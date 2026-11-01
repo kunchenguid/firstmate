@@ -164,7 +164,8 @@ fi
 # empty value survives the split), or nothing if the project is
 # absent. Every other token beside the mode is ignored, exactly as before either
 # annotation existed.
-parsed=$(awk -v n="$NAME" '
+parsed=$(FM_REGISTRY_NAME="$NAME" awk '
+  BEGIN { n = ENVIRON["FM_REGISTRY_NAME"] }
   function dist(x, y,   i, j, lx, ly, d, c, v) {
     lx = length(x); ly = length(y);
     for (i=0; i<=lx; i++) d[i,0] = i;

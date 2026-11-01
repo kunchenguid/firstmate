@@ -495,6 +495,61 @@ test_single_project_unresolvable_name_still_skips() {
   pass "single-project form leaves a genuinely bad name unresolved"
 }
 
+# A path takes its registered alias in every home, so naming a project by path
+# keeps its label and its registered posture.
+test_single_project_path_keeps_registered_posture() {
+  local home clone out outside
+  home=$(mktemp -d "$TMP_ROOT/path-home.XXXXXX")
+  mkdir -p "$home/projects"
+  clone=$(build_pair "$home" pathiota)
+  advance_origin "$home" pathiota C1
+  mkdir -p "$home/data" "$clone/sub"
+  printf -- '- pathiota [local-only] - test project (added 2026-06-27)\n' > "$home/data/projects.md"
+
+  out=$(cd "$clone" && run_sync "$home" .)
+  assert_contains "$out" "pathiota: skipped: local-only project" "\`.\` must keep the registered posture"
+  out=$(cd "$clone/sub" && run_sync "$home" ..)
+  assert_contains "$out" "pathiota: skipped: local-only project" "\`..\` must keep the registered posture"
+  out=$(cd "$home/projects" && run_sync "$home" ./pathiota)
+  assert_contains "$out" "pathiota: skipped: local-only project" "a relative path must keep the registered posture"
+
+  outside="$home/outside"
+  mkdir -p "$outside"
+  mv "$clone" "$outside/oddname"
+  printf -- '- ext [local-only] - mapped project (added 2026-06-27)\n' > "$home/data/projects.md"
+  printf '{"ext": "%s"}\n' "$outside/oddname" > "$home/data/project-paths.json"
+  out=$(run_sync "$home" "$outside/oddname")
+  assert_contains "$out" "ext: skipped: local-only project" "an absolute path must take its manifest alias"
+  out=$(cd "$outside" && run_sync "$home" oddname)
+  assert_contains "$out" "ext: skipped: local-only project" "a bare cwd directory must take its manifest alias"
+  pass "single-project form keeps a registered project's posture when named by path"
+}
+
+test_single_project_path_without_alias_keeps_legacy_label() {
+  local home clone out
+  home=$(mktemp -d "$TMP_ROOT/path-home.XXXXXX")
+  mkdir -p "$home/projects"
+  clone=$(build_pair "$home" pathkappa)
+  advance_origin "$home" pathkappa C1
+  out=$(cd "$clone" && run_sync "$home" .)
+  assert_contains "$out" ".: synced" "an unregistered path keeps its legacy label"
+  pass "single-project form keeps the legacy label for a path with no alias"
+}
+
+test_single_project_path_unreadable_registry_stops() {
+  local home clone out rc
+  home=$(mktemp -d "$TMP_ROOT/path-home.XXXXXX")
+  mkdir -p "$home/projects"
+  clone=$(build_pair "$home" pathlambda)
+  advance_origin "$home" pathlambda C1
+  mkdir -p "$home/data/projects.md"
+  out=$(cd "$clone" && FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" "$ROOT/bin/fm-fleet-sync.sh" . 2>&1); rc=$?
+  [ "$rc" -ne 0 ] || fail "a path refresh succeeded with an unreadable registry"
+  assert_contains "$out" "could not read this home's project registry" "the refusal must name the registry"
+  assert_not_contains "$out" "synced" "an unreadable registry must stop before any fetch"
+  pass "single-project form stops a path refresh on an unreadable registry"
+}
+
 test_whole_fleet_form() {
   local home behind current out
   home=$(new_home)
@@ -763,6 +818,9 @@ test_single_project_by_bare_name_ignores_cwd_shadow
 test_single_project_by_projects_relative_name_resolves
 test_single_project_by_projects_relative_name_ignores_cwd_shadow
 test_single_project_unresolvable_name_still_skips
+test_single_project_path_keeps_registered_posture
+test_single_project_path_without_alias_keeps_legacy_label
+test_single_project_path_unreadable_registry_stops
 test_whole_fleet_form
 test_bootstrap_relays_recovered_and_stuck
 test_orphaned_stale_packed_refs_lock_recovers

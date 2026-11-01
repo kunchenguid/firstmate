@@ -17,7 +17,9 @@ It does not replace `secondmate-provisioning`, which owns project clones inside 
 
 ## Preconditions and registry
 
-Projects live flat under `projects/`, and `data/projects.md` is the private fleet registry.
+Projects live under the home's projects root: flat under `projects/` in an ordinary home, or as sibling repositories of the org root in a `config/projects-root` home (docs/configuration.md "Project-local homes").
+`data/projects.md` is the private fleet registry, and `data/project-paths.json` additionally registers an alias for a project outside the projects root.
+Discovery is not authority: in an org home, sibling repositories are discoverable (`bin/fm-projects.sh discover`) but only registered entries are eligible for refresh, spawn, seeding, or landing, so registering a sibling is the add operation there - never clone it.
 Use the registry format and parser contract owned by the header of `bin/fm-project-mode.sh`.
 Keep each registry description useful for identifying the project, but keep delivery posture, captain-private state, and detailed project knowledge in their existing designated homes.
 Do not turn the registry into project documentation.
@@ -53,7 +55,7 @@ Default it off for every project and every posture, and enable it only on the ca
 
 The optional `forge=` token records which forge the project's remote actually is; its values are `forge=gerrit`, `forge=forgejo`, and `forge=external`.
 It is orthogonal to the mode and to `+yolo`, so it is never derived from either, and it is never inferred at use time from a remote name, host, port, or push target.
-At add or create intake, run `bin/fm-forge-detect.sh projects/<name>` once the clone exists and propose its answer alongside the posture; the captain's confirmation is what binds it, and the registry token is the durable record of that confirmation.
+At add or create intake, run `bin/fm-forge-detect.sh "$(bin/fm-projects.sh resolve <name>)"` once the repository exists at its resolved directory and propose its answer alongside the posture; the captain's confirmation is what binds it, and the registry token is the durable record of that confirmation.
 Never register the binding from detection alone, and never re-derive it later from the clone.
 `bin/fm-forge-detect.sh` never proposes `forge=forgejo`, so for a remote that may be Forgejo or Gitea ask the captain and register `forge=forgejo` only on that confirmation.
 A forge composes with `no-mistakes`, `direct-PR`, and `no-mistakes-prod-only` (`forge=external` with `direct-PR` only), and the registry refuses it on `local-only`, which publishes nothing; a Gerrit-hosted project kept local registers `local-only` with no forge token.
@@ -65,7 +67,8 @@ The optional `pr=manual` token marks a `no-mistakes` project whose PR title and 
 ## Add or clone an existing project
 
 Confirm the source URL, local project name, delivery posture, and autonomy posture, stating the resolved default for each rather than asking the captain to invent one.
-Clone into `projects/<name>` and add the registry entry only after the destination is known to be unused.
+In an ordinary home, clone into `projects/<name>` and add the registry entry only after the destination is known to be unused.
+In a `config/projects-root` home, a sibling repository is registered in place: add its `data/projects.md` entry (alias = the sibling directory name) and never clone or move it; a project outside the projects root registers through `data/project-paths.json` instead.
 A `no-mistakes` or `no-mistakes-prod-only` project must have an `origin` remote and must complete the initialization procedure below, because a conditional policy's product-facing work runs the pipeline while its internal-only work still takes the direct PR.
 A `direct-PR` project needs an `origin` remote but skips no-mistakes initialization.
 A `local-only` project may have no remote and skips no-mistakes initialization.
@@ -78,17 +81,17 @@ Before making that remote change, propose the repository name, owner or organiza
 Use `gh-axi` for the approved GitHub operation and consult its current help rather than relying on remembered flags.
 After remote creation succeeds, clone it locally, add the registry entry, and initialize it according to its delivery posture.
 
-For a purely `local-only` project, create a local Git repository under its unused `projects/<name>` path, add the registry entry, and make no GitHub call.
+For a purely `local-only` project, create a local Git repository at its unused destination - `projects/<name>` in an ordinary home, a new sibling directory under the projects root in a `config/projects-root` home - add the registry entry, and make no GitHub call.
 A new repository has no commit, and spawn refuses to dispatch work into a project with an unborn `HEAD`.
 Tell the captain that the project needs a first commit.
 The captain's request to create that local project authorizes this local initialization, but it does not authorize an unmentioned remote repository.
 
 ## Initialize
 
-Run no-mistakes initialization only for `no-mistakes` and `no-mistakes-prod-only` projects:
+Run no-mistakes initialization only for `no-mistakes` and `no-mistakes-prod-only` projects, in the project's resolved directory (`bin/fm-projects.sh resolve <name>`):
 
 ```sh
-(cd projects/<name> && no-mistakes init && no-mistakes doctor)
+(cd "$(bin/fm-projects.sh resolve <name>)" && no-mistakes init && no-mistakes doctor)
 ```
 
 Initialization configures the local gate and does not vendor a no-mistakes skill into the project.
@@ -102,4 +105,5 @@ First obtain the captain's explicit removal decision, then inspect the current d
 If any dependency or unlanded work exists, stop and report it before changing anything.
 Never issue a raw removal command from Firstmate.
 Once that preflight confirms none of the above and the captain's approval is concrete, AGENTS.md hard rule 1's captain-approved project operation exception authorizes firstmate to remove the clone directly and update its registry entry to match.
+In a `config/projects-root` home the project is the user's own working copy: removal means deleting its `data/projects.md` line (and any `data/project-paths.json` entry), never the sibling directory.
 When a clone has already been removed through an approved removal, or the registry is provably stale because no clone exists, remove its registry line so navigation matches reality.

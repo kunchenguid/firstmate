@@ -56,6 +56,8 @@
 . "$FM_BACKEND_LIB_DIR/fm-composer-lib.sh"
 # shellcheck source=bin/fm-agent-process-lib.sh
 . "$FM_BACKEND_LIB_DIR/fm-agent-process-lib.sh"
+# shellcheck source=bin/fm-view-lib.sh
+. "$FM_BACKEND_LIB_DIR/fm-view-lib.sh"
 
 # The verified floor: the oldest herdr-core release every adapter surface
 # (including `send --wait` and the `hello` handshake) was exercised against.
@@ -84,9 +86,12 @@ fm_backend_hc_bin() {
 }
 
 # fm_backend_hc_version_check: refuse loudly on a missing, misnamed, or
-# older-than-verified binary. `<bin> --version` must print `hc x.y.z`.
+# older-than-verified binary. `<bin> --version` must print `hc x.y.z`. It runs
+# the binary outside fm_backend_hc_env_run, so it carries the same view refusal,
+# and container_ensure names that refusal here before any hc call.
 fm_backend_hc_version_check() {
   local bin raw ver major rest minor patch cur min fmaj fmin fpat
+  fm_view_refuse_self_starting_backend hc || return 1
   bin=$(fm_backend_hc_bin) || {
     echo "error: backend=hc selected but no 'herdr-core' or 'hc' binary was found on PATH (install Herdr Core per docs/hc-backend.md or set FM_HC_BIN)" >&2
     return 1
@@ -127,12 +132,20 @@ EOF
 }
 
 # fm_backend_hc_env_run: run the resolved binary with exactly <session>'s env
-# pins. Ambient HC_TERMINAL_* routing markers are always stripped. An
-# inherited HC_SOCKET is stripped because hc lets it win over HC_SESSION;
-# FM_HC_SOCKET is the deliberate pin used by tests and the lab instead.
+# pins, the point every hc command but the version probe passes through. Inside
+# a view it refuses before reaching hc, because hc starts a core on any command
+# (measured on hc 0.1.15 from a plain `hc get`), and a core started there would
+# show workers the view. The refusal is a plain failure, never hc's not_found
+# status: endpoint-state reads report a recorded task as unreadable and kill and
+# relaunch refuse, while the presence check behind the session-start digest and
+# the fleet snapshot reports it as dead.
+# Ambient HC_TERMINAL_* routing markers are always stripped. An inherited
+# HC_SOCKET is stripped because hc lets it win over HC_SESSION; FM_HC_SOCKET is
+# the deliberate pin used by tests and the lab instead.
 fm_backend_hc_env_run() {  # <session> <args...>
   local session=$1 bin
   shift
+  fm_view_refuse_self_starting_backend hc || return 1
   bin=$(fm_backend_hc_bin) || {
     echo "error: backend=hc selected but no 'herdr-core' or 'hc' binary was found on PATH (install Herdr Core per docs/hc-backend.md or set FM_HC_BIN)" >&2
     return 1

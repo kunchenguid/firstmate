@@ -25,6 +25,7 @@
   ],
   "readmeSetupTargets": [
     "docs/configuration.md",
+    "docs/project-local.md",
     "docs/wedge-alarm.md",
     "docs/tmux-backend.md",
     "docs/herdr-backend.md",
@@ -460,6 +461,10 @@
     {
       "path": "docs/plans/2026-10-12-2032-feat-pi-stream-silence-plan.md",
       "audience": "maintainer-architecture"
+    },
+    {
+      "path": "docs/project-local.md",
+      "audience": "operator-current"
     },
     {
       "path": "docs/remote-secondmates.md",

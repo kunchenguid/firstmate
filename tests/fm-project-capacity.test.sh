@@ -288,6 +288,62 @@ test_spaced_project_name_is_declared() {
   pass "a project name with spaces is declared by taking the capacity from the last field"
 }
 
+# A project registered under an alias that differs from its clone directory
+# name is declared by that registered name, the same name the spawn records as
+# project_name and looks up in the registry.
+test_registered_alias_is_declared() {
+  local case_dir home out rc=0
+  case_dir=$(make_case alias task-c)
+  home="$case_dir/home"
+  printf '{"heavy": "%s"}\n' "$case_dir/project" > "$home/data/project-paths.json"
+  declare_capacity "$home" "heavy 1" "project 5"
+  write_live "$home" live-a "$case_dir/project"
+  out=$(spawn_ship "$case_dir" task-c "$case_dir/unused") || rc=$?
+  expect_code "$DEFER_EXIT" "$rc" "a project registered under an alias was not capped by its alias declaration: $out"
+  assert_contains "$out" "deferred: project heavy admits 1 worker(s) at once" \
+    "the deferral did not use the registered alias's declared capacity"
+  assert_absent "$home/state/task-c.meta" "the deferred alias spawn published a record"
+  pass "a project registered under an alias is declared by its registered name"
+}
+
+# `.` and `..` are paths, so a spawn from inside the project finds the same
+# registered name, and with it the same declaration, as naming the project.
+test_current_directory_is_declared() {
+  local case_dir home out rc=0
+  case_dir=$(make_case dot task-c)
+  home="$case_dir/home"
+  printf '{"heavy": "%s"}\n' "$case_dir/project" > "$home/data/project-paths.json"
+  declare_capacity "$home" "heavy 1" "project 5"
+  write_live "$home" live-a "$case_dir/project"
+  out=$(cd "$case_dir/project" && run_spawn "$case_dir" "$home" "$case_dir/unused" task-c . --mode no-mistakes --yolo off) || rc=$?
+  expect_code "$DEFER_EXIT" "$rc" "a spawn of . bypassed the project's declared capacity: $out"
+  assert_contains "$out" "deferred: project heavy admits 1 worker(s) at once" \
+    "a spawn of . did not use the registered alias's declared capacity"
+  rc=0
+  mkdir -p "$case_dir/project/sub"
+  out=$(cd "$case_dir/project/sub" && run_spawn "$case_dir" "$home" "$case_dir/unused" task-c .. --mode no-mistakes --yolo off) || rc=$?
+  expect_code "$DEFER_EXIT" "$rc" "a spawn of .. bypassed the project's declared capacity: $out"
+  assert_absent "$home/state/task-c.meta" "the deferred current-directory spawn published a record"
+  pass "a spawn of . or .. is declared by the project's registered name"
+}
+
+# A bare alias keeps its own name when two registered aliases share a directory,
+# so the declaration for the alias the spawn named is the one that applies.
+test_bare_alias_keeps_its_declaration() {
+  local case_dir home out rc=0
+  case_dir=$(make_case twin task-c)
+  home="$case_dir/home"
+  printf '%s\n' "$case_dir" > "$home/config/projects-root"
+  printf '{"aaa": "%s", "heavy": "%s"}\n' "$case_dir/project" "$case_dir/project" > "$home/data/project-paths.json"
+  declare_capacity "$home" "heavy 1" "aaa 5"
+  write_live "$home" live-a "$case_dir/project"
+  out=$(run_spawn "$case_dir" "$home" "$case_dir/unused" task-c heavy --mode no-mistakes --yolo off) || rc=$?
+  expect_code "$DEFER_EXIT" "$rc" "a bare alias took another alias's declaration: $out"
+  assert_contains "$out" "deferred: project heavy admits 1 worker(s) at once" \
+    "the deferral did not use the named alias's declaration"
+  pass "a bare alias sharing a directory keeps its own declaration"
+}
+
 # A clone directory may be named with a leading '#'. That name is declared when
 # the '#' is written against the rest of the name and the line ends with the
 # capacity. A '#' followed by whitespace stays a comment even when the line
@@ -653,6 +709,9 @@ test_undeclared_capacity_keeps_dispatch_uncapped
 test_available_capacity_admits_the_worker
 test_exhausted_capacity_defers_without_leaving_anything_behind
 test_spaced_project_name_is_declared
+test_registered_alias_is_declared
+test_current_directory_is_declared
+test_bare_alias_keeps_its_declaration
 test_hash_prefixed_project_name_is_declared
 test_symlinked_home_counts_each_worker_once
 test_release_frees_a_place

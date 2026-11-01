@@ -500,6 +500,44 @@ stop_watcher() {  # <home>
   FM_HOME="$1" FM_STATE_OVERRIDE="$1/state" "$ROOT/bin/fm-watch-arm.sh" --stop >/dev/null 2>&1 || true
 }
 
+test_projects_list_follows_projects_root() {
+  local home org fakebin
+  home=$(make_home legacy-projects 0 0)
+  fakebin=$(make_probes "$TMP_ROOT/p-projects" 0.50 60 8 20971520)
+  mkdir -p "$home/projects/alpha" "$home/projects/beta"
+  assert_equals 'alpha,beta' "$(capacity_doc "$home" "$fakebin" | jq -r '.projects | join(",")')" \
+    "a legacy home must list the clones under projects/"
+  org="$TMP_ROOT/org-projects"
+  home="$org/.firstmate"
+  mkdir -p "$home/state" "$home/config" "$home/data" "$org/registered" "$org/stray"
+  git -C "$org/registered" init -q
+  git -C "$org/stray" init -q
+  printf '..\n' > "$home/config/projects-root"
+  printf -- '- registered [no-mistakes]\n' > "$home/data/projects.md"
+  assert_equals 'registered' "$(capacity_doc "$home" "$fakebin" | jq -r '.projects | join(",")')" \
+    "a projects-root home must list only its registered projects"
+  printf -- '- b"c [local-only] - quoted row\n- registered [no-mistakes]\n' > "$home/data/projects.md"
+  assert_equals 'registered' "$(capacity_doc "$home" "$fakebin" | jq -r '.projects | join(",")')" \
+    "a quoted registry row must not cost the other project names"
+  printf -- '- registered [no-mistakes]\n' > "$home/data/projects.md"
+  printf 'a\nb\n' > "$home/config/projects-root"
+  assert_equals 'null|fm-lane-capacity.v1' "$(capacity_doc "$home" "$fakebin" | jq -r '[.projects, .schema] | map(tostring) | join("|")')" \
+    "a malformed projects-root must report null projects without stopping the report"
+  : > "$home/data/projects.md"
+  assert_equals 'null' "$(capacity_doc "$home" "$fakebin" | jq -c .projects)" \
+    "a malformed projects-root must report null even with nothing registered"
+  printf '..\n' > "$home/config/projects-root"
+  rm -f "$home/data/projects.md"
+  mkdir "$home/data/projects.md"
+  printf 'target 3\n' > "$home/config/lane-capacity"
+  FM_LANE_CAPACITY_PUBLISH_INTERVAL=0 PATH="$fakebin:$PATH" FM_HOME="$home" "$CAPACITY" --publish \
+    >/dev/null 2>"$TMP_ROOT/projects-err"
+  assert_equals 'null' "$(jq -c .projects "$home/state/lane-capacity.json")" \
+    "an unreadable registry must publish null projects, not an empty list"
+  assert_grep "projects.md" "$TMP_ROOT/projects-err" "stderr must name the unreadable registry"
+  pass "the projects list follows the home's projects root and registry"
+}
+
 test_watcher_publishes_only_when_opted_in() {
   local on off i
   on=$(make_home watch-on 1 0)
@@ -540,6 +578,7 @@ test_limits_and_admit
 test_publish_document
 test_captain_and_quota
 test_watcher_publishes_only_when_opted_in
+test_projects_list_follows_projects_root
 test_real_host_smoke
 
 echo '# all fm-capacity tests passed'
