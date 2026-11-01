@@ -794,25 +794,58 @@ printf 'run other-branch\n'
 SH
   cat > "$fakebin/tail" <<'SH'
 #!/usr/bin/env bash
-for arg in "$@"; do
-  [ "$arg" != "$FM_CLAIM_STATUS_FILE" ] || printf 'x' >> "$FM_STATUS_TAIL_CALLS"
-done
+if [ -e "$FM_STATUS_COUNT_SENTINEL" ]; then
+  for arg in "$@"; do
+    [ "$arg" != "$FM_CLAIM_STATUS_FILE" ] || { printf 'tail\n' >> "$FM_STATUS_EXTERNAL_CALLS"; exit 99; }
+  done
+fi
 exec "$FM_REAL_TAIL" "$@"
 SH
+  for command in stat wc grep sed date git; do
+    eval "FM_REAL_$command=\$(command -v $command)"
+    export "FM_REAL_$command"
+    cat > "$fakebin/$command" <<'SH'
+#!/usr/bin/env bash
+if [ -e "$FM_STATUS_COUNT_SENTINEL" ]; then
+  for arg in "$@"; do
+    [ "$arg" != "$FM_CLAIM_STATUS_FILE" ] || { printf '%s\n' "${0##*/}" >> "$FM_STATUS_EXTERNAL_CALLS"; exit 99; }
+  done
+fi
+real_var=FM_REAL_${0##*/}
+eval 'real_path=${'"$real_var"'}'
+exec "$real_path" "$@"
+SH
+    chmod +x "$fakebin/$command"
+  done
+  cat > "$fakebin/no-mistakes" <<'SH'
+#!/usr/bin/env bash
+case " $* " in *' runs '*)
+  if [ -e "$FM_STATUS_COUNT_SENTINEL" ]; then printf 'no-mistakes\n' >> "$FM_STATUS_EXTERNAL_CALLS"; exit 99; fi
+  printf 'run other-branch\n';;
+*) exec "$FM_REAL_NM" "$@";;
+esac
+SH
+  FM_REAL_NM=$(command -v no-mistakes)
+  export FM_REAL_NM
   chmod +x "$fakebin/no-mistakes" "$fakebin/tail"
   export FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)'
   real_tail=$(command -v tail)
-  export FM_CLAIM_STATUS_FILE="$status_file" FM_STATUS_TAIL_CALLS="$reads" FM_REAL_TAIL="$real_tail"
+  export FM_CLAIM_STATUS_FILE="$status_file" FM_STATUS_TAIL_CALLS="$reads" FM_STATUS_EXTERNAL_CALLS="$reads"
+  export FM_STATUS_COUNT_SENTINEL="$dir/count-external"
+  FM_REAL_COMMAND_DIR=$(dirname "$(command -v grep)")
+  FM_REAL_TAIL=$(command -v tail)
+  export FM_REAL_COMMAND_DIR FM_REAL_TAIL
   PATH="$fakebin:$PATH" FM_CLAIMED_RUN_DELAY=0 FM_STATE_OVERRIDE="$state" \
     FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_POLL=1 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
   wait_poll_cycle "$state" "$pid" || { reap "$pid"; fail "incremental watcher exited before its first cycle"; }
   [ -s "$cursor" ] || { reap "$pid"; fail "watcher did not create the byte-offset cursor"; }
-  reads_before=$(wc -c < "$reads" 2>/dev/null | tr -d '[:space:]'); reads_before=${reads_before:-0}
+  : > "$reads"
+  : > "$FM_STATUS_COUNT_SENTINEL"
   wait_poll_cycle "$state" "$pid" || { reap "$pid"; fail "incremental watcher exited on an unchanged log"; }
-  reads_after=$(wc -c < "$reads" 2>/dev/null | tr -d '[:space:]'); reads_after=${reads_after:-0}
-  [ "$reads_after" = "$reads_before" ] || { reap "$pid"; fail "unchanged log was reread"; }
+  rm -f "$FM_STATUS_COUNT_SENTINEL"
+  [ ! -s "$reads" ] || { reap "$pid"; fail "unchanged status log invoked external readers: $(cat "$reads")"; }
   printf 'working [at=1234567890]: validation started\n' >> "$status_file"
   wait_for_exit "$pid" 100 || { reap "$pid"; fail "appended validation claim was not detected"; }
   [ "$(grep -c 'validation claim has no run' "$out")" -eq 1 ] || fail "appended claim did not produce exactly one wake: $(cat "$out")"
