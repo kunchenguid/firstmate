@@ -1330,13 +1330,22 @@ fi
 # now so no path can publish a record the watcher would discard as malformed.
 # FM_SPAWN_NO_START_CHECK=1 disables arming for a spawn whose watcher lives in
 # another home (bin/fm-remote-secondmate-control.sh sets it).
-spawn_arm_start_check() {  # <id> <enabled 0|1> <epoch> <busy-gen|-> <harness>
-  local id=$1 enabled=$2 epoch=${3:-} gen=$4 harness=$5 record lock rc=0
+# With `try`, a held meta lock is not waited for: the remote secondmate path
+# publishes after releasing its route locks, and a retirement can hold the meta
+# lock while it waits on those same route locks. The record is still replaced
+# by an atomic rename, and a remote record's proof is read live through the
+# route, so the watcher judges whichever worker is there now.
+spawn_arm_start_check() {  # <id> <enabled 0|1> <epoch> <busy-gen|-> <harness> [wait|try]
+  local id=$1 enabled=$2 epoch=${3:-} gen=$4 harness=$5 how=${6:-wait} record lock locked=1 rc=0
   record="$STATE/$id.start-pending"
   [ "${FM_SPAWN_NO_START_CHECK:-0}" != 1 ] || enabled=0
   [ -n "$epoch" ] || epoch=$(date +%s)
   lock=$(fm_meta_lock_path "$STATE/$id.meta") || return 1
-  fm_lock_acquire_wait "$lock"
+  if [ "$how" = try ]; then
+    fm_lock_try_acquire "$lock" || locked=0
+  else
+    fm_lock_acquire_wait "$lock"
+  fi
   if [ "$enabled" -eq 1 ]; then
     if ! { printf '%s %s %s\n' "$epoch" "$gen" "$harness" >"$record.tmp.$$" \
       && mv -f "$record.tmp.$$" "$record"; }; then
@@ -1346,7 +1355,7 @@ spawn_arm_start_check() {  # <id> <enabled 0|1> <epoch> <busy-gen|-> <harness>
   else
     rm -f "$record" || rc=1
   fi
-  fm_lock_release "$lock"
+  [ "$locked" -eq 0 ] || fm_lock_release "$lock"
   return "$rc"
 }
 
@@ -1688,8 +1697,8 @@ spawn_remote_secondmate() {
   # its start in its own remote spawn gate. The parent record carries no busy
   # generation, so it is armed with `-`.
   case "$harness" in
-  kimi*) spawn_arm_start_check "$id" 0 "$remote_start_epoch" - "$harness" || true ;;
-  *) spawn_arm_start_check "$id" 1 "$remote_start_epoch" - "$harness" || true ;;
+  kimi*) spawn_arm_start_check "$id" 0 "$remote_start_epoch" - "$harness" try || true ;;
+  *) spawn_arm_start_check "$id" 1 "$remote_start_epoch" - "$harness" try || true ;;
   esac
   "$SCRIPT_DIR/fm-home-summary-refresh.sh" --best-effort || true
   if ! "$SCRIPT_DIR/fm-procevent-remote-reply.sh" arm "$id" >/dev/null; then
