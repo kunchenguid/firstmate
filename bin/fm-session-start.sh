@@ -1026,6 +1026,14 @@ if fm_pf_relay_active "$FM_HOME" \
   fi
 fi
 
+# Rejected state checks stay quiet after their one wake; list them here so a
+# standing rejection is never silently lost (written by bin/fm-watch.sh).
+if [ -s "$STATE/.rejected-checks" ]; then
+  section "REJECTED STATE CHECKS"
+  printf 'Refused without running (not executable or untrusted); raised once already:\n'
+  sed 's/^/  /' "$STATE/.rejected-checks"
+fi
+
 # --- 7. network checks ------------------------------------------------------
 # Deliberately here and not later: these lines are actionable (a stuck clone, a
 # secondmate that could not be relaunched, broken GitHub auth), and the section
