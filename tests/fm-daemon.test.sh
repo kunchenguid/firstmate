@@ -1458,6 +1458,44 @@ test_housekeeping_overdue_pause_opens_one_decision_in_away_mode() {
   pass "away-mode housekeeping opens one overdue decision and worker resume closes it"
 }
 
+test_housekeeping_overdue_pause_preserves_prior_actionable_event() {
+  local dir state fakebin task win pane statusf blocked
+  dir=$(make_supercase overdue-pause-unread-event)
+  state="$dir/state"; fakebin="$dir/fakebin"
+  task=overdue-unread; win="sess:fm-$task"; pane="$dir/pane.txt"; statusf="$state/$task.status"
+  printf 'done: prior actionable event\npaused: waiting for dependency\n' > "$statusf"
+  printf 'idle prompt $\n' > "$pane"
+  fm_write_meta "$state/$task.meta" "window=$win" "worktree=$dir/wt" "kind=ship" "harness=pi"
+  FM_HOME="$dir" FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-afk-contract.sh" enter --words 'fixture words' >/dev/null 2>&1 \
+    || fail "fixture: could not record the away posture"
+  echo $(( $(date +%s) - 5000 )) > "$state/.subsuper-paused-$task"
+  echo $(( $(date +%s) - 5000 )) > "$state/.subsuper-last-scan"
+  sleep 2
+  FM_STATE_OVERRIDE="$state" . "$ROOT/bin/fm-wake-lib.sh"
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$win" FM_FAKE_TMUX_CAPTURE="$pane" \
+    FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_PAUSE_UNDATED_MAX_SECS=1 \
+    FM_HEARTBEAT_SCAN_SECS=0 FM_ESCALATE_BATCH_SECS=999999 housekeeping "$state"
+
+  blocked="blocked [key=paused-overdue-$task]"
+  [ "$(grep -cF "$blocked" "$statusf")" -eq 1 ] || fail "overdue blocker was not appended once"
+  [ "$(grep -cF 'prior actionable event (catch-all scan)' "$state/.subsuper-escalations")" -eq 1 ] \
+    || fail "the prior unread status event was not presented once"
+  [ "$(grep -cF "stale: $win (paused " "$state/.subsuper-escalations")" -eq 1 ] \
+    || fail "the overdue pause was not queued once"
+  ! grep -Fq "paused-overdue-$task (catch-all scan)" "$state/.subsuper-escalations" \
+    || fail "the self-announced overdue blocker was re-reported by heartbeat"
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$win" FM_FAKE_TMUX_CAPTURE="$pane" \
+    FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_PAUSE_UNDATED_MAX_SECS=1 \
+    FM_HEARTBEAT_SCAN_SECS=0 FM_ESCALATE_BATCH_SECS=999999 housekeeping "$state"
+  [ "$(grep -cF 'prior actionable event (catch-all scan)' "$state/.subsuper-escalations")" -eq 1 ] \
+    || fail "the prior actionable event was presented more than once"
+  [ "$(grep -cF "stale: $win (paused " "$state/.subsuper-escalations")" -eq 1 ] \
+    || fail "the overdue pause was queued more than once"
+  pass "overdue self-announcement preserves prior unread events without duplicate heartbeat"
+}
+
 test_housekeeping_declared_time_controls_pause_recheck() {
   local dir state fakebin task win pane key now future distant past escalations
   dir=$(make_supercase pause-until-cadence)
@@ -3545,6 +3583,7 @@ test_housekeeping_captain_held_silenced_only_by_an_away_record
 test_housekeeping_paused_resumed_cleared
 test_housekeeping_busy_declared_wait_matures_its_window
 test_housekeeping_overdue_pause_opens_one_decision_in_away_mode
+test_housekeeping_overdue_pause_preserves_prior_actionable_event
 test_housekeeping_declared_time_controls_pause_recheck
 test_housekeeping_paused_unpaused_cleared
 test_housekeeping_captain_held_resolved_cleared
