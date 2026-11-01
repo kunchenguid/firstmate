@@ -148,6 +148,29 @@ test_an_unreadable_backlog_never_reads_as_zero() {
   pass "an unreadable backlog shows unknown, never a false zero"
 }
 
+# A Beads home keeps its holds in Beads, so its data/backlog.md is absent or a
+# stale leftover from before a migration. The line reads only the markdown
+# backlog, so on such a home it must say the holds are not counted rather than
+# claim a zero while live Beads holds wait.
+test_a_non_markdown_backend_never_prints_a_zero() {
+  local home out
+  home=$(make_primary_home beads-toml)
+  printf 'backend = "beads"\n' > "$home/.tasks.toml"
+  out=$(run_line "$home") || fail "the line failed on a beads home"
+  assert_equals "$out" "Waiting on you: unknown - captain holds on the beads backlog are not counted" \
+    "a beads home with a stale empty markdown backlog showed a count"
+  rm -f "$home/data/backlog.md"
+  out=$(run_line "$home" --claude) || fail "the Claude hook form failed on a beads home"
+  assert_equals "$(printf '%s' "$out" | jq -r '.systemMessage')" \
+    "Waiting on you: unknown - captain holds on the beads backlog are not counted" \
+    "a beads home with no markdown backlog showed a count in the Claude Stop hook"
+  home=$(make_primary_home beads-env)
+  out=$(TASKS_AXI_BACKEND=beads run_line "$home") || fail "the line failed with a beads backend override"
+  assert_equals "$out" "Waiting on you: unknown - captain holds on the beads backlog are not counted" \
+    "a TASKS_AXI_BACKEND=beads override still counted the markdown backlog"
+  pass "a home on a non-markdown backlog backend never prints a zero"
+}
+
 test_a_task_worktree_prints_nothing() {
   local base wt out
   base="$TMP_ROOT/wt-base"
@@ -251,6 +274,7 @@ fm_test_run \
   test_an_aged_hold_still_counts_and_is_marked \
   test_a_registered_secondmate_says_its_holds_are_not_counted \
   test_an_unreadable_backlog_never_reads_as_zero \
+  test_a_non_markdown_backend_never_prints_a_zero \
   test_a_task_worktree_prints_nothing \
   test_claude_stop_hook_runs_the_line \
   test_only_the_claude_hook_registry_runs_the_line \

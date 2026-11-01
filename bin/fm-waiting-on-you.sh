@@ -32,6 +32,9 @@
 # When the holds cannot be read the line says so instead of printing a false
 # zero:
 #   Waiting on you: unknown - the captain holds could not be read
+# Only the markdown backlog is counted. A home whose tasks-axi backend is
+# another one (Beads, for example) gets the not-counted form instead of a zero:
+#   Waiting on you: unknown - captain holds on the beads backlog are not counted
 #
 # Scope: only a genuine primary home (bin/fm-primary-scope-lib.sh) prints
 # anything; inside a crewmate or scout worktree it prints nothing. It never
@@ -67,6 +70,11 @@ line=
 if calls=$(FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-fleet-snapshot.sh" --captain-calls 2>/dev/null) \
   && line=$(printf '%s\n' "$calls" | jq -er '
     def cut($n): if length > $n then .[:($n - 1)] + "…" else . end;
+    if .uncounted_backend != null then
+      "Waiting on you: unknown - captain holds on the "
+        + (.uncounted_backend | tostring | gsub("[[:cntrl:]\\s]+"; " ") | cut(40))
+        + " backlog are not counted"
+    else
     def day: (.[8:10] | tonumber | tostring) + " "
       + (["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"][(.[5:7] | tonumber) - 1]);
     def unanswered: if . == null then "long unanswered" else "unanswered since " + day end;
@@ -80,7 +88,8 @@ if calls=$(FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-fleet-snapshot.sh" --captain-calls
           + ([.calls[:3][] | ((.title // .id) | gsub("\\s+"; " ") | cut(60))
               + " [" + (.class // "unclassed") + (if .aged then ", " + (.since | unanswered) else "" end) + "]"] | join("; "))
           + (if .count > 3 then " (+" + ((.count - 3) | tostring) + " more)" else "" end)
-        end)' 2>/dev/null); then
+        end)
+    end' 2>/dev/null); then
   :
 else
   line='Waiting on you: unknown - the captain holds could not be read'

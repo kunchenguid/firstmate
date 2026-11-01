@@ -623,11 +623,39 @@ test_a_main_outcome_reaches_main_without_counting_as_a_captain_call() {
   pass "a main outcome reaches main like a captain outcome, labelled as firstmate's to act on"
 }
 
+# One line per task keeps only the newest summary. When a task's newer main row
+# collapses an older captain row, the line must not say "not a captain call":
+# main would acknowledge the captain's login request as its own and it would
+# never reach the captain. Only a task whose collapsed rows are all main is
+# labelled firstmate's alone.
+test_a_main_row_collapsing_a_captain_row_says_it_includes_a_captain_call() {
+  local home drained
+  home="$TMP_ROOT/drain-main-over-captain"
+  mkdir -p "$home/state" "$home/config"
+  FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" append --task login --verdict captain \
+    --summary "needs the captain's login" >/dev/null || fail "fixture: could not record a captain outcome"
+  FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" append --task landing --verdict main \
+    --summary 'checks are running' >/dev/null || fail "fixture: could not record a main outcome"
+  FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" append --task login --verdict main \
+    --summary 'PR ready' >/dev/null || fail "fixture: could not record a main outcome"
+  FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" append --task landing --verdict main \
+    --summary 'local branch ready to land' >/dev/null || fail "fixture: could not record a main outcome"
+  drained=$(FM_HOME="$home" "$FAKE_CLAUDE" -c '"$0" 2>&1' "$ROOT/bin/fm-wake-drain.sh")
+  assert_contains "$drained" "[seq 3, newest of 2 for this task, recorded 0m ago, includes a captain call] login: PR ready" \
+    "a main row that collapsed a captain row did not say it includes a captain call"
+  assert_not_contains "$drained" "main to act, not a captain call] login:" \
+    "a task carrying a captain row was labelled main's alone"
+  assert_contains "$drained" "[seq 4, newest of 2 for this task, recorded 0m ago, main to act, not a captain call] landing: local branch ready to land" \
+    "a task whose collapsed rows are all main lost its main label"
+  pass "a main row that collapses a captain row says it includes a captain call"
+}
+
 fm_test_run \
   test_report_surface_enforces_actor_turn_and_scope \
   test_report_after_the_return_is_queued_for_main \
   test_dispatch_entry_scopes_rows_and_renders_the_away_tail \
   test_branch_outcomes_only_on_a_host_home_off_pi \
+  test_a_main_row_collapsing_a_captain_row_says_it_includes_a_captain_call \
   test_a_main_outcome_reaches_main_without_counting_as_a_captain_call \
   test_branch_outcomes_put_captain_first_and_collapse_routine_overflow \
   test_branch_outcomes_collapse_repeated_captain_outcomes_per_task \
