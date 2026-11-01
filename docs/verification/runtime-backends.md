@@ -3593,6 +3593,8 @@ Measured on 2026-11-01 inside a `bin/fm-hc-lab.sh` session (`fm-hclab-s3det-*`, 
 | Dead `HC_TERMINAL_SOCKET` | Undetected, and no socket file or core was created. |
 | Live unix listener at the resolved `herdr-app.sock` path, no other markers | `hc` / `app-window`; a stale socket file and an absent one both undetected. |
 | App signal plus no self-identifying hc binary on `PATH` | Undetected (`app-window-unusable`); `fm_backend_name` still resolves `tmux` and prints the missing-toolchain notice. |
+| `HC_SESSION=<never-started> hc server status --json` in scratch `HOME`/XDG roots (hc 0.1.14, 2026-11-01) | Started a core: `server status` autostarts, like every other contact, so the adapter's container ensure would start a session nobody runs. Detection therefore requires the spawn session's core socket to accept a connection first. |
+| Socket layout for a started core, same scratch roots | `$XDG_RUNTIME_DIR/herdr-core/<session>.sock` with `XDG_RUNTIME_DIR` set (both `default` and a named session); `$XDG_STATE_HOME/herdr-core/<session>/<session>.sock` without it, and `~/.local/state/...` with `XDG_STATE_HOME` unset too. A `default`-session terminal's env carries `HC_TERMINAL_SOCKET` but no `HC_SESSION`; a named session's carries both. |
 | `FM_BACKEND=herdr` with app-terminal markers | `herdr` resolves silently - explicit selection always wins. |
 
 `bin/fm-supervisor-target-lib.sh` now resolves `$HC_TERMINAL_ID`+`$HC_TERMINAL_SOCKET` to `<session>:<address>`/`hc`; `bin/fm-supervise-daemon.sh` still supports only `tmux herdr rex t3code` and refuses the resolved backend loudly.

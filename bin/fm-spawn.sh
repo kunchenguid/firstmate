@@ -129,8 +129,8 @@
 #   and rex stay silent like tmux; auto-detected cmux and Herdr-app-driven hc
 #   print a loud stderr notice; zellij, orca, paseo, t3code, and tern are never
 #   auto-detected (the paseo and tern markers, like bare hc markers, leak into
-#   every descendant process). A detected non-default backend also records its
-#   signal in meta's backend_detect= line.
+#   every descendant process). An app-detected hc also records its signal in
+#   meta's backend_detect= line.
 #   codex-app is not a known backend yet; docs/codex-app-backend.md owns that
 #   blocked backend contract. Default tmux spawns do not write backend= to meta;
 #   absent backend= means tmux. Orca, cmux, paseo, tern, and hc do not support
@@ -2233,16 +2233,12 @@ fi
 if [ "$RELAUNCH" -eq 0 ]; then
   if [ "$BACKEND_SET" -eq 1 ]; then
     BACKEND=$BACKEND_ARG
-  else
-    BACKEND=$(fm_backend_name)
-    # fm_backend_name already ran detection in a command substitution; rerun
-    # it directly here only so FM_BACKEND_DETECTED/FM_BACKEND_DETECT_SIGNAL
-    # survive into this process for the meta's backend_detect= provenance
-    # line below. An explicit setting skips detection entirely - same as
-    # fm_backend_name - so it leaves the globals empty.
-    FM_BACKEND_DETECTED=""
     FM_BACKEND_DETECT_SIGNAL=""
-    fm_backend_explicit_name >/dev/null 2>&1 || fm_backend_detect >/dev/null 2>&1 || true
+  else
+    # Called directly so the one detection that chose BACKEND also leaves
+    # FM_BACKEND_DETECT_SIGNAL for the meta's backend_detect= line below.
+    fm_backend_resolve
+    BACKEND=$FM_BACKEND_RESOLVED
   fi
   fm_backend_validate_spawn "$BACKEND" || exit 1
   fm_backend_source "$BACKEND" || exit 1
@@ -7029,13 +7025,12 @@ preserve_relaunch_meta() {
   # default path's meta stays byte-identical (absent backend= means tmux;
   # data/fm-backend-design-d7's P1 compatibility contract).
   [ "$BACKEND" = tmux ] || echo "backend=$BACKEND"
-  # backend_detect= records the auto-detection signal behind a non-default,
-  # non-explicit backend selection, so the task record carries the reason
-  # (e.g. HERDR_ENV, app-terminal, app-window), not just the result. Skipped
-  # for explicit selections and for the default path, and when the
-  # provenance rerun above did not reproduce the resolved backend.
-  [ "$BACKEND" = tmux ] || [ -z "${FM_BACKEND_DETECTED:-}" ] || [ "$FM_BACKEND_DETECTED" != "$BACKEND" ] \
-    || echo "backend_detect=${FM_BACKEND_DETECT_SIGNAL:-}"
+  # backend_detect= records which Herdr app signal auto-selected hc, so the
+  # task record carries the reason, not just the result. Every other
+  # selection (explicit, default, or another detected backend) writes none.
+  case "$BACKEND:${FM_BACKEND_DETECT_SIGNAL:-}" in
+    hc:app-terminal|hc:app-window) echo "backend_detect=$FM_BACKEND_DETECT_SIGNAL" ;;
+  esac
   if [ "$BACKEND" = herdr ]; then
     echo "herdr_session=$HERDR_SES"
     echo "herdr_workspace_id=$HERDR_WORKSPACE_ID"

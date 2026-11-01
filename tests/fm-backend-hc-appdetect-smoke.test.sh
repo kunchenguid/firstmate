@@ -16,6 +16,9 @@
 #   C. explicit: config/backend=hc plus the same app-terminal env selects hc
 #      but writes NO backend_detect= line - explicit selection never runs
 #      detection.
+#   D. no core: the same live window over an HC_SESSION with no running core
+#      resolves the default backend with a notice and starts no core (the
+#      decision point only; a tmux spawn is out of this smoke's scope).
 #
 # Everything lands in a bin/fm-hc-lab.sh session (unique fm-hclab-*
 # HC_SESSION, scratch XDG roots, a pinned FM_HC_SOCKET, and a fleet-state
@@ -196,8 +199,24 @@ grep -q '^backend_detect=app-window$' "$META" \
 WORKER_TERM=$(grep '^hc_terminal=' "$META" | cut -d= -f2-)
 assert_task_labels "$ID" "$WORKER_TERM"
 teardown_one "$ID"
-kill "$APPSOCK_PID" 2>/dev/null; wait "$APPSOCK_PID" 2>/dev/null; APPSOCK_PID=
 pass "app-window: a live herdr-app.sock under the resolved app home auto-selects hc with backend_detect=app-window"
+
+# --- Case D: a live window over a session with no running core --------------
+# The adapter's container_ensure starts a missing core, so detection must
+# refuse instead of selecting hc for a session nobody started. No pin names
+# the lab core here; the session is never provisioned.
+ABSENT_SES=$HC_TEST_SES-none
+# shellcheck disable=SC2016 # positional params expand in the child shell.
+OUT=$($SCRUB -u FM_HC_SOCKET HERDR_APP_HOME="$APPHOME" HC_SESSION="$ABSENT_SES" \
+  FM_CONFIG_OVERRIDE="$CONFIG" bash -c '. "$1/bin/fm-backend.sh"; fm_backend_name' _ "$ROOT" 2>"$TMP_ROOT/d.err")
+[ "$OUT" = tmux ] || fail "a live window over a stopped session must keep the default backend, got '$OUT'"$'\n'"$(cat "$TMP_ROOT/d.err")"
+grep -q "hc session '$ABSENT_SES' has no running core" "$TMP_ROOT/d.err" \
+  || fail "the refusal notice must name the session it would not start"$'\n'"$(cat "$TMP_ROOT/d.err")"
+for probe in "$XDG_STATE_HOME/herdr-core/$ABSENT_SES" "${XDG_RUNTIME_DIR:-$TMP_ROOT/no-runtime}/herdr-core/$ABSENT_SES.sock"; do
+  [ ! -e "$probe" ] || fail "resolving the backend started core state at $probe"
+done
+kill "$APPSOCK_PID" 2>/dev/null; wait "$APPSOCK_PID" 2>/dev/null; APPSOCK_PID=
+pass "app-window: a live window over a session with no running core keeps the default and starts nothing"
 
 # --- Case C: explicit config/backend wins, detection skipped ----------------
 printf 'hc\n' > "$CONFIG/backend"
