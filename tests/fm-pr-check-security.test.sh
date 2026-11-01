@@ -152,7 +152,23 @@ case "${1:-} ${2:-}" in
   "pr view")
     case " $* " in
       *statusCheckRollup*)
-        printf '%s\n' "{\"state\":\"OPEN\",\"isDraft\":false,\"mergeable\":\"MERGEABLE\",\"mergeStateStatus\":\"CLEAN\",\"headRefOid\":\"${FM_TEST_GH_HEAD:-0123456789abcdef0123456789abcdef01234567}\",\"baseRefName\":\"main\",\"statusCheckRollup\":[{\"__typename\":\"CheckRun\",\"name\":\"ci\",\"status\":\"COMPLETED\",\"conclusion\":\"SUCCESS\"}]}"
+        case " $* " in
+          *" --jq "*)
+            # The static PR poll's combined read: it applies its own filter
+            # with the real jq, so the fixture's state and rollup are what a
+            # case controls and the filter's verdict is what the poll sees.
+            [ "${FM_TEST_GH_FAIL:-0}" = 0 ] || exit 1
+            [ -z "${FM_TEST_GH_STATE_STARTED:-}" ] || : > "$FM_TEST_GH_STATE_STARTED"
+            [ "${FM_TEST_GH_SLEEP:-0}" = 0 ] || sleep "$FM_TEST_GH_SLEEP"
+            [ -n "${FM_TEST_JQ:-}" ] || exit 1
+            rollup=${FM_TEST_GH_ROLLUP:-'[{"__typename":"CheckRun","name":"ci","status":"COMPLETED","conclusion":"SUCCESS"}]'}
+            printf '%s' "{\"state\":\"${FM_TEST_GH_POLL_STATE:-${FM_TEST_GH_STATE:-OPEN}}\",\"headRefOid\":\"${FM_TEST_GH_HEAD:-0123456789abcdef0123456789abcdef01234567}\",\"statusCheckRollup\":$rollup}" \
+              | "$FM_TEST_JQ" -r "${@: -1}"
+            ;;
+          *)
+            printf '%s\n' "{\"state\":\"OPEN\",\"isDraft\":false,\"mergeable\":\"MERGEABLE\",\"mergeStateStatus\":\"CLEAN\",\"headRefOid\":\"${FM_TEST_GH_HEAD:-0123456789abcdef0123456789abcdef01234567}\",\"baseRefName\":\"main\",\"statusCheckRollup\":[{\"__typename\":\"CheckRun\",\"name\":\"ci\",\"status\":\"COMPLETED\",\"conclusion\":\"SUCCESS\"}]}"
+            ;;
+        esac
         exit 0
         ;;
       *" --json isDraft "*)
@@ -214,14 +230,85 @@ case "${1:-} ${2:-}" in
 esac
 exit "${FM_TEST_GH_AXI_RC:-0}"
 SH
-  # Plain glab, reproducing the real CLI's contract: its field output on stdout
-  # and exit 0 on success, and a non-zero exit with no stdout on any failure.
+  # The poll and the merge path both read the merge request as JSON
+  # (-F json), so that form serves one JSON record whose state and head
+  # pipeline a case controls; the degraded detail fetch reads the failed
+  # jobs of a pipeline and its failed bridges through the same CLI.
   cat > "$fakebin/glab" <<'SH'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$FM_TEST_GLAB_LOG"
 [ "${FM_TEST_GLAB_FAIL:-0}" = 0 ] || exit 1
 [ "${FM_TEST_GLAB_SLEEP:-0}" = 0 ] || sleep "$FM_TEST_GLAB_SLEEP"
-printf 'title:\tfixture merge request\nstate:\t%s\nauthor:\tsomeone\n' "${FM_TEST_GLAB_STATE:-opened}"
+case " $* " in
+  *" api "*) [ "${FM_TEST_GLAB_STDERR_NOTICE:-0}" = 0 ] || printf '%s\n' 'A new version of glab is available' >&2 ;;
+esac
+case " $* " in
+  *" -F json "*)
+    # The arming probe records, at each record read, whether task-a's poll
+    # was already published and whether its control lock was held.
+    if [ -n "${FM_TEST_GLAB_ARMING_PROBE:-}" ]; then
+      probe=published=no
+      [ ! -e "$FM_TEST_GLAB_ARMING_PROBE/task-a.check.sh" ] || probe=published=yes
+      if [ -e "$FM_TEST_GLAB_ARMING_PROBE/.control-task-a.lock" ]; then
+        probe="$probe locked=yes"
+      else
+        probe="$probe locked=no"
+      fi
+      printf '%s\n' "$probe" >> "$FM_TEST_GLAB_LOG.probe"
+    fi
+    [ -z "${FM_TEST_GLAB_STATE_AFTER:-}" ] || [ ! -e "$FM_TEST_GLAB_LOG.train" ] || FM_TEST_GLAB_STATE=$FM_TEST_GLAB_STATE_AFTER
+    printf '%s\n' "{\"state\":\"${FM_TEST_GLAB_STATE:-opened}\",\"detailed_merge_status\":\"${FM_TEST_GLAB_DETAIL:-mergeable}\",\"sha\":\"11568153bd75a30fd956da9ba7c1172ae556ada7\",\"head_pipeline\":{\"id\":${FM_TEST_GLAB_PIPELINE_ID:-941},\"status\":\"${FM_TEST_GLAB_PIPELINE:-success}\",\"sha\":\"37cf1cd139d2810616986b103feb45fead258fe4\"}}"
+    ;;
+  *" api "*)
+    [ "${FM_TEST_GLAB_API_FAIL:-0}" = 0 ] || exit 1
+    # A hung detail read that ignores SIGALRM the way glab's Go runtime does,
+    # so only a real kill can cut it.
+    case "${FM_TEST_GLAB_DETAIL_HANG:-0}:$*" in
+      1:*pipelines/*) printf '%s\n' "$$" > "$FM_TEST_GLAB_LOG.hangpid"; trap '' ALRM; exec sleep 60 ;;
+    esac
+    case "$*" in
+      *merge_trains/merge_requests/*)
+        : > "$FM_TEST_GLAB_LOG.train"
+        case "${FM_TEST_GLAB_TRAIN:-}" in
+          car) printf '%s\n' '{"id":5,"status":"idle"}' ;;
+          gone) printf '%s\n' '{"message":"404 Not found"}'; printf '%s\n' 'glab: 404 Not Found (HTTP 404)' >&2; exit 1 ;;
+          fail) printf '%s\n' 'glab: 500 (HTTP 500)' >&2; exit 1 ;;
+          neterr) printf '%s\n' 'glab: Get "https://gitlab.example/api/v4/projects/group%2Fproj404/merge_trains/merge_requests/1404": i/o timeout' >&2; exit 1 ;;
+          *) printf '%s\n' '[]' ;;
+        esac
+        ;;
+      *merge_trains)
+        if [ -n "${FM_TEST_GLAB_TRAINS+x}" ]; then
+          printf '%s\n' "$FM_TEST_GLAB_TRAINS"
+        elif [ "${FM_TEST_GLAB_TRAIN:-}" = gone ]; then
+          printf '%s\n' '[]'
+        else
+          printf '%s\n' '[{"cars":[{"merge_request":{"iid":7}}]}]'
+        fi
+        ;;
+      *merge_requests/*)
+        [ "${FM_TEST_GLAB_RECHECK_FAIL:-0}" = 0 ] || exit 1
+        state=${FM_TEST_GLAB_STATE:-opened}
+        [ -z "${FM_TEST_GLAB_STATE_AFTER:-}" ] || [ ! -e "$FM_TEST_GLAB_LOG.train" ] || state=$FM_TEST_GLAB_STATE_AFTER
+        printf '%s\n' "{\"state\":\"$state\"}"
+        ;;
+      *pipelines/77/jobs*)
+        # A child pipeline in another project is served only under that
+        # project's own path.
+        case "${FM_TEST_GLAB_CHILD_PROJECT:-}:$*" in
+          :*|*:*"projects/$FM_TEST_GLAB_CHILD_PROJECT/pipelines/77/"*) printf '%s\n' "${FM_TEST_GLAB_CHILD_JOBS:-[]}" ;;
+          *) printf '%s\n' '[]' ;;
+        esac
+        ;;
+      *pipelines/*bridges*) printf '%s\n' "${FM_TEST_GLAB_BRIDGES:-[]}" ;;
+      *pipelines/*jobs*) printf '%s\n' "${FM_TEST_GLAB_JOBS:-[]}" ;;
+      *) printf '%s\n' '[]' ;;
+    esac
+    ;;
+  *)
+    printf 'title:\tfixture merge request\nstate:\t%s\nauthor:\tsomeone\n' "${FM_TEST_GLAB_STATE:-opened}"
+    ;;
+esac
 SH
   # gerrit-axi, reproducing the real CLI's contract: one JSON record on stdout
   # and exit 0 on success, and a non-zero exit with no stdout on any failure.
@@ -308,7 +395,7 @@ run_check_entry() {
   FM_ROOT_OVERRIDE="$dir/root" FM_HOME="$dir/home" FM_CONFIG_OVERRIDE="$dir/home/config" \
     FM_TEST_GUARD_LOG="$dir/guard.log" FM_TEST_GH_LOG="$dir/gh.log" \
     FM_TEST_GH_AXI_LOG="$dir/gh-axi.log" FM_TEST_GLAB_LOG="$dir/glab.log" \
-    FM_TEST_GERRIT_AXI_LOG="$dir/gerrit-axi.log" \
+    FM_TEST_GERRIT_AXI_LOG="$dir/gerrit-axi.log" FM_TEST_JQ="$REAL_JQ" \
     PATH="$dir/fakebin:$BASE_PATH" \
     "$PR_CHECK" "$@"
 }
@@ -319,7 +406,7 @@ run_merge_entry() {
   FM_ROOT_OVERRIDE="$dir/root" FM_HOME="$dir/home" FM_CONFIG_OVERRIDE="$dir/home/config" \
     FM_TEST_GUARD_LOG="$dir/guard.log" FM_TEST_GH_LOG="$dir/gh.log" \
     FM_TEST_GH_AXI_LOG="$dir/gh-axi.log" FM_TEST_GLAB_LOG="$dir/glab.log" \
-    FM_TEST_GERRIT_AXI_LOG="$dir/gerrit-axi.log" \
+    FM_TEST_GERRIT_AXI_LOG="$dir/gerrit-axi.log" FM_TEST_JQ="$REAL_JQ" \
     PATH="$dir/fakebin:$BASE_PATH" \
     "$PR_MERGE" "$@"
 }
@@ -1030,8 +1117,8 @@ test_github_enterprise_hosts() {
   rc=$?
   set -e
   [ "$rc" -eq 2 ] || fail "check entrypoint accepted an unlisted GitHub Enterprise host"
-  [ "$(cat "$dir/stderr")" = 'error: invalid PR check request' ] \
-    || fail "unlisted GitHub host diagnostic was not the fixed refusal"
+  grep -qxF 'error: invalid PR check request' "$dir/stderr" \
+    || fail "unlisted GitHub host diagnostic was not the fixed refusal: $(cat "$dir/stderr")"
   assert_no_grep 'pr=' "$dir/home/state/task-a.meta" "an unlisted GitHub host recorded pr metadata"
   [ ! -s "$dir/gh.log" ] || fail "an unlisted GitHub host still reached the forge"
 
@@ -1045,29 +1132,37 @@ test_github_enterprise_hosts() {
   grep -qxF 'pr=https://github.com/my-org/repo/pull/37' "$dir/home/state/task-a.meta" \
     || fail "github.com pr metadata changed"
   [ -s "$dir/gh.log" ] || fail "github.com registration made no forge read"
-  ! grep -qE '^host=.+' "$dir/gh.log" \
+  ! grep -E '^host=.+' "$dir/gh.log" | grep -qvxF 'host=github.com' \
     || fail "github.com registration exported a host it never needed"
   pass "GitHub Enterprise hosts are accepted only when the home names them and their host reaches every forge call"
 }
 
 # Runs one watcher under a hang guard that TERMs it and returns 124 once it has
-# used sixty seconds of its own time. The guard pauses while the file named by
+# used FM_TEST_WATCH_BOUND (default 60) seconds of its own time. The guard pauses while the file named by
 # FM_TEST_WATCH_BOUND_PAUSE exists, so a case that holds the watcher on work it
 # injects, or makes it wait on concurrent work it started, charges that work's
 # duration to itself instead of to the watcher.
+# FM_TEST_WATCH_STOP_WHEN names a file whose appearance ends a step meant to
+# stay silent: one second of watcher time after it exists the guard TERMs the
+# watcher and returns 124, so a silent step proves its poll ran (the caller
+# removes the watcher's .last-check and names it here) without spending the
+# whole bound, while a wake still exits the watcher with its own status first.
 # FM_TEST_CHECK_TIMEOUT sets the per-check timeout for a case that exercises it.
 # Otherwise the product default applies: a tighter override silently kills a
 # correct poll on a loaded machine, and the watcher then only retries it or
 # exits on a later check's wake without the poll's result.
 run_watcher_bounded() {
   local home=$1 fakebin=$2 check_interval=${FM_TEST_CHECK_INTERVAL:-0} watch_root=${FM_TEST_WATCH_ROOT:-$ROOT}
-  local check_timeout_env=(-u FM_CHECK_TIMEOUT)
+  local check_timeout_env=(-u FM_CHECK_TIMEOUT) case_dir
+  case_dir=$(dirname "$home")
   [ -z "${FM_TEST_CHECK_TIMEOUT:-}" ] || check_timeout_env=("FM_CHECK_TIMEOUT=$FM_TEST_CHECK_TIMEOUT")
   shift 2
-  perl -MPOSIX=WNOHANG -MTime::HiRes=time,sleep -e 'my $pause=shift; my $left=60; my $pid=fork; die unless defined $pid; if (!$pid) { exec @ARGV } my $last=time; while (waitpid($pid, WNOHANG) == 0) { my $now=time; $left -= $now - $last unless length $pause && -e $pause; $last=$now; if ($left <= 0) { kill "TERM", $pid; waitpid $pid, 0; exit 124 } sleep 0.02 } exit($? >> 8)' \
-    "${FM_TEST_WATCH_BOUND_PAUSE:-}" env "${check_timeout_env[@]}" \
+  perl -MPOSIX=WNOHANG -MTime::HiRes=time,sleep -e 'my $pause=shift; my $left=shift; my $stop=shift; my $pid=fork; die unless defined $pid; if (!$pid) { exec @ARGV } my $last=time; while (waitpid($pid, WNOHANG) == 0) { my $now=time; my $spent=$now - $last; $last=$now; unless (length $pause && -e $pause) { $left -= $spent; $left = 1 if length $stop && -e $stop && $left > 1; $stop = "" if length $stop && -e $stop } if ($left <= 0) { kill "TERM", $pid; waitpid $pid, 0; exit 124 } sleep 0.02 } exit($? >> 8)' \
+    "${FM_TEST_WATCH_BOUND_PAUSE:-}" "${FM_TEST_WATCH_BOUND:-60}" "${FM_TEST_WATCH_STOP_WHEN:-}" env "${check_timeout_env[@]}" \
       FM_HOME="$home" FM_ROOT_OVERRIDE="$watch_root" FM_CHECK_INTERVAL="$check_interval" \
-      FM_POLL=0.02 FM_HEARTBEAT=999999 FM_SIGNAL_GRACE=0 PATH="$fakebin:$BASE_PATH" "$WATCH" "$@"
+      FM_TEST_GH_LOG="$case_dir/gh.log" FM_TEST_GLAB_LOG="$case_dir/glab.log" \
+      FM_TEST_GH_AXI_LOG="$case_dir/gh-axi.log" FM_TEST_GERRIT_AXI_LOG="$case_dir/gerrit-axi.log" \
+      FM_POLL=0.02 FM_HEARTBEAT=999999 FM_SIGNAL_GRACE=0 FM_TEST_JQ="$REAL_JQ" PATH="$fakebin:$BASE_PATH" "$WATCH" "$@"
 }
 
 test_rejected_metacharacter_bytes_are_inert() {
@@ -1126,7 +1221,7 @@ make_poll_fixture() {
 run_poll() {
   local dir=$1
   FM_TEST_GH_LOG="$dir/gh.log" FM_TEST_GLAB_LOG="$dir/glab.log" \
-    FM_TEST_GERRIT_AXI_LOG="$dir/gerrit-axi.log" \
+    FM_TEST_GERRIT_AXI_LOG="$dir/gerrit-axi.log" FM_TEST_JQ="$REAL_JQ" \
     PATH="$dir/fakebin:$BASE_PATH" \
     bash "$dir/home/state/task-a.check.sh"
 }
@@ -1183,6 +1278,357 @@ test_static_poll_contract() {
   [ "$rc" -eq 0 ] || fail "watcher did not surface merged poll"
   [ "$(grep -c '^check: .*: merged$' "$dir/watch.out")" -eq 1 ] || fail "watcher did not convert merged output into exactly one wake"
   pass "static poll is silent except for one merged line and remains watcher-bounded"
+}
+
+test_github_degraded_poll() {
+  local dir out
+  dir=$(make_case github-degraded-poll)
+  make_poll_fixture "$dir"
+
+  # A failing check after the ready report emits exactly one degraded line
+  # naming the head; the same line for every failing conclusion shape.
+  for shape in \
+    'CheckRun|FAILURE' \
+    'CheckRun|TIMED_OUT' \
+    'CheckRun|STARTUP_FAILURE' \
+    'StatusContext|FAILURE' \
+    'StatusContext|ERROR'; do
+    typename=${shape%%|*}
+    verdict=${shape#*|}
+    if [ "$typename" = CheckRun ]; then
+      rollup="[{\"__typename\":\"CheckRun\",\"name\":\"ci\",\"status\":\"COMPLETED\",\"conclusion\":\"$verdict\"}]"
+    else
+      rollup="[{\"__typename\":\"StatusContext\",\"context\":\"ci\",\"state\":\"$verdict\"}]"
+    fi
+    out=$(FM_TEST_GH_ROLLUP="$rollup" run_poll "$dir")
+    [ "$out" = "degraded head=0123456789abcdef0123456789abcdef01234567 jobs=ci:$verdict" ] \
+      || fail "GitHub poll did not emit exactly one degraded line for rollup $rollup: $out"
+  done
+  out=$(FM_TEST_GH_ROLLUP='[{"__typename":"CheckRun","name":"lint","status":"COMPLETED","conclusion":"SUCCESS"},{"__typename":"CheckRun","name":"ci","status":"COMPLETED","conclusion":"FAILURE"}]' run_poll "$dir")
+  [ "$out" = 'degraded head=0123456789abcdef0123456789abcdef01234567 jobs=ci:FAILURE' ] \
+    || fail "GitHub poll did not skip a green check beside a failing one: $out"
+  out=$(FM_TEST_GH_ROLLUP='[{"__typename":"CheckRun","name":"ci","status":"COMPLETED","conclusion":"FAILURE","detailsUrl":"https://ci.example/run/1"},{"__typename":"CheckRun","name":"lint","status":"COMPLETED","conclusion":"TIMED_OUT"}]' run_poll "$dir")
+  [ "$out" = 'degraded head=0123456789abcdef0123456789abcdef01234567 jobs=ci:FAILURE,lint:TIMED_OUT url=https://ci.example/run/1' ] \
+    || fail "GitHub poll did not name every failing check and the first check's URL: $out"
+
+  # A merged, pending, skipped, or green rollup, a non-open pull request, an
+  # unreadable head, and a gh failure all stay silent.
+  for rollup in \
+    '[{"__typename":"CheckRun","name":"ci","status":"COMPLETED","conclusion":"SUCCESS"}]' \
+    '[{"__typename":"CheckRun","name":"ci","status":"IN_PROGRESS","conclusion":null}]' \
+    '[{"__typename":"CheckRun","name":"ci","status":"COMPLETED","conclusion":"SKIPPED"}]' \
+    '[]'; do
+    out=$(FM_TEST_GH_ROLLUP="$rollup" run_poll "$dir")
+    [ -z "$out" ] || fail "GitHub poll emitted for a non-failing rollup $rollup"
+  done
+  out=$(FM_TEST_GH_POLL_STATE=MERGED FM_TEST_GH_ROLLUP='[{"__typename":"CheckRun","name":"ci","status":"COMPLETED","conclusion":"FAILURE"}]' run_poll "$dir")
+  [ "$out" = merged ] || fail "GitHub poll did not keep the merged wake unchanged"
+  out=$(FM_TEST_GH_POLL_STATE=CLOSED FM_TEST_GH_ROLLUP='[{"__typename":"CheckRun","name":"ci","status":"COMPLETED","conclusion":"FAILURE"}]' run_poll "$dir")
+  [ -z "$out" ] || fail "GitHub poll emitted a degraded line for a closed pull request"
+  out=$(FM_TEST_GH_HEAD=not-a-head FM_TEST_GH_ROLLUP='[{"__typename":"CheckRun","name":"ci","status":"COMPLETED","conclusion":"FAILURE"}]' run_poll "$dir")
+  [ -z "$out" ] || fail "GitHub poll emitted a degraded line for an unreadable head"
+  out=$(FM_TEST_GH_FAIL=1 run_poll "$dir")
+  [ -z "$out" ] || fail "GitHub poll emitted after a gh failure"
+  pass "GitHub poll emits one degraded line per failing rollup and stays silent otherwise"
+}
+
+test_degraded_poll_wakes_once_per_transition() {
+  local dir state out rc url
+  dir=$(make_case degraded-dedupe)
+  state="$dir/home/state"
+  ln -sf "$REAL_JQ" "$dir/fakebin/jq"
+  url=https://gitlab.example/group/subgroup/project/-/merge_requests/7
+
+  # The identity the poll emits is the only thing the dedupe marker may hold.
+  fm_pr_poll_degraded_identity_valid 'head=0123456789abcdef0123456789abcdef01234567' \
+    || fail "the identity validator rejected a GitHub head"
+  fm_pr_poll_degraded_identity_valid 'pipeline=941' \
+    || fail "the identity validator rejected a GitLab pipeline"
+  for identity in 'head=0123456789abcdef0123456789abcdef0123456' 'head=0123456789ABCDEF0123456789abcdef01234567' \
+    'head=' 'pipeline=0' 'pipeline=00941' 'pipeline=941x' 'pipeline=' 'merged' 'degraded' \
+    'head=0123456789abcdef0123456789abcdef01234567
+injected'; do
+    fm_pr_poll_degraded_identity_valid "$identity" 2>/dev/null \
+      && fail "the identity validator accepted $identity"
+  done
+
+  write_poll_meta "$state" task-a "$url"
+  fm_pr_poll_prepare "$state" task-a gitlab "$url" gitlab.example group/subgroup/project 7 "$POLL" \
+    || fail "could not prepare the degraded dedupe poll"
+  fm_pr_poll_publish_prepared || fail "could not publish the degraded dedupe poll"
+
+  rm -f "$state/.last-check"
+  FM_TEST_GLAB_STATE=opened FM_TEST_GLAB_PIPELINE=failed \
+    run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/watch-1.out" 2> "$dir/watch-1.err"
+  rc=$?
+  [ "$rc" -eq 0 ] || fail "bounded watcher did not complete through the degraded poll"
+  [ "$(grep -c 'degraded after ready: degraded pipeline=941' "$dir/watch-1.out")" -eq 1 ] \
+    || fail "watcher did not convert the degraded poll into exactly one wake"
+  [ -f "$state/task-a.pr-poll-degraded" ] || fail "degraded dedupe marker missing after the wake"
+  ack_watcher_cycle "$state" || fail "degraded wake acknowledgement failed"
+
+  # The same degraded head/pipeline on a later poll stays silent.
+  rm -f "$state/.last-check"
+  set +e
+  rc=0
+  FM_TEST_WATCH_STOP_WHEN="$state/.last-check" FM_TEST_GLAB_STATE=opened FM_TEST_GLAB_PIPELINE=failed \
+    run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/watch-2.out" 2> "$dir/watch-2.err" || rc=$?
+  set -e
+  [ "$rc" -eq 124 ] || fail "watcher ended before its bound on a step meant to stay silent (watch-2): rc=$rc"
+  [ "$(grep -c 'degraded after ready' "$dir/watch-2.out")" -eq 0 ] \
+    || fail "watcher woke again for the same degraded transition"
+  ack_watcher_cycle "$state" || fail "duplicate cycle acknowledgement failed"
+
+  # A new failing pipeline is a new transition and wakes again.
+  rm -f "$state/.last-check"
+  FM_TEST_GLAB_STATE=opened FM_TEST_GLAB_PIPELINE=failed FM_TEST_GLAB_PIPELINE_ID=942 \
+    run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/watch-3.out" 2> "$dir/watch-3.err"
+  rc=$?
+  [ "$rc" -eq 0 ] || fail "bounded watcher did not complete through a changed degraded poll"
+  [ "$(grep -c 'degraded after ready: degraded pipeline=942' "$dir/watch-3.out")" -eq 1 ] \
+    || fail "watcher did not wake again for a changed degraded pipeline"
+  ack_watcher_cycle "$state" || fail "changed degraded wake acknowledgement failed"
+
+  # A merge-train drop wakes only after the car was seen on the train, once
+  # per drop, and a re-queue arms the next drop.
+  rm -f "$state/task-a.pr-poll-degraded"
+  rm -f "$state/.last-check"
+  set +e
+  rc=0
+  FM_TEST_WATCH_STOP_WHEN="$state/.last-check" FM_TEST_GLAB_STATE=opened FM_TEST_GLAB_TRAIN=gone \
+    run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/watch-4.out" 2> "$dir/watch-4.err" || rc=$?
+  set -e
+  [ "$rc" -eq 124 ] || fail "watcher ended before its bound on a step meant to stay silent (watch-4): rc=$rc"
+  [ "$(grep -c 'degraded after ready' "$dir/watch-4.out")" -eq 0 ] \
+    || fail "watcher woke for a drop it never saw on the train"
+  grep -F 'reported a train drop it never saw on the train' "$state/.watch-triage.log" >/dev/null \
+    || fail "the unseen-drop step never polled the drop"
+  ack_watcher_cycle "$state" || fail "unseen drop cycle acknowledgement failed"
+  rm -f "$state/.last-check"
+  set +e
+  rc=0
+  FM_TEST_WATCH_STOP_WHEN="$state/.last-check" FM_TEST_GLAB_STATE=opened FM_TEST_GLAB_TRAIN=car \
+    run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/watch-5.out" 2> "$dir/watch-5.err" || rc=$?
+  set -e
+  [ "$rc" -eq 124 ] || fail "watcher ended before its bound on a step meant to stay silent (watch-5): rc=$rc"
+  [ "$(grep -c 'degraded after ready' "$dir/watch-5.out")" -eq 0 ] \
+    || fail "watcher woke for a merge request that is on its train"
+  ack_watcher_cycle "$state" || fail "on-train cycle acknowledgement failed"
+  rm -f "$state/.last-check"
+  FM_TEST_GLAB_STATE=opened FM_TEST_GLAB_TRAIN=gone FM_TEST_GLAB_DETAIL=need_rebase \
+    run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/watch-6.out" 2> "$dir/watch-6.err"
+  [ "$(grep -c 'degraded after ready: degraded train=dropped url=.* reason=need_rebase' "$dir/watch-6.out")" -eq 1 ] \
+    || fail "watcher did not wake once for a train drop"
+  ack_watcher_cycle "$state" || fail "drop cycle acknowledgement failed"
+  rm -f "$state/.last-check"
+  set +e
+  rc=0
+  FM_TEST_WATCH_STOP_WHEN="$state/.last-check" FM_TEST_GLAB_STATE=opened FM_TEST_GLAB_TRAIN=gone \
+    run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/watch-7.out" 2> "$dir/watch-7.err" || rc=$?
+  set -e
+  [ "$rc" -eq 124 ] || fail "watcher ended before its bound on a step meant to stay silent (watch-7): rc=$rc"
+  [ "$(grep -c 'degraded after ready' "$dir/watch-7.out")" -eq 0 ] \
+    || fail "watcher woke again for the same train drop"
+  ack_watcher_cycle "$state" || fail "repeat drop cycle acknowledgement failed"
+  rm -f "$state/.last-check"
+  set +e
+  rc=0
+  FM_TEST_WATCH_STOP_WHEN="$state/.last-check" FM_TEST_GLAB_STATE=opened FM_TEST_GLAB_TRAIN=car \
+    run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/watch-8.out" 2> "$dir/watch-8.err" || rc=$?
+  set -e
+  [ "$rc" -eq 124 ] || fail "watcher ended before its bound on a step meant to stay silent (watch-8): rc=$rc"
+  ack_watcher_cycle "$state" || fail "re-queue cycle acknowledgement failed"
+  rm -f "$state/.last-check"
+  FM_TEST_GLAB_STATE=opened FM_TEST_GLAB_TRAIN=gone \
+    run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/watch-9.out" 2> "$dir/watch-9.err"
+  [ "$(grep -c 'degraded after ready: degraded train=dropped' "$dir/watch-9.out")" -eq 1 ] \
+    || fail "watcher did not wake for a second drop after a re-queue"
+  pass "a degraded ready PR wakes once per head/pipeline transition and stays silent on a repeat"
+}
+
+test_degraded_wake_survives_an_unsaved_marker() {
+  local dir state rc url
+  dir=$(make_case degraded-unsaved-marker)
+  state="$dir/home/state"
+  ln -sf "$REAL_JQ" "$dir/fakebin/jq"
+  url=https://gitlab.example/group/subgroup/project/-/merge_requests/7
+  write_poll_meta "$state" task-a "$url"
+  fm_pr_poll_prepare "$state" task-a gitlab "$url" gitlab.example group/subgroup/project 7 "$POLL" \
+    || fail "could not prepare the unsaved-marker poll"
+  fm_pr_poll_publish_prepared || fail "could not publish the unsaved-marker poll"
+  # A directory where the marker belongs makes the marker save fail after
+  # the poll reported a new degraded transition.
+  mkdir "$state/task-a.pr-poll-degraded"
+  rm -f "$state/.last-check"
+  set +e
+  rc=0
+  FM_TEST_GLAB_STATE=opened FM_TEST_GLAB_PIPELINE=failed \
+    run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/watch-1.out" 2> "$dir/watch-1.err" || rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "watcher reported success although the degraded marker could not be saved"
+  [ "$(grep -c 'degraded after ready: degraded pipeline=941' "$state/.wake-queue" 2>/dev/null || true)" = 1 ] \
+    || fail "a degraded transition whose marker could not be saved was not queued as a wake"
+  pass "a degraded wake is queued before its dedupe marker, so a failed marker save never silences it"
+}
+test_arming_baselines_an_already_degraded_change() {
+  local dir state url url1 fail_env value
+  dir=$(make_case degraded-baseline)
+  state="$dir/home/state"
+  ln -sf "$REAL_JQ" "$dir/fakebin/jq"
+  url=https://gitlab.example/group/subgroup/project/-/merge_requests/7
+  write_task_meta "$dir" task-a
+  FM_TEST_GLAB_STATE=opened FM_TEST_GLAB_PIPELINE=failed run_check_entry "$dir" task-a "$url" >/dev/null 2>&1 \
+    || fail "arming a GitLab watch with a failed head pipeline failed"
+  [ -f "$state/task-a.pr-poll-degraded" ] || fail "arming did not baseline the already failing pipeline"
+  rm -f "$state/.last-check"
+  FM_TEST_WATCH_STOP_WHEN="$state/.last-check" FM_TEST_GLAB_STATE=opened FM_TEST_GLAB_PIPELINE=failed \
+    run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/watch-1.out" 2> "$dir/watch-1.err" || true
+  [ "$(grep -c 'degraded after ready' "$dir/watch-1.out")" -eq 0 ] \
+    || fail "watcher woke for a pipeline that was already failing at the ready report"
+  ack_watcher_cycle "$state" || fail "baseline cycle acknowledgement failed"
+  rm -f "$state/.last-check"
+  FM_TEST_GLAB_STATE=opened FM_TEST_GLAB_PIPELINE=failed FM_TEST_GLAB_PIPELINE_ID=942 \
+    run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/watch-2.out" 2> "$dir/watch-2.err" || true
+  [ "$(grep -c 'degraded after ready: degraded pipeline=942' "$dir/watch-2.out")" -eq 1 ] \
+    || fail "watcher did not wake for a pipeline that failed after the ready report"
+  pass "arming baselines an already degraded change so only a later failure wakes"
+
+  # The baseline is read before the poll is published and under the task's
+  # control lock, so a watcher read can never fall between the two.
+  dir=$(make_case degraded-baseline-order)
+  state="$dir/home/state"
+  ln -sf "$REAL_JQ" "$dir/fakebin/jq"
+  write_task_meta "$dir" task-a
+  FM_TEST_GLAB_ARMING_PROBE="$state" FM_TEST_GLAB_STATE=opened FM_TEST_GLAB_PIPELINE=failed \
+    run_check_entry "$dir" task-a "$url" >/dev/null 2>&1 \
+    || fail "arming a GitLab watch for the baseline order failed"
+  [ "$(cat "$dir/glab.log.probe")" = 'published=no locked=yes' ] \
+    || fail "the arming baseline was not read before publishing under the control lock: $(cat "$dir/glab.log.probe")"
+  [ -f "$state/task-a.check.sh" ] || fail "arming did not publish the poll after its baseline"
+  [ ! -e "$state/.control-task-a.lock" ] || fail "arming left the task's control lock held"
+  fm_pr_poll_degraded_already_notified "$state" task-a gitlab gitlab.example group/subgroup/project 7 pipeline=941 \
+    || fail "arming did not record the failing pipeline as its baseline"
+
+  # Re-arming on a green change replaces the previous watch's marker.
+  FM_TEST_GLAB_STATE=opened FM_TEST_GLAB_PIPELINE=success \
+    run_check_entry "$dir" task-a "$url" >/dev/null 2>&1 \
+    || fail "re-arming a GitLab watch on a green change failed"
+  [ ! -e "$state/task-a.pr-poll-degraded" ] || fail "re-arming on a green change kept the previous watch's marker"
+
+  # A merge request already on its merge train at arming records that, so a
+  # drop before the watcher's first poll still wakes once.
+  FM_TEST_GLAB_STATE=opened FM_TEST_GLAB_PIPELINE=success FM_TEST_GLAB_TRAIN=car \
+    run_check_entry "$dir" task-a "$url" >/dev/null 2>&1 \
+    || fail "arming a GitLab watch on a merge train failed"
+  fm_pr_poll_degraded_already_notified "$state" task-a gitlab gitlab.example group/subgroup/project 7 train=on \
+    || fail "arming did not record a merge request already on its train"
+  rm -f "$state/.last-check"
+  FM_TEST_GLAB_STATE=opened FM_TEST_GLAB_PIPELINE=failed FM_TEST_GLAB_PIPELINE_ID=943 FM_TEST_GLAB_TRAIN=car \
+    run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/watch-failed.out" 2> "$dir/watch-failed.err" || true
+  [ "$(grep -c 'degraded after ready: degraded pipeline=943' "$dir/watch-failed.out")" -eq 1 ] \
+    || fail "watcher did not wake for a pipeline failure while on train"
+  ack_watcher_cycle "$state" || fail "pipeline-failure wake acknowledgement failed"
+  rm -f "$state/.last-check"
+  FM_TEST_WATCH_STOP_WHEN="$state/.last-check" FM_TEST_GLAB_STATE=opened FM_TEST_GLAB_PIPELINE=success FM_TEST_GLAB_TRAIN=car \
+    run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/watch-recovered.out" 2> "$dir/watch-recovered.err" || true
+  ack_watcher_cycle "$state" || fail "recovery poll cycle acknowledgement failed"
+  rm -f "$state/.last-check"
+  FM_TEST_GLAB_STATE=opened FM_TEST_GLAB_PIPELINE=success FM_TEST_GLAB_TRAIN=gone \
+    run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/watch-1.out" 2> "$dir/watch-1.err" || true
+  [ "$(grep -c 'degraded after ready: degraded train=dropped' "$dir/watch-1.out")" -eq 1 ] \
+    || fail "watcher did not wake for a merge request dropped from the train it was on at arming"
+  pass "arming records its baseline, including an on-train merge request, before publishing the poll"
+
+  # A stalled baseline read fails registration and leaves no lock or poll.
+  dir=$(make_case degraded-baseline-timeout)
+  state="$dir/home/state"
+  ln -sf "$REAL_JQ" "$dir/fakebin/jq"
+  write_task_meta "$dir" task-a
+  if FM_CHECK_TIMEOUT=1 FM_TEST_GLAB_SLEEP=3 FM_TEST_GLAB_STATE=opened FM_TEST_GLAB_PIPELINE=failed \
+      run_check_entry "$dir" task-a "$url" >/dev/null 2>"$dir/timeout.err"; then
+    fail "arming succeeded although its baseline read timed out"
+  fi
+  grep -q 'baseline read.*timed out' "$dir/timeout.err" || fail "arming did not name the timed-out baseline read"
+  [ ! -e "$state/.control-task-a.lock" ] || fail "a timed-out baseline read left the control lock held"
+  [ ! -e "$state/task-a.check.sh" ] || fail "a timed-out baseline read published a poll"
+  pass "a stalled baseline read fails arming without a lock or poll"
+
+  # A stalled re-arm to another PR leaves the task armed on the previous one.
+  dir=$(make_case degraded-rearm-timeout)
+  state="$dir/home/state"
+  ln -sf "$REAL_JQ" "$dir/fakebin/jq"
+  write_task_meta "$dir" task-a
+  url1=https://gitlab.example/group/subgroup/project/-/merge_requests/1
+  FM_TEST_GLAB_STATE=opened FM_TEST_GLAB_PIPELINE=success run_check_entry "$dir" task-a "$url1" >/dev/null 2>&1 \
+    || fail "arming the first GitLab watch failed"
+  if FM_CHECK_TIMEOUT=1 FM_TEST_GLAB_SLEEP=3 FM_TEST_GLAB_STATE=opened FM_TEST_GLAB_PIPELINE=success \
+      run_check_entry "$dir" task-a "$url" >/dev/null 2>"$dir/rearm.err"; then
+    fail "re-arming succeeded although its baseline read timed out"
+  fi
+  grep -q "^pr=$url1\$" "$state/task-a.meta" || fail "a failed re-arm replaced the task's PR metadata"
+  fm_pr_poll_artifacts_valid "$state" task-a "$POLL" \
+    || fail "a failed re-arm left the previous poll no longer matching its metadata"
+  [ ! -e "$state/.control-task-a.lock" ] || fail "a failed re-arm left the control lock held"
+  pass "a stalled re-arm leaves the previous watch and metadata intact"
+
+  # An unreadable forge read is an unknown baseline, not a clean one: arming
+  # fails like a timeout, and a failed re-arm keeps the previous watch.
+  dir=$(make_case degraded-baseline-unreadable)
+  state="$dir/home/state"
+  ln -sf "$REAL_JQ" "$dir/fakebin/jq"
+  write_task_meta "$dir" task-a
+  FM_TEST_GLAB_FAIL=1 FM_TEST_GLAB_STATE=opened FM_TEST_GLAB_PIPELINE=success FM_TEST_GLAB_TRAIN=car \
+    run_check_entry "$dir" task-a "$url" >/dev/null 2>"$dir/unreadable.err" \
+    || fail "arming failed although the unreadable baseline should be unknown"
+  [ ! -e "$state/.control-task-a.lock" ] || fail "an unreadable baseline read left the control lock held"
+  [ -e "$state/task-a.check.sh" ] || fail "an unreadable baseline read did not publish a poll"
+  # A readable merge request whose merge-train car read fails for any reason
+  # other than a 404 arms as not on a train, so the merged wake is kept.
+  for fail_env in FM_TEST_GLAB_API_FAIL FM_TEST_GLAB_TRAIN; do
+    rm -f "$state/task-a.check.sh" "$state/task-a.pr-poll-degraded"
+    if [ "$fail_env" = FM_TEST_GLAB_TRAIN ]; then value=fail; else value=1; fi
+    (export "$fail_env=$value" FM_TEST_GLAB_STATE=opened FM_TEST_GLAB_PIPELINE=success
+      [ "$fail_env" = FM_TEST_GLAB_TRAIN ] || export FM_TEST_GLAB_TRAIN=car
+      run_check_entry "$dir" task-a "$url" >/dev/null 2>"$dir/unreadable.err") \
+      || fail "arming failed on an unreadable merge-train car read ($fail_env): $(cat "$dir/unreadable.err")"
+    [ -f "$state/task-a.check.sh" ] || fail "an unreadable merge-train car read published no poll ($fail_env)"
+    [ ! -e "$state/task-a.pr-poll-degraded" ] || fail "an unreadable merge-train car read recorded a baseline ($fail_env)"
+  done
+  rm -f "$state/task-a.check.sh"
+  FM_TEST_GLAB_STATE=opened FM_TEST_GLAB_PIPELINE=success run_check_entry "$dir" task-a "$url1" >/dev/null 2>&1 \
+    || fail "arming the first GitLab watch for the unreadable case failed"
+  FM_TEST_GLAB_FAIL=1 run_check_entry "$dir" task-a "$url" >/dev/null 2>&1 \
+    || fail "re-arming failed although an unreadable baseline should be unknown"
+  grep -q "^pr=$url\$" "$state/task-a.meta" || fail "an unreadable re-arm did not publish the new PR metadata"
+  fm_pr_poll_artifacts_valid "$state" task-a "$POLL" \
+    || fail "an unreadable re-arm left the new poll mismatched with its metadata"
+  dir=$(make_case degraded-baseline-unreadable-gh)
+  state="$dir/home/state"
+  ln -sf "$REAL_JQ" "$dir/fakebin/jq"
+  write_task_meta "$dir" task-a
+  FM_TEST_GH_FAIL=1 run_check_entry "$dir" task-a https://github.com/o/r/pull/9 >/dev/null 2>"$dir/unreadable.err" \
+    || fail "arming failed although an unreadable baseline should be unknown"
+  [ -e "$state/task-a.check.sh" ] || fail "an unreadable GitHub baseline read did not publish a poll"
+  pass "an unreadable baseline read permits arming with an unknown baseline"
+
+  # The merge-time re-record makes no forge read of its own, so an unreadable
+  # forge cannot fail it before the merge's own live reads, and the watch's
+  # marker for that same PR stays exactly as the watcher left it.
+  dir=$(make_case degraded-baseline-merge-record)
+  state="$dir/home/state"
+  ln -sf "$REAL_JQ" "$dir/fakebin/jq"
+  write_task_meta "$dir" task-a
+  FM_TEST_GLAB_STATE=opened FM_TEST_GLAB_PIPELINE=failed run_check_entry "$dir" task-a "$url" >/dev/null 2>&1 \
+    || fail "arming a GitLab watch with a failed head pipeline failed before the merge-time re-record"
+  "$REAL_CP" "$state/task-a.pr-poll-degraded" "$dir/marker.before"
+  : > "$dir/glab.log"
+  FM_PR_CHECK_MERGE=1 FM_TEST_GLAB_FAIL=1 run_check_entry "$dir" task-a "$url" >/dev/null 2>"$dir/merge-record.err" \
+    || fail "the merge-time re-record failed on an unreadable forge: $(cat "$dir/merge-record.err")"
+  [ ! -s "$dir/glab.log" ] || fail "the merge-time re-record read the forge: $(cat "$dir/glab.log")"
+  cmp -s "$dir/marker.before" "$state/task-a.pr-poll-degraded" \
+    || fail "the merge-time re-record changed the watch's degraded marker"
+  fm_pr_poll_artifacts_valid "$state" task-a "$POLL" || fail "the merge-time re-record did not republish a valid poll"
+  pass "the merge-time re-record skips the baseline read and keeps the watch's marker"
 }
 
 test_atomic_interruption_leaves_no_partial_artifact() {
@@ -1640,6 +2086,7 @@ test_teardown_removes_poll_artifacts() {
   printf 'check\n' > "$dir/home/state/task-a.check.sh"
   printf 'data\n' > "$dir/home/state/task-a.pr-poll"
   printf 'registration\n' > "$dir/home/state/task-a.pr-poll-registration"
+  printf 'degraded\n' > "$dir/home/state/task-a.pr-poll-degraded"
   printf 'trust\n' > "$dir/home/state/task-a.check-trust"
   cat > "$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
@@ -1654,6 +2101,7 @@ SH
   [ ! -e "$dir/home/state/task-a.check.sh" ] || fail "teardown left the runnable check"
   [ ! -e "$dir/home/state/task-a.pr-poll" ] || fail "teardown left the sidecar"
   [ ! -e "$dir/home/state/task-a.pr-poll-registration" ] || fail "teardown left the PR poll registration"
+  [ ! -e "$dir/home/state/task-a.pr-poll-degraded" ] || fail "teardown left the degraded dedupe marker"
   [ ! -e "$dir/home/state/task-a.check-trust" ] || fail "teardown left the custom check registration"
 
   dir=$(make_case teardown-retirement-receipt)
@@ -2293,9 +2741,12 @@ SH
 }
 
 test_gitlab_merge_watch() {
-  local dir state out rc url value noglab entry bindir name
+  local dir state out rc url value noglab nojq noperl entry bindir name wide train started elapsed poll_pid waited hung
   dir=$(make_case gitlab-merge-watch)
   state="$dir/home/state"
+  # The poll reads the merge request as JSON, so the fixture's search path
+  # carries the real jq the way arming requires it.
+  ln -sf "$REAL_JQ" "$dir/fakebin/jq"
   url=https://gitlab.example/group/subgroup/project/-/merge_requests/7
 
   write_poll_meta "$state" task-a "$url"
@@ -2320,6 +2771,204 @@ group/subgroup/project
   [ "$out" = merged ] || fail "GitLab poll did not emit exactly one merged line"
   out=$(FM_TEST_GLAB_FAIL=1 run_poll "$dir")
   [ -z "$out" ] || fail "GitLab poll emitted after a glab failure"
+
+  # A still-open merge request whose head pipeline failed is the readable
+  # trace of a merge train dropping it, and emits exactly one degraded line
+  # naming the pipeline and its URL. A green or pending head pipeline, a
+  # closed merge request, and a pipeline without a readable id all stay
+  # silent.
+  out=$(FM_TEST_GLAB_STATE=opened FM_TEST_GLAB_PIPELINE=failed run_poll "$dir")
+  [ "$out" = 'degraded pipeline=941 url=https://gitlab.example/group/subgroup/project/-/pipelines/941' ] || fail "GitLab poll did not emit exactly one degraded line for a failed head pipeline: $out"
+  out=$(FM_TEST_GLAB_STATE=locked FM_TEST_GLAB_PIPELINE=failed run_poll "$dir")
+  [ "$out" = 'degraded pipeline=941 url=https://gitlab.example/group/subgroup/project/-/pipelines/941' ] || fail "GitLab poll did not treat a locked merge request as still open"
+
+  # The degraded line names the failed jobs with their forge failure reasons,
+  # following a failed bridge into its child pipeline, and a failed detail
+  # fetch only shortens the line.
+  out=$(FM_TEST_GLAB_STATE=opened FM_TEST_GLAB_PIPELINE=failed \
+    FM_TEST_GLAB_JOBS='[{"name":"ruby","status":"failed","failure_reason":"script_failure"},{"name":"lint","status":"success"}]' \
+    run_poll "$dir")
+  [ "$out" = 'degraded pipeline=941 url=https://gitlab.example/group/subgroup/project/-/pipelines/941 jobs=ruby:script_failure' ] \
+    || fail "GitLab poll did not name the failed job and its reason: $out"
+  out=$(FM_TEST_GLAB_STATE=opened FM_TEST_GLAB_PIPELINE=failed \
+    FM_TEST_GLAB_JOBS='[{"name":"ruby","status":"failed","failure_reason":"script_failure"}]' \
+    FM_TEST_GLAB_BRIDGES='[{"name":"child","status":"failed","downstream_pipeline":{"id":77}}]' \
+    FM_TEST_GLAB_CHILD_JOBS='[{"name":"e2e test","status":"failed","failure_reason":"script_failure"}]' \
+    run_poll "$dir")
+  [ "$out" = 'degraded pipeline=941 url=https://gitlab.example/group/subgroup/project/-/pipelines/941 jobs=ruby:script_failure,e2e test:script_failure' ] \
+    || fail "GitLab poll did not follow a failed bridge into its child pipeline: $out"
+  out=$(FM_TEST_GLAB_STATE=opened FM_TEST_GLAB_PIPELINE=failed FM_TEST_GLAB_CHILD_PROJECT=555 \
+    FM_TEST_GLAB_JOBS='[{"name":"ruby","status":"failed","failure_reason":"script_failure"}]' \
+    FM_TEST_GLAB_BRIDGES='[{"name":"child","status":"failed","downstream_pipeline":{"id":77,"project_id":555}}]' \
+    FM_TEST_GLAB_CHILD_JOBS='[{"name":"e2e test","status":"failed","failure_reason":"script_failure"}]' \
+    run_poll "$dir")
+  [ "$out" = 'degraded pipeline=941 url=https://gitlab.example/group/subgroup/project/-/pipelines/941 jobs=ruby:script_failure,e2e test:script_failure' ] \
+    || fail "GitLab poll did not read a cross-project child pipeline through its own project: $out"
+  out=$(FM_TEST_GLAB_STATE=opened FM_TEST_GLAB_PIPELINE=failed \
+    FM_TEST_GLAB_JOBS='[{"name":"ruby","status":"failed","failure_reason":"script_failure\nnewline"}]' \
+    run_poll "$dir")
+  [ "$out" = 'degraded pipeline=941 url=https://gitlab.example/group/subgroup/project/-/pipelines/941 jobs=ruby:script_failure newline' ] \
+    || fail "GitLab poll did not flatten a newline inside a job name: $out"
+  # A wide failed pipeline graph spends a bounded detail budget and still
+  # emits the known failure with the detail read so far.
+  wide='[{"name":"c1","status":"failed","downstream_pipeline":{"id":101}},{"name":"c2","status":"failed","downstream_pipeline":{"id":102}},{"name":"c3","status":"failed","downstream_pipeline":{"id":103}},{"name":"c4","status":"failed","downstream_pipeline":{"id":104}},{"name":"c5","status":"failed","downstream_pipeline":{"id":105}},{"name":"c6","status":"failed","downstream_pipeline":{"id":106}},{"name":"c7","status":"failed","downstream_pipeline":{"id":107}},{"name":"c8","status":"failed","downstream_pipeline":{"id":108}}]'
+  for train in '' gone; do
+    : > "$dir/glab.log"
+    rm -f "$dir/glab.log.train"
+    out=$(FM_TEST_GLAB_STATE=opened FM_TEST_GLAB_PIPELINE="$([ -n "$train" ] && echo success || echo failed)" \
+      FM_TEST_GLAB_TRAIN="$train" FM_TEST_GLAB_BRIDGES="$wide" \
+      FM_TEST_GLAB_JOBS='[{"name":"ruby","status":"failed","failure_reason":"script_failure"}]' \
+      run_poll "$dir")
+    case $out in
+      'degraded pipeline=941 url=https://gitlab.example/group/subgroup/project/-/pipelines/941 jobs=ruby:script_failure'*) [ -z "$train" ] || fail "GitLab train drop emitted a pipeline line: $out" ;;
+      "degraded train=dropped url=$url reason=mergeable pipeline_url=https://gitlab.example/group/subgroup/project/-/pipelines/941") [ -n "$train" ] || fail "GitLab failed pipeline emitted a train line: $out" ;;
+      *) fail "GitLab poll lost the known failure under the detail budget (train=$train): $out" ;;
+    esac
+    [ "$(grep -c 'api projects/.*/pipelines/' "$dir/glab.log")" -le 8 ] \
+      || fail "GitLab detail reads exceeded their budget (train=$train): $(grep -c 'api projects/.*/pipelines/' "$dir/glab.log")"
+  done
+  # A hung detail read is cut by its own time limit, so both paths still
+  # emit the known failure well inside the watcher's 30-second check bound.
+  for train in '' gone; do
+    rm -f "$dir/glab.log.train"
+    started=$SECONDS
+    out=$(FM_TEST_GLAB_STATE=opened FM_TEST_GLAB_PIPELINE="$([ -n "$train" ] && echo success || echo failed)" \
+      FM_TEST_GLAB_TRAIN="$train" FM_TEST_GLAB_DETAIL_HANG=1 run_poll "$dir")
+    elapsed=$((SECONDS - started))
+    case $out in
+      'degraded pipeline=941 url=https://gitlab.example/group/subgroup/project/-/pipelines/941') [ -z "$train" ] || fail "GitLab train drop emitted a pipeline line under a hung detail read: $out" ;;
+      "degraded train=dropped url=$url reason=mergeable pipeline_url=https://gitlab.example/group/subgroup/project/-/pipelines/941") [ -n "$train" ] || fail "GitLab failed pipeline emitted a train line under a hung detail read: $out" ;;
+      *) fail "GitLab poll lost the known failure under a hung detail read (train=$train): $out" ;;
+    esac
+    [ "$elapsed" -lt 25 ] || fail "a hung GitLab detail read held the poll ${elapsed}s (train=$train)"
+  done
+  # A poll stopped mid-read, as the watcher's check timeout stops it with
+  # TERM to the poll's process group, takes the hung read's own process
+  # group down with it rather than leaving glab running after the watcher.
+  rm -f "$dir/glab.log.train" "$dir/glab.log.hangpid"
+  FM_TEST_GLAB_STATE=opened FM_TEST_GLAB_PIPELINE=failed FM_TEST_GLAB_DETAIL_HANG=1 \
+    FM_TEST_GH_LOG="$dir/gh.log" FM_TEST_GLAB_LOG="$dir/glab.log" FM_TEST_JQ="$REAL_JQ" \
+    PATH="$dir/fakebin:$BASE_PATH" \
+    perl -e 'setpgrp(0, 0) or die "setpgrp: $!"; exec @ARGV or die "exec: $!"' \
+    bash "$dir/home/state/task-a.check.sh" > /dev/null 2>&1 &
+  poll_pid=$!
+  waited=0
+  while [ ! -s "$dir/glab.log.hangpid" ] && [ "$waited" -lt 100 ]; do sleep 0.05; waited=$((waited + 1)); done
+  hung=$(cat "$dir/glab.log.hangpid" 2>/dev/null)
+  if [ -z "$hung" ] || ! kill -0 "$hung" 2>/dev/null; then
+    fail "the hung GitLab detail read never started"
+  fi
+  kill -TERM -- "-$poll_pid" 2>/dev/null
+  wait "$poll_pid" 2>/dev/null || true
+  waited=0
+  while kill -0 "$hung" 2>/dev/null && [ "$waited" -lt 40 ]; do sleep 0.05; waited=$((waited + 1)); done
+  if kill -0 "$hung" 2>/dev/null; then
+    kill -KILL "$hung" 2>/dev/null
+    fail "a stopped GitLab poll left its hung detail read running"
+  fi
+  rm -f "$dir/glab.log.hangpid"
+  # Without perl no detail read can be bounded, so none is made: both paths
+  # emit the known failure at once, with no job names, even when every detail
+  # read would hang.
+  noperl="$dir/noperl"
+  mkdir -p "$noperl"
+  while IFS= read -r bindir; do
+    [ -d "$bindir" ] || continue
+    for entry in "$bindir"/*; do
+      [ -e "$entry" ] || continue
+      name=$(basename "$entry")
+      case $name in perl|perl5*) continue ;; esac
+      [ -e "$noperl/$name" ] || ln -s "$entry" "$noperl/$name" 2>/dev/null
+    done
+  done <<EOF
+$dir/fakebin
+$(printf '%s\n' "$BASE_PATH" | tr ':' '\n')
+EOF
+  ! PATH="$noperl" command -v perl >/dev/null 2>&1 \
+    || fail "the perl-free search path still resolved perl"
+  for train in '' gone; do
+    rm -f "$dir/glab.log.train"
+    : > "$dir/glab.log"
+    started=$SECONDS
+    out=$(FM_TEST_GLAB_STATE=opened FM_TEST_GLAB_PIPELINE="$([ -n "$train" ] && echo success || echo failed)" \
+      FM_TEST_GLAB_TRAIN="$train" FM_TEST_GLAB_DETAIL_HANG=1 FM_TEST_GLAB_LOG="$dir/glab.log" \
+      FM_TEST_JQ="$REAL_JQ" PATH="$noperl" bash "$dir/home/state/task-a.check.sh")
+    elapsed=$((SECONDS - started))
+    case $out in
+      'degraded pipeline=941 url=https://gitlab.example/group/subgroup/project/-/pipelines/941') [ -z "$train" ] || fail "GitLab train drop emitted a pipeline line without perl: $out" ;;
+      '') [ -n "$train" ] || fail "GitLab pipeline failure was lost without perl: $out" ;;
+      *) fail "GitLab poll emitted an unbounded train drop without perl (train=$train): $out" ;;
+    esac
+    ! grep -q 'api projects/.*/pipelines/' "$dir/glab.log" \
+      || fail "GitLab poll made an unbounded detail read without perl (train=$train)"
+    [ "$elapsed" -lt 10 ] || fail "GitLab poll without perl took ${elapsed}s (train=$train)"
+  done
+  rm -f "$dir/glab.log.train"
+  out=$(FM_TEST_GLAB_STATE=opened FM_TEST_GLAB_PIPELINE=failed \
+    FM_TEST_GLAB_API_FAIL=1 run_poll "$dir")
+  [ "$out" = 'degraded pipeline=941 url=https://gitlab.example/group/subgroup/project/-/pipelines/941' ] \
+    || fail "GitLab poll lost the degraded wake when only the detail fetch failed: $out"
+  for pipeline in success running pending canceled ''; do
+    out=$(FM_TEST_GLAB_STATE=opened FM_TEST_GLAB_PIPELINE="$pipeline" run_poll "$dir")
+    [ -z "$out" ] || fail "GitLab poll emitted for a non-failed head pipeline"
+  done
+  out=$(FM_TEST_GLAB_STATE=closed FM_TEST_GLAB_PIPELINE=failed run_poll "$dir")
+  [ -z "$out" ] || fail "GitLab poll emitted a degraded line for a closed merge request"
+  out=$(FM_TEST_GLAB_STATE=opened FM_TEST_GLAB_PIPELINE=failed FM_TEST_GLAB_PIPELINE_ID=0 run_poll "$dir")
+  [ -z "$out" ] || fail "GitLab poll emitted a degraded line for a pipeline without a readable id"
+
+  # A missing-car response is ambiguous and stays silent; only a present car
+  # is sufficient evidence for ontrain.
+  out=$(FM_TEST_GLAB_STATE=opened FM_TEST_GLAB_PIPELINE=success FM_TEST_GLAB_TRAIN=car run_poll "$dir")
+  [ "$out" = ontrain ] || fail "GitLab poll did not report a merge request on its train: $out"
+  out=$(FM_TEST_GLAB_STDERR_NOTICE=1 FM_TEST_GLAB_STATE=opened FM_TEST_GLAB_PIPELINE=success FM_TEST_GLAB_TRAIN=car run_poll "$dir")
+  [ "$out" = ontrain ] || fail "a stderr notice on a good car read spoiled the on-train report: $out"
+  out=$(FM_TEST_GLAB_STDERR_NOTICE=1 FM_TEST_GLAB_STATE=opened FM_TEST_GLAB_PIPELINE=success FM_TEST_GLAB_TRAIN=gone \
+    FM_TEST_GLAB_TRAINS='[{"cars":[{"merge_request":{"iid":7}}]}]' run_poll "$dir")
+  [ -z "$out" ] || fail "GitLab poll treated an ambiguous car-endpoint 404 as a train drop: $out"
+  out=$(FM_TEST_GLAB_STATE=locked FM_TEST_GLAB_PIPELINE=canceled FM_TEST_GLAB_TRAIN=gone FM_TEST_GLAB_DETAIL=need_rebase \
+    FM_TEST_GLAB_TRAINS='[{"cars":[{"merge_request":{"iid":7}}]}]' run_poll "$dir")
+  [ -z "$out" ] || fail "GitLab poll treated an ambiguous car-endpoint 404 as a train drop: $out"
+  # A train drop names only the pipeline link, so a merge request never on a
+  # train costs no pipeline detail reads on each poll.
+  : > "$dir/glab.log"
+  out=$(FM_TEST_GLAB_STATE=opened FM_TEST_GLAB_PIPELINE=success FM_TEST_GLAB_TRAIN=gone \
+    FM_TEST_GLAB_JOBS='[{"name":"ruby","status":"failed","failure_reason":"script_failure"}]' \
+    FM_TEST_GLAB_BRIDGES='[{"name":"child","status":"failed","downstream_pipeline":{"id":77}}]' \
+    FM_TEST_GLAB_CHILD_JOBS='[{"name":"e2e test","status":"failed","failure_reason":"script_failure"}]' \
+    run_poll "$dir")
+  [ "$out" = "degraded train=dropped url=$url reason=mergeable pipeline_url=https://gitlab.example/group/subgroup/project/-/pipelines/941" ] \
+    || fail "GitLab train drop did not name only the pipeline link: $out"
+  ! grep -q 'api projects/.*/pipelines/' "$dir/glab.log" \
+    || fail "GitLab train drop read pipeline details: $(cat "$dir/glab.log")"
+  rm -f "$dir/glab.log.train"
+  out=$(FM_TEST_GLAB_STATE=merged FM_TEST_GLAB_TRAIN=gone FM_TEST_GLAB_TRAINS='[]' run_poll "$dir")
+  [ "$out" = merged ] || fail "a merged MR missing from the active train list was not reported as merged: $out"
+  rm -f "$dir/glab.log.train"
+  : > "$dir/glab.log"
+  out=$(FM_TEST_GLAB_STATE=opened FM_TEST_GLAB_STATE_AFTER=merged FM_TEST_GLAB_TRAIN=gone run_poll "$dir")
+  [ "$out" = merged ] || fail "a merge between the initial MR read and a missing train car was not reported as merged: $out"
+  [ "$(grep -F -c 'api projects/group%2Fsubgroup%2Fproject/merge_requests/7' "$dir/glab.log")" -eq 1 ] \
+    || fail "the missing-car path did not make exactly one bounded MR-state recheck"
+  rm -f "$dir/glab.log.train"
+  out=$(FM_TEST_GLAB_STATE=opened FM_TEST_GLAB_STATE_AFTER=closed FM_TEST_GLAB_TRAIN=gone run_poll "$dir")
+  [ -z "$out" ] || fail "a closed MR recheck was reported as a train drop: $out"
+  rm -f "$dir/glab.log.train"
+  out=$(FM_TEST_GLAB_STATE=opened FM_TEST_GLAB_RECHECK_FAIL=1 FM_TEST_GLAB_TRAIN=gone run_poll "$dir")
+  [ "$out" = "degraded train=dropped url=$url reason=mergeable pipeline_url=https://gitlab.example/group/subgroup/project/-/pipelines/941 mr_state=unconfirmed" ] \
+    || fail "an unreadable MR recheck did not preserve the drop with an unconfirmed state: $out"
+  rm -f "$dir/glab.log.train"
+  out=$(FM_TEST_GLAB_STATE=opened FM_TEST_GLAB_TRAIN=fail run_poll "$dir")
+  [ -z "$out" ] || fail "GitLab poll emitted after a failed merge-train read"
+  out=$(FM_TEST_GLAB_STATE=opened FM_TEST_GLAB_TRAIN=neterr run_poll "$dir")
+  [ -z "$out" ] || fail "GitLab poll read a transport error mentioning 404 as a train drop: $out"
+  out=$(FM_TEST_GLAB_STATE=closed FM_TEST_GLAB_TRAIN=gone run_poll "$dir")
+  [ -z "$out" ] || fail "GitLab poll reported a train drop for a closed merge request"
+  out=$(FM_TEST_GLAB_STATE=opened FM_TEST_GLAB_PIPELINE=failed FM_TEST_GLAB_TRAIN=gone run_poll "$dir")
+  case $out in
+    'degraded pipeline=941 '*) ;;
+    *) fail "a failed head pipeline did not take precedence over a train drop: $out" ;;
+  esac
 
   # glab is addressed by project URL and merge request number, never by the
   # merge request URL, which the real CLI resolves through the current git
@@ -2379,17 +3028,54 @@ EOF
   esac
   [ ! -e "$state/task-b.check.sh" ] || fail "refused GitLab arming left a poll armed"
 
+  # The poll reads JSON, so arming refuses without jq the same way, naming the
+  # missing tool rather than arming a watch that can only stay silent.
+  nojq="$dir/nojq"
+  mkdir -p "$nojq"
+  while IFS= read -r bindir; do
+    [ -d "$bindir" ] || continue
+    for entry in "$bindir"/*; do
+      [ -e "$entry" ] || continue
+      name=$(basename "$entry")
+      [ "$name" = jq ] && continue
+      [ -e "$nojq/$name" ] || ln -s "$entry" "$nojq/$name" 2>/dev/null
+    done
+  done <<EOF
+$dir/fakebin
+$(printf '%s\n' "$BASE_PATH" | tr ':' '\n')
+EOF
+  ! PATH="$nojq" command -v jq >/dev/null 2>&1 \
+    || fail "the jq-free search path still resolved jq"
+  # A poll armed before jq was required keeps its merged wake from the plain
+  # state field and stays silent on everything else.
+  printf '%s\n%s\n%s\n%s\n%s\n' gitlab "$url" gitlab.example group/subgroup/project 7 \
+    > "$state/task-a.pr-poll"
+  out=$(FM_TEST_GLAB_STATE=merged FM_TEST_GLAB_LOG="$dir/glab.log" PATH="$nojq" \
+    bash "$state/task-a.check.sh")
+  [ "$out" = merged ] || fail "GitLab poll lost its merged wake without jq: $out"
+  out=$(FM_TEST_GLAB_STATE=opened FM_TEST_GLAB_PIPELINE=failed FM_TEST_GLAB_LOG="$dir/glab.log" PATH="$nojq" \
+    bash "$state/task-a.check.sh")
+  [ -z "$out" ] || fail "GitLab poll emitted a non-merged line without jq: $out"
+  set +e
+  out=$(FM_ROOT_OVERRIDE="$dir/root" FM_HOME="$dir/home" \
+    FM_TEST_GUARD_LOG="$dir/guard.log" PATH="$nojq" \
+    "$PR_CHECK" task-b "$url" 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "arming a GitLab watch succeeded with jq absent"
+  case "$out" in
+    *"requires jq on PATH"*) ;;
+    *) fail "arming a GitLab watch with jq absent did not report the missing tool" ;;
+  esac
+  [ ! -e "$state/task-b.check.sh" ] || fail "refused GitLab arming left a poll armed"
+
   # The merge path addresses the forge the URL names, and never the other one.
-  # This fixture's glab answers with the field output the poll reads, so the
-  # merge's JSON read cannot be parsed, which must refuse rather than merge on a
-  # state it could not read.
+  # The fixture's glab read fails, so the merge's JSON read cannot parse the
+  # state, which must refuse rather than merge on a state it could not read.
   write_task_meta "$dir" task-c
   : > "$dir/glab.log"
-  # The merge path needs jq before it reads anything, so this case supplies it
-  # and the refusal below is the unreadable state rather than a missing tool.
-  ln -sf "$REAL_JQ" "$dir/fakebin/jq"
   set +e
-  run_merge_entry "$dir" task-c "$url" >/dev/null 2> "$dir/merge-c.err"
+  FM_TEST_GLAB_FAIL=1 run_merge_entry "$dir" task-c "$url" >/dev/null 2> "$dir/merge-c.err"
   rc=$?
   set -e
   [ "$rc" -ne 0 ] || fail "merge wrapper merged a GitLab merge request it could not read"
@@ -3277,9 +3963,11 @@ test_authority_persistence_refuses_rebound_metadata() {
   write_task_meta "$dir" task-a
   run_check_entry "$dir" task-a "$url_a" >/dev/null 2> "$dir/seed.err" \
     || fail "rebind: could not arm the original poll"
+  # The hook runs inside the merge, which holds the task control lock, so it
+  # re-records the way a lock holder does rather than waiting on its parent.
   cat > "$dir/rebind.sh" <<SH
 #!/usr/bin/env bash
-"$PR_CHECK" task-a "$url_b" >/dev/null
+FM_PR_CHECK_MERGE=1 FM_TEST_JQ="$REAL_JQ" "$PR_CHECK" task-a "$url_b" >/dev/null
 SH
   chmod +x "$dir/rebind.sh"
   set +e
@@ -3381,10 +4069,12 @@ test_authority_retirement_preserves_replacement() {
   queue_merge "$dir" "$url_a"
   # The replacement runs inside the watcher, whose environment names the real
   # firstmate root, so restore the fixture root every other arming here uses.
+  # The watcher holds the task control lock here, so the re-arm re-records the
+  # way a lock holder does rather than waiting on its parent.
   cat > "$dir/replace-authority.sh" <<SH
 #!/usr/bin/env bash
-export FM_ROOT_OVERRIDE="$dir/root" FM_TEST_GUARD_LOG="$dir/guard.log"
-"$PR_CHECK" task-a "$url_b" >/dev/null
+export FM_ROOT_OVERRIDE="$dir/root" FM_TEST_GUARD_LOG="$dir/guard.log" FM_TEST_JQ="$REAL_JQ"
+FM_PR_CHECK_MERGE=1 "$PR_CHECK" task-a "$url_b" >/dev/null
 (
   FM_TEST_GH_GRAPHQL_STATE=OPEN FM_TEST_GH_GRAPHQL_MERGED=false \\
   FM_TEST_GH_GRAPHQL_QUEUED=true \\
@@ -3685,7 +4375,7 @@ test_device_rerecord_serializes_direct_rearm() {
   cp "$state/task-a.pr-poll-registration" "$dir/published.registration"
   cp "$state/task-a.check.sh" "$dir/published.check.sh"
   start_poll_publish_holder "$dir" "$state" task-a
-  FM_ROOT_OVERRIDE="$dir/root" FM_HOME="$dir/home" FM_TEST_GUARD_LOG="$dir/guard.log" \
+  FM_ROOT_OVERRIDE="$dir/root" FM_HOME="$dir/home" FM_TEST_GUARD_LOG="$dir/guard.log" FM_TEST_JQ="$REAL_JQ" \
     PATH="$dir/fakebin:$BASE_PATH" "$PR_CHECK" task-a "$url_b" > "$dir/rearm.out" 2> "$dir/rearm.err" &
   rearm_pid=$!
   for i in $(seq 1 100); do
@@ -3765,6 +4455,7 @@ test_parser_matrix
 test_github_enterprise_config_resolution
 test_github_enterprise_hosts
 test_gitlab_merge_watch
+test_arming_baselines_an_already_degraded_change
 test_forgejo_merge_watch
 test_forgejo_login_list_shapes
 test_gerrit_merge_watch
@@ -3797,6 +4488,9 @@ test_direct_pr_unpushed_commit_refuses_registration
 test_valid_recording_and_merge_derivation
 test_rejected_metacharacter_bytes_are_inert
 test_static_poll_contract
+test_github_degraded_poll
+test_degraded_poll_wakes_once_per_transition
+test_degraded_wake_survives_an_unsaved_marker
 test_atomic_interruption_leaves_no_partial_artifact
 test_concurrent_watcher_sees_only_complete_publication
 test_poll_publication_refuses_unsafe_destinations

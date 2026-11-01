@@ -52,7 +52,7 @@ Two things about plain `glab` were established by running it, because assuming e
 
 First, plain `glab` has no field selector.
 `gh` reads one field with `--json state -q .state`; `glab mr view` offers only `-F, --output string  Format output as: text, json`.
-Its JSON would need a JSON processor, and `jq` is not one of firstmate's common tools, so the state is read from glab's own field output instead.
+The merged check therefore reads glab's own field output, which needs no JSON processor; the poll's degraded read (head pipeline, merge-train car) is JSON-only and needs `jq`, and without `jq` the poll falls back to this field read so merged wakes keep working.
 Only an exact `merged` wakes firstmate, so a changed output format produces no wake rather than a false merge.
 
 Second, `glab` cannot take a merge request URL the way `gh pr view` can.
@@ -205,8 +205,11 @@ $ echo $?
 
 Neither refusal armed a poll or recorded a `pr=`, so a missing tool leaves no half-prepared merge behind.
 
-`jq` is not one of firstmate's common tools, which is why the watch poll reads glab's field output instead.
-The merge path cannot do the same: `detailed_merge_status`, `has_conflicts`, `blocking_discussions_resolved`, and the head pipeline appear only in glab's JSON.
+`bin/fm-pr-check.sh` refuses to arm a GitLab watch without `jq` because its degraded-state baseline is JSON-only.
+A car-endpoint 404 is confirmed with one bounded read of the project's active merge-train list; only a readable list omitting the merge request triggers one bounded MR-state re-read, while list errors stay silent.
+An `opened` or `locked` re-read reports the drop; `closed` stays silent, `merged` reports the merge, and an unreadable re-read reports the confirmed drop with `mr_state=unconfirmed`.
+The watcher emits a drop only after it has recorded the merge request on the train.
+The merge path cannot read the field output: `detailed_merge_status`, `has_conflicts`, `blocking_discussions_resolved`, and the head pipeline appear only in glab's JSON.
 The poll's silence on a missing tool is safe because silence means "not merged yet"; a merge cannot be silent about it, so the requirement is reported rather than assumed.
 
 The merged half of the fixture is refused, and every failing condition is listed rather than just the first:
