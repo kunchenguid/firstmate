@@ -185,10 +185,11 @@ case "$provider" in
     # a merge train drops a merge request when its pipeline does not succeed.
     # Any other open merge request has its merge-train car read: a present car
     # emits "ontrain"; after a car HTTP 404, a readable train list without the
-    # merge request triggers one bounded MR-state re-read. A merged re-read
-    # emits "merged"; any readable non-merged state emits a degraded train-drop
-    # line. If the re-read fails, the line includes mr_state=unconfirmed so the
-    # confirmed drop is not hidden. The watcher wakes only when it last saw the
+    # merge request triggers one bounded MR-state re-read. An opened or locked
+    # re-read emits a degraded train-drop line; a closed re-read stays silent,
+    # and a merged re-read emits "merged". If the re-read fails, the line
+    # includes mr_state=unconfirmed so the confirmed drop is not hidden. The
+    # watcher wakes only when it last saw the
     # car on the train. Other car or train-list read failures stay silent, as do
     # a pending or green head pipeline and an unreadable initial MR record.
     # Without jq the poll falls back to the plain state field,
@@ -346,7 +347,8 @@ case "$provider" in
             end' 2>/dev/null) || current_state=unknown
           case $current_state in
             merged) printf '%s\n' merged; exit 0 ;;
-            opened|locked|closed) ;;
+            opened|locked) ;;
+            closed) exit 0 ;;
             *) current_state=unknown ;;
           esac
           line="degraded train=dropped url=$url"
