@@ -1,3 +1,4 @@
+# shellcheck shell=bash
 record_hygiene_report() {
   local file id output now cutoff archive dir pr seen_prs prior backend target endpoint_state n file_mtime read_timeout read_status
   read_timeout=${FM_RECORD_HYGIENE_READ_TIMEOUT:-10}
