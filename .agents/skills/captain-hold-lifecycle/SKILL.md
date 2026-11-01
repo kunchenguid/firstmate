@@ -21,7 +21,8 @@ Prefer holding the work item the question gates over minting a new row; create a
 The originating investigation or review is never its own inventory entry, so hold a separate task for the call and pass `--origin <origin-id>` so `complete` can check it.
 Put the question and its options in the hold reason, and keep one held task per genuine gate: a multi-question review is one held task pointing at its report, not a row per question. Represent that task with exactly one board card that consolidates its questions and options; never fan one task id into duplicate same-key cards.
 Register or re-hold through `bin/fm-captain-hold.sh hold`, which is idempotent per task id.
-Every hold names its class with `--class`, one of the captain's own categories that `bin/fm-captain-hold.sh classes` prints; a call that fits none - a reversible route, an ordering, or a next unit - is firstmate's to decide, so decide it rather than holding it.
+Every hold names its class with `--class`, one of the captain's own categories that `bin/fm-captain-hold.sh classes` prints; an `ask-user-authority` escalation names the decision it is, such as `design-pick` for a product or architecture call accepted intent does not settle, or `repeated-finding-ruling` for a third same-theme finding whose corrections prop up an abstraction he should rule on.
+If no class fits, it is not a captain call: a reversible route, an ordering, or a next unit is firstmate's to decide, so decide it rather than holding it.
 After inventorying the whole report and review surface, firstmate runs `bin/fm-captain-hold.sh complete` with every captain-held task id, or with `--none` when nothing waits on the captain.
 A scout may attest its own empty inventory only through the narrow command exception in its generated brief's Definition of done.
 For a non-empty inventory or a refused command, the scout reports to firstmate rather than writing metadata or backlog records.

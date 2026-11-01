@@ -70,11 +70,18 @@
 #   product-or-scope-expansion         a genuine product or scope expansion
 #   destructive-irreversible-security  destructive, irreversible, or security-sensitive
 #   discard-unlanded                   discarding unlanded work
+#   design-pick                        a product or architecture call that
+#                                      accepted intent does not settle
+#   repeated-finding-ruling            the third same-theme finding, where
+#                                      incremental corrections are propping up
+#                                      an abstraction he should decide whether
+#                                      to keep
 #   deferred-by-captain                a call whose only nature is his own
 #                                      "later"; requires --until
-# A missing or unknown class is refused before anything is written. There is
-# deliberately no class for reversible work, so a reversible call cannot be
-# held for the captain at all; it is firstmate's to decide. The class is
+# A missing or unknown class is refused before anything is written. If no class
+# fits, it is not a captain call: it is firstmate's to decide. There is
+# deliberately no class for reversible work and no catch-all, so a reversible
+# call cannot be held for the captain at all. The class is
 # recorded on a `Captain hold class:` body line, replaced on every re-hold,
 # which bin/fm-fleet-snapshot.sh projects as hold_class and Bearings renders.
 # A hold recorded before classes existed has no such line and projects null.
@@ -326,6 +333,8 @@ physical-or-credential
 product-or-scope-expansion
 destructive-irreversible-security
 discard-unlanded
+design-pick
+repeated-finding-ruling
 deferred-by-captain'
 
 captain_hold_class_known() {  # <class>
@@ -1165,9 +1174,9 @@ command_hold() {
   done
   validate_slug task-id "$id"
   [ "$class_set" = 1 ] && [ -n "$class" ] \
-    || fail "--class is required: name which of the captain's categories this call belongs to ($(printf '%s' "$CAPTAIN_HOLD_CLASSES" | tr '\n' ',' | sed 's/,/, /g')); a reversible call has no class and is firstmate's to decide, not a captain hold"
+    || fail "--class is required: name which of the captain's categories this call belongs to ($(printf '%s' "$CAPTAIN_HOLD_CLASSES" | tr '\n' ',' | sed 's/,/, /g')); if no class fits, it is not a captain call and is firstmate's to decide"
   captain_hold_class_known "$class" \
-    || fail "unknown --class $class: the captain-hold classes are $(printf '%s' "$CAPTAIN_HOLD_CLASSES" | tr '\n' ',' | sed 's/,/, /g'); a reversible call has no class and is firstmate's to decide, not a captain hold"
+    || fail "unknown --class $class: the captain-hold classes are $(printf '%s' "$CAPTAIN_HOLD_CLASSES" | tr '\n' ',' | sed 's/,/, /g'); if no class fits, it is not a captain call and is firstmate's to decide"
   if [ "$class" = deferred-by-captain ] && [ -z "$until" ]; then
     fail "--class deferred-by-captain records the captain's own later and requires --until YYYY-MM-DD"
   fi
