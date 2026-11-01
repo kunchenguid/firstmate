@@ -575,6 +575,259 @@ EOF
   pass "Pi actionable output waits for predecessor close before successor restoration"
 }
 
+# A successor can print readiness after its arm process has already exited when
+# a descendant retains the stdout pipe and emits the line. Readiness alone must
+# not let the original wake reach Pi while no arm child is alive: restoration
+# has to start a live successor inside its existing retry bound first.
+test_pi_dead_ready_successor_is_retried_before_delivery() {
+  local repo home plugin log stop release holder out status
+  repo="$TMP_ROOT/pi-dead-ready-successor-root"
+  home="$TMP_ROOT/pi-dead-ready-successor-home"
+  log="$TMP_ROOT/pi-dead-ready-successor.log"
+  stop="$TMP_ROOT/pi-dead-ready-successor.stop"
+  release="$TMP_ROOT/pi-dead-ready-successor.release"
+  holder="$TMP_ROOT/pi-dead-ready-successor-holder.sh"
+  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  install_pi_watch_extension_fixture "$repo"
+  plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
+  cat > "$holder" <<'SH'
+#!/usr/bin/env bash
+parent=$1
+release=$2
+while kill -0 "$parent" 2>/dev/null; do sleep 0.01; done
+printf 'watcher: started pid=%s (beacon fresh) recovery-generation=dead-ready\n' "$parent"
+while [ ! -e "$release" ]; do sleep 0.02; done
+SH
+  chmod +x "$holder"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = --handling-delivered ]; then exit 0; fi
+printf 'arm=%s\n' "$$" >> "${FM_ARM_LOG:?}"
+count=$(grep -c '^arm=' "$FM_ARM_LOG")
+if [ "$count" -eq 1 ]; then
+  printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+  printf 'signal: wake before dead-ready successor\n'
+  exit 0
+fi
+if [ "$count" -eq 2 ]; then
+  ("${FM_HOLDER:?}" "$$" "${FM_RELEASE_FILE:?}" >&1 2>/dev/null &)
+  exit 0
+fi
+printf 'watcher: started pid=%s (beacon fresh) recovery-generation=live-successor\n' "$$"
+trap 'exit 0' TERM INT
+while [ ! -e "$FM_STOP_FILE" ]; do sleep 0.02; done
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+  out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_LOG="$log" FM_STOP_FILE="$stop" FM_RELEASE_FILE="$release" FM_HOLDER="$holder" FM_WATCH_REARM_RETRY_BASE_MS=5 FM_WATCH_REARM_RETRY_MAX_MS=10 FM_WATCH_REARM_RETRY_LIMIT=2 node --input-type=module 2>&1 <<'EOF'
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+let tool = null;
+let prompt = "";
+let armsAtDelivery = 0;
+const armRows = () => existsSync(process.env.FM_ARM_LOG)
+  ? readFileSync(process.env.FM_ARM_LOG, "utf8").split("\n").filter((row) => row.startsWith("arm="))
+  : [];
+const pi = {
+  on() {},
+  registerCommand() {},
+  registerTool(candidate) {
+    if (candidate.name === "fm_watch_arm_pi") tool = candidate;
+  },
+  sendUserMessage: async (message) => {
+    armsAtDelivery = armRows().length;
+    prompt += message;
+  },
+};
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+mod.default(pi);
+await tool.execute("initial-dead-ready-arm", {}, undefined, undefined, {});
+for (let i = 0; i < 500 && !prompt; i += 1) {
+  await new Promise((resolve) => setTimeout(resolve, 10));
+}
+let failure = "";
+if (!prompt.includes("signal: wake before dead-ready successor")) {
+  failure = `original wake was not delivered: ${prompt}`;
+} else if (armsAtDelivery < 3) {
+  failure = `wake reached Pi with no live successor; arms at delivery=${armsAtDelivery}: ${armRows().join(" | ")}`;
+}
+writeFileSync(process.env.FM_STOP_FILE, "stop\n");
+writeFileSync(process.env.FM_RELEASE_FILE, "release\n");
+await new Promise((resolve) => setTimeout(resolve, 100));
+if (failure) throw new Error(failure);
+process.exit(0);
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "Pi restoration must retry a dead-but-ready successor before delivering the wake: $out"
+  [ -z "$out" ] || fail "Pi dead-ready successor test printed output: $out"
+  pass "Pi restoration retries a dead-but-ready successor before delivering the wake"
+}
+
+# A verified successor can die just after restoration accepts it while a
+# descendant still holds its stdio pipes, so Node never reports close. The
+# arm's exit alone must still route into the bounded retry instead of leaving
+# the home unwatched until the descendant lets go.
+test_pi_successor_exit_with_held_pipe_schedules_retry() {
+  local repo home plugin log stop release delivered out status
+  repo="$TMP_ROOT/pi-held-pipe-successor-root"
+  home="$TMP_ROOT/pi-held-pipe-successor-home"
+  log="$TMP_ROOT/pi-held-pipe-successor.log"
+  stop="$TMP_ROOT/pi-held-pipe-successor.stop"
+  release="$TMP_ROOT/pi-held-pipe-successor.release"
+  delivered="$TMP_ROOT/pi-held-pipe-successor.delivered"
+  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  install_pi_watch_extension_fixture "$repo"
+  plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = --handling-delivered ]; then exit 0; fi
+printf 'arm=%s\n' "$$" >> "${FM_ARM_LOG:?}"
+count=$(grep -c '^arm=' "$FM_ARM_LOG")
+if [ "$count" -eq 1 ]; then
+  printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+  printf 'signal: wake before held-pipe successor\n'
+  exit 0
+fi
+if [ "$count" -eq 2 ]; then
+  printf 'watcher: started pid=%s (beacon fresh) recovery-generation=held-pipe\n' "$$"
+  (while [ ! -e "${FM_RELEASE_FILE:?}" ]; do sleep 0.02; done &)
+  while [ ! -e "${FM_DELIVERED_FILE:?}" ]; do sleep 0.02; done
+  exit 0
+fi
+printf 'watcher: started pid=%s (beacon fresh) recovery-generation=retry-successor\n' "$$"
+trap 'exit 0' TERM INT
+while [ ! -e "$FM_STOP_FILE" ]; do sleep 0.02; done
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+  out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_LOG="$log" FM_STOP_FILE="$stop" FM_RELEASE_FILE="$release" FM_DELIVERED_FILE="$delivered" FM_WATCH_REARM_RETRY_BASE_MS=5 FM_WATCH_REARM_RETRY_MAX_MS=10 FM_WATCH_REARM_RETRY_LIMIT=2 node --input-type=module 2>&1 <<'EOF'
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+let tool = null;
+let prompt = "";
+const armRows = () => existsSync(process.env.FM_ARM_LOG)
+  ? readFileSync(process.env.FM_ARM_LOG, "utf8").split("\n").filter((row) => row.startsWith("arm="))
+  : [];
+const pi = {
+  on() {},
+  registerCommand() {},
+  registerTool(candidate) {
+    if (candidate.name === "fm_watch_arm_pi") tool = candidate;
+  },
+  sendUserMessage: async (message) => {
+    prompt += message;
+    writeFileSync(process.env.FM_DELIVERED_FILE, "delivered\n");
+  },
+};
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+mod.default(pi);
+await tool.execute("initial-held-pipe-arm", {}, undefined, undefined, {});
+for (let i = 0; i < 500 && armRows().length < 3; i += 1) {
+  await new Promise((resolve) => setTimeout(resolve, 10));
+}
+let failure = "";
+if (!prompt.includes("signal: wake before held-pipe successor")) {
+  failure = `original wake was not delivered: ${prompt}`;
+} else if (armRows().length < 3) {
+  failure = `successor exit with a held pipe left no retry: ${armRows().join(" | ")}`;
+}
+writeFileSync(process.env.FM_STOP_FILE, "stop\n");
+writeFileSync(process.env.FM_RELEASE_FILE, "release\n");
+await new Promise((resolve) => setTimeout(resolve, 100));
+if (failure) throw new Error(failure);
+process.exit(0);
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "Pi successor exit with a held pipe must schedule the bounded retry: $out"
+  [ -z "$out" ] || fail "Pi held-pipe successor test printed output: $out"
+  pass "Pi successor exit with a held pipe schedules the bounded retry"
+}
+
+# Node can report the arm process exit before its stdout pipe drains. Delay the
+# arm's own final output behind a descendant-held FIFO so the actionable line
+# reaches the extension after exit; it must still become the wake, not a retry.
+test_pi_actionable_line_draining_after_exit_stays_actionable() {
+  local repo home plugin log fifo stop out status
+  repo="$TMP_ROOT/pi-actionable-after-exit-root"
+  home="$TMP_ROOT/pi-actionable-after-exit-home"
+  log="$TMP_ROOT/pi-actionable-after-exit.log"
+  fifo="$TMP_ROOT/pi-actionable-after-exit.fifo"
+  stop="$TMP_ROOT/pi-actionable-after-exit.stop"
+  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  install_pi_watch_extension_fixture "$repo"
+  plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = --handling-delivered ]; then exit 0; fi
+printf 'arm=%s\n' "$$" >> "${FM_ARM_LOG:?}"
+count=$(grep -c '^arm=' "$FM_ARM_LOG")
+if [ "$count" -eq 1 ]; then
+  mkfifo "${FM_DELAY_FIFO:?}"
+  exec 3>&1
+  (
+    exec 4<"$FM_DELAY_FIFO"
+    sleep 0.1
+    cat <&4 >&3
+  ) &
+  exec 3>&-
+  exec >"$FM_DELAY_FIFO"
+  printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+  printf 'signal: actionable output drained after exit\n'
+  exit 0
+fi
+printf 'watcher: started pid=%s (beacon fresh) recovery-generation=drained-actionable\n' "$$"
+trap 'exit 0' TERM INT
+while [ ! -e "$FM_STOP_FILE" ]; do sleep 0.02; done
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+  out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_LOG="$log" FM_DELAY_FIFO="$fifo" FM_STOP_FILE="$stop" FM_WATCH_REARM_RETRY_BASE_MS=2000 node --input-type=module 2>&1 <<'EOF'
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+let tool = null;
+let prompt = "";
+const armRows = () => existsSync(process.env.FM_ARM_LOG)
+  ? readFileSync(process.env.FM_ARM_LOG, "utf8").split("\n").filter((row) => row.startsWith("arm="))
+  : [];
+const pi = {
+  on() {},
+  registerCommand() {},
+  registerTool(candidate) {
+    if (candidate.name === "fm_watch_arm_pi") tool = candidate;
+  },
+  sendUserMessage: async (message) => {
+    prompt += message;
+  },
+};
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+mod.default(pi);
+await tool.execute("initial-delayed-drain-arm", {}, undefined, undefined, {});
+for (let i = 0; i < 100 && !prompt; i += 1) {
+  await new Promise((resolve) => setTimeout(resolve, 10));
+}
+let failure = "";
+if (!prompt.includes("signal: actionable output drained after exit")) {
+  failure = `late actionable line was lost: ${prompt || "no wake delivered"}`;
+} else if (armRows().length !== 2) {
+  failure = `late actionable line started the wrong number of successors: ${armRows().join(" | ")}`;
+}
+writeFileSync(process.env.FM_STOP_FILE, "stop\n");
+await new Promise((resolve) => setTimeout(resolve, 100));
+if (failure) throw new Error(failure);
+process.exit(0);
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "Pi actionable output draining after exit must stay actionable: $out"
+  [ -z "$out" ] || fail "Pi actionable-after-exit test printed output: $out"
+  pass "Pi actionable output draining after exit stays actionable"
+}
+
 test_pi_branch_offer_owns_actionable_wake() {
   local repo home plugin log stop out status
   repo="$TMP_ROOT/pi-branch-offer-root"
@@ -2203,8 +2456,8 @@ EOF
 # A repair call must not no-op on an arm child whose process is already dead
 # while its close event is still pending (stdio pipe held): the first arm
 # below exits at once but leaves a pipe holder behind, so the extension still
-# holds the handle with no close fired. The repair must start a fresh arm
-# rather than answer unchanged.
+# holds the handle with no close fired. The repair must not fail over the dead
+# arm, and a second arm follows without another call.
 test_pi_repair_starts_fresh_arm_over_dead_child() {
   local repo home plugin log stop holder out status
   repo="$TMP_ROOT/pi-stale-child-root"
@@ -2276,11 +2529,8 @@ for (let i = 0; i < 250 && !dead; i += 1) {
 if (!dead) throw new Error(`first arm pid ${armPid} never exited`);
 const second = await tool.execute("tool-call-repair", {}, undefined, undefined, {});
 const text = second.content[0].text;
-if (!text.includes("started Pi extension arm child")) {
-  throw new Error(`repair did not start a fresh arm: ${text}`);
-}
-if (text.includes("unchanged")) {
-  throw new Error(`repair no-opped on a dead child: ${text}`);
+if (text.includes("FAILED")) {
+  throw new Error(`repair failed over a dead child: ${text}`);
 }
 let rearmed = false;
 for (let i = 0; i < 250 && !rearmed; i += 1) {
@@ -2301,10 +2551,9 @@ EOF
 }
 
 # A scheduled continuity retry must not stall behind a dead-but-unclosed arm
-# child. The first arm exits with its stdout held open, a manual repair starts
-# a second arm that does the same, and then the first arm's close finally
-# fires: its retry must see the dead second arm as an empty slot and start a
-# fresh arm.
+# child. The first arm exits with its stdout held open, the next arm (from the
+# exit's retry or a manual repair) does the same, and then the first arm's
+# close finally fires: continuity must still reach a fresh live arm.
 test_pi_scheduled_retry_starts_fresh_arm_over_dead_child() {
   local repo home plugin log stop release out status
   repo="$TMP_ROOT/pi-retry-dead-root"
@@ -2371,8 +2620,8 @@ mod.default(pi);
 await tool.execute("tool-call-retry-dead-first", {}, undefined, undefined, {});
 await waitForExit(await waitForArms(1));
 const repair = await tool.execute("tool-call-retry-dead-repair", {}, undefined, undefined, {});
-if (!repair.content[0].text.includes("started Pi extension arm child")) {
-  throw new Error(`repair did not start a second arm: ${repair.content[0].text}`);
+if (repair.content[0].text.includes("FAILED")) {
+  throw new Error(`repair failed over the dead first arm: ${repair.content[0].text}`);
 }
 await waitForExit(await waitForArms(2));
 writeFileSync(process.env.FM_RELEASE_FILE, "release\n");
@@ -5766,6 +6015,9 @@ test_pi_redundant_tool_call_is_owned_noop
 test_pi_scheduled_retry_call_is_owned_noop
 test_pi_actionable_close_starts_single_successor_before_delivery
 test_pi_actionable_output_waits_for_predecessor_close
+test_pi_dead_ready_successor_is_retried_before_delivery
+test_pi_successor_exit_with_held_pipe_schedules_retry
+test_pi_actionable_line_draining_after_exit_stays_actionable
 test_pi_branch_offer_owns_actionable_wake
 test_pi_branch_offer_flags_heartbeat
 test_pi_heartbeat_is_not_ridden_into_main_by_a_co_present_check
