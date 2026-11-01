@@ -153,8 +153,7 @@ if [ "$BUDGET_SECS" -gt 120 ]; then
   exit 2
 fi
 
-# The smallest bound a probe can be given, because fm_run_timed treats a
-# non-positive bound as no bound.
+# The smallest probe bound under bin/fm-timeout-lib.sh's bound contract.
 PROBE_MIN_SECS=1
 # Both clocks here count whole seconds, so a probe can start when the arithmetic
 # says a second is left while almost none of it really is, and it still gets a
@@ -232,7 +231,7 @@ budget_allows() {
 
 # The bound for one probe: the probe bound, cut down to whatever the sweep
 # budget has left, so no probe can run past the end of the sweep. Never below
-# PROBE_MIN_SECS, because fm_run_timed treats a non-positive bound as no bound.
+# PROBE_MIN_SECS, per bin/fm-timeout-lib.sh's bound contract.
 probe_bound() {
   local left
   left=$((DEADLINE - $(real_epoch)))

@@ -13,7 +13,7 @@
 #       it. timeout and gtimeout are selected only when type -P yields an
 #       executable path, and that path is what fm_run_timed and fm_exec_timed
 #       invoke, so a builtin or function of the same name cannot shadow the
-#       runner. The perl and bash fallbacks are unchanged.
+#       runner.
 #
 #   fm_run_timed <seconds> <command> [args...]
 #       Runs the command with a hard bound. Exit status is the command's own,
@@ -27,6 +27,10 @@
 #       own KILL escalation, with no status recorded by the bounded command,
 #       also collapses into 124: there it means the bound fired, not that the
 #       command chose to die.
+#       On caller INT/HUP/TERM, the Perl fallback reaps its command group with
+#       up to 0.2s TERM-to-KILL grace, then restores the caller's traps and
+#       redelivers the signal. If the caller continues, it returns 128+n.
+#       Its deadline and cleanup grace use a monotonic clock.
 #
 #   fm_exec_timed <seconds> <grace-seconds> <command> [args...]
 #       Replaces the calling shell with the bounded command, so it must be the
@@ -66,14 +70,13 @@
 #   fm_timed_out <status>
 #       0 iff <status> is how fm_run_timed or fm_exec_timed reports the bound.
 #
-# A non-positive bound is not a bound: `timeout 0` and the perl fallback's
-# `alarm 0` both disable the deadline, so callers must reject 0 before calling.
+# Callers must supply a positive integer bound; `timeout 0` disables the deadline.
 #
 # All four fm_run_timed mechanisms terminate the whole process GROUP, not just
 # the direct child, so a hung grandchild (a vendor CLI spawned by a wrapper
 # script, a git fetch spawned by a sweep) cannot outlive the bound. GNU/BSD
 # `timeout` does this by default because it does not run the command in the
-# foreground process group; the perl fallback does it explicitly with setpgrp
+# foreground process group; the perl fallback does it explicitly with setpgid
 # plus a negative pid, and the bash fallback uses monitor mode to give the
 # bounded child its own process group before signaling its negative pid.
 set -u
@@ -206,8 +209,71 @@ fm_run_timed() {  # <seconds> <command...>
       fm_run_external_timeout "$timeout_path" "$seconds" "$@"
       ;;
     perl)
-      perl -e 'my $t = shift; my $pid = fork; die "fork failed" unless defined $pid; if (!$pid) { setpgrp(0, 0); exec @ARGV } local $SIG{ALRM} = sub { kill "TERM", -$pid; select undef, undef, undef, 0.2; kill "KILL", -$pid; exit 124 }; alarm $t; waitpid $pid, 0; exit(($? & 127) ? 128 + ($? & 127) : $? >> 8)' \
-        "$seconds" "$@"
+      local saved_traps runner_pid='' interrupted='' runner_rc monitor_was_on=0
+      saved_traps=$(trap -p INT HUP TERM)
+      # wait on an asynchronous runner so Bash handles a process-directed signal
+      # immediately instead of deferring the trap until a foreground Perl exits.
+      trap 'interrupted=INT; [ -z "$runner_pid" ] || kill -INT "$runner_pid" 2>/dev/null || true' INT
+      trap 'interrupted=HUP; [ -z "$runner_pid" ] || kill -HUP "$runner_pid" 2>/dev/null || true' HUP
+      trap 'interrupted=TERM; [ -z "$runner_pid" ] || kill -TERM "$runner_pid" 2>/dev/null || true' TERM
+      case $- in *m*) monitor_was_on=1 ;; esac
+      set -m
+      perl -MPOSIX=WNOHANG,setpgid -MTime::HiRes=clock_gettime,CLOCK_MONOTONIC -e '
+        my $bound = shift;
+        my ($signal, $kill_at, $result) = (0, 0, 0);
+        for my $entry ([HUP => 1], [INT => 2], [TERM => 15]) {
+          my ($name, $number) = @$entry;
+          $SIG{$name} = sub { $signal ||= $number };
+        }
+        my $pid = fork;
+        exit 127 unless defined $pid;
+        if (!$pid) {
+          $SIG{$_} = "DEFAULT" for qw(INT HUP TERM);
+          setpgid(0, 0);
+          exec @ARGV;
+          exit 127;
+        }
+        # Both sides establish the group before the parent can signal it.
+        setpgid($pid, $pid);
+        my $deadline = clock_gettime(CLOCK_MONOTONIC) + $bound;
+        while (1) {
+          if (!$kill_at && ($signal || clock_gettime(CLOCK_MONOTONIC) >= $deadline)) {
+            $result = $signal ? 128 + $signal : 124;
+            $kill_at = clock_gettime(CLOCK_MONOTONIC) + 0.2;
+            kill "TERM", -$pid;
+          }
+          my $done = waitpid $pid, WNOHANG;
+          if ($done == $pid) {
+            my $status = $?;
+            kill "KILL", -$pid if $kill_at;
+            exit($kill_at ? $result : ($status & 127) ? 128 + ($status & 127) : $status >> 8);
+          }
+          exit 127 if $done == -1;
+          if ($kill_at && clock_gettime(CLOCK_MONOTONIC) >= $kill_at) {
+            kill "KILL", -$pid;
+            waitpid $pid, 0;
+            exit $result;
+          }
+          select undef, undef, undef, 0.02;
+        }
+      ' -- "$seconds" "$@" <&0 &
+      runner_pid=$!
+      [ "$monitor_was_on" -eq 1 ] || set +m
+      [ -z "$interrupted" ] || kill -"$interrupted" "$runner_pid" 2>/dev/null || true
+      while :; do
+        if wait "$runner_pid"; then runner_rc=0; else runner_rc=$?; fi
+        # A trap interrupts wait before the runner has finished its cleanup.
+        kill -0 "$runner_pid" 2>/dev/null || break
+      done
+      trap - INT HUP TERM
+      eval "$saved_traps"
+      [ -z "$interrupted" ] || kill -s "$interrupted" "$(exec perl -e 'print getppid()')"
+      case "$interrupted" in
+        INT) return 130 ;;
+        HUP) return 129 ;;
+        TERM) return 143 ;;
+      esac
+      return "$runner_rc"
       ;;
     bash) fm_run_bash_timeout "$seconds" "$@" ;;
     *) return 124 ;;
