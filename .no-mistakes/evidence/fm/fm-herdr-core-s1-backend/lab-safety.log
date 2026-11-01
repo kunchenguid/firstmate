@@ -1,0 +1,49 @@
+
+Attempting guarded command: bin/fm-hc-lab.sh provision default
+fm-hc-lab: refusing session name 'default'
+
+Attempting guarded command: bin/fm-hc-lab.sh teardown default
+fm-hc-lab: refusing session name 'default'
+lab core session fm-hclab-a ready (server pid 24018)
+lab core session fm-hclab-b ready (server pid 24288)
+fm-hc-ci-cleanup.sh: wrote lab session snapshot to {run-worktree}/.live-hc/baseline (2 names)
+Owned baseline inventory:
+fm-hclab-a
+fm-hclab-b
+lab core session fm-hclab-c ready (server pid 24544)
+
+Attempting guarded command: bin/fm-hc-lab.sh provision fm-hclab-c
+mkdir: {run-worktree}/.live-hc/labs/fm-hclab-c: File exists
+fm-hc-lab: could not create session dir for 'fm-hclab-c'; refusing to adopt or overwrite it
+
+Attempting guarded command: bin/fm-hc-lab.sh run fm-hclab-c --json server stop
+fm-hc-lab: run forbids a leading option before the hc subcommand; it could shift a lifecycle operation past the guard
+
+Attempting guarded command: bin/fm-hc-lab.sh run fm-hclab-c server stop
+fm-hc-lab: run forbids server operations; use guarded stop or teardown
+
+Attempting guarded command: bin/fm-hc-lab.sh run fm-hclab-c connect
+fm-hc-lab: run forbids connect; raw protocol writes bypass the CLI guards
+
+Attempting guarded command: bin/fm-hc-lab.sh run fm-hclab-c ls --session default
+fm-hc-lab: run forbids caller-supplied --session/--socket; the helper pins the lab session and socket
+
+Attempting guarded command: bin/fm-hc-lab.sh run fm-hclab-c ls --socket other.sock
+fm-hc-lab: run forbids caller-supplied --session/--socket; the helper pins the lab session and socket
+Actual isolated server after refused escape attempts:
+{"hidden_finished":0,"terminals":[]}
+Simulated external-state change detected by metadata tripwire:
+
+Attempting guarded command: bin/fm-hc-lab.sh teardown fm-hclab-c
+fm-hc-lab: FLEET-STATE TRIPWIRE FAILED: real herdr-core state changed during lab work
+fm-hc-lab: before: 0 files; after: 1 files
+1a2
+> {run-worktree}/.live-hc/operator-state/herdr-core/unexpected 1617463005 1793495025 0
+Restored fixture tripwire permits cleanup
+lab core session fm-hclab-c ready (server pid 25949)
+{"address":"t1","agent":"sleep","cwd":"{run-worktree}","state":"live","turn":0}
+fm-hc-ci-cleanup.sh: stopping job-owned lab core session fm-hclab-c
+fm-hc-ci-cleanup.sh: removed job-owned lab core session fm-hclab-c
+Preserved baseline session fm-hclab-a: {"hidden_finished":0,"terminals":[]}
+Preserved baseline session fm-hclab-b: {"hidden_finished":0,"terminals":[]}
+Job-owned new lab removed; baseline labs preserved; guarded teardown follows

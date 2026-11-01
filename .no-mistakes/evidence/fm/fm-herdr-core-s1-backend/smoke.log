@@ -1,5 +1,5 @@
-lab core session fm-hclab-smoke-2885-21758 ready (server pid 2967)
-ok - hc smoke: create_task started fm-hclab-smoke-2885-21758:t1
+lab core session fm-hclab-smoke-43586-21276 ready (server pid 43664)
+ok - hc smoke: create_task started fm-hclab-smoke-43586-21276:t1
 ok - hc smoke: current_path follows the shell's cwd
 ok - hc smoke: send_text_line ran the command and capture shows its output
 ok - hc smoke: send_text_submit delivers through send --wait (verdict empty)

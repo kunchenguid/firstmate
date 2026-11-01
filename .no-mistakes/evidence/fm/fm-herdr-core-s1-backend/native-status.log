@@ -1,0 +1,24 @@
+lab core session fm-hclab-proof ready (server pid 1666)
+Verified session: fm-hclab-proof
+Dependency check accepts FM_HC_BIN-only installation
+Real Core record before submit: {"address":"t1","state":"live","status":{"app":"lab-reporter","state":"idle"},"labels":{"firstmate.home":"firstmate-a108bf6a","firstmate.task":"fm-status","herdr.space":"fm-firstmate-a108bf6a","herdr.tab":"firstmate-a108bf6a-fm-status"},"foreground":{"argv":["/opt/homebrew/Cellar/python@3.14/3.14.6/Frameworks/Python.framework/Versions/3.14/Resources/Python.app/Contents/MacOS/Python","-u","{run-worktree}/.live-hc/reporter.py","idle"],"cwd":"{run-worktree}/.live-hc","name":"Python","pid":2090}}
+Native submit verdict: empty
+Busy-state immediately after native submit: busy
+Settled native status: {"state":"live","status":{"app":"lab-reporter","state":"done"},"turn":1}
+Captured terminal output:
+01M6A9X7CZMCYXF5S3PAGHHTAD/.live-hc HEAD*?
+  exec /opt/homebrew/bin/python3 -u {run-worktree}/.live-hc/reporter.py idle
+native-submit-proof
+RECEIVED:'native-submit-proof\n'
+error: hc terminal fm-hclab-proof:t1 does not carry this task's labels; refusing to close it
+Mismatched task input/close refused; owned endpoint remains present
+Blocked Core record: {"state":"live","status":{"app":"lab-reporter","state":"blocked"}}
+error: hc send refused fm-hclab-proof:t2 - the terminal is blocked waiting on input (never forced): {"error":{"hint":"typing would answer its dialog; read its screen first (hc read t2), or --force","kind":"blocked","message":"t2 is blocked (waiting)"}}
+Blocked submit verdict: unknown
+Blocked terminal output:
+01M6A9X7CZMCYXF5S3PAGHHTAD/.live-hc HEAD*?
+  exec /opt/homebrew/bin/python3 -u {run-worktree}/.live-hc/reporter.py blocked
+Blocked send delivered zero payload and kept native blocked status
+Real Claude liveness: alive
+{"state":"live","status":{"app":"claude-code","state":"idle"},"foreground":{"argv":["~/.local/bin/claude"],"cwd":"{run-worktree}/.live-hc","name":"2.1.316","pid":10922}}
+All owned terminals closed; lab teardown follows
