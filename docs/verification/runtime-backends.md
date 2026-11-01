@@ -2116,6 +2116,35 @@ poll 8: {"agent_status":"working","session":".../2026-09-21T14-10-08-776Z_01a0c4
 
 The read that supplies the reference is `bin/backends/herdr.sh`'s `fm_backend_herdr_pane_agent_session_ref`, the per-harness rule is `bin/fm-control-lib.sh`'s `fm_control_relaunch_resume_flag`, and the launch argument is composed by `relaunch_resume_args` in `bin/fm-spawn.sh`; `docs/herdr-backend.md` "Agent status authority and relaunch" owns the contract. Nothing here changes `resume` as a control verb, and only a relaunch asks for it.
 
+#### Claude: rebinding to the fresh session
+
+Measured 2026-10-25 on macOS against Herdr 0.9.1 and Claude Code 2.1.310, in an isolated `fm-lab-` session (`bin/fm-herdr-lab.sh`), after the captain's sidebar showed a relaunched Claude worker with the old session's five-hour idle time.
+
+A fresh Claude in an adopted pane hits the same frozen binding: its `startup` report is ignored while a session is bound.
+Unlike Pi's `herdr:pi` reports above, an outside `clear` report with a newer nanosecond `--seq` is applied, and a Claude started with that id with `--session-id` then keeps the binding:
+
+```sh
+# nested shell in the lab pane, then: claude; /exit; claude; /exit
+herdr agent get "$P" --session "$LAB" | jq -c '.result.agent | {agent, session: .agent_session.value}'
+U=$(uuidgen | tr 'A-Z' 'a-z')
+herdr pane report-agent-session "$P" --source herdr:claude --agent claude --seq "$(python3 -c 'import time; print(time.time_ns())')" --agent-session-id "$U" --session-start-source clear --session "$LAB"
+# then: claude --session-id "$U", and re-read
+```
+
+```text
+# first claude
+{"agent":"claude","session":"a7d60a7b-052c-486a-a30a-ee6e8d91595d"}
+# second fresh claude, no rebind
+{"agent":"claude","session":"a7d60a7b-052c-486a-a30a-ee6e8d91595d"}
+# new id 0d3f45b2-9fb1-45a1-925f-3415190c8475
+report rc=0
+# third claude after clear rebind and --session-id
+{"agent":"claude","session":"0d3f45b2-9fb1-45a1-925f-3415190c8475"}
+```
+
+The rebind is `bin/backends/herdr.sh`'s `fm_backend_herdr_pane_rebind_agent_session`, the per-harness rule is `bin/fm-control-lib.sh`'s `fm_control_relaunch_fresh_session_flag`, and the launch argument is composed by `relaunch_fresh_session_args` in `bin/fm-spawn.sh`.
+`tests/fm-control-herdr-smoke.test.sh` refreshes the Herdr half against the real binary: it binds a session, proves a `startup` report leaves it in place, relaunches through `bin/fm-spawn.sh --relaunch --harness claude`, and asserts the binding equals the launched `--session-id`.
+
 ### Away-mode transport
 
 The away daemon is no longer launched on Pi; the away posture there is the record `bin/fm-afk-contract.sh` owns.

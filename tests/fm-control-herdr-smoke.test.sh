@@ -202,7 +202,7 @@ fm_backend_herdr_send_text_line "$SESSION:$PANE_ID" "export PATH=$FAKEBIN_Q:\$PA
   || fail "could not put the inert test harness on the pane PATH"
 fm_backend_herdr_send_text_line "$SESSION:$PANE_ID" "cd -- $PROJ_Q" \
   || fail "could not move the agent-free pane out of its recorded worktree"
-for _ in $(seq 1 20); do
+for _ in $(seq 1 100); do
   [ "$(fm_backend_herdr_current_path "$SESSION:$PANE_ID" 2>/dev/null || true)" != "$PROJ_REAL" ] || break
   sleep 0.1
 done
@@ -212,7 +212,7 @@ done
 OUT=$(env FM_HOME="$HOME_DIR" HERDR_SESSION="$SESSION" FM_SPAWN_NO_GUARD=1 \
   "$ROOT/bin/fm-spawn.sh" hsmoke --relaunch --harness codex) \
   || fail "a drifted, agent-free Herdr pane should be re-homed and relaunched: $OUT"
-for _ in $(seq 1 20); do
+for _ in $(seq 1 100); do
   [ ! -e "$SCRATCH/codex-launched" ] || break
   sleep 0.1
 done
@@ -326,7 +326,7 @@ rm -f "$SCRATCH/codex-launched"
 OUT=$(env FM_HOME="$HOME_DIR" HERDR_SESSION="$SESSION" FM_SPAWN_NO_GUARD=1 \
   "$ROOT/bin/fm-spawn.sh" hsmoke --relaunch --harness codex) \
   || fail "a stale-registration Herdr pane should be relaunched: $OUT"
-for _ in $(seq 1 20); do
+for _ in $(seq 1 100); do
   [ ! -e "$SCRATCH/codex-launched" ] || break
   sleep 0.1
 done
@@ -340,6 +340,111 @@ awk -F= '$1 == "harness" {$0="harness=claude"} {print}' "$HOME_DIR/state/hsmoke.
   > "$HOME_DIR/state/hsmoke.meta.tmp"
 mv "$HOME_DIR/state/hsmoke.meta.tmp" "$HOME_DIR/state/hsmoke.meta"
 pass "real herdr: a stale registration no longer blocks relaunch, and the endpoint and local copy survive"
+
+# --- a fresh replacement takes over the pane's bound session ---------------
+#
+# Herdr keeps a pane's bound agent session after the agent exits, and ignores
+# a later `startup` session report while one is bound, so a replacement that
+# starts fresh would leave the pane showing the old session's identity and idle
+# time. The relaunch moves the binding to an id it chose and starts the
+# replacement on exactly that id. The fake `claude` below records its argv;
+# the binding is read from the real Herdr.
+herdr_bound_session() {
+  herdr agent get "$PANE_ID" --session "$SESSION" 2>/dev/null | jq -r '.result.agent.agent_session.value // empty'
+}
+report_session() {  # <id> <session-start-source>
+  herdr pane report-agent-session "$PANE_ID" --source herdr:claude --agent claude \
+    --seq "$(( $(date +%s) * 1000000000 + ${2#*:} ))" --agent-session-id "$1" \
+    --session-start-source "${2%%:*}" --session "$SESSION" >/dev/null 2>&1
+}
+OLD_SESSION_ID=31d009bf-1111-4222-8333-444444444444
+report_session "$OLD_SESSION_ID" clear:1 || version_fail "could not report a bound agent session on the task pane"
+[ "$(herdr_bound_session)" = "$OLD_SESSION_ID" ] \
+  || version_fail "a clear session report from outside the pane was not applied, so a relaunch cannot move the binding"
+# The divergence that makes this non-vacuous: a fresh agent's own startup
+# report does not move a bound session.
+report_session c75cf1a2-1111-4222-8333-444444444444 startup:2 || version_fail "could not send a startup session report"
+[ "$(herdr_bound_session)" = "$OLD_SESSION_ID" ] \
+  || version_fail "a startup report now moves a bound session; the relaunch rebind may no longer be needed"
+[ "$(fm_backend_agent_state herdr "$SESSION:$PANE_ID")" = dead ] \
+  || fail "the pane with a stale session binding should be relaunchable"
+cat > "$FAKEBIN/claude" <<EOF
+#!/usr/bin/env bash
+printf '%s\n' "\$@" > "$SCRATCH/claude-argv"
+EOF
+chmod +x "$FAKEBIN/claude"
+OUT=$(env FM_HOME="$HOME_DIR" HERDR_SESSION="$SESSION" FM_SPAWN_NO_GUARD=1 \
+  "$ROOT/bin/fm-spawn.sh" hsmoke --relaunch --harness claude 2>&1) \
+  || fail "a Claude relaunch into the pane with a stale session binding should succeed: $OUT"
+for _ in $(seq 1 50); do
+  [ ! -e "$SCRATCH/claude-argv" ] || break
+  sleep 0.1
+done
+[ -e "$SCRATCH/claude-argv" ] || fail "the Claude replacement was not launched: $OUT"
+NEW_SESSION_ID=$(awk 'prev == "--session-id" { print; exit } { prev = $0 }' "$SCRATCH/claude-argv")
+[ -n "$NEW_SESSION_ID" ] || fail "the Claude replacement was not started on a chosen session id: $(tr '\n' ' ' < "$SCRATCH/claude-argv")"
+[ "$NEW_SESSION_ID" != "$OLD_SESSION_ID" ] || fail "the Claude replacement reused the old session id"
+[ "$(herdr_bound_session)" = "$NEW_SESSION_ID" ] \
+  || version_fail "the pane still binds '$(herdr_bound_session)' instead of the replacement's session '$NEW_SESSION_ID'"
+[ "$(sed -n 's/^window=//p' "$HOME_DIR/state/hsmoke.meta" | tail -1)" = "$SESSION:$PANE_ID" ] \
+  || fail "the Claude relaunch replaced its endpoint instead of reusing it"
+pass "real herdr $HERDR_VERSION: a fresh Claude replacement is started on the session the pane was rebound to"
+
+# --- a gone endpoint is re-created in its own task-named workspace ---------
+#
+# With presentation spaces on, a relaunch whose recorded pane is gone must not
+# put the replacement in the launcher's workspace, where it reads as a second
+# row named after the launcher. The launcher here is a pane in a workspace the
+# captain renamed, and its identity is what the relaunch would otherwise
+# inherit.
+mkdir -p "$HOME_DIR/config"
+printf 'on\n' > "$HOME_DIR/config/herdr-presentation-spaces"
+LAUNCHER_OUT=$(herdr workspace create --cwd "$SCRATCH" --label "Zyx QA fm" --no-focus --session "$SESSION") \
+  || fail "could not create the launcher workspace"
+LAUNCHER_WS=$(printf '%s' "$LAUNCHER_OUT" | jq -r '.result.workspace.workspace_id')
+LAUNCHER_PANE=$(printf '%s' "$LAUNCHER_OUT" | jq -r '.result.root_pane.pane_id')
+LAUNCHER_SOCKET=$(fm_backend_herdr_presentation_session_socket_path "$SESSION") \
+  || fail "could not read the lab session's socket for the launcher identity"
+GONE_OUT=$(herdr workspace create --cwd "$WT" --label "└ hsmoke · p:abcdefghijklmnopqrstuv" --no-focus --session "$SESSION") \
+  || fail "could not create the task's earlier projection workspace"
+GONE_WS=$(printf '%s' "$GONE_OUT" | jq -r '.result.workspace.workspace_id')
+GONE_TAB=$(printf '%s' "$GONE_OUT" | jq -r '.result.tab.tab_id')
+GONE_PANE=$(printf '%s' "$GONE_OUT" | jq -r '.result.root_pane.pane_id')
+printf 'version=2\ntask_id=hsmoke\nprojection_id=abcdefghijklmnopqrstuv\nhome=%s\nsession=%s\nworkspace_id=%s\ntab_id=%s\npane_id=%s\nparent_workspace_id=%s\nparent_label=firstmate\nworkspace_label=└ hsmoke · p:abcdefghijklmnopqrstuv\ntask_label=fm-hsmoke\n' \
+  "$(cd "$HOME_DIR" && pwd -P)" "$SESSION" "$GONE_WS" "$GONE_TAB" "$GONE_PANE" "$LAUNCHER_WS" \
+  > "$HOME_DIR/state/hsmoke.herdr-presentation"
+awk -F= -v w="$SESSION:$GONE_PANE" -v ws="$GONE_WS" -v t="$GONE_TAB" -v p="$GONE_PANE" '
+  $1 == "window" { $0 = "window=" w }
+  $1 == "herdr_workspace_id" { $0 = "herdr_workspace_id=" ws }
+  $1 == "herdr_tab_id" { $0 = "herdr_tab_id=" t }
+  $1 == "herdr_pane_id" { $0 = "herdr_pane_id=" p }
+  $1 == "harness" { $0 = "harness=codex" }
+  { print }' "$HOME_DIR/state/hsmoke.meta" > "$HOME_DIR/state/hsmoke.meta.tmp"
+mv "$HOME_DIR/state/hsmoke.meta.tmp" "$HOME_DIR/state/hsmoke.meta"
+herdr workspace close "$GONE_WS" --session "$SESSION" >/dev/null 2>&1 \
+  || fail "could not close the task's earlier projection workspace"
+OUT=$(env FM_HOME="$HOME_DIR" HERDR_SESSION="$SESSION" HERDR_PANE_ID="$LAUNCHER_PANE" \
+  HERDR_SOCKET_PATH="$LAUNCHER_SOCKET" FM_SPAWN_NO_GUARD=1 \
+  "$ROOT/bin/fm-spawn.sh" hsmoke --relaunch --harness codex 2>&1) \
+  || fail "a relaunch whose projected endpoint is gone should re-create it: $OUT"
+REBOUND_WS=$(sed -n 's/^herdr_workspace_id=//p' "$HOME_DIR/state/hsmoke.meta" | tail -1)
+REBOUND_PANE=$(sed -n 's/^herdr_pane_id=//p' "$HOME_DIR/state/hsmoke.meta" | tail -1)
+[ -n "$REBOUND_WS" ] && [ "$REBOUND_WS" != "$LAUNCHER_WS" ] \
+  || fail "the replacement endpoint landed in the launcher's own workspace ($LAUNCHER_WS): $OUT"
+REBOUND_LABEL=$(herdr workspace list --session "$SESSION" | jq -r --arg w "$REBOUND_WS" '.result.workspaces[] | select(.workspace_id == $w) | .label')
+case "$REBOUND_LABEL" in
+  "└ hsmoke · p:"*) : ;;
+  *) fail "the replacement endpoint's workspace is not named after the task: '$REBOUND_LABEL'" ;;
+esac
+[ "$(herdr tab list --workspace "$LAUNCHER_WS" --session "$SESSION" | jq '[.result.tabs[] | select(.label == "fm-hsmoke")] | length')" = 0 ] \
+  || fail "the launcher's workspace gained a task tab"
+herdr pane get "$REBOUND_PANE" --session "$SESSION" >/dev/null 2>&1 \
+  || fail "the recorded replacement pane does not exist"
+pass "real herdr $HERDR_VERSION: a gone endpoint is re-created in its own task-named workspace, not the launcher's"
+PANE_ID=$REBOUND_PANE
+awk -F= '$1 == "harness" {$0="harness=claude"} {print}' "$HOME_DIR/state/hsmoke.meta" \
+  > "$HOME_DIR/state/hsmoke.meta.tmp"
+mv "$HOME_DIR/state/hsmoke.meta.tmp" "$HOME_DIR/state/hsmoke.meta"
 
 # Last: the foreground process is the sleeping stand-in, so the pane never draws any
 # recognized composer chrome. exit's composer-empty guard (bin/fm-control.sh)

@@ -1269,6 +1269,35 @@ test_fm_send_still_marks_the_same_secondmate_task() {
 # handed to it: resuming another adapter's reference would inject that agent's
 # conversation into this launch. Every other pair must print nothing so the
 # relaunch stays a fresh session exactly as it does today.
+# Only a harness that can be started on a session id the caller chose has a
+# fresh-session form, and it travels with the agent label its Herdr
+# integration reports, so the pane's binding can be moved to that id before
+# launch. Every other harness must print nothing and relaunch exactly as today.
+test_relaunch_fresh_session_flag_is_per_adapter() {
+  local got harness want
+  local cases=$'claude|--session-id\tclaude
+codex|
+pi|
+pi-signed|
+opencode|
+omp|
+grok|
+kimi|
+cursor|
+gemini|
+devin|'
+  while IFS='|' read -r harness want; do
+    [ -n "$harness" ] || continue
+    got=$(fm_control_relaunch_fresh_session_flag "$harness") \
+      || fail "the fresh-session lookup must never fail; it did for '$harness'"
+    [ "$got" = "$want" ] \
+      || fail "$harness should print '$want', got '$got'"
+  done <<EOF
+$cases
+EOF
+  pass "fm-control-lib: only a harness that takes a chosen session id has a fresh-session relaunch form"
+}
+
 test_relaunch_resume_flag_is_per_adapter_and_reference_owner() {
   local got harness label want
   # (harness | registered agent label | expected flag) lines, written out
@@ -1314,6 +1343,7 @@ test_opencode_interrupts_twice_and_others_once
 test_unverified_harness_is_refused
 test_harness_family_resolution
 test_relaunch_resume_flag_is_per_adapter_and_reference_owner
+test_relaunch_fresh_session_flag_is_per_adapter
 test_prefixed_recorded_harness_reaches_each_control_verb
 test_backend_key_capability_matrix
 test_harness_kind_capability

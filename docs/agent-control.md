@@ -148,15 +148,19 @@ A bare-shell tab left behind by an earlier reclaim that refused before the recor
 The re-created tab is opened in the herdr session the record names, never in whichever session the recovering seat happens to sit in - relocating a task onto another herdr server would be an identity change published as a self-consistent but wrong record.
 A seat that *claims* a herdr launcher pane belonging to a different session is refused rather than allowed to place the endpoint somewhere else, so reclaim such a task from a seat in the recorded session.
 A seat with no herdr launcher pane at all - a plain ssh or cron shell, which is the ordinary way an operator reclaims - is not refused: placement falls back to the recorded session's labeled container, so the tab still lands in the session the record names.
-The reclaim pins the recorded **session** but not the **workspace**: the container follows the reclaiming seat, so a reclaim run from a seat inside the recorded session places the new tab in *that seat's* workspace rather than the recorded `herdr_workspace_id`, even when the recorded workspace still exists and only the pane was destroyed.
-The record is republished consistently and no work is lost, but the task's `herdr_workspace_id` moves with it.
+With presentation spaces enabled, the reclaim also keeps the task in a workspace of its own, so it never shows up as a second row under the reclaiming seat's name.
+When the task's version 2 journal still binds a surviving projection workspace, the new tab is created in that recorded workspace and the journal advances to the new tab and pane.
+When that projection workspace is gone too, the stale journal is retired and the reclaim creates a fresh task-named projection, exactly as a fresh spawn would.
+A task with no journal also gets a fresh projection.
+Any other journal shape, such as a version 1 attempt whose workspace still exists, falls back to the flat container, as does a home with presentation spaces disabled or a session where projection is unavailable ([`herdr-backend.md`](herdr-backend.md) "Restart recovery").
+Only that flat fallback follows the reclaiming seat: run from a seat inside the recorded session, it places the new tab in *that seat's* workspace, and the task's `herdr_workspace_id` moves with it.
+The record is republished consistently either way, and no work is lost.
 The pane id necessarily changes (the pane did not survive), and the record follows it.
-A Herdr reclaim deliberately uses the flat container shape rather than presentation projection: projection is a presentation-only layout that is never endpoint or ownership authority, and flat is already the documented fallback for every recovery it cannot bind exactly ([`docs/herdr-backend.md`](herdr-backend.md)).
 
-**Known Herdr limitation - a refusal before the record is republished leaves a stray husk pane** (follow-up bead `fm-herdr-rebind-leak-20260913`).
-The rebind registers no abort cleanup, so a refusal in the window between the new tab being created and the record being republished leaves that pane behind while the record still names the old, gone one.
+**Known Herdr limitation - a flat-fallback refusal before the record is republished leaves a stray husk pane** (follow-up bead `fm-herdr-rebind-leak-20260913`).
+A projected reclaim registers the new pane for abort cleanup, but the flat fallback does not, so a refusal in the window between the new tab being created and the record being republished leaves that pane behind while the record still names the old, gone one.
 The stray pane holds a bare shell - the harness is not delivered until after publication - so the next reclaim cleans up after it: the re-created tab carries the same `fm-<id>` label, `tab create` finds it, classifies it a husk, and closes and replaces it.
-That self-heals only when the retry resolves the *same* workspace, which the placement rule above does not guarantee.
+That self-heals only when the retry resolves the *same* workspace, which the flat placement rule above does not guarantee.
 The worktree and the task's records are unaffected either way.
 
 ### Failure and rollback

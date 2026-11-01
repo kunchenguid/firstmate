@@ -331,6 +331,24 @@ fm_control_relaunch_resume_flag() {  # <harness> <registered-agent>
   return 0
 }
 
+# The flag that starts a harness on a NEW session whose id the caller chose,
+# then the agent label that harness's Herdr integration reports, tab-separated;
+# nothing for a harness without one.
+#
+# The other half of the failure above: a harness that relaunches fresh into a
+# pane whose Herdr registration outlived its agent keeps that pane bound to the
+# OLD session, so Herdr shows the old session's identity and idle time for the
+# new agent. Choosing the new id up front lets the caller move the binding to
+# it before launch (bin/backends/herdr.sh's
+# fm_backend_herdr_pane_rebind_agent_session), and the replacement then reports
+# exactly that id (measured 2026-10-25: herdr 0.9.1, Claude Code 2.1.310).
+fm_control_relaunch_fresh_session_flag() {  # <harness>
+  case "${1-}" in
+    claude) printf -- '--session-id\tclaude' ;;
+  esac
+  return 0
+}
+
 # Which named keys a backend adapter can deliver. Every session provider
 # normalizes Enter, Ctrl+C, and the Ctrl+U composer clear; Orca's terminal API
 # exposes only an interrupt and an Enter, so it can deliver neither Escape nor
