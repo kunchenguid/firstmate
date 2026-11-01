@@ -1463,6 +1463,102 @@ test_required_captain_hold_tests_fail_without_tasks_axi() {
   pass "all four required captain-hold tests fail when tasks-axi is unavailable"
 }
 
+make_superseded_pause_case() {  # <name> <status-line>
+  local name=$1 status_line=$2 dir state window key sig
+  dir=$(make_case "$name"); state="$dir/state"; window="test:fm-superseded"
+  printf 'idle at declared wait\n' > "$dir/pane.txt"
+  printf 'window=%s\nkind=ship\nharness=grok\nbackend=tmux\n' "$window" > "$state/paused.meta"
+  printf '%s\n' "$status_line" > "$state/paused.status"
+  sig=$(seen_sig "$state/paused.status"); printf '%s' "$sig" > "$state/.seen-paused_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  printf '%s' "$(hash_text 'idle at declared wait')" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  printf '%s\n' "$dir"
+}
+
+superseded_pause_round() {  # <dir> <crew-state-line> <exit|absorb> [busy]
+  local dir=$1 crew_state=$2 mode=$3 busy=${4:-no} state="$1/state" out="$1/watch.out" pid
+  local command=zsh busy_max=999999
+  case "$busy" in
+    yes|recent) command=grok; [ "$busy" = yes ] && busy_max=1; printf 'working\nCtrl+c:cancel\n' > "$dir/pane.txt" ;;
+  esac
+  PATH="$dir/fakebin:$PATH" FM_FAKE_TMUX_WINDOW=test:fm-superseded \
+    FM_FAKE_TMUX_CAPTURE="$dir/pane.txt" FM_FAKE_TMUX_CURRENT_COMMAND="$command" \
+    FM_FAKE_CREW_STATE="$crew_state" FM_WATCH_HANDLING_SUCCESSOR=1 \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$dir/fakebin/fm-crew-state.sh" \
+    FM_BUSY_TURN_MAX_SECS="$busy_max" FM_PAUSE_RESURFACE_SECS=240 \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    "$WATCH" >> "$out" 2>&1 &
+  pid=$!
+  if [ "$mode" = exit ]; then
+    wait_for_exit "$pid" 100 || { reap "$pid"; return 1; }
+  else
+    wait_poll_cycle "$state" "$pid" 100 || { reap "$pid"; return 1; }
+    reap "$pid"
+  fi
+}
+
+test_declared_wait_surfaces_superseding_state() {
+  local dir state window
+  dir=$(make_superseded_pause_case gate-unreported 'paused: waiting for validation run R')
+  state="$dir/state"; window=test:fm-superseded
+  superseded_pause_round "$dir" \
+    'state: parked · source: run-step · ask-user: authority decision · run: R' exit \
+    || fail "idle paused run parked at an unreported human gate did not surface"
+  grep -F "stale: $window (paused wait superseded: run R is parked at a human-owed gate with no open decision)" \
+    "$dir/watch.out" >/dev/null || fail "gate wake did not identify the run and missing decision"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the idle gate wake"
+  superseded_pause_round "$dir" \
+    'state: parked · source: run-step · ask-user: authority decision · run: R' absorb \
+    || fail "the same declaration and run re-alarmed inside the cadence"
+  [ ! -s "$state/.wake-queue" ] || fail "the same declaration and run produced a duplicate wake"
+
+  dir=$(make_superseded_pause_case gate-reported 'paused: waiting for validation run R')
+  state="$dir/state"
+  printf 'needs-decision [key=nm-R-review]: decide the ask-user finding\npaused: waiting for validation run R\n' > "$state/paused.status"
+  sig=$(seen_sig "$state/paused.status"); printf '%s' "$sig" > "$state/.seen-paused_status"
+  superseded_pause_round "$dir" \
+    'state: parked · source: run-step · ask-user: authority decision · run: R' absorb \
+    || fail "an already-open decision did not preserve the declared-wait cadence"
+  [ ! -s "$state/.wake-queue" ] || fail "gate with an open needs-decision generated a stale wake"
+
+  dir=$(make_superseded_pause_case gate-working 'paused: waiting for validation run R')
+  state="$dir/state"
+  superseded_pause_round "$dir" 'state: working · source: run-step · validating (running) · run: R' absorb \
+    || fail "a working validation run did not preserve the declared-wait cadence"
+  [ ! -s "$state/.wake-queue" ] || fail "working run generated a stale wake"
+
+  dir=$(make_superseded_pause_case gate-terminal 'paused: waiting for validation run R')
+  state="$dir/state"
+  superseded_pause_round "$dir" 'state: done · source: run-step · run: R' exit \
+    || fail "terminal validation run did not supersede the declared wait"
+  grep -F 'paused wait superseded: current run R is terminal (done)' "$dir/watch.out" >/dev/null \
+    || fail "terminal wake did not identify the superseded wait"
+
+  dir=$(make_superseded_pause_case gate-busy-recent 'paused: waiting for validation run R')
+  superseded_pause_round "$dir" \
+    'state: parked · source: run-step · ask-user: authority decision · run: R' exit recent \
+    || fail "recent busy paused run parked at an unreported human gate did not surface"
+  grep -F 'run R is parked at a human-owed gate' "$dir/watch.out" >/dev/null \
+    || fail "recent busy gate wake did not identify the run"
+
+  dir=$(make_superseded_pause_case gate-busy-old 'paused: waiting for validation run R')
+  state="$dir/state"
+  set_mtime "$(( $(date +%s) - 500 ))" "$state/paused.meta"
+  superseded_pause_round "$dir" \
+    'state: parked · source: run-step · ask-user: authority decision · run: R' exit yes \
+    || fail "old busy paused run parked at an unreported human gate did not surface"
+  grep -F 'run R is parked at a human-owed gate' "$dir/watch.out" >/dev/null \
+    || fail "old busy gate wake did not identify the run"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the busy gate wake"
+  superseded_pause_round "$dir" \
+    'state: parked · source: run-step · ask-user: authority decision · run: R' absorb yes \
+    || fail "the repeated busy poll failed"
+  [ ! -s "$state/.wake-queue" ] || fail "the busy gate repeated inside the cadence"
+
+  pass "declared waits surface unreported gates and terminal runs once, while working runs and answered gates keep the pause cadence on idle and busy paths"
+}
+
 if [ -n "${FM_TEST_ONLY:-}" ]; then
   "$FM_TEST_ONLY"
   exit 0
@@ -1472,6 +1568,7 @@ fm_test_run \
   test_required_captain_hold_tests_fail_without_tasks_axi \
   test_nonterminal_stale_not_working_surfaced \
   test_nonterminal_stale_paused_absorbed_then_resurfaced \
+  test_declared_wait_surfaces_superseding_state \
   test_exited_declared_pause_is_bounded_but_live_gate_surfaces \
   test_own_work_wait_keeps_first_alert_then_long_cadence \
   test_absorbed_replacement_wait_does_not_inherit_the_old_throttle \
