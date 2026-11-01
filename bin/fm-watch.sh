@@ -4489,6 +4489,22 @@ EOF
     fi
   done < <(recorded_windows)
 
+  # Collect a completed hygiene scan before launching another one. The report
+  # child keeps endpoint/backlog reads out of the polling path.
+  hygiene_result="$STATE/.record-hygiene-result"
+  hygiene_running="$STATE/.record-hygiene-running"
+  if [ -f "$hygiene_result" ]; then
+    hygiene_report=$(cat "$hygiene_result")
+    if [ -n "$hygiene_report" ] && ! cmp -s <(printf '%s\n' "$hygiene_report") "$STATE/.record-hygiene-last"; then
+      hygiene_reason="check: record hygiene: $hygiene_report"
+      fm_wake_append check record-hygiene "$hygiene_reason" || exit 1
+      printf '%s\n' "$hygiene_report" > "$STATE/.record-hygiene-last"
+      rm -f "$hygiene_result" "$hygiene_running"
+      wake "$hygiene_reason"
+    fi
+    rm -f "$hygiene_result" "$hygiene_running"
+  fi
+
   # Heartbeat: the watcher runs a cheap fleet-scan at a regular cadence no matter
   # what. Time-based via .last-heartbeat mtime; interval doubles per consecutive
   # no-change heartbeat (idle fleet) up to HEARTBEAT_MAX, and resets on any
@@ -4498,10 +4514,28 @@ EOF
   hb=$(( HEARTBEAT * (1 << streak) ))
   [ "$hb" -gt "$HEARTBEAT_MAX" ] && hb=$HEARTBEAT_MAX
   if [ "$(age_of "$STATE/.last-heartbeat")" -ge "$hb" ]; then
-    hygiene_report=$(FM_BOOTSTRAP_DETECT_ONLY=1 record_hygiene_report)
-    if [ -n "$hygiene_report" ] && ! cmp -s <(printf '%s\n' "$hygiene_report") "$STATE/.record-hygiene-last"; then
-      printf '%s\n' "$hygiene_report" > "$STATE/.record-hygiene-last"
-      wake "record hygiene: $hygiene_report"
+    if [ ! -e "$hygiene_running" ] && [ ! -e "$hygiene_result" ]; then
+      : > "$hygiene_running"
+      (
+        report_timeout=${FM_RECORD_HYGIENE_TIMEOUT:-60}
+        case "$report_timeout" in ''|*[!0-9]*|0) report_timeout=60 ;; esac
+        FM_BOOTSTRAP_DETECT_ONLY=1 record_hygiene_report > "$hygiene_result.tmp" &
+        report_pid=$!
+        (
+          sleep "$report_timeout"
+          : > "$hygiene_result.timeout"
+          kill "$report_pid" 2>/dev/null || true
+        ) &
+        watchdog_pid=$!
+        wait "$report_pid" || true
+        kill "$watchdog_pid" 2>/dev/null || true
+        wait "$watchdog_pid" 2>/dev/null || true
+        if [ -e "$hygiene_result.timeout" ]; then
+          printf 'RECORD_HYGIENE: report timed out after %ss\n' "$report_timeout" > "$hygiene_result.tmp"
+          rm -f "$hygiene_result.timeout"
+        fi
+        mv -f "$hygiene_result.tmp" "$hygiene_result"
+      ) >/dev/null 2>&1 &
     fi
     # Triage: in always-on mode a heartbeat is benign unless the cheap fleet-scan
     # turns up a captain-relevant status the per-wake path missed. Absorb the
