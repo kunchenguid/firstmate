@@ -65,7 +65,13 @@ printf '%s\n' "\$n" > "$world/gh.count"
 [ ! -f "$world/gh.\$n.sh" ] || sh "$world/gh.\$n.sh"
 f="$world/gh.\$n.json"
 [ -f "\$f" ] || f=\$(ls "$world"/gh.*.json | sort -t. -k2 -n | tail -1)
-cat "\$f"
+case "\$*" in
+  *--paginate*)
+    pages="$world/gh.\$n.pages.json"
+    if [ -f "\$pages" ]; then cat "\$pages"; else jq -s . "\$f"; fi
+    ;;
+  *) cat "\$f" ;;
+esac
 SH
   cat > "$fakebin/glab" <<SH
 #!/usr/bin/env bash
@@ -143,7 +149,7 @@ gh_fixture() {  # <out> [key=value...]
   shift
   local state=OPEN draft=false head mergeable=MERGEABLE mss=BLOCKED decision=REVIEW_REQUIRED
   local rollup='"SUCCESS"' completed=$OLD_ISO committed=$OLD_ISO threads='[]' total=0
-  local review_oid bot_at=$OLD_ISO comments='[]' extra_reviews='' pushed=''
+  local review_oid bot_at=$OLD_ISO comments='[]' extra_reviews='' pushed='' comment_count
   head=$(cat "$(dirname "$out")/head")
   review_oid=$head
   for kv in "$@"; do
@@ -156,6 +162,7 @@ gh_fixture() {  # <out> [key=value...]
       pushed=*) pushed=${kv#*=} ;;
     esac
   done
+  comment_count=$(printf '%s' "$comments" | jq 'length')
   local suites="[{\"createdAt\":\"${pushed:-$committed}\"}]"
   [ "$pushed" != none ] || suites='[]'
   local rollup_obj=null
@@ -168,7 +175,7 @@ gh_fixture() {  # <out> [key=value...]
   "reviewThreads":{"totalCount":$total,"nodes":$threads},
   "reviews":{"nodes":[{"author":{"login":"coderabbitai","__typename":"Bot"},"state":"COMMENTED","body":"lgtm",
     "submittedAt":"$bot_at","updatedAt":"$bot_at","commit":{"oid":"$review_oid"}}$extra_reviews]},
-  "comments":{"nodes":$comments}
+  "comments":{"totalCount":$comment_count,"nodes":$comments,"pageInfo":{"hasNextPage":false,"endCursor":null}}
 }}}}
 JSON
 }
@@ -321,7 +328,7 @@ test_gitlab_gate_clean_and_unclean_conditions() {
 }
 
 test_park_stops_agent_records_lane_and_leases_slot() {
-  local w head out rc=0
+  local w head out mode rc=0
   w=$(make_world park-ok "$GH_URL")
   head=$(cat "$w/head")
   gh_fixture "$w/gh.1.json"
@@ -332,8 +339,10 @@ test_park_stops_agent_records_lane_and_leases_slot() {
   grep -qx "lease 3 --lease-holder lane --root $w/root" "$w/treehouse.log" || fail "park: slot was not durably leased: $(cat "$w/treehouse.log" 2>/dev/null)"
   grep -qx "head=$head" "$w/state/lane.review-park" || fail "park: record lacks the parked head"
   grep -qx "slot_leased=yes" "$w/state/lane.review-park" || fail "park: record does not note the lease"
-  [ "$(stat -f %Lp "$w/state/lane.review-park" 2>/dev/null || stat -c %a "$w/state/lane.review-park")" = 600 ] \
-    || fail "park: record is not private"
+  mode=$(stat -c %a "$w/state/lane.review-park" 2>/dev/null) \
+    || mode=$(stat -f %Lp "$w/state/lane.review-park" 2>/dev/null) \
+    || fail "park: could not read record mode"
+  [ "$mode" = 600 ] || fail "park: record is not private (mode=$mode)"
   tail -1 "$w/state/lane.status" | grep -q "^paused \[at=[0-9]*\]: parked on review: PR $GH_URL clean at ${head:0:12}" \
     || fail "park: no declared wait in the status log: $(tail -1 "$w/state/lane.status")"
   [ "$(cat "$w/gh.count")" = 2 ] || fail "park: expected a fresh gate read and a re-check before the stop, got $(cat "$w/gh.count") reads"
@@ -624,11 +633,6 @@ test_each_relaunch_trigger_relaunches_a_fresh_worker() {
   gh_fixture "$w/gh.1.json" comments="[{\"author\":{\"login\":\"carol\",\"__typename\":\"User\"},\"createdAt\":\"$later\",\"updatedAt\":\"$later\"}]"
   expect_relaunch "$w" comment "new comments from carol"
 
-  # An older comment edited after the park is new feedback too.
-  w=$(make_world trig-edit "$GH_URL"); gh_fixture "$w/gh.1.json"; park_world "$w"
-  gh_fixture "$w/gh.1.json" comments="[{\"author\":{\"login\":\"coderabbitai\",\"__typename\":\"Bot\"},\"createdAt\":\"$OLD_ISO\",\"updatedAt\":\"$later\"}]"
-  expect_relaunch "$w" edited-comment "new comments from coderabbitai"
-
   # An inline reply in an already resolved thread leaves no unresolved thread
   # and no new review submission; the reply itself is the new feedback.
   w=$(make_world trig-thread-reply "$GH_URL"); gh_fixture "$w/gh.1.json"; park_world "$w"
@@ -644,6 +648,26 @@ test_each_relaunch_trigger_relaunches_a_fresh_worker() {
   gl_fixture "$w" notes="[{\"notes\":[{\"author\":{\"username\":\"dave\"},\"system\":false,\"created_at\":\"$later\",\"resolvable\":false}]}]"
   expect_relaunch "$w" gitlab-note "new comments from dave"
   pass "head change, failing checks, changes requested, an unresolved thread, a conflict, and new or edited GitHub or GitLab comments, including an inline reply in a resolved thread, each relaunch a fresh worker with the trigger in its instructions"
+}
+
+test_edited_comment_beyond_first_hundred_triggers_relaunch() {
+  local w later
+  later=$(date -u -v+1H +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -d '+1 hour' +%Y-%m-%dT%H:%M:%SZ)
+  w=$(make_world trig-edit-over-100 "$GH_URL")
+  gh_fixture "$w/gh.1.json"; park_world "$w"
+  # The old one-page response excludes this older edited comment.
+  gh_fixture "$w/gh.1.json" comments='[{"author":{"login":"recent","__typename":"User"},"createdAt":"2026-02-01T00:00:00Z","updatedAt":"2026-02-01T00:00:00Z"}]'
+  gh_fixture "$w/comment-page1.json" comments="$(jq -cn --arg old "$OLD_ISO" --arg later "$later" '[{author:{login:"greptile-apps",__typename:"Bot"},createdAt:$old,updatedAt:$later}] + [range(99) | {author:{login:"older",__typename:"User"},createdAt:$old,updatedAt:$old}]')"
+  gh_fixture "$w/comment-page2.json" comments='[{"author":{"login":"newest","__typename":"User"},"createdAt":"2026-03-01T00:00:00Z","updatedAt":"2026-03-01T00:00:00Z"}]'
+  jq -s '
+    .[0] as $one | .[1] as $two
+    | [($one | .data.repository.pullRequest.comments.totalCount=101
+              | .data.repository.pullRequest.comments.pageInfo={hasNextPage:true,endCursor:"page-1"}),
+       ($two | .data.repository.pullRequest.comments.totalCount=101
+              | .data.repository.pullRequest.comments.pageInfo={hasNextPage:false,endCursor:null})]
+  ' "$w/comment-page1.json" "$w/comment-page2.json" > "$w/gh.1.pages.json"
+  expect_relaunch "$w" edited-comment-over-100 "new comments from greptile-apps"
+  pass "an edited comment older than the latest 100 is detected and relaunches the parked lane"
 }
 
 test_behind_base_does_not_relaunch() {
@@ -997,6 +1021,7 @@ fm_test_run \
   test_park_preflight_refusals_leave_the_agent_running \
   test_repark_reuses_its_own_lease_and_refuses_a_foreign_one \
   test_each_relaunch_trigger_relaunches_a_fresh_worker \
+  test_edited_comment_beyond_first_hundred_triggers_relaunch \
   test_behind_base_does_not_relaunch \
   test_slow_relaunch_is_never_cut_short_by_the_tick \
   test_tick_resumes_where_the_last_one_ran_out_of_time \

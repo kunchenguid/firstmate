@@ -286,12 +286,12 @@ review_bots_json() {
 # snapshot <pr-url> prints one normalized JSON object, the only input the gate
 # and trigger programs read, so both providers share one decision procedure.
 
-GITHUB_QUERY='query($owner:String!,$repo:String!,$number:Int!){repository(owner:$owner,name:$repo){pullRequest(number:$number){
+GITHUB_QUERY='query($owner:String!,$repo:String!,$number:Int!,$endCursor:String){repository(owner:$owner,name:$repo){pullRequest(number:$number){
   state isDraft headRefOid baseRefName mergeable mergeStateStatus reviewDecision
   commits(last:1){nodes{commit{oid committedDate checkSuites(first:100){nodes{createdAt}} statusCheckRollup{state contexts(first:100){nodes{__typename ... on CheckRun{name completedAt} ... on StatusContext{context createdAt}}}}}}}
   reviewThreads(first:100){totalCount nodes{isResolved comments(last:100){nodes{author{login __typename} createdAt updatedAt}}}}
   reviews(last:100){nodes{author{login __typename} state body submittedAt updatedAt commit{oid}}}
-  comments(last:100){nodes{author{login __typename} createdAt updatedAt}}
+  comments(first:100,after:$endCursor){totalCount nodes{author{login __typename} createdAt updatedAt} pageInfo{hasNextPage endCursor}}
 }}}'
 
 GITHUB_NORMALIZE='
@@ -319,6 +319,8 @@ GITHUB_NORMALIZE='
       changes_requested: ($p.reviewDecision == "CHANGES_REQUESTED"),
       threads_unresolved: ([$p.reviewThreads.nodes[] | select(.isResolved | not)] | length),
       threads_complete: ($p.reviewThreads.totalCount <= ($p.reviewThreads.nodes | length)),
+      comments_complete: (($p.comments.totalCount // -1) <= ($p.comments.nodes | length)
+        and $p.comments.pageInfo.hasNextPage == false),
       activity: (
         [$p.comments.nodes[] | {author: (.author.login // "ghost"), bot: (.author.__typename == "Bot"),
           at: .createdAt, touched: (.updatedAt // .createdAt), on_head: false, approval_only: false}]
@@ -357,6 +359,7 @@ GITLAB_NORMALIZE='
       changes_requested: ($s == "requested_changes"),
       threads_unresolved: ([$d[].notes[]? | select(.resolvable == true and .resolved != true)] | length),
       threads_complete: true,
+      comments_complete: true,
       activity: [$d[] | .notes[]? | select(.system != true)
         | {author: (.author.username // "ghost"), bot: false, at: .created_at,
            touched: (.updated_at // .created_at), on_head: false, approval_only: false}]
@@ -392,8 +395,17 @@ snapshot() {  # <pr-url> [--required]
       command -v gh >/dev/null 2>&1 || return 1
       fm_pr_github_host_export "$FM_PR_HOST"
       secs=$(step_secs "$READ_SECS") || return 1
-      raw=$(fm_run_timed "$secs" gh api graphql -f query="$GITHUB_QUERY" \
+      raw=$(fm_run_timed "$secs" gh api graphql --paginate --slurp -f query="$GITHUB_QUERY" \
         -F "owner=${FM_PR_PATH%%/*}" -F "repo=${FM_PR_PATH#*/}" -F "number=$FM_PR_NUMBER" 2>/dev/null) || return 1
+      raw=$(printf '%s' "$raw" | jq -ce '
+        select(type == "array" and length > 0)
+        | select(all(.[]; .errors == null and .data.repository.pullRequest != null))
+        | map(.data.repository.pullRequest) as $pages
+        | select(all($pages[]; .headRefOid == $pages[0].headRefOid))
+        | {data:{repository:{pullRequest:($pages[0] + {comments:($pages[0].comments + {
+            totalCount:$pages[-1].comments.totalCount,
+            pageInfo:$pages[-1].comments.pageInfo,
+            nodes:[$pages[] | .comments.nodes[]?]})})}}}' 2>/dev/null) || return 1
       snap=$(printf '%s' "$raw" | jq -c "$GITHUB_NORMALIZE" 2>/dev/null) || return 1
       [ "${2-}" = --required ] || { printf '%s\n' "$snap"; return 0; }
       missing=$(github_required_unreported "$raw") || missing=null
@@ -446,6 +458,7 @@ GATE_PROGRAM="$JQ_TIME"'
       (if $s.changes_requested then "changes are requested" else empty end),
       (if $s.threads_unresolved > 0 then "\($s.threads_unresolved) review thread(s) unresolved" else empty end),
       (if ($s.threads_complete | not) then "review threads could not all be read" else empty end),
+      (if ($s.comments_complete | not) then "review comments could not all be read" else empty end),
       (if $settled or $s.ci != "success" then empty
        elif ($seen | length) > 0 then "automated reviewers (\($seen | join(", "))) have not submitted a review of this head; quiet window \($left)s left"
        else "no automated reviewer has submitted a review of this head; quiet window \($left)s left" end)
@@ -463,6 +476,7 @@ TRIGGER_PROGRAM="$JQ_TIME"'
         (if $s.conflict == "conflict" then "the PR has merge conflicts" else empty end),
         (if $s.threads_unresolved > 0 then "\($s.threads_unresolved) review thread(s) unresolved" else empty end),
         (if ($s.threads_complete | not) then "review threads could not all be read" else empty end),
+        (if ($s.comments_complete | not) then "review comments could not all be read" else empty end),
         ([$s.activity[] | select(([.at, .touched] | map(ts // 0) | max) > $parked and (.approval_only | not)) | .author] | unique
          | if length > 0 then "new comments from \(join(", "))" else empty end)
       ]
