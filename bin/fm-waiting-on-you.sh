@@ -5,10 +5,12 @@
 # A captain call that lives only in chat can be asked again and again while
 # nothing records it as waiting on him, and a reply claiming nothing waits on
 # him cannot be checked. This line is computed at every primary turn end from
-# the same live captain holds Bearings' Captain's Call reads
+# every unanswered undated captain hold in this home
 # (bin/fm-fleet-snapshot.sh --captain-calls: backlog records whose hold_bucket
-# is "live"), so a real hold stays on screen until it is answered and a claim
-# that nothing waits can be contradicted on sight. It is printed after every
+# is "live" or "aged"), so a real hold stays on screen until it is answered,
+# however long it has waited, and a claim that nothing waits can be
+# contradicted on sight. A dated deferral and a hold blocked by unfinished work
+# are not waiting on him and stay off the count. It is printed after every
 # turn, including a plain acknowledgement, and a zero is printed as a zero.
 #
 # Usage:
@@ -19,9 +21,16 @@
 # Line shape (this header is the one owner):
 #   Waiting on you: 0
 #   Waiting on you: <n> - <title> [<class>]; <title> [<class>] (+<k> more)
+#   Waiting on you: <n> (<a> unanswered since <d Mon>) - <title> [<class>, unanswered since <d Mon>]; ...
 # Each title is cut to 60 characters, at most three are named, and a hold
-# recorded before captain-hold classes existed shows [unclassed]. When the
-# holds cannot be read the line says so instead of printing a false zero:
+# recorded before captain-hold classes existed shows [unclassed]. A hold past
+# the aged threshold (FM_SNAPSHOT_UNDATED_HOLD_AGE_DAYS) is still counted: the
+# header says how many and the oldest hold date, and each named one says its
+# own. When a secondmate is registered, its holds are not counted here and the
+# line says so rather than staying silent, for example
+#   Waiting on you: 0 (secondmate holds not counted)
+# When the holds cannot be read the line says so instead of printing a false
+# zero:
 #   Waiting on you: unknown - the captain holds could not be read
 #
 # Scope: only a genuine primary home (bin/fm-primary-scope-lib.sh) prints
@@ -58,13 +67,20 @@ line=
 if calls=$(FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-fleet-snapshot.sh" --captain-calls 2>/dev/null) \
   && line=$(printf '%s\n' "$calls" | jq -er '
     def cut($n): if length > $n then .[:($n - 1)] + "…" else . end;
-    (.count | tostring) as $n
-    | if .count == 0 then "Waiting on you: 0"
-      else "Waiting on you: " + $n + " - "
-        + ([.calls[:3][] | ((.title // .id) | gsub("\\s+"; " ") | cut(60))
-            + " [" + (.class // "unclassed") + "]"] | join("; "))
-        + (if .count > 3 then " (+" + ((.count - 3) | tostring) + " more)" else "" end)
-      end' 2>/dev/null); then
+    def day: (.[8:10] | tonumber | tostring) + " "
+      + (["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"][(.[5:7] | tonumber) - 1]);
+    def unanswered: if . == null then "long unanswered" else "unanswered since " + day end;
+    ([.calls[] | select(.aged) | .since | select(. != null)] | min) as $oldest
+    | ([(if .aged > 0 then (.aged | tostring) + " " + ($oldest | unanswered) else empty end),
+        (if .secondmates_uncounted then "secondmate holds not counted" else empty end)]
+       | if length > 0 then " (" + join("; ") + ")" else "" end) as $note
+    | "Waiting on you: " + (.count | tostring) + $note
+      + (if .count == 0 then ""
+        else " - "
+          + ([.calls[:3][] | ((.title // .id) | gsub("\\s+"; " ") | cut(60))
+              + " [" + (.class // "unclassed") + (if .aged then ", " + (.since | unanswered) else "" end) + "]"] | join("; "))
+          + (if .count > 3 then " (+" + ((.count - 3) | tostring) + " more)" else "" end)
+        end)' 2>/dev/null); then
   :
 else
   line='Waiting on you: unknown - the captain holds could not be read'

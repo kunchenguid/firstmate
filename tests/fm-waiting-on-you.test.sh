@@ -94,6 +94,44 @@ test_many_holds_name_three_and_count_the_rest() {
   pass "many live holds name three titles and count the rest"
 }
 
+# An undated hold left unanswered past the aged threshold is still waiting on
+# the captain, so it stays on the count, marked with the date it was set
+# (oracle: the firstmate decision's own example shape, "Waiting on you: 2
+# (1 unanswered since 14 Oct)"). Dropping it would print a false 1.
+test_an_aged_hold_still_counts_and_is_marked() {
+  local home out
+  home=$(make_primary_home aged)
+  hold_in "$home" sample-rental --title "Spend on the rental" --class money \
+    --reason "approve the rental spend" --repo sample || fail "could not hold the money call"
+  sed -i.bak 's/^  Captain hold set: .*/  Captain hold set: 2020-10-14T00:00:00Z/' "$home/data/backlog.md" \
+    || fail "could not backdate the money call"
+  hold_in "$home" sample-login --title "Sign in to the store" --class physical-or-credential \
+    --reason "needs the captain's login" --repo sample || fail "could not hold the login call"
+  grep -q '^  Captain hold set: 2020-10-14' "$home/data/backlog.md" || fail "the backdated hold lost its date"
+  out=$(run_line "$home") || fail "the line failed with an aged hold"
+  case "$out" in
+    "Waiting on you: 2 (1 unanswered since 14 Oct) - "*) ;;
+    *) fail "an aged hold dropped off the count or was not marked: $out" ;;
+  esac
+  assert_contains "$out" "Spend on the rental [money, unanswered since 14 Oct]" "the aged hold was not named as aged: $out"
+  assert_contains "$out" "Sign in to the store [physical-or-credential]" "the live hold was not named: $out"
+  assert_not_contains "$out" "physical-or-credential, unanswered" "the live hold was marked aged: $out"
+  pass "an aged unanswered hold still counts and is marked with its hold date"
+}
+
+# A registered secondmate's holds are not read by this line, so the line says
+# so instead of a bare zero the captain would read as nothing waiting anywhere.
+test_a_registered_secondmate_says_its_holds_are_not_counted() {
+  local home out
+  home=$(make_primary_home with-mate)
+  printf '%s\n' "- mate-one - sample mate (home: $TMP_ROOT/mate-one-home; scope: sample work; projects: sample; added 2026-10-01)" \
+    > "$home/data/secondmates.md"
+  out=$(run_line "$home") || fail "the line failed with a registered secondmate"
+  assert_equals "$out" "Waiting on you: 0 (secondmate holds not counted)" \
+    "a registered secondmate left the zero looking complete"
+  pass "a registered secondmate makes the line say its holds are not counted"
+}
+
 test_an_unreadable_backlog_never_reads_as_zero() {
   local home out
   home=$(make_primary_home unreadable)
@@ -181,14 +219,39 @@ test_claude_stop_hook_runs_the_line() {
     || fail "the registered Claude Stop hook failed"
   assert_equals "$(printf '%s' "$out" | jq -r '.systemMessage')" "Waiting on you: 1 - Sign in to the store [physical-or-credential]" \
     "the registered Claude Stop hook did not show the live hold"
-  pass "the registered Claude Stop hook shows the waiting line as its systemMessage"
+  out=$(GROK_AGENT=1 CLAUDE_PROJECT_DIR="$ROOT" FM_ROOT_OVERRIDE="$home" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+    FM_DATA_OVERRIDE="$home/data" FM_CONFIG_OVERRIDE="$home/config" bash -c "$command" </dev/null) \
+    || fail "the registered Claude Stop hook failed under Grok"
+  assert_equals "$out" "" "the Claude Stop hook rendered the line for a Grok session that reads the same settings"
+  pass "the registered Claude Stop hook shows the waiting line as its systemMessage, and only for Claude"
+}
+
+# docs/turnend-guard.md says only the Claude Stop hook and the Pi footer render
+# the line. Every tracked JSON hook registry is parsed and the set of
+# registries whose hook commands run the line must be exactly the Claude
+# settings; the Pi footer is proven by test_pi_turn_end_sets_the_footer_status.
+test_only_the_claude_hook_registry_runs_the_line() {
+  local file runners=''
+  while IFS= read -r file; do
+    jq -e . "$ROOT/$file" >/dev/null 2>&1 || fail "a tracked hook registry is not JSON: $file"
+    if jq -e '[.. | strings | select(test("(^|[/\"[:space:]])fm-waiting-on-you\\.sh([[:space:]]|$)"))] | length > 0' \
+      "$ROOT/$file" >/dev/null; then
+      runners="$runners$file "
+    fi
+  done < <(git -C "$ROOT" ls-files -- .claude/settings.json '.agents/hooks.json' '.codex/hooks.json' \
+    '.cursor/hooks.json' '.grok/hooks/*.json')
+  assert_equals "$runners" ".claude/settings.json " "the hook registries that run the waiting line drifted from the documented coverage"
+  pass "only the Claude Stop hook registry runs the waiting line among the tracked JSON hook registries"
 }
 
 fm_test_run \
   test_a_turn_with_no_hold_shows_a_zero \
   test_a_live_hold_shows_its_count_title_and_class \
   test_many_holds_name_three_and_count_the_rest \
+  test_an_aged_hold_still_counts_and_is_marked \
+  test_a_registered_secondmate_says_its_holds_are_not_counted \
   test_an_unreadable_backlog_never_reads_as_zero \
   test_a_task_worktree_prints_nothing \
   test_claude_stop_hook_runs_the_line \
+  test_only_the_claude_hook_registry_runs_the_line \
   test_pi_turn_end_sets_the_footer_status

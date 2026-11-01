@@ -34,7 +34,8 @@
 # remains: none, or quiet mode's, whose captain is present; bin/fm-afk-contract.sh
 # AWAY OR QUIET) may be missing from the return brief, so it is also queued
 # for MAIN as a durable check wake keyed supervision-host-return:<seq>,
-# presented by the drain until MAIN acknowledges it. bin/fm-afk-return.sh
+# presented by the drain until MAIN acknowledges it; a main row's wake tells
+# MAIN to act on it itself, never to relay it as a captain call. bin/fm-afk-return.sh
 # archives the record before it reads the store and this check follows the
 # append, so every visible row is in the brief, queued, or both: the relay does
 # not depend on the host surviving its turn or on its owner delivering the
@@ -142,12 +143,16 @@ fi
 if ! fm_afk_contract_away_present "$STATE"; then
   # shellcheck source=bin/fm-wake-lib.sh
   . "$SCRIPT_DIR/fm-wake-lib.sh"
+  HANDOFF='relay it to the captain' HANDOFF_VERB=relay
+  if [ "$VERDICT" = main ]; then
+    HANDOFF='act on it yourself, it is not a captain call' HANDOFF_VERB='act on'
+  fi
   if ! fm_wake_append check "supervision-host-return:$SEQ" \
-    "check: supervision-host outcome $SEQ for $TASK [$VERDICT] was recorded after the captain returned, so the return brief may not show it; relay it to the captain: $SUMMARY"; then
+    "check: supervision-host outcome $SEQ for $TASK [$VERDICT] was recorded after the captain returned, so the return brief may not show it; $HANDOFF: $SUMMARY"; then
     printf 'recorded seq %s [%s], but the captain has returned and its relay to MAIN could not be queued; the host hands this turn to MAIN\n' "$SEQ" "$VERDICT" >&2
     exit 0
   fi
-  printf 'recorded seq %s [%s]; the captain has returned, so it is queued for MAIN to relay\n' "$SEQ" "$VERDICT"
+  printf 'recorded seq %s [%s]; the captain has returned, so it is queued for MAIN to %s\n' "$SEQ" "$VERDICT" "$HANDOFF_VERB"
   exit 0
 fi
 printf 'recorded seq %s [%s]; it waits in the outcome store for MAIN\n' "$SEQ" "$VERDICT"

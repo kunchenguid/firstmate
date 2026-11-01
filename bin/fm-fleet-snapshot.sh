@@ -116,10 +116,14 @@
 #
 # --contribution-input prints only the canonical backlog/tasks ownership pair,
 # without worker observations or cross-home collection, for the home-local poll.
-# --captain-calls prints only this home's live captain holds - the backlog
-# records whose hold_bucket is "live", the same classification Bearings'
-# Captain's Call reads - as {count,calls:[{id,title,class}]}, from the backlog
-# parse alone, so a per-turn reader (bin/fm-waiting-on-you.sh) stays cheap.
+# --captain-calls prints every unanswered undated captain hold in this home -
+# the backlog records whose hold_bucket is "live" or "aged", so a hold never
+# drops off for having waited long - as
+# {count,aged,calls:[{id,title,class,aged,since}],secondmates_uncounted}, where
+# since is an aged hold's YYYY-MM-DD hold date and secondmates_uncounted says a
+# secondmate is registered (or the registry is unreadable) whose holds are not
+# counted. It reads only the backlog and the local registry table, so a
+# per-turn reader (bin/fm-waiting-on-you.sh) stays cheap.
 # Compatibility: JSON is the primary machine-readable surface.
 # Human views must render this output instead of parsing state files again.
 set -u
@@ -249,8 +253,9 @@ refreshes only its parent-side remote-summary cache as an observational side eff
 --contribution-input emits the canonical local backlog/tasks ownership pair only,
 without worker observations or cross-home collection.
 
---captain-calls emits only this home's live captain holds as
-{count,calls:[{id,title,class}]}, from the backlog parse alone.
+--captain-calls emits this home's unanswered undated captain holds, live and
+aged, as {count,aged,calls:[{id,title,class,aged,since}],secondmates_uncounted},
+from the backlog parse and the local secondmate registry table alone.
 
 --secondmate-home-summary emits the bounded structured summary used after a
 validated registered-home handoff. It is local-only, skips nested secondmate
@@ -1991,10 +1996,15 @@ scout_report_lines() {
 
 BACKLOG_JSON=$(backlog_json) || { echo "fm-fleet-snapshot: backlog read failed" >&2; exit 1; }
 if [ "$OUTPUT_MODE" = captain-calls ]; then
-  printf '%s\n' "$BACKLOG_JSON" | jq -c '
-    [.records[]? | select(.structured and .hold_bucket == "live")
-     | {id, title, class:(.hold_class // null)}]
-    | {count:length, calls:.}' || { echo "fm-fleet-snapshot: captain-call projection failed" >&2; exit 1; }
+  CAPTAIN_CALL_REGISTRY=$(registry_secondmates_json) || { echo "fm-fleet-snapshot: secondmate registry read failed" >&2; exit 1; }
+  printf '%s\n' "$BACKLOG_JSON" | jq -c --argjson registry "$CAPTAIN_CALL_REGISTRY" '
+    [.records[]? | select(.structured and (.hold_bucket == "live" or .hold_bucket == "aged"))
+     | (.hold_bucket == "aged") as $aged
+     | {id, title, class:(.hold_class // null), aged:$aged,
+        since:(if $aged then ((.hold_set // .since // "")[:10] | select(test("^[0-9]{4}-[0-9]{2}-[0-9]{2}$"))) // null else null end)}]
+    | {count:length, aged:(map(select(.aged)) | length), calls:.,
+       secondmates_uncounted:($registry.present and ($registry.available != true or ($registry.records | length) > 0))}' \
+    || { echo "fm-fleet-snapshot: captain-call projection failed" >&2; exit 1; }
   exit 0
 fi
 contribution_tasks_json() {

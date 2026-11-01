@@ -561,9 +561,10 @@ That warning uses `bin/fm-supervision-instructions.sh --repair-line`, so it alwa
 
 ## Waiting-on-you line
 
-Every primary turn end also shows a "Waiting on you" line with the count and titles of this home's live captain holds, a zero included, so a claim that nothing waits on the captain can be contradicted on sight.
-`bin/fm-waiting-on-you.sh` owns its content, shape, and scope, and computes it from the same live holds Bearings' Captain's Call reads.
+A Claude or Pi primary turn end also shows a "Waiting on you" line with the count and titles of this home's unanswered undated captain holds, aged ones included and marked, and a zero included, so a claim that nothing waits on the captain can be contradicted on sight.
+`bin/fm-waiting-on-you.sh` owns its content, shape, and scope.
 It is display only: it never blocks or follows up a turn, and it is independent of the guard predicate above.
+Only the two surfaces below render it.
 
 | Harness | Where the line appears |
 | --- | --- |
@@ -589,7 +590,8 @@ It is display only: it never blocks or follows up a turn, and it is independent 
 - If `jq` is removed after installation, the hook remains silent and exits 0, turn-end wakes stop, and Kimi crews fall back to idle detection.
 - Unreadable hook input remains fail-open.
 - No harness adapter uses a shell ampersand to manufacture supervision.
-- The waiting-on-you line is shown only on Claude and Pi primaries; the other primary harnesses do not render it yet.
+- The waiting-on-you line is rendered only by the Claude `Stop` hook and the Pi footer.
+  Every other primary adapter gets neither the line nor a captain-hold follow-up yet: this guard's stderr follow-up fires only for blind supervision and never mentions captain holds.
 
 ## Regression coverage
 
