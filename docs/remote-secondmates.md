@@ -552,8 +552,9 @@ Recording that source line prevents another duplicate on later recaptures.
 
 The channel carries the mate's status and decision model.
 An uncorrelated progress line and a newly raised `needs-decision` travel the same path as a correlated answer, and reach the parent's open-decision fold identically.
-Correlation is a per-line property that settles a pending request.
-It is never a gate on the stream, so no single line can stop or wedge the relay or hold the cursor back.
+Correlation identifies the pending request.
+[`bin/fm-pending-reply-lib.sh`](../bin/fm-pending-reply-lib.sh) owns reply eligibility and settlement.
+Correlation never gates the stream, so no single line can stop or wedge the relay or hold the cursor back.
 
 ### Transport normalization
 
