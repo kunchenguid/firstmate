@@ -330,6 +330,29 @@ test_turnend_guard_agy_runs_turn_end_hooks_on_a_normal_stop() {
   pass "fm-turnend-guard-agy: turn-end hooks run on a normal stop, a refusal continues the turn once"
 }
 
+# A hook hold excuses only the same session's very next normal stop: a
+# cancelled continuation or a replaced session must not skip the hooks.
+test_turnend_guard_agy_hook_hold_skip_is_scoped() {
+  local dir payload out
+  dir=$(make_primary_dir "$TMP_ROOT/stop-turn-end-hook-scoped")
+  write_arm_fixture "$dir" actionable
+  mkdir -p "$dir/hooks/turn-end.d"
+  printf '#!/bin/sh\necho "finish the owed reply first" >&2\nexit 1\n' > "$dir/hooks/turn-end.d/10-owed"
+  chmod +x "$dir/hooks/turn-end.d/10-owed"
+  payload='{"sessionId":"s-1","conversationId":"c-1","executionNum":1,"terminationReason":"NO_TOOL_CALL"}'
+  out=$(run_agy_stop "$dir" "$payload")
+  assert_equals "continue" "$(printf '%s' "$out" | jq -r '.decision // empty')" "the first stop must be held"
+  out=$(run_agy_stop "$dir" '{"sessionId":"s-1","conversationId":"c-1","executionNum":2,"terminationReason":"USER_CANCELED"}')
+  assert_equals "{}" "$out" "a cancelled stop passes through"
+  out=$(run_agy_stop "$dir" "$payload")
+  assert_equals "continue" "$(printf '%s' "$out" | jq -r '.decision // empty')" \
+    "the normal stop after a cancelled continuation must run the hooks again"
+  out=$(run_agy_stop "$dir" '{"sessionId":"s-2","conversationId":"c-2","executionNum":1,"terminationReason":"NO_TOOL_CALL"}')
+  assert_equals "continue" "$(printf '%s' "$out" | jq -r '.decision // empty')" \
+    "a replacement session must not inherit another session's hold skip"
+  pass "fm-turnend-guard-agy: a hook hold skip is retired by a cancelled stop and bound to its session"
+}
+
 test_turnend_guard_agy_actionable_wake_followup() {
   local dir payload out decision reason
   dir=$(make_primary_dir "$TMP_ROOT/stop-wake")
@@ -647,6 +670,7 @@ fm_test_run \
   test_agents_hooks_json_registration_and_cwd_contract \
   test_sessionstart_agy_primary_secondmate_and_worktree_scope \
   test_turnend_guard_agy_runs_turn_end_hooks_on_a_normal_stop \
+  test_turnend_guard_agy_hook_hold_skip_is_scoped \
   test_turnend_guard_agy_actionable_wake_followup \
   test_turnend_guard_agy_supervision_host_park \
   test_turnend_guard_agy_park_timeout_rearms \

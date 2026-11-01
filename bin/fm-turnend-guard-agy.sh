@@ -83,20 +83,24 @@ fm_primary_scope_matches "$FM_ROOT" "$STATE" || allow_stop
 
 TERM_REASON=$(printf '%s' "$PAYLOAD" | jq -r '.terminationReason // empty' 2>/dev/null || true)
 if [ -n "$TERM_REASON" ] && [ "$TERM_REASON" != "NO_TOOL_CALL" ]; then
+  rm -f "$STATE/.turnend-hook-held" 2>/dev/null || true
   allow_stop
 fi
 
 # Installed turn-end lifecycle hooks (docs/configuration.md "Lifecycle hooks")
 # run on every normal stop, before any park, and a refusal continues the turn
 # with its reason. Antigravity marks no follow-up-driven stop, so
-# state/.turnend-hook-held records the hold and the very next stop skips the
-# hooks once, so hooks can never hold a turn open twice. Absent
+# state/.turnend-hook-held records the holding session and only that session's
+# very next normal stop skips the hooks once, so hooks can never hold a turn
+# open twice. A cancelled or failed stop retires the record. Absent
 # hooks/turn-end.d this is one directory test.
 if fm_hooks_present turn-end; then
-  if [ -e "$STATE/.turnend-hook-held" ]; then
-    rm -f "$STATE/.turnend-hook-held" 2>/dev/null || true
-  elif ! TURN_END_REASON=$(fm_hooks_turn_end "$PAYLOAD"); then
-    if ! { mkdir -p "$STATE" 2>/dev/null && : > "$STATE/.turnend-hook-held"; }; then
+  HOOK_SESSION=$(printf '%s' "$PAYLOAD" | jq -r '.sessionId // "" | tostring' 2>/dev/null || true)
+  HELD_SESSION=$(cat "$STATE/.turnend-hook-held" 2>/dev/null) && HELD=1 || HELD=0
+  rm -f "$STATE/.turnend-hook-held" 2>/dev/null || true
+  if { [ "$HELD" -eq 0 ] || [ "$HELD_SESSION" != "$HOOK_SESSION" ]; } \
+    && ! TURN_END_REASON=$(fm_hooks_turn_end "$PAYLOAD"); then
+    if ! { mkdir -p "$STATE" 2>/dev/null && printf '%s' "$HOOK_SESSION" > "$STATE/.turnend-hook-held"; }; then
       allow_stop
     fi
     continue_turn "TURN END HELD BY A LIFECYCLE HOOK - handle this before ending the turn:
