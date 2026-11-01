@@ -2273,6 +2273,24 @@ test_recovery_rechecks_decision_before_allowed_delivery() (
   pass "an uncached decision check immediately before delivery refuses a newly opened decision"
 )
 
+test_decision_cache_cleanup_removes_abandoned_dirs() {
+  local lab tmp own other stray
+  lab=$(fm_test_tmproot fm-pr-cache-clean)
+  tmp=$lab/tmp
+  mkdir -p "$tmp"
+  TMPDIR=$tmp
+  own="$tmp/fm-pending-reply-decisions.$$.AAAA"
+  other="$tmp/fm-pending-reply-decisions.999999999.BBBB"
+  stray="$tmp/fm-pending-reply-decisions.other"
+  mkdir -p "$own" "$other" "$stray"
+  printf 'snapshot' > "$own/0"
+  fm_pending_reply_decision_cache_cleanup
+  [ ! -d "$own" ] || fail "interrupted tick dir for this pid must be removed"
+  [ -d "$other" ] || fail "another pid's cache dir must survive"
+  [ -d "$stray" ] || fail "non-matching dir must survive"
+  pass "decision-cache cleanup removes this pid's abandoned dirs only"
+}
+
 # --- run --------------------------------------------------------------------
 
 test_recovery_rechecks_decision_before_allowed_delivery || fail "pre-delivery decision regression failed"
@@ -2327,5 +2345,6 @@ test_local_parent_replies_is_wrong_home_evidence
 test_escalated_undelivered_correlation_stays_retryable
 test_same_kind_escalation_reopens_after_operator_close
 test_summary_keeps_accents_and_caps_by_character
+test_decision_cache_cleanup_removes_abandoned_dirs
 
 printf 'ok - all pending-reply tests passed\n'
