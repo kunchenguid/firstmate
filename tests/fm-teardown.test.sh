@@ -3597,6 +3597,254 @@ SH
   pass "forced secondmate teardown preflights every Herdr child before cleanup mutation"
 }
 
+# --- secondmate retirement clears the home's identity -----------------------
+
+# A treehouse-leased secondmate home is returned to the pool, not deleted, and
+# `treehouse return` restores tracked content without touching gitignored files.
+# The two files that make a directory a secondmate home - the
+# .fm-secondmate-home identity marker and the .fm-secondmate-parent binding
+# written beside it - are both gitignored, so retirement used to hand a retired
+# home's identity to whatever crewmate task next leased that slot, and
+# bin/fm-primary-scope-lib.sh force-includes any marked root as a primary home.
+# Retirement is the one moment that knows the home has stopped being a home.
+# Build the home as a real worktree of the case's project and point FM_ROOT at
+# that project, because "is this a treehouse slot" is exactly "is this a
+# registered worktree of FM_ROOT".
+configure_pooled_secondmate_home() {  # <case-dir>
+  local case_dir=$1 home="$1/sm-home"
+  git -C "$case_dir/project" worktree add -q --detach "$home" main
+  # FM_ROOT is the case project here, and teardown runs $FM_ROOT/bin/fm-guard.sh
+  # advisorily; give it one so the run's stderr carries only real diagnostics.
+  mkdir -p "$case_dir/project/bin"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$case_dir/project/bin/fm-guard.sh"
+  chmod +x "$case_dir/project/bin/fm-guard.sh"
+  mkdir -p "$home/state" "$home/data" "$home/config" "$home/projects"
+  printf '%s\n' task-x1 > "$home/.fm-secondmate-home"
+  printf 'schema=fm-secondmate-parent.v1\nroute=local\nparent_home=%s\n' \
+    "$case_dir/project" > "$home/.fm-secondmate-parent"
+  printf '%s\n' "home=$home" >> "$case_dir/state/task-x1.meta"
+  printf '%s\n' "$home"
+}
+
+run_teardown_pooled() {  # <case-dir> [args...]
+  local case_dir=$1; shift
+  FM_HOME='' \
+  FM_ROOT_OVERRIDE="$case_dir/project" \
+  FM_STATE_OVERRIDE="$case_dir/state" \
+  FM_DATA_OVERRIDE="$case_dir/data" \
+  FM_CONFIG_OVERRIDE="$case_dir/config" \
+  PATH="$case_dir/fakebin:${FM_TEARDOWN_TEST_PATH:-$PATH}" \
+    "$TEARDOWN" task-x1 "$@"
+}
+
+test_secondmate_retirement_clears_pooled_home_identity() {
+  local case_dir home rc
+  case_dir=$(make_case retire-identity)
+  write_meta "$case_dir" local-only secondmate
+  home=$(configure_pooled_secondmate_home "$case_dir")
+  # The lease is returned only after the identity files are out of the way, so
+  # the fake records what it sees at the moment it receives the return call.
+  cat > "$case_dir/fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+for arg in "$@"; do dir=$arg; done
+for name in .fm-secondmate-home .fm-secondmate-parent; do
+  if [ -e "$dir/$name" ] || [ -L "$dir/$name" ]; then
+    echo "treehouse: $name still present at return" >&2
+    exit 1
+  fi
+done
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/treehouse"
+
+  rc=0
+  run_teardown_pooled "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  [ "$rc" -eq 0 ] || fail "retire-identity: pooled secondmate teardown failed (the identity files must be gone when the lease is returned): $(cat "$case_dir/stderr")"
+  [ -d "$home" ] || fail "retire-identity: a returned lease must leave the slot directory in place"
+  assert_absent "$home/.fm-secondmate-home" \
+    "retire-identity: the retired home kept its identity marker for the next lease"
+  assert_absent "$home/.fm-secondmate-parent" \
+    "retire-identity: the retired home kept its parent binding for the next lease"
+  pass "secondmate retirement clears a pooled home's identity before returning the lease"
+}
+
+# A failed return preserves the home, so it must also preserve the identity that
+# makes it a home - otherwise a retry, or the captain, would find an anonymous
+# directory where a secondmate still lives.
+test_failed_return_restores_pooled_home_identity() {
+  local case_dir home rc
+  case_dir=$(make_case retire-identity-restore)
+  write_meta "$case_dir" local-only secondmate
+  home=$(configure_pooled_secondmate_home "$case_dir")
+  cat > "$case_dir/fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+echo "treehouse: return refused" >&2
+exit 1
+SH
+  chmod +x "$case_dir/fakebin/treehouse"
+
+  rc=0
+  run_teardown_pooled "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  [ "$rc" -ne 0 ] || fail "retire-identity-restore: teardown reported success despite a failed return"
+  [ -d "$home" ] || fail "retire-identity-restore: a failed return removed the home"
+  assert_present "$home/.fm-secondmate-home" \
+    "retire-identity-restore: a failed return left the preserved home without its identity marker"
+  assert_present "$home/.fm-secondmate-parent" \
+    "retire-identity-restore: a failed return left the preserved home without its parent binding"
+  [ "$(head -1 "$home/.fm-secondmate-home")" = task-x1 ] \
+    || fail "retire-identity-restore: the restored identity marker lost its id"
+  pass "a failed lease return restores the preserved secondmate home's identity"
+}
+
+# A teardown killed while `treehouse return` is running cannot restore anything
+# itself, so the staged identity must be recoverable by the retry: the retry has
+# to find the home still a seeded secondmate home, return its lease, and leave
+# the slot without an identity.
+# Kill a pooled secondmate teardown while its `treehouse return` is running.
+# The teardown is exec'd in the background shell so the pid killed and waited on
+# is fm-teardown.sh itself, and it is reaped before its fake treehouse dies - a
+# surviving teardown would otherwise run its own failure cleanup under the retry.
+interrupt_pooled_return() {  # <case-dir> <home>
+  local case_dir=$1 home=$2 pid i
+  cat > "$case_dir/fakebin/treehouse" <<SH
+#!/usr/bin/env bash
+echo \$\$ > "$case_dir/treehouse.pid"
+: > "$case_dir/treehouse.reached"
+exec sleep 300
+SH
+  chmod +x "$case_dir/fakebin/treehouse"
+
+  (
+    FM_HOME='' \
+    FM_ROOT_OVERRIDE="$case_dir/project" \
+    FM_STATE_OVERRIDE="$case_dir/state" \
+    FM_DATA_OVERRIDE="$case_dir/data" \
+    FM_CONFIG_OVERRIDE="$case_dir/config" \
+    PATH="$case_dir/fakebin:${FM_TEARDOWN_TEST_PATH:-$PATH}" \
+      exec "$TEARDOWN" task-x1 --force
+  ) > "$case_dir/stdout1" 2> "$case_dir/stderr1" &
+  pid=$!
+  for i in $(seq 1 100); do
+    [ -e "$case_dir/treehouse.reached" ] && break
+    sleep 0.1
+  done
+  [ -e "$case_dir/treehouse.reached" ] \
+    || { kill -KILL "$pid" 2>/dev/null; wait "$pid" 2>/dev/null; fail "retire-identity-interrupt: teardown never reached the lease return: $(cat "$case_dir/stderr1")"; }
+  assert_absent "$home/.fm-secondmate-home" \
+    "retire-identity-interrupt: the identity marker was still in place while the lease was being returned"
+  kill -KILL "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  kill -KILL "$(cat "$case_dir/treehouse.pid")" 2>/dev/null || true
+}
+
+# The retry decides whether the slot is still this secondmate's from its durable
+# treehouse lease, so this fake reports one lease - for the home, held by the
+# holder named in <case-dir>/lease-holder - through `treehouse status --json`,
+# fails status when <case-dir>/status-fails exists, and records each return,
+# which must find both identity files already gone.
+write_lease_treehouse() {  # <case-dir> <home>
+  local case_dir=$1 home=$2
+  cat > "$case_dir/fakebin/treehouse" <<SH
+#!/usr/bin/env bash
+if [ "\${1:-}" = status ]; then
+  [ ! -e "$case_dir/status-fails" ] || { echo "treehouse: pool state unreadable" >&2; exit 1; }
+  printf '[{"name":"1","path":"%s","status":"in-use","lease_holder":"%s"}]\n' "$home" "\$(cat "$case_dir/lease-holder")"
+  exit 0
+fi
+for arg in "\$@"; do dir=\$arg; done
+for name in .fm-secondmate-home .fm-secondmate-parent; do
+  [ ! -e "\$dir/\$name" ] || { echo "treehouse: \$name still present at return" >&2; exit 1; }
+done
+echo returned >> "$case_dir/treehouse-returned"
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/treehouse"
+}
+
+assert_interrupted_retry_completed() {  # <case-dir> <home> <label>
+  local case_dir=$1 home=$2 label=$3 rc=0
+  run_teardown_pooled "$case_dir" --force > "$case_dir/stdout2" 2> "$case_dir/stderr2" || rc=$?
+  [ "$rc" -eq 0 ] || fail "$label: the retry of an interrupted retirement failed: $(cat "$case_dir/stderr2")"
+  assert_contains "$(cat "$case_dir/stderr2")" "restored the interrupted retirement's home-identity files" \
+    "$label: the retry did not report restoring the staged identity"
+  assert_present "$case_dir/treehouse-returned" \
+    "$label: the retry did not return the lease"
+  assert_absent "$home/.fm-secondmate-home" \
+    "$label: the retried retirement left the identity marker for the next lease"
+  assert_absent "$home/.fm-secondmate-parent" \
+    "$label: the retried retirement left the parent binding for the next lease"
+  [ -z "$(find "$case_dir" -maxdepth 1 -name '.fm-identity-restore.*' -print)" ] \
+    || fail "$label: a completed retirement left its identity stash behind"
+}
+
+test_interrupted_return_identity_recovered_by_retry() {
+  local case_dir home
+  case_dir=$(make_case retire-identity-interrupt)
+  write_meta "$case_dir" local-only secondmate
+  home=$(configure_pooled_secondmate_home "$case_dir")
+  interrupt_pooled_return "$case_dir" "$home"
+  write_lease_treehouse "$case_dir" "$home"
+  printf '%s\n' task-x1 > "$case_dir/lease-holder"
+  assert_interrupted_retry_completed "$case_dir" "$home" retire-identity-interrupt
+  pass "a retirement interrupted during the lease return is recovered and completed by the retry"
+}
+
+# A crewmate task's process lease can lapse while its .fm-slot-owner claim stays
+# beside the slot, and the pool can then lease that slot to a secondmate home.
+# That leftover claim says nothing about who holds the slot now; the durable
+# lease does, so the retry must still restore and complete the retirement.
+test_interrupted_return_retry_ignores_stale_task_claim() {
+  local case_dir home
+  case_dir=$(make_case retire-identity-stale-claim)
+  write_meta "$case_dir" local-only secondmate
+  home=$(configure_pooled_secondmate_home "$case_dir")
+  printf 'task=crew-old\nhome=%s\n' "$case_dir/other-home" > "$case_dir/.fm-slot-owner"
+  interrupt_pooled_return "$case_dir" "$home"
+  write_lease_treehouse "$case_dir" "$home"
+  printf '%s\n' task-x1 > "$case_dir/lease-holder"
+  assert_interrupted_retry_completed "$case_dir" "$home" retire-identity-stale-claim
+  pass "a retry of an interrupted retirement trusts the durable lease over a stale task claim"
+}
+
+# The interrupted return may have completed before the kill, and the pool may
+# then have leased the slot to someone else. The surviving identity backup does
+# not prove the lease is still this secondmate's, so the retry must refuse -
+# keeping the backup - rather than stamp the new holder's worktree as a
+# secondmate home and return it; a lease it cannot read refuses the same way.
+test_interrupted_return_retry_refuses_reassigned_slot() {
+  local case_dir home rc label=retire-identity-reassigned
+  case_dir=$(make_case "$label")
+  write_meta "$case_dir" local-only secondmate
+  home=$(configure_pooled_secondmate_home "$case_dir")
+  interrupt_pooled_return "$case_dir" "$home"
+  write_lease_treehouse "$case_dir" "$home"
+  printf '%s\n' crew-zz9 > "$case_dir/lease-holder"
+
+  : > "$case_dir/status-fails"
+  rc=0
+  run_teardown_pooled "$case_dir" --force > "$case_dir/stdout2" 2> "$case_dir/stderr2" || rc=$?
+  [ "$rc" -ne 0 ] || fail "$label: the retry reported success without reading the slot's lease"
+  assert_contains "$(cat "$case_dir/stderr2")" "treehouse lease cannot be read" \
+    "$label: the refusal did not say the lease could not be read"
+  rm -f "$case_dir/status-fails"
+
+  rc=0
+  run_teardown_pooled "$case_dir" --force > "$case_dir/stdout3" 2> "$case_dir/stderr3" || rc=$?
+  [ "$rc" -ne 0 ] || fail "$label: the retry reported success on a slot another holder leased"
+  assert_contains "$(cat "$case_dir/stderr3")" "treehouse lease is now held by crew-zz9, not by secondmate task-x1" \
+    "$label: the refusal did not name the holder of the slot's lease"
+
+  assert_absent "$home/.fm-secondmate-home" \
+    "$label: the retry stamped the reassigned slot with the retired identity marker"
+  assert_absent "$home/.fm-secondmate-parent" \
+    "$label: the retry stamped the reassigned slot with the retired parent binding"
+  assert_absent "$case_dir/treehouse-returned" \
+    "$label: the retry returned a slot another holder leased"
+  [ -n "$(find "$case_dir" -maxdepth 1 -name '.fm-identity-restore.*' -print)" ] \
+    || fail "$label: a refused retry discarded the identity backup"
+  pass "a retry of an interrupted retirement refuses a slot whose lease it cannot read or another holder took"
+}
+
 configure_secondmate_with_tmux_children() {  # <case-dir>
   local case_dir=$1 home="$1/secondmate-home" child child_wt
   mkdir -p "$home/state" "$home/data" "$home/config" "$home/projects"
@@ -5991,6 +6239,11 @@ test_herdr_flat_teardown_refuses_orphaning_records_then_retry_completes
 test_herdr_flat_teardown_refuses_records_on_unparseable_presence
 test_herdr_flat_teardown_preflight_refuses_before_changes
 test_herdr_teardown_presentation_lock_namespace_is_per_account
+test_secondmate_retirement_clears_pooled_home_identity
+test_failed_return_restores_pooled_home_identity
+test_interrupted_return_identity_recovered_by_retry
+test_interrupted_return_retry_ignores_stale_task_claim
+test_interrupted_return_retry_refuses_reassigned_slot
 test_forced_secondmate_herdr_child_preflight_refuses_before_changes
 test_forced_secondmate_teardown_holds_descendant_lifecycle_locks
 test_forced_secondmate_herdr_child_retains_records_when_close_unconfirmed
