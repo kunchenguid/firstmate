@@ -474,6 +474,10 @@
       "audience": "operator-current"
     },
     {
+      "path": "docs/task-data-lifecycle.md",
+      "audience": "operator-current"
+    },
+    {
       "path": "docs/sessionstart-nudge.md",
       "audience": "operator-current"
     },

@@ -702,6 +702,7 @@ test_local_only_fork_remote_allows() {
   set -e
 
   expect_code 0 "$rc" "fork-allow: teardown should succeed when HEAD is on a fork remote"
+  [ "$(cat "$case_dir/state/task-x1.prune-safe")" = fm-prune-safe-v1 ] || fail 'safe teardown omitted pruning receipt'
   ! grep -q REFUSED "$case_dir/stderr" || fail "fork-allow: teardown printed a REFUSED line"
   [ ! -e "$case_dir/state/.task-x1.branch-outcome-index" ] \
     || fail "fork-allow: teardown left the task's branch outcome index behind"
@@ -934,6 +935,7 @@ test_no_mistakes_truly_unpushed_refuses() {
   set -e
 
   expect_code 1 "$rc" "nm-unpushed: teardown should refuse"
+  assert_absent "$case_dir/state/task-x1.prune-safe" 'unlanded teardown created pruning receipt'
   grep -q REFUSED "$case_dir/stderr" || fail "nm-unpushed: no REFUSED line in stderr"
   pass "no-mistakes worktree with genuinely unlanded work is refused (safety preserved)"
 }
@@ -2764,6 +2766,7 @@ test_local_only_force_overrides_unpushed() {
   local case_dir rc
   case_dir=$(make_case force-override)
   write_meta "$case_dir" local-only ship
+  printf 'fm-prune-safe-v1\n' > "$case_dir/state/task-x1.prune-safe"
   wt_commit "$case_dir" "unpushed work"
 
   set +e
@@ -2772,6 +2775,7 @@ test_local_only_force_overrides_unpushed() {
   set -e
 
   expect_code 0 "$rc" "force-override: --force should bypass the unpushed-work check"
+  assert_absent "$case_dir/state/task-x1.prune-safe" 'forced teardown retained pruning receipt'
   ! grep -q REFUSED "$case_dir/stderr" || fail "force-override: REFUSED printed despite --force"
   pass "local-only worktree with unpushed work is torn down under --force (escape hatch)"
 }
