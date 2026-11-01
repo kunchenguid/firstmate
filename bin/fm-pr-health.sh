@@ -52,11 +52,13 @@
 #   - author must act: reviewDecision CHANGES_REQUESTED, or an explicit
 #     maintainer label pending-contributor-action, waiting-on-author,
 #     waiting-for-author or awaiting-author, with any "namespace:" prefix.
-# A conflict and author action each wake once per latest commit; a missing
-# approval is recorded once per latest commit. A failing check wakes once per
-# latest commit and check (suite: workflow) name: a check that newly fails at an already reported
-# commit wakes once more, a name already reported there never repeats, and the
-# line names only the new ones. The conditions have independent histories.
+# A conflict and an author action each wake once per latest commit, and a
+# missing approval is recorded once per latest commit. A failing check wakes
+# once per latest commit and check name, and a maintainer-gated suite is
+# recorded once per latest commit and workflow name: a check that newly fails
+# at an already reported commit wakes once more, a name already reported there
+# never repeats, and the line names only the new ones. The conditions have
+# independent histories.
 # A merged or closed PR is final and never read again. A failed or timed-out
 # read, or a latest commit that differs between the two reads, leaves the PR's
 # fingerprint untouched and prints nothing; fm-contributions.sh reports forge
@@ -319,12 +321,12 @@ read_notifications() { # deadline
   jq -r --arg since "$since" '.[] | select(.subject.type == "PullRequest" and (.updated_at // "") >= $since)
     | .subject.url // "" | capture("^https://api[.]github[.]com/repos/(?<path>[^/]+/[^/]+)/pulls/(?<n>[1-9][0-9]*)$")
     | "https://github.com/\(.path)/pull/\(.n)"' "$TMP/notify.json" | sort -u > "$TMP/events"
-  # Do not advance either cursor component while later pages may be hidden.
-  if [ "$(jq length "$TMP/notify.json")" -lt 50 ]; then
-    jq --arg lm "$next_lm" --arg since "$next_since" '.notifications = ((.notifications // {}) + {last_modified:$lm,since:$since})' \
-      "$TMP/health.json" > "$TMP/next.json" && mv "$TMP/next.json" "$TMP/health.json"
-    [ -z "$lm" ] || NOTIFY_OK=1
-  fi
+  jq --arg lm "$next_lm" --arg since "$next_since" '.notifications = ((.notifications // {}) + {last_modified:$lm,since:$since})' \
+    "$TMP/health.json" > "$TMP/next.json" && mv "$TMP/next.json" "$TMP/health.json"
+  # The first read and a full page leave NOTIFY_OK=0, so this pass reads every
+  # owned PR: events on unread pages are older than that read, and the cursor
+  # still advances, so a busy feed cannot pin the monitor to full sweeps.
+  [ -z "$lm" ] || [ "$(jq length "$TMP/notify.json")" -ge 50 ] || NOTIFY_OK=1
 }
 
 poll() {

@@ -747,28 +747,30 @@ test_notifications_keep_events_at_the_saved_timestamp() {
   pass 'notifications at the saved timestamp remain eligible'
 }
 
-test_full_notification_page_does_not_advance_cursor() {
+test_full_notification_page_forces_a_sweep_and_advances() {
   local home before
   home=$(new_home full-notification-page)
   task "$home" ship1 pr=https://github.com/o/r/pull/45
   pr "$home" 45 "$HEAD_A" "$BASE_1" true false
   feed "$home"
-  arm "$home"
-  expect_silent "$home" 'the initial empty feed establishes its cursor'
+  # A busy account: the very first read already returns a full page.
   jq -n '[range(50) | {updated_at:"2026-11-01T00:01:00Z",reason:"comment",subject:{type:"PullRequest",url:"https://api.github.com/repos/o/r/pulls/99"}}]' \
     > "$home/forge/notifications.json"
-  printf 'Sun, 01 Nov 2026 00:01:00 GMT\n' > "$home/forge/notifications-lm"
-  before=$(reads "$home" 45)
-  expect_silent "$home" 'a full page still uses the fallback sweep'
-  [ "$(reads "$home" 45)" = $((before + 1)) ] || fail 'a full page did not force a full sweep'
+  arm "$home"
+  expect_silent "$home" 'the first full page reads every owned PR'
+  [ "$(reads "$home" 45)" = 1 ] || fail 'a first full page did not read the owned PR'
   [ "$(jq -r '.notifications.last_modified' "$home/state/pr-health.json")" = 'Sun, 01 Nov 2026 00:00:00 GMT' ] \
-    || fail 'a full page advanced Last-Modified'
+    || fail 'a first full page left the feed without a cursor'
+  printf 'Sun, 01 Nov 2026 00:02:00 GMT\n' > "$home/forge/notifications-lm"
+  jq '[.[] | .updated_at = "2026-11-01T00:02:00Z"]' "$home/forge/notifications.json" > "$home/forge/n" \
+    && mv "$home/forge/n" "$home/forge/notifications.json"
   before=$(reads "$home" 45)
-  expect_silent "$home" 'an incomplete feed remains eligible for re-read'
-  [ "$(reads "$home" 45)" = $((before + 1)) ] || fail 'the unchanged full page was treated as current'
-  [ "$(grep -c 'If-Modified-Since: Sun, 01 Nov 2026 00:00:00 GMT' "$home/forge/calls.log")" -ge 2 ] \
-    || fail 'the old conditional cursor was not reused'
-  pass 'full notification pages retain the prior cursor and force fallback reads'
+  expect_silent "$home" 'a later full page still reads every owned PR'
+  [ "$(reads "$home" 45)" = $((before + 1)) ] || fail 'a later full page did not force a full read'
+  before=$(reads "$home" 45)
+  expect_silent "$home" 'after a full page the unchanged feed answers 304'
+  [ "$(reads "$home" 45)" = "$before" ] || fail 'a busy feed pinned the monitor to full sweeps'
+  pass 'a full notification page forces a full read and still advances the cursor'
 }
 
 test_failed_event_read_is_retried() {
@@ -790,7 +792,7 @@ test_failed_event_read_is_retried() {
 failures=0
 for test_name in test_maintainer_author_and_approval_states_are_distinct \
   test_pending_reviewer_without_review_decision_is_recorded test_truncated_check_suites_are_retried test_notifications_drive_reads_with_the_poll_as_fallback test_notifications_keep_events_at_the_saved_timestamp \
-  test_failed_event_read_is_retried test_full_notification_page_does_not_advance_cursor \
+  test_failed_event_read_is_retried test_full_notification_page_forces_a_sweep_and_advances \
   test_unknown_then_dirty_wakes_once test_dirty_again_at_same_commits_is_silent \
   test_conflict_once_per_latest_commit test_adopted_draft_red_required_check_after_pause_wakes_once \
   test_reported_failure_does_not_hide_a_later_required_failure \
