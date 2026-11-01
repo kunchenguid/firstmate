@@ -622,7 +622,7 @@ Task meta records `backend=` only for a non-default backend; an absent `backend=
 - A t3code task additionally records `t3_thread_id=` and `t3_project_id=`, with `window=fm-<id>` kept as the shared firstmate alias.
 
 - A tern task additionally records `tern_session_id=`, `tern_tab_id=`, and `tern_block_id=`.
-- An hc task additionally records `hc_session=` and `hc_terminal=`, with `window=<hc_session>:<hc_terminal>`.
+- For hc endpoint fields and automatic-selection provenance, see [Task shape and metadata](hc-backend.md#task-shape-and-metadata).
 
 ### Task selectors
 
