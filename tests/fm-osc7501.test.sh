@@ -244,6 +244,22 @@ t_old_claude_uses_generic() {
   pass "native gate: claude below the floor uses the generic reporter"
 }
 
+# A natively reporting harness whose launched executable was not named must
+# not get a competing reporter, even when an old copy sits on PATH.
+t_native_harness_without_agent_bin_skips() {
+  local d=$TMP_ROOT/noagentbin
+  mkhome "$d"; mkfake "$d" claude 'claude 1.9.9'
+  start_term "$d"
+  env "${CLEAN_UNSET[@]}" HC_TERMINAL_ID=x FM_OSC7501_TTY="$TERM_SLAVE" \
+    PATH="$d/bin:$PATH" bash "$SCRIPT" arm \
+    --task t29 --harness claude --backend tmux --kind ship \
+    --state "$d/state" --config "$d/config"
+  [ -z "$(ls "$d/state"/.osc7501watch-* 2>/dev/null)" ] \
+    || fail "a claude with no named executable armed a watcher from the PATH copy"
+  stop_term
+  pass "native gate: a native-capable harness without --agent-bin arms nothing"
+}
+
 # A harness upgraded in place across the native floor - the same symlink, its
 # target rewritten with a newer binary - must be re-probed at the next launch,
 # so the generic reporter stands down instead of competing with native records.
@@ -676,6 +692,7 @@ fm_test_run \
   t_final_idle_after_working \
   t_native_claude_skips_everything \
   t_old_claude_uses_generic \
+  t_native_harness_without_agent_bin_skips \
   t_inplace_upgrade_reprobes_native \
   t_native_codex_threshold \
   t_unknown_activity_leaves_native_root \

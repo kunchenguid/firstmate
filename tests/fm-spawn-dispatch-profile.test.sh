@@ -639,6 +639,46 @@ SH
   pass "a raw launch ending in a separator or a comment still runs the worker, its disarm, and config warnings"
 }
 
+# A raw launch of a natively reporting harness must probe the executable it
+# runs, not the copy on PATH: an absolute Claude Code 2.1.316 (above the
+# 2.1.295 native floor) launched while PATH holds Claude 1.0.0 gets no
+# reporter. When an assignment precedes the command, the executable it runs
+# is not established, so it gets no reporter either.
+test_raw_native_launch_probes_launched_binary() {
+  local rec id out status launch raw n=0 oldbin newbin result
+  for raw in new-claude 'FOO=1 claude'; do
+    n=$((n + 1))
+    id=raw-native-$n-z15
+    rec=$(make_spawn_case "raw-native-$n" claude "$id")
+    read_case_record "$rec"
+    oldbin="$CASE_DIR/oldbin"
+    newbin="$CASE_DIR/newbin"
+    mkdir -p "$oldbin" "$newbin"
+    # shellcheck disable=SC2016
+    printf '#!/bin/sh
+[ "$1" = --version ] && { echo "%s (Claude Code)"; exit 0; }
+if ls "${FM_TASK_INBOX%%/*}"/.osc7501watch-* >/dev/null 2>&1; then echo REPORTER-ARMED; else echo NO-REPORTER; fi
+' 1.0.0 >"$oldbin/claude"
+    # shellcheck disable=SC2016
+    printf '#!/bin/sh
+[ "$1" = --version ] && { echo "%s (Claude Code)"; exit 0; }
+if ls "${FM_TASK_INBOX%%/*}"/.osc7501watch-* >/dev/null 2>&1; then echo REPORTER-ARMED; else echo NO-REPORTER; fi
+' 2.1.316 >"$newbin/claude"
+    chmod +x "$oldbin/claude" "$newbin/claude"
+    [ "$raw" != new-claude ] || raw="$newbin/claude --flag"
+    out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" "$raw")
+    status=$?
+    expect_code 0 "$status" "raw launch '$raw' should spawn: $out"
+    launch=$(cat "$LAUNCH_LOG")
+    result=$(cd "$CASE_DIR" && isolated_pane_env REX_BLOCK=b1 \
+      PATH="$oldbin:$PATH" FM_OSC7501_TTY="$CASE_DIR/tty" /bin/sh -c ": >'$CASE_DIR/tty'; $launch" 2>&1)
+    status=$?
+    expect_code 0 "$status" "staged launch for raw '$raw' failed: $result"
+    assert_contains "$result" NO-REPORTER "raw '$raw' armed a reporter beside a natively reporting Claude: $result"
+  done
+  pass "a raw native launch probes its own executable, and an unestablished one gets no reporter"
+}
+
 test_chained_raw_launch_strips_ai_trailer_in_every_step() {
   local rec id out status launch body
   id=chained-raw-z15
@@ -2766,6 +2806,7 @@ test_active_dispatch_profile_allows_explicit_harness
 test_active_dispatch_profile_allows_positional_harness
 test_active_dispatch_profile_allows_raw_launch_command
 test_raw_launch_trailing_separator_or_comment_keeps_disarm
+test_raw_native_launch_probes_launched_binary
 test_chained_raw_launch_strips_ai_trailer_in_every_step
 test_claude_threads_model_and_effort
 test_codex_threads_model_and_effort
