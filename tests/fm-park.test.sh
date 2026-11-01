@@ -612,6 +612,10 @@ test_each_relaunch_trigger_relaunches_a_fresh_worker() {
   gh_fixture "$w/gh.1.json" 'threads=[{"isResolved":false}]' total=1
   expect_relaunch "$w" thread "1 review thread(s) unresolved"
 
+  w=$(make_world trig-incomplete-threads "$GH_URL"); gh_fixture "$w/gh.1.json"; park_world "$w"
+  gh_fixture "$w/gh.1.json" 'threads=[]' total=150
+  expect_relaunch "$w" incomplete-threads "review threads could not all be read"
+
   w=$(make_world trig-conflict "$GH_URL"); gh_fixture "$w/gh.1.json"; park_world "$w"
   gh_fixture "$w/gh.1.json" mergeable=CONFLICTING mss=DIRTY
   expect_relaunch "$w" conflict "merge conflicts"
