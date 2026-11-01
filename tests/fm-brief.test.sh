@@ -454,6 +454,10 @@ test_worker_briefs_reserve_pr_merges_for_authority_with_decision_context() {
       "$mode brief must state workers never merge"
     assert_grep "Append \`done [at=<epoch>]: PR {url}" "$brief" \
       "$mode brief must tell workers to report the ready PR and stop"
+    assert_grep 'background and each option with its consequence' "$brief" \
+      "$mode brief must require decision background and option consequences"
+    assert_no_grep 'summary of options' "$brief" \
+      "$mode brief must not retain the underspecified decision template"
   done
 
   # A named PR base must not change the worker merge prohibition or reintroduce
