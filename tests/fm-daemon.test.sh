@@ -1458,6 +1458,30 @@ test_housekeeping_overdue_pause_opens_one_decision_in_away_mode() {
   pass "away-mode housekeeping opens one overdue decision and worker resume closes it"
 }
 
+test_housekeeping_overdue_queue_failure_retries() {
+  local dir state fakebin task win pane statusf
+  dir=$(make_supercase overdue-queue-retry)
+  state="$dir/state"; fakebin="$dir/fakebin"
+  task=overdue-retry; win="sess:fm-$task"; pane="$dir/pane.txt"; statusf="$state/$task.status"
+  printf 'paused: waiting for dependency\\n' > "$statusf"
+  printf 'idle prompt $\\n' > "$pane"
+  fm_write_meta "$state/$task.meta" "window=$win" "worktree=$dir/wt" "kind=ship" "harness=pi"
+  FM_HOME="$dir" FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-afk-contract.sh" enter --words 'fixture words' >/dev/null 2>&1 || fail "fixture: could not record away posture"
+  echo $(( $(date +%s) - 5000 )) > "$state/.subsuper-paused-$task"
+  sleep 2
+  FM_STATE_OVERRIDE="$state" . "$ROOT/bin/fm-wake-lib.sh"
+  real_escalate_add=$(declare -f escalate_add)
+  eval "${real_escalate_add/ escalate_add()/ real_escalate_add_impl()}"
+  escalate_add() { return 1; }
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$win" FM_FAKE_TMUX_CAPTURE="$pane" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_PAUSE_UNDATED_MAX_SECS=1 housekeeping "$state"
+  [ ! -e "$state/.paused-overdue-$task" ] || fail "failed queue was marked reported"
+  escalate_add() { real_escalate_add_impl "$@"; }
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$win" FM_FAKE_TMUX_CAPTURE="$pane" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_PAUSE_UNDATED_MAX_SECS=1 housekeeping "$state"
+  [ -e "$state/.paused-overdue-$task" ] || fail "retry did not mark the queued overdue event"
+  [ "$(grep -cF "stale: $win (paused " "$state/.subsuper-escalations")" -eq 1 ] || fail "retry did not queue exactly one stale escalation"
+  pass "failed overdue queue retries after recovery"
+}
+
 test_housekeeping_quiet_overdue_pause_opens_decision() {
   local dir state fakebin task win pane statusf
   dir=$(make_supercase quiet-overdue-pause)
@@ -3605,6 +3629,7 @@ test_housekeeping_captain_held_silenced_only_by_an_away_record
 test_housekeeping_paused_resumed_cleared
 test_housekeeping_busy_declared_wait_matures_its_window
 test_housekeeping_overdue_pause_opens_one_decision_in_away_mode
+test_housekeeping_overdue_queue_failure_retries
 test_housekeeping_overdue_pause_preserves_prior_actionable_event
 test_housekeeping_quiet_overdue_pause_opens_decision
 test_housekeeping_declared_time_controls_pause_recheck

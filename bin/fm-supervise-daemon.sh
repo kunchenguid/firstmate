@@ -1525,8 +1525,8 @@ housekeeping() {  # <state>
         else
           identity=$(stat -c '%d %i' "$state/$task.status" 2>/dev/null)
         fi
-        printf '%s:%s\n' "$identity" "$size" > "$overdue_marker"
         if escalate_add "$state" "stale: $win (paused ${status_age}s, wait overdue - decide or release)"; then
+          printf '%s:%s\n' "$identity" "$size" > "$overdue_marker"
           pending_record=$(status_span_first_actionable_record "$state/$task.status" \
             "$(status_seen_offset "$state" "$task")" '' '' "paused-overdue-$task")
           pending_rc=$?
