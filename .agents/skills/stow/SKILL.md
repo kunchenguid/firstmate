@@ -40,7 +40,7 @@ Markers are compact trailing HTML comments, deliberately cheap because marker by
 
 The tier names say what the pass does with an entry:
 
-- `pinned` - no clock is ever read for it: exempt from decay and from budget eviction, changed only through inspect-then-update when the captain or reality changes it, except that an explicit per-item captain approval may offload it under the flow below.
+- `pinned` - no clock is ever read for it: exempt from decay and from budget eviction, changed only through inspect-then-update when the captain or reality changes it, except that firstmate may relocate it under the pinned offload flow below when its content survives intact at a findable destination the record names.
 - `aging` - it must re-prove itself: an entry whose age is greater than or equal to 30 days since its last-reinforced date is stale, and a stale entry is re-validated (date refreshed) or archived, never kept by inertia alone.
 - `perishable` - it is stored expecting disposal: an entry whose age is greater than or equal to 7 days since its last-reinforced date is stale, and its prose must name a checkable expiry condition, such as a backlog id, a version floor, or a dated expectation.
   An admitted durable entry that cannot name a checkable expiry condition is not `perishable` and must be stored as `aging`.
@@ -124,15 +124,15 @@ Every `/stow` invocation performs this complete pass, even when the session cont
    Budget eviction considers only editable `aging` entries that carry a last-reinforced date and are not pending offload or pending capture; a `<!--g-->` legacy-grace entry is ineligible until its grace cycle resolves, so eviction can neither cancel a promised grace cycle nor prefer just-validated entries over unvalidated ones.
    Convergence precondition: before evicting anything, total the eligible pool and check that archiving all of it would reach the budget; when even that cannot, skip the eviction rung entirely, archive nothing for budget reasons, and carry the concrete inability to the final step, naming the exempt pinned and pending-capture floor that crowds out the budget.
    Automatic processes never move a `pinned` entry: decay clocks, legacy grace cycles, oldest-first budget eviction, immediate budget archiving, and autonomous offload do not apply to it.
-   The sole exception is relocation to a JIT owner after explicit, per-item captain approval under the offload flow below, and that entry remains in memory until its destination is live.
+   The sole exception is firstmate's own relocation of an intact pinned entry to a JIT owner under the offload flow below, and that entry remains in memory until its destination is live.
 8. Run `bin/fm-startup-memory-budget.sh report` again after the complete pass.
-   Finish at or below the effective budget, or open a concrete captain decision before ending the pass.
+   Finish at or below the effective budget, or hold a concrete captain call under the rules below before ending the pass.
    A secondmate must explicitly report `primary-owned-shared-file-alone-exceeds-budget` when the inherited shared file alone exceeds its allowance, because local curation cannot resolve it.
-   Route that constraint to the primary owner and open one concrete captain decision at the primary owning level that names the shortfall, with exactly these options: raise the affected home's effective budget, or explicitly approve the primary owner trimming or offloading each named shared-file entry.
+   Route that constraint to the primary owner, whose firstmate relocates intact shared-file entries under the pinned offload flow below as its own call; only trimming that would drop words carrying meaning, or changing what a preference means, is held for the captain at the primary owning level, under the classes the flow below names.
    When the convergence precondition skipped eviction, report the exempt pinned and pending-capture floor and the remaining shortfall as that concrete inability rather than archiving eligible knowledge that could not close the gap.
    Only after every safe non-pinned archival, consolidation, offload, and eligible eviction action is exhausted may a remaining excess be attributed to pinned safety, authority, or genuine captain-preference entries.
-   In that last-resort case, create one captain-held decision that names the shortfall and each relevant pinned entry, with exactly these options: raise the effective budget, or explicitly approve offloading or trimming a named pinned entry.
-   Route a read-only ownership constraint to its primary owner, and make every other unresolved excess a concrete captain decision that names the safe action still required.
+   In that last-resort case, first relocate every intact pinned entry that has a findable JIT destination under the pinned offload flow below; if the excess remains, hold one captain call through `bin/fm-captain-hold.sh hold <task-id> --class permanent-removal --reason "<reason>"` that names the shortfall and each relevant pinned entry, with exactly these options: raise the effective budget, or permanently trim or remove a named pinned entry.
+   Route a read-only ownership constraint to its primary owner, and hold every other unresolved excess as a captain call only when a captain-hold class fits it; otherwise it is firstmate's to decide, so decide it and name the decision in the receipt.
    Never end a pass over budget as an accepted exception.
 
 A net increase is allowed only for a genuinely new current fact with no stronger owner.
@@ -153,7 +153,7 @@ Archive provenance stays verbose rather than compact because the cold tier is ne
 
 Reasons include `unreinforced <N>d`, `unreinforced <N>p`, `budget oldest-first`, and `legacy-unvalidated`.
 Archiving is a move, not a removal, and recovery is `grep` plus copy back with no tooling.
-Each home keeps its own archive, the archive never cascades, and truncating a grown archive is a captain decision, not a mechanism.
+Each home keeps its own archive, the archive never cascades, and truncating a grown archive is a captain call held with `--class permanent-removal`, not a mechanism.
 
 ## Over-budget offload to JIT-loaded owners
 
@@ -170,7 +170,7 @@ Every test must hold for a candidate:
 
 - Editable source: this home owns the memory file and may relocate the entry; a read-only shared entry is routed to its primary owner instead.
 - Durable: not `perishable`, not stale, and expected to remain true for months.
-- Eligible by authority: only a non-pinned, dated `aging` entry that is not pending offload or pending capture may be autonomously relocated to an already-existing allowed owner, while a `pinned` entry may be proposed only for explicit, per-item captain-approved relocation and can never be archived or autonomously offloaded for budget relief.
+- Eligible by authority: only a non-pinned, dated `aging` entry that is not pending offload or pending capture may be autonomously relocated to an already-existing allowed owner, while a `pinned` entry may be relocated only intact, through the pinned offload flow below, and can never be archived or evicted for budget relief.
 - Conditional: a one-line nameable trigger exists, and a session that never touches that trigger runs no risk from omitting the fact.
 - Fat enough to matter: roughly 50 estimated tokens or more, handled largest-first, because consolidation handles smaller entries.
 - A destination below fits the entry's privacy and visibility.
@@ -180,11 +180,11 @@ Every test must hold for a candidate:
 
 **Hard rule: the stow process never creates or writes a firstmate-repo-tracked skill.**
 **Every skill stow's offload produces for a Firstmate home is user-owned and local, excluded through that active home's repository-local exclude file resolved with `git -C "$home_root" rev-parse --git-path info/exclude`; contributing a lesson to the shared tracked template is a separate deliberate captain action, never automatic.**
-Approved project-level destinations are not produced by stow: they ship normally through that project's own registered delivery path.
+Project-level destinations are not produced by stow: they ship normally through that project's own registered delivery path.
 
 - A user-owned local skill: a directory under `.agents/skills/<freeform-name>/` whose path is appended to the active home clone's repository-local exclude file, never to a `.gitignore`.
   Resolve `home_root` to `$FM_HOME` when it is set and otherwise to the Firstmate code root, and anchor every destination index check, exclude-path lookup, and ignore verification to that root with `git -C "$home_root"`.
-  Before approval and again before migration, validate that the chosen freeform destination under `home_root` is absent from that home's git index and collides with no existing file or directory, and reject the destination if either check fails.
+  Before proposing and again before migration, validate that the chosen freeform destination under `home_root` is absent from that home's git index and collides with no existing file or directory, and reject the destination if either check fails.
   The name is freeform with no user-vs-firstmate naming convention, the skill stays per-home and untracked, and the harness still lists and JIT-loads it because skill discovery scans the filesystem and ignores git status (verified in `docs/verification/stow-memory.md`).
   Its precise, condition-stated description line is its entire trigger; it gets no `AGENTS.md` declaration because `AGENTS.md` is shared tracked material.
   Because this destination is local and untracked, it is also the JIT home for private conditional knowledge that no committed surface may hold.
@@ -196,28 +196,40 @@ Approved project-level destinations are not produced by stow: they ship normally
 Forbidden destinations: any firstmate-repo-tracked skill per the hard rule; firstmate's own `AGENTS.md`, which is always-loaded for every fleet session; `docs/` alone, which is never agent-loaded on demand, though a skill body may point into docs for depth; and any committed surface for private content.
 A local skill exists only in this home, so offloading an entry out of `data/captain-shared.md` removes it from every inheriting home's always-injected memory: the proposal must say so, and the default for shared entries is keep.
 
-### Flow: reduce, approve, migrate, remove
+### Flow: reduce, propose, migrate, remove
 
 1. Reduce non-pinned material now.
    For each eligible non-pinned candidate, record its first line, source file, estimated tokens, one-line trigger, live destination, privacy and visibility verdict, and actual budget relief in the completion receipt.
    Autonomously relocate it only by adding it to an already-existing allowed JIT note, or by routing it through a project's established delivery path to an already-existing allowed project-level destination, then confirming that destination holds the quoted entry before removing the memory entry.
    A destination that needs creation, uncompleted project delivery, or any other future work is not live and cannot count as relief, so continue with the next archival or eviction rung instead of leaving an over-budget proposal pending.
 2. Propose pinned relocation only.
-   For a pinned candidate, append a `proposed-offload` section with the same fields to the completion receipt, create or refresh one durable backlog item with `bin/fm-tasks-axi.sh add`, `bin/fm-tasks-axi.sh show <id> --full`, and `bin/fm-tasks-axi.sh update <id> --body-file <path>` as appropriate, but do not hold it for the captain: an offload moves memory content to another place, so it is reversible and not a captain call.
-   Hold only a step that permanently removes something the captain owns, through `bin/fm-captain-hold.sh hold <task-id> --class permanent-removal --reason "<reason>"`.
-   Preserve each candidate's approval state in that item, and require explicit plain-chat approval for that named item before any migration.
-   If the captain never answers, nothing migrates and the item persists, but it is never treated as budget relief.
-3. Migrate an approved pinned candidate outside this pass.
-   Resolve `home_root` to `$FM_HOME` when it is set and otherwise to the Firstmate code root, then re-validate the approved local-skill destination under that root for both index absence with `git -C "$home_root"` and filesystem collision absence.
+   For a pinned candidate, append a `proposed-offload` section with the same fields to the completion receipt, and create or refresh one durable backlog item with `bin/fm-tasks-axi.sh add`, `bin/fm-tasks-axi.sh show <id> --full`, and `bin/fm-tasks-axi.sh update <id> --body-file <path>` as appropriate.
+   Relocating a pinned entry whose content survives intact at a findable destination is reversible, so it is firstmate's call and needs no captain approval; the item and the receipt must name exactly where the content goes, because a relocation the captain cannot find is indistinguishable from a deletion.
+   Two things are not reversible relocations and stay captain calls, held at once: permanently removing content he owns, including a trim that would drop words carrying meaning, through `bin/fm-captain-hold.sh hold <task-id> --class permanent-removal --reason "<reason>"`, and changing what one of his preferences means, through `--class design-pick`, because his preferences are his to reinterpret.
+   A proposed relocation is never budget relief until its destination is live.
+3. Migrate a proposed pinned candidate outside this pass.
+   Resolve `home_root` to `$FM_HOME` when it is set and otherwise to the Firstmate code root, then re-validate the proposed local-skill destination under that root for both index absence with `git -C "$home_root"` and filesystem collision absence.
    Before creating the destination or writing any private content, resolve the exclude file with `git -C "$home_root" rev-parse --git-path info/exclude`, append the destination directory path to it, and verify the future `SKILL.md` path is ignored with `git -C "$home_root" check-ignore`.
    Only after that verification succeeds, create the destination and write the `SKILL.md` with its precise description trigger, then confirm the skill appears in a fresh session's skill index.
    If any migration step fails, remove the destination content and the exclude rule written by this attempt, leaving neither partial private content nor a partial rule behind.
-   An approved project destination ships as a normal task through that project's registered delivery mode.
+   A project destination ships as a normal task through that project's registered delivery mode.
    The migration's source of truth is the entry as quoted in the proposal.
 4. Remove only once live.
    The memory entry leaves its always-injected file only after the destination is live: the local skill exists with its verified line in the active home's resolved repository-local exclude file, or the project change has landed.
    Until then the entry stays, so knowledge is never in limbo between owners.
    Leave no pointer behind by default, and at most one line only when the destination's discoverability is genuinely doubtful.
+
+## Captain calls
+
+Any ask this skill puts to the captain in chat is filed as a hold at the same moment, through `bin/fm-captain-hold.sh hold <task-id> --class <class> --reason "<reason>"`, because a question that exists only in chat is a silent stall that nothing shows as waiting on him.
+If no class fits, it is not a captain call: decide it as firstmate's call and name the decision in the receipt.
+This list is the check every change to this skill must keep true: each instruction here that asks the captain something appears below with its class, and every other choice in this skill is firstmate's.
+
+- Permanently removing pinned content he owns, or trimming it in a way that drops words carrying meaning, including the last-resort over-budget call in step 8 and a shared-file trim held at the primary owning level: `permanent-removal`.
+- Truncating a grown `data/memory-archive.md`: `permanent-removal`.
+- Changing what one of his preferences means: `design-pick`.
+
+Firstmate's own calls, needing no captain approval: archiving, consolidation, eviction of eligible `aging` entries, offload of non-pinned entries, and relocation of an intact pinned entry to a destination the record names.
 
 ## Knowledge sweep and routing
 
@@ -244,7 +256,7 @@ A local skill exists only in this home, so offloading an entry out of `data/capt
    - File each undone next step as a queued backlog item with a genuine `blocked-by` dependency when applicable.
 4. **Use inspect-then-update.**
    For every retained fact, ask which current statement it supersedes, whether it can be a one-sentence rewrite, and whether a stale entry should be refreshed, archived, or routed to an existing stronger owner.
-   The only graduation moves are promotion to tracked shared material through a PR, folding a learning into the captain-preference destination selected by AGENTS.md, archiving a stale entry to `data/memory-archive.md`, autonomous offload of an eligible non-pinned conditional entry to an already-existing allowed owner through the reduce flow above, captain-approved offload of a pinned durable conditional entry to a JIT-loaded owner executed through the migration step above, or deletion of an entry that is a duplicate or already preserved through a stronger existing owner.
+   The only graduation moves are promotion to tracked shared material through a PR, folding a learning into the captain-preference destination selected by AGENTS.md, archiving a stale entry to `data/memory-archive.md`, autonomous offload of an eligible non-pinned conditional entry to an already-existing allowed owner through the reduce flow above, firstmate's recorded relocation of an intact pinned durable conditional entry to a JIT-loaded owner executed through the migration step above, or deletion of an entry that is a duplicate or already preserved through a stronger existing owner.
    A stale unique fact is never deleted, only archived.
    Do not invent another graduation path.
 
@@ -257,7 +269,7 @@ So before the reset, make sure the important open work you are holding in contex
 Judge for yourself what is important and which record each thing belongs to, and write it through the owner that already governs that record.
 One bound holds: this covers the open work you are actually holding in context, not the records at large.
 It is not a reconciliation of durable records against repository or forge reality, cannot become one on input this volatile, and must never be reported as one.
-Where the right correction is a judgment you cannot make, leave the record alone and raise the question instead of guessing.
+Where the right correction is a judgment you cannot make, leave the record alone and raise the question instead of guessing, under the captain-call rule above: held under its class when it is the captain's, otherwise named in the receipt as firstmate's open question.
 
 ## One-time migration of unmarked entries
 
@@ -279,7 +291,7 @@ Report the outcome in plain captain-facing language with all of these facts:
 - each durable finding filed outside memory and its authoritative owner, including every capture to a declared memory tier;
 - every finding or entry a declared tier should hold but this session could not reach, left carrying its pending-capture marker and named so a session that can reach it captures it;
 - each archived entry's reason, each autonomous offload's live destination and actual relief, and, when a pinned candidate was proposed, the `proposed-offload` section with every candidate's fields;
-- every unresolved exception, including a primary-owned shared-file constraint in a secondmate home, and every concrete captain decision opened for an over-budget result;
+- every unresolved exception, including a primary-owned shared-file constraint in a secondmate home, and every captain call held for an over-budget result, with its class;
 - each open record this pass filed or corrected, and each one it deliberately left alone with the judgment it is waiting on;
 - whether the session is safe to reset, only when all durable findings are captured, no tier-owned finding is waiting on an unreachable declared tier, every open record this session held is filed or explicitly left with its reason, and the post-pass result is within budget with no exception or pending budget decision.
 
@@ -319,7 +331,7 @@ The session is reset-safe only when every home is within its own budget with no 
 ## Scope exclusion: no skill storage by the pass
 
 The stow pass itself must never store, create, or edit a skill as a destination for any finding.
-The exclusion binds the pass as a writer: proposing an offload and letting the migration step execute a captain-approved candidate later is not the pass storing a skill.
-Every Firstmate-home skill that migration produces is user-owned and local under the destinations hard rule, while an approved project-level destination is produced and shipped through that project's registered delivery path, never by stow.
+The exclusion binds the pass as a writer: proposing an offload and letting the migration step execute that proposed candidate later is not the pass storing a skill.
+Every Firstmate-home skill that migration produces is user-owned and local under the destinations hard rule, while a project-level destination is produced and shipped through that project's registered delivery path, never by stow.
 Changing firstmate's tracked `.agents/skills/` or public `skills/` remains a deliberately scoped Firstmate repository task through its pipeline, gated by this home's firstmate-repository publication authority, never a stow product.
-Outside a captain-approved offload, generalizable knowledge still routes to shared tracked material through its pipeline where that authority exists and to `data/` otherwise, and fleet-local knowledge to `data/` or to the declared memory tier that owns its class.
+Outside a pinned offload, generalizable knowledge still routes to shared tracked material through its pipeline where that authority exists and to `data/` otherwise, and fleet-local knowledge to `data/` or to the declared memory tier that owns its class.
