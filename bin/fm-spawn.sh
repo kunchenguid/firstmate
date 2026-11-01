@@ -487,8 +487,9 @@
 #   PI_CODING_AGENT_DIR on its launch line, so it deterministically reads Pi's
 #   default <home>/.pi/agent store whatever the pane daemon exports, where
 #   <home> is the HOME that launch line carries (an Orca launch-env source can
-#   supply a different one), unless a raw launch command names its own agent
-#   root, which then wins.
+#   supply a different one, and a source that leaves HOME unset or empty refuses
+#   the spawn because that launch's root cannot be named), unless a raw launch
+#   command names its own agent root, which then wins.
 #   A present file pins every supported launch of
 #   that runner from this home - ship, scout, local secondmate, raw Claude
 #   command, and relaunch - to the declared account root, and the spawn
@@ -5885,13 +5886,20 @@ spawn_assert_agent_worktree
 
 # The HOME the launch line gives its worker. Only an Orca launch-env source can
 # replace it, and its snapshot is already the shell-quoted NAME=value list that
-# launch line will apply inside the cleared environment. Re-split that list the
-# same way the pane's shell will and take its HOME record; a record that leaves
-# HOME unset or empty makes Pi fall back to the account's passwd home. Every
+# launch line will apply inside the cleared environment. When that source owns
+# HOME - the name is allowlisted - only its own record can set it: a record that
+# leaves HOME unset or empty gives the worker a root Pi derives from the account
+# database or from the worker's own directory, neither of which this spawn can
+# name, so both refuse instead of registering in a store nobody reads. Every
 # other launch forwards the pane's HOME, which this process's own HOME stands in
 # for.
 spawn_launch_effective_home() {
-  local env_args=${1-} word home=${HOME:-} found=0
+  local env_args=${1-} word home=${HOME:-} found=0 source_home=0
+  if [ "$ORCA_LAUNCH_ENV_ENABLED" = 1 ]; then
+    case $'\n'"$LAUNCH_ENV_NAMES"$'\n' in
+    *$'\n'HOME$'\n'*) source_home=1 ;;
+    esac
+  fi
   # shellcheck disable=SC2294 # the list is the launch line's own quoted words.
   eval "set -- $env_args"
   for word in "$@"; do
@@ -5900,14 +5908,10 @@ spawn_launch_effective_home() {
       home=${word#HOME=}
       found=1
       ;;
-    -HOME)
-      home=
-      found=1
-      ;;
     esac
   done
-  if [ "$found" -eq 1 ] && [ -z "$home" ]; then
-    home=$(env -u HOME node -e 'process.stdout.write(require("node:os").homedir())' 2>/dev/null) || return 1
+  if [ "$source_home" = 1 ] && [ "$found" -eq 0 ]; then
+    return 1
   fi
   [ -n "$home" ] || return 1
   printf '%s\n' "$home"
@@ -5977,7 +5981,7 @@ pi | pi-signed)
       spawn_pi_trust_args=(--agent-dir "$WORKER_ACCOUNT_ROOT" "${spawn_pi_trust_args[@]}")
     else
       spawn_pi_trust_home=$(spawn_launch_effective_home "$ORCA_LAUNCH_ENV_ARGS") || {
-        echo "error: could not resolve the HOME an unpinned $HARNESS launch will read, so its Pi trust store cannot be selected; refusing to launch a worker that could park on the trust dialog; $(spawn_endpoint_hint)" >&2
+        echo "error: could not resolve the HOME an unpinned $HARNESS launch will read, so its Pi trust store cannot be selected: that launch carries no HOME or an empty one, and it would read a root this spawn cannot name; refusing to launch a $HARNESS worker that could park on the trust dialog; $(spawn_endpoint_hint)" >&2
         exit 1
       }
       spawn_pi_trust_args=(--agent-dir "$spawn_pi_trust_home/.pi/agent" "${spawn_pi_trust_args[@]}")

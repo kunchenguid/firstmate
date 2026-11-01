@@ -244,6 +244,47 @@ test_write_failure_refuses_loudly() {
   pass "an unwritable store fails loudly and leaves nothing behind"
 }
 
+# A store a dotfile manager or synced folder leaves read-only, or one another
+# account owns, is not a reason to refuse a spawn whose outcome writes nothing:
+# a recorded decision, an `always` policy and a `never` policy all launch
+# against it unchanged.
+test_read_only_store_still_allows_no_write_outcomes() {
+  local rec out store before
+  rec=$(make_case readonly-store)
+  read_case "$rec"
+  store="$AGENT/trust.json"
+  mkdir -p "$AGENT"
+  settings_write "$AGENT" '{"defaultProjectTrust": "ask"}'
+  printf '{\n  "%s": true\n}\n' "$(wt_real)" > "$store"
+  before=$(cat "$store")
+  chmod 444 "$store"
+
+  out=$(run_trust "$WT" "$PROJ")
+  expect_code 0 $? "a read-only store must still count a recorded trust: $out"
+  assert_contains "$out" "already trusted:" "a read-only store must still report the saved decision"
+  [ "$(cat "$store")" = "$before" ] || fail "a recorded trust must leave a read-only store untouched"
+
+  chmod 600 "$store"
+  printf '{}\n' > "$store"
+  before=$(cat "$store")
+  chmod 444 "$store"
+  settings_write "$AGENT" '{"defaultProjectTrust": "always"}'
+  out=$(run_trust "$WT" "$PROJ")
+  expect_code 0 $? "a read-only store must not refuse an 'always' policy: $out"
+  assert_contains "$out" 'defaultProjectTrust to "always"' \
+    "an 'always' policy must still be reported against a read-only store"
+  [ "$(cat "$store")" = "$before" ] || fail "an 'always' policy must not write into a read-only store"
+
+  settings_write "$AGENT" '{"defaultProjectTrust": "never"}'
+  out=$(run_trust "$WT" "$PROJ")
+  expect_code 0 $? "a read-only store must not refuse a 'never' policy: $out"
+  assert_contains "$out" 'defaultProjectTrust to "never"' \
+    "a 'never' policy must still be reported against a read-only store"
+  [ "$(cat "$store")" = "$before" ] || fail "a 'never' policy must not write into a read-only store"
+  chmod 600 "$store"
+  pass "a read-only store still allows the three outcomes that write nothing"
+}
+
 test_malformed_store_refuses_loudly() {
   local rec out store
   rec=$(make_case malformed)
@@ -335,6 +376,21 @@ test_agent_root_resolution() {
   out=$(env -u PI_CODING_AGENT_DIR HOME="$USER_HOME" "$TRUST" "$WT" "$PROJ" 2>&1)
   expect_code 0 $? "the default user-level root must be registered: $out"
   assert_trusted "$USER_HOME/.pi/agent/trust.json" "$(wt_real)" "the default ~/.pi/agent root was not the store root"
+
+  # 4. A spawn process without HOME does not block the root its launch already
+  #    names; only the default root would need that home.
+  out=$(env -u HOME "$TRUST" --agent-dir "$AGENT" "$WT" "$PROJ" 2>&1)
+  expect_code 0 $? "an explicit agent root must register with HOME unset: $out"
+  assert_trusted "$AGENT/trust.json" "$(wt_real)" "--agent-dir did not decide the store root with HOME unset"
+
+  # 5. An empty HOME gives Pi a root under the worker's own directory, which no
+  #    default here can name, so it is refused unless --agent-dir names one.
+  out=$(env HOME= "$TRUST" "$WT" "$PROJ" 2>&1)
+  expect_code 1 $? "an empty HOME with no explicit root must refuse: $out"
+  assert_contains "$out" "HOME is set but empty" "the empty-HOME refusal must name the reason"
+  out=$(env HOME= "$TRUST" --agent-dir "$AGENT" "$WT" "$PROJ" 2>&1)
+  expect_code 0 $? "an explicit agent root must register with an empty HOME: $out"
+  assert_trusted "$AGENT/trust.json" "$(wt_real)" "--agent-dir did not decide the store root with an empty HOME"
   pass "the store root follows the pinned agent dir and else ~/.pi/agent, never the invoking environment"
 }
 
@@ -584,7 +640,13 @@ case "$*" in
     name=
     for a in "$@"; do name=$a; done
     case "$name" in
-      HOME) printf 'HOME=%s\n' "${FM_TEST_TMUX_HOME:?}" ;;
+      HOME)
+        if [ "${FM_TEST_TMUX_HOME_UNSET:-0}" = 1 ]; then
+          printf -- '-HOME\n'
+        else
+          printf 'HOME=%s\n' "${FM_TEST_TMUX_HOME-}"
+        fi
+        ;;
       *) printf '%s=stub\n' "$name" ;;
     esac
     ;;
@@ -657,6 +719,60 @@ EOF
     "the refusal must say it would not launch the worker"
   assert_contains "$out" "$store" "the refusal must name the effective store"
   pass "an unwritable launch-env HOME store refuses the spawn"
+}
+
+# A source that owns HOME but leaves it unset (tmux set-environment -r) gives
+# that launch a Pi agent root derived from the account database, which this spawn
+# cannot select as the launch line's HOME. Registering anywhere else would leave
+# the worker on the dialog this control removes, so the spawn refuses.
+test_pi_spawn_refuses_a_launch_env_without_home() {
+  local rec id out store
+  id=pi-trust-launch-env-no-home
+  rec=$(make_pi_orca_spawn_case spawn-launch-env-no-home "$id")
+  IFS='|' read -r CASE HOME_DIR PROJ_DIR WORKER_HOME FAKEBIN_DIR <<EOF
+$rec
+EOF
+  store="$WORKER_HOME/.pi/agent/trust.json"
+
+  out=$(FM_TEST_ORCA_DIR="$CASE" FM_TEST_TMUX_HOME_UNSET=1 FM_TEST_TMUX_HOME="$WORKER_HOME" \
+    fm_test_run_spawn "$HOME_DIR" "$PROJ_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR" \
+    --mode no-mistakes --yolo off --backend orca)
+  expect_code 1 $? "a launch whose source leaves HOME unset must refuse: $out"
+  assert_contains "$out" "could not resolve the HOME" \
+    "the unset refusal must name what it could not resolve"
+  assert_contains "$out" "refusing to launch a pi worker" \
+    "the unset refusal must say it would not launch the worker"
+  assert_absent "$HOME_DIR/user-home/.pi/agent/trust.json" \
+    "a launch without HOME must not register in the spawning process's store"
+  assert_absent "$store" "a launch without HOME must not register in the supplied home's store"
+  assert_absent "$HOME_DIR/state/$id.meta" "a refused spawn must not publish a task record"
+  pass "an unpinned launch whose source leaves HOME unset refuses instead of registering elsewhere"
+}
+
+# An empty HOME value makes Pi resolve its agent root relative to the worker's
+# own directory, which is no store this spawn can name either.
+test_pi_spawn_refuses_an_empty_launch_env_home() {
+  local rec id out store
+  id=pi-trust-launch-env-empty-home
+  rec=$(make_pi_orca_spawn_case spawn-launch-env-empty-home "$id")
+  IFS='|' read -r CASE HOME_DIR PROJ_DIR WORKER_HOME FAKEBIN_DIR <<EOF
+$rec
+EOF
+  store="$WORKER_HOME/.pi/agent/trust.json"
+
+  out=$(FM_TEST_ORCA_DIR="$CASE" FM_TEST_TMUX_HOME='' \
+    fm_test_run_spawn "$HOME_DIR" "$PROJ_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR" \
+    --mode no-mistakes --yolo off --backend orca)
+  expect_code 1 $? "a launch whose source sets HOME empty must refuse: $out"
+  assert_contains "$out" "could not resolve the HOME" \
+    "the empty refusal must name what it could not resolve"
+  assert_contains "$out" "refusing to launch a pi worker" \
+    "the empty refusal must say it would not launch the worker"
+  assert_absent "$HOME_DIR/user-home/.pi/agent/trust.json" \
+    "a launch with an empty HOME must not register in the spawning process's store"
+  assert_absent "$store" "a launch with an empty HOME must not register in the supplied home's store"
+  assert_absent "$HOME_DIR/state/$id.meta" "a refused spawn must not publish a task record"
+  pass "an unpinned launch whose source sets HOME empty refuses instead of registering elsewhere"
 }
 
 test_pi_spawn_registers_the_worktree() {
@@ -791,6 +907,7 @@ test_trusted_ancestor_is_already_trusted
 test_undecided_ancestor_is_skipped
 test_declined_ancestor_is_refused
 test_write_failure_refuses_loudly
+test_read_only_store_still_allows_no_write_outcomes
 test_malformed_store_refuses_loudly
 test_out_of_scope_paths_are_refused
 test_agent_root_resolution
@@ -803,6 +920,8 @@ test_unreadable_settings_refuses_loudly
 test_pi_spawn_registers_the_worktree
 test_pi_spawn_registers_the_launch_env_home_store
 test_pi_spawn_refuses_an_unwritable_launch_env_home_store
+test_pi_spawn_refuses_a_launch_env_without_home
+test_pi_spawn_refuses_an_empty_launch_env_home
 test_pi_spawn_ignores_the_spawning_process_agent_root
 test_pi_spawn_refuses_when_registration_fails
 test_pi_spawn_respects_the_never_policy

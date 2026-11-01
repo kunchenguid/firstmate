@@ -50,7 +50,9 @@
 # the HOME that launch line carries, which an Orca launch-env source
 # (config/launch-env-tmux-session) can replace with the value it snapshotted,
 # and bin/fm-spawn.sh resolves that home and passes its agent root as
-# --agent-dir too. The one exception is a raw launch command that itself names
+# --agent-dir too; a source that leaves HOME unset or empty names no such home,
+# so bin/fm-spawn.sh refuses that spawn rather than writing an entry its worker
+# would never read. The one exception is a raw launch command that itself names
 # an agent root: its own assignment applies after the unset, so that worker
 # reads the named root and the entry written here is not the one it consults. An
 # operator who needs a different agent root or account selects one with
@@ -92,8 +94,11 @@
 # argument. A primary checkout, a worktree of an unrelated repo, a subdirectory
 # of a worktree, a plain directory, a home directory, and `/` are each refused
 # with a non-zero exit, never a warning and never a silent skip. Only the
-# launching user's own store is written, it must be a regular file this uid
-# owns, every unrelated entry is preserved, and the replacement is atomic.
+# launching user's own store is written: a write must land in a regular file
+# this uid owns and can write, which is checked at the write itself, so an
+# outcome that needs none - a recorded decision, or a `never`/`always` policy -
+# still launches against a read-only or foreign-owned store. Every unrelated
+# entry is preserved, and the replacement is atomic.
 #
 # FAILURE IS LOUD BY DESIGN. fm-spawn.sh treats a non-zero exit here as a spawn
 # refusal, because continuing would launch a worker straight back into the
@@ -155,17 +160,33 @@ WT_REAL=$(real_dir "$WT_ARG") || true
 PROJ_REAL=$(real_dir "$PROJ_ARG") || true
 [ -n "$PROJ_REAL" ] || refuse "project '$PROJ_ARG' is not an accessible directory"
 
-[ -n "${HOME:-}" ] || refuse "HOME is not set, so Pi's agent root cannot be located"
-HOME_REAL=$(real_dir "$HOME") || true
-[ -n "$HOME_REAL" ] || refuse "HOME '$HOME' is not an accessible directory"
+# Pi falls back to the account's passwd home when HOME is unset, so that is the
+# default root then too. A set-but-empty HOME gives Pi a cwd-relative
+# `.pi/agent` instead, which no default root here can name, so it is refused
+# unless --agent-dir names the root the launch already reads.
+HOME_REAL=
+if [ -n "${HOME:-}" ]; then
+  HOME_REAL=$(real_dir "$HOME") || true
+  [ -n "$HOME_REAL" ] || refuse "HOME '$HOME' is not an accessible directory"
+elif [ -z "${HOME+set}" ]; then
+  HOME_PASSWD=$( (unset HOME; printf '%s\n' ~) 2>/dev/null) || true
+  [ -n "$HOME_PASSWD" ] || refuse "HOME is not set and the account's home directory cannot be located, so Pi's default agent root cannot be located"
+  HOME_REAL=$(real_dir "$HOME_PASSWD") || true
+  [ -n "$HOME_REAL" ] || refuse "the account home directory '$HOME_PASSWD' is not an accessible directory"
+fi
 
 # The launch forwards a pinned agent root verbatim, so a relative value would
 # name one directory here and another once the worker resolves it. Refuse rather
 # than guess, the same way bin/fm-claude-trust.sh treats a relative
 # CLAUDE_CONFIG_DIR. An explicit empty --agent-dir is refused by the same case
 # below instead of falling back, because that is a launch root nobody named.
-AGENT_DIR=$HOME_REAL/.pi/agent
-[ "$AGENT_GIVEN" -eq 0 ] || AGENT_DIR=$AGENT_ARG
+AGENT_DIR=
+if [ "$AGENT_GIVEN" -eq 0 ]; then
+  [ -n "$HOME_REAL" ] || refuse "HOME is set but empty, so Pi would place its agent root under the worker's own directory; name the root the launch reads with --agent-dir"
+  AGENT_DIR=$HOME_REAL/.pi/agent
+else
+  AGENT_DIR=$AGENT_ARG
+fi
 case $AGENT_DIR in
 '') refuse "the Pi agent root is empty, so the trust store cannot be located" ;;
 /*) ;;
@@ -173,7 +194,7 @@ case $AGENT_DIR in
 esac
 
 [ "$WT_REAL" != / ] || refuse "'/' is the filesystem root, not a task worktree"
-[ "$WT_REAL" != "$HOME_REAL" ] || refuse "'$WT_REAL' is the home directory, not a task worktree"
+[ -z "$HOME_REAL" ] || [ "$WT_REAL" != "$HOME_REAL" ] || refuse "'$WT_REAL' is the home directory, not a task worktree"
 
 WT_TOP=$(git -C "$WT_REAL" rev-parse --show-toplevel 2>/dev/null) || true
 [ -n "$WT_TOP" ] || refuse "'$WT_REAL' is not inside a git repository"
@@ -216,8 +237,6 @@ if [ -L "$STORE" ]; then
 fi
 if [ -e "$STORE" ]; then
   [ -f "$STORE" ] || refuse "'$STORE' is not a regular file"
-  [ -O "$STORE" ] || refuse "'$STORE' is not owned by this user"
-  [ -w "$STORE" ] || refuse "'$STORE' is not writable"
 fi
 
 # Read-modify-write with a fingerprint check before the rename and a readback
@@ -290,6 +309,26 @@ const defaultPolicy = () => {
   policy = value === "always" ? "always" : value === "never" ? "never" : "ask";
   return policy;
 };
+// Ownership and write permission are enforced here, at the write itself, so an
+// outcome that needs no write is never refused because of them.
+const assertWritable = () => {
+  let stats;
+  try {
+    stats = fs.statSync(store);
+  } catch (err) {
+    if (err.code === "ENOENT") return;
+    throw new Error(`${store} could not be inspected (${err.code}), so trust cannot be recorded`);
+  }
+  if (!stats.isFile()) throw new Error(`${store} is not a regular file`);
+  if (typeof process.getuid === "function" && stats.uid !== process.getuid()) {
+    throw new Error(`${store} is not owned by this user, so trust cannot be recorded`);
+  }
+  try {
+    fs.accessSync(store, fs.constants.W_OK);
+  } catch {
+    throw new Error(`${store} is not writable, so trust cannot be recorded`);
+  }
+};
 const attempt = () => {
   const original = readStore();
   const before = fingerprint(original);
@@ -316,6 +355,7 @@ const attempt = () => {
   if (found !== null) return `declined:${found.path}`;
   const directive = defaultPolicy();
   if (directive !== "ask") return `policy:${directive}`;
+  assertWritable();
   root[target] = true;
   const sorted = {};
   for (const key of Object.keys(root).sort()) sorted[key] = root[key];

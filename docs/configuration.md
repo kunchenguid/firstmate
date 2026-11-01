@@ -1652,6 +1652,7 @@ The source requires `config/launch-env-allowlist` and reads only its names from 
 A listed name missing from the session, an unreadable session, or a malformed selector stops the spawn before Orca creates the worktree or terminal; a name removed with `tmux set-environment -r` stays deliberately unset.
 Source mode also sets `GIT_CONFIG_NOSYSTEM=1`, so a system Git credential helper cannot answer with personal credentials.
 A snapshotted `HOME` is also the home an unpinned Pi or pi-signed worker uses for its default `<home>/.pi/agent` trust store, so the spawn registers its worktree in that store before launch.
+A source that leaves `HOME` unset or empty names no such home, so an unpinned Pi or pi-signed spawn refuses with a named error instead of registering an entry that worker would never read.
 Values travel only in the owner-only staged launch file, never terminal input, and the pane deletes that file before the worker starts.
 If the pane has not run the launch command and deleted the file within 30 seconds, or the spawn is interrupted before then, Firstmate removes the file unless the pane already did, leaves the Orca terminal open, and reports the spawn as failed rather than leaving credentials on disk.
 The source applies to fresh Orca spawns; `--relaunch` is refused on Orca because it has no recovery-grade agent-state classifier.
