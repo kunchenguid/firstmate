@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Enumerate this home's registered secondmates for an internal /stow cascade.
 # Usage: fm-stow-cascade.sh [--help]
-#        fm-stow-cascade.sh --reach <memory-file> <destination>
+#        fm-stow-cascade.sh --reach <memory-file> <survivor>...
 #
 # The internal /stow skill owns curation judgement; this command owns only the
 # mechanical inputs a cascade needs: which homes exist, what each home's own
@@ -43,25 +43,30 @@
 # A secondmate home never cascades: secondmates do not own secondmates, so this
 # command reports the empty cascade there rather than reaching for a registry.
 #
-# --reach names every home that reads <memory-file> (data/captain.md,
-# data/captain-shared.md, or data/learnings.md) today and whether each can
-# reach <destination>, before stow relocates an entry. A relocation some reader
-# cannot reach is a deletion for that reader. This home reads all three files;
-# in a primary home every registered secondmate also reads its inherited copy
-# of data/captain-shared.md. A destination is reachable from a reader when it
-# lies inside that reader's home, or, for a secondmate reading the shared file,
-# when it is this home's data/captain-shared.md itself, the shared surface every
+# --reach answers, per fact, whether every home that reads a fact in
+# <memory-file> (data/captain.md, data/captain-shared.md, or data/learnings.md)
+# today can still read that fact after stow moves or drops an entry. Each
+# <survivor> is a place the fact will still be afterwards: a relocation's
+# destination, the surviving copy a dropped duplicate leaves, or the archive a
+# retirement writes. A reader still reads the fact when any survivor is
+# reachable from it; one that reaches none loses the fact, which is a deletion
+# for that reader. This home reads all three files; in a primary home every
+# registered secondmate also reads its inherited copy of
+# data/captain-shared.md. A survivor is reachable from a reader when it lies
+# inside that reader's home, or, for a secondmate reading the shared file, when
+# it is this home's data/captain-shared.md itself, the shared surface every
 # inheriting home (local or remote) loads as its copy. A local home that fails
-# validation never counts as reaching anything. It prints source=,
-# destination=, one "reader=<id> placement=<p> home=<path> reachable=yes|no"
-# line per reader, and reach=reversible or reach=removal. In a secondmate home
+# validation never counts as reaching anything. It prints source=, one
+# survives= line per survivor, one
+# "reader=<id> placement=<p> home=<path> reachable=yes|no" line per reader, and
+# reach=reversible or reach=removal. In a secondmate home
 # data/captain-shared.md is primary-owned, so --reach refuses it there.
 #
 # Exit status: 0 every home reported cleanly (or there were none), or --reach
-# found every reader able to reach the destination; 3 at least one home
-# reported an exception and every home was still reported; 4 --reach found a
-# reader that cannot reach the destination; 1 the cascade input itself is
-# unusable; 2 invalid use.
+# found every reader still able to read the fact; 3 at least one home reported
+# an exception and every home was still reported; 4 --reach found a reader
+# that would lose the fact; 1 the cascade input itself is unusable; 2 invalid
+# use.
 set -u
 
 usage() {
@@ -71,7 +76,7 @@ usage() {
 MODE=cascade
 case "${1:-}" in
   -h|--help) [ "$#" -eq 1 ] || { usage >&2; exit 2; }; usage; exit 0 ;;
-  --reach) [ "$#" -eq 3 ] || { usage >&2; exit 2; }; MODE=reach ;;
+  --reach) [ "$#" -ge 3 ] || { usage >&2; exit 2; }; MODE=reach ;;
   "") [ "$#" -eq 0 ] || { usage >&2; exit 2; } ;;
   *) usage >&2; exit 2 ;;
 esac
@@ -192,31 +197,38 @@ reach_path() { # <path>
 }
 
 REACH_UNREACHABLE=0
-reach_reader() { # <reader> <placement> <home> <destination-or-empty> [shared-surface]
-  local reachable=no
-  if [ -n "$4" ]; then
-    case "$4/" in "${3%/}"/*) reachable=yes ;; esac
-    [ -z "${5:-}" ] || [ "$4" != "$5" ] || reachable=yes
+REACH_SURVIVORS=()
+reach_reader() { # <reader> <placement> <home> <shared-surface-or-empty> <usable:0|1>
+  local reachable=no survivor
+  if [ "$5" = 1 ]; then
+    for survivor in "${REACH_SURVIVORS[@]}"; do
+      case "$survivor/" in "${3%/}"/*) reachable=yes ;; esac
+      [ -z "$4" ] || [ "$survivor" != "$4" ] || reachable=yes
+    done
   fi
   emit "reader=$1 placement=$2 home=$3 reachable=$reachable"
   [ "$reachable" = yes ] || REACH_UNREACHABLE=$((REACH_UNREACHABLE + 1))
 }
 
-reach_main() { # <memory-file> <destination>
-  local source=${1##*/} dest self shared line
+reach_main() { # <memory-file> <survivor>...
+  local source=${1##*/} survivor resolved self shared line
+  shift
   case "$source" in captain.md|captain-shared.md|learnings.md) ;; *) usage >&2; exit 2 ;; esac
-  case "/$2/" in
-    */../*|*/./*) printf 'error: destination must not contain . or .. segments: %s\n' "$2" >&2; exit 2 ;;
-  esac
-  dest=$(reach_path "$2") || die "destination cannot be resolved: $2"
+  for survivor in "$@"; do
+    case "/$survivor/" in
+      */../*|*/./*) printf 'error: a survivor must not contain . or .. segments: %s\n' "$survivor" >&2; exit 2 ;;
+    esac
+    resolved=$(reach_path "$survivor") || die "survivor cannot be resolved: $survivor"
+    REACH_SURVIVORS+=("$resolved")
+  done
   self=$(CDPATH='' cd -- "$FM_HOME" 2>/dev/null && pwd -P) || die "home cannot be resolved: $FM_HOME"
   if [ "$source" = captain-shared.md ] \
     && { [ -e "$FM_HOME/$SUB_HOME_MARKER" ] || [ -L "$FM_HOME/$SUB_HOME_MARKER" ]; }; then
     die "data/captain-shared.md is primary-owned in a secondmate home; route its relocation to the primary owner"
   fi
   emit "source=data/$source"
-  emit "destination=$dest"
-  reach_reader this-home local "$self" "$dest"
+  for survivor in "${REACH_SURVIVORS[@]}"; do emit "survives=$survivor"; done
+  reach_reader this-home local "$self" '' 1
   if [ "$source" = captain-shared.md ] && { [ -e "$REGISTRY" ] || [ -L "$REGISTRY" ]; }; then
     shared=$(reach_path "$DATA/captain-shared.md") || die "shared memory file cannot be resolved: $DATA/captain-shared.md"
     secondmate_registry_validate_bindings "$REGISTRY" secondmate_registry_path_key \
@@ -226,11 +238,11 @@ reach_main() { # <memory-file> <destination>
       [ -n "$line" ] || continue
       secondmate_registry_parse_line "$line" || die "malformed secondmate registry entry: $line"
       if [ "$SECONDMATE_REGISTRY_REMOTE" -eq 1 ]; then
-        reach_reader "$SECONDMATE_REGISTRY_ID" remote "$SECONDMATE_REGISTRY_HOST:$SECONDMATE_REGISTRY_HOME" "$dest" "$shared"
+        reach_reader "$SECONDMATE_REGISTRY_ID" remote "$SECONDMATE_REGISTRY_HOST:$SECONDMATE_REGISTRY_HOME" "$shared" 1
       elif validate_secondmate_home "$SECONDMATE_REGISTRY_ID" "$SECONDMATE_REGISTRY_HOME"; then
-        reach_reader "$SECONDMATE_REGISTRY_ID" local "$VALIDATED_HOME" "$dest" "$shared"
+        reach_reader "$SECONDMATE_REGISTRY_ID" local "$VALIDATED_HOME" "$shared" 1
       else
-        reach_reader "$SECONDMATE_REGISTRY_ID" local "$SECONDMATE_REGISTRY_HOME" ''
+        reach_reader "$SECONDMATE_REGISTRY_ID" local "$SECONDMATE_REGISTRY_HOME" '' 0
       fi
     done < "$TMP/records"
   fi
@@ -242,7 +254,7 @@ reach_main() { # <memory-file> <destination>
   exit 4
 }
 
-[ "$MODE" != reach ] || reach_main "$2" "$3"
+[ "$MODE" != reach ] || { shift; reach_main "$@"; }
 
 if [ -e "$FM_HOME/$SUB_HOME_MARKER" ] || [ -L "$FM_HOME/$SUB_HOME_MARKER" ]; then
   emit 'role=secondmate'
