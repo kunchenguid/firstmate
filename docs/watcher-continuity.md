@@ -118,7 +118,7 @@ The stale-owner claim occurs only after the existing AFK and supervision-need ga
 ### Claude arm failures
 
 After each non-actionable arm close, the hook rechecks the identity-matched watcher lock and fresh beacon before retrying a bounded number of times.
-The beacon is `state/.last-watcher-beat`, which only the watcher process touches.
+The beacon is `state/.last-watcher-beat`, which the watcher process owns and refreshes as it makes progress.
 
 - A cycle-end failure is benign when that live-watcher predicate is true.
   In that case the hook suppresses the arm output and continues silently.
@@ -426,9 +426,9 @@ The file is size-capped through `FM_WATCH_CYCLE_LOG_MAX_BYTES` and `FM_WATCH_CYC
 
 ### Grace, beacon, and stop signals
 
-The default 300-second grace is unchanged.
-Only the watcher process touches `state/.last-watcher-beat`.
-No helper process can make a wedged watcher appear healthy.
+The beacon grace default follows the poll cadence and never drops below the historical 300 seconds; the shared derivation and its readers belong to [`turnend-guard.md`](turnend-guard.md#guard-grace-and-the-poll-cadence).
+Only the watcher process, and the sweeps it runs inside its own cycle, touch `state/.last-watcher-beat`.
+No helper process can make a wedged watcher appear healthy, because [cycle progress](turnend-guard.md#cycle-progress-keeps-the-beacon-fresh) refresh stops the moment the watcher stops progressing.
 An arm whose own script path sits under a disposable no-mistakes validation checkout (`.no-mistakes/worktrees/`) refuses with the typed failure line before touching any state, because a watcher started there outlives the validation step and keeps writing the real home's state from a checkout about to be deleted.
 Once per poll the watcher checks that its home, its state directory, and its own code root still exist, and exits with a logged reason when one is gone, scoped to itself alone, so a torn-down temporary home or a discarded checkout never leaves an orphan watcher behind.
 The arm applies the same rule to its own ground: when its script, its state directory, or an `FM_HOME` that existed at start disappears, it fails with `watcher: FAILED - arm ground removed: <path> no longer exists` instead of polling on; the `bin/fm-watch-arm.sh` header owns the timing bound.
