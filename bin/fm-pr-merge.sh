@@ -147,11 +147,13 @@
 # unreadable row refuses before that command, so a captain approval must be
 # recorded as an `answer --release` before this entrypoint is invoked. While
 # an away record exists (a quiet-mode record is a present captain, so its
-# merges stay attended: bin/fm-afk-contract.sh mode) any green merge may
+# merges stay attended: bin/fm-afk-contract.sh mode) a green merge may
 # proceed under away authority:
-# the record's presence is the whole mechanical fact, and which merge the
-# captain's away words meant is the supervision session's reading
-# (bin/fm-branch-prompt.sh "Postures"). An unreadable record refuses rather
+# the record's presence is the whole mechanical fact, and which pull requests
+# the captain's away words name is the supervision session's reading
+# (bin/fm-branch-prompt.sh "Postures"). While away, a GitHub merge is also
+# refused before the forge call unless this account's live repository
+# permission can merge. An unreadable record refuses rather
 # than being skipped, neither posture releases a captain hold, and away
 # authority lapses when the record is archived.
 # The authority read and synchronous forge command share the away record's
@@ -1499,6 +1501,30 @@ refuse_github_queue_while_away() {
   return 2
 }
 
+# While away, a merge is handed to GitHub only when this account's live
+# permission on the repository can merge (WRITE, MAINTAIN, or ADMIN), so a pull
+# request in a repository the account cannot merge holds for the return
+# instead of being attempted under away authority. An unreadable permission
+# refuses the same way.
+refuse_github_without_merge_permission_while_away() {
+  local permission
+  [ "$FM_PR_AWAY_POSTURE" = true ] || return 0
+  permission=$(gh repo view "$PR_OWNER/$PR_REPO" --json viewerPermission \
+    --jq '.viewerPermission // ""' 2>/dev/null) || permission=
+  case "$permission" in
+    ADMIN | MAINTAIN | WRITE) return 0 ;;
+    '')
+      printf 'error: GitHub merge refused while away because this account'"'"'s permission on %s/%s could not be read; nothing was handed to the forge\n' \
+        "$PR_OWNER" "$PR_REPO" >&2
+      ;;
+    *)
+      printf 'error: GitHub merge refused while away because this account'"'"'s permission on %s/%s is %s, which cannot merge; nothing was handed to the forge\n' \
+        "$PR_OWNER" "$PR_REPO" "$permission" >&2
+      ;;
+  esac
+  return 2
+}
+
 require_recorded_pr_identity() {
   local existing
   existing=$(grep '^pr=' "$META" | tail -1 | cut -d= -f2- || true)
@@ -1721,6 +1747,7 @@ case "$PROVIDER" in
     require_current_away_authority || away_status=$?
     [ "$away_status" -eq 0 ] || exit "$away_status"
     refuse_github_queue_while_away || exit 2
+    refuse_github_without_merge_permission_while_away || exit 2
     merge_status=0
     merge_output=$(gh pr merge "$PR_NUMBER" --repo "$PR_OWNER/$PR_REPO" \
       --match-head-commit "$FM_PR_MERGE_HEAD" \

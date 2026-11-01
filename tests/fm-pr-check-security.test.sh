@@ -169,6 +169,10 @@ case "${1:-} ${2:-}" in
     [ -z "${FM_TEST_GH_MERGE_HOOK:-}" ] || "$FM_TEST_GH_MERGE_HOOK"
     exit 0
     ;;
+  "repo view")
+    printf 'WRITE\n'
+    exit 0
+    ;;
 esac
 case " $* " in
   *" api repos/"*"/issues/"*"/comments?per_page=100 "*|*" api repos/"*"/pulls/"*"/reviews?per_page=100 "*|*" api repos/"*"/pulls/"*"/comments?per_page=100 "*)
