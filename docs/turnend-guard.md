@@ -214,12 +214,14 @@ A fixed 300-second grace default stops correctly bounding staleness once a home'
 A perfectly healthy watcher mid-wait would then read stale at the edge of every full poll cycle by definition.
 That is exactly what a long-poll home (`FM_POLL=300`) hit against the Claude Stop-hook auto-arm (`bin/fm-claude-stop-autoarm.sh`).
 
-Two readers derive their default grace from the configured poll instead of a bare constant:
+These readers derive their default grace from the configured poll instead of a bare constant:
 
 - That hook.
 - `bin/fm-watch.sh`'s own pre-acquisition staleness check (the "lock held by live pid but heartbeat is stale" refusal).
+- The watcher-health checks in `bin/fm-supervision-host.sh` and `bin/fm-supervision-handoff.sh`.
+- The Pi watch extension's health and repair checks (`.pi/extensions/fm-primary-pi-watch.ts`), which source the home's `config/watch.env` and `config/x-mode.env` so a home-configured `FM_POLL` reaches the derivation.
 
-Both use `max(300, FM_POLL + 60)`.
+All use `max(300, FM_POLL + 60)`.
 The default never drops below the historical 300-second floor for the common short-poll case, but grows with the poll cadence once that cadence would otherwise outrun it.
 `fm_poll_derived_grace` in `bin/fm-wake-lib.sh` is the single owner of that formula.
 
@@ -243,8 +245,8 @@ The arm wrapper and the watcher it may start then judge staleness with the exact
 The reason is the same.
 The daemon's watcher-restart cadence there is not a fixed poll loop, so a flat grace misreads a daemon that is genuinely still cycling as down.
 
-Every other direct `FM_GUARD_GRACE` reader still falls back to the bare 300-second default unless `FM_GUARD_GRACE` is set explicitly in the environment.
-Those readers are:
+Readers that keep the bare constant default still fall back to 300 seconds unless `FM_GUARD_GRACE` is set explicitly in the environment.
+Such readers include:
 
 - `bin/fm-guard.sh`.
 - The strict-watcher checks in `bin/fm-turnend-guard.sh` and its harness-specific wrappers.
