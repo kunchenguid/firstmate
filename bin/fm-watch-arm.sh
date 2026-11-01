@@ -167,7 +167,9 @@ ARM_HOME_EXISTED=0
 WATCH_LOCK="$STATE/.watch.lock"
 BEAT="$STATE/.last-watcher-beat"
 # "Fresh" reuses the guard's threshold so there is one definition of liveness.
-GRACE=${FM_GUARD_GRACE:-300}
+# fm_beacon_grace (bin/fm-wake-lib.sh, sourced above) owns it: an explicit
+# FM_GUARD_GRACE, else the poll-derived default the watcher itself uses.
+GRACE=$(fm_beacon_grace)
 case "$GRACE" in
   ''|*[!0-9]*) GRACE=300 ;;
   *) GRACE=$((10#$GRACE)) ;;

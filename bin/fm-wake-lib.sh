@@ -205,6 +205,60 @@ fm_watcher_stall_bound() {
   printf '%s\n' "${FM_WATCHER_STALL_BOUND:-$((grace * 3))}"
 }
 
+# fm_beacon_grace
+# The beacon-freshness grace every liveness reader judges against: an explicit
+# FM_GUARD_GRACE, else the poll-derived default above. bin/fm-guard.sh,
+# bin/fm-watch-arm.sh, bin/fm-watch.sh, and the turn-end guards all call this so
+# the warning, the replacement arm, and the watcher's own re-arm agree on what
+# "fresh" means instead of each carrying its own flat constant.
+# docs/turnend-guard.md "Guard grace and the poll cadence" owns the rationale.
+fm_beacon_grace() {
+  printf '%s\n' "${FM_GUARD_GRACE:-$(fm_poll_derived_grace)}"
+}
+
+# fm_watch_beacon_tick <beat-path> [min-interval-seconds]
+# Throttled, fork-free refresh of the watcher liveness beacon, for the sweeps a
+# single supervision cycle runs between its one top-of-cycle touch.
+# bin/fm-watch.sh touches the beacon at the top of each cycle, and one cycle's own
+# work can run far longer than the guard grace on a large home: the per-record
+# pending-reply sweep, the per-window stale loop, the per-status heartbeat scan,
+# and the per-check sweep each shell out per unit, so a home with a deep
+# pending-reply backlog ran a single cycle past 590s with the beacon untouched
+# while the watcher was genuinely working (docs/turnend-guard.md "Cycle progress
+# keeps the beacon fresh"). A reader that had no progress signal called that a
+# dead supervisor and refused its own replacement.
+# Anything walking a per-record, per-window, or per-check list inside the cycle
+# calls this between units, so the beacon age tracks real progress instead of
+# whole-cycle length, while a genuinely wedged watcher - the one this beacon
+# exists to catch - stops making progress and its beacon ages exactly as before.
+# The throttle reads $SECONDS, a bash builtin, so a call costs no fork; the
+# interval only bounds how often a tight loop rewrites the file. A forked
+# subshell inherits the last tick, so it never re-touches ahead of the schedule.
+FM_BEACON_TICK_INTERVAL=${FM_BEACON_TICK_INTERVAL:-1}
+_FM_BEACON_TICK_AT=
+fm_watch_beacon_tick() {
+  local beat=$1 interval=${2:-$FM_BEACON_TICK_INTERVAL}
+  case "$interval" in ''|*[!0-9]*|0) interval=1 ;; esac
+  if [ -n "$_FM_BEACON_TICK_AT" ] && [ "$SECONDS" -ge "$_FM_BEACON_TICK_AT" ] \
+    && [ $((SECONDS - _FM_BEACON_TICK_AT)) -lt "$interval" ]; then
+    return 0
+  fi
+  _FM_BEACON_TICK_AT=$SECONDS
+  # Truncation updates the mtime without a fork; the beacon carries no content.
+  : > "$beat" 2>/dev/null || true
+  return 0
+}
+
+# fm_watch_beacon_progress
+# The call a sweep inside a supervision cycle makes: it refreshes whatever
+# beacon the owning watcher exported, and does nothing outside a watcher, so a
+# library that also runs under a test or a one-shot command never invents
+# liveness evidence of its own.
+fm_watch_beacon_progress() {
+  [ -n "${FM_WATCH_BEACON_PATH:-}" ] || return 0
+  fm_watch_beacon_tick "$FM_WATCH_BEACON_PATH"
+}
+
 # fm_watcher_lock_unheld <state>
 # True when the watcher lock or its symlinked owner directory is absent, or when
 # the existing lock records no pid at all. Any non-empty pid remains held here;
@@ -237,7 +291,7 @@ fm_watcher_lock_matches_pid() {
 FM_WATCHER_HEALTHY_PID=
 FM_WATCHER_HEALTHY_IDENTITY=
 fm_watcher_healthy() {
-  local state=$1 watch_path=$2 grace=${3:-${FM_GUARD_GRACE:-300}} home=${4:-$FM_HOME} lockdir beat pid identity age
+  local state=$1 watch_path=$2 grace=${3:-${FM_GUARD_GRACE:-$(fm_poll_derived_grace)}} home=${4:-$FM_HOME} lockdir beat pid identity age
   FM_WATCHER_HEALTHY_PID=
   FM_WATCHER_HEALTHY_IDENTITY=
   lockdir="$state/.watch.lock"
@@ -505,7 +559,7 @@ FM_WATCHER_VERDICT_OK=false
 # shellcheck disable=SC2034 # Read by callers after the function returns.
 FM_WATCHER_VERDICT_REASON=stale-beacon
 fm_watcher_supervision_verdict() {
-  local state=$1 watch=$2 grace=${3:-${FM_GUARD_GRACE:-300}} home=${4:-$FM_HOME}
+  local state=$1 watch=$2 grace=${3:-${FM_GUARD_GRACE:-$(fm_poll_derived_grace)}} home=${4:-$FM_HOME}
   local root=${5:-$FM_ROOT}
   local beat age fresh=false model
   FM_WATCHER_VERDICT_OK=false
