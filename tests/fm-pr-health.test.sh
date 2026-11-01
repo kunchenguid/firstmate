@@ -47,7 +47,7 @@ case "$1 $2" in
     for arg in "$@"; do case "$arg" in number=*) n=${arg#number=} ;; esac; done
     model "$n" | jq '[{data:{repository:{pullRequest:{
       headRefOid:(.graphql_head // .head),isDraft:.draft,baseRef:{target:{oid:.base}},reviewDecision:(.reviewDecision // "APPROVED"),
-      commits:{nodes:[{commit:{oid:(.graphql_head // .head),checkSuites:{nodes:[(.suites // [])[]
+      commits:{nodes:[{commit:{oid:(.graphql_head // .head),checkSuites:{pageInfo:{hasNextPage:(.suites_truncated // false)},nodes:[(.suites // [])[]
         | {conclusion,app:{slug:"github-actions"},workflowRun:{workflow:{name}}}]}}}]},
       reviewRequests:{nodes:[range(.requests) | {requestedReviewer:{__typename:"User"}}]},
       latestReviews:{nodes:[range(.reviews) | {author:{__typename:"User",login:"reviewer"}}]},
@@ -662,6 +662,23 @@ test_maintainer_author_and_approval_states_are_distinct() {
   pass 'maintainer-gated CI, required approval and author action notify distinctly once'
 }
 
+test_truncated_check_suites_are_retried() {
+  local home
+  home=$(new_home truncated-check-suites)
+  task "$home" ship1 pr=https://github.com/o/r/pull/46
+  pr "$home" 46 "$HEAD_A" "$BASE_1" true false
+  set_pr "$home" 46 '.suites = [{name:"CI",conclusion:"ACTION_REQUIRED"}] | .suites_truncated = true'
+  arm "$home"
+  expect_silent "$home" 'an incomplete suite connection must not emit an incomplete result'
+  jq -e '.prs["https://github.com/o/r/pull/46"] == null' "$home/state/pr-health.json" >/dev/null \
+    || fail 'a truncated suite list was accepted as complete'
+  set_pr "$home" 46 '.suites_truncated = false'
+  expect_silent "$home" 'the unsettled read must retry when the suite list is complete'
+  jq -e '.prs["https://github.com/o/r/pull/46"].maintainer_gated | any(.[]; .name == "CI")' \
+    "$home/state/pr-health.json" >/dev/null || fail 'the retried ACTION_REQUIRED suite was not recorded'
+  pass 'truncated suite connections are retried before classification'
+}
+
 test_notifications_drive_reads_with_the_poll_as_fallback() {
   local home before
   home=$(new_home notification-events)
@@ -759,7 +776,7 @@ test_failed_event_read_is_retried() {
 
 failures=0
 for test_name in test_maintainer_author_and_approval_states_are_distinct \
-  test_notifications_drive_reads_with_the_poll_as_fallback test_notifications_keep_events_at_the_saved_timestamp \
+  test_truncated_check_suites_are_retried test_notifications_drive_reads_with_the_poll_as_fallback test_notifications_keep_events_at_the_saved_timestamp \
   test_failed_event_read_is_retried test_full_notification_page_does_not_advance_cursor \
   test_unknown_then_dirty_wakes_once test_dirty_again_at_same_commits_is_silent \
   test_conflict_once_per_latest_commit test_adopted_draft_red_required_check_after_pause_wakes_once \

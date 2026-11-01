@@ -143,7 +143,7 @@ gh_read() { # deadline args... : one bounded forge read
 PR_QUERY='query($owner:String!,$repo:String!,$number:Int!,$endCursor:String){repository(owner:$owner,name:$repo){pullRequest(number:$number){
 headRefOid
 reviewDecision
-commits(last:1){nodes{commit{oid checkSuites(first:100){nodes{conclusion app{slug} workflowRun{workflow{name}}}}}}}
+commits(last:1){nodes{commit{oid checkSuites(first:100){pageInfo{hasNextPage} nodes{conclusion app{slug} workflowRun{workflow{name}}}}}}}
 statusCheckRollup{contexts(first:100,after:$endCursor){pageInfo{hasNextPage endCursor} nodes{__typename
 ... on CheckRun{name status conclusion startedAt isRequired(pullRequestNumber:$number)}
 ... on StatusContext{context state createdAt isRequired(pullRequestNumber:$number)}}}}}}}'
@@ -214,6 +214,7 @@ read_pr() { # url deadline output-directory -> rest.json gql.json
   jq -e '
     select(type == "array" and length > 0)
     | select(all(.[]; .errors == null and .data.repository.pullRequest != null))
+    | select(all(.[]; (.data.repository.pullRequest.commits.nodes[0].commit.checkSuites.pageInfo.hasNextPage // false) == false))
     | map(.data.repository.pullRequest) as $pages
     | select(all($pages[]; .headRefOid == $pages[0].headRefOid))
     | select(($pages[-1].statusCheckRollup.contexts.pageInfo.hasNextPage // false) == false)
