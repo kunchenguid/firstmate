@@ -64,7 +64,7 @@ fm_control_verb_allowed() {  # <verb>
 # section 4's verified-adapter list; an unverified adapter is refused rather
 # than guessed at, exactly as a spawn on it would be.
 fm_control_harnesses() {
-  printf '%s\n' claude codex opencode pi pi-signed grok kimi cursor gemini muse rovo omp agy devin commandcode polytoken cortex kiro
+  printf '%s\n' claude codex opencode pi pi-signed pig grok kimi cursor gemini muse rovo omp agy devin commandcode polytoken cortex kiro
 }
 
 fm_control_harness_supported() {  # <harness>
@@ -88,6 +88,7 @@ fm_control_harness_family() {  # <recorded-harness>
   case "${1-}" in
     pi) printf 'pi' ;;
     pi-signed) printf 'pi-signed' ;;
+    pig) printf 'pig' ;;
     omp) printf 'omp' ;;
     agy) printf 'agy' ;;
     devin) printf 'devin' ;;
@@ -136,7 +137,7 @@ fm_control_harness_supports_kind() {  # <harness> <kind>
 fm_control_interrupt_transport() {  # <harness>
   case "${1-}" in
     polytoken) printf 'rest' ;;
-    claude|codex|opencode|pi|pi-signed|omp|grok|kimi|cursor|gemini|muse|rovo|agy|devin|commandcode) printf 'key' ;;
+    claude|codex|opencode|pi|pi-signed|pig|omp|grok|kimi|cursor|gemini|muse|rovo|agy|devin|commandcode) printf 'key' ;;
     *) return 1 ;;
   esac
 }
@@ -157,7 +158,7 @@ fm_control_interrupt_transport() {  # <harness>
 # composer does nothing (verified live, cortex 1.1.104).
 fm_control_interrupt_key() {  # <harness>
   case "${1-}" in
-    claude|codex|opencode|pi|pi-signed|omp|kimi|cursor|gemini|muse|rovo|agy|devin|commandcode|cortex|kiro) printf 'Escape' ;;
+    claude|codex|opencode|pi|pi-signed|pig|omp|kimi|cursor|gemini|muse|rovo|agy|devin|commandcode|cortex|kiro) printf 'Escape' ;;
     grok) printf 'C-c' ;;
     *) return 1 ;;
   esac
@@ -170,7 +171,7 @@ fm_control_interrupt_key() {  # <harness>
 fm_control_interrupt_repeat() {  # <harness>
   case "${1-}" in
     opencode|devin) printf '2' ;;
-    claude|codex|pi|pi-signed|omp|grok|kimi|cursor|gemini|muse|rovo|agy|commandcode|cortex|kiro) printf '1' ;;
+    claude|codex|pi|pi-signed|pig|omp|grok|kimi|cursor|gemini|muse|rovo|agy|commandcode|cortex|kiro) printf '1' ;;
     *) return 1 ;;
   esac
 }
@@ -189,7 +190,7 @@ fm_control_interrupt_repeat() {  # <harness>
 fm_control_interrupt_arm_signal() {  # <harness>
   case "${1-}" in
     devin) printf '%s' 'esc again to interrupt' ;;
-    claude|codex|opencode|pi|pi-signed|omp|grok|kimi|cursor|gemini|muse|rovo|agy|commandcode|cortex|kiro) ;;
+    claude|codex|opencode|pi|pi-signed|pig|omp|grok|kimi|cursor|gemini|muse|rovo|agy|commandcode|cortex|kiro) ;;
     *) return 1 ;;
   esac
 }
@@ -204,7 +205,7 @@ fm_control_interrupt_arm_signal() {  # <harness>
 fm_control_interrupt_press_gap() {  # <harness>
   case "${1-}" in
     devin|commandcode) printf '0.5' ;;
-    claude|codex|opencode|pi|pi-signed|omp|grok|kimi|cursor|gemini|muse|rovo|agy|cortex|kiro) printf '0.2' ;;
+    claude|codex|opencode|pi|pi-signed|pig|omp|grok|kimi|cursor|gemini|muse|rovo|agy|cortex|kiro) printf '0.2' ;;
     *) return 1 ;;
   esac
 }
@@ -227,7 +228,7 @@ fm_control_interrupt_hazard_signal() {  # <harness>
     # a hazard surface on its path; the /quit exit opens only the slash palette,
     # where Enter accepts the preselected /quit row (verified live).
     polytoken) ;;
-    claude|codex|opencode|pi|pi-signed|omp|grok|kimi|cursor|gemini|muse|rovo|agy|cortex|kiro) ;;
+    claude|codex|opencode|pi|pi-signed|pig|omp|grok|kimi|cursor|gemini|muse|rovo|agy|cortex|kiro) ;;
     *) return 1 ;;
   esac
 }
@@ -251,7 +252,7 @@ fm_control_interrupt_hazard_signal() {  # <harness>
 fm_control_interrupt_clear_key() {  # <harness>
   case "${1-}" in
     muse) printf 'C-u' ;;
-    claude|codex|opencode|pi|pi-signed|omp|grok|kimi|cursor|gemini|rovo|agy|devin|commandcode|cortex|kiro) ;;
+    claude|codex|opencode|pi|pi-signed|pig|omp|grok|kimi|cursor|gemini|rovo|agy|devin|commandcode|cortex|kiro) ;;
     *) return 1 ;;
   esac
 }
@@ -269,7 +270,7 @@ fm_control_interrupt_ack_source() {  # <harness>
     # kiro's stop hook fires on normal completion but, like claude's, not on a
     # manual Escape, and its `Cancelled ...` row is likewise rendered rather than
     # recorded, so fm-control preserves the adapter-owned busy record instead.
-    claude|codex|opencode|pi|pi-signed|omp|grok|kimi|cursor|gemini|rovo|agy|devin|commandcode|cortex|kiro) printf 'none' ;;
+    claude|codex|opencode|pi|pi-signed|pig|omp|grok|kimi|cursor|gemini|rovo|agy|devin|commandcode|cortex|kiro) printf 'none' ;;
     *) return 1 ;;
   esac
 }
@@ -291,6 +292,7 @@ fm_control_exit_command() {  # <harness> [opencode-major]
       ;;
     claude|grok|kimi|cursor|muse|rovo) printf '/exit' ;;
     codex|pi|pi-signed|omp|gemini|agy|devin|commandcode|polytoken|cortex|kiro) printf '/quit' ;;
+    pig) printf '/quit' ;;
     *) return 1 ;;
   esac
 }
