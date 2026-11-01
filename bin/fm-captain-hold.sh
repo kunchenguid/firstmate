@@ -56,7 +56,8 @@
 # readers decode them (bin/fm-hold-reason-lib.sh owns the encoding).
 # `--until` records the captain's own deferral date through `tasks-axi hold
 # --until`, so a "revisit later" answer is stored as a date instead of a live
-# card.
+# card. It pairs with any class: a deferred call keeps its own class, because
+# the deferral says when, not what kind of call it is.
 #
 # TYPED HOLDS. `--class` is required and must name one entry of the closed
 # vocabulary `classes` prints, which mirrors the captain's own authority list:
@@ -69,8 +70,8 @@
 #   product-or-scope-expansion         a genuine product or scope expansion
 #   destructive-irreversible-security  destructive, irreversible, or security-sensitive
 #   discard-unlanded                   discarding unlanded work
-#   deferred-by-captain                his own "later"; requires --until, and
-#                                      --until requires it
+#   deferred-by-captain                a call whose only nature is his own
+#                                      "later"; requires --until
 # A missing or unknown class is refused before anything is written. There is
 # deliberately no class for reversible work, so a reversible call cannot be
 # held for the captain at all; it is firstmate's to decide. The class is
@@ -1169,9 +1170,6 @@ command_hold() {
     || fail "unknown --class $class: the captain-hold classes are $(printf '%s' "$CAPTAIN_HOLD_CLASSES" | tr '\n' ',' | sed 's/,/, /g'); a reversible call has no class and is firstmate's to decide, not a captain hold"
   if [ "$class" = deferred-by-captain ] && [ -z "$until" ]; then
     fail "--class deferred-by-captain records the captain's own later and requires --until YYYY-MM-DD"
-  fi
-  if [ -n "$until" ] && [ "$class" != deferred-by-captain ]; then
-    fail "--until records the captain's own deferral and requires --class deferred-by-captain"
   fi
   [ -n "$reason" ] || fail "reason must not be empty"
   # bin/fm-hold-reason-lib.sh owns the storage constraint and reversible encoding.

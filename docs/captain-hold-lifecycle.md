@@ -64,7 +64,7 @@ Repeat and edge cases:
 - Retries of an active hold preserve its hold-set timestamp.
 - Re-holding released work starts a new timestamped lifecycle.
 - A closed task is refused rather than reopened.
-- `--until` stores the captain's own deferral date through tasks-axi's date gate, and pairs only with `--class deferred-by-captain`.
+- `--until` stores the captain's own deferral date through tasks-axi's date gate, and pairs with any class: a deferred call keeps its own class, and `--class deferred-by-captain` (which requires `--until`) is only for a call whose sole nature is the captain's own later.
 - `--origin` resolves the backend origin identity before writing the hold-set stamp.
   The association lives on its own `Captain hold origin:` body line; [completion inventory checks](#recording-a-reviewed-inventory-complete) own how it is verified.
   The ordering above prevents an interrupted or refused backend hold from publishing the new association, even when an old captain hold is still active or date-expired.
