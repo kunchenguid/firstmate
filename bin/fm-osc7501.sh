@@ -15,10 +15,9 @@
 #   2. the pane must have a writable controlling terminal
 #   3. the terminal must be KNOWN 7501-aware by its environment
 #      (HC_TERMINAL_ID = herdr-core, REX_BLOCK/REX_SESSION = Rex,
-#      TERM_PROGRAM=ghostty) or answer the `OSC 7501 ; ?` capability query;
+#      TERM_PROGRAM=ghostty); unknown terminals silently do nothing.
 #      backend=herdr (old herdr has no protocol support) and backend=t3code
-#      (no task tty) exit before the query, as does an unknown terminal
-#      without a readable tty
+#      (no task tty) never report
 #   4. the harness must not already report natively: Claude Code >= 2.1.295
 #      and Pi >= 1.1.0 send their own records (herdr discussions #5073/#5106,
 #      verified 2026-10-30), so a firstmate record would only fight theirs
@@ -57,12 +56,9 @@
 # previous watcher before any gate, so a relaunch rebinds to the new agent and
 # a natively reporting agent never shares the pane with a stale writer.
 #
-# Safety: the capability query is the ONLY terminal-input read; it runs while
-# the pane shell still owns the tty (before the agent launches), sets
-# -icanon -echo for under a second, restores the saved mode (also when a
-# signal interrupts it), and drains any
-# straggler bytes so nothing escape-shaped reaches the worker's composer or
-# the agent's input later. Every record write is one small write() to the
+# Safety: the reporter never reads terminal input or changes terminal modes.
+# Eligibility uses passive environment markers only. Every record write is
+# one small write() to the
 # pane's tty in the output direction - the same channel fm-rex-marks.sh uses -
 # so it can never be read as typed input.
 #
@@ -74,10 +70,9 @@
 #       [--backend <b> --target <t>]         the reporter loop (internal)
 #   disarm --state <dir>                     retire this terminal's watcher
 #
-# Test seams: FM_OSC7501_TTY replaces /dev/tty as the emit/query device (a
+# Test seams: FM_OSC7501_TTY replaces /dev/tty as the output device (a
 # regular file then captures exactly what a terminal would receive), and
-# FM_OSC7501_INTERVAL/_HEARTBEAT/_QUERY_DS/_PROBE_SECS tune the loop and
-# probes.
+# FM_OSC7501_INTERVAL/_HEARTBEAT/_PROBE_SECS tune the loop and version probe.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -86,7 +81,6 @@ FM_OSC7501_MSG_MAX=${FM_OSC7501_MSG_MAX:-120}
 FM_OSC7501_TITLE_MAX=${FM_OSC7501_TITLE_MAX:-64}
 FM_OSC7501_INTERVAL=${FM_OSC7501_INTERVAL:-2}
 FM_OSC7501_HEARTBEAT=${FM_OSC7501_HEARTBEAT:-45}
-FM_OSC7501_QUERY_DS=${FM_OSC7501_QUERY_DS:-5}
 FM_OSC7501_PROBE_SECS=${FM_OSC7501_PROBE_SECS:-3}
 FM_OSC7501_APP_MAX=32
 FM_OSC7501_AUTH_RE='credential|login|log in|sign[ -]?in|auth|token|password|api key'
@@ -171,49 +165,13 @@ osc_gate() { # <config> <state>
 }
 
 # known-aware environment: the pane runs inside a terminal whose 7501 support
-# is established by its own marker, so no query is needed.
+# is established by its own marker; unknown terminals never report.
 osc_env_aware() {
   [ -n "${HC_TERMINAL_ID:-}" ] && return 0
   [ -n "${REX_BLOCK:-}${REX_SESSION:-}" ] && return 0
   [ "${TERM_PROGRAM:-}" = ghostty ] && return 0
   return 1
 }
-
-# capability query: write `OSC 7501 ; ?`, read the answer, and restore the
-# saved terminal mode. The tty is set VMIN=0 VTIME=FM_OSC7501_QUERY_DS
-# (deciseconds) so each raw read() returns at the first byte or on a bounded
-# silence; `dd` treats that empty read as EOF, which makes the wait
-# version-proof where bash 3.2's own read would block forever. Runs only
-# while the pane shell owns the tty in the foreground, before the agent
-# starts. A second gap-bounded read mops up a response that straddled a
-# silence so no escape-shaped bytes are left for the next program on the
-# pane to read.
-osc_query_restore() { # <signal>: restore the saved mode, then die by it
-  stty "$old" <"$dev" 2>/dev/null
-  trap - "$1"
-  kill -"$1" "$$"
-}
-
-osc_query_supported() {
-  local dev=${FM_OSC7501_TTY:-/dev/tty} old reply='' more
-  old=$(stty -g <"$dev" 2>/dev/null) || return 1
-  trap 'osc_query_restore INT' INT
-  trap 'osc_query_restore TERM' TERM
-  trap 'osc_query_restore HUP' HUP
-  if stty -icanon -echo min 0 time "$FM_OSC7501_QUERY_DS" <"$dev" 2>/dev/null; then
-    printf '\033]7501;?\033\134' >"$dev" 2>/dev/null
-    reply=$(dd bs=1 count=8192 if="$dev" 2>/dev/null)
-    if [ -n "$reply" ]; then
-      more=$(dd bs=1 count=8192 if="$dev" 2>/dev/null)
-      reply="$reply$more"
-    fi
-  fi
-  stty "$old" <"$dev" 2>/dev/null || true
-  trap - INT TERM HUP
-  case "$reply" in *"$FM_OSC7501_QUERY_MATCH"*) return 0 ;; esac
-  return 1
-}
-FM_OSC7501_QUERY_MATCH=$(printf '\033]7501')
 
 # --- native reporting ---------------------------------------------------------
 
@@ -515,17 +473,13 @@ osc_arm() { # --task --harness --backend --kind --state --config [--target] [--a
   pidfile="$state/.osc7501watch-$key"
   osc_retire "$pidfile" || exit 0
   osc_gate "$config" "$state" || exit 0
-  # a pane without a writable tty can never report, and one without a readable
-  # tty can never answer the capability query either
+  # a pane without a writable tty can never report
   local dev=${FM_OSC7501_TTY:-/dev/tty}
   [ -w "$dev" ] || exit 0
   case "$backend" in herdr | t3code) exit 0 ;; esac
-  # a natively reporting agent never sees a query or a competing record
+  osc_env_aware || exit 0
+  # a natively reporting agent never sees a competing record
   osc_native "$harness" "${agent_bin:-$harness}" && exit 0
-  if ! osc_env_aware; then
-    [ -r "$dev" ] || exit 0
-    osc_query_supported || exit 0
-  fi
   FM_OSC7501_WATCHER=1 nohup bash "$SCRIPT_DIR/fm-osc7501.sh" watch \
     --task "$task" --kind "$kind" --state "$state" --harness "$harness" \
     --backend "$backend" --target "$target" \

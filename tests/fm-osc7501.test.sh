@@ -4,7 +4,7 @@
 # behavior: the bytes a real terminal would receive across a pty, the
 # presence or absence of the watcher process, and the records emitted as
 # firstmate's durable signals (status file, busy-state, inbox) change. The
-# pty fake-terminal both captures output and answers the capability query.
+# pty fake-terminal captures output without sending capability replies.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -15,34 +15,26 @@ command -v python3 >/dev/null 2>&1 || { echo "skip: python3 not found (pty fake-
 TMP_ROOT=$(fm_test_tmproot fm-osc7501-tests)
 SCRIPT=$ROOT/bin/fm-osc7501.sh
 DRIVER=$TMP_ROOT/fake-term.py
-Q=$'\033]7501;?\033\\'
 
-# fake-term.py <cap-file> <slave-name-file> <answer|silent> [cmd...] - a
-# terminal emulator on a pty: writes the slave path, appends every output byte
-# to the capture file, and in "answer" mode replies to the OSC 7501 capability
-# query like a 7501-aware terminal would. A trailing command runs as the
+# fake-term.py <cap-file> <slave-name-file> [cmd...] - a terminal emulator
+# on a pty: writes the slave path and captures output. A command runs as the
 # pane's shell: its own session with the pty as controlling terminal, so its
 # /dev/tty is this terminal. Runs until killed.
 cat >"$DRIVER" <<'PY'
 import fcntl, os, pty, select, sys, termios, time
 
-cap_path, slave_path, mode = sys.argv[1], sys.argv[2], sys.argv[3]
+cap_path, slave_path = sys.argv[1:3]
 master, slave = pty.openpty()
 with open(slave_path, "w") as f:
     f.write(os.ttyname(slave))
-if len(sys.argv) > 4 and os.fork() == 0:
+if len(sys.argv) > 3 and os.fork() == 0:
     os.close(master)
     os.setsid()
     fcntl.ioctl(slave, termios.TIOCSCTTY, 0)
     for fd in (0, 1, 2):
         os.dup2(slave, fd)
-    os.execvp(sys.argv[4], sys.argv[4:])
+    os.execvp(sys.argv[3], sys.argv[3:])
 cap = open(cap_path, "ab", buffering=0)
-seen = 0
-query = b"\x1b]7501;?\x1b\\"
-reply = b"\x1b]7501;state=idle\x1b\\"
-answered = False
-buf = b""
 while True:
     r, _, _ = select.select([master], [], [], 0.1)
     if not r:
@@ -54,20 +46,15 @@ while True:
     if not data:
         break
     cap.write(data)
-    buf += data
-    if mode == "answer" and not answered and query in buf:
-        os.write(master, reply)
-        answered = True
-        buf = b""
 PY
 
-# start_term <dir> <answer|silent> -> sets TERM_SLAVE + TERM_CAP, leaves the
+# start_term <dir> [cmd...] -> sets TERM_SLAVE + TERM_CAP, leaves the
 # emulator running. TERM_PID kills it; run from a test's subshell scope.
-start_term() { # <dir> <mode> [cmd...]
-  local dir=$1 mode=$2
-  shift 2
+start_term() { # <dir> [cmd...]
+  local dir=$1
+  shift
   : >"$dir/cap"
-  python3 "$DRIVER" "$dir/cap" "$dir/slave" "$mode" "$@" &
+  python3 "$DRIVER" "$dir/cap" "$dir/slave" "$@" &
   TERM_PID=$!
   local i=0
   while [ ! -s "$dir/slave" ] && [ "$i" -lt 50 ]; do sleep 0.1; i=$((i + 1)); done
@@ -103,34 +90,48 @@ wait_cap() { # <needle-file-content> <cap> <seconds>: fixed string appears
   done
 }
 
-# --- capability query -------------------------------------------------------
+# --- passive terminal eligibility -------------------------------------------
 
-# An unaware terminal (never answers the query) gets exactly one probe and no
-# watcher; the probe is the only byte the terminal ever sees.
-t_query_unaware_terminal_silent() {
+# Contract: unknown terminals get no bytes, no watcher, and no input reads.
+# Queue actual worker input before arm; the next consumer must receive it
+# unchanged. This rejects the former capability probe consuming typed input.
+t_unknown_terminal_preserves_input() {
   local d=$TMP_ROOT/unaware
   mkhome "$d"
-  start_term "$d" silent
-  env "${CLEAN_UNSET[@]}" FM_OSC7501_TTY="$TERM_SLAVE" bash "$SCRIPT" arm \
-    --task t1 --harness opencode --backend tmux --kind ship \
-    --state "$d/state" --config "$d/config"
-  sleep 0.3
-  stop_term
-  assert_present "$d/cap" "unaware: capture file"
-  local cap
-  cap=$(cat "$d/cap")
-  assert_equals "$Q" "$cap" "unaware terminal sees only the one capability probe"
+  if ! env "${CLEAN_UNSET[@]}" python3 - "$SCRIPT" "$d" <<'PYTEST'
+import os, pty, select, subprocess, sys, termios
+script, home = sys.argv[1:]
+master, slave = pty.openpty()
+mode = termios.tcgetattr(slave)
+mode[3] &= ~termios.ECHO
+termios.tcsetattr(slave, termios.TCSANOW, mode)
+typed = b"worker input must survive startup\n"
+os.write(master, typed)
+env = dict(os.environ, FM_OSC7501_TTY=os.ttyname(slave))
+subprocess.run(["bash", script, "arm", "--task", "t1", "--harness", "opencode",
+                "--backend", "tmux", "--kind", "ship", "--state", home + "/state",
+                "--config", home + "/config"], env=env, check=True, timeout=5)
+assert termios.tcgetattr(slave) == mode, "arm changed terminal modes"
+assert not select.select([master], [], [], 0.3)[0], "unknown terminal received output"
+assert select.select([slave], [], [], 0.3)[0], "arm consumed queued worker input"
+assert os.read(slave, 4096) == typed, "arm corrupted queued worker input"
+os.close(slave)
+os.close(master)
+PYTEST
+  then
+    fail "unknown terminal: output or input contract violated"
+  fi
   [ -z "$(ls "$d/state"/.osc7501watch-* 2>/dev/null)" ] || fail "unaware terminal spawned a watcher"
-  pass "capability query: silent terminal gets one probe, no watcher"
+  pass "unknown terminal: no output or watcher, queued worker input untouched"
 }
 
-# A terminal that answers the query arms the watcher, which reports the
-# worker's state derived from the busy-state signal.
-t_query_answered_arms_watcher() {
+# A passive Ghostty marker arms the watcher, which reports the worker's
+# state derived from the busy-state signal without a terminal query.
+t_ghostty_arms_watcher() {
   local d=$TMP_ROOT/aware
   mkhome "$d"
-  start_term "$d" answer
-  env "${CLEAN_UNSET[@]}" FM_OSC7501_TTY="$TERM_SLAVE" bash "$SCRIPT" arm \
+  start_term "$d"
+  env "${CLEAN_UNSET[@]}" TERM_PROGRAM=ghostty FM_OSC7501_TTY="$TERM_SLAVE" bash "$SCRIPT" arm \
     --task t2 --harness opencode --backend tmux --kind ship \
     --state "$d/state" --config "$d/config"
   assert_present "$(echo "$d/state"/.osc7501watch-* | head -1)" "aware: watcher pidfile recorded"
@@ -141,7 +142,7 @@ t_query_answered_arms_watcher() {
   wait_cap "$(printf 'title=%s' "$(printf 'fm-t2' | base64 | tr -d '\n')")" "$d/cap" 10 \
     || fail "aware: working record missing title=fm-t2"
   stop_term
-  pass "capability query: answering terminal arms watcher emitting working"
+  pass "passive detection: Ghostty arms watcher emitting working"
 }
 
 # --- emission / state mapping ------------------------------------------------
@@ -151,7 +152,7 @@ t_query_answered_arms_watcher() {
 t_status_transitions_and_final_done() {
   local d=$TMP_ROOT/trans
   mkhome "$d"
-  start_term "$d" answer
+  start_term "$d"
   local holder
   sleep 300 &
   holder=$!
@@ -181,7 +182,7 @@ t_status_transitions_and_final_done() {
 t_final_idle_after_working() {
   local d=$TMP_ROOT/park
   mkhome "$d"
-  start_term "$d" answer
+  start_term "$d"
   sleep 300 &
   local holder=$!
   busy_rec "$d/state" t4 busy
@@ -214,8 +215,8 @@ mkfake() { # <dir> <name> <version-out>
 t_native_claude_skips_everything() {
   local d=$TMP_ROOT/native
   mkhome "$d"; mkfake "$d" claude 'claude 2.1.295'
-  start_term "$d" answer
-  env "${CLEAN_UNSET[@]}" FM_OSC7501_TTY="$TERM_SLAVE" \
+  start_term "$d"
+  env "${CLEAN_UNSET[@]}" HC_TERMINAL_ID=x FM_OSC7501_TTY="$TERM_SLAVE" \
     PATH="$d/bin:$PATH" bash "$SCRIPT" arm \
     --task t5 --harness claude --backend tmux --kind ship \
     --state "$d/state" --config "$d/config" --agent-bin claude
@@ -232,8 +233,8 @@ t_native_claude_skips_everything() {
 t_old_claude_uses_generic() {
   local d=$TMP_ROOT/oldclaude
   mkhome "$d"; mkfake "$d" claude 'claude 1.9.9'
-  start_term "$d" answer
-  env "${CLEAN_UNSET[@]}" FM_OSC7501_TTY="$TERM_SLAVE" \
+  start_term "$d"
+  env "${CLEAN_UNSET[@]}" HC_TERMINAL_ID=x FM_OSC7501_TTY="$TERM_SLAVE" \
     PATH="$d/bin:$PATH" bash "$SCRIPT" arm \
     --task t6 --harness claude --backend tmux --kind ship \
     --state "$d/state" --config "$d/config" --agent-bin claude
@@ -252,7 +253,7 @@ t_inplace_upgrade_reprobes_native() {
   printf '#!/usr/bin/env bash\necho "pi 1.0.9"\n' >"$d/install/pi"
   chmod +x "$d/install/pi"
   ln -s "$d/install/pi" "$d/bin/pi"
-  start_term "$d" answer
+  start_term "$d"
   env "${CLEAN_UNSET[@]}" FM_OSC7501_TTY="$TERM_SLAVE" HC_TERMINAL_ID=x PATH="$d/bin:$PATH" \
     bash "$SCRIPT" arm --task t22 --harness pi --backend tmux --kind ship \
     --state "$d/state" --config "$d/config" --agent-bin pi
@@ -269,42 +270,13 @@ t_inplace_upgrade_reprobes_native() {
   pass "native gate: an in-place harness upgrade is re-probed at the next launch"
 }
 
-# --- no corruption ------------------------------------------------------------
-
-# A terminal that answers late-ish still has its whole reply consumed inside
-# the query window: whatever a program reads next sees no escape-shaped
-# leftovers. The emulator's reply is written as one burst; a second read
-# after arm must get nothing.
-t_reply_drained_for_next_program() {
-  local d=$TMP_ROOT/drain
-  mkhome "$d"
-  start_term "$d" answer
-  env "${CLEAN_UNSET[@]}" FM_OSC7501_TTY="$TERM_SLAVE" bash "$SCRIPT" arm \
-    --task t7 --harness opencode --backend tmux --kind ship \
-    --state "$d/state" --config "$d/config"
-  # the arm armed a watcher; everything since must be complete records only:
-  # each sequence is ESC ] 7501 ; ... ESC \ with no bare ESC or split junk.
-  sleep 1
-  stop_term
-  local bad
-  bad=$(python3 - "$d/cap" <<'PY'
-import re, sys
-data = open(sys.argv[1], "rb").read()
-stripped = re.sub(rb"\x1b\]7501;[^\x1b]*\x1b\\", b"", data)
-sys.stdout.write("clean" if stripped == b"" else repr(stripped))
-PY
-)
-  assert_equals "clean" "$bad" "output stream contains only complete OSC 7501 records"
-  pass "no corruption: capture holds only whole OSC 7501 records, no stray escapes"
-}
-
 # --- config gate ---------------------------------------------------------------
 
 t_config_off_disables() {
   local d=$TMP_ROOT/cfgoff
   mkhome "$d"; printf 'off\n' >"$d/config/osc7501-status"
-  start_term "$d" answer
-  env "${CLEAN_UNSET[@]}" FM_OSC7501_TTY="$TERM_SLAVE" bash "$SCRIPT" arm \
+  start_term "$d"
+  env "${CLEAN_UNSET[@]}" HC_TERMINAL_ID=x FM_OSC7501_TTY="$TERM_SLAVE" bash "$SCRIPT" arm \
     --task t8 --harness opencode --backend tmux --kind ship \
     --state "$d/state" --config "$d/config"
   sleep 0.3
@@ -315,12 +287,12 @@ t_config_off_disables() {
   pass "config gate: osc7501-status=off disables arm entirely"
 }
 
-# A known-aware environment (herdr-core's HC_TERMINAL_ID) skips the query and
-# still arms the watcher: no probe bytes on the wire.
-t_known_aware_skips_query() {
+# A known-aware environment (herdr-core's HC_TERMINAL_ID) arms the watcher
+# without sending any probe bytes on the wire.
+t_hc_marker_arms_watcher() {
   local d=$TMP_ROOT/hc
   mkhome "$d"
-  start_term "$d" silent
+  start_term "$d"
   env -u HERDR_ENV -u HERDR_PANE_ID -u HERDR_SESSION -u HERDR_SOCKET_PATH \
     -u HERDR_TAB_ID -u HERDR_WORKSPACE_ID -u REX_BLOCK -u REX_SESSION \
     -u TERM_PROGRAM \
@@ -365,7 +337,7 @@ t_concurrent_panes_keep_their_reporters() {
   for pane in a b; do
     mkdir -p "$d/$pane"
     # shellcheck disable=SC2016
-    start_term "$d/$pane" silent env "${CLEAN_UNSET[@]}" HC_TERMINAL_ID="$pane" FM_OSC7501_INTERVAL=1 \
+    start_term "$d/$pane" env "${CLEAN_UNSET[@]}" HC_TERMINAL_ID="$pane" FM_OSC7501_INTERVAL=1 \
       bash -c 'echo $$ >"$5"; bash "$1" arm --task "$4" --harness opencode --backend tmux --kind ship --state "$2" --config "$3"; exec sleep 300' \
       _ "$SCRIPT" "$d/state" "$d/config" "t$pane" "$d/$pane/shell"
     eval "$pane=\$TERM_PID"
@@ -387,9 +359,9 @@ t_concurrent_panes_keep_their_reporters() {
 t_disarm_after_agent_exit_parks_idle() {
   local d=$TMP_ROOT/disarm
   mkhome "$d"
-  start_term "$d" answer
+  start_term "$d"
   busy_rec "$d/state" t10 busy
-  env "${CLEAN_UNSET[@]}" FM_OSC7501_TTY="$TERM_SLAVE" FM_OSC7501_INTERVAL=1 bash "$SCRIPT" arm \
+  env "${CLEAN_UNSET[@]}" HC_TERMINAL_ID=x FM_OSC7501_TTY="$TERM_SLAVE" FM_OSC7501_INTERVAL=1 bash "$SCRIPT" arm \
     --task t10 --harness opencode --backend tmux --kind ship \
     --state "$d/state" --config "$d/config"
   local wpid
@@ -411,7 +383,7 @@ t_disarm_after_agent_exit_parks_idle() {
 t_rearm_retires_previous_reporter() {
   local d=$TMP_ROOT/rearm
   mkhome "$d"; mkfake "$d" claude 'claude 2.1.295'
-  start_term "$d" answer
+  start_term "$d"
   env "${CLEAN_UNSET[@]}" FM_OSC7501_TTY="$TERM_SLAVE" HC_TERMINAL_ID=x bash "$SCRIPT" arm \
     --task t11 --harness opencode --backend tmux --kind ship \
     --state "$d/state" --config "$d/config"
@@ -432,16 +404,12 @@ t_rearm_retires_previous_reporter() {
   pass "lifecycle: relaunch retires the previous reporter before native/off gates"
 }
 
-tty_input_mode() { # <tty> -> canonical-input and echo flags as stty names them
-  stty -a <"$1" | tr -s ' \t;' '\n' | grep -Ex -- '-?(icanon|echo)' | sort
-}
-
 # Cursor arms no busy-state record; its own conversation transcript is the
 # activity source.
 t_cursor_transcript_drives_activity() {
   local d=$TMP_ROOT/cursor proj conv
   mkhome "$d"
-  start_term "$d" answer
+  start_term "$d"
   sleep 300 &
   local holder=$!
   proj=$d/cursor-projects/p1
@@ -551,7 +519,7 @@ t_paused_reads_from_busy_state() {
 t_retire_waits_for_slow_reporter() {
   local d=$TMP_ROOT/slow first second i
   mkhome "$d"
-  start_term "$d" answer
+  start_term "$d"
   for i in $(seq 1 100); do
     printf 'needs-decision [at=%s] [key=k%s]: q%s\nresolved [at=%s] [key=k%s]: a%s\n' "$i" "$i" "$i" "$i" "$i" "$i"
   done >"$d/state/t17.status"
@@ -576,34 +544,12 @@ t_retire_waits_for_slow_reporter() {
   pass "lifecycle: relaunch confirms the old reporter is gone before arming"
 }
 
-# A launch interrupted while the capability query holds the terminal raw
-# must leave the pane's canonical input and echo as it found them.
-t_interrupted_query_restores_mode() {
-  local d=$TMP_ROOT/intr before after apid
-  mkhome "$d"
-  start_term "$d" silent
-  before=$(tty_input_mode "$TERM_SLAVE")
-  env "${CLEAN_UNSET[@]}" FM_OSC7501_TTY="$TERM_SLAVE" FM_OSC7501_QUERY_DS=20 bash "$SCRIPT" arm \
-    --task t13 --harness opencode --backend tmux --kind ship \
-    --state "$d/state" --config "$d/config" &
-  apid=$!
-  wait_cap "$Q" "$d/cap" 60 || fail "interrupt: query never sent"
-  kill -TERM "$apid"
-  wait "$apid" 2>/dev/null || true
-  after=$(tty_input_mode "$TERM_SLAVE")
-  assert_equals "$(printf 'echo\nicanon')" "$before" "pane starts canonical with echo"
-  assert_equals "$before" "$after" "interrupted query restores canonical input and echo"
-  [ -z "$(ls "$d/state"/.osc7501watch-* 2>/dev/null)" ] || fail "interrupt: an interrupted arm spawned a watcher"
-  stop_term
-  pass "query safety: an interrupted probe restores the terminal mode"
-}
-
 # An hc terminal opened from inside a herdr session inherits HERDR_* markers;
 # its own HC_TERMINAL_ID still makes it a known-aware reporter.
 t_hc_terminal_with_inherited_herdr_markers() {
   local d=$TMP_ROOT/hcinherit
   mkhome "$d"
-  start_term "$d" silent
+  start_term "$d"
   env "${CLEAN_UNSET[@]}" HC_TERMINAL_ID=t-2 HERDR_ENV=1 HERDR_PANE_ID=p-1 \
     FM_OSC7501_TTY="$TERM_SLAVE" bash "$SCRIPT" arm \
     --task t14 --harness opencode --backend hc --kind ship \
@@ -618,16 +564,15 @@ t_hc_terminal_with_inherited_herdr_markers() {
 }
 
 fm_test_run \
-  t_query_unaware_terminal_silent \
-  t_query_answered_arms_watcher \
+  t_unknown_terminal_preserves_input \
+  t_ghostty_arms_watcher \
   t_status_transitions_and_final_done \
   t_final_idle_after_working \
   t_native_claude_skips_everything \
   t_old_claude_uses_generic \
   t_inplace_upgrade_reprobes_native \
-  t_reply_drained_for_next_program \
   t_config_off_disables \
-  t_known_aware_skips_query \
+  t_hc_marker_arms_watcher \
   t_concurrent_panes_keep_their_reporters \
   t_disarm_after_agent_exit_parks_idle \
   t_rearm_retires_previous_reporter \
@@ -636,5 +581,4 @@ fm_test_run \
   t_turn_then_terminal_line \
   t_paused_reads_from_busy_state \
   t_retire_waits_for_slow_reporter \
-  t_interrupted_query_restores_mode \
   t_hc_terminal_with_inherited_herdr_markers
