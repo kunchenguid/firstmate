@@ -182,7 +182,11 @@ emit_error() {
   local reason=$1
   if [ "$REQUEST_SENT" -eq 1 ]; then
     if [ "$RESPONSE_VALID" -eq 1 ]; then
-      record_resolution "$(jq -c '{status: "error", rule: .answers.rule.choice, confidence: .answers.rule.confidence, probabilities: .answers.rule.probabilities}' "$RESP_FILE")"
+      record_resolution "$(jq -c --slurpfile cfg "$RULES" --arg none_criterion "$DEFAULT_WHEN" '
+        .answers.rule.choice as $c
+        | {status: "error", rule: $c,
+           rule_when: (if ($c | test("^rule_[1-9][0-9]*$")) then ($cfg[0].rules // [])[($c | ltrimstr("rule_") | tonumber) - 1].when else $none_criterion end | .[0:60]),
+           confidence: .answers.rule.confidence, probabilities: .answers.rule.probabilities}' "$RESP_FILE")"
     else
       record_resolution '{"status":"error"}'
     fi

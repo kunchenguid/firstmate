@@ -1963,6 +1963,7 @@ record=$(cat "$RECORD")
 assert_equals 'error' "$(jq -r .status <<<"$record")" "a late error is recorded as error"
 assert_equals 'rule_4' "$(jq -r .rule <<<"$record")" "an error after a valid answer keeps the chosen rule"
 assert_equals '0.9' "$(jq -r .confidence <<<"$record")" "an error after a valid answer keeps the confidence"
+assert_equals "$(jq -r '.rules[3].when[0:60]' "$RULES")" "$(jq -r .rule_when <<<"$record")" "an error after a valid answer keeps the rule text"
 
 rm -rf "$RECORD" "$HOME_DIR/.env"
 reset_log
@@ -1974,11 +1975,11 @@ assert_absent "$RECORD" "a usage error appends nothing"
 
 reset_log
 TYPESAFE_API_KEY=$KEY run code out err "$BRIEF" --project pager
-expected_out=${out//latency_ms: [0-9]*/latency_ms: N}
+expected_out=$(sed -E 's/latency_ms: [0-9]+/latency_ms: N/' <<<"$out")
 rm -f "$RECORD"; mkdir -p "$RECORD"
 TYPESAFE_API_KEY=$KEY run code out err "$BRIEF" --project pager
 expect_code 0 "$code" "an unwritable record keeps the exit code"
-assert_equals "$expected_out" "${out//latency_ms: [0-9]*/latency_ms: N}" "an unwritable record keeps stdout"
+assert_equals "$expected_out" "$(sed -E 's/latency_ms: [0-9]+/latency_ms: N/' <<<"$out")" "an unwritable record keeps stdout"
 assert_equals "dispatch-resolve: could not write $RECORD" "$err" "an unwritable record warns once on stderr"
 rm -rf "$RECORD"
 pass "resolution record: one line without brief text, nothing when off, write failures change nothing"
