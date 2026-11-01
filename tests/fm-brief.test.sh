@@ -919,7 +919,7 @@ test_secondmate_marked_request_reporting_contract() {
     "secondmate charter lost decisions, blockers, failures, ready outcomes, or landed work"
   # Under standing merge authority nothing is ever "ready for review", so the
   # landed merge is the trigger a charter without this line silently omits.
-  assert_grep 'a merge Firstmate performed under standing merge authority and one the captain merged on the forge' "$brief" \
+  assert_grep 'a merge you performed yourself under standing merge authority and one the captain merged on the forge' "$brief" \
     "secondmate charter did not name a landed merge as a reporting trigger"
   assert_grep 'States: working, needs-decision, blocked, paused, done, failed.' "$brief" \
     "secondmate charter changed the preserved status vocabulary"
