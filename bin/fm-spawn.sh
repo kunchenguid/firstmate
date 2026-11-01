@@ -506,6 +506,9 @@
 #     __CLAUDEADDDIRS__ quoted --add-dir flags granting exactly this task's
 #                  Firstmate channel directories (claude_add_dirs_flag below;
 #                  supplies its own trailing space, empty never used)
+#     __CLAUDENAME__ the shell-quoted claude --name value, "<project> · <task>"
+#                  with " [scout]" on a scout (claude_session_name below);
+#                  crewmate and scout launches only
 #     __CLAUDESETTINGS__ the single claude --settings value: a quoted inline
 #                  JSON object for a crewmate or scout, or a quoted path to
 #                  state/<task-id>.claude-settings.json for a secondmate
@@ -2499,6 +2502,19 @@ shell_quote() {
   printf "'"
 }
 
+# The Claude session display name, which Remote Control also uses for the
+# session: "<project> · <task>", with the project prefix dropped from a task id
+# that already starts with it, and " [scout]" appended for a scout. The task id
+# and the project directory's basename are its only inputs.
+claude_session_name() {  # <project> <task-id> <kind>
+  local project=$1 task=$2 kind=$3
+  case "$task" in
+  "$project"-?*) task=${task#"$project"-} ;;
+  esac
+  [ "$kind" = scout ] && task="$task [scout]"
+  printf '%s · %s' "$project" "$task"
+}
+
 resolve_pi_executable() {
   local candidate dir
   candidate=$(type -P -- "$1" 2>/dev/null) || return 1
@@ -2718,6 +2734,10 @@ launch_template() {
   # pane on a one-time interactive question - while a "Block" answer anywhere
   # on the machine writes permissions.blockReadsOutsideWorkingDirectories
   # into user settings and refuses those reads under bypass too.
+  # --name gives a crewmate or scout the session name __CLAUDENAME__ builds.
+  # Remote Control lists the session under that name instead of an
+  # auto-generated one, and --name never turns Remote Control on: only the
+  # captain's own setting does.
   # A Claude task worker receives the brief and later steering as file-shaped
   # content, which is otherwise indistinguishable from indirect prompt
   # injection. Establish only those two Firstmate-owned task channels through
@@ -2727,6 +2747,7 @@ launch_template() {
   claude)
     printf '%s' 'CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false CLAUDE_CODE_SEND_FEEDBACK=0 claude __CLAUDEPERMFLAG__ __CLAUDEADDDIRS__--settings __CLAUDESETTINGS__ '
     if [ "$kind" != secondmate ]; then
+      printf '%s' '--name __CLAUDENAME__ '
       printf '%s' "--append-system-prompt '$(spawn_claude_task_channel_statement)' "
     fi
     # Claude Code strips invisible characters, U+2063 included, from the
@@ -7187,6 +7208,11 @@ if [ "$RELAUNCH" -eq 1 ]; then
 fi
 LAUNCH=${LAUNCH//__PIRESUME__/$RESUME_ARGS}
 LAUNCH=${LAUNCH//__CLAUDEPERMFLAG__/$CLAUDE_PERM_FLAG}
+case "$LAUNCH" in
+*__CLAUDENAME__*)
+  LAUNCH=${LAUNCH//__CLAUDENAME__/$(shell_quote "$(claude_session_name "$(basename "$PROJ_ABS")" "$ID" "$KIND")")}
+  ;;
+esac
 case "$LAUNCH" in
 *__CLAUDESETTINGS__*)
   if [ "$KIND" = secondmate ]; then

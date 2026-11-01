@@ -64,6 +64,12 @@ Firstmate-built Claude command lines disable Claude's `/bug` and `/feedback` mod
 T3 Code owns its provider command and cannot carry these controls; [`docs/t3code-backend.md`](../../../../../docs/t3code-backend.md#active-limits) owns that backend limit.
 The controls are scoped to the launched process and never modify the captain's global Claude settings; `launch_template()` in `../../../../../bin/fm-spawn.sh` owns their exact mechanics and defense-in-depth rationale.
 
+## Session name
+
+A Claude crewmate or scout launches with `--name '<project> · <task>'`, with ` [scout]` appended on a scout and the project prefix dropped from a task id that already starts with it.
+Remote Control lists the session under that name instead of an auto-generated one, and `--name` never turns Remote Control on, so a captain who keeps it off still gets a plain display name.
+A `--secondmate` launch carries no name; `claude_session_name()` in `../../../../../bin/fm-spawn.sh` owns the format.
+
 ## Task control channel
 
 A Claude task worker's launch brief and Firstmate steering-inbox messages arrive as file-shaped content that is otherwise indistinguishable from indirect prompt injection.
