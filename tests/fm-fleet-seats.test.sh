@@ -1725,7 +1725,8 @@ test_unpooled_grants_exist_before_certificate_publication() {
   [ -f "$req" ] || fail "unpooled client did not request admission"
   kill -STOP "$pid"
   serve_remotes >/dev/null || { kill -CONT "$pid"; wait "$pid"; fail "unpooled serve"; }
-  assert_equals reserved "$(lifecycle_of "$R_REMOTE" unpooled "$gen")" "serve published approval before its holder"
+  assert_equals reserved "$(lifecycle_of "$R_REMOTE" unpooled "$gen")" \
+    "serve published approval before its holder (client: $(tail -2 "$base/client.out" 2>/dev/null | tr '\n' ' '); rejected: $(head -3 "$R_REMOTE/state/fleet-seats/requests/"*.rejected 2>/dev/null | tr '\n' ' '); requests left: $(find "$R_REMOTE/state/fleet-seats/requests/" -maxdepth 1 -name '*.req' 2>/dev/null | tr '\n' ' '))"
   assert_equals true "$(jq --arg g "$gen" 'any(.holders[]; .generation == $g and .model == "unpooled-model")' "$R_ROOT/state/fleet-seats/remote-theshop.cert")" "the certificate omitted the approved unpooled holder"
   printf '{"pools":[{"name":"shared","capacity":1,"models":["unpooled-model"]}]}\n' > "$R_ROOT/config/fleet-seats"
   serve_remotes >/dev/null || { kill -CONT "$pid"; wait "$pid"; fail "new-policy serve"; }
