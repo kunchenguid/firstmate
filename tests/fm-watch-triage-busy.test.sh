@@ -1285,6 +1285,52 @@ SH
   pass "triage log capping handles wc byte counts with leading spaces"
 }
 
+# Handling successors must not reopen the recovery episode they just surfaced.
+test_handling_successor_rearm_cleanup_preserves_episode() {
+  local dir state out pid count real_cut
+  dir=$(make_case handling-rearm-cleanup); state="$dir/state"; out="$dir/watch.out"
+  real_cut=$(command -v cut)
+  cat > "$dir/fakebin/cut" <<SH
+#!/usr/bin/env bash
+if [ -f "$state/.settle-triggered" ] && [ ! -f "$state/.confirm-triggered" ]; then
+  : > "$state/.confirm-triggered"
+  printf 'announced:handling:handling-rearm.1\n' > "$state/.watcher-down"
+fi
+exec "$real_cut" "\$@"
+SH
+  chmod +x "$dir/fakebin/cut"
+  append_wake "$state" check "inbox:handling-rearm:1" "check: queued recovery row" \
+    || fail "could not seed the queued recovery row"
+  printf 'announced:handling:handling-rearm.1\n' > "$state/.watcher-down"
+  chmod 600 "$state/.watcher-down"
+  FM_WATCH_HANDLING_SUCCESSOR=1 PATH="$dir/fakebin:$PATH" FM_STATE_OVERRIDE="$state" \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_poll_cycle "$state" "$pid" || fail "handling successor exited before settling: $(cat "$out" 2>/dev/null || true)"
+  : > "$state/.settle-triggered"
+  FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_recovery_marker_handling_settled "$2/.watcher-down"' _ "$ROOT/bin/fm-wake-lib.sh" "$state" \
+    || { kill "$pid" 2>/dev/null || true; fail "could not settle handling marker"; }
+  wait_for_exit "$pid" 100 || { kill "$pid" 2>/dev/null || true; fail "handling successor did not surface queued recovery row"; }
+  count=$(grep -cF "check: rearm-resurface" "$out" 2>/dev/null || true)
+  [ "${count:-0}" -eq 1 ] || fail "handling successor emitted ${count:-0} rearm resurfaces"
+  case $(cat "$state/.watcher-down" 2>/dev/null || true) in
+    pending:downtime:*) fail "cleanup republished recovery episode as pending downtime" ;;
+    announced:handling:handling-rearm.1) ;;
+    *) fail "unexpected recovery marker after cleanup: $(cat "$state/.watcher-down" 2>/dev/null || true)" ;;
+  esac
+  : > "$out"
+  FM_WATCH_HANDLING_SUCCESSOR=1 PATH="$dir/fakebin:$PATH" FM_STATE_OVERRIDE="$state" \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_poll_cycle "$state" "$pid" || fail "later handling successor exited without new queue row"
+  ! grep -F "check: rearm-resurface" "$out" >/dev/null || fail "later successor repeated old recovery row"
+  append_wake "$state" check "inbox:handling-rearm:2" "check: new queued recovery row" \
+    || fail "could not seed new durable queue row"
+  wait_for_exit "$pid" 100 || { kill "$pid" 2>/dev/null || true; fail "new queue row did not wake later successor"; }
+  grep -F "check: rearm-resurface" "$out" >/dev/null || fail "new row was not resurfaced"
+  pass "handling successor cleanup preserves recovery episode and resurfaces new work"
+}
+
 test_procevent_captured_result_surfaces_proactively() {
   local dir state out drain_out pid beacon_age
   dir=$(make_case procevent-delivery); state="$dir/state"
@@ -1993,6 +2039,7 @@ fm_test_run \
   test_terminal_first_sight_drops_a_finished_write_deferral_chain \
   test_triage_log_size_cap_accepts_spaced_wc_counts \
   test_procevent_captured_result_surfaces_proactively \
+  test_handling_successor_rearm_cleanup_preserves_episode \
   test_procevent_unacknowledged_result_redrains_until_handled \
   test_procevent_marker_keys_are_injective \
   test_procevent_headlines_classify_queue_keys \
