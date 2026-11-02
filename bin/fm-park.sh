@@ -292,8 +292,8 @@ review_bots_json() {
 GITHUB_QUERY='query($owner:String!,$repo:String!,$number:Int!,$endCursor:String){repository(owner:$owner,name:$repo){pullRequest(number:$number){
   state isDraft headRefOid baseRefName mergeable mergeStateStatus reviewDecision
   commits(last:1){nodes{commit{oid committedDate checkSuites(first:100){nodes{createdAt}} statusCheckRollup{state contexts(first:100){nodes{__typename ... on CheckRun{name completedAt} ... on StatusContext{context createdAt}}}}}}}
-  reviewThreads(first:100){totalCount nodes{isResolved comments(last:100){nodes{author{login __typename} createdAt updatedAt}}}}
-  reviews(last:100){nodes{author{login __typename} state body submittedAt updatedAt commit{oid}}}
+  reviewThreads(first:100){totalCount nodes{isResolved comments(last:100){totalCount nodes{author{login __typename} createdAt updatedAt}}}}
+  reviews(last:100){totalCount nodes{author{login __typename} state body submittedAt updatedAt commit{oid}}}
   comments(first:100,after:$endCursor){totalCount nodes{author{login __typename} createdAt updatedAt} pageInfo{hasNextPage endCursor}}
 }}}'
 
@@ -323,7 +323,9 @@ GITHUB_NORMALIZE='
       threads_unresolved: ([$p.reviewThreads.nodes[] | select(.isResolved | not)] | length),
       threads_complete: ($p.reviewThreads.totalCount <= ($p.reviewThreads.nodes | length)),
       comments_complete: (($p.comments.totalCount // -1) <= ($p.comments.nodes | length)
-        and $p.comments.pageInfo.hasNextPage == false),
+        and $p.comments.pageInfo.hasNextPage == false
+        and ($p.reviews.totalCount // -1) <= ($p.reviews.nodes | length)
+        and ([$p.reviewThreads.nodes[]? | (.comments.totalCount // -1) <= (.comments.nodes | length)] | all)),
       activity: (
         [$p.comments.nodes[] | {author: (.author.login // "ghost"), bot: (.author.__typename == "Bot"),
           at: .createdAt, touched: (.updatedAt // .createdAt), on_head: false, approval_only: false}]
@@ -616,7 +618,7 @@ cmd_park() {
     die "refusing to park $id: $why"
   fi
   # Written before the stop and marked pending, so a park that dies after the
-  # stop still leaves the lane watched; the next tick settles a pending record.
+  # stop still leaves the lane watched; the next tick settles it.
   record_write "$id" "pr=$pr" "head=$head" "parked_at=$parked_at" "slot_leased=$lease" "pending=1" \
     || die "refusing to park $id: its park record could not be written"
   out=$(FM_HOME=$FM_HOME fm_run_timed "$ACTION_SECS" "$CONTROL_BIN" "$id" exit 2>&1) || rc=$?
@@ -795,12 +797,10 @@ watch_unparked() {  # <id>
   action_start "$id" park
 }
 
-# A pending record is a park that did not confirm its stop. Once its agent is
-# confirmed dead it is promoted to parked; while the agent is still alive the
-# park did not happen and the record is dropped; otherwise (including a check
-# that outlasts its bound) it stays pending.
+# A pending record stays watched while its agent stop may still be in flight.
+# Confirmed dead is promoted to parked; confirmed alive after the stop bound is dropped.
 settle_pending() {  # <id>
-  local id=$1 meta secs alive
+  local id=$1 meta secs alive parked_at
   lock_try "$(lane_lock "$id")" || return 0
   [ -n "$(record_get "$id" pending)" ] || return 0
   meta="$STATE/$id.meta"
@@ -812,7 +812,10 @@ settle_pending() {  # <id>
     dead)
       record_write "$id" "pr=$(record_get "$id" pr)" "head=$(record_get "$id" head)" \
         "parked_at=$(record_get "$id" parked_at)" "slot_leased=$(record_get "$id" slot_leased)" ;;
-    alive) rm -f -- "$(record_path "$id")" ;;
+    alive)
+      parked_at=$(record_get "$id" parked_at)
+      [[ "$parked_at" =~ ^[0-9]+$ ]] || return 0
+      [ "$(( $(date +%s) - parked_at ))" -ge "$ACTION_SECS" ] && rm -f -- "$(record_path "$id")" ;;
   esac
 }
 

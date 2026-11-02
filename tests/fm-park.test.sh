@@ -163,7 +163,7 @@ gh_fixture() {  # <out> [key=value...]
   shift
   local state=OPEN draft=false head mergeable=MERGEABLE mss=BLOCKED decision=REVIEW_REQUIRED
   local rollup='"SUCCESS"' completed=$OLD_ISO committed=$OLD_ISO threads='[]' total=0
-  local review_oid bot_at=$OLD_ISO comments='[]' extra_reviews='' pushed='' comment_count
+  local review_oid bot_at=$OLD_ISO comments='[]' extra_reviews='' pushed='' comment_count review_count
   head=$(cat "$(dirname "$out")/head")
   review_oid=$head
   for kv in "$@"; do
@@ -177,6 +177,8 @@ gh_fixture() {  # <out> [key=value...]
     esac
   done
   comment_count=$(printf '%s' "$comments" | jq 'length')
+  review_count=$(( 1 + $(printf '%s' "[$extra_reviews]" | jq 'length') ))
+  threads=$(printf '%s' "$threads" | jq 'map(.comments.totalCount = (.comments.nodes | length))')
   local suites="[{\"createdAt\":\"${pushed:-$committed}\"}]"
   [ "$pushed" != none ] || suites='[]'
   local rollup_obj=null
@@ -187,7 +189,7 @@ gh_fixture() {  # <out> [key=value...]
   "mergeStateStatus":"$mss","reviewDecision":"$decision",
   "commits":{"nodes":[{"commit":{"oid":"$head","committedDate":"$committed","checkSuites":{"nodes":$suites},"statusCheckRollup":$rollup_obj}}]},
   "reviewThreads":{"totalCount":$total,"nodes":$threads},
-  "reviews":{"nodes":[{"author":{"login":"coderabbitai","__typename":"Bot"},"state":"COMMENTED","body":"lgtm",
+  "reviews":{"totalCount":$review_count,"nodes":[{"author":{"login":"coderabbitai","__typename":"Bot"},"state":"COMMENTED","body":"lgtm",
     "submittedAt":"$bot_at","updatedAt":"$bot_at","commit":{"oid":"$review_oid"}}$extra_reviews]},
   "comments":{"totalCount":$comment_count,"nodes":$comments,"pageInfo":{"hasNextPage":false,"endCursor":null}}
 }}}}
@@ -250,6 +252,12 @@ test_github_gate_clean_and_each_unclean_condition() {
   gh_fixture "$w/gh.1.json" 'threads=[{"isResolved":true},{"isResolved":false}]' total=2
   expect_unclean "$w" threads "1 review thread(s) unresolved"
   gh_fixture "$w/gh.1.json" 'threads=[]' total=150; expect_unclean "$w" threads-truncated "could not all be read"
+  gh_fixture "$w/gh.1.json"
+  jq '.data.repository.pullRequest.reviews.totalCount = 101' "$w/gh.1.json" > "$w/truncated.json" && mv "$w/truncated.json" "$w/gh.1.json"
+  expect_unclean "$w" reviews-truncated "review comments could not all be read"
+  gh_fixture "$w/gh.1.json" 'threads=[{"isResolved":true,"comments":{"nodes":[{"author":{"login":"reviewer"}}]}}]'
+  jq '.data.repository.pullRequest.reviewThreads.nodes[0].comments.totalCount = 101' "$w/gh.1.json" > "$w/truncated.json" && mv "$w/truncated.json" "$w/gh.1.json"
+  expect_unclean "$w" thread-comments-truncated "review comments could not all be read"
   pass "github gate: clean PR parks, and draft, closed, conflict, behind, unknown mergeability, CI pending/failing/absent, changes requested, unresolved and unread threads each refuse"
 }
 
@@ -506,8 +514,15 @@ test_interrupted_park_reads_as_parking_and_the_tick_settles_it() {
   gh_fixture "$w/gh.1.json" 'rollup="FAILURE"'
   out=$(run_park "$w" tick 2>&1)
   [ -z "$out" ] && [ ! -e "$w/control.log" ] || fail "interrupted-alive: tick acted: $out"
-  [ ! -e "$w/state/lane.review-park" ] || fail "interrupted-alive: the record of a running agent was kept"
-  pass "a park killed during the stop reads as parking, still relaunches on feedback, and the next tick parks it once the agent is dead or drops it while the agent runs"
+  grep -qx 'pending=1' "$w/state/lane.review-park" || fail "interrupted-alive: pending record dropped before stop bound"
+  w=$(make_world park-interrupted-expired "$GH_URL")
+  gh_fixture "$w/gh.1.json"
+  kill_park_during_stop "$w"
+  : > "$w/agent.alive"
+  sed -i.bak "s/^parked_at=.*/parked_at=$(( $(date +%s) - 2 ))/" "$w/state/lane.review-park"
+  FM_PARK_ACTION_SECS=1 run_park "$w" tick >/dev/null 2>&1
+  [ ! -e "$w/state/lane.review-park" ] || fail "interrupted-expired: alive worker record was not dropped after bound"
+  pass "a pending park stays watched during stop, promotes a later stop, and expires only after the stop bound"
 }
 
 test_hung_pending_check_ends_within_the_tick() {
@@ -704,6 +719,15 @@ test_each_relaunch_trigger_relaunches_a_fresh_worker() {
   w=$(make_world trig-incomplete-threads "$GH_URL"); gh_fixture "$w/gh.1.json"; park_world "$w"
   gh_fixture "$w/gh.1.json" 'threads=[]' total=150
   expect_relaunch "$w" incomplete-threads "review threads could not all be read"
+
+  w=$(make_world trig-incomplete-reviews "$GH_URL"); gh_fixture "$w/gh.1.json"; park_world "$w"
+  jq '.data.repository.pullRequest.reviews.totalCount = 101' "$w/gh.1.json" > "$w/truncated.json" && mv "$w/truncated.json" "$w/gh.1.json"
+  expect_relaunch "$w" incomplete-reviews "review comments could not all be read"
+
+  w=$(make_world trig-incomplete-thread-comments "$GH_URL"); gh_fixture "$w/gh.1.json"; park_world "$w"
+  gh_fixture "$w/gh.1.json" 'threads=[{"isResolved":true,"comments":{"nodes":[{"author":{"login":"reviewer"}}]}}]'
+  jq '.data.repository.pullRequest.reviewThreads.nodes[0].comments.totalCount = 101' "$w/gh.1.json" > "$w/truncated.json" && mv "$w/truncated.json" "$w/gh.1.json"
+  expect_relaunch "$w" incomplete-thread-comments "review comments could not all be read"
 
   w=$(make_world trig-conflict "$GH_URL"); gh_fixture "$w/gh.1.json"; park_world "$w"
   gh_fixture "$w/gh.1.json" mergeable=CONFLICTING mss=DIRTY
