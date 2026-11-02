@@ -1025,6 +1025,42 @@ test_wedge_threshold_unacted_gate_wakes_again_after_the_run_moves_on() {
   pass "a run that parks at a new gate after moving on is reported again"
 }
 
+test_wedge_gate_unacted_poll_wakes_throttles_and_rearms() {
+  local dir state fakebin out capture window key n
+  local parked='state: parked · source: run-step · parked at awaiting_approval: 2 finding(s) · run: 01RUNGATE'
+  local running='state: working · source: run-step · validating (running) · run: 01RUNGATE'
+  window="test:fm-wedge"; key=$(printf '%s' "$window" | tr ':/.' '___')
+  dir=$(wedge_threshold_fixture unacted-poll 'working: handed to validation' 2000)
+  arm_unacted_gate "$dir"
+  state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"; capture="$dir/pane.txt"
+  printf 'stale-hash' > "$state/.hash-$key"
+  FM_TEST_STALE_ESCALATE=600 wedge_threshold_round "$state" "$fakebin" "$out" "$capture" "$window" "$parked" exit \
+    || fail "a changing pane never reached the unacted gate poll wake: $(cat "$out")"
+  grep -F 'has not acted on it' "$out" >/dev/null \
+    || fail "the poll wake did not report the unacted gate: $(cat "$out")"
+  [ -e "$state/.gate-unacted-checked-$key" ] || fail "the poll consult left no throttle marker"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the poll wake"
+  : > "$out"
+  printf 'stale-hash' > "$state/.hash-$key"
+  FM_TEST_STALE_ESCALATE=600 wedge_threshold_round "$state" "$fakebin" "$out" "$capture" "$window" "$parked" absorb \
+    || fail "the throttled poll consult woke again inside its window: $(cat "$out")"
+  rm -f "$state/.gate-unacted-checked-$key"
+  printf 'stale-hash' > "$state/.hash-$key"
+  FM_TEST_STALE_ESCALATE=600 wedge_threshold_round "$state" "$fakebin" "$out" "$capture" "$window" "$parked" absorb \
+    || fail "the same unacted gate woke again after the throttle lapsed: $(cat "$out")"
+  rm -f "$state/.gate-unacted-checked-$key"
+  printf 'stale-hash' > "$state/.hash-$key"
+  FM_TEST_STALE_ESCALATE=600 wedge_threshold_round "$state" "$fakebin" "$out" "$capture" "$window" "$running" absorb \
+    || fail "the poll consult misbehaved on a running run: $(cat "$out")"
+  [ ! -e "$state/.gate-unacted-reported-$key" ] \
+    || fail "the poll consult kept its reported marker after the run left the gate"
+  rm -f "$state/.gate-unacted-checked-$key"
+  printf 'stale-hash' > "$state/.hash-$key"
+  FM_TEST_STALE_ESCALATE=600 wedge_threshold_round "$state" "$fakebin" "$out" "$capture" "$window" "$parked" exit \
+    || fail "a new gate on the same run never woke through the poll consult: $(cat "$out")"
+  pass "the poll consult wakes once, honours its throttle and re-arms when the run moves on"
+}
+
 # Every way the worker accounts for itself, or the signal does not apply, keeps
 # the unchanged ladder even where the flag is armed.
 test_wedge_threshold_unacted_gate_ignores_acted_or_ineligible_lanes() {
@@ -1088,5 +1124,6 @@ fm_test_run \
   test_wedge_threshold_validating_run_is_off_until_armed \
   test_wedge_threshold_escalates_an_unacted_gate_or_outcome \
   test_wedge_threshold_unacted_gate_wakes_again_after_the_run_moves_on \
+  test_wedge_gate_unacted_poll_wakes_throttles_and_rearms \
   test_wedge_threshold_unacted_gate_ignores_acted_or_ineligible_lanes \
   test_wedge_threshold_unacted_gate_is_off_until_armed
