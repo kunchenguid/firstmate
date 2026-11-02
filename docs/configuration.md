@@ -1844,13 +1844,13 @@ This single-provider table is separate from the frozen legacy mapping used by `f
 
 - On pane backends, Codex `ultra` requires an explicit model advertising it in the Codex cache, and Pi native `ultra` requires a `codex-native/` model.
   Codex `max` is threaded for `gpt-5.6-luna` or a model the Codex cache advertises it for, and is otherwise omitted with a warning.
-  Spawn and relaunch read the cache from the selected Codex home and refuse an unsupported `ultra` before provisioning or stopping a worker.
+  Spawn and relaunch read the cache from the selected Codex home for catalog-dependent requests and refuse an unsupported `ultra` before provisioning or stopping a worker.
   Without [`config/launch-env-allowlist`](#worker-launch-environment-configlaunch-env-allowlist), that home is the caller's own `CODEX_HOME` (default `~/.codex`), resolved against the caller's working directory if relative, and a Codex `max` or `ultra` worker launches with that same `CODEX_HOME`.
   With the filter, a fresh Orca spawn can use the [Orca environment source](#orca-environment-source-configlaunch-env-tmux-session) snapshot for both the check and the launch: an explicitly selected absolute `CODEX_HOME`, or an explicitly selected absolute `HOME` when `CODEX_HOME` is absent or unset.
   Otherwise catalog-dependent `max` and `ultra` refuse before provisioning or stopping, while `gpt-5.6-luna` `max` launches with the filtered environment unchanged.
   `bin/fm-harness.sh validate-native-effort` and `bin/fm-spawn.sh` own validation and launch mapping.
   A missing cache never blocks Luna `max`.
-  Dispatch and bootstrap validation only require Codex `max` and `ultra` to name an explicit model; the selected spawn or relaunch checks the cache, so a stale or missing entry never rejects the whole rules file.
+  Dispatch and bootstrap validation only require Codex `max` and `ultra` to name an explicit model; the selected pane spawn or relaunch checks catalog-dependent requests, so a stale or missing entry never rejects the whole rules file.
 - On pane backends, an omitted model or effort means the selected harness uses its own default for that axis; [T3 selection](t3code-backend.md#provider-instances-and-models) owns server-backed defaults.
 - OpenCode receives the effort as its default `build` agent's `variant`, keyed to the resolved model, inside the `OPENCODE_CONFIG_CONTENT` JSON its launch already writes (the per-model reasoning-effort field of the config schema, verified on opencode 1.18.32); with no model resolved, the effort is recorded in task metadata but omitted from the launch.
 - Every profile array is an implicit quota-aware choice resolved through `quota-array-dispatch`.
