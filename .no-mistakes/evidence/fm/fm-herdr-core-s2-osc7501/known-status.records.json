@@ -1,0 +1,61 @@
+[
+  {
+    "state": "idle",
+    "app": "firstmate-opencode",
+    "title": "fm-t"
+  },
+  {
+    "state": "working",
+    "app": "firstmate-opencode",
+    "title": "fm-t"
+  },
+  {
+    "state": "blocked",
+    "kind": "question",
+    "app": "firstmate-opencode",
+    "title": "fm-t",
+    "msg": "Needs your decision: choose a region "
+  },
+  {
+    "state": "working",
+    "app": "firstmate-opencode",
+    "title": "fm-t"
+  },
+  {
+    "state": "blocked",
+    "kind": "auth",
+    "app": "firstmate-opencode",
+    "title": "fm-t",
+    "msg": "Blocked: API token expired "
+  },
+  {
+    "state": "working",
+    "app": "firstmate-opencode",
+    "title": "fm-t"
+  },
+  {
+    "state": "blocked",
+    "kind": "question",
+    "app": "firstmate-opencode",
+    "title": "fm-t",
+    "msg": "Needs your decision: captain to decide"
+  },
+  {
+    "state": "done",
+    "app": "firstmate-opencode",
+    "title": "fm-t",
+    "msg": "PR ready: PR https://example.invalid/pr/7"
+  },
+  {
+    "state": "done",
+    "app": "firstmate-opencode",
+    "title": "fm-t",
+    "msg": "PR ready: PR https://example.invalid/pr/7"
+  },
+  {
+    "state": "done",
+    "app": "firstmate-opencode",
+    "title": "fm-t",
+    "msg": "PR ready: PR https://example.invalid/pr/7"
+  }
+]

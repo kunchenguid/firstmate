@@ -1,0 +1,24 @@
+[
+  {
+    "state": "idle",
+    "app": "firstmate-opencode",
+    "title": "fm-t"
+  },
+  {
+    "state": "blocked",
+    "kind": "question",
+    "app": "firstmate-opencode",
+    "title": "fm-t",
+    "msg": "Needs your decision: choose one "
+  },
+  {
+    "state": "idle",
+    "app": "firstmate-opencode",
+    "title": "fm-t"
+  },
+  {
+    "state": "idle",
+    "app": "firstmate-opencode",
+    "title": "fm-t"
+  }
+]

@@ -1,0 +1,23 @@
+[
+  {
+    "state": "idle",
+    "app": "firstmate-opencode",
+    "title": "fm-t"
+  },
+  {
+    "state": "working",
+    "app": "firstmate-opencode",
+    "title": "fm-t"
+  },
+  {
+    "state": "idle",
+    "app": "firstmate-opencode",
+    "title": "fm-t"
+  },
+  {
+    "state": "error",
+    "app": "firstmate-opencode",
+    "title": "fm-t",
+    "msg": "Failed: earlier result with identical timestamp"
+  }
+]

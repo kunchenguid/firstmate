@@ -1,0 +1,35 @@
+[
+  {
+    "state": "idle",
+    "app": "firstmate-rovo",
+    "title": "fm-t"
+  },
+  {
+    "state": "working",
+    "app": "firstmate-rovo",
+    "title": "fm-t"
+  },
+  {
+    "state": "idle",
+    "app": "firstmate-rovo",
+    "title": "fm-t"
+  },
+  {
+    "state": "done",
+    "app": "firstmate-rovo",
+    "title": "fm-t",
+    "msg": "Done: fresh line appended after busy reading"
+  },
+  {
+    "state": "error",
+    "app": "firstmate-rovo",
+    "title": "fm-t",
+    "msg": "Failed: fresh failure appended after busy reading"
+  },
+  {
+    "state": "error",
+    "app": "firstmate-rovo",
+    "title": "fm-t",
+    "msg": "Failed: fresh failure appended after busy reading"
+  }
+]

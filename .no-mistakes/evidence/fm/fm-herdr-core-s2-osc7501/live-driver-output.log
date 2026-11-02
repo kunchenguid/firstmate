@@ -1,0 +1,106 @@
+
+SCENARIO: Local PTY: eligibility, native exclusion and queued-input safety
+[unknown-terminal] $ bash {run-worktree}/bin/fm-osc7501.sh arm --task t --harness opencode --agent-bin opencode --backend tmux --kind ship --state {run-worktree}/.live-validation/unknown-terminal/state --config {run-worktree}/.live-validation/unknown-terminal/config --target ''
+[unknown-terminal] zero output bytes; no watcher; terminal modes unchanged
+[unknown-terminal] $ IFS= read -r typed; printf "%s" "$typed" > {run-worktree}/.live-validation/unknown-terminal/input
+[unknown-terminal] zero output bytes; no watcher; terminal modes unchanged
+[unknown-terminal] $ bash {run-worktree}/bin/fm-osc7501.sh disarm --state {run-worktree}/.live-validation/unknown-terminal/state
+[config-off] $ bash {run-worktree}/bin/fm-osc7501.sh arm --task t --harness opencode --agent-bin opencode --backend tmux --kind ship --state {run-worktree}/.live-validation/config-off/state --config {run-worktree}/.live-validation/config-off/config --target ''
+[config-off] zero output bytes; no watcher; terminal modes unchanged
+[config-off] $ bash {run-worktree}/bin/fm-osc7501.sh disarm --state {run-worktree}/.live-validation/config-off/state
+[native-claude] $ bash {run-worktree}/bin/fm-osc7501.sh arm --task t --harness claude --agent-bin ~/.local/bin/claude --backend tmux --kind ship --state {run-worktree}/.live-validation/native-claude/state --config {run-worktree}/.live-validation/native-claude/config --target ''
+[native-claude] zero output bytes; no watcher; terminal modes unchanged
+[native-claude] $ bash {run-worktree}/bin/fm-osc7501.sh disarm --state {run-worktree}/.live-validation/native-claude/state
+[native-codex-safe-probe] $ bash {run-worktree}/bin/fm-osc7501.sh arm --task t --harness codex --agent-bin /opt/homebrew/bin/codex --backend tmux --kind ship --state {run-worktree}/.live-validation/native-codex-safe-probe/state --config {run-worktree}/.live-validation/native-codex-safe-probe/config --target ''
+[native-codex-safe-probe] zero output bytes; no watcher; terminal modes unchanged
+[native-codex-safe-probe] $ bash {run-worktree}/bin/fm-osc7501.sh disarm --state {run-worktree}/.live-validation/native-codex-safe-probe/state
+[legacy-herdr] $ bash {run-worktree}/bin/fm-osc7501.sh arm --task t --harness opencode --agent-bin opencode --backend herdr --kind ship --state {run-worktree}/.live-validation/legacy-herdr/state --config {run-worktree}/.live-validation/legacy-herdr/config --target ''
+[legacy-herdr] zero output bytes; no watcher; terminal modes unchanged
+[legacy-herdr] $ bash {run-worktree}/bin/fm-osc7501.sh disarm --state {run-worktree}/.live-validation/legacy-herdr/state
+[no-task-tty] $ bash {run-worktree}/bin/fm-osc7501.sh arm --task t --harness opencode --agent-bin opencode --backend t3code --kind ship --state {run-worktree}/.live-validation/no-task-tty/state --config {run-worktree}/.live-validation/no-task-tty/config --target ''
+[no-task-tty] zero output bytes; no watcher; terminal modes unchanged
+[no-task-tty] $ bash {run-worktree}/bin/fm-osc7501.sh disarm --state {run-worktree}/.live-validation/no-task-tty/state
+[unresolved-agent] $ bash {run-worktree}/bin/fm-osc7501.sh arm --task t --harness env --agent-bin '' --backend tmux --kind ship --state {run-worktree}/.live-validation/unresolved-agent/state --config {run-worktree}/.live-validation/unresolved-agent/config --target ''
+[unresolved-agent] zero output bytes; no watcher; terminal modes unchanged
+[unresolved-agent] $ bash {run-worktree}/bin/fm-osc7501.sh disarm --state {run-worktree}/.live-validation/unresolved-agent/state
+RESULT: pass
+
+SCENARIO: Local PTY: known activity maps decisions, captain holds and final done
+[known-status] synthetic durable busy input: busy
+[known-status] $ bash {run-worktree}/bin/fm-osc7501.sh arm --task t --harness opencode --agent-bin opencode --backend tmux --kind ship --state {run-worktree}/.live-validation/known-status/state --config {run-worktree}/.live-validation/known-status/config --target ''
+[known-status] observed {"state": "working", "app": "firstmate-opencode", "title": "fm-t"}
+[known-status] status replace: needs-decision [at=1] [key=k]: choose a region
+[known-status] observed {"state": "blocked", "kind": "question", "app": "firstmate-opencode", "title": "fm-t", "msg": "Needs your decision: choose a region "}
+[known-status] status append: resolved [at=2] [key=k]: chosen
+[known-status] observed {"state": "working", "app": "firstmate-opencode", "title": "fm-t"}
+[known-status] status replace: blocked [at=3] [key=a]: API token expired
+[known-status] observed {"state": "blocked", "kind": "auth", "app": "firstmate-opencode", "title": "fm-t", "msg": "Blocked: API token expired "}
+[known-status] status append: resolved [at=4] [key=a]: refreshed
+[known-status] observed {"state": "working", "app": "firstmate-opencode", "title": "fm-t"}
+[known-status] synthetic durable busy input: idle
+[known-status] status replace: captain-held [at=5]: captain to decide
+[known-status] observed {"state": "blocked", "kind": "question", "app": "firstmate-opencode", "title": "fm-t", "msg": "Needs your decision: captain to decide"}
+[known-status] status replace: done [at=6]: PR https://example.invalid/pr/7
+[known-status] observed {"state": "done", "app": "firstmate-opencode", "title": "fm-t", "msg": "PR ready: PR https://example.invalid/pr/7"}
+[known-status] observed {"state": "done", "app": "firstmate-opencode", "title": "fm-t", "msg": "PR ready: PR https://example.invalid/pr/7"}
+[known-status] $ bash {run-worktree}/bin/fm-osc7501.sh disarm --state {run-worktree}/.live-validation/known-status/state
+[known-status] observed {"state": "done", "app": "firstmate-opencode", "title": "fm-t", "msg": "PR ready: PR https://example.invalid/pr/7"}
+[known-status] $ bash {run-worktree}/bin/fm-osc7501.sh disarm --state {run-worktree}/.live-validation/known-status/state
+RESULT: pass
+
+SCENARIO: Local PTY + private tmux: stale/fresh outcomes, unknown retirement and finalization
+[stale-done] status replace: done [at=1793610699]: earlier result with identical timestamp
+[stale-done] synthetic durable busy input: busy
+[stale-done] $ bash {run-worktree}/bin/fm-osc7501.sh arm --task t --harness opencode --agent-bin opencode --backend tmux --kind ship --state {run-worktree}/.live-validation/stale-done/state --config {run-worktree}/.live-validation/stale-done/config --target ''
+[stale-done] observed {"state": "working", "app": "firstmate-opencode", "title": "fm-t"}
+[stale-done] synthetic durable busy input: absent (unknown)
+[stale-done] observed {"state": "idle", "app": "firstmate-opencode", "title": "fm-t"}
+[stale-done] $ bash {run-worktree}/bin/fm-osc7501.sh disarm --state {run-worktree}/.live-validation/stale-done/state
+[stale-done] observed {"state": "done", "app": "firstmate-opencode", "title": "fm-t", "msg": "Done: earlier result with identical timestamp"}
+[stale-done] $ bash {run-worktree}/bin/fm-osc7501.sh disarm --state {run-worktree}/.live-validation/stale-done/state
+[stale-failed] status replace: failed [at=1793610707]: earlier result with identical timestamp
+[stale-failed] synthetic durable busy input: busy
+[stale-failed] $ bash {run-worktree}/bin/fm-osc7501.sh arm --task t --harness opencode --agent-bin opencode --backend tmux --kind ship --state {run-worktree}/.live-validation/stale-failed/state --config {run-worktree}/.live-validation/stale-failed/config --target ''
+[stale-failed] observed {"state": "working", "app": "firstmate-opencode", "title": "fm-t"}
+[stale-failed] synthetic durable busy input: absent (unknown)
+[stale-failed] observed {"state": "idle", "app": "firstmate-opencode", "title": "fm-t"}
+[stale-failed] $ bash {run-worktree}/bin/fm-osc7501.sh disarm --state {run-worktree}/.live-validation/stale-failed/state
+[stale-failed] observed {"state": "error", "app": "firstmate-opencode", "title": "fm-t", "msg": "Failed: earlier result with identical timestamp"}
+[stale-failed] $ bash {run-worktree}/bin/fm-osc7501.sh disarm --state {run-worktree}/.live-validation/stale-failed/state
+[unknown-decisions] synthetic durable busy input: idle
+[unknown-decisions] $ bash {run-worktree}/bin/fm-osc7501.sh arm --task t --harness opencode --agent-bin opencode --backend tmux --kind ship --state {run-worktree}/.live-validation/unknown-decisions/state --config {run-worktree}/.live-validation/unknown-decisions/config --target ''
+[unknown-decisions] observed {"state": "idle", "app": "firstmate-opencode", "title": "fm-t"}
+[unknown-decisions] status replace: needs-decision [at=1] [key=x]: choose one
+[unknown-decisions] observed {"state": "blocked", "kind": "question", "app": "firstmate-opencode", "title": "fm-t", "msg": "Needs your decision: choose one "}
+[unknown-decisions] synthetic durable busy input: absent (unknown)
+[unknown-decisions] status append: resolved [at=2] [key=x]: yes
+[unknown-decisions] observed {"state": "idle", "app": "firstmate-opencode", "title": "fm-t"}
+[unknown-decisions] $ bash {run-worktree}/bin/fm-osc7501.sh disarm --state {run-worktree}/.live-validation/unknown-decisions/state
+[unknown-decisions] observed {"state": "idle", "app": "firstmate-opencode", "title": "fm-t"}
+[unknown-decisions] $ bash {run-worktree}/bin/fm-osc7501.sh disarm --state {run-worktree}/.live-validation/unknown-decisions/state
+[rovo-real-tmux] $ bash {run-worktree}/bin/fm-osc7501.sh arm --task t --harness rovo --agent-bin rovo --backend tmux --kind ship --state {run-worktree}/.live-validation/rovo-real-tmux/state --config {run-worktree}/.live-validation/rovo-real-tmux/config --target lab:
+[rovo-real-tmux] observed {"state": "working", "app": "firstmate-rovo", "title": "fm-t"}
+[rovo-real-tmux] observed {"state": "idle", "app": "firstmate-rovo", "title": "fm-t"}
+[rovo-real-tmux] status replace: done [at=1793610725]: fresh line appended after busy reading
+[rovo-real-tmux] observed {"state": "done", "app": "firstmate-rovo", "title": "fm-t", "msg": "Done: fresh line appended after busy reading"}
+[rovo-real-tmux] status append: failed [at=1]: fresh failure appended after busy reading
+[rovo-real-tmux] observed {"state": "error", "app": "firstmate-rovo", "title": "fm-t", "msg": "Failed: fresh failure appended after busy reading"}
+[rovo-real-tmux] $ bash {run-worktree}/bin/fm-osc7501.sh disarm --state {run-worktree}/.live-validation/rovo-real-tmux/state
+[rovo-real-tmux] observed {"state": "error", "app": "firstmate-rovo", "title": "fm-t", "msg": "Failed: fresh failure appended after busy reading"}
+[rovo-real-tmux] $ bash {run-worktree}/bin/fm-osc7501.sh disarm --state {run-worktree}/.live-validation/rovo-real-tmux/state
+RESULT: pass
+
+SCENARIO: Local PTY: off/native relaunch clears a killed watcher exactly once
+[leftover-off] synthetic durable busy input: busy
+[leftover-off] $ bash {run-worktree}/bin/fm-osc7501.sh arm --task t --harness opencode --agent-bin opencode --backend tmux --kind ship --state {run-worktree}/.live-validation/leftover-off/state --config {run-worktree}/.live-validation/leftover-off/config --target ''
+[leftover-off] observed {"state": "working", "app": "firstmate-opencode", "title": "fm-t"}
+[leftover-off] $ bash {run-worktree}/bin/fm-osc7501.sh arm --task t --harness opencode --agent-bin opencode --backend tmux --kind ship --state {run-worktree}/.live-validation/leftover-off/state --config {run-worktree}/.live-validation/leftover-off/config --target ''
+[leftover-off] observed {"state": "idle", "app": "firstmate-opencode", "title": "fm-t"}
+[leftover-off] $ bash {run-worktree}/bin/fm-osc7501.sh disarm --state {run-worktree}/.live-validation/leftover-off/state
+[leftover-native] synthetic durable busy input: busy
+[leftover-native] $ bash {run-worktree}/bin/fm-osc7501.sh arm --task t --harness opencode --agent-bin opencode --backend tmux --kind ship --state {run-worktree}/.live-validation/leftover-native/state --config {run-worktree}/.live-validation/leftover-native/config --target ''
+[leftover-native] observed {"state": "working", "app": "firstmate-opencode", "title": "fm-t"}
+[leftover-native] $ bash {run-worktree}/bin/fm-osc7501.sh arm --task t --harness claude --agent-bin ~/.local/bin/claude --backend tmux --kind ship --state {run-worktree}/.live-validation/leftover-native/state --config {run-worktree}/.live-validation/leftover-native/config --target ''
+[leftover-native] observed {"state": "idle", "app": "firstmate-claude", "title": "fm-t"}
+[leftover-native] $ bash {run-worktree}/bin/fm-osc7501.sh disarm --state {run-worktree}/.live-validation/leftover-native/state
+RESULT: pass

@@ -1,0 +1,2 @@
+ok - a raw launch ending in a separator or a comment still runs the worker, its disarm, and config warnings
+ok - a raw launch keeps a reporter only for an established agent below its native floor

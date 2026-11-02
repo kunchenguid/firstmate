@@ -1,0 +1,12 @@
+{
+  "REX_BIN_DIR": null,
+  "REX_SERVER": null,
+  "claude --version": {
+    "exit": 0,
+    "stdout": "2.1.316 (Claude Code)\n",
+    "stderr": ""
+  },
+  "codex --version": {
+    "error": "timed out after 10s; child killed and waited by subprocess.run"
+  }
+}

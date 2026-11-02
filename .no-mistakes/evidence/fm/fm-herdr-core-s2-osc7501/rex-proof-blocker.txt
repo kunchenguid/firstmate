@@ -1,0 +1,25 @@
+Requested real-Rex proof was not executed.
+
+Read-only discovery: command -v rex hc herdr tmux codex claude
+- rex and hc are not on PATH; no repository-local Rex executable was supplied.
+- REX_BIN_DIR and REX_SERVER are unset.
+- No host filesystem hunt or default-session access was performed.
+
+Workspace-local acquisition workaround attempted:
+GET https://www.superlogical.com/rex/docs/installation (successful).
+Public macOS installation text says: "Invites are going out to our mailing list", "Get an invite", and "Log in with Discord to download." Page data has macDownload:null. There is no public downloadable macOS binary on the installation page. Logging in or acquiring tester authority is outside this validation phase.
+
+Existing native-agent checks:
+claude --version: exit 0, 2.1.316 (Claude Code).
+codex --version: timed out after 10 seconds; subprocess.run killed and waited for its child. The actual reporter's own bounded version probe safely suppressed bridging in the separate local PTY check; that is not evidence of Codex's native status emission.
+
+To execute the missing proof: provide a real Rex CLI/server via PATH or an explicit repository-local path, authorized isolated Rex runtime setup, and a functioning existing Codex CLI/login. Do not change production credentials. Then repeat native-root/decision/heartbeat/unknown/ordinary-disarm and reader/event non-feedback proof in a disposable Rex session.
+
+Completed evidence is limited to the real reporter's /dev/tty protocol output with synthetic durable task records, and its real tmux activity-reader path with a synthetic Rovo busy marker. No real Rovo, Antigravity, OpenCode, or Codex inference session was run. No claim of native Rex shared-root or GUI validation is made.
+
+Targeted automated validation:
+- tests/fm-osc7501.test.sh exited 0.
+- Initial tests/fm-spawn-dispatch-profile.test.sh failed its config-warning fixture: the fixture provided neither a writable tty file nor a known-aware marker. Fixed only that test setup.
+- The subsequent broad spawn-file invocation exceeded its 240-second command timeout; a first extraction also executed unrelated top-level allowlist cases and exceeded 120 seconds. These incomplete broad attempts are not reported as passes.
+- Executed only test_raw_launch_trailing_separator_or_comment_keeps_disarm and test_raw_launch_reporter_follows_established_agent from the same file after excluding other top-level invocations: exit 0. Removed the temporary extraction afterward.
+- Final live driver exited 0 after setup corrections (bounded heartbeat wait, ordinary disarm before controlling-terminal revocation, and private tmux without inherited user configuration). All four planned local scenarios completed. Private tmux and watcher processes were stopped; disposable worktree data was removed.
