@@ -232,17 +232,19 @@
 # (about 80 s for a 2.4 MB log when this bound was set), and a remote leg adds
 # up to two FM_SEND_REMOTE_BUDGET transport attempts.
 # A catchable TERM, INT, or HUP to a text send stops it with a report and exit
-# 128+signal: before delivery, nothing was sent and the exact rerun is printed;
-# with the remote transport in flight, remote completion is unknown - never
-# reported as unsent - the expectation is marked delivery-unknown, and the
-# printed FM_PENDING_REPLY_EXISTING_CORR=<id> resend (or the same
-# fire-and-forget delivery id) is the only safe retry; after the durable
-# record, do not resend. Every report, and also fm-send's own remote-budget
-# timeout and an unconfirmed typed submit, prints one line per --resolve-key
-# saying whether its close is durably recorded: a resolved line carrying it was
-# appended since the send began, or its captain-held task's answer intake
-# completed. A delivered answer's unrecorded key gets its exact manual close,
-# never a resend.
+# 128+signal: before delivery, nothing was sent and the exact rerun is printed,
+# except that a resend reusing a correlation whose earlier remote attempt is
+# still unknown keeps that delivery-unknown state and prints only the
+# correlation-reusing resend; with the remote transport in flight, remote
+# completion is unknown - never reported as unsent - the expectation is marked
+# delivery-unknown, and the printed FM_PENDING_REPLY_EXISTING_CORR=<id> resend
+# (or the same fire-and-forget delivery id) is the only safe retry; after the
+# durable record, do not resend. Every report, and also fm-send's own
+# remote-budget timeout and an unconfirmed typed submit, prints one line per
+# --resolve-key saying whether its close is durably recorded: a resolved line
+# carrying it was appended since the send began, or its captain-held task's
+# answer intake completed. A delivered answer's unrecorded key gets its exact
+# manual close, never a resend.
 # SIGKILL, such as a harness tool timeout that kills the process group, runs
 # no handler, so a --resolve-key send also prints each durable step as it
 # lands: "delivery to <task> starts now" (absent: nothing was sent), "durably
@@ -253,9 +255,12 @@
 # to its budget (the remote record can land after fm-send died, so treat it as
 # unknown), a marked request's attempted-delivery marker (the watcher ages it
 # to delivery-unknown), and a metadata lock the next sender reclaims as stale.
-# Verify each key afterwards, read-only, with
-#   grep -F '[key=<key>]' "$FM_HOME/state/<task>.status" | grep '^resolved'
-# or, for a captain-held key, bin/fm-tasks-axi.sh show <task-id> --full.
+# Verify each key afterwards, read-only, on its latest line (a reopened key's
+# older resolved line no longer counts), with
+#   grep -F '[key=<key>]' "<state>/<task>.status" | tail -n 1 | grep '^resolved'
+# where <state> is $FM_STATE_OVERRIDE when the send ran with it, else
+# $FM_HOME/state; or, for a captain-held key, bin/fm-tasks-axi.sh show
+# <task-id> --full.
 #
 # After a successful TYPED-plane submit fm-send pauses FM_SEND_SETTLE seconds
 # (default 1, 0 disables) before returning: submit confirmation only proves the
@@ -658,6 +663,7 @@ FM_SEND_DELIVERY=
 FM_SEND_DELIVERED_WHAT=
 FM_SEND_HELD_LOCK=
 FM_SEND_PREPARED=0
+FM_SEND_REUSED_UNKNOWN=0
 FM_SEND_DELIVERY_CONFIRMED=0
 FM_SEND_HOLDS_FED=0
 FM_SEND_LOCAL_SEQ_FLOOR=0
@@ -674,21 +680,51 @@ fm_send_progress() {  # <text>
   printf 'fm-send: %s\n' "$1" >&2
 }
 
-# The exact command that reruns this send, optionally reusing a correlation.
-fm_send_print_rerun() {  # [corr]
-  local home state arg
+# --- printed resend commands ------------------------------------------------
+#
+# Every command this script prints for the operator to run must reach the SAME
+# home and the SAME script this invocation used. Neither is recoverable from the
+# command line alone: a one-shot "FM_HOME=<home> bin/fm-send.sh ..." leaves
+# nothing exported for the next command, and a relative invocation cannot be
+# re-run from any other directory. A printed command missing either resolves
+# somewhere else - another home's state dir, or no script at all - so the
+# operator's preserved message is still never delivered.
+# These two are the ONE statement of that context; every printed command (the
+# reruns and retries fm_send_print_rerun prints, and the refused --resolve-key
+# resend) builds on them rather than restating the quoting and fallback rules.
+# They sit above the interruption traps so a handler can always call them.
+
+# The environment prefix a printed resend must carry: the absolute home always,
+# and FM_STATE_OVERRIDE only when this invocation was actually given one, so the
+# printed command never invents a state dir the caller was not using.
+fm_send_resend_env() {  # -> "FM_HOME=<q> [FM_STATE_OVERRIDE=<q> ]"
+  local home state
   home=$(cd "$FM_HOME" 2>/dev/null && pwd) || home=$FM_HOME
-  printf 'FM_HOME=%q ' "$home" >&2
+  printf 'FM_HOME=%q ' "$home"
   if [ "${FM_STATE_OVERRIDE+x}" = x ]; then
     state=$(cd "$STATE" 2>/dev/null && pwd) || state=$STATE
-    printf 'FM_STATE_OVERRIDE=%q ' "$state" >&2
+    printf 'FM_STATE_OVERRIDE=%q ' "$state"
   fi
-  [ -z "${1:-}" ] || printf 'FM_PENDING_REPLY_EXISTING_CORR=%q ' "$1" >&2
-  printf '%q' "$SCRIPT_DIR/fm-send.sh" >&2
-  for arg in "${FM_SEND_ORIGINAL_ARGS[@]}"; do
-    printf ' %q' "$arg" >&2
-  done
-  printf '\n' >&2
+}
+
+# This script's absolute path, quoted. Deliberately not "$0": a relative "$0" is
+# only valid from the directory this invocation happened to run in.
+fm_send_resend_exe() {
+  printf '%q' "$SCRIPT_DIR/fm-send.sh"
+}
+
+# The exact command that reruns this send, optionally reusing a correlation.
+fm_send_print_rerun() {  # [corr]
+  local arg
+  {
+    fm_send_resend_env
+    [ -z "${1:-}" ] || printf 'FM_PENDING_REPLY_EXISTING_CORR=%q ' "$1"
+    fm_send_resend_exe
+    for arg in "${FM_SEND_ORIGINAL_ARGS[@]}"; do
+      printf ' %q' "$arg"
+    done
+    printf '\n'
+  } >&2
 }
 
 # Whether a resolved line carrying <key> is durably in the target's status log,
@@ -740,6 +776,21 @@ fm_send_report_resolve_keys() {  # [delivered]
       echo "fm-send: --resolve-key $k: NOT recorded (no resolved line for it in ${RESOLVE_STATUS_FILE:-its status log})" >&2
     fi
   done
+}
+
+# FM_SEND_LOCAL_SEQ_FLOOR = one above every record sequence in the inbox root
+# and handled/, which is where the next enqueue lands at the earliest. Parsed
+# in this shell, because it runs on every local send and handled/ only grows.
+fm_send_set_local_seq_floor() {  # <inbox-dir>
+  local f n max=0
+  for f in "$1"/*.msg "$1"/handled/*.msg; do
+    n=${f##*/}
+    n=${n%.msg}
+    case "$n" in '' | *[!0-9]*) continue ;; esac
+    n=$((10#$n))
+    [ "$n" -le "$max" ] || max=$n
+  done
+  FM_SEND_LOCAL_SEQ_FLOOR=$((max + 1))
 }
 
 # After an interrupted local enqueue: the record it wrote, if its atomic rename
@@ -803,13 +854,21 @@ fm_send_interrupted() {  # <signal-name>
     fm_send_report_resolve_keys
     ;;
   *)
-    if [ "$PENDING_REPLY_CREATED" = 1 ] || [ "$FM_SEND_PREPARED" = 1 ]; then
-      fm_send_known_undelivered_cleanup >/dev/null 2>&1 || true
+    if [ "$FM_SEND_REUSED_UNKNOWN" = 1 ]; then
+      fm_pending_reply_mark_delivery_unknown "$STATE" "$PENDING_REPLY_CORR" || true
+      echo "fm-send: interrupted by SIG$sig before this attempt's delivery, so this attempt sent nothing; correlation $PENDING_REPLY_CORR's earlier remote attempt to secondmate $TARGET_REMOTE_ID is still unknown, so the steer may already be recorded there." >&2
+      fm_send_report_resolve_keys
+      echo "fm-send: retry only with this correlation-reusing resend; it lands on the same remote inbox record if the earlier one arrived, and closes each --resolve-key decision once delivery confirms:" >&2
+      fm_send_print_rerun "$PENDING_REPLY_CORR"
+    else
+      if [ "$PENDING_REPLY_CREATED" = 1 ] || [ "$FM_SEND_PREPARED" = 1 ]; then
+        fm_send_known_undelivered_cleanup >/dev/null 2>&1 || true
+      fi
+      echo "fm-send: interrupted by SIG$sig before delivery; nothing was sent to $FM_SEND_LABEL." >&2
+      fm_send_report_resolve_keys
+      echo "fm-send: nothing was sent, so rerunning the same command is safe:" >&2
+      fm_send_print_rerun "${FM_PENDING_REPLY_EXISTING_CORR:-}"
     fi
-    echo "fm-send: interrupted by SIG$sig before delivery; nothing was sent to $FM_SEND_LABEL." >&2
-    fm_send_report_resolve_keys
-    echo "fm-send: nothing was sent, so rerunning the same command is safe:" >&2
-    fm_send_print_rerun "${FM_PENDING_REPLY_EXISTING_CORR:-}"
     ;;
   esac
   exit "$status"
@@ -859,38 +918,6 @@ fm_send_open_set_keys() {  # <open-set>
 # refused key never costs the operator the text they typed.
 fm_send_quoted_message() {  # <text...>
   printf '%q' "$*"
-}
-
-# --- printed resend commands ------------------------------------------------
-#
-# Every command this script prints for the operator to run must reach the SAME
-# home and the SAME script this invocation used. Neither is recoverable from the
-# command line alone: a one-shot "FM_HOME=<home> bin/fm-send.sh ..." leaves
-# nothing exported for the next command, and a relative invocation cannot be
-# re-run from any other directory. A printed command missing either resolves
-# somewhere else - another home's state dir, or no script at all - so the
-# operator's preserved message is still never delivered.
-# These two are the ONE statement of that context; both printed resend paths
-# (the unconfirmed remote retry and the refused --resolve-key) call them rather
-# than restating the quoting and fallback rules.
-
-# The environment prefix a printed resend must carry: the absolute home always,
-# and FM_STATE_OVERRIDE only when this invocation was actually given one, so the
-# printed command never invents a state dir the caller was not using.
-fm_send_resend_env() {  # -> "FM_HOME=<q> [FM_STATE_OVERRIDE=<q> ]"
-  local home state
-  home=$(cd "$FM_HOME" 2>/dev/null && pwd) || home=$FM_HOME
-  printf 'FM_HOME=%q ' "$home"
-  if [ "${FM_STATE_OVERRIDE+x}" = x ]; then
-    state=$(cd "$STATE" 2>/dev/null && pwd) || state=$STATE
-    printf 'FM_STATE_OVERRIDE=%q ' "$state"
-  fi
-}
-
-# This script's absolute path, quoted. Deliberately not "$0": a relative "$0" is
-# only valid from the directory this invocation happened to run in.
-fm_send_resend_exe() {
-  printf '%q' "$SCRIPT_DIR/fm-send.sh"
 }
 
 # Close-note body for --resolve-key. Ordinary keys keep answered: <excerpt>.
@@ -1211,6 +1238,7 @@ else
     if [ "$PENDING_REPLY_CREATED" != 1 ] &&
       fm_pending_reply_delivery_attempt_unresolved "$STATE" "$PENDING_REPLY_CORR"; then
       if [ "$TARGET_BACKEND" = remote ]; then
+        FM_SEND_REUSED_UNKNOWN=1
         if ! fm_pending_reply_reset_known_undelivered "$STATE" "$PENDING_REPLY_CORR"; then
           echo "error: pending-reply delivery for $TARGET_TASK_ID could not be reset for an idempotent remote resend of correlation $PENDING_REPLY_CORR" >&2
           exit 1
@@ -1406,10 +1434,8 @@ else
     fi
     # The floor below which an interrupted enqueue cannot have landed (an
     # idempotent write may reuse any earlier record, so it has none).
-    if [ "${FM_SEND_IDEMPOTENT:-0}" != 1 ]; then
-      FM_SEND_LOCAL_SEQ_FLOOR=$(fm_task_inbox_next_seq "$(fm_task_inbox_dir "$STATE" "$INBOX_TASK_ID")")
-      FM_SEND_LOCAL_SEQ_FLOOR=$((10#$FM_SEND_LOCAL_SEQ_FLOOR))
-    fi
+    [ "${FM_SEND_IDEMPOTENT:-0}" = 1 ] ||
+      fm_send_set_local_seq_floor "$(fm_task_inbox_dir "$STATE" "$INBOX_TASK_ID")"
     fm_send_progress "delivery to $INBOX_TASK_ID starts now; no delivery step ran before this line"
     FM_SEND_DELIVERY=inbox
     FM_SEND_PHASE=deliver

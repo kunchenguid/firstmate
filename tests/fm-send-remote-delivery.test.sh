@@ -35,6 +35,9 @@
 #      correlation-reusing resend as the last line; that resend closes them.
 #  10. A SIGKILL mid-transport runs no handler: the progress lines and the
 #      header's read-only check are what the caller can rely on.
+#  11. A correlation-reusing resend interrupted before its own transport keeps
+#      the earlier attempt's unknown delivery for the watcher, never reports
+#      the steer as unsent, and prints the same correlation as the only retry.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -1020,7 +1023,7 @@ test_remote_sigkill_mid_transport_leaves_verifiable_state() {
     "a --resolve-key send must announce the delivery leg before it starts"
   assert_not_contains "$err" "durably recorded" \
     "a killed remote transport must never look recorded"
-  if grep -F '[key=upgrade-window]' "$home/state/rsm.status" | grep '^resolved' >/dev/null; then
+  if grep -F '[key=upgrade-window]' "$home/state/rsm.status" | tail -n 1 | grep '^resolved' >/dev/null; then
     fail "the documented read-only check must find no resolved line after the kill"
   fi
   pend=$(pending_record "$home")
@@ -1029,6 +1032,93 @@ test_remote_sigkill_mid_transport_leaves_verifiable_state() {
   fm_pending_reply_delivery_attempt_unresolved "$home/state" "$(fm_pending_reply_get "$pend" corr_id)" \
     || fail "the killed attempt must leave its attempted-delivery marker for watcher reconciliation"
   pass "fm-send remote: a SIGKILL mid-transport leaves progress lines and verifiable state"
+}
+
+# The first attempt's record lands remotely but both transports are lost, so
+# its delivery is unknown. The printed correlation-reusing resend is then
+# interrupted while it waits for the parent metadata lock, before its own
+# transport. The earlier record is really there, so the expectation must stay
+# delivery-unknown (the watcher escalates that, and skips an undelivered
+# awaiting_report without a marker), the report must not call the steer
+# unsent, and the printed retry must reuse the correlation and land on that
+# same remote record.
+test_remote_interrupted_reused_corr_keeps_unknown_delivery() {
+  local dir fb ssh_log home rhome rc err pend corr marker lock ready release holder_pid
+  local count tries
+  dir="$TMP_ROOT/remote-reused-interrupt"; mkdir -p "$dir"
+  fb=$(make_stubs "$dir"); ssh_log="$dir/ssh.log"; : > "$ssh_log"
+  rhome=$(setup_remote_secondmate_home remote-reused-interrupt)
+  home=$(setup_remote_parent_home remote-reused-interrupt "$rhome")
+
+  rc=0
+  send_env "$fb" "$home" "$ssh_log" FM_FAKE_SSH_AMBIGUOUS=1 \
+    "$SEND" rsm "rotate the staging keys" >"$dir/first.out" 2>"$dir/first.err" || rc=$?
+  expect_code 1 "$rc" "a twice-lost transport must exit unconfirmed: $(cat "$dir/first.err")"
+  count=$(remote_inbox_records "$rhome" | grep -c . || true)
+  [ "$count" = 1 ] || fail "the first attempt must have landed one remote record, found $count"
+  pend=$(pending_record "$home")
+  [ "$(fm_pending_reply_get "$pend" phase)" = delivery_unknown ] \
+    || fail "the lost transport must leave delivery unknown: $(cat "$pend")"
+  corr=$(fm_pending_reply_get "$pend" corr_id)
+  # The resend comes later than the first attempt; age its attempted marker so
+  # the resend's fresh one is observable.
+  marker=$(fm_pending_reply_delivery_confirmation_path "$home/state" "$corr")
+  printf 'attempted=1\n' > "$marker"
+
+  lock="$home/state/.meta-rsm.lock"
+  ready="$dir/lock-ready"
+  release="$dir/release-lock"
+  FM_STATE_OVERRIDE="$home/state" bash -c '
+    . "$1"
+    fm_task_inbox_lock_acquire "$2" || exit 91
+    : > "$3"
+    while [ ! -e "$4" ]; do sleep 0.05; done
+    fm_lock_release "$2"
+  ' _ "$ROOT/bin/fm-task-inbox-lib.sh" "$lock" "$ready" "$release" &
+  holder_pid=$!
+  while [ ! -e "$ready" ]; do
+    kill -0 "$holder_pid" 2>/dev/null || fail "metadata-lock holder exited early"
+    /bin/sleep 0.05
+  done
+
+  start_send_in_group "$fb" "$home" "$ssh_log" "$dir/out" "$dir/err" \
+    FM_PENDING_REPLY_EXISTING_CORR="$corr" FM_TASK_INBOX_LOCK_WAIT_SECS=120 -- \
+    rsm "rotate the staging keys"
+  tries=0
+  until [ "$(cat "$marker" 2>/dev/null)" != "attempted=1" ] && [ -f "$marker" ]; do
+    tries=$((tries + 1))
+    if [ "$tries" -gt 600 ] || ! kill -0 "$BG_PID" 2>/dev/null; then
+      : > "$release"
+      fail "the resend never prepared its attempt: $(cat "$dir/err")"
+    fi
+    /bin/sleep 0.05
+  done
+  kill -s TERM -- "-$BG_PID"
+  rc=0
+  wait "$BG_PID" || rc=$?
+  : > "$release"
+  wait "$holder_pid" || fail "metadata-lock holder failed"
+  err=$(cat "$dir/err")
+  expect_code 143 "$rc" "the interrupted resend must exit 128+TERM: $err"
+  [ "$(cat "$ssh_log.count")" = 2 ] \
+    || fail "the interrupted resend must not have reached the transport"
+  assert_not_contains "$err" "nothing was sent" \
+    "a correlation whose earlier remote attempt landed must never be reported as unsent"
+  [ "$(fm_pending_reply_get "$pend" phase)" = delivery_unknown ] \
+    || fail "the interrupted resend must keep the earlier attempt's unknown delivery: $(cat "$pend")"
+  [ -z "$(fm_pending_reply_get "$pend" delivered_epoch)" ] \
+    || fail "an interrupted resend must not confirm delivery: $(cat "$pend")"
+  assert_contains "$(tail -1 "$dir/err")" "FM_PENDING_REPLY_EXISTING_CORR=$corr " \
+    "the last report line must be the correlation-reusing retry"
+
+  rc=0
+  run_printed_resend "$fb" "$ssh_log" "$(tail -1 "$dir/err")" "$dir/retry.out" "$dir/retry.err" || rc=$?
+  expect_code 0 "$rc" "the printed retry must deliver: $(cat "$dir/retry.err")"
+  count=$(remote_inbox_records "$rhome" | grep -c . || true)
+  [ "$count" = 1 ] || fail "the printed retry must land on the earlier remote record, found $count"
+  [ -n "$(fm_pending_reply_get "$pend" delivered_epoch)" ] \
+    || fail "the printed retry must confirm delivery: $(cat "$pend")"
+  pass "fm-send remote: an interrupted correlation-reusing resend keeps the earlier unknown delivery"
 }
 
 test_remote_large_steer_uses_stdin
@@ -1048,6 +1138,7 @@ test_remote_send_budget_bounds_busy_lane
 test_remote_interrupt_mid_transport_reports_each_key
 test_remote_budget_timeout_reports_each_key
 test_remote_sigkill_mid_transport_leaves_verifiable_state
+test_remote_interrupted_reused_corr_keeps_unknown_delivery
 test_local_pending_reports_delivered_unconfirmed
 test_local_pending_does_not_close_resolve_key
 test_local_secondmate_pending_keeps_expectation_armed
