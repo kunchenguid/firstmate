@@ -437,7 +437,7 @@ status_pause_age() {  # <status-line> <file-age-seconds> <now-epoch>
 
 status_pause_is_overdue() {  # <status-line> <age-seconds> <now-epoch> -> success iff overdue
   local until undated_max=${FM_PAUSE_UNDATED_MAX_SECS:-$FM_PAUSE_UNDATED_MAX_SECS_DEFAULT}
-  case "$undated_max" in ''|*[!0-9]*) undated_max=$FM_PAUSE_UNDATED_MAX_SECS_DEFAULT ;; esac
+  case "$undated_max" in ''|0|*[!0-9]*) undated_max=$FM_PAUSE_UNDATED_MAX_SECS_DEFAULT ;; esac
   if until=$(status_paused_until "$1"); then
     [ "$3" -gt "$(( until + ${FM_PAUSE_RESURFACE_SECS:-$FM_PAUSE_RESURFACE_SECS_DEFAULT} ))" ]
   else

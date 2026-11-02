@@ -1514,7 +1514,9 @@ test_undated_pause_age_uses_the_pause_line() {
   [ "$age" = 90000 ] || fail "a later file touch moved the pause age ($age)"
   age=$(bash -c '. "$1/bin/fm-classify-lib.sh"; status_pause_age "$2" 7200 "$3"' _ "$ROOT" "paused: waiting" "$now")
   [ "$age" = 7200 ] || fail "an unstamped pause did not keep the file age ($age)"
-  pass "the undated bound is measured from the pause line's own stamp"
+  result=$(FM_PAUSE_UNDATED_MAX_SECS=0 bash -c '. "$1/bin/fm-classify-lib.sh"; status_pause_is_overdue "paused: waiting" 0 1800000000; printf "%s" "$?"' _ "$ROOT")
+  [ "$result" = 1 ] || fail "zero bound made a fresh pause overdue"
+  pass "the undated bound uses the pause timestamp and rejects zero"
 }
 
 test_undated_pause_overdue_bound() {
