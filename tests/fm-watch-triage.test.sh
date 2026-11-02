@@ -727,16 +727,23 @@ test_secondmate_status_routine_absorbed_routed_surfaced_classifier() {
 
 
 test_claimed_run_outcomes() {
-  local outcome dir state fakebin out wt task branch pid expected
-  for outcome in missing matching; do
+  local outcome dir state fakebin out wt task branch pid expected delay age
+  for outcome in missing matching invalid-delay; do
     dir=$(make_case "claimed-run-$outcome"); state="$dir/state"; fakebin="$dir/fakebin"
     out="$dir/watch.out"; wt="$dir/worktree"; task=claim
     mkdir -p "$wt"
     git -C "$wt" init -q
     branch=$(git -C "$wt" symbolic-ref --short HEAD)
     printf 'worktree=%s\n' "$wt" > "$state/$task.meta"
-    printf 'working [at=1234567890] [key=validation]: validation started\nworking: implementing validation setup\nworking: checking progress\n' > "$state/$task.status"
-    { printf '%s\n' "$(( $(date +%s) - 60 ))"; printf '%s\n%s\n' "$branch" '1'; } > "$state/.claimed-run-$task"
+    if [ "$outcome" = invalid-delay ]; then
+      printf 'working: routine progress\n' > "$state/$task.status"
+    else
+      printf 'working [at=1234567890] [key=validation]: validation started\nworking: implementing validation setup\nworking: checking progress\n' > "$state/$task.status"
+    fi
+    age=60; delay=0
+    if [ "$outcome" = invalid-delay ]; then age=200; delay=invalid; else
+      { printf '%s\n' "$(( $(date +%s) - age ))"; printf '%s\n%s\n' "$branch" '1'; } > "$state/.claimed-run-$task"
+    fi
     printf 'v2\t%s\t%s@%s' "$(status_observed_signature "$state/$task.status")" \
       "$(size_of "$state/$task.status")" "$(_fm_open_decisions_file_ident "$state/$task.status")" \
       > "$state/.seen-claim_status"
@@ -756,10 +763,14 @@ SH
     chmod +x "$fakebin/no-mistakes"
     export FM_EXPECT_BRANCH="$branch"
     export FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)'
-    PATH="$fakebin:$PATH" FM_CLAIMED_RUN_DELAY=0 FM_STATE_OVERRIDE="$state" \
+    PATH="$fakebin:$PATH" FM_CLAIMED_RUN_DELAY="$delay" FM_STATE_OVERRIDE="$state" \
       FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_POLL=1 FM_SIGNAL_GRACE=1 \
       FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
     pid=$!
+    if [ "$outcome" = invalid-delay ]; then
+      wait_poll_cycle "$state" "$pid" || { reap "$pid"; fail "invalid-delay watcher exited before its first cycle"; }
+      { printf '%s\n' "$(( $(date +%s) - age ))"; printf '%s\n%s\n' "$branch" '1'; } > "$state/.claimed-run-$task"
+    fi
     if [ "$expected" = 1 ]; then
       wait_for_exit "$pid" 100 || { reap "$pid"; fail "claimed-run $outcome did not surface"; }
       [ "$(grep -c 'validation claim has no run' "$out")" -eq 1 ] || fail "missing run did not emit exactly one wake: $(cat "$out")"
