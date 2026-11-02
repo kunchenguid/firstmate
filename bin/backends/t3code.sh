@@ -203,8 +203,36 @@ process.stdout.write(require("crypto").createHash("sha256").update(require("fs")
 # only on acceptance or T3's typed refusal of the send: any other failure,
 # including one before the request went out, leaves the earlier attempt
 # unproven and reads 7.
-fm_backend_t3code_turn_start() {  # <thread-id> <text> [model-selection-json]
+fm_backend_t3code_turn_start() (  # <thread-id> <text> [model-selection-json]
   local thread=$1 text=$2 file='' dir record='' id='' out rc=0 held=0
+  local state=${FM_STATE_OVERRIDE:-$FM_HOME/state} task seat server
+  server=$(fm_backend_t3code_server_identity) || return 1
+  seat=$("$FM_BACKEND_LIB_DIR/fm-fleet-seats.sh" show-t3 "$thread" "$server") || return 1
+  if [ -n "$seat" ]; then
+    task=$(printf '%s' "$seat" | jq -ser 'if length == 1 then .[0].task else error("ambiguous T3 holder") end') || return 1
+    state=$(printf '%s' "$seat" | jq -er .state_dir) || return 1
+    if printf '%s' "$seat" | jq -e --arg t "$thread" --arg server "$server" '
+      any(.incarnations[]; .kind == "secondmate" and .route.backend == "t3code"
+        and .route.target == $t and .route.server_identity == $server)
+    ' >/dev/null; then
+      # shellcheck source=bin/fm-secondmate-liveness-lib.sh
+      . "$FM_BACKEND_LIB_DIR/fm-secondmate-liveness-lib.sh"
+      fm_supervisor_lifecycle_enter "$state" "$task" 0 || {
+        echo "error: T3 turn refused while $task has an active lifecycle operation" >&2
+        return 1
+      }
+      trap 'fm_supervisor_lifecycle_release "$state" "$task"' EXIT
+    fi
+    seat=$("$FM_BACKEND_LIB_DIR/fm-fleet-seats.sh" show-t3 "$thread" "$server") || return 1
+    if ! printf '%s' "$seat" | jq -e --arg t "$thread" --arg server "$server" '
+      [.incarnations[] | select(.route.backend == "t3code"
+        and .route.target == $t and .route.server_identity == $server)]
+      | length > 0 and all(.[]; .lifecycle == "reserved" or .lifecycle == "confirmed")
+    ' >/dev/null; then
+      echo "error: T3 turn refused for $task; normal capacity admission is required" >&2
+      return 1
+    fi
+  fi
   dir="${FM_STATE_OVERRIDE:-$FM_HOME/state}/t3code-sends"
   if [ -n "${FM_T3CODE_CLIENT_REQUEST_ID:-}" ]; then
     id=$FM_T3CODE_CLIENT_REQUEST_ID
@@ -248,7 +276,7 @@ fm_backend_t3code_turn_start() {  # <thread-id> <text> [model-selection-json]
   fi
   [ -z "$record" ] || [ "$rc" -eq 7 ] || rm -f "$record"
   return "$rc"
-}
+)
 
 fm_backend_t3code_thread_state() {  # <thread-id>
   fm_backend_t3code_mcp state --thread "$1"

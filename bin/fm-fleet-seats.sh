@@ -195,6 +195,8 @@
 #       ended, skipping busy episodes; nothing is killed to free a seat.
 #   fm-fleet-seats.sh show <id>
 #       Print this home's holder record for <id> (read-only).
+#   fm-fleet-seats.sh show-t3 <thread-id> <server-identity>
+#       Print the fleet's holder records for the recorded T3 endpoint.
 #   fm-fleet-seats.sh serve-remotes
 #       Root only (a no-op anywhere else): serve every registered remote
 #       secondmate and print one "served <id> ..." or "unreachable <id>" line
@@ -1069,6 +1071,12 @@ TASK='' MODEL='' HOLDER='' HARNESS='' DIGEST_ARG='' EPOCH_ARG='' RAW_LAUNCH=0
 GEN='' PREV_GEN='-' KIND='' ROUTE_FILE='' RESPONSE_FILE='' REASON='' LIMIT='' STATE_DIR_ARG=''
 ALLOWANCES=''
 case "$CMD" in
+  show-t3)
+    T3_TARGET=${1:-}
+    T3_SERVER=${2:-}
+    [ "$#" -eq 2 ] && [ -n "$T3_TARGET" ] && [ -n "$T3_SERVER" ] || usage
+    shift 2
+    ;;
   reserve|dispatch|confirm|release|reclaim|reconcile-remote|show)
     TASK=${1:-}
     shift 2>/dev/null || true
@@ -1109,7 +1117,7 @@ case "$CMD" in
     case "$REASON" in prelaunch|cancelled|replaced|teardown) ;; *) usage ;; esac
     ;;
   reconcile-remote) [ -n "$RESPONSE_FILE" ] || usage ;;
-  confirm|reclaim|show) ;;
+  confirm|reclaim|show|show-t3) ;;
   reconcile)
     [ "${1:-}" = --limit ] && is_count "${2:-}" && [ "$#" -eq 2 ] || usage
     LIMIT=$2
@@ -1202,7 +1210,7 @@ if [ "$ROOT_UNPROVEN" -eq 1 ]; then
 fi
 case "$CMD" in
   reserve) declared || { [ -d "$LEDGER/holders" ] || exit 0; OPT_OUT=1; } ;;
-  dispatch|confirm|release|reclaim|reconcile-remote|show)
+  dispatch|confirm|release|reclaim|reconcile-remote|show|show-t3)
     declared || [ -d "$LEDGER/holders" ] || exit 0
     ;;
   reconcile) [ -d "$LEDGER/holders" ] || exit 0 ;;
@@ -1244,6 +1252,18 @@ load_or_refuse() {
 }
 
 # --- read-only ------------------------------------------------------------------
+
+if [ "$CMD" = show-t3 ]; then
+  ledger_scan || unavailable "${LEDGER_ERROR:-the fleet ledger could not be read}"
+  for record in "$LEDGER/holders/"*.json; do
+    [ -f "$record" ] || continue
+    jq -c --arg t "$T3_TARGET" --arg server "$T3_SERVER" '
+      select(any(.incarnations[];
+        .route.backend == "t3code" and .route.target == $t and .route.server_identity == $server))
+    ' "$record" || unavailable "cannot read T3 endpoint ownership"
+  done
+  exit 0
+fi
 
 if [ "$CMD" = show ]; then
   load_or_refuse

@@ -2499,6 +2499,24 @@ fm_secondmate_liveness_relaunch "$1" smfail && echo relaunched=yes || echo relau
   ' "$ROOT" "$state/smfail.meta")
   assert_contains "$out" "terminal; normal capacity admission" "terminal T3 resume was not refused"
   [ -z "$(t3_dispatch_types)" ] || fail "terminal T3 generation received executable work"
+  FM_HOME="$CASE_DIR/home" FM_STATE_OVERRIDE="$state" FM_CONFIG_OVERRIDE="$CONFIG" \
+    "$ROOT/bin/fm-fleet-seats.sh" reserve contender --generation g-other --kind secondmate --harness claude --model pool-model-a --holder-pid "$$" \
+    > "$CASE_DIR/probe.out" 2>&1 || fail "reclaimed capacity was not available: $(cat "$CASE_DIR/probe.out")"
+  out=$(FM_HOME="$CASE_DIR/home" FM_STATE_OVERRIDE="$state" t3_run 'fm_backend_t3code_send_text_submit "$1" continue 1 0 0' "$thread" 2>&1)
+  assert_contains "$out" send-failed "explicit-target delivery resumed a reclaimed generation: $out"
+  probe_rc=0
+  FM_HOME="$CASE_DIR/home" FM_STATE_OVERRIDE="$state" t3_run 'fm_backend_t3code_resume_failed "$1"' "$thread" > "$CASE_DIR/resume.out" 2>&1 || probe_rc=$?
+  expect_code 1 "$probe_rc" "direct recovery resumed a reclaimed generation"
+  mv "$state/smfail.meta" "$state/smfail.saved"
+  out=$(FM_HOME="$CASE_DIR/home" FM_STATE_OVERRIDE="$state" t3_run 'fm_backend_t3code_send_text_submit "$1" continue 1 0 0' "$thread" 2>&1)
+  assert_contains "$out" send-failed "missing task metadata bypassed terminal seat ownership: $out"
+  mkdir -p "$CASE_DIR/other-home/state"
+  ln -s "$state" "$CASE_DIR/home/state"
+  ln -s "$CONFIG" "$CASE_DIR/home/config"
+  printf 'schema=fm-secondmate-parent.v1\nroute=local\nparent_home=%s\n' "$CASE_DIR/home" > "$CASE_DIR/other-home/.fm-secondmate-parent"
+  out=$(FM_HOME="$CASE_DIR/other-home" FM_STATE_OVERRIDE="$CASE_DIR/other-home/state" t3_run 'fm_backend_t3code_send_text_submit "$1" continue 1 0 0' "$thread" 2>&1)
+  assert_contains "$out" send-failed "another caller state bypassed terminal seat ownership: $out"
+  [ -z "$(t3_dispatch_types)" ] || fail "reclaimed T3 generation received executable work beside its replacement"
   pass "secondmate liveness backend=t3code: a failed run is resumed on its own thread, never archived and replaced"
 }
 
