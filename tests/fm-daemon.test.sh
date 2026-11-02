@@ -1583,6 +1583,31 @@ test_housekeeping_overdue_queue_failure_resume_discards() {
   pass "failed enqueue followed by a worker event closes without an obsolete alert, retaining failed resolutions"
 }
 
+test_overdue_reconcile_ignores_unrelated_and_repeated_pause() {
+  local dir state task statusf identity offset event
+  for event in blocked repeated; do
+    dir=$(make_supercase "overdue-reconcile-$event"); state="$dir/state"
+    task=overdue-reconcile; statusf="$state/$task.status"
+    printf 'paused [at=100]: waiting for dependency\n' > "$statusf"
+    offset=$(wc -c < "$statusf" | tr -d ' ')
+    printf 'blocked [key=paused-overdue-%s]: overdue\n' "$task" >> "$statusf"
+    if [ "$(uname)" = Darwin ]; then identity=$(/usr/bin/stat -f '%d %i' "$statusf"); else identity=$(stat -c '%d %i' "$statusf"); fi
+    printf '%s:%s\n' "$identity" "$offset" > "$state/.paused-overdue-$task"
+    case "$event" in
+      blocked) printf 'blocked [key=other]: another decision\n' >> "$statusf" ;;
+      repeated) printf 'paused [at=200]: waiting for dependency\n' >> "$statusf" ;;
+    esac
+    (
+      export FM_HOME="$dir" FM_STATE_OVERRIDE="$state"
+      . "$ROOT/bin/fm-wake-lib.sh"
+      reconcile_overdue_pause "$state" "$task"
+      [ -e "$state/.paused-overdue-$task" ] || fail "$event removed the overdue marker"
+      status_open_decisions "$statusf" | grep -Fq "paused-overdue-$task" || fail "$event closed the overdue decision"
+    ) || fail "overdue reconciliation accepted $event as resume"
+  done
+  pass "unrelated blockers and repeated pauses preserve overdue decisions"
+}
+
 test_housekeeping_overdue_initial_publication_reconciles_resume() {
   local timing dir state task statusf original_append
   for timing in before after; do
@@ -3824,6 +3849,7 @@ test_housekeeping_overdue_queue_failure_leaves_decision_open
 test_housekeeping_overdue_queue_failure_resume_discards
 test_watcher_overdue_marker_does_not_hide_blocker_from_daemon
 test_overdue_open_decision_without_marker_is_not_repeated
+test_overdue_reconcile_ignores_unrelated_and_repeated_pause
 test_housekeeping_overdue_initial_publication_reconciles_resume
 test_housekeeping_overdue_pause_preserves_prior_actionable_event
 test_housekeeping_quiet_overdue_pause_opens_decision

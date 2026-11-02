@@ -2665,7 +2665,7 @@ clear_pause_tracking() {  # <window-key>
 
 # Keep the overdue decision open until the worker appends another status event.
 pause_overdue_reconcile() {  # <task> <status-file> -> 0 unchanged, 1 cleared or absent
-  local task=$1 statusf=$2 marker="$STATE/.paused-overdue-$1" identity marker_identity offset actual added line verb key append_rc resume=0
+  local task=$1 statusf=$2 marker="$STATE/.paused-overdue-$1" identity marker_identity offset actual added line verb key append_rc resume=0 prior_pause new_pause pause_line
   [ -f "$marker" ] || return 1
   [ -f "$statusf" ] || { rm -f "$marker"; return 1; }
   identity=$(stat_devino "$statusf") || return 0
@@ -2678,17 +2678,19 @@ pause_overdue_reconcile() {  # <task> <status-file> -> 0 unchanged, 1 cleared or
   fi
   [ "$actual" -gt "$offset" ] || return 0
   added=$(_fm_status_read_span "$statusf" "$offset" "$((actual - offset))") || return 0
+  pause_line=$(_fm_status_read_span "$statusf" 0 "$offset" | grep -E '^paused([[:space:]]|:)' | tail -n 1)
+  _fm_status_unstamped "$pause_line" prior_pause
   while IFS= read -r line || [ -n "$line" ]; do
     verb=$(status_line_verb "$line")
     case "$verb" in
-      '') ;;
+      blocked|'') ;;
       resolved)
         key=$(_fm_decision_key "$line" '') || key=''
         [ "$key" = "paused-overdue-$task" ] && { rm -f "$marker"; return 1; }
         ;;
-      blocked)
-        key=$(_fm_decision_key "$line" '') || key=''
-        [ "$key" = "paused-overdue-$task" ] || resume=1
+      paused)
+        _fm_status_unstamped "$line" new_pause
+        [ "$new_pause" = "$prior_pause" ] || resume=1
         ;;
       *) resume=1 ;;
     esac

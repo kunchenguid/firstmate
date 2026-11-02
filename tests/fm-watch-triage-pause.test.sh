@@ -1440,6 +1440,12 @@ test_overdue_marker_survives_reconcile_and_closes_on_working() {
       "$STATE/.paused-overdue-overdue-marker-eof" "$(stat_devino "$2"):$(_fm_status_file_size "$2")"
     [ -s "$STATE/.paused-overdue-overdue-marker-eof" ] || exit 1
     pause_overdue_reconcile overdue-marker-eof "$2"; [ "$?" -eq 0 ] || exit 1
+    printf "blocked [key=other]: unrelated decision\n" >> "$2"
+    pause_overdue_reconcile overdue-marker-eof "$2"; [ "$?" -eq 0 ] || exit 1
+    [ -s "$STATE/.paused-overdue-overdue-marker-eof" ] || exit 1
+    printf "paused [at=200]: waiting for an external dependency\n" >> "$2"
+    pause_overdue_reconcile overdue-marker-eof "$2"; [ "$?" -eq 0 ] || exit 1
+    [ -s "$STATE/.paused-overdue-overdue-marker-eof" ] || exit 1
     printf "needs-decision: captain input required\n" >> "$2"
     pause_overdue_reconcile overdue-marker-eof "$2"; [ "$?" -eq 1 ] || exit 1
     [ ! -e "$STATE/.paused-overdue-overdue-marker-eof" ] || exit 1
