@@ -615,7 +615,7 @@ status_event_recorded() {  # <status-file> <new-status-line>
 #   resolved       corr=<16 hex> [key=texte-du-mur]: <how it was decided>
 # and a recovery turn can leave two such tokens on one line. All of those must
 # read as the bare verb, in BOTH directions: a verb parse that keeps the token
-# glued on matches no arm of _fm_decision_fold_line, so the opener never opens
+# glued on matches no arm of _fm_decision_fold_action, so the opener never opens
 # and the closer never closes, and a captain decision goes silently missing.
 # Recognition starts only AFTER the retained leading verb: a token-first line
 # keeps that token, so its following word cannot impersonate a transition and
@@ -779,13 +779,7 @@ $set
 EOF
   printf '%s' "$out"
 }
-# Fold ONE status line into an existing "<key>\t<verb>\t<note>\n"-per-line open
-# set, applying the same needs-decision/blocked-opens, resolved/captain-held-closes
-# rule status_open_decisions documents above. Pure text transform, no file I/O.
-# This is the ONE place the per-line open/resolved rule is written; both the
-# whole-file fold (status_open_decisions) and the incremental cursor-backed fold
-# (status_open_decisions_incremental) below call this instead of re-deriving the
-# rule, so the two consumption strategies can never drift apart on semantics.
+
 # Reserved decision-key namespaces, and the rule that makes them mean something.
 #
 # A key like `pending-reply-<id>` names a decision that one library raises and is
@@ -846,9 +840,13 @@ _fm_status_kind() {
 # rewriting the set: it sets _FM_FOLD_ACTION to none, clear (drop every record),
 # open (replace <key>'s record with _FM_FOLD_RECORD at the end), or close (drop
 # <key>'s record), plus _FM_FOLD_KEY. Callers declare those three names local.
-# Every read is fork-free, so a whole-file fold pays no subshell per line;
-# _fm_decision_fold_line below applies the action to the text set, and
-# status_open_decisions applies it to an in-memory one.
+# This is the ONE place the per-line open/close rule status_open_decisions
+# documents above is written, so no fold re-derives it and no two consumption
+# strategies can drift apart on semantics: _fm_decision_fold_line below applies
+# the action to the text set (the incremental cursor-backed fold and other
+# per-line callers use that), and status_open_decisions applies it to an
+# in-memory one. Pure line read, no file I/O; every read is fork-free, so a
+# whole-file fold pays no subshell per line.
 _fm_decision_fold_action() {  # <status-line> <resolve-verb> <held-verb> <kind> [timed]
   local __fm_fa_verb __fm_fa_note __fm_fa_unstamped __fm_fa_epoch __fm_fa_stated
   _FM_FOLD_ACTION=none
@@ -1107,9 +1105,10 @@ EOF
 # the question is settled outright, so a structured row still open behind it is a
 # contradiction between the two records - see fm-captain-hold.sh's `diverged`.
 #
-# Semantics are not re-derived here: every candidate line goes through the same
-# _fm_decision_fold_line rule the two folds use, and the reported verb is read
-# off the transitions that rule produces.
+# Semantics are not re-derived here: every candidate line goes through
+# _fm_decision_fold_line, which applies the same _fm_decision_fold_action rule
+# the two folds use, and the reported verb is read off the transitions that rule
+# produces.
 #
 # One `grep` pre-selects those candidates so the bash fold below costs the log's
 # TRANSITIONS rather than its whole lifetime length - status files are only ever
@@ -1217,7 +1216,7 @@ EOF
 # below are the bounded-cost siblings used for that per-drain path: each call
 # reads only the bytes appended to a status file since its own last call (a
 # persisted per-file byte cursor) and folds just those new lines into a
-# persisted running open-set, via the exact same _fm_decision_fold_line rule
+# persisted running open-set, via the exact same _fm_decision_fold_action rule
 # status_open_decisions uses - so the two strategies can never disagree on what
 # is open. Cost is bounded by NEW appends since the last drain, not by the
 # status file's total lifetime size.
@@ -1233,7 +1232,7 @@ EOF
 # The optional timed view uses a separate `.timed` cursor and adds `:timed`
 # to the version; status_open_decisions_incremental owns its row format.
 # FM_OPEN_DECISIONS_FOLD_VERSION must be bumped whenever
-# _fm_decision_fold_line semantics change, so persisted state from an older
+# _fm_decision_fold_action semantics change, so persisted state from an older
 # interpretation is discarded and rebuilt from byte 0; the kind suffix does the
 # same when a task kind changes, because kind changes the fold below.
 #
@@ -2250,7 +2249,7 @@ _fm_status_open_activities_stream() {
   held=${FM_CLASSIFY_CAPTAIN_HELD_VERB:-$FM_CLASSIFY_CAPTAIN_HELD_VERB_DEFAULT}
   pause=${FM_CLASSIFY_PAUSED_VERB:-$FM_CLASSIFY_PAUSED_VERB_DEFAULT}
   while IFS= read -r line || [ -n "$line" ]; do
-    # Blank-line guard; see _fm_decision_fold_line for why this is a glob.
+    # Blank-line guard; see _fm_decision_fold_action for why this is a glob.
     case "$line" in
       *[![:space:]]*) ;;
       *) continue ;;
