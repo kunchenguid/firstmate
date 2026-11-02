@@ -950,17 +950,19 @@ test_scan_ignores_non_canonical_done_lines() {
   printf '%s\n' 'done [at=2]: PR https://github.com/o/r/pull/5 checks green' 'done [at=3]: cleanup finished' > "$state/task-later-done.status"
   write_task_meta "$dir" task-paused
   printf '%s\n' 'done [at=2]: PR https://github.com/o/r/pull/6 checks green' 'paused [at=3]: waiting on a rebase' > "$state/task-paused.status"
+  write_task_meta "$dir" task-note
+  printf '%s\n' 'done [at=2]: PR https://github.com/o/r/pull/7 checks green' 'note [at=3]: the PR is not ready' > "$state/task-note.status"
 
   out=$(run_check_entry "$dir" scan 2> "$dir/stderr") || fail "the scan failed: $(cat "$dir/stderr")"
   [ -z "$out" ] || fail "a scan with nothing to register printed: $out"
-  for id in task-prose task-red task-working task-failed task-later-done task-paused; do
+  for id in task-prose task-red task-working task-failed task-later-done task-paused task-note; do
     ! grep -q '^pr=' "$state/$id.meta" || fail "$id registered a PR from a non-canonical line"
     [ ! -e "$state/$id.check.sh" ] || fail "$id armed a poll from a non-canonical line"
   done
   pass "the scan registers nothing from a non-canonical or superseded done line"
 }
 
-# A resolved, note, or captain-held line is supervisor bookkeeping rather than
+# A resolved or captain-held line is supervisor bookkeeping rather than
 # the crew changing state, so it never withdraws a ready line. Each forge's
 # ready shape registers.
 test_scan_reads_the_ready_line_past_supervisor_annotations() {
@@ -972,7 +974,6 @@ test_scan_reads_the_ready_line_past_supervisor_annotations() {
     'needs-decision [at=1] [key=k1]: which base?' \
     'done [at=2]: PR https://github.com/o/r/pull/7 checks green' \
     'resolved [at=3] [key=k1]: main' \
-    'note [at=4]: captain asked to wait' \
     'captain-held [at=5]: review on Monday' > "$state/task-a.status"
   write_task_meta "$dir" task-bare
   printf '%s\n' 'done [at=2]: PR https://github.com/o/r/pull/8' > "$state/task-bare.status"
