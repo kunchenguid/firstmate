@@ -293,6 +293,16 @@ command_fields=$(perl -MMIME::Base64=decode_base64 -e '
 IFS=$'\t' read -r command_name _command_action command_rel seat_op <<EOF
 $command_fields
 EOF
+case "${FM_FAKE_SSH_MODE:-normal}:$command_name:$_command_action" in
+  launch-rex-bad-server-route:fm-remote-secondmate-control.sh:launch|launch-rex-mismatched-route:fm-remote-secondmate-control.sh:launch)
+    argv_b64=$(perl -MMIME::Base64=decode_base64,encode_base64 -e '
+      my @args=split(/\0/, decode_base64($ARGV[0]));
+      $args[6] = "herdr";
+      print encode_base64(join("\0", @args) . "\0", "");
+    ' "$argv_b64") || exit $?
+    set -- "$1" "$2" "$3" "$argv_b64"
+    ;;
+esac
 # Launch-response overrides must preserve the host's predecessor evidence.
 case "${FM_FAKE_SSH_MODE:-normal}:$command_name:$_command_action" in
   launch-*:fm-remote-secondmate-control.sh:disposition)
