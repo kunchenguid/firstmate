@@ -57,8 +57,9 @@
 #   and the result is written once per change - an open decision still
 #   reads blocked, done/failed still report, anything else parks at idle -
 #   so a working/blocked record cannot outlive the signals that produced
-#   it. A watcher that never wrote stays silent instead: the root record
-#   may belong to a native writer. Harnesses whose activity only resolves
+#   it. arm's idle clear is the bridge's own first write, so the watcher it
+#   starts owns the root record from launch; a watcher with no write of its
+#   own stays silent instead: the root record may belong to a native writer. Harnesses whose activity only resolves
 #   busy or unknown (Rovo, Antigravity) thereby still reach idle, blocked,
 #   done, and error through the signals.
 #
@@ -138,26 +139,21 @@ osc_b64() { # <text> -> base64 on one line
   printf '%s' "$1" | base64 | tr -d '\n'
 }
 
-# osc_seq <state> [id] [kind] [progress] [title] [msg] -> one OSC 7501 report.
-# msg/title are clipped and base64-encoded; progress survives only on
-# working/blocked. FM_OSC_APP must name the reporting program.
+# osc_seq <state> [kind] [title] [msg] -> one OSC 7501 root report.
+# msg/title are clipped and base64-encoded. FM_OSC_APP must name the
+# reporting program.
 osc_seq() {
   local f="state=$1"
-  case "${3:-}" in '') ;; *) f="$f:kind=$3" ;; esac
+  case "${2:-}" in '') ;; *) f="$f:kind=$2" ;; esac
   f="$f:app=$FM_OSC_APP"
-  case "$2" in '') ;; *) f="$f:id=$2" ;; esac
-  case "$1:${4:-}" in
-    working:[0-9] | working:[1-9][0-9] | working:100 | blocked:[0-9] | blocked:[1-9][0-9] | blocked:100)
-      f="$f:progress=$4" ;;
-  esac
-  case "${5:-}" in '') ;; *)
+  case "${3:-}" in '') ;; *)
     local t
-    t=$(osc_clean "${5:0:$FM_OSC7501_TITLE_MAX}")
+    t=$(osc_clean "${3:0:$FM_OSC7501_TITLE_MAX}")
     f="$f:title=$(osc_b64 "$t")" ;;
   esac
-  case "${6:-}" in '') ;; *)
+  case "${4:-}" in '') ;; *)
     local m
-    m=$(osc_clean "${6:0:$FM_OSC7501_MSG_MAX}")
+    m=$(osc_clean "${4:0:$FM_OSC7501_MSG_MAX}")
     f="$f:msg=$(osc_b64 "$m")" ;;
   esac
   printf '\033]7501;%s\033\134' "$f"
@@ -358,10 +354,10 @@ osc_final() {
     done | error) ;;
     *) W_STATE=idle W_KIND='' W_MSG='' ;;
   esac
-  printf '%s' "$(osc_seq "$W_STATE" '' "$W_KIND" '' "$WATCH_TITLE" "$W_MSG")" >&3 2>/dev/null
+  printf '%s' "$(osc_seq "$W_STATE" "$W_KIND" "$WATCH_TITLE" "$W_MSG")" >&3 2>/dev/null
 }
 
-osc_watch() { # --task --kind --state --harness --parent
+osc_watch() { # --task --kind --state --harness [--backend] [--target] [--owned 1] --parent
   local opt
   WATCH_TASK=
   WATCH_KIND=
@@ -370,6 +366,7 @@ osc_watch() { # --task --kind --state --harness --parent
   WATCH_BACKEND=
   WATCH_TARGET=
   WATCH_PARENT=
+  WATCH_OWNED=
   while [ $# -gt 0 ]; do
     opt=$1
     shift
@@ -381,6 +378,7 @@ osc_watch() { # --task --kind --state --harness --parent
       --backend) WATCH_BACKEND=$1 ;;
       --target) WATCH_TARGET=$1 ;;
       --parent) WATCH_PARENT=$1 ;;
+      --owned) WATCH_OWNED=$1 ;;
       *) usage ;;
     esac
     shift
@@ -393,6 +391,7 @@ osc_watch() { # --task --kind --state --harness --parent
   FM_OSC_APP="${FM_OSC_APP:0:$FM_OSC7501_APP_MAX}"
   WATCH_TITLE="fm-$WATCH_TASK"
   local dev=${FM_OSC7501_TTY:-/dev/tty} hb=0 hb_ticks last='' seq act
+  [ "$WATCH_OWNED" = 1 ] && last=$(osc_seq idle '' "$WATCH_TITLE" '')
   exec 3>>"$dev" 2>/dev/null || exit 0
   osc_load_libs || exit 0
   trap 'osc_final; exit 0' TERM INT HUP
@@ -406,7 +405,7 @@ osc_watch() { # --task --kind --state --harness --parent
     fi
     if act=$(osc_activity "$WATCH_HARNESS" "$WATCH_TASK" "$WATCH_STATE" "$WATCH_BACKEND" "$WATCH_TARGET"); then
       osc_plan "$WATCH_TASK" "$WATCH_KIND" "$WATCH_STATE" "$act"
-      seq=$(osc_seq "$W_STATE" '' "$W_KIND" '' "$WATCH_TITLE" "$W_MSG")
+      seq=$(osc_seq "$W_STATE" "$W_KIND" "$WATCH_TITLE" "$W_MSG")
       if [ "$seq" != "$last" ]; then
         printf '%s' "$seq" >&3 2>/dev/null
         last=$seq
@@ -427,7 +426,7 @@ osc_watch() { # --task --kind --state --harness --parent
       # change, retiring whatever they no longer justify.
       if [ -n "$last" ]; then
         osc_plan "$WATCH_TASK" "$WATCH_KIND" "$WATCH_STATE" idle
-        seq=$(osc_seq "$W_STATE" '' "$W_KIND" '' "$WATCH_TITLE" "$W_MSG")
+        seq=$(osc_seq "$W_STATE" "$W_KIND" "$WATCH_TITLE" "$W_MSG")
         if [ "$seq" != "$last" ]; then
           printf '%s' "$seq" >&3 2>/dev/null
           last=$seq
@@ -544,10 +543,11 @@ osc_arm() { # --task --harness --backend --kind --state --config [--target] [--a
   # a record a watcher that died without its final write may have left
   FM_OSC_APP="firstmate-$harness"
   FM_OSC_APP="${FM_OSC_APP:0:$FM_OSC7501_APP_MAX}"
-  printf '%s' "$(osc_seq idle '' '' '' "fm-$task" '')" >>"$dev" 2>/dev/null || true
+  local owned=''
+  printf '%s' "$(osc_seq idle '' "fm-$task" '')" >>"$dev" 2>/dev/null && owned=1
   FM_OSC7501_WATCHER=1 nohup bash "$SCRIPT_DIR/fm-osc7501.sh" watch \
     --task "$task" --kind "$kind" --state "$state" --harness "$harness" \
-    --backend "$backend" --target "$target" \
+    --backend "$backend" --target "$target" --owned "$owned" \
     --parent "$PPID" </dev/null >/dev/null 2>&1 &
   printf '%s %s %s\n' "$!" "$task" "$$" >"$pidfile" 2>/dev/null || true
   exit 0

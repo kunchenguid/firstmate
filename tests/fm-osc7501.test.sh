@@ -507,8 +507,8 @@ t_agy_reports_through_unknown() {
 
 # A watcher killed without its final write leaves its last record on the
 # pane. The next arm writes one idle record once every gate has passed -
-# proven while the fresh watcher, activity unknown and never having written,
-# still produces nothing of its own.
+# proven while the fresh watcher, activity unknown and the signals still
+# folding to that same idle, adds nothing on top of it.
 t_arm_clears_stale_record() {
   local d=$TMP_ROOT/armclear
   mkhome "$d"
@@ -530,9 +530,36 @@ t_arm_clears_stale_record() {
   wait_cap 'state=idle:app=firstmate-opencode' "$d/cap" 60 || fail "clear: arm left the stale record on the pane"
   sleep 2
   assert_equals "1" "$(grep -o 'state=' "$d/cap" | wc -l | tr -d ' ')" \
-    "clear: only the arm-time write lands - the fresh watcher stays silent while unknown"
+    "clear: only the arm-time write lands - the fresh watcher does not repeat it while unknown"
   stop_term
   pass "lifecycle: arm clears a dead watcher's stale record once the gates pass"
+}
+
+# A launch whose activity never reads known - a short Rovo/Antigravity turn
+# that finishes between polls - still owns the root record through arm's
+# idle clear: a decision, a done result, and the ordinary disarm's final
+# record all land with activity unknown from the first poll on.
+t_initial_unknown_launch_reports() {
+  local d=$TMP_ROOT/initunknown
+  mkhome "$d"
+  start_term "$d"
+  env "${CLEAN_UNSET[@]}" HC_TERMINAL_ID=x FM_OSC7501_TTY="$TERM_SLAVE" FM_OSC7501_INTERVAL=1 \
+    bash "$SCRIPT" arm --task t34 --harness opencode --agent-bin opencode --backend tmux \
+    --kind ship --state "$d/state" --config "$d/config"
+  local wpid
+  wpid=$(watcher_pid "$d/state") || fail "initial unknown: no watcher armed"
+  wait_cap 'state=idle:app=firstmate-opencode' "$d/cap" 60 || fail "initial unknown: no arm-time record"
+  printf 'needs-decision [at=1] [key=k1]: pick one\n' >"$d/state/t34.status"
+  wait_cap 'state=blocked:kind=question' "$d/cap" 60 \
+    || fail "initial unknown: an open decision did not report"
+  printf 'resolved [at=2] [key=k1]: go\ndone [at=3]: PR https://example.test/pr/34\n' >>"$d/state/t34.status"
+  wait_cap 'state=done' "$d/cap" 60 || fail "initial unknown: done did not report"
+  : >"$d/cap"
+  env "${CLEAN_UNSET[@]}" FM_OSC7501_TTY="$TERM_SLAVE" bash "$SCRIPT" disarm --state "$d/state"
+  wait_gone "$wpid" || fail "initial unknown: disarm left the reporter running"
+  wait_cap 'state=done' "$d/cap" 60 || fail "initial unknown: disarm skipped the final record"
+  stop_term
+  pass "initial unknown: arm's record carries ownership - decisions, done, and the exit write all land"
 }
 
 # --- config gate ---------------------------------------------------------------
@@ -875,6 +902,7 @@ fm_test_run \
   t_rovo_reports_through_unknown \
   t_agy_reports_through_unknown \
   t_arm_clears_stale_record \
+  t_initial_unknown_launch_reports \
   t_config_off_disables \
   t_hc_marker_arms_watcher \
   t_concurrent_panes_keep_their_reporters \
