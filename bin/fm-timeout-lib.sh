@@ -16,7 +16,8 @@
 #       runner. The perl and bash fallbacks are unchanged.
 #
 #   fm_run_timed <seconds> <command> [args...]
-#       Runs the command with a hard bound. Exit status is the command's own,
+#       Runs the command with a hard bound, preserving the caller's stdin.
+#       Exit status is the command's own,
 #       except 124, which means the bound was hit (GNU timeout's convention,
 #       reproduced by the perl and bash fallbacks), and a command killed by
 #       signal n, which reports 128+n on every mechanism - so a SIGKILLed child
@@ -117,7 +118,7 @@ fm_run_bash_timeout() {
     command_rc=$?
     printf '%s\n' "$command_rc" > "$command_status"
     exit "$command_rc"
-  ) &
+  ) <&0 &
   child_pid=$!
   (
     set +m
@@ -168,7 +169,7 @@ fm_run_external_timeout() {
     command_rc=$?
     printf "%s\n" "$command_rc" > "$status_file"
     exit "$command_rc"
-  ' _ "$status_file" "$@" &
+  ' _ "$status_file" "$@" <&0 &
   runner_pid=$!
   if wait "$runner_pid"; then
     runner_rc=0
