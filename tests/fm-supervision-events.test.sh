@@ -273,4 +273,53 @@ grep -Fq "fm_watch_pane_probe $STATE_DIR" "$TMP/waited-calls" \
 [ ! -s "$WAKE_LOG" ] || fail "a bound-killed probe must not surface a wake: $(cat "$WAKE_LOG")"
 pass "watched-pane reads run through watcher_waited and die at the read budget"
 
+(
+  reset_state
+  fm_backend_wait_transition() { fm_backend_herdr_wait_transition "${@:2}"; }
+  fm_backend_events_capable() { return 0; }
+  fm_backend_herdr_socket_path() { printf fake-socket; }
+  fm_backend_herdr_agent_status_raw() {
+    if [ ! -e "$TMP/probed" ]; then
+      : > "$TMP/probed"
+      printf working
+    elif [ "$MODE" = hung ]; then
+      command sleep 12 &
+      printf '%s\n' "$!" > "$TMP/reconcile-pid"
+      wait "$!"
+      printf blocked
+    else
+      printf working
+    fi
+  }
+  cat > "$TMP/reader" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$2" > "$FM_READER_TIMEOUT"
+printf '@subscribed\n'
+sleep 3
+printf 'wD:p1\t\tblocked\tclaude\n'
+SH
+  chmod +x "$TMP/reader"
+  export FM_BACKEND_HERDR_EVENT_READER="$TMP/reader"
+  export FM_READER_TIMEOUT="$TMP/reader-timeout"
+  POLL=10
+  for MODE in hung healthy; do
+    reset_state
+    rm -f "$TMP/probed" "$TMP/reconcile-pid"
+    printf 'default\tops\tdesign\tDesign review\t1\n' > "$STATE_DIR/watched-panes"
+    SECONDS=0
+    event_wait_or_sleep
+    [ "$(cat "$FM_READER_TIMEOUT")" = 10 ] || fail "reconciliation budget changed the subscription timeout"
+    if [ "$MODE" = hung ]; then
+      [ "$SECONDS" -lt 8 ] || fail "second status read exceeded its read budget (${SECONDS}s)"
+      [ -s "$TMP/reconcile-pid" ] || fail "second status read was not exercised"
+      if kill -0 "$(cat "$TMP/reconcile-pid")" 2>/dev/null; then fail "timed-out reconciliation survived its waited group"; fi
+      [ ! -s "$WAKE_LOG" ] || fail "timed-out reconciliation emitted a wake"
+    else
+      [ "$SECONDS" -ge 3 ] || fail "healthy subscription ended at the read deadline"
+      assert_contains "$(cat "$WAKE_LOG")" 'watched pane Design review' "event after the read deadline did not wake"
+    fi
+  done
+) || fail "watched reconciliation budget contracts"
+pass "second status read is bounded while healthy event subscriptions retain their duration"
+
 echo "# fm-supervision-events.test.sh: all assertions passed"

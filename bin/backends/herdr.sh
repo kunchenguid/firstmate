@@ -4140,6 +4140,10 @@ fm_backend_herdr_wait_transition() {  # <session> <timeout_secs> <state_dir> <pa
     done
   fi
 
+  if [ -n "${WATCHER_WAIT_BOUND_DONE:-}" ]; then
+    : > "$WATCHER_WAIT_BOUND_DONE"
+  fi
+
   # Drain stream edges until a fresh blocked edge or the timeout. The reader is
   # a subprocess of this call (NOT a second watcher), and is killed the instant
   # a blocked edge is found.

@@ -3278,6 +3278,7 @@ watcher_waited() {  # <command...>
     *)
       (
         command sleep "$WATCHER_WAIT_BOUND_SECS" || exit 0
+        [ -z "${WATCHER_WAIT_BOUND_DONE:-}" ] || [ ! -e "$WATCHER_WAIT_BOUND_DONE" ] || exit 0
         kill -TERM -- "-$FM_ACTIVE_CHECK_PGID" 2>/dev/null || true
         command sleep 1
         kill -KILL -- "-$FM_ACTIVE_CHECK_PGID" 2>/dev/null || true
@@ -3435,7 +3436,7 @@ heartbeat_scan_finds_actionable() {
 # a second watcher, so every guard/beacon/arm/turn-end mechanism is unchanged.
 event_wait_or_sleep() {
   local w b session first_backend="" first_session="" rec rc
-  local label notify status probe windows=() t3_windows=()
+  local label notify status probe read_bound= windows=() t3_windows=()
   # Refresh label identities before each bounded wait. These panes have no task
   # status logs, so level polling is also their backstop when push is unavailable
   # or another backend/session owns this cycle's single multiplexed connection.
@@ -3520,7 +3521,12 @@ event_wait_or_sleep() {
   # signal for all of it (watcher_waited).
   fm_wait_tmp_cleanup
   WATCHER_WAIT_TMP=$(mktemp -d "${TMPDIR:-/tmp}/fm-watch-wait.XXXXXX") || WATCHER_WAIT_TMP=
-  TMPDIR=${WATCHER_WAIT_TMP:-${TMPDIR:-/tmp}} FM_BACKEND_EVENTS_CAPABILITY_CONFIRMED=1 watcher_waited \
+  if [ "$first_backend" = herdr ] && [ -n "$FM_WATCHED_PANES" ]; then
+    [ -n "$WATCHER_WAIT_TMP" ] || return 2
+    read_bound=$FM_WATCHED_PANE_READ_SECS
+  fi
+  TMPDIR=${WATCHER_WAIT_TMP:-${TMPDIR:-/tmp}} FM_BACKEND_EVENTS_CAPABILITY_CONFIRMED=1 \
+    WATCHER_WAIT_BOUND_SECS=$read_bound WATCHER_WAIT_BOUND_DONE="$WATCHER_WAIT_TMP/reconciled" watcher_waited \
     fm_backend_wait_transition "$first_backend" "$first_session" "$POLL" "$STATE" "${windows[@]}"
   rc=$?
   rec=$WATCHER_CAPTURE
