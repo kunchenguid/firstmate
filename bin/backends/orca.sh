@@ -601,7 +601,7 @@ fm_backend_orca_send_key() {  # <terminal-id> <key>
 # slash-command popup placeholder fill gets the required second Enter without
 # duplicating text.
 fm_backend_orca_send_text_submit() {  # <terminal-id> <text> <retries> <enter-sleep> <settle>
-  local terminal=$1 text=$2 retries=$3 sleep_s=$4 settle=$5 target rc=0
+  local terminal=$1 text=$2 retries=$3 sleep_s=$4 settle=$5 target rc=0 verdict
   fm_backend_orca_tool_check || { printf 'send-failed'; return 0; }
   # A stale recorded id is retried once through window= inside send_literal.
   # Enter and the composer read then use that live id, still typing the text once.
@@ -625,8 +625,12 @@ fm_backend_orca_send_text_submit() {  # <terminal-id> <text> <retries> <enter-sl
     printf 'inbox-deferred'
     return 0
   fi
-  fm_composer_submit_retry_core fm_backend_orca_send_key fm_backend_orca_composer_state \
-    "$target" "$retries" "$sleep_s" "" FM_ORCA_RESOLVED_TERMINAL
+  verdict=$(fm_composer_submit_retry_core fm_backend_orca_send_key fm_backend_orca_composer_state \
+    "$target" "$retries" "$sleep_s" "" FM_ORCA_RESOLVED_TERMINAL)
+  if [ "$verdict" = pending ] && [ "$target" != "$terminal" ]; then
+    verdict=pending-replacement
+  fi
+  printf '%s' "$verdict"
 }
 
 # fm_backend_orca_kill: close one recorded task terminal. A missing CLI is a

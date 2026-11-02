@@ -1295,6 +1295,10 @@ else
     echo "error: text not sent to $T ($TARGET_BACKEND send failed; tried $RESOLUTION_TRIED)" >&2
     exit 1
     ;;
+  pending-replacement)
+    echo "fm-send: submission to $T is unconfirmed (verdict=pending-replacement; tried $RESOLUTION_TRIED); do not retype or blindly resend - inspect the replacement pane for the recorded worktree in Orca's UI before deciding whether to resend" >&2
+    exit 3
+    ;;
   pending)
     # The text was typed into the live target and Enter was sent; only the
     # submit read-back stayed unconfirmed (e.g. a busy harness queues the
