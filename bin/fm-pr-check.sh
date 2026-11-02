@@ -102,6 +102,7 @@ pr_check_scan() {
     kind=$(sed -n 's/^kind=//p' "$meta" | tail -1)
     case "$kind" in secondmate|scout) continue ;; esac
     url=$(pr_check_reported_url "$STATE/$id.status") || continue
+    [ -e "$STATE/$id.pr-poll-merge-notified" ] || [ -e "$STATE/$id.pr-poll-retirement" ] && continue
     recorded=$(grep '^pr=' "$meta" | tail -1 | cut -d= -f2- || true)
     [ -z "$recorded" ] || { [ "$recorded" = "$url" ] && ! fm_pr_poll_artifacts_valid "$STATE" "$id" "$SCRIPT_DIR/fm-pr-poll.sh"; } || continue
     candidates="$candidates$id $url"$'\n'

@@ -883,6 +883,22 @@ test_scan_publishes_a_missing_poll_for_a_recorded_pr() {
   pass "the scan publishes the poll of a task whose pr= has none"
 }
 
+# A merged PR's poll is retired on purpose; the scan must not re-arm it.
+test_scan_does_not_rearm_a_retired_merged_poll() {
+  local dir state
+  dir=$(make_case scan-retired-merge)
+  state="$dir/home/state"
+  write_poll_meta "$state" task-a https://github.com/o/r/pull/7 'kind=ship' 'mode=no-mistakes'
+  printf '%s\n' 'done [at=2]: PR https://github.com/o/r/pull/7 checks green' > "$state/task-a.status"
+  printf '%s\n' fm-pr-poll-merge-notified-v1 > "$state/task-a.pr-poll-merge-notified"
+
+  run_check_entry "$dir" scan > /dev/null 2> "$dir/stderr" || fail "the scan failed: $(cat "$dir/stderr")"
+  if fm_pr_poll_artifacts_valid "$state" task-a "$POLL"; then
+    fail "the scan re-armed the poll of a merged task"
+  fi
+  pass "the scan leaves a merged task's retired poll alone"
+}
+
 # A PR the supervisor records while a scan registration is in flight is kept.
 test_scan_does_not_overwrite_a_pr_recorded_meanwhile() {
   local dir state
@@ -4092,6 +4108,7 @@ test_scan_retries_refused_task_behind_a_hanging_registration
 test_scan_rotates_past_a_hanging_registration
 test_scan_publishes_a_missing_poll_for_a_recorded_pr
 test_scan_does_not_overwrite_a_pr_recorded_meanwhile
+test_scan_does_not_rearm_a_retired_merged_poll
 test_watcher_sweep_records_a_reported_pr
 test_valid_recording_and_merge_derivation
 test_rejected_metacharacter_bytes_are_inert
