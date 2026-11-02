@@ -63,6 +63,7 @@ Before raising, re-raising, reminding about, or recommending an option on a deci
 An answer recorded in one home is invisible to the others, so a report's open-questions list, a status line, or one home's backlog alone never proves the call is still open.
 When records disagree, the newest dated captain answer wins over an older answer and over any report's open-questions list; raise the call again only when no answer exists or the captain's newest words leave it genuinely open.
 `FM_HOME=<home> bin/fm-tasks-axi.sh list` and `show <id> --full` read a local home's backlog, including recorded `answer` resolution blocks, and `bin/fm-on.sh <secondmate-id> fm-tasks-axi.sh ...` reads a remote home's.
+An answered call closes, and once it ages past the home's `done_keep` it moves to that home's Done archive (`.tasks.toml` `archive`, default `data/done-archive.md`), which `list` and `show` do not read, so search that archive file as well; no tracked command reads a remote home's archive, so ask that secondmate through the routed path to search its own.
 When the captain answers a decision about work another home owns, send the answer to that owning home in the same turn through the routed secondmate path, then read that home's record back and confirm it changed; until it has, report the answer as not yet delivered rather than recorded.
 
 ## Operating sequence
