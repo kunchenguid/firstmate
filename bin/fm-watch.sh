@@ -148,6 +148,11 @@
 #                          source owned closes that episode); the queued
 #                          payload names what to check. These three kinds are
 #                          joined with `;` when more than one surfaces in a cycle
+#   check: pr-register: <lines>
+#                          with config/pr-register-scan present, a task's done
+#                          line reported a PR that the check sweep's
+#                          fm-pr-check.sh scan could not record; the line
+#                          names the task, the PR, and the refusal
 #   check: rejected unauthenticated state checks: <paths>
 #                          unsafe state checks were refused without execution
 #   check: rejected unauthenticated PR poll retirement receipts: <paths>
@@ -3995,6 +4000,16 @@ while :; do
   if [ "$(age_of "$STATE/.last-check")" -ge "$CHECK_INTERVAL" ]; then
     rejected_checks=
     contribution_check_output=
+    # Record each PR a task reported but nobody recorded, so its merge poll
+    # below runs in this same sweep (bin/fm-pr-check.sh owns the scan).
+    pr_register_reason=
+    if [ -e "$CONFIG/pr-register-scan" ]; then
+      FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" run_check_capture "$SCRIPT_DIR/fm-pr-check.sh" scan || exit 1
+      if [ -n "$FM_CHECK_RESULT" ]; then
+        pr_register_reason="check: pr-register: $FM_CHECK_RESULT"
+        fm_wake_append check pr-register "$pr_register_reason" || exit 1
+      fi
+    fi
     for c in "$STATE"/*.check.sh; do
       [ -e "$c" ] || continue
       is_pr_poll=0
@@ -4115,6 +4130,7 @@ EOF
       wake "$reason"
     fi
     touch "$STATE/.last-check"
+    [ -z "$pr_register_reason" ] || wake "$pr_register_reason"
     if [ -n "$contribution_check_output" ]; then
       wake "$contribution_check_output"
     fi
