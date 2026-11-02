@@ -26,7 +26,7 @@ TMP_ROOT=$(cd "$TMP_ROOT" && pwd)
 # the foreground cwd with it. The fake treehouse opens that nested shell for
 # the interactive form, which is exactly what must not be used.
 make_lease_case() {
-  local name=$1 dir home proj wt fb d
+  local name=$1 harness=${2:-codex} dir home proj wt fb d
   dir="$TMP_ROOT/$name"
   home="$dir/home"
   proj="$dir/project"
@@ -34,7 +34,7 @@ make_lease_case() {
   d="$dir/fake"
   fb="$dir/fakebin"
   mkdir -p "$d" "$fb" "$dir/user-home"
-  fm_test_spawn_home "$home" codex
+  fm_test_spawn_home "$home" "$harness"
   fm_git_worktree "$proj" "$wt" "slot-$name"
   fm_test_spawn_brief "$home" "$name" "Exercise the Herdr task-copy lease for $name."
   printf '%s' "$proj" > "$d/cwd"
@@ -65,7 +65,12 @@ if [ "${1:-}" = status ] && [ "${2:-}" = --json ]; then
 fi
 [ "${1:-}" != server ] || exit 0
 case "${1:-} ${2:-}" in
+  'session list')
+    [ ! -f "$D/session-lockable" ] || printf '{"sessions":[{"name":"default","running":true,"socket_path":"%s/herdr.sock"}]}\n' "$D"
+    exit 0 ;;
+  'pane close') : > "$D/pane-gone"; exit 0 ;;
   'pane get')
+    [ ! -f "$D/pane-gone" ] || { printf '{"error":{"code":"pane_not_found"}}\n'; exit 0; }
     printf '{"result":{"pane":{"pane_id":"%s","cwd":"%s","foreground_cwd":"%s"}}}\n' \
       "${3:-}" "$(cat "$D/cwd")" "$(cat "$D/fg")"
     exit 0 ;;
@@ -101,19 +106,27 @@ case "${1:-} ${2:-}" in
 esac
 exit 0
 SH
-  chmod +x "$fb/treehouse" "$fb/herdr"
+  cat > "$fb/polytoken" <<'SH'
+#!/usr/bin/env bash
+case "$*" in
+  *"print models"*) printf 'zai/glm-5.3-flash\nzai/glm-5.3-flash(low)\n' ;;
+esac
+exit 0
+SH
+  chmod +x "$fb/treehouse" "$fb/herdr" "$fb/polytoken"
   fm_test_fake_sleep_noop "$fb"
   printf '%s\n' "$dir"
 }
 
-run_lease_spawn() {  # <case-dir> <id>
+run_lease_spawn() {  # <case-dir> <id> [extra spawn args...]
   local dir=$1 id=$2
+  shift 2
   env -u HERDR_ENV -u HERDR_PANE_ID -u HERDR_SESSION -u HERDR_SOCKET_PATH \
     -u HERDR_TAB_ID -u HERDR_WORKSPACE_ID \
     PATH="$dir/fakebin:$PATH" FM_HOME="$dir/home" FM_FAKE_DIR="$dir/fake" \
     FM_FAKE_SLOT="$dir/slot" HOME="$dir/user-home" CLAUDE_CONFIG_DIR='' \
     FM_SPAWN_NO_GUARD=1 \
-    "$SPAWN" "$id" "$dir/project" --backend herdr --mode no-mistakes --yolo off 2>&1
+    "$SPAWN" "$id" "$dir/project" --backend herdr --mode no-mistakes --yolo off "$@" 2>&1
 }
 
 test_fresh_spawn_leases_and_moves_the_top_level_shell() {
@@ -173,9 +186,44 @@ test_rolled_back_spawn_after_launch_names_the_lease_it_keeps() {
   pass "a spawn rolled back after its launch keeps the lease and names the command that releases it"
 }
 
+# abort_polytoken_spawn <id> [session-lockable]: a polytoken spawn into a dirty
+# copy aborts before its launch and asks Herdr to close its own pane. Herdr
+# closes it only when the session's presentation lock can be taken, which needs
+# the session's socket; without it the kill refuses and the pane stays.
+abort_polytoken_spawn() {
+  local id=$1 dir
+  dir=$(make_lease_case "$id" polytoken)
+  echo dirty >> "$dir/slot/README.md"
+  [ -z "${2:-}" ] || : > "$dir/fake/session-lockable"
+  LEASE_OUT=$(run_lease_spawn "$dir" "$id" --model zai/glm-5.3-flash --effort low)
+  LEASE_STATUS=$?
+  LEASE_DIR=$dir
+}
+
+test_abort_returns_the_lease_once_the_pane_is_gone() {
+  local id=lease-pane-gone
+  abort_polytoken_spawn "$id" session-lockable
+  [ "$LEASE_STATUS" -ne 0 ] || fail "spawn launched into a dirty leased copy"$'\n'"$LEASE_OUT"
+  assert_grep 'pane close' "$LEASE_DIR/fake/herdr-log" "the abort did not close its pane"$'\n'"$LEASE_OUT"
+  [ -e "$LEASE_DIR/fake/returned" ] || fail "the abort kept a lease although its pane is gone"$'\n'"$LEASE_OUT"
+  pass "an abort whose pane Herdr reports gone returns the lease"
+}
+
+test_abort_keeps_the_lease_while_the_pane_is_present() {
+  local id=lease-close-refused
+  abort_polytoken_spawn "$id"
+  [ "$LEASE_STATUS" -ne 0 ] || fail "spawn launched into a dirty leased copy"$'\n'"$LEASE_OUT"
+  ! grep -q 'pane close' "$LEASE_DIR/fake/herdr-log" || fail "the kill closed the pane without its presentation lock"
+  [ ! -e "$LEASE_DIR/fake/returned" ] || fail "the abort returned the lease while its pane is still present"
+  assert_contains "$LEASE_OUT" "stays leased to $id" "an abort with its pane still present did not name the lease it keeps"
+  pass "an abort whose pane is still present keeps the lease and names it"
+}
+
 test_fresh_spawn_leases_and_moves_the_top_level_shell
 test_failed_lease_refuses_without_a_record
 test_aborted_spawn_names_the_lease_it_keeps
 test_rolled_back_spawn_after_launch_names_the_lease_it_keeps
+test_abort_returns_the_lease_once_the_pane_is_gone
+test_abort_keeps_the_lease_while_the_pane_is_present
 
 echo "# all fm-spawn-herdr-lease tests passed"
