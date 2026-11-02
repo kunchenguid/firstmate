@@ -1503,8 +1503,7 @@ test_watcher_overdue_marker_does_not_hide_blocker_from_daemon() {
   printf 'blocked [key=paused-overdue-%s]: paused 90s, wait overdue - decide or release\n' "$task" >> "$statusf"
   fm_write_meta "$state/$task.meta" "window=$win" "worktree=$dir/wt" "kind=ship" "harness=pi"
   (
-    export FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_ESCALATE_BATCH_SECS=999999
-    . "$ROOT/bin/fm-wake-lib.sh"
+    FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_ESCALATE_BATCH_SECS=999999 . "$ROOT/bin/fm-wake-lib.sh"
     if [ "$(uname)" = Darwin ]; then identity=$(/usr/bin/stat -f '%d %i' "$statusf"); else identity=$(stat -c '%d %i' "$statusf"); fi
     printf '%s:%s\n' "$identity" "$size" > "$state/.paused-overdue-$task"
     [ -z "$(overdue_delivered_key "$state" "$task")" ] || fail "an undelivered marker hid its blocker"
@@ -1525,8 +1524,7 @@ test_overdue_open_decision_without_marker_is_not_repeated() {
   printf '%s\n' "$(( $(date +%s) - 5000 ))" > "$state/.subsuper-paused-$task"
   sleep 2
   (
-    export FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_PAUSE_UNDATED_MAX_SECS=1 FM_ESCALATE_BATCH_SECS=999999
-    . "$ROOT/bin/fm-wake-lib.sh"
+    FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_PAUSE_UNDATED_MAX_SECS=1 FM_ESCALATE_BATCH_SECS=999999 . "$ROOT/bin/fm-wake-lib.sh"
     housekeeping "$state"
     [ "$(grep -cF "blocked [key=paused-overdue-$task]" "$statusf")" -eq 1 ] || fail "an interrupted emission opened a second decision"
   ) || fail "open decision without a marker was repeated"
@@ -1548,9 +1546,9 @@ test_housekeeping_overdue_queue_failure_resume_discards() {
         FM_HOME="$dir" FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-afk-contract.sh" enter --words fixture >/dev/null 2>&1 || fail "fixture: away posture"
         printf '%s\n' "$(( $(date +%s) - 5000 ))" > "$state/.subsuper-paused-$task"
         sleep 2
-        export PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$win" FM_FAKE_TMUX_CAPTURE="$pane"
-        export FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_PAUSE_UNDATED_MAX_SECS=1 FM_ESCALATE_BATCH_SECS=999999
-        . "$ROOT/bin/fm-wake-lib.sh"
+        PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$win" FM_FAKE_TMUX_CAPTURE="$pane" \
+          FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_PAUSE_UNDATED_MAX_SECS=1 FM_ESCALATE_BATCH_SECS=999999 \
+          . "$ROOT/bin/fm-wake-lib.sh"
         original_append=$(declare -f fm_wake_status_append_self_announced)
         escalate_add() { return 1; }
         housekeeping "$state"
