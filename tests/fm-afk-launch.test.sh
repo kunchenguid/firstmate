@@ -75,6 +75,7 @@ enter_posture() {  # <home>
 no_operator_session() {  # <command...>
   env -u TMUX -u TMUX_PANE -u HERDR_ENV -u HERDR_PANE_ID -u HERDR_SESSION \
     -u REX_SESSION -u REX_BLOCK -u ORCA_TERMINAL_HANDLE \
+    -u HC_TERMINAL_ID -u HC_TERMINAL_SOCKET -u HC_SESSION -u HC_SCOPE -u HC_SOCKET \
     -u FM_SUPERVISOR_TARGET -u FM_SUPERVISOR_BACKEND "$@"
 }
 
