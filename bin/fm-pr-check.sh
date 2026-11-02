@@ -87,6 +87,12 @@ pr_check_rotate() {  # <last-id>: start the lines on stdin just after the line f
   awk -v last="$1" '{ a[NR] = $0; split($0, f, " "); if (f[1] == last) s = NR } END { for (i = 0; i < NR; i++) print a[(i + s) % NR + 1] }'
 }
 
+pr_check_pr_retired() {  # <id> <recorded-url>
+  [ -n "$2" ] && fm_pr_url_parse "$2" || return 1
+  fm_pr_poll_merge_already_notified "$STATE" "$1" "$FM_PR_PROVIDER" "$FM_PR_HOST" "$FM_PR_PATH" "$FM_PR_NUMBER" && return 0
+  fm_pr_poll_retirement_parse "$STATE/$1.pr-poll-retirement" && [ "$FM_PR_RETIRE_URL" = "$2" ]
+}
+
 pr_check_scan() {
   local budget start meta id kind url recorded left marker err rc tmp candidates='' cursor_file cursor
   budget=${FM_CHECK_TIMEOUT:-30}
@@ -102,8 +108,8 @@ pr_check_scan() {
     kind=$(sed -n 's/^kind=//p' "$meta" | tail -1)
     case "$kind" in secondmate|scout) continue ;; esac
     url=$(pr_check_reported_url "$STATE/$id.status") || continue
-    [ -e "$STATE/$id.pr-poll-merge-notified" ] || [ -e "$STATE/$id.pr-poll-retirement" ] && continue
     recorded=$(grep '^pr=' "$meta" | tail -1 | cut -d= -f2- || true)
+    pr_check_pr_retired "$id" "$recorded" && continue
     [ -z "$recorded" ] || { [ "$recorded" = "$url" ] && ! fm_pr_poll_artifacts_valid "$STATE" "$id" "$SCRIPT_DIR/fm-pr-poll.sh"; } || continue
     candidates="$candidates$id $url"$'\n'
   done
