@@ -1,0 +1,34 @@
+command -v rex: not found on PATH
+Workspace-local acquisition attempted: fetched https://www.superlogical.com/rex/docs/installation.md with curl -fLsS --max-time 25.
+Official macOS installation document:
+---
+title: "Installation"
+canonical_url: https://www.superlogical.com/rex/docs/installation
+---
+
+# Installation
+
+**At the current stage of beta testing, the macOS application and the Linux
+and FreeBSD server are available to all testers.**
+
+We already have Rex servers running on Windows, and we have Rex clients for
+iOS, Linux, and Windows at varying stages of readiness. We hope to expand the
+scope of public testing quickly, but they aren't part of testing yet.
+
+
+The macOS
+client is fully self-contained with a local server that lets you get up
+and running quickly. We plan on adding support for more platforms for the
+client in the future.
+
+<h2 id="linux"><OsIcon name="linux" />Linux <Tag color="function">Alpha</Tag><Tag>Server only</Tag></h2>
+
+See [Installing on Linux](https://www.superlogical.com/rex/docs/linux/installation.md) for the details.
+
+
+<h2 id="freebsd"><OsIcon name="freebsd" />FreeBSD <Tag color="function">Alpha</Tag><Tag>Server only</Tag></h2>
+
+See [Installing on FreeBSD](https://www.superlogical.com/rex/docs/freebsd/installation.md) for the details.
+
+
+No macOS download URL or source build is supplied there; web installation page points to tester login. No login, system installation, host-filesystem search, or operator server connection attempted. Need an authorized Rex macOS CLI/server on PATH or at a supplied repository-local path to run an isolated native-Codex shared-root proof.

@@ -1,0 +1,26 @@
+Surface: real bin/fm-osc7501.sh arm/watch/disarm, controlling PTYs sized 120x40; synthetic task state, no substituted product or harness binary. OSC root bytes decoded below. No Rex/GUI/tenant claim.
+known-to-unknown: busy seed -> working: ["state=idle:app=firstmate-opencode:title=Zm0tZGVtbw==", "state=working:app=firstmate-opencode:title=Zm0tZGVtbw=="]
+known-to-unknown: remove activity -> idle: ["state=idle:app=firstmate-opencode:title=Zm0tZGVtbw=="]
+known-to-unknown: two heartbeat periods unknown -> no repeat: []
+known-to-unknown: unknown + keyed decision -> question: ["state=blocked:kind=question:app=firstmate-opencode:title=Zm0tZGVtbw==:msg=TmVlZHMgeW91ciBkZWNpc2lvbjogY2hvb3NlIA=="]
+known-to-unknown: decision resolved -> idle once: ["state=idle:app=firstmate-opencode:title=Zm0tZGVtbw=="]
+known-to-unknown: unknown + failure -> error: ["state=error:app=firstmate-opencode:title=Zm0tZGVtbw==:msg=RmFpbGVkOiBidWlsZCBmYWlsZWQ="]
+known-to-unknown: ordinary disarm preserves error: ["state=error:app=firstmate-opencode:title=Zm0tZGVtbw==:msg=RmFpbGVkOiBidWlsZCBmYWlsZWQ="]
+PASS known-to-unknown retirement, no heartbeat, decision resolution, failure finalization
+initial-unknown-rovo: arm owns initial idle; no known activity and no heartbeat: ["state=idle:app=firstmate-rovo:title=Zm0tZGVtbw=="]
+initial-unknown-rovo: first poll unknown -> decision still reported: ["state=blocked:kind=question:app=firstmate-rovo:title=Zm0tZGVtbw==:msg=TmVlZHMgeW91ciBkZWNpc2lvbjogc2VsZWN0IA=="]
+initial-unknown-rovo: standing captain hold remains question-blocked: ["state=blocked:kind=question:app=firstmate-rovo:title=Zm0tZGVtbw==:msg=TmVlZHMgeW91ciBkZWNpc2lvbjogY2FwdGFpbiB3aWxsIGRlY2lkZQ=="]
+initial-unknown-rovo: unknown + completion -> done: ["state=done:app=firstmate-rovo:title=Zm0tZGVtbw==:msg=UFIgcmVhZHk6IFBSIGh0dHBzOi8vZXhhbXBsZS50ZXN0L3ByLzQy"]
+initial-unknown-rovo: ordinary disarm writes final done: ["state=done:app=firstmate-rovo:title=Zm0tZGVtbw==:msg=UFIgcmVhZHk6IFBSIGh0dHBzOi8vZXhhbXBsZS50ZXN0L3ByLzQy"]
+initial-unknown-agy: arm owns initial idle; no known activity and no heartbeat: ["state=idle:app=firstmate-agy:title=Zm0tZGVtbw=="]
+initial-unknown-agy: first poll unknown -> decision still reported: ["state=blocked:kind=question:app=firstmate-agy:title=Zm0tZGVtbw==:msg=TmVlZHMgeW91ciBkZWNpc2lvbjogc2VsZWN0IA=="]
+initial-unknown-agy: standing captain hold remains question-blocked: ["state=blocked:kind=question:app=firstmate-agy:title=Zm0tZGVtbw==:msg=TmVlZHMgeW91ciBkZWNpc2lvbjogY2FwdGFpbiB3aWxsIGRlY2lkZQ=="]
+initial-unknown-agy: unknown + completion -> done: ["state=done:app=firstmate-agy:title=Zm0tZGVtbw==:msg=UFIgcmVhZHk6IFBSIGh0dHBzOi8vZXhhbXBsZS50ZXN0L3ByLzQy"]
+initial-unknown-agy: ordinary disarm writes final done: ["state=done:app=firstmate-agy:title=Zm0tZGVtbw==:msg=UFIgcmVhZHk6IFBSIGh0dHBzOi8vZXhhbXBsZS50ZXN0L3ByLzQy"]
+PASS initially unknown non-native Rovo/Antigravity paths, holds, done, finalization (synthetic durable signals; no model sessions)
+unaware: launch gate -> no records and no watcher; actual installed executable for native probes: []
+off: launch gate -> no records and no watcher; actual installed executable for native probes: []
+native-claude: launch gate -> no records and no watcher; actual installed executable for native probes: []
+native-codex: launch gate -> no records and no watcher; actual installed executable for native probes: []
+PASS passive unknown-terminal/config-off gates; installed Claude/Codex protected (native or failed-probe fail-closed, not native version proof)
+All PTY shells reaped; all reporter pidfiles absent; captures retained.

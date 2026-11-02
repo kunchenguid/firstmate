@@ -1,0 +1,2 @@
+claude --version: exit=0, stdout='2.1.316 (Claude Code)', stderr=''
+codex --version: timed out after 8 seconds; entire owned probe process group killed and reaped, stdout='', stderr=''
