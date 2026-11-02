@@ -745,7 +745,7 @@ Write your findings to \`$DATA/$ID/report.md\`.
 The report must stand alone: what you did, what you found, the evidence (commands run, output, file:line references), and what you recommend.
 Return artifacts, not a transcript: write the lineage manifest with
 \`$FM_ROOT/bin/fm-artifact-manifest.sh write --task $ID --artifact report=$DATA/$ID/report.md\`,
-and add one \`--artifact <kind>=<path>\` for each other artifact you produced under \`$DATA/$ID/\` (kinds: patch, test-log, review-report, report, trace).
+and add one \`--artifact <kind>=<path>\` for each other artifact you produced under \`$DATA/$ID/\` (kinds: patch, test-log, review-report, report, trace, manifest).
 The manifest pins every artifact with its full SHA-256; a chat log, transcript, or session dump is not an artifact and the contract refuses it.
 $LAVISH_LINE
 Before reporting done, read and follow \`$FM_ROOT/.agents/skills/captain-hold-lifecycle/SKILL.md\` and pass its shared completion gate for the report and any visual review.

@@ -710,7 +710,7 @@ EOF
 Return artifact references and hashes, not a conversational summary: the parent consumes your manifest, never your transcript.
 Before your done line, write the lineage manifest with
 \`$artifact_root/bin/fm-artifact-manifest.sh write --task $id --artifact <kind>=<path> ...\`,
-listing every artifact you produced under \`$artifact_data/$id/\` (kinds: patch, test-log, review-report, report, trace; for example \`patch\` for the diff you shipped, \`test-log\` for the run you cite, \`review-report\` for a review).
+listing every artifact you produced under \`$artifact_data/$id/\` (kinds: patch, test-log, review-report, report, trace, manifest; for example \`patch\` for the diff you shipped, \`test-log\` for the run you cite, \`review-report\` for a review).
 The manifest pins each file with its full SHA-256; a chat log, transcript, or session dump is not an artifact and the contract refuses it.
 EOF
 }

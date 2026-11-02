@@ -4,8 +4,9 @@
 # A worker's result is its artifacts, not its chat. This entry point writes the
 # machine-readable manifest the parent channel points at, verifies it by
 # recomputing every hash, or prints the parent-channel reference. Kinds are a
-# closed allowlist (patch, test-log, review-report, report, trace) owned by
-# bin/fm-artifact-lib.sh; a transcript, chat log, or session dump is refused.
+# closed allowlist (patch, test-log, review-report, report, trace, manifest)
+# owned by bin/fm-artifact-lib.sh; a transcript, chat log, or session dump is
+# refused.
 #
 # Usage:
 #   fm-artifact-manifest.sh write --task <id> --artifact <kind>=<path> [--artifact ...]

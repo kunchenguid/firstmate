@@ -12,9 +12,9 @@
 #
 # The contract (docs/artifact-lineage.md):
 #   - artifact kinds are a closed allowlist (patch, test-log, review-report,
-#     report, trace). transcript, chat, session, and conversation are NOT
-#     artifacts and are refused, so a transcript cannot be forwarded as a
-#     WorkerResult.
+#     report, trace, manifest). transcript, chat, session, and conversation
+#     are NOT artifacts and are refused, so a transcript cannot be forwarded as
+#     a WorkerResult.
 #   - every path is the home-relative `data/<task>/...` form and resolves to a
 #     regular, non-symlinked file under the data directory; the check is a
 #     resolving one, never a textual prefix test.
