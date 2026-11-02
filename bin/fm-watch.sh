@@ -1902,7 +1902,10 @@ wedge_gate_unacted_poll() {  # <window> <task>
   key=$(window_key "$win")
   [ "$(age_of "$STATE/.gate-unacted-checked-$key")" -ge "$STALE_ESCALATE_SECS" ] || return 0
   date +%s > "$STATE/.gate-unacted-checked-$key"
-  verdict=$(wedge_gate_unacted "$task") || return 0
+  if ! verdict=$(wedge_gate_unacted "$task"); then
+    rm -f "$STATE/.gate-unacted-reported-$key"
+    return 0
+  fi
   [ "$(cat "$STATE/.gate-unacted-reported-$key" 2>/dev/null || true)" != "$verdict" ] || return 0
   reason=$(wedge_gate_unacted_reason "$win" "$verdict")
   fm_wake_append stale "$win" "$reason" || exit 1
@@ -2280,6 +2283,7 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-
           fi
           return 0
         fi
+        rm -f "$STATE/.gate-unacted-reported-$_wkey"
         if evidence=$(wedge_wait_evidence "$task") &&
            wedge_defer_wait "$win" "$since_file" "$label" "$age" "$evidence"; then
           return 0

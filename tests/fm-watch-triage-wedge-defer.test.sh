@@ -1003,6 +1003,28 @@ test_wedge_threshold_escalates_an_unacted_gate_or_outcome() {
   pass "a run parked at a gate or at an outcome that the worker has not acted on wakes firstmate once"
 }
 
+test_wedge_threshold_unacted_gate_wakes_again_after_the_run_moves_on() {
+  local dir state fakebin out capture window
+  local parked='state: parked · source: run-step · parked at awaiting_approval: 2 finding(s) · run: 01RUNGATE'
+  local running='state: working · source: run-step · validating (running) · run: 01RUNGATE'
+  window="test:fm-wedge"
+  dir=$(wedge_threshold_fixture unacted-repark 'working: handed to validation' 2000)
+  arm_unacted_gate "$dir"
+  state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"; capture="$dir/pane.txt"
+  wedge_threshold_round "$state" "$fakebin" "$out" "$capture" "$window" "$parked" exit \
+    || fail "the first unacted gate never woke firstmate: $(cat "$out")"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the first unacted gate wake"
+  wedge_threshold_round "$state" "$fakebin" "$out" "$capture" "$window" "$running" exit \
+    || fail "the run leaving its gate was not observed: $(cat "$out")"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the interim wake"
+  : > "$out"
+  wedge_threshold_round "$state" "$fakebin" "$out" "$capture" "$window" "$parked" exit \
+    || fail "a second unacted gate on the same run never woke firstmate: $(cat "$out")"
+  grep -F 'has not acted on it' "$out" >/dev/null \
+    || fail "the second unacted gate was not reported as unacted: $(cat "$out")"
+  pass "a run that parks at a new gate after moving on is reported again"
+}
+
 # Every way the worker accounts for itself, or the signal does not apply, keeps
 # the unchanged ladder even where the flag is armed.
 test_wedge_threshold_unacted_gate_ignores_acted_or_ineligible_lanes() {
@@ -1065,5 +1087,6 @@ fm_test_run \
   test_wedge_threshold_escalates_when_no_run_is_executing \
   test_wedge_threshold_validating_run_is_off_until_armed \
   test_wedge_threshold_escalates_an_unacted_gate_or_outcome \
+  test_wedge_threshold_unacted_gate_wakes_again_after_the_run_moves_on \
   test_wedge_threshold_unacted_gate_ignores_acted_or_ineligible_lanes \
   test_wedge_threshold_unacted_gate_is_off_until_armed
