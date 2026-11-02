@@ -90,9 +90,11 @@
 #     and so ignored here, when a ledger holder exists for its key; a
 #     generation the record names itself (spawn_gen=, or a remote route's
 #     remote_spawn_gen= or fleet_seat_generation=) that conflicts with every
-#     ledger incarnation fails admission closed, while a generation derived
-#     from the remote's serve certificate is not a ledger-issued identity and
-#     is exempt from that history check.
+#     ledger incarnation fails admission closed, while the generation the
+#     remote's serve certificate proves for that route and model is not a
+#     ledger-issued identity and is exempt from that history check - whether
+#     the record derives it from the certificate or already names the host
+#     generation a relaunch persisted into it.
 #     An unmanaged ship or scout counts while its record is pooled; an unmanaged
 #     local secondmate counts unless its session lock is free or stale and its
 #     endpoint is proven destroyed; an unresolved model counts everywhere.

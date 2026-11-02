@@ -205,7 +205,10 @@
 # leftovers included) and its delivery confirmation is removed so retired mates
 # cannot leave durable reply expectations behind. Non-forced retirement refuses
 # while any of those records is still unresolved. Teardown then discards child
-# work, kills child runtime endpoints, and removes the retired home. Removing a
+# work, kills child runtime endpoints, and removes the retired home. A local
+# retirement removes its data/secondmates.md route before the task record, so a
+# failed registry publication preserves that record for the retry that finishes
+# the route instead of stranding a route whose home is already gone. Removing a
 # leased home releases its durable treehouse lease so the pool slot is freed,
 # never left leased forever. If the treehouse return fails, teardown leaves the
 # leased home and state in place instead of hiding a still-held lease.
@@ -3094,6 +3097,11 @@ finish_firstmate_home_removal() {
 # is already gone. A retry that finds the public path still present refuses
 # rather than removing it: it cannot prove that home is the generation the
 # evidence names instead of a reseeded successor at the same path.
+# Rolling back before the rename restores the home and withdraws that evidence,
+# but only when the staged copy is genuinely gone: a signal that lands between
+# the rename and the committed flag leaves <staged>/home in place, so the
+# evidence stays for the next attempt to finish deleting the copy it moved
+# rather than reporting a removal over a staged home.
 # A remote retirement supplies its staging path through FM_REMOTE_RETIRE_STAGE
 # and keeps its own host-side pending evidence.
 remove_firstmate_home() (  # <home> <label> <task-id> <backend>
