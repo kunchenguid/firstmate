@@ -678,7 +678,7 @@ rex_teardown_meta() {  # <state-dir> <id> <kind> <home> <session-id> <window-id>
 }
 
 test_teardown_retires_the_secondmate_session() {
-  local dir mate out sid wid bid crew_sid crew_wid crew_bid rc
+  local dir mate out sid wid bid crew_sid crew_wid crew_bid rc pending
   dir=$(new_case teardown-secondmate)
   mate="$dir/mate"
   mkdir -p "$mate/state" "$mate/data" "$mate/config" "$dir/home/data" "$dir/home/config"
@@ -691,14 +691,32 @@ test_teardown_retires_the_secondmate_session() {
   read -r crew_sid crew_wid crew_bid <<<"$out"
   assert_equals "$sid" "$crew_sid" "the secondmate's crew must share its per-home session"
   rex_teardown_meta "$dir/home/state" sm secondmate "$mate" "$sid" "$wid" "$bid"
+  printf 'spawn_gen=rex.g1\n' >> "$dir/home/state/sm.meta"
+  pending="$dir/retirement.pending.json"
+  jq -n --arg home "$mate" --arg target "${sid#session:}:${bid#block:}" \
+    '{schema:"fm-remote-retirement-pending.v1",task:"sm",home:$home,generation:"rex.g1",backend:"herdr",target:$target,phase:"pending",destroyed:false,exit_code:null}' > "$pending"
   rex_teardown_meta "$mate/state" crew ship "$dir/nonexistent-crew" "$crew_sid" "$crew_wid" "$crew_bid"
   fake_rex "$dir" new other --window keep --cwd /tmp --json >/dev/null
 
   out=$(env -u TERM_PROGRAM -u REX_SESSION -u REX_BLOCK -u REX_SERVER \
+    FM_REMOTE_RETIRE_PENDING="$pending" \
+    FM_REX_FAKE_DIR="$dir/fake" REX_BIN_DIR="$dir/bin" FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_REX_FAKE_DEAD_PID="$DEAD_PID" FM_BACKEND_REX_BUNDLE_BIN="$dir/no-bundle/rex" \
+    "$ROOT/bin/fm-teardown.sh" sm --force 2>&1); rc=$?
+  [ "$rc" -ne 0 ] || fail "retirement accepted a mismatched backend: $out"
+  assert_present "$mate" "backend mismatch removed the secondmate home"
+  assert_equals null "$(jq -r .exit_code "$pending")" "backend mismatch changed the retained outcome"
+  jq '.backend = "rex"' "$pending" > "$pending.next"
+  mv "$pending.next" "$pending"
+
+  out=$(env -u TERM_PROGRAM -u REX_SESSION -u REX_BLOCK -u REX_SERVER \
+    FM_REMOTE_RETIRE_PENDING="$pending" \
     FM_REX_FAKE_DIR="$dir/fake" REX_BIN_DIR="$dir/bin" FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" \
     FM_REX_FAKE_DEAD_PID="$DEAD_PID" FM_BACKEND_REX_BUNDLE_BIN="$dir/no-bundle/rex" \
     "$ROOT/bin/fm-teardown.sh" sm --force 2>&1); rc=$?
   expect_code 0 "$rc" "teardown of a rex secondmate must succeed: $out"
+  assert_absent "$mate" "successful retirement retained the secondmate home"
+  assert_equals 0 "$(jq -r .exit_code "$pending")" "retirement did not retain its successful outcome"
   assert_equals 0 "$(state_json "$dir" "[.sessions[] | select(.session_id == \"$sid\")] | length")" \
     "retiring the secondmate must retire its emptied per-home session"
   assert_equals 1 "$(state_json "$dir" '.sessions | length')" "an unrelated session must survive the retirement"

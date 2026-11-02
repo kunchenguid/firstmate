@@ -2265,10 +2265,10 @@ teardown_retain_remote_retirement_outcome() {
   [ "$TEARDOWN_POOL_SLOT_LOST" = 0 ] || retirement_rc=$TEARDOWN_LOST_SLOT_EXIT
   if ! jq -e --arg id "$ID" --arg home "${HOME_PATH:-$WT}" --arg gen "$(meta_value "$META" spawn_gen)" \
     --arg target "$T" --argjson rc "$retirement_rc" \
-    --arg backend "$(meta_value "$META" remote_backend)" '
+    --arg backend "$BACKEND" '
     select(.schema == "fm-remote-retirement-pending.v1" and .task == $id and .home == $home
       and .generation == $gen and .target == $target
-      and .backend == (if $backend == "" then "herdr" else $backend end)
+      and .backend == $backend
       and .phase == "pending" and .destroyed == false
       and (.exit_code == null or .exit_code == 0 or .exit_code == 4))
     | .exit_code = (if .exit_code == 4 then 4 else $rc end)' "$FM_REMOTE_RETIRE_PENDING" > "$retirement_tmp" \
