@@ -25,21 +25,27 @@
 #
 # scan records every task whose status reports a PR that nobody recorded, so
 # merge monitoring never depends on the supervisor remembering this command.
-# bin/fm-watch.sh runs it at the start of each check sweep. A candidate is a
-# task record that is not a secondmate or scout and has no pr= line, or has the
-# reported pr= but no valid published poll; its PR is
-# the first "PR <url>" token in the newest done: line that names a supported PR
-# URL, whatever the rest of the line says. A URL without the "PR " prefix is
-# prose and never counts. Each candidate is recorded through the ordinary
-# path above, so every refusal still applies. A refusal prints one line naming
-# the task, the URL, and the reason, once per task and URL
-# (state/<task>.pr-register-refused), and the scan retries silently on later
+# bin/fm-watch.sh runs it at the start of each check sweep. A task reports a PR
+# only when its newest crew-declared status line (last_crew_status_line in
+# bin/fm-classify-lib.sh) is a done: line in a ready shape
+# (fm_dod_ready_note_url in bin/fm-dod-lib.sh) naming a supported PR URL, so
+# prose around the URL, a line saying the PR is not ready, and any later crew
+# line each leave nothing to record. A candidate is a task record that is not a
+# secondmate or scout and has no pr= line, has the reported pr= but no valid
+# published poll, or has a pr= that its status log named and the reported PR now
+# replaces; a pr= the log never named is the supervisor's own choice and stays,
+# and a merged or retired pr= is never replaced. Each candidate is recorded
+# through the ordinary path above, so every refusal still applies. A refusal
+# prints one line naming the task, the URL, and the reason, once per task and
+# URL (state/<task>.pr-register-refused), and the scan retries silently on later
 # sweeps, so a draft later marked ready is recorded without help. Each sweep
 # starts just after the last task the previous sweep attempted
 # (state/.pr-check-scan-cursor), so a registration that hangs or is refused
 # cannot take the whole budget on every sweep. Registrations
 # stop FM_CHECK_TIMEOUT (default 30) minus 5 seconds after the scan starts; a
-# registration cut at that bound prints nothing and is retried.
+# registration cut at that bound prints one line saying the PR merge watch could
+# not be armed, once per task and URL (state/<task>.pr-register-timed-out), and
+# is retried.
 # Usage: fm-pr-check.sh <task-id> <pr-url>
 #        fm-pr-check.sh scan
 set -eu
@@ -61,26 +67,13 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 . "$SCRIPT_DIR/fm-timeout-lib.sh"
 
 pr_check_reported_url() {  # <status-file>
-  local line token found=
+  local line url
   [ -f "$1" ] && [ ! -L "$1" ] || return 1
-  while IFS= read -r line; do
-    [ "$(status_line_verb "$line")" = "done" ] || continue
-    while IFS= read -r token; do
-      token=${token#*PR }
-      while :; do
-        case "$token" in
-          *[\).,\;:\'\"]) token=${token%?} ;;
-          *) break ;;
-        esac
-      done
-      if fm_pr_url_parse "$token"; then
-        found=$FM_PR_URL
-        break
-      fi
-    done < <(status_line_note "$line" | grep -oE '(^|[^[:alnum:]_])PR https://[^[:space:]]+' || true)
-  done < <(grep -E '^[[:space:]]*done' "$1" | grep -F 'PR https://' || true)
-  [ -n "$found" ] || return 1
-  printf '%s\n' "$found"
+  line=$(last_crew_status_line "$1")
+  [ "$(status_line_verb "$line")" = "done" ] || return 1
+  url=$(fm_dod_ready_note_url "$(status_line_note "$line")") || return 1
+  fm_pr_url_parse "$url" || return 1
+  printf '%s\n' "$FM_PR_URL"
 }
 
 pr_check_rotate() {  # <last-id>: start the lines on stdin just after the line for last-id, wrapping
@@ -94,7 +87,7 @@ pr_check_pr_retired() {  # <id> <recorded-url>
 }
 
 pr_check_scan() {
-  local budget start meta id kind url recorded left marker err rc tmp candidates='' cursor_file cursor
+  local budget start meta id kind url recorded replaces left refused timed_out marker note err rc tmp candidates='' cursor_file cursor
   budget=${FM_CHECK_TIMEOUT:-30}
   case "$budget" in ''|*[!0-9]*) budget=30 ;; esac
   budget=$((budget - 5))
@@ -110,25 +103,41 @@ pr_check_scan() {
     url=$(pr_check_reported_url "$STATE/$id.status") || continue
     recorded=$(grep '^pr=' "$meta" | tail -1 | cut -d= -f2- || true)
     pr_check_pr_retired "$id" "$recorded" && continue
-    [ -z "$recorded" ] || { [ "$recorded" = "$url" ] && ! fm_pr_poll_artifacts_valid "$STATE" "$id" "$SCRIPT_DIR/fm-pr-poll.sh"; } || continue
-    candidates="$candidates$id $url"$'\n'
+    replaces=
+    if [ "$recorded" = "$url" ]; then
+      ! fm_pr_poll_artifacts_valid "$STATE" "$id" "$SCRIPT_DIR/fm-pr-poll.sh" || continue
+    elif [ -n "$recorded" ]; then
+      fm_dod_status_names_pr "$STATE/$id.status" "$recorded" || continue
+      replaces=$recorded
+    fi
+    candidates="$candidates$id $url $replaces"$'\n'
   done
   cursor_file="$STATE/.pr-check-scan-cursor"
   cursor=$(cat "$cursor_file" 2>/dev/null || true)
   candidates=$(printf '%s' "$candidates" | pr_check_rotate "$cursor")
-  while IFS=' ' read -r id url; do
+  while IFS=' ' read -r id url replaces; do
     [ -n "$id" ] || continue
     left=$((start + budget - $(date +%s)))
     [ "$left" -gt 0 ] || break
-    marker="$STATE/$id.pr-register-refused"
+    refused="$STATE/$id.pr-register-refused"
+    timed_out="$STATE/$id.pr-register-timed-out"
     printf '%s\n' "$id" > "$cursor_file" 2>/dev/null || true
     rc=0
-    err=$(fm_run_timed "$left" env FM_PR_CHECK_SCAN=1 bash "$SCRIPT_DIR/fm-pr-check.sh" "$id" "$url" 2>&1 >/dev/null) || rc=$?
+    # The grace lets a registration cut at the bound run its cleanup trap.
+    err=$( (fm_exec_timed "$left" 2 env FM_PR_CHECK_SCAN=1 FM_PR_CHECK_SCAN_REPLACES="$replaces" \
+      bash "$SCRIPT_DIR/fm-pr-check.sh" "$id" "$url") 2>&1 >/dev/null) || rc=$?
     if [ "$rc" -eq 0 ]; then
-      rm -f -- "$marker"
+      rm -f -- "$refused" "$timed_out"
       continue
     fi
-    [ "$rc" -ne 124 ] || continue
+    if fm_timed_out "$rc"; then
+      marker=$timed_out
+      note="its PR merge watch could not be armed: registration timed out after ${left}s, and later sweeps keep retrying"
+    else
+      marker=$refused
+      err=$(printf '%s\n' "$err" | sed -n 's/^error: //p' | head -1)
+      note="it was not recorded: ${err:-registration failed}"
+    fi
     if [ -f "$marker" ] && [ ! -L "$marker" ] && [ "$(cat "$marker")" = "$url" ]; then
       continue
     fi
@@ -137,8 +146,7 @@ pr_check_scan() {
       rm -f -- "$tmp"
       continue
     fi
-    err=$(printf '%s\n' "$err" | sed -n 's/^error: //p' | head -1)
-    printf '%s reported %s in a done line, but it was not recorded: %s\n' "$id" "$url" "${err:-registration failed}"
+    printf '%s reported %s in a done line, but %s\n' "$id" "$url" "$note"
   done <<EOF_SCAN
 $candidates
 EOF_SCAN
@@ -320,10 +328,12 @@ META_LOCK_HELD=1
 [ -f "$META" ] && [ ! -L "$META" ] && [ "$(fm_pr_file_link_count "$META")" = 1 ] \
   || { echo "error: task metadata is unavailable" >&2; exit 1; }
 # A scan gathers its candidates before it registers them, so the supervisor may
-# have recorded another PR meanwhile; that choice is never overwritten.
+# have recorded another PR meanwhile; that choice is never overwritten. Only the
+# exact pr= the scan chose to replace gives way.
 if [ "${FM_PR_CHECK_SCAN:-}" = 1 ]; then
   RECORDED_PR=$(grep '^pr=' "$META" | tail -1 | cut -d= -f2- || true)
-  [ -z "$RECORDED_PR" ] || [ "$RECORDED_PR" = "$URL" ] || exit 0
+  [ -z "$RECORDED_PR" ] || [ "$RECORDED_PR" = "$URL" ] \
+    || [ "$RECORDED_PR" = "${FM_PR_CHECK_SCAN_REPLACES:-}" ] || exit 0
 fi
 META_DEVICE=$(fm_pr_file_device "$META") || exit 1
 STATE_DEVICE=$(fm_pr_file_device "$STATE") || exit 1

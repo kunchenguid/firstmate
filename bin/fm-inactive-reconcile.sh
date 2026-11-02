@@ -373,12 +373,7 @@ terminal_outcome_pr() { # <state-line> <kind>
     clean_field "$(state_line_pr "$line")"
     return 0
   fi
-  value=$(state_line_note "$line")
-  case "$value" in 'PR '*) value=${value#PR } ;; *) return 0 ;; esac
-  case "$value" in
-    *' checks green') value=${value% checks green} ;;
-    *' published for review') value=${value% published for review} ;;
-  esac
+  value=$(fm_dod_ready_note_url "$(state_line_note "$line")") || return 0
   fm_pr_url_parse "$value" || return 0
   clean_field "$FM_PR_URL"
 }
@@ -407,21 +402,22 @@ terminal_outcome_corroborated() { # <state> <last-status-line> <state-line>
   [ "$declared" = "$state" ]
 }
 
-# The task's delivered PR. Recorded meta pr= is the only authoritative source;
-# the fallback scrape accepts only a preferred terminal line in a mode's
-# ready-signal shape (`done: PR <url>` or `done: PR <url> checks green`,
-# optionally carrying an emission-time tag this scrape steps over without
-# reading), so a PR a worker merely mentioned in prose is never claimed as the
-# delivery.
+# The task's delivered PR. Recorded meta pr= stands unless the terminal line is
+# in a mode's ready-signal shape (`done: PR <url>` or `done: PR <url> checks
+# green`, optionally carrying an emission-time tag this scrape steps over without
+# reading) and either nothing is recorded or the status log named the recorded
+# PR, so that line replaces it (fm_dod_status_names_pr); a PR a worker merely
+# mentioned in prose is never claimed as the delivery.
 # A scout never delivers a PR, so it never carries one.
-pr_for_task() { # <meta> [preferred-line]
-  local meta=$1 preferred=${2:-} value
+pr_for_task() { # <meta> <terminal-line> <status-file>
+  local meta=$1 terminal=$2 status=$3 value ready
   [ "$(meta_field "$meta" kind)" != scout ] || return 0
   value=$(meta_field "$meta" pr)
-  if [ -z "$value" ] && [ -n "$preferred" ]; then
-    value=$(printf '%s\n' "$preferred" \
-      | sed -nE 's|^done( \[at=[^]]*\])?: PR (https?://[^[:space:])"]+/pull/[0-9]+)( checks green)?$|\2|p' \
-      | head -1 || true)
+  ready=$(printf '%s\n' "$terminal" \
+    | sed -nE 's|^done( \[at=[^]]*\])?: PR (https?://[^[:space:])"]+/pull/[0-9]+)( checks green)?$|\2|p' \
+    | head -1 || true)
+  if [ -n "$ready" ] && { [ -z "$value" ] || fm_dod_status_names_pr "$status" "$value"; }; then
+    value=$ready
   fi
   clean_field "$value"
 }
@@ -503,7 +499,7 @@ report_child_ledger_locked() { # <id> <meta>
   status="$STATE/$id.status"
   last=$(child_terminal_ledger_line "$status") || return 0
   state=$(status_line_verb "$last")
-  pr=$(pr_for_task "$meta" "$last")
+  pr=$(pr_for_task "$meta" "$last" "$status")
   incarnation=$(meta_incarnation "$meta")
   fingerprint=$(sha256_text "$incarnation|$id|$state|ledger|$last")
   if [ "$state" = "done" ] && [ ! -f "$(record_path "$fingerprint" reported)" ] \

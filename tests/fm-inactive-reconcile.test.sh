@@ -466,6 +466,24 @@ test_secondmate_ledger_delivery_carries_report_and_failure() {
   pass "ledger delivery carries the report pointer, the failed verb, and each new terminal line"
 }
 
+# The child's report names the PR its newest ready line delivered once the log
+# shows that line replacing the recorded PR; a recorded PR the log never named
+# is the supervisor's own choice and stays.
+test_ledger_report_names_a_replacement_pr() {
+  local replaced_key kept_key
+  make_world ledger-replacement; bind_secondmate local
+  write_child "$MATE" replaced $'done: PR https://example.test/owner/repo/pull/1 checks green\nworking: reopening\ndone: PR https://example.test/owner/repo/pull/22 checks green'
+  write_child "$MATE" kept 'done: PR https://example.test/owner/repo/pull/23 checks green'
+  FM_FAKE_CREW_STATE='unknown' run_reconcile "$MATE"
+  replaced_key=$(reported_outcome_key "$MATE" replaced 'done') || fail "replacement receipt key missing"
+  kept_key=$(reported_outcome_key "$MATE" kept 'done') || fail "kept receipt key missing"
+  sed -E 's/ \[at=[0-9]+\]//' "$MAIN/state/mate.status" | grep -Fxq "done [key=$replaced_key]: child replaced done: PR https://example.test/owner/repo/pull/22 checks green pr=https://example.test/owner/repo/pull/22 mode=no-mistakes yolo=off" \
+    || fail "the report kept the replaced PR: $(cat "$MAIN/state/mate.status")"
+  sed -E 's/ \[at=[0-9]+\]//' "$MAIN/state/mate.status" | grep -Fxq "done [key=$kept_key]: child kept done: PR https://example.test/owner/repo/pull/23 checks green pr=https://example.test/owner/repo/pull/1 mode=no-mistakes yolo=off" \
+    || fail "the report overrode a PR the log never named: $(cat "$MAIN/state/mate.status")"
+  pass "a child report names a replacement PR and keeps a recorded PR the log never named"
+}
+
 # A PR URL a worker only ever mentioned in prose is never claimed as the
 # task's delivered PR: without a recorded PR, only a terminal line in the
 # ready-signal shape carries one, and a scout never carries one at all.
@@ -1361,6 +1379,7 @@ test_reconciliation_never_calls_forge
 test_reconciliation_sets_no_forge_mode_for_state_read
 test_terminal_outcome_never_names_a_pr_the_run_did_not_open
 test_terminal_outcome_takes_the_pr_its_run_opened
+test_ledger_report_names_a_replacement_pr
 test_status_log_sourced_outcome_keeps_its_own_pr
 test_status_log_outcome_keeps_gitlab_and_gerrit_reviews
 test_status_log_outcome_never_borrows_an_earlier_pr
