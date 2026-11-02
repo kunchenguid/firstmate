@@ -16,8 +16,8 @@ This covered all 24 parallel and 201 serial members at that refresh; an existing
 Observed maxima provide conservative packing weights, not an upper bound on future durations.
 
 The serial table was refreshed again on 2026-11-01 from run [41340713659](https://github.com/kunchenguid/firstmate/actions/runs/41340713659) (the complete green lane) and run [41355222466](https://github.com/kunchenguid/firstmate/actions/runs/41355222466) (its ten completed shards plus the completed `FM_TEST_END` markers of its serial-9 shard, which was cancelled at the 30-minute cap after that shard outgrew its packed estimate).
-That refresh gave all 279 portable serial members it covered a measured hint, none on the default; the lane now has 280 members and every one still carries a hint.
-That refresh replaced every row of `portable_serial_weight_hints`, so the per-file hint values quoted below record the provenance of earlier refreshes rather than the current table; read the current values from the runner or from `--check-coverage`.
+That refresh gave all 279 portable serial members it covered a measured hint, none on the default.
+That refresh replaced every row of `portable_serial_weight_hints`, so the per-file hint values quoted below record the provenance of earlier refreshes rather than the current table; read current membership, hint values, and any member still on the default weight from the runner or from `--check-coverage`.
 The refreshed lane no longer fits the 1200000 ms packing target in eleven or twelve shards (twelve still modeled about 1220 seconds), so the portable serial split grew to thirteen shards, whose largest models about 1126 seconds.
 
 Two serial-5 jobs were cancelled at their 30-minute cap and uploaded no artifact.
