@@ -335,6 +335,7 @@ GITHUB_NORMALIZE='
         | map(select(.at != null)))
     }'
 
+# A failed paginated page fails the whole read, so normalized discussions are complete.
 GITLAB_NORMALIZE='
   .[0] as $mr | .[1] as $d
   | if ($mr | type) != "object" or ($d | type) != "array" then error("invalid merge request read") else . end

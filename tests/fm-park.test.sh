@@ -79,7 +79,12 @@ printf '%s\n' "\$*" >> "$world/glab.log"
 case "\$*" in
   *"/discussions"*)
     cat "$world/gl.discussions.json"
-    case "\$*" in *--paginate*) [ ! -f "$world/gl.discussions.2.json" ] || cat "$world/gl.discussions.2.json" ;; esac
+    case "\$*" in
+      *--paginate*)
+        [ ! -f "$world/gl.discussions.2.json" ] || cat "$world/gl.discussions.2.json"
+        [ ! -e "$world/gl.discussions.fail" ] || exit 1
+        ;;
+    esac
     ;;
   *) cat "$world/gl.mr.json" ;;
 esac
@@ -333,7 +338,20 @@ test_gitlab_gate_clean_and_unclean_conditions() {
     > "$w/gl.discussions.2.json"
   expect_unclean "$w" gl-second-page-thread "1 review thread(s) unresolved"
   rm -f "$w/gl.discussions.2.json"
-  pass "gitlab gate: clean MR parks, and draft, conflict, rebase, CI running/failed/absent, changes requested, other merge blockers, unresolved threads, a pipeline on an older commit, and a review bot that has not finished each refuse, across every page of discussions"
+  # A failed later page makes the whole paginated read unusable: neither the
+  # gate nor a parked-lane tick may act on the visible first page alone.
+  gl_fixture "$w"
+  printf '%s\\n' '[{"notes":[{"author":{"username":"bob"},"system":false,"created_at":"2026-01-01T00:06:00Z","resolvable":true,"resolved":false}]}]' > "$w/gl.discussions.2.json"
+  : > "$w/gl.discussions.fail"
+  local rc=0 out
+  out=$(run_park "$w" gate lane 2>&1) || rc=$?
+  [ "$rc" = 1 ] || fail "gitlab failed discussion page: gate exit $rc: $out"
+  ! grep -q '^clean ' <<<"$out" || fail "gitlab failed discussion page: gate claimed clean"
+  printf 'pr=%s\\nhead=%s\\nparked_at=%s\\nslot_leased=yes\\n' "$GL_URL" "$(cat "$w/head")" "$(date +%s)" > "$w/state/lane.review-park"
+  rc=0; out=$(run_park "$w" tick 2>&1) || rc=$?
+  [ "$rc" = 0 ] && [ -z "$out" ] || fail "gitlab failed discussion page: tick acted: $rc $out"
+  [ -e "$w/state/lane.review-park" ] && [ ! -e "$w/control.log" ] || fail "gitlab failed discussion page: parked lane was relaunched"
+  pass "gitlab gate: clean MR parks, and draft, conflict, rebase, CI running/failed/absent, changes requested, other merge blockers, unresolved threads, a pipeline on an older commit, and a review bot that has not finished each refuse, across every page of discussions; a failed page is unreadable for gate and tick"
 }
 
 test_park_stops_agent_records_lane_and_leases_slot() {
