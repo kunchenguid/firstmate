@@ -30,17 +30,19 @@ If the primary harness runs outside tmux, Firstmate creates or reuses a detached
 tmux attach -t firstmate
 ```
 
-Each task window is named `fm-<id>`.
+Each task window is named `fm-<home-label>-<id>`, where the home label is `firstmate` or `2ndmate-<id>` plus a short stable hash of the resolved Firstmate root.
+Every home that runs outside its own tmux session shares the one `firstmate` session, and Firstmate refuses to create a window whose name that session already holds, so the label keeps two homes with the same task id from blocking each other's worker.
+The task's recorded `window=` names its window, and every Firstmate path reads it from there; a task recorded with the older bare `fm-<id>` name stays reachable the same way.
 
 ```sh
 tmux list-windows -t <session-name>
-tmux select-window -t <session-name>:fm-<id>
+tmux select-window -t <session-name>:fm-<home-label>-<id>
 ```
 
 Typing into an attached task window is authoritative direct intervention.
 Routine supervision does not require attachment: `bin/fm-peek.sh <id>` captures a bounded tail and `FM_HOME=<home> bin/fm-send.sh <id> '<text>'` steers the recorded endpoint.
 
-Verify setup by spawning a small task and confirming its `fm-<id>` window appears in the selected session.
+Verify setup by spawning a small task and confirming its `fm-<home-label>-<id>` window appears in the selected session.
 
 ## Current behavior and safety
 

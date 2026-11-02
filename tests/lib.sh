@@ -897,6 +897,28 @@ fm_write_secondmate_meta() {
     "projects=$projects"
 }
 
+# fm_test_expected_tmux_window <task-id> <fm-home> [fm-root]: the home-scoped
+# tmux window name bin/fm-spawn.sh creates for <task-id> when it runs with that
+# FM_HOME and FM_ROOT (default: this repo, which a spawn with an empty
+# FM_ROOT_OVERRIDE resolves to). Derived through the production mapping in a
+# fresh process so the expectation cannot drift from it; on failure it prints
+# a name no window can carry, so a pattern built from it never matches broadly.
+fm_test_expected_tmux_window() {  # <task-id> <fm-home> [fm-root]
+  local id=$1 home=$2 root=${3:-$ROOT} name
+  # shellcheck disable=SC2016 # Positional parameters expand inside the child bash.
+  name=$(FM_HOME="$home" FM_ROOT="$root" FM_ROOT_OVERRIDE='' bash -c \
+    '. "$1/bin/fm-backend.sh" && fm_backend_source tmux && fm_backend_tmux_scoped_window "fm-$2"' \
+    _ "$ROOT" "$id" 2>/dev/null) || name=
+  case "$name" in
+    fm-?*-"$id") printf '%s' "$name" ;;
+    *)
+      echo "fm_test_expected_tmux_window: cannot derive task $id's window for FM_HOME=$home FM_ROOT=$root" >&2
+      printf '<unresolved-tmux-window-for-%s>' "$id"
+      return 1
+      ;;
+  esac
+}
+
 # --- common assertions ------------------------------------------------------
 
 # assert_equals <expected> <actual> <msg>

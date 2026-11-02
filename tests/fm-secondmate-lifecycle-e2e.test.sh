@@ -118,6 +118,10 @@ phase_spawn() {
     || fail "secondmate spawn failed"
 
   local meta="$HOME_DIR/state/design.meta"
+  # The primary creates the secondmate's window, so it carries the primary
+  # home's scoped name.
+  DESIGN_WINDOW="firstmate:$(fm_test_expected_tmux_window design "$HOME_DIR")"
+  assert_grep "window=$DESIGN_WINDOW" "$meta" "spawn meta did not record the home-scoped window"
   assert_grep 'kind=secondmate' "$meta" "spawn meta did not record kind=secondmate"
   assert_grep "home=$SUB_ABS" "$meta" "spawn meta did not record the subhome"
   assert_grep 'projects=alpha, beta, gamma' "$meta" "spawn meta did not record the project list"
@@ -136,11 +140,11 @@ phase_spawn() {
 phase_send() {
   : > "$LOG"
   printf '❯\n' > "$PANE"
-  # The meta window (firstmate:fm-design) must win over a foreign same-named
-  # window returned by list-windows. Include the recorded endpoint in the fake
-  # inventory so the recovery-grade liveness check can verify it exists.
-  PATH="$FAKEBIN:$PATH" FM_HOME="$HOME_DIR" FM_FAKE_TMUX_WINDOW="firstmate:fm-design
-other-session:fm-design" \
+  # The meta window must win over a foreign same-named window returned by
+  # list-windows. Include the recorded endpoint in the fake inventory so the
+  # recovery-grade liveness check can verify it exists.
+  PATH="$FAKEBIN:$PATH" FM_HOME="$HOME_DIR" FM_FAKE_TMUX_WINDOW="$DESIGN_WINDOW
+other-session:${DESIGN_WINDOW#*:}" \
     FM_FAKE_TMUX_LOG="$LOG" FM_FAKE_TMUX_CAPTURE="$PANE" \
     "$ROOT/bin/fm-send.sh" fm-design 'route this work' >/dev/null 2>&1 \
     || fail "fm-send failed for a bare firstmate window with home metadata"
@@ -152,9 +156,9 @@ other-session:fm-design" \
   body=$(bash -c '. "$1"; fm_task_inbox_body "$2"' _ "$ROOT/bin/fm-task-inbox-lib.sh" "$record")
   assert_contains "$body" '[fm-from-firstmate]' "the inbox request was not marked as from-firstmate"
   assert_contains "$body" 'route this work' "the original request text did not survive the marker"
-  assert_grep 'send-keys -t firstmate:fm-design -l : Firstmate instruction waiting:' "$LOG" "send did not ring the window recorded in this home's meta"
+  assert_grep "send-keys -t $DESIGN_WINDOW -l : Firstmate instruction waiting:" "$LOG" "send did not ring the window recorded in this home's meta"
   assert_no_grep 'route this work' "$LOG" "send typed the payload instead of only the doorbell"
-  assert_no_grep 'send-keys -t other-session:fm-design' "$LOG" "send targeted a foreign same-named window"
+  assert_no_grep "send-keys -t other-session:${DESIGN_WINDOW#*:}" "$LOG" "send targeted a foreign same-named window"
   pass "send: a bare fm-<id> secondmate enqueues a marked request and rings the meta window"
 }
 
@@ -211,7 +215,7 @@ phase_recovery() {
   # drop the live meta, then respawn from the registry + persistent home (no
   # explicit home argument).
   PATH="$FAKEBIN:$PATH" FM_FAKE_TMUX_LOG="$LOG" \
-    tmux kill-window -t firstmate:fm-design >/dev/null \
+    tmux kill-window -t "$DESIGN_WINDOW" >/dev/null \
     || fail "could not retire the fake endpoint before recovery"
   rm -f "$HOME_DIR/state/design.meta"
   PATH="$FAKEBIN:$PATH" FM_HOME="$HOME_DIR" FM_FAKE_TMUX_LOG="$LOG" FM_FAKE_TMUX_CAPTURE="$PANE" \
@@ -220,7 +224,7 @@ phase_recovery() {
   local meta="$HOME_DIR/state/design.meta"
   assert_grep "home=$SUB_ABS" "$meta" "respawn did not preserve the persistent home from the registry"
   assert_grep 'projects=alpha, beta, gamma' "$meta" "respawn did not preserve the project list from the registry"
-  assert_grep 'window=firstmate:fm-design' "$meta" "respawn did not reconstruct the direct-report window"
+  assert_grep "window=$DESIGN_WINDOW" "$meta" "respawn did not reconstruct the direct-report window"
   pass "recovery: respawns from the durable registry and persistent home"
 }
 

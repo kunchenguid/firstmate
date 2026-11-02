@@ -428,7 +428,7 @@ test_duplicate_secondmate_spawn_does_not_converge_trace_context() {
     FM_STATE_OVERRIDE="$prim/state" FM_DATA_OVERRIDE="$prim/data" \
     FM_PROJECTS_OVERRIDE="$prim/projects" FM_CONFIG_OVERRIDE="$prim/config" \
     FM_SPAWN_NO_GUARD=1 CLAUDECODE=1 TMUX="fake,1,0" \
-    FM_FAKE_DUPLICATE_WINDOW="fm-$id" FM_FAKE_LAUNCH_LOG="$log" \
+    FM_FAKE_DUPLICATE_WINDOW="$(fm_test_expected_tmux_window "$id" "$prim")" FM_FAKE_LAUNCH_LOG="$log" \
     PATH="$fake:$PATH" "$SPAWN" "$id" "$sm" --secondmate 2>&1)
   status=$?
 

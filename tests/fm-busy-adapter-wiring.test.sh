@@ -1083,7 +1083,7 @@ test_raw_secondmate_launch_writes_no_busy_wiring() {
   sm="$case_dir/sm"
   assert_present "$state/$id.busy-gen" "canonical claude secondmate spawn did not arm a busy generation"
   assert_present "$sm/.fm-busy-stop" "canonical claude secondmate spawn did not write the Stop pointer"
-  PATH="$case_dir/fake/fakebin:$PATH" tmux kill-window -t "firstmate:fm-$id" \
+  PATH="$case_dir/fake/fakebin:$PATH" tmux kill-window -t "$(grep '^window=' "$state/$id.meta" | cut -d= -f2-)" \
     || fail "could not retire the fake window before raw respawn"
   : > "$case_dir/launch.log"
   out=$(FM_BACKEND=tmux FM_FAKE_LAUNCH_LOG="$case_dir/launch.log" \

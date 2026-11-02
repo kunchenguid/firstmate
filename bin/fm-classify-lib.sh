@@ -73,6 +73,16 @@ case $- in *u*) _fm_classify_nounset=on ;; *) _fm_classify_nounset=off ;; esac
 [ "$_fm_classify_nounset" = on ] || set +u
 unset _fm_classify_nounset
 
+# fm_backend_hometag, which window_to_task's no-metadata fallback uses to read
+# this home's scoped tmux window names. Optional: minimal-bin copies of this
+# library (the remote-job worker, the Pi supervision-branch harness) carry no
+# backend libraries, host no tmux task windows, and keep the bare fm- strip.
+if [ -f "$_FM_CLASSIFY_LIB_DIR/fm-backend-hometag-lib.sh" ]; then
+  # shellcheck source=bin/fm-backend-hometag-lib.sh
+  # shellcheck disable=SC1091
+  . "$_FM_CLASSIFY_LIB_DIR/fm-backend-hometag-lib.sh"
+fi
+
 # Captain-relevant status verbs. A status line carrying any of these is work
 # firstmate must see. Lines without these verbs are no-verb signals: the watcher
 # absorbs them only with positive provably-working evidence, while the daemon uses
@@ -2224,9 +2234,12 @@ status_open_activities() {  # <status-file-or-dash>
 }
 
 # task id from a recorded window target, falling back to the tmux-shaped
-# "<session>:fm-<id>" form when no metadata state is available.
+# window name when no metadata state is available: this home's scoped
+# "<session>:fm-<hometag>-<id>", or the bare "<session>:fm-<id>". Another
+# home's scoped window keeps its tag after the bare strip, so it never reads as
+# a task id of this home.
 window_to_task() {
-  local w=$1 state=${2:-${STATE:-${FM_STATE_OVERRIDE:-}}} meta mw mt t3_thread t line
+  local w=$1 state=${2:-${STATE:-${FM_STATE_OVERRIDE:-}}} meta mw mt t3_thread t line tag
   if [ -n "$state" ]; then
     for meta in "$state"/*.meta; do
       [ -e "$meta" ] || continue
@@ -2251,7 +2264,21 @@ window_to_task() {
       return 0
     done
   fi
-  t="${w##*:}"; t="${t#fm-}"; printf '%s' "$t"
+  t="${w##*:}"
+  case "$t" in
+    fm-?*-?*)
+      tag=$(fm_backend_hometag 2>/dev/null) || tag=
+      case "$t" in
+        "fm-$tag-"?*)
+          if [ -n "$tag" ]; then
+            printf '%s' "${t#fm-"$tag"-}"
+            return 0
+          fi
+          ;;
+      esac
+      ;;
+  esac
+  t="${t#fm-}"; printf '%s' "$t"
 }
 
 # --- home-owned status-append ledger ----------------------------------------
