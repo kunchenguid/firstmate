@@ -18,10 +18,10 @@ The retirement contract lives in `claim_spawn_slot` in [`bin/fm-spawn.sh`](../..
 The portable regression uses real disposable Git repositories and a simulated terminal through the real spawn, crew-state, relaunch, and teardown entrypoints.
 It does not allocate a live fleet slot or submit a model prompt.
 
-Compatibility inspection covers the shared allocation path for tmux, Herdr, Zellij, and cmux, before any harness-specific launch.
-The existing recovery-grade classifier permits retirement only for an observed agent-free endpoint on tmux or Herdr.
+Compatibility inspection covers the shared allocation path before any harness-specific launch.
+Retirement follows `fm_backend_agent_state`'s `dead` verdict for an observed agent-free endpoint on any backend.
 A missing endpoint remains refused because it can be unreachable, and this path never starts a backend server to investigate it.
-Zellij and cmux have no verified negative classifier and therefore refuse stale-claim retirement.
+A backend whose classifier cannot return `dead`, including Zellij and cmux, refuses stale-claim retirement.
 Orca allocates its own worktrees and never enters the Treehouse claim path; secondmate and remote records are ineligible for retirement.
 The same guard applies to every supported primary and worker harness because the proof uses the recorded backend endpoint, with no harness-specific branch or new vendor-output recognition.
 Live backend and harness behavior was not refreshed by this regression; existing classifier evidence below remains independently scoped.
@@ -54,7 +54,7 @@ FM_TEST_END 2026-11-02T21:45:33Z tests/fm-teardown-endpoint-safety.test.sh exit=
 FM_TEST_END 2026-11-02T21:49:26Z tests/fm-control-relaunch.test.sh exit=0 duration_ms=233789 gate_skip=false
 ```
 
-The stopped-task case also checks crew-state reporting, refusal to relaunch the retired task, and cleanup of the retired record after a later task owns the slot, preserving that later task's dirty file and owner claim.
+The stopped-task case also checks refusal to relaunch the retired task and cleanup of the retired record after a later task owns the slot, preserving that later task's dirty file and owner claim.
 Optional real-tmux cases in the endpoint-safety suite printed `skip - tmux not installed`; these assertions do not claim live-tmux qualification.
 
 ## Harness detection precedence

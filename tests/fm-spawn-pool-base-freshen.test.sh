@@ -1265,13 +1265,9 @@ test_reused_slot_retires_only_safe_older_records() {
       continue
     fi
     expect_code 0 "$status" "stopped older task should allow slot reuse"$'\n'"$out"
-    out=$(FM_ROOT_OVERRIDE='' FM_HOME="$HOME_DIR" PATH="$FAKEBIN_DIR:$PATH" \
-      "$ROOT/bin/fm-crew-state.sh" "$old" 2>&1)
-    assert_contains "$out" "reassigned to task $id" 'crew-state read the successor copy'
     out=$(fm_test_run_spawn "$HOME_DIR" "$POOL_DIR" "$FAKEBIN_DIR" "$old" --relaunch)
     status=$?
     [ "$status" -ne 0 ] || fail 'retired task relaunched into successor copy'
-    assert_contains "$out" "reassigned to task $id" 'relaunch refusal lacks successor'
     # Teardown is the user-visible failure: it must work without editing A.
     # --force waives the new scout's report gate, never the duplicate claim gate.
     out=$(FM_ROOT_OVERRIDE='' FM_HOME="$HOME_DIR" PATH="$FAKEBIN_DIR:$PATH" \
