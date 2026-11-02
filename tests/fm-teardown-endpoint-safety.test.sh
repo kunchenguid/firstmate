@@ -1737,7 +1737,7 @@ case "$1" in
 esac
 SH
     chmod +x "$event_home/bin/fm-procevent.sh"
-    jq -n --arg h "$mate" '{schema:"fm-remote-retirement-pending.v1",task:"mate",home:$h,generation:"g1",target:"isolated:fm-mate",backend:"herdr",phase:"pending",destroyed:false,exit_code:null}' >"$dir/pending.json"
+    jq -n --arg h "$mate" '{schema:"fm-remote-retirement-pending.v1",task:"mate",home:$h,generation:"g1",target:"isolated:fm-mate",backend:"tmux",phase:"pending",destroyed:false,exit_code:null}' >"$dir/pending.json"
     cat >"$dir/fakebin/rm" <<'SH'
 #!/usr/bin/env bash
 last=${!#}
@@ -1933,7 +1933,7 @@ test_retirement_retains_child_loss_before_metadata_removal() {
     fm_write_meta "$child_meta" \
       window=isolated:fm-scout endpoint_task_id=scout backend=tmux kind=scout \
       "worktree=$dir/pool/1/project" "project=$dir/project" spawn_gen=g-child
-    jq -n --arg h "$mate" '{schema:"fm-remote-retirement-pending.v1",task:"mate",home:$h,generation:"g1",target:"isolated:fm-mate",backend:"herdr",phase:"pending",destroyed:false,exit_code:null}' >"$dir/pending.json"
+    jq -n --arg h "$mate" '{schema:"fm-remote-retirement-pending.v1",task:"mate",home:$h,generation:"g1",target:"isolated:fm-mate",backend:"tmux",phase:"pending",destroyed:false,exit_code:null}' >"$dir/pending.json"
     cat >"$dir/fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
 case "$*" in *has-session*) exit 1 ;; esac
