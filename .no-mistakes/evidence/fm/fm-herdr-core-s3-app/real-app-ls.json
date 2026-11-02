@@ -1,0 +1,30 @@
+{
+  "spaces": [
+    {
+      "id": "lab",
+      "name": "01M6D7AZ9AE9CQYPP3HJTM7PFK",
+      "folder": "{run-worktree}",
+      "machine": null,
+      "active": true,
+      "tabs": [
+        {
+          "id": "primary",
+          "name": "1",
+          "active": true,
+          "settled": false,
+          "terminals": [
+            {
+              "terminal": "t1",
+              "pane": "p1e84d3ffb56bb83b444520952235a3ab",
+              "status": null,
+              "app": null,
+              "name": null,
+              "sub_agents": []
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "recent": []
+}

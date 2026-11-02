@@ -1,0 +1,48 @@
+[
+  {
+    "command": [
+      "do",
+      "agent.focus",
+      "--terminal",
+      "t9"
+    ],
+    "exit": 0,
+    "stdout": "{\n  \"ok\": true\n}\n",
+    "stderr": ""
+  },
+  {
+    "command": [
+      "do",
+      "overlay.close"
+    ],
+    "exit": 0,
+    "stdout": "{\n  \"ok\": true\n}\n",
+    "stderr": ""
+  },
+  {
+    "command": [
+      "do",
+      "window.maximize"
+    ],
+    "exit": 0,
+    "stdout": "{\n  \"ok\": true\n}\n",
+    "stderr": ""
+  },
+  {
+    "command": [
+      "status"
+    ],
+    "exit": 0,
+    "stdout": "{\n  \"zoom\": 1.0,\n  \"font_size\": 14.0,\n  \"ui_font_size\": 13.0,\n  \"space\": \"fm-firstmate-e8bb695d\",\n  \"tab\": \"firstmate-e8bb695d-fm-livegui\",\n  \"focused_pane\": \"pd30728f97fc0d3dbf604f9ff66de6c8d\",\n  \"layout\": \"main\",\n  \"agent\": null,\n  \"floats\": {},\n  \"overlays\": [\n    \"frame-welcome\"\n  ],\n  \"errors\": []\n}\n",
+    "stderr": ""
+  },
+  {
+    "command": [
+      "shot",
+      "~/.no-mistakes/evidence/01M6D7AZ9AE9CQYPP3HJTM7PFK/herdr-app-worker.png"
+    ],
+    "exit": 0,
+    "stdout": "~/.no-mistakes/evidence/01M6D7AZ9AE9CQYPP3HJTM7PFK/herdr-app-worker.png\n",
+    "stderr": ""
+  }
+]

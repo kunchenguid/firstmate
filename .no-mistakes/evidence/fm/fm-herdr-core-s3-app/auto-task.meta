@@ -1,0 +1,17 @@
+window=fm-hclab-a:t4
+endpoint_task_id=liveauto
+worktree=~/.treehouse/project-54f8e1/1/project
+project={run-worktree}/.live/project
+harness=sh
+kind=ship
+mode=no-mistakes
+yolo=off
+branch=fm/liveauto
+tasktmp=/tmp/fm-liveauto
+model=default
+effort=default
+spawn_gen=s1793593495.57425.27074
+backend=hc
+backend_detect=app-terminal
+hc_session=fm-hclab-a
+hc_terminal=t4

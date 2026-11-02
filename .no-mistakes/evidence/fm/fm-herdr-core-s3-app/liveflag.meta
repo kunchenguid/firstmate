@@ -1,0 +1,16 @@
+window=fm-hclab-a:t5
+endpoint_task_id=liveflag
+worktree=~/.treehouse/project-54f8e1/2/project
+project={run-worktree}/.live/project
+harness=sh
+kind=ship
+mode=no-mistakes
+yolo=off
+branch=fm/liveflag
+tasktmp=/tmp/fm-liveflag
+model=default
+effort=default
+spawn_gen=s1793593519.67670.9337
+backend=hc
+hc_session=fm-hclab-a
+hc_terminal=t5

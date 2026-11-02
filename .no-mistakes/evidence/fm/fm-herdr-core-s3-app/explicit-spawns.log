@@ -1,0 +1,128 @@
+
+=== flag ===
+fm-gate-refuse: gate agent lifecycle permitted only against lab home {run-worktree}/.live/home
+●━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+●  WATCHER DOWN - SUPERVISION IS OFF
+●  1 task(s) in flight, but no watcher has a fresh beacon (last beat: never, grace 300s).
+●  Trust the emitted supervision protocol for this harness; do not use shell & for watcher repair.
+●  This is a supervision warning only; the guarded operation WILL still run.
+●  repair a missing or failed watcher cycle with the Pi tool fm_watch_arm_pi, or restart Pi with -e {run-worktree}/.pi/extensions/fm-primary-turnend-guard.ts -e {run-worktree}/.pi/extensions/fm-primary-pi-watch.ts if the extensions are not loaded.
+●━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+warning: {run-worktree}/.live/home/data/liveflag/launch-brief.md records no ship branch; defaulting to legacy branch fm/liveflag
+warning: {run-worktree}/.live/home/data/liveflag/launch-brief.md records no delivery contract line (scaffolded before ship briefs recorded one); launching on the explicit --mode no-mistakes - confirm its definition of done matches
+spawned liveflag harness=sh kind=ship mode=no-mistakes yolo=off window=fm-hclab-a:t5 worktree=~/.treehouse/project-54f8e1/2/project
+spawn_exit=0
+{"address":"t5","argv":["/run/current-system/sw/bin/zsh"],"cols":200,"created_ms":1793593508829,"cwd":"{run-worktree}/.live/project","die_with_parent":false,"exit_code":null,"finished_ms":null,"foreground":{"argv":["/run/current-system/sw/bin/zsh","-i","-l"],"cwd":"~/.treehouse/project-54f8e1/2/project","name":"zsh","pid":74218},"identity":"ghostty","keep":false,"labels":{"firstmate.home":"firstmate-e8bb695d","firstmate.task":"fm-liveflag","herdr.space":"fm-firstmate-e8bb695d","herdr.tab":"firstmate-e8bb695d-fm-liveflag"},"name":null,"notify":false,"parent":null,"pid":71622,"reason":null,"reported":false,"rm":false,"rows":120,"screen":"exact","signal":null,"state":"live","status":null,"status_ms":null,"template":null,"title":"zsh","turn":0}
+treehouse get
+project main
+  treehouse get
+A new version of treehouse is available: v3.1.0 → v3.1.8
+Run "treehouse update" to update
+
+🌳 Setting up worktree...
+APFS sharing: cloned=0 logical_bytes=0 private_data_reduced_bytes=0 below_threshold=1
+🌳 Entered worktree at ~/.treehouse/project-54f8e1/2/project. Type 'exit' to return.
+project HEAD
+  cd -- '~/.treehouse/project-54f8e1/2/project'
+project HEAD
+  export GOTMPDIR=/tmp/fm-liveflag/gotmp
+project HEAD
+  export COMPACT_ADVISER_DISABLE=1
+project HEAD
+  export FM_TASK_ID=liveflag
+project HEAD
+  . '/tmp/fm-liveflag+5bdd248a6b73c2fcf7377981c02e6cab49a792b22fe5ba71eac3aa133fafeddf/launch.s1793593519.67670.9337.sh'
+explicit-flag-worker-ok%                                                                                                                                                                                project HEAD
+❯
+fm-gate-refuse: gate agent lifecycle permitted only against lab home {run-worktree}/.live/home
+WARNING: watcher still down (same stale episode; last beat: never, grace 300s) - full banner already printed this episode.
+teardown: reaping leaked worktree process(es) for liveflag: 74218 87482
+teardown: force-killing leaked worktree process(es) for liveflag: 74218
+A new version of treehouse is available: v3.1.0 → v3.1.8
+Run "treehouse update" to update
+
+🌳 Worktree returned to pool.
+WARNING: watcher still down (same stale episode; last beat: never, grace 300s) - full banner already printed this episode.
+{run-worktree}/.live/project: already current
+teardown liveflag complete (window fm-hclab-a:t5, worktree ~/.treehouse/project-54f8e1/2/project)
+Backlog: liveflag just finished (this home keeps no markdown backlog at {run-worktree}/.live/home/data/backlog.md). Update {run-worktree}/.live/home/data/backlog.md - move liveflag to Done, keep Done to the 10 most recent, then re-scan Queued and dispatch only work whose blockers are gone and date is due.
+
+=== environment ===
+fm-gate-refuse: gate agent lifecycle permitted only against lab home {run-worktree}/.live/home
+WARNING: watcher still down (same stale episode; last beat: never, grace 300s) - full banner already printed this episode.
+warning: {run-worktree}/.live/home/data/liveenvironment/launch-brief.md records no ship branch; defaulting to legacy branch fm/liveenvironment
+warning: {run-worktree}/.live/home/data/liveenvironment/launch-brief.md records no delivery contract line (scaffolded before ship briefs recorded one); launching on the explicit --mode no-mistakes - confirm its definition of done matches
+spawned liveenvironment harness=sh kind=ship mode=no-mistakes yolo=off window=fm-hclab-a:t6 worktree=~/.treehouse/project-54f8e1/2/project
+spawn_exit=0
+{"address":"t6","argv":["/run/current-system/sw/bin/zsh"],"cols":200,"created_ms":1793593538068,"cwd":"{run-worktree}/.live/project","die_with_parent":false,"exit_code":null,"finished_ms":null,"foreground":{"argv":["/run/current-system/sw/bin/zsh","-i","-l"],"cwd":"~/.treehouse/project-54f8e1/2/project","name":"zsh","pid":97545},"identity":"ghostty","keep":false,"labels":{"firstmate.home":"firstmate-e8bb695d","firstmate.task":"fm-liveenvironment","herdr.space":"fm-firstmate-e8bb695d","herdr.tab":"firstmate-e8bb695d-fm-liveenvironment"},"name":null,"notify":false,"parent":null,"pid":96517,"reason":null,"reported":false,"rm":false,"rows":120,"screen":"exact","signal":null,"state":"live","status":null,"status_ms":null,"template":null,"title":"zsh","turn":0}
+project main
+  treehouse get
+A new version of treehouse is available: v3.1.0 → v3.1.8
+Run "treehouse update" to update
+
+🌳 Setting up worktree...
+🌳 Entered worktree at ~/.treehouse/project-54f8e1/2/project. Type 'exit' to return.
+project HEAD
+  cd -- '~/.treehouse/project-54f8e1/2/project'
+project HEAD
+  export GOTMPDIR=/tmp/fm-liveenvironment/gotmp
+project HEAD
+  export COMPACT_ADVISER_DISABLE=1
+project HEAD
+  export FM_TASK_ID=liveenvironment
+project HEAD
+  . '/tmp/fm-liveenvironment+5bdd248a6b73c2fcf7377981c02e6cab49a792b22fe5ba71eac3aa133fafeddf/launch.s1793593545.95724.18345.sh'
+explicit-env-worker-ok%                                                                                                                                                                                 project HEAD
+❯
+fm-gate-refuse: gate agent lifecycle permitted only against lab home {run-worktree}/.live/home
+WARNING: watcher still down (same stale episode; last beat: never, grace 300s) - full banner already printed this episode.
+teardown: reaping leaked worktree process(es) for liveenvironment: 6630 97545
+teardown: force-killing leaked worktree process(es) for liveenvironment: 97545
+A new version of treehouse is available: v3.1.0 → v3.1.8
+Run "treehouse update" to update
+
+🌳 Worktree returned to pool.
+WARNING: watcher still down (same stale episode; last beat: never, grace 300s) - full banner already printed this episode.
+{run-worktree}/.live/project: already current
+teardown liveenvironment complete (window fm-hclab-a:t6, worktree ~/.treehouse/project-54f8e1/2/project)
+Backlog: liveenvironment just finished (this home keeps no markdown backlog at {run-worktree}/.live/home/data/backlog.md). Update {run-worktree}/.live/home/data/backlog.md - move liveenvironment to Done, keep Done to the 10 most recent, then re-scan Queued and dispatch only work whose blockers are gone and date is due.
+
+=== config ===
+fm-gate-refuse: gate agent lifecycle permitted only against lab home {run-worktree}/.live/home
+WARNING: watcher still down (same stale episode; last beat: never, grace 300s) - full banner already printed this episode.
+warning: {run-worktree}/.live/home/data/liveconfig/launch-brief.md records no ship branch; defaulting to legacy branch fm/liveconfig
+warning: {run-worktree}/.live/home/data/liveconfig/launch-brief.md records no delivery contract line (scaffolded before ship briefs recorded one); launching on the explicit --mode no-mistakes - confirm its definition of done matches
+spawned liveconfig harness=sh kind=ship mode=no-mistakes yolo=off window=fm-hclab-a:t7 worktree=~/.treehouse/project-54f8e1/2/project
+spawn_exit=0
+{"address":"t7","argv":["/run/current-system/sw/bin/zsh"],"cols":200,"created_ms":1793593573445,"cwd":"{run-worktree}/.live/project","die_with_parent":false,"exit_code":null,"finished_ms":null,"foreground":{"argv":["/run/current-system/sw/bin/zsh","-i","-l"],"cwd":"~/.treehouse/project-54f8e1/2/project","name":"zsh","pid":17503},"identity":"ghostty","keep":false,"labels":{"firstmate.home":"firstmate-e8bb695d","firstmate.task":"fm-liveconfig","herdr.space":"fm-firstmate-e8bb695d","herdr.tab":"firstmate-e8bb695d-fm-liveconfig"},"name":null,"notify":false,"parent":null,"pid":15677,"reason":null,"reported":false,"rm":false,"rows":120,"screen":"exact","signal":null,"state":"live","status":null,"status_ms":null,"template":null,"title":"zsh","turn":0}
+project main
+  treehouse get
+A new version of treehouse is available: v3.1.0 → v3.1.8
+Run "treehouse update" to update
+
+🌳 Setting up worktree...
+🌳 Entered worktree at ~/.treehouse/project-54f8e1/2/project. Type 'exit' to return.
+project HEAD
+  cd -- '~/.treehouse/project-54f8e1/2/project'
+project HEAD
+  export GOTMPDIR=/tmp/fm-liveconfig/gotmp
+project HEAD
+  export COMPACT_ADVISER_DISABLE=1
+project HEAD
+  export FM_TASK_ID=liveconfig
+project HEAD
+  . '/tmp/fm-liveconfig+5bdd248a6b73c2fcf7377981c02e6cab49a792b22fe5ba71eac3aa133fafeddf/launch.s1793593581.14467.8375.sh'
+explicit-config-worker-ok%                                                                                                                                                                              project HEAD
+❯
+fm-gate-refuse: gate agent lifecycle permitted only against lab home {run-worktree}/.live/home
+WARNING: watcher still down (same stale episode; last beat: never, grace 300s) - full banner already printed this episode.
+teardown: reaping leaked worktree process(es) for liveconfig: 17503 25073
+teardown: force-killing leaked worktree process(es) for liveconfig: 17503
+A new version of treehouse is available: v3.1.0 → v3.1.8
+Run "treehouse update" to update
+
+🌳 Worktree returned to pool.
+WARNING: watcher still down (same stale episode; last beat: never, grace 300s) - full banner already printed this episode.
+{run-worktree}/.live/project: already current
+teardown liveconfig complete (window fm-hclab-a:t7, worktree ~/.treehouse/project-54f8e1/2/project)
+Backlog: liveconfig just finished (this home keeps no markdown backlog at {run-worktree}/.live/home/data/backlog.md). Update {run-worktree}/.live/home/data/backlog.md - move liveconfig to Done, keep Done to the 10 most recent, then re-scan Queued and dispatch only work whose blockers are gone and date is due.

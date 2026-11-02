@@ -1,0 +1,74 @@
+[
+  {
+    "name": "projected terminal on the live pinned core",
+    "exit": 0,
+    "stdout": "backend=hc\nsignal=app-terminal\n",
+    "stderr": "NOTICE: auto-detected a Herdr-app-projected terminal (fm-hclab-a:t1 carries a herdr.space label) - spawning into the EXPERIMENTAL hc backend with Herdr app presentation (herdr.space/herdr.tab labels). Set config/backend or pass --backend <name> to opt out.\n"
+  },
+  {
+    "name": "bare markers from an actual unlabeled core terminal",
+    "exit": 0,
+    "stdout": "backend=tmux\nsignal=\n",
+    "stderr": ""
+  },
+  {
+    "name": "labeled terminal cannot steer an unrelated spawn socket",
+    "exit": 0,
+    "stdout": "backend=tmux\nsignal=\n",
+    "stderr": ""
+  },
+  {
+    "name": "live terminal with missing core binary names the missing toolchain",
+    "exit": 0,
+    "stdout": "backend=tmux\nsignal=app-terminal-unusable\n",
+    "stderr": "NOTICE: running in a live hc terminal (fm-hclab-a:t1) but no usable hc toolchain (an executable FM_HC_BIN, or herdr-core/hc on PATH reporting 'hc x.y.z' at or above the verified minimum 0.1.14, and jq) can verify a Herdr app projection; staying on the default backend. See docs/hc-backend.md.\n"
+  },
+  {
+    "name": "stale terminal socket never starts a core",
+    "exit": 0,
+    "stdout": "backend=tmux\nsignal=\n",
+    "stderr": ""
+  },
+  {
+    "name": "nonexistent terminal on live core is not a signal",
+    "exit": 0,
+    "stdout": "backend=tmux\nsignal=\n",
+    "stderr": ""
+  },
+  {
+    "name": "tmux marker wins inside a projected terminal",
+    "exit": 0,
+    "stdout": "backend=tmux\nsignal=TMUX\n",
+    "stderr": ""
+  },
+  {
+    "name": "classic Herdr marker wins inside a projected terminal",
+    "exit": 0,
+    "stdout": "backend=herdr\nsignal=HERDR_ENV\n",
+    "stderr": ""
+  },
+  {
+    "name": "explicit environment wins over projected terminal",
+    "exit": 0,
+    "stdout": "backend=tmux\nsignal=\n",
+    "stderr": ""
+  },
+  {
+    "name": "explicit configuration wins over projected terminal",
+    "exit": 0,
+    "stdout": "backend=tmux\nsignal=\n",
+    "stderr": ""
+  },
+  {
+    "name": "marker-less shell near a listening app socket and running core stays silent",
+    "exit": 0,
+    "stdout": "backend=tmux\nsignal=\n",
+    "stderr": ""
+  },
+  {
+    "name": "marker-less shell near a listening app socket with no core starts nothing",
+    "exit": 0,
+    "stdout": "backend=tmux\nsignal=\n",
+    "stderr": ""
+  }
+]

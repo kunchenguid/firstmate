@@ -1,0 +1,4 @@
+fm-gate-refuse: gate agent lifecycle permitted only against lab home {run-worktree}/.live/home
+NOTICE: auto-detected a Herdr-app-projected terminal (fm-hclab-a:t1 carries a herdr.space label) - spawning into the EXPERIMENTAL hc backend with Herdr app presentation (herdr.space/herdr.tab labels). Set config/backend or pass --backend <name> to opt out.
+warning: {run-worktree}/.live/home/data/liveauto/launch-brief.md records no ship branch; defaulting to legacy branch fm/liveauto
+warning: {run-worktree}/.live/home/data/liveauto/launch-brief.md records no delivery contract line (scaffolded before ship briefs recorded one); launching on the explicit --mode no-mistakes - confirm its definition of done matches

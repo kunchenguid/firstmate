@@ -1,0 +1,6 @@
+primary terminal=t8 socket=.s/fm-hclab-a.sock session=fm-hclab-a
+fm-gate-refuse: gate agent lifecycle permitted only against lab home {run-worktree}/.live/home
+NOTICE: auto-detected a Herdr-app-projected terminal (fm-hclab-a:t8 carries a herdr.space label) - spawning into the EXPERIMENTAL hc backend with Herdr app presentation (herdr.space/herdr.tab labels). Set config/backend or pass --backend <name> to opt out.
+warning: {run-worktree}/.live/home/data/livegui/launch-brief.md records no ship branch; defaulting to legacy branch fm/livegui
+warning: {run-worktree}/.live/home/data/livegui/launch-brief.md records no delivery contract line (scaffolded before ship briefs recorded one); launching on the explicit --mode no-mistakes - confirm its definition of done matches
+spawned livegui harness=sh kind=ship mode=no-mistakes yolo=off window=fm-hclab-a:t9 worktree=~/.treehouse/project-54f8e1/1/project

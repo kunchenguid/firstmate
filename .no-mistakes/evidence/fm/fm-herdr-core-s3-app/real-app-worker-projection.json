@@ -1,0 +1,80 @@
+{
+  "spaces": [
+    {
+      "id": "lab",
+      "name": "01M6D7AZ9AE9CQYPP3HJTM7PFK",
+      "folder": "{run-worktree}",
+      "machine": null,
+      "active": false,
+      "tabs": [
+        {
+          "id": "primary",
+          "name": "1",
+          "active": true,
+          "settled": false,
+          "terminals": [
+            {
+              "terminal": "t1",
+              "pane": "p1e84d3ffb56bb83b444520952235a3ab",
+              "status": null,
+              "app": null,
+              "name": null,
+              "sub_agents": []
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "sp5882cd4c654588eb7008309e5d440227",
+      "name": "Live app validation",
+      "folder": "{run-worktree}",
+      "machine": null,
+      "active": true,
+      "tabs": [
+        {
+          "id": "tb45a2f810d8e18d6757e1c843a658fedc",
+          "name": "App-created primary",
+          "active": true,
+          "settled": false,
+          "terminals": [
+            {
+              "terminal": "t8",
+              "pane": "pe0f2558fc031629606aa162b52f7f469",
+              "status": null,
+              "app": null,
+              "name": null,
+              "sub_agents": []
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "fm-firstmate-e8bb695d",
+      "name": "project",
+      "folder": "{run-worktree}/.live/project",
+      "machine": null,
+      "active": false,
+      "tabs": [
+        {
+          "id": "firstmate-e8bb695d-fm-livegui",
+          "name": "1",
+          "active": true,
+          "settled": false,
+          "terminals": [
+            {
+              "terminal": "t9",
+              "pane": "pd30728f97fc0d3dbf604f9ff66de6c8d",
+              "status": null,
+              "app": null,
+              "name": null,
+              "sub_agents": []
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "recent": []
+}

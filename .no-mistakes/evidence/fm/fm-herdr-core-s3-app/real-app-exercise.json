@@ -1,0 +1,78 @@
+[
+  {
+    "command": [
+      "Herdr",
+      "do",
+      "space.new",
+      "{\"name\": \"Live app validation\", \"folder\": \"{run-worktree}\", \"tab\": \"App-created primary\", \"argv\": [\"bash\", \"{run-worktree}/.live/gui-primary.sh\", \"{run-worktree}\"]}"
+    ],
+    "exit": 0,
+    "stdout": "{\n  \"space\": \"sp5882cd4c654588eb7008309e5d440227\",\n  \"tab\": \"tb45a2f810d8e18d6757e1c843a658fedc\",\n  \"terminal\": \"t8\"\n}\n",
+    "stderr": ""
+  },
+  {
+    "command": [
+      "Herdr",
+      "ls"
+    ],
+    "exit": 0,
+    "stdout": "{\n  \"spaces\": [\n    {\n      \"id\": \"lab\",\n      \"name\": \"01M6D7AZ9AE9CQYPP3HJTM7PFK\",\n      \"folder\": \"{run-worktree}\",\n      \"machine\": null,\n      \"active\": false,\n      \"tabs\": [\n        {\n          \"id\": \"primary\",\n          \"name\": \"1\",\n          \"active\": true,\n          \"settled\": false,\n          \"terminals\": [\n            {\n              \"terminal\": \"t1\",\n              \"pane\": \"p1e84d3ffb56bb83b444520952235a3ab\",\n              \"status\": null,\n              \"app\": null,\n              \"name\": null,\n              \"sub_agents\": []\n            }\n          ]\n        }\n      ]\n    },\n    {\n      \"id\": \"sp5882cd4c654588eb7008309e5d440227\",\n      \"name\": \"Live app validation\",\n      \"folder\": \"{run-worktree}\",\n      \"machine\": null,\n      \"active\": true,\n      \"tabs\": [\n        {\n          \"id\": \"tb45a2f810d8e18d6757e1c843a658fedc\",\n          \"name\": \"App-created primary\",\n          \"active\": true,\n          \"settled\": false,\n          \"terminals\": [\n            {\n              \"terminal\": \"t8\",\n              \"pane\": \"pe0f2558fc031629606aa162b52f7f469\",\n              \"status\": null,\n              \"app\": null,\n              \"name\": null,\n              \"sub_agents\": []\n            }\n          ]\n        }\n      ]\n    },\n    {\n      \"id\": \"fm-firstmate-e8bb695d\",\n      \"name\": \"project\",\n      \"folder\": \"{run-worktree}/.live/project\",\n      \"machine\": null,\n      \"active\": false,\n      \"tabs\": [\n        {\n          \"id\": \"firstmate-e8bb695d-fm-livegui\",\n          \"name\": \"1\",\n          \"active\": true,\n          \"settled\": false,\n          \"terminals\": [\n            {\n              \"terminal\": \"t9\",\n              \"pane\": \"pd30728f97fc0d3dbf604f9ff66de6c8d\",\n              \"status\": null,\n              \"app\": null,\n              \"name\": null,\n              \"sub_agents\": []\n            }\n          ]\n        }\n      ]\n    }\n  ],\n  \"recent\": []\n}\n",
+    "stderr": ""
+  },
+  {
+    "command": [
+      "Herdr",
+      "do",
+      "agent.focus",
+      "--terminal",
+      "t9"
+    ],
+    "exit": 0,
+    "stdout": "{\n  \"ok\": true\n}\n",
+    "stderr": ""
+  },
+  {
+    "command": [
+      "Herdr",
+      "do",
+      "overlay.close"
+    ],
+    "exit": 0,
+    "stdout": "{\n  \"ok\": true\n}\n",
+    "stderr": ""
+  },
+  {
+    "command": [
+      "Herdr",
+      "shot",
+      "~/.no-mistakes/evidence/01M6D7AZ9AE9CQYPP3HJTM7PFK/herdr-app-worker.png"
+    ],
+    "exit": 0,
+    "stdout": "~/.no-mistakes/evidence/01M6D7AZ9AE9CQYPP3HJTM7PFK/herdr-app-worker.png\n",
+    "stderr": ""
+  },
+  {
+    "command": [
+      "Herdr",
+      "status"
+    ],
+    "exit": 0,
+    "stdout": "{\n  \"zoom\": 1.0,\n  \"font_size\": 14.0,\n  \"ui_font_size\": 13.0,\n  \"space\": \"fm-firstmate-e8bb695d\",\n  \"tab\": \"firstmate-e8bb695d-fm-livegui\",\n  \"focused_pane\": \"pd30728f97fc0d3dbf604f9ff66de6c8d\",\n  \"layout\": \"main\",\n  \"agent\": null,\n  \"floats\": {},\n  \"overlays\": [\n    \"frame-welcome\"\n  ],\n  \"errors\": []\n}\n",
+    "stderr": ""
+  },
+  {
+    "scenario": "marker-less process near real app window; running lab core",
+    "exit": 0,
+    "stdout": "backend=tmux\nsignal=\n",
+    "stderr": ""
+  },
+  {
+    "scenario": "marker-less process near real app window; unprovisioned core",
+    "exit": 0,
+    "stdout": "backend=tmux\nsignal=\n",
+    "stderr": ""
+  },
+  {
+    "app_exit": -15
+  }
+]

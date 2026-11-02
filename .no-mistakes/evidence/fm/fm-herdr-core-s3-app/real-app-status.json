@@ -1,0 +1,15 @@
+{
+  "zoom": 1.0,
+  "font_size": 14.0,
+  "ui_font_size": 13.0,
+  "space": "lab",
+  "tab": "primary",
+  "focused_pane": "p1e84d3ffb56bb83b444520952235a3ab",
+  "layout": "main",
+  "agent": null,
+  "floats": {},
+  "overlays": [
+    "frame-welcome"
+  ],
+  "errors": []
+}

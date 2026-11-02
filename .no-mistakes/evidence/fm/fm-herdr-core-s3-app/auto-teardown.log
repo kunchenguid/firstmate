@@ -1,0 +1,11 @@
+fm-gate-refuse: gate agent lifecycle permitted only against lab home {run-worktree}/.live/home
+WARNING: watcher still down (same stale episode; last beat: never, grace 300s) - full banner already printed this episode.
+teardown: reaping leaked worktree process(es) for liveauto: 36239 61638
+teardown: force-killing leaked worktree process(es) for liveauto: 61638
+A new version of treehouse is available: v3.1.0 → v3.1.8
+Run "treehouse update" to update
+
+🌳 Worktree returned to pool.
+{run-worktree}/.live/project: already current
+teardown liveauto complete (window fm-hclab-a:t4, worktree ~/.treehouse/project-54f8e1/1/project)
+Backlog: liveauto just finished (this home keeps no markdown backlog at {run-worktree}/.live/home/data/backlog.md). Update {run-worktree}/.live/home/data/backlog.md - move liveauto to Done, keep Done to the 10 most recent, then re-scan Queued and dispatch only work whose blockers are gone and date is due.

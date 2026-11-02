@@ -1,0 +1,19 @@
+project main
+  treehouse get
+A new version of treehouse is available: v3.1.0 → v3.1.8
+Run "treehouse update" to update
+
+🌳 Setting up worktree...
+🌳 Entered worktree at ~/.treehouse/project-54f8e1/1/project. Type 'exit' to return.
+project HEAD
+  cd -- '~/.treehouse/project-54f8e1/1/project'
+project HEAD
+  export GOTMPDIR=/tmp/fm-liveauto/gotmp
+project HEAD
+  export COMPACT_ADVISER_DISABLE=1
+project HEAD
+  export FM_TASK_ID=liveauto
+project HEAD
+  . '/tmp/fm-liveauto+5bdd248a6b73c2fcf7377981c02e6cab49a792b22fe5ba71eac3aa133fafeddf/launch.s1793593495.57425.27074.sh'
+live-auto-worker-ok%                                                                                                                                                                                    project HEAD
+❯

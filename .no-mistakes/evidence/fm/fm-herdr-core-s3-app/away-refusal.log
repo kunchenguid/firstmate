@@ -1,0 +1,2 @@
+error: away-mode daemon does not support supervisor backend 'hc' yet (supported: tmux herdr rex t3code); set FM_SUPERVISOR_BACKEND=tmux|herdr|rex|t3code and FM_SUPERVISOR_TARGET to run firstmate's own pane under a supported backend
+daemon_exit=1

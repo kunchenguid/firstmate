@@ -1,0 +1,16 @@
+window=fm-hclab-a:t6
+endpoint_task_id=liveenvironment
+worktree=~/.treehouse/project-54f8e1/2/project
+project={run-worktree}/.live/project
+harness=sh
+kind=ship
+mode=no-mistakes
+yolo=off
+branch=fm/liveenvironment
+tasktmp=/tmp/fm-liveenvironment
+model=default
+effort=default
+spawn_gen=s1793593545.95724.18345
+backend=hc
+hc_session=fm-hclab-a
+hc_terminal=t6
