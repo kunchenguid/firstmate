@@ -812,11 +812,18 @@ case "$cmd" in
     rm -f "$world/$w.id" "$world/$w.path"
     ;;
   send-keys)
-    if [ "$text" = "treehouse get Enter" ]; then
+    if [ "$text" = "treehouse get Enter" ] || [[ "$text" == *"fm-treehouse-shell.sh"*" --get || printf "* ]]; then
       w=$(window_name "$target")
       for slot in "$slots"/*/project; do
         grep -qxF -- "$slot" "$world"/*.path 2>/dev/null && continue
         printf '%s\n' "$slot" > "$world/$w.path"
+        if [[ "$text" == *"FM_TREEHOUSE_READY_FILE="* ]]; then
+          ready=${text#*FM_TREEHOUSE_READY_FILE=}
+          ready=${ready%% FM_TREEHOUSE_FAILURE_FILE=*}
+          ready=${ready#\'}
+          ready=${ready%\'}
+          printf '%s\n' "$slot" > "$ready"
+        fi
         break
       done
     fi
