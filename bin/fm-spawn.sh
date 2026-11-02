@@ -243,8 +243,10 @@
 #   render, endpoint, worktree, record, or backlog move exists, so the task stays
 #   exactly as queued as it was; an unreadable declaration refuses with exit 1.
 #   A batch reports such a pair as `batch: DEFERRED` and exits 75 when nothing
-#   else failed. A relaunch reclaims a place before releasing the project lock;
-#   a --secondmate spawn is never counted against capacity.
+#   else failed. A relaunch reclaims a place before releasing the project lock,
+#   and an aborted relaunch that never reached launch delivery puts a finished
+#   scout or local-only ship's released place back; a --secondmate spawn is
+#   never counted against capacity.
 #   With no harness arg, a crewmate/scout spawn resolves the CREW harness only when
 #   config/crew-dispatch.json is absent. When that file exists, crewmate/scout
 #   spawns require an explicit harness so firstmate cannot silently skip dispatch
@@ -1710,6 +1712,12 @@ GIT_HOOKS_DIR=
 SPAWN_LAUNCH_SENT=0
 SPAWN_ENDPOINT_CLOSED=0
 SPAWN_STAGED_LAUNCH_FILE=
+# A relaunch of a released scout or local-only ship reserves its place again by
+# appending a working line. These record what that line replaced so an abort can
+# put the file back exactly as it was.
+SPAWN_STATUS_RESERVATION_OFFSET=
+SPAWN_STATUS_RESERVATION_END=
+SPAWN_STATUS_RESERVATION_LINE=
 
 spawn_fresh_commit_rollback() {
   if fm_backlog_atomic_transition rollback "$STATE/$ID.meta" \
@@ -1749,6 +1757,34 @@ spawn_orca_reclaim_launch_file() {
     return 2
   fi
   return 1
+}
+
+# Undo the reservation line a relaunch appended before it could prove its
+# replacement started. The finished task's place is released again only when
+# this spawn's own line is still the file's tail, so a concurrent retry of the
+# same id keeps whatever it wrote. The prior bytes are restored rather than a
+# synthetic done line appended: a new done/failed event would also close the
+# task's open decisions (bin/fm-classify-lib.sh's fold rule) and read as a
+# second completion of work that had already finished.
+spawn_restore_status_reservation() {
+  local status_file=$STATE/$ID.status tmp size
+  [ -n "$SPAWN_STATUS_RESERVATION_OFFSET" ] || return 0
+  SPAWN_STATUS_RESERVATION_OFFSET=
+  [ -f "$status_file" ] && [ -r "$status_file" ] || return 0
+  size=$(wc -c <"$status_file" 2>/dev/null | tr -d ' ') || return 0
+  if [ "$size" != "$SPAWN_STATUS_RESERVATION_END" ] ||
+    [ "$(tail -c "$((${#SPAWN_STATUS_RESERVATION_LINE} + 1))" "$status_file" 2>/dev/null)" != "$SPAWN_STATUS_RESERVATION_LINE" ]; then
+    echo "warning: task $ID's status log changed after this spawn reserved its place; leaving $ID's place held so no other writer's line is lost" >&2
+    return 0
+  fi
+  tmp="$STATE/.$ID.status.rollback.${BASHPID:-$$}"
+  if head -c "$((size - ${#SPAWN_STATUS_RESERVATION_LINE} - 1))" "$status_file" >"$tmp" &&
+    mv -f "$tmp" "$status_file"; then
+    return 0
+  fi
+  rm -f "$tmp" 2>/dev/null || true
+  echo "warning: could not restore the released completion of $ID after its aborted relaunch; its place stays held until it is cleaned up" >&2
+  return 0
 }
 
 spawn_abort_cleanup() {
@@ -2007,6 +2043,19 @@ spawn_abort_cleanup() {
     fm_lock_release "$SPAWN_CONTROL_LOCK" || true
   fi
   [ -z "$SPAWN_META_TMP" ] || rm -f "$SPAWN_META_TMP" 2>/dev/null || true
+  # A relaunch that never reached launch delivery must not keep the finished
+  # scout or local-only ship's place reserved: nothing replaced it, so the
+  # record goes back to holding no place for queued work. A delivered launch is
+  # left alone even when it later fails, because a worker may be running there.
+  if [ "$status" -ne 0 ] && [ "$SPAWN_LAUNCH_SENT" = 0 ] &&
+    [ -n "$SPAWN_STATUS_RESERVATION_OFFSET" ]; then
+    if [ -n "${SPAWN_TASK_LOCK:-}" ] && fm_lock_try_acquire "$SPAWN_TASK_LOCK"; then
+      spawn_restore_status_reservation
+      fm_lock_release "$SPAWN_TASK_LOCK" || true
+    else
+      echo "warning: another spawn of $ID holds its spawn lock; leaving $ID's released completion unreleased until it is cleaned up" >&2
+    fi
+  fi
   if [ "$status" -ne 0 ] && [ "${ORCA_LAUNCH_ENV_ENABLED:-0}" = 1 ] && [ -n "$SPAWN_STAGED_LAUNCH_FILE" ]; then
     if [ "$SPAWN_LAUNCH_SENT" = 0 ] || [ "$SPAWN_ENDPOINT_CLOSED" = 1 ]; then
       rm -f -- "$SPAWN_STAGED_LAUNCH_FILE" 2>/dev/null || true
@@ -7313,9 +7362,29 @@ preserve_relaunch_meta() {
   exit 1
 }
 if [ "$KIND" = scout ] || { [ "$KIND" = ship ] && [ "$MODE" = local-only ]; }; then
-  if ! printf '%s\n' "$(status_stamp_line 'working: spawn admitted')" >> "$STATE/$ID.status"; then
+  # A relaunch may be replacing a record whose completion already released its
+  # place. Reserve that place for the launch window, remembering the exact
+  # prior file so spawn_abort_cleanup can put it back when the replacement never
+  # reaches delivery. A fresh spawn has no record to reserve against, so it
+  # appends without a rollback point.
+  if [ "$RELAUNCH" -eq 1 ] && [ -f "$STATE/$ID.status" ] && [ -r "$STATE/$ID.status" ] &&
+    [ "$(status_line_verb "$(last_status_line "$STATE/$ID.status")")" = 'done' ]; then
+    SPAWN_STATUS_RESERVATION_OFFSET=$(wc -c <"$STATE/$ID.status" | tr -d ' ')
+    case "$SPAWN_STATUS_RESERVATION_OFFSET" in
+      ''|*[!0-9]*)
+        echo "error: could not read the size of $STATE/$ID.status to reserve the released place of $ID" >&2
+        exit 1
+        ;;
+    esac
+  fi
+  SPAWN_STATUS_RESERVATION_LINE=$(status_stamp_line 'working: spawn admitted')
+  if ! printf '%s\n' "$SPAWN_STATUS_RESERVATION_LINE" >> "$STATE/$ID.status"; then
+    SPAWN_STATUS_RESERVATION_OFFSET=
     echo "error: could not record working status for spawn of $ID" >&2
     exit 1
+  fi
+  if [ -n "$SPAWN_STATUS_RESERVATION_OFFSET" ]; then
+    SPAWN_STATUS_RESERVATION_END=$((SPAWN_STATUS_RESERVATION_OFFSET + ${#SPAWN_STATUS_RESERVATION_LINE} + 1))
   fi
 fi
 if [ "$RELAUNCH" -eq 0 ]; then

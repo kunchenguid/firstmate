@@ -182,6 +182,21 @@ new_worktree() {  # <case-dir> <name>
   printf '%s\n' "$1/wt-$2"
 }
 
+# The per-home suffix bin/fm-spawn.sh puts on its staged launch directory under
+# /tmp, so a case can occupy that directory and abort a launch after the record
+# is republished. Mirrors spawn_launch_home_token.
+launch_home_token() {  # <home>
+  local home=$1 root
+  root=$(cd "$home" 2>/dev/null && pwd -P) || root=$home
+  if command -v shasum >/dev/null 2>&1; then
+    printf '%s' "$root" | shasum -a 256 | awk '{print $1}'
+  elif command -v sha256sum >/dev/null 2>&1; then
+    printf '%s' "$root" | sha256sum | awk '{print $1}'
+  else
+    return 1
+  fi
+}
+
 run_spawn() {  # <case-dir> <home> <pane-path> <args...>
   local case_dir=$1 home=$2 pane=$3
   shift 3
@@ -636,6 +651,55 @@ test_failed_spawn_after_admission_holds_no_place() {
   pass "a spawn that fails after admission leaves no record and holds no place"
 }
 
+# A relaunch of a finished scout or local-only ship reserves its place again for
+# the launch window. When the replacement never reaches launch delivery, that
+# reservation must come off again: nothing replaced the worker, so the queued
+# task it displaced is admitted instead of waiting for a cleanup.
+test_aborted_relaunch_releases_the_reserved_place() {
+  local scenario kind mode case_dir home wt out rc token launch_dir
+  for scenario in scout local-only; do
+    kind=scout mode=
+    [ "$scenario" != local-only ] || { kind=ship; mode=local-only; }
+    case_dir=$(make_case "aborted-relaunch-$scenario" task-a task-b)
+    home="$case_dir/home"
+    wt=$(new_worktree "$case_dir" task-a)
+    if [ "$kind" = ship ]; then
+      sed 's/mode=no-mistakes/mode=local-only/' "$home/data/task-a/brief.md" > "$home/data/task-a/brief.tmp"
+      mv "$home/data/task-a/brief.tmp" "$home/data/task-a/brief.md"
+    fi
+    declare_capacity "$home" 'project 1'
+    fm_write_meta "$home/state/task-a.meta" \
+      'window=firstmate:fm-task-a' 'endpoint_task_id=task-a' \
+      "worktree=$wt" "project=$case_dir/project" \
+      'harness=codex' "kind=$kind" "mode=$mode" 'yolo=off' \
+      'branch=wt-task-a' 'spawn_gen=old-a'
+    printf 'fm-task-a\n' > "$case_dir/calls.log.window"
+    printf 'done: finished\n' > "$home/state/task-a.status"
+    # The staged-launch private-directory guard is the first refusal after the
+    # reservation and the republished record, so a public launch directory
+    # aborts the replacement exactly where a real launch delivery can fail.
+    token=$(launch_home_token "$home") || fail "could not derive the staged launch directory for $home"
+    launch_dir="/tmp/fm-task-a+$token"
+    rm -rf "$launch_dir" 2>/dev/null || true
+    mkdir -p "$launch_dir"
+    chmod 777 "$launch_dir"
+    rc=0
+    out=$(run_spawn "$case_dir" "$home" "$wt" task-a --relaunch) || rc=$?
+    rm -rf "$launch_dir"
+    [ "$rc" -ne 0 ] && [ "$rc" -ne "$DEFER_EXIT" ] ||
+      fail "the aborted $scenario relaunch did not fail (exit $rc): $out"
+    assert_contains "$out" "is not a private directory" \
+      "the $scenario relaunch did not abort at launch staging: $out"
+    [ "$(tail -n 1 "$home/state/task-a.status")" = 'done: finished' ] ||
+      fail "the aborted $scenario relaunch left its reservation in the status log: $(tail -n 1 "$home/state/task-a.status")"
+    rc=0
+    out=$(spawn_ship "$case_dir" task-b) || rc=$?
+    expect_code 0 "$rc" "the aborted $scenario relaunch kept the finished worker's place: $out"
+    assert_contains "$out" "spawned task-b" "the queued task was not launched after the $scenario relaunch aborted"
+  done
+  pass "an aborted relaunch restores a finished scout's or local-only ship's released place"
+}
+
 test_unreadable_declaration_refuses_every_spawn() {
   local case_dir home out rc label body before worktrees
   case_dir=$(make_case unreadable task-c)
@@ -762,6 +826,7 @@ test_capacity_is_shared_by_every_local_home
 test_unreadable_holders_refuse_admission
 test_concurrent_spawns_cannot_both_take_the_last_place
 test_failed_spawn_after_admission_holds_no_place
+test_aborted_relaunch_releases_the_reserved_place
 test_unreadable_declaration_refuses_every_spawn
 test_batch_reports_a_deferred_pair
 test_orca_spawn_is_admitted_under_the_shared_project_lock
