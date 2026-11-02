@@ -4036,6 +4036,58 @@ test_answer_records_the_note_a_retained_record_carried() {
   pass "answer records the note a retained record carried"
 }
 
+# External review (P2): a retention that wrote `Deliverable of the finished work:
+# <note>` and then failed at its reopen leaves its pending record behind, so the
+# captain can answer before the replay. That deliverable line already keeps the
+# note, and the answer must not append a second, standalone copy of it.
+test_answer_does_not_repeat_a_note_the_deliverable_carries() {
+  local home id pr note encoded show body count label
+
+  pr=https://github.com/sample/sample/pull/56
+  note="Delivered, merge not confirmed because it was still open when this finished: $pr"
+  encoded=$(printf '%s' "$note" | sed 's/ /%20/g')
+
+  for label in whole-line deliverable-line absent; do
+    home=$(make_home "answer-note-$label")
+    id="sample-answer-note-$label"
+    tasks_in "$home" add "$id" "Ship the $label note" --kind ship --repo sample >/dev/null \
+      || fail "could not create the $label note fixture"
+    case "$label" in
+      whole-line)
+        tasks_in "$home" update "$id" --body "$note" >/dev/null \
+          || fail "could not preload the whole-line note"
+        ;;
+      deliverable-line)
+        tasks_in "$home" update "$id" --body "Deliverable of the finished work: $note" >/dev/null \
+          || fail "could not preload the deliverable-line note"
+        ;;
+    esac
+    run_captain "$home" hold "$id" --reason "captain decision pending" >/dev/null \
+      || fail "could not hold the $label note fixture"
+    printf 'id=%s\ndata=%s\nspawn_gen=fixture-%s\ncleanup_incomplete=0\nmode=retain\narg=--note\narg=%s\n' \
+      "$id" "$home/data" "$id" "$encoded" > "$home/state/$id.backlog-close"
+
+    printf 'Proceed without merging.\n' > "$home/answer.txt"
+    run_captain "$home" answer "$id" --decision-file "$home/answer.txt" >/dev/null \
+      || fail "the captain could not answer the $label note row"
+    show=$(tasks_in "$home" show "$id" --full) || fail "the answered $label note row is gone"
+    assert_contains "$show" "state: done" "the answer did not close the $label note row"
+    body=$(tasks_in "$home" show "$id" --full | sed -n 's/^  body: //p' | head -1)
+    count=$(printf '%s' "$body" | grep -oF "$note" | wc -l | tr -d ' ')
+    case "$label" in
+      absent)
+        [ "$count" = 1 ] \
+          || fail "the answer appended the note $count times instead of once: $body" ;;
+      *)
+        [ "$count" = 1 ] \
+          || fail "the answer repeated a note the body already carried $count times: $body" ;;
+    esac
+    assert_no_grep '(merged ' "$home/data/backlog.md" \
+      "the $label note answer rendered as a merge nobody read"
+  done
+  pass "the answer records its note once whether or not the body already carries it"
+}
+
 test_answer_records_a_composed_note_once() {
   local home id pr show body
   home=$(make_home answer-composed-note-retry)
@@ -5801,6 +5853,7 @@ test_answer_keeps_every_link_it_downgrades
 test_answer_records_an_interrupted_downgrade_note_once
 test_answer_records_a_composed_note_once
 test_answer_records_the_note_a_retained_record_carried
+test_answer_does_not_repeat_a_note_the_deliverable_carries
 test_answer_downgrades_a_recorded_link_no_run_verified
 test_merge_approval_releases_before_zero_done_retention
 test_pr_merge_entrypoint_refuses_a_captain_held_task
