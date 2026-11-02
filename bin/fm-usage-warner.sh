@@ -431,7 +431,7 @@ shim_backup() {
 ARM_BACKUP=
 
 # An unregistered shim is not inert: the watcher rejects it on every cycle and
-# wakes firstmate about unauthenticated state checks. So a failed or
+# wakes firstmate about untrusted state checks. So a failed or
 # interrupted arm never leaves the home holding a shim without a matching trust
 # binding: an already-bound shim is put back, otherwise the shim goes.
 arm_rollback() {
