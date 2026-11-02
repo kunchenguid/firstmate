@@ -147,7 +147,12 @@ install_pi_watch_identity_fixture() {
 mkdir -p "$STATE/.watch.lock"
 printf '%s\n' "$$" > "$STATE/.watch.lock/pid"
 printf '%s\n' "$FM_HOME" > "$STATE/.watch.lock/fm-home"
-printf '%s\n' "$FM_ROOT_OVERRIDE/bin/fm-watch.sh" > "$STATE/.watch.lock/watcher-path"
+# Record the watcher path exactly as bin/fm-watch.sh does: WATCH_PATH is
+# "$SCRIPT_DIR/fm-watch.sh" with SCRIPT_DIR a `cd ... && pwd` result, so the
+# lock holds the shell's spelling of the root rather than the raw one. For an
+# already-canonical root the two are identical; a shell-spelled root keeps the
+# recorded side canonical, which is the shape the real lock always has.
+printf '%s\n' "$(CDPATH='' cd -- "$FM_ROOT_OVERRIDE/bin" && pwd)/fm-watch.sh" > "$STATE/.watch.lock/watcher-path"
 fm_pid_identity "$$" > "$STATE/.watch.lock/pid-identity"
 touch "$STATE/.last-watcher-beat"
 SH
@@ -621,6 +626,71 @@ EOF
   [ "$status" -eq 0 ] || fail "Pi health monitor must derive its grace from the poll cadence: $out"
   [ -z "$out" ] || fail "Pi health long-poll test printed output: $out"
   pass "Pi health monitor derives its grace from the home's poll cadence"
+}
+
+test_pi_health_matches_a_shell_spelled_root() {
+  local repo home shell_root expected_watch_path out status
+  repo="$TMP_ROOT/pi-shell-spelled-root"
+  home="$TMP_ROOT/pi-shell-spelled-home"
+  # On native Windows the extension's fmRoot is the native spelling
+  # (C:\firstmate) while the lock records the shell's (/c/firstmate on Git
+  # Bash, /cygdrive/c/firstmate on cygwin), and fm_watcher_lock_matches_pid
+  # compares the two as exact strings. A drive-letter split cannot be built on
+  # Linux, so this reproduces the same split portably: one directory spelled
+  # two ways, where only the shell's `cd ... && pwd` collapses the difference.
+  # Without resolving the expected side in bash, an established watcher reads
+  # as unhealthy here and a stalled one is never replaced.
+  shell_root="$repo/../pi-shell-spelled-root"
+  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  install_pi_watch_extension_fixture "$repo"
+  install_pi_watch_identity_fixture "$repo"
+  expected_watch_path="$(CDPATH='' cd -- "$repo/bin" && pwd)/fm-watch.sh"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'arm\n' >> "$FM_HOME/starts"
+. "$FM_ROOT_OVERRIDE/bin/fm-test-watch-identity.sh"
+printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+trap 'exit 0' TERM INT
+while [ ! -e "$FM_HOME/stop" ] && [ -e "$0" ]; do sleep 0.02; done
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+  out=$(PLUGIN="$repo/.pi/extensions/fm-primary-pi-watch.ts" FM_HOME="$home" FM_ROOT_OVERRIDE="$shell_root" EXPECTED_WATCH_PATH="$expected_watch_path" node --input-type=module 2>&1 <<'EOF'
+import assert from "node:assert/strict";
+import { existsSync, readFileSync, utimesSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+let tool;
+const pi={on(){},registerCommand(){},registerTool(t){if(t.name==="fm_watch_arm_pi")tool=t;},sendUserMessage:async()=>{}};
+const home=process.env.FM_HOME, state=`${home}/state`;
+const starts=()=>readFileSync(`${home}/starts`,"utf8").trim().split("\n").length;
+writeFileSync(`${state}/.lock`,`${process.pid}\n`);
+const mod=await import(pathToFileURL(process.env.PLUGIN).href);mod.default(pi);
+try {
+  const first=await tool.execute();
+  assert.equal(first.details.state,"starting");
+  for(let i=0;i<200 && !existsSync(`${state}/.last-watcher-beat`);i++) await new Promise(r=>setTimeout(r,10));
+  await new Promise(r=>setTimeout(r,100));
+  const recorded=readFileSync(`${state}/.watch.lock/watcher-path`,"utf8").trim();
+  assert.equal(recorded,process.env.EXPECTED_WATCH_PATH,"the lock must hold the shell's spelling");
+  const healthy=await tool.execute();
+  assert.equal(healthy.details.ok,true,"a shell-spelled root must still verify the recorded watcher");
+  assert.equal(healthy.details.state,"healthy","an established watcher under another spelling must read healthy");
+  const stale=new Date(Date.now()-1200_000);
+  utimesSync(`${state}/.last-watcher-beat`,stale,stale);
+  const stalled=await tool.execute();
+  assert.doesNotMatch(stalled.details.message,/replacement withheld/,"a shell-spelled root must not withhold the repair");
+  assert.equal(stalled.details.state,"retrying","a stalled shell-spelled watcher must be replaced, not read as unproved");
+  for(let i=0;i<200 && starts()<2;i++) await new Promise(r=>setTimeout(r,10));
+  assert.equal(starts(),2,"the identity-proved watcher must be replaced exactly once");
+  let recovered;
+  for(let i=0;i<200;i++){recovered=await tool.execute();if(recovered.details.state==="healthy")break;await new Promise(r=>setTimeout(r,10));}
+  assert.equal(recovered.details.state,"healthy","the replacement must establish fresh progress under the shell's spelling");
+} finally { writeFileSync(`${home}/stop`,"stop\n"); }
+EOF
+)
+  status=$?
+  [ "$status" -eq 0 ] || fail "Pi watcher health must resolve the expected path in bash: $out"
+  [ -z "$out" ] || fail "Pi shell-spelled root test printed output: $out"
+  pass "Pi watcher health matches a shell-spelled root against the recorded watcher path"
 }
 
 test_pi_unready_arm_has_bounded_start_grace() {
@@ -6090,6 +6160,7 @@ test_pi_health_monitor_replaces_a_wedged_watcher
 test_pi_health_monitor_tolerates_a_slow_retire
 test_pi_repair_rearms_when_arm_outlives_retire_timeout
 test_pi_health_monitor_respects_long_poll_grace
+test_pi_health_matches_a_shell_spelled_root
 test_pi_unready_arm_has_bounded_start_grace
 test_pi_scheduled_retry_call_is_owned_noop
 test_pi_actionable_close_starts_single_successor_before_delivery

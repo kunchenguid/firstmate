@@ -264,13 +264,26 @@ function liveArmChild(owner: SessionGeneration): ChildProcess | null {
   return child;
 }
 
+// bin/fm-watch.sh records the lock's watcher-path as "$SCRIPT_DIR/fm-watch.sh",
+// where SCRIPT_DIR is bash's own `cd ... && pwd` spelling. On native Windows
+// fmRoot is the native spelling (C:\firstmate) while the recorded side is the
+// shell's (Git Bash /c/firstmate, cygwin /cygdrive/c/firstmate), so passing
+// fmRoot's spelling straight through fails fm_watcher_lock_matches_pid's exact
+// compare: an established watcher reads as unhealthy, and when it stalls the
+// monitor withholds a replacement because its identity was never proved.
+// Rewriting drive letters here could only guess one shell's convention, so both
+// checks resolve the expected side with the same shell that records it.
+const resolvedWatcherPath = `
+    expected_watch_path=$(CDPATH='' cd -- "\${3%/*}" 2>/dev/null && pwd)/\${3##*/} || exit 1`;
+
 // Reuse the arm layer's home/path/process/freshness predicate, including
 // home-local cadence settings. A surviving child alone proves no progress.
 function watcherIdentityOwned(): boolean {
   const result = spawnSync("bash", ["-c", `
     . "$1" || exit 1
+${resolvedWatcherPath}
     pid=$(cat "$2/.watch.lock/pid" 2>/dev/null) || exit 1
-    fm_watcher_lock_matches_pid "$2" "$3" "$pid" "$FM_HOME"
+    fm_watcher_lock_matches_pid "$2" "$expected_watch_path" "$pid" "$FM_HOME"
   `, "fm-pi-watch-identity", `${fmRoot}/bin/fm-wake-lib.sh`, state, `${fmRoot}/bin/fm-watch.sh`], {
     env: { ...process.env, FM_HOME: fmHome, FM_ROOT_OVERRIDE: fmRoot, FM_STATE_OVERRIDE: state, FM_CONFIG_OVERRIDE: config },
     encoding: "utf8",
@@ -287,9 +300,10 @@ function watcherHealthy(): boolean {
   // on every check. fm_poll_derived_grace is the one owner of that derivation.
   const result = spawnSync("bash", ["-c", `
     . "$1" || exit 1
+${resolvedWatcherPath}
     [ ! -f "$FM_CONFIG_OVERRIDE/watch.env" ] || . "$FM_CONFIG_OVERRIDE/watch.env"
     [ ! -f "$FM_CONFIG_OVERRIDE/x-mode.env" ] || . "$FM_CONFIG_OVERRIDE/x-mode.env"
-    fm_watcher_healthy "$2" "$3" "\${FM_GUARD_GRACE:-$(fm_poll_derived_grace)}" "$FM_HOME"
+    fm_watcher_healthy "$2" "$expected_watch_path" "\${FM_GUARD_GRACE:-$(fm_poll_derived_grace)}" "$FM_HOME"
   `, "fm-pi-watch-health", `${fmRoot}/bin/fm-wake-lib.sh`, state, `${fmRoot}/bin/fm-watch.sh`], {
     env: { ...process.env, FM_HOME: fmHome, FM_ROOT_OVERRIDE: fmRoot, FM_STATE_OVERRIDE: state, FM_CONFIG_OVERRIDE: config },
     encoding: "utf8",
