@@ -1734,6 +1734,28 @@ test_remote_host_supervisor_adoption_and_accounting() {
     || fail "releasing an abandoned candidate"
   assert_equals 1 "$(used_seats "$R_ROOT")" \
     "a released candidate contradicted the generation the certificate proves"
+  # A relaunch persists the host's generation into the parent record before it
+  # reserves. The record then names the very generation the certificate proves,
+  # so it is still not a ledger-issued identity the released candidate
+  # contradicts.
+  task_record "$R_ROOT" theshop pool-model-a secondmate \
+    "$(printf 'remote_host=shop-host\nremote_root=%s\nhome=%s\nremote_spawn_gen=host.1' "$ROOT" "$R_REMOTE")"
+  new_holder
+  out=$(reserve "$R_ROOT" relaunch-admitted pool-model-a 2>&1) \
+    || fail "a persisted certificate-proved generation refused the relaunch: $out"
+  assert_contains "$out" "used=2 capacity=2" "the persisted generation lost its single adoption"
+  seats "$R_ROOT" release relaunch-admitted --generation g-relaunch-admitted --reason prelaunch >/dev/null \
+    || fail "release the relaunch admission"
+  # A named generation the certificate does not prove stays subject to ledger
+  # history, so an invented identity is still refused.
+  task_record "$R_ROOT" theshop pool-model-a secondmate \
+    "$(printf 'remote_host=shop-host\nremote_root=%s\nhome=%s\nremote_spawn_gen=host.unissued' "$ROOT" "$R_REMOTE")"
+  new_holder
+  out=$(reserve "$R_ROOT" bogus-contender pool-model-a 2>&1)
+  expect_code 5 "$?" "a record-named generation no certificate proves: $out"
+  assert_contains "$out" "host.unissued" "the refusal did not name the unissued generation"
+  task_record "$R_ROOT" theshop pool-model-a secondmate \
+    "$(printf 'remote_host=shop-host\nremote_root=%s\nhome=%s' "$ROOT" "$R_REMOTE")"
   new_holder
   out=$(reserve "$R_ROOT" local-spare pool-model-a 2>&1) || fail "generationless parent blocked a free local seat: $out"
   seats "$R_ROOT" release local-spare --generation g-local-spare --reason prelaunch >/dev/null || fail "release local spare"

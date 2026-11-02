@@ -544,12 +544,21 @@ meta_generation() {  # <meta>
 }
 
 accounting_generation() {
-  local meta=$1 gen id route host root home owner owner_state
+  local meta=$1 gen
   gen=$(meta_generation "$meta")
   if [ -n "$gen" ]; then
     printf '%s' "$gen"
     return
   fi
+  certificate_generation "$meta"
+}
+
+# certificate_generation <meta>: the generation the remote's serve certificate
+# proves for this record's own registered route and model, whatever generation
+# the record itself names. A verified certificate owns that proof, so its
+# generation is not an identity the ledger failed to issue.
+certificate_generation() {
+  local meta=$1 id route host root home owner owner_state
   [ "$(record_field "$meta" kind)" = secondmate ] || return 0
   id=${meta##*/}
   id=${id%.meta}
@@ -657,6 +666,12 @@ pooled_records() {
       # failed first spawn can leave a released candidate as the only row and
       # never issue the generation the running supervisor reports.
       gen=$(accounting_generation "$meta")
+      derived=1
+    elif [ "$gen" = "$(certificate_generation "$meta")" ]; then
+      # A relaunch persists the host's generation into this record before it
+      # reserves, so the named identity is exactly the one the certificate
+      # proves here. It stays exempt for the same reason: the certificate, not
+      # a ledger row, is what issued it.
       derived=1
     fi
     if [ "$derived" -eq 0 ] && [ -n "$gen" ] && awk -F '\t' -v s="$home_state" -v t="$id" '$1 == s && $2 == t { found = 1 } END { exit !found }' "$TMPD/ledger"; then

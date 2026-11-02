@@ -30,7 +30,8 @@ mkdir -p "$HOME_DIR/data" "$HOME_DIR/state" "$HOME_DIR/config"
 printf -- '- ios - iOS delivery (host: remote-mac; root: /srv/fm; home: /srv/fm-home; scope: iOS; projects: alpha; added 2026-08-01)\n' \
   > "$HOME_DIR/data/secondmates.md"
 
-reset_meta() {
+reset_meta() {  # [model]
+  local model=${1:-openai-codex/gpt-5.6-sol}
   printf 'host-old\n' > "$HOME_DIR/state/fake-host-generation"
   fm_write_meta "$HOME_DIR/state/ios.meta" \
     "window=remote:ios" \
@@ -41,7 +42,7 @@ reset_meta() {
     "kind=secondmate" \
     "mode=secondmate" \
     "yolo=off" \
-    "model=openai-codex/gpt-5.6-sol" \
+    "model=$model" \
     "effort=medium" \
     "home=/srv/fm-home" \
     "projects=alpha" \
@@ -337,6 +338,36 @@ assert_contains "$OUT" "pool shared is full" "a full fleet pool did not refuse b
 assert_grep 'model=openai-codex/gpt-5.6-sol' "$HOME_DIR/state/ios.meta" \
   "a refused relaunch changed the parent route"
 pass "a full fleet pool refuses a remote supervisor relaunch"
+
+# A supervisor the host's serve certificate proves, whose ledger history holds
+# only a released failed candidate, still gets its seat: the resolver persists
+# the host generation into the parent record before it reserves, and that named
+# generation is the certificate's, not one the ledger failed to issue.
+reset_meta pool-model-a
+rm -f "$HOME_DIR/state/busy.meta"
+rm -rf "$HOME_DIR/state/fleet-seats"
+mkdir -p "$HOME_DIR/state/fleet-seats"
+printf '{"pools":[{"name":"shared","capacity":2,"models":["pool-model-a"]}]}\n' \
+  > "$HOME_DIR/config/fleet-seats"
+digest=$(jq -cS . "$HOME_DIR/config/fleet-seats" | cksum | tr -s ' ' '-' | cut -d- -f1-2)
+printf '{"schema":"fm-fleet-seats-serve.v2","policy_digest":"%s","epoch":"rtest.legacy","complete":true,"holders":[{"state_dir":"/srv/fm-home/state/parent-route","task":"ios","generation":"host.legacy","model":"pool-model-a"}]}\n' \
+  "$digest" > "$HOME_DIR/state/fleet-seats/remote-ios.cert"
+printf 'host.legacy\n' > "$HOME_DIR/state/fake-host-generation"
+seats reserve ios --generation g-abandoned --kind secondmate --harness pi \
+  --model pool-model-a --holder-pid "$$" >/dev/null || fail "could not seed a released failed candidate"
+seats release ios --generation g-abandoned --reason prelaunch >/dev/null \
+  || fail "could not release the failed candidate"
+OUT=$(run_relaunch ios claude pool-model-a medium); RC=$?
+expect_code 0 "$RC" "a certificate-proved generation lost its seat: $OUT"
+assert_grep 'model=pool-model-a' "$HOME_DIR/state/ios.meta" \
+  "the relaunch of a certificate-proved supervisor did not publish its pooled model"
+RELAUNCHED=$(ios_generation)
+[ -n "$RELAUNCHED" ] || fail "the relaunch of a certificate-proved supervisor published no seat generation"
+assert_equals confirmed "$(ios_lifecycle "$RELAUNCHED")" \
+  "the certificate-proved relaunch was not confirmed"
+assert_equals released "$(ios_lifecycle g-abandoned)" \
+  "the failed candidate was revived by the certificate-proved relaunch"
+pass "a certificate-proved supervisor relaunches past a released failed candidate"
 
 reset_meta
 rm -f "$HOME_DIR/state/busy.meta"
