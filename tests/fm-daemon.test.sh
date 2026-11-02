@@ -1596,6 +1596,7 @@ test_overdue_reconcile_ignores_unrelated_and_repeated_pause() {
       repeated) printf 'paused [at=200]: waiting for dependency\n' >> "$statusf" ;;
     esac
     (
+      # shellcheck disable=SC2030
       export FM_HOME="$dir" FM_STATE_OVERRIDE="$state"
       . "$ROOT/bin/fm-wake-lib.sh"
       reconcile_overdue_pause "$state" "$task"
@@ -3550,9 +3551,8 @@ test_discover_supervisor_t3code_after_env_tmux_and_herdr() {
   (
     t3_discovery_stub
     export FM_FAKE_T3_CALLS="$dir/calls" FM_FAKE_T3_THREAD=thread-captain
-    export FM_HOME="$dir" FM_BACKEND_CONFIG_DIR="$dir/config" FM_T3CODE_ORIGIN=http://127.0.0.1:9 FM_BACKEND=
     local out
-    if out=$(FM_SUPERVISOR_TARGET='' FM_SUPERVISOR_BACKEND='' TMUX_PANE='' HERDR_ENV='' HERDR_PANE_ID='' discover_supervisor_target); then
+    if out=$(FM_HOME="$dir" FM_BACKEND_CONFIG_DIR="$dir/config" FM_T3CODE_ORIGIN=http://127.0.0.1:9 FM_BACKEND='' FM_SUPERVISOR_TARGET='' FM_SUPERVISOR_BACKEND='' TMUX_PANE='' HERDR_ENV='' HERDR_PANE_ID='' discover_supervisor_target); then
       fail "T3 supervisor discovery must require explicit backend selection"
     fi
     [ "$out" = firstmate:0 ] || fail "without explicit T3 selection the tmux fallback must stand"
