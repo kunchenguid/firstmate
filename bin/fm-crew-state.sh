@@ -145,6 +145,10 @@
 #      running/fixing with recent reported activity: a killed or timed-out drive
 #      call is not daemon death, so that claim is answered by steering the crew
 #      to reattach, not by escalating.
+#      A TERMINAL failed run (never a live one) yields to the worker's own newest
+#      paused: line when that line is stamped after this branch's run record
+#      last updated, and to a merged recorded PR; a failure with no later
+#      declaration, or only a later working:/done: line, still reads failed.
 #   4. No current run for this crew (pre-validation, uninitialized repository,
 #      proven historical head, or kind=scout): fall back to the recorded
 #      backend's pane busy state, then the resolved status declaration
@@ -1301,6 +1305,34 @@ if [ "$HAVE_RUN" = 1 ]; then
     fi
     if [ "$CI_LOG_STATE" != not-ready ] && [ "$CI_LOG_STATE" != no-checks ]; then
       emit_ship_status_done "run still monitoring PR"
+    fi
+  fi
+
+  # A TERMINAL failed run stops outranking the worker's own newest declaration
+  # once nothing live remains to override. Two durable facts lift it, and a
+  # live run never reaches here (its RUN_STATE is working):
+  #   - the recorded PR has merged, so the work landed whatever the run did; or
+  #   - the newest status line is a paused: declaration stamped AFTER the run
+  #     record last updated, so the worker spoke after the run ended.
+  # A failed run with no later line, or only a later working:/done: line, stays
+  # failed, and a declaration stamped before the run ended cannot talk past it.
+  # Run fields are read only from this branch's own run: the coarse path's
+  # $RUN_OUT may be another branch's, so it lifts on the recorded PR alone.
+  if [ "$RUN_DETAIL" = "run failed" ]; then
+    lift_run_out=$RUN_OUT
+    [ "$RUN_SOURCE" = full ] || lift_run_out=""
+    if [ "$(RUN_OUT=$lift_run_out; passed_pr_detail)" = "run passed: PR merged" ]; then
+      merged_pr_url=$(strip_quotes "$(fm_nm_field "$lift_run_out" pr)")
+      [ -n "$merged_pr_url" ] || merged_pr_url=$(meta_value pr)
+      emit "done" run-step "earlier run failed${SEP}PR merged${merged_pr_url:+: $merged_pr_url}${SELECTED_RUN_ID:+${SEP}run: $SELECTED_RUN_ID}"
+    fi
+    if [ -n "$lift_run_out" ] \
+      && [ "$(status_line_verb "$(last_status_line "$LOG")")" = "$LOG_VERB" ] \
+      && status_is_paused "$LOG_LINE" \
+      && log_epoch=$(status_line_at_epoch "$LOG_LINE") \
+      && run_ended=$(fm_nm_run_updated_at "$WT" "$NM_TIMEOUT" "${SELECTED_RUN_ID:-$(strip_quotes "$(nm_field id)")}") \
+      && [ "$log_epoch" -gt "$run_ended" ]; then
+      emit paused status-log "$(status_line_note "$LOG_LINE")${SEP}earlier run failed, declared after it ended${SELECTED_RUN_ID:+${SEP}run: $SELECTED_RUN_ID}"
     fi
   fi
 

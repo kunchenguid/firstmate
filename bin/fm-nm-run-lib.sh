@@ -143,6 +143,33 @@ fm_nm_state_db() {  # <worktree>
   printf '%s/state.sqlite\n' "$root"
 }
 
+# Epoch seconds the run record was last updated, which for a terminal run is
+# when it ended. Read-only and bounded like every other reader of the state
+# database; prints nothing and returns nonzero when the database, the run, or
+# the column is unreadable, so a caller that needs the time never guesses one.
+fm_nm_run_updated_at() {  # <worktree> <timeout_secs> <run-id>
+  local out
+  [ -n "${3:-}" ] || return 1
+  out=$(fm_nm_bounded "$1" "$2" python3 -I - "$3" "$(fm_nm_state_db "$1")" 2>/dev/null <<'PY'
+import sqlite3
+import sys
+from contextlib import closing
+from pathlib import Path
+
+run_id, database = sys.argv[1:]
+try:
+    with closing(sqlite3.connect(Path(database).as_uri() + "?mode=ro", uri=True, timeout=5)) as db:
+        rows = db.execute("SELECT updated_at FROM runs WHERE id = ?", (run_id,)).fetchall()
+    if len(rows) == 1 and isinstance(rows[0][0], int) and rows[0][0] > 0:
+        print(rows[0][0])
+except (OSError, sqlite3.Error):
+    pass
+PY
+  ) || return 1
+  case "$out" in ''|*[!0-9]*) return 1 ;; esac
+  printf '%s\n' "$out"
+}
+
 # Scalar value of a TOON key in captured `axi status` output $1.
 fm_nm_field() {  # <toon-output> <key>
   printf '%s\n' "$1" | sed -n "s/^[[:space:]]*$2:[[:space:]]*\(.*\)/\1/p" | head -1
