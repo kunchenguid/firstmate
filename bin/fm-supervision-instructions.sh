@@ -109,6 +109,14 @@ case "$HARNESS" in
   *) HARNESS=unknown; SNIPPET="$DOC_DIR/unknown.md" ;;
 esac
 [ -f "$SNIPPET" ] || SNIPPET="$DOC_DIR/unknown.md"
+CODEX_PARK=0
+if [ "$HARNESS" = codex ]; then
+  if [ -x "$SCRIPT_DIR/fm-codex-stop-park.sh" ] && "$SCRIPT_DIR/fm-codex-stop-park.sh" --capable; then
+    CODEX_PARK=1
+  else
+    SNIPPET="$DOC_DIR/codex-checkpoint.md"
+  fi
+fi
 HOST_SNIPPET=
 grok_arm='bin/fm-watch-arm.sh'
 case "$HARNESS" in
@@ -157,13 +165,18 @@ if [ "$X_MODE" -eq 0 ] && [ -f "$x_mode_env" ]; then
 fi
 
 render_snippet() {  # [snippet]
-  local line tags snippet=${1:-$SNIPPET}
+  local line tags snippet=${1:-$SNIPPET} codex_tag=codex-checkpoint
+  [ "$CODEX_PARK" -eq 0 ] || codex_tag=codex-park
   while IFS= read -r line || [ -n "$line" ]; do
     case "$line" in
       '{'*'} '*)
         tags=${line%%\} *}
         tags=${tags#\{}
-        case ",$tags," in *",$HARNESS,"*) ;; *) continue ;; esac
+        case ",$tags," in
+          *",$HARNESS,"*) ;;
+          *",$codex_tag,"*) [ "$HARNESS" = codex ] || continue ;;
+          *) continue ;;
+        esac
         line=${line#*\} }
         ;;
     esac
@@ -207,7 +220,11 @@ repair_line() {
       printf '%s%s\n' "$prefix" 'watcher supervision needs Stop-owned automatic recovery; inspect the hook registration and startup status before ending the turn.'
       ;;
     codex)
-      printf '%s%s%s%s\n' "$prefix" 'repair missing watcher supervision with a foreground checkpoint: bin/fm-watch-checkpoint.sh --seconds ' "$checkpoint_seconds" '.'
+      if [ "$CODEX_PARK" -eq 1 ]; then
+        printf '%s%s\n' "$prefix" 'watcher supervision is owned by the Codex asynchronous Stop park; inspect state/.codex-park.json and the native hook registration before ending blind.'
+      else
+        printf '%s%s%s%s\n' "$prefix" 'repair missing watcher supervision with a foreground checkpoint: bin/fm-watch-checkpoint.sh --seconds ' "$checkpoint_seconds" '.'
+      fi
       ;;
     pi|pi-signed)
       printf '%s%s%s%s%s%s\n' "$prefix" 'repair a missing or failed watcher cycle with the Pi tool fm_watch_arm_pi, or restart Pi with -e ' "$pi_turnend_ext" ' -e ' "$pi_ext" ' if the extensions are not loaded.'
@@ -248,7 +265,11 @@ ordinary_wake_line() {
       printf '%s\n' '- Ordinary wake: the Stop-owned auto-arm (bin/fm-claude-stop-autoarm.sh) already owns watcher continuity; drain and handle the wake, and do not arm another cycle yourself.'
       ;;
     codex)
-      printf '%s\n' '- Ordinary wake: take the next foreground bin/fm-watch-checkpoint.sh checkpoint as directed below.'
+      if [ "$CODEX_PARK" -eq 1 ]; then
+        printf '%s\n' '- Ordinary wake: the Codex Stop hook (bin/fm-codex-stop-park.sh) already owns watcher continuity; drain and handle the wake, and do not arm another cycle yourself.'
+      else
+        printf '%s\n' '- Ordinary wake: take the next foreground bin/fm-watch-checkpoint.sh checkpoint as directed below.'
+      fi
       ;;
     pi|pi-signed)
       printf '%s\n' '- Ordinary wake: the Pi extension already owns watcher continuity; do not arm another cycle.'
