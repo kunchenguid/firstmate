@@ -4084,6 +4084,10 @@ if [ -n "$LAUNCH_HOME_TOKEN" ]; then
   rm -rf "/tmp/fm-$ID+$LAUNCH_HOME_TOKEN"
 fi
 remove_pr_poll_artifacts "$STATE" "$ID" || exit 1
+# A parked worker's PR watch outlives its session, so it retires with the task.
+if [ -e "$STATE/$ID.park" ] || [ -L "$STATE/$ID.park" ]; then
+  "$SCRIPT_DIR/fm-pr-park.sh" unpark "$ID" >/dev/null || exit 1
+fi
 retire_busy_state "$STATE" "$ID" "$BUSY_GEN" || exit 1
 # Opt-in fleet activity ledger (docs/fleet-ledger.md), before the status log is
 # retired so its last lines are captured; off costs one file test.
