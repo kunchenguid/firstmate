@@ -1871,6 +1871,41 @@ SH
   pass "retirement restores registrations and rearms after sweep, rename, and signal failures"
 }
 
+# A SIGKILL or host shutdown cannot run the EXIT trap, so the evidence and an
+# empty staging directory survive beside the still-present home. The record
+# names that exact home and generation, so the retry must roll the leftover
+# back and remove the home rather than refuse it forever.
+test_uncatchable_interruption_still_retries() {
+  local dir mate stage rc
+  dir=$(make_case retire-sigkill)
+  mate="$dir/mate"
+  stage="$mate.retiring.g1"
+  mkdir -p "$mate/state" "$mate/data" "$mate/config" "$dir/home/state"
+  printf 'mate\n' >"$mate/.fm-secondmate-home"
+  printf 'manual\n' >"$dir/home/config/backlog-backend"
+  fm_write_meta "$dir/home/state/mate.meta" \
+    window=isolated:fm-mate endpoint_task_id=mate backend=tmux kind=secondmate \
+    "home=$mate" "worktree=$mate" "project=$dir/project" spawn_gen=g1
+  cat >"$dir/fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+case "$*" in *has-session*) exit 1 ;; esac
+exit 0
+SH
+  chmod +x "$dir/fakebin/tmux"
+  # Exactly what an uncatchable interruption leaves behind: the evidence is
+  # published with this home and generation, its staging directory is empty,
+  # and the home itself was never renamed.
+  mkdir -m 700 "$stage"
+  printf 'home_removal_source=%s\nhome_removal_generation=g1\nhome_removal_stage=%s\n' \
+    "$mate" "$stage" >"$dir/home/state/mate.home-removal"
+  rc=0
+  run_case "$dir" mate >"$dir/retry.out" 2>&1 || rc=$?
+  expect_code 0 "$rc" "a retry after an uncatchable interruption: $(cat "$dir/retry.out")"
+  assert_absent "$mate" "the retry did not remove the home"
+  assert_absent "$dir/home/state/mate.home-removal" "the retry retained its evidence"
+  pass "an uncatchable interruption before the rename is rolled back and retried"
+}
+
 test_retirement_retains_child_loss_before_metadata_removal() {
   local depth dir mate owner nested child_meta rc real_rm
   real_rm=$(command -v rm)
@@ -2022,5 +2057,6 @@ test_retirement_reuses_only_empty_staging
 test_local_retirement_resumes_recorded_staging
 
 test_retirement_rollback_rearms_on_failure
+test_uncatchable_interruption_still_retries
 test_retirement_retains_child_loss_before_metadata_removal
 test_local_retirement_registry_failure_preserves_retry

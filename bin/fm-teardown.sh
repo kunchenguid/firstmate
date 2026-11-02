@@ -3145,8 +3145,20 @@ remove_firstmate_home() (  # <home> <label> <task-id> <backend>
       rm -f -- "$evidence" || return 1
       return 0
     fi
-    echo "REFUSED: retirement retry cannot prove public home ownership for $home" >&2
-    return 1
+    # The rename never happened: an uncatchable interruption left both the home
+    # and this attempt's evidence. The record already names this exact home and
+    # generation, so an empty staging directory is this attempt's own leftover
+    # and can be withdrawn for a clean retry. A successor at the same path
+    # carries another generation and never reaches here.
+    if [ ! -e "$recorded" ] \
+      || { [ -d "$recorded" ] && [ ! -L "$recorded" ] && [ ! -e "$recorded/home" ]; }; then
+      [ ! -e "$recorded" ] || rmdir "$recorded" 2>/dev/null || return 1
+      rm -f -- "$evidence" || return 1
+      recorded=''
+    else
+      echo "REFUSED: retirement retry cannot prove public home ownership for $home" >&2
+      return 1
+    fi
   fi
   [ -e "$home" ] || return 0
   abs_home_path=$(validate_firstmate_home_for_removal "$home" "$label" "$expected_id") || return 1
