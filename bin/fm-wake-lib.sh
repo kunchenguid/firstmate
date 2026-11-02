@@ -7,7 +7,8 @@
 # reservation. An existing receipt or row suppresses another append; consumer
 # acknowledgement writes missing receipts for its own rows before removal.
 # Receipt failure leaves rows queued. These receipts suppress enqueue replay,
-# never count as primary handling acknowledgement, and are not pruned with rows.
+# never count as primary handling acknowledgement, and are not pruned with rows;
+# bin/fm-startup-network.sh removes a generation's receipt with that generation.
 
 FM_WAKE_LIB_DIR="$(d=${BASH_SOURCE[0]%/*}; [ "$d" != "${BASH_SOURCE[0]}" ] || d=.; cd "${d:-/}" && pwd)"
 FM_WAKE_DEFAULT_ROOT="$(cd "$FM_WAKE_LIB_DIR/.." && pwd)"
