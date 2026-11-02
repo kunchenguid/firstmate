@@ -104,6 +104,10 @@
 #     A running primary is never refused or preempted.
 #   - for each registered remote secondmate, the rows of its last complete
 #     serve certificate, remote-<id>.cert.
+# When that count is the allowance one remote is served, a root ledger row that
+# its certificate also lists as a state/parent-route row of the same task,
+# generation, and model is left out: that host counts the agent itself, and
+# subtracting both sides would spend its seat twice.
 # The root refuses (exit 5) instead of counting when any registered remote has
 # a pending serve, no certificate, or a certificate for another policy digest;
 # a registry line cannot be parsed; a home cannot be listed; a task record or
@@ -147,15 +151,17 @@
 # registering home reserves it at the root, dispatches it with a remote route carrying
 # the host operation token, and applies the host's token-scoped disposition
 # with reconcile-remote. Host-side records under state/parent-route are
-# execution receipts (bin/fm-remote-secondmate-control.sh): a pooled
-# supervisor whose generation a retained reservation proves is
+# execution receipts (bin/fm-remote-secondmate-control.sh): a retained
+# reservation whose model is the one this host records leaves the supervisor
 # parent-accounted, while one no reservation proves is adopted into the serve
 # certificate, so pools can be enabled around a pre-pool or unrecorded
 # supervisor without losing its occupancy. A reservation claimed under another
 # operation's token is proven by that operation's receipt, which binds the
-# generation and the model the host found already running; the model the
-# reservation asked for is never compared, because the request is not what
-# runs.
+# generation and the model the host found already running: when that model is
+# not the one the reservation asked for, the observing operation found this
+# supervisor already running, so it is adopted into the certificate on the
+# model it actually runs until the registering home reconciles the receipt and
+# releases its candidate.
 #
 # EXPLICIT MODELS. While any pool is configured, every launch needs a verified
 # explicit model. A harness default or raw launch command cannot prove its
