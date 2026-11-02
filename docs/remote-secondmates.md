@@ -278,6 +278,8 @@ An operator's `--fix` refuses to rewrite, reload, or restart a Herdr service own
 Readiness runs its unattended repair as `--fix --automatic`, which never stops, boots out, replaces, reloads, or takes over a running Herdr server or a loaded Herdr launch agent, because launchd can restart that server and a mate can create a pane in it at any moment.
 It only records ownership and starts a stopped server, and reports every other Herdr repair as an operator action.
 A reload never force-restarts the freshly bootstrapped server.
+The operator's explicit `--fix` keeps a residual risk that automatic readiness does not: its empty-pane proof is taken before it boots out, reloads, or authorizes the guard to take the session over, and nothing stops a mate from creating a pane in that window, so a pane created concurrently during its repair is closed.
+Run an explicit `fm-remote-doctor.sh --fix` only when no mate is being launched, relaunched, or recovered on that account.
 Under `--backend rex --fix`, the doctor starts the account's persistent Rex server only when none answers.
 It never stops or restarts an answering Rex server, because a stop ends every process in that server's sessions, including unrelated work and sibling agents, and a restore brings back only shells.
 An answering exit-empty server is reported as a human gap: at a time when nothing runs there, an operator runs `rex server stop` and then `rex server start` on that account, and rex stays not ready until then.
