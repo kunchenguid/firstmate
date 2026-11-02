@@ -627,7 +627,9 @@ test_raw_launch_trailing_separator_or_comment_keeps_disarm() {
 SH
     chmod +x "$agentbin/custom-agent"
     printf 'onn\n' > "$HOME_DIR/config/osc7501-status"
-    result=$(cd "$CASE_DIR" && isolated_pane_env PATH="$agentbin:$PATH" FM_OSC7501_TTY=no-tty \
+    # Config warnings apply only after the writable, known-aware tty gates.
+    : > "$CASE_DIR/no-tty"
+    result=$(cd "$CASE_DIR" && isolated_pane_env REX_BLOCK=b1 PATH="$agentbin:$PATH" FM_OSC7501_TTY=no-tty \
       /bin/sh -c "$launch" 2>&1)
     status=$?
     expect_code 0 "$status" "staged launch for raw '$raw' failed: $result"

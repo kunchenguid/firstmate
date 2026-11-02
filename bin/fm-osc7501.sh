@@ -10,14 +10,15 @@
 # `arm` runs inside a task pane at launch (fm-spawn stages it into the launch
 # command) and decides whether this worker may report:
 #
-#   1. config/osc7501-status must not say off (default on; an unrecognized
-#      word warns once and reads as off)
-#   2. the pane must have a writable controlling terminal
-#   3. the terminal must be KNOWN 7501-aware by its environment
+#   1. the pane must have a writable controlling terminal
+#   2. the terminal must be KNOWN 7501-aware by its environment
 #      (HC_TERMINAL_ID = herdr-core, REX_BLOCK/REX_SESSION = Rex,
 #      TERM_PROGRAM=ghostty); unknown terminals silently do nothing.
 #      backend=herdr (old herdr has no protocol support) and backend=t3code
 #      (no task tty) never report
+#   3. config/osc7501-status must not say off (default on; an unrecognized
+#      word warns once per value and reads as off). This gate is read only
+#      after the writable-tty and known-aware-terminal checks pass
 #   4. the launch must name the executable it runs (--agent-bin); a launch
 #      that names none - a raw launch command whose agent fm-spawn cannot
 #      establish - never reports
@@ -55,14 +56,16 @@
 #   owns the root record, so it never triggers a heartbeat. Once the bridge
 #   has written a record of its own, though, the durable signals alone keep
 #   it honest: they fold the same way with idle activity and the result is
-#   written once per change - an open decision still reads blocked,
+#   written once per change - an open decision or standing captain hold
+#   still reads blocked, a fresh terminal result reads done/error, and
 #   anything else parks at idle - so a working/blocked record cannot
 #   outlive the signals that produced it. A done/failed line only counts
 #   when it was appended to the status file after the last reading that
 #   proved a turn was running; one already standing then belongs to an
 #   earlier phase and parks at idle while that turn is still in flight. The
-#   exit write drops that check: the agent is gone, so its done/error stands. arm's idle clear is the bridge's own
-#   first write, so the watcher it starts owns the root record from launch;
+#   exit write drops that check: the agent is gone, so its done/error stands.
+#   arm's idle clear is the bridge's own first write, so the watcher it
+#   starts owns the root record from launch;
 #   a watcher with no write of its own stays silent instead: the root record
 #   may belong to a native writer. Harnesses whose activity only resolves
 #   busy or unknown (Rovo, Antigravity) thereby still reach idle, blocked,
