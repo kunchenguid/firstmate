@@ -840,7 +840,9 @@ case "$cmd" in
     printf '{}\n' ;;
   rm) rm -f "$D/$last.json"; printf '{}\n' ;;
   read) printf '❯\n' ;;
-  send) printf '{"started":true,"wait":{"status":"working"}}\n' ;;
+  send)
+    [ ! -e "$D/send-refuses" ] || { printf '{"error":{"kind":"refused"}}\n' >&2; exit 1; }
+    printf '{"started":true,"wait":{"status":"working"}}\n' ;;
   *) printf '{}\n' ;;
 esac
 SH
@@ -1140,13 +1142,14 @@ SH
 
 test_move_refuses_before_stopping_anything() {
   local scenario out rc before args
-  for scenario in cmux unknown same-backend remote unreadable pending-composer; do
+  for scenario in cmux unknown same-backend missing-hc remote unreadable pending-composer; do
     move_world "move-refuse-$scenario" claude
     args=(sm1 --backend hc)
     case "$scenario" in
       cmux) args=(sm1 --backend cmux) ;;
       unknown) args=(sm1 --backend bogus) ;;
       same-backend) args=(sm1 --backend tmux) ;;
+      missing-hc) W_HCBIN="$W_DIR/no-such-dir/hc" ;;
       remote) add_move_remote_dead "$W_DIR" ;;
       unreadable) : > "$W_MV/unreadable" ;;
       pending-composer) printf '❯ draft text\n' > "$W_MV/pane" ;;
@@ -1165,6 +1168,7 @@ test_move_refuses_before_stopping_anything() {
       cmux) assert_contains "$out" "backend=cmux does not support --secondmate" "the cmux refusal names the limit" ;;
       unknown) assert_contains "$out" "unknown backend" "the unknown-backend refusal names it" ;;
       same-backend) assert_contains "$out" "already recorded on backend=tmux" "a same-backend move points at relaunch" ;;
+      missing-hc) assert_contains "$out" "backend=hc needs 'hc', which is not available here; nothing was stopped or moved" "a missing target binary refuses before any stop" ;;
       remote)
         assert_contains "$out" "a local move is refused" "a dead remote mate reaches the library's own refusal"
         assert_contains "$(cat "$W_DIR/ssh.log")" "-- lab-host " "the remote mate must have been probed on its host"
@@ -1173,7 +1177,24 @@ test_move_refuses_before_stopping_anything() {
       pending-composer) assert_contains "$out" "could not be proven stopped" "a refused stop ends the move" ;;
     esac
   done
-  pass "move: an unmovable target, a remote mate, an unclassifiable endpoint, and a refused stop all leave the mate untouched"
+  pass "move: an unmovable or unavailable target, a remote mate, an unclassifiable endpoint, and a refused stop all leave the mate untouched"
+}
+
+test_move_restores_the_previous_record_when_the_launch_fails() {
+  local out rc=0 before
+  move_world move-launch-fails zsh
+  : > "$W_DIR/hc/send-refuses"
+  cp -p "$W_DIR/home/state/sm1.meta" "$W_DIR/before.meta"
+  out=$(run_move sm1 --backend hc) || rc=$?
+  expect_code 1 "$rc" "a move whose replacement launch fails must fail"$'\n'"$out"
+  [ -f "$W_DIR/home/state/sm1.meta" ] || fail "a failed launch must not leave the mate without a record"$'\n'"$out"
+  cmp -s "$W_DIR/before.meta" "$W_DIR/home/state/sm1.meta" \
+    || fail "a failed launch must leave the previous record byte-identical"$'\n'"$(diff "$W_DIR/before.meta" "$W_DIR/home/state/sm1.meta")"
+  assert_contains "$out" "could not be launched on hc" "the failure names the target"
+  assert_contains "$out" "its previous record (backend=tmux) is in place" "the failure states the record survived"
+  assert_not_contains "$out" "moved sm1" "a failed launch must not report a move"
+  assert_grep 'failed' "$W_DIR/home/state/.secondmate-relaunch-sm1" "the move must record its failed outcome"
+  pass "move: a failed replacement launch leaves the previous record in place for recovery and says so"
 }
 
 test_move_usage_prints_the_exit_status_contract() {
@@ -1461,6 +1482,7 @@ test_sweep_leaves_an_alive_hc_secondmate_untouched
 test_move_stops_a_live_tmux_secondmate_and_relaunches_it_on_hc
 test_move_relaunches_an_already_stopped_tmux_secondmate_on_hc
 test_move_refuses_before_stopping_anything
+test_move_restores_the_previous_record_when_the_launch_fails
 test_move_usage_prints_the_exit_status_contract
 test_move_refuses_while_the_liveness_lock_is_held
 test_remote_poll_probe_maps_states

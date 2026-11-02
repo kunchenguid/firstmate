@@ -31,12 +31,15 @@
 # (docs/remote-secondmates.md).
 #
 # The target must be a spawn-capable backend that hosts second mates
-# (bin/fm-backend.sh's FM_BACKEND_SECONDMATE), checked before anything is
-# stopped. Recovery keeps a local mate on its recorded backend (PR #8082), so
-# a completed move needs no config/backend change to last. A launch that fails
-# after the stop leaves the mate with no agent and its record unchanged, so
-# the next liveness recovery respawns it on its previous, recorded backend,
-# and the failure says so plainly.
+# (bin/fm-backend.sh's FM_BACKEND_SECONDMATE) and must be ready to launch one:
+# its own CLI and toolchain present, and for hc and rex its core or server
+# reachable, through the same adapter checks fm-spawn runs. All of that is
+# checked before anything is stopped. Recovery keeps a local mate on its
+# recorded backend (PR #8082), so a completed move needs no config/backend
+# change to last. The record is snapshotted before the launch; a launch that
+# fails after the stop has its previous record put back, so the next liveness
+# recovery respawns the mate on its previous, recorded backend, and the
+# failure says so plainly.
 #
 # Prints `moved <id> from=<old-backend> to=<new-backend>` followed by the
 # spawn's own `spawned ...` line. Exit status: 0 moved; 1 refused or failed,
@@ -96,11 +99,25 @@ fm_backend_validate_spawn "$TARGET" || exit 1
 fm_backend_secondmate_supported "$TARGET" \
   || die "backend=$TARGET does not support --secondmate spawns yet (secondmate-capable: $FM_BACKEND_SECONDMATE)"
 fm_backend_runtime_check "$TARGET" || exit 1
+# The target's own tools (bin/fm-backend.sh's per-backend set, minus
+# treehouse: a second mate launches in its home, never a leased worktree),
+# then the reachability check fm-spawn runs before it opens an endpoint.
+for TOOL in $(fm_backend_required_tools "$TARGET"); do
+  [ "$TOOL" = treehouse ] || fm_backend_required_tool_available "$TARGET" "$TOOL" \
+    || die "backend=$TARGET needs '$TOOL', which is not available here; nothing was stopped or moved"
+done
+case "$TARGET" in
+  hc) fm_backend_hc_container_ensure >/dev/null || die "backend=hc is not ready to launch second mate $ID; nothing was stopped or moved" ;;
+  rex) fm_backend_rex_local_server_ensure || die "backend=rex is not ready to launch second mate $ID; nothing was stopped or moved" ;;
+esac
 OLD_BACKEND=$(fm_backend_of_meta "$META")
 [ "$OLD_BACKEND" != "$TARGET" ] || die "second mate $ID is already recorded on backend=$TARGET; to restart it in place use bin/fm-control.sh $ID relaunch"
 
 first_line() {  # <text>
-  printf '%s\n' "$1" | sed -n '/./{s/^error: //;s/[[:space:]]\{1,\}/ /g;p;q;}'
+  local line
+  line=$(printf '%s\n' "$1" | sed -n '/^error: /{p;q;}')
+  [ -n "$line" ] || line=$1
+  printf '%s\n' "$line" | sed -n '/./{s/^error: //;s/[[:space:]]\{1,\}/ /g;p;q;}'
 }
 
 fm_secondmate_liveness_lock "$ID" \
@@ -127,10 +144,21 @@ case "$FM_SM_LIVE_STATUS" in
     ;;
 esac
 
+# A fresh spawn that fails rolls its record back, which removes this mate's
+# existing one; the snapshot puts it back so liveness recovery still finds it.
+SNAPSHOT="$STATE/.$ID.meta.move.$$"
+cp -p "$META" "$SNAPSHOT" || die "could not snapshot second mate $ID's record before the launch; nothing was moved and its record is unchanged"
+trap 'rm -f "$SNAPSHOT"; fm_secondmate_liveness_unlock "$ID"' EXIT
 if fm_secondmate_liveness_relaunch "$META" "$ID" "" "$TARGET"; then
   printf 'moved %s from=%s to=%s\n' "$ID" "$OLD_BACKEND" "$TARGET"
   printf '%s\n' "$FM_SM_LIVE_OUT" | grep '^spawned ' || true
   exit 0
 fi
+if ! cmp -s "$SNAPSHOT" "$META"; then
+  cp -p "$SNAPSHOT" "$META.move.$$" && mv -f "$META.move.$$" "$META" || {
+    trap 'fm_secondmate_liveness_unlock "$ID"' EXIT
+    die "second mate $ID could not be launched on $TARGET and its previous record could not be put back; restore it from $SNAPSHOT: $(first_line "$FM_SM_LIVE_OUT")"
+  }
+fi
 [ "$FM_SM_LIVE_STATUS" != skipped ] || die "$FM_SM_LIVE_REASON"
-die "second mate $ID could not be launched on $TARGET after its $OLD_BACKEND agent was stopped; no agent is running, its home and record are unchanged, and the next liveness recovery respawns it on its recorded backend $OLD_BACKEND: $(first_line "$FM_SM_LIVE_OUT")"
+die "second mate $ID could not be launched on $TARGET after its $OLD_BACKEND agent was stopped; its home is unchanged and its previous record (backend=$OLD_BACKEND) is in place, so the next liveness recovery respawns it on $OLD_BACKEND: $(first_line "$FM_SM_LIVE_OUT")"
