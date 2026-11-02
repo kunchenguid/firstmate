@@ -193,6 +193,7 @@ fi
 if [ "$1" = kill-window ] && [ -n "${FM_FAKE_HERMES_STALL_META:-}" ]; then
   if [ -e "$FM_FAKE_HERMES_STALL_META" ]; then echo "kill-window record=present" >> "$FM_FAKE_HERMES_KILL_LOG"
   else echo "kill-window record=absent" >> "$FM_FAKE_HERMES_KILL_LOG"; fi
+  [ -z "${FM_FAKE_HERMES_KILL_FAIL:-}" ] || exit 1
 fi
 exec "$(dirname "$0")/tmux-base" "$@"
 SH_TMUX
@@ -225,3 +226,15 @@ assert_contains "$out" 'Hermes did not reach its TUI' 'stalled launch diagnostic
 assert_contains "$(cat "$case_dir/kill" 2>/dev/null)" 'kill-window record=present' 'stalled worker not stopped before its record was removed'
 [ ! -e "$home/state/hermes-stalled.meta" ] || fail 'stalled fresh spawn kept its task record'
 pass 'stalled Hermes launch stops its pane before the task record is removed'
+
+fm_test_spawn_brief "$home" hermes-unclosed
+if out=$(FM_FAKE_HERMES_STALL_META="$home/state/hermes-unclosed.meta" FM_FAKE_HERMES_KILL_LOG="$case_dir/kill-unclosed" \
+  FM_FAKE_HERMES_KILL_FAIL=1 FM_HERMES_READY_POLLS=2 FM_HERMES_POLL_INTERVAL=0 \
+  fm_test_run_spawn "$home" "$wt" "$fakebin" hermes-unclosed "$proj" --scout --harness hermes --hermes-profile example 2>&1); then
+  fail 'unclosed stalled Hermes launch accepted'
+fi
+assert_contains "$out" 'Hermes did not reach its TUI' 'unclosed stalled launch diagnostic'
+assert_contains "$(cat "$case_dir/kill-unclosed" 2>/dev/null)" 'kill-window record=present' 'unclosed stalled worker close not attempted'
+assert_contains "$out" 'task record is kept' 'unclosed stalled launch warning'
+assert_grep 'hermes_profile=example' "$home/state/hermes-unclosed.meta" 'unclosed stalled worker lost its task record'
+pass 'stalled Hermes launch whose pane cannot be closed keeps its task record'
