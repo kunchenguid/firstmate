@@ -818,6 +818,27 @@ fm_dod_pr_url_from_done_note() {  # <note>
   printf '%s\n' "$url"
 }
 
+# The URL of a note that is exactly a ready report (`PR <url>`, `PR <url> checks
+# green`, or Gerrit's `PR <url> published for review`), or empty. Anything else
+# around the URL is prose, so the caller claims no delivered PR from it.
+fm_dod_ready_note_url() {  # <note>
+  local url=$1
+  case "$url" in 'PR '*) url=${url#PR } ;; *) return 1 ;; esac
+  case "$url" in
+    *' checks green') url=${url% checks green} ;;
+    *' published for review') url=${url% published for review} ;;
+  esac
+  case "$url" in ''|*[[:space:]]*) return 1 ;; esac
+  printf '%s\n' "$url"
+}
+
+# 0 when the status log names <url>. A task's newest ready line replaces its
+# recorded PR only on this proof that the line is newer than that PR; a recorded
+# PR the log never named is the supervisor's own choice.
+fm_dod_status_names_pr() {  # <status-file> <url>
+  grep -Fqw -- "$2" "$1" 2>/dev/null
+}
+
 # The last recorded <key>= value in <meta>, or empty.
 fm_dod_meta_value() {  # <meta> <key>
   grep "^$2=" "$1" 2>/dev/null | tail -1 | cut -d= -f2-

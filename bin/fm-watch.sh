@@ -151,8 +151,9 @@
 #   check: pr-register: <lines>
 #                          with config/pr-register-scan present, a task's done
 #                          line reported a PR that the check sweep's
-#                          fm-pr-check.sh scan could not record; the line
-#                          names the task, the PR, and the refusal
+#                          fm-pr-check.sh scan could not record, or whose
+#                          merge watch it could not arm in time; the line
+#                          names the task, the PR, and the refusal or timeout
 #   check: rejected unauthenticated state checks: <paths>
 #                          unsafe state checks were refused without execution
 #   check: rejected unauthenticated PR poll retirement receipts: <paths>
