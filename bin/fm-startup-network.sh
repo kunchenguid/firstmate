@@ -113,12 +113,14 @@
 #                             status written last as its completion boundary;
 #                             retained until the result settles so a later cycle can
 #                             deliver it, with bin/fm-startup-network-lib.sh owning
-#                             the read contract.
+#                             the read contract. Bounded, not an archive: see
+#                             "RETAINED RESULTS ARE BOUNDED" below.
 #   .startup-network-wake-receipts/<generation>
 #                             a receipt stating that this generation's wake row was
 #                             committed; it suppresses producer replay, never counts
 #                             as handling acknowledgement, and bin/fm-wake-lib.sh owns
-#                             when one is written.
+#                             when one is written. Removed with the generation it
+#                             belongs to.
 #   .startup-network.timings  per-step elapsed times for the last run, in
 #                             bin/fm-timing-lib.sh's tab-separated format: the
 #                             stage total, one record per network phase (gh auth,
@@ -142,6 +144,18 @@
 # from the shared report. No wait extends the delivery child-group deadline.
 # Hitting the bound is reported as an actionable NETWORK_CHECKS: line, never as
 # silence. bin/fm-timeout-lib.sh remains the single owner of bounded execution.
+#
+# RETAINED RESULTS ARE BOUNDED. A session start reserves a new generation, so
+# without a bound a long-lived home would keep one report directory per start
+# forever. prune_results() runs under the publication lock whenever a new
+# generation is reserved and whenever a generation settles, and it removes only
+# what nothing can still act on: never the current shared-status generation,
+# never a generation named by a queued startup-network wake row, and never one of
+# the newest RESULT_KEEP_UNSETTLED unsettled generations, which is the grace
+# window for a run that died before settling. Everything else is settled or
+# fenced by a successor, so its directory and wake receipt are removed. The
+# shared report and timings files remain the operator's read path for the last
+# run; `prune` exposes the same pass to an operator and to the tests.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -155,6 +169,11 @@ CLAIM_FILE="$STATE/.startup-network.claim"
 DELIVERED_FILE="$STATE/.startup-network.delivered"
 TIMINGS_FILE="$STATE/.startup-network.timings"
 PUBLISH_LOCK="$STATE/.startup-network.lock"
+
+# Unsettled generations kept past the current one, so a run that died between
+# retaining its completion and settling it stays readable for a few starts.
+# Settled and superseded generations are not retained; see prune_results().
+RESULT_KEEP_UNSETTLED=3
 
 # shellcheck source=bin/fm-timeout-lib.sh
 . "$SCRIPT_DIR/fm-timeout-lib.sh"
@@ -300,6 +319,10 @@ EOF
     fm_lock_release "$PUBLISH_LOCK"
     return 1
   fi
+  # The reservation just superseded every earlier generation, so this is the
+  # natural rotation point: drop the retained results and receipts that are
+  # settled or fenced, keeping the new generation and anything still queued.
+  prune_results
 
   # Detached three ways, each closing a different failure:
   #   - stdio to /dev/null, because the digest's stdout is a pipe the harness
@@ -415,6 +438,64 @@ settle_result() { # <generation> <reason>
   printf '%s:%s\n' "$2" "$1" | write_atomic "$result/settled"
 }
 
+# A queued startup wake row is the delivery obligation for its generation; it is
+# retired only by the acknowledgement that writes the generation's receipt.
+result_queued() { # <generation>
+  local queue="$STATE/.wake-queue"
+  [ -f "$queue" ] && [ ! -L "$queue" ] || return 1
+  awk -F '\t' -v key="startup-network:$1" \
+    'NF == 5 && $3 == "check" && $4 == key { found=1; exit } END { exit !found }' "$queue"
+}
+
+# Bounds the per-generation retained state a long-lived home accumulates.
+# Deletes only what nothing can still act on - never the current generation,
+# never a queued one, never the newest RESULT_KEEP_UNSETTLED unsettled ones -
+# and only entries it can positively identify, so malformed, incomplete, or
+# symlinked records are left alone rather than followed or guessed at.
+# The caller owns the publication lock; cleanup failure never fails a run.
+prune_results() {
+  local root="$STATE/.startup-network-results" receipts="$STATE/.startup-network-wake-receipts"
+  local current gen entry receipt kept_unsettled=0
+  [ -d "$root" ] && [ ! -L "$root" ] || return 0
+  current=$(status_get generation)
+  # Newest first. Generation names are <epoch>.<pid>.<harvest-pid>, so the epoch
+  # component orders them the same way the runs happened. A glob is read here
+  # rather than ls, so odd entries survive to be declined by name validation.
+  while IFS= read -r gen; do
+    [ -n "$gen" ] || continue
+    fm_startup_generation_valid "$gen" || continue
+    fm_startup_result_path "$STATE" "$gen" >/dev/null || continue
+    [ "$gen" = "$current" ] && continue
+    result_queued "$gen" && continue
+    if ! fm_startup_result_settled "$STATE" "$gen"; then
+      [ "$kept_unsettled" -ge "$RESULT_KEEP_UNSETTLED" ] || {
+        kept_unsettled=$((kept_unsettled + 1))
+        continue
+      }
+    fi
+    entry="$root/$gen"
+    [ -d "$entry" ] && [ ! -L "$entry" ] || continue
+    rm -rf -- "$entry" 2>/dev/null || continue
+    receipt="$receipts/$gen"
+    [ -f "$receipt" ] && [ ! -L "$receipt" ] || continue
+    [ "$(cat "$receipt" 2>/dev/null || true)" = "$gen" ] || continue
+    rm -f -- "$receipt" 2>/dev/null || true
+  done < <(
+    for entry in "$root"/*; do
+      [ -e "$entry" ] || [ -L "$entry" ] || continue
+      printf '%s\n' "${entry##*/}"
+    done | LC_ALL=C sort -t. -k1,1nr -k2,2nr
+  )
+  return 0
+}
+cmd_prune() {
+  local rc=0
+  take_lock "$PUBLISH_LOCK" "$(delivery_budget)" || return 1
+  prune_results || rc=$?
+  fm_lock_release "$PUBLISH_LOCK"
+  return "$rc"
+}
+
 queue_result_wake() { # <generation> <state>
   fm_wake_append check "startup-network:$1" \
     "check: startup-network: deferred startup network checks finished ($2); read them with $FM_ROOT/bin/fm-startup-network.sh report --generation $1"
@@ -452,12 +533,14 @@ recover_result() { # <generation-or-empty> <deadline> <wait-for-claim>
     if [ "$(cat "$DELIVERED_FILE" 2>/dev/null || true)" = "$generation" ]; then
       settle_result "$generation" inline
       rc=$?
+      [ "$rc" -ne 0 ] || prune_results
       fm_lock_release "$PUBLISH_LOCK"
       return "$rc"
     fi
     if ! report_requires_wake "$state"; then
       settle_result "$generation" clean
       rc=$?
+      [ "$rc" -ne 0 ] || prune_results
       fm_lock_release "$PUBLISH_LOCK"
       return "$rc"
     fi
@@ -825,6 +908,7 @@ case "$MODE" in
   run) cmd_run "$LOCKED" "$LOCK_PID" "$GENERATION" || exit $? ;;
   harvest) cmd_harvest "${HARVEST_PID:-}" ;;
   recover) cmd_recover "$GENERATION" "${1:-$(delivery_budget)}" || exit $? ;;
+  prune) cmd_prune || exit $? ;;
   report)
     report_generation=${GENERATION:-$(status_get generation)}
     if retained=$(fm_startup_result_path "$STATE" "$report_generation"); then
@@ -847,7 +931,7 @@ case "$MODE" in
   -h|--help) usage ;;
   *)
     printf 'fm-startup-network: unknown mode: %s\n' "${MODE:-<none>}" >&2
-    printf 'usage: fm-startup-network.sh start|run|harvest|report|recover|wait\n' >&2
+    printf 'usage: fm-startup-network.sh start|run|harvest|report|recover|prune|wait\n' >&2
     exit 2
     ;;
 esac
