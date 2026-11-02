@@ -33,6 +33,7 @@ Now a merge is recorded only when some run read it from the forge and left that 
 | 21 | A link the gate cannot positively read as a pull request is recorded as an unconfirmed note, including a shape tasks-axi's renderer accepts | `bin/fm-teardown.sh` (`backlog_pr_completion_args`) | `tests/fm-teardown.test.sh` `test_teardown_records_a_renderer_accepted_link_as_an_unconfirmed_note` | pass |
 | 22 | A long link that still fits the record stays recordable as an unconfirmed note | `bin/fm-backlog-transition-lib.sh` (`FM_BACKLOG_NOTE_MAX`) | `tests/fm-teardown.test.sh` `test_teardown_records_a_long_but_recordable_pr_link_as_its_unconfirmed_note` | pass |
 | 23 | The pending-close record carries ordinary punctuation and still refuses a line break or control byte | `bin/fm-backlog-transition-lib.sh` (`fm_backlog_note_encode`, `fm_backlog_note_decode`, `fm_backlog_close_marker_validate`) | `tests/fm-backlog-atomicity.test.sh` `test_note_codec_carries_punctuation_and_refuses_line_breaks` | pass |
+| 24 | A note counts as already recorded only as that exact sentence - its own line, a `Deliverable of the finished work:` line, or a `; <sentence>` suffix - so a note for a neighboring link is still written and a deliverable-shaped note is not repeated | `bin/fm-captain-hold.sh` (`close_answered`) | `tests/fm-captain-hold-lifecycle.test.sh` `test_answer_keeps_a_gerrit_note_that_shares_a_numeric_prefix`, `test_answer_does_not_repeat_a_note_the_deliverable_carries` | pass |
 
 ## Refreshing this verification
 

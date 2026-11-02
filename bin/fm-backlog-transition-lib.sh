@@ -996,7 +996,7 @@ fm_backlog_merge_fact_time_valid() {  # <timestamp>
   esac
 }
 
-# Read the record into FM_BACKLOG_MERGE_FACT_URL, _MERGED_AT, and _VERIFIED_AT.
+# Read the record into FM_BACKLOG_MERGE_FACT_URL and _VERIFIED_AT.
 # Succeeds only for a record whose every field is present and well formed, so an
 # unreadable or hand-edited file reads as unverified rather than as a merge.
 FM_BACKLOG_MERGE_FACT_URL=
