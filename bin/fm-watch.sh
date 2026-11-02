@@ -348,11 +348,10 @@ HEARTBEAT=${FM_HEARTBEAT:-600}        # base seconds between heartbeat scans
 HEARTBEAT_MAX=${FM_HEARTBEAT_MAX:-7200}  # heartbeat backoff cap
 CHECK_INTERVAL=${FM_CHECK_INTERVAL:-300}  # seconds between *.check.sh sweeps
 CHECK_TIMEOUT=${FM_CHECK_TIMEOUT:-30}     # seconds allowed per *.check.sh
-# Total per-cycle read budget for the watched-pane probe (label resolution plus
-# one agent-status read per pane) run through watcher_waited's bounded group in
-# event_wait_or_sleep. Local socket reads normally cost well under a second
-# each; the bound only fires when a read wedges, and it stays inside POLL so
-# the event wait keeps most of the cycle.
+# Read budget for the watched-pane probe and, separately, initial Herdr event
+# reconciliation when watches are present. Both use watcher_waited's bounded
+# group; reconciliation releases its bound before waiting for stream events.
+# docs/configuration.md owns the operator-facing budget and retry contract.
 FM_WATCHED_PANE_READ_SECS=${FM_WATCHED_PANE_READ_SECS:-5}
 case "$FM_WATCHED_PANE_READ_SECS" in
   ''|*[!0-9]*|0) FM_WATCHED_PANE_READ_SECS=5 ;;

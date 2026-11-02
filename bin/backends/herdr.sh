@@ -4126,10 +4126,8 @@ fm_backend_herdr_wait_transition() {  # <session> <timeout_secs> <state_dir> <pa
     rc=2
   fi
 
-  # Level reconcile on (re)connect (report section 3d): a pane already `blocked`
-  # during the gap since the last subscription is returned now, once, while
-  # newer edges accumulate in the active stream. `working` panes clear their
-  # marker here too.
+  # Reconcile current levels through the shared transition policy while newer
+  # edges accumulate in the subscribed stream.
   if [ "$rc" -ne 2 ]; then
     for w in "${windows[@]}"; do
       [ "${w%%:*}" = "$session" ] || continue
@@ -4149,12 +4147,13 @@ fm_backend_herdr_wait_transition() {  # <session> <timeout_secs> <state_dir> <pa
   fi
 
   if [ -n "${WATCHER_WAIT_BOUND_DONE:-}" ]; then
+    # Release only the read watchdog; the reader keeps its subscription budget.
     : > "$WATCHER_WAIT_BOUND_DONE"
   fi
 
-  # Drain stream edges until a fresh blocked edge or the timeout. The reader is
+  # Drain stream edges until a fresh actionable edge or the timeout. The reader is
   # a subprocess of this call (NOT a second watcher), and is killed the instant
-  # a blocked edge is found.
+  # an actionable edge is found.
   # Split each raw projected line (pane_id\tworkspace_id\tagent_status\tagent)
   # with `cut`, NOT `IFS=$'\t' read`: a tab is IFS-whitespace, so `read` would
   # collapse an empty middle field (e.g. an absent workspace_id) and shift the

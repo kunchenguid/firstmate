@@ -52,6 +52,7 @@ These variables override individual operational directories for tests and specia
 ### Operator-owned Herdr pane watches (state/watched-panes)
 
 Operator sessions without task metadata can join this home's existing supervision cycle through `bin/fm-watch-pane.sh`.
+Valid nonempty registrations keep supervision needed even when no tasks are in flight.
 Set `FM_HOME` explicitly; the CLI's `--help` owns command syntax.
 Registration validates a live Herdr session, an exact workspace label, an exact tab label, and exactly one pane in that tab.
 The registry stores one tab-separated row per watch: `session`, `workspace-label`, `tab-label`, `label`, `notify-done` (`0` or `1`).
@@ -60,17 +61,20 @@ Labels and session/workspace/tab identities must be unique within the registry.
 The script header and help own registration, replacement, removal, and listing mechanics.
 
 Firstmate resolves those labels to current pane IDs before each bounded wait, so replacing a server or pane does not require saving a new ID.
+The per-cycle identity/status probe runs inside `watcher_waited`'s recorded process group with an `FM_WATCHED_PANE_READ_SECS` budget (default 5 seconds; zero or non-digit values use 5).
+If a read hangs, the watchdog terminates that group, escalating to KILL after one second; completed rows retain their results and unfinished rows retry next cycle.
+When a Herdr event wait includes resolved watches, its initial status reconciliation has a separate budget of the same duration, released after reconciliation so the normal event subscription duration remains unchanged.
 Missing or ambiguous identities are reported to stderr and skipped rather than guessed; renamed labels require registration again.
 Any endpoint already recorded in task metadata retains its task policy, including secondmate exclusions, even if explicitly registered.
 Only Herdr watches are supported; other backends keep their existing behavior.
-The existing single connection watches one backend/session group at a time, while registered panes in every group receive level polling on the ordinary poll cadence, including when push is unavailable.
+The existing single connection watches one backend/session group at a time, while the probe attempts level polling for registrations in every group on the ordinary poll cadence, including when push is unavailable.
 Blocked states produce a durable wake naming the watch label and status; `--notify-done` also enables immediate finish notification for that watch alone.
 The transition policy and deduplication contract are owned by [`bin/fm-transition-lib.sh`](../bin/fm-transition-lib.sh).
-For an opted-in watch, changing between `blocked` and `done` can notify without an intervening `working` state; repeated readings of the last notified status are suppressed across reconnects.
-`working` rearms notification, while `idle` produces no wake and does not rearm it.
-Removing or replacing a registration retires the pane's watch-owned deduplication marker, so a re-registered pane reports its next blocked or opted-in done; a pane task metadata owns keeps its state.
+Removing or replacing a registration retires its deduplication marker if the old pane still resolves and has no task metadata; task-owned markers survive, and an unresolvable pane does not prevent idempotent removal.
+Registry mutation and watch notification commits share a lock; transitions from an outdated registry snapshot cannot publish wakes or change deduplication markers.
 Transient finish states may therefore notify for an opted-in watch; ordinary tasks continue to defer `done` to their existing completion handling.
 No command creates or closes a pane, and the operator should unregister a watch when its session ends.
+[`tests/fm-watch-pane.test.sh`](../tests/fm-watch-pane.test.sh) covers registration and marker retirement, and [`tests/fm-supervision-events.test.sh`](../tests/fm-supervision-events.test.sh) covers bounded reads and partial probe results.
 
 ### Relative paths and lifecycle safety
 
