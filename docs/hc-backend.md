@@ -115,8 +115,8 @@ The session-start sweep and the watcher's liveness tick classify the mate's term
 A terminal whose agent ended reads `dead` and is closed and removed before the respawn.
 A terminal whose program finished reads `missing` while the core still lists it under `hc ls --all` with the mate's labels and tab, so the same idempotent close removes that husk first.
 A terminal already gone is simply respawned, and an alive mate is never touched.
-The respawn is `bin/fm-spawn.sh <id> --secondmate` on the backend fm-spawn resolves, so a home hosting hc second mates sets `config/backend` to `hc`.
-[`bin/fm-secondmate-move.sh`](../bin/fm-secondmate-move.sh) `<id> --backend hc` moves an existing local mate from another local backend onto hc while keeping its home, records, and backlog; its header owns the sequence and its refusals.
+The respawn is `bin/fm-spawn.sh <id> --secondmate` on the mate's recorded backend (PR #8082), so a local hc second mate stays on hc whatever `config/backend` says.
+[`bin/fm-secondmate-move.sh`](../bin/fm-secondmate-move.sh) `<id> --backend hc` moves an existing local mate from another local backend onto hc while keeping its home, records, and backlog, and recovery then keeps it on hc because the record names hc; its header owns the sequence and its refusals.
 Lifecycle control of an hc second mate (`bin/fm-control.sh <id> exit` and `relaunch`) is governed by the control plane's per-backend capability ([capability matrix](agent-control.md#capability-matrix)), which does not list hc, so both verbs refuse an hc task of any kind; this page adds no second-mate-specific exception.
 
 ## Limits

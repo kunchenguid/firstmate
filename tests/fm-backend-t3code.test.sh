@@ -2448,6 +2448,46 @@ fm_secondmate_liveness_relaunch "$1" smfail && echo relaunched=yes || echo relau
   pass "secondmate liveness backend=t3code: a failed run is resumed on its own thread, never archived and replaced"
 }
 
+# Moving a secondmate whose T3 run failed never resumes it in place: the
+# thread is archived with a proven close and the mate is respawned on the
+# move's target backend; an unproved close spawns nothing.
+test_failed_t3_secondmate_move_archives_before_respawn_on_target() {
+  local thread=mcp:2c3d4e5f-6a7b-4c8d-9e0f-89abcdef0123 root out
+  t3_case secondmate-failed-move failed
+  t3_world "$(t3_thread_json "$thread" failed false)"
+  root="$CASE_DIR/fake-root"
+  mkdir -p "$root/bin"
+  printf '#!/usr/bin/env bash\nprintf "SPAWN %%s\\n" "$*" >> "%s"\n' "$CASE_DIR/spawns" > "$root/bin/fm-spawn.sh"
+  chmod +x "$root/bin/fm-spawn.sh"
+  run_move_relaunch() {  # <state-dir>
+    mkdir -p "$1"
+    fm_write_meta "$1/smmove.meta" "window=fm-smmove" "kind=secondmate" "harness=claude" "backend=t3code" "t3_thread_id=$thread" "home=$CASE_DIR/sm-home"
+    STATE="$1" FM_STATE_OVERRIDE="$1" FM_CONFIG_OVERRIDE="$CONFIG" FM_HOME="$CASE_DIR/home" FM_ROOT_OVERRIDE="$root" bash -c '
+. "$0/bin/fm-secondmate-liveness-lib.sh"
+fm_secondmate_liveness_probe "$1" smmove poll
+printf "probe=%s resume=%s\n" "$FM_SM_LIVE_STATUS" "$FM_SM_LIVE_RESUME"
+fm_secondmate_liveness_relaunch "$1" smmove "" hc && echo relaunched=yes || echo "relaunched=no status=$FM_SM_LIVE_STATUS reason=$FM_SM_LIVE_REASON"
+' "$ROOT" "$1/smmove.meta" 2>&1
+  }
+  out=$(run_move_relaunch "$CASE_DIR/state-ok")
+  assert_contains "$out" "probe=relaunchable resume=1" "a failed T3 run probes as resumable: $out"
+  assert_contains "$out" "relaunched=yes" "a proven archive lets the move's respawn run: $out"
+  [ "$(t3_dispatch_types)" = t3_thread_organize ] || fail "a move must archive the thread and never send it a resume turn, got '$(t3_dispatch_types)'"
+  [ "$(t3_request "$(t3_log_line_of 'r.tool === "t3_thread_organize"')" 'r.arguments.action')" = archive ] || fail "the move closes the thread by archiving it"
+  assert_grep "SPAWN smmove --secondmate --backend hc" "$CASE_DIR/spawns" "the respawn lands on the move's target backend"
+  assert_grep relaunched "$CASE_DIR/state-ok/.secondmate-relaunch-smmove" "the move is recorded in the relaunch ledger"
+  : > "$CASE_DIR/spawns"
+  : > "$LOG"
+  t3_world "$(t3_thread_json "$thread" failed false)"
+  t3_world_set 'w.failTools = { t3_thread_organize: { code: "boom", message: "archive failed" } }'
+  out=$(run_move_relaunch "$CASE_DIR/state-fail")
+  assert_contains "$out" "relaunched=no status=skipped reason=could not prove the old t3code endpoint $thread closed" "an unproved close must stop the move: $out"
+  [ ! -s "$CASE_DIR/spawns" ] || fail "no respawn may run after an unproved close, got $(cat "$CASE_DIR/spawns")"
+  assert_not_contains "$(t3_dispatch_types)" t3_thread_send "a refused move must not resume the thread either"
+  assert_grep "t3_thread_id=$thread" "$CASE_DIR/state-fail/smmove.meta" "the endpoint record is kept"
+  pass "secondmate move backend=t3code: a failed run is archived with a proven close and respawned on the target, never resumed in place"
+}
+
 # A secondmate whose thread was archived while its run still drains is not
 # proven closed: recovery leaves it in place instead of launching a second
 # supervisor beside the draining one.
@@ -2756,6 +2796,7 @@ test_status_table
 test_push_wait_escalates_pending_question_once
 test_answer_script_reads_and_answers_questions
 test_failed_t3_secondmate_is_resumed_in_place
+test_failed_t3_secondmate_move_archives_before_respawn_on_target
 test_t3_secondmate_missing_thread_reproves_close_before_replacement
 test_daemon_unconfirmed_digest_is_frozen_and_retried_verbatim
 test_frozen_flush_keeps_the_next_generation_arrival

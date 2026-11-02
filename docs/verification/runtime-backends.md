@@ -3654,7 +3654,7 @@ Refresh the second-mate proof with:
 bin/fm-test-run.sh tests/fm-backend-hc-secondmate-smoke.test.sh
 ```
 
-The guard runs a real `bin/fm-spawn.sh <id> <home> --secondmate --backend hc` with a token-free stand-in named for a verified adapter, reads the terminal's labels through the lab core, then drives `bin/fm-secondmate-liveness-lib.sh` through a dead agent, a finished terminal, and an alive mate with the home's `config/backend` set to `hc`.
+The guard runs a real `bin/fm-spawn.sh <id> <home> --secondmate --backend hc` with a token-free stand-in named for a verified adapter, reads the terminal's labels through the lab core, then drives `bin/fm-secondmate-liveness-lib.sh` through a dead agent, a finished terminal, and an alive mate, whose recovery respawns keep the mate on its recorded backend `hc` (PR #8082).
 Observed guard output:
 
 ```text
