@@ -1130,6 +1130,114 @@ startup_supervision_needed() { # <home>
   ' _ "$ROOT/bin/fm-supervision-lib.sh" "$1/state"
 }
 
+# Every session start reserves a generation, so retention has to be bounded:
+# settled and superseded completions are removed, while anything an actor can
+# still reach - the current generation, a queued wake's generation, and the
+# newest unsettled results - is preserved. Unknown shapes are never touched.
+test_retained_results_are_pruned_but_live_obligations_are_kept() {
+  local rec home root log generation
+  rec=$(new_world bounded-retention)
+  IFS='|' read -r home root log <<< "$rec"
+  seed() { # <generation> [settled-kind]
+    local g=$1 kind=${2:-}
+    mkdir -p "$home/state/.startup-network-results/$g"
+    printf 'generation=%s\nstate=done\nfinished=1\n' "$g" \
+      > "$home/state/.startup-network-results/$g/status"
+    printf 'ACTIONABLE_%s\n' "$g" > "$home/state/.startup-network-results/$g/report"
+    [ -z "$kind" ] || printf '%s:%s\n' "$kind" "$g" > "$home/state/.startup-network-results/$g/settled"
+  }
+  printf 'state=running\ngeneration=1500.1.1\n' > "$home/state/.startup-network.status"
+  seed 1500.1.1 # current, still unsettled
+  seed 1400.1.1 clean
+  seed 1300.1.1 inline
+  seed 1200.1.1 # queued below
+  seed 1100.1.1 # unsettled grace 1
+  seed 1000.1.1 # unsettled grace 2
+  seed 900.1.1 #  unsettled grace 3
+  seed 800.1.1 #  unsettled past the grace window
+  seed 700.1.1
+  mkdir -p "$home/state/.startup-network-wake-receipts"
+  printf '700.1.1\n' > "$home/state/.startup-network-wake-receipts/700.1.1"
+  printf '1500.1.1\n' > "$home/state/.startup-network-wake-receipts/1500.1.1"
+  printf '1\t1\tcheck\tstartup-network:1200.1.1\tcheck: startup-network: actionable\n' \
+    > "$home/state/.wake-queue"
+  # Shapes the cleanup must decline to interpret rather than delete or follow.
+  mkdir -p "$home/state/.startup-network-results/not-a-generation"
+  mkdir -p "$home/state/.startup-network-results/0600.1.1" # no report: incomplete
+  printf 'generation=0600.1.1\nstate=done\n' > "$home/state/.startup-network-results/0600.1.1/status"
+  mkdir -p "$home/detached"
+  ln -s "$home/detached" "$home/state/.startup-network-results/0500.1.1"
+
+  run_stage "$home" "$root" prune || fail "the retention pass failed"
+
+  for generation in 1500.1.1 1200.1.1 1100.1.1 1000.1.1 900.1.1; do
+    [ -d "$home/state/.startup-network-results/$generation" ] \
+      || fail "retention removed $generation, which an actor can still reach"
+  done
+  for generation in 1400.1.1 1300.1.1 800.1.1 700.1.1; do
+    [ ! -e "$home/state/.startup-network-results/$generation" ] \
+      || fail "retention kept retired generation $generation"
+  done
+  [ -f "$home/state/.startup-network-wake-receipts/700.1.1" ] \
+    && fail "a pruned generation kept its wake receipt"
+  [ -f "$home/state/.startup-network-wake-receipts/1500.1.1" ] \
+    || fail "retention removed the current generation's wake receipt"
+  assert_contains "$(cat "$home/state/.wake-queue")" "startup-network:1200.1.1" \
+    "retention consumed a queued wake row"
+  [ -d "$home/state/.startup-network-results/not-a-generation" ] \
+    || fail "retention deleted a directory it could not identify"
+  [ -d "$home/state/.startup-network-results/0600.1.1" ] \
+    || fail "retention deleted an incomplete completion"
+  [ -L "$home/state/.startup-network-results/0500.1.1" ] \
+    || fail "retention followed or removed a symlinked completion"
+  [ -d "$home/detached" ] || fail "retention deleted a symlink target"
+
+  # Idempotent: a second pass finds nothing further to remove.
+  run_stage "$home" "$root" prune || fail "the second retention pass failed"
+  for generation in 1200.1.1 1100.1.1 1000.1.1 900.1.1; do
+    [ -d "$home/state/.startup-network-results/$generation" ] \
+      || fail "a repeated retention pass removed $generation"
+  done
+  pass "fm-startup-network: retention bounds completed results and keeps every live obligation"
+}
+
+test_retained_results_are_pruned_but_live_obligations_are_kept
+
+# The pass has to run on its own, not only when an operator asks: a reservation
+# supersedes the previous generation and a settlement retires the current one.
+test_settling_a_run_prunes_the_generations_it_retired() {
+  local rec home root log claimant generation
+  rec=$(new_world settlement-prunes)
+  IFS='|' read -r home root log <<< "$rec"
+  mkdir -p "$home/state/.startup-network-results/1000.1.1" \
+    "$home/state/.startup-network-wake-receipts"
+  printf 'generation=1000.1.1\nstate=done\nfinished=1\n' \
+    > "$home/state/.startup-network-results/1000.1.1/status"
+  printf 'ACTIONABLE_OLD\n' > "$home/state/.startup-network-results/1000.1.1/report"
+  printf 'clean:1000.1.1\n' > "$home/state/.startup-network-results/1000.1.1/settled"
+  printf '1000.1.1\n' > "$home/state/.startup-network-wake-receipts/1000.1.1"
+
+  sleep 10 &
+  claimant=$!
+  FM_SESSION_START_TIMEOUT=4 FM_FAKE_BOOTSTRAP_LOG="$log" \
+    run_stage "$home" "$root" start --locked 0 --harvest-pid "$claimant"
+  run_stage "$home" "$root" wait 30 >/dev/null || fail "the successful worker never published"
+  kill "$claimant" 2>/dev/null || true
+  wait "$claimant" 2>/dev/null || true
+
+  [ ! -e "$home/state/.startup-network-results/1000.1.1" ] \
+    || fail "a settled superseded generation survived the next run"
+  [ ! -e "$home/state/.startup-network-wake-receipts/1000.1.1" ] \
+    || fail "a settled superseded generation kept its wake receipt"
+  generation=$(sed -n 's/^generation=//p' "$home/state/.startup-network.status")
+  [ -n "$generation" ] || fail "the run left no current generation"
+  [ -d "$home/state/.startup-network-results/$generation" ] \
+    || fail "the run pruned its own retained completion"
+  pass "fm-startup-network: reservation and settlement prune the generations they retire"
+}
+
+test_settling_a_run_prunes_the_generations_it_retired
+
 test_running_and_refused_records_have_correct_supervision() {
   local rec home root log worker waited=0 pid
   rec=$(new_world running-supervision)
