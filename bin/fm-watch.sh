@@ -1874,7 +1874,7 @@ wedge_defer_validating() {  # <window> <since-file> <triage-label> <idle-age> <t
 # OFF unless the home creates config/wedge-escalate-unacted-gate: absent the flag
 # the status file and crew state are never read here and the ladder is unchanged.
 # The crew-state read is the costly one, so it runs only after the cheap
-# status-file checks pass. On success it prints `<run-id> <parked|done|failed>`.
+# status-file checks pass. On success it prints `<run-id> <parked|done|failed> <gate>`.
 wedge_gate_unacted() {  # <task> -> "<run-id> <state>" on stdout
   local task=$1 statusf last verb=''
   [ -e "$CONFIG/wedge-escalate-unacted-gate" ] || return 1
@@ -1887,6 +1887,10 @@ wedge_gate_unacted() {  # <task> -> "<run-id> <state>" on stdout
   last=$(last_status_line "$statusf")
   status_line_verb "$last" verb
   case "$verb" in done|failed) return 1 ;; esac
+  # A declared wait (open backlog captain hold, or the worker's own newest
+  # blocked:/needs-decision: line) is the worker accounting for itself.
+  task_captain_call_open "$task" && return 1
+  status_worker_wait_verb "$statusf" >/dev/null && return 1
   crew_run_gate_unacted "$task"
 }
 
@@ -1916,6 +1920,7 @@ wedge_gate_unacted_poll() {  # <window> <task>
 
 wedge_gate_unacted_reason() {  # <window> <verdict>
   local run=${2%% *} state=${2#* }
+  state=${state%% *}
   case "$state" in
     parked) state='parked at a gate awaiting a response' ;;
     *) state="reached a terminal outcome ($state)" ;;

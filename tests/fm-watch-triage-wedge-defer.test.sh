@@ -1071,6 +1071,8 @@ test_wedge_threshold_unacted_gate_ignores_acted_or_ineligible_lanes() {
     'done-logged|done: ready|2000|state: done · source: run-step · checks green: PR ready for review · run: 01R' \
     'paused|paused: waiting on a release|2000|state: parked · source: run-step · parked at awaiting_approval: 2 finding(s) · run: 01R' \
     'human-owed|working: handed to validation|2000|state: parked · source: run-step · parked at awaiting_approval: 1 finding(s) · ask-user: authority decision · run: 01R' \
+    'declared-blocker|blocked: need the API key for the staging account|2000|state: parked · source: run-step · parked at awaiting_approval: 2 finding(s) · run: 01R' \
+    'declared-decision|needs-decision: which API shape to ship|2000|state: parked · source: run-step · parked at awaiting_approval: 2 finding(s) · run: 01R' \
     'executing|working: handed to validation|2000|state: working · source: run-step · validating (running) · run: 01R'; do
     IFS='|' read -r name log age verdict <<< "$spec"
     dir=$(wedge_threshold_fixture "unacted-skip-$name" "$log" "$age" 1000)
@@ -1085,6 +1087,37 @@ test_wedge_threshold_unacted_gate_ignores_acted_or_ineligible_lanes() {
       && fail "a $name lane was reported as unacted: $(cat "$out")"
   done
   pass "an acted-on, declared, human-owed or executing lane is never reported as an unacted result"
+}
+
+# A different gate of the same run is a different signal even with no negative
+# check in between, and an open backlog captain hold is a declared wait.
+test_wedge_threshold_unacted_gate_distinguishes_gates_and_honours_a_captain_hold() {
+  local dir state fakebin out capture window
+  local first='state: parked · source: run-step · parked at awaiting_approval: 2 finding(s) · run: 01RUNGATE'
+  local second='state: parked · source: run-step · parked at fix_review: 1 finding(s) · run: 01RUNGATE'
+  window="test:fm-wedge"
+  dir=$(wedge_threshold_fixture unacted-two-gates 'working: handed to validation' 2000)
+  arm_unacted_gate "$dir"
+  state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"; capture="$dir/pane.txt"
+  wedge_threshold_round "$state" "$fakebin" "$out" "$capture" "$window" "$first" exit     || fail "the first gate never woke firstmate: $(cat "$out")"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the first gate wake"
+  : > "$out"
+  wedge_threshold_round "$state" "$fakebin" "$out" "$capture" "$window" "$second" exit     || fail "a later gate of the same run was silenced: $(cat "$out")"
+  grep -F 'has not acted on it' "$out" >/dev/null \
+    || fail "the later gate was not reported as unacted: $(cat "$out")"
+
+  command -v tasks-axi >/dev/null 2>&1 \
+    || { echo "skip: tasks-axi not found (captain hold half)"; pass "a later gate of the same run is reported again"; return 0; }
+  dir=$(backlog_hold_wedge_fixture unacted-captain-hold 2000 1000) \
+    || fail "could not build a backlog captain-hold fixture"
+  arm_unacted_gate "$dir"
+  state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"; capture="$dir/pane.txt"
+  FM_HOME="$dir" FM_DATA_OVERRIDE="$dir/data" FM_TEST_STALE_ESCALATE=600 \
+    wedge_threshold_round "$state" "$fakebin" "$out" "$capture" "$window" "$first" exit \
+    || fail "a captain-held lane never reached the at-threshold consult: $(cat "$out")"
+  grep -F 'has not acted on it' "$out" >/dev/null \
+    && fail "a lane under an open captain hold was reported as unacted: $(cat "$out")"
+  pass "a later gate of the same run is reported again and an open captain hold is never unacted"
 }
 
 # Absent the flag the ladder is unchanged.
@@ -1126,4 +1159,5 @@ fm_test_run \
   test_wedge_threshold_unacted_gate_wakes_again_after_the_run_moves_on \
   test_wedge_gate_unacted_poll_wakes_throttles_and_rearms \
   test_wedge_threshold_unacted_gate_ignores_acted_or_ineligible_lanes \
+  test_wedge_threshold_unacted_gate_distinguishes_gates_and_honours_a_captain_hold \
   test_wedge_threshold_unacted_gate_is_off_until_armed

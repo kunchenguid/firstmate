@@ -2705,10 +2705,12 @@ crew_run_is_validating() {  # <id> -> "<run-id> <step>" on stdout
 # one proves the round is over and the pipeline is waiting on the worker.
 # A gate whose findings table owes the answer to a human (FM_GATE_HUMAN_DECISION)
 # is excluded because that wait belongs to firstmate and is wedge_wait_evidence's
-# to account for. On success it prints `<run-id> <parked|done|failed>`.
+# to account for. On success it prints `<run-id> <parked|done|failed> <detail>`,
+# where <detail> is the first component after the source (the gate or outcome
+# text), so a later gate of the same run is a different value from an earlier one.
 # Same cost and caveat as crew_run_is_validating: one fm-crew-state.sh read.
 crew_run_gate_unacted() {  # <id> -> "<run-id> <state>" on stdout
-  local id=$1 line state src rest part run=''
+  local id=$1 line state src rest part run='' detail='' seen_src=0
   [ -n "$id" ] || return 1
   line=$("$FM_CREW_STATE_BIN" "$id" 2>/dev/null) || true
   case "$line" in state:*) ;; *) return 1 ;; esac
@@ -2721,11 +2723,15 @@ crew_run_gate_unacted() {  # <id> -> "<run-id> <state>" on stdout
     part=${rest%% · *}
     rest=${rest#* · }
     [ "$part" = "$FM_GATE_HUMAN_DECISION" ] && return 1
-    case "$part" in "run: "?*) run=${part#run: } ;; esac
+    case "$part" in
+      "run: "?*) run=${part#run: } ;;
+      "source: "*) seen_src=1 ;;
+      *) if [ "$seen_src" = 1 ] && [ -z "$detail" ]; then detail=$part; fi ;;
+    esac
   done
   [ -n "$run" ] || return 1
   case "$run" in *[[:space:]]*) return 1 ;; esac
-  printf '%s %s\n' "$run" "$state"
+  printf '%s %s %s\n' "$run" "$state" "$detail"
 }
 
 # Directories excluded from the worktree write probe below, and the depth it walks.
