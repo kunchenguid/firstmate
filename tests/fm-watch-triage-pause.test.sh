@@ -584,8 +584,6 @@ test_live_paused_until_controls_recheck_time() {
 # The backlog is real rather than a fixture file: bin/fm-captain-hold.sh is the
 # only writer of a hold and tasks-axi the only reader, so a hand-written row
 # would pin this test's idea of a hold instead of the one the watcher consults.
-# These four cases require tasks-axi on PATH and fail if it is absent, so a
-# missing backlog reader cannot turn unexercised safety checks into a green run.
 #
 # Cost: every case below drives churn through ONE watcher process rather than
 # relaunching per pane change. Watcher startup dominates a round here, and an

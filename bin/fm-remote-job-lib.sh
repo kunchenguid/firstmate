@@ -968,15 +968,18 @@ fm_remote_job_worker_identity_path() { printf '%s\n' "$FM_REMOTE_JOB_STATE/worke
 fm_remote_job_worker_lock_path() { printf '%s\n' "$FM_REMOTE_JOB_STATE/worker.lock"; }
 
 # The start identity every owner record in this library compares against. A
-# Linux-compatible /proc yields "proc-starttime=<ticks>" from stat field 22,
-# which is immune to the wall-clock and boot-time steps that re-render ps lstart
-# for one live process (observed on WSL2); the prefix keeps it from ever equaling
-# a legacy lstart date string. Capability-detect the file rather than keying on
-# uname, matching fm_pid_identity, and fall back to LC_ALL=C ps lstart where
-# /proc is absent (macOS), so a lock recorded under one locale still verifies
-# under another. FM_PROC_ROOT_OVERRIDE points tests at a fake /proc.
+# Linux-compatible /proc yields "boot=<boot-id> proc-starttime=<ticks>" from
+# stat field 22, which is immune to the wall-clock and boot-time steps that
+# re-render ps lstart for one live process (observed on WSL2), and the boot id
+# keeps a pid reused after a reboot from matching an earlier owner. The prefix
+# keeps the identity from ever equaling a legacy lstart date string.
+# Capability-detect the file rather than keying on uname, matching
+# fm_pid_identity, and fall back to LC_ALL=C ps lstart where /proc is absent
+# (macOS), joining its boot identity from boot_id or kern.boottime, so a lock
+# recorded under one locale still verifies under another.
+# FM_PROC_ROOT_OVERRIDE points tests at a fake /proc.
 fm_remote_job_process_start() {
-  local pid=$1 proc_root stat_line starttime ps_bin value
+  local pid=$1 proc_root stat_line starttime ps_bin value boot
   local -a stat_fields
   case "$pid" in ''|*[!0-9]*) return 1 ;; esac
   proc_root=${FM_PROC_ROOT_OVERRIDE:-/proc}
@@ -987,31 +990,44 @@ fm_remote_job_process_start() {
     [ "${#stat_fields[@]}" -ge 20 ] || return 1
     starttime=${stat_fields[19]}
     case "$starttime" in ''|*[!0-9]*) return 1 ;; esac
-    printf 'proc-starttime=%s\n' "$starttime"
+    boot=$(cat "$proc_root/sys/kernel/random/boot_id" 2>/dev/null) || return 1
+    case "$boot" in ''|*[!a-zA-Z0-9-]*) return 1 ;; esac
+    printf 'boot=%s proc-starttime=%s\n' "$boot" "$starttime"
     return 0
   fi
-  if [ -x /bin/ps ]; then ps_bin=/bin/ps; elif [ -x /usr/bin/ps ]; then ps_bin=/usr/bin/ps; else return 1; fi
+  if [ -x /bin/ps ]; then ps_bin=/bin/ps; elif [ -x /usr/bin/ps ]; then ps_bin=/usr/bin/ps; else ps_bin=$(command -v ps) || return 1; fi
   value=$(LC_ALL=C "$ps_bin" -p "$pid" -o lstart= 2>/dev/null) || return 1
   [ -n "$value" ] || return 1
   case "$value" in *$'\n'*|*$'\r'*) return 1 ;; esac
-  printf '%s\n' "$value"
+  boot=$(cat "$proc_root/sys/kernel/random/boot_id" 2>/dev/null) || boot=$(sysctl -n kern.boottime 2>/dev/null) || return 1
+  [ -n "$boot" ] || return 1
+  printf 'boot=%s ps-start=%s\n' "$boot" "$value"
 }
 
 # True when <recorded-start> still names the live process at <pid>.
-# New records match fm_remote_job_process_start exactly (proc-starttime on
-# Linux, LC_ALL=C lstart where /proc is absent). Legacy records lack the
-# proc-starttime= prefix; compare them against both C-locale and ambient-locale
-# ps lstart so a healthy pre-update worker still verifies and the
-# code-identity path can stop and replace it once, instead of piling supervisors.
+# New records match fm_remote_job_process_start exactly (boot-scoped
+# proc-starttime on Linux, boot-scoped LC_ALL=C lstart where /proc is absent).
+# A pre-boot record carrying only proc-starttime=<ticks> matches those same
+# ticks, and older records without that prefix are compared against both
+# C-locale and ambient-locale ps lstart, so a healthy pre-update worker still
+# verifies and the code-identity path can stop and replace it once, instead of
+# piling supervisors.
 fm_remote_job_start_matches() { # <recorded-start> <pid>
   local recorded=$1 pid=$2 actual ps_bin value
   case "$pid" in ''|*[!0-9]*) return 1 ;; esac
   [ -n "$recorded" ] || return 1
   if actual=$(fm_remote_job_process_start "$pid" 2>/dev/null); then
     [ "$recorded" = "$actual" ] && return 0
-    case "$recorded" in proc-starttime=*) return 1 ;; esac
+    case "$recorded" in
+      proc-starttime=*)
+        case "$actual" in
+          boot=*' proc-starttime='*) [ "$recorded" = "${actual#* }" ]; return $? ;;
+        esac
+        return 1 ;;
+      boot=*) return 1 ;;
+    esac
   else
-    case "$recorded" in proc-starttime=*) return 1 ;; esac
+    case "$recorded" in boot=*|proc-starttime=*) return 1 ;; esac
   fi
   if [ -x /bin/ps ]; then ps_bin=/bin/ps; elif [ -x /usr/bin/ps ]; then ps_bin=/usr/bin/ps; else return 1; fi
   if value=$(LC_ALL=C "$ps_bin" -p "$pid" -o lstart= 2>/dev/null); then
@@ -1218,7 +1234,7 @@ fm_remote_job_probe() { # <account-home>; require a fresh heartbeat outside an a
 fm_remote_job_wait_for_probe() { # <remote-root> <account-home>
   local root=$1 account_home=$2 i=0
   while [ "$i" -lt 200 ]; do
-    fm_remote_job_probe "$account_home" && fm_remote_job_worker_identity_matches "$root" "$account_home" && return 0
+    fm_remote_job_worker_owned_alive "$root" "$account_home" && fm_remote_job_worker_identity_matches "$root" "$account_home" && return 0
     i=$((i + 1))
     sleep 0.1
   done

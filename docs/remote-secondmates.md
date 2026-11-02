@@ -21,9 +21,12 @@ Firstmate does not support placing an individual worker remotely or failing a re
 
 ## Where the remote agent runs
 
-The remote second-mate agent runs on one of two session-provider backends, selected per launch.
+The remote second-mate agent itself runs on one of two session-provider backends, selected per launch.
 [Launch selection and placement](#launch-or-recover) define the backend contract.
 Provisioning checks any available supported backend; launch checks the selected one.
+By default a Herdr route uses the shared `fm-remote` session; for isolated validation the host controller also accepts an explicit owned lab session, and its [`header`](../bin/fm-remote-secondmate-control.sh) owns the input and allowed names.
+A route recorded under an `fm-lab-*` session resolves its predecessor and relaunches on that same recorded session instead of the default; such an endpoint answers only on the session it was recorded under, so the [relaunch contract](#relaunch-a-live-remote-second-mate) carries it into both host calls.
+Every path that provisions or launches one refuses a host that is not ready for it.
 
 - `fm-remote` is reserved for remote fleet work and must not be used for personal work.
 - The user's interactive Herdr session remains `default` and is not a remote-secondmate prerequisite.
@@ -450,28 +453,25 @@ Without an explicit backend, a later launch or liveness recovery preserves the p
 An existing endpoint on a different backend is refused rather than migrated.
 Placement is per backend:
 
-- Herdr: all remote secondmates on one host share `fm-remote` and retain separate `2ndmate-<id>` workspaces inside it.
+- Herdr: remote secondmates on one host share `fm-remote` and retain separate `2ndmate-<id>` workspaces inside it.
 - Rex: each remote secondmate home gets its own `2ndmate-<id>-<hash>` session on the host's persistent personal rex server, the same placement rule a local secondmate home uses.
 
 ### Refused and unsupported launches
 
 - An explicit request for any backend other than herdr or rex is refused rather than honored, and the remote host refuses one too.
-- An existing remote endpoint recorded outside its backend's contract - a Herdr session other than `fm-remote`, or a Rex route whose recorded server is not a local `unix://` endpoint - is classified as unverified and left untouched.
-  Launch, liveness recovery, control, and retirement refuse it until an operator explicitly migrates it, instead of attempting a live cutover.
+- An existing remote endpoint recorded outside its backend's contract - a Herdr session other than the one its caller expects (`fm-remote`, or the owned `fm-lab-*` session its route records), or a Rex route whose recorded server is not a local `unix://` endpoint - is classified as unverified and left untouched.
+  Launch, liveness recovery, and control refuse it until an operator explicitly migrates it, instead of attempting a live cutover; only the calls that carry the recorded session, the [relaunch contract](#relaunch-a-live-remote-second-mate) and retirement, reach a lab route.
+- A Rex launch reply is judged on its own route metadata whatever endpoint the host already records: a server other than a host-local `unix://` endpoint, or a target whose session half is not the reported session, fails as a route refusal at admission, before the launch can be treated as one whose completion is unknown, and the recorded route is preserved.
 - A launch after a host has drifted out of readiness fails with the doctor's own gap text instead of leaving a half-created endpoint.
 - Raw launch commands are not accepted for remote secondmates.
 - Backends that already refuse secondmate launch, currently Orca, cmux, and paseo, remain unsupported on the remote host.
 
 ### Liveness recovery
 
-Startup liveness recovery relaunches a dead or missing remote second mate through this same command.
+Startup liveness recovery uses this same command when the shared recovery owner authorizes replacement.
 So recovery passes the same readiness gate rather than a weaker one.
 
-The watcher's liveness tick applies the identical rule during ordinary supervision through the shared `bin/fm-secondmate-liveness-lib.sh`:
-
-- The remote endpoint is probed read-only once per cadence.
-- Only a positive `dead` or `missing` reply relaunches through that command.
-- An unreachable transport or inconclusive state is left untouched rather than replaced locally.
+The watcher's liveness tick uses the same [`bin/fm-secondmate-liveness-lib.sh`](../bin/fm-secondmate-liveness-lib.sh), whose header owns generation-bound authorization, read-only remote probes, and refusal to replace an uncertain remote locally.
 
 ### Inventory reconcile for markerless routes
 
@@ -672,7 +672,12 @@ The primary passes `<harness> <model|default|-> <effort|default|->` explicitly, 
 It passes them explicitly because `config/secondmate-harness` is not inherited into a second mate's home, and the file on that host belongs to a different home.
 Letting the far side re-resolve it would silently move the mate onto another runtime.
 SSH exit 255 leaves completion unknown and the route preserved, exactly as every other verb here.
-Move a live remote second mate onto a newly pinned harness, model, or effort with [`bin/fm-remote-secondmate-relaunch.sh`](../bin/fm-remote-secondmate-relaunch.sh) rather than calling `relaunch` through `fm-on.sh` directly: the host-local relaunch it drives can only rewrite the host's own endpoint record, so this wrapper reads the confirmed identity back from that record afterward and republishes the primary's own route metadata to match, the same way launch already records a fresh route.
+Move a live remote second mate onto a newly pinned harness, model, or effort with [`bin/fm-remote-secondmate-relaunch.sh`](../bin/fm-remote-secondmate-relaunch.sh) rather than calling `relaunch` through `fm-on.sh` directly: the wrapper reads the confirmed identity back from the host's endpoint record and republishes the registering parent's route metadata to match.
+The [fleet seat contract](configuration.md#fleet-seat-pools-configfleet-seats) owns the parent-accounting prerequisite, including nested remote routes.
+[`bin/fm-secondmate-restart.sh`](../bin/fm-secondmate-restart.sh)'s header owns persistence-gated restart and the re-read fallback when the original incarnation cannot safely be replaced.
+A remote mate provisioned before `remote_spawn_gen` was recorded stays nudge-only during updates until one manual relaunch through `bin/fm-remote-secondmate-relaunch.sh` writes that generation into the primary's record.
+A relaunch replaces the generation the host's own record names, so a replacement that reached the host but was cancelled before it confirmed a startup still becomes the predecessor, while a launch that never reached the host leaves the older generation in place.
+The wrapper's header and [`bin/fm-remote-secondmate-control.sh`](../bin/fm-remote-secondmate-control.sh)'s header own the operation token and host outcome mechanics.
 
 ### Firstmate code convergence
 
@@ -699,14 +704,23 @@ It refuses while any of these holds:
 - The primary has an unfinished backlog outbox.
 - A routed reply remains unresolved.
 
-Herdr retirement closes only the retiring secondmate's panes or `2ndmate-<id>` workspace in `fm-remote`, never the shared session or a sibling's workspace or panes.
+Herdr retirement closes only the retiring secondmate's panes or `2ndmate-<id>` workspace in that route's recorded session - `fm-remote` by default, or the owned `fm-lab-*` session it was recorded under - never the shared session or a sibling's workspace or panes.
+Retirement carries the recorded lab session into the host call, and both a pending retry and a completed replay must name the session the route was recorded under; evidence written for another session refuses instead of reconciling.
 Rex retirement follows the [recorded-block and empty-session cleanup contract](rex-backend.md#cleanup-and-the-absence-proof), never stopping the shared server.
 SSH exit 255 preserves both the route and local records because completion is unknown.
+The [fleet seat contract](configuration.md#fleet-seat-pools-configfleet-seats) owns counted-generation retention during retirement.
+If accounting fails after host retirement, the primary retains its route and local records for reconciliation; the remote home may already be removed.
+A retry for the same generation replays the host's retained destruction result, including a lost-slot exit, without touching a successor at the reused home path.
+A retry that finds the home still present without a parent-route record proving it belongs to that generation refuses instead of removing it.
+Before the host removes anything it publishes a durable pending record for that exact generation and route; a record that cannot be published refuses the retirement, so no home is deleted behind evidence that could never be produced.
+Both seed commands refuse that id while the owning home still holds its retirement evidence, so a retry never races a fresh route or home at the reused id.
+A retirement interrupted after the home is gone republishes its evidence from that pending record on the same generation's retry, after proving the recorded endpoint absent again.
+The primary retains matching evidence before local cleanup so cleanup or accounting failures can resume without another host retirement.
 `--force` remains the explicit discard path and requires the same captain authority as local secondmate discard.
 
 No generic remote delete or write surface exists:
 
-- Remote writes are confined to inherited allowlist files and backlog handoff scratch files.
+- Remote file transfers are confined to inherited allowlist files and backlog handoff scratch files; lifecycle commands own their operational records.
 - Remote home removal is reachable only through guarded secondmate retirement.
 
 ## Verification
@@ -747,6 +761,9 @@ bin/fm-test-run.sh tests/fm-remote-backlog-handoff.test.sh
 bin/fm-test-run.sh tests/fm-remote-secondmate-lifecycle-e2e.test.sh
 bin/fm-test-run.sh tests/fm-remote-secondmate-omp.test.sh
 bin/fm-test-run.sh tests/fm-remote-secondmate-trace-context.test.sh
+bin/fm-test-run.sh tests/fm-remote-generation.test.sh
+bin/fm-test-run.sh tests/fm-remote-seat-adoption.test.sh
+bin/fm-test-run.sh tests/fm-teardown-remote-finalization.test.sh
 ```
 
 ### What the portable tests cannot prove

@@ -6,6 +6,8 @@ set -u
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
+. "$ROOT/bin/fm-timeout-lib.sh"
+
 fm_git_identity fmtest fmtest@example.invalid
 
 TMP_ROOT=$(fm_test_tmproot fm-record-export-remote-home)
@@ -54,7 +56,7 @@ run_remote_teardown() {  # <home> <output-prefix>
   FM_DATA_OVERRIDE="$home/data" \
   FM_CONFIG_OVERRIDE="$home/config" \
   PATH="$base/fakebin:$PATH" \
-    timeout 30 "$ROOT/bin/fm-teardown.sh" "$TASK" > "$output.out" 2> "$output.err"
+    fm_run_timed 30 "$ROOT/bin/fm-teardown.sh" "$TASK" > "$output.out" 2> "$output.err"
 }
 
 test_remote_home_teardown_commits_before_deleting() {

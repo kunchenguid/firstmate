@@ -127,6 +127,8 @@ Exact call payloads are owned by `bin/fm-t3-mcp.mjs` and `bin/backends/t3code.sh
 
 `fm-peek.sh` renders the newest items of the thread's activity view as `[type/status] text` lines followed by a `t3code: status=<status> run=<active run>` line.
 T3 pages that view oldest first, so the helper starts from the thread's visible item count to read the tail.
+When the [fleet seat ledger](configuration.md#fleet-seat-pools-configfleet-seats) accounts for the endpoint, a turn is refused as proven non-delivery unless every incarnation recorded for that endpoint is still `reserved` or `confirmed`, so a released or reclaimed generation is never resumed and needs a fresh launch instead.
+A secondmate turn to an accounted endpoint also holds that mate's supervisor lifecycle episode, so it is refused while another lifecycle operation on that mate is active.
 An ordinary metadata-routed `fm-send.sh` text steer becomes a durable steering-inbox record, and its doorbell is a `t3_thread_send` in `auto` mode, which starts an idle thread's next turn or steers the running one.
 T3 derives the message id from the client request id within the auth session that sent it and commits a send before it replies, so retries must reuse that id, under the same sign-in, to reach the message T3 already committed.
 For ordinary sends and doorbells, the adapter reuses the id stored in a record keyed by thread and text for up to 60 minutes from creation, ending that delivery earlier on confirmation or a typed send refusal.
@@ -173,7 +175,9 @@ When the thread id is known, the helper archives it and reports its id and wheth
 An unproven launch-brief outcome (a lost reply or a T3 error that can follow a commit) means the brief may already be running, so spawn keeps the task record, lease, and thread, never resends the brief itself, and exits nonzero with the thread to inspect.
 An identical brief resend follows the [ordinary-send retention window above](#current-lifecycle-and-safety); verify delivery in T3 Code before resending after that window.
 Before returning a retained slot by hand, prove both the archive with no active run and the end of its provider and worktree-owned processes, as teardown does above.
-The kill is idempotent, so an already archived thread, or one the verified server no longer has, is the end state, and an unreachable or gate-refused server refuses the teardown rather than returning a slot a live thread still points at.
+The kill is idempotent, so an already archived thread, or one the creation server no longer has, is the end state, and an unreachable or gate-refused server refuses the teardown rather than returning a slot a live thread still points at.
+The record binds its thread to the server it was created on in `t3_server`, and every later read, close, and absence proof runs against that server: a credential that now names another server reads `unreadable` and refuses cleanup instead of acting on a different server's thread.
+A record written before that field existed adopts the selected server only when the thread is positively present there; without that proof teardown preserves the task and its worktree, and only `--force` authorizes cleanup through the selected server, whose gate [`bin/fm-teardown.sh`](../bin/fm-teardown.sh) owns.
 Archiving keeps the transcript visible in T3 Code; this backend never deletes a thread.
 The `fm-` project of a torn-down secondmate home stays in T3 Code pointing at the removed directory until the operator deletes it there, because deleting a nonempty project takes the archived thread's transcript with it.
 
@@ -196,6 +200,7 @@ Thread persistence alone does not prove a live agent.
 Inspect a failed worker's thread error before sending a new turn through its normal steer path.
 A new turn continues the same driver and transcript; `fm-control.sh relaunch` remains refused.
 Automatic secondmate recovery treats a failed run the same way: the thread is still readable, so recovery resumes it in place with one recovery turn instead of archiving it and launching a second thread, and the relaunch ledger bounds repeats.
+Automatic recovery skips a generation whose seat was released or reclaimed, and the [turn admission above](#current-lifecycle-and-safety) would refuse the resume anyway, so it needs a fresh launch that reserves a new generation.
 That turn tells the secondmate to re-read its `AGENTS.md` and config first, and startup still delivers its queued config re-read retries, because a resumed conversation does not re-read on its own the way a fresh launch does.
 A secondmate thread that reads missing is closed again through the idempotent archive before a replacement thread is launched, and when that close cannot be proven the thread and its record stay as recorded and nothing is spawned; other backends keep their existing best-effort close ([`bin/fm-secondmate-liveness-lib.sh`](../bin/fm-secondmate-liveness-lib.sh)).
 Teardown still requires a proven archive before returning the worktree.

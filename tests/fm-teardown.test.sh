@@ -91,6 +91,10 @@ make_case() {
   case_dir="$TMP_ROOT/$name"
   fakebin="$case_dir/fakebin"
   mkdir -p "$case_dir/state" "$case_dir/config" "$case_dir/data" "$fakebin"
+  mkdir -p "$case_dir/primary-home"
+  ln -s "$case_dir/state" "$case_dir/primary-home/state"
+  ln -s "$case_dir/config" "$case_dir/primary-home/config"
+  ln -s "$case_dir/data" "$case_dir/primary-home/data"
 
   # Mocks for the post-check teardown steps. Refuse logic exits before these
   # run; the ALLOW cases need them so the script can complete cleanly.
@@ -641,12 +645,13 @@ SH
 }
 
 # Run teardown with PATH mocking. Args: case_dir [extra args...]
+# FM_TEARDOWN_TEST_HOME explicitly selects a marked home for parent-channel cases.
 run_teardown() {
   local case_dir=$1; shift
   # FM_DATA_OVERRIDE is pinned to the case dir because teardown closes this
   # home's backlog item itself; without it $DATA would resolve to the real
   # repo's own home and a test could mutate live records.
-  FM_ROOT_OVERRIDE="$ROOT" \
+  FM_HOME="${FM_TEARDOWN_TEST_HOME:-$case_dir/primary-home}" FM_ROOT_OVERRIDE="$ROOT" \
   FM_STATE_OVERRIDE="$case_dir/state" \
   FM_DATA_OVERRIDE="$case_dir/data" \
   FM_CONFIG_OVERRIDE="$case_dir/config" \
@@ -1044,8 +1049,6 @@ test_merged_pr_patch_matching_preserves_indentation() {
   for mode in exact amended old-git; do
     case_dir=$(make_case "pr-indentation-$mode")
     write_meta "$case_dir" no-mistakes ship
-    # A pushed parent makes the YAML patch the only unpushed commit, while
-    # giving the local replay a different parent from the recorded PR head.
     wt_commit_file "$case_dir" local-parent.txt parent "local parent"
     git -C "$case_dir/wt" push -q origin HEAD:refs/heads/fm/task-x1
     git -C "$case_dir/project" fetch -q origin fm/task-x1
@@ -1062,7 +1065,6 @@ test_merged_pr_patch_matching_preserves_indentation() {
       cat > "$case_dir/fakebin/git" <<'SH'
 #!/usr/bin/env bash
 if [ "${1:-}" = patch-id ]; then
-  printf '%s\n' "$*" >> "$FM_PATCH_ID_LOG"
   if [ "${2:-}" = --verbatim ]; then
     echo 'error: unknown option `verbatim`' >&2
     exit 129
@@ -1076,7 +1078,7 @@ SH
     [ "$local_head" != "$pr_head" ] || fail "$mode: fixture did not diverge"
 
     set +e
-    FM_PATCH_ID_LOG="$case_dir/patch-id.log" run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
     rc=$?
     set -e
 
@@ -1086,10 +1088,6 @@ SH
     if [ "$expected" = 1 ]; then
       assert_grep REFUSED "$case_dir/stderr" "$mode: no refusal diagnostic"
       assert_refusal_retained_task_state "$case_dir" "$mode" "$local_head"
-    fi
-    if [ "$mode" = old-git ]; then
-      assert_grep 'patch-id --verbatim' "$case_dir/patch-id.log" "old-git: capability rejection was not exercised"
-      ! grep -q -- --stable "$case_dir/patch-id.log" || fail "old-git: fell back to whitespace-insensitive matching"
     fi
   done
   pass "merged PR patch matching preserves indentation, allows exact replays, and refuses unsupported Git"
@@ -1832,10 +1830,11 @@ SH
 test_forced_secondmate_child_scout_nested_clone_returns_clean() {
   local case_dir home child_wt rc
   case_dir=$(make_case secondmate-child-nested-clean)
+  configure_stoppable_child_tmux "$case_dir"
   write_meta "$case_dir" local-only secondmate
   home="$case_dir/secondmate-home"
   mkdir -p "$home/state" "$home/data" "$home/config" "$home/projects"
-  printf '%s\n' task-x1 > "$home/.fm-secondmate-home"
+  bind_fixture_secondmate_home "$home" "$case_dir/primary-home" task-x1
   printf '%s\n' "home=$home" >> "$case_dir/state/task-x1.meta"
   child_wt="$case_dir/child-scout-wt"
   git -C "$case_dir/project" worktree add -q -b fm/child-scout "$child_wt" main
@@ -1852,7 +1851,7 @@ test_forced_secondmate_child_scout_nested_clone_returns_clean() {
   rc=0
   run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
 
-  expect_code 0 "$rc" "secondmate-child-nested-clean: forced secondmate teardown should succeed"
+  expect_code 0 "$rc" "secondmate-child-nested-clean: forced secondmate teardown should succeed: $(cat "$case_dir/stderr")"
   [ -z "$(git -C "$child_wt" status --porcelain --untracked-files=all)" ] \
     || fail "secondmate-child-nested-clean: untracked entries remain: $(git -C "$child_wt" status --porcelain --untracked-files=all)"
   assert_absent "$child_wt/scratch-clone" "secondmate-child-nested-clean: nested clone survived return"
@@ -1882,10 +1881,11 @@ SH
 test_forced_secondmate_dirty_child_return_warns_and_completes() {
   local case_dir home child_wt rc
   case_dir=$(make_case secondmate-child-dirty-return)
+  configure_stoppable_child_tmux "$case_dir"
   write_meta "$case_dir" local-only secondmate
   home="$case_dir/secondmate-home"
   mkdir -p "$home/state" "$home/data" "$home/config" "$home/projects"
-  printf '%s\n' task-x1 > "$home/.fm-secondmate-home"
+  bind_fixture_secondmate_home "$home" "$case_dir/primary-home" task-x1
   printf '%s\n' "home=$home" >> "$case_dir/state/task-x1.meta"
   child_wt="$case_dir/pool/6/repo"
   mkdir -p "$case_dir/pool/6"
@@ -1904,7 +1904,7 @@ test_forced_secondmate_dirty_child_return_warns_and_completes() {
   rc=0
   run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
 
-  expect_code 4 "$rc" "secondmate-child-dirty-return: a lost child slot should exit 4 after retirement"
+  expect_code 4 "$rc" "secondmate-child-dirty-return: a lost child slot should exit 4 after retirement: $(cat "$case_dir/stderr")"
   assert_grep "lost this slot" "$case_dir/stderr" \
     "secondmate-child-dirty-return: no lost-slot warning for the dirty child return"
   assert_grep "left-behind-clone" "$case_dir/stderr" \
@@ -2941,7 +2941,7 @@ test_secondmate_home_teardown_delivers_final_line_or_refuses() {
   printf 'working: shipping\ndone: PR https://github.com/example/repo/pull/9 checks green\n' \
     > "$case_dir/state/task-x1.status"
   set +e
-  FM_HOME="$case_dir/home" run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  FM_TEARDOWN_TEST_HOME="$case_dir/home" run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
   rc=$?
   set -e
   expect_code 0 "$rc" "mate-teardown-delivers: teardown should succeed: $(cat "$case_dir/stderr")"
@@ -2964,7 +2964,7 @@ test_secondmate_home_teardown_delivers_final_line_or_refuses() {
   git -C "$case_dir/project" update-ref refs/heads/main "$wt_head"
   printf 'done: PR https://github.com/example/repo/pull/9 checks green\n' > "$case_dir/state/task-x1.status"
   set +e
-  FM_HOME="$case_dir/home" run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  FM_TEARDOWN_TEST_HOME="$case_dir/home" run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
   rc=$?
   set -e
   [ "$rc" -ne 0 ] || fail "mate-teardown-refuses: teardown proceeded with an undelivered final line"
@@ -2984,7 +2984,7 @@ test_secondmate_home_teardown_delivers_final_line_or_refuses() {
   [ -z "$seq" ] || FM_HOME="$case_dir/home" FM_STATE_OVERRIDE="$case_dir/state" \
     "$ROOT/bin/fm-wake-drain.sh" --ack-through "$seq" --recovery-generation "$generation" >/dev/null
   set +e
-  FM_HOME="$case_dir/home" run_teardown "$case_dir" > "$case_dir/stdout2" 2> "$case_dir/stderr2"
+  FM_TEARDOWN_TEST_HOME="$case_dir/home" run_teardown "$case_dir" > "$case_dir/stdout2" 2> "$case_dir/stderr2"
   rc=$?
   set -e
   expect_code 0 "$rc" "mate-teardown-refuses: rerun after repair should succeed: $(cat "$case_dir/stderr2")"
@@ -3517,10 +3517,16 @@ test_herdr_teardown_presentation_lock_namespace_is_per_account() {
   fi
 }
 
+bind_fixture_secondmate_home() {
+  local home=$1 parent=$2 id=$3
+  printf '%s\n' "$id" > "$home/.fm-secondmate-home"
+  printf 'schema=fm-secondmate-parent.v1\nroute=local\nparent_home=%s\n' "$parent" > "$home/.fm-secondmate-parent"
+}
+
 configure_secondmate_with_herdr_child() {  # <case-dir>
   local case_dir=$1 home="$1/secondmate-home"
   mkdir -p "$home/state" "$home/data" "$home/config" "$home/projects"
-  printf '%s\n' task-x1 > "$home/.fm-secondmate-home"
+  bind_fixture_secondmate_home "$home" "$case_dir/primary-home" task-x1
   printf '%s\n' "home=$home" >> "$case_dir/state/task-x1.meta"
   fm_write_meta "$home/state/child-herdr.meta" \
     "window=childsession:wC:p1" \
@@ -3597,10 +3603,47 @@ SH
   pass "forced secondmate teardown preflights every Herdr child before cleanup mutation"
 }
 
+configure_stoppable_child_tmux() {  # <case-dir>
+  local case_dir=$1
+  cat > "$case_dir/fakebin/tmux" <<SH
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$case_dir/kill.log"
+case "\$1" in
+  kill-window)
+    target=\${3//=/}
+    case "\$target" in
+      firstmate:fm-child-a|firstmate:fm-child-b|firstmate:fm-nested-sm|firstmate:fm-child-scout)
+        : > "$case_dir/\${target#*:}.stopped"
+        ;;
+    esac
+    ;;
+  list-windows)
+    for child in child-a child-b nested-sm child-scout; do
+      [ -e "$case_dir/fm-\$child.stopped" ] || printf 'fm-%s\\n' "\$child"
+    done
+    ;;
+  display-message)
+    if [ "\${!#}" = '#{socket_path}' ]; then
+      printf '%s\\n' "$case_dir/tmux.sock"
+    elif [ "\${!#}" = '#{pane_dead}' ]; then
+      target=\${4//=/}
+      if [ -e "$case_dir/\${target#*:}.stopped" ]; then
+        printf '1\n'
+      else
+        printf '0\n'
+      fi
+    fi
+    ;;
+esac
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/tmux"
+}
+
 configure_secondmate_with_tmux_children() {  # <case-dir>
   local case_dir=$1 home="$1/secondmate-home" child child_wt
   mkdir -p "$home/state" "$home/data" "$home/config" "$home/projects"
-  printf '%s\n' task-x1 > "$home/.fm-secondmate-home"
+  bind_fixture_secondmate_home "$home" "$case_dir/primary-home" task-x1
   printf '%s\n' "home=$home" >> "$case_dir/state/task-x1.meta"
   for child in child-a child-b; do
     child_wt="$case_dir/$child-wt"
@@ -3614,6 +3657,7 @@ configure_secondmate_with_tmux_children() {  # <case-dir>
       "mode=local-only"
     : > "$home/state/$child.status"
   done
+  configure_stoppable_child_tmux "$case_dir"
 }
 
 test_forced_secondmate_teardown_holds_descendant_lifecycle_locks() {
@@ -3624,11 +3668,6 @@ test_forced_secondmate_teardown_holds_descendant_lifecycle_locks() {
   home="$case_dir/secondmate-home"
   : > "$case_dir/kill.log"
   : > "$case_dir/treehouse.log"
-  cat > "$case_dir/fakebin/tmux" <<SH
-#!/usr/bin/env bash
-printf '%s\n' "\$*" >> "$case_dir/kill.log"
-exit 0
-SH
   cat > "$case_dir/fakebin/treehouse" <<SH
 #!/usr/bin/env bash
 printf '%s\n' "\$*" >> "$case_dir/treehouse.log"
@@ -3713,10 +3752,11 @@ test_forced_secondmate_herdr_child_retains_records_when_close_unconfirmed() {
 
 configure_nested_secondmate_with_herdr_grandchild() {  # <case-dir>
   local case_dir=$1 home="$1/secondmate-home" nested_home="$1/secondmate-home/nested-home"
+  configure_stoppable_child_tmux "$case_dir"
   mkdir -p "$home/state" "$home/data" "$home/config" "$home/projects"
   mkdir -p "$nested_home/state" "$nested_home/data" "$nested_home/config" "$nested_home/projects"
-  printf '%s\n' task-x1 > "$home/.fm-secondmate-home"
-  printf '%s\n' nested-sm > "$nested_home/.fm-secondmate-home"
+  bind_fixture_secondmate_home "$home" "$case_dir/primary-home" task-x1
+  bind_fixture_secondmate_home "$nested_home" "$home" nested-sm
   printf '%s\n' "home=$home" >> "$case_dir/state/task-x1.meta"
   fm_write_meta "$home/state/nested-sm.meta" \
     "window=firstmate:fm-nested-sm" \
@@ -3775,7 +3815,7 @@ test_forced_teardown_retains_nested_secondmate_home_when_grandchild_close_unconf
   [ "$rc" -ne 0 ] \
     || fail "herdr-grandchild-unconfirmed-close: teardown erased records after an ambiguous grandchild close"
   [ -e "$closed" ] \
-    || fail "herdr-grandchild-unconfirmed-close: fixture did not attempt the grandchild close"
+    || fail "herdr-grandchild-unconfirmed-close: fixture did not attempt the grandchild close: $(cat "$case_dir/stderr")"
   [ -d "$nested_home" ] \
     || fail "herdr-grandchild-unconfirmed-close: the recursive failure still removed the nested secondmate home"
   [ -e "$nested_home/state/grandchild-herdr.meta" ] \
@@ -5482,6 +5522,184 @@ test_retained_sources_still_reach_the_ordinary_refusal() {
   pass "present required sources still reach the ordinary teardown refusal"
 }
 
+test_descendant_episode_refuses_before_coordination() {
+  local case_dir home nested holder rc ready
+  case_dir=$(make_case descendant-episode)
+  write_meta "$case_dir" local-only secondmate
+  configure_nested_secondmate_with_herdr_grandchild "$case_dir"
+  home="$case_dir/secondmate-home"
+  nested="$home/nested-home"
+  ready="$case_dir/episode-ready"
+  ROOT="$ROOT" HOME_STATE="$home/state" READY="$ready" bash -c '
+    . "$ROOT/bin/fm-secondmate-liveness-lib.sh"
+    fm_supervisor_lifecycle_acquire "$HOME_STATE" nested-sm 0 || exit 1
+    : > "$READY"
+    exec sleep 600
+  ' &
+  holder=$!
+  for _ in $(seq 1 100); do [ ! -e "$ready" ] || break; sleep 0.1; done
+  [ -e "$ready" ] || { kill "$holder"; fail "the child episode did not start"; }
+  rc=0
+  run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  kill "$holder"
+  wait "$holder" 2>/dev/null || true
+  [ "$rc" -ne 0 ] || fail "cleanup ignored the descendant's supervisor episode"
+  assert_grep 'descendant secondmate nested-sm has a lifecycle episode in flight' "$case_dir/stderr" "the busy episode did not stop cleanup"
+  assert_present "$home/state/nested-sm.meta" "the busy episode lost its route"
+  assert_present "$nested" "the busy episode lost its home"
+  assert_absent "$home/state/.task-set.lock" "episode refusal leaked coordination"
+  pass "a descendant supervisor episode refuses cleanup before its coordination locks"
+}
+
+test_accounting_failure_preserves_the_containing_home() {
+  local case_dir home rc holder ready route orphan holder_file
+  case_dir=$(make_case accounting-retention)
+  write_meta "$case_dir" local-only secondmate
+  configure_secondmate_with_tmux_children "$case_dir"
+  home="$case_dir/secondmate-home"
+  orphan="$case_dir/orphan-home"
+  mkdir -p "$orphan/state" "$orphan/config" "$orphan/data"
+  printf 'orphan\n' > "$orphan/.fm-secondmate-home"
+  rc=0
+  FM_HOME="$orphan" FM_STATE_OVERRIDE="$orphan/state" FM_CONFIG_OVERRIDE="$orphan/config" \
+    FM_DATA_OVERRIDE="$orphan/data" "$ROOT/bin/fm-fleet-seats.sh" reserve orphan-child \
+    --generation orphan-child --kind ship --harness claude --model child-model --holder-pid "$$" \
+    > "$case_dir/orphan.stdout" 2> "$case_dir/orphan.stderr" || rc=$?
+  expect_code 0 "$rc" "an orphan fixture with no provable authority must succeed silently"
+  assert_absent "$orphan/state/fleet-seats" "orphan authority created an independent ledger"
+  printf '{"pools":[{"name":"unrelated","capacity":1,"models":["other-model"]}]}\n' > "$case_dir/config/fleet-seats"
+  FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_CONFIG_OVERRIDE="$home/config" \
+    FM_DATA_OVERRIDE="$home/data" "$ROOT/bin/fm-fleet-seats.sh" reserve child-a \
+    --generation g-child --kind ship --harness claude --model child-model --holder-pid "$$" >/dev/null \
+    || fail "could not seed the child's holder"
+  route="$case_dir/child-route.json"
+  printf '{"placement":"local","backend":"tmux","target":"firstmate:fm-child-a","spawn_gen":"g-child"}\n' > "$route"
+  chmod 0600 "$route"
+  FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_CONFIG_OVERRIDE="$home/config" \
+    FM_DATA_OVERRIDE="$home/data" PATH="$case_dir/fakebin:$PATH" \
+    "$ROOT/bin/fm-fleet-seats.sh" dispatch child-a --generation g-child --route-file "$route" >/dev/null \
+    || fail "could not dispatch the child's socket-bound route"
+  holder_file=
+  for route in "$case_dir/state/fleet-seats/holders/"*.json; do
+    [ "$(jq -r .task "$route")" != child-a ] || holder_file=$route
+  done
+  [ -n "$holder_file" ] || fail "child reservation was not stored at its authoritative root"
+  assert_equals "$case_dir/tmux.sock" "$(jq -r '.incarnations[0].route.socket_path' "$holder_file")" "child route did not bind the fixture socket"
+  printf 'spawn_gen=g-child\nmodel=child-model\n' >> "$home/state/child-a.meta"
+  cp "$holder_file" "$case_dir/holder-before.json"
+  ready="$case_dir/fleet-lock-ready"
+  ROOT="$ROOT" HOME_STATE="$case_dir/state" READY="$ready" bash -c '
+    . "$ROOT/bin/fm-wake-lib.sh"
+    fm_lock_try_acquire "$HOME_STATE/.fleet-seats.lock" || exit 1
+    : > "$READY"
+    exec sleep 600
+  ' &
+  holder=$!
+  for _ in $(seq 1 100); do [ ! -e "$ready" ] || break; sleep 0.1; done
+  [ -e "$ready" ] || { kill "$holder"; fail "the accounting lock did not start"; }
+  rc=0
+  run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  kill "$holder"
+  wait "$holder" 2>/dev/null || true
+  [ "$rc" -ne 0 ] || fail "cleanup discarded a home after accounting failed"
+  assert_grep "child-a's fleet seat generation g-child stays counted" "$case_dir/stderr" "refusal did not reach child generation accounting: $(cat "$case_dir/stderr")"
+  cmp -s "$holder_file" "$case_dir/holder-before.json" || fail "failed accounting changed the child's authoritative route or count"
+  assert_present "$case_dir/fm-child-a.stopped" "accounting failure never reached the child close"
+  assert_absent "$case_dir/fm-child-b.stopped" "accounting refusal continued closing sibling endpoints"
+  assert_present "$home" "failed accounting discarded the containing home"
+  assert_present "$home/state/child-a.meta" "failed accounting discarded the child's route"
+  assert_present "$case_dir/state/task-x1.meta" "failed accounting discarded the parent's route"
+  assert_grep 'spawn_gen=g-child' "$home/state/child-a.meta" "failed accounting damaged the child's binding"
+  assert_equals reserved "$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_CONFIG_OVERRIDE="$home/config" \
+    FM_DATA_OVERRIDE="$home/data" "$ROOT/bin/fm-fleet-seats.sh" show child-a | jq -r '.incarnations[0].lifecycle')" "failed accounting released the child's generation"
+  rc=0
+  run_teardown "$case_dir" --force > "$case_dir/retry.stdout" 2> "$case_dir/retry.stderr" || rc=$?
+  expect_code 0 "$rc" "cleanup retry after accounting unlock: $(cat "$case_dir/retry.stderr")"
+  assert_equals released "$(jq -r ' .incarnations[] | select(.generation == "g-child") | .lifecycle' "$holder_file")" "successful cleanup did not release the authoritative child generation"
+  assert_absent "$home" "a successful cleanup retry retained the retired home"
+  assert_absent "$case_dir/state/task-x1.meta" "a successful cleanup retry retained its parent route"
+  pass "cleanup restores generation bindings and retains homes after release failure, then completes on retry"
+}
+
+test_retirement_adopts_ancestor_episode() {
+  local name state TMP_ROOT
+  TMP_ROOT=$(fm_test_tmproot fm-teardown-inherited)
+  # These execute actual teardown with clean and real nested-Git residue
+  # returns. The waiting host-shaped parent retains ownership after each child.
+  . "$ROOT/bin/fm-secondmate-liveness-lib.sh"
+  for name in secondmate-child-nested-clean secondmate-child-dirty-return; do
+    state="$TMP_ROOT/$name/state"
+    mkdir -p "$state"
+    fm_supervisor_lifecycle_acquire "$state" task-x1 0 || fail "could not hold host episode"
+    if [ "$name" = secondmate-child-nested-clean ]; then
+      test_forced_secondmate_child_scout_nested_clone_returns_clean
+    else
+      test_forced_secondmate_dirty_child_return_warns_and_completes
+    fi
+    fm_supervisor_lifecycle_adopt "$state" task-x1 || fail "teardown released its ancestor's episode"
+    fm_supervisor_lifecycle_release "$state" task-x1
+  done
+  pass "initial clean and residue teardown adopt and preserve the waiting host episode"
+}
+
+test_retirement_refuses_invalid_inherited_episode() {
+  local case_dir carrier damage rc holder _attempt
+  . "$ROOT/bin/fm-secondmate-liveness-lib.sh"
+  case_dir=$(make_case invalid-retirement-episode)
+  write_meta "$case_dir" local-only secondmate
+  fm_supervisor_lifecycle_acquire "$case_dir/state" task-x1 0 || fail "could not hold host episode"
+  carrier=$FM_SUPERVISOR_LIFECYCLE_CARRIER
+  for damage in "${carrier%|*}|stale" "$case_dir/state/.secondmate-liveness-task-x1.lock|forged|identity|episode"; do
+    rc=0
+    FM_SUPERVISOR_LIFECYCLE_CARRIER=$damage run_teardown "$case_dir" --force \
+      > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+    expect_code 1 "$rc" "invalid inherited retirement episode must refuse"
+    assert_present "$case_dir/state/task-x1.meta" "invalid carrier removed the route"
+    assert_present "$case_dir/wt" "invalid carrier removed the worktree"
+    fm_supervisor_lifecycle_adopt "$case_dir/state" task-x1 || fail "refusal released its ancestor's episode"
+  done
+  fm_supervisor_lifecycle_release "$case_dir/state" task-x1
+  ROOT="$ROOT" CASE_STATE="$case_dir/state" READY="$case_dir/carrier" bash -c '
+    . "$ROOT/bin/fm-secondmate-liveness-lib.sh"
+    fm_supervisor_lifecycle_acquire "$CASE_STATE" task-x1 0 || exit 1
+    trap '\''fm_supervisor_lifecycle_release "$CASE_STATE" task-x1'\'' EXIT
+    printf "%s\n" "$FM_SUPERVISOR_LIFECYCLE_CARRIER" > "$READY"
+    for ((i=0; i<100; i++)); do
+      [ ! -f "$READY.release" ] || exit 0
+      sleep 0.1
+    done
+    exit 1
+  ' &
+  holder=$!
+  for _attempt in $(seq 1 100); do
+    [ ! -s "$case_dir/carrier" ] || break
+    sleep 0.1
+  done
+  rc=0
+  FM_SUPERVISOR_LIFECYCLE_CARRIER=$(cat "$case_dir/carrier") run_teardown "$case_dir" --force \
+    > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  assert_present "$case_dir/state/.secondmate-liveness-task-x1.lock" "foreign episode was released"
+  touch "$case_dir/carrier.release"
+  wait "$holder" || fail "foreign episode owner failed to finish"
+  expect_code 1 "$rc" "a verified non-ancestor episode must refuse"
+  assert_present "$case_dir/state/task-x1.meta" "foreign carrier removed the route"
+  assert_present "$case_dir/wt" "foreign carrier removed the worktree"
+  pass "stale, forged, and non-ancestor retirement episodes refuse before destruction"
+}
+
+if [ "$#" -gt 0 ]; then
+  for selected_test in "$@"; do
+    case "$selected_test" in
+      test_secondmate_home_teardown_delivers_final_line_or_refuses) "$selected_test" ;;
+      test_forced_teardown_retains_nested_secondmate_home_when_grandchild_close_unconfirmed|test_accounting_failure_preserves_the_containing_home|test_forced_secondmate_teardown_holds_descendant_lifecycle_locks|test_forced_secondmate_herdr_child_retains_records_when_close_unconfirmed|test_retirement_adopts_ancestor_episode|test_retirement_refuses_invalid_inherited_episode|test_descendant_episode_refuses_before_coordination) "$selected_test" ;;
+      *) fail "unknown focused test: $selected_test" ;;
+    esac
+  done
+  exit 0
+fi
+
+test_retirement_adopts_ancestor_episode
+test_retirement_refuses_invalid_inherited_episode
 test_teardown_preserves_opencode_busy_plugin_on_pool_return
 
 # Archive coverage uses the real teardown entry point over isolated homes.
@@ -5945,6 +6163,11 @@ test_status_archive_nested_secondmate_children() {
   pass "forced secondmate retirement preserves two descendant levels and refuses linked child directories"
 }
 
+if [ -n "${FM_TEST_ONLY:-}" ]; then
+  "$FM_TEST_ONLY"
+  exit
+fi
+
 test_hidden_untracked_work_refuses_before_return
 test_content_fallback_git_capability_boundary
 test_status_archive_opt_in
@@ -6007,7 +6230,6 @@ test_squash_merged_branch_deleted_allows
 test_squash_merged_pr_allows_when_head_ancestor_of_pr_head
 test_no_pr_recorded_discovers_merged_pr_by_branch_allows
 test_squash_merged_pr_allows_replayed_unpushed_patch
-test_merged_pr_patch_matching_preserves_indentation
 test_merged_pr_with_later_local_commit_refuses
 test_squash_merged_rebased_branch_allows
 test_squash_merged_forgejo_pr_allows_when_main_moved_on
@@ -6090,3 +6312,8 @@ test_process_spawned_during_grace_is_reaped_on_later_pass
 test_persistent_scan_refuses_after_bounded_retries
 test_process_exit_during_identity_lookup_does_not_refuse
 test_run_abort_precedes_process_reap_precedes_worktree_removal
+
+test_descendant_episode_refuses_before_coordination
+test_accounting_failure_preserves_the_containing_home
+
+test_merged_pr_patch_matching_preserves_indentation

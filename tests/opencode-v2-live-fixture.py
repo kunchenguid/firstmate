@@ -9,6 +9,7 @@ from pathlib import Path
 import shutil
 import socket
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -18,6 +19,8 @@ import urllib.request
 
 
 def run(lab):
+    executable = str(Path(sys.argv[1]).resolve())
+    subprocess.run([executable, "--version"], check=True)
     repo = Path(__file__).resolve().parent.parent
     project = lab / "project"
     home = lab / "home"
@@ -103,7 +106,7 @@ def run(lab):
         env[f"XDG_{kind}_HOME"] = str(path)
     logpath = lab / "server.log"
     log = logpath.open("w")
-    process = subprocess.Popen(["opencode", "serve", "--hostname", "127.0.0.1", "--port", str(port)], cwd=project, env=env, stdout=log, stderr=log)
+    process = subprocess.Popen([executable, "serve", "--hostname", "127.0.0.1", "--port", str(port)], cwd=project, env=env, stdout=log, stderr=log)
     headers = {}
 
     def api(path, body=None, method=None):

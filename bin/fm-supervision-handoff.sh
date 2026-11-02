@@ -48,8 +48,10 @@ case "$RETRY" in ''|0*|*[!0-9]*) RETRY=300 ;; esac
 fm_session_lock_owned_by_self "$STATE" || exit 1
 [ "$(cat "$PENDING" 2>/dev/null)" = "$TOKEN" ] || exit 1
 SESSION=$(cat "$STATE/.lock" 2>/dev/null) || exit 1
-SESSION_ID=$(fm_pid_identity "$SESSION") || exit 1
+SESSION_ID=$(fm_session_pid_identity "$SESSION") || exit 1
 [ -n "$SESSION_ID" ] || exit 1
+SESSION_RECORDED_ID=$(fm_session_lock_recorded_session_id "$STATE" 2>/dev/null) || SESSION_RECORDED_ID=
+case "$SESSION" in win:*) [ -n "$SESSION_RECORDED_ID" ] || exit 1 ;; esac
 ARM=
 OUT=
 ARM_RECORDED=0
@@ -76,8 +78,9 @@ trap 'exit 0' TERM INT
 
 session_owned() {
   [ "$(cat "$STATE/.lock" 2>/dev/null)" = "$SESSION" ] \
-    && fm_pid_alive "$SESSION" \
-    && [ "$(fm_pid_identity "$SESSION" 2>/dev/null)" = "$SESSION_ID" ]
+    && [ "$(fm_session_lock_recorded_session_id "$STATE" 2>/dev/null)" = "$SESSION_RECORDED_ID" ] \
+    && fm_session_pid_alive "$SESSION" \
+    && [ "$(fm_session_pid_identity "$SESSION" 2>/dev/null)" = "$SESSION_ID" ]
 }
 
 retry_delivery() {
@@ -86,6 +89,7 @@ retry_delivery() {
   if [ -n "${TMUX_PANE:-}" ] && session_owned; then
     pane_pid=$(tmux display-message -p -t "$TMUX_PANE" '#{pane_pid}' 2>/dev/null) || pane_pid=
     ancestor=$SESSION
+    case "$SESSION" in ''|*[!0-9]*) return 0 ;; esac
     case "$pane_pid" in ''|*[!0-9]*) ancestor= ;; esac
     while [ -n "$ancestor" ] && [ "$ancestor" != 1 ] && [ "$ancestor" != "$pane_pid" ]; do
       ancestor=$(ps -o ppid= -p "$ancestor" 2>/dev/null | tr -d ' ')

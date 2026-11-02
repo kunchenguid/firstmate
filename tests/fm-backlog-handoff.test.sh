@@ -676,7 +676,7 @@ SH
 
 test_local_teardown_preserves_wake_when_home_removal_fails() {
   local home="$TMP_ROOT/teardown-home-fail-main" sub="$TMP_ROOT/teardown-home-fail-sub"
-  local fakebin rm_bin="$TMP_ROOT/teardown-home-fail-rm" real_rm corr rc=0 marker rec fail_home
+  local fakebin rm_bin="$TMP_ROOT/teardown-home-fail-rm" real_rm corr rc=0 marker rec fail_stage stage_home
   local marker_before="$TMP_ROOT/teardown-home-fail-marker.before"
   local rec_before="$TMP_ROOT/teardown-home-fail-record.before"
   setup_homes "$home" "$sub"
@@ -694,11 +694,11 @@ test_local_teardown_preserves_wake_when_home_removal_fails() {
   cp -p -- "$marker" "$marker_before"
   cp -p -- "$rec" "$rec_before"
   real_rm=$(command -v rm)
-  fail_home=$(cd "$sub" && pwd -P)
+  fail_stage=$(cd "$sub" && pwd -P)
   cat > "$rm_bin/rm" <<'SH'
 #!/usr/bin/env bash
 for arg in "$@"; do
-  [ "$arg" != "$FM_FAIL_HOME" ] || exit 1
+  case "$arg" in "$FM_FAIL_STAGE".retiring.*) exit 1 ;; esac
 done
 exec "$FM_REAL_RM" "$@"
 SH
@@ -706,7 +706,7 @@ SH
   fakebin=$(make_fake_tmux "$TMP_ROOT/teardown-home-fail-fake")
 
   set +e
-  PATH="$rm_bin:$fakebin:$PATH" FM_REAL_RM="$real_rm" FM_FAIL_HOME="$fail_home" \
+  PATH="$rm_bin:$fakebin:$PATH" FM_REAL_RM="$real_rm" FM_FAIL_STAGE="$fail_stage" \
     FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
     FM_FAKE_TMUX_WINDOW='firstmate:fm-design' \
     FM_FAKE_TMUX_LOG="$TMP_ROOT/teardown-home-fail-tmux.log" \
@@ -715,12 +715,14 @@ SH
   rc=$?
   set -e
   [ "$rc" -ne 0 ] || fail "teardown ignored the receiver-home removal failure"
-  assert_present "$sub" "failed teardown did not preserve the receiver home"
-  assert_grep 'still-routed' "$sub/data/backlog.md" "failed teardown lost routed backlog work"
+  stage_home=$(awk -F= '$1 == "home_removal_stage" { print substr($0, index($0, "=") + 1) }' "$home/state/design.home-removal")/home
+  assert_present "$stage_home" "failed teardown did not preserve the staged receiver home"
+  assert_grep 'still-routed' "$stage_home/data/backlog.md" "failed teardown lost routed backlog work"
   cmp -s "$marker_before" "$marker" \
     || fail "failed home removal changed the pending wake marker"
   cmp -s "$rec_before" "$rec" \
     || fail "failed home removal changed the pending wake correlation"
+  assert_present "$home/state/design.home-removal" "failed teardown lost staged-home recovery evidence"
   assert_present "$home/state/design.meta" "failed teardown removed route metadata"
   assert_grep '- design ' "$home/data/secondmates.md" "failed teardown removed the registry route"
 

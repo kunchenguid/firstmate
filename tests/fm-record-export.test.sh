@@ -25,6 +25,27 @@ run_export() {  # <home> <args...>
   FM_HOME="$home" "$EXPORTER" "$@"
 }
 
+test_empty_path_overrides_use_defaults() {
+  local home export_root mode root_override home_override
+  for mode in root home; do
+    home=$(make_home "empty-overrides-$mode")
+    export_root="$TMP_ROOT/export-empty-$mode"
+    printf '%s\n' "$export_root" >"$home/config/record-export-root"
+    printf 'projects\n' >"$home/data/projects.md"
+    write_archive_fixture "$home" empty-generation
+    root_override=''
+    home_override=$home
+    if [ "$mode" = home ]; then root_override=$home; home_override=''; fi
+    env FM_ROOT_OVERRIDE="$root_override" FM_HOME="$home_override" FM_CONFIG_OVERRIDE='' FM_DATA_OVERRIDE='' FM_STATE_OVERRIDE='' \
+      "$EXPORTER" sync || fail "sync rejected empty $mode overrides"
+    cmp "$home/data/projects.md" "$export_root/live/data/projects.md" || fail "sync used wrong defaults"
+    env FM_ROOT_OVERRIDE="$root_override" FM_HOME="$home_override" FM_CONFIG_OVERRIDE='' FM_DATA_OVERRIDE='' FM_STATE_OVERRIDE='' \
+      "$EXPORTER" archive-task task-a || fail "archive rejected empty $mode overrides"
+    cmp "$home/state/task-a.meta" "$export_root/archive/task-a/empty-generation/meta" || fail "archive used wrong defaults"
+  done
+  pass "empty path overrides use shell defaults for sync and archive"
+}
+
 test_sync_is_off_when_config_is_absent() {
   local home rc=0
   home=$(make_home sync-off)
@@ -306,7 +327,7 @@ test_sync_detects_destination_parent_replacement() {
   run_export "$home" sync > "$home/initial.out" 2> "$home/initial.err" \
     || fail "destination-race setup sync failed: $(cat "$home/initial.err")"
   live_target=$(readlink "$export_root/live" 2>/dev/null || true)
-  dd if=/dev/zero of="$home/data/projects.md" bs=1048576 count=64 status=none
+  dd if=/dev/zero of="$home/data/projects.md" bs=1048576 count=256 status=none
 
   run_export "$home" sync > "$home/race.out" 2> "$home/race.err" &
   pid=$!
@@ -474,15 +495,28 @@ test_archive_refuses_a_corrupt_committed_manifest() {
     run_export "$home" archive-task task-a > "$home/first.out" 2> "$home/first.err" || rc=$?
     expect_code 0 "$rc" "initial archive for $case_name manifest case"
     manifest="$export_root/archive/task-a/committed-generation/manifest.v1.json"
-    case "$case_name" in
-      wrong-task) sed 's/"task": "task-a"/"task": "another-task"/' "$manifest" > "$home/manifest.tmp" ;;
-      trailing-garbage) cp "$manifest" "$home/manifest.tmp"; printf 'not-json\n' >> "$home/manifest.tmp" ;;
-      duplicate-key) sed '/"captured_at":/a\  "captured_at": "2000-01-01T00:00:00Z",' "$manifest" > "$home/manifest.tmp" ;;
-      wrong-type) sed 's/"captured_at": "[^"]*"/"captured_at": 1/' "$manifest" > "$home/manifest.tmp" ;;
-      extra-root) sed '/"complete": true/a\  "unexpected": true,' "$manifest" > "$home/manifest.tmp" ;;
-      extra-entry) sed '0,/"sha256": "[^"]*"/s//& , "unexpected": true/' "$manifest" > "$home/manifest.tmp" ;;
-    esac
-    mv "$home/manifest.tmp" "$manifest"
+    python3 - "$case_name" "$manifest" "$home/manifest.tmp" <<'PYFIX' || fail "manifest mutation failed"
+import json, sys
+case, source, target = sys.argv[1:]
+with open(source) as f:
+    data = json.load(f)
+if case == "wrong-task": data["task"] = "another-task"
+if case == "wrong-type": data["captured_at"] = 1
+if case == "extra-root": data["unexpected"] = True
+if case == "extra-entry": data["files"][0]["unexpected"] = True
+text = json.dumps(data, indent=2)
+if case == "duplicate-key":
+    text = text.replace('"captured_at":', '"captured_at": "2000-01-01T00:00:00Z", "captured_at":', 1)
+    pairs = json.loads(text, object_pairs_hook=list)
+    assert sum(key == "captured_at" for key, _ in pairs) == 2
+elif case == "trailing-garbage": text += "not-json"
+else:
+    decoded = json.loads(text)
+    if case == "extra-root": assert decoded["unexpected"] is True
+    if case == "extra-entry": assert decoded["files"][0]["unexpected"] is True
+with open(target, "w") as f: f.write(text)
+PYFIX
+    mv "$home/manifest.tmp" "$manifest" || fail "manifest publication failed"
     rc=0
     run_export "$home" archive-task task-a > "$home/retry.out" 2> "$home/retry.err" || rc=$?
     [ "$rc" -ne 0 ] || fail "archive retry accepted a $case_name committed manifest"
@@ -492,7 +526,7 @@ test_archive_refuses_a_corrupt_committed_manifest() {
 }
 
 test_archive_detects_a_source_change_during_capture() {
-  local home export_root archive outside archive_pid worker_pid rc=0 wait_count=0 stage=
+  local home export_root archive outside archive_pid worker_pid worker_parent worker_identity rc=0 wait_count=0 stage=
   home=$(make_home archive-source-race)
   export_root="$TMP_ROOT/export-archive-source-race"
   outside="$TMP_ROOT/outside-archive-source-race"
@@ -501,7 +535,7 @@ test_archive_detects_a_source_change_during_capture() {
   write_archive_fixture "$home" racing-generation
   mkdir -p "$outside"
   printf 'outside sentinel\n' > "$outside/sentinel"
-  dd if=/dev/zero of="$home/state/task-a.status" bs=1048576 count=64 status=none
+  dd if=/dev/zero of="$home/state/task-a.status" bs=1048576 count=256 status=none
   run_export "$home" archive-task task-a > "$home/stdout" 2> "$home/stderr" &
   archive_pid=$!
   while kill -0 "$archive_pid" 2>/dev/null; do
@@ -512,13 +546,20 @@ test_archive_detects_a_source_change_during_capture() {
     sleep 0.01
   done
   [ -n "$stage" ] || { wait "$archive_pid" || true; fail "archive source-race fixture never observed staging"; }
-  worker_pid=$(ps -eo pid=,args= | awk -v pattern="$ROOT/bin/fm-record-export.py archive-task task-a" \
-    'index($0, pattern) { print $1; exit }')
-  [ -n "$worker_pid" ] || { wait "$archive_pid" || true; fail "archive source-race fixture could not identify the filesystem worker"; }
-  kill -STOP "$worker_pid"
+  owned_exporter_pid() {
+    ps -eo pid=,ppid=,args= | awk -v owner="$archive_pid" -v pattern="$ROOT/bin/fm-record-export.py archive-task task-a" '
+      { parent[$1] = $2; if ($3 ~ /(^|\/)python[0-9.]*$/ && index($0, pattern)) candidate[$1] = 1 }
+      END { for (pid in candidate) { p=pid; for (n=0; n<100 && p>1; n++) { if (parent[p] == owner) { print pid; exit }; p=parent[p] } } }'
+  }
+  worker_pid=$(owned_exporter_pid)
+  [ -n "$worker_pid" ] || { wait "$archive_pid" || true; fail "archive fixture could not identify its exporter descendant"; }
+  kill -STOP "$worker_pid" || fail "could not stop owned exporter"
+  worker_parent=$(ps -o ppid= -p "$worker_pid" | tr -d ' ')
+  worker_identity=$(ps -o lstart= -p "$worker_pid")
   rm "$home/state/task-a.status"
   ln -s "$outside/sentinel" "$home/state/task-a.status"
-  kill -CONT "$worker_pid"
+  [ "$(owned_exporter_pid)" = "$worker_pid" ] && [ "$(ps -o ppid= -p "$worker_pid" | tr -d ' ')" = "$worker_parent" ] && [ "$(ps -o lstart= -p "$worker_pid")" = "$worker_identity" ] || fail "exporter ownership changed before resume"
+  kill -CONT "$worker_pid" || fail "could not resume owned exporter"
   wait "$archive_pid" || rc=$?
   [ "$rc" -ne 0 ] || fail "archive committed while a source changed during capture"
   assert_absent "$archive/manifest.v1.json" "source race committed a manifest"
@@ -656,6 +697,40 @@ test_archive_allows_missing_optional_records() {
   pass "teardown archive treats absent status and inbox records as a complete capture"
 }
 
+test_archive_resolves_local_and_remote_generation_metadata() {
+  local case_name home export_root generation rc
+  for case_name in spawn-only remote-only both fleet-only neither; do
+    home=$(make_home "archive-generation-$case_name")
+    export_root="$TMP_ROOT/export-generation-$case_name"
+    printf '%s\n' "$export_root" > "$home/config/record-export-root"
+    mkdir -p "$home/state"
+    case "$case_name" in
+      spawn-only) printf 'spawn_gen=local-generation\n' > "$home/state/task-a.meta"; generation='local-generation' ;;
+      remote-only) printf 'remote_spawn_gen=remote-generation\n' > "$home/state/task-a.meta"; generation='remote-generation' ;;
+      both)
+        printf 'spawn_gen=preferred-generation\nremote_spawn_gen=remote-generation\nfleet_seat_generation=fleet-generation\n' > "$home/state/task-a.meta"
+        generation='preferred-generation'
+        ;;
+      fleet-only) printf 'fleet_seat_generation=fleet-generation\n' > "$home/state/task-a.meta"; generation='fleet-generation' ;;
+      neither) printf 'kind=secondmate\n' > "$home/state/task-a.meta"; generation= ;;
+    esac
+    rc=0
+    run_export "$home" archive-task task-a > "$home/stdout" 2> "$home/stderr" || rc=$?
+    if [ "$case_name" = neither ]; then
+      [ "$rc" -ne 0 ] || fail "archive accepted metadata without a generation"
+      assert_absent "$export_root/archive/task-a" "metadata without a generation created an archive"
+    else
+      expect_code 0 "$rc" "archive generation case $case_name: $(cat "$home/stderr")"
+      assert_present "$export_root/archive/task-a/$generation/manifest.v1.json" \
+        "archive did not use the resolved generation for $case_name"
+      jq -e --arg generation "$generation" '.spawn_gen == $generation' \
+        "$export_root/archive/task-a/$generation/manifest.v1.json" >/dev/null \
+        || fail "manifest did not preserve the resolved generation for $case_name"
+    fi
+  done
+  pass "record export resolves exactly one generation with local-first remote fallback precedence"
+}
+
 test_archive_refuses_unsafe_sources_and_destinations() {
   local home export_root outside rc case_name
   for case_name in missing-gen duplicate-gen unsafe-gen meta-link status-fifo inbox-link destination-link unknown-partial; do
@@ -768,6 +843,42 @@ test_export_root_stays_cold_to_firstmate_readers() {
   pass "presentation, wake, classification, and snapshot readers leave the export root cold"
 }
 
+test_large_collection_uses_bounded_descriptors() {
+  local home export_root n
+  home=$(make_home bounded-descriptors)
+  export_root="$TMP_ROOT/export-bounded-descriptors"
+  printf '%s\n' "$export_root" > "$home/config/record-export-root"
+  write_archive_fixture "$home" bounded-generation
+  for n in $(seq 1 180); do
+    printf 'pending %s\n' "$n" > "$home/state/task-a.inbox/$n.msg"
+    printf 'handled %s\n' "$n" > "$home/state/task-a.inbox/handled/$n.msg"
+  done
+  (ulimit -n 64; run_export "$home" sync && run_export "$home" archive-task task-a) > "$home/out" 2> "$home/err" \
+    || fail "bounded descriptor export failed: $(cat "$home/err")"
+  assert_present "$export_root/archive/task-a/bounded-generation/inbox/180.msg" "archive lost the tail record"
+  assert_present "$export_root/live/state/task-a.inbox/handled/180.msg" "live export lost handled records"
+  pass "live and archive export stay within a low descriptor limit"
+}
+
+test_archive_retry_preserves_its_required_capture() {
+  local home export_root manifest
+  home=$(make_home required-capture)
+  export_root="$TMP_ROOT/export-required-capture"
+  printf '%s\n' "$export_root" > "$home/config/record-export-root"
+  write_archive_fixture "$home" required-generation
+  run_export "$home" archive-task task-a || fail "initial required capture failed"
+  manifest="$export_root/archive/task-a/required-generation/manifest.v1.json"
+  fm_touch_epoch "$(( $(date +%s) - 40 * 86400 ))" "$manifest"
+  run_export "$home" archive-task task-a || fail "required capture retry failed"
+  assert_present "$manifest" "successful retry pruned its required capture"
+  pass "archive retry preserves the capture required for retirement"
+}
+
+if [ -n "${FM_TEST_ONLY:-}" ]; then
+  "$FM_TEST_ONLY"
+  exit
+fi
+
 test_sync_is_off_when_config_is_absent
 test_sync_copies_only_the_v1_allowlist
 test_sync_replaces_files_atomically
@@ -790,8 +901,14 @@ test_archive_retry_removes_stale_files_from_a_partial_generation
 test_archive_revalidates_sources_immediately_before_publication
 test_archive_waits_for_the_task_lock_before_enumerating_sources
 test_archive_allows_missing_optional_records
+test_archive_resolves_local_and_remote_generation_metadata
 test_archive_refuses_unsafe_sources_and_destinations
 test_archive_retention_prunes_only_old_committed_generations
 test_export_root_stays_cold_to_firstmate_readers
 
 echo "ALL TESTS PASSED"
+
+test_large_collection_uses_bounded_descriptors
+test_archive_retry_preserves_its_required_capture
+
+test_empty_path_overrides_use_defaults

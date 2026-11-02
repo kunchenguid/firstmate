@@ -55,6 +55,19 @@ test_family_selection() {
   fam_count=$(printf '%s\n' "$listed" | wc -l | tr -d ' ')
   [ "$fam_count" -lt "$all_count" ] \
     || fail "pure-contract-unit must be a proper subset of --all"
+  local spec family script
+  for spec in \
+    pure-contract-unit:fm-merge-local.test.sh \
+    pure-contract-unit:fm-read-repetition.test.sh \
+    live-harness-optin:fm-read-repetition-live.test.sh \
+    standalone:fm-procevent-extension-errors.test.sh
+  do
+    family=${spec%%:*}
+    script=${spec#*:}
+    listed=$("$RUNNER" --list --family "$family") || fail "family selection failed for $family"
+    printf '%s\n' "$listed" | grep -Fxq "tests/$script" \
+      || fail "$family omitted $script"
+  done
   pass "family selection returns a proper subset of the suite"
 }
 
@@ -1895,6 +1908,80 @@ assert len(doc["scripts"])==3
   pass "aggregate-json merges lane timing artifacts"
 }
 
+test_changed_extension_and_watcher_regressions_are_selected() {
+  local tmp repo source listed script
+  tmp=$(fm_test_tmproot fm-test-run-restored-selection)
+  repo="$tmp/repo"
+  init_changed_fixture_repo "$repo"
+  for script in fm-procevent-extension-errors.test.sh fm-watch-open-decisions.test.sh fm-extension-binding.test.sh fm-procevent.test.sh fm-procevent-when.test.sh fm-remote-reply.test.sh; do
+    printf '#!/usr/bin/env bash\nexit 0\n' >"$repo/tests/$script"
+    chmod +x "$repo/tests/$script"
+  done
+  for source in fm-extension.mjs fm-extension.sh fm-procevent.sh fm-procevent-lib.sh fm-procevent-extension-capture.pl fm-watch.sh; do
+    : >"$repo/bin/$source"
+  done
+  mkdir -p "$repo/docs/examples/process-event-extension"
+  : >"$repo/docs/examples/process-event-extension/probe.sh"
+  git -C "$repo" add .
+  git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -qm selection-fixture
+  for source in bin/fm-extension.mjs bin/fm-extension.sh bin/fm-procevent.sh bin/fm-procevent-lib.sh bin/fm-procevent-extension-capture.pl docs/examples/process-event-extension/probe.sh bin/fm-watch.sh; do
+    printf '\n' >>"$repo/$source"
+    listed=$(cd "$repo" && bin/fm-test-run.sh --list --changed --base HEAD) || fail "selection failed for $source"
+    if [ "$source" = bin/fm-watch.sh ]; then
+      assert_contains "$listed" tests/fm-watch-open-decisions.test.sh "watcher change omitted decision coverage"
+    else
+      assert_contains "$listed" tests/fm-procevent-extension-errors.test.sh "$source omitted extension error coverage"
+    fi
+    git -C "$repo" checkout -q -- "$source"
+  done
+  pass "extension, process-event, and watcher changes select their existing regressions"
+}
+
+test_coverage_guard_uses_c_order_under_localized_locale() {
+  local candidate selected='' out tmp
+  for candidate in en_US.UTF-8 en_US.utf8; do
+    if locale -a | grep -Fx "$candidate" >/dev/null; then selected=$candidate; break; fi
+  done
+  [ -n "$selected" ] || { printf 'skip: en_US UTF-8 locale unavailable\n'; return; }
+  tmp=$(fm_test_tmproot fm-test-run-comm-locale)
+  out=$(LC_ALL="$selected" "$RUNNER" --check-coverage 2>"$tmp/err") \
+    || fail "localized coverage verification failed: $(cat "$tmp/err")"
+  assert_no_grep 'sorted order' "$tmp/err" "localized comm rejected C-sorted inputs"
+  assert_contains "$out" 'FM_TEST_COVERAGE ok' "coverage guard omitted result"
+  pass "coverage comparisons retain C ordering under en_US UTF-8"
+}
+
+test_changed_read_containment_selects_its_regressions() {
+  local tmp repo source listed script
+  tmp=$(fm_test_tmproot fm-test-run-read-containment)
+  repo="$tmp/repo"
+  init_changed_fixture_repo "$repo"
+  mkdir -p "$repo/.pi/extensions/lib" "$repo/tests/fixtures"
+  for script in fm-read-repetition.test.sh fm-read-repetition-live.test.sh fm-pi-primary-types.test.sh; do
+    printf '#!/usr/bin/env bash\nexit 0\n' > "$repo/tests/$script"
+    chmod +x "$repo/tests/$script"
+  done
+  for source in .pi/extensions/fm-primary-read-repetition.ts .pi/extensions/lib/fm-primary-read-repetition-policy.ts tests/fixtures/fm-read-repetition-sdk.mjs tests/fixtures/fm-read-repetition-live.mjs; do
+    : > "$repo/$source"
+  done
+  git -C "$repo" add .
+  git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -qm read-containment-fixture
+  for source in .pi/extensions/fm-primary-read-repetition.ts .pi/extensions/lib/fm-primary-read-repetition-policy.ts tests/fixtures/fm-read-repetition-sdk.mjs tests/fixtures/fm-read-repetition-live.mjs; do
+    printf '\n' >> "$repo/$source"
+    listed=$(cd "$repo" && bin/fm-test-run.sh --list --changed --base HEAD) || fail "selection failed for $source"
+    for script in fm-read-repetition.test.sh fm-read-repetition-live.test.sh fm-pi-primary-types.test.sh; do
+      assert_contains "$listed" "tests/$script" "$source omitted $script"
+    done
+    git -C "$repo" checkout -q -- "$source"
+  done
+  pass "read-containment extension and fixture changes select all three regression suites"
+}
+
+if [ -n "${FM_TEST_ONLY:-}" ]; then
+  "$FM_TEST_ONLY"
+  exit
+fi
+
 test_list_all_exact_suite_coverage
 test_family_selection
 test_single_script_selection
@@ -1938,3 +2025,9 @@ test_max_wall_ms_is_a_result_not_advice
 test_jobs_parallel_scheduler_and_failure_propagation
 test_herdr_ci_family_run_has_a_step_timeout
 test_aggregate_json
+
+test_changed_extension_and_watcher_regressions_are_selected
+
+test_coverage_guard_uses_c_order_under_localized_locale
+
+test_changed_read_containment_selects_its_regressions
