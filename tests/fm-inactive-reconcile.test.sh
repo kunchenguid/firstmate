@@ -181,7 +181,8 @@ test_main_direct_terminal_presentation_receipt() {
 
 arm_claude_busy() { # <home> <id> <busy|idle>
   local home=$1 id=$2 state=$3
-  sed -i 's/^harness=.*/harness=claude/' "$home/state/$id.meta"
+  sed 's/^harness=.*/harness=claude/' "$home/state/$id.meta" > "$home/state/$id.meta.new"
+  mv "$home/state/$id.meta.new" "$home/state/$id.meta"
   printf 'g1\n' > "$home/state/$id.busy-gen"
   printf 'v1 gen=g1 seq=1 state=%s source=claude-hook event=test ts=%s\n' "$state" "$(date +%s)" > "$home/state/$id.busy-state"
 }
@@ -1034,6 +1035,40 @@ SH
   pass "stalled state reads are bounded without starving later children"
 }
 
+test_stalled_liveness_read_is_bounded_and_scan_progresses() {
+  local started elapsed
+  make_world bounded-liveness
+  write_child "$MAIN" a 'working: liveness read will stall'
+  age "$MAIN/state/a.meta" "$MAIN/state/a.status"
+  cat > "$WORLD/fakebin/fm-crew-state.sh" <<'SH'
+#!/usr/bin/env bash
+if [ "$1" = a ]; then
+  sleep 1
+  printf 'state: failed · source: fake\n'
+else
+  printf 'state: done · source: fake\n'
+fi
+SH
+  cat > "$WORLD/fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+[ ! -e "$(dirname "$0")/stall" ] || sleep 30
+SH
+  : > "$WORLD/fakebin/stall"
+  chmod +x "$WORLD/fakebin/fm-crew-state.sh" "$WORLD/fakebin/tmux"
+
+  started=$(date +%s)
+  FM_INACTIVE_RECONCILE_BUDGET_SECS=2 run_reconcile "$MAIN" --startup
+  elapsed=$(( $(date +%s) - started ))
+  [ "$elapsed" -le 4 ] || fail "stalled liveness read exceeded aggregate scan budget (${elapsed}s)"
+
+  rm -f "$WORLD/fakebin/stall"
+  write_child "$MAIN" b 'done: green'
+  FM_INACTIVE_RECONCILE_BUDGET_SECS=2 run_reconcile "$MAIN" --startup
+  grep -Fq 'child=b state=done' "$MAIN/state/.wake-queue" \
+    || fail "next bounded scan did not resume with the following child"
+  pass "stalled liveness reads are bounded without starving later children"
+}
+
 test_full_scan_budget_includes_wake_lock_wait() {
   local holder started elapsed i
   make_world wake-lock; write_child "$MAIN" child 'done: green'
@@ -1169,6 +1204,7 @@ test_nonterminal_and_captain_held_states_do_not_report
 test_watcher_hook_and_idle_secondmate_exemption
 test_watcher_poll_delivers_child_ledger_line_to_parent
 test_stalled_state_read_is_bounded_and_scan_progresses
+test_stalled_liveness_read_is_bounded_and_scan_progresses
 test_full_scan_budget_includes_wake_lock_wait
 test_notice_recovery_does_not_duplicate_wake
 test_missing_parent_binding_names_itself
