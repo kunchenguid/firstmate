@@ -513,6 +513,10 @@ seat_enter() {
 remote_endpoint_load() {
   local id=$1 herdr_session rex_server
   REMOTE_ENDPOINT_ERROR=
+  # Clear the validated fields so a caller can tell "no backend was bound"
+  # from "the backend failed validation" after a refused load.
+  REMOTE_ENDPOINT_BACKEND=
+  REMOTE_ENDPOINT_TARGET=
   REMOTE_ENDPOINT_META=$(meta_path "$id")
   if ! fm_backend_validate_task_endpoint "$REMOTE_ENDPOINT_META" "$id" 2>/dev/null; then
     REMOTE_ENDPOINT_ERROR="remote secondmate $id endpoint metadata is invalid; refusing access until it is explicitly migrated"
