@@ -36,6 +36,8 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 . "$SCRIPT_DIR/fm-parent-channel-lib.sh"
 # shellcheck source=bin/fm-dod-lib.sh
 . "$SCRIPT_DIR/fm-dod-lib.sh"
+# shellcheck source=bin/fm-classify-lib.sh
+. "$SCRIPT_DIR/fm-classify-lib.sh"
 
 if [ "$#" -ne 2 ]; then
   echo "error: invalid PR check request" >&2
@@ -207,6 +209,28 @@ fm_lock_acquire_wait "$META_LOCK"
 META_LOCK_HELD=1
 [ -f "$META" ] && [ ! -L "$META" ] && [ "$(fm_pr_file_link_count "$META")" = 1 ] \
   || { echo "error: task metadata is unavailable" >&2; exit 1; }
+if [ -n "${FM_PR_CHECK_EXPECT_INCARNATION:-}" ]; then
+  CURRENT_LINE=$(last_status_line "$STATE/$ID.status")
+  current_incarnation=$(grep '^spawn_gen=' "$META" | tail -1 | cut -d= -f2- || true)
+  if [ -z "$current_incarnation" ]; then
+    current_identity=$(grep '^tasktmp=' "$META" | tail -1 | cut -d= -f2- || true)
+    if [ -z "$current_identity" ]; then
+      current_identity="$(grep '^window=' "$META" | tail -1 | cut -d= -f2- || true)|$(grep '^worktree=' "$META" | tail -1 | cut -d= -f2- || true)"
+    fi
+    if command -v shasum >/dev/null 2>&1; then
+      current_hash=$(printf '%s' "$current_identity" | shasum -a 256 | awk '{print substr($1, 1, 32)}')
+    else
+      current_hash=$(printf '%s' "$current_identity" | sha256sum | awk '{print substr($1, 1, 32)}')
+    fi
+    current_incarnation="legacy-$current_hash"
+  elif ! [[ "$current_incarnation" =~ ^[A-Za-z0-9._-]+$ ]]; then
+    current_incarnation=
+  fi
+  [ "$current_incarnation" = "$FM_PR_CHECK_EXPECT_INCARNATION" ] \
+    && [ "$(status_line_verb "$CURRENT_LINE")" = "done" ] \
+    && [ "$(status_line_note "$CURRENT_LINE")" = "$(status_line_note "$FM_PR_CHECK_EXPECT_READY_LINE")" ] \
+    || { echo "error: ready task outcome changed before PR registration" >&2; exit 1; }
+fi
 META_DEVICE=$(fm_pr_file_device "$META") || exit 1
 STATE_DEVICE=$(fm_pr_file_device "$STATE") || exit 1
 [ "$META_DEVICE" = "$STATE_DEVICE" ] || { echo "error: task metadata is unavailable" >&2; exit 1; }

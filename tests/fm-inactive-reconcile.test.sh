@@ -6,6 +6,7 @@ set -u
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 RECON="$ROOT/bin/fm-inactive-reconcile.sh"
+TEARDOWN="$ROOT/bin/fm-teardown.sh"
 DRAIN="$ROOT/bin/fm-wake-drain.sh"
 GRANT="$ROOT/bin/fm-wake-grant.sh"
 WATCH="$ROOT/bin/fm-watch.sh"
@@ -220,6 +221,141 @@ test_branch_ack_retires_inactive_outcome_receipt() {
       || fail "unchanged inactive outcome re-queued on cadence scan $cycle after its branch acknowledgement"
   done
   pass "a branch-actor acknowledgement retires the inactive-outcome receipt and later scans stay quiet"
+}
+
+# One stalled registration per scan bounds work and the persisted cursor visits
+# every child before wrapping, while ledger delivery still runs first.
+test_slow_pr_watch_does_not_starve_ledger_or_later_children() {
+  local i
+  make_world slow-pr-watch; bind_secondmate local
+  for i in 1 2 3; do
+    write_child "$MATE" "a-$i" "done: PR https://github.com/owner/repo/pull/$i checks green"
+  done
+  write_child "$MATE" b-later 'done: later child finished'
+  cat > "$WORLD/fakebin/gh" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$FM_FORGE_LOG"
+case " $* " in
+  *'pull/'*) sleep 5; exit 0 ;;
+  *' --json isDraft '*) printf '{"isDraft":false}\n' ;;
+  *' --json headRefOid '*) printf '{"headRefOid":"%s"}\n' "$FM_TEST_HEAD" ;;
+  *' --json state '*) printf 'OPEN\n' ;;
+esac
+SH
+  chmod +x "$WORLD/fakebin/gh"
+  FM_PR_WATCH_ARM_SECS=2 FM_FAKE_CREW_STATE=unknown run_reconcile "$MATE"
+  grep -Fq 'child-outcome-b-later-done' "$MAIN/state/mate.status" \
+    || fail 'slow PR registration prevented ledger delivery'
+  [ "$(wc -l < "$WORLD/forge.log")" -eq 1 ] \
+    || fail 'one scan attempted more than one stalled registration'
+  for i in 2 3; do
+    FM_PR_WATCH_ARM_SECS=2 FM_FAKE_CREW_STATE=unknown run_reconcile "$MATE"
+    [ "$(wc -l < "$WORLD/forge.log")" -eq "$i" ] \
+      || fail "scan $i did not attempt exactly the next child"
+  done
+  for i in 1 2 3; do
+    grep -Fq "pull/$i" "$WORLD/forge.log" || fail "child $i was never attempted"
+  done
+  pass 'one stalled PR registration per scan bounds work and cursor traversal eventually attempts every child'
+}
+
+# A canonical ready ledger line is enough to record pr= and install the poll
+# sidecar in a main home, without a supervisor-turn caller.
+test_main_home_arms_ready_pr_watch() {
+  local url='https://github.com/owner/repo/pull/1' head
+  make_world main-ready-watch
+  write_child "$MAIN" child "done: PR $url checks green"
+  head=$(git -C "$MAIN/projects/child" rev-parse HEAD)
+  grep -v '^pr=\|^pr_head=\|^kind=' "$MAIN/state/child.meta" > "$MAIN/state/child.meta.tmp"
+  mv "$MAIN/state/child.meta.tmp" "$MAIN/state/child.meta"
+  cat > "$WORLD/fakebin/gh" <<'SH'
+#!/usr/bin/env bash
+case " $* " in
+  *' --json isDraft '*) printf '{"isDraft":false}\n' ;;
+  *' --json headRefOid '*) printf '{"headRefOid":"%s"}\n' "$FM_TEST_HEAD" ;;
+  *' --json state '*) printf '%s\n' "${FM_TEST_GH_STATE:-OPEN}" ;;
+  *) exit 97 ;;
+esac
+SH
+  chmod +x "$WORLD/fakebin/gh"
+  FM_TEST_HEAD=$head run_reconcile "$MAIN"
+  [ "$(sed -n 's/^pr=//p' "$MAIN/state/child.meta")" = "$url" ] \
+    || fail 'canonical CI-ready status did not record its PR automatically'
+  [ -f "$MAIN/state/child.check.sh" ] && [ ! -L "$MAIN/state/child.check.sh" ] \
+    || fail 'canonical CI-ready status did not arm its merge poll'
+  FM_TEST_GH_STATE=MERGED PATH="$WORLD/fakebin:$PATH" bash "$MAIN/state/child.check.sh" \
+    > "$WORLD/poll.out" || fail 'the armed merge watch did not run'
+  grep -qxF merged "$WORLD/poll.out" || fail 'the armed merge watch did not observe the merge'
+  cat > "$WORLD/fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  cat > "$WORLD/fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  cat > "$WORLD/fakebin/no-mistakes" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  chmod +x "$WORLD/fakebin/treehouse" "$WORLD/fakebin/tmux" "$WORLD/fakebin/no-mistakes"
+  FM_HOME="$MAIN" FM_ROOT_OVERRIDE="$ROOT" PATH="$WORLD/fakebin:$PATH" \
+    bash "$TEARDOWN" child > "$WORLD/teardown.out" 2> "$WORLD/teardown.err" \
+    || fail "the merged sandbox lane did not clean up safely: $(cat "$WORLD/teardown.err")"
+  [ ! -e "$MAIN/state/child.meta" ] || fail 'cleanup left the sandbox task record'
+  pass 'a ready status with missing kind defaults to ship, auto-arms, detects a merge, and cleans its sandbox lane'
+}
+
+test_pr_watch_arm_timeout_names_timeout() {
+  make_world arm-timeout
+  write_child "$MAIN" child 'done: PR https://github.com/owner/repo/pull/1 checks green'
+  cat > "$WORLD/fakebin/gh" <<'SH'
+#!/usr/bin/env bash
+sleep 5
+SH
+  chmod +x "$WORLD/fakebin/gh"
+  FM_PR_WATCH_ARM_SECS=2 run_reconcile "$MAIN"
+  grep -Fq 'PR merge watch could not be armed for task child (https://github.com/owner/repo/pull/1): timed out after 2s' \
+    "$MAIN/state/.wake-queue" || fail 'PR watch timeout notice did not explain the timeout'
+  pass 'PR watch arming timeout notice names the timeout'
+}
+
+# A registration whose two forge reads each take 2s exceeded the original 3s
+# bound; the default bound must still arm it.
+test_default_arm_bound_allows_slow_forge_reads() {
+  local url='https://github.com/owner/repo/pull/1' head
+  make_world slow-forge-arm
+  write_child "$MAIN" child "done: PR $url checks green"
+  head=$(git -C "$MAIN/projects/child" rev-parse HEAD)
+  grep -v '^pr=\|^pr_head=' "$MAIN/state/child.meta" > "$MAIN/state/child.meta.tmp"
+  mv "$MAIN/state/child.meta.tmp" "$MAIN/state/child.meta"
+  cat > "$WORLD/fakebin/gh" <<'SH'
+#!/usr/bin/env bash
+sleep 2
+case " $* " in
+  *' --json isDraft '*) printf '{"isDraft":false}\n' ;;
+  *' --json headRefOid '*) printf '{"headRefOid":"%s"}\n' "$FM_TEST_HEAD" ;;
+  *) exit 97 ;;
+esac
+SH
+  chmod +x "$WORLD/fakebin/gh"
+  FM_TEST_HEAD=$head run_reconcile "$MAIN"
+  [ "$(sed -n 's/^pr=//p' "$MAIN/state/child.meta")" = "$url" ] \
+    || fail "default arming bound refused a slow but healthy registration: $(cat "$MAIN/state/.wake-queue" 2>/dev/null)"
+  [ -f "$MAIN/state/child.check.sh" ] || fail 'slow registration did not arm its merge poll'
+  pass 'the default arming bound arms a registration slower than 3s'
+}
+
+test_scout_does_not_arm_ready_pr_watch() {
+  local url='https://github.com/owner/repo/pull/1'
+  make_world scout-ready-watch
+  write_child "$MAIN" scout "done: PR $url checks green"
+  sed -i.bak 's/^kind=ship$/kind=scout/; /^pr=/d; /^pr_head=/d' "$MAIN/state/scout.meta"
+  rm -f "$MAIN/state/scout.meta.bak"
+  run_reconcile "$MAIN"
+  ! grep -q '^pr=' "$MAIN/state/scout.meta" || fail 'scout metadata gained a PR registration'
+  [ ! -e "$MAIN/state/scout.check.sh" ] || fail 'scout gained a merge poll sidecar'
+  pass 'scout CI-ready outcomes do not arm merge watches'
 }
 
 # An unpushed CI-ready ship done: is not a parent-facing ready signal. The
@@ -440,9 +576,9 @@ test_secondmate_ledger_delivery_carries_report_and_failure() {
   mkdir -p "$MATE/data/scout"
   printf '# findings\n' > "$MATE/data/scout/report.md"
   write_child "$MATE" boom 'failed: build broke'
-  write_child "$MATE" replaced-pr $'working: old PR https://example.test/owner/repo/pull/11\ndone: PR https://example.test/owner/repo/pull/22'
-  awk '$0 !~ /^pr=/' "$MATE/state/replaced-pr.meta" > "$MATE/state/replaced-pr.meta.tmp"
-  mv "$MATE/state/replaced-pr.meta.tmp" "$MATE/state/replaced-pr.meta"
+  write_child "$MATE" replaced-pr $'working: old PR https://example.test/owner/repo/pull/11\ndone: PR https://example.test/owner/repo/pull/22 checks green'
+  sed -i.bak 's|^pr=https://example.test/owner/repo/pull/1$|pr=https://example.test/owner/repo/pull/11|' "$MATE/state/replaced-pr.meta"
+  rm -f "$MATE/state/replaced-pr.meta.bak"
   FM_FAKE_CREW_STATE='unknown' run_reconcile "$MATE"
   scout_key=$(reported_outcome_key "$MATE" scout 'done') || fail "scout receipt key missing"
   boom_key=$(reported_outcome_key "$MATE" boom failed) || fail "failed receipt key missing"
@@ -451,7 +587,7 @@ test_secondmate_ledger_delivery_carries_report_and_failure() {
     || fail "scout delivery lost its report pointer: $(cat "$MAIN/state/mate.status")"
   sed -E 's/ \[at=[0-9]+\]//' "$MAIN/state/mate.status" | grep -Fxq "failed [key=$boom_key]: child boom failed: build broke pr=https://example.test/owner/repo/pull/1 mode=no-mistakes yolo=off" \
     || fail "failed line was not delivered under the failed verb: $(cat "$MAIN/state/mate.status")"
-  sed -E 's/ \[at=[0-9]+\]//' "$MAIN/state/mate.status" | grep -Fxq "done [key=$replaced_key]: child replaced-pr done: PR https://example.test/owner/repo/pull/22 pr=https://example.test/owner/repo/pull/22 mode=no-mistakes yolo=off" \
+  sed -E 's/ \[at=[0-9]+\]//' "$MAIN/state/mate.status" | grep -Fxq "done [key=$replaced_key]: child replaced-pr done: PR https://example.test/owner/repo/pull/22 checks green pr=https://example.test/owner/repo/pull/22 mode=no-mistakes yolo=off" \
     || fail "ledger fallback did not prefer the terminal ready line PR: $(cat "$MAIN/state/mate.status")"
   printf 'working: retrying\ndone: fixed on retry\n' >> "$MATE/state/boom.status"
   FM_FAKE_CREW_STATE='unknown' run_reconcile "$MATE"
@@ -467,14 +603,15 @@ test_secondmate_ledger_delivery_carries_report_and_failure() {
 # task's delivered PR: without a recorded PR, only a terminal line in the
 # ready-signal shape carries one, and a scout never carries one at all.
 test_pr_field_requires_recorded_pr_or_ready_signal_line() {
-  local id prose_key ready_key stamped_key placeholder_key scout_key
+  local id prose_key compared_key ready_key stamped_key placeholder_key scout_key
   make_world pr-provenance; bind_secondmate local
   write_child "$MATE" prose $'working: context in https://example.test/other/repo/pull/33\ndone: cleanup finished'
+  write_child "$MATE" compared 'done: compared against PR https://example.test/owner/repo/pull/22 checks green'
   write_child "$MATE" ready 'done: PR https://example.test/owner/repo/pull/44 checks green'
   write_child "$MATE" stamped 'done [at=1788576000]: PR https://example.test/owner/repo/pull/66 checks green'
   write_child "$MATE" placeholder 'done [at=<epoch>]: PR https://example.test/owner/repo/pull/77 checks green'
   write_child "$MATE" lookout 'done: PR https://example.test/owner/repo/pull/55'
-  for id in prose ready stamped placeholder; do
+  for id in prose compared ready stamped placeholder; do
     awk '$0 !~ /^pr=/' "$MATE/state/$id.meta" > "$MATE/state/$id.meta.tmp"
     mv "$MATE/state/$id.meta.tmp" "$MATE/state/$id.meta"
   done
@@ -483,6 +620,7 @@ test_pr_field_requires_recorded_pr_or_ready_signal_line() {
   mv "$MATE/state/lookout.meta.tmp" "$MATE/state/lookout.meta"
   FM_FAKE_CREW_STATE='unknown' run_reconcile "$MATE"
   prose_key=$(reported_outcome_key "$MATE" prose 'done') || fail "prose receipt key missing"
+  compared_key=$(reported_outcome_key "$MATE" compared 'done') || fail "prose PR comparison receipt key missing"
   ready_key=$(reported_outcome_key "$MATE" ready 'done') || fail "ready receipt key missing"
   stamped_key=$(reported_outcome_key "$MATE" stamped 'done') || fail "stamped ready receipt key missing"
   placeholder_key=$(reported_outcome_key "$MATE" placeholder 'done') \
@@ -490,6 +628,8 @@ test_pr_field_requires_recorded_pr_or_ready_signal_line() {
   scout_key=$(reported_outcome_key "$MATE" lookout 'done') || fail "scout receipt key missing"
   sed -E 's/ \[at=[0-9]+\]//' "$MAIN/state/mate.status" | grep -Fxq "done [key=$prose_key]: child prose done: cleanup finished mode=no-mistakes yolo=off" \
     || fail "a PR mentioned only in prose was claimed as the delivery: $(cat "$MAIN/state/mate.status")"
+  sed -E 's/ \[at=[0-9]+\]//' "$MAIN/state/mate.status" | grep -Fxq "done [key=$compared_key]: child compared done: compared against PR https://example.test/owner/repo/pull/22 checks green mode=no-mistakes yolo=off" \
+    || fail "a PR compared in prose was claimed as the delivery: $(cat "$MAIN/state/mate.status")"
   sed -E 's/ \[at=[0-9]+\]//' "$MAIN/state/mate.status" | grep -Fxq "done [key=$ready_key]: child ready done: PR https://example.test/owner/repo/pull/44 checks green pr=https://example.test/owner/repo/pull/44 mode=no-mistakes yolo=off" \
     || fail "a ready-signal terminal line did not carry its PR: $(cat "$MAIN/state/mate.status")"
   sed -E 's/ \[at=[0-9]+\]//' "$MAIN/state/mate.status" | grep -Fxq "done [key=$stamped_key]: child stamped done: PR https://example.test/owner/repo/pull/66 checks green pr=https://example.test/owner/repo/pull/66 mode=no-mistakes yolo=off" \
@@ -987,12 +1127,12 @@ test_full_scan_budget_includes_wake_lock_wait() {
   [ -e "$WORLD/lock-ready" ] || fail "wake lock holder did not start"
 
   started=$(date +%s)
-  FM_INACTIVE_RECONCILE_BUDGET_SECS=1 FM_FAKE_CREW_STATE='done' run_reconcile "$MAIN" --startup
+  FM_PR_WATCH_ARM_SECS=1 FM_INACTIVE_RECONCILE_BUDGET_SECS=1 FM_FAKE_CREW_STATE='done' run_reconcile "$MAIN" --startup
   elapsed=$(( $(date +%s) - started ))
   reap "$holder"
   # The unbounded wake-lock wait is ended by the process-group backstop, which
-  # fires one second after the budget; the bound proves the scan cannot ride
-  # the 30-second lock hold.
+  # fires one second after the arming bound plus the budget; the bound proves
+  # the scan cannot ride the 30-second lock hold.
   [ "$elapsed" -le 4 ] || fail "wake lock wait exceeded aggregate scan budget (${elapsed}s)"
   pass "aggregate scan budget includes durable wake operations"
 }
@@ -1070,6 +1210,11 @@ SH
 }
 
 test_main_direct_terminal_presentation_receipt
+test_slow_pr_watch_does_not_starve_ledger_or_later_children
+test_main_home_arms_ready_pr_watch
+test_scout_does_not_arm_ready_pr_watch
+test_pr_watch_arm_timeout_names_timeout
+test_default_arm_bound_allows_slow_forge_reads
 test_branch_ack_retires_inactive_outcome_receipt
 test_unpushed_ci_ready_done_is_not_published
 test_local_done_head_is_pinned_before_parent_delivery

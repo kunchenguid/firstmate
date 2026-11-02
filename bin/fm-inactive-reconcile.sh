@@ -83,8 +83,14 @@
 # main-home acknowledgement. The atomic epoch/cursor marker's mtime gates scans,
 # and its cursor records the last child visited within the aggregate budget.
 #
-# The scan reads only durable local state and fm-crew-state.sh; it never invokes
-# gh, gh-axi, curl, fm-pr-check.sh, fm-pr-poll.sh, or a state *.check.sh.
+# Ready ship outcomes also arm their merge poll from the durable status ledger;
+# the poll itself remains owned by fm-watch.sh and this scan never reads forge
+# state directly. Each scan makes at most one bin/fm-pr-check.sh registration
+# attempt, bounded by FM_PR_WATCH_ARM_SECS (default 10, valid 1..30): a
+# registration does two forge reads plus local locking and hashing, which
+# measured up to about 3s on a loaded host before any forge latency. That
+# attempt runs before the scan deadline is taken, so the wedged-scan backstop
+# allows for it on top of the budget.
 set -u
 export LC_ALL=C
 
@@ -102,6 +108,8 @@ CREW_STATE_BIN="${FM_INACTIVE_CREW_STATE_BIN:-$SCRIPT_DIR/fm-crew-state.sh}"
 . "$SCRIPT_DIR/fm-classify-lib.sh"
 # shellcheck source=bin/fm-parent-channel-lib.sh
 . "$SCRIPT_DIR/fm-parent-channel-lib.sh"
+# shellcheck source=bin/fm-pr-lib.sh
+. "$SCRIPT_DIR/fm-pr-lib.sh"
 # shellcheck source=bin/fm-timeout-lib.sh
 . "$SCRIPT_DIR/fm-timeout-lib.sh"
 # shellcheck source=bin/fm-dod-lib.sh
@@ -127,6 +135,17 @@ case "$FM_INACTIVE_RECONCILE_BUDGET_SECS" in
 esac
 if [ "$FM_INACTIVE_RECONCILE_BUDGET_SECS" -gt 30 ]; then
   printf 'fm-inactive-reconcile: FM_INACTIVE_RECONCILE_BUDGET_SECS must be a whole number from 1 to 30\n' >&2
+  exit 2
+fi
+FM_PR_WATCH_ARM_SECS=${FM_PR_WATCH_ARM_SECS:-10}
+case "$FM_PR_WATCH_ARM_SECS" in
+  ''|*[!0-9]*|0)
+    printf 'fm-inactive-reconcile: FM_PR_WATCH_ARM_SECS must be a whole number from 1 to 30\n' >&2
+    exit 2
+    ;;
+esac
+if [ "$FM_PR_WATCH_ARM_SECS" -gt 30 ]; then
+  printf 'fm-inactive-reconcile: FM_PR_WATCH_ARM_SECS must be a whole number from 1 to 30\n' >&2
   exit 2
 fi
 
@@ -329,13 +348,14 @@ meta_incarnation() { # <meta>
 # delivery.
 # A scout never delivers a PR, so it never carries one.
 pr_for_task() { # <meta> [preferred-line]
-  local meta=$1 preferred=${2:-} value
+  local meta=$1 preferred=${2:-} value ready_pr
   [ "$(meta_field "$meta" kind)" != scout ] || return 0
   value=$(meta_field "$meta" pr)
-  if [ -z "$value" ] && [ -n "$preferred" ]; then
-    value=$(printf '%s\n' "$preferred" \
+  if [ -n "$preferred" ]; then
+    ready_pr=$(printf '%s\n' "$preferred" \
       | sed -nE 's|^done( \[at=[^]]*\])?: PR (https?://[^[:space:])"]+/pull/[0-9]+)( checks green)?$|\2|p' \
       | head -1 || true)
+    [ -z "$ready_pr" ] || value=$ready_pr
   fi
   clean_field "$value"
 }
@@ -460,10 +480,79 @@ report_child_ledger_locked() { # <id> <meta>
   return 1
 }
 
-# Every direct child's ledger, under its meta lock. File reads, plus a local
-# git reachability check for a ship done: with no delivery record yet, so it
-# runs on every poll in a secondmate home; a delivery failure is already queued as a
-# notice and never fails the scan.
+# A canonical CI-ready ship outcome arms its merge poll without waiting for a
+# supervisor turn. fm-pr-check owns validation, metadata, and sidecar creation.
+arm_ready_pr_watch() { # <id> <meta>
+  local id=$1 meta=$2 status line note url recorded arm_output arm_rc incarnation kind
+  kind=$(meta_field "$meta" kind)
+  [ "${kind:-ship}" = ship ] || return 0
+  status="$STATE/$id.status"
+  line=$(child_terminal_ledger_line "$status") || return 0
+  [ "$(status_line_verb "$line")" = 'done' ] || return 0
+  note=$(status_line_note "$line")
+  case "$note" in
+    PR\ https://*) ;;
+    *) return 0 ;;
+  esac
+  case "$note" in
+    *' checks green') ;;
+    *) return 0 ;;
+  esac
+  url=${note#PR }
+  url=${url% checks green}
+  case "$url" in *[[:space:]]*|'') return 0 ;; esac
+  recorded=$(meta_field "$meta" pr)
+  incarnation=$(meta_incarnation "$meta")
+  if [ "$recorded" = "$url" ] \
+    && fm_pr_poll_artifacts_valid "$STATE" "$id" "$SCRIPT_DIR/fm-pr-poll.sh" \
+    && [ "$FM_PR_DATA_URL" = "$url" ]; then
+    fm_pr_metadata_identity_parse "$meta" \
+      && [ "$FM_PR_META_URL" = "$url" ] && return 0
+  fi
+  if [ "$recorded" = "$url" ] && fm_pr_metadata_identity_parse "$meta"; then
+    fm_pr_poll_merge_already_notified "$STATE" "$id" \
+      "$FM_PR_META_PROVIDER" "$FM_PR_META_HOST" "$FM_PR_META_PATH" "$FM_PR_META_NUMBER" \
+      && return 0
+  fi
+  if arm_output=$(fm_run_timed "$FM_PR_WATCH_ARM_SECS" env FM_PR_CHECK_EXPECT_INCARNATION="$incarnation" \
+    FM_PR_CHECK_EXPECT_READY_LINE="$line" \
+    "$SCRIPT_DIR/fm-pr-check.sh" "$id" "$url" 2>&1); then
+    return 0
+  else
+    arm_rc=$?
+  fi
+  if fm_timed_out "$arm_rc"; then
+    arm_output="timed out after ${FM_PR_WATCH_ARM_SECS}s${arm_output:+: $arm_output}"
+  elif [ -z "$arm_output" ]; then
+    arm_output="exited with status $arm_rc"
+  fi
+  publish_actionable "pr-watch-arm:$id" \
+    "PR merge watch could not be armed for task $id ($url): $(clean_field "$arm_output")" || true
+}
+
+# Every ready status is eligible for arming on each scan, in every home.
+arm_ready_pr_watches() {
+  local meta id cursor selected=''
+  local marker="$STATE/.pr-watch-cursor"
+  cursor=$(cat "$marker" 2>/dev/null || true)
+  for meta in "$STATE"/*.meta; do
+    [ -f "$meta" ] || continue
+    id=$(basename "$meta" .meta)
+    valid_id "$id" || continue
+    if [ -n "$cursor" ] && [[ "$id" > "$cursor" ]]; then
+      selected=$id
+      break
+    fi
+    [ -n "$selected" ] || selected=$id
+  done
+  [ -n "$selected" ] || return 0
+  meta="$STATE/$selected.meta"
+  arm_ready_pr_watch "$selected" "$meta" || true
+  printf '%s\n' "$selected" > "$marker.tmp" && mv -f "$marker.tmp" "$marker"
+}
+
+# Every direct child's ledger is examined on each scan. Parent delivery remains
+# secondmate-only, while merge-watch arming applies to every home.
 ledger_pass() {
   local meta id lock
   for meta in "$STATE"/*.meta; do
@@ -604,12 +693,14 @@ scan() {
   mkdir -p "$STATE" "$OUTCOME_DIR" || return 1
   [ ! -L "$OUTCOME_DIR" ] || return 1
   if self=$(home_secondmate_id); then
-    # The ledger-first delivery is per poll, not per cadence.
+    # The ledger-first delivery is per poll, not per cadence; run it before
+    # bounded PR registration attempts so a slow forge cannot starve delivery.
     ledger_pass
   else
     marker_rc=$?
     self=''
   fi
+  arm_ready_pr_watches
   if [ "$startup" != 1 ] && [ "$(scan_marker_age)" -lt "$FM_INACTIVE_RECONCILE_SECS" ]; then
     return 0
   fi
@@ -668,7 +759,9 @@ case "$mode" in
     # process-group kill is only the backstop for a scan wedged outside every
     # bounded section (an unbounded lock wait), so it fires one second after
     # the deadline instead of racing the clean bounded exit it exists to guard.
-    if fm_run_timed $((FM_INACTIVE_RECONCILE_BUDGET_SECS + 1)) "$0" _scan-locked "$startup"; then
+    # The deadline is taken after the bounded merge-watch arming attempt, so
+    # the backstop also allows for that attempt.
+    if fm_run_timed $((FM_PR_WATCH_ARM_SECS + FM_INACTIVE_RECONCILE_BUDGET_SECS + 1)) "$0" _scan-locked "$startup"; then
       :
     elif [ "$?" -ne 124 ]; then
       exit 1
