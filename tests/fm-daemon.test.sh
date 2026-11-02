@@ -1583,10 +1583,10 @@ test_housekeeping_overdue_queue_failure_resume_discards() {
 
 test_overdue_reconcile_ignores_unrelated_and_repeated_pause() {
   local dir state task statusf identity offset event
-  for event in blocked repeated; do
+  for event in blocked repeated prose custom; do
     dir=$(make_supercase "overdue-reconcile-$event"); state="$dir/state"
     task=overdue-reconcile; statusf="$state/$task.status"
-    printf 'paused [at=100]: waiting for dependency\n' > "$statusf"
+    if [ "$event" = custom ]; then printf 'holding [at=100]: waiting for dependency\n' > "$statusf"; else printf 'paused [at=100]: waiting for dependency\n' > "$statusf"; fi
     offset=$(wc -c < "$statusf" | tr -d ' ')
     printf 'blocked [key=paused-overdue-%s]: overdue\n' "$task" >> "$statusf"
     if [ "$(uname)" = Darwin ]; then identity=$(/usr/bin/stat -f '%d %i' "$statusf"); else identity=$(stat -c '%d %i' "$statusf"); fi
@@ -1594,12 +1594,14 @@ test_overdue_reconcile_ignores_unrelated_and_repeated_pause() {
     case "$event" in
       blocked) printf 'blocked [key=other]: another decision\n' >> "$statusf" ;;
       repeated) printf 'paused [at=200]: waiting for dependency\n' >> "$statusf" ;;
+      prose) printf 'Still waiting for the dependency\n' >> "$statusf" ;;
+      custom) printf 'holding [at=200]: waiting for dependency\n' >> "$statusf" ;;
     esac
     (
       # shellcheck disable=SC2030
       export FM_HOME="$dir" FM_STATE_OVERRIDE="$state"
       . "$ROOT/bin/fm-wake-lib.sh"
-      reconcile_overdue_pause "$state" "$task"
+      if [ "$event" = custom ]; then FM_CLASSIFY_PAUSED_VERB=holding reconcile_overdue_pause "$state" "$task"; else reconcile_overdue_pause "$state" "$task"; fi
       [ -e "$state/.paused-overdue-$task" ] || fail "$event removed the overdue marker"
       status_open_decisions "$statusf" | grep -Fq "paused-overdue-$task" || fail "$event closed the overdue decision"
     ) || fail "overdue reconciliation accepted $event as resume"

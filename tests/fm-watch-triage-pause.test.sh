@@ -1429,8 +1429,8 @@ test_busy_overdue_pause_does_not_enter_wedge_ladder() {
 test_overdue_marker_survives_reconcile_and_closes_on_working() {
   local dir state statusf
   dir=$(paused_until_fixture overdue-marker-eof "" 90000); state="$dir/state"; statusf="$state/overdue-marker-eof.status"
-  printf 'paused: waiting for an external dependency\n' > "$statusf"
-  FM_STATE_OVERRIDE="$state" FM_HOME="$dir" bash -c '
+  printf 'holding: waiting for an external dependency\n' > "$statusf"
+  FM_STATE_OVERRIDE="$state" FM_HOME="$dir" FM_CLASSIFY_PAUSED_VERB=holding bash -c '
     . "$1"
     fm_wake_status_append_self_announced() { printf "%s\n" "$3" >> "$2"; }
     fm_wake_append() { :; }
@@ -1443,7 +1443,13 @@ test_overdue_marker_survives_reconcile_and_closes_on_working() {
     printf "blocked [key=other]: unrelated decision\n" >> "$2"
     pause_overdue_reconcile overdue-marker-eof "$2"; [ "$?" -eq 0 ] || exit 1
     [ -s "$STATE/.paused-overdue-overdue-marker-eof" ] || exit 1
-    printf "paused [at=200]: waiting for an external dependency\n" >> "$2"
+    printf "holding [at=200]: waiting for an external dependency\n" >> "$2"
+    pause_overdue_reconcile overdue-marker-eof "$2"; [ "$?" -eq 0 ] || exit 1
+    [ -s "$STATE/.paused-overdue-overdue-marker-eof" ] || exit 1
+    printf "Still waiting for the dependency\n" >> "$2"
+    pause_overdue_reconcile overdue-marker-eof "$2"; [ "$?" -eq 0 ] || exit 1
+    [ -s "$STATE/.paused-overdue-overdue-marker-eof" ] || exit 1
+    printf "holding [at=300]: waiting for an external dependency\n" >> "$2"
     pause_overdue_reconcile overdue-marker-eof "$2"; [ "$?" -eq 0 ] || exit 1
     [ -s "$STATE/.paused-overdue-overdue-marker-eof" ] || exit 1
     printf "needs-decision: captain input required\n" >> "$2"
