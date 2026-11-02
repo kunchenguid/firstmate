@@ -111,9 +111,12 @@ fm_tmux_composer_caps() {
 # It answers Command Code the same way, from its anchored `command-code`
 # foreground process name and its own verified busy footer: its composer is a
 # bare `❯` row between the same two rules, and its placeholder needs the
-# identity-scoped ghost ceiling in bin/fm-composer-lib.sh.
+# identity-scoped ghost ceiling in bin/fm-composer-lib.sh. Hermes runs under
+# an interpreter, so it is matched by foreground argv through
+# bin/fm-hermes-process-lib.sh rather than by process name.
 # Prints "<owner><TAB>idle" or "<owner><TAB>working" for owner pi,
-# polytoken, or commandcode; exits 1 when the pane is not a live shape owner.
+# polytoken, commandcode, or hermes; exits 1 when the pane is not a live
+# shape owner.
 fm_tmux_composer_identity() {  # <target>
   local target=$1 tty pid pgid tpgid comm args owner='' status
   tty=$(tmux display-message -p -t "$target" '#{pane_tty}' 2>/dev/null) || tty=
