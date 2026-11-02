@@ -362,6 +362,7 @@ SH
   chmod +x "$TMP/reader"
   export FM_BACKEND_HERDR_EVENT_READER="$TMP/reader"
   export FM_READER_TIMEOUT="$TMP/reader-timeout"
+  # shellcheck disable=SC2034 # Read by the sourced watcher's event_wait_or_sleep (fm-watch.sh is shellcheck-sourced to /dev/null).
   POLL=10
   for MODE in hung healthy; do
     reset_state
