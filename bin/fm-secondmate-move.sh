@@ -37,9 +37,10 @@
 # checked before anything is stopped. Recovery keeps a local mate on its
 # recorded backend (PR #8082), so a completed move needs no config/backend
 # change to last. The record is snapshotted before the launch; a launch that
-# fails after the stop has its previous record put back, so the next liveness
-# recovery respawns the mate on its previous, recorded backend, and the
-# failure says so plainly.
+# fails after the stop has its previous record put back under the record's
+# meta lock, so the next liveness recovery respawns the mate on its previous,
+# recorded backend; a different record found in place by then is left alone.
+# The failure says which of those happened.
 #
 # Prints `moved <id> from=<old-backend> to=<new-backend>` followed by the
 # spawn's own `spawned ...` line. Exit status: 0 moved; 1 refused or failed,
@@ -154,11 +155,22 @@ if fm_secondmate_liveness_relaunch "$META" "$ID" "" "$TARGET"; then
   printf '%s\n' "$FM_SM_LIVE_OUT" | grep '^spawned ' || true
   exit 0
 fi
-if ! cmp -s "$SNAPSHOT" "$META"; then
+# The restore runs under the record's meta lock, the one every record writer
+# (fm-spawn, fm-control) publishes under, and only fills the gap the failed
+# fresh spawn's rollback left: a record present by then was published by
+# another writer, so it is left exactly as it is.
+META_LOCK=$(fm_meta_lock_path "$META") && fm_lock_acquire_wait "$META_LOCK" \
+  || die "second mate $ID could not be launched on $TARGET and its record lock could not be taken to put the previous record back; restore it from $SNAPSHOT: $(first_line "$FM_SM_LIVE_OUT")"
+if [ ! -e "$META" ] && [ ! -L "$META" ]; then
   cp -p "$SNAPSHOT" "$META.move.$$" && mv -f "$META.move.$$" "$META" || {
+    fm_lock_release "$META_LOCK" || true
     trap 'fm_secondmate_liveness_unlock "$ID"' EXIT
     die "second mate $ID could not be launched on $TARGET and its previous record could not be put back; restore it from $SNAPSHOT: $(first_line "$FM_SM_LIVE_OUT")"
   }
+elif ! cmp -s "$SNAPSHOT" "$META"; then
+  fm_lock_release "$META_LOCK" || true
+  die "second mate $ID could not be launched on $TARGET after its $OLD_BACKEND agent was stopped, and a different record for it is now in place (published by another writer since, or left by the launch's own incomplete cleanup); that record was left as it is and the previous one was not put back: $(first_line "$FM_SM_LIVE_OUT")"
 fi
+fm_lock_release "$META_LOCK" || true
 [ "$FM_SM_LIVE_STATUS" != skipped ] || die "$FM_SM_LIVE_REASON"
 die "second mate $ID could not be launched on $TARGET after its $OLD_BACKEND agent was stopped; its home is unchanged and its previous record (backend=$OLD_BACKEND) is in place, so the next liveness recovery respawns it on $OLD_BACKEND: $(first_line "$FM_SM_LIVE_OUT")"
