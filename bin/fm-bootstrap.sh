@@ -1560,6 +1560,7 @@ detect_local_tools() {
   fi
 }
 
+# shellcheck source=bin/fm-record-hygiene-lib.sh
 . "$SCRIPT_DIR/fm-record-hygiene-lib.sh"
 
 detect_local_config() {
