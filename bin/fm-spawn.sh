@@ -527,6 +527,9 @@
 #     __CLAUDEADDDIRS__ quoted --add-dir flags granting exactly this task's
 #                  Firstmate channel directories (claude_add_dirs_flag below;
 #                  supplies its own trailing space, empty never used)
+#     __CLAUDESESSION__ --resume <id> on a move whose old Claude agent's
+#                  session fm-control captured and whose transcript exists
+#                  (supplies its own trailing space), empty otherwise
 #     __CLAUDESETTINGS__ the single claude --settings value: a quoted inline
 #                  JSON object for a crewmate or scout, or a quoted path to
 #                  state/<task-id>.claude-settings.json for a secondmate
@@ -2976,7 +2979,7 @@ launch_template() {
   # project and fetched content. A persistent secondmate receives its own
   # supervisor contract instead, so this task-worker statement does not apply.
   claude)
-    printf '%s' 'CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false CLAUDE_CODE_SEND_FEEDBACK=0 claude __CLAUDEPERMFLAG__ __CLAUDEADDDIRS__--settings __CLAUDESETTINGS__ '
+    printf '%s' 'CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false CLAUDE_CODE_SEND_FEEDBACK=0 claude __CLAUDEPERMFLAG__ __CLAUDEADDDIRS____CLAUDESESSION__--settings __CLAUDESETTINGS__ '
     if [ "$kind" != secondmate ]; then
       printf '%s' "--append-system-prompt '$(spawn_claude_task_channel_statement)' "
     fi
@@ -3738,6 +3741,29 @@ muse_credential_present() {
 # agent, a stale one, a malformed reference - degrades to that same
 # fresh-session launch rather than refusing, because nothing here is a safety
 # property; it preserves a display and supervision signal.
+claude_session_id_valid() {  # <id>
+  case "$1" in
+    ????????-????-????-????-????????????) ;;
+    *) return 1 ;;
+  esac
+  case "$1" in
+    *[!0-9a-f-]*) return 1 ;;
+  esac
+}
+
+# claude_session_transcript_present: whether Claude saved <id>'s conversation in
+# the store this launch uses, so --resume can find it. A missing transcript
+# (saving off, another account, a pruned store) falls back to a fresh session.
+claude_session_transcript_present() {  # <id>
+  local id=$1 store transcript
+  claude_session_id_valid "$id" || return 1
+  store=${CLAUDE_CONFIG_DIR:-$HOME/.claude}
+  for transcript in "$store"/projects/*/"$id".jsonl; do
+    [ -s "$transcript" ] && return 0
+  done
+  return 1
+}
+
 relaunch_resume_args() {  # <harness> <backend> <target>
   local harness=${1-} backend=${2-} target=${3-} identity agent ref flag
   [ "$backend" = herdr ] || return 0
@@ -7290,6 +7316,17 @@ fi
 META_WINDOW=$T
 [ "$BACKEND" = orca ] && META_WINDOW=$W
 [ "$BACKEND" = t3code ] && META_WINDOW=$W
+# A move continues the old Claude agent's conversation: bin/fm-control.sh
+# captures that agent's session id before stopping it and hands it over in
+# FM_CONTROL_CLAUDE_RESUME. Only a move resumes; an in-place relaunch replaces
+# an agent that may be confused or out of context, so it starts fresh from the
+# brief and the progress note.
+CLAUDE_SESSION_FLAG=
+if [ "$HARNESS" = claude ] && [ "$RAW_LAUNCH" = 0 ] && [ -n "$MOVE_FROM_BACKEND" ] \
+  && [ "$RELAUNCH_PRIOR_HARNESS" = claude ] && [ "$SPAWN_CONTROL_PARENT" = 1 ] \
+  && claude_session_transcript_present "${FM_CONTROL_CLAUDE_RESUME:-}"; then
+  CLAUDE_SESSION_FLAG="--resume $FM_CONTROL_CLAUDE_RESUME "
+fi
 SPAWN_GEN="s$(date +%s).${BASHPID:-$$}.$RANDOM"
 SPAWN_META_PATH="$STATE/$ID.meta"
 if [ "$SPAWN_META_LOCK_HELD" != 1 ]; then
@@ -7649,6 +7686,7 @@ case "$LAUNCH" in
   LAUNCH=${LAUNCH//__BRIEFDOORBELL__/"$(shell_quote "$brief_doorbell")"}
   ;;
 esac
+LAUNCH=${LAUNCH//__CLAUDESESSION__/$CLAUDE_SESSION_FLAG}
 case "$LAUNCH" in
 *__CLAUDEADDDIRS__*)
   CLAUDE_ADD_DIRS=$(claude_add_dirs_flag "$KIND" "$STATE" "$DATA" "$FM_ROOT" "$ID") || {

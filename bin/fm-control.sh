@@ -102,7 +102,9 @@
 #              that backend and endpoint, and the old endpoint is closed only
 #              after that record is committed. A Pi replacement resumes the
 #              session the old endpoint's runtime recorded, as an in-place
-#              relaunch does. The target backend's spawn, runtime, and
+#              relaunch does, and a Claude replacement resumes the session the
+#              old Claude agent was running (read before it stops,
+#              fm_control_claude_session_of_worktree). The target backend's spawn, runtime, and
 #              harness checks run before the old agent stops.
 #              Refused on t3code before anything is stopped: a T3 thread
 #              keeps its conversation, so a new turn or a provider change on
@@ -1260,7 +1262,7 @@ record_note() {
 }
 
 do_relaunch() {
-  local exit_result state note_line
+  local exit_result state note_line claude_resume
   local -a spawn_args
 
   require_state_verified_backend relaunch
@@ -1300,6 +1302,12 @@ do_relaunch() {
   record_note
   journal_write noted "${CHECKPOINT_LINES[@]}" "$note_line"
 
+  # A move to another backend continues a Claude agent's conversation, so its
+  # session id is read while the agent still runs.
+  claude_resume=
+  if [ "$BACKEND_SET" = 1 ] && [ "$PRIOR_HARNESS" = claude ] && [ "$TARGET_HARNESS" = claude ]; then
+    claude_resume=$(fm_control_claude_session_of_worktree "$WT")
+  fi
   journal_write stopping "${CHECKPOINT_LINES[@]}" "$note_line"
   exit_result=$(do_exit)
   journal_write exited "${CHECKPOINT_LINES[@]}" "$note_line" "exit_result=$exit_result"
@@ -1313,7 +1321,7 @@ do_relaunch() {
   [ "$TARGET_EFFORT" = default ] || spawn_args+=(--effort "$TARGET_EFFORT")
   [ -z "$TARGET_ACCOUNT" ] || spawn_args+=(--account "$TARGET_ACCOUNT")
   [ "$BACKEND_SET" = 0 ] || spawn_args+=(--move-backend "$NEW_BACKEND")
-  if FM_CONTROL_RELAUNCH_TX="$RELAUNCH_TX" \
+  if FM_CONTROL_RELAUNCH_TX="$RELAUNCH_TX" FM_CONTROL_CLAUDE_RESUME="$claude_resume" \
       "$SCRIPT_DIR/fm-spawn.sh" "${spawn_args[@]}" >/dev/null; then
     RELAUNCH_META_PUBLISHED=1
     # $T was resolved from the record before the launch. When the recorded

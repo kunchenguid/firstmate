@@ -744,6 +744,29 @@ test_hermes_profile_refusals_preserve_running_worker() {
   pass 'fm-control relaunch: Hermes profile model and gateway refusals preserve the current worker'
 }
 
+test_claude_session_is_read_only_from_one_live_record_in_the_worktree() {
+  local d agent other out
+  d=$(fm_test_tmproot fm-control-claude-session)
+  mkdir -p "$d/wt" "$d/other" "$d/store/sessions"
+  set -m
+  ( cd "$d/wt" && exec -a claude sleep 60 ) &
+  agent=$!
+  ( cd "$d/wt" && exec -a claude sleep 60 ) &
+  other=$!
+  set +m
+  printf '{"pid":%s,"sessionId":"11111111-2222-4333-8444-555555555555","cwd":"%s","kind":"interactive"}\n' "$agent" "$d/wt" > "$d/store/sessions/$agent.json"
+  printf '{"pid":999999,"sessionId":"aaaaaaaa-2222-4333-8444-555555555555","cwd":"%s","kind":"interactive"}\n' "$d/wt" > "$d/store/sessions/999999.json"
+  printf '{"pid":%s,"sessionId":"bbbbbbbb-2222-4333-8444-555555555555","cwd":"%s","kind":"interactive"}\n' "$$" "$d/other" > "$d/store/sessions/$$.json"
+  out=$(fm_control_claude_session_of_worktree "$d/wt" "$d/store")
+  assert_equals "$out" 11111111-2222-4333-8444-555555555555 "one live Claude record in the worktree names its session"
+  printf '{"pid":%s,"sessionId":"cccccccc-2222-4333-8444-555555555555","cwd":"%s","kind":"interactive"}\n' "$other" "$d/wt" > "$d/store/sessions/$other.json"
+  out=$(fm_control_claude_session_of_worktree "$d/wt" "$d/store")
+  kill "$agent" "$other" 2>/dev/null || true
+  wait "$agent" "$other" 2>/dev/null || true
+  assert_equals "$out" "" "two live Claude agents in one worktree resume neither"
+  pass "fm-control-lib: a Claude session is read only from exactly one live record in the worktree"
+}
+
 test_state_verified_backends_are_exactly_tmux_herdr_rex_and_hc() {
   fm_control_backend_state_verified tmux || fail "tmux has a recovery-grade classifier"
   fm_control_backend_state_verified herdr || fail "herdr has a recovery-grade classifier"
@@ -1346,6 +1369,7 @@ test_unverified_state_backends_refuse_stop_verbs
 test_commandcode_relaunch_off_tmux_and_herdr_refuses_before_stopping
 test_hermes_profile_refusals_preserve_running_worker
 test_state_verified_backends_are_exactly_tmux_herdr_rex_and_hc
+test_claude_session_is_read_only_from_one_live_record_in_the_worktree
 test_window_label_is_refused_with_the_exact_id
 test_explicit_endpoint_is_refused
 test_unknown_task_is_refused

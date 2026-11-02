@@ -3456,6 +3456,41 @@ test_secondmate_spawns_fresh_on_hc() {
   pass "fm-spawn --secondmate --backend hc: a local secondmate spawns in its own Herdr.app space"
 }
 
+test_control_move_resumes_the_claude_conversation() {
+  local dir out rc=0 agent sid=0f1e2d3c-4b5a-4697-8877-665544332211 launched
+  dir=$(new_case control-move-resume rl96)
+  add_ship_task "$dir" rl96 claude
+  make_hc_stub "$dir"
+  # The running agent's own session record, as Claude keeps it per process.
+  set -m
+  ( cd "$dir/wt" && exec -a claude sleep 60 ) &
+  agent=$!
+  set +m
+  mkdir -p "$dir/user-home/.claude/sessions" "$dir/user-home/.claude/projects/p"
+  printf '{"pid":%s,"sessionId":"%s","cwd":"%s","kind":"interactive"}\n' "$agent" "$sid" "$dir/wt" \
+    > "$dir/user-home/.claude/sessions/$agent.json"
+  printf '{"type":"user"}\n' > "$dir/user-home/.claude/projects/p/$sid.jsonl"
+  out=$(run_control_hc "$dir" rl96 relaunch --backend hc --note "moved") || rc=$?
+  kill "$agent" 2>/dev/null || true
+  wait "$agent" 2>/dev/null || true
+  expect_code 0 "$rc" "the move should succeed"$'\n'"$out"
+  launched=$(cat "$dir/fake/hc/launched-command")
+  assert_contains "$launched" "--resume $sid" "a moved Claude agent must continue its own conversation"
+  pass "fm-control relaunch --backend hc: a moved Claude agent resumes its conversation"
+}
+
+test_control_move_without_a_session_record_starts_fresh() {
+  local dir out rc=0 launched
+  dir=$(new_case control-move-fresh rl97)
+  add_ship_task "$dir" rl97 claude
+  make_hc_stub "$dir"
+  out=$(run_control_hc "$dir" rl97 relaunch --backend hc --note "moved") || rc=$?
+  expect_code 0 "$rc" "the move should succeed"$'\n'"$out"
+  launched=$(cat "$dir/fake/hc/launched-command")
+  assert_not_contains "$launched" "--resume" "with no live session record the replacement starts fresh"
+  pass "fm-control relaunch --backend hc: without a live session record the replacement starts fresh"
+}
+
 test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint
 test_relaunch_refuses_before_exit_when_the_composer_holds_pending_text
 test_relaunch_refuses_before_exit_when_the_composer_state_is_unproven
@@ -3556,3 +3591,5 @@ test_control_relaunch_moves_a_running_task_to_hc
 test_control_move_refuses_before_stop_when_hc_is_unreachable
 test_control_relaunch_moves_a_secondmate_into_its_own_hc_space
 test_secondmate_spawns_fresh_on_hc
+test_control_move_resumes_the_claude_conversation
+test_control_move_without_a_session_record_starts_fresh

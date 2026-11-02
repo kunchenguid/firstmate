@@ -333,6 +333,39 @@ fm_control_relaunch_resume_flag() {  # <harness> <registered-agent>
   return 0
 }
 
+# fm_control_claude_session_of_worktree: the session id of the one interactive
+# Claude agent running in <worktree>, read from the per-process record Claude
+# keeps at <store>/sessions/<pid>.json (store: CLAUDE_CONFIG_DIR, else
+# ~/.claude). A record counts only while its pid is alive and still a Claude
+# process, its cwd is the worktree, and its kind is interactive; anything but
+# exactly one such record prints nothing, so a caller starts a fresh session
+# rather than resuming a guessed one.
+fm_control_claude_session_of_worktree() {  # <worktree> [store]
+  local wt=$1 store=${2:-${CLAUDE_CONFIG_DIR:-$HOME/.claude}} wt_real record fields pid id cwd kind found=
+  command -v jq >/dev/null 2>&1 || return 0
+  wt_real=$(cd "$wt" 2>/dev/null && pwd -P) || return 0
+  for record in "$store"/sessions/*.json; do
+    [ -f "$record" ] || continue
+    fields=$(jq -r '[(.pid // "" | tostring), .sessionId // "", .cwd // "", .kind // ""] | @tsv' "$record" 2>/dev/null) || continue
+    IFS=$'\t' read -r pid id cwd kind <<EOF
+$fields
+EOF
+    case "$pid" in ''|*[!0-9]*) continue ;; esac
+    [ "$kind" = interactive ] || continue
+    [ "$(cd "$cwd" 2>/dev/null && pwd -P)" = "$wt_real" ] || continue
+    kill -0 "$pid" 2>/dev/null || continue
+    case "$(LC_ALL=C ps -o args= -p "$pid" 2>/dev/null)" in
+      *claude*) ;;
+      *) continue ;;
+    esac
+    [ -z "$found" ] || return 0
+    found=$id
+  done
+  case "$found" in
+    ????????-????-????-????-????????????) printf '%s' "$found" ;;
+  esac
+}
+
 # Which named keys a backend adapter can deliver. Every session provider
 # normalizes Enter, Ctrl+C, and the Ctrl+U composer clear; Orca's terminal API
 # exposes only an interrupt and an Enter, so it can deliver neither Escape nor

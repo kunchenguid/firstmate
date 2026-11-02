@@ -3741,6 +3741,20 @@ Real Herdr.app exercise on 2026-11-02: the official herdr-app 0.1.11 bundle (sha
 
 `bin/fm-supervisor-target-lib.sh` now resolves `$HC_TERMINAL_ID`+`$HC_TERMINAL_SOCKET` to `<session>:<address>`/`hc`; `bin/fm-supervise-daemon.sh` still supports only `tmux herdr rex t3code` and refuses the resolved backend loudly.
 
+### Move and control
+
+Measured on 2026-10-31 with `hc 0.1.16`, Herdr `0.9.5`, and `claude 2.1.316.1485` on macOS, with a real Claude Code worker given a one-word brief.
+Herdr 1 calls ran on a named `fm-lab-` session provisioned and torn down through `bin/fm-herdr-lab.sh`, and hc calls ran on a named `HC_SESSION=fm-lab-hc-<pid>` core.
+
+| Step | Result |
+| --- | --- |
+| `fm-control.sh mv1 relaunch --backend hc --note ...` on a ship with a live Claude in a Herdr pane | `relaunched mv1 harness=claude from=claude ... backend=hc endpoint=fm-lab-hc-84101:t1`; the record carried `backend=hc`, `hc_core=<id>`, no `herdr_*` keys, and the same `worktree=`; `git status --porcelain` and `HEAD` were unchanged; the old Herdr pane read `pane_not_found`. |
+| `fm-control.sh mv1 exit` on hc | `stopped mv1 ... backend=hc`; `fm_backend_agent_state hc` then read `dead` (the login shell), with `foreground.name` naming the user's Claude launcher wrapper while Claude ran. |
+| `fm-control.sh mv1 relaunch --note ...` on hc | Adopted the same terminal `t1` and read `alive`. |
+| `fm-control.sh mv1 relaunch --backend hc` of a live Claude in a Herdr pane, with transcript saving on | The old agent's session id, read from its `sessions/<pid>.json`, was the session the hc replacement ran; `hc get` reported `{"app":"claude-code","state":"done"}`. |
+
+`tests/fm-control-relaunch.test.sh` and `tests/fm-backend-hc.test.sh` pin the logic portably.
+
 ### Not verified
 
 - A spawn with a real harness rather than the stand-in.

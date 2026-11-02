@@ -108,7 +108,10 @@ It runs the same transaction: the old agent is stopped on its recorded endpoint 
 The old endpoint is closed only after that record is committed, and only while it still reads agent-free.
 The worktree, branch, and every uncommitted change are reused untouched.
 The target's spawn, core, and harness checks run before the old agent stops, so a move hc cannot take refuses with nothing changed.
-A Pi replacement resumes the session the old endpoint's runtime recorded, as an in-place relaunch does; other harnesses start a fresh conversation from the brief and the progress note.
+A Pi replacement resumes the session the old endpoint's runtime recorded, as an in-place relaunch does.
+A Claude replacement resumes the conversation the old Claude agent was running: before the stop, the control plane reads its session id from the per-process record Claude keeps under `sessions/` in its config directory, and only exactly one live interactive Claude record in the worktree counts.
+Without such a record, or without that session's saved transcript, and for every other harness, the replacement starts a fresh conversation from the brief and the progress note.
+An in-place relaunch never resumes a Claude conversation, because it replaces an agent that may be confused or out of context.
 hc is the only move target.
 
 ### Reclaiming a task whose endpoint is gone
