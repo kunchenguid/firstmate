@@ -59,6 +59,9 @@ func registerCalm(ext *sdk.Extension, root string) {
 			return err
 		}
 		state.setActive(active)
+		if !active {
+			state.stopShip()
+		}
 		state.applyIdle(ctx)
 		return nil
 	})

@@ -47,6 +47,22 @@ func TestRunCommandAsyncCancellationWaitsForChild(t *testing.T) {
 	}
 }
 
+func TestRunCommandAsyncCancellationStopsShellChildren(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("fixture uses sh")
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan ExecResult, 1)
+	go func() { done <- RunCommandAsync(ctx, "sh", []string{"-c", "sleep 3 & wait"}, ExecOptions{}) }()
+	time.Sleep(100 * time.Millisecond)
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("cancellation left a child holding the output pipes")
+	}
+}
+
 func TestRunManagedCommandStreamsOutputAndJoinsProcessGroupOnCancel(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()

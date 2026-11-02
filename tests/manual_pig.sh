@@ -43,7 +43,7 @@ cleanup() {
   rm -rf "$TASK_TMP" || status=1
   exit "$status"
 }
-trap - EXIT
+trap cleanup EXIT
 
 "$HERDR_LAB_HELPER" provision "$HERDR_LAB_SESSION" || fail "could not provision the named Herdr lab"
 lab() { "$HERDR_LAB_HELPER" run "$HERDR_LAB_SESSION" "$@"; }

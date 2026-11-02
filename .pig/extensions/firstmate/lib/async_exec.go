@@ -6,7 +6,6 @@ import (
 	"bytes"
 	"context"
 	"io"
-	"os"
 	"os/exec"
 	"strconv"
 	"sync"
@@ -36,19 +35,18 @@ func RunCommandAsync(ctx context.Context, command string, args []string, options
 		limit = DefaultMaxBuffer
 	}
 	cmd := exec.CommandContext(ctx, command, args...)
+	configureProcessGroup(cmd)
 	cmd.Dir = options.Dir
 	if options.Env != nil {
 		cmd.Env = options.Env
 	}
 	cmd.Cancel = func() error {
-		if cmd.Process == nil {
-			return os.ErrProcessDone
-		}
-		return cmd.Process.Kill()
+		terminateProcessGroup(cmd)
+		return nil
 	}
 	cmd.Stdin = bytes.NewBufferString(options.Input)
-	stdout := &boundedBuffer{limit: limit, onLimit: func() { terminateProcess(cmd) }}
-	stderr := &boundedBuffer{limit: limit, onLimit: func() { terminateProcess(cmd) }}
+	stdout := &boundedBuffer{limit: limit, onLimit: func() { terminateProcessGroup(cmd) }}
+	stderr := &boundedBuffer{limit: limit, onLimit: func() { terminateProcessGroup(cmd) }}
 	cmd.Stdout, cmd.Stderr = stdout, stderr
 	err := cmd.Run()
 	result := ExecResult{Stdout: stdout.String(), Stderr: stderr.String()}

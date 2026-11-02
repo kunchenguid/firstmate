@@ -607,7 +607,7 @@ test_pig_primary_only_dispatch_refuses_every_worker_route() {
   local kind route rec id out status sm launch
   local -a invocation
   for kind in ship scout secondmate; do
-    for route in explicit positional raw env command nohup bash-c bash-c-compound bash-c-env bash-nested bash-lc config; do
+    for route in explicit positional raw env env-s env-split command nohup bash-c bash-c-compound bash-c-env bash-nested bash-lc config; do
       id="pig-${kind}-${route}-z31"
       rec=$(make_spawn_case "pig-${kind}-${route}" claude "$id")
       read_case_record "$rec"
@@ -632,6 +632,8 @@ test_pig_primary_only_dispatch_refuses_every_worker_route() {
         positional) invocation+=(pig) ;;
         raw) invocation+=('pig --print refused') ;;
         env) invocation+=('env -u FM_PIG_HARNESS FM_PIG_HARNESS=pig pig --print refused') ;;
+        env-s) invocation+=("env -S 'pig --print refused'") ;;
+        env-split) invocation+=("env --split-string 'pig --print refused'") ;;
         command) invocation+=('command pig --print refused') ;;
         nohup) invocation+=('nohup pig --print refused') ;;
         bash-c) invocation+=("bash -c 'pig --print refused'") ;;
@@ -650,6 +652,7 @@ test_pig_primary_only_dispatch_refuses_every_worker_route() {
       expect_code 1 "$status" "$kind $route shell/PiG selection must refuse"
       case "$route" in
         bash-*) assert_contains "$out" "raw shell -c launches cannot be safely classified" "$kind $route refusal must identify the raw-shell boundary" ;;
+        env-s|env-split) assert_contains "$out" "raw env split-string launches cannot be safely classified" "$kind $route refusal must identify the split-string boundary" ;;
         *) assert_contains "$out" "PiG is verified as a primary-only harness" "$kind $route refusal must identify PiG's dispatch boundary" ;;
       esac
       [ ! -s "$LAUNCH_LOG" ] || fail "$kind $route PiG selection delivered a launch command: $(cat "$LAUNCH_LOG")"
@@ -686,11 +689,11 @@ test_pig_primary_only_dispatch_refuses_every_worker_route() {
       fi
     fi
     status=$?
-    expect_code 1 "$status" "$kind raw shell launch should be refused"
-    assert_contains "$out" "raw shell -c launches cannot be safely classified" "$kind shell refusal missing"
-    [ ! -s "$LAUNCH_LOG" ] || fail "$kind raw shell launch reached the launcher"
+    expect_code 0 "$status" "$kind simple verified shell launch should proceed"
+    assert_contains "$out" "spawned $id harness=codex" "$kind shell launch was not classified"
+    assert_contains "$(cat "$LAUNCH_LOG")" 'codex --version' "$kind shell launch was not preserved"
   done
-  pass "PiG and raw shell dispatch are refused while verified harness dispatch remains available"
+  pass "PiG and unclassifiable shell dispatch are refused while simple verified shell launches remain available"
 }
 
 test_chained_raw_launch_strips_ai_trailer_in_every_step() {

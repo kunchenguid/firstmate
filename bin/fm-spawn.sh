@@ -3073,7 +3073,10 @@ case "$ARG3" in
     case "$word" in
       [A-Za-z_]*=*) continue ;;
       -u|--unset|-C|--chdir) raw_skip_next=1; continue ;;
-      -S|--split-string) raw_skip_next=1; continue ;;
+      -S*|--split-string|--split-string=*)
+        echo "error: raw env split-string launches cannot be safely classified for worker dispatch; select a direct harness or a verified launch template" >&2
+        exit 1
+        ;;
     esac
     word=${word#\"}
     word=${word#\'}
@@ -3140,6 +3143,14 @@ if [ "$RAW_LAUNCH" -eq 1 ]; then
       done
       ;;
   esac
+fi
+
+# Admit only a literal, simple command for an independently verified worker.
+# Unrecognized shell syntax remains refused rather than guessing what it runs.
+safe_raw_shell="^[[:space:]]*(bash|sh|dash|zsh|ksh)[[:space:]]+-l?c[[:space:]]+'(claude|codex|pi|pi-signed|omp|grok|kimi|cursor|muse|gemini|rovo|devin|commandcode|polytoken|cortex|kiro|agy)([[:space:]]+[A-Za-z0-9_./:=+@,-]+)*'[[:space:]]*$"
+if [ "$RAW_SHELL_C" -eq 1 ] && [[ "$LAUNCH" =~ $safe_raw_shell ]]; then
+  HARNESS=${BASH_REMATCH[2]}
+  RAW_SHELL_C=0
 fi
 
 case "$KIND:$HARNESS:$RAW_SHELL_C" in

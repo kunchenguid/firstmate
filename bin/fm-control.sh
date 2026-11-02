@@ -780,7 +780,7 @@ do_exit() {
     dialog=$(cat "$FM_COMPOSER_DIALOG_SINK")
     refuse_blocking_prompt "$dialog"
   fi
-  if [ "$HARNESS" != "pig" ] && [ "$cmd" != "C-c" ]; then
+  if [ "$cmd" != "C-c" ]; then
     case "$composer_state" in
       empty) ;;
       pending)

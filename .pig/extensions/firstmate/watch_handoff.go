@@ -229,6 +229,7 @@ func validateReplacementHandoff(data []byte, path string) ([]*pendingActionable,
 // replacementCoordinator carries actionable closes between two generations of
 // one handoff path that share this process.
 type replacementCoordinator struct {
+	handoffMu     sync.Mutex
 	receiver      func(*pendingActionable)
 	receiverOwner *watcher
 	pending       []*pendingActionable
