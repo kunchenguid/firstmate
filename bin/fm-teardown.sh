@@ -3056,7 +3056,7 @@ t3code_secondmate_home_shutdown_barrier() {  # <home> <task-id>
 }
 
 finish_firstmate_home_removal() {
-  local rc=$1 restore_rc=0
+  local rc=$1 evidence=${2:-} restore_rc=0
   trap - EXIT
   if [ "$removal_committed" = 0 ] && [ -n "$process_event_backup" ]; then
     restore_firstmate_home_process_events "$abs_home_path" "$label" "$process_event_backup" || restore_rc=$?
@@ -3069,6 +3069,10 @@ finish_firstmate_home_removal() {
   [ -z "$tmp" ] || rm -f -- "$tmp" || restore_rc=1
   if [ "$removal_committed" = 0 ] && [ -n "$retired" ]; then
     rmdir "$retired" 2>/dev/null || true
+    # This attempt's evidence is a retry contract for a removal whose rename
+    # committed. Rolling back before the rename restores the home, so leaving
+    # it behind would refuse every later teardown of a home that still exists.
+    [ -z "$evidence" ] || rm -f -- "$evidence" 2>/dev/null || true
   fi
   [ "$restore_rc" = 0 ] || rc=$restore_rc
   exit "$rc"
@@ -3086,7 +3090,7 @@ remove_firstmate_home() (  # <home> <label> <task-id> <backend>
   process_event_backup=''
   retired=''
   tmp=''
-  trap 'finish_firstmate_home_removal "$?"' EXIT
+  trap 'finish_firstmate_home_removal "$?" "$evidence"' EXIT
   trap 'exit 143' TERM
   trap 'exit 130' INT
   trap 'exit 129' HUP

@@ -1799,7 +1799,7 @@ SH
 
 test_retirement_rollback_rearms_on_failure() {
   local mode dir mate stage rc
-  for mode in rename sweep signal; do
+  for mode in rename sweep signal evidence; do
     dir=$(make_case "retire-rollback-$mode")
     mate="$dir/mate"
     stage="$mate.retiring.g1"
@@ -1822,7 +1822,7 @@ case "$1" in
     [ "${2:-}" != --preflight ] || exit 0
     rm -f "$FM_HOME/state/procevent/wait.source"
     case "$FM_TEST_ROLLBACK" in
-      sweep) exit 1 ;;
+      sweep|evidence) exit 1 ;;
       signal) kill -TERM "$PPID"; exit 1 ;;
     esac ;;
   reconcile) touch "$FM_TEST_REARMED" ;;
@@ -1835,13 +1835,21 @@ exec "$FM_TEST_REAL_MV" "$@"
 SH
     chmod +x "$mate/bin/fm-procevent.sh" "$dir/fakebin/mv"
     rc=0
-    FM_TEST_REAL_MV="$(command -v mv)" FM_TEST_STAGE="$stage" FM_REMOTE_RETIRE_STAGE="$stage" \
+    FM_TEST_REAL_MV="$(command -v mv)" FM_TEST_STAGE="$stage" \
+      FM_REMOTE_RETIRE_STAGE="$( [ "$mode" = evidence ] || printf '%s' "$stage" )" \
       FM_TEST_ROLLBACK="$mode" FM_TEST_REARMED="$dir/rearmed" \
       run_case "$dir" mate >"$dir/out" 2>"$dir/err" || rc=$?
     [ "$rc" -ne 0 ] || fail "rollback injection succeeded: $mode"
     assert_grep registration "$mate/state/procevent/wait.source" "rollback lost registrations: $mode"
     assert_present "$dir/rearmed" "rollback did not rearm: $mode"
-    assert_absent "$stage" "rollback retained empty stage: $mode"
+    if [ "$mode" = evidence ]; then
+      # This attempt published its own evidence before the failing step; a
+      # rollback that restores the home must withdraw it, or every later
+      # teardown refuses a home that still exists.
+      assert_absent "$dir/home/state/mate.home-removal" "rollback stranded its own removal evidence"
+    else
+      assert_absent "$stage" "rollback retained empty stage: $mode"
+    fi
   done
   pass "retirement restores registrations and rearms after sweep, rename, and signal failures"
 }
