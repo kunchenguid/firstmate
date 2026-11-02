@@ -1063,6 +1063,82 @@ EOF
   pass ".opencode primary plugin: guard path is anchored to worktree, not directory"
 }
 
+# One OpenCode 2 server can host several locations whose plugins all see the
+# whole server's event stream. Location B's guard instance must run B's guard
+# and prompt only for B's own root sessions: a turn on location A, a session
+# the server cannot place, and B's own subagent session never run B's guard or
+# reach any session. B's own root turn is the positive control, so a guard
+# that never acts cannot pass.
+test_opencode2_guard_acts_only_for_its_own_location() {
+  command -v node >/dev/null 2>&1 || { printf 'skip: node not found\n'; return 0; }
+  local loc_a loc_b log out status
+  loc_a="$TMP_ROOT/opencode2-scope/loc-a"
+  loc_b="$TMP_ROOT/opencode2-scope/loc-b"
+  log="$TMP_ROOT/opencode2-scope/guard-b.log"
+  mkdir -p "$loc_a" "$loc_b/bin"
+  git init -q "$loc_a"
+  git init -q "$loc_b"
+  cat > "$loc_b/bin/fm-turnend-guard.sh" <<'EOF'
+#!/usr/bin/env bash
+cat >/dev/null
+printf 'guard-ran\n' >> "${FM_GUARD_LOG:?}"
+printf 'guard-fired-for-b\n' >&2
+exit 2
+EOF
+  chmod +x "$loc_b/bin/fm-turnend-guard.sh"
+  out=$(NODE_NO_WARNINGS=1 PLUGIN="$ROOT/.opencode/plugins/fm-primary-turnend-guard.js" \
+    SERVER="$ROOT/tests/opencode2-fake-server.mjs" LOC_A="$loc_a" LOC_B="$loc_b" FM_GUARD_LOG="$log" \
+    node --input-type=module 2>&1 <<'EOF'
+import { existsSync, readFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+const { createFakeServer } = await import(pathToFileURL(process.env.SERVER).href);
+const plugin = (await import(pathToFileURL(process.env.PLUGIN).href)).default;
+const server = createFakeServer();
+const { LOC_A: a, LOC_B: b, FM_GUARD_LOG: log } = process.env;
+plugin.setup(server.ctxFor(b));
+const runs = () => (existsSync(log) ? readFileSync(log, "utf8").split("\n").filter(Boolean).length : 0);
+const expect = (condition, message) => {
+  if (!condition) {
+    console.error(`${message}; guard runs=${runs()} prompts=${JSON.stringify(server.prompts)}`);
+    process.exit(1);
+  }
+};
+
+server.addSession("ses_a", a);
+await server.emit(server.terminal("ses_a"));
+expect(runs() === 0 && server.prompts.length === 0, "a turn on location A ran B's guard or prompted");
+
+await server.emit(server.terminal("ses_unknown", "failed"));
+expect(runs() === 0 && server.prompts.length === 0, "a session the server cannot place ran B's guard");
+
+server.addSession("ses_b", b);
+server.addSession("ses_b_child", b, "ses_b");
+await server.emit(server.terminal("ses_b_child"));
+expect(runs() === 0 && server.prompts.length === 0, "B's own subagent session ran B's guard");
+
+await server.emit(server.terminal("ses_b", "interrupted"));
+expect(runs() === 1, "B's own root turn end did not run B's guard");
+expect(server.prompts.length === 1 && server.prompts[0].sessionID === "ses_b", "B's guard follow-up did not reach B's own session");
+expect(server.prompts[0].text.includes("guard-fired-for-b"), "B's follow-up lost its guard output");
+
+// A session first seen through its creation event, unknown to session.get:
+// the creation event alone places it, on either location.
+await server.emit(server.created("ses_a_new", a));
+await server.emit(server.terminal("ses_a_new"));
+expect(runs() === 1 && server.prompts.length === 1, "a newly created location-A session ran B's guard");
+await server.emit(server.created("ses_b_new", b));
+await server.emit(server.terminal("ses_b_new"));
+expect(runs() === 2 && server.prompts.length === 2 && server.prompts[1].sessionID === "ses_b_new",
+  "a newly created location-B session was not guarded");
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "OpenCode 2 guard must act only for its own location's root sessions: $out"
+  [ -z "$out" ] || fail "OpenCode 2 guard location test printed output: $out"
+  pass ".opencode primary plugin: an OpenCode 2 guard acts only for its own location's root sessions"
+}
+
 test_pi_extension_injects_once_per_logical_agent_run() {
   local repo home ext log out status
   repo="$TMP_ROOT/pi-logical-run-root"
@@ -2603,6 +2679,7 @@ test_tracked_claude_entries_inert_under_grok
 test_codex_hook_uses_process_pwd_when_payload_cwd_is_outside_root
 test_codex_hook_ignores_nested_git_root_guard
 test_opencode_plugin_anchors_guard_to_worktree
+test_opencode2_guard_acts_only_for_its_own_location
 test_pi_extension_injects_once_per_logical_agent_run
 test_pi_extension_retries_after_followup_delivery_failure
 test_pi_extension_keeps_marker_of_live_ancestor_session

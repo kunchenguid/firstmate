@@ -436,6 +436,76 @@ SH
   pass "opencode plugin classifies from session.execution.* (OpenCode 2), scoped to the latched worker session"
 }
 
+# drive_oc2_setup <plugin> <worker-dir> <foreign-dir> <kind:session>...: load
+# the generated OpenCode 2 plugin through its setup(ctx) entry on an in-process
+# server hosting the worker's location and a foreign one, then emit each event
+# in order. ses_main lives in the worker's location, ses_foreign in the foreign
+# location, and any other session is one the server cannot place.
+drive_oc2_setup() {
+  local plugin=$1 worker=$2 foreign=$3
+  shift 3
+  PLUGIN_PATH="$plugin" SERVER="$ROOT/tests/opencode2-fake-server.mjs" WORKER="$worker" FOREIGN="$foreign" \
+    NODE_NO_WARNINGS=1 node --input-type=module - "$@" 2>&1 <<'EOF'
+import { pathToFileURL } from "node:url";
+const { createFakeServer } = await import(pathToFileURL(process.env.SERVER).href);
+const plugin = (await import(pathToFileURL(process.env.PLUGIN_PATH).href)).default;
+const server = createFakeServer();
+server.addSession("ses_main", process.env.WORKER);
+server.addSession("ses_foreign", process.env.FOREIGN);
+plugin.setup(server.ctxFor(process.env.WORKER));
+for (const arg of process.argv.slice(2)) {
+  const [kind, session] = arg.split(":");
+  await server.emit(kind === "started" ? server.started(session) : server.terminal(session));
+}
+EOF
+}
+
+# The OpenCode 2 busy plugin's subscription sees every location on its server.
+# A session of another location, or one the server cannot place, must neither
+# change the worker's busy record nor touch its turn-ended notification, while
+# the worker's own session still drives both (the positive control).
+test_opencode_plugin_v2_ignores_other_locations() {
+  local rec id=busy-oc-3 out state plugin foreign
+  rec=$(make_spawn_case oc-exec-scope opencode "$id")
+  read_case_record "$rec"
+  cat > "$FAKEBIN_DIR/opencode" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = --version ]; then
+  printf '%s\n' "${FM_FAKE_OPENCODE_VERSION:-2.2.4}"
+fi
+exit 0
+SH
+  chmod +x "$FAKEBIN_DIR/opencode"
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR")
+  expect_code 0 $? "opencode spawn should succeed: $out"
+  state="$HOME_DIR/state"
+  plugin="$WT_DIR/.opencode/plugins/fm-busy-state.js"
+  foreign="$TMP_ROOT/oc-exec-scope-foreign"
+  mkdir -p "$foreign"
+
+  out=$(drive_oc2_setup "$plugin" "$WT_DIR" "$foreign" started:ses_main succeeded:ses_main) \
+    || fail "own-location drive failed: $out"
+  [ -f "$state/$id.turn-ended" ] || fail "the worker's own terminal event did not touch the notification marker"
+  out=$(classify opencode "$id" "$state")
+  [ "$out" = "idle opencode-plugin" ] || fail "the worker's own session must settle idle through setup(ctx), got '$out'"
+
+  rm -f "$state/$id.turn-ended"
+  out=$(drive_oc2_setup "$plugin" "$WT_DIR" "$foreign" started:ses_foreign succeeded:ses_foreign) \
+    || fail "foreign-location drive failed: $out"
+  [ ! -e "$state/$id.turn-ended" ] || fail "another location's terminal event touched the worker's notification marker"
+  out=$(drive_oc2_setup "$plugin" "$WT_DIR" "$foreign" started:ses_foreign) || fail "foreign start drive failed: $out"
+  out=$(classify opencode "$id" "$state")
+  [ "$out" = "idle opencode-plugin" ] || fail "another location's turn changed the worker's busy record, got '$out'"
+  out=$(drive_oc2_setup "$plugin" "$WT_DIR" "$foreign" started:ses_unplaced) || fail "unplaced start drive failed: $out"
+  out=$(classify opencode "$id" "$state")
+  [ "$out" = "idle opencode-plugin" ] || fail "a session the server cannot place changed the worker's busy record, got '$out'"
+
+  out=$(drive_oc2_setup "$plugin" "$WT_DIR" "$foreign" started:ses_main) || fail "own start drive failed: $out"
+  out=$(classify opencode "$id" "$state")
+  [ "$out" = "busy opencode-plugin" ] || fail "the worker's own turn start must mark it busy through setup(ctx), got '$out'"
+  pass "opencode 2 plugin ignores other locations' sessions on a shared server"
+}
+
 run_claude_hook() {  # <settings.json> <hook-event>
   local cmd
   cmd=$(jq -r ".hooks[\"$2\"][0].hooks[0].command" "$1")
@@ -1142,6 +1212,7 @@ test_pi_extension_stale_incarnation_rejected
 test_kimi_and_grok_install_no_unverified_wiring
 test_opencode_plugin_semantic_lifecycle
 test_opencode_plugin_v2_execution_lifecycle
+test_opencode_plugin_v2_ignores_other_locations
 test_claude_hooks_semantic_lifecycle
 test_claude_hooks_stale_incarnation_harmless
 test_gemini_hooks_semantic_lifecycle
