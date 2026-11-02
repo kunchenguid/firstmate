@@ -4976,6 +4976,74 @@ test_leaked_tasktmp_process_is_reaped() {
   pass "a leaked descendant process rooted under the task's per-task tasktmp is reaped by teardown too"
 }
 
+# Claude Code's per-session scratch lives at
+# <CLAUDE_CODE_TMPDIR>/claude-<uid>/<slug of the session cwd>/<session-id>/.
+claude_tmp_slug() {  # <path>
+  printf '%s' "$1" | LC_ALL=C tr -c 'a-zA-Z0-9' '-'
+}
+
+test_claude_session_tmp_for_the_worktree_is_removed() {
+  local case_dir rc=0 root wt_dir other_dir home_dir
+  case_dir=$(make_case claude-session-tmp)
+  write_meta "$case_dir" no-mistakes ship
+  land_shippable_commit "$case_dir"
+  root="$case_dir/claude-tmp/claude-$(id -u)"
+  wt_dir="$root/$(claude_tmp_slug "$case_dir/wt")"
+  other_dir="$root/$(claude_tmp_slug "$case_dir/other-wt")"
+  home_dir="$root/$(claude_tmp_slug "$case_dir")"
+  mkdir -p "$wt_dir/session-a/scratchpad" "$wt_dir/session-b" \
+    "$other_dir/session-c" "$home_dir/session-d"
+  printf 'scratch\n' > "$wt_dir/session-a/scratchpad/big.out"
+
+  CLAUDE_CODE_TMPDIR="$case_dir/claude-tmp/" run_teardown "$case_dir" \
+    > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  expect_code 0 "$rc" "claude-session-tmp: teardown should succeed"
+  assert_absent "$wt_dir" "claude-session-tmp: the worktree's Claude session temp survived teardown"
+  assert_present "$other_dir/session-c" "claude-session-tmp: another worktree's Claude session temp was removed"
+  assert_present "$home_dir/session-d" "claude-session-tmp: the supervising home's Claude session temp was removed"
+  assert_present "$root" "claude-session-tmp: the per-uid Claude temp root was removed"
+  pass "teardown removes only the exact worktree's Claude Code session temp"
+}
+
+test_absent_claude_session_tmp_is_a_noop() {
+  local case_dir rc=0
+  case_dir=$(make_case claude-session-tmp-absent)
+  write_meta "$case_dir" no-mistakes ship
+  land_shippable_commit "$case_dir"
+
+  CLAUDE_CODE_TMPDIR="$case_dir/claude-tmp" run_teardown "$case_dir" \
+    > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  expect_code 0 "$rc" "claude-session-tmp-absent: teardown should succeed"
+  assert_absent "$case_dir/claude-tmp" "claude-session-tmp-absent: teardown created a Claude temp root"
+  assert_no_grep "Claude" "$case_dir/stderr" "claude-session-tmp-absent: an absent Claude temp produced a warning"
+  pass "teardown with no Claude Code session temp is a silent no-op"
+}
+
+test_symlinked_claude_session_tmp_is_never_followed() {
+  local case_dir rc=0 root target
+  case_dir=$(make_case claude-session-tmp-symlink)
+  write_meta "$case_dir" no-mistakes ship
+  land_shippable_commit "$case_dir"
+  root="$case_dir/claude-tmp/claude-$(id -u)"
+  target="$case_dir/precious"
+  mkdir -p "$root" "$target"
+  printf 'keep\n' > "$target/file"
+  ln -s "$target" "$root/$(claude_tmp_slug "$case_dir/wt")"
+
+  CLAUDE_CODE_TMPDIR="$case_dir/claude-tmp" run_teardown "$case_dir" \
+    > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  expect_code 0 "$rc" "claude-session-tmp-symlink: teardown should still succeed"
+  assert_present "$target/file" "claude-session-tmp-symlink: teardown followed a symlinked session temp"
+  [ -L "$root/$(claude_tmp_slug "$case_dir/wt")" ] \
+    || fail "claude-session-tmp-symlink: the symlink itself was removed instead of left for inspection"
+  assert_grep "is not a directory owned by this user" "$case_dir/stderr" \
+    "claude-session-tmp-symlink: teardown did not warn about the symlinked session temp"
+  pass "teardown leaves a symlinked Claude session temp in place and warns"
+}
+
 test_lsof_absent_reaps_tmux_process_group() {
   local case_dir rc pid path_without_lsof
   case_dir=$(make_case lsof-absent-process-group-reap)
@@ -6082,6 +6150,9 @@ test_another_branchs_parked_run_is_never_touched
 test_own_autonomous_run_is_left_alone
 test_leaked_worktree_process_is_reaped
 test_leaked_tasktmp_process_is_reaped
+test_claude_session_tmp_for_the_worktree_is_removed
+test_absent_claude_session_tmp_is_a_noop
+test_symlinked_claude_session_tmp_is_never_followed
 test_lsof_absent_reaps_tmux_process_group
 test_lsof_error_refuses_before_removal
 test_reused_pid_identity_is_not_force_killed

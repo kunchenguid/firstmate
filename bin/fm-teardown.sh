@@ -317,6 +317,10 @@
 #     root still exists, so the account's healthy LaunchAgent worker and every
 #     live remote secondmate worker are out of scope. Best effort: a sweep
 #     failure never blocks this teardown.
+#   Fix 4 - remove the worktree's Claude Code session temp. Right after Fix 2,
+#     remove_claude_session_tmp deletes the exact-slug session scratch Claude
+#     Code left under its per-uid temp root for this worktree path; its comment
+#     owns the layout and safety rule. Best effort and never blocking.
 # After Fix 1 and Fix 2, when config/pipeline-spend opts this home in, a ship
 # task whose local copy this teardown owns has its no-mistakes pipeline spend
 # recorded by bin/fm-pipeline-spend.sh, which owns the attribution and the
@@ -2521,6 +2525,57 @@ EOF
   return 1
 }
 
+# Claude Code keeps per-session scratch (tool output, scratchpads, background
+# task logs) under <tmp>/claude-<uid>/<cwd slug>/<session-id>/ and never removes
+# it. <tmp> is CLAUDE_CODE_TMPDIR, else the process temp dir (TMPDIR, else
+# /tmp), and the slug is the session's working directory with every
+# non-alphanumeric character mapped to "-"; a slug longer than 200 characters
+# gets a hashed suffix this cannot reproduce, so such a worktree is skipped, as
+# is a non-ASCII path.
+# On a size-capped tmpfs /tmp, finished tasks' scratch accumulates until a
+# per-user quota breaks every agent on the machine. This runs only after the
+# process reap proved nothing still runs under the worktree and before the slot
+# returns to the pool, so neither a live session nor a later task can own the
+# exact-slug directory it removes. Sessions in any other directory, including
+# the supervising home's, have a different slug and are never touched.
+# Best effort: a symlink, a foreign owner, or a non-directory at any step is
+# left in place with a warning and never followed.
+remove_claude_session_tmp() {  # <worktree>
+  local wt=$1 uid physical path slug base root dir seen=
+  case "$wt" in /?*) ;; *) return 0 ;; esac
+  uid=$(id -u 2>/dev/null) || return 0
+  physical=$(cd "$wt" 2>/dev/null && pwd -P) || physical=
+  for path in "$wt" "$physical"; do
+    [ -n "$path" ] || continue
+    # Claude Code maps each UTF-16 unit, not each byte, so only an ASCII path
+    # has a slug this byte-wise mapping reproduces exactly.
+    [ "$(printf '%s' "$path" | LC_ALL=C tr -d '\200-\377')" = "$path" ] || continue
+    slug=$(printf '%s' "$path" | LC_ALL=C tr -c 'a-zA-Z0-9' '-')
+    [ "${#slug}" -le 200 ] || continue
+    for base in "${CLAUDE_CODE_TMPDIR:-}" "${TMPDIR:-}" /tmp; do
+      base=${base%/}
+      [ -n "$base" ] || continue
+      root="$base/claude-$uid"
+      dir="$root/$slug"
+      case " $seen " in *" $dir "*) continue ;; esac
+      seen="$seen $dir"
+      { [ -e "$root" ] || [ -L "$root" ]; } || continue
+      if [ -L "$root" ] || [ ! -d "$root" ] || [ ! -O "$root" ]; then
+        echo "warning: Claude temp root $root is not a directory owned by this user; leaving it in place" >&2
+        continue
+      fi
+      { [ -e "$dir" ] || [ -L "$dir" ]; } || continue
+      if [ -L "$dir" ] || [ ! -d "$dir" ] || [ ! -O "$dir" ]; then
+        echo "warning: Claude session temp $dir for $ID is not a directory owned by this user; leaving it in place" >&2
+        continue
+      fi
+      rm -rf -- "$dir" \
+        || echo "warning: could not remove Claude session temp $dir for $ID; cleanup continues" >&2
+    done
+  done
+  return 0
+}
+
 require_orca_worktree_path_match() {
   local worktree_id=$1 inspected=$2 resolved inspected_abs resolved_abs
   resolved=$(fm_backend_worktree_path orca "$worktree_id") || {
@@ -3829,6 +3884,7 @@ fi
 if [ "$KIND" != secondmate ] && teardown_owns_worktree; then
   conclude_task_no_mistakes_run "$WT"
   reap_task_worktree_processes worktree "$WT" "$TASK_TMP"
+  remove_claude_session_tmp "$WT"
 elif [ "$KIND" != secondmate ]; then
   reap_task_worktree_processes tasktmp "$TASK_TMP"
 fi
