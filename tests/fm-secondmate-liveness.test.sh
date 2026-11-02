@@ -1120,6 +1120,24 @@ test_move_relaunches_an_already_stopped_tmux_secondmate_on_hc() {
   pass "move: an already-stopped tmux secondmate is relaunched on hc without lifecycle input"
 }
 
+# add_move_remote_dead <w>: places sm1 on a remote host whose stubbed state
+# probe reports the agent dead, so the move reaches the relaunch step.
+add_move_remote_dead() {
+  local w=$1 sshbin
+  printf 'remote_host=lab-host\nremote_backend=herdr\nremote_herdr_session=fm-remote\nremote_target=fm-remote:w1:p1\n' >> "$w/home/state/sm1.meta"
+  mkdir -p "$w/home/data"
+  printf -- '- sm1 - Remote mate (host: lab-host; root: /remote/root; home: /remote/sm1-home; scope: remote work; projects: alpha; added 2026-01-01)\n' \
+    > "$w/home/data/secondmates.md"
+  sshbin=$(fm_fakebin "$w/ssh-tools")
+  cat > "$sshbin/ssh" <<SH
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> '$w/ssh.log'
+printf 'dead\n'
+SH
+  chmod +x "$sshbin/ssh"
+  W_PATH="$sshbin:$W_PATH"
+}
+
 test_move_refuses_before_stopping_anything() {
   local scenario out rc before args
   for scenario in cmux unknown same-backend remote unreadable pending-composer; do
@@ -1129,7 +1147,7 @@ test_move_refuses_before_stopping_anything() {
       cmux) args=(sm1 --backend cmux) ;;
       unknown) args=(sm1 --backend bogus) ;;
       same-backend) args=(sm1 --backend tmux) ;;
-      remote) printf 'remote_host=mate-host.invalid\n' >> "$W_DIR/home/state/sm1.meta" ;;
+      remote) add_move_remote_dead "$W_DIR" ;;
       unreadable) : > "$W_MV/unreadable" ;;
       pending-composer) printf '❯ draft text\n' > "$W_MV/pane" ;;
     esac
@@ -1147,12 +1165,29 @@ test_move_refuses_before_stopping_anything() {
       cmux) assert_contains "$out" "backend=cmux does not support --secondmate" "the cmux refusal names the limit" ;;
       unknown) assert_contains "$out" "unknown backend" "the unknown-backend refusal names it" ;;
       same-backend) assert_contains "$out" "already recorded on backend=tmux" "a same-backend move points at relaunch" ;;
-      remote) assert_contains "$out" "remote host" "a remote mate is refused by placement" ;;
+      remote)
+        assert_contains "$out" "a local move is refused" "a dead remote mate reaches the library's own refusal"
+        assert_contains "$(cat "$W_DIR/ssh.log")" "-- lab-host " "the remote mate must have been probed on its host"
+        ;;
       unreadable) assert_contains "$out" "cannot be classified" "an unreadable endpoint refuses before any stop" ;;
       pending-composer) assert_contains "$out" "could not be proven stopped" "a refused stop ends the move" ;;
     esac
   done
   pass "move: an unmovable target, a remote mate, an unclassifiable endpoint, and a refused stop all leave the mate untouched"
+}
+
+test_move_usage_prints_the_exit_status_contract() {
+  local out rc=0 contract='Exit status: 0 moved; 1 refused or failed,'
+  out=$("$ROOT/bin/fm-secondmate-move.sh" --help 2>/dev/null) || rc=$?
+  expect_code 0 "$rc" "--help must succeed"$'\n'"$out"
+  assert_contains "$out" "$contract" "--help must print the exit-status contract"
+  assert_contains "$out" "with the message naming the state the mate was left in; 2 invalid use." "--help must print the whole contract"
+  rc=0
+  out=$("$ROOT/bin/fm-secondmate-move.sh" 2>&1 >/dev/null) || rc=$?
+  expect_code 2 "$rc" "a move with no arguments is invalid use"$'\n'"$out"
+  assert_contains "$out" "$contract" "invalid use must print the exit-status contract on stderr"
+  assert_contains "$out" "with the message naming the state the mate was left in; 2 invalid use." "invalid use must print the whole contract on stderr"
+  pass "move: --help and invalid use both print the header through its exit-status contract"
 }
 
 test_move_refuses_while_the_liveness_lock_is_held() {
@@ -1426,6 +1461,7 @@ test_sweep_leaves_an_alive_hc_secondmate_untouched
 test_move_stops_a_live_tmux_secondmate_and_relaunches_it_on_hc
 test_move_relaunches_an_already_stopped_tmux_secondmate_on_hc
 test_move_refuses_before_stopping_anything
+test_move_usage_prints_the_exit_status_contract
 test_move_refuses_while_the_liveness_lock_is_held
 test_remote_poll_probe_maps_states
 test_remote_poll_probe_unreachable_preserves_route

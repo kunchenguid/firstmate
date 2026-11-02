@@ -17,8 +17,9 @@
 #      mate's terminal in the mate home's own Herdr.app space while this home
 #      keeps the identity labels, and the classifier reads the agent alive;
 #   2. a mate whose agent died (a shell left in its terminal) is closed,
-#      removed, and respawned in the same space at a new address, through
-#      the home's config/backend=hc default rather than any flag;
+#      removed, and respawned in the same space at a new address, on the
+#      backend its record names (recovery keeps a local mate on its recorded
+#      backend, PR #8082);
 #   3. a mate whose terminal finished (program ended, record kept) has that
 #      husk removed before the respawn;
 #   4. an alive mate is left untouched.
@@ -107,9 +108,8 @@ unset HC_TERMINAL_ID HC_TERMINAL_SOCKET HC_SCOPE HC_SOCKET FM_ROOT_OVERRIDE FM_B
   TMUX HERDR_ENV FM_STATE_OVERRIDE FM_DATA_OVERRIDE FM_CONFIG_OVERRIDE FM_PROJECTS_OVERRIDE
 
 # The primary home that owns the mate's record, and the seeded mate home. The
-# primary selects hc for every launch through config/backend, the documented
-# configuration for a home hosting hc second mates, so the recovery respawn
-# below lands on hc with no flag.
+# primary sets config/backend=hc as an ordinary home setting; the recovery
+# respawn below stays on hc because the mate's record names hc.
 PRIMARY=$TMP_ROOT/home
 MATE=$TMP_ROOT/mate
 mkdir -p "$PRIMARY/state" "$PRIMARY/config" "$PRIMARY/data" "$TMP_ROOT/user-home" \
@@ -187,7 +187,7 @@ wait_for 20 state_is dead || fail "a terminal whose agent ended must read dead (
 recover
 ADDR2=$(meta_field hc_terminal)
 [ -n "$ADDR2" ] && [ "$ADDR2" != "$ADDR1" ] || fail "the respawn must bind a fresh terminal, got '$ADDR2' after '$ADDR1'"
-[ "$(meta_field backend)" = hc ] || fail "the respawn must stay on hc through config/backend"
+[ "$(meta_field backend)" = hc ] || fail "the respawn must stay on the recorded backend hc"
 rc=0; lab get "$ADDR1" --json >/dev/null 2>&1 || rc=$?
 [ "$rc" -eq 3 ] || fail "the dead terminal $ADDR1 must be removed from the core (hc get exited $rc)"
 assert_mate_labels "$ADDR2"

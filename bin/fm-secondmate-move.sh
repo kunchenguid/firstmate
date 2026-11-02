@@ -32,9 +32,11 @@
 #
 # The target must be a spawn-capable backend that hosts second mates
 # (bin/fm-backend.sh's FM_BACKEND_SECONDMATE), checked before anything is
-# stopped. A launch that fails after the stop leaves the mate with no agent
-# and its record unchanged - exactly the state the ordinary liveness recovery
-# repairs on its next pass - and the failure says so plainly.
+# stopped. Recovery keeps a local mate on its recorded backend (PR #8082), so
+# a completed move needs no config/backend change to last. A launch that fails
+# after the stop leaves the mate with no agent and its record unchanged, so
+# the next liveness recovery respawns it on its previous, recorded backend,
+# and the failure says so plainly.
 #
 # Prints `moved <id> from=<old-backend> to=<new-backend>` followed by the
 # spawn's own `spawned ...` line. Exit status: 0 moved; 1 refused or failed,
@@ -47,7 +49,7 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 
 usage() {
-  sed -n '2,41{s/^# \{0,1\}//;p;}' "$0"
+  sed -n '2,/^set -u/{/^#/{s/^# \{0,1\}//;p;};}' "$0"
 }
 
 die() {  # <message>
@@ -64,10 +66,6 @@ while [ "$#" -gt 0 ]; do
       [ "$#" -ge 2 ] || { echo "error: --backend requires a value" >&2; exit 2; }
       TARGET=$2
       shift 2
-      ;;
-    --backend=*)
-      TARGET=${1#--backend=}
-      shift
       ;;
     -*)
       echo "error: unexpected argument '$1'" >&2
@@ -91,8 +89,6 @@ case "$ID" in ''|*[!A-Za-z0-9._-]*) echo "error: invalid second mate id: $ID" >&
 META="$STATE/$ID.meta"
 [ -f "$META" ] && [ ! -L "$META" ] || die "no task record for $ID in $STATE; a move needs the mate's own record"
 [ "$(fm_meta_get "$META" kind)" = secondmate ] || die "task $ID is not a second mate; fm-secondmate-move moves kind=secondmate records only"
-REMOTE_HOST=$(fm_meta_get "$META" remote_host)
-[ -z "$REMOTE_HOST" ] || die "second mate $ID is placed on remote host $REMOTE_HOST, whose backend is its own; a local move is refused (docs/remote-secondmates.md)"
 
 # Every target check runs before the agent is stopped, so an impossible move
 # costs nothing.
@@ -137,4 +133,4 @@ if fm_secondmate_liveness_relaunch "$META" "$ID" "" "$TARGET"; then
   exit 0
 fi
 [ "$FM_SM_LIVE_STATUS" != skipped ] || die "$FM_SM_LIVE_REASON"
-die "second mate $ID could not be launched on $TARGET after its $OLD_BACKEND agent was stopped; no agent is running, its home and record are unchanged, and the next liveness recovery will respawn it: $(first_line "$FM_SM_LIVE_OUT")"
+die "second mate $ID could not be launched on $TARGET after its $OLD_BACKEND agent was stopped; no agent is running, its home and record are unchanged, and the next liveness recovery respawns it on its recorded backend $OLD_BACKEND: $(first_line "$FM_SM_LIVE_OUT")"
