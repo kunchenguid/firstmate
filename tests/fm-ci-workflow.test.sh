@@ -593,9 +593,9 @@ test_normal_tier_shares_one_budget() {
   pass "normal tier jobs share one $normal minute budget"
 }
 
-# Heavy tier: Herdr alone carries a job-level last-resort backstop above the
-# normal tier, while its family-run step owns a tighter tripwire so the
-# always() cleanup and timing upload still run after a hang.
+# Heavy tier: Herdr and herdr-core each carry a job-level last-resort backstop
+# above the normal tier, while each lane's family-run step owns a tighter
+# tripwire so the always() cleanup and timing upload still run after a hang.
 test_heavy_tier_keeps_a_step_tripwire_under_a_job_backstop() {
   local normal heavy step
   # shellcheck disable=SC2086
