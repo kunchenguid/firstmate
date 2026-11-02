@@ -127,6 +127,10 @@
 #                          opt-in config/open-decision-reminders record-age
 #                          backstop, independent of pane and branch state;
 #                          open_decision_reminder_tick owns its bounded repeats
+#   check: validation claim has no run for <branch> (worker reported validation started)
+#                          a worker's validation-started status has no
+#                          no-mistakes run on its branch FM_CLAIMED_RUN_DELAY
+#                          seconds later; reported once per claim
 #   check: process-event result captured: <keys>
 #                          a durably captured process-to-event result is queued
 #                          and has not been surfaced yet; reported once per
@@ -319,11 +323,11 @@ WATCHER_DOWNTIME_MARKER="$STATE/.watcher-down"
 if [ "$(uname)" = Darwin ]; then
   stat_mtime() { /usr/bin/stat -f %m "$1" 2>/dev/null; }        # epoch seconds of mtime
   stat_devino() { /usr/bin/stat -f '%d %i' "$1" 2>/dev/null; }  # device + inode pair
-  stat_devino_size() { /usr/bin/stat -f '%d %i %z' "$1" 2>/dev/null; }
+  stat_log_identities() { /usr/bin/stat -L -f '%d %i %z %c %N' "$@" 2>/dev/null; }  # dev ino size ctime path, one line per path
 else
   stat_mtime() { stat -c %Y "$1" 2>/dev/null; }
   stat_devino() { stat -c '%d %i' "$1" 2>/dev/null; }
-  stat_devino_size() { stat -c '%d %i %s' "$1" 2>/dev/null; }
+  stat_log_identities() { stat -L -c '%d %i %s %Z %n' "$@" 2>/dev/null; }
 fi
 # Record the held state directory's device+inode now that stat_devino exists.
 # The per-poll teardown check re-stats the path instead of comparing /dev/fd/6
@@ -3497,6 +3501,129 @@ event_wait_or_sleep() {
   esac
 }
 
+# --- validation-claim verification --------------------------------------------
+# A worker's `working: validation started` line claims a no-mistakes run exists
+# for its branch. .claimed-run-<task> holds the claim's epoch while it is pending,
+# and .claimed-run-cursor-<task> remembers how far the log was read: a header line
+# `dev ino size ctime offset verified_at`, then the bytes that end at `offset`,
+# bounded by CLAIMED_RUN_WITNESS_BYTES. Those bytes identify the log, because a
+# status log only ever grows; a replacement, shrink, or rewrite of its tail is a
+# new log whose pending claim is void.
+# ponytail: a same-size rewrite that leaves the last 4096 bytes intact goes
+# unnoticed, which keeps a poll's read bounded; widen the witness if one appears.
+CLAIMED_RUN_WITNESS_BYTES=4096
+# File times are whole seconds here and can lag the clock slightly, so a rewrite
+# can keep its predecessor's ctime only while that ctime is this close to the
+# last read. Past it, the single batched stat alone proves a log unchanged.
+CLAIMED_RUN_CTIME_SLACK_SECS=2
+
+# Sets CLAIMED_RUN_BYTES to <file> from byte <offset> through its end.
+claimed_run_read_from() {  # <file> <offset>
+  CLAIMED_RUN_BYTES=$(tail -c +"$(($2 + 1))" "$1" 2>/dev/null && printf '\001') || return 1
+  CLAIMED_RUN_BYTES=${CLAIMED_RUN_BYTES%$'\001'}
+}
+
+# True when <text>'s complete lines include a validation claim.
+claimed_run_text_claims() {  # <text>
+  local line line_verb line_note
+  case "$1" in *'validation started'*) ;; *) return 1 ;; esac
+  while IFS= read -r line; do
+    status_line_verb "$line" line_verb
+    status_line_note "$line" line_note
+    if [ "$line_verb" = working ] && [ "$line_note" = 'validation started' ]; then
+      return 0
+    fi
+  done <<EOF
+$1
+EOF
+  return 1
+}
+
+# Advances one log's cursor from its batched stat, arming a claim found in the
+# newly complete lines. A log whose stat matches a settled cursor costs no fork.
+claimed_run_scan_log() {  # <status-log> <task> <dev> <ino> <size> <ctime>
+  local LC_ALL=C f=$1 task=$2 dev=$3 ino=$4 size=$5 ctime=$6
+  local marker="$STATE/.claimed-run-$task" cursor="$STATE/.claimed-run-cursor-$task"
+  local c_dev='' c_ino='' c_size='' c_ctime='' c_offset='' c_verified='' witness='' verified_at start kept offset complete
+  [ ! -f "$cursor" ] || read -r c_dev c_ino c_size c_ctime c_offset c_verified < "$cursor"
+  case ":$c_dev:$c_ino:$c_size:$c_ctime:$c_offset:$c_verified:" in
+    *::*|*[!0-9:]*) c_dev= ;;
+    *)
+      if [ "$dev $ino $size $ctime" = "$c_dev $c_ino $c_size $c_ctime" ] \
+        && [ "$((c_ctime + CLAIMED_RUN_CTIME_SLACK_SECS))" -lt "$c_verified" ]; then
+        return 0
+      fi
+      ;;
+  esac
+  # Taken before the read, so a later rewrite cannot look settled.
+  verified_at=$(date +%s)
+  start=0
+  kept=-1
+  if [ -n "$c_dev" ] && [ "$dev $ino" = "$c_dev $c_ino" ] && [ "$size" -ge "$c_offset" ]; then
+    { read -r _; IFS= read -r -d '' witness; } < "$cursor"
+    start=$((c_offset - ${#witness}))
+    claimed_run_read_from "$f" "$start" || return 0
+    [ "${CLAIMED_RUN_BYTES:0:${#witness}}" != "$witness" ] || kept=${#witness}
+  fi
+  if [ "$kept" -lt 0 ]; then
+    [ -z "$c_dev" ] || rm -f "$marker"
+    start=0
+    kept=0
+    claimed_run_read_from "$f" 0 || return 0
+  fi
+  complete=${CLAIMED_RUN_BYTES:kept}
+  case "$complete" in
+    *$'\n'*) complete=${complete%$'\n'*}$'\n' ;;
+    *) complete= ;;
+  esac
+  offset=$((start + kept + ${#complete}))
+  if claimed_run_text_claims "$complete" && [ ! -f "$marker" ]; then
+    printf '%s\n' "$verified_at" > "$marker" || return 0
+  fi
+  kept=$((offset - start))
+  witness=${CLAIMED_RUN_BYTES:0:kept}
+  [ "$kept" -le "$CLAIMED_RUN_WITNESS_BYTES" ] || witness=${witness:kept-CLAIMED_RUN_WITNESS_BYTES}
+  printf '%s %s %s %s %s %s\n%s' "$dev" "$ino" "$size" "$ctime" "$offset" "$verified_at" "$witness" > "$cursor.tmp" \
+    && mv -f "$cursor.tmp" "$cursor"
+}
+
+# Settles one pending claim once it is due: a run on the task's branch clears it,
+# and its absence raises one wake. A failed run lookup leaves it pending.
+claimed_run_verify() {  # <task>
+  local task=$1 marker="$STATE/.claimed-run-$1" stamp wt branch runs reason
+  read -r stamp < "$marker" 2>/dev/null || stamp=
+  case "$stamp" in ''|*[!0-9]*) rm -f "$marker"; return 0 ;; esac
+  [ "$(( $(date +%s) - stamp ))" -ge "$CLAIMED_RUN_DELAY" ] || return 0
+  wt=$(fm_meta_get "$STATE/$task.meta" worktree)
+  branch=
+  [ ! -d "$wt" ] || branch=$(git -C "$wt" symbolic-ref --quiet --short HEAD 2>/dev/null || true)
+  [ -n "$branch" ] || { rm -f "$marker"; return 0; }
+  runs=$(fm_nm_run_checked "$wt" 10 runs --limit 2147483647) || return 0
+  if printf '%s\n' "$runs" | awk -v branch="$branch" '$2 == branch { found=1 } END { exit !found }'; then
+    rm -f "$marker"
+    return 0
+  fi
+  reason="check: validation claim has no run for $branch (worker reported validation started)"
+  fm_wake_append check "claimed-run-$task" "$reason" || return 1
+  rm -f "$marker"
+  wake "$reason"
+}
+
+claimed_run_tick() {
+  local logs=("$STATE"/*.status) listing dev ino size ctime f task
+  [ -e "${logs[0]}" ] || return 0
+  listing=$(stat_log_identities "${logs[@]}") || :
+  while read -r dev ino size ctime f; do
+    [ -f "$f" ] || continue
+    task=${f##*/}; task=${task%.status}
+    claimed_run_scan_log "$f" "$task" "$dev" "$ino" "$size" "$ctime" </dev/null
+    [ -f "$STATE/.claimed-run-$task" ] || continue
+    claimed_run_verify "$task" </dev/null || return 1
+  done <<EOF
+$listing
+EOF
+}
+
 # --- Main entry: the runtime below runs only when this file is executed as a
 # script. When sourced (unit tests loading the functions above), return here
 # before acquiring the singleton lock or entering the blocking loop.
@@ -3994,128 +4121,6 @@ while :; do
   else
     triage_log "inactive-outcome reconciliation unavailable"
   fi
-
-  claimed_run_matches_snapshot() {
-    local file=$1 snapshot=$2 size=$3 current saved
-    exec 8< "$file" 9< "$snapshot" || return 1
-    IFS= read -r -d '' -n "$size" current <&8 || { exec 8<&- 9<&-; return 1; }
-    IFS= read -r -d '' -n "$size" saved <&9 || { exec 8<&- 9<&-; return 1; }
-    exec 8<&- 9<&-
-    [ "$current" = "$saved" ]
-  }
-
-  claimed_run_has_appended_bytes() {
-    local file=$1 offset=$2 discarded next
-    exec 8< "$file" || return 0
-    if [ "$offset" -gt 0 ]; then
-      IFS= read -r -d '' -n "$offset" discarded <&8 || { exec 8<&-; return 0; }
-    fi
-    IFS= read -r -d '' -n 1 next <&8
-    local result=$?
-    exec 8<&-
-    [ "$result" -eq 0 ]
-  }
-
-  # A worker's routine validation-started line is not itself an actionable wake.
-  # Remember each distinct claim and verify it after a bounded delay on this poll loop.
-  claimed_run_tick() {
-  local LC_ALL=C f task meta wt branch claim marker seen cursor stamp recorded_branch recorded_claim runs line line_verb line_note
-  local stat_result dev ino size cursor_dev cursor_ino cursor_size cursor_claim offset appended consumed line_end identity witness witness_match
-  case "$CLAIMED_RUN_DELAY" in ''|*[!0-9]*) return 0 ;; esac
-  for f in "$STATE"/*.status; do
-    [ -f "$f" ] || continue
-    task=${f##*/}; task=${task%.status}
-    marker="$STATE/.claimed-run-$task"
-    seen="$STATE/.claimed-run-seen-$task"
-    cursor="$STATE/.claimed-run-cursor-$task"
-    identity="$STATE/.claimed-run-identity-$task"
-    witness="$STATE/.claimed-run-witness-$task"
-    cursor_dev=
-    cursor_ino=
-    cursor_size=
-    cursor_claim=
-    if [ -f "$cursor" ]; then
-      read -r cursor_dev cursor_ino cursor_size cursor_claim < "$cursor"
-      case "$cursor_dev:$cursor_ino:$cursor_size" in *[!0-9:]*) cursor_dev= ;; esac
-    fi
-    witness_match=
-    if [ -f "$witness" ] && claimed_run_matches_snapshot "$f" "$witness" "$cursor_size"; then witness_match=1; fi
-    if [ -n "$cursor_dev" ] && [ -n "$witness_match" ] && [ -f "$identity" ] && [ "$f" -ef "$identity" ] && [ ! "$f" -nt "$cursor" ] \
-      && ! claimed_run_has_appended_bytes "$f" "$cursor_size"; then
-      dev=$cursor_dev; ino=$cursor_ino; size=$cursor_size
-      offset=$cursor_size; claim=$cursor_claim; stat_result=
-    else
-      stat_result=$(stat_devino_size "$f") || continue
-      read -r dev ino size <<EOF
-$stat_result
-EOF
-      case "$dev:$ino:$size" in *[!0-9:]*) continue ;; esac
-      offset=0
-      if [ "$cursor_dev:$cursor_ino" = "$dev:$ino" ] && [ -n "$cursor_size" ] && [ "$size" -ge "$cursor_size" ] && [ -n "$witness_match" ]; then
-        offset=$cursor_size
-      elif [ -n "$cursor_dev" ]; then
-        rm -f "$marker" "$seen"
-        cursor_claim=
-      fi
-      claim=$cursor_claim
-    fi
-    if [ -n "$stat_result" ]; then
-      if [ "$size" -gt "$offset" ]; then
-        appended=$(tail -c +"$((offset + 1))" "$f"; printf '\001') || continue
-        appended=${appended%$'\001'}
-        consumed=0
-        while [[ "$appended" == *$'\n'* ]]; do
-          line=${appended%%$'\n'*}
-          appended=${appended#*$'\n'}
-          consumed=$((consumed + ${#line} + 1))
-          status_line_verb "$line" line_verb
-          status_line_note "$line" line_note
-          if [ "$line_verb" = working ] && [ "$line_note" = 'validation started' ]; then
-            claim=$((offset + consumed))
-          fi
-        done
-        offset=$((offset + consumed))
-      fi
-      cursor_claim=$claim
-      printf '%s %s %s %s\n' "$dev" "$ino" "$offset" "$cursor_claim" > "$cursor"
-      cp "$f" "$witness" || continue
-      rm -f "$identity"
-      ln "$f" "$identity" 2>/dev/null || :
-    fi
-    [ -n "$claim" ] || [ -f "$marker" ] || continue
-    meta="$STATE/$task.meta"
-    wt=$(grep '^worktree=' "$meta" 2>/dev/null | tail -n 1 | cut -d= -f2-)
-    [ -d "$wt" ] || continue
-    branch=$(git -C "$wt" symbolic-ref --quiet --short HEAD 2>/dev/null || true)
-    [ -n "$branch" ] || continue
-    stamp=$(sed -n '1p' "$marker" 2>/dev/null || true)
-    recorded_branch=$(sed -n '2p' "$marker" 2>/dev/null || true)
-    recorded_claim=$(sed -n '3p' "$marker" 2>/dev/null || true)
-    if [ -n "$claim" ] && { [ "$recorded_branch" != "$branch" ] || [ "$recorded_claim" != "$claim" ]; }; then
-      { date +%s; printf '%s\n%s\n' "$branch" "$claim"; } > "$marker"
-      stamp=$(sed -n '1p' "$marker")
-      recorded_branch=$branch
-      recorded_claim=$claim
-    fi
-    [ -n "$recorded_claim" ] && [ "$recorded_branch" = "$branch" ] || continue
-    if [ "$(sed -n '1p' "$seen" 2>/dev/null || true)" = "$branch:$recorded_claim" ]; then
-      rm -f "$marker"
-      continue
-    fi
-    case "$stamp" in ''|*[!0-9]*) rm -f "$marker"; continue ;; esac
-    [ "$(( $(date +%s) - stamp ))" -ge "$CLAIMED_RUN_DELAY" ] || continue
-    runs=$(fm_nm_run_checked "$wt" 10 runs --limit 2147483647) || continue
-    if ! printf '%s\n' "$runs" | awk -v branch="$branch" '$2 == branch { found=1 } END { exit !found }'; then
-      fm_wake_append check "claimed-run-$task" "check: validation claim has no run for $branch (worker reported validation started)" || return 1
-      printf '%s\n' "$branch:$recorded_claim" > "$seen"
-      rm -f "$marker"
-      wake "check: validation claim has no run for $branch (worker reported validation started)"
-    else
-      printf '%s\n' "$branch:$recorded_claim" > "$seen"
-      rm -f "$marker"
-    fi
-  done
-  }
 
   # Slow per-task checks (firstmate writes these, e.g. a merged-PR poll).
   claimed_run_tick || { echo 'watcher: claimed-run verification failed' >&2; exit 1; }
