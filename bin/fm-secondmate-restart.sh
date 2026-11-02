@@ -298,8 +298,9 @@ while [ "$i" -lt "${#IDS[@]}" ]; do
       ''|low|medium|high|xhigh|max|ultra) ;;
       *) EFFORT[i]="" ;;
     esac
-    if [ "${EFFORT[i]}" = ultra ] && ! "$SCRIPT_DIR/fm-harness.sh" validate-native-effort "${HARNESS[i]}" "${MODEL[i]}" "${EFFORT[i]}"; then
-      REASON[i]="the configured Ultra profile does not select native Codex through Pi"
+    # Codex validates against the remote host catalog during relaunch.
+    if [ "${EFFORT[i]}" = ultra ] && [ "${HARNESS[i]}" != codex ] && ! "$SCRIPT_DIR/fm-harness.sh" validate-native-effort "${HARNESS[i]}" "${MODEL[i]}" "${EFFORT[i]}"; then
+      REASON[i]="the configured model and effort are not supported"
       i=$((i + 1))
       continue
     fi
