@@ -34,7 +34,9 @@
 # the task, the URL, and the reason, once per task and URL
 # (state/<task>.pr-register-refused), and the scan retries silently on later
 # sweeps after every task not yet refused for its URL, so a draft later marked
-# ready is recorded without help. Registrations
+# ready is recorded without help. Each list starts one task later on every sweep
+# (state/.pr-check-scan-cursor), so a registration that hangs cannot take the
+# whole budget on every sweep. Registrations
 # stop FM_CHECK_TIMEOUT (default 30) minus 5 seconds after the scan starts; a
 # registration cut at that bound prints nothing and is retried.
 # Usage: fm-pr-check.sh <task-id> <pr-url>
@@ -80,8 +82,12 @@ pr_check_reported_url() {  # <status-file>
   printf '%s\n' "$found"
 }
 
+pr_check_rotate() {  # <offset>: shift the lines on stdin left by offset, wrapping
+  awk -v k="$1" 'NF { a[++n] = $0 } END { for (i = 0; i < n; i++) print a[(i + k) % n + 1] }'
+}
+
 pr_check_scan() {
-  local budget start meta id kind url left marker err rc tmp fresh= retry=
+  local budget start meta id kind url left marker err rc tmp fresh= retry= cursor_file cursor
   budget=${FM_CHECK_TIMEOUT:-30}
   case "$budget" in ''|*[!0-9]*) budget=30 ;; esac
   budget=$((budget - 5))
@@ -103,6 +109,12 @@ pr_check_scan() {
       fresh="$fresh$id $url"$'\n'
     fi
   done
+  cursor_file="$STATE/.pr-check-scan-cursor"
+  cursor=$(cat "$cursor_file" 2>/dev/null || true)
+  case "$cursor" in ''|*[!0-9]*) cursor=0 ;; esac
+  printf '%s\n' "$((cursor + 1))" > "$cursor_file" 2>/dev/null || true
+  fresh=$(printf '%s' "$fresh" | pr_check_rotate "$cursor")
+  retry=$(printf '%s' "$retry" | pr_check_rotate "$cursor")
   while IFS=' ' read -r id url; do
     [ -n "$id" ] || continue
     left=$((start + budget - $(date +%s)))
@@ -126,7 +138,8 @@ pr_check_scan() {
     err=$(printf '%s\n' "$err" | sed -n 's/^error: //p' | head -1)
     printf '%s reported %s in a done line, but it was not recorded: %s\n' "$id" "$url" "${err:-registration failed}"
   done <<EOF_SCAN
-$fresh$retry
+$fresh
+$retry
 EOF_SCAN
 }
 

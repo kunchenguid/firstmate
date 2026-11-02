@@ -156,7 +156,7 @@ case "${1:-} ${2:-}" in
         exit 0
         ;;
       *" --json isDraft "*)
-        case "$*" in *"${FM_TEST_GH_SLOW_URL:-no-slow-url}"*) sleep 5 ;; esac
+        case "$*" in *"${FM_TEST_GH_SLOW_URL:-no-slow-url}"*) sleep 30 ;; esac
         printf '%s\n' "{\"isDraft\":${FM_TEST_GH_DRAFT:-false}}"
         exit 0
         ;;
@@ -839,12 +839,32 @@ test_scan_tries_new_reports_before_refused_retries() {
   write_task_meta "$dir" task-b
   printf '%s\n' 'done [at=2]: PR https://github.com/o/r/pull/20 checks green' > "$state/task-b.status"
 
-  FM_CHECK_TIMEOUT=7 FM_TEST_GH_SLOW_URL=pull/9 run_check_entry "$dir" scan > /dev/null 2> "$dir/stderr" \
+  FM_CHECK_TIMEOUT=15 FM_TEST_GH_SLOW_URL=pull/9 run_check_entry "$dir" scan > /dev/null 2> "$dir/stderr" \
     || fail "the scan failed: $(cat "$dir/stderr")"
   grep -qxF 'pr=https://github.com/o/r/pull/20' "$state/task-b.meta" \
     || fail "a new report was starved by an earlier refused retry"
   ! grep -q '^pr=' "$state/task-a.meta" || fail "the slow refused task was recorded"
   pass "the scan records a new report before retrying a refused one"
+}
+
+# A registration that hangs takes the whole budget of one sweep, and the next
+# sweep starts with a different task, so a later report is still recorded.
+test_scan_rotates_past_a_hanging_registration() {
+  local dir state
+  dir=$(make_case scan-rotates-past-hang)
+  state="$dir/home/state"
+  write_task_meta "$dir" task-a
+  printf '%s\n' 'done [at=2]: PR https://github.com/o/r/pull/9 checks green' > "$state/task-a.status"
+  write_task_meta "$dir" task-b
+  printf '%s\n' 'done [at=2]: PR https://github.com/o/r/pull/20 checks green' > "$state/task-b.status"
+
+  FM_CHECK_TIMEOUT=15 FM_TEST_GH_SLOW_URL=pull/9 run_check_entry "$dir" scan > /dev/null 2> "$dir/stderr" \
+    || fail "the first scan failed: $(cat "$dir/stderr")"
+  FM_CHECK_TIMEOUT=15 FM_TEST_GH_SLOW_URL=pull/9 run_check_entry "$dir" scan > /dev/null 2> "$dir/stderr" \
+    || fail "the second scan failed: $(cat "$dir/stderr")"
+  grep -qxF 'pr=https://github.com/o/r/pull/20' "$state/task-b.meta" \
+    || fail "a hanging registration starved a later report on every sweep"
+  pass "the scan starts a later sweep at a different task so a hanging registration cannot starve it"
 }
 
 # The watcher's check sweep runs the scan, so a reported PR gets its merge poll
@@ -4035,6 +4055,7 @@ test_direct_pr_unpushed_commit_refuses_registration
 test_scan_records_a_pr_reported_in_a_done_line
 test_scan_reports_a_refusal_once_and_retries
 test_scan_tries_new_reports_before_refused_retries
+test_scan_rotates_past_a_hanging_registration
 test_watcher_sweep_records_a_reported_pr
 test_valid_recording_and_merge_derivation
 test_rejected_metacharacter_bytes_are_inert
