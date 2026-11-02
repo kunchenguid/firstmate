@@ -106,6 +106,7 @@ install_pi_watch_extension_fixture() {
   mkdir -p "$repo/bin"
   cp "$ROOT/bin/fm-operational-input.sh" "$repo/bin/fm-operational-input.sh"
   chmod +x "$repo/bin/fm-operational-input.sh"
+  cp "$ROOT/bin/fm-wake-lib.sh" "$ROOT/bin/fm-path-lib.sh" "$repo/bin/"
   cat > "$repo/node_modules/@earendil-works/pi-coding-agent/package.json" <<'JSON'
 {"name":"@earendil-works/pi-coding-agent","type":"module","exports":"./index.js"}
 JSON
@@ -138,6 +139,18 @@ export const Type = {
   },
 };
 JS
+}
+
+install_pi_watch_identity_fixture() {
+  cat > "$1/bin/fm-test-watch-identity.sh" <<'SH'
+. "$FM_ROOT_OVERRIDE/bin/fm-wake-lib.sh"
+mkdir -p "$STATE/.watch.lock"
+printf '%s\n' "$$" > "$STATE/.watch.lock/pid"
+printf '%s\n' "$FM_HOME" > "$STATE/.watch.lock/fm-home"
+printf '%s\n' "$FM_ROOT_OVERRIDE/bin/fm-watch.sh" > "$STATE/.watch.lock/watcher-path"
+fm_pid_identity "$$" > "$STATE/.watch.lock/pid-identity"
+touch "$STATE/.last-watcher-beat"
+SH
 }
 
 test_pi_extension_reports_external_healthy_watcher() {
@@ -288,59 +301,367 @@ test_pi_redundant_tool_call_is_owned_noop() {
   stop="$TMP_ROOT/pi-redundant-tool.stop"
   mkdir -p "$repo/bin" "$home/state" "$home/config"
   install_pi_watch_extension_fixture "$repo"
+  install_pi_watch_identity_fixture "$repo"
   plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
   cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
 #!/usr/bin/env bash
 printf 'arm\n' >> "${FM_ARM_LOG:?}"
+# Bind the real fake process with the canonical identity writer, not a health stub.
+. "$FM_ROOT_OVERRIDE/bin/fm-test-watch-identity.sh"
 printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
 trap 'exit 0' TERM INT
-while [ ! -e "$FM_STOP_FILE" ] && [ -e "$0" ]; do sleep 0.02; done
+for ((i=0; i<1000; i++)); do
+  [ ! -e "$FM_STOP_FILE" ] && [ -e "$0" ] || break
+  sleep 0.02
+done
 SH
   chmod +x "$repo/bin/fm-watch-arm.sh"
   out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_LOG="$log" FM_STOP_FILE="$stop" node --input-type=module 2>&1 <<'EOF'
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import assert from "node:assert/strict";
+import { existsSync, readFileSync, writeFileSync, utimesSync, unlinkSync } from "node:fs";
 import { pathToFileURL } from "node:url";
-
-let tool = null;
-const pi = {
-  on() {},
-  registerCommand() {},
-  registerTool(candidate) {
-    if (candidate.name === "fm_watch_arm_pi") tool = candidate;
-  },
-  sendUserMessage: async () => {},
-};
-writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
-const mod = await import(pathToFileURL(process.env.PLUGIN).href);
-mod.default(pi);
-const initial = await tool.execute("tool-call-first", {}, undefined, undefined, {});
-if (!initial.content[0]?.text.includes("started Pi extension arm child")) {
-  throw new Error(`initial call did not start the arm child: ${initial.content[0]?.text}`);
-}
-const redundant = await tool.execute("tool-call-redundant", {}, undefined, undefined, {});
-if (!redundant.content[0]?.text.includes("Pi extension already owns an arm child; no manual re-arm needed")) {
-  throw new Error(`redundant call omitted ownership-based no-op guidance: ${redundant.content[0]?.text}`);
-}
-if (/^watcher: healthy\b/.test(redundant.content[0]?.text)) {
-  throw new Error(`redundant call overclaimed independent health: ${redundant.content[0]?.text}`);
-}
-if (!redundant.content[0]?.text.includes("only after a later notification says the cycle is missing, failed, or unhealthy")) {
-  throw new Error(`redundant call omitted the repair-only condition: ${redundant.content[0]?.text}`);
-}
-for (let i = 0; i < 100 && !existsSync(process.env.FM_ARM_LOG); i += 1) {
-  await new Promise((resolve) => setTimeout(resolve, 10));
-}
-if (!existsSync(process.env.FM_ARM_LOG)) throw new Error("initial arm child did not start");
-await new Promise((resolve) => setTimeout(resolve, 100));
-const rows = readFileSync(process.env.FM_ARM_LOG, "utf8").trim().split("\n");
-if (rows.length !== 1) throw new Error(`redundant call spawned ${rows.length} arm children`);
-writeFileSync(process.env.FM_STOP_FILE, "stop\n");
+let tool;
+const pi = { on() {}, registerCommand() {}, registerTool(t) { if(t.name === "fm_watch_arm_pi") tool=t; }, sendUserMessage: async()=>{} };
+const home=process.env.FM_HOME, state=`${home}/state`;
+writeFileSync(`${state}/.lock`, `${process.pid}\n`);
+const mod=await import(pathToFileURL(process.env.PLUGIN).href); mod.default(pi);
+try {
+  const first=await tool.execute();
+  assert.equal(first.details.state,"starting");
+  assert.match(first.details.message,/started Pi extension arm child/);
+  const starting=await tool.execute();
+  assert.equal(starting.details.state,"starting","unconfirmed arm must remain starting");
+  assert.doesNotMatch(starting.details.message,/no manual re-arm needed/);
+  for(let i=0;i<200 && !existsSync(`${state}/.last-watcher-beat`);i++) await new Promise(r=>setTimeout(r,10));
+  await new Promise(r=>setTimeout(r,100));
+  const fresh=await tool.execute();
+  assert.equal(fresh.details.ok,true);
+  assert.equal(fresh.details.state,"healthy");
+  assert.match(fresh.details.message,/no manual re-arm needed/);
+  const old=new Date(Date.now()-1200_000);
+  utimesSync(`${state}/.last-watcher-beat`,old,old);
+  const stale=await tool.execute();
+  assert.equal(stale.details.ok,false,"1200s stale progress must never report healthy");
+  assert.equal(stale.details.state,"retrying","identity-proved stale watcher must be replaced");
+  for(let i=0;i<200 && readFileSync(process.env.FM_ARM_LOG,"utf8").trim().split("\n").length<2;i++) await new Promise(r=>setTimeout(r,10));
+  let recovered;
+  for(let i=0;i<200;i++) { recovered=await tool.execute(); if(recovered.details.state==="healthy") break; await new Promise(r=>setTimeout(r,10)); }
+  assert.equal(recovered.details.state,"healthy","stale watcher replacement must establish fresh progress");
+  assert.equal(readFileSync(process.env.FM_ARM_LOG,"utf8").trim().split("\n").length,2,"stale watcher must cause exactly one replacement");
+  unlinkSync(`${state}/.last-watcher-beat`);
+  assert.equal((await tool.execute()).details.state,"retrying","missing beacon with owned identity must also trigger replacement");
+  for(let i=0;i<200 && readFileSync(process.env.FM_ARM_LOG,"utf8").trim().split("\n").length<3;i++) await new Promise(r=>setTimeout(r,10));
+  for(let i=0;i<200;i++) { recovered=await tool.execute(); if(recovered.details.state==="healthy") break; await new Promise(r=>setTimeout(r,10)); }
+  assert.equal(recovered.details.state,"healthy","replacement must recover missing progress");
+  writeFileSync(`${state}/.last-watcher-beat`,"");
+  const identity=readFileSync(`${state}/.watch.lock/pid-identity`,"utf8");
+  writeFileSync(`${state}/.watch.lock/pid-identity`,"reused-pid");
+  assert.equal((await tool.execute()).details.ok,false,"reused PID identity must be denied");
+  writeFileSync(`${state}/.watch.lock/pid-identity`,identity);
+  writeFileSync(`${state}/.watch.lock/fm-home`,`${home}/sibling`);
+  assert.equal((await tool.execute()).details.ok,false,"sibling home must be denied");
+  assert.equal(readFileSync(`${state}/.watch.lock/fm-home`,"utf8"),`${home}/sibling`,"foreign home metadata must remain untouched");
+  writeFileSync(`${state}/.watch.lock/fm-home`,home);
+  const path=readFileSync(`${state}/.watch.lock/watcher-path`,"utf8");
+  writeFileSync(`${state}/.watch.lock/watcher-path`,"/foreign/watcher");
+  assert.equal((await tool.execute()).details.ok,false,"foreign watcher path must be denied");
+  writeFileSync(`${state}/.watch.lock/watcher-path`,path);
+  const child=readFileSync(`${state}/.watch.lock/pid`,"utf8").trim();
+  writeFileSync(`${state}/.lock`,child);
+  assert.equal((await tool.execute()).details.ok,false,"foreign session owner must be denied");
+  process.kill(Number(child),0);
+  writeFileSync(`${state}/.lock`,`${process.pid}\n`);
+  assert.equal((await tool.execute()).details.state,"healthy","verified progress must recover without a duplicate arm");
+  assert.equal(readFileSync(process.env.FM_ARM_LOG,"utf8").trim().split("\n").length,3,"foreign identities must not trigger duplicate arms");
+} finally { writeFileSync(process.env.FM_STOP_FILE,"stop\n"); }
 EOF
 )
   status=$?
-  expect_code 0 "$status" "Pi redundant tool call must remain an ownership-based no-op with repair-only guidance"
-  [ -z "$out" ] || fail "Pi redundant-call test printed output: $out"
-  pass "Pi redundant tool call returns ownership guidance and spawns no second child"
+  expect_code 0 "$status" "Pi existing-arm success requires canonical identity and fresh progress, preserving foreign arms"
+  [ -z "$out" ] || fail "Pi existing-arm health test printed output: $out"
+  pass "Pi replaces stale owned watchers and preserves unproved identities"
+}
+
+test_pi_health_monitor_replaces_a_wedged_watcher() {
+  local repo home out status
+  repo="$TMP_ROOT/pi-health-monitor-root"
+  home="$TMP_ROOT/pi-health-monitor-home"
+  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  install_pi_watch_extension_fixture "$repo"
+  install_pi_watch_identity_fixture "$repo"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'arm\n' >> "$FM_HOME/starts"
+. "$FM_ROOT_OVERRIDE/bin/fm-test-watch-identity.sh"
+printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+trap 'exit 0' TERM INT
+while [ ! -e "$FM_HOME/stop" ] && [ -e "$0" ]; do sleep 0.02; done
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+  out=$(PLUGIN="$repo/.pi/extensions/fm-primary-pi-watch.ts" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" node --input-type=module 2>&1 <<'EOF'
+import assert from "node:assert/strict";
+import { existsSync, readFileSync, statSync, utimesSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+const intervals=[];
+const realSetInterval=globalThis.setInterval;
+globalThis.setInterval=(callback,ms,...args)=>{
+  intervals.push(ms);
+  return realSetInterval(callback,20,...args);
+};
+const handlers=new Map();
+const pi={on(event,handler){handlers.set(event,handler);},registerCommand(){},registerTool(){},sendUserMessage:async()=>{}};
+const state=`${process.env.FM_HOME}/state`;
+writeFileSync(`${state}/.lock`,`${process.pid}\n`);
+const mod=await import(pathToFileURL(process.env.PLUGIN).href);mod.default(pi);
+try {
+  await handlers.get("session_start")({});
+  for(let i=0;i<200 && !existsSync(`${state}/.last-watcher-beat`);i++) await new Promise(r=>setTimeout(r,10));
+  assert.deepEqual(intervals,[30_000],"health monitor must check every 30 seconds");
+  const oldPid=readFileSync(`${state}/.watch.lock/pid`,"utf8").trim();
+  const stale=new Date(Date.now()-1200_000);
+  utimesSync(`${state}/.last-watcher-beat`,stale,stale);
+  for(let i=0;i<300;i++) {
+    if(readFileSync(`${process.env.FM_HOME}/starts`,"utf8").trim().split("\n").length===2 && readFileSync(`${state}/.watch.lock/pid`,"utf8").trim()!==oldPid) break;
+    await new Promise(r=>setTimeout(r,10));
+  }
+  assert.equal(readFileSync(`${process.env.FM_HOME}/starts`,"utf8").trim().split("\n").length,2,"health monitor must start one replacement without another tool call");
+  const newPid=readFileSync(`${state}/.watch.lock/pid`,"utf8").trim();
+  assert.notEqual(newPid,oldPid,"replacement must own a new watcher process");
+  for(let i=0;i<200;i++) {
+    const age=Date.now()-statSync(`${state}/.last-watcher-beat`).mtimeMs;
+    if(age<1000) break;
+    await new Promise(r=>setTimeout(r,10));
+  }
+  const age=Date.now()-statSync(`${state}/.last-watcher-beat`).mtimeMs;
+  assert.ok(age<1000,`replacement beacon is not fresh (${age}ms)`);
+} finally { writeFileSync(`${process.env.FM_HOME}/stop`,"stop\n"); }
+EOF
+)
+  status=$?
+  [ "$status" -eq 0 ] || fail "Pi health monitor must replace a stalled watcher without manual re-arm: $out"
+  [ -z "$out" ] || fail "Pi health-monitor test printed output: $out"
+  pass "Pi health monitor replaces a wedged watcher without another tool call"
+}
+
+test_pi_health_monitor_tolerates_a_slow_retire() {
+  local repo home out status
+  repo="$TMP_ROOT/pi-health-slow-retire-root"
+  home="$TMP_ROOT/pi-health-slow-retire-home"
+  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  install_pi_watch_extension_fixture "$repo"
+  install_pi_watch_identity_fixture "$repo"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'arm\n' >> "$FM_HOME/starts"
+# A loaded host can take longer than the bounded retire wait to close a
+# SIGTERMed arm. The close path still owns the bounded re-arm.
+trap 'sleep 0.4; exit 0' TERM INT
+. "$FM_ROOT_OVERRIDE/bin/fm-test-watch-identity.sh"
+printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+while [ ! -e "$FM_HOME/stop" ] && [ -e "$0" ]; do sleep 0.02; done
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+  out=$(PLUGIN="$repo/.pi/extensions/fm-primary-pi-watch.ts" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_PI_ARM_READY_TIMEOUT_MS="$ARM_READY_TIMEOUT_MS" FM_WATCH_ARM_RETIRE_TIMEOUT_MS=50 FM_WATCH_REARM_RETRY_BASE_MS=10 FM_WATCH_REARM_RETRY_MAX_MS=20 FM_WATCH_REARM_RETRY_LIMIT=2 node --input-type=module 2>&1 <<'EOF'
+import assert from "node:assert/strict";
+import { existsSync, readFileSync, statSync, utimesSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+const realSetInterval=globalThis.setInterval;
+globalThis.setInterval=(callback,_ms,...args)=>realSetInterval(callback,20,...args);
+const messages=[];
+let tool;
+const handlers=new Map();
+const pi={on(event,handler){handlers.set(event,handler);},registerCommand(){},registerTool(candidate){if(candidate.name==="fm_watch_arm_pi") tool=candidate;},sendUserMessage:async(message)=>{messages.push(message);}};
+const state=`${process.env.FM_HOME}/state`;
+writeFileSync(`${state}/.lock`,`${process.pid}\n`);
+const mod=await import(pathToFileURL(process.env.PLUGIN).href);mod.default(pi);
+try {
+  await handlers.get("session_start")({});
+  for(let i=0;i<300 && !existsSync(`${state}/.last-watcher-beat`);i++) await new Promise(r=>setTimeout(r,10));
+  const oldPid=readFileSync(`${state}/.watch.lock/pid`,"utf8").trim();
+  const stale=new Date(Date.now()-1200_000);
+  utimesSync(`${state}/.last-watcher-beat`,stale,stale);
+  for(let i=0;i<500;i++) {
+    const starts=existsSync(`${process.env.FM_HOME}/starts`) ? readFileSync(`${process.env.FM_HOME}/starts`,"utf8").trim().split("\n") : [];
+    if(starts.length===2 && readFileSync(`${state}/.watch.lock/pid`,"utf8").trim()!==oldPid) break;
+    await new Promise(r=>setTimeout(r,10));
+  }
+  const starts=readFileSync(`${process.env.FM_HOME}/starts`,"utf8").trim().split("\n");
+  assert.equal(starts.length,2,"a slow retire must still produce exactly one replacement");
+  assert.notEqual(readFileSync(`${state}/.watch.lock/pid`,"utf8").trim(),oldPid,"replacement must own a new watcher process");
+  for(let i=0;i<200;i++) {
+    const age=Date.now()-statSync(`${state}/.last-watcher-beat`).mtimeMs;
+    if(age<1000) break;
+    await new Promise(r=>setTimeout(r,10));
+  }
+  assert.ok(Date.now()-statSync(`${state}/.last-watcher-beat`).mtimeMs<1000,"replacement beacon is not fresh");
+  let recovered;
+  for(let i=0;i<400;i++) {
+    recovered=await tool.execute();
+    if(recovered.details.state==="healthy") break;
+    await new Promise(r=>setTimeout(r,10));
+  }
+  assert.equal(recovered.details.state,"healthy","a slow retire must still settle on a healthy replacement");
+  await new Promise(r=>setTimeout(r,100));
+  assert.ok(!messages.some((message)=>/could not retire the arm/.test(message)),`a slow retire produced a false failure alarm: ${messages.join(" | ")}`);
+  assert.equal(readFileSync(`${process.env.FM_HOME}/starts`,"utf8").trim().split("\n").length,2,"a slow retire must not churn extra arms");
+} finally { writeFileSync(`${process.env.FM_HOME}/stop`,"stop\n"); }
+EOF
+)
+  status=$?
+  [ "$status" -eq 0 ] || fail "Pi health monitor must not alarm while a slow retire still re-arms: $out"
+  [ -z "$out" ] || fail "Pi health slow-retire test printed output: $out"
+  pass "Pi health monitor tolerates a slow retire without a false failure alarm"
+}
+
+test_pi_repair_rearms_when_arm_outlives_retire_timeout() {
+  local repo home out status
+  repo="$TMP_ROOT/pi-retire-timeout-root"
+  home="$TMP_ROOT/pi-retire-timeout-home"
+  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  install_pi_watch_extension_fixture "$repo"
+  install_pi_watch_identity_fixture "$repo"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'arm\n' >> "$FM_HOME/starts"
+. "$FM_ROOT_OVERRIDE/bin/fm-test-watch-identity.sh"
+printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+# Model a watcher parked in a long poll or blocked in a foreground child: the
+# arm ignores TERM, so its close event cannot fire inside the retire wait and
+# an orphaned descendant keeps its stdio pipes open.
+trap '' TERM INT
+while [ ! -e "$FM_HOME/stop" ] && [ -e "$0" ]; do sleep 0.02; done
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+  out=$(PLUGIN="$repo/.pi/extensions/fm-primary-pi-watch.ts" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_WATCH_ARM_RETIRE_TIMEOUT_MS=100 FM_WATCH_REARM_RETRY_BASE_MS=10 FM_WATCH_REARM_RETRY_MAX_MS=20 FM_WATCH_REARM_RETRY_LIMIT=2 node --input-type=module 2>&1 <<'EOF'
+import assert from "node:assert/strict";
+import { existsSync, readFileSync, utimesSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+const messages=[];
+let tool;
+const pi={on(){},registerCommand(){},registerTool(candidate){if(candidate.name==="fm_watch_arm_pi") tool=candidate;},sendUserMessage:async(message)=>{messages.push(message);}};
+const state=`${process.env.FM_HOME}/state`;
+writeFileSync(`${state}/.lock`,`${process.pid}\n`);
+const mod=await import(pathToFileURL(process.env.PLUGIN).href);mod.default(pi);
+const starts=()=>existsSync(`${process.env.FM_HOME}/starts`) ? readFileSync(`${process.env.FM_HOME}/starts`,"utf8").trim().split("\n").filter(Boolean) : [];
+try {
+  const first=await tool.execute();
+  assert.equal(first.details.state,"starting");
+  for(let i=0;i<300 && !existsSync(`${state}/.last-watcher-beat`);i++) await new Promise(r=>setTimeout(r,10));
+  await new Promise(r=>setTimeout(r,100));
+  const oldPid=readFileSync(`${state}/.watch.lock/pid`,"utf8").trim();
+  const stale=new Date(Date.now()-1200_000);
+  utimesSync(`${state}/.last-watcher-beat`,stale,stale);
+  const repair=await tool.execute();
+  assert.equal(repair.details.state,"retrying","identity-proved stale watcher must be replaced");
+  for(let i=0;i<300 && starts().length<2;i++) await new Promise(r=>setTimeout(r,10));
+  assert.equal(starts().length,2,"a repair call whose retire timed out must still start one replacement");
+  for(let i=0;i<200 && readFileSync(`${state}/.watch.lock/pid`,"utf8").trim()===oldPid;i++) await new Promise(r=>setTimeout(r,10));
+  assert.notEqual(readFileSync(`${state}/.watch.lock/pid`,"utf8").trim(),oldPid,"replacement must own a new watcher process");
+  await new Promise(r=>setTimeout(r,300));
+  assert.equal(starts().length,2,"a late old-arm close must not churn a second replacement");
+  assert.deepEqual(messages,[],`a bounded retire timeout must not surface a false failure alarm: ${messages.join(" | ")}`);
+} finally { writeFileSync(`${process.env.FM_HOME}/stop`,"stop\n"); }
+EOF
+)
+  status=$?
+  [ "$status" -eq 0 ] || fail "Pi repair call must re-arm when the arm outlives the retire wait: $out"
+  [ -z "$out" ] || fail "Pi retire-timeout repair test printed output: $out"
+  pass "Pi repair call re-arms when an arm outlives the bounded retire wait"
+}
+
+test_pi_health_monitor_respects_long_poll_grace() {
+  local repo home out status
+  repo="$TMP_ROOT/pi-health-long-poll-root"
+  home="$TMP_ROOT/pi-health-long-poll-home"
+  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  install_pi_watch_extension_fixture "$repo"
+  install_pi_watch_identity_fixture "$repo"
+  # A long-poll home may legitimately leave its beacon untouched past 300s, so
+  # the health check must derive its grace from the poll cadence.
+  printf 'FM_POLL=600\n' > "$home/config/watch.env"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'arm\n' >> "$FM_HOME/starts"
+. "$FM_ROOT_OVERRIDE/bin/fm-test-watch-identity.sh"
+printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+trap 'exit 0' TERM INT
+while [ ! -e "$FM_HOME/stop" ] && [ -e "$0" ]; do sleep 0.02; done
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+  out=$(PLUGIN="$repo/.pi/extensions/fm-primary-pi-watch.ts" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" node --input-type=module 2>&1 <<'EOF'
+import assert from "node:assert/strict";
+import { existsSync, readFileSync, utimesSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+const realSetInterval=globalThis.setInterval;
+globalThis.setInterval=(callback,_ms,...args)=>realSetInterval(callback,20,...args);
+const messages=[];
+const handlers=new Map();
+const pi={on(event,handler){handlers.set(event,handler);},registerCommand(){},registerTool(){},sendUserMessage:async(message)=>{messages.push(message);}};
+const home=process.env.FM_HOME, state=`${home}/state`;
+const starts=()=>readFileSync(`${home}/starts`,"utf8").trim().split("\n").length;
+writeFileSync(`${state}/.lock`,`${process.pid}\n`);
+const mod=await import(pathToFileURL(process.env.PLUGIN).href);mod.default(pi);
+const age=(seconds)=>{const t=new Date(Date.now()-seconds*1000);utimesSync(`${state}/.last-watcher-beat`,t,t);};
+try {
+  await handlers.get("session_start")({});
+  for(let i=0;i<200 && !existsSync(`${state}/.last-watcher-beat`);i++) await new Promise(r=>setTimeout(r,10));
+  assert.equal(starts(),1,"first arm must start once");
+  // 400s is stale under a fixed 300s floor but healthy under 600s poll + 60s.
+  age(400);
+  await new Promise(r=>setTimeout(r,400));
+  assert.equal(starts(),1,"a 400s beacon under FM_POLL=600 must not be retired");
+  assert.equal(messages.length,0,`a long-poll grace must stay quiet: ${messages.join(" | ")}`);
+  age(700);
+  for(let i=0;i<300 && starts()<2;i++) await new Promise(r=>setTimeout(r,10));
+  assert.equal(starts(),2,"a 700s beacon past the derived grace must be retired once");
+} finally { writeFileSync(`${home}/stop`,"stop\n"); }
+EOF
+)
+  status=$?
+  [ "$status" -eq 0 ] || fail "Pi health monitor must derive its grace from the poll cadence: $out"
+  [ -z "$out" ] || fail "Pi health long-poll test printed output: $out"
+  pass "Pi health monitor derives its grace from the home's poll cadence"
+}
+
+test_pi_unready_arm_has_bounded_start_grace() {
+  local repo home out status
+  repo="$TMP_ROOT/pi-unready-grace-root"
+  home="$TMP_ROOT/pi-unready-grace-home"
+  mkdir -p "$home/state" "$home/config"
+  install_pi_watch_extension_fixture "$repo"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'arm\n' >> "$FM_HOME/starts"
+for ((i=0;i<500;i++)); do
+  [ ! -e "$FM_HOME/stop" ] && [ -e "$0" ] || break
+  sleep 0.02
+done
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+  out=$(PLUGIN="$repo/.pi/extensions/fm-primary-pi-watch.ts" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_PI_ARM_READY_TIMEOUT_MS=200 node --input-type=module 2>&1 <<'EOF'
+import assert from "node:assert/strict";
+import { readFileSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+let tool;
+const pi={on(){},registerCommand(){},registerTool(t){if(t.name==="fm_watch_arm_pi")tool=t;},sendUserMessage:async()=>{}};
+writeFileSync(`${process.env.FM_HOME}/state/.lock`,`${process.pid}\n`);
+const mod=await import(pathToFileURL(process.env.PLUGIN).href);mod.default(pi);
+try {
+  await tool.execute();
+  const starting=await tool.execute();
+  assert.equal(starting.details.state,"starting");
+  assert.equal(starting.details.ok,false,"unverified start must not claim healthy success");
+  await new Promise(r=>setTimeout(r,500));
+  const expired=await tool.execute();
+  assert.equal(expired.details.ok,false);
+  assert.equal(expired.details.state,"unhealthy","unready arm must not borrow indefinite start grace");
+  assert.equal(readFileSync(`${process.env.FM_HOME}/starts`,"utf8").trim().split("\n").length,1);
+} finally { writeFileSync(`${process.env.FM_HOME}/stop`,"stop\n"); }
+EOF
+)
+  status=$?
+  [ "$status" -eq 0 ] || fail "Pi unready arm start grace: $out"
+  pass "Pi unready arm receives bounded start grace without duplicate launch or healthy success"
 }
 
 test_pi_scheduled_retry_call_is_owned_noop() {
@@ -380,15 +701,13 @@ for (let i = 0; i < 100; i += 1) {
   redundant = await tool.execute("tool-call-during-retry", {}, undefined, undefined, {});
   if (redundant.content[0]?.text.includes("scheduled continuity retry")) break;
 }
-if (!redundant?.content[0]?.text.includes("Pi extension already owns a scheduled continuity retry; no manual re-arm needed")) {
+if (!redundant?.content[0]?.text.includes("scheduled continuity retry; health is not yet verified")) {
   throw new Error(`scheduled retry did not return ownership-based no-op guidance: ${redundant?.content[0]?.text}`);
 }
 if (/^watcher: healthy\b/.test(redundant.content[0]?.text)) {
   throw new Error(`scheduled retry call overclaimed independent health: ${redundant.content[0]?.text}`);
 }
-if (!redundant.content[0]?.text.includes("only after a later notification says the cycle is missing, failed, or unhealthy")) {
-  throw new Error(`scheduled retry call omitted the repair-only condition: ${redundant.content[0]?.text}`);
-}
+if (redundant.details?.state !== "retrying") throw new Error("scheduled retry must be distinguished from healthy");
 await new Promise((resolve) => setTimeout(resolve, 100));
 const rows = readFileSync(process.env.FM_ARM_LOG, "utf8").trim().split("\n");
 if (rows.length !== 1) throw new Error(`scheduled retry call spawned ${rows.length} arm children`);
@@ -3186,6 +3505,7 @@ test_pi_session_transition_generation_owner() {
   fail_once="$TMP_ROOT/pi-session-transition-fail-once"
   mkdir -p "$repo/bin" "$home/state" "$home/config" "$marker_root"
   install_pi_watch_extension_fixture "$repo"
+  install_pi_watch_identity_fixture "$repo"
   plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
   cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
 #!/usr/bin/env bash
@@ -3206,6 +3526,7 @@ marker=$(mktemp "${FM_MARKER_ROOT:?}/arm.XXXXXX") || exit 1
 cleanup() { rm -f "$marker"; }
 trap cleanup EXIT
 trap 'exit 0' TERM INT
+. "$FM_ROOT_OVERRIDE/bin/fm-test-watch-identity.sh"
 printf 'watcher: started pid=%s\n' "$$"
 printf '%s\n' "$$" > "${FM_CHILD_PID_FILE:?}"
 printf '%s\n' "$marker" > "${FM_CHILD_MARKER_FILE:?}"
@@ -3441,6 +3762,7 @@ test_pi_session_replacement_carries_inflight_actionable_close() {
   stop="$TMP_ROOT/pi-session-replacement-handoff.stop"
   mkdir -p "$repo/bin" "$home/state" "$home/config" "$marker_root"
   install_pi_watch_extension_fixture "$repo"
+  install_pi_watch_identity_fixture "$repo"
   plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
   cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
 #!/usr/bin/env bash
@@ -3453,6 +3775,7 @@ cleanup() { rm -f "$marker"; }
 trap cleanup EXIT
 trap 'exit 0' TERM INT
 printf 'arm pid=%s marker=%s\n' "$$" "$marker" >> "${FM_ARM_LOG:?}"
+. "$FM_ROOT_OVERRIDE/bin/fm-test-watch-identity.sh"
 printf 'watcher: started pid=%s (beacon fresh) recovery-generation=replacement-fixture\n' "$$"
 while :; do
   if [ -e "$FM_TRIGGER_FILE" ]; then
@@ -5763,6 +6086,11 @@ EOF
 test_pi_extension_reports_external_healthy_watcher
 test_pi_tool_returns_agent_tool_result
 test_pi_redundant_tool_call_is_owned_noop
+test_pi_health_monitor_replaces_a_wedged_watcher
+test_pi_health_monitor_tolerates_a_slow_retire
+test_pi_repair_rearms_when_arm_outlives_retire_timeout
+test_pi_health_monitor_respects_long_poll_grace
+test_pi_unready_arm_has_bounded_start_grace
 test_pi_scheduled_retry_call_is_owned_noop
 test_pi_actionable_close_starts_single_successor_before_delivery
 test_pi_actionable_output_waits_for_predecessor_close

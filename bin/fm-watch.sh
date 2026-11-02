@@ -3661,6 +3661,7 @@ watcher_cleanup() {
   fm_capture_output_cleanup
   fm_wait_tmp_cleanup
   fm_custom_check_snapshot_cleanup
+  fm_pending_reply_decision_cache_cleanup
   # A stop can land inside a marker or queue critical section, leaving locks
   # recorded against this very pid with no frame left to release them. Drop
   # ours outright - identity-aware no-ops for any lock not ours - so the
