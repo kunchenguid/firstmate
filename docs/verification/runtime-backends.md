@@ -2229,12 +2229,13 @@ The packed application source sets it into the environment of every terminal it 
 `env:{...e.env,ORCA_TERMINAL_HANDLE:e.preAllocatedHandle}`, with the same value recorded against the live terminal.
 An inherited value that is not a live terminal of the runtime is replaced, not trusted: `h=m&&i.has(m)?m:t?.preAllocateHandleForPty(e); m&&m!==h&&delete p.ORCA_TERMINAL_HANDLE`.
 So the marker names a terminal this Orca runtime owns, and a stale or foreign value cannot redirect discovery to someone else's endpoint.
-A tmux, Herdr, or Rex session started inside an Orca terminal still carries its own innermost markers, which is why discovery checks Orca last.
+A tmux, Herdr, Rex, or hc session started inside an Orca terminal still carries its own innermost markers, which is why discovery checks Orca last.
 
-With only `ORCA_TERMINAL_HANDLE` set (no `TMUX_PANE`, no herdr, Rex, or T3 markers), both refusal paths were run:
+With only `ORCA_TERMINAL_HANDLE` set (no `TMUX_PANE`, no herdr, Rex, hc, or T3 markers), both refusal paths were run:
 
 ```sh
 env -u TMUX -u TMUX_PANE -u HERDR_ENV -u HERDR_PANE_ID -u REX_SESSION -u REX_BLOCK \
+  -u HC_TERMINAL_ID -u HC_TERMINAL_SOCKET -u HC_SESSION -u HC_SCOPE -u HC_SOCKET \
   -u FM_SUPERVISOR_TARGET -u FM_SUPERVISOR_BACKEND ORCA_TERMINAL_HANDLE=term_probe \
   bash bin/fm-afk-start.sh
 ```

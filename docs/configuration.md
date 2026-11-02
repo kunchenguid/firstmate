@@ -700,7 +700,7 @@ Target detection uses `FM_SUPERVISOR_TARGET`, then `$TMUX_PANE`, then `"${HERDR_
 The Orca signal and its version record live in [orca-backend.md](orca-backend.md#away-supervision).
 
 Selecting or discovering any other supervisor backend, including `hc`, `zellij`, `orca`, `cmux`, or `tern`, refuses at daemon startup instead of trying tmux injection primitives against a non-tmux pane.
-The daemon refuses at startup; `bin/fm-afk-launch.sh` `start` and `start-native` refuse before they write `state/.afk`, so `/afk` never reports armed for a session the daemon cannot inject into.
+`bin/fm-afk-launch.sh` `start` and `start-native` refuse the same backends before they write `state/.afk`, so `/afk` never reports armed for a session the daemon cannot inject into.
 At the launcher, a discovery that names no operator session at all refuses the same way rather than arming against the fallback.
 The launcher also checks that the resolved endpoint exists on its backend, using the same check the daemon makes at startup.
 
