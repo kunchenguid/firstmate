@@ -35,7 +35,10 @@ make_probe_root() {
   cat > "$probe_root/bin/fm-test-env-lib.sh" <<'SH'
 #!/usr/bin/env bash
 fm_test_env_isolate() {
-  printf '%s\t%s\n' "$FM_TEST_ENV_PROBE_SUITE" "$$" > "$FM_TEST_ENV_PROBE_MARKER"
+  local owner_pid
+  # Bash 3.2 lacks BASHPID; a child shell's PPID identifies this frame.
+  owner_pid=${BASHPID:-$(exec sh -c 'printf "%s\n" "$PPID"')} || exit 91
+  printf '%s\t%s\n' "$FM_TEST_ENV_PROBE_SUITE" "$owner_pid" > "$FM_TEST_ENV_PROBE_MARKER"
   exit "$FM_TEST_ENV_PROBE_EXIT_STATUS"
 }
 SH
@@ -202,13 +205,18 @@ set -u
   . "$(dirname "${BASH_SOURCE[0]}")/../bin/fm-test-env-lib.sh"
   fm_test_env_isolate
 )
+rc=$?
 printf 'PARENT_FM_HOME=%s\n' "$FM_HOME"
+printf 'FORWARDED_STATUS=%s\n' "$rc"
+exit "$rc"
 SH
   probe_suite_reaches_owner "$probe_root" "$probe" \
     && fail "the probe accepted isolation that executed only inside a subshell"
   assert_present "$marker" "the subshell decoy never reached the owner"
   assert_contains "$(cat "$output")" "PARENT_FM_HOME=$probe_root/live-home-sentinel/subshell-decoy.test.sh/FM_HOME" \
     "the subshell decoy did not prove that its parent retained the fleet pointer"
+  assert_contains "$(cat "$output")" "FORWARDED_STATUS=$PROBE_EXIT_STATUS" \
+    "the subshell decoy did not forward the isolation status"
   pass "the probe rejects isolation that leaves the top-level shell exposed"
 }
 
