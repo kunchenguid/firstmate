@@ -827,24 +827,26 @@ test_scan_reports_a_refusal_once_and_retries() {
   pass "the scan reports a refused registration once and records the PR on a later retry"
 }
 
-# A task already refused for its URL is retried after every task not yet
-# refused, so a slow retry cannot use the whole budget ahead of a new report.
-test_scan_tries_new_reports_before_refused_retries() {
+# A refused task whose draft is now ready is recorded within two sweeps even
+# when a hanging registration sorts ahead of it and takes the first sweep.
+test_scan_retries_refused_task_behind_a_hanging_registration() {
   local dir state
-  dir=$(make_case scan-new-before-refused)
+  dir=$(make_case scan-refused-behind-hang)
   state="$dir/home/state"
   write_task_meta "$dir" task-a
   printf '%s\n' 'done [at=2]: PR https://github.com/o/r/pull/9 checks green' > "$state/task-a.status"
-  printf '%s\n' 'https://github.com/o/r/pull/9' > "$state/task-a.pr-register-refused"
   write_task_meta "$dir" task-b
   printf '%s\n' 'done [at=2]: PR https://github.com/o/r/pull/20 checks green' > "$state/task-b.status"
+  printf '%s\n' 'https://github.com/o/r/pull/20' > "$state/task-b.pr-register-refused"
 
   FM_CHECK_TIMEOUT=15 FM_TEST_GH_SLOW_URL=pull/9 run_check_entry "$dir" scan > /dev/null 2> "$dir/stderr" \
-    || fail "the scan failed: $(cat "$dir/stderr")"
+    || fail "the first scan failed: $(cat "$dir/stderr")"
+  FM_CHECK_TIMEOUT=15 FM_TEST_GH_SLOW_URL=pull/9 run_check_entry "$dir" scan > /dev/null 2> "$dir/stderr" \
+    || fail "the second scan failed: $(cat "$dir/stderr")"
   grep -qxF 'pr=https://github.com/o/r/pull/20' "$state/task-b.meta" \
-    || fail "a new report was starved by an earlier refused retry"
-  ! grep -q '^pr=' "$state/task-a.meta" || fail "the slow refused task was recorded"
-  pass "the scan records a new report before retrying a refused one"
+    || fail "a refused task was starved by a hanging registration"
+  [ ! -e "$state/task-b.pr-register-refused" ] || fail "a recorded PR kept its refusal marker"
+  pass "the scan retries a refused task within two sweeps despite a hanging registration"
 }
 
 # A registration that hangs takes the whole budget of one sweep, and the next
@@ -4054,7 +4056,7 @@ test_unpushed_named_head_refuses_registration
 test_direct_pr_unpushed_commit_refuses_registration
 test_scan_records_a_pr_reported_in_a_done_line
 test_scan_reports_a_refusal_once_and_retries
-test_scan_tries_new_reports_before_refused_retries
+test_scan_retries_refused_task_behind_a_hanging_registration
 test_scan_rotates_past_a_hanging_registration
 test_watcher_sweep_records_a_reported_pr
 test_valid_recording_and_merge_derivation

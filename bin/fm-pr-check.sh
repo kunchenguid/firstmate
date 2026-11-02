@@ -33,10 +33,10 @@
 # path above, so every refusal still applies. A refusal prints one line naming
 # the task, the URL, and the reason, once per task and URL
 # (state/<task>.pr-register-refused), and the scan retries silently on later
-# sweeps after every task not yet refused for its URL, so a draft later marked
-# ready is recorded without help. Each list starts one task later on every sweep
-# (state/.pr-check-scan-cursor), so a registration that hangs cannot take the
-# whole budget on every sweep. Registrations
+# sweeps, so a draft later marked ready is recorded without help. Each sweep
+# starts just after the last task the previous sweep attempted
+# (state/.pr-check-scan-cursor), so a registration that hangs or is refused
+# cannot take the whole budget on every sweep. Registrations
 # stop FM_CHECK_TIMEOUT (default 30) minus 5 seconds after the scan starts; a
 # registration cut at that bound prints nothing and is retried.
 # Usage: fm-pr-check.sh <task-id> <pr-url>
@@ -82,12 +82,12 @@ pr_check_reported_url() {  # <status-file>
   printf '%s\n' "$found"
 }
 
-pr_check_rotate() {  # <offset>: shift the lines on stdin left by offset, wrapping
-  awk -v k="$1" 'NF { a[++n] = $0 } END { for (i = 0; i < n; i++) print a[(i + k) % n + 1] }'
+pr_check_rotate() {  # <last-id>: start the lines on stdin just after the line for last-id, wrapping
+  awk -v last="$1" '{ a[NR] = $0; split($0, f, " "); if (f[1] == last) s = NR } END { for (i = 0; i < NR; i++) print a[(i + s) % NR + 1] }'
 }
 
 pr_check_scan() {
-  local budget start meta id kind url left marker err rc tmp fresh= retry= cursor_file cursor
+  local budget start meta id kind url left marker err rc tmp candidates= cursor_file cursor
   budget=${FM_CHECK_TIMEOUT:-30}
   case "$budget" in ''|*[!0-9]*) budget=30 ;; esac
   budget=$((budget - 5))
@@ -102,24 +102,17 @@ pr_check_scan() {
     kind=$(sed -n 's/^kind=//p' "$meta" | tail -1)
     case "$kind" in secondmate|scout) continue ;; esac
     url=$(pr_check_reported_url "$STATE/$id.status") || continue
-    marker="$STATE/$id.pr-register-refused"
-    if [ -f "$marker" ] && [ ! -L "$marker" ] && [ "$(cat "$marker")" = "$url" ]; then
-      retry="$retry$id $url"$'\n'
-    else
-      fresh="$fresh$id $url"$'\n'
-    fi
+    candidates="$candidates$id $url"$'\n'
   done
   cursor_file="$STATE/.pr-check-scan-cursor"
   cursor=$(cat "$cursor_file" 2>/dev/null || true)
-  case "$cursor" in ''|*[!0-9]*) cursor=0 ;; esac
-  printf '%s\n' "$((cursor + 1))" > "$cursor_file" 2>/dev/null || true
-  fresh=$(printf '%s' "$fresh" | pr_check_rotate "$cursor")
-  retry=$(printf '%s' "$retry" | pr_check_rotate "$cursor")
+  candidates=$(printf '%s' "$candidates" | pr_check_rotate "$cursor")
   while IFS=' ' read -r id url; do
     [ -n "$id" ] || continue
     left=$((start + budget - $(date +%s)))
     [ "$left" -gt 0 ] || break
     marker="$STATE/$id.pr-register-refused"
+    printf '%s\n' "$id" > "$cursor_file" 2>/dev/null || true
     rc=0
     err=$(fm_run_timed "$left" bash "$SCRIPT_DIR/fm-pr-check.sh" "$id" "$url" 2>&1 >/dev/null) || rc=$?
     if [ "$rc" -eq 0 ]; then
@@ -138,8 +131,7 @@ pr_check_scan() {
     err=$(printf '%s\n' "$err" | sed -n 's/^error: //p' | head -1)
     printf '%s reported %s in a done line, but it was not recorded: %s\n' "$id" "$url" "${err:-registration failed}"
   done <<EOF_SCAN
-$fresh
-$retry
+$candidates
 EOF_SCAN
 }
 
