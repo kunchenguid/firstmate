@@ -463,7 +463,6 @@ case "$SECONDMATE_LIVENESS_WINDOW_SECS" in ''|*[!0-9]*|0) SECONDMATE_LIVENESS_WI
 # invisibly - except an item held for the captain while the away-posture record
 # exists, which is never rechecked (away_record_present below).
 PAUSE_RESURFACE_SECS=${FM_PAUSE_RESURFACE_SECS:-$FM_PAUSE_RESURFACE_SECS_DEFAULT}
-PAUSE_UNDATED_MAX_SECS=${FM_PAUSE_UNDATED_MAX_SECS:-$FM_PAUSE_UNDATED_MAX_SECS_DEFAULT}
 # A declared wait that names WHEN it clears (`paused: ... until <UTC ISO 8601>`,
 # status_paused_until in fm-classify-lib.sh) is condition-aware: it is not
 # rechecked before that time, and it is rechecked once as soon as that time
@@ -1530,22 +1529,21 @@ _wedge_cap_rollback() {
 # declared `until` time that has just passed re-surface at once), while the
 # throttle keeps the cadence between repeats.
 resurface_absorbed() {  # <window> <throttle-marker> <age> <reason> [scope] [min-age] [status-file] [blocked-line] [overdue-marker]
-  local win=$1 throttle=$2 age=$3 reason=$4 scope=${5-} min_age=${6:-$PAUSE_RESURFACE_SECS} statusf=${7-} blocked_line=${8-} overdue_marker=${9-} append_rc size
+  local win=$1 throttle=$2 age=$3 reason=$4 scope=${5-} min_age=${6:-$PAUSE_RESURFACE_SECS} statusf=${7-} blocked_line=${8-} overdue_marker=${9-} snapshot=${10-} append_rc task
   if [ -z "$scope" ] || [ ! -e "$throttle" ] \
     || [ "$(cat "$throttle" 2>/dev/null || true)" = "$scope" ]; then
     [ "$age" -ge "$min_age" ] || return 0
     [ "$(age_of "$throttle")" -ge "$PAUSE_RESURFACE_SECS" ] || return 0   # 999999 when no prior re-surface
   fi
   if [ -n "$blocked_line" ]; then
-    blocked_line=$(status_stamp_line "$blocked_line") || exit 1
+    task=${overdue_marker##*/}; task=${task#.paused-overdue-}
+    fm_overdue_marker_publish "$STATE" "$task" "$snapshot" || return 0
     fm_wake_status_append_self_announced "$STATE" "$statusf" "$blocked_line"; append_rc=$?
-    [ "$append_rc" -eq 0 ] || [ "$append_rc" -eq 1 ] || exit 1
-    size=$(LC_ALL=C awk -v target="$blocked_line" '
-      { end = offset + length($0) + 1; if ($0 == target) found = end; offset = end }
-      END { if (found) print found; else exit 1 }
-    ' "$statusf") || exit 1
-    case "$size" in ''|*[!0-9]*) exit 1 ;; esac
-    printf '%s:%s\n' "$(stat_devino "$statusf")" "$size" > "$overdue_marker"
+    if [ "$append_rc" -ne 0 ] && [ "$append_rc" -ne 1 ]; then
+      rm -f "$overdue_marker"
+      exit 1
+    fi
+    pause_overdue_reconcile "$task" "$statusf" || return 0
   fi
   fm_wake_append stale "$win" "$reason" || exit 1
   if [ -n "$scope" ]; then printf '%s' "$scope" > "$throttle"; else date +%s > "$throttle"; fi
@@ -2461,7 +2459,7 @@ busy_stream_snapshot_current() {  # <task> <observed snapshot>
 # wording; a caller that reached the bounded cadence off pause tracking alone, with
 # no declaring verb left on the log, keeps the external-wait wording it always had.
 handle_paused_stale() {  # <window> <task> <hash>
-  local win=$1 task=$2 h=$3 key statusf mtime age detail reason declaration last until now min_age rc
+  local win=$1 task=$2 h=$3 key statusf mtime age detail reason declaration last until now min_age rc snapshot
   key=$(window_key "$win")
   pause_overdue_reconcile "$task" "$STATE/$task.status"; rc=$?
   if [ "$rc" -eq 0 ]; then
@@ -2473,6 +2471,7 @@ handle_paused_stale() {  # <window> <task> <hash>
   wedge_episode_end "$key"
   clear_write_tracking "$key"
   statusf="$STATE/$task.status"
+  snapshot="$(stat_devino "$statusf"):$(_fm_status_file_size "$statusf")"
   mtime=$(stat_mtime "$statusf")
   case "$mtime" in ''|*[!0-9]*) mtime=$(date +%s) ;; esac
   now=$(date +%s)
@@ -2512,7 +2511,7 @@ handle_paused_stale() {  # <window> <task> <hash>
     reason="paused ${age}s, awaiting external - declared pause, rechecked on a long cadence not a wedge; confirm the wait still holds"
   fi
   if [ "$detail" = "paused, wait overdue" ]; then
-    resurface_absorbed "$win" "$STATE/.paused-resurfaced-$key" "$age" "stale: $win ($reason)" "$declaration" "$min_age" "$statusf" "blocked [key=paused-overdue-$task]: paused ${age}s, wait overdue - decide or release" "$STATE/.paused-overdue-$task"
+    resurface_absorbed "$win" "$STATE/.paused-resurfaced-$key" "$age" "stale: $win ($reason)" "$declaration" "$min_age" "$statusf" "blocked [key=paused-overdue-$task]: paused ${age}s, wait overdue - decide or release" "$STATE/.paused-overdue-$task" "$snapshot"
   else
     resurface_absorbed "$win" "$STATE/.paused-resurfaced-$key" "$age" "stale: $win ($reason)" "$declaration" "$min_age"
   fi
@@ -2545,6 +2544,11 @@ busy_turn_bound_check() {  # <window> <task> <hash> <since-file> <escalation-fil
   local win=$1 task=$2 h=$3 since_file=$4 escalation_file=$5 dialog=${6-} key statusf declared
   local stream_episode stream_snapshot=$BUSY_STREAM_SNAPSHOT label="busy (no completed turn)"
   statusf="$STATE/$task.status"
+  if pause_overdue_reconcile "$task" "$statusf"; then
+    wedge_episode_end "$(window_key "$win")"
+    clear_write_tracking "$(window_key "$win")"
+    return 0
+  fi
   if status_is_paused_or_captain_held "$(status_declared_wait_line "$statusf")"; then
     if afk_present; then
       # Away mode is daemon-owned, so this bound hands off the PLAIN wake identity
@@ -2660,10 +2664,8 @@ clear_pause_tracking() {  # <window-key>
 }
 
 # Keep the overdue decision open until the worker appends another status event.
-# The marker stores the byte offset immediately after the watcher's own blocked
-# line, so later checks read only status events written after that decision.
 pause_overdue_reconcile() {  # <task> <status-file> -> 0 unchanged, 1 cleared or absent
-  local task=$1 statusf=$2 marker="$STATE/.paused-overdue-$1" identity offset actual added line verb key append_rc resume=0
+  local task=$1 statusf=$2 marker="$STATE/.paused-overdue-$1" identity marker_identity offset actual added line verb key append_rc resume=0
   [ -f "$marker" ] || return 1
   [ -f "$statusf" ] || { rm -f "$marker"; return 1; }
   identity=$(stat_devino "$statusf") || return 0
@@ -2683,6 +2685,10 @@ pause_overdue_reconcile() {  # <task> <status-file> -> 0 unchanged, 1 cleared or
       resolved)
         key=$(_fm_decision_key "$line" '') || key=''
         [ "$key" = "paused-overdue-$task" ] && { rm -f "$marker"; return 1; }
+        ;;
+      blocked)
+        key=$(_fm_decision_key "$line" '') || key=''
+        [ "$key" = "paused-overdue-$task" ] || resume=1
         ;;
       *) resume=1 ;;
     esac
@@ -2719,18 +2725,12 @@ pause_state_class() {  # <window> <task>
   if [ "$rc" -eq 0 ]; then printf 'paused'; return; fi
   last=$(status_declared_wait_line "$statusf")
   recheck_file="$STATE/.paused-rechecked-$key"
-  if status_is_paused_or_captain_held "$last"; then
-    local mtime now age undated_max
+  if status_is_paused "$last"; then
+    local mtime now age
     mtime=$(stat_mtime "$statusf"); now=$(date +%s)
     case "$mtime" in ''|*[!0-9]*) mtime=$now ;; esac
     age=$(( now - mtime ))
-    if status_is_paused "$last"; then
-      status_pause_is_overdue "$last" "$age" "$now" && { printf 'paused'; return; }
-    else
-      undated_max=$PAUSE_UNDATED_MAX_SECS
-      case "$undated_max" in ''|*[!0-9]*) undated_max=$FM_PAUSE_UNDATED_MAX_SECS_DEFAULT ;; esac
-      [ "$age" -gt "$undated_max" ] && { printf 'paused'; return; }
-    fi
+    status_pause_is_overdue "$last" "$age" "$now" && { printf 'paused'; return; }
   fi
   if ! status_is_paused_or_captain_held "$last"; then
     rm -f "$recheck_file"

@@ -384,8 +384,10 @@ classify_signal() {  # <reason-after-colon> <state>
     case "$f" in *.status) ;; *) continue ;; esac
     [ -e "$f" ] || [ -L "$f" ] || continue
     task=$(basename "$f"); task="${task%.status}"
+    reconcile_overdue_pause "$state" "$task" || true
     record=$(status_span_first_actionable_record "$f" \
-      "$(status_seen_offset "$state" "$task")")
+      "$(status_seen_offset "$state" "$task")" '' '' \
+      "$(overdue_daemon_key "$state" "$task")")
     rc=$?
     [ "$rc" -eq 1 ] && [ -z "$record" ] && continue
     if [ "$rc" -eq 2 ]; then
@@ -437,8 +439,10 @@ classify_stale() {  # <window> <state> [<span-record> <span-status>]
   local win=$1 state=$2 record=${3-} rc=${4-} task last declared event rest
   task=$(window_to_task "$win" "$state")
   if [ -z "$rc" ]; then
+    reconcile_overdue_pause "$state" "$task" || true
     record=$(status_span_first_actionable_record "$state/$task.status" \
-      "$(status_seen_offset "$state" "$task")")
+      "$(status_seen_offset "$state" "$task")" '' '' \
+      "$(overdue_daemon_key "$state" "$task")")
     rc=$?
   fi
   last=$(last_status_line "$state/$task.status")
@@ -1351,27 +1355,32 @@ _oldest_line_age() {  # <buf> -> seconds since the oldest buffered item first ar
 #     the block below and escalate what it finds; that block owns its file set.
 reconcile_overdue_pause() {  # <state> <task> -> reconcile worker events after overdue decision
   local state=$1 task=$2 statusf="$1/$2.status" marker="$1/.paused-overdue-$2" identity marker_identity offset size added line verb key resume=0 rc
-  [ -f "$marker" ] && [ -f "$statusf" ] || return 0
+  [ -f "$marker" ] || return 1
+  [ -f "$statusf" ] || return 2
   if [ "$(uname)" = Darwin ]; then
-    identity=$(/usr/bin/stat -f '%d %i' "$statusf" 2>/dev/null) || return 0
+    identity=$(/usr/bin/stat -f '%d %i' "$statusf" 2>/dev/null) || return 2
   else
-    identity=$(stat -c '%d %i' "$statusf" 2>/dev/null) || return 0
+    identity=$(stat -c '%d %i' "$statusf" 2>/dev/null) || return 2
   fi
-  IFS=: read -r marker_identity offset < "$marker" || [ -n "$offset" ] || { rm -f "$marker"; return 0; }
-  size=$(_fm_status_file_size "$statusf") || return 0
-  case "$offset:$size" in *[!0-9:]*) rm -f "$marker"; return 0 ;; esac
+  IFS=: read -r marker_identity offset < "$marker" || [ -n "$offset" ] || { rm -f "$marker"; return 1; }
+  size=$(_fm_status_file_size "$statusf") || return 2
+  case "$offset:$size" in *[!0-9:]*) rm -f "$marker"; return 1 ;; esac
   if [ "$identity" != "$marker_identity" ] || [ "$size" -lt "$offset" ]; then
-    rm -f "$marker"; return 0
+    rm -f "$marker"; return 1
   fi
   [ "$size" -gt "$offset" ] || return 0
-  added=$(_fm_status_read_span "$statusf" "$offset" "$((size - offset))") || return 0
+  added=$(_fm_status_read_span "$statusf" "$offset" "$((size - offset))") || return 2
   while IFS= read -r line || [ -n "$line" ]; do
     verb=$(status_line_verb "$line")
     case "$verb" in
       '') ;;
       resolved)
         key=$(_fm_decision_key "$line" '') || key=
-        [ "$key" = "paused-overdue-$task" ] && { rm -f "$marker" "$state/.overdue-pending-$task"; return 0; }
+        [ "$key" = "paused-overdue-$task" ] && { rm -f "$marker"; return 1; }
+        ;;
+      blocked)
+        key=$(_fm_decision_key "$line" '') || key=
+        [ "$key" = "paused-overdue-$task" ] || resume=1
         ;;
       *) resume=1 ;;
     esac
@@ -1381,48 +1390,46 @@ EOF
   [ "$resume" -eq 1 ] || return 0
   fm_wake_status_append_self_announced "$state" "$statusf" "resolved [key=paused-overdue-$task]: worker pause changed"
   rc=$?
-  [ "$rc" -eq 0 ] || [ "$rc" -eq 1 ] || return 0
-  rm -f "$marker" "$state/.overdue-pending-$task"
+  [ "$rc" -eq 0 ] || [ "$rc" -eq 1 ] || return 2
+  rm -f "$marker"
+  return 1
+}
+
+# The overdue marker's second line is the daemon's: the alert it still owes the
+# supervisor, or "delivered". Only that line hides the blocker from wake
+# classification: a marker without it is the watcher's, which proves nothing
+# reached the supervisor.
+overdue_daemon_key() {  # <state> <task>
+  [ -z "$(sed -n 2p "$1/.paused-overdue-$2" 2>/dev/null)" ] || printf 'paused-overdue-%s' "$2"
+}
+
+overdue_alert_deliver() {  # <state> <task> -> queue the alert the marker still owes
+  local state=$1 task=$2 marker="$1/.paused-overdue-$2" snapshot message size record rc identity
+  reconcile_overdue_pause "$state" "$task" || return 0
+  { IFS= read -r snapshot; IFS= read -r message; } < "$marker" || true
+  [ -n "$message" ] && [ "$message" != delivered ] || return 0
+  escalate_add "$state" "$message" || return 0
+  fm_overdue_marker_publish "$state" "$task" "$snapshot" delivered || return 0
+  size=$(LC_ALL=C awk -v prefix="blocked [key=paused-overdue-$task]" '
+    { end = offset + length($0) + 1; if (index($0, prefix) == 1) found = end; offset = end }
+    END { if (found) print found; else exit 1 }
+  ' "$state/$task.status") || return 0
+  record=$(status_span_first_actionable_record "$state/$task.status" \
+    "$(status_seen_offset "$state" "$task")" '' '' "paused-overdue-$task")
+  rc=$?
+  if [ "$rc" -eq 1 ]; then
+    identity=$(_fm_open_decisions_file_ident "$state/$task.status") || identity=
+    [ -n "$identity" ] && mark_status_seen "$state" "$task" "$size" "$identity" || true
+  fi
 }
 
 housekeeping() {  # <state>
-  local state=$1 now due f key task win marker age last max_defer oldest pause_secs marker_epoch until bounded_until pause_reason dialog_name persisted append_rc size identity seen_identity overdue_marker overdue_task pending_record pending_rc pending_file pending_identity pending_size pending_message pending_status_size pending_added pending_line pending_resumed pending_rc2
+  local state=$1 now due f key task win marker age last max_defer oldest pause_secs marker_epoch until bounded_until pause_reason dialog_name persisted append_rc size seen_identity overdue_marker overdue_task pause_identity pause_size
   now=$(_now)
   for overdue_marker in "$state"/.paused-overdue-*; do
     [ -f "$overdue_marker" ] || continue
     overdue_task=${overdue_marker##*/}; overdue_task=${overdue_task#.paused-overdue-}
-    reconcile_overdue_pause "$state" "$overdue_task"
-  done
-  for pending_file in "$state"/.overdue-pending-*; do
-    [ -f "$pending_file" ] || continue
-    overdue_task=${pending_file##*/}; overdue_task=${overdue_task#.overdue-pending-}
-    IFS=: read -r pending_identity pending_size < "$pending_file"
-    pending_message=$(sed -n '2p' "$pending_file")
-    if [ -z "$pending_identity" ] || [ -z "$pending_size" ] || [ -z "$pending_message" ]; then
-      rm -f "$pending_file"
-      continue
-    fi
-    pending_status_size=$(_fm_status_file_size "$state/$overdue_task.status") || continue
-    case "$pending_size:$pending_status_size" in *[!0-9:]*) rm -f "$pending_file"; continue ;; esac
-    if [ "$pending_status_size" -gt "$pending_size" ]; then
-      pending_added=$(_fm_status_read_span "$state/$overdue_task.status" "$pending_size" "$((pending_status_size - pending_size))") || continue
-      pending_resumed=0
-      while IFS= read -r pending_line || [ -n "$pending_line" ]; do
-        pending_rc2=$(status_line_verb "$pending_line")
-        case "$pending_rc2" in ''|paused) ;; *) pending_resumed=1; break ;; esac
-      done <<EOF
-$pending_added
-EOF
-      if [ "$pending_resumed" -eq 1 ]; then
-        fm_wake_status_append_self_announced "$state" "$state/$overdue_task.status" "resolved [key=paused-overdue-$overdue_task]: worker pause changed" >/dev/null
-        rm -f "$pending_file"
-        continue
-      fi
-    fi
-    if escalate_add "$state" "$pending_message"; then
-      printf '%s:%s\n' "$pending_identity" "$pending_size" > "$state/.paused-overdue-$overdue_task"
-      rm -f "$pending_file"
-    fi
+    overdue_alert_deliver "$state" "$overdue_task"
   done
   migrate_watcher_pause_markers "$state"
 
@@ -1524,6 +1531,12 @@ EOF
       rm -f "$marker"; continue
     fi
     task=$(window_to_task "$win" "$state")
+    if [ "$(uname)" = Darwin ]; then
+      pause_identity=$(/usr/bin/stat -f '%d %i' "$state/$task.status" 2>/dev/null) || continue
+    else
+      pause_identity=$(stat -c '%d %i' "$state/$task.status" 2>/dev/null) || continue
+    fi
+    pause_size=$(_fm_status_file_size "$state/$task.status") || continue
     last=$(status_declared_wait_line "$state/$task.status")
     if [ -z "$last" ] || ! status_is_paused_or_captain_held "$last"; then
       reconcile_pause_tracking "$win" "$state" "$last"
@@ -1542,34 +1555,16 @@ EOF
     status_age=$(( now - status_mtime ))
     if fm_afk_contract_present "$state" && status_is_paused "$last" && status_pause_is_overdue "$last" "$status_age" "$now"; then
       overdue_marker="$state/.paused-overdue-$task"
-      pending_file="$state/.overdue-pending-$task"
-      if [ ! -e "$overdue_marker" ] && [ ! -e "$pending_file" ]; then
+      if [ ! -e "$overdue_marker" ]; then
         blocked_line="blocked [key=paused-overdue-$task]: paused ${status_age}s, wait overdue - decide or release"
+        fm_overdue_marker_publish "$state" "$task" "$pause_identity:$pause_size" \
+          "stale: $win (paused ${status_age}s, wait overdue - decide or release)" || continue
         fm_wake_status_append_self_announced "$state" "$state/$task.status" "$blocked_line"; append_rc=$?
-        [ "$append_rc" -eq 0 ] || [ "$append_rc" -eq 1 ] || continue
-        size=$(LC_ALL=C awk -v prefix="blocked [key=paused-overdue-$task]" '
-          { end = offset + length($0) + 1; if (index($0, prefix) == 1) found = end; offset = end }
-          END { if (found) print found; else exit 1 }
-        ' "$state/$task.status") || continue
-        case "$size" in ''|*[!0-9]*) continue ;; esac
-        if [ "$(uname)" = Darwin ]; then
-          identity=$(/usr/bin/stat -f '%d %i' "$state/$task.status" 2>/dev/null)
-        else
-          identity=$(stat -c '%d %i' "$state/$task.status" 2>/dev/null)
+        if [ "$append_rc" -ne 0 ] && [ "$append_rc" -ne 1 ]; then
+          rm -f "$overdue_marker"
+          continue
         fi
-        pending_message="stale: $win (paused ${status_age}s, wait overdue - decide or release)"
-        printf '%s:%s\n%s\n' "$identity" "$size" "$pending_message" > "$pending_file"
-        if escalate_add "$state" "$pending_message"; then
-          printf '%s:%s\n' "$identity" "$size" > "$overdue_marker"
-          rm -f "$pending_file"
-          pending_record=$(status_span_first_actionable_record "$state/$task.status" \
-            "$(status_seen_offset "$state" "$task")" '' '' "paused-overdue-$task")
-          pending_rc=$?
-          if [ "$pending_rc" -eq 1 ]; then
-            seen_identity=$(_fm_open_decisions_file_ident "$state/$task.status") || seen_identity=
-            [ -n "$seen_identity" ] && mark_status_seen "$state" "$task" "$size" "$seen_identity" || true
-          fi
-        fi
+        overdue_alert_deliver "$state" "$task"
         _now > "$marker"
       fi
       continue
@@ -1639,7 +1634,7 @@ EOF
       task=$(basename "$f"); task="${task%.status}"
       record=$(status_span_first_actionable_record "$f" \
         "$(status_seen_offset "$state" "$task")" '' '' \
-        "$( [ -f "$state/.paused-overdue-$task" ] && printf 'paused-overdue-%s' "$task" )")
+        "$(overdue_daemon_key "$state" "$task")")
       rc=$?
       if [ "$rc" -eq 2 ]; then
         ident=$(status_observed_signature "$f")
@@ -1874,8 +1869,10 @@ handle_wake() {  # <reason> <state>
               dialog_name=$(stale_dialog_name "$stale_detail") || dialog_name=''
               task=$(window_to_task "$arg" "$state")
               if [ -n "$task" ]; then
+                reconcile_overdue_pause "$state" "$task" || true
                 span_record=$(status_span_first_actionable_record "$state/$task.status" \
-                  "$(status_seen_offset "$state" "$task")")
+                  "$(status_seen_offset "$state" "$task")" '' '' \
+                  "$(overdue_daemon_key "$state" "$task")")
                 span_rc=$?
                 case "$span_rc" in
                   0|1)

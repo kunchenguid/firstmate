@@ -1374,24 +1374,56 @@ test_paused_until_that_passed_is_rechecked_before_the_cadence() {
   pass "a declared wait whose until time has passed is rechecked at once, then held to the cadence"
 }
 
-test_overdue_resume_race_uses_block_line_offset() {
+test_overdue_resume_race_uses_pause_snapshot() {
+  local dir state statusf timing
+  for timing in before after; do
+    dir=$(paused_until_fixture "overdue-resume-race-$timing" "$(( $(date +%s) - 90000 ))" 90000); state="$dir/state"; statusf="$state/until.status"
+    FM_STATE_OVERRIDE="$state" FM_HOME="$dir" FM_PAUSE_UNDATED_MAX_SECS=1 bash -c '
+      . "$1"
+      original_append=$(declare -f fm_wake_status_append_self_announced)
+      eval "${original_append/fm_wake_status_append_self_announced ()/original_append_impl ()}"
+      fm_wake_status_append_self_announced() {
+        case "$3" in blocked*)
+          [ "$timing" != before ] || printf "working: resumed\n" >> "$2"
+          original_append_impl "$@"
+          [ "$timing" != after ] || printf "working: resumed\n" >> "$2"
+          return 1 ;;
+        esac
+        original_append_impl "$@"
+      }
+      timing=$3
+      handle_paused_stale test:fm-until until hash
+      [ ! -s "$STATE/.wake-queue" ] || exit 1
+      [ ! -e "$STATE/.paused-overdue-until" ] || exit 1
+      [ -z "$(status_open_decisions "$2")" ] || exit 1
+      grep -Fq "resolved [key=paused-overdue-until]" "$2"
+    ' _ "$WATCH" "$statusf" "$timing" || fail "initial overdue publication missed a resume ($timing)"
+  done
+  pass "overdue publication reconciles resumes before or after the blocker append without a stale alert"
+}
+
+test_busy_overdue_pause_does_not_enter_wedge_ladder() {
   local dir state statusf
-  dir=$(paused_until_fixture overdue-resume-race "" 90000); state="$dir/state"; statusf="$state/overdue-resume-race.status"
-  printf 'paused: waiting for an external dependency\n' > "$statusf"
-  FM_STATE_OVERRIDE="$state" FM_HOME="$dir" bash -c '
+  dir=$(paused_until_fixture busy-overdue "$(( $(date +%s) - 90000 ))" 90000); state="$dir/state"; statusf="$state/until.status"
+  FM_STATE_OVERRIDE="$state" FM_HOME="$dir" FM_PAUSE_UNDATED_MAX_SECS=1 bash -c '
     . "$1"
-    fm_wake_append() { :; }
     wake() { :; }
-    resurface_absorbed test:fm-until "$STATE/.paused-resurfaced-overdue-resume-race" 0 overdue "" 0 "$2" \
-      "blocked [key=paused-overdue-overdue-resume-race]: paused 90000s, wait overdue - decide or release" \
-      "$STATE/.paused-overdue-overdue-resume-race"
-    printf "working: resumed\\n" >> "$2"
-    pause_overdue_reconcile overdue-resume-race "$2"
-    [ "$?" -eq 1 ] || exit 1
-    [ ! -e "$STATE/.paused-overdue-overdue-resume-race" ] || exit 1
-    grep -Fq "resolved [key=paused-overdue-overdue-resume-race]" "$2"
-  ' _ "$WATCH" "$statusf" || fail "a resume appended just after the blocked line was not closed using the recorded byte boundary"
-  pass "a resume racing the overdue marker write closes the decision after the watcher blocked line"
+    key=$(window_key test:fm-until)
+    since="$STATE/.stale-since-$key"; escalations="$STATE/.escalated-$key"
+    busy_turn_bound_check test:fm-until until first "$since" "$escalations" || exit 1
+    status_open_decisions "$2" | grep -Fq paused-overdue-until || exit 1
+    before=$(wc -l < "$STATE/.wake-queue")
+    busy_turn_bound_check test:fm-until until second "$since" "$escalations" || exit 1
+    busy_turn_bound_check test:fm-until until third "$since" "$escalations" || exit 1
+    [ "$(wc -l < "$STATE/.wake-queue")" = "$before" ] || exit 1
+    [ ! -e "$since" ] && [ ! -e "$escalations" ] || exit 1
+    printf "working: resumed\n" >> "$2"
+    STALE_ESCALATE_SECS=999999
+    busy_turn_bound_check test:fm-until until resumed "$since" "$escalations"
+    [ "$?" -eq 1 ] && [ -e "$since" ] || exit 1
+    [ -z "$(status_open_decisions "$2")" ]
+  ' _ "$WATCH" "$statusf" || fail "busy overdue pause repeated a wake or lost normal wedge tracking after resume"
+  pass "busy overdue decisions suppress wedge alerts until a worker event, then restore ordinary tracking"
 }
 
 test_overdue_marker_survives_reconcile_and_closes_on_working() {
@@ -1405,7 +1437,7 @@ test_overdue_marker_survives_reconcile_and_closes_on_working() {
     wake() { :; }
     resurface_absorbed test:fm-overdue "$STATE/.paused-resurfaced-overdue-marker-eof" 90000 overdue "" 0 "$2" \
       "blocked [key=paused-overdue-overdue-marker-eof]: paused 90000s, wait overdue - decide or release" \
-      "$STATE/.paused-overdue-overdue-marker-eof"
+      "$STATE/.paused-overdue-overdue-marker-eof" "$(stat_devino "$2"):$(_fm_status_file_size "$2")"
     [ -s "$STATE/.paused-overdue-overdue-marker-eof" ] || exit 1
     pause_overdue_reconcile overdue-marker-eof "$2"; [ "$?" -eq 0 ] || exit 1
     printf "needs-decision: captain input required\n" >> "$2"
@@ -1448,7 +1480,7 @@ test_reused_task_id_does_not_inherit_overdue_pause() {
     fm_wake_status_append_self_announced() { printf "%s\n" "$3" >> "$2"; }
     fm_wake_append() { :; }
     wake() { :; }
-    resurface_absorbed test:fm-until "$STATE/.paused-resurfaced-reused" 90000 overdue "" 0 "$2" "blocked [key=paused-overdue-until]: paused 90000s, wait overdue - decide or release" "$STATE/.paused-overdue-until"
+    resurface_absorbed test:fm-until "$STATE/.paused-resurfaced-reused" 90000 overdue "" 0 "$2" "blocked [key=paused-overdue-until]: paused 90000s, wait overdue - decide or release" "$STATE/.paused-overdue-until" "$(stat_devino "$2"):$(_fm_status_file_size "$2")"
     mv "$2" "$2.retired"
     printf "working: fresh task\n" > "$2"
     result=$(pause_state_class test:fm-until until)
@@ -1643,7 +1675,8 @@ fm_test_run \
   test_paused_until_near_future_is_quiet_before_the_cadence \
   test_paused_until_wrong_year_is_bounded_by_the_cadence \
   test_paused_until_that_passed_is_rechecked_before_the_cadence \
-  test_overdue_resume_race_uses_block_line_offset \
+  test_overdue_resume_race_uses_pause_snapshot \
+  test_busy_overdue_pause_does_not_enter_wedge_ladder \
   test_overdue_marker_survives_reconcile_and_closes_on_working \
   test_overdue_terminal_status_ignores_pane_display_churn \
   test_reused_task_id_does_not_inherit_overdue_pause \
