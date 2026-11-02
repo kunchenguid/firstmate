@@ -353,6 +353,14 @@ HEARTBEAT=${FM_HEARTBEAT:-600}        # base seconds between heartbeat scans
 HEARTBEAT_MAX=${FM_HEARTBEAT_MAX:-7200}  # heartbeat backoff cap
 CHECK_INTERVAL=${FM_CHECK_INTERVAL:-300}  # seconds between *.check.sh sweeps
 CHECK_TIMEOUT=${FM_CHECK_TIMEOUT:-30}     # seconds allowed per *.check.sh
+# Read budget for the watched-pane probe and, separately, initial Herdr event
+# reconciliation when watches are present. Both use watcher_waited's bounded
+# group; reconciliation releases its bound before waiting for stream events.
+# docs/configuration.md owns the operator-facing budget and retry contract.
+FM_WATCHED_PANE_READ_SECS=${FM_WATCHED_PANE_READ_SECS:-5}
+case "$FM_WATCHED_PANE_READ_SECS" in
+  ''|*[!0-9]*|0) FM_WATCHED_PANE_READ_SECS=5 ;;
+esac
 HOME_SUMMARY_INTERVAL=${FM_HOME_SUMMARY_INTERVAL:-300}
 case "$HOME_SUMMARY_INTERVAL" in
   ''|*[!0-9]*|0) HOME_SUMMARY_INTERVAL=300 ;;
@@ -479,6 +487,7 @@ EVENT_CAP_FAIL_MAX=${FM_EVENT_CAP_FAIL_MAX:-3}
 _event_cap_key=""
 _event_cap_ok=0
 _event_cap_fails=0
+_watched_pane_start=0
 
 # afk_present: 0 while the away-mode flag exists. When set, the daemon wraps this
 # watcher and owns triage, so the watcher must behave one-shot (enqueue + exit on
@@ -3242,7 +3251,7 @@ fm_capture_output_cleanup() {
 # watcher_cleanup stops one still in flight. Its own setup failures return 2,
 # which the event wait reads as an unusable event path (sleep the budget).
 watcher_waited() {  # <command...>
-  local rc pgid
+  local rc pgid bound_pid=
   fm_capture_output_cleanup
   WATCHER_CAPTURE=
   FM_CAPTURE_OUTPUT=$(mktemp "$STATE/.fm-capture-output.XXXXXX") || return 2
@@ -3264,8 +3273,30 @@ watcher_waited() {  # <command...>
     fm_capture_output_cleanup
     return 2
   fi
+  # WATCHER_WAIT_BOUND_SECS (optional, env-prefixed per call): kill the group
+  # once the bounded command runs past that many seconds, so a waited call
+  # whose own work has no internal deadline still cannot stall the cycle.
+  # The watchdog is a sibling of the waited group, never its member, and the
+  # bound's TERM-then-KILL reaches a hung read exactly like a stop does.
+  case "${WATCHER_WAIT_BOUND_SECS:-}" in
+    ''|*[!0-9]*|0) ;;
+    *)
+      (
+        command sleep "$WATCHER_WAIT_BOUND_SECS" || exit 0
+        [ -z "${WATCHER_WAIT_BOUND_DONE:-}" ] || [ ! -e "$WATCHER_WAIT_BOUND_DONE" ] || exit 0
+        kill -TERM -- "-$FM_ACTIVE_CHECK_PGID" 2>/dev/null || true
+        command sleep 1
+        kill -KILL -- "-$FM_ACTIVE_CHECK_PGID" 2>/dev/null || true
+      ) >/dev/null 2>&1 &
+      bound_pid=$!
+      ;;
+  esac
   wait "$FM_ACTIVE_CHECK_PID"
   rc=$?
+  if [ -n "$bound_pid" ]; then
+    kill "$bound_pid" 2>/dev/null || true
+    wait "$bound_pid" 2>/dev/null || true
+  fi
   FM_ACTIVE_CHECK_PID=
   fm_active_check_stop || { fm_capture_output_cleanup; return 2; }
   WATCHER_CAPTURE=$(cat "$FM_CAPTURE_OUTPUT" 2>/dev/null || true)
@@ -3410,9 +3441,50 @@ heartbeat_scan_finds_actionable() {
 # a second watcher, so every guard/beacon/arm/turn-end mechanism is unchanged.
 event_wait_or_sleep() {
   local w b session first_backend="" first_session="" rec rc
-  local windows=() t3_windows=()
+  local label notify status probe read_bound='' windows=() t3_windows=()
+  # Pane watches are opt-in: a home with no non-empty watched-panes registry must
+  # behave exactly as it did before the feature, so the probe, its waited
+  # process group, and its bound watchdog stay off entirely.
+  FM_WATCHED_PANES=
+  # shellcheck disable=SC2034 # Read by fm_watch_pane_lock_current in bin/fm-watch-pane-lib.sh, reached through the backend's dynamic lib list.
+  FM_WATCHED_PANES_IDENTITY=
+  if [ -s "$STATE/watched-panes" ]; then
+    # Refresh label identities before each bounded wait. These panes have no
+    # task status logs, so level polling is also their backstop when push is
+    # unavailable or another backend/session owns this cycle's single
+    # multiplexed connection. The label resolution and per-pane status reads
+    # run as ONE waited, bounded group: a slow read then sits inside the
+    # recorded child group watcher cleanup can stop, never holds a stop signal
+    # inside a command substitution (watcher_waited), and cannot run past its
+    # read budget (FM_WATCHED_PANE_READ_SECS). Rows a killed or failed probe
+    # never reached are simply retried on the next cycle. Rotate the first
+    # registration so a persistently hung early read cannot starve later
+    # watches.
+    # shellcheck disable=SC2034 # Read by fm_watch_pane_lock_current in bin/fm-watch-pane-lib.sh, reached through the backend's dynamic lib list.
+    FM_WATCHED_PANES_IDENTITY=$(fm_watch_pane_registry_identity "$STATE") || FM_WATCHED_PANES_IDENTITY=
+    WATCHER_WAIT_BOUND_SECS=$FM_WATCHED_PANE_READ_SECS \
+      watcher_waited fm_watch_pane_probe "$STATE" "$_watched_pane_start" || true
+    _watched_pane_start=$((_watched_pane_start + 1))
+    probe=$WATCHER_CAPTURE
+    if [ -n "$probe" ]; then
+      # The probe read in its own process; load its backend in this one too,
+      # including homes with only operator watches and no task metadata.
+      fm_backend_source herdr || probe=
+    fi
+    while IFS=$'\t' read -r w label notify status; do
+      [ -n "$w" ] && [ -n "$label" ] && [ -n "$notify" ] || continue
+      FM_WATCHED_PANES="${FM_WATCHED_PANES}${w}"$'\t'"${label}"$'\t'"${notify}"$'\n'
+      [ -n "$status" ] || continue
+      session=${w%%:*}
+      rec=$(fm_backend_herdr_normalize_event "${w#*:}" "" "$status" "")
+      if fm_backend_herdr_apply_transition "$STATE" "$session" "$rec" >/dev/null; then
+        handle_push_transition herdr "$session" "$rec"
+      fi
+    done <<< "$probe"
+  fi
   while IFS= read -r w; do
     b=$(window_backend "$w")
+    [ -z "$(fm_watch_pane_lookup "$w")" ] || b=herdr
     fm_backend_has_push "$b" || continue
     # Secondmate endpoints are supervised via status writes, not pane/agent
     # state (an idle or blocked secondmate agent pane is healthy by design), so
@@ -3434,7 +3506,7 @@ event_wait_or_sleep() {
       continue
     fi
     windows+=("$w")
-  done < <(recorded_windows)
+  done < <({ recorded_windows; printf '%s\n' "$FM_WATCHED_PANES" | cut -f1; } | awk 'NF && !seen[$0]++')
   if [ "${#windows[@]}" -eq 0 ] && [ "${#t3_windows[@]}" -gt 0 ]; then
     first_backend=t3code
     first_session=$(fm_backend_event_session t3code "${t3_windows[0]}")
@@ -3466,7 +3538,13 @@ event_wait_or_sleep() {
   # signal for all of it (watcher_waited).
   fm_wait_tmp_cleanup
   WATCHER_WAIT_TMP=$(mktemp -d "${TMPDIR:-/tmp}/fm-watch-wait.XXXXXX") || WATCHER_WAIT_TMP=
-  TMPDIR=${WATCHER_WAIT_TMP:-${TMPDIR:-/tmp}} FM_BACKEND_EVENTS_CAPABILITY_CONFIRMED=1 watcher_waited \
+  if [ "$first_backend" = herdr ] && [ -n "$FM_WATCHED_PANES" ]; then
+    [ -n "$WATCHER_WAIT_TMP" ] || return 2
+    read_bound=$FM_WATCHED_PANE_READ_SECS
+  fi
+  TMPDIR=${WATCHER_WAIT_TMP:-${TMPDIR:-/tmp}} FM_BACKEND_EVENTS_CAPABILITY_CONFIRMED=1 \
+    WATCHER_WAIT_BOUND_SECS=$read_bound \
+    WATCHER_WAIT_BOUND_DONE=${read_bound:+$WATCHER_WAIT_TMP/reconciled} watcher_waited \
     fm_backend_wait_transition "$first_backend" "$first_session" "$POLL" "$STATE" "${windows[@]}"
   rc=$?
   rec=$WATCHER_CAPTURE

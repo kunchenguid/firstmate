@@ -33,6 +33,7 @@ sleep() { printf 'SLEEP\n' >> "$SLEEP_LOG"; }
 
 reset_state() {
   rm -f "$STATE_DIR"/*.meta "$STATE_DIR"/*.status "$STATE_DIR"/.wake-queue \
+    "$STATE_DIR"/watched-panes \
     "$STATE_DIR"/.wake-queue.seq "$STATE_DIR"/.watch-triage.log \
     "$STATE_DIR"/.herdr-escalated-* "$TMP"/panes "$TMP"/wtcalls "$TMP"/wtcalled 2>/dev/null || true
   : > "$WAKE_LOG"
@@ -40,6 +41,8 @@ reset_state() {
   _event_cap_key=""
   _event_cap_ok=0
   _event_cap_fails=0
+  FM_WATCHED_PANES=
+  _watched_pane_start=0
 }
 
 mkrec() {  # <pane_id> <status>
@@ -184,5 +187,201 @@ event_wait_or_sleep   # disabled: sleeps without calling wait_transition
 WTN=$(wc -l < "$TMP/wtcalls" | tr -d '[:space:]')
 [ "$WTN" = 2 ] || fail "after EVENT_CAP_FAIL_MAX connect failures the event path must be disabled for the process (expected 2 wait_transition calls, got $WTN)"
 pass "event_wait_or_sleep: consecutive event-path failures disable the fast-path and revert to pure polling (fail-closed)"
+
+# --- operator watches: explicit backend, task precedence, refresh and polling --
+reset_state
+fm_backend_source herdr || fail "load Herdr backend"
+# shellcheck disable=SC2329 # Runtime fixture for the explicit identity boundary.
+fm_backend_herdr_resolve_watched_pane() {
+  case "$3" in
+    design) printf '%s:%s' "$1" "$(cat "$TMP/current-pane")" ;;
+    ship) printf '%s:wG:pQ' "$1" ;;
+    mate) printf '%s:wA:pS' "$1" ;;
+    missing) return 1 ;;
+  esac
+}
+# shellcheck disable=SC2329 # Runtime fixture for level reconciliation.
+fm_backend_herdr_agent_status_raw() { cat "$TMP/agent-status"; }
+# shellcheck disable=SC2329 # Runtime fixture for one multiplexed wait.
+fm_backend_wait_transition() { printf '%s\n' "$*" >> "$TMP/watch-calls"; return 1; }
+# shellcheck disable=SC2329 # Runtime capability fixture.
+fm_backend_events_capable() { return 0; }
+printf 'wD:p1' > "$TMP/current-pane"
+printf working > "$TMP/agent-status"
+printf 'default\tops\tdesign\tDesign review\t1\ndefault\tops\tship\tShip alias\t1\ndefault\tops\tmate\tMate alias\t1\ndefault\tops\tmissing\tMissing\t0\nother\tops\tdesign\tOther design\t0\n' > "$STATE_DIR/watched-panes"
+fm_write_meta "$STATE_DIR/ship.meta" "window=default:wG:pQ" "backend=herdr" "kind=ship"
+fm_write_meta "$STATE_DIR/mate.meta" "window=default:wA:pS" "backend=herdr" "kind=secondmate"
+: > "$TMP/watch-calls"
+event_wait_or_sleep
+CALL=$(cat "$TMP/watch-calls")
+assert_contains "$CALL" 'default:wD:p1' "metadata-free watch missing from wait"
+assert_not_contains "$CALL" 'default:wA:pS' "secondmate alias must remain excluded"
+assert_not_contains "$CALL" 'other:wD:p1' "another session must stay on polling path"
+[ "$(printf '%s\n' "$CALL" | tr ' ' '\n' | grep -cx default:wG:pQ)" = 1 ] || fail "task/watch endpoint must be deduped"
+[ "$(fm_watch_pane_context default:wG:pQ)" = task ] || fail "ordinary task must retain done policy"
+[ "$(fm_watch_pane_context default:wD:p1)" = watched-done ] || fail "operator done opt-in missing"
+printf wD:p2 > "$TMP/current-pane"
+: > "$TMP/watch-calls"
+event_wait_or_sleep
+assert_contains "$(cat "$TMP/watch-calls")" default:wD:p2 "pane ID must refresh at wait time"
+assert_not_contains "$(cat "$TMP/watch-calls")" default:wD:p1 "stale ID must not remain subscribed"
+pass "registry merges with task endpoints, retains secondmate/task policy, groups sessions and refreshes IDs"
+
+printf blocked > "$TMP/agent-status"
+event_wait_or_sleep
+assert_contains "$(cat "$WAKE_LOG")" 'watched pane Design review (default:wD:p2, herdr: agent blocked)' "watch wake must name label and status"
+N=$(wc -l < "$WAKE_LOG")
+event_wait_or_sleep
+[ "$(wc -l < "$WAKE_LOG")" = "$N" ] || fail "reconnect/poll must dedupe watched blocked"
+printf "done" > "$TMP/agent-status"
+# shellcheck disable=SC2329 # Force the existing polling fallback.
+fm_backend_events_capable() { return 1; }
+_event_cap_key=
+event_wait_or_sleep
+assert_contains "$(cat "$WAKE_LOG")" 'watched pane Design review (default:wD:p2, herdr: agent done)' "opted-in done must wake even without push"
+assert_not_contains "$(cat "$WAKE_LOG")" 'Other design (other:wD:p2, herdr: agent done)' "done must remain opt-in"
+N=$(wc -l < "$WAKE_LOG")
+event_wait_or_sleep
+[ "$(wc -l < "$WAKE_LOG")" = "$N" ] || fail "done level reconcile must dedupe"
+printf working > "$TMP/agent-status"
+event_wait_or_sleep
+printf blocked > "$TMP/agent-status"
+event_wait_or_sleep
+[ "$(wc -l < "$WAKE_LOG")" -gt "$N" ] || fail "working must rearm watches"
+pass "watch reasons reach the durable wake queue, dedupe blocked/done, rearm on working and poll without push"
+
+FM_WATCHED_PANE_READ_SECS=1
+(
+  fm_backend_herdr_resolve_watched_pane() {
+    if [ "$3:$PROBE_MODE" = slow:identity ]; then command sleep 12; fi
+    printf '%s:%s' "$1" "$3"
+  }
+  fm_backend_herdr_agent_status_raw() {
+    if [ "$2:$PROBE_MODE" = slow:status ]; then command sleep 12; fi
+    printf blocked
+  }
+  fm_backend_events_capable() { return 1; }
+  for PROBE_MODE in identity status; do
+    reset_state
+    printf 'default\tops\tfast\tFast\t0\ndefault\tops\tslow\tSlow\t0\n' > "$STATE_DIR/watched-panes"
+    SECONDS=0
+    event_wait_or_sleep
+    [ "$SECONDS" -lt 8 ] || fail "later $PROBE_MODE read exceeded the probe budget"
+    assert_contains "$(cat "$WAKE_LOG")" 'watched pane Fast' "later $PROBE_MODE read discarded an earlier result"
+    assert_not_contains "$(cat "$WAKE_LOG")" 'watched pane Slow' "unfinished $PROBE_MODE row emitted a result"
+    [ -n "$(fm_watch_pane_lookup default:fast)" ] || fail "earlier row missing from subscription snapshot"
+    PROBE_MODE=recovered
+    event_wait_or_sleep
+    assert_contains "$(cat "$WAKE_LOG")" 'watched pane Slow' "unfinished row was not retried next cycle"
+    [ "$(wc -l < "$WAKE_LOG" | tr -d ' ')" = 2 ] || fail "retry duplicated the earlier wake"
+  done
+) || fail "incremental watched probe contracts"
+pass "later identity/status timeouts preserve earlier rows and retry unfinished rows"
+
+# A persistently hung first registration must not starve either later watch.
+(
+  fm_backend_herdr_resolve_watched_pane() {
+    if [ "$3:$STARVATION_MODE" = slow:identity ]; then command sleep 12; fi
+    printf '%s:%s' "$1" "$3"
+  }
+  fm_backend_herdr_agent_status_raw() {
+    if [ "$2:$STARVATION_MODE" = slow:status ]; then command sleep 12; fi
+    printf blocked
+  }
+  fm_backend_events_capable() { return 0; }
+  for STARVATION_MODE in identity status; do
+    reset_state
+    printf 'default\tops\tslow\tSlow\t0\ndefault\tops\tfast\tFast\t0\ndefault\tops\tlast\tLast\t0\n' > "$STATE_DIR/watched-panes"
+    : > "$TMP/watch-calls"
+    : > "$TMP/watch-snapshots"
+    for CYCLE in 1 2 3; do
+      event_wait_or_sleep
+      printf '# cycle %s\n%s\n' "$CYCLE" "$FM_WATCHED_PANES" >> "$TMP/watch-snapshots"
+    done
+    for TARGET in fast last; do
+      assert_contains "$(cat "$TMP/watch-snapshots")" "default:$TARGET" "hung first $STARVATION_MODE read starved $TARGET"
+      assert_contains "$(cat "$TMP/watch-calls")" "default:$TARGET" "later watch never reached push subscription"
+    done
+    assert_contains "$(cat "$WAKE_LOG")" 'watched pane Fast' "hung first read suppressed Fast polling"
+    assert_contains "$(cat "$WAKE_LOG")" 'watched pane Last' "hung first read suppressed Last polling"
+    assert_not_contains "$(cat "$WAKE_LOG")" 'watched pane Slow' "unfinished first row emitted a wake"
+    [ "$(wc -l < "$WAKE_LOG" | tr -d ' ')" = 2 ] || fail "rotating probes duplicated a wake"
+  done
+) || fail "watched probe starvation contracts"
+pass "persistently hung first identity/status reads cannot starve later watches"
+
+# --- event_wait_or_sleep: watched-pane reads run waited and bounded ---------
+# A hung per-cycle read must not stall the cycle or sit outside the recorded
+# child group: the probe goes through watcher_waited and dies at its read
+# budget. The fake agent read sleeps for real, so only the bound can end it.
+reset_state
+# shellcheck disable=SC2329 # Runtime fixture for the explicit identity boundary.
+fm_backend_herdr_resolve_watched_pane() { printf '%s:wD:p1' "$1"; }
+# shellcheck disable=SC2329 # Runtime fixture simulating a wedged status read.
+fm_backend_herdr_agent_status_raw() { command sleep 60; }
+# shellcheck disable=SC2329 # Force the polling fallback so the cycle ends fast.
+fm_backend_events_capable() { return 1; }
+printf 'default\tops\tdesign\tDesign review\t1\n' > "$STATE_DIR/watched-panes"
+eval "$(declare -f watcher_waited | sed '1s/watcher_waited/orig_watcher_waited/')"
+watcher_waited() { printf '%s\n' "$*" >> "$TMP/waited-calls"; orig_watcher_waited "$@"; }
+: > "$TMP/waited-calls"
+export FM_WATCHED_PANE_READ_SECS=1
+SECONDS=0
+event_wait_or_sleep
+[ "$SECONDS" -lt 30 ] || fail "a hung pane read must hit the bounded budget instead of stalling the cycle (${SECONDS}s)"
+grep -Fq "fm_watch_pane_probe $STATE_DIR" "$TMP/waited-calls" \
+  || fail "the per-cycle probe must run through watcher_waited: $(cat "$TMP/waited-calls")"
+[ ! -s "$WAKE_LOG" ] || fail "a bound-killed probe must not surface a wake: $(cat "$WAKE_LOG")"
+pass "watched-pane reads run through watcher_waited and die at the read budget"
+
+(
+  reset_state
+  fm_backend_wait_transition() { fm_backend_herdr_wait_transition "${@:2}"; }
+  fm_backend_events_capable() { return 0; }
+  fm_backend_herdr_socket_path() { printf fake-socket; }
+  fm_backend_herdr_agent_status_raw() {
+    if [ ! -e "$TMP/probed" ]; then
+      : > "$TMP/probed"
+      printf working
+    elif [ "$MODE" = hung ]; then
+      command sleep 12 &
+      printf '%s\n' "$!" > "$TMP/reconcile-pid"
+      wait "$!"
+      printf blocked
+    else
+      printf working
+    fi
+  }
+  cat > "$TMP/reader" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$2" > "$FM_READER_TIMEOUT"
+printf '@subscribed\n'
+sleep 3
+printf 'wD:p1\t\tblocked\tclaude\n'
+SH
+  chmod +x "$TMP/reader"
+  export FM_BACKEND_HERDR_EVENT_READER="$TMP/reader"
+  export FM_READER_TIMEOUT="$TMP/reader-timeout"
+  # shellcheck disable=SC2034 # Read by the sourced watcher's event_wait_or_sleep (fm-watch.sh is shellcheck-sourced to /dev/null).
+  POLL=10
+  for MODE in hung healthy; do
+    reset_state
+    rm -f "$TMP/probed" "$TMP/reconcile-pid"
+    printf 'default\tops\tdesign\tDesign review\t1\n' > "$STATE_DIR/watched-panes"
+    SECONDS=0
+    event_wait_or_sleep
+    [ "$(cat "$FM_READER_TIMEOUT")" = 10 ] || fail "reconciliation budget changed the subscription timeout"
+    if [ "$MODE" = hung ]; then
+      [ "$SECONDS" -lt 8 ] || fail "second status read exceeded its read budget (${SECONDS}s)"
+      [ -s "$TMP/reconcile-pid" ] || fail "second status read was not exercised"
+      if kill -0 "$(cat "$TMP/reconcile-pid")" 2>/dev/null; then fail "timed-out reconciliation survived its waited group"; fi
+      [ ! -s "$WAKE_LOG" ] || fail "timed-out reconciliation emitted a wake"
+    else
+      [ "$SECONDS" -ge 3 ] || fail "healthy subscription ended at the read deadline"
+      assert_contains "$(cat "$WAKE_LOG")" 'watched pane Design review' "event after the read deadline did not wake"
+    fi
+  done
+) || fail "watched reconciliation budget contracts"
+pass "second status read is bounded while healthy event subscriptions retain their duration"
 
 echo "# fm-supervision-events.test.sh: all assertions passed"
