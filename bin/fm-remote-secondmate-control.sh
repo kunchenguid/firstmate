@@ -310,12 +310,19 @@ seat_emit() {
 
 # seat_endpoint_state <backend> <target>: recovery-grade state, with a
 # `missing` reading upgraded to `gone` only on the backend's absence proof.
-seat_endpoint_state() {
+seat_endpoint_state() {  # <backend> <target> [meta]
   local state verdict
   [ -n "$1" ] && [ -n "$2" ] || { printf 'unreadable'; return 0; }
   state=$(fm_backend_agent_state "$1" "$2" 2>/dev/null || printf 'unreadable')
   if [ "$state" = missing ]; then
-    verdict=$(fm_control_endpoint_absence_verdict "$1" "$2")
+    # The record carries the creation server a Rex absence proof must name;
+    # without it that backend can only answer `unproven`, which keeps the
+    # operation unknown and its seat counted forever.
+    if [ -n "${3:-}" ]; then
+      verdict=$(fm_control_endpoint_absence_verdict "$1" "$2" "$3")
+    else
+      verdict=$(fm_control_endpoint_absence_verdict "$1" "$2")
+    fi
     case "${verdict%%$'\t'*}" in
       gone) state=gone ;;
       dead) state=dead ;;
@@ -422,7 +429,7 @@ seat_decide() {
       fi
       ;;
     existing|dispatched|started)
-      state=$(seat_endpoint_state "$backend" "$target")
+      state=$(seat_endpoint_state "$backend" "$target" "$(meta_path "$SEAT_LIFECYCLE_ID")")
       if [ "$state" = alive ] && [ "$meta_gen" = "$gen" ]; then
         if [ "$phase" = existing ]; then
           SEAT_DECIDED=existing
@@ -568,7 +575,7 @@ seat_predecessor_ready() {
   while IFS=$'\t' read -r receipt op phase; do
     case "$phase" in existing|started|dead-after-start) confirmed=1 ;; esac
   done < <(fm_remote_seat_receipts_for_generation "$CONTROL_STATE" "$SEAT_LIFECYCLE_ID" "$gen")
-  state=$(seat_endpoint_state "$REMOTE_ENDPOINT_BACKEND" "$REMOTE_ENDPOINT_TARGET")
+  state=$(seat_endpoint_state "$REMOTE_ENDPOINT_BACKEND" "$REMOTE_ENDPOINT_TARGET" "$REMOTE_ENDPOINT_META")
   case "$state" in
     alive) ;;
     dead|gone)
