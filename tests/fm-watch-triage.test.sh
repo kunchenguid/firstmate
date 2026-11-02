@@ -848,6 +848,39 @@ SH
   pass "unchanged status logs are skipped and appended validation claims are detected once"
 }
 
+test_claimed_run_same_size_rewrite_resets_cursor() {
+  local dir state fakebin out wt status_file cursor pid old_size
+  dir=$(make_case claimed-run-same-size-rewrite); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; wt="$dir/worktree"; status_file="$state/claim.status"
+  mkdir -p "$wt"
+  git -C "$wt" init -q
+  printf 'worktree=%s\n' "$wt" > "$state/claim.meta"
+  printf 'working: validation pending\n' > "$status_file"
+  printf 'v2\t%s\t%s@%s' "$(status_observed_signature "$status_file")" \
+    "$(size_of "$status_file")" "$(_fm_open_decisions_file_ident "$status_file")" \
+    > "$state/.seen-claim_status"
+  cursor="$state/.claimed-run-cursor-claim"
+  cat > "$fakebin/no-mistakes" <<'SH'
+#!/usr/bin/env bash
+printf 'run other-branch\n'
+SH
+  chmod +x "$fakebin/no-mistakes"
+  export FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)'
+  PATH="$fakebin:$PATH" FM_CLAIMED_RUN_DELAY=0 FM_STATE_OVERRIDE="$state" \
+    FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_poll_cycle "$state" "$pid" || { reap "$pid"; fail "same-size watcher exited before its first cycle"; }
+  read -r _ _ old_size _ < "$cursor"
+  printf 'working: validation started\n' > "$status_file"
+  [ "$(size_of "$status_file")" -eq "$old_size" ] || { reap "$pid"; fail "same-size fixture changed the status log size"; }
+  touch -r "$cursor" "$status_file"
+  wait_for_exit "$pid" 100 || { reap "$pid"; fail "same-size rewritten claim was not detected"; }
+  [ "$(grep -c 'validation claim has no run' "$out")" -eq 1 ] || fail "same-size rewritten claim did not produce exactly one wake: $(cat "$out")"
+  unset FM_FAKE_CREW_STATE
+  pass "a same-size status rewrite resets its cursor and detects validation claims"
+}
+
 test_claimed_run_shrink_resets_cursor() {
   local dir state fakebin out wt status_file cursor old_size pid long_line
   dir=$(make_case claimed-run-shrink); state="$dir/state"; fakebin="$dir/fakebin"
@@ -5481,6 +5514,7 @@ fm_test_run \
   test_secondmate_status_routine_absorbed_routed_surfaced_classifier \
   test_claimed_run_outcomes \
   test_claimed_run_incremental_log \
+  test_claimed_run_same_size_rewrite_resets_cursor \
   test_claimed_run_shrink_resets_cursor \
   test_provably_working_signal_absorbed \
   test_turn_ended_provably_working_absorbed \

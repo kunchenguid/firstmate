@@ -4010,7 +4010,7 @@ while :; do
   # Remember each distinct claim and verify it after a bounded delay on this poll loop.
   claimed_run_tick() {
   local LC_ALL=C f task meta wt branch claim marker seen cursor stamp recorded_branch recorded_claim runs line line_verb line_note
-  local stat_result dev ino size cursor_dev cursor_ino cursor_size cursor_claim offset appended consumed line_end identity
+  local stat_result dev ino size cursor_dev cursor_ino cursor_size cursor_claim offset appended consumed line_end identity witness witness_match
   case "$CLAIMED_RUN_DELAY" in ''|*[!0-9]*) return 0 ;; esac
   for f in "$STATE"/*.status; do
     [ -f "$f" ] || continue
@@ -4019,6 +4019,7 @@ while :; do
     seen="$STATE/.claimed-run-seen-$task"
     cursor="$STATE/.claimed-run-cursor-$task"
     identity="$STATE/.claimed-run-identity-$task"
+    witness="$STATE/.claimed-run-witness-$task"
     cursor_dev=
     cursor_ino=
     cursor_size=
@@ -4027,7 +4028,10 @@ while :; do
       read -r cursor_dev cursor_ino cursor_size cursor_claim < "$cursor"
       case "$cursor_dev:$cursor_ino:$cursor_size" in *[!0-9:]*) cursor_dev= ;; esac
     fi
-    if [ -n "$cursor_dev" ] && [ -f "$identity" ] && [ "$f" -ef "$identity" ] && [ ! "$f" -nt "$cursor" ] \
+    witness_match=
+    if [ -f "$witness" ] && IFS= read -r line < "$f" && IFS= read -r recorded_claim < "$witness" \
+      && [ "$line" = "$recorded_claim" ]; then witness_match=1; fi
+    if [ -n "$cursor_dev" ] && [ -n "$witness_match" ] && [ -f "$identity" ] && [ "$f" -ef "$identity" ] && [ ! "$f" -nt "$cursor" ] \
       && ! claimed_run_has_appended_bytes "$f" "$cursor_size"; then
       dev=$cursor_dev; ino=$cursor_ino; size=$cursor_size
       offset=$cursor_size; claim=$cursor_claim; stat_result=
@@ -4038,7 +4042,7 @@ $stat_result
 EOF
       case "$dev:$ino:$size" in *[!0-9:]*) continue ;; esac
       offset=0
-      if [ "$cursor_dev:$cursor_ino" = "$dev:$ino" ] && [ -n "$cursor_size" ] && [ "$size" -ge "$cursor_size" ]; then
+      if [ "$cursor_dev:$cursor_ino" = "$dev:$ino" ] && [ -n "$cursor_size" ] && [ "$size" -ge "$cursor_size" ] && [ -n "$witness_match" ]; then
         offset=$cursor_size
       elif [ -n "$cursor_dev" ]; then
         rm -f "$marker" "$seen"
@@ -4065,6 +4069,8 @@ EOF
       fi
       cursor_claim=$claim
       printf '%s %s %s %s\n' "$dev" "$ino" "$offset" "$cursor_claim" > "$cursor"
+      IFS= read -r line < "$f" || line=
+      printf '%s\n' "$line" > "$witness"
       rm -f "$identity"
       ln "$f" "$identity" 2>/dev/null || :
     fi
