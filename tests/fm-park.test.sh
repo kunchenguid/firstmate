@@ -377,7 +377,8 @@ test_park_refuses_when_head_moves_after_the_verdict() {
 test_park_serializes_final_check_with_inbox_delivery() {
   local w lock pid rc=0 out
   w=$(make_world park-inbox-lock "$GH_URL")
-  local FM_HOME="$w" FM_STATE_OVERRIDE="$w/state" STATE="$w/state" FM_ROOT="$ROOT"
+  local FM_HOME="$w"
+  export FM_HOME
   . "$ROOT/bin/fm-task-inbox-lib.sh"
   gh_fixture "$w/gh.1.json"
   lock=$(fm_task_inbox_delivery_lock_path "$w/state" lane)
