@@ -88,9 +88,15 @@ cat > "$FAKEBIN/fake-ssh" <<'SH'
 count=$(cat "$FM_FAKE_SSH_COUNT" 2>/dev/null || echo 0)
 printf '%s\n' "$((count + 1))" > "$FM_FAKE_SSH_COUNT"
 printf '%s\n' "$*" >> "$FM_FAKE_SSH_LOG"
+batch_mode=
 while [ "$#" -gt 0 ]; do
   case "$1" in
-    -o) shift 2 ;;
+    -o)
+      # OpenSSH keeps the first value given for an option, so a later BatchMode
+      # cannot override an earlier one.
+      case "$2" in BatchMode=*) [ -n "$batch_mode" ] || batch_mode=${2#BatchMode=} ;; esac
+      shift 2
+      ;;
     --) shift; break ;;
     *) exit 90 ;;
   esac
@@ -102,6 +108,17 @@ shift 2
 [ "$entry" = fm-remote-entrypoint.sh ] || exit 92
 case "${FM_FAKE_SSH_MODE:-normal}" in
   unreachable) exit 255 ;;
+  authprompt)
+    # Key needs a passphrase nobody can type. Interactive ssh would block on
+    # the terminal; BatchMode=yes makes it fail at once like real OpenSSH.
+    if [ "$batch_mode" = yes ]; then
+      printf '%s\n' 'remote-mac: Permission denied (publickey).' >&2
+      exit 255
+    fi
+    printf '%s\n' 'Enter passphrase for key (blocked on terminal)' >> "$FM_FAKE_SSH_PROMPTED"
+    sleep "${FM_FAKE_SSH_PROMPT_HANG:-30}"
+    exit 98
+    ;;
   ambiguous)
     "$FM_FAKE_REMOTE_ENTRYPOINT" "$@"
     exit 255
@@ -129,6 +146,18 @@ fm_on() {
   FM_REMOTE_JOB_STATE_ROOT="$TMP_ROOT/remote-jobs" \
   "$ROOT/bin/fm-on.sh" "$@"
 }
+
+set +e
+USAGE_OUTPUT=$("$ROOT/bin/fm-on.sh" 2>&1)
+USAGE_RC=$?
+set -e
+[ "$USAGE_RC" -eq 2 ] || fail "fm-on usage returned $USAGE_RC instead of 2"
+assert_contains "$USAGE_OUTPUT" 'a key that needs a passphrase or a' \
+  "fm-on usage truncated the BatchMode explanation"
+assert_contains "$USAGE_OUTPUT" 'password prompt fails at once with ssh' \
+  "fm-on usage truncated the end of the BatchMode explanation"
+assert_contains "$USAGE_OUTPUT" 'configured SendEnv patterns.' "fm-on usage truncated the protections paragraph"
+pass "fm-on usage prints its complete header through the last comment"
 
 # The pre-feature user path had no executable transport at all. The regression
 # exercises the adopted public surface end to end through a deterministic SSH
@@ -185,6 +214,28 @@ DEFAULT_WINDOW=$((DEFAULT_INTERVAL * DEFAULT_COUNT))
 [ "$DEFAULT_WINDOW" -le 120 ] \
   || fail "the default dead-peer detection window is not bounded to a sane ceiling (got ${DEFAULT_WINDOW}s = ${DEFAULT_INTERVAL}s x $DEFAULT_COUNT)"
 pass "fm-on arms a bounded SSH dead-peer detection window by default (${DEFAULT_INTERVAL}s x $DEFAULT_COUNT = ${DEFAULT_WINDOW}s)"
+
+# Noninteractive callers (the watcher, under a harness with no Keychain) must
+# never wait on a passphrase prompt: an authentication failure has to end the
+# transport with ssh's own nonzero status and diagnostic. The fake ssh blocks
+# when BatchMode is not effectively yes, so a prompt shows up as a timeout and
+# a recorded prompt rather than as a source-text match.
+: > "$SSH_LOG"
+PROMPTED="$TMP_ROOT/ssh-prompted"
+rm -f "$PROMPTED"
+SECONDS=0
+set +e
+AUTHFAIL_ERR=$(FM_FAKE_SSH_MODE=authprompt FM_FAKE_SSH_PROMPTED="$PROMPTED" FM_FAKE_SSH_PROMPT_HANG=5 \
+  fm_on ios fm-probe-two.sh 2>&1 >/dev/null)
+AUTHFAIL_RC=$?
+set -e
+AUTHFAIL_SECS=$SECONDS
+assert_absent "$PROMPTED" "the ssh transport reached an interactive passphrase prompt"
+[ "$AUTHFAIL_RC" -eq 255 ] || fail "failed ssh authentication did not surface ssh's nonzero status (got $AUTHFAIL_RC)"
+[ "$AUTHFAIL_SECS" -lt 4 ] || fail "failed ssh authentication did not end promptly (took ${AUTHFAIL_SECS}s)"
+assert_contains "$AUTHFAIL_ERR" 'Permission denied (publickey)' "the authentication failure diagnostic was not reported"
+assert_contains "$(tail -n 1 "$SSH_LOG")" 'BatchMode=yes' "the ssh argv did not carry BatchMode=yes"
+pass "fm-on fails promptly with ssh's status instead of waiting on a passphrase prompt"
 
 : > "$SSH_LOG"
 FM_SSH_ALIVE_INTERVAL=7 FM_SSH_ALIVE_COUNT_MAX=2 fm_on ios fm-probe-two.sh >/dev/null
@@ -290,7 +341,7 @@ expect_dir "$REMOTE_ROOT/bin"
 if [ -d "$ACCOUNT_HOME/.local/bin" ] && [ ! -L "$ACCOUNT_HOME/.local/bin" ]; then
   expect_dir "$ACCOUNT_HOME/.local/bin"
 fi
-for candidate in "${NVM_CHILD_DIRS[@]}"; do expect_dir "$candidate"; done
+for candidate in ${NVM_CHILD_DIRS[@]+"${NVM_CHILD_DIRS[@]}"}; do expect_dir "$candidate"; done
 for candidate in "${DISCOVERED_DIRS[@]}"; do expect_dir "$candidate"; done
 for fixed in /usr/bin /bin /usr/sbin /sbin; do expect_dir "$fixed"; done
 

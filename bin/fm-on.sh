@@ -21,6 +21,9 @@
 # blindly repeated by this layer.
 #
 # The SSH alias keeps normal public-key and strict host-key policy in ~/.ssh.
+# BatchMode=yes keeps the transport noninteractive: callers such as the watcher
+# run without a terminal or Keychain, so a key that needs a passphrase or a
+# password prompt fails at once with ssh's own status instead of blocking.
 # This command explicitly disables agent forwarding, forwarding setup, and
 # configured SendEnv patterns. The remote entrypoint executes the selected
 # command under an empty environment with only its fixed runtime values.
@@ -45,7 +48,10 @@ PROTOCOL=1
 . "$SCRIPT_DIR/fm-secondmate-registry-lib.sh"
 
 die() { printf 'error: %s\n' "$1" >&2; exit 1; }
-usage() { sed -n '2,25p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
+usage() {
+  awk 'NR == 1 { next } /^#/ { sub(/^# ?/, ""); print; next } /^[[:space:]]*$/ { print; next } { exit }' "$0"
+  exit 2
+}
 
 encode_base64() {
   base64 | tr -d '\n'
@@ -112,6 +118,7 @@ case "$ALIVE_COUNT_MAX" in ''|*[!0-9]*) die "FM_SSH_ALIVE_COUNT_MAX must be a po
 [ "$ALIVE_COUNT_MAX" -gt 0 ] || die "FM_SSH_ALIVE_COUNT_MAX must be a positive integer: $ALIVE_COUNT_MAX"
 
 SSH_ARGS=(
+  -o BatchMode=yes
   -o ForwardAgent=no
   -o ClearAllForwardings=yes
   -o 'SendEnv=-*'
