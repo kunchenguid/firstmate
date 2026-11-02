@@ -1482,6 +1482,10 @@ test_housekeeping_overdue_queue_failure_retries() {
   escalate_add() { return 1; }
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$win" FM_FAKE_TMUX_CAPTURE="$pane" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_PAUSE_UNDATED_MAX_SECS=1 housekeeping "$state"
   [ ! -e "$state/.paused-overdue-$task" ] || fail "failed queue was marked reported"
+  [ -e "$state/.overdue-pending-$task" ] || fail "failed queue did not keep a pending alert"
+  FM_HOME="$dir" FM_STATE_OVERRIDE="$state" bash -c '. "$1" && reconcile_overdue_pauses' _ "$ROOT/bin/fm-watch.sh" \
+    || fail "watcher overdue reconciliation failed"
+  [ -e "$state/.overdue-pending-$task" ] || fail "a watcher poll discarded the pending overdue alert"
   escalate_add() { real_escalate_add_impl "$@"; }
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$win" FM_FAKE_TMUX_CAPTURE="$pane" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_PAUSE_UNDATED_MAX_SECS=1 housekeeping "$state"
   [ -e "$state/.paused-overdue-$task" ] || fail "retry did not mark the queued overdue event"

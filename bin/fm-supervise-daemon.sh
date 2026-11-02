@@ -1371,7 +1371,7 @@ reconcile_overdue_pause() {  # <state> <task> -> reconcile worker events after o
       '') ;;
       resolved)
         key=$(_fm_decision_key "$line" '') || key=
-        [ "$key" = "paused-overdue-$task" ] && { rm -f "$marker" "$state/.paused-overdue-pending-$task"; return 0; }
+        [ "$key" = "paused-overdue-$task" ] && { rm -f "$marker" "$state/.overdue-pending-$task"; return 0; }
         ;;
       *) resume=1 ;;
     esac
@@ -1382,7 +1382,7 @@ EOF
   fm_wake_status_append_self_announced "$state" "$statusf" "resolved [key=paused-overdue-$task]: worker pause changed"
   rc=$?
   [ "$rc" -eq 0 ] || [ "$rc" -eq 1 ] || return 0
-  rm -f "$marker" "$state/.paused-overdue-pending-$task"
+  rm -f "$marker" "$state/.overdue-pending-$task"
 }
 
 housekeeping() {  # <state>
@@ -1393,9 +1393,9 @@ housekeeping() {  # <state>
     overdue_task=${overdue_marker##*/}; overdue_task=${overdue_task#.paused-overdue-}
     reconcile_overdue_pause "$state" "$overdue_task"
   done
-  for pending_file in "$state"/.paused-overdue-pending-*; do
+  for pending_file in "$state"/.overdue-pending-*; do
     [ -f "$pending_file" ] || continue
-    overdue_task=${pending_file##*/}; overdue_task=${overdue_task#.paused-overdue-pending-}
+    overdue_task=${pending_file##*/}; overdue_task=${overdue_task#.overdue-pending-}
     IFS=: read -r pending_identity pending_size < "$pending_file"
     pending_message=$(sed -n '2p' "$pending_file")
     if [ -z "$pending_identity" ] || [ -z "$pending_size" ] || [ -z "$pending_message" ]; then
@@ -1525,7 +1525,7 @@ housekeeping() {  # <state>
     status_age=$(( now - status_mtime ))
     if fm_afk_contract_present "$state" && status_is_paused "$last" && status_pause_is_overdue "$last" "$status_age" "$now"; then
       overdue_marker="$state/.paused-overdue-$task"
-      pending_file="$state/.paused-overdue-pending-$task"
+      pending_file="$state/.overdue-pending-$task"
       if [ ! -e "$overdue_marker" ] && [ ! -e "$pending_file" ]; then
         blocked_line="blocked [key=paused-overdue-$task]: paused ${status_age}s, wait overdue - decide or release"
         fm_wake_status_append_self_announced "$state" "$state/$task.status" "$blocked_line"; append_rc=$?
