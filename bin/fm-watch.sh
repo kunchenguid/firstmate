@@ -280,6 +280,9 @@ WATCH_HOME_EXISTED=0
 . "$SCRIPT_DIR/fm-pending-reply-lib.sh"
 # shellcheck source=bin/fm-busy-lib.sh
 . "$SCRIPT_DIR/fm-busy-lib.sh"
+# Only for the gate-opening stamp wait_gate_check reads.
+# shellcheck source=bin/fm-nm-run-lib.sh
+. "$SCRIPT_DIR/fm-nm-run-lib.sh"
 # Steering-inbox loss detection: bin/fm-task-inbox-lib.sh owns the record,
 # doorbell, re-ring ladder, and unavailable-endpoint contracts; this watcher
 # supplies their live endpoint and busy checks plus wake emission
@@ -2502,9 +2505,14 @@ handle_paused_stale() {  # <window> <task> <hash>
 # afterwards (a ci-monitoring run that rebases onto an advanced base re-runs its
 # test step), and the worker writes nothing about it. So read the crew's current
 # state at most once per STALE_ESCALATE_SECS per window, without the forge
-# fallback, and wake once per distinct parked gate it reports.
+# fallback, and wake once per distinct parked gate it reports. A gate is its
+# reported line plus the run record's gate-opening stamp
+# (fm_nm_run_gate_opened_at), read only when the line says parked: the same run
+# resuming and parking again at the same step between two reads renders an
+# identical line, but its stamp moves. An unreadable stamp never wakes by itself.
 wait_gate_check() {  # <window> <task>
   local win=$1 task=$2 key statusf wait gate_file checked_file line state src reason
+  local run worktree opened saved_line saved_opened
   key=$(window_key "$win")
   gate_file="$STATE/.wait-gate-$key"
   checked_file="$STATE/.wait-gate-checked-$key"
@@ -2526,10 +2534,27 @@ wait_gate_check() {  # <window> <task>
     case "$state" in ''|unknown) ;; *) rm -f "$gate_file" ;; esac
     return 0
   fi
-  [ "$(cat "$gate_file" 2>/dev/null || true)" != "$line" ] || return 0
+  opened=''
+  case "$line" in
+    *" · run: "*)
+      run=${line##* · run: }
+      worktree=$(fm_meta_get "$STATE/$task.meta" worktree 2>/dev/null || true)
+      case "$run" in
+        ''|*[!A-Za-z0-9_-]*) ;;
+        *) [ -z "$worktree" ] || opened=$(fm_nm_run_gate_opened_at "$worktree" "$run") ;;
+      esac
+      ;;
+  esac
+  saved_line='' saved_opened=''
+  [ ! -f "$gate_file" ] || { IFS= read -r saved_line || true; IFS= read -r saved_opened || true; } < "$gate_file"
+  if [ "$saved_line" = "$line" ] \
+    && { [ -z "$opened" ] || [ -z "$saved_opened" ] || [ "$opened" = "$saved_opened" ]; }; then
+    [ -z "$opened" ] || [ -n "$saved_opened" ] || printf '%s\n%s\n' "$line" "$opened" > "$gate_file"
+    return 0
+  fi
   reason="check: validation gate after $wait: $task ${line#*source: run-step · }"
   fm_wake_append check "wait-gate-$task" "$reason" || exit 1
-  printf '%s' "$line" > "$gate_file"
+  printf '%s\n%s\n' "$line" "$opened" > "$gate_file"
   wake "$reason"
 }
 

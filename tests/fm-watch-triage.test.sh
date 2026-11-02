@@ -2316,9 +2316,9 @@ make_wait_gate_case() {  # <name> <status-line> -> sets WG_DIR WG_WINDOW
   WG_DIR=$dir WG_WINDOW=$window
 }
 
-wait_gate_watch_bg() {  # <dir> <window> <out>
+wait_gate_watch_bg() {  # <dir> <window> <out> [extra env assignments...]
   watch_bg "$1/state" "$1/fakebin" "$3" env FM_FAKE_TMUX_WINDOW="$2" FM_FAKE_TMUX_CAPTURE="$1/pane.txt" \
-    FM_STALE_ESCALATE_SECS=240 FM_FAKE_CREW_STATE_LOG="$1/crew-state.log"
+    FM_STALE_ESCALATE_SECS=240 FM_FAKE_CREW_STATE_LOG="$1/crew-state.log" "${@:4}"
 }
 
 test_gate_after_done_or_paused_wakes_once_per_gate() {
@@ -2404,6 +2404,54 @@ test_gate_reparked_after_answer_wakes_again() {
   grep -F "validation gate after done" "$out" >/dev/null || fail "the re-parked gate wake is wrong: $(cat "$out")"
   unset FM_FAKE_CREW_STATE
   pass "a gate that re-parks after the worker acted on an answer wakes again"
+}
+
+set_gate_opened_at() {  # <nm-home> <run-id> <epoch>
+  python3 - "$1/state.sqlite" "$2" "$3" <<'PY'
+import sqlite3, sys
+database, run_id, opened = sys.argv[1:]
+db = sqlite3.connect(database)
+db.execute("CREATE TABLE IF NOT EXISTS runs (id TEXT PRIMARY KEY, awaiting_agent_since INTEGER)")
+db.execute("INSERT OR REPLACE INTO runs (id, awaiting_agent_since) VALUES (?, ?)", (run_id, int(opened)))
+db.commit()
+PY
+}
+
+test_gate_reparked_between_reads_wakes_again() {
+  local dir state out pid gate nm
+  gate='state: parked · source: run-step · parked at test: 1 finding(s) · ask-user: authority decision · run: 01RUN'
+  make_wait_gate_case wait-gate-reparked-unseen 'done: PR https://example.test/pr/3 checks green'
+  dir=$WG_DIR; state="$dir/state"; out="$dir/watch.out"; nm="$dir/nm"
+  mkdir -p "$dir/wt" "$nm"
+  printf 'worktree=%s\n' "$dir/wt" >> "$state/wg.meta"
+  set_gate_opened_at "$nm" 01RUN 1700000000
+  export FM_FAKE_CREW_STATE=$gate
+  wait_gate_watch_bg "$dir" "$WG_WINDOW" "$out" NM_HOME="$nm"
+  pid=$!
+  wait_for_exit "$pid" 100 || { reap "$pid"; fail "the first gate did not wake"; }
+  ack_stopped_cycle "$state" || fail "could not acknowledge the first gate wake"
+
+  : > "$out"; : > "$dir/crew-state.log"
+  rm -f "$state/.wait-gate-checked-test_fm-wg"
+  wait_gate_watch_bg "$dir" "$WG_WINDOW" "$out" NM_HOME="$nm"
+  pid=$!
+  for _ in $(seq 100); do [ -s "$dir/crew-state.log" ] && break; sleep 0.1; done
+  [ -s "$dir/crew-state.log" ] || fail "the second read of the same gate never happened"
+  wait_poll_cycle "$state" "$pid" || fail "the same gate opening woke twice: $(cat "$out")"
+  reap "$pid"
+  [ ! -s "$out" ] || fail "the same gate opening woke twice: $(cat "$out")"
+  ack_stopped_cycle "$state" || true
+
+  : > "$out"; : > "$dir/crew-state.log"
+  set_gate_opened_at "$nm" 01RUN 1700000600
+  rm -f "$state/.wait-gate-checked-test_fm-wg"
+  wait_gate_watch_bg "$dir" "$WG_WINDOW" "$out" NM_HOME="$nm"
+  pid=$!
+  wait_for_exit "$pid" 100 || { reap "$pid"; fail "a gate reopened between two reads with an identical line did not wake"; }
+  grep -Fx "check: validation gate after done: wg ${gate#*source: run-step · }" "$out" >/dev/null \
+    || fail "the reopened gate wake is wrong: $(cat "$out")"
+  unset FM_FAKE_CREW_STATE
+  pass "a gate that resumes and parks again between two reads, with no busy poll, wakes again"
 }
 
 test_no_gate_after_done_stays_silent() {
@@ -5493,6 +5541,7 @@ fm_test_run \
   test_stale_terminal_status_overridden_by_active_run \
   test_gate_after_done_or_paused_wakes_once_per_gate \
   test_gate_reparked_after_answer_wakes_again \
+  test_gate_reparked_between_reads_wakes_again \
   test_no_gate_after_done_stays_silent \
   test_nonterminal_stale_provably_working_absorbed_then_escalated \
   test_wedge_escalation_marks_demand_deep_inspection_after_threshold \
