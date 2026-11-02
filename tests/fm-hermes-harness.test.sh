@@ -183,8 +183,16 @@ mv "$fakebin/tmux" "$fakebin/tmux-base"
 cat > "$fakebin/tmux" <<'SH_TMUX'
 #!/bin/sh
 if [ "$1" = capture-pane ]; then
-  printf ' ─ ready │ model │ 1s\n worker ❯ \n'
+  if [ -n "${FM_FAKE_HERMES_STALL_META:-}" ]; then
+    printf ' Provider setup\n Paste an API key to continue\n'
+  else
+    printf ' ─ ready │ model │ 1s\n worker ❯ \n'
+  fi
   exit 0
+fi
+if [ "$1" = kill-window ] && [ -n "${FM_FAKE_HERMES_STALL_META:-}" ]; then
+  if [ -e "$FM_FAKE_HERMES_STALL_META" ]; then echo "kill-window record=present" >> "$FM_FAKE_HERMES_KILL_LOG"
+  else echo "kill-window record=absent" >> "$FM_FAKE_HERMES_KILL_LOG"; fi
 fi
 exec "$(dirname "$0")/tmux-base" "$@"
 SH_TMUX
@@ -206,3 +214,14 @@ assert_present "$home/state/hermes-worker.hermes-hooks/config.yaml" 'native hook
 if out=$(fm_test_run_spawn "$home" "$wt" "$fakebin" sm "$proj" --secondmate --harness hermes 2>&1); then fail 'secondmate launch accepted'; fi
 assert_contains "$out" 'crewmate/scout adapter only' 'secondmate diagnostic'
 pass 'scout spawn carries native profile, interactive brief, hook overlay and metadata'
+
+fm_test_spawn_brief "$home" hermes-stalled
+if out=$(FM_FAKE_HERMES_STALL_META="$home/state/hermes-stalled.meta" FM_FAKE_HERMES_KILL_LOG="$case_dir/kill" \
+  FM_HERMES_READY_POLLS=2 FM_HERMES_POLL_INTERVAL=0 \
+  fm_test_run_spawn "$home" "$wt" "$fakebin" hermes-stalled "$proj" --scout --harness hermes --hermes-profile example 2>&1); then
+  fail 'stalled Hermes launch accepted'
+fi
+assert_contains "$out" 'Hermes did not reach its TUI' 'stalled launch diagnostic'
+assert_contains "$(cat "$case_dir/kill" 2>/dev/null)" 'kill-window record=present' 'stalled worker not stopped before its record was removed'
+[ ! -e "$home/state/hermes-stalled.meta" ] || fail 'stalled fresh spawn kept its task record'
+pass 'stalled Hermes launch stops its pane before the task record is removed'

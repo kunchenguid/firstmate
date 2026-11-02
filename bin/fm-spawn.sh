@@ -7822,7 +7822,7 @@ if [ "$HARNESS" = hermes ] && [ "$RAW_LAUNCH" -eq 0 ]; then
     case "$(fm_hermes_startup_screen "$HERMES_SCREEN")" in
       decline)
         if [ "$HERMES_DECLINED" = 0 ]; then
-          spawn_send_key "$T" Enter || exit 1
+          spawn_send_key "$T" Enter || break
           HERMES_DECLINED=1
         fi
         ;;
@@ -7835,6 +7835,7 @@ if [ "$HARNESS" = hermes ] && [ "$RAW_LAUNCH" -eq 0 ]; then
   done
   if [ "$HERMES_READY" != 1 ]; then
     echo "error: Hermes did not reach its TUI or process its brief in $T; inspect profile setup, provider errors, and first-run consent (only an already-selected No thanks is answered)" >&2
+    rovo_endpoint_cleanup
     exit 1
   fi
 fi
