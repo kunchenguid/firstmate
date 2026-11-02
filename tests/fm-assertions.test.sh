@@ -1,4 +1,13 @@
 #!/usr/bin/env bash
+# Regression tests for the anchored absence assertion helper in tests/lib.sh.
+#
+# The failure this suite pins: an anchored pattern handed to a fixed-string grep
+# assertion searches for a literal caret and so passes no matter what the file
+# holds. assert_no_regex accepts a clean absence, and rejects a matching line, a
+# missing file, an invalid pattern, and a directory. The last case pins the
+# escaped interactive-agent label guard: the anchored label pattern must tolerate
+# the secondmate label's `.fm-remote` suffix and a dot-substituted lookalike that
+# a literal-dot pattern would have matched, yet still reject the label itself.
 set -eu
 
 # shellcheck source=tests/lib.sh
