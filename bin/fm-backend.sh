@@ -45,12 +45,8 @@
 # it spawns (a tmux server or Herdr client started inside a block inherits
 # them), so an inherited marker is not a selection; see docs/tern-backend.md.
 # bin/backends/hc.sh adds herdr-core (`hc`, the core under Herdr.app), also
-# EXPERIMENTAL, spawn-capable, and session-provider-only. Its bare
-# HC_TERMINAL_* markers are not a selection (hc stamps HC_TERMINAL_ID into
-# every descendant process), but the Herdr app's own signals are: firstmate
-# running inside a terminal the app projects selects hc, and a live Herdr
-# app window selects hc when no other surface marker claims the runtime; see
-# docs/hc-backend.md "Runtime auto-detection".
+# EXPERIMENTAL, spawn-capable, and session-provider-only; see
+# docs/hc-backend.md "Runtime auto-detection" for its selection contract.
 # Codex App is intentionally not in the known set yet.
 # docs/codex-app-backend.md owns that blocked backend contract.
 #

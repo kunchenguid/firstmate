@@ -26,9 +26,9 @@ The Herdr app shows the terminals of the session it bound at launch, `default` u
 
 ## Runtime auto-detection
 
-hc is auto-detected only on the Herdr app's own signals, never on bare `HC_TERMINAL_*` markers: hc stamps them into every process an hc terminal starts, and an app-created terminal's env is deliberately identical to any other hc terminal's - the app sends `TERM_PROGRAM=herdr` in its `terminal.run` call, but the core's `child_env` normalizes that to `ghostty` for every child, app-created or not.
+hc is auto-detected only on the Herdr app's terminal-level signal, never on bare `HC_TERMINAL_*` markers: hc stamps them into every process an hc terminal starts, and an app-created terminal's env is deliberately identical to any other hc terminal's - the app sends `TERM_PROGRAM=herdr` in its `terminal.run` call, but the core's `child_env` normalizes that to `ghostty` for every child, app-created or not.
 What marks a terminal as the app's is its core-side record: the app stamps `herdr.space`/`herdr.tab` labels on every terminal it creates, and a non-empty `herdr.space` is the exact condition under which the app projects a terminal into its window.
-`bin/fm-backend.sh` `fm_backend_detect` owns the check order; this section owns what the signals mean.
+[Backend selection order](configuration.md#backend-selection-order) owns precedence; this section owns the app-terminal signal.
 
 Exactly one signal selects hc, after every other surface marker has had its say:
 
@@ -52,7 +52,8 @@ When a live hc terminal is present but no usable hc toolchain resolves (an execu
 An auto-detected hc prints a stderr notice naming the winning signal and how to opt out; [Task shape and metadata](#task-shape-and-metadata) owns its task record.
 
 Auto-detected hc spawns carry the same `herdr.space`/`herdr.tab` labels an explicit hc spawn does, so workers appear in the captain's window without the app ever being started by Firstmate.
-The app is local GUI presentation only: on a remote or headless home the signal cannot exist, and nothing here changes the remote `herdr` path.
+The app is local GUI presentation only; detection reads the terminal's core-side label without requiring a live app window, so a surviving labeled terminal can still select hc after the GUI closes.
+Nothing here changes the remote `herdr` path.
 
 Two limits apply to auto-detection specifically:
 

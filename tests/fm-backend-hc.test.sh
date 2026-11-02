@@ -107,10 +107,8 @@ FM_TEST_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 test_hc_is_spawn_capable_and_needs_app_signals() {
   local out
   # HC_TERMINAL_ID alone is never a selection: it reaches every process an hc
-  # terminal starts. Detection needs the Herdr app signals (the terminal's own
-  # herdr.space label on a live core, or a live herdr-app.sock window), which
-  # this env deliberately lacks; HERDR_APP_HOME is pinned to an empty dir so a
-  # real window on the developer's machine cannot leak into the result.
+  # terminal starts. This env lacks the app-terminal claim defined in
+  # docs/hc-backend.md "Runtime auto-detection"; an open window is irrelevant.
   out=$(bash -c '. "'"$FM_TEST_ROOT"'/bin/fm-backend.sh"
     fm_backend_validate_spawn hc && echo spawn-ok
     unset TMUX HERDR_ENV CMUX_WORKSPACE_ID TERM_PROGRAM REX_BLOCK __CFBundleIdentifier HC_TERMINAL_SOCKET
