@@ -1454,8 +1454,11 @@ test_watcher_exits_on_state_teardown_during_startup() {
   [ "$stopped" -eq 1 ] || fail "watcher never finished claiming its lock: $(cat "$out")"
   # Stopping the watcher shell does not stop its already-forked helpers.
   # Atomically detach the old directory instead of racing their writes with
-  # recursive deletion. Retain it until fixture cleanup so its inode cannot
-  # be reused for the replacement and mistaken for a successor's release.
+  # recursive deletion, and never empty it in place: a child that republishes
+  # mid-`rm -rf` leaves the same inode at the path with no lock pid, which the
+  # watcher reads as a successor's release rather than a teardown. Retain the
+  # detached tree until fixture cleanup so its inode cannot be reused for the
+  # replacement and mistaken for a successor's release.
   mv "$state" "$dir/retired-state" || fail "could not detach startup state"
   mkdir -p "$state" || fail "could not recreate startup state"
   kill -CONT "$pid" 2>/dev/null || true
