@@ -406,6 +406,25 @@ test_sweep_respawns_confirmed_dead_secondmate() {
   pass "sweep: a confirmed-dead secondmate endpoint is killed and respawned"
 }
 
+test_sweep_respawns_on_the_recorded_backend() {
+  local w fb tmuxfb log out
+  w=$(new_world sweep-pinned-backend)
+  add_sm_home "$w" sm1 firstmate:fm-sm1
+  fb=$(make_toolchain "$w"); tmuxfb=$(make_liveness_tmux "$w")
+  log="$w/calls.log"; : > "$log"
+
+  # The home now selects hc for new spawns; the dead mate is recorded on tmux.
+  out=$(run_bootstrap "$tmuxfb:$fb" "$w/home" zsh "$log" FM_BACKEND=hc)
+
+  assert_not_contains "$out" "SECONDMATE_LIVENESS: secondmate sm1:" \
+    "the respawn should succeed on the recorded backend: $out"
+  assert_contains "$(cat "$log")" "new-window" \
+    "the respawn must land on the backend the mate is recorded on, not the configured default"
+  assert_no_grep 'backend=hc' "$w/home/state/sm1.meta" \
+    "the respawned record must stay on its recorded backend"
+  pass "sweep: a dead secondmate respawns on its recorded backend, not a changed default"
+}
+
 test_sweep_recovers_the_durable_secondmate_account() {
   local w fb tmuxfb log out
   w=$(new_world sweep-account)
@@ -845,6 +864,7 @@ test_tmux_agent_state_rejects_malformed_targets_before_probe
 test_herdr_agent_state_preserves_husk_classifier
 test_agent_state_dispatcher_and_compatibility
 test_sweep_respawns_confirmed_dead_secondmate
+test_sweep_respawns_on_the_recorded_backend
 test_sweep_recovers_the_durable_secondmate_account
 test_sweep_serializes_distinct_secondmate_relaunches
 test_sweep_keeps_tmux_best_effort_kill_when_close_fails

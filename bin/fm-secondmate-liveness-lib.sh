@@ -28,8 +28,9 @@
 # remote route is never replaced by a local endpoint.
 #
 # Replacement relaunch goes through `bin/fm-spawn.sh <id> --secondmate` with
-# FM_SPAWN_NO_GUARD=1, the same guarded path every recovery uses. That path
-# re-resolves placement from the task's own metadata and registry route, so a
+# FM_SPAWN_NO_GUARD=1, the same guarded path every recovery uses. A local mate
+# is pinned to its recorded backend. That path re-resolves placement from the
+# task's own metadata and registry route, so a
 # remote mate is relaunched on its recorded remote host through bin/fm-on.sh -
 # never as a local replacement - behind fm-spawn's own readiness gate and
 # per-task spawn lock.
@@ -353,10 +354,16 @@ fm_secondmate_liveness_relaunch() {  # <meta> <id> [timeout-secs]
     fm_lock_release "$relaunch_lock" || true
     return "$rc"
   fi
+  # The respawn stays on the backend the mate is recorded on: a changed
+  # config/backend applies to new spawns, and moving a live mate to another
+  # backend is the explicit `fm-control.sh <id> relaunch --backend` path.
+  # A remote mate's backend is its host's, so it is never pinned from here.
+  local -a respawn_args=("$id" --secondmate)
+  [ -n "$(fm_meta_get "$meta" remote_host)" ] || respawn_args+=(--backend "$(fm_backend_of_meta "$meta")")
   if [ -n "$timeout" ]; then
-    FM_SM_LIVE_OUT=$(FM_SPAWN_NO_GUARD=1 fm_run_timed "$timeout" "$FM_ROOT/bin/fm-spawn.sh" "$id" --secondmate 2>&1) || rc=$?
+    FM_SM_LIVE_OUT=$(FM_SPAWN_NO_GUARD=1 fm_run_timed "$timeout" "$FM_ROOT/bin/fm-spawn.sh" "${respawn_args[@]}" 2>&1) || rc=$?
   else
-    FM_SM_LIVE_OUT=$(FM_SPAWN_NO_GUARD=1 "$FM_ROOT/bin/fm-spawn.sh" "$id" --secondmate 2>&1) || rc=$?
+    FM_SM_LIVE_OUT=$(FM_SPAWN_NO_GUARD=1 "$FM_ROOT/bin/fm-spawn.sh" "${respawn_args[@]}" 2>&1) || rc=$?
   fi
   FM_SM_LIVE_RC=$rc
   if [ "$rc" -eq 0 ]; then
