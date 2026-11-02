@@ -1021,7 +1021,8 @@ test_scan_keeps_a_recorded_pr_the_log_never_named() {
   write_poll_meta "$state" task-a https://github.com/o/r/pull/9 'kind=ship' 'mode=no-mistakes'
   printf '%s\n' \
     'done [at=2]: PR https://github.com/o/r/pull/90 checks green' \
-    'done [at=3]: PR https://github.com/o/r/pull/91 checks green' > "$state/task-a.status"
+    'done [at=3]: PR https://github.com/o/r/pull/9-checks checks green' \
+    'done [at=4]: PR https://github.com/o/r/pull/91 checks green' > "$state/task-a.status"
   cp "$state/task-a.meta" "$dir/meta.before"
 
   run_check_entry "$dir" scan > /dev/null 2> "$dir/stderr" || fail "the scan failed: $(cat "$dir/stderr")"
