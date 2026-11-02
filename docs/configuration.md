@@ -1465,10 +1465,12 @@ An unreadable or nonregular file, or a path inspection error, also refuses and n
 For a new worker, these checks run before its endpoint, local copy, or task record is created; Firstmate never launches with a partial list.
 Only exact tool names are accepted, not wildcard patterns.
 Firstmate checks syntax and runtime support before launch but never runs `pi mcp list` or otherwise connects to servers to validate names.
-When its first agent run starts, after Pi's startup tool-loading boundary, the worker extension compares the launch's exclusion list with its own loaded-tool registry and appends a timestamped warning note to `state/<task-id>.status` naming the configuration file and every unmatched entry for the supervisor.
+An `mcp__` entry whose server part, the text before the next `__`, contains `-` or `.` is also refused with the sanitized spelling to use, because Pi names an MCP tool `mcp__<server>__<tool>` with every character outside letters, digits, and `_` in the server part replaced by `_`, so such an entry could never match.
+A dash or dot in the tool part is accepted.
+When its first agent run starts, after Pi's startup tool-loading boundary, the worker extension compares the launch's exclusion list with its own loaded-tool registry and appends one timestamped warning note to `state/<task-id>.status` naming the configuration file and every listed tool that is still loaded.
 The check runs before worker actions so it cannot supersede a terminal status emitted during the turn.
-An unmatched entry is reported as **unverified**, not valid: Pi versions that omit excluded tools from the registry cannot distinguish a correct exclusion from a typo, and a server that has not connected cannot verify its tools either.
-Names present in the registry produce no report; unknown or unverified names do not refuse the launch.
+Pi removes correctly excluded tools from the registry, so a listed name that is absent is never reported: absence cannot distinguish a successful exclusion from a typo or a server that has not connected, and neither refuses the launch.
+MCP servers connect in the background and may register tools after that start check, so the same extension also blocks any call to a listed tool name, including calls a codemode script makes, which Pi routes through the same tool-call handlers; there is no second status line.
 Each relaunch installs a fresh worker extension with the home's current list, so the replacement performs the same check.
 
 [`bin/fm-exclude-tools-lib.sh`](../bin/fm-exclude-tools-lib.sh) implements parsing and pre-launch validation for this contract; [`bin/fm-spawn.sh`](../bin/fm-spawn.sh)'s header owns the launch-flag mechanics.

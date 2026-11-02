@@ -1512,7 +1512,7 @@ test_pi_exclude_tools_reach_ship_and_scout_launches() {
       rec=$(make_spawn_case "excl-${harness}-${kindflag#--}" "$harness" "$id")
       read_case_record "$rec"
       write_exclude_file "$HOME_DIR" '# hide the write tools' '' \
-        '  mcp__tracker__editIssue  ' 'mcp__tracker__createPage' 'mcp__other-srv__tool.v2'
+        '  mcp__tracker__editIssue  ' 'mcp__tracker__createPage' 'mcp__other_srv__tool.v2'
       if [ "$kindflag" = --scout ]; then
         out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --scout)
       else
@@ -1521,7 +1521,7 @@ test_pi_exclude_tools_reach_ship_and_scout_launches() {
       status=$?
       expect_code 0 "$status" "$harness $kindflag spawn with exclusions should succeed"$'\n'"$out"
       launch=$(cat "$LAUNCH_LOG")
-      assert_contains "$launch" "--exclude-tools 'mcp__tracker__editIssue,mcp__tracker__createPage,mcp__other-srv__tool.v2' " \
+      assert_contains "$launch" "--exclude-tools 'mcp__tracker__editIssue,mcp__tracker__createPage,mcp__other_srv__tool.v2' " \
         "$harness $kindflag launch must carry the comma-joined, quoted exclusion list"
     done
   done
@@ -1533,17 +1533,13 @@ test_pi_exclude_tools_worker_registry_reports() {
   command -v node >/dev/null 2>&1 || fail "node is required to drive Pi worker exclusion reporting"
   for harness in pi pi-signed; do
     for kindflag in --ship --scout; do
-      for scenario in matched unmatched unverified; do
+      for scenario in absent present late; do
         id="excl-registry-${harness}-${kindflag#--}-${scenario}"
         case_name=$id
-        [ "$scenario" != unmatched ] || case_name="josé-$id"
+        [ "$scenario" != present ] || case_name="josé-$id"
         rec=$(make_spawn_case "$case_name" "$harness" "$id")
         read_case_record "$rec"
-        case "$scenario" in
-          matched) write_exclude_file "$HOME_DIR" 'mcp__tracker__editIssue' ;;
-          unmatched) write_exclude_file "$HOME_DIR" 'mcp__tracker__editIssu' 'mcp__tracker__createIssu' ;;
-          unverified) write_exclude_file "$HOME_DIR" 'mcp__offline__executeWrite' ;;
-        esac
+        write_exclude_file "$HOME_DIR" 'mcp__tracker__editIssue' 'mcp__tracker__createIssue'
         if [ "$kindflag" = --scout ]; then
           out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --scout)
         else
@@ -1584,35 +1580,47 @@ extension.default({
 });
 assert.equal(status(), before, "registration must not validate against a registry that has not loaded yet");
 assert.deepEqual(busy(), seeded, "registration must not change busy state");
-if (process.env.SCENARIO !== "unverified") {
-  tools = [{ name: "mcp__tracker__editIssue" }, { name: "mcp__tracker__createIssue" }];
-}
+const edit = { name: "mcp__tracker__editIssue" };
+const create = { name: "mcp__tracker__createIssue" };
+const read = { name: "mcp__tracker__readIssue" };
+// Pi removes excluded names from the registry, so a correct exclusion leaves them absent.
+if (process.env.SCENARIO === "absent") tools = [read];
+// An exclusion that failed leaves one listed name still registered.
+if (process.env.SCENARIO === "present") tools = [edit, read];
 rmSync(process.env.TURNEND, { force: true });
 await handlers.agent_start();
 const started = { gen, seq: "2", state: "busy", source: "pi-ext", event: "agent-start" };
 assert.deepEqual(busy(), started, "agent_start must publish a generation-bound Pi busy event");
 const after = status();
-if (process.env.SCENARIO === "matched") {
-  assert.equal(after, before, "an exact match must produce no report");
+if (process.env.SCENARIO !== "present") {
+  assert.equal(after, before, "absent listed tools are the success state and must produce no report");
 } else {
   const report = after.slice(before.length);
   assert.match(report, /^note \[at=\d+\]: warning: /);
   assert.ok(report.includes(process.env.EXCLUDE_FILE), "the report must identify the config file");
-  assert.ok(report.includes("unmatched exclusion entries"));
-  assert.ok(report.includes("unverified"), "absence must never imply validity");
-  const missing = process.env.SCENARIO === "unmatched"
-    ? ["mcp__tracker__editIssu", "mcp__tracker__createIssu"]
-    : ["mcp__offline__executeWrite"];
-  for (const name of missing) assert.ok(report.includes(name), "every unmatched entry must be reported: " + name);
-  assert.ok(!report.includes("mcp__tracker__editIssue"), "a loaded tool must not be reported");
+  assert.ok(report.includes("still loaded"), "the report must say the exclusion is not in effect");
+  assert.ok(report.includes("mcp__tracker__editIssue"), "a listed tool that is still loaded must be reported");
+  assert.ok(!report.includes("mcp__tracker__createIssue"), "an absent listed tool must not be reported");
+  assert.ok(!report.includes("mcp__tracker__readIssue"), "an unlisted tool must not be reported");
 }
 await handlers.agent_settled({}, { isIdle: () => false });
 assert.deepEqual(busy(), started, "a continuation must stay busy even when agent_settled fires");
+// MCP servers connect in the background: a listed tool that registers after the start
+// check is never a second status line, it is blocked at call time instead.
+if (process.env.SCENARIO === "late") tools = [edit, create, read];
 await handlers.turn_end();
 for (let attempt = 0; attempt < 100 && !existsSync(process.env.TURNEND); attempt++) {
   await setTimeout(10);
 }
-assert.ok(existsSync(process.env.TURNEND), "reporting must preserve turn-end notification");
+assert.ok(existsSync(process.env.TURNEND), "turn-end notification must be preserved");
+assert.equal(status(), after, "a turn end must not add a status line");
+for (const name of [edit.name, create.name]) {
+  assert.deepEqual(handlers.tool_call({ toolName: name }), {
+    block: true, reason: name + " is excluded by config/crew-exclude-tools",
+  }, "a call to a listed tool must be blocked: " + name);
+}
+assert.equal(handlers.tool_call({ toolName: read.name }), undefined, "an unlisted tool must not be blocked");
+assert.equal(handlers.tool_call({}), undefined, "a call without a tool name must not be blocked");
 assert.deepEqual(busy(), started, "an inner turn boundary must not mark the worker idle");
 await handlers.agent_settled({}, { isIdle: () => true });
 assert.deepEqual(busy(), { gen, seq: "3", state: "idle", source: "pi-ext", event: "agent-settled" });
@@ -1638,17 +1646,17 @@ JS
         )
         status=$?
         expect_code 0 "$status" "$harness $kindflag $scenario worker registry check failed: $out"
-        if [ "$scenario" != matched ]; then
+        if [ "$scenario" = present ]; then
           report=$(bash -c '. "$1/bin/fm-classify-lib.sh"; scan_unread_surface_lines "$2"' \
             _ "$ROOT" "$HOME_DIR/state")
           expect_code 0 "$?" "the supervisor's unread-status consumer should succeed"
           assert_contains "$report" "$HOME_DIR/config/crew-exclude-tools" "the supervisor must see the exclusion warning even after done"
-          assert_contains "$report" "unverified" "the supervisor must see that exclusions remain unverified"
+          assert_contains "$report" "still loaded" "the supervisor must see that a listed tool is still loaded"
         fi
       done
     done
   done
-  pass "Pi worker registries report unmatched and unverified exclusions without reporting exact matches"
+  pass "Pi worker registries report only listed tools that are still loaded and block calls to every listed tool"
 }
 
 test_pi_exclude_tools_absent_and_empty_lists() {
@@ -1727,6 +1735,32 @@ test_pi_exclude_tools_malformed_entry_refuses_before_endpoint() {
     [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "a malformed exclusion entry '$bad' still wrote a task record"
   done
   pass "a malformed exclusion entry refuses the spawn before any launch or record"
+}
+
+test_pi_exclude_tools_server_shape_refuses_before_endpoint() {
+  local rec id out status bad n=0
+  for bad in 'mcp__my-tracker__editIssue' 'mcp__my.srv__tool' 'mcp__a-b'; do
+    n=$((n + 1))
+    id="excl-shape-$n-z9s"
+    rec=$(make_spawn_case "excl-shape-$n" pi "$id")
+    read_case_record "$rec"
+    write_exclude_file "$HOME_DIR" 'mcp__srv__good' "$bad"
+    out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+    status=$?
+    expect_code 1 "$status" "server-shape entry '$bad' must refuse the spawn"
+    assert_contains "$out" "entry '$bad' can never match" "the refusal must name the entry '$bad'"
+    [ ! -s "$LAUNCH_LOG" ] || fail "a server-shape entry '$bad' still launched a worker"
+    [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "a server-shape entry '$bad' still wrote a task record"
+  done
+  assert_contains "$out" "mcp__a_b__<tool>" "the refusal must suggest the sanitized server part"
+  # A dash or dot in the tool part is not a server-part mistake and stays accepted.
+  id=excl-shape-ok-z9s
+  rec=$(make_spawn_case excl-shape-ok pi "$id")
+  read_case_record "$rec"
+  write_exclude_file "$HOME_DIR" 'mcp__srv__tool-x.v2'
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  expect_code 0 "$?" "a dash or dot in the tool part must stay accepted: $out"
+  pass "an mcp__ entry whose server part has - or . refuses the spawn before any launch or record"
 }
 
 test_pi_exclude_tools_read_failure_refuses_before_launch() {
@@ -2775,6 +2809,7 @@ test_pi_exclude_tools_worker_registry_reports
 test_pi_exclude_tools_absent_and_empty_lists
 test_exclude_tools_non_pi_runtime_refuses_non_empty_list
 test_pi_exclude_tools_malformed_entry_refuses_before_endpoint
+test_pi_exclude_tools_server_shape_refuses_before_endpoint
 test_pi_exclude_tools_read_failure_refuses_before_launch
 test_pi_exclude_tools_do_not_leak_across_homes_or_to_secondmates
 test_batch_forwards_shared_profile_flags

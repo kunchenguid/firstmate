@@ -6637,15 +6637,24 @@ export default function (pi: any) {
     await busyEvent("busy", "agent-start");
     // Verify only this worker's registry, never connect servers from Firstmate.
     // Check before actions so the warning cannot supersede this turn's terminal status.
+    // Pi removes excluded names from this registry, so absence is the success case and
+    // is never reported; only a listed name that is still loaded is a real failure.
     if (!checkedExclusions && excludeTools.length) {
       const loaded = new Set(pi.getAllTools().map((tool: any) => tool.name));
-      const unmatched = excludeTools.filter((name) => !loaded.has(name));
-      if (unmatched.length) {
+      const present = excludeTools.filter((name) => loaded.has(name));
+      if (present.length) {
         appendFileSync(statusFile, "note [at=" + Math.floor(Date.now() / 1000) + "]: warning: " + excludeFile
-          + " unmatched exclusion entries (unverified: absent from the worker's loaded-tool registry; excluded tools or unavailable servers cannot be verified): "
-          + unmatched.join(", ") + "\n");
+          + " exclusion not in effect: these listed tools are still loaded in the worker's tool registry: "
+          + present.join(", ") + "\n");
       }
       checkedExclusions = true;
+    }
+  });
+  // Backstop for tools that register after this check (MCP servers connect later):
+  // block any call to a listed name. Pi routes codemode's nested calls through here too.
+  pi.on("tool_call", (event: any) => {
+    if (event && excludeTools.includes(event.toolName)) {
+      return { block: true, reason: event.toolName + " is excluded by config/crew-exclude-tools" };
     }
   });
   pi.on("agent_settled", async (_event: any, ctx: any) => {
