@@ -1565,6 +1565,29 @@ spawn_remote_secondmate() {
   else
     rc=$?
   fi
+  # A reply that names a Rex route is judged on its own metadata here, before
+  # any later branch decides what its completion means. A malformed route is a
+  # refusal, not an unknown outcome that leaves the seat counted: the successor
+  # and policy-opt-out paths must not treat it as something to reconcile.
+  remote_backend=$(printf '%s\n' "$out" | sed -n 's/^backend=//p' | tail -1)
+  if [ "$remote_backend" = rex ] && [ "$rc" -eq 0 ]; then
+    remote_target=$(printf '%s\n' "$out" | sed -n 's/^target=//p' | tail -1)
+    remote_rex_session_id=$(printf '%s\n' "$out" | sed -n 's/^rex_session_id=//p' | tail -1)
+    remote_rex_server=$(printf '%s\n' "$out" | sed -n 's/^rex_server=//p' | tail -1)
+    remote_rex_ok=1
+    case "$remote_rex_server" in unix://*) ;; *) remote_rex_ok=0 ;; esac
+    case "$remote_rex_session_id" in session:?*) ;; *) remote_rex_ok=0 ;; esac
+    case "$remote_target" in "${remote_rex_session_id#session:}":?*) ;; *) remote_rex_ok=0 ;; esac
+    case "${remote_target%%:*}" in '' | *[!0-9a-f-]*) remote_rex_ok=0 ;; esac
+    case "${remote_target#*:}" in '' | *:* | *[!0-9a-f-]*) remote_rex_ok=0 ;; esac
+    if [ "$remote_rex_ok" -ne 1 ]; then
+      fm_lock_release "$remote_lock" || true
+      fm_lock_release "$registry_lock" || true
+      fm_lock_release "$SPAWN_TASK_LOCK" || true
+      echo "error: remote launch returned malformed Rex route metadata (session '${remote_rex_session_id:-missing}', server '${remote_rex_server:-missing}', target '${remote_target:-missing}'); preserving the remote route for reconciliation" >&2
+      return 1
+    fi
+  fi
   seat_disposition=
   accounting_gen=
   remote_spawn_gen=$(printf '%s\n' "$out" | sed -n 's/^spawn_gen=//p' | tail -1)
@@ -1635,24 +1658,10 @@ spawn_remote_secondmate() {
       fi
       ;;
     rex)
+      # Already judged above, before any branch could treat this launch as one
+      # whose completion is unknown; re-read them to record the delivered route.
       remote_rex_session_id=$(printf '%s\n' "$out" | sed -n 's/^rex_session_id=//p' | tail -1)
       remote_rex_server=$(printf '%s\n' "$out" | sed -n 's/^rex_server=//p' | tail -1)
-      # The route must pin a host-local unix:// server and a
-      # <session-uuid>:<block-uuid> target whose session half is the reported
-      # session id; anything else is not an endpoint this contract launched.
-      remote_rex_ok=1
-      case "$remote_rex_server" in unix://*) ;; *) remote_rex_ok=0 ;; esac
-      case "$remote_rex_session_id" in session:?*) ;; *) remote_rex_ok=0 ;; esac
-      case "$remote_target" in "${remote_rex_session_id#session:}":?*) ;; *) remote_rex_ok=0 ;; esac
-      case "${remote_target%%:*}" in '' | *[!0-9a-f-]*) remote_rex_ok=0 ;; esac
-      case "${remote_target#*:}" in '' | *:* | *[!0-9a-f-]*) remote_rex_ok=0 ;; esac
-      if [ "$remote_rex_ok" -ne 1 ]; then
-        fm_lock_release "$remote_lock" || true
-        fm_lock_release "$registry_lock" || true
-        fm_lock_release "$SPAWN_TASK_LOCK" || true
-        echo "error: remote launch returned malformed Rex route metadata (session '${remote_rex_session_id:-missing}', server '${remote_rex_server:-missing}', target '${remote_target:-missing}'); preserving the remote route for reconciliation" >&2
-        return 1
-      fi
       ;;
   esac
   if [ -z "$remote_model" ] || [ "$remote_model" = - ]; then
