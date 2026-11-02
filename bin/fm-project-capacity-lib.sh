@@ -47,7 +47,8 @@
 #     no longer uses local resources, and
 #   - is not a finished scout or local-only ship with no active reservation.
 # Completion means a done event with no later working event in the status log.
-# A reservation holds until the log records working or done after its offset; bookkeeping alone does not expire it.
+# A reservation holds until the log records working or done after its offset;
+# bookkeeping alone does not expire it.
 # Reservations contain gen=<spawn generation> and status_offset=<byte count>.
 # Admission reads the reservation before status; malformed or unreadable records
 # hold a place. Expiry restores the completion rule.
