@@ -422,7 +422,12 @@ case "${FM_FAKE_SSH_MODE:-normal}:$command_name:$command_rel" in
     exit 0
     ;;
   launch-rex-bad-server-route:fm-remote-secondmate-control.sh:*)
-    [ "$_command_action" = launch ] || exit 93
+    # A host that launches normally but answers the launch with a route the
+    # parent must refuse: the real launch still writes the host-side seat
+    # receipt, so a later reconciliation can account for the endpoint the
+    # refused reply left behind.
+    [ "$_command_action" = launch ] || exec "$FM_FAKE_REMOTE_ENTRYPOINT" "$@"
+    "$FM_FAKE_REMOTE_ENTRYPOINT" "$@" >/dev/null 2>&1 || exit $?
     printf 'schema=fm-remote-secondmate-control.v1\n'
     printf 'backend=rex\n'
     printf 'target=00000001-0000-7000-8000-000000000002:00000002-0000-7000-8000-000000000003\n'
@@ -432,7 +437,8 @@ case "${FM_FAKE_SSH_MODE:-normal}:$command_name:$command_rel" in
     exit 0
     ;;
   launch-rex-mismatched-route:fm-remote-secondmate-control.sh:*)
-    [ "$_command_action" = launch ] || exit 93
+    [ "$_command_action" = launch ] || exec "$FM_FAKE_REMOTE_ENTRYPOINT" "$@"
+    "$FM_FAKE_REMOTE_ENTRYPOINT" "$@" >/dev/null 2>&1 || exit $?
     printf 'schema=fm-remote-secondmate-control.v1\n'
     printf 'backend=rex\n'
     printf 'target=99999999-0000-7000-8000-000000000009:00000002-0000-7000-8000-000000000003\n'
@@ -1883,7 +1889,7 @@ if FM_FAKE_SSH_MODE=launch-rex-mismatched-route remote_env "$ROOT/bin/fm-spawn.s
   fail "a rex route whose target did not match its session was accepted"
 fi
 assert_grep 'malformed Rex route metadata' "$TMP_ROOT/spawn-rex-mismatched.out" \
-  "a session-mismatched rex route did not fail with the rex metadata refusal"
+  "a session-mismatched rex route did not fail with the rex metadata refusal: $(cat "$TMP_ROOT/spawn-rex-mismatched.out" 2>/dev/null)"
 cmp -s "$TMP_ROOT/parent-ios-pre-launch.meta" "$PARENT/state/ios.meta" \
   || fail "a refused rex session route rewrote the recorded route"
 pass "remote secondmate backend selection is strict on both sides of the boundary"
