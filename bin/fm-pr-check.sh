@@ -33,7 +33,8 @@
 # path above, so every refusal still applies. A refusal prints one line naming
 # the task, the URL, and the reason, once per task and URL
 # (state/<task>.pr-register-refused), and the scan retries silently on later
-# sweeps, so a draft later marked ready is recorded without help. Registrations
+# sweeps after every task not yet refused for its URL, so a draft later marked
+# ready is recorded without help. Registrations
 # stop FM_CHECK_TIMEOUT (default 30) minus 5 seconds after the scan starts; a
 # registration cut at that bound prints nothing and is retried.
 # Usage: fm-pr-check.sh <task-id> <pr-url>
@@ -80,7 +81,7 @@ pr_check_reported_url() {  # <status-file>
 }
 
 pr_check_scan() {
-  local budget start meta id kind url left marker err rc tmp
+  local budget start meta id kind url left marker err rc tmp fresh= retry=
   budget=${FM_CHECK_TIMEOUT:-30}
   case "$budget" in ''|*[!0-9]*) budget=30 ;; esac
   budget=$((budget - 5))
@@ -95,6 +96,15 @@ pr_check_scan() {
     kind=$(sed -n 's/^kind=//p' "$meta" | tail -1)
     case "$kind" in secondmate|scout) continue ;; esac
     url=$(pr_check_reported_url "$STATE/$id.status") || continue
+    marker="$STATE/$id.pr-register-refused"
+    if [ -f "$marker" ] && [ ! -L "$marker" ] && [ "$(cat "$marker")" = "$url" ]; then
+      retry="$retry$id $url"$'\n'
+    else
+      fresh="$fresh$id $url"$'\n'
+    fi
+  done
+  while IFS=' ' read -r id url; do
+    [ -n "$id" ] || continue
     left=$((start + budget - $(date +%s)))
     [ "$left" -gt 0 ] || break
     marker="$STATE/$id.pr-register-refused"
@@ -115,7 +125,9 @@ pr_check_scan() {
     fi
     err=$(printf '%s\n' "$err" | sed -n 's/^error: //p' | head -1)
     printf '%s reported %s in a done line, but it was not recorded: %s\n' "$id" "$url" "${err:-registration failed}"
-  done
+  done <<EOF_SCAN
+$fresh$retry
+EOF_SCAN
 }
 
 if [ "$#" -eq 1 ] && [ "$1" = scan ]; then
