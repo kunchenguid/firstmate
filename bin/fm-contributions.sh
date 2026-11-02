@@ -90,9 +90,9 @@
 # next URL that still has a full observation reserve; only a genuine forge
 # failure, structural refusal or head change records an error.
 # API failure leaves error evidence; an expired or absent observation is not
-# silence. The error and its unavailable line name the first failing step: a
-# read's label, exit status, budget seconds left and first line of its error
-# output (control characters dropped, at most 160 characters), or the
+# silence. The error and its unavailable line name the failing step: a read's
+# label, exit status, budget seconds left and a fixed class of its error (HTTP
+# status, DNS, TLS or connection error, else request failed), or the
 # structural check that refused the observation. A later good read clears the
 # record's error, so the unavailable line is the copy that outlives it.
 # FM_CONTRIBUTIONS_MAX_AGE (default 900 seconds) bounds freshness.
@@ -101,6 +101,10 @@
 # observation, with a stale error beside it cleared.
 # A genuine failure prints its unavailable line only when it starts an episode
 # (no prior owner has an error); a successful read ends the episode.
+# That class is read from the first 4096 stderr bytes only; raw stderr,
+# endpoints, headers and response bodies are never retained. Failed parallel
+# reads are joined in sorted label order, not completion order. Head drift has its own fixed reason.
+# These same sanitized reasons appear in error and the first unavailable line.
 # FM_CONTRIBUTIONS_NOW supplies an ISO UTC clock for tests, otherwise UTC now.
 # FM_CONTRIBUTIONS_READY_LABEL selects the equivalent triage label, default
 # ready-for-pr. Labels are matched case-insensitively and exactly.
@@ -331,11 +335,11 @@ forge_transient_error() { # stderr-file summary
   return 1
 }
 
-forge_bound_result() { # failed-rc failed-why fallback-rc
+forge_bound_result() { # failed-rc failed-why fallback-rc stage
   FORGE_BOUND_RC=$3
   if [ "$1" -ne 0 ]; then
     : > "$TMP/forge-unavailable"
-    printf '%s\n' "$2" >> "$TMP/why"
+    printf '%s\n' "$2" > "$TMP/why-$4"
     FORGE_BOUND_RC=$1
   else
     BUDGET_EXHAUSTED=1
@@ -343,9 +347,13 @@ forge_bound_result() { # failed-rc failed-why fallback-rc
   fi
 }
 
-forge() {
-  local remaining rc=0 failed_rc=0 failed_why='' now read_deadline
-  local forge_err=${FORGE_ERR:-$TMP/forge.err} out summary why
+forge() { # fixed read stage, then native gh arguments
+  local stage=$1 remaining rc=0 failed_rc=0 failed_why='' now read_deadline
+  local forge_err bounded out summary why
+  shift
+  # Each parallel stage owns its own scratch files.
+  forge_err="$TMP/$stage.err"
+  bounded="$TMP/$stage.err-head"
   out=$(mktemp "$TMP/forge-output.XXXXXX")
   now=$(date +%s)
   read_deadline=$((now + 5))
@@ -354,7 +362,7 @@ forge() {
     now=$(date +%s)
     remaining=$((read_deadline - now))
     if [ "$remaining" -le 0 ]; then
-      forge_bound_result "$failed_rc" "$failed_why" 1
+      forge_bound_result "$failed_rc" "$failed_why" 1 "$stage"
       rm -f -- "$out"
       return "$FORGE_BOUND_RC"
     fi
@@ -369,17 +377,18 @@ forge() {
     # A kill at the read bound or the deadline is budget refusal. If the retry
     # times out, retain the genuine forge failure that caused that retry.
     if [ "$rc" -eq 124 ]; then
-      forge_bound_result "$failed_rc" "$failed_why" "$rc"
+      forge_bound_result "$failed_rc" "$failed_why" "$rc" "$stage"
       rm -f -- "$out"
       return "$FORGE_BOUND_RC"
     fi
-    # Keep the failing read's own words; the retry and cleanup discard its error file.
-    why=$(printf '%s read exited %s with %ss of budget left: %s' "$(basename "$forge_err" .err)" "$rc" \
-      "$((DEADLINE - $(date +%s)))" "$(sed -n '/[^[:space:]]/{p;q;}' "$forge_err" | tr -d '\000-\037\177' | cut -c1-160)")
-    summary=$(forge_error_summary "$forge_err")
-    if [ "$failed_rc" -ne 0 ] || ! forge_transient_error "$forge_err" "$summary"; then
+    # Classify only the first 4096 stderr bytes, and keep only that fixed
+    # class, never raw (potentially private) forge stderr.
+    LC_ALL=C head -c 4096 "$forge_err" > "$bounded"
+    summary=$(forge_error_summary "$bounded")
+    why=$(printf '%s read exited %s with %ss of budget left: %s' "$stage" "$rc" "$((DEADLINE - $(date +%s)))" "$summary")
+    if [ "$failed_rc" -ne 0 ] || ! forge_transient_error "$bounded" "$summary"; then
       : > "$TMP/forge-unavailable"
-      printf '%s\n' "$why" >> "$TMP/why"
+      printf '%s\n' "$why" > "$TMP/why-$stage"
       rm -f -- "$out"
       return "$rc"
     fi
@@ -409,30 +418,30 @@ observe() { # canonical GitHub URL -> normalized JSON
   case "$url" in https://github.com/*) ;; *) return 1 ;; esac
   part=${url#https://github.com/}; number=${part##*/}; part=${part%/*}; kind=${part##*/}; part=${part%/*}
   case "$kind" in pull) endpoint="repos/$part/pulls/$number" ;; issues) endpoint="repos/$part/issues/$number" ;; *) return 1 ;; esac
-  rm -f -- "$TMP/budget-exhausted" "$TMP/forge-unavailable" "$TMP/why"
+  rm -f -- "$TMP/budget-exhausted" "$TMP/forge-unavailable" "$TMP/why" "$TMP"/why-*
   BUDGET_EXHAUSTED=0
-  FORGE_ERR="$TMP/core.err" forge api "$endpoint" > "$TMP/core.json" || return 1
+  forge core api "$endpoint" > "$TMP/core.json" || return 1
   jq -e '(.state == "open" or .state == "closed") and (.user.login | type == "string")' "$TMP/core.json" >/dev/null \
     || unobserved 'core read returned an unexpected shape' || return 1
   if [ "$kind" = pull ]; then
     head=$(jq -er '.head.sha | select(test("^[a-fA-F0-9]{40}$"))' "$TMP/core.json") \
       || unobserved 'core read named no head commit' || return 1
-    FORGE_ERR="$TMP/comments.err" forge api "repos/$part/issues/$number/comments?per_page=100" --paginate --slurp > "$TMP/comments.json" &
+    forge comments api "repos/$part/issues/$number/comments?per_page=100" --paginate --slurp > "$TMP/comments.json" &
     local comments_pid=$!
-    FORGE_ERR="$TMP/reviews.err" forge api "$endpoint/reviews?per_page=100" --paginate --slurp > "$TMP/reviews.json" &
+    forge reviews api "$endpoint/reviews?per_page=100" --paginate --slurp > "$TMP/reviews.json" &
     local reviews_pid=$!
-    FORGE_ERR="$TMP/inline.err" forge api "$endpoint/comments?per_page=100" --paginate --slurp > "$TMP/inline.json" &
+    forge inline api "$endpoint/comments?per_page=100" --paginate --slurp > "$TMP/inline.json" &
     local inline_pid=$!
-    FORGE_ERR="$TMP/checks.err" forge api "repos/$part/commits/$head/check-runs?filter=all&per_page=100" --paginate --slurp > "$TMP/checks.json" &
+    forge checks api "repos/$part/commits/$head/check-runs?filter=all&per_page=100" --paginate --slurp > "$TMP/checks.json" &
     local checks_pid=$!
-    FORGE_ERR="$TMP/statuses.err" forge api "repos/$part/commits/$head/statuses?per_page=100" --paginate --slurp > "$TMP/statuses.json" &
+    forge statuses api "repos/$part/commits/$head/statuses?per_page=100" --paginate --slurp > "$TMP/statuses.json" &
     local statuses_pid=$!
-    FORGE_ERR="$TMP/repo.err" forge api "repos/$part" > "$TMP/repo.json" &
+    forge repo api "repos/$part" > "$TMP/repo.json" &
     local repo_pid=$!
     local -a pids=("$comments_pid" "$reviews_pid" "$inline_pid" "$checks_pid" "$statuses_pid" "$repo_pid")
     printf '[]\n' > "$TMP/threads.json"
     if [ "$TRACK_THREADS" = true ]; then
-      FORGE_ERR="$TMP/threads.err" forge api graphql --paginate --slurp -f owner="${part%/*}" -f name="${part#*/}" -F number="$number" \
+      forge threads api graphql --paginate --slurp -f owner="${part%/*}" -f name="${part#*/}" -F number="$number" \
         -f query='query($owner:String!,$name:String!,$number:Int!,$endCursor:String){repository(owner:$owner,name:$name){pullRequest(number:$number){reviewThreads(first:100,after:$endCursor){nodes{isResolved comments(first:1){nodes{databaseId}}}pageInfo{hasNextPage endCursor}}}}}' \
         > "$TMP/threads.json" &
       pids+=("$!")
@@ -442,7 +451,7 @@ observe() { # canonical GitHub URL -> normalized JSON
       || unobserved 'comment pages returned an unexpected shape' || return 1
     jq -e 'type == "array" and all(.[]; (.data.repository.pullRequest.reviewThreads.nodes | type) == "array")' "$TMP/threads.json" >/dev/null \
       || unobserved 'review thread pages returned an unexpected shape' || return 1
-    FORGE_ERR="$TMP/head.err" forge pr view "$url" --json headRefOid,reviewDecision > "$TMP/after.json" || return 1
+    forge head pr view "$url" --json headRefOid,reviewDecision > "$TMP/after.json" || return 1
     after=$(jq -er '.headRefOid | select(test("^[a-fA-F0-9]{40}$"))' "$TMP/after.json") \
       || unobserved 'head read named no head commit' || return 1
     [ "$head" = "$after" ] || unobserved 'head changed during observation' || return 1
@@ -489,9 +498,9 @@ observe() { # canonical GitHub URL -> normalized JSON
       || unobserved 'observation could not be assembled' || return 1
   else
     label=${FM_CONTRIBUTIONS_READY_LABEL:-ready-for-pr}
-    FORGE_ERR="$TMP/comments.err" forge api "repos/$part/issues/$number/comments?per_page=100" --paginate --slurp > "$TMP/comments.json" &
+    forge comments api "repos/$part/issues/$number/comments?per_page=100" --paginate --slurp > "$TMP/comments.json" &
     local comments_pid=$!
-    FORGE_ERR="$TMP/issue-events.err" forge api "repos/$part/issues/$number/events?per_page=100" --paginate --slurp > "$TMP/issue-events.json" &
+    forge issue-events api "repos/$part/issues/$number/events?per_page=100" --paginate --slurp > "$TMP/issue-events.json" &
     local events_pid=$!
     wait_forges "$comments_pid" "$events_pid" || return 1
     jq -e 'type == "array" and all(.[]; type == "array")' "$TMP/comments.json" >/dev/null \
@@ -581,7 +590,7 @@ clear_unsupported_errors() {
 }
 
 poll() {
-  local task url old kind error observed why
+  local task url old kind error observed why failure detail
   local -a row
   acquire
   get_input
@@ -618,8 +627,14 @@ poll() {
     observed=0
     observe "$url" || observed=$?
     [ "$BUDGET_EXHAUSTED" -eq 0 ] || continue
-    why='no failing step recorded'
-    [ ! -s "$TMP/why" ] || IFS= read -r why < "$TMP/why"
+    # Join every failed read in stage-label order, then a structural refusal.
+    why=
+    for failure in "$TMP"/why-* "$TMP/why"; do
+      [ -s "$failure" ] || continue
+      IFS= read -r detail < "$failure"
+      why="${why:+$why; }$detail"
+    done
+    why=${why:-no failing step recorded}
     # Wake once per failure episode: only when no owner has a prior error.
     if [ "$observed" -ne 0 ] && jq -ne --slurpfile saved "$TMP/saved.json" --arg url "$url" --args \
       'all($ARGS.positional[] as $task | [$saved[0][] | select(.task == $task) | .records[] | select(.url == $url)] | first;
