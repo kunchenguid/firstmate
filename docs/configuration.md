@@ -620,7 +620,7 @@ Task meta records `backend=` only for a non-default backend; an absent `backend=
 
 - Every new task records `endpoint_task_id=` as the cleanup binding between the metadata filename and its opaque runtime endpoint.
 
-- A remote secondmate's route record additionally records `fleet_seat_generation=` when a fleet seat accounts for its launch or relaunch; the [seat contract](#fleet-seat-pools-configfleet-seats) owns that counted generation.
+- A remote secondmate's route record additionally records `fleet_seat_generation=` when a fleet seat accounts for its launch or relaunch, and `remote_spawn_gen=` for the generation recorded on the host; the [seat contract](#fleet-seat-pools-configfleet-seats) owns the counted generation and [remote secondmates](remote-secondmates.md#relaunch-a-live-remote-second-mate) owns its relaunch use.
 
 - A herdr task additionally records `herdr_session=`, `herdr_workspace_id=`, `herdr_tab_id=`, and `herdr_pane_id=`.
 

@@ -3074,6 +3074,13 @@ finish_firstmate_home_removal() {
   exit "$rc"
 }
 
+# For a local removal, the evidence file is written before the public home is
+# renamed into its staging directory, so a retry can finish a removal whose home
+# is already gone. A retry that finds the public path still present refuses
+# rather than removing it: it cannot prove that home is the generation the
+# evidence names instead of a reseeded successor at the same path.
+# A remote retirement supplies its staging path through FM_REMOTE_RETIRE_STAGE
+# and keeps its own host-side pending evidence.
 remove_firstmate_home() (  # <home> <label> <task-id> <backend>
   local home=$1 label=$2 expected_id=${3:-} backend=${4:-} meta=${5:-$META} abs_home_path process_event_backup backup_root retired recorded tmp generation evidence removal_committed=0
   process_event_backup=''

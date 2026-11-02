@@ -87,10 +87,13 @@
 #   - nonterminal ledger holders mapped to the pool, as above;
 #   - UNMANAGED pooled task records in the root home and local descendants
 #     (reached through each home's data/secondmates.md): a record is managed,
-#     and so ignored here, when a ledger holder exists for its key; a record
-#     generation (spawn_gen=, or fleet_seat_generation= on a remote route) that
-#     conflicts with every ledger incarnation fails admission closed. An
-#     unmanaged ship or scout counts while its record is pooled; an unmanaged
+#     and so ignored here, when a ledger holder exists for its key; a
+#     generation the record names itself (spawn_gen=, or a remote route's
+#     remote_spawn_gen= or fleet_seat_generation=) that conflicts with every
+#     ledger incarnation fails admission closed, while a generation derived
+#     from the remote's serve certificate is not a ledger-issued identity and
+#     is exempt from that history check.
+#     An unmanaged ship or scout counts while its record is pooled; an unmanaged
 #     local secondmate counts unless its session lock is free or stale and its
 #     endpoint is proven destroyed; an unresolved model counts everywhere.
 #   - the primary supervisor, keyed "<root-state>\t.primary", when the root's
@@ -635,8 +638,9 @@ remote_route_is() {
 # that agent itself, and charging both sides would spend one seat twice. A record
 # whose generation is a predecessor some incarnation names, but which the ledger
 # never held, is still an unmanaged agent and counts by its record. Returns 4
-# (with CONFLICT set) when a record's generation is otherwise unknown to its
-# ledger holder.
+# (with CONFLICT set) when a generation the record names is otherwise unknown
+# to its ledger holder; a certificate-derived generation is exempt from that
+# history check.
 pooled_records() {
   local home_state=$1 models=$2 gens=${3:-} exclude=${4:-} meta id verdict gen derived
   [ -r "$home_state" ] && [ -x "$home_state" ] || return 1

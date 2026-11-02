@@ -44,7 +44,7 @@
 # agent's endpoint record and operation receipts described below; the home's own
 # state/*.meta remains reserved for workers the secondmate supervises.
 # Retirement closes only this secondmate's panes or workspace and never
-# stops the shared fm-remote session or removes a sibling secondmate's workspace
+# stops the shared remote session or removes a sibling secondmate's workspace
 # or panes.
 #
 # Relaunch is not a second lifecycle implementation: it runs the ORDINARY local

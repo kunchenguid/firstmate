@@ -708,6 +708,7 @@ SSH exit 255 preserves both the route and local records because completion is un
 The [fleet seat contract](configuration.md#fleet-seat-pools-configfleet-seats) owns counted-generation retention during retirement.
 If accounting fails after host retirement, the primary retains its route and local records for reconciliation; the remote home may already be removed.
 A retry for the same generation replays the host's retained destruction result, including a lost-slot exit, without touching a successor at the reused home path.
+A retry that finds the home still present without a parent-route record proving it belongs to that generation refuses instead of removing it.
 Before the host removes anything it publishes a durable pending record for that exact generation and route; a record that cannot be published refuses the retirement, so no home is deleted behind evidence that could never be produced.
 A retirement interrupted after the home is gone republishes its evidence from that pending record on the same generation's retry, after proving the recorded endpoint absent again.
 The primary retains matching evidence before local cleanup so cleanup or accounting failures can resume without another host retirement.
