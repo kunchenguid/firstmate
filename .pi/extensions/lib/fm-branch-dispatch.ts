@@ -364,6 +364,17 @@ function homeOwnedRanges(state: string, task: string, statusPath: string): Array
   }
 }
 
+// The ledger is published after the status append it covers, so its version is
+// part of a second mate's span cache config: a verdict cached between the
+// append and the ledger publish must not outlive the ledger landing.
+function homeOwnedLedgerVersion(state: string, task: string): string {
+  try {
+    return statusFileVersion(`${state}/.${task}.home-appends`) ?? "absent";
+  } catch {
+    return "unreadable";
+  }
+}
+
 // Non-blank lines of <buf> starting at byte <base>, each with its absolute
 // [start, end) byte range including the newline.
 function linesWithOffsets(buf: Buffer, base: number): Array<{ line: string; start: number; end: number }> {
@@ -542,7 +553,9 @@ export function scopeForUnreadWake(state: string, heartbeat: boolean, afk = fals
             if (presentationCursor === undefined) presentationCursor = readPresentationCursor(state);
             cursor = presentationCursor?.get(task);
           }
-          const config = spanRule ? `${decisionConfig}\0${cursor?.ident ?? ""}\0${cursor?.offset ?? 0}` : decisionConfig;
+          const config = spanRule
+            ? `${decisionConfig}\0${cursor?.ident ?? ""}\0${cursor?.offset ?? 0}\0${homeOwnedLedgerVersion(state, task)}`
+            : decisionConfig;
           const cached = staleDecisionCache.get(ownershipKey);
           if (cached?.version === version && cached.config === config) {
             decisionOwned = cached.decisionOwned;
