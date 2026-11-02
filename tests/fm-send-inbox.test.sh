@@ -410,15 +410,31 @@ SH
 }
 
 test_delivery_lock_serializes_enqueue() {
-  local dir err lock sender rc=0
+  local dir err lock sender rc=0 waiting i=0
   dir=$(setup_case delivery-lock)
   err="$dir/send.err"
+  waiting="$dir/delivery-lock-waiting"
   . "$ROOT/bin/fm-task-inbox-lib.sh"
   lock=$(fm_task_inbox_delivery_lock_path "$dir/home/state" t1)
   fm_task_inbox_lock_acquire "$lock" || fail "could not acquire the inbox delivery lock"
-  run_send "$dir" "$err" FM_TASK_INBOX_LOCK_WAIT_SECS=10 -- t1 "arrived during parking" &
+  cat > "$dir/fakebin/sleep" <<'SH'
+#!/usr/bin/env bash
+[ "${FM_TEST_DELIVERY_LOCK_WAITING:-}" = "" ] || : > "$FM_TEST_DELIVERY_LOCK_WAITING"
+exec /bin/sleep "$@"
+SH
+  chmod +x "$dir/fakebin/sleep"
+  run_send "$dir" "$err" FM_TASK_INBOX_LOCK_WAIT_SECS=10 FM_TEST_DELIVERY_LOCK_WAITING="$waiting" -- t1 "arrived during parking" &
   sender=$!
-  sleep 0.2
+  while [ ! -e "$waiting" ] && [ "$i" -lt 200 ]; do
+    /bin/sleep 0.01
+    i=$((i + 1))
+  done
+  [ -e "$waiting" ] || {
+    fm_lock_release "$lock"
+    wait "$sender" 2>/dev/null || true
+    fail "fm-send did not reach the held delivery-lock wait"
+  }
+  kill -0 "$sender" 2>/dev/null || fail "fm-send exited while the delivery lock was held"
   [ ! -e "$dir/home/state/t1.inbox/001.msg" ] || {
     fm_lock_release "$lock"
     wait "$sender" 2>/dev/null || true
