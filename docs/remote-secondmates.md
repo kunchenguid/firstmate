@@ -25,6 +25,7 @@ The remote second-mate agent itself runs on one of two session-provider backends
 [Launch selection and placement](#launch-or-recover) define the backend contract.
 Provisioning checks any available supported backend; launch checks the selected one.
 By default a Herdr route uses the shared `fm-remote` session; for isolated validation the host controller also accepts an explicit owned lab session, and its [`header`](../bin/fm-remote-secondmate-control.sh) owns the input and allowed names.
+A route recorded under an `fm-lab-*` session resolves its predecessor and relaunches on that same recorded session instead of the default; such an endpoint answers only on the session it was recorded under, so the [relaunch contract](#relaunch-a-live-remote-second-mate) carries it into both host calls.
 Every path that provisions or launches one refuses a host that is not ready for it.
 
 - `fm-remote` is reserved for remote fleet work and must not be used for personal work.

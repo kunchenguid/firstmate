@@ -2190,7 +2190,7 @@ The pool names, capacities, and models are the operator's own choice; nothing is
 - A full pool refuses with the current holders listed.
 - An unreachable, unconfirmed, unreadable, locked, or malformed authority also refuses, including a missing registered local home, missing remote snapshot, or unparseable secondmate registry record, because an uncounted seat is never treated as free.
 - A running agent, including a primary that starts while the pool is full, is never refused or preempted; new pooled launches refuse until the count is back under capacity.
-- No refusal changes the route: firstmate picks the overflow route from `config/crew-dispatch.json` at its own model and effort, or holds the task.
+- No refusal re-routes the task by itself: firstmate chooses another eligible profile from the matched rule's `use` array, dispatching at that profile's own model and effort, or holds the task.
 - A reservation whose launching process died is resolved by the watcher's periodic seat maintenance only with evidence that it never dispatched, its confirmed agent later died, or its exact endpoint is proven destroyed; until then the orphan stays counted, however long that evidence remains unavailable.
 - Bounded maintenance rotates its starting holder every 30 seconds so uncertain or busy launches do not permanently prevent later holders from being reconciled.
 - A ship or scout's seat is retained until cleanup while its task record still names that generation; a supervisor's record may remain during generation-specific recovery.

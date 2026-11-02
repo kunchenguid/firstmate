@@ -1071,6 +1071,9 @@ cmd_retire() {
     # The pending record is the evidence a retirement owes the primary if it
     # is interrupted after the home is gone and before the proof is published.
     # It binds this exact generation and route and never claims destruction.
+    # A Rex route also retains the recorded creation server, because the home
+    # metadata that names it is removed with the home, while the retry's
+    # absence proof refuses to read a same-numbered block on any other server.
     pending="$HOST_HISTORY/$id.retirement.$expected.pending.json"
     if [ -e "$pending" ] || [ -L "$pending" ]; then
       [ -f "$pending" ] && [ ! -L "$pending" ] || die "remote retirement history is unsafe"
