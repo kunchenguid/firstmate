@@ -1076,6 +1076,18 @@ move_world() {  # <name> <pane-command> -> sets W_DIR, W_PATH, W_HCBIN, W_LOG, W
   [ -n "$W_TAG" ] && [ -n "$W_MATE_TAG" ] || fail "could not resolve the home tags"
 }
 
+run_move_with_root() {  # <fm-root> <args...> -> run_move with FM_ROOT_OVERRIDE set to <fm-root>
+  local root=$1
+  shift
+  env -u HC_TERMINAL_ID -u HC_TERMINAL_SOCKET -u HC_SCOPE -u HC_SOCKET -u FM_HC_SOCKET -u FM_BACKEND \
+    FM_ROOT_OVERRIDE="$root" \
+    PATH="$W_PATH:$BASE_PATH" TMUX='' FM_HOME="$W_DIR/home" \
+    FM_HC_BIN="$W_HCBIN" FM_HC_FAKE_DIR="$W_DIR/hc" HC_SESSION=fmtest \
+    FM_MOVE_FAKE_DIR="$W_MV" FM_TMUX_CALL_LOG="$W_LOG" \
+    FM_CONTROL_POLL=0.01 FM_CONTROL_SETTLE_WAIT=0.05 FM_CONTROL_EXIT_WAIT=0.5 \
+    "$ROOT/bin/fm-secondmate-move.sh" "$@" 2>&1
+}
+
 run_move() {  # <args...> -> combined output; the move's exit status
   env -u HC_TERMINAL_ID -u HC_TERMINAL_SOCKET -u HC_SCOPE -u HC_SOCKET -u FM_HC_SOCKET -u FM_ROOT_OVERRIDE -u FM_BACKEND \
     PATH="$W_PATH:$BASE_PATH" TMUX='' FM_HOME="$W_DIR/home" \
@@ -1195,6 +1207,44 @@ test_move_restores_the_previous_record_when_the_launch_fails() {
   assert_not_contains "$out" "moved sm1" "a failed launch must not report a move"
   assert_grep 'failed' "$W_DIR/home/state/.secondmate-relaunch-sm1" "the move must record its failed outcome"
   pass "move: a failed replacement launch leaves the previous record in place for recovery and says so"
+}
+
+test_move_leaves_a_newer_record_in_place_when_the_launch_fails() {
+  local out rc=0 entry fake_root
+  move_world move-launch-fails-newer zsh
+  : > "$W_DIR/hc/send-refuses"
+  # A root whose fm-spawn.sh runs the real spawn (which fails at the send) and
+  # then publishes a newer record, as a concurrent relaunch would, before the
+  # move gets to its restore.
+  fake_root="$W_DIR/root"
+  mkdir -p "$fake_root/bin"
+  for entry in "$ROOT"/*; do
+    [ "${entry##*/}" = bin ] || ln -s "$entry" "$fake_root/${entry##*/}"
+  done
+  for entry in "$ROOT"/bin/*; do
+    [ "${entry##*/}" = fm-spawn.sh ] || ln -s "$entry" "$fake_root/bin/${entry##*/}"
+  done
+  cat > "$fake_root/bin/fm-spawn.sh" <<SH
+#!/usr/bin/env bash
+rc=0
+env -u FM_ROOT_OVERRIDE '$ROOT/bin/fm-spawn.sh' "\$@" || rc=\$?
+printf 'window=fm-sm1-newer\nkind=secondmate\nbackend=tmux\nhome=$W_DIR/sm1\n' > '$W_DIR/newer.meta'
+cp -p '$W_DIR/newer.meta' '$W_DIR/home/state/sm1.meta'
+exit "\$rc"
+SH
+  chmod +x "$fake_root/bin/fm-spawn.sh"
+  cp -p "$W_DIR/home/state/sm1.meta" "$W_DIR/before.meta"
+  out=$(run_move_with_root "$fake_root" sm1 --backend hc) || rc=$?
+  expect_code 1 "$rc" "a move whose replacement launch fails must fail"$'\n'"$out"
+  cmp -s "$W_DIR/newer.meta" "$W_DIR/home/state/sm1.meta" \
+    || fail "a record published after the failed launch must be left byte-identical"$'\n'"$(diff "$W_DIR/newer.meta" "$W_DIR/home/state/sm1.meta" 2>&1)"
+  ! cmp -s "$W_DIR/before.meta" "$W_DIR/home/state/sm1.meta" || fail "the snapshot must not overwrite a newer record"
+  assert_contains "$out" "could not be launched on hc" "the failure names the target"
+  assert_contains "$out" "a different record for it is now in place" "the failure names the record it found"
+  assert_contains "$out" "the previous one was not put back" "the failure must not claim the previous record was restored"
+  assert_not_contains "$out" "is in place, so the next liveness recovery" "the failure must not claim the previous record survived"
+  assert_not_contains "$out" "moved sm1" "a failed launch must not report a move"
+  pass "move: a failed launch leaves a record published since in place and says the previous one was not restored"
 }
 
 test_move_usage_prints_the_exit_status_contract() {
@@ -1483,6 +1533,7 @@ test_move_stops_a_live_tmux_secondmate_and_relaunches_it_on_hc
 test_move_relaunches_an_already_stopped_tmux_secondmate_on_hc
 test_move_refuses_before_stopping_anything
 test_move_restores_the_previous_record_when_the_launch_fails
+test_move_leaves_a_newer_record_in_place_when_the_launch_fails
 test_move_usage_prints_the_exit_status_contract
 test_move_refuses_while_the_liveness_lock_is_held
 test_remote_poll_probe_maps_states
