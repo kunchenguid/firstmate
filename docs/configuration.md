@@ -63,6 +63,7 @@ The script header and help own registration, replacement, removal, and listing m
 Firstmate resolves those labels to current pane IDs before each bounded wait, so replacing a server or pane does not require saving a new ID.
 The per-cycle identity/status probe runs inside `watcher_waited`'s recorded process group with an `FM_WATCHED_PANE_READ_SECS` budget (default 5 seconds; zero or non-digit values use 5).
 If a read hangs, the watchdog terminates that group, escalating to KILL after one second; completed rows retain their results and unfinished rows retry next cycle.
+The probe advances its starting registration by one each cycle, so a persistently hung read cannot starve later registrations while the watcher continues cycling.
 When a Herdr event wait includes resolved watches, its initial status reconciliation has a separate budget of the same duration, released after reconciliation so the normal event subscription duration remains unchanged.
 Missing or ambiguous identities are reported to stderr and skipped rather than guessed; renamed labels require registration again.
 Any endpoint already recorded in task metadata retains its task policy, including secondmate exclusions, even if explicitly registered.

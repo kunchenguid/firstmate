@@ -35,7 +35,7 @@ The turn-end guard closes the remaining gap at the primary's own turn boundary.
 
 The guard acts at that boundary when both of these hold:
 
-- Work, a process-event source, a registered custom check, or Relay polling needs supervision.
+- The home meets the shared [supervision-need predicate](../bin/fm-supervision-lib.sh).
 - No identity-matched watcher has a fresh beacon.
 
 The beacon is `state/.last-watcher-beat`, which `bin/fm-watch.sh` touches every cycle, as [Guard grace and the poll cadence](#guard-grace-and-the-poll-cadence) describes.
@@ -73,12 +73,7 @@ It also requires `AGENTS.md`, `bin/`, and the effective state directory.
 
 ### Supervision need
 
-For an in-scope primary, the guard counts in-flight work from `state/*.meta`.
-These sources also count toward supervision need:
-
-- Registered `state/procevent/*.source` records require supervision even though they have no task metadata.
-- Every mode treats `state/x-watch.check.sh` as supervision need, so Relay polling remains guarded without an in-flight task.
-- A custom check registered with `bin/fm-check-register.sh` counts the same way, so an operator's home-level poll keeps running after the last task is torn down.
+For an in-scope primary, [`bin/fm-supervision-lib.sh`](../bin/fm-supervision-lib.sh) owns the supervision-need conditions shared by every mode, including registrations without task metadata.
 
 The default cross-harness mode exits silently with no supervision need.
 
