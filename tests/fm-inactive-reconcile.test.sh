@@ -179,12 +179,43 @@ test_main_direct_terminal_presentation_receipt() {
   pass "main direct terminal presentation has a durable receipt"
 }
 
-test_live_agent_withholds_terminal_outcome() {
-  make_world live-agent; write_child "$MAIN" child 'done: PR https://example.test/owner/repo/pull/1 checks green'
+arm_claude_busy() { # <home> <id> <busy|idle>
+  local home=$1 id=$2 state=$3
+  sed -i 's/^harness=.*/harness=claude/' "$home/state/$id.meta"
+  printf 'g1\n' > "$home/state/$id.busy-gen"
+  printf 'v1 gen=g1 seq=1 state=%s source=claude-hook event=test ts=%s\n' "$state" "$(date +%s)" > "$home/state/$id.busy-state"
+}
+
+run_live_child() { # <world> <busy|idle> <meta-newer-than-status:0|1>
+  make_world "$1"; write_child "$MAIN" child 'done: PR https://example.test/owner/repo/pull/1 checks green'
+  arm_claude_busy "$MAIN" child "$2"
+  age "$MAIN/state/child.meta" "$MAIN/state/child.status"
+  [ "$3" != 1 ] || set_mtime "$(( $(date +%s) - 90 ))" "$MAIN/state/child.meta"
   FM_FAKE_CREW_STATE='failed' FM_FAKE_PANE_CMD=claude FM_FAKE_TASK_ID=child run_reconcile "$MAIN" --startup
-  [ "$(outcome_count "$MAIN" pending)" = 0 ] || fail "live agent still received a terminal outcome"
-  [ "$(wake_count "$MAIN" 'inactive-outcome:')" != 1 ] || fail "live agent still woke the supervisor"
-  pass "live agent withholds the terminal outcome"
+}
+
+assert_withheld() {
+  [ "$(outcome_count "$MAIN" pending)" = 0 ] || fail "$1: terminal outcome record written"
+  [ -z "$(grep inactive-outcome: "$MAIN/state/.wake-queue" 2>/dev/null)" ] || fail "$1: supervisor woke"
+}
+
+test_busy_agent_withholds_terminal_outcome() {
+  run_live_child busy-agent busy 0
+  assert_withheld "busy agent"
+  pass "busy agent withholds the terminal outcome"
+}
+
+test_relaunched_idle_agent_withholds_terminal_outcome() {
+  run_live_child relaunched-agent idle 1
+  assert_withheld "relaunched agent"
+  pass "idle agent on a newer incarnation withholds the terminal outcome"
+}
+
+test_idle_finished_agent_keeps_terminal_outcome() {
+  run_live_child idle-agent idle 0
+  [ "$(outcome_count "$MAIN" pending)" = 1 ] || fail "idle finished agent lost its terminal outcome"
+  [ "$(wake_count "$MAIN" 'inactive-outcome:')" = 1 ] || fail "idle finished agent did not wake the supervisor"
+  pass "idle finished agent keeps the terminal outcome"
 }
 
 test_dead_agent_keeps_terminal_outcome() {
@@ -1093,7 +1124,9 @@ SH
 }
 
 test_main_direct_terminal_presentation_receipt
-test_live_agent_withholds_terminal_outcome
+test_busy_agent_withholds_terminal_outcome
+test_relaunched_idle_agent_withholds_terminal_outcome
+test_idle_finished_agent_keeps_terminal_outcome
 test_dead_agent_keeps_terminal_outcome
 test_branch_ack_retires_inactive_outcome_receipt
 test_unpushed_ci_ready_done_is_not_published

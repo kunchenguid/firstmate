@@ -88,8 +88,8 @@
 # main-home acknowledgement. The atomic epoch/cursor marker's mtime gates scans,
 # and its cursor records the last child visited within the aggregate budget.
 #
-# The scan reads only durable local state, fm-crew-state.sh, and one endpoint
-# liveness read per terminal candidate; it never invokes
+# The scan reads only durable local state, fm-crew-state.sh, and one
+# time-bounded endpoint liveness and busy read per terminal candidate; it never invokes
 # gh, gh-axi, curl, fm-pr-check.sh, fm-pr-poll.sh, or a state *.check.sh.
 set -u
 export LC_ALL=C
@@ -503,12 +503,23 @@ report_child() { # <id>
   report_child_ledger_locked "$id" "$meta"
 }
 
-task_agent_state() { # <meta>
-  local backend target
-  backend=$(fm_backend_of_meta "$1")
-  target=$(fm_backend_target_of_meta "$1")
-  [ -n "$target" ] || { printf 'unreadable'; return 0; }
-  fm_backend_agent_state "$backend" "$target" 2>/dev/null || printf 'unreadable'
+task_holds_live_work() { # <id> <meta> <timeout>; 0 when the verdict must be withheld, 3 on timeout
+  local id=$1 meta=$2 timeout=$3 backend target verdict rc=0
+  backend=$(fm_backend_of_meta "$meta")
+  target=$(fm_backend_target_of_meta "$meta")
+  [ -n "$target" ] || return 1
+  verdict=$(fm_run_timed "$timeout" bash -c '
+    . "$1"; . "$2"
+    [ "$(fm_backend_agent_state "$3" "$4" 2>/dev/null)" = alive ] || exit 0
+    printf "alive "
+    fm_busy_classify_meta "$5" "$6" "$7" 2>/dev/null' \
+    _ "$SCRIPT_DIR/fm-backend.sh" "$SCRIPT_DIR/fm-busy-lib.sh" "$backend" "$target" "$meta" "$id" "$STATE") || rc=$?
+  [ "$rc" -ne 124 ] || return 3
+  case "$verdict" in
+    'alive busy'*) return 0 ;;
+    alive*) [ "$meta" -nt "$STATE/$id.status" ] ;;
+    *) return 1 ;;
+  esac
 }
 
 reconcile_direct_child_locked() { # <id> <meta> <secondmate-id-or-empty> <timeout>
@@ -540,7 +551,8 @@ reconcile_direct_child_locked() { # <id> <meta> <secondmate-id-or-empty> <timeou
     'state: failed '*) state='failed' ;;
     *) return 0 ;;
   esac
-  [ "$(task_agent_state "$meta")" != alive ] || return 0
+  task_holds_live_work "$id" "$meta" "$timeout" && return 0
+  [ "$?" -ne 3 ] || return 3
   pr=$(pr_for_task "$meta")
   incarnation=$(meta_incarnation "$meta")
   # The receipt identity binds structured fields only: a persistent child that
