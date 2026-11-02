@@ -3994,6 +3994,15 @@ while :; do
     triage_log "inactive-outcome reconciliation unavailable"
   fi
 
+  claimed_run_matches_snapshot() {
+    local file=$1 snapshot=$2 size=$3 current saved
+    exec 8< "$file" 9< "$snapshot" || return 1
+    IFS= read -r -d '' -n "$size" current <&8 || { exec 8<&- 9<&-; return 1; }
+    IFS= read -r -d '' -n "$size" saved <&9 || { exec 8<&- 9<&-; return 1; }
+    exec 8<&- 9<&-
+    [ "$current" = "$saved" ]
+  }
+
   claimed_run_has_appended_bytes() {
     local file=$1 offset=$2 discarded next
     exec 8< "$file" || return 0
@@ -4029,8 +4038,7 @@ while :; do
       case "$cursor_dev:$cursor_ino:$cursor_size" in *[!0-9:]*) cursor_dev= ;; esac
     fi
     witness_match=
-    if [ -f "$witness" ] && IFS= read -r line < "$f" && IFS= read -r recorded_claim < "$witness" \
-      && [ "$line" = "$recorded_claim" ]; then witness_match=1; fi
+    if [ -f "$witness" ] && claimed_run_matches_snapshot "$f" "$witness" "$cursor_size"; then witness_match=1; fi
     if [ -n "$cursor_dev" ] && [ -n "$witness_match" ] && [ -f "$identity" ] && [ "$f" -ef "$identity" ] && [ ! "$f" -nt "$cursor" ] \
       && ! claimed_run_has_appended_bytes "$f" "$cursor_size"; then
       dev=$cursor_dev; ino=$cursor_ino; size=$cursor_size
@@ -4069,8 +4077,7 @@ EOF
       fi
       cursor_claim=$claim
       printf '%s %s %s %s\n' "$dev" "$ino" "$offset" "$cursor_claim" > "$cursor"
-      IFS= read -r line < "$f" || line=
-      printf '%s\n' "$line" > "$witness"
+      cp "$f" "$witness" || continue
       rm -f "$identity"
       ln "$f" "$identity" 2>/dev/null || :
     fi

@@ -855,7 +855,7 @@ test_claimed_run_same_size_rewrite_resets_cursor() {
   mkdir -p "$wt"
   git -C "$wt" init -q
   printf 'worktree=%s\n' "$wt" > "$state/claim.meta"
-  printf 'working: validation pending\n' > "$status_file"
+  printf 'working: validation pending\nworking: validation pending\n' > "$status_file"
   printf 'v2\t%s\t%s@%s' "$(status_observed_signature "$status_file")" \
     "$(size_of "$status_file")" "$(_fm_open_decisions_file_ident "$status_file")" \
     > "$state/.seen-claim_status"
@@ -872,7 +872,7 @@ SH
   pid=$!
   wait_poll_cycle "$state" "$pid" || { reap "$pid"; fail "same-size watcher exited before its first cycle"; }
   read -r _ _ old_size _ < "$cursor"
-  printf 'working: validation started\n' > "$status_file"
+  printf 'working: validation pending\nworking: validation started\n' > "$status_file"
   [ "$(size_of "$status_file")" -eq "$old_size" ] || { reap "$pid"; fail "same-size fixture changed the status log size"; }
   touch -r "$cursor" "$status_file"
   wait_for_exit "$pid" 100 || { reap "$pid"; fail "same-size rewritten claim was not detected"; }
