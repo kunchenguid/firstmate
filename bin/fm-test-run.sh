@@ -909,6 +909,7 @@ tests/fm-remote-secondmate-lifecycle-e2e.test.sh 837309
 tests/fm-remote-secondmate-omp.test.sh 5868
 tests/fm-remote-secondmate-parent-binding.test.sh 80636
 tests/fm-remote-secondmate-relaunch.test.sh 154430
+tests/fm-remote-secondmate-session.test.sh 800
 tests/fm-remote-secondmate-trace-context.test.sh 152508
 tests/fm-remote-transport-lanes.test.sh 75647
 tests/fm-review-check.test.sh 1437
