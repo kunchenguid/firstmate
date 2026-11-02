@@ -1672,19 +1672,36 @@ fm_backend_transition_note() {  # <backend> <record>
   esac
 }
 
-# Early spawn checks for API-owned sessions. Other backends keep their
+# Early spawn checks for API-owned sessions, and for hc, whose core must answer
+# before a move stops the agent it would replace. Other backends keep their
 # existing admission checks in container_ensure at endpoint provisioning.
 fm_backend_runtime_check() {  # <backend>
   fm_backend_source "$1" || return 1
   case "$1" in
     orca) fm_backend_orca_runtime_check ;;
     t3code) fm_backend_t3code_runtime_check ;;
+    hc) fm_backend_hc_container_ensure >/dev/null ;;
     *) return 0 ;;
   esac
 }
 
 fm_backend_validate_harness() {  # <backend> <harness>
   fm_backend_source "$1" || return 1
+  # Command Code's idle placeholder, and Cortex's titled composer box, read
+  # empty only with that harness's pane identity, which tmux and Herdr supply
+  # and the other backends do not, so there the composer would never read
+  # empty and steering would stall.
+  case "$2" in
+    commandcode|cortex)
+      case "$1" in
+        tmux|herdr) ;;
+        *)
+          echo "error: $2 is verified on the tmux and herdr backends only; backend=$1 cannot prove its composer empty. Select backend tmux or herdr." >&2
+          return 1
+          ;;
+      esac
+      ;;
+  esac
   case "$1" in
     t3code) fm_backend_t3code_validate_harness "$2" ;;
     *) return 0 ;;

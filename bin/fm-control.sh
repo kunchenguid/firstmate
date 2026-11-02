@@ -6,6 +6,7 @@
 #        fm-control.sh <task-id> exit
 #        fm-control.sh <task-id> relaunch [--harness <name>] [--model <name>]
 #                                         [--effort <level>] [--account <entry>]
+#                                         [--backend <name>]
 #                                         (--note <text> | --note-file <path>)
 #
 # Why this exists, and how it differs from fm-send.sh. bin/fm-send.sh is the
@@ -94,6 +95,15 @@
 #              The same pre-stop refusal applies to this home's worker tool
 #              exclusions (bin/fm-exclude-tools-lib.sh): a malformed list, or a
 #              replacement runtime that cannot hide the listed tools.
+#              --backend <name> MOVES the task to another runtime backend
+#              (hc only): the old agent is stopped on its recorded endpoint
+#              exactly as above, one fresh endpoint is created on <name> in
+#              the same recorded worktree, the record is republished with
+#              that backend and endpoint, and the old endpoint is closed only
+#              after that record is committed. A Pi replacement resumes the
+#              session the old endpoint's runtime recorded, as an in-place
+#              relaunch does. The target backend's spawn, runtime, and
+#              harness checks run before the old agent stops.
 #              Refused on t3code before anything is stopped: a T3 thread
 #              keeps its conversation, so a new turn or a provider change on
 #              it continues the same agent rather than a fresh one
@@ -269,6 +279,8 @@ NEW_HARNESS=
 NEW_MODEL=
 NEW_EFFORT=
 NEW_ACCOUNT=
+NEW_BACKEND=
+BACKEND_SET=0
 HARNESS_SET=0
 MODEL_SET=0
 EFFORT_SET=0
@@ -286,6 +298,7 @@ for control_arg in "$@"; do
       model) NEW_MODEL=$control_arg; MODEL_SET=1 ;;
       effort) NEW_EFFORT=$control_arg; EFFORT_SET=1 ;;
       account) NEW_ACCOUNT=$control_arg; ACCOUNT_SET=1 ;;
+      backend) NEW_BACKEND=$control_arg; BACKEND_SET=1 ;;
       note) NOTE=$control_arg; NOTE_SET=1 ;;
       note_file)
         [ -f "$control_arg" ] || die "--note-file '$control_arg' is not a readable file"
@@ -305,6 +318,8 @@ for control_arg in "$@"; do
     --effort=*) NEW_EFFORT=${control_arg#--effort=}; EFFORT_SET=1 ;;
     --account) control_want_value=account ;;
     --account=*) NEW_ACCOUNT=${control_arg#--account=}; ACCOUNT_SET=1 ;;
+    --backend) control_want_value=backend ;;
+    --backend=*) NEW_BACKEND=${control_arg#--backend=}; BACKEND_SET=1 ;;
     --note) control_want_value=note ;;
     --note=*) NOTE=${control_arg#--note=}; NOTE_SET=1 ;;
     --note-file) control_want_value=note_file ;;
@@ -323,9 +338,11 @@ fi
 
 if [ "$VERB" != relaunch ]; then
   [ "$HARNESS_SET" = 0 ] && [ "$MODEL_SET" = 0 ] && [ "$EFFORT_SET" = 0 ] && [ "$ACCOUNT_SET" = 0 ] && [ "$NOTE_SET" = 0 ] \
-    || die "--harness, --model, --effort, --account, and --note apply to 'relaunch' only"
+    && [ "$BACKEND_SET" = 0 ] \
+    || die "--harness, --model, --effort, --account, --backend, and --note apply to 'relaunch' only"
 fi
 [ "$ACCOUNT_SET" = 0 ] || [ -n "$NEW_ACCOUNT" ] || die "--account requires a non-empty value"
+[ "$BACKEND_SET" = 0 ] || [ -n "$NEW_BACKEND" ] || die "--backend requires a non-empty value"
 [ "$HARNESS_SET" = 0 ] || [ -n "$NEW_HARNESS" ] || die "--harness requires a non-empty value"
 [ "$MODEL_SET" = 0 ] || [ -n "$NEW_MODEL" ] || die "--model requires a non-empty value"
 [ "$EFFORT_SET" = 0 ] || [ -n "$NEW_EFFORT" ] || die "--effort requires a non-empty value"
@@ -903,6 +920,7 @@ journal_write() {  # <phase> [extra-line]...
     echo "to_harness=$TARGET_HARNESS"
     echo "to_model=$TARGET_MODEL"
     echo "to_effort=$TARGET_EFFORT"
+    [ "$BACKEND_SET" = 0 ] || echo "to_backend=$NEW_BACKEND"
     local line
     for line in "$@"; do
       echo "$line"
@@ -1115,6 +1133,31 @@ resolve_relaunch_profile() {
   fi
 }
 
+# resolve_move_backend: for `relaunch --backend`, prove before anything is
+# stopped that the target backend can take this task, so a refusal the launch
+# owner would raise after the stop is raised here instead, while nothing has
+# changed. fm-spawn.sh --relaunch --move-backend re-checks all of it and owns
+# the move itself.
+resolve_move_backend() {
+  [ "$BACKEND_SET" = 1 ] || return 0
+  [ "$NEW_BACKEND" != "$BACKEND" ] \
+    || die "task $ID already runs on backend '$BACKEND'; drop --backend to relaunch it in place"
+  case "$NEW_BACKEND" in
+    hc) ;;
+    *) die "relaunch --backend supports the hc backend only; '$NEW_BACKEND' has no verified path for a moved task" ;;
+  esac
+  case "$KIND" in
+    ship|scout|secondmate) ;;
+    *) die "task $ID records kind '$KIND', which has no defined move shape" ;;
+  esac
+  fm_backend_validate_spawn "$NEW_BACKEND" || exit 1
+  fm_backend_runtime_check "$NEW_BACKEND" || exit 1
+  fm_backend_validate_harness "$NEW_BACKEND" "$TARGET_HARNESS" || exit 1
+  if ! fm_control_backend_state_verified "$NEW_BACKEND" || ! fm_control_backend_relaunch_supported "$NEW_BACKEND"; then
+    die "backend '$NEW_BACKEND' cannot prove an agent stopped or host a replacement; refusing to move $ID there"
+  fi
+}
+
 # safe_checkpoint: prove, before anything is stopped, that the work a relaunch
 # must preserve is actually there and recoverable afterwards. Fills
 # CHECKPOINT_LINES with the journal lines describing what it proved, and
@@ -1224,6 +1267,7 @@ do_relaunch() {
   fm_control_backend_relaunch_supported "$BACKEND" \
     || die "task $ID runs on the $BACKEND backend, where a thread keeps its conversation and a new turn or provider change continues the same agent, so no fresh replacement can be launched into its endpoint; 'interrupt' ends its turn, and a fresh task needs a teardown and a new dispatch"
   resolve_relaunch_profile
+  resolve_move_backend
 
   case "$KIND" in
     ship|scout)
@@ -1268,6 +1312,7 @@ do_relaunch() {
   [ "$TARGET_MODEL" = default ] || spawn_args+=(--model "$TARGET_MODEL")
   [ "$TARGET_EFFORT" = default ] || spawn_args+=(--effort "$TARGET_EFFORT")
   [ -z "$TARGET_ACCOUNT" ] || spawn_args+=(--account "$TARGET_ACCOUNT")
+  [ "$BACKEND_SET" = 0 ] || spawn_args+=(--move-backend "$NEW_BACKEND")
   if FM_CONTROL_RELAUNCH_TX="$RELAUNCH_TX" \
       "$SCRIPT_DIR/fm-spawn.sh" "${spawn_args[@]}" >/dev/null; then
     RELAUNCH_META_PUBLISHED=1
@@ -1285,6 +1330,7 @@ do_relaunch() {
     if fm_backend_validate_task_endpoint "$META" "$ID" >/dev/null \
        && [ -n "$FM_BACKEND_VALIDATED_TARGET" ]; then
       T=$FM_BACKEND_VALIDATED_TARGET
+      BACKEND=$FM_BACKEND_VALIDATED_BACKEND
     else
       die "the replacement agent for $ID was launched, but task $ID's republished record no longer passes endpoint validation (the refusal above names the row), so this transaction cannot say which endpoint to confirm it on; reconcile $META before any further control action"
     fi

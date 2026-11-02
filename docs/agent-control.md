@@ -101,6 +101,16 @@ A relaunch does take one session reference when the endpoint's own runtime recor
 
 Switching harness is therefore one ordinary relaunch rather than a separate mechanism.
 
+### Moving a task to another backend
+
+`relaunch --backend hc` moves a ship, scout, or local secondmate onto herdr-core, the terminal core Herdr.app shows.
+It runs the same transaction: the old agent is stopped on its recorded endpoint and must read agent-free there, one fresh hc terminal opens in the same recorded worktree or home, the replacement launches there, and the record is republished with `backend=hc` and that terminal.
+The old endpoint is closed only after that record is committed, and only while it still reads agent-free.
+The worktree, branch, and every uncommitted change are reused untouched.
+The target's spawn, core, and harness checks run before the old agent stops, so a move hc cannot take refuses with nothing changed.
+A Pi replacement resumes the session the old endpoint's runtime recorded, as an in-place relaunch does; other harnesses start a fresh conversation from the brief and the progress note.
+hc is the only move target.
+
 ### Reclaiming a task whose endpoint is gone
 
 A Herdr pane or workspace, or a Rex block, can be destroyed out from under a live task by churn, a session restart, or a stopped Rex server.

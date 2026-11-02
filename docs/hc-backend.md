@@ -111,6 +111,7 @@ An input, capture, or close that carries the task label refuses a terminal whose
 `bin/fm-control.sh` drives hc tasks like tmux, Herdr, and Rex tasks: `interrupt`, `exit`, and `relaunch` in the same terminal.
 An agent that exits returns its terminal to the login shell, which reads `dead` and is adopted by the next relaunch.
 A terminal is proven gone when it is finished and still carries the task's labels, or when the core whose id the record names answers not-found; the relaunch then opens one fresh terminal in the recorded worktree.
+`relaunch --backend hc` moves a task from another backend onto hc ([`agent-control.md`](agent-control.md#moving-a-task-to-another-backend)).
 
 ## Limits
 
