@@ -134,7 +134,8 @@
 #                          within about FM_START_CHECK_SECS plus one FM_POLL for
 #                          local workers; remote secondmates add proof- and
 #                          cause-read route round trips, each capped at
-#                          FM_START_CHECK_ROUTE_SECS. <n> is the real elapsed time: one wake per launch,
+#                          FM_START_CHECK_ROUTE_SECS (one shared remote-read
+#                          budget per poll). <n> is the real elapsed time: one wake per launch,
 #                          including remote secondmates, naming an exited agent,
 #                          a vanished endpoint, a recognized launch dialog, or an
 #                          unsubmitted brief, and the command that clears it; the
@@ -2837,7 +2838,8 @@ EOF
 # after that append succeeded, so a crash in between can repeat the wake once
 # but never lose it. Nothing here presses a key: the supervisor accepts a
 # folder-trust dialog for its own worker under the harness-adapters trust
-# rules. At most one wake is queued per poll, like the reminder tick above.
+# rules. Remote proofs wait until the deadline, remote route reads share one
+# START_CHECK_ROUTE_SECS wall-clock budget per poll, and at most one wake is queued.
 START_CHECK_SECS=${FM_START_CHECK_SECS:-120}
 case "$START_CHECK_SECS" in ''|0*|*[!0-9]*) START_CHECK_SECS=120 ;; esac
 START_CHECK_ROUTE_SECS=${FM_START_CHECK_ROUTE_SECS:-20}
@@ -2849,10 +2851,33 @@ START_CHECK_WAKE=
 # bin/fm-remote-secondmate-control.sh verbs), as the secondmate liveness tick
 # does. watcher_waited keeps shutdown interruptible; fm_run_timed bounds each
 # route call. An unreachable host returns nonzero and is neither proof nor death.
+# 0 when <id> wrote a status line or completed a turn at or after <epoch>; for a
+# remote secondmate this is the parent-side mirror of its status, read locally.
+start_check_local_proof() {  # <id> <epoch>
+  local f m
+  for f in "$STATE/$1.status" "$STATE/$1.turn-ended"; do
+    m=$(stat_mtime "$f") || continue
+    [ "$m" -ge "$2" ] && return 0
+  done
+  return 1
+}
+
+# 0 while the current start_check_tick still has route time left; outside a
+# tick there is no shared budget.
+start_check_route_budget_left() {
+  [ -z "${START_CHECK_TICK_STARTED:-}" ] \
+    || [ "$((START_CHECK_TICK_STARTED + START_CHECK_ROUTE_SECS - $(date +%s)))" -gt 0 ]
+}
+
 start_check_remote() {  # <id> <verb> [args...]; output in WATCHER_CAPTURE
-  local id=$1 verb=$2
+  local id=$1 verb=$2 limit=$START_CHECK_ROUTE_SECS now
   shift 2
-  watcher_waited fm_run_timed "$START_CHECK_ROUTE_SECS" "$SCRIPT_DIR/fm-on.sh" "$id" fm-remote-secondmate-control.sh "$verb" "$id" "$@"
+  if [ -n "${START_CHECK_TICK_STARTED:-}" ]; then
+    now=$(date +%s)
+    limit=$((START_CHECK_ROUTE_SECS - now + START_CHECK_TICK_STARTED))
+    [ "$limit" -gt 0 ] || return 1
+  fi
+  watcher_waited fm_run_timed "$limit" "$SCRIPT_DIR/fm-on.sh" "$id" fm-remote-secondmate-control.sh "$verb" "$id" "$@"
 }
 
 # 0 when a busy-contract verdict proves a started worker: busy from anything but
@@ -2880,11 +2905,8 @@ start_check_verdict_proves() {  # <verdict>
 # semantic source, so its rendered busy footer counts unless the same tail shows
 # a launch dialog.
 start_check_started() {  # <id> <meta> <epoch> [record-gen]
-  local id=$1 meta=$2 epoch=$3 gen=${4:--} f m backend target tail
-  for f in "$STATE/$id.status" "$STATE/$id.turn-ended"; do
-    m=$(stat_mtime "$f") || continue
-    [ "$m" -ge "$epoch" ] && return 0
-  done
+  local id=$1 meta=$2 epoch=$3 gen=${4:--} backend target tail
+  start_check_local_proof "$id" "$epoch" && return 0
   if [ -n "$(fm_meta_get "$meta" remote_host)" ]; then
     start_check_remote "$id" observe --start-proof || return 1
     [ "$(printf '%s\n' "$WATCHER_CAPTURE" | head -1)" = busy ] && return 0
@@ -3011,8 +3033,9 @@ start_check_reason() {  # <id> <meta> <harness> <age>
 }
 
 start_check_tick() {  # [now-epoch], for deterministic clock callers
-  local now=${1:-} f id epoch gen harness meta mgen reason target lock
+  local now=${1:-} f id epoch gen harness meta mgen reason target lock remote
   START_CHECK_WAKE=
+  START_CHECK_TICK_STARTED=$(date +%s)
   for f in "$STATE"/*.start-pending; do
     [ -f "$f" ] || continue
     id=${f##*/}
@@ -3041,13 +3064,27 @@ start_check_tick() {  # [now-epoch], for deterministic clock callers
       fm_lock_release "$lock"
       continue
     fi
+    remote=$(fm_meta_get "$meta" remote_host)
+    [ -n "$now" ] || fm_epoch_seconds_to now
+    # A remote proof crosses the route, so it is read only once the record is
+    # due and only while this poll's shared route budget lasts; until then only
+    # the parent-side mirror can clear it, and the record waits for a later poll.
+    if [ -n "$remote" ] && { [ "$((now - epoch))" -lt "$START_CHECK_SECS" ] || ! start_check_route_budget_left; }; then
+      if start_check_local_proof "$id" "$epoch"; then
+        rm -f -- "$f"
+        fm_lock_release "$lock"
+        triage_log "start check: $id started"
+      else
+        fm_lock_release "$lock"
+      fi
+      continue
+    fi
     if start_check_started "$id" "$meta" "$epoch" "$gen"; then
       rm -f -- "$f"
       fm_lock_release "$lock"
       triage_log "start check: $id started"
       continue
     fi
-    [ -n "$now" ] || fm_epoch_seconds_to now
     [ "$((now - epoch))" -ge "$START_CHECK_SECS" ] || { fm_lock_release "$lock"; continue; }
     [ -z "$START_CHECK_WAKE" ] || { fm_lock_release "$lock"; continue; }
     start_check_reason "$id" "$meta" "$harness" "$((now - epoch))"
@@ -3062,7 +3099,9 @@ start_check_tick() {  # [now-epoch], for deterministic clock callers
       printf '%s' "$START_CHECK_TAIL" | hash_pane > "$STATE/.stale-$(window_key "$target")"
     fi
     START_CHECK_WAKE=$reason
+    break
   done
+  START_CHECK_TICK_STARTED=
 }
 
 # The identity a re-surface throttle is bound to: the task's whole status-log

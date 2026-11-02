@@ -46,6 +46,7 @@ REMOTE_HOST=$(fm_meta_get "$META" remote_host)
 [ -n "$REMOTE_HOST" ] \
   || die "task $ID is not a remotely placed secondmate; use bin/fm-control.sh $ID relaunch instead"
 
+LAUNCH_EPOCH=$(date +%s)
 RELAUNCH_OUT=$("$SCRIPT_DIR/fm-on.sh" "$ID" fm-remote-secondmate-control.sh \
   relaunch "$ID" "$HARNESS" "$MODEL" "$EFFORT" </dev/null 2>&1) || {
   rc=$?
@@ -65,6 +66,8 @@ printf '%s\n' "$RELAUNCH_OUT"
 NEW_HARNESS=$(printf '%s\n' "$RELAUNCH_OUT" | sed -n 's/^harness=//p' | tail -1)
 NEW_MODEL=$(printf '%s\n' "$RELAUNCH_OUT" | sed -n 's/^model=//p' | tail -1)
 NEW_EFFORT=$(printf '%s\n' "$RELAUNCH_OUT" | sed -n 's/^effort=//p' | tail -1)
+REMOTE_BUSY_GEN=$(printf '%s\n' "$RELAUNCH_OUT" | sed -n 's/^busy_gen=//p' | tail -1)
+case "$REMOTE_BUSY_GEN" in *[!A-Za-z0-9._-]*) REMOTE_BUSY_GEN= ;; esac
 [ -n "$NEW_HARNESS" ] || die "the host's route confirmation carried no harness to record"
 
 META_LOCK=$(fm_meta_lock_path "$META") || die "metadata lock path is invalid for $ID"
@@ -77,6 +80,7 @@ META_TMP=$(mktemp "$STATE/.fm-remote-relaunch-meta.XXXXXX") || {
   printf 'harness=%s\n' "$NEW_HARNESS"
   printf 'model=%s\n' "$NEW_MODEL"
   printf 'effort=%s\n' "$NEW_EFFORT"
+  [ -z "$REMOTE_BUSY_GEN" ] || printf 'remote_busy_gen=%s\n' "$REMOTE_BUSY_GEN"
 } >> "$META_TMP"
 # Every other line is preserved in its original relative order after the
 # refreshed harness/model/effort. A pr= line's own identity region (pr_head=
@@ -87,10 +91,22 @@ META_TMP=$(mktemp "$STATE/.fm-remote-relaunch-meta.XXXXXX") || {
 # that already had one armed.
 while IFS= read -r line || [ -n "$line" ]; do
   case "$line" in
-    harness=*|model=*|effort=*) ;;
+    harness=*|model=*|effort=*|remote_busy_gen=*) ;;
     *) printf '%s\n' "$line" >> "$META_TMP" ;;
   esac
 done < "$META"
 chmod 0600 "$META_TMP"
 mv -f -- "$META_TMP" "$META"
+case "$NEW_HARNESS" in kimi*) rm -f -- "$STATE/$ID.start-pending" ;;
+  *)
+    if [ "${FM_SPAWN_NO_START_CHECK:-0}" = 1 ]; then
+      rm -f -- "$STATE/$ID.start-pending"
+    else
+      record_tmp="$STATE/$ID.start-pending.tmp.$$"
+      if { printf '%s %s %s\n' "$LAUNCH_EPOCH" "${REMOTE_BUSY_GEN:--}" "$NEW_HARNESS" > "$record_tmp" \
+        && mv -f -- "$record_tmp" "$STATE/$ID.start-pending"; }; then :
+      else rm -f -- "$record_tmp"; fi
+    fi
+    ;;
+esac
 fm_lock_release "$META_LOCK"

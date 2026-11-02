@@ -353,6 +353,7 @@ remote_proof() {  # <observation> [verdict] [busy-gen]
 remote_tick() {  # <proof> <state> <capture> <rc>: tick once with a stubbed route
   REMOTE_PROOF=$1 REMOTE_STATE=$2 REMOTE_CAPTURE=$3 REMOTE_RC=$4
   start_check_remote() {
+    REMOTE_CALLS=$((${REMOTE_CALLS:-0} + 1))
     WATCHER_CAPTURE=
     [ "$REMOTE_RC" = 0 ] || return "$REMOTE_RC"
     case "$2" in
@@ -376,6 +377,12 @@ test_remote_secondmate_reads_route() {
   # launch, which is all a mate that starts and settles silently leaves (the
   # stock secondmate charter writes no status line at start); so does a
   # parent-mirrored status write.
+  arm_remote early
+  printf '1190 g900.1.1 pi\n' > "$STATE/early.start-pending"
+  REMOTE_CALLS=0
+  remote_tick "$(remote_proof busy)" alive '' 0 || fail "tick failed"; eval "$real"
+  [ "$REMOTE_CALLS" = 0 ] || fail "a remote route was read before its deadline"
+  [ -e "$STATE/early.start-pending" ] || fail "a pre-deadline record was removed without local proof"
   arm_remote r1
   remote_tick "$(remote_proof busy)" alive '' 0 || fail "tick failed"; eval "$real"
   [ ! -e "$STATE/r1.start-pending" ] || fail "a busy remote observation did not count as proof"
@@ -397,7 +404,10 @@ test_remote_secondmate_reads_route() {
   [ -n "$START_CHECK_WAKE" ] || fail "another launch's busy record counted as proof"
   # The spawn seed, or only the observation line, proves nothing.
   arm_remote r2
+  arm_remote z10
+  REMOTE_CALLS=0
   remote_tick "$(remote_proof idle)" alive "$PI_DIALOG" 0 || fail "tick failed"; eval "$real"
+  [ "$REMOTE_CALLS" = 3 ] || fail "the tick continued route reads after queuing a wake"
   case "$START_CHECK_WAKE" in
     "check: start r2: no start signal 200s after spawn (harness=pi; on screen on remote-mac: Pi project-trust dialog \"Trust project folder?\"); accept: FM_HOME=$FM_HOME $SCRIPT_DIR/fm-send.sh r2 --key Enter") ;;
     *) fail "unexpected remote dialog reason: $START_CHECK_WAKE" ;;
@@ -418,6 +428,7 @@ test_remote_secondmate_reads_route() {
   # The real route wrapper bounds observe, state, and capture independently.
   reset_state
   arm_remote r7
+  arm_remote r8
   mkdir -p "$TMP_ROOT/hanging-route"
   printf '#!/bin/sh\nsleep 5\n' > "$TMP_ROOT/hanging-route/fm-on.sh"
   chmod +x "$TMP_ROOT/hanging-route/fm-on.sh"
@@ -436,7 +447,44 @@ test_remote_secondmate_reads_route() {
     *) fail "a timed-out remote route was treated as proof or death: $START_CHECK_WAKE" ;;
   esac
   [ "$(count_wakes)" = 1 ] || fail "timed-out route did not queue exactly one generic wake"
-  pass "remote route calls are bounded; an unreachable host is neither proof nor death"
+  [ -e "$STATE/r8.start-pending" ] || fail "the later due record was not deferred to the next poll"
+  start=$(date +%s)
+  start_check_tick 1200 || fail "the deferred remote record did not get its next-poll turn"
+  elapsed=$(($(date +%s) - start))
+  [ "$elapsed" -lt 6 ] || fail "the next remote route stalled the tick for ${elapsed}s"
+  [ ! -e "$STATE/r8.start-pending" ] || fail "the deferred record was not judged on the next poll"
+  [ "$(count_wakes)" = 2 ] || fail "the deferred remote record did not queue its wake"
+  pass "remote route calls share a bounded poll budget and later records wait for the next poll"
+}
+
+# A record whose route read would start after this poll's shared budget is
+# spent is neither proven nor judged: it waits for the next poll, so a slow
+# but healthy route never turns into a false start wake for the next mate.
+test_spent_route_budget_defers_remote_record() {
+  reset_state
+  local real saved_secs=$START_CHECK_ROUTE_SECS
+  real=$(declare -f start_check_remote)
+  arm_remote b1
+  arm_remote b2
+  START_CHECK_ROUTE_SECS=1
+  start_check_remote() {  # b1 answers slowly but proves its start
+    WATCHER_CAPTURE=
+    case "$1:$2" in
+      b1:observe) sleep 2; WATCHER_CAPTURE=$(remote_proof busy) ;;
+      b2:observe) WATCHER_CAPTURE=$(remote_proof idle) ;;
+      *) return 1 ;;
+    esac
+  }
+  start_check_tick 1200 || fail "tick failed"
+  [ ! -e "$STATE/b1.start-pending" ] || fail "the slow but started remote mate was not cleared"
+  [ -e "$STATE/b2.start-pending" ] || fail "a record past the spent route budget was judged in the same poll"
+  [ "$(count_wakes)" = 0 ] || fail "a spent route budget produced a start wake: $START_CHECK_WAKE"
+  start_check_tick 1200 || fail "tick failed"
+  [ ! -e "$STATE/b2.start-pending" ] || fail "the deferred remote record was not judged on the next poll"
+  [ "$(count_wakes)" = 1 ] || fail "the deferred unstarted remote record did not wake on the next poll"
+  eval "$real"
+  START_CHECK_ROUTE_SECS=$saved_secs
+  pass "a remote record past the poll's spent route budget waits for the next poll instead of waking"
 }
 
 test_one_wake_per_poll() {
@@ -491,5 +539,6 @@ fm_test_run \
   test_secondmate_launch_is_checked \
   test_held_lock_defers_without_waiting \
   test_remote_secondmate_reads_route \
+  test_spent_route_budget_defers_remote_record \
   test_one_wake_per_poll \
   test_watcher_loop_single_named_wake
