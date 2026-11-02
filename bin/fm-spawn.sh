@@ -2379,10 +2379,6 @@ if [ "$RELAUNCH" -eq 1 ]; then
     echo "error: --relaunch refused after locking: $FM_BACKLOG_TRANSITION_ERROR" >&2
     exit 1
   }
-  if [ -n "$(fm_meta_get "$RELAUNCH_META" worktree_outdated)" ]; then
-    echo "error: task $ID's pool slot was reassigned to task $(fm_meta_get "$RELAUNCH_META" worktree_reassigned_to); refusing to relaunch into its historical copy" >&2
-    exit 1
-  fi
   fm_backend_validate_task_endpoint "$RELAUNCH_META" "$ID" || exit 1
   BACKEND=$FM_BACKEND_VALIDATED_BACKEND
   RELAUNCH_TARGET=$FM_BACKEND_VALIDATED_TARGET

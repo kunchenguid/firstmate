@@ -306,10 +306,6 @@ HARNESS=$(meta_value harness)
 REMOTE_HOST=$(meta_value remote_host)
 [ -n "$KIND" ] || KIND=ship
 
-# Spawn's retired record must never read the successor's copy as its own.
-REASSIGNED_TO=$(meta_value worktree_reassigned_to)
-[ -z "$REASSIGNED_TO" ] || emit unknown none "worktree reassigned to task $REASSIGNED_TO"
-
 # A torn-down (or never-created) worktree has no current state to read. A
 # remote secondmate's recorded worktree is a path on ITS host, so the local
 # probe proves nothing for it - the remote arm below reads the true source.
