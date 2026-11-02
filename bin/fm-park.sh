@@ -737,7 +737,7 @@ cmd_run() {
   out=$( LOCKS_HELD=; trap release_locks EXIT; "cmd_$verb" "$id" "$@" 2>/dev/null ) || true
   if [ -n "$out" ]; then
     case "$out" in *"another lifecycle action is already running"*|*"another park action still holds"*) return 0 ;; esac
-    report_write "$id" "$out"
+    report_write "$id" "$out" || return 1
     [ "$verb" != land ] || rm -f -- "$STATE/$id.review-park-land"
   elif [ "$verb" = land ] && [ ! -e "$STATE/$id.meta" ]; then
     rm -f -- "$STATE/$id.review-park-land"
