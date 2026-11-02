@@ -1925,6 +1925,45 @@ SH
   pass "direct and recursive retirement retain lost-slot outcomes before child evidence disappears"
 }
 
+test_local_retirement_registry_failure_preserves_retry() {
+  local dir mate rc
+  dir=$(make_case local-retire-registry-failure)
+  mate="$dir/mate"
+  mkdir -p "$mate/state" "$mate/data" "$mate/config"
+  printf 'mate\n' > "$mate/.fm-secondmate-home"
+  printf 'manual\n' > "$dir/home/config/backlog-backend"
+  printf -- '- mate - Test mate. (home: %s; scope: tests; projects: ; added 2026-10-28)\n' "$mate" > "$dir/home/data/secondmates.md"
+  fm_write_meta "$dir/home/state/mate.meta" \
+    "window=isolated:fm-mate" "endpoint_task_id=mate" "backend=tmux" \
+    "kind=secondmate" "home=$mate" "worktree=$mate" "project=$dir/project" "spawn_gen=g1"
+  cat > "$dir/fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+case "$*" in *has-session*) exit 1 ;; esac
+exit 0
+SH
+  cat > "$dir/fakebin/mv" <<'SH'
+#!/usr/bin/env bash
+last=${!#}
+[ "$last" != "$FM_TEST_REGISTRY" ] || exit 1
+exec "$FM_TEST_REAL_MV" "$@"
+SH
+  chmod +x "$dir/fakebin/mv"
+  rc=0
+  FM_TEST_REAL_MV="$(command -v mv)" FM_TEST_REGISTRY="$dir/home/data/secondmates.md" \
+    run_case "$dir" mate > "$dir/first.out" 2> "$dir/first.err" || rc=$?
+  expect_code 1 "$rc" "registry publication failure must fail retirement: $(cat "$dir/first.err")"
+  assert_absent "$mate" "failure did not reach final registry publication"
+  assert_present "$dir/home/state/mate.meta" "registry failure lost retry identity"
+  assert_grep '- mate ' "$dir/home/data/secondmates.md" "failed publication lost registry entry"
+  rm "$dir/fakebin/mv"
+  rc=0
+  run_case "$dir" mate > "$dir/retry.out" 2> "$dir/retry.err" || rc=$?
+  expect_code 0 "$rc" "registry publication retry: $(cat "$dir/retry.err")"
+  assert_absent "$dir/home/state/mate.meta" "successful retry retained metadata"
+  assert_no_grep '- mate ' "$dir/home/data/secondmates.md" "successful retry retained registry entry"
+  pass "local retirement retains retry identity until registry publication succeeds"
+}
+
 if [ -n "${FM_TEST_ONLY:-}" ]; then
   "$FM_TEST_ONLY"
   exit
@@ -1967,3 +2006,4 @@ test_local_retirement_resumes_recorded_staging
 
 test_retirement_rollback_rearms_on_failure
 test_retirement_retains_child_loss_before_metadata_removal
+test_local_retirement_registry_failure_preserves_retry

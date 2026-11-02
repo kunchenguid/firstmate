@@ -4524,6 +4524,12 @@ fi
 # racing the same id stays serialized exactly as it was before. A captain-held
 # row takes the retain transition here instead of the close: same record, same
 # ordering, the row returns to Queued with its deliverable recorded.
+if [ "$KIND" = secondmate ]; then
+  remove_secondmate_registry_entry "$ID" || {
+    echo "error: secondmate registry publication failed; task record is preserved for retry" >&2
+    exit 1
+  }
+fi
 if [ "$BACKLOG_CLOSED" = 1 ]; then
   BACKLOG_CLOSE_MARKER=$(fm_backlog_close_marker_path "$STATE" "$ID") || exit 1
   if ! fm_backlog_atomic_transition "$BACKLOG_TRANSITION" "$STATE/$ID.meta" "$BACKLOG_CLOSE_MARKER" \
@@ -4549,9 +4555,6 @@ else
     echo "error: $ID's endpoint and local copy are cleaned up, but its task record could not be removed ($FM_BACKLOG_TRANSITION_ERROR)" >&2
     exit 1
   fi
-fi
-if [ "$KIND" = secondmate ]; then
-  remove_secondmate_registry_entry "$ID"
 fi
 fm_lock_release "$META_LOCK"
 META_LOCK_HELD=0
