@@ -249,4 +249,28 @@ event_wait_or_sleep
 [ "$(wc -l < "$WAKE_LOG")" -gt "$N" ] || fail "working must rearm watches"
 pass "watch reasons reach the durable wake queue, dedupe blocked/done, rearm on working and poll without push"
 
+# --- event_wait_or_sleep: watched-pane reads run waited and bounded ---------
+# A hung per-cycle read must not stall the cycle or sit outside the recorded
+# child group: the probe goes through watcher_waited and dies at its read
+# budget. The fake agent read sleeps for real, so only the bound can end it.
+reset_state
+# shellcheck disable=SC2329 # Runtime fixture for the explicit identity boundary.
+fm_backend_herdr_resolve_watched_pane() { printf '%s:wD:p1' "$1"; }
+# shellcheck disable=SC2329 # Runtime fixture simulating a wedged status read.
+fm_backend_herdr_agent_status_raw() { command sleep 60; }
+# shellcheck disable=SC2329 # Force the polling fallback so the cycle ends fast.
+fm_backend_events_capable() { return 1; }
+printf 'default\tops\tdesign\tDesign review\t1\n' > "$STATE_DIR/watched-panes"
+eval "$(declare -f watcher_waited | sed '1s/watcher_waited/orig_watcher_waited/')"
+watcher_waited() { printf '%s\n' "$*" >> "$TMP/waited-calls"; orig_watcher_waited "$@"; }
+: > "$TMP/waited-calls"
+export FM_WATCHED_PANE_READ_SECS=1
+SECONDS=0
+event_wait_or_sleep
+[ "$SECONDS" -lt 30 ] || fail "a hung pane read must hit the bounded budget instead of stalling the cycle (${SECONDS}s)"
+grep -Fq "fm_watch_pane_probe $STATE_DIR" "$TMP/waited-calls" \
+  || fail "the per-cycle probe must run through watcher_waited: $(cat "$TMP/waited-calls")"
+[ ! -s "$WAKE_LOG" ] || fail "a bound-killed probe must not surface a wake: $(cat "$WAKE_LOG")"
+pass "watched-pane reads run through watcher_waited and die at the read budget"
+
 echo "# fm-supervision-events.test.sh: all assertions passed"

@@ -5,11 +5,13 @@
 #   fm-watch-pane.sh remove <label>
 #   fm-watch-pane.sh list
 # add validates a unique live single-pane tab and replaces the entry for label.
-# remove is idempotent; list prints the stored TSV without contacting Herdr.
+# remove is idempotent; remove or replace also retires the pane's watch-owned
+# escalation marker (a pane task metadata owns keeps it); list prints the
+# stored TSV without contacting Herdr.
 # No command creates, closes, or changes a Herdr pane or session.
 set -euo pipefail
 
-usage() { sed -n '2,10s/^# \{0,1\}//p' "${BASH_SOURCE[0]}"; }
+usage() { sed -n '2,11s/^# \{0,1\}//p' "${BASH_SOURCE[0]}"; }
 case "${1:-}" in -h|--help) usage; exit 0 ;; esac
 [ -n "${FM_HOME:-}" ] || { echo 'error: set FM_HOME explicitly' >&2; exit 2; }
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -44,7 +46,9 @@ trap 'exit 1' HUP INT TERM
 fm_watch_pane_validate "$REGISTRY" || { echo 'error: invalid watched-pane registry' >&2; exit 1; }
 umask 077
 TMP=$(mktemp "$STATE/.watched-panes.XXXXXX")
+OLD_ROW=
 if [ -f "$REGISTRY" ]; then
+  OLD_ROW=$(FM_WATCH_PANE_LABEL="$LABEL" awk -F '\t' '$4 == ENVIRON["FM_WATCH_PANE_LABEL"] { print; exit }' "$REGISTRY")
   FM_WATCH_PANE_LABEL="$LABEL" awk -F '\t' '$4 != ENVIRON["FM_WATCH_PANE_LABEL"]' "$REGISTRY" > "$TMP"
 fi
 if [ "$COMMAND" = add ]; then
@@ -60,3 +64,10 @@ if [ "$COMMAND" = add ]; then
 fi
 mv -f -- "$TMP" "$REGISTRY"
 TMP=
+# A removed or replaced registration retires the pane's watch-owned escalation
+# marker, so a later registration cannot inherit it and stay silent on the
+# pane's next blocked. A pane a task metadata record owns keeps its state.
+if [ -n "$OLD_ROW" ]; then
+  IFS=$'\t' read -r old_session old_workspace old_tab _old_rest <<< "$OLD_ROW"
+  fm_watch_pane_retire "$STATE" "$old_session" "$old_workspace" "$old_tab" || true
+fi

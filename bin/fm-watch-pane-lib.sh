@@ -49,3 +49,36 @@ fm_watch_pane_resolve() {  # <state_dir> -> resolved snapshot
     printf '%s\t%s\t%s\n' "$target" "$label" "$notify"
   done < "$state/watched-panes"
 }
+
+# The per-cycle read the watcher runs through its waited, bounded group: the
+# resolved snapshot joined with one live agent-status read per pane, printed as
+#   <target>\t<label>\t<notify_done>\t<agent_status>
+# A pane whose read fails keeps an empty status so the caller can skip just
+# that row and retry it next cycle.
+fm_watch_pane_probe() {  # <state_dir>
+  local state=$1 rows target label notify status
+  rows=$(fm_watch_pane_resolve "$state") || return 1
+  [ -n "$rows" ] || return 0
+  fm_backend_source herdr || return 1
+  while IFS=$'\t' read -r target label notify || [ -n "$target" ]; do
+    [ -n "$target" ] || continue
+    status=$(fm_backend_herdr_agent_status_raw "${target%%:*}" "${target#*:}")
+    printf '%s\t%s\t%s\t%s\n' "$target" "$label" "$notify" "$status"
+  done <<EOF
+$rows
+EOF
+}
+
+# Retire the watch-owned escalation marker of a registration's pane after its
+# row leaves the registry (remove or replace). The marker suppresses a pane's
+# next actionable edge, so leaving it behind would let a re-registered pane
+# inherit it and stay silent on its next blocked. A pane a task metadata record
+# claims is task-owned and keeps its state. Quiet and best effort: a pane that
+# no longer resolves has no marker key to derive, so nothing can be retired.
+fm_watch_pane_retire() {  # <state_dir> <session> <workspace-label> <tab-label>
+  local state=$1 session=$2 workspace=$3 tab=$4 target
+  fm_backend_source herdr || return 0
+  target=$(fm_backend_herdr_resolve_watched_pane "$session" "$workspace" "$tab" 2>/dev/null) || return 0
+  [ -z "$(fm_backend_meta_for_window "$target" "$state" 2>/dev/null)" ] || return 0
+  fm_backend_herdr_clear_transition "$state" "$target" || return 0
+}

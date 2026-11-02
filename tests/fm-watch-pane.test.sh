@@ -112,8 +112,51 @@ test_watched_pane_supervision_need() {
   pass "valid nonempty pane watches need supervision independently of tasks and done policy"
 }
 
+test_watched_pane_marker_retire() {
+  local dir fb resp log state marker
+  dir="$TMP_ROOT/marker-retire"; resp="$dir/responses"; state="$dir/home/state"; log="$dir/log"
+  mkdir -p "$resp" "$state"; : > "$log"
+  fb=$(make_herdr_fakebin "$dir")
+  printf '{"result":{"workspaces":[{"workspace_id":"w1","label":"ops"}]}}' > "$resp/1.out"
+  printf '{"result":{"tabs":[{"tab_id":"w1:t1","label":"design"}]}}' > "$resp/2.out"
+  printf '{"result":{"panes":[{"tab_id":"w1:t1","pane_id":"w1:p1"}]}}' > "$resp/3.out"
+  PATH="$fb:$PATH" FM_HOME="$dir/home" FM_STATE_OVERRIDE="$state" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash "$ROOT/bin/fm-watch-pane.sh" add watch-session ops design 'Design review' || fail "CLI add"
+  marker="$state/.herdr-escalated-watch-session_w1_p1"
+  # remove retires the watch-owned escalation marker so a re-registered pane
+  # cannot inherit it and stay silent on its next blocked.
+  printf 'blocked' > "$marker"
+  PATH="$fb:$PATH" FM_HOME="$dir/home" FM_STATE_OVERRIDE="$state" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash "$ROOT/bin/fm-watch-pane.sh" remove 'Design review' || fail "CLI remove"
+  [ ! -e "$marker" ] || fail "remove must retire the pane's watch-owned escalation marker"
+  # Replacing a label retires the old row's marker the same way.
+  PATH="$fb:$PATH" FM_HOME="$dir/home" FM_STATE_OVERRIDE="$state" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash "$ROOT/bin/fm-watch-pane.sh" add watch-session ops design 'Design review' --notify-done || fail "CLI re-add"
+  printf 'blocked' > "$marker"
+  PATH="$fb:$PATH" FM_HOME="$dir/home" FM_STATE_OVERRIDE="$state" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash "$ROOT/bin/fm-watch-pane.sh" add watch-session ops design 'Design review' || fail "CLI replace"
+  [ ! -e "$marker" ] || fail "replace must retire the pane's watch-owned escalation marker"
+  # A pane a task metadata record owns is task-owned: its marker survives.
+  fm_write_meta "$state/tk1.meta" "window=watch-session:w1:p1" "backend=herdr" "kind=ship"
+  printf 'blocked' > "$marker"
+  PATH="$fb:$PATH" FM_HOME="$dir/home" FM_STATE_OVERRIDE="$state" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash "$ROOT/bin/fm-watch-pane.sh" remove 'Design review' || fail "CLI remove task-owned"
+  [ -e "$marker" ] || fail "remove must not clear a task-owned pane's escalation marker"
+  rm -f "$state/tk1.meta" "$marker"
+  # A pane that no longer resolves clears nothing but never blocks removal.
+  printf '{"result":{"panes":[]}}' > "$resp/3.out"
+  PATH="$fb:$PATH" FM_HOME="$dir/home" FM_STATE_OVERRIDE="$state" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash "$ROOT/bin/fm-watch-pane.sh" add watch-session ops design 'Gone pane' 2>/dev/null && fail "add of a missing pane must fail"
+  printf 'watch-session\tops\tdesign\tGone pane\t0\n' > "$state/watched-panes"
+  printf 'blocked' > "$marker"
+  PATH="$fb:$PATH" FM_HOME="$dir/home" FM_STATE_OVERRIDE="$state" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash "$ROOT/bin/fm-watch-pane.sh" remove 'Gone pane' || fail "remove must stay idempotent when the pane is unresolvable"
+  pass "remove/replace retire watch-owned escalation markers, keep task-owned state, and stay idempotent"
+}
+
 test_watched_pane_supervision_need
 test_watched_pane_identity_and_cli
+test_watched_pane_marker_retire
 
 # Production bounded wait, fake transport: verify the snapshot survives the
 # wait boundary and both reconnect and streaming use the opt-in policy.

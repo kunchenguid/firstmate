@@ -68,6 +68,7 @@ Blocked states produce a durable wake naming the watch label and status; `--noti
 The transition policy and deduplication contract are owned by [`bin/fm-transition-lib.sh`](../bin/fm-transition-lib.sh).
 For an opted-in watch, changing between `blocked` and `done` can notify without an intervening `working` state; repeated readings of the last notified status are suppressed across reconnects.
 `working` rearms notification, while `idle` produces no wake and does not rearm it.
+Removing or replacing a registration retires the pane's watch-owned deduplication marker, so a re-registered pane reports its next blocked or opted-in done; a pane task metadata owns keeps its state.
 Transient finish states may therefore notify for an opted-in watch; ordinary tasks continue to defer `done` to their existing completion handling.
 No command creates or closes a pane, and the operator should unregister a watch when its session ends.
 
