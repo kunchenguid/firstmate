@@ -382,7 +382,7 @@ SH
 # written into the JSON as-is, so a value may carry a JSON escape.
 write_mr_json() {
   local file=$1 kv key value
-  local state=opened detail=mergeable conflicts=false discussions=true
+  local state=opened detail=mergeable conflicts=false discussions=true work_in_progress=false
   local head=$MR_HEAD pipeline_sha=$MR_HEAD pipeline_status=success pipeline=present
   local merge_when_pipeline_succeeds=false merge_after=null
   shift
@@ -394,6 +394,7 @@ write_mr_json() {
       detail) detail=$value ;;
       conflicts) conflicts=$value ;;
       discussions) discussions=$value ;;
+      work_in_progress) work_in_progress=$value ;;
       head) head=$value ;;
       pipeline_sha) pipeline_sha=$value ;;
       pipeline_status) pipeline_status=$value ;;
@@ -406,8 +407,8 @@ write_mr_json() {
   if [ "$pipeline" = present ]; then
     pipeline=$(printf '{"sha":"%s","status":"%s"}' "$pipeline_sha" "$pipeline_status")
   fi
-  printf '{"iid":7,"state":"%s","detailed_merge_status":"%s","has_conflicts":%s,' \
-    "$state" "$detail" "$conflicts" > "$file"
+  printf '{"iid":7,"state":"%s","detailed_merge_status":"%s","has_conflicts":%s,"work_in_progress":%s,' \
+    "$state" "$detail" "$conflicts" "$work_in_progress" > "$file"
   printf '"blocking_discussions_resolved":%s,"sha":"%s","head_pipeline":%s,' \
     "$discussions" "$head" "$pipeline" >> "$file"
   printf '"merge_when_pipeline_succeeds":%s,"merge_after":%s}\n' \
@@ -2082,6 +2083,7 @@ test_gitlab_each_condition_refuses_independently() {
     "detail|detail=need_rebase|detailed_merge_status is \"need_rebase\", not mergeable" \
     "conflicts|conflicts=true|has_conflicts is \"true\", not false" \
     "discussions|discussions=false|blocking_discussions_resolved is \"false\", not true" \
+    "draft|work_in_progress=true|the merge request is a draft" \
     "pipeline-status|pipeline_status=failed|the head pipeline status is \"failed\", not success" \
     "pipeline-sha|pipeline_sha=$MR_STALE_HEAD|the head pipeline ran at \"$MR_STALE_HEAD\", not at the current head $MR_HEAD" \
     "no-pipeline|pipeline=null|the head pipeline status is \"none\", not success"
@@ -2115,7 +2117,7 @@ test_gitlab_each_condition_refuses_independently() {
 test_gitlab_reports_every_failing_condition() {
   local case_dir rc expected
   case_dir=$(make_gitlab_case gitlab-refuse-all \
-    state=closed detail=conflict conflicts=true discussions=false \
+    state=closed detail=conflict conflicts=true discussions=false work_in_progress=true \
     pipeline_status=failed "pipeline_sha=$MR_STALE_HEAD")
 
   set +e
@@ -2130,6 +2132,7 @@ test_gitlab_reports_every_failing_condition() {
     'detailed_merge_status is "conflict", not mergeable' \
     'has_conflicts is "true", not false' \
     'blocking_discussions_resolved is "false", not true' \
+    'the merge request is a draft' \
     'the head pipeline status is "failed", not success' \
     "the head pipeline ran at \"$MR_STALE_HEAD\", not at the current head $MR_HEAD"
   do
@@ -2191,6 +2194,29 @@ test_gitlab_unreadable_state_refuses() {
       || fail "gitlab-unreadable-$name: a merge was attempted on an unreadable state"
   done
   pass "fm-pr-merge refuses an unreadable GitLab merge request state rather than merging blind"
+}
+
+# A merge request whose draft state GitLab did not report as a boolean refuses
+# exactly like a draft, mirroring the GitHub unreadable-draft twin above, rather
+# than merging on an unreadable field.
+test_gitlab_unreadable_draft_state_refuses() {
+  local case_dir rc
+  case_dir=$(make_gitlab_case gitlab-draft-unreadable)
+  "$JQ_BIN" -c 'del(.work_in_progress)' "$case_dir/mr.json" > "$case_dir/mr.json.new"
+  mv "$case_dir/mr.json.new" "$case_dir/mr.json"
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 "$MR_URL" \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "gitlab-draft-unreadable: a merge request not read as non-draft must refuse"
+  assert_grep "the merge request is a draft" "$case_dir/stderr" \
+    "gitlab-draft-unreadable: the draft state was not named"
+  [ -z "$(glab_merge_line "$case_dir/glab.log")" ] \
+    || fail "gitlab-draft-unreadable: a merge was attempted without a non-draft reading"
+  pass "fm-pr-merge refuses a merge request with no boolean draft state"
 }
 
 test_gitlab_invalid_head_refuses() {
@@ -2996,6 +3022,7 @@ test_gitlab_each_condition_refuses_independently
 test_gitlab_reports_every_failing_condition
 test_gitlab_stale_recorded_head_is_reported
 test_gitlab_unreadable_state_refuses
+test_gitlab_unreadable_draft_state_refuses
 test_gitlab_invalid_head_refuses
 test_gitlab_missing_tool_refuses_before_recording
 test_forgejo_url_resolves_and_merges

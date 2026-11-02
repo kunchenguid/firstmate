@@ -99,10 +99,10 @@
 #
 # A GitLab merge is refused unless every pre-merge condition holds, each read
 # live at merge time rather than taken from recorded metadata: the merge request
-# is open, detailed_merge_status is mergeable, has_conflicts is false,
-# blocking_discussions_resolved is true, and the head pipeline succeeded at the
-# exact current head commit. Every failing condition is reported, not just the
-# first. An attended --allow-no-pipeline, for a repository that deliberately
+# is open, not a draft, detailed_merge_status is mergeable, has_conflicts is
+# false, blocking_discussions_resolved is true, and the head pipeline succeeded
+# at the exact current head commit. Every failing condition is reported, not
+# just the first. An attended --allow-no-pipeline, for a repository that deliberately
 # runs no merge request pipeline, waives only the pipeline condition and only
 # when GitLab reports head_pipeline as present and null: a failed, running,
 # canceled, or stale pipeline still refuses, every other condition still
@@ -580,7 +580,7 @@ FM_PR_GITLAB_ASYNC_CONFIGURED=false
 gitlab_verify_mergeable() {
   local json fields line pipeline_waived
   local total=0 named=0 refusals=''
-  local state='' detail='' conflicts='' discussions=''
+  local state='' detail='' conflicts='' discussions='' draft=''
   local live_head='' pipeline_sha='' pipeline_status='' pipeline_absent='' async_configured=''
 
   # GITLAB_HOST is set to the same host the project URL already carries, so the
@@ -601,6 +601,7 @@ gitlab_verify_mergeable() {
         "detail=" + ((.detailed_merge_status // "") | tostring),
         "conflicts=" + (.has_conflicts | tostring),
         "discussions=" + (.blocking_discussions_resolved | tostring),
+        "draft=" + (.work_in_progress | tostring),
         "head=" + ((.sha // "") | tostring),
         "pipeline_sha=" + ((.head_pipeline.sha // "") | tostring),
         "pipeline_status=" + ((.head_pipeline.status // "") | tostring),
@@ -619,6 +620,7 @@ gitlab_verify_mergeable() {
       detail=*) detail=${line#detail=} ;;
       conflicts=*) conflicts=${line#conflicts=} ;;
       discussions=*) discussions=${line#discussions=} ;;
+      draft=*) draft=${line#draft=} ;;
       head=*) live_head=${line#head=} ;;
       pipeline_sha=*) pipeline_sha=${line#pipeline_sha=} ;;
       pipeline_status=*) pipeline_status=${line#pipeline_status=} ;;
@@ -633,7 +635,7 @@ FIELDS
   # Every field named exactly once and no unnamed line: a value carrying a
   # newline would split into a line no name matches, so it is refused here
   # rather than silently truncated into a value a check could accept.
-  if [ "$named" -ne 9 ] || [ "$total" -ne 9 ]; then
+  if [ "$named" -ne 10 ] || [ "$total" -ne 10 ]; then
     echo "error: could not read the GitLab merge request state before merging" >&2
     return 1
   fi
@@ -660,6 +662,9 @@ FIELDS
 "
   [ "$discussions" = true ] \
     || refusals="$refusals  - blocking_discussions_resolved is \"${discussions:-unreadable}\", not true
+"
+  [ "$draft" = false ] \
+    || refusals="$refusals  - the merge request is a draft
 "
   # The waiver covers only a head_pipeline GitLab reports as null; a failed,
   # running, canceled, or stale pipeline is a verdict, not an absence of one.
