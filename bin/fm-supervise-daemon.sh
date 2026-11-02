@@ -1386,7 +1386,7 @@ EOF
 }
 
 housekeeping() {  # <state>
-  local state=$1 now due f key task win marker age last max_defer oldest pause_secs marker_epoch until bounded_until pause_reason dialog_name persisted append_rc size identity seen_identity overdue_marker overdue_task pending_record pending_rc pending_file pending_identity pending_size pending_message
+  local state=$1 now due f key task win marker age last max_defer oldest pause_secs marker_epoch until bounded_until pause_reason dialog_name persisted append_rc size identity seen_identity overdue_marker overdue_task pending_record pending_rc pending_file pending_identity pending_size pending_message pending_status_size pending_added pending_line pending_resumed pending_rc2
   now=$(_now)
   for overdue_marker in "$state"/.paused-overdue-*; do
     [ -f "$overdue_marker" ] || continue
@@ -1401,6 +1401,23 @@ housekeeping() {  # <state>
     if [ -z "$pending_identity" ] || [ -z "$pending_size" ] || [ -z "$pending_message" ]; then
       rm -f "$pending_file"
       continue
+    fi
+    pending_status_size=$(_fm_status_file_size "$state/$overdue_task.status") || continue
+    case "$pending_size:$pending_status_size" in *[!0-9:]*) rm -f "$pending_file"; continue ;; esac
+    if [ "$pending_status_size" -gt "$pending_size" ]; then
+      pending_added=$(_fm_status_read_span "$state/$overdue_task.status" "$pending_size" "$((pending_status_size - pending_size))") || continue
+      pending_resumed=0
+      while IFS= read -r pending_line || [ -n "$pending_line" ]; do
+        pending_rc2=$(status_line_verb "$pending_line")
+        case "$pending_rc2" in ''|paused) ;; *) pending_resumed=1; break ;; esac
+      done <<EOF
+$pending_added
+EOF
+      if [ "$pending_resumed" -eq 1 ]; then
+        fm_wake_status_append_self_announced "$state" "$state/$overdue_task.status" "resolved [key=paused-overdue-$overdue_task]: worker pause changed" >/dev/null
+        rm -f "$pending_file"
+        continue
+      fi
     fi
     if escalate_add "$state" "$pending_message"; then
       printf '%s:%s\n' "$pending_identity" "$pending_size" > "$state/.paused-overdue-$overdue_task"
