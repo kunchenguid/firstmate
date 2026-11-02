@@ -3180,6 +3180,11 @@ term_set() {  # <address> <jq-filter> [args...]
   jq "$@" "$filter" "$f" > "$f.tmp" && mv "$f.tmp" "$f"
 }
 case "$cmd" in
+  --version) printf 'hc 0.1.14\n' ;;
+  connect)
+    IFS= read -r _req || true
+    printf '{"jsonrpc":"2.0","id":1,"result":{"generation":1}}\n'
+    ;;
   server)
     [ ! -f "$D/core-down" ] || { echo 'error: core unreachable' >&2; exit 4; }
     printf '{"core":{"id":"%s"},"live":0}\n' "$(cat "$D/core-id" 2>/dev/null || printf c0ffee)"
@@ -3215,7 +3220,16 @@ case "$cmd" in
     cat "$D/$last.json"
     ;;
   send)
-    addr=$2 payload=${3:-}
+    # hc send [--json] [--wait] [--timeout <s>] <address> -- <text>
+    addr= payload=
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        --) payload=${2:-}; break ;;
+        --timeout) shift 2 ;;
+        --*) shift ;;
+        *) [ -n "$addr" ] || addr=$1; shift ;;
+      esac
+    done
     [ -f "$D/$addr.json" ] || exit 3
     [ ! -f "$D/send-fails" ] || exit 1
     case "$payload" in
@@ -3248,7 +3262,7 @@ run_spawn_hc() {  # <case-dir> <args...>; FM_TEST_HERDR_SESSION names this seat'
   env -u HERDR_ENV -u HERDR_PANE_ID -u HERDR_SESSION -u HERDR_SOCKET_PATH \
     -u HERDR_TAB_ID -u HERDR_WORKSPACE_ID -u HC_SOCKET -u HC_TERMINAL_ID \
     ${seat[@]+"${seat[@]}"} PATH="$dir/fakebin:$PATH" FM_HOME="$dir/home" FM_FAKE_DIR="$dir/fake" \
-    HOME="$dir/user-home" CLAUDE_CONFIG_DIR='' HC_SESSION=fmhc \
+    HOME="$dir/user-home" CLAUDE_CONFIG_DIR='' HC_SESSION=fmhc FM_HC_BIN="$dir/fakebin/hc" \
     FM_SPAWN_NO_GUARD=1 GROK_HOME="$dir/grokhome" \
     "$SPAWN" "$@" 2>&1
 }
@@ -3259,7 +3273,7 @@ run_control_hc() {  # <case-dir> <args...>
   env -u HERDR_ENV -u HERDR_PANE_ID -u HERDR_SESSION -u HERDR_SOCKET_PATH \
     -u HERDR_TAB_ID -u HERDR_WORKSPACE_ID -u HC_SOCKET -u HC_TERMINAL_ID \
     PATH="$dir/fakebin:$PATH" FM_HOME="$dir/home" FM_FAKE_DIR="$dir/fake" \
-    HOME="$dir/user-home" CLAUDE_CONFIG_DIR='' HC_SESSION=fmhc \
+    HOME="$dir/user-home" CLAUDE_CONFIG_DIR='' HC_SESSION=fmhc FM_HC_BIN="$dir/fakebin/hc" \
     FM_SPAWN_NO_GUARD=1 GROK_HOME="$dir/grokhome" \
     FM_CONTROL_POLL=0.01 FM_CONTROL_EXIT_WAIT=0.05 FM_CONTROL_LAUNCH_WAIT=0.05 \
     "$CONTROL" "$@" 2>&1
@@ -3389,73 +3403,6 @@ test_control_move_refuses_before_stop_when_hc_is_unreachable() {
   out=$(run_control_hc "$dir" rl95 exit --backend hc) || rc=$?
   expect_code 1 "$rc" "--backend must be refused outside relaunch"
   pass "fm-control relaunch --backend hc: refuses before the old agent stops when hc cannot take the task"
-}
-
-test_control_relaunch_moves_a_secondmate_into_its_own_hc_space() {
-  local dir home out rc=0 parent_tag mate_tag
-  dir=$(new_case sm-move smv1)
-  home="$dir/home"
-  mkdir -p "$home/config"
-  printf 'claude\n' > "$home/config/secondmate-harness"
-  fm_git_worktree "$dir/proj" "$dir/smhome" sm-move-branch
-  mkdir -p "$dir/smhome/state" "$dir/smhome/data" "$dir/smhome/bin"
-  printf 'smv1\n' > "$dir/smhome/.fm-secondmate-home"
-  printf '# charter\n' > "$dir/smhome/data/charter.md"
-  printf '# agents\n' > "$dir/smhome/AGENTS.md"
-  printf 'window=x:fm-c1\n' > "$dir/smhome/state/c1.meta"
-  {
-    echo "window=fmses:fm-smv1"
-    echo "endpoint_task_id=smv1"
-    echo "worktree=$dir/smhome"
-    echo "project=$dir/smhome"
-    echo "harness=claude"
-    echo "kind=secondmate"
-    echo "mode=secondmate"
-    echo "yolo=off"
-    echo "model=default"
-    echo "effort=default"
-    echo "home=$dir/smhome"
-    echo "projects="
-  } > "$home/state/smv1.meta"
-  printf '%s\n' "fm-smv1" > "$dir/fake/windows"
-  printf '%s' "$dir/smhome" > "$dir/fake/cwd"
-  make_hc_stub "$dir"
-  out=$(run_control_hc "$dir" smv1 relaunch --backend hc) || rc=$?
-  expect_code 0 "$rc" "a secondmate should move to hc"$'\n'"$out"
-  [ "$(meta_field "$dir" smv1 backend)" = hc ] || fail "the mate's record must name hc"
-  [ "$(meta_field "$dir" smv1 home)" = "$dir/smhome" ] || fail "the mate must keep its home"
-  assert_grep "--cwd $dir/smhome" "$dir/fake/hc/log" "the mate's terminal must open in its home"
-  parent_tag=$(FM_HOME="$home" FM_ROOT="$ROOT" bash -c '. "$0/bin/fm-backend-hometag-lib.sh"; fm_backend_hometag' "$ROOT")
-  mate_tag=$(FM_HOME="$dir/smhome" FM_ROOT="$dir/smhome" bash -c '. "$0/bin/fm-backend-hometag-lib.sh"; fm_backend_hometag' "$ROOT")
-  assert_grep "firstmate.home=$parent_tag" "$dir/fake/hc/log" \
-    "the mate's terminal keeps this home's identity label, so this home can probe and steer it"
-  assert_grep "herdr.space=fm-$mate_tag" "$dir/fake/hc/log" \
-    "the mate's terminal is shown in the mate home's own Herdr.app space"
-  [ "$(cat "$dir/smhome/data/charter.md")" = "# charter" ] || fail "a move must never rewrite the charter"
-  assert_present "$dir/smhome/state/c1.meta" "the mate's child records must survive the move"
-  pass "fm-control relaunch --backend hc: a secondmate moves into its own home's Herdr.app space"
-}
-
-test_secondmate_spawns_fresh_on_hc() {
-  local dir out rc=0 mate_tag
-  dir=$(new_case sm-fresh smf1)
-  mkdir -p "$dir/home/config"
-  printf 'claude\n' > "$dir/home/config/secondmate-harness"
-  fm_git_worktree "$dir/proj" "$dir/smhome" sm-fresh-branch
-  mkdir -p "$dir/smhome/state" "$dir/smhome/data" "$dir/smhome/bin" "$dir/smhome/config"
-  printf 'smf1\n' > "$dir/smhome/.fm-secondmate-home"
-  printf '# charter\n' > "$dir/smhome/data/charter.md"
-  printf '# agents\n' > "$dir/smhome/AGENTS.md"
-  printf '%s' "$dir/smhome" > "$dir/fake/cwd"
-  make_hc_stub "$dir"
-  out=$(run_spawn_hc "$dir" smf1 "$dir/smhome" --secondmate --backend hc) || rc=$?
-  expect_code 0 "$rc" "a secondmate should spawn on hc"$'\n'"$out"
-  [ "$(meta_field "$dir" smf1 backend)" = hc ] || fail "the fresh mate's record must name hc"
-  [ -n "$(meta_field "$dir" smf1 hc_core)" ] || fail "the fresh mate's record must name its hc core"
-  mate_tag=$(FM_HOME="$dir/smhome" FM_ROOT="$dir/smhome" bash -c '. "$0/bin/fm-backend-hometag-lib.sh"; fm_backend_hometag' "$ROOT")
-  assert_grep "herdr.space=fm-$mate_tag" "$dir/fake/hc/log" "a fresh mate is shown in its own home's space"
-  assert_grep "--cwd $dir/smhome" "$dir/fake/hc/log" "a fresh mate's terminal opens in its home"
-  pass "fm-spawn --secondmate --backend hc: a local secondmate spawns in its own Herdr.app space"
 }
 
 test_control_move_resumes_the_claude_conversation() {
@@ -3619,8 +3566,6 @@ test_move_backend_refuses_other_shapes
 test_aborted_move_closes_its_new_hc_terminal
 test_control_relaunch_moves_a_running_task_to_hc
 test_control_move_refuses_before_stop_when_hc_is_unreachable
-test_control_relaunch_moves_a_secondmate_into_its_own_hc_space
-test_secondmate_spawns_fresh_on_hc
 test_control_move_resumes_the_claude_conversation
 test_control_move_without_a_session_record_starts_fresh
 test_hc_task_moves_back_to_herdr

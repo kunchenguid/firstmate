@@ -2462,19 +2462,6 @@ HC_SES=
 HC_TERMINAL=
 HC_CORE=
 
-# spawn_hc_create_task: the task's hc terminal. A secondmate's terminal keeps
-# this home's identity labels, so this home's probe, steer, and close checks
-# hold unchanged, but it is shown in the secondmate home's own Herdr.app space,
-# the one that home's own spawns use (bin/backends/hc.sh).
-spawn_hc_create_task() {  # <session> <window-label> <cwd>
-  if [ "$KIND" = secondmate ]; then
-    FM_HC_SPACE="fm-$(FM_HOME=$PROJ_ABS FM_ROOT=$PROJ_ABS fm_backend_hometag)" \
-      fm_backend_hc_create_task "$@"
-  else
-    fm_backend_hc_create_task "$@"
-  fi
-}
-
 # --relaunch adoption: every identity axis comes from the task's own validated
 # durable record, never from the command line, so a relaunch can only ever
 # re-launch the task it names. The endpoint identity check is the same shared
@@ -2589,7 +2576,7 @@ if [ "$RELAUNCH" -eq 1 ]; then
   # up (bin/fm-bootstrap.sh; the secondmate-provisioning skill). Rebinding one
   # here as well would be a second path to the same outcome, so this refuses
   # and names the one that owns it.
-  if [ "$RELAUNCH_REBIND" -eq 1 ] && [ "$KIND" = secondmate ] && [ "$MOVE_BACKEND_SET" -eq 0 ]; then
+  if [ "$RELAUNCH_REBIND" -eq 1 ] && [ "$KIND" = secondmate ]; then
     echo "error: secondmate $ID's recorded endpoint is gone; its recovery is owned by the secondmate respawn path, not by relaunch (run bin/fm-spawn.sh $ID --secondmate, or let the session-start liveness sweep do it)" >&2
     exit 1
   fi
@@ -2669,6 +2656,13 @@ if [ "$RELAUNCH" -eq 1 ]; then
       hc|herdr) ;;
       *)
         echo "error: --move-backend supports the hc and herdr backends only; '$MOVE_BACKEND' has no verified fresh-endpoint path for a moved task" >&2
+        exit 1
+        ;;
+    esac
+    case "$KIND" in
+      ship|scout) ;;
+      *)
+        echo "error: task $ID records kind '$KIND'; --move-backend moves ship and scout tasks only" >&2
         exit 1
         ;;
     esac
@@ -5043,7 +5037,7 @@ EOF
         exit 1
       }
     fi
-    HC_TERMINAL=$(spawn_hc_create_task "$HC_SES" "$W" "$WT") || exit 1
+    HC_TERMINAL=$(fm_backend_hc_create_task "$HC_SES" "$W" "$WT") || exit 1
     T="$HC_SES:$HC_TERMINAL"
     SPAWN_HC_REBIND_TARGET=$T
     SES=$HC_SES
@@ -5057,9 +5051,9 @@ EOF
     #
     # Herdr reaches here only on a PROVEN-gone pane: its every read is scoped to
     # the session the record names (fm_control_endpoint_absence_verdict owns
-    # that argument), or here as a move target. tmux and every non-moving
-    # secondmate were already refused, and rex and hc took the branches above,
-    # so there is no dispatch left to make.
+    # that argument), or here as a move target. tmux and every secondmate were
+    # already refused, and rex and hc took the branches above, so there is no
+    # dispatch left to make.
     #
     # This deliberately uses the FLAT container shape rather than Herdr's
     # presentation projection: projection is a presentation-only layout that is
@@ -5081,21 +5075,14 @@ EOF
     # self-consistent but wrong record.
     #
     # A move from another backend has no recorded herdr session, so it lands
-    # where a fresh spawn from this seat would: this seat's session, and for a
-    # secondmate that home's own workspace.
-    HERDR_REBIND_LABEL_HOME=$FM_HOME
-    HERDR_REBIND_RELATIONSHIP=launcher-home
+    # where a fresh spawn from this seat would: this seat's session.
     if [ "$MOVE_BACKEND_SET" -eq 1 ]; then
       HERDR_REBIND_SES=$(fm_backend_herdr_session)
-      if [ "$KIND" = secondmate ]; then
-        HERDR_REBIND_LABEL_HOME=$PROJ_ABS
-        HERDR_REBIND_RELATIONSHIP=other-home
-      fi
     else
       HERDR_REBIND_SES=${RELAUNCH_TARGET%%:*}
     fi
-    HERDR_CONTAINER_RAW=$(HERDR_PANE_ID="$RELAUNCH_LAUNCHER_PANE_ID" FM_HOME="$HERDR_REBIND_LABEL_HOME" \
-      fm_backend_herdr_container_ensure "$PROJ_ABS" "$HERDR_REBIND_RELATIONSHIP" "$HERDR_REBIND_SES") || {
+    HERDR_CONTAINER_RAW=$(HERDR_PANE_ID="$RELAUNCH_LAUNCHER_PANE_ID" \
+      fm_backend_herdr_container_ensure "$PROJ_ABS" launcher-home "$HERDR_REBIND_SES") || {
       # container_ensure returns 1 for several unrelated reasons - a failed
       # version check, a server that will not start, an ambiguous workspace
       # label, a cross-session launcher identity, a failed workspace create -
@@ -5122,7 +5109,7 @@ EOF
     HERDR_SEEDED_DEFAULT_TAB_ID=${HERDR_CONTAINER_RAW#*$'\t'}
     HERDR_SES=${CONTAINER%%:*}
     HERDR_WORKSPACE_ID=${CONTAINER#*:}
-    HERDR_TASK_IDS=$(FM_HOME="$HERDR_REBIND_LABEL_HOME" fm_backend_herdr_create_task "$CONTAINER" "$W" "$WT" "$HERDR_SEEDED_DEFAULT_TAB_ID") || exit 1
+    HERDR_TASK_IDS=$(fm_backend_herdr_create_task "$CONTAINER" "$W" "$WT" "$HERDR_SEEDED_DEFAULT_TAB_ID") || exit 1
     read -r HERDR_TAB_ID HERDR_PANE_ID <<EOF
 $HERDR_TASK_IDS
 EOF
@@ -5416,7 +5403,7 @@ EOF
   hc)
     HC_SES=$(fm_backend_hc_container_ensure) || exit 1
     HC_CORE=$(fm_backend_hc_core_id "$HC_SES") || exit 1
-    HC_TERMINAL=$(spawn_hc_create_task "$HC_SES" "$W" "$PROJ_ABS") || exit 1
+    HC_TERMINAL=$(fm_backend_hc_create_task "$HC_SES" "$W" "$PROJ_ABS") || exit 1
     T="$HC_SES:$HC_TERMINAL"
     ;;
   orca)

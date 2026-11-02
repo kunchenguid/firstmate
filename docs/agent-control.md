@@ -103,8 +103,9 @@ Switching harness is therefore one ordinary relaunch rather than a separate mech
 
 ### Moving a task to another backend
 
-`relaunch --backend hc` moves a ship, scout, or local secondmate onto herdr-core, the terminal core Herdr.app shows.
-It runs the same transaction: the old agent is stopped on its recorded endpoint and must read agent-free there, one fresh hc terminal opens in the same recorded worktree or home, the replacement launches there, and the record is republished with `backend=hc` and that terminal.
+`relaunch --backend hc` moves a ship or scout task onto the experimental hc backend ([`hc-backend.md`](hc-backend.md)).
+Secondmates do not move, because hc does not run them.
+It runs the same transaction: the old agent is stopped on its recorded endpoint and must read agent-free there, one fresh hc terminal opens in the same recorded worktree, the replacement launches there, and the record is republished with `backend=hc` and that terminal.
 The old endpoint is closed only after that record is committed, and only while it still reads agent-free.
 The worktree, branch, and every uncommitted change are reused untouched.
 The target's spawn, core, and harness checks run before the old agent stops, so a move hc cannot take refuses with nothing changed.
@@ -112,7 +113,7 @@ A Pi replacement resumes the session the old endpoint's runtime recorded, as an 
 A Claude replacement resumes the conversation the old Claude agent was running: before the stop, the control plane reads its session id from the per-process record Claude keeps under `sessions/` in its config directory, and only exactly one live interactive Claude record in the worktree counts.
 Without such a record, or without that session's saved transcript, and for every other harness, the replacement starts a fresh conversation from the brief and the progress note.
 An in-place relaunch never resumes a Claude conversation, because it replaces an agent that may be confused or out of context.
-`relaunch --backend herdr` moves a task back from hc the same way, into this seat's Herdr session, and for a secondmate into its home's own workspace.
+`relaunch --backend herdr` moves a task back from hc the same way, into this seat's Herdr session.
 hc and herdr are the only move targets.
 
 ### Reclaiming a task whose endpoint is gone

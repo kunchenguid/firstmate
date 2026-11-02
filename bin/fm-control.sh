@@ -95,8 +95,8 @@
 #              The same pre-stop refusal applies to this home's worker tool
 #              exclusions (bin/fm-exclude-tools-lib.sh): a malformed list, or a
 #              replacement runtime that cannot hide the listed tools.
-#              --backend <name> MOVES the task to another runtime backend
-#              (hc, or herdr to move one back): the old agent is stopped on its recorded endpoint
+#              --backend <name> MOVES a ship or scout task to another
+#              runtime backend (hc, or herdr to move one back): the old agent is stopped on its recorded endpoint
 #              exactly as above, one fresh endpoint is created on <name> in
 #              the same recorded worktree, the record is republished with
 #              that backend and endpoint, and the old endpoint is closed only
@@ -1149,8 +1149,8 @@ resolve_move_backend() {
     *) die "relaunch --backend supports the hc and herdr backends only; '$NEW_BACKEND' has no verified path for a moved task" ;;
   esac
   case "$KIND" in
-    ship|scout|secondmate) ;;
-    *) die "task $ID records kind '$KIND', which has no defined move shape" ;;
+    ship|scout) ;;
+    *) die "task $ID records kind '$KIND'; relaunch --backend moves ship and scout tasks only" ;;
   esac
   fm_backend_validate_spawn "$NEW_BACKEND" || exit 1
   fm_backend_runtime_check "$NEW_BACKEND" || exit 1
