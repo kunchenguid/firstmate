@@ -212,7 +212,19 @@ clear_stream() {
   return 0
 }
 
+close_permission_keys() {  # [<gen>]: all keys when omitted
+  [ -f "$STATE/$ID.permission-keys" ] || return 0
+  local key_gen request_key
+  while read -r key_gen request_key; do
+    [ -z "${1:-}" ] || [ "$key_gen" = "$1" ] || continue
+    printf 'resolved [at=%s] [key=%s]: worker resumed after the Claude permission prompt\n' \
+      "$(date +%s)" "$request_key" >> "$STATE/$ID.status" || true
+  done < "$STATE/$ID.permission-keys"
+  rm -f "$STATE/$ID.permission-keys"
+}
+
 clear_stream_incarnation() {
+  close_permission_keys
   rm -f "$STATE/$ID.model-stream" "$STATE/$ID.model-stream-order" "$STATE/$ID.model-progress" "$STATE/$ID.permission-keys"
 }
 
@@ -383,14 +395,7 @@ write_record "$GEN" $((OLD_SEQ + 1)) || {
 if [ "$NEW_STATE" != busy ]; then
   clear_stream || { lock_release; exit 1; }
 fi
-if [ -f "$STATE/$ID.permission-keys" ]; then
-  while read -r key_gen request_key; do
-    [ "$key_gen" = "$GEN" ] || continue
-    printf 'resolved [at=%s] [key=%s]: worker resumed after the Claude permission prompt\n' \
-      "$(date +%s)" "$request_key" >> "$STATE/$ID.status" || true
-  done < "$STATE/$ID.permission-keys"
-  rm -f "$STATE/$ID.permission-keys"
-fi
+close_permission_keys "$GEN"
 umask "$old_umask"
 # Best effort: the record already settled, so a failed touch never refuses it.
 [ "$TURN_ENDED" = 0 ] || touch "$STATE/$ID.turn-ended" 2>/dev/null || true

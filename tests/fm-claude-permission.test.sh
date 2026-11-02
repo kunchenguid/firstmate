@@ -64,12 +64,12 @@ test_request_identity_and_generation() {
   [ "$(wc -l < "$state/t1.status" | tr -d ' ')" = 2 ] || fail 'a later identical tool request was suppressed'
   next=$("$EV" arm "$state" t1)
   if request "$state" "$gen" 2>/dev/null; then fail 'old incarnation was accepted'; fi
-  [ "$(wc -l < "$state/t1.status" | tr -d ' ')" = 2 ] || fail 'old incarnation wrote a decision'
+  [ "$(wc -l < "$state/t1.status" | tr -d ' ')" = 4 ] || fail 'old incarnation wrote a decision'
   request "$state" "$next" || fail 'replacement incarnation was suppressed'
   if printf '{}' | "$EV" permission-request "$state" t1 --gen "$next" 2>/dev/null; then
     fail 'malformed permission event was accepted'
   fi
-  [ "$(wc -l < "$state/t1.status" | tr -d ' ')" = 3 ] || fail 'invalid event changed status'
+  [ "$(wc -l < "$state/t1.status" | tr -d ' ')" = 5 ] || fail 'invalid event changed status'
   pass 'later requests and replacement incarnations remain distinct; stale and malformed events are refused'
 }
 
@@ -87,6 +87,18 @@ test_resume_closes_the_decision() {
   pass 'a resume event closes the permission decision exactly once'
 }
 
+test_relaunch_closes_the_abandoned_decision() {
+  local dir state gen
+  dir=$(make_case relaunch); state="$dir/state"
+  . "$ROOT/bin/fm-classify-lib.sh"
+  gen=$("$EV" arm "$state" t1)
+  request "$state" "$gen" || fail 'request failed'
+  "$EV" arm "$state" t1 >/dev/null || fail 'relaunch failed'
+  [ -z "$(status_own_open_decisions "$state/t1.status")" ] || fail 'relaunch left the decision open'
+  pass 'arming a replacement closes the abandoned permission decision'
+}
+
 test_request_is_durable_and_idempotent
+test_relaunch_closes_the_abandoned_decision
 test_resume_closes_the_decision
 test_request_identity_and_generation
