@@ -88,8 +88,13 @@
 # main-home acknowledgement. The atomic epoch/cursor marker's mtime gates scans,
 # and its cursor records the last child visited within the aggregate budget.
 #
-# The scan reads only durable local state, fm-crew-state.sh, and one
-# time-bounded endpoint liveness and busy read per terminal candidate; it never invokes
+# A terminal verdict is withheld while the endpoint carries a live agent that is
+# busy, or whose spawn_gen epoch is later than the last status line's [at=]
+# epoch (a newer incarnation; an unknown epoch counts as not newer).
+#
+# The scan reads only durable local state, fm-crew-state.sh, and one endpoint
+# liveness and busy read per terminal candidate, bounded by the scan budget left
+# after the crew-state read; it never invokes
 # gh, gh-axi, curl, fm-pr-check.sh, fm-pr-poll.sh, or a state *.check.sh.
 set -u
 export LC_ALL=C
@@ -503,8 +508,8 @@ report_child() { # <id>
   report_child_ledger_locked "$id" "$meta"
 }
 
-task_holds_live_work() { # <id> <meta> <timeout>; 0 when the verdict must be withheld, 3 on timeout
-  local id=$1 meta=$2 timeout=$3 backend target verdict rc=0
+task_holds_live_work() { # <id> <meta> <timeout> <last-status-line>; 0 when the verdict must be withheld, 3 on timeout
+  local id=$1 meta=$2 timeout=$3 last=$4 backend target verdict rc=0 spawn_epoch status_epoch
   backend=$(fm_backend_of_meta "$meta")
   target=$(fm_backend_target_of_meta "$meta")
   [ -n "$target" ] || return 1
@@ -517,13 +522,20 @@ task_holds_live_work() { # <id> <meta> <timeout>; 0 when the verdict must be wit
   [ "$rc" -ne 124 ] || return 3
   case "$verdict" in
     'alive busy'*) return 0 ;;
-    alive*) [ "$meta" -nt "$STATE/$id.status" ] ;;
+    alive*)
+      spawn_epoch=$(meta_field "$meta" spawn_gen)
+      spawn_epoch=${spawn_epoch#s}
+      spawn_epoch=${spawn_epoch%%.*}
+      status_epoch=$(status_line_at_epoch "$last") || return 1
+      case "$spawn_epoch$status_epoch" in ''|*[!0-9]*) return 1 ;; esac
+      [ "$spawn_epoch" -gt "$status_epoch" ]
+      ;;
     *) return 1 ;;
   esac
 }
 
 reconcile_direct_child_locked() { # <id> <meta> <secondmate-id-or-empty> <timeout>
-  local id=$1 meta=$2 self=${3:-} timeout=$4 status turn last age state_line state pr incarnation fingerprint outcome_key payload kind state_rc=0
+  local id=$1 meta=$2 self=${3:-} timeout=$4 status turn last age state_line state pr incarnation fingerprint outcome_key payload kind state_rc=0 started left
   [ -f "$meta" ] && [ ! -L "$meta" ] || return 0
   kind=$(meta_field "$meta" kind)
   [ "$kind" = secondmate ] && return 0
@@ -538,6 +550,7 @@ reconcile_direct_child_locked() { # <id> <meta> <secondmate-id-or-empty> <timeou
   fi
   age=$(last_activity_age "$meta" "$status" "$turn")
   [ "$age" -ge "$FM_INACTIVE_RECONCILE_SECS" ] || return 0
+  started=$(date +%s)
   state_line=$(fm_run_timed "$timeout" env FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_CREW_STATE_NO_FORGE=1 \
     "$CREW_STATE_BIN" "$id" 2>/dev/null) || state_rc=$?
   [ "$state_rc" -ne 124 ] || return 3
@@ -551,7 +564,9 @@ reconcile_direct_child_locked() { # <id> <meta> <secondmate-id-or-empty> <timeou
     'state: failed '*) state='failed' ;;
     *) return 0 ;;
   esac
-  task_holds_live_work "$id" "$meta" "$timeout" && return 0
+  left=$((timeout - ($(date +%s) - started)))
+  [ "$left" -ge 1 ] || return 3
+  task_holds_live_work "$id" "$meta" "$left" "$last" && return 0
   [ "$?" -ne 3 ] || return 3
   pr=$(pr_for_task "$meta")
   incarnation=$(meta_incarnation "$meta")
