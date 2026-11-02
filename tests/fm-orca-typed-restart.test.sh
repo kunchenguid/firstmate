@@ -5,7 +5,7 @@ set -u
 
 TMP_ROOT=$(fm_test_tmproot fm-orca-typed-restart)
 
-for mode in restart healthy healthy-retry; do
+for mode in restart healthy healthy-retry enter-failure; do
   fixture="$TMP_ROOT/$mode"
   mkdir -p "$fixture/fakebin" "$fixture/root/bin" "$fixture/state" "$fixture/worktree"
   printf '#!/usr/bin/env bash\nexit 0\n' > "$fixture/root/bin/fm-guard.sh"
@@ -40,7 +40,10 @@ if (args[0] === 'status') {
 } else if (args[1] === 'send') {
   if (args.includes('--enter')) {
     fs.appendFileSync(dir + '/enters', terminal + '\n');
-    if (terminal === 'old' && fs.existsSync(dir + '/restarted')) {
+    if (mode === 'enter-failure') {
+      console.log(JSON.stringify({ok: false, error: {code: 'send_failed', message: 'temporary runtime error'}}));
+      process.exitCode = 1;
+    } else if (terminal === 'old' && fs.existsSync(dir + '/restarted')) {
       console.log(JSON.stringify({ok: false, error: {code: 'terminal_handle_stale'}}));
       process.exitCode = 1;
     } else {
@@ -76,6 +79,13 @@ JS
     assert_not_contains "$(cat "$fixture/out")" "fm-peek.sh" "restart directed inspection to the stale recorded endpoint"
     [ "$(cat "$fixture/enters")" = $'old\nlive' ] || fail "restart: Enter retried after endpoint change"
     [ ! -s "$fixture/submitted" ] || fail "restart unexpectedly submitted the lost command"
+  elif [ "$mode" = enter-failure ]; then
+    [ "$rc" = 3 ] || fail "enter-failure: expected unconfirmed exit 3, got $rc: $(cat "$fixture/out")"
+    assert_contains "$(cat "$fixture/out")" "submission is unconfirmed" "enter-failure did not report the failed Enter as unconfirmed"
+    assert_contains "$(cat "$fixture/out")" "do not retype or blindly resend" "enter-failure invited a duplicate send"
+    assert_not_contains "$(cat "$fixture/out")" "text not sent" "enter-failure claimed the accepted text was not sent"
+    [ "$(cat "$fixture/enters")" = old ] || fail "enter-failure: Enter was retried after a non-stale failure"
+    [ ! -s "$fixture/submitted" ] || fail "enter-failure unexpectedly submitted the command"
   else
     [ "$rc" = 0 ] || fail "$mode: original endpoint send failed: $(cat "$fixture/out")"
     [ "$(cat "$fixture/submitted")" = /status ] || fail "$mode: slash command was not submitted"
@@ -84,4 +94,4 @@ JS
     [ "$(cat "$fixture/enters")" = "$expected" ] || fail "$mode: original Enter budget changed"
   fi
 done
-pass "Typed Orca endpoint changes are unconfirmed without retyping or further Enter"
+pass "Typed Orca endpoint changes and failed Enters are unconfirmed without retyping or further Enter"

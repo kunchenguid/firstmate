@@ -72,6 +72,7 @@ Draft and busy deferral applies to inbox rings; explicit typed text and Enter re
 On the typed plane, `fm-send.sh` verifies composer clearance through the fleet-wide classifier in `bin/fm-composer-lib.sh`, retrying Enter without retyping when a slash popup first fills an argument placeholder.
 If typed submission Enter changes the endpoint from the one that received the literal text, verification stops without retyping or further Enter attempts; an empty replacement composer cannot confirm text typed elsewhere.
 `fm-send.sh` exits 3 with an unconfirmed-submission message directing the caller to inspect the replacement pane for the recorded worktree in Orca's UI before deciding whether to resend.
+An Enter that fails after Orca accepted the typed text is likewise unconfirmed, not a proven non-delivery: the text may still be in that composer or an earlier Enter may have submitted it, so `fm-send.sh` exits 3 with retype-free recovery guidance instead of reporting the text as not sent.
 The composer read is one bounded tail of the live terminal and never pages backward into scrollback, so a stale startup banner cannot compete with the bottom-anchored composer.
 A bare shell row is `unknown`, not an empty agent composer, and plain-text captures degrade a glyph row carrying trailing text to `unknown` rather than a false `pending`.
 The watcher has no native Orca busy signal, so each harness adapter's semantic lifecycle supplies worker state.

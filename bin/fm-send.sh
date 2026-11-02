@@ -65,7 +65,8 @@
 # and outside --resolve-key). Pane backends type the literal text ONCE, then
 # retry Enter without retyping; T3 Code starts one native turn. Typed-plane exit
 # contract: 0 = submit confirmed; 3 = the text reached the live endpoint and
-# submission was attempted, but the read-back stayed unconfirmed, or an API
+# submission was attempted, but the read-back stayed unconfirmed or Enter failed
+# after the text was accepted, or an API
 # backend's outcome is unproven: a lost reply or an error that can follow a
 # commit (verify the endpoint
 # before any resend, and never submit blindly; docs/t3code-backend.md owns

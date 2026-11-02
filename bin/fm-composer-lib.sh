@@ -2455,8 +2455,11 @@ EOF
 # A caller that opts into <resolved-target-var> also receives endpoint outcomes:
 # Enter resolving a different endpoint than <target> returns `endpoint-changed`
 # (`inbox-deferred` on the inbox plane) with no retype and no further Enter, and
-# a failed Enter returns `send-failed`/`inbox-deferred` rather than a composer
-# verdict; every caller that omits the variable keeps the vocabulary above.
+# a failed Enter never claims a proven non-delivery, because the text was
+# already accepted: on the typed plane it returns `pending` (fm-send's
+# unconfirmed outcome), and on the inbox plane `send-failed`/`inbox-deferred`
+# rather than a composer verdict; every caller that omits the variable keeps the
+# vocabulary above.
 # tmux and herdr keep richer cores that consume this same shared verdict plus
 # fm_composer_queued_enter_verdict; no shape knowledge lives in any loop.
 fm_composer_submit_retry_core() {  # <send-key-fn> <state-fn> <target> <retries> <enter-sleep> [expected-label] [resolved-target-var]
@@ -2475,8 +2478,15 @@ fm_composer_submit_retry_core() {  # <send-key-fn> <state-fn> <target> <retries>
     fi
     # Only a caller that passes resolved-target-var (Orca) stops on a failed
     # Enter; every other backend keeps verifying the composer as before.
+    # An Enter that fails after the text was accepted is never a proven
+    # non-delivery: the text may still be in that composer, or an earlier
+    # Enter may have submitted it. The typed plane therefore reports the
+    # unconfirmed `pending` verdict instead of `send-failed`, so fm-send warns
+    # against a blind resend rather than saying the text was not sent.
     if [ "$key_rc" -ne 0 ] && [ -n "$resolved_target_var" ]; then
-      if [ "$key_rc" -eq 4 ] && [ -n "${FM_TASK_INBOX_RING_LINE:-}" ]; then
+      if [ -z "${FM_TASK_INBOX_RING_LINE:-}" ]; then
+        printf 'pending'
+      elif [ "$key_rc" -eq 4 ]; then
         printf 'inbox-deferred'
       else
         printf 'send-failed'
