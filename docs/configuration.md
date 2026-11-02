@@ -14,7 +14,7 @@ Start with the directory layout, then use the setting reference for the behavior
 | Supervision and presentation | [Pi supervision branch](#pi-supervision-branch), [supervision host](#supervision-host-configsupervision-host), [Codex native Stop park](#codex-native-stop-park-configcodex-stop-park), [warm-cache compaction](#warm-cache-compaction-configwarm-compact), and [Calm preference](#calm-preference-configcalm) |
 | Persistent secondmates | [Secondmate routes](#secondmate-routes-datasecondmatesmd) |
 | Review bots on owned GitHub pull requests | [Contribution review bots](#contribution-review-bots-configcontribution-review-bots) |
-| Stopping idle workers while a PR awaits review, and cleanup on merge | [Park on review](#park-on-review-configpark-on-review-configauto-land) |
+| Stopping idle workers while a PR awaits review, and cleanup on merge | [Park on review](#park-on-review) |
 | Per-run overrides and tuning | [Environment variables](#environment-variables) |
 
 ## FM_HOME
@@ -812,7 +812,7 @@ With the file absent, nothing is armed and an already armed check prints nothing
 Creating the flag takes effect at the next session start, or immediately after `bin/fm-pr-health.sh arm`.
 The flag is a home-local preference and is not inherited by secondmate homes.
 
-## Park on review (config/park-on-review, config/auto-land)
+## Park on review
 
 The optional local, gitignored `config/park-on-review` presence flag opts this home into stopping the idle agent of a ship lane whose PR or merge request only awaits human review, while keeping its branch, PR, task record, instructions, and local copy. The complete park and cleanup behavior is owned by [`bin/fm-park.sh`](../bin/fm-park.sh); see its command help for invocation details.
 A lane parks only from a verified clean, ready-to-merge state: open and not a draft, no conflicts, CI green on the current head (on GitHub, with every check the base branch requires reported on it), no changes requested, zero unresolved review threads, and every automated reviewer (CodeRabbit, Greptile, or a login listed in `config/contribution-review-bots`) having submitted a review of the current head, or a quiet window having passed since CI finished on it (a bot comment alone does not prove a finished review).
