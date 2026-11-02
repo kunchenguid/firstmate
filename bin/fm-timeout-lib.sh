@@ -27,7 +27,10 @@
 #       exit, and is reported as 124 too. Only 137 raised by GNU/BSD timeout's
 #       own KILL escalation, with no status recorded by the bounded command,
 #       also collapses into 124: there it means the bound fired, not that the
-#       command chose to die.
+#       command chose to die. A pipe or file on standard input reaches the
+#       command on every mechanism. The timeout and bash mechanisms background
+#       the command and restore that redirected stdin afterwards; they do not
+#       attach a terminal, and a closed stdin does not fail the call.
 #
 #   fm_exec_timed <seconds> <grace-seconds> <command> [args...]
 #       Replaces the calling shell with the bounded command, so it must be the
@@ -105,6 +108,34 @@ fm_timeout_mechanism() {
   fi
 }
 
+# True when stdin is a pipe or file. A terminal is not a redirected payload,
+# and a closed stdin cannot be duplicated.
+fm_timeout_stdin_is_redirected() {
+  [ ! -t 0 ] && ( exec 3<&0 ) 2>/dev/null
+}
+
+# Background "$@" and keep a redirected stdin. A non-interactive bash assigns
+# /dev/null to an async command's stdin, then applies explicit redirections, so
+# 0<&3 restores the dup. The group redirection is undone when the group ends,
+# and 3<&- keeps the spare fd out of the child.
+fm_timeout_background() {
+  if fm_timeout_stdin_is_redirected; then
+    { "$@" 0<&3 3<&- & } 3<&0
+  else
+    "$@" &
+  fi
+}
+
+fm_bash_timeout_child() {
+  local status_file=$1 command_rc
+  shift
+  set +m
+  "$@"
+  command_rc=$?
+  printf '%s\n' "$command_rc" > "$status_file"
+  exit "$command_rc"
+}
+
 fm_run_bash_timeout() {
   local seconds=$1 command_status deadline_status child_pid watchdog_pid command_rc recorded_rc monitor_was_on=0
   shift
@@ -112,13 +143,7 @@ fm_run_bash_timeout() {
   deadline_status="${command_status}.deadline"
   case $- in *m*) monitor_was_on=1 ;; esac
   set -m
-  (
-    set +m
-    "$@"
-    command_rc=$?
-    printf '%s\n' "$command_rc" > "$command_status"
-    exit "$command_rc"
-  ) <&0 &
+  fm_timeout_background fm_bash_timeout_child "$command_status" "$@"
   child_pid=$!
   (
     set +m
@@ -157,19 +182,20 @@ fm_run_external_timeout() {
   # Run the executable path asynchronously (never a bare name: that is the omp
   # timeout builtin, and backgrounding it leaves $! empty) so its pid - also
   # the process-group id created by GNU/BSD timeout without --foreground -
-  # remains available for cleanup.
+  # remains available for cleanup. fm_timeout_background keeps a redirected
+  # stdin across that async assignment.
   # A shell wrapper can exit promptly on TERM while one of its descendants
   # ignores TERM; timeout then considers the command finished and does not send
   # its configured KILL. Explicitly reap that leftover group on a real timeout.
   # shellcheck disable=SC2016  # Expansion is deliberately deferred to the child shell.
-  "$runner" -k 1 "$seconds" bash -c '
+  fm_timeout_background "$runner" -k 1 "$seconds" bash -c '
     status_file=$1
     shift
     "$@"
     command_rc=$?
     printf "%s\n" "$command_rc" > "$status_file"
     exit "$command_rc"
-  ' _ "$status_file" "$@" <&0 &
+  ' _ "$status_file" "$@"
   runner_pid=$!
   if wait "$runner_pid"; then
     runner_rc=0
