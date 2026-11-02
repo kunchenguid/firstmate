@@ -1979,8 +1979,7 @@ fm_treehouse_slot_owner_claim() {  # <worktree> <task-id> <home>
 #   absent - no claim: the slot was taken before claims existed, or returned since
 #   unsafe - a claim file exists but cannot be read as a claim
 # FM_TREEHOUSE_SLOT_OWNER_ID and FM_TREEHOUSE_SLOT_OWNER_HOME carry the recorded
-# claimant as evidence. The home is reported, never matched: a home that moved
-# must not turn a task's own slot into a refusal.
+# claimant as evidence for consumers that also need to verify the owning home.
 fm_treehouse_slot_owner_state() {  # <worktree> <task-id>
   local worktree=$1 id=$2 marker line owner_id='' owner_home=''
   FM_TREEHOUSE_SLOT_OWNER=unsafe
@@ -2008,6 +2007,13 @@ fm_treehouse_slot_owner_state() {  # <worktree> <task-id>
   else
     FM_TREEHOUSE_SLOT_OWNER=other
   fi
+}
+
+fm_treehouse_slot_claim_home_owns_state() {  # <claim-home> <record-state> <active-state> <active-home>
+  local claim_home=$1 record_state=$2 active_state=$3 active_home=$4
+  [ -n "$claim_home" ] && [ -d "$claim_home" ] || return 1
+  [ "$claim_home/state" -ef "$record_state" ] && return 0
+  [ "$record_state" -ef "$active_state" ] && [ "$claim_home" -ef "$active_home" ]
 }
 
 # Drop a task's own claim once its slot is back in the pool. Never removes

@@ -124,10 +124,15 @@
 # cleanup step, teardown verifies record exclusivity: no OTHER task record in
 # this home or any locally registered Firstmate home may name the same live path
 # in its worktree= or home=. One live path with two task records is the reuse
-# collision itself, whichever record is stale. The one exception is a slot whose
-# owner claim (below) names another task: this teardown is then records-only and
-# touches nothing under the slot, so the scan is skipped rather than stranding
-# the stale record and, with it, the claimant's own teardown.
+# collision itself, whichever record is stale. The owner claim (below) settles
+# which one is stale. A claim naming another task makes this teardown
+# records-only, touching nothing under the slot, so the scan is skipped rather
+# than stranding the stale record and, with it, the claimant's own teardown. A
+# claim naming this task and written by this home proves this record took the
+# slot last, so each other record naming it whose own recorded endpoint is
+# proven not live is reported as stale and left in place rather than refusing
+# both teardowns forever; another record with a live or unprovable endpoint
+# still refuses.
 # That scan alone cannot prove THIS record is the current owner, because the task
 # that took the slot next may leave no record it can reach - its own worker may
 # have exited and its record been cleaned up, or it may live in a home this
@@ -160,8 +165,9 @@
 # before cleanup. Its current working directory is only incidental process
 # state: the same worker remains the owner after changing directory, so cwd can
 # never veto teardown of that exact recorded endpoint.
-# The scan and destructive return hold a project-identity lock in the local root
-# Firstmate home's state directory, as resolved by bin/fm-wake-lib.sh's
+# The scan and destructive return hold each conflicting record's lifecycle and
+# metadata locks, plus a project-identity lock in the local root Firstmate
+# home's state directory, as resolved by bin/fm-wake-lib.sh's
 # fm_firstmate_root_home; a home seeded from another machine is its own local
 # root, since a lock on this filesystem cannot be held or observed across that
 # boundary. Fresh Treehouse spawns for that project in
@@ -593,6 +599,7 @@ SM_LIVENESS_LOCK=
 META_LOCK=
 META_LOCK_HELD=0
 DESCENDANT_LOCK_PATHS=()
+SLOT_RECORD_LOCK_PATHS=()
 DESCENDANT_TASK_STATES=()
 DESCENDANT_TASK_IDS=()
 DESCENDANT_TASK_KINDS=()
@@ -603,6 +610,10 @@ teardown_release_locks() {
   if declare -F teardown_release_herdr_locks >/dev/null 2>&1; then
     teardown_release_herdr_locks || true
   fi
+  for ((i=${#SLOT_RECORD_LOCK_PATHS[@]} - 1; i >= 0; i--)); do
+    fm_lock_release "${SLOT_RECORD_LOCK_PATHS[$i]}" || true
+  done
+  SLOT_RECORD_LOCK_PATHS=()
   for ((i=${#DESCENDANT_LOCK_PATHS[@]} - 1; i >= 0; i--)); do
     fm_lock_release "${DESCENDANT_LOCK_PATHS[$i]}" || true
   done
@@ -2569,9 +2580,108 @@ collect_local_firstmate_states() {
   TREEHOUSE_OWNER_STATES=("${FM_LOCAL_FIRSTMATE_STATES[@]}")
 }
 
+# A missing tmux name proves nothing by itself: a window can be renamed or
+# moved on the same server. Accept that absence only after the process rooted
+# at the recorded pane has died (pid plus start time, so reuse cannot satisfy
+# it) and the ordinary worktree reap inventory finds no process still rooted
+# under the record's worktree or task temp directory.
+other_record_tmux_missing_proven_gone() {  # <meta-file>
+  local meta=$1 pid recorded_start current_start worktree tasktmp
+  pid=$(fm_backend_meta_exact_value "$meta" endpoint_pid) || return 1
+  recorded_start=$(fm_backend_meta_exact_value "$meta" endpoint_pid_start) || return 1
+  case "$pid" in ''|*[!0-9]*) return 1 ;; esac
+  [ -n "$recorded_start" ] || return 1
+  case "$recorded_start" in *$'\n'*|*$'\r'*|*$'\t'*) return 1 ;; esac
+  current_start=$(fm_pid_start_time "$pid" 2>/dev/null || true)
+  [ "$current_start" != "$recorded_start" ] || return 1
+  worktree=$(fm_backend_meta_exact_value "$meta" worktree) || return 1
+  tasktmp=$(fm_backend_meta_exact_value "$meta" tasktmp 2>/dev/null || true)
+  task_pids_under_roots "$worktree" "$tasktmp" || return 1
+  [ -z "$TASK_PIDS" ]
+}
+
+# Whether another task record's own recorded endpoint is proven not live: its
+# endpoint metadata validates and the recovery-grade classifier reads it dead,
+# or the backend-specific absence authority proves a missing endpoint gone.
+# Every other answer, including a validation failure, is not proof.
+other_record_endpoint_proven_gone() {  # <meta-file> <task-id>
+  local meta=$1 task_id=$2 state verdict tmux_server
+  local FM_BACKEND_VALIDATED_BACKEND FM_BACKEND_VALIDATED_TARGET
+  fm_backend_validate_task_endpoint "$meta" "$task_id" 2>/dev/null || return 1
+  if [ "$FM_BACKEND_VALIDATED_BACKEND" = tmux ]; then
+    # A bare tmux read describes only the server selected by this teardown's
+    # environment. It cannot prove anything about a record created on another
+    # server, even when both servers reuse the same session/window names.
+    tmux_server=$(fm_backend_meta_exact_value "$meta" tmux_server) || return 1
+    case "$tmux_server" in
+      /*) ;;
+      *) return 1 ;;
+    esac
+    case "$tmux_server" in *$'\n'*|*$'\r'*|*$'\t'*) return 1 ;; esac
+    fm_backend_source tmux || return 1
+    state=$(fm_backend_tmux_agent_state_on_server "$tmux_server" "$FM_BACKEND_VALIDATED_TARGET")
+    case "$state" in
+      dead) return 0 ;;
+      missing) other_record_tmux_missing_proven_gone "$meta"; return ;;
+      *) return 1 ;;
+    esac
+  fi
+  state=$(fm_backend_agent_state "$FM_BACKEND_VALIDATED_BACKEND" "$FM_BACKEND_VALIDATED_TARGET")
+  case "$state" in
+    dead) return 0 ;;
+    missing)
+      verdict=$(fm_control_endpoint_absence_verdict \
+        "$FM_BACKEND_VALIDATED_BACKEND" "$FM_BACKEND_VALIDATED_TARGET" "$meta")
+      case "${verdict%%$'\t'*}" in
+        gone|dead) return 0 ;;
+      esac
+      ;;
+  esac
+  return 1
+}
+
+teardown_record_lock_held() {  # <lock-path>
+  local lock=$1 held
+  [ "$CONTROL_LOCK_HELD" != 1 ] || [ "$lock" != "$CONTROL_LOCK" ] || return 0
+  [ "$META_LOCK_HELD" != 1 ] || [ "$lock" != "$META_LOCK" ] || return 0
+  for held in "${DESCENDANT_LOCK_PATHS[@]+"${DESCENDANT_LOCK_PATHS[@]}"}" \
+              "${SLOT_RECORD_LOCK_PATHS[@]+"${SLOT_RECORD_LOCK_PATHS[@]}"}"; do
+    [ "$lock" != "$held" ] || return 0
+  done
+  return 1
+}
+
+hold_conflicting_slot_record_locks() {  # <meta-file> <task-id>
+  local other=$1 other_id=$2 control_lock meta_lock control_held=0 meta_held=0
+  control_lock="${other%/*}/.control-$other_id.lock"
+  meta_lock=$(fm_meta_lock_path "$other") || {
+    echo "REFUSED: task $other_id has an invalid metadata lock path; nothing was changed" >&2
+    return 1
+  }
+  teardown_record_lock_held "$control_lock" && control_held=1
+  teardown_record_lock_held "$meta_lock" && meta_held=1
+  if [ "$control_held" != "$meta_held" ]; then
+    echo "REFUSED: task $other_id's lifecycle and metadata locks are not held together; nothing was changed" >&2
+    return 1
+  fi
+  if [ "$control_held" = 0 ]; then
+    if ! fm_lock_try_acquire "$control_lock"; then
+      echo "REFUSED: task $other_id has a lifecycle action in flight; nothing was changed" >&2
+      return 1
+    fi
+    SLOT_RECORD_LOCK_PATHS+=("$control_lock")
+    if ! fm_lock_try_acquire "$meta_lock"; then
+      echo "REFUSED: task $other_id has a metadata update in flight; nothing was changed" >&2
+      return 1
+    fi
+    SLOT_RECORD_LOCK_PATHS+=("$meta_lock")
+  fi
+  [ -f "$other" ] && [ ! -L "$other" ] || return 2
+}
+
 require_exclusive_worktree_slot_record() {
   local record_meta=$1 record_id=$2 record_state=$3 worktree=$4
-  local slot state_dir other other_id field other_path other_slot
+  local slot state_dir other other_id field other_path other_slot lock_rc claimed=0
   slot=$(canonical_existing_dir "$worktree") || return 0
   # A slot whose owner claim names another task was reassigned, so this record's
   # teardown is records-only and touches nothing under it; another record naming
@@ -2579,6 +2689,19 @@ require_exclusive_worktree_slot_record() {
   # block the claimant's own teardown behind it.
   fm_treehouse_slot_owner_state "$slot" "$record_id"
   [ "$FM_TREEHOUSE_SLOT_OWNER" != other ] || return 0
+  # A claim naming this record, written by this record's own home, proves this
+  # record took the slot last: the claim is written under the project lock that
+  # allocates the slot, so every other record naming it predates that
+  # allocation and is stale. Refusing would strand both records, since the
+  # stale one is records-only and never clears this one. That holds only if the
+  # other task's allocator wrote a claim, so another record is treated as stale
+  # only when its own recorded endpoint is also proven not live; a live or
+  # unprovable endpoint still refuses. A matching task id from any other home
+  # proves nothing, so the scan still refuses there.
+  if [ "$FM_TREEHOUSE_SLOT_OWNER" = mine ] \
+     && fm_treehouse_slot_claim_home_owns_state "$FM_TREEHOUSE_SLOT_OWNER_HOME" "$record_state" "$STATE" "$FM_HOME"; then
+    claimed=1
+  fi
   collect_local_firstmate_states "$record_state" || return 1
   for state_dir in "${TREEHOUSE_OWNER_STATES[@]}"; do
     for other in "$state_dir"/*.meta; do
@@ -2594,6 +2717,20 @@ require_exclusive_worktree_slot_record() {
         [ -n "$other_path" ] || continue
         other_slot=$(canonical_existing_dir "$other_path") || continue
         [ "$other_slot" = "$slot" ] || continue
+        lock_rc=0
+        hold_conflicting_slot_record_locks "$other" "$other_id" || lock_rc=$?
+        case "$lock_rc" in
+          0) ;;
+          2) continue ;;
+          *) return 1 ;;
+        esac
+        other_path=$(fm_meta_get "$other" "$field")
+        other_slot=$(canonical_existing_dir "$other_path") || continue
+        [ "$other_slot" = "$slot" ] || continue
+        if [ "$claimed" = 1 ] && other_record_endpoint_proven_gone "$other" "$other_id"; then
+          echo "warning: task $other_id's recorded $field also names $slot, but that slot's owner claim names $record_id, which took the slot after $other_id's record was written, and $other_id's recorded endpoint is not live; $other_id's record is stale and is left in place for its own teardown." >&2
+          continue
+        fi
         echo "REFUSED: task $record_id's recorded worktree $slot is also task $other_id's recorded $field." >&2
         echo "Returning that pool slot would kill $other_id's processes and reset its copy, so nothing was changed - not even with --force." >&2
         echo "Reconcile whichever record is wrong (bin/fm-crew-state.sh $record_id; bin/fm-crew-state.sh $other_id), then re-run teardown." >&2
@@ -2612,14 +2749,16 @@ require_exclusive_task_worktree_slot() {
 # Positive slot ownership, read from the claim the task that took the slot wrote
 # into the slot itself (bin/fm-wake-lib.sh owns the claim and its states).
 #
-# For a slot this task still claims, or one with no claim, the record scan above
-# proves that no OTHER task record names it. It cannot prove that THIS record is
-# not the stale one, because the task that took the slot next may leave no record
-# this scan can reach: its own worker may have exited and its record been cleaned
-# up, or it may belong to a home this machine does not register. The claim closes that gap from the other side - it names the
-# task that actually took the slot, and it is written under the same project lock
-# that allocates it - so a claim naming another task is proof the slot was
-# reassigned after this record was written.
+# The record scan above proves that no OTHER task record names the slot, unless
+# a claim from this home names this task, in which case any such record whose
+# own recorded endpoint is proven not live is stale. The scan alone cannot prove
+# that THIS record is not the stale one, because the task that took the slot next
+# may leave no record this scan can reach: its own worker may have exited and its
+# record been cleaned up, or it may belong to a home this machine does not
+# register. The claim closes that gap from the other side - it names the task
+# that actually took the slot, and it is written under the same project lock that
+# allocates it - so a claim naming another task is proof the slot was reassigned
+# after this record was written.
 #
 # A claim naming another task does not refuse: it means the slot is no longer
 # this task's, so the record's own cleanup proceeds and every slot step is
