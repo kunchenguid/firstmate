@@ -33,17 +33,18 @@
 #      unprobed build shares the root record
 #
 # When all of that holds, arm daemonizes `watch`, which polls firstmate's own
-# durable signals for the task and emits records to /dev/tty. Every record
-# needs known activity first: fm_busy_classify (bin/fm-busy-lib.sh owns every
-# source: the busy-state record, Cursor's transcript / Muse's session log, or
-# the rendered pane fm-backend.sh captures for Grok/Rovo/Agy) must read busy
-# or idle. Then, in order:
+# durable signals for the task and emits records to /dev/tty. Activity comes
+# from fm_busy_classify (bin/fm-busy-lib.sh owns every source: the busy-state
+# record, Cursor's transcript / Muse's session log, or the rendered pane
+# fm-backend.sh captures for Grok/Rovo/Agy). With known busy or idle activity,
+# the mapping is, in order:
 #
 #   an open keyed needs-decision or blocked in state/<id>.status
 #   (bin/fm-classify-lib.sh owns the fold):
-#     needs-decision/held -> blocked kind=question
+#     needs-decision      -> blocked kind=question
 #     blocked             -> blocked kind=permission (kind=auth when the note
 #                            names a credential)
+#   otherwise the latest status line is captain-held -> blocked kind=question
 #   otherwise busy -> working
 #   otherwise the latest status line, when it is terminal:
 #     failed              -> error
@@ -51,15 +52,16 @@
 #   otherwise idle
 #   A paused declaration has no separate mapping; activity decides as above.
 #   Unknown activity proves nothing about the worker and nothing about who
-#   owns the root record, so the bridge never holds or heartbeats a record
-#   there. While the bridge's own last write stands, though, the durable
+#   owns the root record, so it never triggers a heartbeat. Once the bridge
+#   has written a record of its own, though, the durable
 #   signals alone keep it honest: they fold the same way with idle activity
 #   and the result is written once per change - an open decision still
 #   reads blocked, done/failed still report, anything else parks at idle -
 #   so a working/blocked record cannot outlive the signals that produced
 #   it. arm's idle clear is the bridge's own first write, so the watcher it
 #   starts owns the root record from launch; a watcher with no write of its
-#   own stays silent instead: the root record may belong to a native writer. Harnesses whose activity only resolves
+#   own stays silent instead: the root record may belong to a native writer.
+#   Harnesses whose activity only resolves
 #   busy or unknown (Rovo, Antigravity) thereby still reach idle, blocked,
 #   done, and error through the signals.
 #
@@ -74,8 +76,8 @@
 # launch runs `disarm` right after the agent command returns, and the watcher
 # also exits when its recorded parent - the shell running the launch - dies.
 # Either way a final emit keeps done/error and otherwise parks the record at
-# idle - including when activity is unknown, as long as the bridge's last
-# write still stands; a TERM/HUP retires it the same way. One watcher per
+# idle - including when activity is unknown, provided the watcher has a
+# prior write of its own; a TERM/HUP retires it the same way. One watcher per
 # controlling terminal (<state>/.osc7501watch-<tty>): every arm retires the
 # pane's previous watcher before any gate, so a relaunch rebinds to the new
 # agent and a natively reporting agent never shares the pane with a stale
@@ -93,7 +95,9 @@
 #       --config <dir> [--target <t>] [--agent-bin <exe>]
 #                                            detect + spawn watcher; exit 0
 #   watch --task <id> --kind <k> --state <dir> --harness <h> --parent <pid>
-#       [--backend <b> --target <t>]         the reporter loop (internal)
+#       [--backend <b> --target <t>] [--owned 1]
+#                                            reporter loop; owned carries
+#                                            arm's successful write (internal)
 #   disarm --state <dir>                     retire this terminal's watcher
 #
 # Test seams: FM_OSC7501_TTY replaces /dev/tty as the output device (a
