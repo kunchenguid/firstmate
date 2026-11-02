@@ -1583,7 +1583,7 @@ test_housekeeping_overdue_queue_failure_resume_discards() {
 
 test_overdue_reconcile_ignores_unrelated_and_repeated_pause() {
   local dir state task statusf identity offset event
-  for event in blocked repeated prose custom; do
+  for event in blocked repeated prose custom done merged; do
     dir=$(make_supercase "overdue-reconcile-$event"); state="$dir/state"
     task=overdue-reconcile; statusf="$state/$task.status"
     if [ "$event" = custom ]; then printf 'holding [at=100]: waiting for dependency\n' > "$statusf"; else printf 'paused [at=100]: waiting for dependency\n' > "$statusf"; fi
@@ -1596,14 +1596,21 @@ test_overdue_reconcile_ignores_unrelated_and_repeated_pause() {
       repeated) printf 'paused [at=200]: waiting for dependency\n' >> "$statusf" ;;
       prose) printf 'Still waiting for the dependency\n' >> "$statusf" ;;
       custom) printf 'holding [at=200]: waiting for dependency\n' >> "$statusf" ;;
+      done) printf 'done: finished\n' >> "$statusf" ;;
+      merged) printf 'merged\n' >> "$statusf" ;;
     esac
     (
       # shellcheck disable=SC2030
       export FM_HOME="$dir" FM_STATE_OVERRIDE="$state"
       . "$ROOT/bin/fm-wake-lib.sh"
       if [ "$event" = custom ]; then FM_CLASSIFY_PAUSED_VERB=holding reconcile_overdue_pause "$state" "$task"; else reconcile_overdue_pause "$state" "$task"; fi
-      [ -e "$state/.paused-overdue-$task" ] || fail "$event removed the overdue marker"
-      status_open_decisions "$statusf" | grep -Fq "paused-overdue-$task" || fail "$event closed the overdue decision"
+      if [ "$event" = done ] || [ "$event" = merged ]; then
+        [ ! -e "$state/.paused-overdue-$task" ] || fail "$event left the overdue marker"
+        ! status_open_decisions "$statusf" | grep -Fq "paused-overdue-$task" || fail "$event left the overdue decision open"
+      else
+        [ -e "$state/.paused-overdue-$task" ] || fail "$event removed the overdue marker"
+        status_open_decisions "$statusf" | grep -Fq "paused-overdue-$task" || fail "$event closed the overdue decision"
+      fi
     ) || fail "overdue reconciliation accepted $event as resume"
   done
   pass "unrelated blockers and repeated pauses preserve overdue decisions"

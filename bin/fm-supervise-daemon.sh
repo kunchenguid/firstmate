@@ -1354,7 +1354,7 @@ _oldest_line_age() {  # <buf> -> seconds since the oldest buffered item first ar
 #  3) heartbeat scan: every HEARTBEAT_SCAN_SECS, run the catch-all status scan in
 #     the block below and escalate what it finds; that block owns its file set.
 reconcile_overdue_pause() {  # <state> <task> -> reconcile worker events after overdue decision
-  local state=$1 task=$2 statusf="$1/$2.status" marker="$1/.paused-overdue-$2" identity marker_identity offset size added line verb key resume=0 rc prior_pause new_pause pause_verb=${FM_CLASSIFY_PAUSED_VERB:-$FM_CLASSIFY_PAUSED_VERB_DEFAULT}
+  local state=$1 task=$2 statusf="$1/$2.status" marker="$1/.paused-overdue-$2" identity marker_identity offset size added line verb key resume=0 rc prior_pause new_pause pause_verb=${FM_CLASSIFY_PAUSED_VERB:-$FM_CLASSIFY_PAUSED_VERB_DEFAULT} legacy_re="^[[:space:]]*(${FM_CAPTAIN_RE:-$FM_CLASSIFY_CAPTAIN_RE_DEFAULT})"
   [ -f "$marker" ] || return 1
   [ -f "$statusf" ] || return 2
   if [ "$(uname)" = Darwin ]; then
@@ -1374,7 +1374,7 @@ reconcile_overdue_pause() {  # <state> <task> -> reconcile worker events after o
   _fm_status_unstamped "$pause_line" prior_pause
   while IFS= read -r line || [ -n "$line" ]; do
     verb=$(status_line_verb "$line")
-    _fm_status_verb_recognized "$verb" || continue
+    _fm_status_line_is_event "$line" "$legacy_re" || continue
     case "$verb" in
       blocked) ;;
       resolved)

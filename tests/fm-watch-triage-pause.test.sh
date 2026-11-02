@@ -1449,6 +1449,22 @@ test_overdue_marker_survives_reconcile_and_closes_on_working() {
     printf "Still waiting for the dependency\n" >> "$2"
     pause_overdue_reconcile overdue-marker-eof "$2"; [ "$?" -eq 0 ] || exit 1
     [ -s "$STATE/.paused-overdue-overdue-marker-eof" ] || exit 1
+    printf "done: finished\n" >> "$2"
+    pause_overdue_reconcile overdue-marker-eof "$2"; [ "$?" -eq 1 ] || exit 1
+    [ ! -e "$STATE/.paused-overdue-overdue-marker-eof" ] || exit 1
+    printf 'holding: waiting for an external dependency\n' >> "$2"
+    offset=$(_fm_status_file_size "$2")
+    identity=$(stat_devino "$2")
+    printf '%s:%s\n' "$identity" "$offset" > "$STATE/.paused-overdue-overdue-marker-eof"
+    printf "blocked [key=paused-overdue-overdue-marker-eof]: overdue\n" >> "$2"
+    printf "merged\n" >> "$2"
+    pause_overdue_reconcile overdue-marker-eof "$2"; [ "$?" -eq 1 ] || exit 1
+    [ ! -e "$STATE/.paused-overdue-overdue-marker-eof" ] || exit 1
+    printf 'holding: waiting for an external dependency\n' >> "$2"
+    offset=$(_fm_status_file_size "$2")
+    identity=$(stat_devino "$2")
+    printf '%s:%s\n' "$identity" "$offset" > "$STATE/.paused-overdue-overdue-marker-eof"
+    printf "blocked [key=paused-overdue-overdue-marker-eof]: overdue\n" >> "$2"
     printf "holding [at=300]: waiting for an external dependency\n" >> "$2"
     pause_overdue_reconcile overdue-marker-eof "$2"; [ "$?" -eq 0 ] || exit 1
     [ -s "$STATE/.paused-overdue-overdue-marker-eof" ] || exit 1

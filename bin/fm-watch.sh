@@ -2665,7 +2665,7 @@ clear_pause_tracking() {  # <window-key>
 
 # Keep the overdue decision open until the worker appends another status event.
 pause_overdue_reconcile() {  # <task> <status-file> -> 0 unchanged, 1 cleared or absent
-  local task=$1 statusf=$2 marker="$STATE/.paused-overdue-$1" identity marker_identity offset actual added line verb key append_rc resume=0 prior_pause new_pause pause_line pause_verb=${FM_CLASSIFY_PAUSED_VERB:-$FM_CLASSIFY_PAUSED_VERB_DEFAULT}
+  local task=$1 statusf=$2 marker="$STATE/.paused-overdue-$1" identity marker_identity offset actual added line verb key append_rc resume=0 prior_pause new_pause pause_line pause_verb=${FM_CLASSIFY_PAUSED_VERB:-$FM_CLASSIFY_PAUSED_VERB_DEFAULT} legacy_re="^[[:space:]]*(${FM_CAPTAIN_RE:-$FM_CLASSIFY_CAPTAIN_RE_DEFAULT})"
   [ -f "$marker" ] || return 1
   [ -f "$statusf" ] || { rm -f "$marker"; return 1; }
   identity=$(stat_devino "$statusf") || return 0
@@ -2682,7 +2682,7 @@ pause_overdue_reconcile() {  # <task> <status-file> -> 0 unchanged, 1 cleared or
   _fm_status_unstamped "$pause_line" prior_pause
   while IFS= read -r line || [ -n "$line" ]; do
     verb=$(status_line_verb "$line")
-    _fm_status_verb_recognized "$verb" || continue
+    _fm_status_line_is_event "$line" "$legacy_re" || continue
     case "$verb" in
       blocked) ;;
       resolved)
