@@ -867,6 +867,10 @@ seed_home() {
   fm_lock_acquire_wait "$SEED_REGISTRY_LOCK" || return 1
   SEED_REGISTRY_LOCK_HELD=1
   trap seed_exit_cleanup EXIT
+  if [ -e "$STATE/.seat-retirement-$id.json" ] || [ -L "$STATE/.seat-retirement-$id.json" ]; then
+    echo "error: secondmate $id retirement is unfinished; finish teardown before seeding" >&2
+    return 1
+  fi
 
   validate_registry
   for project in "$@"; do

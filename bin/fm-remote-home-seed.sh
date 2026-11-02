@@ -109,6 +109,9 @@ mkdir -p "$STATE" || die "cannot create parent state directory"
 REGISTRY_LOCK=$(secondmate_registry_lock_path "$STATE")
 fm_lock_acquire_wait "$REGISTRY_LOCK" || die "cannot lock the secondmate registry"
 REGISTRY_LOCK_HELD=1
+if [ -e "$STATE/.seat-retirement-$ID.json" ] || [ -L "$STATE/.seat-retirement-$ID.json" ]; then
+  die "secondmate $ID retirement is unfinished; finish teardown before seeding"
+fi
 
 if [ -e "$REG" ] || [ -L "$REG" ]; then
   [ -f "$REG" ] && [ ! -L "$REG" ] || die "secondmate registry is unavailable or unsafe: $REG"

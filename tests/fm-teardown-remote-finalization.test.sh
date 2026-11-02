@@ -29,6 +29,21 @@ MV
     assert_present "$home/state/.seat-retirement-mate.json" "publication failure lost recovery evidence"
     assert_grep '- mate ' "$home/data/secondmates.md" "publication failure lost its route"
   fi
+  cp "$home/data/secondmates.md" "$home/registry.before"
+  for placement in local remote; do
+    rc=0
+    if [ "$placement" = local ]; then
+      FM_HOME="$home" bash "$ROOT/bin/fm-home-seed.sh" mate "$home/reseeded" --no-projects >"$home/seed.out" 2>"$home/seed.err" || rc=$?
+    else
+      FM_HOME="$home" bash "$ROOT/bin/fm-remote-home-seed.sh" mate remote /remote/root /remote/home --no-projects >"$home/seed.out" 2>"$home/seed.err" || rc=$?
+    fi
+    expect_code 1 "$rc" "unfinished retirement must fence $placement seeding"
+    assert_grep 'retirement is unfinished' "$home/seed.err" "seeding must identify unfinished retirement"
+    cmp "$home/registry.before" "$home/data/secondmates.md" || fail "refused seed changed the registry"
+    assert_absent "$home/reseeded" "refused seed created a successor home"
+    assert_absent "$home/data/mate/brief.md" "refused seed created a successor charter"
+    assert_present "$home/state/.seat-retirement-mate.json" "refused seed removed retirement evidence"
+  done
   rc=0
   FM_HOME="$home" bash "$ROOT/bin/fm-teardown.sh" mate > "$home/out" 2> "$home/err" || rc=$?
   if [ "$shape" = mismatched ]; then

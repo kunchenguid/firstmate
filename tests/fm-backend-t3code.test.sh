@@ -2215,6 +2215,9 @@ test_secondmate_teardown_archives_thread_before_home_removal_without_project_del
       assert_present "$home/AGENTS.md" "an unproven shutdown keeps the secondmate home"
       assert_present "$state/$id.meta" "an unproven shutdown keeps the endpoint record"
       kill -0 "$PROVIDER_PID" 2>/dev/null || fail "the refused teardown must not have touched the provider"
+      kill "$PROVIDER_PID" 2>/dev/null || true
+      wait "$PROVIDER_PID" 2>/dev/null || true
+      PROVIDER_PID=
       continue
     fi
     out=$( PATH="$(fm_test_base_path_sans "$PATH" lsof)" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$CASE_DIR/home" \
