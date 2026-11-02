@@ -3752,6 +3752,7 @@ Herdr 1 calls ran on a named `fm-lab-` session provisioned and torn down through
 | `fm-control.sh mv1 exit` on hc | `stopped mv1 ... backend=hc`; `fm_backend_agent_state hc` then read `dead` (the login shell), with `foreground.name` naming the user's Claude launcher wrapper while Claude ran. |
 | `fm-control.sh mv1 relaunch --note ...` on hc | Adopted the same terminal `t1` and read `alive`. |
 | `fm-control.sh mv1 relaunch --backend hc` of a live Claude in a Herdr pane, with transcript saving on | The old agent's session id, read from its `sessions/<pid>.json`, was the session the hc replacement ran; `hc get` reported `{"app":"claude-code","state":"done"}`. |
+| `fm-control.sh mv1 relaunch --backend herdr` of that hc task | `backend=herdr` on a new pane in this seat's Herdr lab session, which read `alive`; the hc terminal answered not-found and the worktree status was unchanged. |
 
 `tests/fm-control-relaunch.test.sh` and `tests/fm-backend-hc.test.sh` pin the logic portably.
 

@@ -112,7 +112,8 @@ A Pi replacement resumes the session the old endpoint's runtime recorded, as an 
 A Claude replacement resumes the conversation the old Claude agent was running: before the stop, the control plane reads its session id from the per-process record Claude keeps under `sessions/` in its config directory, and only exactly one live interactive Claude record in the worktree counts.
 Without such a record, or without that session's saved transcript, and for every other harness, the replacement starts a fresh conversation from the brief and the progress note.
 An in-place relaunch never resumes a Claude conversation, because it replaces an agent that may be confused or out of context.
-hc is the only move target.
+`relaunch --backend herdr` moves a task back from hc the same way, into this seat's Herdr session, and for a secondmate into its home's own workspace.
+hc and herdr are the only move targets.
 
 ### Reclaiming a task whose endpoint is gone
 

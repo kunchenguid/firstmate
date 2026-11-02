@@ -96,7 +96,7 @@
 #              exclusions (bin/fm-exclude-tools-lib.sh): a malformed list, or a
 #              replacement runtime that cannot hide the listed tools.
 #              --backend <name> MOVES the task to another runtime backend
-#              (hc only): the old agent is stopped on its recorded endpoint
+#              (hc, or herdr to move one back): the old agent is stopped on its recorded endpoint
 #              exactly as above, one fresh endpoint is created on <name> in
 #              the same recorded worktree, the record is republished with
 #              that backend and endpoint, and the old endpoint is closed only
@@ -1145,8 +1145,8 @@ resolve_move_backend() {
   [ "$NEW_BACKEND" != "$BACKEND" ] \
     || die "task $ID already runs on backend '$BACKEND'; drop --backend to relaunch it in place"
   case "$NEW_BACKEND" in
-    hc) ;;
-    *) die "relaunch --backend supports the hc backend only; '$NEW_BACKEND' has no verified path for a moved task" ;;
+    hc|herdr) ;;
+    *) die "relaunch --backend supports the hc and herdr backends only; '$NEW_BACKEND' has no verified path for a moved task" ;;
   esac
   case "$KIND" in
     ship|scout|secondmate) ;;

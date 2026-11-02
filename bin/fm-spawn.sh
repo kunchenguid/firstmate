@@ -2666,9 +2666,9 @@ if [ "$RELAUNCH" -eq 1 ]; then
       exit 1
     }
     case "$MOVE_BACKEND" in
-      hc) ;;
+      hc|herdr) ;;
       *)
-        echo "error: --move-backend supports the hc backend only; '$MOVE_BACKEND' has no verified fresh-endpoint path for a moved task" >&2
+        echo "error: --move-backend supports the hc and herdr backends only; '$MOVE_BACKEND' has no verified fresh-endpoint path for a moved task" >&2
         exit 1
         ;;
     esac
@@ -5056,9 +5056,9 @@ EOF
     #
     # Herdr reaches here only on a PROVEN-gone pane: its every read is scoped to
     # the session the record names (fm_control_endpoint_absence_verdict owns
-    # that argument). tmux and every non-moving secondmate were already
-    # refused, and rex and hc took the branches above, so there is no dispatch
-    # left to make.
+    # that argument), or here as a move target. tmux and every non-moving
+    # secondmate were already refused, and rex and hc took the branches above,
+    # so there is no dispatch left to make.
     #
     # This deliberately uses the FLAT container shape rather than Herdr's
     # presentation projection: projection is a presentation-only layout that is
@@ -5078,9 +5078,23 @@ EOF
     # session from a seat that is not in it would silently relocate the task
     # onto another herdr server - an identity change, published as a
     # self-consistent but wrong record.
-    HERDR_REBIND_SES=${RELAUNCH_TARGET%%:*}
-    HERDR_CONTAINER_RAW=$(HERDR_PANE_ID="$RELAUNCH_LAUNCHER_PANE_ID" \
-      fm_backend_herdr_container_ensure "$PROJ_ABS" launcher-home "$HERDR_REBIND_SES") || {
+    #
+    # A move from another backend has no recorded herdr session, so it lands
+    # where a fresh spawn from this seat would: this seat's session, and for a
+    # secondmate that home's own workspace.
+    HERDR_REBIND_LABEL_HOME=$FM_HOME
+    HERDR_REBIND_RELATIONSHIP=launcher-home
+    if [ "$MOVE_BACKEND_SET" -eq 1 ]; then
+      HERDR_REBIND_SES=$(fm_backend_herdr_session)
+      if [ "$KIND" = secondmate ]; then
+        HERDR_REBIND_LABEL_HOME=$PROJ_ABS
+        HERDR_REBIND_RELATIONSHIP=other-home
+      fi
+    else
+      HERDR_REBIND_SES=${RELAUNCH_TARGET%%:*}
+    fi
+    HERDR_CONTAINER_RAW=$(HERDR_PANE_ID="$RELAUNCH_LAUNCHER_PANE_ID" FM_HOME="$HERDR_REBIND_LABEL_HOME" \
+      fm_backend_herdr_container_ensure "$PROJ_ABS" "$HERDR_REBIND_RELATIONSHIP" "$HERDR_REBIND_SES") || {
       # container_ensure returns 1 for several unrelated reasons - a failed
       # version check, a server that will not start, an ambiguous workspace
       # label, a cross-session launcher identity, a failed workspace create -
@@ -5107,7 +5121,7 @@ EOF
     HERDR_SEEDED_DEFAULT_TAB_ID=${HERDR_CONTAINER_RAW#*$'\t'}
     HERDR_SES=${CONTAINER%%:*}
     HERDR_WORKSPACE_ID=${CONTAINER#*:}
-    HERDR_TASK_IDS=$(fm_backend_herdr_create_task "$CONTAINER" "$W" "$WT" "$HERDR_SEEDED_DEFAULT_TAB_ID") || exit 1
+    HERDR_TASK_IDS=$(FM_HOME="$HERDR_REBIND_LABEL_HOME" fm_backend_herdr_create_task "$CONTAINER" "$W" "$WT" "$HERDR_SEEDED_DEFAULT_TAB_ID") || exit 1
     read -r HERDR_TAB_ID HERDR_PANE_ID <<EOF
 $HERDR_TASK_IDS
 EOF

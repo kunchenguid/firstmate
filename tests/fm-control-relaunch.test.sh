@@ -3240,12 +3240,14 @@ SH
   chmod +x "$fb/hc"
 }
 
-run_spawn_hc() {  # <case-dir> <args...>
+run_spawn_hc() {  # <case-dir> <args...>; FM_TEST_HERDR_SESSION names this seat's herdr session
   local dir=$1; shift
+  local -a seat=()
+  [ -z "${FM_TEST_HERDR_SESSION:-}" ] || seat=(HERDR_SESSION="$FM_TEST_HERDR_SESSION")
   mkdir -p "$dir/user-home"
   env -u HERDR_ENV -u HERDR_PANE_ID -u HERDR_SESSION -u HERDR_SOCKET_PATH \
     -u HERDR_TAB_ID -u HERDR_WORKSPACE_ID -u HC_SOCKET -u HC_TERMINAL_ID \
-    PATH="$dir/fakebin:$PATH" FM_HOME="$dir/home" FM_FAKE_DIR="$dir/fake" \
+    ${seat[@]+"${seat[@]}"} PATH="$dir/fakebin:$PATH" FM_HOME="$dir/home" FM_FAKE_DIR="$dir/fake" \
     HOME="$dir/user-home" CLAUDE_CONFIG_DIR='' HC_SESSION=fmhc \
     FM_SPAWN_NO_GUARD=1 GROK_HOME="$dir/grokhome" \
     "$SPAWN" "$@" 2>&1
@@ -3331,7 +3333,7 @@ test_move_backend_refuses_other_shapes() {
   rc=0
   out=$(run_spawn_hc "$dir" rl92 --relaunch --move-backend tmux) || rc=$?
   expect_code 1 "$rc" "a move to a backend without a verified move path must refuse"
-  assert_contains "$out" "supports the hc backend only" "the refusal must name the supported target"
+  assert_contains "$out" "supports the hc and herdr backends only" "the refusal must name the supported targets"
   rc=0
   out=$(run_spawn_hc "$dir" rl92 --move-backend hc) || rc=$?
   expect_code 1 "$rc" "--move-backend without --relaunch must refuse"
@@ -3491,6 +3493,34 @@ test_control_move_without_a_session_record_starts_fresh() {
   pass "fm-control relaunch --backend hc: without a live session record the replacement starts fresh"
 }
 
+test_hc_task_moves_back_to_herdr() {
+  local dir out rc=0 status_before
+  herdr_case_or_skip move-back rl98 || { echo "skip - needs jq"; return 0; }
+  dir=$HERDR_CASE_DIR
+  rm -f "$dir/fake/herdr-stopped"
+  make_hc_stub "$dir"
+  printf '{"result":{"agent":{"agent":"claude","agent_status":"idle"}}}\n' > "$dir/fake/herdr-agent-registration"
+  out=$(run_spawn_hc "$dir" rl98 --relaunch --move-backend hc) || rc=$?
+  expect_code 0 "$rc" "the move to hc should succeed"$'\n'"$out"
+  # The hc agent stops: its terminal returns to the login shell.
+  jq '.foreground.name = "zsh" | .foreground.argv = ["-zsh"]' "$dir/fake/hc/t1.json" > "$dir/t1.tmp" \
+    && mv "$dir/t1.tmp" "$dir/fake/hc/t1.json"
+  : > "$dir/fake/herdr-log"
+  rm -f "$dir/fake/herdr-agent-registration" "$dir/fake/herdr-agent-live"
+  status_before=$(git -C "$dir/wt" status --porcelain)
+  rc=0
+  out=$(FM_TEST_HERDR_SESSION=fmlab run_spawn_hc "$dir" rl98 --relaunch --move-backend herdr) || rc=$?
+  expect_code 0 "$rc" "an hc task should move back to herdr"$'\n'"$out"
+  [ "$(meta_field "$dir" rl98 backend)" = herdr ] || fail "the record must name herdr again"
+  [ -z "$(meta_field "$dir" rl98 hc_terminal)" ] || fail "the record must drop the hc endpoint"
+  [ "$(meta_field "$dir" rl98 herdr_pane_id)" = '%9' ] || fail "the record must name the new herdr pane, got $(meta_field "$dir" rl98 herdr_pane_id)"
+  [ "$(meta_field "$dir" rl98 worktree)" = "$dir/wt" ] || fail "the move back must keep the worktree"
+  [ "$(git -C "$dir/wt" status --porcelain)" = "$status_before" ] || fail "the move back must leave the worktree untouched"
+  assert_contains "$(cat "$dir/fake/herdr-log")" "--session fmlab" "the new pane must land in this seat's herdr session"
+  assert_absent "$dir/fake/hc/t1.json" "the old hc terminal must be closed after the move back"
+  pass "fm-spawn --relaunch --move-backend herdr: an hc task moves back to a Herdr pane in its worktree"
+}
+
 test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint
 test_relaunch_refuses_before_exit_when_the_composer_holds_pending_text
 test_relaunch_refuses_before_exit_when_the_composer_state_is_unproven
@@ -3593,3 +3623,4 @@ test_control_relaunch_moves_a_secondmate_into_its_own_hc_space
 test_secondmate_spawns_fresh_on_hc
 test_control_move_resumes_the_claude_conversation
 test_control_move_without_a_session_record_starts_fresh
+test_hc_task_moves_back_to_herdr
