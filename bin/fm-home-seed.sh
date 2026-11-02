@@ -867,6 +867,9 @@ seed_home() {
   fm_lock_acquire_wait "$SEED_REGISTRY_LOCK" || return 1
   SEED_REGISTRY_LOCK_HELD=1
   trap seed_exit_cleanup EXIT
+  # Remote retirement evidence under this same registry lock owns the id until
+  # it finishes; seeding must not publish a fresh home at a path a retry of that
+  # retirement could then be asked to remove (docs/remote-secondmates.md).
   if [ -e "$STATE/.seat-retirement-$id.json" ] || [ -L "$STATE/.seat-retirement-$id.json" ]; then
     echo "error: secondmate $id retirement is unfinished; finish teardown before seeding" >&2
     return 1

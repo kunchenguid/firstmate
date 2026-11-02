@@ -109,6 +109,8 @@ mkdir -p "$STATE" || die "cannot create parent state directory"
 REGISTRY_LOCK=$(secondmate_registry_lock_path "$STATE")
 fm_lock_acquire_wait "$REGISTRY_LOCK" || die "cannot lock the secondmate registry"
 REGISTRY_LOCK_HELD=1
+# Unfinished remote retirement for this id still owns it under the same registry
+# lock, so a reseed must wait rather than race a retry at the reused id.
 if [ -e "$STATE/.seat-retirement-$ID.json" ] || [ -L "$STATE/.seat-retirement-$ID.json" ]; then
   die "secondmate $ID retirement is unfinished; finish teardown before seeding"
 fi

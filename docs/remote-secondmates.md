@@ -710,6 +710,7 @@ If accounting fails after host retirement, the primary retains its route and loc
 A retry for the same generation replays the host's retained destruction result, including a lost-slot exit, without touching a successor at the reused home path.
 A retry that finds the home still present without a parent-route record proving it belongs to that generation refuses instead of removing it.
 Before the host removes anything it publishes a durable pending record for that exact generation and route; a record that cannot be published refuses the retirement, so no home is deleted behind evidence that could never be produced.
+Both seed commands refuse that id while the owning home still holds its retirement evidence, so a retry never races a fresh route or home at the reused id.
 A retirement interrupted after the home is gone republishes its evidence from that pending record on the same generation's retry, after proving the recorded endpoint absent again.
 The primary retains matching evidence before local cleanup so cleanup or accounting failures can resume without another host retirement.
 `--force` remains the explicit discard path and requires the same captain authority as local secondmate discard.
@@ -757,6 +758,9 @@ bin/fm-test-run.sh tests/fm-remote-backlog-handoff.test.sh
 bin/fm-test-run.sh tests/fm-remote-secondmate-lifecycle-e2e.test.sh
 bin/fm-test-run.sh tests/fm-remote-secondmate-omp.test.sh
 bin/fm-test-run.sh tests/fm-remote-secondmate-trace-context.test.sh
+bin/fm-test-run.sh tests/fm-remote-generation.test.sh
+bin/fm-test-run.sh tests/fm-remote-seat-adoption.test.sh
+bin/fm-test-run.sh tests/fm-teardown-remote-finalization.test.sh
 ```
 
 ### What the portable tests cannot prove
