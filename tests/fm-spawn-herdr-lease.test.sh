@@ -186,32 +186,49 @@ test_rolled_back_spawn_after_launch_names_the_lease_it_keeps() {
   pass "a spawn rolled back after its launch keeps the lease and names the command that releases it"
 }
 
-# abort_polytoken_spawn <id> [session-lockable]: a polytoken spawn into a dirty
-# copy aborts before its launch and asks Herdr to close its own pane. Herdr
-# closes it only when the session's presentation lock can be taken, which needs
-# the session's socket; without it the kill refuses and the pane stays.
+# abort_polytoken_spawn <id> <dirty|launch-fails> [session-lockable]: a
+# polytoken spawn aborts, either before its launch into a dirty copy or after a
+# launch that was not delivered into a clean copy, and asks Herdr to close its
+# own pane. Herdr closes it only when the session's presentation lock can be
+# taken, which needs the session's socket; without it the kill refuses and the
+# pane stays.
 abort_polytoken_spawn() {
   local id=$1 dir
   dir=$(make_lease_case "$id" polytoken)
-  echo dirty >> "$dir/slot/README.md"
-  [ -z "${2:-}" ] || : > "$dir/fake/session-lockable"
+  case "$2" in
+    dirty) echo dirty >> "$dir/slot/README.md" ;;
+    launch-fails) : > "$dir/fake/launch-send-fails" ;;
+  esac
+  [ -z "${3:-}" ] || : > "$dir/fake/session-lockable"
   LEASE_OUT=$(run_lease_spawn "$dir" "$id" --model zai/glm-5.3-flash --effort low)
   LEASE_STATUS=$?
   LEASE_DIR=$dir
 }
 
-test_abort_returns_the_lease_once_the_pane_is_gone() {
+test_abort_returns_a_clean_lease_once_the_pane_is_gone() {
   local id=lease-pane-gone
-  abort_polytoken_spawn "$id" session-lockable
+  abort_polytoken_spawn "$id" launch-fails session-lockable
+  [ "$LEASE_STATUS" -ne 0 ] || fail "spawn succeeded although its launch was not delivered"$'\n'"$LEASE_OUT"
+  [ ! -e "$LEASE_DIR/home/state/$id.meta" ] || fail "the failed spawn kept its task record"
+  assert_grep 'pane close' "$LEASE_DIR/fake/herdr-log" "the abort did not close its pane"$'\n'"$LEASE_OUT"
+  [ -e "$LEASE_DIR/fake/returned" ] || fail "the abort kept a clean lease although its pane is gone"$'\n'"$LEASE_OUT"
+  pass "an abort whose pane Herdr reports gone returns a clean lease"
+}
+
+test_abort_keeps_a_dirty_lease_once_the_pane_is_gone() {
+  local id=lease-pane-gone-dirty
+  abort_polytoken_spawn "$id" dirty session-lockable
   [ "$LEASE_STATUS" -ne 0 ] || fail "spawn launched into a dirty leased copy"$'\n'"$LEASE_OUT"
   assert_grep 'pane close' "$LEASE_DIR/fake/herdr-log" "the abort did not close its pane"$'\n'"$LEASE_OUT"
-  [ -e "$LEASE_DIR/fake/returned" ] || fail "the abort kept a lease although its pane is gone"$'\n'"$LEASE_OUT"
-  pass "an abort whose pane Herdr reports gone returns the lease"
+  [ ! -e "$LEASE_DIR/fake/returned" ] || fail "the abort returned a copy holding uncommitted work"
+  assert_grep dirty "$LEASE_DIR/slot/README.md" "the abort discarded the copy's uncommitted work"
+  assert_contains "$LEASE_OUT" "stays leased to $id" "an abort that kept a dirty copy did not name the lease it keeps"
+  pass "an abort whose pane Herdr reports gone keeps a copy with uncommitted work leased"
 }
 
 test_abort_keeps_the_lease_while_the_pane_is_present() {
   local id=lease-close-refused
-  abort_polytoken_spawn "$id"
+  abort_polytoken_spawn "$id" dirty
   [ "$LEASE_STATUS" -ne 0 ] || fail "spawn launched into a dirty leased copy"$'\n'"$LEASE_OUT"
   ! grep -q 'pane close' "$LEASE_DIR/fake/herdr-log" || fail "the kill closed the pane without its presentation lock"
   [ ! -e "$LEASE_DIR/fake/returned" ] || fail "the abort returned the lease while its pane is still present"
@@ -223,7 +240,8 @@ test_fresh_spawn_leases_and_moves_the_top_level_shell
 test_failed_lease_refuses_without_a_record
 test_aborted_spawn_names_the_lease_it_keeps
 test_rolled_back_spawn_after_launch_names_the_lease_it_keeps
-test_abort_returns_the_lease_once_the_pane_is_gone
+test_abort_returns_a_clean_lease_once_the_pane_is_gone
+test_abort_keeps_a_dirty_lease_once_the_pane_is_gone
 test_abort_keeps_the_lease_while_the_pane_is_present
 
 echo "# all fm-spawn-herdr-lease tests passed"
