@@ -482,6 +482,7 @@ EVENT_CAP_FAIL_MAX=${FM_EVENT_CAP_FAIL_MAX:-3}
 _event_cap_key=""
 _event_cap_ok=0
 _event_cap_fails=0
+_watched_pane_start=0
 
 # afk_present: 0 while the away-mode flag exists. When set, the daemon wraps this
 # watcher and owns triage, so the watcher must behave one-shot (enqueue + exit on
@@ -3444,11 +3445,13 @@ event_wait_or_sleep() {
   # cleanup can stop, never holds a stop signal inside a command substitution
   # (watcher_waited), and cannot run past its read budget
   # (FM_WATCHED_PANE_READ_SECS). Rows a killed or failed probe never reached
-  # are simply retried on the next cycle.
+  # are simply retried on the next cycle. Rotate the first registration so a
+  # persistently hung early read cannot starve later watches.
   FM_WATCHED_PANES=
   FM_WATCHED_PANES_IDENTITY=$(fm_watch_pane_registry_identity "$STATE") || FM_WATCHED_PANES_IDENTITY=
   WATCHER_WAIT_BOUND_SECS=$FM_WATCHED_PANE_READ_SECS \
-    watcher_waited fm_watch_pane_probe "$STATE" || true
+    watcher_waited fm_watch_pane_probe "$STATE" "$_watched_pane_start" || true
+  _watched_pane_start=$((_watched_pane_start + 1))
   probe=$WATCHER_CAPTURE
   if [ -n "$probe" ]; then
     # The probe read in its own process; load its backend in this one too,

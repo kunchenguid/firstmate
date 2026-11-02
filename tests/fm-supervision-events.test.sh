@@ -42,6 +42,7 @@ reset_state() {
   _event_cap_ok=0
   _event_cap_fails=0
   FM_WATCHED_PANES=
+  _watched_pane_start=0
 }
 
 mkrec() {  # <pane_id> <status>
@@ -276,6 +277,38 @@ FM_WATCHED_PANE_READ_SECS=1
   done
 ) || fail "incremental watched probe contracts"
 pass "later identity/status timeouts preserve earlier rows and retry unfinished rows"
+
+# A persistently hung first registration must not starve either later watch.
+(
+  fm_backend_herdr_resolve_watched_pane() {
+    if [ "$3:$STARVATION_MODE" = slow:identity ]; then command sleep 12; fi
+    printf '%s:%s' "$1" "$3"
+  }
+  fm_backend_herdr_agent_status_raw() {
+    if [ "$2:$STARVATION_MODE" = slow:status ]; then command sleep 12; fi
+    printf blocked
+  }
+  fm_backend_events_capable() { return 0; }
+  for STARVATION_MODE in identity status; do
+    reset_state
+    printf 'default\tops\tslow\tSlow\t0\ndefault\tops\tfast\tFast\t0\ndefault\tops\tlast\tLast\t0\n' > "$STATE_DIR/watched-panes"
+    : > "$TMP/watch-calls"
+    : > "$TMP/watch-snapshots"
+    for CYCLE in 1 2 3; do
+      event_wait_or_sleep
+      printf '# cycle %s\n%s\n' "$CYCLE" "$FM_WATCHED_PANES" >> "$TMP/watch-snapshots"
+    done
+    for TARGET in fast last; do
+      assert_contains "$(cat "$TMP/watch-snapshots")" "default:$TARGET" "hung first $STARVATION_MODE read starved $TARGET"
+      assert_contains "$(cat "$TMP/watch-calls")" "default:$TARGET" "later watch never reached push subscription"
+    done
+    assert_contains "$(cat "$WAKE_LOG")" 'watched pane Fast' "hung first read suppressed Fast polling"
+    assert_contains "$(cat "$WAKE_LOG")" 'watched pane Last' "hung first read suppressed Last polling"
+    assert_not_contains "$(cat "$WAKE_LOG")" 'watched pane Slow' "unfinished first row emitted a wake"
+    [ "$(wc -l < "$WAKE_LOG" | tr -d ' ')" = 2 ] || fail "rotating probes duplicated a wake"
+  done
+) || fail "watched probe starvation contracts"
+pass "persistently hung first identity/status reads cannot starve later watches"
 
 # --- event_wait_or_sleep: watched-pane reads run waited and bounded ---------
 # A hung per-cycle read must not stall the cycle or sit outside the recorded

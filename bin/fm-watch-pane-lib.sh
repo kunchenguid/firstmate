@@ -33,22 +33,27 @@ fm_watch_pane_context() {  # <target> -> policy context
 
 # Resolve afresh each cycle; metadata always wins, including secondmates and
 # endpoints owned by a different backend. No endpoint namespace discovery.
-fm_watch_pane_probe() {  # <state_dir>
-  local state=$1 session workspace tab label notify target status seen='|'
+fm_watch_pane_probe() {  # <state_dir> <start-offset>
+  local state=$1 start=$2 row i session workspace tab label notify target status seen='|'
+  local rows=()
   fm_watch_pane_validate "$state/watched-panes" || {
     echo 'error: invalid watched-pane registry' >&2
     return 1
   }
   [ -f "$state/watched-panes" ] || return 0
   fm_backend_source herdr || return 1
-  while IFS=$'\t' read -r session workspace tab label notify || [ -n "$session" ]; do
+  while IFS= read -r row || [ -n "$row" ]; do
+    rows+=("$row")
+  done < "$state/watched-panes"
+  for ((i = 0; i < ${#rows[@]}; i++)); do
+    IFS=$'\t' read -r session workspace tab label notify <<< "${rows[$(((start + i) % ${#rows[@]}))]}"
     target=$(fm_backend_herdr_resolve_watched_pane "$session" "$workspace" "$tab") || continue
     [ -z "$(fm_backend_meta_for_window "$target" "$state" 2>/dev/null)" ] || continue
     case "$seen" in *"|$target|"*) continue ;; esac
     seen="$seen$target|"
     status=$(fm_backend_herdr_agent_status_raw "${target%%:*}" "${target#*:}") || status=
     printf '%s\t%s\t%s\t%s\n' "$target" "$label" "$notify" "$status"
-  done < "$state/watched-panes"
+  done
 }
 
 fm_watch_pane_registry_identity() {
