@@ -108,6 +108,17 @@
 #   .startup-network.delivered
 #                             a durable acknowledgement that harvest printed the
 #                             current finished result, containing its generation.
+#   .startup-network-results/<generation>/
+#                             a completed run's report, optional timings, and the
+#                             status written last as its completion boundary;
+#                             retained until the result settles so a later cycle can
+#                             deliver it, with bin/fm-startup-network-lib.sh owning
+#                             the read contract.
+#   .startup-network-wake-receipts/<generation>
+#                             a receipt stating that this generation's wake row was
+#                             committed; it suppresses producer replay, never counts
+#                             as handling acknowledgement, and bin/fm-wake-lib.sh owns
+#                             when one is written.
 #   .startup-network.timings  per-step elapsed times for the last run, in
 #                             bin/fm-timing-lib.sh's tab-separated format: the
 #                             stage total, one record per network phase (gh auth,
