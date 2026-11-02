@@ -61,8 +61,8 @@ rex_window_id=window:<uuid>
 rex_block_id=block:<uuid>
 ```
 
-The immutable block id is the routing authority.
-Rex never reuses an id, so the recorded block names exactly one block for its whole life.
+The immutable block id is the routing authority, paired with the server that created it.
+Within one server Rex never reuses an id, so that recorded pair names exactly one block for its whole life, and a same-numbered block reached through another server cannot stand in for it.
 Every CLI call passes the recorded session with `-s`, because the CLI otherwise defaults to the caller's own session.
 
 ## Current operation and safety

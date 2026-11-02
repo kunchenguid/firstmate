@@ -2173,6 +2173,7 @@ The pool names, capacities, and models are the operator's own choice; nothing is
   A launch that found a supervisor already running on another model counts that supervisor's own generation on the model it actually runs, proven by the receipt that observed it; reached through the host's certificate or the reconciled parent record, that generation stays charged, so the model it runs is never free to another launch.
   Reconciling that receipt releases the candidate the launch reserved on the model it asked for, which therefore never keeps a seat for an agent it did not start.
 - A lost reply or an unknown outcome keeps the candidate counted until the primary's watcher reads the host's outcome for that generation; a missing or mismatched receipt stays unknown and never permits the token to repeat lifecycle effects.
+  That host read names a Rex route's recorded creation server, so a same-numbered block on another server cannot settle the generation dead and the operation stays unknown.
 - An unresolved received operation stays unknown after an adoption write fails; validation errors never replace an earlier operation's receipt with a prelaunch refusal.
 - While seat pools are configured, a host refuses a supervisor launch or relaunch that did not come through the primary's accounting.
 - The primary grants no pooled seat while any registered remote has a pending delivery or no complete confirmation of the current declaration.
