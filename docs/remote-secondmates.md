@@ -274,8 +274,9 @@ The primary Firstmate code root keeps the `fm-remote` session and `dev.firstmate
 The doctor records that root as the service owner, and a different code root on the same account receives a separate, root-derived Herdr session and launch-agent label.
 [`bin/fm-remote-herdr-identity-lib.sh`](../bin/fm-remote-herdr-identity-lib.sh) owns that resolution, so readiness, launch, relaunch, and endpoint validation all name the same session for a code root.
 A legacy service without an owner record is adopted only when its existing launch-agent guard proves the current root owns it; otherwise the doctor leaves it alone and reports the ownership gap.
-Repairs refuse to rewrite, reload, or restart the Herdr service when its owner is another code root or its pane state is live or cannot be proven empty.
-That proof is taken immediately before the launch agent is booted out, and the reload never force-restarts the freshly bootstrapped server.
+Repairs never rewrite, reload, restart, or take over a Herdr service whose server is running, whoever owns it, because a mate can create a pane in a running server at any moment; the doctor reports that service and its owner instead.
+That includes a running server born outside the Aqua login session: an operator stops it once no mate needs it, and `--fix` then starts the session inside the launch agent.
+Repairs of one service hold a lock and re-prove its server is stopped under it before booting out the launch agent, so concurrent readiness runs cannot undo each other, and a reload never force-restarts the freshly bootstrapped server.
 Under `--backend rex --fix`, the doctor starts the account's persistent Rex server only when none answers.
 It never stops or restarts an answering Rex server, because a stop ends every process in that server's sessions, including unrelated work and sibling agents, and a restore brings back only shells.
 An answering exit-empty server is reported as a human gap: at a time when nothing runs there, an operator runs `rex server stop` and then `rex server start` on that account, and rex stays not ready until then.

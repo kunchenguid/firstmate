@@ -59,9 +59,10 @@
 # --fix is idempotent and closes only automatable gaps. It records the code
 # root that owns the Herdr service, preserves the primary fm-remote session and
 # label, and gives another code root a separate session and launch-agent label.
-# It refuses to rewrite, reload, or restart a differently owned Herdr service,
-# a legacy service whose owner cannot be proven, or a service with live or
-# uninspectable panes. It may adopt a legacy owner only when its launch-agent
+# It never rewrites, reloads, restarts, or takes over a Herdr service whose
+# server is running, because a mate can create a pane in it at any moment; it
+# reports that service and its owner instead. Repairs of one stopped service
+# are serialized and re-prove the stop under their lock. It may adopt a legacy owner only when its launch-agent
 # guard proves the current root, and that adoption writes metadata without
 # restarting the service. It also writes and reloads the owned Aqua agents,
 # starts the Linux workers where no Aqua agent applies, starts a persistent rex
@@ -239,9 +240,13 @@ herdr_server_running() {
   [ "$running" = true ]
 }
 
+# Readiness repair never stops, reloads, rewrites, or takes over a service
+# whose server is running: a mate can create a pane in it at any moment, so no
+# inspection can prove it stays empty. Only a stopped server is repaired, and
+# apply_fixes serializes those repairs and re-proves the stop under its lock.
 HERDR_SERVICE_BLOCK_REASON=
 herdr_service_mutation_blocked() {
-  local status running panes count
+  local status running
   HERDR_SERVICE_BLOCK_REASON=
   status=$(herdr_server_status_json) || { HERDR_SERVICE_BLOCK_REASON='server status is unavailable'; return 0; }
   running=$(printf '%s' "$status" | jq -r 'if .server.running == true then "true" elif .server.running == false then "false" else empty end' 2>/dev/null) || {
@@ -254,22 +259,11 @@ herdr_service_mutation_blocked() {
     *) HERDR_SERVICE_BLOCK_REASON='server status is unproven'; return 0 ;;
   esac
   if [ -z "$HERDR_OWNER_ROOT" ] || [ "$HERDR_OWNER_ROOT" != "$FM_ROOT" ]; then
-    HERDR_SERVICE_BLOCK_REASON='service owner is unknown or belongs to another code root'
-    return 0
+    HERDR_SERVICE_BLOCK_REASON='its server is running and its owner is unknown or another code root'
+  else
+    HERDR_SERVICE_BLOCK_REASON='its server is running, and readiness repair never stops a running server whose panes it cannot freeze'
   fi
-  panes=$(fm_backend_herdr_cli "$HERDR_SESSION_NAME" pane list 2>/dev/null) || {
-    HERDR_SERVICE_BLOCK_REASON='pane state is uninspectable'
-    return 0
-  }
-  count=$(printf '%s' "$panes" | jq -er '.result.panes | if type == "array" then length else error("not an array") end' 2>/dev/null) || {
-    HERDR_SERVICE_BLOCK_REASON='pane state is uninspectable'
-    return 0
-  }
-  if [ "$count" -gt 0 ]; then
-    HERDR_SERVICE_BLOCK_REASON='service has live panes'
-    return 0
-  fi
-  return 1
+  return 0
 }
 
 # Birth of the process serving the session, as the guard classifies it:
@@ -945,17 +939,14 @@ check_herdr_server() {
           "install lsof on that account so the launch agent and this check can tell an Aqua-born server from one started over SSH"
         ;;
       unproven)
-        record herdr-server "fixable: session $HERDR_SESSION_NAME is running but no herdr process can be shown to own its socket, so its birth cannot be proven" \
-          "rerun this command with --fix so the launch agent takes the session over (its current panes close and the parent firstmate relaunches its mates)"
+        herdr_service_mutation_blocked || true
+        record herdr-server "human: session $HERDR_SESSION_NAME is running but no herdr process can be shown to own its socket, so its birth cannot be proven; takeover is refused because $HERDR_SERVICE_BLOCK_REASON (owner: ${HERDR_OWNER_ROOT:-unknown})" \
+          "once no mate needs session $HERDR_SESSION_NAME, stop its server with 'herdr server stop --session $HERDR_SESSION_NAME' and rerun this command with --fix so the launch agent starts it in the Aqua login session"
         ;;
       *)
-        if herdr_service_mutation_blocked; then
-          record herdr-server "human: session $HERDR_SESSION_NAME is served by pid ${birth#* } born outside the Aqua login session (${birth%% *}), but takeover is refused because $HERDR_SERVICE_BLOCK_REASON (owner: ${HERDR_OWNER_ROOT:-unknown})" \
-            "resolve ownership or wait until the session has no panes before repairing it"
-        else
-          record herdr-server "fixable: session $HERDR_SESSION_NAME is served by pid ${birth#* } born outside the Aqua login session (${birth%% *}), so its panes cannot reach the login keychain" \
-            "rerun this command with --fix so the launch agent takes the session over (its current panes close and the parent firstmate relaunches its mates)"
-        fi
+        herdr_service_mutation_blocked || true
+        record herdr-server "human: session $HERDR_SESSION_NAME is served by pid ${birth#* } born outside the Aqua login session (${birth%% *}), so its panes cannot reach the login keychain; takeover is refused because $HERDR_SERVICE_BLOCK_REASON (owner: ${HERDR_OWNER_ROOT:-unknown})" \
+          "once no mate needs session $HERDR_SESSION_NAME, stop its server with 'herdr server stop --session $HERDR_SESSION_NAME' and rerun this command with --fix so the launch agent starts it in the Aqua login session"
         ;;
     esac
     return 0
@@ -1020,43 +1011,54 @@ fix_report() { # <check> applied|failed <text>
   printf 'fix %s=%s: %s\n' "$1" "$2" "$3"
 }
 
+# The owner record is written only under the repair lock apply_fixes holds.
 record_herdr_owner() {
-  local tmp
+  local owner tmp
   [ -n "$FM_ROOT" ] || return 1
   if [ -e "$HERDR_OWNER_FILE" ] || [ -L "$HERDR_OWNER_FILE" ]; then
-    [ -f "$HERDR_OWNER_FILE" ] && [ ! -L "$HERDR_OWNER_FILE" ] || return 1
-    local owner
-    IFS= read -r owner < "$HERDR_OWNER_FILE" || owner=
+    owner=$(fm_remote_herdr_recorded_owner "$HERDR_OWNER_FILE")
     [ "$owner" = "$FM_ROOT" ] || return 1
     HERDR_OWNER_ROOT=$owner
     return 0
   fi
   mkdir -p "$HERDR_OWNER_DIR" 2>/dev/null || return 1
   [ -d "$HERDR_OWNER_DIR" ] && [ ! -L "$HERDR_OWNER_DIR" ] || return 1
-  local lock="$HERDR_OWNER_FILE.lock"
-  mkdir "$lock" 2>/dev/null || return 1
   tmp="$HERDR_OWNER_FILE.tmp.$$"
-  if [ -e "$HERDR_OWNER_FILE" ] || [ -L "$HERDR_OWNER_FILE" ]; then
-    local owner
-    IFS= read -r owner < "$HERDR_OWNER_FILE" || owner=
-    rmdir "$lock" 2>/dev/null || true
-    [ -f "$HERDR_OWNER_FILE" ] && [ ! -L "$HERDR_OWNER_FILE" ] && [ "$owner" = "$FM_ROOT" ] || return 1
-    HERDR_OWNER_ROOT=$owner
-    return 0
-  fi
   if ! printf '%s\n' "$FM_ROOT" > "$tmp"; then
     rm -f -- "$tmp"
-    rmdir "$lock" 2>/dev/null || true
     return 1
   fi
   chmod 0600 "$tmp" 2>/dev/null || true
   if ! mv -- "$tmp" "$HERDR_OWNER_FILE" 2>/dev/null; then
     rm -f -- "$tmp"
-    rmdir "$lock" 2>/dev/null || true
     return 1
   fi
-  rmdir "$lock" 2>/dev/null || true
   HERDR_OWNER_ROOT=$FM_ROOT
+}
+
+# One repair at a time per Herdr service: every lifecycle repair takes this
+# lock and re-proves the server is stopped under it, so a concurrent readiness
+# repair that already started the server and launched a mate is never undone.
+# bin/fm-remote-job-lib.sh owns the dead-holder reclaim.
+HERDR_REPAIR_LOCK_OWNER=
+herdr_repair_lock_path() {
+  printf '%s/%s.repair.lock\n' "$HERDR_OWNER_DIR" "$LAUNCH_AGENT_LABEL"
+}
+
+herdr_repair_lock_acquire() {
+  [ -z "$HERDR_REPAIR_LOCK_OWNER" ] || return 0
+  mkdir -p "$HERDR_OWNER_DIR" 2>/dev/null || return 1
+  [ -d "$HERDR_OWNER_DIR" ] && [ ! -L "$HERDR_OWNER_DIR" ] || return 1
+  fm_remote_job_reload_lock_acquire "$(herdr_repair_lock_path)" || return 1
+  HERDR_REPAIR_LOCK_OWNER=$FM_REMOTE_JOB_RELOAD_OWNER
+  FM_REMOTE_JOB_RELOAD_OWNER=
+}
+
+herdr_repair_lock_release() {
+  [ -n "$HERDR_REPAIR_LOCK_OWNER" ] || return 0
+  FM_REMOTE_JOB_RELOAD_OWNER=$HERDR_REPAIR_LOCK_OWNER
+  HERDR_REPAIR_LOCK_OWNER=
+  fm_remote_job_reload_lock_release "$(herdr_repair_lock_path)"
 }
 
 write_launch_agent() { # <resolved-login-shell>
@@ -1093,11 +1095,10 @@ write_launch_agent() { # <resolved-login-shell>
 
 # Reload rather than plain bootstrap so a rewritten plist replaces a stale
 # in-memory copy, and kickstart so the server is running now rather than at the
-# next login. Both are safe to repeat. The boot-out is the only step that can
-# stop a server, so the ownership and empty-pane proof is taken immediately
-# before it; the kickstart never passes -k, because RunAtLoad has already
-# started the freshly bootstrapped job and a forced restart would kill a server
-# that may have gained panes since that proof.
+# next login. Both are safe to repeat. The boot-out runs only after the server
+# is re-proven stopped under the repair lock, and the kickstart never passes
+# -k, because RunAtLoad has already started the freshly bootstrapped job and a
+# forced restart would kill a server that may already hold a mate's pane.
 reload_launch_agent() { # <check-to-report-under>
   local report=$1 out
   [ -f "$LAUNCH_AGENT_PLIST" ] || {
@@ -1121,6 +1122,30 @@ reload_launch_agent() { # <check-to-report-under>
     fix_report "$report" failed "launchctl bootstrap gui/$UID_NUM refused: ${out:-no diagnostic}"
     return 1
   fi
+  kickstart_launch_agent "$report" "bootstrapped and started $LAUNCH_AGENT_LABEL in gui/$UID_NUM"
+}
+
+# A loaded job whose contract already matches only needs starting; it is never
+# booted out.
+start_launch_agent() { # <check-to-report-under>
+  local report=$1
+  if [ -z "$UID_NUM" ] || ! command -v launchctl >/dev/null 2>&1; then
+    fix_report "$report" failed "launchctl or the account uid is unavailable"
+    return 1
+  fi
+  if herdr_service_mutation_blocked; then
+    fix_report "$report" failed "refusing to start session $HERDR_SESSION_NAME through $LAUNCH_AGENT_LABEL: $HERDR_SERVICE_BLOCK_REASON (owner: ${HERDR_OWNER_ROOT:-unknown})"
+    return 1
+  fi
+  if ! record_herdr_owner; then
+    fix_report "$report" failed "cannot safely record this code root as owner at $HERDR_OWNER_FILE"
+    return 1
+  fi
+  kickstart_launch_agent "$report" "started the loaded $LAUNCH_AGENT_LABEL in gui/$UID_NUM"
+}
+
+kickstart_launch_agent() { # <check-to-report-under> <applied-text>
+  local report=$1 out
   if ! out=$(launchctl kickstart "gui/$UID_NUM/$LAUNCH_AGENT_LABEL" 2>&1); then
     fix_report "$report" failed "launchctl kickstart gui/$UID_NUM/$LAUNCH_AGENT_LABEL refused: ${out:-no diagnostic}"
     return 1
@@ -1129,7 +1154,7 @@ reload_launch_agent() { # <check-to-report-under>
     fix_report "$report" failed "the herdr server for session $HERDR_SESSION_NAME did not come up inside the Aqua launch agent within 10s"
     return 1
   fi
-  fix_report "$report" applied "bootstrapped and started $LAUNCH_AGENT_LABEL in gui/$UID_NUM"
+  fix_report "$report" applied "$2"
 }
 
 wait_for_herdr_server() {
@@ -1182,6 +1207,14 @@ apply_fixes() { # <resolved-login-shell>
     i=$((i + 1))
     case "$value" in fixable:*) ;; *) continue ;; esac
     case "$name" in
+      launchagent|launchagent-scope|launchagent-loaded|herdr-server|herdr-owner)
+        if ! herdr_repair_lock_acquire; then
+          fix_report "$name" failed "another readiness repair of session $HERDR_SESSION_NAME still holds $(herdr_repair_lock_path)"
+          continue
+        fi
+        ;;
+    esac
+    case "$name" in
       remote-job-worker|remote-job-worker-loaded|remote-job-probe)
         [ "$remote_job_fixed" -eq 0 ] || continue
         remote_job_fixed=1
@@ -1213,7 +1246,11 @@ apply_fixes() { # <resolved-login-shell>
         if [ "$PLATFORM" = darwin ] && [ -f "$LAUNCH_AGENT_PLIST" ] && check_is_ok gui-session; then
           [ "$launch_agent_reloaded" -eq 0 ] || continue
           launch_agent_reloaded=1
-          reload_launch_agent herdr-server || true
+          if check_is_ok launchagent-loaded; then
+            start_launch_agent herdr-server || true
+          else
+            reload_launch_agent herdr-server || true
+          fi
           continue
         fi
         start_herdr_server || true
@@ -1229,6 +1266,7 @@ apply_fixes() { # <resolved-login-shell>
       entrypoint-link) link_entrypoint || true ;;
     esac
   done
+  herdr_repair_lock_release || true
 }
 
 # --- report -----------------------------------------------------------------
