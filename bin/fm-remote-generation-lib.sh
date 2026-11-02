@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 
 fm_remote_generation_resolve() {
-  local ledger active route response tmp line config data
+  local ledger active route response tmp line config data route_call
   config=${CONFIG:-$FM_HOME/config}
   data=${DATA:-$FM_HOME/data}
   ledger=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
@@ -27,7 +27,13 @@ fm_remote_generation_resolve() {
     FM_REMOTE_GENERATION=$(printf '%s\n' "$route" | jq -r .generation)
     FM_REMOTE_TARGET=$(printf '%s\n' "$route" | jq -r .route.target)
   else
-    if ! response=$("$SCRIPT_DIR/fm-on.sh" "$ID" fm-remote-secondmate-control.sh route "$ID" </dev/null); then
+    # A lab endpoint only answers on the session it was recorded under, so the
+    # route lookup carries the same session the relaunch will use.
+    route_call=(route "$ID")
+    case "$(fm_meta_get "$META" remote_herdr_session)" in
+      fm-lab-*) route_call+=(--herdr-session "$(fm_meta_get "$META" remote_herdr_session)") ;;
+    esac
+    if ! response=$("$SCRIPT_DIR/fm-on.sh" "$ID" fm-remote-secondmate-control.sh "${route_call[@]}" </dev/null); then
       [ "${1:-}" = retire ] || return 1
       FM_REMOTE_GENERATION=$(fm_meta_get "$META" remote_spawn_gen)
       FM_REMOTE_TARGET=$(fm_meta_get "$META" remote_target)

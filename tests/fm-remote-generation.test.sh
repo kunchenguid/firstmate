@@ -14,12 +14,14 @@ mkdir -p "$SCRIPT_DIR" "$STATE"
 ID=ios
 META="$STATE/ios.meta"
 export FM_GENERATION_FIXTURE="$TMP/ledger" FM_ROUTE_FIXTURE="$TMP/route"
+export FM_ROUTE_ARGV="$TMP/route-argv"
 cat > "$SCRIPT_DIR/fm-fleet-seats.sh" <<'SH'
 #!/usr/bin/env bash
 cat "$FM_GENERATION_FIXTURE"
 SH
 cat > "$SCRIPT_DIR/fm-on.sh" <<'SH'
 #!/usr/bin/env bash
+printf '%s\n' "$*" > "$FM_ROUTE_ARGV"
 cat "$FM_ROUTE_FIXTURE"
 SH
 chmod +x "$SCRIPT_DIR/"*.sh
@@ -91,4 +93,14 @@ assert_equals - "$(fm_remote_launch_predecessor "{\"incarnations\":[$LEDGER_A]}"
   'another host route answered for this one'
 assert_equals - "$(fm_remote_launch_predecessor '{"incarnations":[]}' remote /srv/fm /srv/home)" \
   'an empty ledger named a predecessor'
+
+# A lab endpoint answers only on the session it was recorded under, so the
+# route lookup that resolves a predecessor must carry it.
+printf '%s\n' '{"incarnations":[]}' > "$FM_GENERATION_FIXTURE"
+printf 'schema=fm-remote-secondmate-control.v1\nbackend=herdr\nspawn_gen=lab\ntarget=fm-lab-x:w1:p1\n' > "$FM_ROUTE_FIXTURE"
+fm_write_meta "$META" remote_host=remote remote_root=/srv/fm home=/srv/home remote_herdr_session=fm-lab-x
+fm_remote_generation_resolve
+assert_equals lab "$FM_REMOTE_GENERATION" 'a lab route lookup resolved no generation'
+assert_contains "$(cat "$FM_ROUTE_ARGV")" '--herdr-session fm-lab-x' \
+  'the lab route lookup dropped the recorded session'
 printf 'remote generation regressions passed\n'
