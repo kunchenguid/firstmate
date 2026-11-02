@@ -1900,12 +1900,12 @@ spawn_abort_cleanup() {
     fi
   fi
   # A durable Herdr lease outlives the pane, unlike the process lease the
-  # interactive command used to take, so an abort before any record exists
-  # returns it. Only a closed endpoint proves nothing is left to inspect there;
-  # an open one keeps the lease and names the command, as the pane used to hold
-  # the slot for the operator.
+  # interactive command used to take, so an abort that leaves no record returns
+  # it, whether or not the launch was sent. Only a closed endpoint proves
+  # nothing is left to inspect there; an open one keeps the lease and names the
+  # command, as the pane used to hold the slot for the operator.
   if [ "$HERDR_LEASED" = 1 ] && [ "$status" -ne 0 ] && [ -n "${WT:-}" ] &&
-    [ "$SPAWN_LAUNCH_SENT" = 0 ] && [ ! -e "$STATE/$ID.meta" ] && [ ! -L "$STATE/$ID.meta" ]; then
+    [ ! -e "$STATE/$ID.meta" ] && [ ! -L "$STATE/$ID.meta" ]; then
     HERDR_LEASED=0
     if [ "$SPAWN_ENDPOINT_CLOSED" = 1 ] && (cd "$PROJ_ABS" && treehouse return --force "$WT") >/dev/null 2>&1; then
       :

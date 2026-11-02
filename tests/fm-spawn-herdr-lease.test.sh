@@ -78,6 +78,7 @@ case "${1:-} ${2:-}" in
       'cd -- '*) path=${payload#cd -- }; path=${path#\'}; path=${path%\'}
         printf '%s' "$path" > "$D/cwd"; printf '%s' "$path" > "$D/fg" ;;
       *'encode launch-brief'* | *'Firstmate operational input waiting: read'*)
+        [ ! -f "$D/launch-send-fails" ] || exit 1
         printf '%s\n' "$payload" > "$D/launched-command"
         : > "$D/herdr-agent-live" ;;
     esac
@@ -158,8 +159,23 @@ test_aborted_spawn_names_the_lease_it_keeps() {
   pass "an aborted spawn keeps the lease and names the command that releases it"
 }
 
+test_rolled_back_spawn_after_launch_names_the_lease_it_keeps() {
+  local id=lease-after-launch dir out status
+  dir=$(make_lease_case "$id")
+  : > "$dir/fake/launch-send-fails"
+  out=$(run_lease_spawn "$dir" "$id")
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn succeeded although its launch was not delivered"$'\n'"$out"
+  [ ! -e "$dir/home/state/$id.meta" ] || fail "the failed spawn kept its task record"
+  assert_contains "$out" "stays leased to $id" "a rolled-back spawn after its launch left the lease unnamed"
+  assert_contains "$out" "treehouse return --force $dir/slot" "a rolled-back spawn after its launch did not name the command that releases it"
+  [ ! -e "$dir/fake/returned" ] || fail "an abort with the endpoint still open returned a slot the operator may want to inspect"
+  pass "a spawn rolled back after its launch keeps the lease and names the command that releases it"
+}
+
 test_fresh_spawn_leases_and_moves_the_top_level_shell
 test_failed_lease_refuses_without_a_record
 test_aborted_spawn_names_the_lease_it_keeps
+test_rolled_back_spawn_after_launch_names_the_lease_it_keeps
 
 echo "# all fm-spawn-herdr-lease tests passed"
