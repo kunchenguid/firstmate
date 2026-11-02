@@ -3932,6 +3932,39 @@ test_herdr_projection_teardown_surfaces_restore_failure_without_blocking_cleanup
   pass "herdr projection teardown surfaces failed focus restoration without turning confirmed cleanup into a hard failure"
 }
 
+# A fresh Herdr task's pane shell lives in its leased copy, and `treehouse
+# return` ends every process there, so returning the copy first kills the pane
+# outside the focus-preserving close; Herdr below 0.8.0 then moves focus to a
+# neighbouring workspace with nothing to restore it. This fake return models
+# exactly that pane death and focus move.
+test_herdr_projection_teardown_closes_pane_before_returning_its_copy() {
+  local case_dir log closed restored
+  case_dir=$(make_case herdr-projection-close-before-return)
+  write_meta "$case_dir" local-only ship
+  configure_herdr_projection_teardown_case "$case_dir"
+  log="$case_dir/herdr.log"; closed="$case_dir/closed"; restored="$case_dir/restored"; : > "$log"
+  cat > "$case_dir/fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = return ]; then
+  printf 'treehouse %s\n' "$*" >> "${FM_FAKE_HERDR_LOG:?}"
+  : > "${FM_FAKE_HERDR_CLOSED:?}"
+fi
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/treehouse"
+
+  FM_FAKE_HERDR_LOG="$log" FM_FAKE_HERDR_CLOSED="$closed" FM_FAKE_HERDR_RESTORED="$restored" \
+    run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" \
+    || fail "herdr-projection-close-before-return: forced teardown failed: $(cat "$case_dir/stderr")"
+  assert_contains "$(cat "$log")" "treehouse return" \
+    "herdr-projection-close-before-return: regression did not exercise the copy return"
+  [ "$(awk '/pane close/ { print "close"; exit } /treehouse return/ { print "return"; exit }' "$log")" = close ] \
+    || fail "herdr-projection-close-before-return: teardown returned the copy before closing the exact pane: $(cat "$log")"
+  assert_contains "$(cat "$log")" "tab focus w2:t2" \
+    "herdr-projection-close-before-return: teardown did not restore the exact pre-close active tab"
+  pass "herdr projection teardown closes its exact pane, restoring focus, before returning the copy that holds its shell"
+}
+
 # A task's per-task watcher markers (.seen-<id>_status, .seen-<id>_turn-ended,
 # .hb-surfaced-<id>) and an orphaned presentation journal - one whose pane the
 # close path proved gone without retiring it - must not outlive teardown, while
@@ -5998,6 +6031,7 @@ test_forced_teardown_retains_nested_secondmate_home_when_grandchild_close_unconf
 test_herdr_projection_teardown_retires_journal_only_after_confirmed_close
 test_herdr_projection_teardown_retains_journal_when_close_unconfirmed
 test_herdr_projection_teardown_surfaces_restore_failure_without_blocking_cleanup
+test_herdr_projection_teardown_closes_pane_before_returning_its_copy
 test_teardown_retires_task_watcher_markers_and_orphan_journal
 test_teardown_retains_journal_bound_to_another_pane
 test_teardown_retires_v1_journal_when_projected_workspace_gone
