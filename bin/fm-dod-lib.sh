@@ -836,7 +836,8 @@ fm_dod_ready_note_url() {  # <note>
 # recorded PR only on this proof that the line is newer than that PR; a recorded
 # PR the log never named is the supervisor's own choice.
 fm_dod_status_names_pr() {  # <status-file> <url>
-  grep -Fqw -- "$2" "$1" 2>/dev/null
+  [ -f "$1" ] && [ -r "$1" ] || return 1
+  tr -s '[:space:]' '\n' < "$1" | grep -Fx -- "$2" > /dev/null
 }
 
 # The last recorded <key>= value in <meta>, or empty.
