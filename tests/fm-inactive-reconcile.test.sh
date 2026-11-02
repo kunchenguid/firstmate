@@ -198,7 +198,7 @@ run_live_child() { # <world> <busy|idle> <spawn-epoch-offset> [rewrite-meta]
 
 assert_withheld() {
   [ "$(outcome_count "$MAIN" pending)" = 0 ] || fail "$1: terminal outcome record written"
-  [ -z "$(grep inactive-outcome: "$MAIN/state/.wake-queue" 2>/dev/null)" ] || fail "$1: supervisor woke"
+  ! grep -q inactive-outcome: "$MAIN/state/.wake-queue" 2>/dev/null || fail "$1: supervisor woke"
 }
 
 test_busy_agent_withholds_terminal_outcome() {

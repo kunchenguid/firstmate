@@ -513,6 +513,7 @@ task_holds_live_work() { # <id> <meta> <timeout> <last-status-line>; 0 when the 
   backend=$(fm_backend_of_meta "$meta")
   target=$(fm_backend_target_of_meta "$meta")
   [ -n "$target" ] || return 1
+  # shellcheck disable=SC2016
   verdict=$(fm_run_timed "$timeout" bash -c '
     . "$1"; . "$2"
     [ "$(fm_backend_agent_state "$3" "$4" 2>/dev/null)" = alive ] || exit 0
