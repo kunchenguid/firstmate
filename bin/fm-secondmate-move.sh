@@ -94,6 +94,9 @@ META="$STATE/$ID.meta"
 [ -f "$META" ] && [ ! -L "$META" ] || die "no task record for $ID in $STATE; a move needs the mate's own record"
 [ "$(fm_meta_get "$META" kind)" = secondmate ] || die "task $ID is not a second mate; fm-secondmate-move moves kind=secondmate records only"
 
+OLD_BACKEND=$(fm_backend_of_meta "$META")
+[ "$OLD_BACKEND" != "$TARGET" ] || die "second mate $ID is already recorded on backend=$TARGET; to restart it in place use bin/fm-control.sh $ID relaunch"
+
 # Every target check runs before the agent is stopped, so an impossible move
 # costs nothing.
 fm_backend_validate_spawn "$TARGET" || exit 1
@@ -111,8 +114,6 @@ case "$TARGET" in
   hc) fm_backend_hc_container_ensure >/dev/null || die "backend=hc is not ready to launch second mate $ID; nothing was stopped or moved" ;;
   rex) fm_backend_rex_local_server_ensure || die "backend=rex is not ready to launch second mate $ID; nothing was stopped or moved" ;;
 esac
-OLD_BACKEND=$(fm_backend_of_meta "$META")
-[ "$OLD_BACKEND" != "$TARGET" ] || die "second mate $ID is already recorded on backend=$TARGET; to restart it in place use bin/fm-control.sh $ID relaunch"
 
 first_line() {  # <text>
   local line
@@ -125,6 +126,7 @@ fm_secondmate_liveness_lock "$ID" \
   || die "another liveness check or recovery is in progress for second mate $ID; retry once it finishes"
 trap 'fm_secondmate_liveness_unlock "$ID"' EXIT
 
+STOPPED=0
 fm_secondmate_liveness_probe "$META" "$ID" poll
 case "$FM_SM_LIVE_STATUS" in
   silent)
@@ -134,6 +136,7 @@ case "$FM_SM_LIVE_STATUS" in
     if ! EXIT_OUT=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" "$SCRIPT_DIR/fm-control.sh" "$ID" exit 2>&1); then
       die "second mate $ID's agent on $OLD_BACKEND could not be proven stopped, so nothing was moved and its record is unchanged: $(first_line "$EXIT_OUT")"
     fi
+    STOPPED=1
     fm_secondmate_liveness_probe "$META" "$ID" poll
     [ "$FM_SM_LIVE_STATUS" = relaunchable ] \
       || die "after the stop, second mate $ID's endpoint reads '$FM_SM_LIVE_STATE' rather than agent-free, so the move stops here with its record unchanged and no replacement launched"
@@ -172,5 +175,8 @@ elif ! cmp -s "$SNAPSHOT" "$META"; then
   die "second mate $ID could not be launched on $TARGET after its $OLD_BACKEND agent was stopped, and a different record for it is now in place (published by another writer since, or left by the launch's own incomplete cleanup); that record was left as it is and the previous one was not put back: $(first_line "$FM_SM_LIVE_OUT")"
 fi
 fm_lock_release "$META_LOCK" || true
-[ "$FM_SM_LIVE_STATUS" != skipped ] || die "$FM_SM_LIVE_REASON"
+if [ "$FM_SM_LIVE_STATUS" = skipped ]; then
+  [ "$STOPPED" = 1 ] || die "second mate $ID was not moved to $TARGET; nothing was stopped or launched and its record is unchanged: $FM_SM_LIVE_REASON"
+  die "second mate $ID was not moved to $TARGET: its $OLD_BACKEND agent was stopped, nothing was launched, and its previous record (backend=$OLD_BACKEND) is unchanged, so the next liveness recovery respawns it on its recorded backend: $FM_SM_LIVE_REASON"
+fi
 die "second mate $ID could not be launched on $TARGET after its $OLD_BACKEND agent was stopped; its home is unchanged and its previous record (backend=$OLD_BACKEND) is in place, so the next liveness recovery respawns it on $OLD_BACKEND: $(first_line "$FM_SM_LIVE_OUT")"

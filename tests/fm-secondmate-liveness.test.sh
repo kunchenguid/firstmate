@@ -1247,6 +1247,30 @@ SH
   pass "move: a failed launch leaves a record published since in place and says the previous one was not restored"
 }
 
+test_move_names_the_stopped_state_when_the_relaunch_is_skipped() {
+  local out rc=0 ledger
+  if [ "$(id -u)" = 0 ]; then
+    pass "move: skipped-relaunch message skipped (root ignores file modes)"
+    return
+  fi
+  move_world move-skipped-after-stop claude
+  ledger="$W_DIR/home/state/.secondmate-relaunch-sm1"
+  : > "$ledger"
+  chmod 444 "$ledger"
+  cp -p "$W_DIR/home/state/sm1.meta" "$W_DIR/before.meta"
+  out=$(run_move sm1 --backend hc) || rc=$?
+  chmod 644 "$ledger"
+  expect_code 1 "$rc" "a move whose relaunch is skipped must fail"$'\n'"$out"
+  [ "$(cat "$W_MV/literal")" = /exit ] || fail "the live agent must have been stopped first, got: $(cat "$W_MV/literal")"
+  assert_not_contains "$(cat "$W_DIR/hc/log" 2>/dev/null || true)" $'\x1frun\x1f' "a skipped relaunch must not launch anything"
+  cmp -s "$W_DIR/before.meta" "$W_DIR/home/state/sm1.meta" || fail "a skipped relaunch must leave the record unchanged"
+  assert_contains "$out" "its tmux agent was stopped, nothing was launched, and its previous record (backend=tmux) is unchanged" "the failure states what the move did"
+  assert_contains "$out" "the next liveness recovery respawns it on its recorded backend" "the failure states how the mate comes back"
+  assert_contains "$out" "relaunch ledger $ledger is unwritable" "the failure carries the library's skip reason"
+  assert_not_contains "$out" "moved sm1" "a skipped relaunch must not report a move"
+  pass "move: a relaunch skipped after the stop says the agent was stopped, nothing launched, and the record is unchanged"
+}
+
 test_move_usage_prints_the_exit_status_contract() {
   local out rc=0 contract='Exit status: 0 moved; 1 refused or failed,'
   out=$("$ROOT/bin/fm-secondmate-move.sh" --help 2>/dev/null) || rc=$?
@@ -1534,6 +1558,7 @@ test_move_relaunches_an_already_stopped_tmux_secondmate_on_hc
 test_move_refuses_before_stopping_anything
 test_move_restores_the_previous_record_when_the_launch_fails
 test_move_leaves_a_newer_record_in_place_when_the_launch_fails
+test_move_names_the_stopped_state_when_the_relaunch_is_skipped
 test_move_usage_prints_the_exit_status_contract
 test_move_refuses_while_the_liveness_lock_is_held
 test_remote_poll_probe_maps_states
