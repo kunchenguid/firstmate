@@ -410,12 +410,13 @@ terminal_outcome_corroborated() { # <state> <last-status-line> <state-line>
 # A scout never delivers a PR, so it never carries one.
 pr_for_task() { # <meta> <terminal-line> <status-file>
   local meta=$1 terminal=$2 status=$3 value ready=
+  local github_shape='^https?://[^[:space:])"]+/pull/[0-9]+$'
   [ "$(meta_field "$meta" kind)" != scout ] || return 0
   value=$(meta_field "$meta" pr)
   if [ "$(status_line_verb "$terminal")" = done ]; then
     ready=$(fm_dod_ready_note_url "$(status_line_note "$terminal")") || ready=
     if [ -n "$ready" ] && ! fm_pr_url_parse "$ready" \
-      && ! [[ "$ready" =~ '^https?://[^[:space:])"]+/pull/[0-9]+$' ]]; then
+      && ! [[ "$ready" =~ $github_shape ]]; then
       ready=
     fi
   fi
