@@ -795,8 +795,9 @@ root_holders() {
     ledger_pool_holders "$models"
     # The (task, generation) pairs this home already counts, so an adopted
     # supervisor a remote certificate lists is not counted a second time.
-    awk -F '\t' '($4 == "reserved" || $4 == "confirmed") { print $2 "\t" $3 }' \
-      "$TMPD/ledger" > "$TMPD/counted-gens" || return 1
+    awk -F '\t' 'NR == FNR { m[$0] = 1; next }
+      ($4 == "reserved" || $4 == "confirmed") && ($5 == "-" || ($5 in m)) { print $2 "\t" $3 }' \
+      "$models" "$TMPD/ledger" > "$TMPD/counted-gens" || return 1
     while IFS= read -r home_state; do
       pooled_records "$home_state" "$models" "$TMPD/counted-gens" "$exclude" \
         || { rc=$?; [ "$rc" -ne 4 ] || return 4; return 1; }
@@ -1789,7 +1790,11 @@ if [ "$ROOT_REMOTE" -eq 1 ]; then
             ' "$reservation" >/dev/null 2>&1; then
             unavailable "host supervisor $id has unaccounted occupancy"
           fi
-          continue
+          if jq -e --arg m "$(record_field "$meta" model)" '
+            .incarnations[0].model == (if $m == "-" or $m == "default" or $m == "" then null else $m end)
+          ' "$reservation" >/dev/null; then
+            continue
+          fi
         fi
         # No retained reservation proves parent accounting: a supervisor
         # launched before this home had seat pools, or one whose launch reply
@@ -1798,8 +1803,10 @@ if [ "$ROOT_REMOTE" -eq 1 ]; then
         # unless the same agent is already counted here under a matching
         # generation. A reservation that exists but does not validate is
         # still refused above.
-        if ! awk -F '\t' -v t="$id" -v g="$gen" \
-            '($4 == "reserved" || $4 == "confirmed") && $2 == t && $3 == g { found = 1 } END { exit !found }' \
+        model=$(record_field "$meta" model)
+        case "$model" in ''|default|-) model=- ;; esac
+        if ! awk -F '\t' -v t="$id" -v g="$gen" -v m="$model" \
+            '($4 == "reserved" || $4 == "confirmed") && $2 == t && $3 == g && ($5 == "-" || $5 == m) { found = 1 } END { exit !found }' \
             "$TMPD/ledger"; then
           accounted=0
           while IFS= read -r home_state; do
@@ -1810,8 +1817,6 @@ if [ "$ROOT_REMOTE" -eq 1 ]; then
             fi
           done < "$TMPD/local-homes"
           if [ "$accounted" -eq 0 ]; then
-            model=$(record_field "$meta" model)
-            case "$model" in ''|default|-) model=- ;; esac
             printf '%s\t%s\t%s\t%s\tconfirmed\n' \
               "$ROOT_STATE/parent-route" "$id" "$gen" "$model" >> "$TMPD/adopted-hosts"
           fi

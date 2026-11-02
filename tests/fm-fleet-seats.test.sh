@@ -1783,8 +1783,10 @@ test_remote_host_supervisor_adoption_and_accounting() {
   chmod 600 "$reservation4"
   out=$(serve_remotes 2>&1)
   assert_contains "$out" "served theshop" "bound or default-model reservations blocked serving"
-  assert_equals false "$(jq '.holders | any(.task == "theshop2" or .task == "theshop3" or .task == "theshop4")' \
+  assert_equals false "$(jq '.holders | any(.task == "theshop2" or .task == "theshop3" )' \
     "$R_ROOT/state/fleet-seats/remote-theshop.cert")" "parent-accounted supervisors were adopted anyway"
+  assert_equals pool-model-a "$(jq -r '.holders[] | select(.task == "theshop4") | .model' \
+    "$R_ROOT/state/fleet-seats/remote-theshop.cert")" "observing reservation erased actual-model occupancy"
   rm -f "$receipt" "$reservation" "$reservation3" "$meta2" "$meta3" "$meta" \
     "$receipt4" "$reservation4" "$meta4"
   rm -f "$R_ROOT/config/fleet-seats" "$R_ROOT/state/theshop.meta"

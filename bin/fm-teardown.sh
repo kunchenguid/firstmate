@@ -1299,6 +1299,11 @@ remote_secondmate_teardown() {
   retire_args=("$ID")
   [ "$FORCE" != --force ] || retire_args+=(--force)
   retire_args+=(--expect-generation "$generation")
+  if [ "$FM_REMOTE_BACKEND" = herdr ]; then
+    case "$target" in
+      fm-lab-*:*) retire_args+=(--herdr-session "${target%%:*}") ;;
+    esac
+  fi
   TEARDOWN_REMOTE_RETIREMENT="$STATE/.seat-retirement-$ID.json"
   if [ -e "$TEARDOWN_REMOTE_RETIREMENT" ] || [ -L "$TEARDOWN_REMOTE_RETIREMENT" ]; then
     [ -f "$TEARDOWN_REMOTE_RETIREMENT" ] && [ ! -L "$TEARDOWN_REMOTE_RETIREMENT" ] \

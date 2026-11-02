@@ -1058,9 +1058,9 @@ cmd_retire() {
     proof="$HOST_HISTORY/$id.retirement.$expected.json"
     if [ -e "$proof" ] || [ -L "$proof" ]; then
       [ -f "$proof" ] && [ ! -L "$proof" ] || die "remote retirement history is unsafe"
-      replay=$(jq -ce --arg t "$id" --arg h "$TARGET_HOME" --arg g "$expected" '
+      replay=$(jq -ce --arg t "$id" --arg h "$TARGET_HOME" --arg g "$expected" --arg session "$REMOTE_HERDR_SESSION" '
         select(.task == $t and .home == $h and .generation == $g
-          and ((.backend == "herdr" and (.target | type == "string" and startswith("fm-remote:")))
+          and ((.backend == "herdr" and (.target | type == "string" and startswith($session + ":")))
             or (.backend == "rex" and (.target | type == "string" and test("^[0-9a-f-]+:[0-9a-f-]+$"))))
           and .destroyed == true
           and (.exit_code == 0 or .exit_code == 4))' "$proof") \
@@ -1077,10 +1077,10 @@ cmd_retire() {
     pending="$HOST_HISTORY/$id.retirement.$expected.pending.json"
     if [ -e "$pending" ] || [ -L "$pending" ]; then
       [ -f "$pending" ] && [ ! -L "$pending" ] || die "remote retirement history is unsafe"
-      pending_record=$(jq -ce --arg t "$id" --arg h "$TARGET_HOME" --arg g "$expected" '
+      pending_record=$(jq -ce --arg t "$id" --arg h "$TARGET_HOME" --arg g "$expected" --arg session "$REMOTE_HERDR_SESSION" '
         select(.schema == "fm-remote-retirement-pending.v1" and .task == $t and .home == $h
           and .generation == $g and .phase == "pending"
-          and ((.backend == "herdr" and (.target | type == "string" and startswith("fm-remote:")))
+          and ((.backend == "herdr" and (.target | type == "string" and startswith($session + ":")))
             or (.backend == "rex" and (.target | type == "string" and test("^[0-9a-f-]+:[0-9a-f-]+$"))))
           and .destroyed == false
           and (.exit_code == null or .exit_code == 0 or .exit_code == 4))' "$pending") \

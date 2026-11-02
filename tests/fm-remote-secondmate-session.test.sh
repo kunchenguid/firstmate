@@ -109,3 +109,26 @@ for server in foreign-server recorded-server; do
   assert_absent "$absent_home" 'retirement retry recreated deleted home'
 done
 pass "Rex retirement retry retains server ownership after home deletion"
+
+for phase in pending completed; do
+  proof="$history/lab.retirement.lab.g1.json"
+  pending="$history/lab.retirement.lab.g1.pending.json"
+  jq -n --arg home "$absent_home" --arg target "$session:w1:p1" \
+    '{task:"lab",home:$home,generation:"lab.g1",backend:"herdr",target:$target,destroyed:true,exit_code:0}' > "$proof"
+  if [ "$phase" = pending ]; then
+    jq '. + {schema:"fm-remote-retirement-pending.v1",phase:"pending",destroyed:false}' "$proof" > "$pending"
+    rm "$proof"
+  fi
+  out=$(env FM_HOME="$absent_home" FM_ROOT_OVERRIDE="$TMP_ROOT/code" PATH="$FAKEBIN:$PATH" bash "$ROOT/bin/fm-remote-secondmate-control.sh" retire lab --expect-generation lab.g1 2>&1); rc=$?
+  [ "$rc" -ne 0 ] || fail "$phase evidence accepted the wrong session"
+  assert_absent "$FM_TEST_HERDR_LOG" "$phase wrong session accessed Herdr"
+  out=$(env FM_HOME="$absent_home" FM_ROOT_OVERRIDE="$TMP_ROOT/code" PATH="$FAKEBIN:$PATH" bash "$ROOT/bin/fm-remote-secondmate-control.sh" retire lab --expect-generation lab.g1 --herdr-session "$session" 2>&1); rc=$?
+  if [ "$phase" = completed ]; then
+    expect_code 0 "$rc" "lab completion replay refused: $out"
+  else
+    assert_present "$FM_TEST_HERDR_LOG" "lab pending retry did not reach endpoint reconciliation: $out"
+    rm "$FM_TEST_HERDR_LOG" "$pending"
+  fi
+  assert_absent "$absent_home" "$phase replay recreated the retired home"
+done
+pass "lab retirement evidence binds pending retries and completion replay to the selected session"
