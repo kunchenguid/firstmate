@@ -1320,6 +1320,63 @@ SH
   pass "fm-send --resolve-key: a caller signal before delivery reports nothing sent and the exact rerun"
 }
 
+# A caller signal during a captain-held key's answer intake lands after the
+# enqueue, so the answer was delivered while its key may still be open, and the
+# report hands back the command that checks it. Pasted into another shell (no
+# FM_HOME, another directory), that command must read the very backlog this
+# send resolved the key in - the lookup fm-send itself ran - not whatever home
+# that shell would default to.
+test_interrupt_during_hold_intake_prints_home_bound_check() {
+  local dir fb axibin log home rc err check_cmd
+  dir="$TMP_ROOT/interrupt-hold-intake"; mkdir -p "$dir"
+  fb=$(make_stubs "$dir"); log="$dir/send.log"
+  axibin="$dir/axibin"; mkdir -p "$axibin"
+  cat > "$axibin/tasks-axi" <<'SH'
+#!/usr/bin/env bash
+n=$(( $(cat "$FM_FAKE_TASKS_AXI_COUNT" 2>/dev/null || echo 0) + 1 ))
+printf '%s\n' "$n" > "$FM_FAKE_TASKS_AXI_COUNT"
+printf '%s|%s|%s\n' "$PWD" "${TASKS_AXI_FILE:-}" "$*" >> "$FM_FAKE_TASKS_AXI_LOG"
+if [ "$n" -gt 1 ] && [ -n "${FM_FAKE_TASKS_AXI_HANG_MARK:-}" ]; then
+  printf '%s\n' "$$" > "$FM_FAKE_TASKS_AXI_HANG_MARK"
+  exec /bin/sleep 60
+fi
+printf 'task %s\n  state: queued\n  hold_kind: captain\n' "${2:-}"
+SH
+  chmod +x "$axibin/tasks-axi"
+  home=$(setup_home interrupt-hold-intake)
+  mkdir -p "$home/data"
+  fm_write_meta "$home/state/t1.meta" "window=sess:fm-t1" "kind=ship"
+
+  start_send_in_group "$axibin:$fb" "$home" "$log" "$dir/out" "$dir/err" \
+    FM_FAKE_TASKS_AXI_COUNT="$dir/axi.count" FM_FAKE_TASKS_AXI_LOG="$dir/axi.log" \
+    FM_FAKE_TASKS_AXI_HANG_MARK="$dir/axi.pid" -- \
+    t1 --resolve-key held-call "go with REST"
+  wait_for_file "$dir/axi.pid" "the captain-held answer intake to start"
+  kill -s TERM -- "-$BG_PID"
+  rc=0
+  wait "$BG_PID" || rc=$?
+  reap_pid_file "$dir/axi.pid"
+  err=$(cat "$dir/err")
+  expect_code 143 "$rc" "a SIGTERM during the answer intake must exit 128+signal: $err"
+  assert_contains "$err" "after the steer was durably recorded at $home/state/t1.inbox/001.msg" \
+    "the answer was enqueued before its intake, so it must be reported delivered"
+  assert_contains "$err" "--resolve-key held-call: NOT recorded by this send" \
+    "an interrupted intake must report the captain-held key as not recorded"
+  check_cmd=$(printf '%s\n' "$err" \
+    | sed -n 's/.*; check it with \(.* show held-call --full\) and, if still open, .*/\1/p')
+  [ -n "$check_cmd" ] || fail "the report must print the captain-held check command: $err"
+  (
+    unset FM_HOME FM_ROOT_OVERRIDE FM_STATE_OVERRIDE FM_DATA_OVERRIDE
+    cd "$dir" || exit 1
+    env PATH="$axibin:$PATH" FM_FAKE_TASKS_AXI_COUNT="$dir/check.count" \
+      FM_FAKE_TASKS_AXI_LOG="$dir/check.log" bash -c "$check_cmd"
+  ) >"$dir/check.out" 2>"$dir/check.err" \
+    || fail "the printed check must run from another shell: $(cat "$dir/check.err")"
+  [ "$(cat "$dir/check.log")" = "$(head -1 "$dir/axi.log")" ] \
+    || fail "the printed check must read the backlog the send resolved the key in:"$'\n'"want: $(head -1 "$dir/axi.log")"$'\n'"got:  $(cat "$dir/check.log")"
+  pass "fm-send --resolve-key: an interrupted captain-held intake prints a check bound to this home's backlog"
+}
+
 # A SIGKILL runs no handler, so the progress lines written before it are what
 # the caller keeps: an answer killed during its doorbell has already printed
 # "durably recorded" and a recorded line per key, and the header's read-only
@@ -1347,7 +1404,7 @@ test_sigkill_after_local_enqueue_keeps_progress_lines() {
     "each closed key must be announced as soon as its line is appended"
   assert_contains "$err" "--resolve-key db-engine: recorded" \
     "each closed key must be announced as soon as its line is appended"
-  grep -F '[key=api-shape]' "$home/state/t1.status" | grep '^resolved' >/dev/null \
+  grep -F '[key=api-shape]' "$home/state/t1.status" | tail -n 1 | grep '^resolved' >/dev/null \
     || fail "the documented read-only check must find the closing record"
   pass "fm-send --resolve-key: a SIGKILL after the enqueue leaves progress lines the caller can trust"
 }
@@ -1383,4 +1440,5 @@ test_remote_reserved_pending_reply_key_closes_locally
 test_decision_answer_partition_relocates_under_the_record
 test_interrupt_after_local_enqueue_reports_recorded_keys
 test_interrupt_before_local_delivery_reports_unsent
+test_interrupt_during_hold_intake_prints_home_bound_check
 test_sigkill_after_local_enqueue_keeps_progress_lines

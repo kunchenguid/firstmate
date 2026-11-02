@@ -259,8 +259,9 @@
 # older resolved line no longer counts), with
 #   grep -F '[key=<key>]' "<state>/<task>.status" | tail -n 1 | grep '^resolved'
 # where <state> is $FM_STATE_OVERRIDE when the send ran with it, else
-# $FM_HOME/state; or, for a captain-held key, bin/fm-tasks-axi.sh show
-# <task-id> --full.
+# $FM_HOME/state; or, for a captain-held key, with the same FM_HOME the send
+# used,
+#   FM_HOME=<home> FM_DATA_OVERRIDE= bin/fm-tasks-axi.sh show <task-id> --full
 #
 # After a successful TYPED-plane submit fm-send pauses FM_SEND_SETTLE seconds
 # (default 1, 0 disables) before returning: submit confirmation only proves the
@@ -690,8 +691,9 @@ fm_send_progress() {  # <text>
 # somewhere else - another home's state dir, or no script at all - so the
 # operator's preserved message is still never delivered.
 # These two are the ONE statement of that context; every printed command (the
-# reruns and retries fm_send_print_rerun prints, and the refused --resolve-key
-# resend) builds on them rather than restating the quoting and fallback rules.
+# reruns and retries fm_send_print_rerun prints, the refused --resolve-key
+# resend, and the captain-held commands fm_send_backlog_cmd prints) builds on
+# them rather than restating the quoting and fallback rules.
 # They sit above the interruption traps so a handler can always call them.
 
 # The environment prefix a printed resend must carry: the absolute home always,
@@ -711,6 +713,12 @@ fm_send_resend_env() {  # -> "FM_HOME=<q> [FM_STATE_OVERRIDE=<q> ]"
 # only valid from the directory this invocation happened to run in.
 fm_send_resend_exe() {
   printf '%q' "$SCRIPT_DIR/fm-send.sh"
+}
+
+# A sibling backlog script, bound to the backlog this send resolves captain-held
+# keys in: this home's own data directory, as fm_send_hold_resolved_id reads it.
+fm_send_backlog_cmd() {  # <script> -> "<env>FM_DATA_OVERRIDE= <q-abs-script>"
+  printf '%sFM_DATA_OVERRIDE= %q' "$(fm_send_resend_env)" "$SCRIPT_DIR/$1"
 }
 
 # The exact command that reruns this send, optionally reusing a correlation.
@@ -762,7 +770,7 @@ fm_send_report_resolve_keys() {  # [delivered]
       if [ "$FM_SEND_HOLDS_FED" = 1 ]; then
         echo "fm-send: --resolve-key $k: recorded (captain-held task $hold answered)" >&2
       elif [ -n "$delivered" ]; then
-        echo "fm-send: --resolve-key $k: NOT recorded by this send (the answer intake for captain-held task $hold did not complete); check it with fm-tasks-axi.sh show $hold --full and, if still open, close it with fm-captain-hold.sh answer - do not resend the answer" >&2
+        echo "fm-send: --resolve-key $k: NOT recorded by this send (the answer intake for captain-held task $hold did not complete); check it with $(fm_send_backlog_cmd fm-tasks-axi.sh) show $hold --full and, if still open, close it with $(fm_send_backlog_cmd fm-captain-hold.sh) answer $hold --decision-file <file holding the answer> - do not resend the answer" >&2
       else
         echo "fm-send: --resolve-key $k: NOT recorded (this send never reached the answer intake for captain-held task $hold)" >&2
       fi
@@ -1126,7 +1134,7 @@ fm_send_feed_resolved_holds() { # <answer-text>
   done
   if ! printf '%s' "$lines" | "$SCRIPT_DIR/fm-captain-hold.sh" answers \
     --source "a firstmate answer sent to $RESOLVE_TASK_ID" >/dev/null 2>&1; then
-    echo "error: the answer was delivered to $T, but this captain-held task could not be closed: ${RESOLVE_HOLD_KEYS}. Close it with fm-captain-hold.sh answer - do not resend the answer." >&2
+    echo "error: the answer was delivered to $T, but this captain-held task could not be closed: ${RESOLVE_HOLD_KEYS}. Close it with $(fm_send_backlog_cmd fm-captain-hold.sh) answer <task-id> --decision-file <file holding the answer> - do not resend the answer." >&2
     return 1
   fi
   FM_SEND_HOLDS_FED=1
