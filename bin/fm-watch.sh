@@ -4527,8 +4527,8 @@ EOF
       if ! cmp -s <(printf '%s\n' "$hygiene_report") "$STATE/.record-hygiene-last"; then
         hygiene_reason="check: record hygiene: $hygiene_report"
         fm_wake_append check record-hygiene "$hygiene_reason" || exit 1
-        wake "$hygiene_reason"
         printf '%s\n' "$hygiene_report" > "$STATE/.record-hygiene-last"
+        wake "$hygiene_reason"
       fi
     else
       rm -f "$STATE/.record-hygiene-last"
