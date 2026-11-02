@@ -83,6 +83,9 @@
 #        fm-startup-network.sh recover [--generation <generation>] [seconds]
 #          One bounded current-generation publication/delivery attempt. A stale
 #          expected generation is a no-op; contention leaves completion retained.
+#        fm-startup-network.sh prune
+#          Run the retention pass by hand. It is the same pass a new reservation
+#          runs under the publication lock; for operators and tests only.
 #        fm-startup-network.sh report [--generation <generation>]
 #          Print the current state and report without changing anything, then the
 #          last run's per-step elapsed times. This is the ONLY command that prints
@@ -111,9 +114,9 @@
 #   .startup-network-results/<generation>/
 #                             a completed run's report, optional timings, and the
 #                             status written last as its completion boundary;
-#                             retained until the result settles so a later cycle can
-#                             deliver it, with bin/fm-startup-network-lib.sh owning
-#                             the read contract. Bounded, not an archive: see
+#                             retained so a later cycle can deliver it, with
+#                             bin/fm-startup-network-lib.sh owning the read
+#                             contract. Bounded, not an archive: see
 #                             "RETAINED RESULTS ARE BOUNDED" below.
 #   .startup-network-wake-receipts/<generation>
 #                             a receipt stating that this generation's wake row was
@@ -147,15 +150,21 @@
 #
 # RETAINED RESULTS ARE BOUNDED. A session start reserves a new generation, so
 # without a bound a long-lived home would keep one report directory per start
-# forever. prune_results() runs under the publication lock whenever a new
-# generation is reserved, and it removes only
-# what nothing can still act on: never the current shared-status generation,
-# never a generation named by a queued startup-network wake row, and never one of
-# the newest RESULT_KEEP_UNSETTLED unsettled generations, which is the grace
-# window for a run that died before settling. Everything else is settled or
-# fenced by a successor, so its directory and wake receipt are removed. The
-# shared report and timings files remain the operator's read path for the last
-# run; `prune` exposes the same pass to an operator and to the tests.
+# forever. prune_results() runs under the publication lock at each new
+# reservation, and it removes only what nothing can still act on: never the
+# current shared-status generation, never a generation named by a queued
+# startup-network wake row, and never one of the newest RESULT_KEEP_UNSETTLED
+# unsettled generations, which is the grace window for a run that died before
+# settling. Everything else is settled or fenced by a successor, so its
+# directory and wake receipt are removed - but only once it is a complete
+# completion record carrying the state, finished, rc, report_published, and
+# matching generation its readers consume, so an incomplete or hand-written
+# directory is declined rather than deleted. The validated receipt goes first,
+# so an interrupted pass leaves a retryable directory rather than an orphan
+# receipt no later pass enumerates, and a symlinked receipt root declines the
+# receipt step entirely. The shared report and timings files remain the
+# operator's read path for the last run; `prune` exposes the same pass to an
+# operator and to the tests.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -172,7 +181,8 @@ PUBLISH_LOCK="$STATE/.startup-network.lock"
 
 # Unsettled generations kept past the current one, so a run that died between
 # retaining its completion and settling it stays readable for a few starts.
-# Settled and superseded generations are not retained; see prune_results().
+# Settled and superseded generations are not retained once they are complete
+# completion records; see prune_results().
 RESULT_KEEP_UNSETTLED=3
 
 # shellcheck source=bin/fm-timeout-lib.sh
