@@ -2,7 +2,7 @@
 # Spawn a direct report: a crewmate in a treehouse or Orca worktree, or a
 # secondmate in its isolated firstmate home.
 # Usage: fm-spawn.sh <task-id> <project-dir> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--branch-prefix <prefix>] [--base-branch <branch>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--hermes-profile <name>] [--account <entry>] [--backend <name>] [--herdr-resume-lock-wait]
-#        fm-spawn.sh <task-id> <project-dir> --scout [--base-branch <branch>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--hermes-profile <name>] [--account <entry>] [--backend <name>] [--herdr-resume-lock-wait]
+#        fm-spawn.sh <task-id> <project-dir> --scout [--follow-up <scout-id>] [--base-branch <branch>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--hermes-profile <name>] [--account <entry>] [--backend <name>] [--herdr-resume-lock-wait]
 #        fm-spawn.sh <task-id> [<firstmate-home>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] --secondmate
 #   --mode and --yolo are this task's delivery contract, REQUIRED for every ship
 #   spawn and refused on --scout and --secondmate spawns. Firstmate resolves both
@@ -64,6 +64,13 @@
 #   first in the private launch-brief overlay, including the exact task-owned
 #   steering inbox. This never rewrites a project's instruction files or a
 #   secondmate's charter.
+#   --follow-up <scout-id> starts a scout from a finished scout's report and,
+#   when the recorded Claude session can be resumed, from its conversation;
+#   bin/fm-scout-session-lib.sh owns the record, the resume rule, and the brief
+#   preamble. It is single-task, scout-only, refused on relaunch, needs
+#   data/<scout-id>/report.md, and prints the path it took. Every verified
+#   Claude scout launch carries --session-id and records claude_session= so a
+#   later follow-up can resume it.
 #        fm-spawn.sh <task-id> --relaunch [--harness <name>] [--model <name>] [--effort <level>] [--account <entry>]
 #   --relaunch launches a replacement agent for an EXISTING task into that
 #   task's own recorded worktree, reusing its recorded endpoint when that
@@ -543,6 +550,9 @@
 #                  reports (relaunch_resume_args below owns it; it supplies its
 #                  own leading space, and is empty on every fresh spawn and for
 #                  every other harness)
+#     __CLAUDESESSION__ optional scout-only `--session-id <uuid> `, preceded by
+#                  `--resume <old> --fork-session ` on a resumed follow-up
+#                  (bin/fm-scout-session-lib.sh owns the rule; empty otherwise)
 #     __TURNEND__  absolute path to state/<task-id>.turn-ended (for harnesses whose
 #                  turn-end signal rides the launch command, e.g. codex -c notify=[...])
 #     __PIEXT__    absolute path to state/<task-id>.pi-ext.ts (pi busy-state extension,
@@ -973,6 +983,8 @@ fm_backlog_directory_present "$STATE" "state directory" || {
 . "$SCRIPT_DIR/fm-worker-account-lib.sh"
 # shellcheck source=bin/fm-omp-profile-lib.sh
 . "$SCRIPT_DIR/fm-omp-profile-lib.sh"
+# shellcheck source=bin/fm-scout-session-lib.sh
+. "$SCRIPT_DIR/fm-scout-session-lib.sh"
 # Fail closed before any fleet mutation: a no-mistakes gate agent must never spawn
 # a direct report (see bin/fm-gate-refuse-lib.sh).
 fm_refuse_if_gate_agent
@@ -1006,6 +1018,8 @@ TRACEPARENT_SET=0
 ACCOUNT_ARG=
 ACCOUNT_SET=0
 RELAUNCH=0
+FOLLOW_UP=
+FOLLOW_UP_SET=0
 # Opt-in only: exact-resume presentation-order lock waits instead of refusing.
 # Absent/unset keeps upstream refuse-on-contention. See header.
 HERDR_RESUME_LOCK_WAIT=0
@@ -1067,6 +1081,10 @@ for a in "$@"; do
     account)
       ACCOUNT_ARG=$a
       ACCOUNT_SET=1
+      ;;
+    follow-up)
+      FOLLOW_UP=$a
+      FOLLOW_UP_SET=1
       ;;
     *)
       echo "error: internal parser state for --$want_value" >&2
@@ -1135,6 +1153,11 @@ for a in "$@"; do
     UPSTREAM_CONSENT_SET=1
     ;;
   --traceparent) want_value=traceparent ;;
+  --follow-up) want_value=follow-up ;;
+  --follow-up=*)
+    FOLLOW_UP=${a#--follow-up=}
+    FOLLOW_UP_SET=1
+    ;;
   --traceparent=*)
     TRACEPARENT_ARG=${a#--traceparent=}
     TRACEPARENT_SET=1
@@ -1201,6 +1224,20 @@ fi
   echo "error: --account applies to ships and scouts; secondmate ${POS[0]:-} launches on its own config/secondmate-accounts/<id>/claude-account pin" >&2
   exit 1
 }
+if [ "$FOLLOW_UP_SET" -eq 1 ]; then
+  [ "$KIND" = scout ] && [ "$RELAUNCH" -eq 0 ] || {
+    echo "error: --follow-up applies only to a fresh --scout spawn" >&2
+    exit 1
+  }
+  fm_task_id_creation_valid "$FOLLOW_UP" || {
+    echo "error: --follow-up requires a valid scout task id" >&2
+    exit 1
+  }
+  [ -f "$DATA/$FOLLOW_UP/report.md" ] || {
+    echo "error: --follow-up $FOLLOW_UP has no report at $DATA/$FOLLOW_UP/report.md" >&2
+    exit 1
+  }
+fi
 # A parent-delivered carrier replaces this home's own resolution, so it is
 # refused unless it is a secondmate spawn carrying a strictly valid W3C value.
 # Nothing else may reach the pane's TRACEPARENT export.
@@ -2139,6 +2176,10 @@ if [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart" ] && case "$idpart" in *
     echo "error: config/crew-dispatch.json is active - pass an explicit harness resolved from the dispatch rules (the consultation backstop, so the rules are never silently skipped)." >&2
     exit 1
   fi
+  [ "$FOLLOW_UP_SET" -eq 0 ] || {
+    echo "error: --follow-up is single-task only" >&2
+    exit 1
+  }
   rc=0
   shared_args=()
   [ -z "$HARNESS_ARG" ] || shared_args+=(--harness "$HARNESS_ARG")
@@ -2893,7 +2934,7 @@ launch_template() {
     # record-backed doorbell: the full envelope is published into the receiving
     # home's state/operational-inbox before launch and only a printable doorbell
     # naming it is passed. A record that cannot be published stops the spawn.
-    printf '%s' '__MODELFLAG____EFFORTFLAG____BRIEFDOORBELL__'
+    printf '%s' '__CLAUDESESSION____MODELFLAG____EFFORTFLAG____BRIEFDOORBELL__'
     ;;
   # --disable hooks (equivalent to -c features.hooks=false) requests that codex
   # turn its whole lifecycle-hook layer off for CREWMATE and SCOUT launches only.
@@ -4279,9 +4320,14 @@ if [ "$KIND" = ship ] || [ "$KIND" = scout ]; then
   SOURCE_BRIEF=$BRIEF
   BRIEF="$DATA/$ID/launch-brief.md"
   BRIEF_TMP="$DATA/$ID/.launch-brief.md.${BASHPID:-$$}"
+  # A follow-up scout keeps its preamble across relaunches through follow_up=.
+  [ "$RELAUNCH" -eq 0 ] || FOLLOW_UP=$(fm_meta_get "$RELAUNCH_META" follow_up)
   {
     fm_brief_worker_role "$STATE" "$ID" "$FM_ROOT" &&
       printf '\n' &&
+      if [ -n "$FOLLOW_UP" ]; then
+        fm_scout_follow_up_preamble "$FOLLOW_UP" "$DATA/$FOLLOW_UP/report.md"
+      fi &&
       cat "$SOURCE_BRIEF" &&
       if [ "$KIND" = ship ] && [ "$MODE" = no-mistakes ]; then
         fm_brief_intent_overlay "$CAPTAIN_INTENT"
@@ -7191,6 +7237,22 @@ META_WINDOW=$T
 [ "$BACKEND" = t3code ] && META_WINDOW=$W
 SPAWN_GEN="s$(date +%s).${BASHPID:-$$}.$RANDOM"
 SPAWN_META_PATH="$STATE/$ID.meta"
+# Resumable scouts (bin/fm-scout-session-lib.sh): a verified Claude scout gets a
+# known session id, and a fresh follow-up resumes the earlier one when it can.
+CLAUDE_SESSION_ID=
+CLAUDE_SESSION_FLAG=
+if [ "$KIND" = scout ] && [ "$RAW_LAUNCH" = 0 ] && [ "$HARNESS" = claude ]; then
+  CLAUDE_SESSION_ID=$(fm_scout_session_new_id) || CLAUDE_SESSION_ID=
+fi
+if [ "$FOLLOW_UP_SET" -eq 1 ]; then
+  if follow_up_out=$(fm_scout_follow_up_resume_id "$DATA" "$FOLLOW_UP" "$HARNESS" "$RAW_LAUNCH" "${CLAUDE_CONFIG_DIR:-$HOME/.claude}"); then
+    CLAUDE_SESSION_FLAG="--resume $follow_up_out --fork-session "
+    echo "follow-up: resuming scout $FOLLOW_UP's claude session $follow_up_out in a fresh local copy"
+  else
+    echo "follow-up: fresh scout pointed at $DATA/$FOLLOW_UP/report.md ($follow_up_out)"
+  fi
+fi
+[ -z "$CLAUDE_SESSION_ID" ] || CLAUDE_SESSION_FLAG="${CLAUDE_SESSION_FLAG}--session-id $CLAUDE_SESSION_ID "
 if [ "$SPAWN_META_LOCK_HELD" != 1 ]; then
   SPAWN_META_LOCK=$(fm_meta_lock_path "$STATE/$ID.meta") || exit 1
   fm_lock_acquire_wait "$SPAWN_META_LOCK"
@@ -7206,7 +7268,7 @@ SPAWN_META_PATH=$SPAWN_META_TMP
 preserve_relaunch_meta() {
   awk -F= '
     BEGIN {
-      split("window endpoint_task_id worktree project harness hermes_profile hermes_home kind mode yolo branch tasktmp base_branch upstream_consent forge backup_remote backup_prefix model effort opencode_version account account_provider omp_profile busy_gen spawn_gen approval_mode traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id paseo_terminal_id paseo_workspace_id rex_server rex_session_id rex_window_id rex_block_id t3_thread_id t3_project_id tern_session_id tern_tab_id tern_block_id hc_session hc_terminal home projects control_relaunch_tx polytoken_session polytoken_port polytoken_credential", keys, " ")
+      split("window endpoint_task_id worktree project harness hermes_profile hermes_home kind mode yolo branch tasktmp base_branch upstream_consent forge backup_remote backup_prefix model effort opencode_version account account_provider omp_profile busy_gen spawn_gen approval_mode claude_session traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id paseo_terminal_id paseo_workspace_id rex_server rex_session_id rex_window_id rex_block_id t3_thread_id t3_project_id tern_session_id tern_tab_id tern_block_id hc_session hc_terminal home projects control_relaunch_tx polytoken_session polytoken_port polytoken_credential", keys, " ")
       for (i in keys) owned[keys[i]] = 1
     }
     !($1 in owned)
@@ -7237,6 +7299,8 @@ preserve_relaunch_meta() {
   [ -z "$EXTERNAL_BACKUP_REMOTE" ] || echo "backup_prefix=$EXTERNAL_BACKUP_PREFIX"
   echo "model=${MODEL:-default}"
   echo "effort=${EFFORT:-default}"
+  [ -z "$CLAUDE_SESSION_ID" ] || echo "claude_session=$CLAUDE_SESSION_ID"
+  [ -z "$FOLLOW_UP" ] || echo "follow_up=$FOLLOW_UP"
   # The detected OpenCode major, recorded so fm-control sends the exit key this
   # agent's TUI understands. Written only when a version was resolved, so a
   # non-opencode or undetectable task record stays byte-identical.
@@ -7419,6 +7483,7 @@ MODELFLAG=$(model_flag_for_harness "$HARNESS" "$MODEL" "$OPENCODE_MAJOR")
 # A pinned Pi launch confines Pi's model lookup to the declared provider.
 [ -z "$WORKER_ACCOUNT_PROVIDER" ] || MODELFLAG="--provider $(shell_quote "$WORKER_ACCOUNT_PROVIDER") $MODELFLAG"
 EFFORTFLAG=$(effort_flag_for_harness "$HARNESS" "$EFFORT" "$MODEL" "$OPENCODE_MAJOR") || exit 1
+LAUNCH=${LAUNCH//__CLAUDESESSION__/$CLAUDE_SESSION_FLAG}
 LAUNCH=${LAUNCH//__MODELFLAG__/$MODELFLAG}
 LAUNCH=${LAUNCH//__EFFORTFLAG__/$EFFORTFLAG}
 # Relaunch session continuity. Computed here, where the adopted endpoint (T) is

@@ -9,6 +9,9 @@ metadata:
 # Scout outcome and promotion
 
 A completed scout must leave a self-contained report before its scratch worktree can be discarded; read and relay its findings, record the report as the Done artifact, and re-evaluate the queue.
+Teardown keeps a best-effort native-session reference at `data/<id>/session.ref` beside that report without retaining the scout itself.
+For a new question that benefits from the finished scout's context, dispatch a fresh `--scout --follow-up <id>`; its brief names the old report and requires every earlier claim to be re-verified against the new copy.
+The launch resumes only a recorded, still-available Claude transcript and otherwise runs a normal fresh scout.
 A report may recommend implementation but does not authorize it.
 Before treating the investigation or any visual review as complete, load `captain-hold-lifecycle`; teardown enforces that shared completion gate.
 When a scout's deliverable is a visual artifact the captain will iterate on, keep it alive and follow the crew-hosted Lavish board contract in `docs/configuration.md` rather than arming or polling the board from firstmate.
