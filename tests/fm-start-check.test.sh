@@ -146,6 +146,26 @@ test_same_second_turn_end_is_proof() {
   pass "turn-ended proof at the launch epoch is accepted"
 }
 
+test_launch_epoch_excludes_existing_markers() {
+  local marker epoch boundary
+  for marker in status turn-ended; do
+    reset_state
+    open_pane "e-$marker" "$PI_DIALOG"
+    arm_task "e-$marker" pi 1000
+    touch "$STATE/e-$marker.$marker"
+    epoch=$(stat -f %m "$STATE/e-$marker.$marker" 2>/dev/null || stat -c %Y "$STATE/e-$marker.$marker")
+    boundary=$(fm_start_check_launch_epoch "$STATE" "e-$marker")
+    [ "$boundary" -gt "$epoch" ] || fail "$marker did not advance the launch boundary"
+    printf '%s %s pi\n' "$boundary" "$ARMED_GEN" > "$STATE/e-$marker.start-pending"
+    start_check_tick "$boundary"
+    [ -e "$STATE/e-$marker.start-pending" ] || fail "pre-launch $marker suppressed the start wake"
+    touch -t "$(date -r "$boundary" '+%Y%m%d%H%M.%S' 2>/dev/null || date -d "@$boundary" '+%Y%m%d%H%M.%S')" "$STATE/e-$marker.$marker"
+    start_check_tick "$boundary"
+    [ ! -e "$STATE/e-$marker.start-pending" ] || fail "post-boundary $marker was not accepted as proof"
+  done
+  pass "existing status and turn-ended markers precede the launch boundary; later proof still counts"
+}
+
 test_pi_dialog_named_once() {
   local reason
   reset_state
@@ -527,6 +547,7 @@ fm_test_run \
   test_spawn_arms_marker \
   test_proof_before_deadline_is_silent \
   test_same_second_turn_end_is_proof \
+  test_launch_epoch_excludes_existing_markers \
   test_pi_dialog_named_once \
   test_claude_dialog_has_no_key \
   test_dead_agent_names_relaunch \

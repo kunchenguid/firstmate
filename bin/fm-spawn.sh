@@ -1565,7 +1565,7 @@ spawn_remote_secondmate() {
   fi
   launch_args=("$id" "$harness" "$model" "$effort" "$backend")
   [ -z "$remote_traceparent" ] || launch_args+=("$remote_traceparent")
-  remote_start_epoch=$(date +%s)
+  remote_start_epoch=$(fm_start_check_launch_epoch "$STATE" "$id")
   if out=$("$SCRIPT_DIR/fm-on.sh" "$id" fm-remote-secondmate-control.sh launch \
     "${launch_args[@]}" </dev/null 2>&1); then
     rc=0
@@ -8001,7 +8001,7 @@ else
       sleep 0.2
     done
   }
-  START_CHECK_EPOCH=$(date +%s)
+  START_CHECK_EPOCH=$(fm_start_check_launch_epoch "$STATE" "$ID")
   SPAWN_LAUNCH_SENT=1
   # errexit is on here: a failed send still exits, and Orca source mode first
   # removes the credential-bearing file the pane never received.

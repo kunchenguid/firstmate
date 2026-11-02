@@ -167,6 +167,18 @@ fm_path_mtime() {
   fi
 }
 
+fm_start_check_launch_epoch() {  # <state-dir> <task-id>
+  local now newest m file
+  fm_epoch_seconds_to now
+  newest=0
+  for file in "$1/$2.status" "$1/$2.turn-ended"; do
+    m=$(fm_path_mtime "$file") || continue
+    [ "$m" -le "$newest" ] || newest=$m
+  done
+  [ "$newest" -lt "$now" ] || now=$((newest + 1))
+  printf '%s\n' "$now"
+}
+
 fm_path_age() {
   local path=$1 m now
   m=$(fm_path_mtime "$path") || { echo 999999; return; }
