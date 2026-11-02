@@ -243,13 +243,13 @@ case " $* " in
 esac
 SH
   chmod +x "$WORLD/fakebin/gh"
-  FM_FAKE_CREW_STATE=unknown run_reconcile "$MATE"
+  FM_PR_WATCH_ARM_SECS=2 FM_FAKE_CREW_STATE=unknown run_reconcile "$MATE"
   grep -Fq 'child-outcome-b-later-done' "$MAIN/state/mate.status" \
     || fail 'slow PR registration prevented ledger delivery'
   [ "$(wc -l < "$WORLD/forge.log")" -eq 1 ] \
     || fail 'one scan attempted more than one stalled registration'
   for i in 2 3; do
-    FM_FAKE_CREW_STATE=unknown run_reconcile "$MATE"
+    FM_PR_WATCH_ARM_SECS=2 FM_FAKE_CREW_STATE=unknown run_reconcile "$MATE"
     [ "$(wc -l < "$WORLD/forge.log")" -eq "$i" ] \
       || fail "scan $i did not attempt exactly the next child"
   done
@@ -314,10 +314,36 @@ test_pr_watch_arm_timeout_names_timeout() {
 sleep 5
 SH
   chmod +x "$WORLD/fakebin/gh"
-  run_reconcile "$MAIN"
-  grep -Fq 'PR merge watch could not be armed for task child (https://github.com/owner/repo/pull/1): timed out after 3s' \
+  FM_PR_WATCH_ARM_SECS=2 run_reconcile "$MAIN"
+  grep -Fq 'PR merge watch could not be armed for task child (https://github.com/owner/repo/pull/1): timed out after 2s' \
     "$MAIN/state/.wake-queue" || fail 'PR watch timeout notice did not explain the timeout'
   pass 'PR watch arming timeout notice names the timeout'
+}
+
+# A registration whose two forge reads each take 2s exceeded the original 3s
+# bound; the default bound must still arm it.
+test_default_arm_bound_allows_slow_forge_reads() {
+  local url='https://github.com/owner/repo/pull/1' head
+  make_world slow-forge-arm
+  write_child "$MAIN" child "done: PR $url checks green"
+  head=$(git -C "$MAIN/projects/child" rev-parse HEAD)
+  grep -v '^pr=\|^pr_head=' "$MAIN/state/child.meta" > "$MAIN/state/child.meta.tmp"
+  mv "$MAIN/state/child.meta.tmp" "$MAIN/state/child.meta"
+  cat > "$WORLD/fakebin/gh" <<'SH'
+#!/usr/bin/env bash
+sleep 2
+case " $* " in
+  *' --json isDraft '*) printf '{"isDraft":false}\n' ;;
+  *' --json headRefOid '*) printf '{"headRefOid":"%s"}\n' "$FM_TEST_HEAD" ;;
+  *) exit 97 ;;
+esac
+SH
+  chmod +x "$WORLD/fakebin/gh"
+  FM_TEST_HEAD=$head run_reconcile "$MAIN"
+  [ "$(sed -n 's/^pr=//p' "$MAIN/state/child.meta")" = "$url" ] \
+    || fail "default arming bound refused a slow but healthy registration: $(cat "$MAIN/state/.wake-queue" 2>/dev/null)"
+  [ -f "$MAIN/state/child.check.sh" ] || fail 'slow registration did not arm its merge poll'
+  pass 'the default arming bound arms a registration slower than 3s'
 }
 
 test_scout_does_not_arm_ready_pr_watch() {
@@ -1101,12 +1127,12 @@ test_full_scan_budget_includes_wake_lock_wait() {
   [ -e "$WORLD/lock-ready" ] || fail "wake lock holder did not start"
 
   started=$(date +%s)
-  FM_INACTIVE_RECONCILE_BUDGET_SECS=1 FM_FAKE_CREW_STATE='done' run_reconcile "$MAIN" --startup
+  FM_PR_WATCH_ARM_SECS=1 FM_INACTIVE_RECONCILE_BUDGET_SECS=1 FM_FAKE_CREW_STATE='done' run_reconcile "$MAIN" --startup
   elapsed=$(( $(date +%s) - started ))
   reap "$holder"
   # The unbounded wake-lock wait is ended by the process-group backstop, which
-  # fires one second after the budget; the bound proves the scan cannot ride
-  # the 30-second lock hold.
+  # fires one second after the arming bound plus the budget; the bound proves
+  # the scan cannot ride the 30-second lock hold.
   [ "$elapsed" -le 4 ] || fail "wake lock wait exceeded aggregate scan budget (${elapsed}s)"
   pass "aggregate scan budget includes durable wake operations"
 }
@@ -1188,6 +1214,7 @@ test_slow_pr_watch_does_not_starve_ledger_or_later_children
 test_main_home_arms_ready_pr_watch
 test_scout_does_not_arm_ready_pr_watch
 test_pr_watch_arm_timeout_names_timeout
+test_default_arm_bound_allows_slow_forge_reads
 test_branch_ack_retires_inactive_outcome_receipt
 test_unpushed_ci_ready_done_is_not_published
 test_local_done_head_is_pinned_before_parent_delivery

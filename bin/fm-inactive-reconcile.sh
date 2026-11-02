@@ -85,7 +85,12 @@
 #
 # Ready ship outcomes also arm their merge poll from the durable status ledger;
 # the poll itself remains owned by fm-watch.sh and this scan never reads forge
-# state directly.
+# state directly. Each scan makes at most one bin/fm-pr-check.sh registration
+# attempt, bounded by FM_PR_WATCH_ARM_SECS (default 10, valid 1..30): a
+# registration does two forge reads plus local locking and hashing, which
+# measured up to about 3s on a loaded host before any forge latency. That
+# attempt runs before the scan deadline is taken, so the wedged-scan backstop
+# allows for it on top of the budget.
 set -u
 export LC_ALL=C
 
@@ -130,6 +135,17 @@ case "$FM_INACTIVE_RECONCILE_BUDGET_SECS" in
 esac
 if [ "$FM_INACTIVE_RECONCILE_BUDGET_SECS" -gt 30 ]; then
   printf 'fm-inactive-reconcile: FM_INACTIVE_RECONCILE_BUDGET_SECS must be a whole number from 1 to 30\n' >&2
+  exit 2
+fi
+FM_PR_WATCH_ARM_SECS=${FM_PR_WATCH_ARM_SECS:-10}
+case "$FM_PR_WATCH_ARM_SECS" in
+  ''|*[!0-9]*|0)
+    printf 'fm-inactive-reconcile: FM_PR_WATCH_ARM_SECS must be a whole number from 1 to 30\n' >&2
+    exit 2
+    ;;
+esac
+if [ "$FM_PR_WATCH_ARM_SECS" -gt 30 ]; then
+  printf 'fm-inactive-reconcile: FM_PR_WATCH_ARM_SECS must be a whole number from 1 to 30\n' >&2
   exit 2
 fi
 
@@ -498,7 +514,7 @@ arm_ready_pr_watch() { # <id> <meta>
       "$FM_PR_META_PROVIDER" "$FM_PR_META_HOST" "$FM_PR_META_PATH" "$FM_PR_META_NUMBER" \
       && return 0
   fi
-  if arm_output=$(fm_run_timed 3 env FM_PR_CHECK_EXPECT_INCARNATION="$incarnation" \
+  if arm_output=$(fm_run_timed "$FM_PR_WATCH_ARM_SECS" env FM_PR_CHECK_EXPECT_INCARNATION="$incarnation" \
     FM_PR_CHECK_EXPECT_READY_LINE="$line" \
     "$SCRIPT_DIR/fm-pr-check.sh" "$id" "$url" 2>&1); then
     return 0
@@ -506,7 +522,7 @@ arm_ready_pr_watch() { # <id> <meta>
     arm_rc=$?
   fi
   if fm_timed_out "$arm_rc"; then
-    arm_output="timed out after 3s${arm_output:+: $arm_output}"
+    arm_output="timed out after ${FM_PR_WATCH_ARM_SECS}s${arm_output:+: $arm_output}"
   elif [ -z "$arm_output" ]; then
     arm_output="exited with status $arm_rc"
   fi
@@ -743,7 +759,9 @@ case "$mode" in
     # process-group kill is only the backstop for a scan wedged outside every
     # bounded section (an unbounded lock wait), so it fires one second after
     # the deadline instead of racing the clean bounded exit it exists to guard.
-    if fm_run_timed $((FM_INACTIVE_RECONCILE_BUDGET_SECS + 1)) "$0" _scan-locked "$startup"; then
+    # The deadline is taken after the bounded merge-watch arming attempt, so
+    # the backstop also allows for that attempt.
+    if fm_run_timed $((FM_PR_WATCH_ARM_SECS + FM_INACTIVE_RECONCILE_BUDGET_SECS + 1)) "$0" _scan-locked "$startup"; then
       :
     elif [ "$?" -ne 124 ]; then
       exit 1
