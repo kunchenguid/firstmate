@@ -144,8 +144,7 @@ The worktree and the task's records are unaffected either way.
 
 - A refusal **before** the agent is stopped leaves the durable record and the instructions byte-identical.
 - A launch failure **after** the agent is stopped restores the prior durable record, keeps the progress note so a later recovery still has it, marks the journal `failed:launching`, and reports plainly that no agent is running and where the work is preserved.
-- If the launch owner already published the new record but no running agent can be confirmed, the new record is kept: the task is recorded on the new harness with no agent confirmed, which is exactly what recovery reconciles.
-  Rewriting it back to the old harness would be a second, worse inaccuracy.
+- If the launch owner already published the new record but no running agent can be confirmed, the control plane probes the recorded endpoint: if the agent is alive at the new address the new record is kept and the journal records `new-record-kept-agent-alive`; otherwise the saved-aside prior record is restored byte-exact when it exists (`prior-record-restored-endpoint-<state>`), and when no prior record is available the gap is reported as a reconciliation requirement.
 
 ## Fail-closed boundaries
 
