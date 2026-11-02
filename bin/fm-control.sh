@@ -1154,6 +1154,13 @@ resolve_move_backend() {
   esac
   fm_backend_validate_spawn "$NEW_BACKEND" || exit 1
   fm_backend_runtime_check "$NEW_BACKEND" || exit 1
+  # Herdr's own tool, version, and server checks run in the launch owner's
+  # container ensure, after the stop; run them here, against the session a
+  # moved task lands in, so a Herdr that cannot run refuses the move first.
+  if [ "$NEW_BACKEND" = herdr ]; then
+    fm_backend_herdr_version_check || exit 1
+    fm_backend_herdr_server_ensure "$(fm_backend_herdr_session)" || exit 1
+  fi
   fm_backend_validate_harness "$NEW_BACKEND" "$TARGET_HARNESS" || exit 1
   if ! fm_control_backend_state_verified "$NEW_BACKEND" || ! fm_control_backend_relaunch_supported "$NEW_BACKEND"; then
     die "backend '$NEW_BACKEND' cannot prove an agent stopped or host a replacement; refusing to move $ID there"

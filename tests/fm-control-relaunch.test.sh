@@ -3405,6 +3405,24 @@ test_control_move_refuses_before_stop_when_hc_is_unreachable() {
   pass "fm-control relaunch --backend hc: refuses before the old agent stops when hc cannot take the task"
 }
 
+test_control_move_refuses_before_stop_when_herdr_cannot_run() {
+  local dir out rc=0
+  command -v jq >/dev/null 2>&1 || { echo "skip - herdr's checks need jq"; return 0; }
+  dir=$(new_case control-move-herdr-down rl99)
+  add_ship_task "$dir" rl99 claude
+  cp "$dir/home/state/rl99.meta" "$dir/meta.before"
+  # A herdr on PATH that cannot report its status, so it cannot run a task.
+  mkdir -p "$dir/fakebin"
+  printf '#!/bin/sh\necho "herdr: broken install" >&2\nexit 1\n' > "$dir/fakebin/herdr"
+  chmod +x "$dir/fakebin/herdr"
+  out=$(run_control "$dir" rl99 relaunch --backend herdr --note "moved") || rc=$?
+  expect_code 1 "$rc" "a herdr that cannot run must refuse the move"$'\n'"$out"
+  assert_contains "$out" "herdr status --json' failed" "the refusal must name the failed herdr check"
+  [ ! -s "$dir/fake/literal" ] || fail "a refused move must not touch the running agent"
+  cmp -s "$dir/meta.before" "$dir/home/state/rl99.meta" || fail "a refused move must leave the record unchanged"
+  pass "fm-control relaunch --backend herdr: refuses before the old agent stops when herdr cannot run"
+}
+
 test_control_move_resumes_the_claude_conversation() {
   local dir out rc=0 agent sid=0f1e2d3c-4b5a-4697-8877-665544332211 launched
   dir=$(new_case control-move-resume rl96)
@@ -3609,6 +3627,7 @@ test_move_backend_refuses_other_shapes
 test_aborted_move_closes_its_new_hc_terminal
 test_control_relaunch_moves_a_running_task_to_hc
 test_control_move_refuses_before_stop_when_hc_is_unreachable
+test_control_move_refuses_before_stop_when_herdr_cannot_run
 test_control_move_resumes_the_claude_conversation
 test_control_move_without_a_session_record_starts_fresh
 test_hc_task_moves_back_to_herdr
