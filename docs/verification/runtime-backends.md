@@ -1885,6 +1885,9 @@ Real captures verified these active distinctions:
 - Pi uses content between complete separator rows and requires exact native Pi identity.
 - Dim or faint suggestion text is ghost content, while normally styled text is pending input.
 - Grok dark truecolor placeholders are ghost content, while bright truecolor typed input remains pending.
+- On a kiro pane only, a near-achromatic truecolor run up to `FM_COMPOSER_GHOST_GRAY_LUMA_MAX` is ghost content, while a chromatic glyph at similar luminance stays real; every other harness keeps the shared ceiling, so Claude's grey slash-command input stays typed input.
+- On a kiro pane only, a 256-colour index is luminance-tested as ghost content inside the 232-255 greyscale ramp, whose RGB is fixed by definition; every other index, and every index on another harness, is not tested at all.
+- On a real Herdr 0.9.5 pane running kiro-cli 2.35.1, the idle composer reads `empty` when the caller names `kiro` and `pending` otherwise, so the harness must be named for every kiro composer read; [Kiro CLI adapter verification](kiro.md#2026-10-29-re-verification-on-kiro-cli-2351) owns the run.
 - A bare shell prompt has no safe agent-composer container and is unknown.
 - Codex 0.154's idle braille starfield rows are composer furniture, with the dated Herdr evidence and refresh command in [Composer classification matrix](#composer-classification-matrix).
 
@@ -2036,7 +2039,7 @@ Two vendor facts the fix rests on, both read from the outputs above and from `fm
 - Pi's process presents with kernel name `node` and argv0 `pi` (its foreground group also carries Pi's child `node` helpers with argv0 such as `npm view ... version`), so a running Pi is attributed by argv[0] exactly as the tmux probe attributes it; a symlink named `claude` to `sleep` presents as name `sleep`, argv0 `claude`.
 - Herdr creates the record with its own placeholder `agent_status` of `unknown` the moment it notices Pi, before Pi's extension reports `idle`; that transient reads `unknown` in the pane classifier as it always did, and only a lifecycle status is subject to the process-level proof.
 
-Subcommand presence below the 0.9.0 measurement, checked 2026-09-10 on macOS aarch64 against the pinned upstream release clients fetched from `https://github.com/ogulcancelik/herdr/releases/download/v<version>/herdr-macos-aarch64`:
+Subcommand presence below the 0.9.0 measurement, checked 2026-09-10 on macOS aarch64 against the pinned upstream release clients fetched from `https://github.com/ogulcancelik/herdr/releases/download/v<version>/herdr-macos-aarch64` (now redirected to `herdrdev/herdr`):
 
 | Release | sha256 |
 |---------|--------|
@@ -2473,6 +2476,25 @@ ok - real rex: no state-changing call left the test sessions and every other ses
 ```
 
 Use the [Rex regression entry points](../rex-backend.md#regression-entry-points) to refresh this record after a Rex upgrade, and the opt-in live composer guard after any tool upgrade.
+
+### Remote second mate durability on Linux
+
+Verified on 2026-10-30 against `rex 0.1.0-preview.12` (commit `e6592f7`, API revision 8) installed through the public `install.sh --tarball` inside a disposable Apple `container` VM: Debian GNU/Linux 12, glibc 2.36, aarch64, 2 CPUs, 4 GB.
+The server ran on a private socket `unix:///tmp/rv/rex.sock` with a private `--state-dir /tmp/rv/state`; the container and image were deleted afterwards.
+This run checked Rex server primitives on Linux, not an end-to-end Firstmate remote second-mate lifecycle; the full transcript lives outside the repository.
+The current operator contract is in [remote readiness](../remote-secondmates.md#repair-with---fix), with portable regressions in [`fm-remote-doctor.test.sh`](../../tests/fm-remote-doctor.test.sh) and [`fm-remote-secondmate-lifecycle-e2e.test.sh`](../../tests/fm-remote-secondmate-lifecycle-e2e.test.sh).
+
+Every check passed:
+
+- Foreground tracking follows a nested interactive shell: after typing `bash` into a login-shell block, `block call ... process` reported the inner bash as foreground with the login shell among its ancestors, and typed input reached the innermost shell.
+- The earlier reported nested-shell bug does not reproduce: typing `treehouse` into the nested shell delivered the input, and the outer login shell was never left as a stale foreground.
+- A harder stub case where `treehouse` exec'd another interactive bash behaved the same, with correct process ancestry.
+- `rex whoami --json` distinguishes a unix `peer` principal from a loopback TCP `anonymous`, and `TERM_PROGRAM=rex` is present inside blocks.
+- `rex do` Lua handlers ran, and `rex events --json` streamed events including `terminal.child_exited`.
+- Durability is shape-dependent: `rex server run --exit-empty` exits about ten seconds after its last session or control connection disappears, so an ephemeral server cannot hold a remote route.
+- `rex server start` is a detached persistent daemon (`exit_empty: false`) that survives SSH disconnection, and it binds only the default personal socket (`$HOME/.local/state/rex/run/server.sock`); `start` has no `--listen` flag.
+- Sessions restore across a server stop when the restarted server binds the same endpoint and state directory: after `server stop` plus `server start`, the sessions returned with the same ids, each block as a fresh login shell preserving its cwd.
+- A server started on a different socket with the same state directory restored nothing (`session_count: 0`), so restore is keyed to the server's endpoint identity, not merely its state directory.
 
 ## T3 Code
 
@@ -3217,6 +3239,46 @@ ok - under the away-posture record the wake carries the verbatim read-back tail,
 
 The merge suite and the security suite dominate the wall time.
 
+## Pi worker model-stream observation
+
+Verified on 2026-10-13 with the installed Pi 1.2.0 SDK and Node v24.13.0.
+On an unverified Pi version, the guard exercises the spawn-time inert path with its exact warning, no stream handlers, and ordinary busy/idle classification; stream observation stays off until the version is verified.
+Refresh this token-free guard after a Pi upgrade:
+
+```sh
+bash bin/fm-test-run.sh tests/fm-pi-worker-stream-live-e2e.test.sh
+```
+
+Observed output:
+
+```text
+ok - real Pi 1.2.0 stream, tool, completion, and background request phases
+ok - real Pi 1.2.0 default-off worker
+Firstmate model-stream observation write failed; inspect worker instrumentation.
+ok - real Pi 1.2.0 instrumentation deadline terminated writer and output-holding descendant
+ok - real Pi 1.2.0 stream, tool, completion, and background request phases
+# pi-signed unavailable: signed executable not exercised
+ok - real Pi 1.2.0 worker stream lifecycle, background exclusion, and default-off behavior
+```
+
+The guard runs the generated worker extension through Pi's real resource loader, model runtime, agent loop, and custom tool execution in isolated directories.
+Synthetic transport holds an accepted response, supplies substantive and empty events, enters a tool phase, and completes a subsequent request.
+The real provider callback is also exercised outside the foreground agent loop to disconfirm background-request tracking.
+An isolated copy of the toolkit injects one stalled writer command and a descendant that retains output, proving the real extension's deadline ends both processes and Pi continues through its remaining phases.
+No external provider, credentials, primary extension, or live fleet is used.
+The signed executable was absent and is not credited as live-verified on this version.
+The portable busy-state, adapter-wiring, and watcher-triage suites own generation/request rejection and inspection notification behavior.
+
+The unverified-version fallback was checked on 2026-10-31 with installed Pi 1.4.0 and Node v24.22.1 using the same command above.
+The guard asserted the exact spawn warning and absence of stream handlers, then exercised ordinary busy/idle behavior through the real SDK.
+Observed output:
+
+```text
+ok - real Pi 1.4.0 default-off worker
+# pi-signed unavailable: signed executable not exercised
+ok - real Pi 1.4.0 unverified-version warning, inert stream observation, and existing busy/idle behavior
+```
+
 ## Native Codex through Pi
 
 Verified on 2026-09-08 with Pi 0.85.1 and the installed `pi-codex-native` 0.2.1 adapter.
@@ -3447,3 +3509,136 @@ The full run's native Ahoy cases depend on the model's own choices and failed wi
 
 A real `bin/fm-spawn.sh --scout --harness opencode --model opencode-go/deepseek-v4.1-flash` in a private tmux server recorded `opencode_version=1.18.20` (and `1.18.31` on the second release), launched the worker as `opencode --model opencode-go/deepseek-v4.1-flash --prompt <brief>` with no `--standalone`, and the worker answered its brief.
 `bin/fm-control.sh <task> exit` then resolved the typed `/exit` from that recorded major and returned both panes to the shell.
+
+## Native Codex supervision park
+
+Verified on 2026-10-19 with `codex-cli 0.163.0` on macOS arm64 in an isolated named Herdr lab.
+The native TUI fired project SessionStart and asynchronous Stop hooks, and `codex queue --thread` delivered input to the embedded `--no-daemon` session.
+[Supervision verification](supervision.md#codex-native-model-free-park-2026-10-19) records the commands, ten-minute provider-call comparison, real check delivery, input interrupt, park-death recovery and native-exit cleanup.
+This verifies the primary-session park, not a worker busy-state classifier or a Codex dialog-mirror writer.
+
+## hc
+
+Measured on 2026-10-29 with `hc 0.1.13` on macOS (Darwin 27.0.0, `/bin/bash` 3.2.57), against private cores only: a unique `HC_SESSION`, `XDG_STATE_HOME` and `XDG_RUNTIME_DIR` under a short `/tmp/fmhc.*` directory, and `HC_TERMINAL_ID`, `HC_TERMINAL_SOCKET`, and `HC_SCOPE` unset.
+The default socket path under the scratchpad temp directory exceeded the 103-byte unix socket limit, which `hc` reports as a usage error, so the private root must be short.
+
+### CLI facts the adapter depends on
+
+| Probe | Result |
+| --- | --- |
+| `HC_SESSION=<private>` with an inherited `HC_TERMINAL_SOCKET` naming another core | `hc ls` listed only the private core's terminals. |
+| `HC_SOCKET=<core a socket> HC_SESSION=<core b> hc ls` (hc 0.1.14, 2026-10-30) | Listed core a's terminals: an exported `HC_SOCKET` wins over `HC_SESSION`. With `env -u HC_SOCKET` it listed core b's, so `fm_backend_hc_cli` drops `HC_SOCKET`. |
+| `hc run --bg --json --no-parent --outlive-parent --no-notify --cwd /tmp --label firstmate.task=x` with no argv | Started the user's login shell; printed `{"address":"t2","agent":"zsh",...}`. |
+| `hc get <missing>` | Exit 3, `{"error":{"kind":"not_found",...}}` on stderr. |
+| `hc kill <t>` on a live shell | Exit 0; `hc get` then reports `state: finished`, `reason: killed`. |
+| `hc rm <t>` after kill | Exit 0; `hc get` then exits 3. |
+| `hc send <t> 'cd /usr'` | Pasted and submitted; `foreground.cwd` became `/usr`. |
+| `hc --version` (0.1.14, 2026-10-30) | Prints `hc 0.1.14`; the adapter's binary gate requires this `hc x.y.z` shape at or above 0.1.14. |
+| `hello` over `hc connect --session <s>` (0.1.14, 2026-10-30) | Answered `{"result":{"generation":1,...}}`; the adapter refuses any other generation. |
+| `hc send <t> --wait --timeout <n> -- <text>` (0.1.14, 2026-10-30) | Returns `{"started":<bool|null>,"wait":{"status",...}}`; `started:true` or `wait.status:working` natively confirms the submit. Exit 9 is `blocked` (never forced), 3 `not_found`, 11 `finished`; text after `--` survives leading dashes. |
+| `hc keys <t> -- <key>` (0.1.14, 2026-10-30) | Accepts the `--` delimiter before key names. |
+| `server stop` on a lab session (0.1.14, 2026-10-30) | Closes the API listener only; the session's `serve` and `hold` daemons stay by design and take ~30-60s to finish exiting after TERM/KILL. `bin/fm-hc-lab.sh` sweeps them by their exact `HC_SESSION=<name>` env token. |
+| `hc get` of a terminal running the user's `claude` wrapper | `foreground` was `{"name":"hats","argv":["/Users/fran/.cargo/bin/hats","run","--"]}`; the Claude process was another member of that process group. |
+
+### Adapter lifecycle
+
+`tests/fm-backend-hc-smoke.test.sh` passed inside a `bin/fm-hc-lab.sh` session (hc 0.1.14, 2026-10-30): an `fm-hclab-*` core with scratch XDG roots, a pinned `FM_HC_SOCKET`, and a fleet-state tripwire that verified the recorded real-core file metadata inventory unchanged afterward.
+Teardown swept the session's `serve`/`hold` daemons by their `HC_SESSION` env token.
+
+```text
+ok - hc smoke: create_task started fm-hclab-smoke-28051-8595:t1
+ok - hc smoke: current_path follows the shell's cwd
+ok - hc smoke: send_text_line ran the command and capture shows its output
+ok - hc smoke: send_text_submit delivers through send --wait (verdict empty)
+ok - hc smoke: agent_state reads dead for a shell and alive for an agent-named foreground
+ok - hc smoke: kill closes and removes the terminal
+FM_TEST_COMPLETE
+```
+
+A real Claude Code launch through the user's `claude` wrapper, typed into a task terminal with `fm_backend_hc_send_text_line` and never given a prompt, read `alive` from `fm_backend_agent_state` within three polls, and `fm_backend_kill` returned 0 with no surviving member of its process group.
+Before reading the process group, the same launch read `ambiguous`.
+
+### Spawn, steer, peek, and teardown
+
+A scout ran end to end in a scratch home with `HOME` and `TREEHOUSE_ROOT` in the scratch root, a private core (`HC_SESSION=fme1`), a local bare-origin project, and a compiled stand-in agent at `<root>/agents/claude/claude` that logs its argv, its `HC_*` and `FM_*` environment, and every input line:
+
+```sh
+FM_SPAWN_NO_GUARD=1 bin/fm-spawn.sh e2e1 "$R/home/projects/demo" --scout --backend hc --harness "$R/agents/claude/claude --fake"
+bin/fm-peek.sh e2e1
+bin/fm-send.sh e2e1 'Please also report the second line.'
+bin/fm-captain-hold.sh complete e2e1 --none
+bin/fm-teardown.sh e2e1
+```
+
+| Step | Result |
+| --- | --- |
+| Spawn | `spawned e2e1 harness=claude kind=scout window=fme1:t1 worktree=<root>/pool/.treehouse/demo-74e2e1/1/demo`; meta carried `backend=hc`, `hc_session=fme1`, `hc_terminal=t1`. |
+| Terminal screen | `treehouse get`, `cd -- '<worktree>'`, the exports, and `. '/tmp/fm-e2e1+<hash>/launch.<gen>.sh'` ran in order, then the stand-in printed its prompt. |
+| Agent environment | `HC_SESSION=fme1`, `HC_TERMINAL_ID=t1`, `HC_TERMINAL_SOCKET=<root>/herdr-core/fme1.sock`, `HC_SCOPE`, `FM_TASK_ID=e2e1`, `FM_TASK_INBOX`. |
+| `fm_backend_agent_state hc fme1:t1` | `alive`. |
+| `bin/fm-peek.sh e2e1` | Showed the terminal's screen. |
+| `bin/fm-send.sh e2e1 ...` twice | Exit 0; `001.msg` and `002.msg` in the inbox; the stand-in received the doorbell line each time. |
+| `bin/fm-crew-state.sh e2e1` | `state: working · source: pane · harness busy (fm-spawn)`. |
+| `bin/fm-teardown.sh e2e1` | `teardown e2e1 complete (window fme1:t1, ...)`; `hc ls --all` was empty and the worktree returned to the pool. |
+
+Before the launch-line fix the same spawn could not type `+`, which every launch line carries.
+
+### Live guard
+
+`tests/fm-backend-hc-liveness-live-e2e.test.sh` on this host inside an `fm-hclab-*` lab session (hc 0.1.14, 2026-10-30):
+
+```text
+# claude 2.1.314 (Claude Code): foreground={"argv":["/Users/kunchen/.local/bin/claude"],"cwd":".../fm-hclab-liveness-75126-29941/wt","name":"2.1.314","pid":76277}
+ok - hc liveness: claude 2.1.314 (Claude Code) classifies alive in hc 0.1.14
+# codex codex-cli 0.155.1: foreground={"argv":["/opt/homebrew/bin/codex"],"cwd":".../fm-hclab-liveness-75126-29941/wt","name":"codex","pid":79249}
+ok - hc liveness: codex codex-cli 0.155.1 classifies alive in hc 0.1.14
+# opencode 1.18.32: foreground={"argv":["/opt/homebrew/bin/opencode"],"cwd":".../wt","name":"opencode","pid":83815}
+ok - hc liveness: opencode 1.18.32 classifies alive in hc 0.1.14
+# pi 0.82.0: foreground={"argv":["/opt/homebrew/bin/pi-signed"],"cwd":".../wt","name":"pi-launcher","pid":85772}
+ok - hc liveness: pi 0.82.0 classifies alive in hc 0.1.14
+# grok grok 1.0.41 (4220f3b224a6) [stable]: foreground={"argv":["/Users/kunchen/.local/bin/grok"],"cwd":".../wt","name":"grok-1.0.41-macos-aarch64","pid":87715}
+ok - hc liveness: grok grok 1.0.41 (4220f3b224a6) [stable] classifies alive in hc 0.1.14
+# unverified on this machine (not installed): kimi
+```
+
+Teardown swept the session's serve/hold daemons plus the harness processes they held, and the fleet-state tripwire confirmed the recorded real-core file metadata inventory unchanged.
+
+### Runtime auto-detection (Herdr app signals)
+
+Measured on 2026-11-01 inside a `bin/fm-hc-lab.sh` session (`fm-hclab-s3det-*`, hc 0.1.14) and against herdr-app 0.1.11 source plus its release binary, never against a running user app or core:
+
+| Probe | Result |
+| --- | --- |
+| `TERM_PROGRAM=herdr hc run` (CLI path) | The child env showed `TERM_PROGRAM=ghostty`: the core's `child_env` rewrites absent-or-`herdr` `TERM_PROGRAM` to `ghostty` for every terminal. |
+| `terminal.run` over `hc connect` with `env={"TERM","COLORTERM","TERM_PROGRAM":"herdr"}` and `herdr.space`/`herdr.tab` labels - the app's exact call (herdr-app 0.1.11 `src/hc.rs`) | Same child env: `TERM_PROGRAM=ghostty`, `HC_TERMINAL_ID`, `HC_TERMINAL_SOCKET`, `HC_SESSION`, `HC_SCOPE` present. An app terminal's process env is identical to any other hc terminal's; the `herdr` claim is consumed core-side. |
+| `hc get` against a missing socket path | **Spawned a new `herdr-core serve` bound to that path** (autostart confirmed): the detection's `hc get` runs only behind a live unix-connect probe. |
+| `hc get` against a stale socket file with another core recorded | Refused `unavailable` naming the listening core's socket; no autostart on a refused connect. |
+| `fm_backend_detect` inside the labeled terminal (`env -i` claims and a real `hc send` run inside it) | `hc` / `app-terminal`; `fm_backend_name` resolved `hc` with the loud opt-out notice. |
+| Same inside an unlabeled `hc run` terminal | Undetected. |
+| `HERDR_ENV=1` alongside the app-terminal markers | `herdr` wins - the earlier surface marker keeps its verdict. A lab core provisioned from a herdr pane does inherit `HERDR_*` into every terminal it spawns. |
+| Dead `HC_TERMINAL_SOCKET` | Undetected, and no socket file or core was created. |
+| Live unix listener at the resolved `herdr-app.sock` path, no other markers | Undetected, silently: a live window or socket alone is not a signal - it reaches every host process, so it cannot tell an in-app firstmate from a bare shell while the window is open elsewhere. A stale socket file and an absent one are equally undetected. |
+| Live hc terminal socket plus no self-identifying hc binary on `PATH` | Undetected (`app-terminal-unusable`); `fm_backend_name` still resolves `tmux` and prints the missing-toolchain notice. |
+| `HC_SESSION=<never-started> hc server status --json` in scratch `HOME`/XDG roots (hc 0.1.14, 2026-11-01) | Started a core: `server status` autostarts, like every other contact, so the adapter's container ensure would start a session nobody runs. Detection therefore requires the spawn session's core socket to accept a connection first. |
+| Socket layout for a started core, same scratch roots | `$XDG_RUNTIME_DIR/herdr-core/<session>.sock` with `XDG_RUNTIME_DIR` set (both `default` and a named session); `$XDG_STATE_HOME/herdr-core/<session>/<session>.sock` without it, and `~/.local/state/...` with `XDG_STATE_HOME` unset too. A `default`-session terminal's env carries `HC_TERMINAL_SOCKET` but no `HC_SESSION`; a named session's carries both. |
+| `FM_BACKEND=herdr` with app-terminal markers | `herdr` resolves silently - explicit selection always wins. |
+
+Real Herdr.app exercise on 2026-11-02: the official herdr-app 0.1.11 bundle (sha256-verified from the release manifest) was launched as `Contents/MacOS/Herdr` against an isolated `HERDR_APP_HOME` bound to a lab hc 0.1.14 session, beside a disposable `fm-herdr-lab-*` classic-herdr session and a private-tmpdir tmux server, all torn down afterward:
+
+| Scenario | Result |
+| --- | --- |
+| `fm_backend_detect` inside a terminal the app itself created (it stamped `herdr.space`/`herdr.tab`; env carried `HC_TERMINAL_ID`/`HC_TERMINAL_SOCKET`/`HC_SESSION`/`HC_SCOPE`) | `hc` / `app-terminal`; `fm_backend_name` resolved `hc` with the opt-out notice. |
+| Real `bin/fm-spawn.sh` ship dispatch from that app terminal | Meta recorded `backend=hc`, `backend_detect=app-terminal`, `hc_terminal=t2`; the worker terminal carried `herdr.space=fm-<hometag>`, `herdr.tab=<hometag>-fm-<id>`, and `firstmate.*` labels, and `herdr-app ls` showed it projected as its own space/tab in the window. |
+| `fm_backend_detect` inside the disposable classic-herdr TUI while the app window was live | `herdr` / `HERDR_ENV`. |
+| `fm_backend_detect` inside real tmux while the app window was live | `tmux` / `TMUX`. |
+| Marker-less process while the app window was live (spawn core = real `default`, then a pinned lab core) | Selected `hc` / `app-window` under the pre-change signal set - the ambiguity proof that dropped `app-window` as a signal. Post-change, undetected and resolving `tmux`. |
+| Marker-less process with no `herdr-app.sock` at all | Undetected, resolving `tmux`. |
+| Real `default` core file-meta before/after | Byte-identical - the lab never drove the shared core. |
+
+`bin/fm-supervisor-target-lib.sh` now resolves `$HC_TERMINAL_ID`+`$HC_TERMINAL_SOCKET` to `<session>:<address>`/`hc`; `bin/fm-supervise-daemon.sh` still supports only `tmux herdr rex t3code` and refuses the resolved backend loudly.
+
+### Not verified
+
+- A spawn with a real harness rather than the stand-in.
+- `send --wait`'s `started`/`working` proof against a real status-reporting harness; the lab run covered a non-reporting shell, whose verdict falls to the composer screen.
+- Native `status.state` reported by a real harness launched through `bin/fm-spawn.sh`.

@@ -3,9 +3,10 @@
 # TERM to the command's process group at the bound, KILL once the grace has
 # passed, a forwarded signal, the caller replaced rather than wrapped, and a
 # refusal instead of an unbounded run when nothing on the host can enforce the
-# bound. Most cases pin the perl watchdog, the preferred mechanism and the only
-# one a stock macOS host has, under a PATH that holds no timeout variant; the
-# GNU fallback case runs only where a real timeout exists.
+# bound. Most cases pin the preferred perl watchdog under a PATH that holds no
+# timeout variant. Piped stdin exercises every mechanism, with a passthrough
+# timeout stub when the external executable is absent; deadline cases use real
+# watchdogs.
 # shellcheck disable=SC2016 # each bounded bash -c script expands its own arguments
 set -u
 
@@ -52,6 +53,54 @@ wait_for_file() {  # <path>
     i=$((i + 1))
     [ "$i" -lt 500 ] || fail "timed out waiting for $1"
     sleep 0.02
+  done
+}
+
+# Cover both inherited pipe input and a function inside a pipeline: stock
+# macOS Bash cannot enable job control in the latter, unlike newer Bash.
+test_run_timed_preserves_piped_stdin() {
+  local mechanism dir tool runner shape out
+  for mechanism in timeout gtimeout perl bash; do
+    dir="$TMP_ROOT/stdin-$mechanism"
+    mkdir -p "$dir/bin"
+    for tool in bash cat mktemp rm sleep; do
+      ln -s "$(command -v "$tool")" "$dir/bin/$tool"
+    done
+    case "$mechanism" in
+      timeout|gtimeout)
+        runner=$(type -P "$mechanism" 2>/dev/null || true)
+        if [ -n "$runner" ]; then
+          ln -s "$runner" "$dir/bin/$mechanism"
+        else
+          printf '#!/bin/sh\nshift 3\nexec "$@"\n' > "$dir/bin/$mechanism"
+          chmod +x "$dir/bin/$mechanism"
+        fi
+        ;;
+      perl)
+        if ! command -v perl >/dev/null 2>&1; then
+          pass 'fm_run_timed piped stdin (skipped: no perl on this host)'
+          continue
+        fi
+        ln -s "$(command -v perl)" "$dir/bin/perl"
+        ;;
+    esac
+    printf 'hello\nsecond line\twith spaces\r\n\000last bytes\n\n' > "$dir/expected"
+    for shape in inherited pipeline; do
+      out=$(cat "$dir/expected" | PATH="$dir/bin" bash -c '
+        unset FM_TIMEOUT_MECHANISM_OVERRIDE
+        . "$1/bin/fm-timeout-lib.sh"
+        read_timed() { fm_run_timed 5 cat; }
+        fm_timeout_mechanism
+        if [ "$3" = pipeline ]; then
+          cat "$2/expected" | read_timed > "$2/actual"
+        else
+          read_timed > "$2/actual"
+        fi
+      ' _ "$ROOT" "$dir" "$shape") || fail "$mechanism failed to read $shape pipe stdin"
+      [ "$out" = "$mechanism" ] || fail "stdin case selected $out instead of $mechanism"
+      cmp -s "$dir/expected" "$dir/actual" || fail "$mechanism lost or changed $shape pipe stdin"
+      pass "fm_run_timed preserves exact $shape pipe stdin through $mechanism"
+    done
   done
 }
 
@@ -416,6 +465,7 @@ test_run_timed_keeps_stdout_and_nonzero_status_when_a_function_shadows_timeout()
   pass "fm_run_timed keeps stdout and nonzero status when a function shadows timeout"
 }
 
+test_run_timed_preserves_piped_stdin
 test_passes_the_command_status_and_output_through
 test_system_bash_preserves_completion_and_signal_statuses
 test_run_timed_reports_the_bound_when_the_wrapper_records_a_signal_death
