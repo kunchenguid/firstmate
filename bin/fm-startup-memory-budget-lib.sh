@@ -6,7 +6,7 @@
 # strictly formatted positive decimal value followed by one newline.  The
 # locked primary bootstrap owns first materialization.  This library owns safe
 # parsing, default publication, and the portable prompt-memory estimate used by
-# bin/fm-startup-memory-budget.sh and the internal /stow skill.
+# bin/fm-startup-memory-budget.sh, bin/fm-session-start.sh, and the internal /stow skill.
 
 FM_STARTUP_MEMORY_BUDGET_FILE="startup-memory-budget"
 FM_STARTUP_MEMORY_BUDGET_DEFAULT="7500"
