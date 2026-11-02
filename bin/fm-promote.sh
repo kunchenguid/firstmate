@@ -30,8 +30,9 @@
 # there instead of asking firstmate to remember it.
 # no-mistakes-prod-only is a registry policy rather than a task mode and is refused.
 # A scout spawned on a named base records base_branch= in its meta; promotion
-# keeps that base as the ship's starting point and pull-request target, and
-# refuses a mode that cannot carry one (bin/fm-dod-lib.sh fm_base_branch_valid).
+# keeps that base as the ship's starting point and landing target (the pull
+# request's base, or the branch a local-only landing fast-forwards), and refuses
+# a forge that cannot carry one (bin/fm-dod-lib.sh fm_base_branch_valid).
 # In a home with config/spawn-base-primary-checkout, which can start a scout from
 # the primary checkout's default branch, a publishing mode without a named base
 # on a project with an origin remote is told to return to origin's default

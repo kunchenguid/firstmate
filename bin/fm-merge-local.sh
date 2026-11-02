@@ -1,9 +1,18 @@
 #!/usr/bin/env bash
 # Perform the approved local merge for a local-only ship task: fast-forward the
-# project's default branch to local_done_head= in state/<task-id>.meta,
+# project's landing branch to local_done_head= in state/<task-id>.meta,
 # recorded when the done report was accepted by bin/fm-dod-lib.sh. Missing or
 # malformed heads refuse. Legacy tasks with no head must report readiness again
 # before approval. The recorded ship branch must still point at that exact commit.
+# The landing branch is the task's recorded base_branch= (bin/fm-spawn.sh writes
+# it from --base-branch) when there is one, read from the task record and never
+# from the clone's origin/HEAD record, so a task based on a named feature or
+# release branch lands on that branch without anyone re-pointing the clone's
+# default-branch record by hand; a task with no recorded base lands on the
+# default branch exactly as before. The project's main checkout must be on that
+# landing branch and clean; a checkout on any other branch, including the
+# default branch when the task recorded a base, is refused by name rather than
+# landed somewhere else.
 #
 # This is firstmate's merge gate-action (the captain's merge authority applied
 # locally instead of via a GitHub PR). It is the one sanctioned exception to hard
@@ -120,6 +129,7 @@ default_branch() {
   return 1
 }
 
+BASE_BRANCH=$(grep '^base_branch=' "$META" | cut -d= -f2- || true)
 BRANCH=$(grep '^branch=' "$META" | cut -d= -f2- || true)
 [ -n "$BRANCH" ] || BRANCH="fm/$ID"
 if ! git check-ref-format --branch "$BRANCH" >/dev/null 2>&1; then
@@ -137,19 +147,38 @@ MERGE_PROJECT_LOCK="$project_git_dir/fm-local-landing.lock"
 fm_lock_acquire_wait "$MERGE_PROJECT_LOCK"
 local_head_matches || { echo "error: branch $BRANCH differs from the recorded local done head; refusing" >&2; exit 1; }
 
-DEFAULT=$(default_branch) || { echo "error: cannot determine default branch for $PROJ; expected origin/HEAD, main, or master" >&2; exit 1; }
+# The landing branch: the task's recorded base when it has one, else the
+# project's default branch. A recorded base is read from the task record only.
+if [ -n "$BASE_BRANCH" ]; then
+  fm_base_branch_valid "$BASE_BRANCH" local-only none "fm-merge-local.sh $ID" || exit 1
+  git -C "$PROJ" rev-parse --verify --quiet "refs/heads/$BASE_BRANCH" >/dev/null || {
+    echo "error: task $ID lands on its recorded base branch '$BASE_BRANCH', but $PROJ has no local branch of that name; create or check it out there, then retry" >&2
+    exit 1
+  }
+  DEFAULT=$BASE_BRANCH
+else
+  DEFAULT=$(default_branch) || { echo "error: cannot determine default branch for $PROJ; expected origin/HEAD, main, or master" >&2; exit 1; }
+fi
 
-# The project's main checkout must be on its default branch and clean, so the
+# The project's main checkout must be on the landing branch and clean, so the
 # fast-forward lands predictably (firstmate never writes here otherwise).
-cur=$(git -C "$PROJ" symbolic-ref --short HEAD 2>/dev/null || echo "")
-[ "$cur" = "$DEFAULT" ] || { echo "error: $PROJ is on '$cur', expected default branch '$DEFAULT'; cannot merge safely" >&2; exit 1; }
+cur=$(git -C "$PROJ" symbolic-ref HEAD 2>/dev/null || echo "")
+cur=${cur#refs/heads/}
+if [ "$cur" != "$DEFAULT" ]; then
+  if [ -n "$BASE_BRANCH" ]; then
+    echo "error: $PROJ is on '$cur', but task $ID lands on its recorded base branch '$BASE_BRANCH'; check out $BASE_BRANCH in $PROJ before retrying, because the base named at intake is the landing branch and is not re-pointed here" >&2
+  else
+    echo "error: $PROJ is on '$cur', expected default branch '$DEFAULT'; cannot merge safely" >&2
+  fi
+  exit 1
+fi
 if [ -n "$(git -C "$PROJ" status --porcelain 2>/dev/null | head -1)" ]; then
   echo "error: $PROJ has a dirty working tree; refusing to merge into it" >&2
   exit 1
 fi
 
 # Clean fast-forward only: DEFAULT must be an ancestor of BRANCH.
-before=$(git -C "$PROJ" rev-parse "$DEFAULT")
+before=$(git -C "$PROJ" rev-parse --verify "refs/heads/$DEFAULT^{commit}")
 if ! git -C "$PROJ" merge-base --is-ancestor "$before" "$MERGE_HEAD"; then
   echo "REFUSED: $BRANCH is not a fast-forward of $DEFAULT (it has diverged)." >&2
   echo "Have the crewmate rebase $BRANCH onto $DEFAULT, then retry." >&2
@@ -171,7 +200,7 @@ case "$hold_status" in
     ;;
 esac
 # Recheck after the approval read. Git's ref transaction below verifies and
-# locks the worker head together with the default-branch update.
+# locks the worker head together with the landing-branch update.
 if [ "$(fm_dod_local_done_head "$META")" != "$MERGE_HEAD" ] || ! local_head_matches; then
   echo "error: local done head or branch changed during approval check; refusing" >&2
   exit 1
@@ -188,7 +217,7 @@ prepare
 commit
 EOF
 if [ "$merge_status" -ne 0 ]; then
-  # The transaction left main untouched. Undo only the staged fast-forward;
+  # The transaction left the landing branch untouched. Undo only the staged fast-forward;
   # the two-tree checkout also protects any intervening local edits here.
   git -C "$PROJ" read-tree -m -u "$MERGE_HEAD" "$before" || {
     echo "error: local merge refused and checkout restoration failed in $PROJ" >&2
@@ -200,7 +229,7 @@ MERGE_META_LOCK=
 fm_lock_release "$MERGE_CONTROL_LOCK" || true
 MERGE_CONTROL_LOCK=
 [ "$merge_status" -eq 0 ] || exit "$merge_status"
-after=$(git -C "$PROJ" rev-parse --short "$DEFAULT")
+after=$(git -C "$PROJ" rev-parse --short "refs/heads/$DEFAULT")
 fm_lock_release "$MERGE_PROJECT_LOCK" || true
 MERGE_PROJECT_LOCK=
 # Opt-in fleet activity ledger (docs/fleet-ledger.md); off costs one file test.

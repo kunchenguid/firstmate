@@ -407,7 +407,8 @@ test_pr_based_dod_draft_check_uses_gh_axi() {
 }
 
 # A scout spawned on a named base keeps that base through promotion: the ship
-# instructions start from it and the PR targets it; local-only cannot carry it.
+# instructions start from it, a PR targets it, and a local-only landing
+# fast-forwards it.
 test_promotion_keeps_the_recorded_base_branch() {
   local home id meta out status mode
   home="$TMP_ROOT/promote-base-home"
@@ -440,12 +441,20 @@ EOF
         "promotion did not target the PR at the recorded base"
       assert_grep 'base_branch=feature/hub' "$meta" "promotion dropped the recorded base"
     else
-      [ "$status" -ne 0 ] || fail "promoting a based scout to local-only should be refused"
-      assert_contains "$out" "mode=local-only" "the local-only promotion refusal did not explain itself"
-      assert_grep 'kind=scout' "$meta" "a refused promotion changed the task record"
+      expect_code 0 "$status" "promoting a based scout to local-only should succeed"$'\n'"$out"
+      # shellcheck disable=SC2016
+      assert_grep 'Return to a clean copy of the base branch `feature/hub`' "$home/data/$id/ship-instructions.md" \
+        "local-only promotion did not start the ship from the recorded base"
+      # shellcheck disable=SC2016
+      assert_grep 'firstmate fast-forwards the local base branch `feature/hub` to it' "$home/data/$id/ship-instructions.md" \
+        "local-only promotion did not land the ship on the recorded base"
+      # shellcheck disable=SC2016
+      ! grep -q 'local `main`' "$home/data/$id/ship-instructions.md" \
+        || fail "local-only promotion with a base still names local main as the landing branch"
+      assert_grep 'base_branch=feature/hub' "$meta" "local-only promotion dropped the recorded base"
     fi
   done
-  pass "promotion keeps a scout's recorded base branch and refuses local-only for it"
+  pass "promotion keeps a scout's recorded base branch for a PR target and a local-only landing alike"
 }
 
 test_scout_done_is_not_gated

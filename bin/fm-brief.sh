@@ -44,7 +44,8 @@
 #   no-mistakes  implement -> /no-mistakes pipeline -> PR -> configured merge authority
 #   direct-PR    implement -> push + open PR via gh-axi (no pipeline) -> configured merge authority
 #   local-only   implement on branch, stop and report "ready in branch" (no push/PR);
-#                the configured merge authority approves, firstmate merges to local main
+#                the configured merge authority approves, firstmate fast-forwards the
+#                local base branch (default branch unless --base-branch names one)
 # no-mistakes-prod-only is a registry policy, not a task mode; resolve it to one of
 # the three concrete modes at intake before calling this script.
 # --branch-prefix <prefix> optionally overrides the ship branch's "fm/" prefix, so
@@ -63,10 +64,13 @@
 # repository default, for work that belongs on a named integration, feature, or
 # release branch. It writes a "Base branch: <branch>" line under `# Setup`, which
 # bin/fm-spawn.sh requires to agree with the same --base-branch it is passed to
-# choose the copy's starting point, and a ship's
-# Definition of done then targets that branch with its pull request.
-# bin/fm-dod-lib.sh's fm_base_branch_valid owns which deliveries accept one.
-# Refused on --secondmate.
+# choose the copy's starting point, and a ship's Definition of done then lands on
+# that branch: no-mistakes and direct-PR target it with their pull request, and
+# local-only has bin/fm-merge-local.sh fast-forward it in the project's local
+# copy instead of the branch the clone's origin/HEAD record names, so the captain
+# names the branch once at intake and never re-points that record by hand.
+# bin/fm-dod-lib.sh's fm_base_branch_valid owns which deliveries accept one
+# (every mode; refused only on a forge). Refused on --secondmate.
 # --forge names the project's forge, defaults to none, and is orthogonal to --mode
 # exactly as the registry's `forge=` token is. It is the captain's confirmed
 # registry binding, read from data/projects.md at intake and passed here; this

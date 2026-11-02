@@ -1394,9 +1394,10 @@ test_home_brief_include_is_appended_last() {
   pass "fm-brief.sh: the home brief include lands last on ship and scout, verbatim, and fails closed"
 }
 
-# --base-branch names the branch a task starts from and a ship's PR targets. It is
-# recorded as a Base branch line under # Setup, which fm-spawn reads back, and is
-# refused where no pull request carries the work.
+# --base-branch names the branch a task starts from and lands on: a ship's PR
+# targets it, and a local-only ship is fast-forwarded onto it. It is recorded as
+# a Base branch line under # Setup, which fm-spawn reads back, and is refused
+# only where a forge carries the work.
 test_base_branch_is_rendered_and_bounded() {
   local home out rc brief base meta_base
   home="$TMP_ROOT/base-branch-home"
@@ -1451,17 +1452,38 @@ test_base_branch_is_rendered_and_bounded() {
   assert_grep 'at a detached HEAD on a clean default branch.' "$brief" \
     "a brief without --base-branch changed its default-branch setup line"
 
-  out=$(FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-base-lo-b5 some-proj --mode local-only --base-branch feature/hub 2>&1); rc=$?
-  [ "$rc" -ne 0 ] || fail "local-only --base-branch should be refused"
-  assert_contains "$out" "mode=local-only" "the local-only refusal did not explain itself"
+  # A local-only ship names its base once at intake: the brief records the
+  # Setup line fm-spawn reads back, and the definition of done lands by
+  # fast-forwarding that branch locally instead of "local main".
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-base-lo-b5 some-proj --mode local-only --base-branch feature/hub >/dev/null 2>&1 \
+    || fail "local-only --base-branch should scaffold"
+  brief="$home/data/brief-base-lo-b5/brief.md"
+  base=$(fm_brief_base_branches "$brief")
+  [ "$base" = feature/hub ] || fail "the local-only brief recorded base '$base', not feature/hub"
+  assert_grep 'at a detached HEAD on a clean copy of its base branch.' "$brief" \
+    "the local-only brief did not write the base-variant Setup line"
+  # shellcheck disable=SC2016
+  assert_grep 'firstmate fast-forwards the local base branch `feature/hub` to it through the guarded landing path' "$brief" \
+    "the local-only definition of done does not land on the base branch"
+  # shellcheck disable=SC2016
+  assert_grep 'if `feature/hub` has advanced, rebase onto it' "$brief" \
+    "the local-only definition of done does not keep the branch a fast-forward of the base"
+  # shellcheck disable=SC2016
+  assert_grep 'firstmate handles the fast-forward of the local base branch `feature/hub`' "$brief" \
+    "the local-only safety rule still promises a merge into local main"
+  # shellcheck disable=SC2016
+  ! grep -q 'local `main`' "$brief" || fail "the local-only brief with a base still names local main as the landing branch"
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-base-lo-gerrit-b10 some-proj --mode direct-PR --forge gerrit --base-branch feature/hub 2>&1); rc=$?
+  [ "$rc" -ne 0 ] || fail "a base branch on a gerrit forge should still be refused"
+  assert_contains "$out" "forge=gerrit" "the forge refusal did not explain itself"
   out=$(FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-base-bad-b6 some-proj --mode direct-PR --base-branch 'bad..name' 2>&1); rc=$?
   [ "$rc" -ne 0 ] || fail "an invalid base branch name should be refused"
   out=$(FM_HOME="$home" FM_SECONDMATE_CHARTER=charter "$ROOT/bin/fm-brief.sh" brief-base-sm-b7 --secondmate --no-projects --base-branch feature/hub 2>&1); rc=$?
   [ "$rc" -ne 0 ] || fail "a secondmate charter should refuse --base-branch"
-  for id in brief-base-lo-b5 brief-base-bad-b6 brief-base-sm-b7; do
+  for id in brief-base-lo-gerrit-b10 brief-base-bad-b6 brief-base-sm-b7; do
     [ ! -e "$home/data/$id/brief.md" ] || fail "a refused --base-branch scaffold wrote $id"
   done
-  pass "fm-brief.sh: --base-branch records the base, targets the PR at it, and is refused where no PR carries it"
+  pass "fm-brief.sh: --base-branch records the base, targets the PR or local landing at it, and is refused only on a forge"
 }
 
 # (a) An unregistered/default project - no --branch-prefix passed at all - must
