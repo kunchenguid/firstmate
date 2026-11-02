@@ -4989,6 +4989,130 @@ test_send_text_submit_idle_baseline_does_not_confirm_failed_enter() {
   pass "fm_backend_herdr_send_text_submit: a failed Enter cannot borrow a later native transition as delivery proof"
 }
 
+test_agy_empty_composer_cannot_confirm_a_missed_literal() (
+  local scripted_baseline scripted_native out expected
+  # shellcheck source=bin/backends/herdr.sh
+  . "$ROOT/bin/backends/herdr.sh"
+  # shellcheck disable=SC2329 # Mocks drive the public submit entry point.
+  fm_backend_herdr_parse_target() { FM_BACKEND_HERDR_SESSION=default; FM_BACKEND_HERDR_PANE=w1:p2; }
+  # shellcheck disable=SC2329
+  fm_backend_herdr_agent_identity_raw() { printf 'agy\tidle'; }
+  # shellcheck disable=SC2329
+  fm_backend_herdr_send_literal() { return 0; }
+  # shellcheck disable=SC2329
+  fm_backend_herdr_send_key() { return 0; }
+  # shellcheck disable=SC2329
+  fm_backend_herdr_agent_status_raw() { printf '%s' "$scripted_baseline"; }
+  # shellcheck disable=SC2329
+  fm_backend_herdr_wait_for_working() { printf '%s' "$scripted_native"; }
+  # shellcheck disable=SC2329
+  fm_backend_herdr_composer_state() { printf empty; }
+  # shellcheck disable=SC2329
+  fm_backend_herdr_rendered_busy_state() { printf idle; }
+  # shellcheck disable=SC2329
+  fm_composer_blocking_dialog_noted() { return 1; }
+  # shellcheck disable=SC2329
+  sleep() { :; }
+  for scripted_baseline in idle blocked; do
+    scripted_native=idle
+    out=$(fm_backend_herdr_send_text_submit default:w1:p2 'unsent payload' 1 0.01 0.01)
+    [ "$out" = unknown ] || fail "agy $scripted_baseline empty composer cannot confirm a missed literal, got $out"
+  done
+  scripted_baseline=idle; scripted_native=busy; expected=empty
+  out=$(fm_backend_herdr_send_text_submit default:w1:p2 'real payload' 1 0.01 0.01)
+  [ "$out" = "$expected" ] || fail "agy native transition must still confirm delivery, got $out"
+  pass "fm_backend_herdr_send_text_submit: agy empty alone cannot confirm a missed literal; native transition can"
+)
+
+test_agy_empty_composer_confirms_when_busy_arrives_on_second_window() (
+  local dir enter_log wait_log rendered_log out enter_count wait_count
+  dir=$(mktemp -d)
+  trap 'rm -rf "$dir"' EXIT
+  enter_log="$dir/enter.log"
+  wait_log="$dir/wait.log"
+  rendered_log="$dir/rendered.log"
+
+  # shellcheck source=bin/backends/herdr.sh
+  . "$ROOT/bin/backends/herdr.sh"
+  # shellcheck disable=SC2329
+  fm_backend_herdr_parse_target() { FM_BACKEND_HERDR_SESSION=default; FM_BACKEND_HERDR_PANE=w1:p2; }
+  # shellcheck disable=SC2329
+  fm_backend_herdr_agent_identity_raw() { printf 'agy\tidle'; }
+  # shellcheck disable=SC2329
+  fm_backend_herdr_send_literal() { return 0; }
+  # shellcheck disable=SC2329
+  fm_backend_herdr_send_key() {
+    [ "$2" = Enter ] && printf 'enter\n' >> "$enter_log"
+    return 0
+  }
+  # shellcheck disable=SC2329
+  fm_backend_herdr_agent_status_raw() { printf 'idle'; }
+  # shellcheck disable=SC2329
+  fm_backend_herdr_composer_state() { printf empty; }
+  # shellcheck disable=SC2329
+  fm_composer_blocking_dialog_noted() { return 1; }
+  # shellcheck disable=SC2329
+  sleep() { :; }
+
+  # Scenario 1: native busy arrives on the second window.
+  : > "$enter_log"; : > "$wait_log"; : > "$rendered_log"
+  # shellcheck disable=SC2329
+  fm_backend_herdr_wait_for_working() {
+    printf 'wait\n' >> "$wait_log"
+    local count
+    count=$(wc -l < "$wait_log")
+    if [ "$count" -ge 2 ]; then
+      printf 'busy'
+    else
+      printf 'idle'
+    fi
+  }
+  # shellcheck disable=SC2329
+  fm_backend_herdr_rendered_busy_state() { printf 'idle'; }
+  out=$(fm_backend_herdr_send_text_submit default:w1:p2 'test payload' 3 0.01 0.01)
+  [ "$out" = empty ] || fail "native busy on window 2 must confirm delivery, got $out"
+  enter_count=$(wc -l < "$enter_log")
+  [ "$enter_count" -eq 1 ] || fail "Enter must not be pressed into an empty composer again, enter_count=$enter_count"
+  wait_count=$(wc -l < "$wait_log")
+  [ "$wait_count" -eq 2 ] || fail "polling must stop once busy is observed on window 2, wait_count=$wait_count"
+
+  # Scenario 2: rendered busy arrives on the second window.
+  : > "$enter_log"; : > "$wait_log"; : > "$rendered_log"
+  # shellcheck disable=SC2329
+  fm_backend_herdr_wait_for_working() {
+    printf 'wait\n' >> "$wait_log"
+    printf 'idle'
+  }
+  # shellcheck disable=SC2329
+  fm_backend_herdr_rendered_busy_state() {
+    printf 'rendered\n' >> "$rendered_log"
+    local count
+    count=$(wc -l < "$rendered_log")
+    if [ "$count" -ge 2 ]; then
+      printf 'busy'
+    else
+      printf 'idle'
+    fi
+  }
+  out=$(fm_backend_herdr_send_text_submit default:w1:p2 'test payload' 3 0.01 0.01)
+  [ "$out" = empty ] || fail "rendered busy on window 2 must confirm delivery, got $out"
+  enter_count=$(wc -l < "$enter_log")
+  [ "$enter_count" -eq 1 ] || fail "Enter must not be pressed into an empty composer again, enter_count=$enter_count"
+
+  # Scenario 3: budget exhausted with neither native nor rendered busy proof.
+  : > "$enter_log"; : > "$wait_log"; : > "$rendered_log"
+  # shellcheck disable=SC2329
+  fm_backend_herdr_rendered_busy_state() { printf 'idle'; }
+  out=$(fm_backend_herdr_send_text_submit default:w1:p2 'test payload' 3 0.01 0.01)
+  [ "$out" = unknown ] || fail "exhausted budget without busy proof must report unknown, got $out"
+  enter_count=$(wc -l < "$enter_log")
+  [ "$enter_count" -eq 1 ] || fail "Enter must not be pressed into an empty composer again, enter_count=$enter_count"
+  wait_count=$(wc -l < "$wait_log")
+  [ "$wait_count" -eq 3 ] || fail "must poll for all retries in budget, wait_count=$wait_count"
+
+  pass "fm_backend_herdr_send_text_submit: agy empty composer polls for native/rendered busy across budget without extra Enter"
+)
+
 test_send_text_submit_idle_native_empty_composer_confirms_delivery() {
   local dir log resp fb out enter_count
   dir="$TMP_ROOT/submit-idle-native-empty-composer"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
@@ -6462,6 +6586,8 @@ test_send_text_submit_confirms_blocked_after_enter
 test_send_text_submit_preexisting_working_pending_is_queued_enter
 test_send_text_submit_preexisting_working_does_not_confirm_failed_enter
 test_send_text_submit_idle_baseline_does_not_confirm_failed_enter
+test_agy_empty_composer_cannot_confirm_a_missed_literal || exit 1
+test_agy_empty_composer_confirms_when_busy_arrives_on_second_window || exit 1
 test_send_text_submit_idle_native_empty_composer_confirms_delivery
 test_send_text_submit_idle_native_pending_plus_rendered_busy_is_queued
 test_composer_state_cursor_midturn_row_reads_pending

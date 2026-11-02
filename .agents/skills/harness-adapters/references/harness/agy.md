@@ -21,7 +21,7 @@ Verified as a full Firstmate harness (Primary, Secondmate, and Crewmate/Scout).
 | Resume | `--continue` and `--conversation` exist but carry no verified pane-resume contract; use deterministic relaunch. |
 | Model | `--model <id>` with the bare catalog id from `agy models` (for example `gemini-3.8-flash-high`); `bin/fm-spawn.sh` refuses a requested id a reachable listing omits. The listing is a remote fetch, so the probe runs stdin-detached under the shared hard bound and an unreachable or hung listing launches unvalidated with a notice. |
 | Effort | `--effort low\|medium\|high`; `xhigh` and `max` stay in task metadata under the record-and-omit contract. |
-| Composer | Borderless bare `>` row, which the shared classifier reads as `unknown` under the dead-shell rule, never `empty`; steering confirms delivery through native agent-state and the delivery footer instead, the cursor precedent. |
+| Composer | Unstyled `>` between two full-width `─` separator rules; accepted only with proven idle agy identity (unframed or unidentified bare `>` stays `unknown` under the dead-shell rule). On tmux, empty reads settle across the late-footer window; on Herdr, empty alone does not confirm delivery without payload proof. See [`docs/verification/agy.md`](../../../../../docs/verification/agy.md). |
 
 ## Trust, and where the decision persists
 

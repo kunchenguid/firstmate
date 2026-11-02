@@ -90,7 +90,7 @@ fm_tmux_composer_caps() {
 }
 
 # fm_tmux_composer_identity: the tmux agent-identity probe backing the
-# separated (pi) composer shape, tmux's analogue of herdr's native
+# separated (pi/agy) composer shape, tmux's analogue of herdr's native
 # `agent get`. It answers only for the verified owners of that shape, from
 # two live signals:
 #   - identity: the pane tty's FOREGROUND process group (pgid = tpgid, the
@@ -110,7 +110,9 @@ fm_tmux_composer_caps() {
 # bare `❯` row between the same two rules, and its placeholder needs the
 # identity-scoped ghost ceiling in bin/fm-composer-lib.sh.
 # Prints "<owner><TAB>idle" or "<owner><TAB>working" for owner pi,
-# polytoken, or commandcode; exits 1 when the pane is not a live shape owner.
+# polytoken, commandcode, or agy; exits 1 without a live shape owner.
+# agy's separated `>` prompt needs its exact process identity and its own
+# delivery-busy footer; a shell or a generic node process never proves agy.
 fm_tmux_composer_identity() {  # <target>
   local target=$1 tty pgid tpgid comm owner='' status
   tty=$(tmux display-message -p -t "$target" '#{pane_tty}' 2>/dev/null) || tty=
@@ -122,6 +124,7 @@ fm_tmux_composer_identity() {  # <target>
         case "${comm##*/}" in
           pi|pi-signed|pi-launcher|Pi) owner=pi ;;
           polytoken) owner=polytoken ;;
+          agy) owner=agy ;;
           command-code) owner=commandcode ;;
         esac
         [ -n "$owner" ] && break
@@ -135,6 +138,7 @@ EOF
     case "${comm##*/}" in
       pi|pi-signed|pi-launcher) owner=pi ;;
       polytoken) owner=polytoken ;;
+      agy) owner=agy ;;
     esac
   fi
   [ -n "$owner" ] || return 1
@@ -158,8 +162,13 @@ EOF
 # it (a pi separator pair under the cursor) or the cursor-anchored read is
 # `unknown` (the Command Code check below), so an `unknown` read pays one
 # process probe and a definite read never does.
+# An identity-proven empty agy composer must span its late busy-footer window:
+# FM_TMUX_AGY_IDLE_SETTLE_POLLS (default 10) x
+# FM_TMUX_AGY_IDLE_SETTLE_SLEEP (default 0.5 seconds). Pending never waits.
+# After settling, refresh both foreground identity and composer, never reuse
+# the pre-wait proof after the agent may have exited or a draft appeared.
 fm_tmux_composer_state() {  # <target> -> empty|pending|pending-unproven|unknown
-  local target=$1 cy pane verdict identity
+  local target=$1 cy pane verdict identity i polls
   cy=$(fm_tmux_composer_cursor_row "$target") || { printf 'unknown'; return 0; }
   case "$cy" in ''|*[!0-9]*) printf 'unknown'; return 0 ;; esac
   pane=$(fm_tmux_composer_capture "$target") || { printf 'unknown'; return 0; }
@@ -199,6 +208,23 @@ fm_tmux_composer_state() {  # <target> -> empty|pending|pending-unproven|unknown
   if [ "$verdict" = unknown ] && identity=$(fm_tmux_composer_identity "$target") \
      && [ "${identity%%$'\t'*}" = commandcode ]; then
     verdict=$(fm_composer_classify_screen "$(fm_tmux_composer_caps)" "$pane" '' "$identity")
+    [ "$verdict" != need-identity ] || verdict=unknown
+  fi
+  if [ "$verdict" = empty ] && [ "${identity:-}" = $'agy\tidle' ]; then
+    polls=${FM_TMUX_AGY_IDLE_SETTLE_POLLS:-10}
+    case "$polls" in *[!0-9]*) printf 'unknown'; return 0 ;; esac
+    i=0
+    while [ "$i" -lt "$polls" ]; do
+      sleep "${FM_TMUX_AGY_IDLE_SETTLE_SLEEP:-0.5}" || { printf 'unknown'; return 0; }
+      [ "$(fm_pane_busy_state "$target" agy)" = idle ] || { printf 'unknown'; return 0; }
+      i=$((i + 1))
+    done
+    identity=$(fm_tmux_composer_identity "$target") || { printf 'unknown'; return 0; }
+    [ "$identity" = $'agy\tidle' ] || { printf 'unknown'; return 0; }
+    cy=$(fm_tmux_composer_cursor_row "$target") || { printf 'unknown'; return 0; }
+    case "$cy" in ''|*[!0-9]*) printf 'unknown'; return 0 ;; esac
+    pane=$(fm_tmux_composer_capture "$target") || { printf 'unknown'; return 0; }
+    verdict=$(fm_composer_classify_screen "$(fm_tmux_composer_caps)" "$pane" "$cy" "$identity")
     [ "$verdict" != need-identity ] || verdict=unknown
   fi
   printf '%s' "$verdict"
