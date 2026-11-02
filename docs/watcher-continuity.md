@@ -351,7 +351,7 @@ Under the away-posture record the exclusion lifts and a check row is offered to 
 It filters the queue to the current actor's opaque claim before same-key deduplication, then presents and acknowledges only that actor-local view.
 A missing or empty branch snapshot is refused loudly rather than read as "nothing eligible".
 With a live branch owner, a missing snapshot means the branch's own acknowledgement already consumed the grant, and the refusal says so; otherwise reaching the drain without the non-empty handoff promised by the extension is a wiring bug.
-A branch acknowledgement retires the check-row receipts - inactive-outcome, inactive-reconcile notice, and secondmate stall - of exactly the granted sequences it consumes, so a branch-consumed check is never re-queued by its producer.
+A branch acknowledgement retires the check-row receipts - inactive-outcome, inactive-reconcile notice, secondmate stall, and startup-network generation - of exactly the granted sequences it consumes, so a branch-consumed check is never re-queued by its producer.
 Attended, a grant names no check row and each scan finds nothing.
 
 ### Per-actor regression tests
@@ -370,7 +370,7 @@ The same suite pins the counted-equals-presentable invariant against `bin/fm-gua
 - That row is presented with its acknowledgement command - with the ordinary warning restored - as soon as the grant clears.
 - Structurally unusable rows are retired by main alone while every remaining row stays presentable and acknowledgeable.
 
-Branch acknowledgement retiring the check-row receipts of exactly its granted sequences is pinned by `tests/fm-wake-queue.test.sh` for the secondmate stall receipt and by `tests/fm-inactive-reconcile.test.sh` for the inactive-outcome receipt.
+Branch acknowledgement retiring the check-row receipts of exactly its granted sequences is pinned by `tests/fm-wake-queue.test.sh` for the secondmate stall and startup-network delivery receipts and by `tests/fm-inactive-reconcile.test.sh` for the inactive-outcome receipt.
 
 `tests/fm-pi-branch-extension.test.sh` pins extension-side classification, claim publication and release, and the pre-drain recheck.
 
