@@ -868,8 +868,6 @@ test_observed_model_mismatch_does_not_double_charge() {
   mkdir -p "$dir" "$R_REMOTE/state/parent-route"
   printf 'kind=secondmate\nmodel=pool-model-a\nspawn_gen=host.1\n' \
     > "$R_REMOTE/state/parent-route/theshop.meta"
-  task_record "$R_ROOT" theshop pool-model-a secondmate \
-    "$(printf 'remote_host=shop-host\nremote_root=%s\nhome=%s' "$ROOT" "$R_REMOTE")"
   printf 'schema=fm-remote-seat-receipt.v1\noperation=op1\nverb=launch\nactual_generation=host.1\nactual_model=pool-model-a\n' \
     > "$R_REMOTE/state/parent-route/theshop.seat-operation.op1"
   chmod 600 "$R_REMOTE/state/parent-route/theshop.seat-operation.op1"
@@ -879,6 +877,15 @@ test_observed_model_mismatch_does_not_double_charge() {
       route:{placement:"remote", operation:"op1", home:$h}}]}' \
     > "$R_REMOTE/state/parent-route/theshop.seat-reservation.op1"
   chmod 600 "$R_REMOTE/state/parent-route/theshop.seat-reservation.op1"
+  printf '{"pools":[{"name":"a","capacity":1,"models":["pool-model-a"]},{"name":"b","capacity":1,"models":["pool-model-b"]}]}\n' > "$R_ROOT/config/fleet-seats"
+  serve_remotes >/dev/null 2>&1 || fail "serve before parent reconciliation failed"
+  assert_equals true "$(jq '.holders | any(.task == "theshop" and .generation == "host.1" and .model == "pool-model-a")'     "$R_ROOT/state/fleet-seats/remote-theshop.cert")" "lost observation reply erased actual-model occupancy"
+  new_holder
+  out=$(reserve "$R_ROOT" lost-observation-contender pool-model-a 2>&1)
+  expect_code 4 "$?" "unreconciled observation allowed another actual-model worker: $out"
+  pools "$R_ROOT" 2
+  task_record "$R_ROOT" theshop pool-model-a secondmate \
+    "$(printf 'remote_host=shop-host\nremote_root=%s\nhome=%s' "$ROOT" "$R_REMOTE")"
   # The parent keeps its own confirmed seat for the generation the receipt
   # proved, which is what reduces the remote allowance.
   local st name
@@ -1858,8 +1865,9 @@ test_remote_host_supervisor_adoption_and_accounting() {
   chmod 600 "$reservation4"
   out=$(serve_remotes 2>&1)
   assert_contains "$out" "served theshop" "bound or default-model reservations blocked serving"
-  assert_equals false "$(jq '.holders | any(.task == "theshop2" or .task == "theshop3" or .task == "theshop4")' \
+  assert_equals false "$(jq '.holders | any(.task == "theshop2" or .task == "theshop3")' \
     "$R_ROOT/state/fleet-seats/remote-theshop.cert")" "parent-accounted supervisors were adopted anyway"
+  assert_equals true "$(jq '.holders | any(.task == "theshop4" and .generation == "host.4" and .model == "pool-model-a")'     "$R_ROOT/state/fleet-seats/remote-theshop.cert")" "unreconciled cross-model observation lost occupancy"
   rm -f "$receipt" "$reservation" "$reservation3" "$meta2" "$meta3" "$meta" \
     "$receipt4" "$reservation4" "$meta4"
   rm -f "$R_ROOT/config/fleet-seats" "$R_ROOT/state/theshop.meta"

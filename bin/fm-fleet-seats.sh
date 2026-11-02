@@ -814,7 +814,15 @@ root_holders() {
   registry_homes || return 1
   ledger_scan || return 1
   {
-    ledger_pool_holders "$models"
+    : > "$TMPD/excluded-gens"
+    if [ -n "$exclude" ] && remote_certificate "$exclude"; then
+      jq -r ' .holders[] | select(.state_dir | endswith("/parent-route")) |
+        [.task, .generation, (.model // "-")] | @tsv' "$CERT_FILE" > "$TMPD/excluded-gens"
+    fi
+    awk -F '\t' 'FILENAME == ARGV[1] { excluded[$1 SUBSEP $2 SUBSEP $3] = 1; next }
+      FILENAME == ARGV[2] { models[$0] = 1; next }
+      ($4 == "reserved" || $4 == "confirmed") && ($5 == "-" || ($5 in models)) &&
+        !(($2 SUBSEP $3 SUBSEP $5) in excluded) { print $1 "\t" $2 }'       "$TMPD/excluded-gens" "$models" "$TMPD/ledger"
     # The (task, generation) pairs this home already counts, so an adopted
     # supervisor a remote certificate lists is not counted a second time.
     awk -F '\t' 'NR == FNR { m[$0] = 1; next }
@@ -1812,12 +1820,7 @@ if [ "$ROOT_REMOTE" -eq 1 ]; then
             ' "$reservation" >/dev/null 2>&1; then
             unavailable "host supervisor $id has unaccounted occupancy"
           fi
-          # An observing binding already proved this agent and the model it
-          # runs, so the reservation's request model decides nothing here and
-          # the parent owns the count. Comparing it again would adopt a
-          # supervisor the parent already charges and spend its seat twice.
-          if [ "$requested_model" = "-" ] \
-            || jq -e --arg m "$(record_field "$meta" model)" '
+          if jq -e --arg m "$(record_field "$meta" model)" '
               .incarnations[0].model == (if $m == "-" or $m == "default" or $m == "" then null else $m end)
             ' "$reservation" >/dev/null; then
             continue
