@@ -34,6 +34,12 @@
 #      shows closes that entry, including a blocked: line whose note trails a
 #      "[key=...]" token the key grammar reads as prose. A key nothing owns
 #      still refuses, and that refusal hands the operator's message back intact.
+#  10. A caller's TERM, INT, or HUP to the sender's process group reports what
+#      was recorded: before delivery, nothing was sent and the exact rerun is
+#      printed; after the enqueue, the answer was delivered (never resend) and
+#      each --resolve-key is recorded. Every line is a durable-state check.
+#  11. A SIGKILL runs no handler, so the progress lines already written - the
+#      enqueue and each appended close - are what the caller keeps.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -59,6 +65,13 @@ set -u
 case "${1:-}" in
   send-keys)
     [ "${FM_FAKE_TMUX_SEND_FAIL:-0}" = 1 ] && exit 1
+    if [ -n "${FM_FAKE_TMUX_HANG_MARK:-}" ]; then
+      # A doorbell ring into a wedged pane that never returns. The real
+      # sleep, because the stubbed one on PATH returns immediately; the mark
+      # holds its pid so the test can reap it.
+      printf '%s\n' "$$" > "$FM_FAKE_TMUX_HANG_MARK"
+      exec /bin/sleep 60
+    fi
     shift
     literal=0
     while [ $# -gt 0 ]; do
@@ -1169,6 +1182,176 @@ test_refusal_keyed_resend_keeps_the_accepted_keys() {
   pass "fm-send --resolve-key: a refused key's keyed resend keeps every accepted key in order"
 }
 
+# Start the real fm-send in its OWN process group, the way a harness tool call
+# runs it, so a test can deliver a caller timeout's signal to the whole tree.
+# A background job of this non-interactive shell starts with INT and QUIT
+# ignored, which no trap can undo, so the wrapper restores their defaults
+# first, as a harness-spawned tool process has them. Sets BG_PID.
+start_send_in_group() {  # <path-prefix> <home> <log> <out> <err> [env...] -- <args...>
+  local path_prefix=$1 home=$2 log=$3 out=$4 err=$5 envs=()
+  shift 5
+  while [ "$#" -gt 0 ] && [ "$1" != -- ]; do envs+=("$1"); shift; done
+  shift
+  : > "$log"
+  perl -e '$SIG{INT} = $SIG{QUIT} = "DEFAULT"; setpgrp(0, 0); exec @ARGV or die "exec: $!\n"' \
+    env PATH="$path_prefix:$PATH" \
+    FM_ROOT_OVERRIDE="$home" FM_HOME="$home" FM_SEND_LOG="$log" FM_SEND_SETTLE=0 \
+    ${envs[@]+"${envs[@]}"} "$SEND" "$@" >"$out" 2>"$err" &
+  BG_PID=$!
+}
+
+wait_for_file() {  # <path> <what>
+  local tries=0
+  while [ ! -s "$1" ]; do
+    tries=$((tries + 1))
+    [ "$tries" -le 600 ] || fail "timed out waiting for $2"
+    /bin/sleep 0.05
+  done
+}
+
+reap_pid_file() {  # <file holding a hung stub's pid>
+  [ -s "$1" ] || return 0
+  kill "$(cat "$1")" 2>/dev/null || true
+}
+
+# Open one needs-decision per comma-separated key in t1's status log and
+# collect the matching --resolve-key flags in RESOLVE_ARGS.
+open_local_keys() {  # <home> <comma-separated-keys>
+  local k
+  RESOLVE_ARGS=()
+  for k in ${2//,/ }; do
+    printf 'needs-decision [key=%s]: pick one\n' "$k" >> "$1/state/t1.status"
+    RESOLVE_ARGS+=(--resolve-key "$k")
+  done
+}
+
+# A caller timeout (TERM or INT to the sender's process group) that lands after
+# the local enqueue, while the best-effort doorbell is still ringing, must not
+# leave the caller blind: fm-send reports that the answer was durably recorded
+# (so it must not be resent) and, for EACH --resolve-key, that its closing
+# record is present - the very state the observed 60s tool timeout hid.
+test_interrupt_after_local_enqueue_reports_recorded_keys() {
+  local case sig keys dir fb log home rc err k out
+  for case in TERM:api-shape INT:api-shape,db-engine; do
+    sig=${case%%:*}
+    keys=${case#*:}
+    dir="$TMP_ROOT/interrupt-ring-$sig"; mkdir -p "$dir"
+    fb=$(make_stubs "$dir"); log="$dir/send.log"
+    home=$(setup_home "interrupt-ring-$sig")
+    fm_write_meta "$home/state/t1.meta" "window=sess:fm-t1" "kind=ship"
+    open_local_keys "$home" "$keys"
+
+    start_send_in_group "$fb" "$home" "$log" "$dir/out" "$dir/err" \
+      FM_FAKE_TMUX_HANG_MARK="$dir/ring.pid" -- t1 "${RESOLVE_ARGS[@]}" "go with REST"
+    wait_for_file "$dir/ring.pid" "the doorbell ring to start (SIG$sig)"
+    kill -s "$sig" -- "-$BG_PID"
+    rc=0
+    wait "$BG_PID" || rc=$?
+    reap_pid_file "$dir/ring.pid"
+    err=$(cat "$dir/err")
+    expect_code "$((128 + $(kill -l "$sig")))" "$rc" \
+      "a SIG$sig after the enqueue must exit 128+signal: $err"
+    assert_contains "$err" "interrupted by SIG$sig after the steer was durably recorded at $home/state/t1.inbox/001.msg" \
+      "an interruption after the enqueue must say the answer was delivered"
+    assert_contains "$err" "do not resend" \
+      "a delivered answer must never invite a duplicate resend"
+    for k in ${keys//,/ }; do
+      assert_contains "$err" "--resolve-key $k: recorded" \
+        "each closed key must be reported as recorded (SIG$sig)"
+    done
+    assert_not_contains "$err" "NOT recorded" \
+      "no closed key may be reported as missing"
+    out=$(drain_out "$home")
+    for k in ${keys//,/ }; do
+      if printf '%s' "$out" | grep -F "[key=$k]" >/dev/null; then
+        fail "the answered key $k must be closed after the interrupted ring: $out"
+      fi
+    done
+  done
+  pass "fm-send --resolve-key: a caller signal after the enqueue reports delivery and each recorded key"
+}
+
+# A caller timeout during pre-delivery validation (here a wedged backlog read
+# for a captain-held key) must report that nothing was sent, that no key was
+# recorded, and end with the plain rerun as the safe retry - the state the
+# observed 30s tool timeout left with no word at all.
+test_interrupt_before_local_delivery_reports_unsent() {
+  local dir fb axibin log home rc err expected arg quoted
+  dir="$TMP_ROOT/interrupt-validate"; mkdir -p "$dir"
+  fb=$(make_stubs "$dir"); log="$dir/send.log"
+  axibin="$dir/axibin"; mkdir -p "$axibin"
+  cat > "$axibin/tasks-axi" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$$" > "$FM_FAKE_TASKS_AXI_HANG_MARK"
+exec /bin/sleep 60
+SH
+  chmod +x "$axibin/tasks-axi"
+  home=$(setup_home interrupt-validate)
+  mkdir -p "$home/data"
+  fm_write_meta "$home/state/t1.meta" "window=sess:fm-t1" "kind=ship"
+  printf 'needs-decision [key=api-shape]: pick REST or RPC\n' > "$home/state/t1.status"
+
+  start_send_in_group "$axibin:$fb" "$home" "$log" "$dir/out" "$dir/err" \
+    FM_FAKE_TASKS_AXI_HANG_MARK="$dir/axi.pid" -- \
+    t1 --resolve-key api-shape --resolve-key held-call "go with REST"
+  wait_for_file "$dir/axi.pid" "the captain-held key lookup to start"
+  kill -s HUP -- "-$BG_PID"
+  rc=0
+  wait "$BG_PID" || rc=$?
+  reap_pid_file "$dir/axi.pid"
+  err=$(cat "$dir/err")
+  expect_code 129 "$rc" "a SIGHUP before delivery must exit 128+signal: $err"
+  assert_contains "$err" "interrupted by SIGHUP before delivery; nothing was sent to t1" \
+    "an interruption before delivery must say nothing was sent"
+  assert_contains "$err" "--resolve-key api-shape: NOT recorded" \
+    "the open status-log key must be reported as not recorded"
+  assert_contains "$err" "--resolve-key held-call: NOT recorded" \
+    "the unresolved second key must be reported as not recorded"
+  [ ! -e "$home/state/t1.inbox" ] || [ -z "$(find "$home/state/t1.inbox" -name '*.msg')" ] \
+    || fail "nothing may be enqueued before delivery"
+  printf -v quoted '%q' "$home"
+  expected="FM_HOME=$quoted"
+  for arg in "$SEND" t1 --resolve-key api-shape --resolve-key held-call "go with REST"; do
+    printf -v quoted '%q' "$arg"
+    expected="$expected $quoted"
+  done
+  [ "$(tail -1 "$dir/err")" = "$expected" ] \
+    || fail "the last report line must be the exact plain rerun:"$'\n'"want: $expected"$'\n'"got:  $(tail -1 "$dir/err")"
+  pass "fm-send --resolve-key: a caller signal before delivery reports nothing sent and the exact rerun"
+}
+
+# A SIGKILL runs no handler, so the progress lines written before it are what
+# the caller keeps: an answer killed during its doorbell has already printed
+# "durably recorded" and a recorded line per key, and the header's read-only
+# check confirms the closing record.
+test_sigkill_after_local_enqueue_keeps_progress_lines() {
+  local dir fb log home rc err
+  dir="$TMP_ROOT/sigkill-ring"; mkdir -p "$dir"
+  fb=$(make_stubs "$dir"); log="$dir/send.log"
+  home=$(setup_home sigkill-ring)
+  fm_write_meta "$home/state/t1.meta" "window=sess:fm-t1" "kind=ship"
+  open_local_keys "$home" api-shape,db-engine
+
+  start_send_in_group "$fb" "$home" "$log" "$dir/out" "$dir/err" \
+    FM_FAKE_TMUX_HANG_MARK="$dir/ring.pid" -- t1 "${RESOLVE_ARGS[@]}" "go with REST"
+  wait_for_file "$dir/ring.pid" "the doorbell ring to start"
+  kill -s KILL -- "-$BG_PID"
+  rc=0
+  wait "$BG_PID" || rc=$?
+  reap_pid_file "$dir/ring.pid"
+  err=$(cat "$dir/err")
+  expect_code 137 "$rc" "the SIGKILLed sender must die by the signal"
+  assert_contains "$err" "fm-send: durably recorded at $home/state/t1.inbox/001.msg" \
+    "the enqueue must be announced before anything slow can be killed"
+  assert_contains "$err" "--resolve-key api-shape: recorded" \
+    "each closed key must be announced as soon as its line is appended"
+  assert_contains "$err" "--resolve-key db-engine: recorded" \
+    "each closed key must be announced as soon as its line is appended"
+  grep -F '[key=api-shape]' "$home/state/t1.status" | grep '^resolved' >/dev/null \
+    || fail "the documented read-only check must find the closing record"
+  pass "fm-send --resolve-key: a SIGKILL after the enqueue leaves progress lines the caller can trust"
+}
+
 test_answer_send_closes_open_decision
 test_answer_close_is_self_announced
 test_separate_resolve_key_answers_do_not_rewake
@@ -1198,3 +1381,6 @@ test_stamped_close_line_stays_within_the_status_line_cap
 test_failed_close_recovery_command_is_shell_safe
 test_remote_reserved_pending_reply_key_closes_locally
 test_decision_answer_partition_relocates_under_the_record
+test_interrupt_after_local_enqueue_reports_recorded_keys
+test_interrupt_before_local_delivery_reports_unsent
+test_sigkill_after_local_enqueue_keeps_progress_lines

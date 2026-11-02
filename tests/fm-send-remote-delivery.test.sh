@@ -27,8 +27,14 @@
 #      preserves the marked expectation for the record that may have landed.
 #   8. A LOCAL typed-plane send (an explicit backend target or harness-native
 #      slash) keeps its exit-3 delivered-unconfirmed contract, never closes a
-#      --resolve-key decision unconfirmed, and keeps a marked expectation
-#      armed.
+#      --resolve-key decision unconfirmed (and says so per key), and keeps a
+#      marked expectation armed.
+#   9. A caller's TERM, INT, or HUP during the remote transport, and fm-send's
+#      own transport budget, each report unknown completion (never "not
+#      sent"), one recorded/NOT recorded line per --resolve-key, and the
+#      correlation-reusing resend as the last line; that resend closes them.
+#  10. A SIGKILL mid-transport runs no handler: the progress lines and the
+#      header's read-only check are what the caller can rely on.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -108,8 +114,12 @@ stdin_file="$FM_SSH_LOG.stdin.$count"
 cat > "$stdin_file"
 if [ -n "${FM_FAKE_SSH_HANG:-}" ]; then
   # A busy remote lane: the transport attempt never returns on its own. The
-  # real sleep, because the stubbed one on PATH returns immediately.
-  /bin/sleep "$FM_FAKE_SSH_HANG"
+  # real sleep, because the stubbed one on PATH returns immediately. Its pids
+  # mark the transport as in flight and let a test reap a lane that outlived
+  # an interrupted sender (the bounded transport runs in its own group).
+  /bin/sleep "$FM_FAKE_SSH_HANG" &
+  printf '%s %s\n' "$$" "$!" > "$FM_SSH_LOG.hang-pids"
+  wait "$!"
   exit 255
 fi
 if [ "${FM_FAKE_SSH_AFTER_AMBIGUOUS_RC:-0}" -ne 0 ] && [ "$count" -gt 1 ]; then
@@ -217,6 +227,66 @@ send_env() {  # <fakebin> <parent-home> <ssh-log> [extra env...] -- <cmd...>
     FM_SSH_BIN="$fb/fake-ssh" FM_SSH_LOG="$ssh_log" \
     FM_SSH_COUNT="$ssh_log.count" FM_REMOTE_CODE_ROOT="$ROOT" \
     "$@"
+}
+
+# Start the real fm-send in its OWN process group, the way a harness tool call
+# runs it, so a test can deliver a caller timeout's signal to the whole tree
+# exactly as that caller would. A background job of this non-interactive shell
+# starts with INT and QUIT ignored, which no trap can undo, so the wrapper
+# restores their defaults first, as a harness-spawned tool process has them.
+# Sets BG_PID.
+start_send_in_group() {  # <fakebin> <parent-home> <ssh-log> <out> <err> [env...] -- <args...>
+  local fb=$1 home=$2 ssh_log=$3 out=$4 err=$5 envs=()
+  shift 5
+  while [ "$#" -gt 0 ] && [ "$1" != -- ]; do envs+=("$1"); shift; done
+  shift
+  perl -e '$SIG{INT} = $SIG{QUIT} = "DEFAULT"; setpgrp(0, 0); exec @ARGV or die "exec: $!\n"' \
+    env PATH="$fb:$PATH" \
+    FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" FM_SEND_SETTLE=0 \
+    FM_SSH_BIN="$fb/fake-ssh" FM_SSH_LOG="$ssh_log" \
+    FM_SSH_COUNT="$ssh_log.count" FM_REMOTE_CODE_ROOT="$ROOT" \
+    ${envs[@]+"${envs[@]}"} "$SEND" "$@" >"$out" 2>"$err" &
+  BG_PID=$!
+}
+
+wait_for_file() {  # <path> <what>
+  local tries=0
+  while [ ! -s "$1" ]; do
+    tries=$((tries + 1))
+    [ "$tries" -le 600 ] || fail "timed out waiting for $2"
+    /bin/sleep 0.05
+  done
+}
+
+# Reap a hung fake transport that outlived its interrupted sender: the bounded
+# transport runs in a process group of its own, out of the caller's signal.
+reap_hung_transport() {  # <ssh-log>
+  [ -f "$1.hang-pids" ] || return 0
+  # shellcheck disable=SC2046  # two pids, split on purpose
+  kill $(cat "$1.hang-pids") 2>/dev/null || true
+}
+
+# Open one needs-decision per comma-separated key in rsm's status log and
+# collect the matching --resolve-key flags in RESOLVE_ARGS.
+open_remote_keys() {  # <parent-home> <comma-separated-keys>
+  local k
+  RESOLVE_ARGS=()
+  : > "$1/state/rsm.status"
+  for k in ${2//,/ }; do
+    printf 'needs-decision [key=%s]: tonight or the weekend\n' "$k" >> "$1/state/rsm.status"
+    RESOLVE_ARGS+=(--resolve-key "$k")
+  done
+}
+
+# Run a printed resend command the way a caller would paste it.
+run_printed_resend() {  # <fakebin> <ssh-log> <command> <out> <err>
+  (
+    unset FM_HOME
+    env PATH="$1:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_SEND_SETTLE=0 \
+      FM_SSH_BIN="$1/fake-ssh" FM_SSH_LOG="$2" \
+      FM_SSH_COUNT="$2.count" FM_REMOTE_CODE_ROOT="$ROOT" \
+      bash -c "$3"
+  ) >"$4" 2>"$5"
 }
 
 test_remote_large_steer_uses_stdin() {
@@ -807,8 +877,10 @@ test_local_pending_does_not_close_resolve_key() {
   rc=0
   env PATH="$fb:$PATH" FM_FAKE_TMUX_PENDING=1 \
     FM_ROOT_OVERRIDE="$home" FM_HOME="$home" FM_SEND_LOG="$log" FM_SEND_SETTLE=0 \
-    "$SEND" t2 --resolve-key creds "/vault fetch deploy-token" >/dev/null 2>&1 || rc=$?
+    "$SEND" t2 --resolve-key creds "/vault fetch deploy-token" >/dev/null 2>"$dir/err" || rc=$?
   expect_code 3 "$rc" "an unconfirmed local answer must exit with the delivered-unconfirmed status"
+  assert_contains "$(cat "$dir/err")" "--resolve-key creds: NOT recorded" \
+    "an unconfirmed submit must say the answered key was not recorded"
   if grep -F 'resolved' "$home/state/t2.status" >/dev/null; then
     fail "an unconfirmed local answer must not close the decision: $(cat "$home/state/t2.status")"
   fi
@@ -816,6 +888,147 @@ test_local_pending_does_not_close_resolve_key() {
   printf '%s' "$out" | grep -F '[key=creds]' >/dev/null \
     || fail "the blocker must stay open after an unconfirmed local answer: $out"
   pass "fm-send local: an unconfirmed submit still never closes a --resolve-key decision"
+}
+
+# A caller timeout (TERM, INT, or HUP to the sender's process group) that lands
+# while the remote transport is in flight must not leave the caller blind:
+# fm-send reports that remote completion is unknown and never that the steer
+# was not sent, states for EACH --resolve-key whether its closing record is
+# durably present, and ends with the correlation-reusing resend as the one safe
+# retry, which then closes every answered decision on a single remote record.
+test_remote_interrupt_mid_transport_reports_each_key() {
+  local case sig keys dir fb ssh_log home rhome rc err pend corr k resend_cmd count
+  for case in TERM:upgrade-window INT:upgrade-window,freeze-day HUP:upgrade-window,freeze-day; do
+    sig=${case%%:*}
+    keys=${case#*:}
+    dir="$TMP_ROOT/remote-interrupt-$sig"; mkdir -p "$dir"
+    fb=$(make_stubs "$dir"); ssh_log="$dir/ssh.log"; : > "$ssh_log"
+    rhome=$(setup_remote_secondmate_home "remote-interrupt-$sig")
+    home=$(setup_remote_parent_home "remote-interrupt-$sig" "$rhome")
+    open_remote_keys "$home" "$keys"
+
+    start_send_in_group "$fb" "$home" "$ssh_log" "$dir/out" "$dir/err" \
+      FM_FAKE_SSH_HANG=60 FM_SEND_REMOTE_BUDGET=120 -- \
+      rsm "${RESOLVE_ARGS[@]}" "the weekend, freeze Friday"
+    wait_for_file "$ssh_log.hang-pids" "the remote transport to start (SIG$sig)"
+    kill -s "$sig" -- "-$BG_PID"
+    rc=0
+    wait "$BG_PID" || rc=$?
+    reap_hung_transport "$ssh_log"
+    err=$(cat "$dir/err")
+    expect_code "$((128 + $(kill -l "$sig")))" "$rc" \
+      "a SIG$sig during the remote transport must exit 128+signal: $err"
+    assert_contains "$err" "interrupted by SIG$sig" \
+      "a caller interruption must be reported as such"
+    assert_contains "$err" "remote completion is unknown" \
+      "an interrupted remote transport must report unknown completion"
+    assert_not_contains "$err" "nothing was sent" \
+      "an in-flight remote transport must never be reported as unsent"
+    for k in ${keys//,/ }; do
+      assert_contains "$err" "--resolve-key $k: NOT recorded" \
+        "each answered key must say it was not recorded (SIG$sig)"
+    done
+    if grep '^resolved' "$home/state/rsm.status" >/dev/null; then
+      fail "an unconfirmed remote answer must not close a decision: $(cat "$home/state/rsm.status")"
+    fi
+    pend=$(pending_record "$home")
+    [ -n "$pend" ] || fail "an interrupted remote transport must keep its pending-reply expectation"
+    [ "$(fm_pending_reply_get "$pend" phase)" = delivery_unknown ] \
+      || fail "an interrupted remote transport must record unknown delivery: $(cat "$pend")"
+    corr=$(fm_pending_reply_get "$pend" corr_id)
+    resend_cmd=$(tail -1 "$dir/err")
+    assert_contains "$resend_cmd" "FM_PENDING_REPLY_EXISTING_CORR=$corr " \
+      "the last report line must be the correlation-reusing resend"
+
+    rc=0
+    run_printed_resend "$fb" "$ssh_log" "$resend_cmd" "$dir/resend.out" "$dir/resend.err" || rc=$?
+    expect_code 0 "$rc" "the printed resend must deliver the answer: $(cat "$dir/resend.err")"
+    for k in ${keys//,/ }; do
+      sed -E 's/ \[at=[0-9]+\]//' "$home/state/rsm.status" \
+        | grep -qF "resolved [key=$k]: answered: the weekend, freeze Friday" \
+        || fail "the printed resend must close $k: $(cat "$home/state/rsm.status")"
+    done
+    count=$(remote_inbox_records "$rhome" | grep -c . || true)
+    [ "$count" = 1 ] || fail "the resend must leave exactly one remote record, found $count"
+  done
+  pass "fm-send remote: a caller signal mid-transport reports each --resolve-key and the safe resend"
+}
+
+# fm-send's own bound on the remote transport (FM_SEND_REMOTE_BUDGET) is the
+# internal timeout: its unconfirmed result must also state, for each answered
+# key, that its closing record is not present, before the resend command.
+test_remote_budget_timeout_reports_each_key() {
+  local keys dir fb ssh_log home rhome rc err k resend_cmd
+  for keys in upgrade-window upgrade-window,freeze-day; do
+    dir="$TMP_ROOT/remote-budget-keys-${keys//,/-}"; mkdir -p "$dir"
+    fb=$(make_stubs "$dir"); ssh_log="$dir/ssh.log"; : > "$ssh_log"
+    rhome=$(setup_remote_secondmate_home "remote-budget-keys-${keys//,/-}")
+    home=$(setup_remote_parent_home "remote-budget-keys-${keys//,/-}" "$rhome")
+    open_remote_keys "$home" "$keys"
+
+    rc=0
+    send_env "$fb" "$home" "$ssh_log" FM_FAKE_SSH_HANG=60 FM_SEND_REMOTE_BUDGET=2 \
+      "$SEND" rsm "${RESOLVE_ARGS[@]}" "the weekend, freeze Friday" \
+      >"$dir/out" 2>"$dir/err" || rc=$?
+    reap_hung_transport "$ssh_log"
+    err=$(cat "$dir/err")
+    expect_code 1 "$rc" "a budget-bounded answer must keep the unconfirmed exit: $err"
+    assert_contains "$err" "within its 2s budget" \
+      "the budget-bounded answer must name the bound that stopped it"
+    for k in ${keys//,/ }; do
+      assert_contains "$err" "--resolve-key $k: NOT recorded" \
+        "the budget-bounded answer must report each key as not recorded"
+    done
+    resend_cmd=$(tail -1 "$dir/err")
+    assert_contains "$resend_cmd" "FM_PENDING_REPLY_EXISTING_CORR=" \
+      "the resend command must stay the last report line"
+    rc=0
+    run_printed_resend "$fb" "$ssh_log" "$resend_cmd" "$dir/resend.out" "$dir/resend.err" || rc=$?
+    expect_code 0 "$rc" "the printed resend must deliver the answer: $(cat "$dir/resend.err")"
+    for k in ${keys//,/ }; do
+      grep -F "[key=$k]" "$home/state/rsm.status" | grep '^resolved' >/dev/null \
+        || fail "the printed resend must close $k: $(cat "$home/state/rsm.status")"
+    done
+  done
+  pass "fm-send remote: its own transport timeout reports each --resolve-key before the resend"
+}
+
+# An uncatchable kill (a harness tool timeout that SIGKILLs the process group)
+# runs no handler, so the progress lines already written are all the caller
+# keeps: "delivering" without "durably recorded" means the transport may have
+# started but was never confirmed, the read-only check the header documents
+# finds no resolved line, and the pending-reply attempt stays for the watcher.
+test_remote_sigkill_mid_transport_leaves_verifiable_state() {
+  local dir fb ssh_log home rhome rc err pend
+  dir="$TMP_ROOT/remote-sigkill"; mkdir -p "$dir"
+  fb=$(make_stubs "$dir"); ssh_log="$dir/ssh.log"; : > "$ssh_log"
+  rhome=$(setup_remote_secondmate_home remote-sigkill)
+  home=$(setup_remote_parent_home remote-sigkill "$rhome")
+  open_remote_keys "$home" upgrade-window
+
+  start_send_in_group "$fb" "$home" "$ssh_log" "$dir/out" "$dir/err" \
+    FM_FAKE_SSH_HANG=60 FM_SEND_REMOTE_BUDGET=120 -- \
+    rsm "${RESOLVE_ARGS[@]}" "the weekend, freeze Friday"
+  wait_for_file "$ssh_log.hang-pids" "the remote transport to start"
+  kill -s KILL -- "-$BG_PID"
+  rc=0
+  wait "$BG_PID" || rc=$?
+  reap_hung_transport "$ssh_log"
+  err=$(cat "$dir/err")
+  expect_code 137 "$rc" "the SIGKILLed sender must die by the signal"
+  assert_contains "$err" "fm-send: delivery to rsm starts now" \
+    "a --resolve-key send must announce the delivery leg before it starts"
+  assert_not_contains "$err" "durably recorded" \
+    "a killed remote transport must never look recorded"
+  if grep -F '[key=upgrade-window]' "$home/state/rsm.status" | grep '^resolved' >/dev/null; then
+    fail "the documented read-only check must find no resolved line after the kill"
+  fi
+  pend=$(pending_record "$home")
+  [ -n "$pend" ] && [ -z "$(fm_pending_reply_get "$pend" delivered_epoch)" ] \
+    || fail "the killed attempt must leave its undelivered expectation: $(cat "$pend" 2>/dev/null)"
+  fm_pending_reply_delivery_attempt_unresolved "$home/state" "$(fm_pending_reply_get "$pend" corr_id)" \
+    || fail "the killed attempt must leave its attempted-delivery marker for watcher reconciliation"
+  pass "fm-send remote: a SIGKILL mid-transport leaves progress lines and verifiable state"
 }
 
 test_remote_large_steer_uses_stdin
@@ -832,6 +1045,9 @@ test_remote_real_failure_still_fails
 test_remote_exit3_no_longer_delivered
 test_remote_transport_loss_preserves_expectation
 test_remote_send_budget_bounds_busy_lane
+test_remote_interrupt_mid_transport_reports_each_key
+test_remote_budget_timeout_reports_each_key
+test_remote_sigkill_mid_transport_leaves_verifiable_state
 test_local_pending_reports_delivered_unconfirmed
 test_local_pending_does_not_close_resolve_key
 test_local_secondmate_pending_keeps_expectation_armed

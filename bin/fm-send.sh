@@ -30,7 +30,9 @@
 # resend is appropriate (unresolvable target, an endpoint that cannot be
 # locked and revalidated or that retired or changed, an unwritable record, a
 # failed or lost remote transport) or a decision-close append failed after
-# delivery (the error then carries the exact manual close). The remote enqueue
+# delivery (the error then carries the exact manual close); 128+signal = the
+# caller interrupted it, and the interruption report below says what was
+# recorded. The remote enqueue
 # is idempotent: the remote leg deduplicates an exact re-run of the same
 # request onto the existing record (bin/fm-task-inbox-lib.sh), so after a lost
 # transport (ssh exit 255, completion unknown) fm-send retries the same leg
@@ -223,6 +225,37 @@
 # working:, or done: event still cannot clear a captain decision. The flag is
 # refused with --key, with an explicit backend target (no task ledger in this
 # home), and with an empty message.
+#
+# Interruption and caller timeouts: give fm-send a caller timeout of at least
+# 240 s. A --resolve-key send folds the target's decision ledger before
+# delivery and again after its close, each fold growing with that status log
+# (about 80 s for a 2.4 MB log when this bound was set), and a remote leg adds
+# up to two FM_SEND_REMOTE_BUDGET transport attempts.
+# A catchable TERM, INT, or HUP to a text send stops it with a report and exit
+# 128+signal: before delivery, nothing was sent and the exact rerun is printed;
+# with the remote transport in flight, remote completion is unknown - never
+# reported as unsent - the expectation is marked delivery-unknown, and the
+# printed FM_PENDING_REPLY_EXISTING_CORR=<id> resend (or the same
+# fire-and-forget delivery id) is the only safe retry; after the durable
+# record, do not resend. Every report, and also fm-send's own remote-budget
+# timeout and an unconfirmed typed submit, prints one line per --resolve-key
+# saying whether its close is durably recorded: a resolved line carrying it was
+# appended since the send began, or its captain-held task's answer intake
+# completed. A delivered answer's unrecorded key gets its exact manual close,
+# never a resend.
+# SIGKILL, such as a harness tool timeout that kills the process group, runs
+# no handler, so a --resolve-key send also prints each durable step as it
+# lands: "delivery to <task> starts now" (absent: nothing was sent), "durably
+# recorded ..." (present: never resend), and per key "recorded" as soon as its
+# resolved line is appended. A kill can leave a delivered answer whose
+# decisions stay open (they re-surface; close each by hand rather than
+# resend), a remote transport that keeps running in its own process group up
+# to its budget (the remote record can land after fm-send died, so treat it as
+# unknown), a marked request's attempted-delivery marker (the watcher ages it
+# to delivery-unknown), and a metadata lock the next sender reclaims as stale.
+# Verify each key afterwards, read-only, with
+#   grep -F '[key=<key>]' "$FM_HOME/state/<task>.status" | grep '^resolved'
+# or, for a captain-held key, bin/fm-tasks-axi.sh show <task-id> --full.
 #
 # After a successful TYPED-plane submit fm-send pauses FM_SEND_SETTLE seconds
 # (default 1, 0 disables) before returning: submit confirmation only proves the
@@ -612,7 +645,188 @@ RESOLVE_STATUS_FILE=
 # longer owns also keeps the common path free of any backlog read.
 RESOLVE_STATUS_KEYS=
 RESOLVE_HOLD_KEYS=
+RESOLVE_HOLD_PAIRS=
 RESOLVE_CLOSE_MAX=$FM_LINE_CAP_DEFAULT
+RESOLVE_STATUS_OFFSET=0
+
+# Interruption state for the header's "Interruption and caller timeouts"
+# contract. FM_SEND_PHASE moves validate -> deliver (a delivery leg is in
+# flight: inbox, remote, or typed) -> delivered (FM_SEND_DELIVERED_WHAT names
+# the durable outcome). Everything a handler reads is initialized here.
+FM_SEND_PHASE=validate
+FM_SEND_DELIVERY=
+FM_SEND_DELIVERED_WHAT=
+FM_SEND_HELD_LOCK=
+FM_SEND_PREPARED=0
+FM_SEND_DELIVERY_CONFIRMED=0
+FM_SEND_HOLDS_FED=0
+FM_SEND_LOCAL_SEQ_FLOOR=0
+FM_SEND_LABEL=$T
+[ -z "$TARGET_META" ] || FM_SEND_LABEL=$(fm_send_id_from_meta "$TARGET_META")
+MESSAGE=
+RESOLVE_ANSWER_TEXT=
+INBOX_TASK_ID=
+
+# Progress for a --resolve-key send, printed as each durable step happens, so a
+# caller that kills fm-send uncatchably still holds the last proven state.
+fm_send_progress() {  # <text>
+  [ -n "$RESOLVE_KEYS" ] || return 0
+  printf 'fm-send: %s\n' "$1" >&2
+}
+
+# The exact command that reruns this send, optionally reusing a correlation.
+fm_send_print_rerun() {  # [corr]
+  local home state arg
+  home=$(cd "$FM_HOME" 2>/dev/null && pwd) || home=$FM_HOME
+  printf 'FM_HOME=%q ' "$home" >&2
+  if [ "${FM_STATE_OVERRIDE+x}" = x ]; then
+    state=$(cd "$STATE" 2>/dev/null && pwd) || state=$STATE
+    printf 'FM_STATE_OVERRIDE=%q ' "$state" >&2
+  fi
+  [ -z "${1:-}" ] || printf 'FM_PENDING_REPLY_EXISTING_CORR=%q ' "$1" >&2
+  printf '%q' "$SCRIPT_DIR/fm-send.sh" >&2
+  for arg in "${FM_SEND_ORIGINAL_ARGS[@]}"; do
+    printf ' %q' "$arg" >&2
+  done
+  printf '\n' >&2
+}
+
+# Whether a resolved line carrying <key> is durably in the target's status log,
+# appended after this send sampled the log. Any earlier one was superseded,
+# because validation requires the key to be open.
+fm_send_status_key_recorded() {  # <key>
+  local want=$1 line verb got
+  [ -n "$RESOLVE_STATUS_FILE" ] && [ -f "$RESOLVE_STATUS_FILE" ] || return 1
+  while IFS= read -r line || [ -n "$line" ]; do
+    status_line_verb "$line" verb
+    [ "$verb" = resolved ] || continue
+    got=$(_fm_decision_key "$line" '' 2>/dev/null) || continue
+    [ "$got" = "$want" ] && return 0
+  done < <(tail -c "+$((RESOLVE_STATUS_OFFSET + 1))" "$RESOLVE_STATUS_FILE" 2>/dev/null)
+  return 1
+}
+
+fm_send_hold_id_for_key() {  # <key>
+  local pair
+  for pair in $RESOLVE_HOLD_PAIRS; do
+    [ "${pair%%=*}" = "$1" ] || continue
+    printf '%s' "${pair#*=}"
+    return 0
+  done
+  return 1
+}
+
+# One line per --resolve-key stating whether its close is durably recorded.
+# [delivered] means the answer reached the worker, so a key left open gets its
+# manual close, never a resend.
+fm_send_report_resolve_keys() {  # [delivered]
+  local delivered=${1:-} k hold close_cmd
+  for k in $RESOLVE_KEYS; do
+    if hold=$(fm_send_hold_id_for_key "$k"); then
+      if [ "$FM_SEND_HOLDS_FED" = 1 ]; then
+        echo "fm-send: --resolve-key $k: recorded (captain-held task $hold answered)" >&2
+      elif [ -n "$delivered" ]; then
+        echo "fm-send: --resolve-key $k: NOT recorded by this send (the answer intake for captain-held task $hold did not complete); check it with fm-tasks-axi.sh show $hold --full and, if still open, close it with fm-captain-hold.sh answer - do not resend the answer" >&2
+      else
+        echo "fm-send: --resolve-key $k: NOT recorded (this send never reached the answer intake for captain-held task $hold)" >&2
+      fi
+    elif fm_send_status_key_recorded "$k"; then
+      echo "fm-send: --resolve-key $k: recorded (resolved line present in $RESOLVE_STATUS_FILE)" >&2
+    elif [ -n "$delivered" ]; then
+      fm_send_close_line "$k" "$(fm_send_close_note_text "$RESOLVE_ANSWER_TEXT")"
+      printf -v close_cmd "printf '%%s\\n' %q >> %q" "$FM_LINE_CAP_LINE" "$RESOLVE_STATUS_FILE"
+      echo "fm-send: --resolve-key $k: NOT recorded (no resolved line for it in $RESOLVE_STATUS_FILE); close it without resending: $close_cmd" >&2
+    else
+      echo "fm-send: --resolve-key $k: NOT recorded (no resolved line for it in ${RESOLVE_STATUS_FILE:-its status log})" >&2
+    fi
+  done
+}
+
+# After an interrupted local enqueue: the record it wrote, if its atomic rename
+# landed - the exact body at or above the sequence the inbox would have issued
+# when the enqueue began (an idempotent write may reuse an older record).
+fm_send_find_local_record() {
+  local dir f n have
+  dir=$(fm_task_inbox_dir "$STATE" "$INBOX_TASK_ID")
+  for f in "$dir"/*.msg "$dir"/handled/*.msg; do
+    [ -f "$f" ] || continue
+    n=$(fm_task_inbox_seq_of "${f##*/}") || continue
+    [ "$n" -ge "$FM_SEND_LOCAL_SEQ_FLOOR" ] || continue
+    have=$(fm_task_inbox_body "$f" 2>/dev/null; printf x)
+    [ "$have" = "${MESSAGE}x" ] || continue
+    printf '%s' "$f"
+    return 0
+  done
+  return 1
+}
+
+# The catchable-interruption report (TERM, INT, HUP). It states what is durably
+# recorded, never claims an unknown remote completion as unsent, keeps the
+# pending-reply bookkeeping consistent with that outcome, and exits 128+signal.
+fm_send_interrupted() {  # <signal-name>
+  local sig=$1 status found
+  trap '' INT TERM HUP
+  status=$((128 + $(kill -l "$sig")))
+  [ -z "$FM_SEND_HELD_LOCK" ] || fm_lock_release "$FM_SEND_HELD_LOCK" || true
+  if [ "$FM_SEND_PHASE:$FM_SEND_DELIVERY" = deliver:inbox ]; then
+    if found=$(fm_send_find_local_record); then
+      FM_SEND_PHASE=delivered
+      FM_SEND_DELIVERED_WHAT="the steer was durably recorded at $found"
+    else
+      FM_SEND_PHASE=validate
+    fi
+  fi
+  case "$FM_SEND_PHASE:$FM_SEND_DELIVERY" in
+  delivered:*)
+    if [ -n "$PENDING_REPLY_CORR" ] && [ "$FM_SEND_DELIVERY_CONFIRMED" != 1 ]; then
+      fm_pending_reply_confirm_delivery "$STATE" "$PENDING_REPLY_CORR" >/dev/null 2>&1 || true
+    fi
+    echo "fm-send: interrupted by SIG$sig after $FM_SEND_DELIVERED_WHAT; it was delivered, so do not resend it." >&2
+    fm_send_report_resolve_keys delivered
+    ;;
+  deliver:remote)
+    if [ -n "$PENDING_REPLY_CORR" ]; then
+      fm_pending_reply_mark_delivery_unknown "$STATE" "$PENDING_REPLY_CORR" || true
+    fi
+    echo "fm-send: interrupted by SIG$sig while the remote transport to secondmate $TARGET_REMOTE_ID was in flight; remote completion is unknown, so the steer may already be recorded there." >&2
+    fm_send_report_resolve_keys
+    if [ -n "$FIRE_AND_FORGET_ID" ]; then
+      echo "fm-send: retry only with the same delivery id:" >&2
+      fm_send_print_rerun
+    else
+      echo "fm-send: only this correlation-reusing resend is safe; it lands on the same remote inbox record if the first one arrived, and closes each --resolve-key decision once delivery confirms:" >&2
+      fm_send_print_rerun "$PENDING_REPLY_CORR"
+    fi
+    ;;
+  deliver:typed)
+    echo "fm-send: interrupted by SIG$sig while submitting to $T; delivery is unknown, so verify with fm-peek.sh before any resend." >&2
+    fm_send_report_resolve_keys
+    ;;
+  *)
+    if [ "$PENDING_REPLY_CREATED" = 1 ] || [ "$FM_SEND_PREPARED" = 1 ]; then
+      fm_send_known_undelivered_cleanup >/dev/null 2>&1 || true
+    fi
+    echo "fm-send: interrupted by SIG$sig before delivery; nothing was sent to $FM_SEND_LABEL." >&2
+    fm_send_report_resolve_keys
+    echo "fm-send: nothing was sent, so rerunning the same command is safe:" >&2
+    fm_send_print_rerun "${FM_PENDING_REPLY_EXISTING_CORR:-}"
+    ;;
+  esac
+  exit "$status"
+}
+
+if [ "${1:-}" != "--key" ]; then
+  if [ -n "$RESOLVE_KEYS" ] && [ -n "$TARGET_SELECTOR" ] && [ -n "$TARGET_META" ]; then
+    RESOLVE_STATUS_FILE="$STATE/$(fm_send_id_from_meta "$TARGET_META").status"
+    if [ -f "$RESOLVE_STATUS_FILE" ]; then
+      RESOLVE_STATUS_OFFSET=$(wc -c < "$RESOLVE_STATUS_FILE" | tr -d ' ') || RESOLVE_STATUS_OFFSET=0
+    fi
+    case "$RESOLVE_STATUS_OFFSET" in '' | *[!0-9]*) RESOLVE_STATUS_OFFSET=0 ;; esac
+  fi
+  trap 'fm_send_interrupted INT' INT
+  trap 'fm_send_interrupted TERM' TERM
+  trap 'fm_send_interrupted HUP' HUP
+fi
 
 # Resolve a --resolve-key key that the status log no longer owns to the
 # captain-held task that carries it: the key as a task id itself (the collapsed
@@ -741,6 +955,7 @@ if [ -n "$RESOLVE_KEYS" ]; then
     if resolved_hold_id=$(fm_send_hold_resolved_id "$RESOLVE_TASK_ID" "$k"); then
       RESOLVE_HOLD_KEYS="${RESOLVE_HOLD_KEYS}${RESOLVE_HOLD_KEYS:+ }$resolved_hold_id"
       resolve_resend_args="$resolve_resend_args --resolve-key $k"
+      RESOLVE_HOLD_PAIRS="${RESOLVE_HOLD_PAIRS}${RESOLVE_HOLD_PAIRS:+ }$k=$resolved_hold_id"
       continue
     fi
     resolve_refused_keys="${resolve_refused_keys}${resolve_refused_keys:+ }$k"
@@ -829,12 +1044,19 @@ fi
 # without a matching watcher seen marker; any concurrent foreign status bytes,
 # or a worker line the fold read but never listed, leave the watcher's wake
 # path untouched.
+fm_send_close_note_text() { # <answer-text> -> one-line close-note text
+  printf '%s' "$1" | tr '\n\r\t' '   ' | LC_ALL=C tr -d '\000-\037\177'
+}
+
+fm_send_close_line() { # <key> <close-note-text> -> FM_LINE_CAP_LINE
+  fm_cap_line_var "resolved [key=$1]: $(fm_send_resolve_close_note "$1" "$2")" "$RESOLVE_CLOSE_MAX"
+}
+
 fm_send_close_resolved_keys() { # <answer-text>
-  local note=$1 k close_note append_rc still manual_close_cmd close_lines=() i=0
-  note=$(printf '%s' "$note" | tr '\n\r\t' '   ' | LC_ALL=C tr -d '\000-\037\177')
+  local note k append_rc still manual_close_cmd close_lines=() i=0
+  note=$(fm_send_close_note_text "$1")
   for k in $RESOLVE_STATUS_KEYS; do
-    close_note=$(fm_send_resolve_close_note "$k" "$note")
-    fm_cap_line_var "resolved [key=$k]: $close_note" "$RESOLVE_CLOSE_MAX"
+    fm_send_close_line "$k" "$note"
     close_lines+=("$FM_LINE_CAP_LINE")
   done
   [ "${#close_lines[@]}" -gt 0 ] || return 0
@@ -846,6 +1068,11 @@ fm_send_close_resolved_keys() { # <answer-text>
     echo "error: the answer was delivered to $T, but the close for decision key(s) '$RESOLVE_STATUS_KEYS' could not be appended to $RESOLVE_STATUS_FILE. Close it manually with: $manual_close_cmd - do not resend the answer." >&2
     return 1
   fi
+  # The lines are durably appended; say so before the slow re-fold below, so a
+  # caller that kills this run during that fold still knows they landed.
+  for k in $RESOLVE_STATUS_KEYS; do
+    fm_send_progress "--resolve-key $k: recorded (resolved line appended to $RESOLVE_STATUS_FILE)"
+  done
   still=$(status_open_decisions "$RESOLVE_STATUS_FILE")
   for k in $RESOLVE_STATUS_KEYS; do
     case "$still" in
@@ -864,9 +1091,9 @@ fm_send_close_resolved_keys() { # <answer-text>
 # it does not build a decision record or choose a close path; the keys were
 # already resolved to task ids above, so the intake needs no legacy origin.
 fm_send_feed_resolved_holds() { # <answer-text>
-  local note=$1 k lines=''
+  local note k pair lines=''
   [ -n "$RESOLVE_HOLD_KEYS" ] || return 0
-  note=$(printf '%s' "$note" | tr '\n\r\t' '   ' | LC_ALL=C tr -d '\000-\037\177')
+  note=$(fm_send_close_note_text "$1")
   for k in $RESOLVE_HOLD_KEYS; do
     lines="${lines}${k}"$'\t'"${note}"$'\t'$'\n'
   done
@@ -875,6 +1102,10 @@ fm_send_feed_resolved_holds() { # <answer-text>
     echo "error: the answer was delivered to $T, but this captain-held task could not be closed: ${RESOLVE_HOLD_KEYS}. Close it with fm-captain-hold.sh answer - do not resend the answer." >&2
     return 1
   fi
+  FM_SEND_HOLDS_FED=1
+  for pair in $RESOLVE_HOLD_PAIRS; do
+    fm_send_progress "--resolve-key ${pair%%=*}: recorded (captain-held task ${pair#*=} answered)"
+  done
 }
 
 # Resolve the target's harness from its meta (recorded by fm-spawn), used to
@@ -995,6 +1226,7 @@ else
       echo "error: failed to durably prepare pending-reply delivery for $TARGET_TASK_ID" >&2
       exit 1
     fi
+    FM_SEND_PREPARED=1
   fi
   # Data-plane selection (see the header): text addressed to a task selector
   # resolved through this home's metadata rides the inbox plane, unless it is
@@ -1041,6 +1273,7 @@ else
       echo "error: steer not sent to remote secondmate $TARGET_REMOTE_ID: its parent task metadata could not be locked for final delivery validation" >&2
       exit 1
     fi
+    FM_SEND_HELD_LOCK=$REMOTE_META_LOCK
     CURRENT_REMOTE_ID=
     CURRENT_REMOTE_HOST=
     CURRENT_REMOTE_SPAWN_GEN=
@@ -1074,6 +1307,9 @@ else
     # retry that would only wait out the same busy remote queue again. (A
     # remote job's own timeout also relays as 124; treating it as unconfirmed
     # stays safe because the remote enqueue deduplicates.)
+    fm_send_progress "delivery to $TARGET_REMOTE_ID starts now; no delivery step ran before this line"
+    FM_SEND_DELIVERY=remote
+    FM_SEND_PHASE=deliver
     printf '%s' "$MESSAGE" | fm_run_timed "$FM_SEND_REMOTE_BUDGET" "$SCRIPT_DIR/fm-on.sh" --stdin \
       "$TARGET_REMOTE_ID" fm-remote-secondmate-control.sh send-stdin "${REMOTE_SEND_ARGS[@]}" || remote_rc=$?
     if [ "$remote_rc" -eq 124 ]; then
@@ -1085,6 +1321,7 @@ else
         "$TARGET_REMOTE_ID" fm-remote-secondmate-control.sh send-stdin "${REMOTE_SEND_ARGS[@]}" || remote_rc=$?
     fi
     fm_lock_release "$REMOTE_META_LOCK"
+    FM_SEND_HELD_LOCK=
     if [ "$remote_rc" -ne 0 ] && [ "$remote_completion_unknown" -eq 1 ]; then
       if [ -n "$FIRE_AND_FORGET_ID" ]; then
         echo "error: fire-and-forget steer to remote secondmate $TARGET_REMOTE_ID is unconfirmed (delivery-id=$FIRE_AND_FORGET_ID); retry only with the same delivery id" >&2
@@ -1093,6 +1330,9 @@ else
       if [ -n "$PENDING_REPLY_CORR" ]; then
         fm_pending_reply_mark_delivery_unknown "$STATE" "$PENDING_REPLY_CORR" || true
       fi
+      # fm-send's own timeout: say per answered key what is durably recorded
+      # before the resend, which closes each one once delivery confirms.
+      fm_send_report_resolve_keys
       if [ "$remote_rc" -eq 255 ]; then
         echo "error: steer to remote secondmate $TARGET_REMOTE_ID is unconfirmed (transport lost twice; remote completion unknown). Only the correlation-reusing resend below is idempotent and lands on the same remote inbox record:" >&2
       elif [ "$remote_rc" -eq 124 ]; then
@@ -1100,22 +1340,20 @@ else
       else
         echo "error: steer to remote secondmate $TARGET_REMOTE_ID is unconfirmed (the first transport attempt had unknown completion and the retry failed). Only the correlation-reusing resend below is idempotent and lands on the same remote inbox record:" >&2
       fi
-      printf '%s' "$(fm_send_resend_env)" >&2
-      printf 'FM_PENDING_REPLY_EXISTING_CORR=%q %s' \
-        "$PENDING_REPLY_CORR" "$(fm_send_resend_exe)" >&2
-      for resend_arg in "${FM_SEND_ORIGINAL_ARGS[@]}"; do
-        printf ' %q' "$resend_arg" >&2
-      done
-      printf '\n' >&2
+      fm_send_print_rerun "$PENDING_REPLY_CORR"
       exit 1
     fi
     if [ "$remote_rc" -ne 0 ]; then
+      FM_SEND_PHASE=validate
       fm_send_known_undelivered_cleanup ||
         echo "error: known-undelivered pending-reply state could not be reset for $TARGET_TASK_ID" >&2
       echo "error: steer not sent to remote secondmate $TARGET_REMOTE_ID (the remote steering-inbox record could not be written; the remote leg's stderr above has the reason)" >&2
       exit 1
     fi
     # The remote record is durable delivery, exactly as a local enqueue is.
+    FM_SEND_DELIVERED_WHAT="the steer was durably recorded in remote secondmate $TARGET_REMOTE_ID's steering inbox"
+    FM_SEND_PHASE=delivered
+    fm_send_progress "durably recorded in remote secondmate $TARGET_REMOTE_ID's steering inbox"
     if [ -n "$PENDING_REPLY_CORR" ]; then
       if fm_pending_reply_confirm_delivery "$STATE" "$PENDING_REPLY_CORR"; then
         :
@@ -1128,6 +1366,7 @@ else
         fi
       fi
     fi
+    FM_SEND_DELIVERY_CONFIRMED=1
     if [ -n "$RESOLVE_KEYS" ]; then
       fm_send_close_resolved_keys "$RESOLVE_ANSWER_TEXT" || exit 1
       fm_send_feed_resolved_holds "$RESOLVE_ANSWER_TEXT" || exit 1
@@ -1144,6 +1383,7 @@ else
       echo "error: steer not sent to $INBOX_TASK_ID: its task metadata could not be locked for final delivery validation" >&2
       exit 1
     fi
+    FM_SEND_HELD_LOCK=$INBOX_META_LOCK
     CURRENT_INBOX_TARGET=
     CURRENT_INBOX_BACKEND=
     CURRENT_INBOX_SPAWN_GEN=
@@ -1164,6 +1404,15 @@ else
       echo "error: steer not sent to $INBOX_TASK_ID: the task retired or changed endpoint during target resolution" >&2
       exit 1
     fi
+    # The floor below which an interrupted enqueue cannot have landed (an
+    # idempotent write may reuse any earlier record, so it has none).
+    if [ "${FM_SEND_IDEMPOTENT:-0}" != 1 ]; then
+      FM_SEND_LOCAL_SEQ_FLOOR=$(fm_task_inbox_next_seq "$(fm_task_inbox_dir "$STATE" "$INBOX_TASK_ID")")
+      FM_SEND_LOCAL_SEQ_FLOOR=$((10#$FM_SEND_LOCAL_SEQ_FLOOR))
+    fi
+    fm_send_progress "delivery to $INBOX_TASK_ID starts now; no delivery step ran before this line"
+    FM_SEND_DELIVERY=inbox
+    FM_SEND_PHASE=deliver
     if [ "${FM_SEND_IDEMPOTENT:-0}" = 1 ]; then
       INBOX_RECORD=$(fm_task_inbox_write_idempotent "$STATE" "$INBOX_TASK_ID" "$MESSAGE" \
         "${FIRE_AND_FORGET_ID:+fire-and-forget}") || inbox_write_rc=$?
@@ -1172,14 +1421,20 @@ else
         "${FIRE_AND_FORGET_ID:+fire-and-forget}") || inbox_write_rc=$?
     fi
     if [ "${inbox_write_rc:-0}" -ne 0 ]; then
+      FM_SEND_PHASE=validate
       fm_lock_release "$INBOX_META_LOCK"
+      FM_SEND_HELD_LOCK=
       if [ "$PENDING_REPLY_CREATED" = 1 ] && [ -n "$PENDING_REPLY_CORR" ]; then
         fm_pending_reply_discard_undelivered "$STATE" "$PENDING_REPLY_CORR" || true
       fi
       echo "error: steer not sent to $INBOX_TASK_ID: its inbox record could not be written under $STATE/$INBOX_TASK_ID.inbox" >&2
       exit 1
     fi
+    FM_SEND_DELIVERED_WHAT="the steer was durably recorded at $INBOX_RECORD"
+    FM_SEND_PHASE=delivered
     fm_lock_release "$INBOX_META_LOCK"
+    FM_SEND_HELD_LOCK=
+    fm_send_progress "durably recorded at $INBOX_RECORD"
     # Enqueue IS durable delivery to the task's record: mark the pending
     # expectation delivered now, without resolving it - only a correlated
     # parent report acknowledges the request.
@@ -1203,6 +1458,7 @@ else
         fi
       fi
     fi
+    FM_SEND_DELIVERY_CONFIRMED=1
     # The answer is durably sent: close each answered decision at enqueue time
     # (answerer-closes; see the header contract).
     if [ -n "$RESOLVE_KEYS" ]; then
@@ -1270,12 +1526,16 @@ else
   # block: remote text rides the inbox leg above, and remote --key exits
   # earlier.
   send_rc=0
+  fm_send_progress "delivery to $FM_SEND_LABEL starts now; no delivery step ran before this line"
+  FM_SEND_DELIVERY=typed
+  FM_SEND_PHASE=deliver
   if verdict=$(fm_backend_send_text_submit "$TARGET_BACKEND" "$T" "$MESSAGE" "$retries" "$sleep_s" "$settle" "$EXPECTED_LABEL"); then
     :
   else
     send_rc=$?
   fi
   if [ "$send_rc" -ne 0 ]; then
+    FM_SEND_PHASE=validate
     fm_send_known_undelivered_cleanup ||
       echo "error: known-undelivered pending-reply state could not be reset for $TARGET_TASK_ID" >&2
     echo "error: text not sent to $T ($TARGET_BACKEND send failed; tried $RESOLUTION_TRIED)" >&2
@@ -1283,8 +1543,11 @@ else
   fi
   case "$verdict" in
   empty)
+    FM_SEND_DELIVERED_WHAT="the text was submitted to $T"
+    FM_SEND_PHASE=delivered
     ;;
   send-failed)
+    FM_SEND_PHASE=validate
     fm_send_known_undelivered_cleanup ||
       echo "error: known-undelivered pending-reply state could not be reset for $TARGET_TASK_ID" >&2
     echo "error: text not sent to $T ($TARGET_BACKEND send failed; tried $RESOLUTION_TRIED)" >&2
@@ -1303,6 +1566,7 @@ else
     # surfaces through the library's own reconciliation
     # (bin/fm-pending-reply-lib.sh).
     echo "fm-send: text delivered to $T but submission is unconfirmed (verdict=pending; tried $RESOLUTION_TRIED); do not retype or blindly resend - verify with fm-peek.sh, then re-send '--key Enter' only if the composer still holds the text" >&2
+    fm_send_report_resolve_keys
     exit 3
     ;;
   unconfirmed)
@@ -1320,9 +1584,11 @@ else
     else
       echo "fm-send: delivery to $T is unconfirmed (verdict=unconfirmed: the $TARGET_BACKEND outcome is unproven, a lost reply or an error that can follow a commit; tried $RESOLUTION_TRIED); verify with fm-peek.sh, and resend only the identical text, which reuses its request id" >&2
     fi
+    fm_send_report_resolve_keys
     exit 3
     ;;
   *)
+    FM_SEND_PHASE=validate
     if [ "$PENDING_REPLY_CREATED" = 1 ] && [ -n "$PENDING_REPLY_CORR" ]; then
       fm_pending_reply_discard_undelivered "$STATE" "$PENDING_REPLY_CORR" || true
     fi
@@ -1345,6 +1611,7 @@ else
       exit 1
     fi
   fi
+  FM_SEND_DELIVERY_CONFIRMED=1
   # Delivery is fully confirmed: close each answered decision in this home's
   # ledger (answerer-closes; see the header contract).
   if [ -n "$RESOLVE_KEYS" ]; then
