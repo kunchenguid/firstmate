@@ -264,6 +264,41 @@ test_incremental_agrees_with_full_fold_across_appends() {
   pass "the incremental fold matches the full fold across appends in both key positions"
 }
 
+test_whole_file_fold_keeps_open_order_without_subprocess_growth() {
+  local dir f size i level small large expected
+  dir=$(case_dir whole-fold-processes)
+  f="$dir/task.status"
+  printf 'kind=secondmate\n' > "$dir/task.meta"
+  for size in 1 200; do
+    : > "$f"
+    for ((i = 0; i < size; i++)); do
+      printf 'needs-decision [key=q%s]: question %s\nblocked: [key=b%s] waiting %s\ndone: other work %s\nresolved [key=b%s]: answered\n' \
+        "$i" "$i" "$i" "$i" "$i" "$i" >> "$f"
+    done
+    : > "$dir/children-$size"
+    (
+      level=$BASH_SUBSHELL
+      set -T
+      trap 'if [ "$BASH_SUBSHELL" -gt "$level" ]; then printf x >> "$dir/children-$size"; fi' DEBUG
+      status_open_decisions "$f" > "$dir/output-$size"
+    )
+    [ "$(grep -c . "$dir/output-$size")" -eq "$size" ] \
+      || fail "the whole-file fold lost open questions at size $size: $(cat "$dir/output-$size")"
+  done
+  small=$(wc -c < "$dir/children-1")
+  large=$(wc -c < "$dir/children-200")
+  [ "$large" -le "$((small + 20))" ] \
+    || fail "the whole-file fold launches subprocess work per transition ($small -> $large)"
+  # A re-asked key moves to the end, a resolved key leaves, and a secondmate's
+  # own done line closes nothing; the cursor-backed fold must agree.
+  f="$dir/order.status"
+  printf 'needs-decision [key=a]: first\nneeds-decision [key=b]: second\nneeds-decision [key=c]: third\n' > "$f"
+  printf 'done: unrelated\nneeds-decision [key=a]: asked again\nresolved [key=b]: answered\n' >> "$f"
+  expected=$(printf 'c\tneeds-decision\tthird\na\tneeds-decision\tasked again\n')
+  assert_fold "$f" "$expected" "re-asked key moves to the end"
+  pass "the whole-file fold keeps open order without subprocess work growing with transitions"
+}
+
 test_stated_key_is_honored_in_both_positions
 test_bare_keyless_line_still_folds_to_default
 test_resolution_closes_across_positions
@@ -277,6 +312,7 @@ test_corr_only_tag_opens_as_default_like_a_bare_line
 test_key_only_before_colon_still_opens_no_regression
 test_blocked_and_resolved_are_tag_order_independent
 test_incremental_agrees_with_full_fold_across_appends
+test_whole_file_fold_keeps_open_order_without_subprocess_growth
 
 # status_key_closing_verb reports HOW the status side currently reads one key,
 # which is what lets a consumer tell a settled key from a key handed to a
