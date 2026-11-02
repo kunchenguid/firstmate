@@ -437,6 +437,9 @@ resolve_authority() {
   else
     ROOT_STATE=$root/state ROOT_CONFIG=$root/config ROOT_DATA=$root/data
   fi
+  if [ -d "$ROOT_STATE" ]; then
+    ROOT_STATE=$(canon_dir "$ROOT_STATE") || return 1
+  fi
 }
 
 # --- the holder ledger ---------------------------------------------------------
@@ -570,6 +573,7 @@ certificate_generation() {
   owner=$(awk -F '\t' -v id="$id" '$1 == id { print $2; exit }' "$TMPD/remote-owners")
   owner_state=$owner/state
   [ "$owner" != "$ROOT_HOME" ] || owner_state=$ROOT_STATE
+  owner_state=$(canon_dir "$owner_state") || return 0
   [ "$meta" = "$owner_state/$id.meta" ] || return 0
   [ "$(record_field "$meta" remote_host)" = "$host" ] \
     && [ "$(record_field "$meta" remote_root)" = "$root" ] \
@@ -774,6 +778,7 @@ remote_owner() {
   if [ "$REMOTE_OWNER" = "$ROOT_HOME" ]; then
     REMOTE_OWNER_STATE=$ROOT_STATE REMOTE_OWNER_CONFIG=$ROOT_CONFIG REMOTE_OWNER_DATA=$ROOT_DATA
   fi
+  REMOTE_OWNER_STATE=$(canon_dir "$REMOTE_OWNER_STATE") || return 1
 }
 
 # remote_certificate <id>: the remote's last complete certificate, whatever its

@@ -1616,9 +1616,14 @@ test_terminal_generations_and_removed_aliases() {
 test_nested_remote_serve_uses_registry_owner() {
   local out
   make_remote_fleet nested-remote-owner 2
+  mv "$R_LOCAL/state" "$R_LOCAL/physical-state"
+  ln -s physical-state "$R_LOCAL/state"
   sed -n '/^- theshop /p' "$R_ROOT/data/secondmates.md" > "$R_LOCAL/data/secondmates.md"
   sed '/^- theshop /d' "$R_ROOT/data/secondmates.md" > "$R_ROOT/data/secondmates.new"
   mv "$R_ROOT/data/secondmates.new" "$R_ROOT/data/secondmates.md"
+  (umask 077; printf '{}\n' > "$R_LOCAL/response.json")
+  out=$(seats "$R_LOCAL" reconcile-remote theshop --generation missing --response-file "$R_LOCAL/response.json" 2>&1)
+  assert_contains "$out" "no seat is reserved" "nested owner state alias was rejected"
   cat > "$R_ROOT/direct-entrypoint" <<'SH'
 #!/usr/bin/env bash
 root=$(printf '%s' "$2" | base64 -d)
@@ -1685,6 +1690,11 @@ test_unpooled_grants_exist_before_certificate_publication() {
 test_remote_host_supervisor_adoption_and_accounting() {
   local out policy meta reservation receipt dir="$TMP_ROOT/remote-adopt-out"
   make_remote_fleet remote-host-accounting 1
+  ln -s "$R_ROOT" "$TMP_ROOT/primary-alias"
+  R_ROOT="$TMP_ROOT/primary-alias"
+  (umask 077; printf '{}\n' > "$R_ROOT/response.json")
+  out=$(seats "$R_ROOT" reconcile-remote theshop --generation missing --response-file "$R_ROOT/response.json" 2>&1)
+  assert_contains "$out" "no seat is reserved" "root owner home alias was rejected"
   mkdir -p "$dir"
   serve_remotes >/dev/null || fail "initial serve"
   policy=$R_REMOTE/state/fleet-seats/policy.json
