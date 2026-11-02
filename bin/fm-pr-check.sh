@@ -22,7 +22,22 @@
 # skips this refusal, because its own merge-time draft refusal is authoritative.
 # The recorded pr= also frees the task's place in a declared project capacity
 # (bin/fm-project-capacity-lib.sh).
+#
+# scan records every task whose status reports a PR that nobody recorded, so
+# merge monitoring never depends on the supervisor remembering this command.
+# bin/fm-watch.sh runs it at the start of each check sweep. A candidate is a
+# task record that is not a secondmate or scout and has no pr= line; its PR is
+# the first "PR <url>" token in the newest done: line that names a supported PR
+# URL, whatever the rest of the line says. A URL without the "PR " prefix is
+# prose and never counts. Each candidate is recorded through the ordinary
+# path above, so every refusal still applies. A refusal prints one line naming
+# the task, the URL, and the reason, once per task and URL
+# (state/<task>.pr-register-refused), and the scan retries silently on later
+# sweeps, so a draft later marked ready is recorded without help. Registrations
+# stop FM_CHECK_TIMEOUT (default 30) minus 5 seconds after the scan starts; a
+# registration cut at that bound prints nothing and is retried.
 # Usage: fm-pr-check.sh <task-id> <pr-url>
+#        fm-pr-check.sh scan
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -38,6 +53,75 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 . "$SCRIPT_DIR/fm-parent-channel-lib.sh"
 # shellcheck source=bin/fm-dod-lib.sh
 . "$SCRIPT_DIR/fm-dod-lib.sh"
+# shellcheck source=bin/fm-timeout-lib.sh
+. "$SCRIPT_DIR/fm-timeout-lib.sh"
+
+pr_check_reported_url() {  # <status-file>
+  local line token found=
+  [ -f "$1" ] && [ ! -L "$1" ] || return 1
+  while IFS= read -r line; do
+    [ "$(status_line_verb "$line")" = "done" ] || continue
+    while IFS= read -r token; do
+      token=${token#*PR }
+      while :; do
+        case "$token" in
+          *[\).,\;:\'\"]) token=${token%?} ;;
+          *) break ;;
+        esac
+      done
+      if fm_pr_url_parse "$token"; then
+        found=$FM_PR_URL
+        break
+      fi
+    done < <(status_line_note "$line" | grep -oE '(^|[^[:alnum:]_])PR https://[^[:space:]]+' || true)
+  done < <(grep -E '^[[:space:]]*done' "$1" | grep -F 'PR https://' || true)
+  [ -n "$found" ] || return 1
+  printf '%s\n' "$found"
+}
+
+pr_check_scan() {
+  local budget start meta id kind url left marker err rc tmp
+  budget=${FM_CHECK_TIMEOUT:-30}
+  case "$budget" in ''|*[!0-9]*) budget=30 ;; esac
+  budget=$((budget - 5))
+  start=$(date +%s)
+  export FM_HOME FM_STATE_OVERRIDE="$STATE"
+  for meta in "$STATE"/*.meta; do
+    [ -f "$meta" ] && [ ! -L "$meta" ] || continue
+    id=${meta##*/}
+    id=${id%.meta}
+    fm_pr_task_id_valid "$id" || continue
+    ! grep -q '^pr=' "$meta" || continue
+    kind=$(sed -n 's/^kind=//p' "$meta" | tail -1)
+    case "$kind" in secondmate|scout) continue ;; esac
+    url=$(pr_check_reported_url "$STATE/$id.status") || continue
+    left=$((start + budget - $(date +%s)))
+    [ "$left" -gt 0 ] || break
+    marker="$STATE/$id.pr-register-refused"
+    rc=0
+    err=$(fm_run_timed "$left" bash "$SCRIPT_DIR/fm-pr-check.sh" "$id" "$url" 2>&1 >/dev/null) || rc=$?
+    if [ "$rc" -eq 0 ]; then
+      rm -f -- "$marker"
+      continue
+    fi
+    [ "$rc" -ne 124 ] || continue
+    if [ -f "$marker" ] && [ ! -L "$marker" ] && [ "$(cat "$marker")" = "$url" ]; then
+      continue
+    fi
+    tmp=$(mktemp "$STATE/.pr-register-refused.XXXXXX") || continue
+    if ! { printf '%s\n' "$url" > "$tmp" && mv -f -- "$tmp" "$marker"; }; then
+      rm -f -- "$tmp"
+      continue
+    fi
+    err=$(printf '%s\n' "$err" | sed -n 's/^error: //p' | head -1)
+    printf '%s reported %s in a done line, but it was not recorded: %s\n' "$id" "$url" "${err:-registration failed}"
+  done
+}
+
+if [ "$#" -eq 1 ] && [ "$1" = scan ]; then
+  pr_check_scan
+  exit 0
+fi
 
 if [ "$#" -ne 2 ]; then
   echo "error: invalid PR check request" >&2

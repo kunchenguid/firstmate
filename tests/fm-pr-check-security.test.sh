@@ -760,6 +760,105 @@ test_direct_pr_unpushed_commit_refuses_registration() {
   pass "fm-pr-check refuses a direct-PR registration while a later commit is only in the copy"
 }
 
+# A PR a task reported in a done line is recorded by the scan whatever the rest
+# of the line says, so its merge monitoring never waits on the supervisor
+# running this command by hand. A URL without the "PR " prefix is prose, a scout
+# never delivers a PR, and an already recorded PR is left alone.
+test_scan_records_a_pr_reported_in_a_done_line() {
+  local dir state out
+  dir=$(make_case scan-records-reported-pr)
+  state="$dir/home/state"
+  write_task_meta "$dir" task-a
+  printf '%s\n' \
+    'working [at=1]: rebasing the PR branch' \
+    'done [at=2]: rebased and pushed; PR https://github.com/o/r/pull/7, not draft, only Full suite red' \
+    'done [at=3]: live transcript posted on https://github.com/o/r/pull/99' > "$state/task-a.status"
+  write_task_meta "$dir" task-prose
+  printf '%s\n' 'done [at=2]: opened https://github.com/o/r/pull/8' > "$state/task-prose.status"
+  fm_write_meta "$state/task-scout.meta" 'window=firstmate:fm-task-scout' 'endpoint_task_id=task-scout' \
+    "worktree=$dir/wt" "project=$dir/project" 'kind=scout'
+  printf '%s\n' 'done [at=2]: PR https://github.com/o/r/pull/10 reviewed' > "$state/task-scout.status"
+  write_poll_meta "$state" task-held https://github.com/o/r/pull/11
+  printf '%s\n' 'done [at=2]: PR https://github.com/o/r/pull/12 checks green' > "$state/task-held.status"
+  cp "$state/task-held.meta" "$dir/held.before"
+
+  out=$(run_check_entry "$dir" scan 2> "$dir/stderr") || fail "the scan failed: $(cat "$dir/stderr")"
+  [ -z "$out" ] || fail "a scan that recorded everything printed: $out"
+  grep -qxF 'pr=https://github.com/o/r/pull/7' "$state/task-a.meta" \
+    || fail "the PR named in a done line was not recorded"
+  fm_pr_poll_artifacts_valid "$state" task-a "$POLL" || fail "the reported PR's merge poll was not armed"
+  ! grep -q '^pr=' "$state/task-prose.meta" || fail "a URL without the PR prefix was recorded"
+  [ ! -e "$state/task-prose.check.sh" ] || fail "a URL without the PR prefix armed a poll"
+  ! grep -q '^pr=' "$state/task-scout.meta" || fail "a scout's PR mention was recorded"
+  [ ! -e "$state/task-scout.check.sh" ] || fail "a scout's PR mention armed a poll"
+  cmp -s "$dir/held.before" "$state/task-held.meta" || fail "a task with a recorded PR was recorded again"
+  pass "the scan records the PR a done line reports and leaves prose, scouts and recorded PRs alone"
+}
+
+# A refused registration is reported once per task and PR, and later scans keep
+# retrying silently, so a draft marked ready afterwards is recorded unaided.
+test_scan_reports_a_refusal_once_and_retries() {
+  local dir state out
+  dir=$(make_case scan-refusal-once)
+  state="$dir/home/state"
+  write_task_meta "$dir"
+  printf '%s\n' 'done [at=2]: PR https://github.com/o/r/pull/9 checks green' > "$state/task-a.status"
+
+  out=$(FM_TEST_GH_DRAFT=true run_check_entry "$dir" scan 2> "$dir/stderr") \
+    || fail "the scan failed: $(cat "$dir/stderr")"
+  [ "$(printf '%s\n' "$out" | wc -l | tr -d ' ')" = 1 ] || fail "a refusal did not print exactly one line: $out"
+  case "$out" in
+    'task-a reported https://github.com/o/r/pull/9 in a done line, but it was not recorded: '*draft*) ;;
+    *) fail "the refusal line did not name the task, the PR and the reason: $out" ;;
+  esac
+  ! grep -q '^pr=' "$state/task-a.meta" || fail "a refused draft was recorded"
+
+  out=$(FM_TEST_GH_DRAFT=true run_check_entry "$dir" scan 2> "$dir/stderr") \
+    || fail "the repeated scan failed: $(cat "$dir/stderr")"
+  [ -z "$out" ] || fail "the same refusal was reported twice: $out"
+
+  out=$(FM_TEST_GH_DRAFT=false run_check_entry "$dir" scan 2> "$dir/stderr") \
+    || fail "the retry scan failed: $(cat "$dir/stderr")"
+  [ -z "$out" ] || fail "a successful retry printed: $out"
+  grep -qxF 'pr=https://github.com/o/r/pull/9' "$state/task-a.meta" \
+    || fail "the PR was not recorded once it left draft"
+  [ ! -e "$state/task-a.pr-register-refused" ] || fail "a recorded PR kept its refusal marker"
+  pass "the scan reports a refused registration once and records the PR on a later retry"
+}
+
+# The watcher's check sweep runs the scan, so a reported PR gets its merge poll
+# without the supervisor, and a refusal becomes a durable wake.
+test_watcher_sweep_records_a_reported_pr() {
+  local dir state rc
+  dir=$(make_case watcher-scan-records)
+  state="$dir/home/state"
+  write_task_meta "$dir"
+  printf '%s\n' 'done [at=2]: PR https://github.com/o/r/pull/7 open, not draft' > "$state/task-a.status"
+  add_stop_custom_check "$dir"
+  set +e
+  run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/watch.out" 2> "$dir/watch.err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "the watcher failed: $(cat "$dir/watch.err")"
+  grep -qxF 'pr=https://github.com/o/r/pull/7' "$state/task-a.meta" \
+    || fail "the watcher sweep did not record the reported PR"
+  fm_pr_poll_artifacts_valid "$state" task-a "$POLL" || fail "the watcher sweep did not arm the reported PR's merge poll"
+
+  dir=$(make_case watcher-scan-refusal)
+  state="$dir/home/state"
+  write_task_meta "$dir"
+  printf '%s\n' 'done [at=2]: PR https://github.com/o/r/pull/9 checks green' > "$state/task-a.status"
+  add_stop_custom_check "$dir"
+  set +e
+  FM_TEST_GH_DRAFT=true run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/watch.out" 2> "$dir/watch.err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "the refusal watcher failed: $(cat "$dir/watch.err")"
+  grep -F 'check: pr-register: task-a reported https://github.com/o/r/pull/9' "$state/.wake-queue" >/dev/null \
+    || fail "the refusal was not queued as a durable wake: $(cat "$state/.wake-queue" 2>/dev/null)"
+  pass "the watcher sweep records a reported PR and queues a refusal"
+}
+
 test_valid_recording_and_merge_derivation() {
   local dir expected sidecar count rc
   dir=$(make_case valid-recording)
@@ -1670,6 +1769,7 @@ test_teardown_removes_poll_artifacts() {
   printf 'data\n' > "$dir/home/state/task-a.pr-poll"
   printf 'registration\n' > "$dir/home/state/task-a.pr-poll-registration"
   printf 'trust\n' > "$dir/home/state/task-a.check-trust"
+  printf 'https://github.com/o/r/pull/9\n' > "$dir/home/state/task-a.pr-register-refused"
   cat > "$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
 exit 0
@@ -1684,6 +1784,7 @@ SH
   [ ! -e "$dir/home/state/task-a.pr-poll" ] || fail "teardown left the sidecar"
   [ ! -e "$dir/home/state/task-a.pr-poll-registration" ] || fail "teardown left the PR poll registration"
   [ ! -e "$dir/home/state/task-a.check-trust" ] || fail "teardown left the custom check registration"
+  [ ! -e "$dir/home/state/task-a.pr-register-refused" ] || fail "teardown left the PR registration refusal marker"
 
   dir=$(make_case teardown-retirement-receipt)
   fakebin="$dir/fakebin"
@@ -3910,6 +4011,9 @@ test_draft_pull_request_is_not_armed
 test_secondmate_record_refuses_a_pr_watch
 test_unpushed_named_head_refuses_registration
 test_direct_pr_unpushed_commit_refuses_registration
+test_scan_records_a_pr_reported_in_a_done_line
+test_scan_reports_a_refusal_once_and_retries
+test_watcher_sweep_records_a_reported_pr
 test_valid_recording_and_merge_derivation
 test_rejected_metacharacter_bytes_are_inert
 test_static_poll_contract
