@@ -2452,6 +2452,11 @@ EOF
 # retyping would duplicate it. Proven pending (and pending-unproven) retries
 # consume the budget; any other verdict returns immediately, so `unknown`
 # stays a loud refusal rather than a blind retry into an unreadable pane.
+# A caller that opts into <resolved-target-var> also receives endpoint outcomes:
+# Enter resolving a different endpoint than <target> returns `endpoint-changed`
+# (`inbox-deferred` on the inbox plane) with no retype and no further Enter, and
+# a failed Enter returns `send-failed`/`inbox-deferred` rather than a composer
+# verdict; every caller that omits the variable keeps the vocabulary above.
 # tmux and herdr keep richer cores that consume this same shared verdict plus
 # fm_composer_queued_enter_verdict; no shape knowledge lives in any loop.
 fm_composer_submit_retry_core() {  # <send-key-fn> <state-fn> <target> <retries> <enter-sleep> [expected-label] [resolved-target-var]

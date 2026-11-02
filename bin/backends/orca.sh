@@ -377,6 +377,13 @@ fm_backend_orca_resolve_live_terminal() {  # <stale-terminal-id>
   printf '%s' "$named_json" | fm_backend_orca_pick_terminal "$stale"
 }
 
+# Gate input to a replacement endpoint resolved at send time. Returns 0 to
+# proceed with the caller's text or key, 1 for a blocking dialog (text and Enter
+# stop, while an explicit Ctrl-C is unaffected), 2 when the pane provably holds
+# this ring's own pending doorbell so no copy is appended, and 4 when an inbox
+# ring must defer the whole send. FM_TASK_INBOX_RING_LINE alone selects the
+# inbox draft, busy, and unreadable checks; a typed send keeps its existing
+# semantics behind the dialog guard.
 fm_backend_orca_check_replacement() {
   local cap dialog cstate action=${2:-literal}
   if ! cap=$(fm_backend_orca_composer_capture "$1" 2>/dev/null); then
