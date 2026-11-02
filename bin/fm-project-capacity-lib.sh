@@ -45,10 +45,13 @@
 #   - has no recorded PR handoff: the pr= line bin/fm-pr-check.sh records when a
 #     worker's PR is ready, after which the worker waits on review or merge and
 #     no longer uses local resources, and
-#   - is not a finished scout or local-only ship with no capacity reservation.
+#   - is not a finished scout or local-only ship with no active reservation.
 # Completion means a done event with no later working event in the status log.
 # A <state>/<id>.capacity-reservation file holds a released worker's place
-# during relaunch until working is appended on success or non-launch is proven.
+# during relaunch while the status log has not grown past its status_offset.
+# Reservations contain gen=<spawn generation> and status_offset=<byte count>.
+# Admission reads the reservation before status; malformed or unreadable records
+# hold a place. Growth expires the reservation and restores the completion rule.
 # A place therefore frees when a PR-based ship records its ready PR, when a
 # scout or local-only ship reports done, or when a task's record is removed.
 # No-mistakes and direct-PR ships keep their place after done until their PR
@@ -174,6 +177,21 @@ fm_project_capacity_reservation_path() {
   printf '%s/%s.capacity-reservation\n' "$1" "$2"
 }
 
+fm_project_capacity_reservation_active() {
+  local reservation=$1 status_file=$2 offset size
+  [ -e "$reservation" ] || [ -L "$reservation" ] || return 1
+  [ -f "$reservation" ] && [ -r "$reservation" ] || return 0
+  offset=$(awk '
+    NR == 1 && /^gen=.+$/ { gen=1; next }
+    NR == 2 && /^status_offset=[0-9]+$/ { offset=substr($0,15); valid=1; next }
+    { invalid=1 }
+    END { if (NR != 2 || !gen || !valid || invalid) exit 1; print offset }
+  ' "$reservation") || return 0
+  size=$(wc -c < "$status_file" 2>/dev/null | tr -d '[:space:]') || return 0
+  case "$size" in ''|*[!0-9]*) return 0 ;; esac
+  awk -v size="$size" -v offset="$offset" 'BEGIN { exit !(size <= offset) }'
+}
+
 fm_project_capacity_status_finished() {
   local status_file=$1 status_line status_verb finished=0
   [ -f "$status_file" ] && [ -r "$status_file" ] || return 1
@@ -252,8 +270,8 @@ fm_project_capacity_occupants() {  # <project-lock> <project-dir> <first-state> 
       if [ "$kind" = scout ] || { [ "$kind" = ship ] && [ "$(fm_meta_get "$meta" mode)" = local-only ]; }; then
         status_file=${meta%.meta}.status
         reservation=$(fm_project_capacity_reservation_path "$state" "$(basename "$meta" .meta)")
-        if fm_project_capacity_status_finished "$status_file" &&
-          [ ! -e "$reservation" ] && [ ! -L "$reservation" ]; then
+        if ! fm_project_capacity_reservation_active "$reservation" "$status_file" &&
+          fm_project_capacity_status_finished "$status_file"; then
           continue
         fi
       fi

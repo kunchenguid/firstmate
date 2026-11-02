@@ -1713,7 +1713,6 @@ SPAWN_LAUNCH_SENT=0
 SPAWN_ENDPOINT_CLOSED=0
 SPAWN_STAGED_LAUNCH_FILE=
 SPAWN_CAPACITY_RESERVATION=
-SPAWN_CAPACITY_RESERVATION_TOKEN=${BASHPID:-$$}
 
 spawn_fresh_commit_rollback() {
   if fm_backlog_atomic_transition rollback "$STATE/$ID.meta" \
@@ -2026,18 +2025,11 @@ spawn_abort_cleanup() {
       esac
     fi
   fi
-  if [ -n "$SPAWN_CAPACITY_RESERVATION" ]; then
+  if [ "$status" -ne 0 ] && [ -n "$SPAWN_CAPACITY_RESERVATION" ] &&
+    { [ "$SPAWN_LAUNCH_SENT" = 0 ] || [ "$SPAWN_ENDPOINT_CLOSED" = 1 ]; }; then
     if fm_lock_try_acquire "$SPAWN_TASK_LOCK"; then
-      if [ "$(cat "$SPAWN_CAPACITY_RESERVATION" 2>/dev/null)" = "$SPAWN_CAPACITY_RESERVATION_TOKEN" ]; then
-        if [ "$status" -eq 0 ]; then
-          if printf '%s\n' "$(status_stamp_line 'working: spawn admitted')" >> "$STATE/$ID.status"; then
-            rm -f -- "$SPAWN_CAPACITY_RESERVATION" || true
-          else
-            echo "warning: could not record working status for $ID; keeping its capacity reservation" >&2
-          fi
-        elif [ "$SPAWN_LAUNCH_SENT" = 0 ] || [ "$SPAWN_ENDPOINT_CLOSED" = 1 ]; then
-          rm -f -- "$SPAWN_CAPACITY_RESERVATION" || true
-        fi
+      if [ "$(fm_meta_get "$SPAWN_CAPACITY_RESERVATION" gen)" = "$SPAWN_GEN" ]; then
+        rm -f -- "$SPAWN_CAPACITY_RESERVATION" || true
       fi
       fm_lock_release "$SPAWN_TASK_LOCK" || true
     else
@@ -7343,9 +7335,13 @@ fi
 if [ "$KIND" = scout ] || { [ "$KIND" = ship ] && [ "$MODE" = local-only ]; }; then
   if [ "$RELAUNCH" -eq 1 ] && fm_project_capacity_status_finished "$STATE/$ID.status"; then
     CAPACITY_RESERVATION_PATH=$(fm_project_capacity_reservation_path "$STATE" "$ID")
+    CAPACITY_STATUS_OFFSET=$(wc -c < "$STATE/$ID.status" | tr -d '[:space:]') || exit 1
+    case "$CAPACITY_STATUS_OFFSET" in
+      ''|*[!0-9]*) echo "error: could not measure status history for $ID" >&2; exit 1 ;;
+    esac
     CAPACITY_RESERVATION_TMP=$(mktemp "$STATE/.$ID.capacity-reservation.XXXXXX") || exit 1
     if ! (umask 077 && chmod 600 "$CAPACITY_RESERVATION_TMP" &&
-      printf '%s\n' "$SPAWN_CAPACITY_RESERVATION_TOKEN" > "$CAPACITY_RESERVATION_TMP" &&
+      printf 'gen=%s\nstatus_offset=%s\n' "$SPAWN_GEN" "$CAPACITY_STATUS_OFFSET" > "$CAPACITY_RESERVATION_TMP" &&
       mv -f "$CAPACITY_RESERVATION_TMP" "$CAPACITY_RESERVATION_PATH"); then
       rm -f -- "$CAPACITY_RESERVATION_TMP"
       echo "error: could not reserve the released place of $ID" >&2

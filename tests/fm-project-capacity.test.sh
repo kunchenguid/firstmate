@@ -408,10 +408,39 @@ test_restart_does_not_count_its_own_record() {
   pass "restarts exclude their own records and reclaim completed workers' places"
 }
 
+test_reservation_expiry_and_malformed_records() {
+  local dir offset body expected rc label
+  dir="$TMP_ROOT/reservation-parser"
+  mkdir -p "$dir"
+  printf 'done: finished\n' > "$dir/status"
+  offset=$(wc -c < "$dir/status" | tr -d '[:space:]')
+  while IFS='|' read -r label expected body; do
+    printf '%b' "$body" > "$dir/reservation"
+    rc=0
+    bash -c '. "$1/bin/fm-project-capacity-lib.sh"; fm_project_capacity_reservation_active "$2" "$3"' \
+      _ "$ROOT" "$dir/reservation" "$dir/status" || rc=$?
+    expect_code "$expected" "$rc" "$label: wrong reservation verdict"
+  done <<EOF
+unchanged|0|gen=new\nstatus_offset=$offset\n
+grown|1|gen=new\nstatus_offset=0\n
+truncated|0|gen=new\nstatus_offset=999999999999999999999999\n
+malformed|0|gen=new\nstatus_offset=invalid\n
+missing generation|0|status_offset=0\n
+extra field|0|gen=new\nstatus_offset=0\nextra=value\n
+EOF
+  rm "$dir/reservation"
+  mkdir "$dir/reservation"
+  rc=0
+  bash -c '. "$1/bin/fm-project-capacity-lib.sh"; fm_project_capacity_reservation_active "$2" "$3"' \
+    _ "$ROOT" "$dir/reservation" "$dir/status" || rc=$?
+  expect_code 0 "$rc" "an unreadable reservation did not hold capacity"
+  pass "reservation records expire on status growth and malformed records hold capacity"
+}
+
 test_relaunch_reclaims_a_finished_workers_place() {
   local scenario tail kind mode case_dir home wt out rc hold pid i
   for scenario in scout local-only; do
-    for tail in plain bookkeeping; do
+    for tail in plain bookkeeping early-plain early-bookkeeping; do
       kind=scout mode=
       [ "$scenario" != local-only ] || { kind=ship; mode=local-only; }
       case_dir=$(make_case "relaunch-$scenario-$tail" task-a task-b)
@@ -429,7 +458,7 @@ test_relaunch_reclaims_a_finished_workers_place() {
         'branch=wt-task-a' 'spawn_gen=old-a'
       printf 'fm-task-a\n' > "$case_dir/calls.log.window"
       printf 'done: finished\n' > "$home/state/task-a.status"
-      [ "$tail" = plain ] || printf 'captain-held: decision transferred\n' >> "$home/state/task-a.status"
+      case "$tail" in *bookkeeping) printf 'captain-held: decision transferred\n' >> "$home/state/task-a.status" ;; esac
       cp "$home/state/task-a.status" "$case_dir/prior.status"
       write_live "$home" live-b "$case_dir/project"
       rc=0
@@ -449,24 +478,34 @@ test_relaunch_reclaims_a_finished_workers_place() {
       done
       cmp -s "$case_dir/prior.status" "$home/state/task-a.status" || fail "reservation changed status history"
       [ -f "$home/state/task-a.capacity-reservation" ] || fail "launch has no reservation"
-      printf 'captain-held: concurrent transfer\n' >> "$home/state/task-a.status"
       rc=0
       out=$(spawn_ship "$case_dir" task-b "$case_dir/unused") || rc=$?
       expect_code "$DEFER_EXIT" "$rc" "a relaunch in progress released its place: $out"
+      case "$tail" in
+        early-*)
+          printf 'done: replacement finished\n' >> "$home/state/task-a.status"
+          cp "$home/state/task-a.status" "$case_dir/prior.status"
+          ;;
+      esac
       : > "$hold.release"
       wait "$pid" || fail "relaunch failed: $(cat "$case_dir/relaunch.out")"
-      assert_absent "$home/state/task-a.capacity-reservation" "successful relaunch retained its reservation file"
-      assert_contains "$(cat "$home/state/task-a.status")" 'captain-held: concurrent transfer' "relaunch lost a concurrent event"
-      rc=0
-      out=$(spawn_ship "$case_dir" task-b "$case_dir/unused") || rc=$?
-      expect_code "$DEFER_EXIT" "$rc" "a relaunched $scenario did not hold its place: $out"
-      printf 'done: replacement finished\n' >> "$home/state/task-a.status"
+      [ -f "$home/state/task-a.capacity-reservation" ] || fail "successful relaunch removed its reservation"
+      cmp -s "$case_dir/prior.status" "$home/state/task-a.status" || fail "successful relaunch changed status history"
+      case "$tail" in
+        early-*) ;;
+        *)
+          rc=0
+          out=$(spawn_ship "$case_dir" task-b "$case_dir/unused") || rc=$?
+          expect_code "$DEFER_EXIT" "$rc" "a relaunched $scenario did not hold its place: $out"
+          printf 'done: replacement finished\n' >> "$home/state/task-a.status"
+          ;;
+      esac
       rc=0
       out=$(spawn_ship "$case_dir" task-b) || rc=$?
       expect_code 0 "$rc" "later completion did not release capacity: $out"
     done
   done
-  pass "relaunch reservations hold continuously until working, then a later done releases capacity"
+  pass "relaunch reservations hold unchanged status until a later worker event"
 }
 
 # A place frees when a worker records its ready PR and when a task is cleaned
@@ -883,6 +922,7 @@ test_symlinked_home_counts_each_worker_once
 test_release_frees_a_place
 test_finished_worker_frees_a_place
 test_restart_does_not_count_its_own_record
+test_reservation_expiry_and_malformed_records
 test_relaunch_reclaims_a_finished_workers_place
 test_occupancy_counts_only_this_projects_workers
 test_capacity_is_shared_by_every_local_home
