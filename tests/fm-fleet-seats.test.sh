@@ -907,6 +907,29 @@ test_observed_model_mismatch_does_not_double_charge() {
     "the host re-charged a supervisor the parent already counts: $(cat "$dir/mismatch-worker.out")"
   pass "an observing receipt's model decides seating instead of the requested model"
 }
+# A remote home may record its state behind a symlink. The host then publishes
+# its parent-route holders under the resolved path, so the parent's generation
+# lookup must not depend on the logical spelling: otherwise the same adopted
+# supervisor is charged on both sides.
+test_symlinked_remote_state_does_not_double_charge() {
+  local out dir="$TMP_ROOT/remote-symlink-out"
+  make_remote_fleet remote-symlink 2
+  mkdir -p "$dir"
+  mv "$R_REMOTE/state" "$R_REMOTE/state-real"
+  ln -s "$R_REMOTE/state-real" "$R_REMOTE/state"
+  mkdir -p "$R_REMOTE/state/parent-route"
+  printf 'kind=secondmate\nmodel=pool-model-a\nspawn_gen=host.1\n' \
+    > "$R_REMOTE/state/parent-route/theshop.meta"
+  task_record "$R_ROOT" theshop pool-model-a secondmate \
+    "$(printf 'remote_host=shop-host\nremote_root=%s\nhome=%s' "$ROOT" "$R_REMOTE")"
+  serve_remotes >/dev/null 2>&1 || fail "serve with a symlinked remote state failed"
+  remote_reserve_bg symlink-worker pool-model-a "$dir/symlink-worker"
+  serve_remotes >/dev/null 2>&1 || fail "allowance serve failed"
+  wait "$BG_PID"
+  expect_code 0 "$(cat "$dir/symlink-worker.rc")" \
+    "a symlinked remote state spent the adopted supervisor's seat twice: $(cat "$dir/symlink-worker.out")"
+  pass "a symlinked remote state keeps one supervisor charged once"
+}
 
 test_delivered_policy_governs_the_remote_home() {
   local out
@@ -2422,6 +2445,7 @@ test_remote_home_shares_the_fleet_capacity
 test_unreachable_remote_is_never_free
 test_lost_serve_reply_does_not_double_charge
 test_observed_model_mismatch_does_not_double_charge
+test_symlinked_remote_state_does_not_double_charge
 test_delivered_policy_governs_the_remote_home
 test_stale_remote_requests_refuse_before_launch
 test_inflight_remote_seat_follows_model_between_pools

@@ -585,9 +585,14 @@ certificate_generation() {
     && [ "$(record_field "$meta" remote_root)" = "$root" ] \
     && [ "$(record_field "$meta" home)" = "$home" ] || return 0
   remote_certificate "$id" || return 0
-  jq -r --arg s "$home/state/parent-route" --arg t "$id" \
+  # A remote home's `state` may be a symlink, so the host publishes its
+  # parent-route holders under the resolved path while this record names the
+  # logical one. Match the parent-route surface itself rather than its
+  # spelling: the certificate belongs to this remote, and one task has one
+  # parent-route holder there.
+  jq -r --arg t "$id" \
     --arg m "$(normalize_model "$(record_field "$meta" model)")" '
-    [.holders[] | select(.state_dir == $s and .task == $t
+    [.holders[] | select((.state_dir | endswith("/parent-route")) and .task == $t
       and (.model // "") == $m)]
     | if length == 1 then .[0].generation else empty end' "$CERT_FILE"
 }
