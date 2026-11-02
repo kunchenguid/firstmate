@@ -123,8 +123,8 @@ RELAUNCH_ARGS+=(--expect-generation "$PREV_GEN")
 if [ "$SEAT_TRACKED" -eq 1 ]; then
   ROUTE_FILE=$(umask 077 && mktemp "$STATE/.seat-route-$ID.XXXXXX") || die "cannot stage the seat route for $ID"
   if ! { jq -cn --arg host "$REMOTE_HOST" --arg root "$(fm_meta_get "$META" remote_root)" \
-      --arg home "$(fm_meta_get "$META" home)" --arg op "$NEW_GEN" \
-      '{placement: "remote", backend: "herdr", target: null, home: $home, host: $host,
+      --arg home "$(fm_meta_get "$META" home)" --arg op "$NEW_GEN" --arg backend "$FM_REMOTE_BACKEND" \
+      '{placement: "remote", backend: $backend, target: null, home: $home, host: $host,
         remote_root: $root, spawn_gen: null, operation: $op}' > "$ROUTE_FILE" \
     && seats dispatch "$ID" --generation "$NEW_GEN" --route-file "$ROUTE_FILE" >/dev/null; }; then
     seats release "$ID" --generation "$NEW_GEN" --reason prelaunch >/dev/null 2>&1 || true

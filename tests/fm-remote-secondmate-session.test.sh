@@ -80,3 +80,32 @@ expect_code 1 "$rc" "lab metadata cannot authorize a shared-session target"
 cmp -s "$META" "$TMP_ROOT/before.meta" || fail "target mismatch changed the endpoint record"
 assert_absent "$FM_TEST_HERDR_LOG" "target mismatch accessed Herdr"
 pass "lab selection refuses targets outside the selected session"
+
+
+cat > "$FAKEBIN/rex" <<'SH'
+#!/usr/bin/env bash
+case "$*" in
+  *whoami*) printf '{"endpoint":"%s"}\n' "$FM_TEST_REX_SERVER" ;;
+  *"block call"*) echo 'block not found' >&2; exit 3 ;;
+  *) exit 99 ;;
+esac
+SH
+chmod +x "$FAKEBIN/rex"
+history="$TMP_ROOT/code/state/remote-secondmate-history"
+mkdir -p "$history"
+absent_home="$TMP_ROOT/absent"
+pending="$history/lab.retirement.rex.g1.pending.json"
+jq -n --arg home "$absent_home" '{schema:"fm-remote-retirement-pending.v1",task:"lab",home:$home,generation:"rex.g1",backend:"rex",target:"aaaa:bbbb",rex_server:"recorded-server",phase:"pending",destroyed:false,exit_code:0}' > "$pending"
+for server in foreign-server recorded-server; do
+  out=$(env FM_HOME="$absent_home" FM_ROOT_OVERRIDE="$TMP_ROOT/code" FM_TEST_REX_SERVER="$server" PATH="$FAKEBIN:$PATH" bash "$ROOT/bin/fm-remote-secondmate-control.sh" retire lab --expect-generation rex.g1 2>&1); rc=$?
+  if [ "$server" = foreign-server ]; then
+    [ "$rc" -ne 0 ] || fail 'retirement accepted a different Rex server'
+    assert_present "$pending" 'refusal lost pending server proof'
+  else
+    expect_code 0 "$rc" "retirement retry with recorded Rex server: $out"
+    assert_absent "$pending" 'successful retry retained pending record'
+    assert_equals rex "$(printf '%s\n' "$out" | sed -n 's/^seat_retirement=//p' | jq -r .backend)" 'retry lost Rex backend'
+  fi
+  assert_absent "$absent_home" 'retirement retry recreated deleted home'
+done
+pass "Rex retirement retry retains server ownership after home deletion"

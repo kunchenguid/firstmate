@@ -103,4 +103,16 @@ fm_remote_generation_resolve
 assert_equals lab "$FM_REMOTE_GENERATION" 'a lab route lookup resolved no generation'
 assert_contains "$(cat "$FM_ROUTE_ARGV")" '--herdr-session fm-lab-x' \
   'the lab route lookup dropped the recorded session'
+for backend in herdr rex; do
+  jq --arg backend "$backend" '.incarnations = [{generation:"backend.g1", lifecycle:"confirmed", startup_confirmed:true, route:{placement:"remote", backend:$backend, host:"remote", remote_root:"/srv/fm", home:"/srv/home", spawn_gen:"backend.g1", target:"endpoint"}}]' "$FM_GENERATION_FIXTURE" > "$TMP/backend-ledger"
+  mv "$TMP/backend-ledger" "$FM_GENERATION_FIXTURE"
+  fm_remote_generation_resolve
+  assert_equals "$backend" "$FM_REMOTE_BACKEND" 'ledger backend must survive resolution'
+  printf '%s\n' '{"incarnations":[]}' > "$FM_GENERATION_FIXTURE"
+  printf 'schema=fm-remote-secondmate-control.v1\nbackend=%s\nspawn_gen=backend.g2\ntarget=endpoint\n' "$backend" > "$FM_ROUTE_FIXTURE"
+  fm_remote_generation_resolve
+  assert_equals "$backend" "$FM_REMOTE_BACKEND" 'host backend must survive resolution'
+done
+printf 'schema=fm-remote-secondmate-control.v1\nbackend=tmux\nspawn_gen=invalid\ntarget=endpoint\n' > "$FM_ROUTE_FIXTURE"
+if fm_remote_generation_resolve; then fail 'unsupported remote backend accepted'; fi
 printf 'remote generation regressions passed\n'

@@ -1037,7 +1037,7 @@ cmd_update() {
 }
 
 cmd_retire() {
-  local id=$1 force='' rc=0 recorded_server current_server generation target proof pending='' tmp expected='' replay record operation
+  local id=$1 force='' rc=0 recorded_server='' current_server generation target proof pending='' tmp expected='' replay record operation
   local pending_record='' pending_target='' pending_backend='' pending_rc='' reconciled=0 partial=0
   local retained_generation retained_target retired marker_path verdict retirement_backend=''
   shift
@@ -1084,6 +1084,8 @@ cmd_retire() {
         || die "remote retirement pending history does not match this route"
       pending_target=$(printf '%s\n' "$pending_record" | jq -r .target)
       pending_backend=$(printf '%s\n' "$pending_record" | jq -r .backend)
+      recorded_server=$(printf '%s\n' "$pending_record" | jq -r '.rex_server // empty')
+      [ "$pending_backend" != rex ] || [ -n "$recorded_server" ] || die "remote retirement pending history lacks its Rex server"
       pending_rc=$(printf '%s\n' "$pending_record" | jq -r '.exit_code // empty')
     fi
   fi
@@ -1115,7 +1117,7 @@ cmd_retire() {
     if [ "$partial" = 1 ]; then
       [ -n "$pending_rc" ] || die "remote retirement outcome is unknown; preserving pending evidence"
       fm_backend_source "$retirement_backend" || return 1
-      verdict=$(fm_control_endpoint_absence_verdict "$retirement_backend" "$target")
+      verdict=$(fm_control_endpoint_absence_verdict "$retirement_backend" "$target" "" "$recorded_server")
       [ "${verdict%%$'\t'*}" = gone ] || return 1
       reconciled=1
     fi
@@ -1181,22 +1183,24 @@ cmd_retire() {
     # an attempt whose interruption it could not later reconcile.
     pending="$HOST_HISTORY/$id.retirement.$generation.pending.json"
     if [ -n "$pending_record" ]; then
-      [ "$pending_target" = "$target" ] || die "remote retirement pending history does not match this endpoint"
+      [ "$pending_target" = "$target" ] && [ "$pending_backend" = "$retirement_backend" ] \
+        && { [ "$retirement_backend" != rex ] || [ "$(printf '%s\n' "$pending_record" | jq -r .rex_server)" = "$recorded_server" ]; } || die "remote retirement pending history does not match this endpoint"
     elif [ -e "$pending" ] || [ -L "$pending" ]; then
       [ -f "$pending" ] && [ ! -L "$pending" ] || die "remote retirement history is unsafe"
       pending_record=$(jq -ce --arg t "$id" --arg h "$TARGET_HOME" --arg g "$generation" \
-        --arg target "$target" --arg retirement_backend "$retirement_backend" '
+        --arg target "$target" --arg retirement_backend "$retirement_backend" --arg server "$recorded_server" '
         select(.schema == "fm-remote-retirement-pending.v1" and .task == $t and .home == $h
           and .generation == $g and .backend == $retirement_backend and .target == $target
+          and ($retirement_backend != "rex" or .rex_server == $server)
           and .phase == "pending" and .destroyed == false
           and (.exit_code == null or .exit_code == 0 or .exit_code == 4))' "$pending") \
         || die "remote retirement pending history does not match this endpoint"
       pending_rc=$(printf '%s\n' "$pending_record" | jq -r '.exit_code // empty')
     else
       tmp=$(umask 077; mktemp "$HOST_HISTORY/.retirement.XXXXXX") || return 1
-      if ! printf '{"schema":"fm-remote-retirement-pending.v1","task":%s,"generation":%s,"home":%s,"backend":%s,"target":%s,"phase":"pending","destroyed":false,"exit_code":null}\n' \
+      if ! printf '{"schema":"fm-remote-retirement-pending.v1","task":%s,"generation":%s,"home":%s,"backend":%s,"target":%s,"rex_server":%s,"phase":"pending","destroyed":false,"exit_code":null}\n' \
         "$(json_str "$id")" "$(json_str "$generation")" "$(json_str "$TARGET_HOME")" \
-        "$(json_str "$retirement_backend")" "$(json_str "$target")" > "$tmp" \
+        "$(json_str "$retirement_backend")" "$(json_str "$target")" "$(json_str "$recorded_server")" > "$tmp" \
         || ! mv -f -- "$tmp" "$pending"; then
         rm -f -- "$tmp"
         return 1
@@ -1230,7 +1234,7 @@ cmd_retire() {
     fi
     pending_rc=$rc
     fm_backend_source "$retirement_backend" || return 1
-    verdict=$(fm_control_endpoint_absence_verdict "$retirement_backend" "$target" "$REMOTE_ENDPOINT_META")
+    verdict=$(fm_control_endpoint_absence_verdict "$retirement_backend" "$target" "$REMOTE_ENDPOINT_META" "$recorded_server")
     [ "${verdict%%$'\t'*}" = gone ] || return 1
   fi
   proof="$HOST_HISTORY/$id.retirement.$generation.json"

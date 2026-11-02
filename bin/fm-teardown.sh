@@ -1303,8 +1303,8 @@ remote_secondmate_teardown() {
   if [ -e "$TEARDOWN_REMOTE_RETIREMENT" ] || [ -L "$TEARDOWN_REMOTE_RETIREMENT" ]; then
     [ -f "$TEARDOWN_REMOTE_RETIREMENT" ] && [ ! -L "$TEARDOWN_REMOTE_RETIREMENT" ] \
       || { echo "REFUSED: remote retirement evidence is unsafe" >&2; return 1; }
-    jq -e --arg t "$ID" --arg h "$remote_home" --arg g "$generation" --arg target "$target" \
-      '.task == $t and .home == $h and (.generation // "") == $g and .backend == "herdr"
+    jq -e --arg t "$ID" --arg h "$remote_home" --arg g "$generation" --arg target "$target" --arg backend "$FM_REMOTE_BACKEND" \
+      '.task == $t and .home == $h and (.generation // "") == $g and .backend == $backend
        and .target == $target and .destroyed == true and (.exit_code == 0 or .exit_code == 4)' \
       "$TEARDOWN_REMOTE_RETIREMENT" >/dev/null || { echo "REFUSED: remote retirement evidence does not match this generation" >&2; return 1; }
   fi
@@ -1344,9 +1344,9 @@ remote_secondmate_teardown() {
   if [ ! -f "$TEARDOWN_REMOTE_RETIREMENT" ]; then
     tmp=$(umask 077; mktemp "$STATE/.seat-retirement-$ID.XXXXXX") || return 1
     if ! printf '%s\n' "$out" | sed -n 's/^seat_retirement=//p' | jq -se \
-      --arg t "$ID" --arg h "$remote_home" --arg g "$generation" --arg target "$target" --argjson rc "$rc" \
+      --arg t "$ID" --arg h "$remote_home" --arg g "$generation" --arg target "$target" --arg backend "$FM_REMOTE_BACKEND" --argjson rc "$rc" \
       'select(length == 1) | .[0] | select(.task == $t and .home == $h and (.generation // "") == $g
-        and .backend == "herdr" and .target == $target and .destroyed == true) | .exit_code = $rc' > "$tmp"; then
+        and .backend == $backend and .target == $target and .destroyed == true) | .exit_code = $rc' > "$tmp"; then
       rm -f -- "$tmp"
       echo "error: remote retirement has no matching destruction evidence; preserving the local route" >&2
       return 1
