@@ -1186,8 +1186,10 @@ cmd_retire() {
     # an attempt whose interruption it could not later reconcile.
     pending="$HOST_HISTORY/$id.retirement.$generation.pending.json"
     if [ -n "$pending_record" ]; then
-      [ "$pending_target" = "$target" ] && [ "$pending_backend" = "$retirement_backend" ] \
-        && { [ "$retirement_backend" != rex ] || [ "$(printf '%s\n' "$pending_record" | jq -r .rex_server)" = "$recorded_server" ]; } || die "remote retirement pending history does not match this endpoint"
+      if [ "$pending_target" != "$target" ] || [ "$pending_backend" != "$retirement_backend" ] \
+        || { [ "$retirement_backend" = rex ] && [ "$(printf '%s\n' "$pending_record" | jq -r .rex_server)" != "$recorded_server" ]; }; then
+        die "remote retirement pending history does not match this endpoint"
+      fi
     elif [ -e "$pending" ] || [ -L "$pending" ]; then
       [ -f "$pending" ] && [ ! -L "$pending" ] || die "remote retirement history is unsafe"
       pending_record=$(jq -ce --arg t "$id" --arg h "$TARGET_HOME" --arg g "$generation" \
