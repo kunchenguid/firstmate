@@ -61,7 +61,8 @@
 #                       step 1, harvested WITHOUT waiting for it.
 #   8. context digest - data/projects.md, data/secondmates.md, data/captain.md,
 #                       data/captain-shared.md, data/learnings.md: read-only,
-#                       always safe, always runs.
+#                       always safe, always runs. The three curated memory
+#                       files are bounded by config/startup-memory-budget.
 #   9. closing reminder - prints the context-specific watcher next step; this
 #                       script points back to the emitted harness supervision
 #                       block and deliberately never arms the watcher itself.
@@ -286,6 +287,8 @@ stage() {  # <stage-name>: breadcrumb for the parent's truncation banner
 . "$SCRIPT_DIR/fm-timeout-lib.sh"
 # shellcheck source=bin/fm-session-lock-lib.sh
 . "$SCRIPT_DIR/fm-session-lock-lib.sh"
+# shellcheck source=bin/fm-startup-memory-budget-lib.sh
+. "$SCRIPT_DIR/fm-startup-memory-budget-lib.sh"
 
 if [ -z "${FM_SESSION_START_STAGE_FILE:-}" ]; then
   SESSION_START_BUDGET=${FM_SESSION_START_TIMEOUT:-120}
@@ -419,6 +422,151 @@ print_file_or_absent() {
   else
     printf 'ABSENT\n'
   fi
+}
+
+# The three curated memory files that config/startup-memory-budget governs.
+# data/projects.md and data/secondmates.md stay on the unbounded path above:
+# they are small fleet identity, not curated memory.
+FM_MEMORY_FILES='captain.md captain-shared.md learnings.md'
+FM_MEMORY_BUDGET_STATE=''
+FM_MEMORY_BUDGET_BYTES=0
+FM_MEMORY_WATER_LEVEL=0
+FM_MEMORY_SIZE_CAPTAIN=0
+FM_MEMORY_SIZE_SHARED=0
+FM_MEMORY_SIZE_LEARNINGS=0
+FM_MEMORY_PRINTED_BYTES=0
+
+memory_file_size() {  # <basename>: cached byte size from memory_budget_prepare
+  case "$1" in
+    captain.md) printf '%s\n' "$FM_MEMORY_SIZE_CAPTAIN" ;;
+    captain-shared.md) printf '%s\n' "$FM_MEMORY_SIZE_SHARED" ;;
+    learnings.md) printf '%s\n' "$FM_MEMORY_SIZE_LEARNINGS" ;;
+    *) return 1 ;;
+  esac
+}
+
+# memory_budget_prepare: read the budget through its own owner library and
+# derive one per-file allowance. A missing or invalid budget, or an unusable
+# memory file, leaves FM_MEMORY_BUDGET_STATE=invalid so every governed file
+# keeps today's full-print behaviour instead of guessing. The budget is split
+# across the three files by their measured sizes, water-filling so a file that
+# fits under an even share prints whole and its unused share moves to the
+# larger files. Total printed bytes never exceed the configured token budget
+# times the estimator's 3 bytes per token.
+memory_budget_prepare() {
+  local budget file size total=0 big used new_level level n=0 tries=0
+  [ -z "$FM_MEMORY_BUDGET_STATE" ] || return 0
+  FM_MEMORY_BUDGET_STATE=invalid
+  # shellcheck source=bin/fm-startup-memory-budget-lib.sh
+  if ! fm_startup_memory_budget_read "$CONFIG" >/dev/null; then
+    return 0
+  fi
+  budget=$FM_STARTUP_MEMORY_BUDGET_VALUE
+  FM_MEMORY_BUDGET_BYTES=$(awk -v b="$budget" 'BEGIN { printf "%d", b * 3 }')
+  for file in $FM_MEMORY_FILES; do
+    if ! fm_startup_memory_measure_file "$DATA/$file" >/dev/null; then
+      return 0
+    fi
+    size=$FM_STARTUP_MEMORY_MEASURE_BYTES
+    case "$file" in
+      captain.md) FM_MEMORY_SIZE_CAPTAIN=$size ;;
+      captain-shared.md) FM_MEMORY_SIZE_SHARED=$size ;;
+      learnings.md) FM_MEMORY_SIZE_LEARNINGS=$size ;;
+    esac
+    total=$((total + size))
+    n=$((n + 1))
+  done
+  if [ "$total" -le "$FM_MEMORY_BUDGET_BYTES" ]; then
+    # Everything already fits: one level above every size prints each whole.
+    FM_MEMORY_WATER_LEVEL=$total
+    FM_MEMORY_BUDGET_STATE=ok
+    return 0
+  fi
+  level=$((FM_MEMORY_BUDGET_BYTES / n))
+  while [ "$tries" -lt 8 ]; do
+    tries=$((tries + 1))
+    used=0
+    big=0
+    for size in "$FM_MEMORY_SIZE_CAPTAIN" "$FM_MEMORY_SIZE_SHARED" "$FM_MEMORY_SIZE_LEARNINGS"; do
+      if [ "$size" -le "$level" ]; then
+        used=$((used + size))
+      else
+        big=$((big + 1))
+      fi
+    done
+    [ "$big" -gt 0 ] || break
+    new_level=$(((FM_MEMORY_BUDGET_BYTES - used) / big))
+    [ "$new_level" -le 0 ] && break
+    [ "$new_level" -eq "$level" ] && break
+    level=$new_level
+  done
+  FM_MEMORY_WATER_LEVEL=$level
+  FM_MEMORY_BUDGET_STATE=ok
+}
+
+# memory_print_head <path> <cap-bytes>: print whole lines up to the cap and set
+# FM_MEMORY_PRINTED_BYTES to the exact byte count printed. A single line wider
+# than the cap falls back to a raw byte head so a truncation still shows text.
+memory_print_head() {
+  local path=$1 cap=$2
+  FM_MEMORY_PRINTED_BYTES=$(LC_ALL=C awk -v cap="$cap" '
+    { len = length($0) + 1
+      if (used + len > cap) exit
+      used += len }
+    END { printf "%d", used }' "$path")
+  if [ "$FM_MEMORY_PRINTED_BYTES" -eq 0 ] && [ "$cap" -gt 0 ]; then
+    head -c "$cap" "$path"
+    FM_MEMORY_PRINTED_BYTES=$cap
+  else
+    LC_ALL=C awk -v cap="$cap" '
+      { len = length($0) + 1
+        if (used + len > cap) exit
+        printf "%s\n", $0
+        used += len }' "$path"
+  fi
+}
+
+# memory_print_truncation_pointer <path> <printed-bytes> <total-bytes>: the
+# remainder must stay visibly reachable, so the read-once contract stays honest.
+memory_print_truncation_pointer() {
+  local path=$1 printed=$2 total=$3 rel=${1##*/}
+  printf '\n--- CONTEXT TRUNCATED: data/%s printed %s of %s bytes, bounded by config/startup-memory-budget ---\n' \
+    "$rel" "$printed" "$total"
+  printf 'The rest of this file exists and is reachable on demand:\n'
+  printf '  grep -n <topic> %s\n' "$path"
+  printf '  tail -n 60 %s\n' "$path"
+  printf "  sed -n '1,120p' %s\n" "$path"
+  printf -- '--- END CONTEXT TRUNCATED ---\n'
+}
+
+# print_memory_file_or_absent <path> <label>: same labeled subsection and
+# ABSENT/empty semantics as print_file_or_absent, but a curated memory file is
+# bounded by its startup-budget allowance. Under budget the output is byte
+# identical to print_file_or_absent.
+print_memory_file_or_absent() {
+  local path=$1 label=$2 size cap
+  subsection "$label"
+  if [ ! -f "$path" ]; then
+    printf 'ABSENT\n'
+    return 0
+  fi
+  if [ ! -s "$path" ]; then
+    printf '(present, empty)\n'
+    return 0
+  fi
+  memory_budget_prepare
+  if [ "$FM_MEMORY_BUDGET_STATE" != ok ]; then
+    cat "$path"
+    return 0
+  fi
+  size=$(memory_file_size "${path##*/}") || { cat "$path"; return 0; }
+  cap=$FM_MEMORY_WATER_LEVEL
+  if [ "$size" -le "$cap" ]; then
+    cat "$path"
+    return 0
+  fi
+  memory_print_head "$path" "$cap"
+  memory_print_truncation_pointer "$path" "$FM_MEMORY_PRINTED_BYTES" "$size"
 }
 
 print_backlog_pointer() {
@@ -858,8 +1006,11 @@ section "READ-ONCE CONTRACT"
 cat <<'EOF'
 Everything below is printed in full for this session start: every state/*.meta,
 a compact data/backlog.md listing, a bounded tail of every state/*.status,
-data/projects.md, data/secondmates.md, data/captain.md, data/captain-shared.md,
-and data/learnings.md.
+data/projects.md, and data/secondmates.md.
+data/captain.md, data/captain-shared.md, and data/learnings.md are printed
+within the startup budget in config/startup-memory-budget; when one exceeds its
+share, a CONTEXT TRUNCATED pointer states the bytes printed and total bytes and
+prints the commands that read the remainder.
 Do NOT re-read any of them after reading this digest, and do NOT bulk-read
 data/backlog.md or state/*.status: re-reading everything defeats the entire
 point of this command.
@@ -872,6 +1023,8 @@ Go to a source directly only when:
     printed with its tail),
   - a full task body is needed (bin/fm-tasks-axi.sh show <id> --full, or data/backlog.md),
   - the backlog listing disclosed omitted queued items and this turn needs them,
+  - a CONTEXT TRUNCATED pointer named a remainder this turn needs (use the
+    commands it prints),
   - the NETWORK CHECKS section reported its checks still IN PROGRESS and this
     turn needs their verdict (bin/fm-startup-network.sh report),
   - or a STARTUP TRUNCATED banner named the stage that would have printed it, in
@@ -1014,9 +1167,9 @@ stage context
 section "CONTEXT"
 print_file_or_absent "$DATA/projects.md" "data/projects.md"
 print_file_or_absent "$DATA/secondmates.md" "data/secondmates.md"
-print_file_or_absent "$DATA/captain.md" "data/captain.md"
-print_file_or_absent "$DATA/captain-shared.md" "data/captain-shared.md (shared, main-authoritative, read-only in secondmate homes)"
-print_file_or_absent "$DATA/learnings.md" "data/learnings.md"
+print_memory_file_or_absent "$DATA/captain.md" "data/captain.md"
+print_memory_file_or_absent "$DATA/captain-shared.md" "data/captain-shared.md (shared, main-authoritative, read-only in secondmate homes)"
+print_memory_file_or_absent "$DATA/learnings.md" "data/learnings.md"
 
 # --- 9. closing reminder -----------------------------------------------
 stage next-step

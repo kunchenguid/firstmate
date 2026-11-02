@@ -814,6 +814,53 @@ EOF
   pass "context digest distinguishes ABSENT, empty-but-present, and populated files"
 }
 
+# --- context digest: startup-memory budget bound ----------------------------
+
+# Curated memory is printed within config/startup-memory-budget. Over budget the
+# digest prints a bounded head plus an explicit pointer that keeps the remainder
+# reachable; under budget the bytes are unchanged from the full print.
+test_context_digest_prints_curated_memory_within_budget() {
+  local rec root home fakebin out over_cap pointer
+  rec=$(new_world memory-budget)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+
+  # Small memory under a generous budget: printed whole, no pointer.
+  printf '7500\n' > "$home/config/startup-memory-budget"
+  printf 'tiny captain memory\n' > "$home/data/captain.md"
+  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  assert_contains "$out" 'tiny captain memory' "under-budget captain.md was not printed whole"
+  printf '%s\n' "$out" | grep -q -- '--- CONTEXT TRUNCATED:' \
+    && fail "under-budget digest printed a truncation pointer"
+
+  # One huge memory file against the same budget: bounded head, honest pointer.
+  {
+    printf 'first captain line\n'
+    awk 'BEGIN { for (i = 0; i < 4000; i++) printf "filler line %05d with enough text to matter\n", i }'
+  } > "$home/data/captain.md"
+  over_cap=$(LC_ALL=C wc -c < "$home/data/captain.md" | tr -d '[:space:]')
+  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  assert_contains "$out" 'first captain line' "over-budget captain.md lost its head"
+  printf '%s\n' "$out" | grep -q 'filler line 03999' \
+    && fail "over-budget captain.md was printed whole"
+  pointer=$(printf '%s\n' "$out" | grep -A4 -- '--- CONTEXT TRUNCATED: data/captain.md printed ')
+  assert_contains "$pointer" "of $over_cap bytes" "truncation pointer did not state the total bytes"
+  assert_contains "$pointer" 'grep -n <topic>' "truncation pointer missing the grep form"
+  assert_contains "$pointer" 'tail -n 60' "truncation pointer missing the tail form"
+  assert_contains "$pointer" "sed -n '1,120p'" "truncation pointer missing the sed range form"
+  assert_contains "$pointer" "$home/data/captain.md" "truncation pointer missing the copy-pasteable path"
+
+  # An invalid budget keeps today's full print rather than guessing a cap.
+  printf '0\n' > "$home/config/startup-memory-budget"
+  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  assert_contains "$out" 'filler line 03999' "an invalid budget did not keep the full print"
+
+  pass "context digest prints curated memory within the startup-memory budget"
+}
+
 # --- lock refusal: read-only path --------------------------------------------
 
 test_lock_refusal_read_only_path() {
@@ -3015,6 +3062,7 @@ EOF
 }
 
 test_context_digest_absent_empty_present
+test_context_digest_prints_curated_memory_within_budget
 test_lock_refusal_read_only_path
 test_lock_write_failure_read_only_path
 test_trace_context_effective_state_is_frozen_after_lock
