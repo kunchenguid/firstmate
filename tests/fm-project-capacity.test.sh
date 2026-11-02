@@ -97,6 +97,11 @@ case "$*" in
     ;;
 esac
 case "${1:-}" in
+  send-keys)
+    case "${FM_FAKE_SEND_FAILURE:-}:$*" in
+      literal:*" -l "*|enter:*" Enter") exit 1 ;;
+    esac
+    ;;
   display-message) printf 'firstmate\n' ;;
   list-windows) [ ! -s "$window_file" ] || cat "$window_file" ;;
   new-window)
@@ -656,11 +661,12 @@ test_failed_spawn_after_admission_holds_no_place() {
 # reservation must come off again: nothing replaced the worker, so the queued
 # task it displaced is admitted instead of waiting for a cleanup.
 test_aborted_relaunch_releases_the_reserved_place() {
-  local scenario kind mode case_dir home wt out rc token launch_dir
+  local scenario kind mode case_dir home wt out rc token launch_dir failure
   for scenario in scout local-only; do
+    for failure in staging literal enter; do
     kind=scout mode=
     [ "$scenario" != local-only ] || { kind=ship; mode=local-only; }
-    case_dir=$(make_case "aborted-relaunch-$scenario" task-a task-b)
+    case_dir=$(make_case "aborted-relaunch-$scenario-$failure" task-a task-b)
     home="$case_dir/home"
     wt=$(new_worktree "$case_dir" task-a)
     if [ "$kind" = ship ]; then
@@ -674,7 +680,8 @@ test_aborted_relaunch_releases_the_reserved_place() {
       'harness=codex' "kind=$kind" "mode=$mode" 'yolo=off' \
       'branch=wt-task-a' 'spawn_gen=old-a'
     printf 'fm-task-a\n' > "$case_dir/calls.log.window"
-    printf 'done: finished\n' > "$home/state/task-a.status"
+    printf 'done: finished\ncaptain-held: decision transferred\n' > "$home/state/task-a.status"
+    cp "$home/state/task-a.status" "$case_dir/prior.status"
     # The staged-launch private-directory guard is the first refusal after the
     # reservation and the republished record, so a public launch directory
     # aborts the replacement exactly where a real launch delivery can fail.
@@ -682,21 +689,23 @@ test_aborted_relaunch_releases_the_reserved_place() {
     launch_dir="/tmp/fm-task-a+$token"
     rm -rf "$launch_dir" 2>/dev/null || true
     mkdir -p "$launch_dir"
-    chmod 777 "$launch_dir"
+    if [ "$failure" = staging ]; then chmod 777 "$launch_dir"; else chmod 700 "$launch_dir"; fi
     rc=0
-    out=$(run_spawn "$case_dir" "$home" "$wt" task-a --relaunch) || rc=$?
+    out=$(FM_FAKE_SEND_FAILURE="$failure" run_spawn "$case_dir" "$home" "$wt" task-a --relaunch) || rc=$?
     rm -rf "$launch_dir"
     [ "$rc" -ne 0 ] && [ "$rc" -ne "$DEFER_EXIT" ] ||
       fail "the aborted $scenario relaunch did not fail (exit $rc): $out"
-    assert_contains "$out" "is not a private directory" \
-      "the $scenario relaunch did not abort at launch staging: $out"
-    [ "$(tail -n 1 "$home/state/task-a.status")" = 'done: finished' ] ||
-      fail "the aborted $scenario relaunch left its reservation in the status log: $(tail -n 1 "$home/state/task-a.status")"
+    if [ "$failure" = staging ]; then
+      assert_contains "$out" "is not a private directory" "the relaunch did not abort at staging"
+    fi
+    cmp -s "$case_dir/prior.status" "$home/state/task-a.status" ||
+      fail "the aborted $scenario/$failure relaunch changed the prior status bytes"
     rc=0
     out=$(spawn_ship "$case_dir" task-b) || rc=$?
     expect_code 0 "$rc" "the aborted $scenario relaunch kept the finished worker's place: $out"
     assert_contains "$out" "spawned task-b" "the queued task was not launched after the $scenario relaunch aborted"
   done
+    done
   pass "an aborted relaunch restores a finished scout's or local-only ship's released place"
 }
 

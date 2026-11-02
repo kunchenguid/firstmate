@@ -7367,8 +7367,7 @@ if [ "$KIND" = scout ] || { [ "$KIND" = ship ] && [ "$MODE" = local-only ]; }; t
   # prior file so spawn_abort_cleanup can put it back when the replacement never
   # reaches delivery. A fresh spawn has no record to reserve against, so it
   # appends without a rollback point.
-  if [ "$RELAUNCH" -eq 1 ] && [ -f "$STATE/$ID.status" ] && [ -r "$STATE/$ID.status" ] &&
-    [ "$(status_line_verb "$(last_status_line "$STATE/$ID.status")")" = 'done' ]; then
+  if [ "$RELAUNCH" -eq 1 ] && fm_project_capacity_status_finished "$STATE/$ID.status"; then
     SPAWN_STATUS_RESERVATION_OFFSET=$(wc -c <"$STATE/$ID.status" | tr -d ' ')
     case "$SPAWN_STATUS_RESERVATION_OFFSET" in
       ''|*[!0-9]*)
@@ -7989,6 +7988,7 @@ else
     LAUNCH_SOURCE_TEXT="if [ -e $(shell_quote "$LAUNCH_FILE") ]; then $LAUNCH_SOURCE_TEXT || true; else echo 'error: private launch file was already removed; refusing worker launch' >&2; fi"
   fi
   if ! spawn_send_literal "$T" "$LAUNCH_SOURCE_TEXT"; then
+    [ "$BACKEND" = hc ] || SPAWN_LAUNCH_SENT=0
     [ "$ORCA_LAUNCH_ENV_ENABLED" != 1 ] || spawn_orca_launch_send_fail
     exit 1
   fi
@@ -7998,6 +7998,7 @@ else
     spawn_herdr_presentation_order_lock_release
   fi
   if ! spawn_send_key "$T" Enter; then
+    SPAWN_LAUNCH_SENT=0
     [ "$ORCA_LAUNCH_ENV_ENABLED" != 1 ] || spawn_orca_launch_send_fail
     exit 1
   fi
