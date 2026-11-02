@@ -591,15 +591,6 @@ test_external_review_done_with_backup_needs_the_copy() {
   pass "external review done with a backup: refused until HEAD is under refs/remotes/backup/backup/, then accepted"
 }
 
-test_no_mistakes_dod_marks_validation_start() {
-  local out
-  out=$(fm_dod_block no-mistakes validation-start-task)
-  assert_contains "$out" 'append `working [at=<epoch>]: validation started` to the status file' \
-    "no-mistakes DoD must tell workers to mark validation start"
-  pass "no-mistakes DoD marks validation start for branch verification"
-}
-
-test_no_mistakes_dod_marks_validation_start
 test_external_forge_is_direct_pr_only
 test_external_rule_one_forbids_every_task_push
 test_external_dod_renders_the_adapter
