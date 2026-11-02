@@ -4,21 +4,23 @@
 # backend from the app's own signals with no explicit backend configured
 # (docs/hc-backend.md "Runtime auto-detection").
 #
-# Three cases run a REAL spawn end to end, because detection is a
+# One case runs a REAL spawn end to end, because detection is a
 # fm-spawn-time decision (tests/fm-backend.test.sh owns the fake-env matrix):
 #
 #   A. app-terminal: the spawn env carries HC_TERMINAL_ID/HC_TERMINAL_SOCKET
 #      of a live, herdr.space-labeled lab terminal - the exact claim an
 #      app-created terminal makes. The label is verified through the core and
 #      hc is selected, and meta records backend_detect=app-terminal.
-#   B. app-window: no terminal markers; a live herdr-app.sock under a scratch
-#      HERDR_APP_HOME selects hc with backend_detect=app-window.
+#   B. app-window is not a signal: a live herdr-app.sock under a scratch
+#      HERDR_APP_HOME with a live pinned core keeps a marker-less process on
+#      the default backend - silently - because an open window cannot tell
+#      an in-app firstmate from a bare shell elsewhere (the decision point
+#      only; a tmux spawn is out of this smoke's scope).
 #   C. explicit: config/backend=hc plus the same app-terminal env selects hc
 #      but writes NO backend_detect= line - explicit selection never runs
 #      detection.
-#   D. no core: the same live window over an HC_SESSION with no running core
-#      resolves the default backend with a notice and starts no core (the
-#      decision point only; a tmux spawn is out of this smoke's scope).
+#   D. no core: the same live window beside an HC_SESSION with no running
+#      core resolves the default backend silently and starts no core.
 #
 # Everything lands in a bin/fm-hc-lab.sh session (unique fm-hclab-*
 # HC_SESSION, scratch XDG roots, a pinned FM_HC_SOCKET, and a fleet-state
@@ -178,7 +180,12 @@ assert_task_labels "$ID" "$WORKER_TERM"
 teardown_one "$ID"
 pass "app-terminal: spawn env claiming a herdr.space-labeled terminal auto-selects hc, notices, records backend_detect=app-terminal, and labels the worker"
 
-# --- Case B: app-window -----------------------------------------------------
+# --- Case B: a live app window never selects hc for a marker-less process --
+# The dropped app-window signal: a live herdr-app.sock under the resolved
+# app home reaches every process on the host, so it cannot tell an in-app
+# firstmate from a bare shell while the window is open elsewhere. With the
+# lab core pinned and live, resolution must still be the default backend -
+# silent, with no detection signal left behind.
 # AF_UNIX caps near 104 bytes; the app socket must live under a short dir.
 APPHOME=$(mktemp -d /tmp/fm-app.XXXXXX) || fail "mktemp for the app home failed"
 python3 -c 'import socket,sys,time; s=socket.socket(socket.AF_UNIX); s.bind(sys.argv[1]); s.listen(5); time.sleep(300)' \
@@ -186,37 +193,29 @@ python3 -c 'import socket,sys,time; s=socket.socket(socket.AF_UNIX); s.bind(sys.
 APPSOCK_PID=$!
 sleep 0.3
 
-ID=appdetw1
-OUT=$(HERDR_APP_HOME=$APPHOME spawn_one "$ID" "sh -c 'echo appdetect-window-ok'" 2>"$TMP_ROOT/b.err")
+# shellcheck disable=SC2016 # positional params expand in the child shell.
+OUT=$($SCRUB HERDR_APP_HOME="$APPHOME" FM_CONFIG_OVERRIDE="$CONFIG" \
+  bash -c '. "$1/bin/fm-backend.sh"; fm_backend_name; s=$FM_BACKEND_DETECT_SIGNAL; [ -z "$s" ] || { echo "signal=$s" >&2; exit 3; }' _ "$ROOT" 2>"$TMP_ROOT/b.err")
 rc=$?
-[ "$rc" -eq 0 ] || fail "fm-spawn.sh under the app-window signal failed"$'\n'"--- stdout ---"$'\n'"$OUT"$'\n'"--- stderr ---"$'\n'"$(cat "$TMP_ROOT/b.err")"
-grep -q 'NOTICE: auto-detected a live Herdr app window' "$TMP_ROOT/b.err" \
-  || fail "the app-window notice must name the signal"$'\n'"$(cat "$TMP_ROOT/b.err")"
-META=$STATE/$ID.meta
-grep -q '^backend=hc$' "$META" || fail "meta must record backend=hc"$'\n'"$(cat "$META")"
-grep -q '^backend_detect=app-window$' "$META" \
-  || fail "meta must record backend_detect=app-window"$'\n'"$(cat "$META")"
-WORKER_TERM=$(grep '^hc_terminal=' "$META" | cut -d= -f2-)
-assert_task_labels "$ID" "$WORKER_TERM"
-teardown_one "$ID"
-pass "app-window: a live herdr-app.sock under the resolved app home auto-selects hc with backend_detect=app-window"
+[ "$rc" -eq 0 ] || fail "a live app window left a detection signal behind (rc=$rc)"$'\n'"$(cat "$TMP_ROOT/b.err")"
+[ "$OUT" = tmux ] || fail "a live app window must keep a marker-less process on the default backend, got '$OUT'"
+[ ! -s "$TMP_ROOT/b.err" ] || fail "a live app window must resolve silently - no auto-detect notice"$'\n'"$(cat "$TMP_ROOT/b.err")"
+pass "app-window is not a signal: a live herdr-app.sock over a running spawn core keeps the default backend silently and records nothing"
 
-# --- Case D: a live window over a session with no running core --------------
-# The adapter's container_ensure starts a missing core, so detection must
-# refuse instead of selecting hc for a session nobody started. No pin names
-# the lab core here; the session is never provisioned.
+# --- Case D: a live window beside a session with no running core ------------
+# No pin names the lab core here and the session is never provisioned;
+# resolution stays on the default, silently, and starts no core.
 ABSENT_SES=$HC_TEST_SES-none
 # shellcheck disable=SC2016 # positional params expand in the child shell.
 OUT=$($SCRUB -u FM_HC_SOCKET HERDR_APP_HOME="$APPHOME" HC_SESSION="$ABSENT_SES" \
   FM_CONFIG_OVERRIDE="$CONFIG" bash -c '. "$1/bin/fm-backend.sh"; fm_backend_name' _ "$ROOT" 2>"$TMP_ROOT/d.err")
-[ "$OUT" = tmux ] || fail "a live window over a stopped session must keep the default backend, got '$OUT'"$'\n'"$(cat "$TMP_ROOT/d.err")"
-grep -q "hc session '$ABSENT_SES' has no running core" "$TMP_ROOT/d.err" \
-  || fail "the refusal notice must name the session it would not start"$'\n'"$(cat "$TMP_ROOT/d.err")"
+[ "$OUT" = tmux ] || fail "a live window beside a stopped session must keep the default backend, got '$OUT'"$'\n'"$(cat "$TMP_ROOT/d.err")"
+[ ! -s "$TMP_ROOT/d.err" ] || fail "a live window with no running core resolves silently"$'\n'"$(cat "$TMP_ROOT/d.err")"
 for probe in "$XDG_STATE_HOME/herdr-core/$ABSENT_SES" "${XDG_RUNTIME_DIR:-$TMP_ROOT/no-runtime}/herdr-core/$ABSENT_SES.sock"; do
   [ ! -e "$probe" ] || fail "resolving the backend started core state at $probe"
 done
 kill "$APPSOCK_PID" 2>/dev/null; wait "$APPSOCK_PID" 2>/dev/null; APPSOCK_PID=
-pass "app-window: a live window over a session with no running core keeps the default and starts nothing"
+pass "app-window is not a signal: a live window beside a session with no running core keeps the default silently and starts nothing"
 
 # --- Case C: explicit config/backend wins, detection skipped ----------------
 printf 'hc\n' > "$CONFIG/backend"

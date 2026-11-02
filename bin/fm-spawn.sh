@@ -7072,7 +7072,7 @@ preserve_relaunch_meta() {
   # task record carries the reason, not just the result. Every other
   # selection (explicit, default, or another detected backend) writes none.
   case "$BACKEND:${FM_BACKEND_DETECT_SIGNAL:-}" in
-    hc:app-terminal|hc:app-window) echo "backend_detect=$FM_BACKEND_DETECT_SIGNAL" ;;
+    hc:app-terminal) echo "backend_detect=$FM_BACKEND_DETECT_SIGNAL" ;;
   esac
   if [ "$BACKEND" = herdr ]; then
     echo "herdr_session=$HERDR_SES"

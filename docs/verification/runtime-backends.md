@@ -3610,18 +3610,28 @@ Measured on 2026-11-01 inside a `bin/fm-hc-lab.sh` session (`fm-hclab-s3det-*`, 
 | Same inside an unlabeled `hc run` terminal | Undetected. |
 | `HERDR_ENV=1` alongside the app-terminal markers | `herdr` wins - the earlier surface marker keeps its verdict. A lab core provisioned from a herdr pane does inherit `HERDR_*` into every terminal it spawns. |
 | Dead `HC_TERMINAL_SOCKET` | Undetected, and no socket file or core was created. |
-| Live unix listener at the resolved `herdr-app.sock` path, no other markers | `hc` / `app-window`; a stale socket file and an absent one both undetected. |
-| App signal plus no self-identifying hc binary on `PATH` | Undetected (`app-window-unusable`); `fm_backend_name` still resolves `tmux` and prints the missing-toolchain notice. |
+| Live unix listener at the resolved `herdr-app.sock` path, no other markers | Undetected, silently: a live window or socket alone is not a signal - it reaches every host process, so it cannot tell an in-app firstmate from a bare shell while the window is open elsewhere. A stale socket file and an absent one are equally undetected. |
+| Live hc terminal socket plus no self-identifying hc binary on `PATH` | Undetected (`app-terminal-unusable`); `fm_backend_name` still resolves `tmux` and prints the missing-toolchain notice. |
 | `HC_SESSION=<never-started> hc server status --json` in scratch `HOME`/XDG roots (hc 0.1.14, 2026-11-01) | Started a core: `server status` autostarts, like every other contact, so the adapter's container ensure would start a session nobody runs. Detection therefore requires the spawn session's core socket to accept a connection first. |
 | Socket layout for a started core, same scratch roots | `$XDG_RUNTIME_DIR/herdr-core/<session>.sock` with `XDG_RUNTIME_DIR` set (both `default` and a named session); `$XDG_STATE_HOME/herdr-core/<session>/<session>.sock` without it, and `~/.local/state/...` with `XDG_STATE_HOME` unset too. A `default`-session terminal's env carries `HC_TERMINAL_SOCKET` but no `HC_SESSION`; a named session's carries both. |
 | `FM_BACKEND=herdr` with app-terminal markers | `herdr` resolves silently - explicit selection always wins. |
+
+Real Herdr.app exercise on 2026-11-02: the official herdr-app 0.1.11 bundle (sha256-verified from the release manifest) was launched as `Contents/MacOS/Herdr` against an isolated `HERDR_APP_HOME` bound to a lab hc 0.1.14 session, beside a disposable `fm-herdr-lab-*` classic-herdr session and a private-tmpdir tmux server, all torn down afterward:
+
+| Scenario | Result |
+| --- | --- |
+| `fm_backend_detect` inside a terminal the app itself created (it stamped `herdr.space`/`herdr.tab`; env carried `HC_TERMINAL_ID`/`HC_TERMINAL_SOCKET`/`HC_SESSION`/`HC_SCOPE`) | `hc` / `app-terminal`; `fm_backend_name` resolved `hc` with the opt-out notice. |
+| Real `bin/fm-spawn.sh` ship dispatch from that app terminal | Meta recorded `backend=hc`, `backend_detect=app-terminal`, `hc_terminal=t2`; the worker terminal carried `herdr.space=fm-<hometag>`, `herdr.tab=<hometag>-fm-<id>`, and `firstmate.*` labels, and `herdr-app ls` showed it projected as its own space/tab in the window. |
+| `fm_backend_detect` inside the disposable classic-herdr TUI while the app window was live | `herdr` / `HERDR_ENV`. |
+| `fm_backend_detect` inside real tmux while the app window was live | `tmux` / `TMUX`. |
+| Marker-less process while the app window was live (spawn core = real `default`, then a pinned lab core) | Selected `hc` / `app-window` under the pre-change signal set - the ambiguity proof that dropped `app-window` as a signal. Post-change, undetected and resolving `tmux`. |
+| Marker-less process with no `herdr-app.sock` at all | Undetected, resolving `tmux`. |
+| Real `default` core file-meta before/after | Byte-identical - the lab never drove the shared core. |
 
 `bin/fm-supervisor-target-lib.sh` now resolves `$HC_TERMINAL_ID`+`$HC_TERMINAL_SOCKET` to `<session>:<address>`/`hc`; `bin/fm-supervise-daemon.sh` still supports only `tmux herdr rex t3code` and refuses the resolved backend loudly.
 
 ### Not verified
 
-- A ship spawn, and a spawn with a real harness rather than the stand-in.
+- A spawn with a real harness rather than the stand-in.
 - `send --wait`'s `started`/`working` proof against a real status-reporting harness; the lab run covered a non-reporting shell, whose verdict falls to the composer screen.
 - Native `status.state` reported by a real harness launched through `bin/fm-spawn.sh`.
-- The `app-window` probe against a real running Herdr.app window (verified against a plain unix listener; a real app's socket behavior was not exercised).
-- How the `herdr.space` and `herdr.tab` labels display in Herdr.app.
