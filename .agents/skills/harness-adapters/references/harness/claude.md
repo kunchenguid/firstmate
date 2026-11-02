@@ -86,6 +86,7 @@ Put either in user settings or the untracked `.claude/settings.local.json`, neve
 ## Permission prompts
 
 Worker `PermissionRequest` hooks report security decisions through the existing status and watcher path; `bin/fm-busy-event.sh` owns request deduplication.
+The next busy-state event from the same incarnation closes the decision.
 Never answer a permission prompt with keys; route the decision to firstmate.
 [`../../../../../docs/verification/runtime-backends.md`](../../../../../docs/verification/runtime-backends.md#claude-permission-prompt-wake) records the live event and its refresh command.
 
