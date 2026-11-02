@@ -471,12 +471,17 @@ t_rovo_reports_through_unknown() {
   wait_cap 'state=blocked:kind=question' "$d/cap" 60 || fail "rovo: an open decision did not report while unknown"
   printf 'resolved [at=2] [key=k1]: go\ndone [at=%s]: PR https://example.test/pr/31\n' "$(date +%s)" >>"$d/state/t31.status"
   wait_cap 'state=done' "$d/cap" 60 || fail "rovo: a done stamped after the last busy read did not report while unknown"
+  printf 'Rovo is thinking...\n' >"$d/pane"
+  wait_last_state 'state=working' "$d/cap" 60 || fail "rovo: a follow-up turn did not read as working"
+  : >"$d/pane"
+  wait_last_state 'state=idle' "$d/cap" 60 \
+    || fail "rovo: the earlier done reported over the follow-up turn while unknown"
   kill "$wpid" 2>/dev/null
   wait_gone "$wpid" || fail "rovo: the watcher did not exit on TERM"
   wait "$wpid" 2>/dev/null || true
   local tail
   tail=$(tail -c 4000 "$d/cap" | grep -o 'state=[a-z]*' | tail -1)
-  assert_equals "state=done" "$tail" "rovo: the final record keeps done"
+  assert_equals "state=done" "$tail" "rovo: the exit write keeps the done that predates the last busy read"
   kill "$holder" 2>/dev/null; wait "$holder" 2>/dev/null || true
   pass "rovo: the busy marker drives working; unknown activity still retires it and reports decisions and done"
 }
@@ -572,22 +577,24 @@ t_initial_unknown_launch_reports() {
 }
 
 # A done/failed line carries the phase that wrote it, not the turn now in
-# flight: once activity is unknown, a terminal line only reports when its
-# stamp reaches the reading that last proved the worker busy. An older done
-# and an older failed both park at idle instead of claiming a result, and a
-# done stamped after the last busy read still lands.
+# flight: once activity is unknown, a terminal line only reports when it was
+# appended after the reading that last proved the worker busy. The stale
+# lines are stamped no earlier than any busy reading, so a whole-second
+# stamp cannot order them - the same-second case - and both an earlier done
+# and an earlier failed must still park at idle. The agent's death is
+# different: no turn is in flight, so the parent-exit write restores that
+# standing result. A done appended after the last busy read reports live
+# even when its stamp is no later than that reading's second.
 t_stale_terminal_line_parks_idle() {
-  local d=$TMP_ROOT/staleline verb wpid
+  local d=$TMP_ROOT/staleline verb wpid holder suppressed t0
   mkhome "$d"
-  : >"$d/cap"
-  sleep 300 &
-  local holder=$!
-  local suppressed
   for verb in 'done' 'failed'; do
     suppressed='done'
     [ "$verb" = 'done' ] || suppressed=error
     : >"$d/cap"
-    printf '%s [at=1]: earlier phase result\n' "$verb" >"$d/state/t42.status"
+    sleep 300 &
+    holder=$!
+    printf '%s [at=%s]: earlier phase result\n' "$verb" "$(($(date +%s) + 60))" >"$d/state/t42.status"
     busy_rec "$d/state" t42 busy
     env "${CLEAN_UNSET[@]}" FM_OSC7501_TTY="$d/cap" FM_OSC7501_INTERVAL=1 \
       bash "$SCRIPT" watch --task t42 --kind ship --state "$d/state" --harness opencode \
@@ -600,9 +607,16 @@ t_stale_terminal_line_parks_idle() {
     sleep 2
     assert_equals "0" "$(grep -o "state=$suppressed" "$d/cap" | wc -l | tr -d ' ')" \
       "stale $verb: the earlier result never reported while activity was unknown"
-    kill "$wpid" 2>/dev/null; wait "$wpid" 2>/dev/null || true
+    kill "$holder" 2>/dev/null; wait "$holder" 2>/dev/null || true
+    wait_gone "$wpid" || fail "stale $verb: the watcher did not exit on parent death"
+    wait "$wpid" 2>/dev/null || true
+    assert_equals "state=$suppressed" "$(grep -o 'state=[a-z]*' "$d/cap" | tail -1)" \
+      "stale $verb: the exit write with unknown activity keeps the standing result"
   done
   : >"$d/cap"
+  sleep 300 &
+  holder=$!
+  t0=$(date +%s)
   busy_rec "$d/state" t42 busy
   env "${CLEAN_UNSET[@]}" FM_OSC7501_TTY="$d/cap" FM_OSC7501_INTERVAL=1 \
     bash "$SCRIPT" watch --task t42 --kind ship --state "$d/state" --harness opencode \
@@ -611,12 +625,12 @@ t_stale_terminal_line_parks_idle() {
   wait_cap 'state=working' "$d/cap" 60 || fail "fresh done: no working record"
   rm -f "$d/state/t42.busy-state" "$d/state/t42.busy-gen"
   wait_last_state 'state=idle' "$d/cap" 60 || fail "fresh done: working did not retire"
-  printf 'done [at=%s]: PR https://example.test/pr/42\n' "$(date +%s)" >"$d/state/t42.status"
+  printf 'done [at=%s]: PR https://example.test/pr/42\n' "$t0" >>"$d/state/t42.status"
   wait_last_state 'state=done' "$d/cap" 60 \
-    || fail "fresh done: a line stamped after the last busy read did not report"
+    || fail "fresh done: a line appended after the last busy read did not report"
   kill "$wpid" 2>/dev/null; wait "$wpid" 2>/dev/null || true
   kill "$holder" 2>/dev/null; wait "$holder" 2>/dev/null || true
-  pass "unknown activity: a stale done/failed parks at idle; a fresh done still reports"
+  pass "unknown activity: a stale done/failed parks at idle until exit keeps it; a fresh done still reports"
 }
 
 # A watcher killed without its final write leaves its record standing. The

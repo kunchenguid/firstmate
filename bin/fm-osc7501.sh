@@ -58,9 +58,10 @@
 #   written once per change - an open decision still reads blocked,
 #   anything else parks at idle - so a working/blocked record cannot
 #   outlive the signals that produced it. A done/failed line only counts
-#   when it was stamped at or after the last reading that proved a turn was
-#   running; an older one belongs to an earlier phase and parks at idle
-#   while that turn is still in flight. arm's idle clear is the bridge's own
+#   when it was appended to the status file after the last reading that
+#   proved a turn was running; one already standing then belongs to an
+#   earlier phase and parks at idle while that turn is still in flight. The
+#   exit write drops that check: the agent is gone, so its done/error stands. arm's idle clear is the bridge's own
 #   first write, so the watcher it starts owns the root record from launch;
 #   a watcher with no write of its own stays silent instead: the root record
 #   may belong to a native writer. Harnesses whose activity only resolves
@@ -290,17 +291,25 @@ osc_activity() { # <harness> <task> <state> [backend] [target]
   case "$act" in busy | idle) printf '%s' "$act" ;; *) return 1 ;; esac
 }
 
+# osc_mark <status-file> -> its line count, the append position a later
+# line must pass to be newer than this reading; 0 when absent or empty.
+osc_mark() {
+  local n
+  n=$(grep -c '' "$1" 2>/dev/null) || n=${n:-0}
+  printf '%s' "${n:-0}"
+}
+
 # osc_plan sets W_STATE, W_KIND, W_MSG from the task's signals and its
 # activity. act=unknown folds the same signals as idle - no unproven working
 # claim - except that a terminal line then proves the worker finished only
-# when it was stamped at or after <busy-at>, the reading that last proved a
-# turn was running: an older done/failed can belong to an earlier phase
-# while the turn that superseded it is still in flight, and an untimed line
-# proves nothing. A same-second stamp still counts, since a line truly older
-# than that reading can never coincide with it. No busy reading at all (0)
-# means nothing argues the line is stale.
-osc_plan() { # <task> <kind> <state> <busy|idle|unknown> [busy-at]
-  local task=$1 kind=$2 state_dir=$3 act=$4 busy_at=${5:-0} file line verb note held at
+# when it was appended past <busy-mark>, the status file's osc_mark taken
+# just after the reading that last proved a turn was running: a done/failed
+# standing by then can belong to an earlier phase while the turn that
+# superseded it is still in flight. Append order, unlike a whole-second
+# stamp, orders a line against a reading in the same second. 0 means no
+# line preceded any busy reading.
+osc_plan() { # <task> <kind> <state> <busy|idle|unknown> [busy-mark]
+  local task=$1 kind=$2 state_dir=$3 act=$4 busy_mark=${5:-0} file line verb note held at
   file="$state_dir/$task.status"
   W_STATE=
   W_KIND=
@@ -340,9 +349,9 @@ osc_plan() { # <task> <kind> <state> <busy|idle|unknown> [busy-at]
   fi
   case "$verb" in
     failed | done)
-      if [ "$act" = unknown ] && [ "$busy_at" -gt 0 ] 2>/dev/null; then
-        at=$(status_line_at_epoch "$line" 2>/dev/null) || at=0
-        [ "$at" -ge "$busy_at" ] 2>/dev/null || { W_STATE=idle; return 0; }
+      if [ "$act" = unknown ] && [ "$busy_mark" -gt 0 ] 2>/dev/null; then
+        at=$(grep -nxF -- "$line" "$file" 2>/dev/null | tail -n 1 | cut -d: -f1)
+        [ "${at:-0}" -gt "$busy_mark" ] 2>/dev/null || { W_STATE=idle; return 0; }
       fi
       if [ "$verb" = failed ]; then
         W_STATE=error
@@ -362,18 +371,18 @@ osc_plan() { # <task> <kind> <state> <busy|idle|unknown> [busy-at]
 
 # --- watcher ------------------------------------------------------------------
 
-# final record before exit: the agent is gone, so a running turn no longer
-# counts; keep a result worth finding (done/error) and park everything else
-# at idle. Unknown activity does not silence it - its own working/blocked
-# must never outlive the agent - but a watcher that never wrote stays
-# silent, leaving a possible native owner of the root record untouched.
+# final record before exit: the agent is gone, so no turn is in flight and
+# its latest done/error is its outcome whatever activity last read; keep that
+# result and park everything else at idle. Unknown activity does not silence
+# it - its own working/blocked must never outlive the agent - but a watcher
+# that never wrote stays silent, leaving a possible native owner of the root
+# record untouched.
 osc_final() {
-  local fact=idle
-  if ! osc_activity "$WATCH_HARNESS" "$WATCH_TASK" "$WATCH_STATE" "$WATCH_BACKEND" "$WATCH_TARGET" >/dev/null; then
-    [ -n "${last:-}" ] || return 0
-    fact=unknown
+  if [ -z "${last:-}" ] \
+    && ! osc_activity "$WATCH_HARNESS" "$WATCH_TASK" "$WATCH_STATE" "$WATCH_BACKEND" "$WATCH_TARGET" >/dev/null; then
+    return 0
   fi
-  osc_plan "$WATCH_TASK" "$WATCH_KIND" "$WATCH_STATE" "$fact" "${busy_seen:-0}"
+  osc_plan "$WATCH_TASK" "$WATCH_KIND" "$WATCH_STATE" idle
   case "$W_STATE" in
     done | error) ;;
     *) W_STATE=idle W_KIND='' W_MSG='' ;;
@@ -414,7 +423,7 @@ osc_watch() { # --task --kind --state --harness [--backend] [--target] [--owned 
   FM_OSC_APP="firstmate-$WATCH_HARNESS"
   FM_OSC_APP="${FM_OSC_APP:0:$FM_OSC7501_APP_MAX}"
   WATCH_TITLE="fm-$WATCH_TASK"
-  local dev=${FM_OSC7501_TTY:-/dev/tty} hb=0 hb_ticks last='' seq act busy_seen=0
+  local dev=${FM_OSC7501_TTY:-/dev/tty} hb=0 hb_ticks last='' seq act busy_mark=0
   [ "$WATCH_OWNED" = 1 ] && last=$(osc_seq idle '' "$WATCH_TITLE" '')
   exec 3>>"$dev" 2>/dev/null || exit 0
   osc_load_libs || exit 0
@@ -428,7 +437,7 @@ osc_watch() { # --task --kind --state --harness [--backend] [--target] [--owned 
       break
     fi
     if act=$(osc_activity "$WATCH_HARNESS" "$WATCH_TASK" "$WATCH_STATE" "$WATCH_BACKEND" "$WATCH_TARGET"); then
-      [ "$act" = busy ] && busy_seen=$(date +%s)
+      [ "$act" = busy ] && busy_mark=$(osc_mark "$WATCH_STATE/$WATCH_TASK.status")
       osc_plan "$WATCH_TASK" "$WATCH_KIND" "$WATCH_STATE" "$act"
       seq=$(osc_seq "$W_STATE" "$W_KIND" "$WATCH_TITLE" "$W_MSG")
       if [ "$seq" != "$last" ]; then
@@ -449,9 +458,10 @@ osc_watch() { # --task --kind --state --harness [--backend] [--target] [--owned 
       # write stands, keep it honest: fold the durable signals alone (no
       # unproven working claim) and write the result once per change,
       # retiring whatever they no longer justify. A done/failed line still
-      # has to outdate the last reading that proved a turn was running.
+      # has to be appended after the last reading that proved a turn was
+      # running.
       if [ -n "$last" ]; then
-        osc_plan "$WATCH_TASK" "$WATCH_KIND" "$WATCH_STATE" unknown "$busy_seen"
+        osc_plan "$WATCH_TASK" "$WATCH_KIND" "$WATCH_STATE" unknown "$busy_mark"
         seq=$(osc_seq "$W_STATE" "$W_KIND" "$WATCH_TITLE" "$W_MSG")
         if [ "$seq" != "$last" ]; then
           printf '%s' "$seq" >&3 2>/dev/null
