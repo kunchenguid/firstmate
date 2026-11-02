@@ -3073,11 +3073,17 @@ finish_firstmate_home_removal() {
   fi
   [ -z "$tmp" ] || rm -f -- "$tmp" || restore_rc=1
   if [ "$removal_committed" = 0 ] && [ -n "$retired" ]; then
-    rmdir "$retired" 2>/dev/null || true
-    # This attempt's evidence is a retry contract for a removal whose rename
-    # committed. Rolling back before the rename restores the home, so leaving
-    # it behind would refuse every later teardown of a home that still exists.
-    [ -z "$evidence" ] || rm -f -- "$evidence" 2>/dev/null || true
+    if [ -e "$retired/home" ] || [ -L "$retired/home" ]; then
+      # The rename landed before an interrupt could set the committed flag: the
+      # staged copy is real, so the evidence must stay for a retry to finish.
+      :
+    else
+      rmdir "$retired" 2>/dev/null || true
+      # This attempt's evidence is a retry contract for a removal whose rename
+      # committed. Rolling back before the rename restores the home, so leaving
+      # it behind would refuse every later teardown of a home that still exists.
+      [ -z "$evidence" ] || rm -f -- "$evidence" 2>/dev/null || true
+    fi
   fi
   [ "$restore_rc" = 0 ] || rc=$restore_rc
   exit "$rc"
