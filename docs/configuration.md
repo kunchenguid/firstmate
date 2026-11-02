@@ -1638,8 +1638,9 @@ They state what "done" means, the exact command or check that proves it, what th
 A brief that carries none of the four sections predates the contract and stays dispatchable, so a task already in flight can still be relaunched.
 A secondmate charter is not a task brief and never carries them.
 
+`## Acceptance criteria` restates the captain's ask as checkable conditions and never adds a second one: `## Captain's intent` stays authoritative because the reviewer treats it as acceptance criteria, and `AGENTS.md` owns that relation.
 `bin/fm-brief-heading-lib.sh` owns the field list and the unfilled-field reader, and `bin/fm-brief.sh`'s header owns the scaffold syntax.
-The [verification record](verification/brief-task-fields.md) holds the measured before-state and the re-measurement procedure.
+The [verification record](verification/brief-task-fields.md) holds the mechanism claim and the re-measurement procedure.
 
 ## Worker launch environment (config/launch-env-allowlist)
 

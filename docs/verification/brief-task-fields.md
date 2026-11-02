@@ -1,9 +1,10 @@
-# Brief task-field trial verification
+# Brief task-field verification
 
 Audience: maintainer verification.
 
 This record supports the four required task fields a ship or scout brief carries, owned by [`bin/fm-brief.sh`](../../bin/fm-brief.sh) (scaffold) and [`bin/fm-brief-heading-lib.sh`](../../bin/fm-brief-heading-lib.sh) (the field list and the unfilled-field reader).
-It records the before-baseline and the re-measurement procedure for one project, so a later reader can re-run the comparison and see for themselves whether the change moved the signal.
+It states the mechanism claim, the structural proof that holds in every home, and a re-measurement procedure a maintainer can run against their own home's dispatch record.
+No home's own data is recorded here: the numbers are meant to be produced by the reader, on the reader's sessions, with the same procedure.
 
 ## What changed
 
@@ -19,90 +20,48 @@ A ship or scout brief's `# Task` section now carries four required fields, each 
 `bin/fm-spawn.sh` and `bin/fm-promote.sh` refuse a brief whose field is absent, empty, or still its placeholder, and the refusal names the field to write.
 A brief that carries none of the four sections predates the contract and stays dispatchable, so a task already in flight can still be relaunched.
 
-## The baseline this is measured against
+## How `## Acceptance criteria` relates to `## Captain's intent`
 
-The evidence is `20-Tools/agentsview-quality-report-2026-10-12.md` in the `ai_lab_vault` vault, whose two WARNING-severity prompt-maturity rows are `missing success criteria` (124 of 523 sessions, reported 1.8x incomplete lift) and `repeated prompts` (278 signals across 46 sessions, reported 10.9x incomplete lift).
+`## Captain's intent` is the captain's own ask in the captain's own words, and it stays authoritative: the reviewer treats that subsection as the acceptance criteria, and `bin/fm-dod-lib.sh` passes its body, and only its body, as the no-mistakes `--intent`.
+`## Acceptance criteria` is that same ask restated as conditions someone else can check, so it may narrow or sharpen the ask but must stay entailed by it.
+A criterion the captain's words do not support is not an acceptance criterion: it belongs in `## Out of scope` as follow-up, or the brief itself is wrong.
+When the two disagree, the intent governs and the brief is corrected, so a brief never carries two competing definitions of done.
 
-That report is a signal generator, not a measurement, and two of its own caveats bind this trial.
+## What is proven structurally
 
-- The report lists four `0.0x` incomplete-lift multipliers, among them `missing targeted verification path` (49 signals). A `0.0x` multiplier means the cohort had zero incomplete sessions or a divide-by-zero, so it is **unmeasured, not safe**. The verification-path row this change targets therefore has no trustworthy baseline multiplier at all.
-- The report's grade, ratios, and multipliers are computed by a methodology the fleet has not inspected (bead `woka`).
+The mechanism claim is narrow: a brief the generator scaffolds carries the four sections with their placeholders, the dispatch path refuses a brief whose field is unfilled and names that field, a filled brief dispatches, and a brief predating the contract still dispatches.
+This holds in any home and needs no measurement; [`tests/fm-brief.test.sh`](../../tests/fm-brief.test.sh) covers the scaffold and the single fill site per field, and [`tests/fm-task-delivery.test.sh`](../../tests/fm-task-delivery.test.sh) covers the refusal and the pre-contract acceptance.
 
-## Measured before-state
+The behavioral claim is separate and weaker: briefs carrying an explicit contract should produce fewer sessions whose record shows missing success criteria or repeated prompts.
+That claim is home-specific, so it is re-measured rather than recorded.
 
-Measured 2026-10-19 against the agentsview SQLite archive at `~/.agentsview/sessions.db` (agentsview v0.45.0, the live server on `127.0.0.1:50901`).
-The session store is the authority; the UI is not a durable record.
+## Re-measurement procedure
 
-The cohort is the firstmate-dispatched sessions of the one project `ai_lab_vault`: a session whose first user message carries the `FIRSTMATE_OP: v1 launch-brief` marker, which is how a dispatched worker is identified in the store.
-
-```sh
-sqlite3 -readonly ~/.agentsview/sessions.db "
-with d as (
-  select s.id, s.agent, s.started_at, s.outcome, s.missing_success_criteria_count msc,
-         s.missing_verification_count mv, s.duplicate_prompt_count dup, m.content
-  from sessions s join messages m on m.session_id=s.id and m.ordinal=0
-  where s.project='ai_lab_vault' and s.deleted_at is null
-    and m.content like '%FIRSTMATE_OP: v1 launch-brief%'
-)
-select count(*) sessions,
-  sum(case when content like '%## Acceptance criteria%' then 1 else 0 end) with_acceptance_section,
-  sum(case when msc>0 then 1 else 0 end) sess_msc,
-  sum(case when mv>0 then 1 else 0 end) sess_mv,
-  sum(case when dup>0 then 1 else 0 end) sess_dup,
-  sum(dup) dup_signals,
-  sum(case when outcome='completed' then 1 else 0 end) completed,
-  min(started_at), max(started_at)
-from d;
-"
-```
-
-Result on 2026-10-19:
-
-| Measure | Value |
-| --- | --- |
-| Dispatched sessions in `ai_lab_vault` | 6 |
-| Carrying an `## Acceptance criteria` section | 0 |
-| Sessions with `missing success criteria` | 1 |
-| Sessions with `missing targeted verification path` | 0 |
-| Sessions with `repeated prompts` | 2 |
-| `repeated prompts` signals | 2 |
-| Sessions with outcome `completed` | 5 |
-| `quality_signal_version` | 5 |
-| Window | 2026-09-15 to 2026-10-19 |
-
-For contrast, the same project's non-dispatched sessions (a worker's own interactive session, not a dispatched worker) carry 107 sessions with `missing success criteria` and 10 with `repeated prompts` across 308 sessions.
-That contrast is the reason the cohort is defined by the launch-brief marker rather than by project alone: the change lands in the brief, so only the dispatched cohort can move.
-
-## Procedure
-
-1. Land the change on `main`, so newly dispatched briefs carry the four fields.
-2. Dispatch at least 20 ship or scout tasks against the `ai_lab_vault` project clone, each with a filled `## Acceptance criteria`, `## Verification path`, `## Required artifact`, and `## Out of scope`.
+1. Before landing the change, choose the home's own dispatch record and count the dispatched cohort: sessions a ship or scout brief launched, identified by the brief marker those sessions carry in their first user message, so a session started by a human is never counted as dispatched.
+   For that cohort, record the cohort size, how many sessions carried an `## Acceptance criteria` section, and the record's own prompt-quality counters for missing success criteria and repeated prompts. Record the date, the counter version the record reports, and the query used.
+2. Land the change, so newly scaffolded briefs carry the four fields.
+3. Dispatch a batch of ship or scout tasks through the generator, each with all four fields filled.
    A task whose fields are not filled is refused at dispatch, so a refused dispatch is the generator working, not a missing sample.
-3. Re-run the query above, unchanged, and read the same rows.
-4. Record the dated output in this file.
+4. Re-run the same query, unchanged, against the same record, and read the same rows.
+5. Record the dated before and after rows together, with the cohort size of each.
 
 ## What counts as improvement
 
-The mechanism claim is narrow and structural: a dispatched brief that carries the four fields, and a dispatched brief whose first user message carries an `## Acceptance criteria` section, is the observable that the generator change reached the worker.
-That claim is true by construction and is proven by the scaffold and refusal tests.
+Three conditions must all hold before a lift is claimed.
 
-The behavioral claim is separate and weaker: sessions in the dispatched cohort should carry `missing success criteria` and `repeated prompts` signals at a lower rate than the before-state above.
-Three conditions must all hold for a lift to be claimed.
+- The count of sessions carrying an `## Acceptance criteria` section equals the cohort size, which proves the sample actually ran under the new generator rather than under a mix of old and new briefs.
+- The signal rates for missing success criteria and repeated prompts are below the before-state.
+- The cohort is large enough that the difference is not noise: state the cohort size with the number, because a single session flipping is a large swing when the before-cohort is small.
 
-- `sess_msc` and `sess_dup` in the re-measured cohort must be below the before-state.
-- The `with_acceptance_section` count must equal the cohort size, which proves the sample actually ran under the new generator rather than under a mix of old and new briefs.
-- The cohort must be large enough that a difference is not noise: with 6 sessions in the before-state, one session flipping is a 16-point swing, so a single-run comparison on a small cohort is not evidence.
-
-**No lift figure is trusted until a sibling method bead confirms it.**
-The report's `0.0x` multipliers are degenerate, its lift methodology is uninspected, and the before-state cohort here is 6 sessions.
-A measured change in this cohort is a signal to investigate, not a result to publish.
+A measured change in a small cohort is a signal to investigate, not a result to publish.
 
 ## Re-measurement notes
 
-- The archive is SQLite at `~/.agentsview/sessions.db` and is written by a live daemon, so a re-measurement should read with `sqlite3 -readonly` and accept that the newest session may not have been ingested yet.
-- The server on `127.0.0.1:50901` serves the same archive; the UI is a view of it, not the record.
-- A session is dispatched when its first user message carries the `FIRSTMATE_OP: v1 launch-brief` marker.
-  A session that lacks the marker was not dispatched through this generator, whatever its project.
-- `missing_success_criteria_count`, `missing_verification_count`, and `duplicate_prompt_count` are per-session counters on the `sessions` table; the report's "sessions" and "signals" columns count different things, and a session can carry more than one signal.
-- The `quality_signal_version` column on `sessions` records which signal computation produced the counters.
-  A version change invalidates a comparison with an earlier one, and the version must be recorded with any result.
+- Read the session record read-only; it is written by a live process, so the newest session may not have been ingested yet, and the UI over it is a view rather than the record.
+- A session is dispatched when its first user message carries the brief marker.
+  A session without the marker was not dispatched through this generator, whatever else it looks like.
+- The prompt-quality counters are per-session, and the counters and the signals they produce count different things: a session can carry more than one signal.
+- The record names which signal computation produced the counters.
+  A version change invalidates a comparison with an earlier one, so record the version with every result.
+- A degenerate multiplier, such as a reported `0.0x` lift, means the cohort had zero qualifying sessions or a divide-by-zero: it is unmeasured, not safe, and it cannot serve as a baseline.
+- A signal generator's grade, ratios, and multipliers are not a measurement until the home that owns it has inspected the methodology.
