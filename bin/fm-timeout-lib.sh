@@ -117,12 +117,14 @@ fm_timeout_stdin_is_redirected() {
 # Background "$@" and keep a redirected stdin. A non-interactive bash assigns
 # /dev/null to an async command's stdin, then applies explicit redirections, so
 # 0<&3 restores the dup. The group redirection is undone when the group ends,
-# and 3<&- keeps the spare fd out of the child.
+# and 3<&- keeps the spare fd out of the child. A terminal or closed stdin gets
+# an explicit /dev/null: under set -m (the bash mechanism) bash skips its
+# implicit one, which would hand the terminal to a background process group.
 fm_timeout_background() {
   if fm_timeout_stdin_is_redirected; then
     { "$@" 0<&3 3<&- & } 3<&0
   else
-    "$@" &
+    "$@" </dev/null &
   fi
 }
 
