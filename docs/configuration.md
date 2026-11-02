@@ -1802,10 +1802,11 @@ No-mistakes and direct-PR ships keep their place after `done` until their record
 The declaration is matched by the spawning clone's directory name, so clones of the same origin share the cap only when they use that same directory name.
 A clone of that origin under a different directory name finds no declaration and is not capped, though its workers are still counted as holders for a same-origin clone that is capped.
 When every place is held, a fresh spawn launches nothing, creates no record, leaves the backlog item queued, prints one `deferred:` line naming the holders, and exits 75, so Firstmate dispatches the item again once a place frees.
-Relaunches are checked against the same limit, excluding their own task record; restarting a completed scout or local-only ship records new work and reserves its place again, and a relaunch that aborts before its replacement reaches launch delivery restores that completion so the released place is not held by a worker that never started.
+Relaunches are checked against the same limit, excluding their own task record; relaunching a completed scout or local-only ship writes a capacity reservation at `state/<task-id>.capacity-reservation` that holds its place until the restarted worker's status log records `working` or `done` after the reservation, so bookkeeping alone never expires it.
+An aborted relaunch whose launch was never sent, or whose endpoint was closed, removes that reservation, so the released place is not held by a worker that never started; a delivery that cannot be proven either way keeps it.
 A malformed or unreadable file refuses every ship or scout spawn until it is fixed, rather than guessing the intended limit, and so does a local home's state directory or task record that cannot be read while counting a capped project's holders.
 Firstmate cannot see which part of a worker's life uses the resource, so the number bounds whole workers from launch to completion or PR handoff, and the tightest resource every worker needs should decide it.
-[`bin/fm-project-capacity-lib.sh`](../bin/fm-project-capacity-lib.sh) owns the file format, completion and resumed-work rules, what holds a place, and why concurrent spawns cannot both take the last one.
+[`bin/fm-project-capacity-lib.sh`](../bin/fm-project-capacity-lib.sh) owns the file format, the reservation record and its expiry, completion and resumed-work rules, what holds a place, and why concurrent spawns cannot both take the last one.
 
 ## Crew dispatch profiles (config/crew-dispatch.json)
 

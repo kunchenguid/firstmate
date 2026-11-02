@@ -243,10 +243,11 @@
 #   render, endpoint, worktree, record, or backlog move exists, so the task stays
 #   exactly as queued as it was; an unreadable declaration refuses with exit 1.
 #   A batch reports such a pair as `batch: DEFERRED` and exits 75 when nothing
-#   else failed. A relaunch reclaims a place before releasing the project lock,
-#   and an aborted relaunch that never reached launch delivery puts a finished
-#   scout or local-only ship's released place back; a --secondmate spawn is
-#   never counted against capacity.
+#   else failed. A relaunch of a finished scout or local-only ship reserves its
+#   released place before releasing the project lock, and that reservation holds
+#   until the replacement's status log records working or done. An aborted
+#   relaunch whose launch was never sent or whose endpoint was closed removes the
+#   reservation again; a --secondmate spawn is never counted against capacity.
 #   With no harness arg, a crewmate/scout spawn resolves the CREW harness only when
 #   config/crew-dispatch.json is absent. When that file exists, crewmate/scout
 #   spawns require an explicit harness so firstmate cannot silently skip dispatch
