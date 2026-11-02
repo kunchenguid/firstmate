@@ -361,7 +361,7 @@ agent_view() { # <session> set|clear
 }
 
 cmd_sync() {
-  local only=${1:-} record session workspaces panes live_pane live_ws pane_count changed pair diff rc=0
+  local only=${1:-} record session workspaces panes root_panes live_pane live_ws root_pane_count changed pair diff rc=0
   local -a args=()
   collect_tasks "$only"
   [ "${#TASKS[@]}" -gt 0 ] || return 0
@@ -397,10 +397,14 @@ EOF
         fi
       fi
       projected_workspace "$P_TASK" "$P_SESSION" "$P_WORKSPACE" "$P_PANE" || continue
-      pane_count=$(printf '%s' "$workspaces" | jq -r --arg w "$P_WORKSPACE" '
-        [.result.workspaces[]? | select(.workspace_id == $w)]
-        | if length == 1 then .[0].pane_count else empty end' 2>/dev/null) || pane_count=
-      [ "$pane_count" = 1 ] || continue
+      # A projected workspace holds exactly one terminal root pane on every
+      # release; its 0.9.x sidebar pane is chrome beside that root pane, not a
+      # second task, so the shared root-pane rule is the version-tolerant
+      # "single task" gate where a raw pane count would silently skip 0.9.x
+      # projections.
+      root_panes=$(printf '%s' "$panes" | fm_backend_herdr_root_pane_ids "$P_WORKSPACE") || continue
+      root_pane_count=$(printf '%s\n' "$root_panes" | awk 'NF { n += 1 } END { print n + 0 }')
+      [ "$root_pane_count" = 1 ] || continue
       live_ws=$(printf '%s' "$workspaces" | jq -c --arg w "$P_WORKSPACE" '
         [.result.workspaces[]? | select(.workspace_id == $w)][0].tokens // {}' 2>/dev/null) || live_ws='{}'
       diff=$(changed_tokens "$live_ws" \

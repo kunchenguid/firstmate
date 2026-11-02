@@ -3945,11 +3945,13 @@ teardown_herdr_journal_orphaned() {
 HERDR_PRESENTATION_RETIRE_CANDIDATE=0
 HERDR_PRESENTATION_SESSION=
 HERDR_PRESENTATION_PANE=
+HERDR_PRESENTATION_TAB=
 if [ "$BACKEND" = herdr ] \
    && { [ -e "$HERDR_PRESENTATION_JOURNAL" ] || [ -L "$HERDR_PRESENTATION_JOURNAL" ]; }; then
   fm_backend_source herdr || true
   HERDR_PRESENTATION_SESSION=$(meta_value "$META" herdr_session)
   HERDR_PRESENTATION_WORKSPACE=$(meta_value "$META" herdr_workspace_id)
+  HERDR_PRESENTATION_TAB=$(meta_value "$META" herdr_tab_id)
   HERDR_PRESENTATION_PANE=$(meta_value "$META" herdr_pane_id)
   if [ -n "$HERDR_PRESENTATION_SESSION" ] \
      && [ -n "$HERDR_PRESENTATION_WORKSPACE" ] \
@@ -3974,8 +3976,15 @@ if [ "$HERDR_PRESENTATION_RETIRE_CANDIDATE" = 1 ]; then
     # Swallowing them left a wrong active workspace with no operator-visible
     # signal at all. The close stays non-fatal exactly as before: the presence
     # gate below is what decides whether any durable record may be removed.
-    fm_backend_herdr_projection_close_pane_focus_preserving \
-      "$HERDR_PRESENTATION_SESSION" "$HERDR_PRESENTATION_PANE" || true
+    # The tab-level close removes the terminal and 0.9.x sidebar panes together
+    # so the disposable workspace empties instead of leaking as a sidebar husk.
+    if [ -n "$HERDR_PRESENTATION_TAB" ]; then
+      fm_backend_herdr_projection_close_tab_focus_preserving \
+        "$HERDR_PRESENTATION_SESSION" "$HERDR_PRESENTATION_TAB" || true
+    else
+      fm_backend_herdr_projection_close_pane_focus_preserving \
+        "$HERDR_PRESENTATION_SESSION" "$HERDR_PRESENTATION_PANE" || true
+    fi
   else
     echo "warning: herdr presentation focus lock unavailable; refusing a concurrent focus-unsafe pane close" >&2
   fi

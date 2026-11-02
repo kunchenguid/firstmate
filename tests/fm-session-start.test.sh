@@ -451,9 +451,9 @@ case "${1:-} ${2:-}" in
     ;;
   "pane list")
     if [ -e "$spawned" ]; then
-      printf '%s\n' '{"result":{"panes":[{"pane_id":"p-new","tab_id":"t-new"}]}}'
+      printf '%s\n' '{"result":{"panes":[{"pane_id":"p-new","tab_id":"t-new","workspace_id":"ws1"}]}}'
     elif [ ! -e "$killed" ]; then
-      printf '%s\n' '{"result":{"panes":[{"pane_id":"p-old","tab_id":"t-old"}]}}'
+      printf '%s\n' '{"result":{"panes":[{"pane_id":"p-old","tab_id":"t-old","workspace_id":"ws1"}]}}'
     else
       printf '%s\n' '{"result":{"panes":[]}}'
     fi
@@ -480,7 +480,10 @@ case "${1:-} ${2:-}" in
   "pane close")
     [ "${3:-}" = p-old ] && : > "$killed"
     ;;
-  "pane run"|"pane send-text"|"pane send-keys"|"tab close")
+  "tab close")
+    [ "${3:-}" = t-old ] && : > "$killed"
+    ;;
+  "pane run"|"pane send-text"|"pane send-keys")
     ;;
   *)
     exit 1
@@ -1387,7 +1390,7 @@ EOF
 
   out=$(network_stage_report "$home" "$root")
   assert_not_contains "$out" "SECONDMATE_LIVENESS:" "successful Herdr husk recovery should stay non-actionable"
-  assert_contains "$(cat "$log")" "pane close p-old" "session start did not close the confirmed Herdr husk"
+  assert_contains "$(cat "$log")" "tab close t-old" "session start did not close the confirmed Herdr husk"
   assert_contains "$(cat "$log")" "tab create" "session start did not relaunch the Herdr secondmate"
   assert_grep 'herdr_pane_id=p-new' "$home/state/$SESSION_START_HERDR_SECOND_MATE_ID.meta" \
     "the real respawn path did not record the replacement Herdr pane"

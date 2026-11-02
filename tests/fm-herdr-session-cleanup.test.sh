@@ -186,9 +186,9 @@ fm_backend_herdr_cli() {
   esac
 }
 
-fm_backend_herdr_projection_close_pane_focus_preserving() {
+fm_backend_herdr_projection_close_tab_focus_preserving() {
   [ ! -e "$FIXTURE_DIR/focus-refuse" ] || return 1
-  [ "${3:-}" = no-agent ] || return 1
+  [ "${4:-}" = no-agent ] || return 1
   printf '%s\n' "$*" >> "$CLOSE_LOG"
   : > "$FIXTURE_DIR/closed"
 }
