@@ -441,8 +441,8 @@ jobs:
           herdr-core --version
           treehouse --version
           version=$(herdr-core --version | awk '{print $2; exit}')
-          [ "$version" = "0.1.14" ] || {
-            echo "::error::expected exact herdr-core pin 0.1.14, got ${version:-<empty>}"
+          [ "$version" = "0.1.15" ] || {
+            echo "::error::expected exact herdr-core pin 0.1.15, got ${version:-<empty>}"
             exit 1
           }
       - name: Snapshot pre-suite hc lab sessions

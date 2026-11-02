@@ -90,11 +90,24 @@ export DISABLE_AUTOUPDATER=1
 . "$ROOT/bin/fm-backend.sh"
 fm_backend_source hc || fail "fm_backend_source hc failed"
 
+# shellcheck source=/dev/null
+. "$ROOT/bin/fm-control-lib.sh"
 CHECKED=0
 SKIPPED=
 HC_VERSION=$("$HC_TOOL" --version 2>/dev/null | head -1)
-for harness in claude codex opencode pi grok kimi; do
-  bin_path=$(command -v "$harness" 2>/dev/null || true)
+for harness in $(fm_control_harnesses); do
+  case "$harness" in
+    commandcode|cortex)
+      note "not applicable: $harness launches are restricted to tmux and herdr"
+      continue ;;
+  esac
+  binary=$harness
+  [ "$harness" != kiro ] || binary=kiro-cli
+  if [ "$harness" = cursor ]; then
+    bin_path=$(fm_cursor_resolve_binary 2>/dev/null || true)
+  else
+    bin_path=$(command -v "$binary" 2>/dev/null || true)
+  fi
   if [ -z "$bin_path" ] || [ ! -x "$bin_path" ]; then
     SKIPPED="$SKIPPED $harness"
     note "skip: $harness is not installed on this machine"
@@ -102,9 +115,16 @@ for harness in claude codex opencode pi grok kimi; do
   fi
   version=$("$bin_path" --version 2>/dev/null | head -1 | tr -d '\r') || version=
   [ -n "$version" ] || version=unknown
-  address=$(fm_backend_hc_cli "$HC_SESSION" run --bg --json --no-parent --outlive-parent --no-notify \
+  args=("$bin_path")
+  case "$harness" in
+    codex) args+=(--no-daemon) ;;
+    rovo) args+=(run) ;;
+    kiro) args+=(chat) ;;
+    omp) args+=(--no-session --no-extensions --no-title) ;;
+  esac
+  address=$(OMP_SKIP_SETUP=1 fm_backend_hc_cli "$HC_SESSION" run --bg --json --no-parent --outlive-parent --no-notify \
     --cwd "$HC_LAB_DIR/wt" --label "firstmate.task=fm-$harness" --label "firstmate.home=$(fm_backend_hometag)" \
-    "$bin_path" | jq -r '.address // empty')
+    "${args[@]}" | jq -r '.address // empty')
   fm_backend_hc_address_valid "$address" || fail "$harness ($version): hc did not start a terminal"
   target="$HC_SESSION:$address"
   state=

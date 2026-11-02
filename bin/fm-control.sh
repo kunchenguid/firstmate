@@ -54,7 +54,8 @@
 #              always REFUSES: a task record carries no socket identity for its
 #              endpoint, so this verb cannot tell a destroyed window from one on
 #              a tmux server it cannot address, and it will not claim a stop it
-#              cannot see.
+#              cannot see. hc likewise refuses missing or finished terminals:
+#              its record has no core or socket identity to prove absence.
 #              Refused on t3code before anything is sent: T3's `/mcp` tools
 #              have no session stop (bin/fm-control-lib.sh
 #              fm_control_backend_exit_supported); interrupt ends its turn.
@@ -132,7 +133,7 @@
 #   - A backend that cannot deliver the harness's interrupt key is refused
 #     (Orca's terminal API has no Escape).
 #   - `exit` and `relaunch` require a backend with a recovery-grade agent-state
-#     classifier (tmux, herdr, rex, or t3code), because without one the "the
+#     classifier (tmux, herdr, rex, hc, or t3code), because without one the "the
 #     agent stopped" postcondition cannot be proven. Relaunch also requires
 #     replacement support, which t3code lacks. zellij, orca, cmux, paseo, and tern are
 #     refused rather than reported as successful blind.
@@ -383,6 +384,8 @@ RECORDED_HARNESS=$(fm_meta_get "$META" harness)
 KIND=$(fm_meta_get "$META" kind)
 WT=$(fm_meta_get "$META" worktree)
 [ -n "$KIND" ] || KIND=ship
+[ "$BACKEND" != hc ] || [ "$KIND" != secondmate ] \
+  || die "the hc backend does not support secondmate lifecycle control"
 # OpenCode's composer exit key changed between its 1.x and 2.x lines; the major
 # spawn detected is recorded here so the exit command below matches the running
 # agent. Absent (a legacy record or a non-opencode task) it stays empty.
@@ -405,7 +408,7 @@ fi
 # --- shared helpers ---------------------------------------------------------
 
 agent_state() {
-  fm_backend_agent_state "$BACKEND" "$T"
+  fm_backend_agent_state "$BACKEND" "$T" "$LABEL"
 }
 
 busy_verdict() {
