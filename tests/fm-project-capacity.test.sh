@@ -429,7 +429,7 @@ missing generation|0|status_offset=0\n
 extra field|0|gen=new\nstatus_offset=0\nextra=value\n
 EOF
   printf 'gen=new\nstatus_offset=%s\n' "$offset" > "$dir/reservation"
-  for verb in captain-held note resolved needs-decision blocked failed paused working done; do
+  for verb in captain-held note resolved needs-decision blocked failed paused working "done"; do
     printf '%s [at=123]: appended after reservation\n' "$verb" >> "$dir/status"
     expected=0
     case "$verb" in working|done) expected=1 ;; esac
