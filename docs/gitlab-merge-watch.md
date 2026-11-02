@@ -309,7 +309,7 @@ It skips only that prompt; the conditions above are what authorize the merge.
 ## Why a recorded head is not the authority
 
 `bin/fm-pr-check.sh` records `pr_head=` for GitHub and GitLab alike: `gh` exposes the head commit as a selectable field, and the GitLab arm reads the merge request's JSON when `jq` is present (see above).
-It is optional by design, and the other consumers treat it that way: `bin/fm-teardown.sh` proves a merge request landed through the merged state read plus a fetch of `refs/merge-requests/<iid>/head`, the ref GitLab keeps for every merge request including a merged one, and `bin/fm-review-diff.sh` fetches that same ref by default with a recorded `pr_head=` only as its offline fallback.
+It is optional by design, and the other consumers treat it that way: `bin/fm-teardown.sh` proves a merge request landed from the live merged state and live merge-request head, and `bin/fm-review-diff.sh` compares against that live head by default, each head fetch taken only from a worktree origin that resolves to the recorded URL's own project; [`architecture.md`](architecture.md) owns the review fetch and the [`fm-teardown.sh` header](../bin/fm-teardown.sh) owns the landed-work proof.
 A Gerrit task records none, because a Gerrit revision names one patch set and every amend or rebase is a new one.
 
 The merge path still does not depend on one, and deliberately so.
