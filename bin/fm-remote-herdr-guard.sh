@@ -25,15 +25,21 @@
 #   the owner was born in the Aqua session (launchd or the Aqua remote-job
 #   worker)                            -> exit 0, leave it alone
 #   the owner was born anywhere else (an SSH remote attach, a shell over
-#   ssh/mosh, or a birth it cannot prove) -> `herdr server stop`, wait until the
+#   ssh/mosh, or a birth it cannot prove), and the operator's
+#   fm-remote-doctor.sh --fix authorized this start
+#                                       -> `herdr server stop`, wait until the
 #                                          socket is released, then exec
 #                                          `herdr server --session <s>` at once
 #                                          so the socket is rebound before a
 #                                          reconnecting SSH attach can start
 #                                          another foreign server
 #   the foreign server does not release the socket in time -> exit 1
-# A takeover closes every pane in that session; the parent firstmate's
-# secondmate liveness sweep relaunches its mates into the Aqua-born server.
+#   any other start (RunAtLoad at login, a KeepAlive restart, or an automatic
+#   readiness repair) over a foreign server -> exit 0, leave it alone
+# A takeover closes every pane in that session, so it happens only on the
+# operator's explicit request: that --fix writes its own live pid to
+# ~/.firstmate/remote-herdr-takeover-<s>, and this guard consumes that one-shot
+# marker and honors it only while the authorizing doctor is still running.
 # bin/fm-remote-herdr-owner-lib.sh owns the owner discovery and the birth
 # markers; FM_REMOTE_HERDR_GUARD_STOP_WAIT_TENTHS (default 50) bounds the
 # release wait in tenths of a second. Every decision prints one line to
@@ -91,6 +97,21 @@ fi
 
 if fm_remote_herdr_birth_is_aqua "$BIRTH"; then
   log "session $SESSION is served by pid $OWNER born in the Aqua login session ($BIRTH); nothing to do"
+  exit 0
+fi
+
+takeover_authorized() {
+  local marker="${HOME:-}/.firstmate/remote-herdr-takeover-$SESSION" claimed pid=
+  claimed="$marker.claimed.$$"
+  mv -- "$marker" "$claimed" 2>/dev/null || return 1
+  IFS= read -r pid < "$claimed" || true
+  rm -f -- "$claimed"
+  case "$pid" in ''|*[!0-9]*) return 1 ;; esac
+  kill -0 "$pid" 2>/dev/null
+}
+
+if ! takeover_authorized; then
+  log "session $SESSION is served by ${OWNER:+pid }${OWNER:-an unproven process} born outside the Aqua login session ($BIRTH); leaving it alone, because only the operator's fm-remote-doctor.sh --fix authorizes a takeover"
   exit 0
 fi
 

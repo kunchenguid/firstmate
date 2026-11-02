@@ -274,9 +274,10 @@ The primary Firstmate code root keeps the `fm-remote` session and `dev.firstmate
 The doctor records that root as the service owner, and a different code root on the same account receives a separate, root-derived Herdr session and launch-agent label.
 [`bin/fm-remote-herdr-identity-lib.sh`](../bin/fm-remote-herdr-identity-lib.sh) owns that resolution, so readiness, launch, relaunch, and endpoint validation all name the same session for a code root.
 A legacy service without an owner record is adopted only when its existing launch-agent guard proves the current root owns it; otherwise the doctor leaves it alone and reports the ownership gap.
-Repairs never rewrite, reload, restart, or take over a Herdr service whose server is running, whoever owns it, because a mate can create a pane in a running server at any moment; the doctor reports that service and its owner instead.
-That includes a running server born outside the Aqua login session: an operator stops it once no mate needs it, and `--fix` then starts the session inside the launch agent.
-Repairs of one service hold a lock and re-prove its server is stopped under it before booting out the launch agent, so concurrent readiness runs cannot undo each other, and a reload never force-restarts the freshly bootstrapped server.
+An operator's `--fix` refuses to rewrite, reload, or restart a Herdr service owned by another code root, one whose owner cannot be proven, or one whose pane list shows live panes or cannot be read; it reports the service and its owner instead.
+Readiness runs its unattended repair as `--fix --automatic`, which never stops, boots out, replaces, reloads, or takes over a running Herdr server or a loaded Herdr launch agent, because launchd can restart that server and a mate can create a pane in it at any moment.
+It only records ownership and starts a stopped server, and reports every other Herdr repair as an operator action.
+A reload never force-restarts the freshly bootstrapped server.
 Under `--backend rex --fix`, the doctor starts the account's persistent Rex server only when none answers.
 It never stops or restarts an answering Rex server, because a stop ends every process in that server's sessions, including unrelated work and sibling agents, and a restore brings back only shells.
 An answering exit-empty server is reported as a human gap: at a time when nothing runs there, an operator runs `rex server stop` and then `rex server start` on that account, and rex stays not ready until then.
@@ -306,8 +307,10 @@ It acts on whichever server owns the `fm-remote` socket:
 | --- | --- |
 | Nothing | Execs the server in the foreground under launchd. |
 | An Aqua-born server | Exits 0. |
-| Any other (foreign) server | Stops the foreign server and takes the session over, closing its panes so the parent firstmate relaunches its mates into the Aqua-born server. |
+| Any other (foreign) server, on a start the operator's `--fix` authorized | Stops the foreign server and takes the session over, closing its panes so the parent firstmate relaunches its mates into the Aqua-born server. |
+| Any other (foreign) server, on any other start | Exits 0 and leaves it alone; the doctor reports it until an operator's `--fix` takes it over. |
 
+Only the operator's `--fix` authorizes a takeover, through a one-shot marker naming its own live process, so a login, a KeepAlive restart, or an automatic readiness repair never closes a running session's panes.
 `KeepAlive={SuccessfulExit=false}` lets that exit 0 rest instead of respawning against a held socket.
 The guard's header owns the decision table, and [`bin/fm-remote-herdr-owner-lib.sh`](../bin/fm-remote-herdr-owner-lib.sh) owns the birth markers it reads.
 
@@ -317,6 +320,7 @@ The guard's header owns the decision table, and [`bin/fm-remote-herdr-owner-lib.
 
 - It starts the same workers directly on Linux.
 - It recreates the `~/.local/bin/fm-remote-entrypoint.sh` symlink when it is absent.
+  An existing link to another Firstmate checkout's entrypoint is accepted as is, because every call names its code root, so a second code root on the account never repoints the first one's link.
 - It creates only Firstmate-owned required-tool wrappers that it can prove resolve to a version-manager target.
   It stops after one harness satisfies the at-least-one requirement, which is the harness line of the [required remote tools](#required-remote-tools).
 
