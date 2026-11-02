@@ -84,6 +84,7 @@ hc_core=<core id>
 `backend_detect=` is `app-terminal` only when that signal automatically selected hc; an explicitly selected hc writes no `backend_detect=` line.
 
 `hc_core` is the id `hc server status` reports for that core; it lets a structured not-found prove the terminal gone (see "Lifecycle control").
+A core that reports no id still takes the task, and the record then carries no `hc_core`.
 
 `<address>` is hc's terminal address such as `t7`.
 Every adapter call sets exactly the recorded `HC_SESSION` and drops any inherited `HC_SOCKET`, which hc would otherwise prefer, so a task keeps reaching its own core even when the caller's environment names another one.

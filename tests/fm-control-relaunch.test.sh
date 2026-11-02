@@ -3468,6 +3468,49 @@ test_hc_task_moves_back_to_herdr() {
   pass "fm-spawn --relaunch --move-backend herdr: an hc task moves back to a Herdr pane in its worktree"
 }
 
+test_move_to_hc_without_a_core_id_records_none() {
+  local dir out rc=0
+  herdr_case_or_skip move-no-core rl99 || { echo "skip - needs jq"; return 0; }
+  dir=$HERDR_CASE_DIR
+  rm -f "$dir/fake/herdr-stopped"
+  printf '{"result":{"agent":{"agent":"claude","agent_status":"idle"}}}\n' > "$dir/fake/herdr-agent-registration"
+  make_hc_stub "$dir"
+  : > "$dir/fake/hc/core-id"
+  out=$(run_spawn_hc "$dir" rl99 --relaunch --move-backend hc) || rc=$?
+  expect_code 0 "$rc" "a core that reports no id must not refuse the move"$'\n'"$out"
+  [ "$(meta_field "$dir" rl99 window)" = fmhc:t1 ] || fail "the record must name the new hc terminal"
+  [ -z "$(meta_field "$dir" rl99 hc_core)" ] || fail "a core without an id must leave hc_core unrecorded"
+  pass "fm-spawn --relaunch --move-backend hc: a core without an id records no hc_core instead of refusing"
+}
+
+test_aborted_hc_rebind_keeps_the_finished_terminal() {
+  local dir out rc=0
+  herdr_case_or_skip hc-rebind-abort rl89 || { echo "skip - needs jq"; return 0; }
+  dir=$HERDR_CASE_DIR
+  rm -f "$dir/fake/herdr-stopped"
+  printf '{"result":{"agent":{"agent":"claude","agent_status":"idle"}}}\n' > "$dir/fake/herdr-agent-registration"
+  make_hc_stub "$dir"
+  out=$(run_spawn_hc "$dir" rl89 --relaunch --move-backend hc) || rc=$?
+  expect_code 0 "$rc" "the move to hc should succeed"$'\n'"$out"
+  # A record written before hc_core existed, whose terminal has finished.
+  grep -v '^hc_core=' "$dir/home/state/rl89.meta" > "$dir/meta.tmp" && mv "$dir/meta.tmp" "$dir/home/state/rl89.meta"
+  jq '.state = "finished" | .foreground = null' "$dir/fake/hc/t1.json" > "$dir/t1.tmp" && mv "$dir/t1.tmp" "$dir/fake/hc/t1.json"
+  : > "$dir/fake/hc/send-fails"
+  rc=0
+  out=$(run_spawn_hc "$dir" rl89 --relaunch) || rc=$?
+  [ "$rc" -ne 0 ] || fail "a rebind whose terminal cannot take input must fail"$'\n'"$out"
+  [ "$(meta_field "$dir" rl89 window)" = fmhc:t1 ] || fail "an aborted rebind must keep the record on the old terminal"
+  [ -f "$dir/fake/hc/t1.json" ] || fail "an aborted rebind must keep the finished terminal the record names"
+  assert_absent "$dir/fake/hc/t2.json" "an aborted rebind must close the terminal it opened"
+  rm -f "$dir/fake/hc/send-fails"
+  rc=0
+  out=$(run_spawn_hc "$dir" rl89 --relaunch) || rc=$?
+  expect_code 0 "$rc" "a retried rebind must still prove the finished terminal gone"$'\n'"$out"
+  [ "$(meta_field "$dir" rl89 window)" = fmhc:t3 ] || fail "the retried rebind must name its new terminal, got $(meta_field "$dir" rl89 window)"
+  assert_absent "$dir/fake/hc/t1.json" "the finished terminal must be removed once the new record is published"
+  pass "fm-spawn --relaunch on hc: an aborted rebind keeps the finished terminal, so a retry still proves it gone"
+}
+
 test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint
 test_relaunch_refuses_before_exit_when_the_composer_holds_pending_text
 test_relaunch_refuses_before_exit_when_the_composer_state_is_unproven
@@ -3569,3 +3612,5 @@ test_control_move_refuses_before_stop_when_hc_is_unreachable
 test_control_move_resumes_the_claude_conversation
 test_control_move_without_a_session_record_starts_fresh
 test_hc_task_moves_back_to_herdr
+test_move_to_hc_without_a_core_id_records_none
+test_aborted_hc_rebind_keeps_the_finished_terminal

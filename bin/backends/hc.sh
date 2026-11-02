@@ -280,7 +280,7 @@ fm_backend_hc_core_id() {  # <session>
   local id
   id=$(fm_backend_hc_cli "$1" server status --json 2>/dev/null | jq -r '.core.id // empty' 2>/dev/null) || id=
   case "$id" in
-    ''|*[!0-9a-f]*) echo "error: hc session '$1' reported no core id" >&2; return 1 ;;
+    ''|*[!0-9a-f]*) echo "warning: hc session '$1' reported no core id; a not-found from it cannot prove a terminal gone" >&2; return 1 ;;
   esac
   printf '%s' "$id"
 }

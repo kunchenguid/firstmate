@@ -1779,6 +1779,10 @@ spawn_orca_reclaim_launch_file() {
 # record names it. An abort before then closes it, so a retry is not refused
 # by hc's one-live-terminal-per-task rule.
 SPAWN_HC_REBIND_TARGET=
+# The finished hc terminal an in-place rebind replaces. It stays until the
+# republished record names the new terminal, so an aborted rebind leaves the
+# record naming a terminal that still proves itself finished.
+SPAWN_HC_REBIND_OLD=
 spawn_abort_cleanup() {
   local status=$?
   if [ -n "$SPAWN_HC_REBIND_TARGET" ] && [ "$status" -ne 0 ] &&
@@ -5030,13 +5034,8 @@ EOF
     # shellcheck disable=SC2034 # fm_backend_hc_container_ensure reads it.
     [ -z "$HC_SES" ] || HC_SESSION=$HC_SES
     HC_SES=$(fm_backend_hc_container_ensure) || exit 1
-    HC_CORE=$(fm_backend_hc_core_id "$HC_SES") || exit 1
-    if [ "$MOVE_BACKEND_SET" -eq 0 ]; then
-      fm_backend_kill hc "$RELAUNCH_TARGET" "" "$W" || {
-        echo "error: task $ID's finished hc terminal $RELAUNCH_TARGET could not be removed; refusing to open a second terminal for it" >&2
-        exit 1
-      }
-    fi
+    HC_CORE=$(fm_backend_hc_core_id "$HC_SES") || HC_CORE=
+    [ "$MOVE_BACKEND_SET" -eq 1 ] || SPAWN_HC_REBIND_OLD=$RELAUNCH_TARGET
     HC_TERMINAL=$(fm_backend_hc_create_task "$HC_SES" "$W" "$WT") || exit 1
     T="$HC_SES:$HC_TERMINAL"
     SPAWN_HC_REBIND_TARGET=$T
@@ -5402,7 +5401,7 @@ EOF
     ;;
   hc)
     HC_SES=$(fm_backend_hc_container_ensure) || exit 1
-    HC_CORE=$(fm_backend_hc_core_id "$HC_SES") || exit 1
+    HC_CORE=$(fm_backend_hc_core_id "$HC_SES") || HC_CORE=
     HC_TERMINAL=$(fm_backend_hc_create_task "$HC_SES" "$W" "$PROJ_ABS") || exit 1
     T="$HC_SES:$HC_TERMINAL"
     ;;
@@ -8303,6 +8302,9 @@ spawn_close_moved_endpoint() {
   return 0
 }
 [ -z "$MOVE_FROM_BACKEND" ] || spawn_close_moved_endpoint
+if [ -n "$SPAWN_HC_REBIND_OLD" ] && ! fm_backend_kill hc "$SPAWN_HC_REBIND_OLD" "" "$W"; then
+  echo "warning: task $ID rebound to hc terminal $T, but its finished hc terminal $SPAWN_HC_REBIND_OLD could not be removed; remove it by hand" >&2
+fi
 
 fm_lock_release "$SPAWN_META_LOCK"
 SPAWN_META_LOCK_HELD=0
