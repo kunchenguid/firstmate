@@ -54,7 +54,12 @@
 # skipped here, so one outcome is never reported twice. It then uses
 # fm-crew-state.sh as the sole current-state source.
 # Only a done or failed state is suspicious enough to create a durable terminal
-# outcome record or wake the supervisor.
+# outcome record or wake the supervisor, and only while the recorded endpoint
+# does not carry a live agent: fm_backend_agent_state (bin/fm-backend.sh)
+# reading `alive` withholds the verdict, since a status mtime and an old
+# failed run cannot prove a silent foreground call or a relaunched incarnation
+# has stopped. Any other answer, including an unreadable one, leaves the
+# verdict as before and is never read as proof the agent is gone.
 # Working, paused, parked, blocked, unknown, persistent secondmates, and
 # captain-held work retain their existing supervision semantics.
 #
@@ -83,7 +88,8 @@
 # main-home acknowledgement. The atomic epoch/cursor marker's mtime gates scans,
 # and its cursor records the last child visited within the aggregate budget.
 #
-# The scan reads only durable local state and fm-crew-state.sh; it never invokes
+# The scan reads only durable local state, fm-crew-state.sh, and one endpoint
+# liveness read per terminal candidate; it never invokes
 # gh, gh-axi, curl, fm-pr-check.sh, fm-pr-poll.sh, or a state *.check.sh.
 set -u
 export LC_ALL=C
@@ -106,6 +112,8 @@ CREW_STATE_BIN="${FM_INACTIVE_CREW_STATE_BIN:-$SCRIPT_DIR/fm-crew-state.sh}"
 . "$SCRIPT_DIR/fm-timeout-lib.sh"
 # shellcheck source=bin/fm-dod-lib.sh
 . "$SCRIPT_DIR/fm-dod-lib.sh"
+# shellcheck source=bin/fm-backend.sh
+. "$SCRIPT_DIR/fm-backend.sh"
 
 FM_INACTIVE_RECONCILE_SECS=${FM_INACTIVE_RECONCILE_SECS:-900}
 case "$FM_INACTIVE_RECONCILE_SECS" in
@@ -495,6 +503,14 @@ report_child() { # <id>
   report_child_ledger_locked "$id" "$meta"
 }
 
+task_agent_state() { # <meta>
+  local backend target
+  backend=$(fm_backend_of_meta "$1")
+  target=$(fm_backend_target_of_meta "$1")
+  [ -n "$target" ] || { printf 'unreadable'; return 0; }
+  fm_backend_agent_state "$backend" "$target" 2>/dev/null || printf 'unreadable'
+}
+
 reconcile_direct_child_locked() { # <id> <meta> <secondmate-id-or-empty> <timeout>
   local id=$1 meta=$2 self=${3:-} timeout=$4 status turn last age state_line state pr incarnation fingerprint outcome_key payload kind state_rc=0
   [ -f "$meta" ] && [ ! -L "$meta" ] || return 0
@@ -524,6 +540,7 @@ reconcile_direct_child_locked() { # <id> <meta> <secondmate-id-or-empty> <timeou
     'state: failed '*) state='failed' ;;
     *) return 0 ;;
   esac
+  [ "$(task_agent_state "$meta")" != alive ] || return 0
   pr=$(pr_for_task "$meta")
   incarnation=$(meta_incarnation "$meta")
   # The receipt identity binds structured fields only: a persistent child that

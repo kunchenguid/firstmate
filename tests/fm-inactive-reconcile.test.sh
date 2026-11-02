@@ -39,7 +39,14 @@ SH
   cat > "$fake/tmux" <<'SH'
 #!/usr/bin/env bash
 case "${1:-}" in
-  display-message) printf '%%1\n' ;;
+  list-windows) [ -z "${FM_FAKE_PANE_CMD:-}" ] || printf 'fm-%s\n' "${FM_FAKE_TASK_ID:?}" ;;
+  display-message)
+    case "$*" in
+      *pane_tty*) ;;
+      *pane_current_command*) printf '%s\n' "${FM_FAKE_PANE_CMD:-zsh}" ;;
+      *) printf '%%1\n' ;;
+    esac
+    ;;
   capture-pane) printf 'idle\n> \n' ;;
 esac
 SH
@@ -170,6 +177,22 @@ test_main_direct_terminal_presentation_receipt() {
   FM_HOME="$MAIN" FM_STATE_OVERRIDE="$MAIN/state" "$DRAIN" --ack-through "$seq" --recovery-generation "$generation"
   [ "$(outcome_count "$MAIN" presented)" = 1 ] || fail "acknowledged presentation did not receive its own receipt"
   pass "main direct terminal presentation has a durable receipt"
+}
+
+test_live_agent_withholds_terminal_outcome() {
+  make_world live-agent; write_child "$MAIN" child 'done: PR https://example.test/owner/repo/pull/1 checks green'
+  FM_FAKE_CREW_STATE='failed' FM_FAKE_PANE_CMD=claude FM_FAKE_TASK_ID=child run_reconcile "$MAIN" --startup
+  [ "$(outcome_count "$MAIN" pending)" = 0 ] || fail "live agent still received a terminal outcome"
+  [ "$(wake_count "$MAIN" 'inactive-outcome:')" != 1 ] || fail "live agent still woke the supervisor"
+  pass "live agent withholds the terminal outcome"
+}
+
+test_dead_agent_keeps_terminal_outcome() {
+  make_world dead-agent; write_child "$MAIN" child 'done: PR https://example.test/owner/repo/pull/1 checks green'
+  FM_FAKE_CREW_STATE='failed' FM_FAKE_PANE_CMD=zsh FM_FAKE_TASK_ID=child run_reconcile "$MAIN" --startup
+  [ "$(outcome_count "$MAIN" pending)" = 1 ] || fail "dead agent lost its terminal outcome"
+  [ "$(wake_count "$MAIN" 'inactive-outcome:')" = 1 ] || fail "dead agent did not wake the supervisor"
+  pass "dead agent keeps the terminal outcome"
 }
 
 # Away-posture regression: a branch-actor drain that consumes an
@@ -1070,6 +1093,8 @@ SH
 }
 
 test_main_direct_terminal_presentation_receipt
+test_live_agent_withholds_terminal_outcome
+test_dead_agent_keeps_terminal_outcome
 test_branch_ack_retires_inactive_outcome_receipt
 test_unpushed_ci_ready_done_is_not_published
 test_local_done_head_is_pinned_before_parent_delivery
