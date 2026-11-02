@@ -424,6 +424,17 @@ _fm_status_declared_wait_scan() {  # <resolve-verb> <legacy-captain-re>
 # the flat cadence; returns 1 when the line is not a pause or declares no time,
 # or the time is malformed, so a bad token falls back to the cadence rather than
 # silencing the wait.
+# Age the pause from its own [at=] stamp, so later lines in the file do not
+# postpone the ceiling. An unstamped legacy pause keeps the file's age.
+status_pause_age() {  # <status-line> <file-age-seconds> <now-epoch>
+  local at
+  if at=$(status_line_at_epoch "$1") && [ "$at" -le "$3" ]; then
+    printf '%s' "$(( $3 - at ))"
+  else
+    printf '%s' "$2"
+  fi
+}
+
 status_pause_is_overdue() {  # <status-line> <age-seconds> <now-epoch> -> success iff overdue
   local until undated_max=${FM_PAUSE_UNDATED_MAX_SECS:-$FM_PAUSE_UNDATED_MAX_SECS_DEFAULT}
   case "$undated_max" in ''|*[!0-9]*) undated_max=$FM_PAUSE_UNDATED_MAX_SECS_DEFAULT ;; esac

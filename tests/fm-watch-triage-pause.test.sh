@@ -1502,6 +1502,15 @@ test_malformed_dated_pause_is_not_undated_overdue() {
   pass "malformed dated pauses remain on bounded recheck"
 }
 
+test_undated_pause_age_uses_the_pause_line() {
+  local now=1800000000 age
+  age=$(bash -c '. "$1/bin/fm-classify-lib.sh"; status_pause_age "$2" 7200 "$3"' _ "$ROOT" "paused [at=$((now - 90000))]: waiting" "$now")
+  [ "$age" = 90000 ] || fail "a later file touch moved the pause age ($age)"
+  age=$(bash -c '. "$1/bin/fm-classify-lib.sh"; status_pause_age "$2" 7200 "$3"' _ "$ROOT" "paused: waiting" "$now")
+  [ "$age" = 7200 ] || fail "an unstamped pause did not keep the file age ($age)"
+  pass "the undated bound is measured from the pause line's own stamp"
+}
+
 test_undated_pause_overdue_bound() {
   local dir state statusf class
   dir=$(paused_until_fixture undated-overdue "" 30); state="$dir/state"; statusf="$state/until.status"
@@ -1681,6 +1690,7 @@ fm_test_run \
   test_overdue_terminal_status_ignores_pane_display_churn \
   test_reused_task_id_does_not_inherit_overdue_pause \
   test_malformed_dated_pause_is_not_undated_overdue \
+  test_undated_pause_age_uses_the_pause_line \
   test_undated_pause_overdue_bound \
   test_paused_bg_job_without_until_stays_silent_after_the_job_ends \
   test_paused_bg_job_until_timeout_rechecks_after_the_job_ends

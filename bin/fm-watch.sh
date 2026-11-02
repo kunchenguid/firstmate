@@ -1537,13 +1537,12 @@ resurface_absorbed() {  # <window> <throttle-marker> <age> <reason> [scope] [min
   fi
   if [ -n "$blocked_line" ]; then
     task=${overdue_marker##*/}; task=${task#.paused-overdue-}
-    fm_overdue_marker_publish "$STATE" "$task" "$snapshot" || return 0
+    ! status_open_decisions "$statusf" | grep -Fq "paused-overdue-$task" || return 0
     fm_wake_status_append_self_announced "$STATE" "$statusf" "$blocked_line"; append_rc=$?
-    if [ "$append_rc" -ne 0 ] && [ "$append_rc" -ne 1 ]; then
-      rm -f "$overdue_marker"
-      exit 1
+    [ "$append_rc" -eq 0 ] || [ "$append_rc" -eq 1 ] || exit 1
+    if printf '%s\n' "$snapshot" > "$overdue_marker"; then
+      pause_overdue_reconcile "$task" "$statusf" || return 0
     fi
-    pause_overdue_reconcile "$task" "$statusf" || return 0
   fi
   fm_wake_append stale "$win" "$reason" || exit 1
   if [ -n "$scope" ]; then printf '%s' "$scope" > "$throttle"; else date +%s > "$throttle"; fi
@@ -2459,7 +2458,7 @@ busy_stream_snapshot_current() {  # <task> <observed snapshot>
 # wording; a caller that reached the bounded cadence off pause tracking alone, with
 # no declaring verb left on the log, keeps the external-wait wording it always had.
 handle_paused_stale() {  # <window> <task> <hash>
-  local win=$1 task=$2 h=$3 key statusf mtime age detail reason declaration last until now min_age rc snapshot
+  local win=$1 task=$2 h=$3 key statusf mtime age detail reason declaration last until now min_age rc snapshot pause_age
   key=$(window_key "$win")
   pause_overdue_reconcile "$task" "$STATE/$task.status"; rc=$?
   if [ "$rc" -eq 0 ]; then
@@ -2479,9 +2478,10 @@ handle_paused_stale() {  # <window> <task> <hash>
   last=$(status_declared_wait_line "$statusf")
   min_age=$PAUSE_RESURFACE_SECS
   declaration="declared:$(fm_wake_signal_sig "$statusf" || true)"
-  if status_is_paused "$last" && status_pause_is_overdue "$last" "$age" "$now"; then
+  pause_age=$(status_pause_age "$last" "$age" "$now")
+  if status_is_paused "$last" && status_pause_is_overdue "$last" "$pause_age" "$now"; then
     detail="paused, wait overdue"
-    reason="paused ${age}s, wait overdue - decide or release"
+    reason="paused ${pause_age}s, wait overdue - decide or release"
     declaration="$declaration:overdue"
     min_age=0
   elif status_is_captain_held "$last"; then
@@ -2511,7 +2511,7 @@ handle_paused_stale() {  # <window> <task> <hash>
     reason="paused ${age}s, awaiting external - declared pause, rechecked on a long cadence not a wedge; confirm the wait still holds"
   fi
   if [ "$detail" = "paused, wait overdue" ]; then
-    resurface_absorbed "$win" "$STATE/.paused-resurfaced-$key" "$age" "stale: $win ($reason)" "$declaration" "$min_age" "$statusf" "blocked [key=paused-overdue-$task]: paused ${age}s, wait overdue - decide or release" "$STATE/.paused-overdue-$task" "$snapshot"
+    resurface_absorbed "$win" "$STATE/.paused-resurfaced-$key" "$age" "stale: $win ($reason)" "$declaration" "$min_age" "$statusf" "blocked [key=paused-overdue-$task]: paused ${pause_age}s, wait overdue - decide or release" "$STATE/.paused-overdue-$task" "$snapshot"
   else
     resurface_absorbed "$win" "$STATE/.paused-resurfaced-$key" "$age" "stale: $win ($reason)" "$declaration" "$min_age"
   fi
@@ -2729,7 +2729,7 @@ pause_state_class() {  # <window> <task>
     local mtime now age
     mtime=$(stat_mtime "$statusf"); now=$(date +%s)
     case "$mtime" in ''|*[!0-9]*) mtime=$now ;; esac
-    age=$(( now - mtime ))
+    age=$(status_pause_age "$last" "$(( now - mtime ))" "$now")
     status_pause_is_overdue "$last" "$age" "$now" && { printf 'paused'; return; }
   fi
   if ! status_is_paused_or_captain_held "$last"; then

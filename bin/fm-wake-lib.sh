@@ -866,19 +866,6 @@ fm_recovery_marker_read() {
   FM_RECOVERY_MARKER_TOKEN=$line
 }
 
-# Atomically publish the overdue decision's marker: line 1 is the pause snapshot,
-# optional line 2 is the daemon's delivery state (see overdue_daemon_key).
-fm_overdue_marker_publish() {  # <state> <task> <identity:offset> [delivery]
-  local tmp
-  tmp=$(mktemp "$1/.overdue-tmp.XXXXXX") || return 1
-  if { printf '%s\n' "$3" && { [ -z "${4-}" ] || printf '%s\n' "$4"; }; } > "$tmp" \
-    && _fm_atomic_replace "$tmp" "$1/.paused-overdue-$2"; then
-    return 0
-  fi
-  rm -f "$tmp"
-  return 1
-}
-
 _fm_atomic_replace() {
   mv -f -- "$1" "$2"
 }

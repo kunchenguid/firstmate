@@ -1466,11 +1466,7 @@ test_housekeeping_overdue_pause_opens_one_decision_in_away_mode() {
   pass "away-mode housekeeping opens one overdue decision and worker resume closes it"
 }
 
-overdue_alert_owed() {  # <state> <task>
-  case "$(sed -n 2p "$1/.paused-overdue-$2" 2>/dev/null)" in ''|delivered) return 1 ;; esac
-}
-
-test_housekeeping_overdue_queue_failure_retries() {
+test_housekeeping_overdue_queue_failure_leaves_decision_open() {
   local dir state fakebin task win pane statusf
   dir=$(make_supercase overdue-queue-retry)
   state="$dir/state"; fakebin="$dir/fakebin"
@@ -1483,20 +1479,19 @@ test_housekeeping_overdue_queue_failure_retries() {
   sleep 2
   FM_STATE_OVERRIDE="$state" . "$ROOT/bin/fm-wake-lib.sh"
   real_escalate_add=$(declare -f escalate_add)
-  eval "${real_escalate_add/escalate_add ()/real_escalate_add_impl ()}"
   escalate_add() { return 1; }
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$win" FM_FAKE_TMUX_CAPTURE="$pane" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_PAUSE_UNDATED_MAX_SECS=1 housekeeping "$state"
-  overdue_alert_owed "$state" "$task" || fail "failed queue did not keep the owed alert"
+  [ -z "$(overdue_delivered_key "$state" "$task")" ] || fail "failed queue was recorded as delivered"
   FM_HOME="$dir" FM_STATE_OVERRIDE="$state" bash -c '. "$1" && reconcile_overdue_pauses' _ "$ROOT/bin/fm-watch.sh" \
     || fail "watcher overdue reconciliation failed"
-  overdue_alert_owed "$state" "$task" || fail "a watcher poll discarded the owed overdue alert"
-  escalate_add() { real_escalate_add_impl "$@"; }
-  printf 'resolved [key=unrelated]: unrelated answer\n' >> "$statusf"
-  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$win" FM_FAKE_TMUX_CAPTURE="$pane" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_PAUSE_UNDATED_MAX_SECS=1 housekeeping "$state"
-  [ -e "$state/.paused-overdue-$task" ] && ! overdue_alert_owed "$state" "$task" || fail "retry did not settle the queued overdue event"
+  [ -e "$state/.paused-overdue-$task" ] || fail "a watcher poll discarded the overdue marker"
   eval "$real_escalate_add"
-  [ "$(grep -cF "stale: $win (paused " "$state/.subsuper-escalations")" -eq 1 ] || fail "retry did not queue exactly one stale escalation"
-  pass "failed overdue queue retries after recovery"
+  echo $(( $(date +%s) - 5000 )) > "$state/.subsuper-last-scan"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$win" FM_FAKE_TMUX_CAPTURE="$pane" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_PAUSE_UNDATED_MAX_SECS=1 FM_HEARTBEAT_SCAN_SECS=0 housekeeping "$state"
+  [ "$(grep -cF "blocked [key=paused-overdue-$task]" "$statusf")" -eq 1 ] || fail "the failed queue opened a second decision"
+  [ "$(grep -cF "paused-overdue-$task" "$state/.subsuper-escalations")" -eq 1 ] || fail "the next housekeeping pass did not raise the open decision once"
+  [ "$(grep -cF "stale: $win (paused " "$state/.subsuper-escalations")" -eq 0 ] || fail "a failed alert was retried"
+  pass "a failed overdue queue stays an open decision the next housekeeping pass raises"
 }
 
 test_watcher_overdue_marker_does_not_hide_blocker_from_daemon() {
@@ -1511,8 +1506,8 @@ test_watcher_overdue_marker_does_not_hide_blocker_from_daemon() {
     export FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_ESCALATE_BATCH_SECS=999999
     . "$ROOT/bin/fm-wake-lib.sh"
     if [ "$(uname)" = Darwin ]; then identity=$(/usr/bin/stat -f '%d %i' "$statusf"); else identity=$(stat -c '%d %i' "$statusf"); fi
-    fm_overdue_marker_publish "$state" "$task" "$identity:$size" || fail "fixture: marker"
-    [ -z "$(overdue_daemon_key "$state" "$task")" ] || fail "a marker with no owed alert hid its blocker"
+    printf '%s:%s\n' "$identity" "$size" > "$state/.paused-overdue-$task"
+    [ -z "$(overdue_delivered_key "$state" "$task")" ] || fail "an undelivered marker hid its blocker"
     handle_wake "stale: $win (paused 90s, wait overdue - decide or release)" "$state"
     grep -F "paused-overdue-$task" "$state/.subsuper-escalations" >/dev/null \
       || fail "the daemon never escalated a blocker only the watcher had reported"
@@ -1520,11 +1515,11 @@ test_watcher_overdue_marker_does_not_hide_blocker_from_daemon() {
   pass "a watcher-written overdue marker leaves the blocker to ordinary escalation"
 }
 
-test_overdue_marker_publish_failure_opens_no_decision() {
-  local dir state task statusf rc
-  dir=$(make_supercase overdue-publish-failure)
-  state="$dir/state"; task=overdue-publish; statusf="$state/$task.status"
-  printf 'paused: waiting for dependency\n' > "$statusf"
+test_overdue_open_decision_without_marker_is_not_repeated() {
+  local dir state task statusf
+  dir=$(make_supercase overdue-open-no-marker)
+  state="$dir/state"; task=overdue-crash; statusf="$state/$task.status"
+  printf 'paused: waiting for dependency\nblocked [key=paused-overdue-%s]: paused 9s, wait overdue - decide or release\n' "$task" > "$statusf"
   fm_write_meta "$state/$task.meta" "window=sess:fm-$task" "worktree=$dir/wt" "kind=ship" "harness=pi"
   FM_HOME="$dir" FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-afk-contract.sh" enter --words fixture >/dev/null 2>&1 || fail "fixture: away"
   printf '%s\n' "$(( $(date +%s) - 5000 ))" > "$state/.subsuper-paused-$task"
@@ -1532,18 +1527,10 @@ test_overdue_marker_publish_failure_opens_no_decision() {
   (
     export FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_PAUSE_UNDATED_MAX_SECS=1 FM_ESCALATE_BATCH_SECS=999999
     . "$ROOT/bin/fm-wake-lib.sh"
-    _fm_atomic_replace() { return 1; }
     housekeeping "$state"
-    [ ! -e "$state/.paused-overdue-$task" ] || fail "a failed publish left a marker"
-    ! grep -F "blocked [key=paused-overdue-$task]" "$statusf" >/dev/null || fail "a failed publish opened a decision with no record"
-    ! ls "$state"/.overdue-tmp.* >/dev/null 2>&1 || fail "a failed publish left a temp file"
-    unset -f _fm_atomic_replace
-    . "$ROOT/bin/fm-wake-lib.sh"
-    printf '%s\n' "$(( $(date +%s) - 5000 ))" > "$state/.subsuper-paused-$task"
-    housekeeping "$state"
-    grep -F "blocked [key=paused-overdue-$task]" "$statusf" >/dev/null || fail "recovered storage did not open the decision"
-  ) || fail "failed marker publish was not retried cleanly"
-  pass "a failed overdue marker publish opens no decision and retries"
+    [ "$(grep -cF "blocked [key=paused-overdue-$task]" "$statusf")" -eq 1 ] || fail "an interrupted emission opened a second decision"
+  ) || fail "open decision without a marker was repeated"
+  pass "an open overdue decision with no marker is not opened again"
 }
 
 test_housekeeping_overdue_queue_failure_resume_discards() {
@@ -1567,7 +1554,7 @@ test_housekeeping_overdue_queue_failure_resume_discards() {
         original_append=$(declare -f fm_wake_status_append_self_announced)
         escalate_add() { return 1; }
         housekeeping "$state"
-        overdue_alert_owed "$state" "$task" || fail "failed queue lost the owed alert"
+        [ -e "$state/.paused-overdue-$task" ] || fail "failed queue lost the overdue marker"
         FM_PAUSE_UNDATED_MAX_SECS=86400
         printf '%s: worker changed wait\n' "$event" >> "$statusf"
         eval "$original_enqueue"
@@ -1577,8 +1564,8 @@ test_housekeeping_overdue_queue_failure_resume_discards() {
           signal) handle_wake "signal: $statusf" "$state" ;;
           stale) handle_wake "stale: $win" "$state" ;;
         esac
-        overdue_alert_owed "$state" "$task" || fail "failed resolution lost the owed alert ($event/$route)"
-        [ ! -s "$state/.subsuper-escalations" ] || fail "failed resolution queued an obsolete alert ($event/$route)"
+        [ -e "$state/.paused-overdue-$task" ] || fail "failed resolution lost the overdue marker ($event/$route)"
+        : > "$state/.subsuper-escalations"
         eval "$original_append"
         case "$route" in
           housekeeping) housekeeping "$state" ;;
@@ -3833,10 +3820,10 @@ test_housekeeping_captain_held_silenced_only_by_an_away_record
 test_housekeeping_paused_resumed_cleared
 test_housekeeping_busy_declared_wait_matures_its_window
 test_housekeeping_overdue_pause_opens_one_decision_in_away_mode
-test_housekeeping_overdue_queue_failure_retries
+test_housekeeping_overdue_queue_failure_leaves_decision_open
 test_housekeeping_overdue_queue_failure_resume_discards
 test_watcher_overdue_marker_does_not_hide_blocker_from_daemon
-test_overdue_marker_publish_failure_opens_no_decision
+test_overdue_open_decision_without_marker_is_not_repeated
 test_housekeeping_overdue_initial_publication_reconciles_resume
 test_housekeeping_overdue_pause_preserves_prior_actionable_event
 test_housekeeping_quiet_overdue_pause_opens_decision
