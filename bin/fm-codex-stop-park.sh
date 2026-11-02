@@ -26,7 +26,9 @@
 #
 # Async hooks do not themselves wake Codex. A bounded native queue submission
 # does; delivery failure latches this session to foreground fallback and stays
-# visible to the next synchronous Stop guard. One arm failure is reported and
+# visible to the next synchronous Stop guard. When supervision stops being needed
+# with a final result still queued, that result is delivered the same way before
+# the park exits. One arm failure is reported and
 # retried; a second consecutive failure also latches fallback. A dead park is
 # reported when the next Stop replaces its stale claim. Signals terminate only
 # the tracked arm child; fm_exec_timed also reaps it after owner death on Perl

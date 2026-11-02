@@ -11,6 +11,7 @@ When this session owns supervision:
 3. A real event arrives through Codex's native thread queue as a `Firstmate watcher wake` message.
    Drain first, handle the event and acknowledge it; the next Stop re-arms automatically.
    Quiet watcher polls and supervision-host cycle boundaries remain inside the hook and cost no model calls.
+   When the last supervision source finishes with a final result still queued, the hook delivers that result once more with a message saying supervision has ended; drain, handle and acknowledge it, and do not run a foreground checkpoint.
 4. New user input runs immediately while the asynchronous hook stays parked.
    The single-flight claim and watcher's existing singleton prevent a second watcher when that turn ends.
 5. A park recovery or failure message is actionable: drain and inspect `state/.codex-park.json`.
