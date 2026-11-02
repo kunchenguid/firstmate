@@ -858,6 +858,49 @@ test_lost_serve_reply_does_not_double_charge() {
   pass "a lost serve reply keeps the published certificate as the supervisor's binding"
 }
 
+# A launch that asked for one model and found a supervisor already running on
+# another proves the running model through its observing receipt. The parent
+# then owns that seat, so the host must not adopt the same supervisor and
+# charge it against the allowance the parent just reduced.
+test_observed_model_mismatch_does_not_double_charge() {
+  local out dir="$TMP_ROOT/remote-model-mismatch-out"
+  make_remote_fleet remote-model-mismatch 2
+  mkdir -p "$dir" "$R_REMOTE/state/parent-route"
+  printf 'kind=secondmate\nmodel=pool-model-a\nspawn_gen=host.1\n' \
+    > "$R_REMOTE/state/parent-route/theshop.meta"
+  task_record "$R_ROOT" theshop pool-model-a secondmate \
+    "$(printf 'remote_host=shop-host\nremote_root=%s\nhome=%s' "$ROOT" "$R_REMOTE")"
+  printf 'schema=fm-remote-seat-receipt.v1\noperation=op1\nverb=launch\nactual_generation=host.1\nactual_model=pool-model-a\n' \
+    > "$R_REMOTE/state/parent-route/theshop.seat-operation.op1"
+  chmod 600 "$R_REMOTE/state/parent-route/theshop.seat-operation.op1"
+  jq -n --arg h "$R_REMOTE" '{schema:"fm-fleet-seat-holder.v2", task:"theshop",
+    incarnations:[{generation:"op1", kind:"secondmate", lifecycle:"reserved",
+      launch_phase:"dispatching", model:"pool-model-b",
+      route:{placement:"remote", operation:"op1", home:$h}}]}' \
+    > "$R_REMOTE/state/parent-route/theshop.seat-reservation.op1"
+  chmod 600 "$R_REMOTE/state/parent-route/theshop.seat-reservation.op1"
+  # The parent keeps its own confirmed seat for the generation the receipt
+  # proved, which is what reduces the remote allowance.
+  local st name
+  st=$(cd "$R_ROOT/state" && pwd -P)
+  name=$(printf '%s\t%s' "$st" theshop | cksum | tr -s ' ' '-' | cut -d- -f1-2)
+  mkdir -p "$R_ROOT/state/fleet-seats/holders"
+  jq -n --arg s "$st" --arg h "$R_REMOTE" '{schema:"fm-fleet-seat-holder.v2", state_dir:$s,
+    task:"theshop", revision:1, incarnations:[{generation:"host.1", previous_generation:null,
+      kind:"secondmate", model:"pool-model-a", policy_digest_at_reserve:null,
+      lifecycle:"confirmed", launch_phase:"started", owner_pid:null, owner_pid_identity:"",
+      route:{placement:"remote", operation:"op1", home:$h, host:null, remote_root:null,
+        spawn_gen:"host.1", target:null}, startup_confirmed:true, disposition:null}]}' \
+    > "$R_ROOT/state/fleet-seats/holders/$name.json"
+  serve_remotes >/dev/null 2>&1 || fail "serve with an observing receipt on another model failed"
+  remote_reserve_bg mismatch-worker pool-model-a "$dir/mismatch-worker"
+  serve_remotes >/dev/null 2>&1 || fail "allowance serve failed"
+  wait "$BG_PID"
+  expect_code 0 "$(cat "$dir/mismatch-worker.rc")" \
+    "the host re-charged a supervisor the parent already counts: $(cat "$dir/mismatch-worker.out")"
+  pass "an observing receipt's model decides seating instead of the requested model"
+}
+
 test_delivered_policy_governs_the_remote_home() {
   local out
   make_remote_fleet remote-deliver 2
@@ -1815,10 +1858,8 @@ test_remote_host_supervisor_adoption_and_accounting() {
   chmod 600 "$reservation4"
   out=$(serve_remotes 2>&1)
   assert_contains "$out" "served theshop" "bound or default-model reservations blocked serving"
-  assert_equals false "$(jq '.holders | any(.task == "theshop2" or .task == "theshop3" )' \
+  assert_equals false "$(jq '.holders | any(.task == "theshop2" or .task == "theshop3" or .task == "theshop4")' \
     "$R_ROOT/state/fleet-seats/remote-theshop.cert")" "parent-accounted supervisors were adopted anyway"
-  assert_equals pool-model-a "$(jq -r '.holders[] | select(.task == "theshop4") | .model' \
-    "$R_ROOT/state/fleet-seats/remote-theshop.cert")" "observing reservation erased actual-model occupancy"
   rm -f "$receipt" "$reservation" "$reservation3" "$meta2" "$meta3" "$meta" \
     "$receipt4" "$reservation4" "$meta4"
   rm -f "$R_ROOT/config/fleet-seats" "$R_ROOT/state/theshop.meta"
@@ -2371,6 +2412,7 @@ test_remote_policy_must_be_confirmed_before_any_grant
 test_remote_home_shares_the_fleet_capacity
 test_unreachable_remote_is_never_free
 test_lost_serve_reply_does_not_double_charge
+test_observed_model_mismatch_does_not_double_charge
 test_delivered_policy_governs_the_remote_home
 test_stale_remote_requests_refuse_before_launch
 test_inflight_remote_seat_follows_model_between_pools

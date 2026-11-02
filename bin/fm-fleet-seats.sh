@@ -1812,9 +1812,14 @@ if [ "$ROOT_REMOTE" -eq 1 ]; then
             ' "$reservation" >/dev/null 2>&1; then
             unavailable "host supervisor $id has unaccounted occupancy"
           fi
-          if jq -e --arg m "$(record_field "$meta" model)" '
-            .incarnations[0].model == (if $m == "-" or $m == "default" or $m == "" then null else $m end)
-          ' "$reservation" >/dev/null; then
+          # An observing binding already proved this agent and the model it
+          # runs, so the reservation's request model decides nothing here and
+          # the parent owns the count. Comparing it again would adopt a
+          # supervisor the parent already charges and spend its seat twice.
+          if [ "$requested_model" = "-" ] \
+            || jq -e --arg m "$(record_field "$meta" model)" '
+              .incarnations[0].model == (if $m == "-" or $m == "default" or $m == "" then null else $m end)
+            ' "$reservation" >/dev/null; then
             continue
           fi
         fi

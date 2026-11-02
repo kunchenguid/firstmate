@@ -1874,7 +1874,7 @@ if FM_FAKE_SSH_MODE=launch-rex-bad-server-route remote_env "$ROOT/bin/fm-spawn.s
   fail "a rex route naming a non-local server was accepted"
 fi
 assert_grep 'malformed Rex route metadata' "$TMP_ROOT/spawn-rex-bad-server.out" \
-  "a non-local rex server route did not fail with the rex metadata refusal"
+  "a non-local rex server route did not fail with the rex metadata refusal: $(cat "$TMP_ROOT/spawn-rex-bad-server.out" 2>/dev/null)"
 cmp -s "$TMP_ROOT/parent-ios-pre-launch.meta" "$PARENT/state/ios.meta" \
   || fail "a refused rex server route rewrote the recorded route"
 if FM_FAKE_SSH_MODE=launch-rex-mismatched-route remote_env "$ROOT/bin/fm-spawn.sh" ios --secondmate --backend rex \
