@@ -33,7 +33,9 @@
 # task's own metadata and registry route, so a
 # remote mate is relaunched on its recorded remote host through bin/fm-on.sh -
 # never as a local replacement - behind fm-spawn's own readiness gate and
-# per-task spawn lock.
+# per-task spawn lock. A deliberate move of a local mate onto another backend
+# (bin/fm-secondmate-move.sh) runs this same relaunch with the target backend
+# named explicitly, so the one respawn owner also performs the move.
 #
 # Modes:
 #   full - session-start sweep: remote routes run the full readiness repair
@@ -259,8 +261,12 @@ fm_secondmate_liveness_probe() {  # <meta> <id> <full|poll>
       else
         # A T3 thread reads missing once archived, which T3 may still be
         # finishing; its idempotent kill re-proves the close before a
-        # replacement thread is launched.
-        [ "$backend" != t3code ] || FM_SM_LIVE_KILL=1
+        # replacement thread is launched. An hc terminal reads missing once
+        # its program has finished too, while the finished record still
+        # carries the mate's labels and its Herdr.app tab; the adapter's
+        # idempotent close removes that husk, and is a silent success on a
+        # terminal already gone, before the replacement terminal is created.
+        case "$backend" in t3code|hc) FM_SM_LIVE_KILL=1 ;; esac
         FM_SM_LIVE_CAUSE="recorded endpoint confidently missing"
       fi
       FM_SM_LIVE_WHERE="backend=$backend"
@@ -281,11 +287,16 @@ fm_secondmate_liveness_probe() {  # <meta> <id> <full|poll>
   return 0
 }
 
-# fm_secondmate_liveness_relaunch <meta> <id> [timeout-secs]
+# fm_secondmate_liveness_relaunch <meta> <id> [timeout-secs] [backend]
 #
 # Acts on a `relaunchable` probe verdict for <id>: takes the per-home relaunch
 # lock, records the attempt, kills a confirmed-dead local endpoint if required
 # (FM_SM_LIVE_KILL), runs the guarded spawn, then records its outcome.
+# An explicit [backend] is a deliberate move (bin/fm-secondmate-move.sh): the
+# respawn is passed `--backend <backend>`, which fm-spawn honors ahead of
+# FM_BACKEND and config/backend. It is refused for a remote mate before any
+# attempt is recorded, because a remote mate's backend belongs to its host.
+# Without it the respawn takes fm-spawn's ordinary backend resolution.
 # On t3code a close that cannot be proven stops there: the thread and its
 # metadata stay as recorded, the verdict becomes skipped, and nothing is
 # spawned, because a second thread beside a live one is the duplicate
@@ -300,9 +311,15 @@ fm_secondmate_liveness_probe() {  # <meta> <id> <full|poll>
 # killed or spawned and no attempt is recorded: the verdict becomes
 # FM_SM_LIVE_STATUS=skipped with FM_SM_LIVE_REASON set and this returns 1.
 # Caller holds the liveness lock and owns reporting.
-fm_secondmate_liveness_relaunch() {  # <meta> <id> [timeout-secs]
-  local meta=$1 id=$2 timeout=${3:-} relaunch_lock wait_seconds rc=0
+fm_secondmate_liveness_relaunch() {  # <meta> <id> [timeout-secs] [backend]
+  local meta=$1 id=$2 timeout=${3:-} move_backend=${4:-} relaunch_lock wait_seconds rc=0
   FM_SM_LIVE_OUT='' FM_SM_LIVE_RC=0
+  if [ -n "$move_backend" ] && [ -n "$(fm_meta_get "$meta" remote_host)" ]; then
+    FM_SM_LIVE_STATUS=skipped
+    FM_SM_LIVE_REASON="secondmate $id is placed on remote host $(fm_meta_get "$meta" remote_host), whose backend is its own; a local move is refused"
+    FM_SM_LIVE_RC=1
+    return 1
+  fi
   if ! fm_secondmate_liveness_recent_attempts "$id" 0 >/dev/null; then
     FM_SM_LIVE_STATUS=skipped
     FM_SM_LIVE_REASON="relaunch ledger $STATE/.secondmate-relaunch-$id is unreadable; endpoint left $FM_SM_LIVE_STATE"
@@ -367,11 +384,12 @@ fm_secondmate_liveness_relaunch() {  # <meta> <id> [timeout-secs]
     return "$rc"
   fi
   # The respawn stays on the backend the mate is recorded on: a changed
-  # config/backend applies to new spawns, and moving a live mate to another
-  # backend is the explicit `fm-control.sh <id> relaunch --backend` path.
+  # config/backend applies to new spawns, and recovery keeps a local mate on
+  # its recorded backend. bin/fm-secondmate-move.sh is the explicit way to move
+  # a mate, and its named backend overrides the recorded one here.
   # A remote mate's backend is its host's, so it is never pinned from here.
   local -a respawn_args=("$id" --secondmate)
-  [ -n "$(fm_meta_get "$meta" remote_host)" ] || respawn_args+=(--backend "$(fm_backend_of_meta "$meta")")
+  [ -n "$(fm_meta_get "$meta" remote_host)" ] || respawn_args+=(--backend "${move_backend:-$(fm_backend_of_meta "$meta")}")
   if [ -n "$timeout" ]; then
     FM_SM_LIVE_OUT=$(FM_SPAWN_NO_GUARD=1 fm_run_timed "$timeout" "$FM_ROOT/bin/fm-spawn.sh" "${respawn_args[@]}" 2>&1) || rc=$?
   else
