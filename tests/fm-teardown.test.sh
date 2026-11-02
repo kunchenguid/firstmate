@@ -4421,6 +4421,34 @@ EOF
   pass "a parked run the pipeline advanced past the task copy is still concluded from the runs ledger, not orphaned"
 }
 
+# The same anchored-continuation ledger bind must hold when the run's recorded
+# PR URL uses plain http, as a pull request on a LAN Forgejo instance without
+# TLS does: the scheme never disqualifies the row.
+test_parked_run_advanced_past_unfetched_head_with_http_pr_row_is_still_aborted() {
+  local case_dir rc advanced_short anchor_short
+  case_dir=$(make_case parked-run-pipeline-advanced-unfetched-http-pr)
+  write_meta "$case_dir" no-mistakes ship
+  land_shippable_commit "$case_dir"
+  anchor_short=$(git -C "$case_dir/wt" rev-parse --short=7 HEAD)
+  advanced_short=$(make_unfetched_pipeline_heads "$case_dir")
+  assert_head_absent_from_worktree "$case_dir/wt" "$advanced_short" "parked-run-pipeline-advanced-unfetched-http-pr"
+
+  rc=0
+  FM_FAKE_AXI_STATUS="$(parked_axi_status_toon fm/task-x1 "$advanced_short")" \
+  FM_FAKE_NM_RUNS_LIST="$(cat <<EOF
+$(ledger_row running fm/task-x1 "$advanced_short" 2026-09-03 07:55 http://pi4:3001/joergspoerl/Scan2Excel/pulls/7)
+$(ledger_row failed fm/task-x1 "$anchor_short" 2026-09-02 06:36)
+EOF
+)" \
+  FM_FAKE_NM_ABORT_LOG="$case_dir/nm-abort.log" \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  expect_code 0 "$rc" "parked-run-pipeline-advanced-unfetched-http-pr: teardown should still succeed"
+  assert_grep "abort --run 01RUN" "$case_dir/nm-abort.log" \
+    "parked-run-pipeline-advanced-unfetched-http-pr: a ledger row with a plain-http PR URL was not recognized"
+  pass "a ledger row carrying a plain-http PR URL still proves the anchored continuation"
+}
+
 test_parked_run_with_mismatched_ledger_head_is_never_aborted() {
   local case_dir rc advanced_short anchor_short
   case_dir=$(make_case parked-run-mismatched-ledger-head)
@@ -6062,6 +6090,7 @@ test_parked_run_in_a_resolved_workspace_home_is_aborted
 test_parked_own_run_concludes_on_passed_with_override_after_abort
 test_parked_own_run_concludes_on_passed_with_skips_after_abort
 test_parked_run_advanced_past_unfetched_head_is_still_aborted
+test_parked_run_advanced_past_unfetched_head_with_http_pr_row_is_still_aborted
 test_parked_run_with_mismatched_ledger_head_is_never_aborted
 test_parked_run_with_malformed_ledger_row_is_never_aborted
 test_parked_run_with_impossible_ledger_date_is_never_aborted
