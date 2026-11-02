@@ -26,7 +26,8 @@
 # scan records every task whose status reports a PR that nobody recorded, so
 # merge monitoring never depends on the supervisor remembering this command.
 # bin/fm-watch.sh runs it at the start of each check sweep. A candidate is a
-# task record that is not a secondmate or scout and has no pr= line; its PR is
+# task record that is not a secondmate or scout and has no pr= line, or has the
+# reported pr= but no valid published poll; its PR is
 # the first "PR <url>" token in the newest done: line that names a supported PR
 # URL, whatever the rest of the line says. A URL without the "PR " prefix is
 # prose and never counts. Each candidate is recorded through the ordinary
@@ -87,7 +88,7 @@ pr_check_rotate() {  # <last-id>: start the lines on stdin just after the line f
 }
 
 pr_check_scan() {
-  local budget start meta id kind url left marker err rc tmp candidates='' cursor_file cursor
+  local budget start meta id kind url recorded left marker err rc tmp candidates='' cursor_file cursor
   budget=${FM_CHECK_TIMEOUT:-30}
   case "$budget" in ''|*[!0-9]*) budget=30 ;; esac
   budget=$((budget - 5))
@@ -98,10 +99,11 @@ pr_check_scan() {
     id=${meta##*/}
     id=${id%.meta}
     fm_pr_task_id_valid "$id" || continue
-    ! grep -q '^pr=' "$meta" || continue
     kind=$(sed -n 's/^kind=//p' "$meta" | tail -1)
     case "$kind" in secondmate|scout) continue ;; esac
     url=$(pr_check_reported_url "$STATE/$id.status") || continue
+    recorded=$(grep '^pr=' "$meta" | tail -1 | cut -d= -f2- || true)
+    [ -z "$recorded" ] || { [ "$recorded" = "$url" ] && ! fm_pr_poll_artifacts_valid "$STATE" "$id" "$SCRIPT_DIR/fm-pr-poll.sh"; } || continue
     candidates="$candidates$id $url"$'\n'
   done
   cursor_file="$STATE/.pr-check-scan-cursor"
@@ -114,7 +116,7 @@ pr_check_scan() {
     marker="$STATE/$id.pr-register-refused"
     printf '%s\n' "$id" > "$cursor_file" 2>/dev/null || true
     rc=0
-    err=$(fm_run_timed "$left" bash "$SCRIPT_DIR/fm-pr-check.sh" "$id" "$url" 2>&1 >/dev/null) || rc=$?
+    err=$(fm_run_timed "$left" env FM_PR_CHECK_SCAN=1 bash "$SCRIPT_DIR/fm-pr-check.sh" "$id" "$url" 2>&1 >/dev/null) || rc=$?
     if [ "$rc" -eq 0 ]; then
       rm -f -- "$marker"
       continue
@@ -310,6 +312,12 @@ fm_lock_acquire_wait "$META_LOCK"
 META_LOCK_HELD=1
 [ -f "$META" ] && [ ! -L "$META" ] && [ "$(fm_pr_file_link_count "$META")" = 1 ] \
   || { echo "error: task metadata is unavailable" >&2; exit 1; }
+# A scan gathers its candidates before it registers them, so the supervisor may
+# have recorded another PR meanwhile; that choice is never overwritten.
+if [ "${FM_PR_CHECK_SCAN:-}" = 1 ]; then
+  RECORDED_PR=$(grep '^pr=' "$META" | tail -1 | cut -d= -f2- || true)
+  [ -z "$RECORDED_PR" ] || [ "$RECORDED_PR" = "$URL" ] || exit 0
+fi
 META_DEVICE=$(fm_pr_file_device "$META") || exit 1
 STATE_DEVICE=$(fm_pr_file_device "$STATE") || exit 1
 [ "$META_DEVICE" = "$STATE_DEVICE" ] || { echo "error: task metadata is unavailable" >&2; exit 1; }

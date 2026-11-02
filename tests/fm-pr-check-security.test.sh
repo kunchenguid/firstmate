@@ -156,7 +156,7 @@ case "${1:-} ${2:-}" in
         exit 0
         ;;
       *" --json isDraft "*)
-        case "$*" in *"${FM_TEST_GH_SLOW_URL:-no-slow-url}"*) sleep 30 ;; esac
+        case "$*" in *"${FM_TEST_GH_SLOW_URL:-no-slow-url}"*) sleep "${FM_TEST_GH_SLOW_SECONDS:-30}" ;; esac
         printf '%s\n' "{\"isDraft\":${FM_TEST_GH_DRAFT:-false}}"
         exit 0
         ;;
@@ -867,6 +867,38 @@ test_scan_rotates_past_a_hanging_registration() {
   grep -qxF 'pr=https://github.com/o/r/pull/20' "$state/task-b.meta" \
     || fail "a hanging registration starved a later report on every sweep"
   pass "the scan starts a later sweep at a different task so a hanging registration cannot starve it"
+}
+
+# A task whose pr= was written but whose poll was never published (the
+# registration was cut between the two) is retried, so its merge is still watched.
+test_scan_publishes_a_missing_poll_for_a_recorded_pr() {
+  local dir state
+  dir=$(make_case scan-missing-poll)
+  state="$dir/home/state"
+  write_poll_meta "$state" task-a https://github.com/o/r/pull/7 'kind=ship' 'mode=no-mistakes'
+  printf '%s\n' 'done [at=2]: PR https://github.com/o/r/pull/7 checks green' > "$state/task-a.status"
+
+  run_check_entry "$dir" scan > /dev/null 2> "$dir/stderr" || fail "the scan failed: $(cat "$dir/stderr")"
+  fm_pr_poll_artifacts_valid "$state" task-a "$POLL" || fail "a recorded PR without a poll was not armed"
+  pass "the scan publishes the poll of a task whose pr= has none"
+}
+
+# A PR the supervisor records while a scan registration is in flight is kept.
+test_scan_does_not_overwrite_a_pr_recorded_meanwhile() {
+  local dir state
+  dir=$(make_case scan-keeps-concurrent-pr)
+  state="$dir/home/state"
+  write_task_meta "$dir" task-a
+  printf '%s\n' 'done [at=2]: PR https://github.com/o/r/pull/20 checks green' > "$state/task-a.status"
+
+  FM_CHECK_TIMEOUT=60 FM_TEST_GH_SLOW_URL=pull/20 FM_TEST_GH_SLOW_SECONDS=3 \
+    run_check_entry "$dir" scan > /dev/null 2> "$dir/stderr" &
+  sleep 1
+  write_poll_meta "$state" task-a https://github.com/o/r/pull/21 'kind=ship' 'mode=no-mistakes'
+  wait $! || fail "the scan failed: $(cat "$dir/stderr")"
+  grep -qxF 'pr=https://github.com/o/r/pull/21' "$state/task-a.meta" \
+    || fail "the scan overwrote a PR recorded while it ran"
+  pass "the scan keeps a PR the supervisor recorded during its registration"
 }
 
 # The watcher's check sweep runs the scan, so a reported PR gets its merge poll
@@ -4058,6 +4090,8 @@ test_scan_records_a_pr_reported_in_a_done_line
 test_scan_reports_a_refusal_once_and_retries
 test_scan_retries_refused_task_behind_a_hanging_registration
 test_scan_rotates_past_a_hanging_registration
+test_scan_publishes_a_missing_poll_for_a_recorded_pr
+test_scan_does_not_overwrite_a_pr_recorded_meanwhile
 test_watcher_sweep_records_a_reported_pr
 test_valid_recording_and_merge_derivation
 test_rejected_metacharacter_bytes_are_inert
