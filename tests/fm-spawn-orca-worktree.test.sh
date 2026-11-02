@@ -379,7 +379,7 @@ EOF
 # task scratch path must still win for ship and scout workers even if the source
 # tries to supply ambient TMPDIR/TMP/TEMP values.
 test_orca_source_pins_task_tmp_after_allowlisted_source_values() {
-  local case_dir home id=orca-tasktmp-source fb out status staged result pane_shell
+  local case_dir home id=orca-tasktmp-source-$$-$RANDOM fb out status staged result expected pane_shell launch_dir
   case_dir="$TMP_ROOT/$id"
   home="$case_dir/home"
   mkdir -p "$home/data/$id" "$home/state" "$home/config" "$home/projects"
@@ -424,7 +424,15 @@ EOF
     FM_TEST_ORCA_LOG="$case_dir/terminal.log" FM_TEST_ORCA_CONSUME=1 \
     PATH="$fb:$PATH" "$SPAWN" "$id" "$case_dir/project" \
     --mode direct-PR --yolo off --backend orca --harness "/bin/sh '$case_dir/probe.sh'" 2>&1)
-  expect_code 0 "$?" "Orca source-mode spawn should succeed: $out"
+  status=$?
+  # Spawn creates a task root and a sibling launch directory under /tmp. Track
+  # both in the existing EXIT cleanup registry before any later assertion can
+  # fail, so this test also cleans up after a failed run.
+  FM_TEST_CLEANUP_DIRS+=("/tmp/fm-$id")
+  for launch_dir in /tmp/fm-"$id"+*; do
+    [ -d "$launch_dir" ] && FM_TEST_CLEANUP_DIRS+=("$launch_dir")
+  done
+  expect_code 0 "$status" "Orca source-mode spawn should succeed: $out"
   staged=$(sed -n "s/^[^']*'\([^']*\/launch\.[^'\/]*\.sh\)'.*$/\1/p" "$case_dir/terminal.log" | tail -1)
   [ -f "$staged.copy" ] || fail "Orca did not stage the launch file for the source-mode temp check"
   for pane_shell in /bin/sh /bin/bash /bin/zsh; do
@@ -433,7 +441,8 @@ EOF
     result=$(env -i HOME="$case_dir/user-home" PATH="$PATH" TERM=xterm \
       TMPDIR=/personal-tmp TMP=/personal-tmp TEMP=/personal-tmp \
       "$pane_shell" -c ". '$staged'") || fail "Orca source-mode temp launch failed in $pane_shell"
-    [ "$result" = $'/tmp/fm-orca-tasktmp-source/tmp\n/tmp/fm-orca-tasktmp-source/tmp\n/tmp/fm-orca-tasktmp-source/tmp' ] \
+    expected=$(printf '%s\n' "/tmp/fm-$id/tmp" "/tmp/fm-$id/tmp" "/tmp/fm-$id/tmp")
+    [ "$result" = "$expected" ] \
       || fail "Orca source mode let allowlisted or ambient temp values override the task scratch in $pane_shell"$'\n'"actual: $result"
   done
   pass "Orca source mode pins TMPDIR, TMP, and TEMP to the task scratch after allowlisted source values"
