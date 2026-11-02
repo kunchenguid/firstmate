@@ -3435,7 +3435,7 @@ heartbeat_scan_finds_actionable() {
 # a second watcher, so every guard/beacon/arm/turn-end mechanism is unchanged.
 event_wait_or_sleep() {
   local w b session first_backend="" first_session="" rec rc
-  local label notify status probe read_bound= windows=() t3_windows=()
+  local label notify status probe read_bound='' windows=() t3_windows=()
   # Refresh label identities before each bounded wait. These panes have no task
   # status logs, so level polling is also their backstop when push is unavailable
   # or another backend/session owns this cycle's single multiplexed connection.

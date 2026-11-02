@@ -196,7 +196,7 @@ test_watched_pane_marker_retire() {
     [ ! -e "$marker" ] || fail "retired snapshot recreated replacement marker"
     FM_WATCHED_PANES_IDENTITY=$(fm_watch_pane_registry_identity "$state")
     FM_WATCHED_PANES=$'watch-session:w1:p1\tDesign review\t0'
-    DONE=$(fm_transition_record w1:p1 '' '' done claude)
+    DONE=$(fm_transition_record w1:p1 '' '' 'done' claude)
     if fm_backend_herdr_apply_transition "$state" watch-session "$DONE" >/dev/null; then fail "replacement retained old done policy"; fi
     bash "$ROOT/bin/fm-watch-pane.sh" remove 'Design review' || fail "notification leaked the registry lock"
   ) || fail "retired snapshot and notification serialization contracts"
