@@ -942,6 +942,16 @@ assert_no_grep() {
   ! grep -F -- "$1" "$2" >/dev/null || fail "$3"
 }
 
+# assert_no_regex <pattern> <file> <msg>: extended-regex must NOT match.
+# assert_*_grep are fixed-string, so an anchored pattern given to them searches
+# for a literal caret and can never match - an absence assertion written that
+# way passes no matter what the file holds. Use this for any anchored absence.
+assert_no_regex() {
+  local status=0
+  grep -E -- "$1" "$2" >/dev/null || status=$?
+  [ "$status" -eq 1 ] || fail "$3 (grep status: $status)"
+}
+
 # assert_absent <path> <msg>: path must not exist.
 assert_absent() {
   [ ! -e "$1" ] || fail "$2"

@@ -974,6 +974,15 @@ openai_rejects() {  # <response-json> <label>
 openai_rejects '{"answers":[{"type":"refusal","name":"rule"}]}' "an openai refusal"
 openai_rejects '{"answers":{"rule":{"choice":"rule_4"}}}' "an openai answers object"
 openai_rejects '{"answers":[]}' "an openai response without the rule answer"
+OA_VALID_RULE='{"type":"choice","name":"rule","choice":"rule_4","confidence":0.9,"probabilities":[{"value":"rule_1","probability":0.01},{"value":"rule_2","probability":0.01},{"value":"rule_3","probability":0.01},{"value":"rule_4","probability":0.96},{"value":"default","probability":0.01}]}'
+# The array check must guard the whole rule check, on every supported jq:
+# jq 1.7 and 1.8 group an unparenthesized `A and B as $x | C` differently.
+openai_rejects "{\"answers\":{\"only\":$OA_VALID_RULE}}" "an otherwise valid openai rule outside an answers array"
+reset_log
+printf '{"answers":[{"type":"text","name":"note"},%s]}\n' "$OA_VALID_RULE" > "$OA_RESPONSE"
+FM_DISPATCH_PROVIDER=openai FM_DISPATCH_MODEL=gpt-6-luna OPENAI_API_KEY=$OA_KEY \
+  FAKE_CURL_RESPONSE=$OA_RESPONSE run code out err "$BRIEF"
+assert_contains "$out" '  status: clear' "a valid openai rule in an answers array is accepted beside other answers"
 openai_rejects 'not json' "a non-JSON openai response"
 openai_rejects '{"answers":[{"type":"choice","name":"rule","choice":"rule_4","confidence":0.9,"probabilities":[{"value":"rule_4","probability":0.5},{"value":"rule_4","probability":0.5}]}]}' "duplicate openai option values"
 openai_rejects '{"answers":[{"type":"choice","name":"rule","choice":"rule_4","confidence":0.9,"probabilities":[{"value":"rule_4","probability":0.99},{"value":"default","probability":0.01}]}]}' "openai probabilities missing options"

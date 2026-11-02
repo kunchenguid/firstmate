@@ -2477,6 +2477,25 @@ ok - real rex: no state-changing call left the test sessions and every other ses
 
 Use the [Rex regression entry points](../rex-backend.md#regression-entry-points) to refresh this record after a Rex upgrade, and the opt-in live composer guard after any tool upgrade.
 
+### Remote second mate durability on Linux
+
+Verified on 2026-10-30 against `rex 0.1.0-preview.12` (commit `e6592f7`, API revision 8) installed through the public `install.sh --tarball` inside a disposable Apple `container` VM: Debian GNU/Linux 12, glibc 2.36, aarch64, 2 CPUs, 4 GB.
+The server ran on a private socket `unix:///tmp/rv/rex.sock` with a private `--state-dir /tmp/rv/state`; the container and image were deleted afterwards.
+This run checked Rex server primitives on Linux, not an end-to-end Firstmate remote second-mate lifecycle; the full transcript lives outside the repository.
+The current operator contract is in [remote readiness](../remote-secondmates.md#repair-with---fix), with portable regressions in [`fm-remote-doctor.test.sh`](../../tests/fm-remote-doctor.test.sh) and [`fm-remote-secondmate-lifecycle-e2e.test.sh`](../../tests/fm-remote-secondmate-lifecycle-e2e.test.sh).
+
+Every check passed:
+
+- Foreground tracking follows a nested interactive shell: after typing `bash` into a login-shell block, `block call ... process` reported the inner bash as foreground with the login shell among its ancestors, and typed input reached the innermost shell.
+- The earlier reported nested-shell bug does not reproduce: typing `treehouse` into the nested shell delivered the input, and the outer login shell was never left as a stale foreground.
+- A harder stub case where `treehouse` exec'd another interactive bash behaved the same, with correct process ancestry.
+- `rex whoami --json` distinguishes a unix `peer` principal from a loopback TCP `anonymous`, and `TERM_PROGRAM=rex` is present inside blocks.
+- `rex do` Lua handlers ran, and `rex events --json` streamed events including `terminal.child_exited`.
+- Durability is shape-dependent: `rex server run --exit-empty` exits about ten seconds after its last session or control connection disappears, so an ephemeral server cannot hold a remote route.
+- `rex server start` is a detached persistent daemon (`exit_empty: false`) that survives SSH disconnection, and it binds only the default personal socket (`$HOME/.local/state/rex/run/server.sock`); `start` has no `--listen` flag.
+- Sessions restore across a server stop when the restarted server binds the same endpoint and state directory: after `server stop` plus `server start`, the sessions returned with the same ids, each block as a fresh login shell preserving its cwd.
+- A server started on a different socket with the same state directory restored nothing (`session_count: 0`), so restore is keyed to the server's endpoint identity, not merely its state directory.
+
 ## T3 Code
 
 ### Orchestrator V2 transport
@@ -3491,6 +3510,13 @@ The full run's native Ahoy cases depend on the model's own choices and failed wi
 A real `bin/fm-spawn.sh --scout --harness opencode --model opencode-go/deepseek-v4.1-flash` in a private tmux server recorded `opencode_version=1.18.20` (and `1.18.31` on the second release), launched the worker as `opencode --model opencode-go/deepseek-v4.1-flash --prompt <brief>` with no `--standalone`, and the worker answered its brief.
 `bin/fm-control.sh <task> exit` then resolved the typed `/exit` from that recorded major and returned both panes to the shell.
 
+## Native Codex supervision park
+
+Verified on 2026-10-19 with `codex-cli 0.163.0` on macOS arm64 in an isolated named Herdr lab.
+The native TUI fired project SessionStart and asynchronous Stop hooks, and `codex queue --thread` delivered input to the embedded `--no-daemon` session.
+[Supervision verification](supervision.md#codex-native-model-free-park-2026-10-19) records the commands, ten-minute provider-call comparison, real check delivery, input interrupt, park-death recovery and native-exit cleanup.
+This verifies the primary-session park, not a worker busy-state classifier or a Codex dialog-mirror writer.
+
 ## hc
 
 Measured on 2026-10-29 with `hc 0.1.13` on macOS (Darwin 27.0.0, `/bin/bash` 3.2.57), against private cores only: a unique `HC_SESSION`, `XDG_STATE_HOME` and `XDG_RUNTIME_DIR` under a short `/tmp/fmhc.*` directory, and `HC_TERMINAL_ID`, `HC_TERMINAL_SOCKET`, and `HC_SCOPE` unset.
@@ -3577,9 +3603,42 @@ ok - hc liveness: grok grok 1.0.41 (4220f3b224a6) [stable] classifies alive in h
 
 Teardown swept the session's serve/hold daemons plus the harness processes they held, and the fleet-state tripwire confirmed the recorded real-core file metadata inventory unchanged.
 
+### Runtime auto-detection (Herdr app signals)
+
+Measured on 2026-11-01 inside a `bin/fm-hc-lab.sh` session (`fm-hclab-s3det-*`, hc 0.1.14) and against herdr-app 0.1.11 source plus its release binary, never against a running user app or core:
+
+| Probe | Result |
+| --- | --- |
+| `TERM_PROGRAM=herdr hc run` (CLI path) | The child env showed `TERM_PROGRAM=ghostty`: the core's `child_env` rewrites absent-or-`herdr` `TERM_PROGRAM` to `ghostty` for every terminal. |
+| `terminal.run` over `hc connect` with `env={"TERM","COLORTERM","TERM_PROGRAM":"herdr"}` and `herdr.space`/`herdr.tab` labels - the app's exact call (herdr-app 0.1.11 `src/hc.rs`) | Same child env: `TERM_PROGRAM=ghostty`, `HC_TERMINAL_ID`, `HC_TERMINAL_SOCKET`, `HC_SESSION`, `HC_SCOPE` present. An app terminal's process env is identical to any other hc terminal's; the `herdr` claim is consumed core-side. |
+| `hc get` against a missing socket path | **Spawned a new `herdr-core serve` bound to that path** (autostart confirmed): the detection's `hc get` runs only behind a live unix-connect probe. |
+| `hc get` against a stale socket file with another core recorded | Refused `unavailable` naming the listening core's socket; no autostart on a refused connect. |
+| `fm_backend_detect` inside the labeled terminal (`env -i` claims and a real `hc send` run inside it) | `hc` / `app-terminal`; `fm_backend_name` resolved `hc` with the loud opt-out notice. |
+| Same inside an unlabeled `hc run` terminal | Undetected. |
+| `HERDR_ENV=1` alongside the app-terminal markers | `herdr` wins - the earlier surface marker keeps its verdict. A lab core provisioned from a herdr pane does inherit `HERDR_*` into every terminal it spawns. |
+| Dead `HC_TERMINAL_SOCKET` | Undetected, and no socket file or core was created. |
+| Live unix listener at the resolved `herdr-app.sock` path, no other markers | Undetected, silently: a live window or socket alone is not a signal - it reaches every host process, so it cannot tell an in-app firstmate from a bare shell while the window is open elsewhere. A stale socket file and an absent one are equally undetected. |
+| Live hc terminal socket plus no self-identifying hc binary on `PATH` | Undetected (`app-terminal-unusable`); `fm_backend_name` still resolves `tmux` and prints the missing-toolchain notice. |
+| `HC_SESSION=<never-started> hc server status --json` in scratch `HOME`/XDG roots (hc 0.1.14, 2026-11-01) | Started a core: `server status` autostarts, like every other contact, so the adapter's container ensure would start a session nobody runs. Detection therefore requires the spawn session's core socket to accept a connection first. |
+| Socket layout for a started core, same scratch roots | `$XDG_RUNTIME_DIR/herdr-core/<session>.sock` with `XDG_RUNTIME_DIR` set (both `default` and a named session); `$XDG_STATE_HOME/herdr-core/<session>/<session>.sock` without it, and `~/.local/state/...` with `XDG_STATE_HOME` unset too. A `default`-session terminal's env carries `HC_TERMINAL_SOCKET` but no `HC_SESSION`; a named session's carries both. |
+| `FM_BACKEND=herdr` with app-terminal markers | `herdr` resolves silently - explicit selection always wins. |
+
+Real Herdr.app exercise on 2026-11-02: the official herdr-app 0.1.11 bundle (sha256-verified from the release manifest) was launched as `Contents/MacOS/Herdr` against an isolated `HERDR_APP_HOME` bound to a lab hc 0.1.14 session, beside a disposable `fm-herdr-lab-*` classic-herdr session and a private-tmpdir tmux server, all torn down afterward:
+
+| Scenario | Result |
+| --- | --- |
+| `fm_backend_detect` inside a terminal the app itself created (it stamped `herdr.space`/`herdr.tab`; env carried `HC_TERMINAL_ID`/`HC_TERMINAL_SOCKET`/`HC_SESSION`/`HC_SCOPE`) | `hc` / `app-terminal`; `fm_backend_name` resolved `hc` with the opt-out notice. |
+| Real `bin/fm-spawn.sh` ship dispatch from that app terminal | Meta recorded `backend=hc`, `backend_detect=app-terminal`, `hc_terminal=t2`; the worker terminal carried `herdr.space=fm-<hometag>`, `herdr.tab=<hometag>-fm-<id>`, and `firstmate.*` labels, and `herdr-app ls` showed it projected as its own space/tab in the window. |
+| `fm_backend_detect` inside the disposable classic-herdr TUI while the app window was live | `herdr` / `HERDR_ENV`. |
+| `fm_backend_detect` inside real tmux while the app window was live | `tmux` / `TMUX`. |
+| Marker-less process while the app window was live (spawn core = real `default`, then a pinned lab core) | Selected `hc` / `app-window` under the pre-change signal set - the ambiguity proof that dropped `app-window` as a signal. Post-change, undetected and resolving `tmux`. |
+| Marker-less process with no `herdr-app.sock` at all | Undetected, resolving `tmux`. |
+| Real `default` core file-meta before/after | Byte-identical - the lab never drove the shared core. |
+
+`bin/fm-supervisor-target-lib.sh` now resolves `$HC_TERMINAL_ID`+`$HC_TERMINAL_SOCKET` to `<session>:<address>`/`hc`; `bin/fm-supervise-daemon.sh` still supports only `tmux herdr rex t3code` and refuses the resolved backend loudly.
+
 ### Not verified
 
-- A ship spawn, and a spawn with a real harness rather than the stand-in.
+- A spawn with a real harness rather than the stand-in.
 - `send --wait`'s `started`/`working` proof against a real status-reporting harness; the lab run covered a non-reporting shell, whose verdict falls to the composer screen.
 - Native `status.state` reported by a real harness launched through `bin/fm-spawn.sh`.
-- How the `herdr.space` and `herdr.tab` labels display in Herdr.app.
