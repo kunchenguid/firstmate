@@ -16,8 +16,8 @@
 #       runner. The perl and bash fallbacks are unchanged.
 #
 #   fm_run_timed <seconds> <command> [args...]
-#       Runs the command with a hard bound, preserving the caller's stdin.
-#       Exit status is the command's own,
+#       Runs the command with a hard bound, preserving the caller's stdin. Exit
+#       status is the command's own,
 #       except 124, which means the bound was hit (GNU timeout's convention,
 #       reproduced by the perl and bash fallbacks), and a command killed by
 #       signal n, which reports 128+n on every mechanism - so a SIGKILLed child
