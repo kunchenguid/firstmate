@@ -57,7 +57,8 @@
 # episode mutex for that task in this home. The bootstrap sweep and watcher
 # tick take it without waiting and skip a busy mate; initial and recovery
 # secondmate spawn, local relaunch and exit, the parent remote relaunch
-# wrapper, and the host-local remote control verbs join it too, so a stale
+# wrapper, the host-local remote control verbs, and a T3 turn delivery to a
+# recorded secondmate thread join it too, so a stale
 # death probe can never act on a generation another episode already replaced.
 # A nested lifecycle process (liveness -> spawn, control -> spawn, host control
 # -> control -> spawn) adopts the owner's hold through the verified carrier
