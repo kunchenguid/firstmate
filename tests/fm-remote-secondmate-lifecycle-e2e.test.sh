@@ -1868,6 +1868,11 @@ assert_grep 'runs only on the herdr or rex backend' "$TMP_ROOT/spawn-tmux-backen
 # A rex route reply that breaks the contract at the parent boundary is refused
 # and leaves the recorded route untouched: a non-local server, or a target
 # whose session half is not the reported session.
+#
+# Launch admission reuses an already-live endpoint's recorded route instead of
+# the reply, so the reply only decides the route when the host has nothing
+# recorded. Clearing it keeps this case about the reply.
+rm -f "$REMOTE_HOME/state/parent-route/ios.meta"
 cp "$PARENT/state/ios.meta" "$TMP_ROOT/parent-ios-pre-launch.meta"
 if FM_FAKE_SSH_MODE=launch-rex-bad-server-route remote_env "$ROOT/bin/fm-spawn.sh" ios --secondmate --backend rex \
   >"$TMP_ROOT/spawn-rex-bad-server.out" 2>&1; then
