@@ -132,7 +132,10 @@ function makeHome(dir, providerPort, { init = true } = {}) {
   return dir;
 }
 
-async function startServer(lab, cwd) {
+// The server is registered for cleanup the moment it is spawned, before any
+// readiness wait can throw: its arguments carry no lab path, so the lab reaper
+// would never find a server whose startup failed.
+async function startServer(lab, cwd, cleanups) {
   const home = join(lab, "os-home");
   mkdirSync(home, { recursive: true });
   const env = {};
@@ -162,6 +165,18 @@ async function startServer(lab, cwd) {
   const logPath = join(lab, "server.log");
   const log = openSync(logPath, "w");
   const child = spawn("opencode", ["serve", "--hostname", "127.0.0.1", "--port", String(port)], { cwd, env, stdio: ["ignore", log, log] });
+  const exited = () => child.exitCode !== null || child.signalCode !== null;
+  const exit = new Promise((done) => {
+    child.once("exit", done);
+    child.once("error", done);
+  });
+  const stop = async () => {
+    if (exited() || !child.pid) return;
+    child.kill("SIGTERM");
+    await Promise.race([exit, sleep(15000)]);
+    if (!exited()) child.kill("SIGKILL");
+  };
+  cleanups.push(stop);
   let auth = "";
   const api = async (path, body, method) => {
     const response = await fetch(`http://127.0.0.1:${port}${path}`, {
@@ -202,11 +217,6 @@ async function startServer(lab, cwd) {
     await api(`/api/session/${id}/prompt`, { text });
     await until(async () => ((await info(id)).time?.busy ?? 0) > before, `turn start in ${id}`);
     await until(() => settled(id), `turn settle in ${id}`);
-  };
-  const stop = async () => {
-    child.kill("SIGTERM");
-    await Promise.race([new Promise((done) => child.once("exit", done)), sleep(15000)]);
-    if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
   };
   return { pid: child.pid, ready, session, context, count, settled, turn, stop };
 }
@@ -299,8 +309,8 @@ try {
     const a = makeHome(join(lab, "home-a"), provider.port);
     const b = makeHome(join(lab, "home-b"), provider.port);
     cpSync(BUSY_PLUGIN, join(b, ".opencode/plugins/fm-busy-state.js"));
-    const server = await startServer(lab, a);
-    cleanups.push(() => stopWatcher(a), () => server.stop());
+    cleanups.push(() => stopWatcher(a));
+    const server = await startServer(lab, a, cleanups);
     writeFileSync(join(a, "state/.lock"), `${server.pid}\n`);
     await server.ready(a, primaryPlugins);
     await server.ready(b, [...primaryPlugins, "fm.busy-state"]);
@@ -335,8 +345,8 @@ try {
     execFileSync("git", ["-C", base, "worktree", "add", "-q", "--detach", mate]);
     makeHome(mate, provider.port, { init: false });
     writeFileSync(join(mate, ".fm-secondmate-home"), "sm-lab\n");
-    const server = await startServer(lab, mate);
-    cleanups.push(() => stopWatcher(mate), () => server.stop());
+    cleanups.push(() => stopWatcher(mate));
+    const server = await startServer(lab, mate, cleanups);
     writeFileSync(join(mate, "state/.lock"), `${server.pid}\n`);
     await server.ready(mate, primaryPlugins);
     const session = await server.session(mate);
@@ -377,8 +387,8 @@ try {
     const foreign = spawn("sleep", ["300"], { stdio: "ignore" });
     cleanups.push(() => foreign.kill("SIGKILL"));
     writeFileSync(join(primary, "state/.lock"), `${foreign.pid}\n`);
-    const server = await startServer(lab, primary);
-    cleanups.push(() => stopWatcher(primary), () => server.stop());
+    cleanups.push(() => stopWatcher(primary));
+    const server = await startServer(lab, primary, cleanups);
     await server.ready(primary, primaryPlugins);
     const session = await server.session(primary);
     await server.turn(session, "A turn under a foreign lock owner.");
