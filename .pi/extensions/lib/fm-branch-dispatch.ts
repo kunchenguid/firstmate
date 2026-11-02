@@ -306,10 +306,8 @@ function openDecisions(
   return open;
 }
 
-function stateLines(text: string): string[] {
-  return text.split(/\r?\n/).filter((line) => /\S/.test(line) && !(
-    statusLineVerb(line) === "note" && /\s\[state=none\](\s|$)/.test(line.split(":", 1)[0])
-  ));
+function nonBlankLines(text: string): string[] {
+  return text.split(/\r?\n/).filter((line) => /\S/.test(line));
 }
 
 // bin/fm-classify-lib.sh's _fm_open_decisions_file_ident, which stamps each
@@ -522,13 +520,13 @@ export function scopeForUnreadWake(state: string, heartbeat: boolean, afk = fals
             } catch {
               return UNSAFE_SCOPE;
             }
-            const statusLines = stateLines(contents.toString("utf8"));
+            const statusLines = nonBlankLines(contents.toString("utf8"));
             const open = openDecisions(statusLines, resolveVerb, heldVerb, reservedPrefixes);
             decisionOwned = spanRule
               ? spanIsDecisionOwned(
                 open,
-                stateLines(contents.subarray(0, spanOffset).toString("utf8")),
-                stateLines(contents.subarray(spanOffset).toString("utf8")),
+                nonBlankLines(contents.subarray(0, spanOffset).toString("utf8")),
+                nonBlankLines(contents.subarray(spanOffset).toString("utf8")),
                 resolveVerb,
                 heldVerb,
                 reservedPrefixes,

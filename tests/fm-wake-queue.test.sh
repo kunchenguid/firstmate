@@ -1944,6 +1944,32 @@ test_branch_actor_without_eligible_snapshot_refuses() {
   pass "a branch-actor drain with no eligible-row snapshot refuses loudly instead of draining nothing"
 }
 
+test_branch_repeat_ack_after_consumed_grant_names_the_consumed_grant() {
+  local dir state seq gen
+  dir=$(make_case branch-repeat-ack-consumed)
+  state="$dir/state"
+  append_wake "$state" signal "task-a.status" "signal: task-a" || fail "append failed"
+  FM_STATE_OVERRIDE="$state" "$GRANT" activate "$$" branch-repeat || fail "branch owner activation failed"
+  FM_STATE_OVERRIDE="$state" "$GRANT" publish branch-repeat 1 || fail "grant publication failed"
+  FM_STATE_OVERRIDE="$state" FM_SUPERVISION_ACTOR=branch "$DRAIN" > "$dir/drain.out" 2> "$dir/drain.err" \
+    || fail "branch drain failed: $(cat "$dir/drain.err")"
+  seq=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through \([0-9][0-9]*\) --recovery-generation .*/\1/p' "$dir/drain.err")
+  gen=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--recovery-generation \([A-Za-z0-9._-][A-Za-z0-9._-]*\)$/\1/p' "$dir/drain.err")
+  FM_STATE_OVERRIDE="$state" FM_SUPERVISION_ACTOR=branch "$DRAIN" --ack-through "$seq" --recovery-generation "$gen" \
+    || fail "first branch acknowledgement failed"
+  if FM_STATE_OVERRIDE="$state" FM_SUPERVISION_ACTOR=branch "$DRAIN" --ack-through "$seq" --recovery-generation "$gen" \
+    >/dev/null 2>"$dir/repeat.err"; then
+    fail "a repeat branch acknowledgement after its grant was consumed must still refuse"
+  fi
+  grep -q "already consumed" "$dir/repeat.err" \
+    || fail "the repeat acknowledgement did not say the grant was already consumed: $(cat "$dir/repeat.err")"
+  if grep -q "wiring" "$dir/repeat.err"; then
+    fail "the repeat acknowledgement still blamed wiring: $(cat "$dir/repeat.err")"
+  fi
+  FM_STATE_OVERRIDE="$state" "$GRANT" deactivate "$$" branch-repeat || fail "branch owner deactivation failed"
+  pass "a repeat branch acknowledgement after its own ack consumed the grant says the grant was already consumed"
+}
+
 test_wake_publish_requires_atomic_recovery_evidence() {
   local dir state fakebin real_mv rc out
   dir=$(make_case wake-publish-recovery-evidence)
@@ -3039,7 +3065,9 @@ test_malformed_presentation_lock_reports_acquire_failure() {
     || fail "could not seed the malformed-lock wake"
   : > "$state/.status-presentation-lock"
 
-  FM_STATE_OVERRIDE="$state" FM_STATUS_PRESENTATION_LOCK_TIMEOUT=1 \
+  # Keep the malformed lock within the freshness window during this case.
+  # Even after that window expires, recovery refuses this regular-file lock.
+  FM_STATE_OVERRIDE="$state" FM_STATUS_PRESENTATION_LOCK_TIMEOUT=1 FM_LOCK_STALE_AFTER=3600 \
     "$DRAIN" > "$out" 2> "$err" || fail "malformed-lock drain failed"
   grep -F 'wake drain: status presentation lock could not be acquired safely' "$err" >/dev/null \
     || fail "malformed presentation lock did not report an acquire failure"
@@ -3754,6 +3782,7 @@ test_main_ack_leaves_a_row_that_arrived_after_its_drain_unclaimed
 test_actor_filter_precedes_same_key_deduplication
 test_main_reclaims_a_grant_whose_branch_owner_exited
 test_branch_actor_without_eligible_snapshot_refuses
+test_branch_repeat_ack_after_consumed_grant_names_the_consumed_grant
 test_wake_publish_requires_atomic_recovery_evidence
 test_recovery_mint_and_delivery_log_avoid_sibling_subst
 test_large_sequences_stay_exact_decimal_identifiers

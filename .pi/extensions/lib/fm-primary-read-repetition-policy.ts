@@ -115,10 +115,10 @@ function simpleRead(words: string[], root: string, remote: boolean): boolean {
     return args[0] === "-n" && /^\d+(?:,\d+)?p$/.test(args[1] ?? "") && args.slice(2).every(path);
   }
   if (name === "cut") return args.length === 1 && /^-c[1-9]\d*-[1-9]\d*$/.test(args[0]);
-  if (name === "nl") return args.every((arg) => /^-b[atn]$/.test(arg) || path(arg));
+  if (name === "nl") return args.every((arg) => /^-b[atn]$/.test(arg) || /^-v\d+$/.test(arg) || path(arg));
   if (name === "wc") return args.every((arg) => /^-[clmwL]+$/.test(arg) || path(arg));
   if (name === "od") {
-    return args.every((arg) => /^-A[nodx]$/.test(arg) || /^-t(?:x[1248]|[cu])+$/.test(arg) || path(arg));
+    return args.every((arg) => /^-A[nodx]$/.test(arg) || arg === "-c" || /^-t(?:x[1248]|[cu])+$/.test(arg) || path(arg));
   }
   if (name === "grep") {
     // GNU grep's options read/filter only; refuse unfamiliar options anyway.

@@ -152,9 +152,8 @@ FM_CLASSIFY_CAPTAIN_HELD_VERB_DEFAULT='captain-held'
 # log while a log whose tail holds no event still gets a full pass.
 FM_CLASSIFY_EVENT_WINDOW_LINES=200
 
-# Return the last recognized status event, ignoring continuation prose, non-state
-# notes, and blanks (empty if no eligible nonblank line), and with
-# <previous-event-var> the prior event.
+# Return the last recognized status event, ignoring continuation prose and blanks
+# (empty if missing/blank), and with <previous-event-var> the event before it.
 # The optional previous event is what this reader returned before the latest one
 # was appended, so a consumer can name the head it is superseding; asking for it
 # always reads the whole file, since a bounded window cannot bound two events.
@@ -237,8 +236,7 @@ status_prefix_unrecognized() {  # <status-line>
 # Print "<previous event>\n<latest event>" for the status lines on stdin, and
 # return 1 when the stream holds no event at all, so a caller reading a bounded
 # window knows to widen it. A stream without events keeps its last nonblank
-# line other than a non-state note as the latest; warnings cannot declare state
-# even through this fallback (docs/configuration.md "Worker tool exclusions").
+# line as the latest, matching the read this replaced.
 # Keep decision-closing events: skipping a resolved line would revive its opener.
 # A bare legacy free-text line counts as an event only when a captain token leads
 # it, so continuation prose that merely mentions one cannot hide a declaration.
@@ -248,7 +246,6 @@ _fm_status_event_scan() {
   local line last='' prev='' fallback='' legacy_re
   legacy_re="^[[:space:]]*(${FM_CAPTAIN_RE:-$FM_CLASSIFY_CAPTAIN_RE_DEFAULT})"
   while IFS= read -r line || [ -n "$line" ]; do
-    status_line_is_nonstate_note "$line" && continue
     case "$line" in *[![:space:]]*) fallback=$line ;; *) continue ;; esac
     _fm_status_line_is_event "$line" "$legacy_re" && { prev=$last; last=$line; }
   done
@@ -256,16 +253,9 @@ _fm_status_event_scan() {
   [ -n "$last" ]
 }
 
-status_line_is_nonstate_note() {
-  local verb
-  status_line_verb "$1" verb
-  [ "$verb" = note ] && [[ "${1%%:*}" =~ [[:space:]]\[state=none\]([[:space:]]|$) ]]
-}
-
 # 0 when a nonblank <line> is a recognized status event for the scan above.
 _fm_status_line_is_event() {  # <line> <legacy-captain-re>
   local verb unstamped
-  status_line_is_nonstate_note "$1" && return 1
   case "$1" in *:*) status_line_verb "$1" verb ;; *) verb='' ;; esac
   _fm_status_verb_recognized "$verb" && return 0
   # Unrecognized verb-shaped prefixes (parked:, holding:, bad corr tokens) stay
@@ -373,8 +363,8 @@ status_is_paused_or_captain_held() {  # <status-line>
 # pause. Only a resolved line for the pause's own phase key (the keyed
 # activity fold's key, where a keyless line is its own phase) retracts it, as
 # does any other later event. A captain-held line counts only while it is the
-# latest event. Bounded like last_status_line: a tail window with no
-# non-resolved event widens the wait scan to the whole file.
+# latest event. Bounded like last_status_line: only a tail window made wholly of
+# resolved events widens the read to the whole file.
 status_declared_wait_line() {  # <status-file>
   local f=$1 last verb resolve legacy_re
   last=$(last_status_line "$f")
@@ -1252,17 +1242,41 @@ _fm_open_decisions_file_ident() {  # <file> -> strongest available identity
     "$FM_STATUS_IDENTITY_READER" "$f"
     return
   fi
+  _fm_status_stat_fields "$f" || return 1
+  printf '%s' "$_FM_STAT_IDENTITY"
+}
+
+# One stat exec sets _FM_STAT_IDENTITY and _FM_STAT_SIZE for <file>, because
+# the drain reads identity and size of every status file several times and
+# each exec is slow on a loaded host.
+_fm_status_stat_fields() {  # <file>
+  local out dev_ino epoch birth rest
   if [ "$_FM_CLASSIFY_UNAME_S" = Darwin ]; then
-    ident=$(LC_ALL=C /usr/bin/stat -f '%d:%i' "$f" 2>/dev/null) || return 1
-    epoch=$(LC_ALL=C /usr/bin/stat -f '%B' "$f" 2>/dev/null) || epoch=0
-    if [ "$epoch" != 0 ]; then birth=$(LC_ALL=C /usr/bin/stat -f '%FB' "$f" 2>/dev/null) || birth=''; else birth=''; fi
+    out=$(LC_ALL=C /usr/bin/stat -f '%d:%i%t%z%t%B%t%FB' "$1" 2>/dev/null) || return 1
   else
-    ident=$(LC_ALL=C stat -c '%d:%i' "$f" 2>/dev/null) || return 1
-    epoch=$(LC_ALL=C stat -c '%W' "$f" 2>/dev/null) || epoch=0
-    if [ "$epoch" != 0 ]; then birth=$(LC_ALL=C stat -c '%w' "$f" 2>/dev/null) || birth=''; else birth=''; fi
+    out=$(LC_ALL=C stat -c $'%d:%i\t%s\t%W\t%w' "$1" 2>/dev/null) || return 1
   fi
-  case "$ident$birth" in *$'\t'*|*$'\n'*|'') return 1 ;; esac
-  if [ -n "$birth" ]; then printf 'strong:%s:%s' "$ident" "$birth"; else printf 'weak:%s' "$ident"; fi
+  dev_ino=${out%%$'\t'*}; rest=${out#*$'\t'}
+  _FM_STAT_SIZE=${rest%%$'\t'*}; rest=${rest#*$'\t'}
+  epoch=${rest%%$'\t'*}; birth=${rest#*$'\t'}
+  [ "$epoch" != 0 ] || birth=''
+  case "$dev_ino$birth" in *$'\t'*|*$'\n'*|'') return 1 ;; esac
+  if [ -n "$birth" ]; then
+    _FM_STAT_IDENTITY="strong:$dev_ino:$birth"
+  else
+    _FM_STAT_IDENTITY="weak:$dev_ino"
+  fi
+}
+
+# Set _FM_STAT_IDENTITY and _FM_STAT_SIZE for one status file with one stat
+# exec. Injected test readers are honored, identity first and size second.
+_fm_status_read_ident_size() {  # <status-file>
+  if [ -n "${FM_STATUS_IDENTITY_READER:-}" ] || [ -n "${FM_STATUS_SIZE_READER:-}" ]; then
+    _FM_STAT_IDENTITY=$(_fm_open_decisions_file_ident "$1") || return 1
+    _FM_STAT_SIZE=$(_fm_status_file_size "$1") || return 1
+    return 0
+  fi
+  _fm_status_stat_fields "$1"
 }
 
 _fm_status_file_size() {  # <status-file>
@@ -1373,10 +1387,9 @@ status_open_decisions_incremental() {  # <status-file> [<captured-end-offset>] [
   # A stat/size-read failure is a genuine I/O error, not "the file is empty" -
   # report the already-trusted persisted set unchanged rather than risking a
   # silent invalidation that would wipe it.
-  cur_ident=$(_fm_open_decisions_file_ident "$f") || { printf '%s' "$trusted_open"; return 0; }
+  _fm_status_read_ident_size "$f" || { printf '%s' "$trusted_open"; return 0; }
+  cur_ident=$_FM_STAT_IDENTITY actual_size=$_FM_STAT_SIZE
   [ -n "$cur_ident" ] || { printf '%s' "$trusted_open"; return 0; }
-  actual_size=$(_fm_status_file_size "$f") \
-    || { printf '%s' "$trusted_open"; return 0; }
   actual_size=${actual_size//[[:space:]]/}
   case "$actual_size" in ''|*[!0-9]*) printf '%s' "$trusted_open"; return 0 ;; esac
   if [ -n "$captured_end" ]; then
@@ -1522,12 +1535,6 @@ status_snapshot_latest_event() {  # <status-file> <captured-endpoint> <captured-
     while (defined(my $line = <$file>)) {
       next unless $line =~ /[^\s]/;
       $line =~ s/[\r\n]+\z//;
-      my ($head) = split /:/, $line, 2;
-      my ($prefix) = split /\[/, $head, 2;
-      my @words = split " ", $prefix;
-      my $first = shift(@words) // "";
-      my $verb = join " ", $first, grep { !/^corr=[0-9a-fA-F]{16}$/ } @words;
-      next if $verb eq "note" && $head =~ /\s\[state=none\](\s|$)/;
       ($latest, $end) = ($line, $start + tell($file));
     }
     exit 1 unless defined $end;
@@ -1591,9 +1598,8 @@ EOF
     offset=0
     ident=$(_fm_open_decisions_file_ident "$f") || return 1
   fi
-  cur_ident=$(_fm_open_decisions_file_ident "$f") || return 1
-  size=$(_fm_status_file_size "$f") || return 1
-  size=${size//[[:space:]]/}
+  _fm_status_read_ident_size "$f" || return 1
+  cur_ident=$_FM_STAT_IDENTITY size=${_FM_STAT_SIZE//[[:space:]]/}
   case "$size:$offset" in *[!0-9:]*) return 1 ;; esac
   if [ "$ident" != "$cur_ident" ] || [ "$offset" -gt "$size" ]; then offset=0; fi
   printf '%s' "$offset"
@@ -1615,9 +1621,8 @@ status_outcome_backstop_cursor_offset() {  # <status-file>
     case "$presented:$row_backstop" in *[!0-9:]*) return 1 ;; esac
     [ -n "$presented" ] && [ -n "$ident" ] || return 1
     if [ "$row_task" = "$task" ]; then
-      current=$(_fm_open_decisions_file_ident "$f") || return 1
-      size=$(_fm_status_file_size "$f") || return 1
-      size=${size//[[:space:]]/}
+      _fm_status_read_ident_size "$f" || return 1
+      current=$_FM_STAT_IDENTITY size=${_FM_STAT_SIZE//[[:space:]]/}
       case "$size" in ''|*[!0-9]*) return 1 ;; esac
       [ "$ident" = "$current" ] || { printf '0'; return 0; }
       backstop=${row_backstop:-0}
@@ -1915,9 +1920,8 @@ status_commit_presentation_snapshot() {  # <state> <snapshot>
     [ -n "$ident" ] || { rm -f "$tmp"; return 1; }
     f="$state/$task.status"
     [ -f "$f" ] && [ -r "$f" ] && [ ! -L "$f" ] || { rm -f "$tmp"; return 1; }
-    cur_ident=$(_fm_open_decisions_file_ident "$f") || { rm -f "$tmp"; return 1; }
-    size=$(_fm_status_file_size "$f") || { rm -f "$tmp"; return 1; }
-    size=${size//[[:space:]]/}
+    _fm_status_read_ident_size "$f" || { rm -f "$tmp"; return 1; }
+    cur_ident=$_FM_STAT_IDENTITY size=${_FM_STAT_SIZE//[[:space:]]/}
     case "$size" in ''|*[!0-9]*) rm -f "$tmp"; return 1 ;; esac
     [ "$cur_ident" = "$ident" ] && [ "$endpoint" -le "$size" ] \
       || { rm -f "$tmp"; return 1; }
@@ -2025,10 +2029,9 @@ status_open_decisions_cursor_offset() {  # <status-file>
       return 1
     fi
   fi
-  cur_ident=$(_fm_open_decisions_file_ident "$f") || return 1
+  _fm_status_read_ident_size "$f" || return 1
+  cur_ident=$_FM_STAT_IDENTITY size=${_FM_STAT_SIZE//[[:space:]]/}
   [ -n "$cur_ident" ] || return 1
-  size=$(_fm_status_file_size "$f") || return 1
-  size=${size//[[:space:]]/}
   case "$size" in ''|*[!0-9]*) return 1 ;; esac
   if [ -z "$version" ] || [ -z "$ident" ] || [ "$ident" != "$cur_ident" ] || [ "$offset" -gt "$size" ]; then
     offset=0
