@@ -167,6 +167,20 @@ fm_project_capacity_lookup() {  # <config-dir> <project-name>
   return 0
 }
 
+
+fm_project_capacity_status_finished() {
+  local status_file=$1 status_line status_verb finished=0
+  [ -f "$status_file" ] && [ -r "$status_file" ] || return 1
+  while IFS= read -r status_line || [ -n "$status_line" ]; do
+    status_line_verb "$status_line" status_verb
+    case "$status_verb" in
+      done) finished=1 ;;
+      working) finished=0 ;;
+    esac
+  done < "$status_file"
+  [ "$finished" = 1 ]
+}
+
 # Count the task records holding a place in one project's capacity.
 # <project-lock> is fm_treehouse_project_lock_path for the project being
 # admitted, and <project-dir> is that project's own directory, which matches
@@ -180,9 +194,10 @@ fm_project_capacity_lookup() {  # <config-dir> <project-name>
 # FM_PROJECT_CAPACITY_ERROR when the local homes cannot be enumerated, or when
 # a state directory or task record in them cannot be read, since skipping it
 # could undercount the holders.
+
 fm_project_capacity_occupants() {  # <project-lock> <project-dir> <first-state> <own-id>
   local want=$1 own=$2 first=$3 self=$4 state meta kind project lock id label i
-  local status_file status_line status_verb finished
+  local status_file
   local -a cache_dirs cache_locks
   FM_PROJECT_CAPACITY_OCCUPANTS=0
   FM_PROJECT_CAPACITY_OCCUPANT_IDS=
@@ -230,17 +245,9 @@ fm_project_capacity_occupants() {  # <project-lock> <project-dir> <first-state> 
       [ -n "$lock" ] && [ "$lock" = "$want" ] || continue
       if [ "$kind" = scout ] || { [ "$kind" = ship ] && [ "$(fm_meta_get "$meta" mode)" = local-only ]; }; then
         status_file=${meta%.meta}.status
-        finished=0
-        if [ -f "$status_file" ] && [ -r "$status_file" ]; then
-          while IFS= read -r status_line || [ -n "$status_line" ]; do
-            status_line_verb "$status_line" status_verb
-            case "$status_verb" in
-              done) finished=1 ;;
-              working) finished=0 ;;
-            esac
-          done < "$status_file"
+        if fm_project_capacity_status_finished "$status_file"; then
+          continue
         fi
-        [ "$finished" = 0 ] || continue
       fi
       id=$(basename "$meta" .meta)
       label=$id
