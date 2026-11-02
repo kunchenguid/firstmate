@@ -182,6 +182,8 @@ semaphores = {
 }
 properties = runatload | inferred program
 EOF
+        # A mate launch racing the repair lands its pane in the fresh server.
+        [ ! -f "$FM_FAKE_STATE/panes-after-bootstrap" ] || cp "$FM_FAKE_STATE/panes-after-bootstrap" "$FM_FAKE_STATE/panes.json"
         if [ ! -f "$FM_FAKE_STATE/bootstrap-does-not-start" ]; then
           printf 'true\n' > "$FM_FAKE_STATE/herdr.running.$session"
           if [ "$session" = fm-remote ]; then printf 'true\n' > "$FM_FAKE_HERDR_RUNNING"; fi
@@ -193,11 +195,19 @@ EOF
     ;;
   kickstart)
     [ ! -f "$FM_FAKE_STATE/kickstart-fail" ] || { printf 'Kickstart failed: service unavailable\n' >&2; exit 6; }
+    forced=0
+    if [ "$domain" = -k ]; then
+      forced=1
+      domain=${3:-}
+      label=${domain##*/}
+    fi
     case "$label" in
       dev.firstmate.remote-job) : ;;
       *)
         # The real job execs the guard, which stops a foreign server and
-        # becomes the Aqua-born owner; the fixture models that outcome.
+        # becomes the Aqua-born owner; the fixture models that outcome. A
+        # forced kickstart kills the running server, and every pane with it.
+        [ "$forced" -eq 0 ] || rm -f "$FM_FAKE_STATE/panes.json"
         case "$label" in
           dev.firstmate.herdr.fm-remote) session=fm-remote ;;
           dev.firstmate.herdr.fm-remote-*) session=fm-remote-${label##*-} ;;
@@ -276,6 +286,7 @@ if [ "$session" = fm-remote ]; then running_file=$FM_FAKE_HERDR_RUNNING; fi
 running=$(cat "$running_file" 2>/dev/null || printf 'false')
 case " $* " in
   *"pane list"*)
+    [ ! -f "$FM_FAKE_STATE/pane-list-fail" ] || exit 1
     if [ -f "$FM_FAKE_STATE/panes.json" ]; then
       cat "$FM_FAKE_STATE/panes.json"
     else
@@ -565,8 +576,7 @@ assert_contains "$DOCTOR_OUT" "dev.firstmate.herdr.fm-remote-$SECOND_ROOT_ID.pli
   "the second root did not resolve a separately named launch agent"
 ! grep -Fx "bootout gui/$(id -u)/$LABEL" "$CASE_LAUNCHCTL_LOG" >/dev/null \
   || fail "the second root booted out the shared launch agent"
-! grep -Fx "kickstart -k gui/$(id -u)/$LABEL" "$CASE_LAUNCHCTL_LOG" >/dev/null \
-  || fail "the second root restarted the shared service"
+! grep -Eq -- "kickstart.* gui/$(id -u)/$LABEL$" "$CASE_LAUNCHCTL_LOG" || fail "the second root restarted the shared service"
 assert_present "$CASE_PLIST" "the second root removed the shared launch agent"
 assert_grep "$CASE_STATE/owner-root" "$CASE_PLIST" "the primary launch agent no longer names its owner root"
 PRIMARY_COMMAND=$(python3 -c 'import plistlib,sys; print(plistlib.load(open(sys.argv[1], "rb"))["ProgramArguments"][3])' "$CASE_PLIST")
@@ -587,22 +597,21 @@ new_case Darwin with-herdr gui
 doctor --fix
 expect_code 0 "$DOCTOR_RC" "the legacy-owner fixture did not initialize"
 rm -f "$CASE_HOME/.firstmate/remote-herdr-owner"
-printf '{"result":{"panes":[{"pane_id":"p1"}]}}\n' > "$CASE_STATE/panes.json"
 : > "$CASE_LAUNCHCTL_LOG"
 doctor
 expect_code 1 "$DOCTOR_RC" "a legacy service without its durable owner marker was reported ready"
-assert_contains "$DOCTOR_OUT" 'check herdr-server=fixable: session fm-remote is proven to belong to' \
+assert_contains "$DOCTOR_OUT" 'check herdr-owner=fixable: session fm-remote is proven to belong to' \
   "the doctor did not offer safe metadata-only adoption of the legacy owner"
+assert_contains "$DOCTOR_OUT" 'check herdr-server=ok:' \
+  "a missing owner record was reported as a server lifecycle gap"
 assert_no_grep "bootout gui/$(id -u)/$LABEL" "$CASE_LAUNCHCTL_LOG" \
   "a read-only legacy check controlled the service"
 doctor --fix
 expect_code 0 "$DOCTOR_RC" "the legacy owner could not be adopted without a restart"
+assert_contains "$DOCTOR_OUT" 'fix herdr-owner=applied:' "the metadata-only adoption was not reported"
 [ "$(cat "$CASE_HOME/.firstmate/remote-herdr-owner")" = "$ROOT" ] \
   || fail "the legacy service owner marker was not adopted"
-! grep -Fx "bootout gui/$(id -u)/$LABEL" "$CASE_LAUNCHCTL_LOG" >/dev/null \
-  || fail "legacy adoption restarted the shared service"
-! grep -Fx "kickstart -k gui/$(id -u)/$LABEL" "$CASE_LAUNCHCTL_LOG" >/dev/null \
-  || fail "legacy adoption kicked the shared service"
+! grep -Eq -- '^(bootout|bootstrap|kickstart) ' "$CASE_LAUNCHCTL_LOG" || fail "legacy adoption reloaded or restarted an empty healthy service"
 pass "a legacy service is adopted by its matching guard without service control"
 
 # --- a loaded, running launch agent with contract drift is repaired ----------
@@ -658,8 +667,46 @@ assert_contains "$DOCTOR_OUT" "owner: $ROOT" "the refusal omitted the code-root 
   || fail "the doctor rewrote the launch agent despite live panes"
 assert_no_grep "bootout gui/$(id -u)/$LABEL" "$CASE_LAUNCHCTL_LOG" "the doctor booted out a service with live panes"
 assert_no_grep "bootstrap gui/$(id -u) $CASE_PLIST" "$CASE_LAUNCHCTL_LOG" "the doctor bootstrapped a service with live panes"
-assert_no_grep "kickstart -k gui/$(id -u)/$LABEL" "$CASE_LAUNCHCTL_LOG" "the doctor kickstarted a service with live panes"
+! grep -Eq -- "kickstart.* gui/$(id -u)/$LABEL$" "$CASE_LAUNCHCTL_LOG" || fail "the doctor kickstarted a service with live panes"
 pass "a service with live panes is never rewritten or restarted"
+
+# --- unprovable pane state is a refusal, never proof of an empty session ----
+
+for pane_state in malformed unavailable; do
+  new_case Darwin with-herdr gui
+  mkdir -p "$(dirname "$CASE_PLIST")"
+  printf '<plist><dict><key>Label</key><string>%s</string></dict></plist>\n' "$LABEL" > "$CASE_PLIST"
+  write_loaded_contract /obsolete/bin/herdr 'keepalive | runatload | inferred program' "exec '/obsolete/bin/herdr' server --session 'fm-remote'"
+  printf 'true\n' > "$CASE_HERDR_RUNNING"
+  case "$pane_state" in
+    malformed) printf '{}\n' > "$CASE_STATE/panes.json" ;;
+    unavailable) touch "$CASE_STATE/pane-list-fail" ;;
+  esac
+  cp "$CASE_PLIST" "$CASE_STATE/plist.before"
+  doctor --fix
+  expect_code 1 "$DOCTOR_RC" "a service with $pane_state pane state was reported repaired"
+  assert_contains "$DOCTOR_OUT" 'pane state is uninspectable' "the $pane_state pane state was not named as the refusal"
+  cmp -s "$CASE_PLIST" "$CASE_STATE/plist.before" \
+    || fail "the doctor rewrote the launch agent with $pane_state pane state"
+  ! grep -Fxq -- "bootout gui/$(id -u)/$LABEL" "$CASE_LAUNCHCTL_LOG" || fail "the doctor booted out a service with $pane_state pane state"
+  assert_no_grep "bootstrap gui/$(id -u) $CASE_PLIST" "$CASE_LAUNCHCTL_LOG" "the doctor bootstrapped a service with $pane_state pane state"
+  ! grep -Eq -- "kickstart.* gui/$(id -u)/$LABEL$" "$CASE_LAUNCHCTL_LOG" || fail "the doctor kickstarted a service with $pane_state pane state"
+done
+pass "a pane listing that fails or lacks a panes array blocks every repair"
+
+# --- a mate pane that lands during a reload survives it ---------------------
+
+new_case Darwin with-herdr gui
+mkdir -p "$(dirname "$CASE_PLIST")"
+printf '<plist><dict><key>Label</key><string>%s</string></dict></plist>\n' "$LABEL" > "$CASE_PLIST"
+write_loaded_contract /obsolete/bin/herdr 'keepalive | runatload | inferred program' "exec '/obsolete/bin/herdr' server --session 'fm-remote'"
+printf 'true\n' > "$CASE_HERDR_RUNNING"
+printf '{"result":{"panes":[{"pane_id":"p-racing-mate"}]}}\n' > "$CASE_STATE/panes-after-bootstrap"
+doctor --fix
+expect_code 0 "$DOCTOR_RC" "an empty owned service with a stale contract was not repaired"
+assert_grep "bootstrap gui/$(id -u) $CASE_PLIST" "$CASE_LAUNCHCTL_LOG" "the stale launch agent was not reloaded"
+assert_present "$CASE_STATE/panes.json" "the reload force-restarted the fresh server and killed a mate pane that landed after bootstrap"
+pass "a reload never force-restarts the freshly bootstrapped server"
 
 # --- failed replacement cannot hide a stale loaded launch-agent contract -----
 
@@ -791,7 +838,7 @@ assert_contains "$DOCTOR_OUT" 'check launchagent-loaded=ok:' "a healthy loaded c
 doctor --fix
 expect_code 0 "$DOCTOR_RC" "--fix did not hand the session back to the launch agent"
 assert_contains "$DOCTOR_OUT" 'fix herdr-server=applied:' "--fix did not report the takeover through the launch agent"
-assert_grep "kickstart -k gui/$(id -u)/$LABEL" "$CASE_LAUNCHCTL_LOG" "the takeover did not go through launchd"
+assert_grep "kickstart gui/$(id -u)/$LABEL" "$CASE_LAUNCHCTL_LOG" "the takeover did not go through launchd"
 assert_contains "$DOCTOR_OUT" "check herdr-server=ok: session fm-remote is running in the Aqua login session (pid $AQUA_HOLDER_PID, launchd)" \
   "the launch-agent-owned server was not confirmed after the takeover"
 assert_no_dangerous_calls "the takeover reached for auto-login, FileVault, or the keychain"
