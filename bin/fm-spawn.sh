@@ -5033,6 +5033,7 @@ EOF
     # names (fm_control_endpoint_absence_verdict), and is re-created in that
     # recorded session; a move from another backend lands in this seat's own hc
     # session, exactly where a fresh spawn would.
+    # shellcheck disable=SC2034 # fm_backend_hc_container_ensure reads it.
     [ -z "$HC_SES" ] || HC_SESSION=$HC_SES
     HC_SES=$(fm_backend_hc_container_ensure) || exit 1
     HC_CORE=$(fm_backend_hc_core_id "$HC_SES") || exit 1
