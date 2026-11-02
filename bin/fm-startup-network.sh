@@ -148,7 +148,7 @@
 # RETAINED RESULTS ARE BOUNDED. A session start reserves a new generation, so
 # without a bound a long-lived home would keep one report directory per start
 # forever. prune_results() runs under the publication lock whenever a new
-# generation is reserved and whenever a generation settles, and it removes only
+# generation is reserved, and it removes only
 # what nothing can still act on: never the current shared-status generation,
 # never a generation named by a queued startup-network wake row, and never one of
 # the newest RESULT_KEEP_UNSETTLED unsettled generations, which is the grace
@@ -455,7 +455,7 @@ result_queued() { # <generation>
 # The caller owns the publication lock; cleanup failure never fails a run.
 prune_results() {
   local root="$STATE/.startup-network-results" receipts="$STATE/.startup-network-wake-receipts"
-  local current gen entry receipt kept_unsettled=0
+  local current gen entry receipt field value kept_unsettled=0
   [ -d "$root" ] && [ ! -L "$root" ] || return 0
   current=$(status_get generation)
   # Newest first. Generation names are <epoch>.<pid>.<harvest-pid>, so the epoch
@@ -464,7 +464,14 @@ prune_results() {
   while IFS= read -r gen; do
     [ -n "$gen" ] || continue
     fm_startup_generation_valid "$gen" || continue
-    fm_startup_result_path "$STATE" "$gen" >/dev/null || continue
+    entry=$(fm_startup_result_path "$STATE" "$gen") || continue
+    case "$(fm_startup_field "$entry/status" state)" in done|failed|refused|timeout) ;; *) continue ;; esac
+    [ "$(fm_startup_field "$entry/status" report_published)" = 1 ] || continue
+    for field in finished rc; do
+      value=$(fm_startup_field "$entry/status" "$field")
+      case "$value" in ''|*[!0-9]*) break ;; esac
+    done
+    case "$value" in ''|*[!0-9]*) continue ;; esac
     [ "$gen" = "$current" ] && continue
     result_queued "$gen" && continue
     if ! fm_startup_result_settled "$STATE" "$gen"; then
@@ -473,13 +480,16 @@ prune_results() {
         continue
       }
     fi
-    entry="$root/$gen"
     [ -d "$entry" ] && [ ! -L "$entry" ] || continue
+    if [ -d "$receipts" ] && [ ! -L "$receipts" ]; then
+      receipt="$receipts/$gen"
+      if [ -e "$receipt" ] || [ -L "$receipt" ]; then
+        [ -f "$receipt" ] && [ ! -L "$receipt" ] || continue
+        [ "$(cat "$receipt" 2>/dev/null || true)" = "$gen" ] || continue
+        rm -f -- "$receipt" 2>/dev/null || continue
+      fi
+    fi
     rm -rf -- "$entry" 2>/dev/null || continue
-    receipt="$receipts/$gen"
-    [ -f "$receipt" ] && [ ! -L "$receipt" ] || continue
-    [ "$(cat "$receipt" 2>/dev/null || true)" = "$gen" ] || continue
-    rm -f -- "$receipt" 2>/dev/null || true
   done < <(
     for entry in "$root"/*; do
       [ -e "$entry" ] || [ -L "$entry" ] || continue
@@ -530,17 +540,9 @@ recover_result() { # <generation-or-empty> <deadline> <wait-for-claim>
       fm_lock_release "$PUBLISH_LOCK"
       return 1
     fi
-    if [ "$(cat "$DELIVERED_FILE" 2>/dev/null || true)" = "$generation" ]; then
-      settle_result "$generation" inline
-      rc=$?
-      [ "$rc" -ne 0 ] || prune_results
-      fm_lock_release "$PUBLISH_LOCK"
-      return "$rc"
-    fi
     if ! report_requires_wake "$state"; then
       settle_result "$generation" clean
       rc=$?
-      [ "$rc" -ne 0 ] || prune_results
       fm_lock_release "$PUBLISH_LOCK"
       return "$rc"
     fi

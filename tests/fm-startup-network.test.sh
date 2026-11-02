@@ -1135,13 +1135,13 @@ startup_supervision_needed() { # <home>
 # still reach - the current generation, a queued wake's generation, and the
 # newest unsettled results - is preserved. Unknown shapes are never touched.
 test_retained_results_are_pruned_but_live_obligations_are_kept() {
-  local rec home root log generation
+  local rec home root log generation field
   rec=$(new_world bounded-retention)
   IFS='|' read -r home root log <<< "$rec"
   seed() { # <generation> [settled-kind]
     local g=$1 kind=${2:-}
     mkdir -p "$home/state/.startup-network-results/$g"
-    printf 'generation=%s\nstate=done\nfinished=1\n' "$g" \
+    printf 'generation=%s\nstate=done\nfinished=1\nrc=0\nreport_published=1\n' "$g" \
       > "$home/state/.startup-network-results/$g/status"
     printf 'ACTIONABLE_%s\n' "$g" > "$home/state/.startup-network-results/$g/report"
     [ -z "$kind" ] || printf '%s:%s\n' "$kind" "$g" > "$home/state/.startup-network-results/$g/settled"
@@ -1198,20 +1198,39 @@ test_retained_results_are_pruned_but_live_obligations_are_kept() {
     [ -d "$home/state/.startup-network-results/$generation" ] \
       || fail "a repeated retention pass removed $generation"
   done
+  for field in state finished rc report_published; do
+    seed "missing-$field" clean
+    sed "/^$field=/d" "$home/state/.startup-network-results/missing-$field/status" \
+      > "$home/partial-status"
+    mv "$home/partial-status" "$home/state/.startup-network-results/missing-$field/status"
+  done
+  seed 400.1.1 clean
+  printf 'generation=400.1.1\n' > "$home/state/.startup-network-results/400.1.1/status"
+  mv "$home/state/.startup-network-wake-receipts" "$home/detached-receipts"
+  ln -s "$home/detached-receipts" "$home/state/.startup-network-wake-receipts"
+  seed 300.1.1 clean
+  printf '300.1.1\n' > "$home/detached-receipts/300.1.1"
+  run_stage "$home" "$root" prune || fail "the symlinked receipt-root pass failed"
+  [ -f "$home/detached-receipts/300.1.1" ] || fail "retention followed the receipt root"
+  [ -L "$home/state/.startup-network-wake-receipts" ] || fail "retention removed the receipt root"
+  [ -d "$home/state/.startup-network-results/400.1.1" ] || fail "retention deleted a partial status"
+  for field in state finished rc report_published; do
+    [ -d "$home/state/.startup-network-results/missing-$field" ] || fail "retention accepted missing $field"
+  done
   pass "fm-startup-network: retention bounds completed results and keeps every live obligation"
 }
 
 test_retained_results_are_pruned_but_live_obligations_are_kept
 
 # The pass has to run on its own, not only when an operator asks: a reservation
-# supersedes the previous generation and a settlement retires the current one.
-test_settling_a_run_prunes_the_generations_it_retired() {
+# supersedes the previous generation and bounds retained completions.
+test_reserving_a_run_prunes_the_generations_it_retired() {
   local rec home root log claimant generation
   rec=$(new_world settlement-prunes)
   IFS='|' read -r home root log <<< "$rec"
   mkdir -p "$home/state/.startup-network-results/1000.1.1" \
     "$home/state/.startup-network-wake-receipts"
-  printf 'generation=1000.1.1\nstate=done\nfinished=1\n' \
+  printf 'generation=1000.1.1\nstate=done\nfinished=1\nrc=0\nreport_published=1\n' \
     > "$home/state/.startup-network-results/1000.1.1/status"
   printf 'ACTIONABLE_OLD\n' > "$home/state/.startup-network-results/1000.1.1/report"
   printf 'clean:1000.1.1\n' > "$home/state/.startup-network-results/1000.1.1/settled"
@@ -1233,10 +1252,10 @@ test_settling_a_run_prunes_the_generations_it_retired() {
   [ -n "$generation" ] || fail "the run left no current generation"
   [ -d "$home/state/.startup-network-results/$generation" ] \
     || fail "the run pruned its own retained completion"
-  pass "fm-startup-network: reservation and settlement prune the generations they retire"
+  pass "fm-startup-network: reservation prunes retired generations"
 }
 
-test_settling_a_run_prunes_the_generations_it_retired
+test_reserving_a_run_prunes_the_generations_it_retired
 
 test_running_and_refused_records_have_correct_supervision() {
   local rec home root log worker waited=0 pid
