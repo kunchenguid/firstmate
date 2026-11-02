@@ -73,6 +73,7 @@ new_case() {
   local platform=$1 want_herdr=${2:-with-herdr} want_gui=${3:-gui}
   unset CASE_REMOTE_JOB_ACTIVE
   unset CASE_PLATFORM_OVERRIDE
+  unset CASE_ROOT_OVERRIDE
   unset CASE_DSCL_FAIL
   unset CASE_DSCL_HANG
   unset CASE_SECOND_LOGIN_SHELL
@@ -91,7 +92,8 @@ new_case() {
   CASE_PLIST="$CASE_HOME/Library/LaunchAgents/$LABEL.plist"
   CASE_INTERACTIVE_PLIST="$CASE_HOME/Library/LaunchAgents/$INTERACTIVE_LABEL.plist"
   CASE_JOB_PLIST="$CASE_HOME/Library/LaunchAgents/$JOB_LABEL.plist"
-  mkdir -p "$CASE_BIN" "$CASE_HOME" "$CASE_PROJECT_HOME" "$CASE_STATE"
+  mkdir -p "$CASE_BIN" "$CASE_HOME" "$CASE_PROJECT_HOME" "$CASE_STATE" "$CASE_HOME/.firstmate"
+  printf '%s\n' "$ROOT" > "$CASE_HOME/.firstmate/remote-herdr-owner"
   printf 'false\n' > "$CASE_HERDR_RUNNING"
   : > "$CASE_LAUNCHCTL_LOG"
   : > "$CASE_FORBIDDEN_LOG"
@@ -156,24 +158,33 @@ properties = keepalive | runatload | inferred program
 EOF
         ;;
       *)
+        case "$label" in
+          dev.firstmate.herdr.fm-remote) session=fm-remote ;;
+          dev.firstmate.herdr.fm-remote-*) session=fm-remote-${label##*-} ;;
+          *) session=fm-remote ;;
+        esac
+        plist="$FM_FAKE_HOME/Library/LaunchAgents/$label.plist"
+        log="$FM_FAKE_HOME/Library/Logs/$label.log"
+        guard="$FM_FAKE_ROOT/bin/fm-remote-herdr-guard.sh"
         cat > "$loaded" <<EOF
-path = $FM_FAKE_PLIST
+path = $plist
 program = $FM_FAKE_LOGIN_SHELL
 arguments = {
 	$FM_FAKE_LOGIN_SHELL
 	-l
 	-c
-	exec '$FM_FAKE_GUARD' '$FM_FAKE_HERDR_BIN' 'fm-remote'
+	exec '$guard' '$FM_FAKE_HERDR_BIN' '$session'
 }
-stdout path = $FM_FAKE_LAUNCH_AGENT_LOG
-stderr path = $FM_FAKE_LAUNCH_AGENT_LOG
+stdout path = $log
+stderr path = $log
 semaphores = {
 	successful exit => 0
 }
 properties = runatload | inferred program
 EOF
         if [ ! -f "$FM_FAKE_STATE/bootstrap-does-not-start" ]; then
-          printf 'true\n' > "$FM_FAKE_HERDR_RUNNING"
+          printf 'true\n' > "$FM_FAKE_STATE/herdr.running.$session"
+          if [ "$session" = fm-remote ]; then printf 'true\n' > "$FM_FAKE_HERDR_RUNNING"; fi
           printf '%s\n' "$FM_FAKE_AQUA_PID" > "$FM_FAKE_STATE/socket-owner"
         fi
         ;;
@@ -187,11 +198,17 @@ EOF
       *)
         # The real job execs the guard, which stops a foreign server and
         # becomes the Aqua-born owner; the fixture models that outcome.
+        case "$label" in
+          dev.firstmate.herdr.fm-remote) session=fm-remote ;;
+          dev.firstmate.herdr.fm-remote-*) session=fm-remote-${label##*-} ;;
+          *) session=fm-remote ;;
+        esac
         printf '%s\n' "$FM_FAKE_AQUA_PID" > "$FM_FAKE_STATE/socket-owner"
         if [ -f "$FM_FAKE_STATE/kickstart-delay" ]; then
           cp "$FM_FAKE_STATE/kickstart-delay" "$FM_FAKE_STATE/herdr-delay"
         else
-          printf 'true\n' > "$FM_FAKE_HERDR_RUNNING"
+          printf 'true\n' > "$FM_FAKE_STATE/herdr.running.$session"
+          if [ "$session" = fm-remote ]; then printf 'true\n' > "$FM_FAKE_HERDR_RUNNING"; fi
         fi
         ;;
     esac
@@ -248,9 +265,24 @@ SH
     cat > "$CASE_BIN/herdr" <<'SH'
 #!/usr/bin/env bash
 set -u
-running=$(cat "$FM_FAKE_HERDR_RUNNING" 2>/dev/null || printf 'false')
-case "${1:-} ${2:-}" in
-  "status --json")
+session=fm-remote
+want_session=0
+for arg in "$@"; do
+  if [ "$want_session" -eq 1 ]; then session=$arg; want_session=0; continue; fi
+  [ "$arg" != --session ] || want_session=1
+done
+running_file="$FM_FAKE_STATE/herdr.running.$session"
+if [ "$session" = fm-remote ]; then running_file=$FM_FAKE_HERDR_RUNNING; fi
+running=$(cat "$running_file" 2>/dev/null || printf 'false')
+case " $* " in
+  *"pane list"*)
+    if [ -f "$FM_FAKE_STATE/panes.json" ]; then
+      cat "$FM_FAKE_STATE/panes.json"
+    else
+      printf '{"result":{"panes":[]}}\n'
+    fi
+    ;;
+  *"status --json"*)
     if [ -f "$FM_FAKE_STATE/herdr-delay" ]; then
       delay=$(cat "$FM_FAKE_STATE/herdr-delay")
       if [ "$delay" -gt 0 ]; then
@@ -264,8 +296,9 @@ case "${1:-} ${2:-}" in
     fi
     printf '{"client":{"version":"0.7.5","protocol":16},"server":{"running":%s,"socket":"%s"}}\n' "$running" "$FM_FAKE_HERDR_SOCKET"
     ;;
-  "server "*|"server ")
-    printf 'true\n' > "$FM_FAKE_HERDR_RUNNING"
+  *"server "*)
+    printf 'true\n' > "$running_file"
+    if [ "$session" = fm-remote ]; then printf 'true\n' > "$FM_FAKE_HERDR_RUNNING"; fi
     ;;
 esac
 exit 0
@@ -311,6 +344,8 @@ doctor() {
     FM_FAKE_HERDR_BIN="$CASE_BIN/herdr" \
     FM_FAKE_HERDR_SOCKET="$CASE_STATE/herdr.sock" \
     FM_FAKE_GUARD="$GUARD" \
+    FM_FAKE_ROOT="${CASE_ROOT_OVERRIDE:-$ROOT}" \
+    FM_FAKE_HOME="$CASE_HOME" \
     FM_FAKE_AQUA_PID="$AQUA_HOLDER_PID" \
     FM_FAKE_PLIST="$CASE_PLIST" \
     FM_FAKE_JOB_PLIST="$CASE_JOB_PLIST" \
@@ -318,6 +353,7 @@ doctor() {
     FM_FAKE_LAUNCH_AGENT_LOG="$CASE_HOME/Library/Logs/$LABEL.log" \
     FM_FAKE_LOGIN_SHELL="${CASE_LOGIN_SHELL:-/bin/sh}" \
     FM_FAKE_SECOND_LOGIN_SHELL="${CASE_SECOND_LOGIN_SHELL:-}" \
+    FM_ROOT_OVERRIDE="${CASE_ROOT_OVERRIDE-${FM_ROOT_OVERRIDE-}}" \
     FM_FAKE_DSCL_FAIL="${CASE_DSCL_FAIL:-0}" \
     FM_FAKE_DSCL_HANG="${CASE_DSCL_HANG:-0}" \
     FM_LAUNCH_AGENT_SHELL="$([ "${CASE_RESOLVE_DSCL:-0}" = 1 ] || printf '%s' "$CASE_LOGIN_SHELL")" \
@@ -465,6 +501,8 @@ assert_contains "$DOCTOR_OUT" 'check remote-job-worker=ok:' "--fix did not insta
 assert_contains "$DOCTOR_OUT" 'check remote-job-worker-loaded=ok:' "--fix did not load the remote job worker"
 assert_present "$CASE_PLIST" "--fix reported success without writing the plist"
 assert_present "$CASE_JOB_PLIST" "--fix reported success without writing the remote job worker plist"
+[ "$(cat "$CASE_HOME/.firstmate/remote-herdr-owner")" = "$ROOT" ] \
+  || fail "the primary service owner marker does not record its code root"
 assert_herdr_launch_agent_contract "$CASE_PLIST" "$CASE_BIN/herdr"
 [ "$(plist_value "$CASE_JOB_PLIST" Label)" = "$JOB_LABEL" ] \
   || fail "the worker plist does not carry the Firstmate label"
@@ -492,6 +530,80 @@ assert_not_contains "$DOCTOR_OUT" 'fix launchagent-loaded=applied:' "a second --
 [ ! -s "$CASE_LAUNCHCTL_LOG" ] || assert_not_contains "$(cat "$CASE_LAUNCHCTL_LOG")" bootstrap \
   "a second --fix re-bootstrapped a loaded launch agent"
 pass "--fix is idempotent once the host is ready"
+
+# --- a second code root must not rewrite the shared running service ----------
+
+new_case Darwin with-herdr gui
+mkdir -p "$(dirname "$CASE_PLIST")" "$CASE_STATE/owner-root/bin" "$CASE_DIR/second-root/bin"
+printf '%s\n' "$CASE_STATE/owner-root" > "$CASE_HOME/.firstmate/remote-herdr-owner"
+printf '#!/bin/sh\n' > "$CASE_STATE/owner-root/bin/fm-remote-herdr-guard.sh"
+printf '#!/bin/sh\n' > "$CASE_DIR/second-root/bin/fm-remote-herdr-guard.sh"
+cat > "$CASE_PLIST" <<XML
+<?xml version="1.0" encoding="UTF-8"?>
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>$LABEL</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/bin/sh</string>
+		<string>-l</string>
+		<string>-c</string>
+		<string>exec '$CASE_STATE/owner-root/bin/fm-remote-herdr-guard.sh' '$CASE_BIN/herdr' 'fm-remote'</string>
+	</array>
+	<key>LimitLoadToSessionType</key>
+	<string>Aqua</string>
+</dict>
+</plist>
+XML
+write_loaded_contract "$CASE_BIN/herdr"
+printf 'true\n' > "$CASE_HERDR_RUNNING"
+CASE_ROOT_OVERRIDE="$CASE_DIR/second-root"
+doctor --fix
+SECOND_ROOT_ID=$(printf '%s' "$CASE_DIR/second-root" | shasum -a 256 | awk '{print substr($1, 1, 16)}')
+assert_contains "$DOCTOR_OUT" "dev.firstmate.herdr.fm-remote-$SECOND_ROOT_ID.plist" \
+  "the second root did not resolve a separately named launch agent"
+! grep -Fx "bootout gui/$(id -u)/$LABEL" "$CASE_LAUNCHCTL_LOG" >/dev/null \
+  || fail "the second root booted out the shared launch agent"
+! grep -Fx "kickstart -k gui/$(id -u)/$LABEL" "$CASE_LAUNCHCTL_LOG" >/dev/null \
+  || fail "the second root restarted the shared service"
+assert_present "$CASE_PLIST" "the second root removed the shared launch agent"
+assert_grep "$CASE_STATE/owner-root" "$CASE_PLIST" "the primary launch agent no longer names its owner root"
+PRIMARY_COMMAND=$(python3 -c 'import plistlib,sys; print(plistlib.load(open(sys.argv[1], "rb"))["ProgramArguments"][3])' "$CASE_PLIST")
+[ "$PRIMARY_COMMAND" = "exec '$CASE_STATE/owner-root/bin/fm-remote-herdr-guard.sh' '$CASE_BIN/herdr' 'fm-remote'" ] \
+  || fail "the primary launch agent's session name changed"
+SECOND_PLIST="$CASE_HOME/Library/LaunchAgents/dev.firstmate.herdr.fm-remote-$SECOND_ROOT_ID.plist"
+assert_present "$SECOND_PLIST" "the second root did not install its own launch agent"
+[ "$(plist_value "$SECOND_PLIST" Label)" = "dev.firstmate.herdr.fm-remote-$SECOND_ROOT_ID" ] \
+  || fail "the second launch agent has the wrong label"
+SECOND_COMMAND=$(python3 -c 'import plistlib,sys; print(plistlib.load(open(sys.argv[1], "rb"))["ProgramArguments"][3])' "$SECOND_PLIST")
+case "$SECOND_COMMAND" in *"$CASE_DIR/second-root/bin/fm-remote-herdr-guard.sh"*"fm-remote-$SECOND_ROOT_ID"*) ;; *) fail "the second launch agent does not target its own guard and session" ;; esac
+assert_present "$CASE_STATE/herdr.running.fm-remote-$SECOND_ROOT_ID" "the second Herdr session did not start independently"
+pass "a second code root gets a separate Herdr session and launch agent"
+
+# --- a legacy owner is adopted from its guard without restarting its service -
+
+new_case Darwin with-herdr gui
+doctor --fix
+expect_code 0 "$DOCTOR_RC" "the legacy-owner fixture did not initialize"
+rm -f "$CASE_HOME/.firstmate/remote-herdr-owner"
+printf '{"result":{"panes":[{"pane_id":"p1"}]}}\n' > "$CASE_STATE/panes.json"
+: > "$CASE_LAUNCHCTL_LOG"
+doctor
+expect_code 1 "$DOCTOR_RC" "a legacy service without its durable owner marker was reported ready"
+assert_contains "$DOCTOR_OUT" 'check herdr-server=fixable: session fm-remote is proven to belong to' \
+  "the doctor did not offer safe metadata-only adoption of the legacy owner"
+assert_no_grep "bootout gui/$(id -u)/$LABEL" "$CASE_LAUNCHCTL_LOG" \
+  "a read-only legacy check controlled the service"
+doctor --fix
+expect_code 0 "$DOCTOR_RC" "the legacy owner could not be adopted without a restart"
+[ "$(cat "$CASE_HOME/.firstmate/remote-herdr-owner")" = "$ROOT" ] \
+  || fail "the legacy service owner marker was not adopted"
+! grep -Fx "bootout gui/$(id -u)/$LABEL" "$CASE_LAUNCHCTL_LOG" >/dev/null \
+  || fail "legacy adoption restarted the shared service"
+! grep -Fx "kickstart -k gui/$(id -u)/$LABEL" "$CASE_LAUNCHCTL_LOG" >/dev/null \
+  || fail "legacy adoption kicked the shared service"
+pass "a legacy service is adopted by its matching guard without service control"
 
 # --- a loaded, running launch agent with contract drift is repaired ----------
 
@@ -528,6 +640,26 @@ expect_code 0 "$DOCTOR_RC" "--fix did not repair launch-agent contract drift"
 assert_contains "$DOCTOR_OUT" 'check launchagent=ok:' "the repaired launch-agent contract was not confirmed"
 assert_herdr_launch_agent_contract "$CASE_PLIST" "$CASE_BIN/herdr"
 pass "a loaded and running launch agent must match the complete owned contract"
+
+# --- live panes make a launch-agent mismatch a refusal, not a restart --------
+
+new_case Darwin with-herdr gui
+mkdir -p "$(dirname "$CASE_PLIST")"
+printf '<plist><dict><key>Label</key><string>%s</string></dict></plist>\n' "$LABEL" > "$CASE_PLIST"
+write_loaded_contract /obsolete/bin/herdr 'keepalive | runatload | inferred program' "exec '/obsolete/bin/herdr' server --session 'fm-remote'"
+printf 'true\n' > "$CASE_HERDR_RUNNING"
+printf '{"result":{"panes":[{"pane_id":"p1"}]}}\n' > "$CASE_STATE/panes.json"
+cp "$CASE_PLIST" "$CASE_STATE/plist.before"
+doctor --fix
+expect_code 1 "$DOCTOR_RC" "a live service with panes was reported repaired"
+assert_contains "$DOCTOR_OUT" 'live panes' "the refusal did not explain why restart was unsafe"
+assert_contains "$DOCTOR_OUT" "owner: $ROOT" "the refusal omitted the code-root owner"
+[ "$(cat "$CASE_PLIST")" = "$(cat "$CASE_STATE/plist.before")" ] \
+  || fail "the doctor rewrote the launch agent despite live panes"
+assert_no_grep "bootout gui/$(id -u)/$LABEL" "$CASE_LAUNCHCTL_LOG" "the doctor booted out a service with live panes"
+assert_no_grep "bootstrap gui/$(id -u) $CASE_PLIST" "$CASE_LAUNCHCTL_LOG" "the doctor bootstrapped a service with live panes"
+assert_no_grep "kickstart -k gui/$(id -u)/$LABEL" "$CASE_LAUNCHCTL_LOG" "the doctor kickstarted a service with live panes"
+pass "a service with live panes is never rewritten or restarted"
 
 # --- failed replacement cannot hide a stale loaded launch-agent contract -----
 
@@ -771,6 +903,19 @@ assert_no_regex '^(bootout|bootstrap|kickstart)' "$CASE_LAUNCHCTL_LOG" \
   "repeated repair reloaded an already healthy login-shell agent"
 pass "repeated repair reuses one resolved login shell and remains a no-op"
 
+# --- an unowned legacy server stays untouched until its owner is proven ------
+
+new_case Linux with-herdr no-gui
+rm -f "$CASE_HOME/.firstmate/remote-herdr-owner"
+printf 'true\n' > "$CASE_HERDR_RUNNING"
+doctor --fix
+expect_code 1 "$DOCTOR_RC" "a legacy server with unknown ownership was accepted"
+assert_contains "$DOCTOR_OUT" 'owner cannot be proven' "the unknown legacy owner was not reported"
+assert_not_contains "$DOCTOR_OUT" 'fix herdr-server=applied:' "the doctor took over the legacy server"
+assert_absent "$CASE_HOME/.firstmate/remote-herdr-owner" "the doctor claimed an unproven legacy server"
+[ "$(cat "$CASE_HERDR_RUNNING")" = true ] || fail "the doctor changed the legacy server state"
+pass "a legacy service without a provable owner is reported and never taken over"
+
 # --- linux has no launch agent, and --fix starts the server directly ---------
 
 new_case Linux with-herdr no-gui
@@ -784,6 +929,8 @@ doctor --fix
 expect_code 0 "$DOCTOR_RC" "--fix did not start the herdr server on linux"
 assert_contains "$DOCTOR_OUT" 'fix herdr-server=applied:' "--fix did not report starting the server"
 assert_contains "$DOCTOR_OUT" 'check herdr-server=ok:' "the started server was not confirmed by the re-check"
+[ "$(cat "$CASE_HOME/.firstmate/remote-herdr-owner")" = "$ROOT" ] \
+  || fail "the Linux server owner marker does not record its code root"
 [ ! -s "$CASE_LAUNCHCTL_LOG" ] || fail "the linux path invoked launchctl"
 pass "a non-darwin host skips launch agents and starts its herdr server directly"
 

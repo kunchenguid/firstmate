@@ -1,12 +1,14 @@
 #!/usr/bin/env bash
-# launchd exec target for the Firstmate-owned dev.firstmate.herdr.fm-remote
-# launch agent: make the Aqua login session own the fm-remote Herdr server.
+# launchd exec target for a Firstmate-owned remote Herdr agent: make the
+# Aqua login session own its configured Herdr server session.
+# The primary root uses dev.firstmate.herdr.fm-remote and fm-remote; additional
+# roots receive root-derived labels and session names.
 #
 # Usage:
 #   fm-remote-herdr-guard.sh <herdr-path> <session>
 #
 # bin/fm-remote-doctor.sh renders the launch agent as the account's login
-# shell running `exec <this script> <herdr> fm-remote` with
+# shell running `exec <this script> <herdr> <session>` with
 # LimitLoadToSessionType=Aqua, RunAtLoad, KeepAlive={SuccessfulExit=false},
 # and ThrottleInterval=10, then bootstraps it into gui/<uid>. That domain, not
 # the login shell, is what gives this process and every server it execs the

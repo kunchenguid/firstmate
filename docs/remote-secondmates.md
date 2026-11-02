@@ -270,8 +270,12 @@ Over the plain SSH doctor bootstrap, it writes and reloads the applicable Firstm
 
 Both are scoped with `LimitLoadToSessionType=Aqua` and bootstrapped in `gui/<uid>`.
 The Herdr agent applies only to the herdr backend; a rex-verified host needs only the remote-job worker there.
-Under `--backend rex --fix`, it also starts the account's persistent rex server when none answers.
-It never stops or restarts an answering server, because a stop ends every process in that server's sessions, including unrelated work and sibling agents, and a restore brings back only shells.
+The primary Firstmate code root keeps the `fm-remote` session and `dev.firstmate.herdr.fm-remote` launch-agent label.
+The doctor records that root as the service owner, and a different code root on the same account receives a separate, root-derived Herdr session and launch-agent label.
+A legacy service without an owner record is adopted only when its existing launch-agent guard proves the current root owns it; otherwise the doctor leaves it alone and reports the ownership gap.
+Repairs refuse to rewrite, reload, or restart the Herdr service when its owner is another code root or its pane state is live or cannot be proven empty.
+Under `--backend rex --fix`, the doctor starts the account's persistent Rex server only when none answers.
+It never stops or restarts an answering Rex server, because a stop ends every process in that server's sessions, including unrelated work and sibling agents, and a restore brings back only shells.
 An answering exit-empty server is reported as a human gap: at a time when nothing runs there, an operator runs `rex server stop` and then `rex server start` on that account, and rex stays not ready until then.
 Because Rex starts a missing server as exit-empty, nothing else Firstmate runs for a remote second mate starts one: while no server answers, the remote endpoint state reads `unreadable`, and recovery waits for this repair to start the persistent server.
 

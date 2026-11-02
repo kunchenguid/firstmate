@@ -56,12 +56,19 @@
 # fixed. Any remaining fixable or human gap, and any missing required tool,
 # exits non-zero.
 #
-# --fix is idempotent and closes only automatable gaps: it writes and reloads
-# both Firstmate-owned Aqua agents, starts the Linux workers where no Aqua agent
-# applies, starts a persistent rex server when that backend needs one and none
-# answers, recreates the entrypoint symlink, and may add an owned ~/.local/bin
-# wrapper for a required tool it can discover under nvm, asdf, or mise. It never
-# installs packages, creates a login session, writes an auto-login password,
+# --fix is idempotent and closes only automatable gaps. It records the code
+# root that owns the Herdr service, preserves the primary fm-remote session and
+# label, and gives another code root a separate session and launch-agent label.
+# It refuses to rewrite, reload, or restart a differently owned Herdr service,
+# a legacy service whose owner cannot be proven, or a service with live or
+# uninspectable panes. It may adopt a legacy owner only when its launch-agent
+# guard proves the current root, and that adoption writes metadata without
+# restarting the service. It also writes and reloads the owned Aqua agents,
+# starts the Linux workers where no Aqua agent applies, starts a persistent rex
+# server when that backend needs one and none answers, recreates the entrypoint
+# symlink, and may add an owned ~/.local/bin wrapper for a required tool it can
+# discover under nvm, asdf, or mise. It does not install packages, create a
+# login session, write an auto-login password,
 # changes FileVault, stores an account password, or replaces a non-Firstmate
 # wrapper; those remain reported gaps.
 set -eu
@@ -94,11 +101,52 @@ LAUNCH_AGENT_LABEL=dev.firstmate.herdr.fm-remote
 # remains in the separate default session, which this readiness check never
 # requires or changes.
 HERDR_SESSION_NAME=fm-remote
+HERDR_OWNER_DIR="${HOME:-}/.firstmate"
+HERDR_OWNER_FILE="$HERDR_OWNER_DIR/remote-herdr-owner"
+FM_ROOT_ID=$(printf '%s' "$FM_ROOT" | shasum -a 256 | awk '{print substr($1, 1, 16)}')
+[ "${#FM_ROOT_ID}" -eq 16 ] || { printf 'error: could not fingerprint Firstmate code root %s\n' "$FM_ROOT" >&2; exit 1; }
+HERDR_OWNER_ROOT=
+if [ -d "$HERDR_OWNER_DIR" ] && [ ! -L "$HERDR_OWNER_DIR" ] \
+  && [ -f "$HERDR_OWNER_FILE" ] && [ ! -L "$HERDR_OWNER_FILE" ]; then
+  IFS= read -r HERDR_OWNER_ROOT < "$HERDR_OWNER_FILE" || HERDR_OWNER_ROOT=
+fi
+if [ -n "$HERDR_OWNER_ROOT" ] && [ "$HERDR_OWNER_ROOT" != "$FM_ROOT" ]; then
+  HERDR_SESSION_NAME="fm-remote-$FM_ROOT_ID"
+  LAUNCH_AGENT_LABEL="dev.firstmate.herdr.fm-remote-$FM_ROOT_ID"
+  HERDR_OWNER_FILE="$HERDR_OWNER_DIR/remote-herdr-owner-$FM_ROOT_ID"
+  HERDR_OWNER_ROOT=
+  if [ -f "$HERDR_OWNER_FILE" ] && [ ! -L "$HERDR_OWNER_FILE" ]; then
+    IFS= read -r HERDR_OWNER_ROOT < "$HERDR_OWNER_FILE" || HERDR_OWNER_ROOT=
+  fi
+fi
 LAUNCH_AGENT_DIR="${HOME:-}/Library/LaunchAgents"
 LAUNCH_AGENT_PLIST="$LAUNCH_AGENT_DIR/$LAUNCH_AGENT_LABEL.plist"
 LAUNCH_AGENT_LOG_DIR="${HOME:-}/Library/Logs"
 LAUNCH_AGENT_LOG="$LAUNCH_AGENT_LOG_DIR/$LAUNCH_AGENT_LABEL.log"
 ENTRYPOINT_LINK="${HOME:-}/.local/bin/fm-remote-entrypoint.sh"
+
+# Before owner markers existed, the launch-agent guard path is the only
+# durable evidence tying the shared service to a code root. Preserve that
+# service for its recorded root and namespace any other root independently.
+if [ -z "$HERDR_OWNER_ROOT" ] && [ -f "$LAUNCH_AGENT_PLIST" ] && [ ! -L "$LAUNCH_AGENT_PLIST" ]; then
+  legacy_guard=$(grep -oE "[^']+/bin/fm-remote-herdr-guard.sh" "$LAUNCH_AGENT_PLIST" 2>/dev/null | head -1 || true)
+  legacy_root=${legacy_guard%/bin/fm-remote-herdr-guard.sh}
+  if [ -n "$legacy_root" ]; then
+    HERDR_OWNER_ROOT=$legacy_root
+    if [ "$HERDR_OWNER_ROOT" != "$FM_ROOT" ]; then
+      HERDR_SESSION_NAME="fm-remote-$FM_ROOT_ID"
+      LAUNCH_AGENT_LABEL="dev.firstmate.herdr.fm-remote-$FM_ROOT_ID"
+      HERDR_OWNER_FILE="$HERDR_OWNER_DIR/remote-herdr-owner-$FM_ROOT_ID"
+      HERDR_OWNER_ROOT=
+      if [ -d "$HERDR_OWNER_DIR" ] && [ ! -L "$HERDR_OWNER_DIR" ] \
+        && [ -f "$HERDR_OWNER_FILE" ] && [ ! -L "$HERDR_OWNER_FILE" ]; then
+        IFS= read -r HERDR_OWNER_ROOT < "$HERDR_OWNER_FILE" || HERDR_OWNER_ROOT=
+      fi
+      LAUNCH_AGENT_PLIST="$LAUNCH_AGENT_DIR/$LAUNCH_AGENT_LABEL.plist"
+      LAUNCH_AGENT_LOG="$LAUNCH_AGENT_LOG_DIR/$LAUNCH_AGENT_LABEL.log"
+    fi
+  fi
+fi
 
 usage() { sed -n '2,5p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
 
@@ -215,6 +263,40 @@ herdr_server_running() {
   local running
   running=$(herdr_server_status_json | jq -r '.server.running // false' 2>/dev/null) || return 1
   [ "$running" = true ]
+}
+
+herdr_session_has_live_panes() {
+  local panes count
+  herdr_server_running || return 1
+  herdr_adapter_load || return 0
+  panes=$(fm_backend_herdr_cli "$HERDR_SESSION_NAME" pane list 2>/dev/null) || return 0
+  count=$(printf '%s' "$panes" | jq -er '.result.panes | length' 2>/dev/null) || return 0
+  [ "$count" -gt 0 ]
+}
+
+HERDR_SERVICE_BLOCK_REASON=
+herdr_service_mutation_blocked() {
+  local status running
+  HERDR_SERVICE_BLOCK_REASON=
+  status=$(herdr_server_status_json) || { HERDR_SERVICE_BLOCK_REASON='server status is unavailable'; return 0; }
+  running=$(printf '%s' "$status" | jq -r 'if .server.running == true then "true" elif .server.running == false then "false" else empty end' 2>/dev/null) || {
+    HERDR_SERVICE_BLOCK_REASON='server status is malformed'
+    return 0
+  }
+  case "$running" in
+    false) return 1 ;;
+    true) ;;
+    *) HERDR_SERVICE_BLOCK_REASON='server status is unproven'; return 0 ;;
+  esac
+  if [ -z "$HERDR_OWNER_ROOT" ] || [ "$HERDR_OWNER_ROOT" != "$FM_ROOT" ]; then
+    HERDR_SERVICE_BLOCK_REASON='service owner is unknown or belongs to another code root'
+    return 0
+  fi
+  if herdr_session_has_live_panes; then
+    HERDR_SERVICE_BLOCK_REASON='service has live panes or pane state is uninspectable'
+    return 0
+  fi
+  return 1
 }
 
 # Birth of the process serving the session, as the guard classifies it:
@@ -795,16 +877,26 @@ check_launch_agent() { # <resolved-login-shell>
   if [ -f "$LAUNCH_AGENT_PLIST" ] && [ ! -L "$LAUNCH_AGENT_PLIST" ]; then
     if launch_agent_contract_matches "$shell"; then
       record launchagent "ok: $LAUNCH_AGENT_PLIST matches the Firstmate-owned contract"
+    elif herdr_service_mutation_blocked; then
+      record launchagent "human: cannot repair $LAUNCH_AGENT_PLIST because $HERDR_SERVICE_BLOCK_REASON (owner: ${HERDR_OWNER_ROOT:-unknown})" \
+        "resolve ownership or empty the Herdr session before repairing the launch agent"
     else
       record launchagent "fixable: $LAUNCH_AGENT_PLIST does not match the current Firstmate-owned contract" \
         "rerun this command with --fix to rewrite its label, program arguments, session scope, restart policy, and log paths"
     fi
     if launch_agent_is_aqua; then
       record launchagent-scope "ok: LimitLoadToSessionType=Aqua"
+    elif herdr_service_mutation_blocked; then
+      record launchagent-scope "human: cannot repair the session scope because $HERDR_SERVICE_BLOCK_REASON (owner: ${HERDR_OWNER_ROOT:-unknown})" \
+        "resolve ownership or empty the Herdr session before repairing the launch agent"
     else
       record launchagent-scope "fixable: $LAUNCH_AGENT_PLIST is not scoped to the Aqua login session" \
         "rerun this command with --fix to rewrite it with LimitLoadToSessionType=Aqua"
     fi
+  elif herdr_service_mutation_blocked; then
+    record launchagent "human: no launch agent at $LAUNCH_AGENT_PLIST; cannot claim or reload session $HERDR_SESSION_NAME because $HERDR_SERVICE_BLOCK_REASON (owner: ${HERDR_OWNER_ROOT:-unknown})" \
+      "resolve ownership or empty the Herdr session before installing its launch agent"
+    record launchagent-scope "skip: no launch agent is installed yet"
   else
     record launchagent "fixable: no Firstmate herdr launch agent at $LAUNCH_AGENT_PLIST" \
       "rerun this command with --fix to install it"
@@ -823,6 +915,9 @@ check_launch_agent_loaded() { # <resolved-login-shell>
   if launchctl print "gui/$UID_NUM/$LAUNCH_AGENT_LABEL" >/dev/null 2>&1; then
     if launch_agent_loaded_contract_matches "$shell"; then
       record launchagent-loaded "ok: gui/$UID_NUM/$LAUNCH_AGENT_LABEL matches the effective contract"
+    elif herdr_service_mutation_blocked; then
+      record launchagent-loaded "human: cannot reload gui/$UID_NUM/$LAUNCH_AGENT_LABEL because $HERDR_SERVICE_BLOCK_REASON (owner: ${HERDR_OWNER_ROOT:-unknown})" \
+        "resolve ownership or empty the Herdr session before reloading the launch agent"
     else
       record launchagent-loaded "fixable: gui/$UID_NUM/$LAUNCH_AGENT_LABEL does not match the effective Firstmate-owned contract" \
         "rerun this command with --fix to replace the loaded job with the current launch-agent contract"
@@ -830,8 +925,13 @@ check_launch_agent_loaded() { # <resolved-login-shell>
     return 0
   fi
   if check_is_ok gui-session; then
-    record launchagent-loaded "fixable: $LAUNCH_AGENT_LABEL is not loaded into gui/$UID_NUM" \
-      "rerun this command with --fix to bootstrap and start it"
+    if herdr_service_mutation_blocked; then
+      record launchagent-loaded "human: cannot load $LAUNCH_AGENT_LABEL because $HERDR_SERVICE_BLOCK_REASON (owner: ${HERDR_OWNER_ROOT:-unknown})" \
+        "resolve ownership or empty the Herdr session before loading the launch agent"
+    else
+      record launchagent-loaded "fixable: $LAUNCH_AGENT_LABEL is not loaded into gui/$UID_NUM" \
+        "rerun this command with --fix to bootstrap and start it"
+    fi
     return 0
   fi
   record launchagent-loaded "human: $LAUNCH_AGENT_LABEL cannot be loaded because gui/$UID_NUM has no login session" \
@@ -845,6 +945,16 @@ check_herdr_server() {
     return 0
   fi
   if herdr_server_running; then
+    if [ -z "$HERDR_OWNER_ROOT" ]; then
+      record herdr-server "human: session $HERDR_SESSION_NAME is running but its Firstmate code-root owner cannot be proven; leaving the legacy service untouched" \
+        "identify the code root that owns this Herdr service before attempting a repair"
+      return 0
+    fi
+    if [ ! -e "$HERDR_OWNER_FILE" ] && [ ! -L "$HERDR_OWNER_FILE" ]; then
+      record herdr-server "fixable: session $HERDR_SESSION_NAME is proven to belong to $FM_ROOT but still needs its durable owner record" \
+        "rerun this command with --fix to record ownership without restarting the server"
+      return 0
+    fi
     if [ "$PLATFORM" != darwin ]; then
       record herdr-server "ok: session $HERDR_SESSION_NAME is running"
       return 0
@@ -864,8 +974,13 @@ check_herdr_server() {
           "rerun this command with --fix so the launch agent takes the session over (its current panes close and the parent firstmate relaunches its mates)"
         ;;
       *)
-        record herdr-server "fixable: session $HERDR_SESSION_NAME is served by pid ${birth#* } born outside the Aqua login session (${birth%% *}), so its panes cannot reach the login keychain" \
-          "rerun this command with --fix so the launch agent takes the session over (its current panes close and the parent firstmate relaunches its mates)"
+        if herdr_service_mutation_blocked; then
+          record herdr-server "human: session $HERDR_SESSION_NAME is served by pid ${birth#* } born outside the Aqua login session (${birth%% *}), but takeover is refused because $HERDR_SERVICE_BLOCK_REASON (owner: ${HERDR_OWNER_ROOT:-unknown})" \
+            "resolve ownership or wait until the session has no panes before repairing it"
+        else
+          record herdr-server "fixable: session $HERDR_SESSION_NAME is served by pid ${birth#* } born outside the Aqua login session (${birth%% *}), so its panes cannot reach the login keychain" \
+            "rerun this command with --fix so the launch agent takes the session over (its current panes close and the parent firstmate relaunches its mates)"
+        fi
         ;;
     esac
     return 0
@@ -930,6 +1045,45 @@ fix_report() { # <check> applied|failed <text>
   printf 'fix %s=%s: %s\n' "$1" "$2" "$3"
 }
 
+record_herdr_owner() {
+  local tmp
+  [ -n "$FM_ROOT" ] || return 1
+  if [ -e "$HERDR_OWNER_FILE" ] || [ -L "$HERDR_OWNER_FILE" ]; then
+    [ -f "$HERDR_OWNER_FILE" ] && [ ! -L "$HERDR_OWNER_FILE" ] || return 1
+    local owner
+    IFS= read -r owner < "$HERDR_OWNER_FILE" || owner=
+    [ "$owner" = "$FM_ROOT" ] || return 1
+    HERDR_OWNER_ROOT=$owner
+    return 0
+  fi
+  mkdir -p "$HERDR_OWNER_DIR" 2>/dev/null || return 1
+  [ -d "$HERDR_OWNER_DIR" ] && [ ! -L "$HERDR_OWNER_DIR" ] || return 1
+  local lock="$HERDR_OWNER_FILE.lock"
+  mkdir "$lock" 2>/dev/null || return 1
+  tmp="$HERDR_OWNER_FILE.tmp.$$"
+  if [ -e "$HERDR_OWNER_FILE" ] || [ -L "$HERDR_OWNER_FILE" ]; then
+    local owner
+    IFS= read -r owner < "$HERDR_OWNER_FILE" || owner=
+    rmdir "$lock" 2>/dev/null || true
+    [ -f "$HERDR_OWNER_FILE" ] && [ ! -L "$HERDR_OWNER_FILE" ] && [ "$owner" = "$FM_ROOT" ] || return 1
+    HERDR_OWNER_ROOT=$owner
+    return 0
+  fi
+  if ! printf '%s\n' "$FM_ROOT" > "$tmp"; then
+    rm -f -- "$tmp"
+    rmdir "$lock" 2>/dev/null || true
+    return 1
+  fi
+  chmod 0600 "$tmp" 2>/dev/null || true
+  if ! mv -- "$tmp" "$HERDR_OWNER_FILE" 2>/dev/null; then
+    rm -f -- "$tmp"
+    rmdir "$lock" 2>/dev/null || true
+    return 1
+  fi
+  rmdir "$lock" 2>/dev/null || true
+  HERDR_OWNER_ROOT=$FM_ROOT
+}
+
 write_launch_agent() { # <resolved-login-shell>
   local shell=$1 herdr_bin tmp
   if ! herdr_bin=$(command -v herdr 2>/dev/null); then
@@ -942,6 +1096,10 @@ write_launch_agent() { # <resolved-login-shell>
       return 1
       ;;
   esac
+  if ! record_herdr_owner; then
+    fix_report launchagent failed "cannot safely record this code root as owner at $HERDR_OWNER_FILE"
+    return 1
+  fi
   if ! mkdir -p "$LAUNCH_AGENT_DIR" 2>/dev/null; then
     fix_report launchagent failed "cannot create $LAUNCH_AGENT_DIR"
     return 1
@@ -998,6 +1156,10 @@ wait_for_herdr_server() {
 }
 
 start_herdr_server() {
+  if ! record_herdr_owner; then
+    fix_report herdr-server failed "cannot safely record this code root as owner at $HERDR_OWNER_FILE"
+    return 1
+  fi
   if ! herdr_adapter_load; then
     fix_report herdr-server failed "herdr and jq must both resolve before the server can be started"
     return 1
@@ -1039,6 +1201,10 @@ apply_fixes() { # <resolved-login-shell>
         fix_remote_job_worker || true
         ;;
       launchagent|launchagent-scope)
+        if herdr_service_mutation_blocked; then
+          fix_report launchagent failed "refusing to rewrite or reload session $HERDR_SESSION_NAME: $HERDR_SERVICE_BLOCK_REASON (owner: ${HERDR_OWNER_ROOT:-unknown})"
+          continue
+        fi
         [ "$launch_agent_written" -eq 0 ] || continue
         launch_agent_written=1
         write_launch_agent "$shell" || continue
@@ -1049,11 +1215,20 @@ apply_fixes() { # <resolved-login-shell>
         reload_launch_agent launchagent-loaded || true
         ;;
       launchagent-loaded)
+        if herdr_service_mutation_blocked; then
+          fix_report launchagent-loaded failed "refusing to reload session $HERDR_SESSION_NAME: $HERDR_SERVICE_BLOCK_REASON (owner: ${HERDR_OWNER_ROOT:-unknown})"
+          continue
+        fi
         [ "$launch_agent_reloaded" -eq 0 ] || continue
         launch_agent_reloaded=1
         reload_launch_agent launchagent-loaded || true
         ;;
       herdr-server)
+        [ "$launch_agent_reloaded" -eq 0 ] || continue
+        if herdr_service_mutation_blocked; then
+          fix_report herdr-server failed "refusing to restart session $HERDR_SESSION_NAME: $HERDR_SERVICE_BLOCK_REASON (owner: ${HERDR_OWNER_ROOT:-unknown})"
+          continue
+        fi
         # On darwin the launch agent owns the server, so restart it through
         # launchd rather than starting a stray one outside the Aqua session. A
         # reload earlier in this same pass has already done that.
@@ -1095,6 +1270,13 @@ if [ "$PLATFORM" = darwin ]; then
 fi
 run_checks "$LAUNCH_AGENT_SHELL"
 if [ "$MODE" = fix ]; then
+  # A legacy service can be adopted only when its launch-agent guard path
+  # proves this code root already owns it. Adoption writes metadata only; it
+  # never reloads or restarts the existing service.
+  if [ ! -e "$HERDR_OWNER_FILE" ] && [ ! -L "$HERDR_OWNER_FILE" ] \
+    && [ "$HERDR_OWNER_ROOT" = "$FM_ROOT" ] && herdr_server_running; then
+    record_herdr_owner || true
+  fi
   apply_fixes "$LAUNCH_AGENT_SHELL"
   # Re-derive every check from the host itself, so what prints below is the
   # state after repair rather than the intent of a repair.
@@ -1106,11 +1288,11 @@ if [ "${FM_REMOTE_JOB_ACTIVE:-}" = 1 ] || ! remote_job_identity_ok; then
 else
   report_required_tools_from_worker
 fi
-for tool in "${OPTIONAL_TOOLS[@]}"; do
-  if resolved=$(command -v "$tool" 2>/dev/null); then
-    printf 'optional %s=%s\n' "$tool" "$resolved"
+for optional_tool in "${OPTIONAL_TOOLS[@]}"; do
+  if resolved=$(command -v "$optional_tool" 2>/dev/null); then
+    printf 'optional %s=%s\n' "$optional_tool" "$resolved"
   else
-    printf 'optional %s=absent\n' "$tool"
+    printf 'optional %s=absent\n' "$optional_tool"
   fi
 done
 
