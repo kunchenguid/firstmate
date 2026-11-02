@@ -133,7 +133,7 @@ if [ "$SEAT_TRACKED" -eq 1 ]; then
   fi
   RELAUNCH_ARGS+=(--operation "$NEW_GEN" --previous "$PREV_GEN")
 fi
-if [ "$(fm_meta_get "$META" remote_herdr_session)" = fm-lab-* ]; then
+if [[ "$(fm_meta_get "$META" remote_herdr_session)" == fm-lab-* ]]; then
   RELAUNCH_ARGS+=(--herdr-session "$(fm_meta_get "$META" remote_herdr_session)")
 fi
 
