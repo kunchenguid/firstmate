@@ -337,6 +337,7 @@ test_reminder_cycle_still_delivers_procevent_result() {
 # never the reminder's check row, so main must still be the close's owner:
 # judged by the real offer rule both Pi and the supervision host route through.
 test_reminder_cycle_keeps_a_later_branch_wake_on_main() {
+  command -v node >/dev/null 2>&1 || { printf 'skip: node not found\n'; return 0; }
   local dir="$TMP_ROOT/reminder-branch" offer
   reminder_case "$dir" || fail "could not surface and acknowledge the decision before it aged"
   printf 'project=demo\nwindow=fm-other\n' > "$dir/state/other.meta"
