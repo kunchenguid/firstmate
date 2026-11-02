@@ -158,9 +158,14 @@ handle_push_transition() {  # <backend> <session> <record>
   watched=$(fm_watch_pane_lookup "$window")
   if [ "$backend" = herdr ] && [ -n "$watched" ] \
     && [ -z "$(fm_backend_meta_for_window "$window" "$STATE" 2>/dev/null)" ]; then
+    fm_watch_pane_lock_current "$STATE" || return 0
     reason="stale: watched pane ${watched%$'\t'*} ($window, herdr: agent $to${detail:+ ($detail)})"
-    fm_wake_append stale "$window" "$reason" || exit 1
-    fm_backend_commit_transition "$backend" "$STATE" "$session" "$record" || exit 1
+    if ! fm_wake_append stale "$window" "$reason" \
+      || ! fm_backend_commit_transition "$backend" "$STATE" "$session" "$record"; then
+      fm_lock_release "$STATE/.watched-panes.lock"
+      exit 1
+    fi
+    fm_lock_release "$STATE/.watched-panes.lock"
     wake "$reason"
     # shellcheck disable=SC2317 # Tests override the production exiting callback.
     return

@@ -151,6 +151,55 @@ test_watched_pane_marker_retire() {
   printf 'blocked' > "$marker"
   PATH="$fb:$PATH" FM_HOME="$dir/home" FM_STATE_OVERRIDE="$state" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
     bash "$ROOT/bin/fm-watch-pane.sh" remove 'Gone pane' || fail "remove must stay idempotent when the pane is unresolvable"
+  (
+    export PATH="$fb:$PATH" FM_HOME="$dir/home" FM_STATE_OVERRIDE="$state" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp"
+    . "$ROOT/bin/fm-push-transition-lib.sh"
+    fm_backend_source herdr || fail "load watched transition backend"
+    wake() { printf '%s\n' "$1" >> "$dir/wakes"; }
+    printf '{"result":{"panes":[{"tab_id":"w1:t1","pane_id":"w1:p1"}]}}' > "$resp/3.out"
+    rm -f "$marker"
+    : > "$dir/wakes"
+    bash "$ROOT/bin/fm-watch-pane.sh" add watch-session ops design 'Design review' --notify-done || fail "race add"
+    FM_WATCHED_PANES=$'watch-session:w1:p1\tDesign review\t1'
+    FM_WATCHED_PANES_IDENTITY=$(fm_watch_pane_registry_identity "$state")
+    OLD_IDENTITY=$FM_WATCHED_PANES_IDENTITY
+    REC=$(fm_transition_record w1:p1 '' '' blocked claude)
+    bash "$ROOT/bin/fm-watch-pane.sh" remove 'Design review' || fail "race remove"
+    handle_push_transition herdr watch-session "$REC"
+    [ ! -e "$marker" ] && [ ! -s "$dir/wakes" ] || fail "retired subscription recreated a marker or wake"
+    bash "$ROOT/bin/fm-watch-pane.sh" add watch-session ops design 'Design review' --notify-done || fail "race re-add"
+    handle_push_transition herdr watch-session "$REC"
+    [ ! -e "$marker" ] && [ ! -s "$dir/wakes" ] || fail "old snapshot survived identical re-registration"
+    FM_WATCHED_PANES_IDENTITY=$(fm_watch_pane_registry_identity "$state")
+    fm_backend_herdr_apply_transition "$state" watch-session "$REC" >/dev/null || fail "re-registered blocked must be actionable"
+    handle_push_transition herdr watch-session "$REC"
+    [ -s "$marker" ] && [ -s "$dir/wakes" ] || fail "fresh registration missed blocked"
+    CURRENT_IDENTITY=$FM_WATCHED_PANES_IDENTITY
+    FM_WATCHED_PANES_IDENTITY=$OLD_IDENTITY
+    WORKING=$(fm_transition_record w1:p1 '' '' working claude)
+    fm_backend_herdr_apply_transition "$state" watch-session "$WORKING" >/dev/null || true
+    [ -s "$marker" ] || fail "old working edge cleared the new registration marker"
+    FM_WATCHED_PANES_IDENTITY=$CURRENT_IDENTITY
+    fm_backend_herdr_apply_transition "$state" watch-session "$WORKING" >/dev/null || true
+    [ ! -e "$marker" ] || fail "fresh working edge must rearm the registration"
+    eval "$(declare -f fm_wake_append | sed '1s/fm_wake_append/original_wake_append/')"
+    fm_wake_append() {
+      if bash "$ROOT/bin/fm-watch-pane.sh" remove 'Design review' 2>"$dir/busy"; then
+        fail "registry mutation overlapped notification commit"
+      fi
+      original_wake_append "$@"
+    }
+    handle_push_transition herdr watch-session "$REC"
+    [ -s "$marker" ] || fail "serialized notification did not commit"
+    bash "$ROOT/bin/fm-watch-pane.sh" add watch-session ops design 'Design review' || fail "replace after notification"
+    handle_push_transition herdr watch-session "$REC"
+    [ ! -e "$marker" ] || fail "retired snapshot recreated replacement marker"
+    FM_WATCHED_PANES_IDENTITY=$(fm_watch_pane_registry_identity "$state")
+    FM_WATCHED_PANES=$'watch-session:w1:p1\tDesign review\t0'
+    DONE=$(fm_transition_record w1:p1 '' '' done claude)
+    if fm_backend_herdr_apply_transition "$state" watch-session "$DONE" >/dev/null; then fail "replacement retained old done policy"; fi
+    bash "$ROOT/bin/fm-watch-pane.sh" remove 'Design review' || fail "notification leaked the registry lock"
+  ) || fail "retired snapshot and notification serialization contracts"
   pass "remove/replace retire watch-owned escalation markers, keep task-owned state, and stay idempotent"
 }
 
@@ -164,6 +213,9 @@ test_watched_pane_marker_retire
   # shellcheck source=/dev/null
   . "$ROOT/bin/backends/herdr.sh"
   WAIT_DIR="$TMP_ROOT/wait"; mkdir -p "$WAIT_DIR/state"
+  FM_STATE_OVERRIDE="$WAIT_DIR/state" . "$ROOT/bin/fm-wake-lib.sh"
+  printf 'sess\tops\tdesign\tOperator design\t1\n' > "$WAIT_DIR/state/watched-panes"
+  FM_WATCHED_PANES_IDENTITY=$(fm_watch_pane_registry_identity "$WAIT_DIR/state")
   cat > "$WAIT_DIR/reader" <<'SH'
 #!/usr/bin/env bash
 printf '%s\n' "$*" > "$FM_WATCH_TEST_ARGS"

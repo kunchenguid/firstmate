@@ -249,6 +249,34 @@ event_wait_or_sleep
 [ "$(wc -l < "$WAKE_LOG")" -gt "$N" ] || fail "working must rearm watches"
 pass "watch reasons reach the durable wake queue, dedupe blocked/done, rearm on working and poll without push"
 
+(
+  fm_backend_herdr_resolve_watched_pane() {
+    if [ "$3:$MODE" = slow:identity ]; then command sleep 12; fi
+    printf '%s:%s' "$1" "$3"
+  }
+  fm_backend_herdr_agent_status_raw() {
+    if [ "$2:$MODE" = slow:status ]; then command sleep 12; fi
+    printf blocked
+  }
+  fm_backend_events_capable() { return 1; }
+  FM_WATCHED_PANE_READ_SECS=1
+  for MODE in identity status; do
+    reset_state
+    printf 'default\tops\tfast\tFast\t0\ndefault\tops\tslow\tSlow\t0\n' > "$STATE_DIR/watched-panes"
+    SECONDS=0
+    event_wait_or_sleep
+    [ "$SECONDS" -lt 8 ] || fail "later $MODE read exceeded the probe budget"
+    assert_contains "$(cat "$WAKE_LOG")" 'watched pane Fast' "later $MODE read discarded an earlier result"
+    assert_not_contains "$(cat "$WAKE_LOG")" 'watched pane Slow' "unfinished $MODE row emitted a result"
+    [ -n "$(fm_watch_pane_lookup default:fast)" ] || fail "earlier row missing from subscription snapshot"
+    MODE=recovered
+    event_wait_or_sleep
+    assert_contains "$(cat "$WAKE_LOG")" 'watched pane Slow' "unfinished row was not retried next cycle"
+    [ "$(wc -l < "$WAKE_LOG" | tr -d ' ')" = 2 ] || fail "retry duplicated the earlier wake"
+  done
+) || fail "incremental watched probe contracts"
+pass "later identity/status timeouts preserve earlier rows and retry unfinished rows"
+
 # --- event_wait_or_sleep: watched-pane reads run waited and bounded ---------
 # A hung per-cycle read must not stall the cycle or sit outside the recorded
 # child group: the probe goes through watcher_waited and dies at its read

@@ -4045,8 +4045,16 @@ fm_backend_herdr_escalation_marker() {  # <state_dir> <window>
 }
 
 fm_backend_herdr_apply_transition() {  # <state_dir> <session> <record>
-  fm_transition_apply "$1" "$FM_BACKEND_HERDR_ESCALATED_PREFIX" "$2" "$3" \
-    "$(fm_watch_pane_context "$2:$(fm_transition_pane_id "$3")")"
+  local context rc
+  context=$(fm_watch_pane_context "$2:$(fm_transition_pane_id "$3")")
+  if [ "$context" != task ]; then
+    fm_watch_pane_lock_current "$1" || return 1
+    rc=0
+    fm_transition_apply "$1" "$FM_BACKEND_HERDR_ESCALATED_PREFIX" "$2" "$3" "$context" || rc=$?
+    fm_lock_release "$1/.watched-panes.lock"
+    return "$rc"
+  fi
+  fm_transition_apply "$1" "$FM_BACKEND_HERDR_ESCALATED_PREFIX" "$2" "$3" "$context"
 }
 
 fm_backend_herdr_commit_transition() {  # <state_dir> <session> <record>

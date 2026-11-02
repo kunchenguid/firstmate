@@ -33,8 +33,8 @@ fm_watch_pane_context() {  # <target> -> policy context
 
 # Resolve afresh each cycle; metadata always wins, including secondmates and
 # endpoints owned by a different backend. No endpoint namespace discovery.
-fm_watch_pane_resolve() {  # <state_dir> -> resolved snapshot
-  local state=$1 session workspace tab label notify target seen='|'
+fm_watch_pane_probe() {  # <state_dir>
+  local state=$1 session workspace tab label notify target status seen='|'
   fm_watch_pane_validate "$state/watched-panes" || {
     echo 'error: invalid watched-pane registry' >&2
     return 1
@@ -46,27 +46,27 @@ fm_watch_pane_resolve() {  # <state_dir> -> resolved snapshot
     [ -z "$(fm_backend_meta_for_window "$target" "$state" 2>/dev/null)" ] || continue
     case "$seen" in *"|$target|"*) continue ;; esac
     seen="$seen$target|"
-    printf '%s\t%s\t%s\n' "$target" "$label" "$notify"
+    status=$(fm_backend_herdr_agent_status_raw "${target%%:*}" "${target#*:}") || status=
+    printf '%s\t%s\t%s\t%s\n' "$target" "$label" "$notify" "$status"
   done < "$state/watched-panes"
 }
 
-# The per-cycle read the watcher runs through its waited, bounded group: the
-# resolved snapshot joined with one live agent-status read per pane, printed as
-#   <target>\t<label>\t<notify_done>\t<agent_status>
-# A pane whose read fails keeps an empty status so the caller can skip just
-# that row and retry it next cycle.
-fm_watch_pane_probe() {  # <state_dir>
-  local state=$1 rows target label notify status
-  rows=$(fm_watch_pane_resolve "$state") || return 1
-  [ -n "$rows" ] || return 0
-  fm_backend_source herdr || return 1
-  while IFS=$'\t' read -r target label notify || [ -n "$target" ]; do
-    [ -n "$target" ] || continue
-    status=$(fm_backend_herdr_agent_status_raw "${target%%:*}" "${target#*:}")
-    printf '%s\t%s\t%s\t%s\n' "$target" "$label" "$notify" "$status"
-  done <<EOF
-$rows
-EOF
+fm_watch_pane_registry_identity() {
+  if [ "$(uname)" = Darwin ]; then
+    /usr/bin/stat -f '%d:%i:%FB' "$1/watched-panes" 2>/dev/null
+  else
+    stat -c '%d:%i:%w' "$1/watched-panes" 2>/dev/null
+  fi
+}
+
+fm_watch_pane_lock_current() {
+  local state=$1 identity
+  [ -n "${FM_WATCHED_PANES_IDENTITY:-}" ] || return 1
+  fm_lock_try_acquire "$state/.watched-panes.lock" || return 1
+  identity=$(fm_watch_pane_registry_identity "$state") || identity=
+  [ "$identity" != "$FM_WATCHED_PANES_IDENTITY" ] || return 0
+  fm_lock_release "$state/.watched-panes.lock"
+  return 1
 }
 
 # Retire the watch-owned escalation marker of a registration's pane after its

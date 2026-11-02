@@ -3447,6 +3447,7 @@ event_wait_or_sleep() {
   # (FM_WATCHED_PANE_READ_SECS). Rows a killed or failed probe never reached
   # are simply retried on the next cycle.
   FM_WATCHED_PANES=
+  FM_WATCHED_PANES_IDENTITY=$(fm_watch_pane_registry_identity "$STATE") || FM_WATCHED_PANES_IDENTITY=
   WATCHER_WAIT_BOUND_SECS=$FM_WATCHED_PANE_READ_SECS \
     watcher_waited fm_watch_pane_probe "$STATE" || true
   probe=$WATCHER_CAPTURE
