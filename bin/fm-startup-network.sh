@@ -150,21 +150,24 @@
 #
 # RETAINED RESULTS ARE BOUNDED. A session start reserves a new generation, so
 # without a bound a long-lived home would keep one report directory per start
-# forever. prune_results() runs under the publication lock at each new
-# reservation, and it removes only what nothing can still act on: never the
-# current shared-status generation, never a generation named by a queued
-# startup-network wake row, and never one of the newest RESULT_KEEP_UNSETTLED
-# unsettled generations, which is the grace window for a run that died before
-# settling. Everything else is settled or fenced by a successor, so its
-# directory and wake receipt are removed - but only once it is a complete
-# completion record carrying the state, finished, rc, report_published, and
-# matching generation its readers consume, so an incomplete or hand-written
-# directory is declined rather than deleted. The validated receipt goes first,
-# so an interrupted pass leaves a retryable directory rather than an orphan
-# receipt no later pass enumerates, and a symlinked receipt root declines the
-# receipt step entirely. The shared report and timings files remain the
-# operator's read path for the last run; `prune` exposes the same pass to an
-# operator and to the tests.
+# forever. The detached worker runs prune_results() under the publication lock
+# once it has made or verified that reservation - never the session-start
+# caller, so the digest never waits for the scan. It removes only what nothing
+# can still act on: never the current shared-status generation, never a
+# generation named by a queued startup-network wake row, and never one of the
+# newest RESULT_KEEP_UNSETTLED unsettled generations, which is the grace window
+# for a run that died before settling. Everything else is settled or fenced by a
+# successor, so its directory and wake receipt are removed - but only once it is
+# a complete completion record carrying the state, finished, rc,
+# report_published, and matching generation its readers consume, so an
+# incomplete or hand-written directory is declined rather than deleted. The
+# validated receipt goes first, so an interrupted pass leaves a retryable
+# directory rather than an orphan receipt no later pass enumerates, and a
+# symlinked receipt root declines the receipt step entirely. One pass reads the
+# queued generation keys once and examines at most RESULT_PRUNE_MAX entries, so
+# cleanup cost stays flat however many exceptions a home accumulates. The shared
+# report and timings files remain the operator's read path for the last run;
+# `prune` exposes the same pass to an operator and to the tests.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -184,6 +187,11 @@ PUBLISH_LOCK="$STATE/.startup-network.lock"
 # Settled and superseded generations are not retained once they are complete
 # completion records; see prune_results().
 RESULT_KEEP_UNSETTLED=3
+
+# Entries one retention pass may examine. The pass runs on the detached worker's
+# own time, and a home whose retained state keeps hitting an exception must not
+# grow the pass without bound; leftovers are picked up by the next pass.
+RESULT_PRUNE_MAX=64
 
 # shellcheck source=bin/fm-timeout-lib.sh
 . "$SCRIPT_DIR/fm-timeout-lib.sh"
@@ -329,10 +337,6 @@ EOF
     fm_lock_release "$PUBLISH_LOCK"
     return 1
   fi
-  # The reservation just superseded every earlier generation, so this is the
-  # natural rotation point: drop the retained results and receipts that are
-  # settled or fenced, keeping the new generation and anything still queued.
-  prune_results
 
   # Detached three ways, each closing a different failure:
   #   - stdio to /dev/null, because the digest's stdout is a pipe the harness
@@ -450,29 +454,35 @@ settle_result() { # <generation> <reason>
 
 # A queued startup wake row is the delivery obligation for its generation; it is
 # retired only by the acknowledgement that writes the generation's receipt.
-result_queued() { # <generation>
-  local queue="$STATE/.wake-queue"
-  [ -f "$queue" ] && [ ! -L "$queue" ] || return 1
-  awk -F '\t' -v key="startup-network:$1" \
-    'NF == 5 && $3 == "check" && $4 == key { found=1; exit } END { exit !found }' "$queue"
-}
+# Read once per pass, and only by the caller that needs it, because this scan
+# sits on the detached worker's path and must not grow with the queue.
 
 # Bounds the per-generation retained state a long-lived home accumulates.
 # Deletes only what nothing can still act on - never the current generation,
 # never a queued one, never the newest RESULT_KEEP_UNSETTLED unsettled ones -
 # and only entries it can positively identify, so malformed, incomplete, or
 # symlinked records are left alone rather than followed or guessed at.
+# Costs at most RESULT_PRUNE_MAX examined entries and one read of the wake
+# queue, so a home that accumulates exceptions cannot turn cleanup into its own
+# startup tax; whatever is left over is picked up by the next pass.
 # The caller owns the publication lock; cleanup failure never fails a run.
 prune_results() {
   local root="$STATE/.startup-network-results" receipts="$STATE/.startup-network-wake-receipts"
-  local current gen entry receipt field value kept_unsettled=0
+  local queue="$STATE/.wake-queue"
+  local current queued='' gen entry receipt field value kept_unsettled=0 examined=0
   [ -d "$root" ] && [ ! -L "$root" ] || return 0
   current=$(status_get generation)
+  if [ -f "$queue" ] && [ ! -L "$queue" ]; then
+    queued=$(awk -F '\t' 'NF == 5 && $3 == "check" && $4 ~ /^startup-network:/ \
+      { sub(/^startup-network:/, "", $4); print $4 }' "$queue" 2>/dev/null || true)
+  fi
   # Newest first. Generation names are <epoch>.<pid>.<harvest-pid>, so the epoch
   # component orders them the same way the runs happened. A glob is read here
   # rather than ls, so odd entries survive to be declined by name validation.
   while IFS= read -r gen; do
     [ -n "$gen" ] || continue
+    [ "$examined" -lt "$RESULT_PRUNE_MAX" ] || break
+    examined=$((examined + 1))
     fm_startup_generation_valid "$gen" || continue
     entry=$(fm_startup_result_path "$STATE" "$gen") || continue
     case "$(fm_startup_field "$entry/status" state)" in done|failed|refused|timeout) ;; *) continue ;; esac
@@ -483,7 +493,7 @@ prune_results() {
     done
     case "$value" in ''|*[!0-9]*) continue ;; esac
     [ "$gen" = "$current" ] && continue
-    result_queued "$gen" && continue
+    case $'\n'"$queued"$'\n' in *$'\n'"$gen"$'\n'*) continue ;; esac
     if ! fm_startup_result_settled "$STATE" "$gen"; then
       [ "$kept_unsettled" -ge "$RESULT_KEEP_UNSETTLED" ] || {
         kept_unsettled=$((kept_unsettled + 1))
@@ -673,6 +683,10 @@ cmd_run() {  # <locked> <lock-pid> <generation>
     if [ "$(status_get generation)" = "$generation" ] && [ "$(status_get pid)" = "$$" ]; then
       internal=1
       started=$(status_get started)
+      # The worker owns the retention pass, never the session-start caller: this
+      # runs on the detached worker's own time and still under the publication
+      # lock, so the digest that launched it never waits for the scan.
+      prune_results
     fi
     fm_lock_release "$PUBLISH_LOCK"
     [ "$internal" -eq 1 ] || { run_cleanup "$out" "$timings"; return 1; }
@@ -711,6 +725,10 @@ phases=$phases
 generation=$generation
 lock_pid=$lock_pid
 EOF
+    # Same rotation point as the reserved path above, and for the same reason:
+    # this generation is now the current one, so the worker (never the caller)
+    # bounds the older retained results.
+    prune_results
     fm_lock_release "$PUBLISH_LOCK"
   fi
 

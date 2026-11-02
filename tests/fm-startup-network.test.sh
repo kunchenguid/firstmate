@@ -1252,10 +1252,97 @@ test_reserving_a_run_prunes_the_generations_it_retired() {
   [ -n "$generation" ] || fail "the run left no current generation"
   [ -d "$home/state/.startup-network-results/$generation" ] \
     || fail "the run pruned its own retained completion"
-  pass "fm-startup-network: reservation prunes retired generations"
+  pass "fm-startup-network: the worker's reservation prune retires older generations"
 }
 
 test_reserving_a_run_prunes_the_generations_it_retired
+
+# The retention pass must never sit on the session-start path: the digest that
+# launches the stage cannot wait for a scan of whatever a home has accumulated.
+# The worker stub below stands in for the detached run so this isolates `start`.
+test_start_never_scans_retained_results() {
+  local rec home root log generation kept=0 expected=30
+  rec=$(new_world start-does-not-prune)
+  IFS='|' read -r home root log <<< "$rec"
+  rm -f "$root/bin/fm-startup-network.sh"
+  ln -s "$ROOT/bin/fm-startup-network.sh" "$root/bin/fm-startup-network-real.sh"
+  cat > "$root/bin/fm-startup-network.sh" <<'SH'
+#!/usr/bin/env bash
+set -u
+if [ "${1:-}" = run ]; then
+  printf 'run\n' >> "${FM_TEST_WORKER_LOG:?}"
+  exit 0
+fi
+exec bash "${FM_TEST_REAL_STARTUP:?}" "$@"
+SH
+  chmod +x "$root/bin/fm-startup-network.sh"
+  export FM_TEST_WORKER_LOG="$home/worker.log" FM_TEST_REAL_STARTUP="$root/bin/fm-startup-network-real.sh"
+  mkdir -p "$home/state/.startup-network-wake-receipts"
+  for generation in $(seq 1000 1029); do
+    mkdir -p "$home/state/.startup-network-results/$generation.1.1"
+    printf 'generation=%s.1.1\nstate=done\nfinished=1\nrc=0\nreport_published=1\n' "$generation" \
+      > "$home/state/.startup-network-results/$generation.1.1/status"
+    printf 'ACTIONABLE_%s\n' "$generation" \
+      > "$home/state/.startup-network-results/$generation.1.1/report"
+    printf 'clean:%s.1.1\n' "$generation" \
+      > "$home/state/.startup-network-results/$generation.1.1/settled"
+    printf '%s.1.1\n' "$generation" > "$home/state/.startup-network-wake-receipts/$generation.1.1"
+  done
+
+  run_stage "$home" "$root" start --locked 0 --harvest-pid $$ \
+    || fail "start failed against the stubbed worker"
+  # The worker is detached, so start may return before it is scheduled. Wait for
+  # its launch record with a bounded deadline instead of sampling once.
+  local waited=0
+  while [ ! -s "$home/worker.log" ] && [ "$waited" -lt 100 ]; do
+    sleep .1
+    waited=$((waited + 1))
+  done
+  [ -s "$home/worker.log" ] || fail "start never launched the detached worker"
+
+  for generation in $(seq 1000 1029); do
+    [ -d "$home/state/.startup-network-results/$generation.1.1" ] && kept=$((kept + 1))
+  done
+  [ "$kept" -eq "$expected" ] \
+    || fail "start scanned and pruned retained results ($kept of $expected kept)"
+  assert_contains "$(cat "$home/worker.log")" "run" "start did not leave cleanup to the worker"
+  pass "fm-startup-network: the session-start call never scans retained results"
+}
+
+test_start_never_scans_retained_results
+
+# Cleanup is bounded work even when a home keeps accumulating exceptions: one
+# pass examines at most RESULT_PRUNE_MAX entries and the next pass finishes.
+test_the_retention_pass_examines_a_bounded_number_of_entries() {
+  local rec home root log generation budget=64 total=70 remaining
+  rec=$(new_world bounded-pass)
+  IFS='|' read -r home root log <<< "$rec"
+  for generation in $(seq 1000 1069); do
+    mkdir -p "$home/state/.startup-network-results/$generation.1.1"
+    printf 'generation=%s.1.1\nstate=done\nfinished=1\nrc=0\nreport_published=1\n' "$generation" \
+      > "$home/state/.startup-network-results/$generation.1.1/status"
+    printf 'ACTIONABLE_%s\n' "$generation" > "$home/state/.startup-network-results/$generation.1.1/report"
+    printf 'clean:%s.1.1\n' "$generation" \
+      > "$home/state/.startup-network-results/$generation.1.1/settled"
+  done
+  count_results() {
+    local entry count=0
+    for entry in "$home/state/.startup-network-results"/*; do
+      [ -d "$entry" ] && count=$((count + 1))
+    done
+    printf '%s' "$count"
+  }
+  run_stage "$home" "$root" prune || fail "the retention pass failed"
+  remaining=$(count_results)
+  [ "$remaining" -eq "$((total - budget))" ] \
+    || fail "one pass examined $((total - remaining)) entries instead of $budget"
+  run_stage "$home" "$root" prune || fail "the second retention pass failed"
+  remaining=$(count_results)
+  [ "$remaining" -eq 0 ] || fail "a repeated pass left $remaining retired entries"
+  pass "fm-startup-network: the retention pass is bounded per call and resumes on the next"
+}
+
+test_the_retention_pass_examines_a_bounded_number_of_entries
 
 test_running_and_refused_records_have_correct_supervision() {
   local rec home root log worker waited=0 pid
