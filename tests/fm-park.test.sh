@@ -132,6 +132,15 @@ SH
 run_park() {  # <world> <args...>
   local world=$1
   shift
+  if [ "${FM_TEST_EXEC_PARK:-0}" = 1 ]; then
+    exec env \
+      FM_HOME="$world" FM_STATE_OVERRIDE="$world/state" FM_CONFIG_OVERRIDE="$world/config" \
+      FM_PARK_CONTROL_BIN="$world/fakebin/fm-control.sh" \
+      FM_PARK_TEARDOWN_BIN="$world/fakebin/fm-teardown.sh" \
+      FM_PARK_CREW_STATE_BIN="$world/fakebin/fm-crew-state.sh" \
+      FM_PARK_QUIET_SECS="${FM_TEST_QUIET:-900}" \
+      PATH="$world/fakebin:$PATH" "$PARK" "$@"
+  fi
   FM_HOME="$world" FM_STATE_OVERRIDE="$world/state" FM_CONFIG_OVERRIDE="$world/config" \
     FM_PARK_CONTROL_BIN="$world/fakebin/fm-control.sh" \
     FM_PARK_TEARDOWN_BIN="$world/fakebin/fm-teardown.sh" \
@@ -365,6 +374,52 @@ test_park_refuses_when_head_moves_after_the_verdict() {
   pass "a head change between the verdict and the stop refuses the park and leaves the agent running"
 }
 
+test_park_serializes_final_check_with_inbox_delivery() {
+  local w lock pid rc=0 out
+  w=$(make_world park-inbox-lock "$GH_URL")
+  local FM_HOME="$w" FM_STATE_OVERRIDE="$w/state" STATE="$w/state" FM_ROOT="$ROOT"
+  . "$ROOT/bin/fm-task-inbox-lib.sh"
+  gh_fixture "$w/gh.1.json"
+  lock=$(fm_task_inbox_delivery_lock_path "$w/state" lane)
+  fm_lock_acquire_wait "$lock" || fail "inbox-lock: could not hold the task metadata lock"
+  run_park "$w" park lane >"$w/park.out" 2>&1 &
+  pid=$!
+  for _ in $(seq 1 200); do
+    [ "$(cat "$w/gh.count" 2>/dev/null || echo 0)" -ge 2 ] && break
+    sleep 0.05
+  done
+  [ "$(cat "$w/gh.count" 2>/dev/null || echo 0)" -ge 2 ] || fail "inbox-lock: park did not pass its final gate check"
+  mkdir -p "$w/state/lane.inbox"
+  printf 'schema=fm-task-inbox.v1\n--\nnew instruction\n' > "$w/state/lane.inbox/001.msg"
+  fm_lock_release "$lock"
+  wait "$pid" || rc=$?
+  out=$(cat "$w/park.out")
+  case "$rc:$out" in 1:*"steering inbox"*) ;; *) fail "inbox-lock: park did not refuse the newly delivered instruction: $rc $out" ;; esac
+  [ -e "$w/state/lane.inbox/001.msg" ] || fail "inbox-lock: instruction was lost"
+  [ ! -e "$w/control.log" ] || fail "inbox-lock: park stopped the agent: $(cat "$w/control.log")"
+  [ ! -e "$w/state/lane.review-park" ] || fail "inbox-lock: park left a record behind"
+  pass "park holds the inbox delivery lock across its final check and stop, refusing a newly delivered instruction without stopping the agent"
+}
+
+test_park_does_not_hold_metadata_lock_through_control_exit() {
+  local w out
+  w=$(make_world park-control-meta-lock "$GH_URL")
+  gh_fixture "$w/gh.1.json"
+  cat > "$w/fakebin/fm-control.sh" <<SH
+#!/usr/bin/env bash
+. "$ROOT/bin/fm-wake-lib.sh"
+lock=\$(fm_meta_lock_path "$w/state/lane.meta")
+fm_lock_acquire_wait "\$lock" || exit 1
+fm_lock_release "\$lock"
+printf '%s\\n' "\$*" > "$w/control.log"
+SH
+  chmod +x "$w/fakebin/fm-control.sh"
+  out=$(run_park "$w" park lane 2>&1) || fail "control-meta-lock: park failed: $out"
+  case "$out" in "parked lane: PR "*) ;; *) fail "control-meta-lock: unexpected output: $out" ;; esac
+  [ -s "$w/control.log" ] || fail "control-meta-lock: control exit did not run"
+  pass "park leaves the task metadata lock available to fm-control exit"
+}
+
 test_park_refuses_when_the_lane_is_steered_before_the_stop() {
   local w out rc
   w=$(make_world park-steered "$GH_URL")
@@ -392,7 +447,7 @@ kill_park_during_stop() {  # <world>
   local w=$1 pid
   cp "$w/fakebin/fm-control.sh" "$w/fm-control.sh.orig"
   printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$*" >> "%s/control.log"\nsleep 5\n' "$w" > "$w/fakebin/fm-control.sh"
-  TMPDIR="$w" run_park "$w" park lane >/dev/null 2>&1 &
+  TMPDIR="$w" FM_TEST_EXEC_PARK=1 run_park "$w" park lane >/dev/null 2>&1 &
   pid=$!
   for _ in $(seq 1 100); do [ -s "$w/control.log" ] && break; sleep 0.1; done
   [ -s "$w/control.log" ] || fail "interrupted: the stop never started"
@@ -464,9 +519,15 @@ test_failed_park_record_write_leaves_the_agent_running() {
   local w out rc=0
   w=$(make_world park-record-fail "$GH_URL")
   gh_fixture "$w/gh.1.json"
-  printf 'chmod a-w "%s/state"\n' "$w" > "$w/gh.2.sh"
+  cat > "$w/fakebin/mv" <<SH
+#!/usr/bin/env bash
+dest=
+for arg; do dest=\$arg; done
+[ "\$dest" != "$w/state/lane.review-park" ] || exit 1
+exec /bin/mv "\$@"
+SH
+  chmod +x "$w/fakebin/mv"
   out=$(run_park "$w" park lane 2>&1) || rc=$?
-  chmod u+w "$w/state"
   case "$rc:$out" in 1:*"its park record could not be written"*) ;; *) fail "record-fail: $rc $out" ;; esac
   [ ! -e "$w/control.log" ] || fail "record-fail: the agent was stopped: $(cat "$w/control.log")"
   [ ! -e "$w/state/lane.review-park" ] || fail "record-fail: a park record was left behind"
@@ -1015,6 +1076,8 @@ fm_test_run \
   test_park_stops_agent_records_lane_and_leases_slot \
   test_park_refuses_when_head_moves_after_the_verdict \
   test_park_refuses_when_the_lane_is_steered_before_the_stop \
+  test_park_serializes_final_check_with_inbox_delivery \
+  test_park_does_not_hold_metadata_lock_through_control_exit \
   test_interrupted_park_reads_as_parking_and_the_tick_settles_it \
   test_hung_pending_check_ends_within_the_tick \
   test_failed_park_record_write_leaves_the_agent_running \
