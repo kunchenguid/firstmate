@@ -2165,73 +2165,83 @@ test_scout_teardown_stops_and_archives_before_slot_return() {
 }
 
 test_secondmate_teardown_archives_thread_before_home_removal_without_project_delete() {
-  local home data state config id out rc thread=mcp:4e0f2a6b-9d3c-4b5e-af4f-0123456789cd archive_line harness=${1:-claude} journal='' nolsof
+  local home data state config id out rc thread=mcp:4e0f2a6b-9d3c-4b5e-af4f-0123456789cd archive_line harness=${1:-claude} journal='' nolsof scenario
   t3_require_tomllib test_secondmate_teardown_archives_thread_before_home_removal_without_project_delete || return 0
   command -v lsof >/dev/null 2>&1 || { printf 'note: %s skipped: lsof is required to prove a process left the home\n' "${FUNCNAME[0]}"; return 0; }
-  id=$(t3_uid "t3smtdz1-$harness")
-  t3_case "teardown-secondmate-$harness" running
-  t3_world "$(t3_thread_json "$thread" running false)"
-  home="$CASE_DIR/sm-home"; data="$CASE_DIR/data"; state="$CASE_DIR/state"; config="$CONFIG"
-  if [ "$harness" = codex ]; then
-    fm_git_worktree "$CASE_DIR/home-project" "$home" "fm/$id"
-    mkdir "$home/.codex"
-    printf 'model = "gpt-5.6-sol"\n' > "$home/.codex/config.toml"
-    git -C "$home" add .codex/config.toml
-    git -C "$home" -c user.name=t -c user.email=t@example.invalid commit -qm config
-    "$ROOT/bin/fm-t3code-codex-env.sh" install "$home" "FM_HOME=$home" || fail "install secondmate overlay"
-    journal=$(git -C "$home" rev-parse --git-path fm-t3code-codex-env.json)
-  fi
-  mkdir -p "$data" "$state" "$home/state" "$home/data" "$home/config" "$home/projects" "$home/bin" "$home/.claude"
-  printf '%s\n' "$id" > "$home/.fm-secondmate-home"
-  printf '# Firstmate\n' > "$home/AGENTS.md"
-  printf '{"env":{"FM_HOME":"%s"}}\n' "$home" > "$home/.claude/settings.local.json"
-  touch "$state/.last-watcher-beat"
-  fm_write_meta "$state/$id.meta" \
-    "window=fm-$id" "endpoint_task_id=$id" "worktree=$home" "project=$home" \
-    "harness=$harness" "kind=secondmate" "mode=secondmate" "yolo=off" \
-    "backend=t3code" "t3_thread_id=$thread" "t3_project_id=proj-sm" "home=$home"
-  FM_T3_HOME="$home" t3_world_set 'w.probePath = process.env.FM_T3_HOME'
-  # T3 detaches the provider asynchronously after the archive reads back, so a
-  # process rooted in the home can outlive the proven archive.
-  (cd "$home/state" && exec sleep 300) &
-  PROVIDER_PID=$!
-  out=$( PATH="$(fm_test_base_path_sans "$PATH" lsof)" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$CASE_DIR/home" \
-    FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
-    "$ROOT/bin/fm-teardown.sh" "$id" --force 2>&1 )
-  rc=$?
-  [ "$rc" -ne 0 ] || fail "teardown must refuse a T3 secondmate when lsof is unavailable"$'\n'"$out"
-  assert_contains "$out" "lsof is unavailable" "the refusal names the missing lsof"
-  [ -z "$(t3_dispatch_types)" ] || fail "a missing lsof must refuse before the thread is interrupted or archived, got '$(t3_dispatch_types)'"
-  assert_present "$state/$id.meta" "a missing lsof keeps the endpoint record"
-  [ -z "$journal" ] || assert_present "$journal" "a missing lsof keeps the T3 environment the home still runs on"
-  nolsof="$CASE_DIR/nolsof"
-  mkdir -p "$nolsof"
-  printf '#!/usr/bin/env bash\nexit 1\n' > "$nolsof/lsof"
-  chmod +x "$nolsof/lsof"
-  out=$( PATH="$nolsof:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$CASE_DIR/home" \
-    FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
-    "$ROOT/bin/fm-teardown.sh" "$id" --force 2>&1 )
-  rc=$?
-  [ "$rc" -ne 0 ] || fail "teardown must refuse when it cannot prove the home's processes ended"$'\n'"$out"
-  assert_contains "$out" "cannot determine leaked processes" "the refusal names the unproven process scan"
-  assert_present "$home/AGENTS.md" "an unproven shutdown keeps the secondmate home"
-  assert_present "$state/$id.meta" "an unproven shutdown keeps the endpoint record"
-  kill -0 "$PROVIDER_PID" 2>/dev/null || fail "the refused teardown must not have touched the provider"
-  out=$( FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$CASE_DIR/home" \
-    FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
-    "$ROOT/bin/fm-teardown.sh" "$id" --force 2>&1 )
-  rc=$?
-  expect_code 0 "$rc" "t3code secondmate teardown should succeed"$'\n'"$out"
-  ! kill -0 "$PROVIDER_PID" 2>/dev/null || fail "a provider process rooted in the home must be ended before the home is removed"
-  wait "$PROVIDER_PID" 2>/dev/null || true
-  PROVIDER_PID=
-  [ "$(t3_dispatch_types)" = "t3_thread_interrupt t3_thread_organize" ] \
-    || fail "secondmate teardown must interrupt then archive exactly once and never delete the project, got '$(t3_dispatch_types)'"
-  archive_line=$(t3_log_line_of 'r.tool === "t3_thread_organize"')
-  [ "$(t3_request "$archive_line" 'r.probe')" = true ] || fail "the thread must be archived while the home still exists"
-  assert_absent "$home" "teardown should remove the secondmate home"
-  [ -z "$journal" ] || assert_absent "$journal" "secondmate cleanup must retire its tracked Codex overlay before removing the home"
-  assert_absent "$state/$id.meta" "teardown should remove task metadata"
+  # The retirement and the unprovable-scan refusal are separate homes. A refusal
+  # raised once the home's removal evidence is published leaves that evidence
+  # behind, and a retirement retry deliberately refuses to remove a public home
+  # it cannot prove was the generation that evidence names.
+  for scenario in retirement unprovable-scan; do
+    id=$(t3_uid "t3smtdz1-$scenario-$harness")
+    t3_case "teardown-secondmate-$scenario-$harness" running
+    t3_world "$(t3_thread_json "$thread" running false)"
+    home="$CASE_DIR/sm-home"; data="$CASE_DIR/data"; state="$CASE_DIR/state"; config="$CONFIG"
+    journal=''
+    if [ "$harness" = codex ]; then
+      fm_git_worktree "$CASE_DIR/home-project" "$home" "fm/$id"
+      mkdir "$home/.codex"
+      printf 'model = "gpt-5.6-sol"\n' > "$home/.codex/config.toml"
+      git -C "$home" add .codex/config.toml
+      git -C "$home" -c user.name=t -c user.email=t@example.invalid commit -qm config
+      "$ROOT/bin/fm-t3code-codex-env.sh" install "$home" "FM_HOME=$home" || fail "install secondmate overlay"
+      journal=$(git -C "$home" rev-parse --git-path fm-t3code-codex-env.json)
+    fi
+    mkdir -p "$data" "$state" "$home/state" "$home/data" "$home/config" "$home/projects" "$home/bin" "$home/.claude"
+    printf '%s\n' "$id" > "$home/.fm-secondmate-home"
+    printf '# Firstmate\n' > "$home/AGENTS.md"
+    printf '{"env":{"FM_HOME":"%s"}}\n' "$home" > "$home/.claude/settings.local.json"
+    touch "$state/.last-watcher-beat"
+    fm_write_meta "$state/$id.meta" \
+      "window=fm-$id" "endpoint_task_id=$id" "worktree=$home" "project=$home" \
+      "harness=$harness" "kind=secondmate" "mode=secondmate" "yolo=off" \
+      "backend=t3code" "t3_thread_id=$thread" "t3_project_id=proj-sm" "home=$home"
+    FM_T3_HOME="$home" t3_world_set 'w.probePath = process.env.FM_T3_HOME'
+    # T3 detaches the provider asynchronously after the archive reads back, so a
+    # process rooted in the home can outlive the proven archive.
+    (cd "$home/state" && exec sleep 300) &
+    PROVIDER_PID=$!
+    if [ "$scenario" = unprovable-scan ]; then
+      nolsof="$CASE_DIR/nolsof"
+      mkdir -p "$nolsof"
+      printf '#!/usr/bin/env bash\nexit 1\n' > "$nolsof/lsof"
+      chmod +x "$nolsof/lsof"
+      out=$( PATH="$nolsof:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$CASE_DIR/home" \
+        FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
+        "$ROOT/bin/fm-teardown.sh" "$id" --force 2>&1 )
+      rc=$?
+      [ "$rc" -ne 0 ] || fail "teardown must refuse when it cannot prove the home's processes ended"$'\n'"$out"
+      assert_contains "$out" "cannot determine leaked processes" "the refusal names the unproven process scan"
+      assert_present "$home/AGENTS.md" "an unproven shutdown keeps the secondmate home"
+      assert_present "$state/$id.meta" "an unproven shutdown keeps the endpoint record"
+      kill -0 "$PROVIDER_PID" 2>/dev/null || fail "the refused teardown must not have touched the provider"
+      continue
+    fi
+    out=$( PATH="$(fm_test_base_path_sans "$PATH" lsof)" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$CASE_DIR/home" \
+      FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
+      "$ROOT/bin/fm-teardown.sh" "$id" --force 2>&1 )
+    rc=$?
+    [ "$rc" -ne 0 ] || fail "teardown must refuse a T3 secondmate when lsof is unavailable"$'\n'"$out"
+    assert_contains "$out" "lsof is unavailable" "the refusal names the missing lsof"
+    [ -z "$(t3_dispatch_types)" ] || fail "a missing lsof must refuse before the thread is interrupted or archived, got '$(t3_dispatch_types)'"
+    assert_present "$state/$id.meta" "a missing lsof keeps the endpoint record"
+    [ -z "$journal" ] || assert_present "$journal" "a missing lsof keeps the T3 environment the home still runs on"
+    out=$( FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$CASE_DIR/home" \
+      FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
+      "$ROOT/bin/fm-teardown.sh" "$id" --force 2>&1 )
+    rc=$?
+    expect_code 0 "$rc" "t3code secondmate teardown should succeed"$'\n'"$out"
+    ! kill -0 "$PROVIDER_PID" 2>/dev/null || fail "a provider process rooted in the home must be ended before the home is removed"
+    wait "$PROVIDER_PID" 2>/dev/null || true
+    PROVIDER_PID=
+    [ "$(t3_dispatch_types)" = "t3_thread_interrupt t3_thread_organize" ] \
+      || fail "secondmate teardown must interrupt then archive exactly once and never delete the project, got '$(t3_dispatch_types)'"
+    archive_line=$(t3_log_line_of 'r.tool === "t3_thread_organize"')
+    [ "$(t3_request "$archive_line" 'r.probe')" = true ] || fail "the thread must be archived while the home still exists"
+    assert_absent "$home" "teardown should remove the secondmate home"
+    [ -z "$journal" ] || assert_absent "$journal" "secondmate cleanup must retire its tracked Codex overlay before removing the home"
+    assert_absent "$state/$id.meta" "teardown should remove task metadata"
+  done
   pass "fm-teardown.sh backend=t3code secondmate: interrupts and archives, then ends the home's lingering provider process before the home is removed; an unprovable scan keeps the home"
 }
 
