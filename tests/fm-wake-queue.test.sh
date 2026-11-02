@@ -2968,16 +2968,28 @@ case "${1:-}" in
     done
     exit 0 ;;
   list-windows)
-    if [ "${FM_FAKE_WINDOW_GONE:-0}" = 1 ] || { [ -f "$probe.killed" ] && [ ! -f "$probe.spawned" ]; }; then
+    {
       printf 'main\n'
-    else
-      printf 'main\nfm-sm1\n'
-    fi
+      if [ "${FM_FAKE_WINDOW_GONE:-0}" != 1 ] && [ ! -f "$probe.killed" ]; then
+        printf 'fm-sm1\n'
+      fi
+      [ ! -f "$probe.windows" ] || cat "$probe.windows"
+    } | sort -u
     exit 0 ;;
   capture-pane) [ -z "${FM_FAKE_TMUX_CAPTURE:-}" ] || cat "$FM_FAKE_TMUX_CAPTURE"; exit 0 ;;
   new-window)
     printf '%s\n' "$*" >> "$log"
     [ "${FM_TEST_FAIL_NEW_WINDOW:-0}" = 1 ] && exit 1
+    shift
+    name=
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        -n) name=${2:-}; shift 2 ;;
+        *) shift ;;
+      esac
+    done
+    [ -z "$name" ] || printf '%s\n' "$name" >> "$probe.windows"
+    rm -f "$probe.killed"
     : > "$probe.spawned"
     printf '@1\n'
     exit 0 ;;

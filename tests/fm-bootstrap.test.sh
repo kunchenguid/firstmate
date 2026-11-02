@@ -46,7 +46,7 @@ cat > "$FM_COMPACTION_GLOBAL_SETTINGS" <<'JSON'
 JSON
 cat > "$TMP_ROOT/compaction-models.txt" <<'MODELS'
 provider         model                                               context  max-out  thinking  images
-syslog-harness   syslog-auto                                         131.1K   8.2K     no        no
+syslog-harness   syslog-auto                                         131.1K   32.8K    no        no
 MODELS
 
 # Hermetic runtime-backend detection. These cases pin the backend per-home via

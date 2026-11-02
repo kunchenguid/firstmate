@@ -269,6 +269,23 @@ meta_field() {  # <case-dir> <id> <key>
   grep "^$3=" "$1/home/state/$2.meta" | tail -1 | cut -d= -f2-
 }
 
+# run_bootstrap_reconcile <case-dir>: drive the real session-start bootstrap over
+# one fabricated home, which is where the control-relaunch reconciler runs. The
+# reconciler executes before tool detection, so a fake toolchain is unnecessary;
+# FM_COMPACTION_MODELS_CMD is pointed at an empty list so the compaction check
+# stays quiet and fast.
+run_bootstrap_reconcile() {  # <case-dir>
+  local dir=$1
+  mkdir -p "$dir/user-home"
+  env -u HERDR_ENV -u HERDR_PANE_ID -u HERDR_SESSION -u HERDR_SOCKET_PATH \
+    -u HERDR_TAB_ID -u HERDR_WORKSPACE_ID -u TMUX -u TMUX_PANE \
+    PATH="$dir/fakebin:$PATH" FM_HOME="$dir/home" FM_FAKE_DIR="$dir/fake" \
+    FM_BACKEND=tmux HOME="$dir/user-home" CLAUDE_CONFIG_DIR='' \
+    FM_BOOTSTRAP_NETWORK=skip FM_BOOTSTRAP_DETECT_ONLY=0 \
+    FM_COMPACTION_MODELS_CMD='cat /dev/null' \
+    bash "$ROOT/bin/fm-bootstrap.sh" 2>&1
+}
+
 journal_field() {  # <case-dir> <id> <key>
   grep "^$3=" "$1/home/state/$2.control-relaunch" | tail -1 | cut -d= -f2-
 }
@@ -1355,9 +1372,134 @@ test_post_publication_launch_failure_keeps_the_new_record() {
     || fail "a published replacement record must not be rewritten to the prior harness"
   [ -n "$(meta_field "$dir" rl24 control_relaunch_tx)" ] \
     || fail "the published replacement record should identify its relaunch transaction"
-  [ "$(journal_field "$dir" rl24 rollback)" = none-new-record-kept ] \
-    || fail "the journal should record that the published replacement record was kept"
-  pass "fm-control relaunch: post-publication failure keeps the new durable record"
+  [ "$(journal_field "$dir" rl24 rollback)" = new-record-kept-agent-alive ] \
+    || fail "the journal should record that the live endpoint kept the published replacement record"
+  pass "fm-control relaunch: post-publication failure keeps the new durable record when the agent is alive"
+}
+
+test_post_publication_launch_failure_restores_the_prior_record_when_no_agent() {
+  local dir out rc before
+  dir=$(new_case published-dead rl31)
+  add_ship_task "$dir" rl31 claude
+  before=$(cat "$dir/home/state/rl31.meta")
+  # The replacement record is published, but the endpoint only ever reports a
+  # bare shell, so keeping that record would point the control plane at an
+  # address where no agent runs. The saved-aside prior record must come back
+  # byte-exact.
+  printf 'zsh' > "$dir/fake/becomes"
+  out=$(FM_FAKE_LAUNCH_TRANSPORT_FAIL_AFTER_START=1 \
+    run_control "$dir" rl31 relaunch --harness codex --note "restore the prior record"); rc=$?
+  expect_code 1 "$rc" "a published-but-dead launch failure should fail closed"$'\n'"$out"
+  [ "$(cat "$dir/home/state/rl31.meta")" = "$before" ] \
+    || fail "a record pointing at a dead endpoint must be replaced by the prior record byte-exact"
+  [ "$(meta_field "$dir" rl31 harness)" = claude ] \
+    || fail "the restored record must name the prior harness"
+  [ "$(journal_field "$dir" rl31 rollback)" = "prior-record-restored-endpoint-dead" ] \
+    || fail "the journal should record the endpoint-based restore, got '$(journal_field "$dir" rl31 rollback)'"
+  assert_contains "$out" "its prior record was restored" \
+    "the failure should say the prior record was restored"
+  pass "fm-control relaunch: a published record pointing at a dead endpoint is replaced by the prior record"
+}
+
+# --- 2b/2c. interrupted-transaction reconciliation --------------------------
+
+test_confirmed_relaunch_refreshes_the_recorded_endpoint_block() {
+  local dir out before_gen after_gen
+  dir=$(new_case endpoint-refresh rl60)
+  add_ship_task "$dir" rl60 claude
+  before_gen=$(meta_field "$dir" rl60 spawn_gen)
+
+  out=$(run_control "$dir" rl60 relaunch --note "refresh the endpoint block") \
+    || fail "the relaunch should succeed: $out"
+
+  [ "$(meta_field "$dir" rl60 window)" = "fmses:fm-rl60" ] \
+    || fail "the record's window must name the live endpoint, got '$(meta_field "$dir" rl60 window)'"
+  after_gen=$(meta_field "$dir" rl60 spawn_gen)
+  [ -n "$after_gen" ] || fail "the relaunch must record a new incarnation token"
+  [ "$after_gen" != "$before_gen" ] \
+    || fail "a confirmed relaunch must refresh the record's endpoint block to the new incarnation"
+  pass "a confirmed relaunch refreshes the record's endpoint block from the live target"
+}
+
+test_session_start_reconciler_restores_an_interrupted_relaunch() {
+  local dir out before
+  dir=$(new_case reconcile-restore rl50)
+  add_ship_task "$dir" rl50 claude
+  cp -p "$dir/home/state/rl50.meta" "$dir/rl50.meta.prior"
+  before=$(cat "$dir/home/state/rl50.meta")
+  # A replacement record was published (harness=codex, its own tx) and the
+  # transaction was then killed at `launching`: no rollback ran, so the record
+  # points at an endpoint where no agent runs.
+  {
+    printf 'window=fmses:fm-rl50\n'
+    printf 'endpoint_task_id=rl50\n'
+    printf 'worktree=%s\n' "$dir/wt"
+    printf 'project=%s\n' "$dir/proj"
+    printf 'harness=codex\n'
+    printf 'kind=ship\n'
+    printf 'mode=no-mistakes\n'
+    printf 'yolo=off\n'
+    printf 'tasktmp=/tmp/fm-rl50\n'
+    printf 'model=default\n'
+    printf 'effort=default\n'
+    printf 'control_relaunch_tx=tx50\n'
+  } > "$dir/home/state/rl50.meta"
+  {
+    printf 'v1\n'
+    printf 'task=rl50\n'
+    printf 'phase=launching\n'
+    printf 'relaunch_tx=tx50\n'
+  } > "$dir/home/state/rl50.control-relaunch"
+  cp -p "$dir/rl50.meta.prior" "$dir/home/state/rl50.control-relaunch.meta-prior"
+  printf 'zsh' > "$dir/fake/command"
+
+  out=$(run_bootstrap_reconcile "$dir")
+
+  assert_contains "$out" "CONTROL_RELAUNCH_RECONCILE: rl50: restored the prior record" \
+    "an interrupted relaunch with no live agent must restore the prior record"
+  [ "$(cat "$dir/home/state/rl50.meta")" = "$before" ] \
+    || fail "the reconciler must restore the prior record byte-exact"
+  [ "$(meta_field "$dir" rl50 harness)" = claude ] \
+    || fail "the restored record must name the prior harness"
+  pass "session-start reconciler: an interrupted relaunch at a dead endpoint restores the prior record"
+}
+
+test_session_start_reconciler_keeps_the_new_record_when_the_agent_is_alive() {
+  local dir out before
+  dir=$(new_case reconcile-alive rl51)
+  add_ship_task "$dir" rl51 claude
+  cp -p "$dir/home/state/rl51.meta" "$dir/rl51.meta.prior"
+  before=$(cat "$dir/home/state/rl51.meta")
+  {
+    printf 'window=fmses:fm-rl51\n'
+    printf 'endpoint_task_id=rl51\n'
+    printf 'worktree=%s\n' "$dir/wt"
+    printf 'project=%s\n' "$dir/proj"
+    printf 'harness=codex\n'
+    printf 'kind=ship\n'
+    printf 'mode=no-mistakes\n'
+    printf 'yolo=off\n'
+    printf 'tasktmp=/tmp/fm-rl51\n'
+    printf 'model=default\n'
+    printf 'effort=default\n'
+    printf 'control_relaunch_tx=tx51\n'
+  } > "$dir/home/state/rl51.meta"
+  {
+    printf 'v1\n'
+    printf 'task=rl51\n'
+    printf 'phase=launching\n'
+    printf 'relaunch_tx=tx51\n'
+  } > "$dir/home/state/rl51.control-relaunch"
+  cp -p "$dir/rl51.meta.prior" "$dir/home/state/rl51.control-relaunch.meta-prior"
+  printf 'claude' > "$dir/fake/command"
+
+  out=$(run_bootstrap_reconcile "$dir")
+
+  assert_contains "$out" "CONTROL_RELAUNCH_RECONCILE: rl51: interrupted relaunch at launching; new record kept, agent alive" \
+    "an interrupted relaunch whose endpoint is alive must keep the published record"
+  [ "$(meta_field "$dir" rl51 harness)" = codex ] \
+    || fail "a live endpoint must keep its published replacement record"
+  pass "session-start reconciler: an interrupted relaunch at a live endpoint keeps the new record"
 }
 
 test_stop_transport_failure_reconciles_a_dead_agent() {
@@ -2426,6 +2568,10 @@ test_checkpoint_refuses_uninspectable_head_and_status
 test_launch_failure_keeps_the_prior_record_and_reports_it
 test_prepublication_failure_keeps_concurrent_durable_metadata
 test_post_publication_launch_failure_keeps_the_new_record
+test_post_publication_launch_failure_restores_the_prior_record_when_no_agent
+test_session_start_reconciler_restores_an_interrupted_relaunch
+test_session_start_reconciler_keeps_the_new_record_when_the_agent_is_alive
+test_confirmed_relaunch_refreshes_the_recorded_endpoint_block
 test_stop_transport_failure_reconciles_a_dead_agent
 test_complete_journal_failure_rolls_back_from_durable_phase
 test_prepublication_abort_retires_replacement_wiring_and_busy_state

@@ -23,7 +23,9 @@
 #                 "SECONDMATE_SYNC: secondmate <id>: skipped: <reason>",
 #                 "NUDGE_SECONDMATES: secondmate <id>: send failed: <reason>",
 #                 "BOOTSTRAP_INFO: nudged fm-<id> with '<message>'",
-#                 "SECONDMATE_LIVENESS: secondmate <id>: skipped: <reason>|respawn failed after <cause>: <reason>",
+#                 "SECONDMATE_ENDPOINT_DRIFT: <id>: <message>",
+#                 "SECONDMATE_LIVENESS: secondmate <id>: skipped: <reason>|respawn failed after <cause>: <reason>|respawn unconfirmed: <reason>",
+#                 "CONTROL_RELAUNCH_RECONCILE: <id>: <message>",
 #                 "SECONDMATE_HANDOFF: secondmate <id>: pending delivery: <n> item(s)",
 #                 "FMX: X mode on ..." or "FMX: X mode off ...".
 #          When a RUNNING secondmate home is fast-forwarded, its target is
@@ -110,8 +112,8 @@
 #          The `code-root <file>` variant is a detect-only local check that runs
 #          even in a read-only session; detect_code_root_backlog_fork owns what
 #          it reports.
-#          Set FM_BOOTSTRAP_DETECT_ONLY=1 to skip the six MUTATING sweeps
-#          (backlog_record_reconcile, secondmate_sync,
+#          Set FM_BOOTSTRAP_DETECT_ONLY=1 to skip the MUTATING sweeps
+#          (backlog_record_reconcile, control_relaunch_reconcile, secondmate_sync,
 #          secondmate_liveness_sweep, secondmate_handoff_resume, x_mode_setup,
 #          fleet_sync) while still
 #          printing every read-only detect line
@@ -121,7 +123,7 @@
 #          the fleet lock, so a second concurrent session never race-mutates
 #          secondmate homes, pending handoff outboxes and receiver wakes,
 #          X-mode artifacts, project clones, or repair instructions.
-#          Unset/0 (the default) runs all six sweeps - this flag is purely
+#          Unset/0 (the default) runs every mutating sweep - this flag is purely
 #          additive.
 #          Set FM_BOOTSTRAP_NETWORK to split this run by whether a step talks to
 #          the network, so a session start can print its digest from local reads
@@ -760,6 +762,14 @@ secondmate_liveness_one() {  # <meta> <id>
     echo "SECONDMATE_LIVENESS: secondmate $id: skipped: another liveness check is already in progress"
     return 0
   fi
+  # A record whose endpoint block does not name the pane it claims would feed a
+  # stale address to the worker's own self-check; report the drift once and do
+  # not probe, kill, or relaunch against it.
+  if ! fm_secondmate_endpoint_drift "$meta" "$id"; then
+    echo "SECONDMATE_ENDPOINT_DRIFT: $id: $FM_SM_LIVE_DRIFT"
+    fm_secondmate_liveness_unlock "$id"
+    return 0
+  fi
   fm_secondmate_liveness_probe "$meta" "$id" full
   case "$FM_SM_LIVE_STATUS" in
     silent)
@@ -771,6 +781,8 @@ secondmate_liveness_one() {  # <meta> <id>
       if fm_secondmate_liveness_relaunch "$meta" "$id"; then
         secondmate_note_respawned "$id"
         report_relaunch "$id" "$FM_SM_LIVE_CAUSE" "$FM_SM_LIVE_WHERE"
+      elif [ "$FM_SM_LIVE_STATUS" = unconfirmed ]; then
+        echo "SECONDMATE_LIVENESS: secondmate $id: respawn unconfirmed: $FM_SM_LIVE_REASON"
       elif [ "$FM_SM_LIVE_STATUS" = skipped ]; then
         echo "SECONDMATE_LIVENESS: secondmate $id: skipped: $FM_SM_LIVE_REASON"
       else
@@ -1316,6 +1328,77 @@ backlog_record_reconcile() {
   done
 }
 
+# Reconcile any relaunch transaction that was interrupted before its own
+# rollback could run. bin/fm-control.sh owns the transaction's durable record
+# (state/<id>.control-relaunch) and the byte-exact prior record saved beside it
+# ($META_PRIOR). A process killed at a non-terminal phase leaves both on disk
+# with the task's record pointing at whichever incarnation was last published;
+# this sweep reads the live endpoint and either keeps the published record
+# (the endpoint is positively alive there) or restores the saved-aside prior
+# record byte-exact. It never improvises when the pieces are missing: an
+# unverifiable transaction produces one actionable line and is left alone.
+# `complete` and `failed:*` phases are terminal - the transaction already
+# finished or its rollback already decided - so they are left for teardown.
+control_relaunch_reconcile() {
+  [ -e "$STATE" ] || [ -L "$STATE" ] || return 0
+  # shellcheck source=bin/fm-wake-lib.sh disable=SC1091
+  . "$SCRIPT_DIR/fm-wake-lib.sh"
+  local journal id phase meta prior backend target state journal_tx meta_tx lock tmp
+  for journal in "$STATE"/*.control-relaunch; do
+    [ -e "$journal" ] || [ -L "$journal" ] || continue
+    if [ ! -f "$journal" ] || [ -L "$journal" ]; then
+      echo "CONTROL_RELAUNCH_RECONCILE: $(basename "$journal"): unsafe transaction record; reconcile by hand"
+      continue
+    fi
+    id=$(basename "$journal" .control-relaunch)
+    phase=$(fm_meta_get "$journal" phase)
+    case "$phase" in
+      checkpoint|noted|stopping|exited|launching) ;;
+      *) continue ;;
+    esac
+    meta="$STATE/$id.meta"
+    prior="$journal.meta-prior"
+    if [ ! -f "$meta" ]; then
+      echo "CONTROL_RELAUNCH_RECONCILE: $id: interrupted relaunch at $phase but the task record is missing; reconcile before any further control action"
+      continue
+    fi
+    if [ ! -f "$prior" ]; then
+      echo "CONTROL_RELAUNCH_RECONCILE: $id: interrupted relaunch at $phase and no saved-aside prior record; reconcile $meta before any further control action"
+      continue
+    fi
+    backend=$(fm_backend_of_meta "$meta")
+    target=$(fm_backend_target_of_meta "$meta")
+    state=$(fm_backend_agent_state "$backend" "$target" 2>/dev/null || printf unknown)
+    if [ "$state" = alive ]; then
+      echo "CONTROL_RELAUNCH_RECONCILE: $id: interrupted relaunch at $phase; new record kept, agent alive at $target"
+      continue
+    fi
+    # If the current record belongs to a different transaction than the one the
+    # journal describes, the journal is superseded and the newer record is the
+    # live state: never overwrite it with an older snapshot.
+    journal_tx=$(fm_meta_get "$journal" relaunch_tx)
+    meta_tx=$(fm_meta_get "$meta" control_relaunch_tx)
+    if [ -n "$journal_tx" ] && [ "$meta_tx" != "$journal_tx" ]; then
+      echo "CONTROL_RELAUNCH_RECONCILE: $id: interrupted relaunch at $phase but the current record belongs to a different transaction; leaving it and reconciling by hand"
+      continue
+    fi
+    lock=$(fm_meta_lock_path "$meta") || continue
+    if ! fm_lock_acquire_wait_max "$lock" 5; then
+      echo "CONTROL_RELAUNCH_RECONCILE: $id: could not lock $meta to restore the saved-aside prior record; reconcile by hand"
+      continue
+    fi
+    tmp="$meta.restore.${BASHPID:-$$}"
+    if cp -p "$prior" "$tmp" 2>/dev/null && mv -f "$tmp" "$meta" 2>/dev/null; then
+      fm_lock_release "$lock"
+      echo "CONTROL_RELAUNCH_RECONCILE: $id: restored the prior record after an interrupted relaunch at $phase (endpoint read '$state')"
+    else
+      rm -f "$tmp" 2>/dev/null || true
+      fm_lock_release "$lock"
+      echo "CONTROL_RELAUNCH_RECONCILE: $id: could not restore the prior record after an interrupted relaunch at $phase (endpoint read '$state'); reconcile by hand"
+    fi
+  done
+}
+
 startup_memory_budget_setup() {
   # Primary bootstrap owns default publication. A secondmate is deliberately
   # passive here because its setting must converge from the primary through the
@@ -1408,6 +1491,7 @@ if [ "${FM_BOOTSTRAP_DETECT_ONLY:-0}" != 1 ] && local_phase; then
       exit 1
     fi
   fi
+  control_relaunch_reconcile
 fi
 
 # Local detection: presence, version floors, and configuration. Nothing here

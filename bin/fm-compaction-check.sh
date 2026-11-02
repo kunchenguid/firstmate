@@ -71,9 +71,14 @@
 #
 # VERDICTS AND VISIBILITY
 #   ok        trigger point is above 0% and at or below the limit
-#   unsafe    trigger point is above the limit (reason=trigger-above-limit), or
+#   unsafe    trigger point is above the limit (reason=trigger-above-limit),
 #             the reserve is not below the window at all
-#             (reason=reserve-not-below-window), which compacts every turn
+#             (reason=reserve-not-below-window), which compacts every turn,
+#             the effective reasoning level is set from two conflicting
+#             sources (reason=thinking-level-dual-source), the model's output
+#             ceiling is below the fleet floor
+#             (reason=output-budget-below-ceiling), or that ceiling exceeds
+#             the reserve (reason=output-budget-exceeds-reserve)
 #   skipped   no verdict is needed here: a non-pi harness, no pi installed, or a
 #             scope whose effective compaction.enabled is false, which pi
 #             short-circuits before the reserve is ever consulted
@@ -100,6 +105,13 @@
 #   FM_COMPACTION_MODELS_ATTEMPTS   default 3; how many times the model list may
 #                                   be read while a scope is unresolved
 #   FM_COMPACTION_MAX_TRIGGER_PERCENT  default 60
+#   FM_COMPACTION_MIN_OUTPUT_TOKENS  default 32768; the minimum model output
+#                                   (max-out) ceiling a resolved scope may
+#                                   report without an unsafe verdict
+#
+# Each emitted line also names the scope's effective reasoning level and the
+# file that set it, so a per-home override of defaultThinkingLevel is visible
+# rather than silent, and two conflicting sources are reported as unsafe.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -108,6 +120,7 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 
 DEFAULT_MAX_TRIGGER_PERCENT=60
 DEFAULT_MODELS_ATTEMPTS=3
+DEFAULT_MIN_OUTPUT_TOKENS=32768
 PI_DEFAULT_RESERVE_TOKENS=16384
 # pi's own DEFAULT_COMPACTION_SETTINGS is
 # {enabled: true, reserveTokens: 16384, keepRecentTokens: 20000}, read from
@@ -158,6 +171,16 @@ case "$MODELS_ATTEMPTS" in
 esac
 [ "$MODELS_ATTEMPTS" -ge 1 ] || die_usage "FM_COMPACTION_MODELS_ATTEMPTS must be a positive integer"
 
+# MLX/syslog local models were raised to a 32768-token output ceiling on
+# 2026-10-09; a smaller ceiling leaves no room for the compaction summary to
+# coexist with a full answer. Applied to every resolved scope as a fleet-wide
+# minimum output budget, and overridable for a deliberate exception.
+MIN_OUTPUT_TOKENS=${FM_COMPACTION_MIN_OUTPUT_TOKENS:-$DEFAULT_MIN_OUTPUT_TOKENS}
+case "$MIN_OUTPUT_TOKENS" in
+  ''|*[!0-9]*) die_usage "FM_COMPACTION_MIN_OUTPUT_TOKENS must be a positive integer" ;;
+esac
+[ "$MIN_OUTPUT_TOKENS" -ge 1 ] || die_usage "FM_COMPACTION_MIN_OUTPUT_TOKENS must be a positive integer"
+
 # The primary home whose secondmate registry and harness pin are authoritative.
 # A secondmate home records its parent in .fm-secondmate-parent, so a check run
 # there still audits the whole fleet's primary-owned configuration.
@@ -185,14 +208,19 @@ bump_verdict() {
 }
 
 # print_line <verdict> <name> <cwd> <model> <window> <reserve> <source> [<reason>] [<detail>]
+#   [<thinking-level>] [<thinking-source>]
 # Only `ok` and `skipped` are quiet in diagnostics mode: neither withholds a
 # verdict, while `unsafe` and `error` both do.
 print_line() {
   local verdict=$1 name=$2 cwd=$3 model=$4 window=$5 reserve=$6 source=$7
-  local reason=${8:-} detail=${9:-} suffix=
+  local reason=${8:-} detail=${9:-} thinking=${10:-} thinking_source=${11:-}
+  local suffix='' thinking_field=''
   bump_verdict "$verdict"
   if [ "$MODE" = diagnostics ] && [ "$verdict" != unsafe ] && [ "$verdict" != error ]; then
     return 0
+  fi
+  if [ -n "$thinking" ]; then
+    thinking_field=" thinking=$thinking thinkingSource=${thinking_source:-builtin-pi-default}"
   fi
   if [ -n "$reason" ]; then
     suffix=" reason=$reason"
@@ -200,8 +228,8 @@ print_line() {
   if [ -n "$detail" ]; then
     suffix="$suffix ($detail)"
   fi
-  printf 'COMPACTION: %s session=%s cwd=%s model=%s window=%s reserveTokens=%s source=%s%s\n' \
-    "$verdict" "$name" "$cwd" "$model" "$window" "$reserve" "$source" "$suffix"
+  printf 'COMPACTION: %s session=%s cwd=%s model=%s window=%s reserveTokens=%s source=%s%s%s\n' \
+    "$verdict" "$name" "$cwd" "$model" "$window" "$reserve" "$source" "$thinking_field" "$suffix"
 }
 
 # --- model list -------------------------------------------------------------
@@ -246,7 +274,7 @@ one_model_read() {
     NR == 1 && $1 == "provider" { next }
     NF >= 3 && $1 ~ /[^[:space:]]/ {
       tokens = to_tokens($3)
-      if (tokens > 0) printf "%s|%s|%d|%s\n", $1, $2, tokens, $3
+      if (tokens > 0) printf "%s|%s|%d|%s|%d|%s\n", $1, $2, tokens, $3, to_tokens($4), $4
     }
   ')
   if [ -z "$table" ]; then
@@ -266,10 +294,10 @@ build_model_table() {
   MODEL_TABLE=$(printf '%s\n' "$MODEL_ROWS" | awk -F'|' 'NF >= 4 && !seen[$1 "|" $2]++ { print }')
 }
 
-# window_row <provider> <model> -> "tokens|display" when the row exists
+# window_row <provider> <model> -> "tokens|display|max-out|max-out-display" when the row exists
 window_row() {
   printf '%s\n' "$MODEL_TABLE" | awk -F'|' -v p="$1" -v m="$2" \
-    '$1 == p && $2 == m { print $3 "|" $4; found = 1 } END { if (!found) exit 1 }'
+    '$1 == p && $2 == m { print $3 "|" $4 "|" $5 "|" $6; found = 1 } END { if (!found) exit 1 }'
 }
 
 # provider_rows <provider> -> any row for that provider ("" when the whole
@@ -278,17 +306,20 @@ provider_rows() {
   printf '%s\n' "$MODEL_TABLE" | awk -F'|' -v p="$1" '$1 == p { print; exit }'
 }
 
-# model_rows <model> -> "provider|tokens|display" for every provider serving it
+# model_rows <model> -> "provider|tokens|display|max-out|max-out-display" for every provider serving it
 model_rows() {
-  printf '%s\n' "$MODEL_TABLE" | awk -F'|' -v m="$1" '$2 == m { print $1 "|" $3 "|" $4 }'
+  printf '%s\n' "$MODEL_TABLE" | awk -F'|' -v m="$1" '$2 == m { print $1 "|" $3 "|" $4 "|" $5 "|" $6 }'
 }
 
-# resolve_window <provider|"-"> <model> -> WINDOW_TOKENS WINDOW_DISPLAY WINDOW_ERROR
+# resolve_window <provider|"-"> <model> -> WINDOW_TOKENS WINDOW_DISPLAY WINDOW_MAXOUT
+#   WINDOW_MAXOUT_DISPLAY WINDOW_ERROR
 resolve_window() {
-  local provider=$1 model=$2 rows count
+  local provider=$1 model=$2 rows count rest
   [ "$provider" != "-" ] || provider=
   WINDOW_TOKENS=
   WINDOW_DISPLAY=
+  WINDOW_MAXOUT=
+  WINDOW_MAXOUT_DISPLAY=
   WINDOW_ERROR=
   if [ -n "$provider" ]; then
     if ! rows=$(window_row "$provider" "$model"); then
@@ -313,7 +344,11 @@ resolve_window() {
       return 1
     fi
     WINDOW_TOKENS=${rows%%|*}
-    WINDOW_DISPLAY=${rows#*|}
+    rest=${rows#*|}
+    WINDOW_DISPLAY=${rest%%|*}
+    rest=${rest#*|}
+    WINDOW_MAXOUT=${rest%%|*}
+    WINDOW_MAXOUT_DISPLAY=${rest#*|}
     return 0
   fi
   rows=$(model_rows "$model")
@@ -328,6 +363,8 @@ resolve_window() {
   fi
   WINDOW_TOKENS=$(printf '%s\n' "$rows" | cut -d'|' -f2)
   WINDOW_DISPLAY=$(printf '%s\n' "$rows" | cut -d'|' -f3)
+  WINDOW_MAXOUT=$(printf '%s\n' "$rows" | cut -d'|' -f4)
+  WINDOW_MAXOUT_DISPLAY=$(printf '%s\n' "$rows" | cut -d'|' -f5)
   return 0
 }
 
@@ -442,6 +479,46 @@ effective_enabled() {
       ;;
   esac
   return 0
+}
+
+# resolve_thinking_level -> THINKING_LEVEL THINKING_SOURCE THINKING_CONFLICT
+#
+# The effective defaultThinkingLevel for the loaded settings pair: the project
+# value when the file sets it, else the global value, else `unset` (pi's own
+# built-in default, which firstmate does not own and cannot name). The value and
+# its source are reported on every scope line so a lane's reasoning budget is
+# explicit rather than silently inherited.
+#
+# THINKING_CONFLICT is non-empty when BOTH files set the key to different
+# values: two sources for one lane's reasoning budget is exactly the unexplained
+# per-home override this check exists to surface. It does not change the value -
+# choosing the single source is the captain's call - it only makes the
+# disagreement loud.
+resolve_thinking_level() {
+  local has_project has_global global_value
+  THINKING_LEVEL=
+  THINKING_SOURCE=
+  THINKING_CONFLICT=
+  has_project=$(printf '%s' "$PROJECT_JSON" | jq -r 'if has("defaultThinkingLevel") then true else false end' 2>/dev/null || printf 'false')
+  has_global=$(printf '%s' "$GLOBAL_JSON" | jq -r 'if has("defaultThinkingLevel") then true else false end' 2>/dev/null || printf 'false')
+  if [ "$has_project" = true ]; then
+    THINKING_LEVEL=$(printf '%s' "$PROJECT_JSON" | jq -r '.defaultThinkingLevel // empty' 2>/dev/null || true)
+    THINKING_SOURCE=$PROJECT_SETTINGS_PATH
+  fi
+  if [ "$has_global" = true ]; then
+    global_value=$(printf '%s' "$GLOBAL_JSON" | jq -r '.defaultThinkingLevel // empty' 2>/dev/null || true)
+    if [ -z "$THINKING_LEVEL" ]; then
+      THINKING_LEVEL=$global_value
+      THINKING_SOURCE=$GLOBAL_SETTINGS
+    fi
+    if [ "$has_project" = true ] && [ "$THINKING_LEVEL" != "$global_value" ]; then
+      THINKING_CONFLICT="project=$THINKING_LEVEL global=$global_value"
+    fi
+  fi
+  if [ -z "$THINKING_LEVEL" ]; then
+    THINKING_LEVEL='unset'
+    THINKING_SOURCE=builtin-pi-default
+  fi
 }
 
 # --- scope table ------------------------------------------------------------
@@ -620,7 +697,8 @@ trigger_percent() {
 emit_scopes() {
   local rec
   local name cwd provider model model_source reserve reserve_source error_reason
-  local reserve_error w_tokens w_display w_error model_display percent verdict reason
+  local reserve_error w_tokens w_display w_error model_display percent verdict reason detail
+  local maxout maxout_display
   while IFS=$'\t' read -r name cwd provider model model_source reserve reserve_source \
     error_reason reserve_error w_tokens w_display w_error; do
     [ -n "$name" ] || continue
@@ -629,38 +707,71 @@ emit_scopes() {
     else
       model_display="$provider/$model"
     fi
+    # Resolve the effective reasoning level and the model's output ceiling for
+    # this scope. Both are reported on every line so an inherited budget is
+    # visible rather than silent, and the output ceiling is judged below.
+    load_settings_pair "$cwd" >/dev/null 2>&1 || true
+    resolve_thinking_level
+    maxout=
+    maxout_display=
+    if [ "$model" != - ]; then
+      if resolve_window "$provider" "$model"; then
+        maxout=$WINDOW_MAXOUT
+        maxout_display=$WINDOW_MAXOUT_DISPLAY
+      fi
+    fi
     if [ "$error_reason" = harness-not-pi ]; then
-      print_line skipped "$name" "$cwd" - - - "$model_source" harness-not-pi
+      print_line skipped "$name" "$cwd" - - - "$model_source" harness-not-pi "" "$THINKING_LEVEL" "$THINKING_SOURCE"
       continue
     fi
     if [ "$error_reason" = compaction-disabled ]; then
-      print_line skipped "$name" "$cwd" "$model_display" - - "$model_source" compaction-disabled
+      print_line skipped "$name" "$cwd" "$model_display" - - "$model_source" compaction-disabled "" "$THINKING_LEVEL" "$THINKING_SOURCE"
       continue
     fi
     if [ "$error_reason" != - ]; then
-      print_line error "$name" "$cwd" "$model_display" - - "$model_source" "$error_reason"
+      print_line error "$name" "$cwd" "$model_display" - - "$model_source" "$error_reason" "" "$THINKING_LEVEL" "$THINKING_SOURCE"
       continue
     fi
     if [ "$w_error" != - ]; then
-      print_line error "$name" "$cwd" "$model_display" - - "$model_source" "$w_error"
+      print_line error "$name" "$cwd" "$model_display" - - "$model_source" "$w_error" "" "$THINKING_LEVEL" "$THINKING_SOURCE"
       continue
     fi
     if [ "$reserve_error" != - ]; then
-      print_line error "$name" "$cwd" "$model_display" "$w_display" - "$reserve_source" "$reserve_error"
+      print_line error "$name" "$cwd" "$model_display" "$w_display" - "$reserve_source" "$reserve_error" "" "$THINKING_LEVEL" "$THINKING_SOURCE"
       continue
     fi
     percent=$(trigger_percent "$w_tokens" "$reserve")
     verdict=ok
     reason=
+    detail="trigger=$percent% limit=$MAX_TRIGGER_PERCENT%"
     if [ "$reserve" -ge "$w_tokens" ]; then
       verdict=unsafe
       reason="reserve-not-below-window"
     elif awk -v p="$percent" -v m="$MAX_TRIGGER_PERCENT" 'BEGIN { exit !(p > m) }'; then
       verdict=unsafe
       reason="trigger-above-limit"
+    elif [ -n "$THINKING_CONFLICT" ]; then
+      # Two files set the reasoning level to different values: the effective
+      # value is real, but its single owner is not. Report it and leave the
+      # choice to the captain.
+      verdict=unsafe
+      reason="thinking-level-dual-source"
+      detail="$THINKING_CONFLICT"
+    elif [ -n "$maxout" ] && [ "$maxout" -gt 0 ] && [ "$maxout" -lt "$MIN_OUTPUT_TOKENS" ]; then
+      # The model's output ceiling is below the local-model floor, so a full
+      # answer cannot coexist with the compaction summary allowance.
+      verdict=unsafe
+      reason="output-budget-below-ceiling"
+      detail="output=${maxout_display:-$maxout} ceiling=$MIN_OUTPUT_TOKENS"
+    elif [ -n "$maxout" ] && [ "$maxout" -gt 0 ] && [ "$maxout" -gt "$reserve" ]; then
+      # The answer budget exceeds the reserve the compaction trigger holds
+      # back, so the reserve cannot actually hold a full answer.
+      verdict=unsafe
+      reason="output-budget-exceeds-reserve"
+      detail="output=$maxout reserve=$reserve"
     fi
     print_line "$verdict" "$name" "$cwd" "$model_display" "$w_display" "$reserve" \
-      "$reserve_source" "$reason" "trigger=$percent% limit=$MAX_TRIGGER_PERCENT%"
+      "$reserve_source" "$reason" "$detail" "$THINKING_LEVEL" "$THINKING_SOURCE"
   done < <(printf '%s' "$SCOPE_TABLE")
 }
 

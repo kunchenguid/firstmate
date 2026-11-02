@@ -755,20 +755,48 @@ relaunch_rollback() {
       esac
       ;;
     exited|launching)
+      local probe_backend probe_target probe_tmp
       if [ "$RELAUNCH_AGENT_CONFIRMED" = 1 ]; then
         journal_write "failed:$RELAUNCH_PHASE" "rollback=none-new-agent-confirmed" || true
         echo "error: $ID's replacement is running on $TARGET_HARNESS, but transaction completion could not be persisted; its published record was retained for reconciliation" >&2
       elif [ "$RELAUNCH_META_PUBLISHED" = 1 ] \
          || { [ -n "$RELAUNCH_TX" ] \
               && [ "$(fm_meta_get "$META" control_relaunch_tx)" = "$RELAUNCH_TX" ]; }; then
-        # The launch owner published the new incarnation's record. Leaving it
-        # in place is the honest state: the task is now recorded on the new
-        # harness with no agent confirmed, which is exactly what recovery
-        # reconciles. Rewriting it back to the old harness would be a second,
-        # worse inaccuracy.
-        journal_write "failed:$RELAUNCH_PHASE" "rollback=none-new-record-kept" || true
-        echo "error: $ID was relaunched on $TARGET_HARNESS but no running agent could be confirmed; its work is preserved at $WT" >&2
+        # A replacement record was published, but the agent could not be
+        # confirmed. Which record to keep is a property of the endpoint, not of
+        # the publication flag: a new record pointing at an endpoint with no
+        # agent running would blind the control plane to a worker still alive
+        # at the old address. Probe the endpoint the task now HAS and choose
+        # from what it answers, restoring the saved-aside prior record
+        # byte-exact when nothing is alive there.
+        probe_backend=$(fm_backend_of_meta "$META")
+        probe_target=$(fm_backend_target_of_meta "$META")
+        [ -n "$probe_target" ] || probe_target=$T
+        state=$(fm_backend_agent_state "$probe_backend" "$probe_target" 2>/dev/null || printf unknown)
+        if [ "$state" = alive ]; then
+          journal_write "failed:$RELAUNCH_PHASE" "rollback=new-record-kept-agent-alive" || true
+          echo "error: $ID's replacement agent is alive at $probe_target, but transaction completion could not be persisted; its published record was retained for reconciliation" >&2
+        elif [ -f "$META_PRIOR" ]; then
+          # Atomic restore (write beside, then rename) so a reader never sees a
+          # half-written record. Byte-exact: the prior record is the durable
+          # state of the worker the endpoint probe could not prove replaced.
+          probe_tmp="$META.restore.${BASHPID:-$$}"
+          if cp -p "$META_PRIOR" "$probe_tmp" 2>/dev/null && mv -f "$probe_tmp" "$META" 2>/dev/null; then
+            journal_write "failed:$RELAUNCH_PHASE" "rollback=prior-record-restored-endpoint-$state" || true
+            echo "error: $ID was relaunched on $TARGET_HARNESS but no running agent could be confirmed (endpoint reads '$state'); its prior record was restored and its work is preserved at $WT" >&2
+          else
+            rm -f "$probe_tmp" 2>/dev/null || true
+            journal_write "failed:$RELAUNCH_PHASE" "rollback=prior-record-restore-failed-endpoint-$state" || true
+            echo "error: $ID was relaunched on $TARGET_HARNESS, no running agent could be confirmed (endpoint reads '$state'), and its prior record at $META_PRIOR could not be restored; reconcile $META before any further control action" >&2
+          fi
+        else
+          journal_write "failed:$RELAUNCH_PHASE" "rollback=prior-record-missing-endpoint-$state" || true
+          echo "error: $ID was relaunched on $TARGET_HARNESS, no running agent could be confirmed (endpoint reads '$state'), and no prior record was saved aside; reconcile $META before any further control action" >&2
+        fi
       else
+        # No replacement record was published: the spawn never replaced $META,
+        # so the live record (including any concurrent durable update) is still
+        # the prior one and must be left untouched.
         journal_write "failed:$RELAUNCH_PHASE" "rollback=prior-record-kept" || true
         echo "error: $ID's agent was stopped but the replacement did not launch; no agent is running, and its work plus the recorded progress note are preserved at $WT" >&2
       fi
@@ -959,6 +987,40 @@ record_note() {
   esac
 }
 
+# relaunch_refresh_endpoint_block <target>: after a replacement agent is
+# confirmed, rewrite the record's endpoint identity from the validated live
+# target in one atomic rename under the task's meta lock. fm-spawn republishes
+# the record in the same transaction; this is the control plane's own
+# confirmation that the durable address is exactly where the endpoint now
+# answers, so a stale pane address can never survive into the worker's
+# self-check. `window` and `spawn_gen` are always rewritten; on herdr the
+# session and pane are derived from the target too. `herdr_workspace_id` and
+# `herdr_tab_id` are not derivable from the target string and are left as the
+# launch owner just published them from the live container.
+relaunch_refresh_endpoint_block() {  # <target>
+  local target=$1 tmp meta_lock new_gen
+  [ -n "$target" ] || return 1
+  new_gen="s$(date +%s).${BASHPID:-$$}.$RANDOM"
+  meta_lock=$(fm_meta_lock_path "$META") || return 1
+  if ! fm_lock_acquire_wait_max "$meta_lock" 5; then
+    return 1
+  fi
+  tmp="$META.endpoint.${BASHPID:-$$}"
+  if awk -v target="$target" -v gen="$new_gen" -v backend="$BACKEND" '
+      /^window=/ { print "window=" target; next }
+      /^spawn_gen=/ { print "spawn_gen=" gen; next }
+      backend == "herdr" && /^herdr_session=/ { print "herdr_session=" substr(target, 1, index(target, ":") - 1); next }
+      backend == "herdr" && /^herdr_pane_id=/ { print "herdr_pane_id=" substr(target, index(target, ":") + 1); next }
+      { print }
+    ' "$META" > "$tmp" 2>/dev/null && mv -f "$tmp" "$META" 2>/dev/null; then
+    fm_lock_release "$meta_lock"
+    return 0
+  fi
+  rm -f "$tmp" 2>/dev/null || true
+  fm_lock_release "$meta_lock"
+  return 1
+}
+
 do_relaunch() {
   local exit_result state note_line
   local -a spawn_args
@@ -1038,6 +1100,11 @@ do_relaunch() {
     die "the replacement agent for $ID did not come up within ${LAUNCH_WAIT}s (endpoint reads '$state')"
   }
   RELAUNCH_AGENT_CONFIRMED=1
+  # Refresh the durable endpoint identity from the validated live target before
+  # the transaction is declared complete, so the record the worker's self-check
+  # reads names the pane it actually runs in.
+  relaunch_refresh_endpoint_block "$T" \
+    || echo "warning: task $ID's replacement agent is alive at $T, but its recorded endpoint block could not be refreshed; the boot-time endpoint-drift check will reconcile the address" >&2
 
   journal_write complete "${CHECKPOINT_LINES[@]}" "$note_line" "exit_result=$exit_result"
   RELAUNCH_ACTIVE=0

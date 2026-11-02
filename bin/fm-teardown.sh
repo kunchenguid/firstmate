@@ -3781,11 +3781,23 @@ rm -f "$STATE/$ID.turn-ended" "$STATE/$ID.progress" \
   "$STATE/$ID.pi-ext.ts" "$STATE/$ID.omp-ext.ts" "$STATE/$ID.grok-turnend-token" \
   "$STATE/$ID.kimi-turnend-token" "$STATE/$ID.muse-session" \
   "$STATE/$ID.muse-session-current" "$STATE/$ID.cursor-session" \
-  "$STATE/$ID.control-relaunch" "$STATE/$ID.control-relaunch.meta-prior" \
-  "$STATE/$ID.control-relaunch.brief-prior" "$STATE/$ID.control-relaunch.note" \
   "$STATE/$ID.reconcile-nudged" "$STATE/$ID.gemini-settings.json" "$STATE/$ID.devin-config.json" \
   "$STATE/.$ID.branch-outcome-index" \
   "$STATE/.secondmate-relaunch-$ID" "$STATE/.secondmate-relaunch-bound-$ID"
+# A relaunch transaction that never reached a terminal phase is the only copy
+# of the record it saved aside; the session-start reconciler (bin/fm-bootstrap.sh
+# control_relaunch_reconcile) needs both pieces to finish it. Keep them rather
+# than let cleanup destroy the evidence, and say so once.
+control_relaunch_phase=$(fm_meta_get "$STATE/$ID.control-relaunch" phase)
+case "$control_relaunch_phase" in
+  checkpoint|noted|stopping|exited|launching)
+    echo "warning: keeping $ID's interrupted relaunch transaction at $STATE/$ID.control-relaunch (phase=$control_relaunch_phase) for the session-start reconciler" >&2
+    ;;
+  *)
+    rm -f "$STATE/$ID.control-relaunch" "$STATE/$ID.control-relaunch.meta-prior" \
+      "$STATE/$ID.control-relaunch.brief-prior" "$STATE/$ID.control-relaunch.note"
+    ;;
+esac
 # The steering inbox (bin/fm-task-inbox-lib.sh) is runtime state for the
 # retired endpoint; teardown only runs after landing is confirmed, so any
 # leftover unhandled steer here is moot rather than unlanded work.
