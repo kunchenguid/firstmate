@@ -1689,8 +1689,8 @@ spawn_t3_secondmate() {
 
 # A t3code secondmate receives the pane launch facts plus its supervisor,
 # steering inbox, and Git hook identity through the per-directory environment.
-assert_t3_secondmate_env() {  # <reader "<file>"> <label> <home> <thread> <supervision-model> <id>
-  local read=$1 label=$2 home=$3 thread=$4 model=$5 id=$6 name expect
+assert_t3_secondmate_env() {  # <reader "<file>"> <label> <home> <thread> <supervision-model> <id> <harness>
+  local read=$1 label=$2 home=$3 thread=$4 model=$5 id=$6 harness=$7 name expect
   while IFS='=' read -r name expect; do
     [ "$($read "$name")" = "$expect" ] || fail "$label: $name should be '$expect', got '$($read "$name")'"
   done <<EOF
@@ -1699,6 +1699,14 @@ FM_STATE_OVERRIDE=
 FM_DATA_OVERRIDE=
 FM_PROJECTS_OVERRIDE=
 FM_CONFIG_OVERRIDE=
+FM_LAUNCH_DIR=
+FM_LAUNCH_ROOT=
+FM_LAUNCH_MODE=
+FM_LAUNCH_NOTICE=
+FM_VIEW=
+FM_VIEW_ROOT=
+FM_LAUNCH_REAL=
+FM_LAUNCH_REAL_RW=
 COMPACT_ADVISER_DISABLE=1
 FM_PUBLIC_FOLLOWUP_PRIMARY_HOME=$CASE_DIR/home
 FM_HOME=$home
@@ -1713,6 +1721,10 @@ GIT_CONFIG_VALUE_0=$CASE_DIR/home/state/$id.git-hooks
 EOF
   [ "$($read FM_TASK_ID)" = undefined ] || fail "$label: a secondmate is not a task worker and must not carry FM_TASK_ID"
   [ "$($read TRACEPARENT)" = undefined ] || fail "$label: TRACEPARENT must be absent when trace context is off"
+  case "$harness" in
+  claude) [ "$($read CLAUDE_CODE_DISABLE_AUTO_MEMORY)" = 1 ] || fail "$label: a claude secondmate keeps its memory in its home, so CLAUDE_CODE_DISABLE_AUTO_MEMORY must be 1, got '$($read CLAUDE_CODE_DISABLE_AUTO_MEMORY)'" ;;
+  *) [ "$($read CLAUDE_CODE_DISABLE_AUTO_MEMORY)" = undefined ] || fail "$label: only a claude secondmate carries CLAUDE_CODE_DISABLE_AUTO_MEMORY" ;;
+  esac
 }
 
 test_spawn_secondmate_runs_thread_in_home_with_env() {
@@ -1752,14 +1764,14 @@ test_spawn_secondmate_runs_thread_in_home_with_env() {
   settings="$home/.claude/settings.local.json"
   assert_present "$settings" "a claude secondmate home gets .claude/settings.local.json"
   [ "$(t3_json_field "$settings" 'd.hooks')" = undefined ] || fail "a secondmate home carries no busy hooks"
-  [ "$(t3_json_field "$settings" 'd.env.FM_T3CODE_ENV_KEYS.split(",").length')" = 17 ] || fail "the env block should carry GOTMPDIR plus the secondmate environment, got $(t3_json_field "$settings" 'Object.keys(d.env)')"
+  [ "$(t3_json_field "$settings" 'd.env.FM_T3CODE_ENV_KEYS.split(",").length')" = 26 ] || fail "the env block should carry GOTMPDIR plus the secondmate environment, got $(t3_json_field "$settings" 'Object.keys(d.env)')"
   [ "$(t3_json_field "$settings" 'd.env.CAPTAIN_VAR')" = keep ] || fail "the home's own env entries must survive the T3 environment install"
   [ "$(t3_json_field "$settings" 'd.permissions.allow[0]')" = 'Bash(ls:*)' ] || fail "the home's own settings must survive the T3 environment install"
   [ "$(t3_json_field "$settings" 'd.env.LAVISH_AXI_HOST')" = undefined ] || fail "a key an earlier spawn wrote and this one does not must not linger"
-  [ "$(t3_json_field "$settings" 'Object.keys(d.env).length')" = 19 ] || fail "the env block should hold the home's entry, the 17 Firstmate keys, and their list, got $(t3_json_field "$settings" 'Object.keys(d.env)')"
+  [ "$(t3_json_field "$settings" 'Object.keys(d.env).length')" = 28 ] || fail "the env block should hold the home's entry, the 26 Firstmate keys, and their list, got $(t3_json_field "$settings" 'Object.keys(d.env)')"
   [ "$(t3_json_field "$settings" 'd.env.GOTMPDIR')" = "/tmp/fm-$id/gotmp" ] || fail "settings env must carry GOTMPDIR"
   read_settings() { t3_json_field "$settings" "d.env[\"$1\"]"; }
-  assert_t3_secondmate_env read_settings "claude secondmate settings env" "$home" "$thread" autoarm "$id"
+  assert_t3_secondmate_env read_settings "claude secondmate settings env" "$home" "$thread" autoarm "$id" claude
   t3_excluded "$home" .claude/settings.local.json || fail "the settings file must be git-excluded in the home"
   assert_absent "$home/.codex/config.toml" "a claude secondmate writes no codex config"
   [ -L "$home/config/t3code-token" ] || fail "the secondmate home must link the primary's credential, not copy it"
@@ -1784,7 +1796,7 @@ test_spawn_codex_secondmate_writes_toml_env() {
   assert_present "$toml" "a codex secondmate home gets .codex/config.toml"
   [ "$(t3_toml_env "$toml" GOTMPDIR)" = "/tmp/fm-$id/gotmp" ] || fail "config.toml must set GOTMPDIR, got '$(cat "$toml")'"
   read_toml() { t3_toml_env "$toml" "$1"; }
-  assert_t3_secondmate_env read_toml "codex secondmate config.toml" "$home" "$thread" persistent "$id"
+  assert_t3_secondmate_env read_toml "codex secondmate config.toml" "$home" "$thread" persistent "$id" codex
   t3_excluded "$home" .codex/config.toml || fail "config.toml must be git-excluded in the home"
   assert_absent "$home/.claude/settings.local.json" "a codex secondmate writes no Claude settings"
   pass "fm-spawn.sh --backend t3code --secondmate codex: launch prefix as .codex/config.toml shell_environment_policy"

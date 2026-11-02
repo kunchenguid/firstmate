@@ -21,8 +21,9 @@
 # machine reads the same number for the same machine's resources. One line per
 # project:
 #   <project-name> <capacity>
-# <project-name> is the project's registered name, which is the basename of its
-# clone directory, and <capacity> is a positive integer of at most six digits.
+# <project-name> is the project's registered name (bin/fm-spawn.sh's project_name:
+# its registered alias when one maps to the clone, otherwise the basename of its
+# clone directory), and <capacity> is a positive integer of at most six digits.
 # The capacity is the last whitespace-separated field, so the name before it may
 # contain spaces. Blank lines are ignored. A line is a comment when it is `#`,
 # when `#` is followed by whitespace, or when it starts with `#` and its last
@@ -49,9 +50,9 @@
 # task is cleaned up and its record removed. A local-only ship and a scout have
 # no recorded handoff and hold their place until cleanup. A worker that is
 # steered back into work after its PR handoff is not counted again.
-# The declaration is matched by the spawning clone's directory name, so clones
-# of one origin share the cap only when they use that same directory name. A
-# clone of that origin under a different directory name finds no declaration
+# The declaration is matched by the spawning clone's registered name, so clones
+# of one origin share the cap only when they share that name. A clone of that
+# origin under a different name finds no declaration
 # and is not capped, though its workers still count as holders for a
 # same-origin clone that is capped.
 # A record whose project directory no longer exists cannot be matched and holds
