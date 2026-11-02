@@ -1156,7 +1156,7 @@ for partial_shape in missing-marker missing-checkout missing-route renamed succe
   esac
   OUT=$(host_retirement retire "$RETIRE_ID" --force --expect-generation "$RETIRE_GEN"); RC=$?
   case "$partial_shape" in
-    successor|foreign|live)
+    missing-route|successor|foreign|live)
       [ "$RC" -ne 0 ] || fail "unsafe partial retirement was accepted: $partial_shape"
       assert_present "$RETIRE_HOME" "refusal deleted the partial home"
       assert_absent "$RETIRE_PROOF" "refusal published completion"

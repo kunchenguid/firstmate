@@ -3113,6 +3113,8 @@ remove_firstmate_home() (  # <home> <label> <task-id> <backend>
       rm -f -- "$evidence" || return 1
       return 0
     fi
+    echo "REFUSED: retirement retry cannot prove public home ownership for $home" >&2
+    return 1
   fi
   [ -e "$home" ] || return 0
   abs_home_path=$(validate_firstmate_home_for_removal "$home" "$label" "$expected_id") || return 1
@@ -3134,20 +3136,11 @@ remove_firstmate_home() (  # <home> <label> <task-id> <backend>
         fi
         mkdir -m 700 "$retired" || return 1 ;;
       *)
-        if [ -n "$recorded" ]; then
-          retired=$recorded
-          if [ -e "$retired" ]; then
-            [ -d "$retired" ] && [ ! -L "$retired" ] || return 1
-            rmdir "$retired" || return 1
-          fi
-          mkdir -m 700 "$retired" || return 1
-        else
-          retired=$(mktemp -d "${abs_home_path}.retiring.XXXXXX") || return 1
-          tmp=$(umask 077; mktemp "${evidence}.XXXXXX") || return 1
-          if ! printf 'home_removal_source=%s\nhome_removal_generation=%s\nhome_removal_stage=%s\n' "$home" "$generation" "$retired" >"$tmp" \
-            || ! mv -f -- "$tmp" "$evidence"; then
-            return 1
-          fi
+        retired=$(mktemp -d "${abs_home_path}.retiring.XXXXXX") || return 1
+        tmp=$(umask 077; mktemp "${evidence}.XXXXXX") || return 1
+        if ! printf 'home_removal_source=%s\nhome_removal_generation=%s\nhome_removal_stage=%s\n' "$home" "$generation" "$retired" >"$tmp" \
+          || ! mv -f -- "$tmp" "$evidence"; then
+          return 1
         fi ;;
     esac
   fi

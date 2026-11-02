@@ -1082,13 +1082,12 @@ cmd_retire() {
       if [ -e "$TARGET_HOME/.fm-secondmate-home" ]; then
         [ "$(cat "$TARGET_HOME/.fm-secondmate-home")" = "$id" ] || die "remote home belongs to another secondmate"
       fi
-      if [ -e "$(meta_path "$id")" ]; then
-        retained_generation=$(fm_meta_get "$(meta_path "$id")" spawn_gen)
-        [ "$retained_generation" = "$expected" ] || die "generation-mismatch: refusing to retire a successor"
-        retained_target=$(fm_meta_get "$(meta_path "$id")" window)
-        [ -z "$retained_target" ] || [ "$retained_target" = "$pending_target" ] \
-          || die "remote retirement pending history does not match this endpoint"
-      fi
+      [ -f "$(meta_path "$id")" ] || die "remote retirement retry cannot prove public home ownership"
+      retained_generation=$(fm_meta_get "$(meta_path "$id")" spawn_gen)
+      [ "$retained_generation" = "$expected" ] || die "generation-mismatch: refusing to retire a successor"
+      retained_target=$(fm_meta_get "$(meta_path "$id")" window)
+      [ -z "$retained_target" ] || [ "$retained_target" = "$pending_target" ] \
+        || die "remote retirement pending history does not match this endpoint"
     fi
     generation=$expected
     target=$pending_target

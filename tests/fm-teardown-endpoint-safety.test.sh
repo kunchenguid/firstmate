@@ -1700,7 +1700,7 @@ SH
 test_local_retirement_resumes_recorded_staging() {
   local shape dir mate child stage meta rc real_rm
   real_rm=$(command -v rm)
-  for shape in top descendant successor; do
+  for shape in top descendant successor reseeded; do
     dir=$(make_case "local-retire-resume-$shape")
     mate="$dir/mate"
     child="$mate/child"
@@ -1771,10 +1771,19 @@ SH
       sed 's/^spawn_gen=.*/spawn_gen=g2/' "$meta" >"$dir/replacement.meta"
       mv "$dir/replacement.meta" "$meta"
     fi
+    if [ "$shape" = reseeded ]; then
+      mkdir -p "$mate/state" "$mate/data" "$mate/config"
+      printf 'mate\n' >"$mate/.fm-secondmate-home"
+      printf 'replacement data\n' >"$mate/sentinel"
+    fi
     rc=0
     FM_REMOTE_RETIRE_PENDING="$dir/pending.json" FM_TEST_REAL_RM="$real_rm" FM_TEST_DELETE_FAIL="$dir/delete-fail" \
       run_case "$dir" mate >"$dir/retry.out" 2>"$dir/retry.err" || rc=$?
-    if [ "$shape" = successor ]; then
+    if [ "$shape" = reseeded ]; then
+      [ "$rc" -ne 0 ] || fail "retry deleted a reseeded home"
+      assert_grep 'replacement data' "$mate/sentinel" "retry removed replacement data"
+      assert_present "$stage/home" "refusal destroyed owned staging"
+    elif [ "$shape" = successor ]; then
       [ "$rc" -ne 0 ] || fail "successor consumed predecessor staging"
       assert_present "$stage/home" "generation mismatch destroyed staged private data"
     else
