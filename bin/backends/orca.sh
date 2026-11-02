@@ -572,6 +572,7 @@ fm_backend_orca_send_key() {  # <terminal-id> <key>
   if fm_backend_orca_last_stale; then
     live=$(fm_backend_orca_resolve_live_terminal "$terminal") || live=
     if [ -n "$live" ]; then
+      FM_ORCA_RESOLVED_TERMINAL=$live
       case "$key" in
         Enter|enter)
           check_rc=0
@@ -580,7 +581,6 @@ fm_backend_orca_send_key() {  # <terminal-id> <key>
           ;;
       esac
       if fm_backend_orca_send_key_once "$live" "$key"; then
-        FM_ORCA_RESOLVED_TERMINAL=$live
         case "$key" in
           Enter|enter) [ -z "${FM_TASK_INBOX_RING_LINE:-}" ] || return 4 ;;
         esac

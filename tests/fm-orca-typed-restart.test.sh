@@ -5,7 +5,7 @@ set -u
 
 TMP_ROOT=$(fm_test_tmproot fm-orca-typed-restart)
 
-for mode in restart healthy healthy-retry enter-failure replacement-failure replacement-pending replacement-healthy; do
+for mode in restart restart-failure restart-dialog healthy healthy-retry enter-failure replacement-failure replacement-pending replacement-healthy; do
   fixture="$TMP_ROOT/$mode"
   mkdir -p "$fixture/fakebin" "$fixture/root/bin" "$fixture/state" "$fixture/worktree"
   printf '#!/usr/bin/env bash\nexit 0\n' > "$fixture/root/bin/fm-guard.sh"
@@ -15,7 +15,7 @@ for mode in restart healthy healthy-retry enter-failure replacement-failure repl
   : > "$fixture/composer"
   cat > "$fixture/fakebin/sleep" <<'SH'
 #!/usr/bin/env bash
-if [ "$1" = 1.2 ] && [ "$FM_ORCA_TYPED_MODE" = restart ]; then
+if [ "$1" = 1.2 ] && [[ "$FM_ORCA_TYPED_MODE" = restart* ]]; then
   : > "$FM_ORCA_TYPED_FIXTURE/restarted"
   : > "$FM_ORCA_TYPED_FIXTURE/composer"
 fi
@@ -34,13 +34,17 @@ if (args[0] === 'status') {
 } else if (args[1] === 'list') {
   reply({terminals: [{handle: 'live', connected: true, writable: true}], truncated: false});
 } else if (args[1] === 'read') {
+  if (terminal === 'live' && mode === 'restart-dialog') {
+    reply({terminal: {tail: ['Background work is running', '❯ 1. Exit and stop tasks', 'Enter to confirm · Esc to cancel']}});
+    process.exit(0);
+  }
   const body = terminal === 'live' && mode === 'restart' ? '' : fs.readFileSync(dir + '/composer', 'utf8');
   const rule = '─'.repeat(body.length + 4);
   reply({terminal: {tail: ['╭' + rule + '╮', '│ > ' + body + ' │', '╰' + rule + '╯']}});
 } else if (args[1] === 'send') {
   if (args.includes('--enter')) {
     fs.appendFileSync(dir + '/enters', terminal + '\n');
-    if (mode === 'enter-failure' || mode === 'replacement-failure') {
+    if (mode === 'enter-failure' || mode === 'replacement-failure' || (mode === 'restart-failure' && terminal === 'live')) {
       console.log(JSON.stringify({ok: false, error: {code: 'send_failed', message: 'temporary runtime error'}}));
       process.exitCode = 1;
     } else if (terminal === 'old' && fs.existsSync(dir + '/restarted')) {
@@ -76,12 +80,14 @@ JS
     FM_SEND_SETTLE=0 FM_SEND_SLEEP=0 FM_SEND_RETRIES=2 \
     bash "$ROOT/bin/fm-send.sh" typed /status > "$fixture/out" 2>&1 || rc=$?
   [ "$(cat "$fixture/typed")" = /status ] || fail "$mode: slash command was retyped"
-  if [ "$mode" = restart ]; then
+  if [[ "$mode" = restart* ]]; then
     [ "$rc" = 3 ] || fail "restart: expected unconfirmed exit 3, got $rc: $(cat "$fixture/out")"
     assert_contains "$(cat "$fixture/out")" "changed terminal endpoints" "restart did not explain the unconfirmed send"
     assert_contains "$(cat "$fixture/out")" "inspect the replacement pane for the recorded worktree in Orca's UI" "restart did not provide a usable inspection action"
     assert_not_contains "$(cat "$fixture/out")" "fm-peek.sh" "restart directed inspection to the stale recorded endpoint"
-    [ "$(cat "$fixture/enters")" = $'old\nlive' ] || fail "restart: Enter retried after endpoint change"
+    expected=$'old\nlive'
+    [ "$mode" != restart-dialog ] || expected=old
+    [ "$(cat "$fixture/enters")" = "$expected" ] || fail "$mode: unexpected Enter attempts"
     [ ! -s "$fixture/submitted" ] || fail "restart unexpectedly submitted the lost command"
   elif [ "$mode" = replacement-failure ] || [ "$mode" = replacement-pending ]; then
     [ "$rc" = 3 ] || fail "$mode: expected unconfirmed exit 3, got $rc: $(cat "$fixture/out")"
