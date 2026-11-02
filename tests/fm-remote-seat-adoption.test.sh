@@ -257,3 +257,37 @@ for DAMAGE in '.home = "/unrelated"' '.target = "foreign:pane"' '.backend = "tmu
   [ "$RC" -ne 0 ] || fail "retirement replay accepted foreign destruction evidence ($DAMAGE)"
 done
 pass "retirement retries preserve exact generation and clean/residue exits without touching reused homes"
+
+HOST="$TMP/rex-home"
+mkdir -p "$HOST/state/parent-route" "$HOST/data" "$HOST/config" "$HOST/bin"
+printf 'ios\n' > "$HOST/.fm-secondmate-home"
+: > "$HOST/AGENTS.md"
+cat > "$FAKEBIN/rex" <<'SH'
+#!/usr/bin/env bash
+case "$*" in
+  *whoami*) printf '{"endpoint":"%s"}\n' "$(cat "$FM_TEST_ENDPOINT_STATE")" ;;
+  *'block call '*process) printf '{"last_exit":{"code":0},"ancestors":[]}\n' ;;
+  *) exit 1 ;;
+esac
+SH
+chmod +x "$FAKEBIN/rex"
+fm_write_meta "$HOST/state/parent-route/ios.meta" \
+  kind=secondmate harness=claude backend=rex window=aaaa:bbbb \
+  rex_server=unix:///server-a.sock spawn_gen=rex.g1 model=pool-model-a
+fm_write_meta "$HOST/state/parent-route/ios.seat-operation.rex.g1" \
+  schema=fm-remote-seat-receipt.v1 operation=rex.g1 requested_generation=rex.g1 \
+  verb=launch phase=started actual_generation=rex.g1 route_backend=rex route_target=aaaa:bbbb
+for SERVER in unix:///server-b.sock unix:///server-a.sock; do
+  printf '%s\n' "$SERVER" > "$TMP/endpoint-state"
+  OUT=$(host disposition ios --operation rex.g1); RC=$?
+  expect_code 0 "$RC" "Rex disposition query: $OUT"
+  EXPECTED=unknown
+  PHASE=started
+  if [ "$SERVER" = unix:///server-a.sock ]; then
+    EXPECTED=dead-after-start
+    PHASE=dead-after-start
+  fi
+  assert_equals "$EXPECTED" "$(printf '%s\n' "$OUT" | disposition | jq -r .disposition)" "Rex disposition ignored its creation server"
+  assert_equals "$PHASE" "$(sed -n 's/^phase=//p' "$HOST/state/parent-route/ios.seat-operation.rex.g1")" "Rex observation corrupted the durable receipt"
+done
+pass "Rex disposition settles death only on the recorded creation server"

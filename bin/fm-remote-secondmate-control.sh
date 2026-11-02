@@ -313,7 +313,7 @@ seat_emit() {
 seat_endpoint_state() {  # <backend> <target> [meta]
   local state verdict
   [ -n "$1" ] && [ -n "$2" ] || { printf 'unreadable'; return 0; }
-  state=$(fm_backend_agent_state "$1" "$2" 2>/dev/null || printf 'unreadable')
+  state=$(fm_control_endpoint_state "$1" "$2" "${3:-}" 2>/dev/null || printf 'unreadable')
   if [ "$state" = missing ]; then
     # The record carries the creation server a Rex absence proof must name;
     # without it that backend can only answer `unproven`, which keeps the
