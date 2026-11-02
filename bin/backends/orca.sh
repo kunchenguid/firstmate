@@ -53,10 +53,11 @@ process.exit(1);
 # quoted assignments in its private staged launch file, never terminal input.
 # Every allowlisted name must exist in the session; an explicit -NAME record is
 # a deliberate unset, and a missing name refuses rather than falling back.
-fm_backend_orca_launch_env_args() {  # <tmux-session> <newline-separated names>
-  node - "$1" "$2" <<'JS'
+fm_backend_orca_launch_env_args() {  # <tmux-session> <newline-separated names> [codex-home-on-fd3]
+  node - "$1" "$2" "${3:-}" <<'JS'
 const { spawnSync } = require("child_process");
-const [session, names] = process.argv.slice(2);
+const fs = require("fs");
+const [session, names, codexHomeOutput] = process.argv.slice(2);
 function refuse(name) {
   // Do not echo tmux output or errors: they may contain credential values.
   const required = name === undefined ? "" : ` (required name ${name})`;
@@ -79,6 +80,7 @@ function read(name) {
 // multiline values or tmux's automatically populated update-environment.
 read();
 const assignments = [];
+const values = Object.create(null);
 for (const name of new Set(names.split("\n").filter(Boolean))) {
   if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) refuse();
   // Read each name separately so embedded/trailing newlines are preserved and
@@ -90,7 +92,13 @@ for (const name of new Set(names.split("\n").filter(Boolean))) {
   if (!record.startsWith(`${name}=`)) refuse(name);
   const value = record.slice(name.length + 1);
   if (value.includes("\0")) refuse(name);
+  values[name] = value;
   assignments.push(`${name}='${value.replace(/'/g, "'\\''")}'`);
+}
+if (codexHomeOutput) {
+  const home = values.CODEX_HOME !== undefined ? values.CODEX_HOME :
+    (values.HOME ? `${values.HOME}/.codex` : "");
+  fs.writeSync(3, Buffer.from(home.startsWith("/") ? home : "", "latin1"));
 }
 process.stdout.write(assignments.join(" "), "latin1");
 JS

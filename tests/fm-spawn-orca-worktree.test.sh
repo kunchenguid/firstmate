@@ -748,6 +748,28 @@ EOF
   pass "the Orca snapshot passes through bytes tmux reports even when they are not valid UTF-8"
 }
 
+test_orca_codex_snapshot_keeps_exact_home_bytes() {
+  local case_dir fb assignments
+  case_dir="$TMP_ROOT/codex-home-bytes"
+  mkdir -p "$case_dir"
+  fb=$(fm_fakebin "$case_dir")
+  cat > "$fb/tmux" <<'EOF'
+#!/bin/sh
+[ "$#" -ge 5 ] || exit 0
+printf 'CODEX_HOME=/tmp/raw-\377\376-'"'"'q\n\n\n'
+EOF
+  chmod +x "$fb/tmux"
+  printf '/tmp/raw-\377\376-'"'"'q\n\n' > "$case_dir/expected"
+  # shellcheck disable=SC2016 # The child shell expands its own arguments.
+  assignments=$(PATH="$fb:$PATH" bash -c '. "$1"; fm_backend_orca_launch_env_args scoped CODEX_HOME codex-home' _ "$ROOT/bin/backends/orca.sh" 3> "$case_dir/preflight") \
+    || fail "snapshot refused a Codex home with non-UTF-8 bytes and trailing newlines"
+  # shellcheck disable=SC2016 # The child shell expands the exported value.
+  sh -c "export $assignments; printf %s \"\$CODEX_HOME\"" > "$case_dir/launch"
+  cmp -s "$case_dir/expected" "$case_dir/preflight" || fail "snapshot changed the Codex home passed for validation"
+  cmp -s "$case_dir/expected" "$case_dir/launch" || fail "snapshot changed the Codex home passed to the worker"
+  pass "Orca validates and launches with the exact same raw Codex home bytes"
+}
+
 # Without a configured source, a nonempty allowlist on Orca still resolves from
 # the Orca terminal; the spawn proceeds unchanged but says so on stderr.
 test_orca_allowlist_without_source_warns() {
@@ -868,6 +890,105 @@ PY
   pass "real tmux preserves absent/C locale values and reported raw bytes, rejects missing/phantom names and excludes the automatic SSH agent"
 }
 
+test_orca_codex_effort_uses_selected_home() {
+  local setting effort case_dir home id fb out status staged result selected want_home want_codex expected_effort
+  for setting in codex-home codex-special home-only codex-unset codex-empty relative unknown ambient stale; do
+    for effort in max ultra; do
+      id="orca-codex-$setting-$effort"
+      case_dir="$TMP_ROOT/$id"; home="$case_dir/home"
+      selected="$case_dir/selected"
+      [ "$setting" != codex-special ] || selected="$case_dir/selected-'"$'\n\n'
+      mkdir -p "$home/data/$id" "$home/state" "$home/config" "$home/projects" \
+        "$selected" "$case_dir/fallback/.codex" "$case_dir/caller" "$case_dir/pane"
+      touch "$home/state/.last-watcher-beat"
+      printf 'manual\n' > "$home/config/backlog-backend"
+      printf 'scoped-source\n' > "$home/config/launch-env-tmux-session"
+      printf 'CODEX_HOME\n' > "$home/config/launch-env-allowlist"
+      case "$setting" in
+        home-only) printf 'HOME\n' > "$home/config/launch-env-allowlist" ;;
+        codex-unset|codex-empty) printf 'HOME\nCODEX_HOME\n' > "$home/config/launch-env-allowlist" ;;
+        unknown) : > "$home/config/launch-env-allowlist" ;;
+        ambient) rm "$home/config/launch-env-tmux-session" ;;
+      esac
+      printf '%s\n' '{"models":[{"slug":"gpt-6.1-terra","supported_reasoning_levels":[{"effort":"max"},{"effort":"ultra"}]}]}' > "$selected/models_cache.json"
+      cp "$selected/models_cache.json" "$case_dir/fallback/.codex/models_cache.json"
+      [ "$setting" != stale ] || printf '%s\n' '{"models":[]}' > "$selected/models_cache.json"
+      FM_TEST_SETTING="$setting" FM_TEST_CASE="$case_dir" FM_TEST_SELECTED="$selected" python3 - "$case_dir/source.json" <<'PY'
+import json, os, sys
+root, setting = os.environ['FM_TEST_CASE'], os.environ['FM_TEST_SETTING']
+data = {'CODEX_HOME': os.environ['FM_TEST_SELECTED'], 'HOME': root + '/fallback'}
+if setting == 'codex-unset': data['CODEX_HOME'] = None
+if setting == 'codex-empty': data['CODEX_HOME'] = ''
+if setting == 'relative': data['CODEX_HOME'] = 'relative-home'
+with open(sys.argv[1], 'w') as f: json.dump(data, f)
+PY
+      fm_git_init_commit "$case_dir/project"
+      cat > "$home/data/$id/brief.md" <<'EOF'
+# Task
+## Captain's intent
+Exercise a filtered Codex launch.
+## Firstmate spec
+Confirm the worker uses the catalog that was checked.
+EOF
+      fb=$(make_orca_fakebin "$case_dir")
+      cat > "$fb/tmux" <<'EOF'
+#!/usr/bin/env python3
+import json, os, sys
+if sys.argv[1:5] != ['-u','show-environment','-t','=scoped-source']: sys.exit(2)
+with open(os.environ['FM_TEST_ORCA_DIR']+'/source.json') as f: data=json.load(f)
+names=[sys.argv[5]] if len(sys.argv)>5 else data
+for name in names:
+ if name not in data: sys.exit(1)
+ value=data[name]
+ print('-'+name if value is None else name+'='+value)
+EOF
+      cat > "$fb/codex" <<EOF
+#!/bin/sh
+printf 'CODEX_HOME=%s\nHOME=%s\nARGS=%s\n' "\${CODEX_HOME-unset}" "\${HOME-unset}" "\$*" > '$case_dir/worker-env'
+EOF
+      chmod +x "$fb/tmux" "$fb/codex"
+      out=$(FM_ROOT_OVERRIDE='' FM_HOME="$home" HOME="$case_dir/caller" CODEX_HOME="$case_dir/caller" \
+        FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+        FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
+        FM_SPAWN_NO_GUARD=1 FM_TEST_ORCA_DIR="$case_dir" FM_TEST_ORCA_CONSUME=1 \
+        FM_TEST_ORCA_LOG="$case_dir/terminal.log" PATH="$fb:$PATH" \
+        "$SPAWN" "$id" "$case_dir/project" --mode no-mistakes --yolo off --backend orca \
+        --harness codex --model gpt-6.1-terra --effort "$effort" 2>&1); status=$?
+      if [ "$setting" = codex-empty ] || [ "$setting" = relative ] || [ "$setting" = unknown ] || [ "$setting" = ambient ] || { [ "$setting" = stale ] && [ "$effort" = ultra ]; }; then
+        expect_code 1 "$status" "unprovable or unsupported Orca $setting $effort must refuse: $out"
+        [ ! -d "$case_dir/orca-worktrees" ] || fail "Orca $setting $effort refusal allocated a worktree"
+        [ ! -e "$home/state/$id.meta" ] || fail "Orca $setting $effort refusal published metadata"
+        continue
+      fi
+      expect_code 0 "$status" "selected Orca $setting $effort should spawn: $out"
+      staged=$(sed -n "s/^[^']*'\([^']*\/launch\.[^'\/]*\.sh\)'.*$/\1/p" "$case_dir/terminal.log" | tail -1)
+      [ -f "$staged.copy" ] || fail "Orca did not stage the selected launch"
+      cp "$staged.copy" "$staged"
+      # shellcheck disable=SC2016 # The child shell expands its own positional argument.
+      result=$(env -i HOME="$case_dir/pane" CODEX_HOME="$case_dir/pane" PATH="$fb:$PATH" /bin/sh -c '. "$1"' _ "$staged" 2>&1)
+      expect_code 0 "$?" "selected Orca worker launch failed: $result"
+      [ -f "$case_dir/worker-env" ] || fail "selected Orca worker did not run"
+      want_codex="$selected"; want_home="$case_dir/pane"
+      case "$setting" in home-only|codex-unset) want_codex='unset'; want_home="$case_dir/fallback" ;; esac
+      assert_contains "$(cat "$case_dir/worker-env")" "CODEX_HOME=$want_codex" "worker used the wrong Codex home"
+      assert_contains "$(cat "$case_dir/worker-env")" "HOME=$want_home" "worker used the wrong HOME"
+      expected_effort=$effort
+      if [ "$setting" = stale ]; then
+        expected_effort=
+        assert_contains "$out" 'omitting max' 'unsupported source catalog must report omission'
+      fi
+      if [ -n "$expected_effort" ]; then
+        assert_contains "$(cat "$case_dir/worker-env")" "model_reasoning_effort=\"$expected_effort\"" "worker lost selected effort"
+      else
+        assert_not_contains "$(cat "$case_dir/worker-env")" 'model_reasoning_effort=' "unsupported max must be omitted"
+      fi
+    done
+  done
+  pass "Orca validates Codex effort against the selected source home before provisioning"
+}
+
+test_orca_codex_effort_uses_selected_home
+test_orca_codex_snapshot_keeps_exact_home_bytes
 test_orca_source_preserves_values_without_utf8_locale
 test_orca_launch_uses_controlled_tmux_environment
 test_orca_allowlist_without_source_warns
