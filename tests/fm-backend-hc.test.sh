@@ -360,6 +360,53 @@ test_required_tool_check_uses_the_adapter_resolver() {
   pass "hc: the bootstrap tool check resolves hc exactly as the adapter does"
 }
 
+# A --secondmate launch is the PRIMARY's own fm-spawn.sh placing a DIFFERENT
+# home's agent. Identity labels must stay the primary's (its record owns the
+# terminal), while the Herdr.app space must be the mate home's own: the tag the
+# mate's crew will label their terminals with once that home spawns them.
+test_secondmate_spawn_lands_in_the_mates_own_space() {
+  local id="hcsm$$" mate primary_tag mate_tag out rc=0 run_line meta line
+  setup_case secondmate
+  mate="$D/mate"
+  mkdir -p "$mate/bin" "$mate/data" "$mate/state" "$mate/config" "$mate/projects" \
+    "$HOMEDIR/state" "$HOMEDIR/config" "$HOMEDIR/data" "$D/user-home"
+  printf '%s\n' "$id" > "$mate/.fm-secondmate-home"
+  printf '# Firstmate\n' > "$mate/AGENTS.md"
+  printf 'charter\n' > "$mate/data/charter.md"
+  printf '%s\n' 'projects/' 'state/' 'data/' 'config/' > "$mate/.gitignore"
+  git -C "$mate" init -q -b main
+  printf 'codex\n' > "$HOMEDIR/config/crew-harness"
+  # The spawn runs from this checkout, so its own hometag hashes FM_TEST_ROOT;
+  # the mate's tag hashes the mate home, where its own scripts will run.
+  primary_tag=$(FM_HOME=$HOMEDIR FM_ROOT_OVERRIDE=$FM_TEST_ROOT bash -c '. "'"$FM_TEST_ROOT"'/bin/fm-backend.sh"; fm_backend_source hc >/dev/null 2>&1; fm_backend_hometag')
+  mate_tag=$(FM_HOME=$mate FM_ROOT_OVERRIDE=$mate bash -c '. "'"$FM_TEST_ROOT"'/bin/fm-backend.sh"; fm_backend_source hc >/dev/null 2>&1; fm_backend_hometag')
+  [ -n "$primary_tag" ] && [ -n "$mate_tag" ] || fail "could not resolve the home tags"
+  printf '{"address":"t9"}\n' > "$D/run.json"
+  write_terminal "$D" t9 live "fm-$id" "$primary_tag" zsh /bin/zsh
+  FM_TEST_CLEANUP_DIRS+=("/tmp/fm-$id")
+  # FM_HC_SPACE names the primary's own space; a mate must not be pulled into it.
+  out=$(env -u HC_TERMINAL_ID -u HC_TERMINAL_SOCKET -u HC_SCOPE -u HC_SOCKET -u TMUX -u HERDR_ENV \
+    PATH="$FB:$PATH" FM_HC_BIN="$FB/hc" FAKE_HC_DIR="$D" HOME="$D/user-home" \
+    FM_HOME="$HOMEDIR" FM_ROOT_OVERRIDE="$FM_TEST_ROOT" FM_SPAWN_NO_GUARD=1 \
+    FM_SKIP_SECONDMATE_SYNC=1 FM_HC_SPACE=primary-space HC_SESSION=fmtest \
+    bash "$FM_TEST_ROOT/bin/fm-spawn.sh" "$id" "$mate" --secondmate --backend hc 2>&1) || rc=$?
+  expect_code 0 "$rc" "a --secondmate spawn on hc must succeed"$'\n'"$out"
+  assert_contains "$out" "spawned $id harness=codex kind=secondmate" "the spawn reports the mate"
+  run_line=$(grep $'\x1frun\x1f' "$D/log")
+  for line in "firstmate.task=fm-$id" "firstmate.home=$primary_tag" \
+    "herdr.space=fm-$mate_tag" "herdr.tab=$primary_tag-fm-$id"; do
+    assert_contains "$run_line" "$line" "the mate's terminal must carry $line"
+  done
+  assert_not_contains "$run_line" "herdr.space=primary-space" "FM_HC_SPACE must not move the mate out of its own space"
+  assert_not_contains "$run_line" "herdr.space=fm-$primary_tag" "the mate must not share the primary's space"
+  meta=$(cat "$HOMEDIR/state/$id.meta")
+  for line in kind=secondmate backend=hc hc_session=fmtest hc_terminal=t9 window=fmtest:t9 "home=$mate"; do
+    assert_contains "$meta" "$line" "the published record must carry $line"
+  done
+  assert_not_contains "$(cat "$D/log")" HC_SESSION=default "the spawn must never reach the default session"
+  pass "hc: a --secondmate spawn keeps this home's identity and lands in the mate home's own space"
+}
+
 fm_test_run \
   test_hc_is_spawn_capable_and_needs_app_signals \
   test_required_tool_check_uses_the_adapter_resolver \
@@ -376,4 +423,5 @@ fm_test_run \
   test_endpoint_validation_binds_hc_meta \
   test_container_ensure_gates_binary_version_and_generation \
   test_send_text_submit_confirms_through_send_wait \
-  test_send_delimiters_and_binary_socket_pins
+  test_send_delimiters_and_binary_socket_pins \
+  test_secondmate_spawn_lands_in_the_mates_own_space

@@ -1066,6 +1066,21 @@ test_backend_source_requires_unreadable_hermes_helper() {
   _backend_source_hermes_helper_condition unreadable
 }
 
+# bin/fm-backend.sh's FM_BACKEND_SECONDMATE is the one owner of which
+# spawn-capable backends host a persistent --secondmate launch; fm-spawn.sh's
+# refusal and fm-secondmate-move.sh's target check both read it.
+test_backend_secondmate_support_is_one_table() {
+  local backend
+  for backend in tmux herdr zellij rex t3code hc; do
+    fm_backend_secondmate_supported "$backend" || fail "$backend must host a second mate"
+    fm_backend_validate_spawn "$backend" 2>/dev/null || fail "a secondmate-capable backend must be spawn-capable: $backend"
+  done
+  for backend in orca cmux paseo tern bogus ''; do
+    fm_backend_secondmate_supported "$backend" && fail "'$backend' must not host a second mate"
+  done
+  pass "fm_backend_secondmate_supported: tmux, herdr, zellij, rex, t3code, and hc host second mates; orca, cmux, paseo, tern, and unknown names do not"
+}
+
 test_backend_validate_spawn_accepts_orca() {
   local out
   fm_backend_validate_spawn tmux 2>/dev/null || fail "fm_backend_validate_spawn should accept tmux"
@@ -1770,6 +1785,7 @@ test_backend_source_requires_unreadable_adapter_file
 test_backend_source_requires_missing_hermes_helper
 test_backend_source_requires_unreadable_hermes_helper
 test_backend_validate_spawn_accepts_orca
+test_backend_secondmate_support_is_one_table
 test_meta_get_and_backend_of_meta
 test_resolve_selector_three_forms
 test_backend_of_selector_matches_explicit_target_meta
