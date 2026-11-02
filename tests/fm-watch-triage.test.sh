@@ -786,6 +786,32 @@ SH
   pass "delayed validation claims flag only when the branch has no run, then clear their markers"
 }
 
+test_claimed_run_path_with_spaces() {
+  local dir state fakebin out wt task branch pid
+  dir=$(make_case claimed-run-spaces)
+  state="$dir/home with  two spaces/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; wt="$dir/worktree"; task=claim
+  mkdir -p "$state" "$wt"
+  git -C "$wt" init -q
+  branch=$(git -C "$wt" symbolic-ref --short HEAD)
+  printf 'worktree=%s\n' "$wt" > "$state/$task.meta"
+  printf 'working [at=1234567890]: validation started\n' > "$state/$task.status"
+  cat > "$fakebin/no-mistakes" <<'SH'
+#!/usr/bin/env bash
+printf 'run other-branch\n'
+SH
+  chmod +x "$fakebin/no-mistakes"
+  export FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)'
+  PATH="$fakebin:$PATH" FM_CLAIMED_RUN_DELAY=0 FM_STATE_OVERRIDE="$state" \
+    FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 100 || { reap "$pid"; fail "spaced-path claimed run did not surface"; }
+  [ "$(grep -c 'validation claim has no run' "$out")" -eq 1 ] \
+    || fail "spaced-path claim did not produce exactly one wake: $(cat "$out")"
+  pass "claimed-run stat rows preserve paths containing repeated spaces"
+}
+
 test_claimed_run_incremental_log() {
   local dir state fakebin out wt status_file cursor pid
   dir=$(make_case claimed-run-incremental); state="$dir/state"; fakebin="$dir/fakebin"
@@ -5639,6 +5665,7 @@ fm_test_run \
   test_signal_crew_provably_working_classifier \
   test_secondmate_status_routine_absorbed_routed_surfaced_classifier \
   test_claimed_run_outcomes \
+  test_claimed_run_path_with_spaces \
   test_claimed_run_incremental_log \
   test_claimed_run_poll_cost \
   test_claimed_run_same_size_rewrite_resets_cursor \
