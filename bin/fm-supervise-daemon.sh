@@ -900,16 +900,19 @@ escalate_full_text_save() {  # <state> <buf>
   printf '%s' "$file"
 }
 
-# A digest whose delivery came back unconfirmed (only T3 Code reports it: the
-# message may have landed) may already be in the supervisor's transcript. Its
-# generation is frozen: <buf>.frozen-msg keeps the exact submitted text and
-# <buf>.frozen records the buffer's since-stamp, the client request id the
-# daemon minted for that digest, and the items it covered. Every retry sends
-# the same text under that id, with no expiry, until T3 accepts it or refuses
-# it, which unfreezes it for a rebuild. Items appended later form the next
-# generation and are flushed only after the frozen one, so no event is lost or
-# delivered twice; <buf>.next-since records when the first of them arrived,
-# which becomes the buffer's since-stamp once the frozen generation is gone.
+# A T3 Code digest is frozen before its first submit, because an unconfirmed
+# reply leaves the message in the supervisor's transcript while re-encoding it
+# would change the harness carrier and its request identity. <buf>.frozen-msg
+# keeps that exact carrier - a record-backed away-supervisor doorbell on a
+# harness that strips the typed envelope, else the encoded input, both owned by
+# bin/fm-operational-input.sh - and <buf>.frozen records the buffer's
+# since-stamp, the client request id the daemon minted for that digest, and the
+# items it covered. Every retry submits that same carrier under that id, with no
+# expiry, until T3 accepts it or refuses it, which unfreezes it for a rebuild.
+# Items appended later form the next generation and are flushed only after the
+# frozen one, so no event is lost or delivered twice; <buf>.next-since records
+# when the first of them arrived, which becomes the buffer's since-stamp once
+# the frozen generation is gone.
 escalate_freeze() {  # <buf> <submitted-message> <request-id>
   local buf=$1
   rm -f "$buf.next-since"

@@ -3096,9 +3096,14 @@ finish_firstmate_home_removal() {
 
 # For a local removal, the evidence file is written before the public home is
 # renamed into its staging directory, so a retry can finish a removal whose home
-# is already gone. A retry that finds the public path still present refuses
-# rather than removing it: it cannot prove that home is the generation the
-# evidence names instead of a reseeded successor at the same path.
+# is already gone. When the public path is still present, that evidence's own
+# home and generation decide: with the staged copy absent or holding no renamed
+# <staged>/home, the state is this attempt's own leftover after an interruption
+# no trap could catch, so the retry withdraws the evidence and removes the home.
+# A staging directory that already holds <staged>/home, or a home whose
+# generation no longer matches, still refuses rather than removing it: it cannot
+# prove that home is the generation the evidence names instead of a reseeded
+# successor at the same path.
 # Rolling back before the rename restores the home and withdraws that evidence,
 # but only when the staged copy is genuinely gone: a signal that lands between
 # the rename and the committed flag leaves <staged>/home in place, so the
