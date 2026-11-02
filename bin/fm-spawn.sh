@@ -4581,9 +4581,9 @@ claim_spawn_slot() (
       exit 1
     fi
   fi
-  # Do not replace the older claim until every candidate passed. A refused
-  # reuse leaves both the active claim and the older task records unchanged.
-  fm_treehouse_slot_owner_claim "$WT" "$ID" "$FM_HOME" || exit 1
+  # Do not replace the older claim until every candidate passed and every
+  # retired record's temp file is prepared. A refused reuse or a failed temp
+  # write leaves both the active claim and the older task records unchanged.
   for meta in "${records[@]+"${records[@]}"}"; do
     tmp="$meta.outdated.${BASHPID:-$$}"
     temps+=("$tmp")
@@ -4595,7 +4595,10 @@ claim_spawn_slot() (
       done < "$meta"
       printf 'worktree_reassigned_to=%s\n' "$ID"
     } > "$tmp" || exit 1
-    mv -f "$tmp" "$meta" || exit 1
+  done
+  fm_treehouse_slot_owner_claim "$WT" "$ID" "$FM_HOME" || exit 1
+  for meta in "${records[@]+"${records[@]}"}"; do
+    mv -f "$meta.outdated.${BASHPID:-$$}" "$meta" || exit 1
     echo "note: retired task $(basename "$meta" .meta)'s stale pool slot claim to worktree_outdated; successor is $ID" >&2
   done
 )
