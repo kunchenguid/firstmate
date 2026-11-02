@@ -1180,6 +1180,124 @@ test_scout_base_branch_refused_on_gerrit_forge() {
   pass "a based scout on a forge=gerrit project is refused at spawn"
 }
 
+# Exercise the real spawn/teardown entrypoints with a terminal fixture whose
+# old endpoint remains as either a stopped shell or a live agent.
+slot_reuse_old_endpoint() {
+  mv "$FAKEBIN_DIR/tmux" "$FAKEBIN_DIR/tmux-spawn"
+  cat > "$FAKEBIN_DIR/tmux" <<'SH'
+#!/usr/bin/env bash
+case "$1" in
+  list-windows)
+    if [ "$(cat "$FM_SLOT_AGENT_STATE")" != missing ]; then printf 'fm-slot-older\n'; fi ;;
+
+  display-message)
+    case "$*" in
+      *firstmate:fm-slot-older*'#{pane_current_command}'*) cat "$FM_SLOT_AGENT_STATE"; exit 0 ;;
+    esac ;;
+esac
+exec "$(dirname "$0")/tmux-spawn" "$@"
+SH
+  chmod +x "$FAKEBIN_DIR/tmux"
+  export FM_SLOT_AGENT_STATE="$CASE_DIR/old-agent-command"
+  printf 'zsh\n' > "$FM_SLOT_AGENT_STATE"
+}
+
+test_reused_slot_retires_only_safe_older_records() {
+  local rec id='slot-newer' old='slot-older' scenario out status before meta holder i
+  for scenario in stopped live missing dirty unlanded locked; do
+    rec=$(make_case "reuse-$scenario" "$old")
+    read_case_record "$rec"
+    lay_out_as_pool_slot
+    out=$(run_spawn "$old" --mode no-mistakes --yolo off)
+    status=$?
+    expect_code 0 "$status" "older task should launch"$'\n'"$out"
+    meta="$HOME_DIR/state/$old.meta"
+    cp "$meta" "$CASE_DIR/old-before.meta"
+    slot_reuse_old_endpoint
+    fm_test_spawn_brief "$HOME_DIR" "$id"
+    case "$scenario" in
+      live) printf 'codex\n' > "$FM_SLOT_AGENT_STATE" ;;
+      missing) printf 'missing\n' > "$FM_SLOT_AGENT_STATE" ;;
+      locked)
+        (
+          export FM_HOME="$HOME_DIR" FM_STATE_OVERRIDE="$HOME_DIR/state"
+          # shellcheck source=/dev/null
+          . "$ROOT/bin/fm-wake-lib.sh"
+          lock="$HOME_DIR/state/.control-$old.lock"
+          fm_lock_try_acquire "$lock" || exit 1
+          trap 'fm_lock_release "$lock"' EXIT
+          touch "$CASE_DIR/lock-ready"
+          while [ ! -e "$CASE_DIR/lock-release" ]; do sleep 0.1; done
+        ) &
+        holder=$!
+        i=0
+        while [ ! -e "$CASE_DIR/lock-ready" ] && [ "$i" -lt 100 ]; do sleep 0.1; i=$((i + 1)); done
+        [ -e "$CASE_DIR/lock-ready" ] || { kill "$holder"; wait "$holder"; fail 'lock holder failed'; }
+        ;;
+
+      dirty) printf 'keep dirty work\n' > "$POOL_DIR/unlanded.txt" ;;
+      unlanded)
+        printf 'keep committed work\n' > "$POOL_DIR/unlanded.txt"
+        git -C "$POOL_DIR" add unlanded.txt
+        git -C "$POOL_DIR" -c user.name=Tests -c user.email=tests@example.invalid commit -qm unlanded
+        ;;
+    esac
+    before=$(git -C "$POOL_DIR" rev-parse HEAD)
+    out=$(run_spawn "$id" --scout)
+    status=$?
+    if [ "$scenario" = locked ]; then
+      touch "$CASE_DIR/lock-release"
+      wait "$holder" || fail 'lock holder failed to release'
+    fi
+    if [ "$scenario" != stopped ]; then
+      [ "$status" -ne 0 ] || fail "slot reuse accepted $scenario older task"$'\n'"$out"
+      cmp -s "$meta" "$CASE_DIR/old-before.meta" || fail "$scenario record changed"
+      assert_grep "task=$old" "$SLOT_CLAIM" "$scenario replaced the older slot-owner claim"
+      [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$before" ] || fail "$scenario HEAD changed"
+      [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "$scenario published the new task"
+      case "$scenario" in
+        live) assert_contains "$out" 'alive' 'live refusal lacks liveness reason' ;;
+        missing) assert_contains "$out" 'missing' 'missing endpoint refusal lacks reason' ;;
+        locked) assert_contains "$out" 'locked' 'contention refusal lacks reason' ;;
+        dirty|unlanded) [ -f "$POOL_DIR/unlanded.txt" ] || fail "$scenario work lost" ;;
+      esac
+      pass "slot reuse refuses $scenario older task without retiring its record or changing its work"
+      continue
+    fi
+    expect_code 0 "$status" "stopped older task should allow slot reuse"$'\n'"$out"
+    out=$(FM_ROOT_OVERRIDE='' FM_HOME="$HOME_DIR" PATH="$FAKEBIN_DIR:$PATH" \
+      "$ROOT/bin/fm-crew-state.sh" "$old" 2>&1)
+    assert_contains "$out" "reassigned to task $id" 'crew-state read the successor copy'
+    out=$(fm_test_run_spawn "$HOME_DIR" "$POOL_DIR" "$FAKEBIN_DIR" "$old" --relaunch)
+    status=$?
+    [ "$status" -ne 0 ] || fail 'retired task relaunched into successor copy'
+    assert_contains "$out" "reassigned to task $id" 'relaunch refusal lacks successor'
+    # Teardown is the user-visible failure: it must work without editing A.
+    # --force waives the new scout's report gate, never the duplicate claim gate.
+    out=$(FM_ROOT_OVERRIDE='' FM_HOME="$HOME_DIR" PATH="$FAKEBIN_DIR:$PATH" \
+      "$ROOT/bin/fm-teardown.sh" "$id" --force 2>&1)
+    status=$?
+    expect_code 0 "$status" "new task teardown must not refuse an older stale claim"$'\n'"$out"
+    assert_grep "worktree_outdated=$POOL_DIR" "$meta" 'older worktree value was not retained'
+    if grep -q '^worktree=' "$meta"; then fail 'older record still claims the slot'; fi
+    [ ! -e "$HOME_DIR/state/$id.meta" ] || fail 'new task teardown left its record'
+    [ -f "$meta" ] || fail 'new task teardown removed older record'
+    # The successor's claim can disappear or be replaced again. Historical
+    # worktree_outdated must still never become a cleanup target.
+    printf 'task=later-task\nhome=%s\n' "$HOME_DIR" > "$SLOT_CLAIM"
+    printf 'later work\n' > "$POOL_DIR/later-work"
+    out=$(FM_ROOT_OVERRIDE='' FM_HOME="$HOME_DIR" PATH="$FAKEBIN_DIR:$PATH" \
+      "$ROOT/bin/fm-teardown.sh" "$old" 2>&1)
+    status=$?
+    expect_code 0 "$status" 'retired older task cleanup should succeed without reclaiming its historical path'"$out"
+    [ ! -e "$meta" ] || fail 'retired task cleanup left its record'
+    assert_grep 'later work' "$POOL_DIR/later-work" 'older cleanup changed successor work'
+    assert_grep 'task=later-task' "$SLOT_CLAIM" 'older cleanup removed successor claim'
+    pass 'stopped task slot reuse retires worktree= to worktree_outdated= and new task teardown succeeds'
+  done
+  unset FM_SLOT_AGENT_STATE
+}
+
 # A local-only project lands work with bin/fm-merge-local.sh: the primary
 # checkout's default branch advances and nothing is pushed, so origin stays at
 # the tip the slot was allocated from while that branch moves on.
@@ -1384,6 +1502,7 @@ test_refused_launch_leaves_the_pool_for_a_retry_and_a_second_task
 test_refused_launch_spares_per_id_paths_under_a_contended_spawn_lock
 test_non_polytoken_refused_launch_keeps_its_window
 test_treehouse_isolation_refusal_points_at_what_survives
+test_reused_slot_retires_only_safe_older_records
 test_linked_spawning_home_rejects_primary_before_refresh
 test_stale_pool_base_refreshes_before_branching
 test_named_base_branch_starts_from_that_branch

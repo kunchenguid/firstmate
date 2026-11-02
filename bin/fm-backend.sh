@@ -623,6 +623,9 @@ fm_backend_target_of_meta() {  # <meta-file>
 # valid only when their window name itself is exactly fm-<task-id>.
 # On success, sets FM_BACKEND_VALIDATED_BACKEND and
 # FM_BACKEND_VALIDATED_TARGET. On failure, prints one refusal and returns 1.
+# Teardown alone may pass --allow-retired-worktree to validate an endpoint
+# whose worktree= was retired by fm-spawn; the historical path is validation
+# input only, never an active worktree claim or removal target.
 fm_backend_meta_exact_value() {  # <meta-file> <key>
   local meta=$1 key=$2 count value
   count=$(grep -c "^$key=" "$meta" 2>/dev/null || true)
@@ -700,9 +703,9 @@ fm_backend_worktree_identity_repair_hint() {  # <meta-file>
   echo "A pool slot handed on to another task since is still safe to name: cleanup reads that slot's own .fm-slot-owner claim and then leaves the slot untouched, while a slot with no claim is proved only by that worktree listing."
 }
 
-fm_backend_validate_task_endpoint() {  # <meta-file> <task-id>
+fm_backend_validate_task_endpoint() {  # <meta-file> <task-id> [--allow-retired-worktree]
   local meta=$1 id=$2 backend_count backend window worktree project binding_count binding
-  local session pane recorded_session workspace tab terminal worktree_id surface rex_window rex_server thread block
+  local session pane recorded_session workspace tab terminal worktree_id surface retired_to rex_window rex_server thread block
   FM_BACKEND_VALIDATED_BACKEND=
   FM_BACKEND_VALIDATED_TARGET=
   [ -f "$meta" ] && [ ! -L "$meta" ] || {
@@ -717,7 +720,17 @@ fm_backend_validate_task_endpoint() {  # <meta-file> <task-id>
     echo "REFUSED: task $id has a missing, empty, or ambiguous window endpoint; preserving task state." >&2
     return 1
   }
-  worktree=$(fm_backend_meta_exact_value "$meta" worktree) || {
+  worktree=$(fm_backend_meta_exact_value "$meta" worktree) || worktree=
+  if [ -z "$worktree" ] && [ "${3:-}" = --allow-retired-worktree ] \
+    && ! grep -q '^worktree=' "$meta"; then
+    retired_to=$(fm_backend_meta_exact_value "$meta" worktree_reassigned_to) || retired_to=
+    case "$retired_to" in ''|*[!A-Za-z0-9._-]*) retired_to= ;; esac
+    if [ -n "$retired_to" ] && [ "$retired_to" != "$id" ] \
+      && ! grep -qE '^(kind=secondmate|remote_host=|backend=orca)' "$meta"; then
+      worktree=$(fm_backend_meta_exact_value "$meta" worktree_outdated) || worktree=
+    fi
+  fi
+  [ -n "$worktree" ] || {
     echo "REFUSED: task $id has a missing, empty, or ambiguous worktree identity; preserving task state." >&2
     fm_backend_worktree_identity_repair_hint "$meta" >&2
     return 1

@@ -12,6 +12,51 @@ Verified on 2026-10-14 with Polytoken 0.9.0 on macOS arm64 using the tmux worker
 [Polytoken verification](polytoken.md) owns the commands, session-model proof, and lifecycle output; its credentialed live guard refreshes the evidence.
 This does not verify a Polytoken primary, secondmate, or native Herdr pane.
 
+## Pooled worktree claim retirement
+
+The retirement contract lives in `claim_spawn_slot` in [`bin/fm-spawn.sh`](../../bin/fm-spawn.sh); the committed-content proof is shared with teardown through [`bin/fm-worktree-safety-lib.sh`](../../bin/fm-worktree-safety-lib.sh).
+The portable regression uses real disposable Git repositories and a simulated terminal through the real spawn, crew-state, relaunch, and teardown entrypoints.
+It does not allocate a live fleet slot or submit a model prompt.
+
+Compatibility inspection covers the shared allocation path for tmux, Herdr, Zellij, and cmux, before any harness-specific launch.
+The existing recovery-grade classifier permits retirement only for an observed agent-free endpoint on tmux or Herdr.
+A missing endpoint remains refused because it can be unreachable, and this path never starts a backend server to investigate it.
+Zellij and cmux have no verified negative classifier and therefore refuse stale-claim retirement.
+Orca allocates its own worktrees and never enters the Treehouse claim path; secondmate and remote records are ineligible for retirement.
+The same guard applies to every supported primary and worker harness because the proof uses the recorded backend endpoint, with no harness-specific branch or new vendor-output recognition.
+Live backend and harness behavior was not refreshed by this regression; existing classifier evidence below remains independently scoped.
+
+Verified on 2026-11-02 on macOS 27.2 with Bash 5.3.20, stock Bash 3.2.57 syntax checks, Git 2.54.0 (Apple Git-157), ShellCheck 0.11.0, and actionlint 1.7.12.
+Commands:
+
+```sh
+bash bin/fm-test-run.sh tests/fm-spawn-pool-base-freshen.test.sh tests/fm-teardown.test.sh tests/fm-teardown-endpoint-safety.test.sh tests/fm-control-relaunch.test.sh tests/fm-backend-t3code.test.sh
+bash bin/fm-lint.sh
+bash bin/fm-doc-audience-check.sh
+```
+
+Observed retirement assertions:
+
+```text
+ok - stopped task slot reuse retires worktree= to worktree_outdated= and new task teardown succeeds
+ok - slot reuse refuses live older task without retiring its record or changing its work
+ok - slot reuse refuses missing older task without retiring its record or changing its work
+ok - slot reuse refuses dirty older task without retiring its record or changing its work
+ok - slot reuse refuses unlanded older task without retiring its record or changing its work
+ok - slot reuse refuses locked older task without retiring its record or changing its work
+ok - retired endpoint validation is cleanup-only and refuses malformed or ineligible retirement records
+ok - fm-spawn.sh --backend t3code: stale claims are checked before refresh and unsafe slots stay leased
+ok - the content-landed fallback checks a task's recorded base branch, not the default branch
+FM_TEST_END 2026-11-02T21:27:14Z tests/fm-spawn-pool-base-freshen.test.sh exit=0 duration_ms=2443162 gate_skip=false
+FM_TEST_END 2026-11-02T21:35:08Z tests/fm-backend-t3code.test.sh exit=0 duration_ms=219728 gate_skip=false
+FM_TEST_END 2026-11-02T21:44:35Z tests/fm-teardown.test.sh exit=0 duration_ms=566927 gate_skip=false
+FM_TEST_END 2026-11-02T21:45:33Z tests/fm-teardown-endpoint-safety.test.sh exit=0 duration_ms=58019 gate_skip=false
+FM_TEST_END 2026-11-02T21:49:26Z tests/fm-control-relaunch.test.sh exit=0 duration_ms=233789 gate_skip=false
+```
+
+The stopped-task case also checks crew-state reporting, refusal to relaunch the retired task, and cleanup of the retired record after a later task owns the slot, preserving that later task's dirty file and owner claim.
+Optional real-tmux cases in the endpoint-safety suite printed `skip - tmux not installed`; these assertions do not claim live-tmux qualification.
+
 ## Harness detection precedence
 
 Firstmate's own harness comes from two kinds of evidence, and `bin/fm-harness.sh` owns how they combine: an environment marker names its harness, and the nearest harness process in the parent chain proves who owns the process tree.

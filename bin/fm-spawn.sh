@@ -215,6 +215,8 @@
 #   once to drop its claim after metadata publication too, and before its launch
 #   is delivered it closes the endpoint whose `treehouse get` shell leases the
 #   slot and removes the wiring, task temp root, and staged launch file it wrote.
+#   claim_spawn_slot below owns retirement of safe older same-home
+#   claims before base refresh; worktree_outdated= is historical, never active.
 #   The local root is whatever bin/fm-wake-lib.sh's
 #   fm_firstmate_root_home resolves, so a home seeded from another machine anchors
 #   that lock itself rather than failing to resolve one;
@@ -914,6 +916,8 @@ fi
 . "$SCRIPT_DIR/fm-ff-lib.sh"
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
+# shellcheck source=bin/fm-worktree-safety-lib.sh
+. "$SCRIPT_DIR/fm-worktree-safety-lib.sh"
 # shellcheck source=bin/fm-classify-lib.sh
 . "$SCRIPT_DIR/fm-classify-lib.sh"
 fm_backlog_directory_present "$STATE" "state directory" || {
@@ -2375,6 +2379,10 @@ if [ "$RELAUNCH" -eq 1 ]; then
     echo "error: --relaunch refused after locking: $FM_BACKLOG_TRANSITION_ERROR" >&2
     exit 1
   }
+  if [ -n "$(fm_meta_get "$RELAUNCH_META" worktree_outdated)" ]; then
+    echo "error: task $ID's pool slot was reassigned to task $(fm_meta_get "$RELAUNCH_META" worktree_reassigned_to); refusing to relaunch into its historical copy" >&2
+    exit 1
+  fi
   fm_backend_validate_task_endpoint "$RELAUNCH_META" "$ID" || exit 1
   BACKEND=$FM_BACKEND_VALIDATED_BACKEND
   RELAUNCH_TARGET=$FM_BACKEND_VALIDATED_TARGET
@@ -4500,6 +4508,102 @@ spawn_worktree_has_origin_config() { # <worktree>
   return 1
 }
 
+# Retire same-home stale claims before base refresh can change the copy.
+# The caller holds the project allocation lock. Hold every matching record's
+# control and metadata locks without waiting (teardown takes them before the
+# project lock). Refuse on
+# contention, uncertain liveness, or work not proved landed. A pool allocation
+# alone is never proof that an old task is dead or its work is disposable.
+# Only worktree= changes: preserve its exact value as worktree_outdated= and
+# record the successor so later cleanup cannot rediscover ownership when the
+# successor's slot claim disappears. No other home is searched or rewritten.
+claim_spawn_slot() (
+  local meta other_id other_path other_slot slot lock tmp line state default
+  local -a locks=() records=() temps=()
+  trap 'for tmp in "${temps[@]+"${temps[@]}"}"; do rm -f "$tmp"; done; for lock in "${locks[@]+"${locks[@]}"}"; do fm_lock_release "$lock"; done' EXIT
+  slot=$(real_path_or_raw "$WT")
+  for meta in "$STATE"/*.meta; do
+    [ -f "$meta" ] || continue
+    other_id=$(basename "$meta" .meta)
+    [ "$other_id" != "$ID" ] || continue
+    other_path=$(fm_meta_get "$meta" worktree)
+    [ -n "$other_path" ] || continue
+    other_slot=$(real_path_or_raw "$other_path")
+    [ "$other_slot" = "$slot" ] || continue
+    for lock in "$STATE/.control-$other_id.lock" "$(fm_meta_lock_path "$meta")"; do
+      if ! fm_lock_try_acquire "$lock"; then
+        echo "error: cannot retire task $other_id's pool slot claim: its lifecycle or metadata is locked" >&2
+        exit 1
+      fi
+      locks+=("$lock")
+    done
+    # Re-read under the locks: a concurrent lifecycle action may have changed
+    # the candidate between discovery and locking.
+    [ -f "$meta" ] && [ ! -L "$meta" ] || {
+      echo "error: cannot retire task $other_id's unsafe pool slot record" >&2
+      exit 1
+    }
+    other_path=$(fm_meta_get "$meta" worktree)
+    [ -n "$other_path" ] || continue
+    [ "$(real_path_or_raw "$other_path")" = "$slot" ] || continue
+    if [ "$(fm_meta_get "$meta" kind)" = secondmate ] || grep -q '^remote_host=' "$meta"; then
+      echo "error: cannot retire task $other_id's secondmate or remote slot claim" >&2
+      exit 1
+    fi
+    if grep -qE '^(worktree_outdated|worktree_reassigned_to)=' "$meta"; then
+      echo "error: task $other_id has conflicting active and retired worktree claims" >&2
+      exit 1
+    fi
+    fm_backend_validate_task_endpoint "$meta" "$other_id" || exit 1
+    state=$(fm_backend_agent_state "$FM_BACKEND_VALIDATED_BACKEND" "$FM_BACKEND_VALIDATED_TARGET")
+    # Missing endpoints can be unreachable rather than gone. Do not restart a
+    # backend to investigate here: only an observed agent-free endpoint passes.
+    if [ "$state" != dead ]; then
+      echo "error: cannot retire task $other_id's pool slot claim: endpoint is $state, not positively agent-free" >&2
+      exit 1
+    fi
+    fm_treehouse_pool_slot "$(fm_meta_get "$meta" project)" "$WT" || {
+      echo "error: task $other_id's recorded project does not own this pool slot" >&2
+      exit 1
+    }
+    records+=("$meta")
+  done
+  if [ "${#records[@]}" -gt 0 ]; then
+    # Use teardown's conservative content-in-default proof, including for scouts.
+    # A remote branch alone is insufficient because base refresh replaces HEAD.
+    state=$(git -C "$WT" status --porcelain) || exit 1
+    if [ -n "$state" ]; then
+      echo "error: cannot retire older pool slot claims: $WT has uncommitted work" >&2
+      exit 1
+    fi
+    default=$(default_branch "$PROJ_ABS") || {
+      echo "error: cannot retire older pool slot claims: default branch is unknown" >&2
+      exit 1
+    }
+    if ! fm_worktree_content_in_default "$WT" "$default"; then
+      echo "error: cannot retire older pool slot claims: work in $WT is not proved landed in $default" >&2
+      exit 1
+    fi
+  fi
+  # Do not replace the older claim until every candidate passed. A refused
+  # reuse leaves both the active claim and the older task records unchanged.
+  fm_treehouse_slot_owner_claim "$WT" "$ID" "$FM_HOME" || exit 1
+  for meta in "${records[@]+"${records[@]}"}"; do
+    tmp="$meta.outdated.${BASHPID:-$$}"
+    temps+=("$tmp")
+    cp -p "$meta" "$tmp" || exit 1
+    {
+      while IFS= read -r line || [ -n "$line" ]; do
+        case "$line" in worktree=*) line="worktree_outdated=${line#worktree=}" ;; esac
+        printf '%s\n' "$line"
+      done < "$meta"
+      printf 'worktree_reassigned_to=%s\n' "$ID"
+    } > "$tmp" || exit 1
+    mv -f "$tmp" "$meta" || exit 1
+    echo "note: retired task $(basename "$meta" .meta)'s stale pool slot claim to worktree_outdated; successor is $ID" >&2
+  done
+)
+
 # The opt-in half of the base rule the header owns: return 0 and set
 # SPAWN_PRIMARY_BASE_REV when <project>'s own <default> should be this fresh
 # slot's base instead of origin's tip <origin-rev>. A pool slot shares the
@@ -5201,6 +5305,14 @@ EOF
       }
       [ -n "$WT" ] || { echo "error: treehouse get --lease did not report a worktree for $ID" >&2; exit 1; }
       validate_spawn_worktree "treehouse get --lease" "$WT (leased to $ID; once inspected, release it with 'treehouse return --force $WT' from $PROJ_ABS)"
+      # Retire older claims before T3's early base refresh can replace HEAD.
+      if fm_treehouse_pool_slot "$PROJ_ABS" "$WT"; then
+        SPAWN_SLOT_CLAIMED=1
+        claim_spawn_slot || {
+          echo "error: cannot retire older claims for $WT; the slot stays leased to $ID for inspection" >&2
+          exit 1
+        }
+      fi
       T3CODE_LEASED=1
       freshen_spawn_worktree_base "$WT" "$BASE_BRANCH" "$PROJ_ABS" "$MODE" || {
         if [ "$?" -eq 2 ]; then
@@ -5902,12 +6014,12 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   # under its successor.
   # Written under the Treehouse project lock held from before slot allocation
   # through metadata publication, so no other spawn or return sees a half-claim.
-  if fm_treehouse_pool_slot "$PROJ_ABS" "$WT"; then
-    if ! fm_treehouse_slot_owner_claim "$WT" "$ID" "$FM_HOME"; then
+  if [ "$SPAWN_SLOT_CLAIMED" != 1 ] && fm_treehouse_pool_slot "$PROJ_ABS" "$WT"; then
+    SPAWN_SLOT_CLAIMED=1
+    if ! claim_spawn_slot; then
       echo "error: could not claim Treehouse pool slot $WT for task $ID; refusing to launch a worker whose slot cannot later be proved to be its own; $(spawn_endpoint_hint)" >&2
       exit 1
     fi
-    SPAWN_SLOT_CLAIMED=1
   fi
 fi
 if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ] && [ "$BACKEND" != t3code ]; then
