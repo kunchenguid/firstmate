@@ -90,6 +90,14 @@ wait_cap() { # <needle-file-content> <cap> <seconds>: fixed string appears
   done
 }
 
+wait_last_state() { # <state=X> <cap> <seconds>: the newest emitted record is X
+  local want=$1 cap=$2 tries=${3:-40} i=0
+  while [ "$(grep -o 'state=[a-z]*' "$cap" 2>/dev/null | tail -1)" != "$want" ]; do
+    [ "$i" -ge "$tries" ] && return 1
+    sleep 0.1; i=$((i + 1))
+  done
+}
+
 # --- passive terminal eligibility -------------------------------------------
 
 # Contract: unknown terminals get no bytes, no watcher, and no input reads.
@@ -424,7 +432,7 @@ t_final_record_with_unknown_activity() {
   wait_cap 'state=working' "$d/cap" 60 || fail "final: no working record"
   rm -f "$d/state/t30.busy-state" "$d/state/t30.busy-gen"
   wait_cap 'state=idle' "$d/cap" 60 || fail "final: working outlived its turn once activity read unknown"
-  printf 'done [at=9]: PR https://example.test/pr/9\n' >"$d/state/t30.status"
+  printf 'done [at=%s]: PR https://example.test/pr/9\n' "$(date +%s)" >"$d/state/t30.status"
   wait_cap 'state=done' "$d/cap" 60 || fail "final: done did not report while activity was unknown"
   kill "$holder" 2>/dev/null; wait "$holder" 2>/dev/null || true
   wait_gone "$wpid" || fail "final: the watcher did not exit on parent death"
@@ -461,8 +469,8 @@ t_rovo_reports_through_unknown() {
   wait_cap 'state=idle' "$d/cap" 60 || fail "rovo: working outlived the marker while activity read unknown"
   printf 'needs-decision [at=1] [key=k1]: pick one\n' >"$d/state/t31.status"
   wait_cap 'state=blocked:kind=question' "$d/cap" 60 || fail "rovo: an open decision did not report while unknown"
-  printf 'resolved [at=2] [key=k1]: go\ndone [at=3]: PR https://example.test/pr/31\n' >>"$d/state/t31.status"
-  wait_cap 'state=done' "$d/cap" 60 || fail "rovo: done did not report while activity was unknown"
+  printf 'resolved [at=2] [key=k1]: go\ndone [at=%s]: PR https://example.test/pr/31\n' "$(date +%s)" >>"$d/state/t31.status"
+  wait_cap 'state=done' "$d/cap" 60 || fail "rovo: a done stamped after the last busy read did not report while unknown"
   kill "$wpid" 2>/dev/null
   wait_gone "$wpid" || fail "rovo: the watcher did not exit on TERM"
   wait "$wpid" 2>/dev/null || true
@@ -496,8 +504,8 @@ t_agy_reports_through_unknown() {
     || fail "agy: the busy status row did not read as working"
   : >"$d/pane"
   wait_cap 'state=idle' "$d/cap" 60 || fail "agy: working outlived the status row while activity read unknown"
-  printf 'done [at=4]: PR https://example.test/pr/33\n' >"$d/state/t33.status"
-  wait_cap 'state=done' "$d/cap" 60 || fail "agy: done did not report while activity was unknown"
+  printf 'done [at=%s]: PR https://example.test/pr/33\n' "$(date +%s)" >"$d/state/t33.status"
+  wait_cap 'state=done' "$d/cap" 60 || fail "agy: a done stamped after the last busy read did not report while unknown"
   kill "$wpid" 2>/dev/null
   wait_gone "$wpid" || fail "agy: the watcher did not exit on TERM"
   wait "$wpid" 2>/dev/null || true
@@ -506,9 +514,10 @@ t_agy_reports_through_unknown() {
 }
 
 # A watcher killed without its final write leaves its last record on the
-# pane. The next arm writes one idle record once every gate has passed -
-# proven while the fresh watcher, activity unknown and the signals still
-# folding to that same idle, adds nothing on top of it.
+# pane. The next arm writes one idle record once the pane proves 7501-aware
+# and a leftover pidfile marks the record as the bridge's own - proven
+# while the fresh watcher, activity unknown and the signals still folding
+# to that same idle, adds nothing on top of it.
 t_arm_clears_stale_record() {
   local d=$TMP_ROOT/armclear
   mkhome "$d"
@@ -560,6 +569,93 @@ t_initial_unknown_launch_reports() {
   wait_cap 'state=done' "$d/cap" 60 || fail "initial unknown: disarm skipped the final record"
   stop_term
   pass "initial unknown: arm's record carries ownership - decisions, done, and the exit write all land"
+}
+
+# A done/failed line carries the phase that wrote it, not the turn now in
+# flight: once activity is unknown, a terminal line only reports when its
+# stamp reaches the reading that last proved the worker busy. An older done
+# and an older failed both park at idle instead of claiming a result, and a
+# done stamped after the last busy read still lands.
+t_stale_terminal_line_parks_idle() {
+  local d=$TMP_ROOT/staleline verb wpid
+  mkhome "$d"
+  : >"$d/cap"
+  sleep 300 &
+  local holder=$!
+  local suppressed
+  for verb in 'done' 'failed'; do
+    suppressed='done'
+    [ "$verb" = 'done' ] || suppressed=error
+    : >"$d/cap"
+    printf '%s [at=1]: earlier phase result\n' "$verb" >"$d/state/t42.status"
+    busy_rec "$d/state" t42 busy
+    env "${CLEAN_UNSET[@]}" FM_OSC7501_TTY="$d/cap" FM_OSC7501_INTERVAL=1 \
+      bash "$SCRIPT" watch --task t42 --kind ship --state "$d/state" --harness opencode \
+      --parent "$holder" &
+    wpid=$!
+    wait_cap 'state=working' "$d/cap" 60 || fail "stale $verb: no working record"
+    rm -f "$d/state/t42.busy-state" "$d/state/t42.busy-gen"
+    wait_last_state 'state=idle' "$d/cap" 60 \
+      || fail "stale $verb: an earlier-phase $verb reported over a turn still in flight"
+    sleep 2
+    assert_equals "0" "$(grep -o "state=$suppressed" "$d/cap" | wc -l | tr -d ' ')" \
+      "stale $verb: the earlier result never reported while activity was unknown"
+    kill "$wpid" 2>/dev/null; wait "$wpid" 2>/dev/null || true
+  done
+  : >"$d/cap"
+  busy_rec "$d/state" t42 busy
+  env "${CLEAN_UNSET[@]}" FM_OSC7501_TTY="$d/cap" FM_OSC7501_INTERVAL=1 \
+    bash "$SCRIPT" watch --task t42 --kind ship --state "$d/state" --harness opencode \
+    --parent "$holder" &
+  wpid=$!
+  wait_cap 'state=working' "$d/cap" 60 || fail "fresh done: no working record"
+  rm -f "$d/state/t42.busy-state" "$d/state/t42.busy-gen"
+  wait_last_state 'state=idle' "$d/cap" 60 || fail "fresh done: working did not retire"
+  printf 'done [at=%s]: PR https://example.test/pr/42\n' "$(date +%s)" >"$d/state/t42.status"
+  wait_last_state 'state=done' "$d/cap" 60 \
+    || fail "fresh done: a line stamped after the last busy read did not report"
+  kill "$wpid" 2>/dev/null; wait "$wpid" 2>/dev/null || true
+  kill "$holder" 2>/dev/null; wait "$holder" 2>/dev/null || true
+  pass "unknown activity: a stale done/failed parks at idle; a fresh done still reports"
+}
+
+# A watcher killed without its final write leaves its record standing. The
+# leftover pidfile marks it as the bridge's own, so the next launch on that
+# pane clears it however the launch ends - reporting off, or a natively
+# reporting agent - while a pane that never armed still sees nothing.
+t_unarmed_relaunch_clears_leftover() {
+  local d=$TMP_ROOT/deadleft kind wpid
+  mkhome "$d"; mkfake "$d" claude 'claude 2.1.295'
+  start_term "$d"
+  for kind in off native; do
+    rm -f "$d/config/osc7501-status"
+    busy_rec "$d/state" t43 busy
+    env "${CLEAN_UNSET[@]}" HC_TERMINAL_ID=x FM_OSC7501_TTY="$TERM_SLAVE" FM_OSC7501_INTERVAL=1 \
+      bash "$SCRIPT" arm --task t43 --harness opencode --agent-bin opencode --backend tmux --kind ship \
+      --state "$d/state" --config "$d/config"
+    wpid=$(watcher_pid "$d/state") || fail "leftover $kind: no watcher armed"
+    wait_cap 'state=working' "$d/cap" 60 || fail "leftover $kind: no working record"
+    kill -KILL "$wpid" 2>/dev/null; wait "$wpid" 2>/dev/null || true
+    if [ "$kind" = off ]; then
+      printf 'off\n' >"$d/config/osc7501-status"
+      env "${CLEAN_UNSET[@]}" HC_TERMINAL_ID=x FM_OSC7501_TTY="$TERM_SLAVE" bash "$SCRIPT" arm \
+        --task t43 --harness opencode --agent-bin opencode --backend tmux --kind ship \
+        --state "$d/state" --config "$d/config"
+    else
+      env "${CLEAN_UNSET[@]}" HC_TERMINAL_ID=x FM_OSC7501_TTY="$TERM_SLAVE" PATH="$d/bin:$PATH" \
+        bash "$SCRIPT" arm --task t43 --harness claude --agent-bin claude --backend tmux --kind ship \
+        --state "$d/state" --config "$d/config"
+    fi
+    wait_last_state 'state=idle' "$d/cap" 60 \
+      || fail "leftover $kind: the dead watcher's record survived the relaunch"
+    [ -z "$(ls "$d/state"/.osc7501watch-* 2>/dev/null)" ] \
+      || fail "leftover $kind: the unarmed relaunch started a watcher"
+    sleep 1
+    assert_equals "state=idle" "$(grep -o 'state=[a-z]*' "$d/cap" | tail -1)" \
+      "leftover $kind: nothing rewrote the cleared record"
+  done
+  stop_term
+  pass "lifecycle: off and native relaunches clear a dead watcher's leftover record"
 }
 
 # --- config gate ---------------------------------------------------------------
@@ -903,6 +999,8 @@ fm_test_run \
   t_agy_reports_through_unknown \
   t_arm_clears_stale_record \
   t_initial_unknown_launch_reports \
+  t_stale_terminal_line_parks_idle \
+  t_unarmed_relaunch_clears_leftover \
   t_config_off_disables \
   t_hc_marker_arms_watcher \
   t_concurrent_panes_keep_their_reporters \
