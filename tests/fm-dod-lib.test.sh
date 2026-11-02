@@ -399,6 +399,7 @@ test_no_mistakes_deliveries_render_one_validation_start_claim() {
       manual) out=$(fm_dod_block no-mistakes dod-claim fm/dod-claim none '' '' manual) ;;
       gerrit) out=$(fm_dod_block no-mistakes dod-claim fm/dod-claim gerrit) ;;
     esac
+    # shellcheck disable=SC2016  # single quotes keep the backticks literal
     count=$(printf '%s\n' "$out" | grep -Fxc -- '- Before starting validation, append `working [at=<epoch>]: validation started` to the status file so Firstmate can verify that the run exists for this branch.' || true)
     assert_equals 1 "$count" "$delivery delivery must include one validation-start claim"
   done
