@@ -87,7 +87,7 @@ pr_check_rotate() {  # <last-id>: start the lines on stdin just after the line f
 }
 
 pr_check_scan() {
-  local budget start meta id kind url left marker err rc tmp candidates= cursor_file cursor
+  local budget start meta id kind url left marker err rc tmp candidates='' cursor_file cursor
   budget=${FM_CHECK_TIMEOUT:-30}
   case "$budget" in ''|*[!0-9]*) budget=30 ;; esac
   budget=$((budget - 5))
