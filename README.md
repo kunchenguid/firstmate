@@ -74,7 +74,7 @@ All three have verified turn-end guard paths when launched with their documented
 Pick whichever one matches your subscription and workflow.
 
 Oh My Pi (`omp`), a Pi fork, is verified as a primary with the same extension-owned watcher model as Pi and a stronger turn-end guard: its blocking `session_stop` hook compels a continuation instead of requesting one.
-Codex and OpenCode are also verified and supported as primary harnesses; Codex uses bounded foreground checkpoints, and OpenCode uses a TUI plugin, so both carry more harness-specific supervision tradeoffs than the three co-primaries.
+Codex and OpenCode are also verified and supported as primary harnesses; Codex uses bounded foreground checkpoints unless a home opts in to its model-free native Stop park, and OpenCode uses a TUI plugin, so both carry more harness-specific supervision tradeoffs than the three co-primaries.
 Cursor Agent CLI is verified as a primary too, using a tracked project-scope `.cursor/hooks.json` whose `stop` hook parks on the watcher between turns, closest in shape to Claude Code's.
 Launch it with `--trust`, or none of its project hooks load; it also has no turn-end hook in headless `cursor-agent -p`, so run the primary session interactively.
 Antigravity CLI (`agy`) is verified as a primary too, using a tracked project-local `.agents/hooks.json` whose Stop hook parks on the watcher between turns like Cursor's.
