@@ -47,11 +47,10 @@
 #     no longer uses local resources, and
 #   - is not a finished scout or local-only ship with no active reservation.
 # Completion means a done event with no later working event in the status log.
-# A <state>/<id>.capacity-reservation file holds a released worker's place
-# during relaunch while the status log has not grown past its status_offset.
+# A reservation holds until the log records working or done after its offset; bookkeeping alone does not expire it.
 # Reservations contain gen=<spawn generation> and status_offset=<byte count>.
 # Admission reads the reservation before status; malformed or unreadable records
-# hold a place. Growth expires the reservation and restores the completion rule.
+# hold a place. Expiry restores the completion rule.
 # A place therefore frees when a PR-based ship records its ready PR, when a
 # scout or local-only ship reports done, or when a task's record is removed.
 # No-mistakes and direct-PR ships keep their place after done until their PR
@@ -178,7 +177,7 @@ fm_project_capacity_reservation_path() {
 }
 
 fm_project_capacity_reservation_active() {
-  local reservation=$1 status_file=$2 offset size
+  local reservation=$1 status_file=$2 offset size suffix status_line status_verb
   [ -e "$reservation" ] || [ -L "$reservation" ] || return 1
   [ -f "$reservation" ] && [ -r "$reservation" ] || return 0
   offset=$(awk '
@@ -189,7 +188,16 @@ fm_project_capacity_reservation_active() {
   ' "$reservation") || return 0
   size=$(wc -c < "$status_file" 2>/dev/null | tr -d '[:space:]') || return 0
   case "$size" in ''|*[!0-9]*) return 0 ;; esac
-  awk -v size="$size" -v offset="$offset" 'BEGIN { exit !(size <= offset) }'
+  if awk -v size="$size" -v offset="$offset" 'BEGIN { exit !(size <= offset) }'; then
+    return 0
+  fi
+  offset=$(awk -v offset="$offset" 'BEGIN { printf "%.0f", offset + 1 }') || return 0
+  suffix=$(tail -c "+$offset" "$status_file" 2>/dev/null) || return 0
+  while IFS= read -r status_line || [ -n "$status_line" ]; do
+    status_line_verb "$status_line" status_verb
+    case "$status_verb" in working|done) return 1 ;; esac
+  done <<< "$suffix"
+  return 0
 }
 
 fm_project_capacity_status_finished() {

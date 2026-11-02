@@ -409,7 +409,7 @@ test_restart_does_not_count_its_own_record() {
 }
 
 test_reservation_expiry_and_malformed_records() {
-  local dir offset body expected rc label
+  local dir offset body expected rc label verb
   dir="$TMP_ROOT/reservation-parser"
   mkdir -p "$dir"
   printf 'done: finished\n' > "$dir/status"
@@ -417,7 +417,7 @@ test_reservation_expiry_and_malformed_records() {
   while IFS='|' read -r label expected body; do
     printf '%b' "$body" > "$dir/reservation"
     rc=0
-    bash -c '. "$1/bin/fm-project-capacity-lib.sh"; fm_project_capacity_reservation_active "$2" "$3"' \
+    bash -c '. "$1/bin/fm-classify-lib.sh"; . "$1/bin/fm-project-capacity-lib.sh"; fm_project_capacity_reservation_active "$2" "$3"' \
       _ "$ROOT" "$dir/reservation" "$dir/status" || rc=$?
     expect_code "$expected" "$rc" "$label: wrong reservation verdict"
   done <<EOF
@@ -428,13 +428,23 @@ malformed|0|gen=new\nstatus_offset=invalid\n
 missing generation|0|status_offset=0\n
 extra field|0|gen=new\nstatus_offset=0\nextra=value\n
 EOF
+  printf 'gen=new\nstatus_offset=%s\n' "$offset" > "$dir/reservation"
+  for verb in captain-held note resolved needs-decision blocked failed paused working done; do
+    printf '%s [at=123]: appended after reservation\n' "$verb" >> "$dir/status"
+    expected=0
+    case "$verb" in working|done) expected=1 ;; esac
+    rc=0
+    bash -c '. "$1/bin/fm-classify-lib.sh"; . "$1/bin/fm-project-capacity-lib.sh"; fm_project_capacity_reservation_active "$2" "$3"' \
+      _ "$ROOT" "$dir/reservation" "$dir/status" || rc=$?
+    expect_code "$expected" "$rc" "$verb: wrong post-reservation event verdict"
+  done
   rm "$dir/reservation"
   mkdir "$dir/reservation"
   rc=0
-  bash -c '. "$1/bin/fm-project-capacity-lib.sh"; fm_project_capacity_reservation_active "$2" "$3"' \
+  bash -c '. "$1/bin/fm-classify-lib.sh"; . "$1/bin/fm-project-capacity-lib.sh"; fm_project_capacity_reservation_active "$2" "$3"' \
     _ "$ROOT" "$dir/reservation" "$dir/status" || rc=$?
   expect_code 0 "$rc" "an unreadable reservation did not hold capacity"
-  pass "reservation records expire on status growth and malformed records hold capacity"
+  pass "reservation expiry requires working or done and malformed records hold capacity"
 }
 
 test_relaunch_reclaims_a_finished_workers_place() {
@@ -494,9 +504,14 @@ test_relaunch_reclaims_a_finished_workers_place() {
       case "$tail" in
         early-*) ;;
         *)
+          printf 'captain-held: bookkeeping after successful relaunch\n' >> "$home/state/task-a.status"
           rc=0
           out=$(spawn_ship "$case_dir" task-b "$case_dir/unused") || rc=$?
-          expect_code "$DEFER_EXIT" "$rc" "a relaunched $scenario did not hold its place: $out"
+          expect_code "$DEFER_EXIT" "$rc" "bookkeeping released the relaunched $scenario: $out"
+          printf 'working: replacement active\n' >> "$home/state/task-a.status"
+          rc=0
+          out=$(spawn_ship "$case_dir" task-b "$case_dir/unused") || rc=$?
+          expect_code "$DEFER_EXIT" "$rc" "working released the relaunched $scenario: $out"
           printf 'done: replacement finished\n' >> "$home/state/task-a.status"
           ;;
       esac
