@@ -541,16 +541,27 @@ test_run_timed_delivers_piped_stdin_on_every_mechanism() {
     fi
   fi
 
-  rc=0
-  out=$(bash -c '
-    . "$1"
-    exec 3>"$2"
-    printf "%s" "$3" | fm_run_timed 10 cat > "$4"
-    echo still >&3
-  ' _ "$ROOT/bin/fm-timeout-lib.sh" "$dir/fd3" "$payload" "$dir/out") || rc=$?
-  [ "$rc" -eq 0 ] || fail "caller fd 3 was not usable after fm_run_timed (rc=$rc out=$out)"
-  [ "$(cat "$dir/fd3")" = still ] || fail "fm_run_timed disturbed the caller's fd 3"
-  [ "$(cat "$dir/out")" = "$payload" ] || fail "the fd 3 case lost piped stdin"
+  # The runner and the fd 3 write share one shell, so a mechanism that leaves
+  # the caller's fd 3 pointing at its stdin dup fails the write.
+  local fd3_mechanisms=bash
+  [ -z "$timeout_path" ] || fd3_mechanisms="external bash"
+  for mechanism in $fd3_mechanisms; do
+    rm -f "$dir/fd3" "$dir/out"
+    rc=0
+    out=$(bash -c '
+      . "$1"
+      exec 3>"$2"
+      if [ "$5" = external ]; then
+        fm_run_external_timeout "$6" 10 cat < "$3" > "$4"
+      else
+        FM_TIMEOUT_MECHANISM_OVERRIDE=bash fm_run_timed 10 cat < "$3" > "$4"
+      fi
+      echo still >&3
+    ' _ "$ROOT/bin/fm-timeout-lib.sh" "$dir/fd3" "$dir/file" "$dir/out" "$mechanism" "$timeout_path" 2>&1) || rc=$?
+    [ "$rc" -eq 0 ] || fail "caller fd 3 was not usable after the $mechanism mechanism (rc=$rc out=$out)"
+    [ "$(cat "$dir/fd3")" = still ] || fail "the $mechanism mechanism disturbed the caller's fd 3"
+    [ "$(cat "$dir/out")" = "$payload" ] || fail "the $mechanism fd 3 case lost file stdin"
+  done
 
   pass "fm_run_timed delivers piped stdin through every available mechanism"
 }
