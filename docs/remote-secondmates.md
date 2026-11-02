@@ -459,8 +459,8 @@ Placement is per backend:
 ### Refused and unsupported launches
 
 - An explicit request for any backend other than herdr or rex is refused rather than honored, and the remote host refuses one too.
-- An existing remote endpoint recorded outside its backend's contract - a Herdr session other than `fm-remote`, or a Rex route whose recorded server is not a local `unix://` endpoint - is classified as unverified and left untouched.
-  Launch, liveness recovery, control, and retirement refuse it until an operator explicitly migrates it, instead of attempting a live cutover.
+- An existing remote endpoint recorded outside its backend's contract - a Herdr session other than the one its caller expects (`fm-remote`, or the owned `fm-lab-*` session its route records), or a Rex route whose recorded server is not a local `unix://` endpoint - is classified as unverified and left untouched.
+  Launch, liveness recovery, and control refuse it until an operator explicitly migrates it, instead of attempting a live cutover; only the calls that carry the recorded session, the [relaunch contract](#relaunch-a-live-remote-second-mate) and retirement, reach a lab route.
 - A launch after a host has drifted out of readiness fails with the doctor's own gap text instead of leaving a half-created endpoint.
 - Raw launch commands are not accepted for remote secondmates.
 - Backends that already refuse secondmate launch, currently Orca, cmux, and paseo, remain unsupported on the remote host.
