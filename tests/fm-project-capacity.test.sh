@@ -98,8 +98,22 @@ case "$*" in
 esac
 case "${1:-}" in
   send-keys)
+    case "${5:-}" in
+      '. '*) : > "$FM_FAKE_CALL_LOG.launch-text" ;;
+    esac
+    if [ -f "$FM_FAKE_CALL_LOG.launch-text" ] && [ -n "${FM_FAKE_SEND_HOLD:-}" ] && [ "${4:-}" = -l ]; then
+      : > "$FM_FAKE_SEND_HOLD.reached"
+      i=0
+      while [ ! -f "$FM_FAKE_SEND_HOLD.release" ]; do
+        i=$((i + 1))
+        [ "$i" -lt 400 ] || exit 1
+        sleep 0.05
+      done
+    fi
     case "${FM_FAKE_SEND_FAILURE:-}:$*" in
-      literal:*" -l "*|enter:*" Enter") exit 1 ;;
+      literal:*" -l "*|enter:*" Enter")
+        [ ! -f "$FM_FAKE_CALL_LOG.launch-text" ] || exit 1
+        ;;
     esac
     ;;
   display-message) printf 'firstmate\n' ;;
@@ -376,6 +390,7 @@ test_restart_does_not_count_its_own_record() {
       "project=$case_dir/project" \
       "kind=$kind" "mode=$mode"
     printf 'done: finished\ncaptain-held: decision transferred\n' > "$home/state/task-c.status"
+    printf 'stale\n' > "$home/state/task-c.capacity-reservation"
     wt=$(new_worktree "$case_dir" task-c)
     rc=0
     if [ "$kind" = scout ]; then
@@ -387,47 +402,71 @@ test_restart_does_not_count_its_own_record() {
     rc=0
     out=$(spawn_ship "$case_dir" task-d "$case_dir/unused") || rc=$?
     expect_code "$DEFER_EXIT" "$rc" "another task ignored the restarted task's place: $out"
+    assert_absent "$home/state/task-c.capacity-reservation" "fresh restart retained a stale reservation"
     assert_contains "$out" "1 already hold a place (task-c)" "another task did not count the restarted task"
   done
   pass "restarts exclude their own records and reclaim completed workers' places"
 }
 
 test_relaunch_reclaims_a_finished_workers_place() {
-  local scenario kind mode case_dir home wt out rc
+  local scenario tail kind mode case_dir home wt out rc hold pid i
   for scenario in scout local-only; do
-    kind=scout mode=
-    [ "$scenario" != local-only ] || { kind=ship; mode=local-only; }
-    case_dir=$(make_case "relaunch-$scenario" task-a task-b)
-    home="$case_dir/home"
-    wt=$(new_worktree "$case_dir" task-a)
-    if [ "$kind" = ship ]; then
-      sed 's/mode=no-mistakes/mode=local-only/' "$home/data/task-a/brief.md" > "$home/data/task-a/brief.tmp"
-      mv "$home/data/task-a/brief.tmp" "$home/data/task-a/brief.md"
-    fi
-    declare_capacity "$home" 'project 1'
-    fm_write_meta "$home/state/task-a.meta" \
-      'window=firstmate:fm-task-a' 'endpoint_task_id=task-a' \
-      "worktree=$wt" "project=$case_dir/project" \
-      'harness=codex' "kind=$kind" "mode=$mode" 'yolo=off' \
-      'branch=wt-task-a' 'spawn_gen=old-a'
-    printf 'fm-task-a\n' > "$case_dir/calls.log.window"
-    printf 'done: finished\ncaptain-held: decision transferred\n' > "$home/state/task-a.status"
-    write_live "$home" live-b "$case_dir/project"
-    rc=0
-    out=$(run_spawn "$case_dir" "$home" "$wt" task-a --relaunch) || rc=$?
-    expect_code "$DEFER_EXIT" "$rc" "a finished $scenario relaunched into a full project: $out"
-    assert_equals $'done: finished\ncaptain-held: decision transferred' \
-      "$(cat "$home/state/task-a.status")" "a deferred relaunch changed completion state"
-    printf 'pr=123\n' >> "$home/state/live-b.meta"
-    rc=0
-    out=$(run_spawn "$case_dir" "$home" "$wt" task-a --relaunch) || rc=$?
-    expect_code 0 "$rc" "a finished $scenario could not reclaim an empty place: $out"
-    rc=0
-    out=$(spawn_ship "$case_dir" task-b "$case_dir/unused") || rc=$?
-    expect_code "$DEFER_EXIT" "$rc" "a relaunched $scenario did not reserve its place: $out"
-    assert_contains "$out" '1 already hold a place (task-a)' "the relaunched worker was not counted"
+    for tail in plain bookkeeping; do
+      kind=scout mode=
+      [ "$scenario" != local-only ] || { kind=ship; mode=local-only; }
+      case_dir=$(make_case "relaunch-$scenario-$tail" task-a task-b)
+      home="$case_dir/home"
+      wt=$(new_worktree "$case_dir" task-a)
+      if [ "$kind" = ship ]; then
+        sed 's/mode=no-mistakes/mode=local-only/' "$home/data/task-a/brief.md" > "$home/data/task-a/brief.tmp"
+        mv "$home/data/task-a/brief.tmp" "$home/data/task-a/brief.md"
+      fi
+      declare_capacity "$home" 'project 1'
+      fm_write_meta "$home/state/task-a.meta" \
+        'window=firstmate:fm-task-a' 'endpoint_task_id=task-a' \
+        "worktree=$wt" "project=$case_dir/project" \
+        'harness=codex' "kind=$kind" "mode=$mode" 'yolo=off' \
+        'branch=wt-task-a' 'spawn_gen=old-a'
+      printf 'fm-task-a\n' > "$case_dir/calls.log.window"
+      printf 'done: finished\n' > "$home/state/task-a.status"
+      [ "$tail" = plain ] || printf 'captain-held: decision transferred\n' >> "$home/state/task-a.status"
+      cp "$home/state/task-a.status" "$case_dir/prior.status"
+      write_live "$home" live-b "$case_dir/project"
+      rc=0
+      out=$(run_spawn "$case_dir" "$home" "$wt" task-a --relaunch) || rc=$?
+      expect_code "$DEFER_EXIT" "$rc" "a finished $scenario relaunched into a full project: $out"
+      cmp -s "$case_dir/prior.status" "$home/state/task-a.status" || fail "a refused relaunch changed status"
+      assert_absent "$home/state/task-a.capacity-reservation" "a refused relaunch reserved capacity"
+      printf 'pr=123\n' >> "$home/state/live-b.meta"
+      hold="$case_dir/send-hold"
+      FM_FAKE_SEND_HOLD="$hold" run_spawn "$case_dir" "$home" "$wt" task-a --relaunch > "$case_dir/relaunch.out" 2>&1 &
+      pid=$!
+      i=0
+      while [ ! -f "$hold.reached" ]; do
+        i=$((i + 1))
+        [ "$i" -lt 400 ] || fail "relaunch never reached delivery: $(cat "$case_dir/relaunch.out")"
+        sleep 0.05
+      done
+      cmp -s "$case_dir/prior.status" "$home/state/task-a.status" || fail "reservation changed status history"
+      [ -f "$home/state/task-a.capacity-reservation" ] || fail "launch has no reservation"
+      printf 'captain-held: concurrent transfer\n' >> "$home/state/task-a.status"
+      rc=0
+      out=$(spawn_ship "$case_dir" task-b "$case_dir/unused") || rc=$?
+      expect_code "$DEFER_EXIT" "$rc" "a relaunch in progress released its place: $out"
+      : > "$hold.release"
+      wait "$pid" || fail "relaunch failed: $(cat "$case_dir/relaunch.out")"
+      assert_absent "$home/state/task-a.capacity-reservation" "successful relaunch retained its reservation file"
+      assert_contains "$(cat "$home/state/task-a.status")" 'captain-held: concurrent transfer' "relaunch lost a concurrent event"
+      rc=0
+      out=$(spawn_ship "$case_dir" task-b "$case_dir/unused") || rc=$?
+      expect_code "$DEFER_EXIT" "$rc" "a relaunched $scenario did not hold its place: $out"
+      printf 'done: replacement finished\n' >> "$home/state/task-a.status"
+      rc=0
+      out=$(spawn_ship "$case_dir" task-b) || rc=$?
+      expect_code 0 "$rc" "later completion did not release capacity: $out"
+    done
   done
-  pass "relaunching finished scouts and local-only ships reserves their place"
+  pass "relaunch reservations hold continuously until working, then a later done releases capacity"
 }
 
 # A place frees when a worker records its ready PR and when a task is cleaned
@@ -661,52 +700,67 @@ test_failed_spawn_after_admission_holds_no_place() {
 # reservation must come off again: nothing replaced the worker, so the queued
 # task it displaced is admitted instead of waiting for a cleanup.
 test_aborted_relaunch_releases_the_reserved_place() {
-  local scenario kind mode case_dir home wt out rc token launch_dir failure
+  local scenario kind mode case_dir home wt out rc token launch_dir failure tail
   for scenario in scout local-only; do
-    for failure in staging literal enter; do
-    kind=scout mode=
-    [ "$scenario" != local-only ] || { kind=ship; mode=local-only; }
-    case_dir=$(make_case "aborted-relaunch-$scenario-$failure" task-a task-b)
-    home="$case_dir/home"
-    wt=$(new_worktree "$case_dir" task-a)
-    if [ "$kind" = ship ]; then
-      sed 's/mode=no-mistakes/mode=local-only/' "$home/data/task-a/brief.md" > "$home/data/task-a/brief.tmp"
-      mv "$home/data/task-a/brief.tmp" "$home/data/task-a/brief.md"
-    fi
-    declare_capacity "$home" 'project 1'
-    fm_write_meta "$home/state/task-a.meta" \
-      'window=firstmate:fm-task-a' 'endpoint_task_id=task-a' \
-      "worktree=$wt" "project=$case_dir/project" \
-      'harness=codex' "kind=$kind" "mode=$mode" 'yolo=off' \
-      'branch=wt-task-a' 'spawn_gen=old-a'
-    printf 'fm-task-a\n' > "$case_dir/calls.log.window"
-    printf 'done: finished\ncaptain-held: decision transferred\n' > "$home/state/task-a.status"
-    cp "$home/state/task-a.status" "$case_dir/prior.status"
-    # The staged-launch private-directory guard is the first refusal after the
-    # reservation and the republished record, so a public launch directory
-    # aborts the replacement exactly where a real launch delivery can fail.
-    token=$(launch_home_token "$home") || fail "could not derive the staged launch directory for $home"
-    launch_dir="/tmp/fm-task-a+$token"
-    rm -rf "$launch_dir" 2>/dev/null || true
-    mkdir -p "$launch_dir"
-    if [ "$failure" = staging ]; then chmod 777 "$launch_dir"; else chmod 700 "$launch_dir"; fi
-    rc=0
-    out=$(FM_FAKE_SEND_FAILURE="$failure" run_spawn "$case_dir" "$home" "$wt" task-a --relaunch) || rc=$?
-    rm -rf "$launch_dir"
-    [ "$rc" -ne 0 ] && [ "$rc" -ne "$DEFER_EXIT" ] ||
-      fail "the aborted $scenario relaunch did not fail (exit $rc): $out"
-    if [ "$failure" = staging ]; then
-      assert_contains "$out" "is not a private directory" "the relaunch did not abort at staging"
-    fi
-    cmp -s "$case_dir/prior.status" "$home/state/task-a.status" ||
-      fail "the aborted $scenario/$failure relaunch changed the prior status bytes"
-    rc=0
-    out=$(spawn_ship "$case_dir" task-b) || rc=$?
-    expect_code 0 "$rc" "the aborted $scenario relaunch kept the finished worker's place: $out"
-    assert_contains "$out" "spawned task-b" "the queued task was not launched after the $scenario relaunch aborted"
-  done
+    for tail in plain bookkeeping; do
+    for failure in refused staging literal enter; do
+      kind=scout mode=
+      [ "$scenario" != local-only ] || { kind=ship; mode=local-only; }
+      case_dir=$(make_case "aborted-relaunch-$scenario-$tail-$failure" task-a task-b)
+      home="$case_dir/home"
+      wt=$(new_worktree "$case_dir" task-a)
+      if [ "$kind" = ship ]; then
+        sed 's/mode=no-mistakes/mode=local-only/' "$home/data/task-a/brief.md" > "$home/data/task-a/brief.tmp"
+        mv "$home/data/task-a/brief.tmp" "$home/data/task-a/brief.md"
+      fi
+      declare_capacity "$home" 'project 1'
+      fm_write_meta "$home/state/task-a.meta" \
+        'window=firstmate:fm-task-a' 'endpoint_task_id=task-a' \
+        "worktree=$wt" "project=$case_dir/project" \
+        'harness=codex' "kind=$kind" "mode=$mode" 'yolo=off' \
+        'branch=wt-task-a' 'spawn_gen=old-a'
+      printf 'fm-task-a\n' > "$case_dir/calls.log.window"
+      printf 'done: finished\n' > "$home/state/task-a.status"
+      [ "$tail" = plain ] || printf 'captain-held: decision transferred\n' >> "$home/state/task-a.status"
+      cp "$home/state/task-a.status" "$case_dir/prior.status"
+      # The staged-launch private-directory guard is the first refusal after the
+      # reservation and the republished record, so a public launch directory
+      # aborts the replacement exactly where a real launch delivery can fail.
+      token=$(launch_home_token "$home") || fail "could not derive the staged launch directory for $home"
+      launch_dir="/tmp/fm-task-a+$token"
+      rm -rf "$launch_dir" 2>/dev/null || true
+      mkdir -p "$launch_dir"
+      if [ "$failure" = staging ]; then chmod 777 "$launch_dir"; else chmod 700 "$launch_dir"; fi
+      rc=0
+      if [ "$failure" = refused ]; then
+        out=$(run_spawn "$case_dir" "$home" "$wt" task-a --relaunch --backend invalid-backend) || rc=$?
+      else
+        out=$(FM_FAKE_SEND_FAILURE="$failure" run_spawn "$case_dir" "$home" "$wt" task-a --relaunch) || rc=$?
+      fi
+      rm -rf "$launch_dir"
+      [ "$rc" -ne 0 ] && [ "$rc" -ne "$DEFER_EXIT" ] ||
+        fail "the aborted $scenario relaunch did not fail (exit $rc): $out"
+      if [ "$failure" = staging ]; then
+        assert_contains "$out" "is not a private directory" "the relaunch did not abort at staging"
+      fi
+      cmp -s "$case_dir/prior.status" "$home/state/task-a.status" ||
+        fail "the aborted $scenario/$failure relaunch changed the prior status bytes"
+      rc=0
+      out=$(spawn_ship "$case_dir" task-b) || rc=$?
+      case "$failure" in
+        literal|enter)
+          expect_code "$DEFER_EXIT" "$rc" "uncertain delivery released capacity: $out"
+          [ -f "$home/state/task-a.capacity-reservation" ] || fail "uncertain delivery lost its reservation"
+          ;;
+        *)
+          expect_code 0 "$rc" "a proven non-launch retained capacity: $out"
+          assert_absent "$home/state/task-a.capacity-reservation" "a proven non-launch retained its reservation"
+          ;;
+      esac
     done
-  pass "an aborted relaunch restores a finished scout's or local-only ship's released place"
+    done
+  done
+  pass "relaunch failures release only proven non-launches and preserve status history"
 }
 
 test_unreadable_declaration_refuses_every_spawn() {

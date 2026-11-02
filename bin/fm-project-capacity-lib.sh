@@ -45,8 +45,10 @@
 #   - has no recorded PR handoff: the pr= line bin/fm-pr-check.sh records when a
 #     worker's PR is ready, after which the worker waits on review or merge and
 #     no longer uses local resources, and
-#   - has not finished as a scout or local-only ship: its status log has no
-#     done event without a later working event.
+#   - is not a finished scout or local-only ship with no capacity reservation.
+# Completion means a done event with no later working event in the status log.
+# A <state>/<id>.capacity-reservation file holds a released worker's place
+# during relaunch until working is appended on success or non-launch is proven.
 # A place therefore frees when a PR-based ship records its ready PR, when a
 # scout or local-only ship reports done, or when a task's record is removed.
 # No-mistakes and direct-PR ships keep their place after done until their PR
@@ -168,6 +170,10 @@ fm_project_capacity_lookup() {  # <config-dir> <project-name>
 }
 
 
+fm_project_capacity_reservation_path() {
+  printf '%s/%s.capacity-reservation\n' "$1" "$2"
+}
+
 fm_project_capacity_status_finished() {
   local status_file=$1 status_line status_verb finished=0
   [ -f "$status_file" ] && [ -r "$status_file" ] || return 1
@@ -197,7 +203,7 @@ fm_project_capacity_status_finished() {
 
 fm_project_capacity_occupants() {  # <project-lock> <project-dir> <first-state> <own-id>
   local want=$1 own=$2 first=$3 self=$4 state meta kind project lock id label i
-  local status_file
+  local status_file reservation
   local -a cache_dirs cache_locks
   FM_PROJECT_CAPACITY_OCCUPANTS=0
   FM_PROJECT_CAPACITY_OCCUPANT_IDS=
@@ -245,7 +251,9 @@ fm_project_capacity_occupants() {  # <project-lock> <project-dir> <first-state> 
       [ -n "$lock" ] && [ "$lock" = "$want" ] || continue
       if [ "$kind" = scout ] || { [ "$kind" = ship ] && [ "$(fm_meta_get "$meta" mode)" = local-only ]; }; then
         status_file=${meta%.meta}.status
-        if fm_project_capacity_status_finished "$status_file"; then
+        reservation=$(fm_project_capacity_reservation_path "$state" "$(basename "$meta" .meta)")
+        if fm_project_capacity_status_finished "$status_file" &&
+          [ ! -e "$reservation" ] && [ ! -L "$reservation" ]; then
           continue
         fi
       fi
