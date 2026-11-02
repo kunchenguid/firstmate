@@ -127,7 +127,8 @@ An unreachable endpoint can still hold the live agent a rebind would duplicate, 
   Rex's passive reads never start a server, so a stopped Rex server reads `unreadable` rather than `missing`; a Rex `unreadable` therefore goes through this recheck too, and still refuses unless the recheck settles it.
 - **tmux cannot.** `list-windows -a` describes only the tmux server the *current process* addresses (its `TMUX_TMPDIR`/socket), and a task record carries no socket identity for its endpoint.
   A different but running server would answer "not anywhere" about a window it was never able to see, so a server-wide read cannot tell a destroyed window from one on a server this process cannot address.
-  There is no read available that closes that gap, so tmux always refuses - for a renamed session, a moved window, a foreign socket, and a dead server alike.
+  This control plane has no read that closes that gap, so its `exit` and `relaunch` always refuse - for a renamed session, a moved window, a foreign socket, and a dead server alike.
+  A new tmux dispatch can still record its owning socket in its [fleet seat route](configuration.md#fleet-seat-pools-configfleet-seats), which [secondmate recovery authorization](../bin/fm-secondmate-liveness-lib.sh) uses; that is a separate owner and not a control-plane absence proof.
 - **T3 Code refuses `exit` before this proof.** Its [native status table](t3code-backend.md#restart-and-liveness-behavior) owns absence and unreadability, including an archived thread whose active run is still draining.
   T3 Code still cannot reclaim the task because a thread keeps its conversation, so no fresh agent can replace it and `relaunch` refuses before this proof can authorize a replacement.
 
