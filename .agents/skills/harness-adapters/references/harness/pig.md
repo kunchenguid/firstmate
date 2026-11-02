@@ -2,7 +2,7 @@
 
 PiG is integrated as a primary-only adapter; worker, scout, and secondmate dispatch through PiG are not supported.
 The primary live verification on 2026-10-17 used PiG 0.4.1+1.0.3 on macOS arm64 with Go 1.27.2.
-PiG 0.5.3+1.4.0.74f46864 passed token-free extension registration validation; its supervision lifecycle has not been verified live.
+PiG 0.5.3+1.4.0.74f46864 passed token-free extension registration validation only. Its supervision lifecycle (watcher arm and recovery, wake delivery to the primary) has not been verified live on the released SDK: the credentialed throwaway-home end-to-end path `tests/fm-pig-primary-supervision-live-e2e.test.sh` requires `openai-codex/gpt-6-luna` at medium effort and was not available in this run, so no live watcher/recovery/wake evidence was captured beyond the already-documented unverified limit. Background wake delivery remains limited to the idle main TUI conversation. See `/Users/kayisrahman/Documents/workspace/firstmate/data/firstmate-pr8075-nm-live-v1/live-evidence.md`.
 
 ## Operating facts
 
