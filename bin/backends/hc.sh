@@ -272,6 +272,64 @@ fm_backend_hc_container_ensure() {
   printf '%s' "$session"
 }
 
+# fm_backend_hc_core_id: the identity of the core <session> reaches. A core
+# keeps its id in its state directory across restarts, so the id tells "the
+# core this task was created on" apart from another core answering the same
+# session name from different XDG directories.
+fm_backend_hc_core_id() {  # <session>
+  local id
+  id=$(fm_backend_hc_cli "$1" server status --json 2>/dev/null | jq -r '.core.id // empty' 2>/dev/null) || id=
+  case "$id" in
+    ''|*[!0-9a-f]*) echo "error: hc session '$1' reported no core id" >&2; return 1 ;;
+  esac
+  printf '%s' "$id"
+}
+
+# fm_backend_hc_endpoint_absence_recheck: the control plane's absence proof for
+# an hc terminal (bin/fm-control-lib.sh's fm_control_endpoint_absence_verdict).
+# Prints dead, alive, missing, or unproven. hc keeps a terminal's address and
+# its finished record across core restarts and never reuses an address, so:
+#   - a finished terminal carrying this task's labels can never host the agent
+#     again, and reads missing;
+#   - a structured not-found proves absence only from the core the task was
+#     created on, named by the record's hc_core; any other core, or a record
+#     without one, is unproven;
+#   - a live terminal is classified like any other read.
+fm_backend_hc_endpoint_absence_recheck() {  # <target> <recorded-core> <expected-label>
+  local target=$1 recorded=${2:-} expected=${3:-'*'} json rc state core
+  fm_backend_hc_parse_target "$target" || { printf 'unproven'; return 0; }
+  json=$(fm_backend_hc_get "$target")
+  rc=$?
+  if [ "$rc" -eq 3 ]; then
+    core=$(fm_backend_hc_core_id "$FM_BACKEND_HC_SESSION" 2>/dev/null) || core=
+    if [ -n "$recorded" ] && [ "$core" = "$recorded" ]; then
+      printf 'missing'
+    else
+      printf 'unproven'
+    fi
+    return 0
+  fi
+  [ "$rc" -eq 0 ] || { printf 'unproven'; return 0; }
+  state=$(printf '%s' "$json" | jq -r '.state // empty' 2>/dev/null)
+  case "$state" in
+    finished)
+      if [ "$(fm_backend_hc_endpoint_state "$target" "$expected")" = finished ]; then
+        printf 'missing'
+      else
+        printf 'unproven'
+      fi
+      ;;
+    live)
+      case "$(fm_backend_hc_agent_state "$target")" in
+        alive) printf 'alive' ;;
+        dead) printf 'dead' ;;
+        *) printf 'unproven' ;;
+      esac
+      ;;
+    *) printf 'unproven' ;;
+  esac
+}
+
 # fm_backend_hc_create_task: start a login shell terminal in <cwd> for
 # <window-label>, refusing a live duplicate in this home. Prints the address.
 # --no-parent and --outlive-parent keep the terminal independent of whichever
@@ -296,6 +354,7 @@ fm_backend_hc_create_task() {  # <session> <window-label> <cwd>
   fm_backend_hc_address_valid "$address" || { echo "error: hc run did not return a terminal address for $label (got: $out)" >&2; return 1; }
   printf '%s\n' "$address"
 }
+
 
 # fm_backend_hc_capture: the screen plus <lines> of history, the same window
 # tmux's `capture-pane -S -<lines>` returns.

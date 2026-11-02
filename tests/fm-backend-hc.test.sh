@@ -32,7 +32,7 @@ last=""
 for a in "$@"; do last=$a; done
 case "$cmd" in
   --version) printf 'hc %s\n' "${FAKE_HC_VERSION:-0.1.14}" ;;
-  server) printf '{"live":0}\n' ;;
+  server) cat "$D/server.json" 2>/dev/null || printf '{"live":0}\n' ;;
   connect)
     IFS= read -r _req || true
     printf '{"jsonrpc":"2.0","id":1,"result":{"generation":%s}}\n' "${FAKE_HC_GENERATION:-1}"
@@ -360,7 +360,37 @@ test_required_tool_check_uses_the_adapter_resolver() {
   pass "hc: the bootstrap tool check resolves hc exactly as the adapter does"
 }
 
+test_absence_proof_needs_the_recorded_core_or_a_finished_own_terminal() {
+  local tag out meta
+  setup_case absence
+  tag=$(hometag_of)
+  meta="$D/a1.meta"
+  printf 'endpoint_task_id=a1\nhc_core=c0ffee\n' > "$meta"
+  printf '{"core":{"id":"c0ffee"}}\n' > "$D/server.json"
+  write_terminal "$D" t2 finished fm-a1 "$tag" "" ""
+  write_terminal "$D" t3 finished fm-other "$tag" "" ""
+  write_terminal "$D" t4 live fm-a1 "$tag" zsh /bin/zsh
+  write_terminal "$D" t5 live fm-a1 "$tag" 2.1.312 claude
+  # shellcheck disable=SC2016 # the inner shell expands it
+  out=$(hc_shell '. "'"$FM_TEST_ROOT"'/bin/fm-control-lib.sh"
+    for a in t1 t2 t3 t4 t5; do
+      v=$(fm_control_endpoint_absence_verdict hc fmtest:$a "'"$meta"'"); printf "%s=%s " $a "${v%%$(printf "\t")*}"
+    done')
+  assert_equals "$out" "t1=gone t2=gone t3=unproven t4=dead t5=alive " \
+    "not found on the recorded core, own finished, foreign finished, shell, harness"
+  printf '{"core":{"id":"beef"}}\n' > "$D/server.json"
+  # shellcheck disable=SC2016 # the inner shell expands it
+  out=$(hc_shell '. "'"$FM_TEST_ROOT"'/bin/fm-control-lib.sh"; v=$(fm_control_endpoint_absence_verdict hc fmtest:t1 "'"$meta"'"); printf "%s" "${v%%$(printf "\t")*}"')
+  assert_equals "$out" unproven "a not-found from another core proves nothing"
+  printf 'endpoint_task_id=a1\n' > "$meta"
+  # shellcheck disable=SC2016 # the inner shell expands it
+  out=$(hc_shell '. "'"$FM_TEST_ROOT"'/bin/fm-control-lib.sh"; v=$(fm_control_endpoint_absence_verdict hc fmtest:t1 "'"$meta"'"); printf "%s" "${v%%$(printf "\t")*}"')
+  assert_equals "$out" unproven "a record without hc_core cannot prove a not-found"
+  pass "hc: absence is proven only on the recorded core or by the task's own finished terminal"
+}
+
 fm_test_run \
+  test_absence_proof_needs_the_recorded_core_or_a_finished_own_terminal \
   test_hc_is_spawn_capable_and_needs_app_signals \
   test_required_tool_check_uses_the_adapter_resolver \
   test_create_task_is_independent_labeled_and_refuses_duplicates \

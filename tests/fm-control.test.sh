@@ -744,10 +744,12 @@ test_hermes_profile_refusals_preserve_running_worker() {
   pass 'fm-control relaunch: Hermes profile model and gateway refusals preserve the current worker'
 }
 
-test_state_verified_backends_are_exactly_tmux_herdr_and_rex() {
+test_state_verified_backends_are_exactly_tmux_herdr_rex_and_hc() {
   fm_control_backend_state_verified tmux || fail "tmux has a recovery-grade classifier"
   fm_control_backend_state_verified herdr || fail "herdr has a recovery-grade classifier"
   fm_control_backend_state_verified rex || fail "rex has a recovery-grade classifier"
+  fm_control_backend_state_verified hc || fail "hc has a recovery-grade classifier"
+  fm_control_backend_relaunch_supported hc || fail "hc can host a replacement agent"
   local backend
   for backend in zellij orca cmux paseo tern; do
     fm_control_backend_state_verified "$backend" \
@@ -1343,7 +1345,7 @@ test_orca_refuses_an_escape_harness_interrupt
 test_unverified_state_backends_refuse_stop_verbs
 test_commandcode_relaunch_off_tmux_and_herdr_refuses_before_stopping
 test_hermes_profile_refusals_preserve_running_worker
-test_state_verified_backends_are_exactly_tmux_herdr_and_rex
+test_state_verified_backends_are_exactly_tmux_herdr_rex_and_hc
 test_window_label_is_refused_with_the_exact_id
 test_explicit_endpoint_is_refused
 test_unknown_task_is_refused

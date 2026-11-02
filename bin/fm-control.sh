@@ -135,7 +135,7 @@
 #   - A backend that cannot deliver the harness's interrupt key is refused
 #     (Orca's terminal API has no Escape).
 #   - `exit` and `relaunch` require a backend with a recovery-grade agent-state
-#     classifier (tmux, herdr, rex, or t3code), because without one the "the
+#     classifier (tmux, herdr, rex, t3code, or hc), because without one the "the
 #     agent stopped" postcondition cannot be proven. Relaunch also requires
 #     replacement support, which t3code lacks. zellij, orca, cmux, paseo, and tern are
 #     refused rather than reported as successful blind.

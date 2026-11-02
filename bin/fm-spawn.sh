@@ -1751,8 +1751,18 @@ spawn_orca_reclaim_launch_file() {
   return 1
 }
 
+# The hc terminal a relaunch rebind or move opened, until the republished
+# record names it. An abort before then closes it, so a retry is not refused
+# by hc's one-live-terminal-per-task rule.
+SPAWN_HC_REBIND_TARGET=
 spawn_abort_cleanup() {
   local status=$?
+  if [ -n "$SPAWN_HC_REBIND_TARGET" ] && [ "$status" -ne 0 ] &&
+    [ "$(fm_meta_get "$STATE/$ID.meta" window 2>/dev/null)" != "$SPAWN_HC_REBIND_TARGET" ]; then
+    fm_backend_kill hc "$SPAWN_HC_REBIND_TARGET" "" "fm-$ID" 2>/dev/null ||
+      echo "warning: could not close hc terminal $SPAWN_HC_REBIND_TARGET after the aborted relaunch of $ID; close it by hand before retrying" >&2
+    SPAWN_HC_REBIND_TARGET=
+  fi
   if [ "$RELAUNCH_REPLACEMENT_PENDING" = 1 ] &&
     [ "$SPAWN_META_PUBLISH_STARTED" = 1 ] &&
     [ -n "$SPAWN_META_TMP" ] &&
@@ -2424,6 +2434,22 @@ PROJ=
 ARG3=
 FIRSTMATE_HOME=
 RAW_LAUNCH=0
+HC_SES=
+HC_TERMINAL=
+HC_CORE=
+
+# spawn_hc_create_task: the task's hc terminal. A secondmate's terminal keeps
+# this home's identity labels, so this home's probe, steer, and close checks
+# hold unchanged, but it is shown in the secondmate home's own Herdr.app space,
+# the one that home's own spawns use (bin/backends/hc.sh).
+spawn_hc_create_task() {  # <session> <window-label> <cwd>
+  if [ "$KIND" = secondmate ]; then
+    FM_HC_SPACE="fm-$(FM_HOME=$PROJ_ABS FM_ROOT=$PROJ_ABS fm_backend_hometag)" \
+      fm_backend_hc_create_task "$@"
+  else
+    fm_backend_hc_create_task "$@"
+  fi
+}
 
 # --relaunch adoption: every identity axis comes from the task's own validated
 # durable record, never from the command line, so a relaunch can only ever
@@ -2598,6 +2624,11 @@ if [ "$RELAUNCH" -eq 1 ]; then
       echo "error: task $ID has no recorded project; refusing to relaunch" >&2
       exit 1
     }
+  fi
+  if [ "$BACKEND" = hc ]; then
+    HC_SES=$(fm_meta_get "$RELAUNCH_META" hc_session)
+    HC_TERMINAL=$(fm_meta_get "$RELAUNCH_META" hc_terminal)
+    HC_CORE=$(fm_meta_get "$RELAUNCH_META" hc_core)
   fi
   if [ "$BACKEND" = herdr ]; then
     # fm-spawn uses HERDR_PANE_ID for the TASK's pane, while the herdr adapter
@@ -4922,6 +4953,23 @@ EOF
     T=$(fm_backend_rex_target "$FM_REX_TASK_SESSION_ID" "$FM_REX_TASK_BLOCK_ID")
     SES=${T%%:*}
     WT_TARGET=$T
+  elif [ "$BACKEND" = hc ]; then
+    # One fresh terminal opened directly in the recorded worktree. A rebind on
+    # hc reaches here only on a terminal proven gone from the core the record
+    # names (fm_control_endpoint_absence_verdict), and is re-created in that
+    # recorded session.
+    [ -z "$HC_SES" ] || HC_SESSION=$HC_SES
+    HC_SES=$(fm_backend_hc_container_ensure) || exit 1
+    HC_CORE=$(fm_backend_hc_core_id "$HC_SES") || exit 1
+    fm_backend_kill hc "$RELAUNCH_TARGET" "" "$W" || {
+      echo "error: task $ID's finished hc terminal $RELAUNCH_TARGET could not be removed; refusing to open a second terminal for it" >&2
+      exit 1
+    }
+    HC_TERMINAL=$(spawn_hc_create_task "$HC_SES" "$W" "$WT") || exit 1
+    T="$HC_SES:$HC_TERMINAL"
+    SPAWN_HC_REBIND_TARGET=$T
+    SES=$HC_SES
+    WT_TARGET=$T
   else
     # The recorded endpoint is authoritatively gone, so there is nothing to
     # adopt: create ONE fresh endpoint for the same task, opened directly in the
@@ -4932,7 +4980,7 @@ EOF
     # Herdr reaches here only on a PROVEN-gone pane: its every read is scoped to
     # the session the record names (fm_control_endpoint_absence_verdict owns
     # that argument). tmux and every secondmate were already refused, and rex
-    # took the branch above, so there is no dispatch left to make.
+    # and hc took the branches above, so there is no dispatch left to make.
     #
     # This deliberately uses the FLAT container shape rather than Herdr's
     # presentation projection: projection is a presentation-only layout that is
@@ -5274,7 +5322,8 @@ EOF
     ;;
   hc)
     HC_SES=$(fm_backend_hc_container_ensure) || exit 1
-    HC_TERMINAL=$(fm_backend_hc_create_task "$HC_SES" "$W" "$PROJ_ABS") || exit 1
+    HC_CORE=$(fm_backend_hc_core_id "$HC_SES") || exit 1
+    HC_TERMINAL=$(spawn_hc_create_task "$HC_SES" "$W" "$PROJ_ABS") || exit 1
     T="$HC_SES:$HC_TERMINAL"
     ;;
   orca)
@@ -5979,7 +6028,7 @@ elif [ "$RELAUNCH" -eq 1 ]; then
     sleep 0.5
   done
   if [ -z "$relaunch_seen" ] || [ "$(real_path_or_raw "$relaunch_seen")" != "$relaunch_wt_real" ]; then
-    if [ "$BACKEND" != herdr ] && [ "$BACKEND" != rex ]; then
+    if [ "$BACKEND" != herdr ] && [ "$BACKEND" != rex ] && [ "$BACKEND" != hc ]; then
       echo "error: task $ID's endpoint is in '${relaunch_seen:-unknown}', not its recorded worktree '$WT'; refusing to relaunch an agent outside the copy holding its work" >&2
       exit 1
     fi
@@ -7206,7 +7255,7 @@ SPAWN_META_PATH=$SPAWN_META_TMP
 preserve_relaunch_meta() {
   awk -F= '
     BEGIN {
-      split("window endpoint_task_id worktree project harness hermes_profile hermes_home kind mode yolo branch tasktmp base_branch upstream_consent forge backup_remote backup_prefix model effort opencode_version account account_provider omp_profile busy_gen spawn_gen approval_mode traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id paseo_terminal_id paseo_workspace_id rex_server rex_session_id rex_window_id rex_block_id t3_thread_id t3_project_id tern_session_id tern_tab_id tern_block_id hc_session hc_terminal home projects control_relaunch_tx polytoken_session polytoken_port polytoken_credential", keys, " ")
+      split("window endpoint_task_id worktree project harness hermes_profile hermes_home kind mode yolo branch tasktmp base_branch upstream_consent forge backup_remote backup_prefix model effort opencode_version account account_provider omp_profile busy_gen spawn_gen approval_mode traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id paseo_terminal_id paseo_workspace_id rex_server rex_session_id rex_window_id rex_block_id t3_thread_id t3_project_id tern_session_id tern_tab_id tern_block_id hc_session hc_terminal hc_core home projects control_relaunch_tx polytoken_session polytoken_port polytoken_credential", keys, " ")
       for (i in keys) owned[keys[i]] = 1
     }
     !($1 in owned)
@@ -7303,6 +7352,7 @@ preserve_relaunch_meta() {
   if [ "$BACKEND" = hc ]; then
     echo "hc_session=$HC_SES"
     echo "hc_terminal=$HC_TERMINAL"
+    [ -z "$HC_CORE" ] || echo "hc_core=$HC_CORE"
   fi
   if [ "$KIND" = secondmate ]; then
     echo "home=$PROJ_ABS"
