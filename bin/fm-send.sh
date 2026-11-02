@@ -238,8 +238,10 @@
 # correlation-reusing resend; with the remote transport in flight, remote
 # completion is unknown - never reported as unsent - the expectation is marked
 # delivery-unknown, and the printed FM_PENDING_REPLY_EXISTING_CORR=<id> resend
-# (or the same fire-and-forget delivery id) is the only safe retry; after the
-# durable record, do not resend. Every report, and also fm-send's own
+# (or the same fire-and-forget delivery id) is the only safe retry; with a
+# typed submit in flight, delivery is unknown, so verify the endpoint with
+# fm-peek.sh before any resend; after the durable record or a confirmed typed
+# submit, do not resend. Every report, and also fm-send's own
 # remote-budget timeout and an unconfirmed typed submit, prints one line per
 # --resolve-key saying whether its close is durably recorded: a resolved line
 # carrying it was appended since the send began, or its captain-held task's
@@ -658,7 +660,8 @@ RESOLVE_STATUS_OFFSET=0
 # Interruption state for the header's "Interruption and caller timeouts"
 # contract. FM_SEND_PHASE moves validate -> deliver (a delivery leg is in
 # flight: inbox, remote, or typed) -> delivered (FM_SEND_DELIVERED_WHAT names
-# the durable outcome). Everything a handler reads is initialized here.
+# the durable outcome); a proven delivery failure moves it back to validate,
+# because nothing was sent. Everything a handler reads is initialized here.
 FM_SEND_PHASE=validate
 FM_SEND_DELIVERY=
 FM_SEND_DELIVERED_WHAT=

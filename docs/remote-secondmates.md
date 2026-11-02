@@ -507,8 +507,9 @@ The `fm-send.sh` header owns the setting's default and validation contract.
 | --- | --- |
 | Unconfirmed SSH transport (exit 255) | Retried identically once. |
 | Budget expiry | Not retried, because completion is unknown. |
+| Caller interruption (TERM, INT, or HUP) during the transport | Not retried; `fm-send` exits 128+signal and reports completion unknown, never unsent. |
 
-Either outcome preserves this ordinary reply-bearing request's pending-reply expectation for the record that may have landed.
+Each outcome preserves this ordinary reply-bearing request's pending-reply expectation for the record that may have landed.
 
 If delivery remains unconfirmed, only the exact `FM_PENDING_REPLY_EXISTING_CORR=<id>` resend command printed by `fm-send` is safe to run later.
 That command preserves the request body and lets the remote enqueue deduplicate onto the same record.
