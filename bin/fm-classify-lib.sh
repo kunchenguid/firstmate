@@ -2697,6 +2697,37 @@ crew_run_is_validating() {  # <id> -> "<run-id> <step>" on stdout
   printf '%s %s\n' "$run" "$step"
 }
 
+# 0 if crew <id>'s authoritative current state is an attributed no-mistakes run
+# that has STOPPED validating on a result the crewmate itself owes the next move
+# on: parked at a gate (awaiting_approval, fix_review) that is NOT owed to a
+# human, or a terminal outcome (done, failed). It is the complement of
+# crew_run_is_validating: that one proves the pipeline is executing a round, this
+# one proves the round is over and the pipeline is waiting on the worker.
+# A gate whose findings table owes the answer to a human (FM_GATE_HUMAN_DECISION)
+# is excluded because that wait belongs to firstmate and is wedge_wait_evidence's
+# to account for. On success it prints `<run-id> <parked|done|failed>`.
+# Same cost and caveat as crew_run_is_validating: one fm-crew-state.sh read.
+crew_run_gate_unacted() {  # <id> -> "<run-id> <state>" on stdout
+  local id=$1 line state src rest part run=''
+  [ -n "$id" ] || return 1
+  line=$("$FM_CREW_STATE_BIN" "$id" 2>/dev/null) || true
+  case "$line" in state:*) ;; *) return 1 ;; esac
+  state=${line#state: }; state=${state%% *}
+  case "$state" in parked|done|failed) ;; *) return 1 ;; esac
+  src=${line#*source: }; src=${src%% *}
+  [ "$src" = run-step ] || return 1
+  rest="$line · "
+  while [ -n "$rest" ]; do
+    part=${rest%% · *}
+    rest=${rest#* · }
+    [ "$part" = "$FM_GATE_HUMAN_DECISION" ] && return 1
+    case "$part" in "run: "?*) run=${part#run: } ;; esac
+  done
+  [ -n "$run" ] || return 1
+  case "$run" in *[[:space:]]*) return 1 ;; esac
+  printf '%s %s\n' "$run" "$state"
+}
+
 # Directories excluded from the worktree write probe below, and the depth it walks.
 # The excluded set is everything a supervisor read or a package manager can write
 # without the crew doing any work - .git first, so firstmate's own read-only git

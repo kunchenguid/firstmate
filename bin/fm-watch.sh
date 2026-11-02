@@ -1855,6 +1855,71 @@ wedge_defer_validating() {  # <window> <since-file> <triage-label> <idle-age> <t
   triage_log "absorbed $label (no-mistakes run $run validating ($step), idle ${age}s): $win"
 }
 
+# Detect the transition the idle timer cannot see: the task's attributed
+# no-mistakes run STOPPED validating (parked at a gate the crewmate owes the next
+# move on, or reached a terminal outcome) and the crewmate has not acted on it.
+# wedge_defer_validating covers the run while it executes; nothing covered the
+# moment it stops, and a worker that backgrounded its drive call and ended its
+# turn sits there until a human steers it. Pane-idle time alone also misses it
+# when the pane keeps producing small output (doorbell re-rings, status lines)
+# that resets the idle timer, which is why the poll loop also consults this on a
+# fresh pane hash, throttled.
+# "Has not acted" is the worker's own status log: untouched for a full
+# STALE_ESCALATE_SECS, not ending in a done/failed line, and not declaring a wait
+# or a captain hold. Anything newer or declared is the worker accounting for itself.
+# Unlike every deferral around it this is an ESCALATION signal, not an absorb: a
+# match is a genuine wake that skips the deferrals which would otherwise explain
+# the quiet. A gate owed to a human is deliberately not matched
+# (crew_run_gate_unacted), because that wait is firstmate's.
+# OFF unless the home creates config/wedge-escalate-unacted-gate: absent the flag
+# the status file and crew state are never read here and the ladder is unchanged.
+# The crew-state read is the costly one, so it runs only after the cheap
+# status-file checks pass. On success it prints `<run-id> <parked|done|failed>`.
+wedge_gate_unacted() {  # <task> -> "<run-id> <state>" on stdout
+  local task=$1 statusf last verb=''
+  [ -e "$CONFIG/wedge-escalate-unacted-gate" ] || return 1
+  [ -n "$task" ] || return 1
+  statusf="$STATE/$task.status"
+  [ -e "$statusf" ] || return 1
+  [ "$(age_of "$statusf")" -ge "$STALE_ESCALATE_SECS" ] || return 1
+  last=$(status_declared_wait_line "$statusf")
+  if status_is_paused_or_captain_held "$last"; then return 1; fi
+  last=$(last_status_line "$statusf")
+  status_line_verb "$last" verb
+  case "$verb" in done|failed) return 1 ;; esac
+  crew_run_gate_unacted "$task"
+}
+
+# The poll-loop half of wedge_gate_unacted, for a pane whose hash keeps changing
+# and so never reaches wedge_timer_check. At most one crew-state read per window
+# per STALE_ESCALATE_SECS (the .gate-unacted-checked-<key> marker), and one wake
+# per run+state (the .gate-unacted-reported-<key> marker body), so a worker that
+# stays unresponsive is reported once rather than every window; a new run or a
+# changed state is a new signal.
+wedge_gate_unacted_poll() {  # <window> <task>
+  local win=$1 task=$2 key verdict reason
+  [ -e "$CONFIG/wedge-escalate-unacted-gate" ] || return 0
+  key=$(window_key "$win")
+  [ "$(age_of "$STATE/.gate-unacted-checked-$key")" -ge "$STALE_ESCALATE_SECS" ] || return 0
+  date +%s > "$STATE/.gate-unacted-checked-$key"
+  verdict=$(wedge_gate_unacted "$task") || return 0
+  [ "$(cat "$STATE/.gate-unacted-reported-$key" 2>/dev/null || true)" != "$verdict" ] || return 0
+  reason=$(wedge_gate_unacted_reason "$win" "$verdict")
+  fm_wake_append stale "$win" "$reason" || exit 1
+  printf '%s' "$verdict" > "$STATE/.gate-unacted-reported-$key"
+  triage_log "escalated unacted no-mistakes result ($verdict): $win"
+  wake "$reason"
+}
+
+wedge_gate_unacted_reason() {  # <window> <verdict>
+  local run=${2%% *} state=${2#* }
+  case "$state" in
+    parked) state='parked at a gate awaiting a response' ;;
+    *) state="reached a terminal outcome ($state)" ;;
+  esac
+  printf 'stale: %s (no-mistakes run %s %s and the worker has not acted on it - resume it with a steer)' "$1" "$run" "$state"
+}
+
 # The question the wedge timer never asked before it alarmed: is there still an
 # agent here to BE wedged? A wedge is something stuck that might recover, so
 # re-alarming it earns its cost; an agent that is gone never moves again, its pane
@@ -2104,7 +2169,7 @@ wedge_write_escalation_count() {  # <window> <window-key> <escalation-file> <sin
 # fresh progress write, or a replacement request during those reads cancels
 # that wake and its count instead of surfacing an obsolete observation.
 wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-file> <task> <pane-hash> [dialog-name] [stream snapshot]
-  local win=$1 since_file=$2 label=$3 escalation_file=$4 task=$5 hash=$6 dialog=${7-} since age n prev reason evidence guard guard_note
+  local win=$1 since_file=$2 label=$3 escalation_file=$4 task=$5 hash=$6 dialog=${7-} since age n prev reason evidence guard guard_note verdict
   local stream_snapshot=${8:-} stream_ts stream_detail='' append_status
   local _wkey _wrollback_sentinel _wrb_ts _wrb_cap_reason _wrb_cap_status _wrb_rm_status
   local _wrb_since _wrb_now _wrb_age _wrb_cap_ts _wrb_gate
@@ -2199,6 +2264,20 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-
         if [ "$FM_WEDGE_MAX_ESCALATIONS" -gt 0 ] && _wedge_cap_marker_stands "$_wkey"; then
           wedge_dead_record "$win" "$since_file" "$label" "$age" "$hash" "$task" \
             || { fm_epoch_seconds_to _wrb_now; printf '%s\n' "$_wrb_now" > "$since_file"; }
+          return 0
+        fi
+        if verdict=$(wedge_gate_unacted "$task"); then
+          # The run has stopped validating and the worker has not acted on it:
+          # a real signal, so it skips every deferral below and wakes once per
+          # run+state instead of riding the possible-wedge counter.
+          date +%s > "$since_file"
+          if [ "$(cat "$STATE/.gate-unacted-reported-$_wkey" 2>/dev/null || true)" != "$verdict" ]; then
+            reason=$(wedge_gate_unacted_reason "$win" "$verdict")
+            fm_wake_append stale "$win" "$reason" || exit 1
+            printf '%s' "$verdict" > "$STATE/.gate-unacted-reported-$_wkey"
+            triage_log "escalated unacted no-mistakes result ($verdict) for $label: $win"
+            wake "$reason"
+          fi
           return 0
         fi
         if evidence=$(wedge_wait_evidence "$task") &&
@@ -4476,6 +4555,7 @@ EOF
         clear_write_tracking "$key"
       fi
       task=$(window_to_task "$w" "$STATE")
+      wedge_gate_unacted_poll "$w" "$task"
       if ! afk_present && status_is_paused_or_captain_held "$(status_declared_wait_line "$STATE/$task.status")" && [ "$busy_now" -ne 0 ]; then
         case "$(pause_state_class "$w" "$task")" in
           paused) handle_paused_stale "$w" "$task" "$h" ;;

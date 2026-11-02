@@ -1036,6 +1036,19 @@ With the flag absent the wedge timer spends no current-state read for it and kee
 The flag is a home-local supervision-noise preference and is not inherited by secondmate homes.
 [`architecture.md`](architecture.md) owns the deferral contract and `bin/fm-classify-lib.sh`'s `crew_run_is_validating` owns which verdicts count.
 
+## Unacted-gate escalation (config/wedge-escalate-unacted-gate)
+
+The optional local, gitignored `config/wedge-escalate-unacted-gate` presence flag opts this home into a default-off escalation in the watcher.
+With it present, a task whose attributed no-mistakes run has stopped validating wakes firstmate when the run is parked at a gate the worker itself owes a response on, or has reached a terminal outcome, and the worker's own status log has been untouched for `FM_STALE_ESCALATE_SECS`, does not end in a `done:` or `failed:` line, and declares no wait or captain hold.
+This is the counterpart of the validating-run deferral above: that one absorbs the quiet while the run executes, and this one reports the moment it stops.
+It is an escalation, not a deferral: it skips the other wedge deferrals, does not raise the escalation count, and wakes once per run and result.
+The watcher also consults it, at most once per `FM_STALE_ESCALATE_SECS` per task, on a pane whose output keeps changing and so never reaches the idle threshold.
+A gate whose findings owe the answer to a human is not matched, because that wait belongs to firstmate.
+
+With the flag absent the watcher spends no status or current-state read for it and keeps the unchanged escalation schedule.
+The flag is not inherited by secondmate homes.
+`bin/fm-classify-lib.sh`'s `crew_run_gate_unacted` owns which verdicts count, and `bin/fm-watch.sh`'s `wedge_gate_unacted` owns the status-log test.
+
 ## Spawn base from the primary checkout (config/spawn-base-primary-checkout)
 
 The optional local, gitignored `config/spawn-base-primary-checkout` presence flag opts this home into a default-off base for fresh task worktrees on projects that land work locally.

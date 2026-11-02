@@ -967,6 +967,84 @@ test_wedge_threshold_validating_run_is_off_until_armed() {
   pass "with config/wedge-defer-validating absent a running validation keeps the unchanged ladder, wording and reads"
 }
 
+# --- a run that stopped validating and was not acted on is a real signal -----
+# wedge_defer_validating covers the run while it executes. The opposite
+# transition - the run parked at a gate the worker owes a response on, or reached
+# an outcome - while the worker's own status log stays untouched is an
+# escalation, not a deferral, in a home that armed
+# config/wedge-escalate-unacted-gate.
+arm_unacted_gate() {  # <case-dir>
+  : > "$1/config/wedge-escalate-unacted-gate"
+}
+
+test_wedge_threshold_escalates_an_unacted_gate_or_outcome() {
+  local dir state fakebin out capture window key spec name verdict want
+  window="test:fm-wedge"; key=$(printf '%s' "$window" | tr ':/.' '___')
+  for spec in \
+    'gate|state: parked · source: run-step · parked at awaiting_approval: 2 finding(s) · run: 01RUNGATE|parked at a gate awaiting a response' \
+    'outcome|state: done · source: run-step · checks green: PR ready for review · run: 01RUNGATE|reached a terminal outcome (done)'; do
+    name=${spec%%|*}; verdict=${spec#*|}; want=${verdict##*|}; verdict=${verdict%|*}
+    dir=$(wedge_threshold_fixture "unacted-$name" 'working: handed to validation' 2000)
+    arm_unacted_gate "$dir"
+    state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"; capture="$dir/pane.txt"
+    wedge_threshold_round "$state" "$fakebin" "$out" "$capture" "$window" "$verdict" exit \
+      || fail "an unacted $name never woke firstmate: $(cat "$out")"
+    grep -F "no-mistakes run 01RUNGATE $want and the worker has not acted on it" "$out" >/dev/null \
+      || fail "the unacted $name wake did not name the run and result: $(cat "$out")"
+    grep -F 'possible wedge' "$out" >/dev/null \
+      && fail "an unacted $name was worded as a possible wedge"
+    [ ! -e "$state/.wedge-escalations-$key" ] \
+      || fail "an unacted $name rode the wedge escalation counter"
+    ack_stopped_cycle "$state" || fail "could not acknowledge the unacted $name wake"
+    # One wake per run and result: the same unacted result is not re-announced.
+    wedge_threshold_round "$state" "$fakebin" "$out" "$capture" "$window" "$verdict" absorb \
+      || fail "an unacted $name woke again for the same run: $(cat "$out")"
+  done
+  pass "a run parked at a gate or at an outcome that the worker has not acted on wakes firstmate once"
+}
+
+# Every way the worker accounts for itself, or the signal does not apply, keeps
+# the unchanged ladder even where the flag is armed.
+test_wedge_threshold_unacted_gate_ignores_acted_or_ineligible_lanes() {
+  local dir state fakebin out capture window spec name log age verdict
+  window="test:fm-wedge"
+  for spec in \
+    'recent-status|working: handed to validation|0|state: parked · source: run-step · parked at awaiting_approval: 2 finding(s) · run: 01R' \
+    'done-logged|done: ready|2000|state: done · source: run-step · checks green: PR ready for review · run: 01R' \
+    'paused|paused: waiting on a release|2000|state: parked · source: run-step · parked at awaiting_approval: 2 finding(s) · run: 01R' \
+    'human-owed|working: handed to validation|2000|state: parked · source: run-step · parked at awaiting_approval: 1 finding(s) · ask-user: authority decision · run: 01R' \
+    'executing|working: handed to validation|2000|state: working · source: run-step · validating (running) · run: 01R'; do
+    IFS='|' read -r name log age verdict <<< "$spec"
+    dir=$(wedge_threshold_fixture "unacted-skip-$name" "$log" "$age" 1000)
+    arm_unacted_gate "$dir"
+    state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"; capture="$dir/pane.txt"
+    # The wedge timer is pre-armed past the threshold and the threshold raised
+    # above the status age, so the lane reaches the at-threshold consult and only
+    # the status-log evidence under test decides the outcome.
+    FM_TEST_STALE_ESCALATE=600 wedge_threshold_round "$state" "$fakebin" "$out" "$capture" "$window" "$verdict" exit \
+      || fail "a $name lane never reached the at-threshold consult: $(cat "$out")"
+    grep -F 'has not acted on it' "$out" >/dev/null \
+      && fail "a $name lane was reported as unacted: $(cat "$out")"
+  done
+  pass "an acted-on, declared, human-owed or executing lane is never reported as an unacted result"
+}
+
+# Absent the flag the ladder is unchanged.
+test_wedge_threshold_unacted_gate_is_off_until_armed() {
+  local dir state fakebin out capture window
+  local verdict='state: parked · source: run-step · parked at awaiting_approval: 2 finding(s) · run: 01RUNGATE'
+  window="test:fm-wedge"
+  dir=$(wedge_threshold_fixture unacted-unarmed 'working: handed to validation' 2000)
+  state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"; capture="$dir/pane.txt"
+  wedge_threshold_round "$state" "$fakebin" "$out" "$capture" "$window" "$verdict" exit \
+    || fail "an unarmed home stopped escalating a parked gate: $(cat "$out")"
+  grep -F 'has not acted on it' "$out" >/dev/null \
+    && fail "an unarmed home reported an unacted result"
+  grep -F "possible wedge, escalation 1" "$out" >/dev/null \
+    || fail "an unarmed home lost the unchanged wedge wording: $(cat "$out")"
+  pass "with config/wedge-escalate-unacted-gate absent the ladder keeps its wording"
+}
+
 if [ -n "${FM_TEST_ONLY:-}" ]; then
   "$FM_TEST_ONLY"
   exit 0
@@ -985,4 +1063,7 @@ fm_test_run \
   test_wedge_defer_refuses_a_half_filled_wait_record \
   test_wedge_threshold_defers_to_an_executing_validation_run \
   test_wedge_threshold_escalates_when_no_run_is_executing \
-  test_wedge_threshold_validating_run_is_off_until_armed
+  test_wedge_threshold_validating_run_is_off_until_armed \
+  test_wedge_threshold_escalates_an_unacted_gate_or_outcome \
+  test_wedge_threshold_unacted_gate_ignores_acted_or_ineligible_lanes \
+  test_wedge_threshold_unacted_gate_is_off_until_armed
