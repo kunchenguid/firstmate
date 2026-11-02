@@ -409,6 +409,28 @@ SH
   pass "fm-send inbox: lost reply bookkeeping never invites a resend, and the delivered steer is never duplicated"
 }
 
+test_delivery_lock_serializes_enqueue() {
+  local dir err lock sender rc=0
+  dir=$(setup_case delivery-lock)
+  err="$dir/send.err"
+  . "$ROOT/bin/fm-task-inbox-lib.sh"
+  lock=$(fm_task_inbox_delivery_lock_path "$dir/home/state" t1)
+  fm_task_inbox_lock_acquire "$lock" || fail "could not acquire the inbox delivery lock"
+  run_send "$dir" "$err" FM_TASK_INBOX_LOCK_WAIT_SECS=10 -- t1 "arrived during parking" &
+  sender=$!
+  sleep 0.2
+  [ ! -e "$dir/home/state/t1.inbox/001.msg" ] || {
+    fm_lock_release "$lock"
+    wait "$sender" 2>/dev/null || true
+    fail "fm-send wrote the instruction while parking held the delivery lock"
+  }
+  fm_lock_release "$lock"
+  wait "$sender" || rc=$?
+  [ "$rc" -eq 0 ] || fail "fm-send failed after the delivery lock cleared: $(cat "$err")"
+  [ -f "$dir/home/state/t1.inbox/001.msg" ] || fail "fm-send did not enqueue after the delivery lock cleared"
+  pass "fm-send waits for the inbox delivery lock before enqueueing an instruction"
+}
+
 test_meta_lock_contention_fails_bounded() {
   local dir err rc holder marker lock i
   dir=$(setup_case meta-lock)
@@ -518,5 +540,6 @@ test_key_path_never_touches_inbox
 test_secondmate_marker_and_enqueue_delivery
 test_post_enqueue_bookkeeping_failure_is_not_retryable
 test_meta_lock_contention_fails_bounded
+test_delivery_lock_serializes_enqueue
 test_unwritable_inbox_fails_loudly
 test_empty_message_refused

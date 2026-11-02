@@ -55,7 +55,8 @@
 # later get never hands the copy out and prune never removes it even if the
 # endpoint shell dies; bin/fm-teardown.sh's treehouse return releases it),
 # evaluates the gate again with --expect-head immediately before the stop,
-# checks once more that the agent is idle and the inbox empty, writes
+# acquires the same inbox-delivery lock as fm-send, checks once more that the
+# agent is idle and the inbox empty, writes
 # state/<id>.review-park marked pending=1, stops the agent with
 # bin/fm-control.sh exit (endpoint, branch, PR, task record, brief, and copy all
 # stay), rewrites the record without pending once the stop is confirmed, and
@@ -158,6 +159,8 @@ export FM_HOME FM_STATE_OVERRIDE="$STATE" FM_CONFIG_OVERRIDE="$CONFIG"
 . "$SCRIPT_DIR/fm-pr-lib.sh"
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
+# shellcheck source=bin/fm-task-inbox-lib.sh
+. "$SCRIPT_DIR/fm-task-inbox-lib.sh"
 # shellcheck source=bin/fm-backend.sh
 . "$SCRIPT_DIR/fm-backend.sh"
 # shellcheck source=bin/fm-busy-lib.sh
@@ -583,7 +586,7 @@ slot_lease() {  # <id>
 }
 
 cmd_park() {
-  local id=${1-} why result head local_head pr lease parked_at out rc=0 line
+  local id=${1-} why result head local_head pr lease parked_at out rc=0 line inbox_lock
   task_id_ok "$id" || die "usage: fm-park.sh park <task-id>" 2
   lock_try "$(lane_lock "$id")" || die "another park action holds $id"
   why=$(park_preflight "$id") || die "refusing to park $id: $why"
@@ -603,6 +606,11 @@ cmd_park() {
   if ! result=$(gate_eval "$id" "$head") || ! gate_print "$result" > "$PARK_TMP/gate"; then
     die "refusing to park $id: the re-check before stopping was not clean ($(sed 's/^unclean: //' "$PARK_TMP/gate" 2>/dev/null | paste -sd ';' - | sed 's/;/; /g'))" 3
   fi
+  inbox_lock=$(fm_task_inbox_delivery_lock_path "$STATE" "$id")
+  fm_task_inbox_lock_acquire "$inbox_lock" || die "refusing to park $id: its inbox delivery lock could not be acquired"
+  LOCKS_HELD="$LOCKS_HELD $inbox_lock"
+  # fm-send takes the same lock before writing, so no new instruction can
+  # land between this inbox check and the stop.
   if ! why=$(agent_quiet "$id"); then
     die "refusing to park $id: $why"
   fi
