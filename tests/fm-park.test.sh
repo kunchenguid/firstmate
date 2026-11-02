@@ -894,6 +894,24 @@ test_land_requires_opt_in_but_always_cleans_parked() {
   pass "merge-time cleanup requires opt-in for unparked lanes and always cleans parked lanes"
 }
 
+test_land_queue_fails_when_cleanup_request_cannot_be_written() {
+  local w out rc=0
+  w=$(make_world land-queue-write-fail "$GH_URL")
+  : > "$w/config/auto-land"
+  cat > "$w/fakebin/mv" <<SH
+#!/usr/bin/env bash
+dest=
+for arg; do dest=\$arg; done
+[ "\$dest" != "$w/state/lane.review-park-land" ] || exit 1
+exec /bin/mv "\$@"
+SH
+  chmod +x "$w/fakebin/mv"
+  out=$(run_park "$w" land lane --if-eligible --queue 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "land-queue-write-fail: accepted an unwritable cleanup request: $out"
+  [ ! -e "$w/state/lane.review-park-land" ] || fail "land-queue-write-fail: request unexpectedly exists"
+  pass "land queue fails when the cleanup request cannot be written"
+}
+
 # The merge poll's land only starts a detached teardown: it returns at once
 # however slow the teardown is, and the next tick reports the outcome, even in
 # a home that opted out of everything the tick otherwise watches.
@@ -1112,6 +1130,7 @@ fm_test_run \
   test_closed_pr_is_reported_once \
   test_tick_parks_clean_idle_lanes_only_when_opted_in \
   test_land_requires_opt_in_but_always_cleans_parked \
+  test_land_queue_fails_when_cleanup_request_cannot_be_written \
   test_detached_land_returns_at_once_and_the_tick_reports_it \
   test_pending_land_recovers_after_watcher_restart \
   test_pending_land_retries_after_control_lock_refusal \

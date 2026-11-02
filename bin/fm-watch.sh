@@ -4115,7 +4115,10 @@ EOF
           fi
           # Persist before retiring the poll; start only after releasing its control lock.
           FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_CONFIG_OVERRIDE="$CONFIG" \
-            "$SCRIPT_DIR/fm-park.sh" land "$id" --if-eligible --queue >/dev/null 2>&1 || true
+            "$SCRIPT_DIR/fm-park.sh" land "$id" --if-eligible --queue >/dev/null 2>&1 || {
+              triage_log "could not queue merged-lane cleanup for $id"
+              exit 1
+            }
           retire_merged_pr_poll "$id"
           pr_poll_control_release || exit 1
           FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_CONFIG_OVERRIDE="$CONFIG" \
