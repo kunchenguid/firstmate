@@ -2903,6 +2903,58 @@ test_self_merged_lane_is_still_cleaned_up_by_the_poll() {
   pass "a lane merged through bin/fm-pr-merge.sh is still cleaned up when its poll sees the merge"
 }
 
+test_merged_poll_stays_armed_when_cleanup_queue_fails() {
+  local dir state url rc
+  url=https://github.com/o/r/pull/1
+  dir=$(make_case merge-queue-failure)
+  state="$dir/home/state"
+  : > "$dir/home/config/auto-land"
+  write_task_meta "$dir" task-a
+  run_check_entry "$dir" task-a "$url" >/dev/null 2>"$dir/seed.err" \
+    || fail "merge-queue-failure: could not arm merge poll"
+  retire_contributions_observer "$dir"
+  add_stop_custom_check "$dir"
+  run_merge_entry "$dir" task-a "$url" >"$dir/merge.out" 2>"$dir/merge.err" \
+    || fail "merge-queue-failure: merge entrypoint failed: $(cat "$dir/merge.err")"
+  FM_TEST_GH_STATE=MERGED run_watcher_bounded "$dir/home" "$dir/fakebin" \
+    >"$dir/recovery.out" 2>"$dir/recovery.err" \
+    || fail "merge-queue-failure: recovery cycle failed: $(cat "$dir/recovery.err")"
+  grep -F 'check: rearm-resurface' "$dir/recovery.out" >/dev/null \
+    || fail "merge-queue-failure: merged result did not surface for recovery"
+  ack_watcher_cycle "$state" || fail "merge-queue-failure: recovery acknowledgement failed"
+  rm -f "$state/.last-check"
+  printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$*" >> "%s/teardown.log"\n' "$dir" > "$dir/teardown-stub"
+  chmod +x "$dir/teardown-stub"
+  cat > "$dir/fakebin/mv" <<SH
+#!/usr/bin/env bash
+dest=\${!#}
+[ "\$dest" != "$state/task-a.review-park-land" ] || exit 1
+exec /bin/mv "\$@"
+SH
+  chmod +x "$dir/fakebin/mv"
+  set +e
+  FM_TEST_GH_STATE=MERGED run_watcher_bounded "$dir/home" "$dir/fakebin" \
+    >"$dir/watch-failed.out" 2>"$dir/watch-failed.err"
+  rc=$?
+  set -e
+  [ -f "$state/task-a.check.sh" ] \
+    || fail "merge-queue-failure: watcher retired poll after queue failure (rc=$rc)"
+  [ ! -e "$dir/teardown.log" ] \
+    || fail "merge-queue-failure: teardown started without a persisted request"
+
+  ack_watcher_cycle "$state" || fail "merge-queue-failure: failed cycle acknowledgement failed"
+  rm -f "$dir/fakebin/mv" "$state/.last-check"
+  FM_PARK_TEARDOWN_BIN="$dir/teardown-stub" FM_TEST_GH_STATE=MERGED \
+    run_watcher_bounded "$dir/home" "$dir/fakebin" \
+    >"$dir/watch-retry.out" 2>"$dir/watch-retry.err" \
+    || fail "merge-queue-failure: retry failed: $(cat "$dir/watch-retry.err")"
+  assert_poll_absent "$state" task-a
+  for _ in $(seq 1 100); do [ -e "$dir/teardown.log" ] && break; sleep 0.1; done
+  [ -e "$dir/teardown.log" ] \
+    || fail "merge-queue-failure: persisted retry did not start teardown"
+  pass "a failed cleanup queue keeps the merged poll armed until cleanup retries"
+}
+
 test_self_merge_and_poll_publish_one_outcome() {
   local dir state replies url rc
   url=https://github.com/o/r/pull/1
@@ -4169,6 +4221,7 @@ test_merged_poll_retires_once
 test_merged_poll_reregistration_after_notification_is_absorbed
 test_merged_poll_retries_a_failed_upward_report
 test_self_merged_lane_is_still_cleaned_up_by_the_poll
+test_merged_poll_stays_armed_when_cleanup_queue_fails
 test_self_merge_and_poll_publish_one_outcome
 test_merged_poll_row_carries_the_merge_authority
 test_merged_poll_row_names_no_authority_when_no_record_grants_one

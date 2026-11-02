@@ -66,7 +66,7 @@
 # A pending record is watched and resumed like a parked one, so feedback still
 # relaunches a lane whose park died after the stop, and crew state reads it as
 # parking. Each tick promotes a pending record to parked once its agent is
-# confirmed dead and drops it while the agent is still alive.
+# confirmed dead and drops it only if still alive after the stop timeout.
 #
 # resume writes a note naming the PR, the parked head and the trigger, then runs
 # bin/fm-control.sh relaunch --note-file, which starts a fresh agent of the
