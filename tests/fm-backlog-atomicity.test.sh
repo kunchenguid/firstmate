@@ -139,7 +139,7 @@ home_of() { printf '%s/home\n' "$1"; }
 backlog_of() { printf '%s/home/data/backlog.md\n' "$1"; }
 
 add_item() {  # <case-dir> <id> [kind]
-  tasks-axi add "$2" "item for $2" --kind "${3:-ship}" --file "$(backlog_of "$1")" >/dev/null
+  tasks-axi add "$2" "item for $2" --kind "${3:-ship}" --repo project --file "$(backlog_of "$1")" >/dev/null
 }
 
 start_item() {  # <case-dir> <id>
@@ -161,7 +161,7 @@ case "\${1:-}" in
   update) printf '%s\n' '--archive-body' ;;
   mv) printf '%s\n' '[<id>...]' ;;
   show)
-    printf 'task:\n  state: queued\n  held: no\n  blocked: no\n'
+    printf 'task:\n  state: queued\n  held: no\n  blocked: no\n  repo: project\n'
     ;;
   start)
     printf '%s\n' "\$*" > "$case_dir/env-backend-start"
@@ -230,7 +230,7 @@ case "\${1:-}" in
     fi
     printf '%s\n' 'task:'
     printf '  id: %s\n' "$id"
-    printf '%s\n' '  state: in_flight' '  held: no' '  blocked: no'
+    printf '%s\n' '  state: in_flight' '  held: no' '  blocked: no' '  repo: project'
     ;;
   *)
     exit 1
@@ -893,7 +893,7 @@ case "\${1:-}" in
     esac
     printf '%s\n' 'task:'
     printf '  id: %s\n' "$id"
-    printf '%s\n' '  state: in_flight' '  held: no' '  blocked: no'
+    printf '%s\n' '  state: in_flight' '  held: no' '  blocked: no' '  repo: project'
     ;;
   done)
     [ "\${2:-}" = "$id" ] || exit 1
@@ -1003,7 +1003,7 @@ test_dispatch_refuses_a_blocked_row_before_creating_resources() {
   blocker=atomic-dispatch-blocker-b16
   case_dir=$(make_home dispatch-blocked "$id" "$blocker")
   add_item "$case_dir" "$blocker"
-  tasks-axi add "$id" "item for $id" --kind ship --blocked-by "$blocker" \
+  tasks-axi add "$id" "item for $id" --kind ship --repo project --blocked-by "$blocker" \
     --file "$(backlog_of "$case_dir")" >/dev/null
   cat > "$case_dir/fakebin/tmux" <<SH
 #!/usr/bin/env bash
@@ -1091,7 +1091,7 @@ test_recovery_uses_the_parent_of_a_trailing_slash_data_record() {
   pin_markdown_backend "$case_dir"
   backlog="$relocated/backlog.md"
   printf '%s\n' '# Backlog' '' '## In flight' '' '## Queued' '' '## Done' > "$backlog"
-  tasks-axi add "$id" "item for $id" --kind ship --file "$backlog" >/dev/null
+  tasks-axi add "$id" "item for $id" --kind ship --repo project --file "$backlog" >/dev/null
   tasks-axi start "$id" --file "$backlog" >/dev/null
   marker="$(home_of "$case_dir")/state/$id.backlog-close"
   printf 'id=%s\ndata=%s/\nspawn_gen=spawn-relocated-recovery\narg=--note\narg=local%%20main\n' "$id" "$relocated" > "$marker"
@@ -1115,7 +1115,7 @@ test_completion_targets_a_nested_relative_data_directory() {
   mv "$(home_of "$case_dir")/data" "$data"
   data_resolved=$(cd "$data" && pwd -P)
   backlog="$data/backlog.md"
-  tasks-axi add "$id" "item for $id" --kind ship --file "$backlog" >/dev/null
+  tasks-axi add "$id" "item for $id" --kind ship --repo project --file "$backlog" >/dev/null
   tasks-axi start "$id" --file "$backlog" >/dev/null
   write_task_meta "$case_dir" "$id" ship local-only "spawn_gen=spawn-relative-data"
 
@@ -1144,7 +1144,7 @@ test_immediate_child_absolute_data_dispatches_and_completes() {
   mv "$(home_of "$case_dir")/data" "$data"
   data_resolved=$(cd "$data" && pwd -P)
   backlog="$data/backlog.md"
-  tasks-axi add "$id" "item for $id" --kind ship --file "$backlog" >/dev/null
+  tasks-axi add "$id" "item for $id" --kind ship --repo project --file "$backlog" >/dev/null
 
   out=$(FM_DATA_OVERRIDE="$data" run_ship_spawn "$case_dir" "$id") \
     || fail "immediate-child-data spawn failed: $out"
@@ -1169,7 +1169,7 @@ test_bare_relative_data_dispatches_and_completes() {
   data="$case_dir/records"
   mv "$(home_of "$case_dir")/data" "$data"
   backlog="$data/backlog.md"
-  tasks-axi add "$id" "item for $id" --kind ship --file "$backlog" >/dev/null
+  tasks-axi add "$id" "item for $id" --kind ship --repo project --file "$backlog" >/dev/null
 
   out=$(cd "$case_dir" && FM_DATA_OVERRIDE=records run_ship_spawn "$case_dir" "$id") \
     || fail "bare-relative-data spawn failed: $out"
@@ -1743,7 +1743,7 @@ test_trailing_newline_data_path_fails_closed() {
   cp "$data/$id/brief.md" "$home/data/$id/brief.md"
   ln -s "$data" "$case_dir/data-alias"
   backlog_alias="$case_dir/data-alias/backlog.md"
-  tasks-axi add "$id" "item for $id" --kind ship --file "$backlog_alias" >/dev/null
+  tasks-axi add "$id" "item for $id" --kind ship --repo project --file "$backlog_alias" >/dev/null
 
   out=$(FM_DATA_OVERRIDE="$data" run_ship_spawn "$case_dir" "$id") || rc=$?
   [ "$rc" -ne 0 ] || fail "trailing-newline data path bypassed dispatch transition"
@@ -1773,7 +1773,7 @@ test_control_character_data_path_is_refused_before_cleanup() {
   data="$case_dir/crew"$'\t'"data"
   mv "$(home_of "$case_dir")/data" "$data"
   backlog="$data/backlog.md"
-  tasks-axi add "$id" "item for $id" --kind ship --file "$backlog" >/dev/null
+  tasks-axi add "$id" "item for $id" --kind ship --repo project --file "$backlog" >/dev/null
 
   out=$(FM_DATA_OVERRIDE="$data" run_ship_spawn "$case_dir" "$id") || rc=$?
   [ "$rc" -ne 0 ] || fail "control-character data path passed dispatch preflight"

@@ -137,9 +137,9 @@ SH
   printf '%s\n' "$case_dir"
 }
 
-add_item() {  # <home> <id>
+add_item() {  # <home> <id> [repo]
   [ "$HAVE_TASKS_AXI" = 1 ] || return 0
-  tasks-axi add "$2" "item for $2" --kind ship --file "$1/data/backlog.md" >/dev/null
+  tasks-axi add "$2" "item for $2" --kind ship --repo "${3:-project}" --file "$1/data/backlog.md" >/dev/null
 }
 
 row_state() {  # <home> <id>
@@ -294,8 +294,10 @@ test_spaced_project_name_is_declared() {
 # ends with a number, and a '#' note that is not a capacity stays a comment.
 test_hash_prefixed_project_name_is_declared() {
   local case_dir home hashed spaced out rc=0 wt
-  case_dir=$(make_case hash-name task-c task-d)
+  case_dir=$(make_case hash-name task-c)
   home="$case_dir/home"
+  write_brief "$home" task-d
+  add_item "$home" task-d "# serves"
   hashed="$case_dir/#hash-project"
   spaced="$case_dir/# serves"
   git clone -q "$(git -C "$case_dir/project" remote get-url origin)" "$hashed"

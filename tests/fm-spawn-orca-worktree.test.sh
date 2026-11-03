@@ -392,7 +392,7 @@ test_orca_spawn_waits_for_a_slow_pane_before_a_later_failure() {
   printf 'GH_TOKEN\n' > "$home/config/launch-env-allowlist"
   printf '%s\n' '# Backlog' '' '## In flight' '' '## Queued' '' '## Done' > "$home/data/backlog.md"
   printf 'backend = "markdown"\n\n[markdown]\npath = "data/backlog.md"\n' > "$home/.tasks.toml"
-  "$real_axi" add "$id" "item for $id" --kind ship --file "$home/data/backlog.md" >/dev/null
+  "$real_axi" add "$id" "item for $id" --kind ship --repo project --file "$home/data/backlog.md" >/dev/null
   fm_git_init_commit "$case_dir/project"
   cat > "$home/data/$id/brief.md" <<EOF
 # Task
