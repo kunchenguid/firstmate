@@ -178,6 +178,8 @@ BASE_PATH=${FM_TEST_BASE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}
 run_spawn() {
   local case_dir=$1 home=$2 proj=$3 wt=$4 fakebin=$5 id=$6
   shift 6
+  local -a spawn_flags
+  read -r -a spawn_flags <<<"${SPAWN_FLAGS---mode no-mistakes --yolo off}"
   HOME="$home" FM_ROOT_OVERRIDE='' FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
@@ -191,7 +193,7 @@ run_spawn() {
     FM_FAKE_BOB_DELIVERY="${FM_FAKE_BOB_DELIVERY:-yes}" \
     FM_BOB_READY_POLLS=3 FM_BOB_DELIVERY_POLLS=3 FM_BOB_POLL_INTERVAL=0 \
     PATH="$fakebin:$BASE_PATH" \
-    "$SPAWN" "$id" "$proj" --harness bob ${SPAWN_FLAGS---mode no-mistakes --yolo off} "$@" 2>&1
+    "$SPAWN" "$id" "$proj" --harness bob "${spawn_flags[@]}" "$@" 2>&1
 }
 
 test_bob_launch_then_send_is_verified() {
