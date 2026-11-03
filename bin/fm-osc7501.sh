@@ -83,16 +83,20 @@
 # also exits when its recorded parent - the shell running the launch - dies.
 # Either way a final emit keeps done/error and otherwise parks the record at
 # idle - including when activity is unknown, provided the watcher has a
-# prior write of its own; a TERM/HUP retires it the same way. One watcher per
-# controlling terminal (<state>/.osc7501watch-<tty>): every arm retires the
-# pane's previous watcher before any gate, so a relaunch rebinds to the new
-# agent and a natively reporting agent never shares the pane with a stale
-# writer. A leftover pidfile marks a watcher that may have died without its
-# final write, so once the pane's terminal proves 7501-aware arm writes one
-# idle record to clear it - on every relaunch, including off and native
-# ones; panes that never armed get no write. When all gates pass, that
-# write (or a fresh one when there was nothing to clear) is the new
-# watcher's own first record.
+# prior write of its own; a TERM/HUP retires it the same way. A watcher that
+# is already gone can answer neither: when disarm finds a pidfile naming no
+# live reporter, it writes that same final record itself before the pidfile
+# goes, so a dead watcher's working/blocked record is retired even when the
+# next launch arms nothing. One watcher per controlling terminal
+# (<state>/.osc7501watch-<tty>): every arm retires the pane's previous
+# watcher before any gate, so a relaunch rebinds to the new agent and a
+# natively reporting agent never shares the pane with a stale writer. A
+# leftover pidfile marks a watcher that may have died without its final
+# write and without disarm having run, so once the pane's terminal proves
+# 7501-aware arm writes one idle record to clear it - on every relaunch,
+# including off and native ones; panes that never armed get no write. When
+# all gates pass, that write (or a fresh one when there was nothing to
+# clear) is the new watcher's own first record.
 #
 # Safety: the reporter never reads terminal input or changes terminal modes.
 # Eligibility uses passive environment markers only. Every record write is
@@ -520,6 +524,28 @@ osc_retire() {
   rm -f "$1"
 }
 
+# The final record a watcher already gone can never write for itself -
+# exactly osc_final's emit: the signals fold with idle activity, done/error
+# survive, everything else parks at idle. The pidfile proves the record is
+# the bridge's own, and the launch shell's disarm runs right after the
+# agent returns, so this is where a dead watcher's working/blocked record
+# gets retired on a pane whose next launch arms nothing.
+osc_dead_final() { # <task> <kind> <harness> <state>
+  local wtask=$1 wkind=$2 wharness=$3 wstate=$4 dev
+  task_ok "$wtask" || return 0
+  osc_load_libs || return 0
+  FM_OSC_APP="firstmate-$wharness"
+  FM_OSC_APP="${FM_OSC_APP:0:$FM_OSC7501_APP_MAX}"
+  FM_OSC_APP="${FM_OSC_APP%-}"
+  osc_plan "$wtask" "${wkind:-ship}" "$wstate" idle
+  case "$W_STATE" in
+    done | error) ;;
+    *) W_STATE=idle W_KIND='' W_MSG='' ;;
+  esac
+  dev=${FM_OSC7501_TTY:-/dev/tty}
+  printf '%s' "$(osc_seq "$W_STATE" "$W_KIND" "fm-$wtask" "$W_MSG")" >>"$dev" 2>/dev/null || true
+}
+
 osc_disarm() { # --state <dir>
   local opt state=''
   while [ $# -gt 0 ]; do
@@ -532,9 +558,22 @@ osc_disarm() { # --state <dir>
     shift
   done
   [ -d "$state" ] || exit 0
-  local key
+  local key pidfile opid='' wtask='' wharness='' wkind='' live=''
   key=$(osc_tty_key) || exit 0
-  osc_retire "$state/.osc7501watch-$key"
+  pidfile="$state/.osc7501watch-$key"
+  if [ -f "$pidfile" ]; then
+    read -r opid wtask _ wharness wkind <"$pidfile" 2>/dev/null || true
+    case "$opid" in
+      '' | *[!0-9]*) ;;
+      *)
+        kill -0 "$opid" 2>/dev/null \
+          && ps -o command= -p "$opid" 2>/dev/null | grep -q 'fm-osc7501\.sh' \
+          && live=1
+        ;;
+    esac
+    [ -n "$live" ] || osc_dead_final "$wtask" "$wkind" "$wharness" "$state"
+  fi
+  osc_retire "$pidfile"
   exit 0
 }
 
@@ -594,7 +633,7 @@ osc_arm() { # --task --harness --backend --kind --state --config [--target] [--a
     --task "$task" --kind "$kind" --state "$state" --harness "$harness" \
     --backend "$backend" --target "$target" --owned "$owned" \
     --parent "$PPID" </dev/null >/dev/null 2>&1 &
-  printf '%s %s %s\n' "$!" "$task" "$$" >"$pidfile" 2>/dev/null || true
+  printf '%s %s %s %s %s\n' "$!" "$task" "$$" "$harness" "$kind" >"$pidfile" 2>/dev/null || true
   exit 0
 }
 

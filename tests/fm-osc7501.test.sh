@@ -697,12 +697,13 @@ t_stale_terminal_line_parks_idle() {
   pass "unknown activity: a stale done/failed parks at idle until exit keeps it; a fresh done still reports"
 }
 
-# A watcher killed without its final write leaves its record standing. The
-# leftover pidfile marks it as the bridge's own, so the next launch on that
-# pane clears it however the launch ends - reporting off, or a natively
-# reporting agent - while a pane that never armed still sees nothing.
+# A watcher killed without its final write leaves its record standing.
+# fm-spawn's real order runs disarm after the agent command returns, so
+# disarm finds the dead watcher's pidfile and writes the final record
+# itself; the next launch on that pane - reporting off, or a natively
+# reporting agent - then keeps the parked record without writing.
 t_unarmed_relaunch_clears_leftover() {
-  local d=$TMP_ROOT/deadleft kind wpid
+  local d=$TMP_ROOT/deadleft kind wpid n0
   mkhome "$d"; mkfake "$d" claude 'claude 2.1.295'
   start_term "$d"
   for kind in off native; do
@@ -714,6 +715,15 @@ t_unarmed_relaunch_clears_leftover() {
     wpid=$(watcher_pid "$d/state") || fail "leftover $kind: no watcher armed"
     wait_cap 'state=working' "$d/cap" 60 || fail "leftover $kind: no working record"
     kill -KILL "$wpid" 2>/dev/null; wait "$wpid" 2>/dev/null || true
+    n0=$(grep -o 'state=' "$d/cap" | wc -l | tr -d ' ')
+    # the real launch order runs disarm after the agent command returns;
+    # the pidfile names a watcher that is already gone, so disarm writes
+    # the final record itself before removing the pidfile
+    env "${CLEAN_UNSET[@]}" FM_OSC7501_TTY="$TERM_SLAVE" bash "$SCRIPT" disarm --state "$d/state"
+    wait_last_state 'state=idle' "$d/cap" 60 \
+      || fail "leftover $kind: disarm left the dead watcher's record standing"
+    [ -z "$(ls "$d/state"/.osc7501watch-* 2>/dev/null)" ] \
+      || fail "leftover $kind: disarm left the pidfile behind"
     if [ "$kind" = off ]; then
       printf 'off\n' >"$d/config/osc7501-status"
       env "${CLEAN_UNSET[@]}" HC_TERMINAL_ID=x FM_OSC7501_TTY="$TERM_SLAVE" bash "$SCRIPT" arm \
@@ -724,16 +734,16 @@ t_unarmed_relaunch_clears_leftover() {
         bash "$SCRIPT" arm --task t43 --harness claude --agent-bin claude --backend tmux --kind ship \
         --state "$d/state" --config "$d/config"
     fi
-    wait_last_state 'state=idle' "$d/cap" 60 \
-      || fail "leftover $kind: the dead watcher's record survived the relaunch"
+    sleep 1
     [ -z "$(ls "$d/state"/.osc7501watch-* 2>/dev/null)" ] \
       || fail "leftover $kind: the unarmed relaunch started a watcher"
-    sleep 1
+    assert_equals "$((n0 + 1))" "$(grep -o 'state=' "$d/cap" | wc -l | tr -d ' ')" \
+      "leftover $kind: only disarm's final write landed - the relaunch added nothing"
     assert_equals "state=idle" "$(grep -o 'state=[a-z]*' "$d/cap" | tail -1)" \
       "leftover $kind: nothing rewrote the cleared record"
   done
   stop_term
-  pass "lifecycle: off and native relaunches clear a dead watcher's leftover record"
+  pass "lifecycle: disarm retires a dead watcher's record; off and native relaunches stay parked"
 }
 
 # --- config gate ---------------------------------------------------------------
