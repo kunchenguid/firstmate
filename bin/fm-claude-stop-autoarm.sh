@@ -106,16 +106,18 @@
 #     the same owned critical section as its failed-suppressed write and
 #     delivers the one loud final rewake; later generations exit 0.
 #   - StopFailure storm bound: an error-ended turn can precede another error
-#     end when the API is still down, so a StopFailure-triggered generation
-#     that closed actionable would otherwise chain error -> rewake -> error
-#     indefinitely while a wake stays undeliverable. StopFailure-triggered
-#     rewakes are therefore bound to one per
-#     FM_CLAUDE_STOPFAILURE_REWAKE_COOLDOWN window (default 300s), recorded by
-#     state/.claude-autoarm-stopfailure-rewake at the committed rewake: a
-#     firing inside the window still runs the full arm path (coverage and the
-#     handling successor are unaffected) but records rewake-suppressed and
-#     exits 0, leaving the durable wake to the next clean turn end or the
-#     next post-cooldown StopFailure.
+#     end when the API is still down, and no Stop phase runs to charge the
+#     guard's block budget, so every StopFailure-triggered exit-2
+#     continuation (actionable rewake, failure notice, suppressed failure
+#     retry, attended alarm, or interruption recovery) would otherwise chain
+#     error -> continuation -> error at full speed. Each one is therefore paced
+#     to one per FM_CLAUDE_STOPFAILURE_REWAKE_COOLDOWN window (default 300s),
+#     recorded by state/.claude-autoarm-stopfailure-rewake at its committed
+#     write: a firing inside the window holds its open claim, waits out the
+#     remainder, and only then commits and delivers. The continuation is
+#     delayed, never dropped, because after an error end it is the only thing
+#     that guarantees another hook firing; a newer generation that supersedes
+#     the waiting claim owns continuity instead.
 #
 # The epoch ledger state/.claude-autoarm-epoch records the latest claim
 # generation and outcome, and binds rewake outcomes to the session-lock pid and
@@ -165,8 +167,9 @@ CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 OWNER_LOCK="$STATE/.claude-autoarm.lock"
 FAILURE_NOTICE="$STATE/.claude-autoarm-failure-notified"
 FAILURE_ALARM="$STATE/.claude-autoarm-failure-alarmed"
-# Mtime of the last committed StopFailure-triggered rewake; bounds chained
-# error -> rewake -> error cycles (header "StopFailure storm bound").
+# Mtime of the last committed StopFailure-triggered exit-2 continuation; paces
+# chained error -> continuation -> error cycles (header "StopFailure storm
+# bound").
 STOPFAIL_REWAKE_MARKER="$STATE/.claude-autoarm-stopfailure-rewake"
 STOPFAIL_REWAKE_COOLDOWN=${FM_CLAUDE_STOPFAILURE_REWAKE_COOLDOWN:-300}
 case "$STOPFAIL_REWAKE_COOLDOWN" in ''|*[!0-9]*) STOPFAIL_REWAKE_COOLDOWN=300 ;; esac
@@ -310,6 +313,7 @@ MY_GEN=$FM_AUTOARM_MY_GEN
 # even an already-printed banner is never delivered by a losing generation.
 autoarm_commit() {  # <outcome> [marker-file] [interrupted-session-identity]
   local outcome=$1 marker=${2:-} marker_identity=${3:-} session_pid recovery
+  stopfailure_pace
   if [ "$outcome" = rewake ]; then
     fm_session_lock_owned_by_self "$STATE" || return 2
     session_pid=$(sed -n '1p' "$STATE/.lock" 2>/dev/null || true)
@@ -318,10 +322,11 @@ autoarm_commit() {  # <outcome> [marker-file] [interrupted-session-identity]
       pending:downtime:*|announced:downtime:*) recovery=${FM_RECOVERY_MARKER_TOKEN##*:} ;;
       *) return 2 ;;
     esac
-    fm_autoarm_write_owned "$STATE" "$MY_GEN" "$outcome" "$marker" "$session_pid" "$recovery"
+    fm_autoarm_write_owned "$STATE" "$MY_GEN" "$outcome" "$marker" "$session_pid" "$recovery" || return
   else
-    fm_autoarm_write_owned "$STATE" "$MY_GEN" "$outcome" "$marker" '' '' "$marker_identity" "$SESSION_ID"
+    fm_autoarm_write_owned "$STATE" "$MY_GEN" "$outcome" "$marker" '' '' "$marker_identity" "$SESSION_ID" || return
   fi
+  stopfailure_paced
 }
 
 # Best-effort ownership-checked record for exit-0 paths, where supersession
@@ -330,18 +335,25 @@ autoarm_record() {  # <outcome>
   fm_autoarm_write_owned "$STATE" "$MY_GEN" "$1" >/dev/null 2>&1 || true
 }
 
-# True when this firing was triggered by StopFailure and the previous
-# StopFailure-driven rewake still sits inside its cooldown window, so this
-# actionable close may not commit another rewake. The arm and the handling
-# successor already ran, so coverage is unaffected; the undeliverable wake
-# stays durable for the next clean turn end or the next post-cooldown
-# StopFailure (header "StopFailure storm bound").
-stopfailure_rewake_suppressed() {
-  local m
-  [ "$HOOK_EVENT_NAME" = StopFailure ] || return 1
+# Before a StopFailure-triggered commit that delivers an exit-2 continuation,
+# wait out whatever remains of the previous one's cooldown, and record the
+# committed one so the next is paced in turn (header "StopFailure storm
+# bound"). A Stop firing is never paced. The wait is interruptible so the
+# signal traps still run promptly.
+stopfailure_pace() {
+  local m remaining
+  [ "$HOOK_EVENT_NAME" = StopFailure ] || return 0
   m=$(fm_sup_stat_mtime "$STOPFAIL_REWAKE_MARKER" 2>/dev/null || true)
-  [ -n "$m" ] || return 1
-  [ $(( $(date +%s) - m )) -lt "$STOPFAIL_REWAKE_COOLDOWN" ]
+  [ -n "$m" ] || return 0
+  remaining=$(( m + STOPFAIL_REWAKE_COOLDOWN - $(date +%s) ))
+  [ "$remaining" -gt 0 ] || return 0
+  sleep "$remaining" &
+  wait "$!" 2>/dev/null || true
+}
+
+stopfailure_paced() {
+  [ "$HOOK_EVENT_NAME" = StopFailure ] || return 0
+  : > "$STOPFAIL_REWAKE_MARKER" 2>/dev/null || true
 }
 
 # Commit this generation's terminal failed-suppressed outcome together with
@@ -366,6 +378,7 @@ stopfailure_rewake_suppressed() {
 # 1 on any other refusal or uncertainty.
 autoarm_commit_attended_alarm() {
   local session_id budget_session budget_count rc=1 i=0
+  stopfailure_pace
   fm_lock_try_acquire "$OWNER_LOCK" || return 1
   while ! fm_lock_try_acquire "$BUDGET_LOCK"; do
     if [ "$i" -ge 20 ]; then
@@ -392,6 +405,7 @@ autoarm_commit_attended_alarm() {
         && [ "$budget_count" -gt "$BLOCK_BUDGET" ] \
         && _fm_autoarm_write_owned_locked "$STATE" "$MY_GEN" failed-suppressed "$FAILURE_ALARM"; then
         AUTOARM_COMMITTED_ALARM=1
+        stopfailure_paced
         rc=0
       fi
     fi
@@ -706,11 +720,6 @@ if [ "$ACTIONABLE" -eq 1 ]; then
   if [ "$HOST_MODE" -eq 0 ]; then
     start_handling_successor "$CLOSED_ARM_PID" || true
   fi
-  if stopfailure_rewake_suppressed; then
-    autoarm_record rewake-suppressed
-    [ -z "$OUT" ] || rm -f "$OUT" 2>/dev/null || true
-    exit 0
-  fi
   {
     printf 'firstmate watcher wake - one supervision event needs a handling turn now.\n'
     if [ "$HOST_MODE" -eq 1 ]; then
@@ -726,7 +735,6 @@ if [ "$ACTIONABLE" -eq 1 ]; then
     printf 'Run bin/fm-wake-drain.sh first, handle the wake, then run its exact WAKE_ACK_REQUIRED --ack-through command. Until that post-handling acknowledgement, interruption leaves the wake durable for idempotent re-handling. This Stop hook owns watcher continuity: when the handling turn ends, the next needed cycle arms automatically - do NOT run bin/fm-watch-arm.sh after an ordinary wake.\n'
   } >&2
   if autoarm_commit rewake; then
-    [ "$HOOK_EVENT_NAME" = StopFailure ] && : > "$STOPFAIL_REWAKE_MARKER" 2>/dev/null
     [ -z "$OUT" ] || rm -f "$OUT" 2>/dev/null || true
     exit 2
   fi

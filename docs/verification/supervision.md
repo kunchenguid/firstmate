@@ -769,14 +769,14 @@ Observed result:
 - The tracked `fm-claude-stop-autoarm.sh` registration under `StopFailure` (same `asyncRewake: true`, `timeout: 28800` entry as `Stop`) claimed the epoch, ran `fm-watch-arm.sh` in the foreground, closed actionable on the pending wake, and exited 2.
 - Claude honored the `StopFailure` exit 2 exactly like `Stop`: it queued the wake banner as an unprompted next turn (transcript `queue-operation` enqueue `2026-11-03T19:16:29Z`, `Stop hook blocking error from command "StopFailure:authentication_failed..."`), so the queued wake surfaced without typed input.
 - A real watcher was armed afterward and announced the downtime marker: `fm-watch.sh` ran under `state/.watch.lock`, and `.watcher-down` moved to `announced:downtime:<new generation>`.
-- The rewake turn also hit the forced error and ended on `StopFailure` again; the second firing still ran its arm for coverage, saw the committed `StopFailure` rewake inside `state/.claude-autoarm-stopfailure-rewake`'s cooldown (`FM_CLAUDE_STOPFAILURE_REWAKE_COOLDOWN`, default 300), recorded `outcome=rewake-suppressed`, and exited 0, so the forced error -> rewake -> error chain self-bounded instead of storming.
+- The rewake turn also hit the forced error and ended on `StopFailure` again, so a second firing ran inside the first one's cooldown. The build live-tested here dropped that second rewake (`outcome=rewake-suppressed`, exit 0), which self-bounded the storm but could leave the home with no further hook firing. The current build waits out the rest of the cooldown in `state/.claude-autoarm-stopfailure-rewake` (`FM_CLAUDE_STOPFAILURE_REWAKE_COOLDOWN`, default 300) and then delivers. Every `StopFailure`-driven exit-2 continuation, failure paths included, is paced the same way. The deterministic test below pins that pacing; it was not re-run live.
 - A synthetic earlier probe on the same version confirmed `asyncRewake: true` itself is honored under `StopFailure` and that a hook-launched detached child outlives the hook teardown.
 
 Deterministic entry point for the event-aware behavior:
 
 ```sh
 tests/fm-claude-stop-autoarm.test.sh
-# ok - auto-arm: StopFailure arms the cycle, rewakes once per cooldown, and never re-delivers inside it
+# ok - auto-arm: StopFailure continuations are paced to one per cooldown and never dropped
 ```
 
 ## Supervision host
