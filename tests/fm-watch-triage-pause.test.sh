@@ -1463,12 +1463,73 @@ test_required_captain_hold_tests_fail_without_tasks_axi() {
   pass "all four required captain-hold tests fail when tasks-axi is unavailable"
 }
 
+paused_turnend_case() {
+  local mode=$1 dir state fakebin out pid sig until back
+  dir=$(make_case "paused-turnend-$mode"); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"
+  until=
+  if [ "$mode" = expiry ]; then
+    back=$(( $(date +%s) + 15 ))
+    until=$(date -u -r "$back" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null) \
+      || until=$(date -u -d "@$back" +%Y-%m-%dT%H:%M:%SZ)
+  fi
+  printf 'paused: waiting for upstream%s\n' "${until:+ until $until}" > "$state/held.status"
+  if [ "$mode" = bounded ]; then
+    set_mtime "$(( $(date +%s) - 500 ))" "$state/held.status"
+  fi
+  sig=$(seen_sig "$state/held.status"); printf '%s' "$sig" > "$state/.seen-held_status"
+  printf 'first turn\n' > "$state/held.turn-ended"
+  watch_bg "$state" "$fakebin" "$out" env FM_PAUSE_RESURFACE_SECS=240
+  pid=$!
+  if [ "$mode" = bounded ]; then
+    wait_for_exit "$pid" 200 || { reap "$pid"; fail "old pause did not re-surface its turn-end"; }
+    grep -F 'held.turn-ended' "$out" >/dev/null || fail "bounded recheck lost the turn-end"
+    ack_stopped_cycle "$state" || fail "cannot acknowledge bounded turn-end recheck"
+    printf 'second turn\n' >> "$state/held.turn-ended"
+    watch_bg "$state" "$fakebin" "$out" env FM_PAUSE_RESURFACE_SECS=240
+    pid=$!
+  fi
+  if ! wait_poll_cycle "$state" "$pid" || ! wait_poll_cycle "$state" "$pid"; then
+    reap "$pid"; fail "$mode: paused turn-end woke before its recheck: $(cat "$out")"
+  fi
+  [ ! -s "$out" ] || { reap "$pid"; fail "$mode: absorbed turn-end printed a wake"; }
+  case "$mode" in
+    absorb)
+      reap "$pid"
+      ;;
+    bounded)
+      set_mtime "$(( $(date +%s) - 500 ))" "$state/.paused-resurfaced-turnend-held"
+      wait_for_exit "$pid" 200 || { reap "$pid"; fail "turn-end did not re-surface after the cadence"; }
+      grep -F 'held.turn-ended' "$out" >/dev/null || fail "cadence wake lost the turn-end"
+      ;;
+    expiry)
+      wait_for_exit "$pid" 300 || { reap "$pid"; fail "pause expiry did not wake without a new turn-end"; }
+      grep -F 'held.turn-ended' "$out" >/dev/null || fail "expiry wake lost the turn-end"
+      ;;
+    status)
+      printf 'needs-decision: choose the release\n' >> "$state/held.status"
+      wait_for_exit "$pid" 200 || { reap "$pid"; fail "genuine status event was absorbed with the turn-end"; }
+      grep -F 'held.status' "$out" >/dev/null || fail "status wake lost the status file"
+      ;;
+  esac
+  pass "$mode: declared waits bound turn-end wakes and preserve real events"
+}
+
+test_paused_turnend_absorbed() { paused_turnend_case absorb; }
+test_paused_turnend_bounded_resurface() { paused_turnend_case bounded; }
+test_paused_turnend_expiry_wakes() { paused_turnend_case expiry; }
+test_paused_turnend_status_wakes() { paused_turnend_case status; }
+
 if [ -n "${FM_TEST_ONLY:-}" ]; then
   "$FM_TEST_ONLY"
   exit 0
 fi
 
 fm_test_run \
+  test_paused_turnend_absorbed \
+  test_paused_turnend_bounded_resurface \
+  test_paused_turnend_expiry_wakes \
+  test_paused_turnend_status_wakes \
   test_required_captain_hold_tests_fail_without_tasks_axi \
   test_nonterminal_stale_not_working_surfaced \
   test_nonterminal_stale_paused_absorbed_then_resurfaced \
