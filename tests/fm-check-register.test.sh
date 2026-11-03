@@ -35,13 +35,15 @@ test_unsafe_check_is_refused_naming_the_check() {
   local home err status
   home=$(make_home hardlink)
   printf '#!/usr/bin/env bash\n' > "$home/state/poll.check.sh"
-  chmod 0700 "$home/state/poll.check.sh"
+  chmod 0600 "$home/state/poll.check.sh"
   ln "$home/state/poll.check.sh" "$home/other.check.sh"
   err=$(FM_HOME="$home" "$REGISTER" poll 2>&1 >/dev/null); status=$?
   [ "$status" -eq 1 ] || fail "hard-linked check was not refused (status $status)"
   assert_contains "$err" "state/poll.check.sh" "refusal did not name the check"
   assert_contains "$err" "not registered" "refusal did not say the check is unregistered"
   [ ! -e "$home/state/poll.check-trust" ] || fail "refused check left a trust record"
+  [ "$(fm_pr_file_mode "$home/state/poll.check.sh")" = 600 ] || fail "refused check had its mode changed"
+  [ "$(fm_pr_file_mode "$home/other.check.sh")" = 600 ] || fail "refused check's other link had its mode changed"
   pass "unsafe check is refused loudly and names the check"
 }
 
