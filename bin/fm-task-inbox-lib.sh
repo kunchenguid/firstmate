@@ -31,15 +31,15 @@
 #   <task>.inbox/.busy-state   consecutive busy deferrals: "<msg>\t<count>"
 #   <task>.inbox/.escalated    oldest-message name already surfaced as stale,
 #                              so later polls suppress another escalation
-#   <task>.inbox/.retry-ring   name of a fire-and-forget record still owed its
-#                              one retry ring (fm_task_inbox_mark_retry)
+#   <task>.inbox/.retry-ring   name of a fire-and-forget record still owed a
+#                              retry ring (fm_task_inbox_mark_retry)
 #
 # Record format (fm_task_inbox_write / fm_task_inbox_body):
 #   schema=fm-task-inbox.v1
 #   at=<utc timestamp>
 #   body-terminator=1          present on records written with a synthetic final newline
 #   delivery=fire-and-forget   present only when the re-ring ladder must ignore it
-#                              (it still gets one retry ring; see below)
+#                              (it still gets a retry ring; see below)
 #   --
 #   <exact message text; newlines are legal; a marked secondmate request keeps
 #    its from-firstmate marker and corr token verbatim in this body>

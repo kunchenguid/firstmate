@@ -1225,11 +1225,13 @@ fm_backend_capture() {  # <backend> <target> <lines> [expected-label]
 # capability question and the dispatch, so they cannot disagree. cmux is absent
 # pending live verification: its `read-screen` without `--scrollback` plausibly
 # reads only the viewport, but that has not been observed on a real cmux, and
-# the adapter's own capture opts into history with `--scrollback`. orca's
-# `terminal read --limit` is a history read with no viewport mode. rex has no
-# viewport-only read either; its viewport is DERIVED as the last size.rows rows
-# of the styled capture, which always ends with the full screen grid
-# (bin/backends/rex.sh's header owns the derivation and its verified basis).
+# the adapter's own capture opts into history with `--scrollback`. orca is
+# absent too: its `terminal read --limit` is a history read, and the composer
+# path's `terminal read --screen` renders the screen without a verified
+# viewport bound. rex has no viewport-only read either; its viewport is DERIVED
+# as the last size.rows rows of the styled capture, which always ends with the
+# full screen grid (bin/backends/rex.sh's header owns the derivation and its
+# verified basis).
 # tern reads the viewport with `tern capture --surfaces` and no `--scrollback`
 # (trimmed to the block's rows); its own capture opts into history with the flag.
 # hc reads the screen alone with `hc read --lines 0`.
@@ -1399,6 +1401,11 @@ fm_backend_busy_state() {  # <backend> <target>
   esac
 }
 
+# fm_backend_composer_draft: the backend's structured input draft for <target>,
+# printed verbatim so an EMPTY draft is an answer rather than a failure; a
+# backend without a structured draft returns nonzero and its caller falls back
+# to plain capture. fm-task-inbox-lib.sh's own-line check owns that precedence.
+# Only Orca publishes the field (result.terminal.draft); see docs/orca-backend.md.
 fm_backend_composer_draft() {
   local backend=$1
   shift
