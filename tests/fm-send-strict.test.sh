@@ -60,7 +60,8 @@ case "${1:-}" in
     printf '╭────╮\n│    │\n╰────╯\n'
     exit 0 ;;
   list-windows)
-    printf 'foreign:%s\nfm-mpf-lane-m8\nfm-lane-ok\n' "${FM_FAKE_TMUX_WINDOW:-fm-lost}"
+    printf 'foreign:%s\nfm-mpf-lane-m8\nfm-lane-key\nfm-lane-ok\n' \
+      "${FM_FAKE_TMUX_WINDOW:-fm-lost}"
     exit 0 ;;
 esac
 exit 0
@@ -107,6 +108,21 @@ test_exact_lane_id_send_still_works() {
   grep -qF 'lost dispatch' "$home/state/mpf-lane-m8.inbox/001.msg" \
     || fail "exact id should record the steer in the task inbox"
   pass "fm-send strict: exact task/lane ids resolve through home metadata"
+}
+
+test_help_prints_usage() {
+  local home="$TMP_ROOT/help" out err rc
+  mkdir -p "$home/state"
+  out="$TMP_ROOT/help.out"; err="$TMP_ROOT/help.err"
+  env -u FM_HOME "$SEND" --help >"$out" 2>"$err"; rc=$?
+  expect_code 0 "$rc" "fm-send --help without FM_HOME should print usage and exit 0"
+  assert_contains "$(cat "$out")" "Usage: fm-send.sh <target>" "--help should print the header usage line"
+  assert_contains "$(cat "$out")" "--resolve-key" "--help should print the header contract"
+  [ ! -s "$err" ] || fail "fm-send --help wrote to stderr: $(cat "$err")"
+  FM_HOME="$home" "$SEND" --help >"$out" 2>"$err"; rc=$?
+  expect_code 0 "$rc" "fm-send --help with FM_HOME should not treat the flag as a target"
+  assert_contains "$(cat "$out")" "Usage: fm-send.sh <target>" "--help with FM_HOME should print usage"
+  pass "fm-send --help prints the header usage before FM_HOME and target resolution"
 }
 
 test_unset_fm_home_fails() {
@@ -232,6 +248,7 @@ test_key_send_exit_status_follows_delivery() {
 }
 
 test_exact_lane_id_send_still_works
+test_help_prints_usage
 test_key_send_exit_status_follows_delivery
 test_unset_fm_home_fails
 test_unresolvable_target_does_not_tmux_fallback

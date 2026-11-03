@@ -437,6 +437,147 @@ test_quiet_tool_with_announce_pattern_is_silent() {
   pass "a tool that announces nothing stays silent"
 }
 
+# --- published version documents --------------------------------------------
+
+# A fixture curl in the probe PATH answers every fetch with one canned body (or
+# the given failure status), so no case reaches the network. The check must use
+# whatever curl PATH resolves, which is how the fixture takes the real one's
+# place without touching it.
+make_curl_fixture() {
+  local dir=$1 body=$2 status=${3:-0}
+  mkdir -p "$dir"
+  cat > "$dir/curl" <<SH
+#!/usr/bin/env bash
+[ "$status" -eq 0 ] || exit "$status"
+printf '%s\n' '$body'
+SH
+  chmod 0755 "$dir/curl"
+}
+
+test_published_version_newer_than_installed_is_reported() {
+  local home dir fresh out report
+  home=$(make_home version-url)
+  dir="$TMP_ROOT/version-url/bin"
+  make_copy "$dir" claude-fixture '2.1.271 (Claude Code)'
+  make_curl_fixture "$dir" '2.1.273'
+  write_config "$home" '{"tools":[{"name":"claude","command":"claude-fixture","version_url":"https://downloads.example.invalid/latest"}]}'
+  out="$home/out.txt"
+  run_check "$home" "$(fixture_path "$dir")" "$out"
+  report=$(cat "$out")
+  assert_contains "$report" "claude update available: 2.1.273 published at https://downloads.example.invalid/latest, PATH resolves 2.1.271" "a newer published version was not reported against the version PATH resolves"
+  assert_not_contains "$report" "not in effect" "a published update must not be reported as PATH skew"
+
+  fresh="$TMP_ROOT/version-url/new/bin"
+  make_copy "$fresh" claude-fixture '2.1.272 (Claude Code)'
+  run_check "$home" "$(fixture_path "$dir:$fresh")" "$out"
+  report=$(cat "$out")
+  assert_contains "$report" "claude update available: 2.1.273 published at https://downloads.example.invalid/latest, PATH resolves 2.1.271" "a published version newer than every installed copy was not reported"
+  assert_contains "$report" "claude update not in effect: PATH resolves 2.1.271 at $dir/claude-fixture but 2.1.272 is installed at $fresh/claude-fixture" "a published update suppressed the installed PATH skew"
+  pass "a version_url newer than every installed copy is reported as an available update"
+}
+
+test_published_version_already_installed_is_not_double_reported() {
+  local home stale fresh installed out report
+  home=$(make_home version-url-installed)
+  stale="$TMP_ROOT/version-url-installed/old/bin"
+  fresh="$TMP_ROOT/version-url-installed/new/bin"
+  make_copy "$stale" claude-fixture '2.1.271 (Claude Code)'
+  make_curl_fixture "$stale" '2.1.273'
+  write_config "$home" '{"tools":[{"name":"claude","command":"claude-fixture","version_url":"https://downloads.example.invalid/latest"}]}'
+  out="$home/out.txt"
+
+  for installed in 2.1.273 2.1.274; do
+    make_copy "$fresh" claude-fixture "$installed (Claude Code)"
+    run_check "$home" "$(fixture_path "$stale:$fresh")" "$out"
+    report=$(cat "$out")
+    assert_contains "$report" "claude update not in effect: PATH resolves 2.1.271 at $stale/claude-fixture but $installed is installed at $fresh/claude-fixture" "a published version already installed was not reported as PATH skew"
+    assert_not_contains "$report" "update available" "a published version no newer than an installed copy was reported as available"
+    assert_not_contains "$report" "check failed" "readable installed and published versions produced a check failure"
+
+    run_check "$home" "$(fixture_path "$fresh:$stale")" "$out"
+    [ ! -s "$out" ] || fail "a version_url no newer than the active copy must be silent, got: $(cat "$out")"
+  done
+  pass "a version_url no newer than an installed copy reports only PATH skew when needed"
+}
+
+test_published_version_equal_to_path_is_silent() {
+  local home dir out
+  home=$(make_home version-url-current)
+  dir="$TMP_ROOT/version-url-current/bin"
+  make_copy "$dir" claude-fixture '2.1.273 (Claude Code)'
+  make_curl_fixture "$dir" '2.1.273'
+  write_config "$home" '{"tools":[{"name":"claude","command":"claude-fixture","version_url":"https://downloads.example.invalid/latest"}]}'
+  out="$home/out.txt"
+  run_check "$home" "$(fixture_path "$dir")" "$out"
+  [ ! -s "$out" ] || fail "a current tool with version_url must be silent, got: $(cat "$out")"
+  pass "a version_url that matches the PATH version is silent"
+}
+
+test_unreadable_version_url_is_a_failure_not_a_pass() {
+  local home dir out
+  home=$(make_home version-url-dead)
+  dir="$TMP_ROOT/version-url-dead/bin"
+  make_copy "$dir" claude-fixture '2.1.271 (Claude Code)'
+  make_curl_fixture "$dir" '' 22
+  write_config "$home" '{"tools":[{"name":"claude","command":"claude-fixture","version_url":"https://downloads.example.invalid/latest"}]}'
+  out="$home/out.txt"
+  run_check "$home" "$(fixture_path "$dir")" "$out"
+  assert_contains "$(cat "$out")" "claude check failed: https://downloads.example.invalid/latest did not report a version" "a version_url that could not be read was taken for current"
+
+  make_curl_fixture "$dir" 'no version here'
+  rm -f "$home/state/.tool-updates"
+  run_check "$home" "$(fixture_path "$dir")" "$out"
+  assert_contains "$(cat "$out")" "claude check failed: https://downloads.example.invalid/latest did not report a version" "a version_url body with no version was taken for current"
+  pass "a version_url that does not answer with a version is a check failure"
+}
+
+# A probe PATH with every ambient binary except curl, so the version_url probe
+# has no reader while the check's other tools (jq, git, date, grep, timeout)
+# keep working. Built from symlinks, so the host's binaries are never moved.
+make_path_without_curl() {
+  local dir=$1 path_entry entry base
+  mkdir -p "$dir"
+  while IFS= read -r path_entry; do
+    [ -n "$path_entry" ] && [ -d "$path_entry" ] || continue
+    for entry in "$path_entry"/*; do
+      base=${entry##*/}
+      [ "$base" = curl ] && continue
+      [ -e "$dir/$base" ] && continue
+      [ -x "$entry" ] && [ ! -d "$entry" ] || continue
+      ln -s "$entry" "$dir/$base" 2>/dev/null || true
+    done
+  done < <(printf '%s\n' "$PATH" | tr ':' '\n')
+}
+
+test_missing_curl_is_a_failure_not_a_pass() {
+  local home dir nobin out
+  home=$(make_home version-url-nocurl)
+  dir="$TMP_ROOT/version-url-nocurl/bin"
+  make_copy "$dir" claude-fixture '2.1.271 (Claude Code)'
+  nobin="$TMP_ROOT/version-url-nocurl/nobin"
+  make_path_without_curl "$nobin"
+  write_config "$home" '{"tools":[{"name":"claude","command":"claude-fixture","version_url":"https://downloads.example.invalid/latest"}]}'
+  out="$home/out.txt"
+  run_check "$home" "$dir:$nobin" "$out"
+  assert_contains "$(cat "$out")" "claude check failed: curl is required to read https://downloads.example.invalid/latest" "a host without curl took the tool for current"
+  pass "a missing curl is a check failure"
+}
+
+test_version_url_must_be_https_with_a_command() {
+  local home out
+  home=$(make_home version-url-schema)
+  out="$home/out.txt"
+  write_config "$home" '{"tools":[{"name":"claude","command":"claude","version_url":"http://downloads.example.invalid/latest"}]}'
+  run_check "$home" "$PATH" "$out"
+  assert_contains "$(cat "$out")" "tool claude version_url must be one https URL" "a plain-http version_url was accepted"
+
+  write_config "$home" '{"tools":[{"name":"claude","git":{"repo":"/tmp"},"version_url":"https://downloads.example.invalid/latest"}]}'
+  rm -f "$home/state/.tool-updates"
+  run_check "$home" "$PATH" "$out"
+  assert_contains "$(cat "$out")" "tool claude version_url needs command" "a version_url with no command to compare against was accepted"
+  pass "version_url is validated as one https URL beside a command"
+}
+
 # --- git sources ------------------------------------------------------------
 
 # git_fixture <name>: a work repo whose origin branch is two commits ahead,
@@ -1070,6 +1211,12 @@ test_one_broken_pattern_does_not_blind_the_rest_of_the_sweep
 test_an_unchecked_announcement_source_is_not_read_as_current
 test_an_announcement_probe_that_does_not_answer_is_reported
 test_quiet_tool_with_announce_pattern_is_silent
+test_published_version_newer_than_installed_is_reported
+test_published_version_already_installed_is_not_double_reported
+test_published_version_equal_to_path_is_silent
+test_unreadable_version_url_is_a_failure_not_a_pass
+test_missing_curl_is_a_failure_not_a_pass
+test_version_url_must_be_https_with_a_command
 test_commits_behind_origin_are_reported
 test_default_branch_is_detected_when_branch_is_omitted
 test_default_branch_is_asked_of_the_remote_when_the_clone_has_no_record

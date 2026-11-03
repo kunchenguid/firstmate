@@ -16,16 +16,19 @@
 # preference - an absent primary file and an absent destination file both mean
 # the same unconfigured default, so the generic absence mirror below converges
 # a secondmate without deciding the release-dependent floor; explicit "on" and
-# "off" preferences propagate as files. Primary
+# "off" preferences propagate as files. Primary config/herdr-project-groups
+# carries the opt-in Herdr project-group rules, because the agents view they
+# sort is one per Herdr server and every home's tasks share it. Primary
 # config/trace-context is copied at the launch convergence point as part of the
 # default-off W3C trace-context setup, while live convergence leaves it unchanged.
 # Primary config/lavish-axi-host carries the one per-machine Lavish server address
 # to every worker so a worker never starts a second server on another interface.
 # The primary passes its frozen home-session decision into a newly launched
 # Secondmate; see docs/trace-context.md.
-# Primary config/claude-permission-mode is a captain-wide safety preference
-# (bypass or auto for every claude launch), so it flows down too and a
-# secondmate's own claude crewmates launch on the same permission posture.
+# Primary approval-mode settings follow the same inheritance rules as other
+# declared configuration.
+# Primary config/t3code-instances selects the T3 provider account for each
+# harness, so secondmates inherit it rather than falling back to a default.
 # Primary config/keep-ai-trailers is a home-wide commit-attribution choice, so
 # a secondmate's own crewmates keep AI co-author trailers too.
 # Primary config/supervision-host-off is the fleet's supervision-host opt-out,
@@ -71,7 +74,10 @@
 # so a new inheritable item cannot be accepted by one side and refused by the
 # other. A local and remote code root that disagree about this list must be
 # reconciled by the ordinary remote sync/update path before the transfer
-# succeeds; there is no separate allowlist version negotiation.
+# succeeds; there is no separate allowlist version negotiation. The one
+# exception is an item the primary does not have: an older receiver that does
+# not declare it refuses its absent record, and the sender counts that refusal
+# as unchanged, since that code root cannot read the item anyway.
 #
 # shellcheck source=bin/fm-startup-memory-budget-lib.sh
 . "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/fm-startup-memory-budget-lib.sh"
@@ -87,7 +93,7 @@ FM_SHARED_CAPTAIN_MODE="444"
 # The declared inheritable set (space-separated, config-dir-relative item paths).
 # Extend here to inherit more of the primary's local config; override via the
 # environment only in tests. Items must not contain whitespace.
-FM_INHERITABLE_CONFIG="${FM_INHERITABLE_CONFIG:-crew-dispatch.json dispatch-never-send crew-harness backlog-backend backend herdr-presentation-spaces startup-memory-budget trace-context launch-env-allowlist claude-permission-mode lavish-axi-host keep-ai-trailers supervision-host-off firstmate-role}"
+FM_INHERITABLE_CONFIG="${FM_INHERITABLE_CONFIG:-crew-dispatch.json dispatch-never-send crew-harness backlog-backend backend herdr-presentation-spaces herdr-project-groups startup-memory-budget trace-context launch-env-allowlist claude-permission-mode codex-approval-mode lavish-axi-host t3code-instances keep-ai-trailers supervision-host-off firstmate-role}"
 
 # firstmate-role additionally carries a proof-of-state receipt: a scoped role
 # grant (or its recorded absence) authorizes a secondmate home only while

@@ -14,6 +14,12 @@
       "version_args": ["--version"]
     },
     {
+      "name": "claude",
+      "command": "claude",
+      "version_args": ["--version"],
+      "version_url": "https://downloads.claude.ai/claude-code-releases/latest"
+    },
+    {
       "name": "no-mistakes",
       "command": "no-mistakes",
       "version_args": ["--version"],

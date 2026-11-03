@@ -50,6 +50,14 @@ serve() {
       checks='[{"name":"lint","state":"SUCCESS","bucket":"pass","workflow":"ci"},{"name":"optional","state":"SKIPPED","bucket":"skipping","workflow":"ci"}]'
       printf '%s\n' "${FM_TEST_REQUIRED_CHECKS:-$checks}"
       ;;
+    "pr checks "*" --json name,state,bucket --jq "*)
+      if [ -n "${FM_TEST_REPORTED_CHECKS_ERROR-}" ]; then
+        printf '%s\n' "$FM_TEST_REPORTED_CHECKS_ERROR" >&2
+        exit 1
+      fi
+      checks='[{"name":"lint","state":"SUCCESS","bucket":"pass","workflow":"ci"},{"name":"optional","state":"SKIPPED","bucket":"skipping","workflow":"ci"}]'
+      printf '%s\n' "${FM_TEST_REPORTED_CHECKS:-$checks}"
+      ;;
     *)
       printf 'unexpected gh call: %s\n' "$*" >&2
       exit 91
@@ -224,6 +232,48 @@ test_no_reported_checks_is_unverified() {
   pass "given gh's sentence, a head with no reported checks is unverified rather than ready"
 }
 
+# A stacked pull request can target an unprotected branch, so gh's required
+# view can report nothing while a check on this head has already failed.
+UNPROTECTED_BASE="no required checks reported on the 'fm/fixture' branch"
+
+test_failing_reported_check_is_shown_when_nothing_is_required() {
+  local out expected
+  out=$(FM_TEST_CHECKS_ERROR=$UNPROTECTED_BASE \
+    FM_TEST_REPORTED_CHECKS='[{"name":"backend","state":"FAILURE","bucket":"fail","workflow":"ci"},{"name":"lint","state":"SUCCESS","bucket":"pass","workflow":"ci"}]' \
+    run_state) || fail "stacked failing fixture was refused"
+  expected=$(printf 'CHECKS: no required check has reported; readiness unconfirmed\nREPORTED CHECK: backend (FAILURE)')
+  [ "$out" = "$expected" ] \
+    || fail "a failure on a head whose base requires nothing must still be shown, labelled as reported rather than required, got: $out"
+  pass "a failing reported check is shown when the base has no required checks"
+}
+
+test_pending_reported_check_is_shown_when_nothing_is_required() {
+  local out status
+  out=$(FM_TEST_CHECKS_ERROR=$UNPROTECTED_BASE \
+    FM_TEST_REPORTED_CHECKS='[{"name":"backend","state":"IN_PROGRESS","bucket":"pending","workflow":"ci"},{"name":"optional","state":"SKIPPED","bucket":"skipping","workflow":"ci"}]' \
+    run_state) || fail "stacked pending fixture was refused"
+  assert_contains "$out" 'REPORTED CHECK: backend (IN_PROGRESS)' \
+    "a check still running on a head whose base requires nothing must be shown"
+  assert_not_contains "$out" 'optional' \
+    "a skipped reported check is not worth a line"
+
+  status=0
+  FM_TEST_CHECKS_ERROR=$UNPROTECTED_BASE FM_TEST_REPORTED_CHECKS_ERROR='HTTP 502: Bad Gateway' \
+    run_state >/dev/null 2>&1 || status=$?
+  [ "$status" -ne 0 ] || fail "a failed read of the reported checks must refuse, not pass as unconfirmed"
+  pass "a pending reported check is shown when the base has no required checks, and a failed fallback read refuses"
+}
+
+test_protected_base_reports_only_required_checks() {
+  local out
+  out=$(FM_TEST_REQUIRED_CHECKS='[{"name":"CI Status","state":"FAILURE","bucket":"fail","workflow":"ci"}]' \
+    FM_TEST_REPORTED_CHECKS_ERROR='HTTP 502: Bad Gateway' \
+    run_state) || fail "protected-base fixture was refused"
+  [ "$out" = 'REQUIRED CHECK: CI Status (FAILURE)' ] \
+    || fail "a base with required checks keeps the required view and never consults the unfiltered one, got: $out"
+  pass "a protected base reports only required checks"
+}
+
 test_help_states_what_silence_means_and_what_is_out_of_scope() {
   local out
   out=$("$SCRIPT" --help) || fail "help was refused"
@@ -233,6 +283,8 @@ test_help_states_what_silence_means_and_what_is_out_of_scope() {
     "help must name the limit: a required context that never reported is absent from what is read"
   assert_contains "$out" "Unresolved review-thread state is out of this command's scope" \
     "help must state the thread-resolution boundary without inventing a reason for it"
+  assert_contains "$out" 'labelled REPORTED rather than' \
+    "help must state that an unprotected base falls back to every reported check"
   pass "help states what empty output means and what is out of scope"
 }
 
@@ -281,6 +333,9 @@ test_pending_approval_is_not_a_blocker
 test_required_failure_is_a_blocker
 test_unreported_required_checks_are_unconfirmed
 test_no_reported_checks_is_unverified
+test_failing_reported_check_is_shown_when_nothing_is_required
+test_pending_reported_check_is_shown_when_nothing_is_required
+test_protected_base_reports_only_required_checks
 test_help_states_what_silence_means_and_what_is_out_of_scope
 test_unknown_mergeability_is_a_blocker
 test_refusals_exit_nonzero

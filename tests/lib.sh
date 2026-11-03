@@ -6,11 +6,12 @@
 #   . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 #
 # It provides the boilerplate every test file used to re-roll: ok/not-ok
-# reporters, a self-cleaning temp root, fakebin/PATH-shim helpers, deterministic
-# git identity and fixture builders, state/<id>.meta writers, and the common
-# string/exit-code/file assertions. Shared fake-toolchain and spawn-world
+# reporters, TAP plan and completion (fm_test_run), a self-cleaning temp root,
+# fakebin/PATH-shim helpers, deterministic git identity and fixture builders,
+# state/<id>.meta writers, and the common string/exit-code/file assertions. Shared fake-toolchain and spawn-world
 # builders live in tests/fixtures.sh; wake-queue mocks in wake-helpers.sh;
-# secondmate-lifecycle mocks in secondmate-helpers.sh. Suite-specific fakes
+# secondmate-lifecycle mocks in secondmate-helpers.sh; supervision-host
+# fixtures in supervision-host-helpers.sh. Suite-specific fakes
 # that encode a single test's terminal or lifecycle assumptions still belong
 # with the tests that own them.
 #
@@ -58,6 +59,28 @@ export FM_TEST_SEAM=1
 # under the marker. A case that verifies the refusal sets FM_TASK_ID itself.
 unset FM_TASK_ID
 
+# Clear the launcher identity, terminal marker, runtime-backend selector, and
+# home/state overrides a suite inherits from the terminal that started it. A
+# session running inside herdr exports HERDR_ENV/HERDR_PANE_ID/HERDR_SOCKET_PATH/...
+# into every child process, an operator or lab shell may export FM_BACKEND (as
+# bin/fm-live-lab.sh's lab environment does), which outranks config/backend and
+# runtime auto-detection, and a supervisor's own shell may export a home or
+# state override. Spawn and backend fixtures then bind to the host's REAL herdr
+# session instead of the isolated one their case creates: on a herdr-hosted
+# machine several spawn/backend suites failed with `herdr launcher pane '...'
+# belongs to the server at ... not session 'default'`, or recorded a real
+# workspace's pane path as a fixture worktree,
+# while the same suites passed in CI. bin/fm-test-run.sh already clears the
+# overrides and FM_BACKEND per worker; this covers a direct run and the herdr
+# identity, so every suite that sources this library starts from the environment
+# CI gives it. A case that deliberately exercises a launcher identity, a backend,
+# or a home/state override exports its own value after this point (or inside its
+# own subshell).
+unset HERDR_ENV HERDR_PANE_ID HERDR_TAB_ID HERDR_WORKSPACE_ID HERDR_SOCKET_PATH \
+  HERDR_SESSION HERDR_BIN_PATH TERM_PROGRAM \
+  FM_BACKEND FM_HOME FM_ROOT FM_ROOT_OVERRIDE FM_STATE_OVERRIDE FM_DATA_OVERRIDE \
+  FM_CONFIG_OVERRIDE FM_PROJECTS_OVERRIDE
+
 # Clear the tasks-axi env overrides. An operator shell exports TASKS_AXI_FILE
 # (and may export TASKS_AXI_BACKEND) at its real home's backlog, and tasks-axi
 # resolves that env AHEAD of the .tasks.toml a fixture copies, so a suite that
@@ -67,6 +90,13 @@ unset FM_TASK_ID
 # explicit --file, or bin/fm-tasks-axi.sh; a case that verifies the wrapper
 # against an ambient override sets TASKS_AXI_FILE itself.
 unset TASKS_AXI_FILE TASKS_AXI_BACKEND
+
+# Clear the Rex block identity an operator's terminal exports. Run directly
+# inside a Rex block, the suite would otherwise auto-detect the rex backend
+# (bin/fm-backend.sh's fm_backend_detect) and place fixture tasks into the
+# operator's live Rex session. REX_BIN_DIR stays so the real-server smoke test
+# can find the CLI; a case that verifies detection sets these itself.
+unset REX_SESSION REX_BLOCK
 
 # Write the tracked default backlog configuration into a fixture home. Never copy
 # "$ROOT/.tasks.toml": an operator's primary checkout keeps a gitignored override
@@ -98,6 +128,54 @@ fail() {
 
 pass() {
   printf 'ok - %s\n' "$1"
+}
+
+# fm_test_run <test-function>...
+# Print a TAP plan 1..N derived from the function names (N is $#), run each
+# function (each must emit exactly one `ok - ` line via pass), then print
+# FM_TEST_COMPLETE. Adding a test is adding a name to this call; N is not a
+# separately maintained numeral. The names given are the names run.
+# bin/fm-test-tap-verify.sh is the completeness checker the stock macOS Bash
+# job uses against that plan and marker.
+fm_test_run() {
+  local name kind
+  [ "$#" -gt 0 ] || fail "fm_test_run: no tests registered"
+  printf '1..%s\n' "$#"
+  while [ "$#" -gt 0 ]; do
+    name=$1
+    shift
+    kind=$(type -t "$name" 2>/dev/null || true)
+    [ "$kind" = function ] || fail "fm_test_run: $name is not a function"
+    "$name"
+  done
+  printf 'FM_TEST_COMPLETE\n'
+}
+
+# Harness argument assertions reuse the emitted prefix rather than duplicating
+# its per-spawn env-file path. The dispatch suite executes it separately to prove
+# credential preservation, hooks-path selection and invalid-count refusal.
+fm_test_launch_git_prefix() {  # <launch>
+  local launch=$1 helper tail end=' || return 1 2>/dev/null || exit 1; '
+  case "$launch" in
+    *' env-file '*"$end"*) ;;
+    *) fail "launch has no complete Git configuration prefix" ;;
+  esac
+  helper=${launch%%' env-file '*}
+  helper=${helper##*; }
+  tail=${launch#*' env-file '}
+  tail=${tail%%"$end"*}
+  printf '%s env-file %s%s' "$helper" "$tail" "$end"
+}
+
+# The command a pane runs after the launch's Git configuration prefix and its
+# leading export statements, for suites that split it into arguments.
+fm_test_launch_command() {  # <launch>
+  local command=$1 end=' || return 1 2>/dev/null || exit 1; '
+  case "$command" in *"$end"*) command=${command#*"$end"} ;; esac
+  while [[ "$command" == export\ *\;* ]]; do
+    command=${command#*; }
+  done
+  printf '%s' "$command"
 }
 
 # --- self-cleaning temp root ------------------------------------------------
@@ -255,6 +333,11 @@ fm_test_reap_watchers() {
 # its owner's guard reaps it.
 FM_TEST_STUB_MAX_BLOCK_SECONDS=${FM_TEST_STUB_MAX_BLOCK_SECONDS:-120}
 export FM_TEST_STUB_MAX_BLOCK_SECONDS
+# The suite's own pid, for a polling fixture to stop once its suite is gone
+# (`kill -0 "$FM_TEST_SUITE_PID"` in its loop condition), which bounds it to one
+# poll past a runner killed too hard for any cleanup to run.
+FM_TEST_SUITE_PID=$$
+export FM_TEST_SUITE_PID
 
 # Remove a fixture tree even when it holds a read-only directory, such as the
 # spawn-owned state/<id>.git-hooks strip directory.
@@ -266,6 +349,40 @@ fm_test_remove_tree() {
   rm -rf "$dir"
 }
 
+# --- fixture-root process reaping -------------------------------------------
+#
+# A fixture process whose command line names a fixture root - a stub, a script
+# run from a fixture checkout whose bin links back here, or a fake harness
+# session - can reparent to init and keep polling after its test ends, and
+# removing the root only turns its wait into one that can never finish. Before a
+# root is removed, every process naming that exact mktemp root is signalled,
+# TERM and then KILL, each followed by a bounded 2s wait. The match is the
+# unique per-run root path, never a script or process name, so it cannot reach
+# another home's processes; this shell and its ancestors are never signalled.
+fm_test_reap_root_processes() {  # <root>
+  local root=${1%/} chain pid pids signal i
+  [ -n "$root" ] && [ "$root" != / ] || return 0
+  chain=" "
+  pid=$$
+  while [ -n "$pid" ] && [ "$pid" -gt 1 ] 2>/dev/null; do
+    chain="$chain$pid "
+    pid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d '[:space:]')
+  done
+  for signal in TERM KILL; do
+    i=0
+    while [ "$i" -lt 20 ]; do
+      pids=$(ps -ww -eo pid=,args= 2>/dev/null \
+        | FM_TEST_REAP_ROOT="$root/" awk -v chain="$chain" \
+          'index($0, ENVIRON["FM_TEST_REAP_ROOT"]) && index(chain, " " $1 " ") == 0 { print $1 }')
+      [ -n "$pids" ] || return 0
+      # shellcheck disable=SC2086 # one argument per pid
+      [ "$i" -gt 0 ] || kill -s "$signal" $pids 2>/dev/null
+      sleep 0.1
+      i=$((i + 1))
+    done
+  done
+}
+
 fm_test_cleanup() {
   local d
   fm_test_reap_watchers
@@ -275,7 +392,9 @@ fm_test_cleanup() {
   done
   if [ -f "$FM_TEST_CLEANUP_REGISTRY" ]; then
     while IFS= read -r d; do
-      [ -n "$d" ] && fm_test_remove_tree "$d"
+      [ -n "$d" ] || continue
+      fm_test_reap_root_processes "$d"
+      fm_test_remove_tree "$d"
     done < "$FM_TEST_CLEANUP_REGISTRY"
     rm -f "$FM_TEST_CLEANUP_REGISTRY"
   fi
@@ -329,6 +448,7 @@ fm_test_reap_orphans() {
     mtime=$(stat -c %Y "$marker" 2>/dev/null || stat -f %m "$marker" 2>/dev/null) || continue
     [ $((now - mtime)) -ge "$FM_TEST_ORPHAN_MAX_AGE_SECONDS" ] || continue
     dir=$(dirname "$marker")
+    fm_test_reap_root_processes "$dir"
     fm_test_remove_tree "$dir"
   done
 }
@@ -438,6 +558,48 @@ fm_live_gate() {
 
   export DISABLE_AUTOUPDATER=1
   return 0
+}
+
+# fm_tmux_isolation_gate [<tmux-tmp-base>...] is the gate a test opens with
+# before it starts, kills, or cleans up a tmux server of its own. tmux resolves
+# its socket under TMUX_TMPDIR only while that directory exists and otherwise
+# silently falls back to /tmp, so one wrong tmux call reaches the user's own
+# server. The test runs only when no live tmux server answers on any socket in
+# <base>/tmux-<uid> for each base (default: /tmp, plus TMUX_TMPDIR when set),
+# which holds under a private /tmp such as
+#   unshare -Urm sh -c 'mount -t tmpfs tmpfs /tmp && exec bin/fm-test-run.sh <test>'
+# and on a disposable CI runner. Each probe is bounded by
+# FM_TMUX_ISOLATION_PROBE_SECONDS (default 5): a server that does not answer
+# in time, stopped or stuck, counts as live. Otherwise it ends the script with
+#   skip: tmux isolation: <why>; <how to run it>
+fm_tmux_isolation_gate() {
+  local base socket probe rc why='' seconds=${FM_TMUX_ISOLATION_PROBE_SECONDS:-5}
+  local -a bases=("$@")
+  case $seconds in '' | *[!0-9]* | 0) seconds=5 ;; esac
+  # shellcheck source=bin/fm-timeout-lib.sh
+  declare -F fm_run_timed >/dev/null || . "$(dirname "${BASH_SOURCE[0]}")/../bin/fm-timeout-lib.sh"
+  if [ "${#bases[@]}" -eq 0 ]; then
+    bases=(/tmp)
+    [ -z "${TMUX_TMPDIR:-}" ] || bases+=("$TMUX_TMPDIR")
+  fi
+  for base in "${bases[@]}"; do
+    for socket in "${base%/}/tmux-$(id -u)"/*; do
+      [ -S "$socket" ] || continue
+      probe=$(fm_run_timed "$seconds" env -u TMUX tmux -S "$socket" list-sessions 2>&1 >/dev/null)
+      rc=$?
+      if fm_timed_out "$rc"; then
+        why="the tmux server on $socket did not answer within ${seconds}s"
+      elif [ "$rc" -eq 0 ] || [ "${probe#*no server running}" = "$probe" ]; then
+        why="a live tmux server answers on $socket"
+      else
+        continue
+      fi
+      break 2
+    done
+  done
+  [ -n "$why" ] || return 0
+  printf 'skip: tmux isolation: %s; run under a private /tmp (unshare -Urm sh -c '"'"'mount -t tmpfs tmpfs /tmp && exec bin/fm-test-run.sh <test>'"'"')\n' "$why"
+  exit 0
 }
 
 # --- fakebin / PATH shims ---------------------------------------------------
@@ -820,6 +982,16 @@ assert_grep() {
 # assert_no_grep <pattern> <file> <msg>: fixed-string grep must NOT match.
 assert_no_grep() {
   ! grep -F -- "$1" "$2" >/dev/null || fail "$3"
+}
+
+# assert_no_regex <pattern> <file> <msg>: extended-regex must NOT match.
+# assert_*_grep are fixed-string, so an anchored pattern given to them searches
+# for a literal caret and can never match - an absence assertion written that
+# way passes no matter what the file holds. Use this for any anchored absence.
+assert_no_regex() {
+  local status=0
+  grep -E -- "$1" "$2" >/dev/null || status=$?
+  [ "$status" -eq 1 ] || fail "$3 (grep status: $status)"
 }
 
 # assert_absent <path> <msg>: path must not exist.
