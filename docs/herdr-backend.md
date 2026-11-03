@@ -785,6 +785,15 @@ If the ANSI capture ever fails, the plain fallback declares itself unstyled.
 The classifier then degrades a glyph row carrying trailing text to `unknown` instead of misreading ghost suggestions as typed input.
 That safely defers injection and eventually raises the wedge alarm.
 
+### Codex native submission
+
+Codex submission uses one `agent prompt` request with the exact pane and text.
+The adapter requires matching idle native identity and an empty composer before sending.
+Only a matching `agent_prompted` response in `working` state confirms delivery.
+Blocked, stalled, failed and ambiguous responses remain unconfirmed without a literal-input fallback or an in-call retry.
+Claude retains its composer payload proof and Enter path.
+The opt-in refresh guard and current acceptance limits are recorded in [runtime verification](verification/runtime-backends.md#herdr).
+
 ### Away-mode injection
 
 A bare shell prompt is never an empty agent composer.

@@ -316,6 +316,9 @@ Zellij has no verified recovery-grade agent process probe, while Orca, cmux, and
 The current classifier matrix and its refresh guard are recorded in [Composer classification matrix](#composer-classification-matrix), with portable shape coverage in `tests/fm-composer-lib.test.sh` and `tests/fm-composer-ghost.test.sh`.
 Kimi pointer delivery and OpenCode busy-queue behavior remain pinned by `tests/fm-kimi-harness.test.sh`, `tests/fm-tmux-submit-busy.test.sh`, and `tests/fm-composer-lib.test.sh`.
 Herdr's Claude idle-native submit confirmation is pinned by `tests/fm-backend-herdr.test.sh` and refreshed by `FM_HERDR_SUBMIT_CONFIRM_LIVE=1 tests/fm-herdr-submit-confirm-live-e2e.test.sh`.
+The same guard now includes native Codex long-prompt submission when Codex is installed and reports its absence explicitly.
+Native Codex acceptance for this route remains unperformed; portable protocol simulations do not establish TUI paste acceptance.
+
 
 ### Cleanup endpoint identity
 

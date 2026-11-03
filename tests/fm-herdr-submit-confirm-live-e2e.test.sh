@@ -248,4 +248,40 @@ done
   || fail "Claude Code ($VERSION) on $HERDR_VER: the /exit submission reported '$verdict' but the agent never exited"
 pass "live Herdr submit confirm: Claude Code ($VERSION) on $HERDR_VER proves and submits a typed /exit behind its command popup"
 
+# Native Codex acceptance is separate from the synthetic bash composer.
+# Keep the default permission/trust controls: a blocked dialog fails the guard
+# and must be handled by the operator before rerunning in the isolated lab.
+if command -v codex >/dev/null 2>&1; then
+  CODEX_VERSION=$(codex --version 2>/dev/null | head -1)
+  lab pane run "$PANE" codex >/dev/null \
+    || fail "could not launch Codex ($CODEX_VERSION) on $HERDR_VER"
+  ready=0
+  i=0
+  while [ "$i" -lt 60 ]; do
+    if [ "$(fm_backend_herdr_composer_state "$TARGET")" = empty ]; then
+      ready=1; break
+    fi
+    i=$((i + 1)); sleep 1
+  done
+  [ "$ready" = 1 ] || fail "Codex ($CODEX_VERSION) on $HERDR_VER: composer not ready; inspect trust/auth dialogs"
+  CODEX_TOKEN="FMCODEXPONG$$_$RANDOM"
+  padding=$(printf '%6000s' '' | tr ' ' x)
+  payload="Ignore this filler: $padding. Reply with exactly $CODEX_TOKEN and nothing else."
+  verdict=$(fm_backend_herdr_send_text_submit "$TARGET" "$payload" 3 0.4 0.4)
+  [ "$verdict" = empty ] || fail "Codex ($CODEX_VERSION) on $HERDR_VER: native long submit returned $verdict"
+  landed=0
+  i=0
+  while [ "$i" -lt 60 ]; do
+    screen=$(lab pane read "$PANE" --source recent --lines 200 2>/dev/null || true)
+    occurrences=$(printf '%s\n' "$screen" | grep -F -c "$CODEX_TOKEN" || true)
+    if [ "$occurrences" -ge 2 ]; then landed=1; break; fi
+    i=$((i + 1)); sleep 1
+  done
+  [ "$landed" = 1 ] || fail "Codex ($CODEX_VERSION) on $HERDR_VER: no reply after native long submit"
+  CHECKED=$((CHECKED + 1))
+  pass "live Herdr submit confirm: Codex ($CODEX_VERSION) on $HERDR_VER submits a native long prompt"
+else
+  printf 'skip: Codex is absent; native Codex long submission was not checked\n'
+fi
+
 [ "$CHECKED" -gt 0 ] || fail "FM_HERDR_SUBMIT_CONFIRM_LIVE=1 checked no harness"
