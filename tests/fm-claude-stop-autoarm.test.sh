@@ -553,13 +553,15 @@ test_stopfailure_close_rewakes_paced_per_cooldown() {
 
   fm_touch_epoch $(( $(date +%s) - 1 )) "$marker"
   t0=$(date +%s)
-  out=$(FM_CLAUDE_STOPFAILURE_REWAKE_COOLDOWN=6 run_autoarm "$dir" "$fail_payload" 2>/dev/null); status=$?
+  # Decimal configuration accepts leading zeros: 08 must wait eight seconds,
+  # not abort as an invalid octal once the previous commit's marker exists.
+  out=$(FM_CLAUDE_STOPFAILURE_REWAKE_COOLDOWN=08 run_autoarm "$dir" "$fail_payload" 2>/dev/null); status=$?
   elapsed=$(( $(date +%s) - t0 ))
   expect_code 2 "$status" "a StopFailure inside the cooldown must still deliver its rewake once the cooldown elapses"
   assert_contains "$out" "stale: fixture-win actionable" "the paced StopFailure rewake must carry the arm's reason line"
-  [ "$elapsed" -ge 3 ] || fail "a StopFailure inside a 6s cooldown set 1s ago must wait it out before delivering, took ${elapsed}s"
+  [ "$elapsed" -ge 5 ] || fail "a StopFailure inside an 08s decimal cooldown set 1s ago must wait it out before delivering, took ${elapsed}s"
   [ "$(epoch_outcome "$dir")" = rewake ] || fail "the paced StopFailure must record outcome=rewake, got: $(epoch_outcome "$dir")"
-  [ "$(stat -c %Y "$marker" 2>/dev/null || stat -f %m "$marker")" -ge $(( t0 + 3 )) ] || fail "the paced StopFailure rewake must restart the cooldown at its commit"
+  [ "$(stat -c %Y "$marker" 2>/dev/null || stat -f %m "$marker")" -ge $(( t0 + 5 )) ] || fail "the paced StopFailure rewake must restart the cooldown at its commit"
 
   : > "$marker"
   t0=$(date +%s)
