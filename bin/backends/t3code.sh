@@ -52,6 +52,13 @@ fm_backend_t3code_server_matches() {
   [ -n "${1:-}" ] && [ "$(fm_backend_t3code_server_identity 2>/dev/null)" = "$1" ]
 }
 
+# fm_backend_t3code_no_identity_error - the same sign-in guidance the helper
+# prints, for the unbound verbs that must know their server before they are
+# allowed to open a session at all.
+fm_backend_t3code_no_identity_error() {
+  echo "error: no usable T3 credential at $(fm_backend_t3code_token_file); the captain signs in with: bin/fm-t3-mcp.mjs login --access full-access" >&2
+}
+
 fm_backend_t3code_tool_check() {
   command -v node >/dev/null 2>&1 || { echo "error: backend=t3code selected but 'node' is not installed" >&2; return 1; }
   command -v treehouse >/dev/null 2>&1 || { echo "error: backend=t3code selected but 'treehouse' is not installed" >&2; return 1; }
@@ -88,7 +95,13 @@ fm_backend_t3code_mcp() {
     if [ "$previous" = --thread ]; then
       thread=$arg
       if [ "$1" = watch ]; then
-        admitted=$(unset FM_T3CODE_EXPECTED_SERVER FM_T3CODE_TASK_SERVER; fm_backend_t3code_admitted_server "$thread") || return 1
+        # Each watched thread's own record is authoritative: the batch's
+        # environment names only one task's server, so it must never decide
+        # another thread's identity. A thread with no record at all falls back
+        # to the identity the caller admitted for this batch.
+        admitted=$(unset FM_T3CODE_EXPECTED_SERVER FM_T3CODE_TASK_SERVER; fm_backend_t3code_admitted_server "$thread" 2>/dev/null) || admitted=
+        [ -n "$admitted" ] || admitted=${expected:-}
+        [ -n "$admitted" ] || { echo "error: T3 watch thread $thread has no admitted creation-server identity" >&2; return 1; }
       else
         admitted=$(fm_backend_t3code_admitted_server "$thread") || return 1
       fi
@@ -102,7 +115,8 @@ fm_backend_t3code_mcp() {
   done
   if [ -z "$expected" ]; then
     case "$1" in
-      status|project-ensure|resolve-selection|thread-for-root) expected=$(fm_backend_t3code_server_identity) || return 1 ;;
+      status|project-ensure|resolve-selection|thread-for-root)
+        expected=$(fm_backend_t3code_server_identity) || { fm_backend_t3code_no_identity_error; return 1; } ;;
       *) echo "error: T3 request lacks an admitted creation-server identity" >&2; return 1 ;;
     esac
   fi
@@ -240,6 +254,18 @@ process.stdout.write(require("crypto").createHash("sha256").update(require("fs")
   printf '%s/%s' "$dir" "$key"
 }
 
+# A turn refused before its request goes out proves nothing about an earlier
+# attempt under the same text: a caller-held request id or a recent send record
+# keeps the logical delivery unproven (7) so the retry reuses that id instead of
+# rebuilding the message as a new delivery.
+fm_backend_t3code_refused_turn_outcome() {  # <thread-id> <text>
+  local record
+  [ -z "${FM_T3CODE_CLIENT_REQUEST_ID:-}" ] || return 7
+  record=$(fm_backend_t3code_send_record "$1" "$2") || return 1
+  [ -n "$(find "$record" -mmin -60 2>/dev/null)" ] && return 7
+  return 1
+}
+
 # One durable message: it starts an idle thread's next turn or steers the
 # running one (t3_thread_send mode auto). The model selection was fixed at
 # launch, so the optional third argument is accepted for the caller's
@@ -252,12 +278,15 @@ process.stdout.write(require("crypto").createHash("sha256").update(require("fs")
 # unproven and reads 7.
 fm_backend_t3code_turn_start() (  # <thread-id> <text> [model-selection-json]
   local thread=$1 text=$2 file='' dir record='' id='' out rc=0 held=0
-  local state=${FM_STATE_OVERRIDE:-$FM_HOME/state} task seat server
-  server=$(fm_backend_t3code_server_identity) || return 1
-  local admitted
-  admitted=$(fm_backend_t3code_admitted_server "$thread") || return 1
+  local state=${FM_STATE_OVERRIDE:-$FM_HOME/state} task seat server admitted
+  server=$(fm_backend_t3code_server_identity) || server=''
+  admitted=$(fm_backend_t3code_admitted_server "$thread") || admitted=''
+  if [ -z "$server" ] || [ -z "$admitted" ] || [ "$admitted" != "$server" ]; then
+    echo "error: T3 creation server does not match the current credential" >&2
+    fm_backend_t3code_refused_turn_outcome "$thread" "$text"
+    return
+  fi
   local FM_T3CODE_EXPECTED_SERVER=$admitted
-  [ "$FM_T3CODE_EXPECTED_SERVER" = "$server" ] || { echo "error: T3 creation server does not match the current credential" >&2; return 1; }
   seat=$("$FM_BACKEND_LIB_DIR/fm-fleet-seats.sh" show-t3 "$thread" "$server") || return 1
   if [ -n "$seat" ]; then
     task=$(printf '%s' "$seat" | jq -ser 'if length == 1 then .[0].task else error("ambiguous T3 holder") end') || return 1

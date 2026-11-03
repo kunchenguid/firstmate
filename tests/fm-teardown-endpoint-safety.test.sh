@@ -1305,6 +1305,28 @@ SH
   chmod +x "$dir/fakebin/tmux"
 }
 
+# write_empty_lsof_shim: the close-failure cases need their recorded window to
+# still be there when the close fails. teardown reaps leaked worktree processes
+# before closing, and on a host with NO lsof it falls back to signalling the
+# recorded pane's whole process group (bin/fm-teardown.sh
+# reap_task_backend_process_group): that kills the fixture pane's own shell, and
+# tmux then removes the window through that exit instead of through the close
+# under test, so the failure those cases assert could never be observed. Nothing
+# in these fixtures roots a process under its task directories, so the
+# host-with-lsof branch - the branch CI hosts take, and the only one under test
+# here - scans and finds nothing. This stub supplies exactly that branch by
+# answering the bounded cwd scan with a successful, empty inventory. A host that
+# already has lsof keeps using the real one.
+write_empty_lsof_shim() {  # <dir>
+  command -v lsof >/dev/null 2>&1 && return 0
+  cat > "$1/fakebin/lsof" <<'SH'
+#!/usr/bin/env bash
+# lsof -a -d cwd -Fpn: the scan ran and matched nothing.
+exit 0
+SH
+  chmod +x "$1/fakebin/lsof"
+}
+
 # write_endpoint_close_meta: a task record whose worktree and project do not
 # exist, which keeps the cases below on the endpoint close itself - the pool
 # return and its own refusals are covered elsewhere in this file.
@@ -1323,6 +1345,7 @@ test_failed_endpoint_close_refuses_before_removing_the_record() {
   ( cd "$dir" && env -u TMUX -u TMUX_PANE "$REAL_TMUX" -S "$socket" new-session -d -s "$session" -n control )
   ( cd "$dir" && env -u TMUX -u TMUX_PANE "$REAL_TMUX" -S "$socket" new-window -d -t "=$session:" -n "fm-$id" )
   write_close_failing_tmux_shim "$dir" "$socket" "$REAL_TMUX"
+  write_empty_lsof_shim "$dir"
   isolated_tmux_window_exists "$dir" "$socket" "$session" "fm-$id" \
     || fail "fixture did not create the task window"
 
@@ -1383,6 +1406,7 @@ test_forced_teardown_continues_past_a_close_it_could_not_make() {
   ( cd "$dir" && env -u TMUX -u TMUX_PANE "$REAL_TMUX" -S "$socket" new-session -d -s "$session" -n control )
   ( cd "$dir" && env -u TMUX -u TMUX_PANE "$REAL_TMUX" -S "$socket" new-window -d -t "=$session:" -n "fm-$id" )
   write_close_failing_tmux_shim "$dir" "$socket" "$REAL_TMUX"
+  write_empty_lsof_shim "$dir"
   write_endpoint_close_meta "$dir" "$id" "$session:fm-$id"
 
   # Exactly the same case run twice, so the only difference is the operator's
@@ -1434,6 +1458,7 @@ test_unreadable_close_read_refuses_while_a_definitive_absence_completes() {
   ( cd "$dir" && env -u TMUX -u TMUX_PANE "$REAL_TMUX" -S "$socket" new-session -d -s "$session" -n control )
   ( cd "$dir" && env -u TMUX -u TMUX_PANE "$REAL_TMUX" -S "$socket" new-window -d -t "=$session:" -n "fm-$id" )
   write_close_failing_tmux_shim "$dir" "$socket" "$REAL_TMUX"
+  write_empty_lsof_shim "$dir"
   write_endpoint_close_meta "$dir" "$id" "$session:fm-$id"
 
   set +e
@@ -1504,6 +1529,7 @@ test_forced_secondmate_child_close_failure_still_refuses() {
   ( cd "$dir" && env -u TMUX -u TMUX_PANE "$REAL_TMUX" -S "$socket" new-session -d -s "$session" -n control )
   ( cd "$dir" && env -u TMUX -u TMUX_PANE "$REAL_TMUX" -S "$socket" new-window -d -t "=$session:" -n "fm-$child" )
   write_close_failing_tmux_shim "$dir" "$socket" "$REAL_TMUX"
+  write_empty_lsof_shim "$dir"
   fm_write_meta "$dir/home/state/$parent.meta" \
     "window=$session:fm-$parent" "endpoint_task_id=$parent" \
     "worktree=$mate" "project=$mate" "home=$mate" \
