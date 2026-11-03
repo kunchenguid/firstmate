@@ -529,6 +529,45 @@ test_actionable_close_with_live_successor_rewakes_once() {
   pass "auto-arm: actionable close survives a healthy successor without duplicate delivery"
 }
 
+# A StopFailure firing is the API-error turn end that skips the whole Stop
+# phase, and it must drive the same claim/arm/rewake cycle a Stop does.
+# Chained error ends are bounded instead: a second StopFailure inside the
+# rewake cooldown still runs its arm (coverage) but records rewake-suppressed
+# and exits 0, so an error storm cannot chain error -> rewake -> error
+# forever; an ordinary Stop inside the window is unaffected, and once the
+# cooldown expires the still-pending wake rewakes again.
+test_stopfailure_close_rewakes_then_cools_down() {
+  local dir out status fail_payload
+  fail_payload='{"session_id":"sess-autoarm","hook_event_name":"StopFailure","error":"connection_failed","transcript_path":"/tmp/sess.jsonl"}'
+
+  dir=$(make_primary_dir "$TMP_ROOT/stopfailure")
+  : > "$dir/state/task.meta"
+  write_arm_fixture "$dir" actionable
+  out=$(run_autoarm "$dir" "$fail_payload" 2>/dev/null); status=$?
+  expect_code 2 "$status" "a StopFailure firing with an actionable close must rewake like Stop"
+  assert_contains "$out" "stale: fixture-win actionable" "StopFailure rewake must carry the arm's reason line"
+  [ "$(epoch_outcome "$dir")" = rewake ] || fail "StopFailure epoch must record outcome=rewake, got: $(epoch_outcome "$dir")"
+  [ -e "$dir/state/arm-ran" ] || fail "the StopFailure hook never ran the arm"
+  [ -e "$dir/state/.claude-autoarm-stopfailure-rewake" ] || fail "the committed StopFailure rewake never recorded its cooldown marker"
+
+  out=$(run_autoarm "$dir" "$fail_payload" 2>/dev/null); status=$?
+  expect_code 0 "$status" "a second StopFailure inside the cooldown must not rewake again"
+  [ "$(epoch_outcome "$dir")" = rewake-suppressed ] || fail "the suppressed rewake must record outcome=rewake-suppressed, got: $(epoch_outcome "$dir")"
+  [ "$(wc -l < "$dir/state/arm-ran" | tr -d ' ')" -eq 2 ] || fail "the suppressed StopFailure must still run its arm for coverage"
+  [ "$(wc -l < "$dir/state/successor-ran" | tr -d ' ')" -eq 2 ] || fail "the suppressed StopFailure must still start its handling successor"
+
+  out=$(run_autoarm "$dir" 2>/dev/null); status=$?
+  expect_code 2 "$status" "an ordinary Stop inside the cooldown window must still rewake"
+  [ "$(epoch_outcome "$dir")" = rewake ] || fail "the ordinary Stop must record outcome=rewake, got: $(epoch_outcome "$dir")"
+
+  fm_touch_epoch $(( $(date +%s) - 400 )) "$dir/state/.claude-autoarm-stopfailure-rewake"
+  out=$(run_autoarm "$dir" "$fail_payload" 2>/dev/null); status=$?
+  expect_code 2 "$status" "a StopFailure after the cooldown must rewake the still-pending wake"
+  [ "$(epoch_outcome "$dir")" = rewake ] || fail "the post-cooldown StopFailure must record outcome=rewake, got: $(epoch_outcome "$dir")"
+
+  pass "auto-arm: StopFailure arms the cycle, rewakes once per cooldown, and never re-delivers inside it"
+}
+
 # An arm that attached to a peer cycle returns when that cycle ends with the wake
 # the peer delivered. Pi, omp, and OpenCode start the next arm before notifying
 # the model; the hook must do the same, naming the closed arm as the successor's
@@ -2225,6 +2264,7 @@ test_resolves_outermost_claude_pid_in_nested_bgspare_chain
 test_inert_when_fleet_idle
 test_actionable_close_rewakes_with_reason
 test_actionable_close_with_live_successor_rewakes_once
+test_stopfailure_close_rewakes_then_cools_down
 test_attached_cycle_end_starts_handling_successor
 test_unconfirmed_handling_successor_still_rewakes
 test_failed_close_rewakes_with_failure_banner
