@@ -1667,8 +1667,8 @@ _fm_lock_acquire_wait_handoff() {  # <lockdir> <caller-pid>
 # fm_lock_acquire_wait_bounded <lockdir> <positive-seconds>
 #
 # Bounded acquire variant. It preserves the ordinary wait/reclaim behavior
-# until fm-timeout-lib.sh's hard deadline, returns 124 when a live holder still
-# owns the lock, and leaves FM_LOCK_HELD_PID naming that holder.
+# until fm-timeout-lib.sh's hard deadline, returns 124 for retriable contention,
+# and leaves FM_LOCK_HELD_PID naming a live holder when one is known.
 # Use it where a caller must refuse rather than block: wake presentation, and
 # the guarded remote link clear, whose whole contract is to return a
 # reconciliation refusal instead of wedging an unattended close.
@@ -1708,18 +1708,21 @@ fm_lock_acquire_wait_bounded() {
   fi
   if [ "$rc" -eq 124 ]; then
     owner_pid=$(cat "$lockdir/pid" 2>/dev/null || true)
+    # shellcheck disable=SC2034 # Output read by callers after bounded acquisition.
+    FM_LOCK_HELD_PID=
     case "$owner_pid" in
-      ''|*[!0-9]*|0) ;;
+      '')
+        fm_lock_parent_gone "$lockdir" && return 1
+        if [ -e "$lockdir" ] || [ -L "$lockdir" ]; then [ -d "$lockdir" ] || return 1; fi
+        ;;
+      *[!0-9]*|0) return 1 ;;
       *)
         if [ "$owner_pid" -gt 0 ] 2>/dev/null && fm_pid_alive "$owner_pid"; then
           FM_LOCK_HELD_PID=$owner_pid
-          return 124
         fi
         ;;
     esac
-    # shellcheck disable=SC2034 # Output read by callers after bounded acquisition.
-    FM_LOCK_HELD_PID=
-    return 1
+    return 124
   fi
   return "$rc"
 }
