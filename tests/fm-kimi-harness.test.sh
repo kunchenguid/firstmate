@@ -169,7 +169,7 @@ case "${1:-}" in
           ;;
         *)
           printf '%s\n' "$literal" >> "$FM_FAKE_POINTER_LOG"
-          date +%s%3N > "$FM_FAKE_KIMI_TYPED_AT"
+          python3 -c "import time;print(int(time.time()*1000))" > "$FM_FAKE_KIMI_TYPED_AT"
           case "$state" in
             trust|trust-wrapped|trust-partial|trust-decoy|trust-230|trust-230-rootmcp|trust-230-kimimcp|trust-230-small|trust-230-paged|trust-240|booting|banner-only|banner-first|blank-frame) ;;
             *) printf 'pointer-typed\n' > "$FM_FAKE_KIMI_STATE" ;;
@@ -229,7 +229,7 @@ case "${1:-}" in
             printf 'enter\n' >> "$FM_FAKE_KIMI_SUBMIT_ENTER_LOG"
             if [ "${FM_FAKE_KIMI_PASTE_BURST:-no}" = yes ]; then
               # Kimi 2.4.0 suppresses Enter for 120ms after a fast paste.
-              now_ms=$(date +%s%3N)
+              now_ms=$(python3 -c "import time;print(int(time.time()*1000))")
               typed_ms=$(cat "$FM_FAKE_KIMI_TYPED_AT")
               if [ $((now_ms - typed_ms)) -lt 120 ]; then
                 printf 'pointer-expanded\n' > "$FM_FAKE_KIMI_STATE"

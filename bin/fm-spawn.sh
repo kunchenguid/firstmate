@@ -5804,8 +5804,8 @@ grok_wait_for_ready() {
       # Grok can swallow a keypress during its startup window, so y is re-sent
       # on every poll the complete dialog is still on screen. The dialog's own
       # disappearance is the postcondition: once it clears, this branch cannot
-      # fire again. y is the affirmative option's own key.
-      if ! spawn_send_key "$T" y; then
+      # fire again. y is the affirmative option's own key, sent as literal text (not every backend's key adapter maps y).
+      if ! spawn_send_literal "$T" y; then
         GROK_READY_FAILURE_DETAIL="grok trust dialog was seen but y could not be submitted"
         return 1
       fi

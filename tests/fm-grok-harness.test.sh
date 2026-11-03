@@ -142,6 +142,7 @@ case "${1:-}" in
           ;;
       esac
       case "$literal" in
+        y) note_answer ;;
         *'grok --always-approve'*)
           printf '%s\n' "$literal" >> "$launch_log"
           printf 'launched\n' > "$state_file"
