@@ -2331,8 +2331,9 @@ The retarget itself was exercised on 2026-11-02 against Orca 1.4.232 with real C
 The composer read was re-verified on 2026-11-02 against Orca 1.4.232 with real Claude Code 2.1.317 and 2.1.304 panes in a disposable lab runtime: Orca's default `orca terminal read` returns the accumulated stream, so after an accepted Enter the same pane returned repaint fragments (`❯ ⚠ claude.ai connectors are disabled ...`) with no rendered composer and classified `unknown`, which reported a command that had already run as "text not submitted" and exited 1.
 `orca terminal read --terminal <handle> --screen --limit <n> --json` returned the rendered screen, the same pane classified `empty`, and the typed send confirmed delivery.
 The `--screen` payload carried no ANSI bytes, so the Orca capability descriptor stays `styled=0`.
-The same runtime reported typed-but-unsubmitted composer text in `result.terminal.draft`, which Orca omits from the tail and screen rows: a replacement pane whose `draft` held `DRAFT-MARKER keep me` rendered an empty `❯` row and classified `empty`, so an inbox doorbell was typed into that draft instead of deferring until [`bin/backends/orca.sh`](../../bin/backends/orca.sh) rendered the draft as the composer row it is, after which the same capture read `pending`, the ring deferred, and the draft stayed byte-identical.
-`tests/fm-backend-orca.test.sh` pins both the rendered-screen read and the draft-rendering deferral.
+The same runtime reported typed-but-unsubmitted composer text in `result.terminal.draft`, which Orca omits from the tail and screen rows: a replacement pane whose `draft` held `DRAFT-MARKER keep me` rendered an empty `❯` row.
+The adapter retains that structured provenance: a nonempty draft is `pending`, including text matching an idle placeholder, while dialog detection and recording inspect the original rendered screen first and take precedence over the draft verdict.
+`tests/fm-backend-orca.test.sh` pins the rendered-screen read, structured-draft deferral, and dialog protection with a nonempty draft.
 
 ### Orca environment source
 

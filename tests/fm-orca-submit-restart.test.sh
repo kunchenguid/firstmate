@@ -73,7 +73,7 @@ for order in before-text before-text-fresh before-enter pending second-enter ori
       }
       fm_backend_orca_resolve_live_terminal() { printf live; }
       fm_backend_orca_composer_capture() {
-        local body rule
+        local body rule screen=
         printf "%s\n" "$1" >> "$evidence/reads"
         if [ "$1" = old ] && [[ "$order" != original-* ]]; then
           body=doorbell
@@ -83,16 +83,22 @@ for order in before-text before-text-fresh before-enter pending second-enter ori
             case "$mode" in
               settle-unreadable) return 1 ;;
               settle-dialog)
-                printf "Background work is running\n❯ 1. Exit and stop tasks\nEnter to confirm · Esc to cancel\n"
-                return 0 ;;
+                screen=$(printf "Background work is running\n❯ 1. Exit and stop tasks\nEnter to confirm · Esc to cancel\n") ;;
             esac
           fi
           if [ "$mode" = unknown-after ] && [ -f "$evidence/submitted" ]; then return 1; fi
           body=$(cat "$evidence/composer")
         fi
-        printf -v rule "%*s" "$((${#body} + 4))" ""
-        rule=${rule// /─}
-        printf "╭%s╮\n│ > %s │\n╰%s╯\n" "$rule" "$body" "$rule"
+        if [ -z "$screen" ]; then
+          printf -v rule "%*s" "$((${#body} + 4))" ""
+          rule=${rule// /─}
+          screen=$(printf "╭%s╮\n│ > %s │\n╰%s╯\n" "$rule" "$body" "$rule")
+        fi
+        if [ "${3:-}" = json ]; then
+          printf "%s" "$screen" | node -e "const screen = require(\"fs\").readFileSync(0, \"utf8\"); process.stdout.write(JSON.stringify({ok:true,result:{terminal:{tail:screen.split(\"\\n\")}}}));"
+        else
+          printf "%s\n" "$screen"
+        fi
       }
       fm_backend_agent_state() { printf idle; }
       fm_backend_busy_state() {
@@ -106,7 +112,7 @@ for order in before-text before-text-fresh before-enter pending second-enter ori
           fm_backend_orca_composer_state "$2"
         fi
       }
-      fm_backend_capture() { fm_backend_orca_composer_capture "$2"; }
+      fm_backend_capture() { shift; fm_backend_orca_composer_capture "$@"; }
       fm_backend_source() { return 0; }
       fm_task_inbox_doorbell_line() { printf doorbell; }
       fm_backend_send_key() { shift; fm_backend_orca_send_key "$@"; }

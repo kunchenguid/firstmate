@@ -62,6 +62,8 @@ Exact command flags and response parsing are owned by `bin/backends/orca.sh` and
 An ordinary metadata-routed `fm-send.sh` text steer becomes a durable steering-inbox record, and only its best-effort constant doorbell passes through Orca's submit machinery.
 Replacement panes showing a blocking dialog refuse text and Enter; an explicit Ctrl-C remains available.
 After resolving a replacement pane, an inbox ring defers if its composer is unreadable or unproven, holds other input, or shows delivery-busy state; a proven pending own doorbell is reused without appending another copy.
+Orca's structured `result.terminal.draft` field makes any nonempty draft pending, even when its text matches an idle placeholder.
+Dialog detection and recording inspect the original rendered screen first and take precedence over that draft verdict.
 An empty replacement may receive the doorbell text, but never a bare inbox Enter.
 Immediately before Enter on a replacement, including after the settle delay, the inbox gate requires the pane to still hold its own doorbell and refuses empty, foreign draft, busy, unreadable, or blocking-dialog states without pressing Enter.
 Any inbox Enter on a replacement leaves the ring deferred and stops further Enter attempts in that send, even if the Enter was accepted.

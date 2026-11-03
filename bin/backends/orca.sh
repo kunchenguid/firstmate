@@ -505,14 +505,7 @@ if (r.terminal && Array.isArray(r.terminal.tail)) {
 } else {
   process.stdout.write(r.text || r.output || r.content || r.preview || "");
 }
-const draft = r.terminal && r.terminal.draft;
-if (typeof draft === "string") {
-  const body = draft.replace(/\s+/g, " ").trim();
-  if (body) {
-    const rule = "─".repeat(body.length + 4);
-    process.stdout.write("\n╭" + rule + "╮\n│ ❯ " + body + " │\n╰" + rule + "╯");
-  }
-}
+
 '
 }
 
@@ -538,6 +531,12 @@ fm_backend_orca_composer_capture() {  # <terminal-id> [expected-label]
 }
 
 fm_backend_orca_classify_composer() {
+  local verdict
+  verdict=$(fm_composer_classify_screen "$(fm_backend_orca_composer_caps)" "$2")
+  if fm_composer_blocking_dialog "$2" >/dev/null; then
+    printf unknown
+    return 0
+  fi
   if printf '%s' "$1" | node -e '
 const data = JSON.parse(require("fs").readFileSync(0, "utf8"));
 const draft = data.result?.terminal?.draft;
@@ -545,7 +544,7 @@ process.exit(typeof draft === "string" && draft.length > 0 ? 0 : 1);
 '; then
     printf pending
   else
-    fm_composer_classify_screen "$(fm_backend_orca_composer_caps)" "$2"
+    printf '%s' "$verdict"
   fi
 }
 

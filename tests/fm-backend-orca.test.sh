@@ -1978,7 +1978,7 @@ test_retargeted_dialog_blocks_text_and_enter_but_allows_interrupt() {
       if [ "$mode" = interrupt ]; then
         printf '{"ok":true,"result":{"send":{"accepted":true}}}\n' > "$RESP/$n.out"
       else
-        printf '{"ok":true,"result":{"terminal":{"tail":["Background work is running","❯ 1. Exit and stop tasks","Enter to confirm · Esc to cancel"]}}}\n' > "$RESP/$n.out"
+        printf '{"ok":true,"result":{"terminal":{"tail":["Background work is running","❯ 1. Exit and stop tasks","Enter to confirm · Esc to cancel"],"draft":"Type a message..."}}}\n' > "$RESP/$n.out"
       fi
       if [ "$mode" = doorbell ]; then
         touch "$state/.last-watcher-beat"
@@ -2256,6 +2256,18 @@ JS
   pass "Orca inbox: a foreign draft reported only in result.terminal.draft defers before typing"
 }
 
+test_structured_draft_preserves_dialog_verdict() {
+  orca_case structured-draft-dialog
+  printf '%s\n' '{"ok":true,"result":{"terminal":{"tail":["Background work is running","❯ 1. Exit and stop tasks","Enter to confirm · Esc to cancel"],"draft":"Type a message..."}}}' > "$RESP/1.out"
+  PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+    bash -c '. "$0/bin/fm-backend.sh"; . "$0/bin/backends/orca.sh";
+      export FM_COMPOSER_DIALOG_SINK="$1/dialog"
+      verdict=$(fm_backend_orca_composer_state term-live)
+      [ "$verdict" = unknown ] && [ -s "$FM_COMPOSER_DIALOG_SINK" ]' "$ROOT" "$CASE_DIR" \
+    || fail "a structured draft hid the blocking dialog or lost its retry-loop record"
+  pass "Orca structured drafts preserve dialog refusal and retry-loop recording"
+}
+
 test_capture_reads_terminal_tail_json
 test_capture_falls_back_to_text_fields
 test_capture_fails_on_orca_error_json
@@ -2328,3 +2340,5 @@ test_send_stale_exit_status_still_resolves_window
 test_retargeted_dialog_blocks_text_and_enter_but_allows_interrupt
 test_inbox_retarget_preserves_pending_content_and_explicit_input
 test_inbox_retarget_defers_on_foreign_draft_with_empty_tail
+
+test_structured_draft_preserves_dialog_verdict
