@@ -9,7 +9,7 @@
 # Usage:
 #   fm-install-treehouse.sh <destination-directory>
 #
-# Pins Treehouse v3.1.5, the floor providing in-place durable leases and unlanded-copy protection.
+# Pins Treehouse v3.1.5, the verified build providing in-place durable leases and unlanded-copy protection.
 set -eu
 
 FM_TREEHOUSE_CI_VERSION=3.1.5
