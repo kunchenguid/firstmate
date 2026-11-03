@@ -129,6 +129,7 @@ Exact call payloads are owned by `bin/fm-t3-mcp.mjs` and `bin/backends/t3code.sh
 T3 pages that view oldest first, so the helper starts from the thread's visible item count to read the tail.
 When the [fleet seat ledger](configuration.md#fleet-seat-pools-configfleet-seats) accounts for the endpoint, a turn is refused as proven non-delivery unless every incarnation recorded for that endpoint is still `reserved` or `confirmed`, so a released or reclaimed generation is never resumed and needs a fresh launch instead.
 A secondmate turn to an accounted endpoint also holds that mate's supervisor lifecycle episode, so it is refused while another lifecycle operation on that mate is active.
+A failed spawn's rollback is one such operation: it keeps the episode through its thread archive and environment cleanup, so a turn cannot start in that interval and then be interrupted by the same rollback.
 An ordinary metadata-routed `fm-send.sh` text steer becomes a durable steering-inbox record, and its doorbell is a `t3_thread_send` in `auto` mode, which starts an idle thread's next turn or steers the running one.
 T3 derives the message id from the client request id within the auth session that sent it and commits a send before it replies, so retries must reuse that id, under the same sign-in, to reach the message T3 already committed.
 For ordinary sends and doorbells, the adapter reuses the id stored in a record keyed by thread and text for up to 60 minutes from creation, ending that delivery earlier on confirmation or a typed send refusal.
