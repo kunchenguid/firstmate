@@ -541,25 +541,36 @@ fm_backend_orca_composer_draft() {
   local json
   json=$(fm_backend_orca_composer_capture "$1" "" json) || return 3
   printf '%s' "$json" | node -e '
-const data = JSON.parse(require("fs").readFileSync(0, "utf8"));
-const draft = data.result?.terminal?.draft;
-if (data.ok === false || typeof draft !== "string") process.exit(3);
-process.stdout.write(draft);
+try {
+  const data = JSON.parse(require("fs").readFileSync(0, "utf8"));
+  if (data === null || typeof data !== "object") process.exit(3);
+  const draft = data.result?.terminal?.draft;
+  if (data.ok === false || typeof draft !== "string") process.exit(3);
+  process.stdout.write(draft);
+} catch {
+  process.exit(3);
+}
 '
 }
 
 fm_backend_orca_classify_composer() {
-  local verdict
+  local verdict draft
   verdict=$(fm_composer_classify_screen "$(fm_backend_orca_composer_caps)" "$2")
   if fm_composer_blocking_dialog "$2" >/dev/null; then
     printf unknown
     return 0
   fi
-  if printf '%s' "$1" | node -e '
-const data = JSON.parse(require("fs").readFileSync(0, "utf8"));
-const draft = data.result?.terminal?.draft;
-process.exit(typeof draft === "string" && draft.length > 0 ? 0 : 1);
-'; then
+  if draft=$(printf '%s' "$1" | node -e '
+try {
+  const data = JSON.parse(require("fs").readFileSync(0, "utf8"));
+  if (data === null || typeof data !== "object") process.exit(3);
+  const draft = data.result?.terminal?.draft;
+  if (data.ok === false || typeof draft !== "string") process.exit(3);
+  process.stdout.write(String(draft.length));
+} catch {
+  process.exit(3);
+}
+') && [ "$draft" -gt 0 ]; then
     printf pending
   else
     printf '%s' "$verdict"
