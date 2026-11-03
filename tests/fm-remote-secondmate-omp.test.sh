@@ -91,6 +91,7 @@ omp_gen=$(sed -n 's/^busy_gen=//p' "$META")
 assert_grep "busy_gen=$omp_gen" "$TMP_ROOT/launch.out" "the printed route lost the launch's busy generation"
 ctl observe "$ID" --start-proof > "$TMP_ROOT/observe.out" 2>&1 || fail "observe --start-proof failed: $(cat "$TMP_ROOT/observe.out")"
 [ "$(sed -n '2,$p' "$TMP_ROOT/observe.out")" = "verdict=busy fm-spawn
+event=launch-brief
 busy_gen=$omp_gen" ] || fail "observe --start-proof did not report the seeded busy record: $(cat "$TMP_ROOT/observe.out")"
 pass "A host-local launch accepts omp and records the fm-remote Herdr endpoint"
 

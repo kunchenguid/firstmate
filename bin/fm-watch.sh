@@ -2890,9 +2890,8 @@ start_check_verdict_proves() {  # <verdict> <event>
     'busy fm-spawn') return 1 ;;
     busy\ *) return 0 ;;
     idle\ fm-spawn | idle\ fm-interrupt | idle\ fm-recovery | idle\ *-regex) return 1 ;;
-    idle\ claude-hook) [ "$2" = Stop ] ;;
-    idle\ gemini-hook) [ "$2" = AfterAgent ] ;;
-    idle\ pi-ext | idle\ omp-ext) [ "$2" = agent_end ] || [ "$2" = agent_settled ] ;;
+    idle\ claude-hook | idle\ gemini-hook | idle\ pi-ext | idle\ omp-ext | idle\ cursor-transcript | idle\ muse-session-log)
+      case "$2" in session-end|SessionEnd) return 1 ;; *) return 0 ;; esac ;;
     idle\ *) return 1 ;;
   esac
 }

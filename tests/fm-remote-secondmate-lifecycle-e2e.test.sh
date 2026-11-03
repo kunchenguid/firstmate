@@ -931,6 +931,7 @@ assert_absent "$REMOTE_HOME/state/parent-route/ios.start-pending" "the remote ho
 # start-proof mode; codex seeds no busy generation, so none is reported.
 [ "$(remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh observe ios --start-proof)" = "idle
 verdict=unknown codex-unverified
+event=
 busy_gen=$ios_remote_gen" ] || fail "observe --start-proof did not report the host's busy record through the route"
 pass "remote spawn launches on the remote-local backend and records a host-qualified route"
 

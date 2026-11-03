@@ -380,8 +380,8 @@ arm_remote() {  # <id> [record-gen]
 
 # `observe <id> --start-proof` output: the observation line, then the host's
 # busy-contract verdict and the busy generation of the launch it describes.
-remote_proof() {  # <observation> [verdict] [busy-gen]
-  printf '%s\nverdict=%s\nbusy_gen=%s\n' "$1" "${2:-busy fm-spawn}" "${3-g900.1.1}"
+remote_proof() {  # <observation> [verdict] [busy-gen] [event]
+  printf '%s\nverdict=%s\nevent=%s\nbusy_gen=%s\n' "$1" "${2:-busy fm-spawn}" "${4:-}" "${3-g900.1.1}"
 }
 
 remote_tick() {  # <proof> <state> <capture> <rc>: tick once with a stubbed route
@@ -421,8 +421,14 @@ test_remote_secondmate_reads_route() {
   remote_tick "$(remote_proof busy)" alive '' 0 || fail "tick failed"; eval "$real"
   [ ! -e "$STATE/r1.start-pending" ] || fail "a busy remote observation did not count as proof"
   arm_remote r8
-  remote_tick "$(remote_proof idle 'idle pi-ext')" alive '' 0 || fail "tick failed"; eval "$real"
+  remote_tick "$(remote_proof idle 'idle pi-ext' g900.1.1 agent_settled)" alive '' 0 || fail "tick failed"; eval "$real"
   [ ! -e "$STATE/r8.start-pending" ] || fail "a silently settled remote mate's busy record did not count as proof"
+  arm_remote r10
+  remote_tick "$(remote_proof idle 'idle claude-hook' g900.1.1 stop)" alive '' 0 || fail "tick failed"; eval "$real"
+  [ ! -e "$STATE/r10.start-pending" ] || fail "a completed Claude turn did not count as proof"
+  arm_remote r11
+  remote_tick "$(remote_proof idle 'idle claude-hook' g900.1.1 session-end)" alive "$PI_DIALOG" 0 || fail "tick failed"; eval "$real"
+  [ -n "$START_CHECK_WAKE" ] || fail "a remote session-end event counted as start proof"
   arm_remote r5
   printf 'done: started\n' > "$STATE/r5.status"
   remote_tick "$(remote_proof idle)" alive '' 0 || fail "tick failed"; eval "$real"
@@ -434,7 +440,7 @@ test_remote_secondmate_reads_route() {
   [ "$(count_wakes)" = 0 ] || fail "a started or superseded remote mate woke"
   # A started-looking verdict from another launch proves nothing.
   arm_remote r9
-  remote_tick "$(remote_proof idle 'idle pi-ext' g700.1.1)" alive '' 0 || fail "tick failed"; eval "$real"
+  remote_tick "$(remote_proof idle 'idle pi-ext' g700.1.1 agent_settled)" alive '' 0 || fail "tick failed"; eval "$real"
   [ -n "$START_CHECK_WAKE" ] || fail "another launch's busy record counted as proof"
   # The spawn seed, or only the observation line, proves nothing.
   arm_remote r2
