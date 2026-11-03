@@ -754,6 +754,12 @@ test_each_relaunch_trigger_relaunches_a_fresh_worker() {
   gh_fixture "$w/gh.1.json" comments="[{\"author\":{\"login\":\"carol\",\"__typename\":\"User\"},\"createdAt\":\"$later\",\"updatedAt\":\"$later\"}]"
   expect_relaunch "$w" comment "new comments from carol"
 
+  w=$(make_world trig-same-second "$GH_URL"); gh_fixture "$w/gh.1.json"; park_world "$w"
+  gh_fixture "$w/gh.1.json" comments="[{\"author\":{\"login\":\"carol\",\"__typename\":\"User\"},\"createdAt\":\"$NOW_ISO\",\"updatedAt\":\"$NOW_ISO\"}]"
+  parked_at=$(jq -nr --arg t "$NOW_ISO" '$t | fromdateiso8601')
+  sed -i.bak "s/^parked_at=.*/parked_at=$parked_at/" "$w/state/lane.review-park"
+  expect_relaunch "$w" same-second "new comments from carol"
+
   # An inline reply in an already resolved thread leaves no unresolved thread
   # and no new review submission; the reply itself is the new feedback.
   w=$(make_world trig-thread-reply "$GH_URL"); gh_fixture "$w/gh.1.json"; park_world "$w"
@@ -804,18 +810,18 @@ test_behind_base_does_not_relaunch() {
 # A relaunch that takes longer than the whole tick budget still completes: the
 # tick only starts it, and nothing bounded by the tick can kill it.
 test_slow_relaunch_is_never_cut_short_by_the_tick() {
-  local w out start took
+  local w out
   w=$(make_world tick-slow-relaunch "$GH_URL"); gh_fixture "$w/gh.1.json"; park_world "$w"
   gh_fixture "$w/gh.1.json" 'rollup="FAILURE"'
-  printf '#!/usr/bin/env bash\nsleep 8\nprintf "%%s\\n" "$*" >> "%s/control.log"\n' "$w" > "$w/fakebin/fm-control.sh"
-  start=$(date +%s)
+  printf '#!/usr/bin/env bash\nprintf started > "%s/control.started"\nwhile [ ! -e "%s/control.release" ]; do sleep 0.05; done\nprintf "%%s\\n" "$*" >> "%s/control.log"\n' "$w" "$w" "$w" > "$w/fakebin/fm-control.sh"
   out=$(FM_PARK_TICK_SECS=6 run_park "$w" tick 2>&1)
-  took=$(( $(date +%s) - start ))
   [ -z "$out" ] || fail "slow-relaunch: the starting tick printed: $out"
-  [ ! -e "$w/control.log" ] && [ "$took" -lt 8 ] || fail "slow-relaunch: the tick waited ${took}s for the relaunch"
+  for _ in $(seq 1 100); do [ -e "$w/control.started" ] && break; sleep 0.1; done
+  [ -e "$w/control.started" ] || fail "slow-relaunch: detached action never started"
   # A tick while the relaunch runs leaves the busy lane alone.
   out=$(FM_PARK_TICK_SECS=6 run_park "$w" tick 2>&1)
   [ -z "$out" ] || fail "slow-relaunch: a tick during the relaunch printed: $out"
+  : > "$w/control.release"
   wait_report "$w" slow-relaunch
   out=$(FM_PARK_TICK_SECS=6 run_park "$w" tick 2>&1)
   case "$out" in "relaunched lane: PR $GH_URL - checks are failing"*) ;; *) fail "slow-relaunch: report: $out" ;; esac
@@ -957,15 +963,15 @@ SH
 # however slow the teardown is, and the next tick reports the outcome, even in
 # a home that opted out of everything the tick otherwise watches.
 test_detached_land_returns_at_once_and_the_tick_reports_it() {
-  local w out start took
+  local w out
   w=$(make_world land-detached "$GH_URL"); gh_fixture "$w/gh.1.json"; park_world "$w"
-  printf '#!/usr/bin/env bash\nsleep 6\nprintf "%%s\\n" "$*" >> "%s/teardown.log"\nrm -f "%s/state/lane.review-park" "%s/state/lane.meta"\n' "$w" "$w" "$w" > "$w/fakebin/fm-teardown.sh"
-  start=$(date +%s)
+  printf '#!/usr/bin/env bash\nprintf started > "%s/teardown.started"\nwhile [ ! -e "%s/teardown.release" ]; do sleep 0.05; done\nprintf "%%s\\n" "$*" >> "%s/teardown.log"\nrm -f "%s/state/lane.review-park" "%s/state/lane.meta"\n' "$w" "$w" "$w" "$w" "$w" > "$w/fakebin/fm-teardown.sh"
   out=$(run_park "$w" land lane --if-eligible --detach 2>&1)
-  took=$(( $(date +%s) - start ))
   [ "$out" = "automatic cleanup started" ] || fail "land-detached: $out"
-  [ "$took" -lt 6 ] || fail "land-detached: the caller waited ${took}s for the teardown"
-  [ ! -e "$w/teardown.log" ] || fail "land-detached: the teardown finished before the caller returned"
+  for _ in $(seq 1 100); do [ -e "$w/teardown.started" ] && break; sleep 0.1; done
+  [ -e "$w/teardown.started" ] || fail "land-detached: detached teardown never started"
+  [ ! -e "$w/teardown.log" ] || fail "land-detached: teardown completed before release"
+  : > "$w/teardown.release"
   wait_land_settled "$w" land-detached
   [ "$(cat "$w/teardown.log")" = lane ] || fail "land-detached: teardown calls: $(cat "$w/teardown.log")"
   out=$(run_park "$w" tick 2>&1)
