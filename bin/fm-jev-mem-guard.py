@@ -21,7 +21,8 @@ Invariants:
     a false alarm; an unassessed host reports null measured percentages (JSON null,
     "unavailable" in human output) instead of fabricated numbers.
   - Swap with SwapTotal > 0 but no SwapFree line is reported as unknown and never
-    classifies the verdict; a failed top-process listing degrades to an empty list.
+    classifies the verdict; a failed top-process listing degrades to an empty list,
+    and macOS skips the /proc top-process scan entirely.
   - Bounded sub-second execution (< 500ms).
   - Status is OK, WARNING, CRITICAL, or UNKNOWN; recommendation is diagnostic text
     for the operator, never a command.
