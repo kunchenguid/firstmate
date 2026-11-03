@@ -418,6 +418,17 @@ Load `agent-skill-trigger-index` only when auditing or maintaining the complete 
 
 When Relay is enabled, load `fmx-respond` for its activation, authority, mention, follow-up, and public-loop contract.
 
+## 15. Context Guardian
+
+Keep the working context inside its budget so the session keeps its speed.
+This is a standing role the agent holds on its own authority: it measures the conversation's context, compacts without waiting to be asked, and treats a compaction as a cut rather than a stop.
+
+The agent compacts at 150k tokens, ahead of the automatic compaction at 170k, and 180k is the ceiling a session never passes.
+
+Before a cut, capture what the cut would lose: the open question, the pending decision, the paths in play, and the next unfinished step. In this home, run `/stow` first so durable knowledge and open-work records are persisted rather than left in conversation.
+
+After the cut, re-read the task's record and the branch, then resume at the next unfinished step. The task, its branch, and its next step survive the cut.
+
 ## Captain instruction precedence
 
 A current, explicit, concrete captain instruction overrides any conflicting standing rule written above.
