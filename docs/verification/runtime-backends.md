@@ -804,6 +804,30 @@ It captures the launch `bin/fm-spawn.sh` actually builds and confirms that the i
 It does not claim that a managed policy cannot re-enable hooks after launch.
 The portable half, `tests/fm-spawn-dispatch-profile.test.sh`, pins the requested hook-disablement flag for crewmates and its omission for secondmates, which run primary sessions on this repository's own project hooks.
 
+### Stop response parsing
+
+Verified 2026-11-03 on Linux x86_64 with codex-cli 0.162.1.
+The existing live hook-layer guard exercises the installed app-server's `hook/completed` notifications against a loopback Responses fixture that returns fixed text and no tool calls.
+Each app-server has isolated config, hook trust, login files, and data; it neither uses a shared daemon nor contacts a model provider.
+The fixture trusts only its synthetic Stop handler's exact key/hash.
+
+```sh
+bash bin/fm-test-run.sh --jobs 1 tests/fm-turnend-guard.test.sh tests/fm-codex-hook-layer-live-e2e.test.sh
+```
+
+```text
+ok - .codex Stop wrapper: clean success JSON, inherited PATH, unchanged errors and continuation without logout output
+ok - codex codex-cli 0.162.1: Stop parser checked 12 isolated cases with clean wrapper JSON and bounded continuation
+FM_TEST_SUMMARY total=2 failed=0 skipped_gate=0 duration_ms=97428
+```
+
+The portable regression makes its login-shell logout emit terminal escape bytes and confirms that the fixture is effective before checking the tracked command's actual output.
+It also checks primary, child-worktree, and non-Firstmate scope, empty input, missing jq, malformed registration, a non-executable guard, inherited PATH, and unchanged error status/stderr.
+The optional native park's synchronous guard dispatch preserves its `--guard` argument, original payload, success JSON, and exit-2 stderr in an isolated executable fixture without registering a park.
+The live parser accepts both empty output and `{}`, rejects mixed diagnostics/JSON, malformed syntax, multiple objects, and a wrong field type, and preserves an ordinary nonzero error.
+The real copied supervision guard blocks once with its stderr reason, then allows the continuation's Stop; the fixture asserts both native hook verdicts and the two-request bound.
+These checks refresh the Codex adapter evidence; [the integration owner](../turnend-guard.md#harness-integrations) describes its current behavior.
+
 ## Codex automatic approval review
 
 Verified 2026-10-06 with codex-cli 0.160.1.
