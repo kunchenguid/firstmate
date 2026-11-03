@@ -813,6 +813,7 @@ t_early_term_watcher_still_gets_final() {
   mkdir -p "$d/sbin"
   for f in "$ROOT"/bin/*; do ln -s "$f" "$d/sbin/${f##*/}"; done
   rm -f "$d/sbin/fm-classify-lib.sh"
+  # shellcheck disable=SC2016 # Expansions belong to the generated script at runtime.
   printf 'if [ -n "${FM_OSC7501_WATCHER:-}" ] && [ -f %q ]; then echo $$ >%q; sleep 5; fi\n. %q\n' \
     "$d/slow" "$d/initializing" "$ROOT/bin/fm-classify-lib.sh" >"$d/sbin/fm-classify-lib.sh"
   printf 'done [at=%s]: PR https://example.test/pr/45\n' "$(date +%s)" >"$d/state/t45.status"
