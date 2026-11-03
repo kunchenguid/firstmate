@@ -212,8 +212,13 @@ test_bob_launch_then_send_is_verified() {
 
   brief_real="$(cd "$HOME_DIR/data/$id" && pwd -P)/launch-brief.md"
   pointer=$(cat "$CASE_DIR/pointer.log")
-  [ "$pointer" = "Read the brief at $brief_real and follow it exactly." ] \
-    || fail "bob pointer was not the exact absolute-path-only instruction: $pointer"
+  # Bob blocks reads outside its workspace, so the pointer names an in-worktree copy.
+  [ "$pointer" = "Read the brief at $WT_DIR/.bob/launch-brief.md and follow it exactly." ] \
+    || fail "bob pointer was not the exact in-workspace instruction: $pointer"
+  cmp -s "$brief_real" "$WT_DIR/.bob/launch-brief.md" \
+    || fail "the in-workspace brief copy is missing or differs from the launch brief"
+  [ -z "$(git -C "$WT_DIR" status --porcelain --untracked-files=all -- .bob)" ] \
+    || fail "the bob brief copy or hook file is visible to git"
   assert_not_contains "$(cat "$CASE_DIR/tmux-calls.log")" "kill-window" \
     "a successful bob spawn must never tear down the endpoint it just delivered into"
 

@@ -6734,6 +6734,16 @@ EOF
       printf '{"hooks":{"UserPromptSubmit":[{"hooks":[{"type":"command","command":"%s"}]}],"Stop":[{"hooks":[{"type":"command","command":"%s"}]}]}}\n' \
         "$j_submit" "$j_stop" >"$WT/.bob/settings.json"
       exclude_path '.bob/settings.json'
+      # Bob blocks file reads outside its workspace by default
+      # (approval.outsideWorkspaceAllowed=false, and the workspace settings layer
+      # does not override it, verified live against bob 2.0.9), so the brief
+      # pointer cannot name the launch-brief under FM_HOME/data. Hand Bob an
+      # in-workspace copy, kept out of git like the hook file.
+      cp -- "$BRIEF_REAL" "$WT/.bob/launch-brief.md" || {
+        echo "error: could not place the bob brief copy at $WT/.bob/launch-brief.md; $(spawn_endpoint_hint)" >&2
+        exit 1
+      }
+      exclude_path '.bob/launch-brief.md'
     fi
     ;;
   opencode*)
@@ -8186,7 +8196,7 @@ if [ "$HARNESS" = bob ] && [ "$RAW_LAUNCH" -eq 0 ]; then
     bob_spawn_fail "bob did not show a verified ready signal before brief delivery in window $T"
     exit 1
   fi
-  BOB_POINTER="Read the brief at $BRIEF_REAL and follow it exactly."
+  BOB_POINTER="Read the brief at $WT/.bob/launch-brief.md and follow it exactly."
   BOB_SUBMIT_RETRIES=${FM_BOB_SUBMIT_RETRIES:-3}
   BOB_SUBMIT_SLEEP=${FM_BOB_SUBMIT_SLEEP:-${FM_BOB_POLL_INTERVAL:-0.5}}
   BOB_SUBMIT_SETTLE=${FM_BOB_SUBMIT_SETTLE:-0}
