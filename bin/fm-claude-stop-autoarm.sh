@@ -176,6 +176,7 @@ FAILURE_ALARM="$STATE/.claude-autoarm-failure-alarmed"
 STOPFAIL_REWAKE_MARKER="$STATE/.claude-autoarm-stopfailure-rewake"
 STOPFAIL_REWAKE_COOLDOWN=${FM_CLAUDE_STOPFAILURE_REWAKE_COOLDOWN:-300}
 case "$STOPFAIL_REWAKE_COOLDOWN" in ''|*[!0-9]*) STOPFAIL_REWAKE_COOLDOWN=300 ;; esac
+STOPFAIL_REWAKE_COOLDOWN=$((10#$STOPFAIL_REWAKE_COOLDOWN))
 # Only this invocation's commit must survive an interruption as a final rewake.
 AUTOARM_COMMITTED_ALARM=0
 # The guard's attended-block budget (bin/fm-turnend-guard.sh --claude owns the
