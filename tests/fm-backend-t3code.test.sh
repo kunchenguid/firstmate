@@ -2106,6 +2106,75 @@ test_aborted_t3_secondmate_spawn_removes_home_env() {
   pass "fm-spawn.sh --backend t3code --secondmate: an aborted spawn archives its thread, then removes the T3 environment it wrote into the home"
 }
 
+# The failed-startup cleanup owns the task's supervisor lifecycle episode until
+# it is finished. A pooled T3 secondmate's first turn is refused after the
+# thread exists and before its record is published, so the seat stays counted
+# and the thread is still addressable while the abort archives it. A concurrent
+# explicit-thread turn must be refused by the episode mutex: if the abort
+# released the mutex first, that turn would be accepted and then interrupted
+# and archived by this same cleanup.
+t3_seat_thread() {  # <id> -> the T3 thread the case home's seat ledger records
+  FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$CASE_DIR/home" FM_STATE_OVERRIDE="$CASE_DIR/home/state" \
+    FM_DATA_OVERRIDE="$CASE_DIR/home/data" FM_CONFIG_OVERRIDE="$CONFIG" \
+    "$ROOT/bin/fm-fleet-seats.sh" show "$1" |
+    jq -r '[.incarnations[] | select(.route.backend == "t3code") | .route.target // empty] | last // empty'
+}
+
+t3_concurrent_turn() {  # <thread> -> turn-start output; status in $?
+  HOME="$SPAWN_HOME" CLAUDE_CONFIG_DIR='' \
+    FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$CASE_DIR/home" FM_STATE_OVERRIDE="$CASE_DIR/home/state" \
+    FM_DATA_OVERRIDE="$CASE_DIR/home/data" FM_CONFIG_OVERRIDE="$CONFIG" \
+    FM_PROJECTS_OVERRIDE="$CASE_DIR/home/projects" FM_SPAWN_NO_GUARD=1 \
+    bash -c '. "$1/bin/fm-backend.sh"; fm_backend_source t3code || exit 1
+      fm_backend_t3code_turn_start "$2" "concurrent explicit-thread turn"' _ "$ROOT" "$1" 2>&1
+}
+
+test_failed_startup_cleanup_keeps_lifecycle_through_t3_archive() {
+  local id home hold thread out send_out send_rc rc waited
+  id=$(t3_uid t3abortlock)
+  t3_case spawn-abort-lifecycle
+  # A pooled T3 secondmate, so its thread has a counted seat the concurrent
+  # send can resolve while the record is still unpublished.
+  printf '{"pools":[{"name":"shared","capacity":1,"models":["claude-sonnet-5"]}]}\n' > "$CONFIG/fleet-seats"
+  hold="$CASE_DIR/hold-archive"
+  : > "$hold"
+  t3_world_set 'w.failTools = { t3_thread_send: { code: "turn_refused", message: "launch turn refused" } };
+    w.holdTools = { t3_thread_organize: "'"$hold"'" }' \
+    || fail "could not arm the archive hold"
+  home="$CASE_DIR/sm-home"
+  make_t3_secondmate_home "$home" "$id"
+  (spawn_t3_secondmate "$id" "$home" claude claude-sonnet-5 > "$CASE_DIR/spawn.out" 2>&1; echo $? > "$CASE_DIR/spawn.rc") &
+  waited=0
+  while [ ! -e "$hold.reached" ] && [ ! -e "$CASE_DIR/spawn.rc" ] && [ "$waited" -lt 300 ]; do
+    sleep 0.1
+    waited=$((waited + 1))
+  done
+  out=$(cat "$CASE_DIR/spawn.out" 2>/dev/null || true)
+  [ -e "$hold.reached" ] || fail "the failed secondmate spawn never reached its T3 archive: $out"
+  thread=$(t3_seat_thread "$id")
+  [ -n "$thread" ] || fail "the pooled secondmate's seat did not record its T3 thread: $out"
+  # The launch was refused; let the concurrent turn be acceptable to T3 so only
+  # the lifecycle mutex can refuse it.
+  t3_world_set 'delete w.failTools' || fail "could not clear the launch-turn refusal"
+  send_out=$(t3_concurrent_turn "$thread"); send_rc=$?
+  expect_code 1 "$send_rc" "a turn during failed-startup cleanup must be refused"$'\n'"$send_out"
+  assert_contains "$send_out" "active lifecycle operation" "the refusal must name the cleanup's lifecycle operation"
+  [ "$(t3_fake_calls t3_thread_send | grep -c .)" = 1 ] \
+    || fail "the refused turn must never reach T3, got '$(t3_dispatch_types)'"
+  rm -f "$hold"
+  waited=0
+  while [ ! -e "$CASE_DIR/spawn.rc" ] && [ "$waited" -lt 300 ]; do
+    sleep 0.1
+    waited=$((waited + 1))
+  done
+  rc=$(cat "$CASE_DIR/spawn.rc" 2>/dev/null || echo running)
+  [ "$rc" != running ] || fail "the failed secondmate spawn never finished after the archive was released"
+  [ "$rc" -ne 0 ] || fail "the aborted secondmate spawn reported success: $(cat "$CASE_DIR/spawn.out")"
+  [ "$(t3_log_line_of 'r.tool === "t3_thread_organize"')" -gt "$(t3_log_line_of 'r.tool === "t3_thread_send"')" ] \
+    || fail "the failed startup must still archive its idle thread"
+  pass "fm-spawn.sh --backend t3code --secondmate: failed-startup cleanup holds the lifecycle episode through the T3 archive, so a concurrent turn is refused, never accepted and archived"
+}
+
 test_uncertain_launch_message_keeps_task_record() {
   local id out rc thread
   id=$(t3_uid t3uncertainturn)

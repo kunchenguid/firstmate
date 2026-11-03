@@ -34,7 +34,9 @@
 //   (text a queued run starts with once an interrupt lands), failTools
 //   ({name: {code, message}}), dropTools ({name: count}: close the connection
 //   without a reply or effect that many times), dropReplyTools ({name:
-//   count}: apply the call, then close without a reply), emptyReplyTools
+//   count}: apply the call, then close without a reply), holdTools ({name:
+//   path}: create <path>.reached and block that call until <path> is removed,
+//   so a test can act while the caller is mid-request), emptyReplyTools
 //   ({name: count}: answer 200 with an empty event stream and no effect, as a
 //   server that shuts down cleanly before replying), rpcErrorTools ({name:
 //   code}: apply the call once, then answer with a JSON-RPC error of that
@@ -186,6 +188,14 @@ function listItem(x) {
 
 // Returns [result, changed].
 async function callTool(w, name, a) {
+  const hold = (w.holdTools ?? {})[name];
+  if (hold) {
+    // Announce arrival before holding, so a test can act on the exact
+    // in-flight call, then release by removing <hold>.
+    writeFileSync(`${hold}.reached`, "");
+    const deadline = Date.now() + 30_000;
+    while (existsSync(hold) && Date.now() < deadline) await sleep(20);
+  }
   const fail = (w.failTools ?? {})[name];
   if (fail) return [err(fail.code, fail.message), false];
   const threads = (w.threads = w.threads ?? {});

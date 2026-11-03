@@ -1902,10 +1902,6 @@ spawn_abort_cleanup() {
     spawn_seat_abort_custody || true
   fi
   [ -z "$SPAWN_SEAT_ROUTE_FILE" ] || rm -f "$SPAWN_SEAT_ROUTE_FILE" 2>/dev/null || true
-  if [ "$SPAWN_LIFECYCLE_JOINED" = 1 ]; then
-    SPAWN_LIFECYCLE_JOINED=0
-    fm_supervisor_lifecycle_release "$STATE" "$ID" || true
-  fi
   if [ "$RELAUNCH_REPLACEMENT_PENDING" = 1 ] &&
     [ "$SPAWN_META_PUBLISH_STARTED" = 1 ] &&
     [ -n "$SPAWN_META_TMP" ] &&
@@ -2169,6 +2165,17 @@ spawn_abort_cleanup() {
       rm -rf "$GIT_HOOKS_DIR" 2>/dev/null || true
     fi
     fm_lock_release "$SPAWN_TASK_LOCK" || true
+  fi
+  # The episode mutex is released last. Everything above can still interrupt
+  # and archive the endpoint or remove the environment a concurrent T3 turn
+  # would use, so releasing earlier would let a send that acquired the freed
+  # mutex start a turn this cleanup then destroys. An adopted hold stays with
+  # its parent's exit path, and a join's own release belongs here, after the
+  # replacement wiring, Herdr projection, endpoint archive, environment
+  # removal, and record rollback have all finished.
+  if [ "$SPAWN_LIFECYCLE_JOINED" = 1 ]; then
+    SPAWN_LIFECYCLE_JOINED=0
+    fm_supervisor_lifecycle_release "$STATE" "$ID" || true
   fi
   return "$status"
 }
