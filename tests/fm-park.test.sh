@@ -354,13 +354,13 @@ test_gitlab_gate_clean_and_unclean_conditions() {
   printf '%s\\n' '[{"notes":[{"author":{"username":"bob"},"system":false,"created_at":"2026-01-01T00:06:00Z","resolvable":true,"resolved":false}]}]' > "$w/gl.discussions.2.json"
   : > "$w/gl.discussions.fail"
   expect_unclean "$w" gl-failed-page "review threads could not all be read"
-  printf 'pr=%s\\nhead=%s\\nparked_at=%s\\nslot_leased=yes\\n' "$GL_URL" "$(cat "$w/head")" "$(date +%s)" > "$w/state/lane.review-park"
+  printf 'pr=%s\nhead=%s\nparked_at=%s\nslot_leased=yes\n' "$GL_URL" "$(cat "$w/head")" "$(date +%s)" > "$w/state/lane.review-park"
   expect_relaunch "$w" gl-failed-page-parked "review threads could not all be read"
   # A failed merge request read means the forge is unreachable, so an outage
   # retries on the next tick and never relaunches.
   rm -f "$w/gl.discussions.fail" "$w/control.log"
   : > "$w/gl.mr.fail"
-  printf 'pr=%s\\nhead=%s\\nparked_at=%s\\nslot_leased=yes\\n' "$GL_URL" "$(cat "$w/head")" "$(date +%s)" > "$w/state/lane.review-park"
+  printf 'pr=%s\nhead=%s\nparked_at=%s\nslot_leased=yes\n' "$GL_URL" "$(cat "$w/head")" "$(date +%s)" > "$w/state/lane.review-park"
   local rc=0 out
   out=$(run_park "$w" tick 2>&1) || rc=$?
   for _ in $(seq 1 20); do [ ! -e "$w/control.log" ] || break; sleep 0.1; done

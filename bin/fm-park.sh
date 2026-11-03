@@ -430,7 +430,7 @@ snapshot() {  # <pr-url> [--required]
       # retries; a failed discussions read here reports incomplete threads.
       # --paginate prints one JSON array per page; together they are one list.
       if discussions=$(fm_run_timed "$secs" glab api --paginate --hostname "$FM_PR_HOST" \
-        "projects/$enc/merge_requests/$FM_PR_NUMBER/discussions?per_page=100" 2>/dev/null) \
+          "projects/$enc/merge_requests/$FM_PR_NUMBER/discussions?per_page=100" 2>/dev/null) \
         && [ -n "$discussions" ] \
         && discussions=$(printf '%s\n' "$discussions" \
           | jq -cs '[.[] | if type == "array" then .[] else error("invalid discussions page") end]' 2>/dev/null); then
