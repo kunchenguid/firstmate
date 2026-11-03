@@ -114,6 +114,7 @@ SH
   cat > "$fakebin/tmux" <<SH
 #!/usr/bin/env bash
 [ ! -e "$world/tmux.hang" ] || sleep 30
+[ ! -e "$world/tmux.unreadable" ] || { echo "lost server" >&2; exit 1; }
 [ -e "$world/agent.alive" ] || { echo "no server running on /tmp/tmux-fake/default" >&2; exit 1; }
 case "\$1" in
   list-windows) echo fm-lane ;;
@@ -177,7 +178,7 @@ gh_fixture() {  # <out> [key=value...]
     esac
   done
   comment_count=$(printf '%s' "$comments" | jq 'length')
-  review_count=$(( 1 + $(printf '%s' "[$extra_reviews]" | jq 'length') ))
+  review_count=$(( 1 + $(printf '%s' "[${extra_reviews#,}]" | jq 'length') ))
   threads=$(printf '%s' "$threads" | jq 'map(.comments.totalCount = (.comments.nodes | length))')
   local suites="[{\"createdAt\":\"${pushed:-$committed}\"}]"
   [ "$pushed" != none ] || suites='[]'
@@ -513,8 +514,22 @@ test_interrupted_park_reads_as_parking_and_the_tick_settles_it() {
   : > "$w/agent.alive"
   gh_fixture "$w/gh.1.json" 'rollup="FAILURE"'
   out=$(run_park "$w" tick 2>&1)
+  # A relaunch would run detached, so give one the time to appear.
+  for _ in $(seq 1 20); do [ ! -e "$w/control.log" ] || break; sleep 0.1; done
   [ -z "$out" ] && [ ! -e "$w/control.log" ] || fail "interrupted-alive: tick acted: $out"
   grep -qx 'pending=1' "$w/state/lane.review-park" || fail "interrupted-alive: pending record dropped before stop bound"
+
+  # An unreadable agent is no confirmation either, so feedback still waits.
+  w=$(make_world park-interrupted-unreadable "$GH_URL")
+  gh_fixture "$w/gh.1.json"
+  kill_park_during_stop "$w"
+  gh_fixture "$w/gh.1.json" 'rollup="FAILURE"'
+  : > "$w/tmux.unreadable"
+  run_park "$w" tick >/dev/null 2>&1
+  for _ in $(seq 1 20); do [ ! -e "$w/control.log" ] || break; sleep 0.1; done
+  [ ! -e "$w/control.log" ] || fail "interrupted-unreadable: tick relaunched: $(cat "$w/control.log")"
+  grep -qx 'pending=1' "$w/state/lane.review-park" || fail "interrupted-unreadable: an unanswered check settled the record"
+
   w=$(make_world park-interrupted-expired "$GH_URL")
   gh_fixture "$w/gh.1.json"
   kill_park_during_stop "$w"
@@ -616,7 +631,9 @@ test_park_preflight_refusals_leave_the_agent_running() {
   rm -f "$w/control.fail" "$w/control.log"
   : > "$w/agent.alive"
   run_park "$w" tick >/dev/null 2>&1
-  [ ! -e "$w/state/lane.review-park" ] || fail "control-fail: the tick kept the record of a running agent"
+  grep -qx 'pending=1' "$w/state/lane.review-park" || fail "control-fail: the tick dropped the record before the stop bound"
+  FM_PARK_ACTION_SECS=0 run_park "$w" tick >/dev/null 2>&1
+  [ ! -e "$w/state/lane.review-park" ] || fail "control-fail: the record of a running agent outlived the stop bound"
   [ ! -e "$w/control.log" ] || fail "control-fail: the tick acted on the lane: $(cat "$w/control.log")"
 
   ! grep -q "parked on review" "$w/state/lane.status" || fail "preflight: a parked line was appended"

@@ -63,8 +63,8 @@
 # appends a declared paused: line to the task's status log (reported upward in a
 # secondmate home). A refusal before the pending record leaves no record and the
 # agent running; a lease already taken stays until teardown, which is harmless.
-# A pending record is watched and resumed like a parked one, so feedback still
-# relaunches a lane whose park died after the stop, and crew state reads it as
+# A pending record is watched, relaunches on feedback only once its stop is
+# confirmed, because a relaunch replaces the agent, and crew state reads it as
 # parking. Each tick promotes a pending record to parked once its agent is
 # confirmed dead and drops it only if still alive after the stop timeout.
 #
@@ -757,7 +757,8 @@ watch_parked() {  # <id>
   ! lane_busy "$id" || return 0
   if [ -n "$(record_get "$id" pending)" ]; then
     ( LOCKS_HELD=; trap release_locks EXIT; settle_pending "$id" ) || true
-    [ -e "$(record_path "$id")" ] || return 0
+    # Relaunching replaces the agent, so wait until the stop is confirmed.
+    [ -e "$(record_path "$id")" ] && [ -z "$(record_get "$id" pending)" ] || return 0
   fi
   [ -z "$(record_get "$id" resume_error)" ] || return 0
   pr=$(record_get "$id" pr)
