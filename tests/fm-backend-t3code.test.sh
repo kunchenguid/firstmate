@@ -123,10 +123,11 @@ make_treehouse_fakebin() {  # <dir> -> echoes fakebin dir
   cat > "$fb/treehouse" <<'SH'
 #!/usr/bin/env bash
 set -u
+# Capability discovery does not acquire, lease, or return a pool slot.
+[ "${1:-}" != lease ] || [ "${2:-}" != --help ] || exit 0
 printf '{"tool":"treehouse","args":"%s","cwd":"%s"}\n' "$*" "$PWD" >> "${FM_T3_TREEHOUSE_LOG:?}"
 case "${1:-}" in
   lease)
-    [ "${2:-}" = --help ] && exit 0
     echo "already leased" >&2
     exit 1
     ;;

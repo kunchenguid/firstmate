@@ -132,13 +132,18 @@
 #   every descendant process). An app-detected hc also records its signal in
 #   meta's backend_detect= line.
 #   Herdr leases its slot durably (treehouse get --lease) and moves the pane's
-#   top-level shell into it, because a restart restores that shell's cwd.
-#   Each newly acquired managed slot is durably leased to its task before base
-#   refresh. The lease survives worker exit, restart, and every later refusal,
-#   even when no task record was published; a retry must acquire another copy.
-#   A refusal never returns or resets the leased copy. After inspection and an
-#   explicit decision to discard it, the operator can run the printed recovery
-#   command: (cd <project> && treehouse return --force <copy>).
+#   top-level shell into it, because a restart restores that shell's cwd;
+#   docs/herdr-backend.md owns its aborted-spawn lease return.
+#   Pane-driven spawns durably lease recognized managed slots before base
+#   refresh. Once confirmed, that lease survives worker exit, restart, and
+#   later refusals, even when no task record was published; a retry must acquire
+#   another copy. A refusal never returns or resets that leased copy. If leasing
+#   fails, protection is unconfirmed and closing the Treehouse shell may discard
+#   uncommitted work. After inspection and an explicit decision to discard the
+#   copy, the operator can run the printed recovery command:
+#   (cd <project> && treehouse return --force <copy>).
+#   T3 acquires its lease directly with get --lease; docs/t3code-backend.md owns
+#   its abort-return and lease-retention rules.
 #   Normal task cleanup remains subject to fm-teardown.sh's safety checks.
 #   Spawn refuses Treehouse builds without `treehouse lease --help` support.
 #   codex-app is not a known backend yet; docs/codex-app-backend.md owns that
