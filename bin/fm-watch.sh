@@ -2884,15 +2884,18 @@ start_check_remote() {  # <id> <verb> [args...]; output in WATCHER_CAPTURE
 # the spawn's own seed, or an idle verdict only a running worker can have
 # produced (a hook-written record, or a settled Muse or Cursor session). Idle
 # from the rendered-text fallbacks proves nothing, since a parked dialog renders
-# no busy footer either.
-start_check_verdict_proves() {  # <verdict> <event>
+# no busy footer either. Nor does an idle record whose <event> is session-end:
+# the Claude, Devin, Gemini, Cortex and Command Code adapters write it on
+# shutdown even when no prompt was ever submitted, so a worker that exits before
+# starting must still wake. An ordinary task's completed turn also touched its
+# turn-ended marker, which start_check_local_proof reads first.
+start_check_verdict_proves() {  # <verdict> [record event]
   case "$1" in
     'busy fm-spawn') return 1 ;;
     busy\ *) return 0 ;;
     idle\ fm-spawn | idle\ fm-interrupt | idle\ fm-recovery | idle\ *-regex) return 1 ;;
-    idle\ claude-hook | idle\ gemini-hook | idle\ pi-ext | idle\ omp-ext | idle\ cursor-transcript | idle\ muse-session-log)
-      case "$2" in session-end|SessionEnd) return 1 ;; *) return 0 ;; esac ;;
-    idle\ *) return 1 ;;
+    idle\ *) [ "${2:-}" != session-end ] ;;
+    *) return 1 ;;
   esac
 }
 

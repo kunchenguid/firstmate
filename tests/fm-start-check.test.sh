@@ -202,18 +202,45 @@ test_claude_dialog_has_no_key() {
   pass "a Claude dialog is named without a key route"
 }
 
+# The idle record Claude's SessionEnd hook writes (event session-end, exactly as
+# bin/fm-spawn.sh wires it) when the agent exits before any prompt is not proof.
 test_claude_session_end_is_not_start_proof() {
   reset_state
   open_shell_pane ce1 "claude exited"
   arm_task ce1 claude 1000
-  "$ROOT/bin/fm-busy-event.sh" apply "$STATE" ce1 idle --gen "$ARMED_GEN" --source claude-hook --event SessionEnd >/dev/null \
-    || fail "Claude SessionEnd apply"
+  "$ROOT/bin/fm-busy-event.sh" apply "$STATE" ce1 idle --gen "$ARMED_GEN" --source claude-hook --event session-end >/dev/null \
+    || fail "Claude session-end apply"
   start_check_tick 1200 || fail "tick failed"
   case "$START_CHECK_WAKE" in
     *"worker exited before starting"*) ;;
-    *) fail "Claude SessionEnd suppressed the exited-worker wake: $START_CHECK_WAKE" ;;
+    *) fail "Claude session-end suppressed the exited-worker wake: $START_CHECK_WAKE" ;;
   esac
-  pass "Claude SessionEnd alone does not prove a start"
+  pass "Claude session-end alone does not prove a start"
+}
+
+# A healthy launch that finished its first turn silently leaves only the
+# adapter's turn-completion record, with the event the adapter really writes:
+# Claude's Stop hook writes stop, Pi's extension agent-settled. Both prove the
+# start, as do the classifier-only settled Cursor and Muse verdicts.
+test_completed_turn_records_are_proof() {
+  local id harness source event
+  reset_state
+  for id in cs1 ps1; do
+    case "$id" in
+      cs1) harness=claude source=claude-hook event=stop ;;
+      ps1) harness=pi source=pi-ext event=agent-settled ;;
+    esac
+    open_pane "$id" "idle prompt"
+    arm_task "$id" "$harness" 1000
+    "$ROOT/bin/fm-busy-event.sh" apply "$STATE" "$id" idle --gen "$ARMED_GEN" --source "$source" --event "$event" >/dev/null \
+      || fail "$source $event apply"
+    start_check_tick 1200 || fail "tick failed"
+    [ ! -e "$STATE/$id.start-pending" ] || fail "a $source $event record did not count as a start proof"
+  done
+  [ "$(count_wakes)" = 0 ] || fail "a healthy completed launch raised a start wake: $START_CHECK_WAKE"
+  start_check_verdict_proves 'idle cursor-transcript' '' || fail "a settled Cursor transcript did not prove a start"
+  start_check_verdict_proves 'idle muse-session-log' '' || fail "a settled Muse session did not prove a start"
+  pass "turn-completion records prove a start without a wake"
 }
 
 test_dead_agent_names_relaunch() {
@@ -379,9 +406,10 @@ arm_remote() {  # <id> [record-gen]
 }
 
 # `observe <id> --start-proof` output: the observation line, then the host's
-# busy-contract verdict and the busy generation of the launch it describes.
+# busy-contract verdict, its busy record's event, and the busy generation of the
+# launch it describes.
 remote_proof() {  # <observation> [verdict] [busy-gen] [event]
-  printf '%s\nverdict=%s\nevent=%s\nbusy_gen=%s\n' "$1" "${2:-busy fm-spawn}" "${4:-}" "${3-g900.1.1}"
+  printf '%s\nverdict=%s\nevent=%s\nbusy_gen=%s\n' "$1" "${2:-busy fm-spawn}" "${4-launch-brief}" "${3-g900.1.1}"
 }
 
 remote_tick() {  # <proof> <state> <capture> <rc>: tick once with a stubbed route
@@ -421,14 +449,8 @@ test_remote_secondmate_reads_route() {
   remote_tick "$(remote_proof busy)" alive '' 0 || fail "tick failed"; eval "$real"
   [ ! -e "$STATE/r1.start-pending" ] || fail "a busy remote observation did not count as proof"
   arm_remote r8
-  remote_tick "$(remote_proof idle 'idle pi-ext' g900.1.1 agent_settled)" alive '' 0 || fail "tick failed"; eval "$real"
+  remote_tick "$(remote_proof idle 'idle pi-ext' g900.1.1 agent-settled)" alive '' 0 || fail "tick failed"; eval "$real"
   [ ! -e "$STATE/r8.start-pending" ] || fail "a silently settled remote mate's busy record did not count as proof"
-  arm_remote r10
-  remote_tick "$(remote_proof idle 'idle claude-hook' g900.1.1 stop)" alive '' 0 || fail "tick failed"; eval "$real"
-  [ ! -e "$STATE/r10.start-pending" ] || fail "a completed Claude turn did not count as proof"
-  arm_remote r11
-  remote_tick "$(remote_proof idle 'idle claude-hook' g900.1.1 session-end)" alive "$PI_DIALOG" 0 || fail "tick failed"; eval "$real"
-  [ -n "$START_CHECK_WAKE" ] || fail "a remote session-end event counted as start proof"
   arm_remote r5
   printf 'done: started\n' > "$STATE/r5.status"
   remote_tick "$(remote_proof idle)" alive '' 0 || fail "tick failed"; eval "$real"
@@ -440,8 +462,12 @@ test_remote_secondmate_reads_route() {
   [ "$(count_wakes)" = 0 ] || fail "a started or superseded remote mate woke"
   # A started-looking verdict from another launch proves nothing.
   arm_remote r9
-  remote_tick "$(remote_proof idle 'idle pi-ext' g700.1.1 agent_settled)" alive '' 0 || fail "tick failed"; eval "$real"
+  remote_tick "$(remote_proof idle 'idle pi-ext' g700.1.1)" alive '' 0 || fail "tick failed"; eval "$real"
   [ -n "$START_CHECK_WAKE" ] || fail "another launch's busy record counted as proof"
+  # Nor does this launch's shutdown record written before any prompt.
+  arm_remote r12
+  remote_tick "$(remote_proof idle 'idle claude-hook' g900.1.1 session-end)" alive '' 0 || fail "tick failed"; eval "$real"
+  [ -n "$START_CHECK_WAKE" ] || fail "a remote session-end record counted as proof"
   # The spawn seed, or only the observation line, proves nothing.
   arm_remote r2
   arm_remote z10
@@ -464,7 +490,7 @@ test_remote_secondmate_reads_route() {
     *"remote worker on remote-mac exited or its endpoint is gone before starting); recover it per secondmate-provisioning after: FM_HOME=$FM_HOME $SCRIPT_DIR/fm-crew-state.sh r4") ;;
     *) fail "a vanished remote endpoint was not sent to recovery: $START_CHECK_WAKE" ;;
   esac
-  [ "$(count_wakes)" = 4 ] || fail "expected one wake per unstarted remote launch"
+  [ "$(count_wakes)" = 5 ] || fail "expected one wake per unstarted remote launch"
   # The real route wrapper bounds observe, state, and capture independently.
   reset_state
   arm_remote r7
@@ -575,6 +601,7 @@ fm_test_run \
   test_pi_dialog_named_once \
   test_claude_dialog_has_no_key \
   test_claude_session_end_is_not_start_proof \
+  test_completed_turn_records_are_proof \
   test_dead_agent_names_relaunch \
   test_missing_endpoint_names_recovery \
   test_pending_composer_names_submit \

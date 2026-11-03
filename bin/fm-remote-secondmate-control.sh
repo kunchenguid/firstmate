@@ -440,12 +440,13 @@ cmd_capture() {
 
 # Without --start-proof the output is the single observation line the pending-
 # reply tracker compares whole. --start-proof appends this mate's busy-contract
-# verdict and launch generation, read from its parent-route record on this host:
+# verdict, its busy record's event (empty without a valid record), and its launch
+# generation, read from its parent-route record on this host:
 # the only durable start proof for a mate that starts and settles without writing
 # a status line, which the parent's spawn start check (bin/fm-watch.sh
 # start_check_started) reads.
 cmd_observe() {
-  local id=$1 mode=${2:-} harness
+  local id=$1 mode=${2:-} harness record
   validate_id "$id"
   case "$mode" in '' | --start-proof) ;; *) usage ;; esac
   validate_home "$id"
@@ -457,7 +458,6 @@ cmd_observe() {
   # shellcheck source=bin/fm-busy-lib.sh
   . "$SCRIPT_DIR/fm-busy-lib.sh"
   printf 'verdict=%s\n' "$(fm_busy_classify_meta "$REMOTE_ENDPOINT_META" "$id" "$CONTROL_STATE")"
-  local record
   record=$(fm_busy_record_read "$CONTROL_STATE" "$id") || record=
   printf 'event=%s\n' "$(printf '%s\n' "$record" | awk '{print $3}')"
   printf 'busy_gen=%s\n' "$(fm_meta_get "$REMOTE_ENDPOINT_META" busy_gen)"
