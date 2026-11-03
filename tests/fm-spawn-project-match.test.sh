@@ -92,7 +92,24 @@ test_acknowledgement_does_not_waive_a_mismatch() {
   pass "--repo-unrecorded-ok does not waive a recorded repo mismatch"
 }
 
+test_missing_item_hint_records_the_target_repo() {
+  local id=match-add-z5 file out status
+  make_match_case match-add "$id" alpha
+  file="$CASE_HOME/data/backlog.md"
+  printf '%s\n' '# Backlog' '' '## In flight' '' '## Queued' '' '## Done' > "$file"
+  out=$(run_match_spawn "$id" "$CASE_PROJ")
+  status=$?
+  expect_code 1 "$status" "a task with no backlog item should be refused"$'\n'"$out"
+  assert_contains "$out" "--kind ship --repo alpha)" "the add hint did not record the target project as the repo"
+  tasks-axi add "$id" "project match fixture" --kind ship --repo alpha --file "$file" >/dev/null
+  out=$(run_match_spawn "$id" "$CASE_PROJ")
+  status=$?
+  expect_code 0 "$status" "following the add hint should let the spawn proceed"$'\n'"$out"
+  pass "the missing-item hint files the item with the target project's repo"
+}
+
 test_matching_repo_spawns
+test_missing_item_hint_records_the_target_repo
 test_mismatched_repo_is_refused_naming_both
 test_unrecorded_repo_requires_acknowledgement
 test_acknowledgement_does_not_waive_a_mismatch
