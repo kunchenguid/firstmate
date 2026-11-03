@@ -1806,8 +1806,14 @@ pass "watch liveness: an unreachable remote secondmate is probed, preserved, and
 # the live endpoint through the accepted client.
 make_herdr_client_pair "$TMP_ROOT/client-pair" 0.7.1 14 0.7.5 16
 export FM_HERDR_PAIR_DIR="$TMP_ROOT/client-pair"
+# The tail after the fixtures supplies only the ordinary toolchain (jq, sed,
+# grep, ...); a host can keep it outside /usr/bin (NixOS ships it in
+# /run/current-system/sw/bin), so resolve the running jq's directory instead of
+# pinning FHS paths. The compatible fixture still precedes it on this PATH, so
+# client selection never reaches a package-managed herdr.
+system_tools=$(dirname "$(command -v jq)")
 SHADOWED_STATE=$(FM_HOME="$REMOTE_HOME" FM_ROOT_OVERRIDE="$REMOTE_ROOT" \
-  PATH="$TMP_ROOT/client-pair/stale:$REMOTE_ROOT/bin:$TMP_ROOT/client-pair/tools:/usr/bin:/bin" \
+  PATH="$TMP_ROOT/client-pair/stale:$REMOTE_ROOT/bin:$TMP_ROOT/client-pair/tools:$system_tools:/usr/bin:/bin" \
   "$REMOTE_ROOT/bin/fm-remote-secondmate-control.sh" state ios 2>"$TMP_ROOT/shadowed-state.err")
 [ "$SHADOWED_STATE" = alive ] \
   || fail "a live endpoint behind a stale shadowing client must still read alive, got: $SHADOWED_STATE ($(cat "$TMP_ROOT/shadowed-state.err"))"
@@ -1885,6 +1891,12 @@ assert_grep 'runs only on the herdr or rex backend' "$TMP_ROOT/spawn-tmux-backen
 # and leaves the recorded route untouched: a non-local server, or a target
 # whose session half is not the reported session. The reply is judged even
 # though the host already has an endpoint recorded for this task.
+#
+# Each malformed reply is its own launch. The real host launch the reply is
+# checked against leaves the refused generation counted in the parent's seat
+# ledger, and a second launch of the same task is refused while it is pending,
+# so the next case starts from the ledger as it stood before this scenario.
+cp -a "$PARENT/state/fleet-seats" "$TMP_ROOT/fleet-seats-before-malformed-replies"
 cp "$PARENT/state/ios.meta" "$TMP_ROOT/parent-ios-pre-launch.meta"
 if FM_FAKE_SSH_MODE=launch-rex-bad-server-route remote_env "$ROOT/bin/fm-spawn.sh" ios --secondmate --backend rex \
   >"$TMP_ROOT/spawn-rex-bad-server.out" 2>&1; then
@@ -1894,6 +1906,8 @@ assert_grep 'malformed Rex route metadata' "$TMP_ROOT/spawn-rex-bad-server.out" 
   "a non-local rex server route did not fail with the rex metadata refusal: $(cat "$TMP_ROOT/spawn-rex-bad-server.out" 2>/dev/null)"
 cmp -s "$TMP_ROOT/parent-ios-pre-launch.meta" "$PARENT/state/ios.meta" \
   || fail "a refused rex server route rewrote the recorded route"
+rm -rf "$PARENT/state/fleet-seats"
+cp -a "$TMP_ROOT/fleet-seats-before-malformed-replies" "$PARENT/state/fleet-seats"
 if FM_FAKE_SSH_MODE=launch-rex-mismatched-route remote_env "$ROOT/bin/fm-spawn.sh" ios --secondmate --backend rex \
   >"$TMP_ROOT/spawn-rex-mismatched.out" 2>&1; then
   fail "a rex route whose target did not match its session was accepted"
@@ -1902,6 +1916,8 @@ assert_grep 'malformed Rex route metadata' "$TMP_ROOT/spawn-rex-mismatched.out" 
   "a session-mismatched rex route did not fail with the rex metadata refusal: $(cat "$TMP_ROOT/spawn-rex-mismatched.out" 2>/dev/null)"
 cmp -s "$TMP_ROOT/parent-ios-pre-launch.meta" "$PARENT/state/ios.meta" \
   || fail "a refused rex session route rewrote the recorded route"
+rm -rf "$PARENT/state/fleet-seats"
+cp -a "$TMP_ROOT/fleet-seats-before-malformed-replies" "$PARENT/state/fleet-seats"
 pass "remote secondmate backend selection is strict on both sides of the boundary"
 
 # The remote host itself launches on rex: with no recorded endpoint (a
