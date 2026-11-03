@@ -1186,10 +1186,10 @@ test_retained_results_are_pruned_but_live_obligations_are_kept() {
     "retention consumed a queued wake row"
   [ -d "$home/state/.startup-network-results/not-a-generation" ] \
     || fail "retention deleted a directory it could not identify"
-  [ -d "$home/state/.startup-network-results/0600.1.1" ] \
-    || fail "retention deleted an incomplete completion"
-  [ -L "$home/state/.startup-network-results/0500.1.1" ] \
-    || fail "retention followed or removed a symlinked completion"
+  [ ! -e "$home/state/.startup-network-results/0600.1.1" ] \
+    || fail "retention kept an incomplete completion"
+  [ ! -L "$home/state/.startup-network-results/0500.1.1" ] \
+    || fail "retention kept a symlinked completion"
   [ -d "$home/detached" ] || fail "retention deleted a symlink target"
 
   # Idempotent: a second pass finds nothing further to remove.
@@ -1213,7 +1213,7 @@ test_retained_results_are_pruned_but_live_obligations_are_kept() {
   run_stage "$home" "$root" prune || fail "the symlinked receipt-root pass failed"
   [ -f "$home/detached-receipts/300.1.1" ] || fail "retention followed the receipt root"
   [ -L "$home/state/.startup-network-wake-receipts" ] || fail "retention removed the receipt root"
-  [ -d "$home/state/.startup-network-results/400.1.1" ] || fail "retention deleted a partial status"
+  [ ! -e "$home/state/.startup-network-results/400.1.1" ] || fail "retention kept a partial status"
   for field in state finished rc report_published; do
     [ -d "$home/state/.startup-network-results/missing-$field" ] || fail "retention accepted missing $field"
   done
@@ -1343,6 +1343,32 @@ test_the_retention_pass_examines_a_bounded_number_of_entries() {
 }
 
 test_the_retention_pass_examines_a_bounded_number_of_entries
+
+test_incomplete_backlog_does_not_starve_old_results() {
+  local rec home root log generation
+  rec=$(new_world incomplete-backlog)
+  IFS='|' read -r home root log <<< "$rec"
+  for generation in $(seq 1000 1069); do
+    mkdir -p "$home/state/.startup-network-results/$generation.1.1"
+  done
+  for generation in 100 200 300; do
+    mkdir -p "$home/state/.startup-network-results/$generation.1.1"
+    printf 'generation=%s.1.1\nstate=done\nfinished=1\nrc=0\nreport_published=1\n' "$generation" > "$home/state/.startup-network-results/$generation.1.1/status"
+    : > "$home/state/.startup-network-results/$generation.1.1/report"
+    printf 'clean:%s.1.1\n' "$generation" > "$home/state/.startup-network-results/$generation.1.1/settled"
+  done
+  run_stage "$home" "$root" prune || fail "backlog pass failed"
+  for generation in 100 200 300 1000 1060; do
+    [ ! -e "$home/state/.startup-network-results/$generation.1.1" ] || fail "oldest entry survived"
+  done
+  [ -d "$home/state/.startup-network-results/1061.1.1" ] || fail "pass exceeded deletion budget"
+  run_stage "$home" "$root" prune || fail "second backlog pass failed"
+  for generation in $(seq 1000 1069); do
+    [ ! -e "$home/state/.startup-network-results/$generation.1.1" ] || fail "incomplete backlog survived"
+  done
+  pass "fm-startup-network: incomplete backlog drains oldest-first"
+}
+test_incomplete_backlog_does_not_starve_old_results
 
 test_running_and_refused_records_have_correct_supervision() {
   local rec home root log worker waited=0 pid
