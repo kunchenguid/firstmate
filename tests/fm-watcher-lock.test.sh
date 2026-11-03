@@ -1249,6 +1249,7 @@ assert_bounded_deadline_result() {
       case "$mode" in
         unpublished) rm "$lock/pid" ;;
         exited) kill "$holder"; wait "$holder" 2>/dev/null || true ;;
+        absent) rm "$lock/pid"; rmdir "$lock" ;;
         malformed) printf "invalid\n" > "$lock/pid" ;;
         file) rm "$lock/pid"; rmdir "$lock"; printf "invalid\n" > "$lock" ;;
       esac
@@ -1273,6 +1274,11 @@ test_bounded_deadline_unpublished_holder() {
 test_bounded_deadline_exited_holder() {
   assert_bounded_deadline_result exited 124
   pass "bounded deadline with an exited holder is retriable"
+}
+
+test_bounded_deadline_released_lock() {
+  assert_bounded_deadline_result absent 124
+  pass "bounded deadline with a released lock is retriable"
 }
 
 test_bounded_deadline_live_holder() {
@@ -2462,6 +2468,7 @@ test_lock_late_claim_loses_after_recreate
 test_lock_bounded_wait_earns_one_grace_window_for_unpublished_pid
 test_bounded_deadline_unpublished_holder
 test_bounded_deadline_exited_holder
+test_bounded_deadline_released_lock
 test_bounded_deadline_live_holder
 test_bounded_deadline_malformed_lock
 test_lock_paused_mid_acquire_claim_fails_during_steal

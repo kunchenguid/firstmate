@@ -1711,7 +1711,10 @@ fm_lock_acquire_wait_bounded() {
     # shellcheck disable=SC2034 # Output read by callers after bounded acquisition.
     FM_LOCK_HELD_PID=
     case "$owner_pid" in
-      '') [ -d "$lockdir" ] || return 1 ;;
+      '')
+        fm_lock_parent_gone "$lockdir" && return 1
+        if [ -e "$lockdir" ] || [ -L "$lockdir" ]; then [ -d "$lockdir" ] || return 1; fi
+        ;;
       *[!0-9]*|0) return 1 ;;
       *)
         if [ "$owner_pid" -gt 0 ] 2>/dev/null && fm_pid_alive "$owner_pid"; then
