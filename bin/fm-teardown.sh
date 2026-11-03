@@ -4167,6 +4167,7 @@ teardown_finish_treehouse_return() {  # early|final
   # whenever the return did not actually happen.
   fm_treehouse_slot_owner_release "$WT" "$ID"
 }
+
 if [ "$KIND" = ship ] && teardown_owns_worktree && [ -e "$CONFIG/pipeline-spend" ]; then
   FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$DATA" FM_CONFIG_OVERRIDE="$CONFIG" \
     "$SCRIPT_DIR/fm-pipeline-spend.sh" record "$ID" >/dev/null \
