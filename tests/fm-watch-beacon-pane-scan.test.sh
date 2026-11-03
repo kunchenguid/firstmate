@@ -144,6 +144,33 @@ test_single_hung_read_still_reads_stale() {
   pass "a single window whose read hangs past the grace still reads stale"
 }
 
+# The helper wait_poll_cycle must wait a whole poll cycle, not a single
+# per-window beacon advance. In a slow scan the liveness beacon moves once per
+# window, so a wait keyed on it would return after the first window's read;
+# the cycle marker moves once per poll, so wait_poll_cycle returns only after
+# BOTH windows' reads complete.
+test_wait_poll_cycle_waits_a_full_slow_scan_cycle() {
+  local dir state fakebin out pane pid lines
+  dir=$(make_case wait-poll-cycle-slow); state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"
+  mkdir -p "$dir/config"
+  install_beacon_crew_state "$fakebin"
+  pane="$dir/pane.txt"
+  printf '%s' 'idle pane, nothing happening here' > "$pane"
+  prime_stable_pane "$state" "test:winA" "a" "$(cat "$pane")"
+  prime_stable_pane "$state" "test:winB" "b" "$(cat "$pane")"
+  run_beacon_watcher "$state" "$fakebin" "$out" "$pane" 5 3 "$dir/ages.log"
+  pid=$!
+  if ! wait_poll_cycle "$state" "$pid" 300; then
+    reap "$pid"; fail "watcher did not complete a whole poll cycle: $(cat "$out")"
+  fi
+  reap "$pid"
+  lines=$(wc -l < "$dir/ages.log" | tr -d '[:space:]')
+  case "$lines" in ''|*[!0-9]*) lines=0 ;; esac
+  [ "$lines" -ge 2 ] \
+    || fail "wait_poll_cycle returned before the full slow scan finished: only $lines read(s) recorded (ages: $(cat "$dir/ages.log"))"
+  pass "wait_poll_cycle waits a whole slow-scan cycle (both windows read), not a single per-window beacon advance"
+}
+
 # Optional function names allow focused regression verification without running
 # unrelated watcher scenarios.
 if [ "$#" -gt 0 ]; then
@@ -155,3 +182,4 @@ fi
 
 test_slow_advancing_scan_keeps_beacon_fresh || exit 1
 test_single_hung_read_still_reads_stale
+test_wait_poll_cycle_waits_a_full_slow_scan_cycle
