@@ -520,6 +520,9 @@ export async function gate(session, cred) {
 
 async function verifiedSession(flags) {
   const cred = readCredential(tokenFile(flags));
+  if (flags["expected-server"] && flags["expected-server"] !== JSON.stringify([cred.origin, cred.environment_id])) {
+    throw new Refusal("environment_mismatch", "T3 creation server does not match the current credential; refusing to drive a different server", 4);
+  }
   const session = new McpSession(cred.origin, cred.access_token);
   const g = await gate(session, cred);
   return { cred, session, gate: g };

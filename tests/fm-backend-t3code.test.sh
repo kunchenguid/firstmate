@@ -770,6 +770,47 @@ test_reported_unknown_stall_is_not_escalated_again_when_idle() {
   pass "away daemon on T3: a stall reported while unknown is not reported again once T3 reads idle"
 }
 
+test_server_bound_cleanup_paths() {
+  test_cleanup_refuses_switched_server_credential
+  test_kill_interrupts_then_archives_and_tolerates_gone
+  test_startup_cleanup_lifecycle_variants
+}
+
+test_cleanup_refuses_switched_server_credential() (
+  local first_url=$T3_FAKE_URL first_case=$T3_FAKE_CASE_FILE
+  local first_world first_log second_log second_world replacement out rc
+  t3_case cleanup-server-switch
+  t3_world "$(t3_thread_json thread-live running false)"
+  first_world=$T3_FAKE_WORLD first_log=$T3_FAKE_LOG
+  replacement="$CASE_DIR/replacement-token"
+  t3_fake_start "$CASE_DIR/other-server"
+  trap t3_fake_stop EXIT
+  t3_fake_case "$CASE_DIR/other-server/case-data"
+  t3_world "$(t3_thread_json thread-live running false)"
+  t3_fake_credential "$replacement"
+  second_log=$T3_FAKE_LOG second_world=$T3_FAKE_WORLD
+  T3_FAKE_URL=$first_url T3_FAKE_CASE_FILE=$first_case
+  T3_FAKE_WORLD=$first_world T3_FAKE_LOG=$first_log
+  out=$(t3_run '
+    replacement=$1
+    fm_backend_t3code_thread_state() {
+      fm_backend_t3code_mcp state --thread "$1" || return
+      cp "$replacement" "$(fm_backend_t3code_token_file)"
+    }
+    fm_backend_t3code_kill thread-live
+  ' "$replacement" 2>&1); rc=$?
+  [ "$rc" -ne 0 ] || fail "cleanup accepted a credential switch after its state read"
+  assert_contains "$out" "creation server does not match" "cleanup must refuse the switched credential"
+  [ ! -s "$second_log" ] || fail "cleanup contacted the replacement server"
+  node -e '
+    const w=JSON.parse(require("fs").readFileSync(process.argv[1]));
+    const t=w.threads["thread-live"];
+    if (t.archived || !t.activeRunId) process.exit(1);
+  ' "$second_world" || fail "cleanup changed the replacement server thread"
+  [ -z "$(t3_dispatch_types)" ] || fail "cleanup mutated a thread after the credential switch"
+  pass "T3 cleanup refuses a credential switch before interrupt or archive on another server"
+)
+
 test_kill_interrupts_then_archives_and_tolerates_gone() {
   local archive down
   t3_case kill
@@ -3001,6 +3042,7 @@ test_frozen_flush_keeps_the_next_generation_arrival
 test_daemon_defers_digest_while_supervisor_waits_on_request
 test_helper_through_symlinked_root_reaches_t3_and_kill_fails_closed
 test_draining_archived_t3_secondmate_is_not_relaunched
+test_cleanup_refuses_switched_server_credential
 test_kill_interrupts_then_archives_and_tolerates_gone
 test_dispatcher_routes_and_validates_t3code_meta
 test_harness_admission_and_typing_refusals

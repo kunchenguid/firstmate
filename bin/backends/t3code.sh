@@ -63,7 +63,8 @@ fm_backend_t3code_tool_check() {
 # Every failure prints one stderr line.
 fm_backend_t3code_mcp() {
   command -v node >/dev/null 2>&1 || { echo "error: backend=t3code selected but 'node' is not installed" >&2; return 1; }
-  node "$FM_BACKEND_T3CODE_HELPER" "$@" --token-file "$(fm_backend_t3code_token_file)"
+  local expected=${FM_T3CODE_EXPECTED_SERVER:-${FM_T3CODE_TASK_SERVER:-}}
+  node "$FM_BACKEND_T3CODE_HELPER" "$@" --token-file "$(fm_backend_t3code_token_file)" --expected-server "$expected"
 }
 
 # fm_backend_t3code_json_get <key>: one top-level scalar from the helper's JSON
@@ -207,6 +208,8 @@ fm_backend_t3code_turn_start() (  # <thread-id> <text> [model-selection-json]
   local thread=$1 text=$2 file='' dir record='' id='' out rc=0 held=0
   local state=${FM_STATE_OVERRIDE:-$FM_HOME/state} task seat server
   server=$(fm_backend_t3code_server_identity) || return 1
+  local FM_T3CODE_EXPECTED_SERVER=${FM_T3CODE_TASK_SERVER:-$server}
+  [ "$FM_T3CODE_EXPECTED_SERVER" = "$server" ] || { echo "error: T3 creation server does not match the current credential" >&2; return 1; }
   seat=$("$FM_BACKEND_LIB_DIR/fm-fleet-seats.sh" show-t3 "$thread" "$server") || return 1
   if [ -n "$seat" ]; then
     task=$(printf '%s' "$seat" | jq -ser 'if length == 1 then .[0].task else error("ambiguous T3 holder") end') || return 1
@@ -491,6 +494,7 @@ fm_backend_t3code_send_key() {  # <thread-id> <key>
 # or one the verified server no longer has, is already the end state.
 fm_backend_t3code_kill() {  # <thread-id>
   local thread=$1 out exists recorded=${2-${FM_T3CODE_TASK_SERVER:-}}
+  local FM_T3CODE_EXPECTED_SERVER=$recorded
   fm_backend_t3code_server_matches "$recorded" || { echo "error: T3 creation server does not match the current credential" >&2; return 1; }
   out=$(fm_backend_t3code_thread_state "$thread") || return 1
   exists=$(printf '%s' "$out" | fm_backend_t3code_json_get exists) || return 1
