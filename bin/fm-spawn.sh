@@ -1889,7 +1889,7 @@ spawn_abort_cleanup() {
       if fm_backend_kill "$BACKEND" "$T" "$abort_tab_id" "fm-$ID" 2>/dev/null; then
         SPAWN_ENDPOINT_CLOSED=1
       else
-        echo "warning: could not close endpoint $T after the failed spawn of $ID; close it by hand so its slot returns to the pool" >&2
+        echo "warning: could not close endpoint $T after the failed spawn of $ID; close it by hand; its slot returns to the pool only if it holds no durable lease, otherwise it needs an explicit release" >&2
       fi
     fi
     # These paths are per task id, so the per-id spawn lock is retaken for them
@@ -4476,7 +4476,7 @@ spawn_endpoint_closes_on_abort() {
 
 spawn_endpoint_hint() {
   if spawn_endpoint_closes_on_abort; then
-    printf 'window %s is closed on exit, returning any pool slot it held' "$T"
+    printf 'window %s is closed on exit; a pool slot it held returns only if it holds no durable lease, otherwise it needs an explicit release' "$T"
   else
     printf 'inspect window %s' "$T"
   fi

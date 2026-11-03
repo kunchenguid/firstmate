@@ -1051,6 +1051,8 @@ SH
     "the polytoken spawn did not refuse on the post-poll isolation check"$'\n'"$out"
   assert_contains "$out" "pool (window firstmate:fm-$id is closed on exit" \
     "a fresh polytoken isolation refusal must name the worktree and the closed window"$'\n'"$out"
+  assert_contains "$out" "returns only if it holds no durable lease, otherwise it needs an explicit release" \
+    "a fresh polytoken refusal must not promise that closing its window returns a leased slot"$'\n'"$out"
   assert_not_contains "$out" "Inspect target firstmate:fm-$id" \
     "a fresh polytoken isolation refusal must not point at its closed window"
   rm -rf "/tmp/fm-$id" "/tmp/fm-$id+"*
