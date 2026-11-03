@@ -3050,7 +3050,8 @@ turnend_pause_bound() {  # <turn-ended-file>
 # rule and every other signature change still reads as unreported.
 # Pure read: prints one "<seen-file>\t<sig>\t<file>" line per changed file.
 # Declared pauses bound turn-ends by status age and a declaration-scoped throttle.
-# Expiry and cadence rechecks also consider an unchanged turn-end signature.
+# Only a changed turn-end signature is bounded; rechecks of a reported one stay with
+# handle_paused_stale.
 # The caller records reported state only after surfacing or intentional absorption,
 # and commits a status classification position only after a successful span read.
 scan_signals() {
@@ -3071,9 +3072,7 @@ scan_signals() {
       *.status) fm_wake_signal_seen_current "$STATE" "$f" && continue ;;
       *)
         turnend_pause_bound "$f" && continue
-        if [ -z "$STALE_WAIT_DECLARATION" ]; then
-          [ "$sig" = "$(cat "$sf" 2>/dev/null)" ] && continue
-        fi
+        [ "$sig" = "$(cat "$sf" 2>/dev/null)" ] && continue
         ;;
     esac
     printf '%s\t%s\t%s\n' "$sf" "$sig" "$f"

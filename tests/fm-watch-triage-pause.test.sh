@@ -1468,7 +1468,7 @@ paused_turnend_case() {
   dir=$(make_case "paused-turnend-$mode"); state="$dir/state"; fakebin="$dir/fakebin"
   out="$dir/watch.out"
   until=
-  if [ "$mode" = expiry ]; then
+  if [ "$mode" = expiry ] || [ "$mode" = seen ]; then
     back=$(( $(date +%s) + 15 ))
     until=$(date -u -r "$back" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null) \
       || until=$(date -u -d "@$back" +%Y-%m-%dT%H:%M:%SZ)
@@ -1479,6 +1479,9 @@ paused_turnend_case() {
   fi
   sig=$(seen_sig "$state/held.status"); printf '%s' "$sig" > "$state/.seen-held_status"
   printf 'first turn\n' > "$state/held.turn-ended"
+  if [ "$mode" = seen ]; then
+    printf "%s" "$(/usr/bin/stat -f "%z:%Fm" "$state/held.turn-ended" 2>/dev/null || stat -c "%s:%Y" "$state/held.turn-ended")" > "$state/.seen-held_turn-ended"
+  fi
   watch_bg "$state" "$fakebin" "$out" env FM_PAUSE_RESURFACE_SECS=240
   pid=$!
   if [ "$mode" = bounded ]; then
@@ -1506,6 +1509,11 @@ paused_turnend_case() {
       wait_for_exit "$pid" 300 || { reap "$pid"; fail "pause expiry did not wake without a new turn-end"; }
       grep -F 'held.turn-ended' "$out" >/dev/null || fail "expiry wake lost the turn-end"
       ;;
+    seen)
+      sleep 17
+      [ ! -s "$out" ] || { reap "$pid"; fail "expiry re-emitted an already reported turn-end: $(cat "$out")"; }
+      reap "$pid"
+      ;;
     status)
       printf 'needs-decision: choose the release\n' >> "$state/held.status"
       wait_for_exit "$pid" 200 || { reap "$pid"; fail "genuine status event was absorbed with the turn-end"; }
@@ -1518,6 +1526,7 @@ paused_turnend_case() {
 test_paused_turnend_absorbed() { paused_turnend_case absorb; }
 test_paused_turnend_bounded_resurface() { paused_turnend_case bounded; }
 test_paused_turnend_expiry_wakes() { paused_turnend_case expiry; }
+test_paused_turnend_seen_not_reemitted() { paused_turnend_case seen; }
 test_paused_turnend_status_wakes() { paused_turnend_case status; }
 
 if [ -n "${FM_TEST_ONLY:-}" ]; then
@@ -1529,6 +1538,7 @@ fm_test_run \
   test_paused_turnend_absorbed \
   test_paused_turnend_bounded_resurface \
   test_paused_turnend_expiry_wakes \
+  test_paused_turnend_seen_not_reemitted \
   test_paused_turnend_status_wakes \
   test_required_captain_hold_tests_fail_without_tasks_axi \
   test_nonterminal_stale_not_working_surfaced \
