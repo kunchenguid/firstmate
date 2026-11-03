@@ -1338,6 +1338,7 @@ test_the_retention_pass_examines_a_bounded_number_of_entries() {
   }
   for tool in sed cat awk; do
     real_tool=$(command -v "$tool")
+    # shellcheck disable=SC2016  # single quotes are deliberate: the wrapper body is literal generated script text
     printf '#!/usr/bin/env bash\nfor arg in "$@"; do\n case "$arg" in */.startup-network-results/*|*/.startup-network-wake-receipts/*) printf "%%s\n" "$arg" >> %q ;; esac\ndone\nexec %q "$@"\n' \
       "$home/record-reads" "$real_tool" > "$root/bin/$tool"
     chmod +x "$root/bin/$tool"
