@@ -786,8 +786,7 @@ test_recorded_t3_callers_refuse_server_switch() (
   t3_world "$(t3_thread_json "$thread" failed false)"
   t3_fake_credential "$replacement"
   other_log=$T3_FAKE_LOG
-  T3_FAKE_URL=$first_url T3_FAKE_CASE_FILE=$first_case
-  T3_FAKE_WORLD=$first_world T3_FAKE_LOG=$first_log
+  t3_fake_point "$first_url" "$first_case" "$first_world" "$first_log"
   cp "$replacement" "$CONFIG/t3code-token"
   out=$(FM_HOME="$CASE_DIR/home" FM_CONFIG_OVERRIDE="$CONFIG" FM_STATE_OVERRIDE="$CTRL_STATE" FM_DATA_OVERRIDE="$CTRL_DATA" \
     "$ROOT/bin/fm-send.sh" "$id" /status 2>&1); rc=$?
@@ -894,8 +893,7 @@ test_cleanup_refuses_switched_server_credential() (
   t3_world "$(t3_thread_json thread-live running false)"
   t3_fake_credential "$replacement"
   second_log=$T3_FAKE_LOG second_world=$T3_FAKE_WORLD
-  T3_FAKE_URL=$first_url T3_FAKE_CASE_FILE=$first_case
-  T3_FAKE_WORLD=$first_world T3_FAKE_LOG=$first_log
+  t3_fake_point "$first_url" "$first_case" "$first_world" "$first_log"
   out=$(t3_run '
     replacement=$1
     fm_backend_t3code_thread_state() {

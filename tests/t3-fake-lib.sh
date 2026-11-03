@@ -49,6 +49,15 @@ t3_fake_case() {
   printf '%s' "$1" > "$T3_FAKE_CASE_FILE"
 }
 
+# t3_fake_point <url> <case-file> <world> <log>: point the fixture globals at an
+# already-started fake server, e.g. to switch back after a second t3_fake_start.
+t3_fake_point() {
+  T3_FAKE_URL=$1
+  T3_FAKE_CASE_FILE=$2
+  T3_FAKE_WORLD=$3
+  T3_FAKE_LOG=$4
+}
+
 # t3_fake_set <js>: run <js> against the current world as `w` and save it
 # atomically.
 t3_fake_set() {

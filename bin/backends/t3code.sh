@@ -94,7 +94,7 @@ fm_backend_t3code_admitted_server() {
 
 fm_backend_t3code_mcp() {
   command -v node >/dev/null 2>&1 || { echo "error: backend=t3code selected but 'node' is not installed" >&2; return 1; }
-  local expected=${FM_T3CODE_EXPECTED_SERVER:-${FM_T3CODE_TASK_SERVER:-}} arg previous= thread= admitted
+  local expected=${FM_T3CODE_EXPECTED_SERVER:-${FM_T3CODE_TASK_SERVER:-}} arg previous='' thread='' admitted
   for arg in "$@"; do
     if [ "$previous" = --thread ]; then
       thread=$arg
