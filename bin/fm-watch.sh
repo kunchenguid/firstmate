@@ -148,6 +148,11 @@
 #                          source owned closes that episode); the queued
 #                          payload names what to check. These three kinds are
 #                          joined with `;` when more than one surfaces in a cycle
+#   check: pr-register: <lines>
+#                          with config/pr-register-scan present, a task's done
+#                          line reported a PR that the check sweep's
+#                          fm-pr-check.sh scan could not record; the line
+#                          names the task, the PR, and the refusal
 #   check: rejected unauthenticated state checks: <paths>
 #                          unsafe state checks were refused without execution
 #   check: rejected unauthenticated PR poll retirement receipts: <paths>
@@ -3128,7 +3133,7 @@ run_check_process() {
     exec gtimeout "$CHECK_TIMEOUT" bash "$c" "$@"
   else
     # shellcheck disable=SC2016  # single quotes are deliberate: Perl expands its own variables.
-    exec perl -e 'my $t = shift; my $owned = shift; my $pid = fork; die "fork failed" unless defined $pid; if (!$pid) { setpgrp(0, 0) unless $owned; exec @ARGV } my $group = $owned ? getpgrp(0) : $pid; my $stop = sub { $SIG{HUP} = $SIG{INT} = $SIG{TERM} = "IGNORE"; kill "TERM", -$group; select undef, undef, undef, 0.2; kill "KILL", -$group; waitpid $pid, 0; exit 124 }; local $SIG{ALRM} = $stop; local $SIG{HUP} = $stop; local $SIG{INT} = $stop; local $SIG{TERM} = $stop; alarm $t; waitpid $pid, 0; exit($? >> 8)' "$CHECK_TIMEOUT" "${FM_CHECK_OWNED_GROUP:-0}" bash "$c" "$@"
+    exec perl -e 'my $t = shift; my $owned = shift; my $pid = fork; die "fork failed" unless defined $pid; if (!$pid) { setpgrp(0, 0) unless $owned; exec @ARGV } my $group = $owned ? getpgrp(0) : $pid; my $stop = sub { $SIG{HUP} = $SIG{INT} = $SIG{TERM} = "IGNORE"; kill "TERM", -$group; select undef, undef, undef, 0.2; kill "KILL", $owned ? $pid : -$group; waitpid $pid, 0; exit 124 }; local $SIG{ALRM} = $stop; local $SIG{HUP} = $stop; local $SIG{INT} = $stop; local $SIG{TERM} = $stop; alarm $t; waitpid $pid, 0; exit($? >> 8)' "$CHECK_TIMEOUT" "${FM_CHECK_OWNED_GROUP:-0}" bash "$c" "$@"
   fi
 }
 
@@ -3189,7 +3194,7 @@ watcher_stop_signals() {
 }
 
 run_check_capture() {
-  local pgid
+  local pgid rc=0
   fm_check_output_cleanup
   FM_CHECK_RESULT=
   FM_CHECK_OUTPUT=$(mktemp "$STATE/.fm-check-output.XXXXXX") || return 1
@@ -3212,11 +3217,13 @@ run_check_capture() {
     fm_check_output_cleanup
     return 1
   fi
-  wait "$FM_ACTIVE_CHECK_PID" 2>/dev/null || true
+  wait "$FM_ACTIVE_CHECK_PID" 2>/dev/null || rc=$?
   FM_ACTIVE_CHECK_PID=
   fm_active_check_stop || return 1
   FM_CHECK_RESULT=$(cat "$FM_CHECK_OUTPUT" 2>/dev/null || true)
   fm_check_output_cleanup
+  # Keep what the check printed before the cut, then report the cut itself.
+  [ "$rc" -ne 124 ] || FM_CHECK_RESULT="${FM_CHECK_RESULT:+$FM_CHECK_RESULT$'\n'}timed out after ${CHECK_TIMEOUT}s"
 }
 
 FM_CAPTURE_OUTPUT=
@@ -3843,6 +3850,15 @@ resurface_after_downtime() {
 }
 
 while :; do
+  # Native Codex may tear down the async hook and its watchdog together.
+  # fm-codex-stop-park.sh owns this optional identity binding. Self-expiry
+  # closes the normal recovery generation and lets the arm/host exit too.
+  if [ -n "${FM_CODEX_PARK_OWNER_PID:-}" ] \
+    && { ! fm_pid_alive "$FM_CODEX_PARK_OWNER_PID" \
+      || [ "$(fm_pid_identity "$FM_CODEX_PARK_OWNER_PID" 2>/dev/null)" != "${FM_CODEX_PARK_OWNER_IDENTITY:-}" ]; }; then
+    echo 'watcher: exiting - native Codex park owner is gone' >&2
+    exit 1
+  fi
   # Home-gone exit: a deleted home, state directory, or code root means this
   # watcher's world is gone (a torn-down temporary home or a discarded
   # disposable checkout). Exit with a logged reason rather than writing state
@@ -3984,6 +4000,16 @@ while :; do
   if [ "$(age_of "$STATE/.last-check")" -ge "$CHECK_INTERVAL" ]; then
     rejected_checks=
     contribution_check_output=
+    # Record each PR a task reported but nobody recorded, so its merge poll
+    # below runs in this same sweep (bin/fm-pr-check.sh owns the scan).
+    pr_register_reason=
+    if [ -e "$CONFIG/pr-register-scan" ]; then
+      FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" run_check_capture "$SCRIPT_DIR/fm-pr-check.sh" scan || exit 1
+      if [ -n "$FM_CHECK_RESULT" ]; then
+        pr_register_reason="check: pr-register: $FM_CHECK_RESULT"
+        fm_wake_append check pr-register "$pr_register_reason" || exit 1
+      fi
+    fi
     for c in "$STATE"/*.check.sh; do
       [ -e "$c" ] || continue
       is_pr_poll=0
@@ -4104,6 +4130,7 @@ EOF
       wake "$reason"
     fi
     touch "$STATE/.last-check"
+    [ -z "$pr_register_reason" ] || wake "$pr_register_reason"
     if [ -n "$contribution_check_output" ]; then
       wake "$contribution_check_output"
     fi
