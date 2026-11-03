@@ -4777,23 +4777,44 @@ if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ];
     for state_dir in "${FM_LOCAL_FIRSTMATE_STATES[@]}"; do
       for meta in "$state_dir"/*.meta; do
         [ -e "$meta" ] || [ -L "$meta" ] || continue
-        [ -f "$meta" ] && [ ! -L "$meta" ] && [ -r "$meta" ] || return 1
+        [ -f "$meta" ] && [ ! -L "$meta" ] && [ -r "$meta" ] || {
+          echo "error: cannot read task record $meta" >&2
+          return 1
+        }
         for field in worktree home; do
-          recorded=$(fm_meta_get "$meta" "$field") || return 1
+          recorded=$(fm_meta_get "$meta" "$field") || {
+            echo "error: cannot read $field from task record $meta" >&2
+            return 1
+          }
           [ -n "$recorded" ] || continue
           fm_treehouse_pool_slot "$PROJ_ABS" "$recorded" || continue
           recorded=$(real_path_or_raw "$recorded")
           slot_name=$(basename "$(dirname "$recorded")")
-          lease_state=$(cd "$PROJ_ABS" && treehouse status --json) || return 1
+          lease_state=$(cd "$PROJ_ABS" && treehouse status --json) || {
+            echo "error: treehouse status failed for copy $recorded in task record $meta" >&2
+            return 1
+          }
           slot_row=$(printf '%s\n' "$lease_state" | jq -ec --arg name "$slot_name" '
             map(select(.name == $name)) |
             if length != 1 then error("recorded copy missing from pool status") else .[0] end
-          ') || return 1
-          [ "$(real_path_or_raw "$(printf '%s\n' "$slot_row" | jq -er '.path')")" = "$recorded" ] || return 1
+          ') || {
+            echo "error: Treehouse status has no single slot $slot_name for copy $recorded in task record $meta" >&2
+            return 1
+          }
+          [ "$(real_path_or_raw "$(printf '%s\n' "$slot_row" | jq -er '.path')")" = "$recorded" ] || {
+            echo "error: Treehouse slot $slot_name is not copy $recorded in task record $meta" >&2
+            return 1
+          }
           [ "$(printf '%s\n' "$slot_row" | jq -r '.status')" != leased ] || continue
-          leased_path=$(cd "$PROJ_ABS" && treehouse lease "$slot_name" --lease-holder "$(basename "$meta" .meta)") || return 1
+          leased_path=$(cd "$PROJ_ABS" && treehouse lease "$slot_name" --lease-holder "$(basename "$meta" .meta)") || {
+            echo "error: could not lease copy $recorded in task record $meta" >&2
+            return 1
+          }
           [ -d "$leased_path" ] &&
-            [ "$(real_path_or_raw "$leased_path")" = "$recorded" ] || return 1
+            [ "$(real_path_or_raw "$leased_path")" = "$recorded" ] || {
+            echo "error: Treehouse leased '$leased_path', not copy $recorded in task record $meta" >&2
+            return 1
+          }
         done
       done
     done
