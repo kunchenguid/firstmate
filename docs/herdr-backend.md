@@ -758,14 +758,15 @@ It hands the visible pane's ANSI viewport plus Herdr's capability facts to the f
 - Bordered boxes.
 - Bare agent-glyph rows, including muse's `⟩`, which the adapter's retired local pattern silently omitted.
 - opencode's left bar.
-- The Pi separator region this adapter pioneered, admitted only when native `agent get` identity is exactly Pi and state is idle or done.
+- The Pi separator region this adapter pioneered, admitted when native `agent get` identity is exactly Pi and state is idle or done, or when the version-pinned Pi banner adapter proves the terminal Codex usage-limit banner above the pair.
 - Cortex Code's titled rounded top rule, admitted only when native `agent get` identity is exactly `cortex`, which the adapter reads lazily and only when the classifier answers `need-identity` for a titled rounded box holding an agent prompt glyph; the same box on any other pane stays ambiguous, and Cortex is [verified](verification/cortex.md) on Herdr for crewmates and scouts only.
 
 ### Pi composer states
 
 A blocked Pi is parked on an interactive prompt, so its blank composer region is a menu's and not a free composer's.
 That state defers instead of proving emptiness.
-A working Pi, pending middle row, missing identity, incomplete separator pair, or over-tall candidate remains unknown or pending.
+A working Pi, pending middle row, missing identity, incomplete separator pair, or over-tall candidate remains unknown or pending unless the version-pinned banner exception below applies.
+A live Pi whose last row above the pair is its fixed Codex usage-limit banner is admitted on every registered status, because Herdr learns Pi's status only from Pi's lifecycle integration and a status that never followed the failed turn would otherwise park every lifecycle verb on a provably empty composer; the version-pinned `bin/fm-composer-pi-adapter.sh` owns the banner and its bounds.
 Identity stays a lazy second read, consulted only when a separator pair could change the verdict.
 
 ### Placeholder and ghost text
