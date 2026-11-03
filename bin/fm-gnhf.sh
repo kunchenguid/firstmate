@@ -239,13 +239,15 @@ fm_gnhf_status() { # <state> <message>
 fm_gnhf_status "working" "gnhf run $RUN_ID started for $PROJECT in $LOCATION (mode=$MODE, merge authority $YOLO)"
 
 gnhf_rc=0
+exec 3<&0
 (
   cd "$PROJECT_DIR" || exit 1
   # The authorization covers this one run; the worker must not pass it on.
   unset FM_GNHF_RUN_AUTH
   exec "$GNHF_BIN" ${RUN_ARGS[@]+"${RUN_ARGS[@]}"}
-) &
+) <&3 &
 GNHF_PID=$!
+exec 3<&-
 
 # shellcheck disable=SC2329 # invoked via trap
 fm_gnhf_terminate() { # <signal-name> <exit-code>
