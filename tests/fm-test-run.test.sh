@@ -1737,27 +1737,34 @@ test_run_timeout_bounds_the_whole_invocation() {
 # running and every helper that script moved out of its group. The runner is
 # started in a process group of its own and interrupted the two ways a caller
 # does it: an INT to that whole group, as a terminal sends it, and a TERM to
-# the runner's pid alone, as a supervisor sends it.
+# the runner's pid alone, as a supervisor sends it. The script also leaves a
+# directory the runner cannot remove in its temp tree, which a parallel run
+# places inside the run's own temp tree, so a failed cleanup must not cost the
+# sweep, the report, or the signal's status.
 test_interrupted_run_leaves_no_fixture_process() {
   local tmp repo script how parts flags sig status runner_pid rc waited
   command -v perl >/dev/null 2>&1 || fail "perl is required to start the escaped helper"
   tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-interrupt.XXXXXX")
   repo="$tmp/repo"
-  script=tests/fm-interrupt-fixture.test.sh
+  script=tests/fm-brief.test.sh
   {
     cat <<'SH'
 #!/usr/bin/env bash
+mkdir "$TMPDIR/unremovable" && : >"$TMPDIR/unremovable/f" && chmod 0500 "$TMPDIR/unremovable"
 echo "$$" >"$FIXTURE_PID"
 SH
     escaped_helper_hang_fixture | sed 1d
   } | init_bound_fixture_repo "$repo" "$script"
-  for how in "group INT" "pid TERM --run-timeout-secs 0"; do
+  for how in "group INT" "pid TERM --run-timeout-secs 0" "pid TERM --jobs 2"; do
     read -r -a parts <<<"$how"
     sig=${parts[1]}
     flags=("${parts[@]:2}")
     rm -f "$tmp/fixture.pid" "$tmp/escaped.pid"
+    chmod -R u+w "$tmp/t" 2>/dev/null || true
+    rm -rf "$tmp/t"
+    mkdir "$tmp/t"
     set -m
-    (cd "$repo" && FIXTURE_PID="$tmp/fixture.pid" ESCAPED_PID="$tmp/escaped.pid" \
+    (cd "$repo" && TMPDIR="$tmp/t" FIXTURE_PID="$tmp/fixture.pid" ESCAPED_PID="$tmp/escaped.pid" \
       exec bin/fm-test-run.sh "${flags[@]+"${flags[@]}"}" "$script") >"$tmp/out" 2>"$tmp/err" &
     runner_pid=$!
     set +m
@@ -1782,6 +1789,7 @@ SH
     assert_recorded_pid_gone "$tmp/fixture.pid" "the script of a run interrupted by $how"
     assert_recorded_pid_gone "$tmp/escaped.pid" "the escaped helper of a run interrupted by $how"
   done
+  chmod -R u+w "$tmp"
   rm -rf "$tmp"
   pass "an interrupted run leaves none of its script's processes running"
 }

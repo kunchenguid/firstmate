@@ -2447,13 +2447,13 @@ run_under_supervisor() {
   last_phase=$(awk '$1 == "phase" { p = $2 } END { print p }' "$phase_file")
   run_tmp=$(awk '$1 == "run-tmp" { d = $2 } END { print d }' "$phase_file")
   rm -f "$phase_file"
-  [ -z "$run_tmp" ] || rm -rf "$run_tmp"
+  swept=$(sweep_fixture_processes ";$RUN_MARK/")
+  [ -z "$run_tmp" ] || rm -rf "$run_tmp" 2>/dev/null || true
   if [ -n "$in_flight" ]; then
     where="while running $in_flight"
   else
     where="during the ${last_phase:-startup} phase"
   fi
-  swept=$(sweep_fixture_processes ";$RUN_MARK/")
   if [ "$rc" -ne 124 ]; then
     log "FAIL: run interrupted by SIG$(kill -l "$rc") $where; swept $swept leftover fixture process(es)"
     exit "$rc"
