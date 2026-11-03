@@ -1772,45 +1772,50 @@ fm_test_picker_state() {
 }
 
 # A failed Enter after the text was accepted is the uncertain-delivery class:
-# the text may already have been submitted, so reporting `send-failed` would
-# invite a retype that duplicates a delivered message. One composer read
-# decides: empty proves the text left the pane, anything else stays
-# unconfirmed (typed) or deferred (inbox) and never retries in the same send.
+# the text may already have been submitted, and Orca may also have replaced the
+# pane between the accepted text and the failed Enter. A composer read cannot
+# tell those apart - a fresh empty pane looks exactly like a delivered message -
+# so the failed path never reads the composer: it stays unconfirmed (typed) or
+# deferred (inbox) and never retries in the same send.
 fm_test_enter_send() {
   printf 'Enter\n' >> "$FM_TEST_ENTER_ENTERS"
   return "$FM_TEST_ENTER_SEND_RC"
 }
 
-fm_test_enter_state() { printf '%s' "$FM_TEST_ENTER_STATE"; }
+fm_test_enter_state() {
+  printf 'read\n' >> "$FM_TEST_ENTER_READS"
+  printf '%s' "$FM_TEST_ENTER_STATE"
+}
 
 test_failed_enter_after_accepted_text_never_claims_non_delivery() {
-  local out enters
+  local out enters reads
   FM_TEST_ENTER_ENTERS=$(mktemp)
   : > "$FM_TEST_ENTER_ENTERS"
+  FM_TEST_ENTER_READS=$(mktemp)
+  : > "$FM_TEST_ENTER_READS"
   # The adapter always defines its resolved-endpoint variable; an empty value
   # means the Enter stayed on the endpoint that received the text.
   FM_TEST_RESOLVED_TARGET=
 
-  # Typed plane: the read proves the text left the pane, so this is a
-  # delivered submit, not a failure a caller should retry.
+  # Typed plane: every composer read stays unconfirmed. `empty` is the
+  # replacement-pane shape, so trusting it would silently drop the message.
   FM_TEST_ENTER_SEND_RC=1
   FM_TEST_ENTER_STATE=empty
   out=$(unset FM_TASK_INBOX_RING_LINE; fm_composer_submit_retry_core \
     fm_test_enter_send fm_test_enter_state win 3 0 "" FM_TEST_RESOLVED_TARGET)
-  [ "$out" = empty ] || fail "a failed Enter whose text left the pane must report the submitted verdict, got '$out'"
+  [ "$out" = pending ] || fail "a failed Enter with an empty read must stay unconfirmed, got '$out'"
 
-  # Typed plane: text still pending is unconfirmed, never `send-failed`.
   FM_TEST_ENTER_STATE=pending
   out=$(unset FM_TASK_INBOX_RING_LINE; fm_composer_submit_retry_core \
     fm_test_enter_send fm_test_enter_state win 3 0 "" FM_TEST_RESOLVED_TARGET)
   [ "$out" = pending ] || fail "a failed Enter with the text still pending must stay unconfirmed, got '$out'"
 
-  # Inbox plane: the same proofs become a delivered ring or a deferral, so the
-  # watcher never re-types a doorbell that already left the pane.
+  # Inbox plane: the same proofs defer the ring so the watcher retries later;
+  # a failed Enter is never delivery proof there either.
   FM_TEST_ENTER_STATE=empty
   out=$(FM_TASK_INBOX_RING_LINE=doorbell fm_composer_submit_retry_core \
     fm_test_enter_send fm_test_enter_state win 3 0 "" FM_TEST_RESOLVED_TARGET)
-  [ "$out" = empty ] || fail "an inbox ring whose doorbell left the pane must report delivered, got '$out'"
+  [ "$out" = inbox-deferred ] || fail "an inbox ring with an empty read after a failed Enter must defer, got '$out'"
   FM_TEST_ENTER_STATE=pending
   out=$(FM_TASK_INBOX_RING_LINE=doorbell fm_composer_submit_retry_core \
     fm_test_enter_send fm_test_enter_state win 3 0 "" FM_TEST_RESOLVED_TARGET)
@@ -1818,9 +1823,11 @@ test_failed_enter_after_accepted_text_never_claims_non_delivery() {
 
   enters=$(grep -c . "$FM_TEST_ENTER_ENTERS" || true)
   [ "$enters" -eq 4 ] || fail "a failed Enter must never be retried in the same send, saw $enters attempts"
-  rm -f "$FM_TEST_ENTER_ENTERS"
+  reads=$(grep -c . "$FM_TEST_ENTER_READS" || true)
+  [ "$reads" -eq 0 ] || fail "a failed Enter must not consult the composer read, saw $reads reads"
+  rm -f "$FM_TEST_ENTER_ENTERS" "$FM_TEST_ENTER_READS"
   unset FM_TEST_ENTER_SEND_RC FM_TEST_ENTER_STATE FM_TEST_RESOLVED_TARGET
-  pass "a failed Enter after accepted text proves delivery or stays unconfirmed, never send-failed"
+  pass "a failed Enter after accepted text stays unconfirmed whatever the composer reads, never send-failed"
 }
 
 test_background_exit_picker_stays_pending_and_blocks_retry() {

@@ -5,7 +5,7 @@ set -u
 
 TMP_ROOT=$(fm_test_tmproot fm-orca-typed-restart)
 
-for mode in restart restart-failure restart-dialog healthy healthy-retry enter-failure enter-failure-submitted replacement-failure replacement-pending replacement-healthy; do
+for mode in restart restart-failure restart-dialog healthy healthy-retry enter-failure enter-failure-submitted enter-failure-replaced-empty replacement-failure replacement-pending replacement-healthy; do
   fixture="$TMP_ROOT/$mode"
   mkdir -p "$fixture/fakebin" "$fixture/root/bin" "$fixture/state" "$fixture/worktree"
   printf '#!/usr/bin/env bash\nexit 0\n' > "$fixture/root/bin/fm-guard.sh"
@@ -48,6 +48,17 @@ if (args[0] === 'status') {
       // The keystroke reached the pane before the runtime reported the error,
       // so the command ran and the composer is empty.
       fs.writeFileSync(dir + '/submitted', fs.readFileSync(dir + '/composer', 'utf8'));
+      fs.writeFileSync(dir + '/composer', '');
+      console.log(JSON.stringify({ok: false, error: {code: 'send_failed', message: 'temporary runtime error'}}));
+      process.exitCode = 1;
+    } else if (mode === 'enter-failure-replaced-empty') {
+      // The pane was replaced between the accepted text and this Enter: the
+      // original text went with the old pane, and the recorded handle now
+      // reads a fresh, empty composer. The runtime reports a generic failure,
+      // not a stale handle, so no retarget resolves the ambiguity. That read
+      // is indistinguishable from enter-failure-submitted above, so neither
+      // may claim delivery.
+      fs.writeFileSync(dir + '/replaced', '1');
       fs.writeFileSync(dir + '/composer', '');
       console.log(JSON.stringify({ok: false, error: {code: 'send_failed', message: 'temporary runtime error'}}));
       process.exitCode = 1;
@@ -112,14 +123,24 @@ JS
     [ "$(cat "$fixture/enters")" = old ] || fail "enter-failure: Enter was retried after a non-stale failure"
     assert_contains "$(cat "$fixture/out")" "fm-peek.sh" "original endpoint lost inspection guidance"
     [ ! -s "$fixture/submitted" ] || fail "enter-failure unexpectedly submitted the command"
-  elif [ "$mode" = enter-failure-submitted ]; then
-    # The Enter reported failure, but the read proves the text left the pane:
-    # that is a delivered submit, and retrying it would double-send.
-    [ "$rc" = 0 ] || fail "enter-failure-submitted: expected delivered exit 0, got $rc: $(cat "$fixture/out")"
-    [ "$(cat "$fixture/submitted")" = /status ] || fail "enter-failure-submitted: command was not recorded as submitted"
-    [ "$(cat "$fixture/enters")" = old ] || fail "enter-failure-submitted: Enter was retried after a non-stale failure"
-    [ ! -s "$fixture/composer" ] || fail "enter-failure-submitted: composer did not clear"
-    assert_not_contains "$(cat "$fixture/out")" "text not sent" "enter-failure-submitted claimed the accepted text was not sent"
+  elif [ "$mode" = enter-failure-submitted ] || [ "$mode" = enter-failure-replaced-empty ]; then
+    # The composer reads empty in both cases, but only the first actually ran
+    # the command. A failed Enter cannot tell a submitted message from a pane
+    # replaced after the accepted text, so both stay unconfirmed (exit 3) and
+    # neither is retried or retyped.
+    [ "$rc" = 3 ] || fail "$mode: expected unconfirmed exit 3, got $rc: $(cat "$fixture/out")"
+    assert_contains "$(cat "$fixture/out")" "submission is unconfirmed" "$mode: did not report the failed Enter as unconfirmed"
+    assert_contains "$(cat "$fixture/out")" "do not retype or blindly resend" "$mode: invited a duplicate send"
+    assert_not_contains "$(cat "$fixture/out")" "text not sent" "$mode: claimed the accepted text was not sent"
+    [ "$(cat "$fixture/enters")" = old ] || fail "$mode: Enter was retried after a non-stale failure"
+    assert_contains "$(cat "$fixture/out")" "fm-peek.sh" "$mode: original endpoint lost inspection guidance"
+    [ ! -s "$fixture/composer" ] || fail "$mode: expected an empty composer read"
+    if [ "$mode" = enter-failure-submitted ]; then
+      [ "$(cat "$fixture/submitted")" = /status ] || fail "$mode: command was not recorded as submitted"
+    else
+      [ ! -s "$fixture/submitted" ] || fail "$mode: replaced pane unexpectedly submitted the command"
+      [ -s "$fixture/replaced" ] || fail "$mode: endpoint replacement was not modeled"
+    fi
   else
     [ "$rc" = 0 ] || fail "$mode: original endpoint send failed: $(cat "$fixture/out")"
     [ "$(cat "$fixture/submitted")" = /status ] || fail "$mode: slash command was not submitted"

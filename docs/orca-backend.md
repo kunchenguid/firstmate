@@ -71,11 +71,11 @@ Duplicate retries are an accepted cost.
 Draft and busy deferral applies to inbox rings; explicit typed text and Enter retain their existing semantics subject to the dialog guard and typed submission rule below.
 On the typed plane, `fm-send.sh` verifies composer clearance through the fleet-wide classifier in `bin/fm-composer-lib.sh`, retrying Enter without retyping when a slash popup first fills an argument placeholder.
 If typed submission Enter changes the endpoint from the one that received the literal text, verification stops without retyping or further Enter attempts; an empty replacement composer cannot confirm text typed elsewhere.
-An Enter that fails after Orca accepted the typed text is never a proven non-delivery: the text may still be in that composer or an earlier Enter may have submitted it, so a single composer read decides.
-An empty read proves the text left the pane, so the typed-plane send succeeds and, on the endpoint that received the doorbell, the inbox ring counts as delivered rather than deferring or reporting a failure that would invite a duplicate doorbell.
-Any other read keeps `fm-send.sh` at exit 3 instead of reporting the text as not sent, and defers an inbox ring.
-When that unconfirmed submission had resolved a replacement endpoint - Enter changing endpoints, or an Enter failure after the text was typed into a replacement with a non-empty read - `fm-send.sh` exits 3 directing the caller to inspect the replacement pane for the recorded worktree in Orca's UI before deciding whether to resend, because `fm-peek.sh` still reads the recorded handle.
-A failed Enter on the original endpoint with a non-empty read instead points at `fm-peek.sh` and allows resending only Enter, and only while the composer still holds the text.
+An Enter that fails after Orca accepted the typed text is never a proven non-delivery: the text may still be in that composer, an earlier Enter may have submitted it, or Orca may have replaced the pane between the accepted text and the failed Enter.
+It is also never a proven delivery: a composer read cannot separate a submitted message from a replacement or freshly rebound pane, whose empty composer looks identical.
+So a failed Enter stays unconfirmed whatever the composer reads - `fm-send.sh` exits 3 and an inbox ring defers, and Enter is never retried within the same send.
+When that unconfirmed submission had resolved a replacement endpoint - Enter changing endpoints, or an Enter failure after the text was typed into a replacement - `fm-send.sh` exits 3 directing the caller to inspect the replacement pane for the recorded worktree in Orca's UI before deciding whether to resend, because `fm-peek.sh` still reads the recorded handle.
+A failed Enter on the original endpoint instead points at `fm-peek.sh` and allows resending only Enter, and only while the composer still holds the text.
 The composer read is one bounded tail of the live terminal and never pages backward into scrollback, so a stale startup banner cannot compete with the bottom-anchored composer.
 A bare shell row is `unknown`, not an empty agent composer, and plain-text captures degrade a glyph row carrying trailing text to `unknown` rather than a false `pending`.
 The watcher has no native Orca busy signal, so each harness adapter's semantic lifecycle supplies worker state.

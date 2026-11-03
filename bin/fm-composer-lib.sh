@@ -2454,12 +2454,16 @@ EOF
 # stays a loud refusal rather than a blind retry into an unreadable pane.
 # A caller that opts into <resolved-target-var> also receives endpoint outcomes:
 # Enter resolving a different endpoint than <target> returns `endpoint-changed`
-# (`inbox-deferred` on the inbox plane) with no retype and no further Enter, and
-# a failed Enter never claims a proven non-delivery, because the text was
-# already accepted: a composer read that comes back `empty` reports the
-# submitted verdict, otherwise the typed plane returns `pending` (fm-send's
-# unconfirmed outcome) and the inbox plane `inbox-deferred`; every caller that
-# omits the variable keeps the vocabulary above.
+# (`inbox-deferred` on the inbox plane) with no retype and no further Enter.
+# A failed Enter after accepted text is ALWAYS unconfirmed, whatever the composer
+# reads: Orca can replace the pane between the accepted text and the failed
+# Enter, so an empty composer on the replacement (or on a handle now bound to a
+# fresh pane) is indistinguishable from a delivered message. The typed plane
+# returns `pending` (fm-send's unconfirmed outcome) and the inbox plane
+# `inbox-deferred`; `send-failed` is never right there, because the text was
+# already accepted and a caller told "not sent" would retype or re-ring. The
+# failed path deliberately does not read the composer. Every caller that omits
+# the variable keeps the vocabulary above.
 # tmux and herdr keep richer cores that consume this same shared verdict plus
 # fm_composer_queued_enter_verdict; no shape knowledge lives in any loop.
 fm_composer_submit_retry_core() {  # <send-key-fn> <state-fn> <target> <retries> <enter-sleep> [expected-label] [resolved-target-var]
@@ -2480,18 +2484,15 @@ fm_composer_submit_retry_core() {  # <send-key-fn> <state-fn> <target> <retries>
     # Enter; every other backend keeps verifying the composer as before.
     # An Enter that fails after the text was accepted is never a proven
     # non-delivery: the text may still be in that composer, or an earlier
-    # Enter may have submitted it. `send-failed` is never right here, because
-    # a caller told "not sent" would retype the message or re-ring the
-    # doorbell and duplicate a delivery that already landed. One composer read
-    # still proves the text left the pane - the same evidence the success path
-    # trusts - so an empty read reports the submitted verdict and stops the
-    # retry; anything else stays unconfirmed (`pending`) or deferred.
+    # Enter may have submitted it. It is also never a proven delivery: a pane
+    # replaced between the accepted text and the failed Enter can read an
+    # empty composer that is indistinguishable from a delivered message. So
+    # the failed path never consults the composer read; the send stays
+    # unconfirmed (typed `pending`) or deferred (inbox), with no retype and no
+    # further Enter, and `send-failed` stays reserved for a literal typing
+    # failure that happened before this loop.
     if [ "$key_rc" -ne 0 ] && [ -n "$resolved_target_var" ]; then
-      if [ "$key_rc" -eq 4 ] && [ -n "${FM_TASK_INBOX_RING_LINE:-}" ]; then
-        printf 'inbox-deferred'
-      elif [ "$("$state_fn" "$target" "$expected_label")" = empty ]; then
-        printf 'empty'
-      elif [ -n "${FM_TASK_INBOX_RING_LINE:-}" ]; then
+      if [ -n "${FM_TASK_INBOX_RING_LINE:-}" ]; then
         printf 'inbox-deferred'
       else
         printf 'pending'
