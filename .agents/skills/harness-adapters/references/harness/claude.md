@@ -49,7 +49,7 @@ The workspace-trust dialog is unaffected by the permission mode and still needs 
 
 ## Composer ghost
 
-Completed turns can render dim predicted text inside an empty composer, indistinguishable in plain `tmux capture-pane` except the anchored rotating `Try "<suggestion>"` hint, which the fleet-wide idle set in `../../../bin/fm-composer-lib.sh` recognizes inside a proven composer container (verified against 2.1.317 in [`runtime-backends.md`](../../../../../docs/verification/runtime-backends.md#2026-11-02-claude-21317-rotating-try-idle-hint)).
+Completed turns can render dim predicted text inside an empty composer, indistinguishable in plain `tmux capture-pane`.
 Firstmate-built Claude command lines scope `CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false` to each worker and secondmate without changing global config.
 T3 Code owns its provider command and cannot carry this setting; [`docs/t3code-backend.md`](../../../../../docs/t3code-backend.md#active-limits) owns that backend limit.
 CLI `--prompt-suggestions` affects print or SDK mode only and did not suppress interactive ghost text on v2.1.186.

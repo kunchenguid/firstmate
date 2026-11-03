@@ -2202,7 +2202,7 @@ JS
 # instead of deferring. Contract (docs/orca-backend.md): replacement input is
 # guarded against foreign drafts - no typing, ring deferred, retry mark kept.
 test_inbox_retarget_defers_on_foreign_draft_with_empty_tail() {
-  local state id rec before out
+  local state id rec before out draft
   orca_case inbox-retarget-foreign-draft
   state="$CASE_DIR/state"
   id=orcaforeigndraft
@@ -2239,8 +2239,9 @@ if (args[1] === 'list') {
 }
 JS
   chmod +x "$FB/orca"
+  for draft in 'DRAFT-MARKER keep me' 'Try "npm run build" first' 'Type a message...' 'Ask anything...' 'Type to queue message...' ' '; do
   out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_TEST_DIR="$CASE_DIR" \
-    FM_ORCA_TEST_DRAFT='DRAFT-MARKER keep me' FM_STATE_OVERRIDE="$state" FM_HOME="$CASE_DIR" \
+    FM_ORCA_TEST_DRAFT="$draft" FM_STATE_OVERRIDE="$state" FM_HOME="$CASE_DIR" \
     bash -c '. "$0/bin/fm-task-inbox-lib.sh";
       [ "$(fm_backend_composer_state orca term-live)" = pending ] || exit 1
       rc=0
@@ -2251,6 +2252,7 @@ JS
   [ ! -s "$CASE_DIR/inputs" ] || fail "the ring typed into a replacement holding a human draft: $(cat "$CASE_DIR/inputs")"
   [ "$(cat "$state/$id.meta")" = "$before" ] || fail "the deferred ring rewrote metadata"
   [ -f "$rec" ] || fail "the deferred ring dropped the durable steer"
+  done
   pass "Orca inbox: a foreign draft reported only in result.terminal.draft defers before typing"
 }
 

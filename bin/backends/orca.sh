@@ -385,8 +385,9 @@ fm_backend_orca_resolve_live_terminal() {  # <stale-terminal-id>
 # inbox draft, busy, and unreadable checks; a typed send keeps its existing
 # semantics behind the dialog guard.
 fm_backend_orca_check_replacement() {
-  local cap dialog cstate action=${2:-literal}
-  if ! cap=$(fm_backend_orca_composer_capture "$1" 2>/dev/null); then
+  local cap json dialog cstate action=${2:-literal}
+  if ! json=$(fm_backend_orca_composer_capture "$1" "" json 2>/dev/null) \
+     || ! cap=$(fm_backend_orca_json_text "$json"); then
     if [ -n "${FM_TASK_INBOX_RING_LINE:-}" ]; then
       FM_ORCA_RESOLVED_TERMINAL=$1
       return 4
@@ -398,7 +399,7 @@ fm_backend_orca_check_replacement() {
     return 1
   fi
   if [ -n "${FM_TASK_INBOX_RING_LINE:-}" ]; then
-    cstate=$(fm_composer_classify_screen "$(fm_backend_orca_composer_caps)" "$cap")
+    cstate=$(fm_backend_orca_classify_composer "$json" "$cap")
     # The old endpoint's advisory read cannot authorize replacement input.
     # Unknown content must wait for a later ring, never receive text or Enter.
     case "$cstate" in
@@ -504,14 +505,6 @@ if (r.terminal && Array.isArray(r.terminal.tail)) {
 } else {
   process.stdout.write(r.text || r.output || r.content || r.preview || "");
 }
-// Orca reports typed-but-unsubmitted composer text in result.terminal.draft and
-// deliberately excludes it from the tail/screen rows, so a pane holding a human
-// draft still rendered a bare empty composer row and replacement input typed
-// into that draft (live orca 1.4.232 + claude 2.1.317: draft="DRAFT-MARKER keep
-// me" with an empty composer row, and an inbox doorbell appended into the draft
-// instead of deferring). Render it as the composer row it really is so a
-// non-empty draft can never classify empty. Blank/whitespace-only drafts are the
-// idle composer and add nothing.
 const draft = r.terminal && r.terminal.draft;
 if (typeof draft === "string") {
   const body = draft.replace(/\s+/g, " ").trim();
@@ -537,7 +530,23 @@ fm_backend_orca_composer_capture() {  # <terminal-id> [expected-label]
   local terminal=$1 lines=${2:-$FM_COMPOSER_CAPTURE_LINES} out
   fm_backend_orca_tool_check || return 1
   out=$(orca terminal read --terminal "$terminal" --screen --limit "$lines" --json) || return 1
-  fm_backend_orca_json_text "$out"
+  if [ "${3:-}" = json ]; then
+    printf '%s' "$out"
+  else
+    fm_backend_orca_json_text "$out"
+  fi
+}
+
+fm_backend_orca_classify_composer() {
+  if printf '%s' "$1" | node -e '
+const data = JSON.parse(require("fs").readFileSync(0, "utf8"));
+const draft = data.result?.terminal?.draft;
+process.exit(typeof draft === "string" && draft.length > 0 ? 0 : 1);
+'; then
+    printf pending
+  else
+    fm_composer_classify_screen "$(fm_backend_orca_composer_caps)" "$2"
+  fi
 }
 
 # fm_backend_orca_composer_caps: static capability facts, not logic (see the
@@ -554,9 +563,10 @@ fm_backend_orca_composer_caps() {
 # row this adapter never learned, which left every claude/codex/pi/muse steer
 # unconfirmed) lives in bin/fm-composer-lib.sh.
 fm_backend_orca_composer_state() {  # <terminal-id> [expected-label] -> empty|pending|pending-unproven|unknown
-  local cap verdict
-  cap=$(fm_backend_orca_composer_capture "$1") || { printf 'unknown'; return 0; }
-  verdict=$(fm_composer_classify_screen "$(fm_backend_orca_composer_caps)" "$cap")
+  local cap json verdict
+  json=$(fm_backend_orca_composer_capture "$1" "" json) || { printf 'unknown'; return 0; }
+  cap=$(fm_backend_orca_json_text "$json") || { printf 'unknown'; return 0; }
+  verdict=$(fm_backend_orca_classify_composer "$json" "$cap")
   [ "$verdict" != need-identity ] || verdict=unknown
   printf '%s' "$verdict"
 }
