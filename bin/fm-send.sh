@@ -807,17 +807,21 @@ fm_send_set_local_seq_floor() {  # <inbox-dir>
 # After an interrupted local enqueue: the record it wrote, if its atomic rename
 # landed - the exact body at or above the sequence the inbox would have issued
 # when the enqueue began (an idempotent write may reuse an older record).
+# handled/ is expanded only after the root scan, so a record the worker
+# acknowledges (moves into handled/) during the scan is still found there.
 fm_send_find_local_record() {
-  local dir f n have
+  local dir d f n have
   dir=$(fm_task_inbox_dir "$STATE" "$INBOX_TASK_ID")
-  for f in "$dir"/*.msg "$dir"/handled/*.msg; do
-    [ -f "$f" ] || continue
-    n=$(fm_task_inbox_seq_of "${f##*/}") || continue
-    [ "$n" -ge "$FM_SEND_LOCAL_SEQ_FLOOR" ] || continue
-    have=$(fm_task_inbox_body "$f" 2>/dev/null; printf x)
-    [ "$have" = "${MESSAGE}x" ] || continue
-    printf '%s' "$f"
-    return 0
+  for d in "$dir" "$dir/handled"; do
+    for f in "$d"/*.msg; do
+      [ -f "$f" ] || continue
+      n=$(fm_task_inbox_seq_of "${f##*/}") || continue
+      [ "$n" -ge "$FM_SEND_LOCAL_SEQ_FLOOR" ] || continue
+      have=$(fm_task_inbox_body "$f" 2>/dev/null; printf x)
+      [ "$have" = "${MESSAGE}x" ] || continue
+      printf '%s' "$f"
+      return 0
+    done
   done
   return 1
 }

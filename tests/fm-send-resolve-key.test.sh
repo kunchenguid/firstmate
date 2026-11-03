@@ -37,7 +37,9 @@
 #  10. A caller's TERM, INT, or HUP to the sender's process group reports what
 #      was recorded: before delivery, nothing was sent and the exact rerun is
 #      printed; after the enqueue, the answer was delivered (never resend) and
-#      each --resolve-key is recorded. Every line is a durable-state check.
+#      each --resolve-key is recorded. A record the worker acknowledges while
+#      an interrupted enqueue looks for it still counts as delivered. Every
+#      line is a durable-state check.
 #  11. A SIGKILL runs no handler, so the progress lines already written - the
 #      enqueue and each appended close - are what the caller keeps.
 set -u
@@ -1271,6 +1273,79 @@ test_interrupt_after_local_enqueue_reports_recorded_keys() {
   pass "fm-send --resolve-key: a caller signal after the enqueue reports delivery and each recorded key"
 }
 
+# A caller signal can land after the enqueue's atomic rename but before the
+# enqueue returns, so fm-send looks for the record it wrote. A worker that
+# acknowledges that record (its mv into handled/) while fm-send reads it must
+# not turn a received answer into "nothing was sent" and a duplicate resend:
+# the report names the acknowledged record, says do not resend, and offers the
+# key's manual close instead.
+test_interrupt_mid_enqueue_finds_a_record_acknowledged_during_the_scan() {
+  local dir fb hookbin log home inbox rc err real_mv real_dd real_sleep
+  dir="$TMP_ROOT/interrupt-enqueue-ack"; mkdir -p "$dir"
+  fb=$(make_stubs "$dir"); log="$dir/send.log"
+  hookbin="$dir/hookbin"; mkdir -p "$hookbin"
+  # The shims exec the host's own tools: some hosts keep only sh in /bin.
+  real_mv=$(command -v mv); real_dd=$(command -v dd); real_sleep=$(command -v sleep)
+  # The enqueue's rename lands, then the enqueue wedges before it returns.
+  cat > "$hookbin/mv" <<'SH'
+#!/usr/bin/env bash
+if [ "$#" = 2 ]; then
+  case "${1##*/}:$2" in
+    .staging.*:"$FM_FAKE_ACK_INBOX"/[0-9]*.msg)
+      "$FM_TEST_REAL_MV" "$1" "$2" || exit
+      printf '%s\n' "$$" > "$FM_FAKE_ENQUEUE_HANG_MARK"
+      exec "$FM_TEST_REAL_SLEEP" 60 ;;
+  esac
+fi
+exec "$FM_TEST_REAL_MV" "$@"
+SH
+  # The worker acknowledges the root record just as fm-send reads it.
+  cat > "$hookbin/dd" <<'SH'
+#!/usr/bin/env bash
+for a in "$@"; do
+  case "$a" in
+    if="$FM_FAKE_ACK_INBOX"/[0-9]*.msg)
+      "$FM_TEST_REAL_MV" "${a#if=}" "$FM_FAKE_ACK_INBOX/handled/" \
+        && printf '%s\n' "${a#if=}" >> "$FM_FAKE_ACK_LOG" ;;
+  esac
+done
+exec "$FM_TEST_REAL_DD" "$@"
+SH
+  chmod +x "$hookbin/mv" "$hookbin/dd"
+  home=$(setup_home interrupt-enqueue-ack)
+  inbox="$home/state/t1.inbox"
+  fm_write_meta "$home/state/t1.meta" "window=sess:fm-t1" "kind=ship"
+  open_local_keys "$home" api-shape
+
+  start_send_in_group "$hookbin:$fb" "$home" "$log" "$dir/out" "$dir/err" \
+    FM_FAKE_ACK_INBOX="$inbox" FM_FAKE_ACK_LOG="$dir/acked" \
+    FM_FAKE_ENQUEUE_HANG_MARK="$dir/enqueue.pid" FM_TEST_REAL_MV="$real_mv" \
+    FM_TEST_REAL_DD="$real_dd" FM_TEST_REAL_SLEEP="$real_sleep" \
+    -- t1 "${RESOLVE_ARGS[@]}" "go with REST"
+  wait_for_file "$dir/enqueue.pid" "the enqueue's rename to land"
+  kill -s TERM -- "-$BG_PID"
+  rc=0
+  wait "$BG_PID" || rc=$?
+  reap_pid_file "$dir/enqueue.pid"
+  err=$(cat "$dir/err")
+  expect_code 143 "$rc" "a SIGTERM mid-enqueue must exit 128+signal: $err"
+  [ "$(cat "$dir/acked" 2>/dev/null)" = "$inbox/001.msg" ] \
+    || fail "the worker's acknowledgement must race fm-send's read of the root record: $err"
+  grep -qxF "go with REST" "$inbox/handled/001.msg" \
+    || fail "the acknowledged record must hold the answer"
+  assert_contains "$err" "interrupted by SIGTERM after the steer was durably recorded at $inbox/handled/001.msg" \
+    "a record acknowledged during the scan must be reported as delivered"
+  assert_contains "$err" "do not resend" \
+    "a received answer must never invite a duplicate resend"
+  assert_not_contains "$err" "nothing was sent" \
+    "a received answer must never be reported as unsent"
+  assert_contains "$err" "--resolve-key api-shape: NOT recorded" \
+    "the key the interrupted send never closed must be reported open"
+  assert_contains "$err" "close it without resending" \
+    "the open key must get its manual close, not a resend"
+  pass "fm-send --resolve-key: a record the worker acknowledges during the interruption scan is reported delivered"
+}
+
 # A caller timeout during pre-delivery validation (here a wedged backlog read
 # for a captain-held key) must report that nothing was sent, that no key was
 # recorded, and end with the plain rerun as the safe retry - the state the
@@ -1439,6 +1514,7 @@ test_failed_close_recovery_command_is_shell_safe
 test_remote_reserved_pending_reply_key_closes_locally
 test_decision_answer_partition_relocates_under_the_record
 test_interrupt_after_local_enqueue_reports_recorded_keys
+test_interrupt_mid_enqueue_finds_a_record_acknowledged_during_the_scan
 test_interrupt_before_local_delivery_reports_unsent
 test_interrupt_during_hold_intake_prints_home_bound_check
 test_sigkill_after_local_enqueue_keeps_progress_lines
