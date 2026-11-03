@@ -189,6 +189,43 @@ test_matrix_claude_bare_nbsp_row() {
   pass "matrix: claude's ❯+NBSP row reads empty on every profile in both locales (#1988)"
 }
 
+test_matrix_claude_classic_slash_popup_below_composer() {
+  # Claude Code 2.1.303 classic layout uses the composer's glyph for the
+  # selected slash-command entry below the closing rule.
+  local rule screen out locale caps tail
+  rule='────────────────────────'
+  for locale in "${LC_ALL:-${LANG:-C}}" C; do
+    for caps in "$CAPS_STYLED" "$CAPS_STYLED_NOID" "$CAPS_PLAIN"; do
+      screen="transcript line"$'\n'"$rule"$'\n'"❯$NBSP/exit"$'\n'"$rule"
+      screen+=$'\n  ❯ /exit                                Exit the CLI'
+      screen+=$'\n    /context                             Visualize current context usage'
+      screen+=$'\n  ⏵⏵ bypass permissions on (shift+tab to cycle)'
+      out=$(LC_ALL="$locale" fm_composer_extract_selected_content "$caps" "$screen")
+      [ "$out" = /exit ] || fail "the popup entry was read as the composer, got '$out'"
+      screen="transcript line"$'\n'"$rule"$'\n'"❯$NBSP/exit"$'\n'"$rule"
+      screen+=$'\n  ⚠ a notice row\n  ❯ /exit                                Exit the CLI'
+      out=$(LC_ALL="$locale" fm_composer_extract_selected_content "$caps" "$screen")
+      [ "$out" = /exit ] || fail "a notice row let the popup entry win, got '$out'"
+      # Non-popup same-glyph input still wins, including slash text with args.
+      for tail in 'a real draft' '/exit now' '/exit!  real draft'; do
+        screen="transcript line"$'\n'"$rule"$'\n'"❯$NBSP/exit"$'\n'"$rule"$'\n'"❯ $tail"
+        out=$(LC_ALL="$locale" fm_composer_extract_selected_content "$caps" "$screen")
+        [ "$out" = "${tail//  / }" ] || fail "a non-popup row below the pair must keep winning, got '$out'"
+      done
+      # Slash syntax alone is not proof: without a glyph-proven pair, or
+      # with a later separator, the lower row must not be demoted.
+      for screen in \
+        '❯ /exit                                Exit the CLI' \
+        "$rule"$'\n\n'"$rule"$'\n  ❯ /exit                                Exit the CLI' \
+        "$rule"$'\n❯ /exit\n'"$rule"$'\n  ❯ /exit                                Exit the CLI\n'"$rule"; do
+        out=$(LC_ALL="$locale" fm_composer_extract_selected_content "$caps" "$screen")
+        [ "$out" = '/exit Exit the CLI' ] || fail "an unproven popup row must not be demoted, got '$out'"
+      done
+    done
+  done
+  pass "matrix: claude's classic slash popup entry under the composer is not read as the composer"
+}
+
 test_matrix_claude_named_session_titled_rule() {
   # Real claude 2.1.284 started as `claude -n <name>` (captured live through
   # Herdr 0.9.1): the session name is right-aligned inside the rule ABOVE the
@@ -1587,6 +1624,7 @@ test_idle_placeholder_is_empty
 test_idle_placeholder_case_mode_is_explicit
 test_real_text_is_pending
 test_matrix_claude_bare_nbsp_row
+test_matrix_claude_classic_slash_popup_below_composer
 test_matrix_claude_named_session_titled_rule
 test_matrix_claude_arrow_statusline_footer
 test_composer_footer_demotion_needs_a_proven_pair

@@ -1520,7 +1520,8 @@ The pre-Enter payload proof then judged the typed command unsent, pressed Ctrl+U
 
 The fix captures the FULL VISIBLE VIEWPORT for every herdr adapter composer read (`pane read --source visible [--format ansi]`, `fm_backend_herdr_composer_state` and `fm_backend_herdr_composer_content`): the composer is by definition inside the viewport, and the viewport is the one bound that always contains it.
 The shared inbox pending-line confirmation read (`bin/fm-task-inbox-lib.sh`) stays a bounded tail on every backend, herdr included; its payloads are task lines, not slash commands, so the popup shape does not arise there.
-The popup rows sit below the composer's closing rule, which is a structural edge row, so the shared classifier still selects only the composer and the menu rows never read as typed text.
+The popup rows sit below the composer's closing rule, which is a structural edge row, so the shared classifier selects only the composer rather than appending the menu rows as wrapped input.
+For classic layouts whose selected popup row carries the composer's own glyph, see the fixture verification below.
 Verified live in the lab: with the popup up the state read answers `pending` (previously `empty`) and the payload proof returns `/exit` (previously empty), the submit presses Enter, and the Claude process exits, leaving the shell prompt.
 Growing the window only adds rows above the composer, so the bottom-most-shape selection, the footer zone, and every previously passing verdict are unchanged.
 
@@ -1543,6 +1544,25 @@ FM_HERDR_SUBMIT_CONFIRM_LIVE=1 tests/fm-herdr-submit-confirm-live-e2e.test.sh
 
 ```text
 ok - live Herdr submit confirm: Claude Code (2.1.283 (Claude Code)) on herdr 0.9.0 proves and submits a typed /exit behind its command popup
+```
+
+#### Classic popup with the composer's glyph
+
+Fixture verification on 2026-11-03 covers the Claude Code 2.1.303 classic-layout shape: the selected popup entry below the closing rule is `❯ /exit                                Exit the CLI`.
+Unlike the 2.1.283 shape above, this row is itself a bare composer candidate and previously won the bottom-most-row selection, making the payload proof read the menu text instead of `/exit`.
+The shared reader recognizes a slash-command entry only below a valid rule pair already proven by the same glyph, with no later separator.
+A notice between the closing rule and the popup is allowed; a non-popup same-glyph draft below the pair still wins.
+Styled and plain cursorless profiles are covered under both the ambient locale and `LC_ALL=C`.
+The Herdr fixture exercises the submit interface and asserts one Enter and no Ctrl+U, without contacting a live backend.
+This is fixture evidence, not a refreshed live Herdr measurement; the opt-in live guard above remains the command for that measurement.
+
+```sh
+bash bin/fm-test-run.sh tests/fm-composer-lib.test.sh tests/fm-backend-herdr.test.sh
+```
+
+```text
+ok - matrix: claude's classic slash popup entry under the composer is not read as the composer
+ok - fm_backend_herdr_send_text_submit: Claude classic same-glyph slash popup does not prevent /exit submission
 ```
 
 ### Claude background-task exit picker

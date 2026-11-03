@@ -5599,6 +5599,25 @@ test_send_text_submit_claude_slash_popup_composer_is_still_proven_and_submitted(
   pass "fm_backend_herdr_send_text_submit: a typed slash command hidden behind its popup is still proven and submitted"
 }
 
+test_send_text_submit_claude_same_glyph_popup_is_proven_and_submitted() {
+  local dir log resp fb out enter_count
+  dir="$TMP_ROOT/submit-claude-glyph-popup"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  herdr_submit_claude_prefix "$resp" '/exit'
+  printf '%s\n' '────────────────────────' '❯ /exit' '────────────────────────' \
+    '  ❯ /exit                                Exit the CLI' \
+    '    /context                             Visualize current context usage' > "$resp/4.out"
+  printf '{"result":{"agent":{"agent":"claude","agent_status":"idle"}}}\n' > "$resp/5.out"
+  printf '{"result":{"agent":{"agent_status":"working"}}}\n' > "$resp/7.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_BACKEND_HERDR_SUBMIT_POLLS=1 \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 /exit 3 0.01 0.01' "$ROOT" )
+  [ "$out" = empty ] || fail "a same-glyph slash popup must not prevent /exit submission, got '$out'"
+  enter_count=$(grep -c $'\x1f''pane'$'\x1f''send-keys'$'\x1f''w1:p2'$'\x1f''enter' "$log")
+  [ "$enter_count" -eq 1 ] || fail "the proven /exit should be submitted once, sent $enter_count Enter(s)"
+  [ "$(herdr_ctrl_u_count "$log")" -eq 0 ] || fail "a proven /exit must not be cleared"
+  pass "fm_backend_herdr_send_text_submit: Claude classic same-glyph slash popup does not prevent /exit submission"
+}
+
 # Live Claude Code 2.1.283 draws a recognized typed slash command in muted
 # truecolor grey (38;2;112;112;112, luminance 112), below the grok-tuned
 # dark-foreground ghost threshold. Claude's own ghost suggestion is SGR-2 dim,
@@ -6554,6 +6573,7 @@ test_send_text_submit_accepts_marked_payloads_whose_read_back_drops_u2063
 test_send_text_submit_refuses_marked_digest_missing_its_head
 test_composer_state_claude_slash_popup_pushes_composer_above_tail_window
 test_send_text_submit_claude_slash_popup_composer_is_still_proven_and_submitted
+test_send_text_submit_claude_same_glyph_popup_is_proven_and_submitted
 test_send_text_submit_claude_grey_slash_command_is_proven_and_submitted
 test_send_text_submit_lone_paste_placeholder_submits_the_long_payload
 test_send_text_submit_multiline_paste_placeholder_submits_the_long_payload

@@ -1959,6 +1959,27 @@ _fm_composer_bare_rule_sandwich() {  # <plain-screen> <row>
   _fm_composer_titled_rule_row "$above" "${below//─/ }"
 }
 
+# _fm_composer_rule_pair_popup_row: a selected slash-command entry below a
+# valid, same-glyph-proven rule pair is popup furniture, not the composer.
+# Claude Code 2.1.303 classic layout uses `❯ /exit    Exit the CLI` below
+# the closing rule. Require no later separator and a slash token followed by
+# description spacing (or end of row); other same-glyph drafts still win.
+_fm_composer_rule_pair_popup_row() {  # <plain-screen> <row>
+  local plain=$1 row=$2 trimmed glyph rest
+  [ "$row" -ge 0 ] || return 1
+  [ "$FM_COMPOSER_SCAN_PI_PAIR_FOUND" = 1 ] && [ "$FM_COMPOSER_SCAN_PI_PAIR_VALID" = 1 ] || return 1
+  [ "$FM_COMPOSER_SCAN_PI_GLYPH_ROW" -ge 0 ] || return 1
+  [ "$row" -gt "$FM_COMPOSER_SCAN_PI_CLOSE" ] || return 1
+  [ "$FM_COMPOSER_SCAN_PI_LAST_SEPARATOR" -eq "$FM_COMPOSER_SCAN_PI_CLOSE" ] || return 1
+  trimmed=$(_fm_composer_screen_row "$row" "$plain")
+  fm_composer_normalize_trim_var trimmed
+  fm_composer_leading_agent_glyph_var glyph "$trimmed" || return 1
+  [ "$glyph" = "$FM_COMPOSER_SCAN_PI_GLYPH" ] || return 1
+  rest=${trimmed#*"$glyph"}
+  fm_composer_normalize_trim_var rest
+  [[ $rest =~ ^/[A-Za-z0-9][A-Za-z0-9:_.-]*([[:space:]]{2,}|$) ]]
+}
+
 _fm_composer_select_cursorless() {
   local plain=$1 generic=-1 next boundary raw trimmed glyph bare footer=0
   FM_COMPOSER_SELECTED_KIND=
@@ -1987,6 +2008,9 @@ _fm_composer_select_cursorless() {
     else
       bare=-1
     fi
+  fi
+  if _fm_composer_rule_pair_popup_row "$plain" "$bare"; then
+    bare=$FM_COMPOSER_SCAN_PI_GLYPH_ROW
   fi
   if [ "$bare" -gt "$generic" ]; then
     generic=$bare
