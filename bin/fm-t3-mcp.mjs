@@ -115,16 +115,23 @@
 //     archived:true and activeRunId:null (closed=true). A thread the verified
 //     server no longer has is already closed (missing=true). A close the
 //     read-back does not prove within the timeout exits 1 (close_unproven).
-//   fm-t3-mcp.mjs thread-for-root --root <abs-path>
+//   fm-t3-mcp.mjs thread-for-root --root <abs-path> [--target <thread-id>]
 //     The one unarchived, worktree-less thread with an active run on the live
 //     project rooted at <root>, across every t3_thread_list page; a fork
-//     counts, a delegated subagent does not: exit 0 with threadId; exit 5
-//     when there is none; exit 6 when there are several (threadIds names
-//     them).
+//     counts, a delegated subagent does not: exit 0 with threadId and
+//     serverIdentity, the JSON [origin, environment_id] pair that created it.
+//     With --target it answers only when that exact thread is one of them, so
+//     a caller binds the creation server of the supervisor it already named;
+//     exit 5 when there is none or --target is not one, and exit 6 when there
+//     are several and no --target was given (threadIds names them).
 //
 // Every verb accepts --token-file <path>. It defaults to
 // $FM_T3CODE_TOKEN_FILE, else ${FM_CONFIG_OVERRIDE:-$FM_HOME/config}/t3code-token,
 // with FM_HOME defaulting to this repository.
+// Every verb that opens a session also accepts --expected-server <identity>,
+// a caller's admitted [origin, environment_id] pair; a different credential
+// refuses before the session opens, so a caller never drives another server's
+// thread.
 //
 // The capability gate (every verb, login included) runs tools/list and refuses
 // unless all of REQUIRED_TOOLS and t3_environment_read are present, then reads

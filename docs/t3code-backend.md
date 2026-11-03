@@ -128,7 +128,7 @@ Exact call payloads are owned by `bin/fm-t3-mcp.mjs` and `bin/backends/t3code.sh
 `fm-peek.sh` renders the newest items of the thread's activity view as `[type/status] text` lines followed by a `t3code: status=<status> run=<active run>` line.
 T3 pages that view oldest first, so the helper starts from the thread's visible item count to read the tail.
 When the [fleet seat ledger](configuration.md#fleet-seat-pools-configfleet-seats) accounts for the endpoint, a turn is refused as proven non-delivery unless every incarnation recorded for that endpoint is still `reserved` or `confirmed`, so a released or reclaimed generation is never resumed and needs a fresh launch instead.
-A secondmate turn to an accounted endpoint also holds that mate's supervisor lifecycle episode, so it is refused while another lifecycle operation on that mate is active.
+A secondmate turn also holds that mate's supervisor lifecycle episode, for an endpoint a seat accounts for as well as one recognized only by its in-flight launch binding, so it is refused while another lifecycle operation on that mate is active.
 A failed spawn's rollback is one such operation: it keeps the episode through its thread archive and environment cleanup, so a turn cannot start in that interval and then be interrupted by the same rollback.
 An ordinary metadata-routed `fm-send.sh` text steer becomes a durable steering-inbox record, and its doorbell is a `t3_thread_send` in `auto` mode, which starts an idle thread's next turn or steers the running one.
 T3 derives the message id from the client request id within the auth session that sent it and commits a send before it replies, so retries must reuse that id, under the same sign-in, to reach the message T3 already committed.
@@ -177,7 +177,7 @@ An unproven launch-brief outcome (a lost reply or a T3 error that can follow a c
 An identical brief resend follows the [ordinary-send retention window above](#current-lifecycle-and-safety); verify delivery in T3 Code before resending after that window.
 Before returning a retained slot by hand, prove both the archive with no active run and the end of its provider and worktree-owned processes, as teardown does above.
 The kill is idempotent, so an already archived thread, or one the creation server no longer has, is the end state, and an unreachable or gate-refused server refuses the teardown rather than returning a slot a live thread still points at.
-The record binds its thread to the server it was created on in `t3_server`, and every later read, close, and absence proof runs against that server: a credential that now names another server reads `unreadable` and refuses cleanup instead of acting on a different server's thread.
+The record binds its thread to the server it was created on in `t3_server`, and every later read, turn, watched-thread batch, close, and absence proof runs against that server: a credential that now names another server reads `unreadable`, refuses a turn, and refuses cleanup instead of acting on a different server's thread, and a request whose thread carries no recorded or admitted identity at all is refused rather than served by whichever server the credential now names.
 A record written before that field existed adopts the selected server only when the thread is positively present there; without that proof teardown preserves the task and its worktree, and only `--force` authorizes cleanup through the selected server, whose gate [`bin/fm-teardown.sh`](../bin/fm-teardown.sh) owns.
 Archiving keeps the transcript visible in T3 Code; this backend never deletes a thread.
 The `fm-` project of a torn-down secondmate home stays in T3 Code pointing at the removed directory until the operator deletes it there, because deleting a nonempty project takes the archived thread's transcript with it.
@@ -194,7 +194,7 @@ Thread persistence alone does not prove a live agent.
 - `preparing`, `queued`, `starting`, `running`, and `waiting` (the run's post-turn drain) read busy/alive.
 - `idle`, `completed`, `interrupted`, `cancelled`, and `rolled_back` read idle/alive.
 - `failed` reads unknown/dead.
-- An archived thread with no active run, or one the verified server does not have, reads missing.
+- An archived thread with no active run, or one the recorded creation server does not have, reads missing.
 - An archived thread whose run is still draining is not proven closed, so it reads `unknown unreadable` until the run ends.
 - An unreachable server, a refused gate, or a failed read reads `unknown unreadable`, which is never treated as proof that a replacement agent is safe.
 
@@ -213,7 +213,7 @@ T3 accepts an `mcp-client` session only on `/mcp`, so its WebSocket event stream
 A new or changed set of pending requests is escalated at once, once per set, as a `blocked` wake that names the question ids and any permission approvals.
 Each approval is identified by its `approval_request` activity item, which T3 holds at status `waiting` until it is answered, among the thread's last 100 items, so an approval answered and replaced by another before the next cycle is a new set ([source evidence](verification/runtime-backends.md#permission-approvals-in-the-activity-view)).
 Otherwise the call waits on each thread's exact active run and returns as soon as one turns terminal, so the poll loop reconciles that turn without waiting out its interval; with no active run it sleeps the interval instead of re-arming.
-The poll loop, its wedge timer, and the `FM_BUSY_TURN_MAX_SECS` bound on a running thread remain the backstop, and a server the call cannot read drops the cycle to plain polling.
+The poll loop, its wedge timer, and the `FM_BUSY_TURN_MAX_SECS` bound on a running thread remain the backstop, and a server the call cannot read - including a batch whose threads are recorded on more than one creation server - drops the cycle to plain polling.
 Secondmate threads stay off the splice, as on Herdr.
 In a home that also records Herdr or Rex workers, that backend keeps the push wait and the T3 workers stay on the poll loop, so adding a T3 task never slows Herdr or Rex escalation.
 
@@ -230,6 +230,7 @@ T3 puts nothing about the thread into the agent's environment, so eligible disco
 A forked conversation counts; a delegated subagent does not.
 Multiple matching threads print an ambiguity diagnostic naming their ids and fall through to the legacy tmux fallback, as do no matches or an unreachable server.
 Resolve ambiguity by explicitly setting both `FM_SUPERVISOR_BACKEND=t3code` and `FM_SUPERVISOR_TARGET` to the intended thread id.
+The daemon binds that thread's creation server at startup and then sends only through it, so a target it cannot prove belongs to this home's own T3 project refuses at startup instead of falling back to whichever server the credential now names.
 Injection is a `t3_thread_send` only into a settled supervisor thread, one the [thread status table](#restart-and-liveness-behavior) reads idle/alive with no pending request; any other row, including `blocked` and an unreadable thread, defers the digest exactly as a busy pane does on every other backend.
 An unknown native busy verdict defers new-turn delivery but does not prove that work resumed.
 Away housekeeping keeps an overdue stale alert pending and buffers one possible-wedge report while the verdict remains unknown, including a failed run or a transient thread-read failure.

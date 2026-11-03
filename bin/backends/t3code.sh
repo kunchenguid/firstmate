@@ -65,7 +65,11 @@ fm_backend_t3code_tool_check() {
 }
 
 # fm_backend_t3code_mcp <verb> [args...] - one helper call against this home's
-# credential. It prints one JSON object (capture prints text) and exits as its
+# credential and against the creation server admitted for each --thread it
+# names, or the credential's own when the verb names no thread. A request
+# without an admitted identity, or one spanning two servers, is refused before
+# any session opens.
+# It prints one JSON object (capture prints text) and exits as its
 # header says, including send's delivery-unconfirmed status 7.
 # Every failure prints one stderr line.
 fm_backend_t3code_admitted_server() {

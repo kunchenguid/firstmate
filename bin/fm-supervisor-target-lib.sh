@@ -147,6 +147,12 @@ discover_supervisor_backend() {
   return 1
 }
 
+# fm_supervisor_bind_t3code_target: the daemon's T3 target plus its creation
+# server. T3 discovery otherwise yields only a thread id, and every later read
+# or send must name the server that created that thread, so the target is
+# resolved through the adapter's binding mode: it must be a live thread of this
+# home's own project, or this refuses rather than driving another server.
+# Sets FM_SUPERVISOR_TARGET and the FM_T3CODE_SUPERVISOR_* pair its callers use.
 fm_supervisor_bind_t3code_target() {
   local binding thread server
   fm_backend_source t3code || return 1
