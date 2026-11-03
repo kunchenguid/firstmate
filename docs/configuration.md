@@ -1576,6 +1576,7 @@ An undeclared, missing, or signed-out entry refuses rather than falling back to 
 The spawn line and the task record carry the entry as `account=`.
 
 A relaunch or recovery of that task keeps its recorded account, re-checking that it is still declared and signed in before the running worker stops.
+A [dispatch profile](#crew-dispatch-profiles-configcrew-dispatchjson) may fix the account itself with an optional `account` field, which `bin/fm-dispatch-resolve.sh` passes through as `--account` on its `profile:` line; the spawn applies the same membership and sign-in refusals to it.
 To move a task to another declared account, for example when its own account is exhausted, relaunch it explicitly with `bin/fm-control.sh <id> relaunch --account <entry> --note <text>`; nothing moves a running task automatically.
 A task with no recorded account, or one whose account is no longer declared, refuses a plain relaunch and needs that explicit `--account`.
 
@@ -1816,7 +1817,7 @@ Firstmate cannot see which part of a worker's life uses the resource, so the num
 
 `config/crew-dispatch.json` is an optional local, gitignored file containing natural-language rules that firstmate reads before dispatching a crewmate or scout.
 Firstmate chooses the best matching rule with judgment; shell scripts do not match the natural-language rules.
-Firstmate resolves the rule's profile object or array under `AGENTS.md` section 4 and `quota-array-dispatch`, then passes only concrete `--harness`, `--model`, and `--effort` flags to `fm-spawn.sh`.
+Firstmate resolves the rule's profile object or array under `AGENTS.md` section 4 and `quota-array-dispatch`, then passes only concrete `--harness`, `--model`, `--effort`, and (for a Claude profile that names one) `--account` flags to `fm-spawn.sh`.
 
 **Spawn requirements**
 
@@ -1860,6 +1861,7 @@ This section is the single owner of the canonical schema and its per-field seman
 | `use` and optional top-level `default` | Accept one profile object or a non-empty array of profile objects; the single-object form remains fully backward-compatible. |
 | Profile `harness` | Required in every profile. |
 | Profile `model` and `effort`; rule `why` | Optional. |
+| Profile `account` | Optional, Claude profiles only: one [`config/claude-accounts`](#several-claude-accounts-configclaude-accounts) entry (`ordinary`, an absolute path, or `token:<absolute path>`), passed through as `--account`; `fm-spawn.sh` still refuses it unless the home declares that entry. |
 | Top-level `preferred_provider` | Optional provider-family preference, applied after eligibility checks under `quota-array-dispatch`. |
 | Top-level `shared_quota` | Optional; see "Shared-quota opt-out" below. |
 
