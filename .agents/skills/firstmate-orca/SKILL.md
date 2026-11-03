@@ -61,7 +61,7 @@ The stable firstmate alias is `fm-<id>`.
 The recorded `terminal=` and `orca_worktree_id=` fields are what backend helpers use under the hood.
 
 If an ordinary steer fails to enqueue, or a typed-plane `fm-send` fails to submit, do not immediately repeat the instruction.
-Read the reported failure and peek first, then decide whether the record exists or the target is busy, waiting on a prompt, stuck behind a popup, or genuinely wedged.
+Read the reported failure, then peek the recorded endpoint - in Orca's UI instead when the failure names a replacement pane, because `fm-peek` reads the recorded handle and cannot follow retargeting - and decide whether the record exists or the target is busy, waiting on a prompt, stuck behind a popup, or genuinely wedged.
 For harness-specific interrupts or exits, load `harness-adapters`.
 
 ## Recovery
