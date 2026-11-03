@@ -47,7 +47,7 @@ run_gnhf() {
   if [ -n "${TELEMETRY:-}" ]; then envs+=(GNHF_TELEMETRY="$TELEMETRY"); fi
   if [ -n "${FAKE_RC:-}" ]; then envs+=(FM_GNHF_TEST_RC="$FAKE_RC"); fi
   rm -f "$CALL"
-  OUT=$(env "${envs[@]}" "$LAUNCHER" "$@" 2>&1)
+  OUT=$(env -u FM_GNHF_RUN_AUTH -u GNHF_TELEMETRY -u FM_GNHF_TEST_RC "${envs[@]}" "$LAUNCHER" "$@" 2>&1)
   RC=$?
   AUTH=
   TELEMETRY=

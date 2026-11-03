@@ -241,8 +241,30 @@ fm_gnhf_status "working" "gnhf run $RUN_ID started for $PROJECT in $LOCATION (mo
 gnhf_rc=0
 (
   cd "$PROJECT_DIR" || exit 1
+  # The authorization covers this one run; the worker must not pass it on.
+  unset FM_GNHF_RUN_AUTH
   exec "$GNHF_BIN" ${RUN_ARGS[@]+"${RUN_ARGS[@]}"}
-) || gnhf_rc=$?
+) &
+GNHF_PID=$!
+
+# shellcheck disable=SC2329 # invoked via trap
+fm_gnhf_terminate() { # <signal-name> <exit-code>
+  trap '' TERM INT HUP
+  kill -TERM "$GNHF_PID" 2>/dev/null
+  wait "$GNHF_PID" 2>/dev/null
+  fm_gnhf_status "failed" "gnhf run $RUN_ID stopped by SIG$1; inspect the run record and any preserved worktree"
+  exit "$2"
+}
+trap 'fm_gnhf_terminate TERM 143' TERM
+trap 'fm_gnhf_terminate INT 130' INT
+trap 'fm_gnhf_terminate HUP 129' HUP
+
+while :; do
+  wait "$GNHF_PID" && gnhf_rc=0 || gnhf_rc=$?
+  # A trapped signal interrupts wait with >128 while the child still runs.
+  kill -0 "$GNHF_PID" 2>/dev/null || break
+done
+trap - TERM INT HUP
 
 if [ "$gnhf_rc" -eq 0 ]; then
   fm_gnhf_status "done" "gnhf run $RUN_ID exited 0; its unlanded work awaits review through $MODE (merge authority $YOLO)"
