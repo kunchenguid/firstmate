@@ -3965,6 +3965,47 @@ SH
   pass "herdr projection teardown closes its exact pane, restoring focus, before returning the copy that holds its shell"
 }
 
+test_herdr_projection_teardown_refused_close_preserves_task_and_copy() {
+  local case_dir log closed restored wt process_pid rc=0 process_survived=0
+  case_dir=$(make_case herdr-projection-refused-close)
+  write_meta "$case_dir" local-only ship
+  configure_herdr_projection_teardown_case "$case_dir"
+  printf 'running\n' > "$case_dir/state/task-x1.status"
+  wt="$case_dir/wt"
+  log="$case_dir/herdr.log"; closed="$case_dir/closed"; restored="$case_dir/restored"; : > "$log"
+  cat > "$case_dir/fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+printf 'treehouse %s\n' "$*" >> "${FM_FAKE_HERDR_LOG:?}"
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/treehouse"
+
+  perl -e 'chdir $ARGV[0] or die $!; exec "sleep", "300" or die $!' "$wt" &
+  process_pid=$!
+  sleep 0.1
+  FM_FAKE_HERDR_LOG="$log" FM_FAKE_HERDR_CLOSED="$closed" FM_FAKE_HERDR_RESTORED="$restored" \
+    FM_FAKE_HERDR_CLOSE_FAIL=1 \
+    run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  kill -0 "$process_pid" 2>/dev/null && process_survived=1
+  kill "$process_pid" 2>/dev/null || true
+  wait "$process_pid" 2>/dev/null || true
+
+  expect_code 1 "$rc" "herdr-projection-refused-close: teardown should fail after the exact pane remains present"
+  [ "$process_survived" = 1 ] \
+    || fail "herdr-projection-refused-close: teardown reaped the pane shell in the task copy after the close was refused"
+  assert_not_contains "$(cat "$log")" "treehouse return" \
+    "herdr-projection-refused-close: teardown returned the task copy after the close was refused"
+  assert_present "$case_dir/state/task-x1.meta" \
+    "herdr-projection-refused-close: refusal erased the task metadata"
+  assert_present "$case_dir/state/task-x1.status" \
+    "herdr-projection-refused-close: refusal erased the task status"
+  assert_present "$case_dir/state/task-x1.herdr-presentation" \
+    "herdr-projection-refused-close: refusal erased the presentation journal"
+  assert_grep "not confirmed gone" "$case_dir/stderr" \
+    "herdr-projection-refused-close: refusal did not explain why teardown stopped"
+  pass "herdr projection teardown retains the task, pane shell, and leased copy after a refused close"
+}
+
 # A task's per-task watcher markers (.seen-<id>_status, .seen-<id>_turn-ended,
 # .hb-surfaced-<id>) and an orphaned presentation journal - one whose pane the
 # close path proved gone without retiring it - must not outlive teardown, while
@@ -6032,6 +6073,7 @@ test_herdr_projection_teardown_retires_journal_only_after_confirmed_close
 test_herdr_projection_teardown_retains_journal_when_close_unconfirmed
 test_herdr_projection_teardown_surfaces_restore_failure_without_blocking_cleanup
 test_herdr_projection_teardown_closes_pane_before_returning_its_copy
+test_herdr_projection_teardown_refused_close_preserves_task_and_copy
 test_teardown_retires_task_watcher_markers_and_orphan_journal
 test_teardown_retains_journal_bound_to_another_pane
 test_teardown_retires_v1_journal_when_projected_workspace_gone
