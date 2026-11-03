@@ -195,13 +195,7 @@ state_value() { # <id>; prints recovery-grade state
 }
 
 print_route() { # <id>
-<<<<<<< HEAD
-  local id=$1 harness model effort traceparent rex_session_id rex_server
-||||||| parent of 0bbf58d3 (fix(watch): prove a remote secondmate's start through observe --start-proof)
-  local id=$1 harness model effort traceparent
-=======
-  local id=$1 harness model effort traceparent busy_gen
->>>>>>> 0bbf58d3 (fix(watch): prove a remote secondmate's start through observe --start-proof)
+  local id=$1 harness model effort traceparent rex_session_id rex_server busy_gen
   remote_endpoint_require "$id"
   harness=$(fm_meta_get "$REMOTE_ENDPOINT_META" harness)
   model=$(fm_meta_get "$REMOTE_ENDPOINT_META" model)

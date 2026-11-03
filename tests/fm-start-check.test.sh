@@ -455,8 +455,10 @@ test_remote_secondmate_reads_route() {
   ln -s "$ROOT/bin/fm-crew-state.sh" "$TMP_ROOT/hanging-route/fm-crew-state.sh"
   local saved_script_dir=$SCRIPT_DIR start elapsed
   SCRIPT_DIR=$TMP_ROOT/hanging-route
-  FM_START_CHECK_ROUTE_SECS=1
-  START_CHECK_ROUTE_SECS=1
+  # Three whole seconds, so a clock-second boundary inside the tick cannot spend
+  # the budget before the deferred record gets its turn.
+  FM_START_CHECK_ROUTE_SECS=3
+  START_CHECK_ROUTE_SECS=3
   start=$(date +%s)
   start_check_tick 1200 || fail "tick failed for a timed-out route"
   elapsed=$(($(date +%s) - start))
@@ -486,11 +488,13 @@ test_spent_route_budget_defers_remote_record() {
   real=$(declare -f start_check_remote)
   arm_remote b1
   arm_remote b2
-  START_CHECK_ROUTE_SECS=1
+  # Budgets are whole seconds; 3 survives a clock-second boundary in the next
+  # tick, and the 4s answer below always spends it in this one.
+  START_CHECK_ROUTE_SECS=3
   start_check_remote() {  # b1 answers slowly but proves its start
     WATCHER_CAPTURE=
     case "$1:$2" in
-      b1:observe) sleep 2; WATCHER_CAPTURE=$(remote_proof busy) ;;
+      b1:observe) sleep 4; WATCHER_CAPTURE=$(remote_proof busy) ;;
       b2:observe) WATCHER_CAPTURE=$(remote_proof idle) ;;
       *) return 1 ;;
     esac

@@ -1585,17 +1585,10 @@ spawn_remote_secondmate() {
   remote_backend=$(printf '%s\n' "$out" | sed -n 's/^backend=//p' | tail -1)
   remote_target=$(printf '%s\n' "$out" | sed -n 's/^target=//p' | tail -1)
   remote_harness=$(printf '%s\n' "$out" | sed -n 's/^harness=//p' | tail -1)
-<<<<<<< HEAD
-  if [ "$remote_backend" != "$backend" ]; then
-||||||| parent of 0bbf58d3 (fix(watch): prove a remote secondmate's start through observe --start-proof)
-  remote_herdr_session=$(printf '%s\n' "$out" | sed -n 's/^herdr_session=//p' | tail -1)
-  if [ "$remote_backend" != herdr ]; then
-=======
   remote_herdr_session=$(printf '%s\n' "$out" | sed -n 's/^herdr_session=//p' | tail -1)
   remote_busy_gen=$(printf '%s\n' "$out" | sed -n 's/^busy_gen=//p' | tail -1)
   case "$remote_busy_gen" in *[!A-Za-z0-9._-]*) remote_busy_gen= ;; esac
   if [ "$remote_backend" != herdr ]; then
->>>>>>> 0bbf58d3 (fix(watch): prove a remote secondmate's start through observe --start-proof)
     fm_lock_release "$remote_lock" || true
     fm_lock_release "$registry_lock" || true
     fm_lock_release "$SPAWN_TASK_LOCK" || true
