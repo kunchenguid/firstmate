@@ -135,7 +135,10 @@ for order in before-text before-text-fresh before-enter pending second-enter ori
     expected=1
     case "$order/$mode" in
       original-*/success) expected=0 ;;
-      before-text/failure) ;;
+      # The doorbell text was accepted, so a failed Enter is never a proven
+      # non-delivery: on a replacement endpoint it leaves the ring deferred
+      # (docs/orca-backend.md), exactly like a literal failure before typing.
+      before-text/failure|before-enter/failure) ;;
       */failure) expected=2 ;;
     esac
     [ "$out" = "$expected" ] || fail "$order/$mode: expected status $expected, got $out"
