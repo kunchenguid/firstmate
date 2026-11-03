@@ -14,15 +14,6 @@
 # charters still use a single `{TASK}` charter fill. Firstmate may adjust other
 # sections when the task genuinely deviates (e.g. working an existing external
 # PR instead of shipping a new one).
-# A ship or scout `# Task` section also carries four required task fields, each
-# scaffolded as its own section with a fill placeholder: `## Acceptance
-# criteria` (`{ACCEPTANCE_CRITERIA}`), `## Verification path`
-# (`{VERIFICATION_PATH}`), `## Required artifact` (`{REQUIRED_ARTIFACT}`), and
-# `## Out of scope` (`{OUT_OF_SCOPE}`). They state what "done" means, how it is
-# proven, what the task produces, and what it does not cover.
-# bin/fm-brief-heading-lib.sh owns the field list, and bin/fm-spawn.sh and
-# bin/fm-promote.sh refuse a brief whose field is missing, empty, or still its
-# placeholder, so a task cannot reach a worker without them.
 # Usage: fm-brief.sh <task-id> <repo-name> --mode <no-mistakes|direct-PR|local-only> [--branch-prefix <prefix>] [--base-branch <branch>] [--forge <none|gerrit|forgejo|external> [--shape squash]] [--pr <auto|manual>] [--herdr-lab]
 #        fm-brief.sh <task-id> <repo-name> --scout [--base-branch <branch>] [--herdr-lab]
 #        fm-brief.sh <task-id> --secondmate {<project>...|--no-projects}
@@ -657,18 +648,6 @@ IFS= read -r -d '' TASK_SECTION <<'EOF' || true
 
 ## Firstmate spec
 {FIRSTMATE_SPEC}
-
-## Acceptance criteria
-{ACCEPTANCE_CRITERIA}
-
-## Verification path
-{VERIFICATION_PATH}
-
-## Required artifact
-{REQUIRED_ARTIFACT}
-
-## Out of scope
-{OUT_OF_SCOPE}
 EOF
 TASK_SECTION=${TASK_SECTION%$'\n'}
 
@@ -774,7 +753,7 @@ When the report is complete, append \`done [at=<epoch>]: {one-line conclusion}\`
 If your findings reveal work that should ship (e.g. you reproduced a bug and the fix is clear), say so in the report; firstmate may promote this task in place, and you would then receive mode-specific ship instructions as a follow-up message.
 EOF
 append_brief_include
-echo "scaffolded: $BRIEF (scout; replace {TASK}, {FIRSTMATE_SPEC}, {ACCEPTANCE_CRITERIA}, {VERIFICATION_PATH}, {REQUIRED_ARTIFACT}, and {OUT_OF_SCOPE})"
+echo "scaffolded: $BRIEF (scout; replace {TASK} and {FIRSTMATE_SPEC})"
 exit 0
 fi
 
@@ -854,11 +833,11 @@ $DOD
 EOF
 append_brief_include
 if [ "$PR_TEXT" = manual ]; then
-  echo "scaffolded: $BRIEF (ship, mode=$MODE pr=manual; replace {TASK}, {FIRSTMATE_SPEC}, {ACCEPTANCE_CRITERIA}, {VERIFICATION_PATH}, {REQUIRED_ARTIFACT}, and {OUT_OF_SCOPE})"
+  echo "scaffolded: $BRIEF (ship, mode=$MODE pr=manual; replace {TASK} and {FIRSTMATE_SPEC})"
 elif [ "$FORGE" = none ]; then
-  echo "scaffolded: $BRIEF (ship, mode=$MODE; replace {TASK}, {FIRSTMATE_SPEC}, {ACCEPTANCE_CRITERIA}, {VERIFICATION_PATH}, {REQUIRED_ARTIFACT}, and {OUT_OF_SCOPE})"
+  echo "scaffolded: $BRIEF (ship, mode=$MODE; replace {TASK} and {FIRSTMATE_SPEC})"
 elif [ "$FORGE" = gerrit ]; then
-  echo "scaffolded: $BRIEF (ship, mode=$MODE forge=$FORGE shape=$SHAPE; replace {TASK}, {FIRSTMATE_SPEC}, {ACCEPTANCE_CRITERIA}, {VERIFICATION_PATH}, {REQUIRED_ARTIFACT}, and {OUT_OF_SCOPE})"
+  echo "scaffolded: $BRIEF (ship, mode=$MODE forge=$FORGE shape=$SHAPE; replace {TASK} and {FIRSTMATE_SPEC})"
 else
-  echo "scaffolded: $BRIEF (ship, mode=$MODE forge=$FORGE; replace {TASK}, {FIRSTMATE_SPEC}, {ACCEPTANCE_CRITERIA}, {VERIFICATION_PATH}, {REQUIRED_ARTIFACT}, and {OUT_OF_SCOPE})"
+  echo "scaffolded: $BRIEF (ship, mode=$MODE forge=$FORGE; replace {TASK} and {FIRSTMATE_SPEC})"
 fi
