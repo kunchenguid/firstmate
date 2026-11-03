@@ -116,6 +116,8 @@
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=bin/fm-timeout-lib.sh
+. "$SCRIPT_DIR/fm-timeout-lib.sh"
 
 FM_OSC7501_MSG_MAX=${FM_OSC7501_MSG_MAX:-120}
 FM_OSC7501_TITLE_MAX=${FM_OSC7501_TITLE_MAX:-64}
@@ -213,23 +215,14 @@ osc_env_aware() {
 # osc_probe_version <bin> -> first x.y.z in `<bin> --version`, bounded by
 # FM_OSC7501_PROBE_SECS and run at every launch.
 osc_probe_version() { # <bin>
-  local rp tmp pid i ver
+  local rp tmp ver
   rp=$(command -v "$1" 2>/dev/null) || rp=$1
   case "$rp" in /*) ;; *) return 1 ;; esac
   tmp=$(mktemp "${TMPDIR:-/tmp}/fm-osc7501.XXXXXX") || return 1
-  ( "$rp" --version >"$tmp" 2>/dev/null ) & pid=$!
-  i=0
-  while kill -0 "$pid" 2>/dev/null && [ "$i" -lt "$(( ${FM_OSC7501_PROBE_SECS%.*} * 10 ))" ]; do
-    sleep 0.1
-    i=$((i + 1))
-  done
-  if kill -0 "$pid" 2>/dev/null; then
-    kill "$pid" 2>/dev/null
-    wait "$pid" 2>/dev/null
-    ver=
-  else
-    wait "$pid" 2>/dev/null
+  if fm_run_timed "$FM_OSC7501_PROBE_SECS" "$rp" --version >"$tmp" 2>/dev/null; then
     ver=$(grep -Eo '[0-9]+\.[0-9]+\.[0-9]+' "$tmp" 2>/dev/null | head -1)
+  else
+    ver=
   fi
   rm -f "$tmp"
   [ -n "${ver:-}" ] || return 1

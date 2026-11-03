@@ -238,6 +238,70 @@ t_native_claude_skips_everything() {
   pass "native gate: claude >= 2.1.295 emits no probe and arms no watcher"
 }
 
+# Contract: arm must not delay the worker indefinitely on a version probe.
+# A TERM-resistant executable and child reject the old TERM-then-wait hang;
+# the worker marker proves the ordinary launch sequence actually continued.
+t_term_resistant_probe_allows_worker_launch() {
+  local d=$TMP_ROOT/stubbornprobe
+  mkhome "$d"
+  if ! env "${CLEAN_UNSET[@]}" python3 - "$SCRIPT" "$d" <<'PYTEST'
+import os, signal, subprocess, sys, time
+from pathlib import Path
+script, home = sys.argv[1:]
+root = Path(home)
+agent = root / "claude"
+agent.write_text("#!" + sys.executable + "\n" + '''import os, signal, sys
+from pathlib import Path
+root = Path(__file__).parent
+if "--version" not in sys.argv:
+    (root / "worker-started").touch()
+    sys.exit(0)
+signal.signal(signal.SIGTERM, signal.SIG_IGN)
+child = os.fork()
+with (root / "probe-pids").open("a") as f:
+    f.write(str(os.getpid()) + "\\n")
+while True:
+    signal.pause()
+''')
+agent.chmod(0o755)
+tty = root / "tty"
+tty.touch()
+env = dict(os.environ, HC_TERMINAL_ID="test", FM_OSC7501_TTY=str(tty),
+           FM_OSC7501_PROBE_SECS="1")
+args = ["bash", script, "arm", "--task", "stubborn", "--harness", "claude",
+        "--agent-bin", str(agent), "--backend", "tmux", "--kind", "ship",
+        "--state", str(root / "state"), "--config", str(root / "config")]
+launch = subprocess.Popen(["bash", "-c", '"$@"; exec "$AGENT"', "_", *args],
+                          env=dict(env, AGENT=str(agent)), start_new_session=True)
+try:
+    started = time.monotonic()
+    assert launch.wait(timeout=6) == 0, "worker launch failed"
+    assert time.monotonic() - started < 6, "probe exceeded launch bound"
+    assert (root / "worker-started").exists(), "worker never started"
+    pids = (root / "probe-pids").read_text().splitlines()
+    assert len(pids) == 2, "probe did not exercise a descendant"
+    assert not list((root / "state").glob(".osc7501watch-*")), "failed probe armed a reporter"
+    assert tty.read_bytes() == b"", "failed native probe wrote terminal records"
+finally:
+    try:
+        os.killpg(launch.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    pidfile = root / "probe-pids"
+    if pidfile.exists():
+        for pid in pidfile.read_text().splitlines():
+            try:
+                os.kill(int(pid), signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+    launch.wait()
+PYTEST
+  then
+    fail "TERM-resistant version probe prevented bounded worker launch"
+  fi
+  pass "native gate: TERM-resistant probe and child cannot block worker launch"
+}
+
 # An old claude below the native floor falls through to the generic reporter.
 t_old_claude_uses_generic() {
   local d=$TMP_ROOT/oldclaude
@@ -1002,6 +1066,7 @@ fm_test_run \
   t_status_transitions_and_final_done \
   t_final_idle_after_working \
   t_native_claude_skips_everything \
+  t_term_resistant_probe_allows_worker_launch \
   t_old_claude_uses_generic \
   t_launch_without_agent_bin_skips \
   t_inplace_upgrade_reprobes_native \
