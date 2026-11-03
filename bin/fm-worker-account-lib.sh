@@ -71,7 +71,7 @@
 #
 # A `token:<absolute path>` entry is a subscription that has no config root of
 # its own, reached through a long-lived `claude setup-token` OAuth token kept
-# in an owner-only (0600) file. Its launch leaves CLAUDE_CONFIG_DIR unset like
+# in an owner-only file (no group or other access). Its launch leaves CLAUDE_CONFIG_DIR unset like
 # `ordinary`, sheds the same credentials, and runs the agent through
 # bin/fm-claude-token-exec.sh, which reads the file and exports
 # CLAUDE_CODE_OAUTH_TOKEN for that one process. The token value is never an
