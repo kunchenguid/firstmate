@@ -2265,18 +2265,19 @@ JS
 # terminal shapes this backend creates, so an absent field must fall back to
 # the rendered stream: that is the only thing that lets a pending own doorbell
 # on a replacement pane receive its Enter. An unreadable draft still defers.
-# The draft seen while the composer was classified is retained, so a second
-# read that omits the field cannot erase known foreign text.
+# The draft a capture answered with decides that capture's own ownership
+# check. A later capture supersedes it, so an earlier check's own doorbell
+# cannot authorize Enter on a capture that publishes no draft.
 test_structured_own_doorbell_submits_without_retyping() {
-  local target state rec line out expected mode before history unreadable foreign
+  local target state rec line out expected mode before history unreadable foreign stale_cache
   for target in term-stale term-live; do
-    for mode in blank-own history-own history-foreign cached-foreign-absent absent-own absent-unreadable absent-malformed absent-null; do
+    for mode in blank-own history-own history-foreign cached-foreign-absent cached-own-absent absent-own absent-unreadable absent-malformed absent-null; do
     # The cached draft has to decide the replacement gate, where classification
     # and ownership run in one shell. On the original endpoint the accumulated
     # stream fallback is the intended pre-structured-draft behaviour and the
     # two-Enter budget applies, so those shapes are covered on replacements.
     case "$target/$mode" in
-      term-live/cached-foreign-absent|term-live/absent-own) continue ;;
+      term-live/cached-foreign-absent|term-live/cached-own-absent|term-live/absent-own) continue ;;
     esac
     orca_case "structured-$mode-$target"
     state="$CASE_DIR/state"
@@ -2288,9 +2289,12 @@ test_structured_own_doorbell_submits_without_retyping() {
     case "$mode" in
       history-foreign|cached-foreign-absent|absent-unreadable|absent-malformed|absent-null) foreign=1 ;;
     esac
+    stale_cache=0
+    [ "$mode" != cached-own-absent ] || stale_cache=1
     printf '%s' "$line" > "$CASE_DIR/draft"
     [ "$foreign" -eq 0 ] || printf 'human foreign draft' > "$CASE_DIR/draft"
     printf '%s' "$line" > "$CASE_DIR/doorbell"
+    printf 'human foreign draft' > "$CASE_DIR/foreign"
     : > "$CASE_DIR/inputs"
     cat > "$FB/orca" <<'JS'
 #!/usr/bin/env node
@@ -2300,10 +2304,9 @@ const dir = process.env.FM_ORCA_TEST_DIR;
 const mode = process.env.FM_ORCA_TEST_MODE || '';
 const terminal = args[args.indexOf('--terminal') + 1];
 const reply = data => process.stdout.write(JSON.stringify(data));
-const boxed = () => {
-  const line = fs.readFileSync(dir + '/doorbell','utf8');
-  const rule = '─'.repeat(line.length + 4);
-  return ['╭' + rule + '╮','│ > ' + line + ' │','╰' + rule + '╯'];
+const boxed = text => {
+  const rule = '─'.repeat(text.length + 4);
+  return ['╭' + rule + '╮','│ > ' + text + ' │','╰' + rule + '╯'];
 };
 if (args[1] === 'list') {
   reply({ok:true,result:{terminals:[{handle:'term-live',writable:true,connected:true}]}});
@@ -2324,10 +2327,17 @@ if (args[1] === 'list') {
   } else {
     if (screenRead) fs.writeFileSync(dir + '/screen-reads', String(seen + 1));
     let tail = ['────────','❯','────────'];
-    if (mode.startsWith('absent-') && !submitted) tail = boxed();
-    if (!screenRead && process.env.FM_ORCA_TEST_HISTORY === '1') tail = boxed();
+    if (mode.startsWith('absent-') && !submitted) tail = boxed(fs.readFileSync(dir + '/doorbell','utf8'));
+    if (!screenRead && process.env.FM_ORCA_TEST_HISTORY === '1') tail = boxed(fs.readFileSync(dir + '/doorbell','utf8'));
     let withDraft = !mode.startsWith('absent-');
     if (mode === 'cached-foreign-absent' && seen > 0) withDraft = false;
+    // Separation of two replacement checks: the first captures this ring's own
+    // doorbell in the structured draft, a later capture finds foreign composer
+    // text and publishes no draft field at all, in screen and stream alike.
+    if (mode === 'cached-own-absent' && seen > 0) {
+      withDraft = false;
+      tail = boxed(fs.readFileSync(dir + '/foreign','utf8'));
+    }
     const result = {tail};
     if (withDraft) result.draft = fs.readFileSync(dir + '/draft','utf8');
     reply({ok:true,result:{terminal:result}});
@@ -2357,6 +2367,7 @@ JS
     expected=0
     [ "$target" != term-stale ] || expected=1
     [ "$foreign" -eq 0 ] || expected=1
+    [ "$stale_cache" -eq 0 ] || expected=1
     [ "$out" = "$expected" ] || fail "$target structured own doorbell: expected $expected, got $out"
     [ "$(cat "$state/ownstructured.meta")" = "$before" ] || fail "$mode rewrote metadata"
     [ -f "$rec" ] || fail "$mode lost the durable record"
@@ -2369,6 +2380,15 @@ JS
       if [ "$mode" = cached-foreign-absent ]; then
         [ "$(cat "$CASE_DIR/screen-reads")" = 1 ] || fail "$mode re-read a pane whose foreign draft was already known"
       fi
+      continue
+    fi
+    if [ "$stale_cache" -eq 1 ]; then
+      # A doorbell remembered by an earlier check must never authorize Enter on
+      # a later capture, whose absent draft field means "no structured draft"
+      # (plain-capture fallback), not "the earlier answer still stands".
+      [ "$(cat "$CASE_DIR/screen-reads")" = 2 ] || fail "$mode did not run two separate capture checks"
+      [ ! -s "$CASE_DIR/inputs" ] || fail "$mode: a remembered doorbell authorized Enter on a later capture"
+      [ "$(cat "$CASE_DIR/draft")" = "$line" ] || fail "$mode changed the composer text"
       continue
     fi
     [ "$(cat "$CASE_DIR/submitted")" = "$line" ] || fail "structured own doorbell was not submitted intact"

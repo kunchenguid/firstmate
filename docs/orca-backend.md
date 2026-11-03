@@ -67,7 +67,7 @@ Dialog detection and recording inspect the original rendered screen first and ta
 Inbox ownership checks use Orca's structured draft as the sole authority whenever a read publishes it, including an empty draft.
 Live orca 1.4.232 omits `result.terminal.draft` for the shell and agent terminal shapes this backend creates, so an absent or non-string field means that terminal publishes no structured draft and ownership falls back to plain capture of the rendered composer.
 A structured draft that exists but cannot be read (parse error, null root, `ok: false`, or a failed read) defers the ring instead of falling back to accumulated stream text, which can still show an earlier ring's own doorbell beside the foreign draft that is really in the composer.
-The draft seen when the composer was classified is retained for the ownership check, so a later absent field cannot erase known foreign text.
+The draft a capture answered with decides the ownership check for that capture; every later capture supersedes it, so an own doorbell remembered by an earlier check can never authorize Enter on a later capture whose absent field means "no structured draft" rather than "the earlier answer still stands".
 An empty replacement may receive the doorbell text, but never a bare inbox Enter.
 Immediately before Enter on a replacement, including after the settle delay, the inbox gate requires the pane to still hold its own doorbell and refuses empty, foreign draft, busy, unreadable, or blocking-dialog states without pressing Enter.
 Any inbox Enter on a replacement leaves the ring deferred and stops further Enter attempts in that send, even if the Enter was accepted.

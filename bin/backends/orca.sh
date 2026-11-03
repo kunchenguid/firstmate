@@ -398,8 +398,9 @@ fm_backend_orca_check_replacement() {
     echo "error: blocked on a prompt: $dialog" >&2
     return 1
   fi
-  # Keep the draft this capture already answered with: the ownership re-read
-  # must not lose known foreign text when the pane later omits the field.
+  # Let this capture's own answer decide the ownership check below, instead of
+  # a re-read that can omit the field and lose known foreign text. A later
+  # capture always supersedes it, so it cannot carry into another check.
   fm_backend_orca_remember_draft "$1" "$json"
   if [ -n "${FM_TASK_INBOX_RING_LINE:-}" ]; then
     cstate=$(fm_backend_orca_classify_composer "$json" "$cap")
@@ -559,29 +560,32 @@ try {
 '
 }
 
-# fm_backend_orca_remember_draft: retain the structured draft from the capture
-# that classification already made, keyed by the terminal it came from. Only a
-# present string draft is recorded; an absent field leaves an earlier known
-# answer standing, so a later re-read cannot erase it.
+# fm_backend_orca_remember_draft: record the draft ONE capture answered with, so
+# the ownership decision for that capture is made from it instead of a re-read.
+# Every capture that classifies calls this, so each one supersedes whatever an
+# earlier check remembered: the answer is the capture's own three-way result
+# (present, absent, or unreadable), and a later absent field leaves "no
+# structured draft" for that capture rather than an earlier check's doorbell.
+# This is the single boundary those consumers share - a remembered answer can
+# never outlive the capture it came from.
 fm_backend_orca_remember_draft() {  # <terminal-id> <json>
-  local draft
-  draft=$(fm_backend_orca_draft_of_json "$2") || return 0
-  FM_ORCA_LAST_DRAFT=$draft
+  local rc=0 draft
+  draft=$(fm_backend_orca_draft_of_json "$2") || rc=$?
   FM_ORCA_LAST_DRAFT_TERMINAL=$1
-  FM_ORCA_LAST_DRAFT_PRESENT=1
-  return 0
+  FM_ORCA_LAST_DRAFT=$draft
+  FM_ORCA_LAST_DRAFT_STATE=$rc
 }
 
 # fm_backend_orca_composer_draft: the structured draft for <terminal-id>, from
-# the classification-time cache when it has one for that terminal, otherwise a
-# fresh read. The cache matters because an absent field on the ownership re-read
-# would otherwise license stream fallback beside a known foreign draft.
+# the capture it was just classified from when that capture answered, otherwise
+# a fresh read. Exit codes are fm_backend_orca_draft_of_json's.
 fm_backend_orca_composer_draft() {  # <terminal-id>
-  local json
-  if [ "${FM_ORCA_LAST_DRAFT_PRESENT:-0}" = 1 ] \
-     && [ "${FM_ORCA_LAST_DRAFT_TERMINAL:-}" = "$1" ]; then
-    printf '%s' "${FM_ORCA_LAST_DRAFT:-}"
-    return 0
+  local json rc draft
+  if [ -n "${FM_ORCA_LAST_DRAFT_TERMINAL:-}" ] \
+     && [ "${FM_ORCA_LAST_DRAFT_TERMINAL}" = "$1" ]; then
+    rc=${FM_ORCA_LAST_DRAFT_STATE:-3} draft=${FM_ORCA_LAST_DRAFT:-}
+    printf '%s' "$draft"
+    return "$rc"
   fi
   json=$(fm_backend_orca_composer_capture "$1" "" json) || return 3
   fm_backend_orca_draft_of_json "$json"
