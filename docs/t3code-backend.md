@@ -88,7 +88,7 @@ This gate replaces the HTTP dispatch probe and version floor of the pre-V2 trans
 Each ship or scout task has one Treehouse worktree, leased durably with `treehouse get --lease --lease-holder <id>`, and one T3 thread launched with the `existing_worktree` workspace strategy on that worktree.
 A secondmate's T3 project is its home and its thread is launched with the `root` workspace strategy, so the agent runs in the home on whatever branch the home is on.
 T3 assigns the thread id at launch (`mcp:<uuid>`), and the task records it as `t3_thread_id`.
-The normal isolation and unlanded-work refusal rules still apply.
+The normal isolation and durable-retention refusal rules still apply.
 
 [`configuration.md`](configuration.md#task-metadata) owns the task metadata fields, and its [task-selector contract](configuration.md#task-selectors) owns routing to the recorded thread.
 
@@ -273,7 +273,7 @@ If a task's thread no longer reads back, release the task by hand:
 - While a tracked Codex overlay is installed, do not edit that file or clear its `skip-worktree` flag; configuration changes require cleanup first.
 - Shell typing and Ctrl-U are unsupported; runtime Escape and Ctrl-C still interrupt the turn.
 - A Codex supervisor has no away mode on this backend because it has no tracked background tool for `start-native`, and T3 has no terminal for `start` to create.
-- T3 checkpoints each turn as hidden refs under `refs/t3/orchestration-v2/checkpoints/` in the project clone; they are never pushed and do not affect the landed-work test.
+- T3 checkpoints each turn as hidden refs under `refs/t3/orchestration-v2/checkpoints/` in the project clone; they are never pushed and do not affect the retention proof.
 
 ## Regression entry points
 

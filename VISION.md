@@ -50,7 +50,7 @@ This durability is how the experience holds when attention leaves: confidence th
 Every task gets an explicit contract before it starts: what to build or learn, how it ships, and how much autonomy the worker has; the machinery refuses to guess.
 Ship work lands through the project's chosen delivery rigor; scout work leaves a standalone report; neither is allowed to blur into the other on its own.
 Workers are supervised, not trusted: independent validation, behavioral tests, and the configured merge authority stand between a worker's confidence and anything that lands.
-Unlanded work is never torn down; a refusal to discard is a finding, not an obstacle.
+Work without a durable retention proof is never torn down; a refusal to discard is a finding, not an obstacle.
 A new task shape earns its way in only when existing primitives genuinely cannot compose to cover it; simplicity is a capability the fleet defends.
 
 ## The fleet outlives any vendor
