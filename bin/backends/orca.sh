@@ -398,6 +398,9 @@ fm_backend_orca_check_replacement() {
     echo "error: blocked on a prompt: $dialog" >&2
     return 1
   fi
+  # Keep the draft this capture already answered with: the ownership re-read
+  # must not lose known foreign text when the pane later omits the field.
+  fm_backend_orca_remember_draft "$1" "$json"
   if [ -n "${FM_TASK_INBOX_RING_LINE:-}" ]; then
     cstate=$(fm_backend_orca_classify_composer "$json" "$cap")
     # The old endpoint's advisory read cannot authorize replacement input.
@@ -530,27 +533,58 @@ fm_backend_orca_composer_capture() {  # <terminal-id> [expected-label]
   fi
 }
 
-# fm_backend_orca_composer_draft: the structured `result.terminal.draft`,
-# printed verbatim so an EMPTY draft is an answer, never a failure. Orca always
-# publishes the field, so a read that fails is exit 3 (supported but unreadable)
-# rather than the exit 1 that means "this backend has no structured draft". The
-# distinction is the ownership contract: an unreadable draft must defer, never
-# let bin/fm-task-inbox-lib.sh fall back to accumulated stream text, which can
-# still hold an earlier ring's own doorbell next to the current foreign draft.
-fm_backend_orca_composer_draft() {
-  local json
-  json=$(fm_backend_orca_composer_capture "$1" "" json) || return 3
-  printf '%s' "$json" | node -e '
+# fm_backend_orca_draft_of_json: three-way read of `result.terminal.draft`.
+# Exit 0 prints the draft verbatim, empty included. Exit 1 means the field is
+# absent or not a string, i.e. THIS terminal shape publishes no structured
+# draft - live orca 1.4.232 omits it for the shell and agent terminals this
+# backend creates - so the caller may fall back to plain capture. Exit 3 means
+# a structured draft could not be read (parse error, null root, ok:false, or a
+# failed read), and the caller must defer instead of trusting accumulated
+# stream text, which can still hold an earlier ring's own doorbell next to the
+# current foreign draft.
+fm_backend_orca_draft_of_json() {  # <json>
+  printf '%s' "$1" | node -e '
 try {
   const data = JSON.parse(require("fs").readFileSync(0, "utf8"));
   if (data === null || typeof data !== "object") process.exit(3);
-  const draft = data.result?.terminal?.draft;
-  if (data.ok === false || typeof draft !== "string") process.exit(3);
+  if (data.ok === false) process.exit(3);
+  const terminal = data.result?.terminal;
+  if (!terminal || typeof terminal !== "object") process.exit(1);
+  const draft = terminal.draft;
+  if (typeof draft !== "string") process.exit(1);
   process.stdout.write(draft);
 } catch {
   process.exit(3);
 }
 '
+}
+
+# fm_backend_orca_remember_draft: retain the structured draft from the capture
+# that classification already made, keyed by the terminal it came from. Only a
+# present string draft is recorded; an absent field leaves an earlier known
+# answer standing, so a later re-read cannot erase it.
+fm_backend_orca_remember_draft() {  # <terminal-id> <json>
+  local draft
+  draft=$(fm_backend_orca_draft_of_json "$2") || return 0
+  FM_ORCA_LAST_DRAFT=$draft
+  FM_ORCA_LAST_DRAFT_TERMINAL=$1
+  FM_ORCA_LAST_DRAFT_PRESENT=1
+  return 0
+}
+
+# fm_backend_orca_composer_draft: the structured draft for <terminal-id>, from
+# the classification-time cache when it has one for that terminal, otherwise a
+# fresh read. The cache matters because an absent field on the ownership re-read
+# would otherwise license stream fallback beside a known foreign draft.
+fm_backend_orca_composer_draft() {  # <terminal-id>
+  local json
+  if [ "${FM_ORCA_LAST_DRAFT_PRESENT:-0}" = 1 ] \
+     && [ "${FM_ORCA_LAST_DRAFT_TERMINAL:-}" = "$1" ]; then
+    printf '%s' "${FM_ORCA_LAST_DRAFT:-}"
+    return 0
+  fi
+  json=$(fm_backend_orca_composer_capture "$1" "" json) || return 3
+  fm_backend_orca_draft_of_json "$json"
 }
 
 fm_backend_orca_classify_composer() {
@@ -594,6 +628,7 @@ fm_backend_orca_composer_state() {  # <terminal-id> [expected-label] -> empty|pe
   local cap json verdict
   json=$(fm_backend_orca_composer_capture "$1" "" json) || { printf 'unknown'; return 0; }
   cap=$(fm_backend_orca_json_text "$json") || { printf 'unknown'; return 0; }
+  fm_backend_orca_remember_draft "$1" "$json"
   verdict=$(fm_backend_orca_classify_composer "$json" "$cap")
   [ "$verdict" != need-identity ] || verdict=unknown
   printf '%s' "$verdict"

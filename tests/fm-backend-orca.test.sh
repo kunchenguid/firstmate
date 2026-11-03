@@ -2261,10 +2261,23 @@ JS
   pass "Orca inbox: a foreign draft reported only in result.terminal.draft defers before typing"
 }
 
+# Live orca 1.4.232 omits result.terminal.draft for the shell and agent
+# terminal shapes this backend creates, so an absent field must fall back to
+# the rendered stream: that is the only thing that lets a pending own doorbell
+# on a replacement pane receive its Enter. An unreadable draft still defers.
+# The draft seen while the composer was classified is retained, so a second
+# read that omits the field cannot erase known foreign text.
 test_structured_own_doorbell_submits_without_retyping() {
   local target state rec line out expected mode before history unreadable foreign
   for target in term-stale term-live; do
-    for mode in blank-own history-own history-foreign history-foreign-unreadable history-foreign-malformed history-foreign-null; do
+    for mode in blank-own history-own history-foreign cached-foreign-absent absent-own absent-unreadable absent-malformed absent-null; do
+    # The cached draft has to decide the replacement gate, where classification
+    # and ownership run in one shell. On the original endpoint the accumulated
+    # stream fallback is the intended pre-structured-draft behaviour and the
+    # two-Enter budget applies, so those shapes are covered on replacements.
+    case "$target/$mode" in
+      term-live/cached-foreign-absent|term-live/absent-own) continue ;;
+    esac
     orca_case "structured-$mode-$target"
     state="$CASE_DIR/state"
     write_orca_window_meta "$state" ownstructured term-stale "$CASE_DIR/worktree"
@@ -2272,7 +2285,9 @@ test_structured_own_doorbell_submits_without_retyping() {
     line=$(bash -c '. "$0/bin/fm-task-inbox-lib.sh"; fm_task_inbox_doorbell_line "$1"' "$ROOT" "$rec")
     before=$(cat "$state/ownstructured.meta")
     foreign=0
-    case "$mode" in history-foreign*) foreign=1 ;; esac
+    case "$mode" in
+      history-foreign|cached-foreign-absent|absent-unreadable|absent-malformed|absent-null) foreign=1 ;;
+    esac
     printf '%s' "$line" > "$CASE_DIR/draft"
     [ "$foreign" -eq 0 ] || printf 'human foreign draft' > "$CASE_DIR/draft"
     printf '%s' "$line" > "$CASE_DIR/doorbell"
@@ -2282,8 +2297,14 @@ test_structured_own_doorbell_submits_without_retyping() {
 const fs = require('fs');
 const args = process.argv.slice(2);
 const dir = process.env.FM_ORCA_TEST_DIR;
+const mode = process.env.FM_ORCA_TEST_MODE || '';
 const terminal = args[args.indexOf('--terminal') + 1];
 const reply = data => process.stdout.write(JSON.stringify(data));
+const boxed = () => {
+  const line = fs.readFileSync(dir + '/doorbell','utf8');
+  const rule = '─'.repeat(line.length + 4);
+  return ['╭' + rule + '╮','│ > ' + line + ' │','╰' + rule + '╯'];
+};
 if (args[1] === 'list') {
   reply({ok:true,result:{terminals:[{handle:'term-live',writable:true,connected:true}]}});
 } else if (terminal === 'term-stale') {
@@ -2292,6 +2313,7 @@ if (args[1] === 'list') {
 } else if (args[1] === 'read') {
   const screenRead = args.includes('--screen');
   const seen = fs.existsSync(dir + '/screen-reads') ? Number(fs.readFileSync(dir + '/screen-reads','utf8')) : 0;
+  const submitted = fs.existsSync(dir + '/submitted');
   if (screenRead && process.env.FM_ORCA_TEST_UNREADABLE !== '0' && seen > 0) {
     fs.writeFileSync(dir + '/read-failed','1');
     switch (process.env.FM_ORCA_TEST_UNREADABLE) {
@@ -2302,12 +2324,13 @@ if (args[1] === 'list') {
   } else {
     if (screenRead) fs.writeFileSync(dir + '/screen-reads', String(seen + 1));
     let tail = ['────────','❯','────────'];
-    if (!screenRead && process.env.FM_ORCA_TEST_HISTORY === '1') {
-      const line = fs.readFileSync(dir + '/doorbell','utf8');
-      const rule = '─'.repeat(line.length + 4);
-      tail = ['╭' + rule + '╮','│ > ' + line + ' │','╰' + rule + '╯'];
-    }
-    reply({ok:true,result:{terminal:{tail,draft:fs.readFileSync(dir + '/draft','utf8')}}});
+    if (mode.startsWith('absent-') && !submitted) tail = boxed();
+    if (!screenRead && process.env.FM_ORCA_TEST_HISTORY === '1') tail = boxed();
+    let withDraft = !mode.startsWith('absent-');
+    if (mode === 'cached-foreign-absent' && seen > 0) withDraft = false;
+    const result = {tail};
+    if (withDraft) result.draft = fs.readFileSync(dir + '/draft','utf8');
+    reply({ok:true,result:{terminal:result}});
   }
 } else if (args[1] === 'send') {
   const text = args[args.indexOf('--text') + 1];
@@ -2324,11 +2347,11 @@ JS
     [ "$mode" = blank-own ] || history=1
     unreadable=0
     case "$mode" in
-      history-foreign-unreadable) unreadable=1 ;;
-      history-foreign-malformed) unreadable=malformed ;;
-      history-foreign-null) unreadable=null ;;
+      absent-unreadable) unreadable=1 ;;
+      absent-malformed) unreadable=malformed ;;
+      absent-null) unreadable=null ;;
     esac
-    out=$(FM_ORCA_TEST_HISTORY="$history" FM_ORCA_TEST_UNREADABLE="$unreadable" PATH="$FB:$PATH" FM_ORCA_TEST_DIR="$CASE_DIR" FM_STATE_OVERRIDE="$state" FM_HOME="$CASE_DIR" \
+    out=$(FM_ORCA_TEST_HISTORY="$history" FM_ORCA_TEST_UNREADABLE="$unreadable" FM_ORCA_TEST_MODE="$mode" PATH="$FB:$PATH" FM_ORCA_TEST_DIR="$CASE_DIR" FM_STATE_OVERRIDE="$state" FM_HOME="$CASE_DIR" \
       bash -c '. "$0/bin/fm-task-inbox-lib.sh";
         rc=0; fm_task_inbox_ring orca "$1" "$2" || rc=$?; printf "%s" "$rc"' "$ROOT" "$target" "$rec")
     expected=0
@@ -2343,6 +2366,9 @@ JS
       [ ! -s "$CASE_DIR/inputs" ] || fail "$mode: historical stream text authorized input into a foreign draft"
       [ "$(cat "$CASE_DIR/draft")" = 'human foreign draft' ] || fail "$mode changed the foreign draft"
       [ "$unreadable" = 0 ] || [ -f "$CASE_DIR/read-failed" ] || fail "$mode never exercised an unreadable ownership read"
+      if [ "$mode" = cached-foreign-absent ]; then
+        [ "$(cat "$CASE_DIR/screen-reads")" = 1 ] || fail "$mode re-read a pane whose foreign draft was already known"
+      fi
       continue
     fi
     [ "$(cat "$CASE_DIR/submitted")" = "$line" ] || fail "structured own doorbell was not submitted intact"
@@ -2351,7 +2377,7 @@ JS
       || fail "structured own doorbell was retyped or received multiple Enters"
     done
   done
-  pass "Orca structured own doorbells submit once without retyping on live and replacement panes"
+  pass "Orca structured own doorbells and absent drafts submit once without retyping"
 }
 
 test_structured_draft_preserves_dialog_verdict() {
