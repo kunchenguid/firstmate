@@ -230,6 +230,38 @@ test_matrix_claude_named_session_titled_rule() {
   pass "matrix: a named claude session's titled top rule proves its composer; pi stays unchanged"
 }
 
+test_matrix_claude_rotating_idle_hint() {
+  # Real claude 2.1.317 on Orca 1.4.232 renders its idle composer as
+  # `❯ Try "edit fm-branch-dispatch.ts to..."` (evidence screen-idle-hint.txt).
+  # The dim styled capture proves empty by ghost-stripping the hint; a proven
+  # composer CONTAINER captured without styling (`styled=0`, Orca's profile)
+  # has no such proof, so the fleet-wide idle set must own the hint or the
+  # empty composer reads `pending` and a send refuses. The bare plain row keeps
+  # the documented styled=0 degradation to `unknown` - it is indistinguishable
+  # from typed text (see the cursor placeholder pin), so this asserts the
+  # container path. Real typed text stays pending in every case.
+  local rule idle_styled box bar content typed typed_box claude_idle
+  claude_idle=$(printf 'claude\tidle')
+  rule='────────────────────────────────────────'
+  idle_styled="transcript line"$'\n'"$rule"$'\n❯'"$NBSP${ESC}[0m${ESC}[2m"'Try "edit fm-branch-dispatch.ts to..."'"${ESC}[0m"$'\n'"$rule"$'\n  ⏵⏵ auto mode on (shift+tab to cycle)'
+  # A proven container whose inner width matches both borders: the hint row is
+  # what a styled=0 capture leaves behind, so the width is padded in CHARACTERS
+  # (bash counts the ❯ glyph as one) rather than by printf's byte width.
+  bar=$(printf '%-40s' '' | tr ' ' '-')
+  content='❯ Try "edit fm-branch-dispatch.ts to..."'
+  while [ "${#content}" -lt 40 ]; do content+=' '; done
+  box="+$bar+"$'\n'"|$content|"$'\n'"+$bar+"
+  assert_screen "claude rotating idle hint on herdr" empty "$CAPS_STYLED" "$idle_styled" '' "$claude_idle"
+  assert_screen "claude rotating idle hint in an unstyled container" empty "$CAPS_PLAIN" "$box"
+  typed="transcript line"$'\n'"$rule"$'\n❯ fix the login bug'$'\n'"$rule"
+  assert_screen "claude typed under a rotating-hint rule" pending "$CAPS_STYLED" "$typed" '' "$claude_idle"
+  content='❯ fix the login bug'
+  while [ "${#content}" -lt 40 ]; do content+=' '; done
+  typed_box="+$bar+"$'\n'"|$content|"$'\n'"+$bar+"
+  assert_screen "claude typed in an unstyled container" pending "$CAPS_PLAIN" "$typed_box"
+  pass "matrix: claude's rotating Try idle hint proves an empty composer; typed text stays pending"
+}
+
 test_matrix_claude_arrow_statusline_footer() {
   # Real claude 2.x on herdr (captured live 2026-09-20, herdr 0.8.0): the
   # composer is a bare `❯`+U+00A0 row between two solid rules, and the harness
@@ -1704,6 +1736,7 @@ test_matrix_opencode_leftbar_cwd_furniture
 test_matrix_opencode_leftbar_abs_cwd_furniture
 test_matrix_grok_titled_bottom_border
 test_matrix_claude_titled_top_rule
+test_matrix_claude_rotating_idle_hint
 test_matrix_grok_144_approval_titled_bottom_border
 test_matrix_kimi_bordered_shell_glyph_box
 test_matrix_claude_inside_zellij_ansi_dump

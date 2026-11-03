@@ -627,9 +627,15 @@ FM_COMPOSER_SHELL_PROMPT_GLYPHS=$(printf '%s\n' '>' '$' '%' '#')
 # after its `❯` glyph (verified live, Command Code 1.74.1); its truecolor is too
 # bright for the default ghost ceiling, so fm_composer_classify_screen reads its
 # screen with a raised one. kiro's bare `›` composer needs no entry here: see
-# FM_COMPOSER_HINTED_IDLE_RE_DEFAULT below. FM_COMPOSER_IDLE_RE overrides for an unverified harness;
-# matching is case-insensitive.
-FM_COMPOSER_IDLE_RE_DEFAULT='^Type a message\.\.\.$|^Ask anything(\.\.\.|…)|^Plan, search, build anything$|^Add a follow-up$|^Ask Devin to build features, fix bugs, or work on your code$|^Ask your question\.\.\.$|^Type your message\.\.\.$|^Type to queue message\.\.\.$'
+# FM_COMPOSER_HINTED_IDLE_RE_DEFAULT below. Claude Code renders its idle hint
+# after the `❯` glyph as `Try "<rotating suggestion>"` (verified live as
+# `Try "edit fm-branch-dispatch.ts to..."` against Claude Code 2.1.317 on Orca
+# 1.4.232; evidence screen-idle-hint.txt), anchored on the Try prefix with the
+# quoted tail free like opencode's rotating suggestion; Claude renders that hint
+# only in an EMPTY composer, so typed text never reproduces it.
+# FM_COMPOSER_IDLE_RE overrides for an unverified harness; matching is
+# case-insensitive.
+FM_COMPOSER_IDLE_RE_DEFAULT='^Type a message\.\.\.$|^Ask anything(\.\.\.|…)|^Plan, search, build anything$|^Add a follow-up$|^Ask Devin to build features, fix bugs, or work on your code$|^Ask your question\.\.\.$|^Type your message\.\.\.$|^Type to queue message\.\.\.$|^Try "'
 
 # KIRO ONLY (fm_composer_kiro_scope): idle placeholders that carry a submit hint
 # typed input never renders, so the whole anchored row proves an empty composer
