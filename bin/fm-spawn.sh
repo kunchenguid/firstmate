@@ -6547,9 +6547,13 @@ EOF
 // names retained as legacy inputs. Scoping latches the first session that
 // reports activity and ignores other sessions until the latched session settles,
 // so a child's terminal event can never clear the worker's busy state. The
-// turn-ended touch stays the watcher's wake NOTIFICATION, never current-state
-// truth.
+// subscribed stream is the whole server's, so setup() first drops every event
+// whose session belongs to another location (or cannot be placed), using the
+// code root's shared OpenCode 2 session scope. The turn-ended touch stays the
+// watcher's wake NOTIFICATION, never current-state truth.
 import { execFile } from "node:child_process";
+import { pathToFileURL } from "node:url";
+const { createSessionScope } = await import(pathToFileURL("$FM_ROOT/.opencode/plugins/lib/fm-opencode2.js").href);
 const notifyTurnEnd = $busy_notify_turnend;
 const busyEvent = (state, event) =>
   new Promise((resolve) => {
@@ -6621,6 +6625,14 @@ const makeHandler = () => {
     }
   };
 };
+const LIFECYCLE = new Set([
+  "session.execution.started",
+  "session.execution.succeeded",
+  "session.execution.interrupted",
+  "session.execution.failed",
+  "session.status",
+  "session.idle",
+]);
 export const FmBusyState = async () => {
   const handleEvent = makeHandler();
   return {
@@ -6632,7 +6644,15 @@ export default {
   id: "fm.busy-state",
   server: FmBusyState,
   setup(ctx) {
-    setupEventSubscription(ctx, makeHandler());
+    const handleEvent = makeHandler();
+    const scope = createSessionScope(ctx);
+    setupEventSubscription(ctx, async (event) => {
+      scope.observe(event);
+      if (!LIFECYCLE.has(eventType(event))) return;
+      const verdict = await scope.classify(sessionID(event));
+      if (verdict !== "own-root" && verdict !== "own-child") return;
+      await handleEvent(event);
+    });
   },
 };
 EOF

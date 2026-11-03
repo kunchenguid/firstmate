@@ -3437,6 +3437,21 @@ On 2.0.22 the brief is submitted on its own, yet the composer still reads pendin
 `opencode debug config` on 2.0.11 normalized the launch's legacy `{"permission":{"*":"allow"}}` into an allow-all `permissions` rule; the same command printed no configuration on 2.0.22, so on 2.0.22 the legacy shape rests on the earlier 2.0.21 verification recorded in the OpenCode harness reference.
 `tests/fm-spawn-dispatch-profile.test.sh` pins the gate's outcomes portably: an auto-submitted brief gets no extra Enter, a prefilled brief gets exactly one, a composer that reads unknown before it draws gets its one Enter only once it reads pending, a composer that only reads unknown gets its one Enter at the submit deadline, and a turn that never starts fails the spawn.
 
+### OpenCode 2 location-scoped events
+
+Verified on 2026-11-01 on macOS arm64 against OpenCode 2.2.4, on private `opencode serve` processes with scratch `HOME`, XDG directories, `OPENCODE_DB`, and Firstmate homes.
+A plugin's `ctx.event.subscribe` stream carries every location's events on that server, `session.execution.*` events carry only `data.sessionID`, `session.created` carries `data.location.directory` and a subagent's `data.parentID`, and `ctx.session.get({ sessionID })` returns the session's `location` and `parentID` (a bare string or `{ id }` argument is a schema error).
+
+```
+$ tests/fm-opencode-primary-live-e2e.test.sh
+ok - two locations on one server: A receives neither B's warning nor startup nudge and leaves B's busy record untouched; B's own session drives all three
+ok - a marked secondmate home completes two notified, handled, acknowledged cycles with a live identity-matched successor
+ok - a primary under a foreign lock owner is refused arming and warned, and arms once it owns the lock
+(the native fixture's cases above also passed on 2.2.4)
+```
+
+`tests/opencode-v2-scope-live-fixture.mjs`, run by that command, refreshes this record.
+
 ## Pi repeated-read containment
 
 Verified on 2026-10-27 UTC on Linux x86_64 with Node 24.22.1 and npm 11.19.1.

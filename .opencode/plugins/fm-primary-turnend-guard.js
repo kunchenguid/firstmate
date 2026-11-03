@@ -2,9 +2,15 @@ import { spawn } from "node:child_process";
 import { realpathSync } from "node:fs";
 import { resolve } from "node:path";
 import { encodeFirstmateOperationalInput } from "./lib/fm-operational-input.js";
-import { contextDirectory, createTurnEndLatch, promptSession, setupEventSubscription } from "./lib/fm-opencode2.js";
-
-const COORDINATOR_KEY = "__firstmateOpenCodeWatchArm";
+import {
+  contextDirectory,
+  createSessionScope,
+  createTurnEndLatch,
+  locationKey,
+  promptSession,
+  setupEventSubscription,
+  watchArmRegistry,
+} from "./lib/fm-opencode2.js";
 
 function runProcess(command, args, input = "") {
   return new Promise((resolve) => {
@@ -49,8 +55,9 @@ function runGuard(root) {
   return runProcess(`${root}/bin/fm-turnend-guard.sh`, [], '{"stop_hook_active":false}');
 }
 
-async function letWatchArmRun(sessionID, client) {
-  const coordinator = globalThis[COORDINATOR_KEY];
+// Only this location's own watcher coordinator may answer for its turn end.
+async function letWatchArmRun(key, sessionID, client) {
+  const coordinator = key ? watchArmRegistry().get(key) : null;
   if (!coordinator?.ensureArmed) return false;
   const status = await coordinator.ensureArmed(sessionID, client);
   return status === "armed" || status === "wake" || status === "failed";
@@ -58,6 +65,7 @@ async function letWatchArmRun(sessionID, client) {
 
 export const FmPrimaryTurnendGuard = async ({ client, directory, worktree }) => {
   const root = worktree ? resolvePath(worktree) : await resolveRoot(directory);
+  const key = locationKey({ directory: worktree || directory });
   const latch = createTurnEndLatch();
 
   return {
@@ -69,7 +77,7 @@ export const FmPrimaryTurnendGuard = async ({ client, directory, worktree }) => 
 
       if (latch.consume(sessionID)) return;
 
-      if (await letWatchArmRun(sessionID, client)) return;
+      if (await letWatchArmRun(key, sessionID, client)) return;
 
       const result = await runGuard(root);
       if (result.code !== 2) return;
@@ -99,16 +107,23 @@ export const FmPrimaryTurnendGuard = async ({ client, directory, worktree }) => 
 
 function installTurnendGuard(ctx) {
   const anchor = contextDirectory(ctx);
+  const key = locationKey(ctx?.location);
   let rootPromise = null;
   const getRoot = () => (rootPromise ??= resolveRoot(anchor));
   const latch = createTurnEndLatch();
+  const scope = createSessionScope(ctx);
   setupEventSubscription(ctx, async (event) => {
+    scope.observe(event);
     const sessionID = latch(event);
     if (!sessionID) return;
 
+    // Another location's turn, or an unresolvable one, never runs this home's
+    // guard or reaches any session: only this location's root sessions do.
+    if ((await scope.classify(sessionID)) !== "own-root") return;
+
     if (latch.consume(sessionID)) return;
 
-    if (await letWatchArmRun(sessionID, null)) return;
+    if (await letWatchArmRun(key, sessionID, null)) return;
 
     const root = await getRoot();
     const result = await runGuard(root);

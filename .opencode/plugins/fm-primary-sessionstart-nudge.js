@@ -1,7 +1,7 @@
 import { spawn } from "node:child_process";
 import { realpathSync } from "node:fs";
 import { resolve } from "node:path";
-import { contextDirectory, eventProperties, eventSessionID, eventType, promptSession, setupEventSubscription } from "./lib/fm-opencode2.js";
+import { contextDirectory, createSessionScope, eventProperties, eventSessionID, eventType, promptSession, setupEventSubscription } from "./lib/fm-opencode2.js";
 
 const handledSessions = new Set();
 
@@ -62,12 +62,16 @@ export const FmPrimarySessionstartNudge = async ({ client, directory, worktree }
 
 function installSessionstartNudge(ctx) {
   const anchor = contextDirectory(ctx);
+  const scope = createSessionScope(ctx);
+  const handledSessions = new Set();
   let rootPromise = null;
   const getRoot = () => (rootPromise ??= resolveRoot(anchor));
   setupEventSubscription(ctx, async (event) => {
+    scope.observe(event);
     if (eventType(event) !== "session.created") return;
     const sessionID = eventSessionID(event) || eventProperties(event).info?.id;
     if (!sessionID || handledSessions.has(sessionID)) return;
+    if ((await scope.classify(sessionID)) !== "own-root") return;
     const root = await getRoot();
     if (!root) return;
     handledSessions.add(sessionID);

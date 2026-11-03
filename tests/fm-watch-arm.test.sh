@@ -1844,6 +1844,7 @@ make_arm_decision_fixture() {  # <name>
   git init -q -b main "$repo"
   : > "$repo/AGENTS.md"
   cp "$ROOT/bin/fm-supervision-lib.sh" "$repo/bin/fm-supervision-lib.sh"
+  cp "$ROOT/bin/fm-primary-scope-lib.sh" "$repo/bin/fm-primary-scope-lib.sh"
   cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
 #!/usr/bin/env bash
 printf 'arm\n' >> "${FM_ARM_LOG:?}"
@@ -1907,10 +1908,12 @@ if (existsSync(`${state}/.afk`)) {
 }
 
 const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+const { locationKey, watchArmRegistry } = await import(new URL("./lib/fm-opencode2.js", pathToFileURL(process.env.PLUGIN)).href);
 const client = { session: { promptAsync: async () => {} } };
 await mod.FmPrimaryWatchArm({ client, directory: process.env.WORKTREE, worktree: process.env.WORKTREE });
 writeFileSync(`${state}/.lock`, `${process.pid}\n`);
-const status = await globalThis.__firstmateOpenCodeWatchArm.ensureArmed("session-test", client);
+const coordinator = watchArmRegistry().get(locationKey({ directory: process.env.WORKTREE }));
+const status = await coordinator.ensureArmed("session-test", client);
 if (expected === "no-arm") {
   if (status !== "not-needed") {
     console.error(`expected a not-needed decline, got ${status}`);
@@ -1957,6 +1960,119 @@ EOF
   pass "watch-arm: the OpenCode arm plugin decides with the shared supervision predicate"
 }
 
+# make_scoped_arm_home <dir> [secondmate-id]: a home whose code root is <dir>,
+# carrying the real scope and need predicates, a registered need, and a fake
+# arm that records its own launch in that home and then stays alive as the
+# armed watcher cycle.
+make_scoped_arm_home() {  # <dir> [secondmate-id]
+  local dir=$1 marker=${2:-}
+  mkdir -p "$dir/bin" "$dir/state" "$dir/config"
+  : > "$dir/AGENTS.md"
+  cp "$ROOT/bin/fm-supervision-lib.sh" "$ROOT/bin/fm-primary-scope-lib.sh" "$dir/bin/"
+  cat > "$dir/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+case "${1:-}" in --handling-delivered | --stop) exit 0 ;; esac
+printf '%s\n' "$$" >> "$FM_HOME/arm.log"
+printf 'watcher: started pid=%s recovery-generation=g%s\n' "$$" "$$"
+exec sleep 60
+SH
+  chmod +x "$dir/bin/fm-watch-arm.sh"
+  : > "$dir/state/fixture.meta"
+  [ -z "$marker" ] || printf '%s\n' "$marker" > "$dir/.fm-secondmate-home"
+}
+
+# The OpenCode 2 arm plugin is loaded once per location, and one server can
+# host several. A turn on one location must never arm another location's home,
+# each home keeps its own arm state, a genuinely marked secondmate home arms its
+# own watcher exactly as the turn-end guard already guards it, an unmarked task
+# worktree never arms, and the lock-ancestry ownership rule still refuses a home
+# whose session lock names a foreign live process.
+test_opencode2_arm_is_scoped_to_its_own_location_and_home() {
+  command -v node >/dev/null 2>&1 || { printf 'skip: node not found\n'; return 0; }
+  local dir base foreign out status
+  dir=$(make_case opencode2-arm-scope)
+  base="$dir/base"
+  git init -q -b main "$base"
+  git -C "$base" -c user.name=t -c user.email=t@example.invalid commit -q --allow-empty -m base
+  git init -q -b main "$dir/primary-a"
+  git init -q -b main "$dir/foreign-d"
+  git -C "$base" worktree add -q --detach "$dir/secondmate-b"
+  git -C "$base" worktree add -q --detach "$dir/task-c"
+  make_scoped_arm_home "$dir/primary-a"
+  make_scoped_arm_home "$dir/secondmate-b" sm-b
+  make_scoped_arm_home "$dir/task-c"
+  make_scoped_arm_home "$dir/foreign-d"
+  sleep 60 &
+  foreign=$!
+  printf '%s\n' "$foreign" > "$dir/foreign-d/state/.lock"
+  out=$(env -u FM_HOME -u FM_ROOT_OVERRIDE -u FM_STATE_OVERRIDE -u FM_CONFIG_OVERRIDE NODE_NO_WARNINGS=1 \
+    PLUGIN="$ROOT/.opencode/plugins/fm-primary-watch-arm.js" SERVER="$ROOT/tests/opencode2-fake-server.mjs" \
+    CASE_DIR="$dir" node --input-type=module 2>&1 <<'EOF'
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+const { createFakeServer } = await import(pathToFileURL(process.env.SERVER).href);
+const plugin = (await import(pathToFileURL(process.env.PLUGIN).href)).default;
+const { locationKey, watchArmRegistry } = await import(new URL("./lib/fm-opencode2.js", pathToFileURL(process.env.PLUGIN)).href);
+const home = (name) => `${process.env.CASE_DIR}/${name}`;
+const homes = { a: home("primary-a"), b: home("secondmate-b"), c: home("task-c"), d: home("foreign-d") };
+const server = createFakeServer();
+for (const [name, dir] of Object.entries(homes)) {
+  if (name !== "d") writeFileSync(`${dir}/state/.lock`, `${process.pid}\n`);
+  server.addSession(`ses_${name}`, dir);
+  plugin.setup(server.ctxFor(dir));
+}
+const arms = (name) => {
+  const log = `${homes[name]}/arm.log`;
+  return existsSync(log) ? readFileSync(log, "utf8").split("\n").filter(Boolean) : [];
+};
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+const finish = (code, message = "") => {
+  for (const name of Object.keys(homes)) for (const pid of arms(name)) {
+    try { process.kill(Number(pid), "SIGKILL"); } catch {}
+  }
+  if (message) console.error(`${message}; arms=${JSON.stringify(Object.fromEntries(Object.keys(homes).map((n) => [n, arms(n).length])))}`);
+  process.exit(code);
+};
+const expect = (condition, message) => {
+  if (!condition) finish(1, message);
+};
+const waitFor = async (check) => {
+  for (let i = 0; i < 300 && !check(); i += 1) await sleep(20);
+  return check();
+};
+const status = (name, session) => watchArmRegistry().get(locationKey({ directory: homes[name] })).ensureArmed(session);
+
+await server.emit(server.terminal("ses_a"));
+expect(await waitFor(() => arms("a").length === 1), "location A's own turn end did not arm A");
+await sleep(600);
+expect(arms("b").length === 0 && arms("c").length === 0 && arms("d").length === 0, "a turn on location A armed another home");
+
+await server.emit(server.terminal("ses_b"));
+expect(await waitFor(() => arms("b").length === 1), "the marked secondmate home did not arm its own watcher while A's was live");
+expect(arms("a").length === 1, "B's turn end re-armed A");
+expect(await status("a", "ses_a_second") === "other-session", "a different root session reused the first session's arm ownership");
+expect(await status("a", "ses_a") === "armed", "A's arming session lost its live cycle");
+expect(arms("a").length === 1, "a second A session started a competing arm for the same home");
+
+await server.emit(server.terminal("ses_c"));
+await server.emit(server.terminal("ses_d"));
+await sleep(600);
+expect(arms("c").length === 0, "an unmarked task worktree armed");
+expect(arms("d").length === 0, "a home whose lock names a foreign live process armed");
+expect(await status("c", "ses_c") === "not-primary", "an unmarked task worktree is not refused as outside primary scope");
+expect(await status("d", "ses_d") === "read-only", "a foreign lock owner is not refused as read-only");
+finish(0);
+EOF
+)
+  status=$?
+  kill "$foreign" 2>/dev/null || true
+  wait "$foreign" 2>/dev/null || true
+  expect_code 0 "$status" "OpenCode 2 arm plugin must arm only its own location's home: $out"
+  [ -z "$out" ] || fail "OpenCode 2 arm scope test printed output: $out"
+  pass "watch-arm: the OpenCode 2 arm plugin arms only its own location's home, secondmates included, and keeps lock ownership"
+}
+
 test_append_wakes_handling_successor after-ack
 test_append_wakes_handling_successor before-ack
 test_append_wakes_handling_successor after-ack missing
@@ -1998,3 +2114,4 @@ test_take_over_owns_a_fresh_cycle_and_keeps_queued_work_surfacing
 test_take_over_preserves_downtime_from_watcher_self_exit
 test_take_over_confirms_a_watcher_stopped_inside_its_event_wait
 test_opencode_arm_plugin_decides_with_the_shared_predicate
+test_opencode2_arm_is_scoped_to_its_own_location_and_home

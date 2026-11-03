@@ -204,6 +204,44 @@ EOF
   pass "OpenCode session.created delivers the exact wrapper nudge once per session"
 }
 
+test_opencode2_nudge_stays_in_its_own_root_session() {
+  local a="$TMP_ROOT/nudge-a" b="$TMP_ROOT/nudge-b" root out status=0
+  for root in "$a" "$b"; do
+    make_primary "$root"
+    cp "$ROOT/bin/fm-sessionstart-nudge.sh" "$ROOT/bin/fm-primary-scope-lib.sh" \
+      "$ROOT/bin/fm-gate-refuse-lib.sh" "$ROOT/bin/fm-operational-input.sh" "$root/bin/"
+  done
+  out=$(PLUGIN="$ROOT/.opencode/plugins/fm-primary-sessionstart-nudge.js" \
+    SERVER="$ROOT/tests/opencode2-fake-server.mjs" A="$a" B="$b" EXPECTED="$NUDGE_LINE" \
+    node --input-type=module 2>&1 <<'EOF'
+import { pathToFileURL } from "node:url";
+const { createFakeServer } = await import(pathToFileURL(process.env.SERVER).href);
+const plugin = (await import(pathToFileURL(process.env.PLUGIN).href)).default;
+const server = createFakeServer();
+// Both plugin instances share the same module, just as a server may cache it.
+plugin.setup(server.ctxFor(process.env.B));
+plugin.setup(server.ctxFor(process.env.A));
+server.addSession("nudge-a", process.env.A);
+server.addSession("nudge-b", process.env.B);
+await server.emit(server.created("nudge-a", process.env.A));
+await server.emit(server.created("nudge-a", process.env.A));
+if (server.prompts.length !== 1 || server.prompts[0].from !== process.env.A || server.prompts[0].sessionID !== "nudge-a") {
+  throw new Error(`A's creation was handled outside A or more than once: ${JSON.stringify(server.prompts)}`);
+}
+await server.emit(server.created("nudge-child", process.env.B, "nudge-a"));
+await server.emit({ type: "session.created", data: { sessionID: "unknown" } });
+if (server.prompts.length !== 1) throw new Error("a child or unplaceable session was nudged");
+await server.emit(server.created("nudge-b", process.env.B));
+if (server.prompts.length !== 2 || server.prompts[1].from !== process.env.B || server.prompts[1].sessionID !== "nudge-b") {
+  throw new Error(`B's own root session was not nudged: ${JSON.stringify(server.prompts)}`);
+}
+if (server.prompts.some(({ text }) => text !== process.env.EXPECTED)) throw new Error("nudge text changed");
+EOF
+  ) || status=$?
+  expect_code 0 "$status" "OpenCode 2 session-start location isolation"$'\n'"$out"
+  pass "OpenCode 2 nudges each own root once, never a foreign, child or unplaceable session"
+}
+
 # --- run tier ----------------------------------------------------------------
 #
 # make_run_primary builds a primary the run wrapper accepts and the REAL
@@ -1103,6 +1141,7 @@ test_missing_state_is_silent
 test_owned_lock_is_silent
 test_namespace_pid1_lock_holder_is_silent
 test_opencode_plugin_delivers_exact_nudge_once
+test_opencode2_nudge_stays_in_its_own_root_session
 test_run_startup_runs_the_full_digest
 test_run_clear_and_compact_reemit
 test_run_rebuild_forwards_source_to_drifted_instruction_refresh
