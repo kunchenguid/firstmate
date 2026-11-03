@@ -1176,17 +1176,18 @@ SH
 # A scan cut by the watcher's own check bound never reached its own queueing, so
 # the watcher queues that cut durably, once, and nothing the scan queued twice.
 test_watcher_queues_a_scan_cut_at_the_check_bound() {
-  local dir state rc
+  local dir state rc real_sed
+  real_sed=$(type -P sed)
   dir=$(make_case watcher-scan-cut)
   state="$dir/home/state"
   : > "$dir/home/config/pr-register-scan"
   write_task_meta "$dir"
   printf '%s\n' 'done [at=2]: PR https://github.com/o/r/pull/9 checks green' > "$state/task-a.status"
   add_stop_custom_check "$dir"
-  cat > "$dir/fakebin/sed" <<'SH'
+  cat > "$dir/fakebin/sed" <<SH
 #!/usr/bin/env bash
-case "$*" in *'s/^kind=//p'*) sleep 30 ;; esac
-exec "$(type -P sed)" "$@"
+case "\$*" in *'s/^kind=//p'*) sleep 30 ;; esac
+exec "$real_sed" "\$@"
 SH
   chmod +x "$dir/fakebin/sed"
   set +e
