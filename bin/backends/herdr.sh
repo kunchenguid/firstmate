@@ -3502,7 +3502,8 @@ fm_backend_herdr_composer_content() {  # <target>
   else
     return 1
   fi
-  FM_COMPOSER_GHOST_LUMA_MAX=0 fm_composer_extract_selected_content "$caps" "$cap"
+  FM_COMPOSER_HARNESS=claude FM_COMPOSER_GHOST_LUMA_MAX=0 \
+    fm_composer_extract_selected_content "$caps" "$cap"
 }
 
 # fm_backend_herdr_composer_payload_shown: 0 when <after>, read from a

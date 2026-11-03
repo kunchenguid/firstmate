@@ -192,7 +192,8 @@ test_matrix_claude_bare_nbsp_row() {
 test_matrix_claude_classic_slash_popup_below_composer() {
   # Claude Code 2.1.303 classic layout uses the composer's glyph for the
   # selected slash-command entry below the closing rule.
-  local rule screen out locale caps tail
+  local rule screen out locale caps tail harness gap
+  local FM_COMPOSER_HARNESS=claude
   rule='────────────────────────'
   for locale in "${LC_ALL:-${LANG:-C}}" C; do
     for caps in "$CAPS_STYLED" "$CAPS_STYLED_NOID" "$CAPS_PLAIN"; do
@@ -211,6 +212,25 @@ test_matrix_claude_classic_slash_popup_below_composer() {
         screen="transcript line"$'\n'"$rule"$'\n'"❯$NBSP/exit"$'\n'"$rule"$'\n'"❯ $tail"
         out=$(LC_ALL="$locale" fm_composer_extract_selected_content "$caps" "$screen")
         [ "$out" = "${tail//  / }" ] || fail "a non-popup row below the pair must keep winning, got '$out'"
+      done
+      # A blank row ends the popup region: an older empty composer must
+      # never hide a live slash draft below it, even after a notice row.
+      for gap in $'\n\n' $'\n  \t\n' $'\n  ⚠ a notice row\n\n'; do
+        screen="$rule"$'\n❯\n'"$rule$gap"'❯ /exit'
+        out=$(LC_ALL="$locale" fm_composer_extract_selected_content "$caps" "$screen")
+        [ "$out" = /exit ] || fail "a blank-separated slash draft was lost, got '$out'"
+        if [ "$caps" = "$CAPS_PLAIN" ]; then
+          assert_screen "blank-separated plain slash draft" unknown "$caps" "$screen"
+        else
+          assert_screen "blank-separated slash draft" pending "$caps" "$screen"
+        fi
+      done
+      # An unidentified pane or another harness must not borrow Claude's
+      # same-glyph popup interpretation.
+      screen="$rule"$'\n❯ /exit\n'"$rule"$'\n❯ /exit    Exit the CLI'
+      for harness in '' codex kiro; do
+        out=$(LC_ALL="$locale" FM_COMPOSER_HARNESS=$harness fm_composer_extract_selected_content "$caps" "$screen")
+        [ "$out" = '/exit Exit the CLI' ] || fail "harness '${harness:-none}' borrowed Claude popup recognition, got '$out'"
       done
       # Slash syntax alone is not proof: without a glyph-proven pair, or
       # with a later separator, the lower row must not be demoted.

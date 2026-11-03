@@ -1549,10 +1549,11 @@ ok - live Herdr submit confirm: Claude Code (2.1.283 (Claude Code)) on herdr 0.9
 
 #### Classic popup with the composer's glyph
 
-Fixture verification on 2026-11-03 covers the Claude Code 2.1.303 classic-layout shape: the selected popup entry below the closing rule is `❯ /exit                                Exit the CLI`.
+The Claude classic-popup adapter's verification pins are Claude Code 2.1.303, 2.1.308, and 2.1.317 (same-glyph popup verified); 2.1.283 drew no popup glyph (the #5876 shape above).
+Fixture verification on 2026-11-03 covers that classic-layout shape: the selected popup entry below the closing rule is `❯ /exit                                Exit the CLI`.
 Unlike the 2.1.283 shape above, this row is itself a bare composer candidate and previously won the bottom-most-row selection, making the payload proof read the menu text instead of `/exit`.
-[`_fm_composer_rule_pair_popup_row`](../../bin/fm-composer-lib.sh) owns the popup recognition boundary.
-The matrix covers an intervening notice, preserves non-popup same-glyph drafts, and refuses popup demotion without glyph proof or with a later separator.
+[`_fm_composer_claude_classic_popup_row`](../../bin/fm-composer-lib.sh) owns the quarantined popup recognition boundary, enabled only when the caller supplies `FM_COMPOSER_HARNESS=claude` through the existing harness-identification path. Herdr's Claude-only payload read supplies that identity explicitly.
+The matrix covers an intervening notice, preserves non-popup same-glyph drafts (including a live `/exit` below an empty rule-pair composer separated by a blank row), and refuses popup demotion across any blank row, without glyph proof, with a later separator, or for unnamed/non-Claude panes.
 Styled and plain cursorless profiles are covered under both the ambient locale and `LC_ALL=C`.
 The Herdr fixture exercises the submit interface and asserts one Enter and no Ctrl+U, without contacting a live backend.
 This is fixture evidence, not a refreshed live Herdr measurement; the opt-in live guard above remains the command for that measurement.

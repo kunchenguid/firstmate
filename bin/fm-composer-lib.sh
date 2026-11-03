@@ -115,7 +115,7 @@
 # (_fm_composer_row_is_composer_furniture): one unclaimed activity row
 # (`Working on request...`) makes the whole run activity and the envelope above
 # it stale, and a row leading with the SAME glyph the envelope was proven by
-# (`❯ my typed draft`) keeps winning unless _fm_composer_rule_pair_popup_row
+# (`❯ my typed draft`) keeps winning unless _fm_composer_claude_classic_popup_row
 # proves it is a slash-command popup entry. Where a shape
 # cannot demonstrate which it is, the refusal is the answer. The zone is
 # bounded further by a blank row, and an envelope that closed over no glyph row
@@ -1960,20 +1960,28 @@ _fm_composer_bare_rule_sandwich() {  # <plain-screen> <row>
   _fm_composer_titled_rule_row "$above" "${below//─/ }"
 }
 
-# _fm_composer_rule_pair_popup_row: a selected slash-command entry below a
-# valid, same-glyph-proven rule pair is popup furniture, not the composer.
-# Claude Code 2.1.303 classic layout uses `❯ /exit    Exit the CLI` below
-# the closing rule. Require no later separator and a slash token followed by
-# description spacing (or end of row); other same-glyph drafts still win.
-_fm_composer_rule_pair_popup_row() {  # <plain-screen> <row>
-  local plain=$1 row=$2 trimmed glyph rest
+# _fm_composer_claude_classic_popup_row: quarantined Claude classic-popup
+# adapter, enabled only by the caller's recorded harness. Verification pins:
+# Claude Code 2.1.303/2.1.308/2.1.317 drew `❯ /exit    Exit the CLI` below
+# the closing rule; 2.1.283 drew no popup glyph (the #5876 shape).
+# See docs/verification/runtime-backends.md, "Classic popup with the composer's
+# glyph". Require a same-glyph-proven rule pair, no intervening blank row or
+# later separator, and a slash token followed by description spacing (or EOL).
+_fm_composer_claude_classic_popup_row() {  # <plain-screen> <row>
+  local plain=$1 row=$2 trimmed glyph rest next
+  [ "${FM_COMPOSER_HARNESS:-}" = claude ] || return 1
   [ "$row" -ge 0 ] || return 1
   [ "$FM_COMPOSER_SCAN_PI_PAIR_FOUND" = 1 ] && [ "$FM_COMPOSER_SCAN_PI_PAIR_VALID" = 1 ] || return 1
   [ "$FM_COMPOSER_SCAN_PI_GLYPH_ROW" -ge 0 ] || return 1
   [ "$row" -gt "$FM_COMPOSER_SCAN_PI_CLOSE" ] || return 1
   [ "$FM_COMPOSER_SCAN_PI_LAST_SEPARATOR" -eq "$FM_COMPOSER_SCAN_PI_CLOSE" ] || return 1
-  trimmed=$(_fm_composer_screen_row "$row" "$plain")
-  fm_composer_normalize_trim_var trimmed
+  next=$((FM_COMPOSER_SCAN_PI_CLOSE + 1))
+  while [ "$next" -le "$row" ]; do
+    trimmed=$(_fm_composer_screen_row "$next" "$plain")
+    fm_composer_normalize_trim_var trimmed
+    [ -n "$trimmed" ] || return 1
+    next=$((next + 1))
+  done
   fm_composer_leading_agent_glyph_var glyph "$trimmed" || return 1
   [ "$glyph" = "$FM_COMPOSER_SCAN_PI_GLYPH" ] || return 1
   rest=${trimmed#*"$glyph"}
@@ -2010,7 +2018,7 @@ _fm_composer_select_cursorless() {
       bare=-1
     fi
   fi
-  if _fm_composer_rule_pair_popup_row "$plain" "$bare"; then
+  if _fm_composer_claude_classic_popup_row "$plain" "$bare"; then
     bare=$FM_COMPOSER_SCAN_PI_GLYPH_ROW
   fi
   if [ "$bare" -gt "$generic" ]; then
