@@ -583,10 +583,11 @@ t_agy_reports_through_unknown() {
 }
 
 # A watcher killed without its final write leaves its last record on the
-# pane. The next arm writes one idle record once the pane proves 7501-aware
-# and a leftover pidfile marks the record as the bridge's own - proven
-# while the fresh watcher, activity unknown and the signals still folding
-# to that same idle, adds nothing on top of it.
+# pane. The next arm's retirement writes the dead watcher's final record,
+# and arm writes one idle record once the pane proves 7501-aware and a
+# leftover pidfile marks the record as the bridge's own - proven while the
+# fresh watcher, activity unknown and the signals still folding to that
+# same idle, adds nothing on top of them.
 t_arm_clears_stale_record() {
   local d=$TMP_ROOT/armclear
   mkhome "$d"
@@ -607,8 +608,8 @@ t_arm_clears_stale_record() {
     --kind ship --state "$d/state" --config "$d/config"
   wait_cap 'state=idle:app=firstmate-opencode' "$d/cap" 60 || fail "clear: arm left the stale record on the pane"
   sleep 2
-  assert_equals "1" "$(grep -o 'state=' "$d/cap" | wc -l | tr -d ' ')" \
-    "clear: only the arm-time write lands - the fresh watcher does not repeat it while unknown"
+  assert_equals "state=idle state=idle " "$(grep -o 'state=[a-z]*' "$d/cap" | tr '\n' ' ')" \
+    "clear: only the retirement and arm-time writes land - the fresh watcher does not repeat them while unknown"
   stop_term
   pass "lifecycle: arm clears a dead watcher's stale record once the gates pass"
 }
@@ -744,6 +745,60 @@ t_unarmed_relaunch_clears_leftover() {
   done
   stop_term
   pass "lifecycle: disarm retires a dead watcher's record; off and native relaunches stay parked"
+}
+
+# A watcher still alive at disarm but stuck past the TERM grace - here in a
+# pane capture that never returns - cannot run its trap, so retirement kills
+# it. The kill must not lose the final write: retirement writes it for the
+# watcher before forgetting it, and the next launch on that pane - reporting
+# off, or a natively reporting agent - then keeps the parked record.
+t_killed_watcher_still_gets_final() {
+  local d=$TMP_ROOT/killedfinal kind wpid n0 stuck
+  mkhome "$d"; mkfake "$d" claude 'claude 2.1.295'
+  # shellcheck disable=SC2016
+  printf '#!/usr/bin/env bash\n[ "$1" = capture-pane ] || exit 0\nif [ -f %q ]; then echo $$ >%q; exec sleep 60; fi\ncat %q\n' \
+    "$d/stall" "$d/stuck" "$d/pane" >"$d/bin/tmux"
+  chmod +x "$d/bin/tmux"
+  start_term "$d"
+  for kind in off native; do
+    rm -f "$d/config/osc7501-status" "$d/stall" "$d/stuck"
+    printf 'Rovo is thinking...\n' >"$d/pane"
+    env "${CLEAN_UNSET[@]}" HC_TERMINAL_ID=x FM_OSC7501_TTY="$TERM_SLAVE" FM_OSC7501_INTERVAL=1 PATH="$d/bin:$PATH" \
+      bash "$SCRIPT" arm --task t44 --harness rovo --agent-bin rovo --backend tmux --target '%9' --kind ship \
+      --state "$d/state" --config "$d/config"
+    wpid=$(watcher_pid "$d/state") || fail "killed $kind: no watcher armed"
+    wait_last_state 'state=working' "$d/cap" 60 || fail "killed $kind: no working record"
+    : >"$d/stall"
+    wait_cap '' "$d/stuck" 60 && [ -s "$d/stuck" ] || fail "killed $kind: the watcher never reached the stuck capture"
+    stuck=$(cat "$d/stuck")
+    n0=$(grep -o 'state=' "$d/cap" | wc -l | tr -d ' ')
+    env "${CLEAN_UNSET[@]}" FM_OSC7501_TTY="$TERM_SLAVE" bash "$SCRIPT" disarm --state "$d/state"
+    kill -0 "$wpid" 2>/dev/null && fail "killed $kind: disarm returned with the stuck watcher still running"
+    kill "$stuck" 2>/dev/null || true
+    assert_equals "$((n0 + 1))" "$(grep -o 'state=' "$d/cap" | wc -l | tr -d ' ')" \
+      "killed $kind: retirement wrote exactly one final record for the killed watcher"
+    assert_equals "state=idle" "$(grep -o 'state=[a-z]*' "$d/cap" | tail -1)" \
+      "killed $kind: the killed watcher's working record was parked at idle"
+    [ -z "$(ls "$d/state"/.osc7501watch-* 2>/dev/null)" ] \
+      || fail "killed $kind: disarm left the pidfile behind"
+    if [ "$kind" = off ]; then
+      printf 'off\n' >"$d/config/osc7501-status"
+      env "${CLEAN_UNSET[@]}" HC_TERMINAL_ID=x FM_OSC7501_TTY="$TERM_SLAVE" bash "$SCRIPT" arm \
+        --task t44 --harness opencode --agent-bin opencode --backend tmux --kind ship \
+        --state "$d/state" --config "$d/config"
+    else
+      env "${CLEAN_UNSET[@]}" HC_TERMINAL_ID=x FM_OSC7501_TTY="$TERM_SLAVE" PATH="$d/bin:$PATH" \
+        bash "$SCRIPT" arm --task t44 --harness claude --agent-bin claude --backend tmux --kind ship \
+        --state "$d/state" --config "$d/config"
+    fi
+    sleep 1
+    [ -z "$(ls "$d/state"/.osc7501watch-* 2>/dev/null)" ] \
+      || fail "killed $kind: the unarmed relaunch started a watcher"
+    assert_equals "$((n0 + 1))" "$(grep -o 'state=' "$d/cap" | wc -l | tr -d ' ')" \
+      "killed $kind: the relaunch added nothing - the stale record never returns"
+  done
+  stop_term
+  pass "lifecycle: a watcher killed at disarm still gets its final record; off and native relaunches stay parked"
 }
 
 # --- config gate ---------------------------------------------------------------
@@ -1090,6 +1145,7 @@ fm_test_run \
   t_initial_unknown_launch_reports \
   t_stale_terminal_line_parks_idle \
   t_unarmed_relaunch_clears_leftover \
+  t_killed_watcher_still_gets_final \
   t_config_off_disables \
   t_hc_marker_arms_watcher \
   t_concurrent_panes_keep_their_reporters \
