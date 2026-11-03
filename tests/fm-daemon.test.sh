@@ -4151,3 +4151,105 @@ test_dialog_name_survives_away_self_handle
 test_seen_terminal_dialog_stale_clears_like_a_plain_stale
 test_dialog_name_joins_unseen_status_escalation
 test_dialog_name_after_demand_deep_inspection_still_escalates
+
+# Consumer handover uses presentation receipts, never watcher classification.
+test_consumer_presentation_handover() (
+  local dir state file snapshot first second capture out old_inode
+  dir=$(make_supercase consumer-handover); state="$dir/state"
+  # Match executable daemon startup, which loads the portable lock owner.
+  # shellcheck source=bin/fm-wake-lib.sh
+  FM_STATE_OVERRIDE="$state" . "$ROOT/bin/fm-wake-lib.sh"
+  file="$state/receipt.status"; capture="$dir/endpoints"
+  printf 'done: first\n' > "$file"
+  local i
+  for i in 2 3 4 5 6 7; do printf 'done: old-%s\n' "$i" >> "$file"; done
+  # Watcher classification is not a presentation receipt.
+  status_presentation_marker_commit "$(status_signal_seen_marker_path "$state" receipt)" \
+    "$file" "$(log_size "$file")" "$(_fm_open_decisions_file_ident "$file")"
+  [ "$(status_presentation_cursor_offset "$file")" = 0 ] || fail "watcher classification suppressed delivery"
+  first=$(log_size "$file")
+  snapshot=$(status_presentation_snapshot "$state")
+  status_commit_presentation_snapshot "$state" "$snapshot" || fail "drain receipt failed"
+  for FM_DAEMON_PRIMARY_HARNESS in claude codex; do
+    [ "$(status_seen_offset "$state" receipt)" = "$first" ] || fail "handover replayed a presented event"
+  done
+  printf 'failed: second\n' >> "$file"
+  out=$(FM_STATUS_SPAN_ENDPOINT_FILE="$capture" classify_signal "$file" "$state")
+  case "$out" in escalate\|*second*) ;; *) fail "new append disappeared: $out" ;; esac
+  escalate_add "$state" "receipt.status: failed: second" || fail "buffer failed"
+  mark_escalated_seen "$state" "$capture" queued || fail "classification failed"
+  second=$(log_size "$file")
+  [ "$(status_presentation_cursor_offset "$file")" = "$first" ] || fail "classification acted as presentation"
+  inject_msg() { INJECT_SUBMIT_ATTEMPTED=1; INJECT_LAST_VERDICT=unknown; return 1; }
+  escalate_flush "$state" && fail "failed delivery confirmed"
+  [ "$(status_presentation_cursor_offset "$file")" = "$first" ] || fail "failed delivery advanced receipt"
+  # A drain presents an append while the daemon is submitting its earlier cut.
+  inject_msg() {
+    printf 'done: third\n' >> "$file"
+    snapshot=$(status_presentation_snapshot "$state")
+    status_commit_presentation_snapshot "$state" "$snapshot" || return 1
+  }
+  escalate_flush "$state" || fail "successful delivery failed"
+  [ "$(status_presentation_cursor_offset "$file")" = "$(log_size "$file")" ] || fail "older daemon cut regressed drain receipt"
+  printf 'done: fourth\n' >> "$file"
+  out=$(FM_STATUS_SPAN_ENDPOINT_FILE="$capture" classify_signal "$file" "$state")
+  case "$out" in escalate\|*fourth*) ;; *) fail "append after interleaving disappeared" ;; esac
+  escalate_add "$state" 'receipt.status: done: fourth'
+  mark_escalated_seen "$state" "$capture" queued
+  second=$(log_size "$file")
+  inject_msg() { printf 'done: fifth\n' >> "$file"; return 0; }
+  escalate_flush "$state" || fail "daemon delivery failed"
+  [ "$(status_presentation_cursor_offset "$file")" = "$second" ] || fail "daemon acknowledged bytes appended after its captured cut"
+  [ "$(status_outcome_backstop_cursor_offset "$file")" = "$second" ] || fail "backstop ignored native delivery receipt"
+  out=$(status_new_lines_since_cursor "$file")
+  case "$out" in *fifth*) ;; *) fail "drain missed append after daemon receipt" ;; esac
+  printf 'malformed\n' > "$state/.status-presentation-cursor"
+  status_presentation_cursor_offset "$file" >/dev/null && fail "malformed manifest accepted"
+  rm "$state/.status-presentation-cursor"
+  old_inode="$file.old"; mv "$file" "$old_inode"
+  printf 'done: replacement\n' > "$file"
+  [ "$(status_presentation_cursor_offset "$file")" = 0 ] || fail "replacement inherited receipt"
+  rm "$file"; mv "$old_inode" "$file"
+  printf 'x\n' > "$file"
+  [ "$(status_presentation_cursor_offset "$file")" = 0 ] || fail "truncation inherited receipt"
+  printf 'malformed\n' > "$state/.status-delivered-receipt.status"
+  [ "$(status_presentation_cursor_offset "$file")" = 0 ] || fail "malformed receipt accepted"
+  pass "consumer handover shares successful cuts and preserves interleaved appends and failures"
+)
+test_consumer_presentation_handover
+
+# An idempotent backend's frozen generation must not acknowledge the next
+# generation's positions when only its original digest was presented.
+test_frozen_delivery_receipts() (
+  local dir state file capture first second mode=unconfirmed
+  local FM_SUPERVISOR_BACKEND=t3code
+  dir=$(make_supercase frozen-receipts); state="$dir/state"
+  # shellcheck source=bin/fm-wake-lib.sh
+  FM_STATE_OVERRIDE="$state" . "$ROOT/bin/fm-wake-lib.sh"
+  file="$state/frozen.status"; capture="$dir/capture"
+  printf 'done: first\n' > "$file"
+  first=$(log_size "$file")
+  classify_signal "$file" "$state" >/dev/null
+  printf 'frozen\t%s\t%s\n' "$first" "$(_fm_open_decisions_file_ident "$file")" > "$capture"
+  escalate_add "$state" 'frozen.status: done: first'
+  mark_escalated_seen "$state" "$capture" queued
+  inject_msg() {
+    INJECT_SUBMIT_ATTEMPTED=1 INJECT_LAST_VERDICT=$mode INJECT_SENT_MSG=$1
+    [ "$mode" = empty ]
+  }
+  escalate_flush "$state" && fail "unconfirmed digest was delivered"
+  [ "$(status_presentation_cursor_offset "$file")" = 0 ] || fail "frozen attempt became a receipt"
+  printf 'failed: second\n' >> "$file"
+  second=$(log_size "$file")
+  printf 'frozen\t%s\t%s\n' "$second" "$(_fm_open_decisions_file_ident "$file")" > "$capture"
+  escalate_add "$state" 'frozen.status: failed: second'
+  mark_escalated_seen "$state" "$capture" queued
+  mode=empty
+  escalate_flush_frozen "$state" "$state/.subsuper-escalations" || fail "frozen delivery failed"
+  [ "$(status_presentation_cursor_offset "$file")" = "$first" ] || fail "frozen delivery acknowledged next generation"
+  [ -s "$state/.subsuper-escalations" ] || fail "next generation was discarded"
+  escalate_flush "$state" || fail "next generation failed"
+  [ "$(status_presentation_cursor_offset "$file")" = "$second" ] || fail "next generation receipt missing"
+  pass "frozen digest receipts preserve next-generation endpoints"
+)
+test_frozen_delivery_receipts

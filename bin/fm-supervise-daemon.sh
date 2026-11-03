@@ -682,7 +682,11 @@ _seen_status_path() {  # <state> <task>
 # An absent, malformed, identity-mismatched, or legacy marker reads 0, so the
 # whole log is classified and uncertainty prefers a duplicate over event loss.
 status_seen_offset() {  # <state> <task>
-  status_presentation_marker_offset "$(_seen_status_path "$1" "$2")" "$1/$2.status"
+  local classified presented
+  classified=$(status_presentation_marker_offset "$(_seen_status_path "$1" "$2")" "$1/$2.status")
+  presented=$(status_presentation_cursor_offset "$1/$2.status") || presented=0
+  [ "$presented" -le "$classified" ] || classified=$presented
+  printf '%s' "$classified"
 }
 
 # Commit <task>'s successfully classified endpoint, so the heartbeat catch-all
@@ -698,7 +702,7 @@ mark_status_seen() {  # <state> <task> <captured-end-offset> <captured-identity>
 # observed file signature.
 # Recording that signature bounds the report while leaving its classification
 # position unchanged, so readable recovery resumes from the last proven byte.
-mark_escalated_seen() {  # <state> <captured-endpoint-file>
+mark_escalated_seen() {  # <state> <captured-endpoint-file> [queued]
   local state=$1 capture=$2 task endpoint ident rc=0
   [ -f "$capture" ] || return 1
   while IFS=$(printf '\t') read -r task endpoint ident; do
@@ -708,6 +712,9 @@ mark_escalated_seen() {  # <state> <captured-endpoint-file>
       continue
     fi
     mark_status_seen "$state" "$task" "$endpoint" "$ident" || rc=1
+    if [ "${3:-}" = queued ]; then
+      printf '%s\t%s\t%s\n' "$task" "$endpoint" "$ident" >> "$state/.subsuper-escalations.positions" || rc=1
+    fi
   done < "$capture"
   return "$rc"
 }
@@ -933,19 +940,26 @@ escalate_freeze() {  # <buf> <submitted-message> <request-id>
 # such as one left behind by a cleared buffer), 1 while it is still pending
 # or was just refused (unfrozen, so the next flush rebuilds every item).
 escalate_flush_frozen() {  # <state> <buf>
-  local state=$1 buf=$2 n id items
+  local state=$1 buf=$2 n id items positions_count
   n=$(( $(wc -l < "$buf.frozen") - 2 ))
   id=$(sed -n '2s/^id=//p' "$buf.frozen")
   items=$(mktemp "$state/.subsuper-frozen.XXXXXX" 2>/dev/null) || return 1
   tail -n +3 "$buf.frozen" > "$items"
   if [ "$(head -n 1 "$buf.frozen")" != "since=$(cat "$buf.since" 2>/dev/null)" ] || [ -z "$id" ] \
     || [ ! -f "$buf.frozen-msg" ] || ! head -n "$n" "$buf" | cmp -s - "$items"; then
-    rm -f "$items" "$buf.frozen" "$buf.frozen-msg" "$buf.next-since"
+    rm -f "$items" "$buf.frozen" "$buf.frozen-msg" "$buf.frozen-positions" "$buf.next-since"
     return 0
   fi
   if inject_msg "$(cat "$buf.frozen-msg")" "$state" exact "$id"; then
     unknown_wake_acknowledge_flushed "$state" "$items" \
       || log "unknown-wake acknowledgement write failed; a delivered unknown wake may escalate again"
+    if [ -f "$buf.frozen-positions" ]; then
+      status_commit_delivered_endpoints "$state" "$buf.frozen-positions" \
+        || log "delivered status receipts could not be committed; events may replay"
+      positions_count=$(wc -l < "$buf.frozen-positions")
+      tail -n +"$((positions_count + 1))" "$buf.positions" > "$items" && mv -f "$items" "$buf.positions"
+      rm -f "$buf.frozen-positions"
+    fi
     tail -n +"$((n + 1))" "$buf" > "$items" && mv -f "$items" "$buf"
     if [ -s "$buf" ]; then mv -f "$buf.next-since" "$buf.since" 2>/dev/null || _now > "$buf.since"; else rm -f "$buf.since"; fi
     rm -f "$items" "$buf.frozen" "$buf.frozen-msg" "$buf.next-since" "$state/.subsuper-inject-wedged"
@@ -953,7 +967,7 @@ escalate_flush_frozen() {  # <state> <buf>
     return 0
   fi
   rm -f "$items"
-  [ "$INJECT_LAST_VERDICT" != send-failed ] || rm -f "$buf.frozen" "$buf.frozen-msg" "$buf.next-since"
+  [ "$INJECT_LAST_VERDICT" != send-failed ] || rm -f "$buf.frozen" "$buf.frozen-msg" "$buf.frozen-positions" "$buf.next-since"
   return 1
 }
 
@@ -966,7 +980,7 @@ escalate_flush_frozen() {  # <state> <buf>
 # (escalate_freeze) is retried first, verbatim.
 ESCALATE_KEPT_FULL=
 escalate_flush() {  # <state>
-  local state=$1 buf msg full='' fresh=0 id=''
+  local state=$1 buf msg full='' fresh=0 id='' positions
   buf="$state/.subsuper-escalations"
   [ -s "$buf" ] || return 0
   if [ ! -f "$buf" ] || [ ! -r "$buf" ]; then
@@ -996,13 +1010,24 @@ escalate_flush() {  # <state>
   # safety net, but keeping the source single-line makes the intent explicit).
   msg=$(printf 'Supervisor escalate (%s event(s)): %s (pre-read; re-arm not needed — watcher daemon-managed)' "$ESCALATE_EVENTS" "$msg")
   [ "${FM_SUPERVISOR_BACKEND:-tmux}" != t3code ] || id="fm-digest-$(_now)-$$-$RANDOM$RANDOM"
+  positions=$(mktemp "$state/.subsuper-presenting.XXXXXX") || return 1
+  if [ -f "$buf.positions" ]; then
+    cat "$buf.positions" > "$positions" || { rm -f "$positions"; return 1; }
+  fi
   if inject_msg "$msg" "$state" "" "$id"; then
+    status_commit_delivered_endpoints "$state" "$positions" \
+      || log "delivered status receipts could not be committed; events may replay"
+    rm -f "$positions" "$buf.positions"
     unknown_wake_acknowledge_flushed "$state" "$buf" \
       || log "unknown-wake acknowledgement write failed; a delivered unknown wake may escalate again"
     : > "$buf"; rm -f "${buf}.since" "$state/.subsuper-inject-wedged"
     ESCALATE_KEPT_FULL=
     return 0
   fi
+  if [ "$INJECT_SUBMIT_ATTEMPTED" = 1 ] && [ "$INJECT_LAST_VERDICT" = unconfirmed ]; then
+    cp "$positions" "$buf.frozen-positions" || rm -f "$buf.frozen-positions"
+  fi
+  rm -f "$positions"
   if [ "$INJECT_SUBMIT_ATTEMPTED" = 1 ]; then
     [ -z "$full" ] || ESCALATE_KEPT_FULL=$full
     [ "$INJECT_LAST_VERDICT" != unconfirmed ] || escalate_freeze "$buf" "$INJECT_SENT_MSG" "$id"
@@ -1650,6 +1675,7 @@ housekeeping() {  # <state>
         event=${rest#*$'\t'}
         if escalate_add "$state" "$(basename "$f"): $event (catch-all scan)"; then
           mark_status_seen "$state" "$task" "$endpoint" "$ident" || true
+          printf '%s\t%s\t%s\n' "$task" "$endpoint" "$ident" >> "$state/.subsuper-escalations.positions" || true
         fi
       elif ! mark_status_seen "$state" "$task" "$endpoint" "$ident"; then
         escalate_add "$state" "$(basename "$f"): status position commit failed (catch-all scan)"
@@ -1948,7 +1974,7 @@ handle_wake() {  # <reason> <state>
         # A terminal-stale escalate must not leave a persistence marker behind, or
         # housekeeping re-escalates the same pane as a false wedge later.
         [ "$kind" = "stale" ] && stale_marker_remove "$arg" "$state"
-        mark_escalated_seen "$state" "$capture" || classification_failed=1
+        mark_escalated_seen "$state" "$capture" queued || classification_failed=1
         [ "${FM_ESCALATE_BATCH_SECS:-$ESCALATE_BATCH_SECS_DEFAULT}" -le 0 ] && { escalate_flush "$state" || true; }
       else
         classification_failed=1
