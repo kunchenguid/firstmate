@@ -155,11 +155,12 @@
 # current generation, which cleanup never touches. Concurrent passes removing
 # the same retired directory are harmless. No startup path waits on cleanup.
 # Owned generation entries are bounded by the current generation, the newest
-# RESULT_KEEP_UNSETTLED unsettled generations, and queued obligations. Incomplete
+# RESULT_KEEP generations as a name-only look-back window, and queued obligations.
+# No status, report, settled-marker, or receipt contents are read. Incomplete
 # records are removed too; symlinks are unlinked without following their targets.
 # Foreign names are untouched. RESULT_PRUNE_MAX defers real deletions, processed
 # oldest-first so later passes drain the backlog. Queue keys are read once.
-# Validated receipts are removed first so interrupted cleanup stays retryable.
+# Receipts are unlinked first so interrupted cleanup stays retryable.
 # A symlinked receipt root is never followed. `prune` exposes the same pass.
 set -u
 
@@ -175,11 +176,9 @@ DELIVERED_FILE="$STATE/.startup-network.delivered"
 TIMINGS_FILE="$STATE/.startup-network.timings"
 PUBLISH_LOCK="$STATE/.startup-network.lock"
 
-# Unsettled generations kept past the current one, so a run that died between
-# retaining its completion and settling it stays readable for a few starts.
-# Settled and superseded generations are not retained once they are complete
-# completion records; see prune_results().
-RESULT_KEEP_UNSETTLED=3
+# Newest generations kept as a look-back window, settled or not. Older
+# noncurrent, unqueued results are forensic only; see prune_results().
+RESULT_KEEP=3
 
 # Entries one retention pass may examine. The pass runs on the detached worker's
 # own time, and a home whose retained state keeps hitting an exception must not
@@ -448,53 +447,34 @@ settle_result() { # <generation> <reason>
 prune_results() {
   local root="$STATE/.startup-network-results" receipts="$STATE/.startup-network-wake-receipts"
   local queue="$STATE/.wake-queue"
-  local current queued='' gen entry receipt field value deleted=0 complete protected='' names
-  local kept=0 candidates=''
+  local current queued='' gen entry receipt processed=0 names
+  local count=0 index=0 candidates=''
   [ -d "$root" ] && [ ! -L "$root" ] || return 0
   current=$(status_get generation)
   if [ -f "$queue" ] && [ ! -L "$queue" ]; then
     queued=$(awk -F '\t' 'NF == 5 && $3 == "check" && $4 ~ /^startup-network:/ \
       { sub(/^startup-network:/, "", $4); print $4 }' "$queue" 2>/dev/null || true)
   fi
-  names=$(printf '%s\n' "$root"/* | sed 's|.*/||' | LC_ALL=C sort -t. -k1,1nr -k2,2nr)
+  names=$(printf '%s\n' "$root"/* | sed 's|.*/||' | LC_ALL=C sort -t. -k1,1n -k2,2n)
   while IFS= read -r gen; do
     case "$gen" in *.*.*) ;; *) continue ;; esac
     fm_startup_generation_valid "$gen" || continue
-    [ "$gen" = "$current" ] && continue
-    case $'\n'"$queued"$'\n' in *$'\n'"$gen"$'\n'*) continue ;; esac
     candidates="${candidates}${gen}"$'\n'
+    count=$((count + 1))
   done <<< "$names"
   while IFS= read -r gen; do
     [ -n "$gen" ] || continue
+    index=$((index + 1))
+    [ "$index" -le "$((count - RESULT_KEEP))" ] || break
+    [ "$gen" = "$current" ] && continue
+    case $'\n'"$queued"$'\n' in *$'\n'"$gen"$'\n'*) continue ;; esac
+    [ "$processed" -lt "$RESULT_PRUNE_MAX" ] || break
+    processed=$((processed + 1))
     entry="$root/$gen"
-    complete=1
-    fm_startup_result_path "$STATE" "$gen" >/dev/null || complete=0
-    if [ "$complete" = 1 ]; then
-      case "$(fm_startup_field "$entry/status" state)" in done|failed|refused|timeout) ;; *) complete=0 ;; esac
-      [ "$(fm_startup_field "$entry/status" report_published)" = 1 ] || complete=0
-      for field in finished rc; do
-        value=$(fm_startup_field "$entry/status" "$field")
-        case "$value" in ''|*[!0-9]*) complete=0 ;; esac
-      done
-    fi
-    if [ "$complete" = 1 ] && ! fm_startup_result_settled "$STATE" "$gen"; then
-      protected="${protected}${gen}"$'\n'
-      kept=$((kept + 1))
-      [ "$kept" -lt "$RESULT_KEEP_UNSETTLED" ] || break
-    fi
-  done <<< "$candidates"
-  while IFS= read -r gen; do
-    [ -n "$gen" ] || continue
-    case $'\n'"$protected" in *$'\n'"$gen"$'\n'*) continue ;; esac
-    [ "$deleted" -lt "$RESULT_PRUNE_MAX" ] || break
-    entry="$root/$gen"
-    [ "$gen" = "$(status_get generation)" ] && continue
     if [ -d "$receipts" ] && [ ! -L "$receipts" ]; then
       receipt="$receipts/$gen"
-      if [ -e "$receipt" ] || [ -L "$receipt" ]; then
-        if [ -f "$receipt" ] && [ ! -L "$receipt" ] && [ "$(cat "$receipt" 2>/dev/null || true)" = "$gen" ]; then
-          rm -f -- "$receipt" 2>/dev/null || continue
-        fi
+      if [ -f "$receipt" ] || [ -L "$receipt" ]; then
+        rm -f -- "$receipt" 2>/dev/null || continue
       fi
     fi
     [ "$gen" = "$(status_get generation)" ] && continue
@@ -503,8 +483,7 @@ prune_results() {
     else
       rm -rf -- "$entry" 2>/dev/null || continue
     fi
-    deleted=$((deleted + 1))
-  done < <(printf '%s' "$candidates" | LC_ALL=C sort -t. -k1,1n -k2,2n)
+  done <<< "$candidates"
   return 0
 }
 cmd_prune() {
