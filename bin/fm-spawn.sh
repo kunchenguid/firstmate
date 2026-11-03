@@ -131,6 +131,8 @@
 #   auto-detected (the paseo and tern markers, like bare hc markers, leak into
 #   every descendant process). An app-detected hc also records its signal in
 #   meta's backend_detect= line.
+#   Herdr leases its slot durably (treehouse get --lease) and moves the pane's
+#   top-level shell into it, because a restart restores that shell's cwd.
 #   codex-app is not a known backend yet; docs/codex-app-backend.md owns that
 #   blocked backend contract. Default tmux spawns do not write backend= to meta;
 #   absent backend= means tmux. Orca, cmux, paseo, tern, and hc do not support
@@ -1618,6 +1620,7 @@ T3CODE_CREATE_UNCERTAIN=0
 T3CODE_LAUNCH_UNCONFIRMED=0
 T3CODE_PROJECT_ID=
 T3CODE_MODEL_SELECTION=
+HERDR_LEASED=0
 HERDR_PROJECTION_ABORT_CLEANUP=0
 HERDR_PROJECTION_ABORT_SESSION=
 HERDR_PROJECTION_ABORT_TASK_PANE=
@@ -1730,10 +1733,12 @@ spawn_abort_cleanup() {
   fi
   if [ "$HERDR_PROJECTION_ABORT_CLEANUP" = 1 ]; then
     HERDR_PROJECTION_ABORT_CLEANUP=0
-    fm_backend_herdr_projection_cleanup_exact \
+    if fm_backend_herdr_projection_cleanup_exact \
       "$HERDR_PROJECTION_ABORT_SESSION" \
       "$HERDR_PROJECTION_ABORT_TASK_PANE" \
-      "$HERDR_PROJECTION_ABORT_SEEDED_PANE" || true
+      "$HERDR_PROJECTION_ABORT_SEEDED_PANE"; then
+      SPAWN_ENDPOINT_CLOSED=1
+    fi
   fi
   if [ "$HERDR_PRESENTATION_ORDER_LOCK_HELD" = 1 ]; then
     HERDR_PRESENTATION_ORDER_LOCK_HELD=0
@@ -1892,6 +1897,25 @@ spawn_abort_cleanup() {
       else
         echo "warning: another spawn of $ID holds its spawn lock; leaving its $HARNESS wiring, temp root, and staged launch file in place" >&2
       fi
+    fi
+  fi
+  # A durable Herdr lease outlives the pane, unlike the process lease the
+  # interactive command used to take, so an abort that leaves no record returns
+  # it, whether or not the launch was sent. Only a pane Herdr reports gone and a
+  # copy with no uncommitted work prove nothing is left to inspect there; any
+  # other keeps the lease and names the command, as the pane used to hold the
+  # slot for the operator.
+  if [ "$HERDR_LEASED" = 1 ] && [ "$status" -ne 0 ] && [ -n "${WT:-}" ] &&
+    [ ! -e "$STATE/$ID.meta" ] && [ ! -L "$STATE/$ID.meta" ]; then
+    HERDR_LEASED=0
+    local herdr_slot_status
+    if [ "$SPAWN_ENDPOINT_CLOSED" = 1 ] && fm_backend_herdr_endpoint_confirmed_gone "${T:-}" &&
+      herdr_slot_status=$(git -C "$WT" status --porcelain --untracked-files=all 2>/dev/null) &&
+      [ -z "$herdr_slot_status" ] &&
+      (cd "$PROJ_ABS" && treehouse return --force "$WT") >/dev/null 2>&1; then
+      :
+    else
+      echo "warning: the worktree $WT stays leased to $ID after the failed spawn; once inspected, run 'treehouse return --force $WT' from $PROJ_ABS" >&2
     fi
   fi
   # A spawn that aborts after claiming its slot but before its record survives
@@ -5303,6 +5327,24 @@ spawn_send_key() { # <target> <key>
   esac
 }
 
+# Lease the task copy durably instead of typing the interactive `treehouse get`
+# into the pane. That command runs a subshell, so the later `cd` lands inside
+# it and the pane's top-level shell stays in the project; Herdr restores a pane
+# from that top-level shell's cwd, so a host restart reopened every worker in
+# the primary clone. A durable lease needs no subshell, which lets the cd in
+# spawn_enter_recorded_worktree move the top-level shell itself. A lease
+# outlives its pane, so an aborted spawn returns it (spawn_abort_cleanup) and
+# bin/fm-teardown.sh returns it for a finished task.
+spawn_lease_herdr_slot() {
+  WT=$(cd "$PROJ_ABS" && treehouse get --lease --lease-holder "$ID") || {
+    echo "error: treehouse get --lease failed to lease a worktree for $ID from $PROJ_ABS; $(spawn_endpoint_hint)" >&2
+    exit 1
+  }
+  [ -n "$WT" ] || { echo "error: treehouse get --lease did not report a worktree for $ID" >&2; exit 1; }
+  HERDR_LEASED=1
+  validate_spawn_worktree "treehouse get --lease" "$WT (leased to $ID; once inspected, release it with 'treehouse return --force $WT' from $PROJ_ABS)"
+}
+
 # Enter the exact copy recorded for this task immediately before trust setup and
 # launch. Herdr restores a pane's shell cwd from its durable tab layout, so a
 # treehouse subshell's foreground cwd is not enough to keep a later pane restart
@@ -5823,7 +5865,11 @@ elif [ "$RELAUNCH" -eq 1 ]; then
   [ "$KIND" = secondmate ] || validate_spawn_worktree "relaunch" "$T"
 elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   # A t3code slot was leased and validated in its target branch above.
-  if [ "$BACKEND" != t3code ]; then
+  if [ "$BACKEND" = t3code ]; then
+    :
+  elif [ "$BACKEND" = herdr ]; then
+    spawn_lease_herdr_slot
+  else
     spawn_send_text_line "$WT_TARGET" 'treehouse get'
 
     # Wait for the treehouse subshell: the pane's cwd moves from the project to the worktree.
@@ -5890,12 +5936,12 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
     fi
   fi
 
-  # Claim the pool slot for this task. The interactive `treehouse get` sent to
-  # the pane above records only a process lease (Treehouse's durable
-  # `get --lease --lease-holder`, which bin/fm-home-seed.sh uses for secondmate
-  # homes, is not this path), so Treehouse cannot say which task a slot belongs
-  # to once that task's worker exits - and that is exactly when the slot is
-  # handed on and this task's worktree= line goes stale. The claim is what lets
+  # Claim the pool slot for this task. Except on Herdr, whose slot
+  # spawn_lease_herdr_slot leased durably, the interactive `treehouse get` sent
+  # to the pane above records only a process lease, so Treehouse cannot say
+  # which task a slot belongs to once that task's worker exits - and that is
+  # exactly when the slot is handed on and this task's worktree= line goes
+  # stale. The claim is what lets
   # bin/fm-teardown.sh leave a slot that has since been reassigned untouched, so
   # a slot that cannot be claimed is refused here, at the cheapest point, rather
   # than launching a worker whose slot teardown could later release out from
