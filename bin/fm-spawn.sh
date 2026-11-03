@@ -7549,6 +7549,9 @@ fi
 # launch and the launch-env-allowlist `env -i` wrapper.
 LAUNCH="export FM_TASK_INBOX=$(shell_quote "$STATE_REAL/$ID.inbox"); $LAUNCH"
 LAUNCH="export COMPACT_ADVISER_DISABLE=1; $LAUNCH"
+# Every launch also bounds the lifetime of the browser automation a worker starts.
+LAUNCH_CHROME_IDLE_TIMEOUT_MS=1800000
+LAUNCH="export CHROME_DEVTOOLS_AXI_IDLE_TIMEOUT_MS=$LAUNCH_CHROME_IDLE_TIMEOUT_MS; $LAUNCH"
 # When the live-harness gate has exported DISABLE_AUTOUPDATER into this spawn's
 # own environment, carry it into the launch command text so Claude Code's
 # auto-updater cannot rewrite the shared binary during a live run. Embedding the
@@ -7634,6 +7637,9 @@ spawn_send_text_line "$T" "export GOTMPDIR=$TASK_TMP/gotmp"
 # pre-launch channel, so later commands in that shell inherit it too. The launch
 # command independently establishes the value for the agent process itself.
 spawn_send_text_line "$T" "export COMPACT_ADVISER_DISABLE=1"
+# And the bounded browser-automation lifetime, so later commands in that same pane
+# shell inherit it as well as the agent process itself.
+spawn_send_text_line "$T" "export CHROME_DEVTOOLS_AXI_IDLE_TIMEOUT_MS=$LAUNCH_CHROME_IDLE_TIMEOUT_MS"
 if [ "$LAVISH_AXI_HOST_CONFIG_PRESENT" = 1 ]; then
   spawn_send_text_line "$T" "export LAVISH_AXI_HOST=$(shell_quote "$LAVISH_AXI_HOST")"
 fi
@@ -7705,6 +7711,9 @@ if [ "$LAUNCH_ENV_ENABLED" = 1 ]; then
   # $LAUNCH is what gives the wrapping `/bin/sh` itself the switch, not only the
   # agent command it runs.
   LAUNCH_ENV_PREFIX="$LAUNCH_ENV_PREFIX COMPACT_ADVISER_DISABLE=1"
+  # The same floor treatment for the bounded browser-automation lifetime above,
+  # so the wrapping `/bin/sh` itself carries it, not only the agent command it runs.
+  LAUNCH_ENV_PREFIX="$LAUNCH_ENV_PREFIX CHROME_DEVTOOLS_AXI_IDLE_TIMEOUT_MS=$LAUNCH_CHROME_IDLE_TIMEOUT_MS"
   if [ -n "$SPAWN_TRACEPARENT" ]; then
     # shellcheck disable=SC2016
     LAUNCH_ENV_PREFIX="$LAUNCH_ENV_PREFIX "'${TRACEPARENT+"TRACEPARENT=$TRACEPARENT"}'
