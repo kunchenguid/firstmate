@@ -117,20 +117,29 @@ fm_bob_script_is_bob() {  # <path>
 # name table above nor its own marker (BOB_SESSION, set only for descendants)
 # can identify it here (verified, bob 2.0.9 on Node v24). Its first script
 # argument is the structural fact: Bob is the process running Bob's installed
-# entry script. Node options before the script are skipped. MainThread is
+# entry script (its path may contain spaces). Node options before the script are skipped. MainThread is
 # accepted ONLY together with that script, never widened to every node process.
 fm_bob_process_matches() {  # <comm> <args>
-  local comm=$1 args=$2 word
+  local comm=$1 args=$2 cand i j start=-1
   local -a words=()
   case "$(basename -- "$comm")" in
     MainThread|node|node-*|node[0-9]*) ;;
     *) return 1 ;;
   esac
   read -r -a words <<<"$args" || true
-  for word in "${words[@]:1}"; do
-    case "$word" in -*) continue ;; esac
-    fm_bob_script_is_bob "$word"
-    return
+  for ((i = 1; i < ${#words[@]}; i++)); do
+    case "${words[i]}" in -*) continue ;; esac
+    start=$i
+    break
+  done
+  [ "$start" -ge 0 ] || return 1
+  # ps joins argv with spaces, so an install path containing spaces arrives as
+  # several words (and may be followed by Bob's own arguments): try the longest
+  # candidate first and shorten until one is Bob's entry script.
+  for ((j = ${#words[@]}; j > start; j--)); do
+    cand=${words[start]}
+    for ((i = start + 1; i < j; i++)); do cand+=" ${words[i]}"; done
+    fm_bob_script_is_bob "$cand" && return 0
   done
   return 1
 }

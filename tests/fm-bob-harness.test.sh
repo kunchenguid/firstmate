@@ -283,6 +283,66 @@ test_bob_tracked_settings_refuses_spawn() {
   pass "fm-spawn: bob refuses to replace a tracked .bob/settings.json"
 }
 
+test_bob_tracked_brief_refuses_spawn() {
+  local id rec out rc
+  id="bob-trackedbrief-z1-$$"
+  rec=$(make_spawn_case trackedbrief "$id")
+  read_spawn_record "$rec"
+  mkdir -p "$PROJ_DIR/.bob"
+  printf 'project notes\n' >"$PROJ_DIR/.bob/launch-brief.md"
+  git -C "$PROJ_DIR" add .bob/launch-brief.md
+  git -C "$PROJ_DIR" -c user.name=t -c user.email=t@example.com commit -q -m 'project bob brief'
+  git -C "$PROJ_DIR" push -q origin "HEAD:$(git -C "$PROJ_DIR" symbolic-ref --short HEAD)"
+  out=$(run_spawn "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id")
+  rc=$?
+  [ "$rc" -ne 0 ] || fail "bob spawn must refuse a worktree that tracks .bob/launch-brief.md"
+  assert_contains "$out" "tracks its own .bob/launch-brief.md" "tracked-brief refusal was not reported"
+  [ "$(cat "$WT_DIR/.bob/launch-brief.md")" = 'project notes' ] \
+    || fail "the project's tracked .bob/launch-brief.md was modified"
+  [ ! -s "$CASE_DIR/launch.log" ] || fail "bob was launched despite the refusal"
+  pass "fm-spawn: bob refuses to replace a tracked .bob/launch-brief.md"
+}
+
+test_bob_symlinked_dir_refuses_spawn() {
+  local id rec out rc outside
+  id="bob-symlink-z1-$$"
+  rec=$(make_spawn_case symlink "$id")
+  read_spawn_record "$rec"
+  outside="$CASE_DIR/outside-bob"
+  mkdir -p "$outside"
+  ln -s "$outside" "$PROJ_DIR/.bob"
+  git -C "$PROJ_DIR" add .bob
+  git -C "$PROJ_DIR" -c user.name=t -c user.email=t@example.com commit -q -m 'project links .bob'
+  git -C "$PROJ_DIR" push -q origin "HEAD:$(git -C "$PROJ_DIR" symbolic-ref --short HEAD)"
+  out=$(run_spawn "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id")
+  rc=$?
+  [ "$rc" -ne 0 ] || fail "bob spawn must refuse a worktree whose .bob is a symlink"
+  assert_contains "$out" "has .bob as a symlink" "symlinked-.bob refusal was not reported"
+  [ -z "$(ls -A "$outside")" ] || fail "firstmate wrote through the .bob symlink to $outside"
+  [ ! -s "$CASE_DIR/launch.log" ] || fail "bob was launched despite the refusal"
+  pass "fm-spawn: bob refuses a .bob symlink instead of writing through it"
+}
+
+test_bob_concurrent_trust_registrations_all_persist() {
+  local home i n=8 count
+  home="$TMP_ROOT/trust-home"
+  mkdir -p "$home"
+  git init -q "$TMP_ROOT/trust-proj"
+  git -C "$TMP_ROOT/trust-proj" -c user.name=t -c user.email=t@example.com commit -q --allow-empty -m init
+  for i in $(seq 1 "$n"); do
+    git -C "$TMP_ROOT/trust-proj" worktree add -q "$TMP_ROOT/trust-wt-$i" -b "trust-$i"
+  done
+  for i in $(seq 1 "$n"); do
+    HOME="$home" "$ROOT/bin/fm-bob-trust.sh" "$TMP_ROOT/trust-wt-$i" "$TMP_ROOT/trust-proj" >/dev/null 2>"$TMP_ROOT/trust-err-$i" &
+  done
+  wait
+  count=$(node -e 'const f=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")).folders;
+    process.stdout.write(String(Object.values(f).filter(v=>v==="TRUST_FOLDER").length))' "$home/.bob/trustedFolders.json")
+  [ "$count" = "$n" ] || fail "concurrent trust registrations kept $count of $n entries: $(cat "$TMP_ROOT"/trust-err-* 2>/dev/null)"
+  [ ! -e "$home/.bob/trustedFolders.json.fm-trust.lock" ] || fail "the trust store lock was left behind"
+  pass "fm-bob-trust: concurrent registrations all persist and release the store lock"
+}
+
 test_bob_secondmate_is_refused() {
   local id rec out rc
   id="bob-second-z1-$$"
@@ -300,4 +360,7 @@ test_bob_launch_then_send_is_verified
 test_bob_readiness_gate_precedes_pointer
 test_bob_unconfirmed_delivery_fails_loudly
 test_bob_tracked_settings_refuses_spawn
+test_bob_tracked_brief_refuses_spawn
+test_bob_symlinked_dir_refuses_spawn
+test_bob_concurrent_trust_registrations_all_persist
 test_bob_secondmate_is_refused

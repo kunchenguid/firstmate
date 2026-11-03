@@ -6237,10 +6237,20 @@ bob)
   # backstop. bin/fm-bob-trust.sh owns the structural scope test and refuses
   # anything outside the isolated worktree; the refusal blocks the spawn rather
   # than launching a worker with silent suppression of approval and hooks.
-  if git -C "$WT" ls-files --error-unmatch -- .bob/settings.json >/dev/null 2>&1; then
-    echo "error: $WT tracks its own .bob/settings.json; firstmate writes its turn-end and busy-state hooks to that path, so it would replace the project's committed Bob settings; refusing to launch a bob worker; $(spawn_endpoint_hint)" >&2
+  # Firstmate writes .bob/settings.json and .bob/launch-brief.md into the
+  # worktree: refuse when either path is committed (it would replace project
+  # content that then enters the worker's commit), and when .bob itself is a
+  # symlink (the writes would follow it out of the worktree).
+  if [ -L "$WT/.bob" ]; then
+    echo "error: $WT has .bob as a symlink; firstmate writes its hook file and brief copy through .bob, which would land outside the worktree; refusing to launch a bob worker; $(spawn_endpoint_hint)" >&2
     exit 1
   fi
+  for bob_owned in .bob/settings.json .bob/launch-brief.md; do
+    if git -C "$WT" ls-files --error-unmatch -- "$bob_owned" >/dev/null 2>&1; then
+      echo "error: $WT tracks its own $bob_owned; firstmate writes its Bob hook file and brief copy to that path, so it would replace the project's committed content; refusing to launch a bob worker; $(spawn_endpoint_hint)" >&2
+      exit 1
+    fi
+  done
   if ! "$FM_ROOT/bin/fm-bob-trust.sh" "$WT" "$PROJ_ABS" >/dev/null; then
     echo "error: could not pre-register Bob workspace trust for $WT; refusing to launch a bob worker whose --auto-approve and workspace hooks would be silently suppressed; $(spawn_endpoint_hint)" >&2
     exit 1
@@ -6712,7 +6722,7 @@ EOF
       # scoped layer). Bob merges hook arrays across its two settings layers
       # (global ~/.bob/settings/settings.json + workspace .bob/settings.json), so
       # the user's global hooks still run alongside firstmate's. A project that
-      # tracks its own .bob/settings.json is refused before launch (see the bob
+      # tracks its own .bob/settings.json or .bob/launch-brief.md, or links .bob elsewhere, is refused before launch (see the bob
       # trust step), so this write never replaces committed settings. The
       # workspace layer is only loaded in trusted folders; fm-bob-trust.sh and --trust on the launch command both
       # ensure the folder is trusted before hooks are needed.

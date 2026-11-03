@@ -170,17 +170,63 @@ const attempt = () => {
   }
   return isTrusted(JSON.parse(fs.readFileSync(store, "utf8"))) ? "recorded" : "dropped";
 };
-try {
-  for (let i = 0; i < 3; i += 1) {
-    const result = attempt();
-    if (result === "recorded") process.exit(0);
-    if (result === "moved" && i >= 1) {
-      console.error(`error: ${store} was modified while trust was being recorded; refusing to overwrite it`);
-      process.exit(1);
+// Store-wide lock serialising the read-merge-rename cycle between concurrent
+// helpers (spawns from different Firstmate homes share this one store). An
+// O_EXCL lock file holding the owner's pid; a lock whose owner is dead is
+// broken. Portable (flock is absent on macOS). Bob's own rewrites of the store
+// are not covered, which is what the fingerprint check is for.
+const lockPath = `${store}.fm-trust.lock`;
+const sleep = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+const acquire = () => {
+  for (let i = 0; i < 400; i += 1) {
+    try {
+      const fd = fs.openSync(lockPath, "wx", 0o600);
+      fs.writeSync(fd, `${process.pid}\n`);
+      fs.closeSync(fd);
+      return;
+    } catch (err) {
+      if (err.code !== "EEXIST") throw err;
     }
+    let owner = NaN;
+    try {
+      owner = Number.parseInt(fs.readFileSync(lockPath, "utf8"), 10);
+    } catch (err) {
+      if (err.code === "ENOENT") continue;
+      throw err;
+    }
+    if (Number.isInteger(owner) && owner > 0) {
+      try {
+        process.kill(owner, 0);
+      } catch (err) {
+        if (err.code === "ESRCH") {
+          fs.rmSync(lockPath, { force: true });
+          continue;
+        }
+      }
+    }
+    sleep(50);
+  }
+  throw new Error(`could not take the trust store lock ${lockPath}`);
+};
+let outcome = "failed";
+try {
+  acquire();
+  try {
+    for (let i = 0; i < 3 && outcome === "failed"; i += 1) {
+      const result = attempt();
+      if (result === "recorded") outcome = "recorded";
+      else if (result === "moved" && i >= 1) outcome = "moved";
+    }
+  } finally {
+    fs.rmSync(lockPath, { force: true });
   }
 } catch (err) {
   console.error(`error: ${err.message}`);
+  process.exit(1);
+}
+if (outcome === "recorded") process.exit(0);
+if (outcome === "moved") {
+  console.error(`error: ${store} was modified while trust was being recorded; refusing to overwrite it`);
   process.exit(1);
 }
 console.error(`error: ${store} did not retain trust for ${wantedPath} after 3 attempts`);

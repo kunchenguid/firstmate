@@ -108,7 +108,7 @@ ln -s ../unrelated.js "$BOB_INSTALL/other/bin/bob"
 BOB_LAUNCHER="$BOB_INSTALL/bin/bob"
 
 test_bob_session_is_identified_from_its_entry_script() {
-  local dir fakebin shape got
+  local dir fakebin shape got spaced
   dir="$TMP_ROOT/bob-session"
   fakebin=$(fm_fakebin "$dir")
   mkdir -p "$dir/state"
@@ -173,6 +173,26 @@ SH
     lib_eval "$fakebin" 'fm_harness_ancestry_pid') \
     || fail "a bob session started with a node option was not found in the ancestry"
   [ "$got" = 801 ] || fail "a bob session started with a node option resolved '$got', expected 801"
+
+  # An install path containing spaces reaches the matcher as several words and
+  # must still resolve to Bob's entry script; the same shape around an
+  # unrelated script stays refused.
+  spaced="$TMP_ROOT/bob install dir"
+  mkdir -p "$spaced/bin" "$spaced/lib/node_modules/@ibm/bob/dist" "$spaced/other/bin"
+  : > "$spaced/lib/node_modules/@ibm/bob/dist/bob.js"
+  ln -s ../lib/node_modules/@ibm/bob/dist/bob.js "$spaced/bin/bob"
+  : > "$spaced/other/unrelated.js"
+  ln -s ../unrelated.js "$spaced/other/bin/bob"
+  for script in "$spaced/bin/bob" "$spaced/lib/node_modules/@ibm/bob/dist/bob.js"; do
+    for shape in linux macos; do
+      got=$(FM_TEST_BOB_SCRIPT="$script" FM_TEST_BOB_SHAPE="$shape" lib_eval "$fakebin" 'fm_harness_ancestry_pid') \
+        || fail "$shape: the bob session running '$script' (path with spaces) was not found in the ancestry"
+      [ "$got" = 801 ] || fail "$shape: spaced bob path resolved '$got', expected 801"
+    done
+  done
+  if FM_TEST_BOB_SCRIPT="$spaced/other/bin/bob" lib_eval "$fakebin" 'fm_harness_ancestry_pid' >/dev/null 2>&1; then
+    fail "a spaced path around an unrelated script named bob was read as Bob"
+  fi
   pass "session-lock: a bob session is identified from its installed entry script, never from MainThread alone"
 }
 
