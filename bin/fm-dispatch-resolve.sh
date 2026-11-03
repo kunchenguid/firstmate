@@ -95,7 +95,7 @@
 #     fallback: <runner-up rule taken when the picked rule missed its own floor>
 #     reason: <why the status is not clear>
 #     preferred_provider: <family and preference or fallback decision, when applied>
-#     candidate: <harness>:<model> provider=.. scope=.. remaining=..% spendPriority=.. runway=.. -> eligible | eligible, unranked: <reason> | not eligible: <reason>
+#     candidate: <harness>:<model> [account=..] provider=.. scope=.. remaining=..% spendPriority=.. runway=.. -> eligible | eligible, unranked: <reason> | not eligible: <reason>
 #        (with the shared-quota opt-out: <harness>:<model> provider=.. -> eligible (quota ranking off: home declares a single shared quota))
 #     profile: --harness <h> [--model <m>] [--effort <e>] [--account <a>]     (status clear only)
 #        --account appears only for a Claude profile that names an account; fm-spawn.sh
@@ -753,6 +753,7 @@ TEXT=$(jq -r '
   (if .preferred_provider then "  preferred_provider: \(.preferred_provider | flat)" else empty end),
   (if .unranked_note then "  note: \(.unranked_note | flat)" else empty end),
   (.candidates[]? | "  candidate: \(.profile.harness | flat):\(show(.profile.model))"
+      + (if .profile.account then "  account=\(.profile.account | flat)" else "" end)
       + (if .provider then "  provider=\(.provider | flat)" else "" end)
       + (if .scope then "  scope=\(.scope | flat)  remaining=\(show(.pct))%  spendPriority=\(show(.spendPriority))  runway=\(show(.runway))" else "" end)
       + (if (.bounds // [] | length) > 1 then "  bounds=" + ([.bounds[] | "\(.scope | flat):\(show(.pct))%/\((.runway // .status) | flat)"] | join(",")) else "" end)

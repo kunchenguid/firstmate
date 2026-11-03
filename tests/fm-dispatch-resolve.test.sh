@@ -1913,6 +1913,9 @@ jq '.rules[3].use = [{"harness":"claude","model":"sonnet","account":"ordinary"},
 TYPESAFE_API_KEY=$KEY run code out err "$BRIEF" --project pager
 expect_code 0 "$code" "two profiles that differ only by account are not duplicates"
 assert_contains "$out" "reason: genuine spendPriority tie" "accounts sharing one quota row tie and return to the account step, not a config error"
+assert_contains "$out" 'candidate: claude:sonnet  account=ordinary  provider=claude  scope=all_models' "the tied ordinary candidate names its account"
+assert_contains "$out" 'candidate: claude:sonnet  account=/accounts/second  provider=claude  scope=all_models' "the tied second-account candidate names its account"
+assert_not_contains "$out" '  profile: ' "a tie between accounts prints no profile line"
 for bad in '{"harness":"claude","model":"sonnet","account":"relative/path"}' '{"harness":"claude","model":"sonnet","account":""}' \
   '{"harness":"claude","model":"sonnet","account":"ordinary\n"}' '{"harness":"claude","model":"sonnet","account":"token:/keys/second.token\n"}' \
   '{"harness":"cursor","model":"cursor-grok-4.6-medium","account":"ordinary"}'; do
@@ -1925,6 +1928,7 @@ done
 cp "$BASE_RULES" "$RULES"
 TYPESAFE_API_KEY=$KEY run code out err "$BRIEF" --project pager
 assert_not_contains "$out" '--account' "a profile without an account prints no --account"
+assert_not_contains "$out" 'account=' "a candidate without an account prints no account="
 pass "account: a claude profile passes its account to the profile line; malformed or non-claude accounts are refused"
 
 printf '# all fm-dispatch-resolve tests passed\n'
