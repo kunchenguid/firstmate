@@ -446,10 +446,17 @@ fm_task_inbox_check_pending() {
 }
 
 # Whether the composer's content, ignoring line wrapping, is exactly <line>.
+# A backend that publishes a structured draft owns this decision: any answer it
+# gives, empty included, is final. Only exit 1 (no structured draft at all) may
+# fall back to plain capture; an unreadable draft reads as "not ours" so the
+# caller defers, because accumulated stream text can still hold an earlier
+# ring's own doorbell next to the foreign draft that is really in the composer.
 fm_task_inbox_composer_holds() {  # <backend> <target> <line> [expected-label]
-  local cap held
+  local cap held rc=0
   fm_backend_source "$1" || return 1
-  if ! held=$(fm_backend_composer_draft "$1" "$2" "${4:-}" 2>/dev/null); then
+  held=$(fm_backend_composer_draft "$1" "$2" "${4:-}" 2>/dev/null) || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    [ "$rc" -eq 1 ] || return 1
     cap=$(fm_backend_capture "$1" "$2" "$FM_COMPOSER_CAPTURE_LINES" "${4:-}" 2>/dev/null) || return 1
     held=$(fm_composer_extract_selected_content styled=0 "$cap") || return 1
   fi

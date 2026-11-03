@@ -1402,9 +1402,11 @@ fm_backend_busy_state() {  # <backend> <target>
 }
 
 # fm_backend_composer_draft: the backend's structured input draft for <target>,
-# printed verbatim so an EMPTY draft is an answer rather than a failure; a
-# backend without a structured draft returns nonzero and its caller falls back
-# to plain capture. fm-task-inbox-lib.sh's own-line check owns that precedence.
+# printed verbatim so an EMPTY draft is an answer rather than a failure. Exit 0
+# is that answer, exit 1 means "this backend has no structured draft" (the only
+# case where fm-task-inbox-lib.sh's own-line check may fall back to plain
+# capture), and exit 3 means a structured draft exists but could not be read -
+# an ownership decision that must defer instead of trusting stream text.
 # Only Orca publishes the field (result.terminal.draft); see docs/orca-backend.md.
 fm_backend_composer_draft() {
   local backend=$1

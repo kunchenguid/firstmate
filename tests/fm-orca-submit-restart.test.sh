@@ -95,7 +95,9 @@ for order in before-text before-text-fresh before-enter pending second-enter ori
           screen=$(printf "╭%s╮\n│ > %s │\n╰%s╯\n" "$rule" "$body" "$rule")
         fi
         if [ "${3:-}" = json ]; then
-          printf "%s" "$screen" | node -e "const screen = require(\"fs\").readFileSync(0, \"utf8\"); process.stdout.write(JSON.stringify({ok:true,result:{terminal:{tail:screen.split(\"\\n\")}}}));"
+          # Orca publishes the structured draft alongside the rendered screen;
+          # the fixture must too, or every draft read here would be unreadable.
+          printf "%s" "$screen" | FM_ORCA_TEST_DRAFT="$body" node -e "const screen = require(\"fs\").readFileSync(0, \"utf8\"); const draft = process.env.FM_ORCA_TEST_DRAFT || \"\"; process.stdout.write(JSON.stringify({ok:true,result:{terminal:{tail:screen.split(\"\\n\"),draft}}}));"
         else
           printf "%s\n" "$screen"
         fi

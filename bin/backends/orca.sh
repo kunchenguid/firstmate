@@ -530,13 +530,20 @@ fm_backend_orca_composer_capture() {  # <terminal-id> [expected-label]
   fi
 }
 
+# fm_backend_orca_composer_draft: the structured `result.terminal.draft`,
+# printed verbatim so an EMPTY draft is an answer, never a failure. Orca always
+# publishes the field, so a read that fails is exit 3 (supported but unreadable)
+# rather than the exit 1 that means "this backend has no structured draft". The
+# distinction is the ownership contract: an unreadable draft must defer, never
+# let bin/fm-task-inbox-lib.sh fall back to accumulated stream text, which can
+# still hold an earlier ring's own doorbell next to the current foreign draft.
 fm_backend_orca_composer_draft() {
   local json
-  json=$(fm_backend_orca_composer_capture "$1" "" json) || return 1
+  json=$(fm_backend_orca_composer_capture "$1" "" json) || return 3
   printf '%s' "$json" | node -e '
 const data = JSON.parse(require("fs").readFileSync(0, "utf8"));
 const draft = data.result?.terminal?.draft;
-if (data.ok === false || typeof draft !== "string") process.exit(1);
+if (data.ok === false || typeof draft !== "string") process.exit(3);
 process.stdout.write(draft);
 '
 }

@@ -2088,7 +2088,12 @@ if (args[1] === 'list') {
       : ['╭' + rule + '╮', '│ > ' + body + ' │', '╰' + rule + '╯'];
     if (mode === 'cursor-busy') tail.unshift(' ⠠⠛ Working');
     if (mode === 'initial-empty-busy') tail.unshift('ctrl+c to stop');
-    reply({ok:true, result:{terminal:{tail}}});
+    // Orca publishes the structured draft for its agent terminals; the
+    // captured Cursor screen is a plain unstyled row with none, which is what
+    // leaves its verdict unknown.
+    const terminalResult = { tail };
+    if (!mode.startsWith('cursor-')) terminalResult.draft = body;
+    reply({ok:true, result:{terminal:terminalResult}});
   }
 } else if (args[1] === 'send') {
   if (terminal === 'term-stale') {
@@ -2257,17 +2262,19 @@ JS
 }
 
 test_structured_own_doorbell_submits_without_retyping() {
-  local target state rec line out expected mode before history
+  local target state rec line out expected mode before history unreadable foreign
   for target in term-stale term-live; do
-    for mode in blank-own history-own history-foreign; do
+    for mode in blank-own history-own history-foreign history-foreign-unreadable; do
     orca_case "structured-$mode-$target"
     state="$CASE_DIR/state"
     write_orca_window_meta "$state" ownstructured term-stale "$CASE_DIR/worktree"
     rec=$(FM_STATE_OVERRIDE="$state" bash -c '. "$0/bin/fm-task-inbox-lib.sh"; fm_task_inbox_write "$1" ownstructured steer fire-and-forget' "$ROOT" "$state")
     line=$(bash -c '. "$0/bin/fm-task-inbox-lib.sh"; fm_task_inbox_doorbell_line "$1"' "$ROOT" "$rec")
     before=$(cat "$state/ownstructured.meta")
+    foreign=0
+    case "$mode" in history-foreign|history-foreign-unreadable) foreign=1 ;; esac
     printf '%s' "$line" > "$CASE_DIR/draft"
-    [ "$mode" != history-foreign ] || printf 'human foreign draft' > "$CASE_DIR/draft"
+    [ "$foreign" -eq 0 ] || printf 'human foreign draft' > "$CASE_DIR/draft"
     printf '%s' "$line" > "$CASE_DIR/doorbell"
     : > "$CASE_DIR/inputs"
     cat > "$FB/orca" <<'JS'
@@ -2283,13 +2290,22 @@ if (args[1] === 'list') {
   reply({ok:false,error:{code:'terminal_handle_stale',message:'terminal_handle_stale'}});
   process.exitCode = 1;
 } else if (args[1] === 'read') {
-  let tail = ['────────','❯','────────'];
-  if (!args.includes('--screen') && process.env.FM_ORCA_TEST_HISTORY === '1') {
-    const line = fs.readFileSync(dir + '/doorbell','utf8');
-    const rule = '─'.repeat(line.length + 4);
-    tail = ['╭' + rule + '╮','│ > ' + line + ' │','╰' + rule + '╯'];
+  const screenRead = args.includes('--screen');
+  const seen = fs.existsSync(dir + '/screen-reads') ? Number(fs.readFileSync(dir + '/screen-reads','utf8')) : 0;
+  if (screenRead && process.env.FM_ORCA_TEST_UNREADABLE === '1' && seen > 0) {
+    // The ownership re-read fails outright: no output, nonzero exit.
+    fs.writeFileSync(dir + '/read-failed','1');
+    process.exitCode = 1;
+  } else {
+    if (screenRead) fs.writeFileSync(dir + '/screen-reads', String(seen + 1));
+    let tail = ['────────','❯','────────'];
+    if (!screenRead && process.env.FM_ORCA_TEST_HISTORY === '1') {
+      const line = fs.readFileSync(dir + '/doorbell','utf8');
+      const rule = '─'.repeat(line.length + 4);
+      tail = ['╭' + rule + '╮','│ > ' + line + ' │','╰' + rule + '╯'];
+    }
+    reply({ok:true,result:{terminal:{tail,draft:fs.readFileSync(dir + '/draft','utf8')}}});
   }
-  reply({ok:true,result:{terminal:{tail,draft:fs.readFileSync(dir + '/draft','utf8')}}});
 } else if (args[1] === 'send') {
   const text = args[args.indexOf('--text') + 1];
   fs.appendFileSync(dir + '/inputs', JSON.stringify({text,enter:args.includes('--enter')}) + '\n');
@@ -2303,18 +2319,23 @@ JS
     chmod +x "$FB/orca"
     history=0
     [ "$mode" = blank-own ] || history=1
-    out=$(FM_ORCA_TEST_HISTORY="$history" PATH="$FB:$PATH" FM_ORCA_TEST_DIR="$CASE_DIR" FM_STATE_OVERRIDE="$state" FM_HOME="$CASE_DIR" \
+    unreadable=0
+    [ "$mode" != history-foreign-unreadable ] || unreadable=1
+    out=$(FM_ORCA_TEST_HISTORY="$history" FM_ORCA_TEST_UNREADABLE="$unreadable" PATH="$FB:$PATH" FM_ORCA_TEST_DIR="$CASE_DIR" FM_STATE_OVERRIDE="$state" FM_HOME="$CASE_DIR" \
       bash -c '. "$0/bin/fm-task-inbox-lib.sh";
         rc=0; fm_task_inbox_ring orca "$1" "$2" || rc=$?; printf "%s" "$rc"' "$ROOT" "$target" "$rec")
     expected=0
     [ "$target" != term-stale ] || expected=1
-    [ "$mode" != history-foreign ] || expected=1
+    [ "$foreign" -eq 0 ] || expected=1
     [ "$out" = "$expected" ] || fail "$target structured own doorbell: expected $expected, got $out"
     [ "$(cat "$state/ownstructured.meta")" = "$before" ] || fail "$mode rewrote metadata"
     [ -f "$rec" ] || fail "$mode lost the durable record"
-    if [ "$mode" = history-foreign ]; then
-      [ ! -s "$CASE_DIR/inputs" ] || fail "historical stream authorized input into a foreign draft"
-      [ "$(cat "$CASE_DIR/draft")" = 'human foreign draft' ] || fail "foreign draft changed"
+    if [ "$foreign" -eq 1 ]; then
+      # A stale stream doorbell never authorizes input beside a foreign draft,
+      # whether the ownership re-read answers with that draft or fails outright.
+      [ ! -s "$CASE_DIR/inputs" ] || fail "$mode: historical stream text authorized input into a foreign draft"
+      [ "$(cat "$CASE_DIR/draft")" = 'human foreign draft' ] || fail "$mode changed the foreign draft"
+      [ "$unreadable" -eq 0 ] || [ -f "$CASE_DIR/read-failed" ] || fail "$mode never exercised an unreadable ownership read"
       continue
     fi
     [ "$(cat "$CASE_DIR/submitted")" = "$line" ] || fail "structured own doorbell was not submitted intact"
