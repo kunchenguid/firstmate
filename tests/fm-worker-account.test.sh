@@ -14,6 +14,12 @@ set -u
 
 # shellcheck source=tests/fixtures.sh
 . "$(dirname "${BASH_SOURCE[0]}")/fixtures.sh"
+# The relaunch guard is the one check both launch paths share, and its Pi,
+# `ordinary`, and harness-switch axes have no end-to-end relaunch path here, so
+# those cases call the shared function directly; tests/fm-control-relaunch.test.sh
+# drives it end to end through a real relaunch.
+# shellcheck source=bin/fm-worker-account-lib.sh
+. "$ROOT/bin/fm-worker-account-lib.sh"
 
 TMP_ROOT=$(fm_test_tmproot fm-worker-account)
 unset LAVISH_AXI_HOST ANTHROPIC_API_KEY CLAUDE_CODE_OAUTH_TOKEN PI_CODING_AGENT_DIR OPENAI_API_KEY
@@ -385,6 +391,100 @@ test_local_secondmate_reads_the_launching_home_pin() {
   pass "a local secondmate reads the launching home's pin and its own home's file is never inherited over"
 }
 
+# guard_says <expect-rc> <message> <guard args...>
+guard_says() {
+  local want=$1 msg=$2 out rc selection
+  shift 2
+  selection=$(fm_worker_account_resolve "$1" "$2" "config/$(fm_worker_account_file "$1")") \
+    || fail "could not resolve the guard fixture's account"
+  out=$(fm_worker_account_relaunch_guard "$1" "$3" "$4" "$5" "$selection" "${6:-}" 2>&1); rc=$?
+  [ "$rc" = "$want" ] || fail "$msg: expected exit $want, got $rc ($out)"
+  GUARD_OUT=$out
+}
+
+test_relaunch_guard_keeps_a_task_on_its_recorded_account() {
+  local cfg=$TMP_ROOT/guard/config pi_home=$TMP_ROOT/guard/pi-home
+  mkdir -p "$cfg" "$TMP_ROOT/guard/a" "$TMP_ROOT/guard/b" "$pi_home/.pi/agent" "$TMP_ROOT/guard/pi-other"
+  local a=$TMP_ROOT/guard/a b=$TMP_ROOT/guard/b
+
+  printf '%s\n' "$a" > "$cfg/claude-account"
+  guard_says 0 "the pin still on the recorded account must not refuse" \
+    claude "$cfg" g1 claude "$a"
+  [ -z "$GUARD_OUT" ] || fail "an unchanged pin must say nothing: $GUARD_OUT"
+  guard_says 0 "the same account reached by another spelling must not refuse" \
+    claude "$cfg" g1 claude "$a/."
+  guard_says 0 "a task with no recorded account must relaunch as before" \
+    claude "$cfg" g1 claude ""
+  guard_says 0 "a relaunch onto a harness reading the other pin file has nothing to compare" \
+    pi "$cfg" g1 claude "$a"
+
+  guard_says 1 "a pin moved off the recorded account must refuse" \
+    claude "$cfg" g1 claude "$b"
+  assert_contains "$GUARD_OUT" "task g1 was launched on account $b" "the refusal should name the recorded account"
+  assert_contains "$GUARD_OUT" "config/claude-account now selects account $a" "the refusal should name the account the pin selects"
+  assert_contains "$GUARD_OUT" "Set config/claude-account back to '$b'" "the refusal should say how to proceed"
+
+  # A removed pin selects what an unpinned launch would use, so it is measured
+  # against the recorded account like any other pin.
+  rm "$cfg/claude-account"
+  CLAUDE_CONFIG_DIR='' guard_says 1 "a removed pin that would move the task to the ordinary account must refuse" \
+    claude "$cfg" g1 claude "$b"
+  assert_contains "$GUARD_OUT" "config/claude-account is now absent, so no pin selects an account, and the recorded account differs from the account firstmate is currently running with, the ordinary account (~/.claude with CLAUDE_CONFIG_DIR unset)" \
+    "the refusal should name the account firstmate is currently running with"
+  assert_contains "$GUARD_OUT" "the relaunch is refused because no pin selects an account and firstmate is running with a different account than the task recorded. Set config/claude-account to '$b' or run firstmate with that account to relaunch this task, or start a fresh task on the current account" \
+    "the refusal should say why it refused and how to proceed without a pin"
+  CLAUDE_CONFIG_DIR=$a guard_says 1 "a removed pin that would move the task to the ambient root must refuse" \
+    claude "$cfg" g1 claude "$b"
+  assert_contains "$GUARD_OUT" "the account firstmate is currently running with, account $a" "the refusal should name the root firstmate is currently running with"
+  CLAUDE_CONFIG_DIR=$b guard_says 0 "a removed pin whose ambient root is the recorded account must not refuse" \
+    claude "$cfg" g1 claude "$b"
+  CLAUDE_CONFIG_DIR='' guard_says 0 "a removed pin on the recorded ordinary account must not refuse" \
+    claude "$cfg" g1 claude ordinary
+
+  # `ordinary` is an account like any other: for Claude it is the one no
+  # directory is named for, and for Pi it is the root under HOME.
+  printf 'ordinary\n' > "$cfg/claude-account"
+  guard_says 1 "a pin moved from a named root to the ordinary account must refuse" \
+    claude "$cfg" g1 claude "$a"
+  assert_contains "$GUARD_OUT" "now selects the ordinary account (~/.claude with CLAUDE_CONFIG_DIR unset)" \
+    "the refusal should name the ordinary Claude account"
+  guard_says 0 "the unchanged ordinary Claude account must not refuse" \
+    claude "$cfg" g1 claude ordinary
+
+  local saved_home=$HOME
+  HOME=$pi_home
+  printf '%s\nopenai-codex\n' "$TMP_ROOT/guard/pi-other" > "$cfg/pi-account"
+  guard_says 1 "a Pi pin moved off the recorded root must refuse" \
+    pi "$cfg" g1 pi-signed ordinary
+  assert_contains "$GUARD_OUT" "launched on the ordinary account (~/.pi/agent)" "the refusal should name the ordinary Pi account"
+  assert_contains "$GUARD_OUT" "config/pi-account now selects account $TMP_ROOT/guard/pi-other" \
+    "the refusal should name the Pi root the pin selects"
+  printf '%s\nopenai-codex\n' "$pi_home/.pi/agent" > "$cfg/pi-account"
+  guard_says 0 "a Pi pin naming the ordinary root outright must not refuse" \
+    pi-signed "$cfg" g1 pi ordinary
+  rm "$cfg/pi-account"
+  guard_says 0 "a removed Pi pin on the recorded ordinary root must not refuse" \
+    pi "$cfg" g1 pi ordinary
+  guard_says 0 "a removed Pi pin explicitly keeps the recorded root" \
+    pi "$cfg" g1 pi "$TMP_ROOT/guard/pi-other"
+  PI_CODING_AGENT_DIR=$TMP_ROOT/guard/pi-other guard_says 0 "a removed Pi pin whose ambient root is the recorded one must not refuse" \
+    pi "$cfg" g1 pi "$TMP_ROOT/guard/pi-other"
+  HOME=$saved_home
+
+  # A secondmate replacement reconciles its own home's records rather than
+  # continuing a conversation, so re-reading the pin stays how its account is
+  # moved and the guard stands aside for it.
+  printf '%s\n' "$a" > "$cfg/claude-account"
+  guard_says 0 "a secondmate whose pin moved off the recorded account must not refuse" \
+    claude "$cfg" g2 claude "$b" g2
+  [ -z "$GUARD_OUT" ] || fail "a secondmate relaunch must say nothing: $GUARD_OUT"
+  guard_says 1 "an ordinary task in the same home must still refuse" \
+    claude "$cfg" g2 claude "$b"
+  assert_contains "$GUARD_OUT" "config/claude-account now selects account $a" \
+    "the refusal should name the pin"
+  pass "the relaunch guard refuses only an ordinary task's pin, present or removed, that has moved off its recorded account"
+}
+
 spawn_account_secondmate() {
   local id=$1 sm="$CASE/$1-home"
   shift
@@ -501,5 +601,6 @@ test_raw_claude_command_receives_the_pin
 test_raw_claude_account_override_refuses_under_a_pin
 test_raw_claude_account_override_is_kept_without_a_pin
 test_local_secondmate_reads_the_launching_home_pin
+test_relaunch_guard_keeps_a_task_on_its_recorded_account
 
 echo "# all fm-worker-account tests passed"

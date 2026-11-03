@@ -12,7 +12,7 @@
 #   claude          CLAUDE_CONFIG_DIR     config/claude-account
 #   pi, pi-signed   PI_CODING_AGENT_DIR   config/pi-account
 #
-# The pin is opt-in: an absent file is no pin, and the launch keeps today's
+# The pin is opt-in: an absent file is no pin, and a fresh launch keeps today's
 # ambient behavior byte for byte. A present file must resolve, or the launch
 # refuses; nothing falls back to an ambient or vendor-default login once a
 # home has declared one. `ordinary` selects the vendor default: for Claude
@@ -21,6 +21,15 @@
 # is set, even $HOME/.claude; for Pi it is $HOME/.pi/agent. Any other value is
 # one absolute path to an existing readable, searchable directory. Firstmate
 # never copies credentials or changes a global login.
+#
+# An ordinary task that recorded an account at launch stays on it. A pinned
+# spawn records that account, and fm_worker_account_relaunch_guard refuses a
+# relaunch whose current pin selects a different account directory, because
+# the replacement would start without the outgoing worker's session state,
+# which stays under the recorded root. A task launched unpinned records no
+# account, so a pin added later reaches it on its next relaunch. A secondmate
+# replacement starts from its own home's records instead, so it keeps
+# re-reading the pin.
 #
 # A Pi root can hold several provider identities, so config/pi-account names
 # the root on line 1 and the providers that home may spend on line 2,
@@ -124,6 +133,47 @@ fm_worker_account_config() {
   esac
 }
 
+# fm_worker_account_fallback <harness>
+# Prints what `ordinary` means for a runner, as a refusal names it.
+fm_worker_account_fallback() {
+  # shellcheck disable=SC2088  # The fallbacks are literal text for a refusal.
+  case "$1" in
+  claude) printf '%s\n' '~/.claude with CLAUDE_CONFIG_DIR unset' ;;
+  *) printf '%s\n' '~/.pi/agent' ;;
+  esac
+}
+
+# fm_worker_account_root <harness> <declared>
+# Prints the account directory a declared pin token selects: the token itself
+# for an absolute path, nothing for the ordinary Claude account, because that
+# one is CLAUDE_CONFIG_DIR unset rather than a directory, and $HOME/.pi/agent
+# for the ordinary Pi one. Says nothing about whether the directory exists.
+fm_worker_account_root() {
+  if [ "$2" != ordinary ]; then
+    printf '%s\n' "$2"
+    return 0
+  fi
+  case "$1" in
+  claude) printf '\n' ;;
+  *) printf '%s\n' "${HOME:?HOME is required to resolve an ordinary Pi account}/.pi/agent" ;;
+  esac
+}
+
+# fm_worker_account_same_root <root-a> <root-b>
+# Returns 0 when both select the same account directory. The empty root is the
+# ordinary Claude account, which is CLAUDE_CONFIG_DIR unset and therefore never
+# the same selection as a directory Firstmate names outright; two named paths
+# are compared physically, so a trailing slash, a `..`, or a symlink rewritten
+# into the pin file is not read as a different account.
+fm_worker_account_same_root() {
+  local a=$1 b=$2 pa pb
+  [ "$a" != "$b" ] || return 0
+  [ -n "$a" ] && [ -n "$b" ] || return 1
+  pa=$(cd "$a" 2>/dev/null && pwd -P) || return 1
+  pb=$(cd "$b" 2>/dev/null && pwd -P) || return 1
+  [ "$pa" = "$pb" ]
+}
+
 # fm_worker_account_resolve <harness> <config-dir> <setting>
 # Prints "declared<TAB>root<TAB>providers" for a valid pin, where root is the
 # directory the launch selects (empty for ordinary Claude, meaning
@@ -154,23 +204,75 @@ fm_worker_account_resolve() {
     ;;
   esac
   declared=${token%%$'\t'*}
-  root=$declared
-  # shellcheck disable=SC2088  # The fallbacks are literal text for the refusal.
-  case "$harness" in
-  claude) fallback='~/.claude with CLAUDE_CONFIG_DIR unset' ;;
-  *) fallback='~/.pi/agent' ;;
-  esac
-  if [ "$declared" = ordinary ]; then
-    case "$harness" in
-    claude) root= ;;
-    *) root="${HOME:?HOME is required to resolve an ordinary Pi account}/.pi/agent" ;;
-    esac
-  fi
+  root=$(fm_worker_account_root "$harness" "$declared") || return 1
+  fallback=$(fm_worker_account_fallback "$harness")
   if [ -n "$root" ] && { [ ! -d "$root" ] || [ ! -r "$root" ] || [ ! -x "$root" ]; }; then
     echo "error: $setting must name a readable, searchable existing directory (ordinary means $fallback): $cfg -> $root" >&2
     return 1
   fi
   printf '%s\t%s\t%s\n' "$declared" "$root" "${token#*$'\t'}"
+}
+
+# fm_worker_account_describe <harness> <declared>
+# Prints how a refusal names the account a declared pin token selects.
+fm_worker_account_describe() {
+  case "$2" in
+  ordinary) printf '%s\n' "the ordinary account ($(fm_worker_account_fallback "$1"))" ;;
+  *) printf '%s\n' "account $2" ;;
+  esac
+}
+
+# fm_worker_account_relaunch_guard <harness> <task-id> \
+#   <recorded-harness> <recorded-account> <resolved-selection> [<secondmate-id>]
+# The one check that keeps a relaunch on the account its task was launched on,
+# shared by bin/fm-control.sh's pre-stop resolution and bin/fm-spawn.sh
+# --relaunch so both refuse identically for every pinnable runner. Returns 0
+# and changes nothing when the task records no account, when the replacement
+# harness reads a different pin file than the recorded one, or when both
+# select the same account directory. A home that no longer pins this runner
+# selects what an unpinned launch uses: this process's CLAUDE_CONFIG_DIR or
+# else the ordinary account for Claude. An unpinned Pi replacement explicitly
+# keeps the recorded root rather than inheriting the destination pane's
+# PI_CODING_AGENT_DIR. Otherwise prints one refusal naming the
+# recorded account, the account the pin now selects or, with no pin, the
+# account firstmate is currently running with, and both ways forward, and returns 1. Runs before the sign-in check, so a pin pointing
+# somewhere else is reported as the move it is rather than as whatever that
+# other account's login happens to say.
+# A secondmate is passed as <secondmate-id> and is not guarded: its
+# replacement reconciles its own home's durable records at startup rather than
+# continuing the outgoing agent's conversation, so there is no session state
+# for a move to orphan, and re-reading the pin is how an account change for
+# that mate is applied (docs/configuration.md "Per-secondmate account pins").
+fm_worker_account_relaunch_guard() {
+  local harness=$1 id=$2 recorded_harness=$3 recorded=$4 selection=$5 mate=${6:-}
+  local file recorded_file declared root recorded_root now rest
+  [ -n "$recorded" ] || return 0
+  [ -z "$mate" ] || return 0
+  file=$(fm_worker_account_file "$harness") || return 0
+  recorded_file=$(fm_worker_account_file "$recorded_harness") || return 0
+  [ "$file" = "$recorded_file" ] || return 0
+  recorded_root=$(fm_worker_account_root "$recorded_harness" "$recorded") || return 1
+  if [ -n "$selection" ]; then
+    declared=${selection%%$'\t'*}
+    root=${selection#*$'\t'}
+    root=${root%%$'\t'*}
+    now="config/$file now selects $(fm_worker_account_describe "$harness" "$declared")"
+    rest="relaunching would move the task to a different account directory, and the replacement would start without the outgoing worker's session state, which stays under the recorded account. Set config/$file back to '$recorded' to relaunch this task, or leave it and start a fresh task on the new account"
+  else
+    case "$harness" in
+    claude) root=${CLAUDE_CONFIG_DIR:-} ;;
+    *) root=$recorded_root ;;
+    esac
+    if [ -n "$root" ]; then
+      now="config/$file is now absent, so no pin selects an account, and the recorded account differs from the account firstmate is currently running with, account $root"
+    else
+      now="config/$file is now absent, so no pin selects an account, and the recorded account differs from the account firstmate is currently running with, $(fm_worker_account_describe "$harness" ordinary)"
+    fi
+    rest="the relaunch is refused because no pin selects an account and firstmate is running with a different account than the task recorded. Set config/$file to '$recorded' or run firstmate with that account to relaunch this task, or start a fresh task on the current account"
+  fi
+  ! fm_worker_account_same_root "$root" "$recorded_root" || return 0
+  echo "error: task $id was launched on $(fm_worker_account_describe "$recorded_harness" "$recorded"), but $now; $rest" >&2
+  return 1
 }
 
 # fm_worker_account_pi_provider <model>
@@ -239,22 +341,48 @@ fm_worker_account_check() {
   return 0
 }
 
-# fm_worker_account_select <harness> <config-dir> <model> <executable> [<raw-command>] [<secondmate-id>]
-# The whole launch-time decision. Prints nothing for an unpinned runner, so
+# fm_worker_account_select <harness> <config-dir> <model> <executable> [<raw-command>] [<secondmate-id>] \
+#   [<relaunch-id> <recorded-harness> <recorded-account> <recorded-provider>]
+# The whole launch-time decision. Prints nothing for a fresh unpinned runner, so
 # the caller keeps today's launch unchanged. For a pinned one prints
 # "declared<TAB>root<TAB>provider", where provider is the Pi launch model's
 # own (empty for Claude), after the model guard and the sign-in check pass. On
 # refusal prints one error and returns 1. bin/fm-spawn.sh runs it before any
 # endpoint exists, and bin/fm-control.sh before a relaunch stops the live
-# agent.
+# agent. A relaunch guards this exact resolved selection before checking login.
+# When the pin is absent and the guard passes, carry a matching recorded account
+# into the launch and the next record, so another relaunch remains guarded; it
+# must still exist and pass the same sign-in check a pin gets, for Pi under the
+# launch model's provider or else the recorded one.
 fm_worker_account_select() {
   local harness=$1 config=$2 model=$3 executable=$4 raw=${5:-} mate=${6:-}
+  local relaunch_id=${7:-} recorded_harness=${8:-} recorded=${9:-} recorded_provider=${10:-}
   local selection declared root providers word provider='' selected_config setting
   selected_config=$(fm_worker_account_config "$harness" "$config" "$mate") || return 1
   setting="config/$(fm_worker_account_file "$harness")"
   [ "$selected_config" = "$config" ] || setting="$selected_config/$(fm_worker_account_file "$harness")"
   selection=$(fm_worker_account_resolve "$harness" "$selected_config" "$setting") || return 1
+  if [ -n "$relaunch_id" ]; then
+    fm_worker_account_relaunch_guard "$harness" "$relaunch_id" \
+      "$recorded_harness" "$recorded" "$selection" "$mate" || return 1
+  fi
   if [ -z "$selection" ]; then
+    if [ -n "$relaunch_id" ] && [ -n "$recorded" ] && [ -z "$mate" ] &&
+      fm_worker_account_file "$harness" >/dev/null &&
+      [ "$(fm_worker_account_file "$harness")" = "$(fm_worker_account_file "$recorded_harness")" ]; then
+      root=$(fm_worker_account_root "$harness" "$recorded") || return 1
+      setting="task $relaunch_id's recorded account, kept while $setting is absent,"
+      if [ -n "$root" ] && { [ ! -d "$root" ] || [ ! -r "$root" ] || [ ! -x "$root" ]; }; then
+        echo "error: $setting must be a readable, searchable existing directory: $root" >&2
+        return 1
+      fi
+      case "$harness" in
+      pi | pi-signed) provider=$(fm_worker_account_pi_provider "$model") || provider=$recorded_provider ;;
+      esac
+      fm_worker_account_check "$harness" "$recorded" "$root" "$executable" "$provider" "$setting" || return 1
+      printf '%s\t%s\t%s\n' "$recorded" "$root" "$provider"
+      return 0
+    fi
     [ "$selected_config" = "$config" ] && return 0
     echo "error: secondmate account pin disappeared during selection: $setting" >&2
     return 1
