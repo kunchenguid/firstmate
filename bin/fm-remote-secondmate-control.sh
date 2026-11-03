@@ -240,7 +240,8 @@ cmd_launch() {
     *) die "unverified remote secondmate harness: $harness" ;;
   esac
   case "$effort" in -|low|medium|high|xhigh|max|ultra) ;; *) die "invalid remote secondmate effort: $effort" ;; esac
-  if [ "$effort" = ultra ]; then
+  # Codex is checked against the target host catalog by its local launcher.
+  if [ "$effort" = ultra ] && [ "$harness" != codex ]; then
     "$SCRIPT_DIR/fm-harness.sh" validate-native-effort "$harness" "$model" "$effort" || return 1
   fi
   # The selected backend's session-provider server must survive every SSH
@@ -328,7 +329,8 @@ cmd_relaunch() {
   esac
   case "$effort" in -|default|low|medium|high|xhigh|max|ultra) ;; *) die "invalid remote secondmate effort: $effort" ;; esac
   case "$model" in *[[:space:]]*) die "invalid remote secondmate model: $model" ;; esac
-  if [ "$effort" = ultra ]; then
+  # Codex is checked against the target host catalog by its local launcher.
+  if [ "$effort" = ultra ] && [ "$harness" != codex ]; then
     "$SCRIPT_DIR/fm-harness.sh" validate-native-effort "$harness" "$model" "$effort" || return 1
   fi
   remote_endpoint_require "$id"
