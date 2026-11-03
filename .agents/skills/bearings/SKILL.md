@@ -203,6 +203,7 @@ A merge-ready classification grants no merge authority and the ordinary exact-PR
 
 When filing work corresponding to an upstream ticket, put its canonical issue URL on the structured backlog row and run the observer's `arm` operation.
 That explicit task link, rather than repository membership or a text similarity guess, makes a ready-for-pr transition owned planning input.
+Filing is local record-keeping; the work itself still publishes only under the destination's authority, so a task targeting firstmate's own repository remains gated by this home's role (`firstmate-self-repo`) and a user/operator home carries it as a local draft instead.
 After a signal's disposition is durable as filed work, a captain hold, or a recorded no-action decision in the task, acknowledge that exact event token through `ack`.
 Do not acknowledge merely because the signal was read.
 For secondmate-owned contributions, handle and acknowledge in that home and use the existing parent channel for any captain call.

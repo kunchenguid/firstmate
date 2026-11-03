@@ -57,6 +57,10 @@ while IFS= read -r rel; do
     esac
   fi
   case "$rel" in
+    config/firstmate-role)
+      source="$TMP/firstmate-role.resolved"
+      fm_role_inherit_payload "$FM_HOME" "$CONFIG" "$source" || die "cannot resolve the primary role"
+      ;;
     config/*) source="$CONFIG/${rel#config/}" ;;
     data/*) source="$DATA/${rel#data/}" ;;
   esac

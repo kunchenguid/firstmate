@@ -750,7 +750,7 @@ $ ls "$TURNEND"
 
 `tests/fm-codex-hook-layer-live-e2e.test.sh` is the command that refreshes this record.
 It captures the launch `bin/fm-spawn.sh` actually builds, replays those exact flags against the installed Codex, and fails naming the harness and version if the hook layer comes back on.
-It spends no model tokens, so it runs by default wherever Codex is installed.
+It spends no model tokens, so it runs by default wherever Codex, Python 3, and jq are installed.
 The portable half, `tests/fm-spawn-dispatch-profile.test.sh`, pins the split the launch template makes: a crewmate launches hook-free while a secondmate, which runs a primary session on this repository's own project hooks, keeps them.
 
 ### Stop response parsing
@@ -771,7 +771,7 @@ FM_TEST_SUMMARY total=2 failed=0 skipped_gate=0 duration_ms=39305
 ```
 
 The portable regression makes its login-shell logout emit terminal escape bytes and confirms that the fixture is effective before checking the tracked command's actual output.
-It also checks primary, child-worktree, and non-Firstmate scope, empty input, missing jq, malformed registration, a missing executable, inherited PATH, and unchanged error status/stderr.
+It also checks primary, child-worktree, and non-Firstmate scope, empty input, missing jq, malformed registration, a non-executable guard, inherited PATH, and unchanged error status/stderr.
 The live parser accepts both empty output and `{}`, rejects mixed diagnostics/JSON, malformed syntax, multiple objects, and a wrong field type, and preserves an ordinary nonzero error.
 The real copied supervision guard blocks once with its stderr reason, then allows the continuation's Stop; the fixture asserts both native hook verdicts and the two-request bound.
 These checks refresh the Codex adapter evidence; [the integration owner](../turnend-guard.md#harness-integrations) describes its current behavior.
