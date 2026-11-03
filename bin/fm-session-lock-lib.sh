@@ -94,6 +94,47 @@ fm_ps_ppid() {  # <pid> -> parent pid
   printf '%s' "$out"
 }
 
+# True when path $1 is Bob's installed entry script: .../@ibm/bob/dist/bob.js
+# itself, or a `bob` launcher whose symlink chain ends there (npm's bin shim).
+fm_bob_script_is_bob() {  # <path>
+  local path=$1 target hop
+  for hop in 1 2 3 4 5 6 7 8 9; do
+    case "$path" in */@ibm/bob/dist/bob.js) return 0 ;; esac
+    [ "$hop" -gt 1 ] || [ "$(basename -- "$path")" = bob ] || return 1
+    [ -L "$path" ] || return 1
+    target=$(readlink -- "$path" 2>/dev/null) || return 1
+    case "$target" in
+      /*) path=$target ;;
+      *) path=$(dirname -- "$path")/$target ;;
+    esac
+  done
+  return 1
+}
+
+# True when command name $1 and argument string $2 describe Bob's session or
+# supervisor process. Bob (IBM Bob CLI) is a node bundle that sets no process
+# title, so Linux reports comm as MainThread and macOS as node, and neither the
+# name table above nor its own marker (BOB_SESSION, set only for descendants)
+# can identify it here (verified, bob 2.0.9 on Node v24). Its first script
+# argument is the structural fact: Bob is the process running Bob's installed
+# entry script. Node options before the script are skipped. MainThread is
+# accepted ONLY together with that script, never widened to every node process.
+fm_bob_process_matches() {  # <comm> <args>
+  local comm=$1 args=$2 word
+  local -a words=()
+  case "$(basename -- "$comm")" in
+    MainThread|node|node-*|node[0-9]*) ;;
+    *) return 1 ;;
+  esac
+  read -r -a words <<<"$args" || true
+  for word in "${words[@]:1}"; do
+    case "$word" in -*) continue ;; esac
+    fm_bob_script_is_bob "$word"
+    return
+  done
+  return 1
+}
+
 # True when the process described by command name $1 and full argument string $2
 # is a verified harness. Sets FM_HARNESS_IS_CLAUDE for the ancestry walk.
 #
@@ -104,8 +145,9 @@ fm_ps_ppid() {  # <pid> -> parent pid
 #      argv[0] in `ps -o comm=`, while procps on Linux reports the kernel exec
 #      name and ignores argv[0] entirely, so a version-named Claude Code binary
 #      is identified by its install path on macOS and by argv[0] on Linux.
-#   3. a bare interpreter (node, python) running a harness script path.
-#   4. Cursor's own structural identity, owned by bin/fm-cursor-lib.sh.
+#   3. Bob's installed entry script as a node process's first script argument.
+#   4. a bare interpreter (node, python) running a harness script path.
+#   5. Cursor's own structural identity, owned by bin/fm-cursor-lib.sh.
 FM_HARNESS_IS_CLAUDE=0
 fm_harness_process_matches() {  # <comm> <args>
   local comm=$1 args=$2 base argv0 name
@@ -120,6 +162,9 @@ fm_harness_process_matches() {  # <comm> <args>
     case "$name" in claude) FM_HARNESS_IS_CLAUDE=1 ;; esac
     return 0
   fi
+  # Bob: tested before the interpreter arm so a foreign harness word elsewhere
+  # in a bob command line can never claim it.
+  fm_bob_process_matches "$comm" "$args" && return 0
   # Bare interpreter (e.g. node): match the harness name in its script path.
   case "$comm" in
     *node*|*python*)

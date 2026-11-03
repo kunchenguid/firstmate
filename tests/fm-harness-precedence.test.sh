@@ -30,7 +30,7 @@ set -u
 # This suite states the markers it means to test in every case. Drop the ambient
 # ones so a verdict never depends on which harness launched the suite.
 unset CLAUDECODE PI_CODING_AGENT FM_PI_HARNESS GROK_AGENT CURSOR_AGENT CURSOR_INVOKED_AS \
-  FM_SUPERVISION_ACTOR FM_SUPERVISION_PRIMARY_HARNESS
+  BOB_SESSION BOB_SUPERVISED FM_SUPERVISION_ACTOR FM_SUPERVISION_PRIMARY_HARNESS
 
 HARNESS="$ROOT/bin/fm-harness.sh"
 RENDER="$ROOT/bin/fm-supervision-instructions.sh"
@@ -242,6 +242,36 @@ test_pi_signed_survives_agreeing_ancestry() {
   [ "$got" = pi ] \
     || fail "unmarked signed-wrapper ancestry resolved '$got', expected pi"
   pass "an agreeing marker keeps Pi's finer identity that ancestry cannot prove"
+}
+
+# --- 3b. Bob's marker names bob only when nothing nearer does --------------
+
+# Bob's session process is a node bundle the ancestry walk cannot name, so its
+# own BOB_SESSION marker is the only evidence for a Bob primary. Every worker a
+# Bob primary launches inherits that marker, so a worker's own identity must
+# still win: claude and pi through their earlier markers, and any harness with a
+# structural ancestor through ancestry.
+test_bob_marker_names_bob_only_when_nothing_nearer_does() {
+  local dir fakebin bin got
+  dir="$TMP_ROOT/bob"
+  fakebin=$(blind_ancestry_bin "$dir/blind")
+  got=$(with_blind_ancestry "$fakebin" BOB_SESSION=1)
+  [ "$got" = bob ] || fail "BOB_SESSION with no ancestry resolved '$got', expected bob"
+  got=$(with_blind_ancestry "$fakebin" BOB_SUPERVISED=1)
+  [ "$got" = unknown ] || fail "Bob's supervisor-only BOB_SUPERVISED resolved '$got', expected unknown"
+  got=$(with_blind_ancestry "$fakebin" BOB_SESSION=0)
+  [ "$got" = unknown ] || fail "BOB_SESSION=0 resolved '$got', expected unknown"
+  got=$(with_blind_ancestry "$fakebin" BOB_SESSION=1 PI_CODING_AGENT=true)
+  [ "$got" = pi ] || fail "a pi worker under a bob primary resolved '$got', expected pi"
+  got=$(with_blind_ancestry "$fakebin" BOB_SESSION=1 CLAUDECODE=1)
+  [ "$got" = claude ] || fail "a claude worker under a bob primary resolved '$got', expected claude"
+  for name in claude codex; do
+    bin=$(named_bin "$dir/$name-tree" "$name")
+    got=$(under_process "$bin" BOB_SESSION=1)
+    [ "$got" = "$name" ] \
+      || fail "a $name tree carrying an inherited BOB_SESSION resolved '$got', expected $name"
+  done
+  pass "Bob's marker names bob only when no nearer marker or structural ancestor does"
 }
 
 # --- 4. The weakest ancestry signal does not outrank a marker ---------------
@@ -775,6 +805,11 @@ test_supervision_branch_resolves_the_primary_pin() {
   got=$(pin_probe "$bin" "$home" ancestry PI_CODING_AGENT=true \
     FM_SUPERVISION_ACTOR=branch FM_SUPERVISION_PRIMARY_HARNESS=claude)
   [ "$got" = 'comm pi|0' ] || fail "the ancestry verb consulted the pin: '$got'"
+
+  # A bob primary is a known pin like any other.
+  got=$(pin_probe "$bin" "$home" '' PI_CODING_AGENT=true \
+    FM_SUPERVISION_ACTOR=branch FM_SUPERVISION_PRIMARY_HARNESS=bob)
+  [ "$got" = 'bob|0' ] || fail "a branch pinned to a bob primary resolved '$got', expected bob"
   pass "a supervision branch resolves own, crew, and secondmate to the primary's pinned harness"
 }
 
@@ -831,6 +866,7 @@ test_genuine_marker_and_ancestry_agree
 test_cursor_ordering_still_decides_when_ancestry_is_silent
 test_retained_cursor_marker_does_not_rename_a_nested_claude
 test_pi_signed_survives_agreeing_ancestry
+test_bob_marker_names_bob_only_when_nothing_nearer_does
 test_interpreter_args_match_does_not_outrank_a_marker
 test_native_child_of_an_interpreter_shim_decides_at_comm_strength
 test_harness_at_namespace_pid1_is_examined

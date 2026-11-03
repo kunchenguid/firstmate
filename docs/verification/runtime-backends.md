@@ -80,6 +80,38 @@ The portable regression asserts both directions of that case: a host-shaped pid 
 
 Run on the host under Claude Code 2.1.252 with the same two markers set, the same probe reports `claude`, `comm claude`, and Claude's Stop-owned protocol, so the correction does not trade one misidentification for its inverse.
 
+### Bob primary identity and session lock
+
+Bob (IBM Bob CLI) publishes `BOB_SESSION=1` and runs as a node bundle that sets no process title, so harness detection and the session lock need different evidence.
+Verified on 2026-11-03 with Bob 2.0.9 on Node v24.21.0, Linux 6.18 (WSL2), against a live interactive Bob primary.
+The installed entry script `@ibm/bob/dist/bob.js` sets `process.env.BOB_SESSION="1"` inside the session process at runtime, so tool subprocesses inherit it while the session's own `/proc/<pid>/environ` shows only `BOB_SUPERVISED=1`.
+Its supervisor parent strips `BOB_SESSION` and starts the session with `BOB_SUPERVISED=1`.
+Both long-lived processes report `comm=MainThread`, with `node <prefix>/bin/bob ...` as the supervisor's command line and `<prefix>/bin/node <prefix>/bin/bob ...` as the session's, where `<prefix>/bin/bob` is npm's symlink to the entry script.
+
+`bin/fm-harness.sh` therefore names Bob from the marker alone, and `bin/fm-session-lock-lib.sh` identifies the process by that entry script.
+Asked about the two live Bob processes, the lock's process matcher reported:
+
+```text
+parent commit:  supervisor -> no-match ; session -> no-match
+this change:    supervisor -> match    ; session -> match
+```
+
+The portable regressions pin both halves with real processes and no installed Bob:
+
+```sh
+bin/fm-test-run.sh tests/fm-harness-precedence.test.sh
+bash tests/fm-session-lock-ancestry.test.sh
+```
+
+```text
+ok - Bob's marker names bob only when no nearer marker or structural ancestor does
+ok - session-lock: a bob session is identified from its installed entry script, never from MainThread alone
+ok - session-lock e2e: a bob session acquires the lock and an unrelated MainThread script does not
+```
+
+The end-to-end case runs a real process the kernel names `MainThread` executing a fixture install tree through npm's relative launcher symlink, and the real `bin/fm-lock.sh` acquires the lock for it; the same tree with an unrelated script named `bob` is refused with `cannot locate harness process in ancestry`, the error a Bob primary reported before this change.
+A tool call from a real Bob session was not exercised: headless `bob run` requires `BOB_API_KEY`, which that machine did not have, so `fm-harness.sh` reporting `bob` from a live Bob tool subprocess is unverified by this run.
+
 ### Real harness process names behind the walk
 
 The detection half of the opt-in drift guard asks the ancestry walk what it makes of each INSTALLED harness's real running process:
