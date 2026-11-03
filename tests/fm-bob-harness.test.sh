@@ -182,7 +182,7 @@ run_spawn() {
     FM_FAKE_BOB_DELIVERY="${FM_FAKE_BOB_DELIVERY:-yes}" \
     FM_BOB_READY_POLLS=3 FM_BOB_DELIVERY_POLLS=3 FM_BOB_POLL_INTERVAL=0 \
     PATH="$fakebin:$BASE_PATH" \
-    "$SPAWN" "$id" "$proj" --harness bob --mode no-mistakes --yolo off "$@" 2>&1
+    "$SPAWN" "$id" "$proj" --harness bob ${SPAWN_FLAGS---mode no-mistakes --yolo off} "$@" 2>&1
 }
 
 test_bob_launch_then_send_is_verified() {
@@ -272,9 +272,10 @@ test_bob_secondmate_is_refused() {
   id="bob-second-z1-$$"
   rec=$(make_spawn_case second "$id")
   read_spawn_record "$rec"
-  out=$(run_spawn "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" --secondmate)
+  out=$(SPAWN_FLAGS='' run_spawn "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" --secondmate)
   rc=$?
   [ "$rc" -ne 0 ] || fail "bob must be refused as a secondmate"
+  assert_contains "$out" "bob is a verified crewmate/scout adapter only" "bob secondmate refusal did not come from the crewmate-only guard"
   [ ! -s "$CASE_DIR/launch.log" ] || fail "bob secondmate was launched despite the refusal"
   pass "fm-spawn: bob is refused as a secondmate"
 }
