@@ -1397,6 +1397,21 @@ test_home_brief_include_is_appended_last() {
 # --base-branch names the branch a task starts from and a ship's PR targets. It is
 # recorded as a Base branch line under # Setup, which fm-spawn reads back, and is
 # refused where no pull request carries the work.
+# A ship invoked with only a task id has no project positional; under set -u the
+# bare ${POS[1]} read used to abort with "unbound variable" instead of reaching
+# the script's own handling.
+test_ship_with_only_a_task_id_is_not_an_unbound_variable() {
+  local home out rc
+  home="$TMP_ROOT/only-id-home"
+  mkdir -p "$home/data"
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-only-id-p1 --mode direct-PR 2>&1); rc=$?
+  expect_code 0 "$rc" "a ship brief with only a task id should scaffold (got: $out)"
+  case "$out" in *"unbound variable"*) fail "fm-brief.sh read an unset project positional: $out" ;; esac
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-spawn.sh" brief-only-id-p1 --mode direct-PR --yolo off 2>&1) || true
+  case "$out" in *"unbound variable"*) fail "fm-spawn.sh read an unset project positional: $out" ;; esac
+  pass "fm-brief.sh and fm-spawn.sh: a ship with only a task id never hits an unbound positional"
+}
+
 test_base_branch_is_rendered_and_bounded() {
   local home out rc brief base meta_base
   home="$TMP_ROOT/base-branch-home"
@@ -1732,3 +1747,4 @@ test_branch_prefix_is_refused_where_it_does_not_apply
 test_branch_prefix_value_is_validated
 test_branch_prefix_command_is_shell_safe
 test_crewmate_scaffolds_forbid_pool_administration
+test_ship_with_only_a_task_id_is_not_an_unbound_variable
