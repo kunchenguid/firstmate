@@ -608,6 +608,45 @@ test_stopfailure_failure_continuations_are_paced() {
   pass "auto-arm: StopFailure failure continuations are paced by the same cooldown"
 }
 
+# A StopFailure continuation that waits out the cooldown must re-honor the
+# gates it passed before the arm: AFK hands supervision to the away daemon and
+# a vanished need leaves nothing to supervise, so either one appearing during
+# the wait ends the firing silently instead of waking the primary late.
+test_stopfailure_paced_rewake_honors_afk_and_need_after_wait() {
+  local dir case_name status fail_payload rcfile hook_pid
+  fail_payload='{"session_id":"sess-autoarm","hook_event_name":"StopFailure","error":"connection_failed","transcript_path":"/tmp/sess.jsonl"}'
+  for case_name in afk need; do
+    dir=$(make_primary_dir "$TMP_ROOT/stopfailure-wait-$case_name")
+    : > "$dir/state/task.meta"
+    write_arm_fixture "$dir" actionable
+    : > "$dir/state/.claude-autoarm-stopfailure-rewake"
+    rcfile="$dir/hook-rc"
+    ( FM_CLAUDE_STOPFAILURE_REWAKE_COOLDOWN=5 run_autoarm "$dir" "$fail_payload" >/dev/null 2>&1; echo "$?" > "$rcfile" ) &
+    hook_pid=$!
+    for _ in $(seq 1 100); do
+      [ -e "$dir/state/successor-ran" ] && break
+      sleep 0.05
+    done
+    [ -e "$dir/state/successor-ran" ] || fail "$case_name: the paced StopFailure never reached its handling successor"
+    sleep 0.5
+    [ ! -e "$rcfile" ] || fail "$case_name: the StopFailure inside the cooldown finished before waiting it out"
+    if [ "$case_name" = afk ]; then
+      : > "$dir/state/.afk"
+    else
+      rm -f "$dir/state/task.meta"
+    fi
+    wait "$hook_pid"
+    status=$(cat "$rcfile")
+    expect_code 0 "$status" "$case_name appearing during the StopFailure cooldown wait must end the firing silently"
+    if [ "$case_name" = afk ]; then
+      [ "$(epoch_outcome "$dir")" = afk ] || fail "AFK during the wait must record outcome=afk, got: $(epoch_outcome "$dir")"
+    else
+      [ "$(epoch_outcome "$dir")" = clean ] || fail "a vanished need during the wait must record outcome=clean, got: $(epoch_outcome "$dir")"
+    fi
+  done
+  pass "auto-arm: a paced StopFailure rewake stands down when AFK or a lost need appears during its wait"
+}
+
 # An arm that attached to a peer cycle returns when that cycle ends with the wake
 # the peer delivered. Pi, omp, and OpenCode start the next arm before notifying
 # the model; the hook must do the same, naming the closed arm as the successor's
@@ -2306,6 +2345,7 @@ test_actionable_close_rewakes_with_reason
 test_actionable_close_with_live_successor_rewakes_once
 test_stopfailure_close_rewakes_paced_per_cooldown
 test_stopfailure_failure_continuations_are_paced
+test_stopfailure_paced_rewake_honors_afk_and_need_after_wait
 test_attached_cycle_end_starts_handling_successor
 test_unconfirmed_handling_successor_still_rewakes
 test_failed_close_rewakes_with_failure_banner
