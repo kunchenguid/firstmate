@@ -41,7 +41,9 @@
 #    <state>/gnhf/<run-id>.env      resolved project, posture, arguments, run mode
 #    <state>/gnhf/<run-id>.status   working, then done or failed
 #    and, with --task, the same status lines also go to <state>/<id>.status so
-#    the owning task's supervisor sees the live run and its exit. If the
+#    the owning task's supervisor sees the live run and its exit; a clean exit
+#    is mirrored there as `working`, never `done`, because the task's done
+#    signal is the worker's once its deliverable is prepared. If the
 #    wrapper receives TERM, INT or HUP it stops gnhf and records `failed`.
 #    FM_GNHF_RUN_AUTH is removed from gnhf's environment, and the wrapper's
 #    stdin is passed through to gnhf.
@@ -234,6 +236,9 @@ fm_gnhf_status() { # <state> <message>
   printf '%s\n' "$line" >>"$STATUS_LOG" \
     || echo "fm-gnhf: warning: cannot append to $STATUS_LOG" >&2
   if [ -n "$TASK" ]; then
+    # The task's own done signal belongs to the worker once it has prepared its
+    # deliverable; a finished run is mirrored as progress, not completion.
+    if [ "$1" = "done" ]; then line="working [at=$(date +%s)]: $2"; fi
     printf '%s\n' "$line" >>"$STATE/$TASK.status" \
       || echo "fm-gnhf: warning: cannot append to $STATE/$TASK.status" >&2
   fi

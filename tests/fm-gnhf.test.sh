@@ -145,7 +145,9 @@ test_task_status_is_appended() {
   run_gnhf --task t1 --project demo -- "do the work"
   [ "$RC" -eq 0 ] || fail "a --task run failed: $RC ($OUT)"
   assert_contains "$(cat "$HOME_DIR/state/t1.status")" 'working [at=' "the task status log has no live line"
-  assert_contains "$(cat "$HOME_DIR/state/t1.status")" 'done [at=' "the task status log has no terminal line"
+  assert_contains "$(cat "$HOME_DIR/state/t1.status")" 'exited 0' "the task status log did not report the run's exit"
+  assert_not_contains "$(cat "$HOME_DIR/state/t1.status")" 'done [at=' "the task status log carries the task's done signal"
+  assert_contains "$(cat "$(status_path)")" 'done [at=' "the run record lost its terminal status"
   pass "fm-gnhf: --task mirrors the run status into the task's status log"
 }
 
