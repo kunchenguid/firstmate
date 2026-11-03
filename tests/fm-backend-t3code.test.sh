@@ -837,6 +837,27 @@ test_discovered_t3_supervisor_delivers_without_task_metadata() {
   pass "T3 supervisor discovery retains its verified server through digest delivery"
 }
 
+# A pinned supervisor is the operator's explicit choice, so an idle or completed
+# captain thread must still bind: the daemon starts long after the turn that
+# launched it has ended, and requiring an active run would refuse to supervise.
+test_explicit_t3_supervisor_binds_idle_target() {
+  local state out
+  t3_case explicit-supervisor-idle completed
+  state="$CASE_DIR/state"
+  mkdir -p "$state"
+  out=$(t3_run '
+    unset FM_T3CODE_TASK_SERVER FM_T3CODE_EXPECTED_SERVER
+    . "$0/bin/fm-supervise-daemon.sh"
+    FM_HOME=$2 FM_SUPERVISOR_TARGET=thread-live FM_SUPERVISOR_BACKEND=t3code FM_DAEMON_PRIMARY_HARNESS=codex
+    fm_supervisor_bind_t3code_target || exit 1
+    afk_enter "$1"
+    escalate_add "$1" "idle supervisor event"
+    escalate_flush "$1"
+  ' "$state" "$REPO" 2>&1) || fail "an explicitly targeted idle T3 supervisor did not bind: $out"
+  [ "$(t3_fake_calls t3_thread_send | grep -c .)" = 1 ] || fail "an idle pinned supervisor did not receive its digest: $out"
+  pass "T3 supervisor discovery binds an explicitly targeted idle thread"
+}
+
 test_t3_watch_refuses_mixed_recorded_servers() {
   local state server other out rc marker
   t3_case mixed-watch completed
@@ -856,6 +877,16 @@ test_t3_watch_refuses_mixed_recorded_servers() {
   expect_code 2 "$rc" "mixed-server watch must refuse: $out"
   [ ! -s "$LOG" ] || fail "mixed-server watch contacted the selected server"
   [ "$(cat "$marker")" = pending-signature ] || fail "mixed-server watch cleared another server task marker"
+  # The order must not matter: a current-server thread first, then the foreign
+  # record, still refuses the batch instead of querying the foreign thread on
+  # the current server.
+  out=$(t3_run '
+    unset FM_T3CODE_TASK_SERVER FM_T3CODE_EXPECTED_SERVER
+    fm_backend_t3code_wait_transition ignored 0.01 "$1" thread-new thread-old
+  ' "$state" 2>&1); rc=$?
+  expect_code 2 "$rc" "mixed-server watch in reverse order must refuse: $out"
+  [ ! -s "$LOG" ] || fail "reverse-order mixed-server watch contacted the selected server"
+  [ "$(cat "$marker")" = pending-signature ] || fail "reverse-order mixed-server watch cleared another server task marker"
   fm_write_meta "$state/old.meta" "window=fm-old" "backend=t3code" "t3_thread_id=thread-old" "t3_server=$server"
   out=$(t3_run '
     unset FM_T3CODE_TASK_SERVER FM_T3CODE_EXPECTED_SERVER
@@ -868,6 +899,7 @@ test_t3_watch_refuses_mixed_recorded_servers() {
 
 test_discovery_and_watch_server_bindings() {
   test_discovered_t3_supervisor_delivers_without_task_metadata || return
+  test_explicit_t3_supervisor_binds_idle_target || return
   test_t3_watch_refuses_mixed_recorded_servers
 }
 
@@ -3146,6 +3178,7 @@ test_daemon_defers_digest_while_supervisor_waits_on_request
 test_helper_through_symlinked_root_reaches_t3_and_kill_fails_closed
 test_draining_archived_t3_secondmate_is_not_relaunched
 test_discovered_t3_supervisor_delivers_without_task_metadata
+test_explicit_t3_supervisor_binds_idle_target
 test_t3_watch_refuses_mixed_recorded_servers
 test_recorded_t3_callers_refuse_server_switch
 test_cleanup_refuses_switched_server_credential

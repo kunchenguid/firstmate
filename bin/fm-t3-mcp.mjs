@@ -1200,22 +1200,35 @@ async function listThreads(session, projectId, statuses) {
 // project rooted at <root>, the unarchived thread with no worktree of its own
 // whose run is active (the daemon starts from inside the captain's own turn).
 // A fork is an ordinary conversation and counts; a delegated subagent does not.
+// An explicit --target is verified directly instead: it is a supervisor the
+// operator pinned, so it must belong to this project, be unarchived, and have
+// no worktree, but it does not need an active turn - the daemon must be able to
+// bind an idle or completed captain thread before it starts supervision.
 async function threadForRoot(flags) {
   const rootPath = need(flags, "root");
   if (!path.isAbsolute(rootPath)) usage("--root must be an absolute path");
   const { session, cred } = await verifiedSession(flags);
   const project = await projectForRoot(session, rootPath);
   if (!project) throw new Refusal("no_thread", `T3 has no project rooted at ${rootPath}`, 5);
+  if (flags.target) {
+    let t;
+    try {
+      t = threadOf(await session.call("t3_thread_read", { threadId: flags.target, limit: 1, runLimit: 1 }));
+    } catch {
+      throw new Refusal("no_thread", `T3 supervisor ${flags.target} does not run in ${rootPath}`, 5);
+    }
+    const archived = t.archived === true || Boolean(t.archivedAt);
+    if (t.projectId !== project.id || archived || t.relationshipToParent === "subagent" || (t.worktreePath ?? null) !== null) {
+      throw new Refusal("no_thread", `T3 supervisor ${flags.target} does not run in ${rootPath}`, 5);
+    }
+    return { ok: true, threadId: flags.target, serverIdentity: JSON.stringify([cred.origin, cred.environment_id]) };
+  }
   const live = [];
   for (const item of await listThreads(session, project.id, ACTIVE_STATUSES)) {
     if (item.relationshipToParent === "subagent") continue;
     const t = threadOf(await session.call("t3_thread_read", { threadId: item.threadId, limit: 1, runLimit: 1 }));
     if (t.relationshipToParent === "subagent" || t.archived === true || t.archivedAt || (t.worktreePath ?? null) !== null) continue;
     if (ACTIVE_STATUSES.includes(t.status)) live.push(item.threadId);
-  }
-  if (flags.target) {
-    if (!live.includes(flags.target)) throw new Refusal("no_thread", `T3 supervisor ${flags.target} does not run in ${rootPath}`, 5);
-    return { ok: true, threadId: flags.target, serverIdentity: JSON.stringify([cred.origin, cred.environment_id]) };
   }
   if (live.length === 1) return { ok: true, threadId: live[0], serverIdentity: JSON.stringify([cred.origin, cred.environment_id]) };
   if (live.length === 0) throw new Refusal("no_thread", `no live T3 thread runs in ${rootPath}`, 5);

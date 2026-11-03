@@ -72,6 +72,10 @@ fm_backend_t3code_tool_check() {
 # It prints one JSON object (capture prints text) and exits as its
 # header says, including send's delivery-unconfirmed status 7.
 # Every failure prints one stderr line.
+# fm_backend_t3code_admitted_server <thread> - print the server admitted for
+# this thread. Returns 0 with the identity, 2 when no record names the thread,
+# and 1 when a record exists but cannot prove its identity; callers that may
+# fall back to a batch identity must distinguish 2 from 1.
 fm_backend_t3code_admitted_server() {
   local thread=$1 meta binding server=${FM_T3CODE_EXPECTED_SERVER:-${FM_T3CODE_TASK_SERVER:-}}
   if [ -z "$server" ] && [ "$thread" = "${FM_T3CODE_SUPERVISOR_THREAD:-}" ]; then
@@ -88,7 +92,7 @@ fm_backend_t3code_admitted_server() {
       done
     fi
   fi
-  [ -n "$server" ] || { echo "error: T3 request lacks an admitted creation-server identity" >&2; return 1; }
+  [ -n "$server" ] || { echo "error: T3 request lacks an admitted creation-server identity" >&2; return 2; }
   printf '%s' "$server"
 }
 
@@ -102,9 +106,15 @@ fm_backend_t3code_mcp() {
         # Each watched thread's own record is authoritative: the batch's
         # environment names only one task's server, so it must never decide
         # another thread's identity. A thread with no record at all falls back
-        # to the identity the caller admitted for this batch.
-        admitted=$(unset FM_T3CODE_EXPECTED_SERVER FM_T3CODE_TASK_SERVER; fm_backend_t3code_admitted_server "$thread" 2>/dev/null) || admitted=
-        [ -n "$admitted" ] || admitted=${expected:-}
+        # to the identity the caller admitted for this batch; a recorded
+        # identity that fails its check refuses the whole batch instead.
+        local watch_rc=0
+        admitted=$(unset FM_T3CODE_EXPECTED_SERVER FM_T3CODE_TASK_SERVER; fm_backend_t3code_admitted_server "$thread" 2>/dev/null) || watch_rc=$?
+        case "$watch_rc" in
+          0) ;;
+          2) admitted=${expected:-} ;;
+          *) return 1 ;;
+        esac
         [ -n "$admitted" ] || { echo "error: T3 watch thread $thread has no admitted creation-server identity" >&2; return 1; }
       else
         admitted=$(fm_backend_t3code_admitted_server "$thread") || return 1
