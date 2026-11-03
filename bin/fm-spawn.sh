@@ -2540,8 +2540,18 @@ if [ "$RELAUNCH" -eq 1 ]; then
       [ "$relaunch_wt_real" = "$relaunch_cand_real" ] && relaunch_primary=$relaunch_cand
     done
     if [ -z "$relaunch_primary" ]; then
-      relaunch_gd=$(git -C "$RELAUNCH_WT" rev-parse --path-format=absolute --git-dir 2>/dev/null || true)
-      relaunch_gc=$(git -C "$RELAUNCH_WT" rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)
+      # Probe the directory's own layout: an inherited GIT_DIR naming a linked
+      # worktree with GIT_WORK_TREE naming the primary checkout would otherwise
+      # make the two answers differ and pass the primary checkout.
+      relaunch_gdc=$(
+        unset GIT_DIR GIT_WORK_TREE GIT_COMMON_DIR GIT_OBJECT_DIRECTORY GIT_INDEX_FILE \
+          GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_CEILING_DIRECTORIES GIT_NAMESPACE \
+          GIT_DISCOVERY_ACROSS_FILESYSTEM GIT_CONFIG GIT_CONFIG_GLOBAL \
+          GIT_CONFIG_SYSTEM GIT_CONFIG_NOSYSTEM GIT_CONFIG_COUNT
+        git -C "$RELAUNCH_WT" rev-parse --path-format=absolute --git-dir --git-common-dir 2>/dev/null
+      ) || relaunch_gdc=
+      relaunch_gd=${relaunch_gdc%%$'\n'*}
+      relaunch_gc=${relaunch_gdc#*$'\n'}
       [ -z "$relaunch_gd" ] || [ "$relaunch_gd" != "$relaunch_gc" ] || relaunch_primary="its repository's primary checkout"
     fi
     [ -z "$relaunch_primary" ] || {

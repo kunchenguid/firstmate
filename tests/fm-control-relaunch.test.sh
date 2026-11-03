@@ -1807,6 +1807,23 @@ test_relaunch_refuses_a_recorded_worktree_that_is_the_project_primary_checkout()
   pass "fm-spawn --relaunch: a recorded worktree that is the project primary checkout refuses"
 }
 
+# Inherited Git location overrides must not disguise the primary checkout:
+# a linked worktree's GIT_DIR plus the primary checkout as GIT_WORK_TREE would
+# make the git-dir and common-dir probes disagree.
+test_relaunch_refuses_the_primary_checkout_under_inherited_git_overrides() {
+  local dir out rc linked_gd
+  dir=$(new_case projwtenv rl13)
+  add_ship_task "$dir" rl13 claude
+  linked_gd=$(git -C "$dir/wt" rev-parse --absolute-git-dir)
+  sed -i.bak "s#^worktree=.*#worktree=$dir/proj#" "$dir/home/state/rl13.meta"
+  printf 'zsh' > "$dir/fake/command"
+  out=$(GIT_DIR="$linked_gd" GIT_WORK_TREE="$dir/proj" run_spawn "$dir" rl13 --relaunch 2>&1); rc=$?
+  expect_code 1 "$rc" "the primary checkout should refuse even under inherited GIT_DIR/GIT_WORK_TREE"
+  assert_contains "$out" "primary home or checkout" "the refusal should name the primary checkout"
+  [ -z "$(cat "$dir/fake/literal")" ] || fail "a refused relaunch must launch nothing"
+  pass "fm-spawn --relaunch: inherited Git overrides do not hide the project primary checkout"
+}
+
 test_missing_instructions_refuse_before_stopping_anything() {
   local dir out rc
   dir=$(new_case nobrief rl11)
@@ -3091,6 +3108,7 @@ test_cursor_session_binding_is_retired_on_a_harness_switch
 test_missing_worktree_refuses_before_stopping_anything
 test_relaunch_refuses_a_recorded_worktree_that_is_the_primary_home
 test_relaunch_refuses_a_recorded_worktree_that_is_the_project_primary_checkout
+test_relaunch_refuses_the_primary_checkout_under_inherited_git_overrides
 test_missing_instructions_refuse_before_stopping_anything
 test_checkpoint_refusal_leaves_the_record_byte_identical
 test_checkpoint_refuses_uninspectable_head_and_status
