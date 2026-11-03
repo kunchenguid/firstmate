@@ -806,7 +806,7 @@ print_pending() {
   printf 'NOT yet confirmed: %s.\n' "$(phase_label "$phases")"
   [ -z "$age" ] || printf 'Started %ss ago, bounded at %ss.\n' "$age" "$(stage_budget)"
   # shellcheck disable=SC2016  # The backticked wake name is literal digest text.
-  printf 'Only a FAILED or otherwise actionable result arrives as a `check: startup-network` wake; a clean success stays silent.\n'
+  printf 'Only a FAILED or otherwise actionable result arrives as a `check: startup-network:<generation>` wake; a clean success stays silent.\n'
   printf 'The durable result is readable on demand with %s/bin/fm-startup-network.sh report; until it finishes, treat none of it as confirmed.\n' "$FM_ROOT"
 }
 
