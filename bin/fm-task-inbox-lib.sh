@@ -429,10 +429,9 @@ fm_task_inbox_ring() {  # <backend> <target> <record-path> [expected-label]
     return 2
   fi
   # Only explicit deferral or send failure changes the ring status; ordinary
-  # composer verdicts (pending, unknown, ...) remain advisory, never proof. The
-  # one exception is the core's failed-Enter `empty` read: the doorbell
-  # provably left the pane, so the ring is delivered and a re-ring would
-  # duplicate it.
+  # composer verdicts (empty, pending, unknown, ...) remain advisory, never
+  # proof. Orca's failed-Enter path returns `inbox-deferred` without reading the
+  # composer, so it can never hand back an `empty` that would report delivery.
   case "$verdict" in
     inbox-deferred) return 1 ;;
     send-failed) return 2 ;;

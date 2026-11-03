@@ -1015,11 +1015,12 @@ ok - claude-named (2.1.284 (Claude Code)): the same idle pane read cursorless is
 
 ### 2026-11-02 claude 2.1.317 rotating `Try` idle hint
 
-Verified on 2026-11-02 against real Claude Code 2.1.317 panes on Orca 1.4.232 in a disposable lab runtime: an idle claude composer renders the rotating suggestion hint `Try "edit fm-branch-dispatch.ts to..."` after the `❯` glyph, and a `styled=0` capture carries no ghost-strip proof for it, so that hint row inside a proven container read `pending` instead of `empty` and an inbox ring deferred against a composer that held no human input.
+Verified on 2026-11-02 against real Claude Code 2.1.317 panes on Orca 1.4.232 in a disposable lab runtime: an idle claude composer renders the rotating suggestion hint `Try "edit fm-branch-dispatch.ts to..."` after the `❯` glyph, and a `styled=0` capture carries no ghost-strip proof for it.
 `FM_COMPOSER_IDLE_RE_DEFAULT` in [`bin/fm-composer-lib.sh`](../../bin/fm-composer-lib.sh) therefore carries the anchored prefix `^Try "` with the quoted tail free, because the suggestion rotates; claude draws that hint only in an EMPTY composer, so typed text never reproduces it.
-A proven composer container holding that hint row now reads `empty` on an unstyled capture, while real typed text in the same container still reads `pending` and a bare row keeps the `styled=0` degradation to `unknown`.
-The live capture from that run is the rule-separated shape - `❯ Try "..."` between two solid rules with the permission-mode footer below - which reads `unknown` with or without the entry, so the entry widens nothing there and proves emptiness only inside a container the classifier already proved.
-`test_matrix_claude_rotating_idle_hint` in `tests/fm-composer-lib.test.sh` pins the styled container, the unstyled container, and the typed-text counterweight.
+The entry buys a `styled=0` capture of a proven composer container, where there is no ghost-strip proof for the hint: that hint row read `pending` without the entry and reads `empty` with it, while real typed text in the same container still reads `pending` and a bare row keeps the `styled=0` degradation to `unknown`.
+The live shape on this Orca/Claude pair is rule-separated - `❯ Try "..."` between two solid rules with the permission-mode footer below - and it reads `unknown` both with the entry and with `FM_COMPOSER_IDLE_RE='^$'`, so the entry is pinned only by a synthetic bordered container and no live hint row reached `empty`.
+That rule-separated shape is a known limitation of the success-path proof on this Orca/Claude pair: an empty composer there cannot be proven empty, so an accepted Enter whose read lands on it returns `unknown`, `fm-send.sh` reports the text as not submitted and exits 1, and duplicate-resend risk remains until a dedicated classifier change supports that container.
+`test_matrix_claude_rotating_idle_hint` in `tests/fm-composer-lib.test.sh` pins the styled rule-separated row, the unstyled bordered container, and the typed-text counterweight, and no live guard yet pins this vendor string against claude 2.1.317.
 
 ### 2026-09-15 codex-cli 0.154.0 idle starfield and status footer through Herdr
 
