@@ -41,6 +41,8 @@ Interrupt never rewrites busy state as proof of its own success.
 Claude exposes no lifecycle acknowledgement for a manual interrupt, so delivery succeeds with `cancel=unconfirmed` and its adapter-owned busy state remains as observed.
 On T3 Code the backend's native interrupt is the acknowledgement: T3's own run wait decides `cancel=confirmed`, `not-running`, or `unconfirmed` for every harness.
 Devin emits no lifecycle hook for cancellation either, so after an armed interrupt the control plane invalidates the interrupted turn's busy record to `unknown` with `cancel=unconfirmed`; that invalidation is a conservative loss of knowledge, never a fabricated idle.
+Hermes uses double Escape and refuses interrupt unless its composer is proven empty, because that chord discards an unsent draft.
+Its native end hook settles a cancelled turn; [the Hermes reference](../.agents/skills/harness-adapters/references/harness/hermes.md) owns the supported lifecycle limits.
 Cortex Code is the exception to both: its `Stop` hook fires on an Escape interrupt, so one Escape cancels the turn and the hook closes the busy record itself, with no invalidation and no arming gate; an Escape on an idle Cortex composer does nothing.
 Devin's double Escape also opens its `/revert` picker on an idle agent, where Enter reverts file changes, so its second press is sent only after the first renders a running turn's armed hint and never sooner than the adapter's press gap.
 An interrupt whose first press shows no running turn stops there and reports `cancel=not-running`, leaving busy state untouched; a picker a mistimed press opened is closed with one Escape and reported as `revert-picker=dismissed`, and `exit` refuses to type into an open picker.
@@ -118,8 +120,10 @@ An unreachable endpoint can still hold the live agent a rebind would duplicate, 
   `dead` means the pane survived the restart and is adopted after all, with no second tab; `alive` means the agent came back and refuses; only a second `missing` proves the pane itself did not survive ([`docs/herdr-backend.md`](herdr-backend.md) "Restart and liveness behavior").
   That server start is a real side effect, and the parenthetical above does not cover it: when the recorded session's server no longer exists at all, the probe stands a fresh empty one up in order to ask, and nothing afterwards uses it.
   So in that state `exit` - which otherwise reads as a read-only inspection - leaves an idle herdr server behind.
-- **Rex can prove it.** Rex never reuses a session, window, or block id, and a session does not survive its server, so a structured not-found for the recorded block from the server the task was created on proves the block is gone.
-  The record carries that server's endpoint (`rex_server=`), and the recheck refuses unless the server this process reaches reports the same endpoint; it lets the CLI start a stopped personal server, whose fresh start then answers not-found with authority.
+- **Rex can prove it.** Rex never reuses a session, window, or block id, so a structured not-found for the recorded block from the server the task was created on proves the block is gone.
+  The record carries that server's endpoint (`rex_server=`), and the recheck refuses unless the server this process reaches reports the same endpoint; it normally lets the CLI start a stopped personal server before checking the block.
+  [Remote second-mate readiness](remote-secondmates.md#repair-with---fix) owns the exception that prevents this autostart for remote control.
+  [Rex's server-stop limits](rex-backend.md#active-limits) distinguish a restored shell from a missing block.
   A block that is still there is classified from its process view, so `dead` is adopted and `alive` refuses ([`docs/rex-backend.md`](rex-backend.md) "Cleanup and the absence proof").
   Rex's passive reads never start a server, so a stopped Rex server reads `unreadable` rather than `missing`; a Rex `unreadable` therefore goes through this recheck too, and still refuses unless the recheck settles it.
 - **tmux cannot.** `list-windows -a` describes only the tmux server the *current process* addresses (its `TMUX_TMPDIR`/socket), and a task record carries no socket identity for its endpoint.

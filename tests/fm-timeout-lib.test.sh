@@ -3,9 +3,10 @@
 # TERM to the command's process group at the bound, KILL once the grace has
 # passed, a forwarded signal, the caller replaced rather than wrapped, and a
 # refusal instead of an unbounded run when nothing on the host can enforce the
-# bound. Most cases pin the perl watchdog, the preferred mechanism and the only
-# one a stock macOS host has, under a PATH that holds no timeout variant; the
-# GNU fallback case runs only where a real timeout exists.
+# bound. Most cases pin the preferred perl watchdog under a PATH that holds no
+# timeout variant. Piped stdin exercises every mechanism, with a passthrough
+# timeout stub when the external executable is absent; deadline cases use real
+# watchdogs.
 # shellcheck disable=SC2016 # each bounded bash -c script expands its own arguments
 set -u
 
@@ -52,6 +53,54 @@ wait_for_file() {  # <path>
     i=$((i + 1))
     [ "$i" -lt 500 ] || fail "timed out waiting for $1"
     sleep 0.02
+  done
+}
+
+# Cover both inherited pipe input and a function inside a pipeline: stock
+# macOS Bash cannot enable job control in the latter, unlike newer Bash.
+test_run_timed_preserves_piped_stdin() {
+  local mechanism dir tool runner shape out
+  for mechanism in timeout gtimeout perl bash; do
+    dir="$TMP_ROOT/stdin-$mechanism"
+    mkdir -p "$dir/bin"
+    for tool in bash cat mktemp rm sleep; do
+      ln -s "$(command -v "$tool")" "$dir/bin/$tool"
+    done
+    case "$mechanism" in
+      timeout|gtimeout)
+        runner=$(type -P "$mechanism" 2>/dev/null || true)
+        if [ -n "$runner" ]; then
+          ln -s "$runner" "$dir/bin/$mechanism"
+        else
+          printf '#!/bin/sh\nshift 3\nexec "$@"\n' > "$dir/bin/$mechanism"
+          chmod +x "$dir/bin/$mechanism"
+        fi
+        ;;
+      perl)
+        if ! command -v perl >/dev/null 2>&1; then
+          pass 'fm_run_timed piped stdin (skipped: no perl on this host)'
+          continue
+        fi
+        ln -s "$(command -v perl)" "$dir/bin/perl"
+        ;;
+    esac
+    printf 'hello\nsecond line\twith spaces\r\n\000last bytes\n\n' > "$dir/expected"
+    for shape in inherited pipeline; do
+      out=$(cat "$dir/expected" | PATH="$dir/bin" bash -c '
+        unset FM_TIMEOUT_MECHANISM_OVERRIDE
+        . "$1/bin/fm-timeout-lib.sh"
+        read_timed() { fm_run_timed 5 cat; }
+        fm_timeout_mechanism
+        if [ "$3" = pipeline ]; then
+          cat "$2/expected" | read_timed > "$2/actual"
+        else
+          read_timed > "$2/actual"
+        fi
+      ' _ "$ROOT" "$dir" "$shape") || fail "$mechanism failed to read $shape pipe stdin"
+      [ "$out" = "$mechanism" ] || fail "stdin case selected $out instead of $mechanism"
+      cmp -s "$dir/expected" "$dir/actual" || fail "$mechanism lost or changed $shape pipe stdin"
+      pass "fm_run_timed preserves exact $shape pipe stdin through $mechanism"
+    done
   done
 }
 
@@ -399,6 +448,124 @@ test_run_timed_passes_a_natural_exit_through_a_fired_bound() {
 # and a bare call runs the shadow, which drops the command's stdout and
 # replaces its status. gtimeout is shadowed the same way, so a host whose
 # external runner is gtimeout is covered without installing one.
+# A non-interactive bash assigns /dev/null to an async command's stdin. The
+# external timeout and bash mechanisms background their command, so a pipe or
+# file must be restored or a remote steer payload arrives empty. A terminal is
+# not attached, and a closed stdin still runs the command.
+test_run_timed_delivers_piped_stdin_on_every_mechanism() {
+  local payload=piped-stdin-payload out rc mechanism timeout_path perl_bin dir
+  dir="$TMP_ROOT/stdin"
+  perl_bin="$dir/perl-bin"
+  mkdir -p "$perl_bin"
+  for tool in perl bash cat; do
+    ln -s "$(command -v "$tool")" "$perl_bin/$tool" || fail "could not link $tool for the stdin case"
+  done
+  printf '%s' "$payload" > "$dir/file"
+
+  rc=0
+  out=$(printf '%s' "$payload" | bash -c '. "$1"; fm_run_timed 10 cat' _ "$ROOT/bin/fm-timeout-lib.sh") || rc=$?
+  [ "$rc" -eq 0 ] || fail "fm_run_timed did not pass cat's status (rc=$rc out=$out)"
+  [ "$out" = "$payload" ] || fail "fm_run_timed lost piped stdin (out=$out)"
+
+  timeout_path=$(. "$ROOT/bin/fm-timeout-lib.sh"; fm_external_timeout_path || true)
+  if [ -n "$timeout_path" ]; then
+    rc=0
+    out=$(printf '%s' "$payload" | bash -c '
+      . "$1"
+      fm_run_external_timeout "$2" 10 cat
+    ' _ "$ROOT/bin/fm-timeout-lib.sh" "$timeout_path") || rc=$?
+    [ "$rc" -eq 0 ] || fail "external timeout did not pass cat's status (rc=$rc out=$out)"
+    [ "$out" = "$payload" ] || fail "external timeout lost piped stdin (out=$out)"
+
+    rc=0
+    out=$(bash -c '
+      . "$1"
+      fm_run_external_timeout "$2" 10 cat
+    ' _ "$ROOT/bin/fm-timeout-lib.sh" "$timeout_path" < "$dir/file") || rc=$?
+    [ "$rc" -eq 0 ] || fail "external timeout did not pass a file stdin status (rc=$rc out=$out)"
+    [ "$out" = "$payload" ] || fail "external timeout lost file stdin (out=$out)"
+
+    rc=0
+    out=$(bash -c '
+      . "$1"
+      fm_run_external_timeout "$2" 5 bash -c "printf ok"
+    ' _ "$ROOT/bin/fm-timeout-lib.sh" "$timeout_path" <&-) || rc=$?
+    [ "$rc" -eq 0 ] || fail "external timeout failed with closed stdin (rc=$rc out=$out)"
+    [ "$out" = ok ] || fail "external timeout did not run with closed stdin (out=$out)"
+  fi
+
+  mechanism=$(FM_TIMEOUT_MECHANISM_OVERRIDE=bash bash -c '. "$1"; fm_timeout_mechanism' _ "$ROOT/bin/fm-timeout-lib.sh")
+  [ "$mechanism" = bash ] || fail "bash override selected $mechanism"
+  rc=0
+  out=$(printf '%s' "$payload" | FM_TIMEOUT_MECHANISM_OVERRIDE=bash bash -c '
+    . "$1"
+    fm_run_timed 10 bash -c "cat; exit 9"
+  ' _ "$ROOT/bin/fm-timeout-lib.sh") || rc=$?
+  [ "$rc" -eq 9 ] || fail "bash timeout lost the command status after reading stdin (rc=$rc out=$out)"
+  [ "$out" = "$payload" ] || fail "bash timeout lost piped stdin (out=$out)"
+
+  rc=0
+  out=$(FM_TIMEOUT_MECHANISM_OVERRIDE=bash bash -c '
+    . "$1"
+    fm_run_timed 5 bash -c "printf ok"
+  ' _ "$ROOT/bin/fm-timeout-lib.sh" <&-) || rc=$?
+  [ "$rc" -eq 0 ] || fail "bash timeout failed with closed stdin (rc=$rc out=$out)"
+  [ "$out" = ok ] || fail "bash timeout did not run with closed stdin (out=$out)"
+
+  mechanism=$(PATH="$perl_bin" bash -c '. "$1"; fm_timeout_mechanism' _ "$ROOT/bin/fm-timeout-lib.sh")
+  [ "$mechanism" = perl ] || fail "a PATH without timeout selected $mechanism"
+  rc=0
+  out=$(printf '%s' "$payload" | PATH="$perl_bin" bash -c '
+    . "$1"
+    fm_run_timed 10 cat
+  ' _ "$ROOT/bin/fm-timeout-lib.sh") || rc=$?
+  [ "$rc" -eq 0 ] || fail "perl timeout did not pass cat's status (rc=$rc out=$out)"
+  [ "$out" = "$payload" ] || fail "perl timeout lost piped stdin (out=$out)"
+
+  if ( : </dev/tty ) 2>/dev/null; then
+    rc=0
+    out=$(FM_TIMEOUT_MECHANISM_OVERRIDE=bash bash -c '
+      . "$1"
+      fm_run_timed 5 bash -c "if [ -t 0 ]; then echo tty; else echo notty; fi"
+    ' _ "$ROOT/bin/fm-timeout-lib.sh" </dev/tty) || rc=$?
+    [ "$rc" -eq 0 ] || fail "bash timeout failed with a terminal stdin (rc=$rc out=$out)"
+    [ "$out" = notty ] || fail "bash timeout attached a terminal stdin (out=$out)"
+    if [ -n "$timeout_path" ]; then
+      rc=0
+      out=$(bash -c '
+        . "$1"
+        fm_run_external_timeout "$2" 5 bash -c "if [ -t 0 ]; then echo tty; else echo notty; fi"
+      ' _ "$ROOT/bin/fm-timeout-lib.sh" "$timeout_path" </dev/tty) || rc=$?
+      [ "$rc" -eq 0 ] || fail "external timeout failed with a terminal stdin (rc=$rc out=$out)"
+      [ "$out" = notty ] || fail "external timeout attached a terminal stdin (out=$out)"
+    fi
+  fi
+
+  # The runner and the fd 3 write share one shell, so a mechanism that leaves
+  # the caller's fd 3 pointing at its stdin dup fails the write.
+  local fd3_mechanisms=bash
+  [ -z "$timeout_path" ] || fd3_mechanisms="external bash"
+  for mechanism in $fd3_mechanisms; do
+    rm -f "$dir/fd3" "$dir/out"
+    rc=0
+    out=$(bash -c '
+      . "$1"
+      exec 3>"$2"
+      if [ "$5" = external ]; then
+        fm_run_external_timeout "$6" 10 cat < "$3" > "$4"
+      else
+        FM_TIMEOUT_MECHANISM_OVERRIDE=bash fm_run_timed 10 cat < "$3" > "$4"
+      fi
+      echo still >&3
+    ' _ "$ROOT/bin/fm-timeout-lib.sh" "$dir/fd3" "$dir/file" "$dir/out" "$mechanism" "$timeout_path" 2>&1) || rc=$?
+    [ "$rc" -eq 0 ] || fail "caller fd 3 was not usable after the $mechanism mechanism (rc=$rc out=$out)"
+    [ "$(cat "$dir/fd3")" = still ] || fail "the $mechanism mechanism disturbed the caller's fd 3"
+    [ "$(cat "$dir/out")" = "$payload" ] || fail "the $mechanism fd 3 case lost file stdin"
+  done
+
+  pass "fm_run_timed delivers piped stdin through every available mechanism"
+}
+
 test_run_timed_keeps_stdout_and_nonzero_status_when_a_function_shadows_timeout() {
   local out rc=0
   # The functions live in this subshell so they cannot leak into later cases.
@@ -416,11 +583,13 @@ test_run_timed_keeps_stdout_and_nonzero_status_when_a_function_shadows_timeout()
   pass "fm_run_timed keeps stdout and nonzero status when a function shadows timeout"
 }
 
+test_run_timed_preserves_piped_stdin
 test_passes_the_command_status_and_output_through
 test_system_bash_preserves_completion_and_signal_statuses
 test_run_timed_reports_the_bound_when_the_wrapper_records_a_signal_death
 test_run_timed_passes_a_natural_exit_through_a_fired_bound
 test_run_timed_keeps_stdout_and_nonzero_status_when_a_function_shadows_timeout
+test_run_timed_delivers_piped_stdin_on_every_mechanism
 test_term_ends_a_cooperative_command_at_the_bound
 test_kill_ends_a_term_ignoring_command_after_the_grace
 test_the_bound_replaces_the_calling_shell

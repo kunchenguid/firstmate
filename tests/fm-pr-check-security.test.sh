@@ -156,6 +156,7 @@ case "${1:-} ${2:-}" in
         exit 0
         ;;
       *" --json isDraft "*)
+        case "$*" in *"${FM_TEST_GH_SLOW_URL:-no-slow-url}"*) sleep "${FM_TEST_GH_SLOW_SECONDS:-30}" ;; esac
         printf '%s\n' "{\"isDraft\":${FM_TEST_GH_DRAFT:-false}}"
         exit 0
         ;;
@@ -758,6 +759,230 @@ test_direct_pr_unpushed_commit_refuses_registration() {
     || fail "direct-PR refusal did not name the unpushed commit: $(cat "$dir/stderr")"
   [ ! -e "$dir/home/state/task-a.check.sh" ] || fail "direct-PR unpushed commit still armed a poll"
   pass "fm-pr-check refuses a direct-PR registration while a later commit is only in the copy"
+}
+
+# A PR a task reported in a done line is recorded by the scan whatever the rest
+# of the line says, so its merge monitoring never waits on the supervisor
+# running this command by hand. A URL without the "PR " prefix is prose, a scout
+# never delivers a PR, and an already recorded PR is left alone.
+test_scan_records_a_pr_reported_in_a_done_line() {
+  local dir state out
+  dir=$(make_case scan-records-reported-pr)
+  state="$dir/home/state"
+  write_task_meta "$dir" task-a
+  printf '%s\n' \
+    'working [at=1]: rebasing the PR branch' \
+    'done [at=2]: rebased and pushed; PR https://github.com/o/r/pull/7, not draft, only Full suite red' \
+    'done [at=3]: live transcript posted on https://github.com/o/r/pull/99' > "$state/task-a.status"
+  write_task_meta "$dir" task-prose
+  printf '%s\n' 'done [at=2]: opened https://github.com/o/r/pull/8' > "$state/task-prose.status"
+  fm_write_meta "$state/task-scout.meta" 'window=firstmate:fm-task-scout' 'endpoint_task_id=task-scout' \
+    "worktree=$dir/wt" "project=$dir/project" 'kind=scout'
+  printf '%s\n' 'done [at=2]: PR https://github.com/o/r/pull/10 reviewed' > "$state/task-scout.status"
+  write_poll_meta "$state" task-held https://github.com/o/r/pull/11
+  printf '%s\n' 'done [at=2]: PR https://github.com/o/r/pull/12 checks green' > "$state/task-held.status"
+  cp "$state/task-held.meta" "$dir/held.before"
+
+  out=$(run_check_entry "$dir" scan 2> "$dir/stderr") || fail "the scan failed: $(cat "$dir/stderr")"
+  [ -z "$out" ] || fail "a scan that recorded everything printed: $out"
+  grep -qxF 'pr=https://github.com/o/r/pull/7' "$state/task-a.meta" \
+    || fail "the PR named in a done line was not recorded"
+  fm_pr_poll_artifacts_valid "$state" task-a "$POLL" || fail "the reported PR's merge poll was not armed"
+  ! grep -q '^pr=' "$state/task-prose.meta" || fail "a URL without the PR prefix was recorded"
+  [ ! -e "$state/task-prose.check.sh" ] || fail "a URL without the PR prefix armed a poll"
+  ! grep -q '^pr=' "$state/task-scout.meta" || fail "a scout's PR mention was recorded"
+  [ ! -e "$state/task-scout.check.sh" ] || fail "a scout's PR mention armed a poll"
+  cmp -s "$dir/held.before" "$state/task-held.meta" || fail "a task with a recorded PR was recorded again"
+  pass "the scan records the PR a done line reports and leaves prose, scouts and recorded PRs alone"
+}
+
+# A refused registration is reported once per task and PR, and later scans keep
+# retrying silently, so a draft marked ready afterwards is recorded unaided.
+test_scan_reports_a_refusal_once_and_retries() {
+  local dir state out
+  dir=$(make_case scan-refusal-once)
+  state="$dir/home/state"
+  write_task_meta "$dir"
+  printf '%s\n' 'done [at=2]: PR https://github.com/o/r/pull/9 checks green' > "$state/task-a.status"
+
+  out=$(FM_TEST_GH_DRAFT=true run_check_entry "$dir" scan 2> "$dir/stderr") \
+    || fail "the scan failed: $(cat "$dir/stderr")"
+  [ "$(printf '%s\n' "$out" | wc -l | tr -d ' ')" = 1 ] || fail "a refusal did not print exactly one line: $out"
+  case "$out" in
+    'task-a reported https://github.com/o/r/pull/9 in a done line, but it was not recorded: '*draft*) ;;
+    *) fail "the refusal line did not name the task, the PR and the reason: $out" ;;
+  esac
+  ! grep -q '^pr=' "$state/task-a.meta" || fail "a refused draft was recorded"
+
+  out=$(FM_TEST_GH_DRAFT=true run_check_entry "$dir" scan 2> "$dir/stderr") \
+    || fail "the repeated scan failed: $(cat "$dir/stderr")"
+  [ -z "$out" ] || fail "the same refusal was reported twice: $out"
+
+  out=$(FM_TEST_GH_DRAFT=false run_check_entry "$dir" scan 2> "$dir/stderr") \
+    || fail "the retry scan failed: $(cat "$dir/stderr")"
+  [ -z "$out" ] || fail "a successful retry printed: $out"
+  grep -qxF 'pr=https://github.com/o/r/pull/9' "$state/task-a.meta" \
+    || fail "the PR was not recorded once it left draft"
+  [ ! -e "$state/task-a.pr-register-refused" ] || fail "a recorded PR kept its refusal marker"
+  pass "the scan reports a refused registration once and records the PR on a later retry"
+}
+
+# A refused task whose draft is now ready is recorded within two sweeps even
+# when a hanging registration sorts ahead of it and takes the first sweep.
+test_scan_retries_refused_task_behind_a_hanging_registration() {
+  local dir state
+  dir=$(make_case scan-refused-behind-hang)
+  state="$dir/home/state"
+  write_task_meta "$dir" task-a
+  printf '%s\n' 'done [at=2]: PR https://github.com/o/r/pull/9 checks green' > "$state/task-a.status"
+  write_task_meta "$dir" task-b
+  printf '%s\n' 'done [at=2]: PR https://github.com/o/r/pull/20 checks green' > "$state/task-b.status"
+  printf '%s\n' 'https://github.com/o/r/pull/20' > "$state/task-b.pr-register-refused"
+
+  FM_CHECK_TIMEOUT=15 FM_TEST_GH_SLOW_URL=pull/9 run_check_entry "$dir" scan > /dev/null 2> "$dir/stderr" \
+    || fail "the first scan failed: $(cat "$dir/stderr")"
+  FM_CHECK_TIMEOUT=15 FM_TEST_GH_SLOW_URL=pull/9 run_check_entry "$dir" scan > /dev/null 2> "$dir/stderr" \
+    || fail "the second scan failed: $(cat "$dir/stderr")"
+  grep -qxF 'pr=https://github.com/o/r/pull/20' "$state/task-b.meta" \
+    || fail "a refused task was starved by a hanging registration"
+  [ ! -e "$state/task-b.pr-register-refused" ] || fail "a recorded PR kept its refusal marker"
+  pass "the scan retries a refused task within two sweeps despite a hanging registration"
+}
+
+# A registration that hangs takes the whole budget of one sweep, and the next
+# sweep starts with a different task, so a later report is still recorded.
+test_scan_rotates_past_a_hanging_registration() {
+  local dir state
+  dir=$(make_case scan-rotates-past-hang)
+  state="$dir/home/state"
+  write_task_meta "$dir" task-a
+  printf '%s\n' 'done [at=2]: PR https://github.com/o/r/pull/9 checks green' > "$state/task-a.status"
+  write_task_meta "$dir" task-b
+  printf '%s\n' 'done [at=2]: PR https://github.com/o/r/pull/20 checks green' > "$state/task-b.status"
+
+  FM_CHECK_TIMEOUT=15 FM_TEST_GH_SLOW_URL=pull/9 run_check_entry "$dir" scan > /dev/null 2> "$dir/stderr" \
+    || fail "the first scan failed: $(cat "$dir/stderr")"
+  FM_CHECK_TIMEOUT=15 FM_TEST_GH_SLOW_URL=pull/9 run_check_entry "$dir" scan > /dev/null 2> "$dir/stderr" \
+    || fail "the second scan failed: $(cat "$dir/stderr")"
+  grep -qxF 'pr=https://github.com/o/r/pull/20' "$state/task-b.meta" \
+    || fail "a hanging registration starved a later report on every sweep"
+  pass "the scan starts a later sweep at a different task so a hanging registration cannot starve it"
+}
+
+# A task whose pr= was written but whose poll was never published (the
+# registration was cut between the two) is retried, so its merge is still watched.
+test_scan_publishes_a_missing_poll_for_a_recorded_pr() {
+  local dir state
+  dir=$(make_case scan-missing-poll)
+  state="$dir/home/state"
+  write_poll_meta "$state" task-a https://github.com/o/r/pull/7 'kind=ship' 'mode=no-mistakes'
+  printf '%s\n' 'done [at=2]: PR https://github.com/o/r/pull/7 checks green' > "$state/task-a.status"
+
+  run_check_entry "$dir" scan > /dev/null 2> "$dir/stderr" || fail "the scan failed: $(cat "$dir/stderr")"
+  fm_pr_poll_artifacts_valid "$state" task-a "$POLL" || fail "a recorded PR without a poll was not armed"
+  pass "the scan publishes the poll of a task whose pr= has none"
+}
+
+# A merged PR's poll is retired on purpose; the scan must not re-arm it.
+test_scan_does_not_rearm_a_retired_merged_poll() {
+  local dir state
+  dir=$(make_case scan-retired-merge)
+  state="$dir/home/state"
+  write_poll_meta "$state" task-a https://github.com/o/r/pull/7 'kind=ship' 'mode=no-mistakes'
+  printf '%s\n' 'done [at=2]: PR https://github.com/o/r/pull/7 checks green' > "$state/task-a.status"
+  fm_pr_poll_merge_mark_notified "$state" task-a github github.com o/r 7 || fail "could not write the merge marker"
+
+  run_check_entry "$dir" scan > /dev/null 2> "$dir/stderr" || fail "the scan failed: $(cat "$dir/stderr")"
+  if fm_pr_poll_artifacts_valid "$state" task-a "$POLL"; then
+    fail "the scan re-armed the poll of a merged task"
+  fi
+  pass "the scan leaves a merged task's retired poll alone"
+}
+
+# A merge marker for an older PR must not hide a newer recorded PR with no poll.
+test_scan_arms_a_replacement_pr_despite_an_old_merge_marker() {
+  local dir state
+  dir=$(make_case scan-old-marker-new-pr)
+  state="$dir/home/state"
+  write_poll_meta "$state" task-a https://github.com/o/r/pull/9 'kind=ship' 'mode=no-mistakes'
+  printf '%s\n' 'done [at=2]: PR https://github.com/o/r/pull/9 open, not draft' > "$state/task-a.status"
+  fm_pr_poll_merge_mark_notified "$state" task-a github github.com o/r 7 || fail "could not write the merge marker"
+
+  run_check_entry "$dir" scan > /dev/null 2> "$dir/stderr" || fail "the scan failed: $(cat "$dir/stderr")"
+  fm_pr_poll_artifacts_valid "$state" task-a "$POLL" \
+    || fail "an older PR's merge marker hid the replacement PR's missing poll"
+  pass "the scan arms a replacement PR despite an older PR's merge marker"
+}
+
+# A PR the supervisor records while a scan registration is in flight is kept.
+test_scan_does_not_overwrite_a_pr_recorded_meanwhile() {
+  local dir state
+  dir=$(make_case scan-keeps-concurrent-pr)
+  state="$dir/home/state"
+  write_task_meta "$dir" task-a
+  printf '%s\n' 'done [at=2]: PR https://github.com/o/r/pull/20 checks green' > "$state/task-a.status"
+
+  FM_CHECK_TIMEOUT=60 FM_TEST_GH_SLOW_URL=pull/20 FM_TEST_GH_SLOW_SECONDS=3 \
+    run_check_entry "$dir" scan > /dev/null 2> "$dir/stderr" &
+  sleep 1
+  write_poll_meta "$state" task-a https://github.com/o/r/pull/21 'kind=ship' 'mode=no-mistakes'
+  wait $! || fail "the scan failed: $(cat "$dir/stderr")"
+  grep -qxF 'pr=https://github.com/o/r/pull/21' "$state/task-a.meta" \
+    || fail "the scan overwrote a PR recorded while it ran"
+  pass "the scan keeps a PR the supervisor recorded during its registration"
+}
+
+# With config/pr-register-scan present, the watcher's check sweep runs the
+# scan, so a reported PR gets its merge poll without the supervisor, and a
+# refusal becomes a durable wake. With the flag absent, the sweep is unchanged.
+test_watcher_sweep_records_a_reported_pr() {
+  local dir state rc
+  dir=$(make_case watcher-scan-off)
+  state="$dir/home/state"
+  write_task_meta "$dir"
+  printf '%s\n' 'done [at=2]: PR https://github.com/o/r/pull/7 open, not draft' > "$state/task-a.status"
+  add_stop_custom_check "$dir"
+  set +e
+  run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/watch.out" 2> "$dir/watch.err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "the flag-off watcher failed: $(cat "$dir/watch.err")"
+  if grep -q '^pr=' "$state/task-a.meta" || [ -e "$state/task-a.check.sh" ]; then
+    fail "the watcher sweep registered a PR with config/pr-register-scan absent"
+  fi
+  if grep -F 'pr-register' "$state/.wake-queue" >/dev/null 2>&1; then
+    fail "the watcher sweep queued a pr-register wake with config/pr-register-scan absent"
+  fi
+
+  dir=$(make_case watcher-scan-records)
+  state="$dir/home/state"
+  : > "$dir/home/config/pr-register-scan"
+  write_task_meta "$dir"
+  printf '%s\n' 'done [at=2]: PR https://github.com/o/r/pull/7 open, not draft' > "$state/task-a.status"
+  add_stop_custom_check "$dir"
+  set +e
+  run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/watch.out" 2> "$dir/watch.err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "the watcher failed: $(cat "$dir/watch.err")"
+  grep -qxF 'pr=https://github.com/o/r/pull/7' "$state/task-a.meta" \
+    || fail "the watcher sweep did not record the reported PR"
+  fm_pr_poll_artifacts_valid "$state" task-a "$POLL" || fail "the watcher sweep did not arm the reported PR's merge poll"
+
+  dir=$(make_case watcher-scan-refusal)
+  state="$dir/home/state"
+  : > "$dir/home/config/pr-register-scan"
+  write_task_meta "$dir"
+  printf '%s\n' 'done [at=2]: PR https://github.com/o/r/pull/9 checks green' > "$state/task-a.status"
+  add_stop_custom_check "$dir"
+  set +e
+  FM_TEST_GH_DRAFT=true run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/watch.out" 2> "$dir/watch.err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "the refusal watcher failed: $(cat "$dir/watch.err")"
+  grep -F 'check: pr-register: task-a reported https://github.com/o/r/pull/9' "$state/.wake-queue" >/dev/null \
+    || fail "the refusal was not queued as a durable wake: $(cat "$state/.wake-queue" 2>/dev/null)"
+  pass "the watcher sweep scans only with config/pr-register-scan present, then records a reported PR and queues a refusal"
 }
 
 test_valid_recording_and_merge_derivation() {
@@ -1626,6 +1851,35 @@ SH
   pass "returned custom check descendants are drained on installed and fallback timeout paths"
 }
 
+test_timed_out_custom_check_surfaces_with_partial_output() {
+  local backend dir state rc force_fallback
+  for backend in installed-timeout fallback-timeout; do
+    dir=$(make_case "timed-out-custom-check-$backend")
+    state="$dir/home/state"
+    cat > "$state/custom.check.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'finding before the cut\n'
+sleep 30
+printf 'finding after the cut\n'
+SH
+    chmod 0700 "$state/custom.check.sh"
+    FM_HOME="$dir/home" "$REGISTER" custom >/dev/null || fail "could not register $backend timed-out check"
+    force_fallback=0
+    [ "$backend" = installed-timeout ] || force_fallback=1
+
+    rc=0
+    FM_TEST_CHECK_TIMEOUT=1 FM_CHECK_FORCE_FALLBACK="$force_fallback" \
+      run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/watch.out" 2> "$dir/watch.err" || rc=$?
+    [ "$rc" -eq 0 ] || fail "$backend watcher did not stop on the timed-out check (rc=$rc): $(cat "$dir/watch.err")"
+    grep -qxF "check: $state/custom.check.sh: finding before the cut" "$dir/watch.out" \
+      || fail "$backend watcher dropped output printed before the timeout: $(cat "$dir/watch.out")"
+    grep -qxF 'timed out after 1s' "$dir/watch.out" \
+      || fail "$backend watcher kept a timed-out check silent: $(cat "$dir/watch.out")"
+    ! grep -qF 'finding after the cut' "$dir/watch.out" || fail "$backend watcher let the check run past its timeout"
+  done
+  pass "a timed-out custom check surfaces its timeout and earlier output on installed and fallback timeout paths"
+}
+
 test_teardown_removes_poll_artifacts() {
   local dir fakebin artifact counterpart rc
   dir=$(make_case teardown-cleanup)
@@ -1641,6 +1895,7 @@ test_teardown_removes_poll_artifacts() {
   printf 'data\n' > "$dir/home/state/task-a.pr-poll"
   printf 'registration\n' > "$dir/home/state/task-a.pr-poll-registration"
   printf 'trust\n' > "$dir/home/state/task-a.check-trust"
+  printf 'https://github.com/o/r/pull/9\n' > "$dir/home/state/task-a.pr-register-refused"
   cat > "$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
 exit 0
@@ -1655,6 +1910,7 @@ SH
   [ ! -e "$dir/home/state/task-a.pr-poll" ] || fail "teardown left the sidecar"
   [ ! -e "$dir/home/state/task-a.pr-poll-registration" ] || fail "teardown left the PR poll registration"
   [ ! -e "$dir/home/state/task-a.check-trust" ] || fail "teardown left the custom check registration"
+  [ ! -e "$dir/home/state/task-a.pr-register-refused" ] || fail "teardown left the PR registration refusal marker"
 
   dir=$(make_case teardown-retirement-receipt)
   fakebin="$dir/fakebin"
@@ -3471,6 +3727,93 @@ shift_registration_device() {  # <state> <id> [both|data|check]
   esac
 }
 
+test_registered_poll_survives_template_update_and_relaunch() {
+  local scenario dir state historical_poll registration_hash rc
+  for scenario in template-update relaunch combined; do
+    dir=$(make_case "registered-poll-$scenario")
+    state="$dir/home/state"
+    historical_poll="$dir/historical-fm-pr-poll.sh"
+    if [ "$scenario" = relaunch ]; then
+      cp "$POLL" "$historical_poll"
+    else
+      # An older generation may contain different code. It must never execute:
+      # the watcher dispatches the current repository poll with validated data.
+      # The stub's whole body is reachable, so a mistaken execution of the
+      # registered copy writes the marker, reports a non-merged result, and
+      # reaches no forge instead of passing on the current poll's behaviour.
+      cat > "$historical_poll" <<SH
+#!/usr/bin/env bash
+printf 'historical poll executed\\n' > '$dir/sidecar-executed'
+printf 'historical-generation\\n'
+SH
+    fi
+    write_poll_meta "$state" task-a https://github.com/o/r/pull/1
+    seed_canonical_poll "$dir" task-a https://github.com/o/r/pull/1 "$historical_poll"
+    if [ "$scenario" != template-update ]; then
+      printf 'control_relaunch_tx=114614.20261024T230110Z.26328\n' >> "$state/task-a.meta"
+    fi
+    if [ "$scenario" != relaunch ]; then
+      ! cmp -s "$POLL" "$state/task-a.check.sh" || fail "$scenario did not change the template"
+    fi
+    fm_pr_poll_snapshot_capture "$state" task-a "$POLL" \
+      || fail "$scenario rejected an intact registered generation"
+    fm_pr_poll_snapshot_matches "$state" task-a "$POLL" \
+      || fail "$scenario lost its registered snapshot"
+    # A cycle that sees no merge must leave the authenticated generation armed
+    # instead of revoking it for diverging from the updated template.
+    add_stop_custom_check "$dir"
+    rc=0
+    FM_TEST_GH_LOG="$dir/gh.log" FM_TEST_GH_STATE=OPEN \
+      run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/watch-open.out" 2> "$dir/watch-open.err" || rc=$?
+    [ "$rc" -eq 0 ] || fail "$scenario open watcher failed: $(cat "$dir/watch-open.err")"
+    ! grep -F 'rejected unauthenticated state checks' "$dir/watch-open.out" >/dev/null \
+      || fail "$scenario revoked an intact generation before its merge: $(cat "$dir/watch-open.out")"
+    case "$(cat "$dir/watch-open.out")" in
+      check:*z-stop.check.sh:*stop-cycle) ;;
+      *) fail "$scenario open cycle did not reach the control check: $(cat "$dir/watch-open.out")" ;;
+    esac
+    fm_pr_poll_snapshot_matches "$state" task-a "$POLL" \
+      || fail "$scenario disarmed an intact generation before its merge"
+    ack_watcher_cycle "$state" || fail "$scenario could not acknowledge the open cycle"
+    rm -f "$state/z-stop.check.sh" "$state/z-stop.check-trust" "$state/.last-check" "$dir/gh.log"
+    rc=0
+    FM_TEST_GH_LOG="$dir/gh.log" FM_TEST_GH_STATE=MERGED \
+      run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/watch.out" 2> "$dir/watch.err" || rc=$?
+    [ "$rc" -eq 0 ] || fail "$scenario watcher failed: $(cat "$dir/watch.err")"
+    grep -F 'task-a.check.sh: merged' "$dir/watch.out" >/dev/null \
+      || fail "$scenario did not detect the merge: $(cat "$dir/watch.out")"
+    [ ! -e "$dir/sidecar-executed" ] || fail "$scenario executed state-file code"
+    grep -F 'pr view https://github.com/o/r/pull/1 --json state' "$dir/gh.log" >/dev/null \
+      || fail "$scenario did not run the repository poll"
+    awk -F'\t' -v prefix="check: merge landed: task-a https://github.com/o/r/pull/1" \
+      'index($5, prefix) == 1 { found=1 } END { exit !found }' "$state/.wake-queue" \
+      || fail "$scenario lost the merge notification: $(merged_ledger_row "$state" task-a)"
+    assert_poll_absent "$state" task-a
+    # Re-arm the same old generation to test tampering on its original inode.
+    seed_canonical_poll "$dir" task-a https://github.com/o/r/pull/1 "$historical_poll"
+    registration_hash=$(fm_pr_sha256 "$state/task-a.pr-poll-registration")
+    printf '# forged after registration\n' >> "$state/task-a.check.sh"
+    ! fm_pr_poll_snapshot_capture "$state" task-a "$POLL" \
+      || fail "$scenario accepted a forged check"
+    [ "$(fm_pr_sha256 "$state/task-a.pr-poll-registration")" = "$registration_hash" ] \
+      || fail "$scenario rewrote trust for a forged check"
+  done
+  for scenario in unknown-field duplicate-pr; do
+    dir=$(make_case "registered-poll-$scenario")
+    state="$dir/home/state"
+    write_poll_meta "$state" task-a https://github.com/o/r/pull/1
+    seed_canonical_poll "$dir" task-a https://github.com/o/r/pull/1
+    printf 'control_relaunch_tx=114614.20261024T230110Z.26328\n' >> "$state/task-a.meta"
+    case "$scenario" in
+      unknown-field) printf 'injected=value\n' >> "$state/task-a.meta" ;;
+      duplicate-pr) printf 'pr=https://github.com/o/r/pull/2\n' >> "$state/task-a.meta" ;;
+    esac
+    ! fm_pr_poll_snapshot_capture "$state" task-a "$POLL" \
+      || fail "$scenario accepted forged metadata after the relaunch marker"
+  done
+  pass "registered generations survive template updates and relaunch metadata without executing sidecar code or trusting forged bytes"
+}
+
 test_device_renumbered_poll_stays_armed() {
   local dir state out rc original
   dir=$(make_case device-renumber-merged)
@@ -3794,6 +4137,15 @@ test_draft_pull_request_is_not_armed
 test_secondmate_record_refuses_a_pr_watch
 test_unpushed_named_head_refuses_registration
 test_direct_pr_unpushed_commit_refuses_registration
+test_scan_records_a_pr_reported_in_a_done_line
+test_scan_reports_a_refusal_once_and_retries
+test_scan_retries_refused_task_behind_a_hanging_registration
+test_scan_rotates_past_a_hanging_registration
+test_scan_publishes_a_missing_poll_for_a_recorded_pr
+test_scan_does_not_overwrite_a_pr_recorded_meanwhile
+test_scan_does_not_rearm_a_retired_merged_poll
+test_scan_arms_a_replacement_pr_despite_an_old_merge_marker
+test_watcher_sweep_records_a_reported_pr
 test_valid_recording_and_merge_derivation
 test_rejected_metacharacter_bytes_are_inert
 test_static_poll_contract
@@ -3801,6 +4153,7 @@ test_atomic_interruption_leaves_no_partial_artifact
 test_concurrent_watcher_sees_only_complete_publication
 test_poll_publication_refuses_unsafe_destinations
 test_live_artifact_single_link_and_privacy_validation
+test_registered_poll_survives_template_update_and_relaunch
 test_device_renumbered_poll_stays_armed
 test_device_rerecord_refuses_tampered_artifacts
 test_device_rerecord_serializes_direct_rearm
@@ -3809,4 +4162,5 @@ test_postrename_poll_validation_revokes_and_retries
 test_bootstrap_leaves_unauthenticated_checks
 test_custom_snapshot_cleanup_on_signal
 test_returned_custom_check_descendants_are_drained
+test_timed_out_custom_check_surfaces_with_partial_output
 test_teardown_removes_poll_artifacts

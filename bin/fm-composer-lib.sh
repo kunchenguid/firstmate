@@ -575,6 +575,7 @@ fm_busy_lines_match() {  # [harness]
       claude) regex=$FM_DELIVERY_CLAUDE_BUSY_REGEX_DEFAULT ;;
       devin) regex=$FM_DELIVERY_DEVIN_BUSY_REGEX_DEFAULT ;;
       cortex) regex=$FM_DELIVERY_CORTEX_BUSY_REGEX_DEFAULT ;;
+      hermes) regex='^[[:space:]]*─.*·[[:space:]]*[0-9]+([.][0-9]+)?s[[:space:]]*│|^[[:space:]]*([a-z0-9][a-z0-9_-]*[[:space:]]+)?❯[[:space:]]+Ctrl[+]C to interrupt…' ;;
       commandcode) regex=$FM_DELIVERY_COMMANDCODE_BUSY_REGEX_DEFAULT ;;
       codex) regex=$FM_DELIVERY_CODEX_BUSY_REGEX_DEFAULT ;;
       opencode) regex=$FM_DELIVERY_OPENCODE_BUSY_REGEX_DEFAULT ;;
@@ -2239,6 +2240,32 @@ fm_composer_dialog_sink_release() {
   fi
 }
 
+# Hermes TUI 0.21.7: profile-prefixed ❯ prompt immediately below the status
+# rule; placeholder text is dim, while typed drafts are bright. Identity is
+# required, and dialogs, wrapped drafts, non-ready status and unstyled reads
+# remain unproven. The hook record, never this row, owns semantic busy state.
+_fm_composer_hermes_state() {  # <screen> <styled>
+  local screen=$1 styled=$2 stripped
+  [ "$styled" = 1 ] || { printf 'unknown'; return; }
+  # The busy hint uses xterm orange 178, above the shared dim threshold.
+  # Strip only the captured native synthetic cursor chip plus that exact hint;
+  # the same words typed in the normal bright input color remain a draft.
+  local esc=$'\033' hint
+  hint="${esc}[38;5;231m${esc}[48;5;178mC${esc}[38;5;178m${esc}[49mtrl+C to interrupt…${esc}[39m"
+  screen=${screen//"$hint"/}
+  stripped=$(printf '%s\n' "$screen" | fm_composer_strip_ghost | fm_composer_strip_ansi)
+  printf '%s\n' "$stripped" | awk '
+    { rows[NR]=$0 }
+    END {
+      last=NR; while (last>0 && rows[last] ~ /^[[:space:]]*$/) last--
+      # Never interpret a palette or arbitrary output as the composer.
+      if (last<2 || rows[last] !~ /^[[:space:]]*([a-z0-9][a-z0-9_-]*[[:space:]]+)?❯/) { print "unknown"; exit }
+      if (rows[last-1] !~ /^[[:space:]]*─[[:space:]]+.*│.*│/) { print "unknown"; exit }
+      text=rows[last]; sub(/^[[:space:]]*([a-z0-9][a-z0-9_-]*[[:space:]]+)?❯[[:space:]]*/, "", text)
+      if (text ~ /^[[:space:]]*$/) print "empty"; else print "pending"
+    }'
+}
+
 fm_composer_classify_screen() {  # <caps> <screen> [cursor_row] [identity]
   local caps=$1 screen=$2 cy=${3:-} identity=${4:-}
   local styled=0 cursor=0 has_identity=0 cortex_proven=0 cortex_ask=0 kv plain
@@ -2269,6 +2296,10 @@ EOF
   [ "$cursor" = 1 ] || cy=''
   if [ -n "$cy" ]; then
     case "$cy" in *[!0-9]*) printf 'unknown'; return 0 ;; esac
+  fi
+  if [ "$has_identity" = 1 ] && [ "${identity%%$'\t'*}" = hermes ]; then
+    _fm_composer_hermes_state "$screen" "$styled"
+    return
   fi
   plain=$(printf '%s\n' "$screen" | fm_composer_strip_ansi)
   _fm_composer_scan_screen "$plain" "$cy" '' "$cortex_proven"
