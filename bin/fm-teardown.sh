@@ -46,8 +46,9 @@
 # work whose branch is pushed but has no PR recorded or found, or whose recorded PR
 # is confirmed closed without merging, is refused, while a pushed branch with an
 # open PR (including an upstream-contribution PR from a fork) may be cleaned up.
-# Unpushed work has landed only when its PR is merged and the forge reports a PR
-# head that contains the current local work, or its content is already present in the
+# A branch pushed only to the local no-mistakes mirror does not count as pushed
+# to a forge. Unpushed work has landed only when its PR is merged and the forge reports a PR head
+# that contains the current local work, or its content is already present in the
 # up-to-date default branch. This recognizes the common squash-merge-then-delete-
 # branch flow, where the branch's own commits live nowhere on a remote yet the
 # change is fully in main. Local-only delivery retains its existing boundary where
