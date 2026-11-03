@@ -388,17 +388,15 @@ Two bounds of the refusal are known and deliberately not closed here.
 `--force` overrides it at exactly one site, the generic close for backends other than Herdr, Orca, and T3 Code.
 That is the only close where continuing is actually reachable: the worktree is already returned by then and nothing after it needs the backend that could not close, so `--force` - the operator's existing authority to discard a task's records - can mean something there.
 A forced run still prints the full diagnosis naming the backend, the target, and that the close failed, so what may survive is never silent.
-It states what `--force` authorizes rather than what will have happened, because a later refusal in the same run - the Herdr confirmed-gone gate, or the inactive-reconcile delivery gate - can still stop it with every record retained.
+It states what `--force` authorizes rather than what will have happened, because the later inactive-reconcile delivery gate can still stop it with every record retained.
 T3 Code uses the [native cleanup path](../t3code-backend.md#current-lifecycle-and-safety) instead.
 
 The Orca close refuses under `--force` too.
 The step immediately after it removes the Orca worktree through the same CLI whose absence is the only thing that arm ever reports, so a forced continue would die there having removed nothing while claiming the records were already gone.
 The two child close sites inside forced secondmate cleanup also keep refusing: that path is only ever reached under `--force`, so honoring force there would delete the refusal rather than override it, and would contradict the adjacent Herdr child gate that stops forced cleanup for the same hazard.
 
-The retained record is this run's, not a durable guarantee.
-A task carrying a backlog transition writes its pending-close marker before the endpoint close, and the marker survives the refusal; the next `bin/fm-bootstrap.sh` replays it and removes the retained record.
-The pre-existing Herdr confirmed-gone gate has the identical property.
-The refusal message says so rather than promising a retention teardown does not own, so an operator reconciles the surviving endpoint instead of trusting the record to still be there later.
+[`bin/fm-teardown.sh`](../../bin/fm-teardown.sh)'s header and `endpoint_close_refusal` comment own cleanup ordering and the limits of record retention after a close refusal.
+Reconcile the surviving endpoint rather than assuming the retained record guarantees a later retry.
 
 Both directions are proven non-vacuous.
 Restoring the swallowed status makes the refusal case report `teardown <id> complete`, delete the endpoint record, and leave the window live.

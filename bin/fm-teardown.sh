@@ -266,8 +266,8 @@
 # removal so the operator can see what happened.
 #
 # Pre-teardown cleanup sequence (starts after the initial landed/discard-work
-# safety checks pass, and BEFORE any worktree return, branch
-# delete, or backend kill below - a still-active run or a leaked process may
+# safety checks pass, and BEFORE any worktree return or branch
+# deletion below - a still-active run or a leaked process may
 # own live work in that worktree):
 #   Fix 1 - conclude the task's own no-mistakes run. A ship task's worktree can
 #     be torn down while its no-mistakes pipeline run is still PARKED at a gate
@@ -3757,7 +3757,7 @@ fi
 
 # The initial landed/discard-work checks above have passed (or --force skipped
 # them). Fix 1 and Fix 2 (see script header) run here, unconditionally on
-# --force, and before ANY destructive step below - a still-parked run or a
+# --force, and before branch deletion or worktree return - a still-parked run or a
 # leaked process can own live work in this exact worktree. Not for
 # kind=secondmate: a secondmate home's own runtime lifecycle is owned by the
 # dedicated process-event and firstmate-home removal machinery further below,
