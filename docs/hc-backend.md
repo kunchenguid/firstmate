@@ -108,6 +108,7 @@ The terminal's `firstmate.task` and `firstmate.home` labels are the launching ho
 Its presentation labels are the mate's own: `herdr.space` is `fm-<mate hometag>`, the tag the mate home derives for itself (`bin/fm-backend-hometag-lib.sh` resolves `2ndmate-<id>` plus a short hash of that home), and `herdr.tab` is the launching home's scoped label for the mate.
 A mate's own crew label their terminals with that same space, so Herdr.app shows the mate as its own agent with its crew as tabs beside it, apart from the primary's space.
 `FM_HC_SPACE` is not consulted for a `--secondmate` launch, because it would move the mate out of the space its crew uses.
+Known limitation: when the mate's home is a linked git worktree, the app has been seen to show the mate's terminal in a space named after that folder and nested under the launching home's space rather than as its own top-level entry; the labels above are still applied, and this page records the behavior rather than working around it.
 The mate's own spawns select hc through the inherited `config/backend` when the primary sets one, otherwise through the app-terminal signal its own labeled terminal carries.
 
 Liveness and recovery follow the shared second-mate contract ([`secondmate-provisioning`](../.agents/skills/secondmate-provisioning/SKILL.md) "Recovery"; [`bin/fm-secondmate-liveness-lib.sh`](../bin/fm-secondmate-liveness-lib.sh) owns the mechanics).

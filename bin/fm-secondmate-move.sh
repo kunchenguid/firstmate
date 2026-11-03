@@ -97,6 +97,16 @@ META="$STATE/$ID.meta"
 OLD_BACKEND=$(fm_backend_of_meta "$META")
 [ "$OLD_BACKEND" != "$TARGET" ] || die "second mate $ID is already recorded on backend=$TARGET; to restart it in place use bin/fm-control.sh $ID relaunch"
 
+# The harness the respawn launches comes from the same durable pin recovery
+# resolves (bin/fm-harness.sh secondmate), so it is checked against the target
+# here, where a refusal costs nothing: the launch owner's own check would only
+# refuse it after the agent had been stopped. That owner's rule
+# (fm_backend_validate_harness) is reused, not restated.
+HARNESS=$("$SCRIPT_DIR/fm-harness.sh" secondmate "$ID") \
+  || die "the configured second-mate harness for $ID cannot be resolved; nothing was stopped or moved"
+fm_backend_validate_harness "$TARGET" "$HARNESS" \
+  || die "backend=$TARGET cannot launch second mate $ID's configured harness '$HARNESS'; nothing was stopped or moved"
+
 # Every target check runs before the agent is stopped, so an impossible move
 # costs nothing.
 fm_backend_validate_spawn "$TARGET" || exit 1
@@ -122,9 +132,29 @@ first_line() {  # <text>
   printf '%s\n' "$line" | sed -n '/./{s/^error: //;s/[[:space:]]\{1,\}/ /g;p;q;}'
 }
 
+# A relaunch (bin/fm-control.sh) takes the task's control lock rather than the
+# liveness lock, so the move holds that lock too, across the probe, the stop,
+# the close, and the launch: no relaunch can start an agent in an endpoint this
+# move read as dead. The stop below runs as this process's child, and fm-control
+# accepts the lock from its parent the way fm-spawn --relaunch does; a fresh
+# --secondmate spawn never takes it.
+fm_sm_live_require_locks || die "the lock helpers could not be loaded; nothing was stopped or moved"
+CONTROL_LOCK="$STATE/.control-$ID.lock"
+fm_lock_try_acquire "$CONTROL_LOCK" \
+  || die "another lifecycle action is already running for second mate $ID; retry once it finishes"
+CONTROL_LOCK_HELD=1
+LIVENESS_LOCK_HELD=0
+SNAPSHOT=
+# shellcheck disable=SC2329 # Registered by the EXIT trap below.
+move_cleanup() {
+  [ -z "$SNAPSHOT" ] || rm -f "$SNAPSHOT"
+  [ "$LIVENESS_LOCK_HELD" != 1 ] || fm_secondmate_liveness_unlock "$ID"
+  [ "$CONTROL_LOCK_HELD" != 1 ] || fm_lock_release "$CONTROL_LOCK" 2>/dev/null || true
+}
+trap move_cleanup EXIT
 fm_secondmate_liveness_lock "$ID" \
   || die "another liveness check or recovery is in progress for second mate $ID; retry once it finishes"
-trap 'fm_secondmate_liveness_unlock "$ID"' EXIT
+LIVENESS_LOCK_HELD=1
 
 STOPPED=0
 fm_secondmate_liveness_probe "$META" "$ID" poll
@@ -133,9 +163,16 @@ case "$FM_SM_LIVE_STATUS" in
     # No endpoint recorded: nothing to stop or close, only the launch below.
     ;;
   alive)
-    if ! EXIT_OUT=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" "$SCRIPT_DIR/fm-control.sh" "$ID" exit 2>&1); then
+    # A direct child, not a command substitution: fm-control recognizes the
+    # handed-down control lock by its parent pid, which a substitution's
+    # subshell would hide.
+    EXIT_OUT_FILE="$STATE/.$ID.move-exit.$$"
+    if ! FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" "$SCRIPT_DIR/fm-control.sh" "$ID" exit >"$EXIT_OUT_FILE" 2>&1; then
+      EXIT_OUT=$(cat "$EXIT_OUT_FILE" 2>/dev/null || true)
+      rm -f "$EXIT_OUT_FILE"
       die "second mate $ID's agent on $OLD_BACKEND could not be proven stopped, so nothing was moved and its record is unchanged: $(first_line "$EXIT_OUT")"
     fi
+    rm -f "$EXIT_OUT_FILE"
     STOPPED=1
     fm_secondmate_liveness_probe "$META" "$ID" poll
     [ "$FM_SM_LIVE_STATUS" = relaunchable ] \
@@ -152,7 +189,6 @@ esac
 # existing one; the snapshot puts it back so liveness recovery still finds it.
 SNAPSHOT="$STATE/.$ID.meta.move.$$"
 cp -p "$META" "$SNAPSHOT" || die "could not snapshot second mate $ID's record before the launch; nothing was moved and its record is unchanged"
-trap 'rm -f "$SNAPSHOT"; fm_secondmate_liveness_unlock "$ID"' EXIT
 if fm_secondmate_liveness_relaunch "$META" "$ID" "" "$TARGET"; then
   printf 'moved %s from=%s to=%s\n' "$ID" "$OLD_BACKEND" "$TARGET"
   printf '%s\n' "$FM_SM_LIVE_OUT" | grep '^spawned ' || true
@@ -162,14 +198,16 @@ fi
 # (fm-spawn, fm-control) publishes under, and only fills the gap the failed
 # fresh spawn's rollback left: a record present by then was published by
 # another writer, so it is left exactly as it is.
-META_LOCK=$(fm_meta_lock_path "$META") && fm_lock_acquire_wait "$META_LOCK" \
-  || die "second mate $ID could not be launched on $TARGET and its record lock could not be taken to put the previous record back; restore it from $SNAPSHOT: $(first_line "$FM_SM_LIVE_OUT")"
+if ! META_LOCK=$(fm_meta_lock_path "$META") || ! fm_lock_acquire_wait "$META_LOCK"; then
+  die "second mate $ID could not be launched on $TARGET and its record lock could not be taken to put the previous record back; restore it from $SNAPSHOT: $(first_line "$FM_SM_LIVE_OUT")"
+fi
 if [ ! -e "$META" ] && [ ! -L "$META" ]; then
-  cp -p "$SNAPSHOT" "$META.move.$$" && mv -f "$META.move.$$" "$META" || {
+  if ! cp -p "$SNAPSHOT" "$META.move.$$" || ! mv -f "$META.move.$$" "$META"; then
     fm_lock_release "$META_LOCK" || true
-    trap 'fm_secondmate_liveness_unlock "$ID"' EXIT
-    die "second mate $ID could not be launched on $TARGET and its previous record could not be put back; restore it from $SNAPSHOT: $(first_line "$FM_SM_LIVE_OUT")"
-  }
+    KEEP=$SNAPSHOT
+    SNAPSHOT=
+    die "second mate $ID could not be launched on $TARGET and its previous record could not be put back; restore it from $KEEP: $(first_line "$FM_SM_LIVE_OUT")"
+  fi
 elif ! cmp -s "$SNAPSHOT" "$META"; then
   fm_lock_release "$META_LOCK" || true
   die "second mate $ID could not be launched on $TARGET after its $OLD_BACKEND agent was stopped, and a different record for it is now in place (published by another writer since, or left by the launch's own incomplete cleanup); that record was left as it is and the previous one was not put back: $(first_line "$FM_SM_LIVE_OUT")"
