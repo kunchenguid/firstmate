@@ -1914,6 +1914,7 @@ TYPESAFE_API_KEY=$KEY run code out err "$BRIEF" --project pager
 expect_code 0 "$code" "two profiles that differ only by account are not duplicates"
 assert_contains "$out" "reason: genuine spendPriority tie" "accounts sharing one quota row tie and return to the account step, not a config error"
 for bad in '{"harness":"claude","model":"sonnet","account":"relative/path"}' '{"harness":"claude","model":"sonnet","account":""}' \
+  '{"harness":"claude","model":"sonnet","account":"ordinary\n"}' '{"harness":"claude","model":"sonnet","account":"token:/keys/second.token\n"}' \
   '{"harness":"cursor","model":"cursor-grok-4.6-medium","account":"ordinary"}'; do
   jq --argjson p "$bad" '.rules[3].use = [$p]' "$BASE_RULES" > "$RULES"
   TYPESAFE_API_KEY=$KEY run code out err "$BRIEF" --project pager

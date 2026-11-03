@@ -328,7 +328,7 @@ rules_err=$(jq -r --argjson verified_harnesses "$VERIFIED_HARNESSES" --arg provi
         else ($f | has("provider"))
         end);
   def account_ok($h; $a):
-    $h == "claude" and ($a | type) == "string" and ($a | test("^(ordinary|(token:)?/[^[:cntrl:]]*)$"));
+    $h == "claude" and ($a | type) == "string" and ($a | test("\\A(ordinary|(token:)?/[^[:cntrl:]]*)\\z"));
   def profile_bad($p):
     ($p | type) != "object"
     or (($p.harness | type) != "string") or (($p.harness | length) == 0)
