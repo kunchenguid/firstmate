@@ -490,7 +490,7 @@ fm_control_endpoint_state() {
     server=$(fm_backend_t3code_server_for_meta "${3:-}") || { printf unreadable; return 0; }
   fi
   fm_control_endpoint_server_matches "$1" "${3:-}" "$server" || { printf unreadable; return 0; }
-  state=$(fm_backend_agent_state "$1" "$2") || state=unreadable
+  state=$(FM_T3CODE_EXPECTED_SERVER=$server fm_backend_agent_state "$1" "$2") || state=unreadable
   fm_control_endpoint_server_matches "$1" "${3:-}" "$server" || { printf unreadable; return 0; }
   printf '%s' "$state"
 }
@@ -561,7 +561,7 @@ fm_control_endpoint_absence_verdict() {  # <backend> <target> [meta] [server-ide
       # HTTP 404), never a reachability guess: an unreachable server reads
       # `unreadable` instead. Re-read the thread so the verdict is current.
       local t3_state
-      t3_state=$(fm_backend_t3code_agent_state "$target")
+      t3_state=$(FM_T3CODE_EXPECTED_SERVER=$recorded_server fm_backend_t3code_agent_state "$target")
       fm_backend_t3code_server_matches "$recorded_server" || { printf 'unproven\tT3 creation server changed while proving absence'; return 0; }
       case "$t3_state" in
         dead) printf 'dead\t' ;;

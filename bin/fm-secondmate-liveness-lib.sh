@@ -677,7 +677,7 @@ fm_secondmate_liveness_relaunch() {  # <meta> <id> [timeout-secs]
     target=$FM_SM_LIVE_TARGET
     [ -n "$target" ] || target=$(fm_backend_target_of_meta "$meta")
     if fm_control_endpoint_server_matches t3code "$meta" "$FM_SM_LIVE_SERVER" &&
-      FM_SM_LIVE_OUT=$(fm_backend_t3code_resume_failed "$target" 2>&1) &&
+      FM_SM_LIVE_OUT=$(FM_T3CODE_EXPECTED_SERVER=$FM_SM_LIVE_SERVER fm_backend_t3code_resume_failed "$target" 2>&1) &&
       fm_control_endpoint_server_matches t3code "$meta" "$FM_SM_LIVE_SERVER"; then
       fm_secondmate_liveness_ledger_add "$id" relaunched || true
     else

@@ -453,6 +453,8 @@ FM_COMPOSER_HARNESS=$HARNESS
 
 fm_backend_validate "$BACKEND" || exit 1
 if [ "$BACKEND" = t3code ]; then
+  fm_backend_source t3code || exit 1
+  FM_T3CODE_TASK_SERVER=$(fm_backend_t3code_server_for_meta "$META") || die "T3 creation server cannot be verified"
   fm_backend_runtime_check t3code || exit 1
 fi
 

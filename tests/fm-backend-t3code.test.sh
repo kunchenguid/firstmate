@@ -770,7 +770,58 @@ test_reported_unknown_stall_is_not_escalated_again_when_idle() {
   pass "away daemon on T3: a stall reported while unknown is not reported again once T3 reads idle"
 }
 
+test_recorded_t3_callers_refuse_server_switch() (
+  local id=switched thread=mcp:8f9a0b1c-3d4e-4f5a-8b6c-56789abcdef0
+  local first_url=$T3_FAKE_URL first_case=$T3_FAKE_CASE_FILE
+  local first_world first_log original replacement other_log out rc server
+  make_t3_control_task recorded-server-switch "$id" "$thread" failed
+  server=$(t3_run fm_backend_t3code_server_identity)
+  fm_write_meta "$CTRL_STATE/$id.meta" "window=fm-$id" "endpoint_task_id=$id" "kind=secondmate" "home=$CASE_DIR/sm-home" "worktree=$CASE_DIR/sm-home" "project=$CTRL_PROJ" "harness=claude" "backend=t3code" "t3_server=$server" "t3_thread_id=$thread"
+  original="$CASE_DIR/original-token" replacement="$CASE_DIR/replacement-token"
+  cp "$CONFIG/t3code-token" "$original"
+  first_world=$T3_FAKE_WORLD first_log=$T3_FAKE_LOG
+  t3_fake_start "$CASE_DIR/other-server"
+  trap t3_fake_stop EXIT
+  t3_fake_case "$CASE_DIR/other-server/data"
+  t3_world "$(t3_thread_json "$thread" failed false)"
+  t3_fake_credential "$replacement"
+  other_log=$T3_FAKE_LOG
+  T3_FAKE_URL=$first_url T3_FAKE_CASE_FILE=$first_case
+  T3_FAKE_WORLD=$first_world T3_FAKE_LOG=$first_log
+  cp "$replacement" "$CONFIG/t3code-token"
+  out=$(FM_HOME="$CASE_DIR/home" FM_CONFIG_OVERRIDE="$CONFIG" FM_STATE_OVERRIDE="$CTRL_STATE" FM_DATA_OVERRIDE="$CTRL_DATA" \
+    "$ROOT/bin/fm-send.sh" "$id" /status 2>&1); rc=$?
+  [ "$rc" -ne 0 ] || fail "metadata-routed send accepted the replacement server"
+  [ ! -s "$other_log" ] || fail "metadata-routed send contacted the replacement server"
+  cp "$original" "$CONFIG/t3code-token"
+  out=$(FM_HOME="$CASE_DIR/home" FM_CONFIG_OVERRIDE="$CONFIG" FM_STATE_OVERRIDE="$CTRL_STATE" FM_DATA_OVERRIDE="$CTRL_DATA" \
+    STATE="$CTRL_STATE" bash -c '
+      . "$0/bin/fm-secondmate-liveness-lib.sh"
+      fm_secondmate_liveness_probe "$1" switched poll
+      [ "$FM_SM_LIVE_RESUME" = 1 ] || { printf "%s|%s|%s" "$FM_SM_LIVE_STATUS" "$FM_SM_LIVE_STATE" "$FM_SM_LIVE_REASON"; exit 9; }
+      eval "$(declare -f fm_backend_source | sed "1s/fm_backend_source/original_source/")"
+      fm_backend_source() {
+        original_source "$@" || return
+        [ "$1" = t3code ] || return 0
+        eval "$(declare -f fm_backend_t3code_resume_failed | sed "1s/fm_backend_t3code_resume_failed/original_resume/")"
+        fm_backend_t3code_resume_failed() {
+          cp "$replacement" "$(fm_backend_t3code_token_file)"
+          original_resume "$@"
+        }
+      }
+      replacement=$2
+      fm_secondmate_liveness_relaunch "$1" switched
+    ' "$ROOT" "$CTRL_STATE/$id.meta" "$replacement" 2>&1); rc=$?
+  [ "$rc" -ne 0 ] && [ "$rc" -ne 9 ] || fail "failed-run recovery did not refuse the switched credential: $out"
+  [ ! -s "$other_log" ] || fail "failed-run recovery contacted the replacement server"
+  [ -z "$(t3_dispatch_types)" ] || fail "a refused caller dispatched work"
+  pass "metadata send and failed-run recovery preserve the recorded T3 server"
+)
+
 test_server_bound_cleanup_paths() {
+  test_recorded_t3_callers_refuse_server_switch || return
+  test_failed_t3_secondmate_is_resumed_in_place
+  test_lost_send_reply_to_secondmate_names_armed_correlation
   test_cleanup_refuses_switched_server_credential
   test_kill_interrupts_then_archives_and_tolerates_gone
   test_startup_cleanup_lifecycle_variants
@@ -3042,6 +3093,7 @@ test_frozen_flush_keeps_the_next_generation_arrival
 test_daemon_defers_digest_while_supervisor_waits_on_request
 test_helper_through_symlinked_root_reaches_t3_and_kill_fails_closed
 test_draining_archived_t3_secondmate_is_not_relaunched
+test_recorded_t3_callers_refuse_server_switch
 test_cleanup_refuses_switched_server_credential
 test_kill_interrupts_then_archives_and_tolerates_gone
 test_dispatcher_routes_and_validates_t3code_meta

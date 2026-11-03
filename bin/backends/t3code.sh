@@ -61,9 +61,39 @@ fm_backend_t3code_tool_check() {
 # credential. It prints one JSON object (capture prints text) and exits as its
 # header says, including send's delivery-unconfirmed status 7.
 # Every failure prints one stderr line.
+fm_backend_t3code_admitted_server() {
+  local thread=$1 meta binding server=${FM_T3CODE_EXPECTED_SERVER:-${FM_T3CODE_TASK_SERVER:-}}
+  if [ -z "$server" ]; then
+    meta=$(fm_backend_meta_for_window "$thread" "${FM_STATE_OVERRIDE:-$FM_HOME/state}" 2>/dev/null) || meta=
+    if [ -n "$meta" ]; then
+      server=$(fm_backend_t3code_server_for_meta "$meta") || return 1
+    else
+      for binding in "${FM_STATE_OVERRIDE:-$FM_HOME/state}"/.t3-launch-*; do
+        [ -f "$binding" ] || continue
+        server=$(jq -er --arg thread "$thread" 'select(.thread == $thread) | .server' "$binding") && break
+      done
+    fi
+  fi
+  [ -n "$server" ] || { echo "error: T3 request lacks an admitted creation-server identity" >&2; return 1; }
+  printf '%s' "$server"
+}
+
 fm_backend_t3code_mcp() {
   command -v node >/dev/null 2>&1 || { echo "error: backend=t3code selected but 'node' is not installed" >&2; return 1; }
-  local expected=${FM_T3CODE_EXPECTED_SERVER:-${FM_T3CODE_TASK_SERVER:-}}
+  local expected=${FM_T3CODE_EXPECTED_SERVER:-${FM_T3CODE_TASK_SERVER:-}} arg previous= thread=
+  for arg in "$@"; do
+    [ "$previous" != --thread ] || thread=$arg
+    previous=$arg
+  done
+  if [ -z "$expected" ] && [ -n "$thread" ]; then
+    expected=$(fm_backend_t3code_admitted_server "$thread") || return 1
+  fi
+  if [ -z "$expected" ]; then
+    case "$1" in
+      status|project-ensure|resolve-selection|thread-for-root) expected=$(fm_backend_t3code_server_identity) || return 1 ;;
+      *) echo "error: T3 request lacks an admitted creation-server identity" >&2; return 1 ;;
+    esac
+  fi
   node "$FM_BACKEND_T3CODE_HELPER" "$@" --token-file "$(fm_backend_t3code_token_file)" --expected-server "$expected"
 }
 
@@ -208,7 +238,9 @@ fm_backend_t3code_turn_start() (  # <thread-id> <text> [model-selection-json]
   local thread=$1 text=$2 file='' dir record='' id='' out rc=0 held=0
   local state=${FM_STATE_OVERRIDE:-$FM_HOME/state} task seat server
   server=$(fm_backend_t3code_server_identity) || return 1
-  local FM_T3CODE_EXPECTED_SERVER=${FM_T3CODE_TASK_SERVER:-$server}
+  local admitted
+  admitted=$(fm_backend_t3code_admitted_server "$thread") || return 1
+  local FM_T3CODE_EXPECTED_SERVER=$admitted
   [ "$FM_T3CODE_EXPECTED_SERVER" = "$server" ] || { echo "error: T3 creation server does not match the current credential" >&2; return 1; }
   seat=$("$FM_BACKEND_LIB_DIR/fm-fleet-seats.sh" show-t3 "$thread" "$server") || return 1
   if [ -n "$seat" ]; then
@@ -304,6 +336,7 @@ fm_backend_t3code_thread_state() {  # <thread-id>
 fm_backend_t3code_adopt_server_for_thread() {  # <thread-id> -> server identity
   local thread=$1 out exists server
   server=$(fm_backend_t3code_server_identity) || return 1
+  local FM_T3CODE_EXPECTED_SERVER=$server
   out=$(fm_backend_t3code_thread_state "$thread") || return 1
   exists=$(printf '%s' "$out" | fm_backend_t3code_json_get exists) || return 1
   [ "$exists" = true ] || return 1

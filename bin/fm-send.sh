@@ -490,6 +490,13 @@ fm_send_resolve_target() { # <raw-target>
 RAW_TARGET=$1
 fm_send_resolve_target "$RAW_TARGET" || exit 1
 T=$RESOLVED_TARGET
+if [ "$TARGET_BACKEND" = t3code ]; then
+  fm_backend_source t3code || exit 1
+  FM_T3CODE_TASK_SERVER=$(fm_backend_t3code_server_for_meta "$TARGET_META") || {
+    echo "error: T3 creation server cannot be verified for $RAW_TARGET" >&2
+    exit 1
+  }
+fi
 fm_send_detect_kiro_from_live_target
 # The recorded harness, or kiro detected from a meta-less explicit target's
 # live pane, scopes the kiro-only composer rules for every composer read this
