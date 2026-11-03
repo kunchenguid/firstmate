@@ -97,6 +97,8 @@ test_nonterminal_stale_paused_absorbed_then_resurfaced() {
   fi
   [ ! -s "$out" ] || fail "fresh paused stale printed a wake reason during absorb"
   [ ! -s "$state/.wake-queue" ] || fail "fresh paused stale enqueued a wake during absorb"
+  back=0
+  while [ "$back" -lt 100 ] && [ ! -e "$state/.paused-$key" ]; do sleep 0.1; back=$((back + 1)); done
   [ "$(cat "$state/.stale-$key" 2>/dev/null || true)" = "$pane_hash" ] || fail "stale suppressor not advanced on paused absorb"
   [ -e "$state/.paused-$key" ] || fail "paused flag not recorded on absorb"
   [ ! -e "$state/.stale-since-$key" ] || fail "a paused absorb must not start the wedge timer"
