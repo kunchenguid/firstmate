@@ -49,7 +49,7 @@ It prints data only, never a choice: each account's applicable scopes and any un
 Apply the three gates below to each account's rows, taking a projected runway's time from the row's own `usableRunwaySeconds`, rank the eligible ones by their limiting scope's `spendPriority` exactly as for profiles, and pass the chosen entry as `--account <entry>`.
 A genuine tie or no rankable account is the same terminal case as below: decide in the open from the rows or ask the captain, never by file order.
 Account for every declared account in the rationale, including unmeasured ones.
-A typed-resolver `clear` profile for Claude still needs this step's `--account`.
+A typed-resolver `clear` profile for Claude still needs this step's `--account`, unless the profile names its own `account`, which fixes that candidate's account.
 The account is chosen once, at intake: a relaunch keeps the recorded one, and only an explicit `--account` relaunch moves a task ([`docs/configuration.md`](../../../docs/configuration.md#several-claude-accounts-configclaude-accounts) owns the contract).
 
 ## Read the default TOON
