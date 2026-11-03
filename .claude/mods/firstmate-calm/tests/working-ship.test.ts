@@ -2,7 +2,7 @@
 // working row while Calm is on, its cadence on the mocked clock, its size against the
 // viewport, and how it lets go of a site the surface no longer draws.
 import { describe, expect, test } from "claude-code/testing";
-import { calmCommand, decodeCells, isStock, rasterOf, spinner, themeChange, unmeasuredSpinner, world } from "./support.ts";
+import { boxOf, calmCommand, decodeCells, isStock, rasterOf, spinner, themeChange, unmeasuredSpinner, world } from "./support.ts";
 
 const SAIL = "◿│◣";
 const HULL = "╲▁▁▁╱";
@@ -45,8 +45,10 @@ describe("the working ship", () => {
 
   test("leaves one blank row above the boat so its sail stays off the highlighted prompt", async ($, on) => {
     world(on, { preference: "on\n" });
-    const tree = JSON.stringify(await $.ui.render(spinner()));
-    expect(tree).toContain('"paddingTop":1');
+    const drawing = await $.ui.render(spinner());
+    const wrapper = boxOf(drawing);
+    expect(wrapper?.props?.paddingTop).toBe(1);
+    expect(rasterOf(wrapper)).toBeDefined();
   });
 
   test("animates the water every tick and moves the hull one column every fourth, through blits of the mounted size", async ($, on) => {
