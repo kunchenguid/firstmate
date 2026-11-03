@@ -1547,7 +1547,7 @@ test_spawn_leases_slot_creates_thread_and_starts_launch_turn() {
   assert_contains "$(t3_request "$turn" 'r.arguments.message')" "Verify the T3 lifecycle behavior under test." "the first message must carry the brief body"
   assert_present "$wt/.claude/settings.local.json" "spawn must still arm the Claude busy hooks in the worktree before the launch turn"
   local settings="$wt/.claude/settings.local.json"
-  [ "$(t3_json_field "$settings" 'Object.keys(d.hooks).sort().join(" ")')" = "SessionEnd Stop StopFailure UserPromptSubmit" ] \
+  [ "$(t3_json_field "$settings" 'Object.keys(d.hooks).sort().join(" ")')" = "PermissionRequest SessionEnd Stop StopFailure UserPromptSubmit" ] \
     || fail "the env merge must keep the busy hooks, got hooks '$(t3_json_field "$settings" 'Object.keys(d.hooks || {})')'"
   [ "$(t3_json_field "$settings" 'd.env.GOTMPDIR')" = "/tmp/fm-$id/gotmp" ] || fail "settings env must carry GOTMPDIR, got '$(t3_json_field "$settings" 'd.env')'"
   [ "$(t3_json_field "$settings" 'd.env.FM_TASK_ID')" = "$id" ] || fail "a ship worker's settings env must carry FM_TASK_ID"
