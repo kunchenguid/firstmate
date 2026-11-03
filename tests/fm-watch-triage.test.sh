@@ -2454,6 +2454,58 @@ test_gate_reparked_between_reads_wakes_again() {
   pass "a gate that resumes and parks again between two reads, with no busy poll, wakes again"
 }
 
+wait_gate_busy_poll() {  # <dir> <out> [extra env assignments...]
+  local dir=$1 out=$2 pid
+  shift 2
+  : > "$out"
+  printf 'reading the gate findings Ctrl+c:cancel' > "$dir/pane.txt"
+  wait_gate_watch_bg "$dir" "$WG_WINDOW" "$out" "$@"
+  pid=$!
+  wait_poll_cycle "$dir/state" "$pid" || fail "a busy pane woke: $(cat "$out")"
+  wait_poll_cycle "$dir/state" "$pid" || fail "a busy pane woke: $(cat "$out")"
+  reap "$pid"
+  ack_stopped_cycle "$dir/state" || true
+  printf 'finished, awaiting review' > "$dir/pane.txt"
+}
+
+test_stamped_gate_survives_a_busy_poll() {
+  local dir state out pid gate nm
+  gate='state: parked · source: run-step · parked at test: 1 finding(s) · ask-user: authority decision · run: 01RUN'
+  make_wait_gate_case wait-gate-busy-stamped 'done: PR https://example.test/pr/3 checks green'
+  dir=$WG_DIR; state="$dir/state"; out="$dir/watch.out"; nm="$dir/nm"
+  mkdir -p "$dir/wt" "$nm"
+  printf 'worktree=%s\nharness=grok\n' "$dir/wt" >> "$state/wg.meta"
+  set_gate_opened_at "$nm" 01RUN 1700000000
+  export FM_FAKE_CREW_STATE=$gate
+  wait_gate_watch_bg "$dir" "$WG_WINDOW" "$out" NM_HOME="$nm"
+  pid=$!
+  wait_for_exit "$pid" 100 || { reap "$pid"; fail "the first gate did not wake"; }
+  ack_stopped_cycle "$state" || fail "could not acknowledge the first gate wake"
+
+  wait_gate_busy_poll "$dir" "$out" NM_HOME="$nm"
+  : > "$out"; : > "$dir/crew-state.log"
+  rm -f "$state/.wait-gate-checked-test_fm-wg"
+  wait_gate_watch_bg "$dir" "$WG_WINDOW" "$out" NM_HOME="$nm"
+  pid=$!
+  for _ in $(seq 100); do [ -s "$dir/crew-state.log" ] && break; sleep 0.1; done
+  [ -s "$dir/crew-state.log" ] || fail "the read after the busy poll never happened"
+  wait_poll_cycle "$state" "$pid" || fail "the same gate opening woke again after a busy poll: $(cat "$out")"
+  reap "$pid"
+  [ ! -s "$out" ] || fail "the same gate opening woke again after a busy poll: $(cat "$out")"
+  ack_stopped_cycle "$state" || true
+
+  wait_gate_busy_poll "$dir" "$out" NM_HOME="$nm"
+  set_gate_opened_at "$nm" 01RUN 1700000600
+  : > "$out"
+  rm -f "$state/.wait-gate-checked-test_fm-wg"
+  wait_gate_watch_bg "$dir" "$WG_WINDOW" "$out" NM_HOME="$nm"
+  pid=$!
+  wait_for_exit "$pid" 100 || { reap "$pid"; fail "a gate reopened after a busy poll did not wake"; }
+  grep -F "validation gate after done" "$out" >/dev/null || fail "the reopened gate wake is wrong: $(cat "$out")"
+  unset FM_FAKE_CREW_STATE
+  pass "a stamped gate keeps its identity across a busy poll and wakes only when it reopens"
+}
+
 test_no_gate_after_done_stays_silent() {
   local dir state out pid
   make_wait_gate_case wait-gate-none 'done: PR https://example.test/pr/3 checks green'
@@ -5542,6 +5594,7 @@ fm_test_run \
   test_gate_after_done_or_paused_wakes_once_per_gate \
   test_gate_reparked_after_answer_wakes_again \
   test_gate_reparked_between_reads_wakes_again \
+  test_stamped_gate_survives_a_busy_poll \
   test_no_gate_after_done_stays_silent \
   test_nonterminal_stale_provably_working_absorbed_then_escalated \
   test_wedge_escalation_marks_demand_deep_inspection_after_threshold \

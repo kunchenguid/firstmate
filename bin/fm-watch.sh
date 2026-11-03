@@ -2558,6 +2558,16 @@ wait_gate_check() {  # <window> <task>
   wake "$reason"
 }
 
+# A busy poll means the worker may have answered the gate. A saved gate that
+# carries its opening stamp keeps its identity, because a real reopening moves
+# the stamp; only a line-only identity is cleared, so its re-park can wake.
+wait_gate_busy_clear() {  # <key>
+  local gate_file="$STATE/.wait-gate-$1" saved_line='' saved_opened=''
+  [ -f "$gate_file" ] || return 0
+  { IFS= read -r saved_line || true; IFS= read -r saved_opened || true; } < "$gate_file"
+  [ -n "$saved_opened" ] || rm -f "$gate_file"
+}
+
 # Apply the busy-pane completed-turn bound to a window whose bound has already
 # crossed, honoring the worker's OWN declared external wait. Prints/queues
 # nothing itself; it only chooses which absorber owns the crossed bound.
@@ -4374,7 +4384,7 @@ EOF
     # reused below so a busy verdict is consistent within one cycle.
     if window_is_busy "$w" "$tail40"; then busy_now=0; else busy_now=1; fi
     if [ "$kind" = ship ]; then
-      if [ "$busy_now" -eq 0 ]; then rm -f "$STATE/.wait-gate-$key"; else wait_gate_check "$w" "$task"; fi
+      if [ "$busy_now" -eq 0 ]; then wait_gate_busy_clear "$key"; else wait_gate_check "$w" "$task"; fi
     fi
     if [ "$h" = "$prev" ]; then
       n=$(( $(cat "$cf" 2>/dev/null || echo 0) + 1 ))
