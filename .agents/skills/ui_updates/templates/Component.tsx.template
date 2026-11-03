@@ -1,0 +1,45 @@
+import React, { useState } from 'react';
+import './{{ComponentName}}.css';
+
+export interface {{ComponentName}}Props {
+  title?: string;
+  className?: string;
+  onAction?: (actionId: string) => void;
+}
+
+export const {{ComponentName}}: React.FC<{{ComponentName}}Props> = ({
+  title = 'Default Title',
+  className = '',
+  onAction,
+}) => {
+  const [isActive, setIsActive] = useState(false);
+
+  const handleToggle = () => {
+    const nextState = !isActive;
+    setIsActive(nextState);
+    if (onAction) {
+      onAction(nextState ? 'activated' : 'deactivated');
+    }
+  };
+
+  return (
+    <div className={`fqd-{{component-kebab}} ${className}`}>
+      <div className="fqd-{{component-kebab}}__header">
+        <h3 className="fqd-{{component-kebab}}__title">{title}</h3>
+        <button
+          type="button"
+          className={`fqd-{{component-kebab}}__btn ${isActive ? 'fqd-{{component-kebab}}__btn--active' : ''}`}
+          onClick={handleToggle}
+          aria-pressed={isActive}
+        >
+          {isActive ? 'Active' : 'Enable'}
+        </button>
+      </div>
+      <div className="fqd-{{component-kebab}}__content">
+        {/* Child elements */}
+      </div>
+    </div>
+  );
+};
+
+export default {{ComponentName}};
