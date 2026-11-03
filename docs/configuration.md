@@ -1568,11 +1568,12 @@ A remote secondmate is launched on its host from its own home's configuration, s
 ### Several Claude accounts (config/claude-accounts)
 
 A home with more than one Claude subscription can let each ship and scout launch on whichever declared account has quota to spare, instead of pinning every Claude worker to one account.
-Create `config/claude-accounts` with one account per line, each `ordinary` or the absolute path of an existing Claude config directory, written exactly as `config/claude-account` would hold it:
+Create `config/claude-accounts` with one account per line, each `ordinary` or the absolute path of an existing Claude config directory, written exactly as `config/claude-account` would hold it, or a [setup-token account](#setup-token-accounts) written as `token:<absolute path of a setup-token file>`:
 
 ```text
 ordinary
 /home/me/.claude-second
+token:/home/me/.config/claude-tokens/third.token
 ```
 
 A final newline is optional; a blank line, a relative path, a repeated entry, or a control character refuses.
@@ -1590,6 +1591,24 @@ The spawn line and the task record carry the entry as `account=`.
 A relaunch or recovery of that task keeps its recorded account, re-checking that it is still declared and signed in before the running worker stops.
 To move a task to another declared account, for example when its own account is exhausted, relaunch it explicitly with `bin/fm-control.sh <id> relaunch --account <entry> --note <text>`; nothing moves a running task automatically.
 A task with no recorded account, or one whose account is no longer declared, refuses a plain relaunch and needs that explicit `--account`.
+
+#### Setup-token accounts
+
+A `token:<absolute path>` entry is a subscription reached through a long-lived `claude setup-token` credential instead of a config directory of its own, so a second subscription needs no second interactive login.
+Only `config/claude-accounts` accepts this kind; `config/claude-account` and the per-secondmate pins keep their own grammar and refuse it.
+
+The token file holds the token alone (surrounding whitespace is ignored), is a regular file owned by the user, and has mode `0600` (no group or other access).
+A missing, empty, unreadable, non-regular, group- or other-readable, foreign-owned, or multi-token file refuses a launch that names the entry, with a message naming the file, never its content.
+
+A launch on the entry is otherwise an ordinary Claude launch.
+It unsets `CLAUDE_CONFIG_DIR` and every credential variable a pinned launch unsets, then runs the worker through [`bin/fm-claude-token-exec.sh`](../bin/fm-claude-token-exec.sh), which reads the file and exports `CLAUDE_CODE_OAUTH_TOKEN` for that one process only.
+The launch text carries the helper and the file path, never the token, so the value does not appear in argv, the staged launch file, task records, status lines, or the digest.
+The spawn line and the task record carry the entry itself as `account=`, so relaunch and recovery reuse it like any other entry.
+A raw Claude launch command that sets `CLAUDE_CODE_OAUTH_TOKEN` itself refuses.
+
+The sign-in check runs `claude auth status` through the same helper, with the stripped environment above, and requires it to report `loggedIn` with `authMethod` `oauth_token`.
+Claude reads the token offline, so a revoked or expired token passes this check and fails when the worker first calls the API; replace the file with a new `claude setup-token` result.
+`bin/fm-claude-account-quota.sh` reports the entry as unmeasured without running `quota-axi`, because `--profile-only` reads only a config directory's credential file.
 
 The list covers Claude ships and scouts only.
 A local secondmate's own agent never draws from it: under a list it needs its own [per-secondmate account pin](#per-secondmate-account-pins), and `--account` refuses for every secondmate, local or remote.

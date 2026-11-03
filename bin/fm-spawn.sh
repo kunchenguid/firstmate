@@ -512,8 +512,11 @@
 #   spawn must name one declared entry with --account, chosen at intake, and
 #   that entry is checked, launched, and recorded exactly like a pin; a
 #   relaunch reuses the recorded entry unless --account moves it. Without the
-#   list, --account refuses and nothing else changes. docs/configuration.md
-#   "Several Claude accounts" owns the contract.
+#   list, --account refuses and nothing else changes. A `token:<file>` entry
+#   (a `claude setup-token` account) runs the agent through
+#   bin/fm-claude-token-exec.sh, so the token is never launch text, an
+#   argument, or a record. docs/configuration.md "Several Claude accounts"
+#   owns the contract.
 # Per-secondmate omp profile (config/secondmate-accounts/<id>/omp-profile):
 #   Opt-in, and read only for a local secondmate's own omp agent;
 #   bin/fm-omp-profile-lib.sh owns the file and its refusals. A pinned launch
@@ -3535,11 +3538,11 @@ if [ "$BACKEND" = t3code ]; then
   fi
 fi
 if [ -n "$WORKER_ACCOUNT" ] && [ "$HARNESS" = claude ]; then
-  if [ -n "$WORKER_ACCOUNT_ROOT" ]; then
-    export CLAUDE_CONFIG_DIR=$WORKER_ACCOUNT_ROOT
-  else
-    unset CLAUDE_CONFIG_DIR
-  fi
+  # A setup-token account (root token:<file>) selects no config root, like ordinary.
+  case "$WORKER_ACCOUNT_ROOT" in
+  token:* | '') unset CLAUDE_CONFIG_DIR ;;
+  *) export CLAUDE_CONFIG_DIR=$WORKER_ACCOUNT_ROOT ;;
+  esac
 fi
 
 secondmate_registry_value() {
@@ -7601,11 +7604,15 @@ esac
 if [ -n "$WORKER_ACCOUNT" ]; then
   case "$HARNESS" in
   claude)
-    if [ -n "$WORKER_ACCOUNT_ROOT" ]; then
-      LAUNCH="$(fm_worker_account_claude_shed) CLAUDE_CONFIG_DIR=$(shell_quote "$WORKER_ACCOUNT_ROOT") $LAUNCH"
-    else
-      LAUNCH="$(fm_worker_account_claude_shed) -u CLAUDE_CONFIG_DIR $LAUNCH"
-    fi
+    case "$WORKER_ACCOUNT_ROOT" in
+    token:*)
+      # The exec helper reads the token file and exports the token for the
+      # agent alone, so the token is never launch text, an argument, or a record.
+      LAUNCH="$(fm_worker_account_claude_shed) -u CLAUDE_CONFIG_DIR $(shell_quote "$FM_ROOT/bin/fm-claude-token-exec.sh") $(shell_quote "${WORKER_ACCOUNT_ROOT#token:}") $LAUNCH"
+      ;;
+    '') LAUNCH="$(fm_worker_account_claude_shed) -u CLAUDE_CONFIG_DIR $LAUNCH" ;;
+    *) LAUNCH="$(fm_worker_account_claude_shed) CLAUDE_CONFIG_DIR=$(shell_quote "$WORKER_ACCOUNT_ROOT") $LAUNCH" ;;
+    esac
     ;;
   pi | pi-signed)
     LAUNCH="PI_CODING_AGENT_DIR=$(shell_quote "$WORKER_ACCOUNT_ROOT") $LAUNCH"
