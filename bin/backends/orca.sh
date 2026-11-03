@@ -508,7 +508,7 @@ if (r.terminal && Array.isArray(r.terminal.tail)) {
 // deliberately excludes it from the tail/screen rows, so a pane holding a human
 // draft still rendered a bare empty composer row and replacement input typed
 // into that draft (live orca 1.4.232 + claude 2.1.317: draft="DRAFT-MARKER keep
-// me" with an empty `❯` row, and an inbox doorbell appended into the draft
+// me" with an empty composer row, and an inbox doorbell appended into the draft
 // instead of deferring). Render it as the composer row it really is so a
 // non-empty draft can never classify empty. Blank/whitespace-only drafts are the
 // idle composer and add nothing.

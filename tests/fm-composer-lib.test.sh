@@ -259,7 +259,72 @@ test_matrix_claude_rotating_idle_hint() {
   while [ "${#content}" -lt 40 ]; do content+=' '; done
   typed_box="+$bar+"$'\n'"|$content|"$'\n'"+$bar+"
   assert_screen "claude typed in an unstyled container" pending "$CAPS_PLAIN" "$typed_box"
-  pass "matrix: claude's rotating Try idle hint proves an empty composer; typed text stays pending"
+
+  # The VERBATIM live capture behind the entry: Claude Code 2.1.317 on Orca
+  # 1.4.232, read through Orca's `styled=0` profile (evidence
+  # screen-idle-hint.txt). It carries no SGR, so there is no de-emphasis to
+  # ghost-strip and the rule-separated hint row is indistinguishable from typed
+  # text. The entry therefore does NOT make this screen deliverable. These
+  # assertions pin the truth and not a hoped-for `empty`, so the day a Claude
+  # release rewords the hint or reshapes the composer one of them flips and
+  # fails loudly here naming the harness and version, instead of the live
+  # composer quietly stopping to prove itself.
+  local live live_rule live_head typed_live
+  live_rule=$(printf '─%.0s' {1..120})
+  live=$'orca-ide-1.4.232-pi-wake-parakeet-fhsenv:art@zeppola:~/projects/firstmate$ cd /home/art/projects/firstmate && exec claude\ne\n ▐▛███▛█   Claude Code v2.1.317\n▝▜██████▀  Opus 5.5 · API Usage Billing\n ▝▝   ▝▝   ~/projects/firstmate\n'
+  live+="$live_rule"$'\n'
+  live+="❯$NBSP"$'Try "edit fm-branch-dispatch.ts to..."\n'
+  live+="$live_rule"$'\n  ⏵⏵ auto mode on (shift+tab to cycle)'
+  live_head=${live%%"$live_rule"*}
+  typed_live="$live_head$live_rule"$'\n❯ fix the login bug\n'"$live_rule"$'\n  ⏵⏵ auto mode on (shift+tab to cycle)'
+
+  hint_verdict() {  # <screen> <caps> <idle-re|-> [cursor] [identity]
+    local screen=$1 caps=$2 idle=$3
+    shift 3
+    if [ "$idle" = - ]; then
+      fm_composer_classify_screen "$caps" "$screen" "$@"
+    else
+      FM_COMPOSER_IDLE_RE=$idle fm_composer_classify_screen "$caps" "$screen" "$@"
+    fi
+  }
+  assert_claude_hint() {  # <label> <want> <screen> <caps> <idle-re|-> [cursor] [identity]
+    local label=$1 want=$2 out
+    shift 2
+    out=$(hint_verdict "$@")
+    [ "$out" = "$want" ] \
+      || fail "$label: expected $want, got '$out' (claude 2.1.317 on Orca 1.4.232)"
+    out=$(LC_ALL=C hint_verdict "$@")
+    [ "$out" = "$want" ] \
+      || fail "$label under LC_ALL=C: expected $want, got '$out' (claude 2.1.317 on Orca 1.4.232)"
+  }
+  # The limitation itself: the live rule-separated row stays `unknown` on
+  # Orca's own profile, so an accepted Enter whose read lands here is reported
+  # as unconfirmed and duplicate-resend risk remains until a dedicated
+  # classifier change supports this container.
+  assert_claude_hint "live rule-separated Try hint on orca" unknown "$live" "$CAPS_PLAIN" -
+  # ...and the entry is not the cause: an empty idle pattern reads the same
+  # verdict, so widening or removing `^Try "` cannot change this shape.
+  assert_claude_hint "live rule-separated Try hint on orca without the idle set" \
+    unknown "$live" "$CAPS_PLAIN" '^$'
+  # A styled profile has no ghost-strip proof for this unstyled capture either,
+  # so it refuses (`pending`) rather than claiming a false `empty`, with and
+  # without the entry.
+  assert_claude_hint "live Try hint read under a styled profile" \
+    pending "$live" "$CAPS_STYLED" - '' "$claude_idle"
+  assert_claude_hint "live Try hint under a styled profile without the idle set" \
+    pending "$live" "$CAPS_STYLED" '^$' '' "$claude_idle"
+  # What the entry actually buys, and the assertion that flips if `^Try "` is
+  # ever dropped from the fleet-wide set: the same hint in the proven container
+  # reads `pending` once the entry is out of the picture.
+  assert_claude_hint "bordered Try hint container without the idle set" \
+    pending "$box" "$CAPS_PLAIN" '^$'
+  # The protection that must survive every shape: real typed text in the same
+  # live composer is never `empty` - readable under a styled profile, and the
+  # documented `styled=0` degradation to `unknown` on Orca's own profile.
+  assert_claude_hint "live typed text under a styled profile" \
+    pending "$typed_live" "$CAPS_STYLED" - '' "$claude_idle"
+  assert_claude_hint "live typed text on orca" unknown "$typed_live" "$CAPS_PLAIN" -
+  pass "matrix: claude's rotating Try hint proves an empty container, and the live 2.1.317 rule-separated row stays a known unknown rather than a false empty"
 }
 
 test_matrix_claude_arrow_statusline_footer() {
