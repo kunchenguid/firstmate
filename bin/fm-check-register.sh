@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 # Bind an intentional custom watcher check to its current bytes.
 # Usage: fm-check-register.sh <id>
+# Registration also normalizes the check to mode 0700, so a freshly written
+# 0600 check cannot be left armed but unregistered (the watcher refuses any
+# check that is not mode 0700 with a matching trust record); every refusal
+# names the reason on stderr.
 # Retire with fm-check-unregister.sh <id>; do not hand-compose an rm.
 set -u
 
@@ -25,8 +29,13 @@ TRUST="$STATE/$ID.check-trust"
 [ -d "$STATE" ] && [ ! -L "$STATE" ] || { echo "error: state directory is unavailable" >&2; exit 1; }
 [ -f "$CHECK" ] && [ ! -L "$CHECK" ] || { echo "error: custom check is unavailable" >&2; exit 1; }
 STATE_DEVICE=$(fm_pr_file_device "$STATE") || exit 1
+[ "$(fm_pr_file_device "$CHECK")" = "$STATE_DEVICE" ] && [ "$(fm_pr_file_link_count "$CHECK")" = 1 ] \
+  || { echo "error: custom check state/$ID.check.sh must be a single-link file on the state device; not registered, the watcher will refuse it" >&2; exit 1; }
+if [ "$(fm_pr_file_mode "$CHECK")" != 700 ]; then
+  chmod 0700 "$CHECK" || { echo "error: could not set mode 0700 on state/$ID.check.sh; not registered, the watcher will refuse it" >&2; exit 1; }
+fi
 fm_pr_private_file_valid "$CHECK" 700 "$STATE_DEVICE" \
-  || { echo "error: custom check is unavailable" >&2; exit 1; }
+  || { echo "error: custom check state/$ID.check.sh is not a private mode-0700 file; not registered, the watcher will refuse it" >&2; exit 1; }
 fm_pr_regular_destination_on_device_or_absent "$TRUST" "$STATE_DEVICE" \
   || { echo "error: custom check trust path is unavailable" >&2; exit 1; }
 HASH=$(fm_custom_check_sha256 "$CHECK") || { echo "error: custom check hash is unavailable" >&2; exit 1; }
