@@ -674,6 +674,11 @@ test_matrix_omp_status_row_bounds_bare_composer() {
     && fail "typed text opening 'pi ·' must not be mistaken for omp status furniture"
   _fm_composer_row_is_omp_status ' ⣾ 3s  · ◔ GPT-6-Astra' \
     || fail "the status-set omp spinner row must be recognized as furniture"
+  # A 1M-context model renders its usage cell as `%/1M`, not `%/NNNK`; a row
+  # carried only by that cell must still read as furniture, not typed text.
+  _fm_composer_row_is_omp_status ' ◔ claude-opus-4 · ◫ 7%/1M' \
+    || fail "an omp status row with a 1M context cell must be recognized as furniture"
+  assert_screen "idle omp with a 1M context cell" empty "$CAPS_STYLED" $'transcript line\n\n❯\n ◔ claude-opus-4 · ◫ 7%/1M'
   assert_screen "idle omp (unicode preset)" empty "$CAPS_STYLED" "$idle_unicode"
   assert_screen "idle omp (nerd preset)" empty "$CAPS_STYLED" "$idle_nerd"
   assert_screen "busy omp keeps an empty composer" empty "$CAPS_STYLED" "$busy"
