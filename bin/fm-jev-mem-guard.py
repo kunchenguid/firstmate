@@ -2,7 +2,7 @@
 """
 fm-jev-mem-guard.py - Jev Multi-Agent Memory RSS & Swap Thrashing Guard (Pattern 46)
 
-Audits host memory availability (/proc/meminfo) and swap utilization to detect memory
+Audits host memory availability (Linux /proc/meminfo or macOS vm_stat/sysctl) and swap utilization to detect memory
 starvation, swap thrashing, and out-of-control worker RSS expansion across multi-agent seats.
 Prevents catastrophic OOM killer invocations against persistent agent supervisors and tmux sessions.
 
@@ -14,7 +14,7 @@ Thresholds (each named for the CLI flag that carries its operational default; ru
 
 Invariants:
   - Read-only diagnostics.
-  - Fail-open: an unreadable or incomplete /proc/meminfo degrades to a graceful status
+  - Fail-open: unreadable or incomplete host memory telemetry degrades to a graceful status
     UNKNOWN with a machine-readable reason and a 0 --check exit, never a crash and never
     a false alarm; an unassessed host reports null measured percentages (JSON null,
     "unavailable" in human output) instead of fabricated numbers.
@@ -28,9 +28,56 @@ Invariants:
 import argparse
 import json
 import os
+import re
+import subprocess
 import sys
+import time
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
+
+
+def read_macos_meminfo() -> Dict[str, float]:
+    """Return Linux-shaped kB metrics, with a shared 350ms command budget.
+
+    Free, inactive, and speculative pages approximate available memory.
+    Purgeable pages overlap other page counts and must not be added again.
+    Compressed pages remain in use. Missing swap telemetry never alarms.
+    """
+    deadline = time.monotonic() + 0.35
+
+    def command(*args: str) -> str:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError("memory telemetry deadline")
+        return subprocess.run(
+            args, capture_output=True, text=True, check=True, timeout=remaining,
+        ).stdout
+
+    try:
+        total = int(command("sysctl", "-n", "hw.memsize").strip())
+        stats = command("vm_stat")
+        page_size = int(re.search(r"page size of ([0-9]+) bytes", stats)[1])
+        pages = {}
+        for label in ("free", "inactive", "speculative"):
+            pages[label] = int(re.search(r"^Pages " + label + r":\s+([0-9]+)\.", stats, re.M)[1])
+        available = sum(pages.values()) * page_size
+        if total <= 0 or page_size <= 0 or not 0 <= available <= total:
+            return {}
+        info = {"MemTotal": total / 1024, "MemAvailable": available / 1024}
+    except (OSError, ValueError, TypeError, subprocess.SubprocessError, TimeoutError):
+        return {}
+
+    try:
+        swap = command("sysctl", "vm.swapusage")
+        values = {}
+        for label in ("total", "used", "free"):
+            match = re.search(r"\b" + label + r"\s*=\s*([0-9]+(?:\.[0-9]+)?)([KMGT])\b", swap)
+            values[label] = float(match[1]) * (1024 ** "KMGT".index(match[2]))
+        if 0 <= values["free"] <= values["total"] and 0 <= values["used"] <= values["total"]:
+            info.update(SwapTotal=values["total"], SwapFree=values["free"])
+    except (OSError, ValueError, TypeError, subprocess.SubprocessError, TimeoutError):
+        pass
+    return info
 
 
 def read_meminfo() -> Dict[str, int]:
@@ -102,7 +149,7 @@ def audit_memory(
     crit_swap_pct: float,
 ) -> Dict[str, Any]:
     """Audits system memory and swap usage, failing open to status UNKNOWN when unmeasurable."""
-    mem = read_meminfo()
+    mem = read_macos_meminfo() if sys.platform == "darwin" else read_meminfo()
     mem_total_kb = mem.get("MemTotal")
     mem_avail_kb = mem.get("MemAvailable")
     swap_total_kb = mem.get("SwapTotal")
@@ -118,9 +165,9 @@ def audit_memory(
 
     if mem_total_kb is None or mem_total_kb <= 0 or mem_avail_kb is None:
         status = "UNKNOWN"
-        reason = "meminfo-unavailable"
+        reason = "macos-memory-unavailable" if sys.platform == "darwin" else "meminfo-unavailable"
         recommendation = (
-            "/proc/meminfo is unreadable or incomplete on this host; "
+            "Host memory telemetry is unreadable or incomplete; "
             "the verdict is withheld rather than fabricated."
         )
     else:
@@ -164,7 +211,7 @@ def audit_memory(
                 "the caller should continue unchanged."
             )
 
-    top_procs = get_top_rss_processes()
+    top_procs = [] if sys.platform == "darwin" else get_top_rss_processes()
 
     return {
         "name": "fm-jev-mem-guard",
