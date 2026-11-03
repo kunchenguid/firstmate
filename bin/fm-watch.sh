@@ -333,10 +333,11 @@ fi
 # turn-ended signature, annotation staleness checks, and guarded bookkeeping writes.
 
 POLL=${FM_POLL:-15}                   # seconds between cycles
-# The liveness beacon is touched once per cycle, immediately before the
-# terminal wait below (event_wait_or_sleep) as well as at the top of the next
-# one, so a healthy cycle's beacon can legitimately age up to POLL seconds
-# between touches. fm_poll_derived_grace (bin/fm-wake-lib.sh, already sourced
+# The liveness beacon is touched once per cycle at the loop top and again as
+# the pane scan advances (once per completed window, below), so a healthy
+# cycle's beacon can legitimately age up to POLL seconds between loop-top
+# touches while a slow-but-advancing scan stays fresh. fm_poll_derived_grace
+# (bin/fm-wake-lib.sh, already sourced
 # transitively above) is the single owner of the max(300, poll+60)
 # derivation - see docs/turnend-guard.md "Guard grace and the poll cadence".
 # This recomputes the library default above now that the real configured
@@ -4512,6 +4513,14 @@ EOF
         clear_pause_tracking "$key"
       fi
     fi
+    # Progress beacon: a pane scan can outlast WATCHER_STALE_GRACE when enough
+    # windows each spend a bounded current-state read (a pane stable for the
+    # first time). Touch once per completed window so a slow-but-advancing scan
+    # stays inside the grace, while a single window whose read hangs past it
+    # still reads stale - nothing touches the beacon until that read returns.
+    # This is progress-based, not timer-based: no background ticker and no
+    # grace change, and it reuses the loop-top beacon rather than a new one.
+    touch "$STATE/.last-watcher-beat"
   done < <(recorded_windows)
 
   # Heartbeat: the watcher runs a cheap fleet-scan at a regular cadence no matter
