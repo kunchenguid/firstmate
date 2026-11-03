@@ -1209,7 +1209,7 @@ crew_dispatch_validate() {
     # A profile account is Claude-only and takes the grammar of a config/claude-accounts
     # entry; bin/fm-spawn.sh checks that the entry is declared.
     def malformed_accounts($items):
-      ($items | any(has("account") and (((.account | type) != "string") or (.harness != "claude") or (.account | test("^(ordinary|(token:)?/[^[:cntrl:]]*)$") | not))));
+      ($items | any(has("account") and (((.account | type) != "string") or (.harness != "claude") or (.account | test("\\A(ordinary|(token:)?/[^[:cntrl:]]*)\\z") | not))));
     # A quota floor, on a rule or a profile: bin/fm-dispatch-resolve.sh applies
     # it in code against one quota-axi row, so scope and min_percent must be
     # concrete; a rule floor also names the provider whose row it reads.
