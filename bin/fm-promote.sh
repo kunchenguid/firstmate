@@ -334,6 +334,7 @@ These current ship instructions supersede the scout delivery rules and report-ba
 Any earlier "Never push" or scout-only delivery language in this file is superseded.
 This replaces the scout rule limiting outside-worktree writes to the report and status file.
 Keep project edits inside this worktree; keep proof and scratch output outside it, under \`$DATA/$ID/\` or a temporary directory.
+Put any copy of the project that you build, deploy, or run project tooling against in a fresh temporary directory outside every git repository, never under \`$DATA/$ID/\`, because that directory usually sits inside a firstmate git checkout and such tools read the enclosing repository, for example attaching its HEAD commit and author to a deploy.
 Outside the worktree, write only that task material and the status and steering-inbox records authorized below.
 Leave the worktree clean before reporting done.
 The mode-specific Definition of done below is the current delivery contract.
