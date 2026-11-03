@@ -1482,7 +1482,12 @@ paused_turnend_case() {
   sig=$(seen_sig "$state/held.status"); printf '%s' "$sig" > "$state/.seen-held_status"
   printf 'first turn\n' > "$state/held.turn-ended"
   if [ "$mode" = seen ]; then
-    printf "%s" "$(/usr/bin/stat -f "%z:%Fm" "$state/held.turn-ended" 2>/dev/null || stat -c "%s:%Y" "$state/held.turn-ended")" > "$state/.seen-held_turn-ended"
+    if [ "$(uname)" = Darwin ]; then
+      sig=$(/usr/bin/stat -f '%z:%Fm' "$state/held.turn-ended")
+    else
+      sig=$(stat -c '%s:%Y' "$state/held.turn-ended")
+    fi
+    printf '%s' "$sig" > "$state/.seen-held_turn-ended"
   fi
   watch_bg "$state" "$fakebin" "$out" env FM_PAUSE_RESURFACE_SECS=240
   pid=$!
