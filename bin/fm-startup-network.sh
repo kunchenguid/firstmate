@@ -84,8 +84,9 @@
 #          One bounded current-generation publication/delivery attempt. A stale
 #          expected generation is a no-op; contention leaves completion retained.
 #        fm-startup-network.sh prune
-#          Run the retention pass by hand. It is the same pass a new reservation
-#          runs under the publication lock; for operators and tests only.
+#          Run the retention pass by hand. It is the same lock-free pass the
+#          detached worker runs once it has made or verified a reservation; for
+#          operators and tests only.
 #        fm-startup-network.sh report [--generation <generation>]
 #          Print the current state and report without changing anything, then the
 #          last run's per-step elapsed times. This is the ONLY command that prints
@@ -180,9 +181,9 @@ PUBLISH_LOCK="$STATE/.startup-network.lock"
 # noncurrent, unqueued results are forensic only; see prune_results().
 RESULT_KEEP=3
 
-# Entries one retention pass may examine. The pass runs on the detached worker's
-# own time, and a home whose retained state keeps hitting an exception must not
-# grow the pass without bound; leftovers are picked up by the next pass.
+# Entries one retention pass may delete. The pass runs on the detached worker's
+# own time, so a home that accumulated many retired generations drains them over
+# later passes instead of one long pass; leftovers are picked up by the next pass.
 RESULT_PRUNE_MAX=64
 
 # shellcheck source=bin/fm-timeout-lib.sh
