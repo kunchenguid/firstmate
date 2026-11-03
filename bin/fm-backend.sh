@@ -1220,6 +1220,16 @@ fm_backend_capture() {  # <backend> <target> <lines> [expected-label]
   esac
 }
 
+fm_backend_composer_ownership_capture() {
+  case "$1" in
+    orca)
+      fm_backend_source orca || return 1
+      fm_backend_orca_composer_capture "$2" "$3"
+      ;;
+    *) fm_backend_capture "$@" ;;
+  esac
+}
+
 # FM_BACKEND_VISIBLE_CAPTURE: backends with a verified viewport-only read, each
 # implementing fm_backend_<name>_visible_capture. This one list answers both the
 # capability question and the dispatch, so they cannot disagree. cmux is absent
