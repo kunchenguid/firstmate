@@ -2194,6 +2194,66 @@ JS
   pass "Orca inbox: replacement panes preserve drafts, busy deferrals, own-doorbell retries, and explicit input"
 }
 
+# Orca reports the composer's typed draft in result.terminal.draft and
+# deliberately omits it from tail (live evidence on orca 1.4.232 +
+# claude 2.1.317: draft='DRAFT-MARKER keep me' with an empty `❯` tail row).
+# A replacement pane holding a human draft therefore looked empty to the
+# composer read, and an inbox ring appended its doorbell into that draft
+# instead of deferring. Contract (docs/orca-backend.md): replacement input is
+# guarded against foreign drafts - no typing, ring deferred, retry mark kept.
+test_inbox_retarget_defers_on_foreign_draft_with_empty_tail() {
+  local state id rec before out
+  orca_case inbox-retarget-foreign-draft
+  state="$CASE_DIR/state"
+  id=orcaforeigndraft
+  write_orca_window_meta "$state" "$id" term-stale "$CASE_DIR/worktree"
+  before=$(cat "$state/$id.meta")
+  rec=$(FM_STATE_OVERRIDE="$state" bash -c '. "$0/bin/fm-task-inbox-lib.sh"; fm_task_inbox_write "$1" "$2" "durable steer" fire-and-forget' "$ROOT" "$state" "$id")
+  : > "$CASE_DIR/inputs"
+  cat > "$FB/orca" <<'JS'
+#!/usr/bin/env node
+const fs = require('fs');
+const args = process.argv.slice(2);
+const terminal = args[args.indexOf('--terminal') + 1];
+fs.appendFileSync(process.env.FM_ORCA_LOG, ['orca', ...args].join('\x1f') + '\n');
+function reply(data) { process.stdout.write(JSON.stringify(data) + '\n'); }
+if (args[1] === 'list') {
+  reply({ok:true, result:{terminals:[{handle:'term-live', writable:true, connected:true}]}});
+} else if (args[1] === 'read') {
+  if (terminal === 'term-stale') {
+    reply({ok:false, error:{code:'terminal_handle_stale', message:'terminal_handle_stale'}});
+    process.exitCode = 1;
+  } else {
+    reply({ok:true, result:{terminal:{tail:['────────','❯','────────'], draft:process.env.FM_ORCA_TEST_DRAFT}}});
+  }
+} else if (args[1] === 'send') {
+  if (terminal === 'term-stale') {
+    reply({ok:false, error:{code:'terminal_handle_stale', message:'terminal_handle_stale'}});
+    process.exitCode = 1;
+  } else {
+    fs.appendFileSync(process.env.FM_ORCA_TEST_DIR + '/inputs', 'replacement input\n');
+    reply({ok:true, result:{send:{accepted:true}}});
+  }
+} else {
+  process.exitCode = 1;
+}
+JS
+  chmod +x "$FB/orca"
+  out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_TEST_DIR="$CASE_DIR" \
+    FM_ORCA_TEST_DRAFT='DRAFT-MARKER keep me' FM_STATE_OVERRIDE="$state" FM_HOME="$CASE_DIR" \
+    bash -c '. "$0/bin/fm-task-inbox-lib.sh";
+      [ "$(fm_backend_composer_state orca term-live)" = pending ] || exit 1
+      rc=0
+      fm_task_inbox_ring orca term-stale "$1" || rc=$?
+      printf "%s" "$rc"' "$ROOT" "$rec" 2>"$CASE_DIR/err" ) \
+    || fail "foreign-draft ring failed: $(cat "$CASE_DIR/err")"
+  [ "$out" = 1 ] || fail "a non-empty Orca draft must defer the ring, got status '$out'"
+  [ ! -s "$CASE_DIR/inputs" ] || fail "the ring typed into a replacement holding a human draft: $(cat "$CASE_DIR/inputs")"
+  [ "$(cat "$state/$id.meta")" = "$before" ] || fail "the deferred ring rewrote metadata"
+  [ -f "$rec" ] || fail "the deferred ring dropped the durable steer"
+  pass "Orca inbox: a foreign draft reported only in result.terminal.draft defers before typing"
+}
+
 test_capture_reads_terminal_tail_json
 test_capture_falls_back_to_text_fields
 test_capture_fails_on_orca_error_json
@@ -2265,3 +2325,4 @@ test_fm_send_key_uses_live_window
 test_send_stale_exit_status_still_resolves_window
 test_retargeted_dialog_blocks_text_and_enter_but_allows_interrupt
 test_inbox_retarget_preserves_pending_content_and_explicit_input
+test_inbox_retarget_defers_on_foreign_draft_with_empty_tail

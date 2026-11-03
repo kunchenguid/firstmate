@@ -504,6 +504,22 @@ if (r.terminal && Array.isArray(r.terminal.tail)) {
 } else {
   process.stdout.write(r.text || r.output || r.content || r.preview || "");
 }
+// Orca reports typed-but-unsubmitted composer text in result.terminal.draft and
+// deliberately excludes it from the tail/screen rows, so a pane holding a human
+// draft still rendered a bare empty composer row and replacement input typed
+// into that draft (live orca 1.4.232 + claude 2.1.317: draft="DRAFT-MARKER keep
+// me" with an empty `❯` row, and an inbox doorbell appended into the draft
+// instead of deferring). Render it as the composer row it really is so a
+// non-empty draft can never classify empty. Blank/whitespace-only drafts are the
+// idle composer and add nothing.
+const draft = r.terminal && r.terminal.draft;
+if (typeof draft === "string") {
+  const body = draft.replace(/\s+/g, " ").trim();
+  if (body) {
+    const rule = "─".repeat(body.length + 4);
+    process.stdout.write("\n╭" + rule + "╮\n│ ❯ " + body + " │\n╰" + rule + "╯");
+  }
+}
 '
 }
 
