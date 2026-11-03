@@ -801,6 +801,58 @@ t_killed_watcher_still_gets_final() {
   pass "lifecycle: a watcher killed at disarm still gets its final record; off and native relaunches stay parked"
 }
 
+# A short worker can finish and exit while its asynchronously started
+# watcher is still initializing - here held in its library load, before its
+# TERM trap exists - so disarm's TERM ends it without any write of its own.
+# Retirement still writes the final record, keeping the worker's done, and
+# the next launch on that pane - reporting off, or a natively reporting
+# agent - keeps it.
+t_early_term_watcher_still_gets_final() {
+  local d=$TMP_ROOT/earlyterm kind wpid n0 f
+  mkhome "$d"; mkfake "$d" claude 'claude 2.1.295'
+  mkdir -p "$d/sbin"
+  for f in "$ROOT"/bin/*; do ln -s "$f" "$d/sbin/${f##*/}"; done
+  rm -f "$d/sbin/fm-classify-lib.sh"
+  printf 'if [ -n "${FM_OSC7501_WATCHER:-}" ] && [ -f %q ]; then echo $$ >%q; sleep 5; fi\n. %q\n' \
+    "$d/slow" "$d/initializing" "$ROOT/bin/fm-classify-lib.sh" >"$d/sbin/fm-classify-lib.sh"
+  printf 'done [at=%s]: PR https://example.test/pr/45\n' "$(date +%s)" >"$d/state/t45.status"
+  start_term "$d"
+  for kind in off native; do
+    rm -f "$d/config/osc7501-status" "$d/initializing"
+    : >"$d/slow"
+    env "${CLEAN_UNSET[@]}" HC_TERMINAL_ID=x FM_OSC7501_TTY="$TERM_SLAVE" FM_OSC7501_INTERVAL=1 \
+      bash "$d/sbin/fm-osc7501.sh" arm --task t45 --harness opencode --agent-bin opencode --backend tmux \
+      --kind ship --state "$d/state" --config "$d/config"
+    wpid=$(watcher_pid "$d/state") || fail "early term $kind: no watcher armed"
+    wait_cap "$wpid" "$d/initializing" 60 || fail "early term $kind: the watcher never reached its library load"
+    env "${CLEAN_UNSET[@]}" FM_OSC7501_TTY="$TERM_SLAVE" bash "$SCRIPT" disarm --state "$d/state"
+    kill -0 "$wpid" 2>/dev/null && fail "early term $kind: disarm returned with the watcher still running"
+    rm -f "$d/slow"
+    assert_equals "state=done" "$(grep -o 'state=[a-z]*' "$d/cap" | tail -1)" \
+      "early term $kind: retirement kept the worker's done although the watcher never wrote"
+    [ -z "$(ls "$d/state"/.osc7501watch-* 2>/dev/null)" ] \
+      || fail "early term $kind: disarm left the pidfile behind"
+    n0=$(grep -o 'state=' "$d/cap" | wc -l | tr -d ' ')
+    if [ "$kind" = off ]; then
+      printf 'off\n' >"$d/config/osc7501-status"
+      env "${CLEAN_UNSET[@]}" HC_TERMINAL_ID=x FM_OSC7501_TTY="$TERM_SLAVE" bash "$SCRIPT" arm \
+        --task t45 --harness opencode --agent-bin opencode --backend tmux --kind ship \
+        --state "$d/state" --config "$d/config"
+    else
+      env "${CLEAN_UNSET[@]}" HC_TERMINAL_ID=x FM_OSC7501_TTY="$TERM_SLAVE" PATH="$d/bin:$PATH" \
+        bash "$SCRIPT" arm --task t45 --harness claude --agent-bin claude --backend tmux --kind ship \
+        --state "$d/state" --config "$d/config"
+    fi
+    sleep 1
+    [ -z "$(ls "$d/state"/.osc7501watch-* 2>/dev/null)" ] \
+      || fail "early term $kind: the unarmed relaunch started a watcher"
+    assert_equals "$n0" "$(grep -o 'state=' "$d/cap" | wc -l | tr -d ' ')" \
+      "early term $kind: the relaunch added nothing over the final record"
+  done
+  stop_term
+  pass "lifecycle: a watcher TERMed before its trap still gets its final record; off and native relaunches keep it"
+}
+
 # --- config gate ---------------------------------------------------------------
 
 t_config_off_disables() {
@@ -1146,6 +1198,7 @@ fm_test_run \
   t_stale_terminal_line_parks_idle \
   t_unarmed_relaunch_clears_leftover \
   t_killed_watcher_still_gets_final \
+  t_early_term_watcher_still_gets_final \
   t_config_off_disables \
   t_hc_marker_arms_watcher \
   t_concurrent_panes_keep_their_reporters \

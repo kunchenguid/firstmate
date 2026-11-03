@@ -83,12 +83,12 @@
 # also exits when its recorded parent - the shell running the launch - dies.
 # Either way a final emit keeps done/error and otherwise parks the record at
 # idle - including when activity is unknown, provided the watcher has a
-# prior write of its own; a TERM/HUP retires it the same way. A watcher that
-# can no longer answer - already gone, or still busy past the TERM grace and
-# killed - never writes it, so retirement (disarm, or a relaunch's arm)
-# writes that same final record itself before the pidfile goes, and a dead
-# watcher's working/blocked record is retired even when the next launch
-# arms nothing. One watcher per controlling terminal
+# prior write of its own; a TERM/HUP retires it the same way. A watcher can
+# also be gone without that write - killed, or TERMed before its trap was
+# installed - so retirement (disarm, or a relaunch's arm) always writes that
+# same final record itself once the watcher is confirmed gone, before the
+# pidfile goes, and a dead watcher's working/blocked record is retired even
+# when the next launch arms nothing. One watcher per controlling terminal
 # (<state>/.osc7501watch-<tty>): every arm retires the pane's previous
 # watcher before any gate, so a relaunch rebinds to the new agent and a
 # natively reporting agent never shares the pane with a stale writer. A
@@ -502,7 +502,7 @@ osc_gone() {
   done
 }
 
-# The final record a watcher that is gone can no longer write for itself -
+# The final record retirement writes for a watcher it has confirmed gone -
 # exactly osc_final's emit: the signals fold with idle activity, done/error
 # survive, everything else parks at idle. The pidfile proves the record is
 # the bridge's own.
@@ -522,12 +522,12 @@ osc_dead_final() { # <task> <kind> <harness> <state>
   printf '%s' "$(osc_seq "$W_STATE" "$W_KIND" "fm-$wtask" "$W_MSG")" >>"$dev" 2>/dev/null || true
 }
 
-# osc_retire <pidfile> <state>: stop the watcher it records, confirm it
-# exited, and forget it. A watcher that answers TERM writes its own final
-# record from its trap; one already gone, or still busy past the grace and
-# killed so it can never write after the next owner, cannot, so retirement
-# writes that final record for it before the pidfile goes. Returns 1,
-# keeping the pidfile, when the watcher survives.
+# osc_retire <pidfile> <state>: stop the watcher it records - TERM a live
+# one, killing it when it is still busy past the grace so it can never write
+# after the next owner - and once it is confirmed gone, by whatever route,
+# write its final record and forget it. Whether the watcher managed its own
+# final write is never inferred: a repeat of it is identical and harmless.
+# Returns 1, keeping the pidfile, when the watcher survives.
 osc_retire() {
   local opid='' wtask='' wharness='' wkind=''
   [ -f "$1" ] || return 0
@@ -539,11 +539,9 @@ osc_retire() {
     if ! osc_gone "$opid" 50; then
       kill -KILL "$opid" 2>/dev/null || true
       osc_gone "$opid" 10 || return 1
-      osc_dead_final "$wtask" "$wkind" "$wharness" "$2"
     fi
-  else
-    osc_dead_final "$wtask" "$wkind" "$wharness" "$2"
   fi
+  osc_dead_final "$wtask" "$wkind" "$wharness" "$2"
   rm -f "$1"
 }
 
