@@ -5935,12 +5935,6 @@ test_retained_sources_still_reach_the_ordinary_refusal() {
   pass "present required sources still reach the ordinary teardown refusal"
 }
 
-if [ -n "${FM_TEST_ONLY:-}" ]; then
-  "$FM_TEST_ONLY"
-  exit 0
-fi
-
-
 test_teardown_retires_opencode_busy_plugin_on_pool_return
 
 # An orphan status log archived by record hygiene must survive status-archive
