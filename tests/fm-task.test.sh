@@ -837,10 +837,14 @@ case_value_lists() {
 case_rows() {
   BIN=$1; reset_db
   local t=tk13 checks n events row
-  ft create $t --title t --kind ship >/dev/null
+  ft create $t --title t --kind ship --issue "$t" >/dev/null
   use_issue v1
+  [ "$(task_row "$t" | jq -r .issueUrl)" = "$t" ] || return 1
   ft rows $t "$ISSUE"
   must 'rows' 0 || return 1
+  [ "$(task_row "$t" | jq -r .issueUrl)" = "$ISSUE" ] || { echo 'explicit issue URL did not replace bare task id'; return 1; }
+  ft rows "$t" https://github.com/acme/project/issues/999 >/dev/null || return 1
+  [ "$(task_row "$t" | jq -r .issueUrl)" = "$ISSUE" ] || { echo 'stored URL was replaced'; return 1; }
   checks=$(db fm_task_check)
   [ "$(jq length <<<"$checks")" = 4 ] || { echo "want 4 rows (A1 x2 widths, A2, A3), got: $(jq -c '[.[] | .scenarioId + "@" + .width]' <<<"$checks")"; return 1; }
   jq -e 'all(.[]; .taskId == "tk13" and .status == "pending" and (.acceptanceDigest | test("^[0-9a-f]{64}$")))' <<<"$checks" >/dev/null || { echo "row fields: $(jq -c '.[0]' <<<"$checks")"; return 1; }

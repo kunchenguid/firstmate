@@ -456,7 +456,7 @@ plan_drafts() {  # <workdir>
 # explicit head, without the rows already asked on that head, and without a held ask until its hold is old enough.
 # Returns 1 with READ_ERROR_FILE set when the record or GitHub cannot be read.
 plan_rows_task() {  # <task>
-  local task=$1 json issue_url repo n ref issue_json head keys key rows lines held_at now
+  local task=$1 json issue_url repo n ref issue_json head keys key rows lines held_at now description
   json=$(task_writer checks "$task" 2>&1)
   # shellcheck disable=SC2181 # the status of the assignment above
   if [ "$?" -ne 0 ] || ! jq -e '.rows | type == "array"' <<<"$json" >/dev/null 2>&1; then
@@ -465,6 +465,14 @@ plan_rows_task() {  # <task>
   fi
   jq -e 'any(.rows[]; .surface == "user-visible" and .status == "pending" and .nextActor == "tester" and .head != null)' <<<"$json" >/dev/null || return 0
   issue_url=$(jq -r '.issueUrl // empty' <<<"$json")
+  if [ "$issue_url" = "$task" ]; then
+    description=$(task_writer document "$task") || return 1
+    if printf '%s\n' "$description" | node "$ACCEPTANCE" parse - 2>/dev/null | jq -e '.scenarios | length > 0' >/dev/null; then
+      issue_url="task:$task"
+    else
+      issue_url=''
+    fi
+  fi
   [ -n "$issue_url" ] || issue_url=$(sed -n 's/^issue: //p' "$FM_HOME/data/$task/verify.md" | tail -n 1)
   if [ -z "$issue_url" ] || [[ "$issue_url" == task:* || "$issue_url" == *'#firstmate.board?'*'task='* ]]; then
     case "$issue_url" in task:*) n=$issue_url ;; *) n="task:$task" ;; esac

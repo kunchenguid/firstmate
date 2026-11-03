@@ -843,6 +843,8 @@ scenario_rows_ask() {
   fx_issue_raw 500 "$(tpl_issue_body "$(tpl_scenario_env A1 'Dev 5001; DMS env `company`' 1440; tpl_scenario_env A2 'Dev 5001' 1440,390; tpl_scenario_env A3 'Dev 5001' 1440)")"
   # A1@1440 and A2@1440 are pending for the Tester on head h1; A3 is pending with no head (a rows call); A2@390 passed
   printf '{"task":"alpha","state":"running","nextActor":"worker","issueUrl":"https://github.com/%s/issues/500","head":null,"rows":[{"key":"A1@1440","scenarioId":"A1","width":"1440","surface":"user-visible","status":"pending","nextActor":"tester","head":"%s","carried":false,"due":true},{"key":"A2@1440","scenarioId":"A2","width":"1440","surface":"user-visible","status":"pending","nextActor":"tester","head":"%s","carried":false,"due":true},{"key":"A2@390","scenarioId":"A2","width":"390","surface":"user-visible","status":"pass","nextActor":"firstmate","head":"%s","carried":false,"due":false},{"key":"A3@1440","scenarioId":"A3","width":"1440","surface":"user-visible","status":"pending","nextActor":"tester","head":null,"carried":false,"due":true}]}\n' "$REPO" "$(sha h1)" "$(sha h1)" "$(sha h1)" > "$LAB/checks.json"
+  # Legacy records stored the bare task id despite issue-backed acceptance.
+  jq '.issueUrl = "alpha"' "$LAB/checks.json" > "$LAB/checks.next" && mv "$LAB/checks.next" "$LAB/checks.json"
   printf '3.5\n' > "$LAB/ram"
   printf '# company: the admin PC that runs Titan\nram-read=cat %s/ram\nfloor-gb=6\nrecover=echo ran >> %s/recover.log; echo 4 > %s/ram\nnever-touch=Titan.exe, vsdbg\n' "$LAB" "$LAB" "$LAB" > "$H/config/env/company"
   fx_runs "1:completed:success:s0"
@@ -899,7 +901,7 @@ scenario_rows_ask_task() {
   printf 'kind=ship\n' > "$H/state/alpha.meta"
   mkdir -p "$H/data/alpha"
   printf 'surface: user-visible\nissue: task:alpha\nrecord: rows\n' > "$H/data/alpha/verify.md"
-  printf '{"task":"alpha","state":"running","nextActor":"worker","head":null,"rows":[{"key":"V1@1440","scenarioId":"V1","width":"1440","surface":"user-visible","status":"pending","nextActor":"tester","head":"%s","carried":false,"due":true},{"key":"V2@1440","scenarioId":"V2","width":"1440","surface":"user-visible","status":"pending","nextActor":"tester","head":"%s","carried":false,"due":true}]}\n' "$(sha h1)" "$(sha h1)" > "$LAB/checks.json"
+  printf '{"task":"alpha","state":"running","nextActor":"worker","issueUrl":"alpha","head":null,"rows":[{"key":"V1@1440","scenarioId":"V1","width":"1440","surface":"user-visible","status":"pending","nextActor":"tester","head":"%s","carried":false,"due":true},{"key":"V2@1440","scenarioId":"V2","width":"1440","surface":"user-visible","status":"pending","nextActor":"tester","head":"%s","carried":false,"due":true}]}\n' "$(sha h1)" "$(sha h1)" > "$LAB/checks.json"
   export FM_TASK_SHADOW_WRITER="$LAB/writer"
   local dry
   dry=$("$BIN/fm-procevent-deploy-verify.sh" ask-rows alpha --dry-run 2>&1)
