@@ -194,9 +194,9 @@
 #      agree, and are reported as parked. A `blocked:` line that reports a
 #      refused or missing daemon socket remains blocked even if an attributed
 #      run record is stale or terminal, for as long as that blocker is still the
-#      log's latest event; this reconciliation runs BEFORE rule 2b, so that
-#      blocker also outranks rule 2b's supersession and unknown answers. The
-#      same holds for any open decision when the run
+#      worker's latest event on the log; this reconciliation runs BEFORE rule
+#      2b, so that blocker also outranks rule 2b's supersession and unknown
+#      answers. The same holds for any open decision when the run
 #      record itself is UNVERIFIED (its daemon answered down): the crew saw its
 #      gate or blocker first hand, so needs-decision stays parked and blocked
 #      stays blocked, with the unverified record named as the reason.
