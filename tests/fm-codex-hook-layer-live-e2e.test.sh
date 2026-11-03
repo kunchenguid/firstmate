@@ -18,12 +18,14 @@
 #
 # It spends no model tokens (`codex features list` resolves configuration only),
 # so it runs by default wherever codex is installed.
+# The Herdr selection check also uses thread-free native inventory, requires
+# the installed integration, and never installs its candidate review or trust.
 set -u
 
 # shellcheck source=tests/fixtures.sh
 . "$(dirname "${BASH_SOURCE[0]}")/fixtures.sh"
 
-fm_live_gate default-on FM_CODEX_HOOK_LAYER_LIVE codex
+fm_live_gate default-on FM_CODEX_HOOK_LAYER_LIVE,FM_CODEX_HERDR_HOOKS_LIVE codex
 
 CODEX_VERSION=$(codex --version 2>&1)
 TMP_ROOT=$(fm_test_tmproot fm-codex-hook-layer-live)
@@ -101,6 +103,23 @@ test_installed_codex_still_reports_the_hook_feature() {
   printf 'ok - codex %s still publishes the hook feature flag firstmate disables\n' "$CODEX_VERSION"
 }
 
+test_installed_codex_selects_only_the_reviewed_herdr_hook() {
+  local integration result
+  integration="${CODEX_HOME:-$HOME/.codex}/herdr-agent-state.sh"
+  if [ ! -f "$integration" ]; then
+    [ "${FM_CODEX_HERDR_HOOKS_LIVE:-0}" != 1 ] || fail "codex $CODEX_VERSION: Herdr integration absent"
+    printf 'skip: Herdr Codex integration absent; native Herdr selection not checked (%s)\n' "$CODEX_VERSION"
+    return
+  fi
+  # This candidate is test evidence, never an installed operator opt-in.
+  "$ROOT/bin/fm-codex-herdr-hooks.sh" review "$ROOT" > "$TMP_ROOT/review.json" ||
+    fail "codex $CODEX_VERSION: cannot inventory installed Herdr hook"
+  result=$("$ROOT/bin/fm-codex-herdr-hooks.sh" check "$TMP_ROOT/review.json" "$ROOT" 2>&1) ||
+    fail "codex $CODEX_VERSION: native Herdr selection failed: $result"
+  printf 'ok - %s\n' "$result"
+}
+
+test_installed_codex_selects_only_the_reviewed_herdr_hook
 test_installed_codex_still_reports_the_hook_feature
 test_installed_codex_accepts_requested_hook_disablement_for_the_captured_crewmate_launch
 
