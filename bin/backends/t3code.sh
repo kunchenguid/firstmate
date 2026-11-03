@@ -219,12 +219,14 @@ fm_backend_t3code_thread_create() {  # <project-id> <title> <branch> <worktree> 
   printf '%s' "$out" | fm_backend_t3code_json_get threadId || return 1
 }
 
-# fm_backend_t3code_thread_for_home <home>: the live T3 thread running the
+# fm_backend_t3code_thread_for_home <home>: the T3 thread running the
 # firstmate whose home is <home>, for away-mode supervisor discovery
-# (bin/fm-t3-mcp.mjs thread-for-root owns the cwd match). Exactly one match
-# prints its id (0); none prints nothing (1); more than one is an error naming
-# the ids (2); an unreadable server is silent (1) so the caller falls through
-# to its default.
+# (bin/fm-t3-mcp.mjs thread-for-root owns the cwd match). Discovery takes only a
+# thread with an active run; an explicit target in the third argument is
+# verified directly instead, so an idle or completed supervisor still resolves.
+# Exactly one match prints its id (0); none prints nothing (1); more than one is
+# an error naming the ids (2); an unreadable server is silent (1) so the caller
+# falls through to its default.
 fm_backend_t3code_thread_for_home() {  # <home> -> thread id
   local home=$1 real out rc
   real=$(cd "$home" 2>/dev/null && pwd -P) || return 1

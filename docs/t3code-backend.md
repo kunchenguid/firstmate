@@ -230,7 +230,8 @@ T3 puts nothing about the thread into the agent's environment, so eligible disco
 A forked conversation counts; a delegated subagent does not.
 Multiple matching threads print an ambiguity diagnostic naming their ids and fall through to the legacy tmux fallback, as do no matches or an unreachable server.
 Resolve ambiguity by explicitly setting both `FM_SUPERVISOR_BACKEND=t3code` and `FM_SUPERVISOR_TARGET` to the intended thread id.
-The daemon binds that thread's creation server at startup and then sends only through it, so a target it cannot prove belongs to this home's own T3 project refuses at startup instead of falling back to whichever server the credential now names.
+An explicit target is verified directly instead of looked up among the active threads: it must belong to this home's own T3 project, be unarchived, carry no worktree of its own, and not be a delegated subagent, and it needs no active run, so a pinned captain thread that has gone idle or completed still binds.
+The daemon binds that thread's creation server at startup and then sends only through it, so a target that fails any of those checks refuses at startup instead of falling back to whichever server the credential now names.
 Injection is a `t3_thread_send` only into a settled supervisor thread, one the [thread status table](#restart-and-liveness-behavior) reads idle/alive with no pending request; any other row, including `blocked` and an unreadable thread, defers the digest exactly as a busy pane does on every other backend.
 An unknown native busy verdict defers new-turn delivery but does not prove that work resumed.
 Away housekeeping keeps an overdue stale alert pending and buffers one possible-wedge report while the verdict remains unknown, including a failed run or a transient thread-read failure.

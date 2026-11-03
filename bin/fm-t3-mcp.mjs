@@ -120,10 +120,14 @@
 //     project rooted at <root>, across every t3_thread_list page; a fork
 //     counts, a delegated subagent does not: exit 0 with threadId and
 //     serverIdentity, the JSON [origin, environment_id] pair that created it.
-//     With --target it answers only when that exact thread is one of them, so
-//     a caller binds the creation server of the supervisor it already named;
-//     exit 5 when there is none or --target is not one, and exit 6 when there
-//     are several and no --target was given (threadIds names them).
+//     With --target the named thread is verified directly instead of being
+//     searched for among the active ones: it must be one of that project's
+//     threads, unarchived, carry no worktree of its own, and not be a delegated
+//     subagent, and it needs no active run, because the supervisor it names may
+//     already be idle or completed when supervision starts.
+//     Either way a caller binds the creation server of the supervisor it
+//     already named; exit 5 when there is no such thread, and exit 6 when
+//     several match and no --target was given (threadIds names them).
 //
 // Every verb accepts --token-file <path>. It defaults to
 // $FM_T3CODE_TOKEN_FILE, else ${FM_CONFIG_OVERRIDE:-$FM_HOME/config}/t3code-token,
