@@ -2054,7 +2054,8 @@ No qualifying option, or two equally probable qualifying options, produces `ambi
 
 - Any applicable `exhausted_now` row or known zero bound makes that candidate ineligible, and a known profile-floor shortfall does the same before unrelated quota uncertainty is considered.
 - Missing or nonnumeric `spendPriority` evidence is never ranked, and every candidate is printed beside its evidence or the reason it was not rankable, including on ambiguous and approval-gated outcomes that emit no profile.
-- On the opted-in path, duplicate concrete profiles with the same harness, model, and effort inside one rule or the default array are configuration errors rather than ties.
+- On the opted-in path, duplicate concrete profiles with the same harness, model, effort, and `account` inside one rule or the default array are configuration errors rather than ties.
+  Two profiles that differ only by `account` read the same quota row, so they are a genuine tie and the account choice returns to `quota-array-dispatch`.
 
 **Outcomes and exit status**
 
