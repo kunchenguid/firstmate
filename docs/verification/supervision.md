@@ -769,14 +769,19 @@ Observed result:
 - The tracked `fm-claude-stop-autoarm.sh` registration under `StopFailure` (same `asyncRewake: true`, `timeout: 28800` entry as `Stop`) claimed the epoch, ran `fm-watch-arm.sh` in the foreground, closed actionable on the pending wake, and exited 2.
 - Claude honored the `StopFailure` exit 2 exactly like `Stop`: it queued the wake banner as an unprompted next turn (transcript `queue-operation` enqueue `2026-11-03T19:16:29Z`, `Stop hook blocking error from command "StopFailure:authentication_failed..."`), so the queued wake surfaced without typed input.
 - A real watcher was armed afterward and announced the downtime marker: `fm-watch.sh` ran under `state/.watch.lock`, and `.watcher-down` moved to `announced:downtime:<new generation>`.
-- The rewake turn also hit the forced error and ended on `StopFailure` again, so a second firing ran inside the first one's cooldown. The build live-tested here dropped that second rewake (`outcome=rewake-suppressed`, exit 0), which self-bounded the storm but could leave the home with no further hook firing. The current build waits out the rest of the cooldown in `state/.claude-autoarm-stopfailure-rewake` (`FM_CLAUDE_STOPFAILURE_REWAKE_COOLDOWN`, default 300) and then delivers. Every `StopFailure`-driven exit-2 continuation, failure paths included, is paced the same way. The deterministic test below pins that pacing; it was not re-run live.
+- The rewake turn also hit the forced error and ended on `StopFailure` again, so a second firing ran inside the first one's cooldown.
+  The build live-tested here dropped that second rewake (`outcome=rewake-suppressed`, exit 0), which could leave the home with no further hook firing.
+  This live result verifies event delivery and exit-2 semantics, not the current [paced continuation behavior](../watcher-continuity.md#claude-stop-hook); pacing, failure continuations, and post-wait AFK/need checks have deterministic coverage below but were not re-run live.
 - A synthetic earlier probe on the same version confirmed `asyncRewake: true` itself is honored under `StopFailure` and that a hook-launched detached child outlives the hook teardown.
 
 Deterministic entry point for the event-aware behavior:
 
 ```sh
 tests/fm-claude-stop-autoarm.test.sh
-# ok - auto-arm: StopFailure continuations are paced to one per cooldown and never dropped
+# Relevant assertions (not a new live result):
+# ok - auto-arm: StopFailure rewakes are paced to one per cooldown and never dropped
+# ok - auto-arm: StopFailure failure continuations are paced by the same cooldown
+# ok - auto-arm: a paced StopFailure rewake stands down when AFK or a lost need appears during its wait
 ```
 
 ## Supervision host
