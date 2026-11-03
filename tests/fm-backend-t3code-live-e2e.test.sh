@@ -12,6 +12,8 @@
 # docs/verification/runtime-backends.md "T3 Code" records its result.
 set -u
 
+LIVE_CONFIG=${FM_CONFIG_OVERRIDE:-}
+
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
@@ -19,7 +21,7 @@ fm_live_gate default-on FM_T3CODE_LIVE_E2E node
 
 REQUESTED=0
 [ "${FM_T3CODE_LIVE_E2E:-}" = 1 ] || [ "${FM_LIVE:-}" = 1 ] && REQUESTED=1
-TOKEN=${FM_T3CODE_LIVE_TOKEN_FILE:-${FM_CONFIG_OVERRIDE:-$ROOT/config}/t3code-token}
+TOKEN=${FM_T3CODE_LIVE_TOKEN_FILE:-${LIVE_CONFIG:-$ROOT/config}/t3code-token}
 HELPER="$ROOT/bin/fm-t3-mcp.mjs"
 
 skip_or_fail() {  # <reason>

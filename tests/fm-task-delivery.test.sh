@@ -247,8 +247,8 @@ test_promote_requires_and_records_the_delivery_contract() {
   status=$?
   [ "$status" -ne 0 ] || fail "promotion without writable instruction storage should exit non-zero"
   assert_grep 'kind=scout' "$meta" "failed instruction publication still promoted the task"
-  assert_no_grep '^mode=' "$meta" "failed instruction publication recorded a delivery mode"
-  assert_no_grep '^yolo=' "$meta" "failed instruction publication recorded a merge posture"
+  assert_no_regex '^mode=' "$meta" "failed instruction publication recorded a delivery mode"
+  assert_no_regex '^yolo=' "$meta" "failed instruction publication recorded a merge posture"
 
   instructions_path="$home/data/promote-d1/ship-instructions.md"
   mkdir -p "$instructions_path"
@@ -259,8 +259,8 @@ test_promote_requires_and_records_the_delivery_contract() {
   assert_contains "$out" "ship instructions path is a directory" \
     "promotion did not explain the invalid instruction destination"
   assert_grep 'kind=scout' "$meta" "invalid instruction destination still promoted the task"
-  assert_no_grep '^mode=' "$meta" "invalid instruction destination recorded a delivery mode"
-  assert_no_grep '^yolo=' "$meta" "invalid instruction destination recorded a merge posture"
+  assert_no_regex '^mode=' "$meta" "invalid instruction destination recorded a delivery mode"
+  assert_no_regex '^yolo=' "$meta" "invalid instruction destination recorded a merge posture"
   rmdir "$instructions_path"
 
   out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$PROMOTE" promote-d1 --mode direct-PR --yolo on 2>&1)

@@ -942,6 +942,41 @@ test_projection_reclaim_rollback_refuses_a_stale_registration() {
   pass "herdr stale registration: presentation reclaim never closes a stale-registration pane"
 }
 
+test_projection_cleanup_exact_succeeds_only_when_the_task_pane_closed() {
+  local closed refused absent restore_failed_after_close restore_failed_after_failed_close
+  closed=$(bash -c '. "$0/bin/backends/herdr.sh"
+    fm_backend_herdr_projection_close_pane_focus_preserving() { printf "CLOSED %s;" "$2"; }
+    fm_backend_herdr_projection_cleanup_exact fmtest w1:p2 w1:p1; printf "rc=%s" "$?"' "$ROOT" 2>&1)
+  refused=$(bash -c '. "$0/bin/backends/herdr.sh"
+    fm_backend_herdr_projection_close_pane_focus_preserving() { [ "$2" != w1:p2 ] || return 1; printf "CLOSED %s;" "$2"; }
+    fm_backend_herdr_cli() { [ "$2 $3 $4" = "pane get w1:p2" ] && printf "{\"result\":{\"pane\":{\"pane_id\":\"w1:p2\"}}}"; }
+    fm_backend_herdr_projection_cleanup_exact fmtest w1:p2 w1:p1; printf "rc=%s" "$?"' "$ROOT" 2>&1)
+  absent=$(bash -c '. "$0/bin/backends/herdr.sh"
+    fm_backend_herdr_projection_close_pane_focus_preserving() { printf "CLOSED %s;" "$2"; }
+    fm_backend_herdr_projection_cleanup_exact fmtest "" w1:p1; printf "rc=%s" "$?"' "$ROOT" 2>&1)
+  # The close call fails with 2 when focus restoration fails, whether or not
+  # the pane closed; only an exact presence check can tell the two apart.
+  restore_failed_after_close=$(bash -c '. "$0/bin/backends/herdr.sh"
+    fm_backend_herdr_projection_close_pane_focus_preserving() { [ "$2" != w1:p2 ] || return 2; printf "CLOSED %s;" "$2"; }
+    fm_backend_herdr_cli() { [ "$2 $3 $4" = "pane get w1:p2" ] && printf "{\"error\":{\"code\":\"pane_not_found\"}}"; }
+    fm_backend_herdr_projection_cleanup_exact fmtest w1:p2 w1:p1; printf "rc=%s" "$?"' "$ROOT" 2>&1)
+  restore_failed_after_failed_close=$(bash -c '. "$0/bin/backends/herdr.sh"
+    fm_backend_herdr_projection_close_pane_focus_preserving() { [ "$2" != w1:p2 ] || return 2; printf "CLOSED %s;" "$2"; }
+    fm_backend_herdr_cli() { [ "$2 $3 $4" = "pane get w1:p2" ] && printf "{\"result\":{\"pane\":{\"pane_id\":\"w1:p2\"}}}"; }
+    fm_backend_herdr_projection_cleanup_exact fmtest w1:p2 w1:p1; printf "rc=%s" "$?"' "$ROOT" 2>&1)
+  [ "$closed" = "CLOSED w1:p2;CLOSED w1:p1;rc=0" ] \
+    || fail "a closed task pane must report success after closing both panes, got '$closed'"
+  [ "$refused" = "CLOSED w1:p1;rc=1" ] \
+    || fail "a task pane left open must report failure and still close the seeded pane, got '$refused'"
+  [ "$absent" = "CLOSED w1:p1;rc=1" ] \
+    || fail "no task pane must never report a closed endpoint, got '$absent'"
+  [ "$restore_failed_after_close" = "CLOSED w1:p1;rc=0" ] \
+    || fail "a task pane confirmed gone must report success even when focus restoration failed, got '$restore_failed_after_close'"
+  [ "$restore_failed_after_failed_close" = "CLOSED w1:p1;rc=1" ] \
+    || fail "a failed close with failed focus restoration must report failure while the pane is present, got '$restore_failed_after_failed_close'"
+  pass "herdr projection abort cleanup reports success only when the task pane closed"
+}
+
 test_busy_state_never_reports_a_shell_only_pane_busy() {
   local sleep_bin shell_pid dir resp log fb out
   sleep_bin=$(command -v sleep) || fail "sleep not found"
@@ -1229,6 +1264,7 @@ test_launcher_identity_refuses_an_unreadable_pane() {
   local dir log resp fb out status
   dir="$TMP_ROOT/launcher-stale"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
   printf '{"sessions":[{"name":"fmtest","running":true,"socket_path":"/tmp/fm-herdr-unit/fmtest.sock"}]}\n' > "$resp/1.out"
+  # A destroyed pane: herdr 0.9.3 answers `pane get` with pane_not_found, rc=1.
   printf '1\n' > "$resp/2.exit"
   fb=$(make_herdr_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
@@ -1236,8 +1272,38 @@ test_launcher_identity_refuses_an_unreadable_pane() {
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_launcher_identity fmtest' "$ROOT" 2>&1 )
   status=$?
   expect_code 1 "$status" "a launcher pane that no longer reads must refuse, not fall back to a label search"
-  assert_contains "$out" "w7:p3" "the stale-pane refusal did not name the pane it could not resolve"
-  pass "fm_backend_herdr_launcher_identity: refuses when the launcher's own pane no longer resolves"
+  assert_contains "$out" "w7:p3" "the unreadable-pane refusal did not name the pane it could not resolve"
+  assert_contains "$out" "could not be read" "the unreadable-pane refusal did not say the pane could not be read"
+  pass "fm_backend_herdr_launcher_identity: refuses as unreadable when the launcher's own pane was destroyed"
+}
+
+test_launcher_identity_refuses_a_stale_pane_id() {
+  local dir log resp fb out status shape
+  for shape in other-pane empty-tab; do
+    dir="$TMP_ROOT/launcher-stale-$shape"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+    printf '{"sessions":[{"name":"fmtest","running":true,"socket_path":"/tmp/fm-herdr-unit/fmtest.sock"}]}\n' > "$resp/1.out"
+    case "$shape" in
+      # An id herdr resolves to a different pane (a legacy id form such as
+      # `1-1` answers as `w1:p1`), so the exact-id filter keeps nothing.
+      other-pane) printf '{"result":{"pane":{"pane_id":"w7:p9","tab_id":"w7:t9","workspace_id":"w7"}}}\n' > "$resp/2.out" ;;
+      # A pane record that names no tab at all.
+      empty-tab) printf '{"result":{"pane":{"pane_id":"w7:p3","tab_id":"","workspace_id":"w7"}}}\n' > "$resp/2.out" ;;
+    esac
+    fb=$(make_herdr_fakebin "$dir")
+    out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+      HERDR_ENV=1 HERDR_PANE_ID=w7:p3 HERDR_SESSION=fmtest HERDR_SOCKET_PATH=/tmp/fm-herdr-unit/fmtest.sock \
+      bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_launcher_identity fmtest' "$ROOT" 2>&1 )
+    status=$?
+    expect_code 1 "$status" "a stale launcher pane id must refuse, not fall back to a label search"
+    assert_contains "$out" "w7:p3" "the stale-pane refusal did not name the stale pane id"
+    assert_contains "$out" "no longer exists" "the stale-pane refusal did not say the pane id no longer names a pane"
+    assert_contains "$out" "HERDR_PANE_ID" "the stale-pane refusal did not name HERDR_PANE_ID as a value to refresh"
+    assert_contains "$out" "HERDR_TAB_ID" "the stale-pane refusal did not name HERDR_TAB_ID as a value to refresh"
+    assert_contains "$out" "HERDR_WORKSPACE_ID" "the stale-pane refusal did not name HERDR_WORKSPACE_ID as a value to refresh"
+    assert_not_contains "$out" "ambiguous tab or workspace" "the stale-pane refusal still blamed an ambiguity that does not exist"
+    assert_not_contains "$(cat "$log")" $'\x1f''workspace'$'\x1f''create' "a stale launcher pane must not mint or pick a workspace"
+  done
+  pass "fm_backend_herdr_launcher_identity: names a launcher pane id that resolves elsewhere or names no tab as stale and names the values to refresh"
 }
 
 test_launcher_identity_refuses_a_pane_and_tab_that_disagree() {
@@ -6294,6 +6360,7 @@ test_process_state_tolerates_missing_and_malformed_process_fields
 test_process_state_shell_verdict_survives_several_shell_processes
 test_process_state_jq_calls_do_not_grow_with_foreground_processes
 test_projection_reclaim_rollback_refuses_a_stale_registration
+test_projection_cleanup_exact_succeeds_only_when_the_task_pane_closed
 test_busy_state_never_reports_a_shell_only_pane_busy
 test_cli_caches_the_selected_client_within_a_process
 test_cli_scopes_the_selected_client_to_its_session
@@ -6307,6 +6374,7 @@ test_launcher_identity_refuses_a_pane_from_another_session_name
 test_launcher_identity_refuses_a_missing_server_socket
 test_launcher_identity_refuses_a_pane_from_another_server_socket
 test_launcher_identity_refuses_an_unreadable_pane
+test_launcher_identity_refuses_a_stale_pane_id
 test_launcher_identity_refuses_a_pane_and_tab_that_disagree
 test_launcher_identity_refuses_a_workspace_missing_from_the_session
 test_workspace_ensure_prefers_the_launcher_over_the_first_label_match

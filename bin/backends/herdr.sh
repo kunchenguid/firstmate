@@ -1880,7 +1880,14 @@ fm_backend_herdr_launcher_identity() {  # <session>
     | .result.pane.workspace_id
   ' 2>/dev/null)
   if [ -z "$tab" ] || [ -z "$workspace" ]; then
-    echo "error: herdr launcher pane '$pane' returned an ambiguous tab or workspace identity in session '$session'; refusing to place a worker without its exact parent workspace" >&2
+    # Not an ambiguous identity. A destroyed pane id never reaches here: herdr
+    # 0.9.3 answers `pane get` for it with pane_not_found and the "could not
+    # be read" refusal above fires. This branch covers an id herdr resolves to
+    # a different pane (a legacy id form such as `1-1` answers as `w1:p1`), so
+    # the exact-id filter keeps nothing, or a record naming no tab or
+    # workspace. Call the id stale and name the three injected values a live
+    # shell has to refresh, instead of blaming an ambiguity that does not exist.
+    echo "error: herdr launcher pane '$pane' is stale - in session '$session' that pane no longer exists or names no tab or workspace; refresh HERDR_PANE_ID, HERDR_TAB_ID and HERDR_WORKSPACE_ID in this shell to the current pane's values; refusing to place a worker without its exact parent workspace" >&2
     return 1
   fi
 
@@ -2774,13 +2781,22 @@ fm_backend_herdr_projection_create_task() {  # <cwd> <workspace-label> <task-lab
 
 # fm_backend_herdr_projection_cleanup_exact: same-process abort cleanup for a
 # projection whose create calls returned complete exact IDs.
-# It performs no lookup and never calls workspace close.
+# It performs no lookup and never calls workspace close. It succeeds only when
+# the task pane is confirmed gone, so a caller can tell nothing is left open
+# there. A failed close call is followed by an exact presence check, because
+# the close can confirm the pane gone and then fail only to restore focus.
 fm_backend_herdr_projection_cleanup_exact() {  # <session> <task-pane> <seeded-pane>
-  local session=$1 task_pane=$2 seeded_pane=$3
-  [ -z "$task_pane" ] || fm_backend_herdr_projection_close_pane_focus_preserving "$session" "$task_pane" || true
+  local session=$1 task_pane=$2 seeded_pane=$3 task_closed=1
+  if [ -n "$task_pane" ]; then
+    if fm_backend_herdr_projection_close_pane_focus_preserving "$session" "$task_pane" ||
+      [ "$(fm_backend_herdr_pane_presence_state "$session" "$task_pane")" = dead ]; then
+      task_closed=0
+    fi
+  fi
   if [ -n "$seeded_pane" ] && [ "$seeded_pane" != "$task_pane" ]; then
     fm_backend_herdr_projection_close_pane_focus_preserving "$session" "$seeded_pane" || true
   fi
+  return "$task_closed"
 }
 
 # fm_backend_herdr_projection_parent_workspace_exact: resolve one exact parent
