@@ -146,3 +146,15 @@ discover_supervisor_backend() {
   printf '%s' "$FM_SUPERVISOR_BACKEND_DEFAULT"
   return 1
 }
+
+fm_supervisor_bind_t3code_target() {
+  local binding thread server
+  fm_backend_source t3code || return 1
+  binding=$(fm_backend_t3code_thread_for_home "${FM_HOME:-.}" binding "${FM_SUPERVISOR_TARGET:-}") || return 1
+  thread=$(printf '%s' "$binding" | fm_backend_t3code_json_get threadId) || return 1
+  server=$(printf '%s' "$binding" | fm_backend_t3code_json_get serverIdentity) || return 1
+  [ -z "${FM_SUPERVISOR_TARGET:-}" ] || [ "$FM_SUPERVISOR_TARGET" = "$thread" ] || return 1
+  FM_SUPERVISOR_TARGET=$thread
+  FM_T3CODE_SUPERVISOR_THREAD=$thread
+  FM_T3CODE_SUPERVISOR_SERVER=$server
+}

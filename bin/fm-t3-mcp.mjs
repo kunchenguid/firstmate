@@ -1196,7 +1196,7 @@ async function listThreads(session, projectId, statuses) {
 async function threadForRoot(flags) {
   const rootPath = need(flags, "root");
   if (!path.isAbsolute(rootPath)) usage("--root must be an absolute path");
-  const { session } = await verifiedSession(flags);
+  const { session, cred } = await verifiedSession(flags);
   const project = await projectForRoot(session, rootPath);
   if (!project) throw new Refusal("no_thread", `T3 has no project rooted at ${rootPath}`, 5);
   const live = [];
@@ -1206,7 +1206,11 @@ async function threadForRoot(flags) {
     if (t.relationshipToParent === "subagent" || t.archived === true || t.archivedAt || (t.worktreePath ?? null) !== null) continue;
     if (ACTIVE_STATUSES.includes(t.status)) live.push(item.threadId);
   }
-  if (live.length === 1) return { ok: true, threadId: live[0] };
+  if (flags.target) {
+    if (!live.includes(flags.target)) throw new Refusal("no_thread", `T3 supervisor ${flags.target} does not run in ${rootPath}`, 5);
+    return { ok: true, threadId: flags.target, serverIdentity: JSON.stringify([cred.origin, cred.environment_id]) };
+  }
+  if (live.length === 1) return { ok: true, threadId: live[0], serverIdentity: JSON.stringify([cred.origin, cred.environment_id]) };
   if (live.length === 0) throw new Refusal("no_thread", `no live T3 thread runs in ${rootPath}`, 5);
   throw new Refusal("ambiguous_thread", `${live.length} live T3 threads run in ${rootPath} (${live.join(", ")}); set FM_SUPERVISOR_TARGET to the captain thread id`, 6, { threadIds: live });
 }

@@ -2067,7 +2067,15 @@ fm_super_main() {
   # the result into FM_SUPERVISOR_TARGET makes inject_msg (which reads that env
   # var) use the discovered endpoint without an extra global.
   local discovered target_source resolved=1
-  discovered=$(discover_supervisor_target) || resolved=0
+  if [ "$BACKEND" = t3code ]; then
+    fm_supervisor_bind_t3code_target || {
+      echo "error: T3 supervisor discovery could not bind its creation server" >&2
+      exit 1
+    }
+    discovered=$FM_SUPERVISOR_TARGET
+  else
+    discovered=$(discover_supervisor_target) || resolved=0
+  fi
   target_source="FM_SUPERVISOR_TARGET"
   if [ -z "${FM_SUPERVISOR_TARGET:-}" ]; then
     if [ -n "${TMUX_PANE:-}" ]; then

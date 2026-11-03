@@ -63,6 +63,9 @@ fm_backend_t3code_tool_check() {
 # Every failure prints one stderr line.
 fm_backend_t3code_admitted_server() {
   local thread=$1 meta binding server=${FM_T3CODE_EXPECTED_SERVER:-${FM_T3CODE_TASK_SERVER:-}}
+  if [ -z "$server" ] && [ "$thread" = "${FM_T3CODE_SUPERVISOR_THREAD:-}" ]; then
+    server=${FM_T3CODE_SUPERVISOR_SERVER:-}
+  fi
   if [ -z "$server" ]; then
     meta=$(fm_backend_meta_for_window "$thread" "${FM_STATE_OVERRIDE:-$FM_HOME/state}" 2>/dev/null) || meta=
     if [ -n "$meta" ]; then
@@ -80,14 +83,23 @@ fm_backend_t3code_admitted_server() {
 
 fm_backend_t3code_mcp() {
   command -v node >/dev/null 2>&1 || { echo "error: backend=t3code selected but 'node' is not installed" >&2; return 1; }
-  local expected=${FM_T3CODE_EXPECTED_SERVER:-${FM_T3CODE_TASK_SERVER:-}} arg previous= thread=
+  local expected=${FM_T3CODE_EXPECTED_SERVER:-${FM_T3CODE_TASK_SERVER:-}} arg previous= thread= admitted
   for arg in "$@"; do
-    [ "$previous" != --thread ] || thread=$arg
+    if [ "$previous" = --thread ]; then
+      thread=$arg
+      if [ "$1" = watch ]; then
+        admitted=$(unset FM_T3CODE_EXPECTED_SERVER FM_T3CODE_TASK_SERVER; fm_backend_t3code_admitted_server "$thread") || return 1
+      else
+        admitted=$(fm_backend_t3code_admitted_server "$thread") || return 1
+      fi
+      [ -z "$expected" ] || [ "$expected" = "$admitted" ] || {
+        echo "error: T3 request contains threads from different creation servers" >&2
+        return 1
+      }
+      expected=$admitted
+    fi
     previous=$arg
   done
-  if [ -z "$expected" ] && [ -n "$thread" ]; then
-    expected=$(fm_backend_t3code_admitted_server "$thread") || return 1
-  fi
   if [ -z "$expected" ]; then
     case "$1" in
       status|project-ensure|resolve-selection|thread-for-root) expected=$(fm_backend_t3code_server_identity) || return 1 ;;
@@ -188,9 +200,13 @@ fm_backend_t3code_thread_create() {  # <project-id> <title> <branch> <worktree> 
 fm_backend_t3code_thread_for_home() {  # <home> -> thread id
   local home=$1 real out rc
   real=$(cd "$home" 2>/dev/null && pwd -P) || return 1
-  out=$(fm_backend_t3code_mcp thread-for-root --root "$real" 2>/dev/null) && rc=0 || rc=$?
+  out=$(fm_backend_t3code_mcp thread-for-root --root "$real" --target "${3:-}" 2>/dev/null) && rc=0 || rc=$?
   case "$rc" in
-    0) printf '%s' "$out" | fm_backend_t3code_json_get threadId ;;
+    0)
+      if [ "${2:-}" = binding ]; then printf '%s' "$out"; else
+        printf '%s' "$out" | fm_backend_t3code_json_get threadId
+      fi
+      ;;
     6)
       printf '%s' "$out" | node -e '
 const d = JSON.parse(require("fs").readFileSync(0, "utf8"));

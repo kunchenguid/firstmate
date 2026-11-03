@@ -818,6 +818,60 @@ test_recorded_t3_callers_refuse_server_switch() (
   pass "metadata send and failed-run recovery preserve the recorded T3 server"
 )
 
+test_discovered_t3_supervisor_delivers_without_task_metadata() {
+  local state out
+  t3_case discovered-supervisor running
+  state="$CASE_DIR/state"
+  mkdir -p "$state"
+  out=$(t3_run '
+    unset FM_T3CODE_TASK_SERVER FM_T3CODE_EXPECTED_SERVER FM_SUPERVISOR_TARGET
+    . "$0/bin/fm-supervise-daemon.sh"
+    FM_HOME=$2 FM_SUPERVISOR_BACKEND=t3code FM_DAEMON_PRIMARY_HARNESS=codex
+    fm_supervisor_bind_t3code_target || exit 1
+    node -e "const fs=require(\"fs\"), f=process.argv[1], w=JSON.parse(fs.readFileSync(f)); w.threads[\"thread-live\"].status=\"completed\"; w.threads[\"thread-live\"].activeRunId=null; fs.writeFileSync(f,JSON.stringify(w));" "$3"
+    afk_enter "$1"
+    escalate_add "$1" "discovered supervisor event"
+    escalate_flush "$1"
+  ' "$state" "$REPO" "$T3_FAKE_WORLD" 2>&1) || fail "discovered T3 supervisor did not receive its digest: $out"
+  [ ! -s "$state/.subsuper-escalations" ] || fail "delivered supervisor digest stayed buffered"
+  [ "$(t3_fake_calls t3_thread_send | grep -c .)" = 1 ] || fail "supervisor discovery did not deliver exactly once"
+  pass "T3 supervisor discovery retains its verified server through digest delivery"
+}
+
+test_t3_watch_refuses_mixed_recorded_servers() {
+  local state server other out rc marker
+  t3_case mixed-watch completed
+  t3_world "$(t3_thread_json thread-old completed false)" "$(t3_thread_json thread-new completed false)"
+  state="$CASE_DIR/state"
+  mkdir -p "$state"
+  server=$(t3_run fm_backend_t3code_server_identity)
+  other='["http://127.0.0.1:9","env-other"]'
+  fm_write_meta "$state/old.meta" "window=fm-old" "backend=t3code" "t3_thread_id=thread-old" "t3_server=$other"
+  fm_write_meta "$state/new.meta" "window=fm-new" "backend=t3code" "t3_thread_id=thread-new" "t3_server=$server"
+  marker=$(t3_run 'fm_backend_t3code_escalation_marker "$1" thread-old' "$state")
+  printf 'pending-signature' > "$marker"
+  out=$(t3_run '
+    unset FM_T3CODE_TASK_SERVER FM_T3CODE_EXPECTED_SERVER
+    fm_backend_t3code_wait_transition ignored 0.01 "$1" thread-old thread-new
+  ' "$state" 2>&1); rc=$?
+  expect_code 2 "$rc" "mixed-server watch must refuse: $out"
+  [ ! -s "$LOG" ] || fail "mixed-server watch contacted the selected server"
+  [ "$(cat "$marker")" = pending-signature ] || fail "mixed-server watch cleared another server task marker"
+  fm_write_meta "$state/old.meta" "window=fm-old" "backend=t3code" "t3_thread_id=thread-old" "t3_server=$server"
+  out=$(t3_run '
+    unset FM_T3CODE_TASK_SERVER FM_T3CODE_EXPECTED_SERVER
+    fm_backend_t3code_wait_transition ignored 0.01 "$1" thread-old thread-new
+  ' "$state" 2>&1); rc=$?
+  expect_code 1 "$rc" "same-server idle batch should complete normally: $out"
+  [ -s "$LOG" ] || fail "same-server watch did not read its threads"
+  pass "T3 watch validates every recorded server before opening a shared session"
+}
+
+test_discovery_and_watch_server_bindings() {
+  test_discovered_t3_supervisor_delivers_without_task_metadata || return
+  test_t3_watch_refuses_mixed_recorded_servers
+}
+
 test_server_bound_cleanup_paths() {
   test_recorded_t3_callers_refuse_server_switch || return
   test_failed_t3_secondmate_is_resumed_in_place
@@ -3093,6 +3147,8 @@ test_frozen_flush_keeps_the_next_generation_arrival
 test_daemon_defers_digest_while_supervisor_waits_on_request
 test_helper_through_symlinked_root_reaches_t3_and_kill_fails_closed
 test_draining_archived_t3_secondmate_is_not_relaunched
+test_discovered_t3_supervisor_delivers_without_task_metadata
+test_t3_watch_refuses_mixed_recorded_servers
 test_recorded_t3_callers_refuse_server_switch
 test_cleanup_refuses_switched_server_credential
 test_kill_interrupts_then_archives_and_tolerates_gone
