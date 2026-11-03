@@ -30,7 +30,8 @@
 #     the rollup holds only checks that reported; an unreadable requirement
 #     is unclean;
 #   - no changes requested (GitHub reviewDecision; GitLab requested_changes);
-#   - zero unresolved review threads, all of them read;
+#   - zero unresolved review threads, all of them read (a failed GitLab
+#     discussions read counts as not all read);
 #   - automated reviewers settled: every reviewer bot that has ever posted on
 #     the PR has submitted a review bound to the current head (a comment, or a
 #     comment edited later, does not prove its review finished), or the quiet
@@ -337,7 +338,8 @@ GITHUB_NORMALIZE='
         | map(select(.at != null)))
     }'
 
-# A failed paginated page fails the whole read, so normalized discussions are complete.
+# The third input is false when the discussions read failed, so threads_complete
+# reports that the same way a truncated GitHub read does.
 GITLAB_NORMALIZE='
   .[0] as $mr | .[1] as $d
   | if ($mr | type) != "object" or ($d | type) != "array" then error("invalid merge request read") else . end
@@ -364,7 +366,7 @@ GITLAB_NORMALIZE='
       pushed_at: ($hp.created_at // null),
       changes_requested: ($s == "requested_changes"),
       threads_unresolved: ([$d[].notes[]? | select(.resolvable == true and .resolved != true)] | length),
-      threads_complete: true,
+      threads_complete: (.[2] == true),
       comments_complete: true,
       activity: [$d[] | .notes[]? | select(.system != true)
         | {author: (.author.username // "ghost"), bot: false, at: .created_at,
@@ -394,7 +396,7 @@ github_required_unreported() {  # <graphql-json>
 # required checks not yet reported on the head (null when unreadable), which
 # only the gate reads.
 snapshot() {  # <pr-url> [--required]
-  local url=$1 raw mr discussions enc secs snap missing
+  local url=$1 raw mr discussions enc secs snap missing complete
   fm_pr_url_parse "$url" || return 1
   case "$FM_PR_PROVIDER" in
     github)
@@ -424,13 +426,20 @@ snapshot() {  # <pr-url> [--required]
       mr=$(fm_run_timed "$secs" glab api --hostname "$FM_PR_HOST" \
         "projects/$enc/merge_requests/$FM_PR_NUMBER" 2>/dev/null) || return 1
       secs=$(step_secs "$READ_SECS") || return 1
-      discussions=$(fm_run_timed "$secs" glab api --paginate --hostname "$FM_PR_HOST" \
-        "projects/$enc/merge_requests/$FM_PR_NUMBER/discussions?per_page=100" 2>/dev/null) || return 1
-      [ -n "$discussions" ] || return 1
+      # A failed merge request read above means the forge is unreadable and
+      # retries; a failed discussions read here reports incomplete threads.
       # --paginate prints one JSON array per page; together they are one list.
-      discussions=$(printf '%s\n' "$discussions" \
-        | jq -cs '[.[] | if type == "array" then .[] else error("invalid discussions page") end]' 2>/dev/null) || return 1
-      printf '%s\n%s\n' "$mr" "$discussions" | jq -cs "$GITLAB_NORMALIZE" 2>/dev/null
+      if discussions=$(fm_run_timed "$secs" glab api --paginate --hostname "$FM_PR_HOST" \
+        "projects/$enc/merge_requests/$FM_PR_NUMBER/discussions?per_page=100" 2>/dev/null) \
+        && [ -n "$discussions" ] \
+        && discussions=$(printf '%s\n' "$discussions" \
+          | jq -cs '[.[] | if type == "array" then .[] else error("invalid discussions page") end]' 2>/dev/null); then
+        complete=true
+      else
+        discussions='[]'
+        complete=false
+      fi
+      printf '%s\n%s\n%s\n' "$mr" "$discussions" "$complete" | jq -cs "$GITLAB_NORMALIZE" 2>/dev/null
       ;;
     *) return 1 ;;
   esac
