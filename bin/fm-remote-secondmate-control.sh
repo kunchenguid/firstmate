@@ -457,6 +457,9 @@ cmd_observe() {
   # shellcheck source=bin/fm-busy-lib.sh
   . "$SCRIPT_DIR/fm-busy-lib.sh"
   printf 'verdict=%s\n' "$(fm_busy_classify_meta "$REMOTE_ENDPOINT_META" "$id" "$CONTROL_STATE")"
+  local record
+  record=$(fm_busy_record_read "$CONTROL_STATE" "$id") || record=
+  printf 'event=%s\n' "$(printf '%s\n' "$record" | awk '{print $3}')"
   printf 'busy_gen=%s\n' "$(fm_meta_get "$REMOTE_ENDPOINT_META" busy_gen)"
 }
 

@@ -2885,14 +2885,16 @@ start_check_remote() {  # <id> <verb> [args...]; output in WATCHER_CAPTURE
 # produced (a hook-written record, or a settled Muse or Cursor session). Idle
 # from the rendered-text fallbacks proves nothing, since a parked dialog renders
 # no busy footer either.
-start_check_verdict_proves() {  # <verdict>
+start_check_verdict_proves() {  # <verdict> <event>
   case "$1" in
     'busy fm-spawn') return 1 ;;
     busy\ *) return 0 ;;
     idle\ fm-spawn | idle\ fm-interrupt | idle\ fm-recovery | idle\ *-regex) return 1 ;;
-    idle\ *) return 0 ;;
+    idle\ claude-hook) [ "$2" = Stop ] ;;
+    idle\ gemini-hook) [ "$2" = AfterAgent ] ;;
+    idle\ pi-ext | idle\ omp-ext) [ "$2" = agent_end ] || [ "$2" = agent_settled ] ;;
+    idle\ *) return 1 ;;
   esac
-  return 1
 }
 
 # 0 when <id> shows positive evidence it began its brief at or after <epoch>: a
@@ -2912,10 +2914,13 @@ start_check_started() {  # <id> <meta> <epoch> [record-gen]
     [ "$(printf '%s\n' "$WATCHER_CAPTURE" | head -1)" = busy ] && return 0
     [ "$gen" != - ] \
       && [ "$(printf '%s\n' "$WATCHER_CAPTURE" | sed -n 's/^busy_gen=//p' | head -1)" = "$gen" ] \
-      && start_check_verdict_proves "$(printf '%s\n' "$WATCHER_CAPTURE" | sed -n 's/^verdict=//p' | head -1)"
+      && start_check_verdict_proves "$(printf '%s\n' "$WATCHER_CAPTURE" | sed -n 's/^verdict=//p' | head -1)" "$(printf '%s\n' "$WATCHER_CAPTURE" | sed -n 's/^event=//p' | head -1)"
     return
   fi
-  start_check_verdict_proves "$(fm_busy_classify_meta "$meta" "$id" "$STATE")" && return 0
+  local record event
+  record=$(fm_busy_record_read "$STATE" "$id") || record=
+  event=$(printf '%s\n' "$record" | awk '{print $3}')
+  start_check_verdict_proves "$(fm_busy_classify_meta "$meta" "$id" "$STATE")" "$event" && return 0
   case "$(fm_meta_get "$meta" harness)" in
     codex*)
       backend=$(fm_backend_of_meta "$meta")

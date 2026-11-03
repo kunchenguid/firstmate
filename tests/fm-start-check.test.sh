@@ -202,6 +202,20 @@ test_claude_dialog_has_no_key() {
   pass "a Claude dialog is named without a key route"
 }
 
+test_claude_session_end_is_not_start_proof() {
+  reset_state
+  open_shell_pane ce1 "claude exited"
+  arm_task ce1 claude 1000
+  "$ROOT/bin/fm-busy-event.sh" apply "$STATE" ce1 idle --gen "$ARMED_GEN" --source claude-hook --event SessionEnd >/dev/null \
+    || fail "Claude SessionEnd apply"
+  start_check_tick 1200 || fail "tick failed"
+  case "$START_CHECK_WAKE" in
+    *"worker exited before starting"*) ;;
+    *) fail "Claude SessionEnd suppressed the exited-worker wake: $START_CHECK_WAKE" ;;
+  esac
+  pass "Claude SessionEnd alone does not prove a start"
+}
+
 test_dead_agent_names_relaunch() {
   reset_state
   # The agent died while its trust dialog was painted, so the pane keeps that
@@ -554,6 +568,7 @@ fm_test_run \
   test_launch_epoch_excludes_existing_markers \
   test_pi_dialog_named_once \
   test_claude_dialog_has_no_key \
+  test_claude_session_end_is_not_start_proof \
   test_dead_agent_names_relaunch \
   test_missing_endpoint_names_recovery \
   test_pending_composer_names_submit \
