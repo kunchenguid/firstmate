@@ -2315,7 +2315,7 @@ On 2026-10-08, Orca CLI 1.4.222 did not accept a window title as a terminal hand
 The current send-time contract is owned by [`orca-backend.md`](../orca-backend.md#task-shape-and-metadata).
 `tests/fm-backend-orca.test.sh` pins fake-CLI delivery for both restart errors, unchanged healthy-handle commands, missing and ambiguous selector refusal, replacement-dialog guards, inbox draft and busy deferral, exact-own-doorbell retries, and explicit typed and key semantics.
 `tests/fm-orca-submit-restart.test.sh` covers inbox restarts before typing and before Enter, replacement content changing during settle, retained watcher retry marks, and the original endpoint's two-Enter budget.
-`tests/fm-orca-typed-restart.test.sh` covers a typed slash command lost during restart, unconfirmed exit 3 without retyping or further Enter attempts, a failed Enter after typed acceptance reported as unconfirmed rather than not sent, and unchanged original-endpoint submission.
+`tests/fm-orca-typed-restart.test.sh` covers a typed slash command lost during restart, unconfirmed exit 3 without retyping or further Enter attempts, a failed Enter after typed acceptance reported as unconfirmed rather than not sent, a failed Enter whose composer read proves the command ran reported as delivered, and unchanged original-endpoint submission. `tests/fm-composer-lib.test.sh` pins the shared verdict for that failed-Enter read on both the typed and inbox planes.
 
 ### Orca environment source
 

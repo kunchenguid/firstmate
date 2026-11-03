@@ -1771,6 +1771,58 @@ fm_test_picker_state() {
   fm_composer_classify_screen 'styled=1' "$FM_TEST_PICKER_SCREEN" 1
 }
 
+# A failed Enter after the text was accepted is the uncertain-delivery class:
+# the text may already have been submitted, so reporting `send-failed` would
+# invite a retype that duplicates a delivered message. One composer read
+# decides: empty proves the text left the pane, anything else stays
+# unconfirmed (typed) or deferred (inbox) and never retries in the same send.
+fm_test_enter_send() {
+  printf 'Enter\n' >> "$FM_TEST_ENTER_ENTERS"
+  return "$FM_TEST_ENTER_SEND_RC"
+}
+
+fm_test_enter_state() { printf '%s' "$FM_TEST_ENTER_STATE"; }
+
+test_failed_enter_after_accepted_text_never_claims_non_delivery() {
+  local out enters
+  FM_TEST_ENTER_ENTERS=$(mktemp)
+  : > "$FM_TEST_ENTER_ENTERS"
+  # The adapter always defines its resolved-endpoint variable; an empty value
+  # means the Enter stayed on the endpoint that received the text.
+  FM_TEST_RESOLVED_TARGET=
+
+  # Typed plane: the read proves the text left the pane, so this is a
+  # delivered submit, not a failure a caller should retry.
+  FM_TEST_ENTER_SEND_RC=1
+  FM_TEST_ENTER_STATE=empty
+  out=$(unset FM_TASK_INBOX_RING_LINE; fm_composer_submit_retry_core \
+    fm_test_enter_send fm_test_enter_state win 3 0 "" FM_TEST_RESOLVED_TARGET)
+  [ "$out" = empty ] || fail "a failed Enter whose text left the pane must report the submitted verdict, got '$out'"
+
+  # Typed plane: text still pending is unconfirmed, never `send-failed`.
+  FM_TEST_ENTER_STATE=pending
+  out=$(unset FM_TASK_INBOX_RING_LINE; fm_composer_submit_retry_core \
+    fm_test_enter_send fm_test_enter_state win 3 0 "" FM_TEST_RESOLVED_TARGET)
+  [ "$out" = pending ] || fail "a failed Enter with the text still pending must stay unconfirmed, got '$out'"
+
+  # Inbox plane: the same proofs become a delivered ring or a deferral, so the
+  # watcher never re-types a doorbell that already left the pane.
+  FM_TEST_ENTER_STATE=empty
+  out=$(FM_TASK_INBOX_RING_LINE=doorbell fm_composer_submit_retry_core \
+    fm_test_enter_send fm_test_enter_state win 3 0 "" FM_TEST_RESOLVED_TARGET)
+  [ "$out" = empty ] || fail "an inbox ring whose doorbell left the pane must report delivered, got '$out'"
+  FM_TEST_ENTER_STATE=pending
+  out=$(FM_TASK_INBOX_RING_LINE=doorbell fm_composer_submit_retry_core \
+    fm_test_enter_send fm_test_enter_state win 3 0 "" FM_TEST_RESOLVED_TARGET)
+  [ "$out" = inbox-deferred ] || fail "an inbox ring with the doorbell still pending must defer, got '$out'"
+
+  enters=$(grep -c . "$FM_TEST_ENTER_ENTERS" || true)
+  [ "$enters" -eq 4 ] || fail "a failed Enter must never be retried in the same send, saw $enters attempts"
+  rm -f "$FM_TEST_ENTER_ENTERS"
+  unset FM_TEST_ENTER_SEND_RC FM_TEST_ENTER_STATE FM_TEST_RESOLVED_TARGET
+  pass "a failed Enter after accepted text proves delivery or stays unconfirmed, never send-failed"
+}
+
 test_background_exit_picker_stays_pending_and_blocks_retry() {
   local screen out rc sink enters
   screen=$(exit_picker_screen)
@@ -1904,6 +1956,7 @@ test_background_exit_picker_stays_pending_and_blocks_retry
 test_dialog_heading_and_footer_must_be_the_recorded_lines
 test_dialog_note_skips_the_match_when_no_sink_is_set
 test_quoted_exit_picker_text_is_not_a_dialog
+test_failed_enter_after_accepted_text_never_claims_non_delivery
 test_kiro_near_gray_ghost_is_stripped_and_real_text_survives
 test_kiro_palette_gray_ghost_is_stripped_and_chromatic_indexes_survive
 test_composer_widening_is_kiro_only

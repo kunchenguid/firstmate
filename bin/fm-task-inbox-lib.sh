@@ -428,8 +428,11 @@ fm_task_inbox_ring() {  # <backend> <target> <record-path> [expected-label]
   if ! verdict=$(fm_backend_send_text_submit "$backend" "$target" "$FM_TASK_INBOX_RING_LINE" 2 0.4 0.3 "$label" 2>/dev/null); then
     return 2
   fi
-  # Only explicit deferral or send failure changes the ring status; composer
-  # verdicts (empty, pending, unknown, ...) remain advisory, never proof.
+  # Only explicit deferral or send failure changes the ring status; ordinary
+  # composer verdicts (pending, unknown, ...) remain advisory, never proof. The
+  # one exception is the core's failed-Enter `empty` read: the doorbell
+  # provably left the pane, so the ring is delivered and a re-ring would
+  # duplicate it.
   case "$verdict" in
     inbox-deferred) return 1 ;;
     send-failed) return 2 ;;

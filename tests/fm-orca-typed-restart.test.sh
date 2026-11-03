@@ -5,7 +5,7 @@ set -u
 
 TMP_ROOT=$(fm_test_tmproot fm-orca-typed-restart)
 
-for mode in restart restart-failure restart-dialog healthy healthy-retry enter-failure replacement-failure replacement-pending replacement-healthy; do
+for mode in restart restart-failure restart-dialog healthy healthy-retry enter-failure enter-failure-submitted replacement-failure replacement-pending replacement-healthy; do
   fixture="$TMP_ROOT/$mode"
   mkdir -p "$fixture/fakebin" "$fixture/root/bin" "$fixture/state" "$fixture/worktree"
   printf '#!/usr/bin/env bash\nexit 0\n' > "$fixture/root/bin/fm-guard.sh"
@@ -44,7 +44,14 @@ if (args[0] === 'status') {
 } else if (args[1] === 'send') {
   if (args.includes('--enter')) {
     fs.appendFileSync(dir + '/enters', terminal + '\n');
-    if (mode === 'enter-failure' || mode === 'replacement-failure' || (mode === 'restart-failure' && terminal === 'live')) {
+    if (mode === 'enter-failure-submitted') {
+      // The keystroke reached the pane before the runtime reported the error,
+      // so the command ran and the composer is empty.
+      fs.writeFileSync(dir + '/submitted', fs.readFileSync(dir + '/composer', 'utf8'));
+      fs.writeFileSync(dir + '/composer', '');
+      console.log(JSON.stringify({ok: false, error: {code: 'send_failed', message: 'temporary runtime error'}}));
+      process.exitCode = 1;
+    } else if (mode === 'enter-failure' || mode === 'replacement-failure' || (mode === 'restart-failure' && terminal === 'live')) {
       console.log(JSON.stringify({ok: false, error: {code: 'send_failed', message: 'temporary runtime error'}}));
       process.exitCode = 1;
     } else if (terminal === 'old' && fs.existsSync(dir + '/restarted')) {
@@ -105,6 +112,14 @@ JS
     [ "$(cat "$fixture/enters")" = old ] || fail "enter-failure: Enter was retried after a non-stale failure"
     assert_contains "$(cat "$fixture/out")" "fm-peek.sh" "original endpoint lost inspection guidance"
     [ ! -s "$fixture/submitted" ] || fail "enter-failure unexpectedly submitted the command"
+  elif [ "$mode" = enter-failure-submitted ]; then
+    # The Enter reported failure, but the read proves the text left the pane:
+    # that is a delivered submit, and retrying it would double-send.
+    [ "$rc" = 0 ] || fail "enter-failure-submitted: expected delivered exit 0, got $rc: $(cat "$fixture/out")"
+    [ "$(cat "$fixture/submitted")" = /status ] || fail "enter-failure-submitted: command was not recorded as submitted"
+    [ "$(cat "$fixture/enters")" = old ] || fail "enter-failure-submitted: Enter was retried after a non-stale failure"
+    [ ! -s "$fixture/composer" ] || fail "enter-failure-submitted: composer did not clear"
+    assert_not_contains "$(cat "$fixture/out")" "text not sent" "enter-failure-submitted claimed the accepted text was not sent"
   else
     [ "$rc" = 0 ] || fail "$mode: original endpoint send failed: $(cat "$fixture/out")"
     [ "$(cat "$fixture/submitted")" = /status ] || fail "$mode: slash command was not submitted"
