@@ -16,6 +16,7 @@ GNHF is an agent orchestrator: it repeatedly calls another coding agent until a 
 This skill teaches the host agent to prepare one durable run and, in Companion mode, steer or review it.
 
 Core rule: the host agent orchestrates; GNHF executes.
+The launcher runs as one supervised job bound to a task record - a ship worker running `bin/fm-gnhf.sh --task <id>` inside its own task, or an equivalent supervised background job bound to a task id - so the task's watcher, its brief contract, and the project's delivery path all still apply, and no host turn blocks on the run.
 Do not manually implement inside the same scope while a GNHF worker is responsible for it unless the user explicitly changes the delegation.
 
 In Companion mode, GNHF completion is not user acceptance.
@@ -30,9 +31,9 @@ Choose exactly one mode for the run.
 Use when the task is bounded, verification is clear, and the user wants one configured run to proceed without steering.
 
 - Prepare a precise prompt with constraints, non-goals, verification, and stop condition.
-- Launch GNHF and wait for completion.
+- Launch GNHF as that supervised job, then return to other work; its status arrives through the task's durable status channel.
 - Intervene early only for hard failure, runaway scope, destructive behavior, or impossible prerequisites.
-- Report the final GNHF status after exit.
+- Report the final GNHF status once the task's status channel shows the run exited.
 
 Examples:
 
@@ -46,7 +47,7 @@ Use when the task is uncertain, exploratory, design-heavy, research-heavy, or li
 Default to Companion when the user asks to iterate until satisfied, requests multi-round work, provides review findings, asks for design/skill/documentation improvement, or asks for supervision.
 
 - Keep a note of original intent, branch, session id, and last known result.
-- Poll the active GNHF process until exit or until an intervention point appears.
+- Read the run's durable status lines and preserved worktree at each intervention point; never busy-poll the process or hold a host turn open waiting on it.
 - Intervene when the worker optimizes the wrong thing, repeats failed fixes, skips requested research, drifts scope, or claims success without evidence.
 - Treat review findings as the next acceptance criteria.
 - Prefer a new bounded GNHF prompt over manually taking over implementation.
@@ -58,8 +59,10 @@ Examples:
 
 ## Launch
 
-In this home, launch GNHF through `bin/fm-gnhf.sh --project <name> -- <gnhf arguments...>`: its header owns the guard, the per-run authorization tokens, the durable run record, and how results are reviewed.
+In this home, launch GNHF through `bin/fm-gnhf.sh --task <id> --project <name> -- <gnhf arguments...>`: its header owns the guard, the per-run authorization tokens, the durable run record, the task status mirror, and how results are reviewed.
 That wrapper is the only supported launch path, because a bare `gnhf` call could run in the project's primary checkout or publish a branch without the captain's word for that run.
+
+This file vendors the GNHF skill text at GNHF 0.1.50; when updating it, re-vendor from that pinned upstream release rather than editing the copy from memory, and move the pin deliberately in the same change once the CLI shape it documents has changed.
 
 Check the installed CLI before relying on flags:
 

@@ -27,12 +27,20 @@ cat > "$FAKEBIN/gnhf" <<'SH'
 {
   printf 'cwd=%s\n' "$PWD"
   printf 'telemetry=%s\n' "${GNHF_TELEMETRY-unset}"
+  printf 'run_auth=%s\n' "${FM_GNHF_RUN_AUTH-unset}"
   i=0
   for arg in "$@"; do
     i=$((i + 1))
     printf 'arg%s=%s\n' "$i" "$arg"
   done
 } > "$FM_GNHF_TEST_CALL"
+# The termination case needs a child that outlives the launch and can be
+# signalled. exec replaces this shell, so the recorded pid is the worker itself
+# and a stopped child cannot leave a stray grandchild behind.
+if [ -n "${FM_GNHF_TEST_SLEEP:-}" ]; then
+  printf '%s\n' "$$" > "$FM_GNHF_TEST_PID"
+  exec sleep "$FM_GNHF_TEST_SLEEP"
+fi
 printf 'fake gnhf output\n'
 exit "${FM_GNHF_TEST_RC:-0}"
 SH
@@ -149,6 +157,54 @@ test_failed_run_is_recorded() {
   pass "fm-gnhf: a failed run propagates gnhf's exit status and records failure"
 }
 
+test_authorization_does_not_reach_the_child() {
+  AUTH=push
+  run_gnhf --project demo -- --push "do the work"
+  [ "$RC" -eq 0 ] || fail "an authorized --push run failed: $RC ($OUT)"
+  assert_contains "$(cat "$CALL")" $'run_auth=unset\n' "the per-run authorization reached the gnhf child"
+  pass "fm-gnhf: the per-run authorization is unset in the gnhf child's environment"
+}
+
+test_termination_stops_the_child_and_records_failure() {
+  local out="$TMP_ROOT/terminate.out" pidfile="$TMP_ROOT/terminate.pid"
+  local launcher_pid child rc waited status
+  rm -rf "$HOME_DIR/state/gnhf" "$out" "$pidfile" "$HOME_DIR/state/t-term.status"
+  env PATH="$FAKEBIN:$PATH" FM_HOME="$HOME_DIR" FM_GNHF_TEST_CALL="$CALL" \
+    FM_GNHF_TEST_SLEEP=30 FM_GNHF_TEST_PID="$pidfile" \
+    "$LAUNCHER" --task t-term --project demo -- "do the work" >"$out" 2>&1 &
+  launcher_pid=$!
+  waited=0
+  while [ ! -s "$pidfile" ] && [ "$waited" -lt 100 ]; do
+    sleep 0.1
+    waited=$((waited + 1))
+  done
+  if [ ! -s "$pidfile" ]; then
+    kill -TERM "$launcher_pid" 2>/dev/null
+    wait "$launcher_pid" 2>/dev/null
+    fail "the fake gnhf never recorded its pid"
+  fi
+  child=$(cat "$pidfile")
+  # Let the launcher reach its wait loop and install the termination traps.
+  sleep 0.3
+  kill -TERM "$launcher_pid"
+  wait "$launcher_pid"
+  rc=$?
+  [ "$rc" -eq 143 ] || fail "a terminated run exited $rc, expected 143"
+  if kill -0 "$child" 2>/dev/null; then
+    kill -KILL "$child" 2>/dev/null
+    fail "the gnhf child was still running after the launcher was terminated"
+  fi
+  # The state directory was cleared above, so the terminated run's status log is
+  # the only match; a literal unexpanded pattern fails the existence check.
+  local -a statuses=("$HOME_DIR"/state/gnhf/*.status)
+  status=${statuses[0]}
+  [ -e "$status" ] || fail "the terminated run wrote no status log"
+  assert_contains "$(cat "$status")" 'failed [at=' "a terminated run wrote no terminal status line"
+  assert_contains "$(cat "$status")" 'stopped by SIGTERM' "the terminal status did not name the signal"
+  assert_contains "$(cat "$HOME_DIR/state/t-term.status")" 'stopped by SIGTERM' "the task status log did not record the termination"
+  pass "fm-gnhf: SIGTERM stops the gnhf child and records a terminal status in both logs"
+}
+
 test_print_plan_does_not_launch() {
   run_gnhf --project demo --print-plan -- --agent claude "do the work"
   [ "$RC" -eq 0 ] || fail "--print-plan failed: $RC ($OUT)"
@@ -172,4 +228,6 @@ fm_test_run \
   test_unregistered_project_defaults_to_no_mistakes_off \
   test_task_status_is_appended \
   test_failed_run_is_recorded \
+  test_authorization_does_not_reach_the_child \
+  test_termination_stops_the_child_and_records_failure \
   test_print_plan_does_not_launch
