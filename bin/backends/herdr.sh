@@ -2774,13 +2774,22 @@ fm_backend_herdr_projection_create_task() {  # <cwd> <workspace-label> <task-lab
 
 # fm_backend_herdr_projection_cleanup_exact: same-process abort cleanup for a
 # projection whose create calls returned complete exact IDs.
-# It performs no lookup and never calls workspace close.
+# It performs no lookup and never calls workspace close. It succeeds only when
+# the task pane is confirmed gone, so a caller can tell nothing is left open
+# there. A failed close call is followed by an exact presence check, because
+# the close can confirm the pane gone and then fail only to restore focus.
 fm_backend_herdr_projection_cleanup_exact() {  # <session> <task-pane> <seeded-pane>
-  local session=$1 task_pane=$2 seeded_pane=$3
-  [ -z "$task_pane" ] || fm_backend_herdr_projection_close_pane_focus_preserving "$session" "$task_pane" || true
+  local session=$1 task_pane=$2 seeded_pane=$3 task_closed=1
+  if [ -n "$task_pane" ]; then
+    if fm_backend_herdr_projection_close_pane_focus_preserving "$session" "$task_pane" ||
+      [ "$(fm_backend_herdr_pane_presence_state "$session" "$task_pane")" = dead ]; then
+      task_closed=0
+    fi
+  fi
   if [ -n "$seeded_pane" ] && [ "$seeded_pane" != "$task_pane" ]; then
     fm_backend_herdr_projection_close_pane_focus_preserving "$session" "$seeded_pane" || true
   fi
+  return "$task_closed"
 }
 
 # fm_backend_herdr_projection_parent_workspace_exact: resolve one exact parent
