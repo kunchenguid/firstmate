@@ -449,12 +449,10 @@ fm_task_inbox_check_pending() {
 fm_task_inbox_composer_holds() {  # <backend> <target> <line> [expected-label]
   local cap held
   fm_backend_source "$1" || return 1
-  if cap=$(fm_backend_capture "$1" "$2" "$FM_COMPOSER_CAPTURE_LINES" "${4:-}" 2>/dev/null) \
-     && held=$(fm_composer_extract_selected_content styled=0 "$cap") \
-     && [ -n "$held" ] && [ "$(printf '%s' "$held" | tr -d '[:space:]')" = "$(printf '%s' "$3" | tr -d '[:space:]')" ]; then
-    return 0
+  if ! held=$(fm_backend_composer_draft "$1" "$2" "${4:-}" 2>/dev/null); then
+    cap=$(fm_backend_capture "$1" "$2" "$FM_COMPOSER_CAPTURE_LINES" "${4:-}" 2>/dev/null) || return 1
+    held=$(fm_composer_extract_selected_content styled=0 "$cap") || return 1
   fi
-  held=$(fm_backend_composer_draft "$1" "$2" "${4:-}" 2>/dev/null) || return 1
   [ -n "$held" ] && [ "$(printf '%s' "$held" | tr -d '[:space:]')" = "$(printf '%s' "$3" | tr -d '[:space:]')" ]
 }
 
