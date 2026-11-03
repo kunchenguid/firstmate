@@ -2016,6 +2016,39 @@ SH
   pass "local retirement retains retry identity until registry publication succeeds"
 }
 
+
+test_pending_record_for_another_backend_is_not_consumed() {
+  local dir mate rc
+  dir=$(make_case backend-mismatch)
+  mate="$dir/mate"
+  mkdir -p "$mate/state" "$mate/data" "$mate/config" "$mate/bin"
+  printf 'mate\n' >"$mate/.fm-secondmate-home"
+  printf 'manual\n' >"$dir/home/config/backlog-backend"
+  fm_write_meta "$dir/home/state/mate.meta" \
+    "window=isolated:fm-mate" "endpoint_task_id=mate" "backend=tmux" \
+    "kind=secondmate" "home=$mate" "worktree=$mate" "project=$dir/project" "spawn_gen=g1"
+  cat >"$mate/bin/fm-procevent.sh" <<'SH'
+#!/usr/bin/env bash
+case "$1" in
+  sweep-home) [ "${2:-}" = --preflight ] || rm -f "$FM_HOME/state/procevent/"*.source ;;
+  reconcile) exit 0 ;;
+esac
+SH
+  chmod +x "$mate/bin/fm-procevent.sh"
+  mkdir -p "$mate/state/procevent"
+  printf 'registration\n' >"$mate/state/procevent/wait.source"
+  # The pending record belongs to a task teardown is not running: it names the
+  # herdr backend while this task recorded tmux. Retention must not write this
+  # launch's outcome into another backend's record.
+  jq -n --arg h "$mate" '{schema:"fm-remote-retirement-pending.v1",task:"mate",home:$h,generation:"g1",target:"isolated:fm-mate",backend:"herdr",phase:"pending",destroyed:false,exit_code:null}' >"$dir/pending.json"
+  rc=0
+  FM_REMOTE_RETIRE_PENDING="$dir/pending.json" run_case "$dir" mate >"$dir/out" 2>"$dir/err" || rc=$?
+  [ "$rc" -eq 1 ] || fail "a pending record for another backend did not stop teardown (exit $rc): $(cat "$dir/err")"
+  jq -e '.exit_code == null' "$dir/pending.json" >/dev/null \
+    || fail "teardown stored this launch's outcome in another backend's pending record"
+  pass "retention refuses a pending record written for another backend"
+}
+
 if [ -n "${FM_TEST_ONLY:-}" ]; then
   "$FM_TEST_ONLY"
   exit
@@ -2052,6 +2085,7 @@ test_remote_seeded_home_returns_its_uncontested_slot
 test_remote_seeded_home_still_refuses_a_slot_its_child_holds
 test_remote_layout_homes_serialize_on_one_project_lock
 
+
 test_retirement_reuses_only_empty_staging
 
 test_local_retirement_resumes_recorded_staging
@@ -2059,4 +2093,5 @@ test_local_retirement_resumes_recorded_staging
 test_retirement_rollback_rearms_on_failure
 test_uncatchable_interruption_still_retries
 test_retirement_retains_child_loss_before_metadata_removal
+test_pending_record_for_another_backend_is_not_consumed
 test_local_retirement_registry_failure_preserves_retry
