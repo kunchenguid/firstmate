@@ -1436,6 +1436,56 @@ test_dirty_pool_retry_preserves_the_copy() {
   pass 'a dirty-copy refusal retains its lease and every edit while retry uses another copy'
 }
 
+test_recorded_secondmate_slot_is_never_reused() {
+  local rec id out status second before mode=${1:-unleased}
+  id="pool-paused-secondmate-$mode-r1"
+  rec=$(make_case "paused-secondmate-$mode" "$id")
+  read_case_record "$rec"
+  lay_out_as_pool_slot
+  second="$CASE_DIR/secondmate-home"
+  mkdir -p "$second/state" "$second/data" "$CASE_DIR/slots/2" "$CASE_DIR/slots/3"
+  printf '%s\n' "- mate - secondmate (home: $second; scope: project; projects: project; added 2026-10-24)" \
+    > "$HOME_DIR/data/secondmates.md"
+  if [ "$mode" = default-tip ]; then
+    git -C "$PROJECT_DIR" fetch --quiet origin main
+    git -C "$POOL_DIR" checkout --quiet --detach origin/main
+  else
+    printf 'paused scout only copy\n' > "$POOL_DIR/paused-scout.txt"
+    git -C "$POOL_DIR" add paused-scout.txt
+    git -C "$POOL_DIR" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm paused-scout
+  fi
+  before=$(git -C "$POOL_DIR" rev-parse HEAD)
+  printf 'kind=scout\nworktree=%s\nproject=%s\n' "$POOL_DIR" "$PROJECT_DIR" \
+    > "$second/state/paused-scout.meta"
+  if [ "$mode" = leased ]; then
+    FM_FAKE_PANE_PATH="$POOL_DIR" "$FAKEBIN_DIR/treehouse" lease 1 --lease-holder original-holder >/dev/null
+  fi
+  git -C "$PROJECT_DIR" worktree add --quiet --detach "$CASE_DIR/slots/2/project" "$INITIAL_SHA"
+  git -C "$PROJECT_DIR" worktree add --quiet --detach "$CASE_DIR/slots/3/project" "$INITIAL_SHA"
+  install_pool_world_tmux "$FAKEBIN_DIR" "$CASE_DIR/world" "$CASE_DIR/slots"
+  out=$(run_spawn "$id" --scout)
+  status=$?
+  expect_code 0 "$status" "spawn should protect the recorded secondmate copy ($mode)"$'\n'"$out"
+  assert_grep "worktree=$CASE_DIR/slots/2/project" "$HOME_DIR/state/$id.meta" 'spawn reused the secondmate slot'
+  [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$before" ] || fail "spawn reset the paused scout's detached commit"
+  if [ "$mode" != default-tip ]; then
+    assert_grep 'paused scout only copy' "$POOL_DIR/paused-scout.txt" "spawn discarded the paused scout's file"
+  fi
+  if [ "$mode" = leased ]; then
+    assert_grep 'original-holder' "$CASE_DIR/slots/1/.test-treehouse-lease" 'spawn changed the existing lease'
+  else
+    assert_grep 'paused-scout' "$CASE_DIR/slots/1/.test-treehouse-lease" 'spawn did not protect the recorded copy'
+  fi
+  "$FAKEBIN_DIR/tmux" kill-window -t "firstmate:fm-$id"
+  fm_test_spawn_brief "$HOME_DIR" "$id-next"
+  out=$(run_spawn "$id-next" --scout)
+  status=$?
+  expect_code 0 "$status" "another spawn should skip recorded copies after restart"$'\n'"$out"
+  assert_grep "worktree=$CASE_DIR/slots/3/project" "$HOME_DIR/state/$id-next.meta" 'another spawn reused a recorded slot'
+  [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$before" ] || fail 'another spawn reset the recorded copy'
+  pass "spawn protects recorded copies across homes and restarts ($mode)"
+}
+
 # Lease errors and mismatched paths refuse before base refresh or metadata.
 test_pool_lease_failures_refuse_before_refresh() {
   local rec id out status case_name
@@ -1467,6 +1517,9 @@ test_pool_lease_failures_refuse_before_refresh() {
 
 test_pool_lease_failures_refuse_before_refresh
 test_dirty_pool_retry_preserves_the_copy
+test_recorded_secondmate_slot_is_never_reused unleased
+test_recorded_secondmate_slot_is_never_reused default-tip
+test_recorded_secondmate_slot_is_never_reused leased
 test_remote_seeded_home_spawns_from_treehouse_pool
 test_pool_slot_claim_follows_the_spawn_outcome
 test_refused_launch_leaves_the_pool_for_a_retry_and_a_second_task

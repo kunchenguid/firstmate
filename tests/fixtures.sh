@@ -402,6 +402,20 @@ fm_test_fake_treehouse() {  # <fakebin>
   cat > "$1/treehouse" <<'SH'
 #!/usr/bin/env bash
 set -u
+if [ "${1:-}" = status ]; then
+  wt=${FM_FAKE_PANE_PATH:?}
+  root=$(dirname "$(dirname "$wt")")
+  rows='[]'
+  for copy in "$root"/*/"$(basename "$wt")"; do
+    [ -d "$copy" ] || continue
+    name=$(basename "$(dirname "$copy")")
+    status=available
+    [ ! -e "$(dirname "$copy")/.test-treehouse-lease" ] || status=leased
+    rows=$(printf '%s\n' "$rows" | jq --arg path "$copy" --arg name "$name" --arg status "$status" '. + [{path: $path, name: $name, status: $status}]')
+  done
+  printf '%s\n' "$rows"
+  exit 0
+fi
 if [ "${1:-}" = lease ]; then
   [ "${2:-}" != --help ] || exit "${FM_FAKE_TREEHOUSE_OLD:-0}"
   [ "${FM_FAKE_TREEHOUSE_LEASE_FAIL:-0}" = 0 ] || { echo 'lease failed' >&2; exit 1; }
