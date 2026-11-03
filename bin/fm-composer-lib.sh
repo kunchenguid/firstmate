@@ -115,7 +115,8 @@
 # (_fm_composer_row_is_composer_furniture): one unclaimed activity row
 # (`Working on request...`) makes the whole run activity and the envelope above
 # it stale, and a row leading with the SAME glyph the envelope was proven by
-# (`❯ my typed draft`) is a live composer that keeps winning. Where a shape
+# (`❯ my typed draft`) keeps winning unless _fm_composer_rule_pair_popup_row
+# proves it is a slash-command popup entry. Where a shape
 # cannot demonstrate which it is, the refusal is the answer. The zone is
 # bounded further by a blank row, and an envelope that closed over no glyph row
 # (codex's `permissions: YOLO mode` startup banner) proves nothing and demotes
