@@ -256,6 +256,17 @@ fm_composer_kiro_scope() {
   [ "${FM_COMPOSER_HARNESS:-}" = kiro ]
 }
 
+# fm_composer_gray_scope: 0 when the caller named the pane's harness kiro or
+# bob through FM_COMPOSER_HARNESS: the harnesses whose idle placeholder is a
+# grey the default ghost ceiling does not reach (kiro's near-gray truecolor,
+# bob 2.0.9's `38;5;243`, greyscale-ramp level 118; verified live). It gates
+# only the grey ceiling and the 256-colour greyscale-ramp test in
+# fm_composer_strip_ghost; the other kiro rules stay on fm_composer_kiro_scope.
+fm_composer_gray_scope() {
+  case "${FM_COMPOSER_HARNESS:-}" in kiro|bob) return 0 ;; esac
+  return 1
+}
+
 # fm_composer_strip_ghost: the ONE fleet-wide ANSI-aware extractor of "real typed
 # content" from a captured, styled composer row. Reads the styled line on stdin
 # (from `tmux capture-pane -e`, `herdr pane read --format ansi`, or
@@ -322,7 +333,7 @@ fm_composer_kiro_scope() {
 # runs alike pass through or drop intact without locale-dependent classes.
 fm_composer_strip_ghost() {
   local grayscope=0
-  fm_composer_kiro_scope && grayscope=1
+  fm_composer_gray_scope && grayscope=1
   LC_ALL=C awk -v lumamax="${FM_COMPOSER_GHOST_LUMA_MAX:-128}" -v grayscope="$grayscope" \
     -v graylumamax="${FM_COMPOSER_GHOST_GRAY_LUMA_MAX:-180}" \
     -v grayspreadmax="${FM_COMPOSER_GHOST_GRAY_SPREAD_MAX:-12}" '
@@ -626,10 +637,13 @@ FM_COMPOSER_SHELL_PROMPT_GLYPHS=$(printf '%s\n' '>' '$' '%' '#')
 # Command Code renders the anchored `Ask your question...`
 # after its `❯` glyph (verified live, Command Code 1.74.1); its truecolor is too
 # bright for the default ghost ceiling, so fm_composer_classify_screen reads its
-# screen with a raised one. kiro's bare `›` composer needs no entry here: see
+# screen with a raised one. Bob renders the anchored `Build Anything, @ for
+# context, / for commands, $ for skills` after its `❯` glyph between two `─`
+# rules (verified live, bob 2.0.9; a 256-colour grey run, with a reverse-video
+# cell after the glyph). kiro's bare `›` composer needs no entry here: see
 # FM_COMPOSER_HINTED_IDLE_RE_DEFAULT below. FM_COMPOSER_IDLE_RE overrides for an unverified harness;
 # matching is case-insensitive.
-FM_COMPOSER_IDLE_RE_DEFAULT='^Type a message\.\.\.$|^Ask anything(\.\.\.|…)|^Plan, search, build anything$|^Add a follow-up$|^Ask Devin to build features, fix bugs, or work on your code$|^Ask your question\.\.\.$|^Type your message\.\.\.$|^Type to queue message\.\.\.$'
+FM_COMPOSER_IDLE_RE_DEFAULT='^Type a message\.\.\.$|^Ask anything(\.\.\.|…)|^Plan, search, build anything$|^Add a follow-up$|^Ask Devin to build features, fix bugs, or work on your code$|^Ask your question\.\.\.$|^Type your message\.\.\.$|^Type to queue message\.\.\.$|^Build Anything, @ for context, / for commands, \$ for skills$'
 
 # KIRO ONLY (fm_composer_kiro_scope): idle placeholders that carry a submit hint
 # typed input never renders, so the whole anchored row proves an empty composer

@@ -5796,7 +5796,7 @@ bob_capture() {
 }
 
 bob_composer_is_empty() {
-  [ "$(fm_backend_composer_state "$BACKEND" "$T" "$W" 2>/dev/null)" = empty ]
+  [ "$(FM_COMPOSER_HARNESS=bob fm_backend_composer_state "$BACKEND" "$T" "$W" 2>/dev/null)" = empty ]
 }
 
 bob_wait_for_ready() {
@@ -8190,7 +8190,7 @@ if [ "$HARNESS" = bob ] && [ "$RAW_LAUNCH" -eq 0 ]; then
   BOB_SUBMIT_RETRIES=${FM_BOB_SUBMIT_RETRIES:-3}
   BOB_SUBMIT_SLEEP=${FM_BOB_SUBMIT_SLEEP:-${FM_BOB_POLL_INTERVAL:-0.5}}
   BOB_SUBMIT_SETTLE=${FM_BOB_SUBMIT_SETTLE:-0}
-  if ! BOB_SUBMIT_VERDICT=$(fm_backend_send_text_submit \
+  if ! BOB_SUBMIT_VERDICT=$(FM_COMPOSER_HARNESS=bob fm_backend_send_text_submit \
     "$BACKEND" "$T" "$BOB_POINTER" "$BOB_SUBMIT_RETRIES" \
     "$BOB_SUBMIT_SLEEP" "$BOB_SUBMIT_SETTLE" "$W") ||
     [ "$BOB_SUBMIT_VERDICT" = send-failed ]; then

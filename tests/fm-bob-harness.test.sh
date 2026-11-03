@@ -21,29 +21,38 @@ make_bob_fakebin() {
 set -u
 printf '%s\n' "$*" >> "$FM_FAKE_TMUX_CALL_LOG"
 state=$(cat "$FM_FAKE_BOB_STATE" 2>/dev/null || true)
+# The frame is what bob 2.0.9 draws (captured live with tmux capture-pane -e):
+# a `❯` composer between two `─` rules, an SGR 7 cursor cell and the placeholder
+# as a 256-colour grey run (38;5;243) when empty, typed text at the default
+# foreground, and the mode line below. Bob parks its hidden terminal cursor on
+# the last pane row, so #{cursor_y} never names the composer.
+fake_rule() { printf '\033[38;5;57m%s\033[39m\n' "$(printf '─%.0s' $(seq 1 60))"; }
+fake_composer() {  # <row-content-after-glyph>
+  fake_rule
+  printf '  \033[1m\033[38;5;57m❯ %b\n' "$1"
+  fake_rule
+  printf '  \033[38;5;57mAgent\033[38;5;243m Mode\033[38;5;160m (auto-approve)\033[39m\n'
+}
 fake_screen() {
   case "$state" in
     ready)
-      printf 'Bob ready\n╭────────────────────────────────╮\n│ >                              │\n╰────────────────────────────────╯\n'
+      printf 'Logged in as test@example.com\n\n'
+      fake_composer '\033[0;7m \033[0m\033[38;5;243m Build Anything, @ for context, / for commands, $ for skills\033[39m'
       ;;
     pointer-typed)
-      printf '╭────────────────────────────────╮\n│ > Read the brief and follow it │\n│                                │\n╰────────────────────────────────╯\n'
+      printf 'Logged in as test@example.com\n\n'
+      fake_composer '\033[0mRead the brief and follow it\033[7m \033[0m'
       ;;
     delivered)
-      printf 'Read the brief at %s and follow it exactly.\n╭────────────────────────────────╮\n│ >                              │\n╰────────────────────────────────╯\n' "$FM_FAKE_BRIEF_REAL"
+      printf 'Read the brief at %s and follow it exactly.\n\n' "$FM_FAKE_BRIEF_REAL"
+      fake_composer '\033[0;7m \033[0m\033[38;5;243m Build Anything, @ for context, / for commands, $ for skills\033[39m'
       ;;
     *)
       printf 'shell starting\n$ \n'
       ;;
   esac
 }
-fake_cursor_y() {
-  case "$state" in
-    pointer-typed) printf '1\n' ;;
-    ready|delivered) printf '2\n' ;;
-    *) printf '1\n' ;;
-  esac
-}
+fake_cursor_y() { printf '38\n'; }
 case "$*" in
   *"#{pane_current_path}"*) printf '%s\n' "$FM_FAKE_PANE_PATH"; exit 0 ;;
   *"#{cursor_y}"*) fake_cursor_y; exit 0 ;;
