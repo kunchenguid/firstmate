@@ -1013,6 +1013,59 @@ test_backend_source_requires_unreadable_adapter_file() {
   _backend_source_adapter_condition unreadable
 }
 
+_backend_source_hermes_helper_condition() {  # missing|unreadable
+  local condition=$1 dir backend helper marker continued rc test_bash
+  dir="$TMP_ROOT/hermes-helper-$condition"
+  test_bash=${FM_TEST_BASH:-${BASH:-bash}}
+  mkdir -p "$dir"
+  cp -R "$ROOT/bin" "$dir/bin"
+  helper="$dir/bin/fm-hermes-process-lib.sh"
+  if [ "$condition" = missing ]; then
+    rm "$helper"
+  else
+    chmod 000 "$helper"
+    if [ -r "$helper" ]; then
+      pass "fm_backend_source: unreadable Hermes helper skipped (mode-000 files remain readable)"
+      return 0
+    fi
+  fi
+  for backend in tmux herdr rex tern hc; do
+    marker="$dir/$backend.loaded"
+    continued="$dir/$backend.continued"
+    printf ': > "%s"\n' "$marker" > "$dir/bin/backends/$backend.sh"
+    # The sentinel adapter would load successfully without the sibling check.
+    # shellcheck disable=SC2016 # Positional parameters belong to the child.
+    "$test_bash" -c '
+      . "$1"
+      FM_BACKEND_LIB_DIR=$2
+      set -e
+      fm_backend_source "$3"
+      : > "$4"
+    ' _ "$ROOT/bin/fm-backend.sh" "$dir/bin" "$backend" "$continued" >/dev/null 2>&1
+    rc=$?
+    [ "$rc" -ne 0 ] && [ ! -e "$marker" ] && [ ! -e "$continued" ] \
+      || fail "$backend loaded or continued with a $condition Hermes helper"
+  done
+  rm -f "$helper"
+  cp "$ROOT/bin/fm-hermes-process-lib.sh" "$helper"
+  for backend in tmux herdr rex tern hc; do
+    # shellcheck disable=SC2016 # Positional parameters belong to the child.
+    "$test_bash" -c '. "$1"; FM_BACKEND_LIB_DIR=$2; fm_backend_source "$3"' \
+      _ "$ROOT/bin/fm-backend.sh" "$dir/bin" "$backend" \
+      || fail "$backend did not load with its Hermes helper restored"
+    [ -e "$dir/$backend.loaded" ] || fail "$backend did not reach its sentinel adapter"
+  done
+  pass "fm_backend_source: $condition Hermes helper refuses every dependent backend before sourcing"
+}
+
+test_backend_source_requires_missing_hermes_helper() {
+  _backend_source_hermes_helper_condition missing
+}
+
+test_backend_source_requires_unreadable_hermes_helper() {
+  _backend_source_hermes_helper_condition unreadable
+}
+
 test_backend_validate_spawn_accepts_orca() {
   local out
   fm_backend_validate_spawn tmux 2>/dev/null || fail "fm_backend_validate_spawn should accept tmux"
@@ -1675,12 +1728,14 @@ test_spawn_autodetect_nesting_resolves_tmux_silently() {
 }
 
 # CI's stock macOS Bash lane sets FM_TEST_STOCK_BASH=1 to run just the adapter
-# precheck pair. Adding another stock-bash case means adding it to this list,
+# adapter and helper prechecks. Adding another stock-bash case adds it here,
 # not to ci.yml.
 if [ -n "${FM_TEST_STOCK_BASH:-}" ]; then
   fm_test_run \
     test_backend_source_requires_missing_adapter_file \
-    test_backend_source_requires_unreadable_adapter_file
+    test_backend_source_requires_unreadable_adapter_file \
+    test_backend_source_requires_missing_hermes_helper \
+    test_backend_source_requires_unreadable_hermes_helper
   exit 0
 fi
 if [ -n "${FM_TEST_ONLY:-}" ]; then
@@ -1712,6 +1767,8 @@ test_backend_validate_refuses_unknown
 test_backend_source_shell_portable
 test_backend_source_requires_missing_adapter_file
 test_backend_source_requires_unreadable_adapter_file
+test_backend_source_requires_missing_hermes_helper
+test_backend_source_requires_unreadable_hermes_helper
 test_backend_validate_spawn_accepts_orca
 test_meta_get_and_backend_of_meta
 test_resolve_selector_three_forms

@@ -42,7 +42,14 @@ SH
   cat > "$fake/tmux" <<'SH'
 #!/usr/bin/env bash
 case "${1:-}" in
-  display-message) printf '%%1\n' ;;
+  list-windows) [ -z "${FM_FAKE_PANE_CMD:-}" ] || printf 'fm-%s\n' "${FM_FAKE_TASK_ID:?}" ;;
+  display-message)
+    case "$*" in
+      *pane_tty*) ;;
+      *pane_current_command*) printf '%s\n' "${FM_FAKE_PANE_CMD:-zsh}" ;;
+      *) printf '%%1\n' ;;
+    esac
+    ;;
   capture-pane) printf 'idle\n> \n' ;;
 esac
 SH
@@ -173,6 +180,62 @@ test_main_direct_terminal_presentation_receipt() {
   FM_HOME="$MAIN" FM_STATE_OVERRIDE="$MAIN/state" "$DRAIN" --ack-through "$seq" --recovery-generation "$generation"
   [ "$(outcome_count "$MAIN" presented)" = 1 ] || fail "acknowledged presentation did not receive its own receipt"
   pass "main direct terminal presentation has a durable receipt"
+}
+
+arm_claude_busy() { # <home> <id> <busy|idle>
+  local home=$1 id=$2 state=$3
+  sed 's/^harness=.*/harness=claude/' "$home/state/$id.meta" > "$home/state/$id.meta.new"
+  mv "$home/state/$id.meta.new" "$home/state/$id.meta"
+  printf 'g1\n' > "$home/state/$id.busy-gen"
+  printf 'v1 gen=g1 seq=1 state=%s source=claude-hook event=test ts=%s\n' "$state" "$(date +%s)" > "$home/state/$id.busy-state"
+}
+
+run_live_child() { # <world> <busy|idle> <spawn-epoch-offset> [rewrite-meta]
+  local status_epoch=$(( $(date +%s) - 600 ))
+  make_world "$1"
+  write_child "$MAIN" child "done[at=$status_epoch]: PR https://example.test/owner/repo/pull/1 checks green" "s$((status_epoch + $3)).1.1"
+  arm_claude_busy "$MAIN" child "$2"
+  age "$MAIN/state/child.meta" "$MAIN/state/child.status"
+  [ -z "${4:-}" ] || set_mtime "$(( $(date +%s) - 90 ))" "$MAIN/state/child.meta"
+  FM_FAKE_CREW_STATE='done' FM_FAKE_PANE_CMD=claude FM_FAKE_TASK_ID=child run_reconcile "$MAIN" --startup
+}
+
+assert_withheld() {
+  [ "$(outcome_count "$MAIN" pending)" = 0 ] || fail "$1: terminal outcome record written"
+  ! grep -q inactive-outcome: "$MAIN/state/.wake-queue" 2>/dev/null || fail "$1: supervisor woke"
+}
+
+test_busy_agent_withholds_terminal_outcome() {
+  run_live_child busy-agent busy -10
+  assert_withheld "busy agent"
+  pass "busy agent withholds the terminal outcome"
+}
+
+test_relaunched_idle_agent_withholds_terminal_outcome() {
+  run_live_child relaunched-agent idle 10
+  assert_withheld "relaunched agent"
+  pass "idle agent on a newer incarnation withholds the terminal outcome"
+}
+
+test_idle_finished_agent_keeps_terminal_outcome() {
+  run_live_child idle-agent idle -10
+  [ "$(outcome_count "$MAIN" pending)" = 1 ] || fail "idle finished agent lost its terminal outcome"
+  [ "$(wake_count "$MAIN" 'inactive-outcome:')" = 1 ] || fail "idle finished agent did not wake the supervisor"
+  pass "idle finished agent keeps the terminal outcome"
+}
+
+test_idle_agent_with_rewritten_meta_keeps_terminal_outcome() {
+  run_live_child rewritten-meta idle -10 rewrite
+  [ "$(outcome_count "$MAIN" pending)" = 1 ] || fail "rewritten meta withheld the terminal outcome"
+  pass "idle finished agent with rewritten meta keeps the terminal outcome"
+}
+
+test_dead_agent_keeps_terminal_outcome() {
+  make_world dead-agent; write_child "$MAIN" child 'done: PR https://example.test/owner/repo/pull/1 checks green'
+  FM_FAKE_CREW_STATE='done' FM_FAKE_PANE_CMD=zsh FM_FAKE_TASK_ID=child run_reconcile "$MAIN" --startup
+  [ "$(outcome_count "$MAIN" pending)" = 1 ] || fail "dead agent lost its terminal outcome"
+  [ "$(wake_count "$MAIN" 'inactive-outcome:')" = 1 ] || fail "dead agent did not wake the supervisor"
+  pass "dead agent keeps the terminal outcome"
 }
 
 # Away-posture regression: a branch-actor drain that consumes an
@@ -975,6 +1038,40 @@ SH
   pass "stalled state reads are bounded without starving later children"
 }
 
+test_stalled_liveness_read_is_bounded_and_scan_progresses() {
+  local started elapsed
+  make_world bounded-liveness
+  write_child "$MAIN" a 'working: liveness read will stall'
+  age "$MAIN/state/a.meta" "$MAIN/state/a.status"
+  cat > "$WORLD/fakebin/fm-crew-state.sh" <<'SH'
+#!/usr/bin/env bash
+if [ "$1" = a ]; then
+  sleep 1
+  printf 'state: failed · source: fake\n'
+else
+  printf 'state: done · source: fake\n'
+fi
+SH
+  cat > "$WORLD/fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+[ ! -e "$(dirname "$0")/stall" ] || sleep 30
+SH
+  : > "$WORLD/fakebin/stall"
+  chmod +x "$WORLD/fakebin/fm-crew-state.sh" "$WORLD/fakebin/tmux"
+
+  started=$(date +%s)
+  FM_INACTIVE_RECONCILE_BUDGET_SECS=2 run_reconcile "$MAIN" --startup
+  elapsed=$(( $(date +%s) - started ))
+  [ "$elapsed" -le 4 ] || fail "stalled liveness read exceeded aggregate scan budget (${elapsed}s)"
+
+  rm -f "$WORLD/fakebin/stall"
+  write_child "$MAIN" b 'done: green'
+  FM_INACTIVE_RECONCILE_BUDGET_SECS=2 run_reconcile "$MAIN" --startup
+  grep -Fq 'child=b state=done' "$MAIN/state/.wake-queue" \
+    || fail "next bounded scan did not resume with the following child"
+  pass "stalled liveness reads are bounded without starving later children"
+}
+
 test_full_scan_budget_includes_wake_lock_wait() {
   local holder started elapsed i
   make_world wake-lock; write_child "$MAIN" child 'done: green'
@@ -1322,6 +1419,11 @@ SH
 }
 
 test_main_direct_terminal_presentation_receipt
+test_busy_agent_withholds_terminal_outcome
+test_relaunched_idle_agent_withholds_terminal_outcome
+test_idle_finished_agent_keeps_terminal_outcome
+test_idle_agent_with_rewritten_meta_keeps_terminal_outcome
+test_dead_agent_keeps_terminal_outcome
 test_branch_ack_retires_inactive_outcome_receipt
 test_unpushed_ci_ready_done_is_not_published
 test_local_done_head_is_pinned_before_parent_delivery
@@ -1354,6 +1456,7 @@ test_nonterminal_and_captain_held_states_do_not_report
 test_watcher_hook_and_idle_secondmate_exemption
 test_watcher_poll_delivers_child_ledger_line_to_parent
 test_stalled_state_read_is_bounded_and_scan_progresses
+test_stalled_liveness_read_is_bounded_and_scan_progresses
 test_full_scan_budget_includes_wake_lock_wait
 test_notice_recovery_does_not_duplicate_wake
 test_missing_parent_binding_names_itself

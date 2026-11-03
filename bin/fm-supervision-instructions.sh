@@ -104,6 +104,9 @@ if [ -z "$HARNESS" ]; then
 fi
 
 case "$HARNESS" in
+  hermes)
+    echo 'error: hermes is a crewmate/scout adapter only; primary supervision is unsupported' >&2
+    exit 1 ;;
   claude|codex|opencode|pi|grok|cursor|omp|agy) SNIPPET="$DOC_DIR/$HARNESS.md" ;;
   pi-signed) SNIPPET="$DOC_DIR/pi.md" ;;
   pig) SNIPPET="$DOC_DIR/pig.md" ;;
