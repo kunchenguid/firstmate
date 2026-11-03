@@ -1154,13 +1154,14 @@ SH
 
 test_move_refuses_before_stopping_anything() {
   local scenario out rc before args
-  for scenario in cmux unknown same-backend missing-hc remote unreadable pending-composer; do
+  for scenario in cmux unknown same-backend harness-mismatch missing-hc remote unreadable pending-composer; do
     move_world "move-refuse-$scenario" claude
     args=(sm1 --backend hc)
     case "$scenario" in
       cmux) args=(sm1 --backend cmux) ;;
       unknown) args=(sm1 --backend bogus) ;;
       same-backend) args=(sm1 --backend tmux) ;;
+      harness-mismatch) args=(sm1 --backend t3code); printf 'pi\n' > "$W_DIR/home/config/secondmate-harness" ;;
       missing-hc) W_HCBIN="$W_DIR/no-such-dir/hc" ;;
       remote) add_move_remote_dead "$W_DIR" ;;
       unreadable) : > "$W_MV/unreadable" ;;
@@ -1180,6 +1181,7 @@ test_move_refuses_before_stopping_anything() {
       cmux) assert_contains "$out" "backend=cmux does not support --secondmate" "the cmux refusal names the limit" ;;
       unknown) assert_contains "$out" "unknown backend" "the unknown-backend refusal names it" ;;
       same-backend) assert_contains "$out" "already recorded on backend=tmux" "a same-backend move points at relaunch" ;;
+      harness-mismatch) assert_contains "$out" "runs only the claude and codex harnesses" "a target that cannot launch the mate's configured harness refuses before any stop" ;;
       missing-hc) assert_contains "$out" "backend=hc needs 'hc', which is not available here; nothing was stopped or moved" "a missing target binary refuses before any stop" ;;
       remote)
         assert_contains "$out" "a local move is refused" "a dead remote mate reaches the library's own refusal"
@@ -1283,6 +1285,32 @@ test_move_usage_prints_the_exit_status_contract() {
   assert_contains "$out" "$contract" "invalid use must print the exit-status contract on stderr"
   assert_contains "$out" "with the message naming the state the mate was left in; 2 invalid use." "invalid use must print the whole contract on stderr"
   pass "move: --help and invalid use both print the header through its exit-status contract"
+}
+
+# fm-control's relaunch serializes on the task's control lock, not the liveness
+# lock, so the move holds it too: a move that cannot take it refuses outright.
+test_move_refuses_while_the_control_lock_is_held() {
+  local out rc=0 holder i=0 lock
+  move_world move-control-lock-held claude
+  lock="$W_DIR/home/state/.control-sm1.lock"
+  ( STATE="$W_DIR/home/state" bash -c \
+      '. "$1" && fm_lock_acquire_wait "$2" && sleep 30' \
+      _ "$ROOT/bin/fm-wake-lib.sh" "$lock" ) &
+  holder=$!
+  while [ ! -d "$lock" ] && [ "$i" -lt 100 ]; do
+    sleep 0.05
+    i=$((i + 1))
+  done
+  [ -d "$lock" ] || fail "the fixture never acquired the control lock"
+  out=$(run_move sm1 --backend hc) || rc=$?
+  kill "$holder" 2>/dev/null || true
+  wait "$holder" 2>/dev/null || true
+  [ "$rc" -ne 0 ] || fail "a move must not run beside a lifecycle action: $out"
+  assert_contains "$out" "another lifecycle action is already running" "the refusal names the control lock"
+  [ ! -s "$W_MV/literal" ] || fail "a mate under a lifecycle action must not be stopped: $(cat "$W_MV/literal")"
+  [ ! -s "$W_LOG" ] || fail "a mate under a lifecycle action must not be touched: $(cat "$W_LOG")"
+  assert_not_contains "$(cat "$W_DIR/hc/log" 2>/dev/null || true)" $'\x1frun\x1f' "a mate under a lifecycle action must not be launched"
+  pass "move: a mate under another lifecycle action's control lock is refused entirely"
 }
 
 test_move_refuses_while_the_liveness_lock_is_held() {
@@ -1561,6 +1589,7 @@ test_move_leaves_a_newer_record_in_place_when_the_launch_fails
 test_move_names_the_stopped_state_when_the_relaunch_is_skipped
 test_move_usage_prints_the_exit_status_contract
 test_move_refuses_while_the_liveness_lock_is_held
+test_move_refuses_while_the_control_lock_is_held
 test_remote_poll_probe_maps_states
 test_remote_poll_probe_unreachable_preserves_route
 test_remote_full_probe_rex_route

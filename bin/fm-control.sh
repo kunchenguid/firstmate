@@ -342,9 +342,17 @@ ID=$RAW_ID
 fm_lease_guard "$ID" "lifecycle control (fm-control)"
 CONTROL_LOCK="$STATE/.control-$ID.lock"
 trap control_cleanup EXIT
-fm_lock_try_acquire "$CONTROL_LOCK" \
-  || die "another lifecycle action is already running for task $ID"
-CONTROL_LOCK_HELD=1
+# A parent that already holds this task's control lock (bin/fm-secondmate-move.sh
+# stopping the mate it moves) hands it down, the same way this script hands it
+# to bin/fm-spawn.sh --relaunch; the parent keeps releasing it.
+control_owner=$(cat "$CONTROL_LOCK/pid" 2>/dev/null || true)
+if [ -n "$control_owner" ] && [ "$control_owner" = "$PPID" ] && fm_pid_alive "$control_owner"; then
+  CONTROL_LOCK_HELD=0
+else
+  fm_lock_try_acquire "$CONTROL_LOCK" \
+    || die "another lifecycle action is already running for task $ID"
+  CONTROL_LOCK_HELD=1
+fi
 # do_exit runs in a command substitution. That subshell does not run this
 # EXIT trap, so the parent has to hold the path the trap removes. Set it
 # only once the lock is held: a process that loses the lock runs the same
