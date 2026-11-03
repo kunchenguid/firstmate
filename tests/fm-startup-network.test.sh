@@ -1133,7 +1133,7 @@ startup_supervision_needed() { # <home>
 # Every session start reserves a generation, so retention has to be bounded:
 # settled and superseded completions are removed, while anything an actor can
 # still reach - the current generation, a queued wake's generation, and the
-# newest unsettled results - is preserved. Unknown shapes are never touched.
+# newest names - is preserved. Foreign names are never touched.
 test_retained_results_are_pruned_but_live_obligations_are_kept() {
   local rec home root log generation field
   rec=$(new_world bounded-retention)
@@ -1170,11 +1170,11 @@ test_retained_results_are_pruned_but_live_obligations_are_kept() {
 
   run_stage "$home" "$root" prune || fail "the retention pass failed"
 
-  for generation in 1500.1.1 1200.1.1 1100.1.1 1000.1.1 900.1.1; do
+  for generation in 1500.1.1 1400.1.1 1300.1.1 1200.1.1; do
     [ -d "$home/state/.startup-network-results/$generation" ] \
       || fail "retention removed $generation, which an actor can still reach"
   done
-  for generation in 1400.1.1 1300.1.1 800.1.1 700.1.1; do
+  for generation in 1100.1.1 1000.1.1 900.1.1 800.1.1 700.1.1; do
     [ ! -e "$home/state/.startup-network-results/$generation" ] \
       || fail "retention kept retired generation $generation"
   done
@@ -1194,7 +1194,7 @@ test_retained_results_are_pruned_but_live_obligations_are_kept() {
 
   # Idempotent: a second pass finds nothing further to remove.
   run_stage "$home" "$root" prune || fail "the second retention pass failed"
-  for generation in 1200.1.1 1100.1.1 1000.1.1 900.1.1; do
+  for generation in 1500.1.1 1400.1.1 1300.1.1 1200.1.1; do
     [ -d "$home/state/.startup-network-results/$generation" ] \
       || fail "a repeated retention pass removed $generation"
   done
@@ -1235,6 +1235,10 @@ test_reserving_a_run_prunes_the_generations_it_retired() {
   printf 'ACTIONABLE_OLD\n' > "$home/state/.startup-network-results/1000.1.1/report"
   printf 'clean:1000.1.1\n' > "$home/state/.startup-network-results/1000.1.1/settled"
   printf '1000.1.1\n' > "$home/state/.startup-network-wake-receipts/1000.1.1"
+
+  mkdir -p "$home/state/.startup-network-results/1100.1.1" \
+    "$home/state/.startup-network-results/1200.1.1" \
+    "$home/state/.startup-network-results/1300.1.1"
 
   sleep 10 &
   claimant=$!
@@ -1314,10 +1318,10 @@ test_start_never_scans_retained_results
 # Cleanup is bounded work even when a home keeps accumulating exceptions: one
 # pass examines at most RESULT_PRUNE_MAX entries and the next pass finishes.
 test_the_retention_pass_examines_a_bounded_number_of_entries() {
-  local rec home root log generation budget=64 total=70 remaining
+  local rec home root log generation budget=64 total=67 remaining tool real_tool
   rec=$(new_world bounded-pass)
   IFS='|' read -r home root log <<< "$rec"
-  for generation in $(seq 1000 1069); do
+  for generation in $(seq 1000 1066); do
     mkdir -p "$home/state/.startup-network-results/$generation.1.1"
     printf 'generation=%s.1.1\nstate=done\nfinished=1\nrc=0\nreport_published=1\n' "$generation" \
       > "$home/state/.startup-network-results/$generation.1.1/status"
@@ -1332,13 +1336,23 @@ test_the_retention_pass_examines_a_bounded_number_of_entries() {
     done
     printf '%s' "$count"
   }
+  for tool in sed cat awk; do
+    real_tool=$(command -v "$tool")
+    printf '#!/usr/bin/env bash\nfor arg in "$@"; do\n case "$arg" in */.startup-network-results/*|*/.startup-network-wake-receipts/*) printf "%%s\n" "$arg" >> %q ;; esac\ndone\nexec %q "$@"\n' \
+      "$home/record-reads" "$real_tool" > "$root/bin/$tool"
+    chmod +x "$root/bin/$tool"
+  done
   run_stage "$home" "$root" prune || fail "the retention pass failed"
   remaining=$(count_results)
   [ "$remaining" -eq "$((total - budget))" ] \
     || fail "one pass examined $((total - remaining)) entries instead of $budget"
   run_stage "$home" "$root" prune || fail "the second retention pass failed"
   remaining=$(count_results)
-  [ "$remaining" -eq 0 ] || fail "a repeated pass left $remaining retired entries"
+  [ "$remaining" -eq 3 ] || fail "a repeated pass changed the look-back window"
+  for generation in 1064 1065 1066; do
+    [ -d "$home/state/.startup-network-results/$generation.1.1" ] || fail "look-back generation removed"
+  done
+  [ ! -s "$home/record-reads" ] || fail "retention read per-generation records"
   pass "fm-startup-network: the retention pass is bounded per call and resumes on the next"
 }
 
@@ -1363,8 +1377,11 @@ test_incomplete_backlog_does_not_starve_old_results() {
   done
   [ -d "$home/state/.startup-network-results/1061.1.1" ] || fail "pass exceeded deletion budget"
   run_stage "$home" "$root" prune || fail "second backlog pass failed"
-  for generation in $(seq 1000 1069); do
+  for generation in $(seq 1000 1066); do
     [ ! -e "$home/state/.startup-network-results/$generation.1.1" ] || fail "incomplete backlog survived"
+  done
+  for generation in 1067 1068 1069; do
+    [ -d "$home/state/.startup-network-results/$generation.1.1" ] || fail "incomplete look-back generation removed"
   done
   pass "fm-startup-network: incomplete backlog drains oldest-first"
 }
