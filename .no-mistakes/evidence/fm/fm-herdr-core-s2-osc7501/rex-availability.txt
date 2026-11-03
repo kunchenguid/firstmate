@@ -1,0 +1,10 @@
+Real Rex availability check
+command -v rex hc herdr tmux python3 claude codex
+Result: no rex or hc on PATH. herdr, tmux, python3, claude and codex exist.
+Repository bin/*install* and bin/*lab* inventory: no Rex installer or supplied repository-local Rex binary.
+Read https://www.superlogical.com/rex through fetch_content in this run. macOS download states:
+“Invites are going out to our mailing list”
+“Already testing? Log in with Discord to download.”
+Linux/FreeBSD installation commands are also login-gated.
+No host filesystem search, global installation, credential mutation, or live fleet access attempted.
+A workspace-local Rex download cannot be obtained from this public installation page without tester authority. Supply an authorized downloadable macOS Rex binary at a repository-local path, or Rex on PATH, and its isolated server launch contract; main can then perform the explicitly requested real Rex shared-root check. No local PTY result claims to prove Rex rendering, native Codex records, or Rex reader/event behavior.

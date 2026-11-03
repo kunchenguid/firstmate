@@ -1,0 +1,29 @@
+DISARM {run-worktree}/.osc-live-u9j84_yb/signals
+DISARM completed
+PASS Synthetic durable signals on real PTY: unknown clears blocked/working once; stale results stay idle; fresh done/error and captain hold report; exit preserves done
+DISARM {run-worktree}/.osc-live-u9j84_yb/dead-working
+DISARM completed
+DISARM {run-worktree}/.osc-live-u9j84_yb/dead-done
+DISARM completed
+DISARM {run-worktree}/.osc-live-u9j84_yb/dead-failed
+DISARM completed
+PASS Real PTY dead watcher: disarm finalizes idle/done/error before removing ownership; off and installed-Claude relaunch add zero records
+DISARM {run-worktree}/.osc-live-u9j84_yb/early-term
+DISARM completed
+PASS Real PTY early TERM during shell initialization: short worker done survives grace retirement before watcher trap exists
+DISARM {run-worktree}/.osc-live-u9j84_yb/stopped-working
+DISARM completed
+DISARM {run-worktree}/.osc-live-u9j84_yb/stopped-done
+Timeout (0:01:00)!
+Thread 0x00000001fc921300 (most recent call first):
+  File "~/.no-mistakes/evidence/01M6FP4GB8AKRB8HFXAGRE66K3/live-reporter.py", line 19 in drain
+  File "~/.no-mistakes/evidence/01M6FP4GB8AKRB8HFXAGRE66K3/live-reporter.py", line 29 in command
+  File "~/.no-mistakes/evidence/01M6FP4GB8AKRB8HFXAGRE66K3/live-reporter.py", line 43 in disarm
+  File "~/.no-mistakes/evidence/01M6FP4GB8AKRB8HFXAGRE66K3/live-reporter.py", line 100 in <module>
+DISARM completed
+DISARM {run-worktree}/.osc-live-u9j84_yb/stopped-failed
+DISARM completed
+PASS Real PTY live-but-stopped watcher: TERM grace expires, KILL retires it, one final idle/done/error record lands within deadline
+DISARM {run-worktree}/.osc-live-u9j84_yb/clean-gates
+DISARM completed
+PASS Clean real PTY: installed native-Claude gate, reporting off, and disarm without ownership produce no OSC bytes

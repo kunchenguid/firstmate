@@ -1,0 +1,945 @@
+{
+  "cases": [
+    "Synthetic durable signals on real PTY: unknown clears blocked/working once; stale results stay idle; fresh done/error and captain hold report; exit preserves done",
+    "Real PTY dead watcher: disarm finalizes idle/done/error before removing ownership; off and installed-Claude relaunch add zero records",
+    "Real PTY early TERM during shell initialization: short worker done survives grace retirement before watcher trap exists",
+    "Real PTY live-but-stopped watcher: TERM grace expires, KILL retires it, one final idle/done/error record lands within deadline",
+    "Clean real PTY: installed native-Claude gate, reporting off, and disarm without ownership produce no OSC bytes"
+  ],
+  "transcript": [
+    {
+      "command": "bash {run-worktree}/bin/fm-osc7501.sh arm --task worker --harness opencode --agent-bin opencode --backend tmux --kind ship --state {run-worktree}/.osc-live-u9j84_yb/signals/state --config {run-worktree}/.osc-live-u9j84_yb/signals/config",
+      "records": [
+        {
+          "state": "idle",
+          "app": "firstmate-opencode",
+          "title": "Zm0td29ya2Vy"
+        }
+      ]
+    },
+    {
+      "command": "bash {run-worktree}/bin/fm-osc7501.sh disarm --state {run-worktree}/.osc-live-u9j84_yb/signals/state",
+      "records": [
+        {
+          "state": "done",
+          "app": "firstmate-opencode",
+          "title": "Zm0td29ya2Vy",
+          "msg": "RG9uZTogZmluYWwgb3V0Y29tZQ=="
+        },
+        {
+          "state": "done",
+          "app": "firstmate-opencode",
+          "title": "Zm0td29ya2Vy",
+          "msg": "RG9uZTogZmluYWwgb3V0Y29tZQ=="
+        },
+        {
+          "state": "done",
+          "app": "firstmate-opencode",
+          "title": "Zm0td29ya2Vy",
+          "msg": "RG9uZTogZmluYWwgb3V0Y29tZQ=="
+        }
+      ]
+    },
+    {
+      "PASS": "Synthetic durable signals on real PTY: unknown clears blocked/working once; stale results stay idle; fresh done/error and captain hold report; exit preserves done",
+      "last_records": [
+        {
+          "state": "idle",
+          "app": "firstmate-opencode",
+          "title": "Zm0td29ya2Vy"
+        },
+        {
+          "state": "error",
+          "app": "firstmate-opencode",
+          "title": "Zm0td29ya2Vy",
+          "msg": "RmFpbGVkOiBmcmVzaCBhcHBlbmRlZCByZXN1bHQ="
+        },
+        {
+          "state": "blocked",
+          "kind": "question",
+          "app": "firstmate-opencode",
+          "title": "Zm0td29ya2Vy",
+          "msg": "TmVlZHMgeW91ciBkZWNpc2lvbjogY2FwdGFpbiBvd25zIGl0"
+        },
+        {
+          "state": "done",
+          "app": "firstmate-opencode",
+          "title": "Zm0td29ya2Vy",
+          "msg": "RG9uZTogZmluYWwgb3V0Y29tZQ=="
+        },
+        {
+          "state": "done",
+          "app": "firstmate-opencode",
+          "title": "Zm0td29ya2Vy",
+          "msg": "RG9uZTogZmluYWwgb3V0Y29tZQ=="
+        },
+        {
+          "state": "done",
+          "app": "firstmate-opencode",
+          "title": "Zm0td29ya2Vy",
+          "msg": "RG9uZTogZmluYWwgb3V0Y29tZQ=="
+        }
+      ]
+    },
+    {
+      "command": "bash {run-worktree}/bin/fm-osc7501.sh arm --task worker --harness opencode --agent-bin opencode --backend tmux --kind ship --state {run-worktree}/.osc-live-u9j84_yb/dead-working/state --config {run-worktree}/.osc-live-u9j84_yb/dead-working/config",
+      "records": [
+        {
+          "state": "done",
+          "app": "firstmate-opencode",
+          "title": "Zm0td29ya2Vy",
+          "msg": "RG9uZTogZmluYWwgb3V0Y29tZQ=="
+        },
+        {
+          "state": "idle",
+          "app": "firstmate-opencode",
+          "title": "Zm0td29ya2Vy"
+        },
+        {
+          "state": "working",
+          "app": "firstmate-opencode",
+          "title": "Zm0td29ya2Vy"
+        }
+      ]
+    },
+    {
+      "command": "bash {run-worktree}/bin/fm-osc7501.sh disarm --state {run-worktree}/.osc-live-u9j84_yb/dead-working/state",
+      "records": [
+        {
+          "state": "idle",
+          "app": "firstmate-opencode",
+          "title": "Zm0td29ya2Vy"
+        },
+        {
+          "state": "working",
+          "app": "firstmate-opencode",
+          "title": "Zm0td29ya2Vy"
+        },
+        {
+          "state": "idle",
+          "app": "firstmate-opencode",
+          "title": "Zm0td29ya2Vy"
+        }
+      ]
+    },
+    {
+      "command": "bash {run-worktree}/bin/fm-osc7501.sh arm --task worker --harness opencode --agent-bin opencode --backend tmux --kind ship --state {run-worktree}/.osc-live-u9j84_yb/dead-working/state --config {run-worktree}/.osc-live-u9j84_yb/dead-working/config",
+      "records": [
+        {
+          "state": "idle",
+          "app": "firstmate-opencode",
+          "title": "Zm0td29ya2Vy"
+        },
+        {
+          "state": "working",
+          "app": "firstmate-opencode",
+          "title": "Zm0td29ya2Vy"
+        },
+        {
+          "state": "idle",
+          "app": "firstmate-opencode",
+          "title": "Zm0td29ya2Vy"
+        }
+      ]
+    },
+    {
+      "command": "bash {run-worktree}/bin/fm-osc7501.sh arm --task worker --harness claude --agent-bin ~/.local/bin/claude --backend tmux --kind ship --state {run-worktree}/.osc-live-u9j84_yb/dead-working/state --config {run-worktree}/.osc-live-u9j84_yb/dead-working/config",
+      "records": [
+        {
+          "state": "idle",
+          "app": "firstmate-opencode",
+          "title": "Zm0td29ya2Vy"
+        },
+        {
+          "state": "working",
+          "app": "firstmate-opencode",
+          "title": "Zm0td29ya2Vy"
+        },
+        {
+          "state": "idle",
+          "app": "firstmate-opencode",
+          "title": "Zm0td29ya2Vy"
+        }
+      ]
+    },
+    {
+      "command": "bash {run-worktree}/bin/fm-osc7501.sh arm --task worker --harness opencode --agent-bin opencode --backend tmux --kind ship --state {run-worktree}/.osc-live-u9j84_yb/dead-done/state --config {run-worktree}/.osc-live-u9j84_yb/dead-done/config",
+      "records": [
+        {
+          "state": "idle",
+          "app": "firstmate-opencode",
+          "title": "Zm0td29ya2Vy"
+        },
+        {
+          "state": "idle",
+          "app": "firstmate-opencode",
+          "title": "Zm0td29ya2Vy"
+        },
+        {
+          "state": "working",
+          "app": "firstmate-opencode",
+          "title": "Zm0td29ya2Vy"
+        }
+      ]
+    },
+    {
+      "command": "bash {run-worktree}/bin/fm-osc7501.sh disarm --state {run-worktree}/.osc-live-u9j84_yb/dead-done/state",
+      "records": [
+        {
+          "state": "idle",
+          "app": "firstmate-opencode",
+          "title": "Zm0td29ya2Vy"
+        },
+        {
+          "state": "working",
+          "app": "firstmate-opencode",
+          "title": "Zm0td29ya2Vy"
+        },
+        {
+          "state": "done",
+          "app": "firstmate-opencode",
+          "title": "Zm0td29ya2Vy",
+          "msg": "RG9uZTogd29ya2VyIGV4aXQgb3V0Y29tZQ=="
+        }
+      ]
+    },
+    {
+      "command": "bash {run-worktree}/bin/fm-osc7501.sh arm --task worker --harness opencode --agent-bin opencode --backend tmux --kind ship --state {run-worktree}/.osc-live-u9j84_yb/dead-done/state --config {run-worktree}/.osc-live-u9j84_yb/dead-done/config",
+      "records": [
+        {
+          "state": "idle",
+          "app": "firstmate-opencode",
+          "title": "Zm0td29ya2Vy"
+        },
+        {
+          "state": "working",
+          "app": "firstmate-opencode",
+          "title": "Zm0td29ya2Vy"
+        },
+        {
+          "state": "done",
+          "app": "firstmate-opencode",
+          "title": "Zm0td29ya2Vy",
+          "msg": "RG9uZTogd29ya2VyIGV4aXQgb3V0Y29tZQ=="
+        }
+      ]
+    },
+    {
+      "command": "bash {run-worktree}/bin/fm-osc7501.sh arm --task worker --harness claude --agent-bin ~/.local/bin/claude --backend tmux --kind ship --state {run-worktree}/.osc-live-u9j84_yb/dead-done/state --config {run-worktree}/.osc-live-u9j84_yb/dead-done/config",
+      "records": [
+        {
+          "state": "idle",
+          "app": "firstmate-opencode",
+          "title": "Zm0td29ya2Vy"
+        },
+        {
+          "state": "working",
+          "app": "firstmate-opencode",
+          "title": "Zm0td29ya2Vy"
+        },
+        {
+          "state": "done",
+          "app": "firstmate-opencode",
+          "title": "Zm0td29ya2Vy",
+          "msg": "RG9uZTogd29ya2VyIGV4aXQgb3V0Y29tZQ=="
+        }
+      ]
+    },
+    {
+      "command": "bash {run-worktree}/bin/fm-osc7501.sh arm --task worker --harness opencode --agent-bin opencode --backend tmux --kind ship --state {run-worktree}/.osc-live-u9j84_yb/dead-failed/state --config {run-worktree}/.osc-live-u9j84_yb/dead-failed/config",
+      "records": [
+        {
+          "state": "done",
+          "app": "firstmate-opencode",
+          "title": "Zm0td29ya2Vy",
+          "msg": "RG9uZTogd29ya2VyIGV4aXQgb3V0Y29tZQ=="
+        },
+        {
+          "state": "idle",
+          "app": "firstmate-opencode",
+          "title": "Zm0td29ya2Vy"
+        },
+        {
+          "state": "working",
+          "app": "firstmate-opencode",
+          "title": "Zm0td29ya2Vy"
+        }
+      ]
+    },
+    {
+      "command": "bash {run-worktree}/bin/fm-osc7501.sh disarm --state {run-worktree}/.osc-live-u9j84_yb/dead-failed/state",
+      "records": [
+        {
+          "state": "idle",
+          "app": "firstmate-opencode",
+          "title": "Zm0td29ya2Vy"
+        },
+        {
+          "state": "working",
+          "app": "firstmate-opencode",
+          "title": "Zm0td29ya2Vy"
+        },
+        {
+          "state": "error",
+          "app": "firstmate-opencode",
+          "title": "Zm0td29ya2Vy",
+          "msg": "RmFpbGVkOiB3b3JrZXIgZXhpdCBvdXRjb21l"
+        }
+      ]
+    },
+    {
+      "command": "bash {run-worktree}/bin/fm-osc7501.sh arm --task worker --harness opencode --agent-bin opencode --backend tmux --kind ship --state {run-worktree}/.osc-live-u9j84_yb/dead-failed/state --config {run-worktree}/.osc-live-u9j84_yb/dead-failed/config",
+      "records": [
+        {
+          "state": "idle",
+          "app": "firstmate-opencode",
+          "title": "Zm0td29ya2Vy"
+        },
+        {
+          "state": "working",
+          "app": "firstmate-opencode",
+          "title": "Zm0td29ya2Vy"
+        },
+        {
+          "state": "error",
+          "app": "firstmate-opencode",
+          "title": "Zm0td29ya2Vy",
+          "msg": "RmFpbGVkOiB3b3JrZXIgZXhpdCBvdXRjb21l"
+        }
+      ]
+    },
+    {
+      "command": "bash {run-worktree}/bin/fm-osc7501.sh arm --task worker --harness claude --agent-bin ~/.local/bin/claude --backend tmux --kind ship --state {run-worktree}/.osc-live-u9j84_yb/dead-failed/state --config {run-worktree}/.osc-live-u9j84_yb/dead-failed/config",
+      "records": [
+        {
+          "state": "idle",
+          "app": "firstmate-opencode",
+          "title": "Zm0td29ya2Vy"
+        },
+        {
+          "state": "working",
+          "app": "firstmate-opencode",
+          "title": "Zm0td29ya2Vy"
+        },
+        {
+          "state": "error",
+          "app": "firstmate-opencode",
+          "title": "Zm0td29ya2Vy",
+          "msg": "RmFpbGVkOiB3b3JrZXIgZXhpdCBvdXRjb21l"
+        }
+      ]
+    },
+    {
+      "PASS": "Real PTY dead watcher: disarm finalizes idle/done/error before removing ownership; off and installed-Claude relaunch add zero records",
+      "last_records": [
+        {
+          "state": "idle",
+          "app": "firstmate-opencode",
+          "title": "Zm0td29ya2Vy"
+        },
+        {
+          "state": "working",
+          "app": "firstmate-opencode",
+          "title": "Zm0td29ya2Vy"
+        },
+        {
+          "state": "done",
+          "app": "firstmate-opencode",
+          "title": "Zm0td29ya2Vy",
+          "msg": "RG9uZTogd29ya2VyIGV4aXQgb3V0Y29tZQ=="
+        },
+        {
+          "state": "idle",
+          "app": "firstmate-opencode",
+          "title": "Zm0td29ya2Vy"
+        },
+        {
+          "state": "working",
+          "app": "firstmate-opencode",
+          "title": "Zm0td29ya2Vy"
+        },
+        {
+          "state": "error",
+          "app": "firstmate-opencode",
+          "title": "Zm0td29ya2Vy",
+          "msg": "RmFpbGVkOiB3b3JrZXIgZXhpdCBvdXRjb21l"
+        }
+      ]
+    },
+    {
+      "command": "export BASH_ENV={run-worktree}/.osc-live-u9j84_yb/early-term/startup.sh",
+      "records": [
+        {
+          "state": "idle",
+          "app": "firstmate-opencode",
+          "title": "Zm0td29ya2Vy"
+        },
+        {
+          "state": "working",
+          "app": "firstmate-opencode",
+          "title": "Zm0td29ya2Vy"
+        },
+        {
+          "state": "error",
+          "app": "firstmate-opencode",
+          "title": "Zm0td29ya2Vy",
+          "msg": "RmFpbGVkOiB3b3JrZXIgZXhpdCBvdXRjb21l"
+        }
+      ]
+    },
+    {
+      "command": "bash {run-worktree}/bin/fm-osc7501.sh arm --task worker --harness opencode --agent-bin opencode --backend tmux --kind ship --state {run-worktree}/.osc-live-u9j84_yb/early-term/state --config {run-worktree}/.osc-live-u9j84_yb/early-term/config",
+      "records": [
+        {
+          "state": "working",
+          "app": "firstmate-opencode",
+          "title": "Zm0td29ya2Vy"
+        },
+        {
+          "state": "error",
+          "app": "firstmate-opencode",
+          "title": "Zm0td29ya2Vy",
+          "msg": "RmFpbGVkOiB3b3JrZXIgZXhpdCBvdXRjb21l"
+        },
+        {
+          "state": "idle",
+          "app": "firstmate-opencode",
+          "title": "Zm0td29ya2Vy"
+        }
+      ]
+    },
+    {
+      "command": "bash {run-worktree}/bin/fm-osc7501.sh disarm --state {run-worktree}/.osc-live-u9j84_yb/early-term/state",
+      "records": [
+        {
+          "state": "error",
+          "app": "firstmate-opencode",
+          "title": "Zm0td29ya2Vy",
+          "msg": "RmFpbGVkOiB3b3JrZXIgZXhpdCBvdXRjb21l"
+        },
+        {
+          "state": "idle",
+          "app": "firstmate-opencode",
+          "title": "Zm0td29ya2Vy"
+        },
+        {
+          "state": "done",
+          "app": "firstmate-opencode",
+          "title": "Zm0td29ya2Vy",
+          "msg": "RG9uZTogc2hvcnQgd29ya2VyIGFscmVhZHkgZmluaXNoZWQ="
+        }
+      ]
+    },
+    {
+      "command": "unset BASH_ENV",
+      "records": [
+        {
+          "state": "error",
+          "app": "firstmate-opencode",
+          "title": "Zm0td29ya2Vy",
+          "msg": "RmFpbGVkOiB3b3JrZXIgZXhpdCBvdXRjb21l"
+        },
+        {
+          "state": "idle",
+          "app": "firstmate-opencode",
+          "title": "Zm0td29ya2Vy"
+        },
+        {
+          "state": "done",
+          "app": "firstmate-opencode",
+          "title": "Zm0td29ya2Vy",
+          "msg": "RG9uZTogc2hvcnQgd29ya2VyIGFscmVhZHkgZmluaXNoZWQ="
+        }
+      ]
+    },
+    {
+      "PASS": "Real PTY early TERM during shell initialization: short worker done survives grace retirement before watcher trap exists",
+      "last_records": [
+        {
+          "state": "done",
+          "app": "firstmate-opencode",
+          "title": "Zm0td29ya2Vy",
+          "msg": "RG9uZTogd29ya2VyIGV4aXQgb3V0Y29tZQ=="
+        },
+        {
+          "state": "idle",
+          "app": "firstmate-opencode",
+          "title": "Zm0td29ya2Vy"
+        },
+        {
+          "state": "working",
+          "app": "firstmate-opencode",
+          "title": "Zm0td29ya2Vy"
+        },
+        {
+          "state": "error",
+          "app": "firstmate-opencode",
+          "title": "Zm0td29ya2Vy",
+          "msg": "RmFpbGVkOiB3b3JrZXIgZXhpdCBvdXRjb21l"
+        },
+        {
+          "state": "idle",
+          "app": "firstmate-opencode",
+          "title": "Zm0td29ya2Vy"
+        },
+        {
+          "state": "done",
+          "app": "firstmate-opencode",
+          "title": "Zm0td29ya2Vy",
+          "msg": "RG9uZTogc2hvcnQgd29ya2VyIGFscmVhZHkgZmluaXNoZWQ="
+        }
+      ]
+    },
+    {
+      "command": "bash {run-worktree}/bin/fm-osc7501.sh arm --task worker --harness opencode --agent-bin opencode --backend tmux --kind ship --state {run-worktree}/.osc-live-u9j84_yb/stopped-working/state --config {run-worktree}/.osc-live-u9j84_yb/stopped-working/config",
+      "records": [
+        {
+          "state": "done",
+          "app": "firstmate-opencode",
+          "title": "Zm0td29ya2Vy",
+          "msg": "RG9uZTogc2hvcnQgd29ya2VyIGFscmVhZHkgZmluaXNoZWQ="
+        },
+        {
+          "state": "idle",
+          "app": "firstmate-opencode",
+          "title": "Zm0td29ya2Vy"
+        },
+        {
+          "state": "working",
+          "app": "firstmate-opencode",
+          "title": "Zm0td29ya2Vy"
+        }
+      ]
+    },
+    {
+      "command": "bash {run-worktree}/bin/fm-osc7501.sh disarm --state {run-worktree}/.osc-live-u9j84_yb/stopped-working/state",
+      "records": [
+        {
+          "state": "idle",
+          "app": "firstmate-opencode",
+          "title": "Zm0td29ya2Vy"
+        },
+        {
+          "state": "working",
+          "app": "firstmate-opencode",
+          "title": "Zm0td29ya2Vy"
+        },
+        {
+          "state": "idle",
+          "app": "firstmate-opencode",
+          "title": "Zm0td29ya2Vy"
+        }
+      ]
+    },
+    {
+      "retirement_seconds": 12.68398758303374
+    },
+    {
+      "command": "bash {run-worktree}/bin/fm-osc7501.sh arm --task worker --harness opencode --agent-bin opencode --backend tmux --kind ship --state {run-worktree}/.osc-live-u9j84_yb/stopped-done/state --config {run-worktree}/.osc-live-u9j84_yb/stopped-done/config",
+      "records": [
+        {
+          "state": "idle",
+          "app": "firstmate-opencode",
+          "title": "Zm0td29ya2Vy"
+        },
+        {
+          "state": "idle",
+          "app": "firstmate-opencode",
+          "title": "Zm0td29ya2Vy"
+        },
+        {
+          "state": "working",
+          "app": "firstmate-opencode",
+          "title": "Zm0td29ya2Vy"
+        }
+      ]
+    },
+    {
+      "command": "bash {run-worktree}/bin/fm-osc7501.sh disarm --state {run-worktree}/.osc-live-u9j84_yb/stopped-done/state",
+      "records": [
+        {
+          "state": "idle",
+          "app": "firstmate-opencode",
+          "title": "Zm0td29ya2Vy"
+        },
+        {
+          "state": "working",
+          "app": "firstmate-opencode",
+          "title": "Zm0td29ya2Vy"
+        },
+        {
+          "state": "done",
+          "app": "firstmate-opencode",
+          "title": "Zm0td29ya2Vy",
+          "msg": "RG9uZTogd29ya2VyIGZpbmlzaGVkIGR1cmluZyBibG9ja2VkIGNhcHR1cmU="
+        }
+      ]
+    },
+    {
+      "retirement_seconds": 12.404838707996532
+    },
+    {
+      "command": "bash {run-worktree}/bin/fm-osc7501.sh arm --task worker --harness opencode --agent-bin opencode --backend tmux --kind ship --state {run-worktree}/.osc-live-u9j84_yb/stopped-failed/state --config {run-worktree}/.osc-live-u9j84_yb/stopped-failed/config",
+      "records": [
+        {
+          "state": "done",
+          "app": "firstmate-opencode",
+          "title": "Zm0td29ya2Vy",
+          "msg": "RG9uZTogd29ya2VyIGZpbmlzaGVkIGR1cmluZyBibG9ja2VkIGNhcHR1cmU="
+        },
+        {
+          "state": "idle",
+          "app": "firstmate-opencode",
+          "title": "Zm0td29ya2Vy"
+        },
+        {
+          "state": "working",
+          "app": "firstmate-opencode",
+          "title": "Zm0td29ya2Vy"
+        }
+      ]
+    },
+    {
+      "command": "bash {run-worktree}/bin/fm-osc7501.sh disarm --state {run-worktree}/.osc-live-u9j84_yb/stopped-failed/state",
+      "records": [
+        {
+          "state": "idle",
+          "app": "firstmate-opencode",
+          "title": "Zm0td29ya2Vy"
+        },
+        {
+          "state": "working",
+          "app": "firstmate-opencode",
+          "title": "Zm0td29ya2Vy"
+        },
+        {
+          "state": "error",
+          "app": "firstmate-opencode",
+          "title": "Zm0td29ya2Vy",
+          "msg": "RmFpbGVkOiB3b3JrZXIgZmluaXNoZWQgZHVyaW5nIGJsb2NrZWQgY2FwdHVyZQ=="
+        }
+      ]
+    },
+    {
+      "retirement_seconds": 12.856168249971233
+    },
+    {
+      "PASS": "Real PTY live-but-stopped watcher: TERM grace expires, KILL retires it, one final idle/done/error record lands within deadline",
+      "last_records": [
+        {
+          "state": "idle",
+          "app": "firstmate-opencode",
+          "title": "Zm0td29ya2Vy"
+        },
+        {
+          "state": "working",
+          "app": "firstmate-opencode",
+          "title": "Zm0td29ya2Vy"
+        },
+        {
+          "state": "done",
+          "app": "firstmate-opencode",
+          "title": "Zm0td29ya2Vy",
+          "msg": "RG9uZTogd29ya2VyIGZpbmlzaGVkIGR1cmluZyBibG9ja2VkIGNhcHR1cmU="
+        },
+        {
+          "state": "idle",
+          "app": "firstmate-opencode",
+          "title": "Zm0td29ya2Vy"
+        },
+        {
+          "state": "working",
+          "app": "firstmate-opencode",
+          "title": "Zm0td29ya2Vy"
+        },
+        {
+          "state": "error",
+          "app": "firstmate-opencode",
+          "title": "Zm0td29ya2Vy",
+          "msg": "RmFpbGVkOiB3b3JrZXIgZmluaXNoZWQgZHVyaW5nIGJsb2NrZWQgY2FwdHVyZQ=="
+        }
+      ]
+    },
+    {
+      "command": "bash {run-worktree}/bin/fm-osc7501.sh arm --task worker --harness claude --agent-bin ~/.local/bin/claude --backend tmux --kind ship --state {run-worktree}/.osc-live-u9j84_yb/clean-gates/state --config {run-worktree}/.osc-live-u9j84_yb/clean-gates/config",
+      "records": [
+        {
+          "state": "idle",
+          "app": "firstmate-opencode",
+          "title": "Zm0td29ya2Vy"
+        },
+        {
+          "state": "working",
+          "app": "firstmate-opencode",
+          "title": "Zm0td29ya2Vy"
+        },
+        {
+          "state": "error",
+          "app": "firstmate-opencode",
+          "title": "Zm0td29ya2Vy",
+          "msg": "RmFpbGVkOiB3b3JrZXIgZmluaXNoZWQgZHVyaW5nIGJsb2NrZWQgY2FwdHVyZQ=="
+        }
+      ]
+    },
+    {
+      "command": "bash {run-worktree}/bin/fm-osc7501.sh arm --task worker --harness opencode --agent-bin opencode --backend tmux --kind ship --state {run-worktree}/.osc-live-u9j84_yb/clean-gates/state --config {run-worktree}/.osc-live-u9j84_yb/clean-gates/config",
+      "records": [
+        {
+          "state": "idle",
+          "app": "firstmate-opencode",
+          "title": "Zm0td29ya2Vy"
+        },
+        {
+          "state": "working",
+          "app": "firstmate-opencode",
+          "title": "Zm0td29ya2Vy"
+        },
+        {
+          "state": "error",
+          "app": "firstmate-opencode",
+          "title": "Zm0td29ya2Vy",
+          "msg": "RmFpbGVkOiB3b3JrZXIgZmluaXNoZWQgZHVyaW5nIGJsb2NrZWQgY2FwdHVyZQ=="
+        }
+      ]
+    },
+    {
+      "command": "bash {run-worktree}/bin/fm-osc7501.sh disarm --state {run-worktree}/.osc-live-u9j84_yb/clean-gates/state",
+      "records": [
+        {
+          "state": "idle",
+          "app": "firstmate-opencode",
+          "title": "Zm0td29ya2Vy"
+        },
+        {
+          "state": "working",
+          "app": "firstmate-opencode",
+          "title": "Zm0td29ya2Vy"
+        },
+        {
+          "state": "error",
+          "app": "firstmate-opencode",
+          "title": "Zm0td29ya2Vy",
+          "msg": "RmFpbGVkOiB3b3JrZXIgZmluaXNoZWQgZHVyaW5nIGJsb2NrZWQgY2FwdHVyZQ=="
+        }
+      ]
+    },
+    {
+      "PASS": "Clean real PTY: installed native-Claude gate, reporting off, and disarm without ownership produce no OSC bytes",
+      "last_records": [
+        {
+          "state": "idle",
+          "app": "firstmate-opencode",
+          "title": "Zm0td29ya2Vy"
+        },
+        {
+          "state": "working",
+          "app": "firstmate-opencode",
+          "title": "Zm0td29ya2Vy"
+        },
+        {
+          "state": "done",
+          "app": "firstmate-opencode",
+          "title": "Zm0td29ya2Vy",
+          "msg": "RG9uZTogd29ya2VyIGZpbmlzaGVkIGR1cmluZyBibG9ja2VkIGNhcHR1cmU="
+        },
+        {
+          "state": "idle",
+          "app": "firstmate-opencode",
+          "title": "Zm0td29ya2Vy"
+        },
+        {
+          "state": "working",
+          "app": "firstmate-opencode",
+          "title": "Zm0td29ya2Vy"
+        },
+        {
+          "state": "error",
+          "app": "firstmate-opencode",
+          "title": "Zm0td29ya2Vy",
+          "msg": "RmFpbGVkOiB3b3JrZXIgZmluaXNoZWQgZHVyaW5nIGJsb2NrZWQgY2FwdHVyZQ=="
+        }
+      ]
+    }
+  ],
+  "records": [
+    {
+      "state": "idle",
+      "app": "firstmate-opencode",
+      "title": "Zm0td29ya2Vy"
+    },
+    {
+      "state": "blocked",
+      "kind": "question",
+      "app": "firstmate-opencode",
+      "title": "Zm0td29ya2Vy",
+      "msg": "TmVlZHMgeW91ciBkZWNpc2lvbjogY2hvb3NlIA=="
+    },
+    {
+      "state": "idle",
+      "app": "firstmate-opencode",
+      "title": "Zm0td29ya2Vy"
+    },
+    {
+      "state": "working",
+      "app": "firstmate-opencode",
+      "title": "Zm0td29ya2Vy"
+    },
+    {
+      "state": "idle",
+      "app": "firstmate-opencode",
+      "title": "Zm0td29ya2Vy"
+    },
+    {
+      "state": "done",
+      "app": "firstmate-opencode",
+      "title": "Zm0td29ya2Vy",
+      "msg": "RG9uZTogZnJlc2ggYXBwZW5kZWQgcmVzdWx0"
+    },
+    {
+      "state": "working",
+      "app": "firstmate-opencode",
+      "title": "Zm0td29ya2Vy"
+    },
+    {
+      "state": "idle",
+      "app": "firstmate-opencode",
+      "title": "Zm0td29ya2Vy"
+    },
+    {
+      "state": "error",
+      "app": "firstmate-opencode",
+      "title": "Zm0td29ya2Vy",
+      "msg": "RmFpbGVkOiBmcmVzaCBhcHBlbmRlZCByZXN1bHQ="
+    },
+    {
+      "state": "blocked",
+      "kind": "question",
+      "app": "firstmate-opencode",
+      "title": "Zm0td29ya2Vy",
+      "msg": "TmVlZHMgeW91ciBkZWNpc2lvbjogY2FwdGFpbiBvd25zIGl0"
+    },
+    {
+      "state": "done",
+      "app": "firstmate-opencode",
+      "title": "Zm0td29ya2Vy",
+      "msg": "RG9uZTogZmluYWwgb3V0Y29tZQ=="
+    },
+    {
+      "state": "done",
+      "app": "firstmate-opencode",
+      "title": "Zm0td29ya2Vy",
+      "msg": "RG9uZTogZmluYWwgb3V0Y29tZQ=="
+    },
+    {
+      "state": "done",
+      "app": "firstmate-opencode",
+      "title": "Zm0td29ya2Vy",
+      "msg": "RG9uZTogZmluYWwgb3V0Y29tZQ=="
+    },
+    {
+      "state": "idle",
+      "app": "firstmate-opencode",
+      "title": "Zm0td29ya2Vy"
+    },
+    {
+      "state": "working",
+      "app": "firstmate-opencode",
+      "title": "Zm0td29ya2Vy"
+    },
+    {
+      "state": "idle",
+      "app": "firstmate-opencode",
+      "title": "Zm0td29ya2Vy"
+    },
+    {
+      "state": "idle",
+      "app": "firstmate-opencode",
+      "title": "Zm0td29ya2Vy"
+    },
+    {
+      "state": "working",
+      "app": "firstmate-opencode",
+      "title": "Zm0td29ya2Vy"
+    },
+    {
+      "state": "done",
+      "app": "firstmate-opencode",
+      "title": "Zm0td29ya2Vy",
+      "msg": "RG9uZTogd29ya2VyIGV4aXQgb3V0Y29tZQ=="
+    },
+    {
+      "state": "idle",
+      "app": "firstmate-opencode",
+      "title": "Zm0td29ya2Vy"
+    },
+    {
+      "state": "working",
+      "app": "firstmate-opencode",
+      "title": "Zm0td29ya2Vy"
+    },
+    {
+      "state": "error",
+      "app": "firstmate-opencode",
+      "title": "Zm0td29ya2Vy",
+      "msg": "RmFpbGVkOiB3b3JrZXIgZXhpdCBvdXRjb21l"
+    },
+    {
+      "state": "idle",
+      "app": "firstmate-opencode",
+      "title": "Zm0td29ya2Vy"
+    },
+    {
+      "state": "done",
+      "app": "firstmate-opencode",
+      "title": "Zm0td29ya2Vy",
+      "msg": "RG9uZTogc2hvcnQgd29ya2VyIGFscmVhZHkgZmluaXNoZWQ="
+    },
+    {
+      "state": "idle",
+      "app": "firstmate-opencode",
+      "title": "Zm0td29ya2Vy"
+    },
+    {
+      "state": "working",
+      "app": "firstmate-opencode",
+      "title": "Zm0td29ya2Vy"
+    },
+    {
+      "state": "idle",
+      "app": "firstmate-opencode",
+      "title": "Zm0td29ya2Vy"
+    },
+    {
+      "state": "idle",
+      "app": "firstmate-opencode",
+      "title": "Zm0td29ya2Vy"
+    },
+    {
+      "state": "working",
+      "app": "firstmate-opencode",
+      "title": "Zm0td29ya2Vy"
+    },
+    {
+      "state": "done",
+      "app": "firstmate-opencode",
+      "title": "Zm0td29ya2Vy",
+      "msg": "RG9uZTogd29ya2VyIGZpbmlzaGVkIGR1cmluZyBibG9ja2VkIGNhcHR1cmU="
+    },
+    {
+      "state": "idle",
+      "app": "firstmate-opencode",
+      "title": "Zm0td29ya2Vy"
+    },
+    {
+      "state": "working",
+      "app": "firstmate-opencode",
+      "title": "Zm0td29ya2Vy"
+    },
+    {
+      "state": "error",
+      "app": "firstmate-opencode",
+      "title": "Zm0td29ya2Vy",
+      "msg": "RmFpbGVkOiB3b3JrZXIgZmluaXNoZWQgZHVyaW5nIGJsb2NrZWQgY2FwdHVyZQ=="
+    }
+  ]
+}
