@@ -3212,6 +3212,10 @@ if [ "$RAW_LAUNCH" -eq 1 ]; then
           raw_shell_skip_next=0
           continue
         fi
+        word=${word#\"}
+        word=${word#\'}
+        word=${word%\"}
+        word=${word%\'}
         if [ "$shell_seen" -eq 1 ] && raw_shell_has_c_flag "$word"; then
           RAW_SHELL_C=1
           break

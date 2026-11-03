@@ -29,6 +29,9 @@ func Extension() *sdk.Extension {
 	if root == "" {
 		return ext
 	}
+	if os.Getenv("FM_ROOT_OVERRIDE") == "" {
+		_ = os.Setenv("FM_ROOT_OVERRIDE", root)
+	}
 	registerTurnEndGuard(ext, root)
 	registerSessionStart(ext, root)
 	bus := newEventBus()
