@@ -5957,14 +5957,17 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   fi
 
   # Establish durable protection before any base refresh can discard work.
-  # The separate slot-owner claim remains teardown's proof of task identity.
+  # T3 and Herdr already hold this lease from `treehouse get --lease`, and
+  # Treehouse refuses to lease a slot twice. The separate slot-owner claim
+  # remains teardown's proof of task identity.
   if fm_treehouse_pool_slot "$PROJ_ABS" "$WT"; then
-    if [ "$BACKEND" != t3code ]; then
-      SPAWN_TREEHOUSE_LEASE_PATH=$WT
+    if [ "$BACKEND" != t3code ] && [ "$BACKEND" != herdr ]; then
       if ! leased_path=$(cd "$PROJ_ABS" && treehouse lease "$(basename "$(dirname "$WT")")" --lease-holder "$ID"); then
         echo "error: could not durably lease Treehouse pool slot $WT for task $ID; refusing to refresh or launch; $(spawn_endpoint_hint)" >&2
+        echo "warning: durable lease protection is unconfirmed for $WT; exiting its Treehouse shell may discard uncommitted work." >&2
         exit 1
       fi
+      SPAWN_TREEHOUSE_LEASE_PATH=$WT
       if [ -z "$leased_path" ] || [ ! -d "$leased_path" ] ||
         [ "$(real_path_or_raw "$leased_path")" != "$(real_path_or_raw "$WT")" ]; then
         echo "error: Treehouse lease for task $ID returned '$leased_path', not acquired copy '$WT'; refusing to refresh or launch; inspect both paths" >&2

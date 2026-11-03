@@ -1409,6 +1409,7 @@ test_dirty_pool_retry_preserves_the_copy() {
   status=$?
   [ "$status" -ne 0 ] || fail 'dirty copy launched'
   assert_contains "$out" 'is not clean' 'spawn did not refuse the dirty copy'
+  assert_contains "$out" 'was left in place' 'confirmed lease must report retained protection'
   assert_contains "$out" 'treehouse return --force' 'refusal omitted the explicit release command'
   if [ "${FM_TEST_EVIDENCE:-0}" = 1 ]; then
     printf '# Dirty-copy refusal\n$ bin/fm-spawn.sh %s %s --scout\n%s\nexit=%s\n' "$id" "$PROJECT_DIR" "$out" "$status"
@@ -1453,6 +1454,10 @@ test_pool_lease_failures_refuse_before_refresh() {
     assert_contains "$out" 'lease' "$case_name refusal omitted the lease reason"
     [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "$case_name refusal published metadata"
     [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$INITIAL_SHA" ] || fail "$case_name refusal refreshed the copy"
+    if [ "$case_name" = failed ]; then
+      assert_contains "$out" 'protection is unconfirmed' 'failed lease must report uncertain protection'
+      assert_not_contains "$out" 'was left in place' 'failed lease must not claim protection'
+    fi
     if [ "$case_name" = mismatch ]; then
       assert_grep "$id" "$CASE_DIR/slots/1/.test-treehouse-lease" 'path mismatch released the lease'
     fi
