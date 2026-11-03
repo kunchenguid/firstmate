@@ -13,6 +13,9 @@
 # ambient account's; a root quota-axi cannot read there, such as an `ordinary`
 # login kept in the macOS Keychain, is reported unmeasured. QUOTA_AXI_SNAPSHOT
 # is removed from each read so a fixture for one account cannot answer for all.
+# A `token:<file>` entry has no config root, and --profile-only reads only a
+# root's credential file, so it is reported unmeasured without running
+# quota-axi and without reading the token file.
 # quota-axi exits nonzero when it cannot measure a provider, for example when
 # the vendor rate-limits the quota endpoint, yet still prints a valid snapshot
 # naming that state; such a snapshot is kept, so the account is reported
@@ -103,7 +106,15 @@ while IFS= read -r entry; do
   root=$entry
   [ "$entry" != ordinary ] || root="${HOME:?HOME is required to measure the ordinary account}/.claude"
   error=
-  if fm_run_timed "$FM_CLAUDE_ACCOUNT_QUOTA_SECONDS" env -u QUOTA_AXI_SNAPSHOT CLAUDE_CONFIG_DIR="$root" \
+  case "$entry" in
+  token:*)
+    root=-
+    error="setup-token account has no config root for quota-axi to read"
+    ;;
+  esac
+  if [ -n "$error" ]; then
+    :
+  elif fm_run_timed "$FM_CLAUDE_ACCOUNT_QUOTA_SECONDS" env -u QUOTA_AXI_SNAPSHOT CLAUDE_CONFIG_DIR="$root" \
       quota-axi --provider claude --profile-only --json > "$WORK/snapshot.json" 2>/dev/null </dev/null; then
     fm_quota_json_valid < "$WORK/snapshot.json" || error="quota-axi returned an invalid snapshot"
   elif ! fm_quota_json_valid < "$WORK/snapshot.json"; then

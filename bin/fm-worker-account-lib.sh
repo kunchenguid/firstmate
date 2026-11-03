@@ -5,7 +5,8 @@
 # environment credentials a pinned Claude launch sheds.
 #
 # docs/configuration.md "Worker account pin" owns the operator-facing contract.
-# Sourced by bin/fm-spawn.sh and bin/fm-control.sh.
+# Sourced by bin/fm-spawn.sh, bin/fm-control.sh, bin/fm-claude-account-quota.sh,
+# and bin/fm-claude-token-exec.sh.
 #
 # Pinnable runners, each a credential store inside a root its vendor lets a
 # process select:
@@ -55,7 +56,8 @@
 #
 # A home that spends several Claude subscriptions declares them instead in
 # config/claude-accounts: one entry per line, each `ordinary` or an absolute
-# path exactly as config/claude-account would hold it, with no blank lines,
+# path exactly as config/claude-account would hold it, or `token:` plus the
+# absolute path of a setup-token file (below), with no blank lines,
 # duplicates, or control characters, and an optional final newline. The list is
 # opt-in in the same way: absent, nothing here changes. Present, it replaces the
 # home-wide pin, which must then be absent, and every Claude ship or scout
@@ -66,11 +68,25 @@
 # recorded as account=, which a ship or scout relaunch reuses unless an
 # explicit --account moves it. A local secondmate's agent never draws from the
 # list: it needs its own per-secondmate pin.
+#
+# A `token:<absolute path>` entry is a subscription that has no config root of
+# its own, reached through a long-lived `claude setup-token` OAuth token kept
+# in an owner-only (0600) file. Its launch leaves CLAUDE_CONFIG_DIR unset like
+# `ordinary`, sheds the same credentials, and runs the agent through
+# bin/fm-claude-token-exec.sh, which reads the file and exports
+# CLAUDE_CODE_OAUTH_TOKEN for that one process. The token value is never an
+# argument, never in the staged launch text, and never in a task record,
+# status line, or diagnostic: only the entry, which names the file, is. Its
+# sign-in check runs `claude auth status` through the same helper and requires
+# its JSON to report loggedIn with authMethod oauth_token. Only the list
+# accepts this kind; config/claude-account and the per-secondmate pins keep
+# their own grammar.
 
 # shellcheck source=bin/fm-timeout-lib.sh
 . "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/fm-timeout-lib.sh"
 
 FM_WORKER_ACCOUNT_CHECK_SECONDS=${FM_WORKER_ACCOUNT_CHECK_SECONDS:-30}
+FM_WORKER_ACCOUNT_LIB_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 
 # Credentials Claude Code ranks above the /login stored in its config root
 # (code.claude.com/docs/en/authentication, "Authentication precedence"; the
@@ -86,6 +102,47 @@ fm_worker_account_file() {
   pi | pi-signed) printf '%s\n' pi-account ;;
   *) return 1 ;;
   esac
+}
+
+# fm_worker_account_token_load <file>
+# Prints the setup token held in <file> and nothing else, so the only caller
+# that may let the output reach a process environment is
+# bin/fm-claude-token-exec.sh; every other caller discards it. Status: 0 ok, 3
+# missing, 4 not a regular file, 5 unreadable, 6 readable by group or other,
+# 7 owned by another user, 8 empty, 9 not one run of printable characters.
+# The file is followed through a symbolic link, and its own mode decides.
+fm_worker_account_token_load() {
+  perl -e '
+    my ($f) = @ARGV;
+    my @st = stat $f or exit 3;
+    -f _ or exit 4;
+    $st[4] == $> or exit 7;
+    ($st[2] & 077) == 0 or exit 6;
+    open(my $fh, "<", $f) or exit 5;
+    my $body = do { local $/; <$fh> } // "";
+    $body =~ s/\A\s+//;
+    $body =~ s/\s+\z//;
+    length $body or exit 8;
+    $body =~ /\A[\x21-\x7e]+\z/ or exit 9;
+    print $body;
+  ' -- "$1"
+}
+
+# fm_worker_account_token_refusal <status> <file>
+# Prints the one refusal for a non-zero fm_worker_account_token_load status.
+# It names the file and the reason, never any of the file's content.
+fm_worker_account_token_refusal() {
+  local why
+  case "$1" in
+  3) why="does not exist" ;;
+  4) why="is not a regular file" ;;
+  5) why="is not readable" ;;
+  6) why="is readable by group or other; run chmod 600 on it" ;;
+  7) why="is owned by another user" ;;
+  8) why="is empty; write the output of claude setup-token into it" ;;
+  *) why="must hold one token with no spaces or line breaks" ;;
+  esac
+  echo "error: config/claude-accounts declares a setup-token account, but the token file $2 $why" >&2
 }
 
 # fm_worker_account_read <harness> <file>
@@ -205,7 +262,7 @@ fm_worker_account_list() {
     (-f $f && -r _) or exit 5;
     open(my $fh, "<", $f) or exit 5;
     my $body = do { local $/; <$fh> } // "";
-    $body =~ /\A(?:(?:ordinary|\/[^\x00-\x1f\x7f]*)\n)*(?:ordinary|\/[^\x00-\x1f\x7f]*)\n?\z/ or exit 6;
+    $body =~ /\A(?:(?:ordinary|(?:token:)?\/[^\x00-\x1f\x7f]*)\n)*(?:ordinary|(?:token:)?\/[^\x00-\x1f\x7f]*)\n?\z/ or exit 6;
     my %seen;
     for my $entry (split /\n/, $body) {
       exit 7 if $seen{$entry}++;
@@ -226,7 +283,7 @@ fm_worker_account_list() {
     return 1
     ;;
   *)
-    echo "error: config/claude-accounts must hold one account per line, each 'ordinary' or an absolute path, with no blank lines or control characters: $cfg" >&2
+    echo "error: config/claude-accounts must hold one account per line, each 'ordinary', an absolute path, or token:<absolute path of a setup-token file>, with no blank lines or control characters: $cfg" >&2
     return 1
     ;;
   esac
@@ -277,6 +334,19 @@ fm_worker_account_check() {
   done
   case "$harness" in
   claude)
+    case "$root" in
+    token:*)
+      # Claude reads the token offline, so this proves the token is present
+      # and is the credential Claude selects, not that Anthropic accepts it.
+      out=$(fm_run_timed "$FM_WORKER_ACCOUNT_CHECK_SECONDS" "${clean[@]}" \
+        "$FM_WORKER_ACCOUNT_LIB_DIR/fm-claude-token-exec.sh" "${root#token:}" \
+        "$executable" auth status 2>/dev/null </dev/null) &&
+        [ "$(printf '%s\n' "$out" | jq -r 'select(type == "object") | "\(.loggedIn) \(.authMethod)"' 2>/dev/null)" = "true oauth_token" ] &&
+        return 0
+      echo "error: $setting declares the setup-token account $declared, but claude auth status does not report its token as the signed-in credential; create a new one with claude setup-token, or remove the entry" >&2
+      return 1
+      ;;
+    esac
     [ -z "$root" ] || clean+=("CLAUDE_CONFIG_DIR=$root")
     if fm_run_timed "$FM_WORKER_ACCOUNT_CHECK_SECONDS" "${clean[@]}" \
       "$executable" auth status >/dev/null 2>&1 </dev/null; then
@@ -341,7 +411,7 @@ fm_worker_account_request_valid() {
 # before a relaunch stops the live agent.
 fm_worker_account_select() {
   local harness=$1 config=$2 model=$3 executable=$4 raw=${5:-} mate=${6:-} account=${7:-}
-  local selection declared root providers word provider='' selected_config setting listed count
+  local selection declared root providers word provider='' selected_config setting listed count rc
   fm_worker_account_request_valid "$account" || return 1
   if [ -n "$account" ] && [ "$harness" != claude ]; then
     echo "error: --account names one of config/claude-accounts and applies to Claude workers only, not $harness" >&2
@@ -384,11 +454,24 @@ fm_worker_account_select() {
     declared=$account
     root=$account
     [ "$declared" != ordinary ] || root=
-    if [ -n "$root" ] && { [ ! -d "$root" ] || [ ! -r "$root" ] || [ ! -x "$root" ]; }; then
-      # shellcheck disable=SC2088  # Literal text for the refusal.
-      echo "error: $setting must name readable, searchable existing directories (ordinary means ~/.claude with CLAUDE_CONFIG_DIR unset): $root" >&2
-      return 1
-    fi
+    case "$root" in
+    token:*)
+      # The token is read and discarded here; only the exec helper exports it.
+      fm_worker_account_token_load "${root#token:}" >/dev/null
+      rc=$?
+      [ "$rc" -eq 0 ] || {
+        fm_worker_account_token_refusal "$rc" "${root#token:}"
+        return 1
+      }
+      ;;
+    *)
+      if [ -n "$root" ] && { [ ! -d "$root" ] || [ ! -r "$root" ] || [ ! -x "$root" ]; }; then
+        # shellcheck disable=SC2088  # Literal text for the refusal.
+        echo "error: $setting must name readable, searchable existing directories (ordinary means ~/.claude with CLAUDE_CONFIG_DIR unset): $root" >&2
+        return 1
+      fi
+      ;;
+    esac
     providers=
   else
     selection=$(fm_worker_account_resolve "$harness" "$selected_config" "$setting") || return 1
@@ -440,7 +523,8 @@ fm_worker_account_select() {
 # fm_worker_account_claude_shed
 # Prints the `env` launch prefix that unsets the environment credentials Claude
 # ranks above a pinned root's stored login. The caller appends the root
-# assignment, or -u CLAUDE_CONFIG_DIR for the ordinary account.
+# assignment, or -u CLAUDE_CONFIG_DIR for the ordinary account and a
+# setup-token account.
 fm_worker_account_claude_shed() {
   local var prefix=env
   for var in $FM_WORKER_ACCOUNT_CLAUDE_SHED; do

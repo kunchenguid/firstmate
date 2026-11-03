@@ -672,16 +672,18 @@ None of these three runs ever answered its dialog (Escape only, never Enter), so
 A Claude root whose `settings.json` names an `apiKeyHelper` reports `loggedIn: true`, a Pi root holding a stored API key reports `ready`, and a provider registered by an extension in the Pi root's `extensions/` answers `pi auth check` with `not_ready`/`provider_not_found` while `pi --list-models` lists it.
 Each refusal is paired with the divergence it depends on: the same runner, given `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, or the extension's key variable, answers signed in for the empty root, so the refusal proves the check's cleared environment.
 Replacing `env -i` with `env` in the check makes the guard fail on the Claude refusal.
+A declared [setup-token account](../configuration.md#setup-token-accounts) passes only when `claude auth status`, run with the token in `CLAUDE_CODE_OAUTH_TOKEN`, reports `loggedIn: true` and `authMethod: oauth_token`; Claude reads the token offline, so a synthetic token answers that way, while an environment API key reports another method.
 
-Verified 2026-09-22 on Claude Code 2.1.278 and pi 0.86.1 on Linux; pi-signed was not installed.
+Verified 2026-11-03 on Claude Code 2.1.309 and pi 1.0.0 on macOS; pi-signed was not installed.
 
 ```sh
 bash tests/fm-worker-account-live-e2e.test.sh
 ```
 
 ```
-ok - claude 2.1.278 (Claude Code): the pin check accepts a signed-in root and refuses an empty one despite an ambient API key
-ok - pi 0.86.1: the pin check reads auth check and the model listing, and refuses what only an ambient credential signs in
+ok - claude 2.1.309 (Claude Code): the pin check accepts a signed-in root and refuses an empty one despite an ambient API key
+ok - claude 2.1.309 (Claude Code): the setup-token check accepts a token claude reports as oauth_token, a method an API key does not report
+ok - pi 1.0.0: the pin check reads auth check and the model listing, and refuses what only an ambient credential signs in
 skip-runner: pi-signed is not installed, so its pin check was not exercised
 # worker account live guard checked: claude pi
 ```
