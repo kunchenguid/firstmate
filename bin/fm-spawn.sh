@@ -4768,7 +4768,7 @@ if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ] 
 fi
 if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   spawn_protect_recorded_pool_copies() {
-    local state_dir meta field recorded slot_name lease_state leased_path
+    local state_dir meta field recorded slot_name slot_row lease_state leased_path
     [ "$SPAWN_TREEHOUSE_PROJECT_LOCK_HELD" = 1 ] || return 1
     fm_local_firstmate_state_dirs "$STATE" || {
       echo "error: $FM_LOCAL_FIRSTMATE_ERROR; refusing Treehouse acquisition" >&2
@@ -4783,15 +4783,14 @@ if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ];
           [ -n "$recorded" ] || continue
           fm_treehouse_pool_slot "$PROJ_ABS" "$recorded" || continue
           recorded=$(real_path_or_raw "$recorded")
+          slot_name=$(basename "$(dirname "$recorded")")
           lease_state=$(cd "$PROJ_ABS" && treehouse status --json) || return 1
-          slot_name=$(printf '%s\n' "$lease_state" | jq -er --arg path "$recorded" '
-            map(select(.path == $path)) |
-            if length != 1 then error("recorded copy missing from pool status")
-            elif .[0].status == "leased" then "leased"
-            else .[0].name end
+          slot_row=$(printf '%s\n' "$lease_state" | jq -ec --arg name "$slot_name" '
+            map(select(.name == $name)) |
+            if length != 1 then error("recorded copy missing from pool status") else .[0] end
           ') || return 1
-          [ "$slot_name" != leased ] || continue
-          [ "$slot_name" = "$(basename "$(dirname "$recorded")")" ] || return 1
+          [ "$(real_path_or_raw "$(printf '%s\n' "$slot_row" | jq -er '.path')")" = "$recorded" ] || return 1
+          [ "$(printf '%s\n' "$slot_row" | jq -r '.status')" != leased ] || continue
           leased_path=$(cd "$PROJ_ABS" && treehouse lease "$slot_name" --lease-holder "$(basename "$meta" .meta)") || return 1
           [ -d "$leased_path" ] &&
             [ "$(real_path_or_raw "$leased_path")" = "$recorded" ] || return 1
