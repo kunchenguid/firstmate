@@ -2113,13 +2113,6 @@ test_aborted_t3_secondmate_spawn_removes_home_env() {
 # explicit-thread turn must be refused by the episode mutex: if the abort
 # released the mutex first, that turn would be accepted and then interrupted
 # and archived by this same cleanup.
-t3_seat_thread() {  # <id> -> the T3 thread the case home's seat ledger records
-  FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$CASE_DIR/home" FM_STATE_OVERRIDE="$CASE_DIR/home/state" \
-    FM_DATA_OVERRIDE="$CASE_DIR/home/data" FM_CONFIG_OVERRIDE="$CONFIG" \
-    "$ROOT/bin/fm-fleet-seats.sh" show "$1" |
-    jq -r '[.incarnations[] | select(.route.backend == "t3code") | .route.target // empty] | last // empty'
-}
-
 t3_concurrent_turn() {  # <thread> -> turn-start output; status in $?
   HOME="$SPAWN_HOME" CLAUDE_CONFIG_DIR='' \
     FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$CASE_DIR/home" FM_STATE_OVERRIDE="$CASE_DIR/home/state" \
@@ -2130,12 +2123,12 @@ t3_concurrent_turn() {  # <thread> -> turn-start output; status in $?
 }
 
 test_failed_startup_cleanup_keeps_lifecycle_through_t3_archive() {
-  local id home hold thread out send_out send_rc rc waited
+  local id home hold thread out send_out send_rc rc waited pooled=${1:-pooled}
   id=$(t3_uid t3abortlock)
-  t3_case spawn-abort-lifecycle
-  # A pooled T3 secondmate, so its thread has a counted seat the concurrent
-  # send can resolve while the record is still unpublished.
-  printf '{"pools":[{"name":"shared","capacity":1,"models":["claude-sonnet-5"]}]}\n' > "$CONFIG/fleet-seats"
+  t3_case "spawn-abort-lifecycle-$pooled"
+  if [ "$pooled" = pooled ]; then
+    printf '{"pools":[{"name":"shared","capacity":1,"models":["claude-sonnet-5"]}]}\n' > "$CONFIG/fleet-seats"
+  fi
   hold="$CASE_DIR/hold-archive"
   : > "$hold"
   t3_world_set 'w.failTools = { t3_thread_send: { code: "turn_refused", message: "launch turn refused" } };
@@ -2151,8 +2144,8 @@ test_failed_startup_cleanup_keeps_lifecycle_through_t3_archive() {
   done
   out=$(cat "$CASE_DIR/spawn.out" 2>/dev/null || true)
   [ -e "$hold.reached" ] || fail "the failed secondmate spawn never reached its T3 archive: $out"
-  thread=$(t3_seat_thread "$id")
-  [ -n "$thread" ] || fail "the pooled secondmate's seat did not record its T3 thread: $out"
+  thread=$(jq -r .thread "$CASE_DIR/home/state/.t3-launch-$id")
+  [ -n "$thread" ] || fail "the secondmate launch did not record its T3 thread: $out"
   # The launch was refused; let the concurrent turn be acceptable to T3 so only
   # the lifecycle mutex can refuse it.
   t3_world_set 'delete w.failTools' || fail "could not clear the launch-turn refusal"
@@ -2170,6 +2163,7 @@ test_failed_startup_cleanup_keeps_lifecycle_through_t3_archive() {
   rc=$(cat "$CASE_DIR/spawn.rc" 2>/dev/null || echo running)
   [ "$rc" != running ] || fail "the failed secondmate spawn never finished after the archive was released"
   [ "$rc" -ne 0 ] || fail "the aborted secondmate spawn reported success: $(cat "$CASE_DIR/spawn.out")"
+  assert_absent "$CASE_DIR/home/state/.t3-launch-$id" "abort must remove the launch-owner binding"
   [ "$(t3_log_line_of 'r.tool === "t3_thread_organize"')" -gt "$(t3_log_line_of 'r.tool === "t3_thread_send"')" ] \
     || fail "the failed startup must still archive its idle thread"
   pass "fm-spawn.sh --backend t3code --secondmate: failed-startup cleanup holds the lifecycle episode through the T3 archive, so a concurrent turn is refused, never accepted and archived"
@@ -2952,6 +2946,11 @@ test_legacy_control_adoption_survives_shared_checks() {
   pass "legacy control adoption loads its backend, reads alive, interrupts, and refuses absent-thread evidence"
 }
 
+test_startup_cleanup_lifecycle_variants() {
+  test_failed_startup_cleanup_keeps_lifecycle_through_t3_archive
+  test_failed_startup_cleanup_keeps_lifecycle_through_t3_archive uncapped
+}
+
 if [ -n "${FM_TEST_ONLY:-}" ]; then
   "$FM_TEST_ONLY"
   exit
@@ -3035,6 +3034,8 @@ test_spawn_refuses_launch_settings_t3_cannot_honor codex-permission-mode restric
 test_spawn_codex_accepts_bypass_approval_mode
 test_spawn_refuses_launch_settings_t3_cannot_honor launch-env-allowlist HOME "config/launch-env-allowlist"
 test_spawn_refuses_raw_launch_command
+test_failed_startup_cleanup_keeps_lifecycle_through_t3_archive
+test_failed_startup_cleanup_keeps_lifecycle_through_t3_archive uncapped
 test_spawn_abort_returns_lease_only_after_archive ok
 test_spawn_abort_returns_lease_only_after_archive fail
 test_uncertain_thread_launch_keeps_lease

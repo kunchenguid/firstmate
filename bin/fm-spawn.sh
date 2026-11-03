@@ -2173,6 +2173,9 @@ spawn_abort_cleanup() {
   # its parent's exit path, and a join's own release belongs here, after the
   # replacement wiring, Herdr projection, endpoint archive, environment
   # removal, and record rollback have all finished.
+  if [ "$BACKEND" = t3code ] && [ "$KIND" = secondmate ]; then
+    rm -f "$STATE/.t3-launch-$ID"
+  fi
   if [ "$SPAWN_LIFECYCLE_JOINED" = 1 ]; then
     SPAWN_LIFECYCLE_JOINED=0
     fm_supervisor_lifecycle_release "$STATE" "$ID" || true
@@ -5531,6 +5534,9 @@ EOF
       T3CODE_CREATE_UNCERTAIN=0
     fi
     T3CODE_ABORT_CLEANUP=1
+    if [ "$KIND" = secondmate ]; then
+      (umask 077; jq -cn --arg thread "$T" --arg server "$FM_T3CODE_TASK_SERVER" --arg task "$ID" '{thread: $thread, server: $server, task: $task}' > "$STATE/.t3-launch-$ID") || exit 1
+    fi
     ;;
   esac
   # Orca and the Herdr projection own their own abort cleanup above; every other
@@ -7998,6 +8004,7 @@ if [ "$BACKEND" = t3code ]; then
     fi
     T3CODE_LAUNCH_UNCONFIRMED=1
   }
+  [ "$KIND" != secondmate ] || rm -f "$STATE/.t3-launch-$ID"
   T3CODE_ABORT_CLEANUP=0
   T3CODE_LEASED=0
   T3CODE_HOME_ENV=0

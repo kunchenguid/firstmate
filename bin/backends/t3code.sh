@@ -232,6 +232,19 @@ fm_backend_t3code_turn_start() (  # <thread-id> <text> [model-selection-json]
       echo "error: T3 turn refused for $task; normal capacity admission is required" >&2
       return 1
     fi
+  else
+    local binding
+    for binding in "$state"/.t3-launch-*; do
+      [ -f "$binding" ] || continue
+      task=$(jq -er --arg thread "$thread" --arg server "$server" 'select(.thread == $thread and .server == $server) | .task' "$binding") || continue
+      . "$FM_BACKEND_LIB_DIR/fm-secondmate-liveness-lib.sh"
+      fm_supervisor_lifecycle_enter "$state" "$task" 0 || {
+        echo "error: T3 turn refused while $task has an active lifecycle operation" >&2
+        return 1
+      }
+      trap 'fm_supervisor_lifecycle_release "$state" "$task"' EXIT
+      break
+    done
   fi
   dir="${FM_STATE_OVERRIDE:-$FM_HOME/state}/t3code-sends"
   if [ -n "${FM_T3CODE_CLIENT_REQUEST_ID:-}" ]; then
