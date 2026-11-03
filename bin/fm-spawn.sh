@@ -135,7 +135,9 @@
 #   top-level shell into it, because a restart restores that shell's cwd;
 #   docs/herdr-backend.md owns its aborted-spawn lease return.
 #   Before acquisition, spawn durably leases unleased pool copies recorded by
-#   any local Firstmate home.
+#   any local Firstmate home. A record it cannot read, match to its row in
+#   `treehouse status`, or lease refuses the spawn, naming that record and copy;
+#   it blocks later Treehouse acquisitions for the project until it is resolved.
 #   Pane-driven spawns durably lease recognized managed slots before base
 #   refresh. Once confirmed, that lease survives worker exit, restart, and
 #   later refusals, even when no task record was published; a retry must acquire
