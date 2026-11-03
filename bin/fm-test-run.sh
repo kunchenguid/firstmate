@@ -2445,10 +2445,19 @@ run_under_supervisor() {
     END { for (i = 1; i <= n; i++) if (order[i] in open) { printf "%s%s", sep, order[i]; sep = " "; delete open[order[i]] } }
   ' "$phase_file")
   last_phase=$(awk '$1 == "phase" { p = $2 } END { print p }' "$phase_file")
-  run_tmp=$(awk '$1 == "run-tmp" { d = $2 } END { print d }' "$phase_file")
+  run_tmp=$(sed -n 's/^run-tmp //p' "$phase_file" | tail -n 1)
   rm -f "$phase_file"
   swept=$(sweep_fixture_processes ";$RUN_MARK/")
-  [ -z "$run_tmp" ] || rm -rf "$run_tmp" 2>/dev/null || true
+  # Remove the record's directory only when it is the one this run's child
+  # makes with mktemp -d "${TMPDIR:-/tmp}/fm-test-run.XXXXXX"; anything else
+  # is left alone rather than deleted.
+  case $run_tmp in
+    "${TMPDIR:-/tmp}"/fm-test-run.[!/][!/][!/][!/][!/][!/])
+      if [ -d "$run_tmp" ] && [ ! -L "$run_tmp" ]; then
+        rm -rf "$run_tmp" 2>/dev/null || true
+      fi
+      ;;
+  esac
   if [ -n "$in_flight" ]; then
     where="while running $in_flight"
   else

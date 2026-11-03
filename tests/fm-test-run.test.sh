@@ -1732,6 +1732,33 @@ test_run_timeout_bounds_the_whole_invocation() {
   pass "--run-timeout-secs bounds the whole invocation, scripts and selection alike"
 }
 
+# The parent removes the run's temp tree after a tripped whole-run bound. A
+# TMPDIR with a space once made it read that tree's path truncated at the
+# space and delete whatever directory the prefix named.
+test_tripped_run_cleanup_spares_a_spaced_tmpdir_sibling() {
+  local tmp repo script rc
+  command -v perl >/dev/null 2>&1 || fail "perl is required to start the escaped helper"
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-spaced.XXXXXX")
+  repo="$tmp/repo"
+  script=tests/fm-spaced-tmp-fixture.test.sh
+  escaped_helper_hang_fixture | init_bound_fixture_repo "$repo" "$script"
+  mkdir -p "$tmp/work" "$tmp/work files"
+  : >"$tmp/work/keep"
+  set +e
+  (cd "$repo" && TMPDIR="$tmp/work files" ESCAPED_PID="$tmp/escaped.pid" \
+    bin/fm-test-run.sh --per-script-timeout-secs 0 --run-timeout-secs 3 "$script") \
+    >"$tmp/out" 2>"$tmp/err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 124 ] || fail "a tripped whole-run bound must exit 124, got $rc: $(cat "$tmp/out" "$tmp/err")"
+  assert_recorded_pid_gone "$tmp/escaped.pid" "the escaped helper of a run under a spaced TMPDIR"
+  [ -e "$tmp/work/keep" ] || fail "the tripped run's cleanup deleted an unrelated sibling of its spaced TMPDIR"
+  [ -z "$(ls -A "$tmp/work files")" ] \
+    || fail "the tripped run left its temp tree behind: $(ls -A "$tmp/work files")"
+  rm -rf "$tmp"
+  pass "a tripped run removes only its own temp tree under a TMPDIR with a space"
+}
+
 # A bound runs each script in a process group of its own, which a terminal's
 # Ctrl-C never reaches, so an interrupted run must still end the script it was
 # running and every helper that script moved out of its group. The runner is
@@ -2156,6 +2183,7 @@ test_per_script_timeout_bounds_a_hang
 test_default_per_script_bound_applies_in_every_mode
 test_tripped_bound_sweeps_escaped_descendants
 test_run_timeout_bounds_the_whole_invocation
+test_tripped_run_cleanup_spares_a_spaced_tmpdir_sibling
 test_interrupted_run_leaves_no_fixture_process
 test_changed_bound_gives_slow_watcher_suites_headroom
 test_max_wall_ms_is_a_result_not_advice
