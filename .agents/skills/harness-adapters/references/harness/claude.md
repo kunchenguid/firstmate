@@ -89,7 +89,7 @@ Put either in user settings or the untracked `.claude/settings.local.json`, neve
 This differs from the worker hook, which only touches a task marker through `.claude/settings.local.json`.
 A Claude secondmate's busy hooks are not that file: `bin/fm-spawn.sh` passes the parent home's `state/<id>.claude-settings.json` through `--settings` and does not edit the mate home's `settings.local.json`.
 
-Primary `.claude/settings.json` registers `../../../bin/fm-turnend-guard.sh --claude` and `../../../bin/fm-claude-stop-autoarm.sh` with `asyncRewake: true` and `timeout: 28800`.
+Primary `.claude/settings.json` registers `../../../bin/fm-turnend-guard.sh --claude` and `../../../bin/fm-claude-stop-autoarm.sh` under `Stop` and `../../../bin/fm-claude-stop-autoarm.sh` again under `StopFailure`, both auto-arm entries with `asyncRewake: true` and `timeout: 28800`.
 Guard exit 2 plus stderr forces continuation.
 Stop payload `stop_hook_active=true` follows any hook-driven continuation, including async reawakening, so Claude mode ignores it and uses cooperative claim and epoch plus bounded re-block; default Codex mode keeps it as a one-block loop guard.
 
@@ -97,8 +97,10 @@ Project `.claude/settings.json` loads only when the exact project root is the se
 Hooks still run through cwd-sensitive `/bin/sh`, so tracked commands anchor through `"$CLAUDE_PROJECT_DIR"/bin/...`.
 `../../../docs/turnend-guard.md` owns details.
 
-The Stop-owned watcher hook runs every Stop, foregrounds `../../../bin/fm-watch-arm.sh` only when eligible, and uses exit-2 async reawakening as notification.
+The Stop-owned watcher hook runs every Stop and every StopFailure, foregrounds `../../../bin/fm-watch-arm.sh` only when eligible, and uses exit-2 async reawakening as notification.
 The model handles notifications but never routine re-arm.
+On Claude Code 2.1.317 a `StopFailure` firing carries `session_id`, `transcript_path`, `cwd`, `prompt_id`, `error` (for example `authentication_failed`, `server_error`, `connection_failed`), and `last_assistant_message`, and honors the same `asyncRewake` registration and exit-2 rewake as `Stop` (live-verified 2026-11-03 on a herdr-hosted primary; `../../../../../docs/verification/supervision.md` owns the evidence).
+A `StopFailure` turn end that commits a rewake writes `state/.claude-autoarm-stopfailure-rewake`, and another `StopFailure`-driven rewake inside `FM_CLAUDE_STOPFAILURE_REWAKE_COOLDOWN` (default 300 seconds) is suppressed to `rewake-suppressed` while its arm still runs, so an API-error storm cannot chain error to rewake indefinitely.
 Unless `config/supervision-host-off` opts the home out, the hook foregrounds the supervision host instead, which also runs Claude's print mode as its headless engine; [`supervision-host.md`](../../../../../docs/supervision-host.md#engines) owns the verified engine facts.
 Claude's PreToolUse seatbelt blocks directly, and its deny is honored only with empty stdout; `../../../docs/arm-pretool-check.md` owns that contract.
 

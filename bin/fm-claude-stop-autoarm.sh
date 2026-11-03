@@ -1,11 +1,16 @@
 #!/usr/bin/env bash
-# Claude Stop-owned watcher auto-arm (asyncRewake hook).
+# Claude Stop/StopFailure-owned watcher auto-arm (asyncRewake hook).
 #
-# Registered in tracked .claude/settings.json as a Stop command hook with
-# "asyncRewake": true and an explicit multi-hour timeout. Claude Code fires it
-# in the background on EVERY Stop of a Claude primary session, with no
-# deduplication across firings. It owns routine tokenless watcher continuity
-# for Claude primaries (main home and marked secondmate homes):
+# Registered in tracked .claude/settings.json as a Stop command hook AND as a
+# StopFailure command hook, each with "asyncRewake": true and an explicit
+# multi-hour timeout. Claude Code fires it in the background on EVERY Stop of
+# a Claude primary session, and on EVERY StopFailure (the API-error turn end
+# that skips the entire Stop phase), with no deduplication across firings. The
+# StopFailure registration is what re-arms watcher continuity after an
+# error-ended turn: Claude 2.1.317 honors the same asyncRewake/exit-2 rewake
+# semantics on StopFailure as on Stop (docs/verification/supervision.md), so
+# the same script covers both turn ends. It owns routine tokenless watcher
+# continuity for Claude primaries (main home and marked secondmate homes):
 #
 #   - Scope: only a genuine primary checkout (plain checkout or validly marked
 #     secondmate home) with AGENTS.md, bin/, and the effective state dir - the
@@ -100,6 +105,17 @@
 #     consumed block count is over the guard's budget it commits the alarm in
 #     the same owned critical section as its failed-suppressed write and
 #     delivers the one loud final rewake; later generations exit 0.
+#   - StopFailure storm bound: an error-ended turn can precede another error
+#     end when the API is still down, so a StopFailure-triggered generation
+#     that closed actionable would otherwise chain error -> rewake -> error
+#     indefinitely while a wake stays undeliverable. StopFailure-triggered
+#     rewakes are therefore bound to one per
+#     FM_CLAUDE_STOPFAILURE_REWAKE_COOLDOWN window (default 300s), recorded by
+#     state/.claude-autoarm-stopfailure-rewake at the committed rewake: a
+#     firing inside the window still runs the full arm path (coverage and the
+#     handling successor are unaffected) but records rewake-suppressed and
+#     exits 0, leaving the durable wake to the next clean turn end or the
+#     next post-cooldown StopFailure.
 #
 # The epoch ledger state/.claude-autoarm-epoch records the latest claim
 # generation and outcome, and binds rewake outcomes to the session-lock pid and
@@ -127,10 +143,10 @@ usage() {
   cat <<'EOF'
 Usage: fm-claude-stop-autoarm.sh
 
-Claude Stop hook registered in .claude/settings.json; not for manual use.
-It reads the Stop payload on stdin and, in a primary home that needs
-supervision, arms the watcher or supervision host for this session.
-Exit 0 is silent; exit 2 carries a rewake banner on stderr.
+Claude Stop and StopFailure hook registered in .claude/settings.json; not
+for manual use. It reads the hook payload on stdin and, in a primary home
+that needs supervision, arms the watcher or supervision host for this
+session. Exit 0 is silent; exit 2 carries a rewake banner on stderr.
 EOF
 }
 
@@ -149,6 +165,11 @@ CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 OWNER_LOCK="$STATE/.claude-autoarm.lock"
 FAILURE_NOTICE="$STATE/.claude-autoarm-failure-notified"
 FAILURE_ALARM="$STATE/.claude-autoarm-failure-alarmed"
+# Mtime of the last committed StopFailure-triggered rewake; bounds chained
+# error -> rewake -> error cycles (header "StopFailure storm bound").
+STOPFAIL_REWAKE_MARKER="$STATE/.claude-autoarm-stopfailure-rewake"
+STOPFAIL_REWAKE_COOLDOWN=${FM_CLAUDE_STOPFAILURE_REWAKE_COOLDOWN:-300}
+case "$STOPFAIL_REWAKE_COOLDOWN" in ''|*[!0-9]*) STOPFAIL_REWAKE_COOLDOWN=300 ;; esac
 # Only this invocation's commit must survive an interruption as a final rewake.
 AUTOARM_COMMITTED_ALARM=0
 # The guard's attended-block budget (bin/fm-turnend-guard.sh --claude owns the
@@ -187,8 +208,11 @@ GRACE=${FM_GUARD_GRACE:-$(fm_poll_derived_grace)}
 
 # Consume the Stop payload once. The decisions below are state-based; the
 # payload is read so a slow writer can never wedge on a full pipe, and its host
-# is inspected before anything else runs.
+# is inspected before anything else runs. The hook event name distinguishes a
+# StopFailure firing (the API-error turn end) from an ordinary Stop; an absent
+# or unreadable name behaves as Stop everywhere below.
 PAYLOAD=$(cat 2>/dev/null || true)
+HOOK_EVENT_NAME=$(printf '%s' "$PAYLOAD" | jq -r '.hook_event_name // empty' 2>/dev/null || true)
 
 # Cursor loads the tracked Claude settings too. Cursor has no asyncRewake, so if
 # a future Cursor build starts firing the Claude-shaped Stop entry, this arm
@@ -304,6 +328,20 @@ autoarm_commit() {  # <outcome> [marker-file] [interrupted-session-identity]
 # changes nothing about the action taken.
 autoarm_record() {  # <outcome>
   fm_autoarm_write_owned "$STATE" "$MY_GEN" "$1" >/dev/null 2>&1 || true
+}
+
+# True when this firing was triggered by StopFailure and the previous
+# StopFailure-driven rewake still sits inside its cooldown window, so this
+# actionable close may not commit another rewake. The arm and the handling
+# successor already ran, so coverage is unaffected; the undeliverable wake
+# stays durable for the next clean turn end or the next post-cooldown
+# StopFailure (header "StopFailure storm bound").
+stopfailure_rewake_suppressed() {
+  local m
+  [ "$HOOK_EVENT_NAME" = StopFailure ] || return 1
+  m=$(fm_sup_stat_mtime "$STOPFAIL_REWAKE_MARKER" 2>/dev/null || true)
+  [ -n "$m" ] || return 1
+  [ $(( $(date +%s) - m )) -lt "$STOPFAIL_REWAKE_COOLDOWN" ]
 }
 
 # Commit this generation's terminal failed-suppressed outcome together with
@@ -668,6 +706,11 @@ if [ "$ACTIONABLE" -eq 1 ]; then
   if [ "$HOST_MODE" -eq 0 ]; then
     start_handling_successor "$CLOSED_ARM_PID" || true
   fi
+  if stopfailure_rewake_suppressed; then
+    autoarm_record rewake-suppressed
+    [ -z "$OUT" ] || rm -f "$OUT" 2>/dev/null || true
+    exit 0
+  fi
   {
     printf 'firstmate watcher wake - one supervision event needs a handling turn now.\n'
     if [ "$HOST_MODE" -eq 1 ]; then
@@ -683,6 +726,7 @@ if [ "$ACTIONABLE" -eq 1 ]; then
     printf 'Run bin/fm-wake-drain.sh first, handle the wake, then run its exact WAKE_ACK_REQUIRED --ack-through command. Until that post-handling acknowledgement, interruption leaves the wake durable for idempotent re-handling. This Stop hook owns watcher continuity: when the handling turn ends, the next needed cycle arms automatically - do NOT run bin/fm-watch-arm.sh after an ordinary wake.\n'
   } >&2
   if autoarm_commit rewake; then
+    [ "$HOOK_EVENT_NAME" = StopFailure ] && : > "$STOPFAIL_REWAKE_MARKER" 2>/dev/null
     [ -z "$OUT" ] || rm -f "$OUT" 2>/dev/null || true
     exit 2
   fi
