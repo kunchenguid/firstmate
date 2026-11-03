@@ -114,7 +114,9 @@
 #     to one per FM_CLAUDE_STOPFAILURE_REWAKE_COOLDOWN window (default 300s),
 #     recorded by state/.claude-autoarm-stopfailure-rewake at its committed
 #     write: a firing inside the window holds its open claim, waits out the
-#     remainder, and only then commits and delivers. The continuation is
+#     remainder, and only then commits and delivers - unless AFK appeared or
+#     the supervision need vanished meanwhile, which ends it silently exactly
+#     as those gates do before the arm. Otherwise the continuation is
 #     delayed, never dropped, because after an error end it is the only thing
 #     that guarantees another hook firing; a newer generation that supersedes
 #     the waiting claim owns continuity instead.
@@ -339,7 +341,8 @@ autoarm_record() {  # <outcome>
 # wait out whatever remains of the previous one's cooldown, and record the
 # committed one so the next is paced in turn (header "StopFailure storm
 # bound"). A Stop firing is never paced. The wait is interruptible so the
-# signal traps still run promptly.
+# signal traps still run promptly, and a firing that waited goes silent when
+# AFK appeared or the supervision need vanished meanwhile.
 stopfailure_pace() {
   local m remaining
   [ "$HOOK_EVENT_NAME" = StopFailure ] || return 0
@@ -349,6 +352,15 @@ stopfailure_pace() {
   [ "$remaining" -gt 0 ] || return 0
   sleep "$remaining" &
   wait "$!" 2>/dev/null || true
+  if [ -e "$STATE/.afk" ]; then
+    autoarm_record afk
+  elif ! need_supervision; then
+    autoarm_record clean
+  else
+    return 0
+  fi
+  [ -z "${OUT:-}" ] || rm -f "$OUT" 2>/dev/null || true
+  exit 0
 }
 
 stopfailure_paced() {
