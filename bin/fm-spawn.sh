@@ -659,7 +659,7 @@
 # suppressed. Bob has no --model or --effort flag (both axes record-only). Its
 # brief cannot ride the launch command (bob chat has no positional prompt arg), so
 # it launches bare and receives an absolute brief pointer after the TUI attaches
-# through the operational-input owner's record-backed doorbell. BOB_SESSION=1 is
+# through the same readiness and delivery gates as kimi and rovo. BOB_SESSION=1 is
 # stripped: the Bob source throws on a nested session (verified, bob 2.0.9). The
 # bob-hook record is its only busy-state source (bin/fm-busy-lib.sh). bob is
 # crewmate/scout only and is refused for --secondmate.
@@ -1385,7 +1385,7 @@ spawn_remote_secondmate() {
     harness=$("$FM_ROOT/bin/fm-harness.sh" secondmate "$id")
   fi
   case "$harness" in
-  claude | codex | opencode | pi | pi-signed | grok | kimi | cursor | omp | bob) ;;
+  claude | codex | opencode | pi | pi-signed | grok | kimi | cursor | omp) ;;
   *)
     fm_lock_release "$registry_lock" || true
     fm_lock_release "$SPAWN_TASK_LOCK" || true
@@ -3017,7 +3017,7 @@ launch_template() {
   # bob (IBM Bob CLI): bob chat --auto-approve --trust --workspace starts a supervised
   # interactive session. The brief cannot ride the launch command (bob chat has no
   # positional prompt arg), so it is delivered after the TUI attaches through the
-  # operational-input owner's record-backed doorbell, same as kimi and rovo.
+  # readiness and delivery gates, same as kimi and rovo.
   # --auto-approve auto-approves tool executions when safety rules allow. --trust
   # persists the worktree path as trusted in ~/.bob/trustedFolders.json, which is
   # required for --auto-approve to take effect (silently suppressed in untrusted
@@ -3028,7 +3028,7 @@ launch_template() {
   # trusted folder, which --trust and fm-bob-trust.sh ensure before launch). The
   # foreign primary markers are cleared because Bob does not clear an inherited
   # CLAUDECODE, and bin/fm-harness.sh must not read a bob worker as its launcher.
-  bob) printf '%s' 'env -u BOB_SESSION -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS bob chat --auto-approve --trust --workspace __WORKTREE__ __BRIEFDOORBELL__' ;;
+  bob) printf '%s' 'env -u BOB_SESSION -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS bob chat --auto-approve --trust --workspace __WORKTREE__' ;;
   # grok (Grok Build TUI): a positional prompt starts the supervised interactive
   # session. --always-approve auto-approves every tool execution (verified: the
   # crewmate runs fully autonomously, no permission gate), which an unattended
@@ -5787,6 +5787,50 @@ rovo_endpoint_cleanup() {
   fm_backend_kill "$BACKEND" "$T" "$tab_id" "fm-$ID" 2>/dev/null && SPAWN_ENDPOINT_CLOSED=1 || true
 }
 
+# bob mirrors rovo's launch-then-send shape: bob chat has no positional prompt,
+# so bob launches bare and takes its brief pointer after the composer is ready.
+# Delivery is confirmed by bob's own UserPromptSubmit hook record (the prompt
+# reached Bob) or by the pointer sitting in the transcript above an empty composer.
+bob_capture() {
+  fm_backend_capture "$BACKEND" "$T" 120 "$W" 2>/dev/null || true
+}
+
+bob_composer_is_empty() {
+  [ "$(fm_backend_composer_state "$BACKEND" "$T" "$W" 2>/dev/null)" = empty ]
+}
+
+bob_wait_for_ready() {
+  local i=0 max=${FM_BOB_READY_POLLS:-60} interval=${FM_BOB_POLL_INTERVAL:-0.5}
+  while [ "$i" -lt "$max" ]; do
+    bob_composer_is_empty && return 0
+    i=$((i + 1))
+    [ "$i" -ge "$max" ] || sleep "$interval"
+  done
+  return 1
+}
+
+bob_delivery_is_confirmed() {
+  case "$(fm_busy_classify "$BACKEND" "$T" bob "$ID" "$STATE_REAL" 2>/dev/null)" in
+    'busy bob-hook' | 'idle bob-hook') return 0 ;;
+  esac
+  bob_composer_is_empty || return 1
+  bob_capture | grep -Fq 'Read the brief at'
+}
+
+bob_wait_for_delivery() {
+  local i=0 max=${FM_BOB_DELIVERY_POLLS:-40} interval=${FM_BOB_POLL_INTERVAL:-0.5}
+  while [ "$i" -lt "$max" ]; do
+    bob_delivery_is_confirmed && return 0
+    i=$((i + 1))
+    [ "$i" -ge "$max" ] || sleep "$interval"
+  done
+  return 1
+}
+
+bob_spawn_fail() { # <detail>
+  rovo_spawn_fail "$1"
+}
+
 # OpenCode 2 takes its brief on the launch command (--prompt), but some 2.x
 # releases (2.0.11) only prefill the composer and never submit it, while later
 # ones (2.0.22) submit it on their own. This post-launch gate makes both work:
@@ -6193,12 +6237,11 @@ bob)
   # backstop. bin/fm-bob-trust.sh owns the structural scope test and refuses
   # anything outside the isolated worktree; the refusal blocks the spawn rather
   # than launching a worker with silent suppression of approval and hooks.
-  if [ "$KIND" = secondmate ]; then
-    spawn_trust_args=(--secondmate-home "$PROJ_ABS" "$ID")
-  else
-    spawn_trust_args=("$WT" "$PROJ_ABS")
+  if git -C "$WT" ls-files --error-unmatch -- .bob/settings.json >/dev/null 2>&1; then
+    echo "error: $WT tracks its own .bob/settings.json; firstmate writes its turn-end and busy-state hooks to that path, so it would replace the project's committed Bob settings; refusing to launch a bob worker; $(spawn_endpoint_hint)" >&2
+    exit 1
   fi
-  if ! "$FM_ROOT/bin/fm-bob-trust.sh" "${spawn_trust_args[@]}" >/dev/null; then
+  if ! "$FM_ROOT/bin/fm-bob-trust.sh" "$WT" "$PROJ_ABS" >/dev/null; then
     echo "error: could not pre-register Bob workspace trust for $WT; refusing to launch a bob worker whose --auto-approve and workspace hooks would be silently suppressed; $(spawn_endpoint_hint)" >&2
     exit 1
   fi
@@ -6666,12 +6709,12 @@ EOF
       # touch for the watcher. Bob's hook schema is Claude-shaped:
       # { "hooks": { "Event": [{ "hooks": [{ "type": "command", "command": "..." }] }] } }
       # Hooks are written into the worktree's .bob/settings.json (the workspace-
-      # scoped layer). Unlike gemini's GEMINISETTINGS system path, Bob's workspace
-      # hooks live in the worktree, but unlike claude's settings.local.json, Bob
-      # merges hook arrays across its two settings layers (global ~/.bob/settings/
-      # settings.json + workspace .bob/settings.json), so a project's own hooks
-      # still run alongside firstmate's. The workspace layer is only loaded in
-      # trusted folders; fm-bob-trust.sh and --trust on the launch command both
+      # scoped layer). Bob merges hook arrays across its two settings layers
+      # (global ~/.bob/settings/settings.json + workspace .bob/settings.json), so
+      # the user's global hooks still run alongside firstmate's. A project that
+      # tracks its own .bob/settings.json is refused before launch (see the bob
+      # trust step), so this write never replaces committed settings. The
+      # workspace layer is only loaded in trusted folders; fm-bob-trust.sh and --trust on the launch command both
       # ensure the folder is trusted before hooks are needed.
       # Bob has no StopFailure or SessionEnd equivalent in its documented hook
       # surface (verified, bob 2.0.9), so Stop is the only turn-close hook.
@@ -8135,6 +8178,27 @@ if [ "$HARNESS" = rovo ]; then
   fi
   if ! rovo_wait_for_delivery; then
     rovo_spawn_fail "rovo brief pointer delivery was not confirmed in window $T"
+    exit 1
+  fi
+fi
+if [ "$HARNESS" = bob ] && [ "$RAW_LAUNCH" -eq 0 ]; then
+  if ! bob_wait_for_ready; then
+    bob_spawn_fail "bob did not show a verified ready signal before brief delivery in window $T"
+    exit 1
+  fi
+  BOB_POINTER="Read the brief at $BRIEF_REAL and follow it exactly."
+  BOB_SUBMIT_RETRIES=${FM_BOB_SUBMIT_RETRIES:-3}
+  BOB_SUBMIT_SLEEP=${FM_BOB_SUBMIT_SLEEP:-${FM_BOB_POLL_INTERVAL:-0.5}}
+  BOB_SUBMIT_SETTLE=${FM_BOB_SUBMIT_SETTLE:-0}
+  if ! BOB_SUBMIT_VERDICT=$(fm_backend_send_text_submit \
+    "$BACKEND" "$T" "$BOB_POINTER" "$BOB_SUBMIT_RETRIES" \
+    "$BOB_SUBMIT_SLEEP" "$BOB_SUBMIT_SETTLE" "$W") ||
+    [ "$BOB_SUBMIT_VERDICT" = send-failed ]; then
+    bob_spawn_fail "bob brief pointer could not be submitted into window $T"
+    exit 1
+  fi
+  if ! bob_wait_for_delivery; then
+    bob_spawn_fail "bob brief pointer delivery was not confirmed in window $T"
     exit 1
   fi
 fi
