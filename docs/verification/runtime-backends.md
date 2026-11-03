@@ -2333,7 +2333,7 @@ The composer read was re-verified on 2026-11-02 against Orca 1.4.232 with real C
 The `--screen` payload carried no ANSI bytes, so the Orca capability descriptor stays `styled=0`.
 The same runtime reported typed-but-unsubmitted composer text in `result.terminal.draft`, which Orca omits from the tail and screen rows: a replacement pane whose `draft` held `DRAFT-MARKER keep me` rendered an empty `❯` row.
 The adapter retains that structured provenance: a nonempty draft is `pending`, including text matching an idle placeholder, while dialog detection and recording inspect the original rendered screen first and take precedence over the draft verdict.
-`tests/fm-backend-orca.test.sh` pins the rendered-screen read, structured-draft deferral, and dialog protection with a nonempty draft.
+`tests/fm-backend-orca.test.sh` pins the rendered-screen read, structured-draft deferral, dialog protection with a nonempty draft, and exactly one Enter without retyping when the own doorbell exists only in the structured draft.
 
 ### Orca environment source
 

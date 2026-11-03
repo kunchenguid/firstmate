@@ -64,6 +64,7 @@ Replacement panes showing a blocking dialog refuse text and Enter; an explicit C
 After resolving a replacement pane, an inbox ring defers if its composer is unreadable or unproven, holds other input, or shows delivery-busy state; a proven pending own doorbell is reused without appending another copy.
 Orca's structured `result.terminal.draft` field makes any nonempty draft pending, even when its text matches an idle placeholder.
 Dialog detection and recording inspect the original rendered screen first and take precedence over that draft verdict.
+Inbox ownership checks recognize the ring's own doorbell in the structured draft when rendered capture does not contain it, without appending another copy.
 An empty replacement may receive the doorbell text, but never a bare inbox Enter.
 Immediately before Enter on a replacement, including after the settle delay, the inbox gate requires the pane to still hold its own doorbell and refuses empty, foreign draft, busy, unreadable, or blocking-dialog states without pressing Enter.
 Any inbox Enter on a replacement leaves the ring deferred and stops further Enter attempts in that send, even if the Enter was accepted.

@@ -1399,6 +1399,18 @@ fm_backend_busy_state() {  # <backend> <target>
   esac
 }
 
+fm_backend_composer_draft() {
+  local backend=$1
+  shift
+  case "$backend" in
+    orca)
+      fm_backend_source "$backend" || return 1
+      fm_backend_orca_composer_draft "$@"
+      ;;
+    *) return 1 ;;
+  esac
+}
+
 # fm_backend_composer_state: classify the composer/input area of <target> as
 # empty|pending|pending-unproven|unknown for callers that need a pre-submit
 # input guard, a submit acknowledgement, or a launch-readiness check. It is

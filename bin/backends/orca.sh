@@ -530,6 +530,17 @@ fm_backend_orca_composer_capture() {  # <terminal-id> [expected-label]
   fi
 }
 
+fm_backend_orca_composer_draft() {
+  local json
+  json=$(fm_backend_orca_composer_capture "$1" "" json) || return 1
+  printf '%s' "$json" | node -e '
+const data = JSON.parse(require("fs").readFileSync(0, "utf8"));
+const draft = data.result?.terminal?.draft;
+if (data.ok === false || typeof draft !== "string") process.exit(1);
+process.stdout.write(draft);
+'
+}
+
 fm_backend_orca_classify_composer() {
   local verdict
   verdict=$(fm_composer_classify_screen "$(fm_backend_orca_composer_caps)" "$2")

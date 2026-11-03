@@ -2256,6 +2256,55 @@ JS
   pass "Orca inbox: a foreign draft reported only in result.terminal.draft defers before typing"
 }
 
+test_structured_own_doorbell_submits_without_retyping() {
+  local target state rec line out expected
+  for target in term-stale term-live; do
+    orca_case "structured-own-$target"
+    state="$CASE_DIR/state"
+    write_orca_window_meta "$state" ownstructured term-stale "$CASE_DIR/worktree"
+    rec=$(FM_STATE_OVERRIDE="$state" bash -c '. "$0/bin/fm-task-inbox-lib.sh"; fm_task_inbox_write "$1" ownstructured steer fire-and-forget' "$ROOT" "$state")
+    line=$(bash -c '. "$0/bin/fm-task-inbox-lib.sh"; fm_task_inbox_doorbell_line "$1"' "$ROOT" "$rec")
+    printf '%s' "$line" > "$CASE_DIR/draft"
+    : > "$CASE_DIR/inputs"
+    cat > "$FB/orca" <<'JS'
+#!/usr/bin/env node
+const fs = require('fs');
+const args = process.argv.slice(2);
+const dir = process.env.FM_ORCA_TEST_DIR;
+const terminal = args[args.indexOf('--terminal') + 1];
+const reply = data => process.stdout.write(JSON.stringify(data));
+if (args[1] === 'list') {
+  reply({ok:true,result:{terminals:[{handle:'term-live',writable:true,connected:true}]}});
+} else if (terminal === 'term-stale') {
+  reply({ok:false,error:{code:'terminal_handle_stale',message:'terminal_handle_stale'}});
+  process.exitCode = 1;
+} else if (args[1] === 'read') {
+  reply({ok:true,result:{terminal:{tail:['────────','❯','────────'],draft:fs.readFileSync(dir + '/draft','utf8')}}});
+} else if (args[1] === 'send') {
+  const text = args[args.indexOf('--text') + 1];
+  fs.appendFileSync(dir + '/inputs', JSON.stringify({text,enter:args.includes('--enter')}) + '\n');
+  if (args.includes('--enter')) {
+    fs.writeFileSync(dir + '/submitted',fs.readFileSync(dir + '/draft'));
+    fs.writeFileSync(dir + '/draft','');
+  }
+  reply({ok:true,result:{send:{accepted:true}}});
+} else process.exitCode = 1;
+JS
+    chmod +x "$FB/orca"
+    out=$(PATH="$FB:$PATH" FM_ORCA_TEST_DIR="$CASE_DIR" FM_STATE_OVERRIDE="$state" FM_HOME="$CASE_DIR" \
+      bash -c '. "$0/bin/fm-task-inbox-lib.sh";
+        rc=0; fm_task_inbox_ring orca "$1" "$2" || rc=$?; printf "%s" "$rc"' "$ROOT" "$target" "$rec")
+    expected=0
+    [ "$target" != term-stale ] || expected=1
+    [ "$out" = "$expected" ] || fail "$target structured own doorbell: expected $expected, got $out"
+    [ "$(cat "$CASE_DIR/submitted")" = "$line" ] || fail "structured own doorbell was not submitted intact"
+    [ ! -s "$CASE_DIR/draft" ] || fail "structured own doorbell did not clear"
+    node -e 'const fs=require("fs"); const inputs=fs.readFileSync(process.argv[1],"utf8").trim().split("\n").map(JSON.parse); if(inputs.length!==1 || inputs[0].text!=="" || !inputs[0].enter) process.exit(1);' "$CASE_DIR/inputs" \
+      || fail "structured own doorbell was retyped or received multiple Enters"
+  done
+  pass "Orca structured own doorbells submit once without retyping on live and replacement panes"
+}
+
 test_structured_draft_preserves_dialog_verdict() {
   orca_case structured-draft-dialog
   printf '%s\n' '{"ok":true,"result":{"terminal":{"tail":["Background work is running","❯ 1. Exit and stop tasks","Enter to confirm · Esc to cancel"],"draft":"Type a message..."}}}' > "$RESP/1.out"
@@ -2342,3 +2391,5 @@ test_inbox_retarget_preserves_pending_content_and_explicit_input
 test_inbox_retarget_defers_on_foreign_draft_with_empty_tail
 
 test_structured_draft_preserves_dialog_verdict
+
+test_structured_own_doorbell_submits_without_retyping
