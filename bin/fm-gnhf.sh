@@ -41,7 +41,10 @@
 #    <state>/gnhf/<run-id>.env      resolved project, posture, arguments, run mode
 #    <state>/gnhf/<run-id>.status   working, then done or failed
 #    and, with --task, the same status lines also go to <state>/<id>.status so
-#    the owning task's supervisor sees the live run and its exit.
+#    the owning task's supervisor sees the live run and its exit. If the
+#    wrapper receives TERM, INT or HUP it stops gnhf and records `failed`.
+#    FM_GNHF_RUN_AUTH is removed from gnhf's environment, and the wrapper's
+#    stdin is passed through to gnhf.
 #
 # Delivery alignment
 # ------------------
