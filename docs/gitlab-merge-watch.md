@@ -244,7 +244,7 @@ $ echo $?
 Neither refusal armed a poll or recorded a `pr=`, so a missing tool leaves no half-prepared merge behind.
 
 `jq` is not one of firstmate's common tools, which is why the watch poll reads glab's field output instead.
-The merge path cannot do the same: `detailed_merge_status`, `has_conflicts`, `blocking_discussions_resolved`, and the head pipeline appear only in glab's JSON.
+The merge path cannot do the same: `detailed_merge_status`, `has_conflicts`, `blocking_discussions_resolved`, `work_in_progress`, and the head pipeline appear only in glab's JSON.
 The poll's silence on a missing tool is safe because silence means "not merged yet"; a merge cannot be silent about it, so the requirement is reported rather than assumed.
 
 The merged half of the fixture is refused, and every failing condition is listed rather than just the first:
