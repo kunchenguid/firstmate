@@ -47,6 +47,10 @@
 #   kiro-hook        Kiro V2 agent-config hooks (userPromptSubmit opens; stop
 #                    closes) - kiro's ONLY state source; its per-turn stop hook
 #                    also keeps the turn-ended notification touch
+#   bob-hook         IBM Bob CLI workspace hooks (UserPromptSubmit opens; Stop
+#                    closes) - bob's ONLY state source; its per-turn Stop hook
+#                    also keeps the turn-ended notification touch. Stop does not
+#                    fire on a manual Escape interrupt (same as kiro).
 #   codex-hook, codex-appserver  reserved: Codex, gated by
 #                    fm_busy_codex_semantic_source
 #   kimi-wire, kimi-hook  reserved: standalone Kimi, gated by fm_busy_kimi_verified
@@ -122,6 +126,13 @@
 # missing, and an abnormal turn end (no StopFailure/SessionEnd equivalent
 # exists on kiro V2) leaves the record busy until the next userPromptSubmit
 # re-opens it - docs/verification/kiro.md owns that disclosure.
+# Bob is in the same class: its bob-hook record is its ONLY state source
+# (UserPromptSubmit opens, Stop closes, written to .bob/settings.json in the
+# worktree and loaded only in trusted folders), and it has no rendered-tail arm
+# here. Bob has no StopFailure or SessionEnd equivalent (verified, bob 2.0.9),
+# so an abnormal turn end leaves the record busy until the next UserPromptSubmit
+# re-opens it, and a manual Escape interrupt (Stop does not fire) leaves the
+# record busy until the next prompt - the same disclosure as kiro.
 #
 # The muse pull source is semantic, not rendered: it folds muse's own durable
 # session event log. It has no writer, no arm, and no gen, because
@@ -339,6 +350,7 @@ fm_busy_sources_for_harness() {  # <harness>
     commandcode) adapter=commandcode-mod ;;
     polytoken) adapter=polytoken-hook ;;
     kiro) adapter=kiro-hook ;;
+    bob) adapter=bob-hook ;;
     pi|pi-signed) adapter=pi-ext ;;
     omp) adapter=omp-ext ;;
     kimi*)
