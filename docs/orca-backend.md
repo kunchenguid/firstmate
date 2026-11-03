@@ -76,7 +76,7 @@ It is also never a proven delivery: a composer read cannot separate a submitted 
 So a failed Enter stays unconfirmed whatever the composer reads - `fm-send.sh` exits 3 and an inbox ring defers, and Enter is never retried within the same send.
 When that unconfirmed submission had resolved a replacement endpoint - Enter changing endpoints, or an Enter failure after the text was typed into a replacement - `fm-send.sh` exits 3 directing the caller to inspect the replacement pane for the recorded worktree in Orca's UI before deciding whether to resend, because `fm-peek.sh` still reads the recorded handle.
 A failed Enter on the original endpoint instead points at `fm-peek.sh` and allows resending only Enter, and only while the composer still holds the text.
-The composer read is one bounded tail of the live terminal and never pages backward into scrollback, so a stale startup banner cannot compete with the bottom-anchored composer.
+The composer read is one bounded rendered-screen read of the live terminal (`orca terminal read --screen`) and never pages backward into scrollback, so a stale startup banner cannot compete with the bottom-anchored composer and repaint fragments from the accumulated stream cannot read as stale composer text.
 A bare shell row is `unknown`, not an empty agent composer, and plain-text captures degrade a glyph row carrying trailing text to `unknown` rather than a false `pending`.
 The watcher has no native Orca busy signal, so each harness adapter's semantic lifecycle supplies worker state.
 Grok alone retains its isolated rendered-tail fallback.

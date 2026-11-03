@@ -508,19 +508,27 @@ if (r.terminal && Array.isArray(r.terminal.tail)) {
 }
 
 # fm_backend_orca_composer_capture: the orca composer screen - one bounded
-# tail read of the live terminal. Deliberately NOT the old 200-line
-# backward-paged read: the composer is bottom-anchored, and paging back into
-# scrollback is what let a stale startup banner (codex's bordered
+# RENDERED-SCREEN read of the live terminal (`--screen`). Deliberately NOT the
+# accumulated stream tail: that read stacks repaint fragments (one `clear`
+# keystroke comes back as `cclclecleaclear`, cursor-moved spaces are absent),
+# so a real claude composer's empty row arrived as stale text and every
+# successful typed send read `unknown` and exited 1. The screen read is what
+# Orca documents for "how output looks". Deliberately also NOT the old
+# 200-line backward-paged read: the composer is bottom-anchored, and paging
+# back into scrollback is what let a stale startup banner (codex's bordered
 # "permissions" box) compete with - and once outrank - the live composer.
 fm_backend_orca_composer_capture() {  # <terminal-id> [expected-label]
-  fm_backend_orca_capture "$1" "$FM_COMPOSER_CAPTURE_LINES"
+  local terminal=$1 lines=${2:-$FM_COMPOSER_CAPTURE_LINES} out
+  fm_backend_orca_tool_check || return 1
+  out=$(orca terminal read --terminal "$terminal" --screen --limit "$lines" --json) || return 1
+  fm_backend_orca_json_text "$out"
 }
 
 # fm_backend_orca_composer_caps: static capability facts, not logic (see the
-# capability model in bin/fm-composer-lib.sh). Orca's `terminal read` returns
-# plain text; whether it can emit ANSI is unverified (orca is not installed
-# on the verification machine), so styled stays 0 - the conservative
-# degradation - until a live capture proves otherwise.
+# capability model in bin/fm-composer-lib.sh). Orca's `terminal read --screen`
+# returns the rendered screen with escape sequences stripped (verified live on
+# orca 1.4.232: no ANSI bytes in the JSON), so styled stays 0 - the
+# conservative degradation - until a capture that preserves ANSI exists.
 fm_backend_orca_composer_caps() {
   printf 'styled=0\ncursor=0\nidentity=0\nrows=%s\n' "$FM_COMPOSER_CAPTURE_LINES"
 }

@@ -128,6 +128,43 @@ test_capture_fails_on_orca_error_json() {
   pass "fm_backend_orca_capture: fails closed on Orca read error JSON"
 }
 
+test_composer_capture_reads_rendered_screen() {
+  # Orca's `terminal read --help` names --screen as the read for "how output
+  # looks" and warns the default read stacks repaint fragments. A composer is
+  # a rendered shape, so an empty claude row must be classified from the screen
+  # read; from the stream read the same pane carries stale warning text and
+  # reads unknown, which made every successful typed send exit 1 (live orca
+  # 1.4.232, claude 2.1.317).
+  local out fb log dir
+  dir="$TMP_ROOT/composer-screen-read"
+  fb="$dir/fakebin"
+  log="$dir/log"
+  mkdir -p "$fb"
+  : > "$log"
+  cat > "$fb/orca" <<'SH'
+#!/usr/bin/env bash
+set -u
+LOG="${FM_ORCA_LOG:?}"
+{
+  printf 'orca'
+  for a in "$@"; do printf '\x1f%s' "$a"; done
+  printf '\n'
+} >> "$LOG"
+screen=0
+for a in "$@"; do [ "$a" = --screen ] && screen=1; done
+if [ "$screen" = 1 ]; then
+  printf '{"ok":true,"result":{"source":"screen","terminal":{"tail":["────────────────","❯","────────────────"]}}}\n'
+else
+  printf '{"ok":true,"result":{"source":"stream","terminal":{"tail":["❯ ⚠ claude.ai connectors are disabled because another auth source is set"]}}}\n'
+fi
+SH
+  chmod +x "$fb/orca"
+  out=$( PATH="$fb:$PATH" FM_ORCA_LOG="$log" \
+    bash -c '. "$0/bin/backends/orca.sh"; fm_backend_orca_composer_state term-123' "$ROOT" )
+  [ "$out" = empty ] || fail "composer state should be read from Orca's rendered screen (empty), got '$out'"
+  pass "fm_backend_orca_composer_state: reads the rendered screen, not the accumulated stream"
+}
+
 test_runtime_check_accepts_ready_orca_status() {
   local out
   orca_case runtime-ready
@@ -2160,6 +2197,7 @@ JS
 test_capture_reads_terminal_tail_json
 test_capture_falls_back_to_text_fields
 test_capture_fails_on_orca_error_json
+test_composer_capture_reads_rendered_screen
 test_runtime_check_accepts_ready_orca_status
 test_runtime_check_refuses_unready_orca_status
 test_send_text_submit_verifies_empty_composer_after_enter
