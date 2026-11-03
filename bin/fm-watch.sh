@@ -3071,8 +3071,8 @@ scan_signals() {
     case "$f" in
       *.status) fm_wake_signal_seen_current "$STATE" "$f" && continue ;;
       *)
-        turnend_pause_bound "$f" && continue
         [ "$sig" = "$(cat "$sf" 2>/dev/null)" ] && continue
+        turnend_pause_bound "$f" && continue
         ;;
     esac
     printf '%s\t%s\t%s\n' "$sf" "$sig" "$f"
