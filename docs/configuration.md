@@ -1584,7 +1584,7 @@ A task with no recorded account, or one whose account is no longer declared, ref
 A `token:<absolute path>` entry is a subscription reached through a long-lived `claude setup-token` credential instead of a config directory of its own, so a second subscription needs no second interactive login.
 Only `config/claude-accounts` accepts this kind; `config/claude-account` and the per-secondmate pins keep their own grammar and refuse it.
 
-The token file holds the token alone (surrounding whitespace is ignored), is a regular file owned by the user, and has mode `0600` (no group or other access).
+The token file holds the token alone (surrounding whitespace is ignored), is a regular file owned by the user, and grants no group or other access (for example mode `0600`).
 A missing, empty, unreadable, non-regular, group- or other-readable, foreign-owned, or multi-token file refuses a launch that names the entry, with a message naming the file, never its content.
 
 A launch on the entry is otherwise an ordinary Claude launch.
