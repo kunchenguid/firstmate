@@ -1264,6 +1264,7 @@ rovo is likewise verified for crewmate and scout launches ONLY, refused for a se
 
 An agy secondmate or primary runs the tracked project-scope `.agents/hooks.json` in its own home, and `bin/fm-spawn.sh` pre-registers a secondmate home in agy's workspace trust store through `bin/fm-agy-trust.sh`; [`docs/supervision-protocols/agy.md`](supervision-protocols/agy.md) owns its supervision protocol and [`docs/verification/agy.md`](verification/agy.md) owns the evidence.
 kiro (Kiro CLI, V2 engine only) is likewise verified for crewmate and scout launches ONLY, refused for a secondmate because it has no primary supervision protocol; it is claude-shaped, so its per-task turn-end and busy hooks live in a firstmate-owned agent config the spawn writes under `state/<id>.kiro-home` and reaches by relocating `KIRO_HOME` (never the worktree's own `.kiro/`), with the `--trust-all-tools` modal suppressed by a seeded `chat.disableTrustAllConfirmation` setting; [`docs/verification/kiro.md`](verification/kiro.md) owns that evidence, and the v3/KAS engine is out of scope and unsupported on Amazon Linux 2.
+bob (IBM Bob CLI) is likewise verified for crewmate and scout launches ONLY, refused for a secondmate because it has no primary supervision protocol; its per-task turn-end and busy hooks live in the worktree's `.bob/settings.json`, so the spawn refuses a project that tracks its own, and it pre-registers the worktree in Bob's trust store through `bin/fm-bob-trust.sh`; [its adapter reference](../.agents/skills/harness-adapters/references/harness/bob.md) owns the launch, brief delivery, and busy-state facts.
 A kiro hook command must be one unquoted token, so a kiro spawn refuses before launch when that per-task home path contains whitespace or a shell-special character (such as a quote or `$`) and asks for an `FM_HOME` or `FM_STATE_OVERRIDE` free of them.
 
 devin is verified for crewmate and scout launches only; a secondmate is refused because Devin has no verified primary supervision protocol.
@@ -1907,7 +1908,7 @@ Typed resolution additively recognizes `gemini` because AGENTS.md section 4 veri
 | Harness | Provider declaration on the opted-in resolver path |
 | --- | --- |
 | `claude`, `codex`, `grok`, `kimi`, `cursor`, `agy`, `muse` | The resolver has an authoritative single-provider mapping. |
-| Every other verified harness | Must declare `provider` explicitly; this includes multi-provider `pi`, `pi-signed`, `omp`, and `opencode`, and unmapped `gemini`, `rovo`, `devin`, `commandcode`, `cortex`, and `kiro`; omission is an actionable configuration error before any request. |
+| Every other verified harness | Must declare `provider` explicitly; this includes multi-provider `pi`, `pi-signed`, `omp`, and `opencode`, and unmapped `gemini`, `rovo`, `devin`, `commandcode`, `cortex`, `kiro`, and `bob`; omission is an actionable configuration error before any request. |
 
 This single-provider table is separate from the frozen legacy mapping used by `fm-quota-choose.sh`, so additions cannot alter no-key routing.
 
