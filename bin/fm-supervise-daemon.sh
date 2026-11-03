@@ -983,6 +983,18 @@ escalate_flush() {  # <state>
   local state=$1 buf msg full='' fresh=0 id='' positions
   buf="$state/.subsuper-escalations"
   [ -s "$buf" ] || return 0
+  # Herdr native Codex prompts have no idempotency key. A post-send
+  # ambiguity records the submitted text here and holds every later flush.
+  # Only an operator who has inspected the exact endpoint may remove this
+  # marker to authorize another attempt; restarting or switching consumers
+  # does not clear it. The in-process hold also covers a failed marker write.
+  # The buffer and pending endpoints remain intact.
+  if [ "${NATIVE_AMBIGUOUS_STATE:-}" = "$state" ] \
+    || [ -e "$buf.native-unconfirmed" ] || [ -L "$buf.native-unconfirmed" ]; then
+    INJECT_LAST_FAILURE="native submission unconfirmed; inspect the endpoint before clearing $buf.native-unconfirmed"
+    log "inject held: $INJECT_LAST_FAILURE"
+    return 1
+  fi
   if [ ! -f "$buf" ] || [ ! -r "$buf" ]; then
     INJECT_LAST_FAILURE="escalation buffer $buf is not a readable file"
     log "inject skipped: $INJECT_LAST_FAILURE"
@@ -1023,6 +1035,12 @@ escalate_flush() {  # <state>
     : > "$buf"; rm -f "${buf}.since" "$state/.subsuper-inject-wedged"
     ESCALATE_KEPT_FULL=
     return 0
+  fi
+  if [ "${INJECT_RETRY_UNSAFE:-0}" = 1 ]; then
+    if ! printf '%s' "$INJECT_SENT_MSG" > "$buf.native-unconfirmed"; then
+      NATIVE_AMBIGUOUS_STATE=$state
+      log "native ambiguity marker could not be written; delivery held in this process"
+    fi
   fi
   if [ "$INJECT_SUBMIT_ATTEMPTED" = 1 ] && [ "$INJECT_LAST_VERDICT" = unconfirmed ]; then
     cp "$positions" "$buf.frozen-positions" || rm -f "$buf.frozen-positions"
@@ -1734,6 +1752,7 @@ inject_msg() {  # <message> [state] [exact] [request-id]
   INJECT_LAST_VERDICT=
   INJECT_SENT_MSG=
   INJECT_SUBMIT_ATTEMPTED=0
+  INJECT_RETRY_UNSAFE=0
   afk_active "$state" || { INJECT_LAST_FAILURE="deferred: afk inactive"; log "inject $INJECT_LAST_FAILURE"; return 1; }
   # (2) Single-line digest: collapse any embedded newlines so submission via
   # send-keys + Enter is unambiguous regardless of how the TUI composer treats
@@ -1815,6 +1834,10 @@ inject_msg() {  # <message> [state] [exact] [request-id]
   INJECT_SENT_MSG=$msg
   verdict=$(FM_T3CODE_CLIENT_REQUEST_ID=$request_id fm_backend_send_text_submit "$backend" "$target" "$msg" "$retries" "$sleep_s" "$sleep_s" 2>"${errf:-/dev/null}")
   INJECT_LAST_VERDICT=$verdict
+  if [ "$backend" = herdr ] && [ "$verdict" = pending ] \
+    && [ "$(fm_daemon_primary_harness)" = codex ]; then
+    INJECT_RETRY_UNSAFE=1
+  fi
   if [ -n "$errf" ]; then
     err=$(cat "$errf" 2>/dev/null)
     rm -f "$errf"

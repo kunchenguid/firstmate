@@ -790,7 +790,9 @@ That safely defers injection and eventually raises the wedge alarm.
 Codex submission uses one `agent prompt` request with the exact pane and text.
 The adapter requires matching idle native identity and an empty composer before sending.
 Only a matching `agent_prompted` response in `working` state confirms delivery.
-Blocked, stalled, failed and ambiguous responses remain unconfirmed without a literal-input fallback or an in-call retry.
+A native blocked rejection is a known refusal; stalled, failed and ambiguous post-send responses remain pending without a literal-input fallback or retry.
+For a Codex primary, the daemon holds later digest flushes after that ambiguity until an operator inspects the endpoint and explicitly clears the recorded attempt.
+The daemon script owns the marker mechanics.
 Claude retains its composer payload proof and Enter path.
 The opt-in refresh guard and current acceptance limits are recorded in [runtime verification](verification/runtime-backends.md#herdr).
 

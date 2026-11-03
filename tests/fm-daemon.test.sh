@@ -4253,3 +4253,33 @@ test_frozen_delivery_receipts() (
   pass "frozen digest receipts preserve next-generation endpoints"
 )
 test_frozen_delivery_receipts
+
+# A native request has no idempotency key: do not replay an ambiguous send.
+test_native_ambiguity_holds_later_flushes() (
+  local dir state calls=0
+  dir=$(make_supercase native-ambiguity); state="$dir/state"
+  local FM_SUPERVISOR_BACKEND=herdr FM_SUPERVISOR_TARGET=lab:w9:p7
+  local FM_DAEMON_PRIMARY_HARNESS=codex
+  afk_active() { return 0; }
+  fm_backend_target_exists() { return 0; }
+  pane_is_busy() { return 1; }
+  fm_backend_composer_state() { printf empty; }
+  fm_backend_send_text_submit() { printf pending; }
+  inject_msg 'exact text' "$state" exact && fail "pending native request confirmed"
+  [ "$INJECT_RETRY_UNSAFE" = 1 ] || fail "native pending request was safe to retry"
+  escalate_add "$state" 'a status event'
+  inject_msg() {
+    calls=$((calls + 1))
+    INJECT_SUBMIT_ATTEMPTED=1 INJECT_LAST_VERDICT=pending
+    INJECT_RETRY_UNSAFE=1 INJECT_SENT_MSG=$1
+    return 1
+  }
+  escalate_flush "$state" && fail "ambiguous native delivery confirmed"
+  [ -s "$state/.subsuper-escalations.native-unconfirmed" ] || fail "native ambiguity was not recorded"
+  escalate_add "$state" 'a new event'
+  escalate_flush "$state" && fail "held native delivery confirmed"
+  [ "$calls" -eq 1 ] || fail "a later flush duplicated the ambiguous native request"
+  [ "$(wc -l < "$state/.subsuper-escalations")" -eq 2 ] || fail "holding native ambiguity lost buffered events"
+  pass "ambiguous native submission holds later flushes without dropping new events"
+)
+test_native_ambiguity_holds_later_flushes

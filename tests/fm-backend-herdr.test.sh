@@ -6827,8 +6827,10 @@ test_codex_native_submission() (
     verdict=$(fm_backend_herdr_send_text_submit selected:w9:p7 "$text" 3 0 0)
     if [ "$mode" = success ]; then
       [ "$verdict" = empty ] || fail "native exact submission was not confirmed: $verdict"
+    elif [ "$mode" = blocked ]; then
+      [ "$verdict" = send-failed ] || fail "native rejection was not a known refusal: $verdict"
     else
-      [ "$verdict" = unknown ] || fail "$mode was falsely confirmed: $verdict"
+      [ "$verdict" = pending ] || fail "$mode lost its post-send ambiguity: $verdict"
     fi
     [ "$(wc -l < "$dir/requests")" -eq 1 ] || fail "$mode retried the native prompt"
     assert_absent "$dir/retained-paste" "Codex used raw paste"

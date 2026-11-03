@@ -3616,8 +3616,12 @@ fm_backend_herdr_codex_submit() {  # <target> <text>
       .result.agent.pane_id == $pane and .result.agent.agent == "codex" and
       .result.agent.agent_status == "working"' >/dev/null; then
     printf 'empty'
+  elif printf '%s' "$response" | jq -e '.error.code == "agent_blocked"' >/dev/null 2>&1; then
+    printf 'send-failed'
   else
-    printf 'unknown'
+    # The request may have submitted before its reply was lost or stalled.
+    # Use the existing typed-but-unconfirmed verdict to forbid blind resend.
+    printf 'pending'
   fi
 }
 
