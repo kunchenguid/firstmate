@@ -1206,6 +1206,10 @@ crew_dispatch_validate() {
       ($items | any(has("model") and (((.model | type) != "string") or (.model | length) == 0)))
       or ($items | any(has("effort") and (((.effort | type) != "string") or (.effort | length) == 0)))
       or ($typed and ($items | any(has("provider") and (provider_id(.provider) | not))));
+    # A profile account is Claude-only and takes the grammar of a config/claude-accounts
+    # entry; bin/fm-spawn.sh checks that the entry is declared.
+    def malformed_accounts($items):
+      ($items | any(has("account") and (((.account | type) != "string") or (.harness != "claude") or (.account | test("\\A(ordinary|(token:)?/[^[:cntrl:]]*)\\z") | not))));
     # A quota floor, on a rule or a profile: bin/fm-dispatch-resolve.sh applies
     # it in code against one quota-axi row, so scope and min_percent must be
     # concrete; a rule floor also names the provider whose row it reads.
@@ -1242,6 +1246,7 @@ crew_dispatch_validate() {
       if $typed then "use profile model and effort must be non-empty strings, and provider must match ^[a-z0-9]+(-[a-z0-9]+)*\\z when present"
       else "use profile model and effort must be non-empty strings when present"
       end
+    elif malformed_accounts([(.rules // [])[]? | profiles(.use?)[]?]) then "use profile account must be ordinary, an absolute path, or token:<absolute path>, on a claude profile only"
     elif $typed and malformed_quota_scopes([(.rules // [])[]? | profiles(.use?)[]?]) then "use profile quota_scope must be a non-empty string when present"
     elif $typed and malformed_profile_floors([(.rules // [])[]? | profiles(.use?)[]?]) then "use profile floor needs scope and min_percent 0..100"
     elif $typed and ([(.rules // [])[]? | select(has("approval") and .approval != "captain")] | length > 0) then "approval must be \"captain\" when present"
@@ -1259,6 +1264,7 @@ crew_dispatch_validate() {
       if $typed then "default profile model and effort must be non-empty strings, and provider must match ^[a-z0-9]+(-[a-z0-9]+)*\\z when present"
       else "default profile model and effort must be non-empty strings when present"
       end
+    elif has("default") and malformed_accounts([profiles(.default)[]?]) then "default profile account must be ordinary, an absolute path, or token:<absolute path>, on a claude profile only"
     elif $typed and has("default") and malformed_quota_scopes([profiles(.default)[]?]) then "default profile quota_scope must be a non-empty string when present"
     elif $typed and has("default") and malformed_profile_floors([profiles(.default)[]?]) then "default profile floor needs scope and min_percent 0..100"
     else

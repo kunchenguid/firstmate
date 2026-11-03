@@ -1902,4 +1902,33 @@ assert_contains "$out" 'spendPriority=' "shared_quota false prints quota evidenc
 pass "shared_quota false keeps the unchanged quota-ranked behavior"
 cp "$BASE_RULES" "$RULES"
 
+# --- profile account: opt-in, Claude-only, passed through as --account -------
+reset_log
+write_response "$RESPONSE" rule_4 0.9
+jq '.rules[3].use = [{"harness":"claude","model":"sonnet","account":"token:/keys/second.token"}]' "$BASE_RULES" > "$RULES"
+TYPESAFE_API_KEY=$KEY run code out err "$BRIEF" --project pager
+expect_code 0 "$code" "a claude profile with an account resolves"
+assert_contains "$out" "  profile: --harness 'claude' --model 'sonnet' --account 'token:/keys/second.token'" "the profile line carries the account"
+jq '.rules[3].use = [{"harness":"claude","model":"sonnet","account":"ordinary"},{"harness":"claude","model":"sonnet","account":"/accounts/second"}]' "$BASE_RULES" > "$RULES"
+TYPESAFE_API_KEY=$KEY run code out err "$BRIEF" --project pager
+expect_code 0 "$code" "two profiles that differ only by account are not duplicates"
+assert_contains "$out" "reason: genuine spendPriority tie" "accounts sharing one quota row tie and return to the account step, not a config error"
+assert_contains "$out" 'candidate: claude:sonnet  account=ordinary  provider=claude  scope=all_models' "the tied ordinary candidate names its account"
+assert_contains "$out" 'candidate: claude:sonnet  account=/accounts/second  provider=claude  scope=all_models' "the tied second-account candidate names its account"
+assert_not_contains "$out" '  profile: ' "a tie between accounts prints no profile line"
+for bad in '{"harness":"claude","model":"sonnet","account":"relative/path"}' '{"harness":"claude","model":"sonnet","account":""}' \
+  '{"harness":"claude","model":"sonnet","account":"ordinary\n"}' '{"harness":"claude","model":"sonnet","account":"token:/keys/second.token\n"}' \
+  '{"harness":"cursor","model":"cursor-grok-4.6-medium","account":"ordinary"}'; do
+  jq --argjson p "$bad" '.rules[3].use = [$p]' "$BASE_RULES" > "$RULES"
+  TYPESAFE_API_KEY=$KEY run code out err "$BRIEF" --project pager
+  assert_not_contains "$out" '--account' "a malformed or non-claude account is never passed through: $bad"
+  assert_contains "$out$err" "each use profile account must be ordinary, an absolute path, or token:<absolute path>, on a claude profile only" \
+    "a malformed or non-claude account is reported: $bad"
+done
+cp "$BASE_RULES" "$RULES"
+TYPESAFE_API_KEY=$KEY run code out err "$BRIEF" --project pager
+assert_not_contains "$out" '--account' "a profile without an account prints no --account"
+assert_not_contains "$out" 'account=' "a candidate without an account prints no account="
+pass "account: a claude profile passes its account to the profile line; malformed or non-claude accounts are refused"
+
 printf '# all fm-dispatch-resolve tests passed\n'

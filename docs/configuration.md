@@ -9,7 +9,7 @@ Start with the directory layout, then use the setting reference for the behavior
 | --- | --- |
 | Firstmate's code, private files, or project location | [FM_HOME](#fm_home) and [operational home layout](#operational-home-layout-and-state) |
 | Task windows and worker tools | [Runtime backend](#runtime-backend-configbackend--fm_backend) and [harness support](#harness-support) |
-| Worker permissions, accounts, or environment | [Codex approval review](#codex-automatic-approval-review), [Claude permission mode](#claude-permission-mode-configclaude-permission-mode), [Codex permission mode](#codex-permission-mode-configcodex-permission-mode), [persistent managed-policy failover](#persistent-managed-policy-failover), [worker account pin](#worker-account-pin-configclaude-account-configpi-account), [worker tool exclusions](#worker-tool-exclusions-configcrew-exclude-tools), [worker launch environment](#worker-launch-environment-configlaunch-env-allowlist), and its [Orca environment source](#orca-environment-source-configlaunch-env-tmux-session) |
+| Worker permissions, accounts, or environment | [Codex approval review](#codex-automatic-approval-review), [Claude permission mode](#claude-permission-mode-configclaude-permission-mode), [Codex permission mode](#codex-permission-mode-configcodex-permission-mode), [persistent managed-policy failover](#persistent-managed-policy-failover), [worker account pin](#worker-account-pin-configclaude-account-configpi-account), [several Claude accounts](#several-claude-accounts-configclaude-accounts), [worker tool exclusions](#worker-tool-exclusions-configcrew-exclude-tools), [worker launch environment](#worker-launch-environment-configlaunch-env-allowlist), and its [Orca environment source](#orca-environment-source-configlaunch-env-tmux-session) |
 | Backlog, preferences, and memory | [Backlog backend](#backlog-backend-taskstoml--configbacklog-backend), [captain preferences](#captain-preferences-datacaptainmd--datacaptain-sharedmd), [external memory tiers](#external-memory-tiers-memory-layering-section), [record export](#record-export-configrecord-export-root), and [startup memory budget](#startup-memory-budget-configstartup-memory-budget) |
 | Supervision and presentation | [Pi supervision branch](#pi-supervision-branch), [supervision host](#supervision-host-configsupervision-host), [Codex native Stop park](#codex-native-stop-park-configcodex-stop-park), [warm-cache compaction](#warm-cache-compaction-configwarm-compact), and [Calm preference](#calm-preference-configcalm) |
 | Persistent secondmates | [Secondmate routes](#secondmate-routes-datasecondmatesmd) |
@@ -1552,6 +1552,57 @@ A remote secondmate is launched on its host from its own home's configuration, s
 
 [`bin/fm-worker-account-lib.sh`](../bin/fm-worker-account-lib.sh) owns parsing, the sign-in check, and the full list of credentials a Claude launch unsets; [runtime backend verification](verification/runtime-backends.md#worker-account-pin-sign-in-check) records the check against the real runners.
 
+### Several Claude accounts (config/claude-accounts)
+
+A home with more than one Claude subscription can let each ship and scout launch on whichever declared account has quota to spare, instead of pinning every Claude worker to one account.
+Create `config/claude-accounts` with one account per line, each `ordinary` or the absolute path of an existing Claude config directory, written exactly as `config/claude-account` would hold it, or a [setup-token account](#setup-token-accounts) written as `token:<absolute path of a setup-token file>`:
+
+```text
+ordinary
+/home/me/.claude-second
+token:/home/me/.config/claude-tokens/third.token
+```
+
+A final newline is optional; a blank line, a relative path, a repeated entry, or a control character refuses.
+The list is opt-in: without it, every launch, including the single pin above, behaves exactly as before, and `--account` refuses.
+A home keeps either the list or `config/claude-account`, never both; with both present, every Claude launch refuses.
+
+While the list is present, every Claude ship or scout spawn must name one declared entry with `--account <entry>`.
+Firstmate chooses that entry at dispatch intake under the [`quota-array-dispatch`](../.agents/skills/quota-array-dispatch/SKILL.md) procedure, and [`bin/fm-claude-account-quota.sh`](../bin/fm-claude-account-quota.sh) measures each entry for it by running `quota-axi --provider claude --profile-only` under that entry's own config directory (`~/.claude` for `ordinary`).
+Firstmate never picks an entry by default, by file order, or from the ambient account, and never discovers, adds, or copies a login.
+
+The named entry passes the same refusals as a pin before anything launches: its directory must exist, a raw Claude command must not override it, and `claude auth status` must say it is signed in, with the stripped environment and credential unsetting described above.
+An undeclared, missing, or signed-out entry refuses rather than falling back to another entry or the ambient account.
+The spawn line and the task record carry the entry as `account=`.
+
+A relaunch or recovery of that task keeps its recorded account, re-checking that it is still declared and signed in before the running worker stops.
+A [dispatch profile](#crew-dispatch-profiles-configcrew-dispatchjson) may fix the account itself with an optional `account` field, which `bin/fm-dispatch-resolve.sh` passes through as `--account` on its `profile:` line; the spawn applies the same membership and sign-in refusals to it.
+To move a task to another declared account, for example when its own account is exhausted, relaunch it explicitly with `bin/fm-control.sh <id> relaunch --account <entry> --note <text>`; nothing moves a running task automatically.
+A task with no recorded account, or one whose account is no longer declared, refuses a plain relaunch and needs that explicit `--account`.
+
+#### Setup-token accounts
+
+A `token:<absolute path>` entry is a subscription reached through a long-lived `claude setup-token` credential instead of a config directory of its own, so a second subscription needs no second interactive login.
+Only `config/claude-accounts` accepts this kind; `config/claude-account` and the per-secondmate pins keep their own grammar and refuse it.
+
+The token file holds the token alone (surrounding whitespace is ignored), is a regular file owned by the user, and grants no group or other access (for example mode `0600`).
+A missing, empty, unreadable, non-regular, group- or other-readable, foreign-owned, or multi-token file refuses a launch that names the entry, with a message naming the file, never its content.
+
+A launch on the entry is otherwise an ordinary Claude launch.
+It unsets `CLAUDE_CONFIG_DIR` and every credential variable a pinned launch unsets, then runs the worker through [`bin/fm-claude-token-exec.sh`](../bin/fm-claude-token-exec.sh), which reads the file and exports `CLAUDE_CODE_OAUTH_TOKEN` for that one process only.
+The launch text carries the helper and the file path, never the token, so the value does not appear in argv, the staged launch file, task records, status lines, or the digest.
+The spawn line and the task record carry the entry itself as `account=`, so relaunch and recovery reuse it like any other entry.
+A raw Claude launch command that sets `CLAUDE_CODE_OAUTH_TOKEN` itself refuses.
+
+The sign-in check runs `claude auth status` through the same helper, with the stripped environment above, and requires it to report `loggedIn` with `authMethod` `oauth_token`.
+Claude reads the token offline, so a revoked or expired token passes this check and fails when the worker first calls the API; replace the file with a new `claude setup-token` result.
+`bin/fm-claude-account-quota.sh` reports the entry as unmeasured without running `quota-axi`, because `--profile-only` reads only a config directory's credential file.
+
+The list covers Claude ships and scouts only.
+A local secondmate's own agent never draws from it: under a list it needs its own [per-secondmate account pin](#per-secondmate-account-pins), and `--account` refuses for every secondmate, local or remote.
+Other runners ignore the list, and `--account` refuses for them.
+Like the single pin, the list is not inherited into secondmate homes.
+
 ### Per-secondmate account pins
 
 To choose an account for one local secondmate's own agent, create `config/secondmate-accounts/<id>/claude-account` or `config/secondmate-accounts/<id>/pi-account` in the primary home.
@@ -1766,7 +1817,7 @@ Firstmate cannot see which part of a worker's life uses the resource, so the num
 
 `config/crew-dispatch.json` is an optional local, gitignored file containing natural-language rules that firstmate reads before dispatching a crewmate or scout.
 Firstmate chooses the best matching rule with judgment; shell scripts do not match the natural-language rules.
-Firstmate resolves the rule's profile object or array under `AGENTS.md` section 4 and `quota-array-dispatch`, then passes only concrete `--harness`, `--model`, and `--effort` flags to `fm-spawn.sh`.
+Firstmate resolves the rule's profile object or array under `AGENTS.md` section 4 and `quota-array-dispatch`, then passes only concrete `--harness`, `--model`, `--effort`, and (for a Claude profile that names one) `--account` flags to `fm-spawn.sh`.
 
 **Spawn requirements**
 
@@ -1810,6 +1861,7 @@ This section is the single owner of the canonical schema and its per-field seman
 | `use` and optional top-level `default` | Accept one profile object or a non-empty array of profile objects; the single-object form remains fully backward-compatible. |
 | Profile `harness` | Required in every profile. |
 | Profile `model` and `effort`; rule `why` | Optional. |
+| Profile `account` | Optional, Claude profiles only: one [`config/claude-accounts`](#several-claude-accounts-configclaude-accounts) entry (`ordinary`, an absolute path, or `token:<absolute path>`), passed through as `--account`; `fm-spawn.sh` still refuses it unless the home declares that entry. |
 | Top-level `preferred_provider` | Optional provider-family preference, applied after eligibility checks under `quota-array-dispatch`. |
 | Top-level `shared_quota` | Optional; see "Shared-quota opt-out" below. |
 
@@ -2002,7 +2054,8 @@ No qualifying option, or two equally probable qualifying options, produces `ambi
 
 - Any applicable `exhausted_now` row or known zero bound makes that candidate ineligible, and a known profile-floor shortfall does the same before unrelated quota uncertainty is considered.
 - Missing or nonnumeric `spendPriority` evidence is never ranked, and every candidate is printed beside its evidence or the reason it was not rankable, including on ambiguous and approval-gated outcomes that emit no profile.
-- On the opted-in path, duplicate concrete profiles with the same harness, model, and effort inside one rule or the default array are configuration errors rather than ties.
+- On the opted-in path, duplicate concrete profiles with the same harness, model, effort, and `account` inside one rule or the default array are configuration errors rather than ties.
+  Two profiles that differ only by `account` read the same quota row, so they are a genuine tie and the account choice returns to `quota-array-dispatch`.
 
 **Outcomes and exit status**
 
