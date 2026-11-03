@@ -139,6 +139,10 @@ Pi and pi-signed 0.82.0 were reverified on 2026-07-27 through real isolated `fm-
 
 ### Agent liveness name sources
 
+Hermes Agent v0.21.7 was verified as a tmux worker on Linux on 2026-11-02: native Node TUI / Python module argv yielded `alive`, and the tool-side harness detector returned `hermes`.
+[Hermes verification](hermes.md) owns the dated native hook, composer, profile-safety, and lifecycle evidence.
+Refresh it with `FM_HERMES_SIGNALS_LIVE=1 FM_HERMES_LIVE_HOME="$throwaway_root" bash bin/fm-test-run.sh tests/fm-hermes-signals-live-e2e.test.sh`.
+
 The earlier record that every harness is observed under its own `#{pane_current_command}` no longer holds and has been replaced by the per-harness evidence below.
 In this macOS run that reading reflected a rewritable process title rather than stable executable identity, so it is now one of two independent name sources rather than the sole basis of a verdict.
 
