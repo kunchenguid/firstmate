@@ -1,0 +1,3 @@
+Guarded Herdr teardown returned success and verified its unchanged default-session tripwire.
+Named lab session absent from session list; tripwire retired.
+Driver and localhost HTTP server stopped; no lab Claude/host/watcher processes remain.

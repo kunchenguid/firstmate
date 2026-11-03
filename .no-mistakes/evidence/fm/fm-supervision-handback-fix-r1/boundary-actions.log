@@ -1,0 +1,21 @@
+2026-11-03T19:49:08.127143+00:00 AFK removed; acknowledged handback disabled; cooldown marker renewed
+2026-11-03T19:49:08.157474+00:00 submitted one primary prompt
+2026-11-03T19:49:17.322731+00:00 need-before-removal epoch=5 owner_pid=56376 outcome=arming updated_at=1793735350 owner_session_id=5a7a1629-87a7-4c7c-ab9c-91653e0579f5
+2026-11-03T19:49:17.322919+00:00 removed last task metadata during paced continuation
+2026-11-03T19:49:41.441399+00:00 need-after-removal epoch=5 owner_pid=56376 outcome=clean updated_at=1793735369
+2026-11-03T19:49:41.441571+00:00 PASS lost need ends silently
+2026-11-03T19:49:54.142734+00:00 terminated lab watcher 60547
+2026-11-03T19:49:56.250152+00:00 fault injection: real watcher executable permission removed in disposable lab; host disabled to test shared failure continuation
+2026-11-03T19:49:56.308871+00:00 submitted one prompt; no more primary input
+2026-11-03T19:50:09.489198+00:00 failure-first epoch=7 owner_pid=6289 outcome=arming updated_at=1793735401 owner_session_id=5a7a1629-87a7-4c7c-ab9c-91653e0579f5
+2026-11-03T19:50:32.671305+00:00 failure-repeat epoch=8 owner_pid=15027 outcome=arming updated_at=1793735422 owner_session_id=5a7a1629-87a7-4c7c-ab9c-91653e0579f5
+2026-11-03T19:50:32.671504+00:00 AFK set during repeated failure continuation cooldown
+2026-11-03T19:50:56.854664+00:00 failure-afk epoch=8 owner_pid=15027 outcome=afk updated_at=1793735440
+2026-11-03T19:50:56.854792+00:00 PASS failure continuations paced; AFK suppressed terminal retry
+2026-11-03T19:51:27.445093+00:00 watcher permission restored; host enabled; acknowledged handback remains absent
+2026-11-03T19:51:27.474635+00:00 submitted one prompt for no-ack repeated handback
+2026-11-03T19:51:39.661304+00:00 noack-first epoch=10 owner_pid=58546 outcome=arming updated_at=1793735492 owner_session_id=5a7a1629-87a7-4c7c-ab9c-91653e0579f5
+2026-11-03T19:52:03.831331+00:00 noack-repeat epoch=11 owner_pid=69442 outcome=arming updated_at=1793735512 owner_session_id=5a7a1629-87a7-4c7c-ab9c-91653e0579f5
+2026-11-03T19:52:03.831487+00:00 AFK set after no-ack repeated delivery
+2026-11-03T19:52:27.999032+00:00 noack-afk epoch=11 owner_pid=69442 outcome=afk updated_at=1793735530
+Configuration clarification after inspection: supervision-host is presence-based; writing off/on did not disable/re-enable the host. Failure checks ran through the real host without a usable engine; watcher startup failed with exit 126. No-ack checks exercised the no-engine pass-through, not a successful engine turn. Initial acknowledged checks used the default Claude engine, which failed on the injected 401.

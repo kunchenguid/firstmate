@@ -1,0 +1,22 @@
+env -u NO_MISTAKES_GATE -u FM_GATE_REFUSE_BYPASS -u FM_ROOT_OVERRIDE -u FM_STATE_OVERRIDE -u FM_DATA_OVERRIDE -u FM_CON
+FIG_OVERRIDE -u FM_PROJECTS_OVERRIDE -u CLAUDECODE -u CLAUDE_CODE_SESSION_ID -u PI_CODING_AGENT claude
+[0m[38;5;4mhome[0m [0m[38;5;8mmain[0m[38;5;218m*?[0m[38;5;6m [0m
+[0m[38;5;5m❯[0m [0m[4m[38;5;2menv[0m -u NO_MISTAKES_GATE -u FM_GATE_REFUSE_BYPASS -u FM_ROOT_OVERRIDE -u FM_STATE_OVERRIDE -u FM_DATA_OVERRIDE -u FM_C
+ONFIG_OVERRIDE -u FM_PROJECTS_OVERRIDE -u CLAUDECODE -u CLAUDE_CODE_SESSION_ID -u PI_CODING_AGENT [0m[38;5;2mclaude[0m
+
+[0m[38;5;11m───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────[0m
+ [0m[1m[38;5;11mAccessing workspace:[0m
+
+ [0m[1m/Users/kunchen/.no-mistakes/worktrees/52b07e9083e7/01M6HDVCQG2SFKA0B68CD54WW4/.sf-lab/home[0m
+
+ Quick safety check: Is this a project you created or one you trust? (Like your own code, a well-known open source
+ project, or work from your team). If not, take a moment to review what's in this folder first.
+
+ Claude Code'll be able to read, edit, and execute files here.
+
+ [0m[2m[38;5;7mSecurity guide[0m
+
+ [0m[38;5;12m❯ No, exit[0m
+   Yes, I trust this folder
+
+ [0m[2m[38;5;7mEnter to confirm · Esc to cancel[0m

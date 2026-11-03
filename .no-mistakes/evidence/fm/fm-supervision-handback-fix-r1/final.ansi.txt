@@ -1,0 +1,40 @@
+
+[0m[38;5;11m⏺[0m [0m[38;5;11mPlease run /login · API Error: 401 isolated StopFailure live-test forced 401[0m
+
+[0m[2m[38;5;7m✻[0m [0m[2m[38;5;7mBaked for 1s · done 11:49 AM[0m
+
+[0m[38;5;15m⏺[0m Stop hook feedback
+
+[0m[38;5;11m⏺[0m [0m[38;5;11mPlease run /login · API Error: 401 isolated StopFailure live-test forced 401[0m
+
+[0m[2m[38;5;7m✻[0m [0m[2m[38;5;7mCogitated for 1s · done 11:50 AM[0m
+
+[0m[38;5;15m⏺[0m Stop hook feedback
+
+[0m[38;5;11m⏺[0m [0m[38;5;11mPlease run /login · API Error: 401 isolated StopFailure live-test forced 401[0m
+
+[0m[2m[38;5;7m✻[0m [0m[2m[38;5;7mCooked for 1s · done 11:50 AM[0m
+
+[0m[38;5;7m[48;5;8m❯ [0m[38;5;15m[48;5;8msay the single word harbor[0m[48;5;8m                                                                                           [0m
+
+[0m[38;5;11m⏺[0m [0m[38;5;11mPlease run /login · API Error: 401 isolated StopFailure live-test forced 401[0m
+
+[0m[2m[38;5;7m✻[0m [0m[2m[38;5;7mBaked for 1s · done 11:51 AM[0m
+
+[0m[38;5;15m⏺[0m Stop hook feedback
+
+[0m[38;5;11m⏺[0m [0m[38;5;11mPlease run /login · API Error: 401 isolated StopFailure live-test forced 401[0m
+
+[0m[2m[38;5;7m✻[0m [0m[2m[38;5;7mCooked for 1s · done 11:51 AM[0m
+
+[0m[38;5;15m⏺[0m Stop hook feedback
+
+[0m[38;5;11m⏺[0m [0m[38;5;11mPlease run /login · API Error: 401 isolated StopFailure live-test forced 401[0m
+
+[0m[2m[38;5;7m✻[0m [0m[2m[38;5;7mBrewed for 1s · done 11:51 AM[0m
+
+[0m[38;5;7m───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────[0m
+❯ [0m[7m [0m
+[0m[38;5;7m───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────[0m
+
+  [0m[38;5;11m⏵⏵ auto mode on[0m[2m[38;5;7m (shift+tab to cycle)[0m
