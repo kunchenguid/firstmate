@@ -158,7 +158,11 @@ with tempfile.TemporaryDirectory(prefix="fm-macos-memory-") as tmp:
     pages(0.5)
     (root / "swap").write_text("vm.swapusage: total = 1024.00M used = 980.00M free = 44.00M")
     rc, report, _ = audit()
-    assert (rc, report["status"]) == (1, "CRITICAL"), report
+    assert (rc, report["status"], report["summary"]["swap_used_pct"]) == (0, "OK", 95.7), report
+    pages(0.01)
+    rc, report, _ = audit()
+    assert (rc, report["status"], report["summary"]["swap_used_pct"]) == (1, "CRITICAL", 95.7), report
+    pages(0.5)
     (root / "swap").write_text("vm.swapusage: total = 0.00M used = 0.00M free = 0.00M")
     rc, report, _ = audit()
     assert (rc, report["summary"]["swap_used_pct"]) == (0, 0.0), report
@@ -170,18 +174,19 @@ with tempfile.TemporaryDirectory(prefix="fm-macos-memory-") as tmp:
         (root / "pages").write_text(bad_pages)
         rc, report, _ = audit("--crit-mem-pct", "0")
         assert (rc, report["status"], report["summary"]["mem_used_pct"]) == (0, "UNKNOWN", None), report
+        assert report["reason"] == "macos-memory-unavailable", report
     pages(0.5)
     (root / "total").write_text("0")
     rc, report, _ = audit()
-    assert (rc, report["status"]) == (0, "UNKNOWN"), report
+    assert (rc, report["status"], report["reason"]) == (0, "UNKNOWN", "macos-memory-unavailable"), report
     (root / "total").write_text(str(1024 ** 3))
     rc, report, elapsed = audit(extra_env={"SLOW_TELEMETRY": "1"})
-    assert (rc, report["status"]) == (0, "UNKNOWN"), report
+    assert (rc, report["status"], report["reason"]) == (0, "UNKNOWN", "macos-memory-unavailable"), report
     assert elapsed < 0.9, elapsed
     (root / "sysctl").unlink()
     (root / "sysctl").symlink_to("/usr/bin/false")
     rc, report, _ = audit()
-    assert (rc, report["status"]) == (0, "UNKNOWN"), report
+    assert (rc, report["status"], report["reason"]) == (0, "UNKNOWN", "macos-memory-unavailable"), report
 print("ok - Darwin CLI fake-command cases: page sizes, thresholds, swap, invalid data, timeout, failure")
 PYTEST
 

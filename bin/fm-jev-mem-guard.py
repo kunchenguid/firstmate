@@ -9,8 +9,10 @@ Prevents catastrophic OOM killer invocations against persistent agent supervisor
 Thresholds (each named for the CLI flag that carries its operational default; run --help for current values):
   - --warn-mem-pct: memory utilization warning, percent of MemTotal not available.
   - --crit-mem-pct: memory utilization critical, percent of MemTotal not available.
-  - --warn-swap-pct: swap utilization warning, percent of SwapTotal in use.
-  - --crit-swap-pct: swap utilization critical, percent of SwapTotal in use.
+  - --warn-swap-pct: swap utilization warning, percent of SwapTotal in use (Linux only).
+  - --crit-swap-pct: swap utilization critical, percent of SwapTotal in use (Linux only).
+  On macOS, vm.swapusage total grows dynamically as swapfiles are added, so swap
+  figures are report-only there and the verdict comes from memory availability alone.
 
 Invariants:
   - Read-only diagnostics.
@@ -186,11 +188,12 @@ def audit_memory(
                 swap_used_gb = round(swap_used_kb / (1024.0 * 1024.0), 2)
                 swap_used_pct = round((swap_used_kb / swap_total_kb) * 100.0, 1)
 
+        swap_classifies = sys.platform != "darwin" and swap_used_pct is not None
         crit = mem_used_pct >= crit_mem_pct or (
-            swap_used_pct is not None and swap_used_pct >= crit_swap_pct
+            swap_classifies and swap_used_pct >= crit_swap_pct
         )
         warn = mem_used_pct >= warn_mem_pct or (
-            swap_used_pct is not None and swap_used_pct >= warn_swap_pct
+            swap_classifies and swap_used_pct >= warn_swap_pct
         )
         if crit:
             status = "CRITICAL"
@@ -252,13 +255,15 @@ def main():
         "--warn-swap-pct",
         type=float,
         default=85.0,
-        help="Warning threshold for swap utilization %% (default: %(default)s)",
+        help="Warning threshold for swap utilization %% (default: %(default)s); "
+        "report-only on macOS, where swap total grows dynamically",
     )
     parser.add_argument(
         "--crit-swap-pct",
         type=float,
         default=95.0,
-        help="Critical threshold for swap utilization %% (default: %(default)s)",
+        help="Critical threshold for swap utilization %% (default: %(default)s); "
+        "report-only on macOS, where swap total grows dynamically",
     )
     parser.add_argument(
         "--json",
