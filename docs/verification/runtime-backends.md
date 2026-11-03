@@ -1013,6 +1013,14 @@ ok - claude-named (2.1.284 (Claude Code)): real idle composer classifies empty
 ok - claude-named (2.1.284 (Claude Code)): the same idle pane read cursorless is not pending (verdict: empty)
 ```
 
+### 2026-11-02 claude 2.1.317 rotating `Try` idle hint
+
+Verified on 2026-11-02 against real Claude Code 2.1.317 panes on Orca 1.4.232 in a disposable lab runtime: an idle claude composer renders the rotating suggestion hint `Try "edit fm-branch-dispatch.ts to..."` after the `❯` glyph, and a `styled=0` capture carries no ghost-strip proof for it, so that hint row inside a proven container read `pending` instead of `empty` and an inbox ring deferred against a composer that held no human input.
+`FM_COMPOSER_IDLE_RE_DEFAULT` in [`bin/fm-composer-lib.sh`](../../bin/fm-composer-lib.sh) therefore carries the anchored prefix `^Try "` with the quoted tail free, because the suggestion rotates; claude draws that hint only in an EMPTY composer, so typed text never reproduces it.
+A proven composer container holding that hint row now reads `empty` on an unstyled capture, while real typed text in the same container still reads `pending` and a bare row keeps the `styled=0` degradation to `unknown`.
+The live capture from that run is the rule-separated shape - `❯ Try "..."` between two solid rules with the permission-mode footer below - which reads `unknown` with or without the entry, so the entry widens nothing there and proves emptiness only inside a container the classifier already proved.
+`test_matrix_claude_rotating_idle_hint` in `tests/fm-composer-lib.test.sh` pins the styled container, the unstyled container, and the typed-text counterweight.
+
 ### 2026-09-15 codex-cli 0.154.0 idle starfield and status footer through Herdr
 
 Verified on 2026-09-15 on macOS arm64 (Darwin 25.5.0) against codex-cli 0.154.0 (model gpt-6-astra, fast mode) running as a Codex second mate inside a Herdr pane, read through Herdr's ANSI capture with its exact capability descriptor (`styled=1`, `cursor=0`, `identity=1`, `rows=20`).
@@ -2313,9 +2321,16 @@ On 2026-10-08, Orca CLI 1.4.222 did not accept a window title as a terminal hand
 `orca terminal show --terminal title:fm-android-compare-slice3 --json`, the same call with `name:` and `window:` prefixes, and the bare title all exited 1 with `error.code=terminal_handle_stale`.
 `orca terminal list --worktree name:fm-sparkdash-deploy-macnode --json` returned the one live terminal whose handle matched that task's recorded `terminal=`, and `name:fm-does-not-exist-probe` exited 1 with `selector_not_found`.
 The current send-time contract is owned by [`orca-backend.md`](../orca-backend.md#task-shape-and-metadata).
+The retarget itself was exercised on 2026-11-02 against Orca 1.4.232 with real Claude Code panes in a disposable lab runtime: a closed recorded handle with exactly one live pane in the recorded window delivered the text while `state/<id>.meta` stayed byte-identical, and two live panes in that window and a missing window both preserved the original `orca send failed` exit 1 and typed into no pane.
 `tests/fm-backend-orca.test.sh` pins fake-CLI delivery for both restart errors, unchanged healthy-handle commands, missing and ambiguous selector refusal, replacement-dialog guards, inbox draft and busy deferral, exact-own-doorbell retries, and explicit typed and key semantics.
 `tests/fm-orca-submit-restart.test.sh` covers inbox restarts before typing and before Enter, replacement content changing during settle, retained watcher retry marks, and the original endpoint's two-Enter budget.
 `tests/fm-orca-typed-restart.test.sh` covers a typed slash command lost during restart, unconfirmed exit 3 without retyping or further Enter attempts, a failed Enter after typed acceptance reported as unconfirmed whether the composer reads pending, empty after a submit, or empty after an endpoint replacement, and unchanged original-endpoint submission. `tests/fm-composer-lib.test.sh` pins the shared failed-Enter verdict on both the typed and inbox planes, including that the failed path never reads the composer.
+
+The composer read was re-verified on 2026-11-02 against Orca 1.4.232 with real Claude Code 2.1.317 and 2.1.304 panes in a disposable lab runtime: Orca's default `orca terminal read` returns the accumulated stream, so after an accepted Enter the same pane returned repaint fragments (`❯ ⚠ claude.ai connectors are disabled ...`) with no rendered composer and classified `unknown`, which reported a command that had already run as "text not submitted" and exited 1.
+`orca terminal read --terminal <handle> --screen --limit <n> --json` returned the rendered screen, the same pane classified `empty`, and the typed send confirmed delivery.
+The `--screen` payload carried no ANSI bytes, so the Orca capability descriptor stays `styled=0`.
+The same runtime reported typed-but-unsubmitted composer text in `result.terminal.draft`, which Orca omits from the tail and screen rows: a replacement pane whose `draft` held `DRAFT-MARKER keep me` rendered an empty `❯` row and classified `empty`, so an inbox doorbell was typed into that draft instead of deferring until [`bin/backends/orca.sh`](../../bin/backends/orca.sh) rendered the draft as the composer row it is, after which the same capture read `pending`, the ring deferred, and the draft stayed byte-identical.
+`tests/fm-backend-orca.test.sh` pins both the rendered-screen read and the draft-rendering deferral.
 
 ### Orca environment source
 
