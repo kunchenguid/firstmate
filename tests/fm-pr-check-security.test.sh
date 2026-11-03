@@ -1173,6 +1173,32 @@ SH
   pass "a timeout that lands after the cleanup trap is still reported as a timeout"
 }
 
+# A scan cut by the watcher's own check bound never reached its own queueing, so
+# the watcher queues that cut durably, once, and nothing the scan queued twice.
+test_watcher_queues_a_scan_cut_at_the_check_bound() {
+  local dir state rc
+  dir=$(make_case watcher-scan-cut)
+  state="$dir/home/state"
+  : > "$dir/home/config/pr-register-scan"
+  write_task_meta "$dir"
+  printf '%s\n' 'done [at=2]: PR https://github.com/o/r/pull/9 checks green' > "$state/task-a.status"
+  add_stop_custom_check "$dir"
+  cat > "$dir/fakebin/sed" <<'SH'
+#!/usr/bin/env bash
+case "$*" in *'s/^kind=//p'*) sleep 30 ;; esac
+exec "$(type -P sed)" "$@"
+SH
+  chmod +x "$dir/fakebin/sed"
+  set +e
+  FM_TEST_CHECK_TIMEOUT=2 run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/watch.out" 2> "$dir/watch.err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "the cut-scan watcher failed: $(cat "$dir/watch.err")"
+  [ "$(grep -c 'check: pr-register: timed out after 2s' "$state/.wake-queue")" = 1 ] ||
+    fail "a scan cut at the check bound was not queued once: $(cat "$state/.wake-queue" 2>/dev/null)"
+  pass "the watcher durably queues a scan cut at its check bound, once"
+}
+
 # With config/pr-register-scan present, the watcher's check sweep runs the
 # scan, so a reported PR gets its merge poll without the supervisor, and a
 # refusal becomes a durable wake. With the flag absent, the sweep is unchanged.
@@ -4411,6 +4437,7 @@ test_scan_replacement_keeps_the_watch_it_cannot_take_over
 test_scan_reports_a_timed_out_registration_once_and_retries
 test_scan_keeps_a_notice_owed_until_its_wake_is_queued
 test_scan_reports_a_timeout_during_poll_preparation
+test_watcher_queues_a_scan_cut_at_the_check_bound
 test_watcher_sweep_records_a_reported_pr
 test_valid_recording_and_merge_derivation
 test_rejected_metacharacter_bytes_are_inert
