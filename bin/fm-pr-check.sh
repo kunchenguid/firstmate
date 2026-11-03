@@ -36,16 +36,18 @@
 # replaces; a pr= the log never named is the supervisor's own choice and stays,
 # and a merged or retired pr= is never replaced. Each candidate is recorded
 # through the ordinary path above, so every refusal still applies. A refusal
-# prints one line naming the task, the URL, and the reason, once per task and
-# URL (state/<task>.pr-register-refused), and the scan retries silently on later
-# sweeps, so a draft later marked ready is recorded without help. Each sweep
+# queues a check wake and prints one line naming the task, the URL, and the
+# reason, once per task and URL (state/<task>.pr-register-refused), and the scan
+# retries silently on later sweeps, so a draft later marked ready is recorded
+# without help. The wake is queued before the once-only marker is written, so a
+# stop between the two repeats a notice rather than losing it. Each sweep
 # starts just after the last task the previous sweep attempted
 # (state/.pr-check-scan-cursor), so a registration that hangs or is refused
 # cannot take the whole budget on every sweep. Registrations
 # stop FM_CHECK_TIMEOUT (default 30) minus 5 seconds after the scan starts; a
-# registration cut at that bound prints one line saying the PR merge watch could
-# not be armed, once per task and URL (state/<task>.pr-register-timed-out), and
-# is retried.
+# registration cut at that bound reports the same way that the PR merge watch
+# could not be armed, once per task and URL (state/<task>.pr-register-timed-out),
+# and is retried.
 # Usage: fm-pr-check.sh <task-id> <pr-url>
 #        fm-pr-check.sh scan
 set -eu
@@ -87,7 +89,7 @@ pr_check_pr_retired() {  # <id> <recorded-url>
 }
 
 pr_check_scan() {
-  local budget start meta id kind url recorded replaces left refused timed_out marker note err rc tmp candidates='' cursor_file cursor
+  local budget start meta id kind url recorded replaces left refused timed_out marker note line err rc tmp candidates='' cursor_file cursor
   budget=${FM_CHECK_TIMEOUT:-30}
   case "$budget" in ''|*[!0-9]*) budget=30 ;; esac
   budget=$((budget - 5))
@@ -141,12 +143,12 @@ pr_check_scan() {
     if [ -f "$marker" ] && [ ! -L "$marker" ] && [ "$(cat "$marker")" = "$url" ]; then
       continue
     fi
-    tmp=$(mktemp "$STATE/.pr-register-refused.XXXXXX") || continue
-    if ! { printf '%s\n' "$url" > "$tmp" && mv -f -- "$tmp" "$marker"; }; then
-      rm -f -- "$tmp"
-      continue
+    line="$id reported $url in a done line, but $note"
+    fm_wake_append check pr-register "check: pr-register: $line" || continue
+    if tmp=$(mktemp "$STATE/.pr-register-refused.XXXXXX"); then
+      { printf '%s\n' "$url" > "$tmp" && mv -f -- "$tmp" "$marker"; } || rm -f -- "$tmp"
     fi
-    printf '%s reported %s in a done line, but %s\n' "$id" "$url" "$note"
+    printf '%s\n' "$line"
   done <<EOF_SCAN
 $candidates
 EOF_SCAN

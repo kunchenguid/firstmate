@@ -820,7 +820,7 @@ Later `resolved:` and `captain-held:` lines are supervisor bookkeeping and do no
 It records that PR through the ordinary registration path when the task has no `pr=`, or has that same `pr=` but no published merge poll.
 When the status log named the recorded `pr=` and the ready report names a different PR, that PR replaces the recorded one, so a lane that closes a PR and opens another moves its merge poll.
 It skips persistent secondmate and scout records, a `pr=` the status log never named because that is the supervisor's own choice, and a PR whose merge was already reported or whose poll was retired.
-A refused registration, such as a draft, or one cut at the scan's time bound, which reports that the PR merge watch could not be armed, prints one `check: pr-register:` wake for each task, PR and reason, and later sweeps retry without a new wake, so a PR marked ready later is recorded.
+A refused registration, such as a draft, or one cut at the scan's time bound, which reports that the PR merge watch could not be armed, queues one `check: pr-register:` wake for each task, PR and reason before marking it sent, and later sweeps retry without a new wake, so a PR marked ready later is recorded.
 With the file absent, the check sweep does not run the scan, and `pr=` and the merge poll come only from a manual `bin/fm-pr-check.sh <id> <PR url>` run.
 The flag takes effect at the next check sweep, and is a home-local preference that is not inherited by secondmate homes.
 

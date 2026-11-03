@@ -4006,10 +4006,8 @@ while :; do
     pr_register_reason=
     if [ -e "$CONFIG/pr-register-scan" ]; then
       FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" run_check_capture "$SCRIPT_DIR/fm-pr-check.sh" scan || exit 1
-      if [ -n "$FM_CHECK_RESULT" ]; then
-        pr_register_reason="check: pr-register: $FM_CHECK_RESULT"
-        fm_wake_append check pr-register "$pr_register_reason" || exit 1
-      fi
+      # The scan queued each notice itself, before marking it as sent.
+      [ -z "$FM_CHECK_RESULT" ] || pr_register_reason="check: pr-register: $FM_CHECK_RESULT"
     fi
     for c in "$STATE"/*.check.sh; do
       [ -e "$c" ] || continue

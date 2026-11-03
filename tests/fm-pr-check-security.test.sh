@@ -1111,6 +1111,42 @@ test_scan_reports_a_timed_out_registration_once_and_retries() {
   pass "a timed-out registration publishes one notice, retries, and clears on success"
 }
 
+# The once-only marker means the notice was durably queued: a queue that cannot
+# take the wake leaves the notice owed, so a later sweep still delivers it, once.
+test_scan_keeps_a_notice_owed_until_its_wake_is_queued() {
+  local dir state out reason
+  for reason in timeout refusal; do
+    dir=$(make_case "scan-notice-owed-$reason")
+    state="$dir/home/state"
+    write_task_meta "$dir"
+    printf '%s\n' 'done [at=2]: PR https://github.com/o/r/pull/9 checks green' > "$state/task-a.status"
+    mkdir "$state/.wake-queue"
+    if [ "$reason" = timeout ]; then
+      out=$(FM_CHECK_TIMEOUT=7 FM_TEST_GH_SLOW_URL=pull/9 run_check_entry "$dir" scan 2> "$dir/stderr") \
+        || fail "the $reason scan failed: $(cat "$dir/stderr")"
+    else
+      out=$(FM_TEST_GH_DRAFT=true run_check_entry "$dir" scan 2> "$dir/stderr") \
+        || fail "the $reason scan failed: $(cat "$dir/stderr")"
+    fi
+    [ -z "$out" ] || fail "a $reason notice that was not queued was still reported: $out"
+    [ ! -e "$state/task-a.pr-register-timed-out" ] && [ ! -e "$state/task-a.pr-register-refused" ] \
+      || fail "a $reason notice was marked sent before its wake was queued"
+
+    rmdir "$state/.wake-queue"
+    if [ "$reason" = timeout ]; then
+      out=$(FM_CHECK_TIMEOUT=7 FM_TEST_GH_SLOW_URL=pull/9 run_check_entry "$dir" scan 2> "$dir/stderr") \
+        || fail "the $reason retry failed: $(cat "$dir/stderr")"
+    else
+      out=$(FM_TEST_GH_DRAFT=true run_check_entry "$dir" scan 2> "$dir/stderr") \
+        || fail "the $reason retry failed: $(cat "$dir/stderr")"
+    fi
+    [ -n "$out" ] || fail "a later sweep did not report the owed $reason notice"
+    [ "$(grep -c 'check: pr-register: task-a reported' "$state/.wake-queue")" = 1 ] \
+      || fail "the owed $reason notice was not queued once: $(cat "$state/.wake-queue")"
+  done
+  pass "a timeout or refusal notice stays owed until its wake is durably queued, then is queued once"
+}
+
 # The bound can land after the registration installed its cleanup trap, where
 # the worker must still report the bound rather than an ordinary failure.
 test_scan_reports_a_timeout_during_poll_preparation() {
@@ -1199,8 +1235,8 @@ test_watcher_sweep_records_a_reported_pr() {
   rc=$?
   set -e
   [ "$rc" -eq 0 ] || fail "the timeout watcher failed: $(cat "$dir/watch.err")"
-  grep -F 'check: pr-register: task-a reported https://github.com/o/r/pull/9 in a done line, but its PR merge watch could not be armed' "$state/.wake-queue" >/dev/null \
-    || fail "the timeout was not queued as a durable wake: $(cat "$state/.wake-queue" 2>/dev/null)"
+  [ "$(grep -cF 'check: pr-register: task-a reported https://github.com/o/r/pull/9 in a done line, but its PR merge watch could not be armed' "$state/.wake-queue")" = 1 ] \
+    || fail "the timeout was not queued as exactly one durable wake: $(cat "$state/.wake-queue" 2>/dev/null)"
   pass "the watcher sweep scans only with config/pr-register-scan present, then records a reported PR and queues a refusal or a timeout"
 }
 
@@ -4373,6 +4409,7 @@ test_scan_keeps_a_recorded_pr_the_log_never_named
 test_scan_does_not_replace_a_merged_pr
 test_scan_replacement_keeps_the_watch_it_cannot_take_over
 test_scan_reports_a_timed_out_registration_once_and_retries
+test_scan_keeps_a_notice_owed_until_its_wake_is_queued
 test_scan_reports_a_timeout_during_poll_preparation
 test_watcher_sweep_records_a_reported_pr
 test_valid_recording_and_merge_derivation
