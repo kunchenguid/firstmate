@@ -175,8 +175,8 @@ fm_path_age() {
 }
 
 # fm_poll_derived_grace [poll-seconds]
-# Default guard-grace derivation: max(300, poll + 60). A watcher touches its
-# liveness beacon once per poll cycle, so a fixed 300s grace stops correctly
+# Default guard-grace derivation: max(300, poll + 60). A watcher's loop-top
+# beacon touches are POLL seconds apart, so a fixed 300s grace stops correctly
 # bounding staleness once the poll cadence reaches or exceeds it; growing the
 # default with the cadence while keeping the historical 300s floor for the
 # common short-poll case fixes that without a caller-specific constant.
