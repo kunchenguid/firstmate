@@ -94,6 +94,88 @@ SH
   pass "session-lock: a version-named Claude Code session is identified from its install path and argv[0]"
 }
 
+# Bob (IBM Bob CLI) is a node bundle that sets no process title: Linux reports
+# its supervisor and session processes as MainThread and macOS as node, so the
+# session can only be identified by the installed entry script it runs. The
+# launcher is npm's bin shim, a relative symlink into the package, so the fixture
+# builds the real install shape and the cases exercise that resolution for real.
+BOB_INSTALL="$TMP_ROOT/bob-install"
+mkdir -p "$BOB_INSTALL/bin" "$BOB_INSTALL/lib/node_modules/@ibm/bob/dist" "$BOB_INSTALL/other/bin"
+: > "$BOB_INSTALL/lib/node_modules/@ibm/bob/dist/bob.js"
+ln -s ../lib/node_modules/@ibm/bob/dist/bob.js "$BOB_INSTALL/bin/bob"
+: > "$BOB_INSTALL/other/unrelated.js"
+ln -s ../unrelated.js "$BOB_INSTALL/other/bin/bob"
+BOB_LAUNCHER="$BOB_INSTALL/bin/bob"
+
+test_bob_session_is_identified_from_its_entry_script() {
+  local dir fakebin shape got
+  dir="$TMP_ROOT/bob-session"
+  fakebin=$(fm_fakebin "$dir")
+  mkdir -p "$dir/state"
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+set -u
+field= pid=
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -o) field=$2; shift 2 ;;
+    -p) pid=$2; shift 2 ;;
+    *) shift ;;
+  esac
+done
+script=${FM_TEST_BOB_SCRIPT:?}
+case "${FM_TEST_BOB_SHAPE:-linux}" in
+  linux) comm=MainThread ;;
+  macos) comm=node ;;
+esac
+case "$pid:$field" in
+  800:comm=) printf '%s\n' "$comm" ;;
+  800:args=) printf '%s\n' "node $script --resume --auto-approve" ;;
+  800:ppid=) printf '%s\n' 1 ;;
+  801:comm=) printf '%s\n' "$comm" ;;
+  801:args=) printf '%s\n' "/opt/node/bin/node ${FM_TEST_BOB_NODE_OPTS:-}$script --resume --auto-approve" ;;
+  801:ppid=) printf '%s\n' 800 ;;
+  *:comm=) printf '%s\n' bash ;;
+  *:args=) printf '%s\n' 'bash /repo/bin/fm-lock.sh' ;;
+  *:ppid=) printf '%s\n' 801 ;;
+esac
+SH
+  chmod +x "$fakebin/ps"
+  printf '801\n' > "$dir/state/.lock"
+
+  # Non-vacuity: the same table running anything but Bob's entry script must
+  # find nothing, so MainThread is never accepted on its own, a script merely
+  # named bob is not Bob, and neither is a path that only has a bob directory.
+  for script in /srv/app/server.js "$BOB_INSTALL/other/bin/bob" /home/bob/bin/tool.js; do
+    for shape in linux macos; do
+      if FM_TEST_BOB_SCRIPT="$script" FM_TEST_BOB_SHAPE="$shape" \
+        lib_eval "$fakebin" 'fm_harness_ancestry_pid' >/dev/null 2>&1; then
+        fail "$shape: a node process running $script was read as a harness process"
+      fi
+    done
+  done
+
+  for script in "$BOB_LAUNCHER" "$BOB_INSTALL/lib/node_modules/@ibm/bob/dist/bob.js"; do
+    for shape in linux macos; do
+      got=$(FM_TEST_BOB_SCRIPT="$script" FM_TEST_BOB_SHAPE="$shape" lib_eval "$fakebin" 'fm_harness_ancestry_pid') \
+        || fail "$shape: the bob session running $script was not found in the ancestry at all"
+      [ "$got" = 801 ] || fail "$shape: ancestry resolved '$got', expected the nearest bob process 801 (the session, not its supervisor)"
+      FM_TEST_BOB_SCRIPT="$script" FM_TEST_BOB_SHAPE="$shape" lib_eval "$fakebin" 'fm_harness_pid_alive 801' \
+        || fail "$shape: a live bob session was not recognized as a harness"
+      FM_TEST_BOB_SCRIPT="$script" FM_TEST_BOB_SHAPE="$shape" \
+        lib_eval "$fakebin" "fm_session_lock_owned_by_self '$dir/state'" \
+        || fail "$shape: the bob session holding the lock did not recognize itself as the owner"
+    done
+  done
+
+  # Node options before the script do not hide it.
+  got=$(FM_TEST_BOB_SCRIPT="$BOB_LAUNCHER" FM_TEST_BOB_NODE_OPTS='--no-warnings ' \
+    lib_eval "$fakebin" 'fm_harness_ancestry_pid') \
+    || fail "a bob session started with a node option was not found in the ancestry"
+  [ "$got" = 801 ] || fail "a bob session started with a node option resolved '$got', expected 801"
+  pass "session-lock: a bob session is identified from its installed entry script, never from MainThread alone"
+}
+
 # A harness that is pid 1 of its own PID namespace - a container, or the
 # `codex sandbox` this shape was verified in - used to be invisible: the walk
 # stopped as soon as the NEXT pid was 1, so the one process that identifies the
@@ -882,6 +964,59 @@ epoch_outcome() {
   sed -n 's/^.*outcome=\([a-z][a-z]*\) .*$/\1/p' "$1/state/.claude-autoarm-epoch" 2>/dev/null || true
 }
 
+# The reported failure end to end: a real process the kernel names MainThread,
+# running Bob's installed entry script through npm's launcher symlink, runs the
+# real bin/fm-lock.sh from a child exactly as a Bob tool call does. The tree is
+# orphaned first so the walk terminates inside the fixture. The control runs the
+# same tree with an unrelated script named bob and must stay refused, which is
+# also what the lock did for a genuine Bob primary before Bob was identified.
+run_bob_fixture() {  # <dir> <launcher>
+  local dir=$1 launcher=$2 i
+  mkdir -p "$dir/node/bin" "$dir/home/state"
+  ln -s "$(command -v bash)" "$dir/node/bin/MainThread"
+  cat > "$dir/session.sh" <<'SH'
+#!/usr/bin/env bash
+i=0
+while [ "$i" -lt 200 ] && [ "$(ps -o ppid= -p $$ 2>/dev/null | tr -d ' ')" != 1 ]; do
+  sleep 0.05
+  i=$((i + 1))
+done
+printf '%s\n' "$$" > "$FM_HOME/session-pid"
+"$FM_TEST_LOCK" > "$FM_HOME/lock.out" 2>&1
+printf '%s\n' "$?" > "$FM_HOME/lock.rc"
+SH
+  cp "$dir/session.sh" "$BOB_INSTALL/lib/node_modules/@ibm/bob/dist/bob.js"
+  cp "$dir/session.sh" "$BOB_INSTALL/other/unrelated.js"
+  env -u CLAUDE_CODE_SESSION_ID -u CLAUDE_PID -u BOB_SESSION \
+    FM_HOME="$dir/home" FM_TEST_LOCK="$ROOT/bin/fm-lock.sh" \
+    bash -c '"$0" "$1" &' "$dir/node/bin/MainThread" "$launcher"
+  i=0
+  while [ "$i" -lt 400 ] && [ ! -s "$dir/home/lock.rc" ]; do
+    sleep 0.05
+    i=$((i + 1))
+  done
+  [ -s "$dir/home/lock.rc" ] || fail "the bob fixture never finished"
+}
+
+test_e2e_bob_session_acquires_the_lock() {
+  local dir session_pid
+  dir="$TMP_ROOT/e2e-bob"
+  run_bob_fixture "$dir" "$BOB_LAUNCHER"
+  expect_code 0 "$(tr -d '[:space:]' < "$dir/home/lock.rc")" \
+    "a bob session must acquire the session lock: $(cat "$dir/home/lock.out")"
+  session_pid=$(tr -d '[:space:]' < "$dir/home/session-pid")
+  [ "$(tr -d '[:space:]' < "$dir/home/state/.lock")" = "$session_pid" ] \
+    || fail "the session lock does not name the bob process $session_pid"
+
+  dir="$TMP_ROOT/e2e-bob-unrelated"
+  run_bob_fixture "$dir" "$BOB_INSTALL/other/bin/bob"
+  expect_code 1 "$(tr -d '[:space:]' < "$dir/home/lock.rc")" \
+    "an unrelated MainThread script named bob must not acquire the session lock"
+  assert_contains "$(cat "$dir/home/lock.out")" "cannot locate harness process in ancestry" \
+    "the unrelated script was refused for the wrong reason"
+  pass "session-lock e2e: a bob session acquires the lock and an unrelated MainThread script does not"
+}
+
 test_e2e_version_named_session_claims_the_home() {
   local dir
   dir="$TMP_ROOT/e2e-version-named"
@@ -1565,6 +1700,7 @@ test_reanchor_keeps_autoarm_midturn_healthy() {
 }
 
 test_version_named_session_is_identified_on_both_platforms
+test_bob_session_is_identified_from_its_entry_script
 test_harness_at_namespace_pid1_is_examined
 test_ordinary_paths_are_never_harness_processes
 test_harness_beyond_a_gap_never_owns_the_lock
@@ -1583,6 +1719,7 @@ test_windows_task_lease_follows_a_tagged_lock_holder
 test_cygwin_ps_without_o_still_resolves_a_local_harness
 test_e2e_version_named_session_claims_the_home
 test_e2e_daemon_parented_session_claims_the_home
+test_e2e_bob_session_acquires_the_lock
 test_e2e_daemon_parented_version_named_session_keeps_its_lock
 test_e2e_background_session_keeps_its_lock_across_a_recycled_chain
 test_same_session_confirmation_refreshes_rekeyed_id_under_claim_lock
