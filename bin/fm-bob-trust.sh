@@ -112,8 +112,12 @@ fi
 # Read-modify-write with a fingerprint check before the rename and a readback
 # after it, the bin/fm-agy-trust.sh / bin/fm-claude-trust.sh shape: bob itself
 # rewrites this file when a worker answers a trust prompt or the user trusts a
-# folder interactively, so a store that moved under us is retried once and then
-# refused rather than clobbered.
+# folder interactively, so a store that moved under us is never clobbered. Unlike
+# those helpers a failed registration aborts the spawn and parallel spawns from
+# different homes share this one store, so a moved store is re-read and retried
+# with randomized backoff, and a recorded entry is read back again after a short
+# randomized settle, which catches a writer that passed its own fingerprint check
+# just before this rename and replaced the store from an older read.
 # Bob's store schema: { "version": 1, "folders": { "<path>": "TRUST_FOLDER" } }
 # "TRUST_FOLDER" = the exact folder is trusted; "TRUST_PARENT" = all children
 # are trusted. We register as TRUST_FOLDER for the isolated worktree: the exact
@@ -170,70 +174,20 @@ const attempt = () => {
   }
   return isTrusted(JSON.parse(fs.readFileSync(store, "utf8"))) ? "recorded" : "dropped";
 };
-// Store-wide lock serialising the read-merge-rename cycle between concurrent
-// helpers (spawns from different Firstmate homes share this one store). An
-// O_EXCL lock file holding the owner's pid, broken when that owner is dead or
-// when the lock outlives any real hold, which also recovers an empty lock from a
-// helper that died before writing its pid and a pid since reused. Portable
-// (flock is absent on macOS). Bob's own rewrites of the store are not covered,
-// which is what the fingerprint check is for.
-const lockPath = `${store}.fm-trust.lock`;
-const lockMaxAgeMs = 30000;
 const sleep = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
-const lockIsAbandoned = () => {
-  let owner;
-  let ageMs;
-  try {
-    owner = Number.parseInt(fs.readFileSync(lockPath, "utf8"), 10);
-    ageMs = Date.now() - fs.statSync(lockPath).mtimeMs;
-  } catch (err) {
-    if (err.code === "ENOENT") return false;
-    throw err;
-  }
-  if (ageMs > lockMaxAgeMs) return true;
-  if (!Number.isInteger(owner) || owner <= 0) return false;
-  try {
-    process.kill(owner, 0);
-    return false;
-  } catch (err) {
-    return err.code === "ESRCH";
-  }
-};
-const acquire = () => {
-  for (let i = 0; i < 400; i += 1) {
-    try {
-      const fd = fs.openSync(lockPath, "wx", 0o600);
-      try {
-        fs.writeSync(fd, `${process.pid}\n`);
-      } catch (err) {
-        fs.rmSync(lockPath, { force: true });
-        throw err;
-      } finally {
-        fs.closeSync(fd);
-      }
-      return;
-    } catch (err) {
-      if (err.code !== "EEXIST") throw err;
-    }
-    if (lockIsAbandoned()) {
-      fs.rmSync(lockPath, { force: true });
-      continue;
-    }
-    sleep(50);
-  }
-  throw new Error(`could not take the trust store lock ${lockPath}`);
-};
-let outcome = "failed";
+const jitter = (minMs, maxMs) => sleep(minMs + crypto.randomInt(maxMs - minMs));
+const maxAttempts = 40;
+let outcome = "dropped";
 try {
-  acquire();
-  try {
-    for (let i = 0; i < 3 && outcome === "failed"; i += 1) {
-      const result = attempt();
-      if (result === "recorded") outcome = "recorded";
-      else if (result === "moved" && i >= 1) outcome = "moved";
+  for (let i = 0; i < maxAttempts; i += 1) {
+    outcome = attempt();
+    if (outcome === "recorded") {
+      jitter(50, 200);
+      if (isTrusted(JSON.parse(fs.readFileSync(store, "utf8")))) break;
+      outcome = "dropped";
+    } else {
+      jitter(10, 150);
     }
-  } finally {
-    fs.rmSync(lockPath, { force: true });
   }
 } catch (err) {
   console.error(`error: ${err.message}`);
@@ -241,10 +195,10 @@ try {
 }
 if (outcome === "recorded") process.exit(0);
 if (outcome === "moved") {
-  console.error(`error: ${store} was modified while trust was being recorded; refusing to overwrite it`);
+  console.error(`error: ${store} kept changing while trust was being recorded; refusing to overwrite it`);
   process.exit(1);
 }
-console.error(`error: ${store} did not retain trust for ${wantedPath} after 3 attempts`);
+console.error(`error: ${store} did not retain trust for ${wantedPath} after ${maxAttempts} attempts`);
 process.exit(1);
 NODE
 then

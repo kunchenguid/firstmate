@@ -23,7 +23,7 @@ A Bob session is recognized for harness detection and the session lock so firstm
 
 The launch template clears `BOB_SESSION` (bob's source throws on a nested session), `CLAUDECODE`, `PI_CODING_AGENT`, `GROK_AGENT`, and `FM_PI_HARNESS` inline, and the shared outer wrap clears `CURSOR_AGENT`, `CURSOR_INVOKED_AS`, and `GEMINI_CLI`, so neither a foreign primary marker nor a nested-session marker reaches the worker.
 The spawn refuses when the project tracks its own `.bob/settings.json`, because firstmate writes its hook file to that path and would replace the committed settings.
-It also copies the brief to `.bob/launch-brief.md` in the worktree, because bob blocks file reads outside its workspace by default; both `.bob/` files are kept out of git through the worktree exclude.
+It also copies the brief to `.bob/launch-brief.md` in the worktree, because bob blocks file reads outside its workspace by default; both `.bob/` files are kept out of git through the worktree exclude and removed when the worktree returns to its pool.
 After launch, `../../../bin/fm-spawn.sh` runs two gates in the rovo/kimi shape:
 
 1. **Readiness gate** (`bob_wait_for_ready`): poll until the composer reads empty; a pane whose composer is never recognized fails the spawn loudly after `FM_BOB_READY_POLLS` polls.

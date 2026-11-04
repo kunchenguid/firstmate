@@ -20,7 +20,7 @@ fm_bob_script_is_bob() {  # <path>
         return
         ;;
     esac
-    [ "$hop" -gt 1 ] || [ "$(basename -- "$path")" = bob ] || return 1
+    [ "$hop" -gt 1 ] || [ "${path##*/}" = bob ] || return 1
     [ -L "$path" ] || return 1
     target=$(readlink -- "$path" 2>/dev/null) || return 1
     case "$target" in
@@ -34,12 +34,18 @@ fm_bob_script_is_bob() {  # <path>
 # True when command name $1 and argument string $2 describe Bob's session or
 # supervisor process. Node options before the script are skipped, and the script
 # path may contain spaces. MainThread is accepted ONLY together with that script,
-# never widened to every node process.
+# never widened to every node process. Every caller runs this on foreign node
+# processes too, some on each watcher poll and some holding a whole brief in
+# argv, so the miss stays linear and forks nothing per word.
 fm_bob_process_matches() {  # <comm> <args>
-  local comm=$1 args=$2 cand i j start=-1
+  local comm=$1 args=$2 cand='' word i start=-1
   local -a words=()
-  case "$(basename -- "$comm")" in
+  case "${comm##*/}" in
     MainThread|node|node-*|node[0-9]*) ;;
+    *) return 1 ;;
+  esac
+  case "$args" in
+    */bob*) ;;
     *) return 1 ;;
   esac
   read -r -a words <<<"$args" || true
@@ -50,12 +56,14 @@ fm_bob_process_matches() {  # <comm> <args>
   done
   [ "$start" -ge 0 ] || return 1
   # ps joins argv with spaces, so an install path containing spaces arrives as
-  # several words (and may be followed by Bob's own arguments): try the longest
-  # candidate first and shorten until one is Bob's entry script.
-  for ((j = ${#words[@]}; j > start; j--)); do
-    cand=${words[start]}
-    for ((i = start + 1; i < j; i++)); do cand+=" ${words[i]}"; done
-    fm_bob_script_is_bob "$cand" && return 0
+  # several words (and may be followed by Bob's own arguments): grow the candidate
+  # word by word and test it only where it can end in Bob's launcher or script.
+  for ((i = start; i < ${#words[@]}; i++)); do
+    word=${words[i]}
+    cand+="${cand:+ }$word"
+    case "$word" in
+      bob | */bob | */bob.js) fm_bob_script_is_bob "$cand" && return 0 ;;
+    esac
   done
   return 1
 }

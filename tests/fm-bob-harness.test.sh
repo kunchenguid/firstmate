@@ -376,56 +376,27 @@ test_bob_concurrent_trust_registrations_all_persist() {
   count=$(node -e 'const f=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")).folders;
     process.stdout.write(String(Object.values(f).filter(v=>v==="TRUST_FOLDER").length))' "$home/.bob/trustedFolders.json")
   [ "$count" = "$n" ] || fail "concurrent trust registrations kept $count of $n entries: $(cat "$TMP_ROOT"/trust-err-* 2>/dev/null)"
-  [ ! -e "$home/.bob/trustedFolders.json.fm-trust.lock" ] || fail "the trust store lock was left behind"
-  pass "fm-bob-trust: concurrent registrations all persist and release the store lock"
+  pass "fm-bob-trust: concurrent registrations all persist"
 }
 
-# An abandoned lock must never strand every later Bob spawn: an empty lock from a
-# helper that died before writing its pid, a lock whose owner is dead, and an old
-# lock whose pid was reused are all recovered, and a fresh live lock is honored.
-test_bob_abandoned_trust_lock_is_recovered() {
-  local home wt lock store case_name content age sleeper helper rc
-  home="$TMP_ROOT/lock-home"
-  mkdir -p "$home/.bob"
-  git init -q "$TMP_ROOT/lock-proj"
-  git -C "$TMP_ROOT/lock-proj" -c user.name=t -c user.email=t@example.com commit -q --allow-empty -m init
-  wt="$TMP_ROOT/lock-wt"
-  git -C "$TMP_ROOT/lock-proj" worktree add -q "$wt" -b lock-wt
-  store="$home/.bob/trustedFolders.json"
-  lock="$store.fm-trust.lock"
-  sleep 300 &
-  sleeper=$!
-  for case_name in empty-old dead-owner reused-pid-old; do
-    rm -f "$store"
-    case "$case_name" in
-      empty-old) content=''; age=120 ;;
-      dead-owner) content='999999'; age=0 ;;
-      reused-pid-old) content="$sleeper"; age=120 ;;
-    esac
-    printf '%s' "$content" > "$lock"
-    node -e 'const fs=require("node:fs");const t=Date.now()/1000-Number(process.argv[2]);fs.utimesSync(process.argv[1],t,t)' "$lock" "$age"
-    HOME="$home" "$ROOT/bin/fm-bob-trust.sh" "$wt" "$TMP_ROOT/lock-proj" >/dev/null 2>"$TMP_ROOT/lock-err" \
-      || fail "$case_name: an abandoned trust lock blocked registration: $(cat "$TMP_ROOT/lock-err")"
-    [ ! -e "$lock" ] || fail "$case_name: the recovered lock was left behind"
-    [ -s "$store" ] || fail "$case_name: registration wrote no store"
+# The matcher runs on every foreign node process, some holding a whole brief in
+# argv, so a miss must not fork per word. Any helper a word could reach logs here.
+test_bob_matcher_forks_nothing_on_a_foreign_long_argv() {
+  local dir fakebin tool args
+  dir="$TMP_ROOT/matcher-cost"
+  fakebin=$(fm_fakebin "$dir")
+  for tool in basename dirname readlink; do
+    printf '#!/bin/sh\nprintf "%%s\\n" "%s" >> "%s/forks.log"\n' "$tool" "$dir" > "$fakebin/$tool"
+    chmod +x "$fakebin/$tool"
   done
-  # Non-vacuity: a fresh lock held by a live process is waited on, never broken,
-  # and the helper proceeds once its owner releases it.
-  rm -f "$store"
-  printf '%s\n' "$sleeper" > "$lock"
-  HOME="$home" "$ROOT/bin/fm-bob-trust.sh" "$wt" "$TMP_ROOT/lock-proj" >/dev/null 2>"$TMP_ROOT/lock-err" &
-  helper=$!
-  sleep 1
-  [ ! -e "$store" ] || fail "registration wrote through a live owner's lock"
-  [ -e "$lock" ] || fail "a live owner's fresh lock was removed"
-  rm -f "$lock"
-  rc=0
-  wait "$helper" || rc=$?
-  kill "$sleeper" 2>/dev/null || true
-  wait "$sleeper" 2>/dev/null || true
-  [ "$rc" = 0 ] || fail "registration did not proceed after the lock was released: $(cat "$TMP_ROOT/lock-err")"
-  [ -s "$store" ] || fail "registration wrote no store after the lock was released"
-  pass "fm-bob-trust: abandoned locks are recovered and a live lock is honored"
+  : > "$dir/forks.log"
+  args="node /srv/app.js $(printf 'word %.0s' $(seq 1 1000)) /home/bob/notes /tmp/not-bob/bob.js"
+  if PATH="$fakebin:$BASE_PATH" bash -c '. "$1"; fm_bob_process_matches MainThread "$2"' _ \
+    "$ROOT/bin/fm-bob-process-lib.sh" "$args"; then
+    fail "a foreign node process with a long argv matched Bob"
+  fi
+  [ ! -s "$dir/forks.log" ] || fail "the Bob matcher forked on a miss: $(sort "$dir/forks.log" | uniq -c)"
+  pass "fm_bob_process_matches: a miss on a long foreign argv forks nothing"
 }
 
 test_bob_secondmate_is_refused() {
@@ -450,5 +421,5 @@ test_bob_tracked_settings_refuses_spawn
 test_bob_tracked_brief_refuses_spawn
 test_bob_symlinked_dir_refuses_spawn
 test_bob_concurrent_trust_registrations_all_persist
-test_bob_abandoned_trust_lock_is_recovered
+test_bob_matcher_forks_nothing_on_a_foreign_long_argv
 test_bob_secondmate_is_refused

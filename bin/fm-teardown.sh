@@ -1517,12 +1517,16 @@ meta_value() {
   fm_meta_get "$meta" "$key"
 }
 
-# Remove only Polytoken's firstmate-generated worktree wiring, as named by
-# fm_control_harness_wiring_paths. Its tracked hook and facet layers belong to
-# the project. Other harnesses retain their existing worktree-return cleanup.
+# Remove only Polytoken's and Bob's firstmate-generated worktree wiring, as named
+# by fm_control_harness_wiring_paths. They sit behind the worktree exclude, which
+# the return's git clean leaves alone, and a tracked copy belongs to the project.
+# Other harnesses retain their existing worktree-return cleanup.
 remove_harness_worktree_wiring() {  # <worktree>
   local wt=$1 path
-  [ "$(meta_value "$META" harness)" = polytoken ] || return 0
+  case "$(meta_value "$META" harness)" in
+    polytoken | bob) ;;
+    *) return 0 ;;
+  esac
   while IFS= read -r path; do
     case "$path" in "$wt"/*) ;; *) continue ;; esac
     git -C "$wt" ls-files --error-unmatch -- "$path" >/dev/null 2>&1 && continue
