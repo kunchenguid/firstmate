@@ -2499,8 +2499,6 @@ $TEARDOWN_SPARED_PIDS
 EOF
 }
 
-TEARDOWN_SPARED_PIDS=
-
 task_pids_under_roots() {  # <dir>...
   TASK_PIDS=
   TASK_PIDS_FAILED_DIR=
@@ -4238,8 +4236,8 @@ elif [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
     "$SCRIPT_DIR/fm-t3code-codex-env.sh" cleanup "$WT" || exit 1
     git -C "$WT" ls-files --error-unmatch CLAUDE.local.md >/dev/null 2>&1 || rm -f "$WT/CLAUDE.local.md"
   fi
-  # Kills remaining processes in the worktree, resets, returns to pool; kept in
-  # place instead while a spared unowned process still has its cwd there.
+  # Resets and returns the worktree to the pool; kept in place instead while a
+  # spared unowned process still has its cwd there.
   # treehouse resolves the pool from the working directory, so run it from
   # the project. teardown_treehouse_return tolerates transient and stale git locks
   # left by a killed crew process; see the script header for retry and stale-lock proof.
