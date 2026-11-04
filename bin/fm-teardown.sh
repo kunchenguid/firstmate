@@ -2258,6 +2258,11 @@ validate_worktree_teardown_safety() {
 # this copy cannot resolve at all.
 NM_TEARDOWN_TIMEOUT=${FM_TEARDOWN_NM_TIMEOUT:-10}
 case "$NM_TEARDOWN_TIMEOUT" in ''|*[!0-9]*) NM_TEARDOWN_TIMEOUT=10 ;; esac
+# The global cwd census is advisory only when it completes. A timeout refuses
+# teardown instead of falling back to process groups, because that fallback can
+# prove only the recorded task endpoint, not every leaked descendant.
+LSOF_CENSUS_TIMEOUT=${FM_TEARDOWN_LSOF_CENSUS_TIMEOUT:-10}
+case "$LSOF_CENSUS_TIMEOUT" in ''|*[!0-9]*|0) LSOF_CENSUS_TIMEOUT=10 ;; esac
 # How many of the most recent `no-mistakes runs` rows the parked-run
 # continuation proof may scan, mirroring bin/fm-crew-state.sh's limit posture
 # (generous: rows of other branches interleave freely in the real ledger).
@@ -2364,15 +2369,15 @@ conclude_task_no_mistakes_run() {  # <worktree>
 }
 
 # Fix 2 (see script header): pids of every process whose CURRENT WORKING
-# DIRECTORY is exactly $1 or under it, from one bounded system-wide `lsof -a
-# -d cwd` scan (never the recursive +D file-tree walk, which lsof itself
-# documents as slow). Never $$ (this script's own pid). Empty output when
-# nothing matches; failure means the scan could not establish a safe result.
+# DIRECTORY is exactly $1 or under it, from one time-bounded system-wide
+# `lsof -a -d cwd` scan (never the recursive +D file-tree walk, which lsof
+# itself documents as slow). Never $$ (this script's own pid). Empty output
+# when nothing matches; a timeout or failure cannot establish a safe result.
 pids_with_cwd_under() {  # <dir>
   local dir=$1 out pid path line
   [ -n "$dir" ] && [ -d "$dir" ] || return 0
   dir=$(cd "$dir" && pwd -P) || return 1
-  out=$(lsof -a -d cwd -Fpn 2>/dev/null) || return 1
+  out=$(fm_nm_bounded "$dir" "$LSOF_CENSUS_TIMEOUT" lsof -a -d cwd -Fpn 2>/dev/null) || return 1
   [ -n "$out" ] || return 0
   pid=
   while IFS= read -r line; do
@@ -2494,7 +2499,8 @@ reap_task_backend_process_group() {  # <label>
 # first, then KILL after a short grace period for anything still alive; a
 # process that exits on its own between the two passes is simply absent from
 # the recheck. A missing lsof uses the backend process-group fallback; an lsof
-# scan error refuses before destructive teardown.
+# scan error or timeout refuses before destructive teardown. Only an absent
+# lsof uses the identity-safe recorded-backend process-group fallback.
 reap_task_worktree_processes() {  # <label> <dir>...
   local label=$1 pids pid identity current_pids i pass=1 max_passes=3
   local -a tracked_pids tracked_identities remaining_pids remaining_identities

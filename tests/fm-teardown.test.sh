@@ -5547,6 +5547,39 @@ test_process_spawned_during_grace_is_reaped_on_later_pass() {
   pass "a process spawned during grace is reaped on a later pass"
 }
 
+test_hung_lsof_census_refuses_before_removal() {
+  local case_dir rc wt_path fake_pid=99999997
+  case_dir=$(make_case hung-lsof-census-refusal)
+  write_meta "$case_dir" no-mistakes ship
+  land_shippable_commit "$case_dir"
+  wt_path=$(cd "$case_dir/wt" && pwd -P)
+  cat > "$case_dir/fakebin/lsof" <<EOF
+#!/usr/bin/env bash
+printf 'p%s\nfcwd\nn%s\n' '$fake_pid' '$wt_path'
+sleep 300 &
+child=\$!
+trap 'kill "\$child" 2>/dev/null || true; wait "\$child" 2>/dev/null || true; exit 143' TERM
+wait "\$child"
+EOF
+  cat > "$case_dir/fakebin/treehouse" <<EOF
+#!/usr/bin/env bash
+printf 'returned\n' > "$case_dir/treehouse.log"
+EOF
+  chmod +x "$case_dir/fakebin/lsof" "$case_dir/fakebin/treehouse"
+
+  rc=0
+  FM_TEARDOWN_LSOF_CENSUS_TIMEOUT=1 \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  expect_code 1 "$rc" "hung-lsof-census-refusal: teardown should refuse"
+  assert_grep "REFUSED: cannot determine leaked processes under $case_dir/wt for task-x1 (lsof failed)" "$case_dir/stderr" \
+    "hung-lsof-census-refusal: incomplete census did not refuse"
+  assert_present "$case_dir/wt" "hung-lsof-census-refusal: teardown removed the worktree"
+  assert_present "$case_dir/state/task-x1.meta" "hung-lsof-census-refusal: teardown removed task metadata"
+  assert_absent "$case_dir/treehouse.log" "hung-lsof-census-refusal: incomplete census authorized worktree return"
+  pass "a hung global lsof census refuses teardown before removal"
+}
+
 test_persistent_scan_refuses_after_bounded_retries() {
   local case_dir rc wt_path fake_pid=99999999
   case_dir=$(make_case persistent-reap-refusal)
@@ -6581,6 +6614,7 @@ test_lsof_error_refuses_before_removal
 test_reused_pid_identity_is_not_force_killed
 test_exec_changed_process_is_still_reaped
 test_process_spawned_during_grace_is_reaped_on_later_pass
+test_hung_lsof_census_refuses_before_removal
 test_persistent_scan_refuses_after_bounded_retries
 test_process_exit_during_identity_lookup_does_not_refuse
 test_run_abort_precedes_process_reap_precedes_worktree_removal
