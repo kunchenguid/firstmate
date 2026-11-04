@@ -412,6 +412,35 @@ test_typed_submit_on_open_exit_picker_types_nothing() {
 }
 
 test_typed_submit_on_open_exit_picker_types_nothing
+
+test_typed_submit_on_grok_trust_dialog_types_nothing() {
+  local dir fakebin composer sent before rc=0 err v
+  # shellcheck source=/dev/null
+  . "$ROOT/bin/fm-backend.sh"
+  dir="$TMP_ROOT/typed-on-grok-trust"
+  fakebin=$(make_submit_mock "$dir")
+  composer="$dir/composer"
+  sent="$dir/sent.log"
+  err="$dir/err"
+  # The pane Grok 1.0.52 shows on an untrusted folder, where a typed y or n
+  # answers the dialog and Enter accepts it.
+  for v in 1.0.52 1.0.62; do
+    rc=0
+    cp "$ROOT/tests/fixtures/grok-$v/trust-dialog.plain" "$composer"
+    before=$(cat "$composer")
+    : > "$sent"
+    PATH="$fakebin:$PATH" FM_FAKE_COMPOSER="$composer" FM_FAKE_SENT="$sent" \
+      fm_backend_send_text_submit tmux win 'please continue' 3 0 0 >"$dir/out" 2>"$err" || rc=$?
+    [ "$rc" -ne 0 ] || fail "a typed submit onto the Grok $v trust dialog should refuse"
+    [ ! -s "$sent" ] || fail "a typed submit onto the Grok $v trust dialog sent input: $(cat "$sent")"
+    [ "$(cat "$composer")" = "$before" ] || fail "a typed submit onto the Grok $v trust dialog changed the pane"
+    grep -F 'blocked on a prompt: Grok folder-trust dialog' "$err" >/dev/null \
+      || fail "the refusal should name the dialog, got '$(cat "$err")'"
+  done
+  pass "fm_backend_send_text_submit: a typed message to the Grok 1.0.52 and 1.0.62 trust dialogs types nothing and sends no Enter"
+}
+
+test_typed_submit_on_grok_trust_dialog_types_nothing
 test_wrapped_continuation_retries_swallowed_enter
 test_placeholder_like_bare_input_retries_swallowed_enter
 test_busy_pane_composer_clears_first_try
