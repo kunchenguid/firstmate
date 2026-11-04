@@ -105,9 +105,13 @@ while IFS= read -r -d '' path; do
 done < <(git -C "$scratch" ls-files -z)
 
 printf 'fm-test-linux: %s on %s\n' "${#tests[@]}" "$("$runtime" run --rm "$image" sh -c 'uname -sr')"
+case "$(basename "$runtime")" in
+  podman*) identity=(--userns=keep-id) ;;
+  *) identity=(--user "$(id -u):$(id -g)") ;;
+esac
 failed=()
 for t in "${tests[@]}"; do
-  if "$runtime" run --rm --user "$(id -u):$(id -g)" -v "$scratch:/work" -w /work -e HOME=/tmp -e TMPDIR=/tmp "$image" bash "$t"; then
+  if "$runtime" run --rm "${identity[@]}" -v "$scratch:/work" -w /work -e HOME=/tmp -e TMPDIR=/tmp "$image" bash "$t"; then
     printf 'PASS %s\n' "$t"
   else
     printf 'FAIL %s\n' "$t"
