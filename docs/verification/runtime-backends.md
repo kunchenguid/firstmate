@@ -80,6 +80,28 @@ The portable regression asserts both directions of that case: a host-shaped pid 
 
 Run on the host under Claude Code 2.1.252 with the same two markers set, the same probe reports `claude`, `comm claude`, and Claude's Stop-owned protocol, so the correction does not trade one misidentification for its inverse.
 
+### Ancestry reach across the Codex SessionStart hook
+
+Codex publishes no marker, so its session start digest identifies Codex only if the ancestry walk reaches the native `codex` process from where the hook runs.
+The walk in `bin/fm-harness.sh` examines the probing process plus fifteen parents, the same reach as the session lock walker in `bin/fm-session-lock-lib.sh`.
+Verified on 2026-11-04 with codex-cli 0.166.0 on Linux 6.12.113 (arm64), through the installed `codex app-server` against a loopback model fixture with an isolated `CODEX_HOME`, `HOME`, and lab checkout:
+
+```sh
+bin/fm-test-run.sh tests/fm-codex-hook-layer-live-e2e.test.sh
+```
+
+The tracked SessionStart wrapper ran as `codex app-server` -> `bash -lc` -> `fm-codex-stop-park.sh` -> `fm-sessionstart-run.sh` -> `fm-session-start.sh` -> `timeout` -> `bash -c` -> `fm-session-start.sh` -> `fm-session-start.sh`, which puts the digest's harness probe nine parents below the native process, the wake drain's probe eleven, and the guard's probe thirteen.
+With an eight-process walk the digest model context read `SUPERVISION OPERATING INSTRUCTIONS - primary harness: unknown`; with the current walk the same run reads:
+
+```text
+ok - codex codex-cli 0.166.0: the SessionStart hook digest detects the installed Codex and renders its protocol
+```
+
+`tests/fm-harness-precedence.test.sh` pins the measured reach portably at depths 1, 7, 9, and 15, with and without a retained `CLAUDECODE`, plus the bound one process beyond it, and `tests/fm-session-start.test.sh` runs the tracked hook command under a renamed `codex` process.
+That run proves the extended reach live for Codex only.
+Claude 2.1.316 and Pi 1.4.0 were installed on the same host, but no live guard exercised their session-open paths under the extended reach, so their live behavior under it is unverified; each publishes a marker, so ancestry is not their only evidence.
+tmux was not installed, so `tests/fm-harness-liveness-drift-live-e2e.test.sh` gate-skipped and refreshed no per-harness process-name evidence here.
+
 ### Real harness process names behind the walk
 
 The detection half of the opt-in drift guard asks the ancestry walk what it makes of each INSTALLED harness's real running process:

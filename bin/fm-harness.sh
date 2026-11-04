@@ -82,6 +82,17 @@ CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 # shellcheck source=bin/fm-hermes-process-lib.sh
 . "${SCRIPT_DIR:-/}/fm-hermes-process-lib.sh"
 
+# How many processes every ancestry walk below examines: this process plus up
+# to fifteen parents. It deliberately matches fm_harness_ancestry_pids in
+# bin/fm-session-lock-lib.sh, so the session start digest's harness verdict and
+# the session lock's owner are found by walks of the same reach. A Codex
+# SessionStart hook runs fm-harness.sh nine parents below the native codex
+# process (hook shell, stop-park wrapper, session-start runner, the digest and
+# its bounded child), and the digest's later probes sit deeper still, so a
+# shorter walk reports a markerless Codex primary as unknown while the lock
+# still names it.
+HARNESS_ANCESTRY_HOPS=16
+
 # Print the harness named by a verified environment marker, or nothing when no
 # marker is present. Markers only report what the environment CLAIMS; detect_own
 # decides whether that claim survives contradicting ancestry.
@@ -163,12 +174,13 @@ harness_marker() {
   return 0
 }
 
-# True when an exact `omp` process sits within eight parents of this one. The
+# True when an exact `omp` process sits within the walk's reach of this one. The
 # same anchored match as the ancestry walk below, kept separate so the marker
 # precedence above can demand real process evidence before trusting FM_OMP_HARNESS.
 ancestry_names_omp() {
-  local pid=$$ comm
-  for _ in 1 2 3 4 5 6 7 8; do
+  local pid=$$ comm hop=0
+  while [ "$hop" -lt "$HARNESS_ANCESTRY_HOPS" ]; do
+    hop=$((hop + 1))
     comm=$(ps -o comm= -p "$pid" 2>/dev/null) || return 1
     [ "$(basename -- "$comm")" = omp ] && return 0
     pid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')
@@ -310,8 +322,9 @@ harness_process_verdict() {  # <pid>
 # nothing when the walk finds none. The nearest match wins, so a worker nested
 # inside another harness resolves to its own harness.
 harness_ancestry() {  # [<pid>]
-  local pid=${1:-$$} verdict
-  for _ in 1 2 3 4 5 6 7 8; do
+  local pid=${1:-$$} verdict hop=0
+  while [ "$hop" -lt "$HARNESS_ANCESTRY_HOPS" ]; do
+    hop=$((hop + 1))
     verdict=$(harness_process_verdict "$pid")
     [ -z "$verdict" ] || { echo "$verdict"; return; }
     pid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')
@@ -331,8 +344,8 @@ harness_ancestry() {  # [<pid>]
 # Print the pids on the UPWARD path between the deepest descendant of <root> and
 # <root> itself, deepest first. Optional <eligible-leaf-pid> values restrict which
 # descendants may be chosen as that deepest one; with none given every descendant
-# is eligible. Bounded to the same eight levels harness_ancestry climbs, so a deep
-# or pathological tree cannot make this walk unbounded.
+# is eligible. Bounded to the same HARNESS_ANCESTRY_HOPS reach harness_ancestry
+# climbs, so a deep or pathological tree cannot make this walk unbounded.
 process_descent_path() {  # <root> [<eligible-leaf-pid>...]
   local root=${1:-$$} eligible any hit pairs frontier next pid child parent verdict
   local parents='' depth=0 best best_depth=0 best_strength='' hops=0
@@ -344,7 +357,7 @@ process_descent_path() {  # <root> [<eligible-leaf-pid>...]
   pairs=$(ps -eo pid=,ppid= 2>/dev/null) || { printf '%s\n' "$root"; return 0; }
   best=$root
   frontier=$root
-  while [ -n "$frontier" ] && [ "$depth" -lt 8 ]; do
+  while [ -n "$frontier" ] && [ "$depth" -lt "$HARNESS_ANCESTRY_HOPS" ]; do
     next=
     for pid in $frontier; do
       while read -r child parent; do
@@ -386,7 +399,7 @@ EOF
   done
 
   pid=$best
-  while [ -n "$pid" ] && [ "$hops" -le 8 ]; do
+  while [ -n "$pid" ] && [ "$hops" -le "$HARNESS_ANCESTRY_HOPS" ]; do
     printf '%s\n' "$pid"
     [ "$pid" != "$root" ] || break
     parent=
