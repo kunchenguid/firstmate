@@ -1950,6 +1950,9 @@ Consider relaunches through `bin/fm-control.sh relaunch` and does not delete the
 No eligible candidate stays on the current profile and is reported for a decision.
 A completed switch is stored on the task record and reported as an outcome.
 Consider switches when a snapshot passed with `--snapshot` marks the current profile `exhausted_now`.
+A profile `quota_scope` matches alongside the model-wide rows, for the current profile and for each candidate.
+A task record with `account=` accepts a snapshot only with a matching `--account`.
+With `shared_quota` set, consider ignores the snapshot.
 Firstmate writes that snapshot from `quota-axi --json` on a quota wake, or when a bound worker stops on exhausted credits and no quota wake is armed.
 A version-pinned adapter under `FM_LIMIT_MESSAGE_DIR` that matches captured pane text is the other trigger. No adapter ships.
 Status line text is never a signal.
