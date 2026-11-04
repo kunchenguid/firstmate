@@ -1751,6 +1751,7 @@ status_observed_signature() {
     ident=$(_fm_open_decisions_file_ident "$f") || ident=identity-error
     [ -n "$ident" ] || ident=identity-error
   fi
+  _fm_status_ident_without_device ident "$ident"
   if [ -r "$f" ]; then access=readable; else access=unreadable; fi
   encoded=$(printf '%s\0%s\0%s\0%s\0%s\0%s' \
     "$size" "$ident" "$path_state" "$link_target" "$access" "$kind" \
