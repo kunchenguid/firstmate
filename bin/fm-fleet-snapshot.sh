@@ -545,6 +545,7 @@ backlog_json() (  # [<backlog-path>] - defaults to this home's $BACKLOG
                   else cap(.body_lines[-1]; "^(?<v>local main)$")
                   end))
           | .body_excerpt = ((.body_lines | join(" "))[:240])
+          | .selected_answer = ([.body_lines[] | cap(.; "^Selected answer:[[:space:]]*(?<v>.*)$") | select(. != null)][0] // null)
         else . end)
     | .records as $records
     | (reduce ($records[] | select(.structured)) as $record ({};
