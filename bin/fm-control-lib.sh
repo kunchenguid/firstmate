@@ -64,7 +64,7 @@ fm_control_verb_allowed() {  # <verb>
 # section 4's verified-adapter list; an unverified adapter is refused rather
 # than guessed at, exactly as a spawn on it would be.
 fm_control_harnesses() {
-  printf '%s\n' claude codex opencode pi pi-signed grok kimi cursor gemini muse rovo omp agy devin commandcode polytoken cortex kiro hermes
+  printf '%s\n' claude codex opencode pi pi-signed grok kimi cursor gemini muse rovo omp agy devin commandcode polytoken cortex kiro hermes mcode
 }
 
 fm_control_harness_supported() {  # <harness>
@@ -96,6 +96,7 @@ fm_control_harness_family() {  # <recorded-harness>
     cortex) printf 'cortex' ;;
     hermes) printf 'hermes' ;;
     kiro) printf 'kiro' ;;
+    mcode) printf 'mcode' ;;
     claude*) printf 'claude' ;;
     codex*) printf 'codex' ;;
     opencode*) printf 'opencode' ;;
@@ -110,7 +111,7 @@ fm_control_harness_family() {  # <recorded-harness>
 }
 
 # Which task kinds an adapter is verified to run. muse, gemini, rovo, devin,
-# commandcode, polytoken, cortex, and kiro are crewmate/scout adapters only: none has a primary
+# commandcode, polytoken, cortex, kiro, and mcode are crewmate/scout adapters only: none has a primary
 # supervision protocol, and bin/fm-spawn.sh refuses a --secondmate launch on any of them. The control
 # plane asks this BEFORE it stops anything, so an incompatible relaunch target is
 # refused while the current agent is still running rather than after it has
@@ -120,7 +121,7 @@ fm_control_harness_supports_kind() {  # <harness> <kind>
   fm_control_harness_supported "$harness" || return 1
   case "$harness" in
     hermes) case "$kind" in ship|scout) ;; *) return 1 ;; esac ;;
-    muse|gemini|rovo|devin|commandcode|polytoken|cortex|kiro) [ "$kind" != secondmate ] || return 1 ;;
+    muse|gemini|rovo|devin|commandcode|polytoken|cortex|kiro|mcode) [ "$kind" != secondmate ] || return 1 ;;
   esac
   return 0
 }
@@ -137,7 +138,7 @@ fm_control_harness_supports_kind() {  # <harness> <kind>
 fm_control_interrupt_transport() {  # <harness>
   case "${1-}" in
     polytoken) printf 'rest' ;;
-    claude|codex|opencode|pi|pi-signed|omp|grok|kimi|cursor|gemini|muse|rovo|agy|devin|commandcode|hermes) printf 'key' ;;
+    claude|codex|opencode|pi|pi-signed|omp|grok|kimi|cursor|gemini|muse|rovo|agy|devin|commandcode|hermes|mcode) printf 'key' ;;
     *) return 1 ;;
   esac
 }
@@ -158,7 +159,7 @@ fm_control_interrupt_transport() {  # <harness>
 # composer does nothing (verified live, cortex 1.1.104).
 fm_control_interrupt_key() {  # <harness>
   case "${1-}" in
-    claude|codex|opencode|pi|pi-signed|omp|kimi|cursor|gemini|muse|rovo|agy|devin|commandcode|cortex|kiro|hermes) printf 'Escape' ;;
+    claude|codex|opencode|pi|pi-signed|omp|kimi|cursor|gemini|muse|rovo|agy|devin|commandcode|cortex|kiro|hermes|mcode) printf 'Escape' ;;
     grok) printf 'C-c' ;;
     *) return 1 ;;
   esac
@@ -168,10 +169,13 @@ fm_control_interrupt_key() {  # <harness>
 # need a double Escape; every other verified adapter interrupts on a single press. Command Code
 # cancels a running turn on one Escape (verified live, Command Code 1.74.1), and a
 # second press is exactly what opens its rewind picker, so it gets one.
+# MiniMax Code likewise cancels on one Escape, printing `Interrupted after <n>s`
+# with an idle composer (verified live, mcode 0.7.1), and a fast second press
+# opens its edit-message mode, so it gets one too.
 fm_control_interrupt_repeat() {  # <harness>
   case "${1-}" in
     opencode|devin|hermes) printf '2' ;;
-    claude|codex|pi|pi-signed|omp|grok|kimi|cursor|gemini|muse|rovo|agy|commandcode|cortex|kiro) printf '1' ;;
+    claude|codex|pi|pi-signed|omp|grok|kimi|cursor|gemini|muse|rovo|agy|commandcode|cortex|kiro|mcode) printf '1' ;;
     *) return 1 ;;
   esac
 }
@@ -190,7 +194,7 @@ fm_control_interrupt_repeat() {  # <harness>
 fm_control_interrupt_arm_signal() {  # <harness>
   case "${1-}" in
     devin) printf '%s' 'esc again to interrupt' ;;
-    claude|codex|opencode|pi|pi-signed|omp|grok|kimi|cursor|gemini|muse|rovo|agy|commandcode|cortex|kiro|hermes) ;;
+    claude|codex|opencode|pi|pi-signed|omp|grok|kimi|cursor|gemini|muse|rovo|agy|commandcode|cortex|kiro|hermes|mcode) ;;
     *) return 1 ;;
   esac
 }
@@ -202,9 +206,11 @@ fm_control_interrupt_arm_signal() {  # <harness>
 # read below: long enough for a rewind picker a stray earlier Escape paired with
 # this press to render (its idle double-tap opened the picker at a 0.3 s gap and
 # did not at 0.6 s, Command Code 1.74.1).
+# MiniMax Code takes the same single press and settle for its edit-message
+# mode, which a 0.4 s idle pair opened and a 0.5 s pair did not (mcode 0.7.1).
 fm_control_interrupt_press_gap() {  # <harness>
   case "${1-}" in
-    devin|commandcode) printf '0.5' ;;
+    devin|commandcode|mcode) printf '0.5' ;;
     claude|codex|opencode|pi|pi-signed|omp|grok|kimi|cursor|gemini|muse|rovo|agy|cortex|kiro|hermes) printf '0.2' ;;
     *) return 1 ;;
   esac
@@ -220,10 +226,18 @@ fm_control_interrupt_press_gap() {  # <harness>
 # recognized by its `Select a checkpoint to restore your session` subtitle or its
 # `Press Enter to select · Esc to cancel` footer, and one Escape closes it
 # without restoring (verified live, Command Code 1.74.1).
+# MiniMax Code opens its edit-latest-message mode on two Escapes within about
+# 0.4 s on an idle agent (one press arms it with `Press Esc again to edit the
+# latest message`), where Enter replaces that message and regenerates the
+# conversation; it is recognized by its `Editing the selected message` header
+# or its `Enter replace and regenerate` hint, and one Escape cancels it without
+# changing anything (verified live, mcode 0.7.1: 0.1-0.4 s gaps opened it,
+# 0.5 s and longer did not).
 fm_control_interrupt_hazard_signal() {  # <harness>
   case "${1-}" in
     devin) printf '%s' 'Revert to step:|↵ revert' ;;
     commandcode) printf '%s' 'Select a checkpoint to restore your session|Press Enter to select · Esc to cancel' ;;
+    mcode) printf '%s' 'Editing the selected message|Enter replace and regenerate' ;;
     # polytoken's interrupt rides the REST API, never keys, so no key can open
     # a hazard surface on its path; the /quit exit opens only the slash palette,
     # where Enter accepts the preselected /quit row (verified live).
@@ -234,9 +248,9 @@ fm_control_interrupt_hazard_signal() {  # <harness>
 }
 
 # The key that must follow the interrupt key to leave the composer empty, or
-# nothing when the adapter needs none. muse is the one verified adapter that
-# RESTORES the cancelled prompt into its composer as real bright text, so an
-# interrupt is not complete until Ctrl+U has cleared it; leaving it there would
+# nothing when the adapter needs none. muse RESTORES the cancelled prompt into
+# its composer as real bright text, so an interrupt is not complete until
+# Ctrl+U has cleared it; leaving it there would
 # make the next submitted line - a steer, or this plane's own exit command -
 # concatenate onto it. cursor was checked for exactly that behaviour and does
 # NOT repollute: after a single Escape its composer shows only the `Add a
@@ -246,12 +260,16 @@ fm_control_interrupt_hazard_signal() {  # <harness>
 # or @path/to/file` placeholder. kiro was checked the same way and also does not
 # repollute: after a single Escape it prints a `Cancelled ...` row and its
 # composer shows only the `ask a question or describe a task` placeholder
-# (verified, kiro-cli 2.21.4). Prints the key or nothing;
+# (verified, kiro-cli 2.21.4). MiniMax Code DOES repollute when the
+# cancelled turn had produced nothing yet: it prints `Stopped · message restored
+# to the Composer.` and puts the prompt back as real text (verified live, mcode
+# 0.7.1, a turn interrupted after 0 s), so it takes the same Ctrl+U; on an
+# already empty composer that key changes nothing. Prints the key or nothing;
 # a harness with no verified mechanics returns nonzero, matching the tables
 # above.
 fm_control_interrupt_clear_key() {  # <harness>
   case "${1-}" in
-    muse) printf 'C-u' ;;
+    muse|mcode) printf 'C-u' ;;
     claude|codex|opencode|pi|pi-signed|omp|grok|kimi|cursor|gemini|rovo|agy|devin|commandcode|cortex|kiro|hermes) ;;
     *) return 1 ;;
   esac
@@ -270,7 +288,7 @@ fm_control_interrupt_ack_source() {  # <harness>
     # kiro's stop hook fires on normal completion but, like claude's, not on a
     # manual Escape, and its `Cancelled ...` row is likewise rendered rather than
     # recorded, so fm-control preserves the adapter-owned busy record instead.
-    claude|codex|opencode|pi|pi-signed|omp|grok|kimi|cursor|gemini|rovo|agy|devin|commandcode|cortex|kiro|hermes) printf 'none' ;;
+    claude|codex|opencode|pi|pi-signed|omp|grok|kimi|cursor|gemini|rovo|agy|devin|commandcode|cortex|kiro|hermes|mcode) printf 'none' ;;
     *) return 1 ;;
   esac
 }
@@ -291,7 +309,7 @@ fm_control_exit_command() {  # <harness> [opencode-major]
       esac
       ;;
     claude|grok|kimi|cursor|muse|rovo) printf '/exit' ;;
-    codex|pi|pi-signed|omp|gemini|agy|devin|commandcode|polytoken|cortex|kiro|hermes) printf '/quit' ;;
+    codex|pi|pi-signed|omp|gemini|agy|devin|commandcode|polytoken|cortex|kiro|hermes|mcode) printf '/quit' ;;
     *) return 1 ;;
   esac
 }
