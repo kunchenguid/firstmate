@@ -994,6 +994,53 @@ test_lane_capacity_gate_refuses_an_unreadable_opt_in() {
   pass "a malformed lane capacity refuses spawns only when it asks for the gate, and one that cannot be read always refuses"
 }
 
+# The two pieces this change adds on the default path are opt-in: an undeclared
+# home keeps main's behaviour (no spawn-admitted status line, and a relaunch
+# does not take the shared Treehouse project lock), while a declared home turns
+# both on. The declaration itself is the gate.
+test_default_path_pieces_are_opt_in() {
+  local scenario case_dir home wt out rc hold pid i
+  for scenario in undeclared declared; do
+    case_dir=$(make_case "opt-in-$scenario" task-a task-b)
+    home="$case_dir/home"
+    wt=$(new_worktree "$case_dir" task-a)
+    [ "$scenario" = declared ] && declare_capacity "$home" 'project 1'
+    rc=0
+    out=$(run_spawn "$case_dir" "$home" "$wt" task-a "$case_dir/project" --scout) || rc=$?
+    expect_code 0 "$rc" "a fresh scout spawn failed in an $scenario home: $out"
+    if [ "$scenario" = declared ]; then
+      grep -qF 'spawn admitted' "$home/state/task-a.status" ||
+        fail "a declared home did not record the spawn-admitted line: $(cat "$home/state/task-a.status" 2>/dev/null)"
+    elif [ -f "$home/state/task-a.status" ] &&
+      grep -qF 'spawn admitted' "$home/state/task-a.status"; then
+      fail "an undeclared home recorded the spawn-admitted line: $(cat "$home/state/task-a.status")"
+    fi
+    printf 'done: finished\n' >> "$home/state/task-a.status"
+    hold="$case_dir/lock-hold"
+    FM_FAKE_HOLD="$hold" run_spawn "$case_dir" "$home" "$(new_worktree "$case_dir" task-b)" \
+      task-b "$case_dir/project" --mode no-mistakes --yolo off > "$case_dir/holder.out" 2>&1 &
+    pid=$!
+    i=0
+    while [ ! -f "$hold.reached" ]; do
+      i=$((i + 1))
+      [ "$i" -lt 400 ] || fail "the holder spawn never reached its pane check: $(cat "$case_dir/holder.out")"
+      sleep 0.05
+    done
+    rc=0
+    out=$(run_spawn "$case_dir" "$home" "$wt" task-a --relaunch) || rc=$?
+    if [ "$scenario" = declared ]; then
+      expect_code 1 "$rc" "a declared home's relaunch ignored a held project lock: $out"
+      assert_contains "$out" 'another Treehouse slot allocation or return is in progress' \
+        "the declared relaunch did not refuse on the shared project lock"
+    else
+      expect_code 0 "$rc" "an undeclared home's relaunch refused on the project lock: $out"
+    fi
+    : > "$hold.release"
+    wait "$pid" || fail "the holder spawn failed: $(cat "$case_dir/holder.out")"
+  done
+  pass "the default-path pieces stay opt-in behind a capacity declaration"
+}
+
 test_undeclared_capacity_keeps_dispatch_uncapped
 test_available_capacity_admits_the_worker
 test_exhausted_capacity_defers_without_leaving_anything_behind
@@ -1017,3 +1064,4 @@ test_orca_spawn_is_admitted_under_the_shared_project_lock
 test_lane_capacity_gate_is_opt_in
 test_lane_capacity_gate_defers_without_leaving_anything_behind
 test_lane_capacity_gate_refuses_an_unreadable_opt_in
+test_default_path_pieces_are_opt_in
