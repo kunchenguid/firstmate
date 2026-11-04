@@ -92,9 +92,12 @@
 # task id - no identity arithmetic. An answer that is only an option selection
 # needs the label carrying the option words as the captain saw them; without it
 # the row is reported `skipped:` and feeds nothing, because missing words are
-# never inferred. Every non-reconciled resolution record ends with one
-# `Selected answer:` line: the displayed label when present, else the answer,
-# else a single-line decision. The optional fourth field selects the close:
+# never inferred. A non-reconciled resolution record ends with one
+# `Selected answer:` line only when it holds a single-line selection: the
+# displayed label when present, else the answer, else a decision that is one
+# line long. A multi-line decision with no `Answer:` or `Answer as shown to
+# the captain:` line has no `Selected answer:` line.
+# The optional fourth field selects the close:
 # empty or `done` completes the task, `release` lifts the hold so held work
 # resumes; anything else is skipped. A `release` line while the away-posture
 # record exists is reported as `refused:` under the same attended-only rule as
