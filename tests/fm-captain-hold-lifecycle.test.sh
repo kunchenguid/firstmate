@@ -1539,7 +1539,7 @@ EOF
 # closes a distinct parent decision and a retry never duplicates a line. A main
 # home publishes nothing anywhere.
 test_secondmate_home_publishes_holds_and_answers() {
-  local parent mate fakebin channel decision out
+  local parent mate fakebin channel decision out old_text old_digest
   parent=$(make_home parent-channel)
   mate="$TMP_ROOT/channel-mate-home"
   mkdir -p "$mate/data" "$mate/state" "$mate/config" "$mate/projects"
@@ -1617,6 +1617,29 @@ EOF
     || fail "idempotent batch answer retry failed"
   [ "$(grep -c 'resolved \[key=captain-hold-batch-call-1\]' "$channel")" = 1 ] \
     || fail "batch retry did not restore exactly one parent resolution: $(cat "$channel")"
+
+  run_captain "$mate" hold upgrade-call --title "Choose the upgrade action" \
+    --reason "upgrade choice pending" --repo sample >/dev/null \
+    || fail "upgrade replay hold failed"
+  old_text=$(printf 'Captain answered this call through upgrade replay.\nTask: upgrade-call\nAnswer: proceed\n')
+  if command -v shasum >/dev/null 2>&1; then
+    old_digest=$(printf '%s' "$old_text" | shasum -a 256 | awk '{print $1}')
+  else
+    old_digest=$(printf '%s' "$old_text" | sha256sum | awk '{print $1}')
+  fi
+  printf 'Resolution recorded by fm-captain-hold.\nDecision digest: %s\nResolution mode: answered\n\nCaptain decision:\n%s\n' \
+    "$old_digest" "$old_text" > "$mate/upgrade-body.txt"
+  tasks_in "$mate" update upgrade-call --body-file "$mate/upgrade-body.txt" --archive-body >/dev/null
+  tasks_in "$mate" done upgrade-call >/dev/null
+  assert_no_grep 'resolved \[key=captain-hold-upgrade-call-1\]' "$channel" \
+    "upgrade replay fixture already published its parent resolution"
+  out=$(printf 'upgrade-call\tproceed\t\n' \
+    | run_captain "$mate" answers --source "upgrade replay") \
+    || fail "the previous keyed-answer digest was not replayable: $out"
+  assert_contains "$out" "closed: upgrade-call" \
+    "the previous keyed-answer digest was treated as an unrelated closed task"
+  [ "$(grep -c 'resolved \[key=captain-hold-upgrade-call-1\]' "$channel")" = 1 ] \
+    || fail "upgrade replay did not restore exactly one parent resolution: $(cat "$channel")"
 
   run_captain "$parent" hold main-call --title "Choose the main release" \
     --reason "main choice pending" --repo sample >/dev/null || fail "main hold failed"

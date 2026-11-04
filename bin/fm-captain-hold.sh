@@ -1519,6 +1519,13 @@ keyed_decision_text() {  # <source> <task-id> <answer> <label>
   [ -z "$4" ] || printf 'Answer as shown to the user: %s\n' "$4"
 }
 
+previous_keyed_decision_text() {  # <source> <task-id> <answer> <label>
+  printf 'Captain answered this call through %s.\n' "$1"
+  printf 'Task: %s\n' "$2"
+  printf 'Answer: %s\n' "$3"
+  [ -z "$4" ] || printf 'Answer as shown to the captain: %s\n' "$4"
+}
+
 legacy_keyed_decision_text() {  # <source> <key> <answer> <label>
   # Digest-only compatibility shape for records written before canonical user
   # terminology. New records are always built by keyed_decision_text above.
@@ -1537,7 +1544,7 @@ sanitize_reconcile_provenance() {
 }
 
 command_answers() {
-  local origin='' source='' row rest key answer label mode id show state hold_kind body digest legacy_digest legacy_key
+  local origin='' source='' row rest key answer label mode id show state hold_kind body digest previous_digest legacy_digest legacy_key
   local recorded_digest recorded_mode occurrence tmp err closed=0 skipped=0 reason release_flag tab=$'\t'
   local resolve_rc
   while [ "$#" -gt 0 ]; do
@@ -1618,6 +1625,7 @@ command_answers() {
     keyed_decision_text "$source" "$id" "$answer" "$label" > "$tmp" \
       || fail "cannot stage the user decision for $id"
     digest=$(sha256_text "$(cat "$tmp")")
+    previous_digest=$(sha256_text "$(previous_keyed_decision_text "$source" "$id" "$answer" "$label")")
     legacy_digest=''
     if [ "$id" != "$key" ]; then
       legacy_key=$key
@@ -1638,7 +1646,7 @@ command_answers() {
     recorded_digest=$(recorded_decision_digest "$body" || true)
     recorded_mode=$(recorded_resolution_mode "$body" || true)
     if body_has_resolution_record "$body" \
-      && { [ "$recorded_digest" = "$digest" ] \
+      && { [ "$recorded_digest" = "$digest" ] || [ "$recorded_digest" = "$previous_digest" ] \
         || { case "$body" in *"Resolution recorded by fm-decision-hold."*) true ;; *) false ;; esac \
           && [ -n "$legacy_digest" ] && [ "$recorded_digest" = "$legacy_digest" ]; }; }; then
       if { [ -z "$release_flag" ] && [ "$state" = "done" ] \

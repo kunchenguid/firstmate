@@ -723,7 +723,7 @@
 # keeps no data/backlog.md. A configured non-markdown adapter remains
 # active without a markdown file; any active automatic backend without
 # compatible tasks-axi refuses before creating lifecycle state.
-# On success prints: spawned <id> harness=<name> kind=<ship|scout|secondmate> [mode=<mode> yolo=<on|off>] window=<backend-target> worktree=<path>
+# On success prints: spawned <id> harness=<name> kind=<ship|scout|secondmate> [mode=<mode> yolo=<on|off>] window=<backend-target> worktree=<path> ... role=<human-facing-role>
 # A ship task records the explicit mode/yolo it was passed; a secondmate spawn records
 # mode=secondmate, yolo=off, home=, and projects=; an Investigator records neither, and both the
 # success line and state/<id>.meta omit them.
@@ -1661,7 +1661,7 @@ spawn_remote_secondmate() {
     return 1
   fi
   [ ! -e "$CONFIG/fleet-ledger" ] || FM_HOME=$FM_HOME FM_STATE_OVERRIDE=$STATE FM_CONFIG_OVERRIDE=$CONFIG "$SCRIPT_DIR/fm-fleet-ledger.sh" dispatched "$id" secondmate "" "$harness" "${model#-}" || true
-  echo "spawned $id role=\"Project Director\" kind=secondmate mode=secondmate yolo=off harness=$harness window=remote:$id worktree=$home remote=$host backend=$remote_backend"
+  echo "spawned $id harness=$harness kind=secondmate mode=secondmate yolo=off window=remote:$id worktree=$home remote=$host backend=$remote_backend role=\"Project Director\""
   return 0
 }
 
@@ -8189,4 +8189,4 @@ case "$KIND" in
   secondmate) SPAWN_ROLE='Project Director' ;;
   *) SPAWN_ROLE=Builder ;;
 esac
-echo "spawned $ID role=\"$SPAWN_ROLE\" kind=$KIND$SPAWN_DELIVERY harness=$HARNESS window=$META_WINDOW worktree=$WT$SPAWN_ACCOUNT"
+echo "spawned $ID harness=$HARNESS kind=$KIND$SPAWN_DELIVERY window=$META_WINDOW worktree=$WT$SPAWN_ACCOUNT role=\"$SPAWN_ROLE\""
