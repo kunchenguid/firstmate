@@ -85,9 +85,16 @@ printf 'piped auto body\n' | inbox "$home" note --source sentry - >/dev/null \
 [ "$(notes_in "$home/state/inbox-auto")" = 4 ] \
   || fail "every automated note belongs in state/inbox-auto"
 
-sentry_record=$(grep -lF 'source=sentry' "$home/state/inbox-auto/"*.note | head -1)
+# Select by the body, not the class: this case deliberately writes two sentry
+# records (the flagged note and the piped-body note), and record ids are
+# <epoch-second>-<random>, so every record here shares one second and the glob
+# order is decided by the random suffix. Class-only selection therefore picked
+# either record at random and flaked about half the time.
+sentry_record=$(grep -lF 'auto body for sentry' "$home/state/inbox-auto/"*.note | head -1)
 [ -n "$sentry_record" ] \
   || fail "an automated note should record the class that wrote it"
+assert_grep 'source=sentry' "$sentry_record" \
+  "an automated note should record the class that wrote it"
 assert_grep 'auto body for sentry' "$sentry_record" \
   "the automated queue should hold the record body"
 lane_record=$(grep -lF 'auto body for lane-tick' "$home/state/inbox-auto/"*.note | head -1)
