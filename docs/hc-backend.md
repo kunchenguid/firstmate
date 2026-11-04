@@ -132,6 +132,8 @@ A home can start its hc ship and scout workers on another machine its hc core al
 - Its own hc reaches this machine back, under the name `firstmate-as` gives (`hc machine add <ssh target> --name <that name>` there).
   The worker reads its instructions and reports through that route, which lets programs on that machine run commands here as this machine's user, so place workers only on a machine you already trust that far.
 - Claude Code installed and logged in, and the clone already trusted there (open `claude` in it once).
+  The default Claude login there may be kept for another use, such as a supervisor.
+  In that case `claude-config` in `config/hc-machine` names a separate Claude config directory there for workers; the launch pins it with `CLAUDE_CONFIG_DIR`, and the trust check reads that directory's store.
   A placed worker uses that machine's own login, so `--account` is refused.
 - The tools its brief uses, such as `gh` and, for a no-mistakes ship, `no-mistakes`, since the worker pushes and validates from there.
 
@@ -153,7 +155,8 @@ Teardown applies the same landed-work proof it applies to a local worktree, refu
 ### Limits of a placed worker
 
 - Only the `claude` harness is placed, and a `local-only`, `forge=gerrit`, or `forge=external` ship refuses placement, because each is checked against a worktree on this machine.
-- No Firstmate hooks are installed there, since their scripts live in this machine's checkout: busy state comes from hc's native status, and there is no turn-end notification, commit-trailer strip, or push guard.
+- No Firstmate hooks are installed there, since their scripts live in this machine's checkout, so a placed worker has no busy record, turn-end notification, commit-trailer strip, or push guard.
+- Its busy and idle state come from hc's native `status.state` and read as `hc-native`; the fake-hc unit tests cover this, but whether a real Claude worker started there reports `status.state` was not verified live, because the live run's Claude was logged out.
 - Relaunch refuses a placed task.
 - Reads that look inside a worktree on this machine report nothing for a placed one: the no-mistakes run state in the fleet view, the review diff, and worktree write activity as stall evidence.
 

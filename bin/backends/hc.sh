@@ -438,7 +438,7 @@ fm_backend_hc_remote_exec() {  # <session> <machine> <timeout-secs> <cwd|-> <arg
   out=$(fm_backend_hc_cli "$session" exec --json --on "$machine" ${cwd_args[@]+"${cwd_args[@]}"} \
     --timeout "$timeout" -- "$@" 2>"$err_file") || true
   fields=$(printf '%s' "$out" | jq -r 'if (.code | type) == "number" or .code == null
-    then [(.code // "" | tostring), (.signal // "" | tostring), (.timed_out // false | tostring), (.truncated // false | tostring)] | @tsv
+    then [(.code // "" | tostring), (.signal // "" | tostring), (.timed_out // false | tostring), (.truncated // false | tostring)] | join("\u001f")
     else empty end' 2>/dev/null)
   if [ -z "$fields" ]; then
     echo "error: hc exec on machine '$machine' did not run: $(tr '\n' ' ' < "$err_file")" >&2
@@ -446,10 +446,10 @@ fm_backend_hc_remote_exec() {  # <session> <machine> <timeout-secs> <cwd|-> <arg
     return 255
   fi
   rm -f "$err_file"
-  IFS=$'\t' read -r code signal timed_out truncated <<EOF
+  IFS=$'\x1f' read -r code signal timed_out truncated <<EOF
 $fields
 EOF
-  if [ "$timed_out" = true ] || [ "$truncated" = true ] || [ -z "$code" ]; then
+  if [ "$timed_out" = true ] || [ "$truncated" = true ] || [ -z "$code" ] || [ -n "$signal" ]; then
     echo "error: hc exec on machine '$machine' did not finish cleanly (timed_out=$timed_out truncated=$truncated signal=${signal:-none})" >&2
     return 255
   fi
@@ -482,12 +482,12 @@ fm_backend_hc_machine_ready() {  # <session> <machine>
   json=$(fm_backend_hc_cli "$session" machine ls --json 2>/dev/null) \
     || { echo "error: 'hc machine ls' failed for session '$session'" >&2; return 1; }
   fields=$(printf '%s' "$json" | jq -r --arg m "$machine" \
-    'first(.machines[]? | select(.name == $m) | [.state // "", .version // ""] | @tsv) // empty' 2>/dev/null)
+    'first(.machines[]? | select(.name == $m) | [.state // "", .version // ""] | map(tostring) | join("\u001f")) // empty' 2>/dev/null)
   if [ -z "$fields" ]; then
     echo "error: hc machine '$machine' is not added to hc session '$session' on this machine (hc machine ls); add it with 'hc machine add' or keep this task local" >&2
     return 1
   fi
-  IFS=$'\t' read -r state ver <<EOF
+  IFS=$'\x1f' read -r state ver <<EOF
 $fields
 EOF
   if [ "$state" != connected ]; then

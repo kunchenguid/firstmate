@@ -29,6 +29,7 @@ REAL_GIT=$(command -v git)
 #   unreachable     every --on call fails as an unreachable machine
 #   reverse-as      the name the other machine's hc uses for this one
 #   remote/         the other machine's filesystem, seen as /fm-remote-root
+#   exec.json       answered by every exec instead of running the command
 #   <address>.json  a terminal record for get; run writes it, rm removes it
 make_fake_hc() {  # <dir> -> fakebin
   local dir=$1 fb=$1/fakebin
@@ -81,6 +82,7 @@ case "$cmd" in
       printf '{"error":{"kind":"unreachable","message":"cannot reach %s"}}\n' "$on" >&2
       exit 5
     fi
+    if [ -f "$D/exec.json" ]; then cat "$D/exec.json"; exit 0; fi
     out=$(mktemp) err=$(mktemp)
     if [ "${1:-}" = hc ] && [ "${2:-}" = exec ] && [ "${3:-}" = --on ]; then
       # The other machine's own hc reaching back to this one.
@@ -269,6 +271,16 @@ test_remote_exec_separates_transport_from_exit_codes() {
   rc=0
   hc_shell 'fm_backend_hc_remote_exec fmtest laptop 30 - sh -c "exit 255"' >/dev/null 2>&1 || rc=$?
   expect_code 254 "$rc" "a program's own 255 never reads as a transport failure"
+  for answer in '{"code":null,"signal":1,"stdout":"","stderr":"","timed_out":false,"truncated":false}' \
+    '{"code":null,"signal":9,"stdout":"","stderr":"","timed_out":false,"truncated":false}' \
+    '{"code":0,"signal":null,"stdout":"","stderr":"","timed_out":true,"truncated":false}' \
+    '{"code":0,"signal":"","stdout":"","stderr":"","timed_out":false,"truncated":true}'; do
+    printf '%s\n' "$answer" > "$D/exec.json"
+    rc=0
+    hc_shell 'fm_backend_hc_remote_exec fmtest laptop 30 - true' >/dev/null 2>&1 || rc=$?
+    expect_code 255 "$rc" "a killed, timed-out, or truncated run is a transport failure, never an exit code: $answer"
+  done
+  rm -f "$D/exec.json"
   touch "$D/unreachable"
   rc=0
   out=$(hc_shell 'fm_backend_hc_remote_exec fmtest laptop 30 - true' 2>&1) || rc=$?
@@ -333,6 +345,29 @@ test_remote_agent_state_reads_the_group_there() {
     fm_backend_agent_state hc fmtest:laptop/t9')
   assert_equals "unreadable" "$out" "a group scan that cannot run there proves nothing, so a shell is not called dead"
   pass "hc placement: agent state reads a placed terminal's process group on its own machine"
+}
+
+test_placed_busy_state_reads_hc_native_status() {
+  local tag out status
+  setup_case busy
+  tag=$(hometag_for "$HOMEDIR")
+  mkdir -p "$D/laptop"
+  printf 'backend=hc\nhc_session=fmtest\nhc_terminal=laptop/t9\nhc_machine=laptop\n' > "$HOMEDIR/state/p1.meta"
+  printf 'backend=hc\nhc_session=fmtest\nhc_terminal=t8\n' > "$HOMEDIR/state/l1.meta"
+  for status in working idle; do
+    for addr in laptop/t9 t8; do
+      jq -n --arg a "$addr" --arg h "$tag" --arg s "$status" \
+        '{address: $a, state: "live", labels: {"firstmate.task": "x", "firstmate.home": $h}, status: {state: $s}}' > "$D/$addr.json"
+    done
+    out=$(hc_shell '. "'"$ROOT"'/bin/fm-busy-lib.sh"
+      fm_busy_classify hc fmtest:laptop/t9 claude p1 "$FM_HOME/state"; echo
+      fm_busy_classify hc fmtest:t8 claude l1 "$FM_HOME/state"')
+    case "$status" in
+      working) assert_equals "busy hc-native"$'\n'"unknown missing" "$out" "a placed worker reads hc's working as busy; a local hc task with no record stays unknown" ;;
+      idle) assert_equals "idle hc-native"$'\n'"unknown missing" "$out" "a placed worker reads hc's idle as idle; a local hc task with no record stays unknown" ;;
+    esac
+  done
+  pass "hc placement: a placed worker's busy and idle come from hc's native status, and local hc tasks are unchanged"
 }
 
 # --- fm-spawn of a placed scout ------------------------------------------------
@@ -628,6 +663,7 @@ fm_test_run \
   test_machine_readiness_gates_connection_and_versions \
   test_create_task_places_the_terminal_on_the_machine \
   test_remote_agent_state_reads_the_group_there \
+  test_placed_busy_state_reads_hc_native_status \
   test_placed_spawn_builds_everything_on_the_machine \
   test_placed_spawn_refuses_before_creating_anything \
   test_placed_teardown_refuses_unlanded_or_unreachable_work \
