@@ -6710,6 +6710,198 @@ SH
   pass "post-reap proof retains late work and retry records on ordinary and Orca paths, preserving clean/force/scout behavior"
 }
 
+test_post_reap_refusals_keep_backlog_open_after_replay() {
+  local failure failed=0 TEARDOWN=$TEARDOWN
+  for failure in reaper-scan post-reap-work treehouse-pre-return treehouse-write treehouse-commit \
+    orca-write orca-commit orca-kept treehouse-return orca-remove \
+    endpoint-close export inactive-report grok-auth kimi-auth busy-state pr-poll status-archive \
+    t3-close t3-env t3-home t3-home-scan; do
+    (
+      local case_dir rc=0 expected actor='' provider='' home active_home thread=mcp:3d9e1f5a-8c2b-4a4d-8f3e-fedcba543210
+      case_dir=$(make_case "refusal-replay-$failure")
+      active_home="$case_dir"
+      write_meta "$case_dir" no-mistakes ship
+      land_shippable_commit "$case_dir"
+      seed_backlog_in_flight "$case_dir"
+      trap '[ -z "$actor" ] || kill -KILL "$actor" 2>/dev/null || true; [ -z "$provider" ] || kill -KILL "$provider" 2>/dev/null || true; if declare -F t3_fake_stop >/dev/null; then t3_fake_stop; fi' EXIT
+      case "$failure" in
+        orca-*) configure_orca_teardown_case "$case_dir" ;;
+        t3-*)
+          # shellcheck source=tests/t3-fake-lib.sh
+          . "$ROOT/tests/t3-fake-lib.sh"
+          t3_fake_start "$case_dir/server"
+          t3_fake_case "$case_dir/server-case"
+          t3_fake_credential "$case_dir/config/t3code-token"
+          if [ "$failure" = t3-home ] || [ "$failure" = t3-home-scan ]; then
+            active_home="$case_dir/operator-home"
+            mkdir -p "$active_home"
+            home="$case_dir/secondmate-home"
+            mkdir -p "$home/state" "$home/data" "$home/config" "$home/projects"
+            printf 'task-x1\n' > "$home/.fm-secondmate-home"
+            printf '# Firstmate\n' > "$home/AGENTS.md"
+            write_meta "$case_dir" secondmate secondmate "$home"
+            printf 'home=%s\n' "$home" >> "$case_dir/state/task-x1.meta"
+            ( cd "$home" && exec sleep 300 ) &
+            provider=$!
+            disown
+          fi
+          sed 's/^window=.*/window=fm-task-x1/' "$case_dir/state/task-x1.meta" > "$case_dir/meta-new"
+          mv "$case_dir/meta-new" "$case_dir/state/task-x1.meta"
+          printf 'backend=t3code\nt3_thread_id=%s\nt3_project_id=proj-test\n' "$thread" >> "$case_dir/state/task-x1.meta"
+          ;;
+      esac
+      case "$failure" in
+        reaper-scan|t3-home-scan)
+          add_lsof_error "$case_dir"
+          expected='cannot determine leaked processes'
+          ;;
+        post-reap-work)
+          cat > "$case_dir/fakebin/lsof" <<'SH'
+#!/usr/bin/env bash
+printf 'late\n' > "$FM_REFUSAL_CASE/wt/late.txt"
+exit 0
+SH
+          chmod +x "$case_dir/fakebin/lsof"
+          expected='uncommitted changes'
+          ;;
+        treehouse-pre-return)
+          cat > "$case_dir/fakebin/git" <<'SH'
+#!/usr/bin/env bash
+"$REAL_GIT_FOR_TEST" "$@"
+rc=$?
+if [ "$rc" -eq 0 ]; then
+  case " $* " in
+    *" checkout --detach "*) printf 'late\n' > "$FM_REFUSAL_CASE/wt/late.txt" ;;
+  esac
+fi
+exit "$rc"
+SH
+          chmod +x "$case_dir/fakebin/git"
+          expected='REFUSED'
+          ;;
+        treehouse-write|treehouse-commit|orca-write|orca-commit)
+          spawn_late_actor "$case_dir" "$case_dir/wt" 0.5 "${failure##*-}" "$case_dir/endpoint-closed"
+          actor=$LATE_ACTOR_PID
+          expected='REFUSED'
+          ;;
+        orca-kept)
+          ( cd "$case_dir/wt" && exec sleep 300 ) &
+          provider=$!
+          disown
+          expected='kept Orca worktree'
+          ;;
+        treehouse-return)
+          printf '#!/usr/bin/env bash\necho "fixture return refused" >&2\nexit 1\n' > "$case_dir/fakebin/treehouse"
+          chmod +x "$case_dir/fakebin/treehouse"
+          expected='treehouse return failed'
+          ;;
+        orca-remove)
+          mv "$case_dir/fakebin/orca" "$case_dir/fakebin/orca-ok"
+          cat > "$case_dir/fakebin/orca" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-} ${2:-}" = 'worktree rm' ]; then
+  printf '{"ok":false,"error":{"message":"fixture removal refused"}}\n'
+  exit 0
+fi
+exec "$FM_REFUSAL_CASE/fakebin/orca-ok" "$@"
+SH
+          chmod +x "$case_dir/fakebin/orca"
+          expected='fixture removal refused'
+          ;;
+        endpoint-close)
+          cat > "$case_dir/fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+case "${1:-}" in
+  display-message) printf '1\n' ;;
+  kill-window|list-windows) exit 1 ;;
+esac
+exit 0
+SH
+          chmod +x "$case_dir/fakebin/tmux"
+          expected='could not be closed'
+          ;;
+        export)
+          printf '%s\n' "$case_dir/export" > "$case_dir/config/record-export-root"
+          printf 'not a directory\n' > "$case_dir/export"
+          expected='record export'
+          ;;
+        grok-auth|kimi-auth)
+          : > "$case_dir/state/task-x1.${failure%-auth}-turnend-token"
+          expected=''
+          ;;
+        pr-poll|status-archive)
+          if [ "$failure" = status-archive ]; then
+            touch "$case_dir/config/status-archive"
+            printf 'done: fixture\n' > "$case_dir/state/task-x1.status"
+            expected='unsafe status archive'
+          else
+            expected='unsafe task PR-check artifact'
+          fi
+          cat > "$case_dir/fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+case "${1:-}" in
+  display-message) printf '1\n' ;;
+  kill-window)
+    if [ "$FM_REFUSAL_KIND" = pr-poll ]; then
+      mkdir "$FM_REFUSAL_CASE/state/task-x1.pr-poll"
+    else
+      printf 'not a directory\n' > "$FM_REFUSAL_CASE/data/task-x1"
+    fi
+    ;;
+esac
+exit 0
+SH
+          chmod +x "$case_dir/fakebin/tmux"
+          ;;
+        inactive-report|t3-env|busy-state)
+          prepare_teardown_source_copy "$case_dir"
+          rm "$case_dir/config/backlog-backend"
+          TEARDOWN="$case_dir/test-root/bin/fm-teardown.sh"
+          if [ "$failure" = inactive-report ]; then
+            rm "$case_dir/test-root/bin/fm-inactive-reconcile.sh"
+            printf '#!/usr/bin/env bash\necho "fixture report refused" >&2\nexit 1\n' > "$case_dir/test-root/bin/fm-inactive-reconcile.sh"
+            chmod +x "$case_dir/test-root/bin/fm-inactive-reconcile.sh"
+            expected='fixture report refused'
+          elif [ "$failure" = t3-env ]; then
+            rm "$case_dir/test-root/bin/fm-t3code-codex-env.sh"
+            printf '#!/usr/bin/env bash\necho "fixture cleanup refused" >&2\nexit 1\n' > "$case_dir/test-root/bin/fm-t3code-codex-env.sh"
+            chmod +x "$case_dir/test-root/bin/fm-t3code-codex-env.sh"
+            expected='fixture cleanup refused'
+          else
+            printf 'fixture-generation\n' > "$case_dir/state/task-x1.busy-gen"
+            rm "$case_dir/test-root/bin/fm-busy-event.sh"
+            printf '#!/usr/bin/env bash\necho "fixture busy retirement refused" >&2\nexit 1\n' > "$case_dir/test-root/bin/fm-busy-event.sh"
+            chmod +x "$case_dir/test-root/bin/fm-busy-event.sh"
+            expected='fixture busy retirement refused'
+          fi
+          ;;
+        t3-close)
+          t3_fake_set 'w.failTools = {t3_thread_read: {code: "fixture_failure", message: "fixture close refused"}}'
+          expected='could not stop and archive'
+          ;;
+        t3-home) expected='kept secondmate home' ;;
+      esac
+      FM_HOME="$active_home" FM_REFUSAL_CASE="$case_dir" FM_REFUSAL_KIND="$failure" FM_ORCA_CASE="$case_dir" \
+        FM_LATE_ACTOR_GATE="$case_dir/endpoint-closed" FM_FAKE_PANE_PID=1 \
+        run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+      if [ "$failure" = treehouse-pre-return ]; then
+        assert_present "$case_dir/wt/late.txt" "$failure: the late write never happened"
+      fi
+      expect_code 1 "$rc" "$failure: expected refusal: $(cat "$case_dir/stderr")"
+      if [ -n "$expected" ]; then
+        assert_grep "$expected" "$case_dir/stderr" "$failure: wrong refusal path: $(cat "$case_dir/stderr")"
+      fi
+      replay_close_marker "$case_dir" || fail "$failure: startup replay failed"
+      assert_present "$case_dir/state/task-x1.meta" "$failure: startup replay lost the task record"
+      [ "$(backlog_row_state "$case_dir")" = in_flight ] \
+        || fail "$failure: startup replay closed the backlog item"
+      pass "$failure preserves the task record and in_flight row after startup replay"
+    ) || failed=$((failed + 1))
+  done
+  [ "$failed" -eq 0 ] || fail "$failed refusal replay cases failed"
+}
+
+test_post_reap_refusals_keep_backlog_open_after_replay
 test_hidden_untracked_work_refuses_before_return
 test_content_fallback_git_capability_boundary
 test_work_written_at_reap_boundary_is_preserved

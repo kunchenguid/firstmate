@@ -3106,8 +3106,9 @@ t3code_secondmate_home_shutdown_barrier() {  # <home> <task-id>
   return 1
 }
 
-remove_firstmate_home() {  # <home> <label> <task-id> <backend>
+remove_firstmate_home() {  # <home> <label> <task-id> <backend> [close-task]
   local home=$1 label=$2 expected_id=${3:-} backend=${4:-} abs_home_path process_event_backup
+  local close_task=${5:-0}
   [ -n "$home" ] || return 0
   [ -e "$home" ] || return 0
   abs_home_path=$(validate_firstmate_home_for_removal "$home" "$label" "$expected_id") || return 1
@@ -3136,6 +3137,7 @@ remove_firstmate_home() {  # <home> <label> <task-id> <backend>
       restore_firstmate_home_process_events "$abs_home_path" "$label" "$process_event_backup" || return $?
       return 1
     }
+    [ "$close_task" != 1 ] || teardown_record_pending_close
     teardown_treehouse_return "$abs_home_path" "$FM_ROOT" "$label" || {
       echo "error: treehouse return failed for $label $abs_home_path; lease may still be held" >&2
       restore_firstmate_home_process_events "$abs_home_path" "$label" "$process_event_backup" || return $?
@@ -3144,6 +3146,7 @@ remove_firstmate_home() {  # <home> <label> <task-id> <backend>
     [ -z "$process_event_backup" ] || rm -rf -- "$process_event_backup"
     return 0
   fi
+  [ "$close_task" != 1 ] || teardown_record_pending_close
   if safe_rm_rf "$abs_home_path" "$label"; then
     [ -z "$process_event_backup" ] || rm -rf -- "$process_event_backup"
     return 0
@@ -3655,11 +3658,6 @@ preflight_firstmate_home_herdr_children() {  # <home>
 # reached under --force, so honoring force would delete the refusal rather
 # than override it, and would contradict the adjacent Herdr child gate that
 # stops forced cleanup for this same hazard.
-#
-# What is retained is this run's records, not a durable guarantee: a task
-# carrying a backlog transition already wrote its pending-close marker, and the
-# next session start replays that marker and removes the retained record. The
-# message says so rather than promising a retention teardown does not own.
 endpoint_close_refusal() {  # <subject> <backend> <target> <honors-force>
   local subject=$1 backend=$2 target=$3 honors_force=$4
   echo "error: the $backend endpoint $target for $subject could not be closed, so it may still be live." >&2
@@ -3668,7 +3666,6 @@ endpoint_close_refusal() {  # <subject> <backend> <target> <honors-force>
     return 0
   fi
   echo "error: stopping this cleanup without removing the task's records, so the record naming $target is still here to reconcile from." >&2
-  echo "error: that retention is not durable across a session start: if this task carries a backlog transition, the next session replays its pending close and removes the retained record, so reconcile the surviving endpoint yourself rather than trusting the retention." >&2
   if [ "$honors_force" = 1 ]; then
     echo "error: rerun teardown once the close can succeed, or rerun with --force to discard this task's records deliberately." >&2
   fi
@@ -4178,10 +4175,13 @@ if [ "$TEARDOWN_BACKLOG_APPLIES" != 1 ]; then
   fi
 fi
 
-teardown_final_safety_or_exit() {
-  validate_worktree_teardown_safety && return 0
+teardown_refuse() {
   [ "$BACKLOG_CLOSED" != 1 ] || fm_backlog_close_marker_clear "$STATE" "$ID" || true
   exit 1
+}
+
+teardown_final_safety_or_exit() {
+  validate_worktree_teardown_safety || teardown_refuse
 }
 
 teardown_finish_treehouse_return() {  # early|final
@@ -4206,9 +4206,7 @@ teardown_finish_treehouse_return() {  # early|final
     return 0
   fi
   TEARDOWN_RETURN_DEFERRED=0
-  if [ "$1" = final ]; then
-    teardown_final_safety_or_exit
-  fi
+  teardown_final_safety_or_exit
   if [ "$KIND" = scout ] || [ "$FORCE" = "--force" ]; then
     teardown_scrub_scratch_copy "$WT" || exit 1
   fi
@@ -4216,7 +4214,7 @@ teardown_finish_treehouse_return() {  # early|final
   fm_treehouse_pool_slot "$PROJ" "$WT" && wt_pool_slot=1
   teardown_treehouse_return "$WT" "$PROJ" "worktree" "$post_lock_cleanup_check" || {
     echo "error: treehouse return failed for worktree $WT; teardown aborted" >&2
-    exit 1
+    teardown_refuse
   }
   [ "$wt_pool_slot" = 0 ] || teardown_note_dirty_return "$WT"
   # The slot is back in the pool, so this task's claim on it is spent. Dropping
@@ -4247,7 +4245,6 @@ fi
 # T3 project is deliberately left in place: project.delete refuses while the
 # archived thread exists and would take that transcript with it under force.
 if [ "$BACKEND" = t3code ]; then
-  teardown_record_pending_close
   fm_backend_kill t3code "$T" || {
     echo "error: could not stop and archive T3 thread $T for $ID; start T3 Code (or archive the thread there) and re-run teardown" >&2
     endpoint_close_refusal "$ID" t3code "$T" 0 || exit 1
@@ -4283,10 +4280,14 @@ if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
       "$WT/.fm-grok-turnend" "$WT/.fm-kimi-turnend"
     remove_harness_worktree_wiring "$WT"
   fi
-  fm_backend_remove_worktree "$BACKEND" "$ORCA_WORKTREE_ID"
+  fm_backend_remove_worktree "$BACKEND" "$ORCA_WORKTREE_ID" || teardown_refuse
 elif [ "$KIND" != secondmate ] && ! teardown_owns_worktree; then
   :
 elif [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
+  if [ "$BACKEND" = t3code ]; then
+    "$SCRIPT_DIR/fm-t3code-codex-env.sh" cleanup "$WT" || exit 1
+    git -C "$WT" ls-files --error-unmatch CLAUDE.local.md >/dev/null 2>&1 || rm -f "$WT/CLAUDE.local.md"
+  fi
   teardown_record_pending_close
   branch=$(git -C "$WT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)
   if [ "$branch" != "HEAD" ]; then
@@ -4300,10 +4301,6 @@ elif [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
   rm -f "$WT/.claude/settings.local.json" "$WT/.opencode/plugins/fm-turn-end.js" \
     "$WT/.fm-grok-turnend" "$WT/.fm-kimi-turnend"
   remove_harness_worktree_wiring "$WT"
-  if [ "$BACKEND" = t3code ]; then
-    "$SCRIPT_DIR/fm-t3code-codex-env.sh" cleanup "$WT" || exit 1
-    git -C "$WT" ls-files --error-unmatch CLAUDE.local.md >/dev/null 2>&1 || rm -f "$WT/CLAUDE.local.md"
-  fi
   # Resets and returns the worktree to the pool; kept in place instead while a
   # spared unowned process still has its cwd there.
   # treehouse resolves the pool from the working directory, so run it from
@@ -4316,11 +4313,11 @@ elif [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
   teardown_finish_treehouse_return early
 fi
 
-teardown_record_pending_close
+[ "$KIND" = secondmate ] || teardown_record_pending_close
 if [ "$BACKEND" = rex ] && [ "$KIND" = secondmate ] && [ "$TEARDOWN_WINDOWLESS" != 1 ]; then
   ( unset FM_ROOT_OVERRIDE; FM_HOME="$HOME_PATH" FM_ROOT="$HOME_PATH" STATE="$HOME_PATH/state" \
     fm_backend_kill "$BACKEND" "$T" "" "fm-$ID" ) \
-    || endpoint_close_refusal "$ID" "$BACKEND" "$T" 1 || exit 1
+    || endpoint_close_refusal "$ID" "$BACKEND" "$T" 1 || teardown_refuse
 elif [ "$BACKEND" != orca ] && [ "$BACKEND" != t3code ] && [ "$BACKEND" != herdr ] && [ "$TEARDOWN_WINDOWLESS" != 1 ]; then
   # Undo Firstmate's own opt-in Rex attention mark, progress, and tint first
   # (bin/fm-rex-marks.sh), so a pane the close cannot reach is not left showing
@@ -4329,24 +4326,24 @@ elif [ "$BACKEND" != orca ] && [ "$BACKEND" != t3code ] && [ "$BACKEND" != herdr
     FM_HOME=$FM_HOME FM_STATE_OVERRIDE=$STATE FM_CONFIG_OVERRIDE=$CONFIG "$SCRIPT_DIR/fm-rex-marks.sh" clear "$ID" >/dev/null 2>&1 || true
   fi
   fm_backend_kill "$BACKEND" "$T" "$(meta_value "$META" zellij_tab_id)" "fm-$ID" \
-    || endpoint_close_refusal "$ID" "$BACKEND" "$T" 1 || exit 1
+    || endpoint_close_refusal "$ID" "$BACKEND" "$T" 1 || teardown_refuse
 fi
 [ "$TEARDOWN_RETURN_DEFERRED" != 1 ] || teardown_finish_treehouse_return final
 if [ "$KIND" != secondmate ]; then
   if ! FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$DATA" \
       "$SCRIPT_DIR/fm-inactive-reconcile.sh" report "$ID"; then
     echo "error: $ID's final outcome has not reached the parent channel; retaining every durable task record so a rerun can retry the delivery" >&2
-    exit 1
+    teardown_refuse
   fi
 fi
-teardown_export_records "$STATE" "$ID" || exit 1
+teardown_export_records "$STATE" "$ID" || teardown_refuse
 if [ "$KIND" = secondmate ]; then
   [ -n "$HOME_PATH" ] || HOME_PATH=$WT
   handoff_wake_retire_stage \
     || { echo "error: receiver wake cleanup could not be staged; preserving the secondmate home and route" >&2; exit 1; }
   pending_replies_recovery_validate recheck \
     || { echo "error: local pending-reply recovery paths changed; preserving the secondmate home and route" >&2; exit 1; }
-  if remove_firstmate_home "$HOME_PATH" "secondmate home" "$ID" "$BACKEND"; then
+  if remove_firstmate_home "$HOME_PATH" "secondmate home" "$ID" "$BACKEND" 1; then
     :
   else
     rc=$?
@@ -4362,8 +4359,8 @@ if [ "$KIND" = secondmate ]; then
   fi
   remove_secondmate_registry_entry "$ID"
 fi
-remove_grok_turnend_auth "$STATE" "$ID" || exit 1
-remove_kimi_turnend_auth "$STATE" "$ID" || exit 1
+remove_grok_turnend_auth "$STATE" "$ID" || teardown_refuse
+remove_kimi_turnend_auth "$STATE" "$ID" || teardown_refuse
 fm_backend_clear_transition "$BACKEND" "$STATE" "$T" || true
 # Remove the per-task temp root (/tmp/fm-<id>/, incl. its gotmp/) recorded by spawn.
 # Read before the state-file rm below; empty (pre-fix tasks without tasktmp=) is a no-op.
@@ -4397,12 +4394,12 @@ LAUNCH_HOME_TOKEN=$(teardown_launch_home_token "$FM_HOME") || LAUNCH_HOME_TOKEN=
 if [ -n "$LAUNCH_HOME_TOKEN" ]; then
   rm -rf "/tmp/fm-$ID+$LAUNCH_HOME_TOKEN"
 fi
-remove_pr_poll_artifacts "$STATE" "$ID" || exit 1
-retire_busy_state "$STATE" "$ID" "$BUSY_GEN" || exit 1
+remove_pr_poll_artifacts "$STATE" "$ID" || teardown_refuse
+retire_busy_state "$STATE" "$ID" "$BUSY_GEN" || teardown_refuse
 # Opt-in fleet activity ledger (docs/fleet-ledger.md), before the status log is
 # retired so its last lines are captured; off costs one file test.
 [ ! -e "$CONFIG/fleet-ledger" ] || FM_HOME=$FM_HOME FM_STATE_OVERRIDE=$STATE FM_CONFIG_OVERRIDE=$CONFIG "$SCRIPT_DIR/fm-fleet-ledger.sh" cleaned_up "$ID" || true
-teardown_retire_status "$STATE" "$ID" || exit 1
+teardown_retire_status "$STATE" "$ID" || teardown_refuse
 fm_wake_queue_prune_task "$STATE" "$ID" "$T" 2>/dev/null || true
 rm -f "$STATE/$ID.turn-ended" "$STATE/$ID.progress" \
   "$(fm_wake_signal_seen_path "$STATE" "$STATE/$ID.turn-ended")" \
