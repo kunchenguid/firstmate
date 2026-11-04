@@ -1751,6 +1751,7 @@ SH
   done
   [ -s "$fix" ] || fail "the fixture script never started"
   read -r script_pid sleep_pid <"$fix"
+  trap 'kill -KILL "$sleep_pid" 2>/dev/null || true; fm_test_cleanup' EXIT INT TERM HUP QUIT
   id=$(TMPDIR="$tmp" "$runner" --stop | awk -v p="pid=$pid" '$2 == p {print $1}')
   [ -n "$id" ] || fail "--stop did not list the live run"
   TMPDIR="$tmp" "$runner" --stop "$id" >/dev/null || fail "--stop <run> failed"
@@ -1766,6 +1767,12 @@ SH
   rc=0
   kill -0 "$sleep_pid" 2>/dev/null || rc=1
   kill -KILL "$sleep_pid" 2>/dev/null || true
+  trap - EXIT INT TERM HUP QUIT
+  trap fm_test_cleanup EXIT
+  trap 'fm_test_cleanup; exit 130' INT
+  trap 'fm_test_cleanup; exit 143' TERM
+  trap 'fm_test_cleanup; exit 129' HUP
+  trap 'fm_test_cleanup; exit 131' QUIT
   [ "$rc" -eq 0 ] || fail "abort_run killed pid $sleep_pid although its start identity changed"
   pass "--stop does not KILL a pid whose start identity changed"
 }
