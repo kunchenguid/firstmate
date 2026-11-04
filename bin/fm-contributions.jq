@@ -18,6 +18,10 @@ def valid_record:
     and ((.notified // []) | type == "array" and all(.[]; type == "string"))
     and ((.threads // []) | type == "array" and all(.[]; (.key | type == "string")
       and (.raised == null or (.raised | fromdateiso8601 | type == "number"))))
+    and ((.unanswered // null) == null or (.unanswered | type == "object"
+      and (.source | type == "string") and (.author | type == "string")
+      and (.at | fromdateiso8601 | type == "number")
+      and (.raised == null or (.raised | fromdateiso8601 | type == "number"))))
     and (.error == null or (.error | type == "string"))
     and (.checked_at == null or (.checked_at | fromdateiso8601 | type == "number"))
     and (.retired == null or (.retired | (.actor == "captain")

@@ -1,0 +1,6 @@
+ok - unanswered contribution re-raises after acknowledgement at each interval
+ok - our reply clears the unanswered condition and withdraws its wake
+ok - a deliberate no-reply verdict clears the unanswered condition for that comment
+ok - no re-raise occurs when our account spoke last
+ok - a push after the comment clears the unanswered condition
+ok - the re-raise interval is configurable via env and plumbs into the check shim

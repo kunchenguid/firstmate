@@ -123,6 +123,18 @@
 # ack removes only the named pending token.
 # A crash after enqueue can duplicate a wake but cannot consume the pending signal.
 #
+# An unanswered condition holds per owned open pull request when the latest
+# comment, review or review-thread reply from someone other than our own
+# account is newer than our latest reply on that PR (or our latest push after
+# it). While that condition holds, poll wakes firstmate after a re-raise
+# interval (default 14400 seconds / 4 hours, configurable via
+# FM_CONTRIBUTIONS_RERAISE_INTERVAL or config/contribution-reraise-interval, 0
+# disables), even if an earlier signal was acknowledged; ack only snoozes until
+# the next interval. A verdict recording actor nobody (e.g. thanks-only) for
+# that comment clears it. The condition clears automatically once we reply or
+# push after it. The wake text names the PR URL, who commented and how long it
+# has waited: "check: contributions <task> <key> unanswered <url> <author> <age>".
+#
 # Re-raising unanswered review threads is opt-in. Unless
 # FM_CONTRIBUTIONS_REPLY_AGE is set to a positive number of seconds, poll makes
 # no review-thread read, tracks no threads and raises no "unanswered" signal,
@@ -186,6 +198,23 @@ NOW=${FM_CONTRIBUTIONS_NOW:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}
 EPOCH=$(jq -nr --arg now "$NOW" '$now | fromdateiso8601') || fail 'invalid observation clock'
 MAX_AGE=${FM_CONTRIBUTIONS_MAX_AGE:-900}
 REPLY_AGE=${FM_CONTRIBUTIONS_REPLY_AGE:-}
+RERAISE_INTERVAL=${FM_CONTRIBUTIONS_RERAISE_INTERVAL:-}
+if [ -z "$RERAISE_INTERVAL" ] && [ -f "$CONFIG/contribution-reraise-interval" ]; then
+  RERAISE_INTERVAL=$(tr -d '[:space:]' < "$CONFIG/contribution-reraise-interval")
+fi
+if [ -z "$RERAISE_INTERVAL" ] && [ -n "$REPLY_AGE" ]; then
+  RERAISE_INTERVAL=$REPLY_AGE
+fi
+if [ -z "$RERAISE_INTERVAL" ]; then
+  RERAISE_INTERVAL=14400
+fi
+case "$RERAISE_INTERVAL" in
+  0|off) RERAISE_INTERVAL=0 ;;
+  *[!0-9]*) fail 'invalid reraise interval' ;;
+  *)
+    [ -n "${RERAISE_INTERVAL#"${RERAISE_INTERVAL%%[!0]*}"}" ] || RERAISE_INTERVAL=0
+    ;;
+esac
 BUDGET=${FM_CONTRIBUTIONS_BUDGET:-20}
 case "$MAX_AGE" in ''|*[!0-9]*) fail 'invalid freshness bound' ;; esac
 TRACK_THREADS=false
@@ -479,10 +508,21 @@ observe() { # canonical GitHub URL -> normalized JSON
       | ([$issue_comments[] | select(.user.login == $c.user.login) | .created_at]
         + [$inline_comments[] | select(.user.login == $c.user.login) | .created_at]
         + [$reviews[] | select(.user.login == $c.user.login and ((.body // "") != "")) | .submitted_at]) as $replied_at
+      | (([$issue_comments[] | select(.user.login != $c.user.login and .created_at != null)
+           | {author:.user.login, at:.created_at, source:(.html_url // ($c.html_url + "#issuecomment-" + (.id|tostring))), id:.id}]
+         + [$inline_comments[] | select(.user.login != $c.user.login and .created_at != null)
+           | {author:.user.login, at:.created_at, source:(.html_url // ($c.html_url + "#discussion_r" + (.id|tostring))), id:.id}]
+         + [$reviews[] | select(.user.login != $c.user.login and .submitted_at != null)
+           | {author:.user.login, at:.submitted_at, source:(.html_url // ($c.html_url + "#pullrequestreview-" + (.id|tostring))), id:.id}])
+         | sort_by([.at, .id]) | last // null) as $latest_external
+      | ($c.pushed_at // $c.head.pushed_at // $c.head.repo.pushed_at
+         // (([$checks[0][]? | .check_runs[]? | .started_at] + [$statuses[0][]? | .[]? | .created_at])
+             | map(select(. != null)) | max) // null) as $pushed_at
       | {head:$c.head.sha,state:(if $c.merged_at != null then "merged" else $c.state end),
           draft:$c.draft,mergeable:(if $c.mergeable == true then "mergeable" elif $c.mergeable == false then "conflicting" else "unknown" end),
           can_merge:($repo[0].permissions.push // false),
           review_decision:($after[0].reviewDecision // ""),
+          latest_external:$latest_external,latest_reply:($replied_at | max // null),pushed_at:$pushed_at,
           reviews:($reviews | map({id,state,submitted_at,commit_id,user:{login:.user.login}})),
           checks:([ $checks[0][] | .check_runs[] | {name,id,status,conclusion,started_at} ]
             + [ $statuses[0][] | .[] | {name:.context,id,started_at:.created_at,
@@ -533,16 +573,17 @@ observe() { # canonical GitHub URL -> normalized JSON
 }
 
 publish_pending() { # task canonical-url record-file
-  local task=$1 url=$2 record=$3 token key count emitted status type source age reason
+  local task=$1 url=$2 record=$3 token key count emitted status type source age author reason
   count=$(jq '.pending | length' "$record")
   [ "$count" -gt 0 ] || return 0
-  while IFS=$'\t' read -r token type source age; do
+  while IFS=$'\t' read -r token type source age author; do
     [ -n "$token" ] || continue
     key=$(printf '%s\n%s\n' "$url" "$token" | shasum -a 256 | awk '{print $1}')
     emitted=0
     status=0
     reason="check: contributions $task $key"
     case "$type:$source" in
+      unanswered:"$url") reason="$reason unanswered $url $author $age" ;;
       unanswered:https://github.com/*) reason="$reason unanswered $source $age" ;;
     esac
     fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK" || return 1
@@ -557,7 +598,7 @@ publish_pending() { # task canonical-url record-file
     write_record "$task" "$record"
     [ "$emitted" -eq 0 ] || printf 'contribution-wake: %s\n' "$reason"
   done < <(jq -r '. as $r | .pending[] | select(.token as $t | ($r.notified // [] | index($t)) == null)
-    | [.token, .type, (.source // "-"), (.age // "-")] | @tsv' "$record")
+    | [.token, .type, (.source // "-"), (.age // "-"), (.author // "-")] | @tsv' "$record")
 }
 
 settle_final() { # canonical-url task... : copy the URL's final observation to every owner
@@ -573,14 +614,15 @@ settle_final() { # canonical-url task... : copy the URL's final observation to e
       [$saved[0][] | select(.task == $task) | .records[] | select(.url == $url)] | first' > "$TMP/old.json"
     if jq -e '. == null' "$TMP/old.json" >/dev/null; then
       jq -n --slurpfile final "$TMP/final.json" '
-        $final[0] + {error:null,pending:[],notified:[]} | del(.retired)' > "$TMP/row.json"
+        $final[0] + {error:null,pending:[],notified:[]} | del(.retired, .unanswered)' > "$TMP/row.json"
       write_record "$task" "$TMP/row.json"
     elif jq -e '(.observation.state | IN("merged","closed") | not) or .error != null' "$TMP/old.json" >/dev/null; then
       jq -n --slurpfile final "$TMP/final.json" --slurpfile old "$TMP/old.json" '
         $old[0] + {observation:$final[0].observation,checked_at:$final[0].checked_at,error:null}
         | .pending |= map(select(.type != "unanswered"))
         | if has("notified") then .notified |= map(select(startswith("unanswered:") | not)) else . end
-        | if has("threads") then .threads = [] else . end' > "$TMP/row.json"
+        | if has("threads") then .threads = [] else . end
+        | del(.unanswered)' > "$TMP/row.json"
       write_record "$task" "$TMP/row.json"
     fi
   done
@@ -656,6 +698,7 @@ poll() {
         // {url:$url,kind:$kind,checked_at:null,observation:null,verdict:null,seen:[],pending:[],notified:[]}' > "$old"
       if [ "$observed" -eq 0 ]; then
         jq_lib -n --arg now "$NOW" --argjson epoch "$EPOCH" --argjson reply_age "$REPLY_AGE" --argjson track "$TRACK_THREADS" \
+          --argjson reraise_interval "$RERAISE_INTERVAL" \
           --slurpfile old "$old" --slurpfile observation "$TMP/observation.json" '
           $old[0] as $old | $observation[0] as $o
           | ($o.events + (if $o.ready == true and $old.observation.ready != true and (any($o.events[]; .type == "ready-for-pr") | not) then
@@ -668,16 +711,48 @@ poll() {
           | due_threads($tracked; $epoch; $reply_age) as $due
           | ($tracked | map(.key)) as $live
           | ($due | map(.key)) as $due_keys
+          | $o.latest_external as $ext
+          | ($old.verdict // null) as $verdict
+          | (if $o.state == "open" and $ext != null
+                 and ($o.latest_reply == null or $ext.at > $o.latest_reply)
+                 and ($o.pushed_at == null or $o.pushed_at <= $ext.at)
+                 and ($verdict == null or $verdict.source != $ext.source or $verdict.actor != "nobody")
+             then true else false end) as $unanswered_cond
+          | ($old.unanswered // null) as $old_un
+          | ($old_un.raised // null) as $last_raised
+          | (if $reraise_interval > 0 and $unanswered_cond then
+              ($epoch - ($ext.at | fromdateiso8601)) as $ext_age
+              | ($ext_age >= $reraise_interval) as $waited
+              | ($last_raised == null or ($epoch - ($last_raised | fromdateiso8601)) >= $reraise_interval) as $interval_passed
+              | ($waited and ($old_un == null or $old_un.source != $ext.source or $interval_passed))
+            else false end) as $pr_unanswered_due
+          | (if $pr_unanswered_due and ($due | length) == 0 then
+              duration_text($epoch - ($ext.at | fromdateiso8601)) as $age
+              | [{token:("unanswered:pr:" + ($ext.id | tostring) + ":" + $now),type:"unanswered",thread:null,
+                  source:$old.url,head:null,author:$ext.author,age:$age,
+                  body:("no reply on " + $old.url + " for " + $age)}]
+             else [] end) as $pr_due_events
           | $old + {checked_at:$now,error:null,
             observation:($o + {absent_checks:((($old.observation.absent_checks // []) + [($old.observation.checks // [])[] | .name]) - [$o.checks[].name] | unique)}),
             seen:((($old.seen // []) + ($events | map(.token))) | unique),
             pending:((($old.pending // []) + $arrived
-                | map(select(.type != "unanswered" or (.thread as $k | ($live | index($k)) != null and ($due_keys | index($k)) == null))))
-              + [$due[] | reraise_event(.; $epoch; $now)] | unique_by(.token))}
+                | map(select(
+                    if .type != "unanswered" then true
+                    elif .source == $old.url then
+                      $unanswered_cond and ($pr_unanswered_due | not)
+                    else
+                      (.thread as $k | ($live | index($k)) != null and ($due_keys | index($k)) == null)
+                    end)))
+              + [$due[] | reraise_event(.; $epoch; $now)]
+              + $pr_due_events | unique_by(.token))}
           | (.pending | map(.token)) as $held
           | if has("notified") then .notified |= map(select((startswith("unanswered:") | not) or IN($held[]))) else . end
           | if $track then .threads = [$tracked[] | if .key | IN($due_keys[]) then .raised = $now else . end]
-            else del(.threads) end' > "$TMP/row.json"
+            else del(.threads) end
+          | if $unanswered_cond then
+              .unanswered = {source:$ext.source, author:$ext.author, at:$ext.at,
+                             raised:(if ($pr_due_events | length) > 0 then $now else ($old_un.raised // null) end)}
+            else del(.unanswered) end' > "$TMP/row.json"
       else
         error="forge observation unavailable: $why"
         jq --arg now "$NOW" --arg error "$error" '.checked_at=$now | .error=$error' "$old" > "$TMP/row.json"
@@ -712,6 +787,9 @@ arm() {
   fi
   if [ -n "${FM_CONTRIBUTIONS_REPLY_AGE:-}" ]; then
     shim+=("export FM_CONTRIBUTIONS_REPLY_AGE=$(printf '%q' "$FM_CONTRIBUTIONS_REPLY_AGE")")
+  fi
+  if [ -n "${FM_CONTRIBUTIONS_RERAISE_INTERVAL:-}" ]; then
+    shim+=("export FM_CONTRIBUTIONS_RERAISE_INTERVAL=$(printf '%q' "$FM_CONTRIBUTIONS_RERAISE_INTERVAL")")
   fi
   shim+=("exec $(printf '%q' "$SCRIPT_DIR/fm-contributions.sh") poll")
   printf '%s\n' "${shim[@]}" > "$staged"
