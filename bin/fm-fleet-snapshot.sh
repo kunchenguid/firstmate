@@ -544,7 +544,7 @@ backlog_json() (  # [<backlog-path>] - defaults to this home's $BACKLOG
           # fm_backlog_open_pr_note owns this line. The URL stays off the title,
           # where tasks-axi would render it as merged, and still counts as the
           # pull request Bearings and contribution ownership read.
-          | (([.body_lines[] | capture("^PR still open (?<u>https://\\S+)$")?] | map(.u) | .[0]) // null) as $open_pr
+          | (([.body_lines[] | capture("^PR not confirmed merged (?<u>https://\\S+)$")?] | map(.u) | .[0]) // null) as $open_pr
           | if $open_pr == null then .
             else
               .pr_url = (.pr_url // $open_pr)

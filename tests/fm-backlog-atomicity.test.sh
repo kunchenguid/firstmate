@@ -2104,7 +2104,7 @@ test_recovery_replays_an_open_pr_close_without_calling_it_merged() {
   case_dir=$(make_home heal-pending-open-pr)
   add_item "$case_dir" "$id"
   start_item "$case_dir" "$id"
-  printf 'id=%s\ndata=%s\nspawn_gen=spawn-heal-open-pr\narg=--note\narg=PR still open %s\n' \
+  printf 'id=%s\ndata=%s\nspawn_gen=spawn-heal-open-pr\narg=--note\narg=PR not confirmed merged %s\n' \
     "$id" "$(home_of "$case_dir")/data" "$url" \
     > "$(home_of "$case_dir")/state/$id.backlog-close"
 
@@ -2115,7 +2115,7 @@ test_recovery_replays_an_open_pr_close_without_calling_it_merged() {
     fail "replaying an open pull-request close archived it as merged"
   fi
   tasks-axi show "$id" --file "$(backlog_of "$case_dir")" --full \
-    | grep -F "body: \"PR still open $url\"" >/dev/null \
+    | grep -F "body: \"PR not confirmed merged $url\"" >/dev/null \
     || fail "the replayed open pull-request close dropped its note"
   if grep -F 'local main' "$(backlog_of "$case_dir")" >/dev/null; then
     fail "replaying an open pull-request close rewrote the note as a local landing"

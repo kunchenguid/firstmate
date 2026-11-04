@@ -535,16 +535,16 @@ fm_backlog_pr_note_label() {  # <url>
 # merged. An unproven one is this body note instead, and
 # bin/fm-fleet-snapshot.sh matches the line exactly.
 fm_backlog_open_pr_note() {  # <url>
-  printf 'PR still open %s\n' "$1"
+  printf 'PR not confirmed merged %s\n' "$1"
 }
 
 fm_backlog_open_pr_note_arg_valid() {  # <note>
   local note=$1 url
   case "$note" in
-    'PR still open https://'*) ;;
+    'PR not confirmed merged https://'*) ;;
     *) return 1 ;;
   esac
-  url=${note#PR still open }
+  url=${note#PR not confirmed merged }
   [ "${#url}" -le 2048 ] || return 1
   [ "$note" = "$(fm_backlog_open_pr_note "$url")" ] || return 1
   (

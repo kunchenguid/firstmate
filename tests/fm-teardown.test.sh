@@ -883,10 +883,10 @@ test_teardown_does_not_archive_an_open_pr_as_merged() {
   if grep -F '(merged' "$case_dir/data/backlog.md" >/dev/null; then
     fail "unproven GitHub cleanup archived an open pull request as merged"
   fi
-  grep -F "PR still open $url" "$case_dir/data/backlog.md" >/dev/null \
+  grep -F "PR not confirmed merged $url" "$case_dir/data/backlog.md" >/dev/null \
     || fail "unproven GitHub cleanup did not record that the pull request is still open"
   show=$(tasks-axi show task-x1 --file "$case_dir/data/backlog.md" --full)
-  printf '%s\n' "$show" | grep -F "body: \"PR still open $url\"" >/dev/null \
+  printf '%s\n' "$show" | grep -F "body: \"PR not confirmed merged $url\"" >/dev/null \
     || fail "unproven GitHub cleanup did not keep the open pull request in the row body: $show"
   if printf '%s\n' "$show" | grep -F "links: \"pr:$url\"" >/dev/null; then
     fail "unproven GitHub cleanup recorded the open pull request as a pr link"
@@ -901,7 +901,7 @@ test_teardown_does_not_archive_an_open_pr_as_merged() {
   if grep -F '(merged' "$case_dir/data/backlog.md" >/dev/null; then
     fail "a merge record for a different pull request archived this one as merged"
   fi
-  grep -F "PR still open $url" "$case_dir/data/backlog.md" >/dev/null \
+  grep -F "PR not confirmed merged $url" "$case_dir/data/backlog.md" >/dev/null \
     || fail "a mismatched merge record did not leave the pull request open"
 
   case_dir=$(make_case open-pr-notified)
@@ -915,7 +915,7 @@ test_teardown_does_not_archive_an_open_pr_as_merged() {
   tasks-axi show task-x1 --file "$case_dir/data/backlog.md" \
     | grep -F "links: \"pr:$url\"" >/dev/null \
     || fail "a matching merge notification did not close as the item's pr link"
-  if grep -F 'PR still open' "$case_dir/data/backlog.md" >/dev/null; then
+  if grep -F 'PR not confirmed merged' "$case_dir/data/backlog.md" >/dev/null; then
     fail "a matching merge notification was recorded as still open"
   fi
 
@@ -940,7 +940,7 @@ test_teardown_does_not_archive_an_open_pr_as_merged() {
   if grep -F '(merged' "$case_dir/data/backlog.md" >/dev/null; then
     fail "unproven Forgejo cleanup archived an open pull request as merged"
   fi
-  grep -F "PR still open $url" "$case_dir/data/backlog.md" >/dev/null \
+  grep -F "PR not confirmed merged $url" "$case_dir/data/backlog.md" >/dev/null \
     || fail "unproven Forgejo cleanup did not record that the pull request is still open"
 
   case_dir=$(make_case open-pr-forgejo-notified)
