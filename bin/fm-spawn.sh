@@ -658,8 +658,8 @@
 # rather than launching a worker whose --auto-approve and hooks would be silently
 # suppressed. Bob has no --model or --effort flag (both axes record-only). Its
 # brief cannot ride the launch command (bob chat has no positional prompt arg), so
-# it launches bare and receives an absolute brief pointer after the TUI attaches
-# through the same readiness and delivery gates as kimi and rovo. BOB_SESSION=1 is
+# it launches bare and receives a per-launch pointer to an in-worktree brief copy
+# after the TUI attaches, through the same gate shape as kimi and rovo. BOB_SESSION=1 is
 # stripped: the Bob source throws on a nested session (verified, bob 2.0.9). The
 # bob-hook record is its only busy-state source (bin/fm-busy-lib.sh). bob is
 # crewmate/scout only and is refused for --secondmate.
@@ -5790,7 +5790,9 @@ rovo_endpoint_cleanup() {
 # bob mirrors rovo's launch-then-send shape: bob chat has no positional prompt,
 # so bob launches bare and takes its brief pointer after the composer is ready.
 # Delivery is confirmed by bob's own UserPromptSubmit hook record (the prompt
-# reached Bob) or by the pointer sitting in the transcript above an empty composer.
+# reached Bob) or by this launch's pointer sitting in the transcript above an
+# empty composer. The pointer opens with the busy generation so a relaunch into
+# the same pane never reads the previous incarnation's pointer as this one's.
 bob_capture() {
   fm_backend_capture "$BACKEND" "$T" 120 "$W" 2>/dev/null || true
 }
@@ -5814,7 +5816,7 @@ bob_delivery_is_confirmed() {
     'busy bob-hook' | 'idle bob-hook') return 0 ;;
   esac
   bob_composer_is_empty || return 1
-  bob_capture | grep -Fq 'Read the brief at'
+  bob_capture | grep -Fq "Brief $BUSY_GEN:"
 }
 
 bob_wait_for_delivery() {
@@ -8206,7 +8208,7 @@ if [ "$HARNESS" = bob ] && [ "$RAW_LAUNCH" -eq 0 ]; then
     bob_spawn_fail "bob did not show a verified ready signal before brief delivery in window $T"
     exit 1
   fi
-  BOB_POINTER="Read the brief at $WT/.bob/launch-brief.md and follow it exactly."
+  BOB_POINTER="Brief $BUSY_GEN: read $WT/.bob/launch-brief.md and follow it exactly."
   BOB_SUBMIT_RETRIES=${FM_BOB_SUBMIT_RETRIES:-3}
   BOB_SUBMIT_SLEEP=${FM_BOB_SUBMIT_SLEEP:-${FM_BOB_POLL_INTERVAL:-0.5}}
   BOB_SUBMIT_SETTLE=${FM_BOB_SUBMIT_SETTLE:-0}

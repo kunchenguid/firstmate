@@ -172,37 +172,52 @@ const attempt = () => {
 };
 // Store-wide lock serialising the read-merge-rename cycle between concurrent
 // helpers (spawns from different Firstmate homes share this one store). An
-// O_EXCL lock file holding the owner's pid; a lock whose owner is dead is
-// broken. Portable (flock is absent on macOS). Bob's own rewrites of the store
-// are not covered, which is what the fingerprint check is for.
+// O_EXCL lock file holding the owner's pid, broken when that owner is dead or
+// when the lock outlives any real hold, which also recovers an empty lock from a
+// helper that died before writing its pid and a pid since reused. Portable
+// (flock is absent on macOS). Bob's own rewrites of the store are not covered,
+// which is what the fingerprint check is for.
 const lockPath = `${store}.fm-trust.lock`;
+const lockMaxAgeMs = 30000;
 const sleep = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+const lockIsAbandoned = () => {
+  let owner;
+  let ageMs;
+  try {
+    owner = Number.parseInt(fs.readFileSync(lockPath, "utf8"), 10);
+    ageMs = Date.now() - fs.statSync(lockPath).mtimeMs;
+  } catch (err) {
+    if (err.code === "ENOENT") return false;
+    throw err;
+  }
+  if (ageMs > lockMaxAgeMs) return true;
+  if (!Number.isInteger(owner) || owner <= 0) return false;
+  try {
+    process.kill(owner, 0);
+    return false;
+  } catch (err) {
+    return err.code === "ESRCH";
+  }
+};
 const acquire = () => {
   for (let i = 0; i < 400; i += 1) {
     try {
       const fd = fs.openSync(lockPath, "wx", 0o600);
-      fs.writeSync(fd, `${process.pid}\n`);
-      fs.closeSync(fd);
+      try {
+        fs.writeSync(fd, `${process.pid}\n`);
+      } catch (err) {
+        fs.rmSync(lockPath, { force: true });
+        throw err;
+      } finally {
+        fs.closeSync(fd);
+      }
       return;
     } catch (err) {
       if (err.code !== "EEXIST") throw err;
     }
-    let owner = NaN;
-    try {
-      owner = Number.parseInt(fs.readFileSync(lockPath, "utf8"), 10);
-    } catch (err) {
-      if (err.code === "ENOENT") continue;
-      throw err;
-    }
-    if (Number.isInteger(owner) && owner > 0) {
-      try {
-        process.kill(owner, 0);
-      } catch (err) {
-        if (err.code === "ESRCH") {
-          fs.rmSync(lockPath, { force: true });
-          continue;
-        }
-      }
+    if (lockIsAbandoned()) {
+      fs.rmSync(lockPath, { force: true });
+      continue;
     }
     sleep(50);
   }

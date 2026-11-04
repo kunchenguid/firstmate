@@ -44,7 +44,12 @@ fake_screen() {
       fake_composer '\033[0mRead the brief and follow it\033[7m \033[0m'
       ;;
     delivered)
-      printf 'Read the brief at %s and follow it exactly.\n\n' "$FM_FAKE_BRIEF_REAL"
+      tail -n 1 "$FM_FAKE_POINTER_LOG"
+      printf '\n'
+      fake_composer '\033[0;7m \033[0m\033[38;5;243m Build Anything, @ for context, / for commands, $ for skills\033[39m'
+      ;;
+    stale-pointer)
+      printf 'Brief g1.1.1: read %s and follow it exactly.\n\n' "$FM_FAKE_BRIEF_REAL"
       fake_composer '\033[0;7m \033[0m\033[38;5;243m Build Anything, @ for context, / for commands, $ for skills\033[39m'
       ;;
     *)
@@ -56,6 +61,7 @@ fake_cursor_y() { printf '38\n'; }
 case "$*" in
   *"#{pane_current_path}"*) printf '%s\n' "$FM_FAKE_PANE_PATH"; exit 0 ;;
   *"#{cursor_y}"*) fake_cursor_y; exit 0 ;;
+  *"#{cursor_flag}"*) printf '%s\n' "${FM_FAKE_BOB_CURSOR:-0}"; exit 0 ;;
 esac
 case "${1:-}" in
   display-message) printf 'firstmate\n'; exit 0 ;;
@@ -105,11 +111,11 @@ case "${1:-}" in
             fi
             ;;
           pointer-typed)
-            if [ "${FM_FAKE_BOB_DELIVERY:-yes}" = yes ]; then
-              printf 'delivered\n' > "$FM_FAKE_BOB_STATE"
-            else
-              printf 'ready\n' > "$FM_FAKE_BOB_STATE"
-            fi
+            case "${FM_FAKE_BOB_DELIVERY:-yes}" in
+              yes) printf 'delivered\n' > "$FM_FAKE_BOB_STATE" ;;
+              stale) printf 'stale-pointer\n' > "$FM_FAKE_BOB_STATE" ;;
+              *) printf 'ready\n' > "$FM_FAKE_BOB_STATE" ;;
+            esac
             ;;
         esac
         ;;
@@ -191,13 +197,14 @@ run_spawn() {
     FM_FAKE_BRIEF_REAL="$(cd "$home/data/$id" && pwd -P)/launch-brief.md" \
     FM_FAKE_BOB_READY="${FM_FAKE_BOB_READY:-yes}" \
     FM_FAKE_BOB_DELIVERY="${FM_FAKE_BOB_DELIVERY:-yes}" \
+    FM_FAKE_BOB_CURSOR="${FM_FAKE_BOB_CURSOR:-0}" \
     FM_BOB_READY_POLLS=3 FM_BOB_DELIVERY_POLLS=3 FM_BOB_POLL_INTERVAL=0 \
     PATH="$fakebin:$BASE_PATH" \
     "$SPAWN" "$id" "$proj" --harness bob "${spawn_flags[@]}" "$@" 2>&1
 }
 
 test_bob_launch_then_send_is_verified() {
-  local id rec out rc launch pointer brief_real wt_real settings trust
+  local id rec out rc launch pointer gen brief_real wt_real settings trust
   id="bob-success-z1-$$"
   rec=$(make_spawn_case success "$id")
   read_spawn_record "$rec"
@@ -215,8 +222,9 @@ test_bob_launch_then_send_is_verified() {
   brief_real="$(cd "$HOME_DIR/data/$id" && pwd -P)/launch-brief.md"
   pointer=$(cat "$CASE_DIR/pointer.log")
   # Bob blocks reads outside its workspace, so the pointer names an in-worktree copy.
-  [ "$pointer" = "Read the brief at $WT_DIR/.bob/launch-brief.md and follow it exactly." ] \
-    || fail "bob pointer was not the exact in-workspace instruction: $pointer"
+  gen=$(cat "$HOME_DIR/state/$id.busy-gen")
+  [ "$pointer" = "Brief $gen: read $WT_DIR/.bob/launch-brief.md and follow it exactly." ] \
+    || fail "bob pointer was not the exact in-workspace instruction for this launch: $pointer"
   cmp -s "$brief_real" "$WT_DIR/.bob/launch-brief.md" \
     || fail "the in-workspace brief copy is missing or differs from the launch brief"
   [ -z "$(git -C "$WT_DIR" status --porcelain --untracked-files=all -- .bob)" ] \
@@ -249,6 +257,35 @@ test_bob_readiness_gate_precedes_pointer() {
   assert_contains "$out" "bob did not show a verified ready signal" "bob readiness failure was not reported"
   [ ! -s "$CASE_DIR/pointer.log" ] || fail "bob pointer was typed before the composer was ready"
   pass "fm-spawn: bob withholds the pointer until the composer is ready"
+}
+
+# A relaunch reuses the pane, so the previous Bob's composer is on screen while
+# the new process starts, with the shell's cursor still visible below it.
+test_bob_stale_composer_frame_is_not_ready() {
+  local id rec out rc
+  id="bob-staleframe-z1-$$"
+  rec=$(make_spawn_case staleframe "$id")
+  read_spawn_record "$rec"
+  out=$(FM_FAKE_BOB_CURSOR=1 run_spawn "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id")
+  rc=$?
+  [ "$rc" -ne 0 ] || fail "a composer frame under a visible cursor must not pass the ready gate"
+  assert_contains "$out" "bob did not show a verified ready signal" "the stale frame failure was not reported"
+  [ ! -s "$CASE_DIR/pointer.log" ] || fail "bob pointer was typed into a stale frame"
+  pass "fm-spawn: a stale Bob composer under a visible cursor is not ready"
+}
+
+# The previous incarnation's pointer in the transcript proves nothing about this
+# launch's delivery.
+test_bob_stale_pointer_is_not_delivery() {
+  local id rec out rc
+  id="bob-stalepointer-z1-$$"
+  rec=$(make_spawn_case stalepointer "$id")
+  read_spawn_record "$rec"
+  out=$(FM_FAKE_BOB_DELIVERY=stale run_spawn "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id")
+  rc=$?
+  [ "$rc" -ne 0 ] || fail "a previous launch's pointer must not confirm delivery"
+  assert_contains "$out" "bob brief pointer delivery was not confirmed" "the stale pointer failure was not reported"
+  pass "fm-spawn: a previous launch's pointer does not confirm delivery"
 }
 
 test_bob_unconfirmed_delivery_fails_loudly() {
@@ -343,6 +380,54 @@ test_bob_concurrent_trust_registrations_all_persist() {
   pass "fm-bob-trust: concurrent registrations all persist and release the store lock"
 }
 
+# An abandoned lock must never strand every later Bob spawn: an empty lock from a
+# helper that died before writing its pid, a lock whose owner is dead, and an old
+# lock whose pid was reused are all recovered, and a fresh live lock is honored.
+test_bob_abandoned_trust_lock_is_recovered() {
+  local home wt lock store case_name content age sleeper helper rc
+  home="$TMP_ROOT/lock-home"
+  mkdir -p "$home/.bob"
+  git init -q "$TMP_ROOT/lock-proj"
+  git -C "$TMP_ROOT/lock-proj" -c user.name=t -c user.email=t@example.com commit -q --allow-empty -m init
+  wt="$TMP_ROOT/lock-wt"
+  git -C "$TMP_ROOT/lock-proj" worktree add -q "$wt" -b lock-wt
+  store="$home/.bob/trustedFolders.json"
+  lock="$store.fm-trust.lock"
+  sleep 300 &
+  sleeper=$!
+  for case_name in empty-old dead-owner reused-pid-old; do
+    rm -f "$store"
+    case "$case_name" in
+      empty-old) content=''; age=120 ;;
+      dead-owner) content='999999'; age=0 ;;
+      reused-pid-old) content="$sleeper"; age=120 ;;
+    esac
+    printf '%s' "$content" > "$lock"
+    node -e 'const fs=require("node:fs");const t=Date.now()/1000-Number(process.argv[2]);fs.utimesSync(process.argv[1],t,t)' "$lock" "$age"
+    HOME="$home" "$ROOT/bin/fm-bob-trust.sh" "$wt" "$TMP_ROOT/lock-proj" >/dev/null 2>"$TMP_ROOT/lock-err" \
+      || fail "$case_name: an abandoned trust lock blocked registration: $(cat "$TMP_ROOT/lock-err")"
+    [ ! -e "$lock" ] || fail "$case_name: the recovered lock was left behind"
+    [ -s "$store" ] || fail "$case_name: registration wrote no store"
+  done
+  # Non-vacuity: a fresh lock held by a live process is waited on, never broken,
+  # and the helper proceeds once its owner releases it.
+  rm -f "$store"
+  printf '%s\n' "$sleeper" > "$lock"
+  HOME="$home" "$ROOT/bin/fm-bob-trust.sh" "$wt" "$TMP_ROOT/lock-proj" >/dev/null 2>"$TMP_ROOT/lock-err" &
+  helper=$!
+  sleep 1
+  [ ! -e "$store" ] || fail "registration wrote through a live owner's lock"
+  [ -e "$lock" ] || fail "a live owner's fresh lock was removed"
+  rm -f "$lock"
+  rc=0
+  wait "$helper" || rc=$?
+  kill "$sleeper" 2>/dev/null || true
+  wait "$sleeper" 2>/dev/null || true
+  [ "$rc" = 0 ] || fail "registration did not proceed after the lock was released: $(cat "$TMP_ROOT/lock-err")"
+  [ -s "$store" ] || fail "registration wrote no store after the lock was released"
+  pass "fm-bob-trust: abandoned locks are recovered and a live lock is honored"
+}
+
 test_bob_secondmate_is_refused() {
   local id rec out rc
   id="bob-second-z1-$$"
@@ -358,9 +443,12 @@ test_bob_secondmate_is_refused() {
 
 test_bob_launch_then_send_is_verified
 test_bob_readiness_gate_precedes_pointer
+test_bob_stale_composer_frame_is_not_ready
+test_bob_stale_pointer_is_not_delivery
 test_bob_unconfirmed_delivery_fails_loudly
 test_bob_tracked_settings_refuses_spawn
 test_bob_tracked_brief_refuses_spawn
 test_bob_symlinked_dir_refuses_spawn
 test_bob_concurrent_trust_registrations_all_persist
+test_bob_abandoned_trust_lock_is_recovered
 test_bob_secondmate_is_refused

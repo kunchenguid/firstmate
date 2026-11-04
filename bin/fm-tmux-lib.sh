@@ -177,8 +177,13 @@ fm_tmux_composer_state() {  # <target> -> empty|pending|pending-unproven|unknown
   # bin/fm-control.sh, and bin/fm-spawn.sh do) reads it the way every cursorless
   # backend does: the bottom-most shape wins. Bob's `❯` composer sits between
   # two `─` rules, which a read without the identity capability takes as the
-  # bare agent-glyph row it is.
+  # bare agent-glyph row it is. A visible cursor means Bob does not own the
+  # screen yet: on a relaunch the previous incarnation's composer stays on the
+  # pane above the shell for about five seconds after the new process starts
+  # (verified live, bob 2.0.6), and a pointer typed then is lost.
   if [ "${FM_COMPOSER_HARNESS:-}" = bob ]; then
+    [ "$(tmux display-message -p -t "$target" '#{cursor_flag}' 2>/dev/null)" = 0 ] \
+      || { printf 'unknown'; return 0; }
     pane=$(fm_tmux_composer_capture "$target") || { printf 'unknown'; return 0; }
     fm_composer_classify_screen 'styled=1' "$pane" ''
     return 0

@@ -872,6 +872,13 @@ fm_composer_classify_content() {  # <bordered> <content> [idle_re] [idle_case] [
     if [ "$styled" = 1 ]; then
       local plain_body=$plain_content plain_glyph=''
       if fm_composer_leading_agent_glyph_var plain_glyph "$plain_body"; then
+        # Bob translates its placeholder per locale (LC_ALL, LC_MESSAGES, LANG;
+        # verified, bob 2.0.6 under de_DE), so no idle regex can list them all.
+        # The glyph plus a row ghost stripping fully emptied is the proof; typed
+        # text renders bright, survives stripping, and never reaches this arm.
+        if [ "${FM_COMPOSER_HARNESS:-}" = bob ]; then
+          printf 'empty'; return 0
+        fi
         plain_body=${plain_body#*"$plain_glyph"}
         fm_composer_normalize_trim_var plain_body
         if fm_composer_idle_matches "$plain_body" "$idle_re" "$idle_case"; then
