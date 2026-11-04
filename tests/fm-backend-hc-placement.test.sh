@@ -744,6 +744,53 @@ test_placed_teardown_reaps_processes_left_in_the_worktree_there() {
   pass "hc placement: teardown stops processes left under a placed worktree there, and refuses when it cannot scan for them"
 }
 
+# A pid the scan found can exit and be reused by an unrelated process before a
+# signal lands. Oracle: the local reap's contract (task_process_identity_matches
+# in fm-teardown.sh), a pid is signalled only while its start identity still
+# matches the one read at the scan. The fake lsof reports the stand-in under the
+# worktree there on the first scan only, and the fake ps reports a different
+# start time after the first read, as a reused pid would; the stand-in, sitting
+# outside the worktree, must survive. Code that signals every scanned pid kills it.
+test_placed_teardown_reap_skips_a_reused_pid() {
+  local out rc pid real_ps wt_phys
+  placed_teardown_case teardown-reap-reused
+  git_q -C "$TWT_LOCAL" commit -q --allow-empty -m "the change"
+  git_q -C "$TWT_LOCAL" push -q origin fm/task-x1
+  pid=$(bash -c 'cd "$1" && { sleep 300 >/dev/null 2>&1 </dev/null & echo $!; }' _ "$D")
+  kill -0 "$pid" 2>/dev/null || fail "the stand-in job did not start"
+  wt_phys=$(cd "$TWT_LOCAL" && pwd -P)
+  real_ps=$(command -v ps)
+  cat > "$FB/lsof" <<SH
+#!/usr/bin/env bash
+if [ "\$PWD" = "$D/remote" ] && [ ! -e "$D/lsof-seen" ]; then
+  : > "$D/lsof-seen"
+  printf 'p%s\nn%s\n' "$pid" "$wt_phys"
+fi
+exit 0
+SH
+  cat > "$FB/ps" <<SH
+#!/usr/bin/env bash
+if [ "\$*" = "-p $pid -o lstart=" ]; then
+  if [ -e "$D/ps-seen" ]; then echo "Tue Jan  6 00:00:00 2026"; else : > "$D/ps-seen"; echo "Mon Jan  5 00:00:00 2026"; fi
+  exit 0
+fi
+exec "$real_ps" "\$@"
+SH
+  chmod +x "$FB/lsof" "$FB/ps"
+  mkdir -p "$D/no-proc"
+  rc=0
+  out=$(FM_PROC_ROOT_OVERRIDE="$D/no-proc" run_placed_teardown 2>&1) || rc=$?
+  sleep 0.3
+  if ! kill -0 "$pid" 2>/dev/null; then
+    fail "a reused pid must not be signalled by the placed reap"$'\n'"$out"
+  fi
+  kill -KILL "$pid" 2>/dev/null || true
+  [ -e "$D/ps-seen" ] || fail "the reap never read the scanned pid's start identity"$'\n'"$out"
+  expect_code 0 "$rc" "a placed teardown whose scanned pid was reused should succeed"$'\n'"$out"
+  assert_absent "$TWT_LOCAL" "the worktree there is removed"
+  pass "hc placement: the placed reap skips a pid reused after its scan"
+}
+
 crew_state() {
   FAKE_HC_DIR=$D FM_HC_BIN="$FB/hc" FM_HOME=$HOMEDIR FM_ROOT_OVERRIDE="$ROOT" \
     FM_STATE_OVERRIDE="$HOMEDIR/state" FM_DATA_OVERRIDE="$HOMEDIR/data" \
@@ -811,5 +858,6 @@ fm_test_run \
   test_placed_teardown_refuses_unlanded_or_unreachable_work \
   test_placed_teardown_removes_landed_work_there \
   test_placed_teardown_reaps_processes_left_in_the_worktree_there \
+  test_placed_teardown_reap_skips_a_reused_pid \
   test_placed_done_gate_reads_the_head_there \
   test_placed_crew_state_reads_the_worktree_there

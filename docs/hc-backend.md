@@ -152,7 +152,7 @@ The launch brief is prefixed with a placement section telling the worker to run 
 
 Every later step reaches the worker through hc and never through this machine's filesystem or process table: send, keys, capture, current path, and close use the `<machine>/t7` address through this core, and the agent-state group scan, the done gate's head check, and teardown's landed-work proof run their commands there with `hc exec --on`.
 Teardown applies the same landed-work proof it applies to a local worktree, refuses when that machine cannot be reached, and closes the terminal before proving again.
-Between the close and the second proof it stops every process left with its current directory under the worktree there (`lsof -a -d cwd`, or a `/proc` scan where that machine has no `lsof`; TERM, then KILL, then a recheck), as it does for a local worktree, and refuses with every record kept when that scan cannot run there or a process survives.
+Between the close and the second proof it stops every process left with its current directory under the worktree there (`lsof -a -d cwd`, or a `/proc` scan where that machine has no `lsof`; TERM, then KILL, then a recheck; each signal goes only to a process whose start identity still matches the one its scan read, so a reused pid is never signalled), as it does for a local worktree, and refuses with every record kept when that scan cannot run there or a process survives.
 Only then does it remove the worktree and its branch there; `--force` keeps its usual meaning.
 
 ### Limits of a placed worker

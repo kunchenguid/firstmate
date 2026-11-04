@@ -727,6 +727,10 @@ fm_backend_hc_remote_file_remove() {  # <session> <machine> <path>
 # process whose current directory is <dir> or under it (lsof -a -d cwd where
 # that machine has lsof, else a /proc cwd scan) gets TERM, then KILL after a
 # one-second grace, then a recheck; the scan never signals its own shell.
+# Each scan records every match's start identity (/proc/<pid>/stat starttime,
+# else `ps -o lstart=`, as task_process_identity does), and each signal is sent
+# only to a pid whose identity still matches just before it, so a pid reused
+# by another process after the scan is never signalled.
 # Returns 0 when nothing is left (or <dir> is gone), and 1 with the reason on
 # stderr when the scan could not run there or a process survived.
 fm_backend_hc_remote_reap_cwd() {  # <session> <machine> <dir>
@@ -752,14 +756,42 @@ fm_backend_hc_remote_reap_cwd() {  # <session> <machine> <dir>
         done
       fi
     }
+    ident() {
+      if [ -r "$proc_root/$1/stat" ]; then
+        line=$(cat "$proc_root/$1/stat" 2>/dev/null) || return 1
+        set -- ${line##*)}
+        [ "$#" -ge 20 ] || return 1
+        shift 19
+        case "$1" in ""|*[!0-9]*) return 1 ;; esac
+        printf "starttime=%s\n" "$1"
+        return 0
+      fi
+      v=$(LC_ALL=C ps -p "$1" -o lstart= 2>/dev/null) || return 1
+      v=$(printf "%s" "$v" | tr -s " ")
+      v=${v# }; v=${v% }
+      [ -n "$v" ] || return 1
+      printf "lstart=%s\n" "$v"
+    }
+    tracked() {
+      for p in $1; do
+        i=$(ident "$p") && printf "%s %s\n" "$p" "$i"
+      done
+    }
+    signal() {
+      printf "%s\n" "$2" | while read -r p i; do
+        [ -n "$p" ] || continue
+        c=$(ident "$p") && [ "$c" = "$i" ] && kill "-$1" "$p" 2>/dev/null
+      done
+    }
+    proc_root=${FM_PROC_ROOT_OVERRIDE:-/proc}
     pids=$(scan) || exit 4
     [ -n "$pids" ] || exit 0
     printf "%s\n" "$pids" | tr "\n" " "
-    kill -TERM $pids 2>/dev/null
+    signal TERM "$(tracked "$pids")"
     sleep 1
     pids=$(scan) || exit 4
     if [ -n "$pids" ]; then
-      kill -KILL $pids 2>/dev/null
+      signal KILL "$(tracked "$pids")"
       sleep 1
       pids=$(scan) || exit 4
     fi
