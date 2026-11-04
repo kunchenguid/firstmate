@@ -654,6 +654,20 @@ run_teardown() {
     "$TEARDOWN" task-x1 "$@"
 }
 
+# A mode-600 merge record. bin/fm-pr-lib.sh accepts it only when every identity
+# field matches the task's pull request.
+write_merge_notified() {  # <state> <id> <provider> <host> <path> <number>
+  printf '%s\n' fm-pr-poll-merge-notified-v1 "$3" "$4" "$5" "$6" \
+    > "$1/$2.pr-poll-merge-notified"
+  chmod 600 "$1/$2.pr-poll-merge-notified"
+}
+
+write_merge_authority() {  # <state> <id> <provider> <host> <path> <number> <authority>
+  printf '%s\n' fm-merge-authority-v1 "$3" "$4" "$5" "$6" "$7" \
+    > "$1/$2.merge-authority"
+  chmod 600 "$1/$2.merge-authority"
+}
+
 # Seed a real backlog carrying task-x1 as In flight, so a teardown in this case
 # has a row to close. Uses the real tasks-axi (the fixture's default fakebin has
 # no tasks-axi stub, so PATH resolves the installed one).
@@ -786,6 +800,7 @@ SH
   write_meta "$case_dir" no-mistakes ship
   printf '%s\n' 'pr=https://github.com/example/repo/pull/7' >> "$case_dir/state/task-x1.meta"
   seed_backlog_in_flight "$case_dir"
+  write_merge_notified "$case_dir/state" task-x1 github github.com example/repo 7
   cp "$TMP_ROOT/tasks-axi-close-gerrit/fakebin/tasks-axi" "$case_dir/fakebin/tasks-axi"
   out=$(run_teardown "$case_dir" 2>&1) || fail "teardown of a landed GitHub task failed: $out"
   tasks-axi show task-x1 --file "$case_dir/data/backlog.md" \
@@ -834,6 +849,14 @@ SH
     write_meta "$case_dir" no-mistakes ship
     printf 'pr=%s\n' "$url" >> "$case_dir/state/task-x1.meta"
     seed_backlog_in_flight "$case_dir"
+    case "$url" in
+      https://github.com/*)
+        write_merge_notified "$case_dir/state" task-x1 github github.com example/repo 7
+        ;;
+      *)
+        write_merge_notified "$case_dir/state" task-x1 forgejo forgejo.example.com example/repo 7
+        ;;
+    esac
     cp "$TMP_ROOT/tasks-axi-close-gitlab/fakebin/tasks-axi" "$case_dir/fakebin/tasks-axi"
     out=$(run_teardown "$case_dir" 2>&1) || fail "teardown of a landed task with $url failed: $out"
     tasks-axi show task-x1 --file "$case_dir/data/backlog.md" \
@@ -841,6 +864,123 @@ SH
       || fail "$url no longer closed as the item's pr link"
   done
   pass "teardown closes a landed GitLab task with its merge request URL as a note and GitHub and Forgejo tasks with --pr"
+}
+
+# An allowed cleanup of a ship whose pull request is still open must not archive
+# that row as merged. A matching merge notification is what makes the same URL
+# a merged close.
+test_teardown_does_not_archive_an_open_pr_as_merged() {
+  local case_dir out show url
+  url=https://github.com/example/repo/pull/7
+
+  case_dir=$(make_case open-pr-unproven)
+  write_meta "$case_dir" no-mistakes ship
+  printf 'pr=%s\n' "$url" >> "$case_dir/state/task-x1.meta"
+  seed_backlog_in_flight "$case_dir"
+  out=$(run_teardown "$case_dir" 2>&1) || fail "teardown of an unproven GitHub pull request failed: $out"
+  [ "$(backlog_row_state "$case_dir")" = "done" ] \
+    || fail "unproven GitHub cleanup left the item $(backlog_row_state "$case_dir")"
+  if grep -F '(merged' "$case_dir/data/backlog.md" >/dev/null; then
+    fail "unproven GitHub cleanup archived an open pull request as merged"
+  fi
+  grep -F "PR not confirmed merged $url" "$case_dir/data/backlog.md" >/dev/null \
+    || fail "unproven GitHub cleanup did not record that the pull request is still open"
+  show=$(tasks-axi show task-x1 --file "$case_dir/data/backlog.md" --full)
+  printf '%s\n' "$show" | grep -F "body: \"PR not confirmed merged $url\"" >/dev/null \
+    || fail "unproven GitHub cleanup did not keep the open pull request in the row body: $show"
+  if printf '%s\n' "$show" | grep -F "links: \"pr:$url\"" >/dev/null; then
+    fail "unproven GitHub cleanup recorded the open pull request as a pr link"
+  fi
+
+  case_dir=$(make_case open-pr-mismatched-proof)
+  write_meta "$case_dir" no-mistakes ship
+  printf 'pr=%s\n' "$url" >> "$case_dir/state/task-x1.meta"
+  seed_backlog_in_flight "$case_dir"
+  write_merge_notified "$case_dir/state" task-x1 github github.com example/repo 8
+  out=$(run_teardown "$case_dir" 2>&1) || fail "teardown with a mismatched merge record failed: $out"
+  if grep -F '(merged' "$case_dir/data/backlog.md" >/dev/null; then
+    fail "a merge record for a different pull request archived this one as merged"
+  fi
+  grep -F "PR not confirmed merged $url" "$case_dir/data/backlog.md" >/dev/null \
+    || fail "a mismatched merge record did not leave the pull request open"
+
+  case_dir=$(make_case open-pr-notified)
+  write_meta "$case_dir" no-mistakes ship
+  printf 'pr=%s\n' "$url" >> "$case_dir/state/task-x1.meta"
+  seed_backlog_in_flight "$case_dir"
+  write_merge_notified "$case_dir/state" task-x1 github github.com example/repo 7
+  out=$(run_teardown "$case_dir" 2>&1) || fail "teardown of a notified merge failed: $out"
+  grep -F '(merged' "$case_dir/data/backlog.md" >/dev/null \
+    || fail "a matching merge notification was not archived as merged"
+  tasks-axi show task-x1 --file "$case_dir/data/backlog.md" \
+    | grep -F "links: \"pr:$url\"" >/dev/null \
+    || fail "a matching merge notification did not close as the item's pr link"
+  if grep -F 'PR not confirmed merged' "$case_dir/data/backlog.md" >/dev/null; then
+    fail "a matching merge notification was recorded as still open"
+  fi
+
+  case_dir=$(make_case open-pr-authority)
+  write_meta "$case_dir" no-mistakes ship
+  printf 'pr=%s\n' "$url" >> "$case_dir/state/task-x1.meta"
+  seed_backlog_in_flight "$case_dir"
+  write_merge_authority "$case_dir/state" task-x1 github github.com example/repo 7 attended
+  out=$(run_teardown "$case_dir" 2>&1) || fail "teardown of an accepted merge failed: $out"
+  if grep -F '(merged' "$case_dir/data/backlog.md" >/dev/null; then
+    fail "a merge-authority record without a merge notification archived the pull request as merged"
+  fi
+  grep -F "PR not confirmed merged $url" "$case_dir/data/backlog.md" >/dev/null \
+    || fail "a merge-authority record alone did not leave the pull request unconfirmed"
+
+  url=https://forgejo.example.com/example/repo/pulls/7
+  case_dir=$(make_case open-pr-forgejo)
+  write_meta "$case_dir" no-mistakes ship
+  printf 'pr=%s\n' "$url" >> "$case_dir/state/task-x1.meta"
+  seed_backlog_in_flight "$case_dir"
+  out=$(run_teardown "$case_dir" 2>&1) || fail "teardown of an unproven Forgejo pull request failed: $out"
+  if grep -F '(merged' "$case_dir/data/backlog.md" >/dev/null; then
+    fail "unproven Forgejo cleanup archived an open pull request as merged"
+  fi
+  grep -F "PR not confirmed merged $url" "$case_dir/data/backlog.md" >/dev/null \
+    || fail "unproven Forgejo cleanup did not record that the pull request is still open"
+
+  case_dir=$(make_case open-pr-forgejo-notified)
+  write_meta "$case_dir" no-mistakes ship
+  printf 'pr=%s\n' "$url" >> "$case_dir/state/task-x1.meta"
+  seed_backlog_in_flight "$case_dir"
+  write_merge_notified "$case_dir/state" task-x1 forgejo forgejo.example.com example/repo 7
+  out=$(run_teardown "$case_dir" 2>&1) || fail "teardown of a notified Forgejo merge failed: $out"
+  tasks-axi show task-x1 --file "$case_dir/data/backlog.md" \
+    | grep -F "links: \"pr:$url\"" >/dev/null \
+    || fail "a matching Forgejo merge notification did not close as the item's pr link"
+
+  pass "cleanup archives a pull request as merged only when a local merge record matches it"
+}
+
+test_teardown_archives_a_forge_confirmed_merge_without_a_local_marker() {
+  local case_dir out pr_head url show
+  url=https://github.com/example/repo/pull/7
+  case_dir=$(make_case forge-confirmed-merge)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit_file "$case_dir" feature.txt hello "add feature"
+  append_pr_meta_for_current_head "$case_dir"
+  pr_head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  add_gh_pr_merged_for_head "$case_dir" "$pr_head"
+  seed_backlog_in_flight "$case_dir"
+  [ ! -e "$case_dir/state/task-x1.pr-poll-merge-notified" ] \
+    || fail "forge-confirmed-merge: fixture planted a merge notification"
+
+  out=$(run_teardown "$case_dir" 2>&1) || fail "teardown of a forge-confirmed merge failed: $out"
+  [ "$(backlog_row_state "$case_dir")" = "done" ] \
+    || fail "forge-confirmed merge left the item $(backlog_row_state "$case_dir")"
+  grep -F '(merged' "$case_dir/data/backlog.md" >/dev/null \
+    || fail "a pull request the forge confirmed merged was not archived as merged"
+  show=$(tasks-axi show task-x1 --file "$case_dir/data/backlog.md")
+  printf '%s\n' "$show" | grep -F "links: \"pr:$url\"" >/dev/null \
+    || fail "a forge-confirmed merge did not close as the item's pr link: $show"
+  if grep -F 'PR not confirmed merged' "$case_dir/data/backlog.md" >/dev/null; then
+    fail "a forge-confirmed merge was recorded as unconfirmed"
+  fi
+  pass "cleanup archives a pull request as merged when teardown already confirmed that merge"
 }
 
 test_teardown_manual_backend_leaves_the_backlog_to_the_operator() {
@@ -1037,6 +1177,10 @@ test_no_pr_recorded_discovers_merged_pr_by_branch_allows() {
   ! grep -q REFUSED "$case_dir/stderr" || fail "no-pr-branch-discovery: teardown printed a REFUSED line"
   assert_grep 'https://github.com/example/repo/pull/7' "$case_dir/data/backlog.md" \
     "no-pr-branch-discovery: resolved PR URL was not recorded on completion"
+  assert_grep '(merged' "$case_dir/data/backlog.md" \
+    "no-pr-branch-discovery: forge-confirmed merge was not archived as merged"
+  assert_no_grep 'PR not confirmed merged' "$case_dir/data/backlog.md" \
+    "no-pr-branch-discovery: forge-confirmed merge was recorded as unconfirmed"
   pass "teardown discovers a merged PR by branch name and tears down when no pr= was ever recorded"
 }
 
@@ -6195,6 +6339,8 @@ test_local_only_fork_remote_allows
 test_teardown_closes_the_backlog_item_itself
 test_teardown_closes_a_gerrit_task_with_its_change_url_as_a_note
 test_teardown_closes_a_gitlab_task_with_its_merge_request_url_as_a_note
+test_teardown_does_not_archive_an_open_pr_as_merged
+test_teardown_archives_a_forge_confirmed_merge_without_a_local_marker
 test_teardown_manual_backend_leaves_the_backlog_to_the_operator
 test_local_only_truly_unpushed_refuses
 test_local_only_merged_to_local_main_allows

@@ -2098,6 +2098,33 @@ SH
   pass "session start replays a recorded Gerrit close with its change URL as a note"
 }
 
+test_recovery_replays_an_open_pr_close_without_calling_it_merged() {
+  local case_dir id out url=https://github.com/example/repo/pull/11
+  id=atomic-heal-open-pr-b9
+  case_dir=$(make_home heal-pending-open-pr)
+  add_item "$case_dir" "$id"
+  start_item "$case_dir" "$id"
+  printf 'id=%s\ndata=%s\nspawn_gen=spawn-heal-open-pr\narg=--note\narg=PR not confirmed merged %s\n' \
+    "$id" "$(home_of "$case_dir")/data" "$url" \
+    > "$(home_of "$case_dir")/state/$id.backlog-close"
+
+  out=$(run_bootstrap "$case_dir")
+  [ "$(row_state "$case_dir" "$id")" = "done" ] \
+    || fail "session start left an open pull-request close at $(row_state "$case_dir" "$id"): $out"
+  if grep -F '(merged' "$(backlog_of "$case_dir")" >/dev/null; then
+    fail "replaying an open pull-request close archived it as merged"
+  fi
+  tasks-axi show "$id" --file "$(backlog_of "$case_dir")" --full \
+    | grep -F "body: \"PR not confirmed merged $url\"" >/dev/null \
+    || fail "the replayed open pull-request close dropped its note"
+  if grep -F 'local main' "$(backlog_of "$case_dir")" >/dev/null; then
+    fail "replaying an open pull-request close rewrote the note as a local landing"
+  fi
+  assert_absent "$(home_of "$case_dir")/state/$id.backlog-close" \
+    "a replayed open pull-request close left its record behind"
+  pass "session start replays an open pull-request close without calling it merged"
+}
+
 test_recovery_backfills_a_recorded_link_on_an_already_done_item() {
   local case_dir id marker out
   id=atomic-heal-done-backfill-b9
@@ -3125,6 +3152,7 @@ test_recovery_rejects_an_internal_worker_record_symlink
 test_recovery_ignores_a_symlinked_worker_record
 test_recovery_replays_a_close_an_interrupted_cleanup_left_open
 test_recovery_replays_a_gerrit_close_with_its_change_url_as_a_note
+test_recovery_replays_an_open_pr_close_without_calling_it_merged
 test_recovery_backfills_a_recorded_link_on_an_already_done_item
 test_recovery_preserves_a_close_when_the_backlog_cannot_be_read
 test_recovery_retry_preserves_incomplete_cleanup_warning

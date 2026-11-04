@@ -76,14 +76,15 @@ FM_BACKLOG_CLOSE_REPLAY_RESULT=
 # Bounded execution is fm-timeout-lib.sh's alone; source it rather than
 # re-deriving a deadline here. It is stateless, so the memoisation reason this
 # library does not source fm-tasks-axi-lib.sh does not apply.
+_FM_BACKLOG_TRANSITION_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=bin/fm-timeout-lib.sh disable=SC1091
-. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/fm-timeout-lib.sh"
+. "$_FM_BACKLOG_TRANSITION_DIR/fm-timeout-lib.sh"
 # fm-pr-lib.sh owns which URL is a Gerrit change or a GitLab merge request. It
 # is functions and empty globals only, so it is sourced once rather than
 # re-initialising a caller's parsed identity.
 if ! declare -F fm_pr_url_parse >/dev/null 2>&1; then
   # shellcheck source=bin/fm-pr-lib.sh disable=SC1091
-  . "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/fm-pr-lib.sh"
+  . "$_FM_BACKLOG_TRANSITION_DIR/fm-pr-lib.sh"
 fi
 
 # Latched when a row read hits its bound. fm_backlog_row_show runs inside a
@@ -528,6 +529,72 @@ fm_backlog_pr_note_label() {  # <url>
       gitlab) printf 'GitLab merge request\n' ;;
       *) exit 1 ;;
     esac )
+}
+
+# tasks-axi renders a canonical GitHub or Forgejo pull link on the title as
+# merged. An unproven one is this body note instead, and
+# bin/fm-fleet-snapshot.sh matches the line exactly.
+fm_backlog_open_pr_note() {  # <url>
+  printf 'PR not confirmed merged %s\n' "$1"
+}
+
+fm_backlog_open_pr_note_arg_valid() {  # <note>
+  local note=$1 url
+  case "$note" in
+    'PR not confirmed merged https://'*) ;;
+    *) return 1 ;;
+  esac
+  url=${note#PR not confirmed merged }
+  [ "${#url}" -le 2048 ] || return 1
+  [ "$note" = "$(fm_backlog_open_pr_note "$url")" ] || return 1
+  (
+    fm_pr_url_parse "$url" || exit 1
+    case "$FM_PR_PROVIDER" in
+      github|forgejo) exit 0 ;;
+      *) exit 1 ;;
+    esac
+  )
+}
+
+# proven: a merge-notification marker matches the URL.
+# open: a GitHub or Forgejo URL has no such marker.
+# link: any other URL keeps the caller's --pr argument.
+# Prints one of those words and returns 0. A failed proof read is open when
+# this note would accept the URL, and link otherwise. The read runs in its own
+# process so sourcing the merge-authority library cannot change this process.
+fm_backlog_ship_pr_close_mode() {  # <state-dir> <id> <url>
+  local state=$1 id=$2 url=$3 mode
+  mode=$(
+    bash --noprofile --norc -c '
+      lib=$1
+      state=$2
+      id=$3
+      url=$4
+      . "$lib/fm-pr-lib.sh" || exit 1
+      fm_pr_url_parse "$url" || { printf "link\n"; exit 0; }
+      provider=$FM_PR_PROVIDER
+      host=$FM_PR_HOST
+      path=$FM_PR_PATH
+      number=$FM_PR_NUMBER
+      case "$provider" in
+        github|forgejo) ;;
+        *) printf "link\n"; exit 0 ;;
+      esac
+      if fm_pr_poll_merge_already_notified "$state" "$id" "$provider" "$host" "$path" "$number"; then
+        printf "proven\n"
+        exit 0
+      fi
+      printf "open\n"
+    ' _ "$_FM_BACKLOG_TRANSITION_DIR" "$state" "$id" "$url"
+  ) || mode=
+  case "$mode" in
+    proven|open|link) printf '%s\n' "$mode"; return 0 ;;
+  esac
+  if fm_backlog_open_pr_note_arg_valid "$(fm_backlog_open_pr_note "$url")"; then
+    printf 'open\n'
+  else
+    printf 'link\n'
+  fi
 }
 
 fm_backlog_done() {  # <data-dir> <id> [flag...]
@@ -983,7 +1050,9 @@ fm_backlog_close_marker_validate() {  # <marker-path> <authorized-data-dir> <exp
     0) ;;
     2)
       case "${args[0]}" in
-        --note) [ "${args[1]}" = "local%20main" ] ;;
+        --note)
+          [ "${args[1]}" = "local%20main" ] || fm_backlog_open_pr_note_arg_valid "${args[1]}"
+          ;;
         --pr)
           arg_value=${args[1]}
           [ "${#arg_value}" -le 2048 ] \
@@ -1157,7 +1226,7 @@ fm_backlog_close_marker_replay() {  # <state-dir> <marker-path> <authorized-data
   mode=$FM_BACKLOG_CLOSE_VALIDATED_MODE
   [ "$mode" = close ] || mode_flags=(--retain)
   args=("${FM_BACKLOG_CLOSE_VALIDATED_ARGS[@]+"${FM_BACKLOG_CLOSE_VALIDATED_ARGS[@]}"}")
-  if [ "${args[0]-}" = --note ]; then
+  if [ "${args[0]-}" = --note ] && [ "${args[1]-}" = "local%20main" ]; then
     args[1]="local main"
   fi
   meta="$state/$id.meta"
