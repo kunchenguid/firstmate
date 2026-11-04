@@ -3794,13 +3794,9 @@ teardown_herdr_journal_orphaned() {
   fm_backend_herdr_projection_token_workspace_gone \
     "$session" "$HERDR_PRESENTATION_JOURNAL" "$ID"
 }
-# teardown_herdr_retire_leftover_projection: once the recorded pane is proven
-# gone, retire this task's own projected workspace when it outlived that pane -
-# a Herdr restore left an idle shell in it, or the task moved to the flat layout
-# and left it behind (docs/herdr-backend.md "Leftover task workspaces").
-# It runs under the presentation lock teardown already holds, before the reaper
-# can end that shell outside the focus-preserving close. Presentation only and
-# never fatal: every refusal leaves the workspace and journal and says why.
+# teardown_herdr_leftover_unclaimed: the leftover step's claim check, run before
+# the retirement and again as its locked record recheck. No record or journal in
+# any local Firstmate home other than this task's own may claim the workspace.
 teardown_herdr_leftover_unclaimed() {
   if fm_local_firstmate_state_dirs "$STATE" \
     && fm_backend_herdr_projection_unclaimed \
@@ -3813,6 +3809,13 @@ teardown_herdr_leftover_unclaimed() {
   TEARDOWN_HERDR_LEFTOVER_CLAIMED=1
   return 1
 }
+# teardown_herdr_retire_leftover_projection: once the recorded pane is proven
+# gone, retire this task's own projected workspace when it outlived that pane -
+# a Herdr restore left an idle shell in it, or the task moved to the flat layout
+# and left it behind (docs/herdr-backend.md "Leftover task workspaces").
+# It runs under the presentation lock teardown already holds, before the reaper
+# can end that shell outside the focus-preserving close. Presentation only and
+# never fatal: every refusal leaves the workspace and journal and says why.
 teardown_herdr_retire_leftover_projection() {
   local session=$TEARDOWN_HERDR_SESSION token=$TEARDOWN_HERDR_JOURNAL_TOKEN title workspace status=0 reason
   [ -n "$token" ] && [ "$TEARDOWN_HERDR_JOURNAL_SESSION" = "$session" ] || return 0
@@ -4226,10 +4229,11 @@ rm -rf "$STATE/$ID.inbox" "$STATE/$ID.git-hooks" "$STATE/$ID.push-guard" \
   "$STATE/$ID.polytoken-config" \
   "$STATE/$ID.polytoken-sessions" "$STATE/$ID.polytoken-sessions-v1"
 # A presentation journal the close path left behind is orphaned once the
-# recorded pane is proven gone (the Herdr gate above) unless it still names a
-# live projected workspace - a version 2 binding of some other pane, or a
-# version 1 attempt whose token-bearing workspace is still present - which the
-# session-start sweep alone may judge (header).
+# recorded pane is proven gone (the Herdr gate above) when it is a version 2
+# binding of exactly that pane, or when its token-bearing workspace is confirmed
+# gone from the journal's session. A journal that is unreadable, or whose
+# token-bearing workspace is still present or unreadable, is kept for the
+# session-start sweep to judge (header).
 if [ -e "$HERDR_PRESENTATION_JOURNAL" ] || [ -L "$HERDR_PRESENTATION_JOURNAL" ]; then
   if teardown_herdr_journal_orphaned; then
     rm -f "$HERDR_PRESENTATION_JOURNAL"

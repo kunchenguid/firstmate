@@ -456,6 +456,16 @@ Each of these is a claim:
 An unreadable registry, state directory, record, or journal also counts as a claim.
 The claim check runs at discovery and again under the shared named-session presentation lock, immediately before mutation.
 
+Another Firstmate home can share the same named session, and its records are not visible from this home.
+So the unjournaled path also needs positive proof that the pane belongs to a local home.
+Under the presentation lock, every cwd Herdr reports for the pane (`cwd` and `foreground_cwd`) must resolve inside one of these owned paths:
+
+- A local home's own directory.
+- A git worktree listed by a local home's repository.
+- A git worktree listed by a project clone under a local home's `projects/` directory.
+
+A pane with no reported cwd, an unreadable cwd, or a cwd outside every owned path is preserved with a warning.
+
 Both paths then follow the same order:
 
 1. Inside the locks, take one exact snapshot and check the conditions above.
@@ -493,6 +503,7 @@ Any of these preserves the candidate and lets cleanup and session startup contin
 - A cross-home version 2 binding.
 - Current metadata.
 - Any claim on the unjournaled path.
+- No ownership proof on the unjournaled path.
 - A registered or unknown agent.
 - An extra tab or pane.
 - An active target.
@@ -501,8 +512,8 @@ Any of these preserves the candidate and lets cleanup and session startup contin
 - An unreadable check.
 - Any error.
 
-A Firstmate home that shares the named session but is not registered below this home's root cannot be seen.
-Its live agents are still protected by the agent and process proof, but an agent-free idle shell in one of its task workspaces can be retired.
+This cleanup does not close the home workspace of a retired secondmate (`2ndmate-<id>`).
+Such a workspace still needs manual cleanup in Herdr's UI; automatic retirement of it is follow-up work.
 
 ### Operational compromises
 
@@ -521,7 +532,7 @@ Its live agents are still protected by the agent and process proof, but an agent
 - Missing or ambiguous restart bindings fall back to the ordinary home workspace while the old projection remains untouched.
 - Crashes, lost responses, failed exact-pane cleanup, Herdr session restores, or human renames can leave quarantined spaces.
   Cleanup and session start remove only the exact childless idle-shell leftover shapes in [Leftover task workspaces](#leftover-task-workspaces).
-- A journal-correlated space is cleaned up only from its exact home; an unjournaled leftover is retired from any local Herdr home once no local home claims it.
+- A journal-correlated space is cleaned up only from its exact home; an unjournaled leftover is retired from any local Herdr home once no local home claims it and its pane cwd is inside a path a local home owns.
 - Every stale-looking space outside those proofs still requires manual cleanup in Herdr's UI after human inspection.
 - Regaining a dedicated space after degradation requires stopping the flat task, manually checking the stale projection, and clearing its journal before a genuinely fresh launch.
 - The visible token is only a restart-stable correlator and never substitutes for the exact binding.

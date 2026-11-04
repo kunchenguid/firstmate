@@ -22,6 +22,11 @@
 #   matched. No journal or task record in any local Firstmate home
 #   (fm_local_firstmate_state_dirs) may claim it, and that claim check repeats
 #   under the shared named-session presentation lock right before mutation.
+#   That locked recheck also requires ownership proof: every cwd Herdr reports
+#   for the pane resolves inside a local home's own directory or inside a git
+#   worktree listed by that home or by a project clone under its projects/.
+#   A pane with no such proof may belong to another Firstmate home sharing the
+#   named session, so it is preserved with a warning.
 # Both paths then require one tab, one pane, no registered agent, and a process
 # proof that the pane holds only one idle recognized shell with no child
 # process, and both close only that exact pane through the focus-preserving
@@ -46,6 +51,7 @@ fm_backend_source herdr
 . "$SCRIPT_DIR/fm-pr-lib.sh"
 
 FM_HERDR_CLEANUP_UNJOURNALED=0
+FM_HERDR_CLEANUP_OWNED_ROOTS=()
 
 fm_herdr_cleanup_warn() {
   printf 'warning: herdr session-start projection cleanup: %s\n' "$*" >&2
@@ -225,36 +231,99 @@ fm_herdr_cleanup_one() { # <session> <workspace> <title> <home-real>
   return 0
 }
 
-# fm_herdr_cleanup_unjournaled_unclaimed: the unjournaled path's claim check,
+# fm_herdr_cleanup_owned_roots_load: set FM_HERDR_CLEANUP_OWNED_ROOTS to the
+# real path of every local home in FM_LOCAL_FIRSTMATE_STATES and of every git
+# worktree listed by that home or by a project clone under its projects/. A
+# directory whose git top level is not itself lists nothing, so an enclosing
+# unrelated repository never widens the set.
+fm_herdr_cleanup_owned_roots_load() {
+  local state home repo top listed line root
+  FM_HERDR_CLEANUP_OWNED_ROOTS=()
+  for state in "${FM_LOCAL_FIRSTMATE_STATES[@]}"; do
+    home=$(CDPATH='' cd -- "$(dirname "$state")" 2>/dev/null && pwd -P) || continue
+    FM_HERDR_CLEANUP_OWNED_ROOTS+=("$home")
+    for repo in "$home" "$home"/projects/*/; do
+      repo=$(CDPATH='' cd -- "$repo" 2>/dev/null && pwd -P) || continue
+      top=$(git -C "$repo" rev-parse --show-toplevel 2>/dev/null) || continue
+      top=$(CDPATH='' cd -- "$top" 2>/dev/null && pwd -P) || continue
+      [ "$top" = "$repo" ] || continue
+      listed=$(git -C "$repo" -c core.quotePath=false worktree list --porcelain 2>/dev/null) || continue
+      while IFS= read -r line; do
+        case "$line" in
+          'worktree '*)
+            root=$(CDPATH='' cd -- "${line#worktree }" 2>/dev/null && pwd -P) || continue
+            FM_HERDR_CLEANUP_OWNED_ROOTS+=("$root")
+            ;;
+        esac
+      done <<< "$listed"
+    done
+  done
+}
+
+# fm_herdr_cleanup_pane_owned <session> <pane>: true only when Herdr reports at
+# least one cwd for the exact pane and every reported cwd resolves inside one
+# of FM_HERDR_CLEANUP_OWNED_ROOTS.
+fm_herdr_cleanup_pane_owned() {
+  local session=$1 pane=$2 info paths path real root owned
+  [ "${#FM_HERDR_CLEANUP_OWNED_ROOTS[@]}" -gt 0 ] || return 1
+  info=$(fm_backend_herdr_cli "$session" pane get "$pane" 2>/dev/null) || return 1
+  paths=$(printf '%s' "$info" | jq -er --arg pane "$pane" '
+    .result.pane
+    | select(.pane_id == $pane)
+    | [.cwd, .foreground_cwd]
+    | map(select(type == "string" and length > 0))
+    | select(length > 0)
+    | .[]
+  ' 2>/dev/null) || return 1
+  while IFS= read -r path; do
+    real=$(CDPATH='' cd -- "$path" 2>/dev/null && pwd -P) || return 1
+    owned=0
+    for root in "${FM_HERDR_CLEANUP_OWNED_ROOTS[@]}"; do
+      case "$real/" in
+        "$root"/*) owned=1; break ;;
+      esac
+    done
+    [ "$owned" -eq 1 ] || return 1
+  done <<< "$paths"
+}
+
+# fm_herdr_cleanup_unjournaled_eligible: the unjournaled path's claim check,
 # re-run under the presentation lock with the candidate's snapshot tab and
-# pane. The local home set is re-read so a home registered since discovery
-# still counts.
-fm_herdr_cleanup_unjournaled_unclaimed() {
-  if fm_local_firstmate_state_dirs "$STATE" \
-    && fm_backend_herdr_projection_unclaimed \
+# pane, where it also requires the pane's ownership proof. The local home set
+# is re-read so a home registered since discovery still counts as a claimant.
+fm_herdr_cleanup_unjournaled_eligible() {
+  if ! fm_local_firstmate_state_dirs "$STATE" \
+    || ! fm_backend_herdr_projection_unclaimed \
       "$FM_HERDR_CLEANUP_UNJOURNALED_WORKSPACE" \
       "${FM_BACKEND_HERDR_LEFTOVER_TAB:-}" "${FM_BACKEND_HERDR_LEFTOVER_PANE:-}" \
       "$FM_HERDR_CLEANUP_UNJOURNALED_CONCISE" "$FM_HERDR_CLEANUP_UNJOURNALED_TOKEN" \
       '' '' "${FM_LOCAL_FIRSTMATE_STATES[@]}"; then
-    return 0
+    FM_HERDR_CLEANUP_UNJOURNALED_CLAIMED=1
+    return 1
   fi
-  FM_HERDR_CLEANUP_UNJOURNALED_CLAIMED=1
-  return 1
+  [ -n "${FM_BACKEND_HERDR_LEFTOVER_PANE:-}" ] || return 0
+  if ! fm_herdr_cleanup_pane_owned \
+    "$FM_HERDR_CLEANUP_UNJOURNALED_SESSION" "$FM_BACKEND_HERDR_LEFTOVER_PANE"; then
+    FM_HERDR_CLEANUP_UNJOURNALED_UNOWNED=1
+    return 1
+  fi
 }
 
 fm_herdr_cleanup_unjournaled_one() { # <session> <workspace> <title> <token>
   local session=$1 workspace=$2 title=$3 token=$4 concise presentation_lock status=0
   concise=${title#'└ '}
   concise=${concise%" · p:$token"}
+  FM_HERDR_CLEANUP_UNJOURNALED_SESSION=$session
   FM_HERDR_CLEANUP_UNJOURNALED_WORKSPACE=$workspace
   FM_HERDR_CLEANUP_UNJOURNALED_CONCISE=$concise
   FM_HERDR_CLEANUP_UNJOURNALED_TOKEN=$token
   FM_BACKEND_HERDR_LEFTOVER_TAB=
   FM_BACKEND_HERDR_LEFTOVER_PANE=
   FM_HERDR_CLEANUP_UNJOURNALED_CLAIMED=0
+  FM_HERDR_CLEANUP_UNJOURNALED_UNOWNED=0
   # A claimed workspace belongs to live or journal-correlated work and is
   # skipped silently; only the locked recheck below can authorize mutation.
-  fm_herdr_cleanup_unjournaled_unclaimed || return 0
+  fm_herdr_cleanup_unjournaled_eligible || return 0
   presentation_lock=$(fm_backend_herdr_presentation_session_lock_path "$session" 2>/dev/null) || {
     fm_herdr_cleanup_warn "leftover '$title' skipped because the shared presentation lock is unavailable"
     return 0
@@ -265,9 +334,12 @@ fm_herdr_cleanup_unjournaled_one() { # <session> <workspace> <title> <token>
   fi
   fm_backend_herdr_projection_retire_leftover \
     "$session" "$workspace" "$title" "$token" '' '' \
-    fm_herdr_cleanup_unjournaled_unclaimed || status=$?
-  [ "$status" -eq 0 ] || [ "$FM_HERDR_CLEANUP_UNJOURNALED_CLAIMED" = 1 ] \
-    || fm_herdr_cleanup_retire_warn "leftover '$title'" "$status"
+    fm_herdr_cleanup_unjournaled_eligible || status=$?
+  if [ "$FM_HERDR_CLEANUP_UNJOURNALED_UNOWNED" = 1 ]; then
+    fm_herdr_cleanup_warn "leftover '$title' preserved because its pane cwd is not proven to be inside a local Firstmate home or its worktrees"
+  elif [ "$status" -ne 0 ] && [ "$FM_HERDR_CLEANUP_UNJOURNALED_CLAIMED" != 1 ]; then
+    fm_herdr_cleanup_retire_warn "leftover '$title'" "$status"
+  fi
   fm_lock_release "$presentation_lock" || true
   return 0
 }
@@ -295,6 +367,7 @@ fm_herdr_session_cleanup() {
     FM_HERDR_CLEANUP_UNJOURNALED=0
     [ "$found" -eq 1 ] || return 0
   fi
+  [ "$FM_HERDR_CLEANUP_UNJOURNALED" -ne 1 ] || fm_herdr_cleanup_owned_roots_load
   session=$(fm_backend_herdr_session)
   list=$(fm_backend_herdr_cli "$session" workspace list 2>/dev/null) || {
     fm_herdr_cleanup_warn "session '$session' workspace discovery failed; preserving every candidate"

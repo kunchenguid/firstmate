@@ -1827,15 +1827,18 @@ Observed output:
 
 ```text
 ok - real named lab reproduced the exact restored one-tab one-pane childless no-agent shell shape
+warning: herdr session-start projection cleanup: leftover '└ foreign · p:FoReIgNlEfToVeR0000001' preserved because its pane cwd is not proven to be inside a local Firstmate home or its worktrees
 warning: herdr session-start projection cleanup: leftover '└ busy · p:BuSyLeFtOvEr0000000001' preserved because its pane is not a provably idle childless shell
-ok - real named lab cleanup closes journal-correlated and unjournaled leftovers, leaves claimed, busy, and captain workspaces, and preserves exact focus
+ok - real named lab cleanup closes journal-correlated and owned unjournaled leftovers, leaves foreign, claimed, busy, and captain workspaces, and preserves exact focus
+warning: herdr session-start projection cleanup: leftover '└ foreign · p:FoReIgNlEfToVeR0000001' preserved because its pane cwd is not proven to be inside a local Firstmate home or its worktrees
 warning: herdr session-start projection cleanup: leftover '└ busy · p:BuSyLeFtOvEr0000000001' preserved because its pane is not a provably idle childless shell
 ok - real named lab cleanup is idempotent and leaves the default fleet session to the teardown tripwire
 evidence: herdr=0.9.3 protocol=22 default-session-tripwire=armed
 ```
 
 Observed guarantee: after a real restore, one journal-correlated and one unjournaled one-tab and one-pane childless idle shell were closed, which removed both workspaces.
-A leftover another task record names, a task workspace running a foreground command, and a captain workspace outside the task grammar all stayed.
+The unjournaled one had its cwd inside the home, which is its ownership proof.
+An unjournaled leftover whose cwd is outside every local home, a leftover another task record names, a task workspace running a foreground command, and a captain workspace outside the task grammar all stayed.
 The exact non-target focus and the default fleet session remained unchanged, and a repeat run was a no-op.
 
 ### Workspace-removal focus safety

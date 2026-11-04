@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Real restored-shell E2E for session-start Herdr leftover task-workspace cleanup.
 # It covers a journal-correlated leftover, an unjournaled leftover, and the
-# claimed, busy, and captain workspaces the cleanup must leave alone.
+# foreign, claimed, busy, and captain workspaces the cleanup must leave alone.
 # Every CLI operation is routed through one guarded named non-default lab, and
 # lab teardown verifies that the default fleet session is byte-identical.
 set -u
@@ -78,9 +78,9 @@ await_idle_shell() {  # <pane>
   done
   return 1
 }
-make_workspace() {  # <label>; prints "<workspace-id> <root-pane-id>"
+make_workspace() {  # <label> [cwd]; prints "<workspace-id> <root-pane-id>"
   local out
-  out=$(lab workspace create --cwd "$ROOT" --label "$1" --no-focus) || return 1
+  out=$(lab workspace create --cwd "${2:-$ROOT}" --label "$1" --no-focus) || return 1
   printf '%s %s' "$(printf '%s' "$out" | jq -r '.result.workspace.workspace_id')" \
     "$(printf '%s' "$out" | jq -r '.result.root_pane.pane_id')"
 }
@@ -107,11 +107,20 @@ PANE=$(printf '%s' "$CANDIDATE" | jq -r '.result.root_pane.pane_id')
   printf 'task_id=%s\n' "$ID"
   printf 'projection_id=%s\n' "$TOKEN"
 } > "$HOME_DIR/state/$ID.herdr-presentation"
-# An unjournaled leftover: its task and journal were already cleaned up.
+# An unjournaled leftover: its task and journal were already cleaned up. Its
+# cwd sits inside this home, which is the ownership proof the path requires.
+mkdir -p "$HOME_DIR/projects/lost"
 read -r LOST_WS LOST_PANE <<EOF
-$(make_workspace "└ lost-journal · p:LoStJoUrNaLlEfToVeR001")
+$(make_workspace "└ lost-journal · p:LoStJoUrNaLlEfToVeR001" "$HOME_DIR/projects/lost")
 EOF
 [ -n "$LOST_WS" ] && [ -n "$LOST_PANE" ] || fail 'could not create unjournaled leftover fixture'
+# An unjournaled leftover whose cwd is outside every local home, as another
+# Firstmate home sharing the session would leave it.
+mkdir -p "$TMP_ROOT/foreign-home/work"
+read -r FOREIGN_WS FOREIGN_PANE <<EOF
+$(make_workspace "└ foreign · p:FoReIgNlEfToVeR0000001" "$TMP_ROOT/foreign-home/work")
+EOF
+[ -n "$FOREIGN_WS" ] && [ -n "$FOREIGN_PANE" ] || fail 'could not create foreign leftover fixture'
 # A leftover another task record still names.
 read -r CLAIMED_WS CLAIMED_PANE <<EOF
 $(make_workspace "└ claimed · p:ClAiMeDlEfToVeR0000001")
@@ -155,7 +164,7 @@ while [ "$attempt" -lt 50 ]; do
   attempt=$((attempt + 1))
 done
 [ "$attempt" -lt 50 ] || fail 'restored child did not converge to the exact childless idle-shell process-group shape'
-for fixture_pane in "$LOST_PANE" "$CLAIMED_PANE" "$CAPTAIN_PANE" "$BUSY_PANE"; do
+for fixture_pane in "$LOST_PANE" "$FOREIGN_PANE" "$CLAIMED_PANE" "$CAPTAIN_PANE" "$BUSY_PANE"; do
   lab pane get "$fixture_pane" >/dev/null || fail "restored fixture pane $fixture_pane is missing after the lab restart"
   await_idle_shell "$fixture_pane" || fail "restored fixture pane $fixture_pane did not converge to an idle shell"
 done
@@ -183,13 +192,15 @@ fi
 if lab workspace get "$LOST_WS" >/dev/null 2>&1; then
   fail 'unjournaled restored leftover survived cleanup'
 fi
+lab workspace get "$FOREIGN_WS" >/dev/null 2>&1 || fail 'cleanup closed a leftover whose cwd is outside every local home'
+lab pane get "$FOREIGN_PANE" >/dev/null 2>&1 || fail 'cleanup closed the foreign leftover pane'
 lab workspace get "$CLAIMED_WS" >/dev/null 2>&1 || fail 'cleanup closed a leftover another task record names'
 lab pane get "$CLAIMED_PANE" >/dev/null 2>&1 || fail 'cleanup closed the claimed leftover pane'
 lab workspace get "$BUSY_WS" >/dev/null 2>&1 || fail 'cleanup closed a workspace running a foreground command'
 lab pane get "$BUSY_PANE" >/dev/null 2>&1 || fail 'cleanup closed the busy pane'
 lab workspace get "$CAPTAIN_WS" >/dev/null 2>&1 || fail 'cleanup closed a captain workspace outside the task grammar'
 [ -e "$HOME_DIR/state/claimant.meta" ] || fail 'cleanup touched a task record'
-pass 'real named lab cleanup closes journal-correlated and unjournaled leftovers, leaves claimed, busy, and captain workspaces, and preserves exact focus'
+pass 'real named lab cleanup closes journal-correlated and owned unjournaled leftovers, leaves foreign, claimed, busy, and captain workspaces, and preserves exact focus'
 
 FM_HOME="$HOME_DIR" FM_BACKEND=herdr HERDR_SESSION="$HERDR_LAB_SESSION" \
   PATH="$FAKEBIN:$HERDR_ORIGINAL_PATH" "$ROOT/bin/fm-herdr-session-cleanup.sh" \

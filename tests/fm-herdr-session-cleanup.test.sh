@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Focused safety tests for bin/fm-herdr-session-cleanup.sh.
 # Covers one exact cleanup on the journal and unjournaled paths, every
-# title/journal/claim/topology/agent/process refusal, locked revalidation races,
+# title/journal/claim/ownership/topology/agent/process refusal, locked revalidation races,
 # focus refusal, read errors, and repeat idempotence.
 set -u
 
@@ -160,7 +160,9 @@ fm_backend_herdr_cli() {
       printf '{"result":{"panes":'; fixture_panes; printf '}}\n'
       ;;
     "pane get")
-      printf '{"result":{"pane":{"pane_id":"%s","tab_id":"%s","workspace_id":"%s"}}}\n' "$PANE" "$TAB" "$WS"
+      jq -cn --arg pane "$PANE" --arg tab "$TAB" --arg ws "$WS" --rawfile cwd "$FIXTURE_DIR/cwd" \
+        '{result: {pane: {pane_id: $pane, tab_id: $tab, workspace_id: $ws,
+          cwd: ($cwd | rtrimstr("\n")), foreground_cwd: ($cwd | rtrimstr("\n"))}}}'
       ;;
     "agent get")
       case "$(cat "$FIXTURE_DIR/agent")" in
@@ -220,9 +222,20 @@ write_cross_home_v2() {
   write_v2 "$TMP_ROOT/other-home" "$WS" "$TAB" "$PANE"
 }
 
+# An owned pool worktree: a linked worktree of a project clone under this
+# home's projects/, outside the home directory itself.
+OWNED_PROJECT="$FM_HOME/projects/proj"
+OWNED_WORKTREE="$TMP_ROOT/pool/slot1/proj"
+FOREIGN_WORKTREE="$TMP_ROOT/other-home-pool/slot1/proj"
+git init -q "$OWNED_PROJECT"
+git -C "$OWNED_PROJECT" -c user.name=t -c user.email=t@example.invalid commit -q --allow-empty -m init
+mkdir -p "$(dirname "$OWNED_WORKTREE")" "$FOREIGN_WORKTREE"
+git -C "$OWNED_PROJECT" worktree add -q --detach "$OWNED_WORKTREE"
+
 reset_fixture() {
   rm -rf "$FIXTURE_DIR" "$TMP_ROOT"/*.lock "${FM_STATE_OVERRIDE:?}/"* "$FM_HOME/data" "$TMP_ROOT/sm-home"
   mkdir -p "$FIXTURE_DIR"
+  printf '%s\n' "$OWNED_WORKTREE" > "$FIXTURE_DIR/cwd"
   : > "$LOCK_LOG"; : > "$CLOSE_LOG"
   printf '%s\n' "$TITLE" > "$FIXTURE_DIR/title"
   printf '1\n' > "$FIXTURE_DIR/tabs"
@@ -310,6 +323,28 @@ reset_unjournaled; register_secondmate_home
 fm_herdr_session_cleanup >/dev/null 2>&1
 [ "$(wc -l < "$CLOSE_LOG" | tr -d ' ')" = 1 ] || fail "an unclaimed leftover beside a registered secondmate home was not closed"
 pass "unjournaled cleanup reads registered secondmate homes and closes an unclaimed leftover"
+
+reset_unjournaled; register_secondmate_home
+mkdir -p "$TMP_ROOT/sm-home/work"
+printf '%s\n' "$TMP_ROOT/sm-home/work" > "$FIXTURE_DIR/cwd"
+fm_herdr_session_cleanup >/dev/null 2>&1
+[ "$(wc -l < "$CLOSE_LOG" | tr -d ' ')" = 1 ] || fail "an unclaimed leftover inside a registered secondmate home was not closed"
+pass "unjournaled cleanup accepts a pane cwd inside a registered secondmate home"
+
+reset_unjournaled; printf '%s\n' "$FOREIGN_WORKTREE" > "$FIXTURE_DIR/cwd"
+warning=$(fm_herdr_session_cleanup 2>&1 >/dev/null)
+[ ! -s "$CLOSE_LOG" ] || fail "an idle leftover whose cwd is outside every local home was closed"
+case "$warning" in
+  *"not proven to be inside a local Firstmate home"*) ;;
+  *) fail "an unowned leftover was preserved without an ownership warning: $warning" ;;
+esac
+pass "an idle task-label leftover from an unknown home is preserved with a warning"
+reset_unjournaled; printf '%s\n' "$TMP_ROOT/missing-dir" > "$FIXTURE_DIR/cwd"
+assert_preserved "unjournaled leftover whose cwd no longer exists"
+reset_unjournaled; : > "$FIXTURE_DIR/cwd"
+assert_preserved "unjournaled leftover with no reported cwd"
+reset_unjournaled; : > "$FIXTURE_DIR/error-pane-get"
+assert_preserved "unjournaled leftover with an unreadable pane cwd"
 
 reset_unjournaled
 (
