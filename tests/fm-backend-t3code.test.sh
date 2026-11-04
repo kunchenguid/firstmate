@@ -245,7 +245,8 @@ home.mkdir()
 version = subprocess.check_output(["codex", "--version"], text=True).strip()
 with (home / "stderr.log").open("w") as errors:
     server = subprocess.Popen(["codex", "app-server", "--stdio"], cwd=worktree,
-        env=dict(os.environ, CODEX_HOME=str(home)), stdin=subprocess.PIPE,
+        env=dict(os.environ, CODEX_HOME=str(home),
+            TRACEPARENT="00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"), stdin=subprocess.PIPE,
         stdout=subprocess.PIPE, stderr=errors, text=True)
     try:
         def request(number, method, params):
@@ -263,10 +264,15 @@ with (home / "stderr.log").open("w") as errors:
         result = request(2, "config/read", {"cwd": worktree, "includeLayers": True})
         assert result["config"]["model"] == "gpt-5.6-sol", (version, result)
         assert result["config"]["shell_environment_policy"]["set"]["FM_TASK_ID"] == task, version
+        assert result["config"]["shell_environment_policy"]["set"]["TRACEPARENT"] == "", version
         result = request(3, "command/exec", {"cwd": worktree,
             "command": ["/usr/bin/printenv", "FM_TASK_ID"], "timeoutMs": 10000,
             "sandboxPolicy": {"type": "dangerFullAccess"}})
         assert result == {"exitCode": 0, "stdout": task + "\n", "stderr": ""}, (version, result)
+        result = request(4, "command/exec", {"cwd": worktree,
+            "command": ["/usr/bin/printenv", "TRACEPARENT"], "timeoutMs": 10000,
+            "sandboxPolicy": {"type": "dangerFullAccess"}})
+        assert result == {"exitCode": 0, "stdout": "\n", "stderr": ""}, (version, result)
         print(f"ok - {version}: project config retained; shell FM_TASK_ID={task}")
     finally:
         server.terminate()
@@ -1306,6 +1312,7 @@ test_spawn_codex_preserves_tracked_codex_config() {
     "$ROOT/bin/fm-spawn.sh" "$id" "$proj" codex --scout --model gpt-5.6-sol --backend t3code 2>&1 ); rc=$?
   expect_code 0 "$rc" "a codex t3code spawn must accept compatible tracked configuration"$'\n'"$out"
   [ "$(t3_toml_env "$wt/.codex/config.toml" FM_TASK_ID)" = "$id" ] || fail "tracked config must deliver FM_TASK_ID"
+  [ "$(t3_toml_env "$wt/.codex/config.toml" TRACEPARENT)" = '' ] || fail "tracked config must override an inherited TRACEPARENT when trace context is off"
   "$T3_PYTHON" - "$original" "$wt/.codex/config.toml" <<'CHECK'
 import pathlib, sys, tomllib
 original, installed = (pathlib.Path(p).read_bytes() for p in sys.argv[1:])
@@ -1555,9 +1562,9 @@ test_spawn_leases_slot_creates_thread_and_starts_launch_turn() {
   [ "$(t3_json_field "$settings" 'd.env.GIT_CONFIG_VALUE_0')" = "$state/$id.git-hooks" ] || fail "T3 workers must select the installed Git hook"
   [ "$(t3_json_field "$settings" 'd.env.GIT_CONFIG_KEY_0')" = core.hooksPath ] || fail "T3 workers must select core.hooksPath"
   [ "$(t3_json_field "$settings" 'd.env.GIT_CONFIG_COUNT')" = 1 ] || fail "T3 workers must select one Git config override"
-  [ "$(t3_json_field "$settings" 'd.env.TRACEPARENT')" = undefined ] || fail "TRACEPARENT must be absent when trace context is off"
+  [ "$(t3_json_field "$settings" 'd.env.TRACEPARENT')" = '' ] || fail "TRACEPARENT must override an inherited carrier when trace context is off"
   [ "$(t3_json_field "$settings" 'd.env.COMPACT_ADVISER_DISABLE')" = 1 ] || fail "settings env must carry the compact-adviser kill switch every launch carries"
-  [ "$(t3_json_field "$settings" 'Object.keys(d.env).sort().join(" ")')" = "COMPACT_ADVISER_DISABLE FM_T3CODE_ENV_KEYS FM_TASK_ID FM_TASK_INBOX GIT_CONFIG_COUNT GIT_CONFIG_KEY_0 GIT_CONFIG_VALUE_0 GOTMPDIR" ] || fail "a worker env block carries the task inbox and Git hook with the launch environment"
+  [ "$(t3_json_field "$settings" 'Object.keys(d.env).sort().join(" ")')" = "COMPACT_ADVISER_DISABLE FM_T3CODE_ENV_KEYS FM_TASK_ID FM_TASK_INBOX GIT_CONFIG_COUNT GIT_CONFIG_KEY_0 GIT_CONFIG_VALUE_0 GOTMPDIR TRACEPARENT" ] || fail "a worker env block carries the task inbox and Git hook with the launch environment"
   t3_excluded "$wt" .claude/settings.local.json || fail "the settings file must be git-excluded"
   assert_present "$wt/CLAUDE.local.md" "a claude worker gets the task-worker channel statement as CLAUDE.local.md"
   assert_grep "task worker launched by Firstmate" "$wt/CLAUDE.local.md" "CLAUDE.local.md must carry the channel statement"
@@ -1712,7 +1719,7 @@ GIT_CONFIG_KEY_0=core.hooksPath
 GIT_CONFIG_VALUE_0=$CASE_DIR/home/state/$id.git-hooks
 EOF
   [ "$($read FM_TASK_ID)" = undefined ] || fail "$label: a secondmate is not a task worker and must not carry FM_TASK_ID"
-  [ "$($read TRACEPARENT)" = undefined ] || fail "$label: TRACEPARENT must be absent when trace context is off"
+  [ "$($read TRACEPARENT)" = '' ] || fail "$label: TRACEPARENT must override an inherited carrier when trace context is off"
 }
 
 test_spawn_secondmate_runs_thread_in_home_with_env() {
@@ -1723,7 +1730,7 @@ test_spawn_secondmate_runs_thread_in_home_with_env() {
   make_t3_secondmate_home "$home" "$id"
   # The home's own settings, plus a key an earlier spawn wrote that this one does not.
   mkdir -p "$home/.claude"
-  printf '{"permissions":{"allow":["Bash(ls:*)"]},"env":{"CAPTAIN_VAR":"keep","LAVISH_AXI_HOST":"stale","FM_T3CODE_ENV_KEYS":"LAVISH_AXI_HOST"}}\n' \
+  printf '{"permissions":{"allow":["Bash(ls:*)"]},"env":{"CAPTAIN_VAR":"keep","LAVISH_AXI_HOST":"stale","TRACEPARENT":"00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01","FM_T3CODE_ENV_KEYS":"LAVISH_AXI_HOST"}}\n' \
     > "$home/.claude/settings.local.json"
   out=$(spawn_t3_secondmate "$id" "$home" claude claude-sonnet-5)
   expect_code 0 $? "fm-spawn.sh --backend t3code --secondmate should succeed against the fake T3 server"$'\n'"$out"
@@ -1752,11 +1759,11 @@ test_spawn_secondmate_runs_thread_in_home_with_env() {
   settings="$home/.claude/settings.local.json"
   assert_present "$settings" "a claude secondmate home gets .claude/settings.local.json"
   [ "$(t3_json_field "$settings" 'd.hooks')" = undefined ] || fail "a secondmate home carries no busy hooks"
-  [ "$(t3_json_field "$settings" 'd.env.FM_T3CODE_ENV_KEYS.split(",").length')" = 17 ] || fail "the env block should carry GOTMPDIR plus the secondmate environment, got $(t3_json_field "$settings" 'Object.keys(d.env)')"
+  [ "$(t3_json_field "$settings" 'd.env.FM_T3CODE_ENV_KEYS.split(",").length')" = 18 ] || fail "the env block should carry GOTMPDIR plus the secondmate environment, got $(t3_json_field "$settings" 'Object.keys(d.env)')"
   [ "$(t3_json_field "$settings" 'd.env.CAPTAIN_VAR')" = keep ] || fail "the home's own env entries must survive the T3 environment install"
   [ "$(t3_json_field "$settings" 'd.permissions.allow[0]')" = 'Bash(ls:*)' ] || fail "the home's own settings must survive the T3 environment install"
   [ "$(t3_json_field "$settings" 'd.env.LAVISH_AXI_HOST')" = undefined ] || fail "a key an earlier spawn wrote and this one does not must not linger"
-  [ "$(t3_json_field "$settings" 'Object.keys(d.env).length')" = 19 ] || fail "the env block should hold the home's entry, the 17 Firstmate keys, and their list, got $(t3_json_field "$settings" 'Object.keys(d.env)')"
+  [ "$(t3_json_field "$settings" 'Object.keys(d.env).length')" = 20 ] || fail "the env block should hold the home's entry, the 18 Firstmate keys, and their list, got $(t3_json_field "$settings" 'Object.keys(d.env)')"
   [ "$(t3_json_field "$settings" 'd.env.GOTMPDIR')" = "/tmp/fm-$id/gotmp" ] || fail "settings env must carry GOTMPDIR"
   read_settings() { t3_json_field "$settings" "d.env[\"$1\"]"; }
   assert_t3_secondmate_env read_settings "claude secondmate settings env" "$home" "$thread" autoarm "$id"
