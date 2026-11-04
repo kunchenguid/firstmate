@@ -603,6 +603,101 @@ test_active_dispatch_profile_allows_raw_launch_command() {
   pass "active crew-dispatch profile allows the raw launch-command escape hatch"
 }
 
+test_raw_rovo_launch_gets_no_positional_brief() {
+  local rec id out status launch
+  id="raw-rovo-nobrief-z15"
+  rec=$(make_spawn_case raw-rovo-nobrief claude "$id")
+  read_case_record "$rec"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" "rovo run --yolo")
+  status=$?
+  expect_code 1 "$status" "raw rovo launch should reach rovo's readiness gate, which the fake pane never satisfies"
+  assert_contains "$out" "rovo did not show a verified ready signal" "raw rovo launch did not take the rovo readiness path"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "rovo run --yolo" "raw rovo launch command was not emitted"
+  assert_not_contains "$launch" "launch-brief" "raw rovo launch got a positional brief argument"
+  pass "a raw rovo launch is not given the positional launch-brief argument"
+}
+
+test_plain_raw_launch_of_a_known_harness_gets_the_brief() {
+  local rec id out status launch
+  id="raw-known-plain-z15"
+  rec=$(make_spawn_case raw-known-plain claude "$id")
+  read_case_record "$rec"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" "codex --flag")
+  status=$?
+  expect_code 0 "$status" "plain raw launch of a known harness should spawn: $out"
+  assert_not_contains "$out" "launch brief was not appended" "a plain known-harness command was warned about"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "codex --flag \"\$('$ROOT/bin/fm-operational-input.sh' encode launch-brief < '$HOME_DIR/data/$id/launch-brief.md')\"" \
+    "plain raw launch of a known harness did not get the brief appended"
+  pass "a plain single raw launch of a known harness gets the launch brief appended"
+}
+
+test_raw_claude_launch_gets_the_brief_doorbell() {
+  local rec id out status launch doorbell
+  id="raw-claude-doorbell-z15"
+  rec=$(make_spawn_case raw-claude-doorbell claude "$id")
+  read_case_record "$rec"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" "claude --model x")
+  status=$?
+  expect_code 0 "$status" "raw claude launch should spawn: $out"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_not_contains "$launch" "encode launch-brief" "raw claude launch got the typed envelope Claude strips"
+  doorbell=$(claude_launch_brief_arg "$launch")
+  [ "$(printf '%s' "$doorbell" | "$ROOT/bin/fm-operational-input.sh" doorbell-kind)" = launch-brief ] \
+    || fail "raw claude launch did not end with a launch-brief doorbell: $launch"
+  pass "a raw claude launch gets the record-backed launch-brief doorbell"
+}
+
+# Only a plain single command for a known harness gets the brief appended.
+# Compound, command-substituted, wrapped, quoted-operator, commented and unknown-program
+# commands launch exactly as given, with a warning suggesting __BRIEF__.
+test_other_raw_launches_launch_unchanged_with_a_warning() {
+  local rec id out status raw launch n=0
+  # shellcheck disable=SC2016 # the $( ) is literal launch text.
+  for raw in "custom-agent --flag; cleanup" "custom-agent --flag && cleanup" "codex --flag | tee out" "codex --flag &" \
+    'codex --model $(pick-model | tr -d x)' "env -u CLAUDECODE rovo run --yolo" "codex -c 'notify=[a; b]'" "custom-agent --flag" "FOO=1 codex --flag" \
+    "codex --model x # use default permissions"; do
+    n=$((n + 1))
+    id=raw-other-$n-z15
+    rec=$(make_spawn_case "raw-other-$n" claude "$id")
+    read_case_record "$rec"
+    out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+      "$id" "$PROJ_DIR" "$raw" 2>&1)
+    status=$?
+    expect_code 0 "$status" "raw launch should still spawn: $raw"$'\n'"$out"
+    assert_contains "$out" "launch brief was not appended" "raw launch gave no warning: $raw"
+    launch=$(cat "$LAUNCH_LOG")
+    assert_contains "$launch" "$raw" "raw launch command was not emitted unchanged: $raw"
+    assert_not_contains "$launch" "launch-brief" "raw launch got the brief appended: $raw"
+  done
+  pass "a raw launch that is not a plain single known-harness command launches unchanged with a warning"
+}
+
+test_compound_raw_launch_places_brief_at_placeholder() {
+  local rec id out status launch
+  id="raw-compound-placeholder-z15"
+  rec=$(make_spawn_case raw-compound-placeholder claude "$id")
+  read_case_record "$rec"
+
+  # shellcheck disable=SC2016 # __OPINPUT__ and __BRIEF__ are literal launch placeholders.
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" 'custom-agent --flag "$(__OPINPUT__ encode launch-brief < __BRIEF__)"; cleanup' 2>&1)
+  status=$?
+  expect_code 0 "$status" "compound raw launch with __BRIEF__ should spawn: $out"
+  assert_not_contains "$out" "launch brief was not appended" "a compound command naming __BRIEF__ was warned about"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "custom-agent --flag \"\$('$ROOT/bin/fm-operational-input.sh' encode launch-brief < '$HOME_DIR/data/$id/launch-brief.md')\"; cleanup" \
+    "compound raw launch did not place the brief at its __BRIEF__ placeholder"
+  pass "a compound raw launch places the brief where it names __BRIEF__, with nothing appended"
+}
+
 test_chained_raw_launch_strips_ai_trailer_in_every_step() {
   local rec id out status launch body
   id=chained-raw-z15
@@ -2729,6 +2824,11 @@ test_active_dispatch_profile_requires_explicit_harness_for_scout
 test_active_dispatch_profile_allows_explicit_harness
 test_active_dispatch_profile_allows_positional_harness
 test_active_dispatch_profile_allows_raw_launch_command
+test_raw_rovo_launch_gets_no_positional_brief
+test_plain_raw_launch_of_a_known_harness_gets_the_brief
+test_raw_claude_launch_gets_the_brief_doorbell
+test_other_raw_launches_launch_unchanged_with_a_warning
+test_compound_raw_launch_places_brief_at_placeholder
 test_chained_raw_launch_strips_ai_trailer_in_every_step
 test_claude_threads_model_and_effort
 test_codex_threads_model_and_effort
