@@ -41,7 +41,10 @@ new_home() {
 set -eu
 case "$*" in
   'pr view '*headRefOid,reviewDecision*)
-    jq -n --arg head "$(cat "$FORGE/head")" '{headRefOid:$head,reviewDecision:"APPROVED"}' ;;
+    jq -n --arg head "$(cat "$FORGE/head")" \
+          --arg committed "$(cat "$FORGE/committed_at" 2>/dev/null || printf '')" '
+      {headRefOid:$head,reviewDecision:"APPROVED",
+       commits:(if $committed != "" then [{oid:$head,committedDate:$committed}] else [] end)}' ;;
   'pr view '*headRefOid*) cat "$FORGE/head" ;;
   'pr view '*state*) printf 'OPEN\n' ;;
   'api repos/o/r/pulls/8'|'api repos/o/r/pulls/9'|'api repos/o/r/pulls/10')
@@ -427,9 +430,80 @@ test_ack_matches_exact_thread_key() {
   pass 'ack matches thread keys exactly and does not snooze prefix-matching keys'
 }
 
+test_excluded_bot_does_not_cause_unanswered_wake() {
+  local home out
+  home=$(new_home excluded-bot)
+  printf '3600\n' > "$home/config/contribution-reraise-interval"
+  # An excluded / unconfigured bot comments at 08:00:00Z with author_association "NONE".
+  jq -n '[{id:501,user:{login:"greptile-apps[bot]"},author_association:"NONE",
+    body:"Excluded bot comment",html_url:"https://github.com/o/r/pull/8#issuecomment-501",
+    created_at:"2026-09-16T08:00:00Z",updated_at:"2026-09-16T08:00:00Z"}]' > "$home/forge/comments.json"
+  # Initial poll at 08:01:00Z with 1h interval.
+  with_home "$home" env FM_CONTRIBUTIONS_NOW=2026-09-16T08:01:00Z \
+    "$ROOT/bin/fm-contributions.sh" poll >/dev/null || fail 'initial poll failed'
+  # Condition should be clear and no unanswered record created because bot is excluded.
+  jq -e '.records[0].unanswered == null' "$home/data/delivery/contributions.json" >/dev/null \
+    || fail 'unanswered condition was created for excluded bot'
+  # Poll after interval (09:05:00Z) should still be silent.
+  out=$(with_home "$home" env FM_CONTRIBUTIONS_NOW=2026-09-16T09:05:00Z \
+    "$ROOT/bin/fm-contributions.sh" poll) || fail 'poll at 09:05:00Z failed'
+  [ -z "$out" ] || fail "excluded bot caused an alert: $out"
+
+  # Now configure the bot in config/contribution-review-bots and verify it is recognized.
+  printf 'greptile-apps[bot]\n' > "$home/config/contribution-review-bots"
+  with_home "$home" env FM_CONTRIBUTIONS_NOW=2026-09-16T09:05:00Z \
+    "$ROOT/bin/fm-contributions.sh" poll >/dev/null || fail 'poll with configured bot failed'
+  # Condition is now active and tracks the configured review bot:
+  jq -e '.records[0].unanswered != null and .records[0].unanswered.author == "greptile-apps[bot]"' \
+    "$home/data/delivery/contributions.json" >/dev/null \
+    || fail 'configured review bot was not recorded as unanswered'
+  ack_pending "$home" 2026-09-16T09:05:00Z
+  # After 1h interval passes (at 10:10:00Z), unanswered re-raise wake fires:
+  out=$(with_home "$home" env FM_CONTRIBUTIONS_NOW=2026-09-16T10:10:00Z \
+    "$ROOT/bin/fm-contributions.sh" poll) || fail 'poll at 10:10:00Z failed'
+  printf '%s\n' "$out" | grep -Eq 'unanswered https://github.com/o/r/pull/8 greptile-apps\[bot\] 2h$' \
+    || fail "configured review bot did not raise unanswered wake: $out"
+  pass 'excluded bots and non-maintainers do not cause alerts while configured review bots do'
+}
+
+test_push_after_comment_clears_via_forge_commit_time() {
+  local home out
+  home=$(new_home push-clears-via-commits)
+  # Maintainer commented at 08:00:00Z.
+  jq -n '[{id:601,user:{login:"maintainer"},author_association:"OWNER",
+    body:"Please update this",html_url:"https://github.com/o/r/pull/8#issuecomment-601",
+    created_at:"2026-09-16T08:00:00Z",updated_at:"2026-09-16T08:00:00Z"}]' > "$home/forge/comments.json"
+  # Initial poll at 08:01:00Z and ack.
+  with_home "$home" env FM_CONTRIBUTIONS_NOW=2026-09-16T08:01:00Z "$ROOT/bin/fm-contributions.sh" poll >/dev/null \
+    || fail 'initial poll failed'
+  ack_pending "$home" 2026-09-16T08:01:00Z
+  # At 12:05:00Z, unanswered wake fires.
+  out=$(with_home "$home" env FM_CONTRIBUTIONS_NOW=2026-09-16T12:05:00Z "$ROOT/bin/fm-contributions.sh" poll) \
+    || fail 'poll before push failed'
+  printf '%s\n' "$out" | grep -Eq 'unanswered' || fail "unanswered wake missing before push: $out"
+
+  # Author pushes HEAD_B committed at 12:30:00Z (after the comment at 08:00:00Z).
+  # Notice: we do NOT set forge/pushed_at (simulating GitHub REST PR endpoint lacking pushed_at).
+  # Instead, forge/committed_at is read via pr view --json headRefOid,reviewDecision,commits.
+  rm -f "$home/forge/pushed_at"
+  printf '%s\n' "$HEAD_B" > "$home/forge/head"
+  printf '2026-09-16T12:30:00Z\n' > "$home/forge/committed_at"
+
+  # Poll at 13:00:00Z: push after comment clears reminder!
+  out=$(with_home "$home" env FM_CONTRIBUTIONS_NOW=2026-09-16T13:00:00Z "$ROOT/bin/fm-contributions.sh" poll) \
+    || fail 'poll after push failed'
+  [ -z "$out" ] || fail "woke after author pushed commit after comment: $out"
+  with_home "$home" "$ROOT/bin/fm-contributions.sh" pending \
+    | jq -e 'any(.type == "unanswered") | not' >/dev/null \
+    || fail 'pending unanswered signal present after push'
+  jq -e '.records[0].unanswered == null' "$home/data/delivery/contributions.json" >/dev/null \
+    || fail 'record kept unanswered state after push'
+  pass 'push after comment clears reminder via commits committedDate from pr view'
+}
+
 if [ "${BASH_SOURCE[0]}" = "$0" ]; then
   failures=0
-  for test_name in test_reraise_after_ack test_clear_on_our_reply test_clear_on_no_action_verdict test_no_reraise_when_we_spoke_last test_clear_on_our_push test_ack_restarts_snooze test_reraise_is_opt_in test_reraise_interval_configurable test_reminder_waits_full_interval_not_every_poll test_push_does_not_clear_subsequent_comment test_ack_matches_exact_thread_key; do
+  for test_name in test_reraise_after_ack test_clear_on_our_reply test_clear_on_no_action_verdict test_no_reraise_when_we_spoke_last test_clear_on_our_push test_ack_restarts_snooze test_reraise_is_opt_in test_reraise_interval_configurable test_reminder_waits_full_interval_not_every_poll test_push_does_not_clear_subsequent_comment test_ack_matches_exact_thread_key test_excluded_bot_does_not_cause_unanswered_wake test_push_after_comment_clears_via_forge_commit_time; do
     ( "$test_name" ) || failures=$((failures + 1))
   done
   [ "$failures" -eq 0 ] || exit 1

@@ -492,7 +492,7 @@ observe() { # canonical GitHub URL -> normalized JSON
       || unobserved 'comment pages returned an unexpected shape' || return 1
     jq -e 'type == "array" and all(.[]; (.data.repository.pullRequest.reviewThreads.nodes | type) == "array")' "$TMP/threads.json" >/dev/null \
       || unobserved 'review thread pages returned an unexpected shape' || return 1
-    FORGE_ERR="$TMP/head.err" forge pr view "$url" --json headRefOid,reviewDecision > "$TMP/after.json" || return 1
+    FORGE_ERR="$TMP/head.err" forge pr view "$url" --json headRefOid,reviewDecision,commits > "$TMP/after.json" || return 1
     after=$(jq -er '.headRefOid | select(test("^[a-fA-F0-9]{40}$"))' "$TMP/after.json") \
       || unobserved 'head read named no head commit' || return 1
     [ "$head" = "$after" ] || unobserved 'head changed during observation' || return 1
@@ -510,14 +510,17 @@ observe() { # canonical GitHub URL -> normalized JSON
       | ([$issue_comments[] | select(.user.login == $c.user.login) | .created_at]
         + [$inline_comments[] | select(.user.login == $c.user.login) | .created_at]
         + [$reviews[] | select(.user.login == $c.user.login and ((.body // "") != "")) | .submitted_at]) as $replied_at
-      | (([$issue_comments[] | select(.user.login != $c.user.login and .created_at != null)
+      | (([$issue_comments[] | select(.user.login != $c.user.login and .created_at != null
+            and ((.author_association | IN("OWNER","MEMBER","COLLABORATOR")) or (.user.login | IN($bots[]))))
            | {author:.user.login, at:.created_at, source:(.html_url // ($c.html_url + "#issuecomment-" + (.id|tostring))), id:.id}]
-         + [$inline_comments[] | select(.user.login != $c.user.login and .created_at != null)
+         + [$inline_comments[] | select(.user.login != $c.user.login and .created_at != null
+            and ((.author_association | IN("OWNER","MEMBER","COLLABORATOR")) or (.user.login | IN($bots[]))))
            | . as $ic | (.in_reply_to_id // .id) as $root
            | select(($resolved | index($root)) == null)
            | select(any($inline_comments[]; .user.login == $c.user.login and (.in_reply_to_id // .id) == $root and .id > $ic.id) | not)
            | {author:.user.login, at:.created_at, source:(.html_url // ($c.html_url + "#discussion_r" + (.id|tostring))), id:.id}]
-         + [$reviews[] | select(.user.login != $c.user.login and .submitted_at != null and ((.body // "") != ""))
+         + [$reviews[] | select(.user.login != $c.user.login and .submitted_at != null and ((.body // "") != "")
+            and ((.author_association | IN("OWNER","MEMBER","COLLABORATOR")) or (.user.login | IN($bots[]))))
            | . as $rev
            | select(any($reviews[]; .user.login == $rev.user.login and (.state | IN("APPROVED","DISMISSED")) and .id > $rev.id) | not)
            | {author:.user.login, at:.submitted_at, source:(.html_url // ($c.html_url + "#pullrequestreview-" + (.id|tostring))), id:.id}])
