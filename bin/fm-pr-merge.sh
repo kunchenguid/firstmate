@@ -620,17 +620,7 @@ note_expected_head() {
 }
 
 publish_merge_head() {
-  if [ -n "$EXPECTED_HEAD" ]; then
-    FM_PR_MERGE_HEAD=$EXPECTED_HEAD
-  else
-    FM_PR_MERGE_HEAD=$1
-  fi
-}
-
-pin_expected_head() {
-  if [ -n "$EXPECTED_HEAD" ]; then
-    FM_PR_MERGE_HEAD=$EXPECTED_HEAD
-  fi
+  FM_PR_MERGE_HEAD=$1
 }
 
 gitlab_verify_mergeable() {
@@ -1796,7 +1786,6 @@ case "$PROVIDER" in
     require_current_away_authority || away_status=$?
     [ "$away_status" -eq 0 ] || exit "$away_status"
     refuse_github_queue_while_away || exit 2
-    pin_expected_head
     merge_status=0
     merge_output=$(gh pr merge "$PR_NUMBER" --repo "$PR_OWNER/$PR_REPO" \
       --match-head-commit "$FM_PR_MERGE_HEAD" \
@@ -1856,7 +1845,6 @@ case "$PROVIDER" in
     if [ "$FM_PR_AWAY_POSTURE" = true ]; then
       gitlab_merge_args=(--auto-merge=false)
     fi
-    pin_expected_head
     GITLAB_HOST="$FM_PR_HOST" glab mr merge "$PR_NUMBER" -R "$PROJECT_URL" \
       --sha "$FM_PR_MERGE_HEAD" --yes "$@" "${gitlab_merge_args[@]+"${gitlab_merge_args[@]}"}" || merge_status=$?
     if [ "$merge_status" -ne 0 ]; then
@@ -1889,7 +1877,6 @@ case "$PROVIDER" in
     # against a real instance), matching --match-head-commit/--sha above. tea
     # exposes no such flag on its own merge subcommand, so the API is called
     # directly through "tea api" instead.
-    pin_expected_head
     merge_output=$(tea api --login "$FORGEJO_LOGIN" --repo "$PR_OWNER/$PR_REPO" \
       -X POST "/repos/{owner}/{repo}/pulls/$PR_NUMBER/merge" \
       -f "Do=$forgejo_method" -f "head_commit_id=$FM_PR_MERGE_HEAD" 2>&1) || true

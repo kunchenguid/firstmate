@@ -3070,7 +3070,39 @@ test_expected_head_keeps_existing_refusals() {
     "expected-head-fj-status: the status refusal was skipped"
   [ -z "$(tea_merge_line "$case_dir/tea.log")" ] \
     || fail "expected-head-fj-status: a Forgejo merge ran on a failed status"
-  pass "fm-pr-merge keeps draft, hold, review, and check refusals when --expected-head matches"
+
+  case_dir=$(make_case expected-head-away)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" "$head"
+  write_away_record "$case_dir" --words 'merge task-x1 when green'
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/215 \
+    --expected-head "$head" --allow-red lint \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 2 "$rc" "expected-head-away: an attended-only waiver while away must still refuse"
+  assert_grep '--allow-red is attended-only' "$case_dir/stderr" \
+    "expected-head-away: the authority refusal was skipped"
+  assert_no_grep 'pr merge' "$case_dir/gh.log" \
+    "expected-head-away: gh pr merge ran against the away authority"
+
+  case_dir=$(make_case expected-head-identity)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" "$head"
+  printf '\npr=https://github.com/example/repo/pull/99\n' >> "$case_dir/state/task-x1.meta"
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/216 \
+    --expected-head "$head" \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "expected-head-identity: a different recorded PR must still refuse"
+  assert_grep 'is bound to https://github.com/example/repo/pull/99' "$case_dir/stderr" \
+    "expected-head-identity: the task identity refusal was skipped"
+  assert_no_grep 'pr merge' "$case_dir/gh.log" \
+    "expected-head-identity: gh pr merge ran for a task bound to another PR"
+  pass "fm-pr-merge keeps draft, hold, review, check, authority, and identity refusals when --expected-head matches"
 }
 
 # --- durable merge outcome ---------------------------------------------------
