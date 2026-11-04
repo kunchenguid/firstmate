@@ -1563,9 +1563,10 @@ test_away_spend_cap_counts_only_working_workers() {
   wt="$TMP_ROOT/cap-wt-2"; mkdir -p "$wt"
   fm_write_meta "$home/state/real-gone2.meta" "window=cap-lab:fm-no-such-window2" "kind=ship" "worktree=$wt"
   if command -v tmux >/dev/null 2>&1; then
-    TMUX_TMPDIR="$tmuxdir" tmux new-session -d -s cap-lab 'sleep 60' || fail "private tmux server did not start"
-    out=$(TMUX_TMPDIR="$tmuxdir" FM_HOME="$home" "$ROOT/bin/fm-afk-contract.sh" live-workers 2>&1)
-    TMUX_TMPDIR="$tmuxdir" tmux kill-server >/dev/null 2>&1 || true
+    # Unset TMUX so an inherited session cannot redirect these calls to the runner's own server; TMUX_TMPDIR alone then selects the private socket directory.
+    env -u TMUX -u TMUX_PANE TMUX_TMPDIR="$tmuxdir" tmux new-session -d -s cap-lab 'sleep 60' || fail "private tmux server did not start"
+    out=$(env -u TMUX -u TMUX_PANE TMUX_TMPDIR="$tmuxdir" FM_HOME="$home" "$ROOT/bin/fm-afk-contract.sh" live-workers 2>&1)
+    env -u TMUX -u TMUX_PANE TMUX_TMPDIR="$tmuxdir" tmux kill-server >/dev/null 2>&1 || true
     rm -rf "$tmuxdir"
     [ "$out" = 0 ] || fail "endpoint-gone records with live worktrees counted against the cap: $out"
   fi
