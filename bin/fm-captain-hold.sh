@@ -60,8 +60,8 @@
 # `answer` records the captain's exact words and resolves the call in the same
 # act. It requires a non-empty captain decision file of at most 8192 bytes and
 # refuses a file holding only an option selection (one letter or digit, bare,
-# in parentheses, or followed by `.` or `)`), because the displayed option
-# words must be recorded with it. It writes a resolution block while
+# in parentheses, or followed by `.` or `)`, with any surrounding blanks),
+# because the displayed option words must be recorded with it. It writes a resolution block while
 # preserving the leading hold-set stamp until the close succeeds (the previous
 # body is preserved and archived through tasks-axi --archive-body). It closes
 # a question with `tasks-axi done` - or, with `--release`, lifts the hold with
@@ -90,9 +90,9 @@
 # task through the very same `answer` path above, so every guard applies
 # identically no matter which channel the answer arrived on. The key IS the
 # task id - no identity arithmetic. An answer that is only an option selection
-# needs the label carrying the option words as the captain saw them; without it
-# the row is reported `skipped:` and feeds nothing, because missing words are
-# never inferred. A non-reconciled resolution record ends with one
+# (surrounding blanks ignored) needs the label carrying the option words as the
+# captain saw them; a missing or blank label reports the row `skipped:` and
+# feeds nothing, because missing words are never inferred. A non-reconciled resolution record ends with one
 # `Selected answer:` line only when it holds a single-line selection: the
 # displayed label when present, else the answer, else a decision that is one
 # line long. A multi-line decision with no `Answer:` or `Answer as shown to
@@ -355,8 +355,17 @@ BINDING_ANY='(any)'
 DECISION_TEXT=''
 DECISION_DIGEST=''
 
+is_blank() {  # <text>
+  case "$1" in *[![:space:]]*) return 1 ;; esac
+  return 0
+}
+
+# Surrounding blanks never turn a bare option into its displayed words.
 is_option_selection() {  # <text>
-  case "$1" in
+  local text=$1
+  text=${text#"${text%%[![:space:]]*}"}
+  text=${text%"${text##*[![:space:]]}"}
+  case "$text" in
     [A-Za-z0-9]|\([A-Za-z0-9]\)|[A-Za-z0-9][.\)]) return 0 ;;
   esac
   return 1
@@ -550,15 +559,18 @@ closed_answer_replay_mode_compatible() {  # <mode> <task-body>
 # and carries verified evidence; every other mode carries what the captain said.
 resolution_block() {  # <mode>
   local label='Captain decision:'
-  local selected=''
+  local selected='' lines
   [ "$1" != reconciled ] || label='Reconciliation evidence:'
   printf 'Resolution recorded by fm-captain-hold.\nDecision digest: %s\nResolution mode: %s\n\n%s\n%s\n' \
     "$DECISION_DIGEST" "$1" "$label" "$DECISION_TEXT"
   [ "$1" != reconciled ] || return 0
-  case "$DECISION_TEXT" in
-    *$'\nAnswer as shown to the captain: '*) selected=${DECISION_TEXT##*$'\nAnswer as shown to the captain: '} ;;
-    *$'\nAnswer: '*) selected=${DECISION_TEXT##*$'\nAnswer: '} ;;
-    *$'\n'*) ;;
+  # The leading newline lets one pattern find a marker that opens the text.
+  lines=$'\n'$DECISION_TEXT
+  case "$lines" in
+    *$'\nAnswer as shown to the captain: '*)
+      selected=${lines##*$'\nAnswer as shown to the captain: '} ;;
+    *$'\nAnswer: '*) selected=${lines##*$'\nAnswer: '} ;;
+    $'\n'*$'\n'*) ;;
     *) selected=$DECISION_TEXT ;;
   esac
   selected=${selected%%$'\n'*}
@@ -1586,7 +1598,7 @@ command_answers() {
     answer=$(sanitize_field "${answer:-}")
     [ -n "$answer" ] || continue
     label=$(sanitize_field "${label:-}")
-    if [ -z "$label" ] && is_option_selection "$answer"; then
+    if is_blank "$label" && is_option_selection "$answer"; then
       printf 'skipped: %s (option %s requires its displayed meaning)\n' "$key" "$answer"
       skipped=$((skipped + 1))
       continue

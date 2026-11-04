@@ -835,7 +835,7 @@ test_answer_records_and_closes() {
     > "$home/empty-answer.out" 2> "$home/empty-answer.err"; then
     fail "answer accepted an empty captain decision"
   fi
-  for shape in A b 7 '(c)' 'D.' 'e)'; do
+  for shape in A b 7 '(c)' 'D.' 'e)' 'A ' ' b'; do
     printf '%s\n' "$shape" > "$home/option-only.txt"
     if run_captain "$home" answer sample-guard-call --decision-file "$home/option-only.txt" \
       > "$home/option-answer.out" 2> "$home/option-answer.err"; then
@@ -899,7 +899,7 @@ test_answer_records_and_closes() {
 test_option_answers_keep_their_displayed_words() {
   local home show out rc shape n=0
   home=$(make_home option-words)
-  for shape in A b 7 '(c)' 'D.' 'e)'; do
+  for shape in A b 7 '(c)' 'D.' 'e)' 'A ' ' b'; do
     n=$((n + 1))
     run_captain "$home" hold "sample-option-$n" --title "Choose the start state" \
       --reason "Should the feature start enabled? A: Off until checks pass. B: On now." \
@@ -914,6 +914,15 @@ test_option_answers_keep_their_displayed_words() {
     assert_contains "$show" "held: yes" "option $shape without its meaning released the call"
     assert_contains "$show" "state: queued" "option $shape without its meaning closed the call"
   done
+
+  rc=0
+  out=$(printf 'sample-option-1\tA\t \n' \
+    | run_captain "$home" answers --source "option fixture") || rc=$?
+  [ "$rc" -ne 0 ] || fail "answers reported success for option A with a blank label"
+  assert_contains "$out" "skipped: sample-option-1 (option A requires its displayed meaning)" \
+    "answers did not name the missing meaning for option A with a blank label"
+  show=$(tasks_in "$home" show sample-option-1 --full)
+  assert_contains "$show" "held: yes" "option A with a blank label released the call"
 
   out=$(printf 'sample-option-1\tA\tOff until checks pass.\n' \
     | run_captain "$home" answers --source "option fixture") \
@@ -946,6 +955,20 @@ test_option_answers_keep_their_displayed_words() {
   esac
   assert_contains "$show" "Selected answer: Off until checks pass." \
     "the multi-line decision did not expose its selected answer"
+
+  printf 'Answer: Off until checks pass.\nBecause the gate is flaky.\n' > "$home/first-line.txt"
+  run_captain "$home" answer sample-option-4 --decision-file "$home/first-line.txt" >/dev/null \
+    || fail "answer refused a decision whose first line is the answer marker"
+  show=$(tasks_in "$home" show sample-option-4 --full)
+  assert_contains "$show" "Selected answer: Off until checks pass." \
+    "a first-line answer marker did not expose its selected answer"
+
+  printf 'Answer as shown to the captain: Off until checks pass.\nAnswer: A\n' > "$home/first-line-label.txt"
+  run_captain "$home" answer sample-option-5 --decision-file "$home/first-line-label.txt" >/dev/null \
+    || fail "answer refused a decision whose first line is the displayed-answer marker"
+  show=$(tasks_in "$home" show sample-option-5 --full)
+  assert_contains "$show" "Selected answer: Off until checks pass." \
+    "a first-line displayed-answer marker lost priority to a later raw answer"
   pass "option answers keep their displayed words and expose one selected-answer line"
 }
 
