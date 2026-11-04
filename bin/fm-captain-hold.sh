@@ -62,19 +62,19 @@
 # refuses a file holding only an option selection (one letter or digit, bare,
 # in parentheses, or followed by `.` or `)`), because the displayed option
 # words must be recorded with it. It writes a resolution block while
-# preserving the leading hold-set stamp until the close succeeds (the previous body is preserved and archived through
-# tasks-axi --archive-body). It closes a question with `tasks-axi done` - or,
-# with `--release`, lifts the hold with `tasks-axi unhold` so a captain-gated
-# WORK item resumes without closing - and restores resolution-first body
-# ordering. `--release` is attended-only: while the away-posture record exists
-# (state/.afk-contract, or the daemon flag state/.afk, read as away; a quiet
-# record is a present captain) it is refused before anything is written, so an
-# unattended supervisor cannot free held work with its own words and then steer
-# it; the captain releases the hold in an attended session. A closing answer
-# without `--release` is not gated by posture. An exact retry also completes
-# unfinished ordering normalization and
-# is idempotent only when its requested close mode
-# matches the newest record; a changed decision or a mode mismatch is rejected.
+# preserving the leading hold-set stamp until the close succeeds (the previous
+# body is preserved and archived through tasks-axi --archive-body). It closes
+# a question with `tasks-axi done` - or, with `--release`, lifts the hold with
+# `tasks-axi unhold` so a captain-gated WORK item resumes without closing - and
+# restores resolution-first body ordering. `--release` is attended-only: while
+# the away-posture record exists (state/.afk-contract, or the daemon flag
+# state/.afk, read as away; a quiet record is a present captain) it is refused
+# before anything is written, so an unattended supervisor cannot free held work
+# with its own words and then steer it; the captain releases the hold in an
+# attended session. A closing answer without `--release` is not gated by
+# posture. An exact retry also completes unfinished ordering normalization and
+# is idempotent only when its requested close mode matches the newest record;
+# a changed decision or a mode mismatch is rejected.
 # A re-held task may record a new answer on top. On a task already closed outside this script,
 # `answer` records the missing resolution block (the old `repair` path) only
 # when the task still carries the captain-hold provenance tasks-axi preserves

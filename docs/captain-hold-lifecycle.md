@@ -87,12 +87,15 @@ The `answer` subcommand records the captain's exact words and resolves the call 
 | `answer` | Closes a question-shaped call. |
 | `answer --release` | Frees a captain-gated work item to proceed without completing it. |
 
-It requires a non-empty captain decision file of at most 8192 bytes.
+It requires a non-empty captain decision file of at most 8192 bytes and refuses a file that is only an option selection, such as a bare `A`, because the words the captain saw are recorded with the choice and never inferred.
+`bin/fm-captain-hold.sh --help` owns the exact selection shapes it refuses.
 `answer --release` is attended-only: while the away-posture record exists it is refused before anything is written, and the keyed-answer intake refuses a `release` line the same way, because only the captain in an attended session releases a captain hold.
 A quiet record is a present captain and does not refuse.
 It then works in this order:
 
 1. It durably writes a resolution block carrying the decision digest and a `Resolution mode:`.
+   A non-reconciled block also ends with at most one single-line `Selected answer:` field, the deterministic value a reader prints for an answered call instead of parsing the decision prose.
+   `bin/fm-captain-hold.sh --help` owns how that value is chosen and when it is absent.
 2. It retains the leading hold-set stamp until the selected `tasks-axi done` or `tasks-axi unhold` transition succeeds.
 3. It then restores the successful record's resolution-first body ordering.
    The previous body remains preserved below the block and archived through tasks-axi `--archive-body`.
@@ -225,6 +228,7 @@ Each key is reported as follows:
 | Key | Result |
 | --- | --- |
 | Names no task, names a task that is not captain-held, or names a task already closed | Reported as `skipped:` and feeds nothing. |
+| Carries an answer that is only an option selection with an empty label | Reported as `skipped:` naming the missing displayed meaning, and feeds nothing, because the option words are never inferred. |
 | A replay whose answer and requested close mode match the newest record | An idempotent `closed:`. |
 | A replay with a mode mismatch | Skipped. |
 
@@ -552,6 +556,7 @@ The suite does not test the accepted merge-to-cleanup re-hold window or asynchro
 - Answer-time resolution works through a bound channel with task-id keys.
   This includes the `release` mode, mode-matched replay idempotence, and the refusal of drifted, mode-mismatched, absent, unheld, and already-closed keys.
 - The chat channel reaches the same intake.
+- `test_option_answers_keep_their_displayed_words` exercises the option-word guard: `answer` refuses a decision file that is only an option selection, the intake skips an option selection with no label and closes it once the label arrives, the record keeps the raw selection with its displayed meaning, each answered fixture exposes one `Selected answer:` field cut at the first newline of a multi-line decision, and a reconciled close exposes none.
 - `test_release_is_attended_only` exercises the attended-only release: the away posture record and the away daemon flag each refuse `answer --release` and a `release` intake line without writing, while no record and a quiet record release, and a closing answer is not gated.
 - Hold-set stamping precedes visible hold state, preserves an active lifecycle's timestamp, and resets after release.
 - Interrupted answer closure retains the stamp until close and restores resolution-first ordering on retry.
