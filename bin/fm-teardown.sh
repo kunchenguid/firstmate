@@ -1799,9 +1799,10 @@ work_is_landed() {
   content_in_default
 }
 
-# The completion links this teardown already holds locally. A scout's
-# deliverable is its report, a local-only ship lands on local main, and every
-# other ship carries the PR recorded on its own record.
+# The completion links this teardown already holds locally. A finished scout's
+# deliverable is its report while a forced scout is recorded as discarded with
+# no report, a local-only ship lands on local main, and every other ship
+# carries the PR recorded on its own record.
 BACKLOG_DONE_ARGS=()
 backlog_done_args() {
   local data_relative
