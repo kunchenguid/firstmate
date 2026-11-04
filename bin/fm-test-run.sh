@@ -2657,7 +2657,9 @@ PID_FILE="$PID_DIR/$RUN_ID.pid"
 # shellcheck disable=SC2329
 abort_run() {
   local sig=$1 p pids ids='' live w=0
-  trap - TERM INT
+  # Ignored, not restored to default: a repeated --stop or TERM during the grace
+  # period must not end the runner before the final KILL and strand a child.
+  trap '' TERM INT
   pids=$(descendants_of "$$")
   # Each child's start identity is taken before any signal, so a pid that exits
   # and is reused by an unrelated process is never mistaken for a survivor.

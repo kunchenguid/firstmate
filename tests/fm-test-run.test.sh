@@ -1704,6 +1704,63 @@ EOF
   pass "--stop kills children that ignore TERM before the run exits"
 }
 
+# A second --stop while the first is still in its grace period must not end the
+# runner early: with TERM restored to its default during cleanup, the repeat
+# killed the runner before its final KILL and left TERM-ignoring children alive.
+test_repeated_stop_during_grace_still_kills_children() {
+  local tmp repo runner sleeper out fix pid id rc w pid_dir p script_pid sleep_pid
+  tmp=$(fm_test_tmproot fm-test-run-stop-repeat) || fail "could not create the fixture root"
+  repo="$tmp/repo"
+  runner="$repo/bin/fm-test-run.sh"
+  sleeper=tests/fm-sleep-fixture.test.sh
+  pid_dir="$tmp/fm-test-run-pids-$(id -u)"
+  mkdir -p "$repo/bin" "$repo/tests"
+  cp "$RUNNER" "$runner"
+  cp "$ROOT/tests/git-config-helpers.sh" "$repo/tests/"
+  cat >"$repo/$sleeper" <<'EOF'
+#!/usr/bin/env bash
+trap '' TERM
+sleep 60 &
+printf "%s %s\n" "$$" "$!" >"$TMPDIR/fixture.pid"
+wait
+EOF
+  chmod +x "$runner" "$repo/$sleeper"
+  out="$tmp/run.out"
+  fix="$tmp/fixture.pid"
+  TMPDIR="$tmp" "$runner" "$sleeper" >"$out" 2>&1 &
+  pid=$!
+  w=0
+  while [ ! -s "$fix" ] && [ "$w" -lt 100 ]; do
+    sleep 0.1
+    w=$((w + 1))
+  done
+  [ -s "$fix" ] || fail "the fixture script never started"
+  id=$(TMPDIR="$tmp" "$runner" --stop | awk -v p="pid=$pid" '$2 == p {print $1}')
+  [ -n "$id" ] || fail "--stop did not list the live run"
+  # The first stop starts the grace period; the repeats land inside it, since
+  # the TERM-ignoring children keep the runner in cleanup for about two seconds.
+  TMPDIR="$tmp" "$runner" --stop "$id" >/dev/null || fail "first --stop failed"
+  for w in 1 2 3; do
+    sleep 0.2
+    TMPDIR="$tmp" "$runner" --stop "$id" >/dev/null 2>&1 || true
+    kill -TERM "$pid" 2>/dev/null || true
+  done
+  rc=0
+  wait "$pid" || rc=$?
+  [ "$rc" -eq 143 ] || fail "a repeatedly stopped run must still exit 143, got $rc: $(cat "$out")"
+  grep -q "FM_TEST_ABORTED signal=15 run=$id" "$out" \
+    || fail "repeatedly stopped run did not report FM_TEST_ABORTED: $(cat "$out")"
+  read -r script_pid sleep_pid <"$fix"
+  for p in "$script_pid" "$sleep_pid"; do
+    case $(ps -o stat= -p "$p" 2>/dev/null) in
+      ''|Z*) ;;
+      *) fail "TERM-ignoring process $p outlived the repeatedly stopped run" ;;
+    esac
+  done
+  [ ! -e "$pid_dir/$id.pid" ] || fail "the repeatedly stopped run left its registry record behind"
+  pass "a repeated --stop during the grace period still kills TERM-ignoring children"
+}
+
 # A child pid that exits during the grace and is reused by an unrelated process
 # must not be killed: abort_run only KILLs pids whose start identity is the one
 # it recorded. A stubbed ps reports a changed start time for the fixture's
@@ -2259,6 +2316,7 @@ run_unix_only test_stop_refuses_an_unprivate_registry
 test_windows_bash_skips_run_registration
 test_term_to_runner_aborts_a_hung_suite
 run_unix_only test_stop_kills_term_ignoring_children
+run_unix_only test_repeated_stop_during_grace_still_kills_children
 run_unix_only test_stop_spares_a_pid_whose_identity_changed
 test_per_script_timeout_bounds_a_hang
 test_changed_bound_gives_slow_watcher_suites_headroom
