@@ -4106,7 +4106,8 @@ if teardown_owns_worktree && [ -d "$WT" ] && [ "$FORCE" != "--force" ]; then
   validate_worktree_teardown_safety || exit 1
 fi
 
-if [ "$TEARDOWN_BACKLOG_APPLIES" = 1 ]; then
+teardown_record_pending_close() {
+[ "$TEARDOWN_BACKLOG_APPLIES" = 1 ] && [ "$BACKLOG_CLOSED" != 1 ] || return 0
 # Roll the accepted legacy incarnation's stamp back to the record's exact
 # pre-stamp bytes. Uses perl - already in the teardown lifecycle's curated PATH
 # (truncate is not, and is absent on stock macOS) - and verifies the restored
@@ -4167,7 +4168,9 @@ teardown_legacy_stamp_rollback() {
     fi
     exit 1
   fi
-else
+}
+
+if [ "$TEARDOWN_BACKLOG_APPLIES" != 1 ]; then
   if [ "$CLEANUP_RECOVERY" = orca ]; then
     BACKLOG_SKIP_REASON="Orca cleanup recovery is not a launched backlog worker"
   else
@@ -4244,6 +4247,7 @@ fi
 # T3 project is deliberately left in place: project.delete refuses while the
 # archived thread exists and would take that transcript with it under force.
 if [ "$BACKEND" = t3code ]; then
+  teardown_record_pending_close
   fm_backend_kill t3code "$T" || {
     echo "error: could not stop and archive T3 thread $T for $ID; start T3 Code (or archive the thread there) and re-run teardown" >&2
     endpoint_close_refusal "$ID" t3code "$T" 0 || exit 1
@@ -4266,6 +4270,7 @@ if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
     exit 1
   fi
   teardown_final_safety_or_exit
+  teardown_record_pending_close
   if [ -d "$WT" ]; then
     branch=$(git -C "$WT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)
     if [ "$branch" != "HEAD" ]; then
@@ -4282,6 +4287,7 @@ if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
 elif [ "$KIND" != secondmate ] && ! teardown_owns_worktree; then
   :
 elif [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
+  teardown_record_pending_close
   branch=$(git -C "$WT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)
   if [ "$branch" != "HEAD" ]; then
     if git -C "$WT" checkout --detach -q 2>/dev/null; then
@@ -4310,6 +4316,7 @@ elif [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
   teardown_finish_treehouse_return early
 fi
 
+teardown_record_pending_close
 if [ "$BACKEND" = rex ] && [ "$KIND" = secondmate ] && [ "$TEARDOWN_WINDOWLESS" != 1 ]; then
   ( unset FM_ROOT_OVERRIDE; FM_HOME="$HOME_PATH" FM_ROOT="$HOME_PATH" STATE="$HOME_PATH/state" \
     fm_backend_kill "$BACKEND" "$T" "" "fm-$ID" ) \

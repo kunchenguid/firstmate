@@ -5377,6 +5377,7 @@ test_orca_worktree_with_a_spared_process_is_not_removed() {
   write_meta "$case_dir" no-mistakes ship
   land_shippable_commit "$case_dir"
   configure_orca_teardown_case "$case_dir"
+  seed_backlog_in_flight "$case_dir"
   ( cd "$case_dir/wt" && exec sleep 300 ) &
   pid=$!
   disown
@@ -5390,6 +5391,10 @@ test_orca_worktree_with_a_spared_process_is_not_removed() {
   assert_present "$case_dir/state/task-x1.meta" "orca-occupied: records dropped, so no retry is possible"
   grep -Eq "^[^	]+	task-x1	-	kept	[^	]*${pid}[^	]*	" "$case_dir/state/teardown-processes.log" \
     || fail "orca-occupied: the kept worktree was not logged"
+  replay_close_marker "$case_dir" || fail "orca-occupied: startup replay failed"
+  assert_present "$case_dir/state/task-x1.meta" "orca-occupied: startup replay dropped the retained task"
+  [ "$(backlog_row_state "$case_dir")" = in_flight ] \
+    || fail "orca-occupied: startup replay closed the backlog item over a kept worktree"
   pass "an Orca worktree that a spared process occupies is kept and the records survive for a retry"
 }
 
