@@ -21,6 +21,7 @@
 #
 # Usage:
 #   fm-captain-hold.sh hold <task-id> --reason <reason> \
+#     --rec <pick> [--option <text>]... [--key <slug>] \
 #     [--title <title>] [--repo <repo>] [--origin <origin-id>] [--until YYYY-MM-DD]
 #   fm-captain-hold.sh answer <task-id> --decision-file <path> [--release]
 #   fm-captain-hold.sh answers [<legacy-origin> | --any-origin] --source <provenance>   (keyed answers on stdin)
@@ -56,6 +57,15 @@
 # `--until` records the captain's own deferral date through `tasks-axi hold
 # --until`, so a "revisit later" answer is stored as a date instead of a live
 # card.
+#
+# A new ask must carry the agent's recommended pick: `--rec <pick>` is required
+# (refused otherwise, before anything is written) and is appended to the hold
+# reason as a `Rec:` line, after up to four `--option <text>` numbered lines. An
+# already captain-held task and a `--until` deferral record are not new asks.
+# `--key <slug>` (the decision-key charset of bin/fm-classify-lib.sh) names the
+# subject of the ask and is recorded on a `Captain hold key:` body line: a new
+# ask whose key matches another open captain hold creates nothing and says it
+# attached to the existing one, whose id is printed instead.
 #
 # `answer` records the captain's exact words and resolves the call in the same
 # act. It requires a non-empty captain decision file of at most 8192 bytes and
@@ -855,16 +865,16 @@ task_identity() {
   printf '%s' "$id"
 }
 
-write_hold_origin() {  # <task-id> <shown-body> <origin>
-  local id=$1 body=$2 origin=$3 stamp rest new_body tmp
+write_hold_origin() {  # <task-id> <shown-body> <origin> [<label>, default "origin"]
+  local id=$1 body=$2 origin=$3 label=${4:-origin} stamp rest new_body tmp
   body=$(decode_shown_value "$body") \
     || fail "could not decode the existing body for $id"
   stamp=$(printf '%s\n' "$body" | sed -n 1p)
   [ -n "$(body_hold_set_timestamp "$body")" ] \
     || fail "task $id lost its hold-set stamp before its origin was recorded"
-  rest=$(printf '%s\n' "$body" | sed 1d | awk '!/^Captain hold origin: /' \
+  rest=$(printf '%s\n' "$body" | sed 1d | awk -v p="Captain hold $label: " 'index($0, p) != 1' \
     | awk 'NF || started { started = 1; print }')
-  new_body=$(printf '%s\nCaptain hold origin: %s' "$stamp" "$origin")
+  new_body=$(printf '%s\nCaptain hold %s: %s' "$stamp" "$label" "$origin")
   if [ -n "$rest" ]; then
     new_body=$(printf '%s\n\n%s' "$new_body" "$rest")
   fi
@@ -1083,7 +1093,7 @@ verify_entry_durable() {  # <origin-or-empty> <entry>; prints "<id> <how> <origi
 }
 
 command_hold() {
-  local id=${1:-} title='' reason='' repo='' origin='' until='' show state existing_title body='' hold_kind hold_set occurrence
+  local id=${1:-} title='' reason='' rec='' key='' options='' nopt=0 dup='' other pre repo='' origin='' until='' show state existing_title body='' hold_kind hold_set occurrence
   local existing_hold_kind='' existing_held='' preserve_hold_set=0 stored_reason original_body='' hold_status=0
   [ "$#" -ge 1 ] || { usage >&2; exit 2; }
   shift
@@ -1091,6 +1101,13 @@ command_hold() {
     case "$1" in
       --title) shift; title=${1:-} ;;
       --reason) shift; reason=${1:-} ;;
+      --rec) shift; rec=${1:-} ;;
+      --key) shift; key=${1:-} ;;
+      --option)
+        shift; nopt=$((nopt + 1))
+        [ "$nopt" -le 4 ] || fail "at most 4 --option values are allowed"
+        options="${options}${nopt}. ${1:-}"$'\n'
+        ;;
       --repo) shift; repo=${1:-} ;;
       --origin) shift; origin=${1:-} ;;
       --until) shift; until=${1:-} ;;
@@ -1100,6 +1117,11 @@ command_hold() {
   done
   validate_slug task-id "$id"
   [ -n "$reason" ] || fail "reason must not be empty"
+  [ -z "$key" ] || _fm_decision_slug_ok "$key" || fail "--key must be a privacy-safe slug: $key"
+  # The pick and options live in the reason text, so every place the hold is shown carries them.
+  if [ -n "$rec" ]; then
+    reason="${reason}"$'\n'"${options}Rec: ${rec}"
+  fi
   # bin/fm-hold-reason-lib.sh owns the storage constraint and reversible encoding.
   stored_reason=$(fm_hold_reason_encode "$reason") || fail "could not encode the hold reason"
   if [ -n "$origin" ]; then
@@ -1118,6 +1140,31 @@ command_hold() {
   esac
   acquire_task_control_lock "$id"
   require_tasks_axi
+  pre=0
+  if task_show "$id"; then
+    [ "$(show_field_value "$TASK_SHOW_OUTPUT" hold_kind)" = captain ] \
+      && [ "$(show_field_value "$TASK_SHOW_OUTPUT" held)" = yes ] && pre=1
+  fi
+  if [ "$pre" = 0 ] && [ -z "$until" ]; then
+    [ -n "$rec" ] || fail "a new captain ask must carry your recommended pick: add --rec \"<the option you recommend and why>\" (optionally 1-4 --option \"<text>\")"
+    # ponytail: locks are per task id, so two different ids racing on one key can both pass; add a key lock if that bites.
+    if [ -n "$key" ]; then
+      while IFS= read -r other; do
+        [ "$other" != "$id" ] || continue
+        task_show "$other" || continue
+        [ "$(show_field_value "$TASK_SHOW_OUTPUT" hold_kind)" = captain ] || continue
+        [ "$(show_field_value "$TASK_SHOW_OUTPUT" held)" = yes ] || continue
+        [ "$(printf '%s\n' "$(decode_shown_value "$(show_field "$TASK_SHOW_OUTPUT" body)")" | sed -n 's/^Captain hold key: \(.*\)$/\1/p' | head -1)" = "$key" ] || continue
+        dup=$other
+        break
+      done < <(open_task_ids)
+      if [ -n "$dup" ]; then
+        printf 'fm-captain-hold: decision key %s is already an open captain hold; attached to %s, no new hold created for %s\n' "$key" "$dup" "$id" >&2
+        printf '%s\n' "$dup"
+        exit 0
+      fi
+    fi
+  fi
   if task_show "$id"; then
     show=$TASK_SHOW_OUTPUT
     state=$(show_field "$show" state)
@@ -1191,6 +1238,11 @@ command_hold() {
   publish_parent_hold "$id" "$occurrence" needs-decision "$reason"
   if [ -n "$origin" ]; then
     write_hold_origin "$id" "$(show_field "$show" body)" "$origin" || exit $?
+  fi
+  if [ -n "$key" ]; then
+    task_show_or_fail "$id" "task $id disappeared before its decision key was recorded"
+    show=$TASK_SHOW_OUTPUT
+    write_hold_origin "$id" "$(show_field "$show" body)" "$key" key || exit $?
   fi
   printf '%s\n' "$id"
 }
