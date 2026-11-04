@@ -2473,8 +2473,7 @@ spawn_hc_placement_preflight() {
   esac
   HC_SES=$(fm_backend_hc_container_ensure) || return 1
   fm_backend_hc_machine_ready "$HC_SES" "$HC_MACHINE" || return 1
-  HC_CLONE="$HC_PROJECTS/${PROJ_ABS##*/}"
-  fm_backend_hc_remote_clone_check "$HC_SES" "$HC_MACHINE" "$HC_CLONE" "$PROJ_ABS" || return 1
+  HC_CLONE=$(fm_backend_hc_remote_clone_check "$HC_SES" "$HC_MACHINE" "$HC_PROJECTS/${PROJ_ABS##*/}" "$PROJ_ABS") || return 1
   HC_REMOTE_ROOT="$HC_PROJECTS/.fm-hc/$(fm_backend_hometag)"
   mkdir -p "$STATE" || return 1
   state_real=$(cd "$STATE" && pwd -P) || return 1

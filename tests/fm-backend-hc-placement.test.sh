@@ -488,6 +488,40 @@ test_placed_spawn_refuses_before_creating_anything() {
   pass "hc placement: a machine that is down, lacks the clone, the route back, or trust, or an unsupported harness, refuses before anything is created"
 }
 
+# A projects path with a symlink component (macOS /tmp is /private/tmp) names
+# the clone by a path git reports only in its physical form. Oracle: the clone
+# is the same directory either way, so the check must accept it and hand back
+# the physical path the rest of the spawn uses; a symlinked path with no clone
+# behind it is still refused.
+test_placed_clone_check_resolves_a_symlinked_projects_path() {
+  local id=link1 out rc tag meta
+  setup_case clone-link
+  make_repos "$D" proj
+  ln -s "$D/remote/code" "$D/remote/link"
+  rc=0
+  out=$(hc_shell 'fm_backend_hc_remote_clone_check fmtest laptop /fm-remote-root/link/proj "'"$D/proj"'"' 2>&1) || rc=$?
+  expect_code 0 "$rc" "a clone reached through a symlinked projects path is the clone: $out"
+  assert_equals "$VROOT/code/proj" "$out" "the check reports the clone's physical path there"
+  rc=0
+  out=$(hc_shell 'fm_backend_hc_remote_clone_check fmtest laptop /fm-remote-root/link/nosuch "'"$D/proj"'"' 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "a symlinked path with no clone behind it must be refused"
+  assert_contains "$out" "no clone of this project" "the refusal names the missing clone"
+
+  placed_spawn_case clone-link-spawn "$id"
+  ln -s "$D/remote/code" "$D/remote/link"
+  printf 'laptop\nfirstmate-as mini\nprojects %s/link\n' "$VROOT" > "$HOMEDIR/config/hc-machine"
+  tag=$(hometag_for "$HOMEDIR")
+  rc=0
+  out=$(run_placed_spawn "$id") || rc=$?
+  expect_code 0 "$rc" "a placed spawn under a symlinked projects path should succeed"$'\n'"$out"
+  meta="$HOMEDIR/state/$id.meta"
+  assert_grep "hc_clone=$VROOT/code/proj" "$meta" "the record names the clone's physical path"
+  assert_grep "worktree=$VROOT/code/.fm-hc/$tag/$id" "$meta" "the worktree is recorded by git's physical path for it: $(cat "$meta")"
+  "$REAL_GIT" -C "$D/remote/code/proj" worktree list | grep -F "$D/remote/code/.fm-hc/$tag/$id" >/dev/null \
+    || fail "the worktree is not a linked worktree of the clone there"
+  pass "hc placement: a symlinked projects path reaches its clone, and a symlinked path with no clone is refused"
+}
+
 # --- fm-teardown of a placed ship ---------------------------------------------
 
 # placed_teardown_case <name>: a placed ship task-x1 whose worktree is a linked
@@ -666,6 +700,7 @@ fm_test_run \
   test_placed_busy_state_reads_hc_native_status \
   test_placed_spawn_builds_everything_on_the_machine \
   test_placed_spawn_refuses_before_creating_anything \
+  test_placed_clone_check_resolves_a_symlinked_projects_path \
   test_placed_teardown_refuses_unlanded_or_unreachable_work \
   test_placed_teardown_removes_landed_work_there \
   test_placed_done_gate_reads_the_head_there \

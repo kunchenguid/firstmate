@@ -528,15 +528,22 @@ fm_backend_hc_url_key() {  # <url>
 }
 
 # fm_backend_hc_remote_clone_check: <clone> on <machine> is a git checkout's
-# top level whose origin is the same remote as <local-project>'s origin.
+# top level whose origin is the same remote as <local-project>'s origin. Git
+# reports the top level by its physical path, so <clone> is resolved there
+# first (a projects path under macOS /tmp is /private/tmp); on success the
+# check prints that physical path for the caller to use as the clone.
 fm_backend_hc_remote_clone_check() {  # <session> <machine> <clone> <local-project>
-  local session=$1 machine=$2 clone=$3 project=$4 top rc local_url remote_url
-  top=$(fm_backend_hc_remote_git "$session" "$machine" "$clone" rev-parse --show-toplevel 2>/dev/null) && rc=0 || rc=$?
+  local session=$1 machine=$2 clone=$3 project=$4 phys top rc local_url remote_url
+  # shellcheck disable=SC2016 # expands on the other machine
+  phys=$(fm_backend_hc_remote_exec "$session" "$machine" 60 - /bin/sh -c 'cd "$1" && pwd -P' sh "$clone" 2>/dev/null) && rc=0 || rc=$?
+  if [ "$rc" -eq 0 ]; then
+    top=$(fm_backend_hc_remote_git "$session" "$machine" "$phys" rev-parse --show-toplevel 2>/dev/null) && rc=0 || rc=$?
+  fi
   if [ "$rc" -eq 255 ]; then
     echo "error: could not reach hc machine '$machine' to check the project clone at $clone" >&2
     return 1
   fi
-  if [ "$rc" -ne 0 ] || [ "$top" != "$clone" ]; then
+  if [ "$rc" -ne 0 ] || [ -z "$phys" ] || [ "$top" != "$phys" ]; then
     echo "error: hc machine '$machine' has no clone of this project at $clone (clone it there first, from the same origin)" >&2
     return 1
   fi
@@ -548,7 +555,7 @@ fm_backend_hc_remote_clone_check() {  # <session> <machine> <clone> <local-proje
     echo "error: the clone at $clone on '$machine' tracks origin '$remote_url', not this project's '$local_url'" >&2
     return 1
   fi
-  return 0
+  printf '%s\n' "$phys"
 }
 
 # fm_backend_hc_reverse_route_check: prove that <machine>'s own hc reaches
