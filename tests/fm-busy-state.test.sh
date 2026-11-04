@@ -465,6 +465,18 @@ test_kimi_unverified_gate() {
   pass "standalone kimi classifies unknown until the live verification gate opens"
 }
 
+test_pi_stream_version_floor_accepts_verified_rejects_unverified() {
+  local version
+  version=1.2.0
+  fm_busy_pi_stream_version_supported "$version" \
+    || fail "Pi $version must pass the verified stream gate"
+  for version in '' 1.1.9 0.82.0 1.2 1.2.1 1.3.0 1.10.0 2.0.0 1.4.0 1.x.0 1.2.0.1 1.2.0-beta.3 1.2.0+build .1.2.0 1.2.0. 1000000000.0.0 'pi 1.4.0'; do
+    fm_busy_pi_stream_version_supported "$version" \
+      && fail "Pi '${version:-<empty>}' must not pass the verified stream gate"
+  done
+  pass "Pi stream gate accepts only the verified release, rejects newer, older, prerelease, and malformed"
+}
+
 test_cursor_ignores_rendered_and_native_signals() {
   local state out
   state=$(new_state_dir cursor-gate)
@@ -636,6 +648,70 @@ test_turn_ended_notification_is_generation_bound() {
   pass "the turn-ended notification rides the apply generation check"
 }
 
+test_model_stream_lifecycle_is_fenced() {
+  local state gen next before snapshot
+  state=$(new_state_dir model-stream)
+  gen=$("$EV" arm "$state" t1)
+  "$EV" apply "$state" t1 busy --gen "$gen" --source pi-ext --event agent-start
+  before=$(cat "$state/t1.busy-state")
+  "$EV" stream "$state" t1 open --gen "$gen" --request 1 || fail "current stream open refused"
+  snapshot=$(fm_busy_stream_read "$state" t1 pi) || fail "current stream unreadable"
+  "$EV" stream "$state" t1 progress --gen "$gen" --request 1 || fail "current progress refused"
+  [ "$(fm_busy_stream_read "$state" t1 pi)" != "$snapshot" ] || fail "progress did not advance evidence"
+  [ -f "$state/t1.model-progress" ] || fail "model progress anchor missing"
+  [ ! -e "$state/t1.progress" ] || fail "model stream changed the default native anchor"
+  [ "$(cat "$state/t1.busy-state")" = "$before" ] || fail "stream changed busy state"
+  [ ! -e "$state/t1.turn-ended" ] || fail "stream fabricated completion"
+  if fm_busy_stream_read "$state" t1 claude >/dev/null; then fail "foreign harness trusted stream"; fi
+  "$EV" stream "$state" t1 close --gen "$gen" --request 1 || fail "stream close refused"
+  [ ! -e "$state/t1.model-stream" ] || fail "close retained active marker"
+  if "$EV" stream "$state" t1 progress --gen "$gen" --request 1 2>/dev/null; then fail "closed progress accepted"; fi
+  if "$EV" stream "$state" t1 open --gen "$gen" --request 1 2>/dev/null; then fail "closed request reopened"; fi
+  "$EV" stream "$state" t1 open --gen "$gen" --request 2 || fail "retry open refused"
+  snapshot=$(fm_busy_stream_read "$state" t1 pi)
+  if "$EV" stream "$state" t1 close --gen "$gen" --request 1 2>/dev/null; then fail "old close accepted"; fi
+  [ "$(fm_busy_stream_read "$state" t1 pi)" = "$snapshot" ] || fail "old close changed retry"
+  "$EV" apply "$state" t1 idle --gen "$gen" --source pi-ext --event agent-settled
+  [ ! -e "$state/t1.model-stream" ] || fail "settled record retained stream"
+  if "$EV" stream "$state" t1 progress --gen "$gen" --request 2 2>/dev/null; then fail "idle progress accepted"; fi
+  next=$("$EV" arm "$state" t1)
+  [ ! -e "$state/t1.model-stream-order" ] || fail "replacement retained stream ordering"
+  [ ! -e "$state/t1.model-progress" ] || fail "replacement retained model progress"
+  if "$EV" stream "$state" t1 open --gen "$gen" --request 3 2>/dev/null; then fail "stale open accepted"; fi
+  "$EV" apply "$state" t1 busy --gen "$next" --source pi-ext --event agent-start
+  "$EV" stream "$state" t1 open --gen "$next" --request 1
+  "$EV" retire "$state" t1 --gen "$next"
+  [ ! -e "$state/t1.model-stream" ] && [ ! -e "$state/t1.model-stream-order" ] && [ ! -e "$state/t1.model-progress" ] || fail "retire left stream evidence"
+  if "$EV" stream "$state" t1 open --gen "$next" --request 2 2>/dev/null; then fail "unarmed open accepted"; fi
+  pass "model streams preserve state and reject stale, closed, superseded, foreign, and retired events"
+}
+
+test_model_stream_close_failure_invalidates_observation() {
+  local state gen fakebin real_mv
+  state=$(new_state_dir model-stream-close-failure)
+  gen=$("$EV" arm "$state" t1)
+  "$EV" apply "$state" t1 busy --gen "$gen" --source pi-ext --event agent-start
+  "$EV" stream "$state" t1 open --gen "$gen" --request 1
+  fakebin=$(fm_fakebin "$TMP_ROOT/model-stream-close-failure")
+  real_mv=$(command -v mv)
+  cat > "$fakebin/mv" <<SH
+#!/usr/bin/env bash
+case "\${!#}" in *.model-stream-order) exit 1 ;; esac
+exec "$real_mv" "\$@"
+SH
+  chmod +x "$fakebin/mv"
+  if PATH="$fakebin:$PATH" "$EV" stream "$state" t1 close --gen "$gen" --request 1; then
+    fail "faulted close reported success"
+  fi
+  if fm_busy_stream_read "$state" t1 pi >/dev/null; then fail "failed close left active observation"; fi
+  if "$EV" stream "$state" t1 progress --gen "$gen" --request 1; then fail "late progress resurrected failed close"; fi
+  if "$EV" stream "$state" t1 open --gen "$gen" --request 1; then fail "failed close admitted duplicate request"; fi
+  "$EV" stream "$state" t1 open --gen "$gen" --request 2 || fail "new request after failed close refused"
+  pass "failed close invalidates observation before persistence and denies late replay"
+}
+
+test_model_stream_close_failure_invalidates_observation
+test_model_stream_lifecycle_is_fenced
 test_progress_is_generation_bound_and_not_semantic_state
 test_turn_ended_notification_is_generation_bound
 
@@ -664,6 +740,7 @@ test_launch_prompt_requires_a_captured_tail
 test_grok_regex_isolated
 test_codex_unverified_gate
 test_kimi_unverified_gate
+test_pi_stream_version_floor_accepts_verified_rejects_unverified
 test_cursor_ignores_rendered_and_native_signals
 test_dead_endpoint_overrides
 test_herdr_native_busy_only

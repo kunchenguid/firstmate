@@ -41,6 +41,8 @@ Interrupt never rewrites busy state as proof of its own success.
 Claude exposes no lifecycle acknowledgement for a manual interrupt, so delivery succeeds with `cancel=unconfirmed` and its adapter-owned busy state remains as observed.
 On T3 Code the backend's native interrupt is the acknowledgement: T3's own run wait decides `cancel=confirmed`, `not-running`, or `unconfirmed` for every harness.
 Devin emits no lifecycle hook for cancellation either, so after an armed interrupt the control plane invalidates the interrupted turn's busy record to `unknown` with `cancel=unconfirmed`; that invalidation is a conservative loss of knowledge, never a fabricated idle.
+Hermes uses double Escape and refuses interrupt unless its composer is proven empty, because that chord discards an unsent draft.
+Its native end hook settles a cancelled turn; [the Hermes reference](../.agents/skills/harness-adapters/references/harness/hermes.md) owns the supported lifecycle limits.
 Cortex Code is the exception to both: its `Stop` hook fires on an Escape interrupt, so one Escape cancels the turn and the hook closes the busy record itself, with no invalidation and no arming gate; an Escape on an idle Cortex composer does nothing.
 Devin's double Escape also opens its `/revert` picker on an idle agent, where Enter reverts file changes, so its second press is sent only after the first renders a running turn's armed hint and never sooner than the adapter's press gap.
 An interrupt whose first press shows no running turn stops there and reports `cancel=not-running`, leaving busy state untouched; a picker a mistimed press opened is closed with one Escape and reported as `revert-picker=dismissed`, and `exit` refuses to type into an open picker.
@@ -63,7 +65,7 @@ T3 Code has no composer and its `/mcp` tools offer no session stop, so `exit` re
 Removing a worktree, closing an endpoint, or discarding work stays with [`bin/fm-teardown.sh`](../bin/fm-teardown.sh), which owns the landed-work test.
 
 **`resume` is not a verb.**
-It is not deterministic across the verified adapters: codex, grok, gemini, devin, commandcode, and cortex resume only from a session id printed at exit, polytoken resumes only from a session id held in its own sessions registry, opencode continues the most recent session for the cwd, and claude, pi, pi-signed, omp, kimi, and agy have no verified general pane-resume contract.
+It is not deterministic across the verified adapters: codex, grok, gemini, devin, commandcode, cortex, and kiro resume only from a session id printed at exit (kiro also has a cwd-scoped `--resume`, and its sessions live under the per-task `KIRO_HOME`), polytoken resumes only from a session id held in its own sessions registry, opencode continues the most recent session for the cwd, and claude, pi, pi-signed, omp, kimi, and agy have no verified general pane-resume contract.
 `relaunch` uses the brief on disk - not a harness-private session - as the durable instruction when the backend can prove the old agent stopped and the composer is empty; Devin on Herdr currently fails that composer check and refuses.
 T3 Code cannot host a fresh replacement agent in a thread, so `relaunch` refuses before stopping anything.
 A relaunch does take one session reference when the endpoint's own runtime recorded it - see [the relaunch transaction](#transactional-relaunch) - but that is a relaunch input, not a caller-facing verb.
@@ -79,6 +81,7 @@ A relaunch does take one session reference when the endpoint's own runtime recor
    A recorded raw-command basename that differs from its resolved adapter cannot reproduce the command actually running, so relaunch refuses before the checkpoint unless the caller passes an explicit `--harness` to choose the replacement runtime deliberately.
    A harness change resets model and effort unless they are named too, because a model chosen for one adapter does not transfer to another.
    A Claude or Pi replacement must also pass the home's [worker account pin](configuration.md#worker-account-pin-configclaude-account-configpi-account), or a secondmate's own [per-secondmate account pin](configuration.md#per-secondmate-account-pins) when one is set, so a pin that no longer resolves or is signed out refuses before the old agent stops.
+   Under a declared [Claude account list](configuration.md#several-claude-accounts-configclaude-accounts), a Claude ship or scout keeps its recorded account, and `--account <entry>` moves it to another declared one after the same check.
    An omp secondmate replacement likewise passes its [per-secondmate omp profile](configuration.md#per-secondmate-omp-profile) file check before the old agent stops.
    Ship and scout replacements also pass the [worker tool exclusion checks](configuration.md#worker-tool-exclusions-configcrew-exclude-tools) at this step.
 2. **Safe checkpoint.**
@@ -118,8 +121,10 @@ An unreachable endpoint can still hold the live agent a rebind would duplicate, 
   `dead` means the pane survived the restart and is adopted after all, with no second tab; `alive` means the agent came back and refuses; only a second `missing` proves the pane itself did not survive ([`docs/herdr-backend.md`](herdr-backend.md) "Restart and liveness behavior").
   That server start is a real side effect, and the parenthetical above does not cover it: when the recorded session's server no longer exists at all, the probe stands a fresh empty one up in order to ask, and nothing afterwards uses it.
   So in that state `exit` - which otherwise reads as a read-only inspection - leaves an idle herdr server behind.
-- **Rex can prove it.** Rex never reuses a session, window, or block id, and a session does not survive its server, so a structured not-found for the recorded block from the server the task was created on proves the block is gone.
-  The record carries that server's endpoint (`rex_server=`), and the recheck refuses unless the server this process reaches reports the same endpoint; it lets the CLI start a stopped personal server, whose fresh start then answers not-found with authority.
+- **Rex can prove it.** Rex never reuses a session, window, or block id, so a structured not-found for the recorded block from the server the task was created on proves the block is gone.
+  The record carries that server's endpoint (`rex_server=`), and the recheck refuses unless the server this process reaches reports the same endpoint; it normally lets the CLI start a stopped personal server before checking the block.
+  [Remote second-mate readiness](remote-secondmates.md#repair-with---fix) owns the exception that prevents this autostart for remote control.
+  [Rex's server-stop limits](rex-backend.md#active-limits) distinguish a restored shell from a missing block.
   A block that is still there is classified from its process view, so `dead` is adopted and `alive` refuses ([`docs/rex-backend.md`](rex-backend.md) "Cleanup and the absence proof").
   Rex's passive reads never start a server, so a stopped Rex server reads `unreadable` rather than `missing`; a Rex `unreadable` therefore goes through this recheck too, and still refuses unless the recheck settles it.
 - **tmux cannot.** `list-windows -a` describes only the tmux server the *current process* addresses (its `TMUX_TMPDIR`/socket), and a task record carries no socket identity for its endpoint.
@@ -192,6 +197,8 @@ The worktree and the task's records are unaffected either way.
 - `exit`'s composer-empty check, above, is itself a fail-closed boundary that `relaunch` inherits by stopping the old agent through `exit`.
 - `fm-spawn --relaunch` independently refuses unless the endpoint is positively agent-free - either a `dead` endpoint that survives, or a Herdr or Rex endpoint proven gone by the absence proof above - so a replacement can never join a live agent.
   An `alive`, `ambiguous`, or `unreadable` verdict all refuse (a Rex `unreadable` after the absence proof cannot settle it), and so does any endpoint whose absence is not provable, which on tmux is every `missing`; absence is claimed only from positive evidence of it.
+  For a ship or scout it also refuses, by name, a recorded worktree that is the home, the code root, or a repository's primary checkout (its git dir equals its git common dir), so a worker only ever comes back in its own task worktree.
+  This check lives only in the launch owner, so on the `relaunch` verb it fires after the old agent has stopped and the transaction ends as a failed launch.
   It also requires the shell to be in the recorded worktree: every backend but Orca (which owns its own task worktree with no current-path probe) gets one explicit `cd` to the recorded path, then a pre-launch path read that refuses before any harness starts unless it confirms the endpoint is sitting in the recorded copy.
 
 ## Capability matrix

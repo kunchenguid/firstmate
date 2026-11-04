@@ -465,6 +465,8 @@ test_active_dispatch_profile_allows_explicit_harness() {
   rec=$(make_spawn_case profile-explicit claude "$id")
   read_case_record "$rec"
   enable_dispatch_profile "$HOME_DIR"
+  jq '.preferred_provider = "claude"' "$HOME_DIR/config/crew-dispatch.json" > "$HOME_DIR/config/preferred.json"
+  mv "$HOME_DIR/config/preferred.json" "$HOME_DIR/config/crew-dispatch.json"
 
   out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
     "$id" "$PROJ_DIR" --harness codex --model gpt-5 --effort high)
