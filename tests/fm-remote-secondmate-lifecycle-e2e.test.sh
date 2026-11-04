@@ -896,6 +896,9 @@ launches_after_inherit=0
 [ "$launches_before_inherit" -eq "$launches_after_inherit" ] \
   || fail "remote spawn reached launch after ambiguous partial inheritance"
 assert_absent "$PARENT/state/ios.meta" "failed remote inheritance published launch metadata"
+# The agent replies the moment it starts, before the launch returns.
+printf '%s\n%s\n' "$REMOTE_HOME/state/parent-replies.status" 'note: ios fast launch reply' \
+  > "$HERDR_STATE.launch-reply"
 out=$(remote_env "$ROOT/bin/fm-spawn.sh" ios --secondmate)
 assert_contains "$out" 'remote=remote-mac backend=herdr' "remote spawn did not report separate host and backend dimensions"
 assert_grep 'remote_host=remote-mac' "$PARENT/state/ios.meta" "parent metadata omitted the remote host"
@@ -927,14 +930,17 @@ fi
 [ "$(cut -d' ' -f2- "$PARENT/state/ios.start-pending")" = "$expected_gen codex" ] \
   || fail "remote spawn did not arm the parent's start check: $(cat "$PARENT/state/ios.start-pending" 2>&1)"
 assert_absent "$REMOTE_HOME/state/parent-route/ios.start-pending" "the remote host armed its own start check"
-# Only replies past the host's reply-log size at this launch prove the start.
-ios_replies_size=0
-[ ! -f "$REMOTE_HOME/state/parent-replies.status" ] \
-  || ios_replies_size=$(wc -c < "$REMOTE_HOME/state/parent-replies.status" | tr -d ' ')
-ios_replies_offset=$(sed -n 's/^remote_replies_offset=//p' "$PARENT/state/ios.meta")
-case "$ios_replies_offset" in ''|*[!0-9]*) fail "parent metadata did not record the host's reply-log offset at launch" ;; esac
-[ "$ios_replies_offset" -le "$ios_replies_size" ] \
-  || fail "the recorded reply-log offset $ios_replies_offset is past the host's log ($ios_replies_size bytes)"
+# Only replies past the host's reply-log size before this launch prove the
+# start, so the reply the agent wrote as it started lies past the recorded offset.
+assert_replies_offset_precedes() { # <parent-meta> <reply-line> <context>
+  local offset
+  offset=$(sed -n 's/^remote_replies_offset=//p' "$1" | tail -1)
+  case "$offset" in ''|*[!0-9]*) fail "$3: parent metadata did not record the host's reply-log offset" ;; esac
+  [ "$(tail -c +"$((offset + 1))" "$REMOTE_HOME/state/parent-replies.status")" = "$2" ] \
+    || fail "$3: the recorded reply-log offset $offset does not end just before the replacement's first reply: $(cat "$REMOTE_HOME/state/parent-replies.status")"
+}
+assert_absent "$HERDR_STATE.launch-reply" "the fake agent launch did not write its fast reply"
+assert_replies_offset_precedes "$PARENT/state/ios.meta" 'note: ios fast launch reply' "remote spawn"
 # The start check reads the host's own busy record through observe's
 # start-proof mode; codex seeds no busy generation, so none is reported.
 [ "$(remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh observe ios --start-proof)" = "idle
@@ -1357,6 +1363,10 @@ jq --arg p "$ios_pane" \
   || fail "the agent-free remote pane did not classify dead"
 
 tabs_before=$(grep -c '^tab create' "$HERDR_LOG" || true)
+# The replacement replies as it starts; the previous worker's replies already in
+# the log must stay below the boundary this relaunch records.
+printf '%s\n%s\n' "$REMOTE_HOME/state/parent-replies.status" 'note: ios replacement fast reply' \
+  > "$HERDR_STATE.launch-reply"
 # The watcher bounds this relaunch itself: its guarded spawn runs under
 # FM_SECONDMATE_LIVENESS_TIMEOUT, and either outcome wakes and exits the
 # watcher. The leg waits for that same bound plus probe headroom on the wall
@@ -1401,6 +1411,8 @@ assert_grep '- ios ' "$PARENT/data/secondmates.md" \
   "the watcher relaunch changed the registry route"
 [ "$(remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh state ios)" = alive ] \
   || fail "the auto-relaunched remote endpoint did not read alive"
+assert_absent "$HERDR_STATE.launch-reply" "the relaunched fake agent did not write its fast reply"
+assert_replies_offset_precedes "$WATCH_STATE/ios.meta" 'note: ios replacement fast reply' "watcher relaunch"
 # Production relaunch updates the parent route meta and inheritance generation
 # in place; the dedicated watch state above kept the rest of this suite's
 # parent state out of scope, so fold both records back now.

@@ -69,7 +69,7 @@ REMOTE_HERDR_SESSION=fm-remote
 export FM_BACKEND_REX_NO_AUTOSTART=1
 # The parent's watcher owns this mate's spawn start check; nothing on this host
 # scans parent-route state, so every spawn or relaunch driven from here skips
-# arming one.
+# arming one and instead records the reply-log offset that check counts from.
 export FM_SPAWN_NO_START_CHECK=1
 
 die() { printf 'error: %s\n' "$1" >&2; exit 1; }
@@ -195,7 +195,7 @@ state_value() { # <id>; prints recovery-grade state
 }
 
 print_route() { # <id>
-  local id=$1 harness model effort traceparent rex_session_id rex_server busy_gen replies replies_offset
+  local id=$1 harness model effort traceparent rex_session_id rex_server busy_gen replies_offset
   remote_endpoint_require "$id"
   harness=$(fm_meta_get "$REMOTE_ENDPOINT_META" harness)
   model=$(fm_meta_get "$REMOTE_ENDPOINT_META" model)
@@ -221,12 +221,10 @@ print_route() { # <id>
   [ -z "$traceparent" ] || printf 'traceparent=%s\n' "$traceparent"
   busy_gen=$(fm_meta_get "$REMOTE_ENDPOINT_META" busy_gen)
   [ -z "$busy_gen" ] || printf 'busy_gen=%s\n' "$busy_gen"
-  # The parent's spawn start check counts only reply bytes past this offset:
-  # after a launch or relaunch, anything a previous worker wrote is below it.
-  replies="$TARGET_HOME/state/parent-replies.status"
-  replies_offset=0
-  [ ! -f "$replies" ] || replies_offset=$(wc -c < "$replies" | tr -d ' ')
-  printf 'replies_offset=%s\n' "$replies_offset"
+  # The parent's spawn start check counts only reply bytes past this offset,
+  # which the host-local spawn sampled before this agent launched.
+  replies_offset=$(fm_meta_get "$REMOTE_ENDPOINT_META" replies_offset)
+  [ -z "$replies_offset" ] || printf 'replies_offset=%s\n' "$replies_offset"
 }
 
 cmd_route() {
