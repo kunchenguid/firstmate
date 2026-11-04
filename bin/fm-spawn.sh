@@ -142,7 +142,9 @@
 #   every descendant process). An app-detected hc also records its signal in
 #   meta's backend_detect= line.
 #   Herdr leases its slot durably (treehouse get --lease) and moves the pane's
-#   top-level shell into it, because a restart restores that shell's cwd.
+#   top-level shell into it, because a restart restores that shell's cwd and
+#   Herdr's repo grouping matches worktree membership on it
+#   (docs/herdr-backend.md "Presentation spaces").
 #   codex-app is not a known backend yet; docs/codex-app-backend.md owns that
 #   blocked backend contract. Default tmux spawns do not write backend= to meta;
 #   absent backend= means tmux. Orca, cmux, paseo, tern, and hc do not support
@@ -5034,6 +5036,9 @@ else
     fi
     HERDR_PRESENTATION_JOURNAL=$(fm_backend_herdr_projection_journal_path "$STATE" "$ID")
     HERDR_PROJECTED=0
+    HERDR_REPO_PARENT_WORKSPACE_ID=""
+    HERDR_REPO_PARENT_CREATED=""
+    HERDR_REPO_PARENT_LABEL=""
     if [ "$KIND" != secondmate ] && fm_backend_herdr_presentation_enabled "$CONFIG" "$STATE"; then
       HERDR_SES=$(fm_backend_herdr_session)
       HERDR_PARENT_LABEL=$(FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_workspace_label)
@@ -5119,6 +5124,38 @@ else
             echo "warning: herdr presentation parent is absent or ambiguous; using the ordinary flat layout without projection" >&2
             spawn_herdr_presentation_order_lock_release
           else
+            # Repo grouping (docs/herdr-backend.md "Presentation spaces"):
+            # resolve or create this home's per-repo parent BEFORE the task
+            # workspace exists, so the parent is the oldest workspace Herdr
+            # could elect as the repository's group source. Additive and
+            # best effort: any refusal leaves the id empty and the task in
+            # its flat row with one warning, except that a client below the
+            # presentation floor or without worktree groups stays quiet.
+            # The ensure runs in this shell so it can also report whether it
+            # created the parent just now; a parent this spawn created is
+            # removed again below if the ordering move that must put this
+            # task ahead of it does not land. Before that, a parent an
+            # earlier spawn created here but could not remove, recorded per
+            # home, gets the same focus-preserving removal retried; a retry
+            # refused again keeps this task flat too and touches nothing
+            # else. The attach itself happens after the pane's root shell
+            # has provably entered the leased task worktree, still under
+            # this lock.
+            if fm_backend_herdr_worktree_group_capable "$HERDR_SES"; then
+              if fm_backend_herdr_projection_repo_parent_retry "$STATE" "$HERDR_SES" "$PROJ_ABS"; then
+                if fm_backend_herdr_projection_repo_parent_ensure \
+                  "$HERDR_SES" "$PROJ_ABS" "$HERDR_PARENT_LABEL" "$HERDR_PARENT_WORKSPACE_ID" >/dev/null; then
+                  HERDR_REPO_PARENT_WORKSPACE_ID=$FM_BACKEND_HERDR_REPO_PARENT_ID
+                fi
+                HERDR_REPO_PARENT_CREATED=$FM_BACKEND_HERDR_REPO_PARENT_CREATED
+                HERDR_REPO_PARENT_LABEL=$FM_BACKEND_HERDR_REPO_PARENT_LABEL
+              fi
+            else
+              case $? in
+                2) echo "warning: herdr repo grouping could not read the client protocol; leaving this task's space flat" >&2 ;;
+                4) echo "warning: herdr repo grouping could not read the API schema; leaving this task's space flat" >&2 ;;
+              esac
+            fi
             HERDR_PROJECTION_ID=$(fm_backend_herdr_projection_journal_create "$STATE" "$ID") || exit 1
             HERDR_PROJECTION_LABEL=$(fm_backend_herdr_projection_workspace_label "$ID" "$HERDR_PROJECTION_ID")
             if ! FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_projection_create_task \
@@ -5143,11 +5180,47 @@ else
             HERDR_PROJECTION_ABORT_SEEDED_PANE=$FM_BACKEND_HERDR_PROJECTION_SEEDED_PANE_ID
             # Opt-in project groups (docs/herdr-backend.md "Project groups"):
             # an empty key keeps the block-end placement. Off costs one file test.
+            # Repo-parent precedence: when this task has a repo parent (adopted
+            # or fresh), the repo parent group decides its position, so the
+            # move gets an empty key and keeps the block-end placement.
             HERDR_GROUP_ORDER_KEY=
-            [ ! -e "$CONFIG/herdr-project-groups" ] || HERDR_GROUP_ORDER_KEY=$(FM_HOME=$FM_HOME FM_STATE_OVERRIDE=$STATE FM_CONFIG_OVERRIDE=$CONFIG \
-              "$SCRIPT_DIR/fm-herdr-groups.sh" order-key "$ID" "$PROJ_ABS" 2>/dev/null) || HERDR_GROUP_ORDER_KEY=
+            [ ! -e "$CONFIG/herdr-project-groups" ] ||
+              HERDR_GROUP_ORDER_KEY=$(FM_HOME=$FM_HOME FM_STATE_OVERRIDE=$STATE FM_CONFIG_OVERRIDE=$CONFIG \
+                fm_backend_herdr_projection_group_order_key "$HERDR_REPO_PARENT_WORKSPACE_ID" \
+                "$SCRIPT_DIR/fm-herdr-groups.sh" "$ID" "$PROJ_ABS") || HERDR_GROUP_ORDER_KEY=
             fm_backend_herdr_projection_order_best_effort \
-              "$HERDR_SES" "$HERDR_WORKSPACE_ID" "$HERDR_PARENT_LABEL" "$HERDR_PARENT_WORKSPACE_ID" "$HERDR_GROUP_ORDER_KEY"
+              "$HERDR_SES" "$HERDR_WORKSPACE_ID" "$HERDR_PARENT_LABEL" "$HERDR_PARENT_WORKSPACE_ID" \
+              "$HERDR_GROUP_ORDER_KEY"
+            if [ -n "$HERDR_REPO_PARENT_CREATED" ] \
+              && [ "${FM_BACKEND_HERDR_PROJECTION_ORDER_PLACED:-0}" != 1 ]; then
+              # A fresh repo parent joins its home block only once its first
+              # child attaches, and that ordering move is what puts the child
+              # ahead of it. Without the move this parent, still without any
+              # provenance, would stand between the home block and this task
+              # and break this task's restart binding and every later spawn's
+              # ordering, so the exact parent this spawn created is removed
+              # while it is still childless, through the focus-preserving
+              # pane close and never a workspace close, and the task stays in
+              # the flat row the ordering warning already announced. An
+              # adopted or pre-existing parent is never touched; a refused
+              # removal leaves the parent standing with its own warning and
+              # is recorded per home so the next spawn on this repository
+              # retries it (docs/herdr-backend.md "Presentation spaces").
+              # The parent id is cleared on every not-placed outcome,
+              # removed or refused, so the later attach is skipped and the
+              # task stays flat.
+              if fm_backend_herdr_projection_repo_parent_close_fresh "$HERDR_SES" "$HERDR_REPO_PARENT_CREATED"; then
+                echo "warning: herdr repo grouping closed the repo parent $HERDR_REPO_PARENT_CREATED it created for this task because the task could not be placed ahead of it; leaving this task's space flat" >&2
+              elif fm_backend_herdr_projection_repo_parent_retry_record \
+                "$STATE" "$HERDR_SES" "$HERDR_REPO_PARENT_CREATED" "$HERDR_REPO_PARENT_LABEL" "$PROJ_ABS" \
+                "${FM_BACKEND_HERDR_REPO_PARENT_SEEDED_PANE:-}"; then
+                echo "warning: herdr repo grouping recorded the repo parent $HERDR_REPO_PARENT_CREATED left standing so the next spawn on this repository retries removing it" >&2
+              else
+                echo "warning: herdr repo grouping could not record the repo parent $HERDR_REPO_PARENT_CREATED left standing; the next spawn on this repository will not retry removing it" >&2
+              fi
+              HERDR_REPO_PARENT_WORKSPACE_ID=""
+              HERDR_REPO_PARENT_CREATED=""
+            fi
             HERDR_HOME_ID=$(fm_backend_herdr_projection_home_identity "$HERDR_LABEL_HOME" 2>/dev/null || true)
             if [ -n "$HERDR_HOME_ID" ] &&
               fm_backend_herdr_projection_live_binding_matches \
@@ -6091,6 +6164,18 @@ fi
 # tab's original project directory.
 spawn_enter_recorded_worktree
 spawn_assert_agent_worktree
+
+# Repo grouping: the task pane's top-level shell has now provably entered its
+# leased worktree, so the projected workspace can be attached to the repo parent
+# resolved during projection, still under the presentation session lock. Only a
+# freshly projected task with a parent attempts it; the adapter checks Herdr
+# already reports this worktree open in exactly this task's workspace, and any
+# other answer leaves the task flat with one warning (docs/herdr-backend.md
+# "Presentation spaces").
+if [ "$RELAUNCH" -eq 0 ] && [ "${HERDR_PROJECTED:-0}" -eq 1 ] && [ -n "${HERDR_REPO_PARENT_WORKSPACE_ID:-}" ]; then
+  fm_backend_herdr_projection_attach_worktree \
+    "$HERDR_SES" "$HERDR_REPO_PARENT_WORKSPACE_ID" "$HERDR_WORKSPACE_ID" "$WT" || true
+fi
 
 # Pre-register Claude's workspace trust for the directory this launch starts in,
 # at the first point that directory is known and before any per-task state is
