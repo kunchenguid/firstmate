@@ -699,6 +699,69 @@ test_terminal_passed() {
   pass "terminal passed run is authoritative"
 }
 
+# 2026-10-18 audit: no-mistakes v1.64 skipped the CI step on "gh CLI is not
+# authenticated" (one inactive account's keyring read timed out) and still
+# reported `outcome: passed`; 42 such runs read as green, and PR 1744 was red.
+run_passed_ci_skipped() {  # <branch> [<outcome>]
+  cat <<EOF
+run:
+  id: "01RUN"
+  branch: $1
+  status: completed
+  head: "${FM_FAKE_RUN_HEAD:-abc1234}"
+  pr: "https://github.com/o/r/pull/1744"
+  findings: none
+  steps[4]{step,status,findings,duration_ms}:
+    review,completed,0,0
+    push,completed,0,0
+    pr,completed,0,0
+    ci,skipped,0,13809
+outcome: ${2:-passed}
+EOF
+}
+
+test_skipped_ci_is_never_green() {
+  reset_fakes
+  local d out
+  d=$(new_case ci-skipped)
+  make_repo_on_branch "$d/wt" fm/feat-ciskip
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-ciskip.meta" "window=fm:fm-feat-ciskip" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_passed_ci_skipped fm/feat-ciskip)"
+  FM_FAKE_CI_LOGS=$(cat <<'EOF'
+skipping CI: gh CLI is not authenticated: github.com
+  X Failed to log in to github.com account ak47encore (default)
+EOF
+)
+  export FM_FAKE_CI_LOGS
+  out=$(run_crew_state "$d" feat-ciskip)
+  assert_contains "$out" "state: failed" "a passed run whose CI was skipped on auth read as green"
+  assert_contains "$out" "CI verification skipped (gh CLI is not authenticated: github.com)" "the skip reason was not reported"
+  assert_contains "$out" "never verified" "the detail did not say the checks were never verified"
+  FM_FAKE_CI_LOGS='no PR URL found, skipping CI'
+  out=$(run_crew_state "$d" feat-ciskip)
+  assert_contains "$out" "state: failed" "a passed run whose CI was skipped for a missing PR read as green"
+  FM_FAKE_CI_LOGS=''
+  out=$(run_crew_state "$d" feat-ciskip)
+  assert_contains "$out" "state: failed" "a skipped CI step with an unreadable log read as green"
+  assert_contains "$out" "log is unreadable" "an unreadable skip log was not named"
+  # An operator's explicit skip leaves no automatic-skip line; it stays done.
+  FM_FAKE_CI_LOGS='step skipped by request'
+  out=$(run_crew_state "$d" feat-ciskip)
+  assert_contains "$out" "state: done" "an explicit operator CI skip was failed"
+  assert_contains "$out" "(CI skipped by request)" "an explicit CI skip was not labeled"
+  # Newer no-mistakes names the automatic skip in the outcome itself.
+  FM_FAKE_AXI_STATUS="$(run_passed_ci_skipped fm/feat-ciskip passed-with-skips)"
+  FM_FAKE_CI_LOGS='skipping CI: gh CLI is not authenticated: github.com'
+  out=$(run_crew_state "$d" feat-ciskip)
+  assert_contains "$out" "state: failed" "outcome passed-with-skips read as green"
+  # A completed CI step stays done.
+  FM_FAKE_AXI_STATUS="$(run_passed_ci_skipped fm/feat-ciskip | sed 's/ci,skipped/ci,completed/')"
+  out=$(run_crew_state "$d" feat-ciskip)
+  assert_contains "$out" "state: done" "a run whose CI step completed stopped reading done"
+  pass "a run whose CI step was automatically skipped is failed, never checks-green"
+}
+
 test_terminal_failed() {
   reset_fakes
   local d; d=$(new_case failed)
@@ -1932,6 +1995,7 @@ test_ci_fixing_after_green_stays_working
 test_top_level_fixing_ci_running_after_green_stays_working
 test_top_level_fixing_done_log_stays_working
 test_terminal_passed
+test_skipped_ci_is_never_green
 test_terminal_failed
 test_cross_branch_attribution_via_runs_list
 test_repo_cache_key_groups_worktrees
