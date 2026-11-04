@@ -234,6 +234,10 @@
       "audience": "agent-runtime"
     },
     {
+      "path": ".agents/skills/harness-adapters/references/harness/hermes.md",
+      "audience": "agent-runtime"
+    },
+    {
       "path": ".agents/skills/harness-adapters/references/harness/kiro.md",
       "audience": "agent-runtime"
     },
@@ -458,6 +462,10 @@
       "audience": "maintainer-architecture"
     },
     {
+      "path": "docs/plans/2026-10-12-2032-feat-pi-stream-silence-plan.md",
+      "audience": "maintainer-architecture"
+    },
+    {
       "path": "docs/remote-secondmates.md",
       "audience": "operator-current"
     },
@@ -487,6 +495,10 @@
     },
     {
       "path": "docs/supervision-protocols/codex.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": "docs/supervision-protocols/codex-checkpoint.md",
       "audience": "agent-runtime"
     },
     {
@@ -567,6 +579,10 @@
     },
     {
       "path": "docs/verification/dispatch-resolve.md",
+      "audience": "maintainer-verification"
+    },
+    {
+      "path": "docs/verification/hermes.md",
       "audience": "maintainer-verification"
     },
     {

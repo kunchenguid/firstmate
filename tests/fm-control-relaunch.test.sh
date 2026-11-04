@@ -1062,6 +1062,91 @@ test_worker_account_pin_follows_the_relaunch() {
   pass "fm-control relaunch: the replacement follows the home's current worker account pin"
 }
 
+# add_listed_task <case-dir> <id> <recorded-account>: a live Claude ship
+# recorded on <recorded-account> in a home declaring two signed-in accounts,
+# first and second, plus a signed-out one.
+add_listed_task() {
+  local dir=$1 id=$2 recorded=$3
+  add_ship_task "$dir" "$id" claude
+  make_claude_auth_stub "$dir"
+  mkdir -p "$dir/home/config" "$dir/first" "$dir/second" "$dir/signed-out"
+  : > "$dir/first/.credentials.json"
+  : > "$dir/second/.credentials.json"
+  printf '%s\n' "$dir/first" "$dir/second" "$dir/signed-out" > "$dir/home/config/claude-accounts"
+  [ -z "$recorded" ] || echo "account=$recorded" >> "$dir/home/state/$id.meta"
+}
+
+test_account_list_relaunch_reuses_the_recorded_account() {
+  local dir out rc id=rl-list
+  dir=$(new_case list-reuse "$id")
+  add_listed_task "$dir" "$id" "$dir/first"
+  out=$(run_control "$dir" "$id" relaunch --note "same account"); rc=$?
+  expect_code 0 "$rc" "a relaunch under a list should reuse the recorded account"$'\n'"$out"
+  [ "$(meta_field "$dir" "$id" account)" = "$dir/first" ] || fail "the relaunched record should keep the recorded account"
+  assert_contains "$(cat "$dir/fake/literal")" "CLAUDE_CONFIG_DIR='$dir/first'" \
+    "the replacement should launch under the recorded account"
+  : > "$dir/fake/literal"
+  printf 'zsh' > "$dir/fake/command"
+  out=$(run_spawn "$dir" "$id" --relaunch); rc=$?
+  expect_code 0 "$rc" "a direct fm-spawn --relaunch under a list should reuse the recorded account"$'\n'"$out"
+  assert_contains "$out" "account=$dir/first" "the direct relaunch should report the recorded account"
+  pass "fm-control relaunch: a declared account list keeps the account the task records"
+}
+
+test_account_list_relaunch_moves_only_on_explicit_account() {
+  local dir out rc id=rl-list-move
+  dir=$(new_case list-move "$id")
+  add_listed_task "$dir" "$id" "$dir/first"
+  out=$(run_control "$dir" "$id" relaunch --account "$dir/second" --note "first is exhausted"); rc=$?
+  expect_code 0 "$rc" "an explicit --account relaunch should move the task"$'\n'"$out"
+  [ "$(meta_field "$dir" "$id" account)" = "$dir/second" ] || fail "the relaunched record should name the new account"
+  assert_contains "$(cat "$dir/fake/literal")" "CLAUDE_CONFIG_DIR='$dir/second'" \
+    "the replacement should launch under the explicitly chosen account"
+  : > "$dir/fake/literal"
+  out=$(run_control "$dir" "$id" relaunch --note "stay"); rc=$?
+  expect_code 0 "$rc" "a later plain relaunch should succeed"$'\n'"$out"
+  [ "$(meta_field "$dir" "$id" account)" = "$dir/second" ] || fail "a later relaunch should keep the moved account"
+  pass "fm-control relaunch: only an explicit --account moves a task to another declared account"
+}
+
+test_account_list_relaunch_refusals_happen_before_stop() {
+  local dir out rc id=rl-list-refuse case_name recorded flag needle
+  for case_name in undeclared newline signed-out unrecorded removed wrong-harness; do
+    dir=$(new_case "list-refuse-$case_name" "$id")
+    recorded="$dir/first"
+    flag=()
+    case "$case_name" in
+      undeclared)
+        flag=(--account "$dir/elsewhere")
+        needle="account '$dir/elsewhere' is not declared in config/claude-accounts" ;;
+      newline)
+        flag=(--account "$dir/elsewhere"$'\n'"$dir/second")
+        needle="--account must name one config/claude-accounts entry exactly, with no control characters" ;;
+      signed-out)
+        flag=(--account "$dir/signed-out")
+        needle="config/claude-accounts pins Claude workers to $dir/signed-out, which is not signed in" ;;
+      unrecorded)
+        recorded=
+        needle="must name one with --account" ;;
+      removed)
+        recorded="$dir/retired"
+        needle="account '$dir/retired' is not declared in config/claude-accounts" ;;
+      wrong-harness)
+        flag=(--harness codex --account "$dir/second")
+        needle="applies to Claude workers only, not codex" ;;
+    esac
+    add_listed_task "$dir" "$id" "$recorded"
+    cp "$dir/home/state/$id.meta" "$dir/meta-before"
+    out=$(run_control "$dir" "$id" relaunch ${flag[@]+"${flag[@]}"} --note "refuse $case_name"); rc=$?
+    expect_code 1 "$rc" "the $case_name relaunch must refuse"$'\n'"$out"
+    assert_contains "$out" "$needle" "the $case_name refusal should say why"
+    [ "$(cat "$dir/fake/command")" = claude ] || fail "the $case_name refusal must happen before the running agent stops"
+    [ ! -s "$dir/fake/literal" ] || fail "the $case_name refusal must send no lifecycle input"
+    cmp -s "$dir/meta-before" "$dir/home/state/$id.meta" || fail "the $case_name refusal must leave the task record untouched"
+  done
+  pass "fm-control relaunch: undeclared, newline-split, signed-out, unrecorded, retired, and wrong-runner accounts refuse before the old agent stops"
+}
+
 test_secondmate_account_pin_follows_relaunch_and_refuses_before_stop() {
   local dir out rc id=rl-sm-acct harness file variable pin
   for harness in claude pi; do
@@ -1842,6 +1927,51 @@ test_missing_worktree_refuses_before_stopping_anything() {
   [ "$(cat "$dir/fake/command")" = claude ] || fail "a refused relaunch must not stop the agent"
   [ -z "$(cat "$dir/fake/literal")" ] || fail "a refused relaunch must send nothing"
   pass "fm-control relaunch: an unaccountable local copy refuses before the agent is touched"
+}
+
+# A restart must never put a worker back in a primary home or a
+# repository's primary checkout; the recorded worktree is the only launch cwd.
+test_relaunch_refuses_a_recorded_worktree_that_is_the_primary_home() {
+  local dir out rc
+  dir=$(new_case homewt rl11)
+  add_ship_task "$dir" rl11 claude
+  sed -i.bak "s#^worktree=.*#worktree=$dir/home#" "$dir/home/state/rl11.meta"
+  printf 'zsh' > "$dir/fake/command"
+  out=$(run_spawn "$dir" rl11 --relaunch 2>&1); rc=$?
+  expect_code 1 "$rc" "a worktree that is the primary home should refuse"
+  assert_contains "$out" "primary home or checkout" "the refusal should name the primary home"
+  [ -z "$(cat "$dir/fake/literal")" ] || fail "a refused relaunch must launch nothing"
+  pass "fm-spawn --relaunch: a recorded worktree that is the primary home refuses"
+}
+
+test_relaunch_refuses_a_recorded_worktree_that_is_the_project_primary_checkout() {
+  local dir out rc
+  dir=$(new_case projwt rl12)
+  add_ship_task "$dir" rl12 claude
+  sed -i.bak "s#^worktree=.*#worktree=$dir/proj#" "$dir/home/state/rl12.meta"
+  printf 'zsh' > "$dir/fake/command"
+  out=$(run_spawn "$dir" rl12 --relaunch 2>&1); rc=$?
+  expect_code 1 "$rc" "a worktree that is the project primary checkout should refuse"
+  assert_contains "$out" "primary home or checkout" "the refusal should name the primary checkout"
+  [ -z "$(cat "$dir/fake/literal")" ] || fail "a refused relaunch must launch nothing"
+  pass "fm-spawn --relaunch: a recorded worktree that is the project primary checkout refuses"
+}
+
+# Inherited Git location overrides must not disguise the primary checkout:
+# a linked worktree's GIT_DIR plus the primary checkout as GIT_WORK_TREE would
+# make the git-dir and common-dir probes disagree.
+test_relaunch_refuses_the_primary_checkout_under_inherited_git_overrides() {
+  local dir out rc linked_gd
+  dir=$(new_case projwtenv rl13)
+  add_ship_task "$dir" rl13 claude
+  linked_gd=$(git -C "$dir/wt" rev-parse --absolute-git-dir)
+  sed -i.bak "s#^worktree=.*#worktree=$dir/proj#" "$dir/home/state/rl13.meta"
+  printf 'zsh' > "$dir/fake/command"
+  out=$(GIT_DIR="$linked_gd" GIT_WORK_TREE="$dir/proj" run_spawn "$dir" rl13 --relaunch 2>&1); rc=$?
+  expect_code 1 "$rc" "the primary checkout should refuse even under inherited GIT_DIR/GIT_WORK_TREE"
+  assert_contains "$out" "primary home or checkout" "the refusal should name the primary checkout"
+  [ -z "$(cat "$dir/fake/literal")" ] || fail "a refused relaunch must launch nothing"
+  pass "fm-spawn --relaunch: inherited Git overrides do not hide the project primary checkout"
 }
 
 test_missing_instructions_refuse_before_stopping_anything() {
@@ -3174,6 +3304,9 @@ test_same_harness_relaunch_keeps_the_profile_axes
 test_native_ultra_relaunch_preserves_profile_and_rejects_before_stop
 test_signed_out_worker_account_pin_refuses_before_stop
 test_worker_account_pin_follows_the_relaunch
+test_account_list_relaunch_reuses_the_recorded_account
+test_account_list_relaunch_moves_only_on_explicit_account
+test_account_list_relaunch_refusals_happen_before_stop
 test_secondmate_account_pin_follows_relaunch_and_refuses_before_stop
 test_pi_exclude_tools_follow_the_relaunch
 test_exclude_tools_refusals_happen_before_the_agent_stops
@@ -3199,6 +3332,9 @@ test_prefixed_prior_harness_wiring_is_still_retired
 test_muse_session_binding_is_retired_on_a_harness_switch
 test_cursor_session_binding_is_retired_on_a_harness_switch
 test_missing_worktree_refuses_before_stopping_anything
+test_relaunch_refuses_a_recorded_worktree_that_is_the_primary_home
+test_relaunch_refuses_a_recorded_worktree_that_is_the_project_primary_checkout
+test_relaunch_refuses_the_primary_checkout_under_inherited_git_overrides
 test_missing_instructions_refuse_before_stopping_anything
 test_checkpoint_refusal_leaves_the_record_byte_identical
 test_checkpoint_refuses_uninspectable_head_and_status

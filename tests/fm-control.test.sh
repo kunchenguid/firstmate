@@ -770,6 +770,28 @@ test_commandcode_relaunch_off_tmux_and_herdr_refuses_before_stopping() {
   pass "fm-control relaunch: commandcode off tmux and herdr is refused before the running agent is stopped"
 }
 
+test_hermes_profile_refusals_preserve_running_worker() {
+  local dir out rc before
+  dir=$(new_case hermes-preflight)
+  add_task "$dir" t1 claude
+  alive_as "$dir" claude
+  before=$(cat "$dir/home/state/t1.meta")
+  out=$(run_control "$dir" t1 relaunch --harness hermes --model unsupported --note x); rc=$?
+  expect_code 1 "$rc" "Hermes must refuse a model override before stopping: $out"
+  assert_contains "$out" 'profile-owned' 'Hermes model diagnostic missing'
+  [ -z "$(literals "$dir")$(keys_sent "$dir")" ] || fail 'invalid Hermes model stopped the current worker'
+  mkdir -p "$dir/profile"
+  printf '#!/bin/sh\nprintf "%%s\\n" "%s/config.yaml"\n' "$dir/profile" > "$dir/fakebin/hermes"
+  chmod +x "$dir/fakebin/hermes"
+  printf '{"pid":%s,"gateway_state":"running","restart_requested":false,"active_agents":1,"updated_at":"%s"}\n' "$$" "$(date -u +%Y-%m-%dT%H:%M:%S+00:00)" > "$dir/profile/gateway_state.json"
+  out=$(run_control "$dir" t1 relaunch --harness hermes --note x); rc=$?
+  expect_code 1 "$rc" "Hermes must refuse a mid-turn gateway before stopping: $out"
+  assert_contains "$out" 'gateway' 'Hermes gateway diagnostic missing'
+  [ -z "$(literals "$dir")$(keys_sent "$dir")" ] || fail 'Hermes gateway refusal stopped the current worker'
+  [ "$(cat "$dir/home/state/t1.meta")" = "$before" ] || fail 'Hermes preflight changed task metadata'
+  pass 'fm-control relaunch: Hermes profile model and gateway refusals preserve the current worker'
+}
+
 test_state_verified_backends_are_exactly_tmux_herdr_and_rex() {
   fm_control_backend_state_verified tmux || fail "tmux has a recovery-grade classifier"
   fm_control_backend_state_verified herdr || fail "herdr has a recovery-grade classifier"
@@ -2073,6 +2095,7 @@ test_harness_kind_capability
 test_orca_refuses_an_escape_harness_interrupt
 test_unverified_state_backends_refuse_stop_verbs
 test_commandcode_relaunch_off_tmux_and_herdr_refuses_before_stopping
+test_hermes_profile_refusals_preserve_running_worker
 test_state_verified_backends_are_exactly_tmux_herdr_and_rex
 test_worker_state_verbs_refuse_herdr
 test_herdr_relaunch_reaches_existing_validation_path

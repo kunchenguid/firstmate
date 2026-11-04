@@ -9,8 +9,8 @@ It provides task tabs and their terminal blocks while Treehouse continues to pro
 Pick Rex when you already run Firstmate inside Rex and want each task as its own tab next to your session.
 The Rex server must run on the same machine as Firstmate because spawn and liveness checks compare Rex-reported process and filesystem data with local machine state.
 For a new spawn, only a `unix://` endpoint reported by `rex whoami --json` is accepted as proof of locality; other transports, including local TCP endpoints, or an unreadable endpoint are refused before a tab is created or a worktree is leased.
-Use [remote second mates](remote-secondmates.md) to run workers on another host.
-Rex is in beta, and its sessions live in a personal server that does not keep them across a server stop.
+Use [remote second mates](remote-secondmates.md) to run workers on another host; that page owns remote backend selection and server-readiness requirements.
+See [Active limits](#active-limits) for server-stop behavior.
 
 Prerequisites:
 
@@ -167,7 +167,9 @@ Naming `rex` in `config/wedge-alarm` adds an opt-in wedge alarm on Firstmate's o
 ## Active limits
 
 - Rex is experimental and in beta, and the adapter refuses a CLI or server below API revision 5.
-- Sessions do not survive a Rex server stop; recovery proves such tasks gone and reclaims them into fresh tabs.
+- A Rex server stop kills every task's agent process.
+  A restarted server restores the sessions themselves on the same endpoint and state directory, with each block returning as a fresh login shell preserving its working directory.
+  Liveness relaunches the dead agent into the restored session; when a session genuinely does not come back, recovery proves the task gone and reclaims it into a fresh tab.
 - The viewport is derived, not read directly, as described above.
 - Only harnesses that report OSC 7501 contribute native busy evidence; the others are classified from their own lifecycle and rendered footer.
 - Command Code is refused on Rex until it is live-verified there, and Cursor Agent is not yet live-verified on Rex.
