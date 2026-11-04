@@ -149,9 +149,9 @@ bun_argv_must_reject() {  # <argv0> [args...]
 # is decided from - read through the same NUL-delimited stream the verdict
 # itself consumes, so an element carrying a space or newline stays whole.
 bun_probe_script_path() {  # <pid>
-  local a0 a1
+  local a1
   fm_process_argv "$1" 2>/dev/null | {
-    IFS= read -r -d '' a0 && IFS= read -r -d '' a1 || return 1
+    IFS= read -r -d '' _ && IFS= read -r -d '' a1 || return 1
     printf '%s' "$a1"
   }
 }
