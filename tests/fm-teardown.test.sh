@@ -108,6 +108,9 @@ fi
 if [ "${1:-}" = kill-window ] && [ -n "${FM_FAKE_KILL_PID:-}" ]; then
   ( sleep 1; kill -KILL "$FM_FAKE_KILL_PID" 2>/dev/null ) >/dev/null 2>&1 &
 fi
+if [ "${1:-}" = kill-window ] && [ -n "${FM_LATE_ACTOR_GATE:-}" ]; then
+  : > "$FM_LATE_ACTOR_GATE"
+fi
 exit 0
 SH
   # Default gh-axi mock: no PR is associated with the branch, and viewing any PR
@@ -5159,16 +5162,27 @@ PYTHON
 
 # A spared (unowned) process in the worktree: with no ownership oracle every
 # process under the root is spared, so these tests need no endpoint shell.
-spawn_late_actor() {  # <case-dir> <root> <delay> <action: child|write>
+spawn_late_actor() {  # <case-dir> <root> <delay> <action> [gate]
   local case_dir=$1 root=$2 delay=$3 action=$4
   ( cd "$root" && exec bash -c '
+    waits=0
+    while [ -n "$4" ] && [ ! -e "$4" ] && [ "$waits" -lt 600 ]; do
+      sleep 0.1
+      waits=$((waits + 1))
+    done
+    [ -z "$4" ] || [ -e "$4" ] || exit 1
     sleep "$1"
     case "$2" in
       child) ( exec sleep 300 ) & printf "%s\n" "$!" > "$3/late-child.pid" ;;
       write) printf "late\n" > "$PWD/late.txt" ;;
-      commit) git -c user.name=late -c user.email=late@example.com commit -q --allow-empty -m late ;;
+      commit)
+        printf "late\n" > "$PWD/late.txt"
+        git add late.txt
+        git -c user.name=late -c user.email=late@example.com commit -q -m late \
+          && git rev-parse HEAD > "$3/late-commit.sha"
+        ;;
     esac
-  ' _ "$delay" "$action" "$case_dir" ) >/dev/null 2>&1 &
+  ' _ "$delay" "$action" "$case_dir" "${5:-}" ) >/dev/null 2>&1 &
   LATE_ACTOR_PID=$!
   disown
 }
@@ -5265,13 +5279,19 @@ test_late_work_refusal_leaves_no_close_marker_for_startup_replay() {
     case_dir=$(make_case "late-marker-$action")
     write_meta "$case_dir" no-mistakes ship
     land_shippable_commit "$case_dir"
-    spawn_late_actor "$case_dir" "$case_dir/wt" 3 "$action"
+    seed_backlog_in_flight "$case_dir"
+    spawn_late_actor "$case_dir" "$case_dir/wt" 0.5 "$action" "$case_dir/endpoint-closed"
     sleep 0.3
     rc=0
-    FM_FAKE_TREEHOUSE_LOG="$case_dir/treehouse.log" FM_FAKE_PANE_PID=1 \
+    FM_LATE_ACTOR_GATE="$case_dir/endpoint-closed" \
+      FM_FAKE_TREEHOUSE_LOG="$case_dir/treehouse.log" FM_FAKE_PANE_PID=1 \
       run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
     kill -KILL "$LATE_ACTOR_PID" 2>/dev/null || true
     expect_code 1 "$rc" "late-marker-$action: late work must refuse teardown"
+    assert_present "$case_dir/endpoint-closed" "late-marker-$action: the endpoint was not closed"
+    if [ "$action" = commit ]; then
+      assert_present "$case_dir/late-commit.sha" "late-marker-commit: the late commit failed"
+    fi
     assert_grep "REFUSED" "$case_dir/stderr" "late-marker-$action: refusal missing"
     replay_close_marker "$case_dir" || fail "late-marker-$action: startup replay failed"
     assert_present "$case_dir/state/task-x1.meta" "late-marker-$action: startup replay dropped the retained task"
@@ -5287,15 +5307,23 @@ test_orca_work_saved_during_the_wait_is_not_removed() {
     case_dir=$(make_case "orca-late-$action")
     write_meta "$case_dir" no-mistakes ship
     land_shippable_commit "$case_dir"
+    seed_backlog_in_flight "$case_dir"
     configure_orca_teardown_case "$case_dir"
-    spawn_late_actor "$case_dir" "$case_dir/wt" 3 "$action"
+    spawn_late_actor "$case_dir" "$case_dir/wt" 0.5 "$action" "$case_dir/endpoint-closed"
     sleep 0.3
     rc=0
-    FM_ORCA_CASE="$case_dir" run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+    FM_ORCA_CASE="$case_dir" FM_LATE_ACTOR_GATE="$case_dir/endpoint-closed" \
+      run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
     kill -KILL "$LATE_ACTOR_PID" 2>/dev/null || true
     expect_code 1 "$rc" "orca-late-$action: late work must refuse teardown: $(cat "$case_dir/stderr")"
+    assert_present "$case_dir/endpoint-closed" "orca-late-$action: the endpoint was not closed"
+    if [ "$action" = commit ]; then
+      assert_present "$case_dir/late-commit.sha" "orca-late-commit: the late commit failed"
+    fi
     assert_grep "REFUSED" "$case_dir/stderr" "orca-late-$action: refusal missing"
     assert_absent "$case_dir/removal.log" "orca-late-$action: the Orca worktree was removed over late work"
+    [ "$(git -C "$case_dir/wt" symbolic-ref --short HEAD)" = fm/task-x1 ] \
+      || fail "orca-late-$action: the task branch was detached before the safety refusal"
     assert_present "$case_dir/state/task-x1.meta" "orca-late-$action: records dropped"
     replay_close_marker "$case_dir" || fail "orca-late-$action: startup replay failed"
     assert_present "$case_dir/state/task-x1.meta" "orca-late-$action: startup replay dropped the retained task"
@@ -5329,6 +5357,9 @@ configure_orca_teardown_case() {  # <case-dir>
   cat > "$case_dir/fakebin/orca" <<'SH'
 #!/usr/bin/env bash
 case "${1:-} ${2:-}" in
+  'terminal close')
+    [ -z "${FM_LATE_ACTOR_GATE:-}" ] || : > "$FM_LATE_ACTOR_GATE"
+    printf '{"ok":true,"result":{}}\n' ;;
   'worktree show')
     printf '{"ok":true,"result":{"worktree":{"id":"wt-test::/orca/wt-test","path":"%s"}}}\n' "$FM_ORCA_CASE/wt" ;;
   'worktree rm')
@@ -5357,7 +5388,7 @@ test_orca_worktree_with_a_spared_process_is_not_removed() {
   expect_code 1 "$rc" "orca-occupied: an occupied Orca worktree must refuse teardown"
   assert_absent "$case_dir/removal.log" "orca-occupied: the occupied Orca worktree was removed"
   assert_present "$case_dir/state/task-x1.meta" "orca-occupied: records dropped, so no retry is possible"
-  grep -Eq "^[^	]+	task-x1	-	kept	[^	]*$pid[^	]*	" "$case_dir/state/teardown-processes.log" \
+  grep -Eq "^[^	]+	task-x1	-	kept	[^	]*${pid}[^	]*	" "$case_dir/state/teardown-processes.log" \
     || fail "orca-occupied: the kept worktree was not logged"
   pass "an Orca worktree that a spared process occupies is kept and the records survive for a retry"
 }
@@ -5380,7 +5411,7 @@ test_tasktmp_with_a_spared_process_is_not_deleted() {
   kill -KILL "$pid" 2>/dev/null || true
   expect_code 0 "$rc" "tasktmp-occupied: teardown should complete"
   assert_present "$case_dir/tasktmp" "tasktmp-occupied: the occupied tasktmp was deleted"
-  grep -Eq "^[^	]+	task-x1	-	kept	[^	]*$pid[^	]*	.*tasktmp" "$case_dir/state/teardown-processes.log" \
+  grep -Eq "^[^	]+	task-x1	-	kept	[^	]*${pid}[^	]*	.*tasktmp" "$case_dir/state/teardown-processes.log" \
     || fail "tasktmp-occupied: the kept tasktmp was not logged"
   pass "a tasktmp that a spared process occupies is kept"
 }

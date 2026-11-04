@@ -4255,6 +4255,17 @@ if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
     require_orca_worktree_path_match_if_present "$ORCA_WORKTREE_ID" "$WT" || exit 1
     ORCA_PATH_MATCH_VERIFIED=1
   fi
+  if [ -n "$T_ORCA" ]; then
+    fm_backend_kill "$BACKEND" "$T" "$(meta_value "$META" zellij_tab_id)" "fm-$ID" \
+      || { endpoint_close_refusal "$ID" "$BACKEND" "$T" 0; exit 1; }
+  fi
+  survivors=$(teardown_survivors_settled "$WT" | tr '\n' ' ')
+  if [ -n "$survivors" ]; then
+    echo "teardown: kept Orca worktree $WT; process(es) still run in it or cannot be listed: $survivors" >&2
+    teardown_process_log - kept "pid(s) still in Orca worktree: $survivors" "$WT"
+    exit 1
+  fi
+  teardown_final_safety_or_exit
   if [ -d "$WT" ]; then
     branch=$(git -C "$WT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)
     if [ "$branch" != "HEAD" ]; then
@@ -4267,17 +4278,6 @@ if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
       "$WT/.fm-grok-turnend" "$WT/.fm-kimi-turnend"
     remove_harness_worktree_wiring "$WT"
   fi
-  if [ -n "$T_ORCA" ]; then
-    fm_backend_kill "$BACKEND" "$T" "$(meta_value "$META" zellij_tab_id)" "fm-$ID" \
-      || { endpoint_close_refusal "$ID" "$BACKEND" "$T" 0; exit 1; }
-  fi
-  survivors=$(teardown_survivors_settled "$WT" | tr '\n' ' ')
-  if [ -n "$survivors" ]; then
-    echo "teardown: kept Orca worktree $WT; process(es) still run in it or cannot be listed: $survivors" >&2
-    teardown_process_log - kept "pid(s) still in Orca worktree: $survivors" "$WT"
-    exit 1
-  fi
-  teardown_final_safety_or_exit
   fm_backend_remove_worktree "$BACKEND" "$ORCA_WORKTREE_ID"
 elif [ "$KIND" != secondmate ] && ! teardown_owns_worktree; then
   :
