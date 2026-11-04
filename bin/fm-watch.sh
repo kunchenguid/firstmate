@@ -2766,7 +2766,8 @@ open_decision_reminder_tick() {  # [now-epoch], for deterministic clock callers
     [ -f "$f" ] && [ -r "$f" ] && [ ! -L "$f" ] || continue
     [ "$f" != "$exclude" ] || continue
     task=${f##*/}; task=${task%.status}
-    open=$(status_open_decisions_incremental "$f" '' timed) || return 1
+    open=$(status_open_decisions_incremental "$f" '' timed)
+    case $? in 0|3) ;; *) return 1 ;; esac
     [ -n "$open" ] || continue
     while IFS=$'\t' read -r key verb opened note; do
       case "$opened" in ''|unknown|*[!0-9]*) continue ;; esac

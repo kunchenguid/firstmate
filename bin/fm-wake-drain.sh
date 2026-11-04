@@ -18,7 +18,8 @@
 # --open-decisions prints every folded status decision as task [key=KEY] verb:
 # note, without row or content limits. It neither claims nor acknowledges wakes
 # or status presentations. Normal drains retain their bounded preview and put
-# its full count (or unknown on read failure) before the acknowledgement command.
+# its full count (or unknown when any status log could not be read) before the
+# acknowledgement command.
 # After truncation or recovery, reconcile the full reader before acknowledging.
 # FM_STATUS_PRESENTATION_LOCK_TIMEOUT sets the positive whole-second wait for
 # presentation-path locks (default 10); queue mutation locks remain blocking.
@@ -805,7 +806,7 @@ print_status_sections() {
 
 print_status_presentation() {  # [<deduped-raw-rows>]
   local rows=${1:-} lock="$STATE/.status-presentation-lock" snapshot annotation_manifest fully_presented='' rc=0
-  local lock_rc holder_pid
+  local lock_rc holder_pid snapshot_skipped=false
   if fm_lock_acquire_wait_bounded "$lock" "$PRESENTATION_LOCK_TIMEOUT"; then
     :
   else
@@ -819,10 +820,15 @@ print_status_presentation() {  # [<deduped-raw-rows>]
     fi
     return 1
   fi
-  snapshot=$(status_presentation_snapshot "$STATE") || {
-    printf 'STATUS PRESENTATION INCOMPLETE: status snapshot could not be read.\n'
-    rc=1
-  }
+  snapshot=$(status_presentation_snapshot "$STATE")
+  case $? in
+    0) ;;
+    3) snapshot_skipped=true ;;
+    *)
+      printf 'STATUS PRESENTATION INCOMPLETE: status snapshot could not be read.\n'
+      rc=1
+      ;;
+  esac
   if [ "$rc" -eq 0 ] && [ -n "$rows" ]; then
     fm_wake_print_annotations "$rows" "$snapshot" || rc=1
     if [ "$rc" -eq 0 ]; then
@@ -834,7 +840,9 @@ print_status_presentation() {  # [<deduped-raw-rows>]
     OPEN_DECISION_COUNT=0
     if [ -n "$snapshot" ]; then print_status_sections "$snapshot" "$fully_presented" || rc=1; fi
   fi
-  [ "$rc" -eq 0 ] || OPEN_DECISION_COUNT=unknown
+  # A skipped log keeps the other logs presenting, but its decisions are not in
+  # the count, and a number on the acknowledgement line reads as the full set.
+  if [ "$rc" -ne 0 ] || [ "$snapshot_skipped" = true ]; then OPEN_DECISION_COUNT=unknown; fi
   fm_lock_release "$lock"
   return "$rc"
 }

@@ -338,8 +338,31 @@ SH
   pass "a failed open-decisions fold read leaves the acknowledgement count unknown"
 }
 
+test_unreadable_status_log_leaves_the_count_unknown() {
+  local dir state rc
+  dir=$(make_case unreadable-log-count)
+  state="$dir/state"
+  printf 'needs-decision [key=visible]: Keep this one.\n' > "$state/alpha.status"
+  printf 'needs-decision [key=hidden]: Do not lose this one.\n' > "$state/beta.status"
+  chmod 000 "$state/beta.status"
+  append_wake "$state" check fixture 'Handle this separately.' || fail "could not queue fixture"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$dir/out" 2> "$dir/err"
+  rc=$?
+  chmod 600 "$state/beta.status"
+  [ "$rc" -eq 0 ] || fail "drain failed with an unreadable status log: $(cat "$dir/err")"
+  grep -Fx 'alpha [key=visible] needs-decision: Keep this one.' "$dir/out" >/dev/null \
+    || fail "an unreadable log hid the readable log's decision from the listing: $(cat "$dir/out")"
+  grep -E '^WAKE_ACK_REQUIRED: .*open-decisions=unknown ' "$dir/err" >/dev/null \
+    || fail "a skipped status log still produced a counted acknowledgement: $(grep WAKE_ACK_REQUIRED "$dir/err")"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$dir/out" 2> "$dir/err" || fail "drain failed once every log was readable"
+  grep -E '^WAKE_ACK_REQUIRED: .*open-decisions=2 ' "$dir/err" >/dev/null \
+    || fail "the restored log's decision was not counted: $(grep WAKE_ACK_REQUIRED "$dir/err")"
+  pass "a status log the drain cannot read leaves the acknowledgement count unknown while the other logs still list"
+}
+
 test_full_reader_preserves_all_decisions_without_consuming_wakes
 test_full_reader_refuses_an_unreadable_status_log
+test_unreadable_status_log_leaves_the_count_unknown
 test_empty_queue_recovery_counts_all_decisions
 test_count_distinguishes_empty_from_failed_read
 test_fold_read_failure_leaves_the_count_unknown
