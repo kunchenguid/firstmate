@@ -556,8 +556,8 @@ fm_backlog_open_pr_note_arg_valid() {  # <note>
   )
 }
 
-# proven: a merge-notification marker or merge-authority record matches the URL.
-# open: a GitHub or Forgejo URL has no such record.
+# proven: a merge-notification marker matches the URL.
+# open: a GitHub or Forgejo URL has no such marker.
 # link: any other URL keeps the caller's --pr argument.
 # Prints one of those words and returns 0. A failed proof read is open when
 # this note would accept the URL, and link otherwise. The read runs in its own
@@ -583,15 +583,6 @@ fm_backlog_ship_pr_close_mode() {  # <state-dir> <id> <url>
       if fm_pr_poll_merge_already_notified "$state" "$id" "$provider" "$host" "$path" "$number"; then
         printf "proven\n"
         exit 0
-      fi
-      record="$state/$id.merge-authority"
-      if [ -f "$record" ] && [ ! -L "$record" ]; then
-        . "$lib/fm-wake-lib.sh" || exit 1
-        . "$lib/fm-merge-authority-lib.sh" || exit 1
-        if fm_merge_authority_read "$state" "$id" "$provider" "$host" "$path" "$number"; then
-          printf "proven\n"
-          exit 0
-        fi
       fi
       printf "open\n"
     ' _ "$_FM_BACKLOG_TRANSITION_DIR" "$state" "$id" "$url"

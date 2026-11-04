@@ -867,7 +867,7 @@ SH
 }
 
 # An allowed cleanup of a ship whose pull request is still open must not archive
-# that row as merged. A matching local merge record is what makes the same URL
+# that row as merged. A matching merge notification is what makes the same URL
 # a merged close.
 test_teardown_does_not_archive_an_open_pr_as_merged() {
   local case_dir out show url
@@ -925,11 +925,11 @@ test_teardown_does_not_archive_an_open_pr_as_merged() {
   seed_backlog_in_flight "$case_dir"
   write_merge_authority "$case_dir/state" task-x1 github github.com example/repo 7 attended
   out=$(run_teardown "$case_dir" 2>&1) || fail "teardown of an accepted merge failed: $out"
-  grep -F '(merged' "$case_dir/data/backlog.md" >/dev/null \
-    || fail "a matching merge-authority record was not archived as merged"
-  tasks-axi show task-x1 --file "$case_dir/data/backlog.md" \
-    | grep -F "links: \"pr:$url\"" >/dev/null \
-    || fail "a matching merge-authority record did not close as the item's pr link"
+  if grep -F '(merged' "$case_dir/data/backlog.md" >/dev/null; then
+    fail "a merge-authority record without a merge notification archived the pull request as merged"
+  fi
+  grep -F "PR not confirmed merged $url" "$case_dir/data/backlog.md" >/dev/null \
+    || fail "a merge-authority record alone did not leave the pull request unconfirmed"
 
   url=https://forgejo.example.com/example/repo/pulls/7
   case_dir=$(make_case open-pr-forgejo)
