@@ -1018,15 +1018,25 @@ const operational = spawnSync(
   { encoding: "utf8", input: "operational watcher injection" },
 );
 if (operational.status !== 0) throw new Error(`could not create operational input: ${operational.stderr}`);
-await fire("before_agent_start", { prompt: operational.stdout }, mainCtx);
+await fire("before_agent_start", { messageType: "user", prompt: operational.stdout }, mainCtx);
 entries.push({ type: "message", message: { role: "user", content: operational.stdout } });
 const unsolicitedPrompt = "Please keep responses concise while monitoring the fleet.";
-await fire("before_agent_start", { prompt: unsolicitedPrompt }, mainCtx);
+await fire("before_agent_start", { messageType: "user", prompt: unsolicitedPrompt }, mainCtx);
 entries.push({ type: "message", message: { role: "user", content: unsolicitedPrompt } });
+// Pi 1.x's idle sendMessage trigger carries a CustomMessage, not a prompt.
+// It must neither throw nor become captain dialog, even with request wording.
+for (const content of ["custom content must not become captain dialog", explicitRequest]) {
+  await fire("before_agent_start", {
+    type: "before_agent_start",
+    messageType: "custom",
+    message: { role: "custom", customType: "fixture", content, display: false, timestamp: Date.now() },
+    systemPrompt: "fixture", systemPromptOptions: {},
+  }, mainCtx);
+}
 await fire("agent_start", {}, mainCtx);
 await fire("agent_end", {}, mainCtx);
 const legacyOperational = "⁣FIRSTMATE_OP: give me a fresh system-resource report.";
-await fire("before_agent_start", { prompt: legacyOperational }, mainCtx);
+await fire("before_agent_start", { messageType: "user", prompt: legacyOperational }, mainCtx);
 entries.push({ type: "message", message: { role: "user", content: legacyOperational } });
 await fire("agent_start", {}, mainCtx);
 const unsolicited = dispatch("signal: healthy resource result");
@@ -1054,7 +1064,7 @@ for (let index = 0; index < requestedPrompts.length; index += 1) {
   if (index < longRequests.length && content.length <= 4000) {
     throw new Error(`request fixture ${index} did not exceed the mirror bound`);
   }
-  await fire("before_agent_start", { prompt: content }, mainCtx);
+  await fire("before_agent_start", { messageType: "user", prompt: content }, mainCtx);
   // Pi persists this only after every before_agent_start handler has returned.
   entries.push({ type: "message", message: { role: "user", content } });
   await fire("agent_start", {}, mainCtx);
@@ -1080,6 +1090,8 @@ for (const content of [unsolicitedPrompt, ...requestedPrompts]) {
   if (copies !== 1) throw new Error(`current captain prompt was mirrored ${copies} times instead of once`);
 }
 if (mirroredCaptainText.some((text) =>
+  text === `[captain] ${explicitRequest}` ||
+  text.includes("custom content must not become captain dialog") ||
   text.includes("operational watcher injection") || text.includes("FIRSTMATE_OP: give me a fresh system-resource report")
 )) {
   throw new Error("canonical current or legacy operational input entered captain mirror context");
@@ -2329,6 +2341,19 @@ if (mirrored[2].content !== `[captain] ${entries[6].message.content}`) {
 }
 if (mirrored.some((m) => m.content.includes("operational injection") || m.content.includes("tool output") || m.content.includes("merged note"))) {
   throw new Error("mirror leaked operational, tool, or merge-note traffic");
+}
+
+// A run that pi.sendCustomMessage starts carries a custom message and no
+// prompt, so reading the prompt here threw and every such run surfaced the
+// failure instead of starting. It is not captain input either, so nothing of
+// it reaches the mirror.
+const mirroredBeforeCustomRun = session.ops.filter((op) => op.kind === "custom").length;
+await fire("before_agent_start", {
+  messageType: "custom",
+  message: { role: "custom", customType: "fm-branch-merge", content: "merge note that starts its own run" },
+}, ctx);
+if (session.ops.filter((op) => op.kind === "custom").length !== mirroredBeforeCustomRun) {
+  throw new Error("a custom-message run was mirrored as captain dialog");
 }
 
 // The durable cursor advances: a second turn_end mirrors only NEW dialog.

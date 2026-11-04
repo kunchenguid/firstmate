@@ -2374,7 +2374,7 @@ await waitFor(
 if (finalSession.prompts.filter((message) => message.includes("signal: streaming queued actionable outcome")).length !== 1) {
   throw new Error(`second replacement did not replay the idle queued follow-up exactly once: ${finalSession.prompts.join(" | ")}`);
 }
-finalSession.handlers.get("before_agent_start")?.({ prompt: finalSession.prompts[0] }, {});
+finalSession.handlers.get("before_agent_start")?.({ messageType: "user", prompt: finalSession.prompts[0] }, {});
 await new Promise((resolve) => setTimeout(resolve, 20));
 process.exit(0);
 EOF
@@ -2434,7 +2434,7 @@ const pi = {
     prompts.push(message);
     if (streaming) return;
     beforeAgentStarts += 1;
-    handlers.get("before_agent_start")?.({ prompt: message }, {});
+    handlers.get("before_agent_start")?.({ messageType: "user", prompt: message }, {});
   },
   events: { on() {}, emit() {} },
 };
@@ -2476,6 +2476,17 @@ await waitFor(
 if (arms() !== 3 || prompts.length !== 1) throw new Error(`second streaming-time close was not folded: ${prompts.join(" | ")}`);
 if (beforeAgentStarts !== 0) throw new Error(`streaming follow-ups raised before_agent_start ${beforeAgentStarts} times`);
 
+// Pi 1.x emits an idle custom-message trigger without a prompt. Its content
+// matching a queued user wake must not mark that wake consumed.
+await handlers.get("before_agent_start")?.({
+  type: "before_agent_start",
+  messageType: "custom",
+  message: {
+    role: "custom", customType: "fixture", content: prompts[0],
+    display: false, timestamp: Date.now(),
+  },
+  systemPrompt: "fixture", systemPromptOptions: {},
+}, {});
 // Nothing is consumed before the captain replaces the session, so BOTH records
 // (the carrier and the folded one) ride the handoff, neither marked delivered.
 await handlers.get("session_shutdown")?.({ type: "session_shutdown", reason: "new" }, {});
@@ -2554,7 +2565,7 @@ const pi = {
   sendUserMessage: async (message) => {
     prompts.push(message);
     if (streaming) return;
-    handlers.get("before_agent_start")?.({ prompt: message }, {});
+    handlers.get("before_agent_start")?.({ messageType: "user", prompt: message }, {});
   },
   events: { on() {}, emit() {} },
 };
@@ -3230,7 +3241,7 @@ if (!prompts[1].includes("signal: persistence failure actionable outcome")) {
 if (!prompts[1].includes("could not persist a replacement-session actionable wake")) {
   throw new Error(`replacement did not surface the persistence failure: ${prompts[1]}`);
 }
-handlers.get("before_agent_start")?.({ prompt: prompts[1] }, {});
+handlers.get("before_agent_start")?.({ messageType: "user", prompt: prompts[1] }, {});
 process.exit(0);
 EOF
 )

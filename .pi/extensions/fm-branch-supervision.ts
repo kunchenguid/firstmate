@@ -1480,6 +1480,10 @@ ${context.command}
   // synchronous read it replaces did. The generation is captured before that
   // await so a session replaced while it runs cannot be staged into.
   pi.on?.("before_agent_start", async (event, ctx) => {
+    // A run started by an idle custom message (pi.sendMessage with triggerTurn)
+    // carries that message and no prompt, and it is never captain dialog.
+    // Testing for the prompt itself also narrows prompt-only SDK event types.
+    if (!("prompt" in event)) return;
     rememberMainModel(ctx);
     currentMainSession = ctx?.sessionManager ?? null;
     const promptGeneration = generation;
