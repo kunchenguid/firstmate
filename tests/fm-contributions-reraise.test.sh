@@ -501,9 +501,40 @@ test_push_after_comment_clears_via_forge_commit_time() {
   pass 'push after comment clears reminder via commits committedDate from pr view'
 }
 
+test_ack_of_source_comment_records_ack() {
+  local home token_old token_src
+  home=$(new_home ack-source)
+  # Two maintainer comments: 101 is older, 102 is the latest and so the unanswered source.
+  jq -n '[{id:101,user:{login:"maintainer"},author_association:"OWNER",
+    body:"Older note",html_url:"https://github.com/o/r/pull/8#issuecomment-101",
+    created_at:"2026-09-16T08:00:00Z",updated_at:"2026-09-16T08:00:00Z"},
+    {id:102,user:{login:"maintainer"},author_association:"OWNER",
+    body:"Latest note",html_url:"https://github.com/o/r/pull/8#issuecomment-102",
+    created_at:"2026-09-16T08:30:00Z",updated_at:"2026-09-16T08:30:00Z"}]' > "$home/forge/comments.json"
+  with_home "$home" env FM_CONTRIBUTIONS_NOW=2026-09-16T08:31:00Z "$ROOT/bin/fm-contributions.sh" poll >/dev/null \
+    || fail 'initial poll failed'
+  jq -e '.records[0].unanswered.source == "https://github.com/o/r/pull/8#issuecomment-102"' \
+    "$home/data/delivery/contributions.json" >/dev/null || fail 'unanswered source is not the latest comment'
+  token_old=$(with_home "$home" "$ROOT/bin/fm-contributions.sh" pending | jq -er 'map(select(.token | startswith("comment:101:"))) | first | .token') \
+    || fail 'no pending token for the older comment'
+  token_src=$(with_home "$home" "$ROOT/bin/fm-contributions.sh" pending | jq -er 'map(select(.token | startswith("comment:102:"))) | first | .token') \
+    || fail 'no pending token for the source comment'
+  # Acknowledging an unrelated comment must not snooze the unanswered reminder.
+  with_home "$home" env FM_CONTRIBUTIONS_NOW=2026-09-16T08:35:00Z "$ROOT/bin/fm-contributions.sh" ack delivery https://github.com/o/r/pull/8 "$token_old" \
+    || fail 'ack of unrelated comment failed'
+  jq -e '.records[0].unanswered.acked == null' "$home/data/delivery/contributions.json" >/dev/null \
+    || fail 'ack of an unrelated comment snoozed the unanswered reminder'
+  # Acknowledging the comment that is the unanswered source records the ack.
+  with_home "$home" env FM_CONTRIBUTIONS_NOW=2026-09-16T08:40:00Z "$ROOT/bin/fm-contributions.sh" ack delivery https://github.com/o/r/pull/8 "$token_src" \
+    || fail 'ack of source comment failed'
+  jq -e '.records[0].unanswered.acked == "2026-09-16T08:40:00Z"' "$home/data/delivery/contributions.json" >/dev/null \
+    || fail 'ack of the unanswered source comment did not set unanswered.acked'
+  pass 'acking the unanswered source comment records the ack and an unrelated comment does not'
+}
+
 if [ "${BASH_SOURCE[0]}" = "$0" ]; then
   failures=0
-  for test_name in test_reraise_after_ack test_clear_on_our_reply test_clear_on_no_action_verdict test_no_reraise_when_we_spoke_last test_clear_on_our_push test_ack_restarts_snooze test_reraise_is_opt_in test_reraise_interval_configurable test_reminder_waits_full_interval_not_every_poll test_push_does_not_clear_subsequent_comment test_ack_matches_exact_thread_key test_excluded_bot_does_not_cause_unanswered_wake test_push_after_comment_clears_via_forge_commit_time; do
+  for test_name in test_reraise_after_ack test_clear_on_our_reply test_clear_on_no_action_verdict test_no_reraise_when_we_spoke_last test_clear_on_our_push test_ack_restarts_snooze test_reraise_is_opt_in test_reraise_interval_configurable test_reminder_waits_full_interval_not_every_poll test_push_does_not_clear_subsequent_comment test_ack_matches_exact_thread_key test_excluded_bot_does_not_cause_unanswered_wake test_push_after_comment_clears_via_forge_commit_time test_ack_of_source_comment_records_ack; do
     ( "$test_name" ) || failures=$((failures + 1))
   done
   [ "$failures" -eq 0 ] || exit 1

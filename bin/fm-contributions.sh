@@ -866,8 +866,9 @@ case "${1:-}" in
       jq --arg token "$1" --arg now "$NOW" '
         ([$now, (try ($token | capture("(?<ts>[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z)").ts) catch null)] | map(select(. != null)) | max) as $ack_time
         | ($token | split(":") | if .[0] == "unanswered" then .[1:3] else .[:2] end | join(":")) as $token_key
+        | ((.unanswered.source // null) as $un_source | any(.pending[]?; .token == $token and .source == $un_source)) as $acks_source
         | .pending |= map(select(.token != $token))
-        | if .unanswered != null and ($token | startswith("unanswered:pr:")) then
+        | if .unanswered != null and (($token | startswith("unanswered:pr:")) or $acks_source) then
             .unanswered.acked = $ack_time
           else . end
         | if .threads != null then
