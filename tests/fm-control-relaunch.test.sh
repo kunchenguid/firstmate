@@ -3431,6 +3431,7 @@ test_control_move_resumes_the_claude_conversation() {
   # The running agent's own session record, as Claude keeps it per process.
   set -m
   ( cd "$dir/wt" && exec -a claude sleep 60 ) &
+  # shellcheck disable=SC2031 # $! names the job started on the line above, in this shell
   agent=$!
   set +m
   mkdir -p "$dir/user-home/.claude/sessions" "$dir/user-home/.claude/projects/p"
