@@ -4175,6 +4175,12 @@ else
   fi
 fi
 
+teardown_final_safety_or_exit() {
+  validate_worktree_teardown_safety && return 0
+  [ "$BACKLOG_CLOSED" != 1 ] || fm_backlog_close_marker_clear "$STATE" "$ID" || true
+  exit 1
+}
+
 teardown_finish_treehouse_return() {  # early|final
   local survivors
   if [ "$TEARDOWN_CWD_UNLISTABLE" = 1 ]; then
@@ -4198,7 +4204,7 @@ teardown_finish_treehouse_return() {  # early|final
   fi
   TEARDOWN_RETURN_DEFERRED=0
   if [ "$1" = final ]; then
-    validate_worktree_teardown_safety || exit 1
+    teardown_final_safety_or_exit
   fi
   if [ "$KIND" = scout ] || [ "$FORCE" = "--force" ]; then
     teardown_scrub_scratch_copy "$WT" || exit 1
@@ -4271,6 +4277,7 @@ if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
     teardown_process_log - kept "pid(s) still in Orca worktree: $survivors" "$WT"
     exit 1
   fi
+  teardown_final_safety_or_exit
   fm_backend_remove_worktree "$BACKEND" "$ORCA_WORKTREE_ID"
 elif [ "$KIND" != secondmate ] && ! teardown_owns_worktree; then
   :

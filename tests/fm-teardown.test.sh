@@ -5166,6 +5166,7 @@ spawn_late_actor() {  # <case-dir> <root> <delay> <action: child|write>
     case "$2" in
       child) ( exec sleep 300 ) & printf "%s\n" "$!" > "$3/late-child.pid" ;;
       write) printf "late\n" > "$PWD/late.txt" ;;
+      commit) git -c user.name=late -c user.email=late@example.com commit -q --allow-empty -m late ;;
     esac
   ' _ "$delay" "$action" "$case_dir" ) >/dev/null 2>&1 &
   LATE_ACTOR_PID=$!
@@ -5244,6 +5245,64 @@ test_work_saved_during_the_wait_refuses_the_return() {
   assert_present "$case_dir/wt/late.txt" "late-write: late file lost"
   assert_present "$case_dir/state/task-x1.meta" "late-write: metadata dropped despite the refusal"
   pass "work saved by a spared process during the wait refuses the return and keeps the records"
+}
+
+replay_close_marker() {  # <case-dir>
+  local case_dir=$1
+  FM_HOME="$case_dir" FM_ROOT_OVERRIDE="$ROOT" bash -c '
+    . "$1/bin/fm-tasks-axi-lib.sh"
+    . "$1/bin/fm-backlog-transition-lib.sh"
+    fm_backlog_close_marker_replay "$2/state" "$2/state/task-x1.backlog-close" "$2/data" || {
+      printf "replay failed: %s\n" "$FM_BACKLOG_TRANSITION_ERROR" >&2
+      exit 1
+    }
+  ' _ "$ROOT" "$case_dir"
+}
+
+test_late_work_refusal_leaves_no_close_marker_for_startup_replay() {
+  local case_dir rc action
+  for action in write commit; do
+    case_dir=$(make_case "late-marker-$action")
+    write_meta "$case_dir" no-mistakes ship
+    land_shippable_commit "$case_dir"
+    spawn_late_actor "$case_dir" "$case_dir/wt" 3 "$action"
+    sleep 0.3
+    rc=0
+    FM_FAKE_TREEHOUSE_LOG="$case_dir/treehouse.log" FM_FAKE_PANE_PID=1 \
+      run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+    kill -KILL "$LATE_ACTOR_PID" 2>/dev/null || true
+    expect_code 1 "$rc" "late-marker-$action: late work must refuse teardown"
+    assert_grep "REFUSED" "$case_dir/stderr" "late-marker-$action: refusal missing"
+    replay_close_marker "$case_dir" || fail "late-marker-$action: startup replay failed"
+    assert_present "$case_dir/state/task-x1.meta" "late-marker-$action: startup replay dropped the retained task"
+    [ "$(backlog_row_state "$case_dir")" = in_flight ] \
+      || fail "late-marker-$action: startup replay closed the backlog item over retained work"
+  done
+  pass "a refusal after the wait leaves no pending close for startup replay to consume"
+}
+
+test_orca_work_saved_during_the_wait_is_not_removed() {
+  local case_dir rc action
+  for action in write commit; do
+    case_dir=$(make_case "orca-late-$action")
+    write_meta "$case_dir" no-mistakes ship
+    land_shippable_commit "$case_dir"
+    configure_orca_teardown_case "$case_dir"
+    spawn_late_actor "$case_dir" "$case_dir/wt" 3 "$action"
+    sleep 0.3
+    rc=0
+    FM_ORCA_CASE="$case_dir" run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+    kill -KILL "$LATE_ACTOR_PID" 2>/dev/null || true
+    expect_code 1 "$rc" "orca-late-$action: late work must refuse teardown: $(cat "$case_dir/stderr")"
+    assert_grep "REFUSED" "$case_dir/stderr" "orca-late-$action: refusal missing"
+    assert_absent "$case_dir/removal.log" "orca-late-$action: the Orca worktree was removed over late work"
+    assert_present "$case_dir/state/task-x1.meta" "orca-late-$action: records dropped"
+    replay_close_marker "$case_dir" || fail "orca-late-$action: startup replay failed"
+    assert_present "$case_dir/state/task-x1.meta" "orca-late-$action: startup replay dropped the retained task"
+    [ "$(backlog_row_state "$case_dir")" = in_flight ] \
+      || fail "orca-late-$action: startup replay closed the backlog item over retained work"
+  done
+  pass "an Orca worktree that gains work during the wait is kept and its close is not replayed"
 }
 
 test_late_write_is_still_returned_with_force() {
@@ -6760,6 +6819,8 @@ test_foreign_session_survives_and_is_reported
 test_child_started_during_the_wait_keeps_the_worktree
 test_unlistable_worktree_after_the_reaper_keeps_the_worktree
 test_work_saved_during_the_wait_refuses_the_return
+test_late_work_refusal_leaves_no_close_marker_for_startup_replay
+test_orca_work_saved_during_the_wait_is_not_removed
 test_late_write_is_still_returned_with_force
 test_orca_worktree_with_a_spared_process_is_not_removed
 test_tasktmp_with_a_spared_process_is_not_deleted
