@@ -58,6 +58,27 @@ EOF
 chmod +x "$TMP_ROOT/fakebin/"*
 lab() { "$HERDR_LAB_HELPER" run "$HERDR_LAB_SESSION" "$@"; }
 VERSION=$(lab status --json | jq -er '.client.version')
+# Projection is a default only at or above the presentation floor, so ask the
+# same classifier fm-spawn consults; a supported release below it spawns flat.
+FLOOR=$(PATH="$TMP_ROOT/fakebin:$PATH" bash -c '
+  . "$1/bin/backends/herdr.sh"
+  status=0
+  fm_backend_herdr_presentation_release_supported "$2" || status=$?
+  printf "%s %s %s\n" "$status" "$FM_BACKEND_HERDR_MIN_PRESENTATION_VERSION" "$FM_BACKEND_HERDR_PRESENTATION_RELEASE"
+' _ "$ROOT" "$HERDR_LAB_SESSION")
+FLOOR_STATUS=${FLOOR%% *}
+FLOOR=${FLOOR#* }
+FLOOR_VERSION=${FLOOR%% *}
+FLOOR_RELEASE=${FLOOR#* }
+case "$FLOOR_STATUS" in
+  0) ;;
+  1)
+    printf 'skip: Herdr %s is below the %s presentation floor, so spawns stay flat\n' \
+      "$FLOOR_RELEASE" "$FLOOR_VERSION"
+    exit 0
+    ;;
+  *) fail "Herdr $FLOOR_RELEASE could not be classified against the presentation floor" ;;
+esac
 HERDR_SOCKET_PATH=$(lab session list --json | jq -er --arg session "$HERDR_LAB_SESSION" '.sessions[] | select(.name == $session) | .socket_path')
 export HERDR_SOCKET_PATH
 fm_git_init_commit "$TMP_ROOT/project"
