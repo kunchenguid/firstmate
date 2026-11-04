@@ -592,7 +592,7 @@ EOF
   fm_timing_record stage network-checks "$stage_started" "$phases"
 
   if [ "$downgraded" -eq 1 ]; then
-    printf 'NETWORK_CHECKS: the recorded fleet lock holder changed after these were requested, so dead-secondmate relaunch, secondmate convergence, pending handoff delivery, and project clone refresh were skipped; they belong to whichever session holds the lock now\n' >> "$out"
+    printf 'NETWORK_CHECKS: the recorded team lock holder changed after these were requested, so dead-Project-Director relaunch, Project Director convergence, pending handoff delivery, and project clone refresh were skipped; they belong to whichever session holds the lock now\n' >> "$out"
   fi
   case "$rc" in
     0) publish "$generation" 'done' "$phases" "$sweep_locked" "$started" "$rc" "$out" "$timings" ;;

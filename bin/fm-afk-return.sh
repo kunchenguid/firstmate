@@ -296,7 +296,7 @@ catchup_summary() {
 return_guard() {
   local reasons
   if [ -e "$STATE/.afk" ] || fm_afk_contract_present "$STATE"; then
-    printf 'fm-afk-return: away mode is still active; run bin/fm-afk-return.sh before ordinary captain work\n' >&2
+    printf 'fm-afk-return: away mode is still active; run bin/fm-afk-return.sh before ordinary user work\n' >&2
     return 3
   fi
   if [ -e "$GATE" ]; then
@@ -619,7 +619,7 @@ EOF
   rows=$(printf '%s\n' "$STORE_ROWS" | awk -F '\t' '$3 == "captain" && $6 != "true" { printf "  - %s: %s\n", $2, $5 }')
   if [ -n "$rows" ] && [ "$drained" -eq 1 ]; then
     count=$((count + 1))
-    printf '  %s captain outcome(s) escalated by the away session, %s\n' \
+    printf '  %s user outcome(s) escalated by the away session, %s\n' \
       "$(printf '%s\n' "$rows" | wc -l | tr -d ' ')" "$pointer"
   elif [ -n "$rows" ]; then
     count=$((count + 1))
@@ -679,7 +679,7 @@ EOF
   visible_outcomes=$((routine_visible + captain))
   printf '  %s outcome(s) handled by the away session (%s routine, %s escalated above)\n' "$((routine + captain))" "$routine" "$captain"
   if [ "$drained" -eq 1 ] && [ "$visible_outcomes" -gt 0 ] && [ "$drain_ok" -eq 1 ]; then
-    printf '  the drain'"'"'s BRANCH OUTCOMES section presents the visible outcomes: each task'"'"'s captain outcomes on one line until you acknowledge them, visible routine notes once, past its limit as a count\n'
+    printf '  the drain'"'"'s BRANCH OUTCOMES section presents the visible outcomes: each task'"'"'s user outcomes on one line until you acknowledge them, visible routine notes once, past its limit as a count\n'
   elif [ "$drained" -eq 1 ] && [ "$visible_outcomes" -gt 0 ]; then
     printf '  visible outcomes %s\n' "$pointer"
   elif [ "$routine_visible" -gt 0 ]; then
@@ -694,7 +694,7 @@ EOF
   # 7. cost.
   live=0
   for meta in "$STATE"/*.meta; do [ -f "$meta" ] && live=$((live + 1)); done
-  printf 'Cost: %s supervision outcome(s) recorded (%s routine, %s captain); %s task(s) live at return.\n' \
+  printf 'Cost: %s supervision outcome(s) recorded (%s routine, %s user-visible); %s task(s) live at return.\n' \
     "$((routine + captain))" "$routine" "$captain" "$live"
 }
 
@@ -858,7 +858,7 @@ EOF
   fi
   if [ "$lifecycle_ok" -ne 1 ] || grep -q "^blocker$(printf '\t')" "$blockers"; then
     write_gate "$evidence" "$blockers" || { rm -f "$evidence" "$blockers" "$drain_err"; return 1; }
-    printf 'fm-afk-return: catch-up must finish before the captain request\n' >&2
+    printf 'fm-afk-return: catch-up must finish before the user request\n' >&2
     print_evidence "$GATE" >&2
     print_blockers "$GATE" >&2
     printf 'fm-afk-return: handle each blocker now, or close it with resolved [key=...] and append a durable reclassification reason, then run bin/fm-afk-return.sh check\n' >&2
@@ -884,7 +884,7 @@ EOF
   rm -f "$GATE"
   clear_delivery_artifacts
   rm -f "$evidence" "$blockers" "$drain_err"
-  printf 'fm-afk-return: catch-up clear; ordinary captain work may proceed\n'
+  printf 'fm-afk-return: catch-up clear; ordinary user work may proceed\n'
   return 0
 }
 

@@ -1489,7 +1489,7 @@ housekeeping() {  # <state>
       *)
         last=$(status_declared_wait_line "$state/$task.status")
         if [ -n "$last" ] && status_is_captain_held "$last"; then
-          if escalate_add "$state" "captain-held ${age}s (awaiting the captain, answer the held decision or release the hold): $win"; then
+          if escalate_add "$state" "user-held ${age}s (awaiting the user; answer the held decision or release the hold): $win"; then
             _now > "$marker"
           fi
         elif [ -n "$last" ] && status_is_paused "$last"; then

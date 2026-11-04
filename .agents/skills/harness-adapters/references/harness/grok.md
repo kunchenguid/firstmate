@@ -31,7 +31,7 @@ Old Herdr logic treated any pane delta as submission, including popup closure an
 Tmux and Herdr now route captures through `../../../bin/fm-composer-lib.sh`, which classifies real text on every proven content row.
 `../../../docs/herdr-backend.md` owns the boundary and `../../../tests/fm-backend-herdr.test.sh` covers it.
 
-On 2026-09-24, on the first dispatches after Grok was added to this fleet, a steer landed in the Grok 1.0.41 composer unsent.
+On 2026-09-24, on the first dispatches after Grok was added to this team, a steer landed in the Grok 1.0.41 composer unsent.
 The pane showed `Enter:send now` and the text stayed pending.
 Verify delivery by peeking at the pane rather than trusting the send result, on anything time-critical to this harness.
 A hold that silently does not arrive is the worst message to lose.
@@ -54,17 +54,17 @@ It is a knowing exception to the store-avoidance stance, not an oversight, so ex
 
 ## Training opt-in
 
-On 2026-09-24, on the first dispatches after Grok was added to this fleet, Grok 1.0.41 offered "Help improve Grok".
+On 2026-09-24, on the first dispatches after Grok was added to this team, Grok 1.0.41 offered "Help improve Grok".
 That opt-in retains prompts, traces, and metrics for training.
 It is off by default and must be left off.
-This fleet writes customer-facing privacy statements saying customer data and audio are not used for training, and sending our own prompts and traces to a provider for training while publishing that is not a trade to make silently.
+This team writes customer-facing privacy statements saying customer data and audio are not used for training, and sending our own prompts and traces to a provider for training while publishing that is not a trade to make silently.
 
 ## Composer
 
 Fresh placeholder `Type a message...` uses dark 24-bit TRUECOLOR, not SGR-2.
 `fm_composer_strip_ghost` in `../../../bin/fm-composer-lib.sh` drops dim or faint and truecolor below `FM_COMPOSER_GHOST_LUMA_MAX`, default 128.
 On Grok 0.2.93, real input `38;2;224;222;244` measured about 225 luminance, while borders and placeholder ranged from `38;2;50;47;70` through `38;2;110;106;134`, about 51-110, and were dropped.
-The truecolor rule assumes the fleet's dark theme; SGR-2 is theme-independent.
+The truecolor rule assumes the team's dark theme; SGR-2 is theme-independent.
 Coverage is `../../../tests/fm-composer-ghost.test.sh` and `../../../tests/fm-backend-herdr.test.sh`.
 
 Tmux `#{cursor_y}` may point at the pristine composer's bottom border.
@@ -78,7 +78,7 @@ The spawn installs guarded global `fm-turn-end.json` and `fm-turn-end.sh`.
 They act only when workspace `.fm-grok-turnend` matches the registry under `~/.grok/hooks/fm-turn-end.d/`, then touch the task's `state/<id>.turn-ended` through always-set `GROK_WORKSPACE_ROOT`, which equals the worktree.
 This stays outside the worktree, needs no trust grant, and writes only Firstmate files.
 `../../../bin/fm-teardown.sh` removes the gitignored pointer before pooling.
-Secondmates skip it because idle is healthy and ordinary stale-pane detection does not apply.
+Project Directors skip it because idle is healthy and ordinary stale-pane detection does not apply.
 
 ## Primary integration
 

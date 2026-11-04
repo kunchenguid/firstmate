@@ -404,7 +404,7 @@ fm_pr_check_ready_line_waits_for_green() {
 
 # In a secondmate home the registration itself is a captain-facing fact:
 # publish the child's PR-ready line with the canonical URL just recorded, so it
-# reaches the parent whether or not the mate model appends anything
+# reaches the parent whether or not the Project Director model appends anything
 # (bin/fm-parent-channel-lib.sh). A main home has no channel and this is a
 # silent no-op there. The poll is armed either way; a channel that cannot be
 # written is reported as actionable, and bin/fm-inactive-reconcile.sh still

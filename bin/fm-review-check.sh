@@ -120,4 +120,4 @@ case "$READY_RC" in
   0|1) ;;
   *) printf 'actionable: review %s is recorded but its ready line did not reach the parent channel (rc=%s)\n' "$URL" "$READY_RC" >&2 ;;
 esac
-printf 'recorded: review=%s (no merge watch: a human approves and merges the review; escalate it to the captain)\n' "$URL"
+printf 'recorded: review=%s (no merge watch: the user approves and merges the review; escalate it to the user)\n' "$URL"

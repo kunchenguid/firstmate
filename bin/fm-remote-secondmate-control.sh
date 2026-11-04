@@ -327,7 +327,7 @@ cmd_relaunch() {
     *) die "unverified remote secondmate harness: $harness" ;;
   esac
   case "$effort" in -|default|low|medium|high|xhigh|max|ultra) ;; *) die "invalid remote secondmate effort: $effort" ;; esac
-  case "$model" in *[[:space:]]*) die "invalid remote secondmate model: $model" ;; esac
+  case "$model" in *[[:space:]]*) die "invalid remote Project Director model: $model" ;; esac
   if [ "$effort" = ultra ]; then
     "$SCRIPT_DIR/fm-harness.sh" validate-native-effort "$harness" "$model" "$effort" || return 1
   fi

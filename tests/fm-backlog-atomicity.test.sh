@@ -83,10 +83,10 @@ EOF
     mkdir -p "$home/data/$id"
     cat > "$home/data/$id/brief.md" <<EOF
 # Task
-## Captain's intent
+## User's intent
 Exercise backlog dispatch for $id.
 
-## Firstmate spec
+## Director spec
 Verify the atomic backlog transition.
 
 # Definition of done

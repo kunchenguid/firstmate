@@ -1067,7 +1067,7 @@ cmd_status() {
     [ -f "$STATE/$id.status" ] && last=$(tail -1 "$STATE/$id.status" 2>/dev/null | cut -c1-100)
     printf '  %-42s %-6s %-10s %s\n' "$id" "${kind:-?}" "${mode:--}" "${last:-(no events yet)}"
   done
-  [ "$any" -eq 1 ] || printf '\n(no workers on deck)\n'
+  [ "$any" -eq 1 ] || printf '\n(no active workers)\n'
 
   printf '\nNote: the last event line is history, not current state.\n'
 }

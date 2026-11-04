@@ -509,7 +509,7 @@ fm_afk_contract_parse_inputs() {  # <args...>; sets WORDS, EXPECTED_RETURN, SPEN
         FM_AFK_CONTRACT_SCALARS_GIVEN=1
         shift 2 ;;
       --action|--object|--when|--stop|--grant|--grant=*)
-        fm_afk_contract_log "$1 was retired: the captain's away words are the whole mandate, so pass them with --words or --words-file and nothing else"
+        fm_afk_contract_log "$1 was retired: the user's away words are the whole mandate, so pass them with --words or --words-file and nothing else"
         return 2 ;;
       *)
         fm_afk_contract_log "unknown option '$1'"
@@ -689,7 +689,7 @@ fm_afk_contract_main() {
       [ "$#" -eq 0 ] || { fm_afk_contract_usage >&2; return 2; }
       fm_afk_contract_live_ordinary_workers ;;
     clauses|flags|refused|grants)
-      fm_afk_contract_log "'$cmd' was retired with the clause and merge-grant apparatus: the record is the captain's words (read them with 'words' or 'readback')"
+      fm_afk_contract_log "'$cmd' was retired with the clause and merge-grant apparatus: the record is the user's words (read them with 'words' or 'readback')"
       return 2 ;;
     archive) fm_afk_contract_locked_cmd fm_afk_contract_cmd_archive ;;
     archived)

@@ -1,8 +1,8 @@
 # Polytoken CLI
 
-Polytoken is a crewmate/scout adapter using a TUI pane and per-session REST control.
+Polytoken is a worker/Investigator adapter using a TUI pane and per-session REST control.
 Capability discovery uses the installed binary; no Polytoken release number gates or warns on dispatch.
-The router owns the crewmate/scout-only boundary; primary and secondmate integration is unsupported.
+The router owns the worker/Investigator-only boundary; primary and Project Director integration is unsupported.
 [Verification evidence](../../../../../docs/verification/polytoken.md) and its live guard refresh the vendor facts below.
 
 ## Operating facts
@@ -13,7 +13,7 @@ The router owns the crewmate/scout-only boundary; primary and secondmate integra
 | Exit command | `/quit` through the shared slash-palette settle: Enter accepts the preselected row, the TUI exits, the pane falls to its shell, the daemon deletes its credential and exits on its own shortly after (all verified live). `POST /terminate` is NOT used on attached sessions: it wedges the TUI on an SSE reconnect error for ~20s and records a crash log (verified live). |
 | Interrupt | No TUI chord exists at all (`print tui-command-actions` has no cancel action in Prompt scope; a single Escape does nothing; Escape Escape opens the rewind picker). Interrupt is `POST /turn/cancel` on the session daemon, answering `{"status":"cancel_requested","generation":N}`, with `GET /sync`'s `turn: null` as the typed settle. Firstmate never sends interrupt keys. |
 | Skill invocation | `@skill:<name>` in prompt text and the model's `skill` tool; no slash-command skill form. |
-| Resume | `polytoken continue --no-attach <session-id>` restarts from history on a new port with a rotated credential (verified by the scout). Firstmate's deterministic relaunch-from-brief remains the recovery path; the control plane relaunches fresh sessions. |
+| Resume | `polytoken continue --no-attach <session-id>` restarts from history on a new port with a rotated credential (verified by the Investigator). Firstmate's deterministic relaunch-from-brief remains the recovery path; the control plane relaunches fresh sessions. |
 | Model flag | `--model <ref>`, exactly the selectable references `polytoken print models` lists, including effort variants like `zai/glm-5.3-flash(low)`. Canonical launches require concrete model and effort axes; an unlisted model or unreachable catalog refuses the spawn, and a relaunch onto polytoken refuses the same profile, the whitespace handler path below, and a hook layer firstmate did not generate before stopping the running worker. |
 | Effort flag | None separate: `fm_polytoken_model_ref` in `bin/fm-polytoken-lib.sh` owns nearest-level mapping into `<model>(<effort>)`; task metadata retains the requested axis. |
 | Model discovery | `polytoken print models` (one selectable reference per line); `polytoken models` for the full human report. |
@@ -26,7 +26,7 @@ The router owns the crewmate/scout-only boundary; primary and secondmate integra
 
 Hook handlers receive the event JSON on stdin and `POLYTOKEN_*` variables but NO argv (verified live: a handler written as `<script> <arg>` runs with `$*` empty), so every firstmate hook is a generated self-contained script referenced by absolute path, and a state dir whose busy-script path contains whitespace refuses polytoken wiring at spawn because the handler's splitting rules are unverified.
 A failing hook breaks the turn (verified live: a pre_model_turn hook exiting 1 errors the whole turn), so every generated hook wraps its writer in `|| true` and exits 0.
-A project hook that negates a global hook by name fails daemon startup (the scout's finding), so per-task hooks are self-contained and negate nothing.
+A project hook that negates a global hook by name fails daemon startup (the Investigator's finding), so per-task hooks are self-contained and negate nothing.
 Enter while a turn runs queues the text for the next agent pause - `Queued for the next agent pause` - exactly like OpenCode (verified live), and the queued text renders above the composer separator.
 There is no verified composer-clear key: Ctrl+Shift+Y copies the prompt but leaves it in the composer (verified live), so text is only ever typed into a composer proven empty and pending text is never typed onto.
 Ctrl+C ends the session; Escape Escape opens the rewind picker; neither is ever sent by firstmate.
@@ -50,5 +50,5 @@ The delivery guard is never a busy-state source; recorded state comes from the p
 ## Primary integration
 
 No primary Stop guard, watcher protocol, pre-tool protection, or session-start contract is verified for Polytoken.
-Do not launch a primary or secondmate with this adapter.
+Do not launch a primary or Project Director with this adapter.
 The worker facet removes `switch_facet`, `handoff_plan`, `subagent`, and `message_subagent` from its tool registry so a facet change or delegation cannot substitute a routed model for the explicit worker pin.

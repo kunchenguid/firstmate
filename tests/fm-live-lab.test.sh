@@ -638,7 +638,7 @@ cp -R "$UPSRC" "$WORKSRC"
 cat > "$WORKSRC/bin/fm-brief.sh" <<'SH'
 #!/usr/bin/env bash
 mkdir -p "$FM_HOME/data/$1"
-printf '{TASK}\n{FIRSTMATE_SPEC}\n' > "$FM_HOME/data/$1/brief.md"
+printf '{TASK}\n{DIRECTOR_SPEC}\n' > "$FM_HOME/data/$1/brief.md"
 SH
 cat > "$WORKSRC/bin/fm-tasks-axi.sh" <<'SH'
 #!/usr/bin/env bash

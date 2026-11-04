@@ -40,7 +40,7 @@
 # the away-posture record state/.afk-contract, read at every close and again
 # when a turn starts: only an away record is away, and no record or quiet
 # mode's record (fm_afk_contract_away_present, bin/fm-afk-contract.sh AWAY OR
-# QUIET) is a present captain. On each actionable close:
+# QUIET) means the user is present. On each actionable close:
 #   - attended (no away record): the close reaches main exactly as the arm printed
 #     it, as without the host, unless the supervision session may take it: the
 #     home names a usable engine, its turns have every tool they need, this
@@ -63,7 +63,7 @@
 #     conditions under which that restores a single owner and the fallback;
 #   - away (an away record exists): every close goes to the engine.
 # Every turn that starts attended meets that rule again at its start, so a
-# close accepted away whose turn starts attended (the captain returned in
+# close accepted away whose turn starts attended (the user returned in
 # between) or an attended close whose task turned main-only while the
 # successor started reaches main exactly as the arm printed it, and that
 # successor cycle stays running.
@@ -82,17 +82,17 @@
 # docs/watcher-continuity.md "Durable queue and turn-end backstop" owns how
 # that transition makes rows still queued for main recoverable. A handled wake
 # with only routine outcomes never wakes main, and neither does any handled
-# wake while away: captain outcomes wait in
+# wake while away: user outcomes wait in
 # the outcome store for the return drain's BRANCH OUTCOMES section. A handled
-# attended wake that recorded a captain outcome exits with one "supervision-host: branch-outcome:"
+# attended wake that recorded a user outcome exits with one "supervision-host: branch-outcome:"
 # line naming its store rows, without the close it handled; main drains, where
 # the BRANCH OUTCOMES section (bin/fm-wake-drain.sh) presents every
-# unprocessed captain outcome until main acknowledges it. Otherwise the host
+# unprocessed user outcome until main acknowledges it. Otherwise the host
 # parks on the successor.
 # Every other outcome exits with the close's own reason line plus one
 # "supervision-host:" line saying why main has this wake, after stopping the
 # successor cycle so main's next turn end starts from the same state as
-# without the host. Whenever the captain returned during an away engine turn
+# without the host. Whenever the user returned during an away engine turn
 # that recorded visible outcomes, handled or not, the return brief was rendered
 # before they existed, so the host exits with the close, one "supervision-host:"
 # line naming them, and one line per visible outcome, for main to relay. The
@@ -137,7 +137,7 @@
 # lets a turn that starts before the boundary finish after it.
 #
 # OWNERSHIP. Before activation, every successor cycle, and every engine turn
-# the host proves this session still holds the fleet lock
+# the host proves this session still holds the team lock
 # (bin/fm-session-lock-lib.sh) and, when launched by the auto-arm, that the
 # auto-arm generation it serves (FM_SUPERVISION_HOST_AUTOARM_GEN owned by
 # FM_SUPERVISION_HOST_OWNER_PID) is still current; otherwise it stands down
@@ -772,7 +772,7 @@ acknowledged_handback() {  # [extra output lines]; returns only when disabled
 }
 
 # The outcome store (bin/fm-branch-outcome.sh) owns and validates these rows.
-# True when the captain returned during this close's engine turn and that turn
+# True when the user returned during this close's engine turn and that turn
 # recorded visible outcomes; sets RETURNED_ROWS and RETURNED_SEQS. A lookup
 # failure is distinct from a valid turn with no visible outcomes.
 TURN_RECEIPT_SEQS=
@@ -1095,7 +1095,7 @@ handle_wake() {  # <reason-lines>
     fi
   fi
   # The dialog mirror (bin/fm-host-mirror.sh) rides at the head of an
-  # attended wake. The engine never judges without the captain's words, so a
+  # attended wake. The engine never judges without the user's words, so a
   # feed that cannot be read hands the wake to main. Away needs none, so an
   # away wake never reads the mirror or moves its cursor.
   mirror=$MIRROR_FEED
@@ -1202,7 +1202,7 @@ handle_wake() {  # <reason-lines>
   return 1
 }
 
-# The captain outcomes one turn recorded, as store rows.
+# The user outcomes one turn recorded, as compatibility verdict rows.
 turn_captain_seqs() {  # <turn>
   awk -F '\t' -v turn="$1" '$1 == turn && $3 == "captain" { printf "%s%s", sep, $2; sep = ", " }' "$RECEIPTS" 2>/dev/null
 }
@@ -1320,7 +1320,7 @@ while :; do
     fi
   fi
 
-  # The captain returned during that turn: the return brief was rendered
+  # The user returned during that turn: the return brief was rendered
   # before its visible outcomes existed, so main relays them now, handled or not.
   handle_wake "$REASON"
   HANDLE_RC=$?
@@ -1345,10 +1345,10 @@ while :; do
   fi
   if [ "$HANDLE_RC" -ne 0 ]; then
     if returned_during_turn; then
-      exit_to_main "the away session could not take this wake: $HANDLE_WHY; this wake is yours, and the captain returned during its turn, so relay the visible outcomes it recorded (store rows $RETURNED_SEQS, listed next and in bin/fm-branch-outcome.sh list) to the captain" \
+      exit_to_main "the away session could not take this wake: $HANDLE_WHY; this wake is yours, and the user returned during its turn, so relay the visible outcomes it recorded (store rows $RETURNED_SEQS, listed next and in bin/fm-branch-outcome.sh list) to the user" \
         "$(turn_outcome_lines)${HEALTH_NOTE:+$'\n'$HEALTH_NOTE}"
     elif [ "$RETURNED_LOOKUP_FAILED" -eq 1 ]; then
-      exit_to_main "the away session could not take this wake: $HANDLE_WHY; this wake is yours, and the captain returned during its turn, but the recorded outcomes could not be verified" \
+      exit_to_main "the away session could not take this wake: $HANDLE_WHY; this wake is yours, and the user returned during its turn, but the recorded outcomes could not be verified" \
         "$(turn_outcome_lookup_warning)${HEALTH_NOTE:+$'\n'$HEALTH_NOTE}"
     fi
     if [ "$TURN_POSTURE" = away ]; then
@@ -1357,20 +1357,20 @@ while :; do
     exit_to_main "the supervision session could not take this wake: $HANDLE_WHY; this wake is yours" "$HEALTH_NOTE"
   fi
   if returned_during_turn; then
-    exit_to_main "the captain returned while the away session was handling this wake, which it finished after the return brief was rendered; relay its visible outcomes (store rows $RETURNED_SEQS, listed next and in bin/fm-branch-outcome.sh list) to the captain" \
+    exit_to_main "the user returned while the away session was handling this wake, which it finished after the return brief was rendered; relay its visible outcomes (store rows $RETURNED_SEQS, listed next and in bin/fm-branch-outcome.sh list) to the user" \
       "$(turn_outcome_lines)"
   elif [ "$RETURNED_LOOKUP_FAILED" -eq 1 ]; then
-    exit_to_main "the captain returned while the away session was handling this wake, but the recorded outcomes could not be verified; main must review them" \
+    exit_to_main "the user returned while the away session was handling this wake, but the recorded outcomes could not be verified; main must review them" \
       "$(turn_outcome_lookup_warning)"
   fi
-  # Attended captain outcomes are main's to process; away they wait for the
-  # return, including when the captain left while this turn ran. The close
+  # Attended user outcomes are main's to process; away they wait for the
+  # return, including when the user left while this turn ran. The close
   # itself was handled, so only the host's lines reach main.
   if [ -n "$LAST_TURN" ] && ! fm_afk_contract_away_present "$STATE"; then
     CAPTAIN_SEQS=$(turn_captain_seqs "$LAST_TURN")
     if [ -n "$CAPTAIN_SEQS" ]; then
       ARM_TEXT=
-      exit_to_main "branch-outcome: the supervision session handled this wake and recorded captain outcomes for you (store rows $CAPTAIN_SEQS); run bin/fm-wake-drain.sh, act on its BRANCH OUTCOMES section, and acknowledge them as it prints" \
+      exit_to_main "branch-outcome: the supervision session handled this wake and recorded user outcomes for you (store rows $CAPTAIN_SEQS); run bin/fm-wake-drain.sh, act on its BRANCH OUTCOMES section, and acknowledge them as it prints" \
         "$HEALTH_NOTE"
     fi
   fi

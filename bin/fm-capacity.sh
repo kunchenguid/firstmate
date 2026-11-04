@@ -261,7 +261,7 @@ parse_lane_config() {
         esac
         ;;
       captain-idle)
-        is_uint "$value" && [ "${#value}" -le 9 ] && [ "$((10#$value))" -gt 0 ] || { config_error "$lineno" "captain-idle needs a positive number of seconds"; return 1; }
+        is_uint "$value" && [ "${#value}" -le 9 ] && [ "$((10#$value))" -gt 0 ] || { config_error "$lineno" "compatibility key captain-idle needs a positive number of seconds"; return 1; }
         captain_idle=$((10#$value))
         ;;
       quota-provider)
@@ -521,7 +521,7 @@ esac
 if [ -n "$max_load1" ] && [ -n "$lim_load1" ] && ! num_lt "$lim_load1" "$max_load1"; then
   add_constraint load "load: $lim_load1 over its max-load1 $max_load1"
 fi
-[ "$reserve_flag" != present ] || add_constraint reserve "captain reserve: $reserve_label"
+[ "$reserve_flag" != present ] || add_constraint reserve "user reserve (compatibility key captain): $reserve_label"
 [ "$on_battery" != true ] || add_constraint battery "on battery"
 
 free_lanes=unknown

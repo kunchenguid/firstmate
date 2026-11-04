@@ -285,7 +285,7 @@ claim_park || exit 0
 if [ "$LOOP_COUNT" -ge "$LOOP_CEILING" ]; then
   [ "$LOOP_COUNT" -eq "$LOOP_CEILING" ] || exit 0
   fm_supervision_needed "$STATE" "$GRACE" || exit 0
-  emit_followup turn-end-guard "FIRSTMATE SUPERVISION FOLLOW-UP CEILING REACHED - this session has taken $LOOP_COUNT consecutive hook-driven turns without a captain message, so automatic wake delivery stops here to bound the loop. Queued wakes stay durable: run bin/fm-wake-drain.sh, handle them, and run its exact WAKE_ACK_REQUIRED command. Supervision resumes automatically at the next turn end after the captain's next message."
+  emit_followup turn-end-guard "FIRSTMATE SUPERVISION FOLLOW-UP CEILING REACHED - this session has taken $LOOP_COUNT consecutive hook-driven turns without a user message, so automatic wake delivery stops here to bound the loop. Queued wakes stay durable: run bin/fm-wake-drain.sh, handle them, and run its exact WAKE_ACK_REQUIRED command. Supervision resumes automatically at the next turn end after the user's next message."
 fi
 
 # Away mode owns the watcher and its own triage; never park and never wake.

@@ -15,4 +15,4 @@ When this session owns supervision and away mode is not active:
 10. On OpenCode 2, the home's TUI must run as `opencode --standalone`; the default launch hosts the plugins in the shared background service, outside this home's environment and session-lock ancestry.
 
 OpenCode's persistent TUI plugin runtime is the wake mechanism.
-The plugin applies in the main primary checkout and a secondmate's own home, and stays silent only in child crewmate and scout worktrees.
+The plugin applies in the main primary checkout and a Project Director's own home, and stays silent only in child worker and Investigator worktrees.

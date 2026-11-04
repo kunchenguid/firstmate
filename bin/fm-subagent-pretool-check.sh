@@ -201,7 +201,7 @@ else
   ROUTE='first classify the work under the AGENTS.md intake contract, then use bin/fm-brief.sh followed by bin/fm-spawn.sh for dispatched work'
 fi
 
-REASON="[subagent-dispatch] the firstmate primary dispatches through the fleet, not the harness's own delegation tools: work started that way has no durable fleet record, leaves every firstmate guard inert, and dies with this session. Instead, $ROUTE (blocked tool: $TOOL, delegation-shaped on \"$MATCHED\"). Launch the session with FM_ALLOW_SUBAGENT=1 for a deliberate exception."
+REASON="[subagent-dispatch] the Director dispatches through Firstmate's worker system, not the harness's own delegation tools: work started that way has no durable team record, leaves every Firstmate guard inert, and dies with this session. Instead, $ROUTE (blocked tool: $TOOL, delegation-shaped on \"$MATCHED\"). Launch the session with FM_ALLOW_SUBAGENT=1 for a deliberate exception."
 
 json_escape() {
   printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' | tr '\n' ' '

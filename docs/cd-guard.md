@@ -22,16 +22,16 @@ Its threat model is agent mistakes, the same as the watcher-arm seatbelt: an acc
 ## Scope: plain firstmate checkouts only
 
 The guard fires only in a plain firstmate checkout where git-dir equals git-common-dir.
-It is a silent no-op (exit 0, no output) everywhere else, so it never interferes with a crewmate or scout that legitimately works inside its own project or firstmate task worktree.
+It is a silent no-op (exit 0, no output) everywhere else, so it never interferes with a worker or Investigator that legitimately works inside its own project or firstmate task worktree.
 
 `bin/fm-cd-pretool-check.sh` owns its checkout detection; the turn-end guard's marker-aware scope is a separate contract (`docs/turnend-guard.md`).
 A plain, non-worktree checkout has `git rev-parse --git-dir` equal to `git rev-parse --git-common-dir`.
-A crewmate or scout task worktree - the shape `bin/fm-spawn.sh` always hands out - is a linked git worktree where the two differ, so the guard is inert there.
+A worker or Investigator task worktree - the shape `bin/fm-spawn.sh` always hands out - is a linked git worktree where the two differ, so the guard is inert there.
 The checkout must also carry `AGENTS.md` and `bin/`, and any failure to confirm the primary is treated as inert, never as a block.
 
 The cd-guard does not inspect `.fm-secondmate-home`.
-It therefore applies in a git-cloned secondmate home where git-dir equals git-common-dir, but remains inert in a treehouse-leased secondmate home that is itself a linked worktree.
-Secondmate child crew and scout worktrees are likewise inert under the linked-worktree test.
+It therefore applies in a git-cloned Project Director home where git-dir equals git-common-dir, but remains inert in a treehouse-leased Project Director home that is itself a linked worktree.
+Project Director child workers and Investigator worktrees are likewise inert under the linked-worktree test.
 
 ## Block vs allow
 
@@ -136,7 +136,7 @@ Every shell variable reference in the Grok hook command carries an inline defaul
 
 `tests/fm-cd-pretool-check.test.sh` owns the acceptance matrix.
 Every block and allow case runs through Codex-shaped stdin, Claude-shaped stdin, Grok-shaped stdin, OpenCode-shaped CLI, and Pi-shaped CLI entry forms.
-The suite also proves the home exemption (a literal absolute `cd` to the primary checkout, with and without a symlink, allowed; a child, sibling, parent, `pushd`, option-bearing, unexpanded, or glob target denied), the end-to-end cwd-leak regression (a firstmate-owned backlog write leaking into a project clone, then denied at the exact command), the checkout scoping (fires in a git-cloned secondmate fixture, inert in a crewmate/scout linked worktree, inert outside a firstmate checkout, inert outside a git repo), the fail-open transport behavior, the prefilter fast path, the policy CLI output contract, and the per-harness wiring.
+The suite also proves the home exemption (a literal absolute `cd` to the primary checkout, with and without a symlink, allowed; a child, sibling, parent, `pushd`, option-bearing, unexpanded, or glob target denied), the end-to-end cwd-leak regression (a firstmate-owned backlog write leaking into a project clone, then denied at the exact command), the checkout scoping (fires in a git-cloned Project Director fixture, inert in a worker/Investigator linked worktree, inert outside a firstmate checkout, inert outside a git repo), the fail-open transport behavior, the prefilter fast path, the policy CLI output contract, and the per-harness wiring.
 
 Run:
 
@@ -152,7 +152,7 @@ tests/fm-arm-pretool-check.test.sh
 ## Live validation record, 2026-07-11
 
 Each harness ran against a scratch primary-shaped firstmate checkout: a plain git repo with `AGENTS.md`, `bin/` holding the real `fm-cd-pretool-check.sh`, `fm-cd-command-policy.mjs`, and `fm-arm-command-policy.mjs` plus a no-op dummy `fm-arm-pretool-check.sh`, a `projects/foo/` stand-in clone, and the tracked harness hook config.
-No live watcher, fleet state, or the captain's real primary checkout was involved.
+No live watcher, team state, or the user's real primary checkout was involved.
 Each harness was told to run, as separate tool calls, a top-level `cd projects/foo && touch <abs>/BLOCKED` (must be denied) and a subshell `(cd projects/foo && touch <abs>/ALLOWED)` (must run), with the sentinel files as the observable.
 
 Harness versions and outcomes:

@@ -88,9 +88,9 @@ test_report_after_the_return_is_queued_for_main() {
   FM_HOME="$home" "$CONTRACT" archive >/dev/null 2>&1 || fail "fixture: could not archive the away posture"
   out=$(FM_HOME="$home" FM_SUPERVISION_ACTOR=branch FM_BRANCH_REPORT_TURN=t1 "$REPORT" --task alpha --verdict captain --summary 'PR ready for review' 2>&1); rc=$?
   expect_code 0 "$rc" "a report after the return must be recorded"
-  assert_contains "$out" "recorded seq 2 [captain]; the captain has returned, so it is queued for MAIN to relay" \
+  assert_contains "$out" "recorded seq 2 [captain]; the user has returned, so it is queued for MAIN to relay" \
     "a report after the return must say it is queued for main"
-  assert_re $'\tcheck\tsupervision-host-return:2\tcheck: supervision-host outcome 2 for alpha \\[captain\\] was recorded after the captain returned.*relay it to the captain: PR ready for review$' \
+  assert_re $'\tcheck\tsupervision-host-return:2\tcheck: supervision-host outcome 2 for alpha \\[captain\\] was recorded after the user returned.*relay it to the user: PR ready for review$' \
     "$state/.wake-queue" "the late outcome must be a durable check wake for main"
   queue_before=$(cat "$state/.wake-queue")
   out=$(FM_HOME="$home" FM_SUPERVISION_ACTOR=branch FM_BRANCH_REPORT_TURN=t1 "$REPORT" \
@@ -101,7 +101,7 @@ test_report_after_the_return_is_queued_for_main() {
     "$state/branch-outcomes.jsonl" "the post-return silent outcome was not retained"
   [ "$(cat "$state/.wake-queue")" = "$queue_before" ] || fail "a silent report after the return queued another check wake"
   drained=$(FM_HOME="$home" "$ROOT/bin/fm-wake-drain.sh" 2>&1)
-  assert_contains "$drained" "supervision-host outcome 2 for alpha [captain] was recorded after the captain returned" \
+  assert_contains "$drained" "supervision-host outcome 2 for alpha [captain] was recorded after the user returned" \
     "main's drain must present the late outcome"
   assert_not_contains "$drained" 'still building; nothing new has happened' "main's drain rendered the post-return silent note"
   pass "report surface: visible late outcomes queue a relay, while silent outcomes remain stored without a wake or note"
@@ -270,7 +270,7 @@ test_branch_outcomes_collapse_repeated_captain_outcomes_per_task() {
   FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" append --task task-1 --verdict captain --summary 'task-1 changed again' >/dev/null \
     || fail "fixture: could not record the later task-1 outcome"
   drained=$(FM_HOME="$home" "$FAKE_CLAUDE" -c '"$0" 2>&1' "$ROOT/bin/fm-wake-drain.sh")
-  assert_contains "$drained" "BRANCH OUTCOMES: 3 newer captain outcome(s) are held back (byte cap); they follow on the next drain once these are acknowledged" \
+  assert_contains "$drained" "BRANCH OUTCOMES: 3 newer user outcome(s) are held back (byte cap); they follow on the next drain once these are acknowledged" \
     "the section must count every held-back captain row"
   assert_contains "$drained" "[seq 5, recorded 0m ago] task-1: task-1 $pad" "the first task must show its newest outcome the acknowledgement covers"
   assert_not_contains "$drained" "task-1 changed again" "a row after a held-back one must wait, since the acknowledgement cannot cover it"
@@ -470,8 +470,8 @@ test_branch_outcomes_date_a_legacy_backlog_without_adopting_it() {
     "a days-old captain outcome must say when it was recorded"
   assert_contains "$drained" "[seq 3, recorded 3d ago] beta: beta PR" "every captain outcome must say when it was recorded"
   assert_contains "$drained" "check the task's current state first" "the section must ask main to check the current state before acting"
-  assert_contains "$drained" "your reply to the captain covers only those, as if the settled ones had never been listed, and a settled one needs only the acknowledgement" \
-    "the section must keep settled outcomes out of the reply to the captain"
+  assert_contains "$drained" "your reply to the user covers only those, as if the settled ones had never been listed, and a settled one needs only the acknowledgement" \
+    "the section must keep settled outcomes out of the reply to the user"
   assert_contains "$drained" "mark-processed --through 3;" "the backlog must still carry its acknowledgement"
   [ -n "$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" unprocessed)" ] \
     || fail "the drain adopted a legacy captain outcome as processed"

@@ -1,7 +1,7 @@
 # Antigravity CLI
 
 Antigravity's `agy` TUI, verified end to end with agy 1.2.0+ on Linux through the Herdr backend.
-Verified as a full Firstmate harness (Primary, Secondmate, and Crewmate/Scout).
+Verified as a full Firstmate harness (Primary, Project Director, and worker/Investigator).
 `../../../../../docs/verification/agy.md` owns how every fact below was established and what is still unproven.
 
 ## Operating facts
@@ -26,7 +26,7 @@ Verified as a full Firstmate harness (Primary, Secondmate, and Crewmate/Scout).
 ## Trust, and where the decision persists
 
 Every task worktree is a path agy has never seen, so an unregistered launch stops on `Do you trust the contents of this project?` with the safe choice `Yes, I trust this folder` preselected, and an unanswered dialog sends the turn into agy's scratch directory instead of the worktree.
-There is no launch flag that suppresses the dialog, but agy honours a `trustedWorkspaces` entry in the captain's own `~/.gemini/antigravity-cli/settings.json` written ahead of launch (verified live), so `../../../../../bin/fm-spawn.sh` pre-registers the worktree through `../../../../../bin/fm-agy-trust.sh` before launch, the claude shape: the helper refuses anything but a linked worktree of the spawning project, records both the logical pane path and its resolved form because agy compares the logical cwd, and preserves every other key in the store.
+There is no launch flag that suppresses the dialog, but agy honours a `trustedWorkspaces` entry in the user's own `~/.gemini/antigravity-cli/settings.json` written ahead of launch (verified live), so `../../../../../bin/fm-spawn.sh` pre-registers the worktree through `../../../../../bin/fm-agy-trust.sh` before launch, the claude shape: the helper refuses anything but a linked worktree of the spawning project, records both the logical pane path and its resolved form because agy compares the logical cwd, and preserves every other key in the store.
 The post-launch readiness gate is the backstop: it answers a dialog that renders anyway with a single Enter, then requires a busy verdict (Herdr's native `working` status or the pinned `esc to cancel` row) before the spawn reports success, and on a path that was not pre-registered it never counts a busy verdict as ready until the dialog has been answered, because Herdr's native verdict can precede the dialog.
 A pane whose brief cannot be confirmed to run in the worktree fails the spawn, records the failure in the task status, and closes the endpoint.
 Never steer into a pane still showing the dialog; a spawn that reported success has already cleared it.
@@ -48,7 +48,7 @@ agy is included in the session-lock name vocabulary in `../../../../../bin/fm-se
 `fm_busy_agy_tail_busy` matches the pinned `esc to cancel` status row alone, hardcoded with no environment override, and `fm_busy_classify` reports `unknown agy-regex` rather than idle when it is absent, because a long turn can scroll the marker out of the captured tail.
 Teardown removes nothing agy-specific because the spawn leaves nothing behind.
 
-## Primary and secondmate integration
+## Primary and Project Director integration
 
 Antigravity CLI loads `<workspace>/.agents/hooks.json` for hook lifecycle events, running each command from `.agents/` itself.
 agy 1.4.9 reads every top-level key as a named hook spec (firstmate ships one, `firstmate`), with flat `SessionStart` and `Stop` handler lists and `PreToolUse` grouped under `matcher` and `hooks`; any other top-level key, such as a `version` field, silently disables the whole file (verified live).

@@ -277,7 +277,7 @@ validate_backlog_file() {
 # Classify a single key by the section it lives under (## In flight /
 # ## Queued / ## Done), or return non-zero if no `- [ ] <key>` / `- [x] <key>`
 # header exists in the file. This reads only section headings and item header
-# lines - never item bodies - so it drives the fleet-level classification (in-
+# lines - never item bodies - so it drives the team-level classification (in-
 # flight refusal, already-present idempotency, missing-key abort) without
 # re-implementing the block/body move semantics that tasks-axi mv owns.
 backlog_key_section() {

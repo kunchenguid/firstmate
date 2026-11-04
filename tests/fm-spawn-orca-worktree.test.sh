@@ -158,10 +158,10 @@ test_orca_fresh_spawn_enters_the_worktree_it_created() {
   mkdir -p "$home/data/$id"
   cat > "$home/data/$id/brief.md" <<EOF
 # Task
-## Captain's intent
+## User's intent
 Exercise an Orca-backed spawn for $id.
 
-## Firstmate spec
+## Director spec
 Confirm the launch enters the worktree Orca created for it.
 EOF
   fb=$(make_orca_fakebin "$case_dir")
@@ -196,10 +196,10 @@ test_orca_relaunch_is_refused_before_the_worktree_carveout_could_run() {
   mkdir -p "$home/data/$id"
   cat > "$home/data/$id/brief.md" <<EOF
 # Task
-## Captain's intent
+## User's intent
 Exercise a relaunch attempt against a recorded Orca task.
 
-## Firstmate spec
+## Director spec
 Confirm the relaunch is refused before any worktree re-entry logic runs.
 EOF
   {
@@ -254,10 +254,10 @@ test_orca_launch_uses_controlled_tmux_environment() {
     fm_git_init_commit "$case_dir/project"
     cat > "$home/data/$id/brief.md" <<EOF
 # Task
-## Captain's intent
+## User's intent
 Verify the controlled Orca environment source.
 
-## Firstmate spec
+## Director spec
 Execute read-only environment checks.
 EOF
     cat > "$case_dir/probe.sh" <<'EOF'
@@ -396,10 +396,10 @@ test_orca_spawn_waits_for_a_slow_pane_before_a_later_failure() {
   fm_git_init_commit "$case_dir/project"
   cat > "$home/data/$id/brief.md" <<EOF
 # Task
-## Captain's intent
+## User's intent
 Exercise a failed Orca spawn after launch delivery.
 
-## Firstmate spec
+## Director spec
 Confirm a slow pane still receives the staged launch file before the spawn fails later.
 EOF
   fb=$(make_orca_fakebin "$case_dir")
@@ -444,10 +444,10 @@ test_orca_unrun_launch_file_is_reclaimed() {
   fm_git_init_commit "$case_dir/project"
   cat > "$home/data/$id/brief.md" <<EOF
 # Task
-## Captain's intent
+## User's intent
 Exercise an Orca pane that never runs the launch command.
 
-## Firstmate spec
+## Director spec
 Confirm the staged credential file is reclaimed.
 EOF
   fb=$(make_orca_fakebin "$case_dir")
@@ -486,10 +486,10 @@ test_orca_pane_wins_launch_file_race_at_deadline() {
   fm_git_init_commit "$case_dir/project"
   cat > "$home/data/$id/brief.md" <<EOF
 # Task
-## Captain's intent
+## User's intent
 Exercise an Orca pane that unlinks the launch file at the reclaim deadline.
 
-## Firstmate spec
+## Director spec
 Confirm the spawn treats the launch as consumed.
 EOF
   fb=$(make_orca_fakebin "$case_dir")
@@ -537,10 +537,10 @@ test_orca_launch_file_delete_failure_keeps_terminal() {
   fm_git_init_commit "$case_dir/project"
   cat > "$home/data/$id/brief.md" <<EOF
 # Task
-## Captain's intent
+## User's intent
 Exercise an Orca pane that cannot remove the launch file.
 
-## Firstmate spec
+## Director spec
 Confirm the worker is refused and the terminal stays open.
 EOF
   fb=$(make_orca_fakebin "$case_dir")
@@ -585,10 +585,10 @@ test_orca_interrupted_spawn_reclaims_launch_file() {
       fm_git_init_commit "$case_dir/project"
       cat > "$home/data/$id/brief.md" <<EOF
 # Task
-## Captain's intent
+## User's intent
 Exercise an interrupted Orca spawn after launch delivery.
 
-## Firstmate spec
+## Director spec
 Confirm the staged credential file is reclaimed.
 EOF
       fb=$(make_orca_fakebin "$case_dir")
@@ -670,10 +670,10 @@ test_orca_interrupted_spawn_before_send_removes_launch_file() {
     fm_git_init_commit "$case_dir/project"
     cat > "$home/data/$id/brief.md" <<EOF
 # Task
-## Captain's intent
+## User's intent
 Exercise an Orca spawn interrupted before launch delivery.
 
-## Firstmate spec
+## Director spec
 Confirm the staged credential file is removed.
 EOF
     fb=$(make_orca_fakebin "$case_dir")
@@ -768,10 +768,10 @@ test_orca_allowlist_without_source_warns() {
     fm_git_init_commit "$case_dir/project"
     cat > "$home/data/$id/brief.md" <<EOF
 # Task
-## Captain's intent
+## User's intent
 Exercise an Orca allowlist without a configured source.
 
-## Firstmate spec
+## Director spec
 Confirm the spawn reports where allowlisted values come from.
 EOF
     fb=$(make_orca_fakebin "$case_dir")

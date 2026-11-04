@@ -4,7 +4,7 @@
 It is a warner, not a viewer: it never renders a live usage report, and it speaks only once when a configured window reaches a configured percentage of itself consumed.
 
 The read itself is not new.
-[`quota-axi`](configuration.md) is the one Claude-quota reader this fleet depends on, already exposing `--json`, `--full`, `--tui`, and `--no-credential-refresh`; this script runs that exact read (through `bin/fm-quota-axi-lib.sh`'s own provider-row join) and never re-implements it.
+[`quota-axi`](configuration.md) is the one Claude-quota reader this team depends on, already exposing `--json`, `--full`, `--tui`, and `--no-credential-refresh`; this script runs that exact read (through `bin/fm-quota-axi-lib.sh`'s own provider-row join) and never re-implements it.
 Every call passes `--no-credential-refresh`, so the read is strictly read-only; the script never passes `--allow-keychain-prompt` or any other credential-refreshing flag.
 
 ## Opt-in is load-bearing

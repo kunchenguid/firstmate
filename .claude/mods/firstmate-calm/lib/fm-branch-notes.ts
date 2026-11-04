@@ -9,8 +9,8 @@
 // outcome read or processed. Everything is pure so tests run it under Node.
 import { calmCodeRootFromPluginRoot } from "./fm-calm-presentation.ts";
 
-export const BRANCH_NOTE_BOAT = "⛵";
-export const BRANCH_NOTE_ANCHOR = "⚓";
+export const BRANCH_NOTE_BOAT = "•";
+export const BRANCH_NOTE_ANCHOR = "◆";
 /** At most this many lines replay at session start, newest kept. */
 export const BRANCH_NOTES_REPLAY_LIMIT = 20;
 /** How many sessions' last shown sequence the mod's store keeps, newest kept. */

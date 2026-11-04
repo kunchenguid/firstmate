@@ -147,10 +147,10 @@ fm_guard_clear_stale_banner() {
 
 # Worktree-tangle alarm, checked FIRST and independent of in-flight tasks: the
 # firstmate PRIMARY checkout (FM_ROOT) must stay on its default branch. If a
-# crewmate's branch/commits landed here instead of in its own isolated worktree,
+# Builder's branch/commits landed here instead of in its own isolated worktree,
 # the primary is stranded on a feature branch - surface it loudly on the very next
-# fleet action, the same way the watcher-down banner does. Scoped to the primary
-# only: detached HEAD (linked worktrees, secondmate homes) never trips this.
+# team action, the same way the watcher-down banner does. Scoped to the primary
+# only: detached HEAD (linked worktrees, Project Director homes) never trips this.
 tangle_branch=$(fm_primary_tangle_branch "$FM_ROOT" || true)
 if [ -n "$tangle_branch" ]; then
   tangle_default=$(fm_default_branch "$FM_ROOT" 2>/dev/null || echo main)
@@ -159,10 +159,10 @@ if [ -n "$tangle_branch" ]; then
     printf '●%s\n' "$trule"
     printf '●  WORKTREE TANGLE - PRIMARY CHECKOUT IS ON A FEATURE BRANCH\n'
     printf "●  %s is on '%s', not its default branch '%s'.\n" "$FM_ROOT" "$tangle_branch" "$tangle_default"
-    printf '●  A crewmate likely branched/committed in the primary instead of its own worktree.\n'
+    printf '●  A Builder likely branched/committed in the primary instead of its own worktree.\n'
     printf "●  The work is SAFE on the '%s' ref.\n" "$tangle_branch"
     if [ "$READ_ONLY" -eq 1 ]; then
-      printf '●  This read-only session must leave restore work to a session with verified fleet-lock ownership.\n'
+      printf '●  This read-only session must leave restore work to a session with verified team-lock ownership.\n'
     else
       printf "●  Restore the primary to '%s':\n" "$tangle_default"
       printf '●      git -C %s checkout %s\n' "$FM_ROOT" "$tangle_default"
@@ -282,7 +282,7 @@ fi
 # actor the guard stays silent about queued rows.
 if "$queue_pending"; then
   if [ "$READ_ONLY" -eq 1 ]; then
-    echo "WARNING: queued wakes pending - left untouched because this session lacks verified fleet-lock ownership." >&2
+    echo "WARNING: queued wakes pending - left untouched because this session lacks verified team-lock ownership." >&2
   elif [ "$GUARD_ACTOR" != branch ]; then
     echo "WARNING: queued wakes pending - drain them with bin/fm-wake-drain.sh before anything else." >&2
   fi

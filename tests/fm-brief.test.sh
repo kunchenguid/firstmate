@@ -210,9 +210,9 @@ test_ship_modes_generate_clean_briefs() {
     grep -qx "Delivery contract: mode=$mode" "$brief" \
       || fail "$id: brief did not record its machine-readable delivery contract line"
     assert_grep "{TASK}" "$brief" "$id: brief missing the {TASK} placeholder"
-    assert_grep "{FIRSTMATE_SPEC}" "$brief" "$id: brief missing the {FIRSTMATE_SPEC} placeholder"
-    assert_grep "## Captain's intent" "$brief" "$id: brief missing Captain's intent subsection"
-    assert_grep "## Firstmate spec" "$brief" "$id: brief missing Firstmate spec subsection"
+    assert_grep "{DIRECTOR_SPEC}" "$brief" "$id: brief missing the {DIRECTOR_SPEC} placeholder"
+    assert_grep "## User's intent" "$brief" "$id: brief missing user's intent subsection"
+    assert_grep "## Director spec" "$brief" "$id: brief missing Director spec subsection"
     assert_grep 'never a bare number such as "PR 108"' "$brief" "$id: brief missing the full-PR-URL rule"
     assert_grep "mid-task \`working:\` line (including setup complete) is nonterminal" "$brief" \
       "$id: brief missing nonterminal working:/setup-complete gate protection"
@@ -290,9 +290,9 @@ test_forge_selection_renders_correct_cli() {
   done <<'ROWS'
 a value outside the closed set|--mode direct-PR --forge gitlab|expected none, gerrit, forgejo, or external
 the removed github value|--mode direct-PR --forge github|expected none, gerrit, forgejo, or external
-forgejo on local-only|--mode local-only --forge forgejo|cannot ship mode=local-only
+forgejo on local-only|--mode local-only --forge forgejo|cannot use mode=local-only
 a shape on forgejo|--mode direct-PR --forge forgejo --shape squash|--shape applies only with --forge gerrit
-forgejo on a scout|--scout --forge forgejo|apply only to ship briefs
+forgejo on an Investigator|--scout --forge forgejo|apply only to Builder briefs
 ROWS
 
   pass "fm-brief.sh: --forge forgejo names tea in Rule 3, the direct-PR DOD, and the draft read-back, marks the delivery contract, and the closed set refuses everything else"
@@ -347,8 +347,8 @@ test_forge_external_renders_the_review_rail() {
     assert_contains "$out" "$expect" "$label was refused without its reason"
     [ ! -e "$home/data/brief-ext-bad/brief.md" ] || fail "$label left a brief behind"
   done <<'ROWS'
-external on no-mistakes|--mode no-mistakes --forge external|ships direct-PR only for now
-external on local-only|--mode local-only --forge external|cannot ship mode=local-only
+external on no-mistakes|--mode no-mistakes --forge external|supports direct-PR only for now
+external on local-only|--mode local-only --forge external|cannot use mode=local-only
 external with a base branch|--mode direct-PR --forge external --base-branch release|not supported on forge=external
 ROWS
   pass "fm-brief.sh: --forge external renders the no-push rule, the review contract, and the adapter, and refuses every impossible shape"
@@ -373,7 +373,7 @@ test_ship_mode_is_required_and_closed_set() {
     assert_contains "$out" "$expect" "$label: refusal did not explain the contract"
     assert_absent "$home/data/brief-required-$id/brief.md" "$label: refused scaffold still wrote a brief"
   done <<'ROWS'
-missing --mode||ship briefs require --mode
+missing --mode||Builder briefs require --mode
 empty --mode value|--mode|requires a value
 unknown mode value|--mode nope|must be one of no-mistakes, direct-PR, local-only
 conditional policy is not a task mode|--mode no-mistakes-prod-only|classify this task's surface
@@ -393,7 +393,7 @@ test_ship_mode_is_explicit_not_registry() {
   brief="$home/data/brief-explicit-a5/brief.md"
   grep -qx "Delivery contract: mode=no-mistakes" "$brief" \
     || fail "registered direct-PR posture overrode the explicit --mode"
-  assert_grep "Firstmate will then instruct you to run /no-mistakes" "$brief" \
+  assert_grep "The Director will then instruct you to run /no-mistakes" "$brief" \
     "explicit no-mistakes brief did not render the pipeline definition of done"
 
   # An unregistered project is not a blocker either, because nothing is looked up.
@@ -421,8 +421,8 @@ test_delivery_flags_are_refused_where_they_do_not_apply() {
   done <<'ROWS'
 yolo on a ship brief|brief-refused-b1 some-proj --mode direct-PR --yolo on|--yolo is not a brief input
 yolo=value form on a ship brief|brief-refused-b2 some-proj --mode direct-PR --yolo=off|--yolo is not a brief input
-mode on a scout brief|brief-refused-b3 some-proj --scout --mode direct-PR|--mode applies only to ship briefs
-mode on a secondmate charter|brief-refused-b4 --secondmate --no-projects --mode no-mistakes|--mode applies only to ship briefs
+mode on an Investigator brief|brief-refused-b3 some-proj --scout --mode direct-PR|--mode applies only to Builder briefs
+mode on a Project Director charter|brief-refused-b4 --secondmate --no-projects --mode no-mistakes|--mode applies only to Builder briefs
 ROWS
   pass "fm-brief.sh: --yolo and scout/secondmate --mode are refused, never silently dropped"
 }
@@ -434,24 +434,24 @@ test_faster_paths_use_configured_authority_without_stacked_review() {
   id="brief-direct-authority-a4"
   FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" direct-proj --mode direct-PR >/dev/null 2>&1
   brief="$home/data/$id/brief.md"
-  assert_grep "The configured merge authority decides whether to merge the PR; firstmate relays the outcome." "$brief" \
+  assert_grep "The configured merge authority decides whether to merge the PR; the Director relays the outcome." "$brief" \
     "direct-PR brief lost configured merge authority"
   assert_no_grep "The captain reviews and merges the PR" "$brief" \
     "direct-PR brief hard-coded captain-only authority"
   id="brief-local-authority-a4"
   FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" local-proj --mode local-only >/dev/null 2>&1
   brief="$home/data/$id/brief.md"
-  assert_grep "The configured merge authority approves the ready branch, then firstmate merges it into local \`main\` through the guarded fast-forward path." "$brief" \
+  assert_grep "The configured merge authority approves the ready branch, then the Director merges it into local \`main\` through the guarded fast-forward path." "$brief" \
     "local-only brief lost configured merge authority and guarded landing"
   assert_no_grep "The captain approves the ready branch" "$brief" \
     "local-only brief hard-coded captain-only authority"
   assert_no_grep "Firstmate then reviews your branch diff" "$brief" \
     "local-only brief retained a personal review stacked on the selected delivery path"
-  assert_no_grep "pass \`--intent\` as only this brief's \`## Captain's intent\`" "$home/data/$id/brief.md" \
+  assert_no_grep "pass \`--intent\` as only this brief's \`## User's intent\`" "$home/data/$id/brief.md" \
     "local-only brief must not include the no-mistakes --intent contract"
   id="brief-direct-intent-a4"
   FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" direct-proj --mode direct-PR >/dev/null 2>&1
-  assert_no_grep "pass \`--intent\` as only this brief's \`## Captain's intent\`" "$home/data/$id/brief.md" \
+  assert_no_grep "pass \`--intent\` as only this brief's \`## User's intent\`" "$home/data/$id/brief.md" \
     "direct-PR brief must not include the no-mistakes --intent contract"
   pass "fm-brief.sh: faster paths use configured authority without stacked review"
 }
@@ -506,12 +506,12 @@ test_no_mistakes_dod_wording() {
   # shellcheck disable=SC2016  # single quotes are deliberate: the backticks must stay literal
   assert_grep '`help`' "$brief" \
     "no-mistakes DOD must render literal backticks around help"
-  assert_grep "pass \`--intent\` as only this brief's \`## Captain's intent\`" "$brief" \
-    "no-mistakes DOD must require --intent to be the Captain's intent subsection"
-  assert_grep "plus any later words the captain actually said" "$brief" \
-    "no-mistakes DOD must allow later captain words in --intent"
-  assert_grep "Do not include \`## Firstmate spec\`" "$brief" \
-    "no-mistakes DOD must keep Firstmate spec out of --intent"
+  assert_grep "pass \`--intent\` as only this brief's \`## User's intent\`" "$brief" \
+    "no-mistakes DOD must require --intent to be the user's intent subsection"
+  assert_grep "plus any later words the user actually said" "$brief" \
+    "no-mistakes DOD must allow later user words in --intent"
+  assert_grep "Do not include \`## Director spec\`" "$brief" \
+    "no-mistakes DOD must keep Director spec out of --intent"
   assert_grep "or your own decisions and tradeoffs" "$brief" \
     "no-mistakes DOD must keep worker tradeoffs out of --intent"
   assert_grep "This replaces the no-mistakes skill's advice to enrich \`--intent\`" "$brief" \
@@ -526,7 +526,7 @@ test_no_mistakes_dod_wording() {
 
   # The --yes ban is a fleet-wide prohibition, not a preference, and it must not
   # claim an enforcement the tool does not provide: this is instruction only.
-  assert_grep "NEVER pass \`--yes\` (or \`-y\`) to \`no-mistakes axi run\` or \`no-mistakes axi respond\`. It is banned fleet-wide." "$brief" \
+  assert_grep "NEVER pass \`--yes\` (or \`-y\`) to \`no-mistakes axi run\` or \`no-mistakes axi respond\`. It is banned for all Firstmate-managed work." "$brief" \
     "no-mistakes DOD must state the --yes ban as a prohibition"
   assert_grep "answering your own ask-user finding is a hard rule violation" "$brief" \
     "no-mistakes DOD must say why --yes is banned"
@@ -593,9 +593,9 @@ test_ask_user_escalation_format() {
 
   # The DOD's own ask-user paragraph must point back at rule 6's format
   # (one-owner rule) rather than restating or bare-citing it.
-  assert_grep "escalate to firstmate using rule 6's ask-user format" "$brief" \
+  assert_grep "escalate to the Director using rule 6's ask-user format" "$brief" \
     "no-mistakes DOD ask-user paragraph must point at rule 6's format instead of a bare citation"
-  assert_no_grep "escalate to firstmate (rule 6) and stop." "$brief" \
+  assert_no_grep "escalate to the Director (rule 6) and stop." "$brief" \
     "no-mistakes DOD ask-user paragraph still uses the old bare rule-6 pointer"
 
   other_id="brief-no-ask-user-scout"
@@ -668,7 +668,7 @@ test_herdr_lab_contract_is_explicit_and_complete() {
     "Herdr lab brief missing the forbidden server-global command list"
   assert_grep "records the live default session before provisioning" "$brief" \
     "Herdr lab brief missing the before tripwire"
-  assert_grep "verifies the identical fleet state after teardown" "$brief" \
+  assert_grep "verifies the identical worker state after teardown" "$brief" \
     "Herdr lab brief missing the after tripwire"
   assert_no_grep "Herdr lifecycle declaration - NOT ENABLED" "$brief" \
     "Herdr lab brief retained the unguarded declaration"
@@ -713,7 +713,7 @@ test_herdr_lab_omission_is_loud_for_ship_and_scout() {
 }
 
 # Regression (issue #2575): AGENTS.md section 11 and this script's own help tell
-# firstmate to fill `{TASK}` and `{FIRSTMATE_SPEC}`. The unguarded Herdr gate used
+# firstmate to fill `{TASK}` and `{DIRECTOR_SPEC}`. The unguarded Herdr gate used
 # to quote `{TASK}` in its own prose, so that documented global replace spliced
 # the whole task body into the middle of the gate's sentence - silently
 # destroying the one contract that exists precisely because the scaffold cannot
@@ -737,22 +737,22 @@ test_documented_global_replace_leaves_the_herdr_gate_intact() {
     count=$(grep -c -F '{TASK}' "$brief")
     [ "$count" = 1 ] \
       || fail "$kind brief must carry exactly one {TASK} fill site, found $count"
-    count=$(grep -c -F '{FIRSTMATE_SPEC}' "$brief")
+    count=$(grep -c -F '{DIRECTOR_SPEC}' "$brief")
     [ "$count" = 1 ] \
-      || fail "$kind brief must carry exactly one {FIRSTMATE_SPEC} fill site, found $count"
+      || fail "$kind brief must carry exactly one {DIRECTOR_SPEC} fill site, found $count"
     content=$(cat "$brief")
     filled=${content//'{TASK}'/$body}
-    filled=${filled//'{FIRSTMATE_SPEC}'/$spec}
+    filled=${filled//'{DIRECTOR_SPEC}'/$spec}
     count=$(printf '%s\n' "$filled" | grep -c -F "$body")
     [ "$count" = 1 ] \
       || fail "$kind brief: the documented {TASK} replace duplicated the intent body $count times"
     count=$(printf '%s\n' "$filled" | grep -c -F "$spec")
     [ "$count" = 1 ] \
-      || fail "$kind brief: the {FIRSTMATE_SPEC} replace duplicated the spec body $count times"
+      || fail "$kind brief: the {DIRECTOR_SPEC} replace duplicated the spec body $count times"
     printf '%s\n' "$filled" | grep -qF 'this scaffold cannot inspect the task text' \
       || fail "$kind brief: the Herdr safety gate did not survive the documented fill"
   done
-  pass "fm-brief.sh: the documented {TASK} and {FIRSTMATE_SPEC} fills cannot corrupt the Herdr safety gate"
+  pass "fm-brief.sh: the documented {TASK} and {DIRECTOR_SPEC} fills cannot corrupt the Herdr safety gate"
 }
 
 test_secondmate_no_projects_charter() {
@@ -771,16 +771,16 @@ test_secondmate_no_projects_charter() {
   assert_grep "# Project clones" "$brief" "project-less charter dropped the Project clones heading"
   assert_grep "None. This is a project-less domain" "$brief" \
     "project-less charter did not render a sensible no-clones note"
-  assert_grep "its crews take pooled worktrees of that repo" "$brief" \
+  assert_grep "its workers take pooled worktrees of that Firstmate repo" "$brief" \
     "project-less charter operating model lost the pooled-worktree note"
   assert_no_grep "The projects above are local clones" "$brief" \
     "project-less charter kept the with-projects operating-model line"
-  assert_grep '# The captain and the parent channel' "$brief" \
+  assert_grep '# The user and the parent channel' "$brief" \
     "secondmate charter lost the parent-channel section"
   assert_grep 'Nobody reads this chat' "$brief" \
     "secondmate charter no longer says the chat is unread"
-  assert_grep 'in this home it IS the captain' "$brief" \
-    "secondmate charter no longer names the parent channel as the captain"
+  assert_grep 'in this home it reaches the user' "$brief" \
+    "Project Director charter no longer names the parent channel as reaching the user"
   assert_grep 'working [key=<work-slug>]' "$brief" \
     "secondmate charter did not key material routed-work phases"
   assert_grep 'resolved [key=<work-slug>]' "$brief" \
@@ -843,13 +843,13 @@ test_secondmate_marked_request_reporting_contract() {
     "secondmate charter lost terse result reporting"
   assert_grep 'append a status line that points to that doc' "$brief" \
     "secondmate charter lost detailed document pointers"
-  assert_grep 'Report only true captain-relevant outcomes or a declared external wait' "$brief" \
+  assert_grep 'Report only true user-relevant outcomes or a declared external wait' "$brief" \
     "secondmate charter lost declared external waits"
-  assert_grep 'a captain decision, a real blocker, a failure, work ready for review, or work you landed' "$brief" \
+  assert_grep 'a user decision, a real blocker, a failure, work ready for review, or work you landed' "$brief" \
     "secondmate charter lost decisions, blockers, failures, ready outcomes, or landed work"
   # Under standing merge authority nothing is ever "ready for review", so the
   # landed merge is the trigger a charter without this line silently omits.
-  assert_grep 'a merge you performed yourself under standing merge authority and one the captain merged on the forge' "$brief" \
+  assert_grep 'a merge you performed yourself under standing merge authority and one the user merged on the forge' "$brief" \
     "secondmate charter did not name a landed merge as a reporting trigger"
   assert_grep 'States: working, needs-decision, blocked, paused, done, failed.' "$brief" \
     "secondmate charter changed the preserved status vocabulary"
@@ -1120,9 +1120,9 @@ test_scout_completion_write_exception_is_task_scoped() {
       "scout did not receive the empty-inventory command for its own task and home"
     assert_grep 'This exception permits only that command, not direct metadata edits, another task, or any backlog write.' "$brief" \
       "scout completion exception granted broader write authority"
-    assert_grep 'If any captain call remains, ask firstmate to register the inventory and attest completion before you report done.' "$brief" \
+    assert_grep 'If any user call remains, ask the Director to register the inventory and attest completion before you report done.' "$brief" \
       "scout was instructed to write a non-empty inventory itself"
-    assert_grep 'If the command refuses, report the refusal to firstmate and stop rather than bypassing the completion gate.' "$brief" \
+    assert_grep 'If the command refuses, report the refusal to the Director and stop rather than bypassing the completion gate.' "$brief" \
       "scout was allowed to bypass a refused completion"
   done
   pass "fm-brief.sh: scouts may attest only their own empty inventory through the guarded command"
@@ -1171,23 +1171,23 @@ test_scout_and_secondmate_scaffold() {
     || fail "fm-brief.sh scout scaffold exited non-zero"
   brief="$BRIEF_HOME/data/brief-scout-q6/brief.md"
   assert_present "$brief" "scout brief was not scaffolded"
-  assert_grep "SCOUT task" "$brief" "scout brief must declare itself a scout task"
+  assert_grep "Investigator task" "$brief" "Investigator brief must declare its role"
   assert_grep "report.md" "$brief" "scout brief must point at the report deliverable"
-  assert_grep "## Captain's intent" "$brief" "scout brief missing Captain's intent subsection"
-  assert_grep "## Firstmate spec" "$brief" "scout brief missing Firstmate spec subsection"
-  assert_grep "{FIRSTMATE_SPEC}" "$brief" "scout brief missing the spec placeholder"
+  assert_grep "## User's intent" "$brief" "Investigator brief missing user's intent subsection"
+  assert_grep "## Director spec" "$brief" "Investigator brief missing Director spec subsection"
+  assert_grep "{DIRECTOR_SPEC}" "$brief" "Investigator brief missing the spec placeholder"
 
   FM_SECONDMATE_CHARTER='Supervise the alpha domain.' \
     FM_HOME="$BRIEF_HOME" "$ROOT/bin/fm-brief.sh" brief-sm-q6 --secondmate alpha >/dev/null 2>&1 \
     || fail "fm-brief.sh secondmate scaffold exited non-zero"
   brief="$BRIEF_HOME/data/brief-sm-q6/brief.md"
   assert_present "$brief" "secondmate charter was not scaffolded"
-  assert_grep "persistent second mate" "$brief" \
-    "secondmate charter must declare its role"
-  assert_no_grep "## Captain's intent" "$brief" \
+  assert_grep "persistent Project Director" "$brief" \
+    "Project Director charter must declare its role"
+  assert_no_grep "## User's intent" "$brief" \
     "secondmate charter must not grow ship/scout Task subsections"
-  assert_no_grep "{FIRSTMATE_SPEC}" "$brief" \
-    "secondmate charter must not carry the Firstmate spec placeholder"
+  assert_no_grep "{DIRECTOR_SPEC}" "$brief" \
+    "secondmate charter must not carry the Director spec placeholder"
   pass "fm-brief: scout and secondmate code paths still scaffold well-formed briefs"
 }
 
@@ -1564,8 +1564,8 @@ test_branch_prefix_is_refused_where_it_does_not_apply() {
     assert_contains "$out" "$expect" "$label: refusal did not explain why"
     assert_absent "$home/data/${args%% *}/brief.md" "$label: refused scaffold still wrote a brief"
   done <<'ROWS'
-branch-prefix on a scout brief|brief-branchref-f1 some-proj --scout --branch-prefix fix/|--branch-prefix applies only to ship briefs
-branch-prefix on a secondmate charter|brief-branchref-f2 --secondmate --no-projects --branch-prefix fix/|--branch-prefix applies only to ship briefs
+branch-prefix on an Investigator brief|brief-branchref-f1 some-proj --scout --branch-prefix fix/|--branch-prefix applies only to Builder briefs
+branch-prefix on a Project Director charter|brief-branchref-f2 --secondmate --no-projects --branch-prefix fix/|--branch-prefix applies only to Builder briefs
 ROWS
   pass "fm-brief.sh: --branch-prefix is refused on scout and secondmate scaffolds"
 }

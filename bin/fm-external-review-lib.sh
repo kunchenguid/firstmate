@@ -142,7 +142,7 @@ fm_external_review_backup() {  # [<config-dir>]
       echo "error: $file line 1 must name a git remote (letters, digits, '.', '_', '-')" >&2
       return 1 ;;
     origin)
-      echo "error: $file names origin; the backup remote is the captain's personal remote, never the shared origin" >&2
+      echo "error: $file names origin; the backup remote is the user's personal remote, never the shared origin" >&2
       return 1 ;;
   esac
   prefix=backup/

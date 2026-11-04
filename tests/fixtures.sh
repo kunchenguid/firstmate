@@ -388,10 +388,10 @@ fm_test_spawn_brief() {
   mkdir -p "$home/data/$id"
   cat > "$home/data/$id/brief.md" <<EOF
 # Task
-## Captain's intent
+## User's intent
 $intent
 
-## Firstmate spec
+## Director spec
 Exercise the spawn behavior under test.
 EOF
 }

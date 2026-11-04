@@ -6,7 +6,7 @@
 # secondmate homes are all linked `git worktree`s of the same repo, while the
 # PRIMARY checkout (the repo root firstmate operates from) is a normal checkout
 # on a real branch - normally the default branch, main. The "worktree tangle"
-# failure mode is a crewmate spawned to work on firstmate ITSELF branching and
+# failure mode is a Builder spawned to work on Firstmate ITSELF branching and
 # committing in the primary checkout instead of its own disposable worktree,
 # stranding the primary on a feature branch (e.g. fm/readme-restructure-d3).
 #

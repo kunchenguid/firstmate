@@ -38,12 +38,12 @@ Exactly one signal selects hc, after every other surface marker has had its say:
 
 A live `herdr-app.sock` or an open window is deliberately not a signal: every process on the host can see it, so it cannot tell a Firstmate inside an app terminal from one on a bare shell while the window happens to be open elsewhere.
 Live testing against the real app confirmed the ambiguity - marker-less processes selected hc solely because a window existed - so only the terminal-level claim above can auto-select hc.
-A captain who wants a shell outside the app to spawn hc workers sets `config/backend`, `FM_BACKEND`, or `--backend` explicitly.
+A user who wants a shell outside the app to spawn hc workers sets `config/backend`, `FM_BACKEND`, or `--backend` explicitly.
 
 The signal binds the core a spawn would actually reach, the `HC_SESSION` (else `default`) session, and requires it to be running already, because the adapter's container ensure starts a missing core and detection must never start one.
 `bin/fm-backend.sh` resolves that core's socket without calling `hc`: an `FM_HC_SOCKET` pin, else `$XDG_RUNTIME_DIR/herdr-core/<session>.sock` when `XDG_RUNTIME_DIR` is set, else `${XDG_STATE_HOME:-~/.local/state}/herdr-core/<session>/<session>.sock`, the layout measured on hc 0.1.14.
 `app-terminal` additionally requires `HC_TERMINAL_SOCKET` to be that same socket, so a labeled terminal on some other core never steers a spawn.
-The app shows the session it bound at launch, so a captain whose app runs a session other than `default` sets the same `HC_SESSION` for Firstmate or selects hc explicitly.
+The app shows the session it bound at launch, so a user whose app runs a session other than `default` sets the same `HC_SESSION` for Firstmate or selects hc explicitly.
 
 An explicit `--backend`, `FM_BACKEND`, or `config/backend` always wins over detection.
 Inside the classic Herdr TUI, `HERDR_ENV=1` wins before the app signal is consulted, so the `herdr` backend keeps its behavior; inside tmux, `$TMUX` wins the same way, so a marker-less or contradictory process on either surface never sees the app check at all.
@@ -51,13 +51,13 @@ A contradictory marker set (for example another surface's marker alongside the a
 When a live hc terminal is present but no usable hc toolchain resolves (an executable `FM_HC_BIN`, or `herdr-core`/`hc` on `PATH` reporting `hc x.y.z` at or above the adapter's verified minimum, plus `jq` - the same version gate the spawn's container check applies), detection does not switch and a notice names the missing piece instead; a bare terminal marker set is still never a detection.
 An auto-detected hc prints a stderr notice naming the winning signal and how to opt out; [Task shape and metadata](#task-shape-and-metadata) owns its task record.
 
-Auto-detected hc spawns carry the same `herdr.space`/`herdr.tab` labels an explicit hc spawn does, so workers appear in the captain's window without the app ever being started by Firstmate.
+Auto-detected hc spawns carry the same `herdr.space`/`herdr.tab` labels an explicit hc spawn does, so workers appear in the user's window without the app ever being started by Firstmate.
 The app is local GUI presentation only; detection reads the terminal's core-side label without requiring a live app window, so a surviving labeled terminal can still select hc after the GUI closes.
 Nothing here changes the remote `herdr` path.
 
 Two limits apply to auto-detection specifically:
 
-- A `--secondmate` spawn under an auto-detected hc fails the existing refusal rather than silently choosing another backend; set `config/backend` explicitly for a home that spawns secondmates.
+- A `--secondmate` spawn under an auto-detected hc fails the existing refusal rather than silently choosing another backend; set `config/backend` explicitly for a home that spawns Project Directors.
 - Away-mode supervisor discovery and hc refusal are owned by [Away-mode supervisor backend](configuration.md#away-mode-supervisor-backend-fm_supervisor_backend--fm_supervisor_target).
 
 ## Task shape and metadata

@@ -363,7 +363,7 @@ test_remote_inheritance_failure_names_its_own_error_not_an_unchanged_item() {
   # any ssh call for this item, after the two config items above already
   # reported "unchanged:" from the (faked) remote.
   cat > "$home/data/captain-shared.md" <<'EOF'
-# Shared captain preferences
+# Shared user preferences
 
 This file is main-authoritative in the main firstmate home.
 In secondmate homes it is read-only in secondmate homes.
@@ -387,8 +387,8 @@ EOF
   line=$(printf '%s\n' "$out" | grep '^SECONDMATE_SYNC: secondmate sm: skipped: remote inheritance failed on host-sm:' || true)
   [ -n "$line" ] || fail "expected a remote inheritance failure line: $out"
   case "$line" in
-    *"shared captain preferences"*) ;;
-    *) fail "the failure reason should name the shared captain header problem, got: $line" ;;
+    *"shared user preferences"*) ;;
+    *) fail "the failure reason should name the shared user-preferences header problem, got: $line" ;;
   esac
   case "$line" in
     *"unchanged:"*) fail "the failure reason must not report an earlier unchanged item, got: $line" ;;
@@ -592,7 +592,7 @@ test_inherit_push_older_receiver_absent_item_is_unchanged() {
   assert_contains "$out" "unchanged: config/item-c" "the undeclared absent item reads as unchanged"
   assert_not_contains "$out" "error:" "the older receiver's refusal of an absent item is not reported as an error"
   assert_contains "$out" "pushed: config/item-f" "items after the undeclared one are still sent"
-  assert_contains "$out" "unchanged: data/captain-shared.md" "the shared captain file is still converged"
+  assert_contains "$out" "unchanged: data/captain-shared.md" "the compatibility shared-preferences file is still converged"
   [ "$(cat "$remote_home/config/item-f")" = last ] \
     || fail "an item after the undeclared one did not land in the remote home"
   assert_absent "$remote_home/config/item-c" "the older receiver must not gain the undeclared item"
@@ -640,23 +640,23 @@ test_convergence_budget_isolates_a_hung_mate() {
     "$ROOT/bin/fm-bootstrap.sh" 2>&1
   )
   elapsed=$(( $(date +%s) - start ))
-  [ "$elapsed" -lt 90 ] || fail "a hung mate held the network phase for ${elapsed}s past its 15s budget"$'\n'"$out"
+  [ "$elapsed" -lt 90 ] || fail "a hung Project Director held the network phase for ${elapsed}s past its 15s budget"$'\n'"$out"
   assert_contains "$out" \
-    "SECONDMATE_SYNC: secondmate alpha: skipped: remote tracked-file sync failed on host-alpha: no answer within the 15s per-mate convergence budget" \
-    "the hung mate must be reported as its own skip"
+    "SECONDMATE_SYNC: Project Director alpha: skipped: remote tracked-file sync failed on host-alpha: no answer within the 15s per-Project-Director convergence budget" \
+    "the hung Project Director must be reported as its own skip"
   assert_contains "$out" \
-    "SECONDMATE_SYNC: secondmate alpha: skipped: remote inheritance failed on host-alpha: no answer within the 15s per-mate convergence budget" \
-    "an exhausted budget skips the hung mate's inheritance push too"
-  assert_not_contains "$out" "SECONDMATE_SYNC: secondmate bravo:" "the healthy mate must converge without a skip"
+    "SECONDMATE_SYNC: Project Director alpha: skipped: remote inheritance failed on host-alpha: no answer within the 15s per-Project-Director convergence budget" \
+    "an exhausted budget skips the hung Project Director's inheritance push too"
+  assert_not_contains "$out" "SECONDMATE_SYNC: Project Director bravo:" "the healthy Project Director must converge without a skip"
   grep -q 'START host-bravo fm-remote-inherit.sh' "$CF_LOG" \
-    || fail "the healthy mate's inheritance push did not run"$'\n'"$(cat "$CF_LOG")"
+    || fail "the healthy Project Director's inheritance push did not run"$'\n'"$(cat "$CF_LOG")"
   [ -f "$CF_HOME/state/.secondmate-nudge-pending/alpha.pending" ] \
-    || fail "the hung mate's retry marker must survive so the next session start retries it"
+    || fail "the hung Project Director's retry marker must survive so the next session start retries it"
   assert_grep 'owed=1' "$CF_HOME/state/.secondmate-nudge-pending/alpha.pending" \
     "a step cut off by the budget may have changed the home, so the re-read must stay owed"
   [ ! -f "$CF_HOME/state/.secondmate-nudge-pending/bravo.pending" ] \
     || fail "the converged mate's retry marker must be cleared"
-  pass "per-mate convergence budget: a hung host is that mate's skip, keeps its retry marker, and does not hold the others"
+  pass "per-Project-Director convergence budget: a hung host is that Project Director's skip, keeps its retry marker, and does not hold the others"
 }
 
 test_partial_push_failure_keeps_the_reread_owed() {

@@ -24,7 +24,7 @@
 # disposable copy reads blocked and is not a terminal inactive outcome.
 # A line still being appended (no trailing newline yet)
 # is left for the next poll. This is what keeps a mate's PR-ready, finding,
-# and failure outcomes from depending on the mate model appending them
+# and failure outcomes from depending on the Project Director model appending them
 # (docs/secondmate-parent-channel.md). A main home has no parent channel and
 # skips this path: its watcher already signals every child status line.
 # `report <task-id>` runs that same delivery for one child on behalf of a
@@ -685,7 +685,7 @@ reconcile_direct_child_locked() { # <id> <meta> <secondmate-id-or-empty> <timeou
     return 0
   fi
   record_phase_set "$RECORD_PENDING" presentation || return 1
-  payload="inactive terminal outcome awaiting captain presentation: child=$id state=$state"
+  payload="inactive terminal outcome awaiting user presentation: child=$id state=$state"
   [ -z "$pr" ] || payload="$payload pr=$pr"
   queue_presentation "$RECORD_PENDING" "$fingerprint" "$payload" || true
 }

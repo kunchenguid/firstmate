@@ -52,7 +52,7 @@ describe("supervision notes", () => {
     files.set(CURSOR, "3\n");
     files.set(PROCESSED, "1\n");
     await $.session.start(sessionStart);
-    expect(journal.logs).toEqual(["⚓ [seq 3] fm-b: decision waiting", "⛵ fm-c: worker healthy"]);
+    expect(journal.logs).toEqual(["◆ [seq 3] fm-b: decision waiting", "• fm-c: worker healthy"]);
     // Only reads: the markers the drain owns are exactly as they were.
     expect(files.get(CURSOR)).toBe("3\n");
     expect(files.get(PROCESSED)).toBe("1\n");
@@ -77,7 +77,7 @@ describe("supervision notes", () => {
     await clock.advance(POLL - 1);
     expect(journal.logs).toEqual([]);
     await clock.advance(1);
-    expect(journal.logs).toEqual(["⛵ fm-e: reconciled the backlog", "⚓ [seq 8] fm-g: PR https://example.test/pr/1 checks green"]);
+    expect(journal.logs).toEqual(["• fm-e: reconciled the backlog", "◆ [seq 8] fm-g: PR https://example.test/pr/1 checks green"]);
     await clock.advance(POLL * 3);
     expect(journal.logs).toHaveLength(2);
   });
@@ -94,7 +94,7 @@ describe("supervision notes", () => {
     files.set(TAIL, tail([...history, { seq: 6, task: "fm-new", verdict: "routine", summary: "fresh" }]));
     files.set(CURSOR, "6\n");
     await clock.advance(POLL);
-    expect(journal.logs).toEqual(["⚓ [seq 3] fm-b: decision waiting", "⛵ fm-new: fresh"]);
+    expect(journal.logs).toEqual(["◆ [seq 3] fm-b: decision waiting", "• fm-new: fresh"]);
     await clock.advance(POLL);
     expect(journal.logs).toHaveLength(2);
   });
@@ -114,9 +114,9 @@ describe("supervision notes", () => {
     );
     await clock.advance(POLL);
     expect(journal.logs).toEqual([
-      "⛵ 3 earlier supervision outcomes not shown; bin/fm-branch-outcome.sh list shows them",
-      "⛵ fm-i: kept",
-      "⚓ [seq 10] fm-j: newest",
+      "• 3 earlier supervision outcomes not shown; bin/fm-branch-outcome.sh list shows them",
+      "• fm-i: kept",
+      "◆ [seq 10] fm-j: newest",
     ]);
   });
 
@@ -133,7 +133,7 @@ describe("supervision notes", () => {
     expect(replaced.length).toBe(tail(history).length);
     files.set(TAIL, replaced);
     await clock.advance(POLL);
-    expect(journal.logs).toEqual(["⚓ [seq 6] fm-new: fresh anchor here"]);
+    expect(journal.logs).toEqual(["◆ [seq 6] fm-new: fresh anchor here"]);
     await clock.advance(POLL * 3);
     expect(journal.logs).toHaveLength(1);
   });
@@ -145,11 +145,11 @@ describe("supervision notes", () => {
     files.set(HEALTH, health("s1", 300));
     await clock.advance(POLL);
     expect(journal.logs).toEqual([
-      "⛵ Supervision session paused after repeated engine errors; main will handle wakes while it cools down.",
+      "• Supervision session paused after repeated engine errors; main will handle wakes while it cools down.",
     ]);
     files.set(HEALTH, health("s1", 0));
     await clock.advance(POLL);
-    expect(journal.logs[1]).toBe("⛵ Supervision session recovered after a successful cooldown probe.");
+    expect(journal.logs[1]).toBe("• Supervision session recovered after a successful cooldown probe.");
     files.set(HEALTH, health("s2", 0));
     await clock.advance(POLL);
     expect(journal.logs).toHaveLength(2);
@@ -161,15 +161,15 @@ describe("supervision notes", () => {
     files.set(CURSOR, "5\n");
     files.set(PROCESSED, "2\n");
     await $.session.start(sessionStart);
-    expect(journal.logs).toEqual(["⚓ [seq 3] fm-b: decision waiting"]);
+    expect(journal.logs).toEqual(["◆ [seq 3] fm-b: decision waiting"]);
     // Resumed (or hot reloaded): its restored transcript already holds seq 3.
     files.set(TAIL, tail([...history, { seq: 6, task: "fm-h", verdict: "captain", summary: "while closed" }]));
     await $.session.start(sessionStart);
-    expect(journal.logs).toEqual(["⚓ [seq 3] fm-b: decision waiting", "⚓ [seq 6] fm-h: while closed"]);
+    expect(journal.logs).toEqual(["◆ [seq 3] fm-b: decision waiting", "◆ [seq 6] fm-h: while closed"]);
     await clock.advance(POLL);
     expect(journal.logs).toHaveLength(2);
     setSessionId("session-2");
     await $.session.start(sessionStart);
-    expect(journal.logs.slice(2)).toEqual(["⚓ [seq 3] fm-b: decision waiting", "⚓ [seq 6] fm-h: while closed"]);
+    expect(journal.logs.slice(2)).toEqual(["◆ [seq 3] fm-b: decision waiting", "◆ [seq 6] fm-h: while closed"]);
   });
 });

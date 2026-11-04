@@ -34,7 +34,7 @@ Verify setup by spawning a small task and confirming metadata contains `backend=
 
 Paseo is explicit-only, like zellij and orca: `config/backend`, `FM_BACKEND=paseo`, or `--backend paseo` select it, and nothing else does.
 Paseo stamps its markers into every descendant process: a Paseo agent exports `PASEO_AGENT_ID`, a terminal tab exports `PASEO_TERMINAL_ID` and `PASEO_WORKSPACE_ID`, and both carry `__CFBundleIdentifier=sh.paseo.desktop`.
-A tmux server started from a Paseo tab inherits all of them, so their presence proves only that some ancestor was Paseo, never that the captain chose it.
+A tmux server started from a Paseo tab inherits all of them, so their presence proves only that some ancestor was Paseo, never that the user chose it.
 Reading them as a selection would make Paseo an ambient default, which "Authority is explicit and never inferred" rules out; `fm_backend_detect` therefore ignores them.
 
 The markers are still useful once Paseo has been selected explicitly.
@@ -43,9 +43,9 @@ When Firstmate itself runs inside Paseo, the adapter uses them to find Firstmate
 ## Task shape and metadata
 
 Paseo's sidebar is project > workspace > terminal tab, and each task is one terminal tab.
-When Firstmate itself runs inside Paseo, every task tab goes into Firstmate's own workspace, whatever the task's project, so work appears beside the captain's session and nothing new is added to the sidebar.
+When Firstmate itself runs inside Paseo, every task tab goes into Firstmate's own workspace, whatever the task's project, so work appears beside the user's session and nothing new is added to the sidebar.
 A Paseo terminal tab names its workspace through `PASEO_WORKSPACE_ID`; a Paseo agent exports only `PASEO_AGENT_ID`, so its workspace is the one live workspace whose cwd is the Firstmate home, and two or more such workspaces count as unknown.
-Otherwise the adapter uses one shared workspace per project, the same container shape as Herdr: titled `firstmate` (or `2ndmate-<id>` for a secondmate home), created once with `workspace create --path <project> --isolation local --title <label>`, and adopted on later spawns by matching that cwd and title in `workspace ls`.
+Otherwise the adapter uses one shared workspace per project, the same container shape as Herdr: titled `firstmate` (or `2ndmate-<id>` for a Project Director home), created once with `workspace create --path <project> --isolation local --title <label>`, and adopted on later spawns by matching that cwd and title in `workspace ls`.
 Paseo registers or reuses the project by path when that workspace is created.
 Paseo allows duplicate workspaces and terminal names, so a spawn whose `workspace ls` or `terminal ls` inventory cannot be read refuses and creates nothing rather than treating the failed read as empty.
 Agents running inside a task tab may open further tabs or workspaces of their own; nothing in the adapter depends on them.
@@ -94,7 +94,7 @@ Paseo exposes no native generic agent busy signal, so supervision uses capture/h
 
 Paseo can show sub-agents nested inside the current tab, clickable to open as their own view, without opening a separate top-level tab.
 Firstmate's design keeps the terminal-per-task model as the authority: every task gets exactly one terminal tab in its workspace, opened at spawn and closed at cleanup.
-A nested sub-agent view therefore never becomes routing or lifecycle authority for Firstmate - it is an extra view the captain may click into while the task's single terminal remains the endpoint.
+A nested sub-agent view therefore never becomes routing or lifecycle authority for Firstmate - it is an extra view the user may click into while the task's single terminal remains the endpoint.
 
 The practical tradeoff: a task terminal running a harness that itself spawns sub-agents will show those agents nested inside the task's tab, not as new top-level tabs, so each Firstmate task adds exactly one tab.
 The tradeoff surfaced is agent surface versus terminal surface - a nested agent view is visible and clickable but not separately addressable by `fm-send`/`fm-peek`, which always target the task's one recorded terminal.
@@ -105,7 +105,7 @@ Durable history for a finished task therefore lives in the status log, the repor
 ## Active limits
 
 - Paseo is experimental, macOS-only, GUI-first, and requires the app running.
-- Secondmate spawns are unsupported until a per-home lifecycle design is verified; select `tmux` for a home that needs them.
+- Project Director spawns are unsupported until a per-home lifecycle design is verified; select `tmux` for a home that needs them.
 - `paseo run --cwd` is ignored when `PASEO_AGENT_ID` is set (reported on the upstream issue thread); the adapter never uses `paseo run`, only `terminal create --cwd`, which honours the path.
 - There is no native busy or push-event signal, and `fm_backend_agent_state` reports `unverified` for Paseo.
 - A target can disappear after structural readiness and before the operation.

@@ -12,7 +12,7 @@
 #   <number>
 #   <authority>                 away | attended
 # While an away record exists every merge runs under away authority (the
-# record's presence is the whole mechanical fact; which merge the captain's
+# record's presence is the whole mechanical fact; which merge the user's
 # away words meant is the supervision session's reading); without one, or while
 # the record is quiet mode's (bin/fm-afk-contract.sh mode: the captain is
 # present), the merge is attended. The retired values yolo and away-grant are

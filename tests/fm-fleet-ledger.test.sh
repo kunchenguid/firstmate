@@ -56,10 +56,10 @@ make_case() {  # <name> <on|off>
   fm_git_worktree "$PROJ_DIR" "$WT_DIR" "fm/$TASK"
   cat > "$HOME_DIR/data/$TASK/brief.md" <<EOF
 # Task
-## Captain's intent
+## User's intent
 Exercise the fleet ledger for $TASK.
 
-## Firstmate spec
+## Director spec
 Nothing to build.
 EOF
   FAKEBIN=$(make_fakebin "$dir")

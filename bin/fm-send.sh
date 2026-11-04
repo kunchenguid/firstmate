@@ -248,7 +248,7 @@ FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 
 # shellcheck source=bin/fm-gate-refuse-lib.sh
 . "$SCRIPT_DIR/fm-gate-refuse-lib.sh"
-# Fail closed before any fleet mutation: a no-mistakes gate agent must never steer
+# Fail closed before any team mutation: a no-mistakes gate agent must never steer
 # a crewmate (see bin/fm-gate-refuse-lib.sh).
 fm_refuse_if_gate_agent
 
@@ -756,7 +756,7 @@ if [ -n "$RESOLVE_KEYS" ]; then
   if [ -n "$resolve_refused_keys" ]; then
     {
       for k in $resolve_refused_keys; do
-        echo "error: --resolve-key '$k': no open decision or blocker with that key in $RESOLVE_STATUS_FILE, and no captain-held task '$k' or '$RESOLVE_TASK_ID-decision-$k' still open (already closed or mistyped); nothing was sent."
+        echo "error: --resolve-key '$k': no open decision or blocker with that key in $RESOLVE_STATUS_FILE, and no user-held task '$k' or '$RESOLVE_TASK_ID-decision-$k' still open (already closed or mistyped); nothing was sent."
       done
       resolve_open_keys=$(fm_send_open_set_keys "$resolve_open_set")
       if [ -n "$resolve_open_keys" ]; then
@@ -778,7 +778,7 @@ if [ -n "$RESOLVE_KEYS" ]; then
     exit 1
   fi
   # The decision-answer partition (the header's "Answering a decision"
-  # contract): a key that is an open needs-decision, or already a captain-held
+  # contract): a key that is an open needs-decision, or already a user-held
   # task, is a decision, and answering one is main-owned while attended. A
   # blocked: key is ordinary steering and takes no partition guard. Under the
   # away-posture record the guard passes the branch instead (relocation:
@@ -859,7 +859,7 @@ fm_send_close_resolved_keys() { # <answer-text>
   done
 }
 
-# Feed the answered captain-held tasks to the ONE keyed-answer intake, as keyed
+# Feed the answered user-held tasks to the ONE keyed-answer intake, as keyed
 # lines, exactly the way every other channel does. fm-send decides nothing here:
 # it does not build a decision record or choose a close path; the keys were
 # already resolved to task ids above, so the intake needs no legacy origin.
@@ -872,7 +872,7 @@ fm_send_feed_resolved_holds() { # <answer-text>
   done
   if ! printf '%s' "$lines" | "$SCRIPT_DIR/fm-captain-hold.sh" answers \
     --source "a firstmate answer sent to $RESOLVE_TASK_ID" >/dev/null 2>&1; then
-    echo "error: the answer was delivered to $T, but this captain-held task could not be closed: ${RESOLVE_HOLD_KEYS}. Close it with fm-captain-hold.sh answer - do not resend the answer." >&2
+    echo "error: the answer was delivered to $T, but this user-held task could not be closed: ${RESOLVE_HOLD_KEYS}. Close it with fm-captain-hold.sh answer - do not resend the answer." >&2
     return 1
   fi
 }
@@ -1230,7 +1230,7 @@ else
     case "$ring_rc" in
     1) echo "fm-send: doorbell skipped (composer visibly holds pending text); the steer is durably recorded at $INBOX_RECORD and $ring_retry" >&2 ;;
     2) echo "fm-send: doorbell did not reach $T; the steer is durably recorded at $INBOX_RECORD and $ring_retry" >&2 ;;
-    3) echo "fm-send: doorbell not typed because the agent in $T has exited; the steer is durably recorded at $INBOX_RECORD for recovery (stuck-crewmate-recovery), and the watcher will not re-ring a dead pane" >&2 ;;
+    3) echo "fm-send: doorbell not typed because the worker in $T has exited; the steer is durably recorded at $INBOX_RECORD for recovery (compatibility skill stuck-crewmate-recovery), and the watcher will not re-ring a dead pane" >&2 ;;
     esac
     exit 0
   fi

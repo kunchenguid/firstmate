@@ -84,10 +84,10 @@ HOME_DIR="$SCRATCH/home"
 mkdir -p "$HOME_DIR/state" "$HOME_DIR/data/hsmoke"
 cat > "$HOME_DIR/data/hsmoke/brief.md" <<'EOF'
 # Task
-## Captain's intent
+## User's intent
 Exercise Herdr lifecycle control safely.
 
-## Firstmate spec
+## Director spec
 Keep the isolated endpoint and worktree intact.
 EOF
 

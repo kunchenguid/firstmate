@@ -717,7 +717,7 @@ class Session:
         way. A stream that simply ends is the end of a session and nothing more,
         so it is named as that and not as a failure. A stream that raises, here
         or under an event handler, is this turn failing, so it goes through
-        fail_turn and reaches the captain.
+        fail_turn and reaches the user.
 
         Either way the client is told, once, because either way it is waiting on
         a turn that is not coming and a notice is the only thing that releases it.
@@ -728,7 +728,7 @@ class Session:
 
         Neither is a stream that went away because close() asked it to: renew
         closes the old session on every single turn, so announcing that would put
-        a failure notice in front of the captain on every ordinary turn.
+        a failure notice in front of the user on every ordinary turn.
         """
         broke = None
         try:

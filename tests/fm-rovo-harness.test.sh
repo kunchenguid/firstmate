@@ -155,10 +155,10 @@ make_spawn_case() {
   mkdir -p "$home/data/$id" "$home/projects" "$home/state" "$home/config"
   cat > "$home/data/$id/brief.md" <<'EOF'
 # Task
-## Captain's intent
+## User's intent
 Exercise Rovo dispatch.
 
-## Firstmate spec
+## Director spec
 Verify launch and delivery behavior.
 EOF
   printf 'rovo\n' > "$home/config/crew-harness"

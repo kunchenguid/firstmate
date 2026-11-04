@@ -1189,7 +1189,7 @@ EOF
       and (.gates | any(.[]; .id == "external-gate"))
       and (.landed | any(.[]; .id == "shipped-work"))
       and (.landed | any(.[]; .id == "answered-call") | not)
-      and (.omitted | any(.[]; .surface | startswith("captain holds bucketed blocked, dated, or aged")))
+      and (.omitted | any(.[]; .surface | startswith("user holds bucketed blocked, dated, or aged")))
   ' >/dev/null || fail "the collapsed captain-call projection is wrong: $json"
   json=$(run "$home" "$fakebin" --json --all-decisions --all-queued)
   printf '%s' "$json" | jq -e '
@@ -1305,7 +1305,7 @@ EOF
            | contains(["due-parked", "due-superseded", "future-parked", "parked-hold", "blocked-parked", "aged-call",
                        "aging-mate/mate-due-parked", "aging-mate/mate-due-not-required", "mate-future-parked",
                        "aging-mate/mate-parked", "mate-blocked-parked", "mate-aged"]))
-      and (.omitted | any(.[]; .surface == "captain holds bucketed blocked, dated, or aged: 7"))
+      and (.omitted | any(.[]; .surface == "user holds bucketed blocked, dated, or aged: 7"))
   ' >/dev/null || fail "structured buckets must decide Captain's Call placement: $json"
   json=$(run "$home" "$fakebin" --json --all-decisions)
   printf '%s' "$json" | jq -e '
@@ -1360,7 +1360,7 @@ EOF
   printf '%s' "$json" | jq -e '
     (.gates | any(.id == "only-blocked-parked" and .blocked_by == "missing-blocker"
                   and (.reason | startswith("blocked-by missing-blocker"))))
-      and (.omitted | any(.surface == "captain holds bucketed blocked, dated, or aged: 1"))
+      and (.omitted | any(.surface == "user holds bucketed blocked, dated, or aged: 1"))
   ' >/dev/null || fail "a lone blocked deferred hold lacked its concrete disclosure: $json"
   json=$(run "$home" "$fakebin" --json --all-decisions)
   printf '%s' "$json" | jq -e '

@@ -1,7 +1,7 @@
 # Devin CLI
 
 Verified on 2026-09-21 and 2026-09-22 with Devin CLI 3000.11.1 (cc4e349ca55e).
-The router owns the crewmate/scout-only boundary; primary and secondmate integration is unsupported.
+The router owns the worker/Investigator-only boundary; primary and Project Director integration is unsupported.
 [Verification evidence](../../../../../docs/verification/devin.md) and its live guard refresh the vendor facts below.
 
 ## Operating facts
@@ -44,5 +44,5 @@ The shared slash-command settling path also handles `/quit` autocomplete.
 ## Primary integration
 
 No primary Stop guard, watcher protocol, pre-tool protection, or session-start contract was verified for Devin.
-Do not launch a primary or secondmate with this adapter.
+Do not launch a primary or Project Director with this adapter.
 ACP, quota-provider integration, and native Fusion subagent accounting remain separate follow-ups.

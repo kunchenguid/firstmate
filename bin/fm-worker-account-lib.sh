@@ -118,7 +118,7 @@ fm_worker_account_read() {
 }
 
 # fm_worker_account_config <harness> <config-dir> [<secondmate-id>]
-# Prints the directory containing the applicable pin. Only a missing per-mate
+# Prints the directory containing the applicable pin. Only a missing per-Project-Director
 # file falls back to the home pin; unreadable or malformed files still select
 # the override so the ordinary parser refuses them. Non-pinnable runners and
 # ordinary workers keep the supplied directory unchanged.

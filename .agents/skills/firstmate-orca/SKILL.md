@@ -76,14 +76,14 @@ For a messy Orca-backed task:
 6. Stop and inspect if the recorded worktree path, Orca worktree id, or project checkout no longer matches expectations.
 
 Teardown remains governed by the normal firstmate landing rules.
-Scout work can be torn down after the report exists and the `captain-hold-lifecycle` completion gate passes.
-Ship work can be torn down only after the work is landed by its project mode.
+Investigator work can be torn down after the report exists and the `captain-hold-lifecycle` completion gate passes.
+Builder work can be torn down only after the work is landed by its project mode.
 
 ## Smoke Test
 
 Keep Orca smoke tests focused on lifecycle plumbing:
 
-1. Select Orca intentionally for a disposable task or scout.
+1. Select Orca intentionally for a disposable task or Investigator.
 2. Spawn through `bin/fm-spawn.sh`.
 3. Confirm metadata records the Orca backend, terminal, Orca worktree id, and isolated worktree path.
 4. Verify `bin/fm-peek.sh`, a short `bin/fm-send.sh` steer, watcher wake behavior, and `bin/fm-crew-state.sh`.

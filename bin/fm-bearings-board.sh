@@ -283,7 +283,7 @@ decision_card_is_stale() {  # <task-id> <landed-0-or-1>
   # absent from this backlog, and a call wrongly hidden is worse than a card
   # wrongly shown, so both uncertain and absent cards stay.
   if [ "$rc" -eq 1 ]; then
-    printf 'no longer an open captain call\n'
+    printf 'no longer an open user call\n'
     return 0
   fi
   return 1

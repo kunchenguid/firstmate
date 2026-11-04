@@ -35,10 +35,10 @@ write_promotion_brief() {  # <home> <id>
   mkdir -p "$home/data/$id"
   cat > "$home/data/$id/brief.md" <<'EOF'
 # Task
-## Captain's intent
+## User's intent
 Promote the selected scout.
 
-## Firstmate spec
+## Director spec
 Verify promotion preserves the behavior under test.
 EOF
 }

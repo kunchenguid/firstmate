@@ -648,7 +648,7 @@ fm_lock_try_acquire "$CONTROL_LOCK" || {
   exit 1
 }
 CONTROL_LOCK_HELD=1
-# Fail closed before any fleet mutation: a no-mistakes gate agent must never tear
+# Fail closed before any team mutation: a no-mistakes gate agent must never tear
 # down a worktree (see bin/fm-gate-refuse-lib.sh).
 fm_refuse_if_gate_agent
 FM_LOCK_LOG_PREFIX=teardown
@@ -785,7 +785,7 @@ if [ "$TEARDOWN_BACKLOG_APPLIES" = 1 ]; then
     0) TEARDOWN_BACKLOG_TRANSITION=retain ;;
     1) ;;
     *)
-      echo "error: task $ID cannot be torn down because whether its backlog item is still held for the captain could not be read; fix that read and retry rather than risk closing a captain call with no recorded answer" >&2
+      echo "error: task $ID cannot be torn down because whether its backlog item is still held for the user could not be read; fix that read and retry rather than risk closing a user call with no recorded answer" >&2
       [ -z "$TEARDOWN_CAPTAIN_OPEN_OUT" ] || printf '%s\n' "$TEARDOWN_CAPTAIN_OPEN_OUT" >&2
       exit 1
       ;;
@@ -1851,7 +1851,7 @@ backlog_refresh_reminder() {
     backlog_display="${DATA%/}/backlog.md"
   fi
   if [ "$BACKLOG_CLOSED" = 1 ] && [ "$BACKLOG_TRANSITION" = retain ]; then
-    printf '%s\n' "Backlog: $ID stays open in $backlog_display, still held for the captain with its deliverable recorded. Relay the question and close it only with bin/fm-captain-hold.sh answer."
+    printf '%s\n' "Backlog: $ID stays open in $backlog_display, still held for the user with its deliverable recorded. Relay the question and close it only with bin/fm-captain-hold.sh answer."
   elif [ "$BACKLOG_CLOSED" = 1 ]; then
     printf '%s\n' "Backlog: $ID is closed in $backlog_display. Run bin/fm-tasks-axi.sh ready for dependency-cleared candidates, check date gates, and dispatch only work whose blockers are gone and date is due."
   else
@@ -2134,7 +2134,7 @@ validate_worktree_teardown_safety() {
       return "$TEARDOWN_WORKTREE_SAFETY_LOCK_BLOCKED"
     fi
     echo "REFUSED: cannot inspect worktree $WT for uncommitted changes." >&2
-    echo "Restore the git index state, or get the captain's explicit OK to discard, then --force." >&2
+    echo "Restore the git index state, or get the user's explicit approval to discard, then --force." >&2
     return 1
   fi
   dirty=$(printf '%s\n' "$dirty_raw" | grep -vE '^\?\? (\.claude/|\.fm-(grok|kimi)-turnend$)' || true)
@@ -2144,7 +2144,7 @@ validate_worktree_teardown_safety() {
       return "$TEARDOWN_WORKTREE_SAFETY_LOCK_BLOCKED"
     fi
     echo "REFUSED: cannot inspect worktree $WT for commits not on a remote." >&2
-    echo "Restore the git index state, or get the captain's explicit OK to discard, then --force." >&2
+    echo "Restore the git index state, or get the user's explicit approval to discard, then --force." >&2
     return 1
   fi
   unpushed=$(printf '%s\n' "$unpushed_raw" | head -5)
@@ -2156,7 +2156,7 @@ validate_worktree_teardown_safety() {
         return "$TEARDOWN_WORKTREE_SAFETY_LOCK_BLOCKED"
       fi
       echo "REFUSED: cannot inspect worktree $WT for commits not on $DEFAULT." >&2
-      echo "Restore the git index state, or get the captain's explicit OK to discard, then --force." >&2
+      echo "Restore the git index state, or get the user's explicit approval to discard, then --force." >&2
       return 1
     fi
     unmerged=$(printf '%s\n' "$unmerged_raw" | head -5)
@@ -2164,13 +2164,13 @@ validate_worktree_teardown_safety() {
       echo "REFUSED: local-only worktree $WT has work not yet merged into $DEFAULT and not on any remote." >&2
       [ -n "$dirty" ] && report_worktree_dirt "$dirty"
       [ -n "$unmerged" ] && printf 'commits not yet on %s:\n%s\n' "$DEFAULT" "$unmerged" >&2
-      echo "Merge the branch into local $DEFAULT first (bin/fm-merge-local.sh after the captain approves), or push to a fork/remote, or get the captain's explicit OK to discard, then --force." >&2
+      echo "Merge the branch into local $DEFAULT first (bin/fm-merge-local.sh after the user approves), or push to a fork/remote, or get the user's explicit approval to discard, then --force." >&2
       return 1
     fi
   elif [ -n "$dirty" ]; then
     echo "REFUSED: worktree $WT has uncommitted changes." >&2
     report_worktree_dirt "$dirty"
-    echo "Commit them (or get the captain's explicit OK to discard, then --force)." >&2
+    echo "Commit them (or get the user's explicit approval to discard, then --force)." >&2
     return 1
   elif [ -n "$unpushed" ]; then
     branch=${TEARDOWN_WORKTREE_BRANCH_FOR_SAFETY:-}
@@ -2186,7 +2186,7 @@ validate_worktree_teardown_safety() {
         echo "REFUSED: worktree $WT has work not on any remote and not landed." >&2
       fi
       printf 'unpushed commits:\n%s\n' "$unpushed" >&2
-      echo "Push the branch, land its PR, or get the captain's explicit OK to discard, then --force." >&2
+      echo "Push the branch, land its PR, or get the user's explicit approval to discard, then --force." >&2
       return 1
     fi
   fi
@@ -3666,12 +3666,12 @@ if [ "$KIND" = scout ] && [ "$FORCE" != "--force" ]; then
   REPORT="$DATA/$ID/report.md"
   if [ ! -f "$REPORT" ]; then
     echo "REFUSED: scout task $ID has no report at $REPORT." >&2
-    echo "The report is the work product. Have the crewmate write it, or use --force after explicit discard approval." >&2
+    echo "The report is the work product. Have the Investigator write it, or use --force after explicit discard approval." >&2
     exit 1
   fi
   if ! FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$DATA" \
       FM_CONFIG_OVERRIDE="$CONFIG" "$SCRIPT_DIR/fm-captain-hold.sh" verify "$ID" >/dev/null; then
-    echo "REFUSED: scout task $ID has not passed the captain-call completion gate." >&2
+    echo "REFUSED: Investigator task $ID has not passed the user-call completion gate." >&2
     echo "Inventory its report and any visual review through bin/fm-captain-hold.sh before teardown." >&2
     exit 1
   fi
@@ -4179,7 +4179,7 @@ if [ "$BACKLOG_CLOSED" = 1 ]; then
     fm_lock_release "$META_LOCK"
     META_LOCK_HELD=0
     if [ "$BACKLOG_TRANSITION" = retain ]; then
-      echo "error: $ID's endpoint and local copy are cleaned up, but its captain-held backlog item could not be returned to Queued atomically ($FM_BACKLOG_TRANSITION_ERROR); the pending retention is recorded and the next session start retries it" >&2
+      echo "error: $ID's endpoint and local copy are cleaned up, but its user-held backlog item could not be returned to Queued atomically ($FM_BACKLOG_TRANSITION_ERROR); the pending retention is recorded and the next session start retries it" >&2
     else
       echo "error: $ID's endpoint and local copy are cleaned up, but its backlog item could not be closed atomically ($FM_BACKLOG_TRANSITION_ERROR); the pending close is recorded and the next session start retries it" >&2
     fi

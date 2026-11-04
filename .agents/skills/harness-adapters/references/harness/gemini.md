@@ -2,7 +2,7 @@
 
 Google's `gemini` TUI, verified end to end on 2026-09-04 with gemini-cli 0.58.0 on Linux.
 Launch shape: `GEMINI_CLI_TRUST_WORKSPACE=true gemini -y "$(cat <brief>)"`.
-Verified as a CREWMATE and SCOUT adapter only; `../../../../../bin/fm-spawn.sh` refuses a secondmate launch on it because `../../../../../docs/supervision-protocols/` carries no gemini wake protocol.
+Verified as a Builder and Investigator adapter only; `../../../../../bin/fm-spawn.sh` refuses a Project Director launch on it because `../../../../../docs/supervision-protocols/` carries no gemini wake protocol.
 
 ## Operating facts
 
@@ -90,7 +90,7 @@ Two quirks are wired for deliberately.
 
 The system settings layer also makes the busy contract independent of the trust decision: its hooks were verified firing under `--skip-trust` in an untrusted folder, and they need no entry in Gemini's per-workspace `~/.gemini/trusted_hooks.json`, which only records PROJECT hooks.
 Workspace trust therefore buys skills, not state.
-A guarded user-level hook in `~/.gemini/settings.json` was also proven to work, gated grok-style by a worktree pointer and a private token registry, and was rejected because it mutates the captain's own global settings for every session on the machine.
+A guarded user-level hook in `~/.gemini/settings.json` was also proven to work, gated grok-style by a worktree pointer and a private token registry, and was rejected because it mutates the user's own global settings for every session on the machine.
 
 While a hook runs, the status row shows `Executing Hook: <name>` and the `(esc to cancel,` token is already gone, so that brief window reads idle; the turn itself is genuinely over by then.
 

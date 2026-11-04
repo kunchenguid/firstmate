@@ -350,10 +350,10 @@ if [ -z "${FM_SESSION_START_STAGE_FILE:-}" ]; then
     printf '●  Rerun bin/fm-session-start.sh now to finish taking the helm. If it truncates\n'
     if [ "$SESSION_START_RC" -eq 124 ]; then
       printf '●  again, raise FM_SESSION_START_TIMEOUT and report the slow stage - a stage that\n'
-      printf '●  cannot finish inside the bound is a fleet problem, not a reporting detail.\n'
+      printf '●  cannot finish inside the bound is a team problem, not a reporting detail.\n'
     else
       printf '●  again, report the exit status and the stage - raising the runtime bound\n'
-      printf '●  cannot help a digest that died, and a stage that dies is a fleet problem.\n'
+      printf '●  cannot help a digest that died, and a stage that dies is a team problem.\n'
     fi
     printf '%s\n' "$BAR"
   fi
@@ -532,7 +532,7 @@ print_backlog_tasks_axi_compact() {
       "$QUEUED_LIMIT"
     printf '\nin flight:\n'
     printf '%s\n' "$in_flight" | fm_hold_reason_decode_stream | strip_axi_help
-    printf '\nheld (captain- or time-gated; an in-flight item that is also held appears in both groups):\n'
+    printf '\nheld (user- or time-gated; an in-flight item that is also held appears in both groups):\n'
     printf '%s\n' "$held" | fm_hold_reason_decode_stream | strip_axi_help
     printf '\nblocked queued:\n'
     printf '%s\n' "$blocked" | fm_hold_reason_decode_stream | strip_axi_help
@@ -702,14 +702,14 @@ if [ "$LOCK_RC" -ne 0 ]; then
   BAR='●━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━'
   {
     printf '%s\n' "$BAR"
-    printf '●  READ-ONLY SESSION - FLEET LOCK OWNERSHIP WAS NOT VERIFIED\n'
+    printf '●  READ-ONLY SESSION - TEAM LOCK OWNERSHIP WAS NOT VERIFIED\n'
     printf '●  %s\n' "$LOCK_OUT"
     printf '●  Skipping every mutating step: stale Herdr child cleanup,\n'
     printf '●  secondmate convergence, secondmate liveness, pending remote handoff retry,\n'
-    printf '●  X-mode artifacts, fleet sync, and wake-queue drain. Detect-only bootstrap\n'
+    printf '●  X-mode artifacts, team sync, and wake-queue drain. Detect-only bootstrap\n'
     printf '●  diagnostics and the rest of this read-only-safe digest still ran below.\n'
     printf '●  Operate read-only until this resolves - do not spawn, steer, merge, or\n'
-    printf '●  otherwise mutate fleet state from this session.\n'
+    printf '●  otherwise mutate team state from this session.\n'
     printf '%s\n' "$BAR"
   }
 fi
@@ -798,7 +798,7 @@ subsection "WAKE QUEUE"
 if [ "$READ_ONLY" -eq 1 ]; then
   QLEN=0
   [ -s "$STATE/.wake-queue" ] && QLEN=$(grep -c . "$STATE/.wake-queue" 2>/dev/null || printf '0')
-  printf 'skipped (read-only session) - %s record(s) remain queued because this session lacks verified fleet-lock ownership.\n' "$QLEN"
+  printf 'skipped (read-only session) - %s record(s) remain queued because this session lacks verified team-lock ownership.\n' "$QLEN"
   GUARD_OUT=$(FM_GUARD_READ_ONLY=1 "$SCRIPT_DIR/fm-guard.sh" 2>&1)
   [ -n "$GUARD_OUT" ] && printf '%s\n' "$GUARD_OUT"
 else
@@ -983,7 +983,7 @@ subsection "AFK"
 # nothing for a return.
 if [ -f "$STATE/.afk-contract" ]; then
   if [ "$("$SCRIPT_DIR/fm-afk-contract.sh" mode 2>/dev/null)" = quiet ]; then
-    printf 'present - quiet mode recorded at %s (the captain is present and nothing is held for a return: requested actions proceed under ordinary attended authority; only an explicit /quiet off exits it)' \
+    printf 'present - quiet mode recorded at %s (the user is present and nothing is held for a return: requested actions proceed under ordinary attended authority; only an explicit /quiet off exits it)' \
       "$("$SCRIPT_DIR/fm-afk-contract.sh" field entered 2>/dev/null || printf unknown)"
   else
     printf 'present - away posture recorded at %s (hold-for-return only; bin/fm-afk-contract.sh readback for the mandate)' \
@@ -1039,7 +1039,7 @@ section "NETWORK CHECKS"
 if [ "$READ_ONLY" -eq 1 ]; then
   printf 'skipped (read-only session) - GitHub authentication, project clone refresh,\n'
   printf 'secondmate liveness and convergence, and pending handoff delivery were not run.\n'
-  printf 'They need the fleet lock, and this session must not spawn, steer, or merge, so it\n'
+  printf 'They need the team lock, and this session must not spawn, steer, or merge, so it\n'
   printf 'has no action they would gate. The session holding the lock runs them.\n'
 else
   "$SCRIPT_DIR/fm-startup-network.sh" harvest --pid $$ 2>&1 || true

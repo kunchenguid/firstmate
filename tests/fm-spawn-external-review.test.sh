@@ -40,15 +40,15 @@ make_case() {
   git -C "$PROJECT_DIR" worktree add --quiet --detach "$POOL_DIR" "$(git -C "$PROJECT_DIR" rev-parse HEAD)"
   cat > "$HOME_DIR/data/$id/brief.md" <<EOF
 # Task
-## Captain's intent
+## User's intent
 Ship a change through the review tool.
 
-## Firstmate spec
+## Director spec
 Exercise the external review spawn path.
 
 # Definition of done
 Delivery contract: mode=direct-PR forge=external
-Ship branch: fm/$id
+Builder branch: fm/$id
 EOF
 }
 

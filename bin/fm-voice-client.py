@@ -724,7 +724,7 @@ class Client:
         finishing with the session - returns as soon as it is told, while the last
         chunk and the talk end may still be here. The next talk start would then
         overtake them, the relay would open a fresh session and apply the previous
-        turn's talk end to it, and the captain's entire next question was dropped
+        turn's talk end to it, and the user's entire next question was dropped
         as audio arriving with no turn open. It answered a question nobody had
         finished asking.
 

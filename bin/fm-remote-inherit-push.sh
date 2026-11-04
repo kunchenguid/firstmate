@@ -81,7 +81,7 @@ while IFS= read -r rel; do
     [ "$(file_link_count "$source")" = 1 ] || die "inherited source is hardlinked: $source"
     if [ "$rel" = data/captain-shared.md ]; then
       if ! missing=$(shared_captain_header_valid "$source"); then
-        reason="shared captain preferences have no valid primary-authoritative header"
+        reason="shared user preferences (data/captain-shared.md) have no valid primary-authoritative header"
         [ -z "$missing" ] || reason="$reason: missing \"$missing\""
         die "$reason"
       fi

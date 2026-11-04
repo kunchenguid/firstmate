@@ -1,53 +1,53 @@
 #!/usr/bin/env bash
-# Scaffold a crewmate brief or persistent secondmate charter at
+# Scaffold a Builder or Investigator brief, or a persistent Project Director charter at
 # data/<task-id>/brief.md under the active firstmate home.
 # For ordinary tasks, the standard Setup/Rules/Definition-of-done contract is
-# filled in. Ship and scout `# Task` sections have two subsections Firstmate
-# fills before dispatch: `{TASK}` under `## Captain's intent` (the captain's
+# filled in. Builder and Investigator `# Task` sections have two subsections the Director
+# fills before dispatch: `{TASK}` under `## User's intent` (the user's
 # own ask plus the context needed to read it, including the substance of any
 # report, decision, or PR the ask refers to, without added speaker labels or
-# direct address) and `{FIRSTMATE_SPEC}`
-# under `## Firstmate spec` (build instructions, which are never the captain's
+# direct address) and `{DIRECTOR_SPEC}`
+# under `## Director spec` (build instructions, which are never the user's
 # intent). bin/fm-dod-lib.sh owns the no-mistakes `--intent` contract those
 # subsections feed; bin/fm-spawn.sh refuses leftover placeholders and a
-# `## Captain's intent` line opening with a Captain label or address. Secondmate
-# charters still use a single `{TASK}` charter fill. Firstmate may adjust other
+# `## User's intent` line opening with a legacy `Captain` label or address. Project Director
+# charters still use a single `{TASK}` charter fill. The Director may adjust other
 # sections when the task genuinely deviates (e.g. working an existing external
-# PR instead of shipping a new one).
+# PR instead of delivering a new change).
 # Usage: fm-brief.sh <task-id> <repo-name> --mode <no-mistakes|direct-PR|local-only> [--branch-prefix <prefix>] [--base-branch <branch>] [--forge <none|gerrit|forgejo|external> [--shape squash]] [--pr <auto|manual>] [--herdr-lab]
 #        fm-brief.sh <task-id> <repo-name> --scout [--base-branch <branch>] [--herdr-lab]
 #        fm-brief.sh <task-id> --secondmate {<project>...|--no-projects}
-#   --scout writes the scout contract instead: the deliverable is a report at
+#   --scout writes the Investigator contract instead: the deliverable is a report at
 #   data/<task-id>/report.md (no branch, no push, no PR) and the worktree is scratch.
 #   It offers the Lavish review loop only when `fm-bootstrap.sh lavish-compatible`
 #   confirms the legacy board-compatibility floor; otherwise it asks for a text report.
-#   --secondmate writes a persistent secondmate charter. The project list
-#   is cloned into the secondmate home, while the natural-language scope
-#   tells the main firstmate when to route work there; routine churn stays in its own home;
-#   captain-relevant escalations and marked from-firstmate replies append to this
+#   --secondmate writes a persistent Project Director charter. The project list
+#   is cloned into the Project Director home, while the natural-language scope
+#   tells the main Director when to route work there; routine churn stays in its own home;
+#   user-relevant escalations and marked from-Director replies append to this
 #   home's status file.
 #   --no-projects writes a project-less charter for a domain whose subject is the
-#   firstmate repo itself (its home is a firstmate worktree, its crews take pooled
+#   Firstmate repository itself (its home is a firstmate worktree, its workers take pooled
 #   worktrees of the same repo). It is mutually exclusive with a project list, and
 #   omitting both still fails loudly so an accidental omission is never silent.
 #   Set FM_SECONDMATE_CHARTER='<charter>' to fill the charter text.
 #   Set FM_SECONDMATE_SCOPE='<scope>' to write a routing scope distinct from the charter text.
 #   --herdr-lab is mandatory when the task will issue Herdr lifecycle commands.
 #   It adds the hard isolation contract backed by bin/fm-herdr-lab.sh.
-#   The flag must be explicit because {TASK} and {FIRSTMATE_SPEC} are filled
+#   The flag must be explicit because {TASK} and {DIRECTOR_SPEC} are filled
 #   after scaffolding and the caller-supplied repo string cannot reliably
 #   identify this repo. Briefs made without it carry a loud declaration so an
 #   omitted contract cannot be silent.
-# For ship tasks, --mode is REQUIRED and shapes the definition of done. Firstmate
+# For Builder tasks, --mode is REQUIRED and shapes the definition of done. The Director
 # resolves it per task at intake (AGENTS.md section 7); data/projects.md holds the
-# captain's standing posture as context, and this script never reads it:
+# user's standing posture as context, and this script never reads it:
 #   no-mistakes  implement -> /no-mistakes pipeline -> PR -> configured merge authority
 #   direct-PR    implement -> push + open PR via gh-axi (no pipeline) -> configured merge authority
 #   local-only   implement on branch, stop and report "ready in branch" (no push/PR);
-#                the configured merge authority approves, firstmate merges to local main
+#                the configured merge authority approves, the Director merges to local main
 # no-mistakes-prod-only is a registry policy, not a task mode; resolve it to one of
 # the three concrete modes at intake before calling this script.
-# --branch-prefix <prefix> optionally overrides the ship branch's "fm/" prefix, so
+# --branch-prefix <prefix> optionally overrides the Builder branch's "fm/" prefix, so
 # the resolved branch is "<prefix><task-id>" instead of the default "fm/<task-id>".
 # Pass an empty prefix ("--branch-prefix ''") for a bare "<task-id>" branch, or a
 # conventional prefix such as "fix/" - useful for a third-party project that does
@@ -55,26 +55,26 @@
 # to "fm/" when omitted, so every existing installation's branch names are
 # unchanged. Like --mode, this script never reads data/projects.md for it: the
 # registry's optional "branch=<prefix>" annotation (bin/fm-project-mode.sh's
-# header owns that format and its --branch-prefix query) is the captain's
-# standing per-project preference, and firstmate resolves it per task at intake
-# and passes the explicit flag. Refused on --scout and --secondmate: a scout
-# makes no branch and a charter is not a delivery contract.
+# header owns that format and its --branch-prefix query) is the user's
+# standing per-project preference, and the Director resolves it per task at intake
+# and passes the explicit flag. Refused on --scout and --secondmate: an Investigator
+# makes no branch and a Project Director charter is not a delivery contract.
 # --base-branch <branch> starts the task from origin's <branch> instead of the
 # repository default, for work that belongs on a named integration, feature, or
 # release branch. It writes a "Base branch: <branch>" line under `# Setup`, which
 # bin/fm-spawn.sh requires to agree with the same --base-branch it is passed to
-# choose the copy's starting point, and a ship's
+# choose the copy's starting point, and a Builder's
 # Definition of done then targets that branch with its pull request.
 # bin/fm-dod-lib.sh's fm_base_branch_valid owns which deliveries accept one.
 # Refused on --secondmate.
 # --forge names the project's forge, defaults to none, and is orthogonal to --mode
-# exactly as the registry's `forge=` token is. It is the captain's confirmed
+# exactly as the registry's `forge=` token is. It is the user's confirmed
 # registry binding, read from data/projects.md at intake and passed here; this
 # script never infers a forge and never looks the binding up, and bin/fm-spawn.sh
 # refuses a brief whose forge disagrees with the registry. bin/fm-project-mode.sh's
 # header owns what the binding means, and bin/fm-dod-lib.sh owns what `gerrit`,
 # `forgejo`, and `external` change in the Definition of done. On `forgejo` this
-# script also names tea instead of gh-axi in the ship brief's forge-CLI rule, and
+# script also names tea instead of gh-axi in the Builder brief's forge-CLI rule, and
 # on `external` that rule names no forge CLI, because the home's review tool is
 # the only publishing tool. A forge on --mode local-only is refused, because that
 # mode publishes nothing, and `external` also refuses no-mistakes.
@@ -91,41 +91,41 @@
 # membership pinned when its watch is armed, because the merge watch follows one
 # change.
 # It defaults to squash on gerrit and is refused without it.
-# --upstream-consent <host>/<owner>/<repo> records the captain's one-off
+# --upstream-consent <host>/<owner>/<repo> records the user's one-off
 # approval for this one task to publish to that repository when it is
-# firstmate's own upstream. It renders as an `upstream-consent=` token on the
+# Firstmate's own upstream. It renders as an `upstream-consent=` token on the
 # Delivery contract line, bin/fm-spawn.sh checks it against this home's role
 # authority and records it in the task record, and bin/fm-promote.sh honors it
-# the same way. Ship-only: a scout publishes nothing and a charter is not a
+# the same way. Builder-only (compatibility kind `ship`): an Investigator publishes nothing and a Project Director charter is not a
 # delivery contract.
-# --project <dir> is the task's project directory, used to detect when a ship
-# brief would publish to firstmate's own repository: for such a task this
+# --project <dir> is the task's project directory, used to detect when a Builder
+# brief would publish to Firstmate's own repository: for such a task this
 # scaffold refuses a publishing mode that the home's role or recorded consent
-# does not authorize, before the contract exists. Pass it on every ship
+# does not authorize, before the contract exists. Pass it on every Builder
 # scaffold so detection does not depend on the caller recognizing the repo;
 # bin/fm-spawn.sh repeats the check at launch regardless.
-# The generated ship brief records the chosen mode as a fixed machine-readable
+# The generated Builder brief records the chosen mode as a fixed machine-readable
 # "Delivery contract: mode=<mode>" line, followed by " forge=gerrit shape=squash"
 # on Gerrit, " forge=forgejo" on Forgejo, or " forge=external" on an external
 # review tool, then " pr=manual" when the worker owns the PR text. bin/fm-spawn.sh reads that line and
-# refuses to launch a ship task whose explicit --mode or registered forge
+# refuses to launch a Builder task whose explicit --mode or registered forge
 # disagrees, so an adjusted brief and the recorded task metadata cannot drift
 # apart.
-# Ship briefs begin with a worktree-isolation assertion before the branch step.
-# Both crewmate scaffolds carry one shared rule against administering the
+# Builder briefs begin with a worktree-isolation assertion before the branch step.
+# Both worker scaffolds carry one shared rule against administering the
 # infrastructure every lane shares - the no-mistakes daemon and the worktree pool
-# their own slot came from - so ship and scout cannot drift apart. A secondmate
-# charter omits it: that home allocates and returns slots for its own crewmates.
-# --mode, --forge, --shape, and --pr are refused on scout and secondmate scaffolds: a
-# scout's deliverable is a report rather than a merge, and a charter is not a
+# their own slot came from - so Builder and Investigator cannot drift apart. A Project Director
+# charter omits it: that home allocates and returns slots for its own workers.
+# --mode, --forge, --shape, and --pr are refused on Investigator and Project Director scaffolds:
+# an Investigator's deliverable is a report rather than a merge, and a Project Director charter is not a
 # delivery contract.
 # There is no --yolo flag here. The worker never owns merge decisions, so yolo is
-# a spawn-time and firstmate-side input only (AGENTS.md section 7).
+# a spawn-time and Director-side input only (AGENTS.md section 7).
 # Every scaffold's status protocol distinguishes the configured
 # declared-external-wait verb (FM_CLASSIFY_PAUSED_VERB, default "paused") from
 # "blocked:": pause for a known wait expected to clear on its own, including
 # the worker's own background work, pipeline or long command; blocked when
-# firstmate must act. The first-sight alert remains; repeats use the long cadence.
+# Director must act. The first-sight alert remains; repeats use the long cadence.
 # Emission-time syntax and legacy unknown-time handling are owned by
 # bin/fm-classify-lib.sh; each scaffold renders the stamp as a literal <epoch>
 # placeholder the worker replaces with a numeric Unix time as it appends, so a
@@ -133,26 +133,26 @@
 # Every scaffold also carries the steering-inbox receive-and-ack section:
 # process state/<id>.inbox/*.msg in order and acknowledge each by moving it to
 # handled/ (record, doorbell, and ladder owned by bin/fm-task-inbox-lib.sh).
-# Ship tasks include a project-memory section bounding crewmate edits to a
+# Builder tasks include a project-memory section bounding worker edits to a
 # project's AGENTS.md/CLAUDE.md: only corrections of factually wrong
 # information, including wrong information the task itself introduced - never
 # additions of missing knowledge. A correction edits only the wrong text and
 # never runs fm-ensure-agents-md.sh, whose inserted sections and created
 # pointer file are themselves additions.
 # Scaffolds carry no role scope: fm-spawn.sh supplies fm_brief_worker_role from
-# fm-dod-lib.sh to every ship/scout launch brief, so this file never becomes a
+# fm-dod-lib.sh to every Builder/Investigator launch brief, so this file never becomes a
 # second owner of a contract that must stay current across relaunches.
 # A home may carry standing worker instructions without editing this tracked
-# script: when config/brief-include.md exists under the active home, ship and
-# scout scaffolds append its text verbatim as their last section, "# Home brief
+# script: when config/brief-include.md exists under the active home, Builder and
+# Investigator scaffolds append its text verbatim as their last section, "# Home brief
 # additions", which defers to every other section of the brief. It goes last
 # because the machine-read `# Task` heading resolves to its first match, so
-# appended text can never shadow it; a later scout promotion appends its ship
+# appended text can never shadow it; a later Investigator promotion appends its Builder
 # contract below it, which that position-free deference already covers. An
 # absent or blank file changes nothing; a present path that is not a readable
 # regular file, or text carrying its own "Delivery contract: mode=" line (which
-# a later scout promotion could not outrank), stops the scaffold before
-# anything is written. Secondmate charters never take it.
+# a later Investigator promotion could not outrank), stops the scaffold before
+# anything is written. Project Director charters never take it.
 # Refuses to overwrite an existing brief.
 set -eu
 
@@ -286,11 +286,11 @@ for a in "$@"; do
 done
 [ -z "$want_value" ] || { echo "error: --$want_value requires a value" >&2; exit 1; }
 
-# Ship delivery mode is an explicit per-task decision (AGENTS.md section 7). A
+# Builder delivery mode is an explicit per-task decision (AGENTS.md section 7). A
 # missing or invalid value stops the scaffold rather than silently defaulting.
 if [ "$KIND" = ship ]; then
   [ "$MODE_SET" -eq 1 ] || {
-    echo "error: ship briefs require --mode <no-mistakes|direct-PR|local-only>; resolve it at intake from the captain's instruction and the project's registered posture in data/projects.md" >&2
+    echo "error: Builder briefs require --mode <no-mistakes|direct-PR|local-only>; resolve it at intake from the user's instruction and the project's registered posture in data/projects.md" >&2
     exit 1
   }
   case "$MODE" in
@@ -301,14 +301,14 @@ if [ "$KIND" = ship ]; then
     *) echo "error: --mode must be one of no-mistakes, direct-PR, local-only (got '$MODE')" >&2; exit 1 ;;
   esac
 elif [ "$MODE_SET" -eq 1 ]; then
-  echo "error: --mode applies only to ship briefs; a scout delivers a report and a secondmate charter is not a delivery contract" >&2
+  echo "error: --mode applies only to Builder briefs (compatibility kind ship); an Investigator delivers a report and a Project Director charter is not a delivery contract" >&2
   exit 1
 fi
 
-# A ship branch's prefix is optional per-project cosmetics, not a delivery
+# A Builder branch's prefix is optional per-project cosmetics, not a delivery
 # decision, but it still only makes sense where a branch is actually created.
 if [ "$KIND" != ship ] && [ "$BRANCH_PREFIX_SET" -eq 1 ]; then
-  echo "error: --branch-prefix applies only to ship briefs; a scout makes no branch and a secondmate charter is not a delivery contract" >&2
+  echo "error: --branch-prefix applies only to Builder briefs (compatibility kind ship); an Investigator makes no branch and a Project Director charter is not a delivery contract" >&2
   exit 1
 fi
 case "$BRANCH_PREFIX" in
@@ -325,7 +325,7 @@ if [ "$KIND" = ship ]; then
     case "$SHAPE" in
       squash) ;;
       stack)
-        echo "error: --shape stack is refused: a stack is several changes, and it must be watched by its membership pinned when its watch is armed, which this fleet does not yet do - the merge watch follows exactly one change, so a stack's wake could report one change as the whole stack; publish --shape squash" >&2
+        echo "error: --shape stack is refused: a stack is several changes, and it must be watched by its membership pinned when its watch is armed, which this worker system does not yet do - the merge watch follows exactly one change, so a stack's wake could report one change as the whole stack; publish --shape squash" >&2
         exit 1 ;;
       *) echo "error: --shape must be squash (got '$SHAPE')" >&2; exit 1 ;;
     esac
@@ -344,23 +344,23 @@ if [ "$KIND" = ship ]; then
     FORGE_RULE_LINE="Use gh-axi for GitHub operations and chrome-devtools-axi for browser operations."
   fi
 elif [ "$FORGE_SET" -eq 1 ] || [ "$SHAPE_SET" -eq 1 ] || [ "$PR_TEXT_SET" -eq 1 ]; then
-  echo "error: --forge, --shape, and --pr apply only to ship briefs; a scout delivers a report and a secondmate charter is not a delivery contract" >&2
+  echo "error: --forge, --shape, and --pr apply only to Builder briefs (compatibility kind ship); an Investigator delivers a report and a Project Director charter is not a delivery contract" >&2
   exit 1
 fi
 if [ "$BASE_BRANCH_SET" -eq 1 ]; then
   if [ "$KIND" = secondmate ] || [ -z "$BASE_BRANCH" ]; then
-    echo "error: --base-branch takes a branch name and applies only to ship and scout briefs" >&2
+    echo "error: --base-branch takes a branch name and applies only to Builder and Investigator briefs (compatibility kinds ship and scout)" >&2
     exit 1
   fi
   fm_base_branch_valid "$BASE_BRANCH" "$MODE" "$FORGE" "fm-brief.sh --base-branch" || exit 1
 fi
 if [ "$KIND" != ship ]; then
   [ "$UPSTREAM_CONSENT_SET" -eq 0 ] || {
-    echo "error: --upstream-consent applies only to ship briefs; a scout publishes nothing and a charter is not a delivery contract" >&2
+    echo "error: --upstream-consent applies only to Builder briefs (compatibility kind ship); an Investigator publishes nothing and a Project Director charter is not a delivery contract" >&2
     exit 1
   }
   [ "$PROJECT_DIR_SET" -eq 0 ] || {
-    echo "error: --project applies only to ship briefs" >&2
+    echo "error: --project applies only to Builder briefs (compatibility kind ship)" >&2
     exit 1
   }
 fi
@@ -389,7 +389,7 @@ if [ "$KIND" = ship ] && [ "$MODE" != local-only ] && [ "$PROJECT_DIR_SET" -eq 1
     0 | 2) ;;
     *)
       echo "error: $FM_ROLE_PUB_DENIAL" >&2
-      echo "error: to let this home publish to ${FM_ROLE_PUB_TARGET:-that repository}, write 'maintainer ${FM_ROLE_PUB_TARGET:-<host>/<owner>/<repo>}' into $CONFIG/firstmate-role (docs/configuration.md \"Firstmate role\"), or pass --upstream-consent ${FM_ROLE_PUB_TARGET:-<host>/<owner>/<repo>} for this one task with the captain's explicit approval" >&2
+      echo "error: to let this home publish to ${FM_ROLE_PUB_TARGET:-that repository}, write 'maintainer ${FM_ROLE_PUB_TARGET:-<host>/<owner>/<repo>}' into $CONFIG/firstmate-role (docs/configuration.md \"Firstmate role\"), or pass --upstream-consent ${FM_ROLE_PUB_TARGET:-<host>/<owner>/<repo>} for this one task with the user's explicit approval" >&2
       exit 1
       ;;
   esac
@@ -403,7 +403,7 @@ fi
 printf -v BRANCH_Q '%q' "$BRANCH"
 
 if [ "$KIND" = secondmate ] && [ "$HERDR_LAB" -eq 1 ]; then
-  echo "error: --herdr-lab applies only to crewmate ship or scout briefs" >&2
+  echo "error: --herdr-lab applies only to Builder or Investigator briefs (compatibility kinds ship and scout)" >&2
   exit 1
 fi
 
@@ -475,7 +475,7 @@ IFS= read -r -d '' INBOX_SECTION <<EOF || true
 Firstmate steers you through durable message files in $INBOX_DIR.
 When a terminal message says an instruction is waiting there - and at any natural checkpoint when you are unsure - list them with \`find $INBOX_DIR -maxdepth 1 -name '*.msg' 2>/dev/null | sort -V\`, read the complete contents of each record (including its final line even when it is not newline-terminated) and act on each message in numeric order, then acknowledge each handled message by moving it: \`mv $INBOX_DIR/NNN.msg $INBOX_DIR/handled/\`.
 Prefer the format-aware \`fm_task_inbox_body\` reader from \`bin/fm-task-inbox-lib.sh\` when it is available. If you read manually, a header line \`body-terminator=1\` means the writer added exactly one synthetic final newline to terminate the record file; that marked newline is not part of the logical message body, so remove only it and preserve any intentional trailing newlines. Legacy records without that marker may end without a newline; read them through the file end.
-The move IS the acknowledgement: without it firstmate rings again and eventually treats you as stuck. An empty or absent inbox needs no action.
+The move IS the acknowledgement: without it the Director rings again and eventually treats you as stuck. An empty or absent inbox needs no action.
 EOF
 if [ -e "$CONFIG/wait-no-turns" ]; then
   INBOX_SECTION+="Do not poll or list the inbox while waiting; a waiting instruction rings."$'\n'
@@ -520,14 +520,14 @@ fi
 SECONDMATE_CHARTER=${FM_SECONDMATE_CHARTER:-"{TASK}"}
 SECONDMATE_SCOPE=${FM_SECONDMATE_SCOPE:-${FM_SECONDMATE_CHARTER:-"{TASK}"}}
 if [ "$NO_PROJECTS" -eq 1 ]; then
-  PROJECT_CLONES_BODY="None. This is a project-less domain: its subject is the firstmate repo this home lives in, so it needs no separate clones under \`projects/\`; its crews take pooled worktrees of that firstmate repo."
-  PROJECT_CLONES_NOTE="This domain has no separate project clones: its subject is the firstmate repo this home lives in, and its crews take pooled worktrees of that repo."
+  PROJECT_CLONES_BODY="None. This is a project-less domain: its subject is the Firstmate repo this home lives in, so it needs no separate clones under \`projects/\`; its workers take pooled worktrees of that Firstmate repo."
+  PROJECT_CLONES_NOTE="This domain has no separate project clones: its subject is the Firstmate repo this home lives in, and its workers take pooled worktrees of that repo."
 else
   PROJECT_CLONES_BODY=$(printf '%s\n' "$SECONDMATE_PROJECTS" | tr ' ' '\n' | sed 's/^/- /')
   PROJECT_CLONES_NOTE="The projects above are local clones for work you supervise; they are not an exclusive ownership claim."
 fi
 cat > "$BRIEF" <<EOF
-You are a persistent second mate managed by the main firstmate. Work on your own; do not wait for a human.
+You are a persistent Project Director managed by the main Director. Work on your own; do not wait for the user.
 
 # Charter
 $SECONDMATE_CHARTER
@@ -539,66 +539,66 @@ $SECONDMATE_SCOPE
 $PROJECT_CLONES_BODY
 
 # Operating model
-You are in an isolated firstmate home. The local \`AGENTS.md\` is your job description, and your local \`data/\`, \`state/\`, \`config/\`, and \`projects/\` dirs are yours to operate.
+You are in an isolated Firstmate home. The local \`AGENTS.md\` is your job description, and your local \`data/\`, \`state/\`, \`config/\`, and \`projects/\` dirs are yours to operate.
 $PROJECT_CLONES_NOTE
-Delegate project work to your own crewmates with the normal firstmate lifecycle: brief, spawn, status, watcher, steer, teardown, and recovery.
+Delegate implementation to Builders and knowledge-only work to Investigators with the normal Director lifecycle: brief, spawn, status, watcher, steer, teardown, and recovery.
 Do not invent a second delegation system.
 You do not generate your own work.
-Act only on tasks the main firstmate routes to you.
+Act only on tasks the main Director routes to you.
 Never start a survey, audit, or "find improvements" sweep on your own initiative; that is not your job and it is unwanted.
 
-# The captain and the parent channel
-Nobody reads this chat: the captain and the main firstmate see only what is appended to $STATUS_FILE, and a captain-facing sentence that is not appended there has not been sent.
-That file is your parent channel, and in this home it IS the captain: every sentence you would say to the captain, and every outcome the local AGENTS.md tells a firstmate to bring to the captain, is one appended line there, never chat.
-Your own machinery publishes the durable facts about your crew's work for you (\`bin/fm-parent-channel-lib.sh\`): a child's terminal done or failed line with its note and PR on every supervision poll, a PR-ready line when you register a PR, a task you hold for the captain and its answer, a merge, and a child's final line at cleanup all reach the parent channel from the scripts that record them, whether or not you append anything.
-What only you can append is judgement: the answer to a marked request below, a recommendation or caveat on a delivered outcome, a blocker or failure of your own, and anything else you would otherwise say to the captain.
+# The user and the parent channel
+Nobody reads this chat: the user and the main Director see only what is appended to $STATUS_FILE, and a user-facing sentence that is not appended there has not been sent.
+That file is your parent channel, and in this home it reaches the user: every sentence you would say to the user, and every outcome the local AGENTS.md tells a Director to bring to the user, is one appended line there, never chat.
+Your own machinery publishes the durable facts about your workers' work for you (\`bin/fm-parent-channel-lib.sh\`): a child's terminal done or failed line with its note and PR on every supervision poll, a PR-ready line when you register a PR, a task you hold for the user and its answer, a merge, and a child's final line at cleanup all reach the parent channel from the scripts that record them, whether or not you append anything.
+What only you can append is judgement: the answer to a marked request below, a recommendation or caveat on a delivered outcome, a blocker or failure of your own, and anything else you would otherwise say to the user.
 
-# Requests from the main firstmate
-You are a firstmate in your own home, so an incoming message reaches you in your own chat.
+# Requests from the main Director
+You are a Director in your own home, so an incoming message reaches you in your own chat.
 You must distinguish who it is from, because the answer goes to a different place.
-A request relayed to you by the main firstmate is tagged with a leading \`$FM_FROMFIRST_LABEL\` marker followed by an invisible system separator; this marker is untypable, so a human never produces it.
-When a message carries that marker, do the work, then respond via the STATUS/ESCALATION path below, never only in this chat: the main firstmate does not read your chat, so a chat-only reply is lost.
+A request relayed to you by the main Director is tagged with a leading \`$FM_FROMFIRST_LABEL\` marker followed by an invisible system separator; this marker is untypable, so the user never produces it.
+When a message carries that marker, do the work, then respond via the STATUS/ESCALATION path below, never only in this chat: the main Director does not read your chat, so a chat-only reply is lost.
 Marked requests also carry a privacy-safe \`corr=<id>\` token after the marker; include that exact token in your parent status reply (or in the status pointer to a detailed doc) so the parent can correlate the answer.
 Optional helper: \`bin/fm-secondmate-report.sh <verb> <corr_id> <note>\` appends that correlated line to the parent channel itself - do not pass a status path, and do not write a hand path under this home.
 A plain \`echo\` that includes the same \`corr=<id>\` on this parent channel is equally valid; do not depend on the helper being present.
 For a terse result, a status line is the whole answer.
-For a detailed answer (an investigation, a plan, an audit), write it to a doc under your home's \`data/\` and append a status line that points to that doc - the scout-report pattern - so the main firstmate is woken and can read it.
+For a detailed answer (an investigation, a plan, an audit), write it to a doc under your home's \`data/\` and append a status line that points to that doc - the Investigator-report pattern - so the main Director is woken and can read it.
 Before treating an investigation or visual review as complete, load \`captain-hold-lifecycle\` from this home's \`.agents/skills/\` and pass its shared completion gate.
-A message with NO marker is the captain typing directly into your pane: treat it as authoritative captain intervention and stay conversational exactly as you would for any captain message; do not force it onto the status path.
+A message with NO marker is the user typing directly into your pane: treat it as authoritative user intervention and stay conversational exactly as you would for any user message; do not force it onto the status path.
 A request arriving through the instruction inbox below follows the same marker and reply rules.
 
 $INBOX_SECTION
 
-# Escalation to main firstmate
+# Escalation to main Director
 Handle routine work yourself.
-Report only true captain-relevant outcomes or a declared external wait by appending one line:
+Report only true user-relevant outcomes or a declared external wait by appending one line:
    \`$STATUS_APPEND\`
 States: working, needs-decision, blocked, $PAUSED_VERB, done, failed.
 Substitute \`<epoch>\` with the current Unix time in seconds - run \`date +%s\` and write the number it printed; a stamp that is not plain digits records no time at all.
-Use \`$PAUSED_VERB: {why}\` (distinct from \`blocked:\`) only when your domain is deliberately idling on a known external wait you expect to clear on its own, naming when it clears with \`until <YYYY-MM-DDTHH:MMZ>\` (UTC) when you know; use \`blocked:\` when you are stuck and need firstmate to act.
-Use this only for material phase changes, a captain decision, a real blocker, a failure, work ready for review, or work you landed.
-Work you landed includes a merge you performed yourself under standing merge authority and one the captain merged on the forge: under that authority nothing is ever \"ready for review\", so a landed merge that goes unreported reaches the captain as silence.
-This is also how you return the answer to a marked from-firstmate request above.
+Use \`$PAUSED_VERB: {why}\` (distinct from \`blocked:\`) only when your domain is deliberately idling on a known external wait you expect to clear on its own, naming when it clears with \`until <YYYY-MM-DDTHH:MMZ>\` (UTC) when you know; use \`blocked:\` when you are stuck and need the main Director to act.
+Use this only for material phase changes, a user decision, a real blocker, a failure, work ready for review, or work you landed.
+Work you landed includes a merge you performed yourself under standing merge authority and one the user merged on the forge: under that authority nothing is ever \"ready for review\", so a landed merge that goes unreported reaches the user as silence.
+This is also how you return the answer to a marked Director request above.
 A marked request requires one correlated answer after the work; it does not require a separate receipt or start acknowledgement.
 Never append \`working:\` merely to acknowledge receipt or announce that a marked request has started.
 When a routed-work phase has a supervisor-actionable material change worth reporting under the rule above, give that reported phase a stable key.
 If its first reportable event is \`working [key=<work-slug>]: {material phase}\`, use the same key on its later \`$PAUSED_VERB\`, \`done\`, \`failed\`, \`needs-decision\`, or \`blocked\` event so the earlier working phase is superseded.
 When a keyed phase ends without another reportable state, append \`resolved [key=<work-slug>] [at=<epoch>]: {why it is no longer active}\`.
 \`resolved\` separately closes an escalated decision or blocker, and only a \`resolved\` line carrying that decision's exact key closes it: a later \`done\` or \`working\` event never does, even when the answer is what started that work.
-The main firstmate's answer normally writes that closing line at answer time; when a blocker or wait clears WITHOUT an answer from the main firstmate, append \`resolved [at=<epoch>]: {how it cleared}\` yourself (keyed with \`[key=<slug>]\` if you opened it with one) as your domain resumes.
-Routine internal supervision, heartbeats, retries, and crewmate churn stay inside your own home and must not touch that status file.
+The main Director's answer normally writes that closing line at answer time; when a blocker or wait clears WITHOUT an answer from the main Director, append \`resolved [at=<epoch>]: {how it cleared}\` yourself (keyed with \`[key=<slug>]\` if you opened it with one) as your domain resumes.
+Routine internal supervision, heartbeats, retries, and worker churn stay inside your own home and must not touch that status file.
 
 # Definition of done
 You are persistent by default. Do not exit just because your queue is empty.
-On startup and restart, run normal firstmate bootstrap and recovery through \`bin/fm-session-start.sh\` for your own home, but only to RECONCILE work that is already yours: in-flight crewmates, tracked backlog items, and durable watches recorded in this home.
-When you have no assigned or in-flight work after that reconciliation, go idle and wait silently for the main firstmate to route you a task.
+On startup and restart, run normal Firstmate bootstrap and recovery through \`bin/fm-session-start.sh\` for your own home, but only to RECONCILE work that is already yours: in-flight Builders and Investigators, tracked backlog items, and durable watches recorded in this home.
+When you have no assigned or in-flight work after that reconciliation, go idle and wait silently for the main Director to route you a task.
 An empty queue is a healthy resting state, not a cue to invent work: never spawn a survey, audit, or any self-directed "find work" task on your own initiative.
 If this charter cannot be carried out, append \`blocked [at=<epoch>]: {why}\` or \`failed [at=<epoch>]: {why}\` to the main status file and stop.
 EOF
 if [ "$SECONDMATE_CHARTER" = "{TASK}" ]; then
-  echo "scaffolded: $BRIEF (secondmate charter; replace {TASK})"
+  echo "scaffolded: $BRIEF (Project Director charter; replace {TASK})"
 else
-  echo "scaffolded: $BRIEF (secondmate charter)"
+  echo "scaffolded: $BRIEF (Project Director charter)"
 fi
 exit 0
 fi
@@ -626,11 +626,11 @@ HERDR_SECTION=$(printf '%s\n' \
 '   It re-checks refuse-default immediately before stop and again immediately before delete, and fails closed on ambiguity.' \
 '4. If an experiment requires a deliberate mid-run session stop, use only `"$HERDR_LAB_HELPER" stop "$HERDR_LAB_SESSION"`; it performs the same immediate refuse-default check.' \
 '5. Forbidden commands: direct `herdr server stop`, every other server-global operation such as `herdr server live-handoff` or reload/update operations, direct `herdr session stop`, direct `herdr session delete`, and any Herdr call scoped only by ambient or inline `HERDR_SESSION`.' \
-'6. The helper records the live default session before provisioning and verifies the identical fleet state after teardown.' \
+'6. The helper records the live default session before provisioning and verifies the identical worker state after teardown.' \
 '   A missing, stopped, or changed default session is a hard tripwire failure, never a cleanup warning to ignore.' \
 '' \
 'Never bypass the helper, even for a read-only lifecycle probe or cleanup after failure.' \
-'The captain fleet uses the running `default` session.')
+'The active Firstmate home uses the running `default` session.')
 else
 IFS= read -r -d '' HERDR_SECTION <<'EOF' || true
 # Herdr lifecycle declaration - NOT ENABLED
@@ -643,11 +643,11 @@ fi
 
 IFS= read -r -d '' TASK_SECTION <<'EOF' || true
 # Task
-## Captain's intent
+## User's intent
 {TASK}
 
-## Firstmate spec
-{FIRSTMATE_SPEC}
+## Director spec
+{DIRECTOR_SPEC}
 EOF
 TASK_SECTION=${TASK_SECTION%$'\n'}
 
@@ -658,7 +658,7 @@ TASK_SECTION=${TASK_SECTION%$'\n'}
 IFS= read -r -d '' SHARED_INFRA_RULE <<'EOF' || true
 7. Never administer infrastructure that every lane shares. Two things are shared:
    - The `no-mistakes` daemon - one instance serving every lane/home, so stopping, restarting, or
-     updating it kills other lanes' in-flight pipeline runs; only firstmate manages the daemon.
+     updating it kills other lanes' in-flight pipeline runs; only the Director manages the daemon.
      Before you append `blocked:` about the pipeline, run `no-mistakes daemon status` and
      `no-mistakes axi status`. If the daemon socket refuses connections or is missing, append
      `blocked [at=<epoch>]: {the daemon error}` and stop even when the local run record still says running or
@@ -675,9 +675,9 @@ IFS= read -r -d '' SHARED_INFRA_RULE <<'EOF' || true
      running right now. The act is the rule and commands are only examples of it - `treehouse`
      get/return/remove/prune, the equivalent operations on any other worktree provider or runtime
      backend, and `git worktree add|remove|move|prune`. A slot that looks unused is not evidence
-     that it is free, and returning your own worktree is firstmate's job at cleanup, not yours.
+     that it is free, and returning your own worktree is the Director's job at cleanup, not yours.
    If you genuinely need a second checkout, another slot, or the daemon touched, append
-   `blocked [at=<epoch>]: {what you need}` and stop; firstmate arranges it.
+   `blocked [at=<epoch>]: {what you need}` and stop; the Director arranges it.
 EOF
 SHARED_INFRA_RULE=${SHARED_INFRA_RULE%$'\n'}
 
@@ -698,12 +698,12 @@ fi
 
 if [ "$KIND" = scout ]; then
 if "$SCRIPT_DIR/fm-bootstrap.sh" lavish-compatible >/dev/null 2>&1; then
-  LAVISH_LINE='If your deliverable is a visual artifact the captain will review and iterate on, use the lavish-axi rule: arm your board with bin/fm-procevent-lavish.sh arm <artifact.html> --for <task-id>; never run lavish-axi poll yourself. Re-arm with the reply after each nonterminal round to acknowledge it, route the board feedback through your steering inbox, write needs-decision [key=board-review] with the live board URL when the captain owes a decision, and stop at session_ended or an empty End without re-arming - acknowledge that final round with bin/fm-procevent.sh handled <source-id> <sequence> to conclude and retire your board.'
+  LAVISH_LINE='If your deliverable is a visual artifact the user will review and iterate on, use the lavish-axi rule: arm your board with bin/fm-procevent-lavish.sh arm <artifact.html> --for <task-id>; never run lavish-axi poll yourself. Re-arm with the reply after each nonterminal round to acknowledge it, route the board feedback through your steering inbox, write needs-decision [key=board-review] with the live board URL when the user owes a decision, and stop at session_ended or an empty End without re-arming - acknowledge that final round with bin/fm-procevent.sh handled <source-id> <sequence> to conclude and retire your board.'
 else
   LAVISH_LINE='Lavish is unavailable (lavish-axi is missing or below its supported version floor), so deliver your findings as a text report without Lavish, even for a visual deliverable.'
 fi
 cat > "$BRIEF" <<EOF
-You are a crewmate: an autonomous worker agent managed by firstmate. Work on your own; do not wait for a human.
+You are an Investigator: an autonomous knowledge-only worker managed by the Director. Work on your own; do not wait for the user.
 
 $TASK_SECTION
 
@@ -711,7 +711,7 @@ $HERDR_SECTION
 
 # Setup
 $SETUP_BASE
-This is a SCOUT task: the deliverable is a written report, not a PR.
+This is an Investigator task: the deliverable is a written report, not a PR.
 The worktree is your laboratory - install, run, edit, and make scratch commits freely; all of it is discarded at teardown.
 The report is the only thing that survives, so anything worth keeping must be in it.
 
@@ -723,18 +723,18 @@ The report is the only thing that survives, so anything worth keeping must be in
    \`$STATUS_APPEND\`
    States: working, needs-decision, blocked, $PAUSED_VERB, done, failed.
    Substitute \`<epoch>\` with the current Unix time in seconds - run \`date +%s\` and write the number it printed; a stamp that is not plain digits records no time at all.
-   Each append wakes firstmate, so report sparingly: only phase changes a supervisor
+   Each append wakes the Director, so report sparingly: only phase changes a supervisor
    would act on and the needs-decision/blocked/paused/done/failed states. No step-by-step
-   FYI progress lines; firstmate reads your pane for that.
+   FYI progress lines; the Director reads your pane for that.
    Whenever you mention a PR anywhere - a status line, your terminal, a summary - write its full
-   https:// URL exactly as the forge printed it, never a bare number such as "PR 108"; firstmate
+   https:// URL exactly as the forge printed it, never a bare number such as "PR 108"; the Director
    copies that URL from your line rather than assembling one.
 $CREWMATE_PAUSE_INSTRUCTIONS
-5. If you hit the same obstacle twice, append \`blocked [at=<epoch>]: {why}\` and stop; firstmate will help.
+5. If you hit the same obstacle twice, append \`blocked [at=<epoch>]: {why}\` and stop; the Director will help.
 6. If a decision belongs to a human (product choices, destructive actions),
-   append \`needs-decision [at=<epoch>]: {summary of options}\` and stop. Firstmate will reply with the decision.
+   append \`needs-decision [at=<epoch>]: {summary of options}\` and stop. The Director will reply with the decision.
    A decision or blocker you opened stays open until a \`resolved\` line carrying its exact key lands; a later \`done:\` or \`working:\` line never closes it, even when the answer is what started that work.
-   Firstmate's reply normally writes that closing line at answer time; when a blocker or wait clears WITHOUT a firstmate reply, append \`resolved [at=<epoch>]: {how it cleared}\` yourself (same \`[key=<slug>]\` if you opened it with one) as you resume.
+   The Director's reply normally writes that closing line at answer time; when a blocker or wait clears WITHOUT a Director reply, append \`resolved [at=<epoch>]: {how it cleared}\` yourself (same \`[key=<slug>]\` if you opened it with one) as you resume.
 $SHARED_INFRA_RULE
 $SHARED_NO_CD_RULE
 
@@ -747,13 +747,13 @@ $LAVISH_LINE
 Before reporting done, read and follow \`$FM_ROOT/.agents/skills/captain-hold-lifecycle/SKILL.md\` and pass its shared completion gate for the report and any visual review.
 Only when the reviewed inventory is empty, run \`FM_HOME=$(shell_quote "$FM_HOME") bash $(shell_quote "$FM_ROOT/bin/fm-captain-hold.sh") complete $(shell_quote "$ID") --none\`.
 This exception permits only that command, not direct metadata edits, another task, or any backlog write.
-If any captain call remains, ask firstmate to register the inventory and attest completion before you report done.
-If the command refuses, report the refusal to firstmate and stop rather than bypassing the completion gate.
+If any user call remains, ask the Director to register the inventory and attest completion before you report done.
+If the command refuses, report the refusal to the Director and stop rather than bypassing the completion gate.
 When the report is complete, append \`done [at=<epoch>]: {one-line conclusion}\` to the status file and stop.
-If your findings reveal work that should ship (e.g. you reproduced a bug and the fix is clear), say so in the report; firstmate may promote this task in place, and you would then receive mode-specific ship instructions as a follow-up message.
+If your findings reveal work that should be implemented (e.g. you reproduced a bug and the fix is clear), say so in the report; the Director may promote this task in place, and you would then receive mode-specific Builder instructions as a follow-up message.
 EOF
 append_brief_include
-echo "scaffolded: $BRIEF (scout; replace {TASK} and {FIRSTMATE_SPEC})"
+echo "scaffolded: $BRIEF (Investigator; compatibility kind=scout; replace {TASK} and {DIRECTOR_SPEC})"
 exit 0
 fi
 
@@ -779,7 +779,7 @@ RULE1=$(fm_ship_rule_one "$MODE" "$ID" "$BRANCH" "$FORGE" "$BASE_BRANCH") || exi
 DOD=$(fm_dod_block "$MODE" "$ID" "$BRANCH" "$FORGE" "$BASE_BRANCH" "$UPSTREAM_CONSENT" "$PR_TEXT") || exit 1
 
 cat > "$BRIEF" <<EOF
-You are a crewmate: an autonomous worker agent managed by firstmate. Work on your own; do not wait for a human.
+You are a Builder: an autonomous implementation worker managed by the Director. Work on your own; do not wait for the user.
 
 $TASK_SECTION
 
@@ -788,7 +788,7 @@ $HERDR_SECTION
 # Setup
 $SETUP_BASE
 
-**Verify isolation before anything else.** Run \`pwd -P\` and \`git rev-parse --show-toplevel\`; both must resolve to the disposable task worktree you were launched in, such as a treehouse pool path or an Orca-managed worktree, not the primary checkout firstmate operates from.
+**Verify isolation before anything else.** Run \`pwd -P\` and \`git rev-parse --show-toplevel\`; both must resolve to the disposable task worktree you were launched in, such as a treehouse pool path or an Orca-managed worktree, not the primary checkout the Director operates from.
 The path check is authoritative: \`git rev-parse --git-dir\` and \`git rev-parse --git-common-dir\` can help inspect the repo, but they do not prove you are outside the primary checkout.
 If the top-level path is the primary checkout or not the worktree you were launched in, STOP - do not branch or commit here - append \`blocked [at=<epoch>]: launched in primary checkout, not an isolated worktree\` to the status file and stop.
 
@@ -804,22 +804,22 @@ $RULE1
    \`$STATUS_APPEND\`
    States: working, needs-decision, blocked, $PAUSED_VERB, done, failed.
    Substitute \`<epoch>\` with the current Unix time in seconds - run \`date +%s\` and write the number it printed; a stamp that is not plain digits records no time at all.
-   Each append wakes firstmate, so report sparingly: only phase changes a supervisor
+   Each append wakes the Director, so report sparingly: only phase changes a supervisor
    would act on (setup done, bug reproduced, fix implemented, validation passed) and the
    needs-decision/blocked/paused/done/failed states. No step-by-step FYI progress lines;
-   firstmate reads your pane for that.
+   the Director reads your pane for that.
    Whenever you mention a PR anywhere - a status line, your terminal, a summary - write its full
-   https:// URL exactly as the forge printed it, never a bare number such as "PR 108"; firstmate
+   https:// URL exactly as the forge printed it, never a bare number such as "PR 108"; the Director
    copies that URL from your line rather than assembling one.
    A mid-task \`working:\` line (including setup complete) is nonterminal: do not end the
    turn after it; continue the same stage until a defined \`done:\` gate under Definition of done.
 $CREWMATE_PAUSE_INSTRUCTIONS
-5. If you hit the same obstacle twice, append \`blocked [at=<epoch>]: {why}\` and stop; firstmate will help.
+5. If you hit the same obstacle twice, append \`blocked [at=<epoch>]: {why}\` and stop; the Director will help.
 6. If a decision belongs above the implementation worker (product choices, destructive actions),
-   append \`needs-decision [at=<epoch>]: {summary of options}\` and stop. Firstmate will reply with the decision.
+   append \`needs-decision [at=<epoch>]: {summary of options}\` and stop. The Director will reply with the decision.
 $ASK_USER_BLOCK
    A decision or blocker you opened stays open until a \`resolved\` line carrying its exact key lands; a later \`done:\` or \`working:\` line never closes it, even when the answer is what started that work.
-   Firstmate's reply normally writes that closing line at answer time; when a blocker or wait clears WITHOUT a firstmate reply, append \`resolved [at=<epoch>]: {how it cleared}\` yourself (same \`[key=<slug>]\` if you opened it with one) as you resume.
+   The Director's reply normally writes that closing line at answer time; when a blocker or wait clears WITHOUT a Director reply, append \`resolved [at=<epoch>]: {how it cleared}\` yourself (same \`[key=<slug>]\` if you opened it with one) as you resume.
 $SHARED_INFRA_RULE
 $SHARED_NO_CD_RULE
 
@@ -833,11 +833,11 @@ $DOD
 EOF
 append_brief_include
 if [ "$PR_TEXT" = manual ]; then
-  echo "scaffolded: $BRIEF (ship, mode=$MODE pr=manual; replace {TASK} and {FIRSTMATE_SPEC})"
+  echo "scaffolded: $BRIEF (Builder; compatibility kind=ship; mode=$MODE pr=manual; replace {TASK} and {DIRECTOR_SPEC})"
 elif [ "$FORGE" = none ]; then
-  echo "scaffolded: $BRIEF (ship, mode=$MODE; replace {TASK} and {FIRSTMATE_SPEC})"
+  echo "scaffolded: $BRIEF (Builder; compatibility kind=ship; mode=$MODE; replace {TASK} and {DIRECTOR_SPEC})"
 elif [ "$FORGE" = gerrit ]; then
-  echo "scaffolded: $BRIEF (ship, mode=$MODE forge=$FORGE shape=$SHAPE; replace {TASK} and {FIRSTMATE_SPEC})"
+  echo "scaffolded: $BRIEF (Builder; compatibility kind=ship; mode=$MODE forge=$FORGE shape=$SHAPE; replace {TASK} and {DIRECTOR_SPEC})"
 else
-  echo "scaffolded: $BRIEF (ship, mode=$MODE forge=$FORGE; replace {TASK} and {FIRSTMATE_SPEC})"
+  echo "scaffolded: $BRIEF (Builder; compatibility kind=ship; mode=$MODE forge=$FORGE; replace {TASK} and {DIRECTOR_SPEC})"
 fi

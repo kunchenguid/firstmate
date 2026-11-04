@@ -169,7 +169,7 @@ esac
 
 # shellcheck source=bin/fm-gate-refuse-lib.sh
 . "$SCRIPT_DIR/fm-gate-refuse-lib.sh"
-# Fail closed before any fleet mutation: a no-mistakes gate agent must never
+# Fail closed before any team mutation: a no-mistakes gate agent must never
 # drive a crewmate's lifecycle (see bin/fm-gate-refuse-lib.sh).
 fm_refuse_if_gate_agent
 
@@ -999,7 +999,7 @@ resolve_relaunch_profile() {
     # that every respawn re-resolves (the secondmate-provisioning contract), so
     # a relaunch with no explicit harness picks up a newly configured one
     # instead of freezing whatever this incarnation happens to run. The mate id
-    # is passed so a per-mate override line is honored here too; a crewmate or
+    # is passed so a per-Project-Director override line is honored here too; a Builder or
     # scout deliberately does NOT resolve config here: their harness comes
     # from firstmate's own dispatch-profile judgment at intake, and silently
     # re-resolving it would bypass that consultation.
@@ -1007,7 +1007,7 @@ resolve_relaunch_profile() {
       die "the configured secondmate runtime pin for $ID cannot be read; fix config/secondmate-harness rather than relaunching onto an unresolved runtime"
     fi
     if ! CONFIG_MODEL=$("$SCRIPT_DIR/fm-harness.sh" secondmate-model "$ID"); then
-      die "the configured secondmate model pin for $ID cannot be read; fix config/secondmate-harness rather than relaunching onto an unresolved model"
+      die "the configured Project Director model pin for $ID cannot be read; fix the compatibility config/secondmate-harness setting rather than relaunching onto an unresolved model"
     fi
     if ! CONFIG_EFFORT=$("$SCRIPT_DIR/fm-harness.sh" secondmate-effort "$ID"); then
       die "the configured secondmate effort pin for $ID cannot be read; fix config/secondmate-harness rather than relaunching onto an unresolved effort"

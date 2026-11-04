@@ -1,7 +1,7 @@
 ---
 name: firstmate-coding-guidelines
 description: >-
-  Load before editing firstmate's shared, tracked material as defined by AGENTS.md section 1, whether working as firstmate directly or as a crewmate briefed on a firstmate-repo task.
+  Load before editing firstmate's shared, tracked material as defined by AGENTS.md section 1, whether working as firstmate directly or as a worker briefed on a firstmate-repo task.
 user-invocable: false
 metadata:
   internal: true
@@ -57,7 +57,7 @@ The model to copy is `AGENTS.md` section 8's "Away-mode and quiet-mode stub": it
 
 Apply the decision tree above to every line you are about to add to `AGENTS.md`.
 If an addition needs more than a few lines of conditional detail (detail that matters only in a specific situation) or reference detail (a wire format, an exact schema, historical rationale), you are almost certainly adding it to the wrong file.
-`AGENTS.md`'s token cost is paid by every session of every fleet member, every time, whether or not that session ever hits the situation the new lines describe.
+`AGENTS.md`'s token cost is paid by every session of every team member, every time, whether or not that session ever hits the situation the new lines describe.
 A skill's cost is paid only by the sessions that actually load it.
 When in doubt, write the fact into the skill or doc first by patching that owner's existing language, and add only the one-line trigger to `AGENTS.md`.
 
@@ -66,14 +66,14 @@ When in doubt, write the fact into the skill or doc first by patching that owner
 A new skill is dead weight if nothing loads it.
 Every new skill needs its load trigger declared in its description, which is the always-loaded trigger index; add an inline `AGENTS.md` pointer only in the operating section whose always-loaded rule must name it.
 State the trigger as a condition ("load before X", "load on Y wake"), never as a vague pointer.
-Briefs for tasks that touch firstmate's own tracked material should tell the crewmate to load this skill.
+Briefs for tasks that touch firstmate's own tracked material should tell the worker to load this skill.
 `bin/fm-brief.sh`'s `REPO` argument is a caller-supplied string, while its optional `--project` directory enables lineage-based self-repository detection for the publication gate (`bin/fm-role-lib.sh`).
 The scaffold does not add this skill's load instruction; firstmate adds it to firstmate-repo briefs by hand.
 `CONTRIBUTING.md`'s "Development" section carries the same instruction as a durable reminder.
 
 ## Compatibility and enforcement
 
-Before changing shared tracked behavior, review every affected supported primary harness and runtime backend rather than checking only the adapters active in the current fleet.
+Before changing shared tracked behavior, review every affected supported primary harness and runtime backend rather than checking only the adapters active in the current team.
 Mark an axis not applicable only after inspecting its integration surface, and update the corresponding verification evidence when behavior changes.
 
 For critical safety, routing, startup, and supervision infrastructure, prefer deterministic and idempotent enforcement over relying on agent memory alone.
@@ -125,7 +125,7 @@ Firstmate PR #3644 demonstrated the cost: pinning a 75-162-script walk took 32.7
 - `bin/*.sh` and `bin/backends/*.sh` must pass `shellcheck`.
 - Run Firstmate production-library tests and commands that source `bin/` scripts under `bash` explicitly, never through the tool shell's default interpreter.
 - Run `bin/fm-lint.sh` before treating a script change as done; it is the single owner of the lint definition that CI and the no-mistakes pre-push gate both invoke, its own header owns what that definition covers, and it refuses to run under any other version of either linter.
-- When a task names a specific tool, implement the work with that tool, or explicitly flag the substitution and its new dependency footprint for review before shipping.
+- When a task names a specific tool, implement the work with that tool, or explicitly flag the substitution and its new dependency footprint for review before delivery.
 - Colocate tests with the existing pattern in `tests/`, name them `<subject>.test.sh`, and extend an existing script rather than inventing a new runner.
 - Tests must exercise behavior through an executable or public interface and must never assert implementation-source bytes, including through parsers, regexes, snapshots, or indirect wrappers.
 - A maintainer-verification record under `docs/verification/` records active empirical facts, not assumptions or task chronology.

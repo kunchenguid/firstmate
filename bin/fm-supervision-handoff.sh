@@ -98,7 +98,7 @@ retry_delivery() {
       && [ "$(fm_backend_composer_state tmux "$TMUX_PANE" 2>/dev/null)" = empty ] \
       && session_owned && [ "$(cat "$PENDING" 2>/dev/null)" = "$TOKEN" ]; then
       if fm_operational_record_write "$STATE" watcher \
-        'check: supervision-handoff - the host hand-back is still unacknowledged. Run bin/fm-wake-drain.sh, handle its queued work, and run its exact WAKE_ACK_REQUIRED command. This is automatic supervision, not a captain return.' message; then
+        'check: supervision-handoff - the host hand-back is still unacknowledged. Run bin/fm-wake-drain.sh, handle its queued work, and run its exact WAKE_ACK_REQUIRED command. This is automatic supervision, not a user return.' message; then
         verdict=$(fm_backend_send_text_submit tmux "$TMUX_PANE" "$message" 2 0.2 0.2 2>/dev/null) || verdict=unconfirmed
       fi
     fi

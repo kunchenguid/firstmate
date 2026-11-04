@@ -2,8 +2,8 @@
 
 ![Multi-brain agent architecture: one agent, two branches of attention, events are commits](pi-supervision-branch-poster.svg)
 
-This document covers the supervision branch that runs fleet supervision beside the captain's chat on a Pi primary.
-Maintainers changing how wakes reach the branch, how its outcomes reach the captain, or how the attended and away postures differ need it.
+This document covers the supervision branch that runs team supervision beside the user's chat on a Pi primary.
+Maintainers changing how wakes reach the branch, how its outcomes reach the user, or how the attended and away postures differ need it.
 
 The poster is the visual of the idea.
 This document stays the owner and the contract.
@@ -14,29 +14,29 @@ This document stays the owner and the contract.
 | --- | --- |
 | What the branch handles and what stays on main | [Overview](#overview) |
 | Which file owns each part of the design | [Components and their owners](#components-and-their-owners) |
-| Why delivery never freezes the captain's terminal | [Off-thread delivery](#off-thread-delivery) |
-| How a captain-facing event whose wake was lost still surfaces | [Lost-wake outcome backstop](#lost-wake-outcome-backstop) |
-| What the branch sees of the captain's conversation | [How the branch knows what the captain said](#how-the-branch-knows-what-the-captain-said) |
+| Why delivery never freezes the user's terminal | [Off-thread delivery](#off-thread-delivery) |
+| How a user-facing event whose wake was lost still surfaces | [Lost-wake outcome backstop](#lost-wake-outcome-backstop) |
+| What the branch sees of the user's conversation | [How the branch knows what the user said](#how-the-branch-knows-what-the-user-said) |
 | How outcomes are classified, shown, and acknowledged | [Two-stage noise filter](#two-stage-noise-filter) |
-| How fleet-wide heartbeat reviews are routed | [Heartbeat routing](#heartbeat-routing) |
+| How team-wide heartbeat reviews are routed | [Heartbeat routing](#heartbeat-routing) |
 | Prompt caching and the branch model | [Cost model and the byte-stable prefix](#cost-model-and-the-byte-stable-prefix) |
-| What changes while the captain is away | [Postures](#postures) |
+| What changes while the user is away | [Postures](#postures) |
 | Which tests pin this contract | [Verification](#verification) |
 
 ## Overview
 
-Fleet supervision on the Pi primary harness runs on a second conversation - the supervision branch - inside the same `pi` process as the captain's chat.
+team supervision on the Pi primary harness runs on a second conversation - the supervision branch - inside the same `pi` process as the user's chat.
 
 ### What the branch handles while attended
 
 Supervision is default-on.
-Once a Pi primary session owns this home's fleet lock, the branch handles two kinds of work:
+Once a Pi primary session owns this home's team lock, the branch handles two kinds of work:
 
 - Eligible task-local rows from ordinary actionable wakes.
   A row is one queued wake entry.
-- Heartbeat scans that the cheap bash-level scan flags as possibly captain-relevant.
+- Heartbeat scans that the cheap bash-level scan flags as possibly user-relevant.
 
-The branch then merges each outcome back into the captain conversation's transcript.
+The branch then merges each outcome back into the user conversation's transcript.
 
 Some wakes stay on main:
 
@@ -50,14 +50,14 @@ The away posture, recorded by `state/.afk-contract`, hands every row to the bran
 
 ### How outcomes reach main
 
-While attended, captain-relevant branch outcomes persist as exact, sequence-keyed visible transcript entries.
+While attended, user-relevant branch outcomes persist as exact, sequence-keyed visible transcript entries.
 They then open one sequence-keyed processing turn on main, which stays open until main acknowledges that sequence.
 While away, the entries persist but processing waits until the record is archived.
 
 ### Design source
 
-The design source is the captain-approved forked-supervision architecture board.
-That board is a captain-private fleet record: a self-contained HTML explainer with the measured cache and judgment evidence.
+The design source is the user-approved forked-supervision architecture board.
+That board is a user-private team record: a self-contained HTML explainer with the measured cache and judgment evidence.
 This document records the shape it landed as, and the delivering PR cites the board artifact itself.
 
 ### Pi-only scope
@@ -84,7 +84,7 @@ On a non-Pi home that runs the supervision host, the host runs the branch beside
 | [Branch system prompt](#branch-system-prompt) | `bin/fm-branch-prompt.sh` |
 | [Outcome store](#outcome-store) | `bin/fm-branch-outcome.sh` |
 | [Consistency](#consistency) | `bin/fm-lease-lib.sh`, with `bin/fm-lease.sh` as the command surface |
-| [Autonomy](#autonomy) | Default-on once a Pi primary session owns the fleet lock |
+| [Autonomy](#autonomy) | Default-on once a Pi primary session owns the team lock |
 
 ### Wake dispatch
 
@@ -115,12 +115,12 @@ A decision-owned event surfaced by `bin/fm-watch.sh`'s signal path gets the same
 
 `scopeForUnreadWake` excludes every marked row from what the branch may claim, as well as second-mate signals classified by the span rule below.
 
-A second mate's status log is one shared channel carrying many independently keyed decisions, so its signal row is judged by the lines presented since the last drain rather than by the whole log.
-The row is excluded when one of those lines is a decision, blocked, or captain-held line, resolves a decision open just before it, or declares, in the status parser's key positions, the key of a decision still open in that log.
+A Project Director's status log is one shared channel carrying many independently keyed decisions, so its signal row is judged by the lines presented since the last drain rather than by the whole log.
+The row is excluded when one of those lines is a decision, blocked, or user-held line, resolves a decision open just before it, or declares, in the status parser's key positions, the key of a decision still open in that log.
 A resolution that closes nothing, key-less beside only keyed decisions or keyed for a key never open, stays routine.
 A key-less line otherwise falls back to its verb; an unrelated open decision alone leaves a routine span eligible, while a mixed span goes wholly to main.
 The status-presentation cursor bounds that span, and a missing or unmatched cursor falls back to the whole log.
-Single-task crewmate signals keep their existing Pi payload and attended-host whole-log rules, except that the TypeScript decision fold now ignores bare transition words without a colon or complete key token, matching `bin/fm-classify-lib.sh` on both crewmate and second-mate logs.
+Single-task worker signals keep their existing Pi payload and attended-host whole-log rules, except that the TypeScript decision fold now ignores bare transition words without a colon or complete key token, matching `bin/fm-classify-lib.sh` on both worker and second-mate logs.
 
 For a stale row, `scopeForUnreadWake` folds the mapped task's status log.
 It excludes the row when any `needs-decision` remains open or the current meaningful declaration is `captain-held`.
@@ -142,9 +142,9 @@ The wake message itself retains its existing shape, so other harness-arm scripts
 #### Heartbeats during dispatch
 
 Heartbeat handling remains independent.
-A fleet-wide heartbeat keeps its own all-or-nothing rule (see "Heartbeat routing" below): it takes every branch-ownable unread row or none of them.
+A team-wide heartbeat keeps its own all-or-nothing rule (see "Heartbeat routing" below): it takes every branch-ownable unread row or none of them.
 A co-present main-owned check row no longer defers that review to main.
-That row is not fleet context the branch is missing, and main is woken for it on its own triggering close.
+That row is not team context the branch is missing, and main is woken for it on its own triggering close.
 
 ### The branch itself
 
@@ -164,7 +164,7 @@ Earlier conversations stay on disk under `state/branch-session/`, exactly as Pi 
 They are never reopened as live branch context.
 The effort picker may only inspect the model named by the current pointer, as the last-resort lookup documented in [configuration.md](configuration.md#pi-supervision-branch-model-and-effort-configsupervision-branch-model-configsupervision-branch-effort).
 
-Nothing captain-facing rides on that conversation.
+Nothing user-facing rides on that conversation.
 The durable outcome store and its processed marker are what carry unacknowledged outcomes across the boundary.
 They re-present on the new main session exactly as they do after a crash.
 
@@ -220,7 +220,7 @@ It applies both at the branch-session creation boundary.
 ### Branch system prompt
 
 The branch system prompt comes from `bin/fm-branch-prompt.sh`.
-Its header owns the byte-stable-prefix contract (no timestamps, no fleet snapshot, no per-wake content).
+Its header owns the byte-stable-prefix contract (no timestamps, no team snapshot, no per-wake content).
 
 ### Outcome store
 
@@ -228,8 +228,8 @@ The outcome store is `bin/fm-branch-outcome.sh`.
 Its header owns the append-only format, read cursor, and bounded per-task status-coverage indexes.
 
 Outcomes are written to the store before delivery to Pi.
-A captain row advances the cursor only after its matching visible session entry exists.
-Locked session-start replay stops before the first captain row, so it cannot acknowledge that outcome through prose alone.
+A user row advances the cursor only after its matching visible session entry exists.
+Locked session-start replay stops before the first user row, so it cannot acknowledge that outcome through prose alone.
 
 A routine note has no such sequence-keyed record.
 If its cursor write fails after the note was delivered, the next reconciliation sends that note once more.
@@ -245,7 +245,7 @@ That work is tracked as follow-up `fm-pi-routine-delivery-idempotency-followup-r
 - The per-task lease contract.
 - The posture-aware main-only role partition.
 - The deliberate CONFUSED-AGENT-GRADE threat model these guards target.
-  That threat model was captain-decided; adversarial-grade separation is out of scope and tracked as follow-up design work.
+  That threat model was user-decided; adversarial-grade separation is out of scope and tracked as follow-up design work.
 
 `bin/fm-lease.sh` is the command surface.
 
@@ -254,7 +254,7 @@ The guards are wired into these scripts:
 | Scripts | Guard behavior |
 | --- | --- |
 | `fm-send.sh`, `fm-control.sh`, and `fm-teardown.sh` | Overlap, lease-checked, with claim serialization retained through the mutation. |
-| `fm-pr-merge.sh`, `fm-merge-local.sh`, `fm-spawn.sh`, `fm-send.sh --resolve-key` for a decision key, and `fm-teardown.sh` for a second mate | Main-owned while attended; branch refused. |
+| `fm-pr-merge.sh`, `fm-merge-local.sh`, `fm-spawn.sh`, `fm-send.sh --resolve-key` for a decision key, and `fm-teardown.sh` for a Project Director | Main-owned while attended; branch refused. |
 
 A relaunch through `fm-control` stays branch-legal recovery in both postures.
 Under the away-posture record, the PR merge, a fresh spawn, and a decision answer relocate to the branch behind each script's own gate.
@@ -262,11 +262,11 @@ Local-only landing and second-mate retirement never do ("Postures" below).
 
 ### Autonomy
 
-Supervision is default-on for every task once a Pi primary session owns the fleet lock (docs/configuration.md "Pi supervision branch").
-No captain grant file is required.
+Supervision is default-on for every task once a Pi primary session owns the team lock (docs/configuration.md "Pi supervision branch").
+No user grant file is required.
 
-A fleet-wide heartbeat is separately eligible only when every row other than a check or decision-owned signal/stale row is a heartbeat row or a resolvable task-local row (see "Heartbeat routing" below).
-Every other fleet-wide or unresolvable wake, and every watcher-failure alarm, stays on main.
+A team-wide heartbeat is separately eligible only when every row other than a check or decision-owned signal/stale row is a heartbeat row or a resolvable task-local row (see "Heartbeat routing" below).
+Every other team-wide or unresolvable wake, and every watcher-failure alarm, stays on main.
 
 #### Pre-drain recheck
 
@@ -289,10 +289,10 @@ The legacy `state/.afk` daemon flag means nothing on Pi, where the daemon is nev
 
 ## Off-thread delivery
 
-The supervision branch lives inside the captain's own Pi process.
+The supervision branch lives inside the user's own Pi process.
 Pi runs extensions, their tools, and their event handlers on the single JavaScript thread that also draws the TUI and reads the keyboard.
 A synchronous subprocess in the delivery path therefore stops repaint and key echo for the child's whole lifetime.
-The captain saw that as a subsecond freeze every time a routine or captain-facing outcome arrived.
+The user saw that as a subsecond freeze every time a routine or user-facing outcome arrived.
 
 Subprocess work reached through Pi's asynchronous APIs is now awaited instead.
 `.pi/extensions/lib/fm-async-exec.ts` owns that awaited-spawn replacement.
@@ -317,7 +317,7 @@ A session replaced mid-delivery fails the next recheck rather than acting into t
 Two reads stay synchronous because Pi's own API is synchronous there, not as an optimization:
 
 - Pi types its bash spawn hook as a plain function, so the guard on the branch's own shell commands cannot await.
-- The watcher reads `offer.accepted` the moment its dispatch event returns, so a session that does not own the fleet lock must still refuse a wake without waiting.
+- The watcher reads `offer.accepted` the moment its dispatch event returns, so a session that does not own the team lock must still refuse a wake without waiting.
 
 Both read the same uncached ownership authority.
 The lock's process ancestry is walked in full every time it is asked, never cached.
@@ -326,7 +326,7 @@ Reparenting and pid reuse can invalidate a remembered chain, and this answer dec
 ## Lost-wake outcome backstop
 
 Every main-actor wake drain checks each task's newest non-blank status event against the latest supervision-branch outcome that causally covers that task's status log.
-When that event is terminal or otherwise captain-facing and remains uncovered, the drain prints it once in `STATUS OUTCOME BACKSTOP`.
+When that event is terminal or otherwise user-facing and remains uncovered, the drain prints it once in `STATUS OUTCOME BACKSTOP`.
 It does so even if the original queue row was already acknowledged.
 Routine events stay silent, and valid open decisions remain owned by `OPEN DECISIONS`.
 
@@ -354,17 +354,17 @@ A missing or invalid outcome-index ready marker is rebuilt from the authoritativ
 That rebuild runs on the next main drain, on every harness.
 Only a genuine store fault keeps that backstop skipped.
 
-## How the branch knows what the captain said
+## How the branch knows what the user said
 
-Main's captain and assistant text is mirrored into the branch as read-only `fm-main-mirror` messages.
+Main's user and assistant text is mirrored into the branch as read-only `fm-main-mirror` messages.
 The mirror never carries tool calls, tool results, operational injections, or the branch's own merged notes.
 
 Mirroring happens at two points:
 
 - The idle path mirrors at main's turn end.
 - At a prompt-bearing `before_agent_start`, Pi's authoritative prompt is staged verbatim before SessionManager persists that user entry.
-  Pi 1.1's prompt-only event and Pi 1.2's user event both take this path; no-prompt custom events are never staged as captain dialog.
-  The complete current captain message therefore precedes any branch wake accepted after the prompt-bearing boundary.
+  Pi 1.1's prompt-only event and Pi 1.2's user event both take this path; no-prompt custom events are never staged as user dialog.
+  The complete current user message therefore precedes any branch wake accepted after the prompt-bearing boundary.
   The later persisted copy is suppressed, and older dialog entries remain bounded.
 
 The mirror cursor is durable (`state/.branch-mirror-cursor`), so within one main session only not-yet-mirrored dialog is replayed.
@@ -392,10 +392,10 @@ Stage two is the branch's verdict on each handled event, reported through its `f
 | `routine` | A non-silent outcome uses the custom-message path; a silent outcome is stored without a rendered note. Neither opens a follow-up turn. |
 | `captain` | Appends a versioned `fm-branch-visible-outcome` custom session entry. |
 
-### The visible captain entry
+### The visible user entry
 
-The captain entry contains the store sequence, task, verdict, exact summary, and silent flag.
-Its renderer presents the exact task and summary with an anchor prefix.
+The user entry contains the store sequence, task, verdict, exact summary, and silent flag.
+Its renderer presents the exact task and summary with a diamond prefix.
 
 Pi custom session entries persist in the transcript but do not enter model context.
 So a stale compaction summary, an unrelated assistant response, prompt caching, or model instruction noncompliance cannot acknowledge or rewrite the outcome.
@@ -406,28 +406,28 @@ Conflicting content for one sequence fails closed.
 
 Reconciliation runs at two points:
 
-- At session start, when that generation already owns the fleet lock.
+- At session start, when that generation already owns the team lock.
 - At the first post-lock `turn_end`.
 
-Together, these let a cold start that acquires the lock through the startup digest still deliver stored captain outcomes without waiting for another wake.
+Together, these let a cold start that acquires the lock through the startup digest still deliver stored user outcomes without waiting for another wake.
 
-### Processing a captain outcome on main
+### Processing a user outcome on main
 
-Display is only half of a captain outcome.
-The other half is processing, because a blocker, a decision, or a ready PR needs main to act, not only the captain to see it.
+Display is only half of a user outcome.
+The other half is processing, because a blocker, a decision, or a ready PR needs main to act, not only the user to see it.
 
-1. After the visible entry exists and the read cursor has passed it, the extension hands the oldest batch of at most 32 still-unprocessed captain rows to main as one hidden, typed `fm-branch-process` request (kind `branch-outcome`), and presents the next batch after main acknowledges that one.
+1. After the visible entry exists and the read cursor has passed it, the extension hands the oldest batch of at most 32 still-unprocessed user rows to main as one hidden, typed `fm-branch-process` request (kind `branch-outcome`), and presents the next batch after main acknowledges that one.
    The request lists each `[seq N, recorded <age> ago] task: summary`, with the age from the store's `recordedAgo` (`bin/fm-branch-outcome.sh` owns its wording), and asks main to check the task's current state first.
    Summaries over 1024 characters are abbreviated within that bound and point to `bin/fm-branch-outcome.sh lookup --seqs <N>` for the full outcome.
    Main must read the full outcome for any abbreviated line before acting on, relaying, or acknowledging it.
    It says each outcome was recorded earlier and may already have been seen or handled, rather than claiming a visible entry in this transcript, because an outcome carried over from before a restart or a switch of primary has none here.
-   Main sorts the outcomes by that state, and its reply to the captain covers only the still-open ones, as if the settled ones had never been listed; a settled one needs only the acknowledgement below.
+   Main sorts the outcomes by that state, and its reply to the user covers only the still-open ones, as if the settled ones had never been listed; a settled one needs only the acknowledgement below.
    A listed row without a valid age breaks the store's contract, so the extension reports it to main as a visible note and sends no request; every row stays unprocessed and is presented once the store is healthy.
 2. That request opens exactly one main turn.
 3. Main closes it only by calling `fm_branch_processed` with the highest sequence the request listed.
    That call advances a processed marker, which `bin/fm-branch-outcome.sh` keeps separately from the read cursor and never moves past it or backwards.
 
-A lower listed captain sequence is accepted only as a partial acknowledgement and leaves every newer captain sequence open.
+A lower listed user sequence is accepted only as a partial acknowledgement and leaves every newer user sequence open.
 
 Nothing else advances that marker.
 An unrelated reply, an empty reply, or a reply that paraphrases the outcome leaves the sequence unprocessed.
@@ -447,18 +447,18 @@ A presentation already pending its run boundary is not resent or widened.
 Once that run settles, the extension presents the then-current sequence set.
 
 The first two presentations of a given sequence set open a turn of their own.
-After that, the request rides the captain's next prompt, so an ignored request cannot become an unbounded loop of empty turns.
+After that, the request rides the user's next prompt, so an ignored request cannot become an unbounded loop of empty turns.
 Changed sequence membership and a session replacement each start that budget over.
 
 Routine outcomes never enter this path and stay turn-free.
-A home with no processed marker, including an upgrade or switch from the supervision host, re-presents delivered captain rows dated and check-first until acknowledged; see the marker contract in `bin/fm-branch-outcome.sh`.
+A home with no processed marker, including an upgrade or switch from the supervision host, re-presents delivered user rows dated and check-first until acknowledged; see the marker contract in `bin/fm-branch-outcome.sh`.
 
 ### Ownership and verdict rules
 
 The generated [Pi supervision protocol](supervision-protocols/pi.md) owns event ownership for merged outcomes and main's acknowledgement duty.
-Deterministic entry delivery owns captain visibility.
+Deterministic entry delivery owns user visibility.
 
-The branch prompt's "Verdict: routine or captain" section owns the classification criteria, including task-level silence eligibility and the rule to escalate doubt.
+The branch prompt's "Verdict: routine or captain" section owns the classification criteria, including task-level silence eligibility and the rule to escalate doubt; `captain` is the persisted compatibility verdict for a user outcome.
 
 Its "PR identity: copy or abstain" section owns where a PR URL in a summary or tool argument may come from:
 
@@ -470,7 +470,7 @@ Main can read the durable outcome store on demand through its `fm_branch_outcome
 ## Heartbeat routing
 
 The cheap bash-level heartbeat scan absorbs a genuinely no-op pass before it reaches Pi, unchanged from before.
-Only a scan already flagged as possibly captain-relevant emits the bare `heartbeat` wake.
+Only a scan already flagged as possibly user-relevant emits the bare `heartbeat` wake.
 `.pi/extensions/fm-primary-pi-watch.ts` flags that offer `heartbeat: true`.
 The branch accepts it without a project only when every branch-ownable row observed in the unread-queue eligibility check is one of these:
 
@@ -485,7 +485,7 @@ They are excluded from what the branch may claim and left queued for main.
 Main is woken for each on its own watcher cycle, so nothing starves by being left behind.
 Under the away-posture record the branch claims them too ("Postures" below).
 
-Deferring the fleet review to main merely because some unrelated merge poll or Relay mention happened to be sitting unread put a routine review in the captain's chat for a reason that had nothing to do with the fleet.
+Deferring the team review to main merely because some unrelated merge poll or Relay mention happened to be sitting unread put a routine review in the user's chat for a reason that had nothing to do with the team.
 That coupling is gone.
 
 What all-or-nothing still guarantees is unchanged: the branch takes every branch-ownable unread row or none of them.
@@ -493,21 +493,21 @@ An unresolvable task-local row, an unknown row kind, or an unreadable queue stil
 
 ### Reporting the review
 
-The branch runs its normal operating procedure for the wake (`bin/fm-branch-prompt.sh` "Handling a wake") and performs the deeper fleet review that main previously performed.
+The branch runs its normal operating procedure for the wake (`bin/fm-branch-prompt.sh` "Handling a wake") and performs the deeper team review that main previously performed.
 
 | Review result | Report |
 | --- | --- |
 | Found literally nothing worth reporting | Verdict `routine`, `task=fleet`, and `silent=true`, so it is stored without a rendered note. |
-| A fleet-wide routine action | Omits `silent` and keeps its rendered sailboat note. |
+| A team-wide routine action | Omits `silent` and keeps its rendered bullet note. |
 
-Only a captain-worthy finding reports verdict `captain` and appends a visible captain outcome entry.
+Only a user-worthy finding reports verdict `captain` and appends a visible user outcome entry.
 
-Every other fleet-wide or unresolvable wake keeps today's wake-to-main path in both postures.
+Every other team-wide or unresolvable wake keeps today's wake-to-main path in both postures.
 That includes watcher-failure alarms, which are never offered to the branch.
 
 ## Cost model and the byte-stable prefix
 
-The captain accepted the normal provider prompt-caching strategy:
+The user accepted the normal provider prompt-caching strategy:
 
 - A byte-identical branch prefix generated once per firstmate version.
 - The same tool set in the same order on every request.
@@ -551,7 +551,7 @@ That is why `bin/fm-branch-prompt.sh`'s header is the contract's single owner an
 One supervision session runs in two postures, attended and away.
 The posture is a file: the away-posture record `state/.afk-contract`.
 Only `bin/fm-afk-contract.sh` writes it, in the same turn as `/afk`.
-The return path archives it on the captain's first unmarked message.
+The return path archives it on the user's first unmarked message.
 
 ### Who reads the record
 
@@ -559,7 +559,7 @@ The record is never inferred from chat and never placed in the branch's byte-sta
 Three readers check it:
 
 - The dispatcher reads its presence at every routing decision.
-- The branch reads it at the tail of every wake and immediately before every captain-outcome presentation.
+- The branch reads it at the tail of every wake and immediately before every user-outcome presentation.
 - The guarded scripts validate it through the record owner at every gate.
 
 On Pi the away daemon is never launched, so the watcher is the single owner of supervision in both postures.
@@ -579,13 +579,13 @@ A leftover `state/.afk` flag declines nothing.
   Parking is a cost and chat-cleanliness measure.
   Supervision continuity is the safety property, and the return brief's health section reads any gap.
 - The wake message ends with a fixed `POSTURE: AWAY` tail plus the record's read-back verbatim (`bin/fm-afk-contract.sh readback`).
-  The branch therefore has the captain's away words, the spend cap, the expected return, and the reach line in front of it at execution time, without any prefix change.
-- Captain-verdict outcomes accumulate unprocessed in the outcome store.
+  The branch therefore has the user's away words, the spend cap, the expected return, and the reach line in front of it at execution time, without any prefix change.
+- user-verdict outcomes accumulate unprocessed in the outcome store.
   Their visible entries still persist, but no processing turn opens on the parked main.
   The request is re-checked against the record immediately before it would open and at every run boundary, so a request pending when the record appears is cancelled rather than delivered.
   If the record appears after a dedicated processing run opens, the request-local context check aborts that run; a processing request joining a user or unrelated custom run does not authorize aborting it.
   While the record exists, processing messages are filtered from request-local context, including earlier stored copies, without deleting session history or acknowledging outcomes.
-  The first run boundary after the record is archived, ordinarily the captain's return message, presents the accumulated rows with a fresh triggered budget exactly as after any other gap.
+  The first run boundary after the record is archived, ordinarily the user's return message, presents the accumulated rows with a fresh triggered budget exactly as after any other gap.
   `bin/fm-afk-return.sh` lists them under "waiting on you".
 - Main's standing authority relocates to the branch, and nothing more.
   [Authority relocation](#authority-relocation) below gives the details.
@@ -598,12 +598,12 @@ A leftover `state/.afk` flag declines nothing.
 It does so only while `bin/fm-afk-contract.sh validate` succeeds on a complete, readable, live away record (`mode` is not quiet).
 An archived, incomplete, invalid, or quiet record restores the attended refusal byte for byte.
 
-The captain's away words are the whole mandate:
+The user's away words are the whole mandate:
 
 - The branch reads them at the tail.
 - It decides by its own judgment whether the event in front of it is the moment they name.
 - It acts on them only through the guarded scripts, never by analogy.
-- It holds with verdict captain on doubt.
+- It holds with verdict user on doubt.
 
 `bin/fm-branch-prompt.sh` "Postures" owns those execution rules.
 It requires every action taken under the words to open its outcome summary with "per your away instructions:".
@@ -613,7 +613,7 @@ Each relocated script keeps its own gate, enforcing exactly what a script can ch
 | Script | Gate while away |
 | --- | --- |
 | `bin/fm-pr-merge.sh` | Merges any pull request green at its live head, synchronously, under the record lock, and refuses `--allow-red`, `--allow-missing`, and `--allow-no-pipeline` while away, so the green gate is absolute in this posture; which pull request the words meant is the branch's reading. |
-| `bin/fm-spawn.sh` | Dispatches only queued work whose blockers cleared - already queued, or filed by the branch because the words explicitly call for it; refuses a fresh ordinary spawn for either actor once the home holds as many ordinary task records as the record's spend cap (relaunches and secondmates exempt). |
+| `bin/fm-spawn.sh` | Dispatches only queued work whose blockers cleared - already queued, or filed by the branch because the words explicitly call for it; refuses a fresh ordinary spawn for either actor once the home holds as many ordinary task records as the record's spend cap (relaunches and Project Directors exempt). |
 | `bin/fm-send.sh --resolve-key` | Answers a decision the words pre-answer, or one `ask-user-authority`'s judgment (carried verbatim in the branch prompt) lets firstmate decide. |
 | `bin/fm-merge-local.sh` | Never relocated. |
 
@@ -622,7 +622,7 @@ The return brief renders the words verbatim beside that account.
 
 ### The authority invariant
 
-Being away changes how the captain is informed and what happens at a captain-owned decision point, never firstmate's authority set.
+Being away changes how the user is informed and what happens at a user-owned decision point, never firstmate's authority set.
 `tests/fm-branch-supervision.test.sh`, `tests/fm-pr-merge.test.sh`, and `tests/fm-send-resolve-key.test.sh` pin this invariant.
 It sets these limits:
 
@@ -633,8 +633,8 @@ It sets these limits:
 
 ### Cleanup after task completion
 
-Ordinary cleanup of landed ships and completed scouts needs no authority relocation; [`bin/fm-branch-prompt.sh`](../bin/fm-branch-prompt.sh) owns the branch's cleanup instructions in both postures, including lease acquisition and refusal reporting.
-The generated prompt includes the [scout-completion](../.agents/skills/scout-completion/SKILL.md) and [captain-hold-lifecycle](../.agents/skills/captain-hold-lifecycle/SKILL.md) policies verbatim so their completion gate reaches hosts without automatic skill loading.
+Ordinary cleanup of landed ships and completed Investigators needs no authority relocation; [`bin/fm-branch-prompt.sh`](../bin/fm-branch-prompt.sh) owns the branch's cleanup instructions in both postures, including lease acquisition and refusal reporting.
+The generated prompt includes the [scout-completion](../.agents/skills/scout-completion/SKILL.md) and [user-hold-lifecycle](../.agents/skills/captain-hold-lifecycle/SKILL.md) policies verbatim so their completion gate reaches hosts without automatic skill loading.
 
 ## Verification
 
@@ -654,18 +654,18 @@ The generated prompt includes the [scout-completion](../.agents/skills/scout-com
 - Post-construction provider-error and no-report fallback, the consecutive-error latch, cooldown probe, exponential backoff, report-plus-settlement recovery, and report-before-error re-latch.
 - Cache key, and model and effort selection.
 - In `test_branch_dispatch_classifies_main_only_rows_and_writes_the_eligible_snapshot`: decision-owned signal and stale rows' exclusion from `eligibleSeqs`, their presence in `needsDecisionKeys`, task alias resolution, reserved-key configuration, status-log race and symlink refusal, non-vetoing behavior for unrelated eligible rows, and decision-only queues reading as ordinary main-only absence.
-- In `test_branch_dispatch_routes_secondmate_signal_by_new_span`: second-mate signal routing by new span on the Pi and attended-host paths, including an unrelated open hold, mixed, same-key, stamped-key, key-less blocked, and resolution spans, the whole-log fallback, stale-row isolation, and crewmate routing.
+- In `test_branch_dispatch_routes_secondmate_signal_by_new_span`: second-mate signal routing by new span on the Pi and attended-host paths, including an unrelated open hold, mixed, same-key, stamped-key, key-less blocked, and resolution spans, the whole-log fallback, stale-row isolation, and worker routing.
 - In `test_branch_dispatch_resolves_terminal_keyed_orca_stale_row`: a unique Orca `terminal=` handle resolving to its task and project in routine and heartbeat scans, and conflicting terminal, window, or task aliases refusing the whole scan in either record order.
 
 `tests/fm-branch-supervision.test.sh` covers:
 
 - Prompt stability, including the landed-work cleanup instruction and the second-mate relay, signal-span, and stale-liveness rules.
-- The emitted completed-scout cleanup instructions and verbatim completion policies, including incomplete-work boundaries and refusal reporting; these assertions verify prompt delivery, not a model's adherence.
-- Store append-only behavior, the captain cursor barrier, processed-marker sequence bounds and absent-marker safety, and captain-only recorded ages.
+- The emitted completed-Investigator cleanup instructions and verbatim completion policies, including incomplete-work boundaries and refusal reporting; these assertions verify prompt delivery, not a model's adherence.
+- Store append-only behavior, the user cursor barrier, processed-marker sequence bounds and absent-marker safety, and user-only recorded ages.
 - Leases, guards, and non-branch-home invariance.
 - The away relocation: only under a valid live record, never for local-only landing, queued-only branch dispatch rather than orphaned in-flight recovery, the spend cap for both actors and its lock-held recheck, and the attended guarded-action behavior restored by archive or an invalid record.
 
-`tests/fm-afk-return.test.sh` covers the ordered cleanup-due section, its durable merge-marker requirement, and exclusion of both a done task without durable merge evidence and a persistent secondmate carrying that evidence.
+`tests/fm-afk-return.test.sh` covers the ordered cleanup-due section, its durable merge-marker requirement, and exclusion of both a done task without durable merge evidence and a persistent Project Director carrying that evidence.
 
 `tests/fm-pr-merge.test.sh` covers the branch actor merging a green task under the record, being refused on a red check, an unreported required check, or `--allow-red`/`--allow-missing` under it, and being refused at the partition while attended.
 
@@ -673,7 +673,7 @@ The generated prompt includes the [scout-completion](../.agents/skills/scout-com
 
 `tests/fm-send-resolve-key.test.sh` covers the decision-answer partition:
 
-- A needs-decision or captain-held key refuses the attended branch before anything is sent.
+- A needs-decision or user-held key refuses the attended branch before anything is sent.
 - A `blocked:` key stays ordinary steering.
 - The record relocates the answer.
 
@@ -688,7 +688,7 @@ For the away posture:
 
 Other tests remain where they were:
 
-- The branch-offer, heartbeat-offer, heartbeat-not-ridden-by-main-only-rows, main-only-check-class, captain-held-stale-stays-on-main, and mixed-signal-routing tests remain in `tests/fm-pi-watch-extension.test.sh`.
+- The branch-offer, heartbeat-offer, heartbeat-not-ridden-by-main-only-rows, main-only-check-class, user-held-stale-stays-on-main, and mixed-signal-routing tests remain in `tests/fm-pi-watch-extension.test.sh`.
   The last two routing classes exercise `offerWakeToBranch`'s trigger-key cross-reference end to end.
 - The recovery test remains in `tests/fm-session-start.test.sh`.
 - The per-actor consume regression remains in `tests/fm-wake-queue.test.sh`.
@@ -702,9 +702,9 @@ Other tests remain where they were:
 
 `tests/fm-watch-triage.test.sh` covers `bin/fm-watch.sh`'s side of the contract end to end:
 
-- Needs-decision, no-verb captain-held, and pending-reply second-mate escalation signal rows are marked `needs-decision:`.
+- Needs-decision, no-verb user-held, and pending-reply second-mate escalation signal rows are marked `needs-decision:`.
 - A needs-decision whose key transition was rejected by the reserved-key vocabulary (`fm-classify-lib.sh`'s `reconciliation-required:` wrapper) is still marked.
-- Ordinary blocked or captain-relevant signals stay unmarked.
+- Ordinary blocked or user-relevant signals stay unmarked.
 
 ### Live guards
 

@@ -152,7 +152,7 @@ fi
 before=$(git -C "$PROJ" rev-parse "$DEFAULT")
 if ! git -C "$PROJ" merge-base --is-ancestor "$before" "$MERGE_HEAD"; then
   echo "REFUSED: $BRANCH is not a fast-forward of $DEFAULT (it has diverged)." >&2
-  echo "Have the crewmate rebase $BRANCH onto $DEFAULT, then retry." >&2
+  echo "Have the Builder rebase $BRANCH onto $DEFAULT, then retry." >&2
   exit 1
 fi
 
@@ -161,12 +161,12 @@ FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
   "$SCRIPT_DIR/fm-captain-hold.sh" open "$ID" --distinguish-absent || hold_status=$?
 case "$hold_status" in
   0)
-    echo "error: task $ID is still held for the captain; release it before merging" >&2
+    echo "error: task $ID is still held for the user; release it before merging" >&2
     exit 1
     ;;
   1|3) ;;
   *)
-    echo "error: could not determine whether task $ID is still held for the captain; refusing to merge" >&2
+    echo "error: could not determine whether task $ID is still held for the user; refusing to merge" >&2
     exit 1
     ;;
 esac

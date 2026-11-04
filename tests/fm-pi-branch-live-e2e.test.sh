@@ -809,7 +809,7 @@ const record = {
 capturedApi.appendEntry("fm-branch-visible-outcome", record);
 
 const rendered = interactive.chatContainer.render(240).join("\n");
-if (!rendered.includes("⚓") || !rendered.includes(`[seq ${record.seq}]`) || !rendered.includes(record.task) || !rendered.includes(record.summary)) {
+if (!rendered.includes("◆") || !rendered.includes(`[seq ${record.seq}]`) || !rendered.includes(record.task) || !rendered.includes(record.summary)) {
   throw new Error(`active Pi transcript did not immediately render the exact outcome: ${rendered}`);
 }
 if (rendered.split(record.summary).length !== 2) {

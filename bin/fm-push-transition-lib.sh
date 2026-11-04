@@ -158,7 +158,7 @@ handle_push_transition() {  # <backend> <session> <record>
   # Either way the wait is durably recorded, so absorb the immediate escalation
   # and leave the bounded re-surface to the watcher's own pause cadence.
   if status_is_paused_or_captain_held "$(status_declared_wait_line "$STATE/$task.status")"; then
-    triage_log "absorbed push $to (declared wait, awaiting external or captain): $window"
+    triage_log "absorbed push $to (declared wait, awaiting an external condition or the user): $window"
     fm_backend_commit_transition "$backend" "$STATE" "$session" "$record" || exit 1
     return
   fi

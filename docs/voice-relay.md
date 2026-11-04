@@ -1,7 +1,7 @@
 # The spoken interface
 
-Talk to a voice agent that sits in front of the first mate. It answers questions
-about what is happening from the first mate's own records, and when you ask for
+Talk to a voice agent that sits in front of the Director. It answers questions
+about what is happening from the Director's own records, and when you ask for
 real work it says so out loud and queues the request rather than pretending to
 do it.
 
@@ -22,7 +22,7 @@ laptop                          this desktop                      AWS
 microphone --> fm-voice-client.py --(ssh)--> fm-voice-relay.py --> Nova Sonic 2
 speaker    <-------------------------------------------------      (your region)
                                         |
-                                        +--> the first mate's records (read)
+                                        +--> the Director's records (read)
                                         +--> fm-inbox.sh note (queue real work)
 ```
 
@@ -31,7 +31,7 @@ audio and control travel together and need framing. `bin/fm_voice_frame.py` is
 the owner of that format and is the only file both machines run.
 
 The relay reads records and queues work. It never changes a project, and the
-queueing half is `bin/fm-inbox.sh note`, the same surface the captain's own
+queueing half is `bin/fm-inbox.sh note`, the same surface the user's own
 out-of-band capture already uses, rather than a second queue.
 `bin/fm-inbox.sh` remains the single owner of that queue, including request-id deduplication, receipts JSON, and the primary reply record.
 
@@ -45,7 +45,7 @@ Six runs each, all six answered each way.
 | Direct from this desktop, no relay | 1.165 1.190 1.215 1.250 1.281 1.352 | 1.232 |
 | Over the relay, real client and framing | 1.138 1.165 1.171 1.174 1.177 1.283 | 1.172 |
 
-The clock starts the instant the captain stops speaking and stops when the first byte of reply audio arrives.
+The clock starts the instant the user stops speaking and stops when the first byte of reply audio arrives.
 An earlier measurement of the same question, on the same model and region and also reading the records, put the direct path at 1.164 seconds median over five runs, and this control reproduces it to within the noise floor below.
 That measurement is not published here, so read it as corroboration rather than as something to open: the direct column stands as a control on its own, because it was taken in the same pass, on the same clip, model, region and read scope, with only the relay removed.
 
@@ -121,7 +121,7 @@ wrong instant rather than printing a number that looks fast.
 
 ## Setting up the laptop
 
-**The audio devices are not verified.** No worker can reach the captain's laptop, so neither the microphone nor the speaker has ever been opened.
+**The audio devices are not verified.** No worker can reach the user's laptop, so neither the microphone nor the speaker has ever been opened.
 Treat the first live run as their test, and expect the device setup to be where it fails.
 Everything around them is exercised with files.
 That includes the speaker's own byte accounting, the arithmetic deciding which turn a chunk of reply audio is credited to and whose first-audio clock it stamps, which runs against a stub stream in the test suite.
@@ -168,8 +168,8 @@ If it fails before any audio, add `--verbose` and look for the handshake: a chat
 
 ## What it may read
 
-An unconfigured home gets the narrow scope: counts of what is in flight, what is waiting on the captain and what is open for review, with no identifier, title or link assembled at all.
-Widening that is one line the captain of those records writes into `config/voice-read-scope` themselves.
+An unconfigured home gets the narrow scope: counts of what is in flight, what is waiting on the user and what is open for review, with no identifier, title or link assembled at all.
+Widening that is one line the user of those records writes into `config/voice-read-scope` themselves.
 Two whole classes of record are excluded at every scope, and excluded by construction rather than filtered on the way out:
 
 - **Finished work in the backlog's done history**, because a spoken "what is
@@ -178,10 +178,10 @@ Two whole classes of record are excluded at every scope, and excluded by constru
   file in front of them, and they are where commercial detail gets quoted.
 
 Only open work and this home's own runtime records are ever assembled.
-A task keeps its runtime record until teardown, so the count of workers on deck
+A task keeps its runtime record until teardown, so the count of active workers
 and the states beside it still include one whose item is already done; both are a
 number and a state word, never anything written in a record.
-Verified against the captain's live records on 2026-08-21: every occurrence of
+Verified against the user's live records on 2026-08-21: every occurrence of
 the one customer identifier those records contain sits in finished work or a note
 body, so nothing a status answer can say names a customer.
 `tests/fm-voice-relay.test.sh` holds that boundary as an executable check, so
@@ -213,7 +213,7 @@ strength of a typo.
 Push to talk is the default: the microphone is closed until you ask for it. That
 is `$0.0101` per minute against `$0.0151` for an open microphone, and it is the
 setting nobody has decided yet, so this build does not choose the expensive one
-on the captain's behalf.
+on the user's behalf.
 
 `--listen open-mic` exists as a setting and refuses at startup today.
 An open microphone needs something to decide when you stopped speaking, and the client has no end-of-speech detection, so the mode would open a turn, stream audio forever and never mark a boundary, which leaves the relay appending to a session that has already answered.
@@ -233,7 +233,7 @@ spoken duration on top of that. Every one interrupted every second turn. Worse,
 an interrupted turn that needs to read the records is lost outright: the model
 asks for the records, takes them, and then never answers at all.
 
-Reconnecting costs 0.02 seconds and happens while the captain is pressing the
+Reconnecting costs 0.02 seconds and happens while the user is pressing the
 talk key rather than while they are waiting for a reply, so it is invisible. With
 it, six turns in a row all answered.
 
@@ -270,7 +270,7 @@ these are the shapes.
   second question in a session is treated as an interruption, and an interrupted
   turn that reads the records produces no answer at all.
 - **Remembering the last question.** See above.
-- **Doing any project work.** Real work is queued for the first mate and the
+- **Doing any project work.** Real work is queued for the Director and the
   agent says so out loud. It has no tool that changes a project.
 
 ## Cost

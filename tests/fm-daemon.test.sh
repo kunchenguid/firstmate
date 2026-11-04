@@ -1247,8 +1247,8 @@ test_housekeeping_captain_held_resurfaces_and_resets() {
   echo $(( $(date +%s) - 5000 )) > "$state/.subsuper-paused-$key"
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$win" FM_FAKE_TMUX_CAPTURE="$pane" \
     FM_STATE_OVERRIDE="$state" FM_PAUSE_RESURFACE_SECS=240 housekeeping "$state"
-  grep -F "awaiting the captain" "$state/.subsuper-escalations" >/dev/null 2>&1 || fail "a captain hold was silenced entirely instead of re-surfacing as a captain-owned recheck: $(cat "$state/.subsuper-escalations" 2>/dev/null || true)"
-  grep -F "awaiting external" "$state/.subsuper-escalations" >/dev/null 2>&1 && fail "a captain hold was re-surfaced as an external wait, hiding that the captain is the blocker"
+  grep -F "awaiting the user" "$state/.subsuper-escalations" >/dev/null 2>&1 || fail "a user hold was silenced entirely instead of re-surfacing as a user-owned recheck: $(cat "$state/.subsuper-escalations" 2>/dev/null || true)"
+  grep -F "awaiting external" "$state/.subsuper-escalations" >/dev/null 2>&1 && fail "a user hold was re-surfaced as an external wait, hiding that the user is the blocker"
   grep -F "possible wedge" "$state/.subsuper-escalations" >/dev/null 2>&1 && fail "a captain hold was re-surfaced as a possible wedge"
   [ -e "$state/.subsuper-paused-$key" ] || fail "captain-held marker cleared instead of reset for the next window"
   age=$(( $(date +%s) - $(cat "$state/.subsuper-paused-$key" 2>/dev/null || echo 0) ))
@@ -1276,10 +1276,10 @@ test_housekeeping_captain_held_silenced_only_by_an_away_record() {
     PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$win" FM_FAKE_TMUX_CAPTURE="$pane" \
       FM_STATE_OVERRIDE="$state" FM_PAUSE_RESURFACE_SECS=240 housekeeping "$state"
     if [ "$mode" = away ]; then
-      ! grep -F "awaiting the captain" "$state/.subsuper-escalations" >/dev/null 2>&1 \
+      ! grep -F "awaiting the user" "$state/.subsuper-escalations" >/dev/null 2>&1 \
         || fail "a captain hold was rechecked while the away record exists: $(cat "$state/.subsuper-escalations")"
     else
-      grep -F "awaiting the captain" "$state/.subsuper-escalations" >/dev/null 2>&1 \
+      grep -F "awaiting the user" "$state/.subsuper-escalations" >/dev/null 2>&1 \
         || fail "quiet mode's record silenced a captain hold as if the captain were away: $(cat "$state/.subsuper-escalations" 2>/dev/null || true)"
     fi
   done
@@ -1339,7 +1339,7 @@ test_housekeeping_busy_declared_wait_matures_its_window() {
       paused) printf 'paused: the audit engine is running to completion\n' > "$state/$task.status"
               digest="awaiting external" ;;
       captain-held) printf 'captain-held [key=route]: tracked by task-decision-route\n' > "$state/$task.status"
-              digest="awaiting the captain" ;;
+              digest="awaiting the user" ;;
     esac
     printf 'Working...\n' > "$pane"
     fm_write_meta "$state/$task.meta" "window=$win" "worktree=$dir/wt" "kind=ship" "harness=pi"

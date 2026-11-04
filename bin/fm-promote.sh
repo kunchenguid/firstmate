@@ -1,38 +1,38 @@
 #!/usr/bin/env bash
-# Promote a scout task to a ship task in place: the crewmate keeps its window,
-# worktree, and loaded context; only the contract changes. Flips kind= to ship in
-# state/<task-id>.meta so fm-teardown.sh applies the full ship-task teardown protection
-# again. Promotion also writes the crewmate's ship instructions to
+# Promote an Investigator task to a Builder task in place: the worker keeps its window,
+# worktree, and loaded context; only the contract changes. Flips the compatibility
+# kind= to ship in state/<task-id>.meta so fm-teardown.sh applies the full Builder-task
+# teardown protection again. Promotion also writes the worker's Builder instructions to
 # data/<task-id>/ship-instructions.md, appends that same superseding contract to
 # data/<task-id>/brief.md for future relaunches, and prints the fm-send.sh command
 # that delivers it to the current worker. Those instructions carry the
 # scratch-state inventory, the clean
-# default-branch base, the immutable ship branch, and - rendered from
-# bin/fm-dod-lib.sh, the single owner an ordinary ship brief also uses - the
+# default-branch base, the immutable Builder branch, and - rendered from
+# bin/fm-dod-lib.sh, the single owner an ordinary Builder brief also uses - the
 # mode-specific Definition of done, so a promoted worker receives exactly the same
 # delivery contract as a briefed one, including the no-mistakes mode's ask-user
 # escalation rule and --yes ban. The instructions also carry `# Task` with
-# `## Captain's intent` preserved from the scout brief and promotion's ship-time
-# instructions under `## Firstmate spec`; the scout-time spec remains context but
-# is not relabeled as the ship spec. Promotion refuses leftover `{TASK}` /
-# `{FIRSTMATE_SPEC}` placeholders and a `## Captain's intent` line opening with
-# a Captain label or address (bin/fm-dod-lib.sh). A pre-subsection scout
-# brief contributes only Task lines explicitly marked as captain words to intent,
+# `## User's intent` preserved from the Investigator brief and promotion's Builder-time
+# instructions under `## Director spec`; the Investigator-time spec remains context but
+# is not relabeled as the Builder spec. Promotion refuses leftover `{TASK}` /
+# `{DIRECTOR_SPEC}` placeholders and a `## User's intent` line opening with
+# a legacy Captain label or address (bin/fm-dod-lib.sh). A pre-subsection Investigator
+# brief contributes only Task lines explicitly marked as user words to intent,
 # read outside fenced blocks and indented examples so a quoted `Captain:` sample
 # never passes the provenance gate as the ask (bin/fm-dod-lib.sh).
-# A scout records no delivery posture, so promotion is where this task's delivery
-# contract is decided: --mode, --yolo, and the ship branch resolved from
-# --branch-prefix are written into the meta alongside the kind= flip. Firstmate resolves all three at promotion time, having just
-# read the scout's report (AGENTS.md section 7); data/projects.md holds the
-# captain's standing posture as context, and this script never looks that posture
+# An Investigator records no delivery posture, so promotion is where this task's delivery
+# contract is decided: --mode, --yolo, and the Builder branch resolved from
+# --branch-prefix are written into the meta alongside the compatibility kind= flip. The Director resolves all three at promotion time, having just
+# read the Investigator's report (AGENTS.md section 7); data/projects.md holds the
+# user's standing posture as context, and this script never looks that posture
 # up. The registry IS read for one thing only: the project's forge binding, which
 # is a project fact rather than a per-task decision, so promotion takes it from
-# there instead of asking firstmate to remember it.
+# there instead of asking the Director to remember it.
 # no-mistakes-prod-only is a registry policy rather than a task mode and is refused.
-# A scout spawned on a named base records base_branch= in its meta; promotion
-# keeps that base as the ship's starting point and pull-request target, and
+# An Investigator spawned on a named base records base_branch= in its meta; promotion
+# keeps that base as the Builder's starting point and pull-request target, and
 # refuses a mode that cannot carry one (bin/fm-dod-lib.sh fm_base_branch_valid).
-# In a home with config/spawn-base-primary-checkout, which can start a scout from
+# In a home with config/spawn-base-primary-checkout, which can start an Investigator from
 # the primary checkout's default branch, a publishing mode without a named base
 # on a project with an origin remote is told to return to origin's default
 # branch instead, so commits origin has never received cannot ride along in
@@ -43,16 +43,16 @@
 # its value against the registry; bin/fm-project-mode.sh's header owns the
 # binding and bin/fm-dod-lib.sh owns what it changes for the worker, including
 # the refusal of a forge on local-only. A forge=external project is refused
-# outright, because its push guard is installed only by a ship spawn.
+# outright, because its push guard is installed only by a Builder spawn.
 # The project's pr=manual binding is read the same way and applies to a promoted
 # no-mistakes mode only (bin/fm-project-mode.sh --pr; bin/fm-dod-lib.sh's
-# fm_pr_text_valid owns where it is accepted); the ship's Definition of done then
+# fm_pr_text_valid owns where it is accepted); the Builder's Definition of done then
 # carries it.
 # Usage: fm-promote.sh <task-id> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--branch-prefix <prefix>] [--upstream-consent <host>/<owner>/<repo>]
-# --upstream-consent records the captain's one-off approval for this task to
+# --upstream-consent records the user's one-off approval for this task to
 # publish to firstmate's own upstream repository; promotion applies the same
 # self-repository publication gate as bin/fm-spawn.sh (bin/fm-role-lib.sh), so
-# a promoted scout cannot gain authority a fresh ship spawn would be refused.
+# a promoted Investigator cannot gain authority a fresh Builder spawn would be refused.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -121,7 +121,7 @@ done
 [ -z "$want_value" ] || { echo "error: --$want_value requires a value" >&2; exit 1; }
 [ "${#POS[@]}" -ge 1 ] || { echo "usage: fm-promote.sh <task-id> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off>" >&2; exit 1; }
 [ "$MODE_SET" -eq 1 ] || {
-  echo "error: promotion requires --mode <no-mistakes|direct-PR|local-only>; decide it now from the scout's findings and the project's registered posture in data/projects.md" >&2
+  echo "error: promotion requires --mode <no-mistakes|direct-PR|local-only>; decide it now from the Investigator's findings and the project's registered posture in data/projects.md" >&2
   exit 1
 }
 [ "$YOLO_SET" -eq 1 ] || {
@@ -153,7 +153,7 @@ if [ "$UPSTREAM_CONSENT_SET" -eq 1 ]; then
 fi
 # A posture this forge cannot carry is refused once the registry binding has been
 # read. Merge authority on a Gerrit forge is refused rather than quietly dropped,
-# on the captain's decision of 2026-09-15 (bin/fm-project-mode.sh's header carries
+# on the user's decision of 2026-09-15 (bin/fm-project-mode.sh's header carries
 # it). The call right below the definition is kept deliberately as a guard on the
 # mode and yolo posture; it cannot refuse on the forge, which stays none until the
 # registry supplies it after the lock, so the post-registry call is the one that
@@ -161,14 +161,14 @@ fi
 refuse_impossible_forge_posture() {
   fm_forge_valid_for_mode "$FORGE" "$MODE" fm-promote.sh || return 1
   if [ "$FORGE" = gerrit ] && [ "$YOLO" = on ]; then
-    echo "error: --yolo on is refused for forge=gerrit: a Code-Review+2 is a positive attributed claim that a named human approved and firstmate must not manufacture one (captain's decision 2026-09-15); promote with --yolo off and take any landing on a current explicit captain instruction naming that concrete change" >&2
+    echo "error: --yolo on is refused for forge=gerrit: a Code-Review+2 is a positive attributed claim that a named user approved and the Director must not manufacture one (user decision 2026-09-15); promote with --yolo off and take any landing on a current explicit user instruction naming that concrete change" >&2
     return 1
   fi
-  # A scout launches without the per-task push guard a forge=external ship
+  # An Investigator launches without the per-task push guard a forge=external Builder
   # carries (bin/fm-spawn.sh), and its task record has no forge=external line
   # for the ready-report gate, so promotion cannot hand it that contract safely.
   if [ "$FORGE" = external ]; then
-    echo "error: promotion is refused for forge=external: a scout launches without the push guard and the task record that keep task branches off the shared origin; spawn a fresh ship task with bin/fm-brief.sh --forge external instead" >&2
+    echo "error: promotion is refused for forge=external: an Investigator launches without the push guard and task record that keep task branches off the shared origin; spawn a fresh Builder task with bin/fm-brief.sh --forge external instead" >&2
     return 1
   fi
   return 0
@@ -225,11 +225,11 @@ if ! fm_backlog_record_present "$META" "task record" "$STATE"; then
   echo "error: task record for $ID is unsafe or missing ($FM_BACKLOG_TRANSITION_ERROR)" >&2
   exit 1
 fi
-grep -qx 'kind=scout' "$META" || { echo "error: task $ID is not a scout task (kind=scout not in meta)" >&2; exit 1; }
+grep -qx 'kind=scout' "$META" || { echo "error: task $ID is not an Investigator task (compatibility kind=scout not in meta)" >&2; exit 1; }
 
 # Unlike the mode and yolo above, the forge is not a per-task decision: it is the
-# captain's project binding, so promotion takes it from the registry rather than
-# from a flag firstmate must remember.
+# user's project binding, so promotion takes it from the registry rather than
+# from a flag the Director must remember.
 PROMOTE_PROJECT=$(sed -n 's/^project=//p' "$META" | head -n 1)
 if [ -n "$PROMOTE_PROJECT" ]; then
   PROMOTE_PROJECT_NAME=$(basename "$PROMOTE_PROJECT")
@@ -248,7 +248,7 @@ fi
 BASE_BRANCH=$(sed -n 's/^base_branch=//p' "$META" | head -n 1)
 fm_base_branch_valid "$BASE_BRANCH" "$MODE" "$FORGE" "fm-promote.sh $ID" || exit 1
 # The same self-repository publication gate bin/fm-spawn.sh applies to a fresh
-# ship spawn runs here on the recorded project: a promoted scout reaches no
+# Builder spawn runs here on the recorded project: a promoted Investigator reaches no
 # greater upstream authority than the spawn path would grant.
 if [ "$MODE" != local-only ] && [ -n "$PROMOTE_PROJECT" ]; then
   gate_rc=0
@@ -257,14 +257,14 @@ if [ "$MODE" != local-only ] && [ -n "$PROMOTE_PROJECT" ]; then
   0 | 2) ;;
   *)
     echo "error: promotion refused for $ID: $FM_ROLE_PUB_DENIAL" >&2
-    echo "error: to let this home publish to ${FM_ROLE_PUB_TARGET:-that repository}, write 'maintainer ${FM_ROLE_PUB_TARGET:-<host>/<owner>/<repo>}' into $CONFIG/firstmate-role (docs/configuration.md \"Firstmate role\"), or pass --upstream-consent ${FM_ROLE_PUB_TARGET:-<host>/<owner>/<repo>} for this one task with the captain's explicit approval" >&2
+    echo "error: to let this home publish to ${FM_ROLE_PUB_TARGET:-that repository}, write 'maintainer ${FM_ROLE_PUB_TARGET:-<host>/<owner>/<repo>}' into $CONFIG/firstmate-role (docs/configuration.md \"Firstmate role\"), or pass --upstream-consent ${FM_ROLE_PUB_TARGET:-<host>/<owner>/<repo>} for this one task with the user's explicit approval" >&2
     exit 1
     ;;
   esac
 fi
 PROMOTE_BASE_WORDS='default-branch base'
 [ -z "$BASE_BRANCH" ] || PROMOTE_BASE_WORDS="copy of the base branch \`$BASE_BRANCH\`"
-# A home with config/spawn-base-primary-checkout may have started this scout from
+# A home with config/spawn-base-primary-checkout may have started this Investigator from
 # the primary checkout's default branch (bin/fm-spawn.sh's header owns that
 # rule), so a publishing mode is told which default branch to return to. Spawn
 # applies that rule only to a project with an origin remote, so a project
@@ -283,29 +283,29 @@ PROMOTE_CONSENT_WORDS=
 
 SCOUT_BRIEF="$DATA/$ID/brief.md"
 if fm_brief_task_placeholders_present "$SCOUT_BRIEF"; then
-  echo "error: $SCOUT_BRIEF still contains {TASK} or {FIRSTMATE_SPEC}; preserve the original ask in ## Captain's intent and fill the scout-time ## Firstmate spec; promotion generates a separate ship-time spec" >&2
+  echo "error: $SCOUT_BRIEF still contains {TASK} or {DIRECTOR_SPEC}; preserve the original ask in ## User's intent and fill the Investigator-time ## Director spec; promotion generates a separate Builder-time spec" >&2
   exit 1
 fi
 if ! fm_brief_task_content_valid "$SCOUT_BRIEF"; then
-  echo "error: $SCOUT_BRIEF must contain nonempty ## Captain's intent and ## Firstmate spec subsections (or a nonempty legacy # Task body) before promotion" >&2
+  echo "error: $SCOUT_BRIEF must contain nonempty ## User's intent and ## Director spec subsections (or a nonempty legacy # Task body) before promotion" >&2
   exit 1
 fi
 if ADDRESS_LINE=$(fm_brief_intent_address_line "$SCOUT_BRIEF"); then
-  echo "error: $SCOUT_BRIEF ## Captain's intent has an operator-address line: $ADDRESS_LINE; write the captain's actual words without a Captain label or address before promotion, since the heading already records provenance" >&2
+  echo "error: $SCOUT_BRIEF ## User's intent has a direct-address line: $ADDRESS_LINE; write the user's actual words without a speaker label or address before promotion, since the heading already records provenance" >&2
   exit 1
 fi
-if fm_brief_task_heading_present "$SCOUT_BRIEF" "## Captain's intent"; then
-  INTENT_BODY=$(fm_brief_task_heading_body "$SCOUT_BRIEF" "## Captain's intent")
+if fm_brief_task_heading_present "$SCOUT_BRIEF" "## User's intent"; then
+  INTENT_BODY=$(fm_brief_task_heading_body "$SCOUT_BRIEF" "## User's intent")
 else
   TASK_BODY=$(fm_brief_heading_body "$SCOUT_BRIEF" "# Task")
   INTENT_BODY=$(fm_brief_marked_captain_words "$TASK_BODY")
 fi
 if [ -z "$(printf '%s' "$INTENT_BODY" | tr -d '[:space:]')" ]; then
-  echo "error: $SCOUT_BRIEF has no provenance-marked Captain's intent; add the captain's actual words before promotion" >&2
+  echo "error: $SCOUT_BRIEF has no provenance-marked user intent; add the user's actual words before promotion" >&2
   exit 1
 fi
 
-# The promoted worker must receive the same delivery contract an ordinary ship
+# The promoted worker must receive the same delivery contract an ordinary Builder
 # brief carries, so the mode-specific Definition of done is rendered from its
 # single owner (bin/fm-dod-lib.sh) rather than summarised into a hint line. A
 # promoted no-mistakes worker that never received the ask-user escalation rule or
@@ -317,68 +317,68 @@ if [ "$MODE" = no-mistakes ]; then
 fi
 IFS= read -r -d '' PROMOTION_SHIP_SPEC <<EOF || true
 If these promotion steps were already completed before a relaunch, preserve the existing \`$BRANCH_Q\` branch and continue from its current state; do not repeat them destructively.
-1. **Verify isolation before anything else.** Run \`pwd -P\` and \`git rev-parse --show-toplevel\`; both must resolve to the disposable task worktree you were launched in, such as a treehouse pool path or an Orca-managed worktree, not the primary checkout firstmate operates from. If either does not resolve to the worktree you were launched in, stop and escalate to firstmate.
+1. **Verify isolation before anything else.** Run \`pwd -P\` and \`git rev-parse --show-toplevel\`; both must resolve to the disposable task worktree you were launched in, such as a treehouse pool path or an Orca-managed worktree, not the primary checkout the Director operates from. If either does not resolve to the worktree you were launched in, stop and escalate to the Director.
 2. Inventory this worktree's scratch state with \`git status\` and \`git log\` before changing anything.
 3. Return to a clean $PROMOTE_BASE_WORDS, then create your branch: \`git checkout -b $BRANCH_Q --\`.
 4. Carry over only the intended fix changes. Leave scratch commits, debug edits, and experiment files behind.
 5. If you reproduced a bug, turn that reproduction into a regression test.
-6. Treat the scout-time Firstmate spec and any unmarked legacy \`# Task\` text as investigation context, not captain intent or current ship-time instructions.
-7. Everything else in your original instructions carries over unchanged: the status protocol; the instruction inbox and its acknowledgement; the escalation rules, including ask-user; and every safety rule, except where the current delivery contract below explicitly replaces scout-only delivery rules.
+6. Treat the Investigator-time Director spec and any unmarked legacy \`# Task\` text as investigation context, not user intent or current Builder-time instructions.
+7. Everything else in your original instructions carries over unchanged: the status protocol; the instruction inbox and its acknowledgement; the escalation rules, including ask-user; and every safety rule, except where the current delivery contract below explicitly replaces Investigator-only delivery rules.
 EOF
 promote_delivery_contract() {
   cat <<EOF
 # Current delivery mode contract
-This task is now kind=ship with mode=$MODE$PROMOTE_FORGE_WORDS$PROMOTE_PR_WORDS$PROMOTE_CONSENT_WORDS.
+This task is now assigned to a Builder with compatibility kind=ship and mode=$MODE$PROMOTE_FORGE_WORDS$PROMOTE_PR_WORDS$PROMOTE_CONSENT_WORDS.
 This section supersedes every earlier brief instruction about delivery mode.
-These current ship instructions supersede the scout delivery rules and report-based Definition of done.
-Any earlier "Never push" or scout-only delivery language in this file is superseded.
-This replaces the scout rule limiting outside-worktree writes to the report and status file.
+These current Builder instructions supersede the Investigator delivery rules and report-based Definition of done.
+Any earlier "Never push" or Investigator-only delivery language in this file is superseded.
+This replaces the Investigator rule limiting outside-worktree writes to the report and status file.
 Keep project edits inside this worktree; keep proof and scratch output outside it, under \`$DATA/$ID/\` or a temporary directory.
 Outside the worktree, write only that task material and the status and steering-inbox records authorized below.
 Leave the worktree clean before reporting done.
 The mode-specific Definition of done below is the current delivery contract.
 
-# Current ship safety rule
+# Current Builder safety rule
 EOF
   fm_ship_rule_one "$MODE" "$ID" "$BRANCH" "$FORGE" "$BASE_BRANCH"
   if [ -n "$PROMOTION_ASK_USER_BLOCK" ]; then
-    printf '\nThe no-mistakes ask-user escalation below supersedes the scout rule 6 escalation shape.\n'
+    printf '\nThe no-mistakes ask-user escalation below supersedes the Investigator rule 6 escalation shape.\n'
     printf '%s\n' "$PROMOTION_ASK_USER_BLOCK"
   fi
   printf '\n'
   fm_dod_block "$MODE" "$ID" "$BRANCH" "$FORGE" "$BASE_BRANCH" "$UPSTREAM_CONSENT" "$PR_TEXT"
 }
 mkdir -p "$DATA/$ID"
-[ ! -d "$INSTRUCTIONS" ] || { echo "error: ship instructions path is a directory: $INSTRUCTIONS" >&2; exit 1; }
+[ ! -d "$INSTRUCTIONS" ] || { echo "error: Builder instructions compatibility path is a directory: $INSTRUCTIONS" >&2; exit 1; }
 TMP="$DATA/$ID/.ship-instructions.md.${BASHPID:-$$}"
 {
   cat <<EOF
-Your scout task has been promoted to a ship task, mode=$MODE. Your window, worktree, and context stay as they are; only the contract below changes.
+Your Investigator task has been promoted to a Builder task, mode=$MODE. Your window, worktree, and context stay as they are; only the contract below changes.
 
 # Task
-## Captain's intent
+## User's intent
 EOF
   printf '%s\n' "$INTENT_BODY"
   cat <<EOF
 
-## Firstmate spec
+## Director spec
 $PROMOTION_SHIP_SPEC
 
 EOF
   promote_delivery_contract
-} > "$TMP" || { echo "error: could not render ship instructions for mode=$MODE" >&2; exit 1; }
+} > "$TMP" || { echo "error: could not render Builder instructions for mode=$MODE" >&2; exit 1; }
 mv "$TMP" "$INSTRUCTIONS"
 TMP=
-[ -f "$INSTRUCTIONS" ] && [ -r "$INSTRUCTIONS" ] || { echo "error: ship instructions were not published as a readable file: $INSTRUCTIONS" >&2; exit 1; }
+[ -f "$INSTRUCTIONS" ] && [ -r "$INSTRUCTIONS" ] || { echo "error: Builder instructions were not published as a readable file: $INSTRUCTIONS" >&2; exit 1; }
 
 # The current worker receives the instructions through fm-send, but a replacement
 # worker is launched from brief.md. Publish the same explicit precedence contract
-# there so a later relaunch cannot revive the original scout delivery rules.
+# there so a later relaunch cannot revive the original Investigator delivery rules.
 BRIEF_REPLACEMENT="$DATA/$ID/.brief.md.promote.${BASHPID:-$$}"
 {
   cat "$SCOUT_BRIEF"
   printf '\n\n'
-  printf '# Current ship Firstmate spec\n%s\n\n' "$PROMOTION_SHIP_SPEC"
+  printf '# Current Builder Director spec\n%s\n\n' "$PROMOTION_SHIP_SPEC"
   promote_delivery_contract
 } > "$BRIEF_REPLACEMENT" || {
   echo "error: could not render the promoted brief for mode=$MODE" >&2
@@ -386,7 +386,7 @@ BRIEF_REPLACEMENT="$DATA/$ID/.brief.md.promote.${BASHPID:-$$}"
 }
 BRIEF_ORIGINAL="$DATA/$ID/.brief.md.scout.${BASHPID:-$$}"
 mv "$SCOUT_BRIEF" "$BRIEF_ORIGINAL" || {
-  echo "error: could not stage the scout brief for promotion: $SCOUT_BRIEF" >&2
+  echo "error: could not stage the Investigator brief for promotion: $SCOUT_BRIEF" >&2
   exit 1
 }
 if ! mv "$BRIEF_REPLACEMENT" "$SCOUT_BRIEF"; then
@@ -421,8 +421,8 @@ META_LOCK_HELD=0
 
 HOME_Q=$(printf '%q' "$FM_HOME")
 INSTRUCTIONS_Q=$(printf '%q' "$INSTRUCTIONS")
-echo "promoted $ID to ship mode=$MODE yolo=$YOLO$PROMOTE_FORGE_WORDS$PROMOTE_PR_WORDS (teardown protection restored)"
-echo "wrote ship instructions for mode=$MODE$PROMOTE_FORGE_WORDS$PROMOTE_PR_WORDS: $INSTRUCTIONS"
+echo "promoted $ID to Builder mode=$MODE yolo=$YOLO$PROMOTE_FORGE_WORDS$PROMOTE_PR_WORDS compatibility-kind=ship (teardown protection restored)"
+echo "wrote Builder instructions for mode=$MODE$PROMOTE_FORGE_WORDS$PROMOTE_PR_WORDS: $INSTRUCTIONS"
 echo "next: FM_HOME=$HOME_Q bin/fm-send.sh fm-$ID \"\$(cat $INSTRUCTIONS_Q)\""
 
 promote_print_rechain_hint() {
@@ -463,7 +463,7 @@ promote_resolve_primary_home() {
 }
 
 promote_warn_parent_unresolved() {
-  echo "warning: could not resolve the consent-holding parent home for secondmate $1; promotion succeeded, but any open public loop must be inspected and rechained from the parent." >&2
+  echo "warning: could not resolve the consent-holding parent home for Project Director $1; promotion succeeded, but any open public loop must be inspected and rechained from the parent." >&2
 }
 
 if [ -f "$FM_HOME/.fm-secondmate-home" ]; then

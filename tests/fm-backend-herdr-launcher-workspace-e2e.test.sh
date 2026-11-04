@@ -190,10 +190,10 @@ mkdir -p "$PRES_HOME/state" "$PRES_HOME/config"
 write_ship_brief() {  # <file> <id>
   cat > "$1" <<EOF
 # Task
-## Captain's intent
+## User's intent
 Exercise Herdr launcher placement for $2.
 
-## Firstmate spec
+## Director spec
 Verify the worker is placed in the correct workspace.
 EOF
 }

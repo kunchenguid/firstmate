@@ -36,4 +36,4 @@ There a live pane about to wedge-escalate asks each listed guard, and a `CRITICA
 
 Copy the smallest existing pair, keep the wrapper under ten lines, and keep every threshold in the engine with a comment naming the resource it bounds.
 Add the family's behavioral test alongside it and run it through `bin/fm-test-run.sh`.
-A family that needs a host-specific source (a fleet registry, a pool manager, a quota service, or a product's hook store) belongs to the operator's own layer, not this framework.
+A family that needs a host-specific source (a team registry, a pool manager, a quota service, or a product's hook store) belongs to the operator's own layer, not this framework.

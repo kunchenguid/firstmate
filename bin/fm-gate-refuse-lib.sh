@@ -167,9 +167,9 @@ fm_refuse_if_gate_agent() {
     return 0
   fi
   if [ "$FM_GATE_REFUSE_REASON" = env ]; then
-    echo "error: no-mistakes gate agent must not drive the fleet (NO_MISTAKES_GATE set)" >&2
+    echo "error: no-mistakes gate agent must not drive the worker system (NO_MISTAKES_GATE set)" >&2
   else
-    echo "error: refusing fleet lifecycle from inside a no-mistakes gate worktree ($FM_GATE_REFUSE_COMMON)" >&2
+    echo "error: refusing worker-system lifecycle from inside a no-mistakes gate worktree ($FM_GATE_REFUSE_COMMON)" >&2
   fi
   exit "$FM_GATE_REFUSE_EXIT"
 }

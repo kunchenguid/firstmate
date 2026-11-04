@@ -417,7 +417,7 @@ cmd_notify() {
   command -v jq >/dev/null 2>&1 || fail "jq is required"
 
   if [ -z "$snapshot_src" ]; then
-    snapshot=$("$SCRIPT_DIR/fm-fleet-snapshot.sh" --json) || fail "cannot read the fleet snapshot"
+    snapshot=$("$SCRIPT_DIR/fm-fleet-snapshot.sh" --json) || fail "cannot read the team snapshot (fm-fleet-snapshot.v1)"
   elif [ "$snapshot_src" = - ]; then
     snapshot=$(cat)
   else

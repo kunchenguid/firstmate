@@ -1840,7 +1840,7 @@ families_for_changed_path() {
     docs/fm-test-isolation-proof.json)
       printf '%s\n' pure-contract-unit
       ;;
-    .github/*|.gitattributes|.tasks.toml|AGENTS.md|CLAUDE.md|CONTRIBUTING.md|\
+    .github/*|.gitattributes|.tasks.toml|.greptile/*.md|AGENTS.md|CLAUDE.md|CONTRIBUTING.md|GROK_BOT.md|\
     docs/configuration.md|docs/supervision-protocols/*)
       printf '%s\n' pure-contract-unit
       ;;
@@ -1893,7 +1893,7 @@ families_for_changed_path() {
     tests/*)
       printf '%s\n' "__unmapped__:$path"
       ;;
-    README.md|LICENSE|assets/*|docs/*|.gitignore)
+    README.md|VISION.md|LICENSE|assets/*|docs/*|.gitignore)
       ;;
     *)
       if [ -e "$path" ]; then

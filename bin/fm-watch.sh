@@ -187,7 +187,7 @@
 #                          same guarded fm-spawn.sh --secondmate path the
 #                          session-start sweep uses; one wake per relaunch, and
 #                          state/.secondmate-relaunch-<id> keeps the durable
-#                          per-mate count (bin/fm-secondmate-liveness-lib.sh)
+#                          per-Project-Director count (bin/fm-secondmate-liveness-lib.sh)
 #   check: secondmate <id> auto-relaunch failed after <cause>: <detail>
 #                          the same verdict authorized recovery but the
 #                          relaunch itself failed; the attempt is ledgered and
@@ -1164,7 +1164,7 @@ EOF
 # inside SECONDMATE_LIVENESS_WINDOW_SECS: the bound marker wakes once, further
 # probes stay silent, and a later live probe ledgers a `rearmed` row and clears
 # the marker so a manually recovered mate rejoins the guarantee with a full
-# budget. The per-mate liveness lock serializes this tick against a concurrent
+# budget. The per-Project-Director liveness lock serializes this tick against a concurrent
 # session-start sweep, so neither side can kill or re-probe an endpoint the
 # other is mid-relaunch on.
 secondmate_liveness_tick() {
@@ -1714,7 +1714,7 @@ wedge_wait_evidence() {  # <task> -> one wait_record on stdout
     && run=$(crew_gate_awaits_human_decision "$task") \
     && status_has_open_needs_decision "$statusf" "$run"; then
     wait_record 'verified wait at a parked gate' "awaiting firstmate's ask-user decision" \
-      supervisor "decide the gate's ask-user finding and relay the decision to the crewmate" ''
+      supervisor "decide the gate's ask-user finding and relay the decision to the Builder" ''
     return 0
   fi
   return 1
@@ -2464,11 +2464,11 @@ handle_paused_stale() {  # <window> <task> <hash>
   declaration="declared:$(fm_wake_signal_sig "$statusf" || true)"
   if status_is_captain_held "$last"; then
     if away_record_present; then
-      triage_log "absorbed stale (captain-held, never rechecked while the away-posture record exists): $win"
+      triage_log "absorbed stale (user-held, never rechecked while the away-posture record exists): $win"
       return 0
     fi
-    detail="captain-held, awaiting the captain"
-    reason="captain-held ${age}s, awaiting the captain - verified hold transfer, rechecked on a long cadence not a wedge; answer the held decision or release the hold"
+    detail="user-held, awaiting the user"
+    reason="user-held ${age}s, awaiting the user - verified hold transfer, rechecked on a long cadence not a wedge; answer the held decision or release the hold"
   elif until=$(status_paused_until "$last"); then
     if [ "$now" -lt "$until" ] && [ "$age" -lt "$PAUSE_RESURFACE_SECS" ]; then
       triage_log "absorbed stale (paused until $(( until - now ))s from now, declared time not reached): $win"
@@ -2545,7 +2545,7 @@ busy_turn_bound_check() {  # <window> <task> <hash> <since-file> <escalation-fil
       declared="declared:$(fm_wake_signal_sig "$statusf" || true)"
       if captain_held_silenced "$(status_declared_wait_line "$statusf")"; then
         printf '%s' "$declared" > "$STATE/.stale-$key"
-        triage_log "absorbed busy over-age pane (captain-held, never rechecked while the away-posture record exists): $win"
+        triage_log "absorbed busy over-age pane (user-held, never rechecked while the away-posture record exists): $win"
         return 0
       fi
       if [ "$(cat "$STATE/.stale-$key" 2>/dev/null || true)" != "$declared" ]; then
@@ -2958,7 +2958,7 @@ surface_nonterminal_stale() {  # <window> <hash> [dialog-name]
     clear_pause_state "$key"
   fi
   if [ "$throttled" -eq 0 ]; then
-    triage_log "absorbed non-terminal stale (declared wait or open captain call already re-surfaced this window): $win"
+    triage_log "absorbed non-terminal stale (declared wait or open user call already re-surfaced this window): $win"
     return 0
   fi
   wake "$reason"
@@ -4326,7 +4326,7 @@ EOF
           # away-posture record exists (captain_held_silenced).
           if captain_held_silenced "$last"; then
             printf '%s' "$h" > "$sf"
-            triage_log "absorbed stale (captain-held, never rechecked while the away-posture record exists): $w"
+            triage_log "absorbed stale (user-held, never rechecked while the away-posture record exists): $w"
           elif [ "$(cat "$sf" 2>/dev/null || true)" != "$h" ]; then
             stale_reason=$(stale_reason_naming_dialog "stale: $w" "$dialog")
             fm_wake_append stale "$w" "$stale_reason" || exit 1
@@ -4356,7 +4356,7 @@ EOF
               wedge_episode_end "$key" 0 1
               date +%s > "$ssf"
               clear_write_tracking "$key"
-              triage_log "absorbed stale (provably working, overriding a stale captain-relevant status): $w"
+              triage_log "absorbed stale (provably working, overriding a stale user-relevant status): $w"
             elif captain_call_stale_bound "$key" "$task"; then
               # The line is captain-relevant and stays so, but the backlog says
               # the captain already holds this work: further NEW pane hashes with
@@ -4369,7 +4369,7 @@ EOF
               # Pre-cap shape kept the count here (keep-count contract).
               wedge_episode_end "$key" 0 1
               clear_write_tracking "$key"
-              triage_log "absorbed stale (open captain call already surfaced for this status): $w"
+              triage_log "absorbed stale (open user call already surfaced for this status): $w"
             else
               stale_reason=$(stale_reason_naming_dialog "stale: $w" "$dialog")
               fm_wake_append stale "$w" "$stale_reason" || exit 1
@@ -4551,7 +4551,7 @@ EOF
       fi
       touch "$STATE/.last-heartbeat"
       echo $(( $(cat "$STATE/.heartbeat-streak" 2>/dev/null || echo 0) + 1 )) > "$STATE/.heartbeat-streak"
-      triage_log "absorbed heartbeat (no captain-relevant change)"
+      triage_log "absorbed heartbeat (no user-relevant change)"
     fi
   fi
 

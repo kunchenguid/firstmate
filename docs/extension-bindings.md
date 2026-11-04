@@ -21,7 +21,7 @@ The host validates identity and accidental or supply-chain change, but an execut
 Do not bind a package that is not trusted to that level.
 
 Protocol responses are still untrusted evidence.
-The host accepts only the fields and operations below, and no response can authorize a captain decision, merge, destination, stronger operation, force, discard, cleanup, or credential use.
+The host accepts only the fields and operations below, and no response can authorize a user decision, merge, destination, stronger operation, force, discard, cleanup, or credential use.
 External adapters do not receive the built-in `answers`, `autohandle`, or `self-announcing` seams.
 A captured external result therefore remains unhandled until the existing Firstmate handling owner acknowledges it.
 
@@ -230,7 +230,7 @@ The host runs in the Firstmate home that owns the source, never in a task worker
 Claude, Codex, OpenCode, Pi, pi-signed, Grok, Kimi, Cursor, Muse, and Rovo therefore expose no package-loading surface for this capability.
 The result reaches every supported primary through the existing bounded `check` wake path, including the unknown-protocol fallback used where no specialized primary continuation exists.
 Runtime session providers are not consulted because a process-event source has no task endpoint.
-Remote and local secondmate homes bind and install independently, and the primary never executes a missing remote-home package locally. `remote-bind` carries one canonical `firstmate.extension-package-transfer.v1` JSON envelope over the existing bounded `fm-on` stdin/stdout job. Its hashed manifest pins the extension id, version, complete package-tree digest, entry count, total bytes, and byte-sorted entries. Entries are limited to normalized relative directories at mode 0755 and single regular files at mode 0644 or 0755, each with an exact size and SHA-256 payload digest. The receiver accepts at most 128 entries, 256 KiB per file, 512 KiB of package bytes, and 900,000 serialized bytes; it rejects malformed or truncated JSON, duplicate keys or paths, collisions, absolute or traversing names, links and special files, noncanonical modes, hash or size mismatches, and duplicate transfer identities.
+Remote and local Project Director homes bind and install independently, and the primary never executes a missing remote-home package locally. `remote-bind` carries one canonical `firstmate.extension-package-transfer.v1` JSON envelope over the existing bounded `fm-on` stdin/stdout job. Its hashed manifest pins the extension id, version, complete package-tree digest, entry count, total bytes, and byte-sorted entries. Entries are limited to normalized relative directories at mode 0755 and single regular files at mode 0644 or 0755, each with an exact size and SHA-256 payload digest. The receiver accepts at most 128 entries, 256 KiB per file, 512 KiB of package bytes, and 900,000 serialized bytes; it rejects malformed or truncated JSON, duplicate keys or paths, collisions, absolute or traversing names, links and special files, noncanonical modes, hash or size mismatches, and duplicate transfer identities.
 
 The receiver creates the package in a private temporary directory below `data/extensions/staging`, validates ownership, permissions, the package manifest, executable, and complete reconstructed tree, then atomically publishes the transfer before the normal bind handshake and binding publication.
 A failed bind moves the exact transfer identity into `data/extensions/retired-staging` without enabling it.
@@ -238,7 +238,7 @@ A failed bind moves the exact transfer identity into `data/extensions/retired-st
 It refuses missing, ambiguous, drifted, mismatched, in-use, or unrelated state before moving the enabled binding into the staged identity and reversibly moving that exact unit into `data/extensions/retired-staging`.
 If the process stops between those two moves, a retry resumes only when the retained binding and staged receipt, version directory, package, transfer digest, and binding digest still form that one exact retirement identity; altered or coexisting partial state is refused.
 The transfer contains package bytes and declarative metadata only: it carries no environment, credentials, cookies, tokens, destinations, or caller-selected command text and creates no generic file-transfer surface.
-Bindings and credentials are deliberately absent from the inherited secondmate configuration allowlist.
+Bindings and credentials are deliberately absent from the inherited Project Director configuration allowlist.
 
 ## Runnable example
 

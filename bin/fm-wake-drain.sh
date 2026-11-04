@@ -416,7 +416,7 @@ EOF
     return 0
   fi
   [ "$shown" -gt 0 ] || [ "$omitted" -gt 0 ] || return 0
-  printf 'STATUS OUTCOME BACKSTOP (newest captain-facing task event has no covering branch outcome):\n' || return 1
+  printf 'STATUS OUTCOME BACKSTOP (newest user-facing task event has no covering branch outcome):\n' || return 1
   printf '%s' "$output" || return 1
   if [ "$omitted" -gt 0 ]; then
     printf 'STATUS OUTCOME BACKSTOP: %d more omitted (byte cap)\n' "$omitted" || return 1
@@ -581,7 +581,7 @@ EOF
   # captain ruled: a call can dissolve, or turn out to have been a question of
   # fact. Reconcile with what actually happened - never by closing on the
   # strength of this line.
-  printf 'RECORD DIVERGENCE: reconcile each one - record the captain'"'"'s own words with bin/fm-captain-hold.sh answer <task> --decision-file <path>, or re-open the status decision when that resolution was not the captain'"'"'s word.\n' || return 1
+  printf 'RECORD DIVERGENCE: reconcile each one - record the user'"'"'s own words with bin/fm-captain-hold.sh answer <task> --decision-file <path>, or re-open the status decision when that resolution was not the user'"'"'s word.\n' || return 1
 }
 
 # Print BRANCH OUTCOMES: what the supervision host's session recorded since
@@ -595,14 +595,14 @@ EOF
 #   - Captain outcomes come first and never wait behind routine ones. Every
 #     unprocessed captain row is presented on every drain until main
 #     acknowledges it, collapsed to one line per task: the task's newest
-#     presented summary, naming how many unprocessed captain outcomes it
+#     presented summary, naming how many unprocessed user outcomes it
 #     carries, with tasks in order of their oldest unprocessed row. The byte
 #     cap presents only the oldest contiguous run of captain rows and counts
 #     the newer ones it holds back, so the printed bin/fm-branch-outcome.sh
 #     mark-processed target, the newest presented row, acknowledges exactly
 #     what was presented and always at least the oldest row. An unprocessed
 #     captain row is never adopted as processed, so a home that opts in
-#     mid-session cannot lose its first captain outcome. Each line names how
+#     mid-session cannot lose its first user outcome. Each line names how
 #     long ago its row was recorded (the store's "recordedAgo"), because a row
 #     main never acknowledged can come back long after its situation settled
 #     (after a harness or posture switch, or an upgrade whose earlier
@@ -683,13 +683,13 @@ print_branch_outcomes_section() {
 $captain
 ROWS
   if [ "$shown" -gt 0 ]; then
-    text="BRANCH OUTCOMES (captain outcomes the supervision session recorded for you, one line per task, oldest first; each says what was true when it was recorded, so check the task's current state first, including its still-open decisions listed above under OPEN DECISIONS, and sort them into still open and already settled, such as a decision since answered, a PR since merged, or a task since finished - process the still-open ones as firstmate: tell the captain, land or merge what is ready, answer or escalate a decision, or act on a blocker; your reply to the captain covers only those, as if the settled ones had never been listed, and a settled one needs only the acknowledgement):
+    text="BRANCH OUTCOMES (user outcomes the supervision session recorded for you, one line per task, oldest first; each says what was true when it was recorded, so check the task's current state first, including its still-open decisions listed above under OPEN DECISIONS, and sort them into still open and already settled, such as a decision since answered, a PR since merged, or a task since finished - process the still-open ones as Director: tell the user, land or merge what is ready, answer or escalate a decision, or act on a blocker; your reply to the user covers only those, as if the settled ones had never been listed, and a settled one needs only the acknowledgement):
 "
     for line in "${captain_lines[@]}"; do
       text="$text$line
 "
     done
-    [ "$held" -eq 0 ] || text="${text}BRANCH OUTCOMES: $held newer captain outcome(s) are held back (byte cap); they follow on the next drain once these are acknowledged
+    [ "$held" -eq 0 ] || text="${text}BRANCH OUTCOMES: $held newer user outcome(s) are held back (byte cap); they follow on the next drain once these are acknowledged
 "
     text="${text}BRANCH OUTCOMES: after processing them run bin/fm-branch-outcome.sh mark-processed --through $target; until then every drain presents them again
 "

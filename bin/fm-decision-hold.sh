@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # fm-decision-hold.sh - transitional compatibility shim over bin/fm-captain-hold.sh.
 #
-# The separate "decision" concept collapsed into the one primitive the captain
-# cares about: a task held for the captain. bin/fm-captain-hold.sh owns every
+# The separate "decision" concept collapsed into the one primitive the user
+# cares about: a task held for the user. The compatibility-named
+# bin/fm-captain-hold.sh owns every
 # surviving behavior; this shim only maps the retired command surface onto it so
 # in-flight work briefed before the collapse keeps working for one release, and
 # it will be removed in the release after the collapse lands.
@@ -120,22 +121,22 @@ command_resolve() {
   id=$(compose "$origin" "$key")
   [ -n "$decision_file" ] || fail "--decision-file is required"
   [ -f "$decision_file" ] || fail "decision file does not exist: $decision_file"
-  [ -n "$routed" ] || fail "at least one --routed-to task is required; use answer when the captain's answer routes no work"
+  [ -n "$routed" ] || fail "at least one --routed-to task is required; use answer when the user's answer routes no work"
   routed=$(printf '%s\n' "$routed" | tr ' ' '\n' | sed '/^$/d' | LC_ALL=C sort -u | paste -sd' ' -)
   routed_csv=$(printf '%s' "$routed" | tr ' ' ',')
   decision_text=$(cat "$decision_file")
   [ -n "$decision_text" ] || fail "decision file must not be empty"
   decision_digest=$(sha256_text "$decision_text")
-  hold_show=$(task_show "$id") || fail "captain decision $id does not exist in the active home"
+  hold_show=$(task_show "$id") || fail "user decision $id does not exist in the active home"
   hold_body=$(show_field "$hold_show" body)
   case "$hold_body" in
     *"Resolution recorded by fm-decision-hold."*"Routed identities: "*)
       recorded_digest=$(recorded_field "$hold_body" "Decision digest" || true)
       recorded_routes=$(recorded_field "$hold_body" "Routed identities" || true)
       [ "$recorded_digest" = "$decision_digest" ] \
-        || fail "captain decision $id records a different captain decision"
+        || fail "user decision $id records a different user decision"
       [ "$recorded_routes" = "$routed_csv" ] \
-        || fail "captain decision $id records different routed work"
+        || fail "user decision $id records different routed work"
       resolution_recorded=1
       legacy_replay=1
       ;;
@@ -153,11 +154,11 @@ command_resolve() {
       || fail "routed task $dep is not durably blocked by $id"
   done
   tmp=$(umask 077; mktemp "${TMPDIR:-/tmp}/fm-decision-hold-resolve.XXXXXX") \
-    || fail "cannot stage the captain decision"
+    || fail "cannot stage the user decision"
   if ! { cat "$decision_file" && printf '\n\nRouted work:\n' \
     && printf '%s\n' "$routed" | tr ' ' '\n' | sed 's/^/- /'; } > "$tmp"; then
     rm -f -- "$tmp"
-    fail "cannot stage the captain decision for $id"
+    fail "cannot stage the user decision for $id"
   fi
   answer_file=$tmp
   [ "$legacy_replay" = 0 ] || answer_file=$decision_file

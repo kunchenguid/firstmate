@@ -181,7 +181,7 @@ The tracked Grok adapter therefore references `${GROK_WORKSPACE_ROOT:-}` directl
 Validation ran in a git-initialized scratch firstmate-shaped project under this task worktree.
 The scratch project contained copies of the modified checker and policy, unchanged tracked adapters, a dummy checkpoint, a dummy arm script, a harmless `tmux` argument-capture fixture, and a private sentinel path.
 No modified file was installed into the primary checkout or a live harness configuration.
-No live watcher, fleet state, or herdr lifecycle command was used.
+No live watcher, team state, or herdr lifecycle command was used.
 The OpenCode interactive check used the dedicated tmux socket `fm-pretool-smoke`.
 
 Harness versions were:

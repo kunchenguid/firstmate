@@ -164,8 +164,8 @@ const BRANCH_TOOL_NAMES = ["read", "bash", "fm_branch_report"] as const;
 const branchCacheKey = `fm-branch-${createHash("sha256").update(fmHome).digest("hex").slice(0, 24)}`;
 
 const MIRROR_MESSAGE_CAP = 4000;
-const MERGE_NOTE_BOAT = "⛵";
-const VISIBLE_OUTCOME_ANCHOR = "⚓";
+const MERGE_NOTE_BOAT = "•";
+const VISIBLE_OUTCOME_ANCHOR = "◆";
 const VISIBLE_OUTCOME_ENTRY_TYPE = "fm-branch-visible-outcome";
 // The processing half of the captain-outcome contract. The visible entry
 // above is the DISPLAY: crash-safe and exact-once. This hidden, typed request

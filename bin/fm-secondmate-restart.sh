@@ -116,7 +116,7 @@ for arg in "$@"; do
 done
 [ "${#IDS[@]}" -gt 0 ] || { usage >&2; exit 2; }
 
-# Per-mate pass state, kept as parallel indexed arrays so this stays bash-3.2
+# Per-Project-Director pass state, kept as parallel indexed arrays so this stays bash-3.2
 # safe. PLAN is the phase the mate reached: persist-sent, or fallback with the
 # reason already decided.
 PLAN=()
@@ -274,7 +274,7 @@ while [ "$i" -lt "${#IDS[@]}" ]; do
     # the file on that host belongs to a different home and re-resolving there
     # would silently move the mate onto another runtime. Resolve the pin here and
     # pass it explicitly, so both placements land on the same decision. The mate id
-    # rides along so a per-mate override is honored for exactly the mate being
+    # rides along so a per-Project-Director override is honored for exactly the Project Director being
     # restarted, and an unreadable pin is refused for that mate instead of resolving
     # to whatever it happened to run last time.
     if ! resolved_harness=$("$SCRIPT_DIR/fm-harness.sh" secondmate "$id"); then

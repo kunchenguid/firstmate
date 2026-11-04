@@ -431,10 +431,10 @@ write_ship_brief() {  # <home> <id> [description]
   mkdir -p "$home/data/$id"
   cat > "$home/data/$id/brief.md" <<EOF
 # Task
-## Captain's intent
+## User's intent
 $description
 
-## Firstmate spec
+## Director spec
 Verify projected workspace behavior for $id.
 EOF
 }

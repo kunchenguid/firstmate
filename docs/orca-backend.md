@@ -1,13 +1,13 @@
 # Orca runtime backend
 
 Orca is an experimental macOS backend in which the Orca app owns both the task worktree and terminal endpoint.
-The crewmate harness remains the agent process launched inside that endpoint.
+The worker harness remains the agent process launched inside that endpoint.
 Firstmate agents load [`firstmate-orca`](../.agents/skills/firstmate-orca/SKILL.md) before operating or recovering this backend.
 
 ## Setup
 
 Pick Orca when you already use the Orca macOS app and want Orca-managed worktrees and terminals instead of Treehouse plus a session multiplexer.
-Orca is macOS-only, explicit-only, and does not support secondmate spawns.
+Orca is macOS-only, explicit-only, and does not support Project Director spawns.
 
 Prerequisites:
 
@@ -54,15 +54,15 @@ Exact command flags and response parsing are owned by `bin/backends/orca.sh` and
 
 `fm-peek.sh` reads with `orca terminal read`.
 An ordinary metadata-routed `fm-send.sh` text steer becomes a durable steering-inbox record, and only its best-effort constant doorbell passes through Orca's submit machinery.
-On the typed plane, `fm-send.sh` verifies composer clearance through the fleet-wide classifier in `bin/fm-composer-lib.sh`, retrying Enter without retyping when a slash popup first fills an argument placeholder.
+On the typed plane, `fm-send.sh` verifies composer clearance through the team-wide classifier in `bin/fm-composer-lib.sh`, retrying Enter without retyping when a slash popup first fills an argument placeholder.
 The composer read is one bounded tail of the live terminal and never pages backward into scrollback, so a stale startup banner cannot compete with the bottom-anchored composer.
 A bare shell row is `unknown`, not an empty agent composer, and plain-text captures degrade a glyph row carrying trailing text to `unknown` rather than a false `pending`.
 The watcher has no native Orca busy signal, so each harness adapter's semantic lifecycle supplies worker state.
 Grok alone retains its isolated rendered-tail fallback.
 
 Cleanup keeps all shared Firstmate safety checks.
-A scout still requires its report and completed decision inventory.
-A ship still refuses dirty or unlanded work.
+An Investigator still requires its report and completed decision inventory.
+a Builder still refuses dirty or unlanded work.
 Before release, cleanup resolves the recorded Orca worktree id and verifies its path matches the recorded worktree path.
 A missing, unreadable, or mismatched identity preserves metadata and stops rather than deleting anything.
 After those checks, Firstmate closes the exact terminal and releases the exact worktree with Orca's worktree command.
@@ -74,7 +74,7 @@ Reinstall the CLI and rerun; [`verification/runtime-backends.md`](verification/r
 
 - Orca is macOS-only and explicit-only.
 - The app must be running and report ready.
-- Secondmate spawns are unsupported.
+- Project Director spawns are unsupported.
 - Escape is unsupported.
 - Orca exposes no stable CLI version or protocol marker, so readiness is the compatibility gate rather than a version floor.
 - Only the verified terminal-handle and worktree result fields are accepted; speculative response shapes are rejected.

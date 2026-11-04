@@ -163,7 +163,7 @@ RECORDED_AGO_JQ='def recorded_ago: ([$now - .epoch, 0] | max) as $s
     else "\($s / 86400 | floor)d" end;'
 
 usage() {
-  echo "usage: fm-branch-outcome.sh append --task <id> --verdict routine|captain --summary <text> [--wake <text>] [--silent true|false] | unread | mark-read --through <seq> | unprocessed | mark-processed --through <seq> | present | processed-init [--held-lock] | list [--recent <n>] | lookup --seqs <n,...> | startup-replay | seed-tail" >&2
+  echo "usage: fm-branch-outcome.sh append --task <id> --verdict routine|captain --summary <text> [--wake <text>] [--silent true|false] | unread | mark-read --through <seq> | unprocessed | mark-processed --through <seq> | present | processed-init [--held-lock] | list [--recent <n>] | lookup --seqs <n,...> | startup-replay | seed-tail  (captain is the compatibility identifier for a user outcome)" >&2
   exit 2
 }
 
@@ -669,7 +669,7 @@ case "$CMD" in
     VERDICT=$(jq -r --argjson through "$THROUGH" 'select(.seq == $through) | .verdict' "$STORE")
     if [ "$VERDICT" != captain ]; then
       fm_lock_release "$LOCK"
-      echo "error: refusing processed advancement because seq $THROUGH is not an unprocessed captain outcome" >&2
+      echo "error: refusing processed advancement because seq $THROUGH is not an unprocessed user outcome (compatibility verdict=\"captain\")" >&2
       exit 1
     fi
     write_processed "$THROUGH"

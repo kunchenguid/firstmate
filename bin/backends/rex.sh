@@ -36,7 +36,7 @@
 # human (`fm-<id>` window labels), for duplicate refusal, and for list_live
 # discovery (the home-scoped block label). Every call passes an explicit
 # `-s <session-id>` and `-b <block-id>`: without -s the CLI defaults to the
-# caller's own REX_SESSION, which is the captain's session.
+# caller's own REX_SESSION, which is the user's session.
 #
 # Exit codes (verified live, docs/rex-backend.md): 0 ok, 2 invalid command
 # line, 3 target not found (or an ambiguous label, which full ids never are),

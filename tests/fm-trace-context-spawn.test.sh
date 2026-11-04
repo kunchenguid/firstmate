@@ -15,10 +15,10 @@ TMP_ROOT=$(fm_test_tmproot fm-trace-context-spawn)
 write_ship_brief() {  # <file> <id>
   cat > "$1" <<EOF
 # Task
-## Captain's intent
+## User's intent
 Exercise trace propagation for $2.
 
-## Firstmate spec
+## Director spec
 Verify the spawned process receives the expected trace context.
 EOF
 }

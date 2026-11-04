@@ -789,10 +789,10 @@ make_polytoken_spawn_case() {
     "$home/.config/polytoken"
   cat > "$home/data/$id/brief.md" <<'EOF'
 # Task
-## Captain's intent
+## User's intent
 Exercise Polytoken dispatch.
 
-## Firstmate spec
+## Director spec
 Verify launch and delivery behavior.
 EOF
   printf 'polytoken\n' > "$home/config/crew-harness"

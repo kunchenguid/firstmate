@@ -102,7 +102,7 @@ fi
 if [ -n "$EXEC_NUM" ] && [ "$EXEC_NUM" -ge "$LOOP_CEILING" ]; then
   [ "$EXEC_NUM" -eq "$LOOP_CEILING" ] || allow_stop
   fm_supervision_needed "$STATE" "$GRACE" || allow_stop
-  continue_turn "FIRSTMATE SUPERVISION FOLLOW-UP CEILING REACHED - this session has taken $EXEC_NUM consecutive hook-driven turns, so automatic wake delivery stops here to bound the loop. Queued wakes stay durable: run bin/fm-wake-drain.sh, handle them, and run its exact WAKE_ACK_REQUIRED command. Supervision resumes automatically at the next turn end after the captain's next message."
+  continue_turn "FIRSTMATE SUPERVISION FOLLOW-UP CEILING REACHED - this session has taken $EXEC_NUM consecutive hook-driven turns, so automatic wake delivery stops here to bound the loop. Queued wakes stay durable: run bin/fm-wake-drain.sh, handle them, and run its exact WAKE_ACK_REQUIRED command. Supervision resumes automatically at the next turn end after the user's next message."
 fi
 
 if ! fm_supervision_needed "$STATE" "$GRACE"; then

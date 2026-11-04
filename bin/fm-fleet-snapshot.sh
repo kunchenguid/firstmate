@@ -182,7 +182,7 @@ validate_positive_bound() {  # <name> <value>
 }
 case "$FM_SNAPSHOT_SECONDMATES" in
   ''|*[!0-9]*)
-    echo "fm-fleet-snapshot: FM_SNAPSHOT_SECONDMATES must be a non-negative integer" >&2
+    echo "fm-fleet-snapshot: compatibility setting FM_SNAPSHOT_SECONDMATES must be a non-negative integer" >&2
     exit 2
     ;;
 esac
@@ -534,7 +534,7 @@ backlog_json() (  # [<backlog-path>] - defaults to this home's $BACKLOG
        end)
     | .records |= map(
         if (.body_lines | length) > 0 then
-          .hold_set = cap(.body_lines[0]; "^Captain hold set:[[:space:]]*(?<v>[0-9]{4}-[0-9]{2}-[0-9]{2}(?:T[0-9]{2}:[0-9]{2}:[0-9]{2}Z)?)$")
+          .hold_set = cap(.body_lines[0]; "^(?:User|Captain) hold set:[[:space:]]*(?<v>[0-9]{4}-[0-9]{2}-[0-9]{2}(?:T[0-9]{2}:[0-9]{2}:[0-9]{2}Z)?)$")
           | .local_note = (.local_note
               // (if any(.body_lines[];
                     test("^Resolution recorded by fm-(captain|decision)-hold\\.$"))
@@ -2032,18 +2032,18 @@ FM_CONTRIBUTIONS_NOW="$SNAPSHOT_NOW" "$SCRIPT_DIR/fm-contributions.sh" snapshot 
 
 if [ "$OUTPUT_MODE" = secondmate-home-summary ]; then
   secondmate_home_summary_json "$BACKLOG_JSON_FILE" "$TASKS_JSON_FILE" \
-    || { echo "fm-fleet-snapshot: secondmate home summary failed" >&2; exit 1; }
+    || { echo "fm-fleet-snapshot: Project Director home summary failed" >&2; exit 1; }
   exit 0
 fi
 
 scout_report_lines > "$SCOUT_REPORTS_JSON_FILE" \
-  || { echo "fm-fleet-snapshot: scout report snapshot failed" >&2; exit 1; }
+  || { echo "fm-fleet-snapshot: Investigator report snapshot failed" >&2; exit 1; }
 main_inventory_json "$BACKLOG_JSON_FILE" "$TASKS_JSON_FILE" > "$MAIN_INVENTORY_JSON_FILE" \
   || { echo "fm-fleet-snapshot: main inventory summary failed" >&2; exit 1; }
 secondmate_current_json "$TASKS_JSON_FILE" "$SECONDMATE_CURRENT_JSON_FILE" \
-  || { echo "fm-fleet-snapshot: registered secondmate aggregation failed" >&2; exit 1; }
+  || { echo "fm-fleet-snapshot: registered Project Director aggregation failed" >&2; exit 1; }
 secondmate_landed_from_current_json "$SECONDMATE_CURRENT_JSON_FILE" "$SECONDMATE_LANDED_JSON_FILE" \
-  || { echo "fm-fleet-snapshot: secondmate landed projection failed" >&2; exit 1; }
+  || { echo "fm-fleet-snapshot: Project Director landed projection failed" >&2; exit 1; }
 
 jq -n \
   --arg generated "$SNAPSHOT_NOW" \

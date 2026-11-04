@@ -1009,10 +1009,10 @@ NEVER_SEND="$HOME_DIR/config/dispatch-never-send"
 PRIVATE_BRIEF="$TMP_ROOT/private-brief.md"
 cat > "$PRIVATE_BRIEF" <<'MD'
 # Task
-## Captain's intent
+## User's intent
 Fix the pager for the Acme-Ledger account 4417-2290.
 
-## Firstmate spec
+## Director spec
 - Keep the change small.
 MD
 expect_withheld() {  # <label> <stderr fragment> [<value that must not print>...]
@@ -1318,10 +1318,10 @@ pass "per-rule confidence floors fall to the most probable runner-up that clears
 SCAFFOLD_BRIEF="$TMP_ROOT/scaffold-brief.md"
 cat > "$SCAFFOLD_BRIEF" <<'MD'
 # Task
-## Captain's intent
+## User's intent
 Add a flag to the pager.
 
-## Firstmate spec
+## Director spec
 Touch pager.sh only.
 ```sh
 # Not a heading inside a fence
@@ -1333,32 +1333,32 @@ Anything else.
 # Setup
 BOILERPLATE-SETUP never push to the default branch.
 
-## Captain intent authorized for --intent
+## User intent authorized for --intent
 BOILERPLATE-DUPLICATE
 MD
 reset_log
 write_response "$RESPONSE" rule_4 0.9
 TYPESAFE_API_KEY=$KEY run code out err "$SCAFFOLD_BRIEF"
 sent=$(jq -r .state.task.brief "$LOG/body")
-assert_contains "$sent" $'## Captain\'s intent\nAdd a flag to the pager.' "the captain's intent section is sent"
-assert_contains "$sent" $'## Firstmate spec\nTouch pager.sh only.' "the Firstmate spec section is sent"
+assert_contains "$sent" $'## User\'s intent\nAdd a flag to the pager.' "the user's intent section is sent"
+assert_contains "$sent" $'## Director spec\nTouch pager.sh only.' "the Director spec section is sent"
 assert_contains "$sent" $'# Not a heading inside a fence\n## Setup\n```\n### Out of scope\nAnything else.' "fenced lines and subheadings stay inside the section"
 assert_not_contains "$sent" 'BOILERPLATE' "scaffold boilerplate after the task sections is not sent"
 assert_not_contains "$sent" '# Task' "the enclosing Task heading is not sent"
-assert_not_contains "$sent" 'Brief kind:' "a brief without a scout contract line gets no kind line"
+assert_not_contains "$sent" 'Worker role:' "a brief without an Investigator contract line gets no role line"
 
 SPEC_ONLY_BRIEF="$TMP_ROOT/spec-only-brief.md"
-printf '%s\n' '# Task' '## Firstmate spec' 'Spec text.' '## Rules' 'RULES-TEXT' > "$SPEC_ONLY_BRIEF"
+printf '%s\n' '# Task' '## Director spec' 'Spec text.' '## Rules' 'RULES-TEXT' > "$SPEC_ONLY_BRIEF"
 reset_log
 TYPESAFE_API_KEY=$KEY run code out err "$SPEC_ONLY_BRIEF"
-assert_equals $'## Firstmate spec\nSpec text.' "$(jq -r .state.task.brief "$LOG/body")" "one recognized section is enough"
+assert_equals $'## Director spec\nSpec text.' "$(jq -r .state.task.brief "$LOG/body")" "one recognized section is enough"
 
-printf '%s\n' '# Task' '## Firstmate spec   ' 'Spec text.' '## Rules' 'RULES-TEXT' > "$SPEC_ONLY_BRIEF"
+printf '%s\n' '# Task' '## Director spec   ' 'Spec text.' '## Rules' 'RULES-TEXT' > "$SPEC_ONLY_BRIEF"
 reset_log
 TYPESAFE_API_KEY=$KEY run code out err "$SPEC_ONLY_BRIEF"
 assert_equals "$(cat "$SPEC_ONLY_BRIEF")" "$(jq -r .state.task.brief "$LOG/body")" "a heading with trailing blanks is not a section, matching spawn validation"
 
-printf '%s\n' 'Preamble.' '## Firstmate spec' 'Spec text.' > "$SPEC_ONLY_BRIEF"
+printf '%s\n' 'Preamble.' '## Director spec' 'Spec text.' > "$SPEC_ONLY_BRIEF"
 reset_log
 TYPESAFE_API_KEY=$KEY run code out err "$SPEC_ONLY_BRIEF"
 assert_equals "$(cat "$SPEC_ONLY_BRIEF")" "$(jq -r .state.task.brief "$LOG/body")" "a section outside the Task heading is not a task section"
@@ -1368,32 +1368,32 @@ KIND_BRIEF="$TMP_ROOT/kind-brief.md"
 reset_log
 TYPESAFE_API_KEY=$KEY run code out err "$KIND_BRIEF"
 sent=$(jq -r .state.task.brief "$LOG/body")
-assert_contains "$sent" $'## Captain\'s intent\nAdd a flag to the pager.' "a ship brief still sends its task sections"
-assert_not_contains "$sent" 'Brief kind:' "a ship brief gets no kind line"
-assert_not_contains "$sent" 'mode=' "a ship brief's delivery mode is not sent"
+assert_contains "$sent" $'## User\'s intent\nAdd a flag to the pager.' "a Builder brief still sends its task sections"
+assert_not_contains "$sent" 'Worker role:' "a Builder brief gets no role line"
+assert_not_contains "$sent" 'mode=' "a Builder brief's delivery mode is not sent"
 
 { cat "$SCAFFOLD_BRIEF"; printf '%s\n' 'This is a SCOUT task: the deliverable is a written report, not a PR.'; } > "$KIND_BRIEF"
 reset_log
 TYPESAFE_API_KEY=$KEY run code out err "$KIND_BRIEF"
 sent=$(jq -r .state.task.brief "$LOG/body")
-assert_contains "$sent" $'Brief kind: scout (report only)\n\n## Captain\'s intent' "a scout brief's contract line names its kind"
-assert_not_contains "$sent" 'This is a SCOUT task' "the scout contract line itself is not sent"
+assert_contains "$sent" $'Worker role: Investigator (report only; compatibility kind=scout)\n\n## User\'s intent' "an Investigator brief's contract line names its role"
+assert_not_contains "$sent" 'This is a SCOUT task' "the compatibility contract line itself is not sent"
 
 reset_log
 TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
 assert_equals "$(cat "$BRIEF")" "$(jq -r .state.task.brief "$LOG/body")" "a brief with neither heading is sent whole"
-pass "only the brief's task sections and scout tag reach the model, with a whole-brief fallback"
+pass "only the brief's task sections and Investigator role reach the model, with a whole-brief fallback"
 
-# --- escalate: captain approval ------------------------------------------------
+# --- escalate: user approval ---------------------------------------------------
 reset_log
 write_response "$RESPONSE" rule_3 0.95
 TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
 expect_code 0 "$code" "escalate exits 0"
 assert_contains "$out" '  status: escalate' "approval-gated rule escalates"
-assert_contains "$out" "  reason: rule requires the captain's explicit approval before dispatch" "escalate names the approval gate"
+assert_contains "$out" "  reason: rule requires the user's explicit approval before dispatch" "escalate names the approval gate"
 assert_contains "$out" 'candidate: claude:fable  provider=claude  scope=model:fable  remaining=15%  spendPriority=-0.79  runway=projected_exhaustion  bounds=all_models:79%/projected_exhaustion,model:fable:15%/projected_exhaustion  -> eligible' "approval escalation preserves matched candidate evidence"
 assert_not_contains "$out" '  profile:' "escalate emits no profile line"
-pass "escalate: a rule declared approval: captain never yields a profile"
+pass "escalate: the compatibility value approval: captain never yields a profile"
 
 # --- rule floor fails: fall through to default -------------------------------
 reset_log

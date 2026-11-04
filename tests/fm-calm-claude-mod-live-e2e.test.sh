@@ -455,14 +455,14 @@ printf 'key=live-key\nerrors=0\ncooldown=0\nretry_after=0\n' >"$STATE_DIR/.super
 printf 'off\n' >"$FM_HOME_DIR/config/calm"
 launch "$DEBUG_LOG_NOTES" 1
 wait_idle
-wait_screen 'fm: ⚓ [seq 2] fm-live-b: LIVE_REPLAY_CAPTAIN still open' 'the session-start replay of an unprocessed captain outcome' 200
+wait_screen 'fm: ◆ [seq 2] fm-live-b: LIVE_REPLAY_CAPTAIN still open' 'the session-start replay of an unprocessed captain outcome' 200
 outcome append --task fm-live-c --verdict routine --summary 'LIVE_ROUTINE_NOTE worker healthy'
 outcome append --task fm-live-d --verdict routine --summary 'LIVE_SILENT_NOTE no change' --silent true
 outcome append --task fm-live-e --verdict captain --summary 'LIVE_NEW_CAPTAIN PR ready for review'
-wait_screen 'fm: ⛵ fm-live-c: LIVE_ROUTINE_NOTE worker healthy' 'the routine sailboat note' 200
-wait_screen 'fm: ⚓ [seq 5] fm-live-e: LIVE_NEW_CAPTAIN PR ready for review' 'the new captain anchor line' 200
+wait_screen 'fm: • fm-live-c: LIVE_ROUTINE_NOTE worker healthy' 'the routine sailboat note' 200
+wait_screen 'fm: ◆ [seq 5] fm-live-e: LIVE_NEW_CAPTAIN PR ready for review' 'the new captain anchor line' 200
 printf 'key=live-key\nerrors=2\ncooldown=300\nretry_after=0\n' >"$STATE_DIR/.supervision-host-health"
-wait_screen 'fm: ⛵ Supervision session paused after repeated engine errors' 'the latch-trip note' 200
+wait_screen 'fm: • Supervision session paused after repeated engine errors' 'the latch-trip note' 200
 notes_screen=$(screen)
 case "$notes_screen" in
   *'LIVE_PROCESSED_CAPTAIN'*|*'LIVE_SILENT_NOTE'*)
@@ -495,7 +495,7 @@ fi
 # restores it on resume, so the resumed session replays only what it has not shown.
 outcome append --task fm-live-f --verdict captain --summary 'LIVE_WHILE_CLOSED captain outcome'
 launch "$DEBUG_LOG_NOTES" 1 --continue
-wait_screen 'fm: ⚓ [seq 6] fm-live-f: LIVE_WHILE_CLOSED captain outcome' 'the replay of an outcome recorded while the session was closed' 400
+wait_screen 'fm: ◆ [seq 6] fm-live-f: LIVE_WHILE_CLOSED captain outcome' 'the replay of an outcome recorded while the session was closed' 400
 sleep 4
 resumed_notes=$(screen)
 [ "$(printf '%s\n' "$resumed_notes" | grep -c 'LIVE_REPLAY_CAPTAIN')" = 1 ] || {

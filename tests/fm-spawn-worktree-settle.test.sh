@@ -97,10 +97,10 @@ make_settle_case() {
   mkdir -p "$home/data/$id"
   cat > "$home/data/$id/brief.md" <<EOF
 # Task
-## Captain's intent
+## User's intent
 Exercise settled-worktree detection for $id.
 
-## Firstmate spec
+## Director spec
 Record only the pane's stable worktree.
 EOF
   touch "$home/state/.last-watcher-beat"

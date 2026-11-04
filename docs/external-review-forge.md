@@ -9,7 +9,7 @@ This document is the design for that rail; `bin/fm-project-mode.sh`'s header own
 [gerrit-forge-integration.md](gerrit-forge-integration.md) section 3 defines the forge as what the publication artifact is, and therefore which tool makes it.
 Here the artifact is a review that an external tool creates from a snapshot of local commits, so the rail is a fourth value of the existing closed `forge=` binding rather than a separate axis.
 The composition test holds: `local-only` is refused because it publishes nothing, `direct-PR` validates and then uploads with the tool, and `no-mistakes` is refused for now because the pipeline's push, pr, and ci steps would push to the shared origin.
-The binding is never detected, because no protocol fact identifies a snapshot-uploading review tool; the captain's registry entry `[direct-PR forge=external]` is the whole binding.
+The binding is never detected, because no protocol fact identifies a snapshot-uploading review tool; the user's registry entry `[direct-PR forge=external]` is the whole binding.
 The tool itself is private home configuration: `config/external-review.md` holds the worker instructions for validating, uploading, reading review state, and the stopping point, and `bin/fm-dod-lib.sh` renders it verbatim into the Definition of done.
 
 ## The no-push invariant
@@ -22,16 +22,16 @@ The invariant is enforced in three layers, from strongest to weakest:
 3. The generated brief's first rule forbids every such push, and its Definition of done names the review tool as the only publishing path.
 
 The ready report is `done: review <url> uploaded for review`.
-Firstmate cannot observe, approve, or merge the review, so `bin/fm-review-check.sh` records `review=` and `review_head=` without arming a merge watch, and the review always escalates to the captain whatever the yolo setting.
-A scout launches without the guard and the task record, so `bin/fm-promote.sh` refuses to promote one onto a `forge=external` project; such work starts as a ship.
+Firstmate cannot observe, approve, or merge the review, so `bin/fm-review-check.sh` records `review=` and `review_head=` without arming a merge watch, and the review always escalates to the user whatever the yolo setting.
+An Investigator launches without the guard and the task record, so `bin/fm-promote.sh` refuses to promote one onto a `forge=external` project; such work starts as a Builder.
 
 ## The personal backup remote
 
 A worker copy's commits live only in the copy and in the review tool's snapshot.
-`config/external-review-backup` may name a git remote, pointing at storage the captain alone controls, that holds a durable copy at `refs/heads/<backup-prefix><task-id>` (default prefix `backup/`).
+`config/external-review-backup` may name a git remote, pointing at storage the user alone controls, that holds a durable copy at `refs/heads/<backup-prefix><task-id>` (default prefix `backup/`).
 The backup prefix must be non-empty and must neither equal nor start with the task branch prefix, so a durable copy never reads as a delivery branch and the guard's task-prefix rule stays unconditional.
 Spawn refuses a backup remote the project does not have, or one whose URL matches origin's.
-Where the backup remote points is the captain's call; firstmate cannot police it, so a project whose code must not leave a network needs a backup inside that network.
+Where the backup remote points is the user's call; firstmate cannot police it, so a project whose code must not leave a network needs a backup inside that network.
 
 With a backup configured, the ready report is accepted only once HEAD is on the backup remote's namespace, and teardown's existing landed-work test sees the copy as reachable from a remote-tracking ref.
 Without one, the ready report is accepted on the review URL alone, because the snapshot lives in a tool firstmate cannot read; `review_head=` records what was uploaded.
@@ -45,4 +45,4 @@ No gate or cleanup step requires a push on this forge, which removes the pressur
 
 ## Deferred
 
-`no-mistakes` composition, which would run the pipeline with its forge-facing steps skipped and recover custody as Gerrit does, an adapter hook that verifies the uploaded snapshot against HEAD, per-project adapters, and promotion of a scout onto this forge are follow-ups.
+`no-mistakes` composition, which would run the pipeline with its forge-facing steps skipped and recover custody as Gerrit does, an adapter hook that verifies the uploaded snapshot against HEAD, per-project adapters, and promotion of an Investigator onto this forge are follow-ups.

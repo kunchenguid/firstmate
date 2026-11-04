@@ -93,10 +93,10 @@ mkdir -p "$PRIMARY_HOME/state" "$PRIMARY_HOME/data/cm1" "$PRIMARY_HOME/config"
 printf 'off\n' > "$PRIMARY_HOME/config/herdr-presentation-spaces"
 cat > "$PRIMARY_HOME/data/cm1/brief.md" <<'EOF'
 # Task
-## Captain's intent
+## User's intent
 Exercise primary-home Herdr placement.
 
-## Firstmate spec
+## Director spec
 Verify the crewmate uses its primary home's workspace.
 EOF
 
@@ -110,10 +110,10 @@ printf '%s\n' 'projects/' 'state/' 'data/' 'config/' '.no-mistakes/' > "$SM_HOME
 git -C "$SM_HOME" init -q -b main
 cat > "$SM_HOME/data/cm2/brief.md" <<'EOF'
 # Task
-## Captain's intent
+## User's intent
 Exercise secondmate-owned Herdr placement.
 
-## Firstmate spec
+## Director spec
 Verify the crewmate uses its secondmate home's workspace.
 EOF
 

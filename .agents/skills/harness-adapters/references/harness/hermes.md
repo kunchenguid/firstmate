@@ -1,7 +1,7 @@
 # Hermes Agent
 
-Hermes is a spawned crewmate/scout TUI adapter on tmux only.
-Primary and secondmate supervision, other runtime backends, desktop/web surfaces, and messaging bridges are unsupported and refused.
+Hermes is a spawned worker/Investigator TUI adapter on tmux only.
+Primary and Project Director supervision, other runtime backends, desktop/web surfaces, and messaging bridges are unsupported and refused.
 [Hermes verification](../../../../../docs/verification/hermes.md) owns dated vendor evidence and the live guard.
 
 ## Operating facts
@@ -34,4 +34,4 @@ The check is a launch preflight, not a lifetime reservation: the gateway may beg
 The TUI's `--query-file` path did not submit the initial prompt on the verified version; the spawn uses the native interactive query path instead.
 Early provider/build errors can leave the spawn-owned busy record open when the native end hook does not run; inspect the visible pane and use the ordinary recovery procedure.
 User profile settings, plugins, tools, and inference credentials remain native Hermes concerns.
-No primary Stop guard, pre-tool protection, watcher protocol, secondmate hook, or Herdr lifecycle was verified.
+No primary Stop guard, pre-tool protection, watcher protocol, Project Director hook, or Herdr lifecycle was verified.

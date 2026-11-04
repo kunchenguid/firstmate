@@ -44,10 +44,10 @@ Kimi's footer tip can show `ctrl+c: cancel` while idle, and its idle bar can con
 Neither is a busy-state source.
 The delivery-only spinner match covers the full moon-phase glyph set but remains locale- and emoji-font-sensitive because Kimi exposes no stable ASCII busy token.
 
-## Crew turn-end hook and primary limit
+## workers turn-end hook and primary limit
 
 Kimi is outside the primary turn-end guard scope.
-`../../../docs/turnend-guard.md` owns its separate global hook surface and captain-approved crew wake integration.
+`../../../docs/turnend-guard.md` owns its separate global hook surface and user-approved workers wake integration.
 
 `../../../bin/fm-spawn.sh` installs one marker-delimited Firstmate entry in `$HOME/.kimi-code/config.toml`, one silent always-zero hook script, and one private token registry under `$HOME/.kimi-code/fm-turn-end.d/`.
 Each Kimi worker worktree receives a gitignored `.fm-kimi-turnend` pointer.

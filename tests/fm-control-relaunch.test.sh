@@ -206,10 +206,10 @@ add_ship_task() {
   mkdir -p "$home/data/$id"
   cat > "$home/data/$id/brief.md" <<EOF
 # Task
-## Captain's intent
+## User's intent
 Exercise relaunch behavior for $id.
 
-## Firstmate spec
+## Director spec
 Preserve the task while replacing its agent process.
 EOF
   {
@@ -1736,7 +1736,7 @@ test_promoted_scout_relaunch_receives_the_current_delivery_contract() {
     FM_HOME="$home" "$BRIEF" "$id" firstmate --scout >/dev/null \
       || fail "$mode: could not scaffold the scout brief"
     brief="$home/data/$id/brief.md"
-    sed 's/{TASK}/Fix the promotion relaunch contract./; s/{FIRSTMATE_SPEC}/Preserve the current delivery mode./' \
+    sed 's/{TASK}/Fix the promotion relaunch contract./; s/{DIRECTOR_SPEC}/Preserve the current delivery mode./' \
       "$brief" > "$brief.filled"
     mv "$brief.filled" "$brief"
     {
@@ -2745,10 +2745,10 @@ add_herdr_ship_task() {  # <case-dir> <id> [session] [surviving-pane]
   mkdir -p "$home/data/$id"
   cat > "$home/data/$id/brief.md" <<EOF
 # Task
-## Captain's intent
+## User's intent
 Exercise a herdr reclaim safely.
 
-## Firstmate spec
+## Director spec
 Keep the recorded endpoint when it outlives its server.
 EOF
   {

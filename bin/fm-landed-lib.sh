@@ -7,7 +7,7 @@
 # separate jq programs - bin/fm-bearings-snapshot.sh projects this home's own
 # Done rows, and bin/fm-fleet-snapshot.sh projects each secondmate home's Done
 # rows into the roll-up that the same section merges in. Both answer the one
-# question "is this closed row a delivery the captain should see", so the rule
+# question "is this closed row a delivery the user should see", so the rule
 # lives here and neither program restates it.
 #
 # A closed row is never actively held: tasks-axi clears the held flag when a

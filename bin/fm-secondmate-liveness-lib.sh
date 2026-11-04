@@ -94,7 +94,7 @@ fm_sm_live_first_line() {
 # One line per relaunch attempt and one per outcome, keyed by epoch, plus a
 # `rearmed` row when a live probe lifts a parked mate. The watcher bound counts
 # `attempt` rows inside its window and after the last `rearmed` row; the whole
-# file is the durable per-mate relaunch record the captain can count to see
+# file is the durable per-Project-Director relaunch record the user can count to see
 # frequency. Fails when the row cannot be appended.
 fm_secondmate_liveness_ledger_add() {  # <id> <attempt|relaunched|failed|rearmed>
   printf '%s\t%s\n' "$(date +%s)" "$2" >> "$STATE/.secondmate-relaunch-$1" 2>/dev/null

@@ -163,7 +163,7 @@ When that retained arm later closes, its actual close is classified as a new sup
 After the configured retry bound is exhausted, the adapter delivers the original wake with a typed continuity-restoration failure, even if every successor arm hung without reporting readiness.
 
 This is deliberate Option B ordering.
-Whenever restoration succeeds, the fleet is protected before the model handles the wake.
+Whenever restoration succeeds, the team is protected before the model handles the wake.
 When restoration does not succeed, the model is never left blind.
 
 ### Claude handling successor
@@ -203,13 +203,13 @@ Once those rows are acknowledged, a later append that repeats one byte for byte 
 Notification never consumes rows; sequence-bound, per-actor acknowledgement remains the owner of consumption.
 After the supervision host finishes a handled turn, it settles the successor handoff under the durable-queue and recovery-marker locks.
 Any row left for main then becomes a recoverable downtime episode, including one appended after the predecessor closed but before the successor initialized or the host confirmed its handoff.
-The successor closes once with the recovery wake only while that row is still queued; this is how a captain inbox note reaches main during handling-successor startup or while the host is parked on the handled wake's successor.
+The successor closes once with the recovery wake only while that row is still queued; this is how a user inbox note reaches main during handling-successor startup or while the host is parked on the handled wake's successor.
 When the host instead hands the accepted close back to main and leaves that successor running, it republishes the episode as announced downtime, because the close it hands back is that episode's delivery; the successor therefore does not announce it again, while a later durable append still opens a pending episode it recovers.
 
 ### Manual recovery and other harnesses
 
 - The model no longer re-arms after ordinary wakes.
-- No PreToolUse hook denies fleet commands based on watcher status.
+- No PreToolUse hook denies team commands based on watcher status.
 - A genuine auto-arm failure describes the automatic mechanism as broken and never directs a routine manual background arm.
 - Terminal arm-output classification (`started`, `attached`, or `FAILED`) remains defense in depth for the manual recovery path.
 - Codex retains its bounded foreground checkpoint protocol unless the home opts in to its [native Stop park](supervision-protocols/codex.md).
@@ -351,7 +351,7 @@ Under the away-posture record the exclusion lifts and a check row is offered to 
 It filters the queue to the current actor's opaque claim before same-key deduplication, then presents and acknowledges only that actor-local view.
 A missing or empty branch snapshot is refused loudly rather than read as "nothing eligible".
 With a live branch owner, a missing snapshot means the branch's own acknowledgement already consumed the grant, and the refusal says so; otherwise reaching the drain without the non-empty handoff promised by the extension is a wiring bug.
-A branch acknowledgement retires the check-row receipts - inactive-outcome, inactive-reconcile notice, and secondmate stall - of exactly the granted sequences it consumes, so a branch-consumed check is never re-queued by its producer.
+A branch acknowledgement retires the check-row receipts - inactive-outcome, inactive-reconcile notice, and Project Director stall - of exactly the granted sequences it consumes, so a branch-consumed check is never re-queued by its producer.
 Attended, a grant names no check row and each scan finds nothing.
 
 ### Per-actor regression tests
@@ -370,7 +370,7 @@ The same suite pins the counted-equals-presentable invariant against `bin/fm-gua
 - That row is presented with its acknowledgement command - with the ordinary warning restored - as soon as the grant clears.
 - Structurally unusable rows are retired by main alone while every remaining row stays presentable and acknowledgeable.
 
-Branch acknowledgement retiring the check-row receipts of exactly its granted sequences is pinned by `tests/fm-wake-queue.test.sh` for the secondmate stall receipt and by `tests/fm-inactive-reconcile.test.sh` for the inactive-outcome receipt.
+Branch acknowledgement retiring the check-row receipts of exactly its granted sequences is pinned by `tests/fm-wake-queue.test.sh` for the Project Director stall receipt and by `tests/fm-inactive-reconcile.test.sh` for the inactive-outcome receipt.
 
 `tests/fm-pi-branch-extension.test.sh` pins extension-side classification, claim publication and release, and the pre-drain recheck.
 
@@ -502,7 +502,7 @@ They also prove that a legacy or handoff-phase watcher marker from an absent rep
 `tests/fm-watch-recovery-loop.test.sh` covers:
 
 - The once-per-generation announcement bound with the real Pi extension against a refused handling handshake.
-- A handling successor that must surface a real crew event instead of going blind.
+- A handling successor that must surface a real workers event instead of going blind.
 - A handling successor that resurfaces a row appended between its predecessor's close and its own startup handoff.
 
 `tests/fm-watch-triage.test.sh` proves TERM stops a watcher blocked inside a poll's pane capture and still releases its lock and records an acknowledgeable stop.

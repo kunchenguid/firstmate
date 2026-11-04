@@ -3448,7 +3448,7 @@ A throwaway scout was spawned through `bin/fm-spawn.sh --scout --harness omp --m
 
 ### Profile flag
 
-Verified on 2026-10-24 against omp 18.4.3 (`~/.bun/bin/omp`, a Bun package install) on macOS 15 arm64, for the [per-secondmate omp profile](../configuration.md#per-secondmate-omp-profile) pin.
+Verified on 2026-10-24 against omp 18.4.3 (`~/.bun/bin/omp`, a Bun package install) on macOS 15 arm64, for the [per-Project Director omp profile](../configuration.md#per-project-director-omp-profile) pin.
 omp extracts `--profile` from anywhere in its arguments, so the flag Firstmate places right after the executable and before `--config` is honored, and it applies to subcommands such as the catalog check's `models --json`:
 
 ```text

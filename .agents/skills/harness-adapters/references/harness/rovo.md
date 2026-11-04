@@ -1,7 +1,7 @@
 # Rovo CLI
 
-Verified 2026-09-02 on Rovo CLI 202609.1.2 for crewmate/scout work only.
-Not verified, and not naturally verifiable, as a secondmate or primary: rovo has no turn-end hook and no primary supervision protocol, the same gap that scopes muse to crewmate/scout.
+Verified 2026-09-02 on Rovo CLI 202609.1.2 for worker/Investigator work only.
+Not verified, and not naturally verifiable, as a Project Director or primary: rovo has no turn-end hook and no primary supervision protocol, the same gap that scopes muse to worker/Investigator.
 
 ## Operating facts
 
@@ -14,9 +14,9 @@ Not verified, and not naturally verifiable, as a secondmate or primary: rovo has
 | Exit command | `/exit` (also `/quit`, and a single idle Ctrl-C); prints `Run rovo --restore <session-id> to resume your conversation`. |
 | Interrupt | Single Escape is the cancel key and prints `Agent cancelled`; `../../../bin/fm-control-lib.sh` records its acknowledgement source as `none` (see "Interrupt: confirmed under real tmux" below), the same conservative choice as claude/codex/grok/kimi/cursor. |
 | Skill invocation | `/<skill>`, the Claude/Grok form, but see "Skill-loading interop gap" below - a rovo worker cannot invoke a firstmate skill until that gap is resolved. |
-| Autonomy | `--disable-permission-checks` (alias `--yolo`) runs every file CRUD operation and bash command without confirmation, though its own printed caveat keeps permission checks on tools accessing Atlassian data and user-provided MCP servers, which crew/scout tasks never touch. |
-| File access | rovo confines every file-tool operation to its launch worktree by default, so the standard instructions/steering/status/report loop - whose files live in the firstmate home outside the worktree - fails until granted. `../../../bin/fm-spawn.sh`'s `rovo_config_override_flag` grants `toolPermissions.allowedExternalPaths` at launch, folded into the single `--config-override` (see Effort), for exactly this task's brief directory, steering inbox, and status file. The grant lifts the file tools only; rovo's bash tool stays worktree-confined regardless, so the crewmate status line's `echo ... >> status` lands only because the worker falls back to its own file tool for the append. See `../../../../docs/verification/rovo.md`. |
-| Trust dialog | None observed on a clean launch in a fresh worktree; `--yolo` clears crew/scout's confirmation prompts, but it is not the only launch grant the standard flow needs - see File access for the required `allowedExternalPaths` grant. |
+| Autonomy | `--disable-permission-checks` (alias `--yolo`) runs every file CRUD operation and bash command without confirmation, though its own printed caveat keeps permission checks on tools accessing Atlassian data and user-provided MCP servers, which workers/Investigator tasks never touch. |
+| File access | rovo confines every file-tool operation to its launch worktree by default, so the standard instructions/steering/status/report loop - whose files live in the firstmate home outside the worktree - fails until granted. `../../../bin/fm-spawn.sh`'s `rovo_config_override_flag` grants `toolPermissions.allowedExternalPaths` at launch, folded into the single `--config-override` (see Effort), for exactly this task's brief directory, steering inbox, and status file. The grant lifts the file tools only; rovo's bash tool stays worktree-confined regardless, so the worker status line's `echo ... >> status` lands only because the worker falls back to its own file tool for the append. See `../../../../docs/verification/rovo.md`. |
+| Trust dialog | None observed on a clean launch in a fresh worktree; `--yolo` clears workers/Investigator's confirmation prompts, but it is not the only launch grant the standard flow needs - see File access for the required `allowedExternalPaths` grant. |
 | Environment marker | `ATLASSIAN_AGENT_TYPE=rovo` (most specific) and `ROVODEV_CLI=1`, both set on rovo's tool subprocesses alongside `AGENT=rovodev_cli`, none of which rovo scrubs from an inherited `CLAUDECODE`/`CURSOR_AGENT`/etc - so `../../../bin/fm-harness.sh` tests rovo's markers before the `CLAUDECODE` line (the same ordering hazard cursor already documents, issue #3517) and `../../../bin/fm-spawn.sh` clears foreign markers at the launch boundary too. |
 | Process name | `comm=rovo` on the tool subprocess and the `rovo run` process itself, because the installed wrapper execs the generation's `rovo` shim so argv[0] stays `rovo` even though the on-disk binary is `atlassian_cli_rovodev`. |
 | Composer | The existing bordered `box` shape family (`╭─╮ │ │ ╰─╯`) `../../../bin/fm-composer-lib.sh` already reads, with an empty composer showing de-emphasized suggestion chips and a `? for shortcuts.` hint, and a busy footer reading `Enter to queue, Ctrl+Enter to steer`. |
@@ -50,8 +50,8 @@ It does not block the launch-then-send gates: readiness leads with the `Welcome 
 
 ## Interrupt: confirmed under real tmux
 
-The original verification scout (`fm-rovo-smoke-s1`, PTY smoke) observed a single Escape print `Agent cancelled` during a running tool call.
-A follow-up live check under real tmux 3.6a - an isolated `tmux -L <private-socket>` session/window, not the shared fleet session - reproduced the scout's exact finding: a single Escape sent during a genuine mid-flight bash tool call printed `Agent cancelled` in the captured pane.
+The original verification Investigator (`fm-rovo-smoke-s1`, PTY smoke) observed a single Escape print `Agent cancelled` during a running tool call.
+A follow-up live check under real tmux 3.6a - an isolated `tmux -L <private-socket>` session/window, not the shared team session - reproduced the Investigator's exact finding: a single Escape sent during a genuine mid-flight bash tool call printed `Agent cancelled` in the captured pane.
 The launch-then-send live guard (`../../../../tests/fm-rovo-signals-live-e2e.test.sh`) now reproduces it over a raw PTY too: an earlier single fixed-timer Escape landed unreliably (the interrupt instant is timing-sensitive over a bare PTY), so the guard sends Escape across the live tool-call window until the cancel renders - a deterministic way to reproduce a timing-sensitive interrupt, and confirmed to print `Agent cancelled` every run.
 Escape is the interrupt key and is what `fm_control_interrupt_key` returns.
 `fm_control_interrupt_ack_source` still records `none` for rovo - the same conservative choice already made for claude/codex/grok/kimi/cursor, a control-plane fact independent of whether the render happens to appear - so the control plane sends the key and lets its own postcondition, not a parsed string, decide whether the agent actually stopped.
@@ -59,7 +59,7 @@ The interrupt key and its rendered evidence are now fully corroborated rather th
 
 ## OAuth token lifetime
 
-The access token lasts about one hour, but `rovo` refreshes it silently and non-interactively from a stored refresh token (about four weeks' lifetime) with no browser prompt and no visible interruption - this is standing captain-corrected guidance, not this task's own discovery, and this task's own live checks corroborated it empirically: `rovo auth status` showed `Access token expired ... but a refresh token is present`, then a plain `rovo run` completed successfully and a follow-up `rovo auth status` showed a freshly valid token with no interactive step in between.
+The access token lasts about one hour, but `rovo` refreshes it silently and non-interactively from a stored refresh token (about four weeks' lifetime) with no browser prompt and no visible interruption - this is standing user-corrected guidance, not this task's own discovery, and this task's own live checks corroborated it empirically: `rovo auth status` showed `Access token expired ... but a refresh token is present`, then a plain `rovo run` completed successfully and a follow-up `rovo auth status` showed a freshly valid token with no interactive step in between.
 Treat the ~1h access-token lifetime as an ordinary operational fact, not a non-negotiable-safety blocker: a rovo worker does not need to be scoped short to survive it.
 `rovo auth login` (interactive browser OAuth) is needed only after roughly four weeks of disuse or if the refresh token itself is invalidated.
 
@@ -67,7 +67,7 @@ Treat the ~1h access-token lifetime as an ordinary operational fact, not a non-n
 
 rovo's skill loader rejects every firstmate skill: `Invalid skill definition in .../SKILL.md: 'metadata -> internal': Input should be a valid string`, because firstmate's `metadata.internal` is a boolean and rovo's schema wants a string.
 This blocks `/no-mistakes` and every other firstmate skill invocation inside a rovo worker until firstmate's `SKILL.md` frontmatter is made rovo-compatible (a separate, deferred follow-up - it touches every skill file and the installer contract, per `../../firstmate-coding-guidelines/SKILL.md`).
-A `no-mistakes`-mode rovo ship crewmate is blocked by this gap; a rovo scout, which invokes no skill, is unaffected.
+A `no-mistakes`-mode rovo Builder is blocked by this gap; a rovo Investigator, which invokes no skill, is unaffected.
 
 ## ACP as a future upgrade
 

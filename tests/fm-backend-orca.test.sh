@@ -19,10 +19,10 @@ write_spawn_brief() {  # <data-dir> <id>
   local data=$1 id=$2
   cat > "$data/$id/brief.md" <<'EOF'
 # Task
-## Captain's intent
+## User's intent
 Exercise Orca dispatch.
 
-## Firstmate spec
+## Director spec
 Verify the Orca lifecycle behavior under test.
 EOF
 }

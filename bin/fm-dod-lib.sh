@@ -60,7 +60,7 @@
 # The block opens with the fixed machine-readable "Delivery contract: mode=<mode>"
 # line that bin/fm-spawn.sh checks a ship brief against; a forge=gerrit block
 # appends " forge=gerrit shape=squash" to that line, and a forge=forgejo or
-# forge=external block appends " forge=forgejo" or " forge=external". The "Ship branch: <branch>"
+# forge=external block appends " forge=forgejo" or " forge=external". The "Builder branch: <branch>"
 # line under it is machine-readable the same way: bin/fm-spawn.sh refuses a ship
 # whose spawn-selected branch disagrees with it.
 # forge is none|gerrit|forgejo|external and defaults to none;
@@ -96,8 +96,8 @@
 # declares a paused wait instead. bin/fm-pr-check.sh refuses to arm merge
 # monitoring on a draft through the same reading bin/fm-pr-merge.sh uses.
 # This file is the one owner of the no-mistakes `--intent` contract: only the
-# brief's `## Captain's intent` subsection plus later captain words, never
-# `## Firstmate spec` and never the worker's own tradeoffs.
+# brief's `## User's intent` subsection plus later legacy-captain-tagged user words, never
+# `## Director spec` and never the worker's own tradeoffs.
 # Author the subsection body and later relays as the actual words, without
 # adding speaker labels or direct address: the heading supplies provenance and
 # is not part of --intent. A legacy mixed Task instead marks each captain line
@@ -110,8 +110,8 @@
 # roughly the same specification - so a report, decision, or PR the intent
 # refers to is written into it as substance, never left as a pointer.
 # bin/fm-brief.sh scaffolds those two `# Task` subsections; bin/fm-spawn.sh and
-# bin/fm-promote.sh refuse leftover `{TASK}` / `{FIRSTMATE_SPEC}` placeholders
-# and a `## Captain's intent` line opening with a Captain label or address
+# bin/fm-promote.sh refuse leftover `{TASK}` / `{DIRECTOR_SPEC}` placeholders
+# and a `## User's intent` line opening with a Captain label or address
 # through the helpers below. Other mentions of `--intent` point here rather than
 # restating the rule.
 # Every heredoc here stays outside a command substitution: `VAR=$(cat <<EOF ...)`
@@ -145,18 +145,22 @@
 # shellcheck source=bin/fm-external-review-lib.sh
 . "$(d=${BASH_SOURCE[0]%/*}; [ "$d" != "${BASH_SOURCE[0]}" ] || d=.; cd "${d:-/}" && pwd)/fm-external-review-lib.sh"
 
-fm_brief_worker_role() {  # <state-dir> <task-id> <code-root>
-  local state=$1 task_id=$2 root=$3
-  cat <<'EOF'
+fm_brief_worker_role() {  # <state-dir> <task-id> <code-root> [ship|scout]
+  local state=$1 task_id=$2 root=$3 kind=${4:-ship} role focus
+  case "$kind" in
+    scout) role=Investigator; focus='a knowledge-only investigation worker' ;;
+    *) role=Builder; focus='an implementation worker' ;;
+  esac
+  cat <<EOF
 # Current worker role contract
-You are a crewmate: an autonomous worker agent managed by firstmate.
+You are a $role: $focus managed by the Director.
 This section establishes your current identity before every project or task instruction below and supersedes any conflicting role identity in those instructions.
-Do the assigned work yourself and report only to firstmate; do not adopt a firstmate or secondmate supervisor identity, delegate the task, run fleet supervision, or address the captain.
+Do the assigned work yourself and report only to the Director; do not adopt a Director or Project Director supervisor identity, delegate the task, run team supervision, or address the user.
 EOF
-  printf "Your steering inbox is \`%s/%s.inbox\`; this exact path belongs to your current task even when it is outside the worktree or under the supervising firstmate home, so read and acknowledge its messages and do not reject it as another home's state.\n" "$state" "$task_id"
+  printf "Your steering inbox is \`%s/%s.inbox\`; this exact path belongs to your current task even when it is outside the worktree or under the supervising Director's Firstmate home, so read and acknowledge its messages and do not reject it as another home's state.\n" "$state" "$task_id"
   cat <<'EOF'
 Never inspect or change any other home's endpoint namespace; this authorization is limited to the exact task paths named by this brief.
-When this task works on Firstmate itself, the repository root `AGENTS.md` (also imported by `CLAUDE.md`) is project content and the supervisor contract for the firstmate managing you: follow this brief instead of that supervisor contract.
+When this task works on Firstmate itself, the repository root `AGENTS.md` (also imported by `CLAUDE.md`) is project content and the supervisor contract for the Director managing you: follow this brief instead of that supervisor contract.
 Project instructions still govern the work wherever they do not conflict with this worker identity, including `CONTRIBUTING.md` and `firstmate-coding-guidelines` for Firstmate changes.
 EOF
   printf "If the \`firstmate-coding-guidelines\` skill name does not resolve in this session, read \`%s/.agents/skills/firstmate-coding-guidelines/SKILL.md\` instead.\n" "$root"
@@ -191,11 +195,11 @@ fm_forge_valid_for_mode() {  # <forge> <mode> <caller>
       return 1 ;;
   esac
   if [ "$forge" != none ] && [ "$mode" = local-only ]; then
-    echo "error: $caller: forge=$forge cannot ship mode=local-only - that mode publishes nothing, so a forge has no meaning there, and its landing would fast-forward local main with content the review server has never seen; ship no-mistakes or direct-PR, which publish through the forge" >&2
+    echo "error: $caller: forge=$forge cannot use mode=local-only - that mode publishes nothing, so a forge has no meaning there, and its landing would fast-forward local main with content the review server has never seen; use no-mistakes or direct-PR, which publish through the forge" >&2
     return 1
   fi
   if [ "$forge" = external ] && [ "$mode" != direct-PR ]; then
-    echo "error: $caller: forge=external ships direct-PR only for now; the pipeline's push, pr, and ci steps would push to the shared origin" >&2
+    echo "error: $caller: forge=external supports direct-PR only for now; the pipeline's push, pr, and ci steps would push to the shared origin" >&2
     return 1
   fi
   return 0
@@ -216,11 +220,11 @@ fm_pr_text_valid() {  # <pr> <mode> <forge> <caller>
       return 1 ;;
   esac
   if [ "$mode" != no-mistakes ]; then
-    echo "error: $caller: pr=manual ships mode=no-mistakes only - direct-PR already leaves the PR text to the worker and local-only opens no PR" >&2
+    echo "error: $caller: pr=manual supports mode=no-mistakes only - direct-PR already leaves the PR text to the worker and local-only opens no PR" >&2
     return 1
   fi
   if [ "$forge" != none ]; then
-    echo "error: $caller: pr=manual ships on a GitHub-style forge with no forge binding only, not forge=$forge" >&2
+    echo "error: $caller: pr=manual works on a GitHub-style forge with no forge binding only, not forge=$forge" >&2
     return 1
   fi
   return 0
@@ -252,7 +256,7 @@ fm_base_branch_valid() {  # <base> <mode> <forge> <caller>
     return 1
   fi
   if [ "$mode" = local-only ]; then
-    echo "error: $caller: a base branch cannot ship mode=local-only, whose landing fast-forwards local main; ship no-mistakes or direct-PR, which open a pull request against the base" >&2
+    echo "error: $caller: a base branch cannot use mode=local-only, whose landing fast-forwards local main; use no-mistakes or direct-PR, which open a pull request against the base" >&2
     return 1
   fi
   if [ "$forge" != none ]; then
@@ -280,7 +284,7 @@ fm_ship_rule_one() {  # <no-mistakes|direct-PR|local-only> <task-id> [branch] [<
   fm_base_branch_valid "$base" "$mode" "$forge" fm_ship_rule_one || return 1
   [ -z "$base" ] || target="the base branch \`$base\` or the default branch"
   if [ "$forge" = gerrit ]; then
-    printf '%s\n' "1. Never push with git and never create a change except through the one \`gerrit-axi publish --squash\` your Definition of done names. Never run \`gerrit-axi submit\`, never vote or review a change by any path, including \`gerrit review\` or a label option on a push, and never abandon one: a human reviewer approves and submits it on the server."
+    printf '%s\n' "1. Never push with git and never create a change except through the one \`gerrit-axi publish --squash\` your Definition of done names. Never run \`gerrit-axi submit\`, never vote or review a change by any path, including \`gerrit review\` or a label option on a push, and never abandon one: a Reviewer approves and submits it on the server."
     return 0
   fi
   if [ "$forge" = external ]; then
@@ -288,7 +292,7 @@ fm_ship_rule_one() {  # <no-mistakes|direct-PR|local-only> <task-id> [branch] [<
     prefix=$(fm_ship_branch_prefix "$branch" "$id")
     [ -z "$prefix" ] || prefixed=" or any \`$prefix\`-prefixed branch"
     fm_external_review_backup || return 1
-    printf '%s' "1. Never push to \`origin\`, or to any remote whose URL is the project's shared server, and never push your \`$branch\` branch$prefixed to any remote. The review tool named in your Definition of done uploads its own snapshot, so publishing needs no push. Never approve, merge, or move the review past the stopping point your Definition of done names; a human does that."
+    printf '%s' "1. Never push to \`origin\`, or to any remote whose URL is the project's shared server, and never push your \`$branch\` branch$prefixed to any remote. The review tool named in your Definition of done uploads its own snapshot, so publishing needs no push. Never approve, merge, or move the review past the stopping point your Definition of done names; the user or a Reviewer does that."
     if [ -n "$FM_REVIEW_BACKUP_REMOTE" ]; then
       printf ' %s' "The one push you may make is a durable copy to the personal backup remote \`$FM_REVIEW_BACKUP_REMOTE\`: \`git push $FM_REVIEW_BACKUP_REMOTE HEAD:refs/heads/$FM_REVIEW_BACKUP_PREFIX$id\`."
     fi
@@ -300,7 +304,7 @@ fm_ship_rule_one() {  # <no-mistakes|direct-PR|local-only> <task-id> [branch] [<
       printf '%s\n' "1. Never push to $target (push only your \`$branch\` branch). Never merge a PR."
       ;;
     local-only)
-      printf '%s\n' "1. Never push to any remote and never open a PR. Work only on your \`$branch\` branch; firstmate handles the merge into local \`main\`."
+      printf '%s\n' "1. Never push to any remote and never open a PR. Work only on your \`$branch\` branch; the Director handles the merge into local \`main\`."
       ;;
     no-mistakes)
       printf '%s\n' "1. Never push to $target. Never merge a PR."
@@ -317,9 +321,10 @@ fm_ship_rule_one() {  # <no-mistakes|direct-PR|local-only> <task-id> [branch] [<
 fm_brief_task_placeholders_present() {  # <file>
   local file=$1 intent spec
   [ -f "$file" ] || return 1
-  intent=$(fm_brief_task_heading_body "$file" "## Captain's intent")
-  spec=$(fm_brief_task_heading_body "$file" "## Firstmate spec")
+  intent=$(fm_brief_task_heading_body "$file" "## User's intent")
+  spec=$(fm_brief_task_heading_body "$file" "## Director spec")
   [ "$(printf '%s' "$intent" | tr -d '[:space:]')" = '{TASK}' ] && return 0
+  [ "$(printf '%s' "$spec" | tr -d '[:space:]')" = '{DIRECTOR_SPEC}' ] && return 0
   [ "$(printf '%s' "$spec" | tr -d '[:space:]')" = '{FIRSTMATE_SPEC}' ] && return 0
   return 1
 }
@@ -362,17 +367,17 @@ fm_brief_marked_captain_words() {  # <task-body>
   '
 }
 
-fm_brief_intent_overlay() {  # <captain-intent>
+fm_brief_intent_overlay() {  # <user-intent>
   cat <<'EOF'
 
 # Current no-mistakes intent contract
-This section supersedes every earlier brief instruction about constructing `--intent`, but not later clarifications actually supplied by the captain.
-Use everything under `## Captain intent authorized for --intent` through the end of this brief, including any nested subheadings but excluding that heading, plus any later words the captain actually supplied as `--intent`; never include Firstmate specification or other mixed Task content.
+This section supersedes every earlier brief instruction about constructing `--intent`, but not later clarifications actually supplied by the user.
+Use everything under `## User intent authorized for --intent` through the end of this brief, including any nested subheadings but excluding that heading, plus any later words the user actually supplied as `--intent`; never include Director specification or other mixed Task content.
 Preserve those words without adding speaker labels or direct address.
-Firstmate-authored constraints, acceptance criteria, implementation details, decisions, and tradeoffs are specification, not captain intent.
+Director-authored constraints, acceptance criteria, implementation details, decisions, and tradeoffs are specification, not user intent.
 The Definition of done's rule that `--intent` must be self-sufficient still governs the string you pass: resolve any report, decision, or PR the intent below refers to into its substance rather than passing the pointer.
 
-## Captain intent authorized for --intent
+## User intent authorized for --intent
 EOF
   printf '%s\n' "$1"
 }
@@ -382,12 +387,12 @@ EOF
 fm_brief_task_content_valid() {  # <file>
   local file=$1 intent spec task has_intent=0 has_spec=0
   [ -f "$file" ] && [ -r "$file" ] || return 1
-  fm_brief_task_heading_present "$file" "## Captain's intent" && has_intent=1
-  fm_brief_task_heading_present "$file" "## Firstmate spec" && has_spec=1
+  fm_brief_task_heading_present "$file" "## User's intent" && has_intent=1
+  fm_brief_task_heading_present "$file" "## Director spec" && has_spec=1
   if [ "$has_intent" -eq 1 ] || [ "$has_spec" -eq 1 ]; then
     [ "$has_intent" -eq 1 ] && [ "$has_spec" -eq 1 ] || return 1
-    intent=$(fm_brief_task_heading_body "$file" "## Captain's intent")
-    spec=$(fm_brief_task_heading_body "$file" "## Firstmate spec")
+    intent=$(fm_brief_task_heading_body "$file" "## User's intent")
+    spec=$(fm_brief_task_heading_body "$file" "## Director spec")
     [ -n "$(printf '%s' "$intent" | tr -d '[:space:]')" ] || return 1
     [ -n "$(printf '%s' "$spec" | tr -d '[:space:]')" ] || return 1
     return 0
@@ -396,10 +401,10 @@ fm_brief_task_content_valid() {  # <file>
   [ -n "$(printf '%s' "$task" | tr -d '[:space:]')" ]
 }
 
-# Print the first `## Captain's intent` body line that opens with an operator
+# Print the first `## User's intent` body line that opens with an operator
 # address spelling; fail when there is none. The body is never rewritten.
 fm_brief_intent_address_line() {  # <file>
-  fm_brief_task_heading_body "$1" "## Captain's intent" | awk '
+  fm_brief_task_heading_body "$1" "## User's intent" | awk '
     /^[[:space:]]*(Captain('\''s (words|ask|intent))?:|Captain,)/ { print; found = 1; exit }
     END { exit !found }
   '
@@ -423,7 +428,7 @@ EOF
 }
 
 # The forge-independent middle of the no-mistakes contract: how a worker drives
-# the pipeline, what `--intent` may carry, and the two firstmate-specific rules.
+# the pipeline, what `--intent` may carry, and the two Director-specific rules.
 # Written once; only the two sentences about a green PR depend on the forge,
 # because on gerrit, and under pr=manual (the `no-ci` argument), the ci step is
 # skipped and the drive call never reports a green PR.
@@ -453,25 +458,25 @@ ${pr_return_line}Whenever a drive call returns without a gate or an outcome - it
   cat <<EOF
 You drive no-mistakes by responding to its gates, not by implementing fixes.
 Follow the guidance no-mistakes itself provides for the mechanics: it loads when you invoke /no-mistakes, and \`no-mistakes axi run --help\` plus the \`help\` lines in each \`axi\` response are authoritative and version-matched to the installed binary.
-When starting no-mistakes, pass \`--intent\` as only this brief's \`## Captain's intent\` subsection body, not its heading, plus any later words the captain actually said.
+When starting no-mistakes, pass \`--intent\` as only this brief's \`## User's intent\` subsection body, not its heading, plus any later words the user actually said.
 Preserve the actual words without adding speaker labels or direct address; the subsection heading supplies provenance outside the pipeline input.
 For a legacy brief with no such subsection, include only words on lines marked \`[captain] \`, excluding that metadata prefix; never copy its mixed \`# Task\` wholesale.
-If it has no provenance-marked captain words, stop and ask firstmate instead of starting no-mistakes.
-Do not include \`## Firstmate spec\`, later Firstmate build constraints, or your own decisions and tradeoffs.
+If it has no provenance-marked user words, stop and ask the Director instead of starting no-mistakes.
+Do not include \`## Director spec\`, later Director build constraints, or your own decisions and tradeoffs.
 The \`--intent\` string you pass must be self-sufficient: that string plus the codebase must let a reader reconstruct roughly the same specification, without depending on a separate report, a PR, or context that lives only in this conversation.
-When the captain's intent refers to a report, decision, or PR ("do items 1, 2, 3, and 7 of the report"), write the substance of the referenced items into \`--intent\` in the captain's terms, not only the pointer; that substance is the captain's ask by reference, while Firstmate's build instructions and your own decisions still stay out.
-This replaces the no-mistakes skill's advice to enrich \`--intent\` with decisions and tradeoffs; that advice does not apply to Firstmate-dispatched work.
+When the user's intent refers to a report, decision, or PR ("do items 1, 2, 3, and 7 of the report"), write the substance of the referenced items into \`--intent\` in the user's terms, not only the pointer; that substance is the user's ask by reference, while the Director's build instructions and your own decisions still stay out.
+This replaces the no-mistakes skill's advice to enrich \`--intent\` with decisions and tradeoffs; that advice does not apply to Director-dispatched work.
 Do not hand-edit, commit, or fix findings yourself while a run is active - the pipeline applies every fix.
 
 $drive_block
 A killed or timed-out call is never evidence the daemon died: the daemon accepts your response immediately and runs the round in the background, so the call was only ever waiting for a read while the run kept working.
 Reattach and keep going rather than reporting the pipeline blocked; rule 7 owns the checks that decide when a pipeline block is real.
 
-Two firstmate-specific rules layer on top of that guidance:
-- ask-user findings are never yours to answer: escalate to firstmate using rule 6's ask-user format and stop.
-  Firstmate applies \`ask-user-authority\` and obtains any required captain decision.
+Two Director-specific rules layer on top of that guidance:
+- ask-user findings are never yours to answer: escalate to the Director using rule 6's ask-user format and stop.
+  The Director applies \`ask-user-authority\` and obtains any required user decision.
   When the decision comes back, feed it to the gate with \`no-mistakes axi respond\` and let the pipeline apply it - do not route the question to "the user" or implement the fix yourself.
-- NEVER pass \`--yes\` (or \`-y\`) to \`no-mistakes axi run\` or \`no-mistakes axi respond\`. It is banned fleet-wide.
+- NEVER pass \`--yes\` (or \`-y\`) to \`no-mistakes axi run\` or \`no-mistakes axi respond\`. It is banned for all Firstmate-managed work.
   It auto-resolves every gate including ask-user findings with no escalation, and answering your own ask-user finding is a hard rule violation.
 EOF
 }
@@ -488,13 +493,13 @@ Publish from this copy with \`gerrit-axi\`, never with \`git push\`:
    It is one push to \`refs/for/<branch>\` that turns every commit since your branch left the server's branch into ONE change carrying the oldest commit's message, so that message is the review description: make it the one you want reviewed.
    It keeps any \`Change-Id\` a commit already carries and stamps one into the oldest commit when it has none, rewriting your local branch's messages only.
    Never edit, remove, or regenerate a \`Change-Id\`: a different one creates a different change and orphans the first one's review, while the same one adds a patch set to it.
-   Never pass \`--stack\`: a stack of changes is not published from this fleet until it can be watched by its membership pinned when its watch is armed, and the watch follows exactly one change.
+   Never pass \`--stack\`: a stack of changes is not published by this workflow until its membership can be pinned when monitoring starts, and the monitor follows exactly one change.
 3. Read the record it prints: \`ok\` must be \`true\`, and the one row of its \`changes\` table is your change. Its \`url\` is the change URL; when \`url\` is null, write \`https://<host>/c/<project>/+/<change>\` from your \`origin\` remote's host and that row's \`project\` and \`change\`.
    A failure prints a typed error record instead; fix what it names and publish again, which updates the same change rather than creating another.
 Then append \`done [at=<epoch>]: PR {change url} published for review\` to the status file and stop. You are finished.
 That \`done:\` is accepted only when the change's current patch set on the server carries this copy's HEAD tree, so commit nothing after publishing; if you must change the work, commit it and publish again before reporting done.
 A \`done:\` whose URL is not the canonical \`https://<host>/c/<project>/+/<number>\` change URL is refused.
-There is no pull request, no \`gh-axi\` call, and no forge CI result to report: a human reviewer approves and submits the change on the server, and firstmate relays that outcome.
+There is no pull request, no \`gh-axi\` call, and no forge CI result to report: a Reviewer approves and submits the change on the server, and the Director relays that outcome.
 EOF
 }
 
@@ -510,12 +515,12 @@ fm_dod_manual_pr_block() {  # <branch> <forge-cli> <draft-check> <contract-suffi
   cat <<EOF
 # Definition of done
 Delivery contract: mode=no-mistakes$suffix pr=manual
-Ship branch: $branch
+Builder branch: $branch
 This project's pull-request text is written by hand: the pipeline's \`pr\` step would rewrite the title and body you write on every validated push, so **no-mistakes runs here as a validation pass that pushes the branch**, and you then open the PR yourself.
 Pass \`--skip pr,ci\` on every \`no-mistakes axi run\` for this task, and skip nothing else: \`review\`, \`test\`, \`document\`, \`lint\`, and \`push\` still run, and \`ci\` has no pipeline-opened PR to watch.
 The task is complete only when committed on your branch.
 When you believe it is complete, append \`done [at=<epoch>]: {summary}\` to the status file and stop.
-Firstmate will then instruct you to run /no-mistakes to validate and push.
+The Director will then instruct you to run /no-mistakes to validate and push.
 That first \`done:\` is the handoff that starts the pipeline, which owns the push; it is not a request to push from this copy.
 ${nm_base}
 EOF
@@ -523,7 +528,7 @@ EOF
   cat <<EOF
 
 When the run's outcome is passed, passed-with-skips, or passed-with-override, write the PR title and body yourself and publish them with \`$forge_cli\`:
-1. Write the PR body to a file of your own under the scratch location rule 2 names, and verify it with \`head\` before using it. Match the title and body style of the project's recent merged PRs and its contribution guide, in plain English for a reviewer who lacks your context, with no direct address, and keep any issue reference the captain's intent names.
+1. Write the PR body to a file of your own under the scratch location rule 2 names, and verify it with \`head\` before using it. Match the title and body style of the project's recent merged PRs and its contribution guide, in plain English for a reviewer who lacks your context, with no direct address, and keep any issue reference the user's intent names.
 2. Find the PR for your branch first (\`$forge_cli pr list --head <branch>\`). If one exists, update its title and body with \`$forge_cli pr edit <number> --title '<title>' --body-file <path>\`. Otherwise open it with \`$forge_cli pr create\` from the branch the run pushed, ready for review, not a draft$pr_base.
 3. Never post a comment or review on the PR or on any other thread, and never rely on the pipeline for the PR text: it is yours on every push.
 4. Wait for the PR's checks with \`$forge_cli pr checks <number> --watch\`, under the ten-minute command limit as the driving block bounds its waits, and run the same command again whenever it returns with checks still pending. \`$forge_cli pr checks\` exits 1 when the project reports no checks at all: that is not a failed check and needs no fix. If a check fails, commit the fix, drive a new run with the same \`--skip pr,ci\`, and update the PR text if the change affects it.
@@ -565,8 +570,8 @@ fm_dod_block() {  # <mode> <task-id> [branch] [<forge>] [<base>] [<consent>] [<p
       cat <<EOF
 # Definition of done
 Delivery contract: mode=direct-PR forge=gerrit shape=squash$contract_consent
-Ship branch: $branch
-This task ships **direct-PR** to a Gerrit review server: you publish the change yourself, without the no-mistakes pipeline.
+Builder branch: $branch
+This Builder task uses **direct-PR** with a Gerrit review server: you publish the change yourself, without the no-mistakes pipeline.
 Gerrit has no pull requests, so there is nothing to open; publishing creates the change.
 The task is complete only when committed on your branch.
 When it is implemented and committed, publish it.
@@ -580,13 +585,13 @@ EOF
       cat <<EOF
 # Definition of done
 Delivery contract: mode=no-mistakes forge=gerrit shape=squash$contract_consent
-Ship branch: $branch
+Builder branch: $branch
 This project's review server is Gerrit: it has no pull requests and no forge CI the pipeline can watch, so **no-mistakes runs here as a review pass that ends at a ready branch**, and you then publish that branch as one change.
 Pass \`--skip push,pr,ci\` on every \`no-mistakes axi run\` for this task, and skip nothing else: \`review\`, \`test\`, \`document\`, and \`lint\` are the whole point of the run.
 Those three are the only steps that reach a forge, and skipping them is a supported outcome, not a degraded one.
 The task is complete only when committed on your branch.
 When you believe it is complete, append \`done [at=<epoch>]: {summary}\` to the status file and stop.
-Firstmate will then instruct you to run /no-mistakes to validate.
+The Director will then instruct you to run /no-mistakes to validate.
 That first \`done:\` is the handoff that starts the pipeline; it is not a request to publish.
 
 EOF
@@ -603,7 +608,7 @@ An unrecovered fix round is an unfinished task, never housekeeping: publishing w
 Your ready report is refused while the run still holds your branch, while its outcome is missing or not passing, or while your HEAD's tree differs from the run's result.
 
 When the run's outcome is passed, passed-with-skips, or passed-with-override and step 3 holds, publish.
-The squashed change carries only the oldest commit's message, so the pipeline's own fix commits never reach the reviewer's description; your report is how they reach the captain.
+The squashed change carries only the oldest commit's message, so the pipeline's own fix commits never reach the reviewer's description; your report is how they reach the user through the Director.
 After publishing and immediately before your ready report, append one line \`note [at=<epoch>]: pipeline changes: {finding} - {fix it made}; {finding} - {fix it made}\` to the status file, one short clause per finding the run fixed, taken from the run's \`fixes\` table and the gate findings its drive calls returned (\`no-mistakes axi logs --step <step> --full\` has the detail); write \`note [at=<epoch>]: pipeline changes: none\` when it fixed nothing.
 EOF
       fm_gerrit_publish_block
@@ -614,8 +619,8 @@ EOF
       cat <<EOF
 # Definition of done
 Delivery contract: mode=direct-PR forge=external$contract_consent
-Ship branch: $branch
-This task ships **direct-PR** through an external review tool: the tool uploads a snapshot of your local commits itself, so you never push a branch to publish, and there is no pull request to open.
+Builder branch: $branch
+This Builder task uses **direct-PR** through an external review tool: the tool uploads a snapshot of your local commits itself, so you never push a branch to publish, and there is no pull request to open.
 The task is complete only when committed on your branch.
 EOF
       if [ -n "$FM_REVIEW_BACKUP_REMOTE" ]; then
@@ -632,7 +637,7 @@ EOF
         printf '%s\n' "Commit nothing after uploading; if you must change the work, commit it and upload again before reporting done."
       fi
       cat <<EOF
-Do NOT run /no-mistakes. A human approves and merges the review; firstmate relays the outcome.
+Do NOT run /no-mistakes. The user approves and merges the review; the Director relays the outcome.
 
 ## Review tool instructions (home configuration)
 EOF
@@ -642,8 +647,8 @@ EOF
       cat <<EOF
 # Definition of done
 Delivery contract: mode=direct-PR$contract_forge$contract_consent
-Ship branch: $branch
-This task ships **direct-PR**: you raise the PR yourself, without the no-mistakes pipeline.
+Builder branch: $branch
+This Builder task uses **direct-PR**: you raise the PR yourself, without the no-mistakes pipeline.
 The task is complete only when committed on your branch.
 When it is implemented and committed, push your branch and open a PR with \`$forge_cli\` that is ready for review, not a draft$pr_base.
 Before you report done, read the PR back from the forge and confirm it is not a draft $draft_check
@@ -651,20 +656,20 @@ A draft cannot be merged, so a done report on one leaves the merge unasked.
 Then append \`done [at=<epoch>]: PR {url}\` to the status file and stop.
 That \`done:\` is accepted only when this copy's HEAD - your latest commit - is pushed to your PR branch; the check tests that commit, not merely that a branch moved.
 If you deliberately keep the PR a draft, append \`paused [at=<epoch>]: {why the draft is held}\` instead of done.
-Do NOT run /no-mistakes. The configured merge authority decides whether to merge the PR; firstmate relays the outcome.
+Do NOT run /no-mistakes. The configured merge authority decides whether to merge the PR; the Director relays the outcome.
 EOF
       ;;
     local-only:*)
       cat <<EOF
 # Definition of done
 Delivery contract: mode=local-only
-Ship branch: $branch
-This task ships **local-only**: no remote, no PR, no pipeline.
+Builder branch: $branch
+This Builder task uses **local-only** delivery: no remote, no PR, no pipeline.
 The task is complete only when committed on your branch \`$branch\`. Do NOT push, do NOT open a PR, do NOT merge.
 A \`done:\` is accepted when the named head is on this project's shared local branch, not only on a detached copy; the check tests that head, not merely that a branch moved.
 Keep your branch a clean fast-forward onto the current default branch - if \`main\` has advanced, rebase onto it so the eventual merge stays a fast-forward.
 When it is implemented and committed, append \`done [at=<epoch>]: ready in branch $branch\` to the status file and stop.
-The configured merge authority approves the ready branch, then firstmate merges it into local \`main\` through the guarded fast-forward path.
+The configured merge authority approves the ready branch, then the Director merges it into local \`main\` through the guarded fast-forward path.
 EOF
       ;;
     no-mistakes:*)
@@ -677,10 +682,10 @@ EOF
       cat <<EOF
 # Definition of done
 Delivery contract: mode=no-mistakes$contract_forge$contract_consent
-Ship branch: $branch
+Builder branch: $branch
 The task is complete only when committed on your branch.
 When you believe it is complete, append \`done [at=<epoch>]: {summary}\` to the status file and stop.
-Firstmate will then instruct you to run /no-mistakes to validate and ship a PR.
+The Director will then instruct you to run /no-mistakes to validate and publish a PR.
 That first \`done:\` is the handoff that starts the pipeline, which owns the push; it is not a request to push from this copy.
 ${nm_base}
 EOF
@@ -766,7 +771,7 @@ fm_dod_accept_external_review_done() {  # <worktree> <project> <line> <meta>
   local wt=$1 project=$2 line=$3 meta=$4 note url remote prefix sha
   note=$(status_line_note "$line")
   if ! url=$(fm_dod_review_url_from_done_note "$note"); then
-    printf '%s\n' "this project ships through an external review tool, so the ready report is \`review <url> uploaded for review\`, never a PR"
+    printf '%s\n' "this project publishes through an external review tool, so the ready report is \`review <url> uploaded for review\`, never a PR"
     return 1
   fi
   if ! fm_external_review_url_parse "$url"; then

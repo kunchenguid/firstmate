@@ -105,10 +105,10 @@ write_brief() {
   mkdir -p "$DATA/$1"
   cat > "$DATA/$1/brief.md" <<EOF
 # Task
-## Captain's intent
+## User's intent
 Exercise Herdr.app backend auto-detection for $1.
 
-## Firstmate spec
+## Director spec
 Verify the real spawn path selects hc.
 EOF
 }

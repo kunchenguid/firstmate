@@ -199,8 +199,8 @@ The nudge payload has three parts:
 - It carries the current `session-start` protocol kind.
 - It retains exactly ``Run `bin/fm-session-start.sh` now, exactly once, before executing any other instructions.`` as its body.
 
-The Ahoy skill owns the rule that this marked operational input is never a captain-authored session boundary, including its narrow legacy compatibility cases.
-The Ahoy skill's own step 0 helm check is the fallback that protects a nudge-tier harness whose first command is a skill.
+The Ahoy skill owns the rule that this marked operational input is never a user-authored session boundary, including its narrow legacy compatibility cases.
+The Ahoy skill's own step 0 startup check is the fallback that protects a nudge-tier harness whose first command is a skill.
 
 ### Nudge wrapper lock check
 
@@ -283,7 +283,7 @@ Each mapped session generation starts one native prerequisite.
 #### Pi message delivery
 
 Pi is the only adapter that injects a message rather than hook stdout.
-So whatever it injects must carry operational provenance, or the Ahoy skill would have to guess whether it was captain-authored.
+So whatever it injects must carry operational provenance, or the Ahoy skill would have to guess whether it was user-authored.
 
 For `session_start`, the extension does the following:
 
@@ -375,9 +375,9 @@ A later in-process `clear` re-emits only when this lock owner completed a full s
 
 Antigravity CLI is a run-tier harness.
 `.agents/hooks.json` registers `SessionStart`, anchored to the project root with a 30s timeout, invoking `bin/fm-sessionstart-agy.sh`.
-The wrapper drains stdin for the payload's `source` and delegates to `bin/fm-sessionstart-run.sh`, which owns primary or persistent secondmate home scope, source routing, and the digest.
-In linked crewmate worktrees or foreign checkouts, `bin/fm-sessionstart-run.sh` stands down silently and the wrapper emits `{}`.
-In primary or secondmate homes, the wrapper emits the captured digest as `{injectSteps:[{systemMessage:{systemMessage:$digest}}]}` on stdout with exit 0.
+The wrapper drains stdin for the payload's `source` and delegates to `bin/fm-sessionstart-run.sh`, which owns primary or persistent Project Director home scope, source routing, and the digest.
+In linked worker worktrees or foreign checkouts, `bin/fm-sessionstart-run.sh` stands down silently and the wrapper emits `{}`.
+In primary or Project Director homes, the wrapper emits the captured digest as `{injectSteps:[{systemMessage:{systemMessage:$digest}}]}` on stdout with exit 0.
 Native stdout context injection gates the ordered digest into model context before the first agent turn.
 
 ### Cursor compaction

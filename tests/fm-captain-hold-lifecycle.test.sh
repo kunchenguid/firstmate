@@ -1099,7 +1099,7 @@ if [ "${1:-}" = update ] && [ "${2:-}" = sample-stamp-failure ]; then
 fi
 if [ "${1:-}" = hold ] && [ "${2:-}" = sample-old-call ]; then
   show=$("$REAL_TASKS_AXI" show "$2" --full) || exit 93
-  printf '%s\n' "$show" | grep -F 'Captain hold set: 2026-07-14T12:00:00Z' >/dev/null || exit 94
+  printf '%s\n' "$show" | grep -F 'User hold set: 2026-07-14T12:00:00Z' >/dev/null || exit 94
   : > "$FM_HOME/hold-observed-after-stamp"
 fi
 exec "$REAL_TASKS_AXI" "$@"
@@ -1113,7 +1113,7 @@ EOF
     "the tasks-axi hold boundary was not observed"
   show=$(tasks_in "$home" show sample-old-call --full)
   assert_contains "$show" "hold_kind: captain" "the stamped task was not captain-held"
-  assert_contains "$show" "Captain hold set: 2026-07-14T12:00:00Z" \
+  assert_contains "$show" "User hold set: 2026-07-14T12:00:00Z" \
     "the visible captain hold lost its timestamp"
 
   if FM_CAPTAIN_HOLD_NOW=2026-07-14T12:00:00Z run_captain "$home" hold sample-stamp-failure \
@@ -1332,7 +1332,7 @@ test_out_of_band_close_is_recordable() {
     > "$home/never-held.out" 2> "$home/never-held.err"; then
     fail "an ordinary finished task was dressed up as an answered captain call"
   fi
-  assert_grep "never held for the captain" "$home/never-held.err" \
+  assert_grep "never held for the user" "$home/never-held.err" \
     "the refusal must say the task carries no captain-hold provenance"
   pass "an out-of-band close is recordable with the captain's word and nothing else"
 }
@@ -2055,14 +2055,14 @@ test_reconcile_closes_with_evidence_or_keeps_the_call_open() {
   assert_contains "$show" "Reconciliation evidence:" "the moot call did not record the evidence"
   assert_contains "$show" "0.1.38 was published" "the recorded evidence was lost"
   case "$show" in
-    *"Captain decision:"*) fail "a reconciled close was recorded as the captain's own words" ;;
+    *"User decision:"*) fail "a reconciled close was recorded as the user's own words" ;;
   esac
   set +e
   out=$(run_captain "$home" answer sample-moot-call --decision-file "$home/evidence.txt" 2>&1)
   rc=$?
   set -e
   [ "$rc" -ne 0 ] || fail "a reconciled resolution replayed as a captain answer"
-  assert_contains "$out" "not a captain-answer replay" \
+  assert_contains "$out" "not a user-answer replay" \
     "the answer replay refusal did not identify the incompatible resolution mode: $out"
 
   run_captain "$home" reconcile note sample-active-call --note-file "$home/note.txt" >/dev/null \
@@ -2070,7 +2070,7 @@ test_reconcile_closes_with_evidence_or_keeps_the_call_open() {
   show=$(tasks_in "$home" show sample-active-call --full)
   assert_contains "$show" "state: queued" "annotating a still-active call closed it"
   assert_contains "$show" "held: yes" "annotating a still-active call released it"
-  assert_contains "$show" "Captain hold reconciled:" "the re-check left no dated note"
+  assert_contains "$show" "User hold reconciled:" "the re-check left no dated note"
   assert_contains "$show" "Still open: nothing has shipped" "the note body was lost"
   case "$show" in
     *"Resolution recorded by"*) fail "annotating a still-active call wrote a resolution record" ;;
@@ -2091,9 +2091,9 @@ test_reconcile_closes_with_evidence_or_keeps_the_call_open() {
     --note-file "$home/note.txt" >/dev/null \
     || fail "the second request with the same finding was not recorded"
   show=$(tasks_in "$home" show sample-active-call --full)
-  [ "$(printf '%s\n' "$show" | grep -o 'Captain hold reconciled:' | wc -l | tr -d ' ')" -eq 2 ] \
+  [ "$(printf '%s\n' "$show" | grep -o 'User hold reconciled:' | wc -l | tr -d ' ')" -eq 2 ] \
     || fail "a later reconcile request with the same note did not append its own record"
-  assert_contains "$show" "Captain hold reconciled: 2026-09-07T06:01:00Z" \
+  assert_contains "$show" "User hold reconciled: 2026-09-07T06:01:00Z" \
     "the second reconcile request lost its own dated note"
 
   list=$(run_captain "$home" reconcile list)
@@ -2169,7 +2169,7 @@ SH
   set -e
   [ "$rc" -ne 0 ] || fail "a note retry succeeded after the request was retired"
   show=$(tasks_in "$home" show sample-reconcile-note-retry --full)
-  [ "$(printf '%s\n' "$show" | grep -c 'Captain hold reconciled:')" -eq 1 ] \
+  [ "$(printf '%s\n' "$show" | grep -c 'User hold reconciled:')" -eq 1 ] \
     || fail "reconcile note duplicated its durable annotation"
 
   chmod 0500 "$home/state/reconcile-requests"
@@ -2217,7 +2217,7 @@ SH
     --note-file "$home/retry-retire-note.txt" >/dev/null \
     || fail "the applied note could not finish request retirement on retry"
   show=$(tasks_in "$home" show sample-reconcile-retire-retry --full)
-  [ "$(printf '%s\n' "$show" | grep -c 'Captain hold reconciled:')" -eq 1 ] \
+  [ "$(printf '%s\n' "$show" | grep -c 'User hold reconciled:')" -eq 1 ] \
     || fail "failed request retirement duplicated the reconcile note"
   list=$(run_captain "$home" reconcile list)
   assert_contains "$list" "reconcile-requests: 0" "partial retries left a reconcile request pending"
@@ -2751,7 +2751,7 @@ test_teardown_never_closes_a_captain_held_task() {
   assert_absent "$home/state/$id.meta" "cleanup did not release the finished worker record"
   assert_absent "$home/state/$id.backlog-close" \
     "successful cleanup left its pending transition record behind"
-  assert_grep "still held for the captain" "$home/teardown.out" \
+  assert_grep "still held for the user" "$home/teardown.out" \
     "cleanup did not say the row stays open for the captain"
   json=$(run_bearings "$home") || fail "Bearings failed after cleanup of a captain-held task"
   printf '%s' "$json" | jq -e --arg id "$id" '
@@ -3541,7 +3541,7 @@ test_pr_merge_entrypoint_refuses_a_captain_held_task() {
   [ "$rc" -ne 0 ] || fail "the PR merge entrypoint accepted a still-held task"
   assert_no_grep 'pr merge 31 ' "$home/gh.log" \
     "the PR merge entrypoint reached the irreversible forge call for a held task"
-  assert_grep "$pr_id is still held for the captain" "$home/pr.err" \
+  assert_grep "$pr_id is still held for the user" "$home/pr.err" \
     "the PR merge refusal did not name the held task"
   assert_absent "$home/state/.control-$pr_id.lock" \
     "the refused PR merge left its task control lock held"
@@ -3582,7 +3582,7 @@ test_local_merge_entrypoint_refuses_a_captain_held_task() {
   after=$(git -C "$local_repo" rev-parse main)
   [ "$rc" -ne 0 ] || fail "the local merge entrypoint accepted a still-held task"
   [ "$after" = "$before" ] || fail "the local merge entrypoint moved main for a held task"
-  assert_grep "$local_id is still held for the captain" "$home/local.err" \
+  assert_grep "$local_id is still held for the user" "$home/local.err" \
     "the local merge refusal did not name the held task"
   assert_absent "$home/state/.control-$local_id.lock" \
     "the refused local merge left its task control lock held"
@@ -3606,7 +3606,7 @@ test_pr_merge_entrypoint_separates_an_unreadable_record_from_an_absent_one() {
   set -e
   chmod 644 "$home/data/backlog.md"
   [ "$rc" -ne 0 ] || fail "the PR merge entrypoint accepted an unreadable captain-hold authority record"
-  assert_grep "could not determine whether task $id is still held for the captain" "$home/missing-pr.err" \
+  assert_grep "could not determine whether task $id is still held for the user" "$home/missing-pr.err" \
     "the PR merge refusal did not name its unreadable authority record"
   assert_no_grep 'pr merge 43 ' "$home/gh.log" \
     "the PR merge entrypoint reached the forge without a readable authority record"
@@ -3652,7 +3652,7 @@ test_local_merge_entrypoint_separates_an_unreadable_record_from_an_absent_one() 
   after=$(git -C "$repo" rev-parse main)
   [ "$rc" -ne 0 ] || fail "the local merge entrypoint accepted an unreadable captain-hold authority record"
   [ "$after" = "$before" ] || fail "the local merge entrypoint moved main without a readable authority record"
-  assert_grep "could not determine whether task $id is still held for the captain" "$home/missing-local.err" \
+  assert_grep "could not determine whether task $id is still held for the user" "$home/missing-local.err" \
     "the local merge refusal did not name its unreadable authority record"
 
   # No backlog at all: nothing can be held, so the landing proceeds.
@@ -4223,7 +4223,7 @@ PM
     || fail "a captain hold failed where allow_nonref is not on by default"
   show=$(tasks_in "$home" show "$id" --full) || fail "the held row disappeared"
   assert_contains "$show" "hold_kind: captain" "the hold lost its captain kind"
-  assert_contains "$show" "Captain hold set:" "the hold lost its hold-set stamp"
+  assert_contains "$show" "User hold set:" "the hold lost its hold-set stamp"
   assert_contains "$show" "First line of the plan." "the hold lost the original body"
 
   # Cleanup reads the same body back to append the finished work's deliverable.
@@ -4246,7 +4246,7 @@ PM
   assert_contains "$show" "hold_kind: captain" "cleanup dropped the captain hold"
   assert_contains "$show" "Deliverable of the finished work: report data/$scout/report.md" \
     "cleanup lost the deliverable it could not decode a body to append to"
-  assert_contains "$show" "Captain hold set:" "cleanup lost the hold-set stamp"
+  assert_contains "$show" "User hold set:" "cleanup lost the hold-set stamp"
   pass "both body-decoding paths work without the allow_nonref default"
 }
 
@@ -4332,7 +4332,7 @@ test_origin_is_never_its_own_inventory_entry() {
   if run_captain "$home" complete "$id" "$id" > "$home/self.out" 2> "$home/self.err"; then
     fail "complete accepted the origin as its own inventory after a failed hold"
   fi
-  assert_grep "cannot be its own captain-call inventory entry" "$home/self.err" \
+  assert_grep "cannot be its own user-call inventory entry" "$home/self.err" \
     "the refusal does not say why the origin was rejected"
   assert_no_grep "decisions_reviewed=1" "$home/state/$id.meta" \
     "the refused completion recorded an inventory attestation"
@@ -4425,7 +4425,7 @@ fi
 if [ "${1:-}" = update ]; then
   previous=''
   for arg in "$@"; do
-    if [ "$previous" = --body-file ] && grep -qx 'Captain hold origin: origin-b' "$arg"; then
+    if [ "$previous" = --body-file ] && grep -qx 'User hold origin: origin-b' "$arg"; then
       [ -f "$FM_HOME/backend-held" ] || exit 8
       "$REAL_TASKS_AXI" show "$2" --full > "$FM_HOME/before-origin-write" || exit $?
       if [ -f "$FM_HOME/fail-write" ]; then
@@ -4469,7 +4469,7 @@ SH
           assert_absent "$home/before-backend-hold" "$phase $timing origin lookup failure reached the backend hold"
         else
           assert_present "$home/before-backend-hold" "$phase $timing failure never reached the backend hold"
-          assert_no_grep 'Captain hold origin: origin-b' "$home/before-backend-hold" \
+          assert_no_grep 'User hold origin: origin-b' "$home/before-backend-hold" \
             "the backend hold saw the new association before succeeding"
           rm "$home/before-backend-hold"
         fi
@@ -4485,7 +4485,7 @@ SH
             "the failed origin write did not publish exactly one parent decision"
         fi
         shown=$(tasks_in "$home" show "$id" --full)
-        assert_not_contains "$shown" 'Captain hold origin: origin-b' \
+        assert_not_contains "$shown" 'User hold origin: origin-b' \
           "$phase $timing origin $failure failure published the new association"
         if [ "$phase" = active ] || [ "$failure" = write ]; then
           assert_contains "$shown" 'held: yes' "an origin $failure failure lost the successful hold"
@@ -4493,7 +4493,7 @@ SH
           assert_contains "$shown" 'held: no' "$phase $timing origin $failure failure left the task held"
         fi
         if [ "$phase" != new ]; then
-          assert_contains "$shown" 'Captain hold origin: origin-a' \
+          assert_contains "$shown" 'User hold origin: origin-a' \
             "$phase $timing origin $failure failure lost the original association"
         fi
         rm "$home/fail-$failure"
@@ -4527,15 +4527,15 @@ SH
         ${until_args[@]+"${until_args[@]}"} >/dev/null || fail "$phase $timing successful retry failed"
       assert_present "$home/before-backend-hold" "the successful retry did not reach the backend hold"
       shown=$(cat "$home/before-backend-hold")
-      assert_not_contains "$shown" 'Captain hold origin: origin-b' "the backend hold ran with the new association already published"
+      assert_not_contains "$shown" 'User hold origin: origin-b' "the backend hold ran with the new association already published"
       if [ "$phase" != new ]; then
-        assert_contains "$shown" 'Captain hold origin: origin-a' "the backend hold lost the old association before succeeding"
+        assert_contains "$shown" 'User hold origin: origin-a' "the backend hold lost the old association before succeeding"
       fi
       assert_grep 'held: yes' "$home/before-origin-write" "the successful origin write preceded a live hold"
       shown=$(tasks_in "$home" show "$id" --full)
       assert_contains "$shown" 'held: yes' "the successful retry did not hold the task"
-      assert_contains "$shown" 'Captain hold origin: origin-b' "a successful hold lost its association"
-      assert_not_contains "$shown" 'Captain hold origin: origin-a' "a successful hold retained the old association"
+      assert_contains "$shown" 'User hold origin: origin-b' "a successful hold lost its association"
+      assert_not_contains "$shown" 'User hold origin: origin-a' "a successful hold retained the old association"
       assert_equals 1 "$(grep -Fc "needs-decision [key=captain-hold-$id-$occurrence]" "$channel")" \
         "retrying the origin write duplicated the parent decision"
       run_captain "$home" complete origin-b "$id" >/dev/null \
@@ -4610,12 +4610,12 @@ SH
         assert_present "$home/restore-refused" "the refused hold did not attempt restoration"
       fi
       assert_present "$home/hold-refused" "the failure did not reach the backend hold"
-      assert_no_grep 'Captain hold origin: origin-b' "$home/before-backend-hold" \
+      assert_no_grep 'User hold origin: origin-b' "$home/before-backend-hold" \
         "the move published B before the backend hold"
       shown=$(tasks_in "$home" show "$id" --full)
-      assert_contains "$shown" 'Captain hold origin: origin-a' "the failed move lost A's association"
-      assert_not_contains "$shown" 'Captain hold origin: origin-b' "the failed move published B's association"
-      assert_contains "$shown" 'Captain hold set:' "the fixture did not retain the uncommitted stamp"
+      assert_contains "$shown" 'User hold origin: origin-a' "the failed move lost A's association"
+      assert_not_contains "$shown" 'User hold origin: origin-b' "the failed move published B's association"
+      assert_contains "$shown" 'User hold set:' "the fixture did not retain the uncommitted stamp"
       assert_contains "$shown" 'Release this work.' "the failed move lost the earlier answer"
       if [ "$phase" = active ]; then
         assert_contains "$shown" 'held: yes' "the failed move lifted A's active hold"
@@ -4652,7 +4652,7 @@ SH
             tasks_in "$home" "done" "$id" --keep 1 >/dev/null || fail "could not complete the released work"
           fi
           shown=$(tasks_in "$home" show "$id" --full)
-          assert_contains "$shown" 'Captain hold origin: origin-a' "the subsequent transition changed A's association"
+          assert_contains "$shown" 'User hold origin: origin-a' "the subsequent transition changed A's association"
           if run_captain "$home" complete origin-b "$id" >/dev/null 2> "$home/transition-complete.err"; then
             fail "$phase certified B after a failed move"
           fi
@@ -4750,7 +4750,7 @@ SH
       if run_captain "$home" complete "$origin" "$entry" > "$home/self.out" 2> "$home/self.err"; then
         fail "complete accepted aliased self-inventory $origin/$entry"
       fi
-      assert_grep 'cannot be its own captain-call inventory entry' "$home/self.err" \
+      assert_grep 'cannot be its own user-call inventory entry' "$home/self.err" \
         "the alias refusal did not identify self-inventory"
       printf 'decisions_reviewed=1\ndecision_keys=%s\n' "$entry" >> "$home/state/$origin.meta"
       if run_captain "$home" verify "$origin" > "$home/verify.out" 2> "$home/verify.err"; then
@@ -4763,9 +4763,9 @@ SH
   run_captain "$home" hold fm-call --title "Separate call" --reason "Choose" --origin o >/dev/null \
     || fail "could not hold a call using the origin alias"
   shown=$(tasks_in "$home" show fm-call --full)
-  assert_contains "$shown" 'Captain hold origin: fm-o' "hold did not store the backend origin identity"
+  assert_contains "$shown" 'User hold origin: fm-o' "hold did not store the backend origin identity"
   printf '%s\n' "$shown" | sed -n 's/^  body: //p' | jq -r . \
-    | sed 's/^Captain hold origin: fm-o$/Captain hold origin: o/' > "$home/legacy-origin.txt"
+    | sed 's/^User hold origin: fm-o$/Captain hold origin: o/' > "$home/legacy-origin.txt"
   tasks_in "$home" update fm-call --body-file "$home/legacy-origin.txt" >/dev/null \
     || fail "could not create a legacy stored alias"
   for origin in fm-o o; do

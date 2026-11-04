@@ -8,6 +8,17 @@
 # and the task text bin/fm-dispatch-resolve.sh sends to the router, so every
 # consumer sees the same section bodies.
 
+# Canonical task headings use Director terminology. Older persisted briefs used
+# the legacy role headings below, so readers accept them as aliases while every
+# new scaffold emits only the canonical form.
+fm_brief_heading_legacy_alias() {  # <heading>
+  case "$1" in
+    "## User's intent") printf '%s\n' "## Captain's intent" ;;
+    "## Director spec") printf '%s\n' "## Firstmate spec" ;;
+    *) return 1 ;;
+  esac
+}
+
 # Parse an exact ATX heading outside fenced blocks. Body mode prints through
 # the next unfenced heading at the same or a higher level; present mode reports
 # whether the heading exists.
@@ -82,14 +93,20 @@ fm_brief_heading_present() {  # <file> <heading>
 }
 
 fm_brief_task_heading_body() {  # <file> <heading>
-  local task
+  local task alias
   task=$(fm_brief_heading_body "$1" "# Task")
-  fm_brief_heading_parse - "$2" body <<<"$task"
+  if fm_brief_heading_parse - "$2" present >/dev/null <<<"$task"; then
+    fm_brief_heading_parse - "$2" body <<<"$task"
+    return
+  fi
+  alias=$(fm_brief_heading_legacy_alias "$2") || return 0
+  fm_brief_heading_parse - "$alias" body <<<"$task"
 }
 
 fm_brief_task_heading_present() {  # <file> <heading>
-  local task
+  local task alias
   task=$(fm_brief_heading_body "$1" "# Task")
-  fm_brief_heading_parse - "$2" present >/dev/null <<<"$task"
+  fm_brief_heading_parse - "$2" present >/dev/null <<<"$task" && return 0
+  alias=$(fm_brief_heading_legacy_alias "$2") || return 1
+  fm_brief_heading_parse - "$alias" present >/dev/null <<<"$task"
 }
-

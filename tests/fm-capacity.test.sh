@@ -385,7 +385,7 @@ CFG
   out=$(run_capacity_jq "$home" "$fakebin" --admit); rc=$?
   expect_code 75 "$rc" "admit under limits"
   assert_contains "$out" 'deferred: lane capacity of this home' "a deferral must print one deferred line"
-  assert_contains "$out" 'memory: no room for a 1 GB lane: 5.5 GB available, 5 GB kept; disk: disk 50 GB free, under 60 GB; load: 24.7 over its max-load1 20; captain reserve: host reserved by the captain; on battery' \
+  assert_contains "$out" 'memory: no room for a 1 GB lane: 5.5 GB available, 5 GB kept; disk: disk 50 GB free, under 60 GB; load: 24.7 over its max-load1 20; user reserve (compatibility key captain): host reserved by the captain; on battery' \
     "the deferral must give every reason in words"
   write_beat "$home/beat.json" ok 13.5 25.2 0.29 2.0 false "" 500
   rm -f "$home/reserved.flag"

@@ -21,7 +21,7 @@ SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 case "${1:-}" in
   --help|-h)
     printf '%s\n' 'Usage: FM_HOME=<owning-home> fm-approval-failover.sh apply <task-id>' \
-      "Run only after observing a defeated bypass and obtaining the captain's explicit approval." \
+      "Run only after observing a defeated bypass and obtaining the user's explicit approval." \
       'Saves the runtime fallback once and relaunches through fm-control.'
     exit 0
     ;;

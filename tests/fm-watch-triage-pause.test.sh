@@ -282,8 +282,8 @@ test_exited_declared_pause_is_bounded_but_live_gate_surfaces() {
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
   wait_for_exit "$pid" 100 || fail "captain-held dead-agent pane did not re-surface on the bounded cadence"
-  grep -F "awaiting the captain" "$state/.wake-queue" >/dev/null \
-    || fail "captain-held dead-agent pane surfaced as a stopped crew instead of a captain-owned recheck: $(cat "$state/.wake-queue")"
+  grep -F "awaiting the user" "$state/.wake-queue" >/dev/null \
+    || fail "the compatibility captain-held dead-agent pane surfaced as a stopped worker instead of a user-owned recheck: $(cat "$state/.wake-queue")"
   grep -F "awaiting external" "$state/.wake-queue" >/dev/null \
     && fail "captain-held dead-agent pane borrowed the pause verb's external-wait wording"
 
@@ -342,7 +342,7 @@ test_absorbed_replacement_wait_does_not_inherit_the_old_throttle() {
   local statusf window key sig back pid wakes
   for spec in \
     'paused-replacement|paused: waiting on validation run one|paused: waiting on validation run two|awaiting external' \
-    'captain-held-replacement|captain-held [key=route]: awaiting the routing call|captain-held [key=release]: awaiting the release call|awaiting the captain'
+    'captain-held-replacement|captain-held [key=route]: awaiting the routing call|captain-held [key=release]: awaiting the release call|awaiting the user'
   do
     name=${spec%%|*}; spec=${spec#*|}
     initial=${spec%%|*}; spec=${spec#*|}
@@ -884,7 +884,7 @@ test_secondmate_captain_held_resurfaces_in_normal_mode() {
   pid=$!
   wait_for_exit "$pid" 100 || fail "watcher did not re-surface a captain-held secondmate"
   grep -F "stale: $window" "$out" >/dev/null || fail "captain-held secondmate did not emit a stale recheck"
-  grep -F "awaiting the captain" "$out" >/dev/null || fail "captain-held secondmate recheck did not name the captain as the blocker: $(cat "$out")"
+  grep -F "awaiting the user" "$out" >/dev/null || fail "the compatibility captain-held Project Director recheck did not name the user as the blocker: $(cat "$out")"
   grep -F "awaiting external" "$out" >/dev/null && fail "captain-held secondmate recheck claimed an external wait"
   grep -F "possible wedge" "$out" >/dev/null && fail "captain-held secondmate was mislabeled a wedge"
   unset FM_FAKE_CREW_STATE
@@ -1138,7 +1138,7 @@ test_captain_held_never_rechecked_while_away_record_exists() {
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
   wait_for_exit "$pid" 100 || { reap "$pid"; fail "archiving the away-posture record did not restore the captain-held recheck"; }
-  grep -F "awaiting the captain" "$out" >/dev/null || fail "the restored recheck did not name the captain: $(cat "$out")"
+  grep -F "awaiting the user" "$out" >/dev/null || fail "the restored recheck did not name the user: $(cat "$out")"
   unset FM_FAKE_CREW_STATE
   pass "a captain-held item is never rechecked while the away-posture record exists, and the recheck returns once the record is archived"
 }
@@ -1176,7 +1176,7 @@ test_captain_held_rechecked_under_a_quiet_record() {
   pid=$!
   wait_for_exit "$pid" 100 || { reap "$pid"; fail "a captain-held item was not rechecked beside quiet mode's record"; }
   unset FM_FAKE_CREW_STATE
-  grep -F "awaiting the captain" "$out" >/dev/null || fail "the recheck beside a quiet record did not name the captain: $(cat "$out")"
+  grep -F "awaiting the user" "$out" >/dev/null || fail "the recheck beside a quiet record did not name the user: $(cat "$out")"
   ! grep -F 'never rechecked while the away-posture record exists' "$state/.watch-triage.log" >/dev/null 2>&1 \
     || fail "quiet mode's record silenced a captain-held item as if the captain were away: $(cat "$state/.watch-triage.log")"
   [ -f "$state/.afk-contract" ] || fail "fixture: quiet mode's record is gone"

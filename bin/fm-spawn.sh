@@ -1,41 +1,44 @@
 #!/usr/bin/env bash
-# Spawn a direct report: a crewmate in a treehouse or Orca worktree, or a
-# secondmate in its isolated firstmate home.
+# Spawn a direct report: a Builder or Investigator in an isolated worktree, or
+# a Project Director in its isolated Firstmate home. Compatibility flags and
+# persisted kinds remain --scout/kind=scout, --secondmate/kind=secondmate, and
+# kind=ship for installed homes.
 # Usage: fm-spawn.sh <task-id> <project-dir> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--branch-prefix <prefix>] [--base-branch <branch>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--hermes-profile <name>] [--account <entry>] [--backend <name>] [--herdr-resume-lock-wait]
 #        fm-spawn.sh <task-id> <project-dir> --scout [--base-branch <branch>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--hermes-profile <name>] [--account <entry>] [--backend <name>] [--herdr-resume-lock-wait]
 #        fm-spawn.sh <task-id> [<firstmate-home>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] --secondmate
-#   --mode and --yolo are this task's delivery contract, REQUIRED for every ship
-#   spawn and refused on --scout and --secondmate spawns. Firstmate resolves both
-#   per task at intake (AGENTS.md section 7); data/projects.md holds the captain's
+#   --mode and --yolo are this task's delivery contract, REQUIRED for every Builder
+#   spawn and refused on Investigator (--scout) and Project Director (--secondmate)
+#   spawns. The Director resolves both
+#   per task at intake (AGENTS.md section 7); data/projects.md holds the user's
 #   standing posture as context, not as this task's answer, so a spawn never looks
-#   the mode up. A ship spawn additionally reads the brief's recorded
+#   the mode up. A Builder spawn additionally reads the brief's recorded
 #   "Delivery contract: mode=<mode>" line and REFUSES a mismatch, so the worker's
 #   instructions and the recorded task delivery cannot drift apart; a brief
 #   scaffolded before that line existed warns once and launches on the flag.
 #   The project's forge IS read from data/projects.md, because it is the
-#   captain's confirmed project fact rather than a per-task choice: a spawn
+#   user's confirmed project fact rather than a per-task choice: a spawn
 #   refuses a brief whose `forge=` disagrees with the registered binding in
 #   either direction, and refuses --yolo on for a forge=gerrit or
 #   forge=external project, where yolo is inactive (bin/fm-project-mode.sh's
 #   header carries that decision). The project's pr=manual binding is read the
 #   same way and agrees with the brief's " pr=manual" contract suffix in either
-#   direction; only a no-mistakes ship takes it, so a no-mistakes-prod-only
-#   project's direct-PR task expects none. A forge=external ship also refuses a missing
+#   direction; only a no-mistakes Builder takes it, so a no-mistakes-prod-only
+#   project's direct-PR task expects none. A forge=external Builder also refuses a missing
 #   review tool adapter and an unusable personal backup remote, installs the
 #   per-task pre-push guard (bin/fm-git-push-guard.sh) even when the home keeps
 #   AI trailers, and records forge=external, backup_remote=, and backup_prefix=
 #   in the task metadata for bin/fm-dod-lib.sh's ready-report gate. A
 #   registry entry the parser refuses stops the spawn rather than launching on a
 #   guessed posture. A
-#   ship or scout spawn also refuses leftover `{TASK}` / `{FIRSTMATE_SPEC}`
+#   Builder or Investigator spawn also refuses leftover `{TASK}` / `{DIRECTOR_SPEC}`
 #   placeholders, an empty Task, an incomplete pair of Task subsections, or a
-#   `## Captain's intent` line opening with a Captain label or address.
+#   `## User's intent` line opening with a Captain label or address.
 #   When config/herdr-lifecycle-spawn-guard exists, a brief naming
 #   bin/fm-herdr-lab.sh or a listed Herdr session/server lifecycle command must
 #   carry the Herdr isolation contract emitted by bin/fm-brief.sh --herdr-lab;
 #   the refusal names the first such match.
-#   Every ship or scout spawn renders `launch-brief.md`; for a no-mistakes ship
-#   it also carries the current `--intent` contract and the extracted captain
+#   Every Builder or Investigator spawn renders `launch-brief.md`; for a
+#   no-mistakes Builder it also carries the current `--intent` contract and the extracted user
 #   intent. A legacy mixed Task is accepted there only under bin/fm-dod-lib.sh's
 #   provenance-marking rules; unmarked legacy Tasks stop for migration rather
 #   than becoming intent. That library owns the parsing and intent rules. When
@@ -43,14 +46,14 @@
 #   loud one-line deviation notice is printed and the spawn continues.
 #   no-mistakes-prod-only is a registry policy rather than a task mode and is
 #   refused as a flag value.
-#   --branch-prefix is the optional prefix selected at intake for this ship's
+#   --branch-prefix is the optional prefix selected at intake for this Builder's
 #   immutable branch, defaulting to "fm/". It must agree with the branch recorded
-#   in the brief, and is refused on scouts, secondmates, and relaunches. When the
+#   in the brief, and is refused on Investigators, Project Directors, and relaunches. When the
 #   selected branch does not match the project's registered prefix, the spawn
 #   prints a one-line deviation notice and continues, because the registered
-#   prefix is the captain's standing preference and the brief agreement above
+#   prefix is the user's standing preference and the brief agreement above
 #   already guarantees the worker's instructions match the branch.
-#   --base-branch is the optional branch selected at intake for a ship or scout
+#   --base-branch is the optional branch selected at intake for a Builder or Investigator
 #   to start from and target instead of origin's default branch. A fresh launch
 #   resets its pooled copy to origin/<branch>, refusing when the project has no
 #   origin or origin lacks that branch, or when the project's registered forge
@@ -58,12 +61,12 @@
 #   brief (bin/fm-brief.sh --base-branch writes one; other such lines are prose),
 #   and a brief with such a line refuses a spawn without the flag. The spawn records it as
 #   base_branch= in state/<id>.meta, which a relaunch reuses and later review and
-#   cleanup read; it is refused on secondmates and relaunches, and without it
+#   cleanup read; it is refused on Project Directors and relaunches, and without it
 #   nothing changes.
-#   Ship/scout launches always put fm-dod-lib.sh's current worker role scope
+#   Builder/Investigator launches always put fm-dod-lib.sh's current worker role scope
 #   first in the private launch-brief overlay, including the exact task-owned
 #   steering inbox. This never rewrites a project's instruction files or a
-#   secondmate's charter.
+#   Project Director's charter.
 #        fm-spawn.sh <task-id> --relaunch [--harness <name>] [--model <name>] [--effort <level>] [--account <entry>]
 #   --relaunch launches a replacement agent for an EXISTING task into that
 #   task's own recorded worktree, reusing its recorded endpoint when that
@@ -92,10 +95,10 @@
 #   identity for its endpoint, so no read here can tell a destroyed window from
 #   one on a tmux server this process cannot address. An endpoint that turns out
 #   to have survived refuses too. The worktree is reused untouched either way; a
-#   rebind is a recovery, never a teardown. Only a crewmate or scout rebinds: a
-#   secondmate whose endpoint is gone is respawned by its own owner
+#   rebind is a recovery, never a teardown. Only a Builder or Investigator rebinds: a
+#   Project Director whose endpoint is gone is respawned by its own owner
 #   (`--secondmate`, driven by the session-start liveness sweep).
-#   Every fresh ship/scout launch and replacement explicitly enters the recorded
+#   Every fresh Builder/Investigator launch and replacement explicitly enters the recorded
 #   worktree immediately before trust setup and brief delivery, and a pre-launch
 #   cwd check refuses any endpoint that still reports another copy; a Herdr shell
 #   that has drifted out of the recorded worktree is told once to return, and
@@ -103,7 +106,7 @@
 #   --harness <name> is the explicit per-spawn harness/profile adapter. The old
 #   positional harness arg still works for back-compat.
 #   --hermes-profile <name> selects Hermes's native -p profile for a tmux
-#   crewmate/scout; omission keeps Hermes's default selection. Names follow the
+#   Builder/Investigator; omission keeps Hermes's default selection. Names follow the
 #   native lowercase 1-64 character grammar. The resolved home is pinned for
 #   launch, and hermes_profile= is replayed on relaunch. Non-default --model is
 #   refused; effort is recorded but the profile owns model and reasoning.
@@ -112,7 +115,7 @@
 #   may run only while idle; a mid-turn, ambiguous or unreadable gateway is
 #   refused without changing it. No profile config or SOUL is edited.
 #   --model <name> and --effort <low|medium|high|xhigh|max|ultra> are concrete profile
-#   axes chosen by firstmate at intake. They are only threaded into harnesses whose
+#   axes chosen by the Director at intake. They are only threaded into harnesses whose
 #   installed CLIs were verified to support that axis; unsupported axes are omitted
 #   from that harness's launch rather than guessed. Ultra is the explicit
 #   exception: bin/fm-harness.sh validate-native-effort owns its model scope;
@@ -147,7 +150,7 @@
 #   blocked backend contract. Default tmux spawns do not write backend= to meta;
 #   absent backend= means tmux. Orca, cmux, paseo, tern, and hc do not support
 #   --secondmate spawns.
-#   A rex crewmate or scout opens one tab in the Rex session the launching
+#   A rex Builder or Investigator opens one tab in the Rex session the launching
 #   firstmate runs in when it runs directly inside Rex, otherwise in its home's
 #   own Rex session; a --secondmate launch opens its tab in that secondmate
 #   home's own Rex session (bin/backends/rex.sh owns placement).
@@ -160,7 +163,7 @@
 #   A backend spawn refusal (missing dependency, version gate, unauthenticated
 #   socket, or unsupported secondmate mode) is terminal for that selected backend;
 #   callers must surface it instead of silently retrying another backend.
-#   A herdr crewmate or scout is placed in the exact workspace of the firstmate
+#   A herdr Builder or Investigator is placed in the exact workspace of the firstmate
 #   or secondmate process launching it, resolved from that process's own herdr
 #   pane rather than from a workspace label (herdr enforces no label uniqueness,
 #   so a label cannot tell two "firstmate" workspaces apart). A claimed parent
@@ -168,7 +171,7 @@
 #   session stops the spawn before any worker endpoint exists. A launcher
 #   outside herdr has no workspace to inherit and uses this home's own labeled
 #   workspace, which must then match exactly one. --secondmate is the deliberate
-#   exception: it stands up that secondmate home's own workspace.
+#   exception: it stands up that Project Director home's own workspace.
 #   Herdr additionally uses a presentation-only layout by default when the
 #   selected client and running server meet the Herdr 0.8.0 floor. The local
 #   config/herdr-presentation-spaces file can say off to disable it or on to
@@ -245,12 +248,12 @@
 #   A batch reports such a pair as `batch: DEFERRED` and exits 75 when nothing
 #   else failed. A relaunch and a --secondmate spawn are never counted against
 #   capacity.
-#   With no harness arg, a crewmate/scout spawn resolves the CREW harness only when
-#   config/crew-dispatch.json is absent. When that file exists, crewmate/scout
+#   With no harness arg, a Builder/Investigator spawn resolves the CREW harness only when
+#   config/crew-dispatch.json is absent. When that file exists, Builder/Investigator
 #   spawns require an explicit harness so firstmate cannot silently skip dispatch
 #   profile consultation. A --secondmate spawn is exempt and resolves the SECONDMATE
 #   harness (config/secondmate-harness -> config/crew-harness -> own), so the
-#   secondmate-vs-crewmate split is DURABLE across every respawn (recovery,
+#   secondmate-vs-worker split is DURABLE across every respawn (recovery,
 #   /updatefirstmate, restart). A bare adapter name (claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|gemini|muse|rovo|omp|agy|devin|commandcode|cortex|kiro)
 #   overrides it for this spawn (either kind). A non-flag string containing
 #   whitespace is treated as a RAW launch command - the escape hatch for verifying
@@ -288,7 +291,7 @@
 #   private per-task plugin (bin/fm-cortex-plugin.sh) carrying the busy-state
 #   hooks, because Cortex's own settings file takes no hooks through --config.
 #   The launch does not pass --sql-read-only: SQL write policy stays the
-#   captain's own Cortex configuration. config/claude-permission-mode is not
+#   user's own Cortex configuration. config/claude-permission-mode is not
 #   mapped. --effort maps low|medium|high|max; xhigh is omitted (cortex has
 #   no such level). A bad --model is not refused at launch: Cortex starts,
 #   then answers the first prompt with the account's available model ids.
@@ -301,13 +304,13 @@
 #   .omp/fm-worker-overlay.yml through --config. That overlay pins composer
 #   shape, plan mode off, prewalk off, and the non-interactive usage-reserve
 #   policy for the one session only (--auto-approve alone owns approval); the
-#   captain's own ~/.omp/agent/config.yml (model roles, providers, theme) is
+#   user's own ~/.omp/agent/config.yml (model roles, providers, theme) is
 #   never written.
 #   A model written as <provider>/<id> is validated against `omp models --json`
 #   only when that provider appears in the listing; a provider absent from the
 #   listing (an extension-registered provider such as claude-bridge, which omp
 #   never lists) passes through unvalidated with a stderr notice, and a bare
-#   fuzzy pattern is left to omp's own matcher. A crewmate or scout loads its
+#   fuzzy pattern is left to omp's own matcher. A Builder or Investigator loads its
 #   per-task busy-state extension with -e from state/ (outside the worktree, so
 #   auto-discovery cannot load it a second time); a secondmate names only that
 #   state/<id>.omp-ext.ts busy extension with -e and relies on omp
@@ -324,7 +327,7 @@
 #   respawn exactly like the harness axis, and explicit --model/--effort flags
 #   still win over the file's tokens.
 #   A --secondmate spawn also propagates the primary's declared inherited local
-#   material, so the secondmate's OWN crewmates inherit primary config and the
+#   material, so the Project Director's own workers inherit primary config and the
 #   secondmate receives the primary's read-only shared captain-preference file
 #   (fm-config-inherit-lib.sh). A successful launch clears pending inherited
 #   config reread generations because the new agent reads the converged files.
@@ -355,7 +358,7 @@
 #   resolves the current remote default branch (or uses --base-branch, described
 #   above), and resets to its tip. A home that creates the default-off
 #   config/spawn-base-primary-checkout flag (docs/configuration.md) instead
-#   resets a local-only ship or a scout without --base-branch to that same
+#   resets a local-only Builder or an Investigator without --base-branch to that same
 #   branch in the primary checkout when it strictly contains origin's tip: a
 #   local-only project lands work there through bin/fm-merge-local.sh and never
 #   pushes, so origin stays frozen at the last push. A publishing mode
@@ -386,7 +389,7 @@
 #   source of truth; shared --scout/--harness/--model/--effort/--backend/--mode/--yolo
 #   applies to every pair. A ship batch therefore carries one delivery contract, and each
 #   pair still checks it against its own brief; a batch spanning modes is two invocations.
-#   If config/crew-dispatch.json exists, shared --harness is required for crewmate
+#   If config/crew-dispatch.json exists, shared --harness is required for worker
 #   and scout batches. The loop lives here, in bash, so callers never hand-write a
 #   multi-task shell loop (the tool shell is zsh, which does not word-split unquoted
 #   $vars and silently breaks ad-hoc `for ... in $pairs` loops).
@@ -422,7 +425,7 @@
 #   REX_SESSION REX_BLOCK REX_SERVER REX_BIN_DIR TERN_IDENTITY TERN_PANE
 #   TERN_PANE_SOCKET TERN_WINDOW_KEY TERN_WINDOW_SOCKET HC_SESSION
 #   HC_TERMINAL_ID HC_TERMINAL_SOCKET HC_SCOPE, plus the task
-#   marker FM_TASK_ID that ship and scout panes receive above, plus the
+#   marker FM_TASK_ID that Builder and Investigator panes receive above, plus the
 #   compact-adviser kill switch COMPACT_ADVISER_DISABLE, which the floor also
 #   pins to 1 with a literal assignment so it survives the cleared environment
 #   even on a host that never had it set.
@@ -461,7 +464,7 @@
 #   delete the file, or HUP, INT or TERM interrupts spawn first, spawn removes
 #   it unless the pane already did, refuses the worker launch, and leaves the
 #   Orca terminal open.
-#   The selector is not inherited into secondmate homes. This is not a
+#   The selector is not inherited into Project Director homes. This is not a
 #   filesystem sandbox; project and harness sandbox
 #   settings still own access to personal credential files.
 # Codex permission mode: docs/configuration.md owns config/codex-permission-mode.
@@ -475,7 +478,7 @@
 #   value, or an unreadable file, refuses the spawn before any endpoint,
 #   worktree, or record exists and names the accepted values. The file is read
 #   on every spawn and relaunch, so a change reaches the next launch without a
-#   restart, and it is inherited into secondmate homes (bin/fm-config-inherit-lib.sh).
+#   restart, and it is inherited into Project Director homes (bin/fm-config-inherit-lib.sh).
 # Codex approval mode (config/codex-approval-mode):
 #   One whitespace-trimmed token: absent or `bypass` selects
 #   --dangerously-bypass-approvals-and-sandbox; `approve-for-me` selects
@@ -504,7 +507,7 @@
 #   account_provider=) in the task record and on the spawned line. A local
 #   secondmate first checks config/secondmate-accounts/<id>/<runner>-account
 #   in this launching home, then falls back to its home-wide pin when absent.
-#   Pins are never inherited; remote per-mate overrides refuse locally.
+#   Pins are never inherited; remote per-Project-Director overrides refuse locally.
 #   T3 Code refuses a pin because its provider instance owns the account.
 #   bin/fm-worker-account-lib.sh owns parsing, the check, and the shed list.
 # Claude account list (config/claude-accounts, --account <entry>):
@@ -528,7 +531,7 @@
 #                  Firstmate channel directories (claude_add_dirs_flag below;
 #                  supplies its own trailing space, empty never used)
 #     __CLAUDESETTINGS__ the single claude --settings value: a quoted inline
-#                  JSON object for a crewmate or scout, or a quoted path to
+#                  JSON object for a Builder or Investigator, or a quoted path to
 #                  state/<task-id>.claude-settings.json for a secondmate
 #     __PIBIN__    quoted concrete Pi-family executable path resolved from PATH
 #     __PITUIMODE__ optional --tui-mode regular when that executable advertises it
@@ -536,7 +539,7 @@
 #                  that executable advertises the flag (empty otherwise; session
 #                  trust for the launch cwd only, never a trust.json rewrite)
 #     __PIEXCLUDE__ optional ` --exclude-tools '<comma-joined names>'` from
-#                  config/crew-exclude-tools on Pi/pi-signed ship and scout
+#                  config/crew-exclude-tools on Pi/pi-signed Builder and Investigator
 #                  launches (supplies its own leading space, empty otherwise)
 #     __PIRESUME__ optional relaunch-only `--session <reference>` that keeps a
 #                  Pi replacement on the session the endpoint's runtime already
@@ -548,8 +551,8 @@
 #     __PIEXT__    absolute path to state/<task-id>.pi-ext.ts (pi busy-state extension,
 #                  written by this script; outside the worktree to avoid pi's trust gate;
 #                  a secondmate loads it beside its two primary extensions)
-#     __PITURNEND__ absolute path to .pi/extensions/fm-primary-turnend-guard.ts in a pi secondmate home
-#     __PIWATCH__   absolute path to .pi/extensions/fm-primary-pi-watch.ts in a pi secondmate home
+#     __PITURNEND__ absolute path to .pi/extensions/fm-primary-turnend-guard.ts in a pi Project Director home
+#     __PIWATCH__   absolute path to .pi/extensions/fm-primary-pi-watch.ts in a pi Project Director home
 #     __OMPBIN__   quoted concrete omp executable path resolved from PATH
 #     __OMPPROFILE__ optional ` --profile '<name>'` from the per-secondmate omp
 #                  profile pin (supplies its own leading space, empty otherwise)
@@ -592,7 +595,7 @@
 # a mate's completed turns stay in its own home. Codex stays unknown until a semantic
 # source exists. Grok keeps its rendered-tail fallback and is not given a parent
 # turn-end hook. Cursor's transcript binding is written for a secondmate the same way
-# as for a crewmate. Muse, gemini, devin, cortex, and rovo are refused as secondmates.
+# as for a worker. Muse, gemini, devin, cortex, and rovo are refused as secondmates.
 # A raw launch command for a claude, pi, pi-signed, or omp secondmate is not armed
 # and retires any arm an earlier launch of that mate left, so its verdict is unknown:
 # the raw command carries no --settings or -e flag to load the wiring.
@@ -619,17 +622,17 @@
 # plus a gitignored .fm-grok-turnend worktree pointer and a state token.
 # muse installs no hook at all - its plugin engine is off in the default build - so
 # it writes state/<id>.muse-session to bind the pane to muse's own session event
-# log; muse, gemini, devin, commandcode, cortex, and kiro are crewmate/scout only and are refused for --secondmate.
+# log; muse, gemini, devin, commandcode, cortex, and kiro are Builder/Investigator only and are refused for --secondmate.
 # rovo installs no hook either - its eventHooks fire at tool granularity only,
 # never turn-end - so it carries no busy-source wiring at all and no turn-end
 # hook. A positional brief is dead-on-arrival (rovo loads, never works, and drops
 # to an idle shell), so rovo launches BARE and receives an absolute brief pointer
 # only after a TUI readiness gate, then a delivery-confirmation gate - the same
 # launch-then-send shape as kimi. Its busy state is a screen-scrape fallback like
-# grok. rovo is crewmate/scout only and is refused for --secondmate, like muse.
+# grok. rovo is Builder/Investigator only and is refused for --secondmate, like muse.
 # agy installs no per-task worker hook; its brief rides the launch command, and a
-# fresh worktree or secondmate home would park it on a folder-trust dialog, so the
-# spawn pre-registers the worktree or secondmate home in agy's own trust store
+# fresh worktree or Project Director home would park it on a folder-trust dialog, so the
+# spawn pre-registers the worktree or Project Director home in agy's own trust store
 # through bin/fm-agy-trust.sh (the claude shape, but non-fatal) and then waits for
 # a busy turn - answering the dialog first if it renders anyway - before reporting
 # success (the rovo/kimi launch-then-confirm shape). Its busy state is a
@@ -642,13 +645,13 @@
 # into the worktree's own .kiro/, so - mirroring gemini - the spawn writes a
 # firstmate-owned per-task agent config under state/<id>.kiro-home/agents/ and
 # reaches it by relocating KIRO_HOME onto that dir on the launch command; the
-# captain's real ~/.kiro is never touched, and auth is unaffected on AL2 where
+# user's real ~/.kiro is never touched, and auth is unaffected on AL2 where
 # it lives in the XDG data dir - where macOS carries auth is unestablished, so
 # a macOS worker may hit an auth prompt (docs/verification/kiro.md owns that
 # gap). --agent is name-only (a path is rejected), and --trust-all-tools
 # would otherwise block on a modal, so the spawn seeds
 # chat.disableTrustAllConfirmation into that per-task home's settings. kiro is
-# crewmate/scout only and refused for --secondmate. The kiro-hook record is its
+# Builder/Investigator only and refused for --secondmate. The kiro-hook record is its
 # only busy-state source (bin/fm-busy-lib.sh).
 # cursor installs no per-task hook either: it writes state/<id>.cursor-session to
 # bind the pane to cursor's own conversation transcript (projects root, the exact
@@ -660,7 +663,7 @@
 # claude is the one harness whose pre-launch setup can REFUSE the spawn: before
 # any per-task state exists, and before its busy hooks are written, every
 # claude launch pre-registers its launch directory -
-# the task worktree, or the secondmate home for a --secondmate spawn -
+# the task worktree, or the Project Director home for a --secondmate spawn -
 # in the launching user's own Claude trust store through bin/fm-claude-trust.sh,
 # because Claude's interactive workspace-trust dialog gates a folder it has never
 # seen and firstmate cannot answer it. That helper's header owns the structural
@@ -682,13 +685,13 @@
 # readiness gate fails loudly on any first-start dialog the launch cannot get
 # past. bin/fm-polytoken-lib.sh owns every generated artifact and the verified
 # facts; .agents/skills/harness-adapters/references/harness/polytoken.md owns the
-# knowledge record. polytoken is crewmate/scout only and is refused for
+# knowledge record. polytoken is Builder/Investigator only and is refused for
 # --secondmate, like devin.
 # Unless config/keep-ai-trailers is present, every claude launch carries the
 # attribution-off policy in its per-launch --settings JSON, so a spawned worker
 # never writes a Co-Authored-By trailer, Claude-Session link, or generated-with
 # line into a commit or PR body; launch_template() below owns the reason it
-# cannot come from the captain's own settings.
+# cannot come from the user's own settings.
 # Cursor and the other non-Claude runtimes have no equivalent per-launch
 # settings overlay: Cursor injects a Co-Authored-By trailer at the tooling
 # layer after the worker types a clean message, and a per-machine
@@ -722,7 +725,7 @@
 # compatible tasks-axi refuses before creating lifecycle state.
 # On success prints: spawned <id> harness=<name> kind=<ship|scout|secondmate> [mode=<mode> yolo=<on|off>] window=<backend-target> worktree=<path>
 # A ship task records the explicit mode/yolo it was passed; a secondmate spawn records
-# mode=secondmate, yolo=off, home=, and projects=; a scout records neither, and both the
+# mode=secondmate, yolo=off, home=, and projects=; an Investigator records neither, and both the
 # success line and state/<id>.meta omit them.
 # Every fresh spawn or relaunch records a new spawn_gen= incarnation token so durable
 # consumers can distinguish a replacement worker that reuses the same task id.
@@ -734,7 +737,7 @@
 #   --traceparent <carrier> delivers a carrier that a REMOTE parent already
 #   resolved and will record, instead of resolving one from this home's frozen
 #   decision. It is accepted only for --secondmate spawns, only as a strictly
-#   validated W3C traceparent, and exists because a remote secondmate's task
+#   validated W3C traceparent, and exists because a remote Project Director's task
 #   identity is owned by the parent home that holds its task metadata, while the
 #   pane export happens on the remote host (bin/fm-remote-secondmate-control.sh).
 #   Local spawns never pass it and resolve their own carrier exactly as before.
@@ -973,7 +976,7 @@ fm_backlog_directory_present "$STATE" "state directory" || {
 . "$SCRIPT_DIR/fm-worker-account-lib.sh"
 # shellcheck source=bin/fm-omp-profile-lib.sh
 . "$SCRIPT_DIR/fm-omp-profile-lib.sh"
-# Fail closed before any fleet mutation: a no-mistakes gate agent must never spawn
+# Fail closed before any team mutation: a no-mistakes gate agent must never spawn
 # a direct report (see bin/fm-gate-refuse-lib.sh).
 fm_refuse_if_gate_agent
 # Skip the watcher guard when re-exec'd for one pair of a batch (FM_SPAWN_NO_GUARD is
@@ -1164,7 +1167,7 @@ done
   exit 1
 }
 if [ "$KIND" = secondmate ] && [ "$HERMES_PROFILE_SET" = 1 ]; then
-  echo 'error: --hermes-profile is for crewmate/scout launches, never a secondmate' >&2
+  echo 'error: --hermes-profile is for Builder/Investigator launches, never a Project Director (--secondmate)' >&2
   exit 1
 fi
 [ "$EFFORT_SET" -eq 0 ] || [ -n "$EFFORT" ] || {
@@ -1195,10 +1198,10 @@ fi
   echo "error: --account requires a non-empty value" >&2
   exit 1
 }
-# A secondmate, local or remote, launches on its own per-mate pin, so --account
+# A Project Director, local or remote, launches on its own per-Project-Director pin, so --account
 # is refused here, before the remote route could ignore it.
 [ "$ACCOUNT_SET" -eq 0 ] || [ "$KIND" != secondmate ] || {
-  echo "error: --account applies to ships and scouts; secondmate ${POS[0]:-} launches on its own config/secondmate-accounts/<id>/claude-account pin" >&2
+  echo "error: --account applies to Builders and Investigators; Project Director ${POS[0]:-} launches on its own config/secondmate-accounts/<id>/claude-account pin" >&2
   exit 1
 }
 # A parent-delivered carrier replaces this home's own resolution, so it is
@@ -1244,7 +1247,7 @@ if [ "$RELAUNCH" -eq 1 ]; then
     exit 1
   }
   [ "$BRANCH_PREFIX_SET" -eq 0 ] || {
-    echo "error: --relaunch reuses the task's recorded ship branch; --branch-prefix cannot override it" >&2
+    echo "error: --relaunch reuses the task's recorded Builder branch; --branch-prefix cannot override it" >&2
     exit 1
   }
   [ "$BASE_BRANCH_SET" -eq 0 ] || {
@@ -1262,11 +1265,11 @@ else
   # and record no delivery posture; secondmate spawns hardcode theirs.
   if [ "$KIND" = ship ]; then
     [ "$MODE_SET" -eq 1 ] || {
-      echo "error: ship spawns require --mode <no-mistakes|direct-PR|local-only>; resolve it at intake from the captain's instruction and the project's registered posture in data/projects.md" >&2
+      echo "error: Builder spawns require --mode <no-mistakes|direct-PR|local-only>; resolve it at intake from the user's instruction and the project's registered posture in data/projects.md" >&2
       exit 1
     }
     [ "$YOLO_SET" -eq 1 ] || {
-      echo "error: ship spawns require --yolo <on|off>; it is this task's merge authority, not a project lookup" >&2
+      echo "error: Builder spawns require --yolo <on|off>; it is this task's merge authority, not a project lookup" >&2
       exit 1
     }
     case "$MODE" in
@@ -1300,23 +1303,23 @@ else
     fi
   else
     [ "$MODE_SET" -eq 0 ] || {
-      echo "error: --mode applies only to ship spawns; a scout delivers a report and a secondmate records its own fixed posture" >&2
+      echo "error: --mode applies only to Builder spawns; an Investigator delivers a report and a Project Director records its own fixed posture" >&2
       exit 1
     }
     [ "$YOLO_SET" -eq 0 ] || {
-      echo "error: --yolo applies only to ship spawns; a scout delivers a report and a secondmate records its own fixed posture" >&2
+      echo "error: --yolo applies only to Builder spawns; an Investigator delivers a report and a Project Director records its own fixed posture" >&2
       exit 1
     }
     [ "$BRANCH_PREFIX_SET" -eq 0 ] || {
-      echo "error: --branch-prefix applies only to ship spawns; a scout makes no branch and a secondmate records no ship branch" >&2
+      echo "error: --branch-prefix applies only to Builder spawns; an Investigator makes no branch and a Project Director records no Builder branch" >&2
       exit 1
     }
     [ "$KIND" != secondmate ] || [ "$BASE_BRANCH_SET" -eq 0 ] || {
-      echo "error: --base-branch applies only to ship and scout spawns; a secondmate charter has no task base" >&2
+      echo "error: --base-branch applies only to Builder and Investigator spawns; a Project Director charter has no task base" >&2
       exit 1
     }
     [ "$UPSTREAM_CONSENT_SET" -eq 0 ] || {
-      echo "error: --upstream-consent applies only to ship spawns; a scout publishes nothing and a secondmate records no delivery contract" >&2
+      echo "error: --upstream-consent applies only to Builder spawns; an Investigator publishes nothing and a Project Director records no delivery contract" >&2
       exit 1
     }
   fi
@@ -1345,7 +1348,7 @@ spawn_remote_secondmate() {
   registry_lock=$(secondmate_registry_lock_path "$STATE")
   if ! fm_lock_acquire_wait "$registry_lock"; then
     fm_lock_release "$SPAWN_TASK_LOCK" || true
-    echo "error: secondmate registry could not be locked for remote spawn" >&2
+    echo "error: Project Director registry could not be locked for remote spawn" >&2
     return 1
   fi
   remote=$(secondmate_registry_field "$DATA/secondmates.md" "$id" remote 2>/dev/null || true)
@@ -1361,7 +1364,7 @@ spawn_remote_secondmate() {
   if [ "${#POS[@]}" -gt 2 ]; then
     fm_lock_release "$registry_lock" || true
     fm_lock_release "$SPAWN_TASK_LOCK" || true
-    echo "error: remote secondmate spawn accepts no local home positional argument" >&2
+    echo "error: remote Project Director spawn accepts no local home positional argument" >&2
     return 2
   fi
   if [ -n "$HARNESS_ARG" ]; then
@@ -1376,7 +1379,7 @@ spawn_remote_secondmate() {
   *)
     fm_lock_release "$registry_lock" || true
     fm_lock_release "$SPAWN_TASK_LOCK" || true
-    echo "error: remote secondmate spawn requires a verified harness adapter, not a raw launch command: $harness" >&2
+    echo "error: remote Project Director spawn requires a verified harness adapter, not a raw launch command: $harness" >&2
     return 1
     ;;
   esac
@@ -1388,7 +1391,7 @@ spawn_remote_secondmate() {
   if [ "$account_config" != "$CONFIG" ]; then
     fm_lock_release "$registry_lock" || true
     fm_lock_release "$SPAWN_TASK_LOCK" || true
-    echo "error: $account_config/$(fm_worker_account_file "$harness") cannot pin remote secondmate $id from this host; configure config/$(fm_worker_account_file "$harness") in its home $home on $host instead" >&2
+    echo "error: $account_config/$(fm_worker_account_file "$harness") cannot pin remote Project Director $id from this host; configure config/$(fm_worker_account_file "$harness") in its home $home on $host instead" >&2
     return 1
   fi
   model=${MODEL:--}
@@ -1408,7 +1411,7 @@ spawn_remote_secondmate() {
   *)
     fm_lock_release "$registry_lock" || true
     fm_lock_release "$SPAWN_TASK_LOCK" || true
-    echo "error: invalid configured remote secondmate effort: $effort" >&2
+    echo "error: invalid configured remote Project Director effort: $effort" >&2
     return 1
     ;;
   esac
@@ -1426,11 +1429,11 @@ spawn_remote_secondmate() {
       [ "$(fm_meta_get "$meta" home)" != "$home" ]; then
       fm_lock_release "$registry_lock" || true
       fm_lock_release "$SPAWN_TASK_LOCK" || true
-      echo "error: existing metadata for $id does not identify this remote secondmate route" >&2
+      echo "error: existing metadata for $id does not identify this remote Project Director route" >&2
       return 1
     fi
   fi
-  # A remote second mate runs only on a backend whose session-provider server
+  # A remote Project Director runs only on a backend whose session-provider server
   # outlives every SSH connection that supervises it: herdr (its server belongs
   # to the host's GUI login session) is the default; rex runs on the host's
   # persistent personal rex server. Without an explicit selection a relaunch
@@ -1448,7 +1451,7 @@ spawn_remote_secondmate() {
   *)
     fm_lock_release "$registry_lock" || true
     fm_lock_release "$SPAWN_TASK_LOCK" || true
-    echo "error: a remote secondmate runs only on the herdr or rex backend, not '$backend'" >&2
+    echo "error: a remote Project Director runs only on the herdr or rex backend, not '$backend'" >&2
     return 1
     ;;
   esac
@@ -1465,9 +1468,9 @@ spawn_remote_secondmate() {
     # first line, such as the startup liveness sweep, must still say something
     # actionable.
     if [ "$rc" -eq 255 ]; then
-      echo "error: remote secondmate $id readiness could not be confirmed; preserved route $host:$home" >&2
+      echo "error: remote Project Director $id readiness could not be confirmed; preserved route $host:$home" >&2
     else
-      echo "error: remote secondmate $id host $host is not ready for a remote second mate; launch refused" >&2
+      echo "error: remote Project Director $id host $host is not ready for a remote Project Director; launch refused" >&2
     fi
     [ -z "$FM_REMOTE_READINESS_OUT" ] || printf '%s\n' "$FM_REMOTE_READINESS_OUT" >&2
     [ "$rc" -ne 255 ] || return 255
@@ -1483,16 +1486,16 @@ spawn_remote_secondmate() {
       :
     else
       sync_rc=$?
-      echo "warning: remote secondmate $id sync skipped before launch: $(remote_sync_failure_reason "$sync_rc" "$sync_out")" >&2
+      echo "warning: remote Project Director $id sync skipped before launch: $(remote_sync_failure_reason "$sync_rc" "$sync_out")" >&2
     fi
   else
-    echo "warning: remote secondmate $id sync skipped before launch: primary default-branch commit cannot be resolved" >&2
+    echo "warning: remote Project Director $id sync skipped before launch: primary default-branch commit cannot be resolved" >&2
   fi
   remote_lock=$(fm_remote_inherit_transaction_lock_path "$STATE" "$id")
   if ! fm_lock_acquire_wait "$remote_lock"; then
     fm_lock_release "$registry_lock" || true
     fm_lock_release "$SPAWN_TASK_LOCK" || true
-    echo "error: remote secondmate $id inheritance transaction could not be locked" >&2
+    echo "error: remote Project Director $id inheritance transaction could not be locked" >&2
     return 1
   fi
   remote_generation=$(fm_remote_inherit_generation_next "$STATE" "$id" 2>/dev/null || true)
@@ -1500,7 +1503,7 @@ spawn_remote_secondmate() {
     fm_lock_release "$remote_lock" || true
     fm_lock_release "$registry_lock" || true
     fm_lock_release "$SPAWN_TASK_LOCK" || true
-    echo "error: remote secondmate $id inheritance generation could not be published" >&2
+    echo "error: remote Project Director $id inheritance generation could not be published" >&2
     return 1
   fi
   if "$SCRIPT_DIR/fm-remote-inherit-push.sh" "$id" "$remote_generation" >/dev/null; then
@@ -1511,13 +1514,13 @@ spawn_remote_secondmate() {
     fm_lock_release "$registry_lock" || true
     fm_lock_release "$SPAWN_TASK_LOCK" || true
     if [ "$rc" -eq 255 ]; then
-      echo "error: remote secondmate $id inheritance completion is unknown; launch refused and route preserved for reconciliation" >&2
+      echo "error: remote Project Director $id inheritance completion is unknown; launch refused and route preserved for reconciliation" >&2
     else
-      echo "error: remote secondmate $id inheritance failed; launch refused" >&2
+      echo "error: remote Project Director $id inheritance failed; launch refused" >&2
     fi
     return "$rc"
   fi
-  # This parent home owns the remote secondmate's task identity because it holds
+  # This parent home owns the remote Project Director's task identity because it holds
   # the task metadata an observer reads, exactly as for a local spawn: the
   # carrier is resolved against THIS task's own meta (reused verbatim on
   # relaunch, freshly rooted otherwise, never adopting this process's ambient
@@ -1542,7 +1545,7 @@ spawn_remote_secondmate() {
     fm_lock_release "$SPAWN_TASK_LOCK" || true
     [ -z "$out" ] || printf '%s\n' "$out" >&2
     if [ "$rc" -eq 255 ]; then
-      echo "error: remote secondmate $id is unavailable or launch completion is unknown; preserved route $host:$home" >&2
+      echo "error: remote Project Director $id is unavailable or launch completion is unknown; preserved route $host:$home" >&2
     fi
     return "$rc"
   fi
@@ -1642,7 +1645,7 @@ spawn_remote_secondmate() {
     fm_lock_release "$remote_lock" || true
     fm_lock_release "$registry_lock" || true
     fm_lock_release "$SPAWN_TASK_LOCK" || true
-    echo "error: remote secondmate $id launched, but its task record could not be published ($FM_BACKLOG_TRANSITION_ERROR)" >&2
+    echo "error: remote Project Director $id launched, but its task record could not be published ($FM_BACKLOG_TRANSITION_ERROR)" >&2
     return 1
   fi
   if [ "$SPAWN_TASK_SET_LOCK_HELD" = 1 ]; then
@@ -1654,11 +1657,11 @@ spawn_remote_secondmate() {
   fm_lock_release "$SPAWN_TASK_LOCK" || true
   "$SCRIPT_DIR/fm-home-summary-refresh.sh" --best-effort || true
   if ! "$SCRIPT_DIR/fm-procevent-remote-reply.sh" arm "$id" >/dev/null; then
-    echo "error: remote secondmate $id launched, but its reply source could not be armed; endpoint metadata is preserved" >&2
+    echo "error: remote Project Director $id launched, but its reply source could not be armed; endpoint metadata is preserved" >&2
     return 1
   fi
   [ ! -e "$CONFIG/fleet-ledger" ] || FM_HOME=$FM_HOME FM_STATE_OVERRIDE=$STATE FM_CONFIG_OVERRIDE=$CONFIG "$SCRIPT_DIR/fm-fleet-ledger.sh" dispatched "$id" secondmate "" "$harness" "${model#-}" || true
-  echo "spawned $id harness=$harness kind=secondmate mode=secondmate yolo=off window=remote:$id worktree=$home remote=$host backend=$remote_backend"
+  echo "spawned $id role=\"Project Director\" kind=secondmate mode=secondmate yolo=off harness=$harness window=remote:$id worktree=$home remote=$host backend=$remote_backend"
   return 0
 }
 
@@ -1838,7 +1841,7 @@ spawn_abort_cleanup() {
       fi
     fi
   fi
-  # Nothing has run in a leased slot or secondmate home until T3 accepts the
+  # Nothing has run in a leased slot or Project Director home until T3 accepts the
   # launch turn, so an abort before that, including one after T3 refused the
   # turn, archives the thread (it must never act in a returned slot), removes
   # the environment files the spawn wrote there as teardown does, and hands a
@@ -2165,7 +2168,7 @@ if [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart" ] && case "$idpart" in *
       ;;
     esac
     if [ "$KIND" = secondmate ]; then
-      echo "error: batch dispatch does not support --secondmate; spawn each secondmate explicitly" >&2
+      echo "error: batch dispatch does not support --secondmate; spawn each Project Director explicitly" >&2
       rc=2
       continue
     fi
@@ -2212,7 +2215,7 @@ fi
 # work relocates to the branch, under the record's spend cap below - the same
 # cap main meets in that posture. Queued means a dispatchable backlog item:
 # one already queued at entry, or one the branch filed itself because the
-# captain's away words explicitly call for that work (its backlog note cites
+# user's away words explicitly call for that work (its backlog note cites
 # the words); filing the item the captain asked for is not inventing work.
 # shellcheck source=bin/fm-lease-lib.sh
 . "$SCRIPT_DIR/fm-lease-lib.sh"
@@ -2238,7 +2241,7 @@ spawn_refuse_if_away_spend_cap() {
     ;;
   esac
   if [ "$live" -ge "$cap" ]; then
-    echo "error: spawn refused - the away-posture record caps concurrent workers at $cap and $live ordinary task(s) are live in this home; task $ID stays queued for the captain's return or for a worker to finish (spend cap: bin/fm-afk-contract.sh)" >&2
+    echo "error: spawn refused - the away-posture record caps concurrent workers at $cap and $live ordinary task(s) are live in this home; task $ID stays queued for the user's return or for a worker to finish (spend cap: bin/fm-afk-contract.sh)" >&2
     exit 1
   fi
 }
@@ -2263,7 +2266,7 @@ spawn_require_relocated_queued_work() {
   fi
   fm_lease_forbid_branch "new-task spawn (fm-spawn)" --away-relocated
   if ! fm_backlog_row_probe "$DATA" "$ID" || [ "$FM_BACKLOG_ROW_STATE" != "queued no no" ]; then
-    echo "error: spawn refused - the supervision branch under the away-posture record may dispatch only queued unblocked work (already queued, or filed by the branch from the captain's away words); task $ID has no dispatchable backlog item in this home" >&2
+    echo "error: spawn refused - the supervision branch under the away-posture record may dispatch only queued unblocked work (already queued, or filed by the branch from the user's away words); task $ID has no dispatchable backlog item in this home" >&2
     exit 1
   fi
 }
@@ -2540,7 +2543,7 @@ if [ "$RELAUNCH" -eq 1 ]; then
   # here as well would be a second path to the same outcome, so this refuses
   # and names the one that owns it.
   if [ "$RELAUNCH_REBIND" -eq 1 ] && [ "$KIND" = secondmate ]; then
-    echo "error: secondmate $ID's recorded endpoint is gone; its recovery is owned by the secondmate respawn path, not by relaunch (run bin/fm-spawn.sh $ID --secondmate, or let the session-start liveness sweep do it)" >&2
+    echo "error: Project Director $ID's recorded endpoint is gone; its recovery is owned by the secondmate respawn path, not by relaunch (run bin/fm-spawn.sh $ID --secondmate, or let the session-start liveness sweep do it)" >&2
     exit 1
   fi
   MODE=$(fm_meta_get "$RELAUNCH_META" mode)
@@ -2550,7 +2553,7 @@ if [ "$RELAUNCH" -eq 1 ]; then
     BRANCH=$(fm_meta_get "$RELAUNCH_META" branch)
     [ -n "$BRANCH" ] || BRANCH="fm/$ID"
     if ! git check-ref-format --branch "$BRANCH" >/dev/null 2>&1; then
-      echo "error: task $ID has an invalid recorded ship branch '$BRANCH'" >&2
+      echo "error: task $ID has an invalid recorded Builder branch '$BRANCH'" >&2
       exit 1
     fi
   fi
@@ -2681,7 +2684,7 @@ pi_supports_tui_mode() {
 }
 
 # Same help-probe shape as pi_supports_tui_mode for the session-scoped project
-# trust flag. A seeded secondmate home carries tracked .pi/extensions that gate
+# trust flag. A seeded Project Director home carries tracked .pi/extensions that gate
 # Pi behind "Trust project folder?" on first launch; --approve trusts that
 # launch cwd for the run without rewriting ~/.pi/agent/trust.json.
 pi_supports_approve() {
@@ -2832,32 +2835,32 @@ spawn_claude_task_channel_statement() {
 # (busy-state source, exit command, dialogs, quirks) lives in the harness-adapters skill.
 launch_template() {
   local harness=$1 kind=${2:-ship}
-  # shellcheck disable=SC2016  # single quotes are deliberate: $(cat ...) expands in the crewmate pane, not here
+  # shellcheck disable=SC2016  # single quotes are deliberate: $(cat ...) expands in the worker pane, not here
   case "$harness" in
   # CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false disables claude's interactive
   # predicted-next-prompt ghost text, which renders as dim/faint text inside an
   # otherwise-empty composer and would otherwise read like real typed input when
   # firstmate captures the pane (see the harness-adapters skill). It is a per-launch env
-  # prefix scoped to this firstmate-launched agent; it never touches the captain's
+  # prefix scoped to this firstmate-launched agent; it never touches the user's
   # global config. The CLI's --prompt-suggestions flag is print/SDK-mode only and
   # does NOT suppress the interactive ghost text (verified empirically), so the env
   # var is the correct control. The dim-aware composer reader in fm-tmux-lib.sh is
   # the defense-in-depth backstop for any pane this flag cannot reach.
   # Two independent controls disable claude's `/bug`/`/feedback` model-drafted
   # feedback flow (the SendFeedback tool), deliberately layered so a fleet-launched
-  # agent never queues or submits a bug-report draft on the captain's behalf even
+  # agent never queues or submits a bug-report draft on the user's behalf even
   # under a managed Claude settings policy: CLAUDE_CODE_SEND_FEEDBACK=0 is read
   # directly and is not subject to managed-settings precedence, while --settings
   # '{"feedbackDrafts":"off"}' sets the documented settings key (Claude Code
   # changelog 2.1.247) that a managed policy CAN override back on. Either control
   # alone disables the feature; keep both so a managed override of one still
   # leaves the other in force. Both are per-launch, scoped to this invocation only,
-  # and never touch the captain's global ~/.claude/settings.json.
+  # and never touch the user's global ~/.claude/settings.json.
   # Unless config/keep-ai-trailers is present, the same inline --settings JSON
   # also carries the attribution policy
   # ("attribution": {"commit": "", "pr": "", "sessionUrl": false}), which
   # suppresses Claude Code's Co-Authored-By trailer, Claude-Session link, and
-  # generated-with line in commits and PR bodies. The captain sets that
+  # generated-with line in commits and PR bodies. The user sets that
   # policy in the `user` settings scope, but a launched worker's settings
   # sources are not guaranteed to load that scope, so a worker would
   # otherwise run with attribution back on; carrying it per launch keeps the
@@ -2897,14 +2900,14 @@ launch_template() {
     ;;
   # --disable hooks (equivalent to -c features.hooks=false) requests that codex
   # turn its whole lifecycle-hook layer off for CREWMATE and SCOUT launches only.
-  # Without it a crewmate launch parks forever on codex's hook-trust modal
+  # Without it a worker launch parks forever on codex's hook-trust modal
   # ("N hooks are new or changed"), whose selection sits on "Review hooks" -
   # neither trusting nor declining. Firstmate's key plane carries Enter, Escape
   # and Ctrl-C with no arrow navigation, so the selection cannot be moved, and
   # pre-accepting the prompt by writing codex's own trust store would manufacture
   # an operator consent that was never given. The hooks it asks about are the
   # OPERATOR's machine-level ~/.codex/hooks.json plus any project-local
-  # .codex/hooks.json, and a crewmate needs none of them: its turn-end signal is
+  # .codex/hooks.json, and a worker needs none of them: its turn-end signal is
   # the -c notify= program on this same launch (verified still firing with hooks
   # disabled, codex-cli 0.151.0), and firstmate's own .codex/hooks.json registers
   # PRIMARY-session infrastructure that already stands down in a child worktree.
@@ -2965,12 +2968,12 @@ launch_template() {
   # agy 1.2.0). --model takes the bare catalog id from `agy models`
   # (gemini-3.8-flash-high, never the unlisted bare gemini-3.8-flash).
   # --effort takes low|medium|high. --dangerously-skip-permissions
-  # auto-approves every tool call, which an unattended crewmate needs.
+  # auto-approves every tool call, which an unattended worker needs.
   # Every task worktree is a fresh path, so agy would show a folder-trust
   # dialog ("Do you trust the contents of this project?") and no launch flag
   # suppresses it (agy 1.2.0 --help lists none). Left unanswered, the turn
   # runs in agy's own scratch directory instead of the worktree, so the
-  # worktree is pre-registered in the captain's own
+  # worktree is pre-registered in the user's own
   # ~/.gemini/antigravity-cli/settings.json trustedWorkspaces before launch
   # (bin/fm-agy-trust.sh, the claude shape), and the post-launch gate
   # (agy_wait_for_working) answers the preselected safe default ("Yes, I
@@ -2991,7 +2994,7 @@ launch_template() {
   # the busy/turn-end hooks; --agent is name-only, so the config is reached by
   # relocating KIRO_HOME onto the per-task home that holds an agents/firstmate.json
   # (see the hook section below) rather than by a config path. --trust-all-tools
-  # auto-approves every tool call an unattended crewmate needs; its otherwise
+  # auto-approves every tool call an unattended worker needs; its otherwise
   # blocking confirmation modal is suppressed by the chat.disableTrustAllConfirmation
   # setting the hook section seeds into that same per-task home. --model takes a
   # bare catalog model_id from --list-models; --effort takes low|medium|high|xhigh|max.
@@ -3003,8 +3006,8 @@ launch_template() {
   kiro) printf '%s' 'env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS KIRO_HOME=__KIROHOME__ __KIROBIN__ chat --agent-engine v2 --agent firstmate __MODELFLAG____EFFORTFLAG__--trust-all-tools "$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
   # grok (Grok Build TUI): a positional prompt starts the supervised interactive
   # session. --always-approve auto-approves every tool execution (verified: the
-  # crewmate runs fully autonomously, no permission gate), which an unattended
-  # crewmate needs; it is the targeted equivalent of claude's
+  # worker runs fully autonomously, no permission gate), which an unattended
+  # worker needs; it is the targeted equivalent of claude's
   # --dangerously-skip-permissions. grok's turn-end signal does NOT ride the
   # launch command - it is a Stop-event hook installed below (global hook +
   # per-task pointer), so the template is identical for ship/scout/secondmate.
@@ -3026,7 +3029,7 @@ launch_template() {
   # interactive session and auto-submits it, so the brief rides the launch
   # command exactly as it does for claude and grok (verified: a multi-line
   # brief submitted itself with no extra Enter, gemini-cli 0.58.0).
-  # -y (--yolo) auto-approves every tool call, which an unattended crewmate
+  # -y (--yolo) auto-approves every tool call, which an unattended worker
   # needs; the footer renders ` YOLO Ctrl+Y` while it is on and a WriteFile
   # was verified to land with no approval gate.
   # Every task worktree is a fresh path, so gemini refuses to start at all
@@ -3077,8 +3080,8 @@ launch_template() {
   # prompt, and the generated one pins no model so `--model` stays
   # authoritative); `--prompt` submits the brief after the TUI attaches, so no
   # keyplane typing starts the work. `--accept-license-terms` is deliberately
-  # NEVER passed (captain decision 2026-10-07): the license dialog is a blocker
-  # that the readiness gate below fails loudly on, never something a fleet
+  # NEVER passed (user decision 2026-10-07): the license dialog is a blocker
+  # that the readiness gate below fails loudly on, never something a team
   # spawn answers. The leading shell loop clears every foreign ORCA_*/FM_*
   # marker the pane actually carries at launch time (verified live: ORCA_*
   # values from the launching session's environment reach worker tool
@@ -3113,7 +3116,7 @@ launch_template() {
   # per-task worktree token, so no launch placeholder belongs here.
   kimi) printf '%s' '__KIMIBIN__ __MODELFLAG__--auto' ;;
   # muse (Muse Code): a positional prompt starts the supervised interactive
-  # session. --yolo is the single flag that makes a crewmate pane viable: muse
+  # session. --yolo is the single flag that makes a worker pane viable: muse
   # ships approval prompts AND a filesystem/network sandbox ON by default
   # (--sandbox-network defaults to proxy-only, which refuses outright without a
   # managed proxy), and it gates a fresh workspace behind a trust dialog. One
@@ -3127,7 +3130,7 @@ launch_template() {
   # NOT accepted by the interactive TUI (it exits with "unexpected argument"),
   # so this env var is the only control that reaches a pane worker. Verified to
   # drop the foreign rules_file context block while KEEPING the project's own
-  # AGENTS.md rules, which the crewmate contract depends on.
+  # AGENTS.md rules, which the worker contract depends on.
   # muse's turn-end signal rides neither the launch command nor a hook: its
   # plugin engine is off in the default build, so firstmate folds muse's own
   # session event log instead (bin/fm-busy-lib.sh), bound by the sidecar
@@ -3220,7 +3223,7 @@ esac
 # muse, gemini, devin, commandcode, polytoken, cortex, and kiro are verified as CREWMATE/SCOUT adapters only. A secondmate is
 # a firstmate instance, so it needs a primary supervision protocol.
 # gemini has none: docs/supervision-protocols/ carries no gemini wake protocol
-# and this task verified only crewmate-side launch, busy state, interrupt, and
+# and this task verified only worker-side launch, busy state, interrupt, and
 # exit, so a gemini secondmate is refused rather than stood up on an unverified
 # supervision path. muse has none either, and its
 # Claude-compatible hook dialect explicitly rejects the model-reawakening and
@@ -3231,15 +3234,15 @@ esac
 # docs/supervision-protocols/ carries no devin wake protocol (devin 3000.11.1).
 # commandcode has none either: only its worker busy mod is verified, and
 # docs/supervision-protocols/ carries no Command Code wake protocol (1.74.1).
-# polytoken has none either: only the crewmate/scout lifecycle is verified;
+# polytoken has none either: only the Builder/Investigator lifecycle is verified;
 # docs/supervision-protocols/ carries no polytoken primary wake protocol.
 # cortex has none either: only its worker lifecycle hooks are verified, and
 # docs/supervision-protocols/ carries no cortex wake protocol (cortex 1.1.104).
-# kiro has none either: this task verified only crewmate-side launch, busy state,
+# kiro has none either: this task verified only worker-side launch, busy state,
 # interrupt, exit, and resume on the V2 engine, and docs/supervision-protocols/
 # carries no kiro wake protocol (kiro-cli 2.21.4).
 if [ "$KIND" = secondmate ] && { [ "$HARNESS" = muse ] || [ "$HARNESS" = gemini ] || [ "$HARNESS" = devin ] || [ "$HARNESS" = commandcode ] || [ "$HARNESS" = polytoken ] || [ "$HARNESS" = cortex ] || [ "$HARNESS" = kiro ] || [ "$HARNESS" = hermes ]; }; then
-  echo "error: $HARNESS is a verified crewmate/scout adapter only and cannot run a secondmate; it has no primary supervision protocol. Select a harness verified for secondmates." >&2
+  echo "error: $HARNESS is a verified Builder/Investigator adapter only and cannot run a Project Director; it has no primary supervision protocol. Select a harness verified for Project Directors." >&2
   exit 1
 fi
 
@@ -3248,7 +3251,7 @@ fi
 # itself act as a primary) could never be supervised. Refuse loudly rather than
 # standing one up with no way to arm its watch cycle.
 if [ "$KIND" = secondmate ] && [ "$HARNESS" = rovo ]; then
-  echo "error: rovo is a verified crewmate/scout adapter only and cannot run a secondmate; it has no primary supervision protocol. Select a harness verified for secondmates." >&2
+  echo "error: rovo is a verified Builder/Investigator adapter only and cannot run a Project Director; it has no primary supervision protocol. Select a harness verified for Project Directors." >&2
   exit 1
 fi
 
@@ -3370,7 +3373,7 @@ omp)
   }
   OMP_WORKER_CFG="$FM_ROOT/.omp/fm-worker-overlay.yml"
   [ -f "$OMP_WORKER_CFG" ] || {
-    echo "error: omp worker posture overlay missing at $OMP_WORKER_CFG; a worker launched without it can park on the captain's own approval or plan-mode settings" >&2
+    echo "error: omp worker posture overlay missing at $OMP_WORKER_CFG; a worker launched without it can park on the user's own approval or plan-mode settings" >&2
     exit 1
   }
   ;;
@@ -3821,7 +3824,7 @@ effort_flag_for_harness() {
     # high|xhigh|ultra and defaults to high, so low..xhigh map straight across.
     # ultra is muse's max-CLASS level, so firstmate's max maps onto it - but
     # only ever as an EXPLICIT captain choice, never as a fallback, because
-    # AGENTS.md section 4 forbids selecting max without captain preference and
+    # AGENTS.md section 4 forbids selecting max without user preference and
     # the omitted effort here leaves muse on its own high default. muse's extra
     # none/minimal levels sit below firstmate's shared vocabulary and are
     # deliberately unreachable rather than remapped onto low.
@@ -3850,9 +3853,9 @@ case "$LAUNCH" in
   MUSE_AUTH_FILE="$MUSE_CONFIG_HOME/muse/auth.json"
   if ! muse_credential_present "$MUSE_AUTH_FILE"; then
     if [ -n "${META_API_KEY:-}" ]; then
-      echo "error: muse has no worker-reachable credential; META_API_KEY is set for fm-spawn but cannot be proven present in the $BACKEND worker environment. Store the fleet credential at '$MUSE_AUTH_FILE' with 'muse login' or 'muse auth set --api-key-stdin'. The secret will not be copied into the launch command." >&2
+      echo "error: muse has no worker-reachable credential; META_API_KEY is set for fm-spawn but cannot be proven present in the $BACKEND worker environment. Store the shared credential at '$MUSE_AUTH_FILE' with 'muse login' or 'muse auth set --api-key-stdin'. The secret will not be copied into the launch command." >&2
     else
-      echo "error: muse has no worker-reachable credential; META_API_KEY cannot be proven present in the $BACKEND worker environment and '$MUSE_AUTH_FILE' is absent or empty. Store the fleet credential with 'muse login' or 'muse auth set --api-key-stdin'." >&2
+      echo "error: muse has no worker-reachable credential; META_API_KEY cannot be proven present in the $BACKEND worker environment and '$MUSE_AUTH_FILE' is absent or empty. Store the shared credential with 'muse login' or 'muse auth set --api-key-stdin'." >&2
     fi
     exit 1
   fi
@@ -3896,7 +3899,7 @@ json_escape() {
 # through --config-override since there is no per-session escalation once
 # the process is running. rovo's bash tool is NOT covered by this grant and
 # stays confined to the worktree regardless (confirmed live) - the standard
-# crewmate flow's literal `echo ... >> status file` bash line therefore still
+# worker flow's literal `echo ... >> status file` bash line therefore still
 # fails under rovo, but the worker recovers by falling back to its own file
 # tools for the same append (confirmed live), which the grant below does cover.
 # --config-override itself is single-value (a second occurrence silently
@@ -4003,36 +4006,36 @@ validate_firstmate_home_for_spawn() {
   abs_active_home=$(resolved_existing_dir "$FM_HOME")
   abs_root=$(resolved_existing_dir "$FM_ROOT")
   if [ "$abs_home" = "/" ]; then
-    echo "error: secondmate home cannot be the filesystem root: $home" >&2
+    echo "error: Project Director home cannot be the filesystem root: $home" >&2
     return 1
   fi
   if [ "$abs_home" = "$abs_active_home" ]; then
-    echo "error: secondmate home cannot be the active firstmate home: $home" >&2
+    echo "error: Project Director home cannot be the active firstmate home: $home" >&2
     return 1
   fi
   if [ "$abs_home" = "$abs_root" ]; then
-    echo "error: secondmate home cannot be the firstmate repo: $home" >&2
+    echo "error: Project Director home cannot be the firstmate repo: $home" >&2
     return 1
   fi
   if path_is_ancestor_of "$abs_active_home" "$abs_home"; then
-    echo "error: secondmate home cannot be inside the active firstmate home: $home" >&2
+    echo "error: Project Director home cannot be inside the active firstmate home: $home" >&2
     return 1
   fi
   if path_is_ancestor_of "$abs_root" "$abs_home"; then
-    echo "error: secondmate home cannot be inside the firstmate repo: $home" >&2
+    echo "error: Project Director home cannot be inside the firstmate repo: $home" >&2
     return 1
   fi
   if path_is_ancestor_of "$abs_home" "$abs_active_home"; then
-    echo "error: secondmate home cannot be an ancestor of the active firstmate home: $home" >&2
+    echo "error: Project Director home cannot be an ancestor of the active firstmate home: $home" >&2
     return 1
   fi
   if path_is_ancestor_of "$abs_home" "$abs_root"; then
-    echo "error: secondmate home cannot be an ancestor of the firstmate repo: $home" >&2
+    echo "error: Project Director home cannot be an ancestor of the firstmate repo: $home" >&2
     return 1
   fi
   validate_firstmate_operational_dirs "$abs_home" "$abs_active_home" "$abs_root" || return 1
   if [ ! -f "$abs_home/$SUB_HOME_MARKER" ]; then
-    echo "error: firstmate home $home is not a seeded secondmate home" >&2
+    echo "error: firstmate home $home is not a seeded Project Director home" >&2
     return 1
   fi
   marker_id=$(cat "$abs_home/$SUB_HOME_MARKER" 2>/dev/null || true)
@@ -4056,27 +4059,27 @@ validate_firstmate_operational_dirs() {
   for name in data state config projects; do
     dir="$abs_home/$name"
     if [ -L "$dir" ] && [ ! -e "$dir" ]; then
-      echo "error: secondmate $name directory must resolve inside the secondmate home: $dir" >&2
+      echo "error: Project Director $name directory must resolve inside the Project Director home: $dir" >&2
       return 1
     fi
     if [ -d "$dir" ]; then
       abs_dir=$(cd "$dir" && pwd -P)
     elif [ -e "$dir" ]; then
-      echo "error: secondmate $name path is not a directory: $dir" >&2
+      echo "error: Project Director $name path is not a directory: $dir" >&2
       return 1
     else
       abs_dir="$abs_home/$name"
     fi
     if ! path_is_ancestor_of "$abs_home" "$abs_dir"; then
-      echo "error: secondmate $name directory must resolve inside the secondmate home: $dir" >&2
+      echo "error: Project Director $name directory must resolve inside the Project Director home: $dir" >&2
       return 1
     fi
     if [ "$abs_dir" = "$abs_active_home" ] || path_is_ancestor_of "$abs_active_home" "$abs_dir"; then
-      echo "error: secondmate $name directory cannot be inside the active firstmate home: $dir" >&2
+      echo "error: Project Director $name directory cannot be inside the active firstmate home: $dir" >&2
       return 1
     fi
     if [ "$abs_dir" = "$abs_root" ] || path_is_ancestor_of "$abs_root" "$abs_dir"; then
-      echo "error: secondmate $name directory cannot be inside the firstmate repo: $dir" >&2
+      echo "error: Project Director $name directory cannot be inside the firstmate repo: $dir" >&2
       return 1
     fi
   done
@@ -4085,7 +4088,7 @@ validate_firstmate_operational_dirs() {
 if [ "$KIND" = secondmate ]; then
   if [ -z "$FIRSTMATE_HOME" ] && { [ -e "$STATE/$ID.meta" ] || [ -L "$STATE/$ID.meta" ]; }; then
     fm_backlog_record_present "$STATE/$ID.meta" "task record" "$STATE" || {
-      echo "error: secondmate task record is unsafe: $FM_BACKLOG_TRANSITION_ERROR" >&2
+      echo "error: Project Director task record is unsafe: $FM_BACKLOG_TRANSITION_ERROR" >&2
       exit 1
     }
     FIRSTMATE_HOME=$(grep '^home=' "$STATE/$ID.meta" | cut -d= -f2- || true)
@@ -4124,20 +4127,20 @@ if [ "$KIND" = secondmate ]; then
   if [ "${FM_SKIP_SECONDMATE_SYNC:-0}" = 1 ]; then
     :
   elif sm_primary_head=$(primary_head_commit "$FM_ROOT"); then
-    sm_ff_out=$(ff_target "$PROJ_ABS" "secondmate $ID" "$sm_primary_head" yes yes "$ID" "$STATE" 2>&1 || true)
+    sm_ff_out=$(ff_target "$PROJ_ABS" "Project Director $ID" "$sm_primary_head" yes yes "$ID" "$STATE" 2>&1 || true)
     case "$sm_ff_out" in
     *': skipped:'*)
       sm_ff_line=$(first_line "$sm_ff_out")
-      sm_ff_prefix="secondmate $ID: skipped: "
+      sm_ff_prefix="Project Director $ID: skipped: "
       sm_ff_reason=${sm_ff_line#"$sm_ff_prefix"}
-      echo "warning: secondmate $ID sync skipped before launch: $sm_ff_reason" >&2
+      echo "warning: Project Director $ID sync skipped before launch: $sm_ff_reason" >&2
       ;;
     esac
   else
-    echo "warning: secondmate $ID sync skipped before launch: primary default-branch commit cannot be resolved" >&2
+    echo "warning: Project Director $ID sync skipped before launch: primary default-branch commit cannot be resolved" >&2
   fi
   mkdir -p "$PROJ_ABS/state" || {
-    echo "error: could not create secondmate state directory for $PROJ_ABS" >&2
+    echo "error: could not create Project Director state directory for $PROJ_ABS" >&2
     exit 1
   }
   if [ "${FM_SKIP_SECONDMATE_INHERIT:-0}" != 1 ]; then
@@ -4151,10 +4154,10 @@ if [ "$KIND" = secondmate ]; then
     fi
     CONFIG_INHERIT_LOCK_HELD=1
     # Inheritance propagation: push the primary-authoritative live-safe local inheritance
-    # surface into this secondmate home (fm-config-inherit-lib.sh).
+    # surface into this Project Director home (fm-config-inherit-lib.sh).
     FM_CONFIG_INHERIT_LIVE=1 \
       propagate_secondmate_inheritance "$FM_HOME" "$PROJ_ABS" "$CONFIG" "$DATA" ||
-      echo "warning: secondmate $ID inheritance failed for $PROJ_ABS" >&2
+      echo "warning: Project Director $ID inheritance failed for $PROJ_ABS" >&2
   fi
   if [ -f "$PROJ_ABS/data/charter.md" ]; then
     BRIEF="$PROJ_ABS/data/charter.md"
@@ -4186,7 +4189,7 @@ if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ]; then
     exit 1
   }
   if ! fm_project_capacity_lookup "$SPAWN_CAPACITY_CONFIG" "$(basename "$PROJ_ABS")"; then
-    echo "error: spawn refused: the project capacity declaration is unreadable ($FM_PROJECT_CAPACITY_ERROR); fix it so the captain's worker limits are known (docs/configuration.md \"Project capacity\")" >&2
+    echo "error: spawn refused: the project capacity declaration is unreadable ($FM_PROJECT_CAPACITY_ERROR); fix it so the user's worker limits are known (docs/configuration.md \"Project capacity\")" >&2
     exit 1
   fi
   SPAWN_PROJECT_CAPACITY=$FM_PROJECT_CAPACITY
@@ -4234,25 +4237,25 @@ if [ "$KIND" = ship ] || [ "$KIND" = scout ]; then
     fi
   fi
   if fm_brief_task_placeholders_present "$BRIEF"; then
-    echo "error: $BRIEF still contains {TASK} or {FIRSTMATE_SPEC}; fill ## Captain's intent and ## Firstmate spec before spawn" >&2
+    echo "error: $BRIEF still contains {TASK} or {DIRECTOR_SPEC}; fill ## User's intent and ## Director spec before spawn" >&2
     exit 1
   fi
   if ! fm_brief_task_content_valid "$BRIEF"; then
-    echo "error: $BRIEF must contain nonempty ## Captain's intent and ## Firstmate spec subsections (or a nonempty legacy # Task body) before spawn" >&2
+    echo "error: $BRIEF must contain nonempty ## User's intent and ## Director spec subsections (or a nonempty legacy # Task body) before spawn" >&2
     exit 1
   fi
   if ADDRESS_LINE=$(fm_brief_intent_address_line "$BRIEF"); then
-    echo "error: $BRIEF ## Captain's intent has an operator-address line: $ADDRESS_LINE; write the captain's actual words without a Captain label or address before spawn, since the heading already records provenance" >&2
+    echo "error: $BRIEF ## User's intent has a direct-address line: $ADDRESS_LINE; write the user's actual words without a speaker label or address before spawn, since the heading already records provenance" >&2
     exit 1
   fi
   if [ "$KIND" = ship ] && [ "$MODE" = no-mistakes ]; then
-    if fm_brief_task_heading_present "$BRIEF" "## Captain's intent"; then
-      CAPTAIN_INTENT=$(fm_brief_task_heading_body "$BRIEF" "## Captain's intent")
+    if fm_brief_task_heading_present "$BRIEF" "## User's intent"; then
+      CAPTAIN_INTENT=$(fm_brief_task_heading_body "$BRIEF" "## User's intent")
     else
       LEGACY_TASK_BODY=$(fm_brief_heading_body "$BRIEF" "# Task")
       CAPTAIN_INTENT=$(fm_brief_marked_captain_words "$LEGACY_TASK_BODY")
       if [ -z "$(printf '%s' "$CAPTAIN_INTENT" | tr -d '[:space:]')" ]; then
-        echo "error: legacy mixed # Task brief has no provenance-marked captain words for no-mistakes --intent; add [captain] lines or migrate to ## Captain's intent and ## Firstmate spec" >&2
+        echo "error: legacy mixed # Task brief has no provenance-marked user words for no-mistakes --intent; add compatibility [captain] lines or migrate to ## User's intent and ## Director spec" >&2
         exit 1
       fi
     fi
@@ -4280,7 +4283,7 @@ if [ "$KIND" = ship ] || [ "$KIND" = scout ]; then
   BRIEF="$DATA/$ID/launch-brief.md"
   BRIEF_TMP="$DATA/$ID/.launch-brief.md.${BASHPID:-$$}"
   {
-    fm_brief_worker_role "$STATE" "$ID" "$FM_ROOT" &&
+    fm_brief_worker_role "$STATE" "$ID" "$FM_ROOT" "$KIND" &&
       printf '\n' &&
       cat "$SOURCE_BRIEF" &&
       if [ "$KIND" = ship ] && [ "$MODE" = no-mistakes ]; then
@@ -4329,7 +4332,8 @@ if [ "$KIND" = ship ]; then
   BRIEF_MODE=$(sed -n 's/^Delivery contract: mode=\([^ ]*\).*$/\1/p' "$BRIEF" | head -n 1)
   BRIEF_FORGE=$(sed -n 's/^Delivery contract: mode=[^ ]*.*[[:space:]]forge=\([^ ]*\).*$/\1/p' "$BRIEF" | head -n 1)
   [ -n "$BRIEF_FORGE" ] || BRIEF_FORGE=none
-  BRIEF_BRANCH=$(sed -n 's/^Ship branch: //p' "$BRIEF" | head -n 1)
+  BRIEF_BRANCH=$(sed -n 's/^Builder branch: //p' "$BRIEF" | head -n 1)
+  [ -n "$BRIEF_BRANCH" ] || BRIEF_BRANCH=$(sed -n 's/^Ship branch: //p' "$BRIEF" | head -n 1)
   if [ -n "$BRIEF_BRANCH" ]; then
     [ "$BRIEF_BRANCH" = "$BRANCH" ] || {
       echo "error: branch mismatch for $ID: the brief says branch=$BRIEF_BRANCH but this spawn selected branch=$BRANCH" >&2
@@ -4337,19 +4341,19 @@ if [ "$KIND" = ship ]; then
     }
   elif [ "$BRANCH" != "fm/$ID" ]; then
     # A relaunch's branch comes from the meta record (--branch-prefix is refused
-    # there), so a promoted scout whose brief never carried a Ship branch line
+    # there), so a promoted Investigator whose brief never carried a Builder branch line
     # must relaunch on that recorded branch rather than be refused.
     if [ "$RELAUNCH" -eq 1 ]; then
-      echo "warning: $BRIEF records no ship branch; relaunching on the task's recorded branch $BRANCH" >&2
+      echo "warning: $BRIEF records no Builder branch; relaunching on the task's recorded branch $BRANCH" >&2
     else
-      echo "error: $BRIEF records no ship branch; regenerate it with --branch-prefix before spawning $BRANCH" >&2
+      echo "error: $BRIEF records no Builder branch; regenerate it with --branch-prefix before spawning $BRANCH" >&2
       exit 1
     fi
   else
-    echo "warning: $BRIEF records no ship branch; defaulting to legacy branch $BRANCH" >&2
+    echo "warning: $BRIEF records no Builder branch; defaulting to legacy branch $BRANCH" >&2
   fi
   if [ -z "$BRIEF_MODE" ]; then
-    echo "warning: $BRIEF records no delivery contract line (scaffolded before ship briefs recorded one); launching on the explicit --mode $MODE - confirm its definition of done matches" >&2
+    echo "warning: $BRIEF records no delivery contract line (scaffolded before Builder briefs recorded one); launching on the explicit --mode $MODE - confirm its definition of done matches" >&2
   elif [ "$BRIEF_MODE" != "$MODE" ]; then
     echo "error: delivery mismatch for $ID: the brief says mode=$BRIEF_MODE but this spawn passed --mode $MODE; correct the flag or re-scaffold the brief so the worker's instructions and the task record agree" >&2
     exit 1
@@ -4363,7 +4367,7 @@ if [ "$KIND" = ship ]; then
     echo "error: upstream-consent mismatch for $ID: $BRIEF records upstream-consent=${BRIEF_CONSENT:-none} but this spawn passed ${UPSTREAM_CONSENT:-none}; correct the flag or re-scaffold the brief so the worker's contract and the task record agree" >&2
     exit 1
   fi
-  # The registered forge is the captain's confirmed binding (bin/fm-project-mode.sh)
+  # The registered forge is the user's confirmed binding (bin/fm-project-mode.sh)
   # and is never inferred here from a remote, host, or protocol. A brief that
   # disagrees with it would tell the worker to open a pull request a Gerrit
   # server does not have, or to publish a change to a forge that is not Gerrit.
@@ -4373,7 +4377,7 @@ if [ "$KIND" = ship ]; then
     else
       forge_scaffold="fm-brief.sh $ID $PROJ_NAME --mode $MODE --forge $STANDING_FORGE"
     fi
-    echo "error: forge mismatch for $ID: $PROJ_NAME is registered forge=$STANDING_FORGE but $SOURCE_BRIEF records forge=$BRIEF_FORGE; keep the filled ## Captain's intent and ## Firstmate spec bodies, remove $SOURCE_BRIEF, re-scaffold it with $forge_scaffold, then re-fill those two subsections, so the worker's publication matches the project's forge" >&2
+    echo "error: forge mismatch for $ID: $PROJ_NAME is registered forge=$STANDING_FORGE but $SOURCE_BRIEF records forge=$BRIEF_FORGE; keep the filled ## User's intent and ## Director spec bodies, remove $SOURCE_BRIEF, re-scaffold it with $forge_scaffold, then re-fill those two subsections, so the worker's publication matches the project's forge" >&2
     exit 1
   fi
   # The registered PR-text binding is read the same way: a brief that disagrees
@@ -4393,24 +4397,24 @@ if [ "$KIND" = ship ]; then
     pr_scaffold="fm-brief.sh $ID $PROJ_NAME --mode $MODE"
     [ "$STANDING_FORGE" = none ] || pr_scaffold="$pr_scaffold --forge $STANDING_FORGE"
     [ "$STANDING_PR" = auto ] || pr_scaffold="$pr_scaffold --pr $STANDING_PR"
-    echo "error: PR-text mismatch for $ID: $PROJ_NAME is registered pr=$STANDING_PR but $SOURCE_BRIEF records pr=$BRIEF_PR; keep the filled ## Captain's intent and ## Firstmate spec bodies, remove $SOURCE_BRIEF, re-scaffold it with $pr_scaffold, then re-fill those two subsections, so the worker owns the PR text exactly when the project says so" >&2
+    echo "error: PR-text mismatch for $ID: $PROJ_NAME is registered pr=$STANDING_PR but $SOURCE_BRIEF records pr=$BRIEF_PR; keep the filled ## User's intent and ## Director spec bodies, remove $SOURCE_BRIEF, re-scaffold it with $pr_scaffold, then re-fill those two subsections, so the worker owns the PR text exactly when the project says so" >&2
     exit 1
   fi
   # Merge authority on a Gerrit forge is refused rather than quietly dropped, on
-  # the captain's decision of 2026-09-15: a Code-Review+2 is a positive
-  # attributed claim that a named human approved, and firstmate must not
+  # the user's decision of 2026-09-15: a Code-Review+2 is a positive
+  # attributed claim that a named user approved, and the Director must not
   # manufacture one.
   if [ "$STANDING_FORGE" = gerrit ] && [ "$YOLO" = on ]; then
-    echo "error: --yolo on is refused for $ID: $PROJ_NAME is registered forge=gerrit, where yolo is inactive because a Code-Review+2 is a positive attributed claim that a named human approved and firstmate must not manufacture one (captain's decision 2026-09-15); spawn with --yolo off" >&2
+    echo "error: --yolo on is refused for $ID: $PROJ_NAME is registered forge=gerrit, where yolo is inactive because a Code-Review+2 is a positive attributed claim that a named user approved and the Director must not manufacture one (user decision 2026-09-15); spawn with --yolo off" >&2
     exit 1
   fi
   # An external review tool uploads its own snapshot, so this task must never
   # push a task branch to the shared origin (docs/external-review-forge.md).
-  # Every protection the captain configured is validated before any endpoint
+  # Every protection the user configured is validated before any endpoint
   # exists, so a worker never launches without it.
   if [ "$STANDING_FORGE" = external ]; then
     if [ "$YOLO" = on ]; then
-      echo "error: --yolo on is refused for $ID: $PROJ_NAME is registered forge=external, where firstmate can neither observe nor perform the review tool's approval or merge; spawn with --yolo off" >&2
+      echo "error: --yolo on is refused for $ID: $PROJ_NAME is registered forge=external, where the Director can neither observe nor perform the review tool's approval or merge; spawn with --yolo off" >&2
       exit 1
     fi
     fm_external_review_adapter_body "$CONFIG" >/dev/null || exit 1
@@ -4422,12 +4426,12 @@ if [ "$KIND" = ship ]; then
       fm_external_review_prefix_disjoint "$EXTERNAL_BACKUP_PREFIX" "$(fm_ship_branch_prefix "$BRANCH" "$ID")" || exit 1
       backup_urls=$(fm_external_review_remote_urls "$PROJ_ABS" "$EXTERNAL_BACKUP_REMOTE")
       if [ -z "$backup_urls" ]; then
-        echo "error: $ID cannot launch: config/external-review-backup names the remote $EXTERNAL_BACKUP_REMOTE, which $PROJ_ABS does not have; add it with git remote add, or remove the file to ship without a backup" >&2
+        echo "error: $ID cannot launch: config/external-review-backup names the remote $EXTERNAL_BACKUP_REMOTE, which $PROJ_ABS does not have; add it with git remote add, or remove the file to deliver without a backup" >&2
         exit 1
       fi
       shared_urls=$(fm_external_review_remote_urls "$PROJ_ABS" origin)
       if [ -n "$shared_urls" ] && printf '%s\n' "$backup_urls" | grep -Fqx -f <(printf '%s\n' "$shared_urls"); then
-        echo "error: $ID cannot launch: the backup remote $EXTERNAL_BACKUP_REMOTE points at the project's shared origin; a durable copy must go to storage only the captain controls" >&2
+        echo "error: $ID cannot launch: the backup remote $EXTERNAL_BACKUP_REMOTE points at the project's shared origin; a durable copy must go to storage only the user controls" >&2
         exit 1
       fi
     fi
@@ -4445,28 +4449,28 @@ if [ "$KIND" = ship ]; then
     0 | 2) ;;
     *)
       echo "error: spawn refused for $ID: $FM_ROLE_PUB_DENIAL" >&2
-      echo "error: to let this home publish to ${FM_ROLE_PUB_TARGET:-that repository}, write 'maintainer ${FM_ROLE_PUB_TARGET:-<host>/<owner>/<repo>}' into $CONFIG/firstmate-role (docs/configuration.md \"Firstmate role\"), or pass --upstream-consent ${FM_ROLE_PUB_TARGET:-<host>/<owner>/<repo>} for this one task with the captain's explicit approval" >&2
+      echo "error: to let this home publish to ${FM_ROLE_PUB_TARGET:-that repository}, write 'maintainer ${FM_ROLE_PUB_TARGET:-<host>/<owner>/<repo>}' into $CONFIG/firstmate-role (docs/configuration.md \"Firstmate role\"), or pass --upstream-consent ${FM_ROLE_PUB_TARGET:-<host>/<owner>/<repo>} for this one task with the user's explicit approval" >&2
       exit 1
       ;;
     esac
   fi
-  # The registry holds the captain's standing posture, so dropping below it is
-  # allowed (a current explicit captain instruction wins) but never silent. An
+  # The registry holds the user's standing posture, so dropping below it is
+  # allowed (a current explicit user instruction wins) but never silent. An
   # unregistered project resolves to the same no-mistakes standing default, which
   # is why the notice names the standing posture rather than the registry line. A
   # conditional policy is excluded: both of its legs are legitimate classifications.
   if [ -n "$STANDING_MODE" ] && [ "$STANDING_MODE" != no-mistakes-prod-only ] &&
     [ "$(delivery_rigor_rank "$MODE")" -lt "$(delivery_rigor_rank "$STANDING_MODE")" ]; then
-    echo "notice: $ID ships mode=$MODE while the standing posture for $PROJ_NAME is $STANDING_MODE - less rigor than the captain's standing posture; proceed only on a current explicit captain instruction or an intake judgment you can state" >&2
+    echo "notice: $ID uses mode=$MODE while the standing posture for $PROJ_NAME is $STANDING_MODE - less rigor than the user's standing posture; proceed only on a current explicit user instruction or an intake judgment you can state" >&2
   fi
-  # The registered ship-branch prefix (bin/fm-project-mode.sh) is the captain's
-  # answer to "should this project's branches read as firstmate-authored", so a
-  # spawn that ships the legacy fm/ prefix past a registered override is
+  # The registered Builder-branch prefix (bin/fm-project-mode.sh) is the user's
+  # answer to "should this project's branches read as Director-authored", so a
+  # spawn that uses the legacy fm/ prefix past a registered override is
   # announced, not refused: the brief-vs-spawn agreement above already
   # guarantees the worker's instructions match the branch this spawn selected.
   STANDING_BRANCH=$("$FM_ROOT/bin/fm-project-mode.sh" --branch-prefix "$PROJ_NAME" 2>/dev/null) || STANDING_BRANCH=
   if [ "$BRANCH" != "$STANDING_BRANCH$ID" ]; then
-    echo "notice: $ID ships branch=$BRANCH while $PROJ_NAME registers the ship-branch prefix '$STANDING_BRANCH' (branch $STANDING_BRANCH$ID) - the task's branch and PR will read as firstmate-authored; proceed only on a current explicit captain instruction or an intake judgment you can state" >&2
+    echo "notice: $ID uses branch=$BRANCH while $PROJ_NAME registers the Builder-branch prefix '$STANDING_BRANCH' (branch $STANDING_BRANCH$ID) - the task's branch and PR will read as Director-authored; proceed only on a current explicit user instruction or an intake judgment you can state" >&2
   fi
 fi
 
@@ -4839,7 +4843,7 @@ if fm_backlog_transition_applies "$CONFIG" "$DATA" "$KIND"; then
   spawn_preflight_actor=$(fm_lease_actor) || exit "$FM_LEASE_REFUSE_EXIT"
   if [ "$RELAUNCH" -ne 1 ] && [ "$spawn_preflight_actor" = branch ] && fm_lease_away_relocated; then
     if [ "$BACKLOG_ROW_STATE" != "queued no no" ]; then
-      echo "error: spawn refused - the supervision branch under the away-posture record may dispatch only queued unblocked work (already queued, or filed by the branch from the captain's away words); task $ID has no dispatchable backlog item in this home" >&2
+      echo "error: spawn refused - the supervision branch under the away-posture record may dispatch only queued unblocked work (already queued, or filed by the branch from the user's away words); task $ID has no dispatchable backlog item in this home" >&2
       exit 1
     fi
   elif ! fm_backlog_row_dispatchable "$BACKLOG_ROW_STATE"; then
@@ -4999,7 +5003,7 @@ else
     SES=$(fm_backend_tmux_container_ensure)
     T="$SES:$W"
     # #134 robustness (tmux): fm_backend_tmux_create_task captures a stable window
-    # id and pins the window name (automatic-rename/allow-rename off) so a captain's
+    # id and pins the window name (automatic-rename/allow-rename off) so a user's
     # non-default tmux config cannot rename the window away from fm-<id> once
     # treehouse cd's into the worktree. WT_TARGET carries that stable id for the
     # rename-critical worktree-detection steps below; the persisted window= handle
@@ -5010,8 +5014,8 @@ else
   herdr)
     # fm_backend_herdr_workspace_label resolves the target workspace from
     # FM_HOME. For every KIND except secondmate, this process's own FM_HOME is
-    # already the right home (the primary spawning its own crewmate/scout, or
-    # a secondmate spawning ITS OWN crewmate/scout from its own process's
+    # already the right home (the primary spawning its own Builder/Investigator, or
+    # a Project Director spawning its own Builder/Investigator from its own process's
     # FM_HOME - the latter needs no glue at all). A --secondmate spawn is the
     # one case that does: it is the PRIMARY's own fm-spawn.sh process
     # launching a DIFFERENT home (PROJ_ABS, already validated above as the
@@ -5020,7 +5024,7 @@ else
     # after each prefixed simple-command call) so the secondmate's tab lands
     # in the secondmate's own workspace, not the primary's "firstmate" one.
     #
-    # Placement, separately from labeling: a crewmate/scout belongs in the
+    # Placement, separately from labeling: a Builder/Investigator belongs in the
     # EXACT herdr workspace this launching process is itself running in, which
     # only its own herdr pane identity can name (a same-labeled sibling
     # workspace must never be adopted). A --secondmate launch is the exception -
@@ -5379,7 +5383,7 @@ fi
 if [ "$KIND" = secondmate ]; then
   FM_INHERITABLE_CONFIG=trace-context \
     propagate_inheritable_config "$CONFIG" "$PROJ_ABS/config" ||
-    echo "warning: secondmate $ID trace-context inheritance failed for $PROJ_ABS" >&2
+    echo "warning: Project Director $ID trace-context inheritance failed for $PROJ_ABS" >&2
 fi
 # #134 robustness: only tmux needs a worktree-detection target distinct from $T -
 # its rename-safe stable window id, set as WT_TARGET=$WID in the tmux branch above.
@@ -5537,7 +5541,7 @@ kimi_visible_capture() {
 # fm_backend_composer_state), the same owner every steer and injection guard
 # reads. This retired a fourth, spawn-local copy of composer shape knowledge -
 # a hardcoded bordered `│ > │` regex that would have silently broken kimi
-# spawn readiness fleet-wide the day kimi's TUI goes borderless the way
+# spawn readiness across the worker system the day kimi's TUI goes borderless the way
 # claude's did. The banner and brief-echo greps below are launch-progress
 # signals, not composer shapes, so they stay here.
 kimi_composer_is_empty() {
@@ -5860,8 +5864,8 @@ agy_spawn_fail() {  # <detail>
 # must advance past the fm-spawn seed to a polytoken-hook event (pre_user_prompt
 # fires the moment the brief turn is submitted, verified live), which is exactly
 # the verdict the supervisor reads. A pane parked on a first-start dialog the
-# launch cannot get past - the license dialog, which the captain's decision
-# (2026-10-07) makes a blocker that fleet spawns never auto-accept - never posts
+# launch cannot get past - the license dialog, which the user's decision
+# (2026-10-07) makes a blocker that worker spawns never auto-accept - never posts
 # the first hook event, so the gate fails loudly there. Session discovery is
 # folded into the same poll: `polytoken sessions --format json` scoped to this
 # task's config and sessions roots binds the pane's session id, port, and
@@ -6109,17 +6113,17 @@ spawn_assert_agent_worktree
 # also gates loading the project settings written further down, so nothing armed
 # below takes effect without it. EVERY claude launch needs it, a secondmate's
 # included: its home is just as unseen by Claude as a fresh worktree, and
-# skipping the step for that kind left a standalone-clone secondmate home with
+# skipping the step for that kind left a standalone-clone Project Director home with
 # nothing registered and a pane wedged on a dialog firstmate cannot answer.
 # bin/fm-claude-trust.sh owns the structural scope test for both shapes and
 # refuses anything that is neither this project's own isolated worktree nor a
-# seeded secondmate home marked for this id; a refusal blocks the spawn rather
+# seeded Project Director home marked for this id; a refusal blocks the spawn rather
 # than launching a worker that would wedge. Refusing here rather than beside the
 # arm keeps this in the same class as the two worktree refusals just above: no
 # temp root, no retired relaunch wiring and no busy record exists yet to strand,
 # so the refusal names the endpoint the same way they do and leaves nothing else
 # behind.
-# agy gates a fresh worktree or secondmate home behind its own folder-trust
+# agy gates a fresh worktree or Project Director home behind its own folder-trust
 # dialog and honours a trustedWorkspaces entry written ahead of launch
 # (bin/fm-agy-trust.sh), so the same pre-registration removes the dialog for it.
 # Unlike claude's dialog, agy's preselects the safe answer, so a failed
@@ -6202,7 +6206,7 @@ exclude_path() {
 # provider instance, never per thread, but each harness reads its own
 # per-directory config from the thread's cwd ($WT): Claude's
 # .claude/settings.local.json `env` block (merged into the file so the busy
-# hooks written above and a secondmate home's own env entries survive;
+# hooks written above and a Project Director home's own env entries survive;
 # FM_T3CODE_ENV_KEYS names the keys Firstmate wrote, which a respawn replaces
 # so it never inherits a stale value; a symlinked file is refused) and Codex's
 # .codex/config.toml
@@ -6444,9 +6448,9 @@ BUSY_GEN=
     # the ordinary Stop idle hook, without the parent turn-ended touch. Every
     # hook command tolerates a refused event (|| true) so a stale-gen writer
     # can never break Claude's own lifecycle.
-    # A crewmate writes those hooks into the disposable worktree's
+    # A worker writes those hooks into the disposable worktree's
     # .claude/settings.local.json. A secondmate does not: that file in a
-    # persistent home is where Claude Code stores the captain's "don't ask
+    # persistent home is where Claude Code stores the user's "don't ask
     # again" rules, and rewriting it drops them. The secondmate hooks go in
     # a firstmate-owned state/<id>.claude-settings.json passed through
     # --settings. Claude Code merges hook entries across settings files
@@ -6603,7 +6607,7 @@ exit 0
 EOF
       chmod +x "$k_submit" "$k_stop"
       cat >"$KIRO_HOME_DIR/agents/firstmate.json" <<EOF
-{"name":"firstmate","description":"Firstmate per-task crewmate agent (busy-state and turn-end hooks)","tools":["*"],"allowedTools":["*"],"hooks":{"userPromptSubmit":[{"command":"$(json_escape "$k_submit")"}],"stop":[{"command":"$(json_escape "$k_stop")"}]}}
+{"name":"firstmate","description":"Firstmate per-task worker agent (busy-state and turn-end hooks)","tools":["*"],"allowedTools":["*"],"hooks":{"userPromptSubmit":[{"command":"$(json_escape "$k_submit")"}],"stop":[{"command":"$(json_escape "$k_stop")"}]}}
 EOF
     fi
     ;;
@@ -7144,10 +7148,10 @@ fi
 
 # Delivery posture recorded in meta so fm-teardown's safety check and the
 # validate/merge stages can branch on it. A ship task carries the explicit
-# per-task decision validated above; a secondmate's posture is fixed; a scout
+# per-task decision validated above; a Project Director's posture is fixed; an Investigator
 # records none at all, because its deliverable is a report rather than a merge
 # (fm-teardown.sh defaults an absent mode to no-mistakes, and fm-promote.sh
-# requires an explicit mode when a scout is promoted to a ship task).
+# requires an explicit mode when an Investigator is promoted to a Builder task).
 if [ "$KIND" = secondmate ]; then
   MODE=secondmate
   YOLO=off
@@ -7169,7 +7173,7 @@ fi
 # The session-start path owns input resolution. Spawn consumes only the frozen
 # home-session state and reuses it for the carrier and Secondmate launch prefix.
 #
-# A remote secondmate launch is the one case where this process is not the home
+# A remote Project Director launch is the one case where this process is not the home
 # that owns the task's identity: the parent home resolved and will record the
 # carrier, and this host only delivers it. The validated --traceparent value
 # then IS the decision, so the enablement snapshot handed to the new Secondmate
@@ -7557,11 +7561,11 @@ claude | codex | opencode | pi | pi-signed | grok | kimi | gemini | muse | rovo 
   LAUNCH="env -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GEMINI_CLI $LAUNCH"
   ;;
 esac
-# Crewmate panes are created by a long-lived tmux/herdr daemon that does not
+# Worker panes are created by a long-lived tmux/herdr daemon that does not
 # inherit firstmate's current environment, so a bare `claude` in the pane falls
 # back to the default ~/.claude store even when firstmate itself runs under a
 # different CLAUDE_CONFIG_DIR (for example a work-vs-personal subscription split).
-# Forward firstmate's own resolved store onto the claude launch so the crewmate
+# Forward firstmate's own resolved store onto the claude launch so the worker
 # uses the same credential/config firstmate is authenticated with. Only when set;
 # an unset value is the single-store default and needs no prefix.
 # A home's worker account pin replaces that forwarding: the launch names the
@@ -7599,7 +7603,7 @@ if [ "$KIND" = secondmate ]; then
   esac
   # Deliver the primary's EFFECTIVE trace-context decision as a normalized on/off
   # literal (never the raw FM_TRACE_CONTEXT string) so a FM_TRACE_CONTEXT override
-  # on the primary reaches the secondmate's OWN workers, not just the copied
+  # on the primary reaches the Project Director's own workers, not just the copied
   # config/trace-context file: otherwise off would not disable them and on would
   # not enable them across the launch boundary (bin/fm-trace-context-lib.sh header).
   # Reuse the single frozen decision from the carrier resolution above so the
@@ -7650,7 +7654,7 @@ if [ "$GIT_HOOKS_INSTALLED" = 1 ]; then
   GIT_CONFIG_ENV_FILE=$(shell_quote "$LAUNCH_DIR/git-config.$SPAWN_GEN.sh")
   LAUNCH="$(shell_quote "$FM_ROOT/bin/fm-git-strip-ai-trailers.sh") env-file $(shell_quote "$GIT_HOOKS_DIR") $GIT_CONFIG_ENV_FILE && . $GIT_CONFIG_ENV_FILE || return 1 2>/dev/null || exit 1; $LAUNCH"
 fi
-# Every agent this fleet launches - crewmate, scout, and secondmate, on a fresh
+# Every agent this Director launches - Builder, Investigator, and Project Director, on a fresh
 # spawn and on a relaunch alike - runs with the compact-adviser kill switch on.
 # This is an export statement rather than a forwarded ambient name or a
 # command-prefix assignment, so it carries the value across an entire compound
@@ -7783,7 +7787,7 @@ if [ "$BACKEND" = t3code ]; then
     }
   fi
 else
-# Export GOTMPDIR into the crewmate's pane shell so the agent and every child
+# Export GOTMPDIR into the worker's pane shell so the agent and every child
 # process (go build, go test, ...) inherit it. Sent before the launch command so
 # the env is set when the agent starts; the brief sleep lets the export land.
 spawn_send_text_line "$T" "export GOTMPDIR=$TASK_TMP/gotmp"
@@ -8091,9 +8095,9 @@ fi
 if [ "$KIND" = secondmate ] && [ "${FM_SKIP_SECONDMATE_INHERIT:-0}" != 1 ]; then
   if ! fm_config_reread_discard_pending "$PROJ_ABS" "$ID" "$FM_HOME"; then
     if fm_config_reread_quarantine_pending "$PROJ_ABS" "$ID" "$FM_HOME"; then
-      echo "CONFIG_REREAD: secondmate $ID: quarantined pre-relaunch generations after cleanup failure (destination=$PROJ_ABS/state/.fm-inherited-config-reread-quarantine source=$FM_HOME/state/.fm-inherited-config-reread-quarantine)" >&2
+      echo "CONFIG_REREAD: Project Director $ID: quarantined pre-relaunch generations after cleanup failure (destination=$PROJ_ABS/state/.fm-inherited-config-reread-quarantine source=$FM_HOME/state/.fm-inherited-config-reread-quarantine)" >&2
     else
-      echo "CONFIG_REREAD: secondmate $ID: cleanup failed; pre-relaunch generations were force-cleared where possible (destination=$PROJ_ABS source=$FM_HOME)" >&2
+      echo "CONFIG_REREAD: Project Director $ID: cleanup failed; pre-relaunch generations were force-cleared where possible (destination=$PROJ_ABS source=$FM_HOME)" >&2
     fi
   fi
 fi
@@ -8180,4 +8184,9 @@ SPAWN_ACCOUNT=
 # Opt-in Herdr project groups (docs/herdr-backend.md "Project groups") tag the
 # new endpoint now rather than at the next watcher poll; off costs one file test.
 [ ! -e "$CONFIG/herdr-project-groups" ] || [ "$BACKEND" != herdr ] || FM_HOME=$FM_HOME FM_STATE_OVERRIDE=$STATE FM_CONFIG_OVERRIDE=$CONFIG "$SCRIPT_DIR/fm-herdr-groups.sh" sync "$ID" || true
-echo "spawned $ID harness=$HARNESS kind=$KIND$SPAWN_DELIVERY window=$META_WINDOW worktree=$WT$SPAWN_ACCOUNT"
+case "$KIND" in
+  scout) SPAWN_ROLE=Investigator ;;
+  secondmate) SPAWN_ROLE='Project Director' ;;
+  *) SPAWN_ROLE=Builder ;;
+esac
+echo "spawned $ID role=\"$SPAWN_ROLE\" kind=$KIND$SPAWN_DELIVERY harness=$HARNESS window=$META_WINDOW worktree=$WT$SPAWN_ACCOUNT"

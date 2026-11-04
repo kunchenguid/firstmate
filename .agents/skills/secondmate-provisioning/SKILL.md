@@ -1,7 +1,7 @@
 ---
 name: secondmate-provisioning
 description: >-
-  Load when creating, seeding, validating, launching, recovering, handing backlog to, pushing inherited local material into, or retiring a secondmate home, or when editing data/secondmates.md.
+  Load when creating, seeding, validating, launching, recovering, handing backlog to, pushing inherited local material into, or retiring a Project Director home, or when editing data/secondmates.md.
 user-invocable: false
 metadata:
   internal: true
@@ -9,13 +9,13 @@ metadata:
 
 # secondmate-provisioning
 
-Use this reference before creating, seeding, validating, launching, handing backlog to, recovering, pushing inherited local material into, or retiring a persistent secondmate, and before editing `data/secondmates.md`.
+Use this reference before creating, seeding, validating, launching, handing backlog to, recovering, pushing inherited local material into, or retiring a persistent Project Director, and before editing `data/secondmates.md`.
 
-Keep the always-inline routing rules in `AGENTS.md` authoritative: route by natural-language `scope:`, local-only projects stay with the main firstmate, and secondmates are idle by default.
+Keep the always-inline routing rules in `AGENTS.md` authoritative: route by natural-language `scope:`, local-only projects stay with the main firstmate, and Project Directors are idle by default.
 
 ## Routing table
 
-`data/secondmates.md` has one parser-compatible line per persistent second mate.
+`data/secondmates.md` has one parser-compatible line per persistent Project Director.
 A local route uses:
 
 ```markdown
@@ -28,12 +28,12 @@ A whole-home remote route uses:
 - <id> - <one-sentence charter summary> (host: <ssh-alias>; root: <absolute-remote-code-root>; home: <absolute-remote-home>; scope: <natural-language responsibility>; projects: <project-a>, <project-b>; added <date>)
 ```
 
-Each registry entry stays concise and single-line: the summary is one sentence naming the durable charter, `scope:` is the natural-language intake responsibility, `projects:` is the non-exclusive clone list, and any extra prose is limited to genuinely domain-specific hard rules that change routing or safety for that secondmate.
+Each registry entry stays concise and single-line: the summary is one sentence naming the durable charter, `scope:` is the natural-language intake responsibility, `projects:` is the non-exclusive clone list, and any extra prose is limited to genuinely domain-specific hard rules that change routing or safety for that Project Director.
 Natural-language summary and `scope:` text may contain parentheses and semicolons; keep the generated `(home: ...; scope: ...; projects: ...; added ...)` suffix intact so operational consumers resolve its explicit field markers.
 The `home:` path points to the seeded home containing `data/charter.md`; no extra registry pointer field is needed.
 For a remote route, `host:` is an OpenSSH config alias and `root:` is that host's separate tracked Firstmate code root.
 See [remote launch and recovery](../../../docs/remote-secondmates.md#launch-or-recover) for backend selection and readiness (Herdr remains the default; Rex requires explicit selection and a ready doctor verdict).
-This release places whole secondmate homes remotely and never individual workers.
+This release places whole Project Director homes remotely and never individual workers.
 [`docs/remote-secondmates.md`](../../../docs/remote-secondmates.md) owns current operator setup and transport behavior.
 The home-seeded `data/charter.md` is the sole owner of boilerplate idle-by-default behavior, the normal delegation lifecycle, and standard escalation contracts, so point to that charter rather than restating those contracts in the registry entry.
 The `scope:` field is used during intake.
@@ -41,7 +41,7 @@ The `projects:` field is a non-exclusive clone list, not ownership.
 
 ## Charter and seed
 
-Scaffold a secondmate charter with:
+Scaffold a Project Director charter with:
 
 ```sh
 bin/fm-brief.sh <id> --secondmate {<project>...|--no-projects}
@@ -50,7 +50,7 @@ bin/fm-brief.sh <id> --secondmate {<project>...|--no-projects}
 The scaffold writes a charter brief instead of a task brief.
 Set `FM_SECONDMATE_CHARTER='<charter>'` to fill the charter text and `FM_SECONDMATE_SCOPE='<scope>'` when the routing scope differs.
 If you scaffold without `FM_SECONDMATE_CHARTER`, replace the `{TASK}` placeholder before seeding.
-Pass `--no-projects` instead of a project list to scaffold a project-less charter for a domain whose subject is the firstmate repo itself, whose home is a firstmate worktree and whose crews take pooled worktrees of the same repo.
+Pass `--no-projects` instead of a project list to scaffold a project-less charter for a domain whose subject is the firstmate repo itself, whose home is a firstmate worktree and whose worker teams take pooled worktrees of the same repo.
 `--no-projects` is mutually exclusive with a project list, and omitting both still fails loudly, so an accidental omission is never mistaken for a deliberate project-less seed.
 Re-seeding a populated home as project-less is refused non-destructively when the home contains project clones or `data/projects.md` entries.
 Retire or clean that home first, and re-scaffold a stale project-bearing charter with `--no-projects` before seeding.
@@ -70,26 +70,26 @@ Provision a whole remote home through its configured SSH host with:
 bin/fm-remote-home-seed.sh <id> <ssh-alias> <remote-root> <remote-home> {<project>[=<origin-url>]...|--no-projects}
 ```
 
-You resolve each project's origin yourself - from the captain, the project registry, a clone that exists elsewhere, `gh-axi`, or an explicit paste - and name it as `<project>=<origin-url>`; the seed validates and transports what you supply.
-A remote seed therefore creates nothing in this home beyond the route, the charter brief, and a launch record once it is launched: never clone a project into `projects/`, initialize no-mistakes here, or run a fleet sync just to seed a remote secondmate.
+You resolve each project's origin yourself - from the user, the project registry, a clone that exists elsewhere, `gh-axi`, or an explicit paste - and name it as `<project>=<origin-url>`; the seed validates and transports what you supply.
+A remote seed therefore creates nothing in this home beyond the route, the charter brief, and a launch record once it is launched: never clone a project into `projects/`, initialize no-mistakes here, or run a team sync just to seed a remote Project Director.
 A bare `<project>` remains a convenience for a project this home already has cloned, whose configured origin is read instead.
 [`docs/remote-secondmates.md`](../../../docs/remote-secondmates.md#provision-a-route) owns the rest of the operator contract, and [`bin/fm-project-origin-lib.sh`](../../../bin/fm-project-origin-lib.sh) owns the accepted origin forms.
 Pass `--no-projects` in the project position to seed the project-less home described above; the same mutual-exclusion and fail-loud-on-omission rules apply.
 It may only seed a home with no project clones or project-registry entries, and refuses conversion of populated homes without changing them.
-`-` durably leases a fresh firstmate worktree via `treehouse get --lease` under the secondmate id.
+`-` durably leases a fresh firstmate worktree via `treehouse get --lease` under the Project Director id.
 The lease survives with no live process and is never recycled by later `treehouse get` or `prune`.
 The slot stays reserved across restarts until the lease is released.
 Release happens only on explicit retirement or seed rollback, never on routine restart or recovery.
 
-`bin/fm-home-seed.sh` copies the charter into the secondmate home as `data/charter.md`.
+`bin/fm-home-seed.sh` copies the charter into the Project Director home as `data/charter.md`.
 It also writes the gitignored `.fm-secondmate-parent` durable binding before the required `.fm-secondmate-home` identity marker; the parser header in [`bin/fm-secondmate-parent-lib.sh`](../../../bin/fm-secondmate-parent-lib.sh) owns the record contract, and both files must remain in place.
-[`docs/configuration.md`](../../../docs/configuration.md#choose-the-secondmate-harness) owns the primary's secondmate runtime pins, per-mate overrides, launch precedence, compatibility, and malformed-file refusal.
+[`docs/configuration.md`](../../../docs/configuration.md#choose-the-project-director-harness) owns the primary's Project Director runtime pins, per-Project-Director overrides, launch precedence, compatibility, and malformed-file refusal.
 Select the registered mate's id when resolving its pin; [`bin/fm-harness.sh`](../../../bin/fm-harness.sh)'s header owns the resolver commands.
 
-This section is the single owner of the secondmate sync and inherited-local-material propagation contract; `AGENTS.md` sections 3 and 4 point here.
+This section is the single owner of the Project Director sync and inherited-local-material propagation contract; `AGENTS.md` sections 3 and 4 point here.
 Before a local launch, `fm-spawn.sh --secondmate` locally fast-forwards the home to the primary firstmate checkout's current default-branch commit when it is safe, or reconciles a clean divergence whose complete local result is already present there (e.g. after a squash merge) with `reset --keep`; dirty, uniquely diverged, or in-flight homes launch unchanged with a warning, and a genuine divergence gets the same durable reconciliation record `bin/fm-ff-lib.sh` writes for `/updatefirstmate`.
-The locked session-start deferred network stage runs the same bootstrap sweep for every live local secondmate home, discovered from `state/<id>.meta` records with `kind=secondmate` (`data/secondmates.md` only backfills `home=` for older records).
-That no-fetch path is a purely local fast-forward or redundant-divergence reconcile of tracked files, never an origin fetch, and it never touches the gitignored operational dirs, so a secondmate's backlog, projects, and in-flight work are never disturbed; a linked worktree advances immediately, while a standalone clone that lacks the target receives firstmate updates through `/updatefirstmate`.
+The locked session-start deferred network stage runs the same bootstrap sweep for every live local Project Director home, discovered from `state/<id>.meta` records with `kind=secondmate` (`data/secondmates.md` only backfills `home=` for older records).
+That no-fetch path is a purely local fast-forward or redundant-divergence reconcile of tracked files, never an origin fetch, and it never touches the gitignored operational dirs, so a Project Director's backlog, projects, and in-flight work are never disturbed; a linked worktree advances immediately, while a standalone clone that lacks the target receives firstmate updates through `/updatefirstmate`.
 A remote launch and the deferred bootstrap sweep hand the configured host the primary's own default-branch commit and ask it to fast-forward, or reconcile a redundant divergence, the persistent home to exactly that commit, under the same clean, ancestry, and branch guards a local home gets.
 A remote home is a standalone clone on another machine, so that host imports the one commit it was given - already present, else from that host's own Firstmate copy without moving it, else from the home's origin - and skips with an actionable reason when none of them holds it, which is what an unpushed primary commit looks like from there.
 Neither path moves the host's Firstmate copy, and the host-local launch never re-targets that copy after the parent has already synced the home.
@@ -97,43 +97,43 @@ Neither path moves the host's Firstmate copy, and the host-local launch never re
 SSH exit 255 preserves the route and reports unknown completion; it never triggers local respawn or failover.
 The same placement-specific launch and deferred bootstrap sweep also propagate the primary's inherited local material declared by [`fm_config_inherit_items`](../../../bin/fm-config-inherit-lib.sh), whose owner also defines which items are session-scoped.
 Because these paths are gitignored, that propagation is a separate, primary-authoritative copy independent of the tracked-files fast-forward: it re-converges every live home whether or not its tracked files advanced, and it touches only the declared items.
-Propagation failures warn without blocking a local secondmate launch or session-start continuation; a remote prelaunch transfer failure refuses that launch.
+Propagation failures warn without blocking a local Project Director launch or session-start continuation; a remote prelaunch transfer failure refuses that launch.
 The destination keeps whatever safely validated state the helper left behind.
 For inherited config files, local propagation and the remote sender preserve the destination item on source inspection errors and mirror only proven absence; [`fm-config-inherit-lib.sh`](../../../bin/fm-config-inherit-lib.sh) owns this boundary.
-Inheritance copies the literal `config/crew-harness` file, so a secondmate's own crewmates use the primary's crewmate harness only when it names a concrete adapter such as `codex`; an unset or `default` value has nothing concrete to inherit, and the secondmate's own crewmates fall back to the secondmate's own or detected harness instead.
-Inherited `config/backend` becomes that secondmate home's local runtime-backend default for future spawns only; it never retargets, rewrites, migrates, stops, or restarts an already-live worker endpoint.
-A present primary `config/backend` value always converges byte-exact into validated secondmate homes, and primary absence removes that backend setting so those homes keep runtime auto-detection.
+Inheritance copies the literal `config/crew-harness` file, so a Project Director's own workers use the primary's worker harness only when it names a concrete adapter such as `codex`; an unset or `default` value has nothing concrete to inherit, and the Project Director's own workers fall back to the Project Director's own or detected harness instead.
+Inherited `config/backend` becomes that Project Director home's local runtime-backend default for future spawns only; it never retargets, rewrites, migrates, stops, or restarts an already-live worker endpoint.
+A present primary `config/backend` value always converges byte-exact into validated Project Director homes, and primary absence removes that backend setting so those homes keep runtime auto-detection.
 Explicit per-spawn `--backend` and `FM_BACKEND` remain stronger than every home's local `config/backend`, including an inherited default.
-The declared `config/supervision-host-off` opt-out follows the same primary-authoritative propagation: its presence opts secondmate homes out even if they have their own engine setting, and its absence removes their copy at convergence.
+The declared `config/supervision-host-off` opt-out follows the same primary-authoritative propagation: its presence opts Project Director homes out even if they have their own engine setting, and its absence removes their copy at convergence.
 `config/supervision-host` itself is not inherited; each home selects its own engine.
-`config/secondmate-harness` is not inherited because it is only the primary's knob for launching secondmate agents.
+`config/secondmate-harness` is not inherited because it is only the primary's knob for launching Project Director agents.
 `config/firstmate-role` is inherited under the additional [resolved-role and receipt policy](../../../docs/configuration.md#firstmate-role-configfirstmate-role), not as a raw copy of the primary file.
 Account pins are not inherited.
 [`Worker account pin`](../../../docs/configuration.md#worker-account-pin-configclaude-account-configpi-account) owns `config/claude-account`, `config/claude-accounts`, and `config/pi-account` inheritance and backend limits; [`T3 provider instances`](../../../docs/t3code-backend.md#provider-instances-and-models) owns T3 account selection.
-[`docs/configuration.md` "Per-secondmate account pins"](../../../docs/configuration.md#per-secondmate-account-pins) owns the explicit `config/secondmate-accounts/<id>/` override and the independent worker pins inside each mate's home.
-`data/captain-shared.md` is main-authoritative in the primary home and read-only in secondmate homes.
-Its primary file header must state that the file is main-authoritative, read-only in secondmate homes, must not be edited there, and that new captain-preference discoveries are routed to the main firstmate through marked status or a document pointer.
-Every propagation point converges the secondmate copy to the primary bytes; when the primary file is absent, any existing secondmate copy is quarantined and removed so absence converges too.
+[`docs/configuration.md` "Per-Project Director account pins"](../../../docs/configuration.md#per-project-director-account-pins) owns the explicit `config/secondmate-accounts/<id>/` override and the independent worker pins inside each Project Director's home.
+`data/captain-shared.md` is main-authoritative in the primary home and read-only in Project Director homes.
+Its primary file header must state that the file is main-authoritative, read-only in Project Director homes, must not be edited there, and that new user-preference discoveries are routed to the main firstmate through marked status or a document pointer.
+Every propagation point converges the Project Director copy to the primary bytes; when the primary file is absent, any existing Project Director copy is quarantined and removed so absence converges too.
 Both the local helper and the remote receiver compare the destination against the generation each last published there, so an untouched inherited copy is replaced quietly instead of being reported as drift.
 A destination matching neither the primary bytes nor that recorded generation is quarantined to a collision-safe private dated sibling file before replacement, with a `SECONDMATE_SYNC:` diagnostic naming the home and quarantine artifact on the local route, so genuine local edits and interrupted publication keep a recovery copy.
 The helper rejects unsafe directories, symlinked or nonordinary source or destination artifacts, and hardlinked destination files.
-Between propagation runs, the secondmate copy is filesystem read-only; the helper may make its owned destination writable only around a guarded update and restores read-only mode on success, unchanged bytes, and recoverable failure paths.
-Never copy any secondmate `data/captain-shared.md` back into the primary.
+Between propagation runs, the Project Director copy is filesystem read-only; the helper may make its owned destination writable only around a guarded update and restores read-only mode on success, unchanged bytes, and recoverable failure paths.
+Never copy any Project Director `data/captain-shared.md` back into the primary.
 Keep each home's `data/captain.md` domain-local.
 After first propagation to an existing home, trim that home's local `data/captain.md` by hand to domain-specific content plus pointers to `data/captain-shared.md`; do not automate or silently delete private content.
-Keep every `data/learnings.md` fully local by captain decision; route fleet-general machinery facts into tracked documentation through the normal firstmate repo path rather than inventing shared learnings propagation.
+Keep every `data/learnings.md` fully local by user decision; route fleet-general machinery facts into tracked documentation through the normal firstmate repo path rather than inventing shared learnings propagation.
 No AGENTS.md reread nudge is needed at spawn or respawn because the agent reads instructions fresh on launch; only the bootstrap sweep's running-home instruction-surface advance needs that AGENTS.md re-read.
 Bootstrap reports successful AGENTS.md re-read sends as `BOOTSTRAP_INFO:` and only emits `NUDGE_SECONDMATES:` when that send fails and needs retry.
-A separate, literal-content config reread is required whenever inherited `config/*` material changes under an already-running secondmate.
+A separate, literal-content config reread is required whenever inherited `config/*` material changes under an already-running Project Director.
 For a local home, after each successful allowlisted config write, both the locked bootstrap convergence path and mid-session `bin/fm-config-push.sh` use the shared propagation report to build one per-home generation-specific private instruction file from the validated destination post-write bytes for only the declared config items that actually changed for that home, in declaration order.
 Each changed path is printed with clear begin/end delimiters and the destination file's full exact new bytes unparsed, or the explicit token `ABSENT` when propagation removed the destination copy.
 The instruction uses only minimal framing that these are defaults/rules and do not remove judgment; it never includes SHA values, selected profiles, parsed summaries, or any other generated interpretation.
 `data/captain-shared.md` is not a config file and is never inlined into this instruction file or message.
 Homes whose allowlisted config files were all unchanged receive no config-reread message when no retry is pending.
 Different homes may receive different changed-file sets based on their pre-push destination bytes.
-Delivery uses the existing routed secondmate path (`fm-send`) with only a single-line `CONFIG_REREAD: <absolute generation-specific instruction path>` pointer; a failed instruction publication retains the generated exact bytes in a bounded private retry queue when possible, legacy retry reports remain recoverable, a failed publication or retry-marker write retains the exact generation until it can be delivered, a failed send records a per-generation durable retry marker when possible, and all failures surface a concrete `CONFIG_REREAD:` diagnostic without claiming the live agent already re-read the values.
+Delivery uses the existing routed Project Director path (`fm-send`) with only a single-line `CONFIG_REREAD: <absolute generation-specific instruction path>` pointer; a failed instruction publication retains the generated exact bytes in a bounded private retry queue when possible, legacy retry reports remain recoverable, a failed publication or retry-marker write retains the exact generation until it can be delivered, a failed send records a per-generation durable retry marker when possible, and all failures surface a concrete `CONFIG_REREAD:` diagnostic without claiming the live agent already re-read the values.
 The propagation, generation publication, and pointer-delivery sequence holds one per-home inheritance lock, so concurrent mid-session pushes cannot deliver an older generation after a newer one.
-A newly launched or relaunched secondmate already reads its files at launch, so its pending config-reread generations are discarded or quarantined after cleanup failure and it needs no redundant live-agent config nudge unless propagation changes files after launch.
+A newly launched or relaunched Project Director already reads its files at launch, so its pending config-reread generations are discarded or quarantined after cleanup failure and it needs no redundant live-agent config nudge unless propagation changes files after launch.
 Quarantined pre-relaunch generations are retained in bounded private history, and cleanup skips creating an empty quarantine generation.
 Successfully delivered generations are retained only within a bounded per-home state history, while pending generations remain until delivery succeeds or a launch supersedes them.
 A remote home receives the same allowlisted bytes through `fm-remote-inherit.sh` and gets one marked re-read instruction after successful convergence when a transfer or tracked instruction-surface change requires it, or an earlier re-read remains owed.
@@ -143,7 +143,7 @@ The parent records that nudge before delivery, retains it after a failed send, a
 It does not receive a pointer to a primary-local generation path that cannot exist on that host.
 Inherited harness and runtime-backend defaults must not harden `fm-spawn` to reject a deliberate runtime choice that differs from those defaults.
 The [worker launch environment contract](../../../docs/configuration.md#worker-launch-environment-configlaunch-env-allowlist) separately governs explicit environment grants.
-For already-live secondmates, use `bin/fm-config-push.sh` to push a mid-session inherited local-material change without running the tracked-file fast-forward.
+For already-live Project Directors, use `bin/fm-config-push.sh` to push a mid-session inherited local-material change without running the tracked-file fast-forward.
 It uses the same live-home discovery and propagation helper as bootstrap, reports each item as `pushed`, `unchanged`, `skipped`, or `error`, and follows the config-reread contract above for changed or pending generations.
 `bin/fm-home-seed.sh` refuses to copy a missing or placeholder charter.
 
@@ -153,9 +153,9 @@ Run `bin/fm-home-seed.sh validate` when checking registry integrity; its header 
 Seeding is transactional.
 If validation, cloning, no-mistakes initialization, or registry update fails, generated briefs, new homes, new project clones, and registry edits are rolled back.
 
-Secondmate project lists may include `no-mistakes` and `direct-PR` projects only.
+Project Director project lists may include `no-mistakes` and `direct-PR` projects only.
 `local-only` projects stay with the main firstmate.
-For `no-mistakes` projects, seeding initializes only projects newly cloned into a secondmate home and refuses to mutate a preexisting clone that is not already initialized.
+For `no-mistakes` projects, seeding initializes only projects newly cloned into a Project Director home and refuses to mutate a preexisting clone that is not already initialized.
 
 ## Record intake for an existing or inherited domain
 
@@ -180,19 +180,19 @@ Treat an inherited queue that carries plans with no matching delivery record as 
 ## Backlog handoff
 
 Apply `AGENTS.md` section 10's work-items-only backlog contract before creation or handoff.
-When a secondmate is created for a domain, existing main-backlog items that fall under its scope should become its work instead of staying stranded in the main backlog.
-Scope-matching is firstmate's judgment against the secondmate's natural-language scope, not a keyword rule.
+When a Project Director is created for a domain, existing main-backlog items that fall under its scope should become its work instead of staying stranded in the main backlog.
+Scope-matching is firstmate's judgment against the Project Director's natural-language scope, not a keyword rule.
 Read `data/backlog.md`, pick queued items that fit the new scope, and move them with:
 
 ```sh
 bin/fm-backlog-handoff.sh <secondmate-id> <item-key>...
 ```
 
-After seeding, run this handoff for the new secondmate's in-scope queued items.
+After seeding, run this handoff for the new Project Director's in-scope queued items.
 For an existing or inherited domain, complete record intake first so no already-shipped plan row is handed off as open work.
-For a local route, the helper resolves and validates the secondmate home from `data/secondmates.md`, then delegates the item move to `tasks-axi mv` (the single owner of the backlog format), which moves each named item - and a whole connected set, blocker plus dependents, atomically - from the main `data/backlog.md` into the secondmate home's `data/backlog.md`.
+For a local route, the helper resolves and validates the Project Director home from `data/secondmates.md`, then delegates the item move to `tasks-axi mv` (the single owner of the backlog format), which moves each named item - and a whole connected set, blocker plus dependents, atomically - from the main `data/backlog.md` into the Project Director home's `data/backlog.md`.
 For a remote route, the same helper first moves the dependency-closed set atomically from the main backlog into `data/handoff/<id>.outbox.md`, then transfers that backlog-format outbox through `fm-on.sh` and lets the remote home's `fm-backlog-receive.sh` move every not-already-present key under the destination lock.
-After a new local placement or a remote outbox receipt becomes durable, the helper attempts one marked routed-work instruction through the receiving secondmate's recorded endpoint.
+After a new local placement or a remote outbox receipt becomes durable, the helper attempts one marked routed-work instruction through the receiving Project Director's recorded endpoint.
 [`bin/fm-backlog-handoff.sh`](../../../bin/fm-backlog-handoff.sh) owns route-specific wake outcomes, remote outbox release after durable receipt, and stable wake-correlation retry behavior.
 There is no two-phase handoff journal and no tasks-axi release beyond the already-required atomic `mv` capability.
 Bootstrap retries pending outboxes and wakes when mutation is authorized and emits `SECONDMATE_HANDOFF:` for any outboxes that remain.
@@ -201,53 +201,53 @@ It moves each queued item's whole block - the `- [ ] <id> ...` header plus every
 It refuses a selected item with a single-space or tab-indented continuation rather than risk leaving content orphaned in the main backlog.
 It accepts in-scope `## Queued` entries only and refuses `## In flight` and historical `## Done` entries.
 Done records stay with their home for pruning or archiving.
-It is idempotent; an item already in the secondmate backlog is skipped.
+It is idempotent; an item already in the Project Director backlog is skipped.
 After a successful move it warns for any moved key that still owes a public relay reply bound to `main/<key>`, because that binding no longer names the home owning the work; rebind the commitment to `secondmate:<id>` through the `fmx-respond` promised-final procedure, which owns those commands.
-That same rule governs routing generally: a Relay-linked request whose work goes to a secondmate cannot use the home-local mention link at all and needs a promised-final commitment bound to that secondmate's home.
+That same rule governs routing generally: a Relay-linked request whose work goes to a Project Director cannot use the home-local mention link at all and needs a promised-final commitment bound to that Project Director's home.
 It refuses any destination that is not a genuine seeded firstmate home with safe operational directories and a matching `.fm-secondmate-home` marker, so a move can never land in a project.
 Do not hand off `local-only` items.
 
 ## Recovery
 
-For local `kind=secondmate` meta with no window, treat the secondmate as a dead persistent direct report and respawn it with:
+For local `kind=secondmate` meta with no window, treat the Project Director as a dead persistent direct report and respawn it with:
 
 ```sh
 bin/fm-spawn.sh <id> --secondmate
 ```
 
 Use the recorded `home=` in meta.
-If meta is missing but `data/secondmates.md` still registers the secondmate, respawn from the registry entry and its persistent home.
+If meta is missing but `data/secondmates.md` still registers the Project Director, respawn from the registry entry and its persistent home.
 For a remote route, the same command probes and relaunches only on the configured host.
 An SSH transport failure or unreadable remote endpoint remains unknown and must be reconciled on that host; never launch a local replacement.
-`stuck-crewmate-recovery`'s remote-secondmate note owns why the endpoint-dead and send-failed verdicts that seem to justify this are themselves unreliable.
-Respawn re-resolves the secondmate harness from current config, uses the same guarded pre-launch sync, and re-propagates inherited local material, so recovered secondmates converge inherited config items and shared captain preferences whenever their home validates; tracked-file sync remains guarded separately.
-If the secondmate is already running and only inherited local material changed, prefer `bin/fm-config-push.sh` over respawning.
-Before moving a live LOCAL secondmate onto a newly pinned harness, model, or effort, check replacement support in [`docs/agent-control.md`](../../../docs/agent-control.md#fail-closed-boundaries).
+`stuck-crewmate-recovery`'s remote Project Director note owns why the endpoint-dead and send-failed verdicts that seem to justify this are themselves unreliable.
+Respawn re-resolves the Project Director harness from current config, uses the same guarded pre-launch sync, and re-propagates inherited local material, so recovered Project Directors converge inherited config items and shared user preferences whenever their home validates; tracked-file sync remains guarded separately.
+If the Project Director is already running and only inherited local material changed, prefer `bin/fm-config-push.sh` over respawning.
+Before moving a live LOCAL Project Director onto a newly pinned harness, model, or effort, check replacement support in [`docs/agent-control.md`](../../../docs/agent-control.md#fail-closed-boundaries).
 On a supported backend, set `config/secondmate-harness` and relaunch it with `bin/fm-control.sh <id> relaunch`, which re-resolves that pin, stops the agent, and launches the replacement in the same home.
-The same relaunch and recovery paths honor the durable [per-secondmate account pin](../../../docs/configuration.md#per-secondmate-account-pins).
-That plane refuses a remotely placed secondmate by name, because its agent runs on another host where none of the plane's postconditions can be read.
+The same relaunch and recovery paths honor the durable [per-Project Director account pin](../../../docs/configuration.md#per-project-director-account-pins).
+That plane refuses a remotely placed Project Director by name, because its agent runs on another host where none of the plane's postconditions can be read.
 Move a REMOTE one with `bin/fm-remote-secondmate-relaunch.sh <id> <harness> <model|default|-> <effort|default|->`, which runs that same control-plane relaunch on its host and then republishes this primary's own route metadata from the identity the host confirmed; pass the profile explicitly and use `default` for an absent pin, because `config/secondmate-harness` is not inherited and the copy on that host belongs to a different home ([`docs/remote-secondmates.md`](../../../docs/remote-secondmates.md)).
 Never call `fm-remote-secondmate-control.sh relaunch` through `fm-on.sh` directly for this: it leaves this primary's own record naming the runtime the mate used to run.
 A successful update restarts every live mate of both placements on its own, including one already on the target commit; the `/updatefirstmate` skill owns that pass, and `bin/fm-secondmate-restart.sh` owns its persist gate and failure vocabulary.
 
-Do not reconstruct a secondmate's whole tree from the main home.
+Do not reconstruct a Project Director's whole tree from the main home.
 The main firstmate reconciles only direct reports.
-Each secondmate is a firstmate in its own home, so it runs recovery on startup and reconciles its own crewmates.
-A secondmate's recovery reconciles only work that is already its own and then idles.
+Each Project Director is a firstmate in its own home, so it runs recovery on startup and reconciles its own workers.
+A Project Director's recovery reconciles only work that is already its own and then idles.
 It never initiates a survey or audit during recovery.
 
 ## Retirement and teardown
 
-A secondmate is persistent by default.
+A Project Director is persistent by default.
 An empty queue is healthy and does not trigger teardown.
-Run `bin/fm-teardown.sh <id>` for `kind=secondmate` only when the captain or main firstmate explicitly decides to retire that persistent second mate.
+Run `bin/fm-teardown.sh <id>` for `kind=secondmate` only when the user or main firstmate explicitly decides to retire that persistent Project Director.
 
-The safety check is the secondmate's own home.
+The safety check is the Project Director's own home.
 Teardown refuses while its `state/*.meta` contains in-flight work.
 Non-forced retirement also refuses while any parent pending-reply for that id is still unresolved.
 A remote route delegates the in-flight guard to its configured host and additionally refuses while the primary has a pending handoff outbox.
 SSH exit 255 preserves the route and local records because remote completion is unknown.
-When retirement proceeds, teardown kills the direct endpoint, removes every parent pending-reply record for that id including resolved leftovers and its delivery confirmation, removes the `data/secondmates.md` route, clears the main home metadata, and removes the retired secondmate home.
+When retirement proceeds, teardown kills the direct endpoint, removes every parent pending-reply record for that id including resolved leftovers and its delivery confirmation, removes the `data/secondmates.md` route, clears the main home metadata, and removes the retired Project Director home.
 An endpoint close that could not be made stops the retirement before any record naming that endpoint is removed, so a cleanup never reports success for an agent that may still be live with nothing left on disk naming it.
 [`bin/fm-teardown.sh`](../../../bin/fm-teardown.sh)'s `endpoint_close_refusal` contract owns backend-specific `--force` limits; [endpoint-close verification](../../../docs/verification/runtime-backends.md#endpoint-close) records what each backend can prove.
 Removing a leased home releases its durable treehouse lease via `treehouse return`, so the pool slot is freed for reuse rather than left leased forever.
@@ -259,7 +259,7 @@ Raw deletion is unsupported because a blocking process-event child can outlive i
 
 With `--force`, teardown is the explicit discard path.
 The worktree-slot ownership contract in `bin/fm-teardown.sh` still applies: `--force` never authorizes returning a descendant pool slot that another task may own.
-It kills child windows, discards child work and state inside the secondmate home, removes the route, releases the lease, and removes the retired secondmate home.
+It kills child windows, discards child work and state inside the Project Director home, removes the route, releases the lease, and removes the retired Project Director home.
 If forced teardown contends with a fresh task publication in any affected home, one command refuses without publishing or removing task state; treat that refusal as terminal and inspect the other operation before retrying.
 `fm-spawn.sh --relaunch` and non-forced teardown remain outside that task-set serialization; [`fm-secondmate-liveness-lib.sh`'s header](../../../bin/fm-secondmate-liveness-lib.sh) owns automatic recovery serialization.
-Never use `--force` unless the captain explicitly said to discard the work.
+Never use `--force` unless the user explicitly said to discard the work.

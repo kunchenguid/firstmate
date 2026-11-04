@@ -122,7 +122,7 @@ test_true_divergence_after_inherit_still_quarantines() {
   write_shared "$primary/data/captain-shared.md" "shared v2"
   : > "$report"
   out=$(FM_CONFIG_INHERIT_REPORT="$report" propagate_secondmate_inheritance "$primary" "$second")
-  diag=$(printf '%s\n' "$out" | grep '^SECONDMATE_SYNC: secondmate home ' || true)
+  diag=$(printf '%s\n' "$out" | grep '^SECONDMATE_SYNC: Project Director home ' || true)
   [ -n "$diag" ] || fail "edited destination should emit a SECONDMATE_SYNC diagnostic"
   qpath=${diag##* at }
   assert_grep "local edit after inherit" "$qpath" "true-divergence quarantine lost the edited bytes"
@@ -247,7 +247,7 @@ SH
   out=$(PATH="$fakebin:$BASE_PATH" FM_CONFIG_INHERIT_REPORT="$report" \
     propagate_secondmate_inheritance "$primary" "$second")
 
-  diag=$(printf '%s\n' "$out" | grep '^SECONDMATE_SYNC: secondmate home ' || true)
+  diag=$(printf '%s\n' "$out" | grep '^SECONDMATE_SYNC: Project Director home ' || true)
   [ -n "$diag" ] || fail "drift quarantine should emit a SECONDMATE_SYNC diagnostic"
   qpath=${diag##* at }
   [ "$qpath" = "$collision.1" ] || fail "collision-safe quarantine name should use .1, got $qpath"
@@ -278,7 +278,7 @@ test_missing_source_mirrors_absence_without_losing_local_bytes() {
 
   out=$(propagate_secondmate_inheritance "$primary" "$second")
 
-  diag=$(printf '%s\n' "$out" | grep '^SECONDMATE_SYNC: secondmate home ' || true)
+  diag=$(printf '%s\n' "$out" | grep '^SECONDMATE_SYNC: Project Director home ' || true)
   [ -n "$diag" ] || fail "primary absence with a local copy should quarantine before removal"
   qpath=${diag##* at }
   assert_absent "$second/data/captain-shared.md" "primary absence should converge destination to absence"

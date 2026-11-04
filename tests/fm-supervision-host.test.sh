@@ -138,13 +138,13 @@ test_attended_captain_outcome_reaches_main_through_branch_outcomes() {
   assert_re '^supervision-host: branch-outcome: .*\(store rows 1\); run bin/fm-wake-drain.sh' "$home/host.out" \
     "the exit must name the captain outcome's store row and send main to its drain"
   assert_no_re '^signal:' "$home/host.out" "the close the engine handled must not reach main as a wake"
-  assert_grep 'MAIN processes it from its next drain' "$home/engine-report.log" "an attended captain report must say main processes it"
+  assert_grep 'user outcome; compatibility verdict=captain' "$home/engine-report.log" "an attended user-outcome report must identify the compatibility verdict"
   assert_no_grep 'demo.status' "$home/state/.wake-queue" "the handled wake must stay acknowledged"
   assert_no_grep 'supervision-host-return' "$home/state/.wake-queue" "an attended captain report must queue no return wake"
   watcher_live "$home" && fail "the host left its successor cycle running when it woke main"
 
   drained=$(FM_HOME="$home" "$FAKE_CLAUDE" -c '"$0" 2>&1' "$ROOT/bin/fm-wake-drain.sh")
-  assert_contains "$drained" "BRANCH OUTCOMES (captain outcomes the supervision session recorded for you" "main's drain must present the captain outcome"
+  assert_contains "$drained" "BRANCH OUTCOMES (user outcomes the supervision session recorded for you" "main's drain must present the user outcome"
   assert_contains "$drained" "[seq 1, recorded " "the section must carry the outcome's row and when it was recorded"
   assert_contains "$drained" " ago] demo: stub escalated: " "the section must carry the outcome's task and summary"
   assert_contains "$drained" "run bin/fm-branch-outcome.sh mark-processed --through 1" "the section must print its exact acknowledgement"
@@ -193,11 +193,11 @@ test_quiet_record_without_its_daemon_is_a_present_captain() {
   assert_re '	handled	turn=[^	]*	posture=attended	' "$home/state/.supervision-host.log" "a quiet record must leave the host's turn attended"
   assert_no_re '^POSTURE: AWAY' "$home/engine-call.1" "a turn beside a quiet record must carry no away tail"
   assert_re 'MAIN DIALOG MIRROR' "$home/engine-call.1" "a turn beside a quiet record must carry the captain's dialog"
-  assert_grep 'MAIN processes it from its next drain' "$home/engine-report.log" "a captain report beside a quiet record must say main processes it"
+  assert_grep 'user outcome; compatibility verdict=captain' "$home/engine-report.log" "a user-outcome report beside a quiet record must identify the compatibility verdict"
   assert_re '^supervision-host: branch-outcome: .*\(store rows 1\); run bin/fm-wake-drain.sh' "$home/host.out" \
     "the exit must name the captain outcome's store row for the present captain"
   drained=$(FM_HOME="$home" "$FAKE_CLAUDE" -c '"$0" 2>&1' "$ROOT/bin/fm-wake-drain.sh")
-  assert_contains "$drained" "BRANCH OUTCOMES (captain outcomes the supervision session recorded for you" "main's drain must present the captain outcome beside a quiet record"
+  assert_contains "$drained" "BRANCH OUTCOMES (user outcomes the supervision session recorded for you" "main's drain must present the user outcome beside a quiet record"
   assert_contains "$drained" " ago] demo: stub escalated: " "the section must carry the outcome"
   [ -f "$home/state/.afk-contract" ] || fail "the host must leave quiet mode's record in place"
 
@@ -715,8 +715,8 @@ test_return_during_an_engine_turn_hands_its_outcomes_to_main() {
   expect_code 0 "$(cat "$home/host.rc")" "a late-outcome handoff must exit 0 for the owner to deliver"
   assert_absent "$home/state/.afk-contract" "fixture: the stub's return did not archive the record"
   assert_re '^signal: .*demo.status' "$home/host.out" "the handoff must carry the close"
-  assert_re '^supervision-host: the captain returned while the away session was handling this wake.*store rows 1[,)]' "$home/host.out" \
-    "the handoff must say the captain returned mid-turn and name the store rows"
+  assert_re '^supervision-host: the user returned while the away session was handling this wake.*store rows 1[,)]' "$home/host.out" \
+    "the handoff must say the user returned mid-turn and name the store rows"
   assert_re '^supervision-host: outcome 1 for demo \[routine\]: stub handled demo$' "$home/host.out" \
     "the handoff must carry the turn's outcome for main to relay"
   assert_re '	handled	turn=' "$home/state/.supervision-host.log" "the turn itself was handled"
@@ -750,8 +750,8 @@ test_silent_outcomes_are_not_relayed_when_the_captain_returns() {
       assert_re '^supervision-host: the away session could not take this wake: the engine turn failed \(exit 3\); this wake is yours$' \
         "$home/host.out" "$mode: the failed turn must still hand its wake to main"
     fi
-    assert_no_re 'captain returned|store rows|^supervision-host: outcome ' "$home/host.out" \
-      "$mode: a silent outcome was referenced in the captain-return handoff"
+    assert_no_re 'user returned|store rows|^supervision-host: outcome ' "$home/host.out" \
+      "$mode: a silent outcome was referenced in the user-return handoff"
     assert_grep '"silent":true' "$home/state/branch-outcomes.jsonl" "$mode: the silent outcome was not retained in the store"
     assert_absent "$home/state/.afk-contract" "$mode: the captain return was not archived"
   done
@@ -784,7 +784,7 @@ test_outcome_lookup_failure_is_not_treated_as_silence() {
   wait_until 150 watcher_live "$home" || fail "lookup failure: the host never started a watcher cycle"
   append_status "$home" 'outcome lookup failure after a captain return'
   wait_until_deadline 60 host_exited "$home" || fail "lookup failure: the host treated an unreadable store as a silent outcome"
-  assert_re '^supervision-host: the captain returned while the away session was handling this wake, but the recorded outcomes could not be verified; main must review them$' \
+  assert_re '^supervision-host: the user returned while the away session was handling this wake, but the recorded outcomes could not be verified; main must review them$' \
     "$home/host.out" "lookup failure: the main handoff did not explain the lookup failure"
   assert_re '^supervision-host: outcome lookup failed for turn receipt rows 1; visible outcomes may require manual review$' \
     "$home/host.out" "lookup failure: the missing outcome warning was not emitted"
@@ -823,7 +823,7 @@ test_outcome_after_the_return_survives_a_host_killed_at_the_turn_end() {
   assert_re '^check: rearm-resurface$' "$home/host.out" "the next host's first cycle must resurface the queue"
   assert_re '	pass-through	attended	main-only	check: rearm-resurface' "$home/state/.supervision-host.log" "the attended resurface must reach main"
   drained=$(FM_HOME="$home" "$ROOT/bin/fm-wake-drain.sh" 2>&1)
-  assert_contains "$drained" "supervision-host outcome 1 for demo [routine] was recorded after the captain returned" \
+  assert_contains "$drained" "supervision-host outcome 1 for demo [routine] was recorded after the user returned" \
     "main's drain must present the outcome the killed host never handed off"
   pass "host: an outcome recorded after the return reaches main even when its host dies at the turn's end"
 }
@@ -889,8 +889,8 @@ test_return_during_a_failed_turn_still_hands_its_outcomes_to_main() {
   wait_until_deadline 60 host_exited "$home" || fail "return-fail: the host did not hand the wake to main"
   expect_code 0 "$(cat "$home/host.rc")" "a failed turn's handback must exit 0 for the owner to deliver"
   assert_absent "$home/state/.afk-contract" "fixture: the stub's return did not archive the record"
-  assert_re '^supervision-host: the away session could not take this wake: the engine turn failed \(exit 3\); .*captain returned during its turn.*store rows 1[,)]' "$home/host.out" \
-    "the handback must say the turn failed, that the captain returned, and name the store rows"
+  assert_re '^supervision-host: the away session could not take this wake: the engine turn failed \(exit 3\); .*user returned during its turn.*store rows 1[,)]' "$home/host.out" \
+    "the handback must say the turn failed, that the user returned, and name the store rows"
   assert_re '^supervision-host: outcome 1 for demo \[routine\]: stub handled demo$' "$home/host.out" \
     "the handback must carry the failed turn's outcome for main to relay"
   assert_re '	failed	turn=' "$home/state/.supervision-host.log" "the turn itself failed"

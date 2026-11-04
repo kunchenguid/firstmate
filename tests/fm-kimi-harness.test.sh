@@ -272,10 +272,10 @@ make_spawn_case() {
   printf '# Kimi test config\ndefault_model = "test"\n' > "$home/.kimi-code/config.toml"
   cat > "$home/data/$id/brief.md" <<'EOF'
 # Task
-## Captain's intent
+## User's intent
 Exercise Kimi dispatch.
 
-## Firstmate spec
+## Director spec
 Verify launch and delivery behavior.
 EOF
   printf 'kimi\n' > "$home/config/crew-harness"

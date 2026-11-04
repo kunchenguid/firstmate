@@ -38,7 +38,7 @@ Verify setup by spawning a small task and confirming metadata contains `backend=
 
 tern is explicit-only, like zellij, orca, and Paseo: `config/backend`, `FM_BACKEND=tern`, or `--backend tern` select it, and nothing else does.
 Tern stamps `TERM_PROGRAM=tern` and `TERN_PANE=<block-id>` (plus `TERN_PANE_SOCKET` and `TERN_WINDOW_KEY`) into every block its session daemon spawns.
-A tmux server or Herdr client started inside a block inherits all of them, so their presence proves only that some ancestor was Tern, never that the captain chose it.
+A tmux server or Herdr client started inside a block inherits all of them, so their presence proves only that some ancestor was Tern, never that the user chose it.
 Reading them as a selection would make tern an ambient default, which "Authority is explicit and never inferred" rules out; `fm_backend_detect` therefore ignores them.
 
 The markers are still useful once tern has been selected explicitly.
@@ -156,15 +156,15 @@ No successful `ctl` agent read was possible on this host.
 Kill closes the task block with `tern close <session>/<block>`.
 It returns 0 when the block is already gone, and returns 1 with stderr (closing nothing, so teardown keeps the task records) when inventory is unreadable, the block moved sessions, the block is still in the recorded session but its tab no longer carries the task's scoped title, or the block is still present after a failed close.
 
-Real tests may share the captain's running Tern daemon rather than inventing an isolated window.
+Real tests may share the user's running Tern daemon rather than inventing an isolated window.
 `tests/tern-test-safety.sh` permits cleanup only for a currently listed session whose name carries the `fm-test-` prefix and whose id the test created.
 It refuses empty or non-numeric ids, name mismatches, unreadable listings, and any session that hosts the caller's own `$TERN_PANE`.
-The only sanctioned teardown is `tern_safe_kill_session <session_id> <want_name>`; tests never enumerate-and-close unrelated sessions or the captain's live remote blocks.
+The only sanctioned teardown is `tern_safe_kill_session <session_id> <want_name>`; tests never enumerate-and-close unrelated sessions or the user's live remote blocks.
 
 ## Active limits
 
 - tern is experimental and has no dedicated real-backend CI lane.
-- Secondmate spawns are unsupported (`fm-spawn.sh` refuses `--secondmate` on `backend=tern`).
+- Project Director spawns are unsupported (`fm-spawn.sh` refuses `--secondmate` on `backend=tern`).
 - The away-mode `/afk` supervisor backend does not support tern; only `tmux`, `herdr`, and `rex` supervisor panes are accepted.
 - Native agent state requires a Tern window control endpoint; remote-host or headless daemon access that can `ls`/`capture` may still lack `ctl`.
 - Multiplexers swallow TSP: a Tern block hosting tmux or Herdr never shows native Tern agent state.

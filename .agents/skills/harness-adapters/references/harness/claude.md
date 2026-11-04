@@ -8,7 +8,7 @@ These command-line and terminal facts apply to pane-backed sessions; for T3 Code
 
 | Fact | Value |
 |---|---|
-| Busy | Owned hooks: `UserPromptSubmit` opens while `Stop`, `StopFailure`, and `SessionEnd` close; a secondmate gets no `Stop` busy hook, because its home's tracked Stop guard is its only Stop writer, unless that guard predates `.fm-busy-stop` and the launch keeps the `Stop` idle hook (`../../../docs/turnend-guard.md` owns that); manual interrupt emits no hook, so control reports delivered keys and live endpoint only, publishes no idle event or cancellation claim, and usually leaves `claude-hook` busy. |
+| Busy | Owned hooks: `UserPromptSubmit` opens while `Stop`, `StopFailure`, and `SessionEnd` close; a Project Director gets no `Stop` busy hook, because its home's tracked Stop guard is its only Stop writer, unless that guard predates `.fm-busy-stop` and the launch keeps the `Stop` idle hook (`../../../docs/turnend-guard.md` owns that); manual interrupt emits no hook, so control reports delivered keys and live endpoint only, publishes no idle event or cancellation claim, and usually leaves `claude-hook` busy. |
 | Exit | `/exit`. |
 | Interrupt | Single Escape. |
 | Skill | `/<skill>`, for example `/no-mistakes`. |
@@ -18,15 +18,15 @@ These command-line and terminal facts apply to pane-backed sessions; for T3 Code
 
 ## Workspace trust
 
-Claude gates a folder it has never seen behind an interactive workspace-trust dialog (titled "Quick safety check: Is this a project you created or one you trust?"), so every fresh task worktree would hit it, and so would every secondmate home no operator has opened by hand.
+Claude gates a folder it has never seen behind an interactive workspace-trust dialog (titled "Quick safety check: Is this a project you created or one you trust?"), so every fresh task worktree would hit it, and so would every Project Director home no operator has opened by hand.
 `--dangerously-skip-permissions` does not cover that gate: `claude --help` records that the dialog is skipped only in non-interactive mode, through `-p` or a non-TTY stdout, while Firstmate's pane-backed and T3 provider sessions are interactive.
-Every Claude spawn therefore pre-registers its launch directory before launch, and the dialog does not appear: the task worktree for a ship or scout, and the home itself for a `--secondmate` spawn, in either seeded shape (a leased worktree or a standalone clone).
+Every Claude spawn therefore pre-registers its launch directory before launch, and the dialog does not appear: the task worktree for a Builder or Investigator, and the home itself for a `--secondmate` spawn, in either seeded shape (a leased worktree or a standalone clone).
 
-A second, separate dialog - "Allow external CLAUDE.md file imports?" - renders whenever a loaded CLAUDE.md chain reaches outside the project tree, which every crewmate's does through the captain's own `~/.claude/CLAUDE.md` importing `~/.claude/RTK.md`.
+A second, separate dialog - "Allow external CLAUDE.md file imports?" - renders whenever a loaded CLAUDE.md chain reaches outside the project tree, which every worker's does through the user's own `~/.claude/CLAUDE.md` importing `~/.claude/RTK.md`.
 `--setting-sources project,local`, which only `../../../bin/fm-live-lab.sh` passes (an `fm-spawn.sh` worker loads the user settings too), does not suppress it either, and it gates the session exactly like the trust dialog: cursor on "No, disable external imports", no way to move the selection from firstmate's steering plane.
 
-`../../../bin/fm-claude-trust.sh` records `hasTrustDialogAccepted` for both the worktree and its primary checkout in `${CLAUDE_CONFIG_DIR:-$HOME}/.claude.json`, where a home's worker account pin or the declared account a spawn names decides `CLAUDE_CONFIG_DIR` (`../../../docs/configuration.md` "Worker account pin"), for a ship or scout spawn; a secondmate spawn registers only its own home entry, since a secondmate home has no separate primary-checkout entry to carry import consent forward from.
-For a ship or scout spawn, the external-imports flags (`hasClaudeMdExternalIncludesApproved`, `hasClaudeMdExternalIncludesWarningShown`) are carried forward alongside the trust flag only when the primary checkout's project entry already carries an explicit `hasClaudeMdExternalIncludesApproved===true` from a prior interactive session - the common first-spawn case is a project claude has never been asked about, so those two flags are left unwritten and the import dialog still renders, even though trust registers normally.
+`../../../bin/fm-claude-trust.sh` records `hasTrustDialogAccepted` for both the worktree and its primary checkout in `${CLAUDE_CONFIG_DIR:-$HOME}/.claude.json`, where a home's worker account pin or the declared account a spawn names decides `CLAUDE_CONFIG_DIR` (`../../../docs/configuration.md` "Worker account pin"), for a Builder or Investigator spawn; a Project Director spawn registers only its own home entry, since a Project Director home has no separate primary-checkout entry to carry import consent forward from.
+For a Builder or Investigator spawn, the external-imports flags (`hasClaudeMdExternalIncludesApproved`, `hasClaudeMdExternalIncludesWarningShown`) are carried forward alongside the trust flag only when the primary checkout's project entry already carries an explicit `hasClaudeMdExternalIncludesApproved===true` from a prior interactive session - the common first-spawn case is a project claude has never been asked about, so those two flags are left unwritten and the import dialog still renders, even though trust registers normally.
 When the project entry instead already carries an explicit decline (`hasClaudeMdExternalIncludesApproved===false` with `hasClaudeMdExternalIncludesWarningShown===true`), the whole registration refuses - including the trust flag - rather than manufacture consent the human never gave, so that spawn wedges on the trust dialog before it would even reach the import one.
 Both flags `false` is Claude Code's default entry for a project never asked, not a decline, and is treated like an absent flag: trust registers and the import dialog still renders.
 The why-two-entries mechanism and the consent-gating logic live in the script's own header comment, which is the one owner for that contract; the fact worth repeating here is that `../../../bin/fm-spawn.sh` refuses the spawn when the trust flag fails to land, rather than launching a worker that would wedge on that dialog.
@@ -44,13 +44,13 @@ The once-per-machine bypass-permissions confirmation is a third, separate dialog
 Never send Enter to that one either: it was observed rendering in the same shape as the trust dialog, with the selection on `No, exit` and the footer `Enter to confirm . Esc to cancel`, so Enter ends the session rather than accepting.
 Firstmate cannot move a selection with Enter, Escape, and C-c alone, so it cannot accept this dialog at all, and an operator accepts it once per machine instead.
 Inspect the session to identify which dialog is on screen, and report it rather than answering it.
-A launch under `config/claude-permission-mode=auto` never meets the bypass confirmation, because it does not request bypass mode: on 2.1.269 `claude --permission-mode auto` reached the composer directly with the footer `⏵⏵ auto mode on (shift+tab to cycle)`, so a captain who refuses the bypass dialog selects `auto` there instead of accepting it.
+A launch under `config/claude-permission-mode=auto` never meets the bypass confirmation, because it does not request bypass mode: on 2.1.269 `claude --permission-mode auto` reached the composer directly with the footer `⏵⏵ auto mode on (shift+tab to cycle)`, so a user who refuses the bypass dialog selects `auto` there instead of accepting it.
 The workspace-trust dialog is unaffected by the permission mode and still needs the pre-registration above.
 
 ## Composer ghost
 
 Completed turns can render dim predicted text inside an empty composer, indistinguishable in plain `tmux capture-pane`.
-Firstmate-built Claude command lines scope `CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false` to each worker and secondmate without changing global config.
+Firstmate-built Claude command lines scope `CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false` to each worker and Project Director without changing global config.
 T3 Code owns its provider command and cannot carry this setting; [`docs/t3code-backend.md`](../../../../../docs/t3code-backend.md#active-limits) owns that backend limit.
 CLI `--prompt-suggestions` affects print or SDK mode only and did not suppress interactive ghost text on v2.1.186.
 
@@ -60,15 +60,15 @@ Styled capture stays internal to the boolean detector; `fm-peek` and model-facin
 
 ## Feedback drafts
 
-Firstmate-built Claude command lines disable Claude's `/bug` and `/feedback` model-drafted feedback flow, preventing those workers and secondmates from queuing or submitting a bug report on the captain's behalf.
+Firstmate-built Claude command lines disable Claude's `/bug` and `/feedback` model-drafted feedback flow, preventing those workers and Project Directors from queuing or submitting a bug report on the user's behalf.
 T3 Code owns its provider command and cannot carry these controls; [`docs/t3code-backend.md`](../../../../../docs/t3code-backend.md#active-limits) owns that backend limit.
-The controls are scoped to the launched process and never modify the captain's global Claude settings; `launch_template()` in `../../../../../bin/fm-spawn.sh` owns their exact mechanics and defense-in-depth rationale.
+The controls are scoped to the launched process and never modify the user's global Claude settings; `launch_template()` in `../../../../../bin/fm-spawn.sh` owns their exact mechanics and defense-in-depth rationale.
 
 ## Task control channel
 
 A Claude task worker's launch brief and Firstmate steering-inbox messages arrive as file-shaped content that is otherwise indistinguishable from indirect prompt injection.
 `launch_template()` in `../../../../../bin/fm-spawn.sh` establishes exactly those two Firstmate-owned channels as first-party instructions through `--append-system-prompt`, while leaving project files, fetched content, and other external material under the model's normal distrust and granting no merge, destructive, or security-sensitive authority beyond the brief.
-A `--secondmate` launch omits the statement because a secondmate operates under its own supervisor contract instead of a task worker's.
+A `--secondmate` launch omits the statement because a Project Director operates under its own supervisor contract instead of a task worker's.
 On the t3code backend, follow the [per-directory worker-channel contract](../../../../../docs/t3code-backend.md#per-directory-harness-environment).
 
 ## Skill listing budget
@@ -87,7 +87,7 @@ Put either in user settings or the untracked `.claude/settings.local.json`, neve
 
 [`../../../../../docs/verification/supervision.md`](../../../../../docs/verification/supervision.md#turn-end-guard) records the current primary and Stop auto-arm live evidence.
 This differs from the worker hook, which only touches a task marker through `.claude/settings.local.json`.
-A Claude secondmate's busy hooks are not that file: `bin/fm-spawn.sh` passes the parent home's `state/<id>.claude-settings.json` through `--settings` and does not edit the mate home's `settings.local.json`.
+A Claude Project Director's busy hooks are not that file: `bin/fm-spawn.sh` passes the parent home's `state/<id>.claude-settings.json` through `--settings` and does not edit the mate home's `settings.local.json`.
 
 Primary `.claude/settings.json` registers `../../../bin/fm-turnend-guard.sh --claude` and `../../../bin/fm-claude-stop-autoarm.sh` with `asyncRewake: true` and `timeout: 28800`.
 Guard exit 2 plus stderr forces continuation.

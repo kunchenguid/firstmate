@@ -907,7 +907,7 @@ cmd_read() {
     }
     my $ended = $session_ended =~ /^(?:true|True|TRUE)$/;
     if (@messages) {
-      my $message_label = $ended ? "SESSION-ENDING MESSAGE" : "CAPTAIN MESSAGE";
+      my $message_label = $ended ? "SESSION-ENDING MESSAGE" : "USER MESSAGE";
       print "$message_label\n";
       for my $i (0 .. $#messages) {
         print "$message_label PART ", ($i + 1), " of ", scalar(@messages), "\n" if @messages > 1;

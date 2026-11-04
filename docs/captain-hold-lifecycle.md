@@ -1,7 +1,7 @@
-# Captain-hold lifecycle mechanism
+# user-hold lifecycle mechanism
 
-This document explains how a captain call is held, answered, reconciled, shown, and verified.
-It is for maintainers changing `bin/fm-captain-hold.sh` or any surface that reads or closes a captain hold.
+This document explains how a user call is held, answered, reconciled, shown, and verified.
+It is for maintainers changing `bin/fm-captain-hold.sh` or any surface that reads or closes a user hold.
 
 The normative policy is owned by `.agents/skills/captain-hold-lifecycle/SKILL.md` and is not restated here.
 This document records the deterministic mechanism, structured surfaces, compatibility contract, and privacy-safe regression evidence.
@@ -10,8 +10,8 @@ This document records the deterministic mechanism, structured surfaces, compatib
 
 | Question | Section |
 | --- | --- |
-| What is a captain call, and which subcommand does what? | [Mechanism](#mechanism) |
-| Why does cleanup of finished work leave a captain call open? | [Cleanup never closes a captain call](#cleanup-never-closes-a-captain-call) |
+| What is a user call, and which subcommand does what? | [Mechanism](#mechanism) |
+| Why does cleanup of finished work leave a user call open? | [Cleanup never closes a user call](#cleanup-never-closes-a-user-call) |
 | How does a keyed answer from chat or a board reach the call? | [Answer-time resolution](#answer-time-resolution) |
 | How is a call closed when it stopped being a question? | [Reconcile](#reconcile-re-check-reality-never-a-blind-close) |
 | Why did a decision card disappear from the board? | [Card hygiene](#card-hygiene-a-landed-subject-is-not-a-live-call) |
@@ -23,21 +23,21 @@ This document records the deterministic mechanism, structured surfaces, compatib
 ## Mechanism
 
 A decision is not a separate thing in this system.
-It is an ordinary backlog task held for the captain, and the task id is the identity every surface and channel uses.
+It is an ordinary backlog task held for the user, and the task id is the identity every surface and channel uses.
 `bin/fm-captain-hold.sh` is the only lifecycle command layered on that primitive.
 The command addresses the active home's configured data directory.
-As a result, the existing backlog remains the only durable work database, and a secondmate-owned captain call stays in the secondmate home.
+As a result, the existing backlog remains the only durable work database, and a Project-Director-owned user call stays in the Project Director home.
 It never reads report bodies, review artifacts, terminal output, or chat.
 
 ### Subcommands at a glance
 
 | Subcommand | What it does | Details |
 | --- | --- | --- |
-| `hold` | Creates or reuses a task and holds it for the captain. | [Creating a hold](#creating-a-hold-hold) |
-| `answer` | Records the captain's exact words and resolves the call. | [Answering a call](#answering-a-call-answer) |
-| `complete` | Records the reviewed captain-held task ids in the originating task's metadata. | [Recording a reviewed inventory](#recording-a-reviewed-inventory-complete) |
-| `verify` | Read-only check that scout teardown runs before removing source state. | [Checking before scout teardown](#checking-before-scout-teardown-verify) |
-| `open` | Read-only check of whether a row is still an open captain call. | [Cleanup never closes a captain call](#cleanup-never-closes-a-captain-call) |
+| `hold` | Creates or reuses a task and holds it for the user. | [Creating a hold](#creating-a-hold-hold) |
+| `answer` | Records the user's exact words and resolves the call. | [Answering a call](#answering-a-call-answer) |
+| `complete` | Records the reviewed user-held task ids in the originating task's metadata. | [Recording a reviewed inventory](#recording-a-reviewed-inventory-complete) |
+| `verify` | Read-only check that Investigator teardown runs before removing source state. | [Checking before Investigator teardown](#checking-before-investigator-teardown-verify) |
+| `open` | Read-only check of whether a row is still an open user call. | [Cleanup never closes a user call](#cleanup-never-closes-a-user-call) |
 | `answers` | Channel-agnostic entry point for keyed answers. | [Answer-time resolution](#answer-time-resolution) |
 | `bind`, `unbind`, `binding` | Record that a captured-answer source feeds the keyed-answer intake. | [Source bindings](#source-bindings) |
 | `reconcile-requests` | Internal intake that records a reconcile request from a board selection. | [Reconcile](#reconcile-re-check-reality-never-a-blind-close) |
@@ -46,31 +46,31 @@ It never reads report bodies, review artifacts, terminal output, or chat.
 
 ### Creating a hold (`hold`)
 
-The `hold` subcommand is the mandatory captain-hold creation path.
+The `hold` subcommand is the mandatory user-hold creation path.
 It works in this order:
 
 1. It uses an existing task, or creates one when nothing exists to hold.
 2. It records the task's UTC hold-set timestamp as the leading line of the task body.
 3. It invokes the underlying tasks-axi hold operation.
-4. It verifies the captain-hold annotations and timestamp.
-5. In a secondmate home, it publishes the verified hold to the parent channel.
+4. It verifies the user-hold annotations and timestamp.
+5. In a Project Director home, it publishes the verified hold to the parent channel.
 6. When `--origin` is supplied, it records the origin on the task, replacing any previous association only after the backend hold succeeds.
 
-Publishing the stamp first ensures a snapshot cannot observe a newly captain-held task without the timestamp that defines its age.
+Publishing the stamp first ensures a snapshot cannot observe a newly user-held task without the timestamp that defines its age.
 
 Repeat and edge cases:
 
 - Retries of an active hold preserve its hold-set timestamp.
 - Re-holding released work starts a new timestamped lifecycle.
 - A closed task is refused rather than reopened.
-- `--until` stores the captain's own deferral date through tasks-axi's date gate.
+- `--until` stores the user's own deferral date through tasks-axi's date gate.
 - `--origin` resolves the backend origin identity before writing the hold-set stamp.
-  The association lives on its own `Captain hold origin:` body line; [completion inventory checks](#recording-a-reviewed-inventory-complete) own how it is verified.
-  The ordering above prevents an interrupted or refused backend hold from publishing the new association, even when an old captain hold is still active or date-expired.
+  The association lives on its own `User hold origin:` body line; readers also accept the legacy `Captain hold origin:` marker. [Completion inventory checks](#recording-a-reviewed-inventory-complete) own how it is verified.
+  The ordering above prevents an interrupted or refused backend hold from publishing the new association, even when an old user hold is still active or date-expired.
 - If the backend hold fails, `hold` attempts to restore the previous body.
   If restoration also fails, the new stamp can remain, but the previous origin is unchanged.
-  If the subsequent origin write fails, the command returns nonzero, but the successful captain hold and its stamp remain with the previous association (or with no recorded origin for a new task).
-  Parent publication is attempted before that write in a secondmate home, so an origin-write failure cannot skip delivery; a channel failure retains the existing `actionable:` diagnostic.
+  If the subsequent origin write fails, the command returns nonzero, but the successful user hold and its stamp remain with the previous association (or with no recorded origin for a new task).
+  Parent publication is attempted before that write in a Project Director home, so an origin-write failure cannot skip delivery; a channel failure retains the existing `actionable:` diagnostic.
   Re-running `hold` retries origin publication without duplicating the parent decision.
 - If an incomplete hold leaves a stamp above an earlier answer, the [completion durability boundary](#recording-a-reviewed-inventory-complete) applies.
   When the task already records its previous origin, replaying the earlier `answer --release` can remove that stamp, and normal work completion can retain the answer, but neither transition changes the stored origin: neither can certify the failed move's new origin.
@@ -80,16 +80,16 @@ Repeat and edge cases:
 
 ### Answering a call (`answer`)
 
-The `answer` subcommand records the captain's exact words and resolves the call in the same act.
+The `answer` subcommand records the user's exact words and resolves the call in the same act.
 
 | Form | Effect |
 | --- | --- |
 | `answer` | Closes a question-shaped call. |
-| `answer --release` | Frees a captain-gated work item to proceed without completing it. |
+| `answer --release` | Frees a user-gated work item to proceed without completing it. |
 
-It requires a non-empty captain decision file of at most 8192 bytes.
-`answer --release` is attended-only: while the away-posture record exists it is refused before anything is written, and the keyed-answer intake refuses a `release` line the same way, because only the captain in an attended session releases a captain hold.
-A quiet record is a present captain and does not refuse.
+It requires a non-empty user decision file of at most 8192 bytes.
+`answer --release` is attended-only: while the away-posture record exists it is refused before anything is written, and the keyed-answer intake refuses a `release` line the same way, because only the user in an attended session releases a user hold.
+A quiet record is a present user and does not refuse.
 It then works in this order:
 
 1. It durably writes a resolution block carrying the decision digest and a `Resolution mode:`.
@@ -106,7 +106,7 @@ A matching retry also completes any resolution-first normalization left unfinish
 - A drifted answer or a mode mismatch is rejected.
 - A re-held task accepts a new answer as a new record on top.
 
-On a task closed outside the script, `answer` records the missing block only when the captain-hold annotations tasks-axi preserves through a close prove the captain owned it.
+On a task closed outside the script, `answer` records the missing block only when the user-hold annotations tasks-axi preserves through a close prove the user owned it.
 It also verifies the task stays closed.
 
 A hold whose `--until` date has passed keeps those annotations while tasks-axi reports it no longer held.
@@ -114,30 +114,30 @@ An expired deferral therefore remains answerable.
 
 ### Recording a reviewed inventory (`complete`)
 
-While originating task metadata is live, the `complete` subcommand unions the reviewed captain-held task ids, called the reviewed inventory, into `decision_keys=` and records `decisions_reviewed=1`, replacing any earlier pair and writing it once ahead of any armed `pr=` merge-poll identity lines, because the metadata identity parse refuses these keys after `pr=`.
+While originating task metadata is live, the `complete` subcommand unions the reviewed user-held task ids, called the reviewed inventory, into `decision_keys=` and records `decisions_reviewed=1`, replacing any earlier pair and writing it once ahead of any armed `pr=` merge-poll identity lines, because the metadata identity parse refuses these keys after `pr=`.
 A post-teardown visual review can complete against the surviving report and durable tasks without recreating volatile task metadata.
-The [lifecycle policy](../.agents/skills/captain-hold-lifecycle/SKILL.md#policy) assigns caller authority, including the scout's brief-scoped exception for an empty inventory.
-`tests/fm-brief.test.sh` pins that the scout brief's outside-worktree rule names exactly that `complete --none` command, so the write boundary and the completion step cannot drift apart again.
+The [lifecycle policy](../.agents/skills/captain-hold-lifecycle/SKILL.md#policy) assigns caller authority, including the Investigator's brief-scoped exception for an empty inventory.
+`tests/fm-brief.test.sh` pins that the Investigator brief's outside-worktree rule names exactly that `complete --none` command, so the write boundary and the completion step cannot drift apart again.
 
 `complete` accepts `--none` as an explicit semantic inventory result.
 `--none` is refused while the origin still has a lifecycle-open keyed status decision.
 Before recording completion, `complete` verifies every listed task against tasks-axi.
-A durable entry is an open task with captain-hold annotations (including a date-expired hold), or a task carrying a recorded resolution.
+A durable entry is an open task with user-hold annotations (including a date-expired hold), or a task carrying a recorded resolution.
 For an open task without those annotations, a leading hold-set stamp above the resolution is refused: the answer alone cannot establish durability while the hold or release normalization is incomplete.
 A Done task still requires a recorded resolution, but is not subject to that stamp refusal.
 An answered entry that markdown Done retention moved into the configured Done archive still counts, while an archived close with no recorded answer does not.
 The origin is never its own inventory entry, so a hold that failed cannot be vouched for by the origin row.
-For a historical inventory that names its own origin, hold a separate captain task with `--origin`, replace only the invalid entry in the final `decision_keys=` line of the origin metadata with that task id while preserving all other entries, and re-run `complete`.
+For a historical inventory that names its own origin, hold a separate user task with `--origin`, replace only the invalid entry in the final `decision_keys=` line of the origin metadata with that task id while preserving all other entries, and re-run `complete`.
 An entry whose recorded origin differs from the one being completed is refused, comparing backend identities rather than alias spellings.
 An entry with no recorded origin, such as a hold made before origins were recorded or without `--origin`, is accepted on the durability check alone and named in the output.
 
 With a non-empty inventory, `complete` appends a `captain-held [key=<key>]` transfer event for every still-open keyed status decision.
 The event names the reviewed inventory.
-`bin/fm-classify-lib.sh` recognizes it as closing the live status copy without claiming that the captain has answered it.
+`bin/fm-classify-lib.sh` recognizes it as closing the live status copy without claiming that the user has answered it.
 
-### Checking before scout teardown (`verify`)
+### Checking before Investigator teardown (`verify`)
 
-Scout teardown calls the read-only `verify` subcommand after checking for the report and before removing any source state.
+Investigator teardown calls the read-only `verify` subcommand after checking for the report and before removing any source state.
 `verify` checks three things:
 
 - The recorded attestation exists.
@@ -145,19 +145,19 @@ Scout teardown calls the read-only `verify` subcommand after checking for the re
 - No keyed status decision opened after the last `complete`.
 
 A keyed status decision opened after the last `complete` makes `verify` fail, and re-running `complete` is the repair.
-The `--force` path remains the explicit captain-approved discard escape hatch.
+The `--force` path remains the explicit user-approved discard escape hatch.
 
-## Cleanup never closes a captain call
+## Cleanup never closes a user call
 
 The policy prefers holding the very work item a question gates.
-So the backlog row a finished task's cleanup is about to close is routinely the captain's own call.
+So the backlog row a finished task's cleanup is about to close is routinely the user's own call.
 
 `bin/fm-teardown.sh` therefore asks the read-only `open` subcommand before its automatic close:
 
 | `open` exit | Meaning | What teardown does |
 | --- | --- | --- |
-| 0 | The row is still an open captain call (not Done, `hold_kind: captain`). | Retains the row, as described below. |
-| 1 | The row is not an open captain call. | Proceeds with its automatic close. |
+| 0 | The row is still an open user call (not Done, `hold_kind: captain`). | Retains the row, as described below. |
+| 1 | The row is not an open user call. | Proceeds with its automatic close. |
 | 2 | The answer could not be established. | Treats it as a refusal before any destructive step, never as permission to close. |
 
 ### Retaining the row on exit 0
@@ -172,7 +172,7 @@ After cleanup, and still under the task's own lock, teardown does three things:
 - It runs `tasks-axi reopen`.
 
 The row returns to Queued with its hold intact.
-It remains on the appropriate Captain's Call or Charted Next decision surface instead of reading as work still under way.
+It remains on the appropriate user's Call or Charted Next decision surface instead of reading as work still under way.
 
 ### Interrupted cleanup
 
@@ -180,7 +180,7 @@ It remains on the appropriate Captain's Call or Charted Next decision surface in
 That record carries the retention intent as a `mode=retain` line.
 An interrupted cleanup therefore replays the retention at the next session start through the same record, validator, and lock as an ordinary close, and never closes the row.
 
-If the captain answers before replay, `answer` validates that record and copies any supported retained pull request or report into the row before closing it.
+If the user answers before replay, `answer` validates that record and copies any supported retained pull request or report into the row before closing it.
 A retained Gerrit change or GitLab merge request URL is instead recorded as a `Gerrit change <url>` or `GitLab merge request <url>` note on that close.
 Replay then retires the record.
 
@@ -195,20 +195,20 @@ They are recorded for separate upstream work rather than representing defects in
   `done` reports `Task report link must be a data/<id>/report.md path`, and `update` reports `--report must be a data/<id>/report.md path`.
 
 When an interrupted retention leaves such a relocated report in the validated pending-close record, `answer` skips only that known-unsupported row artifact and closes normally.
-The delivery then remains absent from Recently Landed instead of wedging the captain's answer.
+The delivery then remains absent from Recently Landed instead of wedging the user's answer.
 
 A pending-close record that fails validation outright is a different case, and it still refuses the answer.
-The refusal names the record and the validation reason, so the captain can repair it rather than facing a bare failure.
+The refusal names the record and the validation reason, so the user can repair it rather than facing a bare failure.
 
 ### What `--force` does not lift
 
-`--force` does not lift the deferral, because it authorizes discarding unlanded work, never the captain's question.
-Only `answer` with the captain's words or evidence-backed `reconcile close` resolves the call, by either closing the question or releasing the gated work.
+`--force` does not lift the deferral, because it authorizes discarding unlanded work, never the user's question.
+Only `answer` with the user's words or evidence-backed `reconcile close` resolves the call, by either closing the question or releasing the gated work.
 `bin/fm-backlog-transition-lib.sh` owns the transition and its record, and `bin/fm-captain-hold.sh --help` owns the predicate's contract.
 
 ## Answer-time resolution
 
-"A keyed answer resolves its matching captain-held task" is one capability with one owner.
+"A keyed answer resolves its matching user-held task" is one capability with one owner.
 `answers` is its channel-agnostic entry point.
 It reads `<task-id>\t<answer>\t<label>[\t<mode>]` lines and resolves each named task through the same `answer` path.
 Every guard therefore applies identically no matter which channel the answer arrived on.
@@ -225,7 +225,7 @@ Each key is reported as follows:
 
 | Key | Result |
 | --- | --- |
-| Names no task, names a task that is not captain-held, or names a task already closed | Reported as `skipped:` and feeds nothing. |
+| Names no task, names a task that is not user-held, or names a task already closed | Reported as `skipped:` and feeds nothing. |
 | A replay whose answer and requested close mode match the newest record | An idempotent `closed:`. |
 | A replay with a mode mismatch | Skipped. |
 
@@ -245,7 +245,7 @@ Two channels feed that one intake today, and both are ordinary callers rather th
 `bin/fm-send.sh --resolve-key` is the chat channel:
 
 - For a key the status log still owns, that script's header owns the status-log close.
-- A key the status log no longer owns is resolved to a still-open captain-held task and fed as one keyed line.
+- A key the status log no longer owns is resolved to a still-open user-held task and fed as one keyed line.
   The script tries the key as a task id first, then the legacy derived identity.
 
 `bin/fm-procevent.sh` is the captured-result channel:
@@ -257,14 +257,14 @@ Two channels feed that one intake today, and both are ordinary callers rather th
 
 `bin/fm-procevent-lavish.sh answers` is one such built-in adapter command.
 It reads only rows tagged `choice` and relays a card's declared close mode.
-It can never let freeform captain prose forge a task id or a mode.
+It can never let freeform user prose forge a task id or a mode.
 
 Trusted external process-event adapters intentionally expose no answer operation and cannot feed this authority-bearing intake; [`extension-bindings.md`](extension-bindings.md#trust-boundary) owns that boundary.
 
 ## Reconcile: re-check reality, never a blind close
 
-A captain call can stop being a question without the captain ever answering it.
-That happens when the subject lands, the premise turns out to be false, or the choice becomes a matter of fact rather than the captain's to make.
+A user call can stop being a question without the user ever answering it.
+That happens when the subject lands, the premise turns out to be false, or the choice becomes a matter of fact rather than the user's to make.
 `reconcile` is the standing third option for that case, and its whole point is that it is NOT an answer.
 It means "go verify the latest state".
 Once that verification has actually been done, it resolves in exactly one of two ways:
@@ -305,7 +305,7 @@ This captured-source intake records a durable reconcile request under `state/rec
 There is one private record per task, carrying the requesting provenance and a UTC timestamp.
 The record exists so the obligation to re-check cannot be lost between the wake that carried the answer and the turn that acts on it.
 It is idempotent per task: repeating a reconcile keeps one request and its original timestamp.
-The supported creator is the runner carrying the captain's board selection.
+The supported creator is the runner carrying the user's board selection.
 The binding-checked `reconcile-requests` command is that internal intake rather than an operator reconciliation outcome.
 
 ### Verifying and retiring a request
@@ -315,10 +315,10 @@ Each outcome requires both the pending board-created request and the operator in
 
 - `reconcile close <task-id> --evidence-file <path>` is the moot outcome.
   It writes a resolution record whose mode is `reconciled` and whose body is the supplied EVIDENCE under a `Reconciliation evidence:` label, then closes the task.
-  The distinct mode and label are what keep the record honest: it says the call dissolved against verified evidence, and it never claims the captain answered.
+  The distinct mode and label are what keep the record honest: it says the call dissolved against verified evidence, and it never claims the user answered.
 - `reconcile note <task-id> --note-file <path>` is the still-active outcome.
-  It appends one dated `Captain hold reconciled:` note to the task body, leaves the hold in place, and retires the request.
-  The call stays the captain's, now carrying what the re-check found.
+  It appends one dated `User hold reconciled:` note to the task body, leaves the hold in place, and retires the request.
+  The call stays the user's, now carrying what the re-check found.
   A marker bound to the request timestamp, provenance, and note digest lets a matching retry finish retirement without appending again.
   A later request with the same finding still receives its own dated note.
 
@@ -327,7 +327,7 @@ A successful normal answer also retires any pending request, because an answered
 
 Every retirement is checked.
 If request removal fails after an answer, close, or note is already durable, the durable outcome stands, but the command fails and leaves the pending request visible for retry.
-No path here closes a captain call without either the captain's words through `answer` or the evidence through `reconcile close`.
+No path here closes a user call without either the user's words through `answer` or the evidence through `reconcile close`.
 
 ## Card hygiene: a landed subject is not a live call
 
@@ -335,8 +335,8 @@ No path here closes a captain call without either the captain's words through `a
 
 Three checks run, all on exact identity and none on prose:
 
-- The card's key is the captain-held task id, so `bin/fm-captain-hold.sh open --distinguish-absent` is asked whether that task is still an open captain call.
-  - Exit 1 means the task is present but closed, or no longer held for the captain, and drops the card.
+- The card's key is the user-held task id, so `bin/fm-captain-hold.sh open --distinguish-absent` is asked whether that task is still an open user call.
+  - Exit 1 means the task is present but closed, or no longer held for the user, and drops the card.
   - Exit 2 means the answer could not be established, and keeps the card.
   - Exit 3 means the task is absent from the main backlog, which includes a home carrying no backlog file at all, and keeps the card.
 
@@ -348,27 +348,27 @@ Three checks run, all on exact identity and none on prose:
 
 ### Dropped and kept cards
 
-Dropped cards are named on stderr as `dropped-landed-card:` lines, so a rebuild states what it removed rather than quietly shrinking Captain's Call.
+Dropped cards are named on stderr as `dropped-landed-card:` lines, so a rebuild states what it removed rather than quietly shrinking user's Call.
 The landing procedure requires one immediate board rebuild to remove already-stale merged-PR and superseded-version cards without a committed migration or change-worktree state mutation.
 A subject whose state cannot be established is kept, because a wrongly shown card is safer than a wrongly hidden call.
 The validator's reservation scope must equal the adapter's reconcile-classification scope.
 That scope is all card types, because the captured payload carries no card type.
 
-### Remote-secondmate cards
+### Remote Project Director cards
 
-Owner-aware routing for remote-secondmate decision cards is tracked separately.
-That follow-up must query landedness and route reconciliation in the authoritative secondmate home while honoring the remote and local consistency principle.
+Owner-aware routing for remote Project Director decision cards is tracked separately.
+That follow-up must query landedness and route reconciliation in the authoritative Project Director home while honoring the remote and local consistency principle.
 Until then, an absent main-home task passes through this hygiene check unchanged.
 Its Reconcile selection remains announced but cannot create a main-home request, because the main intake refuses an absent task.
 For a main-home call, the reconcile option is the recovery path for whatever still slips through.
 
 ## Structured read surfaces
 
-### Fleet snapshot buckets
+### team snapshot buckets
 
 `bin/fm-fleet-snapshot.sh` parses canonical tasks-axi `(hold: ...)`, `(hold-kind: ...)`, and `(hold-until: ...)` metadata alongside existing backlog fields.
 It resolves every repeated `blocked-by:` edge against structured Done records and keeps missing blockers unresolved.
-It then assigns every captain hold exactly one `hold_bucket`.
+It then assigns every user hold exactly one `hold_bucket`.
 The bucket is decided only from structured fields: `hold_kind`, `state`, `hold_until`, `unresolved_blocker_ids`, and the machine-written hold-set timestamp.
 Hold reason and body prose are never matched, so no wording can hide, reveal, or reclassify a decision.
 
@@ -382,34 +382,34 @@ The first matching row in this order decides the bucket:
 | 3 | `aged` | An undated hold's hold-set timestamp is at least `FM_SNAPSHOT_UNDATED_HOLD_AGE_DAYS` old (default 14, floored elapsed days). |
 | 4 | `live` | None of the above. |
 
-No captain hold can fall through them and none can match two, which is what keeps a hold from vanishing from every view.
-`captain_actionable` - waiting on the captain now - is exactly `hold_bucket == "live"`.
+No user hold can fall through them and none can match two, which is what keeps a hold from vanishing from every view.
+`captain_actionable` - waiting on the user now - is exactly `hold_bucket == "live"`.
 
 Existing undated holds without a hold-set stamp fall back to the task's `since` date.
 That aging is a projection safety net only.
 The durable deferral remains re-holding with `--until`.
 
-The fleet snapshot's secondmate-home summary classifies an actionable captain hold as `captain_decision`.
-It preserves every captain hold in the bounded queued inventory of the owning home.
+The team snapshot's secondmate-home summary classifies an actionable user hold as `captain_decision`.
+It preserves every user hold in the bounded queued inventory of the owning home.
 
 ### Bearings placement
 
-`bin/fm-bearings-snapshot.sh` places each captain hold by its `hold_bucket` and inspects no prose of its own.
+`bin/fm-bearings-snapshot.sh` places each user hold by its `hold_bucket` and inspects no prose of its own.
 
 | `hold_bucket` | Where the hold appears |
 | --- | --- |
-| `live` | A default Captain's Call entry. |
-| `blocked`, `dated`, or `aged` | Leaves the default Captain's Call, renders as a Charted Next gate stating why - the blocking work, the `until <date>`, or the floored age - and contributes to the concrete `omitted[]` disclosure. |
+| `live` | A default user's Call entry. |
+| `blocked`, `dated`, or `aged` | Leaves the default user's Call, renders as a Charted Next gate stating why - the blocking work, the `until <date>`, or the floored age - and contributes to the concrete `omitted[]` disclosure. |
 
-`--all-decisions` reveals every captain hold available within the remote-summary bound and drops its gate.
-An available hold is therefore never in both Captain's Call and Charted Next.
+`--all-decisions` reveals every user hold available within the remote-summary bound and drops its gate.
+An available hold is therefore never in both user's Call and Charted Next.
 An actively worked held task may also appear in Underway, which reports running work independently of those decision buckets.
 
 ### Accepted limits
 
 Three accepted limits remain deliberate:
 
-- A remote or secondmate hold retains the producer home's age and aging decision from the summary's capture time and threshold rather than being recomputed by the parent.
+- A remote or Project Director hold retains the producer home's age and aging decision from the summary's capture time and threshold rather than being recomputed by the parent.
 - A rare concurrent answer-close and re-hold race can leave the newly re-held task without its age basis.
 - Cross-home summaries remain bounded by `FM_SNAPSHOT_SECONDMATE_DECISIONS` and `FM_SNAPSHOT_SECONDMATE_QUEUED`.
   A remote deferred hold beyond those bounds is not exported, so it can be neither gated nor revealed.
@@ -421,7 +421,7 @@ Re-holding through the wrapper with `--until` remains the durable fix rather tha
 [`bin/fm-landed-lib.sh`](../bin/fm-landed-lib.sh) owns Recently Landed's shared selection and artifact-display compatibility rules.
 A local-only landing's note is written by `tasks-axi done --note` as the last of the row's indented body lines rather than into the row title.
 The snapshot therefore reads that final line as the note as well as parsing the title, and the landing is published carrying its recorded note.
-A body that carries a captain resolution record is the captain's own prose and is never mined for that note, so a decision worded `local main` does not become a delivery artifact.
+A body that carries a user resolution record is the user's own prose and is never mined for that note, so a decision worded `local main` does not become a delivery artifact.
 The projection remains read-only and uses the canonical snapshot's structured fields, including the machine-written hold-set timestamp.
 
 ### Merge-to-cleanup window
@@ -435,13 +435,13 @@ The away-posture restriction on queued merges and its residual limits are owned 
 
 ## Record divergence
 
-A captain call can have two records, and closing one does not close the other.
+A user call can have two records, and closing one does not close the other.
 The status-log fold is the open-decision set `bin/fm-classify-lib.sh` reads from a task's status log, where a keyed `needs-decision` or `blocked` line opens a decision.
 A `resolved [key=...]` line closes the status-log fold.
-The structured captain-held task closes only through `answer`.
+The structured user-held task closes only through `answer`.
 
 Until this guard existed, closing on the status side alone left no trace of the disagreement.
-The fold went quiet, the durable record kept saying the captain owed an answer, and nothing warned.
+The fold went quiet, the durable record kept saying the user owed an answer, and nothing warned.
 
 ### What the guard reports
 
@@ -451,11 +451,11 @@ The fold went quiet, the durable record kept saying the captain owed an answer, 
 It flags exactly one condition, where all of these hold:
 
 - The task is still open.
-- The task still carries the captain-hold annotations.
+- The task still carries the user-hold annotations.
 - The task's key was closed on the status side by the resolve verb, resolved through the collapsed identity (the key is the task id) or the legacy derived one.
 
 It closes nothing, ever.
-A captain call closed wrongly leaves review entirely, so both reconciliation directions stay human-owned, and the printed hint names both.
+A user call closed wrongly leaves review entirely, so both reconciliation directions stay human-owned, and the printed hint names both.
 
 ### States that are not divergence
 
@@ -476,7 +476,7 @@ If tasks-axi is unavailable or its listing cannot be parsed, the guard cannot re
 
 ## Compatibility with pre-collapse installs
 
-The collapse is the change that made a decision an ordinary captain-held task whose key is its task id.
+The collapse is the change that made a decision an ordinary user-held task whose key is its task id.
 Older installs created derived `<origin>-decision-<key>` identities through the retired `bin/fm-decision-hold.sh`.
 Those rows are already plain task ids, so they render, answer, verify, and close through the collapsed surfaces with no data migration.
 
@@ -492,7 +492,7 @@ On the Beads backend, an attested legacy markdown id that resolves to no task is
 That row is found by the authoritative evidence first: a row whose notes carry the marker line `migrated from data/backlog.md id <legacy id>`, either alone or followed by ` on <date>` as fm-hold-migration wrote it on 2026-09-04.
 
 Only when no row carries that marker line is the legacy id tried under the configured beads prefix.
-That name-only guess is accepted solely for a single row still held for the captain.
+That name-only guess is accepted solely for a single row still held for the user.
 Two such rows refuse rather than attest.
 Because that acceptance rests on a name rather than on evidence, `complete` names the resolved row beside each prefix-attested legacy id in its completion line, so the guess is auditable after the fact.
 
@@ -511,11 +511,11 @@ The focused end-to-end regression suite is `tests/fm-captain-hold-lifecycle.test
 It proves the behaviors below.
 The suite does not test the accepted merge-to-cleanup re-hold window or asynchronous queued-forge landing because those events occur after the locally serialized merge command has returned.
 
-### Cleanup of a captain-held row
+### Cleanup of a user-held row
 
-- Cleanup of a finished task whose own row is the captain call leaves that call open, queued, held, carrying its deliverable, and visible in Bearings' Captain's Call.
+- Cleanup of a finished task whose own row is the user call leaves that call open, queued, held, carrying its deliverable, and visible in Bearings' user's Call.
   That cleanup leaves no pending record behind.
-  The call survives a `--force` cleanup and closes only when `answer` records the captain's words.
+  The call survives a `--force` cleanup and closes only when `answer` records the user's words.
   An ordinary finished task in the same home still closes with its report link.
 - An interrupted cleanup leaves the row In flight and untouched with its pending record.
   When the row remains unanswered, the next session start retains it as queued and held with the deliverable recorded.
@@ -528,25 +528,25 @@ The suite does not test the accepted merge-to-cleanup re-hold window or asynchro
 - Direct PR and local-only merge entrypoint calls refuse a still-held task before reaching the forge or moving local main.
 - A released pull request passes the guarded PR entrypoint, cleanup records its artifact, and Recently Landed publishes it.
 - An ordinary release still survives zero-retention cleanup and archives when configured.
-- A ship row whose captain hold cannot be read refuses cleanup before any destructive step and surfaces the read failure.
+- a Builder row whose user hold cannot be read refuses cleanup before any destructive step and surfaces the read failure.
 - A released call whose decision text is `local main`, closed with no artifact, is not published as a local-only landing.
 
 ### Divergence coverage
 
 - The reconstructed silent-divergence case is signalled.
-  A status resolution over a still-open captain-held task reaches both `diverged` and the drain's `RECORD DIVERGENCE` section, under the collapsed and the legacy identity alike.
+  A status resolution over a still-open user-held task reaches both `diverged` and the drain's `RECORD DIVERGENCE` section, under the collapsed and the legacy identity alike.
   The backlog task, its hold, and the status log all survive the report unchanged, and the printed hint names both reconciliation directions.
 - The false-signal boundary holds.
-  A captain call with no routed work item, a verified `captain-held` transfer, a still-open status decision, an already answered call, and an ordinary task whose keyed question was answered all stay silent.
+  A user call with no routed work item, a verified `captain-held` transfer, a still-open status decision, an already answered call, and an ordinary task whose keyed question was answered all stay silent.
 
 ### Completion and verification
 
-- A report-only unresolved captain call refuses `--none` completion before teardown can erase the source.
-- Non-forced scout teardown always requires the durable inventory verification.
-- The recorded-answer guard holds: a bare `tasks-axi done` close fails `verify` until `answer` records the captain's word, and an ordinary finished task cannot be dressed up as an answered call.
-- `test_hold_origins_follow_backend_holds` exercises lookup, backend-hold, and origin-write failures for new, active, and released holds, including secondmate publication and retry deduplication.
+- A report-only unresolved user call refuses `--none` completion before teardown can erase the source.
+- Non-forced Investigator teardown always requires the durable inventory verification.
+- The recorded-answer guard holds: a bare `tasks-axi done` close fails `verify` until `answer` records the user's word, and an ordinary finished task cannot be dressed up as an answered call.
+- `test_hold_origins_follow_backend_holds` exercises lookup, backend-hold, and origin-write failures for new, active, and released holds, including Project Director publication and retry deduplication.
 - `test_interrupted_origin_move_does_not_inherit_the_previous_answer` exercises failed restoration, TERM interruption, active and expired holds, earlier-answer replay, and normal released-work completion against the [hold failure semantics](#creating-a-hold-hold) and inventory checks above.
-- An answered call that markdown Done retention moved into the Done archive still passes `verify`, `complete`, and scout teardown, while an archived close carrying no recorded answer still refuses teardown, and an attested call found nowhere is refused by name.
+- An answered call that markdown Done retention moved into the Done archive still passes `verify`, `complete`, and Investigator teardown, while an archived close carrying no recorded answer still refuses teardown, and an attested call found nowhere is refused by name.
 
 ### Answers, stamps, and deferral
 
@@ -567,17 +567,17 @@ The suite does not test the accepted merge-to-cleanup re-hold window or asynchro
 
 Two of the suite's cases pin how a task body is read back rather than any decision behavior, because both paths that read one are otherwise silent when they get it wrong.
 
-The first case covers holding a task that carries a body, and cleanup's retention of a captain-held row.
+The first case covers holding a task that carries a body, and cleanup's retention of a user-held row.
 Both work where the installed JSON::PP defaults `allow_nonref` off and therefore rejects the JSON-encoded bare string a shown scalar field arrives as.
 The case forces that older default back off and probes that the simulation really does reject a bare scalar, so it cannot pass vacuously on a lenient library.
-A fleet host does carry such a library, and both failures reproduce on it natively with no shim, so that behavior is observed and not only simulated.
+A team host does carry such a library, and both failures reproduce on it natively with no shim, so that behavior is observed and not only simulated.
 The case still forces the older default rather than depending on the installed one, which is what makes it deterministic on any host.
 
 The second case covers a retained body's non-ASCII characters, which survive cleanup's rewrite as their exact UTF-8 bytes.
 The case asserts bytes rather than decoded strings.
 A codepoint at or below U+00FF is the one a stream with no raw layer emits as a single latin-1 byte, and comparing decoded strings cannot see that.
 It uses one row per character class, because any character above U+00FF makes the whole string print as UTF-8 and would mask the latin-1 case in a mixed body.
-That latin-1 byte loss also reproduces natively on the fleet host carrying the older library, with no shim.
+That latin-1 byte loss also reproduces natively on the team host carrying the older library, with no shim.
 
 ### Markdown-to-beads migration family
 
@@ -587,24 +587,24 @@ It proves:
 - `verify` and `complete` resolve an attested legacy id through a migrated row's marker note.
 - They resolve it through the configured prefix when no row carries a note, naming the resolved row in the completion line.
 - They resolve it through the marker note of a pre-collapse derived identity.
-- A marker-noted row wins over an unrelated captain-held row occupying the bare prefix namesake.
+- A marker-noted row wins over an unrelated user-held row occupying the bare prefix namesake.
 - An unresolvable id is refused once naming the id (never an empty name).
 - The attested id stays in `decision_keys=` for idempotent re-verification.
 
 One case in that family needs no beads install and always runs.
-It uses a stubbed tasks-axi that fails any markdown file override, and proves the captain-hold hold, answer, and close mutations reach a beads-configured home without one.
+It uses a stubbed tasks-axi that fails any markdown file override, and proves the user-hold hold, answer, and close mutations reach a beads-configured home without one.
 
 ### Reconcile coverage
 
 The reconcile path is pinned in the same suite:
 
-- A reconcile answer arriving through the keyed-answer intake is refused, in the default close mode and in the `release` mode a captain-gated work card declares.
+- A reconcile answer arriving through the keyed-answer intake is refused, in the default close mode and in the `release` mode a user-gated work card declares.
   It leaves both tasks held with no resolution record or request.
 - Only the separately bound captured-source intake records one durable request per task, idempotently across a replay.
 
 It also proves the two verification outcomes:
 
-- An evidence-backed `reconciled` close records the evidence under its own label and never as the captain's words.
+- An evidence-backed `reconciled` close records the evidence under its own label and never as the user's words.
 - A note leaves the call queued, held, and dated.
 
 Around those outcomes, it proves:
@@ -613,7 +613,7 @@ Around those outcomes, it proves:
 - Each durable mutation applies only once across close, probe, and request-retirement failures.
 - A later distinct request with the same note still appends its own dated record.
 - Every failed retirement is surfaced with its pending request retained.
-- Incompatible resolution modes cannot replay as captain answers.
+- Incompatible resolution modes cannot replay as user answers.
 - Normal close, release, and replay paths retire pending requests.
 
 The captured-source coverage proves:
@@ -654,12 +654,12 @@ Projection regressions live in two suites:
 
 | Suite | What it covers |
 | --- | --- |
-| `tests/fm-fleet-snapshot-view.test.sh` | The total structured-only bucket classifier, hold-until parsing, kind-independent captain actionability, undated-hold aging, and title stripping. |
+| `tests/fm-fleet-snapshot-view.test.sh` | The total structured-only bucket classifier, hold-until parsing, kind-independent user actionability, undated-hold aging, and title stripping. |
 | `tests/fm-bearings-snapshot.test.sh` | Default and expanded decision-bucket membership, deferral explanations, blocker-overflow disclosure, working-hold dual surfaces, remote-summary schema invalidation, exact leading-kind inference, artifact-kind mismatch and answered-question exclusion, kind-bearing and kindless local-only landings publishing their recorded note, and scout-report precedence over competing pull-request links. |
 
 ### Refreshing this record
 
-The exact commands and their summarized outputs are recorded in the shipping PR's evidence.
+The exact commands and their summarized outputs are recorded in the delivery PR's evidence.
 To refresh this record, run:
 
 - The four suites above: `tests/fm-captain-hold-lifecycle.test.sh`, `tests/fm-classify-decision-key.test.sh`, `tests/fm-fleet-snapshot-view.test.sh`, and `tests/fm-bearings-snapshot.test.sh`.

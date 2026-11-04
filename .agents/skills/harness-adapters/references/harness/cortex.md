@@ -2,7 +2,7 @@
 
 Verified on 2026-10-12 with Cortex Code 1.1.104 (`cortex`, build 1.1.104+041358.66de1c44636f) on Linux, through tmux and a named Herdr 0.8.2 lab session.
 The live worker guard also passed on 1.2.14 the same day; the Herdr lab checks ran on 1.1.104 only.
-The router owns the crewmate/scout-only boundary; primary and secondmate integration is unsupported.
+The router owns the worker/Investigator-only boundary; primary and Project Director integration is unsupported.
 [Verification evidence](../../../../../docs/verification/cortex.md) and its live guard refresh the vendor facts below.
 
 ## Operating facts
@@ -28,7 +28,7 @@ The router owns the crewmate/scout-only boundary; primary and secondmate integra
 Claude project hooks also run inside a Cortex worker and cannot be switched off, so weigh that before choosing this adapter for a project whose `.claude/` hooks assume Claude Code.
 The plugin's `SessionStart` hook fires at startup, before the first prompt, and Firstmate uses it only to register the pane on Herdr; busy state comes from `UserPromptSubmit`, `Stop`, and `SessionEnd`.
 A turn that ends in a model error (such as an unavailable model) leaves the composer idle; whether `Stop` fires for it was not observed, so a worker sitting on a rendered error with a busy record is a case for the stale-worker playbook, not a hook fault.
-`--sql-read-only` and the `guard:` cell of the mode line are the SQL write guard, not a tool-permission setting; the launch does not pass the flag, so SQL write policy stays the captain's own Cortex configuration, and `CORTEX_CLIENT_READ_ONLY=1` set in the launch environment applies natively.
+`--sql-read-only` and the `guard:` cell of the mode line are the SQL write guard, not a tool-permission setting; the launch does not pass the flag, so SQL write policy stays the user's own Cortex configuration, and `CORTEX_CLIENT_READ_ONLY=1` set in the launch environment applies natively.
 Herdr 0.8.2 has no Cortex entry in its detection manifest (herdrdev/herdr discussion 783), so a hook-less Cortex pane reads `agent_not_found`, which the liveness probe classifies `dead` and which makes the steering doorbell skip the endpoint.
 The per-task plugin's hooks therefore report the pane to Herdr as a `cortex` agent from source `firstmate:cortex` when `HERDR_ENV=1`.
 Herdr's own claude integration hook claims a pane as a `claude` session whenever `CLAUDECODE=1` is set, because Cortex loads `~/.claude/settings.json`; that claim survives the Cortex exit and silently drops every later report on the pane, so the launch always clears `CLAUDECODE`.
@@ -50,5 +50,5 @@ The `../../../../../bin/fm-task-inbox-lib.sh` doorbell was read and acknowledged
 ## Primary integration
 
 No primary Stop guard, watcher protocol, pre-tool protection, or session-start contract was verified for Cortex.
-Do not launch a primary or secondmate with this adapter.
+Do not launch a primary or Project Director with this adapter.
 ACP, Cortex's own worktree and teams modes, and quota-provider integration remain separate follow-ups.

@@ -1263,10 +1263,10 @@ test_spawn_fallback_chain_and_crew_scout_unaffected() {
   mkdir -p "$home/data/$id" "$home/projects" "$home/state"
   cat > "$home/data/$id/brief.md" <<'EOF'
 # Task
-## Captain's intent
+## User's intent
 Exercise an ordinary crew launch.
 
-## Firstmate spec
+## Director spec
 Verify secondmate harness settings do not affect it.
 EOF
   : > "$launchlog"

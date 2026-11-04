@@ -291,7 +291,7 @@ fm_afk_launch_quiet_check() {
   fm_afk_launch_quiet_needs_nothing
   rc=$?
   if [ "$rc" -eq 2 ]; then
-    printf 'Quiet mode starts nothing on this home while its away record (state/.afk-contract) is live: the captain has returned, so run the /afk return (bin/fm-afk-return.sh), pass its catch-up gate, then run quiet-check again.\n'
+    printf 'Quiet mode starts nothing on this home while its away record (state/.afk-contract) is live: the user has returned, so run the /afk return (bin/fm-afk-return.sh), pass its catch-up gate, then run quiet-check again.\n'
     return 2
   fi
   if [ "$rc" -ne 0 ]; then
@@ -308,7 +308,7 @@ fm_afk_launch_quiet_check() {
     printf 'Quiet mode starts nothing on this home, but its supervision session is paused after repeated engine errors: routine wakes reach this conversation until it recovers, and %s.\n' "$retry"
     return 0
   fi
-  printf 'Quiet mode needs nothing on this home: the ordinary supervision session already handles the wakes it can while the captain is present, never opens a turn here for a routine outcome, and hands this conversation only what needs it; no daemon and no away record are used.\n'
+  printf 'Quiet mode needs nothing on this home: the ordinary supervision session already handles the wakes it can while the user is present, never opens a turn here for a routine outcome, and hands this conversation only what needs it; no daemon and no away record are used.\n'
 }
 
 # The away daemon is no longer launched on Pi, nor for away mode on a primary

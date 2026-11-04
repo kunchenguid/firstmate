@@ -93,7 +93,7 @@ Spawn-time worktree discovery sends begin and end markers around `pwd`, captures
 An ordinary metadata-routed `fm-send.sh` text steer becomes a durable steering-inbox record, and only its best-effort constant doorbell passes through cmux's submit machinery.
 On the typed plane, literal send and Enter are separate calls.
 Enter, Escape, and Ctrl-C are supported.
-The composer verifier is a thin adapter: it captures a bounded plain-text tail and hands it with cmux's capability facts to the fleet-wide classifier in `bin/fm-composer-lib.sh`, which owns every shape, including Claude's borderless `❯` row with its U+00A0 separator.
+The composer verifier is a thin adapter: it captures a bounded plain-text tail and hands it with cmux's capability facts to the team-wide classifier in `bin/fm-composer-lib.sh`, which owns every shape, including Claude's borderless `❯` row with its U+00A0 separator.
 `read-screen` is plain text with no cursor primitive, so the shared classifier degrades a glyph row carrying trailing text to `unknown` rather than misreading a harness's own idle suggestion as unsent input.
 An unstructured bare prompt is `unknown`, and a slash-popup placeholder remains `pending`, so only Enter is retried and text is never retyped.
 cmux exposes no native generic agent busy signal, so supervision uses capture/hash polling for screen changes and each harness adapter's semantic lifecycle for worker state.
@@ -109,14 +109,14 @@ The exact window membership is re-read before this operation.
 A selected workspace that is not last closes normally; selection itself is not the trigger.
 Firstmate does not attempt to close the macOS window because cmux's socket cannot close a window holding a live terminal.
 
-Real tests share the captain's running app rather than creating an isolated cmux session.
+Real tests share the user's running app rather than creating an isolated cmux session.
 `tests/cmux-test-safety.sh` permits cleanup only for an exact currently listed `fm-test-` workspace and never enumerates and closes unrelated workspaces or relaunches the app.
 
 ## Active limits
 
 - cmux is experimental, macOS-only, GUI-first, and requires the app running.
 - Socket access requires a one-time manual Settings change.
-- Secondmate spawns are unsupported until a per-home lifecycle design is verified.
+- Project Director spawns are unsupported until a per-home lifecycle design is verified.
 - There is no native busy or push-event signal.
 - A target can disappear after structural readiness and before the operation.
 - The only-workspace cleanup path leaves a fresh default workspace and cannot close the window.

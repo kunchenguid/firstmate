@@ -98,10 +98,10 @@ mkdir -p "$STATE" "$DATA/$ID" "$CONFIG"
 printf 'off\n' > "$CONFIG/herdr-presentation-spaces"
 cat > "$DATA/$ID/brief.md" <<'EOF'
 # Task
-## Captain's intent
+## User's intent
 Exercise Herdr backend auto-detection.
 
-## Firstmate spec
+## Director spec
 Verify the real spawn path selects Herdr.
 EOF
 

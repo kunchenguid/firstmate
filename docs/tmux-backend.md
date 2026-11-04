@@ -1,6 +1,6 @@
 # tmux runtime backend
 
-tmux is Firstmate's verified reference runtime backend and the fully supported baseline for secondmate homes.
+tmux is Firstmate's verified reference runtime backend and the fully supported baseline for Project Director homes.
 [`configuration.md`](configuration.md#runtime-backend-configbackend--fm_backend) owns shared backend selection and metadata semantics.
 
 ## Setup
@@ -14,7 +14,7 @@ Explicit tmux selection via `config/backend` or `--backend tmux` overrides runti
 
 No provisioning is required before the first task.
 
-## Watching the crew
+## Watching the workers
 
 For the best visible experience, launch the primary harness inside a tmux session:
 
@@ -22,7 +22,7 @@ For the best visible experience, launch the primary harness inside a tmux sessio
 tmux new -s firstmate
 ```
 
-Crew tasks become windows in that session, even while another client is attached through a grouped session (`tmux new-session -t <session>`).
+worker tasks become windows in that session, even while another client is attached through a grouped session (`tmux new-session -t <session>`).
 `tmux display-message -p '#S'` prints its name unless a grouped session was used more recently.
 If the primary harness runs outside tmux, Firstmate creates or reuses a detached session named `firstmate`:
 
@@ -76,7 +76,7 @@ Run the real-harness guard after any harness upgrade and before trusting refresh
 ### Composer, busy state, and delivery
 
 Agent liveness and composer safety are separate checks.
-The tmux reader is a thin adapter over the fleet-wide classifier in `bin/fm-composer-lib.sh`: it contributes one styled full-pane capture, the `#{cursor_y}` cursor row, and foreground-process identity probes, and the shape containing the cursor - a complete bordered box (titled bottom borders tolerated, and rounded titled top rules only for a pane whose foreground process is exactly `cortex`), a bare agent-glyph row with its wrapped input, opencode's left bar, or Pi's identity-corroborated separator pair - normally decides the verdict.
+The tmux reader is a thin adapter over the team-wide classifier in `bin/fm-composer-lib.sh`: it contributes one styled full-pane capture, the `#{cursor_y}` cursor row, and foreground-process identity probes, and the shape containing the cursor - a complete bordered box (titled bottom borders tolerated, and rounded titled top rules only for a pane whose foreground process is exactly `cortex`), a bare agent-glyph row with its wrapped input, opencode's left bar, or Pi's identity-corroborated separator pair - normally decides the verdict.
 Since OpenCode 1.18.0 its left bar also draws the working directory and branch right-aligned inside the rows above the Build footer, and the classifier recognises that cwd:branch furniture structurally so an idle pane keeps a proven `empty` verdict.
 OpenCode 1.19.0 draws its mode/model footer row de-emphasised, so the classifier proves that footer from both the ghost-stripped and the ANSI-stripped form of the row; the dated capture and the plain-form safety argument are in [runtime backend verification](verification/runtime-backends.md#2026-10-14-opencode-1190-de-emphasised-modefooter-row-in-the-left-bar-composer).
 Real text in an identified shape is pending, while only positively proven emptiness reads empty.
@@ -108,7 +108,7 @@ Without that baseline, an `unknown` verdict is preserved untouched, so a busy-lo
 
 ## Limits and regression entry points
 
-- tmux is the reference path and supports secondmate homes.
+- tmux is the reference path and supports Project Director homes.
 
 ```sh
 tests/fm-backend-tmux-smoke.test.sh

@@ -15,7 +15,7 @@ When this session owns supervision and away mode is not active:
    When nothing needs supervision, or the park closed beside a verified healthy watcher, the hook returns `{}` and allows normal turn completion.
    When `.executionNum` reaches the loop ceiling (`FM_AGY_TURNEND_LOOP_CEILING`, default 180) while supervision is still needed, the hook returns one `FIRSTMATE SUPERVISION FOLLOW-UP CEILING REACHED` notice; drain and handle queued wakes yourself, and past the ceiling the hook returns `{}`.
    Only normal turn completions with `.terminationReason == "NO_TOOL_CALL"` trigger a park; other termination reasons pass through with `{}`.
-5. The captain keeps control while the hook is parked.
+5. The user keeps control while the hook is parked.
    A message sent while parked supersedes the older park through `state/.agy-park-owner`, making the older park stand down cleanly with `{}` without emitting duplicate wakes.
 6. On a `turn-end-guard` follow-up, the park could not establish a live cycle.
    Inspect the watcher startup path rather than turning the notice into a repeating manual-arm loop; `bin/fm-turnend-guard.sh --agy` enforces a bounded 3-block repair nag before failing open with `{}`.

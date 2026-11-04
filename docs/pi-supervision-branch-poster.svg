@@ -40,10 +40,10 @@
 
         <!-- ================= LANE LABELS ================= -->
         <text x="64" y="200" fill="#FFB454" font-size="24" font-weight="700">MAIN SESSION</text>
-        <text x="64" y="230" fill="#E6EDF3" opacity="0.6" font-size="16">talks with the captain</text>
+        <text x="64" y="230" fill="#E6EDF3" opacity="0.6" font-size="16">talks with the user</text>
         <text x="64" y="480" fill="#56C8FF" font-size="24" font-weight="700">SUPERVISION SESSION</text>
         <text x="64" y="510" fill="#E6EDF3" opacity="0.6" font-size="16">handles the routine,</text>
-        <text x="64" y="534" fill="#E6EDF3" opacity="0.6" font-size="16">decides routine note or exact captain entry</text>
+        <text x="64" y="534" fill="#E6EDF3" opacity="0.6" font-size="16">decides routine note or exact user entry</text>
 
         <!-- ================= CROSS-LANE ARCS (all arrowed, drawn under chips) ================= -->
         <path id="arc-quiet-1" d="M 460 479 C 490 400, 520 300, 545 221" fill="none" stroke="#56C8FF" stroke-width="2.5" stroke-dasharray="1 7" stroke-linecap="round" opacity="0.6" marker-end="url(#ah-cyan)"></path>

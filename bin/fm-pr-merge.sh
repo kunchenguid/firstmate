@@ -258,7 +258,7 @@ PROJECT_URL="https://$FM_PR_HOST/$FM_PR_PATH"
 # Firstmate never submits a Gerrit change, even though gerrit-axi can, so the
 # refusal is stated rather than left as a silently absent provider branch.
 # Submitting a Gerrit change means first recording a Code-Review+2, which is a
-# positive attributed claim that a named human approved the change, read by
+# positive attributed claim that a named user approved the change, read by
 # colleagues and by any audit of the repository. Firstmate must not manufacture
 # one. The server permitting self-approval is what makes this a policy boundary
 # rather than a capability limit, so it is enforced here rather than assumed.
@@ -463,14 +463,14 @@ reject_protected_forge_args() {
   for arg in "$@"; do
     case "$arg" in
       --auto|--auto=*|--admin|--admin=*|--delete-branch|--delete-branch=*|--remove-source-branch|--remove-source-branch=*)
-        echo "error: extra merge arguments must not request auto-merge, a protection bypass, or branch deletion; pass --attended-override only for an explicit captain instruction" >&2
+        echo "error: extra merge arguments must not request auto-merge, a protection bypass, or branch deletion; pass --attended-override only for an explicit user instruction" >&2
         return 1
         ;;
       --*) ;;
       # A single-dash argument is a short-option cluster. -d is gh's
       # --delete-branch, and -yd carries it the same way -yR carries --repo.
       -*d*)
-        echo "error: extra merge arguments must not request auto-merge, a protection bypass, or branch deletion; pass --attended-override only for an explicit captain instruction" >&2
+        echo "error: extra merge arguments must not request auto-merge, a protection bypass, or branch deletion; pass --attended-override only for an explicit user instruction" >&2
         return 1
         ;;
     esac
@@ -1452,12 +1452,12 @@ require_released_captain_hold() {
     "$SCRIPT_DIR/fm-captain-hold.sh" open "$ID" --distinguish-absent || hold_status=$?
   case "$hold_status" in
     0)
-      echo "error: task $ID is still held for the captain; release it before merging" >&2
+      echo "error: task $ID is still held for the user; release it before merging" >&2
       return 1
       ;;
     1|3) return 0 ;;
     *)
-      echo "error: could not determine whether task $ID is still held for the captain; refusing to merge" >&2
+      echo "error: could not determine whether task $ID is still held for the user; refusing to merge" >&2
       return 1
       ;;
   esac

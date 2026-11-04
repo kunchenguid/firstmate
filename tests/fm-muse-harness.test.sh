@@ -146,10 +146,10 @@ make_spawn_case() {
     "$home/xdgconfig" "$home/xdgdata"
   cat > "$home/data/$id/brief.md" <<'EOF'
 # Task
-## Captain's intent
+## User's intent
 Exercise Muse dispatch.
 
-## Firstmate spec
+## Director spec
 Verify the Muse harness behavior under test.
 EOF
   fm_git_worktree "$proj" "$wt" "fm/$id"

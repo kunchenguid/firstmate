@@ -432,10 +432,10 @@ make_kiro_spawn_case() {
   mkdir -p "$home/data/$id" "$home/projects" "$home/state" "$home/config"
   cat > "$home/data/$id/brief.md" <<'EOF'
 # Task
-## Captain's intent
+## User's intent
 Exercise Kiro dispatch.
 
-## Firstmate spec
+## Director spec
 Verify launch and hook wiring.
 EOF
   printf 'kiro\n' > "$home/config/crew-harness"

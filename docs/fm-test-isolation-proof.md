@@ -118,7 +118,7 @@ Those runs exercised the production path that the family admission enables.
 
 These scripts assert how quickly a real watcher reaches its next poll, so they are sensitive to CPU oversubscription rather than to shared state.
 An earlier attempt on the same host measured three failures (`fm-watch-checkpoint`, `fm-watch-recovery-loop`, `fm-watch-arm`) while six unrelated busy processes were running, at roughly ten runnable processes against fourteen cores.
-That is the margin this family has: four workers is proven, and the failures reappear well before the machine is merely busy.
+That is the margin this family has: four worker is proven, and the failures reappear well before the machine is merely busy.
 Keep `--jobs` for this family at or below the proven bound rather than raising it to fill a larger machine.
 
 The archived harness runs showed why ordering matters: the candidate sum was 818s and the balanced four-worker target 205s, but alphabetical order finished in 395s because the 193s `fm-watch-triage` started last and ran alone at the tail.
@@ -182,7 +182,7 @@ That its duration landed within 3% of the two clean runs is evidence the elevate
 These durations are not comparable with the six-member run above: that measurement was taken on a different machine state, and the gap is far larger than two short scripts can account for, so it is not evidence about the two new members.
 For the same reason the 1.72x four-worker figure recorded above is left as a statement about that measurement rather than restated as current.
 
-### secondmate: admitted
+### Project Director: admitted
 
 - Date: 2026-09-03
 - Command: `bin/fm-test-isolation-proof.sh --pool secondmate --jobs 4`
@@ -194,7 +194,7 @@ For the same reason the 1.72x four-worker figure recorded above is left as a sta
 | 2 | `FM_ISOLATION_SUMMARY total=21 failed=0 concurrency=4 duration_ms=571247` |
 
 An earlier proof on 2026-09-03 refused this family on `tests/fm-backlog-handoff.test.sh`, failing two runs of three with `Task "pre-move-crash" not found in this backlog`.
-The cause was in the case's crash injection, not in shared secondmate state.
+The cause was in the case's crash injection, not in shared Project Director state.
 Its fake `tasks-axi` killed the handoff and then slept a fixed second before delegating to the real binary, expecting to be torn down during that pause.
 Nothing tore it down: the fake outlives the process it kills, so on a host slow enough for the case's next assertions to take longer than a second, the orphan woke up and completed the very move the case requires left undone, which then made the recovery step fail.
 Direct observation of the source and destination backlogs during the injected crash showed exactly that, the item moving one second after the crash while the case was still asserting.

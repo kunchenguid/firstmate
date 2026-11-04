@@ -1,24 +1,27 @@
 #!/usr/bin/env bash
 # Detect the agent harness this process tree runs on.
 # Usage: fm-harness.sh                  print own harness: claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|gemini|muse|rovo|omp|agy|devin|commandcode|polytoken|cortex|kiro|hermes|unknown
-#        fm-harness.sh crew             print the effective CREWMATE harness
-#                                        (config/crew-harness; "default" resolves to own)
+#        fm-harness.sh crew             print the effective worker harness
+#                                        (compatibility command/key config/crew-harness;
+#                                        "default" resolves to own)
 #        fm-harness.sh secondmate [id]  print the harness the PRIMARY uses to launch
-#                                        SECONDMATE agents: config/secondmate-harness ->
+#                                        Project Directors (compatibility command/key):
+#                                        config/secondmate-harness ->
 #                                        config/crew-harness -> own. "default" or absent
 #                                        defers to the crew resolution, so an unset
-#                                        secondmate-harness behaves exactly as the crew
+#                                        secondmate-harness behaves exactly as the worker
 #                                        harness did before this knob existed. With a
-#                                        secondmate id, a "mate <id>:" override line wins
+#                                        Project Director id, a compatibility
+#                                        "mate <id>:" override line wins
 #                                        over the default line.
 #        fm-harness.sh secondmate-model [id]
 #                                        print the optional MODEL token from
 #                                        config/secondmate-harness, or empty when absent.
-#                                        An id selects that mate's override line first.
+#                                        An id selects that Project Director's override first.
 #        fm-harness.sh secondmate-effort [id]
 #                                        print the optional EFFORT token from
 #                                        config/secondmate-harness, or empty when absent.
-#                                        An id selects that mate's override line first.
+#                                        An id selects that Project Director's override first.
 #        fm-harness.sh validate-native-effort <harness> <model> <effort>
 #                                        Refuse ultra unless the harness is pi or
 #                                        pi-signed and the model explicitly names
@@ -45,7 +48,7 @@
 #                                        so a caller that knows the terminal's foreground
 #                                        process group can keep a backgrounded process out
 #                                        of the selection.
-# docs/configuration.md "Choose the secondmate harness" owns the pin-file schema
+# docs/configuration.md "Choose the Project Director harness" owns the pin-file schema
 # and resolution contract; the usage above owns the resolver command arguments.
 # Detection evidence and precedence:
 #   Markers  - verified environment variables a harness publishes about itself.
@@ -62,9 +65,9 @@
 # process under another harness (a Pi engine under a Claude primary detects as
 # pi) would otherwise resolve "own" - and with it an absent or "default"
 # config/crew-harness or config/secondmate-harness - to its own harness and
-# dispatch crew there. While FM_SUPERVISION_ACTOR=branch, a non-empty
+# dispatch workers there. While FM_SUPERVISION_ACTOR=branch, a non-empty
 # FM_SUPERVISION_PRIMARY_HARNESS names the primary's harness and replaces
-# detection for the own, crew, and secondmate resolutions; a value that names
+# detection for the own, worker, and Project Director resolutions; a value that names
 # no known harness refuses (exit 2, nothing on stdout) instead of resolving.
 # Outside the branch actor the pin is ignored, and the evidence-only ancestry
 # verbs never consult it.

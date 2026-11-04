@@ -145,7 +145,7 @@
 #          consumes respawned ids. Worker output is captured separately and
 #          replayed in spawn order; failure to create that private capture
 #          directory selects the sequential fallback. Remote tracked-file sync
-#          and inheritance share a per-mate FM_SECONDMATE_CONVERGENCE_TIMEOUT
+#          and inheritance share a per-Project-Director FM_SECONDMATE_CONVERGENCE_TIMEOUT
 #          budget (secondmate_sync_remote_one owns it).
 #          A relaunch that the liveness sweep performs during an `only` run is
 #          always reported, because a digest composed before that run already
@@ -251,7 +251,7 @@ network_sweep_authorized() {
   if network_mutation_authorized; then
     return 0
   fi
-  echo "NETWORK_CHECKS: the recorded fleet lock holder changed before $label, so this stale worker skipped that sweep"
+  echo "NETWORK_CHECKS: the recorded team lock holder changed before $label, so this stale worker skipped that sweep"
   return 1
 }
 
@@ -675,7 +675,7 @@ secondmate_sync() {
     fi
     if fm_secondmate_remote_sync_changed "$sync_out" || [ "$sync_rc" -eq 255 ]; then nudge_needed=1; fi
     if fm_timed_out "$sync_rc"; then
-      echo "SECONDMATE_SYNC: secondmate $id: skipped: remote tracked-file sync failed on $remote_host: no answer within the ${budget}s per-mate convergence budget"
+      echo "SECONDMATE_SYNC: Project Director $id: skipped: remote tracked-file sync failed on $remote_host: no answer within the ${budget}s per-Project-Director convergence budget"
       converged=0
       nudge_needed=1
     elif [ "$sync_rc" -ne 0 ]; then
@@ -695,7 +695,7 @@ secondmate_sync() {
     # Items a failed push applied before it stopped changed the home too.
     if [ "$inherit_rc" -eq 255 ] || printf '%s\n' "${inherit_out:-}" | grep -Eq '^(pushed|removed):'; then nudge_needed=1; fi
     if fm_timed_out "$inherit_rc"; then
-      echo "SECONDMATE_SYNC: secondmate $id: skipped: remote inheritance failed on $remote_host: no answer within the ${budget}s per-mate convergence budget"
+      echo "SECONDMATE_SYNC: Project Director $id: skipped: remote inheritance failed on $remote_host: no answer within the ${budget}s per-Project-Director convergence budget"
       converged=0
       nudge_needed=1
     elif [ "$inherit_rc" -ne 0 ]; then
@@ -1354,13 +1354,13 @@ backlog_record_reconcile() {
           echo "BOOTSTRAP_INFO: closed the backlog item for $label after interrupted cleanup; its endpoint or local copy may remain and should be reconciled"
           ;;
         retained)
-          echo "BOOTSTRAP_INFO: kept the captain call for $label open with its deliverable recorded after an interrupted cleanup"
+          echo "BOOTSTRAP_INFO: kept the user call for $label open with its deliverable recorded after an interrupted cleanup"
           ;;
         retained_incomplete)
-          echo "BOOTSTRAP_INFO: kept the captain call for $label open with its deliverable recorded after interrupted cleanup; its endpoint or local copy may remain and should be reconciled"
+          echo "BOOTSTRAP_INFO: kept the user call for $label open with its deliverable recorded after interrupted cleanup; its endpoint or local copy may remain and should be reconciled"
           ;;
         answered)
-          echo "BOOTSTRAP_INFO: finished the interrupted cleanup for $label; the captain had already answered its call"
+          echo "BOOTSTRAP_INFO: finished the interrupted cleanup for $label; the user had already answered its call"
           ;;
       esac
     else
@@ -1565,7 +1565,7 @@ detect_local_config() {
   if [ -n "$tangle_branch" ]; then
     tangle_default=$(fm_default_branch "$FM_ROOT" 2>/dev/null || echo main)
     if [ "${FM_BOOTSTRAP_DETECT_ONLY:-0}" = 1 ] && [ "${FM_BOOTSTRAP_LOCKED:-0}" != 1 ]; then
-      echo "TANGLE: primary checkout on feature branch '$tangle_branch' (expected '$tangle_default'); the work is safe on that ref - read-only session must leave restore work to the session holding the fleet lock"
+      echo "TANGLE: primary checkout on feature branch '$tangle_branch' (expected '$tangle_default'); the work is safe on that ref - read-only session must leave restore work to the session holding the team lock"
     else
       echo "TANGLE: primary checkout on feature branch '$tangle_branch' (expected '$tangle_default'); the work is safe on that ref - restore the primary with: git -C $FM_ROOT checkout $tangle_default, then re-validate the branch in a proper worktree"
     fi

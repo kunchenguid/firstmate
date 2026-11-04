@@ -1,6 +1,6 @@
 # Secondmate parent channel: live verification
 
-Maintainer-verification record for the guarantee in [`secondmate-parent-channel.md`](../secondmate-parent-channel.md): a captain-facing outcome recorded inside a secondmate home reaches the parent channel without the mate model writing it.
+Maintainer-verification record for the guarantee in [`secondmate-parent-channel.md`](../secondmate-parent-channel.md): a user-facing outcome recorded inside a Project Director home reaches the parent channel without the Project Director model writing it.
 Refresh it by rerunning the fixture below after changing any publisher named in `bin/fm-parent-channel-lib.sh`.
 This run predates emission-time stamping, so each published line below is the payload without its stamp: a rerun now writes the same bytes with an `[at=<epoch>]` tag closing the head, as in `done [key=child-outcome-child-done-05b032a1] [at=<epoch>]: child ...`.
 [`bin/fm-classify-lib.sh`](../../bin/fm-classify-lib.sh) owns that tag's syntax; nothing this record proves about delivery depends on it.
@@ -87,9 +87,9 @@ $ # Every line above beginning 'done [key=child-' or carrying 'captain-hold-' wa
 
 ## Why this proves the hole is closed
 
-- The observed defect was a mate model that handled its child's outcome and then addressed the captain in its own chat instead of appending to the parent channel.
+- The observed defect was a Project Director model that handled its child's outcome and then addressed the user in its own chat instead of appending to the parent channel.
   In this run there is no model at all, and four captain-facing lines still appeared on `$P/state/mate.status`: the child's terminal done line with its note, canonical PR, mode, and posture; the PR-ready line at registration; the captain hold; and the hold's answer.
 - Each line was written by the script that recorded the underlying fact: `bin/fm-inactive-reconcile.sh` on the mate watcher's poll, `bin/fm-pr-check.sh`, and `bin/fm-captain-hold.sh`.
 - Each line produced one `signal:` wake in the real parent watcher, which is the event that starts the parent firstmate's turn and therefore the captain-facing report.
-- The mate watcher's own `signal:` on `child.status` shows the mate was woken as before; whatever the mate model would have said in its chat afterward is irrelevant to delivery.
+- The Project Director watcher's own `signal:` on `child.status` shows the Project Director was woken as before; whatever the Project Director model would have said in its chat afterward is irrelevant to delivery.
 - The trailing `stale:` line in the mate watcher log is the idle real pane after the child's final line, ordinary liveness escalation unrelated to delivery.

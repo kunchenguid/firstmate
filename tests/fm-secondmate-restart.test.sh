@@ -281,9 +281,9 @@ test_persist_gates_and_asks_only_for_open_records() {
   assert_contains "$request" "Open-record persistence" "the request must reuse stow's open-record contract"
   assert_contains "$request" "file a task for each open record" "the request must ask for the unfiled open records"
   assert_contains "$request" "correct any task whose status" "the request must ask for stale task status"
-  assert_contains "$request" "captain call you had formed but never registered" \
+  assert_contains "$request" "user call you had formed but never registered" \
     "the request must flush an unregistered captain call"
-  assert_contains "$request" "Do NOT run the memory, learnings, or captain-preference sweeps" \
+  assert_contains "$request" "Do NOT run the memory, learnings, or user-preference sweeps" \
     "the request must exclude the memory curation half of stow"
   pass "T1 persist is a gate, and asks for open records and task status only"
 }

@@ -1,7 +1,7 @@
 # Gerrit forge integration
 
 This note is the design reasoning for giving Firstmate a forge axis, worked through Gerrit because Gerrit is the case that forces it.
-It is written for whoever integrates a forge with Firstmate rather than for the operator of any one fleet, so it argues about axes, vocabulary, and ownership, and never about which projects should be registered how.
+It is written for whoever integrates a forge with Firstmate rather than for the operator of any one team, so it argues about axes, vocabulary, and ownership, and never about which projects should be registered how.
 Every question it raises is answered, and each decision is stated in the body where the reasoning for it sits rather than collected into a list at the end.
 
 The mechanics it reasons about have their own owners.
@@ -115,12 +115,12 @@ Shape is not varying *with* mode there, it is varying *inside* every value of mo
 Shape already exists on GitHub, it predates Gerrit entirely, and it is load-bearing in four places today:
 
 - `bin/fm-pr-merge.sh` defaults a GitHub merge to `--squash` when the caller selects no method.
-- `bin/fm-fleet-sync.sh`'s branch pruning reasons about it explicitly, dropping the ancestry check on the grounds that pull requests in this fleet are squash-merged, so a merged branch is never an ancestor and such a check would prune nothing.
+- `bin/fm-fleet-sync.sh`'s branch pruning reasons about it explicitly, dropping the ancestry check on the grounds that pull requests in this team are squash-merged, so a merged branch is never an ancestor and such a check would prune nothing.
 - `bin/fm-teardown.sh`'s landed-work test accepts content present in the default branch precisely because a squash collapses the branch's commits and per-commit patch identities stop matching.
-- `bin/fm-ff-lib.sh` reconciles a clean secondmate divergence through a three-way tree proof, as happens after an upstream squash merge.
+- `bin/fm-ff-lib.sh` reconciles a clean Project Director divergence through a three-way tree proof, as happens after an upstream squash merge.
 
 It appears nowhere in the registry.
-A property that four mechanisms depend on, across pruning, teardown safety, merging, and secondmate convergence, and that no project has ever declared, is not a Gerrit concept arriving with Gerrit.
+A property that four mechanisms depend on, across pruning, teardown safety, merging, and Project Director convergence, and that no project has ever declared, is not a Gerrit concept arriving with Gerrit.
 It is an existing axis that has been pinned to one value by assumption for long enough to become invisible.
 That it survived being invisible says how rarely it varies, not where it belongs.
 
@@ -166,7 +166,7 @@ The origin URL already selects which tool to call, the tool then declares its ow
 Be precise about what that removes and what it does not.
 It removes the per-project declaration, which is the part capable of disagreeing with reality.
 It does not remove the mapping, because something must still get from a remote URL to the right tool before any tool can be asked anything, and that something is Firstmate.
-The question is therefore not whether Firstmate holds forge knowledge, since it does either way, but whether it holds one thin host-pattern mapping for the whole fleet or one annotation per project.
+The question is therefore not whether Firstmate holds forge knowledge, since it does either way, but whether it holds one thin host-pattern mapping for the whole team or one annotation per project.
 
 Framed that way the mapping has a real advantage, for a reason that has nothing to do with Gerrit.
 A host pattern is written once and is then either wrong for every project on that host or right for every project on it, which is a failure mode that announces itself on first use.
@@ -218,7 +218,7 @@ This is a property of Gerrit and no amount of tooling changes it.
 Every mechanism that reasons about a remote branch therefore has no counterpart here - the gone-upstream prune in `bin/fm-fleet-sync.sh`, the remote-reachability leg of `bin/fm-teardown.sh`'s landed-work test, and the `refs/pull/<n>/head` fetch in `bin/fm-review-diff.sh`.
 There is no separate namespace either, because there are no forks, so the change is the only remote artifact the work ever has.
 The teardown test and the review diff each already have a fallback that reasons about content or about the local branch, and on Gerrit the fallback is not a fallback, it is the only path.
-The prune has no fallback at all: a `refs/for/<branch>` push creates no upstream tracking ref, so nothing ever reads `[gone]`, the prune never fires, and ship branches accumulate locally after teardown.
+The prune has no fallback at all: a `refs/for/<branch>` push creates no upstream tracking ref, so nothing ever reads `[gone]`, the prune never fires, and Builder branches accumulate locally after teardown.
 That raises the stakes on the content leg of the landed-work test specifically, since it becomes the sole proof that unlanded work is not about to be discarded.
 This is also a property of Gerrit.
 
@@ -330,7 +330,7 @@ It removes one caller of the forge tool's publication mechanics rather than the 
 
 The case against is a dependency the other two options do not carry.
 Gerrit support upstream lands when that project decides it lands, at whatever scope its maintainers accept, and a forge needed now cannot be scheduled against someone else's roadmap.
-A tool under our own hand ships when we ship it.
+A tool under our own hand ships when we deliver it.
 The honest reading is that the upstream route removes the publication duplication on the pipeline-driven path, not all of it, and pays for that with a schedule we do not control.
 
 **So: build ours now, contribute upstream later.**

@@ -36,7 +36,7 @@ Two readings here treat that differently, on purpose.
 
   The worker count and the state histogram cover every live runtime record,
   finished ids included, because a task with a meta file still on disk is still
-  on deck and still needs tearing down. That is the question those two figures
+  active and still needs tearing down. That is the question those two figures
   answer, and it is the same meaning bin/fm-inbox.sh gives "workers" in the human
   rendering. Neither can carry record free text: one is an integer, and the
   other's keys are the state verb folded through the closed set below.

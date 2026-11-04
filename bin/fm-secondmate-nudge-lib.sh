@@ -9,7 +9,7 @@
 # startup network bound's TERM followed by KILL, leaves the reread owed. Once
 # the attempt reports, the record stays owed when that attempt (or an earlier
 # one) changed the home's instructions or inherited material, or when
-# completion is unknown (transport 255 or a per-mate budget cut-off). An
+# completion is unknown (transport 255 or a per-Project-Director budget cut-off). An
 # attempt whose outcome proves nothing changed, with no earlier reread owed, is
 # written back to owed=0 when it failed or removed when it converged; an owed
 # reread survives unchanged retries until a successful send.

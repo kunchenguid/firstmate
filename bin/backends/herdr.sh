@@ -992,7 +992,7 @@ fm_backend_herdr_projection_target_tab_mutation_allowed() {  # <session> <tab-id
     return 0
   fi
   if [ "$foreground_rc" -eq 0 ]; then
-    echo "warning: herdr presentation cleanup target is the captain's active tab; refusing a close that cannot preserve focus" >&2
+    echo "warning: herdr presentation cleanup target is the user's active tab; refusing a close that cannot preserve focus" >&2
   else
     echo "warning: herdr presentation cleanup could not verify whether a foreground client is viewing the target tab; refusing a focus-unsafe mutation" >&2
   fi

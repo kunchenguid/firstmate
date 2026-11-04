@@ -58,10 +58,10 @@ mkdir -p "$XDG_CONFIG_HOME"
 write_spawn_brief() {  # <file> <id>
   cat > "$1" <<EOF
 # Task
-## Captain's intent
+## User's intent
 Exercise backend dispatch for $2.
 
-## Firstmate spec
+## Director spec
 Verify backend selection without changing task intent.
 EOF
 }

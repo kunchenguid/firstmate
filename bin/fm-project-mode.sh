@@ -100,9 +100,9 @@
 #   --forge do not make these checks.
 #
 # A registered `forge=gerrit` project reports yolo=off with an explicit stderr
-# refusal, on the captain's decision of 2026-09-15: a Gerrit Code-Review+2 is a
-# positive attributed claim that a named human approved, read by colleagues and
-# by any audit, and firstmate must not manufacture one. A registered
+# refusal, on the user's decision of 2026-09-15: a Gerrit Code-Review+2 is a
+# positive attributed claim that a named user approved, read by colleagues and
+# by any audit, and the Director must not manufacture one. A registered
 # `forge=external` project reports yolo=off the same way, because firstmate can
 # neither observe nor perform the review tool's approval or merge.
 #
@@ -300,7 +300,7 @@ if [ "$WANT_PR" -eq 1 ]; then
   exit 0
 fi
 if [ "$forge" = gerrit ] && [ "$yolo" = on ]; then
-  echo "refused: +yolo is registered for $NAME but yolo is inactive for forge=gerrit, so this reports yolo=off: a Gerrit Code-Review+2 is a positive attributed claim that a named human approved, and firstmate must not manufacture one (captain's decision 2026-09-15)" >&2
+  echo "refused: +yolo is registered for $NAME but yolo is inactive for forge=gerrit, so this reports yolo=off: a Gerrit Code-Review+2 is a positive attributed claim that a named user approved, and the Director must not manufacture one (user decision 2026-09-15)" >&2
   yolo=off
 fi
 if [ "$forge" = external ] && [ "$yolo" = on ]; then

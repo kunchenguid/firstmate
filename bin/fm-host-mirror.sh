@@ -50,7 +50,8 @@
 #
 # FEED. $STATE/.host-mirror-cursor holds "<seq>\t<engine session>": the newest
 # entry already fed to that engine conversation. `feed <session> new|resume`
-# prints what the next wake carries, one "[captain] ..." or "[main] ..." entry
+# prints what the next wake carries, one compatibility-tagged "[captain] ..."
+# or "[main] ..." entry
 # after another, oldest first, and fails, staging nothing, when the mirror is
 # missing, cannot be read, or fails the file validation below; otherwise it
 # stages the cursor it would reach in $STATE/.host-mirror-cursor.next, and

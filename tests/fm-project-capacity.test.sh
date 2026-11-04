@@ -30,10 +30,10 @@ write_brief() {  # <home> <id>
   mkdir -p "$1/data/$2"
   cat > "$1/data/$2/brief.md" <<EOF
 # Task
-## Captain's intent
+## User's intent
 Run the project's heavy suite for $2.
 
-## Firstmate spec
+## Director spec
 Exercise project capacity admission.
 
 # Definition of done
@@ -527,7 +527,7 @@ test_failed_spawn_after_admission_holds_no_place() {
   case_dir=$(make_case failed task-a task-b)
   home="$case_dir/home"
   declare_capacity "$home" "project 1"
-  printf '%s\n' '# Task' "## Captain's intent" '{TASK}' '' '## Firstmate spec' 'x' > "$home/data/task-a/brief.md"
+  printf '%s\n' '# Task' "## User's intent" '{TASK}' '' '## Director spec' 'x' > "$home/data/task-a/brief.md"
   out=$(spawn_ship "$case_dir" task-a "$case_dir/unused") || rc=$?
   [ "$rc" -ne 0 ] && [ "$rc" -ne "$DEFER_EXIT" ] || fail "an invalid brief did not fail after admission (exit $rc): $out"
   assert_contains "$out" "still contains {TASK}" "the spawn did not fail where expected"

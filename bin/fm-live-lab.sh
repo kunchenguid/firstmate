@@ -295,7 +295,7 @@ check_mirror() {
   entries=$(jq -rs '[.[].tag] | "captain=\(map(select(.=="captain"))|length) main=\(map(select(.=="main"))|length)"' \
     "$LAB/state/.host-mirror.jsonl" 2>/dev/null)
   case "$entries" in
-    captain=0*|*main=0|'') echo "fail mirror: the dialog mirror has no captain and main entry yet (${entries:-no mirror file})"; return 1 ;;
+    captain=0*|*main=0|'') echo "fail mirror: the dialog mirror has no user and main entry yet (${entries:-no mirror file})"; return 1 ;;
   esac
   echo "ok mirror: verified writer, check passed, $entries"
 }
@@ -320,7 +320,7 @@ check_extensions() {
 
 check_host() {
   local pid
-  fleet_nonempty || { echo "ok host: skipped (empty fleet arms no supervision)"; return 0; }
+  fleet_nonempty || { echo "ok host: skipped (an empty worker system arms no supervision)"; return 0; }
   pid=$(awk -F '\t' '$1=="host"{print $2; exit}' "$LAB/state/.supervision-host" 2>/dev/null)
   if [ "$EXPECT_HOST" = yes ]; then
     pid_alive "$pid" || { echo "fail host: no live supervision host (expected one)"; return 1; }
@@ -332,7 +332,7 @@ check_host() {
 }
 
 check_watcher() {
-  fleet_nonempty || { echo "ok watcher: skipped (empty fleet)"; return 0; }
+  fleet_nonempty || { echo "ok watcher: skipped (empty worker system)"; return 0; }
   # shellcheck disable=SC2016 # Expanded by the inner shell.
   if FM_HOME="$LAB" bash -c '. "$1/bin/fm-wake-lib.sh" && fm_watcher_healthy "$1/state" "$1/bin/fm-watch.sh" 300 "$1"' _ "$LAB" 2>/dev/null; then
     echo "ok watcher: live watcher with a fresh beacon"
@@ -464,7 +464,7 @@ spawn_worker() {
 import os, sys
 path = sys.argv[1]
 text = open(path, encoding="utf-8").read()
-text = text.replace("{TASK}", os.environ["TASK_TEXT"], 1).replace("{FIRSTMATE_SPEC}", os.environ["SPEC_TEXT"], 1)
+text = text.replace("{TASK}", os.environ["TASK_TEXT"], 1).replace("{DIRECTOR_SPEC}", os.environ["SPEC_TEXT"], 1)
 open(path, "w", encoding="utf-8").write(text)
 PY
   (cd "$LAB" && lab_run FM_HOME="$LAB" "$LAB/bin/fm-tasks-axi.sh" add "$WORKER_ID" "lab gated worker" --kind ship --repo notes) >/dev/null || return 1

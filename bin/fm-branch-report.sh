@@ -3,12 +3,12 @@
 # command twin of the Pi branch extension's fm_branch_report tool, for a
 # branch session run by the supervision host (docs/supervision-host.md).
 #
-# It records exactly one handled fleet event in the durable outcome store
+# It records exactly one handled team event in the durable outcome store
 # (bin/fm-branch-outcome.sh owns the store) and gives the host the receipt it
 # requires before it counts a wake handled. It enforces the same scoping the
 # Pi tool does (docs/pi-supervision-branch.md "Components and their owners"):
 # while the host's current turn claims signal or stale rows, only the tasks
-# those rows resolve to may be reported - `fleet` and any remembered task are
+# those rows resolve to may be reported - compatibility task id `fleet` and any remembered task are
 # refused before the store is touched - and a claim that names no task (a
 # heartbeat review, or a claimed heartbeat or check row) is unscoped. The
 # claimed task set comes from .pi/extensions/lib/fm-branch-dispatch.ts through
@@ -18,8 +18,9 @@
 #   fm-branch-report.sh --task <id|fleet> --verdict routine|captain \
 #       --summary <text> [--silent true|false] [--wake <text>]
 #
-# The verdict criteria are owned by bin/fm-branch-prompt.sh ("Verdict: routine
-# or captain"); --silent true is legal only for a routine outcome.
+# `fleet` and `captain` above are compatibility identifiers for the team task
+# and a user outcome. The verdict criteria are owned by bin/fm-branch-prompt.sh
+# ("Verdict: routine or user outcome"); --silent true is legal only for a routine outcome.
 # --wake defaults to the wake reason the host recorded for the turn.
 #
 # Only the branch actor of a live host turn may report: FM_SUPERVISION_ACTOR
@@ -29,9 +30,9 @@
 # store refused or failed (nothing recorded), 2 usage, 3 refused (actor, turn,
 # or scope).
 #
-# A non-silent row an away turn recorded after the captain returned (the turn
+# A non-silent row an away turn recorded after the user returned (the turn
 # record says posture=away, or predates the posture field, and no away record
-# remains: none, or quiet mode's, whose captain is present; bin/fm-afk-contract.sh
+# remains: none, or quiet mode's, whose user is present; bin/fm-afk-contract.sh
 # AWAY OR QUIET) may be missing from the return brief, so it is also queued
 # for MAIN as a durable check wake keyed supervision-host-return:<seq>,
 # presented by the drain until MAIN acknowledges it. bin/fm-afk-return.sh
@@ -39,7 +40,7 @@
 # append, so every visible row is in the brief, queued, or both: the relay does
 # not depend on the host surviving its turn or on its owner delivering the
 # host's own handback. Silent outcomes remain in the store but are not queued
-# or relayed as notes. An attended turn queues nothing: its captain rows reach
+# or relayed as notes. An attended turn queues nothing: its user-outcome rows reach
 # MAIN through the host's branch-outcome exit and the drain's BRANCH OUTCOMES
 # section (bin/fm-wake-drain.sh), and its routine rows stay in the store.
 set -u
@@ -81,7 +82,7 @@ SUMMARY=$(printf '%s' "$SUMMARY" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')
 case "$VERDICT" in routine|captain) ;; *) VERDICT= ;; esac
 case "$SILENT" in true|false) ;; *) usage ;; esac
 if [ -z "$TASK" ] || [ -z "$SUMMARY" ] || [ -z "$VERDICT" ]; then
-  echo "invalid report: --task, --verdict (routine|captain), and --summary are required" >&2
+  echo "invalid report: --task, --verdict (routine|captain, where captain is the user-outcome compatibility identifier), and --summary are required" >&2
   exit 2
 fi
 if [ "$SILENT" = true ] && [ "$VERDICT" != routine ]; then
@@ -110,7 +111,7 @@ if [ "$(turn_field unscoped)" != 1 ]; then
   case " $TASKS " in
     *" $TASK "*) ;;
     *)
-      refuse "the wake being handled (row $(turn_field rows)) names ${TASKS:-no task}, not $TASK; report only that task, never fleet or a task from memory"
+      refuse "the wake being handled (row $(turn_field rows)) names ${TASKS:-no task}, not $TASK; report only that task, never the compatibility team task 'fleet' or a task from memory"
       ;;
   esac
 fi
@@ -133,7 +134,7 @@ if [ "$SILENT" = true ]; then
 fi
 if [ "$(turn_field posture)" = attended ]; then
   if [ "$VERDICT" = captain ] && ! fm_afk_contract_away_present "$STATE"; then
-    printf 'recorded seq %s [captain]; MAIN processes it from its next drain\n' "$SEQ"
+    printf 'recorded seq %s [user outcome; compatibility verdict=captain]\n' "$SEQ"
   else
     printf 'recorded seq %s [%s]; it waits in the outcome store for MAIN\n' "$SEQ" "$VERDICT"
   fi
@@ -143,11 +144,11 @@ if ! fm_afk_contract_away_present "$STATE"; then
   # shellcheck source=bin/fm-wake-lib.sh
   . "$SCRIPT_DIR/fm-wake-lib.sh"
   if ! fm_wake_append check "supervision-host-return:$SEQ" \
-    "check: supervision-host outcome $SEQ for $TASK [$VERDICT] was recorded after the captain returned, so the return brief may not show it; relay it to the captain: $SUMMARY"; then
-    printf 'recorded seq %s [%s], but the captain has returned and its relay to MAIN could not be queued; the host hands this turn to MAIN\n' "$SEQ" "$VERDICT" >&2
+    "check: supervision-host outcome $SEQ for $TASK [$VERDICT] was recorded after the user returned, so the return brief may not show it; relay it to the user: $SUMMARY"; then
+    printf 'recorded seq %s [%s], but the user has returned and its relay to MAIN could not be queued; the host hands this turn to MAIN\n' "$SEQ" "$VERDICT" >&2
     exit 0
   fi
-  printf 'recorded seq %s [%s]; the captain has returned, so it is queued for MAIN to relay\n' "$SEQ" "$VERDICT"
+  printf 'recorded seq %s [%s]; the user has returned, so it is queued for MAIN to relay\n' "$SEQ" "$VERDICT"
   exit 0
 fi
 printf 'recorded seq %s [%s]; it waits in the outcome store for MAIN\n' "$SEQ" "$VERDICT"

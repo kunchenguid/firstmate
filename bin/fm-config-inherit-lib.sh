@@ -598,7 +598,7 @@ propagate_shared_captain_preferences() {
           restore_shared_captain_readonly "$dest" || true
           return 1
         fi
-        printf 'SECONDMATE_SYNC: secondmate home %s: quarantined %s drift at %s\n' "$dest_home" "$FM_SHARED_CAPTAIN_REL" "$quarantine"
+        printf 'SECONDMATE_SYNC: Project Director home %s: quarantined %s drift at %s\n' "$dest_home" "$FM_SHARED_CAPTAIN_REL" "$quarantine"
       fi
     elif ! shared_captain_dir_safe "$dest_parent"; then
       reason="unsafe destination directory"
@@ -641,7 +641,7 @@ propagate_shared_captain_preferences() {
     fi
     if quarantine=$(quarantine_shared_captain_dest "$dest" "$dest_parent"); then
       shared_captain_remove_inherited_receipt "$dest_parent" || true
-      printf 'SECONDMATE_SYNC: secondmate home %s: quarantined %s drift at %s\n' "$dest_home" "$FM_SHARED_CAPTAIN_REL" "$quarantine"
+      printf 'SECONDMATE_SYNC: Project Director home %s: quarantined %s drift at %s\n' "$dest_home" "$FM_SHARED_CAPTAIN_REL" "$quarantine"
       record_inheritable_config_result "$FM_SHARED_CAPTAIN_REL" pushed "mirrored primary absence after quarantining local copy at $quarantine"
     else
       reason="failed to quarantine destination before mirroring primary absence"

@@ -263,7 +263,7 @@ if [ "$CLAIM_LOCK_HELD" -ne 1 ]; then
   if ! fm_lock_try_acquire "$CLAIM_LOCK"; then
     sweep_pid=$(sed -n 's/^pid=//p' "$STATE/.startup-network.status" 2>/dev/null | tail -1)
     if [ -n "${FM_LOCK_HELD_PID:-}" ] && [ "$FM_LOCK_HELD_PID" = "$sweep_pid" ]; then
-      echo "error: the prior session's bounded startup sweep is finishing; operate read-only until it releases the fleet lock" >&2
+      echo "error: the prior session's bounded startup sweep is finishing; operate read-only until it releases the team lock" >&2
       exit 1
     fi
     fm_lock_acquire_wait "$CLAIM_LOCK"

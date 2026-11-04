@@ -33,7 +33,7 @@ GitHub Actions and Dependabot are exempt so their automation keeps working, but 
 ### The `full-ci` label
 
 CI on a pull request from an author without write access runs only the quick checks at first: `Test coverage guard`, `Repo invariants`, and the no-mistakes body check.
-Lint and the behavior suites wait for a maintainer, or the maintainer's fleet, to add the `full-ci` label when the pull request is picked up for review.
+Lint and the behavior suites wait for a maintainer, or the maintainer's review automation, to add the `full-ci` label when the pull request is picked up for review.
 Until then the `Full suite` check fails with a message naming the label; that is expected and needs no action from you.
 Adding the label runs the full suite, and every later push to that pull request runs it again.
 This keeps the repository's public CI within GitHub's limit on jobs running at once, while no-mistakes already reviews, tests, and lints your change locally.
@@ -71,9 +71,9 @@ Coordinate any workflow rollback with its required-check names so a retired chec
   `.agents/skills/` holds agent-loaded skills that assume a live firstmate home and carry `metadata.internal: true` so installers such as [skills.sh](https://skills.sh) hide them from discovery; `skills/` holds standalone, installer-facing public skills with no firstmate dependency (see the README's "Two-tier skill layout").
   `.claude/mods/` holds Claude Code mods, plugins whose behavior lives in one function-hooks module; each is reached through an `.agents/skills/<mod>` symlink because Claude Code adopts project plugins only from `.claude/skills`, carries no `SKILL.md` so every other harness's skill loader ignores that entry, and imports only files physically inside its own folder because Claude Code refuses anything else.
   A module may load through `CLAUDE_CODE_ENABLE_FUNCTION_HOOKS` or Claude Code's `tengu_plugin_hooks_modules` rollout flag, but the Calm mod activates only when `CLAUDE_CODE_ENABLE_FUNCTION_HOOKS` is exactly `1` and is otherwise a complete no-op; Firstmate never sets that variable in any settings file, and [`docs/calm.md`](docs/calm.md) owns the contract.
-  Everything personal to one captain's fleet (`.env`, `data/`, `state/`, `config/`, `projects/`, `.no-mistakes/`) is gitignored; never commit it.
+  Everything personal to one user's Firstmate home (`.env`, `data/`, `state/`, `config/`, `projects/`, `.no-mistakes/`) is gitignored; never commit it.
   The root `.tasks.toml` is tracked `tasks-axi` config for `data/backlog.md`; compatible `tasks-axi` is the default backend for routine backlog mutations, with the compatibility definition owned by [`docs/configuration.md`](docs/configuration.md) ("Backlog backend").
-  A local `config/backlog-backend=manual` opt-out forces firstmate's routine backlog updates to hand-editing and stays gitignored; validated secondmate handoffs still delegate through `tasks-axi mv`.
+  A local `config/backlog-backend=manual` opt-out forces Firstmate's routine backlog updates to hand-editing and stays gitignored; validated Project Director handoffs still delegate through `tasks-axi mv`.
   A local `config/backend` file stays gitignored; [runtime backend configuration](docs/configuration.md#runtime-backend-configbackend--fm_backend) owns supported values, selection, and limits.
   It does not make `data/` tracked.
 - Shell helpers in `bin/` are plain bash.
@@ -96,18 +96,18 @@ Coordinate any workflow rollback with its required-check names so a retired chec
 
 ## Development
 
-Tracked changes to firstmate itself - `AGENTS.md`, `README.md`, `CONTRIBUTING.md`, `.tasks.toml`, `.github/workflows/`, `bin/`, `.agents/skills/`, and `skills/` - ship through the `no-mistakes` pipeline on a feature branch and require an explicit merge approval.
+Tracked changes to Firstmate itself - `AGENTS.md`, `README.md`, `CONTRIBUTING.md`, `.tasks.toml`, `.github/workflows/`, `bin/`, `.agents/skills/`, and `skills/` - go through the `no-mistakes` pipeline on a feature branch and require an explicit merge approval.
 Before making any such change, load the agent-only `firstmate-coding-guidelines` skill (`.agents/skills/firstmate-coding-guidelines/SKILL.md`).
 It has the knowledge-placement rules that keep `AGENTS.md` from regrowing after each diet pass.
-Firstmate adds this skill's load line to firstmate-repo briefs by hand; the [coding-guidelines skill](.agents/skills/firstmate-coding-guidelines/SKILL.md#trigger-hygiene) owns the scaffold's detection limits.
-A crewmate picking up such a brief should load the skill even if the brief predates this instruction.
-When supervising live crewmates, keep firstmate's own long validation or build commands in the background so watcher wakes can still be handled.
-Crewmate validation follows the installed no-mistakes version's SKILL.md and live `axi` help instead of duplicating gate mechanics in firstmate docs.
-Firstmate's wrapper still matters: crewmates route every `ask-user` finding to firstmate, which applies `ask-user-authority`, and crewmates never pass `--yes` or `-y` because either flag bypasses that check and any required captain escalation.
+The Director adds this skill's load line to Firstmate-repository briefs by hand; the [coding-guidelines skill](.agents/skills/firstmate-coding-guidelines/SKILL.md#trigger-hygiene) owns the scaffold's detection limits.
+A Builder or Investigator picking up such a brief should load the skill even if the brief predates this instruction.
+When supervising live workers, keep the Director's own long validation or build commands in the background so watcher wakes can still be handled.
+Worker validation follows the installed no-mistakes version's SKILL.md and live `axi` help instead of duplicating gate mechanics in Firstmate docs.
+The Director's wrapper still matters: workers route every `ask-user` finding to the Director, which applies `ask-user-authority`, and workers never pass `--yes` or `-y` because either flag bypasses that check and any required user escalation.
 [`docs/configuration.md`](docs/configuration.md#gate-defaults-no-mistakesyaml) owns the tracked `.no-mistakes.yaml` gate defaults.
 The `firstmate-coding-guidelines` skill owns the rule that local no-mistakes Test stays intent-targeted rather than configuring `commands.test`.
 Verify the same way the gate does: reach for `bin/fm-test-run.sh` with the subjects you care about rather than chaining `bash tests/a.test.sh && bash tests/b.test.sh`, because a list of script paths gets the same bounded concurrency as `--changed`.
-The pipeline publishes that evidence itself, so never hand-commit `.no-mistakes/` paths onto a feature branch; CI rejects them as tracked personal fleet paths.
+The pipeline publishes that evidence itself, so never hand-commit `.no-mistakes/` paths onto a feature branch; CI rejects them as tracked personal runtime paths.
 
 Check and test the toolbelt before pushing:
 

@@ -383,7 +383,7 @@ EOF
   out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$ROOT/bin/fm-promote.sh" "$id" --mode direct-PR --yolo off 2>&1)
   status=$?
   [ "$status" -ne 0 ] || fail "promotion whose only Captain lines are fenced or indented examples should fail"
-  assert_contains "$out" "has no provenance-marked Captain's intent" \
+  assert_contains "$out" "has no provenance-marked user intent" \
     "fenced-example promotion did not refuse like an unmarked legacy brief"
   assert_absent "$home/data/$id/ship-instructions.md" \
     "fenced-example promotion published a fenced sample as captain intent"
@@ -418,10 +418,10 @@ test_promotion_keeps_the_recorded_base_branch() {
     printf 'window=fm-%s\nkind=scout\nworktree=/tmp/wt\nbase_branch=feature/hub\n' "$id" > "$meta"
     cat > "$home/data/$id/brief.md" <<'EOF'
 # Task
-## Captain's intent
+## User's intent
 Fix the hub bug.
 
-## Firstmate spec
+## Director spec
 Reproduce it first.
 
 # Setup
@@ -499,9 +499,9 @@ test_external_forge_is_direct_pr_only() {
   local out
   fm_forge_valid_for_mode external direct-PR test 2>/dev/null || fail "forge=external direct-PR was refused"
   out=$(fm_forge_valid_for_mode external no-mistakes test 2>&1) && fail "forge=external no-mistakes was accepted"
-  assert_contains "$out" "ships direct-PR only for now" "the no-mistakes refusal did not say why"
+  assert_contains "$out" "supports direct-PR only for now" "the no-mistakes refusal did not say why"
   out=$(fm_forge_valid_for_mode external local-only test 2>&1) && fail "forge=external local-only was accepted"
-  assert_contains "$out" "cannot ship mode=local-only" "the local-only refusal did not say why"
+  assert_contains "$out" "cannot use mode=local-only" "the local-only refusal did not say why"
   out=$(fm_base_branch_valid release direct-PR external test 2>&1) && fail "a base branch was accepted on forge=external"
   pass "forge=external composes with direct-PR only and refuses a base branch"
 }

@@ -27,7 +27,7 @@ bin/fm-procevent-lavish.sh arm <artifact.html>
 A worker-owned board uses `bin/fm-procevent-lavish.sh arm <artifact.html> --for <task-id>` and re-arms with its reply after each nonterminal round; the existing handled marker is the acknowledgement.
 Arm it once, then re-arm only when a round is actually waiting: arming again with nothing to acknowledge is refused.
 A terminal round is never re-armed: the board stays yours until you acknowledge it with `bin/fm-procevent.sh handled <source-id> <sequence>`, which retires it, and until then `retire` refuses the board too.
-Never arm a board that a live task hosts; follow the [crew-hosted Lavish board contract](../../../docs/configuration.md#crew-hosted-lavish-review-boards) for reply acceptance and older-version limits.
+Never arm a board that a live task hosts; follow the [worker-hosted Lavish board contract](../../../docs/configuration.md#worker-hosted-lavish-review-boards) for reply acceptance and older-version limits.
 
 Registering a source is not the same fact as listening to it.
 Lavish `arm` waits until this registration's listener is confirmed running and does not report ready without that evidence; other adapters still record the source for the watcher's next reconcile.
@@ -39,18 +39,18 @@ If the claim's recorded pid is alive under a different identity, `bin/fm-proceve
 If the runner itself died and its process group survives, `start` reports `already owned` and takes nothing back: verify whether the dead runner's polling child is still attached to the source, and once that group is empty the next reconcile reclaims the source on its own.
 Nothing signals that group automatically.
 
-When a source carries captain answers to captain-held tasks, bind it BEFORE arming it, so it can never produce an answer that has nowhere to go:
+When a source carries user answers to user-held tasks, bind it BEFORE arming it, so it can never produce an answer that has nowhere to go:
 
 ```sh
 bin/fm-captain-hold.sh bind <source-id>
 ```
 
-The runner then passes each captured result to that source's own adapter `answers` command and pipes the keyed answers it prints into the one keyed-answer intake, which owns every rule about what they mean; the keys are captain-held task ids.
+The runner then passes each captured result to that source's own adapter `answers` command and pipes the keyed answers it prints into the one keyed-answer intake, which owns every rule about what they mean; the keys are user-held task ids.
 This is generic across built-in adapters with an `answers` command, and the runner still wakes you to act on the result.
-External process-event bindings intentionally expose no answer operation and cannot feed the captain-answer intake.
+External process-event bindings intentionally expose no answer operation and cannot feed the user-answer intake.
 `captain-hold-lifecycle` owns when a binding is required and what the keys must be.
 
-A configured remote secondmate reply source is armed and handled through `bin/fm-procevent-remote-reply.sh`.
+A configured remote Project Director reply source is armed and handled through `bin/fm-procevent-remote-reply.sh`.
 Its header owns exact commands, while the adapter owns cursor continuity, validated deduplicated status ingest, path-confined document fetch, acknowledgement, and re-arming after a good delta.
 A continuity break is escalated once and stays unarmed until an operator deliberately rebases it.
 
@@ -70,7 +70,7 @@ bin/fm-procevent-when.sh arm <name> --condition <argv>... --action <argv>...
 
 [`docs/configuration.md`](../../../docs/configuration.md#process-to-event-sources-stateprocevent) owns the watch's operating contract, while the adapter's header and `--help` own the flags, cadence, trust binding, and outcome document.
 Eligibility is a firstmate judgment made BEFORE arming, because the scripts cannot classify an argv: the action must be safe, reversible, and exact (for example `no-mistakes update --beta`, whose own guard refuses while a validation run is active).
-Never bind an action that is destructive, irreversible, or security-sensitive, an action needing captain approval or any gate decision, or an action whose right form depends on what the condition finds - those keep the existing check-fires-then-firstmate-decides flow, for which a plain custom check or another adapter stays correct.
+Never bind an action that is destructive, irreversible, or security-sensitive, an action needing user approval or any gate decision, or an action whose right form depends on what the condition finds - those keep the existing check-fires-then-firstmate-decides flow, for which a plain custom check or another adapter stays correct.
 When in doubt, arm only the condition half as an ordinary check and keep the action as a wake-time decision.
 
 `bin/fm-procevent.sh --help`, `bin/fm-procevent-lavish.sh --help`, `bin/fm-procevent-when.sh --help`, `bin/fm-procevent-quota.sh --help`, and `bin/fm-procevent-remote-reply.sh --help` own the exact commands and flags.
@@ -107,10 +107,10 @@ Two rules the commands cannot enforce for you:
   Consume a Lavish capture with `bin/fm-procevent-lavish.sh read <result-file>` rather than grepping the raw file: that command reports declared and presented item counts plus a completeness verdict, enumerates every captured queued item while retaining supplied element identity, and surfaces a `tag=message` freeform message as its own field, labeling it as session-ending only when the session ended.
   `answers` remains the keyed-choice extractor and never treats freeform prose as a decision key.
   A `feedback` result can still be the last one a review ever produces, so never assume another wake is coming just because the state is not `ended`.
-The crew-hosted recovery ordering and arm-and-acknowledge rule are owned by the [crew-hosted Lavish board contract](../../../docs/configuration.md#crew-hosted-lavish-review-boards); `bin/fm-brief.sh` emits its instruction at the point of use.
+The worker-hosted recovery ordering and arm-and-acknowledge rule are owned by the [worker-hosted Lavish board contract](../../../docs/configuration.md#worker-hosted-lavish-review-boards); `bin/fm-brief.sh` emits its instruction at the point of use.
 : A routine no-op an adapter positively identifies never becomes a firstmate wake - it is recorded as handled and stays silent, so you never see it.
   For an ordinary firstmate-owned Lavish source that is an ended session carrying nothing, or `browser_disconnected` (classified `disconnected`): a closed review window that still has an open session.
-  A task-owned empty terminal round instead reaches its owner's steering inbox for conclusion, as the crew-hosted contract requires.
+  A task-owned empty terminal round instead reaches its owner's steering inbox for conclusion, as the worker-hosted contract requires.
   A board close carrying a real answer, and every other result, still wakes its owner unchanged.
   Never read the absence of a wake as proof a review is still open; ask the source, not the queue.
 : A Lavish wake whose source id matches `bin/fm-procevent-lavish.sh source-id "$(bin/fm-bearings-board.sh path)"` is a bearings board result; load the `bearings` skill's board-wake handling regardless of which answer kinds the result contains.
@@ -153,7 +153,7 @@ A result lost after that clearing and before the runner reads the process output
 The remote-reply adapter removes that particular pre-capture window by never consuming its source, but it cannot recover bytes truly lost from the remote log itself.
 Say these boundaries plainly wherever the behavior is described.
 
-## Talking to the captain about it
+## Talking to the user about it
 
 A wake is not news by itself.
 Report what the source actually produced and what it changes, never the event line, the result path, or the runner.
