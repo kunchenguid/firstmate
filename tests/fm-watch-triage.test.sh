@@ -2180,6 +2180,29 @@ test_unreadable_status_reports_once_per_file_state() {
   pass "unreadable status reports are bounded without advancing classification"
 }
 
+test_reported_status_survives_device_renumbering() {
+  local dir status_file marker reported remounted replaced
+  dir=$(make_case reported-remount)
+  status_file="$dir/task.status"; marker="$dir/.seen-task_status"
+  printf 'working: unchanged status\n' > "$status_file"
+  reported=$(status_observed_signature "$status_file" 28 'strong:11:42:9001') \
+    || fail "could not build the initial reported signature"
+  status_presentation_marker_report "$marker" "$reported" \
+    || fail "could not record the initial reported signature"
+
+  remounted=$(status_observed_signature "$status_file" 28 'strong:99:42:9001') \
+    || fail "could not build the remounted signature"
+  status_presentation_marker_reported_matches "$marker" "$remounted" \
+    || fail "device renumbering made an unchanged reported status read as new"
+
+  replaced=$(status_observed_signature "$status_file" 28 'strong:99:43:9002') \
+    || fail "could not build the replacement signature"
+  if status_presentation_marker_reported_matches "$marker" "$replaced"; then
+    fail "a replaced status file matched the earlier reported signature"
+  fi
+  pass "an unchanged reported status survives device renumbering while a replaced file reads as new"
+}
+
 test_permission_recovery_surfaces_preserved_status() {
   local dir state fakebin out status_file marker before_ident after_ident pid
   dir=$(make_case permission-recovery); state="$dir/state"; fakebin="$dir/fakebin"
@@ -5368,6 +5391,7 @@ fm_test_run \
   test_release_completion_survives_a_later_routine_append \
   test_routine_appends_after_a_classified_event_stay_absorbed \
   test_unreadable_status_reports_once_per_file_state \
+  test_reported_status_survives_device_renumbering \
   test_permission_recovery_surfaces_preserved_status \
   test_terminal_stale_surfaced \
   test_stale_terminal_status_overridden_by_active_run \
