@@ -8,7 +8,7 @@ Start with the directory layout, then use the setting reference for the behavior
 | What you want to configure | Start here |
 | --- | --- |
 | Firstmate's code, private files, or project location | [FM_HOME](#fm_home) and [operational home layout](#operational-home-layout-and-state) |
-| Task windows and worker tools | [Runtime backend](#runtime-backend-configbackend--fm_backend) and [harness support](#harness-support) |
+| Task windows and worker tools | [Runtime backend](#runtime-backend-configbackend--fm_backend), [hc worker placement on another machine](#hc-worker-placement-confighc-machine), and [harness support](#harness-support) |
 | Worker permissions, accounts, or environment | [Codex approval review](#codex-automatic-approval-review), [Claude permission mode](#claude-permission-mode-configclaude-permission-mode), [Codex permission mode](#codex-permission-mode-configcodex-permission-mode), [persistent managed-policy failover](#persistent-managed-policy-failover), [worker account pin](#worker-account-pin-configclaude-account-configpi-account), [several Claude accounts](#several-claude-accounts-configclaude-accounts), [worker tool exclusions](#worker-tool-exclusions-configcrew-exclude-tools), [worker launch environment](#worker-launch-environment-configlaunch-env-allowlist), and its [Orca environment source](#orca-environment-source-configlaunch-env-tmux-session) |
 | Backlog, preferences, and memory | [Backlog backend](#backlog-backend-taskstoml--configbacklog-backend), [captain preferences](#captain-preferences-datacaptainmd--datacaptain-sharedmd), [external memory tiers](#external-memory-tiers-memory-layering-section), [record export](#record-export-configrecord-export-root), and [startup memory budget](#startup-memory-budget-configstartup-memory-budget) |
 | Supervision and presentation | [Pi supervision branch](#pi-supervision-branch), [supervision host](#supervision-host-configsupervision-host), [Codex native Stop park](#codex-native-stop-park-configcodex-stop-park), [warm-cache compaction](#warm-cache-compaction-configwarm-compact), and [Calm preference](#calm-preference-configcalm) |
@@ -697,6 +697,28 @@ tern uses one home-tagged session named `fm-<hometag>` (or `FM_TERN_SESSION` in 
 The caller-facing endpoint is `<session-id>:<block-id>`; tab titles are `fm-<hometag>-<id>`; ids are 64-bit integers and must keep full precision.
 Test cleanup must use the guarded path in [`docs/tern-backend.md`](tern-backend.md#current-operation-and-safety) and only sessions named `fm-test-*`.
 `config/backend` is inherited into secondmate homes under the primary-authoritative contract owned by [`secondmate-provisioning`](../.agents/skills/secondmate-provisioning/SKILL.md).
+
+### hc worker placement (config/hc-machine)
+
+The optional local, gitignored `config/hc-machine` file starts this home's hc ship and scout workers on another machine its hc core already reaches, instead of on this one.
+With the file absent nothing changes.
+It applies only to spawns that resolve the `hc` backend; every other backend ignores it, and secondmates are never placed.
+[`hc-backend.md`](hc-backend.md#workers-on-another-machine) owns what a placed worker needs on that machine, how it runs, and its limits.
+
+The first non-comment line is the machine's name as `hc machine ls` shows it; the other lines are one key and its value, with `#` starting a comment:
+
+```text
+laptop                        # the hc machine new ship and scout terminals start on
+firstmate-as firstmate-host   # required: what that machine's own hc calls this machine
+projects /Users/me/code       # required: the absolute directory there holding one clone per project name
+claude-config /Users/me/.claude-work   # optional: the Claude config directory a worker there uses
+```
+
+Each key may appear once.
+A missing required key, an unknown key, a relative or `..`-carrying path, or a machine line with spaces makes the whole file invalid, and every hc ship or scout spawn then refuses rather than starting here.
+
+`fm-spawn.sh --hc-machine <name>` places one task explicitly and must name the machine the file declares; `--hc-machine local` keeps one task on this machine while the file exists.
+A placed task records `hc_machine=`, `hc_firstmate_as=`, and `hc_clone=` beside its hc endpoint fields, and every later step reads them.
 
 ## Away-mode supervisor backend (FM_SUPERVISOR_BACKEND / FM_SUPERVISOR_TARGET)
 

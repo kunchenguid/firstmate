@@ -78,6 +78,11 @@
 # local-only projects additionally accept work merged into the local default
 # branch (firstmate performs that merge after configured approval) as a fallback
 # for the common case where there is no remote at all.
+# A worktree placed on another hc machine (hc_machine= in meta,
+# docs/hc-backend.md "Workers on another machine") gets this same proof, every
+# git read running there through hc; a machine that cannot be reached refuses,
+# its terminal is closed before the second proof, and the worktree and branch
+# are removed there instead of returned to a pool.
 # Safety is proved again after task processes are reaped, before backlog-close
 # publication, branch deletion, or worktree return.
 # Scout tasks (kind=scout in meta) carve out of that check: their worktree is
@@ -1276,6 +1281,21 @@ else
   T=$FM_BACKEND_VALIDATED_TARGET
   [ "$BACKEND" != orca ] || T_ORCA=$T
 fi
+# Placement on another hc machine (the teardown_wt_git note above). The
+# endpoint validator already bound hc_machine= to the recorded terminal; the
+# clone the worktree belongs to must be recorded too, or nothing here could
+# remove the worktree after proving its work landed.
+TEARDOWN_HC_MACHINE=$(fm_meta_get "$META" hc_machine)
+TEARDOWN_HC_SESSION=
+TEARDOWN_HC_CLONE=
+if [ -n "$TEARDOWN_HC_MACHINE" ]; then
+  TEARDOWN_HC_SESSION=$(fm_meta_get "$META" hc_session)
+  TEARDOWN_HC_CLONE=$(fm_meta_get "$META" hc_clone)
+  if [ "$BACKEND" != hc ] || [ -z "$TEARDOWN_HC_SESSION" ] || [ -z "$TEARDOWN_HC_CLONE" ] || [ -z "$WT" ]; then
+    echo "REFUSED: task $ID records hc_machine=$TEARDOWN_HC_MACHINE without a complete hc placement (backend, hc_session, hc_clone, worktree); preserving task state." >&2
+    exit 1
+  fi
+fi
 # The recorded backend, including every sibling its adapter sources, has to
 # be readable before the first destructive step. --force does not override
 # this. A forced descendant is proved in validate_firstmate_home_children_removal.
@@ -1517,6 +1537,48 @@ meta_value() {
   fm_meta_get "$meta" "$key"
 }
 
+# A ship or scout placed on another hc machine (docs/hc-backend.md "Workers on
+# another machine") records hc_machine=, and its worktree= is a path on that
+# machine. Every landed-work read below goes through teardown_wt_git, which
+# runs the very same git command there through hc, so the proof and its
+# refusals are the local ones; exit 255 is a transport failure, which every
+# caller already reads as "cannot prove" and refuses on. Nothing reads such a
+# path on this machine's filesystem. TEARDOWN_HC_MACHINE, _SESSION, and _CLONE
+# are set where the task record is loaded, before any of these run.
+teardown_wt_git() {
+  if [ -n "$TEARDOWN_HC_MACHINE" ]; then
+    fm_backend_hc_remote_git "$TEARDOWN_HC_SESSION" "$TEARDOWN_HC_MACHINE" "$WT" "$@"
+  else
+    git -C "$WT" "$@"
+  fi
+}
+
+# Whether the task worktree exists: 0 present, 1 absent, 2 cannot tell (a
+# placed worktree whose machine cannot be reached).
+teardown_wt_present() {
+  local rc=0
+  if [ -n "$TEARDOWN_HC_MACHINE" ]; then
+    fm_backend_hc_remote_exec "$TEARDOWN_HC_SESSION" "$TEARDOWN_HC_MACHINE" 30 - test -d "$WT" >/dev/null 2>&1 || rc=$?
+    case "$rc" in
+      0) return 0 ;;
+      1) return 1 ;;
+      *) return 2 ;;
+    esac
+  fi
+  [ -d "$WT" ]
+}
+
+# The directory gh resolves a PR number against: the worktree itself, or for a
+# placed worktree this machine's clone of the same project (its origin was
+# matched to the placed clone's when the task was spawned).
+teardown_gh_dir() {
+  if [ -n "$TEARDOWN_HC_MACHINE" ]; then
+    printf '%s' "$PROJ"
+  else
+    printf '%s' "$WT"
+  fi
+}
+
 # Remove only Polytoken's firstmate-generated worktree wiring, as named by
 # fm_control_harness_wiring_paths. Its tracked hook and facet layers belong to
 # the project. Other harnesses retain their existing worktree-return cleanup.
@@ -1662,28 +1724,28 @@ pr_number_from_target() {
 
 ensure_commit_object() {
   local target=$1 commit=$2 n
-  git -C "$WT" cat-file -e "$commit^{commit}" 2>/dev/null && return 0
+  teardown_wt_git cat-file -e "$commit^{commit}" 2>/dev/null && return 0
   n=$(pr_number_from_target "$target") || return 1
-  git -C "$WT" remote get-url origin >/dev/null 2>&1 || return 1
-  git -C "$WT" fetch --quiet origin "refs/pull/$n/head" >/dev/null 2>&1 || return 1
-  git -C "$WT" cat-file -e "$commit^{commit}" 2>/dev/null
+  teardown_wt_git remote get-url origin >/dev/null 2>&1 || return 1
+  teardown_wt_git fetch --quiet origin "refs/pull/$n/head" >/dev/null 2>&1 || return 1
+  teardown_wt_git cat-file -e "$commit^{commit}" 2>/dev/null
 }
 
 patch_id_for_commit() {
   local commit=$1
   # Indentation can change semantics. Unsupported --verbatim yields no id,
   # so callers fall back to the content check or refuse, never ignore whitespace.
-  git -C "$WT" show --pretty=medium --no-ext-diff "$commit" 2>/dev/null \
+  teardown_wt_git show --pretty=medium --no-ext-diff "$commit" 2>/dev/null \
     | git patch-id --verbatim 2>/dev/null \
     | awk 'NR == 1 { print $1 }'
 }
 
 unpushed_patches_are_in_pr_head() {
   local pr_head=$1 current base pr_patch_ids commit patch_id unpushed
-  current=$(git -C "$WT" rev-parse --verify HEAD 2>/dev/null) || return 1
-  base=$(git -C "$WT" merge-base "$current" "$pr_head" 2>/dev/null) || return 1
+  current=$(teardown_wt_git rev-parse --verify HEAD 2>/dev/null) || return 1
+  base=$(teardown_wt_git merge-base "$current" "$pr_head" 2>/dev/null) || return 1
   pr_patch_ids=$(
-    git -C "$WT" log --format=%H "$base..$pr_head" -- 2>/dev/null \
+    teardown_wt_git log --format=%H "$base..$pr_head" -- 2>/dev/null \
       | while IFS= read -r commit; do
           patch_id_for_commit "$commit"
         done \
@@ -1691,7 +1753,7 @@ unpushed_patches_are_in_pr_head() {
       | sort -u
   ) || return 1
   [ -n "$pr_patch_ids" ] || return 1
-  unpushed=$(git -C "$WT" log --format=%H HEAD --not --exclude='no-mistakes/*' --remotes -- 2>/dev/null) || return 1
+  unpushed=$(teardown_wt_git log --format=%H HEAD --not --exclude='no-mistakes/*' --remotes -- 2>/dev/null) || return 1
   [ -n "$unpushed" ] || return 1
   while IFS= read -r commit; do
     [ -n "$commit" ] || continue
@@ -1715,7 +1777,7 @@ pr_is_merged() {
   if [ -n "$PR_URL" ]; then
     target=$PR_URL
   else
-    target=$(fm_pr_number_from_branch "$WT" "$branch") || return 1
+    target=$(fm_pr_number_from_branch "$(teardown_gh_dir)" "$branch") || return 1
   fi
   [ -n "$target" ] || return 1
   if fm_pr_url_parse "$target" && [ "$FM_PR_PROVIDER" = forgejo ]; then
@@ -1725,7 +1787,7 @@ pr_is_merged() {
     fm_pr_head_valid "$head" || return 1
     resolved_url=$FM_PR_URL
   else
-    view=$(cd "$WT" && gh pr view "$target" --json state,headRefOid,url -q '.state + "\t" + .headRefOid + "\t" + .url' 2>/dev/null) || return 1
+    view=$(cd "$(teardown_gh_dir)" && gh pr view "$target" --json state,headRefOid,url -q '.state + "\t" + .headRefOid + "\t" + .url' 2>/dev/null) || return 1
     state=${view%%$'\t'*}
     remainder=${view#*$'\t'}
     [ "$state" != "$view" ] || return 1
@@ -1739,8 +1801,8 @@ pr_is_merged() {
   fi
   [ -n "$head" ] || return 1
   ensure_commit_object "$target" "$head" || return 1
-  current=$(git -C "$WT" rev-parse --verify HEAD 2>/dev/null) || return 1
-  if git -C "$WT" merge-base --is-ancestor "$current" "$head" 2>/dev/null; then
+  current=$(teardown_wt_git rev-parse --verify HEAD 2>/dev/null) || return 1
+  if teardown_wt_git merge-base --is-ancestor "$current" "$head" 2>/dev/null; then
     landed=1
   elif unpushed_patches_are_in_pr_head "$head"; then
     landed=1
@@ -1766,22 +1828,28 @@ content_in_default() {
   local name=${BASE_BRANCH:-} ref default_tree merged_tree merge_status
   CONTENT_LANDED_PROOF_ERROR=
   [ -n "$name" ] || name=$(default_branch) || return 1
-  if git -C "$WT" remote get-url origin >/dev/null 2>&1; then
-    git -C "$WT" fetch --quiet origin "+refs/heads/$name:refs/remotes/origin/$name" >/dev/null 2>&1 || return 1
+  if teardown_wt_git remote get-url origin >/dev/null 2>&1; then
+    teardown_wt_git fetch --quiet origin "+refs/heads/$name:refs/remotes/origin/$name" >/dev/null 2>&1 || return 1
     ref="refs/remotes/origin/$name"
-  elif git -C "$WT" rev-parse --quiet --verify "refs/heads/$name" >/dev/null 2>&1; then
+  elif teardown_wt_git rev-parse --quiet --verify "refs/heads/$name" >/dev/null 2>&1; then
     ref="refs/heads/$name"
   else
     return 1
   fi
-  default_tree=$(git -C "$WT" rev-parse --quiet --verify "$ref^{tree}" 2>/dev/null) || return 1
+  default_tree=$(teardown_wt_git rev-parse --quiet --verify "$ref^{tree}" 2>/dev/null) || return 1
   [ -n "$default_tree" ] || return 1
-  merged_tree=$(git -C "$WT" merge-tree --write-tree "$ref" HEAD 2>/dev/null) || {
+  merged_tree=$(teardown_wt_git merge-tree --write-tree "$ref" HEAD 2>/dev/null) || {
     merge_status=$?
     case "$merge_status" in
       1) ;; # Git completed the merge and found conflicts.
       129) CONTENT_LANDED_PROOF_ERROR='git merge-tree --write-tree was rejected (Git 2.38 or newer required)' ;;
-      *) CONTENT_LANDED_PROOF_ERROR="git merge-tree --write-tree failed (Git exit $merge_status)" ;;
+      *)
+        if [ "$merge_status" = 255 ] && [ -n "$TEARDOWN_HC_MACHINE" ]; then
+          CONTENT_LANDED_PROOF_ERROR="hc machine '$TEARDOWN_HC_MACHINE' could not be reached to run git merge-tree there"
+        else
+          CONTENT_LANDED_PROOF_ERROR="git merge-tree --write-tree failed (Git exit $merge_status)"
+        fi
+        ;;
     esac
     return 1
   }
@@ -1966,6 +2034,9 @@ worktree_git_lock_path() {
 
 worktree_safety_blocked_by_lock() {
   local reason=$1 lock
+  # A placed worktree's index lock is on its own machine; a read that failed
+  # there refuses as it is, with no stale-lock repair from here.
+  [ -z "$TEARDOWN_HC_MACHINE" ] || return 1
   lock=$(worktree_git_lock_path "$WT") || lock=""
   [ -n "$lock" ] && [ -e "$lock" ] || return 1
   echo "teardown: cannot inspect worktree $WT for $reason while git lock $lock is present; checking whether the lock is stale" >&2
@@ -2122,14 +2193,25 @@ teardown_note_dirty_return() {
 }
 
 validate_worktree_teardown_safety() {
-  local dirty_raw dirty unpushed_raw unpushed DEFAULT unmerged_raw unmerged branch
-  [ -d "$WT" ] || return 0
+  local dirty_raw dirty unpushed_raw unpushed DEFAULT unmerged_raw unmerged branch present=0
   [ "$FORCE" != "--force" ] || return 0
   case "$KIND" in
     secondmate|scout) return 0 ;;
   esac
+  # A worktree that is gone holds nothing to lose; one whose machine cannot be
+  # reached proves nothing, so it refuses.
+  teardown_wt_present || present=$?
+  case "$present" in
+    0) ;;
+    1) return 0 ;;
+    *)
+      echo "REFUSED: cannot reach hc machine '$TEARDOWN_HC_MACHINE' to inspect worktree $WT for unlanded work." >&2
+      echo "Reconnect that machine (hc machine ls), or get the captain's explicit OK to discard, then --force." >&2
+      return 1
+      ;;
+  esac
 
-  if ! dirty_raw=$(git -C "$WT" status --porcelain --untracked-files=all 2>/dev/null); then
+  if ! dirty_raw=$(teardown_wt_git status --porcelain --untracked-files=all 2>/dev/null); then
     if worktree_safety_blocked_by_lock "uncommitted changes"; then
       return "$TEARDOWN_WORKTREE_SAFETY_LOCK_BLOCKED"
     fi
@@ -2139,7 +2221,7 @@ validate_worktree_teardown_safety() {
   fi
   dirty=$(printf '%s\n' "$dirty_raw" | grep -vE '^\?\? (\.claude/|\.fm-(grok|kimi)-turnend$)' || true)
 
-  if ! unpushed_raw=$(git -C "$WT" log --oneline HEAD --not --exclude='no-mistakes/*' --remotes -- 2>/dev/null); then
+  if ! unpushed_raw=$(teardown_wt_git log --oneline HEAD --not --exclude='no-mistakes/*' --remotes -- 2>/dev/null); then
     if worktree_safety_blocked_by_lock "commits not on a remote"; then
       return "$TEARDOWN_WORKTREE_SAFETY_LOCK_BLOCKED"
     fi
@@ -2151,7 +2233,7 @@ validate_worktree_teardown_safety() {
 
   if [ -n "$unpushed" ] && [ "$MODE" = local-only ]; then
     DEFAULT=$(default_branch) || { echo "REFUSED: cannot determine default branch for $PROJ; expected origin/HEAD, main, or master." >&2; return 1; }
-    if ! unmerged_raw=$(git -C "$WT" log --oneline HEAD --not "$DEFAULT" -- 2>/dev/null); then
+    if ! unmerged_raw=$(teardown_wt_git log --oneline HEAD --not "$DEFAULT" -- 2>/dev/null); then
       if worktree_safety_blocked_by_lock "commits not on $DEFAULT"; then
         return "$TEARDOWN_WORKTREE_SAFETY_LOCK_BLOCKED"
       fi
@@ -2175,7 +2257,7 @@ validate_worktree_teardown_safety() {
   elif [ -n "$unpushed" ]; then
     branch=${TEARDOWN_WORKTREE_BRANCH_FOR_SAFETY:-}
     if [ -z "$branch" ]; then
-      branch=$(git -C "$WT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)
+      branch=$(teardown_wt_git rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)
       TEARDOWN_WORKTREE_BRANCH_FOR_SAFETY=$branch
     fi
     if ! work_is_landed "$branch"; then
@@ -3725,7 +3807,11 @@ if [ "$BACKEND" = orca ] && [ "$KIND" != scout ] && [ "$KIND" != secondmate ] &&
   ORCA_PATH_MATCH_VERIFIED=1
 fi
 
-if teardown_owns_worktree && [ -d "$WT" ] && [ "$FORCE" != "--force" ]; then
+if [ -n "$TEARDOWN_HC_MACHINE" ]; then
+  # A placed worktree is proved on its own machine and never as a local
+  # directory; an unreachable machine refuses inside the proof.
+  validate_worktree_teardown_safety || exit 1
+elif teardown_owns_worktree && [ -d "$WT" ] && [ "$FORCE" != "--force" ]; then
   if validate_worktree_teardown_safety; then
     :
   else
@@ -3774,7 +3860,9 @@ fi
 # kind=secondmate: a secondmate home's own runtime lifecycle is owned by the
 # dedicated process-event and firstmate-home removal machinery further below,
 # not by task-worktree cleanup.
-if [ "$KIND" != secondmate ] && teardown_owns_worktree; then
+# A placed worktree's no-mistakes runs belong to its own machine's daemon,
+# which this machine cannot address.
+if [ "$KIND" != secondmate ] && teardown_owns_worktree && [ -z "$TEARDOWN_HC_MACHINE" ]; then
   conclude_task_no_mistakes_run "$WT"
 fi
 
@@ -3869,7 +3957,12 @@ if [ "$BACKEND" = herdr ]; then
   fi
 fi
 
-if [ "$KIND" != secondmate ] && teardown_owns_worktree; then
+if [ -n "$TEARDOWN_HC_MACHINE" ]; then
+  # Processes under a placed worktree run on its own machine; closing its
+  # terminal below stops the worker there, and only the local temp root is
+  # reaped here.
+  reap_task_worktree_processes tasktmp "$TASK_TMP"
+elif [ "$KIND" != secondmate ] && teardown_owns_worktree; then
   reap_task_worktree_processes worktree "$WT" "$TASK_TMP"
 elif [ "$KIND" != secondmate ]; then
   reap_task_worktree_processes tasktmp "$TASK_TMP"
@@ -3878,7 +3971,13 @@ fi
 # A worker can write after the first proof, including while its run is concluded
 # or its processes exit. Inspect the stopped copy before dropping its branch or
 # returning it on either backend path.
-if teardown_owns_worktree && [ -d "$WT" ] && [ "$FORCE" != "--force" ]; then
+if [ -n "$TEARDOWN_HC_MACHINE" ]; then
+  # Stop the placed worker first by closing its terminal there, so nothing
+  # can still be writing when its worktree is proved again.
+  fm_backend_kill "$BACKEND" "$T" "" "fm-$ID" \
+    || endpoint_close_refusal "$ID" "$BACKEND" "$T" 1 || exit 1
+  validate_worktree_teardown_safety || exit 1
+elif teardown_owns_worktree && [ -d "$WT" ] && [ "$FORCE" != "--force" ]; then
   validate_worktree_teardown_safety || exit 1
 fi
 
@@ -4000,6 +4099,14 @@ if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
       || { endpoint_close_refusal "$ID" "$BACKEND" "$T" 0; exit 1; }
   fi
   fm_backend_remove_worktree "$BACKEND" "$ORCA_WORKTREE_ID"
+elif [ -n "$TEARDOWN_HC_MACHINE" ]; then
+  # Both proofs above passed (or --force or a scout's scratch copy waived
+  # them) and its terminal is closed, so the placed worktree and its branch
+  # are removed on their own machine. Nothing of it is on this machine.
+  fm_backend_hc_remote_worktree_remove "$TEARDOWN_HC_SESSION" "$TEARDOWN_HC_MACHINE" "$TEARDOWN_HC_CLONE" "$WT" || {
+    echo "error: could not remove worktree $WT on hc machine '$TEARDOWN_HC_MACHINE'; teardown aborted with every record kept, so rerun it once that machine is reachable" >&2
+    exit 1
+  }
 elif [ "$KIND" != secondmate ] && ! teardown_owns_worktree; then
   :
 elif [ -d "$WT" ] && [ "$KIND" != secondmate ]; then

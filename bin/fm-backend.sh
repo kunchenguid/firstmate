@@ -702,7 +702,7 @@ fm_backend_worktree_identity_repair_hint() {  # <meta-file>
 
 fm_backend_validate_task_endpoint() {  # <meta-file> <task-id>
   local meta=$1 id=$2 backend_count backend window worktree project binding_count binding
-  local session pane recorded_session workspace tab terminal worktree_id surface rex_window rex_server thread block
+  local session pane recorded_session workspace tab terminal worktree_id surface rex_window rex_server thread block hc_machine hc_address
   FM_BACKEND_VALIDATED_BACKEND=
   FM_BACKEND_VALIDATED_TARGET=
   [ -f "$meta" ] && [ ! -L "$meta" ] || {
@@ -917,10 +917,24 @@ fm_backend_validate_task_endpoint() {  # <meta-file> <task-id>
       }
       recorded_session=$(fm_backend_meta_exact_value "$meta" hc_session) || recorded_session=
       terminal=$(fm_backend_meta_exact_value "$meta" hc_terminal) || terminal=
-      if [ -z "$recorded_session" ] || [ -z "$terminal" ] \
+      # A terminal placed on another machine reads <machine>/<address>
+      # (docs/hc-backend.md "Workers on another machine"); its machine must
+      # be the one the record's hc_machine= names, and a local terminal's
+      # record names none.
+      hc_machine=$(fm_backend_meta_exact_value "$meta" hc_machine) || hc_machine=
+      hc_address=$terminal
+      case "$terminal" in
+        */*)
+          hc_address=${terminal#*/}
+          [ "${terminal%%/*}" = "$hc_machine" ] || hc_address=
+          ;;
+        *) [ -z "$hc_machine" ] || hc_address= ;;
+      esac
+      if [ -z "$recorded_session" ] || [ -z "$terminal" ] || [ -z "$hc_address" ] \
         || [ "$window" != "$recorded_session:$terminal" ] \
         || ! fm_backend_endpoint_atom_valid "$recorded_session" \
-        || ! fm_backend_endpoint_atom_valid "$terminal"; then
+        || ! fm_backend_endpoint_atom_valid "$hc_address" \
+        || { [ -n "$hc_machine" ] && ! fm_backend_endpoint_atom_valid "$hc_machine"; }; then
         echo "REFUSED: hc endpoint metadata for task $id is malformed or inconsistent; preserving task state." >&2
         return 1
       fi

@@ -23,8 +23,11 @@
 # without group/other write access; new roots are created mode 0700.
 # Provision creates its session directory exclusively, never adopting one.
 #
-# The run command rejects caller-supplied --session/--socket flags, a leading
-# option before the hc subcommand, the `server` lifecycle subcommand (guarded
+# The run command rejects caller-supplied --session/--socket flags (except
+# `machine add --session <the lab's own name>`, which names the session on the
+# other machine, so a two-machine lab lands in a same-named lab session there
+# and never in that machine's default core), a leading option before the hc
+# subcommand, the `server` lifecycle subcommand (guarded
 # stop/teardown own it), and `connect` (raw protocol writes bypass the CLI
 # guards).
 #

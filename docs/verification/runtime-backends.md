@@ -3741,8 +3741,47 @@ Real Herdr.app exercise on 2026-11-02: the official herdr-app 0.1.11 bundle (sha
 
 `bin/fm-supervisor-target-lib.sh` now resolves `$HC_TERMINAL_ID`+`$HC_TERMINAL_SOCKET` to `<session>:<address>`/`hc`; `bin/fm-supervise-daemon.sh` still supports only `tmux herdr rex t3code` and refuses the resolved backend loudly.
 
+### Workers on another machine
+
+Measured on 2026-11-04 with `hc 0.1.16` on this machine (Linux 7.2) and `hc 0.1.18` on the other machine (macOS, Darwin 25.6.0), entirely inside lab sessions.
+This machine ran an `fm-hclab-*` core, and the other machine was added into a same-named lab session there with `bin/fm-hc-lab.sh run <s> machine add <ssh-target> --name laptop --session <s>`.
+That lab core was given its route back with `hc exec --on laptop -- hc machine add <ssh-target> --name <firstmate-as> --session <s>`.
+A scratch home here and a scratch directory there held everything else.
+Afterward no lab process, lab core state, or scratch file remained on either machine.
+
+| Probe | Result |
+| --- | --- |
+| `hc run --bg --json --on laptop --no-parent --outlive-parent --no-notify --cwd <dir> --label ...` | Printed `{"address":"laptop/t1",...}`; `get`, `read`, `send`, `keys`, `kill`, and `rm` through this core all accept `laptop/t1`. |
+| `hc ls --json --label firstmate.task=<label>` | Listed `laptop/t1`: a label query spans the added machines. |
+| `hc get --json laptop/t99` and `hc get --json nosuch/t1` | Exit 3 `not_found` for a missing terminal there; exit 4 `machine_unknown` for an unknown machine. |
+| `hc exec --on laptop -- sh -c 'exit 7'` | Exit 7; in `--json` form hc exits 0 and reports `code`, base64 `stdout`/`stderr`, `timed_out`, and `truncated`, and a `--timeout` overrun reports `code:null, timed_out:true`. |
+| `hc machine ls --json` | Each machine's `state` (`connecting` right after `add`, then `connected`) and its hc `version`. |
+| A lab session name of 23 characters, added on macOS | Refused there: `the socket path ... is too long here (105 bytes; this system allows 103)`, so a two-machine lab needs a short name. |
+
+A real `bin/fm-spawn.sh` then placed a Claude scout there, with `config/hc-machine` naming the scratch projects directory and a scratch, logged-out `claude-config`, so no model tokens were spent:
+
+| Step | Result |
+| --- | --- |
+| `bin/fm-spawn.sh e2e1 <project> --scout --backend hc --harness claude` | `spawned e2e1 harness=claude kind=scout window=<s>:laptop/t1 worktree=<scratch>/code/.fm-hc/<hometag>/e2e1`; meta carried `hc_terminal=laptop/t1`, `hc_machine=laptop`, `hc_firstmate_as`, and `hc_clone`. |
+| That machine's own core | Listed `t1` with `firstmate.task`, `firstmate.home`, `herdr.space`, and `herdr.tab`, with its cwd in the placed worktree. |
+| `git -C <worktree> worktree list` there | The worktree was a detached linked worktree of the scratch clone. |
+| Launch | The staged launch file had removed itself; Claude started there and showed its first-run screen. |
+| `fm_backend_agent_state` / `fm_backend_hc_current_path` | `alive` / the placed worktree path. |
+| `bin/fm-crew-state.sh e2e1` | `state: unknown · source: pane · harness state unavailable (unknown missing)`; with the machine removed from the lab core, `state: unknown · source: none · backend unreachable (hc endpoint state: unreadable)`. |
+| `bin/fm-control.sh e2e1 interrupt` | `interrupt-delivered e2e1 harness=claude backend=hc verified=endpoint cancel=unconfirmed`. |
+| `bin/fm-teardown.sh e2e1 --force` | Complete; the worktree there and its terminal were gone. |
+
+A placed ship record over a second worktree there then exercised teardown's landed-work proof:
+
+| State there | `bin/fm-teardown.sh ship1` |
+| --- | --- |
+| Machine removed from the lab core | `REFUSED: cannot reach hc machine 'laptop' to inspect worktree ... for unlanded work`; record and worktree kept. |
+| One unpushed commit | `REFUSED: worktree ... has work not on any remote and not landed`, naming the commit; record and worktree kept. |
+| Clean at `origin/master` | Complete; the worktree and its branch were removed there and the record retired. |
+
 ### Not verified
 
 - A spawn with a real harness rather than the stand-in.
+- A placed worker doing real work: the live placement run launched Claude against a logged-out configuration, so no turn ran there and its reporting back through hc was exercised only by the spawn's route-back proof.
 - `send --wait`'s `started`/`working` proof against a real status-reporting harness; the lab run covered a non-reporting shell, whose verdict falls to the composer screen.
 - Native `status.state` reported by a real harness launched through `bin/fm-spawn.sh`.
