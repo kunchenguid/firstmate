@@ -68,6 +68,9 @@ fm_lane_disk_build_root() {
     *) fm_lane_disk_warn "build-output root '$root' is not an absolute path; per-lane build output stays off"; return 1 ;;
   esac
   while [ "$root" != / ] && [ "${root%/}" != "$root" ]; do root=${root%/}; done
+  case "/$root/" in
+    */../*|*/./*) fm_lane_disk_warn "build-output root '$root' has a . or .. component; per-lane build output stays off"; return 1 ;;
+  esac
   [ "$root" != / ] || { fm_lane_disk_warn "build-output root must not be /; per-lane build output stays off"; return 1; }
   printf '%s\n' "$root"
 }

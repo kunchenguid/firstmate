@@ -1080,7 +1080,7 @@ A lane whose pool slot was reassigned to another task gets none of the cleanup.
 
 `config/build-output-root` holds one absolute directory on its first non-blank line that does not start with `#`.
 `FM_BUILD_OUTPUT_ROOT` overrides the file: an absolute path enables that root, `off`, `0`, `false`, or `no` disables it, and unset or empty defers to the file.
-A relative path warns and leaves the setting off.
+A relative path, or one with a `.` or `..` component, warns and leaves the setting off.
 Use a root dedicated to this home, because directories are named by task id alone.
 
 A fresh ship or scout spawn creates `<root>/<task-id>/`, records it as `build_output_dir=` in the task record, and exports these variables into the worker's launch:
@@ -1091,7 +1091,7 @@ A fresh ship or scout spawn creates `<root>/<task-id>/`, records it as `build_ou
 | `CARGO_TARGET_DIR` | `<root>/<task-id>/cargo-target` | [Cargo environment variables](https://doc.rust-lang.org/cargo/reference/environment-variables.html) |
 | `PYTHONPYCACHEPREFIX` | `<root>/<task-id>/pycache` | [Python command line and environment](https://docs.python.org/3/using/cmdline.html#envvar-PYTHONPYCACHEPREFIX) |
 
-SwiftPM's `--scratch-path`, Xcode's `-derivedDataPath`, and Gradle's `--project-cache-dir` have no documented environment variable, so the worker brief gains a `# Disk use` line naming those flags with `$FM_BUILD_OUTPUT_DIR`.
+SwiftPM's `--scratch-path`, Xcode's `-derivedDataPath`, and Gradle's `--project-cache-dir` have no documented environment variable, so the worker brief gains a `# Disk use` line naming those flags with `$FM_BUILD_OUTPUT_DIR` for when that variable is set.
 Bazel keeps its output base outside the checkout by default ([output directories](https://bazel.build/remote/output-directories)), so nothing is exported for it.
 A relaunch reuses the recorded directory and never resolves the setting again.
 Teardown removes only the recorded directory, and leaves a recorded path in place with a warning when it is not absolute, does not end in the task id, or equals or contains the task's local copy.

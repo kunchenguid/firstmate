@@ -109,7 +109,15 @@ test_build_output_root_env_override() {
   expect_code 0 "$status" "spawn with a relative FM_BUILD_OUTPUT_ROOT should still succeed: $out"
   assert_contains "$out" "is not an absolute path" "a relative root was not reported"
   assert_equals unset "$(launched_value CARGO_TARGET_DIR)" "a relative root still exported CARGO_TARGET_DIR"
-  pass "FM_BUILD_OUTPUT_ROOT overrides config/build-output-root, and a relative value stays off"
+
+  read_case "$(make_case env-dotdot lane-envdot-a1)"
+  out=$(FM_BUILD_OUTPUT_ROOT="$TMP_ROOT/x/../dot-root" spawn_ship lane-envdot-a1)
+  status=$?
+  expect_code 0 "$status" "spawn with a .. component in FM_BUILD_OUTPUT_ROOT should still succeed: $out"
+  assert_contains "$out" "has a . or .. component" "a root with a .. component was not reported"
+  assert_equals unset "$(launched_value CARGO_TARGET_DIR)" "a root with a .. component still exported CARGO_TARGET_DIR"
+  assert_absent "$TMP_ROOT/dot-root" "a root with a .. component still created a directory teardown would refuse to remove"
+  pass "FM_BUILD_OUTPUT_ROOT overrides config/build-output-root, and a relative or dotted value stays off"
 }
 
 test_build_output_root_is_off_by_default
