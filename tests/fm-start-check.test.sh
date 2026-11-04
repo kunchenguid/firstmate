@@ -401,8 +401,14 @@ test_held_lock_defers_without_waiting() {
 # stands in for bin/fm-on.sh plus the host's control verbs, whose own suites
 # (fm-remote-secondmate-omp, fm-remote-secondmate-lifecycle-e2e) drive them.
 arm_remote() {  # <id> [record-gen]
-  printf 'window=remote:%s\nharness=pi\nkind=secondmate\nremote_host=remote-mac\nremote_busy_gen=g900.1.1\n' "$1" > "$STATE/$1.meta"
+  printf 'window=remote:%s\nharness=pi\nkind=secondmate\nremote_host=remote-mac\nremote_busy_gen=g900.1.1\nremote_replies_offset=100\n' "$1" > "$STATE/$1.meta"
   printf '1000 %s pi\n' "${2:-g900.1.1}" > "$STATE/$1.start-pending"
+}
+
+# The reply mirror's cursor: how far into the host's reply log it has read.
+mirror_cursor() {  # <id> <offset>
+  mkdir -p "$STATE/remote-replies"
+  printf 'schema=fm-remote-reply-cursor.v1\noffset=%s\n' "$2" > "$STATE/remote-replies/$1.cursor"
 }
 
 # `observe <id> --start-proof` output: the observation line, then the host's
@@ -437,8 +443,8 @@ test_remote_secondmate_reads_route() {
   real=$(declare -f start_check_remote)
   # A busy observation proves; so does the host's own busy record for this
   # launch, which is all a mate that starts and settles silently leaves (the
-  # stock secondmate charter writes no status line at start); so does a
-  # parent-mirrored status write.
+  # stock secondmate charter writes no status line at start); so does a reply
+  # the mirror read past this launch's offset in the host's reply log.
   arm_remote early
   printf '1190 g900.1.1 pi\n' > "$STATE/early.start-pending"
   REMOTE_CALLS=0
@@ -453,8 +459,9 @@ test_remote_secondmate_reads_route() {
   [ ! -e "$STATE/r8.start-pending" ] || fail "a silently settled remote mate's busy record did not count as proof"
   arm_remote r5
   printf 'done: started\n' > "$STATE/r5.status"
+  mirror_cursor r5 140
   remote_tick "$(remote_proof idle)" alive '' 0 || fail "tick failed"; eval "$real"
-  [ ! -e "$STATE/r5.start-pending" ] || fail "a parent-side status write did not count as proof"
+  [ ! -e "$STATE/r5.start-pending" ] || fail "a reply mirrored past the launch offset did not count as proof"
   # A record from an earlier launch of the route is dropped without a wake.
   arm_remote r6 g800.1.1
   remote_tick "$(remote_proof idle)" alive "$PI_DIALOG" 0 || fail "tick failed"; eval "$real"
@@ -468,6 +475,21 @@ test_remote_secondmate_reads_route() {
   arm_remote r12
   remote_tick "$(remote_proof idle 'idle claude-hook' g900.1.1 session-end)" alive '' 0 || fail "tick failed"; eval "$real"
   [ -n "$START_CHECK_WAKE" ] || fail "a remote session-end record counted as proof"
+  # A reply the previous worker wrote before a relaunch, mirrored only after it,
+  # lands below this launch's offset: it neither clears the record early nor
+  # silences the replacement's wake when it is parked on a dialog.
+  arm_remote r13
+  printf '1190 g900.1.1 pi\n' > "$STATE/r13.start-pending"
+  printf 'done: old worker reply\n' >> "$STATE/r13.status"
+  mirror_cursor r13 100
+  remote_tick "$(remote_proof idle)" alive "$PI_DIALOG" 0 || fail "tick failed"; eval "$real"
+  [ -e "$STATE/r13.start-pending" ] || fail "a stale mirrored reply cleared the relaunch's start check early"
+  printf '1000 g900.1.1 pi\n' > "$STATE/r13.start-pending"
+  remote_tick "$(remote_proof idle)" alive "$PI_DIALOG" 0 || fail "tick failed"; eval "$real"
+  case "$START_CHECK_WAKE" in
+    "check: start r13: no start signal 200s after spawn (harness=pi; on screen on remote-mac: Pi project-trust dialog"*) ;;
+    *) fail "a stale mirrored reply silenced the replacement's dialog wake: $START_CHECK_WAKE" ;;
+  esac
   # The spawn seed, or only the observation line, proves nothing.
   arm_remote r2
   arm_remote z10
@@ -490,7 +512,7 @@ test_remote_secondmate_reads_route() {
     *"remote worker on remote-mac exited or its endpoint is gone before starting); recover it per secondmate-provisioning after: FM_HOME=$FM_HOME $SCRIPT_DIR/fm-crew-state.sh r4") ;;
     *) fail "a vanished remote endpoint was not sent to recovery: $START_CHECK_WAKE" ;;
   esac
-  [ "$(count_wakes)" = 5 ] || fail "expected one wake per unstarted remote launch"
+  [ "$(count_wakes)" = 6 ] || fail "expected one wake per unstarted remote launch"
   # The real route wrapper bounds observe, state, and capture independently.
   reset_state
   arm_remote r7

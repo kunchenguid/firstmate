@@ -68,6 +68,8 @@ NEW_MODEL=$(printf '%s\n' "$RELAUNCH_OUT" | sed -n 's/^model=//p' | tail -1)
 NEW_EFFORT=$(printf '%s\n' "$RELAUNCH_OUT" | sed -n 's/^effort=//p' | tail -1)
 REMOTE_BUSY_GEN=$(printf '%s\n' "$RELAUNCH_OUT" | sed -n 's/^busy_gen=//p' | tail -1)
 case "$REMOTE_BUSY_GEN" in *[!A-Za-z0-9._-]*) REMOTE_BUSY_GEN= ;; esac
+REMOTE_REPLIES_OFFSET=$(printf '%s\n' "$RELAUNCH_OUT" | sed -n 's/^replies_offset=//p' | tail -1)
+case "$REMOTE_REPLIES_OFFSET" in *[!0-9]*) REMOTE_REPLIES_OFFSET= ;; esac
 [ -n "$NEW_HARNESS" ] || die "the host's route confirmation carried no harness to record"
 
 META_LOCK=$(fm_meta_lock_path "$META") || die "metadata lock path is invalid for $ID"
@@ -81,6 +83,7 @@ META_TMP=$(mktemp "$STATE/.fm-remote-relaunch-meta.XXXXXX") || {
   printf 'model=%s\n' "$NEW_MODEL"
   printf 'effort=%s\n' "$NEW_EFFORT"
   [ -z "$REMOTE_BUSY_GEN" ] || printf 'remote_busy_gen=%s\n' "$REMOTE_BUSY_GEN"
+  [ -z "$REMOTE_REPLIES_OFFSET" ] || printf 'remote_replies_offset=%s\n' "$REMOTE_REPLIES_OFFSET"
 } >> "$META_TMP"
 # Every other line is preserved in its original relative order after the
 # refreshed harness/model/effort. A pr= line's own identity region (pr_head=
@@ -91,7 +94,7 @@ META_TMP=$(mktemp "$STATE/.fm-remote-relaunch-meta.XXXXXX") || {
 # that already had one armed.
 while IFS= read -r line || [ -n "$line" ]; do
   case "$line" in
-    harness=*|model=*|effort=*|remote_busy_gen=*) ;;
+    harness=*|model=*|effort=*|remote_busy_gen=*|remote_replies_offset=*) ;;
     *) printf '%s\n' "$line" >> "$META_TMP" ;;
   esac
 done < "$META"

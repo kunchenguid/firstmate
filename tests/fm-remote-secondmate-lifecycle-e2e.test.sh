@@ -927,6 +927,14 @@ fi
 [ "$(cut -d' ' -f2- "$PARENT/state/ios.start-pending")" = "$expected_gen codex" ] \
   || fail "remote spawn did not arm the parent's start check: $(cat "$PARENT/state/ios.start-pending" 2>&1)"
 assert_absent "$REMOTE_HOME/state/parent-route/ios.start-pending" "the remote host armed its own start check"
+# Only replies past the host's reply-log size at this launch prove the start.
+ios_replies_size=0
+[ ! -f "$REMOTE_HOME/state/parent-replies.status" ] \
+  || ios_replies_size=$(wc -c < "$REMOTE_HOME/state/parent-replies.status" | tr -d ' ')
+ios_replies_offset=$(sed -n 's/^remote_replies_offset=//p' "$PARENT/state/ios.meta")
+case "$ios_replies_offset" in ''|*[!0-9]*) fail "parent metadata did not record the host's reply-log offset at launch" ;; esac
+[ "$ios_replies_offset" -le "$ios_replies_size" ] \
+  || fail "the recorded reply-log offset $ios_replies_offset is past the host's log ($ios_replies_size bytes)"
 # The start check reads the host's own busy record through observe's
 # start-proof mode; codex seeds no busy generation, so none is reported.
 [ "$(remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh observe ios --start-proof)" = "idle

@@ -1361,7 +1361,7 @@ spawn_remote_secondmate() {
   local remote_backend remote_target remote_harness remote_herdr_session registry_lock remote_lock remote_generation
   local remote_rex_session_id remote_rex_server remote_rex_ok
   local remote_traceparent remote_recorded_traceparent sm_primary_head sync_out sync_rc account_config
-  local remote_start_epoch remote_busy_gen
+  local remote_start_epoch remote_busy_gen remote_replies_offset
   local -a launch_args
   id=${POS[0]:-}
   fm_task_id_creation_valid "$id" || {
@@ -1587,6 +1587,8 @@ spawn_remote_secondmate() {
   remote_harness=$(printf '%s\n' "$out" | sed -n 's/^harness=//p' | tail -1)
   remote_busy_gen=$(printf '%s\n' "$out" | sed -n 's/^busy_gen=//p' | tail -1)
   case "$remote_busy_gen" in *[!A-Za-z0-9._-]*) remote_busy_gen= ;; esac
+  remote_replies_offset=$(printf '%s\n' "$out" | sed -n 's/^replies_offset=//p' | tail -1)
+  case "$remote_replies_offset" in *[!0-9]*) remote_replies_offset= ;; esac
   if [ "$remote_backend" != "$backend" ]; then
     fm_lock_release "$remote_lock" || true
     fm_lock_release "$registry_lock" || true
@@ -1672,6 +1674,7 @@ spawn_remote_secondmate() {
     echo "remote_target=$remote_target"
     [ -z "$remote_recorded_traceparent" ] || echo "traceparent=$remote_recorded_traceparent"
     [ -z "$remote_busy_gen" ] || echo "remote_busy_gen=$remote_busy_gen"
+    [ -z "$remote_replies_offset" ] || echo "remote_replies_offset=$remote_replies_offset"
   } >"$tmp"
   if ! fm_backlog_atomic_transition publish "$tmp" "$meta" "task record" "$STATE"; then
     if [ "$SPAWN_TASK_SET_LOCK_HELD" = 1 ]; then

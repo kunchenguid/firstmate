@@ -2851,10 +2851,22 @@ START_CHECK_WAKE=
 # bin/fm-remote-secondmate-control.sh verbs), as the secondmate liveness tick
 # does. watcher_waited keeps shutdown interruptible; fm_run_timed bounds each
 # route call. An unreachable host returns nonzero and is neither proof nor death.
-# 0 when <id> wrote a status line or completed a turn at or after <epoch>; for a
-# remote secondmate this is the parent-side mirror of its status, read locally.
-start_check_local_proof() {  # <id> <epoch>
-  local f m
+# 0 when <id> wrote a status line or completed a turn at or after <epoch>. A
+# remote secondmate's status reaches this home only through its reply mirror,
+# which can append a line the previous worker wrote long after a relaunch, so
+# for it only reply bytes past the host's log offset at this launch
+# (remote_replies_offset) count: the mirror's cursor
+# (bin/fm-procevent-remote-reply.sh) must have read beyond it.
+start_check_local_proof() {  # <id> <epoch> <meta>
+  local f m boundary cursor
+  if [ -n "$(fm_meta_get "$3" remote_host)" ]; then
+    boundary=$(fm_meta_get "$3" remote_replies_offset)
+    cursor=$(sed -n 's/^offset=//p' "$STATE/remote-replies/$1.cursor" 2>/dev/null) || cursor=
+    case "$boundary" in ''|*[!0-9]*) return 1 ;; esac
+    case "$cursor" in ''|*[!0-9]*) return 1 ;; esac
+    [ "$cursor" -gt "$boundary" ]
+    return
+  fi
   for f in "$STATE/$1.status" "$STATE/$1.turn-ended"; do
     m=$(stat_mtime "$f") || continue
     [ "$m" -ge "$2" ] && return 0
@@ -2910,7 +2922,7 @@ start_check_verdict_proves() {  # <verdict> [record event]
 # a launch dialog.
 start_check_started() {  # <id> <meta> <epoch> [record-gen]
   local id=$1 meta=$2 epoch=$3 gen=${4:--} backend target tail
-  start_check_local_proof "$id" "$epoch" && return 0
+  start_check_local_proof "$id" "$epoch" "$meta" && return 0
   if [ -n "$(fm_meta_get "$meta" remote_host)" ]; then
     start_check_remote "$id" observe --start-proof || return 1
     [ "$(printf '%s\n' "$WATCHER_CAPTURE" | head -1)" = busy ] && return 0
@@ -3077,7 +3089,7 @@ start_check_tick() {  # [now-epoch], for deterministic clock callers
     # due and only while this poll's shared route budget lasts; until then only
     # the parent-side mirror can clear it, and the record waits for a later poll.
     if [ -n "$remote" ] && { [ "$((now - epoch))" -lt "$START_CHECK_SECS" ] || ! start_check_route_budget_left; }; then
-      if start_check_local_proof "$id" "$epoch"; then
+      if start_check_local_proof "$id" "$epoch" "$meta"; then
         rm -f -- "$f"
         fm_lock_release "$lock"
         triage_log "start check: $id started"
