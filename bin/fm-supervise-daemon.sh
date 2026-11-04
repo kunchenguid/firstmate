@@ -1973,7 +1973,8 @@ fm_super_main() {
 
   # Home-local supervision tuning (config/supervision-tuning): the daemon's
   # cadence and escalation knobs. Loaded before any knob below takes its
-  # shipped default, and inherited by the watcher child it starts.
+  # shipped default. The daemon re-loads its own copy each watcher cycle; the
+  # watcher child loads the file itself.
   # shellcheck source=bin/fm-supervision-tuning-lib.sh
   . "$FM_DAEMON_DIR/fm-supervision-tuning-lib.sh"
   fm_supervision_tuning_load
