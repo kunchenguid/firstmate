@@ -4006,8 +4006,8 @@ test_rejection_names_its_cause() {
         expected='task-a.check.sh (merge poll: the task record has no pr= line)'
         ;;
       key-after-pr)
-        printf 'control_relaunch_tx=tx-1\n' >> "$state/task-a.meta"
-        expected='task-a.check.sh (merge poll: the task record has key control_relaunch_tx after its pr= block)'
+        printf 'model=opus\n' >> "$state/task-a.meta"
+        expected='task-a.check.sh (merge poll: the task record has key model after its pr= block)'
         ;;
       replaced-check)
         cp "$state/task-a.check.sh" "$state/.swap"
