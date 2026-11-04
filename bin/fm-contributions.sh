@@ -201,12 +201,15 @@ REPLY_AGE=${FM_CONTRIBUTIONS_REPLY_AGE:-}
 RERAISE_INTERVAL=${FM_CONTRIBUTIONS_RERAISE_INTERVAL:-}
 if [ -z "$RERAISE_INTERVAL" ] && [ -f "$CONFIG/contribution-reraise-interval" ]; then
   RERAISE_INTERVAL=$(tr -d '[:space:]' < "$CONFIG/contribution-reraise-interval")
+  if [ -z "$RERAISE_INTERVAL" ]; then
+    RERAISE_INTERVAL=14400
+  fi
 fi
 if [ -z "$RERAISE_INTERVAL" ] && [ -n "$REPLY_AGE" ]; then
   RERAISE_INTERVAL=$REPLY_AGE
 fi
 if [ -z "$RERAISE_INTERVAL" ]; then
-  RERAISE_INTERVAL=14400
+  RERAISE_INTERVAL=0
 fi
 case "$RERAISE_INTERVAL" in
   0|off) RERAISE_INTERVAL=0 ;;
@@ -511,8 +514,13 @@ observe() { # canonical GitHub URL -> normalized JSON
       | (([$issue_comments[] | select(.user.login != $c.user.login and .created_at != null)
            | {author:.user.login, at:.created_at, source:(.html_url // ($c.html_url + "#issuecomment-" + (.id|tostring))), id:.id}]
          + [$inline_comments[] | select(.user.login != $c.user.login and .created_at != null)
+           | . as $ic | (.in_reply_to_id // .id) as $root
+           | select(($resolved | index($root)) == null)
+           | select(any($inline_comments[]; .user.login == $c.user.login and (.in_reply_to_id // .id) == $root and .id > $ic.id) | not)
            | {author:.user.login, at:.created_at, source:(.html_url // ($c.html_url + "#discussion_r" + (.id|tostring))), id:.id}]
-         + [$reviews[] | select(.user.login != $c.user.login and .submitted_at != null)
+         + [$reviews[] | select(.user.login != $c.user.login and .submitted_at != null and ((.body // "") != ""))
+           | . as $rev
+           | select(any($reviews[]; .user.login == $rev.user.login and (.state | IN("APPROVED","DISMISSED")) and .id > $rev.id) | not)
            | {author:.user.login, at:.submitted_at, source:(.html_url // ($c.html_url + "#pullrequestreview-" + (.id|tostring))), id:.id}])
          | sort_by([.at, .id]) | last // null) as $latest_external
       | ($c.pushed_at // $c.head.pushed_at // $c.head.repo.pushed_at
@@ -719,8 +727,9 @@ poll() {
                  and ($verdict == null or $verdict.source != $ext.source or $verdict.actor != "nobody")
              then true else false end) as $unanswered_cond
           | ($old.unanswered // null) as $old_un
-          | ($old_un.raised // null) as $last_raised
-          | (if $reraise_interval > 0 and $unanswered_cond then
+          | ([$old_un.raised, ($old.threads // [] | map(.raised)[])] | map(select(. != null)) | max) // null as $last_raised
+          | (if $reraise_interval > 0 and $unanswered_cond
+                 and (any($tracked[]; .source == $ext.source) | not) then
               ($epoch - ($ext.at | fromdateiso8601)) as $ext_age
               | ($ext_age >= $reraise_interval) as $waited
               | ($last_raised == null or ($epoch - ($last_raised | fromdateiso8601)) >= $reraise_interval) as $interval_passed
@@ -751,7 +760,8 @@ poll() {
             else del(.threads) end
           | if $unanswered_cond then
               .unanswered = {source:$ext.source, author:$ext.author, at:$ext.at,
-                             raised:(if ($pr_due_events | length) > 0 then $now else ($old_un.raised // null) end)}
+                             raised:(if (($pr_due_events | length) > 0 or ($due | length) > 0) then $now
+                                     else ($old_un.raised // null) end)}
             else del(.unanswered) end' > "$TMP/row.json"
       else
         error="forge observation unavailable: $why"

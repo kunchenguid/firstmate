@@ -11,6 +11,7 @@ HEAD_B=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
 new_home() {
   local home="$TMP_ROOT/$1"
   mkdir -p "$home/data" "$home/state" "$home/config" "$home/projects" "$home/fakebin" "$home/root/bin" "$home/wt" "$home/forge"
+  printf '14400\n' > "$home/config/contribution-reraise-interval"
   printf '# Backlog\n\n## Queued\n' > "$home/data/backlog.md"
   printf '#!/bin/sh\nexit 1\n' > "$home/fakebin/tmux"
   printf '#!/bin/sh\nexit 0\n' > "$home/fakebin/no-mistakes"
