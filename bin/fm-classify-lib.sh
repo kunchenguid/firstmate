@@ -302,8 +302,11 @@ status_is_captain_relevant() {
   [ -n "$line" ] || return 1
   status_line_verb "$line" verb
   _fm_status_route_key "$line" route_key
-  if [ -n "$route_key" ] && [ "$verb" != "${FM_CLASSIFY_RESOLVE_VERB:-$FM_CLASSIFY_RESOLVE_VERB_DEFAULT}" ]; then
-    return 0
+  if [ -n "$route_key" ]; then
+    case "$verb" in
+      "${FM_CLASSIFY_RESOLVE_VERB:-$FM_CLASSIFY_RESOLVE_VERB_DEFAULT}"|"${FM_CLASSIFY_CAPTAIN_HELD_VERB:-$FM_CLASSIFY_CAPTAIN_HELD_VERB_DEFAULT}") ;;
+      *) return 0 ;;
+    esac
   fi
   case "$verb" in
     working|resolved|captain-held|"${FM_CLASSIFY_PAUSED_VERB:-$FM_CLASSIFY_PAUSED_VERB_DEFAULT}")
@@ -580,9 +583,11 @@ status_event_recorded() {  # <status-file> <new-status-line>
 # statement of the status-fold contract that fixes this - a needs-decision/blocked
 # line OPENS a keyed decision, and an explicit resolution or a verified
 # captain-held backlog transfer referencing that key CLOSES it. A valid route-*
-# header key also opens on any verb and stays open until its own resolution.
-# Ship/scout terminal declarations supersede stale log decisions; a secondmate's
-# terminal event may describe other work and cannot close an unrelated decision.
+# header key also opens on any other verb, and only those two lines close it.
+# Ship/scout terminal declarations supersede stale log decisions but leave
+# route-* records standing, and a route-keyed terminal line opens its own key
+# on top of that pruned set; a secondmate's terminal event may describe other
+# work and cannot close an unrelated decision.
 # Who WRITES the closing line is owned elsewhere: the answering firstmate closes
 # at answer time through fm-send's --resolve-key (bin/fm-send.sh header), and a
 # worker self-closes only a blocker that cleared without an answer (bin/fm-brief.sh
@@ -773,7 +778,10 @@ _fm_status_route_key() {  # <status-line> <var>
     *) printf -v "$2" '%s' '' ;;
   esac
 }
-# Keep only the route-* records of a newline-separated "<key>\t..." set.
+# Keep only the route-* records of a newline-separated "<key>\t..." set. This
+# reads the folded key, so a route-* key a plain needs-decision/blocked line
+# stated after the colon survives a terminal line too, although only a key
+# before the colon opens on other verbs.
 _fm_decision_keep_route_keys() {  # <set>
   local line out=''
   while IFS= read -r line; do
@@ -885,15 +893,18 @@ _fm_decision_fold_line() {  # <open-set> <status-line> <resolve-verb> <held-verb
   esac
   status_line_verb "$line" verb
   _fm_status_route_key "$line" route_key
+  case "$unstamped" in
+    *:*)
+      case "$verb:$kind" in
+        done:ship|done:scout|failed:ship|failed:scout)
+          open=$(_fm_decision_keep_route_keys "$open")
+          [ -n "$route_key" ] || { printf '%s' "$open"; return 0; }
+          ;;
+      esac
+      ;;
+  esac
   key=$route_key
   if [ -z "$key" ]; then
-    case "$unstamped" in
-      *:*)
-        case "$verb:$kind" in
-          done:ship|done:scout|failed:ship|failed:scout) _fm_decision_keep_route_keys "$open"; return 0 ;;
-        esac
-        ;;
-    esac
     case "$verb" in
       needs-decision|blocked|"$resolve"|"$held") ;;
       *) printf '%s' "$open"; return 0 ;;
@@ -902,8 +913,8 @@ _fm_decision_fold_line() {  # <open-set> <status-line> <resolve-verb> <held-verb
   fi
   _fm_decision_key_transition_allowed "$key" "$(status_line_note "$line")" \
     || { printf '%s' "$open"; return 0; }
-  case "${route_key:+route}:$verb" in
-    :"$resolve"|:"$held"|route:"$resolve")
+  case "$verb" in
+    "$resolve"|"$held")
       open=$(_fm_decision_drop "$open" "$key")
       [ -n "$open" ] && open="${open}"$'\n'
       ;;
@@ -2545,8 +2556,7 @@ status_span_first_actionable_record() {  # <status-file> <start-offset> [record-
   while IFS= read -r line || [ -n "$line" ]; do
     line_number=$((line_number + 1))
     case "$line" in *[![:space:]]*) ;; *) continue ;; esac
-    _fm_status_route_key "$line" route_key
-    if [ -z "$route_key" ] && status_is_captain_held "$line"; then
+    if status_is_captain_held "$line"; then
       # A transfer closes the status-log decision and remains non-actionable to
       # stale classification. The side-band marker lets signal routing surface
       # the captain-owned hold without changing that established stale verdict.
@@ -2555,35 +2565,19 @@ status_span_first_actionable_record() {  # <status-file> <start-offset> [record-
     fi
     status_is_captain_relevant "$line" || continue
     verb=$(status_line_verb "$line")
-    if [ -n "$route_key" ]; then
-      if [ "$folded" -eq 0 ]; then
-        origins=$(_fm_status_open_decision_origins "$chunk_file" "$(_fm_status_kind "$f")") || { failed=1; break; }
-        folded=1
-      fi
-      live_line=$(while IFS=$(printf '\t') read -r _key _line; do
-        [ "$_key" = "$route_key" ] && { printf '%s' "$_line"; break; }
-      done <<EOF
-$origins
-EOF
-)
-      [ -n "$live_line" ] && [ "$line_number" -eq "$live_line" ] || continue
-      [ -n "$events" ] && events="${events} ; "
-      events="${events}${line}"
-      case "$verb" in
-        needs-decision|"${FM_CLASSIFY_CAPTAIN_HELD_VERB:-$FM_CLASSIFY_CAPTAIN_HELD_VERB_DEFAULT}") _fm_span_needs_decision=1 ;;
-      esac
-      rc=0
-      continue
-    fi
-    case "$verb" in
-      needs-decision|blocked)
-        key=$(_fm_decision_key "$line") || {
-          [ -n "$events" ] && events="${events} ; "
-          events="${events}${line}"
-          [ "$verb" = needs-decision ] && _fm_span_needs_decision=1
-          rc=0
-          continue
-        }
+    _fm_status_route_key "$line" route_key
+    case "${route_key:+route}:$verb" in
+      route:*|:needs-decision|:blocked)
+        key=$route_key
+        if [ -z "$key" ]; then
+          key=$(_fm_decision_key "$line") || {
+            [ -n "$events" ] && events="${events} ; "
+            events="${events}${line}"
+            [ "$verb" = needs-decision ] && _fm_span_needs_decision=1
+            rc=0
+            continue
+          }
+        fi
         _fm_decision_key_transition_allowed "$key" "$(status_line_note "$line")" || {
           [ -n "$events" ] && events="${events} ; "
           events="${events}reconciliation-required: ${line}"
