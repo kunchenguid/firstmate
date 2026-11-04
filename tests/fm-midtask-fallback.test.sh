@@ -584,6 +584,23 @@ invoke consider "$ID" --snapshot "$CASE/snap.json" --account work >/dev/null || 
 [ -s "$CASE/control-calls" ] || fail "matching account snapshot did not relaunch"
 ok "a snapshot is used only for the task's recorded account"
 
+begin pi-account-root
+write_rules true
+write_meta
+sed 's/^harness=claude$/harness=pi/; s|^model=claude-sonnet-5$|model=openai-codex/gpt-5.5|' "$CASE/state/$ID.meta" > "$CASE/state/$ID.meta.next"
+mv "$CASE/state/$ID.meta.next" "$CASE/state/$ID.meta"
+printf 'account=/pi/root\n' >> "$CASE/state/$ID.meta"
+jq '.rules[0].use[0] = {harness:"pi", provider:"codex", model:"openai-codex/gpt-5.5", effort:"high"}' \
+  "$CASE/config/crew-dispatch.json" > "$CASE/config/next.json"
+mv "$CASE/config/next.json" "$CASE/config/crew-dispatch.json"
+invoke bind "$ID" --rule 0 >/dev/null
+: > "$CASE/state/$ID.status"
+quota_doc "$CASE/snap.json" codex exhausted_now 0 grok through_reset 40 claude through_reset 40
+invoke consider "$ID" --snapshot "$CASE/snap.json" --account /pi/root >/dev/null 2>&1; rc=$?
+[ "$rc" -ne 0 ] || fail "snapshot for a pi worker's Pi root was accepted"
+assert_no_control "snapshot for a pi worker's Pi root"
+ok "a snapshot is refused for a pi worker whose account is a Pi root"
+
 begin_agy_scope shared-quota true
 scope_doc "$CASE/snap.json" claude_gpt exhausted_now
 invoke consider "$ID" --snapshot "$CASE/snap.json" >/dev/null || fail "shared_quota consider failed"

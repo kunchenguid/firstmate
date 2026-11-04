@@ -1952,6 +1952,7 @@ A completed switch is stored on the task record and reported as an outcome.
 Consider switches when a snapshot passed with `--snapshot` marks the current profile `exhausted_now`.
 A profile `quota_scope` matches alongside the model-wide rows, for the current profile and for each candidate.
 A task record with `account=` accepts a snapshot only with a matching `--account`.
+For `pi` and `pi-signed` workers `account=` is a Pi root, and consider refuses every snapshot for that task.
 With `shared_quota` set, consider ignores the snapshot.
 Firstmate writes that snapshot from `quota-axi --json` on a quota wake, or when a bound worker stops on exhausted credits and no quota wake is armed.
 A version-pinned adapter under `FM_LIMIT_MESSAGE_DIR` that matches captured pane text is the other trigger. No adapter ships.
