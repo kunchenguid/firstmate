@@ -654,6 +654,10 @@ STUB
   fm_write_meta "$home/state/old-paused.meta" "window=fm-old3" "kind=ship"
   fm_write_meta "$home/state/old-paused-paused.meta" "window=fm-old4" "kind=ship"
   fm_write_meta "$home/state/mate-working.meta" "window=remote:mate-1" "kind=secondmate"
+  # A gone target is proof of a stopped worker only on a backend that classifies
+  # its own agent state; on a capture-failure backend it is a failed read.
+  fm_write_meta "$home/state/gone-tmux.meta" "window=fm-g1" "kind=ship" "backend=tmux"
+  fm_write_meta "$home/state/gone-herdr.meta" "window=fm-g2" "kind=ship" "backend=herdr"
   [ "$(contract "$home" live-workers)" = 6 ] \
     || fail "live-workers counted the secondmate, a finished or paused record, or miscounted: $(contract "$home" live-workers)"
   out=$(contract "$home" enter --words 'keep the lane busy' 2>&1) || fail "entry failed: $out"
@@ -661,6 +665,13 @@ STUB
     || fail "entry did not take the live count as the cap: $(contract "$home" field spend_max_concurrent_workers)"
   assert_contains "$out" 'Spend cap: 6 concurrent workers.' 'the announcement carries the live count'
   assert_contains "$out" '  spend cap: 6 concurrent workers' 'the read-back carries the live count'
+
+  home=$(make_home spend-live-capture-backends)
+  for i in cmux orca zellij paseo tern hc; do
+    fm_write_meta "$home/state/gone-$i.meta" "window=fm-$i" "kind=ship" "backend=$i"
+  done
+  [ "$(contract "$home" live-workers)" = 6 ] \
+    || fail "a failed capture on cmux/orca/zellij/paseo/tern/hc dropped a running worker: $(contract "$home" live-workers)"
 
   home=$(make_home spend-live-below)
   fm_write_meta "$home/state/task-1-working.meta" "window=fm-task-1" "kind=ship"

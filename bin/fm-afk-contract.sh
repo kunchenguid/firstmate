@@ -195,7 +195,8 @@ fm_afk_contract_present() {  # [state-dir]
 # persistent home rather than spend, and whose bin/fm-crew-state.sh reading is
 # not provably idle. A finished, paused, parked, blocked, or failed reading
 # spends nothing, and so does an unknown one that positively names a gone
-# endpoint (worktree gone, backend target gone). Every other unknown - an
+# endpoint (worktree gone, or backend target gone on a backend that classifies
+# its own agent state: tmux, herdr, rex, t3code). Every other unknown - an
 # unreachable endpoint, a read error, or a read cut off by the time bound
 # below - counts, so the cap errs toward refusing a spawn rather than
 # admitting one on an uncertain count. The reads share one total deadline
@@ -221,7 +222,16 @@ fm_afk_contract_live_ordinary_workers() {  # [state-dir]
     'state: working '*) ;;
     'state: unknown '*)
       case "$reading" in
-      *'worktree gone'* | *'backend target gone'*) continue ;;
+      *'worktree gone'*) continue ;;
+      *'backend target gone'*)
+        # Only the backends fm-crew-state.sh classifies by their own agent state
+        # report a gone target as positive evidence; the capture-failure
+        # backends (cmux, orca, zellij, paseo, tern, hc) print the same text
+        # when a screen read merely failed, so their worker stays counted.
+        case "$(grep '^backend=' "$meta" 2>/dev/null | tail -1 | cut -d= -f2-)" in
+        '' | tmux | herdr | rex | t3code) continue ;;
+        esac
+        ;;
       esac
       ;;
     'state: '*) continue ;;
