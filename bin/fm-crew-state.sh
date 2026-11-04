@@ -1561,10 +1561,9 @@ if [ "$HAVE_RUN" = 1 ]; then
   # do working runs and parked gates.
   case "$RUN_STATE" in
     done|failed)
-      case "$RUN_STATUS" in
-        ci|running|fixing|awaiting_approval|fix_review) ;;
-        *) emit_worker_state_if_current proven-only || true ;;
-      esac
+      if [ "$RUN_SOURCE" = coarse ] || ! fm_nm_run_is_active "$RUN_OUT"; then
+        emit_worker_state_if_current proven-only || true
+      fi
       ;;
   esac
 

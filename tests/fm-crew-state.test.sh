@@ -1319,6 +1319,15 @@ EOF
   assert_contains "$out" "checks green" "the live run's green check evidence remains visible"
   assert_not_contains "$out" "worker deliberately stood down" \
     "the hold must not mask a live run's checks-green done verdict"
+  local run_status
+  for run_status in pending '""'; do
+    FM_FAKE_AXI_STATUS="$(run_ci_monitoring fm/feat-held-green | sed "s/^  status: running$/  status: $run_status/")"
+    out=$(run_crew_state "$d" feat-held-green)
+    assert_contains "$out" "state: done" "a live $run_status-status checks-green run remains done despite the hold record"
+    assert_contains "$out" "https://github.com/o/r/pull/2" "the live $run_status-status run keeps its PR link"
+    assert_not_contains "$out" "worker deliberately stood down" \
+      "the hold must not mask a live $run_status-status run's checks-green done verdict"
+  done
   pass "a stood-down record does not override a live checks-green done"
 }
 
