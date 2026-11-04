@@ -135,7 +135,7 @@ seed_secondmate_home() {
   esac
   mkdir -p "$home/bin" "$home/data" "$home/state" "$home/config" "$home/projects"
   printf '# Firstmate\n' > "$home/AGENTS.md"
-  printf 'charter\n' > "$home/data/charter.md"
+  printf 'standalone secondmate charter body\n' > "$home/data/charter.md"
   printf '%s\n' "$id" > "$home/.fm-secondmate-home"
 }
 
@@ -682,10 +682,11 @@ test_claude_spawn_pretrusts_its_worktree_and_reaches_the_brief() {
 # nothing was registered and the pane stopped on the dialog before it read its
 # charter.
 test_secondmate_standalone_clone_home_is_trusted() {
-  local case_dir home out launch doorbell record
+  local case_dir home home_abs out launch doorbell record record_body overlay
   case_dir="$TMP_ROOT/sm-clone-spawn"
   home="$case_dir/fm-homes/nomistakes-n1"
   seed_secondmate_home "$home" nomistakes-n1 clone
+  home_abs=$(cd "$home" && pwd -P)
   out=$(spawn_secondmate_claude "$case_dir" "$home" nomistakes-n1)
   expect_code 0 $? "a claude secondmate spawn into a standalone-clone home must succeed: $out"
   assert_trusted "$case_dir/claude-config/.claude.json" "$home" \
@@ -699,8 +700,14 @@ test_secondmate_standalone_clone_home_is_trusted() {
   [ -n "$record" ] || fail "the secondmate launch command did not carry a brief doorbell"
   [ "$(printf '%s' "$doorbell" | FM_STATE_OVERRIDE="$home/state" "$ROOT/bin/fm-operational-input.sh" doorbell-kind)" = launch-brief ] \
     || fail "the secondmate's doorbell did not name a brief record in its home"
-  [ "$(printf '%s' "$doorbell" | FM_STATE_OVERRIDE="$home/state" "$ROOT/bin/fm-operational-input.sh" open "$record")" = "$(cat "$home/data/charter.md")" ] \
-    || fail "the secondmate could not read its charter from the record"
+  record_body=$(printf '%s' "$doorbell" | FM_STATE_OVERRIDE="$home/state" "$ROOT/bin/fm-operational-input.sh" open "$record")
+  overlay="$case_dir/primary/data/nomistakes-n1/secondmate-launch-brief.md"
+  [ "$record_body" = "$(cat "$overlay")" ] \
+    || fail "the secondmate record did not deliver the launch overlay"
+  assert_contains "$record_body" "Your charter is $home_abs/data/charter.md" \
+    "the secondmate record did not name the home's own charter"
+  assert_contains "$record_body" "standalone secondmate charter body" \
+    "the secondmate could not read its charter from the record"
   # The pane must read the SAME store the registration wrote, or the trust would
   # land somewhere it never looks and the dialog would appear anyway.
   assert_grep "CLAUDE_CONFIG_DIR='$case_dir/claude-config'" "$case_dir/launch.log" \
