@@ -4195,7 +4195,11 @@ fi
 # too: a finished scout or local-only ship releases its place, so the worker
 # being replaced no longer necessarily holds one, and the check excludes this
 # task's own record so a relaunch of a live worker never blocks itself. A
-# secondmate is not a worker.
+# secondmate is not a worker. The two pieces this change adds on the default
+# path are opt-in: the shared Treehouse project lock on a relaunch and the
+# `working: spawn admitted` status line run only once the home declares project
+# capacity at all (SPAWN_PROJECT_CAPACITY_ANY), so an undeclared home behaves
+# exactly as main did.
 SPAWN_PROJECT_CAPACITY=
 SPAWN_PROJECT_CAPACITY_ANY=
 if [ "$KIND" != secondmate ]; then
@@ -4211,7 +4215,7 @@ if [ "$KIND" != secondmate ]; then
   SPAWN_PROJECT_CAPACITY_ANY=$FM_PROJECT_CAPACITY_ANY
 fi
 if [ "$KIND" != secondmate ] &&
-  { [ "$BACKEND" != orca ] || [ -n "$SPAWN_PROJECT_CAPACITY_ANY" ]; }; then
+  { { [ "$RELAUNCH" -eq 0 ] && [ "$BACKEND" != orca ]; } || [ -n "$SPAWN_PROJECT_CAPACITY_ANY" ]; }; then
   SPAWN_TREEHOUSE_PROJECT_LOCK=$(fm_treehouse_project_lock_path "$PROJ_ABS") || {
     echo "error: could not resolve the shared Treehouse project lock for $PROJ_ABS" >&2
     exit 1
@@ -7349,7 +7353,8 @@ if [ "$KIND" = scout ] || { [ "$KIND" = ship ] && [ "$MODE" = local-only ]; }; t
       exit 1
     fi
     SPAWN_CAPACITY_RESERVATION=$CAPACITY_RESERVATION_PATH
-  elif ! printf '%s\n' "$(status_stamp_line 'working: spawn admitted')" >> "$STATE/$ID.status"; then
+  elif [ -n "$SPAWN_PROJECT_CAPACITY_ANY" ] &&
+    ! printf '%s\n' "$(status_stamp_line 'working: spawn admitted')" >> "$STATE/$ID.status"; then
     echo "error: could not record working status for spawn of $ID" >&2
     exit 1
   fi
