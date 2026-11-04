@@ -3220,9 +3220,11 @@ if [ "$RAW_LAUNCH" -eq 1 ]; then
           RAW_SHELL_C=1
           break
         fi
-        case "$word" in
-          -u|--unset|-C|--chdir|-S|--split-string) raw_shell_skip_next=1; continue ;;
-        esac
+        if [ "$shell_seen" -eq 0 ]; then
+          case "$word" in
+            -u|--unset|-C|--chdir|-S|--split-string) raw_shell_skip_next=1; continue ;;
+          esac
+        fi
         case "$(basename -- "$word")" in
           bash|sh|dash|zsh|ksh) shell_seen=1 ;;
         esac
