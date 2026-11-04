@@ -461,6 +461,68 @@ test_coalesce_refusals() {
   pass "fm-send inbox: --coalesce is refused where no local task inbox can coalesce"
 }
 
+# A PR-event producer such as the pr-flow job delivers an informational event
+# (a QA finding, NO-GO, or conflict) to the crew that owns the pull request at
+# the moment it appears. It must reach that crew's durable record without ever
+# climbing the inbox re-ring ladder into a firstmate escalation, which is what
+# the explicit fire-and-forget delivery mode is for.
+test_crewmate_fire_and_forget_records_and_dedups() {
+  local dir err rc inbox delivery rec body action
+  dir=$(setup_case fire-and-forget); err="$dir/send.err"
+  inbox="$dir/home/state/t1.inbox"
+  delivery=9f2c1a4b7d3e5061
+  run_send "$dir" "$err" -- t1 --fire-and-forget "$delivery" \
+    'pr-flow: https://github.com/Muso-AI/H-DevOps/pull/1 has a qa-review finding: no test covers the retry'; rc=$?
+  expect_code 0 "$rc" "a fired delivery to an ordinary crew should enqueue"
+  rec="$inbox/001.msg"
+  [ -f "$rec" ] || fail "the fired delivery was not recorded at $rec"
+  [ "$(find "$inbox" -maxdepth 1 -name '*.msg' | wc -l | tr -d ' ')" = 1 ] \
+    || fail "the fired delivery enqueued more than one record:"$'\n'"$(ls "$inbox")"
+  body=$(record_body _ "$rec")
+  [ "$body" = 'pr-flow: https://github.com/Muso-AI/H-DevOps/pull/1 has a qa-review finding: no test covers the retry' ] \
+    || fail "the recorded body differs: $body"
+  case "$body" in
+    *corr=*) fail "a crewmate fired delivery must not carry a reply expectation: $body" ;;
+  esac
+  inbox_ladder fm_task_inbox_is_fire_and_forget "$rec" \
+    || fail "the record does not carry the fire-and-forget delivery mode, so the watcher would escalate it"
+  action=$(inbox_ladder fm_task_inbox_due_action "$dir/home/state" t1)
+  [ "$action" = quiet ] || fail "a fired delivery entered the re-ring ladder: $action"
+  assert_contains "$(cat "$dir/send.log")" "Firstmate instruction waiting" \
+    "a fired delivery should still ring its doorbell once"
+  # The producer owns once-ness per event, so a blind retry after an uncertain
+  # outcome must land on the record already present instead of queueing a
+  # second copy the crew would act on twice.
+  run_send "$dir" "$err" -- t1 --fire-and-forget "$delivery" \
+    'pr-flow: https://github.com/Muso-AI/H-DevOps/pull/1 has a qa-review finding: no test covers the retry'; rc=$?
+  expect_code 0 "$rc" "a retried fired delivery should succeed"
+  [ "$(find "$inbox" -maxdepth 1 -name '*.msg' | wc -l | tr -d ' ')" = 1 ] \
+    || fail "the same fired delivery was recorded twice:"$'\n'"$(ls "$inbox")"
+  # Ordinary steers are untouched: the same bytes without the flag are a
+  # deliberate new instruction.
+  run_send "$dir" "$err" -- t1 'pr-flow: https://github.com/Muso-AI/H-DevOps/pull/1 has a qa-review finding: no test covers the retry' \
+    || fail "an ordinary steer after a fired delivery should succeed"
+  [ "$(find "$inbox" -maxdepth 1 -name '*.msg' | wc -l | tr -d ' ')" = 2 ] \
+    || fail "an ordinary steer was collapsed onto the fired record:"$'\n'"$(ls "$inbox")"
+  pass "fm-send inbox: an explicit fire-and-forget delivery to a crew is durable, off the re-run ladder, and idempotent"
+}
+
+test_fire_and_forget_requires_a_home_task() {
+  local dir err rc
+  dir=$(setup_case fire-and-forget-refuse); err="$dir/send.err"
+  run_send "$dir" "$err" -- t1 --fire-and-forget XYZ 'event'; rc=$?
+  [ "$rc" -ne 0 ] || fail "a malformed fire-and-forget delivery id should be refused"
+  assert_contains "$(cat "$err")" "16 lowercase hex" "the refusal should name the delivery-id format"
+  run_send "$dir" "$err" -- sess:fm-t1 --fire-and-forget 0123456789abcdef 'event'; rc=$?
+  [ "$rc" -ne 0 ] || fail "fire-and-forget to an explicit backend target should be refused"
+  assert_contains "$(cat "$err")" "requires a recorded task selector" \
+    "the refusal should name the missing task record"
+  [ ! -d "$dir/home/state/t1.inbox" ] \
+    || fail "a refused fire-and-forget must not enqueue anything"
+  [ ! -s "$dir/send.log" ] || fail "a refused fire-and-forget typed something"
+  pass "fm-send inbox: --fire-and-forget needs a recorded task and a well-formed delivery id"
+}
+
 test_text_steer_rides_inbox
 test_multiline_steer_is_legal
 test_resend_enqueues_new_sequence
@@ -477,3 +539,5 @@ test_stranded_meta_lock_is_reclaimed
 test_coalesce_replaces_unhandled_ticks
 test_coalesce_keeps_reringing_ladder
 test_coalesce_refusals
+test_crewmate_fire_and_forget_records_and_dedups
+test_fire_and_forget_requires_a_home_task

@@ -45,7 +45,21 @@
 # "was the message acted on" is, and that is answered asynchronously for an
 # ordinary record by the worker's acknowledgement move into handled/, with the
 # watcher re-ringing an unacknowledged message and escalating a stuck one. An
-# explicit fire-and-forget record is excluded from that ladder.
+# explicit fire-and-forget record is excluded from that ladder, and any recorded
+# task selector may carry one - not only a secondmate: a crewmate or scout
+# target uses it for an event that belongs in the worker's own record but must
+# never climb the ladder into a firstmate escalation. A PR-event producer such
+# as the pr-flow job is the canonical caller, delivering a QA finding, NO-GO, or
+# conflict to the author that owns the pull request at the moment it appears:
+#   fm-send.sh <author-task-id> --fire-and-forget <16-hex-delivery-id> \
+#     'pr-flow: https://github.com/<owner>/<repo>/pull/<n> has a qa-review ...'
+# The producer owns once-ness per (pull request, head, event kind) - it fires
+# the same delivery id once - while the record itself is written idempotently,
+# so a repeated identical body lands on the record already present instead of
+# queueing a second copy the worker would act on twice. Firing stays safe for a
+# finding because the producer keeps its own SLA backstop as an ordinary steer
+# and a pull-request label, so a worker that never reads the fired record still
+# surfaces; the fired record exists to remove the wait, not the escalation.
 # bin/fm-task-inbox-lib.sh owns the record format, the doorbell line, and the
 # re-ring ladder. The composer pre-check before the ring is ADVISORY only: when
 # the composer visibly holds pending text the ring is skipped with a notice and
@@ -114,7 +128,9 @@
 # unmarked captain input never creates one. A marked secondmate instruction
 # sent with --fire-and-forget <16-hex-delivery-id> uses the same inbox transport
 # without creating a reply expectation; its delivery id makes uncertain retries
-# idempotent while allowing a later identical instruction to be distinct.
+# idempotent while allowing a later identical instruction to be distinct. A
+# crewmate or scout target has no reply expectation to suppress, so the flag
+# there changes only the record's delivery mode and the same retry idempotence.
 #
 # Remote secondmate delivery: the send crosses fm-on.sh to a host-local leg
 # (bin/fm-remote-secondmate-control.sh cmd_send) that writes the message as a
@@ -595,8 +611,12 @@ fm_send_resolve_close_note() {  # <key> <excerpt>
 if [ -n "$FIRE_AND_FORGET_ID" ]; then
   printf '%s' "$FIRE_AND_FORGET_ID" | grep -Eq '^[a-f0-9]{16}$' \
     || { echo "error: --fire-and-forget delivery id must be 16 lowercase hex characters" >&2; exit 1; }
-  [ "$MARK_FROM_FIRSTMATE" = 1 ] \
-    || { echo "error: --fire-and-forget requires a recorded secondmate task selector" >&2; exit 1; }
+  # A fired delivery is a recorded task's durable record, so it needs a task
+  # selector resolved through this home's metadata. An explicit backend target
+  # names an endpoint with no inbox, and the --key and --resolve-key planes are
+  # separate: a fired delivery never answers a decision.
+  { [ -n "$TARGET_SELECTOR" ] && [ -n "$TARGET_META" ]; } \
+    || { echo "error: --fire-and-forget requires a recorded task selector" >&2; exit 1; }
   [ -z "$RESOLVE_KEYS" ] \
     || { echo "error: --fire-and-forget cannot accompany --resolve-key" >&2; exit 1; }
 fi
@@ -838,6 +858,13 @@ else
       echo "error: failed to durably prepare pending-reply delivery for $TARGET_TASK_ID" >&2
       exit 1
     fi
+  fi
+  if [ "$MARK_FROM_FIRSTMATE" != 1 ] && [ -n "$FIRE_AND_FORGET_ID" ]; then
+    # A crewmate or scout target arms no reply expectation, so the delivery mode
+    # and the caller's retry idempotence are the whole effect of the flag: the
+    # record carries delivery=fire-and-forget (the watcher leaves it out of the
+    # re-ring ladder) and an identical re-delivery collapses onto it.
+    FM_SEND_IDEMPOTENT=1
   fi
   # Data-plane selection (see the header): text addressed to a task selector
   # resolved through this home's metadata rides the inbox plane, unless it is
