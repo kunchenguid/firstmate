@@ -74,12 +74,13 @@
 # fm-send's ring at enqueue did not land
 # (fm_task_inbox_ring returned 1 or 2) it marks the record, and one grace later
 # the due action is `retry`: once the worker has no open decision of its own,
-# the watcher rings once more and spends the mark
-# whatever the result, so the record never rings a third time and never
-# escalates. The one exception is the Orca backend, where any nonzero ring
-# status keeps the mark for later eligible polls, including restart retargets
-# (still never escalating). A waiting worker does not poll its inbox (bin/fm-brief.sh), so
-# without this retry the record could sit unread until a checkpoint. A pending ordinary record's
+# the watcher rings once more. On every backend but Orca it spends the mark
+# whatever the result, so that record never rings a third time and never
+# escalates. Orca spends the mark only on a zero ring status, so a composer or
+# replacement-endpoint deferral keeps it for later eligible polls, including
+# restart retargets (still never escalating). A waiting worker does not poll
+# its inbox (bin/fm-brief.sh), so without this retry the record could sit
+# unread until a checkpoint. A pending ordinary record's
 # ladder rings the same inbox, so the retry waits behind it, and an
 # acknowledged record drops its mark. The remote steer leg has no watcher
 # ladder and owes no retry.

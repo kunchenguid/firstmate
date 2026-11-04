@@ -523,7 +523,9 @@ if (r.terminal && Array.isArray(r.terminal.tail)) {
 # 200-line backward-paged read: the composer is bottom-anchored, and paging
 # back into scrollback is what let a stale startup banner (codex's bordered
 # "permissions" box) compete with - and once outrank - the live composer.
-fm_backend_orca_composer_capture() {  # <terminal-id> [expected-label]
+# Passing `json` as the third argument prints that same payload raw, so one
+# capture supplies both the rendered text and `result.terminal.draft`.
+fm_backend_orca_composer_capture() {  # <terminal-id> [lines] [json]
   local terminal=$1 lines=${2:-$FM_COMPOSER_CAPTURE_LINES} out
   fm_backend_orca_tool_check || return 1
   out=$(orca terminal read --terminal "$terminal" --screen --limit "$lines" --json) || return 1
