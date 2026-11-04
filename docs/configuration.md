@@ -238,6 +238,7 @@ Use `bin/fm-startup-memory-budget.sh read` to validate and print the effective v
 The stable local estimate is `ceil(UTF-8 bytes / 3)` per file, a conservative portable approximation rather than a provider-exact tokenizer.
 An inherited `data/captain-shared.md` counts in a secondmate's total but remains primary-owned and read-only there.
 The internal [`/stow` skill](../.agents/skills/stow/SKILL.md) owns curation and its automatic secondmate cascade, which accounts every home against this same per-home allowance separately rather than against a fleet total.
+The post-compaction compact digest also sizes its one shared curated-memory excerpt from this allowance at the same 3 bytes per estimated token, using the `7500` default when the file is absent or invalid so a compaction never loses its bound; `bin/fm-session-start.sh --compact` owns that excerpt.
 The helper's header owns exact parsing, publication, and report output mechanics.
 
 ## Stow pass horizon (config/stow-pass-horizon)

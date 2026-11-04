@@ -27,7 +27,13 @@
 #   startup, new            full digest - this process has not taken the helm
 #   clear, compact          `--reemit` digest only when this lock owner recorded
 #                           a completed full startup; otherwise a full digest,
-#                           so a startup killed mid-sweep is finished first
+#                           so a startup killed mid-sweep is finished first.
+#                           `compact` also passes `--compact` either way: a
+#                           compaction re-delivers into the context it just
+#                           shrank, so it gets the bounded view rather than a
+#                           full digest that refills it and forces the next
+#                           compaction. `clear` starts from an empty context
+#                           and keeps the full view.
 #   resume, reload, fork    delegate to the nudge wrapper. Prior context is
 #                           restored on these, so re-running is redundant when
 #                           this process still holds the lock (the nudge stays
@@ -132,10 +138,12 @@ case "$SOURCE" in
     exec "$SCRIPT_DIR/fm-sessionstart-nudge.sh"
     ;;
   clear|compact)
+    VIEW_ARGS=()
+    [ "$SOURCE" != compact ] || VIEW_ARGS=(--compact)
     if session_start_completed; then
-      "$SCRIPT_DIR/fm-session-start.sh" --reemit --source "$SOURCE" || true
+      "$SCRIPT_DIR/fm-session-start.sh" --reemit ${VIEW_ARGS[@]+"${VIEW_ARGS[@]}"} --source "$SOURCE" || true
     else
-      "$SCRIPT_DIR/fm-session-start.sh" --source "$SOURCE" || true
+      "$SCRIPT_DIR/fm-session-start.sh" ${VIEW_ARGS[@]+"${VIEW_ARGS[@]}"} --source "$SOURCE" || true
     fi
     ;;
   *)

@@ -187,7 +187,7 @@
 # Hosts without timeout, gtimeout, or perl use the shared pure-Bash watchdog, so
 # the digest never runs without the same hard bound and process-group cleanup.
 #
-# Usage: fm-session-start.sh [--reemit] [--source <source>]
+# Usage: fm-session-start.sh [--reemit] [--compact] [--source <source>]
 #   Prints the full ordered digest to stdout and exits 0: this is a
 #   reporting command, not a gate. A lock refusal is reported as a loud
 #   banner inline, never a silent failure or a non-zero exit that would make
@@ -210,6 +210,36 @@
 #             this session's own harness holds as its own, so the re-emit
 #             proceeds, while a lock another live session took meanwhile still
 #             produces the ordinary read-only path.
+#
+#   --compact Render the COMPACT view a context compaction re-delivers, passed
+#             only by fm-sessionstart-run.sh for the `compact` source (with or
+#             without --reemit). The full digest re-injected after every
+#             compaction exceeded 512 KiB on a large fleet and refilled the
+#             context it was compacted from, so the next compaction followed
+#             minutes later. Composition, lock, sweeps, and the completion
+#             record are unchanged; only rendering differs. Kept verbatim: the
+#             lock and bootstrap sections, the whole wake-queue presentation
+#             (records, OPEN DECISIONS, UNREAD STATUS, WAKE_ACK_REQUIRED),
+#             the supervision operating instructions, any AGENTS.md
+#             instruction refresh (the cached system-prompt copy is stale, and
+#             a pointer would only move the same bytes into a discretionary
+#             read), network checks, and the closing reminder and wiki stanza.
+#             Bounded: the backlog as one line per item without hold reasons
+#             or bodies (titles cut, the ready list capped), every task record
+#             as one line (id, endpoint alive/dead, PR, newest status event;
+#             backend and terminal only when the endpoint is not alive),
+#             and orphan status logs by id. The projects and secondmates
+#             routing tables print verbatim, as in the full view. Curated
+#             memory (captain, then captain-shared, then learnings) is named
+#             with its size and re-inlined only as the head of each file
+#             within one shared byte budget derived from
+#             config/startup-memory-budget; a file cut at a line boundary says
+#             so and names the path that holds the rest. The COMPACT_* budgets
+#             below own the exact bounds; every section that hits one
+#             discloses its omitted count, the omitted ids where useful, and
+#             the command that lists the rest.
+#             Every other caller - a true startup, /clear, and any explicit
+#             run - keeps the full digest.
 #
 #   --source  The native session-open source, supplied only by
 #             fm-sessionstart-run.sh. A genuine `startup` that owns the active
@@ -234,11 +264,16 @@ COMPLETION_FILE="$STATE/.session-start-complete"
 AGENTS_BASELINE_FILE="$STATE/.session-start-agents-baseline"
 
 REEMIT=0
+COMPACT=0
 SESSION_SOURCE=
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --reemit)
       REEMIT=1
+      shift
+      ;;
+    --compact)
+      COMPACT=1
       shift
       ;;
     --source)
@@ -255,7 +290,7 @@ while [ "$#" -gt 0 ]; do
       ;;
     *)
       printf 'fm-session-start: unknown argument: %s\n' "$1" >&2
-      printf 'usage: fm-session-start.sh [--reemit] [--source <source>]\n' >&2
+      printf 'usage: fm-session-start.sh [--reemit] [--compact] [--source <source>]\n' >&2
       exit 2
       ;;
   esac
@@ -295,25 +330,13 @@ if [ -z "${FM_SESSION_START_STAGE_FILE:-}" ]; then
     # is lost, so the child still runs bounded.
     SESSION_START_STAGE_FILE=/dev/null
   fi
-  if [ "$REEMIT" -eq 1 ]; then
-    if [ -n "$SESSION_SOURCE" ]; then
-      fm_run_timed "$SESSION_START_BUDGET" \
-        env FM_SESSION_START_STAGE_FILE="$SESSION_START_STAGE_FILE" \
-        "$SCRIPT_DIR/fm-session-start.sh" --reemit --source "$SESSION_SOURCE"
-    else
-      fm_run_timed "$SESSION_START_BUDGET" \
-        env FM_SESSION_START_STAGE_FILE="$SESSION_START_STAGE_FILE" \
-        "$SCRIPT_DIR/fm-session-start.sh" --reemit
-    fi
-  elif [ -n "$SESSION_SOURCE" ]; then
-    fm_run_timed "$SESSION_START_BUDGET" \
-      env FM_SESSION_START_STAGE_FILE="$SESSION_START_STAGE_FILE" \
-      "$SCRIPT_DIR/fm-session-start.sh" --source "$SESSION_SOURCE"
-  else
-    fm_run_timed "$SESSION_START_BUDGET" \
-      env FM_SESSION_START_STAGE_FILE="$SESSION_START_STAGE_FILE" \
-      "$SCRIPT_DIR/fm-session-start.sh"
-  fi
+  SESSION_START_CHILD_ARGS=()
+  [ "$REEMIT" -eq 0 ] || SESSION_START_CHILD_ARGS+=(--reemit)
+  [ "$COMPACT" -eq 0 ] || SESSION_START_CHILD_ARGS+=(--compact)
+  [ -z "$SESSION_SOURCE" ] || SESSION_START_CHILD_ARGS+=(--source "$SESSION_SOURCE")
+  fm_run_timed "$SESSION_START_BUDGET" \
+    env FM_SESSION_START_STAGE_FILE="$SESSION_START_STAGE_FILE" \
+    "$SCRIPT_DIR/fm-session-start.sh" ${SESSION_START_CHILD_ARGS[@]+"${SESSION_START_CHILD_ARGS[@]}"}
   SESSION_START_RC=$?
   if [ "$SESSION_START_RC" -eq 124 ]; then
     SESSION_START_LAST_STAGE=$(cat "$SESSION_START_STAGE_FILE" 2>/dev/null) || SESSION_START_LAST_STAGE=
@@ -353,6 +376,8 @@ PRIMARY_HARNESS=$("$SCRIPT_DIR/fm-harness.sh" 2>/dev/null || printf unknown)
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 # shellcheck source=bin/fm-line-cap-lib.sh
 . "$SCRIPT_DIR/fm-line-cap-lib.sh"
+# shellcheck source=bin/fm-startup-memory-budget-lib.sh
+. "$SCRIPT_DIR/fm-startup-memory-budget-lib.sh"
 
 # One tasks-axi compatibility verdict per session start. The probe costs three
 # tasks-axi subprocesses and this digest needs the same answer twice - here for
@@ -368,6 +393,28 @@ case "$STATUS_TAIL" in ''|*[!0-9]*) STATUS_TAIL=5 ;; esac
 QUEUED_LIMIT=${FM_SESSION_START_QUEUED_LIMIT:-20}
 case "$QUEUED_LIMIT" in ''|*[!0-9]*|0) QUEUED_LIMIT=20 ;; esac
 BACKLOG_FIELDS=blocked_by,hold_kind,hold_reason
+
+# Compact post-compaction view (--compact). Every bound below is a fixed byte or
+# character budget rather than a per-fleet scale. With the curated-memory
+# excerpt (config/startup-memory-budget estimated tokens at that library's 3
+# bytes per token, about 22.5 KB at its 7500 default, shared across the three
+# memory files), the whole compact digest - excluding only the verbatim
+# wake-queue presentation, the verbatim routing tables, and an AGENTS.md
+# instruction refresh - stays under 128 KiB however large the fleet grows; their
+# sum, plus this script's fixed sections, is what
+# tests/fm-session-start.test.sh holds to that bound. Each section that hits its
+# budget discloses an exact omitted count and the command that shows the rest.
+COMPACT_TITLE_CAP=40
+COMPACT_STATUS_CAP=64
+COMPACT_ROW_CAP=160
+COMPACT_READY_LIMIT=10
+COMPACT_INFLIGHT_BUDGET=2048
+COMPACT_HELD_BUDGET=11264
+COMPACT_BLOCKED_BUDGET=2048
+COMPACT_MANUAL_BUDGET=16384
+COMPACT_TASKS_BUDGET=12288
+COMPACT_OMITTED_IDS_BUDGET=1024
+COMPACT_ORPHAN_BUDGET=1024
 
 RULE='================================================================================'
 SUBRULE='--------------------------------------------------------------------------------'
@@ -546,6 +593,322 @@ print_status_tail() {
   done < <(tail -n "$STATUS_TAIL" "$status")
 }
 
+# compact_budget <bytes> <noun> <pointer> [<id-list-bytes>]: pass stdin row
+# lines - indented or list-item lines - through while they fit in <bytes>, then
+# count every remaining row and disclose it with <pointer>. Every other line (a
+# heading, a header, a "(...)" summary or footer) passes through uncounted, so
+# the omitted count is exact and a section's own totals survive. A positive
+# <id-list-bytes> also names the omitted rows' first words (their task ids)
+# within that second budget, so a bounded section still says WHICH records it
+# left out. Byte semantics under LC_ALL=C.
+compact_budget() {
+  LC_ALL=C awk -v budget="$1" -v noun="$2" -v pointer="$3" -v idbudget="${4:-0}" '
+    !/^[[:space:]*-]/ { print; next }
+    {
+      n = length($0) + 1
+      if (!over && used + n <= budget) { print; used += n; next }
+      over = 1
+      omitted++
+      if (idbudget > 0 && $1 != "") {
+        if (idused + length($1) + 2 <= idbudget) {
+          ids = ids (ids == "" ? "" : ", ") $1
+          idused += length($1) + 2
+          listed++
+        }
+      }
+    }
+    END {
+      if (omitted > 0) {
+        printf "(%d more %s omitted by the post-compaction size budget - %s)\n", omitted, noun, pointer
+        if (listed > 0) {
+          printf "(omitted: %s%s)\n", ids, (omitted > listed ? sprintf(" and %d more", omitted - listed) : "")
+        }
+      }
+    }
+  '
+}
+
+# compact_axi_rows <title-cap> <ready-limit> <skip-ids>: re-render one
+# tasks-axi TOON listing as one bounded line per task - id, kind, repo, any
+# extra fields (hold_kind, blocked_by) as name=value, then the title cut to
+# <title-cap> characters. hold_reason is never rendered here; it is the long
+# field the compact view exists to drop. TOON quoting ("..." with backslash
+# escapes) is decoded so a comma inside a title cannot shift fields. A
+# positive <ready-limit> keeps only that many rows; <skip-ids> is a
+# space-separated id list to leave out (in-flight tasks the work-under-way
+# section already shows). The tool's count line, field header, and help block
+# are dropped, and this function prints its own count; any other tool line,
+# such as ready_public_followups, passes through capped. Cuts count UTF-8
+# characters, the bin/fm-line-cap-lib.sh rule, so a multibyte character is
+# never cut in half.
+compact_axi_rows() {
+  LC_ALL=C awk -v cap="$1" -v limit="$2" -v skip=" $3 " -v rowcap="$COMPACT_ROW_CAP" '
+    function cut(s, max,    i, n, c, keep) {
+      n = 0; keep = 0
+      for (i = 1; i <= length(s); i++) {
+        c = substr(s, i, 1)
+        if (c >= "\200" && c <= "\277") continue
+        n++
+        if (n == max - 2) keep = i - 1
+        if (n > max) return substr(s, 1, keep) "..."
+      }
+      return s
+    }
+    function parse(s,    i, c, val, inq, n) {
+      n = 0; val = ""; inq = 0
+      for (i = 1; i <= length(s); i++) {
+        c = substr(s, i, 1)
+        if (inq) {
+          if (c == "\\") {
+            i++
+            c = substr(s, i, 1)
+            val = val (c == "n" || c == "t" ? " " : c)
+            continue
+          }
+          if (c == "\"") { inq = 0; continue }
+          val = val c
+          continue
+        }
+        if (c == "\"") { inq = 1; continue }
+        if (c == ",") { F[++n] = val; val = ""; continue }
+        val = val c
+      }
+      F[++n] = val
+      return n
+    }
+    /^help\[/ { exit }
+    /^[a-z_]+\[[0-9]+\][{].*[}]:[[:space:]]*$/ {
+      hdr = $0
+      sub(/^[^{]*[{]/, "", hdr)
+      sub(/[}]:[[:space:]]*$/, "", hdr)
+      nf = split(hdr, NAMES, ",")
+      rows = 1
+      next
+    }
+    rows && /^[[:space:]]/ {
+      line = $0
+      sub(/^[[:space:]]+/, "", line)
+      split("", F)
+      parse(line)
+      delete V
+      for (i = 1; i <= nf; i++) V[NAMES[i]] = F[i]
+      if (index(skip, " " V["id"] " ") > 0) { skipped++; next }
+      total++
+      if (limit > 0 && shown >= limit) next
+      out = "  " V["id"] " (" V["kind"] ", " V["repo"] ")"
+      for (i = 1; i <= nf; i++) {
+        name = NAMES[i]
+        if (name == "id" || name == "state" || name == "kind" || name == "repo" || name == "title" || name == "hold_reason") continue
+        if (V[name] == "" || V[name] == "-" || V[name] == "none") continue
+        if (name == "hold_kind" && V[name] == "captain") continue
+        out = out " " (name == "hold_kind" ? "hold" : name) "=" V[name]
+      }
+      out = out " - " cut(V["title"], cap)
+      print cut(out, rowcap)
+      shown++
+      next
+    }
+    { rows = 0 }
+    /^count:[[:space:]]*[0-9]+[[:space:]]*$/ || /^[[:space:]]*$/ { next }
+    { print cut($0, rowcap) }
+    END {
+      printf "(%d item(s)", total + 0
+      if (limit > 0 && total > shown) printf ", first %d shown, %d more", shown, total - shown
+      if (skipped > 0) printf ", %d more listed under Work under way", skipped
+      printf ")\n"
+    }
+  '
+}
+
+print_backlog_tasks_axi_compact_view() {
+  local path=$1 in_flight held blocked ready err meta_ids meta id
+  if ! in_flight=$(tasks-axi list --file "$path" --state in_flight 2>&1); then
+    err=$in_flight
+  elif ! held=$(tasks-axi list --file "$path" --state held --fields hold_kind 2>&1); then
+    err=$held
+  elif ! blocked=$(tasks-axi list --file "$path" --state queued --blocked --fields blocked_by 2>&1); then
+    err=$blocked
+  elif ! ready=$(tasks-axi ready --file "$path" 2>&1); then
+    err=$ready
+  else
+    meta_ids=
+    for meta in "$STATE"/*.meta; do
+      [ -f "$meta" ] || continue
+      id=$(basename "$meta" .meta)
+      meta_ids="$meta_ids $id"
+    done
+    printf 'compact backlog listing (tasks-axi; one line per item, titles cut to %s characters, hold reasons and bodies omitted; full row: tasks-axi show <id> --full; every hold reason: tasks-axi list --file %s --state held --fields hold_kind,hold_reason)\n' \
+      "$COMPACT_TITLE_CAP" "$path"
+    printf '\nin flight without a live task record below:\n'
+    printf '%s\n' "$in_flight" | compact_axi_rows "$COMPACT_TITLE_CAP" 0 "$meta_ids" |
+      compact_budget "$COMPACT_INFLIGHT_BUDGET" "in-flight item(s)" "tasks-axi list --file $path --state in_flight" "$COMPACT_OMITTED_IDS_BUDGET"
+    printf '\nheld (captain- or time-gated; hold kind is captain unless a hold= field says otherwise; an in-flight item that is also held appears in both groups):\n'
+    printf '%s\n' "$held" | compact_axi_rows "$COMPACT_TITLE_CAP" 0 "" |
+      compact_budget "$COMPACT_HELD_BUDGET" "held item(s)" "tasks-axi list --file $path --state held" "$COMPACT_OMITTED_IDS_BUDGET"
+    printf '\nblocked queued:\n'
+    printf '%s\n' "$blocked" | compact_axi_rows "$COMPACT_TITLE_CAP" 0 "" |
+      compact_budget "$COMPACT_BLOCKED_BUDGET" "blocked item(s)" "tasks-axi list --file $path --state queued --blocked"
+    printf '\nready queued (dispatchable now):\n'
+    printf '%s\n' "$ready" | compact_axi_rows "$COMPACT_TITLE_CAP" "$COMPACT_READY_LIMIT" ""
+    printf '(full ready list: tasks-axi ready --file %s)\n' "$path"
+    return 0
+  fi
+  printf 'tasks-axi compact listing failed; falling back to title-line rendering.\n'
+  fm_cap_line "$err" "$COMPACT_ROW_CAP"
+  print_backlog_manual_compact_view "$path" "fallback"
+}
+
+print_backlog_manual_compact_view() {
+  local path=$1 reason=$2 line
+  print_backlog_manual_compact "$path" "$reason" |
+    while IFS= read -r line || [ -n "$line" ]; do
+      case "$line" in
+        [-*][[:space:]]*) fm_cap_line "$line" "$COMPACT_ROW_CAP" ;;
+        *) printf '%s\n' "$line" ;;
+      esac
+    done |
+    compact_budget "$COMPACT_MANUAL_BUDGET" "backlog title line(s)" "read data/backlog.md"
+}
+
+# The compact view of data/backlog.md: the same backend selection as the full
+# listing, rendered one bounded line per item under fixed byte budgets.
+print_backlog_compact_view() {
+  local path=$1 label=$2
+  subsection "$label"
+  if [ -f "$path" ]; then
+    if [ -s "$path" ]; then
+      if fm_tasks_axi_backend_available "$CONFIG"; then
+        print_backlog_tasks_axi_compact_view "$path"
+      elif fm_backlog_backend_manual "$CONFIG"; then
+        print_backlog_manual_compact_view "$path" "manual backend"
+      else
+        print_backlog_manual_compact_view "$path" "tasks-axi unavailable or incompatible"
+      fi
+    else
+      printf '(present, empty)\n'
+    fi
+  else
+    printf 'ABSENT\n'
+  fi
+}
+
+# endpoint_liveness <meta> <id> <window> <backend>: the same cheap alive/dead
+# presence read the full view prints, as one word: alive, dead, or unknown.
+endpoint_liveness() {
+  local meta=$1 id=$2 window=$3 backend=$4 target
+  if [ -z "$window" ]; then
+    printf 'unknown\n'
+    return 0
+  fi
+  target=$(fm_backend_target_of_meta "$meta")
+  if fm_backend_target_exists "$backend" "${target:-$window}" "fm-$id"; then
+    printf 'alive\n'
+  else
+    printf 'dead\n'
+  fi
+}
+
+# The compact work-under-way view: one line per task carrying what supervision
+# acts on - task id, endpoint alive/dead, PR URL, and the newest status event.
+# The terminal handle prints only for an endpoint that is not alive, because a
+# live worker is steered by task id and only recovery needs the handle (the
+# window too, when it is not the default fm-<id>). The newest event prints as
+# its state word alone, except a decision, blocker, or failure, whose text
+# prints cut to COMPACT_STATUS_CAP: the wake queue and its OPEN DECISIONS and
+# UNREAD STATUS sections above already carry every event that still needs
+# handling, so routine history is the cheapest thing to drop. Lines are ordered
+# endpoints that are not alive first, then tasks whose newest event is a
+# decision, blocker, failure, pause, or completion, then the rest, so the byte
+# budget only ever omits live, routinely working tasks first.
+print_work_under_way_compact() {
+  local meta id window backend endpoint pr terminal status last word line urgent='' actionable='' routine=''
+  for meta in "$STATE"/*.meta; do
+    [ -f "$meta" ] || continue
+    id=$(basename "$meta" .meta)
+    window=$(fm_meta_get "$meta" window)
+    backend=
+    [ -z "$window" ] || backend=$(fm_backend_of_meta "$meta")
+    endpoint=$(endpoint_liveness "$meta" "$id" "$window" "$backend")
+    pr=$(fm_meta_get "$meta" pr)
+    line="  $id $endpoint"
+    if [ "$endpoint" != alive ]; then
+      terminal=$(fm_meta_get "$meta" terminal)
+      [ "$window" = "fm-$id" ] || line="$line window=${window:-none}"
+      [ -z "$terminal" ] || line="$line terminal=$terminal"
+    fi
+    [ -z "$pr" ] || line="$line pr=$pr"
+    status="$STATE/$id.status"
+    last=
+    [ -f "$status" ] && last=$(tail -n 1 "$status" 2>/dev/null)
+    word=${last%%:*}
+    word=${word%% *}
+    case "$word" in
+      ''|*[!a-z-]*) word=other ;;
+    esac
+    if [ -z "$last" ]; then
+      line="$line last=(none)"
+    else
+      case "$word" in
+        needs-decision|blocked|failed)
+          fm_cap_line_var "$last" "$COMPACT_STATUS_CAP"
+          line="$line last: $FM_LINE_CAP_LINE"
+          ;;
+        *) line="$line last=$word" ;;
+      esac
+    fi
+    if [ "$endpoint" != alive ]; then
+      urgent="$urgent$line"$'\n'
+    elif [ -n "$last" ] && [ "$word" != working ]; then
+      actionable="$actionable$line"$'\n'
+    else
+      routine="$routine$line"$'\n'
+    fi
+  done
+  if [ -z "$urgent$actionable$routine" ]; then
+    printf '(none)\n'
+    return 0
+  fi
+  printf '%s' "$urgent$actionable$routine" |
+    compact_budget "$COMPACT_TASKS_BUDGET" "task record(s)" "read state/<id>.meta and bin/fm-crew-state.sh <id>" "$COMPACT_OMITTED_IDS_BUDGET"
+}
+
+# compact_memory_budget_bytes: the one byte budget the compact view's three
+# curated-memory excerpts share - config/startup-memory-budget's estimated
+# tokens (its default when absent or invalid) at that library's 3 bytes per
+# token.
+compact_memory_budget_bytes() {
+  local tokens
+  tokens=$(fm_startup_memory_budget_read "$CONFIG" 2>/dev/null) || tokens=$FM_STARTUP_MEMORY_BUDGET_DEFAULT
+  printf '%s\n' "$((tokens * 3))"
+}
+
+# print_memory_excerpt <path> <label>: curated memory after a compaction - its
+# size, then the head of the file cut at a line boundary within whatever of
+# COMPACT_MEMORY_LEFT earlier files left, which it spends. The full digest
+# delivered the whole file at true session start, and this script's ORDERING
+# note ranks it cheapest to lose, so a cut file names the path holding the rest.
+print_memory_excerpt() {
+  local path=$1 label=$2 bytes excerpt rc used
+  subsection "$label"
+  if [ ! -f "$path" ]; then
+    printf 'ABSENT\n'
+    return 0
+  fi
+  bytes=$(wc -c < "$path" 2>/dev/null | tr -d ' ')
+  printf 'present (%s bytes) - head re-inlined within the shared post-compaction memory budget; read %s, or grep it, before a decision that depends on the rest.\n' "${bytes:-?}" "$path"
+  excerpt=$(LC_ALL=C awk -v budget="$COMPACT_MEMORY_LEFT" '
+    { n = length($0) + 1; if (used + n > budget) { cut = 1; exit } print; used += n }
+    END { if (cut) exit 3 }
+  ' "$path")
+  rc=$?
+  if [ -n "$excerpt" ]; then
+    printf '%s\n' "$excerpt"
+    used=$(printf '%s\n' "$excerpt" | LC_ALL=C wc -c | tr -d ' ')
+    COMPACT_MEMORY_LEFT=$((COMPACT_MEMORY_LEFT - used))
+  fi
+  [ "$rc" -ne 3 ] || printf '(truncated - read %s for the rest)\n' "$path"
+}
+
 hash_file_sha256() {
   local file=$1 digest
   [ -f "$file" ] || return 1
@@ -633,6 +996,12 @@ if [ "$REEMIT" -eq 1 ]; then
   printf 'Queued wakes ARE still drained: they arrived after startup and are this turn work.\n'
 else
   section "SESSION START - $FM_HOME"
+fi
+if [ "$COMPACT" -eq 1 ]; then
+  printf 'COMPACT POST-COMPACTION VIEW: the wake queue, its acknowledgement, open\n'
+  printf 'decisions, and supervision instructions are complete; the fleet state is\n'
+  printf 'one bounded line per item and curated memory is re-inlined only as a\n'
+  printf 'bounded head of each file.\n'
 fi
 # --- 1. lock -----------------------------------------------------------
 stage lock
@@ -791,6 +1160,29 @@ fi
 # a stage that never ran, which the truncation banner names by stage.
 stage read-once
 section "READ-ONCE CONTRACT"
+if [ "$COMPACT" -eq 1 ]; then
+cat <<'EOF'
+This is the COMPACT view a context compaction re-delivers, so it stays small
+enough not to refill the context it was compacted from. Below: every task
+record as one line (id, endpoint alive/dead, PR, newest status event), the
+backlog as one line per item without hold reasons, the ready list capped, the
+routing tables in full, and the curated memory files named with their sizes,
+each re-inlined only as its head within one shared budget (a cut file says
+"(truncated - read <path> for the rest)").
+Every section that hit its budget says how many items it left out and how to
+list them.
+Do NOT bulk re-read data/backlog.md, state/*.meta, or state/*.status to rebuild
+the full view. Go to a source directly only for the item a decision needs:
+  - one task: state/<id>.meta, state/<id>.status, bin/fm-crew-state.sh <id>,
+  - one backlog item or hold reason: tasks-axi show <id> --full,
+  - curated memory past its excerpt that a decision depends on:
+    data/captain.md, data/captain-shared.md, data/learnings.md,
+  - the NETWORK CHECKS verdict when still IN PROGRESS
+    (bin/fm-startup-network.sh report),
+  - or a STARTUP TRUNCATED banner named the stage that would have printed it, in
+    which case that stage's sources were never emitted and must be reconciled.
+EOF
+else
 cat <<'EOF'
 Everything below is printed in full for this session start: every state/*.meta,
 a compact data/backlog.md listing, a bounded tail of every state/*.status,
@@ -813,56 +1205,78 @@ Go to a source directly only when:
   - or a STARTUP TRUNCATED banner named the stage that would have printed it, in
     which case that stage's sources were never emitted and must be reconciled.
 EOF
+fi
 
 # --- 6. fleet-state digest ---------------------------------------------
 # Before CONTEXT: see this file's ORDERING note. Live fleet identity is what a
 # truncated tail must never take.
+print_work_under_way_full() {
+  local meta id window target backend status META_FOUND=0
+  for meta in "$STATE"/*.meta; do
+    [ -f "$meta" ] || continue
+    META_FOUND=1
+    id=$(basename "$meta" .meta)
+    printf '\n--- %s ---\n' "$id"
+    cat "$meta"
+
+    window=$(fm_meta_get "$meta" window)
+    target=$(fm_backend_target_of_meta "$meta")
+    if [ -n "$window" ]; then
+      backend=$(fm_backend_of_meta "$meta")
+      if fm_backend_target_exists "$backend" "${target:-$window}" "fm-$id"; then
+        printf 'endpoint: alive (backend=%s window=%s)\n' "$backend" "$window"
+      else
+        printf 'endpoint: dead (backend=%s window=%s)\n' "$backend" "$window"
+      fi
+    else
+      printf 'endpoint: unknown (no window recorded)\n'
+    fi
+
+    status="$STATE/$id.status"
+    if [ -f "$status" ]; then
+      print_status_tail "$status"
+    else
+      printf 'status tail: (no status file yet: %s)\n' "$status"
+    fi
+  done
+  [ "$META_FOUND" -eq 1 ] || printf '(none)\n'
+}
+
+# print_orphan_status_logs <full|compact>: status logs whose task record is
+# gone. The compact view names them only; the full view prints their tails.
+print_orphan_status_logs() {
+  local view=$1 status id found=0
+  for status in "$STATE"/*.status; do
+    [ -f "$status" ] || continue
+    id=$(basename "$status" .status)
+    [ -f "$STATE/$id.meta" ] && continue
+    found=1
+    if [ "$view" = compact ]; then
+      printf '  %s\n' "$id"
+    else
+      printf '\n--- %s ---\n' "$id"
+      print_status_tail "$status"
+    fi
+  done
+  [ "$found" -eq 1 ] || printf '(none)\n'
+}
+
 stage fleet-state
 section "FLEET STATE"
-print_backlog_compact "$DATA/backlog.md" "data/backlog.md"
-
-subsection "Work under way (state/*.meta)"
-META_FOUND=0
-for meta in "$STATE"/*.meta; do
-  [ -f "$meta" ] || continue
-  META_FOUND=1
-  id=$(basename "$meta" .meta)
-  printf '\n--- %s ---\n' "$id"
-  cat "$meta"
-
-  window=$(fm_meta_get "$meta" window)
-  target=$(fm_backend_target_of_meta "$meta")
-  if [ -n "$window" ]; then
-    backend=$(fm_backend_of_meta "$meta")
-    if fm_backend_target_exists "$backend" "${target:-$window}" "fm-$id"; then
-      printf 'endpoint: alive (backend=%s window=%s)\n' "$backend" "$window"
-    else
-      printf 'endpoint: dead (backend=%s window=%s)\n' "$backend" "$window"
-    fi
-  else
-    printf 'endpoint: unknown (no window recorded)\n'
-  fi
-
-  status="$STATE/$id.status"
-  if [ -f "$status" ]; then
-    print_status_tail "$status"
-  else
-    printf 'status tail: (no status file yet: %s)\n' "$status"
-  fi
-done
-[ "$META_FOUND" -eq 1 ] || printf '(none)\n'
-
-subsection "Orphan status logs (state/*.status without matching .meta)"
-ORPHAN_STATUS_FOUND=0
-for status in "$STATE"/*.status; do
-  [ -f "$status" ] || continue
-  id=$(basename "$status" .status)
-  [ -f "$STATE/$id.meta" ] && continue
-  ORPHAN_STATUS_FOUND=1
-  printf '\n--- %s ---\n' "$id"
-  print_status_tail "$status"
-done
-[ "$ORPHAN_STATUS_FOUND" -eq 1 ] || printf '(none)\n'
+if [ "$COMPACT" -eq 1 ]; then
+  print_backlog_compact_view "$DATA/backlog.md" "data/backlog.md"
+  subsection "Work under way (state/*.meta: <id> <endpoint alive|dead|unknown> [terminal when not alive] [pr] <newest status event - wake-EVENT history, not current state; full log state/<id>.status>)"
+  print_work_under_way_compact
+  subsection "Orphan status logs (state/*.status without matching .meta; full log: state/<id>.status)"
+  print_orphan_status_logs compact |
+    compact_budget "$COMPACT_ORPHAN_BUDGET" "orphan status log(s)" "ls $STATE/*.status"
+else
+  print_backlog_compact "$DATA/backlog.md" "data/backlog.md"
+  subsection "Work under way (state/*.meta)"
+  print_work_under_way_full
+  subsection "Orphan status logs (state/*.status without matching .meta)"
+  print_orphan_status_logs full
+fi
 
 subsection "AFK"
 if [ -e "$STATE/.afk" ]; then
@@ -915,11 +1329,20 @@ fi
 # take (see this file's ORDERING note).
 stage context
 section "CONTEXT"
-print_file_or_absent "$DATA/projects.md" "data/projects.md"
-print_file_or_absent "$DATA/secondmates.md" "data/secondmates.md"
-print_file_or_absent "$DATA/captain.md" "data/captain.md"
-print_file_or_absent "$DATA/captain-shared.md" "data/captain-shared.md (shared, main-authoritative, read-only in secondmate homes)"
-print_file_or_absent "$DATA/learnings.md" "data/learnings.md"
+if [ "$COMPACT" -eq 1 ]; then
+  print_file_or_absent "$DATA/projects.md" "data/projects.md"
+  print_file_or_absent "$DATA/secondmates.md" "data/secondmates.md"
+  COMPACT_MEMORY_LEFT=$(compact_memory_budget_bytes)
+  print_memory_excerpt "$DATA/captain.md" "data/captain.md"
+  print_memory_excerpt "$DATA/captain-shared.md" "data/captain-shared.md (shared, main-authoritative, read-only in secondmate homes)"
+  print_memory_excerpt "$DATA/learnings.md" "data/learnings.md"
+else
+  print_file_or_absent "$DATA/projects.md" "data/projects.md"
+  print_file_or_absent "$DATA/secondmates.md" "data/secondmates.md"
+  print_file_or_absent "$DATA/captain.md" "data/captain.md"
+  print_file_or_absent "$DATA/captain-shared.md" "data/captain-shared.md (shared, main-authoritative, read-only in secondmate homes)"
+  print_file_or_absent "$DATA/learnings.md" "data/learnings.md"
+fi
 
 # --- 9. closing reminder -----------------------------------------------
 stage next-step

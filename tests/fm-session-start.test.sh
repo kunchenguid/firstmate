@@ -29,6 +29,11 @@
 #     network result surfaces exactly once (inline or as a wake, never both), a
 #     read-only session declares the checks it skipped, and the tasks-axi
 #     compatibility verdict is paid for once per session start
+#   - the --compact post-compaction view of a large synthetic fleet with
+#     live-sized curated memory stays within 128 KiB, keeps the wake queue and
+#     its acknowledgement, the routing tables, each section's own total, and a
+#     bounded curated-memory head, and drops hold reasons, routine status
+#     history, and the memory tail the full view still prints
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -2141,6 +2146,253 @@ EOF
   pass "--reemit reprints the digest without repeating startup's mutating sweeps and still drains queued wakes"
 }
 
+# --- compact post-compaction view (--compact) ---------------------------------
+
+# make_fake_tasks_axi_large <fakebin>: a tasks-axi boundary rendering a large
+# fleet in the tool's own TOON shape - FM_FAKE_LARGE_INFLIGHT in-flight rows,
+# FM_FAKE_LARGE_HELD held rows with long hold reasons, FM_FAKE_LARGE_READY ready
+# rows - honoring whatever --fields the caller asks for, so the listing a
+# caller requests is exactly the listing it pays for. Titles carry a comma and
+# escaped quotes so a field-shifting parse would show.
+make_fake_tasks_axi_large() {
+  local fakebin=$1
+  cat > "$fakebin/tasks-axi" <<'SH'
+#!/usr/bin/env bash
+set -u
+case "${1:-}" in
+  --version|-v|-V) printf '%s\n' '0.2.6'; exit 0 ;;
+  update) [ "${2:-}" = --help ] && { printf '%s\n' 'usage: tasks-axi update <id> [--archive-body]'; exit 0; } ;;
+  mv) [ "${2:-}" = --help ] && { printf '%s\n' 'usage: tasks-axi mv <dest> [<id>...]'; exit 0; } ;;
+esac
+cmd=${1:-}
+shift || true
+state= fields= blocked=0
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --state) state=${2:-}; shift 2 ;;
+    --fields) fields=${2:-}; shift 2 ;;
+    --blocked) blocked=1; shift ;;
+    *) shift ;;
+  esac
+done
+reason=$(printf 'HOLD-REASON-BODY %.0s' $(seq 1 40))
+row() {  # <id> <state> <kind> <repo>
+  local id=$1 st=$2 kind=$3 repo=$4 out field
+  out="  $id,$st,$kind,$repo,\"Synthetic task $id, with a comma and \\\"quoted\\\" words that run long past any cap\""
+  IFS=, read -r -a extra <<< "$fields"
+  for field in ${extra[@]+"${extra[@]}"}; do
+    case "$field" in
+      hold_kind) [ "$st" = held ] && out="$out,captain" || out="$out,-" ;;
+      hold_reason) [ "$st" = held ] && out="$out,\"$reason\"" || out="$out,-" ;;
+      blocked_by) [ "$st" = blocked ] && out="$out,large-task-001" || out="$out,none" ;;
+      *) out="$out,-" ;;
+    esac
+  done
+  printf '%s\n' "$out"
+}
+header() {  # <group> <count>
+  printf 'count: %s\n' "$2"
+  printf '%s[%s]{id,state,kind,repo,title%s}:\n' "$1" "$2" "${fields:+,$fields}"
+}
+case "$cmd" in
+  ready)
+    n=${FM_FAKE_LARGE_READY:-25}
+    fields=
+    header ready "$((n + 1))"
+    printf '  ready-utf8,queued,ship,firstmate,%s\n' "$(printf '\303\251%.0s' $(seq 1 60))"
+    for i in $(seq -w 1 "$n"); do row "ready-$i" queued ship firstmate; done
+    printf '%s\n' 'ready_public_followups: 2 delivery-ready obligations'
+    ;;
+  list)
+    case "$state:$blocked" in
+      in_flight:0)
+        n=${FM_FAKE_LARGE_INFLIGHT:-185}
+        header tasks "$((n + 3))"
+        for i in $(seq -w 1 "$n"); do row "large-task-$i" in_flight ship "repo-$i"; done
+        for i in 1 2 3; do row "no-record-$i" in_flight task "-"; done
+        ;;
+      held:0)
+        n=${FM_FAKE_LARGE_HELD:-195}
+        header tasks "$n"
+        for i in $(seq -w 1 "$n"); do row "held-captain-call-$i" held ship "core-backend-$i"; done
+        ;;
+      queued:1)
+        header tasks 4
+        for i in 1 2 3 4; do row "blocked-$i" blocked scout firstmate; done
+        ;;
+      *) printf '%s\n' 'unexpected listing' >&2; exit 9 ;;
+    esac
+    ;;
+  *) exit 1 ;;
+esac
+printf 'help[1]:\n  - Run `tasks-axi show <id> --full` for full notes on a task\n'
+SH
+  chmod +x "$fakebin/tasks-axi"
+}
+
+# make_fake_tmux_parity <fakebin>: a task window whose name ends in an even
+# digit is alive, an odd one is dead, so a large fleet carries both.
+make_fake_tmux_parity() {
+  local fakebin=$1
+  cat > "$fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+set -u
+[ "${1:-}" = display-message ] || exit 1
+target= prev=
+for a in "$@"; do
+  [ "$prev" = -t ] && target=$a
+  prev=$a
+done
+case "$target" in *[02468]) printf '%%1\n'; exit 0 ;; esac
+exit 1
+SH
+  chmod +x "$fakebin/tmux"
+}
+
+# write_large_fleet_home <home>: >=180 task records with long status logs
+# ending in a mix of states, orphan logs, curated memory the size of a live
+# home's (~173 KB captain.md, ~125 KB learnings.md), and a sizable routing table.
+write_large_fleet_home() {
+  local home=$1 i id status long
+  long=$(printf 'STATUS-HISTORY-BODY %.0s' $(seq 1 30))
+  for i in $(seq -w 1 185); do
+    id=large-task-$i
+    printf 'window=fm-%s\nterminal=term_%s\nkind=ship\nmode=no-mistakes\nworktree=/tmp/wt/%s\nproject=/tmp/projects/repo-%s\npr=https://github.com/example/repo-%s/pull/%s\n' \
+      "$id" "$id" "$id" "$i" "$i" "$((10#$i))" > "$home/state/$id.meta"
+    status="$home/state/$id.status"
+    for _ in 1 2 3; do printf 'working: %s\n' "$long" >> "$status"; done
+    case $((10#$i % 4)) in
+      0) printf 'needs-decision [key=large-%s]: pick one %s\n' "$i" "${long//STATUS-HISTORY-BODY/DECISION-BODY}" >> "$status" ;;
+      1) printf 'done: PR https://github.com/example/repo-%s/pull/%s checks green %s\n' "$i" "$((10#$i))" "$long" >> "$status" ;;
+      2) printf 'paused: waiting on an upstream release %s\n' "$long" >> "$status" ;;
+      3) printf 'working: %s\n' "$long" >> "$status" ;;
+    esac
+  done
+  for i in $(seq -w 1 30); do
+    printf 'done: orphan %s\n' "$long" > "$home/state/orphan-$i.status"
+  done
+  {
+    printf 'CAPTAIN-HEAD-MARKER first preference\n'
+    for i in $(seq 1 2276); do printf 'CAPTAIN-MEMORY-BODY preference line %05d with enough words to be realistic\n' "$i"; done
+    printf 'CAPTAIN-TAIL-MARKER last preference\n'
+  } > "$home/data/captain.md"
+  {
+    for i in $(seq 1 1760); do printf 'LEARNINGS-BODY fleet fact line %05d with enough words to be realistic\n' "$i"; done
+    printf 'LEARNINGS-TAIL-MARKER last fact\n'
+  } > "$home/data/learnings.md"
+  for i in $(seq 1 120); do printf -- '- repo-%s: no-mistakes, yolo off, a registry line long enough to matter\n' "$i"; done > "$home/data/projects.md"
+  printf '# Backlog\n\n## In flight\n- [ ] large-task-001 - placeholder (repo: firstmate) (kind: ship)\n' > "$home/data/backlog.md"
+}
+
+test_compact_view_stays_bounded_for_a_large_fleet() {
+  local rec root home fakebin compact fleet full compact_bytes full_bytes held_shown held_omitted limit=131072
+  rec=$(new_world compact-large)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+  make_fake_tasks_axi_large "$fakebin"
+  make_fake_tmux_parity "$fakebin"
+  write_large_fleet_home "$home"
+  append_wake "$home/state" signal large-task-004 "needs-decision: LARGE-FLEET-QUEUED-WAKE" || fail "seed wake failed"
+
+  compact=$(run_named_harness_session_start claude "$home" "$root" "$fakebin:$BASE_PATH" \
+    --reemit --compact --source compact)
+  compact_bytes=$(printf '%s\n' "$compact" | LC_ALL=C wc -c | tr -d ' ')
+  [ "$compact_bytes" -le "$limit" ] \
+    || fail "compact post-compaction digest is $compact_bytes bytes, over its $limit-byte bound"
+  assert_contains "$compact" "COMPACT POST-COMPACTION VIEW" "--compact did not label its view"
+  assert_contains "$compact" "LARGE-FLEET-QUEUED-WAKE" "the compact view dropped the queued wake"
+  printf '%s\n' "$compact" | grep -Eq '^WAKE_ACK_REQUIRED:.*--ack-through [0-9]+ --recovery-generation ' \
+    || fail "the compact view dropped the generation-bound wake acknowledgement"
+  assert_contains "$compact" "OPEN DECISIONS" "the compact view dropped the open decisions"
+  assert_contains "$compact" "SUPERVISION OPERATING INSTRUCTIONS" "the compact view dropped the supervision block"
+  assert_contains "$compact" "NEXT STEP" "the compact view did not reach its closing reminder"
+  assert_not_contains "$compact" "SESSION START HIT ITS" "the compact fixture hit its runtime bound"
+  assert_not_contains "$compact" "HOLD-REASON-BODY" "the compact view inlined hold reasons"
+  # The wake drain's own bounded sections may quote a status event verbatim;
+  # the fleet-state digest is what must not re-inline status history.
+  fleet=$(printf '%s\n' "$compact" | sed -n '/^FLEET STATE$/,/^NETWORK CHECKS$/p')
+  assert_contains "$fleet" "Work under way" "the compact fleet-state section could not be isolated"
+  assert_not_contains "$fleet" "STATUS-HISTORY-BODY" "the compact view inlined routine status history"
+  assert_contains "$compact" "CAPTAIN-HEAD-MARKER" "the compact view dropped the head of data/captain.md"
+  assert_contains "$compact" "(truncated - read $home/data/captain.md for the rest)" \
+    "the compact view cut data/captain.md without its truncation marker"
+  assert_not_contains "$compact" "CAPTAIN-TAIL-MARKER" "the compact view re-inlined all of data/captain.md"
+  assert_not_contains "$compact" "LEARNINGS-TAIL-MARKER" "the compact view re-inlined the tail of data/learnings.md"
+  assert_contains "$compact" "present (" "the compact view did not name curated memory with its size"
+  assert_contains "$compact" "- repo-120: no-mistakes" "the compact view cut the projects routing table"
+  assert_contains "$compact" "  held-captain-call-001 (ship, core-backend-001) - Synthetic task held-captain-call-001,..." \
+    "a held row lost its id, kind, repo, or decoded title"
+  assert_contains "$compact" "held item(s) omitted by the post-compaction size budget" \
+    "the held budget did not disclose what it left out"
+  assert_contains "$compact" "(195 item(s))" "the held budget swallowed its section total"
+  held_shown=$(printf '%s\n' "$compact" | grep -c '^  held-captain-call-')
+  held_omitted=$(printf '%s\n' "$compact" | sed -n 's/^(\([0-9]*\) more held item(s) omitted .*/\1/p')
+  [ "$((held_shown + ${held_omitted:-0}))" -eq 195 ] \
+    || fail "held rows shown ($held_shown) plus disclosed omitted ($held_omitted) do not account for exactly 195"
+  assert_not_contains "$compact" ", (195" "a section total leaked into the omitted-ids list"
+  assert_contains "$compact" "first 10 shown, 16 more" "the ready list was not capped with a remainder count"
+  assert_contains "$compact" "ready_public_followups: 2 delivery-ready obligations" \
+    "the compact ready listing dropped the delivery-ready obligation count"
+  assert_contains "$compact" "  ready-utf8 (ship, firstmate) - $(printf '\303\251%.0s' $(seq 1 37))..." \
+    "a multibyte title was not cut to 40 characters"
+  printf '%s\n' "$compact" | iconv -f UTF-8 -t UTF-8 > /dev/null 2>&1 \
+    || fail "the compact view cut a multibyte character in half"
+  assert_contains "$compact" "  no-record-1 (task, -)" "an in-flight item with no task record was lost"
+  assert_contains "$compact" "185 more listed under Work under way" "in-flight rows with records were not deduplicated"
+  assert_contains "$compact" "  large-task-001 dead terminal=term_large-task-001 pr=https://github.com/example/repo-001/pull/1 last=done" \
+    "a dead endpoint lost its terminal, PR, or newest event"
+  assert_contains "$compact" "  large-task-002 alive pr=https://github.com/example/repo-002/pull/2 last=paused" \
+    "a live task line was not one bounded line"
+  assert_contains "$compact" "  large-task-004 alive pr=https://github.com/example/repo-004/pull/4 last: needs-decision [key=large-004]" \
+    "a decision event lost its capped text"
+  assert_contains "$compact" "orphan-01" "the compact view dropped orphan status logs"
+
+  full=$(run_named_harness_session_start claude "$home" "$root" "$fakebin:$BASE_PATH" \
+    --reemit --source compact)
+  full_bytes=$(printf '%s\n' "$full" | LC_ALL=C wc -c | tr -d ' ')
+  [ "$full_bytes" -gt "$((limit * 3))" ] \
+    || fail "the large-fleet fixture is too small to prove the bound: full view only $full_bytes bytes"
+  assert_not_contains "$full" "COMPACT POST-COMPACTION VIEW" "a run without --compact rendered the compact view"
+  assert_contains "$full" "HOLD-REASON-BODY" "the full view lost its hold reasons"
+  assert_contains "$full" "CAPTAIN-TAIL-MARKER" "the full view lost data/captain.md"
+  assert_contains "$full" "LEARNINGS-TAIL-MARKER" "the full view lost data/learnings.md"
+
+  pass "compact post-compaction view of a 185-task, 195-held fleet is $compact_bytes bytes (full view $full_bytes) and keeps the wake queue and acknowledgement"
+}
+
+test_compact_view_manual_backend_caps_title_lines() {
+  local rec root home fakebin out long_title
+  rec=$(new_world compact-manual)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+  printf '%s\n' manual > "$home/config/backlog-backend"
+  write_long_body_backlog "$home/data/backlog.md"
+  long_title=$(printf 'LONG-HOLD-REASON %.0s' $(seq 1 20))
+  # Insert under ## Queued, ahead of the Done section write_long_body_backlog ends with.
+  awk -v item="- [ ] wide-held - Wide held item (repo: firstmate) (kind: ship) (hold: $long_title) (hold-kind: captain)" '
+    { print }
+    /^## Queued/ { print item }
+  ' "$home/data/backlog.md" > "$home/data/backlog.md.tmp" && mv "$home/data/backlog.md.tmp" "$home/data/backlog.md"
+
+  out=$(run_named_harness_session_start claude "$home" "$root" "$fakebin:$BASE_PATH" --reemit --compact --source compact)
+
+  assert_contains "$out" "COMPACT POST-COMPACTION VIEW" "--compact did not label its manual-backend view"
+  assert_contains "$out" "- [ ] compact-startup - Compact startup digest" \
+    "the compact manual view dropped the in-flight title line"
+  assert_contains "$out" "- [ ] wide-held - Wide held item" "the compact manual view dropped a held title line"
+  assert_contains "$out" " [truncated]" "the compact manual view did not cap a wide title line"
+  assert_not_contains "$out" "OVERSIZED-BODY-LINE" "the compact manual view leaked a task body"
+  assert_not_contains "$out" "DONE-ROW-LINE" "the compact manual view listed a done row"
+
+  pass "compact manual-backend backlog view keeps every title line, capped, without bodies or done rows"
+}
+
 test_agents_baseline_stays_at_true_start_and_reemits_on_every_drifted_pi_compact() {
   local rec root home fakebin startup compact_equal compact_first compact_second clear_out resume_out reset_out baseline baseline_after expected_hash refresh_line bootstrap_line
   rec=$(new_world agents-refresh)
@@ -2669,6 +2921,8 @@ test_portable_timeout_escalates_term_resistant_process
 test_runtime_bound_leaves_a_healthy_digest_untouched
 test_runtime_bound_leaves_harness_ancestry_headroom
 test_reemit_skips_startup_sweeps_but_keeps_the_wake_drain
+test_compact_view_stays_bounded_for_a_large_fleet
+test_compact_view_manual_backend_caps_title_lines
 test_agents_baseline_stays_at_true_start_and_reemits_on_every_drifted_pi_compact
 test_read_only_pi_compact_refreshes_against_its_own_session_identity
 test_codex_unreachable_reset_sources_do_not_claim_instruction_refresh

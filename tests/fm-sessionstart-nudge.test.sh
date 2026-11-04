@@ -206,6 +206,7 @@ run_hook_pi() {  # <root> [args...]
 # was won in the test environment.
 FULL_BANNER="SESSION START - "
 REEMIT_BANNER="SESSION START (CONTEXT RE-EMIT) - "
+COMPACT_VIEW="COMPACT POST-COMPACTION VIEW"
 
 test_run_startup_runs_the_full_digest() {
   local root="$TMP_ROOT/run-startup" out status=0
@@ -216,6 +217,7 @@ test_run_startup_runs_the_full_digest() {
   assert_contains "$out" "lock acquired: harness pid" \
     "the portable startup fixture did not supply a real harness process"
   assert_not_contains "$out" "$REEMIT_BANNER" "startup was misrouted to a context re-emit"
+  assert_not_contains "$out" "$COMPACT_VIEW" "startup rendered the compact post-compaction view"
   assert_not_contains "$out" "FIRSTMATE_OP" "a run-tier open also emitted the nudge instruction"
   assert_contains "$out" "NEXT STEP" "the run wrapper did not deliver a complete digest"
   pass "run wrapper: startup runs the full digest and never also nudges"
@@ -236,8 +238,13 @@ test_run_clear_and_compact_reemit() {
     assert_contains "$out" "are NOT repeated" "$source did not report the skipped startup sweeps"
     assert_contains "$out" "Queued wakes ARE still drained" "$source did not preserve the wake-queue drain"
     assert_not_contains "$out" "FIRSTMATE_OP" "a $source open also emitted the nudge instruction"
+    if [ "$source" = compact ]; then
+      assert_contains "$out" "$COMPACT_VIEW" "compact did not select the compact post-compaction view"
+    else
+      assert_not_contains "$out" "$COMPACT_VIEW" "clear rendered the compact view instead of the full digest"
+    fi
   done
-  pass "run wrapper: clear and compact re-emit the digest without repeating startup sweeps"
+  pass "run wrapper: clear and compact re-emit the digest without repeating startup sweeps, compact in its bounded view"
 }
 
 test_run_rebuild_forwards_source_to_drifted_instruction_refresh() {
@@ -277,6 +284,8 @@ test_run_compact_without_completion_refreshes_before_finishing_startup() {
     "compact skipped full startup when no completed startup could be proven"
   assert_contains "$out" "INCOMPLETE_START_AGENTS=current" \
     "compact after an incomplete startup did not conservatively inject current instructions"
+  assert_contains "$out" "$COMPACT_VIEW" \
+    "compact recovery re-delivered the full digest instead of the compact view"
   refresh_line=$(printf '%s\n' "$out" | grep -n '^CURRENT AGENTS.md - INSTRUCTION REFRESH$' | head -1 | cut -d: -f1)
   bootstrap_line=$(printf '%s\n' "$out" | grep -n '^BOOTSTRAP$' | head -1 | cut -d: -f1)
   [ -n "$refresh_line" ] && [ -n "$bootstrap_line" ] && [ "$refresh_line" -lt "$bootstrap_line" ] \
@@ -933,6 +942,63 @@ JS
   pass "Pi retains a bounded digest prefix and loudly marks oversized preflight delivery"
 }
 
+# The Pi extension's compaction path is the one that re-delivered the full
+# digest after every compaction. Drive both public events against a recording
+# fm-session-start.sh and prove compaction selects the compact view while a
+# true startup keeps the full one.
+test_pi_compaction_selects_the_compact_view() {
+  local fixture out status=0
+  command -v node >/dev/null 2>&1 || {
+    echo "skip: node not found for Pi compaction view selection test"
+    return 0
+  }
+  fixture="$TMP_ROOT/pi-compact-view"
+  mkdir -p "$fixture/.pi/extensions/lib" "$fixture/bin" "$fixture/state" "$fixture/data" "$fixture/config"
+  git init -q -b main "$fixture"
+  git -C "$fixture" commit -q --allow-empty -m init
+  : > "$fixture/AGENTS.md"
+  cp "$ROOT/.pi/extensions/fm-primary-turnend-guard.ts" "$fixture/.pi/extensions/"
+  cp "$ROOT/.pi/extensions/lib/fm-operational-input.ts" \
+    "$ROOT/.pi/extensions/lib/fm-sessionstart-supervisor.mjs" "$fixture/.pi/extensions/lib/"
+  cp "$ROOT/bin/fm-sessionstart-run.sh" "$ROOT/bin/fm-sessionstart-nudge.sh" \
+    "$ROOT/bin/fm-primary-scope-lib.sh" "$ROOT/bin/fm-gate-refuse-lib.sh" \
+    "$ROOT/bin/fm-hook-host-lib.sh" "$ROOT/bin/fm-session-lock-lib.sh" \
+    "$ROOT/bin/fm-operational-input.sh" "$fixture/bin/"
+  cat > "$fixture/bin/fm-session-start.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'DIGEST_ARGS:%s\n' "$*"
+SH
+  chmod +x "$fixture/bin/"*.sh
+
+  out=$(EXT="$fixture/.pi/extensions/fm-primary-turnend-guard.ts" \
+    FM_HOME="$fixture" FM_ROOT_OVERRIDE="$fixture" FM_GATE_REFUSE_BYPASS=1 \
+    node --input-type=module 2>&1 <<'JS'
+import { pathToFileURL } from "node:url";
+const handlers = new Map();
+const sent = [];
+const pi = {
+  on(event, handler) { handlers.set(event, handler); },
+  sendMessage(message) { sent.push(message); },
+};
+const extension = await import(`${pathToFileURL(process.env.EXT).href}?compactview=${Date.now()}`);
+extension.default(pi);
+const ctx = { sessionManager: { getEntries: () => [], getSessionId: () => "compact-view" } };
+handlers.get("session_start")({ reason: "startup" }, ctx);
+const startup = await handlers.get("before_agent_start")({ prompt: "test" }, ctx);
+const startupContent = startup?.message?.content ?? "";
+if (!/DIGEST_ARGS:--source startup\b/.test(startupContent)) throw new Error(`startup did not run the full digest: ${startupContent}`);
+if (startupContent.includes("--compact")) throw new Error("startup selected the compact view");
+await handlers.get("session_compact")({}, ctx);
+if (sent.length !== 1) throw new Error(`expected one post-compaction delivery, got ${sent.length}`);
+const compactContent = sent[0].content;
+if (!/DIGEST_ARGS:--compact --source compact\b/.test(compactContent)) throw new Error(`compaction did not select the compact view: ${compactContent}`);
+JS
+  ) || status=$?
+  expect_code 0 "$status" "Pi compaction view selection"
+  [ -z "$out" ] || fail "Pi compaction view selection printed output: $out"
+  pass "Pi compaction re-delivers the compact view while a true startup keeps the full digest"
+}
+
 test_run_resume_delegates_to_the_nudge() {
   local root="$TMP_ROOT/run-resume" out status=0
   make_run_primary "$root"
@@ -1037,3 +1103,4 @@ test_pi_startup_classifies_cli_continuations
 test_pi_sessionstart_generation_prerequisite
 test_pi_reload_releases_sessionstart_exit_listener
 test_pi_large_sessionstart_digest_is_delivered_loudly
+test_pi_compaction_selects_the_compact_view

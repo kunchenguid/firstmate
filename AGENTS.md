@@ -167,6 +167,7 @@ Run-tier harness surfaces run this command for you at session open while the res
 
 Read the complete digest once and trust it as this turn's startup and recovery input.
 If the harness shows only a preview and persists the full output to a file, read that file before acting.
+A context compaction re-delivers a bounded compact view instead, which re-inlines curated memory only as a size-bounded head of each file, marks every cut file `(truncated - read <path> for the rest)`, and discloses every omission; `bin/fm-session-start.sh --compact` owns what it keeps.
 Do not separately re-read the context, backlog, metadata, or bulk status inputs it just printed unless a source was reported absent or corrupt, older history is specifically needed, or a targeted workflow must inspect before writing.
 An `ABSENT` captain, shared-captain, secondmate, or learnings file means the firstmate repo's built-in defaults, no shared captain preferences, no registered secondmates, or no captured learnings; rebuild an absent or stale project registry from the clones before dispatch.
 
