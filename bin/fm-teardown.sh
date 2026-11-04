@@ -1805,10 +1805,9 @@ content_in_default() {
 # default branch (fallback, which also covers the no-PR and gh-error paths). False
 # when neither proof establishes that the work landed.
 work_is_landed() {
-  local branch=$1 had_pr_url=0
-  [ -z "$PR_URL" ] || had_pr_url=1
+  local branch=$1
   if pr_is_merged "$branch"; then
-    [ "$had_pr_url" = 1 ] && PR_MERGE_PROVEN=1
+    PR_MERGE_PROVEN=1
     return 0
   fi
   content_in_default
@@ -1818,9 +1817,9 @@ work_is_landed() {
 # report as the held deliverable, while a force-closed scout is recorded as
 # discarded with no report. A local-only ship lands on local main. A ship
 # carries its PR as a merged link when a local merge record matches that URL,
-# or when pr_is_merged already confirmed this recorded URL. The local-record
-# check runs here, while those records still exist: cleanup removes them
-# before the close runs. An unproven GitHub or Forgejo PR is the open-PR note.
+# or when pr_is_merged already confirmed this PR. The local-record check
+# runs here, while those records still exist: cleanup removes them before the
+# close runs. An unproven GitHub or Forgejo PR is the open-PR note.
 BACKLOG_DONE_ARGS=()
 backlog_done_args() {
   local data_relative close_mode
