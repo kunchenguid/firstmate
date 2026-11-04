@@ -1,0 +1,18 @@
+# Lab transcript: away spend cap counts only working workers
+# Ran on head b8fc6517 (fix/spend-cap-working-only), before the tmux-isolation test fix
+== 1 working + 1 paused, cap 2
+t-working -> state: working · source: pane · harness busy (claude-hook)
+t-paused -> state: paused · source: status-log · waiting on review
+live-workers: 1
+-- fresh spawn:
+passed the spend-cap check; stopped later at: 
+== 2 working + 1 paused, cap 2
+t-second -> state: working · source: pane · harness busy (claude-hook)
+live-workers: 2
+-- fresh spawn:
+error: spawn refused - the away-posture record caps concurrent workers at 2 and 2 ordinary task(s) are live in this home; task task-new stays queued for the captain's return or for a worker to finish (spend cap: bin/fm-afk-contract.sh)
+== endpoint gone (window removed) and unreachable (bad target)
+t-second -> state: unknown · source: none · backend target gone: lab:w3
+live-workers: 1
+t-unsure -> state: unknown · source: none · backend unreachable (tmux endpoint state: unreadable)
+live-workers (working + unknown): 2
