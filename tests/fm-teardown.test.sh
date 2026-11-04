@@ -689,7 +689,7 @@ make_path_without_lsof() {  # <case-dir>
   local case_dir=$1 path_dir="$1/path-without-lsof" cmd resolved
   mkdir -p "$path_dir"
   for cmd in awk bash basename cat chmod cp cut date dirname env find git grep head hostname id ln \
-    mkdir mktemp mv perl ps readlink realpath rm sed sh sleep sort stat tail timeout tr uname wc xargs; do
+    mkdir mktemp mv node perl ps readlink realpath rm sed sh sleep sort stat tail timeout tr uname wc xargs; do
     resolved=$(command -v "$cmd" 2>/dev/null) || continue
     case "$resolved" in /*) ln -sf "$resolved" "$path_dir/$cmd" ;; esac
   done
@@ -5398,6 +5398,29 @@ test_orca_worktree_with_a_spared_process_is_not_removed() {
   pass "an Orca worktree that a spared process occupies is kept and the records survive for a retry"
 }
 
+test_missing_lsof_does_not_block_orca_or_tasktmp_removal() {
+  local case_dir rc path_without_lsof mode flag
+  for mode in plain force; do
+    flag=
+    [ "$mode" != force ] || flag=--force
+    case_dir=$(make_case "no-lsof-orca-tasktmp-$mode")
+    write_meta "$case_dir" no-mistakes ship
+    printf '%s\n' "tasktmp=$case_dir/tasktmp" >> "$case_dir/state/task-x1.meta"
+    mkdir -p "$case_dir/tasktmp"
+    land_shippable_commit "$case_dir"
+    configure_orca_teardown_case "$case_dir"
+    path_without_lsof=$(make_path_without_lsof "$case_dir")
+    rc=0
+    FM_ORCA_CASE="$case_dir" FM_TEARDOWN_TEST_PATH="$path_without_lsof" \
+      run_teardown "$case_dir" $flag > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+    expect_code 0 "$rc" "no-lsof-orca-$mode: a missing lsof must not block teardown: $(cat "$case_dir/stderr")"
+    assert_present "$case_dir/removal.log" "no-lsof-orca-$mode: the Orca worktree was not removed"
+    assert_absent "$case_dir/tasktmp" "no-lsof-orca-$mode: tasktmp was kept because lsof is missing"
+    assert_absent "$case_dir/state/task-x1.meta" "no-lsof-orca-$mode: the task record was not retired"
+  done
+  pass "a missing lsof falls back to base behavior for Orca and tasktmp removal, with and without force"
+}
+
 test_tasktmp_with_a_spared_process_is_not_deleted() {
   local case_dir rc pid
   case_dir=$(make_case tasktmp-occupied)
@@ -7051,6 +7074,7 @@ test_late_work_refusal_leaves_no_close_marker_for_startup_replay
 test_orca_work_saved_during_the_wait_is_not_removed
 test_late_write_is_still_returned_with_force
 test_orca_worktree_with_a_spared_process_is_not_removed
+test_missing_lsof_does_not_block_orca_or_tasktmp_removal
 test_tasktmp_with_a_spared_process_is_not_deleted
 test_herdr_pane_close_does_not_orphan_task_owned_children
 test_reparented_child_in_endpoint_session_is_reaped

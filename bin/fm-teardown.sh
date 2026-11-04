@@ -2528,6 +2528,7 @@ teardown_spared_pids_in_worktree() {  # [dir]
 
 teardown_survivors_settled() {  # <dir>
   local survivors waits=0
+  [ "$TEARDOWN_CWD_UNLISTABLE" != 1 ] || return 0
   survivors=$(teardown_spared_pids_in_worktree "$1")
   while [ -n "$survivors" ] && [ "$waits" -lt 20 ]; do
     sleep 0.25
