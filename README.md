@@ -45,9 +45,8 @@ Launching a supported harness inside it for your primary session instantiates yo
 - **Project Director** - the persistent context owner for one project.
 - **Builder** - an implementation worker that produces an authorized project change.
 - **Investigator** - a knowledge-only worker that produces a standalone report.
-- **Reviewer** - an independent review role that evaluates work without owning its implementation.
 
-Existing `fm-*` commands, `ship`/`scout`/`secondmate` task kinds, configuration keys, filenames, and persisted records remain supported as compatibility identifiers.
+Existing `fm-*` commands, `ship`/`scout`/`secondmate` task kinds, configuration keys, filenames, persisted records, and runtime labels such as `2ndmate-*` remain supported as compatibility identifiers.
 New prompts, documentation, and user-visible output use the Director role names.
 
 ## Features
@@ -132,7 +131,7 @@ Start `omp` with this checkout as its working directory: it auto-discovers the t
 
 For Grok, `--trust` is needed once per clone so project hooks and the turn-end guard load; `/hooks-trust` inside Grok works too.
 For Pi, approve the project trust prompt once per clone on first launch so the tracked `.pi/extensions/*.ts` files auto-load.
-The `/calm` toggle on Pi, and on Claude Code behind its default-off early-access function-hooks flag, hides supported transcript chrome, including canonically classified Firstmate operational user rows, and uses a Calm-only animated working boat during active runs while preserving all model context and session data.
+The `/calm` toggle on Pi, and on Claude Code behind its default-off early-access function-hooks flag, hides supported transcript chrome, including canonically classified Firstmate operational user rows, and uses a Calm-only animated activity indicator during active runs while preserving all model context and session data.
 Calm changes only presentation, not the user-role delivery, ordering, authority, persistence, or exports of the operational inputs it hides.
 The preference persists for the effective Firstmate home, and toggling it off restores ordinary rendering.
 [Calm's current behavior and supported limits](docs/calm.md) are separate from its [version-scoped maintainer evidence](docs/calm-mode-feasibility.md).
@@ -169,12 +168,12 @@ Setup guides for tmux (the default) and every other supported backend (herdr, ze
  │ writes guarded backlog/briefs/state │
  └──┬──────────────┬───────────────┬───┘
     │ backend sends / status files │
-    ▼              ▼               ▼
- ┌────────┐   ┌────────┐      ┌────────┐
- │fm-task1│   │fm-task2│  ... │fm-taskN│   one visible task endpoint each
- │Builder │   │Invest. │      │Reviewer│   one autonomous agent each
- └───┬────┘   └───┬────┘      └───┬────┘
-     ▼            ▼               ▼
+    ▼              ▼
+ ┌────────┐   ┌────────┐
+ │fm-task1│   │fm-task2│  ...      one visible task endpoint each
+ │Builder │   │Invest. │           one autonomous agent each
+ └───┬────┘   └───┬────┘
+     ▼            ▼
   treehouse worktree, Orca worktree, or isolated Project Director home
      │
      ├─ Builder: project mode ► PR/local merge ► cleanup

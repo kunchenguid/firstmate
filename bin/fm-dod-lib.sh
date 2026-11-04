@@ -284,7 +284,7 @@ fm_ship_rule_one() {  # <no-mistakes|direct-PR|local-only> <task-id> [branch] [<
   fm_base_branch_valid "$base" "$mode" "$forge" fm_ship_rule_one || return 1
   [ -z "$base" ] || target="the base branch \`$base\` or the default branch"
   if [ "$forge" = gerrit ]; then
-    printf '%s\n' "1. Never push with git and never create a change except through the one \`gerrit-axi publish --squash\` your Definition of done names. Never run \`gerrit-axi submit\`, never vote or review a change by any path, including \`gerrit review\` or a label option on a push, and never abandon one: a Reviewer approves and submits it on the server."
+    printf '%s\n' "1. Never push with git and never create a change except through the one \`gerrit-axi publish --squash\` your Definition of done names. Never run \`gerrit-axi submit\`, never vote or review a change by any path, including \`gerrit review\` or a label option on a push, and never abandon one: an authorized reviewer approves and submits it on the server."
     return 0
   fi
   if [ "$forge" = external ]; then
@@ -292,7 +292,7 @@ fm_ship_rule_one() {  # <no-mistakes|direct-PR|local-only> <task-id> [branch] [<
     prefix=$(fm_ship_branch_prefix "$branch" "$id")
     [ -z "$prefix" ] || prefixed=" or any \`$prefix\`-prefixed branch"
     fm_external_review_backup || return 1
-    printf '%s' "1. Never push to \`origin\`, or to any remote whose URL is the project's shared server, and never push your \`$branch\` branch$prefixed to any remote. The review tool named in your Definition of done uploads its own snapshot, so publishing needs no push. Never approve, merge, or move the review past the stopping point your Definition of done names; the user or a Reviewer does that."
+    printf '%s' "1. Never push to \`origin\`, or to any remote whose URL is the project's shared server, and never push your \`$branch\` branch$prefixed to any remote. The review tool named in your Definition of done uploads its own snapshot, so publishing needs no push. Never approve, merge, or move the review past the stopping point your Definition of done names; the user or an authorized reviewer does that."
     if [ -n "$FM_REVIEW_BACKUP_REMOTE" ]; then
       printf ' %s' "The one push you may make is a durable copy to the personal backup remote \`$FM_REVIEW_BACKUP_REMOTE\`: \`git push $FM_REVIEW_BACKUP_REMOTE HEAD:refs/heads/$FM_REVIEW_BACKUP_PREFIX$id\`."
     fi
@@ -401,11 +401,11 @@ fm_brief_task_content_valid() {  # <file>
   [ -n "$(printf '%s' "$task" | tr -d '[:space:]')" ]
 }
 
-# Print the first `## User's intent` body line that opens with an operator
-# address spelling; fail when there is none. The body is never rewritten.
+# Print the first `## User's intent` body line that opens with a speaker label
+# or direct address; fail when there is none. The body is never rewritten.
 fm_brief_intent_address_line() {  # <file>
   fm_brief_task_heading_body "$1" "## User's intent" | awk '
-    /^[[:space:]]*(Captain('\''s (words|ask|intent))?:|Captain,)/ { print; found = 1; exit }
+    /^[[:space:]]*((User|Captain)('\''s (words|ask|intent))?:|(User|Captain),)/ { print; found = 1; exit }
     END { exit !found }
   '
 }
@@ -499,7 +499,7 @@ Publish from this copy with \`gerrit-axi\`, never with \`git push\`:
 Then append \`done [at=<epoch>]: PR {change url} published for review\` to the status file and stop. You are finished.
 That \`done:\` is accepted only when the change's current patch set on the server carries this copy's HEAD tree, so commit nothing after publishing; if you must change the work, commit it and publish again before reporting done.
 A \`done:\` whose URL is not the canonical \`https://<host>/c/<project>/+/<number>\` change URL is refused.
-There is no pull request, no \`gh-axi\` call, and no forge CI result to report: a Reviewer approves and submits the change on the server, and the Director relays that outcome.
+There is no pull request, no \`gh-axi\` call, and no forge CI result to report: an authorized reviewer approves and submits the change on the server, and the Director relays that outcome.
 EOF
 }
 

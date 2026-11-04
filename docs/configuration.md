@@ -13,10 +13,10 @@ Firstmate uses the following human-facing role model in new prompts, documentati
 | Project Director | Persistent owner of context for one project | `secondmate` task kind, flags, config keys, file names, and persisted records |
 | Builder | Implementation worker | `ship` task kind, branch metadata, commands, file names, and persisted records |
 | Investigator | Knowledge-only worker | `scout` task kind, report metadata, commands, file names, and persisted records |
-| Reviewer | Independent review role | Existing review task and reviewer identifiers |
 | user | Human who directs the work | `captain` preference files, hold metadata, legacy brief headings, and persisted records |
 
 Compatibility identifiers are stable machine interfaces and are not role names for new human-facing output.
+Runtime labels such as `2ndmate-*` remain visible where changing them would break workspace adoption and cleanup across existing homes.
 Readers accept legacy `## Captain's intent`, `## Firstmate spec`, and `Ship branch:` fields, while new briefs emit `## User's intent`, `## Director spec`, and `Builder branch:`.
 User-decision records now emit `User hold set:`, `User hold origin:`, `User decision:`, and `User hold reconciled:` markers; readers continue to accept the legacy `Captain ...` forms already stored in installed homes.
 The `fm-*` command prefix and the Firstmate product name remain unchanged.

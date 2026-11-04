@@ -1269,13 +1269,13 @@ apply_pending_retained_artifact() {  # <task-id>
   esac
 }
 
-# A captain hold is released only in an attended session. The away daemon flag
+# A user hold is released only in an attended session. The away daemon flag
 # (state/.afk, bin/fm-wake-lib.sh fm_afk_mode) and the posture record
 # (state/.afk-contract, bin/fm-afk-contract.sh mode) are both read: either one
-# reading away refuses, a quiet record is a present captain, and no record is
+# reading away refuses, a quiet record means the user is present, and no record is
 # attended. The check runs before any write, so a refusal leaves the hold and
 # the body untouched.
-RELEASE_AWAY_REASON='the away-posture record exists, and a captain hold is released only by the captain in an attended session; retry --release after the return archives the record'
+RELEASE_AWAY_REASON='the away-posture record exists, and a user hold is released only by the user in an attended session; retry --release after the return archives the record'
 release_attended() {
   if [ -e "$STATE/.afk" ] && [ "$(fm_afk_mode "$STATE")" = away ]; then
     return 1

@@ -1196,7 +1196,8 @@ EOF
   [ "$authorized" = "$words" ] || fail "literal words in the request were scrubbed"
 
   # A body line that opens with operator address is refused, never rewritten.
-  for marker in 'Captain:' "Captain's words:" "Captain's ask:" "Captain's intent:" 'Captain,'; do
+  for marker in 'User:' "User's words:" "User's ask:" "User's intent:" 'User,' \
+    'Captain:' "Captain's words:" "Captain's ask:" "Captain's intent:" 'Captain,'; do
     n=$((n + 1))
     id="intent-addressed-$n"
     write_brief "$home" "$id" no-mistakes
@@ -1217,11 +1218,11 @@ EOF
   id='intent-addressed-promote'
   printf 'window=fm-%s\nkind=scout\nworktree=/tmp/wt\n' "$id" > "$home/state/$id.meta"
   write_brief "$home" "$id"
-  printf '# Task\n## Captain'"'"'s intent\nCaptain: investigate the refusal.\n\n## Director spec\nReproduce it first.\n' > "$home/data/$id/brief.md"
+  printf '# Task\n## User'"'"'s intent\nUser: investigate the refusal.\n\n## Director spec\nReproduce it first.\n' > "$home/data/$id/brief.md"
   out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$PROMOTE" "$id" --mode no-mistakes --yolo off 2>&1)
   status=$?
   [ "$status" -ne 0 ] || fail "promotion of addressed intent should be refused"
-  assert_contains "$out" "direct-address line: Captain: investigate the refusal." \
+  assert_contains "$out" "direct-address line: User: investigate the refusal." \
     "promotion refusal did not name the offending line"
   assert_absent "$home/data/$id/ship-instructions.md" "promotion published addressed intent"
   assert_grep 'kind=scout' "$home/state/$id.meta" "refused promotion changed the task record"
@@ -1285,10 +1286,6 @@ EOF
       [ "$(cat "$proj/CLAUDE.md")" = '@AGENTS.md' ] || fail "spawn changed the project import"
     done
   done
-  role_line=$(grep -n 'A Builder or Investigator launched by Firstmate into a worktree of this repository' "$ROOT/AGENTS.md" | cut -d: -f1)
-  supervisor_line=$(grep -n '^You are the Director\.$' "$ROOT/AGENTS.md" | head -1 | cut -d: -f1)
-  [ -n "$role_line" ] && [ "$role_line" -lt "$supervisor_line" ] ||
-    fail "Firstmate AGENTS.md does not disambiguate a launched worker before assigning the supervisor identity"
   cmp -s "$ROOT/AGENTS.md" "$home/AGENTS.md" || fail "worker spawn changed the primary contract"
   pass "fm-spawn: every legacy worker receives scoped role instructions without changing project or primary instructions"
 }

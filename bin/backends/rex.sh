@@ -199,13 +199,13 @@ fm_backend_rex_version_check() {  # [start|read]
 fm_backend_rex_local_server_ensure() {
   local endpoint
   endpoint=$(fm_backend_rex_server_endpoint) || {
-    echo "error: could not determine the Rex server endpoint; Rex workers need a Rex server on this machine. For work on another host, use remote second mates (docs/remote-secondmates.md)" >&2
+    echo "error: could not determine the Rex server endpoint; Rex workers need a Rex server on this machine. For work on another host, use remote Project Directors (docs/remote-secondmates.md)" >&2
     return 1
   }
   case "$endpoint" in
     unix://*) return 0 ;;
   esac
-  echo "error: Rex server endpoint '$endpoint' is not proven to be on this machine; Rex workers need a Rex server on this machine. For work on another host, use remote second mates (docs/remote-secondmates.md)" >&2
+  echo "error: Rex server endpoint '$endpoint' is not proven to be on this machine; Rex workers need a Rex server on this machine. For work on another host, use remote Project Directors (docs/remote-secondmates.md)" >&2
   return 1
 }
 
@@ -403,7 +403,7 @@ fm_backend_rex_create_task() {  # <label> <cwd> [launcher-home|other-home] [spaw
         bid=$(printf '%s' "$out" | jq -r '.initial_windows[0].block_ids[0] // empty' 2>/dev/null)
         if [ "$relationship" = other-home ] && [ -n "${REX_SESSION:-}" ]; then
           fm_backend_rex_cli session move "$sid" --after "$REX_SESSION" >/dev/null 2>&1 \
-            || echo "warning: could not place Rex secondmate session $sid after its launcher session" >&2
+            || echo "warning: could not place Rex Project Director session $sid after its launcher session" >&2
         fi
         ;;
       1) sid=$sessions ;;
@@ -424,7 +424,7 @@ fm_backend_rex_create_task() {  # <label> <cwd> [launcher-home|other-home] [spaw
     bid=$FM_BACKEND_REX_NEW_BLOCK
     if [ "$relationship" = other-home ] && [ "$count" -ne 0 ]; then
       fm_backend_rex_cli window move -s "$sid" "$wid" --index 1 >/dev/null 2>&1 \
-        || echo "warning: could not move the respawned Rex secondmate tab $wid to the first position" >&2
+        || echo "warning: could not move the respawned Rex Project Director tab $wid to the first position" >&2
     fi
   fi
   fm_backend_rex_session_unlock
