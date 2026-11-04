@@ -227,21 +227,29 @@ elif [ "$watcher_healthy" = false ]; then
     "$queue_pending" && queue_arg=1
     x_mode=0
     [ -f "$CONFIG/x-mode.env" ] && x_mode=1
-    fix=$("$SCRIPT_DIR/fm-supervision-instructions.sh" \
-      --read-only "$READ_ONLY" \
-      --afk "$afk" \
-      --afk-mode "$(fm_afk_mode "$STATE")" \
-      --x-mode "$x_mode" \
-      --queue-pending "$queue_arg" \
-      --repair-line 2>/dev/null || printf '%s\n' 'Repair missing watcher supervision according to the session-start operating block.')
+    fix=
+    if [ "$watcher_down_reason" != unverified-supervision ]; then
+      fix=$("$SCRIPT_DIR/fm-supervision-instructions.sh" \
+        --read-only "$READ_ONLY" \
+        --afk "$afk" \
+        --afk-mode "$(fm_afk_mode "$STATE")" \
+        --x-mode "$x_mode" \
+        --queue-pending "$queue_arg" \
+        --repair-line 2>/dev/null || printf '%s\n' 'Repair missing watcher supervision according to the session-start operating block.')
+    fi
     rule='━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━'
     {
       printf '●%s\n' "$rule"
-      printf '●  WATCHER DOWN - SUPERVISION IS OFF\n'
-      if [ "$watcher_down_reason" = no-watcher ]; then
-        watcher_cause=$(printf 'no live watcher process holds this home lock (last beat: %s)' "$beacon_desc")
+      if [ "$watcher_down_reason" = unverified-supervision ]; then
+        printf '●  SUPERVISION UNVERIFIED - availability is not established\n'
+        watcher_cause=$(printf 'supervision lifecycle and wake delivery are unverified (last beat: %s)' "$beacon_desc")
       else
-        watcher_cause=$(printf 'no watcher has a fresh beacon (last beat: %s, grace %ss)' "$beacon_desc" "$GRACE")
+        printf '●  WATCHER DOWN - SUPERVISION IS OFF\n'
+        if [ "$watcher_down_reason" = no-watcher ]; then
+          watcher_cause=$(printf 'no live watcher process holds this home lock (last beat: %s)' "$beacon_desc")
+        else
+          watcher_cause=$(printf 'no watcher has a fresh beacon (last beat: %s, grace %ss)' "$beacon_desc" "$GRACE")
+        fi
       fi
       if [ "$in_flight" -gt 0 ]; then
         printf '●  %s task(s) in flight, but %s.\n' "$in_flight" "$watcher_cause"
@@ -252,18 +260,24 @@ elif [ "$watcher_healthy" = false ]; then
       else
         printf '●  X-mode relay polling needs supervision, but %s.\n' "$watcher_cause"
       fi
-      if [ "$READ_ONLY" -eq 1 ]; then
+      if [ "$watcher_down_reason" = unverified-supervision ]; then
+        printf '●  Do not infer watcher recovery or wake delivery from extension markers.\n'
+      elif [ "$READ_ONLY" -eq 1 ]; then
         printf '●  This read-only session should report the lapse, not repair it.\n'
       else
         printf '●  Trust the emitted supervision protocol for this harness; do not use shell & for watcher repair.\n'
       fi
       printf '●  %s\n' "$CONTINUE_LINE"
-      printf '●  %s\n' "$fix"
+      [ -z "$fix" ] || printf '●  %s\n' "$fix"
       printf '●%s\n' "$rule"
     } >&2
   else
-    printf 'WARNING: watcher still down (same stale episode; last beat: %s, grace %ss) - full banner already printed this episode.\n' \
-      "$beacon_desc" "$GRACE" >&2
+    if [ "$watcher_down_reason" = unverified-supervision ]; then
+      printf 'WARNING: supervision remains unverified - full banner already printed this episode.\n' >&2
+    else
+      printf 'WARNING: watcher still down (same stale episode; last beat: %s, grace %ss) - full banner already printed this episode.\n' \
+        "$beacon_desc" "$GRACE" >&2
+    fi
   fi
 else
   # Healthy again while work is still in flight: end the episode so a later

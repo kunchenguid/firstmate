@@ -2855,6 +2855,26 @@ EOF
   pass "session start emits exactly one detected harness block and reports Pi extension load state"
 }
 
+test_pig_session_start_configures_branch_supervision_without_claiming_lifecycle_verification() {
+  local rec root home fakebin out
+  rec=$(new_world pig-branch-extension-config)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_harness "$fakebin" pig
+
+  out=$(FM_FAKE_HARNESS=pig run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  assert_contains "$out" "PIG_WATCH_EXTENSION: not loaded" "PiG extension diagnostic missing"
+  assert_contains "$out" "-e $root/.pi/extensions/fm-primary-turnend-guard.ts -e $root/.pi/extensions/fm-primary-pi-watch.ts -e $root/.pi/extensions/fm-branch-supervision.ts" \
+    "PiG session-start recovery omitted a supervision extension"
+  assert_contains "$out" "Only /ahoy and /bearings registration and skill handoff are verified" \
+    "PiG session-start overstated verified support"
+  assert_contains "$out" "watcher restoration, wake delivery, background-wake coverage, lifecycle recovery, and direct TUI behavior are unverified" \
+    "PiG session-start treated extension configuration as lifecycle proof"
+  pass "PiG session-start configures branch supervision without claiming lifecycle verification"
+}
+
 test_pi_signed_primary_uses_pi_extensions_without_identity_normalization() {
   local rec root home fakebin out
   rec=$(new_world pi-signed-supervision-block)
@@ -2983,6 +3003,51 @@ EOF
   assert_not_contains "$out" "PI_WATCH_EXTENSION" "omp primary must not receive the Pi diagnostic"
   assert_not_contains "$out" "project trust" "omp diagnostic must not carry Pi's trust prerequisite"
   pass "session start emits the omp block and reports omp extension load state"
+}
+
+test_pi_supervision_accepts_live_extension_subprocess_marker() {
+  local rec root home fakebin child pig_pid bindir i
+  rec=$(new_world pi-extension-subprocess-marker)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  install_pi_turnend_extension_fixture "$root"
+  install_pi_watch_extension_fixture "$root"
+  install_omp_extension_fixtures "$root"
+  bindir="$home/pig-bin"
+  mkdir -p "$bindir"
+  ln -s "$(command -v bash)" "$bindir/pig"
+  # shellcheck disable=SC2016 # Child bash creates the PID file using its positional parameter.
+  "$bindir/pig" -c 'sleep 30 & echo $! > "$1"; wait' _ "$home/child.pid" &
+  pig_pid=$!
+  for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+    [ -s "$home/child.pid" ] && break
+    sleep 0.1
+  done
+  child=$(cat "$home/child.pid")
+  write_pi_loaded_markers "$home" "$root" "$child"
+  write_omp_loaded_markers "$home" "$root" "$child"
+  . "$ROOT/bin/fm-wake-lib.sh"
+
+  printf '%s\n' "$$" > "$home/state/.lock"
+  ! fm_pi_extension_owns_supervision "$home/state" "$root" \
+    || fail "a non-PiG primary accepted a descendant extension marker"
+  ! FM_PIG_HARNESS=pi fm_pi_extension_owns_supervision "$home/state" "$root" \
+    || fail "a non-pig FM_PIG_HARNESS value accepted a descendant extension marker"
+  ! FM_PIG_HARNESS=pig fm_pi_extension_owns_supervision "$home/state" "$root" \
+    || fail "a leaked FM_PIG_HARNESS without a pig lock owner accepted a descendant marker"
+  printf '%s\n' "$pig_pid" > "$home/state/.lock"
+  ! fm_pi_extension_owns_supervision "$home/state" "$root" \
+    && fail "a live extension subprocess of the pig lock owner was not accepted without observer harness state"
+  ! FM_PIG_HARNESS=pig fm_omp_extension_owns_supervision "$home/state" "$root" \
+    || fail "a subprocess marker relaxed the strict OMP extension proof"
+  kill "$child" 2>/dev/null || true
+  wait "$child" 2>/dev/null || true
+  ! FM_PIG_HARNESS=pig fm_pi_extension_owns_supervision "$home/state" "$root" \
+    || fail "a dead extension subprocess still vouched for primary supervision"
+  kill "$pig_pid" 2>/dev/null || true
+  wait "$pig_pid" 2>/dev/null || true
+  pass "PiG extension markers accept live subprocess descendants of a pig lock owner only"
 }
 
 test_omp_diagnostic_checkout_home_keeps_restart_wording_and_names_cause() {
@@ -3139,12 +3204,14 @@ test_quiet_record_digest_holds_nothing_for_a_return
 test_next_step_afk_legacy_empty_flag_defaults_away
 test_supervision_block_exactly_one_and_pi_diagnostic
 test_pi_signed_primary_uses_pi_extensions_without_identity_normalization
+test_pig_session_start_configures_branch_supervision_without_claiming_lifecycle_verification
 test_pi_diagnostic_rejects_stale_loaded_marker
 test_pi_diagnostic_rejects_handoff_generation_marker
 test_pi_diagnostic_accepts_prelock_loaded_marker
 test_omp_supervision_block_and_diagnostic
 test_omp_diagnostic_checkout_home_keeps_restart_wording_and_names_cause
 test_omp_diagnostic_accepts_prelock_loaded_marker
+test_pi_supervision_accepts_live_extension_subprocess_marker
 test_pi_diagnostic_rejects_missing_turnend_guard_marker
 test_pi_diagnostic_rejects_previous_session_loaded_marker
 test_runtime_bound_truncates_loudly_and_exits_zero

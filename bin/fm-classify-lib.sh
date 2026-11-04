@@ -297,6 +297,7 @@ status_is_terminal_verb() {
 # in the shared event scan, the module's two FM_CAPTAIN_RE sites - so an override
 # keeps matching a stamped event however the worker spelled the stamp; other
 # metadata and note text remain intact, as do the stored and surfaced event bytes.
+# shellcheck disable=SC2329
 status_is_captain_relevant() {
   local line=$1 verb unstamped
   [ -n "$line" ] || return 1
