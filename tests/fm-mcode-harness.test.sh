@@ -243,11 +243,18 @@ chmod +x "$fakebin/mcode"
 mv "$fakebin/tmux" "$fakebin/tmux-base"
 # FM_FAKE_MCODE_TITLE serves a live mcode's terminal title: a pane tty whose
 # foreground process is minimax-code (through the fake ps), then the title.
+# Until the launch line is typed (the launch log appears), the pane title is
+# FM_FAKE_MCODE_PRELAUNCH_TITLE: what the pane showed before this launch.
 cat > "$fakebin/tmux" <<'EOF'
 #!/bin/sh
 if [ "${1:-}" = capture-pane ] && [ -n "${FM_FAKE_MCODE_SCREEN:-}" ]; then
   printf '%s\n' "$FM_FAKE_MCODE_SCREEN"
   exit 0
+fi
+if [ "${1:-}" = display-message ] && [ -n "${FM_FAKE_LAUNCH_LOG:-}" ] && [ ! -e "$FM_FAKE_LAUNCH_LOG" ]; then
+  case "$*" in
+    *'#{pane_title}'*) printf '%s\n' "${FM_FAKE_MCODE_PRELAUNCH_TITLE:-}"; exit 0 ;;
+  esac
 fi
 if [ "${1:-}" = display-message ] && [ -n "${FM_FAKE_MCODE_TITLE:-}" ]; then
   case "$*" in
@@ -306,7 +313,16 @@ out=$(FM_FAKE_MCODE_SCREEN="$idle_tail" FM_FAKE_MCODE_TITLE='Done | wt | MCode' 
 out=$(FM_FAKE_MCODE_SCREEN="$idle_tail" FM_FAKE_MCODE_TITLE='Ready | wt | MCode' spawn_case mc-ready) \
   && fail 'a Ready screen that never ran the brief reported success'
 assert_grep 'did not start processing its brief' "$home/state/mc-ready.status" 'Ready readiness failure not recorded'
-pass "readiness gate requires a busy or finished turn before the spawn reports success; Ready alone never passes"
+# A relaunch reuses a pane that kept the previous mcode's `Done` title; that
+# stale title is no proof the new launch ran its brief.
+out=$(FM_FAKE_MCODE_SCREEN="$idle_tail" FM_FAKE_MCODE_PRELAUNCH_TITLE='Done | wt | MCode' \
+  FM_FAKE_MCODE_TITLE='Done | wt | MCode' spawn_case mc-stale-done) \
+  && fail 'a Done title the pane already showed before the launch reported success'
+assert_grep 'did not start processing its brief' "$home/state/mc-stale-done.status" 'stale Done readiness failure not recorded'
+out=$(FM_FAKE_MCODE_SCREEN="$idle_tail" FM_FAKE_MCODE_PRELAUNCH_TITLE='Done | old | MCode' \
+  FM_FAKE_MCODE_TITLE='Done | wt | MCode' spawn_case mc-new-done) \
+  || fail "a Done title new to this launch was refused: $out"
+pass "readiness gate requires a busy or finished turn before the spawn reports success; Ready alone and a stale Done never pass"
 
 refuse_case() {  # <id> <expected> [fm-spawn args...]
   local id=$1 expected=$2 refusal

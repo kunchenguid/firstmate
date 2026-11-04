@@ -5872,9 +5872,24 @@ agy_spawn_fail() {  # <detail>
 # (fm_backend_herdr_report_mcode); the report is idempotent, and repeating it
 # covers a first poll that lands before mcode owns the pane. Readiness on Herdr
 # also requires the registration to read back, because without it the
-# liveness probe would call the live worker dead.
+# liveness probe would call the live worker dead. A relaunch reuses a pane that
+# can still hold the previous mcode's `Done` title, so a `Done` title equal to
+# the one the pane showed before the launch line was sent
+# (MCODE_PRELAUNCH_TITLE) counts only after this launch showed another title.
+MCODE_PRELAUNCH_TITLE=
+
+mcode_pane_title() {
+  case "$BACKEND" in
+    tmux) tmux display-message -p -t "$T" '#{pane_title}' 2>/dev/null ;;
+    herdr)
+      fm_backend_herdr_report_mcode "$T" >/dev/null 2>&1 || true
+      fm_backend_mcode_title herdr "$T" 2>/dev/null
+      ;;
+  esac
+}
+
 mcode_wait_for_working() {
-  local i=0 max=${FM_MCODE_READY_POLLS:-60} interval=${FM_MCODE_POLL_INTERVAL:-0.5} pane title
+  local i=0 max=${FM_MCODE_READY_POLLS:-60} interval=${FM_MCODE_POLL_INTERVAL:-0.5} pane title fresh=0
   while [ "$i" -lt "$max" ]; do
     [ "$BACKEND" != herdr ] || fm_backend_herdr_report_mcode "$T" >/dev/null 2>&1 || true
     pane=$(fm_backend_capture "$BACKEND" "$T" 120 "$W" 2>/dev/null || true)
@@ -5888,9 +5903,11 @@ mcode_wait_for_working() {
     # A short brief can finish between polls: a settled `Done` title proves
     # the launch turn ran, while `Ready` never does. Reading the title back on
     # Herdr is the registration proof too.
-    title=$(fm_backend_mcode_title "$BACKEND" "$T" 2>/dev/null) \
-      && [ "$(fm_busy_mcode_title_state "$title")" = settled ] \
-      && [ "${title%% | *}" = Done ] && return 0
+    if title=$(fm_backend_mcode_title "$BACKEND" "$T" 2>/dev/null); then
+      [ "$title" = "$MCODE_PRELAUNCH_TITLE" ] || fresh=1
+      [ "$fresh" = 1 ] && [ "$(fm_busy_mcode_title_state "$title")" = settled ] \
+        && [ "${title%% | *}" = Done ] && return 0
+    fi
     i=$((i + 1))
     [ "$i" -ge "$max" ] || sleep "$interval"
   done
@@ -7965,6 +7982,7 @@ else
       sleep 0.2
     done
   }
+  [ "$HARNESS" != mcode ] || MCODE_PRELAUNCH_TITLE=$(mcode_pane_title || true)
   SPAWN_LAUNCH_SENT=1
   # errexit is on here: a failed send still exits, and Orca source mode first
   # removes the credential-bearing file the pane never received.
