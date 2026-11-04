@@ -15,7 +15,8 @@
 # and never resolves the setting again. Teardown removes only the recorded
 # directory, only after its landed-work gates pass, and refuses a recorded path
 # that is not absolute, does not end in the task id, or equals or contains the
-# task's worktree.
+# task's worktree, comparing both the recorded strings and the physical paths
+# its parent directory and the worktree resolve to.
 #
 # Clone discipline: the config/clone-discipline presence flag, overridden by
 # FM_CLONE_DISCIPLINE (1/on/true/yes enables, any other non-empty value
@@ -30,9 +31,9 @@
 # and unset or empty defers to the file. A path that is absolute, empty, ".",
 # contains a ".." component, or starts with a ".git" component is skipped with a
 # warning. At teardown, after the landed-work gates pass and before the copy is
-# returned, each declared path that exists is removed, except a path that holds
-# tracked files or resolves through a symlinked parent outside the worktree;
-# a declared path that is itself a symlink has only the link removed.
+# returned, each declared path that exists is removed, except a path that is
+# tracked or holds tracked files, or that passes through a symlinked directory;
+# a declared path that is itself an untracked symlink has only the link removed.
 
 fm_lane_disk_warn() { printf 'warning: %s\n' "$*" >&2; }
 
@@ -109,6 +110,10 @@ fm_lane_disk_build_dir_valid() {
   [ -n "${dir%/*}" ] || return 1
   if [ -n "$wt" ]; then
     case "$wt/" in "$dir"/*) return 1 ;; esac
+    local wt_real parent_real
+    wt_real=$(cd "$wt" 2>/dev/null && pwd -P) || return 0
+    parent_real=$(cd "${dir%/*}" 2>/dev/null && pwd -P) || return 0
+    case "$wt_real/" in "${parent_real%/}/$id"/*) return 1 ;; esac
   fi
   return 0
 }
@@ -203,7 +208,7 @@ fm_lane_disk_scratch_path_valid() {
 # fm_lane_disk_scratch_cleanup <worktree> <config-dir>: removes declared
 # scratch paths under the worktree. Never fatal.
 fm_lane_disk_scratch_cleanup() {
-  local wt=$1 config=$2 entry rel target parent wt_real parent_real tracked
+  local wt=$1 config=$2 entry rel target parent wt_real parent_real expected tracked
   [ -d "$wt" ] || return 0
   wt_real=$(cd "$wt" 2>/dev/null && pwd -P) || return 0
   while IFS= read -r entry; do
@@ -216,12 +221,9 @@ fm_lane_disk_scratch_cleanup() {
     [ -e "$target" ] || [ -L "$target" ] || continue
     parent=$(dirname "$target")
     parent_real=$(cd "$parent" 2>/dev/null && pwd -P) || continue
-    case "$parent_real/" in
-      "$wt_real"/*) ;;
-      *) fm_lane_disk_warn "scratch path '$rel' resolves outside the task copy; skipped"; continue ;;
-    esac
-    if [ -L "$target" ]; then
-      rm -f -- "$target" || fm_lane_disk_warn "could not remove scratch link $target"
+    case "$rel" in */*) expected="$wt_real/${rel%/*}" ;; *) expected=$wt_real ;; esac
+    if [ "$parent_real" != "$expected" ]; then
+      fm_lane_disk_warn "scratch path '$rel' passes through a symlinked directory; skipped"
       continue
     fi
     if ! tracked=$(git -C "$wt" ls-files -- ":(literal)$rel" 2>/dev/null); then
@@ -230,6 +232,10 @@ fm_lane_disk_scratch_cleanup() {
     fi
     if [ -n "$tracked" ]; then
       fm_lane_disk_warn "scratch path '$rel' holds tracked files; skipped"
+      continue
+    fi
+    if [ -L "$target" ]; then
+      rm -f -- "$target" || fm_lane_disk_warn "could not remove scratch link $target"
       continue
     fi
     rm -rf -- "$target" || fm_lane_disk_warn "could not fully remove scratch path $target"
