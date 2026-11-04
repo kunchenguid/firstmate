@@ -812,7 +812,7 @@ EOF
 # behind the answered task is released by the close, and the completion gate is
 # satisfied only by a recorded answer.
 test_answer_records_and_closes() {
-  local home id json show
+  local home id json show shape
   home=$(make_home answer-close)
   id=sample-guard-review
   mkdir -p "$home/data/$id"
@@ -835,11 +835,15 @@ test_answer_records_and_closes() {
     > "$home/empty-answer.out" 2> "$home/empty-answer.err"; then
     fail "answer accepted an empty captain decision"
   fi
-  printf 'A' > "$home/letter-only.txt"
-  if run_captain "$home" answer sample-guard-call --decision-file "$home/letter-only.txt" \
-    > "$home/letter-answer.out" 2> "$home/letter-answer.err"; then
-    fail "answer accepted an option letter without its displayed meaning"
-  fi
+  for shape in A b 7 '(c)' 'D.' 'e)'; do
+    printf '%s\n' "$shape" > "$home/option-only.txt"
+    if run_captain "$home" answer sample-guard-call --decision-file "$home/option-only.txt" \
+      > "$home/option-answer.out" 2> "$home/option-answer.err"; then
+      fail "answer accepted option $shape without its displayed meaning"
+    fi
+    assert_grep "include the displayed option words" "$home/option-answer.err" \
+      "the refusal of option $shape did not ask for the displayed option words"
+  done
   if run_captain "$home" answer sample-guard-call > "$home/bare-answer.out" 2> "$home/bare-answer.err"; then
     fail "answer accepted a close with no captain decision file at all"
   fi
@@ -887,6 +891,62 @@ test_answer_records_and_closes() {
       and (.landed | any(.id == "sample-guard-call") | not)
   ' >/dev/null || fail "an answered captain call still renders somewhere it should not: $json"
   pass "answer records the captain's words, closes idempotently, and releases routed work"
+}
+
+# Issue #8152: an option choice is stored with the words the captain saw, never
+# as a bare letter, and every answered call exposes one single-line
+# `Selected answer:` field. Free-text answers close exactly as before.
+test_option_answers_keep_their_displayed_words() {
+  local home show out rc shape n=0
+  home=$(make_home option-words)
+  for shape in A b 7 '(c)' 'D.' 'e)'; do
+    n=$((n + 1))
+    run_captain "$home" hold "sample-option-$n" --title "Choose the start state" \
+      --reason "Should the feature start enabled? A: Off until checks pass. B: On now." \
+      --repo sample >/dev/null || fail "could not register option call $n"
+    rc=0
+    out=$(printf 'sample-option-%s\t%s\t\n' "$n" "$shape" \
+      | run_captain "$home" answers --source "option fixture") || rc=$?
+    [ "$rc" -ne 0 ] || fail "answers reported success for option $shape without its displayed meaning"
+    assert_contains "$out" "skipped: sample-option-$n (option $shape requires its displayed meaning)" \
+      "answers did not name the missing meaning for option $shape"
+    show=$(tasks_in "$home" show "sample-option-$n" --full)
+    assert_contains "$show" "held: yes" "option $shape without its meaning released the call"
+    assert_contains "$show" "state: queued" "option $shape without its meaning closed the call"
+  done
+
+  out=$(printf 'sample-option-1\tA\tOff until checks pass.\n' \
+    | run_captain "$home" answers --source "option fixture") \
+    || fail "answers refused an option with its displayed meaning"
+  assert_contains "$out" "closed: sample-option-1" "the labelled option did not close its call"
+  show=$(tasks_in "$home" show sample-option-1 --full)
+  assert_contains "$show" "state: done" "the labelled option left its call open"
+  assert_contains "$show" "Answer: A" "the labelled option lost the raw selection"
+  assert_contains "$show" "Answer as shown to the captain: Off until checks pass." \
+    "the labelled option lost its displayed meaning"
+  assert_contains "$show" "Selected answer: Off until checks pass." \
+    "the labelled option did not expose its selected-answer field"
+
+  out=$(printf 'sample-option-2\tKeep it off for now\t\n' \
+    | run_captain "$home" answers --source "option fixture") \
+    || fail "answers refused a free-text answer without a label"
+  assert_contains "$out" "closed: sample-option-2" "the free-text answer did not close its call"
+  show=$(tasks_in "$home" show sample-option-2 --full)
+  assert_contains "$show" "state: done" "the free-text answer left its call open"
+  assert_contains "$show" "Selected answer: Keep it off for now" \
+    "the free-text answer did not expose its selected-answer field"
+
+  printf 'From chat:\nAnswer: Off until checks pass.\nBecause the gate is flaky.\n' > "$home/multi.txt"
+  run_captain "$home" answer sample-option-3 --decision-file "$home/multi.txt" >/dev/null \
+    || fail "answer refused a multi-line decision"
+  show=$(tasks_in "$home" show sample-option-3 --full)
+  case "$show" in
+    *"Selected answer: Off until checks pass."*"Because the gate is flaky."*)
+      fail "the selected-answer field carried a second line: $show" ;;
+  esac
+  assert_contains "$show" "Selected answer: Off until checks pass." \
+    "the multi-line decision did not expose its selected answer"
+  pass "option answers keep their displayed words and expose one selected-answer line"
 }
 
 # --release lifts the hold instead of closing, preserving the work item's own
@@ -2065,6 +2125,7 @@ test_reconcile_closes_with_evidence_or_keeps_the_call_open() {
   assert_contains "$show" "0.1.38 was published" "the recorded evidence was lost"
   case "$show" in
     *"Captain decision:"*) fail "a reconciled close was recorded as the captain's own words" ;;
+    *"Selected answer:"*) fail "a reconciled close presented its evidence as the captain's selected answer" ;;
   esac
   set +e
   out=$(run_captain "$home" answer sample-moot-call --decision-file "$home/evidence.txt" 2>&1)
@@ -5115,6 +5176,7 @@ test_hold_decodes_a_bare_scalar_body_without_the_nonref_default
 test_retained_body_keeps_its_utf8_bytes
 test_completion_gate_attests_and_transfers
 test_answer_records_and_closes
+test_option_answers_keep_their_displayed_words
 test_release_frees_held_work
 test_release_is_attended_only
 test_release_rechecks_away_after_waiting_on_task_lock

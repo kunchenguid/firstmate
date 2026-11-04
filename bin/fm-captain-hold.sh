@@ -59,8 +59,10 @@
 #
 # `answer` records the captain's exact words and resolves the call in the same
 # act. It requires a non-empty captain decision file of at most 8192 bytes and
-# writes a resolution block while preserving the leading hold-set stamp until
-# the close succeeds (the previous body is preserved and archived through
+# refuses a file holding only an option selection (one letter or digit, bare,
+# in parentheses, or followed by `.` or `)`), because the displayed option
+# words must be recorded with it. It writes a resolution block while
+# preserving the leading hold-set stamp until the close succeeds (the previous body is preserved and archived through
 # tasks-axi --archive-body). It closes a question with `tasks-axi done` - or,
 # with `--release`, lifts the hold with `tasks-axi unhold` so a captain-gated
 # WORK item resumes without closing - and restores resolution-first body
@@ -87,7 +89,12 @@
 # `<task-id>\t<answer>\t<label>[\t<mode>]` lines on stdin and resolves each named
 # task through the very same `answer` path above, so every guard applies
 # identically no matter which channel the answer arrived on. The key IS the
-# task id - no identity arithmetic. The optional fourth field selects the close:
+# task id - no identity arithmetic. An answer that is only an option selection
+# needs the label carrying the option words as the captain saw them; without it
+# the row is reported `skipped:` and feeds nothing, because missing words are
+# never inferred. Every non-reconciled resolution record ends with one
+# `Selected answer:` line: the displayed label when present, else the answer,
+# else a single-line decision. The optional fourth field selects the close:
 # empty or `done` completes the task, `release` lifts the hold so held work
 # resumes; anything else is skipped. A `release` line while the away-posture
 # record exists is reported as `refused:` under the same attended-only rule as
@@ -345,6 +352,13 @@ BINDING_ANY='(any)'
 DECISION_TEXT=''
 DECISION_DIGEST=''
 
+is_option_selection() {  # <text>
+  case "$1" in
+    [A-Za-z0-9]|\([A-Za-z0-9]\)|[A-Za-z0-9][.\)]) return 0 ;;
+  esac
+  return 1
+}
+
 load_decision() {  # <path>; sets DECISION_TEXT and DECISION_DIGEST
   local path=$1 decision
   [ -n "$path" ] || fail "--decision-file is required"
@@ -353,10 +367,8 @@ load_decision() {  # <path>; sets DECISION_TEXT and DECISION_DIGEST
   [ -n "$decision" ] || fail "decision file must not be empty"
   [ "$(printf '%s' "$decision" | LC_ALL=C wc -c | tr -d ' ')" -le 8192 ] \
     || fail "decision file exceeds 8192 bytes"
-  case "$decision" in
-    [A-Z]) fail "decision file contains only option $decision; include the displayed option words"
-      ;;
-  esac
+  ! is_option_selection "$decision" \
+    || fail "decision file contains only option $decision; include the displayed option words"
   DECISION_TEXT=$decision
   DECISION_DIGEST=$(sha256_text "$decision")
 }
@@ -539,12 +551,14 @@ resolution_block() {  # <mode>
   [ "$1" != reconciled ] || label='Reconciliation evidence:'
   printf 'Resolution recorded by fm-captain-hold.\nDecision digest: %s\nResolution mode: %s\n\n%s\n%s\n' \
     "$DECISION_DIGEST" "$1" "$label" "$DECISION_TEXT"
+  [ "$1" != reconciled ] || return 0
   case "$DECISION_TEXT" in
     *$'\nAnswer as shown to the captain: '*) selected=${DECISION_TEXT##*$'\nAnswer as shown to the captain: '} ;;
     *$'\nAnswer: '*) selected=${DECISION_TEXT##*$'\nAnswer: '} ;;
     *$'\n'*) ;;
     *) selected=$DECISION_TEXT ;;
   esac
+  selected=${selected%%$'\n'*}
   [ -z "$selected" ] || printf 'Selected answer: %s\n' "$selected"
 }
 
@@ -1569,15 +1583,11 @@ command_answers() {
     answer=$(sanitize_field "${answer:-}")
     [ -n "$answer" ] || continue
     label=$(sanitize_field "${label:-}")
-    case "$answer" in
-      [A-Z])
-        [ -n "$label" ] || {
-          printf 'skipped: %s (option %s requires its displayed meaning)\n' "$key" "$answer"
-          skipped=$((skipped + 1))
-          continue
-        }
-        ;;
-    esac
+    if [ -z "$label" ] && is_option_selection "$answer"; then
+      printf 'skipped: %s (option %s requires its displayed meaning)\n' "$key" "$answer"
+      skipped=$((skipped + 1))
+      continue
+    fi
     if [ "$answer" = "$RECONCILE_VALUE" ]; then
       printf 'refused: %s (reconcile requests require a bound captured source)\n' "$key"
       skipped=$((skipped + 1))
