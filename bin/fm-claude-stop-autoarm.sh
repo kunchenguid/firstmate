@@ -15,10 +15,11 @@
 #     ancestor, or a live lock was recorded under this same trusted Claude
 #     session id (which is what keeps a background session arming after its
 #     transient helper chain is recycled).
-#     When an existing numeric owner fails the shared harness-liveness predicate,
-#     the hook delegates guarded recovery to bin/fm-lock.sh and then re-verifies
-#     ownership. A live owner, missing lock, malformed lock, or unresolved
-#     ancestry remains inert, so a competing session never arms or rewakes.
+#     When the shared fm_session_lock_pid_blocks_reclaim verdict refuses to
+#     reclaim the recorded owner, the hook stays inert; otherwise it delegates
+#     guarded recovery to bin/fm-lock.sh and then re-verifies ownership.
+#     A missing lock, a malformed record, or unresolved ancestry stays inert too,
+#     so a competing session never arms or rewakes.
 #   - AFK: while state/.afk exists the away daemon owns the watcher and triage;
 #     this hook exits 0 and NEVER rewakes the primary (checked again at
 #     translation time so a mid-cycle AFK transition is honored).
@@ -217,9 +218,10 @@ fm_primary_scope_matches "$FM_ROOT" "$STATE" || exit 0
 
 # --- identity: only the lock-owning session's hooks may arm ------------------
 # A prior session may have died after leaving its harness identity in .lock.
-# Use the shared liveness predicate to recognize only that stale-owner case; it
-# resolves a tagged identity too, so a dead Windows session is still recoverable
-# rather than being read as a malformed lock nobody may ever clear.
+# Use the shared fm_session_lock_pid_blocks_reclaim verdict to recognize only
+# that stale-owner case; it resolves a tagged identity too, so a dead Windows
+# session is still recoverable rather than being read as a malformed lock nobody
+# may ever clear.
 # Defer the mutating claim until after the unchanged AFK and need gates, so an
 # idle or away home remains byte-for-byte inert. Missing or malformed locks are
 # uncertainty rather than stale-owner evidence and remain inert.
@@ -227,7 +229,7 @@ RECOVER_SESSION_LOCK=0
 if ! fm_session_lock_owned_by_self "$STATE"; then
   LOCK_PID=$(cat "$STATE/.lock" 2>/dev/null || true)
   fm_session_pid_valid "$LOCK_PID" || exit 0
-  fm_harness_pid_alive "$LOCK_PID" && exit 0
+  fm_session_lock_pid_blocks_reclaim "$LOCK_PID" && exit 0
   RECOVER_SESSION_LOCK=1
 fi
 
