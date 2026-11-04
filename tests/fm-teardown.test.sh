@@ -5157,6 +5157,235 @@ PYTHON
   pass "foreign TTY shell survives and is reported while the task-owned child is reaped, and both are logged durably"
 }
 
+# A spared (unowned) process in the worktree: with no ownership oracle every
+# process under the root is spared, so these tests need no endpoint shell.
+spawn_late_actor() {  # <case-dir> <root> <delay> <action: child|write>
+  local case_dir=$1 root=$2 delay=$3 action=$4
+  ( cd "$root" && exec bash -c '
+    sleep "$1"
+    case "$2" in
+      child) ( exec sleep 300 ) & printf "%s\n" "$!" > "$3/late-child.pid" ;;
+      write) printf "late\n" > "$PWD/late.txt" ;;
+    esac
+  ' _ "$delay" "$action" "$case_dir" ) >/dev/null 2>&1 &
+  LATE_ACTOR_PID=$!
+  disown
+}
+
+test_child_started_during_the_wait_keeps_the_worktree() {
+  local case_dir rc child
+  case_dir=$(make_case late-child)
+  write_meta "$case_dir" no-mistakes ship
+  land_shippable_commit "$case_dir"
+  spawn_late_actor "$case_dir" "$case_dir/wt" 3 child
+  sleep 0.3
+  rc=0
+  FM_FAKE_TREEHOUSE_LOG="$case_dir/treehouse.log" FM_FAKE_PANE_PID=1 \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  child=$(cat "$case_dir/late-child.pid" 2>/dev/null || true)
+  [ -z "$child" ] || kill -KILL "$child" 2>/dev/null || true
+  kill -KILL "$LATE_ACTOR_PID" 2>/dev/null || true
+  [ -n "$child" ] || fail "late-child: the late child never started: $(cat "$case_dir/stderr")"
+  expect_code 0 "$rc" "late-child: teardown should complete"
+  [ ! -s "$case_dir/treehouse.log" ] || fail "late-child: the worktree was returned under a child started after the reaper"
+  assert_grep "kept worktree" "$case_dir/stderr" "late-child: kept worktree not reported"
+  assert_grep "$child" "$case_dir/state/teardown-processes.log" "late-child: the late child was not logged"
+  pass "a child started by a spared process after the reaper keeps the worktree"
+}
+
+test_unlistable_worktree_after_the_reaper_keeps_the_worktree() {
+  local case_dir rc agent real_lsof
+  case_dir=$(make_case late-unlistable)
+  write_meta "$case_dir" no-mistakes ship
+  land_shippable_commit "$case_dir"
+  real_lsof=$(command -v lsof)
+  cat > "$case_dir/fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = display-message ]; then printf '%s\n' "${FM_FAKE_PANE_PID:-}"; fi
+if [ "${1:-}" = kill-window ]; then
+  : > "$FM_PANE_CLOSED"
+  ( sleep 1; kill -KILL "$FM_FAKE_KILL_PID" 2>/dev/null ) >/dev/null 2>&1 &
+fi
+exit 0
+SH
+  cat > "$case_dir/fakebin/lsof" <<SH
+#!/usr/bin/env bash
+[ ! -e "\$FM_PANE_CLOSED" ] || exit 1
+exec "$real_lsof" "\$@"
+SH
+  chmod +x "$case_dir/fakebin/tmux" "$case_dir/fakebin/lsof"
+  ( cd "$case_dir/wt" && exec sleep 300 ) &
+  agent=$!
+  disown
+  sleep 0.3
+  rc=0
+  FM_PANE_CLOSED="$case_dir/pane-closed" FM_FAKE_KILL_PID="$agent"   FM_FAKE_TREEHOUSE_LOG="$case_dir/treehouse.log" FM_FAKE_PANE_PID=1     run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  kill -KILL "$agent" 2>/dev/null || true
+  assert_present "$case_dir/pane-closed" "late-unlistable: the pane close never ran: $(cat "$case_dir/stderr")"
+  [ ! -s "$case_dir/treehouse.log" ] || fail "late-unlistable: the worktree was returned although it could not be listed"
+  assert_grep "kept worktree" "$case_dir/stderr" "late-unlistable: kept worktree not reported"
+  pass "a worktree that cannot be listed after the pane close is kept"
+}
+
+test_work_saved_during_the_wait_refuses_the_return() {
+  local case_dir rc
+  case_dir=$(make_case late-write)
+  write_meta "$case_dir" no-mistakes ship
+  land_shippable_commit "$case_dir"
+  spawn_late_actor "$case_dir" "$case_dir/wt" 3 write
+  sleep 0.3
+  rc=0
+  FM_FAKE_TREEHOUSE_LOG="$case_dir/treehouse.log" FM_FAKE_PANE_PID=1 \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  kill -KILL "$LATE_ACTOR_PID" 2>/dev/null || true
+  expect_code 1 "$rc" "late-write: work saved during the wait must refuse teardown"
+  assert_grep "REFUSED" "$case_dir/stderr" "late-write: refusal missing"
+  [ ! -s "$case_dir/treehouse.log" ] || fail "late-write: the worktree was returned over late work"
+  assert_present "$case_dir/wt/late.txt" "late-write: late file lost"
+  assert_present "$case_dir/state/task-x1.meta" "late-write: metadata dropped despite the refusal"
+  pass "work saved by a spared process during the wait refuses the return and keeps the records"
+}
+
+test_late_write_is_still_returned_with_force() {
+  local case_dir rc
+  case_dir=$(make_case late-write-force)
+  write_meta "$case_dir" no-mistakes ship
+  land_shippable_commit "$case_dir"
+  spawn_late_actor "$case_dir" "$case_dir/wt" 3 write
+  sleep 0.3
+  rc=0
+  FM_FAKE_TREEHOUSE_LOG="$case_dir/treehouse.log" FM_FAKE_PANE_PID=1 \
+    run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  kill -KILL "$LATE_ACTOR_PID" 2>/dev/null || true
+  expect_code 0 "$rc" "late-write-force: explicit force must still complete: $(cat "$case_dir/stderr")"
+  [ -s "$case_dir/treehouse.log" ] || fail "late-write-force: explicit force did not return the worktree"
+  pass "an explicit force still returns the worktree after late work"
+}
+
+configure_orca_teardown_case() {  # <case-dir>
+  local case_dir=$1
+  sed 's/^window=.*/window=fm-task-x1/' "$case_dir/state/task-x1.meta" > "$case_dir/meta-new"
+  mv "$case_dir/meta-new" "$case_dir/state/task-x1.meta"
+  printf 'backend=orca\nterminal=term-test\norca_worktree_id=wt-test::/orca/wt-test\n' >> "$case_dir/state/task-x1.meta"
+  cat > "$case_dir/fakebin/orca" <<'SH'
+#!/usr/bin/env bash
+case "${1:-} ${2:-}" in
+  'worktree show')
+    printf '{"ok":true,"result":{"worktree":{"id":"wt-test::/orca/wt-test","path":"%s"}}}\n' "$FM_ORCA_CASE/wt" ;;
+  'worktree rm')
+    printf 'remove\n' >> "$FM_ORCA_CASE/removal.log"
+    printf '{"ok":true,"result":{}}\n' ;;
+  *) printf '{"ok":true,"result":{}}\n' ;;
+esac
+SH
+  chmod +x "$case_dir/fakebin/orca"
+}
+
+test_orca_worktree_with_a_spared_process_is_not_removed() {
+  local case_dir rc pid
+  case_dir=$(make_case orca-occupied)
+  write_meta "$case_dir" no-mistakes ship
+  land_shippable_commit "$case_dir"
+  configure_orca_teardown_case "$case_dir"
+  ( cd "$case_dir/wt" && exec sleep 300 ) &
+  pid=$!
+  disown
+  sleep 0.3
+  rc=0
+  FM_ORCA_CASE="$case_dir" run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  kill -0 "$pid" 2>/dev/null || fail "orca-occupied: the spared process was killed"
+  kill -KILL "$pid" 2>/dev/null || true
+  expect_code 1 "$rc" "orca-occupied: an occupied Orca worktree must refuse teardown"
+  assert_absent "$case_dir/removal.log" "orca-occupied: the occupied Orca worktree was removed"
+  assert_present "$case_dir/state/task-x1.meta" "orca-occupied: records dropped, so no retry is possible"
+  grep -Eq "^[^	]+	task-x1	-	kept	[^	]*$pid[^	]*	" "$case_dir/state/teardown-processes.log" \
+    || fail "orca-occupied: the kept worktree was not logged"
+  pass "an Orca worktree that a spared process occupies is kept and the records survive for a retry"
+}
+
+test_tasktmp_with_a_spared_process_is_not_deleted() {
+  local case_dir rc pid
+  case_dir=$(make_case tasktmp-occupied)
+  write_meta "$case_dir" no-mistakes ship
+  printf '%s\n' "tasktmp=$case_dir/tasktmp" >> "$case_dir/state/task-x1.meta"
+  mkdir -p "$case_dir/tasktmp"
+  land_shippable_commit "$case_dir"
+  ( cd "$case_dir/tasktmp" && exec sleep 300 ) &
+  pid=$!
+  disown
+  sleep 0.3
+  rc=0
+  FM_FAKE_TREEHOUSE_LOG="$case_dir/treehouse.log" FM_FAKE_PANE_PID=1 \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  kill -0 "$pid" 2>/dev/null || fail "tasktmp-occupied: the spared process was killed"
+  kill -KILL "$pid" 2>/dev/null || true
+  expect_code 0 "$rc" "tasktmp-occupied: teardown should complete"
+  assert_present "$case_dir/tasktmp" "tasktmp-occupied: the occupied tasktmp was deleted"
+  grep -Eq "^[^	]+	task-x1	-	kept	[^	]*$pid[^	]*	.*tasktmp" "$case_dir/state/teardown-processes.log" \
+    || fail "tasktmp-occupied: the kept tasktmp was not logged"
+  pass "a tasktmp that a spared process occupies is kept"
+}
+
+test_herdr_pane_close_does_not_orphan_task_owned_children() {
+  local case_dir rc endpoint child closed i
+  case_dir=$(make_case herdr-owned-child)
+  write_meta "$case_dir" local-only ship
+  land_shippable_commit "$case_dir"
+  configure_flat_herdr_teardown_case "$case_dir"
+  mv "$case_dir/fakebin/herdr" "$case_dir/fakebin/herdr.base"
+  cat > "$case_dir/fakebin/herdr" <<SH
+#!/usr/bin/env bash
+case "\${1:-} \${2:-}" in
+  "pane process-info")
+    if [ -e "\$FM_FAKE_HERDR_CLOSED" ]; then
+      printf '%s\n' '{"error":{"code":"pane_not_found"}}' >&2
+      exit 1
+    fi
+    printf '{"result":{"type":"pane_process_info","process_info":{"pane_id":"wG:pQ","shell_pid":%s}}}\n' "\$FM_FAKE_HERDR_SHELL_PID"
+    ;;
+  "pane close")
+    kill -KILL "\$FM_FAKE_HERDR_SHELL_PID" 2>/dev/null
+    exec "$case_dir/fakebin/herdr.base" "\$@"
+    ;;
+  *) exec "$case_dir/fakebin/herdr.base" "\$@" ;;
+esac
+SH
+  chmod +x "$case_dir/fakebin/herdr"
+  perl -e '
+    my ($dir, $file) = @ARGV;
+    my $child = fork();
+    die "fork" unless defined $child;
+    if (!$child) { chdir $dir or die; exec "sleep", "300"; }
+    open my $fh, ">", $file or die;
+    print {$fh} "$child\n";
+    close $fh;
+    sleep 300;
+  ' "$case_dir/wt" "$case_dir/owned.pid" &
+  endpoint=$!
+  for ((i=0; i<100; i++)); do
+    [ ! -s "$case_dir/owned.pid" ] || break
+    sleep 0.1
+  done
+  [ "$i" -lt 100 ] || fail "herdr-owned-child: fixture did not start"
+  child=$(cat "$case_dir/owned.pid")
+  closed="$case_dir/closed"
+  : > "$case_dir/herdr.log"
+  rc=0
+  FM_FAKE_HERDR_LOG="$case_dir/herdr.log" FM_FAKE_HERDR_CLOSED="$closed" \
+  FM_FAKE_HERDR_SHELL_PID="$endpoint" FM_BACKEND_HERDR_IDLE_SHELL_PROOF_POLLS=1 \
+  FM_FAKE_TREEHOUSE_LOG="$case_dir/treehouse.log" \
+    run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  wait "$endpoint" 2>/dev/null || true
+  [ -e "$closed" ] || fail "herdr-owned-child: the pane was never closed: $(cat "$case_dir/stderr")"
+  if kill -0 "$child" 2>/dev/null; then
+    kill -KILL "$child" 2>/dev/null || true
+    fail "herdr-owned-child: the shell's background child survived the pane close: $(cat "$case_dir/stderr")"
+  fi
+  expect_code 0 "$rc" "herdr-owned-child: teardown should complete: $(cat "$case_dir/stderr")"
+  [ -s "$case_dir/treehouse.log" ] || fail "herdr-owned-child: the worktree was not returned"
+  pass "a background child of the Herdr pane shell is reaped although the pane closed first"
+}
+
 test_reparented_child_in_endpoint_session_is_reaped() {
   local case_dir rc endpoint orphan i
   case_dir=$(make_case endpoint-session-orphan)
@@ -6528,6 +6757,13 @@ test_own_autonomous_run_is_left_alone
 test_leaked_worktree_process_is_reaped
 test_leaked_tasktmp_process_is_reaped
 test_foreign_session_survives_and_is_reported
+test_child_started_during_the_wait_keeps_the_worktree
+test_unlistable_worktree_after_the_reaper_keeps_the_worktree
+test_work_saved_during_the_wait_refuses_the_return
+test_late_write_is_still_returned_with_force
+test_orca_worktree_with_a_spared_process_is_not_removed
+test_tasktmp_with_a_spared_process_is_not_deleted
+test_herdr_pane_close_does_not_orphan_task_owned_children
 test_reparented_child_in_endpoint_session_is_reaped
 test_agent_without_ownership_oracle_ending_at_pane_close_returns_worktree
 test_term_resistant_owned_children_are_reaped_with_the_leader
