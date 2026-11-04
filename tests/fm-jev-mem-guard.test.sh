@@ -113,11 +113,10 @@ with tempfile.TemporaryDirectory(prefix="fm-macos-memory-") as tmp:
     for name in ("sysctl", "vm_stat"):
         tool = root / name
         tool.write_text("#!/bin/bash\n"
-                        'if [ "${SLOW_TELEMETRY:-}" = 1 ]; then sleep 1; fi\n'
                         'case "$*" in\n'
-                        '  "-n hw.memsize") cat "$MEM_FIXTURE/total" ;;\n'
-                        '  "vm.swapusage") cat "$MEM_FIXTURE/swap" ;;\n'
-                        '  "") cat "$MEM_FIXTURE/pages" ;;\n'
+                        '  "-n hw.memsize") [ -z "${DELAY_TOTAL:-}" ] || sleep "$DELAY_TOTAL"; cat "$MEM_FIXTURE/total" ;;\n'
+                        '  "vm.swapusage") [ -z "${DELAY_SWAP:-}" ] || sleep "$DELAY_SWAP"; cat "$MEM_FIXTURE/swap" ;;\n'
+                        '  "") [ -z "${DELAY_PAGES:-}" ] || sleep "$DELAY_PAGES"; cat "$MEM_FIXTURE/pages" ;;\n'
                         '  *) exit 1 ;;\nesac\n')
         tool.chmod(0o700)
     env = dict(os.environ, PATH=tmp + os.pathsep + os.environ["PATH"], MEM_FIXTURE=tmp)
@@ -148,6 +147,14 @@ with tempfile.TemporaryDirectory(prefix="fm-macos-memory-") as tmp:
         assert (rc, report["status"], report["summary"]["mem_used_pct"]) == (0, "OK", 50.0), report
         assert report["summary"]["swap_used_pct"] == 0.0, report
         assert report["top_processes"] == [], report
+
+    # Distinct non-zero buckets: dropping any one of them changes the result.
+    (root / "pages").write_text(
+        "Mach Virtual Memory Statistics: (page size of 4096 bytes)\n"
+        "Pages free: 26214.\nPages inactive: 52429.\nPages speculative: 78643.\n")
+    rc, report, _ = audit()
+    summary = report["summary"]
+    assert (rc, summary["mem_available_gb"], summary["mem_used_pct"]) == (0, 0.6, 40.0), report
 
     pages(0.08)
     rc, report, _ = audit()
@@ -180,14 +187,26 @@ with tempfile.TemporaryDirectory(prefix="fm-macos-memory-") as tmp:
     rc, report, _ = audit()
     assert (rc, report["status"], report["reason"]) == (0, "UNKNOWN", "macos-memory-unavailable"), report
     (root / "total").write_text(str(1024 ** 3))
-    rc, report, elapsed = audit(extra_env={"SLOW_TELEMETRY": "1"})
+    rc, report, elapsed = audit(extra_env={"DELAY_TOTAL": "1"})
     assert (rc, report["status"], report["reason"]) == (0, "UNKNOWN", "macos-memory-unavailable"), report
+    assert elapsed < 0.9, elapsed
+    # Each delay fits a fresh 350ms budget; only their sum exceeds the shared one.
+    rc, report, elapsed = audit(extra_env={"DELAY_TOTAL": "0.25", "DELAY_PAGES": "0.25"})
+    assert (rc, report["status"], report["reason"]) == (0, "UNKNOWN", "macos-memory-unavailable"), report
+    assert elapsed < 0.9, elapsed
+    # A swap-only timeout keeps the measured RAM and its verdict.
+    (root / "swap").write_text("vm.swapusage: total = 1.00G used = 0.00G free = 1.00G (encrypted)")
+    pages(0.01)
+    rc, report, elapsed = audit(extra_env={"DELAY_SWAP": "1"})
+    summary = report["summary"]
+    assert (rc, report["status"], summary["mem_used_pct"]) == (1, "CRITICAL", 99.0), report
+    assert (summary["swap_total_gb"], summary["swap_used_pct"]) == (None, None), report
     assert elapsed < 0.9, elapsed
     (root / "sysctl").unlink()
     (root / "sysctl").symlink_to("/usr/bin/false")
     rc, report, _ = audit()
     assert (rc, report["status"], report["reason"]) == (0, "UNKNOWN", "macos-memory-unavailable"), report
-print("ok - Darwin CLI fake-command cases: page sizes, thresholds, swap, invalid data, timeout, failure")
+print("ok - Darwin CLI fake-command cases: page sizes, available pages, thresholds, swap, invalid data, shared timeout, failure")
 PYTEST
 
 echo "ok - all Pattern 46 memory guard tests passed"
