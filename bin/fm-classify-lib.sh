@@ -1192,9 +1192,11 @@ EOF
 #
 # The other real failure mode is OUR OWN read failing (a stat/wc/tail I/O
 # error), not a malformed writer: every such read here is checked, and on
-# failure this reports the already-trusted persisted set unchanged rather than
-# risking a silent invalidation that would wipe it - never a bare "empty" as if
-# nothing were open.
+# failure this returns 1 without touching the persisted cursor, so the next
+# call retries from that trusted baseline. It never reports a bare "empty", or
+# the stale persisted set, as if that were the current open set: a caller that
+# counts or presents the result (the wake drain's acknowledgement count) must
+# see the failure, not a number that looks complete.
 #
 # Not a pure status-file read: this writes/rewrites the sibling cursor file as a
 # side effect (state/.<task>.open-decisions-cursor), the library's second
@@ -1330,7 +1332,7 @@ _fm_status_read_span() {  # <status-file> <start-offset> <byte-length>
 }
 
 status_open_decisions_incremental() {  # <status-file> [<captured-end-offset>] [timed]
-  local f=$1 captured_end=${2:-} cf offset ident open='' trusted_open='' cursor_data first rest offset_line ident_line
+  local f=$1 captured_end=${2:-} cf offset ident open='' cursor_data first rest offset_line ident_line
   local version='' size actual_size cur_ident resolve held chunk_file chunk_size line cursor_dirty=0
   local target_cursor kind fold_version timed=${3:-}
   case "$timed" in ''|timed) ;; *) return 2 ;; esac
@@ -1371,7 +1373,6 @@ status_open_decisions_incremental() {  # <status-file> [<captured-end-offset>] [
                       case "$rest" in
                         *$'\n'*) open=${rest#*$'\n'} ;;
                       esac
-                      if [ -n "$version" ] && [ -n "$ident" ]; then trusted_open=$open; fi
                       ;;
                     *) offset=0; version='' ;;
                   esac
@@ -1384,19 +1385,18 @@ status_open_decisions_incremental() {  # <status-file> [<captured-end-offset>] [
       esac
   fi
 
-  # A stat/size-read failure is a genuine I/O error, not "the file is empty" -
-  # report the already-trusted persisted set unchanged rather than risking a
-  # silent invalidation that would wipe it.
-  _fm_status_read_ident_size "$f" || { printf '%s' "$trusted_open"; return 0; }
+  # A stat/size-read failure is a genuine I/O error, not "the file is empty":
+  # fail and leave the persisted cursor alone so the next call retries from it.
+  _fm_status_read_ident_size "$f" || return 1
   cur_ident=$_FM_STAT_IDENTITY actual_size=$_FM_STAT_SIZE
-  [ -n "$cur_ident" ] || { printf '%s' "$trusted_open"; return 0; }
+  [ -n "$cur_ident" ] || return 1
   actual_size=${actual_size//[[:space:]]/}
-  case "$actual_size" in ''|*[!0-9]*) printf '%s' "$trusted_open"; return 0 ;; esac
+  case "$actual_size" in ''|*[!0-9]*) return 1 ;; esac
   if [ -n "$captured_end" ]; then
     case "$captured_end" in
-      ''|*[!0-9]*) printf '%s' "$trusted_open"; return 0 ;;
+      ''|*[!0-9]*) return 1 ;;
     esac
-    [ "$captured_end" -le "$actual_size" ] || { printf '%s' "$trusted_open"; return 0; }
+    [ "$captured_end" -le "$actual_size" ] || return 1
     size=$captured_end
   else
     size=$actual_size
@@ -1405,19 +1405,18 @@ status_open_decisions_incremental() {  # <status-file> [<captured-end-offset>] [
   if [ -z "$version" ] || [ -z "$ident" ] || [ "$ident" != "$cur_ident" ] || [ "$offset" -gt "$actual_size" ]; then
     offset=0
     open=''
-    trusted_open=''
     cursor_dirty=1
   fi
 
   if [ "$offset" -lt "$size" ]; then
     chunk_file="$cf.read.$$"
     _fm_status_read_span "$f" "$offset" "$((size - offset))" > "$chunk_file" 2>/dev/null \
-      || { rm -f "$chunk_file"; printf '%s' "$trusted_open"; return 0; }
+      || { rm -f "$chunk_file"; return 1; }
     chunk_size=$(LC_ALL=C wc -c < "$chunk_file" 2>/dev/null) \
-      || { rm -f "$chunk_file"; printf '%s' "$trusted_open"; return 0; }
+      || { rm -f "$chunk_file"; return 1; }
     chunk_size=${chunk_size//[[:space:]]/}
     case "$chunk_size" in
-      ''|*[!0-9]*) rm -f "$chunk_file"; printf '%s' "$trusted_open"; return 0 ;;
+      ''|*[!0-9]*) rm -f "$chunk_file"; return 1 ;;
     esac
     # Test-only observability seam (off by default, no production behavior
     # change): when set, records exactly how many bytes THIS call folded, so a

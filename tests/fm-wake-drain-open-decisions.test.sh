@@ -278,9 +278,6 @@ test_count_distinguishes_empty_from_failed_read() {
   FM_STATUS_IDENTITY_READER="$reader" FM_STATE_OVERRIDE="$state" "$DRAIN" > "$dir/out" 2> "$dir/err" \
     || fail "drain did not preserve its wake after presentation failure"
   grep -E '^WAKE_ACK_REQUIRED: .*open-decisions=unknown ' "$dir/err" >/dev/null || fail "failed read claimed a known count"
-  if FM_STATUS_IDENTITY_READER="$reader" FM_STATE_OVERRIDE="$state" "$DRAIN" --open-decisions > "$dir/full"; then
-    fail "full reader reported success after a failed read"
-  fi
   FM_STATE_OVERRIDE="$state" "$DRAIN" --open-decisions > "$dir/full" || fail "full reader failed after recovery"
   grep -Fx 'task [key=route-check] needs-decision: Choose the route.' "$dir/full" >/dev/null \
     || fail "full reader lost the canonical routing key"
@@ -290,9 +287,62 @@ test_count_distinguishes_empty_from_failed_read() {
   pass "empty, unreadable, and resolved decision sets remain distinct"
 }
 
+test_full_reader_refuses_an_unreadable_status_log() {
+  local dir state
+  dir=$(make_case full-reader-unreadable)
+  state="$dir/state"
+  printf 'needs-decision [key=visible]: Keep this one.\n' > "$state/alpha.status"
+  printf 'needs-decision [key=hidden]: Do not lose this one.\n' > "$state/beta.status"
+  chmod 000 "$state/beta.status"
+  if FM_STATE_OVERRIDE="$state" "$DRAIN" --open-decisions > "$dir/full" 2> "$dir/err"; then
+    chmod 600 "$state/beta.status"
+    fail "full reader reported success while beta.status was unreadable: $(cat "$dir/full")"
+  fi
+  chmod 600 "$state/beta.status"
+  grep -F "$state/beta.status" "$dir/err" >/dev/null \
+    || fail "full reader failure did not name the unreadable log: $(cat "$dir/err")"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" --open-decisions > "$dir/full" || fail "full reader failed once every log was readable"
+  grep -Fx 'beta [key=hidden] needs-decision: Do not lose this one.' "$dir/full" >/dev/null \
+    || fail "full reader lost the decision from the restored log"
+  pass "the full reader fails and names a status log it cannot read instead of omitting its decisions"
+}
+
+test_fold_read_failure_leaves_the_count_unknown() {
+  local dir state reader
+  dir=$(make_case fold-read-failure)
+  state="$dir/state"
+  reader="$dir/fold-only-failing-reader"
+  printf 'needs-decision [key=one]: Choose the first.\n' > "$state/task.status"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$dir/out" 2> "$dir/err" || fail "bootstrap drain failed"
+  printf 'needs-decision [key=two]: Choose the second.\n' >> "$state/task.status"
+  # Every other presentation read succeeds; only the open-decisions fold's own
+  # read fails, which its cursor's .read.<pid> scratch sibling identifies.
+  cat > "$reader" <<'SH'
+#!/usr/bin/env bash
+for scratch in "${1%/*}"/.*.open-decisions-cursor.read.*; do
+  [ -e "$scratch" ] && exit 1
+done
+exec perl -e 'open my $f, "<", $ARGV[0] or exit 1; seek $f, $ARGV[1], 0 or exit 1; defined(read $f, my $b, $ARGV[2]) or exit 1; print $b or exit 1' "$1" "$2" "$3"
+SH
+  chmod +x "$reader"
+  append_wake "$state" check fixture 'Handle this separately.' || fail "could not queue fixture"
+  cp "$state/.wake-queue" "$dir/queue-before"
+  FM_STATUS_SPAN_READER="$reader" FM_STATE_OVERRIDE="$state" "$DRAIN" > "$dir/out" 2> "$dir/err" \
+    || fail "drain failed under a fold read failure"
+  grep -E '^WAKE_ACK_REQUIRED: .*open-decisions=unknown ' "$dir/err" >/dev/null \
+    || fail "a failed fold read produced a counted acknowledgement: $(grep WAKE_ACK_REQUIRED "$dir/err")"
+  cmp -s "$dir/queue-before" "$state/.wake-queue" || fail "the failed fold read consumed the queued wake"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$dir/out" 2> "$dir/err" || fail "drain failed after the fold read recovered"
+  grep -E '^WAKE_ACK_REQUIRED: .*open-decisions=2 ' "$dir/err" >/dev/null \
+    || fail "the recovered fold did not count both open decisions: $(grep WAKE_ACK_REQUIRED "$dir/err")"
+  pass "a failed open-decisions fold read leaves the acknowledgement count unknown"
+}
+
 test_full_reader_preserves_all_decisions_without_consuming_wakes
+test_full_reader_refuses_an_unreadable_status_log
 test_empty_queue_recovery_counts_all_decisions
 test_count_distinguishes_empty_from_failed_read
+test_fold_read_failure_leaves_the_count_unknown
 test_buried_decision_still_surfaces
 test_over_long_decision_note_is_capped_with_a_marker
 test_explicit_resolution_closes_it

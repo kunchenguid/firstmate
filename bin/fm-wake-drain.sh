@@ -845,22 +845,26 @@ print_wake_ack_required() { # <sequence>
 }
 
 print_full_open_decisions() {
-  local snapshot task endpoint ident open key verb note
-  snapshot=$(status_presentation_snapshot "$STATE") || return 1
-  while IFS=$'\t' read -r task endpoint ident; do
-    [ -n "$task" ] || continue
+  local exclude f task open key verb note
+  exclude=$(status_scan_parent_channel_exclude "$STATE")
+  for f in "$STATE"/*.status; do
+    [ -f "$f" ] && [ ! -L "$f" ] || continue
+    [ "$f" != "$exclude" ] || continue
+    # The presentation snapshot skips a log it cannot read so one bad file does
+    # not block every other presentation; this reader promises the full set,
+    # so a log it cannot read is a failure, not an omission.
+    [ -r "$f" ] || { printf 'wake drain: cannot read status log %s\n' "$f" >&2; return 1; }
+    task=${f##*/}; task=${task%.status}
     # An incremental fold can seed the legacy presentation cursor and hide
     # unread notes. This reader must not record any presentation receipt.
-    open=$(status_open_decisions "$STATE/$task.status") || return 1
+    open=$(status_open_decisions "$f") || return 1
     [ -n "$open" ] || continue
     while IFS=$'\t' read -r key verb note; do
       printf '%s [key=%s] %s: %s\n' "$task" "$key" "$verb" "$note" || return 1
     done <<EOF
 $open
 EOF
-  done <<EOF
-$snapshot
-EOF
+  done
 }
 
 if [ "$FULL_OPEN_DECISIONS" = true ]; then
