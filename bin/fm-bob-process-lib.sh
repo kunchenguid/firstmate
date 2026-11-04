@@ -36,9 +36,11 @@ fm_bob_script_is_bob() {  # <path>
 # path may contain spaces. MainThread is accepted ONLY together with that script,
 # never widened to every node process. Every caller runs this on foreign node
 # processes too, some on each watcher poll and some holding a whole brief in
-# argv, so the miss stays linear and forks nothing per word.
+# argv, so the cost is bounded whatever the argv length: only the head of argv
+# can hold the script, and at most 16 words after its first can continue a path
+# that spaces split. Anything past either bound is not Bob.
 fm_bob_process_matches() {  # <comm> <args>
-  local comm=$1 args=$2 i start=-1
+  local comm=$1 args=${2:0:8192} i start=-1
   local -a words=()
   case "${comm##*/}" in
     MainThread|node|node-*|node[0-9]*) ;;
@@ -58,7 +60,7 @@ fm_bob_process_matches() {  # <comm> <args>
   # ps joins argv with spaces, so an install path containing spaces arrives as
   # several words (and may be followed by Bob's own arguments): join a candidate
   # only at a word that can end Bob's launcher or script.
-  for ((i = start; i < ${#words[@]}; i++)); do
+  for ((i = start; i < ${#words[@]} && i <= start + 16; i++)); do
     case "${words[i]}" in
       bob | */bob | */bob.js)
         fm_bob_script_is_bob "${words[*]:start:i-start+1}" && return 0

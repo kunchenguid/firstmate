@@ -428,7 +428,7 @@ test_bob_matcher_forks_nothing_on_a_foreign_long_argv() {
     chmod +x "$fakebin/$tool"
   done
   : > "$dir/forks.log"
-  args="node /srv/app.js $(printf 'word %.0s' $(seq 1 1000)) /home/bob/notes /tmp/not-bob/bob.js"
+  args="node /srv/app.js $(printf 'word %.0s' $(seq 1 1000)) /home/bob/notes /opt/x/bob /tmp/not-bob/bob.js bob"
   if PATH="$fakebin:$BASE_PATH" bash -c '. "$1"; fm_bob_process_matches MainThread "$2"' _ \
     "$ROOT/bin/fm-bob-process-lib.sh" "$args"; then
     fail "a foreign node process with a long argv matched Bob"
@@ -438,18 +438,45 @@ test_bob_matcher_forks_nothing_on_a_foreign_long_argv() {
 }
 
 # A /bob word in a brief gets a foreign argv past the matcher's cheap prefilter, so
-# the scan itself must stay linear: a quadratic one takes tens of seconds here.
-test_bob_matcher_scan_stays_linear_on_a_foreign_long_argv() {
-  local args start
+# the matcher's cost must not grow with argv, plain or full of words that look like
+# Bob: an unbounded scan takes tens of seconds on each of these.
+test_bob_matcher_cost_is_bounded_on_a_foreign_long_argv() {
+  local plain matching args start
   # shellcheck source=bin/fm-bob-process-lib.sh
   . "$ROOT/bin/fm-bob-process-lib.sh"
-  args="node /srv/app.js /opt/refs/bob.md $(printf 'word%d ' $(seq 1 30000))"
-  start=$SECONDS
-  if fm_bob_process_matches MainThread "$args"; then
-    fail "a foreign node process naming a bob file matched Bob"
+  plain="node /srv/app.js /opt/refs/bob.md $(printf 'word%d ' $(seq 1 30000))"
+  matching="node /srv/app.js /opt/refs/bob.md $(printf '/opt/refs/bob /opt/refs/bob.js bob %.0s' $(seq 1 1000))"
+  for args in "$plain" "$matching"; do
+    start=$SECONDS
+    if fm_bob_process_matches MainThread "$args"; then
+      fail "a foreign node process naming bob files matched Bob"
+    fi
+    [ $((SECONDS - start)) -lt 5 ] || fail "the Bob matcher took $((SECONDS - start))s on a long foreign argv"
+  done
+  pass "fm_bob_process_matches: a long foreign argv costs a bounded scan"
+}
+
+# Bob's script is the first script argument, so the bound never costs a real
+# install: spaces split its path into a handful of words at the head of argv.
+test_bob_matcher_bound_keeps_a_spaced_install_and_stops_past_it() {
+  local dir spaced deep
+  dir="$TMP_ROOT/matcher-bound"
+  spaced="$dir/my tools/npm global/bobshell/dist/bob.js"
+  deep="$dir/$(printf 'w %.0s' $(seq 1 20))w/bobshell/dist/bob.js"
+  mkdir -p "$(dirname "$spaced")" "$(dirname "$deep")"
+  : > "$spaced"
+  : > "$deep"
+  # shellcheck source=bin/fm-bob-process-lib.sh
+  . "$ROOT/bin/fm-bob-process-lib.sh"
+  fm_bob_process_matches MainThread "node --no-warnings $spaced chat --trust" \
+    || fail "a spaced Bob install inside the bound must match"
+  if fm_bob_process_matches MainThread "node $deep chat"; then
+    fail "a script path split past the word bound must not match"
   fi
-  [ $((SECONDS - start)) -lt 5 ] || fail "the Bob matcher took $((SECONDS - start))s on a 30000-word argv"
-  pass "fm_bob_process_matches: a miss past the prefilter stays linear in argv length"
+  if fm_bob_process_matches MainThread "node $(printf -- '--option%d ' $(seq 1 1000))$spaced"; then
+    fail "a script past the head of argv must not match"
+  fi
+  pass "fm_bob_process_matches: a spaced install matches and the bound stops the scan"
 }
 
 test_bob_secondmate_is_refused() {
@@ -492,6 +519,7 @@ test_bob_concurrent_trust_registrations_all_persist
 test_bob_trust_waits_out_a_truncating_writer
 test_bob_trust_refuses_a_store_that_stays_broken
 test_bob_matcher_forks_nothing_on_a_foreign_long_argv
-test_bob_matcher_scan_stays_linear_on_a_foreign_long_argv
+test_bob_matcher_cost_is_bounded_on_a_foreign_long_argv
+test_bob_matcher_bound_keeps_a_spaced_install_and_stops_past_it
 test_bob_secondmate_is_refused
 test_bob_positional_secondmate_is_refused
