@@ -165,6 +165,92 @@ SH
   pass "the writer breaks a stale lock instead of dying on GNU stat output"
 }
 
+# A writer killed inside its critical section leaves a FRESH orphan lock behind;
+# teardown kills a worker whose exit hook may be mid-write and then retires the
+# busy state moments later. The writer must outwait the stale bound and break
+# that lock on the first retire, rather than give up while the lock is still
+# young and leave cleanup to fail until some later retry.
+test_fresh_orphan_lock_is_broken_on_the_first_retire() {
+  local state gen out status started elapsed
+  state=$(new_state_dir fresh-orphan)
+  gen=$("$EV" arm "$state" t1)
+  mkdir "$state/t1.busy-state.lock"
+  started=$SECONDS
+  out=$(env -u FM_BUSY_LOCK_STALE_SECS "$EV" retire "$state" t1 --gen "$gen" 2>&1) && status=0 || status=$?
+  elapsed=$((SECONDS - started))
+  [ "$status" = 0 ] || fail "the first retire over a fresh orphan lock was refused: $out"
+  [ ! -e "$state/t1.busy-state" ] || fail "retire left the record behind"
+  [ ! -e "$state/t1.busy-gen" ] || fail "retire left the gen sidecar behind"
+  [ ! -e "$state/t1.busy-state.lock" ] || fail "retire left the orphan lock behind"
+  # Non-vacuity: with the default five-second bound a fresh lock cannot read as
+  # stale for about four seconds, so a quick success means something other than
+  # the stale window removed it.
+  [ "$elapsed" -ge 3 ] \
+    || fail "retire succeeded after ${elapsed}s, before a fresh lock could reach the stale bound"
+  [ "$elapsed" -le 8 ] || fail "retire took ${elapsed}s to break a fresh orphan lock"
+  pass "the first retire outwaits the stale bound and breaks a fresh orphan lock"
+}
+
+# The longer wait must not turn into breaking a live writer's lock: a holder
+# that releases inside the stale bound is waited for, never broken, and the
+# waiter then applies its change.
+test_live_writer_lock_is_waited_for_not_broken() {
+  local state gen retire_pid
+  state=$(new_state_dir live-writer)
+  gen=$("$EV" arm "$state" t1)
+  mkdir "$state/t1.busy-state.lock"
+  : > "$state/t1.busy-state.lock/holder"
+  env -u FM_BUSY_LOCK_STALE_SECS "$EV" retire "$state" t1 --gen "$gen" >/dev/null 2>&1 &
+  retire_pid=$!
+  sleep 1
+  kill -0 "$retire_pid" 2>/dev/null || fail "retire did not wait for a live writer's lock"
+  [ -e "$state/t1.busy-state.lock/holder" ] || fail "retire broke a live writer's lock"
+  [ -e "$state/t1.busy-state" ] || fail "retire bypassed a live writer's lock"
+  rm -f "$state/t1.busy-state.lock/holder"
+  rmdir "$state/t1.busy-state.lock"
+  wait "$retire_pid" || fail "retire failed after the live writer released its lock"
+  [ ! -e "$state/t1.busy-state" ] || fail "retire left the record behind"
+  pass "a live writer's lock is waited for and never broken"
+}
+
+# The wait stays bounded: a lock that never ages past the stale bound - live
+# writers re-taking it back to back - still ends in a lock-timeout refusal that
+# leaves the record untouched.
+test_lock_that_stays_young_is_refused_within_a_bound() {
+  local state gen stop out status started elapsed toucher i
+  state=$(new_state_dir young-lock)
+  gen=$("$EV" arm "$state" t1)
+  stop="$state/../toucher-running"
+  mkdir "$state/t1.busy-state.lock"
+  : > "$stop"
+  (
+    i=0
+    while [ -e "$stop" ] && [ "$i" -lt 100 ]; do
+      touch "$state/t1.busy-state.lock" 2>/dev/null || true
+      sleep 0.2
+      i=$((i + 1))
+    done
+  ) &
+  toucher=$!
+  started=$SECONDS
+  out=$(FM_BUSY_LOCK_STALE_SECS=2 "$EV" retire "$state" t1 --gen "$gen" 2>&1) && status=0 || status=$?
+  elapsed=$((SECONDS - started))
+  rm -f "$stop"
+  wait "$toucher" 2>/dev/null || true
+  [ "$status" = 1 ] || fail "retire over a lock that never went stale returned $status: $out"
+  case "$out" in
+    *'busy-state lock timeout for t1'*) : ;;
+    *) fail "the bounded refusal did not name the lock timeout: $out" ;;
+  esac
+  [ -e "$state/t1.busy-state" ] || fail "a refused retire removed the record"
+  [ "$elapsed" -ge 2 ] || fail "retire gave up after ${elapsed}s, inside the stale bound"
+  [ "$elapsed" -le 6 ] || fail "retire waited ${elapsed}s, past its bound"
+  rmdir "$state/t1.busy-state.lock"
+  FM_BUSY_LOCK_STALE_SECS=2 "$EV" retire "$state" t1 --gen "$gen" \
+    || fail "retire failed once the lock was released"
+  pass "a lock that stays younger than the stale bound is refused within a bound"
+}
+
 test_retire_missing_sidecar_is_idempotent() {
   local state gen
   state=$(new_state_dir retire-missing)
@@ -722,6 +808,9 @@ test_apply_unarmed_refused
 test_retire_serializes_and_rejects_stale_gen
 test_retire_missing_sidecar_is_idempotent
 test_stale_lock_broken_under_gnu_stat
+test_fresh_orphan_lock_is_broken_on_the_first_retire
+test_live_writer_lock_is_waited_for_not_broken
+test_lock_that_stays_young_is_refused_within_a_bound
 test_stale_gen_event_rejected
 test_stale_gen_record_unknown
 test_missing_record_unknown_not_idle
