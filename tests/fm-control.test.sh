@@ -1042,6 +1042,23 @@ running fm/other-3 ccccccc 2026-10-03" \
   [ ! -e "$dir/home/state/t1.worker-state" ] \
     || fail "an incomplete listing must not publish a worker-free hold"
   [ -z "$(literals "$dir")" ] || fail "an incomplete listing must not stop the live worker"
+  out=$(FM_CREW_STATE_RUNS_LIMIT=3 \
+    FM_FAKE_AXI_STATUS="$(axi_run_toon "other-task" "$(git -C "$dir/wt-t1" rev-parse HEAD)" running)" \
+    FM_FAKE_NM_FAIL_RUNS=1 \
+    run_control "$dir" t1 stand-down); rc=$?
+  expect_code 1 "$rc" "a failed run listing cannot prove the branch quiet beside another branch's active run"$'\n'"$out"
+  [ ! -e "$dir/home/state/t1.worker-state" ] \
+    || fail "a failed listing must not publish a worker-free hold"
+  [ -z "$(literals "$dir")" ] || fail "a failed listing must not stop the live worker"
+  out=$(FM_CREW_STATE_RUNS_LIMIT=3 \
+    FM_FAKE_AXI_STATUS="$(axi_run_toon "other-task" "$(git -C "$dir/wt-t1" rev-parse HEAD)" running)" \
+    FM_FAKE_RUNS_LIST="running fm/other-1 aaaaaaa 2026-10-01
+running fm/other-2 bbbbbbb 2026-10-02
+completed task-t1 $(git -C "$dir/wt-t1" rev-parse --short HEAD) 2026-10-03" \
+    run_control "$dir" t1 stand-down); rc=$?
+  expect_code 0 "$rc" "this branch's terminal row at the window's last position answers for the branch"$'\n'"$out"
+  assert_grep 'state=stood-down' "$dir/home/state/t1.worker-state" \
+    "a branch row inside a full window proves the branch quiet"
   pass "fm-control stand-down: an incomplete run listing does not prove quiet"
 }
 
@@ -1292,9 +1309,10 @@ test_stand_down_refuses_a_live_run_behind_a_terminal_axi_answer() {
 
 # `no-mistakes runs` offers only --limit: no pagination, no end-of-list marker,
 # and the window is exactly full on any repository whose history has reached it -
-# the eventual steady state of every repository. Corroboration that came back
-# full adds nothing, so it can neither prove nor unprove the branch, and the
-# branch read's own answer stands; a live row INSIDE the window still refuses.
+# the eventual steady state of every repository. When `axi status` reports a
+# terminal run, nothing is in flight anywhere, so a full window without this
+# branch's row (a branch that never ran validation) must not refuse; a live row
+# INSIDE the window still refuses.
 test_stand_down_takes_a_full_run_window_as_no_added_run() {
   local dir out rc head
   dir=$(new_case stand-down-full-window)
@@ -1302,7 +1320,7 @@ test_stand_down_takes_a_full_run_window_as_no_added_run() {
   alive_as "$dir" claude
   head=$(git -C "$dir/wt-t1" rev-parse HEAD)
   out=$(FM_CREW_STATE_RUNS_LIMIT=3 \
-    FM_FAKE_AXI_STATUS="$(axi_run_toon "task-other" "$head" running)" \
+    FM_FAKE_AXI_STATUS="$(axi_run_toon "task-other" "$head" completed)" \
     FM_FAKE_RUNS_LIST="completed  task-other  aaaaaaa1  2026-08-28
 completed  task-other  aaaaaaa2  2026-08-28
 completed  task-other  aaaaaaa3  2026-08-28" \

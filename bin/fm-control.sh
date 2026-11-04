@@ -1010,8 +1010,10 @@ task_is_declared_held() {
 # removes the task from the watcher's stale and wedge detection, so only a
 # proven "no run is active here" may proceed. An absent or unreadable worktree,
 # an unreadable branch-scoped status, and a live run the head rule could not
-# place all refuse. The optional repo-wide listing cannot weaken a readable
-# quiet branch result or make unavailable corroboration a refusal.
+# place all refuse. When the branch-scoped status names another branch's
+# active run, quiet also needs the repo-wide listing to show this branch's row
+# or to complete below its limit; otherwise the listing cannot weaken a
+# readable quiet branch result.
 # fm_nm_branch_run_verdict carries the query half of the same rule and names
 # the one condition that could not prove the branch quiet.
 #

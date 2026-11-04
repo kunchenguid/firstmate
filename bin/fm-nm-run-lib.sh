@@ -619,8 +619,10 @@ fm_nm_runs_status_for_worktree() {  # <worktree> <branch> <runs-list-output> [ex
 }
 
 # The bounded corroboration window read from `no-mistakes runs`. The listing is
-# repo-wide and has neither pagination nor an end-of-list marker, so it can add
-# a run this branch owns but can never be asked to prove the absence of one.
+# repo-wide and has neither pagination nor an end-of-list marker, so its
+# silence proves a branch quiet only when it completed below this limit. The
+# branch-run verdict needs that proof only when `axi status` names another
+# branch's active run, so there the limit is a safety setting.
 fm_nm_runs_limit() {
   local n=${FM_CREW_STATE_RUNS_LIMIT:-200}
   case "$n" in ''|*[!0-9]*|0) n=200 ;; esac
@@ -693,10 +695,13 @@ fm_nm_run_capturing_stderr() {  # <dir> <stdout-var> <stderr-var> <timeout_secs>
 # listing's status column is each run's current status, so it catches a run a
 # stale `axi status` answer missed). Only that newest row is read: the listing
 # is ordered newest first, so an older live row never displaces the newer
-# terminal result that superseded it. Its absence proves quiet only when the
-# listing completed below its requested limit; a failed or capped listing
-# cannot prove that this branch has no active run. An unregistered repository
-# and an absent CLI remain explicit no-run cases.
+# terminal result that superseded it. A terminal or empty `axi status`
+# answer means nothing is in flight in the repository, so the listing's
+# silence or failure never weakens it. Only when `axi status` names ANOTHER
+# branch's active run does quiet need the listing as well: then a row for this
+# branch, or a listing that completed below its requested limit, is required,
+# and a failed or capped listing without such a row leaves the question open.
+# An unregistered repository and an absent CLI remain explicit no-run cases.
 #
 # The verdict carries no run detail: it answers the safety question and names
 # the active run's id when the branch read placed one. Callers that need run
@@ -707,7 +712,7 @@ fm_nm_branch_run_verdict() {  # <worktree> <branch> <timeout_secs> [limit]
   local status_out='' status_rc status_stderr='' status_body='' direct_status=''
   local run_branch_raw='' run_branch='' run_head=''
   local branch_state=unknown branch_reason='' active_id=''
-  local inventory row st rest br sha listing_live='' listing_rows=0 status_unregistered=0
+  local inventory row st rest br sha listing_live='' listing_rows=0 listing_matched=0 other_active=0
   FM_NM_BRANCH_RUN_VERDICT=unknown
   FM_NM_BRANCH_RUN_REASON=
   FM_NM_BRANCH_RUN_ID=
@@ -754,13 +759,14 @@ fm_nm_branch_run_verdict() {  # <worktree> <branch> <timeout_secs> [limit]
             branch_state=unknown
             branch_reason="the run 'no-mistakes axi status' reports on branch $branch (head ${run_head:-unknown}) cannot be placed against this worktree's HEAD"
           fi
+        else
+          other_active=1
         fi
       fi
     fi
   elif [ "$status_rc" != 0 ] \
     && fm_nm_says_unregistered "$status_out" "$status_stderr"; then
     branch_state=quiet
-    status_unregistered=1
   else
     branch_reason="'no-mistakes axi status' could not answer whether branch $branch has a run in flight"
   fi
@@ -779,21 +785,22 @@ fm_nm_branch_run_verdict() {  # <worktree> <branch> <timeout_secs> [limit]
         sha=${rest%% *}
         { [ -n "$br" ] && [ -n "$sha" ]; } || continue
         [ "$br" = "$branch" ] || continue
+        listing_matched=1
         case "$st" in
           completed|failed|cancelled) ;;
           *) listing_live=$st ;;
         esac
         break
       done <<< "$inventory"
-      if [ -z "$listing_live" ] \
-        && [ "$branch_state" = quiet ] \
+      if [ "$other_active" = 1 ] \
+        && [ "$listing_matched" = 0 ] \
         && [ "$listing_rows" -ge "$limit" ]; then
         branch_state=unknown
-        branch_reason="the runs listing reached its $limit-row limit, so whether branch $branch has an active run could not be proved"
+        branch_reason="'no-mistakes axi status' names another branch's active run and the runs listing reached its $limit-row limit without a row for branch $branch, so whether branch $branch has an active run could not be proved"
       fi
-    elif [ "$branch_state" = quiet ] && [ "$status_unregistered" != 1 ]; then
+    elif [ "$other_active" = 1 ]; then
       branch_state=unknown
-      branch_reason="the runs listing could not answer whether branch $branch has an active run"
+      branch_reason="'no-mistakes axi status' names another branch's active run and the runs listing could not answer whether branch $branch has an active run"
     fi
   fi
   if [ "$branch_state" = active ]; then
