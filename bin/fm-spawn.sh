@@ -64,13 +64,14 @@
 #   is for, such as a card URL or id.
 #   A ship, scout, or secondmate spawn records it as work_item= in
 #   state/<id>.meta when the flag is present.
-#   Absent records nothing and never refuses the spawn.
+#   Omitting the flag leaves a fresh task unlinked and never refuses the spawn.
+#   An explicitly empty value is refused.
 #   A control character or newline is refused because it would split that
 #   one-line record; the identifier's shape is otherwise unchecked.
 #   --relaunch reuses the recorded value and refuses the flag.
 #   A secondmate spawn that republishes an existing record without the flag
 #   keeps the recorded value, including the remote route's own task record.
-#   bin/fm-fleet-snapshot.sh publishes it as tasks[].work_item, null when absent.
+#   See bin/fm-fleet-snapshot.sh's header for the snapshot output contract.
 #   Ship/scout launches always put fm-dod-lib.sh's current worker role scope
 #   first in the private launch-brief overlay, including the exact task-owned
 #   steering inbox. This never rewrites a project's instruction files or a
