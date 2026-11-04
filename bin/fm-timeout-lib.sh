@@ -8,10 +8,16 @@
 #   fm_timeout_mechanism
 #       Prints the mechanism fm_run_timed will use on this host: "timeout",
 #       "gtimeout", "perl", or "bash". Set FM_TIMEOUT_MECHANISM_OVERRIDE=bash
-#       to force the dependency-free fallback.
+#       to force the dependency-free fallback. An omp shell defines timeout as
+#       a builtin; command -v reports that builtin, and invoking the name runs
+#       it. timeout and gtimeout are selected only when type -P yields an
+#       executable path, and that path is what fm_run_timed and fm_exec_timed
+#       invoke, so a builtin or function of the same name cannot shadow the
+#       runner. The perl and bash fallbacks are unchanged.
 #
 #   fm_run_timed <seconds> <command> [args...]
-#       Runs the command with a hard bound. Exit status is the command's own,
+#       Runs the command with a hard bound, preserving the caller's stdin. Exit
+#       status is the command's own,
 #       except 124, which means the bound was hit (GNU timeout's convention,
 #       reproduced by the perl and bash fallbacks), and a command killed by
 #       signal n, which reports 128+n on every mechanism - so a SIGKILLed child
@@ -21,7 +27,10 @@
 #       exit, and is reported as 124 too. Only 137 raised by GNU/BSD timeout's
 #       own KILL escalation, with no status recorded by the bounded command,
 #       also collapses into 124: there it means the bound fired, not that the
-#       command chose to die.
+#       command chose to die. A pipe or file on standard input reaches the
+#       command on every mechanism. The timeout and bash mechanisms background
+#       the command and restore that redirected stdin afterwards; they do not
+#       attach a terminal, and a closed stdin does not fail the call.
 #
 #   fm_exec_timed <seconds> <grace-seconds> <command> [args...]
 #       Replaces the calling shell with the bounded command, so it must be the
@@ -73,18 +82,60 @@
 # bounded child its own process group before signaling its negative pid.
 set -u
 
+# Print the PATH path of timeout, else gtimeout, when that path is executable.
+fm_external_timeout_path() {
+  local name timeout_path
+  for name in timeout gtimeout; do
+    timeout_path=$(type -P "$name" 2>/dev/null) || true
+    if [ -n "$timeout_path" ] && [ -x "$timeout_path" ]; then
+      printf '%s\n' "$timeout_path"
+      return 0
+    fi
+  done
+  return 1
+}
+
 fm_timeout_mechanism() {
+  local timeout_path
   if [ "${FM_TIMEOUT_MECHANISM_OVERRIDE:-}" = bash ]; then
     printf 'bash\n'
-  elif command -v timeout >/dev/null 2>&1; then
-    printf 'timeout\n'
-  elif command -v gtimeout >/dev/null 2>&1; then
-    printf 'gtimeout\n'
+  elif timeout_path=$(fm_external_timeout_path); then
+    printf '%s\n' "${timeout_path##*/}"
   elif command -v perl >/dev/null 2>&1; then
     printf 'perl\n'
   else
     printf 'bash\n'
   fi
+}
+
+# True when stdin is a pipe or file. A terminal is not a redirected payload,
+# and a closed stdin cannot be duplicated.
+fm_timeout_stdin_is_redirected() {
+  [ ! -t 0 ] && ( exec 3<&0 ) 2>/dev/null
+}
+
+# Background "$@" and keep a redirected stdin. A non-interactive bash assigns
+# /dev/null to an async command's stdin, then applies explicit redirections, so
+# 0<&3 restores the dup. The group redirection is undone when the group ends,
+# and 3<&- keeps the spare fd out of the child. A terminal or closed stdin gets
+# an explicit /dev/null: under set -m (the bash mechanism) bash skips its
+# implicit one, which would hand the terminal to a background process group.
+fm_timeout_background() {
+  if fm_timeout_stdin_is_redirected; then
+    { "$@" 0<&3 3<&- & } 3<&0
+  else
+    "$@" </dev/null &
+  fi
+}
+
+fm_bash_timeout_child() {
+  local status_file=$1 command_rc
+  shift
+  set +m
+  "$@"
+  command_rc=$?
+  printf '%s\n' "$command_rc" > "$status_file"
+  exit "$command_rc"
 }
 
 fm_run_bash_timeout() {
@@ -94,13 +145,7 @@ fm_run_bash_timeout() {
   deadline_status="${command_status}.deadline"
   case $- in *m*) monitor_was_on=1 ;; esac
   set -m
-  (
-    set +m
-    "$@"
-    command_rc=$?
-    printf '%s\n' "$command_rc" > "$command_status"
-    exit "$command_rc"
-  ) &
+  fm_timeout_background fm_bash_timeout_child "$command_status" "$@"
   child_pid=$!
   (
     set +m
@@ -136,20 +181,23 @@ fm_run_external_timeout() {
   local runner=$1 seconds=$2 status_file runner_pid runner_rc command_rc
   shift 2
   status_file=$(mktemp "${TMPDIR:-/tmp}/fm-timeout-status.XXXXXX" 2>/dev/null) || return 124
-  # Run timeout asynchronously so its pid - also the process-group id created
-  # by GNU/BSD timeout without --foreground - remains available for cleanup.
+  # Run the executable path asynchronously (never a bare name: that is the omp
+  # timeout builtin, and backgrounding it leaves $! empty) so its pid - also
+  # the process-group id created by GNU/BSD timeout without --foreground -
+  # remains available for cleanup. fm_timeout_background keeps a redirected
+  # stdin across that async assignment.
   # A shell wrapper can exit promptly on TERM while one of its descendants
   # ignores TERM; timeout then considers the command finished and does not send
   # its configured KILL. Explicitly reap that leftover group on a real timeout.
   # shellcheck disable=SC2016  # Expansion is deliberately deferred to the child shell.
-  "$runner" -k 1 "$seconds" bash -c '
+  fm_timeout_background "$runner" -k 1 "$seconds" bash -c '
     status_file=$1
     shift
     "$@"
     command_rc=$?
     printf "%s\n" "$command_rc" > "$status_file"
     exit "$command_rc"
-  ' _ "$status_file" "$@" &
+  ' _ "$status_file" "$@"
   runner_pid=$!
   if wait "$runner_pid"; then
     runner_rc=0
@@ -179,11 +227,13 @@ fm_run_external_timeout() {
 }
 
 fm_run_timed() {  # <seconds> <command...>
-  local seconds=$1
+  local seconds=$1 timeout_path
   shift
   case "$(fm_timeout_mechanism)" in
-    timeout) fm_run_external_timeout timeout "$seconds" "$@" ;;
-    gtimeout) fm_run_external_timeout gtimeout "$seconds" "$@" ;;
+    timeout|gtimeout)
+      timeout_path=$(fm_external_timeout_path) || return 127
+      fm_run_external_timeout "$timeout_path" "$seconds" "$@"
+      ;;
     perl)
       perl -e 'my $t = shift; my $pid = fork; die "fork failed" unless defined $pid; if (!$pid) { setpgrp(0, 0); exec @ARGV } local $SIG{ALRM} = sub { kill "TERM", -$pid; select undef, undef, undef, 0.2; kill "KILL", -$pid; exit 124 }; alarm $t; waitpid $pid, 0; exit(($? & 127) ? 128 + ($? & 127) : $? >> 8)' \
         "$seconds" "$@"
@@ -206,7 +256,7 @@ fm_timed_out() {  # <status>
 # which keeps the bound off perl's platform-dependent syscall-restart signal
 # semantics and off the drift of counting sleep intervals.
 fm_exec_timed() {  # <seconds> <grace-seconds> <command...>
-  local seconds=${1:-} grace=${2:-} value owner
+  local seconds=${1:-} grace=${2:-} value owner timeout_path
   for value in "$seconds" "$grace"; do
     case "$value" in
       '' | 0* | *[!0-9]*)
@@ -221,11 +271,13 @@ fm_exec_timed() {  # <seconds> <grace-seconds> <command...>
     exit 125
   fi
   owner=${FM_EXEC_TIMED_OWNER_PID:-$$}
-  [ "$owner" != "$BASHPID" ] || owner=$PPID
   unset FM_EXEC_TIMED_OWNER_PID
   if command -v perl >/dev/null 2>&1; then
     exec perl -MPOSIX=WNOHANG,setpgid -MTime::HiRes=time -e '
-      my ($bound, $grace, $owner) = (shift, shift, shift);
+      my ($bound, $grace, $owner, $shell_parent) = (shift, shift, shift, shift);
+      # exec preserves the shell PID, including in Bash 3.2 subshells where
+      # BASHPID is unavailable. Keep the pre-exec parent for startup races.
+      $owner = $shell_parent if $owner == $$;
       my $parent = getppid();
       my ($pid, $pending, $kill_at, $timed_out) = (0, "", 0, 0);
       for my $sig (qw(TERM INT HUP)) {
@@ -272,11 +324,9 @@ fm_exec_timed() {  # <seconds> <grace-seconds> <command...>
         }
         select undef, undef, undef, 0.05;
       }
-    ' -- "$seconds" "$grace" "$owner" "$@"
-  elif command -v timeout >/dev/null 2>&1; then
-    exec timeout -k "$grace" "$seconds" "$@"
-  elif command -v gtimeout >/dev/null 2>&1; then
-    exec gtimeout -k "$grace" "$seconds" "$@"
+    ' -- "$seconds" "$grace" "$owner" "$PPID" "$@"
+  elif timeout_path=$(fm_external_timeout_path); then
+    exec "$timeout_path" -k "$grace" "$seconds" "$@"
   fi
   printf 'fm_exec_timed: cannot bound %s within %ss: none of perl, timeout, or gtimeout is available\n' "${1##*/}" "$seconds" >&2
   exit 127

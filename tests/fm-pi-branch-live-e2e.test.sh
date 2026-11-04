@@ -23,8 +23,10 @@
 #
 # No provider call leaves the machine. The first branch probe points
 # PI_CODING_AGENT_DIR at an empty directory, so it reads no credentials and
-# model resolution stays empty by construction. The 429 probe intercepts its
-# only request before transport, and the precedence probes read only a local
+# model resolution stays empty by construction. Its main session uses a
+# separate local runtime and intercepted SSE responses, with real vendor
+# events and request capture. The 429 probe intercepts its only request before
+# transport, and the precedence probes read only a local
 # placeholder key for their never-contacted fake provider. Run after
 # every Pi upgrade and before trusting refreshed per-harness evidence
 # (docs/verification/runtime-backends.md).
@@ -64,6 +66,15 @@ if [ "${1:-}" = --handling-delivered ]; then
   printf 'confirmed generation=%s watcher=%s\n' "$2" "$4" >> "${FM_LIVE_WATCH_LOG:?}"
   exit 0
 fi
+# Match --restart's home-scoped retirement contract: a replacement must not
+# leave its predecessor polling the same trigger file.
+if [ "${1:-}" = --restart ] && [ -f "${FM_LIVE_WATCH_LOG:?}" ]; then
+  previous=$(awk '/^arm pid=/ { pid = substr($0, 9) } END { print pid }' "$FM_LIVE_WATCH_LOG")
+  if [ -n "$previous" ]; then
+    kill -TERM "$previous" 2>/dev/null || true
+    printf 'retire pid=%s\n' "$previous" >> "$FM_LIVE_WATCH_LOG"
+  fi
+fi
 printf 'arm pid=%s\n' "$$" >> "${FM_LIVE_WATCH_LOG:?}"
 printf 'watcher: started pid=%s (beacon fresh) recovery-generation=live-sdk-generation\n' "$$"
 trap 'exit 0' TERM INT
@@ -71,6 +82,7 @@ while :; do
   if [ -e "$FM_LIVE_WATCH_TRIGGER" ]; then
     reason=$(cat "$FM_LIVE_WATCH_TRIGGER")
     rm -f "$FM_LIVE_WATCH_TRIGGER"
+    printf 'trigger pid=%s reason=%s\n' "$$" "$reason" >> "${FM_LIVE_WATCH_LOG:?}"
     printf '%s\n' "$reason"
     exit 0
   fi
@@ -101,90 +113,100 @@ const approvedProject = `${home}/projects/live-probe`;
 mkdirSync(approvedProject, { recursive: true });
 writeFileSync(`${home}/state/live-probe.meta`, `project=${approvedProject}\nwindow=fm-live-probe\n`);
 writeFileSync(`${home}/state/.wake-queue`, "1\t1\tsignal\tlive-probe.status\tsignal: live-sdk probe\n");
-const busHandlers = new Map();
+// Main gets a separate local model runtime; the branch's agent dir remains
+// empty. Observe real vendor input, consumption, settlement and provider
+// requests rather than synthesizing successful sendUserMessage callbacks.
 const offers = [];
-const bus = {
-  on(channel, handler) {
-    busHandlers.set(channel, [...(busHandlers.get(channel) ?? []), handler]);
-    return () => {};
-  },
-  emit(channel, data) {
-    for (const handler of busHandlers.get(channel) ?? []) handler(data);
-    if (channel === "fm-branch-supervision:dispatch") offers.push(data);
-  },
-};
 const mainUserMessages = [];
-const piHandlers = new Map();
-let watcherTool = null;
-let sessionCtx = {};
-const pi = {
-  events: bus,
-  on(event, handler) {
-    piHandlers.set(event, [...(piHandlers.get(event) ?? []), handler]);
+const mainInputs = [];
+const requests = [];
+const errors = [];
+let settled = 0;
+const sdk = await import(pathToFileURL(`${process.env.PI_PACKAGE_DIR}/dist/index.js`).href);
+const mainDir = resolve(home, "../main-agent-dir");
+mkdirSync(mainDir, { recursive: true });
+writeFileSync(`${mainDir}/models.json`, JSON.stringify({ providers: {
+  "fm-live-main": {
+    baseUrl: "https://fm-live-main.invalid/v1", api: "openai-completions", apiKey: "fm-live-placeholder",
+    models: [{ id: "fm-live-main-model", name: "local main", contextWindow: 8192, maxTokens: 512 }],
   },
-  registerTool(tool) {
-    if (tool.name === "fm_watch_arm_pi") watcherTool = tool;
-  },
-  registerCommand() {},
-  registerMessageRenderer() {},
-  sendMessage() {},
-  // Main is idle throughout this probe, so a send starts a run: Pi raises
-  // before_agent_start with the exact text and then the user message_start.
-  // A send while main streams raises neither at queue time; the sixth probe
-  // below proves that against the real AgentSession.
-  async sendUserMessage(content, options) {
-    mainUserMessages.push({ content, options: options ?? {} });
-    for (const handler of piHandlers.get("before_agent_start") ?? []) {
-      await handler({ prompt: content }, sessionCtx);
-    }
-    for (const handler of piHandlers.get("message_start") ?? []) {
-      await handler({ message: { role: "user", content: [{ type: "text", text: content }] } }, sessionCtx);
-    }
-  },
+} }));
+globalThis.fetch = async (input, options) => {
+  const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+  if (!url.startsWith("https://fm-live-main.invalid/")) throw new Error(`unexpected provider request: ${url}`);
+  requests.push(JSON.parse(options.body));
+  const chunk = (delta, finish_reason) => `data: ${JSON.stringify({
+    id: "main-fallback", object: "chat.completion.chunk", created: 1, model: "fm-live-main-model",
+    choices: [{ index: 0, delta, finish_reason }],
+  })}\n\n`;
+  return new Response(chunk({ role: "assistant", content: "ACK" }, null) + chunk({}, "stop") + "data: [DONE]\n\n", {
+    headers: { "content-type": "text/event-stream" },
+  });
 };
 process.env.FM_ROOT_OVERRIDE = process.env.FM_REAL_ROOT;
 const branchMod = await import(pathToFileURL(process.env.BRANCH_PLUGIN).href);
-branchMod.default(pi);
 process.env.FM_ROOT_OVERRIDE = process.env.FM_WATCH_ROOT;
 const watchMod = await import(pathToFileURL(process.env.WATCH_PLUGIN).href);
-watchMod.default(pi);
-// The real model surface, built from the same empty agent dir: no
-// credentials are read and no catalog is fetched, so every model lookup is
-// genuinely empty by construction.
-const { ModelRegistry, ModelRuntime } = await import(
-  pathToFileURL(`${process.env.PI_PACKAGE_DIR}/dist/index.js`).href
-);
-const modelRegistry = new ModelRegistry(
-  await ModelRuntime.create({
-    authPath: `${process.env.PI_CODING_AGENT_DIR}/auth.json`,
-    modelsPath: `${process.env.PI_CODING_AGENT_DIR}/models.json`,
-  }),
-);
-if (typeof modelRegistry.getAvailable !== "function" || typeof modelRegistry.hasConfiguredAuth !== "function") {
-  throw new Error("the real ModelRegistry no longer exposes the model surface the supervision picker reads");
+const settings = sdk.SettingsManager.create(home, mainDir);
+const loader = new sdk.DefaultResourceLoader({
+  cwd: home, agentDir: mainDir, settingsManager: settings,
+  extensionFactories: [branchMod.default, watchMod.default, (pi) => {
+    pi.events.on("fm-branch-supervision:dispatch", (offer) => { offers.push(offer); });
+    pi.on("input", (event) => { mainInputs.push(event); });
+    pi.on("message_start", (event) => {
+      if (event.message.role === "user") mainUserMessages.push({
+        content: event.message.content.filter((part) => part.type === "text").map((part) => part.text).join("\n"),
+      });
+    });
+    pi.on("agent_settled", () => { settled += 1; });
+  }],
+  noSkills: true, noPromptTemplates: true, noThemes: true, noContextFiles: true,
+});
+const mainRuntime = await sdk.ModelRuntime.create({ authPath: `${mainDir}/auth.json`, modelsPath: `${mainDir}/models.json` });
+const mainRegistry = new sdk.ModelRegistry(mainRuntime);
+await mainRegistry.refresh();
+const model = mainRegistry.find("fm-live-main", "fm-live-main-model");
+if (!model) throw new Error("real main runtime did not resolve the local provider");
+const emptyRegistry = new sdk.ModelRegistry(await sdk.ModelRuntime.create({
+  authPath: `${process.env.PI_CODING_AGENT_DIR}/auth.json`, modelsPath: `${process.env.PI_CODING_AGENT_DIR}/models.json`,
+}));
+if (emptyRegistry.getAvailable().length || emptyRegistry.find("openai", "no-such-live-model")) {
+  throw new Error("isolated branch runtime was not empty");
 }
-sessionCtx = {
-  sessionManager: { getSessionFile: () => `${home}/main.jsonl`, getEntries: () => [] },
-  modelRegistry,
+const createMain = async (reason) => {
+  // dispose invalidates the vendor extension runtime, including bus listeners.
+  // Reload resources for a replacement rather than rebinding a stale API.
+  await loader.reload();
+  if (loader.getExtensions().errors.length) throw new Error(JSON.stringify(loader.getExtensions().errors));
+  const created = await sdk.createAgentSession({
+    cwd: home, agentDir: mainDir, settingsManager: settings, resourceLoader: loader,
+    sessionManager: sdk.SessionManager.create(home, `${home}/main-sessions`),
+    modelRuntime: mainRuntime, model, noTools: "builtin", sessionStartEvent: { type: "session_start", reason },
+  });
+  await created.session.bindExtensions({ onError: (error) => { errors.push(error); } });
+  return created.session;
 };
+let session = await createMain("startup");
 const waitFor = async (predicate, label) => {
   for (let i = 0; i < 600; i += 1) {
     if (predicate()) return;
     await new Promise((resolve) => setTimeout(resolve, 50));
   }
-  throw new Error(`timeout waiting for ${label}`);
+  throw new Error(`timeout waiting for ${label}; offers=${offers.length}; messages=${mainUserMessages.length}; settled=${settled}; errors=${JSON.stringify(errors)}; watch=${readFileSync(process.env.FM_LIVE_WATCH_LOG, "utf8")}`);
 };
+const liveArmPids = () => readFileSync(process.env.FM_LIVE_WATCH_LOG, "utf8").split(/\n/)
+  .filter((line) => line.startsWith("arm pid="))
+  .map((line) => Number(line.slice("arm pid=".length)))
+  .filter((pid) => { try { process.kill(pid, 0); return true; } catch { return false; } });
 const armCount = () => existsSync(process.env.FM_LIVE_WATCH_LOG)
   ? readFileSync(process.env.FM_LIVE_WATCH_LOG, "utf8").split(/\n/).filter((line) => line.startsWith("arm ")).length
   : 0;
-for (const handler of piHandlers.get("session_start") ?? []) {
-  await handler({ type: "session_start", reason: "startup" }, sessionCtx);
-}
 if (existsSync(`${home}/state/.pi-branch-extension-loaded`)) {
   throw new Error("branch activated before the primary session acquired its lock");
 }
 writeFileSync(`${home}/state/.lock`, `${process.pid}\n`);
-if (!watcherTool) throw new Error("watcher tool was not registered");
+const watcherTool = session.getToolDefinition("fm_watch_arm_pi");
+if (!watcherTool) throw new Error("watcher tool was not registered in the real main session");
 const armed = await watcherTool.execute("live-sdk-arm", {}, undefined, undefined, {});
 if (!armed.details?.ok) throw new Error(`watcher did not arm: ${JSON.stringify(armed.details)}`);
 await waitFor(() => armCount() === 1, "initial watcher arm");
@@ -221,14 +243,16 @@ if (!existsSync(`${home}/state/branch-session`)) {
 // A model pin the branch's REAL runtime cannot resolve must refuse the build
 // and reject the offer back to watcher-owned main delivery rather than
 // silently running the branch on whatever model main would have used.
+await waitFor(() => settled === 1 && !session.isStreaming, "first real main request settlement");
+if (!session.sessionManager.buildSessionContext().messages.some((message) => message.role === "user" && message.content.some((part) => part.type === "text" && part.text === fallback))) {
+  throw new Error("real main session did not retain the first delivered wake");
+}
 writeFileSync(`${home}/config/supervision-branch-model`, "openai/no-such-live-model\n");
-for (const handler of piHandlers.get("session_shutdown") ?? []) {
-  await handler({ type: "session_shutdown", reason: "new" }, sessionCtx);
-}
-for (const handler of piHandlers.get("session_start") ?? []) {
-  await handler({ type: "session_start", reason: "new" }, sessionCtx);
-}
+await session.extensionRunner.emit({ type: "session_shutdown", reason: "new" });
+await session.dispose();
+session = await createMain("new");
 await waitFor(() => armCount() >= 3, "replacement watcher arm");
+await waitFor(() => liveArmPids().length === 1, "replacement to retire the previous fixture arm");
 writeFileSync(`${home}/state/.wake-queue`, "1\t2\tsignal\tlive-probe.status\tsignal: live pin probe\n");
 writeFileSync(process.env.FM_LIVE_WATCH_TRIGGER, "signal: live pin probe\n");
 await waitFor(() => mainUserMessages.length === 2, "pinned watcher-owned main delivery");
@@ -251,15 +275,38 @@ const confirmations = readFileSync(process.env.FM_LIVE_WATCH_LOG, "utf8")
 if (confirmations.length !== 2) {
   throw new Error(`watcher did not confirm both successor deliveries: ${confirmations.join(" | ")}`);
 }
-console.log("LIVE_OK");
+await waitFor(() => settled === 2 && !session.isStreaming, "pinned real main request settlement");
+// Idle input events carry no streamingBehavior on SDK1.1; follow-up queue
+// semantics are asserted separately by the existing real streaming probe.
+if (requests.length !== 2 || mainInputs.length !== 2 || mainInputs.some((event) => event.source !== "extension")) {
+  throw new Error(`real fallback request ownership failed: ${JSON.stringify({ requests, mainInputs, settled })}`);
+}
+for (const [index, reason] of ["signal: live-sdk probe", "signal: live pin probe"].entries()) {
+  if (!JSON.stringify(requests[index].messages).includes(`FIRSTMATE WATCHER WAKE: ${reason}`)) {
+    throw new Error(`real main provider did not receive fallback ${index}`);
+  }
+}
+if (!session.sessionManager.buildSessionContext().messages.some((message) => message.role === "user" && message.content.some((part) => part.type === "text" && part.text === pinFallback))) {
+  throw new Error("real main session did not retain the pinned fallback");
+}
+if (existsSync(`${home}/state/.branch-eligible-rows`) || existsSync(`${home}/state/branch-outcomes.jsonl`)) {
+  throw new Error("unusable branch fabricated an outcome or retained claimed notification ownership");
+}
+if (!readFileSync(`${home}/state/.wake-queue`, "utf8").includes("signal: live pin probe") || errors.length) {
+  throw new Error(`real fallback lost its durable row or raised extension errors: ${JSON.stringify(errors)}`);
+}
+await session.extensionRunner.emit({ type: "session_shutdown", reason: "quit" });
+await session.dispose();
+console.log(`LIVE_OK ${JSON.stringify({ requests, mainInputs, settled, watch: readFileSync(process.env.FM_LIVE_WATCH_LOG, "utf8") })}`);
 process.exit(0);
 EOF
 status=$?
 out=$(cat "$TMP_ROOT/node-output")
-if [ "$status" -ne 0 ] || [ "$out" != "LIVE_OK" ]; then
+if [ "$status" -ne 0 ] || [[ "$out" != LIVE_OK\ * ]]; then
   fail "real-SDK Pi branch guard failed against pi-coding-agent $PI_VERSION: $out"
 fi
-pass "real Pi SDK $PI_VERSION accepts the branch session construction and preserves an unpromptable wake"
+printf '%s\n' "$out"
+pass "real Pi SDK $PI_VERSION rejects an unusable pin and delivers both fallback wakes through the real main session and provider"
 
 # Real-SDK Mode 2 guard: a constructed AgentSession receives the c1 429 shape
 # from Pi's real OpenAI-compatible adapter. Fetch is intercepted in-process,
@@ -342,7 +389,7 @@ const pi = {
   async sendUserMessage(content, options) {
     mainUserMessages.push({ content, options: options ?? {} });
     for (const handler of piHandlers.get("before_agent_start") ?? []) {
-      await handler({ prompt: content }, sessionCtx);
+      await handler({ messageType: "user", prompt: content }, sessionCtx);
     }
     for (const handler of piHandlers.get("message_start") ?? []) {
       await handler({ message: { role: "user", content: [{ type: "text", text: content }] } }, sessionCtx);
@@ -991,3 +1038,411 @@ if [ "$status" -ne 0 ] || [ "$out" != "STREAM_OK" ]; then
   fail "real-SDK streaming-time watcher delivery guard failed against pi-coding-agent $PI_VERSION: $out"
 fi
 pass "real Pi SDK $PI_VERSION queues a streaming-time watcher wake without before_agent_start, keeps the successor chain, and surfaces consumption of both follow-ups"
+
+# The first processing presentation keeps its visible response, while the
+# hidden retry drops only empty or exact-repeat finals through the real event
+# runner, stock assistant renderer, and persistence, including after reopen.
+for retry_case in repeated differing empty first-empty; do
+retryhome="$TMP_ROOT/retry-home-$retry_case"
+retrydir="$TMP_ROOT/retry-agent-dir-$retry_case"
+mkdir -p "$retryhome/state" "$retryhome/config" "$retrydir"
+cp "$streamdir/models.json" "$retrydir/models.json"
+BRANCH_PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" \
+  FM_HOME="$retryhome" FM_ROOT_OVERRIDE="$ROOT" RETRY_CASE="$retry_case" \
+  PI_CODING_AGENT_DIR="$retrydir" PI_PACKAGE_DIR="$PI_PACKAGE_DIR" \
+  node --input-type=module > "$TMP_ROOT/retry-output" 2>&1 <<'EOF'
+import { readFileSync, writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { resolve } from "node:path";
+import { pathToFileURL } from "node:url";
+const home = process.env.FM_HOME;
+const pkg = resolve(process.env.PI_PACKAGE_DIR);
+const { DefaultResourceLoader, ModelRegistry, ModelRuntime, SessionManager, SettingsManager, createAgentSession, initTheme } =
+  await import(pathToFileURL(`${pkg}/dist/index.js`).href);
+const { AssistantMessageComponent } = await import(pathToFileURL(`${pkg}/dist/modes/interactive/components/assistant-message.js`).href);
+initTheme("dark");
+writeFileSync(`${home}/state/.lock`, `${process.pid}\n`);
+const outcome = (...args) => {
+  const result = spawnSync("bash", [`${process.env.FM_ROOT_OVERRIDE}/bin/fm-branch-outcome.sh`, ...args], { encoding: "utf8" });
+  if (result.status !== 0) throw new Error(result.stderr);
+  return result.stdout.trim();
+};
+outcome("processed-init");
+const seq = Number(outcome("append", "--task", "example", "--verdict", "captain", "--summary", "A decision is needed"));
+const original = "The requested result is complete and verified.";
+const handled = process.env.RETRY_CASE === "first-empty" ? "" : "The example task needs a decision.";
+const retryReply = process.env.RETRY_CASE === "repeated" ? handled : process.env.RETRY_CASE === "empty" ? "" : original;
+const expectedFinals = [original, ...(handled ? [handled] : []), ...(retryReply && retryReply !== handled ? [retryReply] : [])];
+let completions = 0;
+let settled = 0;
+const failures = [];
+const chunk = (text, finish = null) => `data: ${JSON.stringify({
+  id: "local-retry-probe", object: "chat.completion.chunk", created: 1, model: "fm-live-stream-model",
+  choices: [{ index: 0, delta: text ? { role: "assistant", content: text } : {}, finish_reason: finish }],
+})}\n\n`;
+globalThis.fetch = async (input) => {
+  const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+  if (!url.startsWith("https://fm-live-stream.invalid/")) throw new Error(`unexpected network request: ${url}`);
+  completions += 1;
+  const text = completions === 1 ? original : completions === 2 ? handled : completions === 3 ? retryReply : "The new user answer.";
+  return new Response(chunk(text) + chunk(null, "stop") + "data: [DONE]\n\n", {
+    headers: { "content-type": "text/event-stream" },
+  });
+};
+const agentDir = process.env.PI_CODING_AGENT_DIR;
+const settings = SettingsManager.create(home, agentDir);
+const loader = new DefaultResourceLoader({
+  cwd: home, agentDir, settingsManager: settings,
+  additionalExtensionPaths: [process.env.BRANCH_PLUGIN],
+  extensionFactories: [{ name: "retry-probe", factory: (pi) => {
+    pi.on("agent_settled", () => { settled += 1; });
+  } }],
+  noSkills: true, noPromptTemplates: true, noThemes: true, noContextFiles: true,
+});
+await loader.reload();
+const runtime = await ModelRuntime.create({ authPath: `${agentDir}/auth.json`, modelsPath: `${agentDir}/models.json` });
+const registry = new ModelRegistry(runtime);
+await registry.refresh();
+const manager = SessionManager.create(home, `${home}/sessions`);
+const { session } = await createAgentSession({
+  cwd: home, sessionManager: manager, settingsManager: settings, resourceLoader: loader,
+  modelRuntime: runtime, model: registry.find("fm-live-stream", "fm-live-stream-model"), noTools: "builtin",
+});
+let streamedRetries = 0;
+const unsubscribe = session.subscribe((event) => {
+  if (event.type !== "message_update" || completions !== 3) return;
+  streamedRetries += 1;
+  const component = new AssistantMessageComponent(undefined, false, undefined, undefined, 0, session.extensionRunner.getMarkdownTransformers());
+  component.updateContent(event.message, true);
+  const rendered = component.render(120).join("\n");
+  if (retryReply && rendered.includes(retryReply)) failures.push("retry prose leaked from the streaming renderer");
+});
+await session.prompt("Finish the requested work.");
+for (let i = 0; i < 600 && settled < 3; i += 1) await new Promise((done) => setTimeout(done, 50));
+if (settled !== 3 || completions !== 3) throw new Error(`retry chain did not settle: ${settled} settlements, ${completions} completions`);
+if ((retryReply && streamedRetries === 0) || failures.length) throw new Error(`streaming suppression failed: ${streamedRetries} updates, ${failures}`);
+const assistantText = (messages) => messages.filter((message) => message.role === "assistant")
+  .flatMap((message) => message.content.filter((part) => part.type === "text").map((part) => part.text));
+if (JSON.stringify(assistantText(session.messages)) !== JSON.stringify(expectedFinals)) throw new Error(`agent state lost new prose or retained an exact repeat: ${JSON.stringify(assistantText(session.messages))}`);
+const reopened = SessionManager.open(manager.getSessionFile(), `${home}/sessions`);
+if (JSON.stringify(assistantText(reopened.buildSessionContext().messages)) !== JSON.stringify(expectedFinals)) throw new Error("reopened session lost new prose or retained an exact repeat");
+if (!outcome("unprocessed").includes(`"seq":${seq}`)) throw new Error("silent retries advanced the processed marker");
+await session.prompt("A new user question.");
+if (assistantText(session.messages).at(-1) !== "The new user answer.") throw new Error("a nextTurn retry hid the new user answer");
+const acknowledged = await session.getToolDefinition("fm_branch_processed").execute("ack", { through: seq }, undefined, undefined, {});
+if (acknowledged.isError || outcome("unprocessed")) throw new Error("the outcome could not be acknowledged after silent retries");
+const entries = readFileSync(manager.getSessionFile(), "utf8").split("\n").filter(Boolean).map((line) => JSON.parse(line));
+if (assistantText(entries.filter((entry) => entry.type === "message").map((entry) => entry.message)).length !== expectedFinals.length + 1) {
+  throw new Error("persisted finals do not match the retained handling outcomes");
+}
+unsubscribe();
+session.dispose();
+console.log("RETRY_OK");
+process.exit(0);
+EOF
+status=$?
+out=$(cat "$TMP_ROOT/retry-output")
+if [ "$status" -ne 0 ] || [ "$out" != "RETRY_OK" ]; then
+  fail "real-SDK processing retry visibility guard ($retry_case) failed against pi-coding-agent $PI_VERSION: $out"
+fi
+done
+pass "real Pi SDK $PI_VERSION suppresses only empty or exact-repeat retry finals, retains first and differing replies after reopen, buffers retry streaming, and keeps outcomes retryable"
+
+stagehome="$TMP_ROOT/stage-home"
+stagedir="$TMP_ROOT/stage-agent-dir"
+mkdir -p "$stagehome/state" "$stagehome/config" "$stagedir"
+cp "$streamdir/models.json" "$stagedir/models.json"
+BRANCH_PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" \
+  FM_HOME="$stagehome" FM_ROOT_OVERRIDE="$ROOT" \
+  PI_CODING_AGENT_DIR="$stagedir" PI_PACKAGE_DIR="$PI_PACKAGE_DIR" \
+  node --input-type=module > "$TMP_ROOT/stage-output" 2>&1 <<'EOF'
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+const home = process.env.FM_HOME;
+const pkg = process.env.PI_PACKAGE_DIR;
+const sdk = await import(pathToFileURL(`${pkg}/dist/index.js`).href);
+const branchMod = await import(pathToFileURL(process.env.BRANCH_PLUGIN).href);
+const version = JSON.parse(readFileSync(`${pkg}/package.json`, "utf8")).version;
+const currentPrompt = "Please include the current startup request in the branch context.";
+const customText = "Unrelated custom startup context must not become captain dialog.";
+const project = `${home}/projects/staging-probe`;
+mkdirSync(project, { recursive: true });
+writeFileSync(`${home}/state/.lock`, `${process.pid}\n`);
+writeFileSync(`${home}/state/staging-probe.meta`, `project=${project}\nwindow=fm-staging-probe\n`);
+const requests = [];
+const observations = [];
+const errors = [];
+const textOf = (messages) => messages.map((message) => typeof message.content === "string"
+  ? message.content : (message.content ?? []).map((part) => part.text ?? "").join("\n")).join("\n");
+const chunk = (delta, finish) => `data: ${JSON.stringify({
+  id: "stage-probe", object: "chat.completion.chunk", created: 1, model: "fm-live-stream-model",
+  choices: [{ index: 0, delta, finish_reason: finish }],
+})}\n\n`;
+globalThis.fetch = async (input, options) => {
+  const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+  if (!url.startsWith("https://fm-live-stream.invalid/")) throw new Error(`unexpected provider: ${url}`);
+  requests.push(JSON.parse(options.body));
+  return new Response(chunk({ role: "assistant", content: "ACK" }, null) + chunk({}, "stop") + "data: [DONE]\n\n", {
+    headers: { "content-type": "text/event-stream" },
+  });
+};
+const agentDir = process.env.PI_CODING_AGENT_DIR;
+const settings = sdk.SettingsManager.create(home, agentDir);
+const manager = sdk.SessionManager.inMemory(home);
+const loader = new sdk.DefaultResourceLoader({
+  cwd: home, agentDir, settingsManager: settings,
+  noExtensions: true, noSkills: true, noPromptTemplates: true, noThemes: true, noContextFiles: true,
+  extensionFactories: [branchMod.default, (pi) => {
+    pi.on("before_agent_start", async (event) => {
+      const isUser = "prompt" in event;
+      if (isUser && event.prompt !== currentPrompt) throw new Error("unexpected prompt in startup probe");
+      if (isUser && version.startsWith("1.1.") && "messageType" in event) throw new Error("SDK1.1 did not emit its prompt-only event");
+      if (isUser && version.startsWith("1.2.") && event.messageType !== "user") throw new Error("SDK1.2 user discriminator missing");
+      if (!isUser && (event.messageType !== "custom" || event.message.content !== customText)) throw new Error("unexpected no-prompt trigger");
+      if (textOf(manager.buildSessionContext().messages).includes(currentPrompt)) throw new Error("current prompt was already persisted before startup wait");
+      writeFileSync(`${home}/state/.wake-queue`, "1\t1\tsignal\tstaging-probe.status\tsignal: startup context probe\n");
+      const offer = {
+        message: "signal: startup context probe", projects: [project], heartbeat: false, eligible: true,
+        accepted: false, settlement: Promise.resolve(),
+        accept(settlement) { this.accepted = true; this.settlement = settlement; },
+      };
+      const requestOffset = requests.length;
+      pi.events.emit("fm-branch-supervision:dispatch", offer);
+      if (!offer.accepted) throw new Error("branch did not accept the startup wake");
+      const failure = await offer.settlement.then(() => null, (error) => error);
+      if (failure?.message !== "supervision branch prompt settled but produced no durable outcome for its claimed wake rows") {
+        throw new Error(`unexpected context-probe settlement: ${failure}`);
+      }
+      const branchRequests = requests.slice(requestOffset).filter((request) => textOf(request.messages).includes("FIRSTMATE SUPERVISION WAKE:"));
+      if (branchRequests.length !== 1) throw new Error(`expected one actual branch request during startup, got ${branchRequests.length}`);
+      const branchText = textOf(branchRequests[0].messages);
+      observations.push({ isUser, event, branchRequests, persisted: manager.buildSessionContext().messages });
+      if (textOf(manager.buildSessionContext().messages).includes(currentPrompt)) throw new Error("main persisted current prompt while its later handler awaited the branch");
+      if (isUser && !branchText.includes(`[captain] ${currentPrompt}`)) throw new Error("actual branch provider request lost the current startup user prompt");
+      if (branchText.includes(`[captain] ${customText}`)) throw new Error("no-prompt custom trigger entered captain dialog");
+    });
+  }],
+});
+await loader.reload();
+if (loader.getExtensions().errors.length) throw new Error(JSON.stringify(loader.getExtensions().errors));
+const runtime = await sdk.ModelRuntime.create({ authPath: `${agentDir}/auth.json`, modelsPath: `${agentDir}/models.json` });
+const registry = new sdk.ModelRegistry(runtime);
+await registry.refresh();
+const { session } = await sdk.createAgentSession({
+  cwd: home, agentDir, settingsManager: settings, resourceLoader: loader, sessionManager: manager,
+  modelRuntime: runtime, model: registry.find("fm-live-stream", "fm-live-stream-model"), noTools: "builtin",
+});
+session.extensionRunner.onError((error) => errors.push(error));
+const timeout = setTimeout(() => { console.error("startup branch-context probe timed out"); process.exit(1); }, 30000);
+try {
+  if (!/^(0\.|1\.[01]\.)/.test(version)) {
+    await session.sendCustomMessage({ customType: "fixture", content: customText, display: false }, { triggerTurn: true });
+  }
+  await session.prompt(currentPrompt);
+  if (!observations.some((observation) => observation.isUser)) throw new Error("real user startup handler did not execute");
+  if (!textOf(manager.buildSessionContext().messages).includes(currentPrompt)) throw new Error("ordinary prompt did not reach stored main history after startup");
+  if (errors.length) throw new Error(JSON.stringify(errors));
+} finally {
+  clearTimeout(timeout);
+  await session.extensionRunner.emit({ type: "session_shutdown", reason: "quit" });
+  session.dispose();
+}
+console.log(`STAGE_OK ${JSON.stringify({ version, observations })}`);
+process.exit(0);
+EOF
+status=$?
+out=$(cat "$TMP_ROOT/stage-output")
+if [ "$status" -ne 0 ] || [[ "$out" != STAGE_OK\ * ]]; then
+  fail "real-SDK startup branch-context guard failed against pi-coding-agent $PI_VERSION: $out"
+fi
+printf '%s\n' "$out"
+pass "real Pi SDK $PI_VERSION stages the current prompt into the actual branch provider request before a later startup handler returns"
+
+# The custom before_agent_start variant was introduced in Pi 1.2.
+# Exercise the vendor event runner, not a fabricated event or a live session.
+case "$PI_VERSION" in
+  0.*|1.0.*|1.1.*)
+    printf 'skip: Pi %s predates the custom before_agent_start event contract\n' "$PI_VERSION"
+    ;;
+  *)
+    eventhome="$TMP_ROOT/event-home"
+    eventdir="$TMP_ROOT/event-agent-dir"
+    mkdir -p "$eventhome/state" "$eventhome/config" "$eventdir"
+    BRANCH_PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" \
+      WATCH_PLUGIN="$repo/.pi/extensions/fm-primary-pi-watch.ts" \
+      FM_HOME="$eventhome" FM_ROOT_OVERRIDE="$ROOT" \
+      PI_CODING_AGENT_DIR="$eventdir" PI_PACKAGE_DIR="$PI_PACKAGE_DIR" \
+      node --input-type=module > "$TMP_ROOT/event-output" 2>&1 <<'EOF'
+import { writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+const pkg = process.env.PI_PACKAGE_DIR;
+const sdk = await import(pathToFileURL(`${pkg}/dist/index.js`).href);
+const { loadExtensions, loadExtensionFromFactory } = await import(
+  pathToFileURL(`${pkg}/dist/core/extensions/loader.js`).href,
+);
+const home = process.env.FM_HOME;
+writeFileSync(`${home}/state/.lock`, `${process.pid}\n`);
+const events = [];
+const bus = sdk.createEventBus();
+const runtime = sdk.createExtensionRuntime();
+const observer = await loadExtensionFromFactory((pi) => {
+  pi.on("before_agent_start", (event) => { events.push(event); });
+}, home, bus, runtime);
+const loaded = await loadExtensions([process.env.BRANCH_PLUGIN, process.env.WATCH_PLUGIN], home, bus, runtime);
+if (loaded.errors.length) throw new Error(JSON.stringify(loaded.errors));
+const modelRuntime = await sdk.ModelRuntime.create({
+  authPath: `${process.env.PI_CODING_AGENT_DIR}/auth.json`,
+  modelsPath: `${process.env.PI_CODING_AGENT_DIR}/models.json`,
+});
+const manager = sdk.SessionManager.inMemory(home);
+const runner = new sdk.ExtensionRunner([observer, ...loaded.extensions], runtime, home, manager, new sdk.ModelRegistry(modelRuntime));
+const errors = [];
+runner.onError((error) => { errors.push(error); });
+await runner.emitBeforeAgentStart({ messageType: "user", prompt: "ordinary prompt" }, { cwd: home });
+await runner.emitBeforeAgentStart({
+  messageType: "custom",
+  message: { role: "custom", customType: "fixture", content: "ordinary prompt", display: false, timestamp: Date.now() },
+}, { cwd: home });
+if (events.length !== 2 || events[0].prompt !== "ordinary prompt" ||
+    events[1].messageType !== "custom" || "prompt" in events[1]) {
+  throw new Error("real SDK did not emit the supported user/custom event shapes");
+}
+if (errors.length) throw new Error(JSON.stringify(errors));
+console.log("EVENT_OK");
+EOF
+    status=$?
+    out=$(cat "$TMP_ROOT/event-output")
+    if [ "$status" -ne 0 ] || [ "$out" != "EVENT_OK" ]; then
+      fail "real-SDK before-agent event guard failed against pi-coding-agent $PI_VERSION: $out"
+    fi
+    pass "real Pi SDK $PI_VERSION emits prompt-bearing user and no-prompt custom events accepted by both consumers"
+    ;;
+esac
+
+# The real session owns cancellation: parking main after an idle processing
+# request opens must abort only that dedicated run, not user/unrelated runs.
+for cancellation_case in processing user unrelated; do
+case "$PI_VERSION:$cancellation_case" in
+  0.*:processing|1.0.*:processing|1.1.*:processing|0.*:unrelated|1.0.*:unrelated|1.1.*:unrelated)
+    printf 'skip: Pi %s has no custom before-agent boundary for the %s cancellation subprobe\n' "$PI_VERSION" "$cancellation_case"
+    continue
+    ;;
+esac
+cancelhome="$TMP_ROOT/cancel-home-$cancellation_case"
+canceldir="$TMP_ROOT/cancel-agent-dir-$cancellation_case"
+mkdir -p "$cancelhome/state" "$cancelhome/config" "$canceldir"
+cp "$streamdir/models.json" "$canceldir/models.json"
+BRANCH_PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" \
+  FM_HOME="$cancelhome" FM_ROOT_OVERRIDE="$ROOT" CANCEL_CASE="$cancellation_case" \
+  PI_CODING_AGENT_DIR="$canceldir" PI_PACKAGE_DIR="$PI_PACKAGE_DIR" \
+  node --input-type=module > "$TMP_ROOT/cancel-output" 2>&1 <<'EOF'
+import { readFileSync, writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { pathToFileURL } from "node:url";
+const home = process.env.FM_HOME;
+const sdk = await import(pathToFileURL(`${process.env.PI_PACKAGE_DIR}/dist/index.js`).href);
+writeFileSync(`${home}/state/.lock`, `${process.pid}\n`);
+const outcome = (...args) => {
+  const result = spawnSync("bash", [`${process.env.FM_ROOT_OVERRIDE}/bin/fm-branch-outcome.sh`, ...args], { encoding: "utf8" });
+  if (result.status !== 0) throw new Error(result.stderr);
+  return result.stdout.trim();
+};
+outcome("processed-init");
+const seq = Number(outcome("append", "--task", "example", "--verdict", "captain", "--summary", "A decision is needed"));
+let completions = 0;
+let settled = 0;
+const triggers = [];
+const errors = [];
+const mode = process.env.CANCEL_CASE;
+const requests = [];
+const contexts = [];
+const chunk = (delta, finish) => `data: ${JSON.stringify({ id: "cancel-probe", object: "chat.completion.chunk", created: 1, model: "fm-live-stream-model", choices: [{ index: 0, delta, finish_reason: finish }] })}\n\n`;
+globalThis.fetch = async (input, options) => {
+  const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+  if (!url.startsWith("https://fm-live-stream.invalid/")) throw new Error(`unexpected provider: ${url}`);
+  requests.push(JSON.parse(options.body));
+  completions += 1;
+  return new Response(chunk({ role: "assistant", content: "ACK" }, null) + chunk({}, "stop") + "data: [DONE]\n\n", { headers: { "content-type": "text/event-stream" } });
+};
+const agentDir = process.env.PI_CODING_AGENT_DIR;
+const settings = sdk.SettingsManager.create(home, agentDir);
+const loader = new sdk.DefaultResourceLoader({
+  cwd: home, agentDir, settingsManager: settings,
+  additionalExtensionPaths: [process.env.BRANCH_PLUGIN],
+  extensionFactories: [{ name: "cancel-probe", factory: (pi) => {
+    pi.on("before_agent_start", (event) => {
+      triggers.push(event);
+      // Custom-opening cases require the real 1.2 before-agent boundary.
+      // The ordinary user-run control remains applicable on older SDKs.
+      if (mode !== "processing" || triggers.length === 2) {
+        const parked = spawnSync("bash", [`${process.env.FM_ROOT_OVERRIDE}/bin/fm-afk-contract.sh`, "enter", "--words", "fixture away posture"], { encoding: "utf8" });
+        if (parked.status !== 0) throw new Error(parked.stderr);
+      }
+    });
+    // The vendor runs context_with_system after every request-local context
+    // transform. Observe its output, not the restored stored session history.
+    pi.on("context_with_system", (event) => { contexts.push(structuredClone(event.messages)); });
+    pi.on("agent_settled", () => { settled += 1; });
+  } }],
+  noSkills: true, noPromptTemplates: true, noThemes: true, noContextFiles: true,
+});
+await loader.reload();
+const runtime = await sdk.ModelRuntime.create({ authPath: `${agentDir}/auth.json`, modelsPath: `${agentDir}/models.json` });
+const registry = new sdk.ModelRegistry(runtime);
+await registry.refresh();
+const { session } = await sdk.createAgentSession({
+  cwd: home, sessionManager: sdk.SessionManager.inMemory(home), settingsManager: settings,
+  resourceLoader: loader, modelRuntime: runtime, model: registry.find("fm-live-stream", "fm-live-stream-model"), noTools: "builtin",
+});
+session.extensionRunner.onError((error) => errors.push(error));
+try {
+  if (mode === "unrelated") {
+    await session.sendCustomMessage({ customType: "fixture", content: "Unrelated custom turn.", display: false }, { triggerTurn: true });
+  } else {
+    await session.prompt("Original user turn.");
+  }
+  const expectedSettled = mode === "processing" ? 2 : 1;
+  for (let i = 0; i < 600 && settled < expectedSettled; i += 1) await new Promise((done) => setTimeout(done, 50));
+  if (settled !== expectedSettled || completions !== 1) throw new Error(`cancellation ownership failed: ${settled} settlements, ${completions} completions, ${JSON.stringify(triggers)}`);
+  if (mode === "processing") {
+    if (triggers.length !== 2) throw new Error("processing run did not open");
+    const trigger = triggers[1];
+    const version = JSON.parse(readFileSync(`${process.env.PI_PACKAGE_DIR}/package.json`, "utf8")).version;
+    if (version.startsWith("1.2.") && (trigger.messageType !== "custom" || "prompt" in trigger || trigger.message.customType !== "fm-branch-process")) throw new Error(`wrong real processing trigger: ${JSON.stringify(trigger)}`);
+    // Cancellation precedes a second provider request; stored transcript is
+    // retained. A subsequent ordinary request must filter the old envelope.
+    if (!session.sessionManager.buildSessionContext().messages.some((message) => message.role === "custom" && message.customType === "fm-branch-process")) throw new Error("cancellation deleted stored processing history");
+    const contextCountBeforeNextPrompt = contexts.length;
+    await session.prompt("A subsequent ordinary user turn.");
+    if (settled !== 3 || completions !== 2 || contexts.length <= contextCountBeforeNextPrompt) throw new Error("subsequent ordinary request did not execute its real context boundary");
+    if (contexts.slice(contextCountBeforeNextPrompt).some((messages) => messages.some((message) => message.role === "custom" && message.customType === "fm-branch-process"))) throw new Error("processing envelope leaked into subsequent request-local context");
+    const requestText = requests.at(-1).messages.map((message) => typeof message.content === "string" ? message.content : (message.content ?? []).map((part) => part.text ?? "").join("\n")).join("\n");
+    if (requestText.includes(trigger.message.content) || !requestText.includes("Original user turn.") || !requestText.includes("A subsequent ordinary user turn.")) throw new Error("subsequent provider request leaked processing content or lost ordinary user content");
+  } else {
+    const expectedText = mode === "unrelated" ? "Unrelated custom turn." : "Original user turn.";
+    const requestText = requests[0].messages.map((message) => typeof message.content === "string" ? message.content : (message.content ?? []).map((part) => part.text ?? "").join("\n")).join("\n");
+    if (!requestText.includes(expectedText)) throw new Error("away context lost ordinary user/unrelated custom content");
+  }
+  if (!outcome("unprocessed").includes(`"seq":${seq}`)) throw new Error("cancellation acknowledged an unhandled outcome");
+  if (errors.length) throw new Error(JSON.stringify(errors));
+} finally {
+  await session.extensionRunner.emit({ type: "session_shutdown", reason: "quit" });
+  session.dispose();
+}
+console.log(`CANCEL_OK ${JSON.stringify({ mode, completions, settled, requests, contexts, cancellation: mode === "processing" ? "before a second provider request; subsequent real request filtered history" : "not cancelled" })}`);
+EOF
+status=$?
+out=$(cat "$TMP_ROOT/cancel-output")
+if [ "$status" -ne 0 ] || [[ "$out" != CANCEL_OK\ * ]]; then
+  fail "real-SDK cancellation guard ($cancellation_case) failed against pi-coding-agent $PI_VERSION: $out"
+fi
+printf '%s\n' "$out"
+done
+case "$PI_VERSION" in
+  0.*|1.0.*|1.1.*)
+    pass "real Pi SDK $PI_VERSION preserves applicable user runs and unprocessed outcomes during away posture; newer custom-opening cases are N/A"
+    ;;
+  *)
+    pass "real Pi SDK $PI_VERSION cancels processing before a second provider request, filters it from a subsequent request, and preserves user/unrelated content and unprocessed outcomes"
+    ;;
+esac

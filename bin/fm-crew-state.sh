@@ -26,7 +26,16 @@
 #
 #   state: <working|parked|done|blocked|paused|failed|unknown> · source: <run-step|pane|status-log|remote-endpoint|none> · <detail>
 #
-# Logic, in order:
+# A run-step reading whose run came from inventory selection ends its detail
+# with a `run: <id>` field naming that run, and a terminal one appends
+# `pr=<url>` after it. The field is always the last clause of the detail so the
+# separator never splits a sentence. The supersession verdict labels the same id
+# `earlier run: <id>`, and a verdict taken from the ledger's own row carries no
+# run id at all, because there the id belongs to a run the verdict did not come
+# from (rule 2b).
+#
+# Logic, numbered for reference; rules 2b and 3 each record that rule 3's
+# status-log reconciliation is applied before rule 2b:
 #   1. Resolve worktree + backend target + kind from state/<id>.meta. A meta
 #      recording remote_host= is a remote secondmate: its worktree and endpoint
 #      live on that host, so the local worktree and pane reads are skipped and
@@ -111,7 +120,9 @@
 #      the active step is ci, `axi status` alone cannot tell "still waiting on
 #      checks" from "checks green, waiting on merge" (see nm_ci_checks_state) -
 #      a check of the full ci-step log overrides working -> done once checks read
-#      green, so a green PR is never silently read as still-validating. And a
+#      green, so a green PR is never silently read as still-validating. A ci log
+#      whose last marker reports no CI checks reads working (no-checks), and the
+#      crew's own checks-green report is not promoted over it. And a
 #      terminal failed or cancelled run whose only unfinished step is the ci
 #      monitor, after every substantive step completed (an explicitly skipped
 #      rebase is allowed) and the ci log's last marker reads checks green,
@@ -125,6 +136,55 @@
 #      FAILED record whose daemon an explicit probe proves down reads unknown,
 #      never failed: an instrument failure must not read as work failure
 #      (nm_daemon_probe_down).
+#   2b. A TERMINAL reading - failed OR done - is authoritative only
+#      while nothing newer contradicts it, because head identity binds whatever
+#      run last sat on this head, not necessarily this branch's current one -
+#      and a stale terminal reading here is promoted into a captain-facing
+#      terminal outcome by bin/fm-inactive-reconcile.sh. A false SUCCESS is the
+#      worse of the two mistakes, because nobody goes looking, so the currency
+#      test is the same in both directions: a later run on this branch that
+#      cannot be bound here is reported as unknown - history, but no proof of
+#      the present. A FAILED reading is additionally answered from a newer
+#      record where one states a terminal outcome for this worktree: a later
+#      COMPLETED run the ledger proves is current, or the ledger's own FAILED
+#      verdict; a later CANCELLED row carries no verdict, so it leaves the
+#      failure unprovable (unknown) like any other unbindable row. A DONE
+#      reading claims no such verdict, because unknown is already the whole
+#      answer a contradicted success may publish.
+#      Because the ledger has no run ID,
+#      an equal head does not identify a rerun; a terminal row supplies newer
+#      truth when its observable status, head, or PR differs. Nothing else does,
+#      so a real failure is never hidden. The whole rule needs two records to
+#      compare, so it applies only to a run attributed from `axi status`: a
+#      coarse reading IS the ledger's own answer for this worktree, and a record
+#      cannot supersede itself.
+#      A self-declared pause or done in the status log is NOT one of those
+#      records. The reader once ordered such a declaration against the ledger's
+#      date column, let a later one supersede the failure, and published the
+#      ordering it believed it had proven as a detail field. Those rules were
+#      removed after repeated defects: the date column stamps a run's START, so
+#      it can never prove a declaration newer than the moment the run finished,
+#      and every narrowing of the rule left another shape in which a real
+#      failure was hidden or a crew's mid-run word was minted as a terminal
+#      verdict. The reader now claims no ordering between the log and the run:
+#      where a later ledger row leaves the current state unprovable it answers
+#      unknown, and otherwise the failed reading stands.
+#      Independently of outcome, a terminal reading publishes a PR only when the
+#      current-run evidence still attributes that reading, or when the ledger
+#      offers no row for this branch at all: an absent row is absence of
+#      contradicting evidence, not disproof, and one record cannot be
+#      authoritative for the verdict while being untrusted for the link that
+#      makes it actionable (the long-inactive crews bin/fm-inactive-reconcile.sh
+#      scans routinely have runs outside the listing window). A row that EXISTS
+#      and cannot be bound still publishes no PR.
+#      Every answer here is reached only AFTER rule 3 below has reconciled the
+#      status log, so rule 3's daemon-socket-down override outranks all of them,
+#      not merely a plainly attributed run record: an instrument failure must not
+#      read as work failure. A verdict taken from the ledger row also names that
+#      row's status and PR together and names the attributed run only as the
+#      reading that row could not be bound to, so a single line never labels one
+#      run's outcome with another run's identity, and never asserts a second,
+#      earlier run the unbindable row does not prove.
 #   3. Reconcile the status log through fm-classify-lib.sh's status_current_line:
 #      open decisions survive unrelated events and continuation prose cannot
 #      hide a declaration. Ship/scout terminal declarations supersede stale log
@@ -134,7 +194,9 @@
 #      agree, and are reported as parked. A `blocked:` line that reports a
 #      refused or missing daemon socket remains blocked even if an attributed
 #      run record is stale or terminal, for as long as that blocker is still the
-#      log's latest event. The same holds for any open decision when the run
+#      log's latest event; this reconciliation runs BEFORE rule 2b, so that
+#      blocker also outranks rule 2b's supersession and unknown answers. The
+#      same holds for any open decision when the run
 #      record itself is UNVERIFIED (its daemon answered down): the crew saw its
 #      gate or blocker first hand, so needs-decision stays parked and blocked
 #      stays blocked, with the unverified record named as the reason.
@@ -150,7 +212,7 @@
 #      `resolved` never become current state or detail.
 #   5. Missing meta or torn-down worktree: report unknown · none. If no run is
 #      attributed to this crew, a dead endpoint also reports unknown · none rather
-#      than trusting a stale status log. On tmux and herdr, which own a
+#      than trusting a stale status log. On tmux, herdr, and rex, which own a
 #      recovery-grade classifier, only its positive death evidence reads as gone
 #      (the endpoint is authoritatively absent, or its pane holds no agent); an
 #      endpoint that merely failed to answer reports unknown · none as
@@ -189,8 +251,19 @@ ID=${1:-}
 
 # Fleet snapshot composition supplies its captured metadata path here so every
 # state read resolves the same task generation selected by that snapshot.
-META=${FM_CREW_STATE_META_OVERRIDE:-"$STATE/$ID.meta"}
-LOG=${FM_CREW_STATE_STATUS_OVERRIDE:-"$STATE/$ID.status"}
+# An override is honoured only when its basename is this task's own file name.
+# An override inherited from another task's environment, for example through a
+# long-lived server started inside that task's snapshot child, names a different
+# task and must fall through to $STATE/$ID.* instead of reading another task's
+# captured generation.
+case ${FM_CREW_STATE_META_OVERRIDE:-} in
+  "$ID.meta"|*/"$ID.meta") META=$FM_CREW_STATE_META_OVERRIDE ;;
+  *) META=$STATE/$ID.meta ;;
+esac
+case ${FM_CREW_STATE_STATUS_OVERRIDE:-} in
+  "$ID.status"|*/"$ID.status") LOG=$FM_CREW_STATE_STATUS_OVERRIDE ;;
+  *) LOG=$STATE/$ID.status ;;
+esac
 NM_TIMEOUT=${FM_CREW_STATE_NM_TIMEOUT:-10}
 case "$NM_TIMEOUT" in ''|*[!0-9]*) NM_TIMEOUT=10 ;; esac
 # How many of the most recent `no-mistakes runs` rows each ledger read
@@ -209,6 +282,14 @@ emit() {  # <state> <source> [detail]
   [ -n "${3:-}" ] && line="$line${SEP}$3"
   printf '%s\n' "$line"
   exit 0
+}
+
+emit_run() {  # <state> <detail> [pr]
+  local detail=$2
+  case "$1" in
+    done|failed) [ -z "${3:-}" ] || detail="$detail${SEP}pr=$3" ;;
+  esac
+  emit "$1" run-step "$detail"
 }
 
 # --- meta resolution --------------------------------------------------------
@@ -312,13 +393,14 @@ fi
 # shell - so a finished crew whose endpoint has closed still reports its run-step
 # state (e.g. done) instead of being masked as unknown. Backend-aware
 # (fm_backend_of_meta defaults absent backend= to tmux, the P1 contract): a
-# herdr task is read through fm_backend_capture instead of a bare tmux probe.
+# herdr task is read through fm_backend_capture while tmux uses the shared
+# endpoint-existence predicate.
 TASK_BACKEND=$(fm_backend_of_meta "$META")
 BACKEND_TARGET=$(fm_backend_target_of_meta "$META")
 EXPECTED_LABEL="fm-$ID"
 pane_readable() {  # <target>
   case "$TASK_BACKEND" in
-    tmux) tmux display-message -p -t "$1" '#{pane_id}' >/dev/null 2>&1 ;;
+    tmux) fm_backend_target_exists tmux "$1" ;;
     *) fm_backend_capture "$TASK_BACKEND" "$1" 1 "$EXPECTED_LABEL" >/dev/null 2>&1 ;;
   esac
 }
@@ -334,6 +416,9 @@ pane_readable() {  # <target>
 # recognized interactive prompt would report `working` here while the
 # watcher's own poll (which always captures a tail) already classifies it
 # unknown - the exact split issue #1792 describes for a different cause.
+# A t3code crew's native busy AND idle are both accepted: the T3 server
+# reports its own session status and there is no shell in front of the agent
+# to misread.
 crew_busy_verdict() {  # <target>
   local tail40
   tail40=$(fm_backend_capture "$TASK_BACKEND" "$1" 40 "$EXPECTED_LABEL" 2>/dev/null) || tail40=''
@@ -357,14 +442,14 @@ nm_field() {  # <key>
   fm_nm_field "$RUN_OUT" "$1"
 }
 
-pr_read_record_bounded() {  # <owner> <repo> <number>
+pr_read_record_bounded() {  # <host> <owner> <repo> <number>
   local record state merged
   # shellcheck disable=SC2016  # The inner script expands after bash -c receives positional args.
   if ! record=$(fm_run_timed 5 bash -c '
     . "$1"
-    fm_pr_github_read_record "$2" "$3" "$4" || exit 1
+    fm_pr_github_read_record "$2" "$3" "$4" "$5" || exit 1
     printf "state=%s\nmerged=%s\n" "$FM_PR_RECORD_STATE" "$FM_PR_RECORD_MERGED"
-  ' _ "$SCRIPT_DIR/fm-pr-lib.sh" "$1" "$2" "$3" 2>/dev/null); then
+  ' _ "$SCRIPT_DIR/fm-pr-lib.sh" "$1" "$2" "$3" "$4" 2>/dev/null); then
     return 1
   fi
   state=$(printf '%s\n' "$record" | sed -n 's/^state=//p' | head -1)
@@ -381,6 +466,24 @@ mr_read_record_bounded() {  # <host> <path> <number>
   if ! record=$(fm_run_timed 5 bash -c '
     . "$1"
     fm_pr_gitlab_read_record "$2" "$3" "$4" || exit 1
+    printf "state=%s\nmerged=%s\n" "$FM_PR_RECORD_STATE" "$FM_PR_RECORD_MERGED"
+  ' _ "$SCRIPT_DIR/fm-pr-lib.sh" "$1" "$2" "$3" 2>/dev/null); then
+    return 1
+  fi
+  state=$(printf '%s\n' "$record" | sed -n 's/^state=//p' | head -1)
+  merged=$(printf '%s\n' "$record" | sed -n 's/^merged=//p' | head -1)
+  [ -n "$state" ] || return 1
+  [ "$merged" = true ] || [ "$merged" = false ] || return 1
+  FM_PR_RECORD_STATE=$state
+  FM_PR_RECORD_MERGED=$merged
+}
+
+forgejo_read_record_bounded() {  # <host> <path> <number>
+  local record state merged
+  # shellcheck disable=SC2016  # The inner script expands after bash -c receives positional args.
+  if ! record=$(fm_run_timed 5 bash -c '
+    . "$1"
+    fm_pr_forgejo_read_record "$2" "$3" "$4" || exit 1
     printf "state=%s\nmerged=%s\n" "$FM_PR_RECORD_STATE" "$FM_PR_RECORD_MERGED"
   ' _ "$SCRIPT_DIR/fm-pr-lib.sh" "$1" "$2" "$3" 2>/dev/null); then
     return 1
@@ -448,7 +551,7 @@ passed_pr_detail() {
     github)
       owner=${path%%/*}
       repo=${path#*/}
-      if ! pr_read_record_bounded "$owner" "$repo" "$number"; then
+      if ! pr_read_record_bounded "$host" "$owner" "$repo" "$number"; then
         printf 'run passed: PR state unknown (unreadable)'
         return
       fi
@@ -477,6 +580,24 @@ passed_pr_detail() {
         open|opened) printf 'run passed: PR open' ;;
         closed)      printf 'run passed: PR closed' ;;
         *)           printf 'run passed: PR state %s' "$state_lc" ;;
+      esac
+      ;;
+    forgejo)
+      if ! forgejo_read_record_bounded "$host" "$path" "$number"; then
+        printf 'run passed: PR state unknown (unreadable)'
+        return
+      fi
+      if [ "$FM_PR_RECORD_MERGED" = true ]; then
+        printf 'run passed: PR merged'
+        return
+      fi
+      # Forgejo reports a merged pull request as closed with merged true, so
+      # an unmerged one is its own open or closed state.
+      state_lc=$(printf '%s' "$FM_PR_RECORD_STATE" | tr '[:upper:]' '[:lower:]')
+      case "$state_lc" in
+        open)   printf 'run passed: PR open' ;;
+        closed) printf 'run passed: PR closed' ;;
+        *)      printf 'run passed: PR state %s' "$state_lc" ;;
       esac
       ;;
     gerrit)
@@ -804,11 +925,17 @@ nm_daemon_answered_down() {
 # daemon each probe burns the full timeout inside the supervisor's per-crew
 # polling loop.
 nm_daemon_probe() {
-  local rc=0
+  local rc=0 daemon_status
   [ -n "$NM_DAEMON_ANSWER" ] && return 0
-  fm_nm_run_checked "$WT" "$NM_TIMEOUT" daemon status >/dev/null || rc=$?
+  daemon_status=$(fm_nm_run_checked "$WT" "$NM_TIMEOUT" daemon status) || rc=$?
   case "$rc" in
-    0)   NM_DAEMON_ANSWER=up ;;
+    0)
+      # A clean stop also exits 0, with "○ daemon not running".
+      if printf '%s\n' "$daemon_status" | grep -Eq '(^|[[:space:]])daemon running([[:space:]]|$)'; then
+        NM_DAEMON_ANSWER=up
+      else
+        NM_DAEMON_ANSWER=down
+      fi ;;
     124) NM_DAEMON_ANSWER=unanswered ;;
     *)   NM_DAEMON_ANSWER=down ;;
   esac
@@ -850,7 +977,13 @@ nm_effective_ci_step_status() {
 # monitoring until merged or closed" or "no CI checks reported - still
 # monitoring until merged or closed" (verified against 360+ real run logs under
 # ~/.no-mistakes/logs/*/ci.log on the installed v1.32.2 binary, including the
-# actual PR #252 run). Reads the ci step's log via `axi logs --full` and scans
+# actual PR #252 run), or, for a repository whose config declares no_ci: true,
+# "repository declares no CI (no_ci: true) - treating as all checks passed -
+# still monitoring until merged or closed" (pinned from no-mistakes v1.84.0).
+# That no_ci sentence reads as no-checks, like the zero-checks marker: no check
+# ever verified the PR, so it stays working and never promotes a worker's own
+# "checks green" claim, even though its text says "all checks passed". Reads
+# the ci step's log via `axi logs --full` and scans
 # it for the MOST RECENT recognized marker (the log is append-only/chronological,
 # so the last match is current): green with nothing red after it means CI is
 # green right now, still only waiting on merge/close.
@@ -867,10 +1000,12 @@ nm_ci_checks_state() {
   ci_log=$(nm_run axi logs --step ci --run "$run_id" --full) || true
   [ -n "$ci_log" ] || { printf 'unknown'; return; }
   marker=$(printf '%s\n' "$ci_log" \
-    | grep -E 'CI checks passed|no CI checks reported - still monitoring|no CI checks reported yet|checks failed|issues detected|CI checks running' \
+    | grep -E 'CI checks passed|repository declares no CI \(no_ci: true\)|no CI checks reported - still monitoring|no CI checks reported yet|checks failed|issues detected|CI checks running' \
     | tail -1)
   case "$marker" in
-    *"checks passed"*|*"no CI checks reported - still monitoring"*) printf 'green' ;;
+    *"repository declares no CI (no_ci: true)"*) printf 'no-checks' ;;
+    *"checks passed"*) printf 'green' ;;
+    *"no CI checks reported - still monitoring"*) printf 'no-checks' ;;
     *"no CI checks reported yet"*|*"checks failed"*|*"issues detected"*|*"CI checks running"*) printf 'not-ready' ;;
     *) printf 'unknown' ;;
   esac
@@ -897,6 +1032,18 @@ nm_ci_checks_state() {
 # cannot identify this branch's run.
 nm_runs_list() {
   nm_run runs --limit "$FM_CREW_STATE_RUNS_LIMIT"
+}
+# The ledger is fetched at most once per read into RUNS_LIST: the coarse
+# attribution fallback and the terminal-failed supersession cross-check below
+# both need it, and neither is worth a second bounded CLI call. Assigns rather
+# than prints, so the cache survives (a command substitution would fetch into a
+# subshell every time).
+RUNS_LIST=""
+RUNS_LIST_FETCHED=0
+runs_list_once() {
+  [ "$RUNS_LIST_FETCHED" = 1 ] && return 0
+  RUNS_LIST=$(nm_runs_list)
+  RUNS_LIST_FETCHED=1
 }
 
 # CREW_BRANCH is empty at detached HEAD (a just-spawned crew, or a scout's
@@ -937,11 +1084,19 @@ if [ "$KIND" = ship ] && [ -n "$CREW_BRANCH" ] && command -v no-mistakes >/dev/n
     # CLI is not retried. Older CLI surfaces without the table retain the
     # coarse fallback below, but cannot turn a replacement into a vague live
     # verdict when its identity and gate cannot be read.
-    overview_ok=1
-    run_overview=$(fm_nm_run_checked "$WT" "$NM_TIMEOUT" axi) || overview_ok=0
-    [ -n "$run_overview" ] || emit unknown run-step "run inventory unavailable; run id: $(strip_quotes "$(nm_field id)")"
-    run_choice=$(fm_nm_select_run "$CREW_BRANCH" "$run_overview" "$WT" "$NM_TIMEOUT")
-    [ "$overview_ok" = 1 ] || emit unknown run-step "run inventory unreadable; run ids: $(strip_quotes "$(nm_field id)"), ${run_choice##*|}"
+    # `axi status` answers a no-run worktree with an explicit
+    # `runs_on_current_branch: 0`: the CLI's authoritative absent verdict,
+    # which needs no inventory read (the bare `axi` table may be capped).
+    if [ "$(strip_quotes "$(nm_field current_branch)")" = "$CREW_BRANCH" ] \
+      && [ "$(strip_quotes "$(nm_field runs_on_current_branch)")" = 0 ]; then
+      run_choice="status-absent"
+    else
+      overview_ok=1
+      run_overview=$(fm_nm_run_checked "$WT" "$NM_TIMEOUT" axi) || overview_ok=0
+      [ -n "$run_overview" ] || emit unknown run-step "run inventory unavailable; run id: $(strip_quotes "$(nm_field id)")"
+      run_choice=$(fm_nm_select_run "$CREW_BRANCH" "$run_overview" "$WT" "$NM_TIMEOUT")
+      [ "$overview_ok" = 1 ] || emit unknown run-step "run inventory unreadable; run ids: $(strip_quotes "$(nm_field id)"), ${run_choice##*|}"
+    fi
     case "$run_choice" in
       unknown\|*)
         known_run_id=""
@@ -952,8 +1107,62 @@ if [ "$KIND" = ship ] && [ -n "$CREW_BRANCH" ] && command -v no-mistakes >/dev/n
         ;;
       selected\|*)
         IFS='|' read -r _ selected_id selected_status candidate_ids <<< "$run_choice"
-        RUN_OUT=$(fm_nm_run_checked "$WT" "$NM_TIMEOUT" axi status --run "$selected_id") \
-          || emit unknown run-step "selected run unreadable; run ids: $candidate_ids"
+        # A bare `axi status` identity can be an older live sibling while the
+        # overview's newest row is terminal.  It may replace a terminal row
+        # only when it is a same-branch candidate proven newer than every
+        # other candidate, by ULID timestamp (same head) or by the
+        # creation-ordered runs ledger (different heads).  A selection proven
+        # older than the live run, while another candidate is not, reports
+        # unknown rather than hiding that candidate.
+        reported_id=$(strip_quotes "$(nm_field id)")
+        reported_branch=$(strip_quotes "$(nm_field branch)")
+        selected_detail=
+        if [ -n "$reported_id" ] && [ "$reported_branch" = "$CREW_BRANCH" ] \
+          && [ "$reported_id" != "$selected_id" ] \
+          && { [ "$selected_status" = completed ] || [ "$selected_status" = cancelled ] || [ "$selected_status" = failed ]; } \
+          && fm_nm_run_is_active "$RUN_OUT"; then
+          case ",$candidate_ids," in
+            *,"$reported_id",*|*,\ "$reported_id",*)
+              reported_head=$(strip_quotes "$(fm_nm_field "$RUN_OUT" head)")
+              runs_ledger=
+              newer_than_all=1
+              newer_than_selected=0
+              IFS=', ' read -ra candidates <<< "$candidate_ids"
+              for candidate_id in "${candidates[@]}"; do
+                [ "$candidate_id" = "$reported_id" ] && continue
+                candidate_detail=$(fm_nm_run_checked "$WT" "$NM_TIMEOUT" axi status --run "$candidate_id") || candidate_detail=
+                [ "$candidate_id" = "$selected_id" ] && selected_detail=$candidate_detail
+                if [ -n "$candidate_detail" ] && fm_nm_run_is_active "$candidate_detail"; then
+                  emit unknown run-step "competing live runs; run ids: $candidate_ids"
+                fi
+                candidate_head=$(strip_quotes "$(fm_nm_field "$candidate_detail" head)")
+                if [ -z "$runs_ledger" ] && [ -n "$candidate_head" ] && [ "${candidate_head:0:7}" != "${reported_head:0:7}" ]; then
+                  runs_ledger=$(nm_runs_list)
+                fi
+                if fm_nm_run_is_newer_than "$CREW_BRANCH" "$candidate_id" "$reported_id" "$candidate_head" "$reported_head" "$runs_ledger"; then
+                  [ "$candidate_id" = "$selected_id" ] && newer_than_selected=1
+                else
+                  precedence_status=$?
+                  [ "$precedence_status" = 2 ] && emit unknown run-step "same-head run ordering unverified; run ids: $candidate_ids"
+                  newer_than_all=0
+                fi
+              done
+              if [ "$newer_than_all" = 1 ]; then
+                selected_id=$reported_id
+                selected_status=running
+                selected_detail=
+              elif [ "$newer_than_selected" = 1 ]; then
+                emit unknown run-step "run ordering unverified; run ids: $candidate_ids"
+              fi
+              ;;
+          esac
+        fi
+        if [ -n "$selected_detail" ]; then
+          RUN_OUT=$selected_detail
+        else
+          RUN_OUT=$(fm_nm_run_checked "$WT" "$NM_TIMEOUT" axi status --run "$selected_id") \
+            || emit unknown run-step "selected run unreadable; run ids: $candidate_ids"
+        fi
         if [ "$(strip_quotes "$(nm_field id)")" != "$selected_id" ] \
           || [ "$(strip_quotes "$(nm_field branch)")" != "$CREW_BRANCH" ]; then
           emit unknown run-step "selected run unavailable or mismatched; run ids: $candidate_ids"
@@ -986,7 +1195,7 @@ if [ "$KIND" = ship ] && [ -n "$CREW_BRANCH" ] && command -v no-mistakes >/dev/n
         SELECTED_RUN_ID=$selected_id
         ;;
     esac
-    if [ "$HAVE_RUN" = 0 ] && [ -z "$SELECTED_RUN_ID" ]; then
+    if [ "$run_choice" != status-absent ] && [ "$HAVE_RUN" = 0 ] && [ -z "$SELECTED_RUN_ID" ]; then
       run_branch=$(strip_quotes "$(nm_field branch)")
       # Head equality, the pipeline-owned parked-run exemption, or executing
       # regardless of head: a live run on this branch is current even after a
@@ -1003,7 +1212,8 @@ if [ "$KIND" = ship ] && [ -n "$CREW_BRANCH" ] && command -v no-mistakes >/dev/n
         # Without run ids, contradictory liveness cannot prove precedence.
         # A live replacement also needs an id-addressed status read: a bare
         # "running" row cannot tell working from waiting at a gate.
-        ledger_status=$(fm_nm_runs_status_for_worktree "$WT" "$CREW_BRANCH" "$(nm_runs_list)")
+        runs_list_once
+        ledger_status=$(fm_nm_runs_status_for_worktree "$WT" "$CREW_BRANCH" "$RUNS_LIST")
         if fm_nm_run_is_active "$RUN_OUT"; then
           if [ "$(fm_nm_run_status_class "$ledger_status")" = terminal ]; then
             emit unknown run-step "run records disagree; run ids: $(strip_quotes "$(nm_field id)"), competing identity unavailable"
@@ -1025,7 +1235,8 @@ if [ "$KIND" = ship ] && [ -n "$CREW_BRANCH" ] && command -v no-mistakes >/dev/n
         # `[ -n "$RUN_OUT" ]`: an empty/timed-out primary call means the CLI
         # itself did not respond, so retrying it immediately with a second
         # bounded call would just double the wait for no better answer.
-        COARSE_STATUS=$(fm_nm_runs_status_for_worktree "$WT" "$CREW_BRANCH" "$(nm_runs_list)")
+        runs_list_once
+        COARSE_STATUS=$(fm_nm_runs_status_for_worktree "$WT" "$CREW_BRANCH" "$RUNS_LIST")
         if [ -n "$COARSE_STATUS" ]; then
           HAVE_RUN=1
           # A branch-matching answer the strict rule rejected is this branch's
@@ -1045,6 +1256,7 @@ fi
 if [ "$HAVE_RUN" = 1 ]; then
   RUN_STATE=working
   RUN_DETAIL=""
+  RUN_PR=""
   CI_STEP_STATUS=""
   CI_LOG_STATE=""
   RUN_STATUS=""
@@ -1079,7 +1291,17 @@ if [ "$HAVE_RUN" = 1 ]; then
   else
     status=$(strip_quotes "$(nm_field status)")
     RUN_STATUS=$status
+    RUN_ID=$(strip_quotes "$(nm_field id)")
+    RUN_HEAD=$(strip_quotes "$(nm_field head)")
+    # The pull request THIS run opened, if it reached its pr step at all. A run
+    # that never opened one reports no pr field, and that absence is meaningful:
+    # it is what keeps a terminal outcome from being lent an older task's PR.
+    RUN_PR=$(strip_quotes "$(nm_field pr)")
     outcome=$(strip_quotes "$(nm_field outcome)")
+    case "$status" in
+      ci|running|fixing|awaiting_approval|fix_review) ATTRIBUTED_LEDGER_STATUS=running ;;
+      *) ATTRIBUTED_LEDGER_STATUS=$status ;;
+    esac
     awaiting=$(printf '%s\n' "$RUN_OUT" | grep -E "$FM_NM_AWAITING_AGENT_RE" | head -1 || true)
     gate_status=$(nm_gate_status)
     has_gate=0
@@ -1146,6 +1368,8 @@ if [ "$HAVE_RUN" = 1 ]; then
               # the worker never reported it and no pr= was recorded.
               ci_pr_url=$(strip_quotes "$(nm_field pr)")
               [ -z "$ci_pr_url" ] || RUN_DETAIL="$RUN_DETAIL: $ci_pr_url"
+            elif [ "$CI_LOG_STATE" = no-checks ]; then
+              RUN_DETAIL="no CI checks reported (or repository declares no CI): nothing has verified the PR (still monitoring for merge/close)"
             fi
             ;;
           fixing)
@@ -1168,10 +1392,42 @@ if [ "$HAVE_RUN" = 1 ]; then
     elif [ "$CI_STEP_STATUS" = fixing ]; then
       CI_LOG_STATE=not-ready
     fi
-    if [ "$CI_LOG_STATE" != not-ready ]; then
+    if [ "$CI_LOG_STATE" != not-ready ] && [ "$CI_LOG_STATE" != no-checks ]; then
       emit_ship_status_done "run still monitoring PR"
     fi
   fi
+
+  TERMINAL_PR=""
+  case "$RUN_STATE" in
+    done|failed)
+      runs_list_once
+      NEWEST_ROW=$(fm_nm_runs_newest_for_branch "$CREW_BRANCH" "$RUNS_LIST")
+      NEWEST_STATUS=${NEWEST_ROW%%|*}
+      NEWEST_REST=${NEWEST_ROW#*|}
+      NEWEST_SHA=${NEWEST_REST%%|*}
+      NEWEST_PR=${NEWEST_REST#*|}
+      NEWEST_ROW_AGREES=0
+      LEDGER_STATUS=$(fm_nm_runs_status_for_worktree "$WT" "$CREW_BRANCH" "$RUNS_LIST")
+      if [ "$RUN_SOURCE" = full ] && [ -n "$RUN_ID" ] \
+        && [ "$(strip_quotes "$(nm_field branch)")" = "$CREW_BRANCH" ] \
+        && [ "$NEWEST_STATUS" = "$ATTRIBUTED_LEDGER_STATUS" ] \
+        && [ "$NEWEST_PR" = "$RUN_PR" ]; then
+        if [ -n "$NEWEST_SHA" ] && [ -n "$RUN_HEAD" ]; then
+          case "$RUN_HEAD" in
+            "$NEWEST_SHA"*) NEWEST_ROW_AGREES=1 ;;
+            *) case "$NEWEST_SHA" in "$RUN_HEAD"*) NEWEST_ROW_AGREES=1 ;; esac ;;
+          esac
+        fi
+      fi
+      if [ "$RUN_SOURCE" = coarse ]; then
+        case "$LEDGER_STATUS" in
+          completed|failed|cancelled) TERMINAL_PR=$NEWEST_PR ;;
+        esac
+      elif [ "$NEWEST_ROW_AGREES" = 1 ] || [ -z "$NEWEST_STATUS" ]; then
+        TERMINAL_PR=$RUN_PR
+      fi
+      ;;
+  esac
 
   # Reconcile the status log. A needs-decision/blocked log line that the run-step
   # has moved past (anything but a genuinely parked run) is deterministically
@@ -1221,8 +1477,42 @@ if [ "$HAVE_RUN" = 1 ]; then
       ;;
   esac
 
-  [ -z "$SELECTED_RUN_ID" ] || RUN_DETAIL="$RUN_DETAIL${SEP}run: $SELECTED_RUN_ID"
-  emit "$RUN_STATE" run-step "$RUN_DETAIL"
+  READING_DETAIL=$RUN_DETAIL
+  RUN_ID_FIELD=""
+  [ -z "$SELECTED_RUN_ID" ] || RUN_ID_FIELD="${SEP}run: $SELECTED_RUN_ID"
+  RUN_DETAIL="$RUN_DETAIL$RUN_ID_FIELD"
+
+  # Apply the terminal-reading precedence contract owned by header rule 2b.
+  if { [ "$RUN_STATE" = "failed" ] || [ "$RUN_STATE" = "done" ]; } \
+    && [ "$RUN_SOURCE" != coarse ]; then
+    if [ "$RUN_STATE" = "failed" ]; then
+      case "$LEDGER_STATUS" in
+        completed)
+          SUPERSEDED_DETAIL="run superseded by a newer completed run on this branch (earlier $READING_DETAIL)"
+          [ -z "$SELECTED_RUN_ID" ] \
+            || SUPERSEDED_DETAIL="$SUPERSEDED_DETAIL${SEP}earlier run: $SELECTED_RUN_ID"
+          TERMINAL_PR=$NEWEST_PR
+          emit_run "done" "$SUPERSEDED_DETAIL" "$TERMINAL_PR"
+          ;;
+        failed)
+          if [ "$NEWEST_ROW_AGREES" != 1 ]; then
+            LEDGER_DETAIL="run $LEDGER_STATUS from the ledger's row for this worktree; the $READING_DETAIL reading could not be bound to it"
+            TERMINAL_PR=$NEWEST_PR
+            emit_run failed "$LEDGER_DETAIL" "$TERMINAL_PR"
+          fi
+          ;;
+      esac
+    fi
+    case "$NEWEST_STATUS" in
+      '') ;;
+      *)
+        [ "$NEWEST_ROW_AGREES" = 1 ] || emit unknown run-step \
+          "the newest $NEWEST_STATUS ledger row on this branch cannot be bound to the $READING_DETAIL; current state not provable here$RUN_ID_FIELD"
+        ;;
+    esac
+  fi
+
+  emit_run "$RUN_STATE" "$RUN_DETAIL" "$TERMINAL_PR"
 fi
 
 # --- fallback: no run attributed to this crew ------------------------------
@@ -1230,7 +1520,7 @@ fi
 # liveness, so a finished-but-pane-closed crew never reaches here. Down here there
 # is no run to consult, so only positive evidence that the target is gone may
 # read as death - a backend that failed to answer is unknown, never death, for
-# both classifier-backed backends (tmux and herdr) - and every death-class
+# the classifier-backed backends (tmux, herdr, rex, and t3code) - and every death-class
 # verdict reports unknown rather than trusting a possibly-stale status log as
 # the current state.
 [ -n "$BACKEND_TARGET" ] || emit unknown none "no backend target recorded"
@@ -1238,11 +1528,12 @@ if ! pane_readable "$BACKEND_TARGET"; then
   # A failed probe is not itself evidence the pane is gone: the herdr CLI can
   # error or stall under load, and tmux can fail to be executed at all (a
   # trimmed PATH) or answer non-definitively, while the pane is alive - a busy
-  # box would otherwise score dozens of live claims dead. Both backends own a
+  # box would otherwise score dozens of live claims dead. These backends own a
   # recovery-grade classifier (fm_backend_agent_state), which separates the
   # outcomes:
   #   missing - the endpoint is authoritatively absent: herdr's pane get
-  #             answered pane_not_found; tmux's successful window inventory
+  #             answered pane_not_found; rex's process read answered a
+  #             structured not-found; tmux's successful window inventory
   #             omitted the exact recorded window, or tmux gave one of its
   #             definitive no-session/no-server/no-socket responses (which
   #             fm_backend_tmux_agent_state owns as death, since fm-bootstrap
@@ -1259,22 +1550,24 @@ if ! pane_readable "$BACKEND_TARGET"; then
   #             normal flow below instead of being discarded.
   #   anything else - the cheap probes themselves failed to answer or
   #             contradicted themselves, which is unknown, never death.
-  # Backends with no classifier (orca, zellij, and cmux all report unverified)
+  # t3code answers from the server's own session status through the same
+  # contract. Backends with no classifier (orca, zellij, cmux, and paseo all
+  # report unverified, and tern's classifier is not promoted to recovery grade)
   # keep their historical capture-failure-means-gone reading.
   case "$TASK_BACKEND" in
-    tmux|herdr) AGENT_STATE=$(fm_backend_agent_state "$TASK_BACKEND" "$BACKEND_TARGET") ;;
+    tmux|herdr|rex|t3code) AGENT_STATE=$(fm_backend_agent_state "$TASK_BACKEND" "$BACKEND_TARGET") ;;
     *) AGENT_STATE=none ;;
   esac
   case "$TASK_BACKEND:$AGENT_STATE" in
-    tmux:alive|herdr:alive)
+    tmux:alive|herdr:alive|rex:alive|t3code:alive)
       ;;
-    tmux:missing|herdr:missing)
+    tmux:missing|herdr:missing|rex:missing|t3code:missing)
       emit unknown none "backend target gone: $BACKEND_TARGET"
       ;;
-    tmux:dead|herdr:dead)
+    tmux:dead|herdr:dead|rex:dead|t3code:dead)
       emit unknown none "backend target gone: $BACKEND_TARGET (agent gone, pane shell remains)"
       ;;
-    tmux:*|herdr:*)
+    tmux:*|herdr:*|rex:*|t3code:*)
       emit unknown none "backend unreachable ($TASK_BACKEND endpoint state: $AGENT_STATE)"
       ;;
     *)

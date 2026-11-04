@@ -1,4 +1,9 @@
 # Projection for fm-contributions.sh; its header owns the record contract.
+def supported_url:
+  type == "string" and test("^https://github[.]com/[A-Za-z0-9-]+/[A-Za-z0-9._-]+/(pull|issues)/[1-9][0-9]*$");
+# Preserve legacy ownership and saved-record compatibility, including lookalike
+# hosts accepted by the historical regex; supported_url alone gates observation.
+# tests/fm-contributions.test.sh covers fresh, retained and mixed saved ownership.
 def canonical_url:
   type == "string" and (test("^https://github.com/[A-Za-z0-9-]+/[A-Za-z0-9._-]+/(pull|issues)/[1-9][0-9]*$")
     or test("^https://[A-Za-z0-9.-]+/[A-Za-z0-9._/-]+/-/merge_requests/[1-9][0-9]*$"));
@@ -11,8 +16,12 @@ def valid_record:
     and all(.pending[]; (.token | type == "string" and length > 0))
     and all(.seen[]; type == "string")
     and ((.notified // []) | type == "array" and all(.[]; type == "string"))
+    and ((.threads // []) | type == "array" and all(.[]; (.key | type == "string")
+      and (.raised == null or (.raised | fromdateiso8601 | type == "number"))))
     and (.error == null or (.error | type == "string"))
     and (.checked_at == null or (.checked_at | fromdateiso8601 | type == "number"))
+    and (.retired == null or (.retired | (.actor == "captain")
+      and (.reason | type == "string" and length > 0) and (.at | fromdateiso8601 | type == "number")))
     and (.verdict == null or (.verdict | (.head | sha) and (.source | type == "string")
       and (.actor | IN("captain","fleet","maintainer","nobody")) and (.summary | type == "string")))
     and (.observation == null or (.kind as $kind | .observation |
@@ -24,13 +33,38 @@ def valid_record:
         and (.mergeable | IN("mergeable","conflicting","unknown")) and (.can_merge | type == "boolean")
         and (.review_decision | IN("","APPROVED","CHANGES_REQUESTED","REVIEW_REQUIRED"))
         else (.ready | type == "boolean") end))))) catch false;
+def duration_text($seconds):
+  if $seconds < 3600 then "\($seconds / 60 | floor)m" else "\($seconds / 3600 | floor)h" end;
+# Unanswered pull-request threads of one observation, keyed by event kind and id
+# so an edited comment stays one thread. A signal raised in this poll counts as
+# the thread's first raise.
+def tracked_threads($previous; $events; $new_tokens; $now_iso):
+  [$events[] | select(.unanswered == true)
+    | (.token | split(":") | .[:2] | join(":")) as $key
+    | {key:$key,type,source,author,at:(.at // null),
+       raised:(([$previous[]? | select(.key == $key) | .raised] | first)
+         // (if .token | IN($new_tokens[]) then $now_iso else null end))}
+      + (if .review_bot == true then {review_bot:true} else {} end)];
+def due_threads($threads; $now; $age):
+  [$threads[] | (.at | try fromdateiso8601 catch null) as $at
+    | select($at != null and ($now - $at) >= $age
+      and (.raised == null or ($now - (.raised | fromdateiso8601)) >= $age))];
+def reraise_event($thread; $now; $now_iso):
+  duration_text($now - ($thread.at | fromdateiso8601)) as $age
+  | {token:("unanswered:" + $thread.key + ":" + $now_iso),type:"unanswered",thread:$thread.key,
+     source:$thread.source,head:null,author:$thread.author,age:$age,
+     body:("no reply from the contribution author for " + $age)}
+    + (if $thread.review_bot == true then {review_bot:true} else {} end);
 def known($input; $saved):
   ([($input.tasks // [])[] | select(.kind != "secondmate")
      | select(.pr.url | canonical_url) | {task:.id,url:.pr.url}]
    + [($input.backlog.records // [])[] | select(.structured == true) as $task
       | ($task.links // [])[] | select(canonical_url) | {task:$task.id,url:.}]
    + [$saved[] | .task as $task | .records[] | {task:$task,url}])
-  | unique_by([.task,.url]);
+  | unique_by([.task,.url])
+  # A retired record ends that task's ownership even while a backlog link remains.
+  | [$saved[] | .task as $task | .records[] | select(.retired != null) | {task:$task,url}] as $retired
+  | map(select(. as $pair | any($retired[]; . == $pair) | not));
 def latest_checks:
   group_by(.name) | map(sort_by([(.started_at // ""),(.id // 0)]) | last);
 def projected($input; $saved; $now; $max_age):
@@ -47,12 +81,12 @@ def projected($input; $saved; $now; $max_age):
     | ($record.observation // {}) as $o
     | (if $record.error == null and $record.observation != null and ($o.head | sha) then $o.head else null end) as $observed_head
     | (($record.checked_at // "") | try fromdateiso8601 catch null) as $checked
-    # A merged or closed observation is final; poll never re-reads it, so it never expires.
+    # On supported URLs, a merged or closed observation never needs another read.
     | ($record.error == null and ($o.state | IN("merged","closed"))) as $final
     | (($final or ($checked != null and ($now - $checked) >= 0 and ($now - $checked) <= $max_age))
        and (if $record.kind == "pr" then $observed_head != null
             else $record.error == null and $record.observation != null end)
-       and ($k.url | startswith("https://github.com/"))) as $fresh
+       and ($k.url | supported_url)) as $fresh
     | (($o.checks // []) | latest_checks) as $checks
     | [$checks[] | select(.status == "completed" and (.conclusion == null or .conclusion == ""))] as $no_verdict
     | [$checks[] | select(.status != "completed")] as $pending
@@ -64,7 +98,7 @@ def projected($input; $saved; $now; $max_age):
     | ([$o.reviews[]? | select(.state != "COMMENTED")] | group_by(.user.login)
        | map(sort_by([.submitted_at,.id]) | last)
        | map(. + {freshness:(if $observed_head != null and .commit_id != $observed_head then "STALE" elif $fresh then "current" else "unverified" end)})) as $reviews
-    | (if ($k.url | startswith("https://github.com/") | not) then
+    | (if ($k.url | supported_url | not) then
          {actor:"unmeasured",reason:"unsupported forge; coverage is unmeasured"}
        elif $o.state == "merged" or $o.state == "closed" then
          if $fresh then {actor:"nobody",reason:("forge reports " + $o.state)}
@@ -72,7 +106,8 @@ def projected($input; $saved; $now; $max_age):
        elif $hold != null then {actor:"captain",reason:$hold.hold_reason,hold:$hold.id}
        elif $fresh | not then {actor:"fleet",reason:($record.error // "contribution not recently checked")}
        elif $stale then {actor:"fleet",reason:"STALE maintainer verdict; reassess the current head"}
-       elif ($record.pending | length) > 0 then {actor:"fleet",reason:"incoming maintainer signal needs triage"}
+       elif ($record.pending | length) > 0 then {actor:"fleet",reason:(if all($record.pending[]; .review_bot == true)
+         then "incoming review-bot finding needs triage" else "incoming maintainer signal needs triage" end)}
        elif $record.kind == "issue" then
          if $o.ready then {actor:"fleet",reason:"filed issue is ready-for-pr"}
          else {actor:"maintainer",reason:"awaiting issue triage"} end

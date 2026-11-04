@@ -16,11 +16,23 @@ make_fakebin() {  # <dir>
   fakebin=$(fm_fakebin "$1")
   cat > "$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
+window_file="$(dirname "$0")/.spawn-window"
 case "$*" in
   *"#{pane_current_path}"*) printf '%s\n' "${FM_FAKE_PANE_PATH:-}"; exit 0 ;;
 esac
 case "${1:-}" in
   display-message) printf 'firstmate\n' ;;
+  list-windows) [ ! -s "$window_file" ] || cat "$window_file" ;;
+  new-window)
+    name=
+    previous=
+    for arg in "$@"; do
+      [ "$previous" = -n ] && name=$arg
+      previous=$arg
+    done
+    printf '%s\n' "$name" > "$window_file"
+    ;;
+  kill-window) : > "$window_file" ;;
 esac
 exit 0
 SH
@@ -82,6 +94,7 @@ run_lifecycle() {
   git -C "$WT_DIR" add landed.txt
   git -C "$WT_DIR" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' \
     commit -qm 'landed'
+  printf 'local_done_head=%s\n' "$(git -C "$WT_DIR" rev-parse HEAD)" >> "$HOME_DIR/state/$TASK.meta"
   out=$(in_home "$ROOT/bin/fm-merge-local.sh" "$TASK" 2>&1) || fail "local merge failed: $out"
   out=$(in_home "$ROOT/bin/fm-teardown.sh" "$TASK" 2>&1) || fail "teardown failed: $out"
 }

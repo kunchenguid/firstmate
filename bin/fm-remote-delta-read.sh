@@ -10,9 +10,14 @@
 # the source. A shortened or changed prefix returns a structured continuity-break
 # result instead of silently rebasing the cursor.
 #
-# An unchanged snapshot is retried after FM_REMOTE_DELTA_POLL_SECONDS (default
-# 0.5 seconds). A complete line is visible on the next sample, and the window
-# deadline can overshoot by that interval plus snapshot and scheduling work.
+# The log is sampled every FM_REMOTE_DELTA_POLL_SECONDS (default 0.5 seconds).
+# A complete line is visible on the next sample, and the window deadline can
+# overshoot by that interval plus snapshot and scheduling work.
+# Each sample of an existing log stats it once. The first sample always runs
+# the bounded capture and hashing; later samples skip that work only when the
+# size, subsecond mtime and ctime, inode, and device key is unchanged. If either
+# timestamp lacks a nonzero subsecond fraction, every sample captures the log
+# rather than trusting a coarse key that could hide a same-second rewrite.
 # The wait remains an ordinary child sleep; signal handling is unchanged.
 #
 # Exit 75 means the wait window closed with no complete line. SIGTERM exits the
@@ -84,6 +89,30 @@ snapshot_log() { # <file> <destination> <size-file>
   )
 }
 
+delta_subsecond() { # <timestamp>: digits, one dot, and a nonzero fraction
+  case "$1" in *[!0-9.]* | *.*.*) return 1 ;; esac
+  case "$1" in [0-9]*.*[1-9]*) ;; *) return 1 ;; esac
+}
+
+# The file identity a snapshot was taken against: GNU and BSD stat spell the
+# fields differently, so the poll selects the syntax once by capability. The
+# mtime and ctime keep their subsecond fraction; a key without one (a stat or
+# filesystem with whole-second timestamps) is discarded, because it cannot tell
+# a same-second same-size rewrite apart, and that poll takes a full snapshot.
+delta_log_key() { # <file>: sets KEY to "size:mtime:ctime:inode:device" or empty
+  local rest mtime ctime
+  if [ "$DELTA_KEY_GNU_STAT" = 1 ]; then
+    KEY=$(stat -c '%s:%.9Y:%.9Z:%i:%d' "$1" 2>/dev/null) || KEY=
+  else
+    KEY=$(stat -f '%z:%Fm:%Fc:%i:%d' "$1" 2>/dev/null) || KEY=
+  fi
+  rest=${KEY#*:}
+  mtime=${rest%%:*}
+  rest=${rest#*:}
+  ctime=${rest%%:*}
+  delta_subsecond "$mtime" && delta_subsecond "$ctime" || KEY=
+}
+
 resolve_log() { # <relative-path>
   local rel=$1 home_real parent_real parent base path
   case "$rel" in ''|/*|*'//'*) die "log must be a nonempty relative path" ;; esac
@@ -134,61 +163,69 @@ trap 'rm -rf -- "$TMP"' EXIT
 trap 'exit 75' TERM
 : > "$TMP/empty"
 EMPTY_HASH=$(sha256_file "$TMP/empty")
-START=$(date +%s)
+if stat -c '%s' / >/dev/null 2>&1; then DELTA_KEY_GNU_STAT=1; else DELTA_KEY_GNU_STAT=0; fi
+START=$SECONDS
+LAST_KEY=
 while :; do
   if [ -e "$LOG" ] || [ -L "$LOG" ]; then
     [ -f "$LOG" ] && [ ! -L "$LOG" ] || die "log changed into an unsafe file: $REL"
-    snapshot_log "$LOG" "$TMP/source" "$TMP/size" \
-      || die "log could not be captured safely: $REL"
-    SIZE=$(tr -d ' ' < "$TMP/size")
-    if [ "$SIZE" -lt "$OFFSET" ]; then
-      copy_prefix "$TMP/source" "$SIZE" "$TMP/prefix"
-      ACTUAL=$(sha256_file "$TMP/prefix")
-      emit_break truncated "$SIZE" "$ACTUAL"
-      exit 0
-    fi
-    copy_prefix "$TMP/source" "$OFFSET" "$TMP/prefix"
-    ACTUAL=$(sha256_file "$TMP/prefix")
-    if [ "$ACTUAL" != "$PREFIX" ]; then
-      emit_break prefix-changed "$SIZE" "$ACTUAL"
-      exit 0
-    fi
-    if [ "$SIZE" -gt "$OFFSET" ]; then
-      tail -c "+$((OFFSET + 1))" "$TMP/source" | head -c "$MAX_BYTES" > "$TMP/chunk" || true
-      COMPLETE_BYTES=$(LC_ALL=C od -An -v -tu1 "$TMP/chunk" | awk '
-        { for (i = 1; i <= NF; i++) { bytes++; if ($i == 10) complete=bytes } }
-        END { print complete + 0 }
-      ')
-      if [ "$COMPLETE_BYTES" -eq 0 ]; then : > "$TMP/payload"; else head -c "$COMPLETE_BYTES" "$TMP/chunk" > "$TMP/payload"; fi
-      BYTES=$(LC_ALL=C wc -c < "$TMP/payload" | tr -d ' ')
-      if [ "$BYTES" -gt 0 ]; then
-        TO=$((OFFSET + BYTES))
-        copy_prefix "$TMP/source" "$TO" "$TMP/to-prefix"
-        TO_HASH=$(sha256_file "$TMP/to-prefix")
-        PAYLOAD_HASH=$(sha256_file "$TMP/payload")
-        printf 'schema=fm-remote-delta.v1\n'
-        printf 'status=delta\n'
-        printf 'path=%s\n' "$REL"
-        printf 'from_offset=%s\n' "$OFFSET"
-        printf 'to_offset=%s\n' "$TO"
-        printf 'from_prefix_sha256=%s\n' "$PREFIX"
-        printf 'to_prefix_sha256=%s\n' "$TO_HASH"
-        printf 'payload_sha256=%s\n' "$PAYLOAD_HASH"
-        printf 'payload_bytes=%s\n' "$BYTES"
-        printf 'reason=\n\n'
-        cat "$TMP/payload"
+    delta_log_key "$LOG"
+    if [ -z "$KEY" ] || [ "$KEY" != "$LAST_KEY" ]; then
+      snapshot_log "$LOG" "$TMP/source" "$TMP/size" \
+        || die "log could not be captured safely: $REL"
+      # The gate stat precedes the capture, so the snapshot is at least as new
+      # as its key: a log that moved in between changes the key and is
+      # captured again on the next poll, never mistaken for stable.
+      LAST_KEY=$KEY
+      IFS= read -r SIZE < "$TMP/size"
+      if [ "$SIZE" -lt "$OFFSET" ]; then
+        copy_prefix "$TMP/source" "$SIZE" "$TMP/prefix"
+        ACTUAL=$(sha256_file "$TMP/prefix")
+        emit_break truncated "$SIZE" "$ACTUAL"
         exit 0
       fi
-      if [ $((SIZE - OFFSET)) -ge "$MAX_BYTES" ]; then
-        emit_break line-exceeds-bound "$SIZE" "$ACTUAL"
+      copy_prefix "$TMP/source" "$OFFSET" "$TMP/prefix"
+      ACTUAL=$(sha256_file "$TMP/prefix")
+      if [ "$ACTUAL" != "$PREFIX" ]; then
+        emit_break prefix-changed "$SIZE" "$ACTUAL"
         exit 0
+      fi
+      if [ "$SIZE" -gt "$OFFSET" ]; then
+        tail -c "+$((OFFSET + 1))" "$TMP/source" | head -c "$MAX_BYTES" > "$TMP/chunk" || true
+        COMPLETE_BYTES=$(LC_ALL=C od -An -v -tu1 "$TMP/chunk" | awk '
+          { for (i = 1; i <= NF; i++) { bytes++; if ($i == 10) complete=bytes } }
+          END { print complete + 0 }
+        ')
+        if [ "$COMPLETE_BYTES" -eq 0 ]; then : > "$TMP/payload"; else head -c "$COMPLETE_BYTES" "$TMP/chunk" > "$TMP/payload"; fi
+        BYTES=$(LC_ALL=C wc -c < "$TMP/payload" | tr -d ' ')
+        if [ "$BYTES" -gt 0 ]; then
+          TO=$((OFFSET + BYTES))
+          copy_prefix "$TMP/source" "$TO" "$TMP/to-prefix"
+          TO_HASH=$(sha256_file "$TMP/to-prefix")
+          PAYLOAD_HASH=$(sha256_file "$TMP/payload")
+          printf 'schema=fm-remote-delta.v1\n'
+          printf 'status=delta\n'
+          printf 'path=%s\n' "$REL"
+          printf 'from_offset=%s\n' "$OFFSET"
+          printf 'to_offset=%s\n' "$TO"
+          printf 'from_prefix_sha256=%s\n' "$PREFIX"
+          printf 'to_prefix_sha256=%s\n' "$TO_HASH"
+          printf 'payload_sha256=%s\n' "$PAYLOAD_HASH"
+          printf 'payload_bytes=%s\n' "$BYTES"
+          printf 'reason=\n\n'
+          cat "$TMP/payload"
+          exit 0
+        fi
+        if [ $((SIZE - OFFSET)) -ge "$MAX_BYTES" ]; then
+          emit_break line-exceeds-bound "$SIZE" "$ACTUAL"
+          exit 0
+        fi
       fi
     fi
   elif [ "$OFFSET" -ne 0 ] || [ "$PREFIX" != "$EMPTY_HASH" ]; then
     emit_break missing 0 "$EMPTY_HASH"
     exit 0
   fi
-  NOW=$(date +%s)
-  [ $((NOW - START)) -lt "$WAIT" ] || exit 75
+  [ $((SECONDS - START)) -lt "$WAIT" ] || exit 75
   sleep "$POLL_SECONDS"
 done

@@ -4,12 +4,12 @@
 # Wraps bin/fm-watch.sh: runs it as a child, presents and classifies every
 # durable wake after an actionable close, acknowledges only after routing, and
 # either SELF-HANDLES the routine majority in bash (no firstmate turn) or
-# ESCALATES a batched, distilled digest to the supervisor pane on
+# ESCALATES a batched, distilled digest to the supervisor endpoint on
 # captain-relevant events plus bounded declared-wait rechecks. This is the
 # token-efficient replacement for the prior always-inject daemon: routine
-# signal/stale/heartbeat wakes cost zero firstmate context; only done/
-# needs-decision/blocked/failed/persistent-wedge/check-output events and a
-# declared-wait recheck reach the LLM, and even then as one pre-read digest per
+# signal/stale/heartbeat wakes cost zero firstmate context; routing is owned by
+# .agents/skills/afk/SKILL.md (Classification policy).
+# Escalated events reach the LLM as one pre-read digest per
 # batch window. That digest is byte-bounded (see escalate_flush); when it cuts
 # or omits anything it names a state/.subsuper-digests/ file holding every
 # buffered event verbatim.
@@ -24,9 +24,9 @@
 # catch-up or when afk is re-entered.
 #
 # IN-BAND OPERATIONAL INPUT. bin/fm-operational-input.sh constructs every
-# current daemon injection as the typed away-supervisor kind after the stable
+# current daemon injection as the away-supervisor kind after the stable
 # FM_OPERATIONAL_PREFIX. A human cannot type its leading U+2063 from a normal
-# keyboard at the start of a message, and Herdr transports it as text.
+# keyboard at the start of a message, and supported backends transport it as text.
 # A primary harness that strips invisible characters from submitted prompts
 # (fm_operational_harness_needs_record, Claude Code) instead receives the
 # owner's record-backed doorbell: the envelope is written to this home's
@@ -48,7 +48,7 @@
 #     drain and acknowledges it only after routing completes.
 #   - Fail-safe-to-escalate: any wake the classifier cannot confidently mark
 #     routine is escalated.
-#   - Bounded wedge latency: a stale pane without a declared wait is escalated
+#   - Bounded wedge latency: ordinary pane staleness without a declared wait escalates
 #     only after it has been idle for STALE_ESCALATE_SECS
 #     (configurable), rechecked once. A wedged crewmate is therefore detected
 #     within STALE_ESCALATE_SECS + a tick, never lost. A declared wait - either a
@@ -72,30 +72,35 @@
 #
 # The robustness shell from the prior always-inject version is preserved:
 # single-instance lock (portable helper, no flock dependency), crash-loop
-# backoff, pane-gone guard, and a signal-trapped shutdown that flushes buffered
+# backoff, endpoint-gone guard, and a signal-trapped shutdown that flushes buffered
 # escalations before exit.
 #
 # Usage: fm-supervise-daemon.sh
 #          Long-lived background loop. Normally started by the /afk skill, which
 #          sets state/.afk first. Env knobs:
-#          FM_SUPERVISOR_TARGET     supervisor pane target (override; otherwise
+#          FM_SUPERVISOR_TARGET     supervisor endpoint target (override; otherwise
 #                                   auto-discovered per backend - $TMUX_PANE
 #                                   under tmux, "<session>:<pane-id>" from
-#                                   $HERDR_PANE_ID under herdr - then
-#                                   firstmate:0 fallback). Accepts either a
-#                                   tmux target or a herdr "<session>:<pane-id>"
-#                                   target; which one it's read as is decided by
-#                                   FM_SUPERVISOR_BACKEND (below), independently.
-#          FM_SUPERVISOR_BACKEND    supervisor pane BACKEND (tmux|herdr;
-#                                   override; otherwise auto-discovered the same
-#                                   way bin/fm-backend.sh's fm_backend_detect
-#                                   resolves the runtime firstmate itself is
-#                                   executing inside - $TMUX_PANE selects tmux,
-#                                   $HERDR_ENV=1 selects herdr - falling back to
-#                                   tmux). zellij, orca, and cmux are not yet
+#                                   $HERDR_PANE_ID under herdr,
+#                                   "<session-uuid>:<block-uuid>" from
+#                                   $REX_SESSION/$REX_BLOCK under rex, or the
+#                                   home's one live T3 thread - then firstmate:0
+#                                   fallback). Accepts a tmux target, a herdr
+#                                   "<session>:<pane-id>", a rex target, or a T3
+#                                   thread id; which one it's read as is decided
+#                                   by FM_SUPERVISOR_BACKEND (below),
+#                                   independently.
+#          FM_SUPERVISOR_BACKEND    supervisor endpoint BACKEND (tmux|herdr|rex|t3code;
+#                                   override; otherwise resolved by
+#                                   bin/fm-supervisor-target-lib.sh - $TMUX_PANE
+#                                   selects tmux, $HERDR_ENV=1 selects herdr,
+#                                   TERM_PROGRAM=rex selects rex, then T3
+#                                   discovery behind its explicit-selection gate
+#                                   - falling back to tmux).
+#                                   zellij, orca, cmux, paseo, and tern are not yet
 #                                   supported as supervisor backends; the daemon
 #                                   refuses loudly at startup rather than trying
-#                                   tmux primitives against a non-tmux pane.
+#                                   tmux primitives against an unsupported endpoint.
 #          FM_INJECT_SKIP           |-prefixes force-self-handle bypassing
 #                                   classification (default "heartbeat"); empty
 #                                   disables. Use sparingly: it overrides the
@@ -125,7 +130,7 @@
 #                                   alarm fires (default 300; 0 disables)
 #          FM_WEDGE_ALARM_CHANNEL   override config/wedge-alarm with a single
 #                                   active-alert directive for that wedge alarm
-#                                   (off|auto|osascript|herdr|command:<cmd>). An
+#                                   (off|auto|osascript|herdr|rex|command:<cmd>). An
 #                                   absent file/var means auto: on macOS that is
 #                                   an OS-level notification, so the alarm is
 #                                   never silent. See wedge_alarm_notify below
@@ -203,14 +208,16 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 . "$FM_DAEMON_DIR/fm-busy-lib.sh"
 
 # --- tunables ---------------------------------------------------------------
-# Supervisor backends this daemon knows how to inject into today. zellij, orca,
-# and cmux are real backends elsewhere in firstmate (bin/fm-backend.sh) but this
-# daemon has no verified composer/busy primitives wired up for them yet - see
-# docs/herdr-backend.md and AGENTS.md section 4's
+# Supervisor backends this daemon knows how to inject into today. rex goes
+# through the same dispatcher primitives as herdr (bin/backends/rex.sh). zellij,
+# orca, cmux, paseo, and tern are real backends elsewhere in firstmate
+# (bin/fm-backend.sh) but this daemon has no verified composer/busy primitives
+# wired up for them yet - see docs/herdr-backend.md and AGENTS.md section 4's
 # harness-verification discipline. Selecting one refuses loudly at startup
 # instead of silently running tmux primitives against a pane that is not a tmux
-# pane.
-FM_SUPERVISOR_SUPPORTED_BACKENDS="tmux herdr"
+# pane. t3code injects through the adapter's t3_thread_send, with its
+# thread status table as the busy verdict.
+FM_SUPERVISOR_SUPPORTED_BACKENDS="tmux herdr rex t3code"
 INJECT_SKIP_DEFAULT="heartbeat"
 STALE_ESCALATE_SECS_DEFAULT=240
 ESCALATE_BATCH_SECS_DEFAULT=90
@@ -227,6 +234,9 @@ WEDGE_ALARM_NOTIFIER_PID=
 INJECT_LAST_FAILURE=
 # 1 once the latest delivery attempt reached the submit primitive.
 INJECT_SUBMIT_ATTEMPTED=0
+# The latest submit's verdict and the exact text it submitted.
+INJECT_LAST_VERDICT=
+INJECT_SENT_MSG=
 # The captain-relevant verb set and the status classifiers (last_status_line,
 # status_is_captain_relevant, window_to_task, and the status-span reader) now
 # live in bin/fm-classify-lib.sh, shared with the always-on watcher.
@@ -521,6 +531,12 @@ unknown_wake_acknowledge_flushed() {  # <state> <buffer>
 
 # --- stale marker + escalation buffer (stateful, but via explicit state dir) -
 # Marker:   state/.subsuper-stale-<key>   contains the epoch first seen idle.
+# Reported: state/.subsuper-reported-stale-<key> records an unknown-state alert.
+# Dialog:   state/.subsuper-dialog-<key>   the blocking-dialog name copied off a
+#           self-handled stale wake, so the persistence line can still say it.
+#           A terminal status still clears the stale marker, and this file goes
+#           with it. The watcher also removes it when the pane no longer shows
+#           the dialog.
 # Buffer:   state/.subsuper-escalations    one distilled line per escalation.
 # Seen:     state/.subsuper-seen-status-<task>  last reported file signature and
 #           classified byte offset, so failures and events do not re-fire while
@@ -532,13 +548,32 @@ stale_marker_record() {  # <window> <state>  — create if absent
   local win=$1 state=$2 key marker
   key=$(_stale_key "$(window_to_task "$win" "$state")")
   marker="$state/.subsuper-stale-$key"
-  [ -e "$marker" ] || _now > "$marker"
+  if [ ! -e "$marker" ]; then
+    rm -f "$state/.subsuper-reported-stale-$key"
+    _now > "$marker"
+  fi
 }
 
 stale_marker_remove() {  # <window> <state>
-  local win=$1 state=$2 key
-  key=$(_stale_key "$(window_to_task "$win" "$state")")
-  rm -f "$state/.subsuper-stale-$key"
+  stale_marker_remove_key "$(_stale_key "$(window_to_task "$1" "$2")")" "$2"
+}
+
+stale_marker_remove_key() {  # <key> <state>
+  rm -f "$2/.subsuper-stale-$1" "$2/.subsuper-dialog-$1" "$2/.subsuper-reported-stale-$1"
+}
+
+# The name a stale detail carried after "blocked-on-prompt: ". The trailing
+# parenthesis from the reason's one parenthetical is not part of the name.
+stale_dialog_name() {  # <stale-detail>
+  local detail=$1 name
+  case "$detail" in
+    *'blocked-on-prompt: '*) ;;
+    *) return 1 ;;
+  esac
+  name=${detail##*blocked-on-prompt: }
+  name=${name%)}
+  [ -n "$name" ] || return 1
+  printf '%s' "$name"
 }
 
 # Pause marker: state/.subsuper-paused-<key> holds the epoch a declared wait (a
@@ -566,11 +601,23 @@ clear_pause_tracking() {  # <window> <state>
   task=$(window_to_task "$win" "$state")
   key=$(_stale_key "$task")
   watcher_key=$(_stale_key "$win")
+  # This list mirrors the watcher's own per-window markers, cap markers included:
+  # releasing a window's wedge timer and escalation count releases them with it,
+  # which is what bin/fm-watch.sh's wedge_episode_end does on the routes that
+  # end an episode there. A marker missing from either list outlives a release
+  # the other already made, and a cap marker that does outlives its window for
+  # the whole horizon.
   rm -f "$state/.subsuper-paused-$key" "$state/.subsuper-pause-until-due-$key" "$state/.subsuper-stale-$key" \
+    "$state/.subsuper-dialog-$key" \
+    "$state/.subsuper-reported-stale-$key" \
     "$state/.paused-$watcher_key" "$state/.paused-rechecked-$watcher_key" "$state/.paused-resurfaced-$watcher_key" \
     "$state/.stale-$watcher_key" "$state/.stale-since-$watcher_key" "$state/.wedge-escalations-$watcher_key" \
+    "$state/.wedge-permanent-$watcher_key" \
+    "$state/.wedge-terminal-queued-$watcher_key" \
+    "$state/.wedge-rollback-failed-$watcher_key" \
     "$state/.writing-since-$watcher_key" "$state/.writing-resurfaced-$watcher_key" \
-    "$state/.waiting-resurfaced-$watcher_key"
+    "$state/.validating-since-$watcher_key" "$state/.validating-resurfaced-$watcher_key" \
+    "$state/.waiting-resurfaced-$watcher_key" "$state/.guard-deferrals-$watcher_key"
 }
 
 reconcile_pause_tracking() {  # <window> <state> <last-status-line>
@@ -674,7 +721,7 @@ mark_escalated_seen() {  # <state> <captured-endpoint-file>
 # case statement here). <backend> defaults to tmux when omitted, so every
 # existing caller/test that passes only <target> is unaffected.
 #
-# This rendered reader applies only to the supervisor pane during away-mode
+# This rendered reader applies only to a supervisor pane during away-mode
 # injection. It never classifies a recorded worker task. The detected primary
 # harness selects exactly one signature, so output from another harness cannot
 # make the primary read busy.
@@ -695,6 +742,16 @@ fm_daemon_primary_harness() {
 
 pane_is_busy() {  # <target> [backend]
   local target=$1 backend=${2:-tmux} native tail40 harness
+  # T3 has no rendered busy fallback, so require positive proof that the
+  # thread is settled and not waiting on a pending request, which the busy
+  # table reads as idle.
+  if [ "$backend" = t3code ]; then
+    fm_backend_source t3code || return 0
+    case "$(fm_backend_t3code_probe "$target")" in
+      idle|ready|interrupted) return 1 ;;
+    esac
+    return 0
+  fi
   harness=$(fm_daemon_primary_harness)
   native=$(fm_backend_busy_state "$backend" "$target" 2>/dev/null)
   case "$native" in
@@ -727,20 +784,29 @@ task_window_harness() {  # <window> <state>
   grep '^harness=' "$meta" 2>/dev/null | cut -d= -f2- || true
 }
 
-# stale_window_is_busy: 0 when the task is PROVABLY working through the
-# semantic busy-state contract (bin/fm-busy-lib.sh), 1 when it is not, and 2
-# when the endpoint could not be read at all. Only an exact busy verdict is
-# working: unknown semantic state never becomes busy and never becomes a
-# silent idle, so a stale pane whose state cannot be proven surfaces.
+# stale_window_is_busy: 0 when the semantic busy-state contract
+# (bin/fm-busy-lib.sh) reports busy, 2 when the endpoint is gone, 3 for T3
+# native uncertainty, and 1 otherwise. Uncertainty cannot prove work resumed.
+# A T3 thread is gone only when the adapter reads it missing (archived or 404);
+# its verdict is native, so a failed transcript read is uncertainty, not removal.
+# Other backends treat a failed capture as gone.
 stale_window_is_busy() {  # <window> <state>
-  local win=$1 state=$2 backend harness label task tail40 verdict
+  local win=$1 state=$2 backend harness label task tail40='' verdict
   backend=$(task_window_backend "$win" "$state")
   harness=$(task_window_harness "$win" "$state")
   task=$(window_to_task "$win" "$state")
   label="fm-$task"
-  tail40=$(fm_backend_capture "$backend" "$win" 40 "$label" 2>/dev/null) || return 2
+  if [ "$backend" = t3code ]; then
+    [ "$(fm_backend_agent_state "$backend" "$win" 2>/dev/null)" != missing ] || return 2
+  else
+    tail40=$(fm_backend_capture "$backend" "$win" 40 "$label" 2>/dev/null) || return 2
+  fi
   verdict=$(fm_busy_classify "$backend" "$win" "$harness" "$task" "$state" "$tail40")
-  [ "${verdict%% *}" = busy ]
+  case "$verdict" in
+    busy\ *) return 0 ;;
+    unknown\ t3code-native) return 3 ;;
+    *) return 1 ;;
+  esac
 }
 
 escalate_add() {  # <state> <distilled-item>
@@ -750,6 +816,7 @@ escalate_add() {  # <state> <distilled-item>
   fi
   buf="$state/.subsuper-escalations"
   [ -s "$buf" ] || _now > "${buf}.since"
+  [ ! -f "$buf.frozen" ] || [ -e "$buf.next-since" ] || _now > "$buf.next-since"
   printf '%s\n' "$item" >> "$buf"
 }
 
@@ -782,7 +849,7 @@ _utf8_prefix() {  # <text> <max-bytes> <out-var>
 # The injected digest is bounded so it always fits one transport argument:
 # tmux refuses an oversized `send-keys -l` command, and Linux refuses to exec
 # any single argument above 131,071 bytes (MAX_ARG_STRLEN), which is how the
-# herdr, zellij, orca, and cmux adapters pass text. Each item is cut to
+# herdr, zellij, orca, cmux, and tern adapters pass text. Each item is cut to
 # ESCALATE_ITEM_BYTES at a UTF-8 boundary with an omitted-bytes marker, the
 # joined items stop at ESCALATE_DIGEST_BYTES with a "+K more event(s)" tail,
 # and a bounded digest names a full-text file under ESCALATE_FULL_DIR that
@@ -834,21 +901,76 @@ escalate_full_text_save() {  # <state> <buf>
   printf '%s' "$file"
 }
 
+# A digest whose delivery came back unconfirmed (only T3 Code reports it: the
+# message may have landed) may already be in the supervisor's transcript. Its
+# generation is frozen: <buf>.frozen-msg keeps the exact submitted text and
+# <buf>.frozen records the buffer's since-stamp, the client request id the
+# daemon minted for that digest, and the items it covered. Every retry sends
+# the same text under that id, with no expiry, until T3 accepts it or refuses
+# it, which unfreezes it for a rebuild. Items appended later form the next
+# generation and are flushed only after the frozen one, so no event is lost or
+# delivered twice; <buf>.next-since records when the first of them arrived,
+# which becomes the buffer's since-stamp once the frozen generation is gone.
+escalate_freeze() {  # <buf> <submitted-message> <request-id>
+  local buf=$1
+  rm -f "$buf.next-since"
+  if ! printf '%s' "$2" > "$buf.frozen-msg" \
+    || ! { printf 'since=%s\nid=%s\n' "$(cat "$buf.since" 2>/dev/null)" "$3"; cat "$buf"; } > "$buf.frozen.tmp" \
+    || ! mv -f "$buf.frozen.tmp" "$buf.frozen"; then
+    rm -f "$buf.frozen.tmp" "$buf.frozen" "$buf.frozen-msg"
+    log "digest freeze could not be recorded; the next flush rebuilds it"
+  fi
+}
+
+# escalate_flush_frozen: retry a frozen generation verbatim. Returns 0 once
+# none is pending (confirmed, or a freeze that no longer matches the buffer,
+# such as one left behind by a cleared buffer), 1 while it is still pending
+# or was just refused (unfrozen, so the next flush rebuilds every item).
+escalate_flush_frozen() {  # <state> <buf>
+  local state=$1 buf=$2 n id items
+  n=$(( $(wc -l < "$buf.frozen") - 2 ))
+  id=$(sed -n '2s/^id=//p' "$buf.frozen")
+  items=$(mktemp "$state/.subsuper-frozen.XXXXXX" 2>/dev/null) || return 1
+  tail -n +3 "$buf.frozen" > "$items"
+  if [ "$(head -n 1 "$buf.frozen")" != "since=$(cat "$buf.since" 2>/dev/null)" ] || [ -z "$id" ] \
+    || [ ! -f "$buf.frozen-msg" ] || ! head -n "$n" "$buf" | cmp -s - "$items"; then
+    rm -f "$items" "$buf.frozen" "$buf.frozen-msg" "$buf.next-since"
+    return 0
+  fi
+  if inject_msg "$(cat "$buf.frozen-msg")" "$state" exact "$id"; then
+    unknown_wake_acknowledge_flushed "$state" "$items" \
+      || log "unknown-wake acknowledgement write failed; a delivered unknown wake may escalate again"
+    tail -n +"$((n + 1))" "$buf" > "$items" && mv -f "$items" "$buf"
+    if [ -s "$buf" ]; then mv -f "$buf.next-since" "$buf.since" 2>/dev/null || _now > "$buf.since"; else rm -f "$buf.since"; fi
+    rm -f "$items" "$buf.frozen" "$buf.frozen-msg" "$buf.next-since" "$state/.subsuper-inject-wedged"
+    ESCALATE_KEPT_FULL=
+    return 0
+  fi
+  rm -f "$items"
+  [ "$INJECT_LAST_VERDICT" != send-failed ] || rm -f "$buf.frozen" "$buf.frozen-msg" "$buf.next-since"
+  return 1
+}
+
 # Flush the escalation buffer as ONE batched, single-line, bounded digest to
-# the supervisor pane. Returns 0 on successful inject (or empty buffer),
+# the supervisor endpoint. Returns 0 on successful inject (or empty buffer),
 # non-zero on inject failure (buffer preserved for retry / catch-up). A bounded
 # digest's full-text file is kept once the submit ran, because the digest naming
 # it may have been typed; ESCALATE_KEPT_FULL remembers it so a retry of the same
-# buffer reuses it instead of writing another copy.
+# buffer reuses it instead of writing another copy. A frozen generation
+# (escalate_freeze) is retried first, verbatim.
 ESCALATE_KEPT_FULL=
 escalate_flush() {  # <state>
-  local state=$1 buf msg full='' fresh=0
+  local state=$1 buf msg full='' fresh=0 id=''
   buf="$state/.subsuper-escalations"
   [ -s "$buf" ] || return 0
   if [ ! -f "$buf" ] || [ ! -r "$buf" ]; then
     INJECT_LAST_FAILURE="escalation buffer $buf is not a readable file"
     log "inject skipped: $INJECT_LAST_FAILURE"
     return 1
+  fi
+  if [ -f "$buf.frozen" ]; then
+    escalate_flush_frozen "$state" "$buf" || return 1
+    [ -s "$buf" ] || return 0
   fi
   escalate_digest_body "$buf"
   msg=$ESCALATE_BODY
@@ -867,7 +989,8 @@ escalate_flush() {  # <state>
   # Single-line wrapper: no embedded newlines (inject_msg also collapses as a
   # safety net, but keeping the source single-line makes the intent explicit).
   msg=$(printf 'Supervisor escalate (%s event(s)): %s (pre-read; re-arm not needed — watcher daemon-managed)' "$ESCALATE_EVENTS" "$msg")
-  if inject_msg "$msg" "$state"; then
+  [ "${FM_SUPERVISOR_BACKEND:-tmux}" != t3code ] || id="fm-digest-$(_now)-$$-$RANDOM$RANDOM"
+  if inject_msg "$msg" "$state" "" "$id"; then
     unknown_wake_acknowledge_flushed "$state" "$buf" \
       || log "unknown-wake acknowledgement write failed; a delivered unknown wake may escalate again"
     : > "$buf"; rm -f "${buf}.since" "$state/.subsuper-inject-wedged"
@@ -876,6 +999,7 @@ escalate_flush() {  # <state>
   fi
   if [ "$INJECT_SUBMIT_ATTEMPTED" = 1 ]; then
     [ -z "$full" ] || ESCALATE_KEPT_FULL=$full
+    [ "$INJECT_LAST_VERDICT" != unconfirmed ] || escalate_freeze "$buf" "$INJECT_SENT_MSG" "$id"
   elif [ "$fresh" = 1 ]; then
     rm -f "$full"
   fi
@@ -1048,6 +1172,42 @@ wedge_alarm_via_herdr() {  # <summary>
   return 1
 }
 
+# Raise Firstmate's own Rex alert on the supervisor pane: a blocked program-status
+# record (id=fm-wedge) plus an OSC 777 desktop notification, which badges that tab
+# and returns the captain to the pane (bin/backends/rex.sh fm_backend_rex_alert).
+# Used only when config/wedge-alarm names `rex`; `auto` never adds it. Needs the
+# supervisor backend to be rex. Best-effort: logs and returns 1 on failure.
+WEDGE_ALARM_REX_RAISED=0
+wedge_alarm_via_rex() {  # <summary>
+  local summary=$1 rc backend target
+  wedge_alarm_os_notifier_override rex "$summary"
+  rc=$?
+  case "$rc" in
+    0) return 0 ;;
+    1) return 1 ;;
+  esac
+  backend="${FM_SUPERVISOR_BACKEND:-$FM_SUPERVISOR_BACKEND_DEFAULT}"
+  target="${FM_SUPERVISOR_TARGET:-$FM_SUPERVISOR_TARGET_DEFAULT}"
+  [ "$backend" = rex ] || {
+    log "wedge alarm: rex channel needs a Rex supervisor pane (supervisor backend is ${backend:-unset})"; return 1; }
+  fm_backend_source rex >/dev/null 2>&1 || {
+    log "wedge alarm: the rex adapter could not be loaded"; return 1; }
+  if wedge_alarm_run_bounded rex fm_backend_rex_alert "$target" "firstmate: away-mode escalations WEDGED" "$summary" >/dev/null 2>&1; then
+    WEDGE_ALARM_REX_RAISED=1
+    return 0
+  fi
+  log "wedge alarm: rex alert could not be written to the supervisor pane"
+  return 1
+}
+
+# Remove a raised Rex alert once a digest is delivered. Best-effort.
+wedge_alarm_rex_clear() {
+  [ "$WEDGE_ALARM_REX_RAISED" = 1 ] || return 0
+  WEDGE_ALARM_REX_RAISED=0
+  fm_backend_source rex >/dev/null 2>&1 || return 0
+  fm_backend_rex_alert_clear "${FM_SUPERVISOR_TARGET:-$FM_SUPERVISOR_TARGET_DEFAULT}" >/dev/null 2>&1 || true
+}
+
 # Run a captain-supplied command with the summary on $1 and on stdin, so an
 # alert can reach a phone/pager (ntfy, Slack, SMS) even when the captain is away
 # from the machine entirely. Best-effort: logs and returns 1 on failure.
@@ -1081,6 +1241,7 @@ wedge_alarm_emit() {  # <channel> <summary>
   case "$channel" in
     osascript) wedge_alarm_via_osascript "$summary" ;;
     herdr) wedge_alarm_via_herdr "$summary" ;;
+    rex) wedge_alarm_via_rex "$summary" ;;
     command) wedge_alarm_via_command "$cmd" "$summary" ;;
   esac
 }
@@ -1104,7 +1265,7 @@ wedge_alarm_notify() {  # <summary> <marker>
     case "$ch" in auto|default) ch=$(wedge_alarm_platform_default) ;; esac
     case "$ch" in
       '') log "wedge alarm: no OS-level alert channel on $(uname); durable marker $marker is the only signal - set config/wedge-alarm (e.g. a command: directive)" ;;
-      osascript|herdr) wedge_alarm_emit "$ch" "$summary" || true ;;
+      osascript|herdr|rex) wedge_alarm_emit "$ch" "$summary" || true ;;
       command:*) wedge_alarm_emit command "$summary" "${ch#command:}" || true ;;
       *) log "wedge alarm: unrecognized active-alert channel directive (redacted); marker still written" ;;
     esac
@@ -1113,7 +1274,7 @@ wedge_alarm_notify() {  # <summary> <marker>
 }
 
 # Raise a loud, rate-limited alarm when escalations cannot be delivered after
-# max-defer (the supervisor pane is genuinely busy/wedged, the initial send
+# max-defer (the supervisor endpoint is genuinely busy/wedged, the initial send
 # fails, or the submit's Enter is swallowed). The daemon must NEVER silently
 # wedge: this logs an ERROR naming the last delivery failure, drops a durable
 # marker firstmate/recovery can surface, flashes the tmux supervisor client's
@@ -1152,7 +1313,7 @@ inject_wedge_alarm() {  # <state> <age-seconds>
     tmux display-message -t "$target" "fm: away-mode escalations WEDGED ${age}s — see $marker" 2>/dev/null || true
   fi
   # Backend-independent active alert. Unlike the tmux flash above (skipped on
-  # every non-tmux backend), this can reach the captain even when every pane and
+  # every non-tmux backend), this can reach the captain even when every endpoint and
   # its backend status-line is unreadable - the gap the 2026-07-10 overnight
   # incident fell through. Configurable and best-effort; the marker above stays
   # the durable record whether or not any channel fires.
@@ -1180,7 +1341,8 @@ _oldest_line_age() {  # <buf> -> seconds since the oldest buffered item first ar
 #     attempt one normal delivery; if it cannot confirm, raise the wedge alarm.
 #     Never silently defer forever.
 #  2) stale recheck: for each pending stale marker past STALE_ESCALATE_SECS,
-#     re-peek the pane; still idle -> escalate (wedge); resumed -> clear marker.
+#     re-peek the pane; still idle -> escalate (wedge); resumed -> clear marker;
+#     T3 unknown -> escalate while retaining the pending recheck.
 #  2b) pause re-surface: for each declared-wait marker past PAUSE_RESURFACE_SECS,
 #     re-peek; gone -> clear; still declaring the wait, on an idle OR a busy pane
 #     -> escalate a recheck digest naming which human the wait is on, and reset
@@ -1188,7 +1350,7 @@ _oldest_line_age() {  # <buf> -> seconds since the oldest buffered item first ar
 #  3) heartbeat scan: every HEARTBEAT_SCAN_SECS, run the catch-all status scan in
 #     the block below and escalate what it finds; that block owns its file set.
 housekeeping() {  # <state>
-  local state=$1 now due f key task win marker age last max_defer oldest pause_secs marker_epoch until bounded_until pause_reason
+  local state=$1 now due f key task win marker age last max_defer oldest pause_secs marker_epoch until bounded_until pause_reason dialog_name persisted
   now=$(_now)
   migrate_watcher_pause_markers "$state"
 
@@ -1231,7 +1393,7 @@ housekeeping() {  # <state>
     win=$(window_for_task "$key" "$state" 2>/dev/null || true)
     if [ -z "$win" ]; then
       # Window gone (task torn down): drop the marker, nothing to escalate.
-      rm -f "$marker"; continue
+      stale_marker_remove_key "$key" "$state"; continue
     fi
     task=$(window_to_task "$win" "$state")
     last=$(status_declared_wait_line "$state/$task.status")
@@ -1243,11 +1405,26 @@ housekeeping() {  # <state>
     [ "$age" -ge "${FM_STALE_ESCALATE_SECS:-$STALE_ESCALATE_SECS_DEFAULT}" ] || continue
     stale_window_is_busy "$win" "$state"
     case "$?" in
-      0) rm -f "$marker" ;;
-      2) rm -f "$marker" ;;
-      *) if escalate_add "$state" "stale persisted ${age}s (possible wedge): $win"; then
-           stale_marker_remove "$win" "$state"
+      0|2) stale_marker_remove_key "$key" "$state" ;;
+      3) if [ ! -e "$state/.subsuper-reported-stale-$key" ] \
+           && escalate_add "$state" "stale persisted ${age}s (possible wedge): $win"; then
+           _now > "$state/.subsuper-reported-stale-$key"
          fi ;;
+      *)
+        if [ -e "$state/.subsuper-reported-stale-$key" ]; then
+          stale_marker_remove_key "$key" "$state"
+          continue
+        fi
+        dialog_name=$(cat "$state/.subsuper-dialog-$key" 2>/dev/null || true)
+        if [ -n "$dialog_name" ]; then
+          persisted="stale persisted ${age}s (possible wedge, blocked-on-prompt: $dialog_name): $win"
+        else
+          persisted="stale persisted ${age}s (possible wedge): $win"
+        fi
+        if escalate_add "$state" "$persisted"; then
+          stale_marker_remove_key "$key" "$state"
+        fi
+        ;;
     esac
   done
 
@@ -1300,9 +1477,9 @@ housekeeping() {  # <state>
     else
       [ "$age" -ge "$pause_secs" ] || continue
     fi
-    # Endpoint-readability probe only: exit code 2 means the capture failed, so the
-    # endpoint is gone and there is nothing left to re-surface. The busy/idle verdict
-    # is deliberately discarded here. Do NOT reinstate a `0)` arm dropping the marker
+    # Removal probe only: stale_window_is_busy owns when exit code 2 means gone.
+    # T3 native uncertainty keeps the recheck pending. The busy/idle verdict is
+    # deliberately discarded here. Do NOT reinstate a `0)` arm dropping the marker
     # on busy: migrate_watcher_pause_markers recreates it with a fresh timestamp on
     # the very next tick while the declaration still stands, so the window would
     # restart forever and the wait would never mature into its one recheck.
@@ -1397,70 +1574,87 @@ window_for_task() {  # <task-key> [state]
 }
 
 # --- injection --------------------------------------------------------------
-# inject_msg: send one escalation digest to the supervisor pane.
-# Returns 0 on successful inject (or empty buffer), non-zero if the pane is
+# inject_msg: send one escalation digest to the supervisor endpoint.
+# Returns 0 on successful inject (or empty buffer), non-zero if the endpoint is
 # gone, the supervisor is busy, afk is inactive, or the verified submit cannot
 # be confirmed after bounded retries. On non-zero the caller preserves
 # the buffer so the escalation survives for the next cycle or the catch-up flush.
 #
 # Submit model:
-#   - TYPE ONCE, then submit with Enter. Never retype the digest: a swallowed
-#     Enter leaves our text in the composer, and retyping would concatenate two
-#     sentinel-prefixed digests into one corrupted turn.
-#   - SUBMIT ACK = the backend submit primitive reports `empty` after Enter.
+#   - Pane backends TYPE ONCE, then submit with Enter. Never retype the digest:
+#     a swallowed Enter leaves our text in the composer, and retyping would
+#     concatenate two sentinel-prefixed digests into one corrupted turn.
+#     T3 Code instead starts one native turn with the complete digest.
+#   - SUBMIT ACK = the backend submit primitive reports `empty` after its submit.
 #     For tmux that means a cleared composer; for herdr's normal idle-baseline
-#     path it means native agent-state observed a real turn start.
+#     path it means native agent-state observed a real turn start; for T3 Code
+#     it means the native turn start was accepted.
 #     Pending means Enter was swallowed; unknown is treated as undelivered by
 #     this strict daemon path.
-#   - COMPOSER GUARD before typing: if the cursor line already has real content
-#     after dim/faint ghost text and borders are ignored (a human's half-typed
-#     line, or a previous injection's unsent text), defer entirely - injecting
-#     would merge with the human's text.
-inject_msg() {  # <message> [state]
-  local msg=$1 state target backend retries sleep_s verdict composer encoded bytes errf err='' body
+#   - COMPOSER GUARD before typing on pane backends: if the cursor line already
+#     has real content after dim/faint ghost text and borders are ignored (a
+#     human's half-typed line, or a previous injection's unsent text), defer
+#     entirely - injecting would merge with the human's text. T3 Code has no
+#     composer and reports the guard as empty.
+inject_msg() {  # <message> [state] [exact] [request-id]
+  local msg=$1 state target backend retries sleep_s verdict composer reason encoded bytes errf err='' body exact=${3:-} request_id=${4:-}
   state="${2:-$(_state_root)}"
   # (1) Presence-gate: inject ONLY when afk is active. When afk is off, the
   # daemon self-handles and stays quiet; firstmate drives the normal always-on
   # watcher triage. Escalations buffer and survive for the next catch-up flush.
   INJECT_LAST_FAILURE=
+  INJECT_LAST_VERDICT=
+  INJECT_SENT_MSG=
   INJECT_SUBMIT_ATTEMPTED=0
   afk_active "$state" || { INJECT_LAST_FAILURE="deferred: afk inactive"; log "inject $INJECT_LAST_FAILURE"; return 1; }
   # (2) Single-line digest: collapse any embedded newlines so submission via
   # send-keys + Enter is unambiguous regardless of how the TUI composer treats
   # them. Then use the canonical typed envelope so downstream consumers retain
   # the exact away-supervisor kind without interpreting this payload's prose.
-  msg=$(_collapse_newlines "$msg")
-  fm_operational_input_encode away-supervisor "$msg" encoded \
-    || { INJECT_LAST_FAILURE="the digest could not be encoded"; log "inject failed: $INJECT_LAST_FAILURE"; return 1; }
-  body=$msg
-  msg=$encoded
+  # An `exact` message is a frozen digest's submitted text, sent verbatim. A
+  # request id is the T3 client request id the digest's delivery owns.
+  if [ "$exact" != exact ]; then
+    msg=$(_collapse_newlines "$msg")
+    fm_operational_input_encode away-supervisor "$msg" encoded \
+      || { INJECT_LAST_FAILURE="the digest could not be encoded"; log "inject failed: $INJECT_LAST_FAILURE"; return 1; }
+    body=$msg
+    msg=$encoded
+  fi
   target="${FM_SUPERVISOR_TARGET:-$FM_SUPERVISOR_TARGET_DEFAULT}"
-  # BACKEND-AWARE (previously a raw `tmux display-message` pane-exists probe):
-  # dispatches through bin/fm-backend.sh so a herdr supervisor pane is checked
-  # via the herdr adapter instead of always assuming tmux. Falls back to tmux
-  # when unset (sourced/test contexts that never ran fm_super_main's startup
-  # discovery), matching this function's pre-existing default assumption.
+  # Dispatch through bin/fm-backend.sh so each supervisor pane or T3 thread is checked by
+  # its backend. Falls back to tmux when unset (sourced/test contexts that never
+  # ran fm_super_main's startup discovery), matching this function's default.
   backend="${FM_SUPERVISOR_BACKEND:-tmux}"
   fm_backend_target_exists "$backend" "$target" \
     || { INJECT_LAST_FAILURE="supervisor target $target not found on $backend"; return 1; }
-  # (3) Busy-guard: never inject into an in-use supervisor pane.
+  # (3) Busy-guard: never inject into an in-use supervisor endpoint.
   if pane_is_busy "$target" "$backend"; then
     INJECT_LAST_FAILURE="deferred: supervisor pane busy (agent mid-turn)"
     log "inject $INJECT_LAST_FAILURE"
     return 1
   fi
-  #   b) Composer-guard: inject ONLY into a confirmed-empty GENUINE agent
-  #      composer. The shared classifier (fm_backend_composer_state ->
+  #   b) Composer-guard: pane backends inject ONLY into a confirmed-empty
+  #      GENUINE agent composer. The shared classifier (fm_backend_composer_state ->
   #      fm_composer_classify_content, bin/fm-composer-lib.sh) reports 'pending'
   #      for real unsubmitted text (a human's half-typed line, or a swallowed
-  #      prior injection) and 'unknown' for a bare dead-shell prompt (the agent
-  #      exited to its login shell) or an unreadable pane. Neither is a safe
-  #      target - typing the escalation into a shell could execute it - so defer
-  #      on anything that is not affirmatively 'empty'. A deferred escalation
-  #      stays buffered for the next cycle or the catch-up flush.
+  #      prior injection) and 'unknown' when it could not prove the composer
+  #      empty or pending: a bare dead-shell prompt (the agent exited to its
+  #      login shell), an unreadable pane, a harness screen the classifier
+  #      does not know, or a recognized composer whose harness is not idle.
+  #      Neither is a safe target - typing the escalation into a
+  #      shell could execute it - so defer on anything that is not
+  #      affirmatively 'empty', and name which of the two it was so a wedge
+  #      that never clears points at the right owner. A deferred escalation
+  #      stays buffered for the next cycle or the catch-up flush. T3 Code has
+  #      no composer, so its adapter reports empty and the native turn path can
+  #      proceed.
   composer=$(fm_backend_composer_state "$backend" "$target" 2>/dev/null)
   if [ "$composer" != empty ]; then
-    INJECT_LAST_FAILURE="deferred: supervisor composer not confirmed-empty (state=${composer:-unknown}: pending input, dead-shell prompt, or unreadable pane)"
+    case "$composer" in
+      pending|pending-unproven) reason='unsubmitted text in the composer' ;;
+      *) reason='composer not proven empty or pending (unrecognized screen, or harness not idle)' ;;
+    esac
+    INJECT_LAST_FAILURE="deferred: supervisor composer not confirmed-empty (state=${composer:-unknown}: $reason)"
     log "inject $INJECT_LAST_FAILURE"
     return 1
   fi
@@ -1468,17 +1662,16 @@ inject_msg() {  # <message> [state]
   #      the owner's record-backed doorbell instead of the typed envelope, so
   #      the away-mode return check can still tell this escalation from the
   #      captain. The record is written only once every guard has passed.
-  if fm_operational_harness_needs_record "$(fm_daemon_primary_harness)"; then
+  if [ "$exact" != exact ] && fm_operational_harness_needs_record "$(fm_daemon_primary_harness)"; then
     if ! fm_operational_record_write "$state" away-supervisor "$body" msg; then
       INJECT_LAST_FAILURE="could not publish the away-supervisor record under $state"
       log "inject failed: $INJECT_LAST_FAILURE"
       return 1
     fi
   fi
-  # (4) Type the digest ONCE, then submit with Enter (retry Enter only, never
-  # retype) via the shared submit primitive. Success = the backend confirms
-  # submit. An unconfirmed/unknown pane does NOT count as delivered, so the
-  # buffer is preserved (strict) rather than cleared.
+  # (4) Submit through the shared primitive. Pane backends type once and retry
+  # only Enter; T3 Code starts one native turn. An unconfirmed endpoint does
+  # not count as delivered, so the buffer is preserved.
   # Dispatches through fm_backend_send_text_submit (bin/fm-backend.sh): for
   # backend=tmux this calls fm_backend_tmux_send_text_submit, a verbatim
   # re-export of fm_tmux_submit_core - byte-identical to calling it directly.
@@ -1491,12 +1684,15 @@ inject_msg() {  # <message> [state]
   bytes=$(LC_ALL=C; printf '%s' "${#msg}")
   errf=$(mktemp "$state/.subsuper-inject-err.XXXXXX" 2>/dev/null) || errf=
   INJECT_SUBMIT_ATTEMPTED=1
-  verdict=$(fm_backend_send_text_submit "$backend" "$target" "$msg" "$retries" "$sleep_s" "$sleep_s" 2>"${errf:-/dev/null}")
+  INJECT_SENT_MSG=$msg
+  verdict=$(FM_T3CODE_CLIENT_REQUEST_ID=$request_id fm_backend_send_text_submit "$backend" "$target" "$msg" "$retries" "$sleep_s" "$sleep_s" 2>"${errf:-/dev/null}")
+  INJECT_LAST_VERDICT=$verdict
   if [ -n "$errf" ]; then
     err=$(cat "$errf" 2>/dev/null)
     rm -f "$errf"
   fi
   if [ "$verdict" = empty ]; then
+    wedge_alarm_rex_clear  # A delivered digest ends a raised Rex wedge alarm.
     return 0  # Backend confirmed the submit.
   fi
   err=$(_collapse_newlines "$err")
@@ -1545,7 +1741,7 @@ is_wake_reason() {  # <reason>
 # is populated, suppression markers commit, and the digest names the decision
 # instead of "unknown wake:".
 handle_wake() {  # <reason> <state>
-  local reason=$1 state=$2 decision action distilled task last stale_detail
+  local reason=$1 state=$2 decision action distilled task last stale_detail dialog_name=''
   local capture="$state/.subsuper-classified-end.$$" span_record='' span_rc='' endpoint ident rest sig marker
   local kind="" arg="" classification_failed=0 span_failure_repeat=0
   : > "$capture" || return 1
@@ -1562,8 +1758,11 @@ handle_wake() {  # <reason> <state>
                 *) arg="${reason#signal: }" ;;
               esac
               decision=$(FM_STATUS_SPAN_ENDPOINT_FILE="$capture" classify_signal "$arg" "$state") ;;
+    stale:*" (unread firstmate instruction: stuck-busy "*|stale:*" (steering-inbox busy bookkeeping unwritable: "*)
+              decision="escalate|${reason#stale: }" ;;
     stale:*)  kind=stale; arg="${reason#stale: }"; stale_detail="${arg#"$arg"}"
               case "$arg" in *" ("*) stale_detail="${arg#*" ("}"; arg="${arg%% \(*}" ;; esac
+              dialog_name=$(stale_dialog_name "$stale_detail") || dialog_name=''
               task=$(window_to_task "$arg" "$state")
               if [ -n "$task" ]; then
                 span_record=$(status_span_first_actionable_record "$state/$task.status" \
@@ -1602,12 +1801,17 @@ handle_wake() {  # <reason> <state>
               # once per STALE_ESCALATE_SECS for as long as the wait lasted.
               # Housekeeping (2b) then owns the re-surface, so the wait is still
               # bounded - by one recheck per PAUSE_RESURFACE_SECS instead.
+              # Where config/wedge-defer-worker-wait arms it, the worker's own
+              # still-open newest blocked: or needs-decision: line is the same
+              # kind of declaration, and that line's own signal already escalated it.
               case "${decision%%|*}" in
                 pause) : ;;
                 *) case "$stale_detail" in
                      idle\ *s,\ possible\ wedge,\ escalation\ *)
                        last=$(status_declared_wait_line "$state/$task.status")
                        status_is_paused_or_captain_held "$last" \
+                         || { [ -e "${FM_CONFIG_OVERRIDE:-$FM_HOME/config}/wedge-defer-worker-wait" ] \
+                                && status_worker_wait_verb "$state/$task.status" >/dev/null; } \
                          || decision="escalate|${reason#stale: }"
                        ;;
                    esac ;;
@@ -1618,6 +1822,15 @@ handle_wake() {  # <reason> <state>
   esac
   action=${decision%%|*}
   distilled=${decision#*|}
+  # A status escalation is built from the status log, which does not carry
+  # the parenthetical, so the name is added to that line here. A self-handled
+  # stale copies the name only when it keeps the persistence marker, below.
+  if [ "$kind" = stale ] && [ "$action" = escalate ] && [ -n "$dialog_name" ]; then
+    case "$distilled" in
+      *"blocked-on-prompt: $dialog_name"*) ;;
+      *) distilled="$distilled (blocked-on-prompt: $dialog_name)" ;;
+    esac
+  fi
   [ "$kind" = signal ] && sync_pause_markers_from_signal "$state" "$arg"
   if [ "$kind" = stale ] && [ "$action" = escalate ]; then
     task=$(window_to_task "$arg" "$state")
@@ -1675,6 +1888,11 @@ handle_wake() {  # <reason> <state>
         else
           pause_marker_remove "$arg" "$state"
           stale_marker_record "$arg" "$state"
+          # The distilled line drops the parenthetical. Housekeeping builds the
+          # persistence line from this file, not from the wake it just absorbed.
+          if [ -n "$dialog_name" ]; then
+            printf '%s' "$dialog_name" > "$state/.subsuper-dialog-$(_stale_key "$task")" || return 1
+          fi
         fi
       fi
       log "self-handle: $reason -> $distilled"
@@ -1786,72 +2004,81 @@ fm_super_main() {
     log "warn: could not record this daemon's process identity; the turn-end guard cannot recognize away-mode supervision"
   fi
 
-  # --- auto-discover the supervisor BACKEND (tmux vs herdr) first -----------
+  # --- auto-discover the supervisor BACKEND (tmux, herdr, or t3code) first --
   # Priority: FM_SUPERVISOR_BACKEND override > $TMUX_PANE (tmux) > $HERDR_ENV=1
-  # (herdr) > tmux fallback. Resolved before the target below, since target
-  # discovery composes a herdr "<session>:<pane-id>" string using the same
+  # (herdr) > TERM_PROGRAM=rex (rex) > a live T3 thread in this home (t3code) >
+  # tmux fallback. Resolved before the target below, since target discovery
+  # composes a herdr "<session>:<pane-id>" string using the same
   # $HERDR_PANE_ID/$HERDR_SESSION markers this checks. Exporting the result
   # into FM_SUPERVISOR_BACKEND makes inject_msg/pane_is_busy/pane_input_pending
   # (which read that env var) dispatch through the right backend without an
   # extra global thread-through.
   local discovered_backend backend_source
+  discovered_backend=$(discover_supervisor_backend) || true
   backend_source="FM_SUPERVISOR_BACKEND"
   if [ -z "${FM_SUPERVISOR_BACKEND:-}" ]; then
     if [ -n "${TMUX_PANE:-}" ]; then
       backend_source="TMUX_PANE"
     elif [ "${HERDR_ENV:-}" = "1" ] && [ -n "${HERDR_PANE_ID:-}" ]; then
       backend_source="HERDR_ENV"
+    elif fm_supervisor_in_rex; then
+      backend_source="TERM_PROGRAM"
+    elif [ "$discovered_backend" = t3code ]; then
+      backend_source="T3_THREAD"
     else
       backend_source="FALLBACK($FM_SUPERVISOR_BACKEND_DEFAULT)"
     fi
   fi
-  discovered_backend=$(discover_supervisor_backend) || true
   FM_SUPERVISOR_BACKEND="$discovered_backend"
   local BACKEND="$FM_SUPERVISOR_BACKEND"
 
   # --- refuse an unsupported supervisor backend loudly, before ever trying a
-  # tmux/herdr-specific call against it (zellij, orca, and cmux have no verified
-  # composer/busy primitives wired up for this daemon yet - AGENTS.md section 4
-  # harness-verification discipline). This is the clear refusal the task calls
-  # for, instead of a confusing "does not resolve to a tmux pane" error.
+  # tmux/herdr-specific call against it (zellij, orca, cmux, paseo, and tern
+  # have no verified composer/busy primitives wired up for this daemon yet -
+  # AGENTS.md section 4 harness-verification discipline). This is the clear
+  # refusal the task calls for, instead of a confusing "does not resolve to a
+  # tmux pane" error.
   if ! fm_backend_list_contains "$FM_SUPERVISOR_SUPPORTED_BACKENDS" "$BACKEND"; then
-    echo "error: away-mode daemon does not support supervisor backend '$BACKEND' yet (supported: $FM_SUPERVISOR_SUPPORTED_BACKENDS); set FM_SUPERVISOR_BACKEND=tmux|herdr and FM_SUPERVISOR_TARGET to run firstmate's own pane under a supported backend" >&2
+    echo "error: away-mode daemon does not support supervisor backend '$BACKEND' yet (supported: $FM_SUPERVISOR_SUPPORTED_BACKENDS); set FM_SUPERVISOR_BACKEND=tmux|herdr|rex|t3code and FM_SUPERVISOR_TARGET to run firstmate's own pane under a supported backend" >&2
     log "startup failed: unsupported supervisor backend '$BACKEND' (source=$backend_source)"
     fm_lock_release "$LOCK" 2>/dev/null || true
     rm -f "$PIDFILE" 2>/dev/null || true
     exit 1
   fi
 
-  # --- auto-discover the supervisor target (the pane running firstmate) -----
+  # --- auto-discover the supervisor target (the endpoint running firstmate) ---
   # Priority: FM_SUPERVISOR_TARGET override > $TMUX_PANE (tmux; inherited from
   # the pane that launched the daemon, normally firstmate's own) >
-  # $HERDR_PANE_ID (herdr, composed into "<session>:<pane-id>") > firstmate:0
-  # fallback. Exporting the result into FM_SUPERVISOR_TARGET makes inject_msg
-  # (which reads that env var) use the discovered pane without an extra global.
-  local discovered target_source
+  # $HERDR_PANE_ID (herdr, composed into "<session>:<pane-id>") >
+  # $REX_SESSION/$REX_BLOCK (rex, composed into "<session-uuid>:<block-uuid>") >
+  # the live T3 thread in this home (t3code) > firstmate:0 fallback. Exporting
+  # the result into FM_SUPERVISOR_TARGET makes inject_msg (which reads that env
+  # var) use the discovered endpoint without an extra global.
+  local discovered target_source resolved=1
+  discovered=$(discover_supervisor_target) || resolved=0
   target_source="FM_SUPERVISOR_TARGET"
   if [ -z "${FM_SUPERVISOR_TARGET:-}" ]; then
     if [ -n "${TMUX_PANE:-}" ]; then
       target_source="TMUX_PANE"
     elif [ "${HERDR_ENV:-}" = "1" ] && [ -n "${HERDR_PANE_ID:-}" ]; then
       target_source="HERDR_ENV(HERDR_PANE_ID)"
+    elif fm_supervisor_in_rex; then
+      target_source="TERM_PROGRAM(REX_BLOCK)"
+    elif [ "$resolved" = 1 ]; then
+      target_source="T3_THREAD"
     else
       target_source="FALLBACK(firstmate:0)"
     fi
   fi
-  if discovered=$(discover_supervisor_target); then
-    : # resolved cleanly
-  else
-    echo "warn: could not auto-discover supervisor pane (no FM_SUPERVISOR_TARGET, TMUX_PANE, or HERDR_ENV/HERDR_PANE_ID); falling back to '$discovered' — verify this is firstmate's pane" >&2
+  if [ "$resolved" != 1 ]; then
+    echo "warn: could not auto-discover supervisor pane (no FM_SUPERVISOR_TARGET, TMUX_PANE, HERDR_ENV/HERDR_PANE_ID, Rex block, or single live T3 thread in this home); falling back to '$discovered' - verify this is firstmate's pane" >&2
   fi
   FM_SUPERVISOR_TARGET="$discovered"
   local TARGET="$FM_SUPERVISOR_TARGET"
 
   # --- validate supervisor target at startup (a missing target is a typo) ---
-  # Dispatches through bin/fm-backend.sh instead of a raw `tmux display-message`
-  # probe, so a herdr supervisor pane is checked via the herdr adapter; for
-  # backend=tmux this runs the exact same `tmux display-message -p -t "$TARGET"
-  # '#{pane_id}'` call as before.
+  # Dispatch through bin/fm-backend.sh so each supervisor pane or T3 thread is checked by
+  # its backend.
   if ! fm_backend_target_exists "$BACKEND" "$TARGET"; then
     echo "error: supervisor target '$TARGET' does not resolve to a $BACKEND pane; set FM_SUPERVISOR_TARGET" >&2
     log "startup failed: target '$TARGET' not found (backend=$BACKEND)"

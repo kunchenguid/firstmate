@@ -4,11 +4,14 @@
 # Refuses when bin/fm-dod-lib.sh will not accept the named head as reachable
 # outside the worker's disposable copy; in no-mistakes mode a forge-reported
 # head is that named head and is already stored on the forge.
-# The watcher check source is byte-for-byte bin/fm-pr-poll.sh; task and PR data
-# live only in a private sidecar and are never interpolated into shell source.
+# The published check is a byte-for-byte copy of bin/fm-pr-poll.sh bound by its
+# own registration, so a later repository update does not invalidate it; task and
+# PR data live only in a private sidecar and are never interpolated into shell
+# source.
 # A GitHub pull request URL, a GitLab merge request URL, and a Gerrit change URL
 # are all accepted, including a merge request or change on a self-hosted
-# instance.
+# instance and a GitHub Enterprise pull request on a host this home names in
+# config/github-hosts.
 # A GitHub pull request the forge reports as a draft is refused, naming the draft
 # state and recording and arming nothing: a draft cannot be merged, so a poll armed on it
 # would wait for an event that cannot occur while nobody is asked to act.
@@ -17,7 +20,28 @@
 # draft state does not refuse, matching how the head read below is optional.
 # bin/fm-pr-merge.sh records through this script with FM_PR_CHECK_MERGE=1 and
 # skips this refusal, because its own merge-time draft refusal is authoritative.
+# The recorded pr= also frees the task's place in a declared project capacity
+# (bin/fm-project-capacity-lib.sh).
+#
+# scan records every task whose status reports a PR that nobody recorded, so
+# merge monitoring never depends on the supervisor remembering this command.
+# bin/fm-watch.sh runs it at the start of each check sweep. A candidate is a
+# task record that is not a secondmate or scout and has no pr= line, or has the
+# reported pr= but no valid published poll; its PR is
+# the first "PR <url>" token in the newest done: line that names a supported PR
+# URL, whatever the rest of the line says. A URL without the "PR " prefix is
+# prose and never counts. Each candidate is recorded through the ordinary
+# path above, so every refusal still applies. A refusal prints one line naming
+# the task, the URL, and the reason, once per task and URL
+# (state/<task>.pr-register-refused), and the scan retries silently on later
+# sweeps, so a draft later marked ready is recorded without help. Each sweep
+# starts just after the last task the previous sweep attempted
+# (state/.pr-check-scan-cursor), so a registration that hangs or is refused
+# cannot take the whole budget on every sweep. Registrations
+# stop FM_CHECK_TIMEOUT (default 30) minus 5 seconds after the scan starts; a
+# registration cut at that bound prints nothing and is retried.
 # Usage: fm-pr-check.sh <task-id> <pr-url>
+#        fm-pr-check.sh scan
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -33,6 +57,97 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 . "$SCRIPT_DIR/fm-parent-channel-lib.sh"
 # shellcheck source=bin/fm-dod-lib.sh
 . "$SCRIPT_DIR/fm-dod-lib.sh"
+# shellcheck source=bin/fm-timeout-lib.sh
+. "$SCRIPT_DIR/fm-timeout-lib.sh"
+
+pr_check_reported_url() {  # <status-file>
+  local line token found=
+  [ -f "$1" ] && [ ! -L "$1" ] || return 1
+  while IFS= read -r line; do
+    [ "$(status_line_verb "$line")" = "done" ] || continue
+    while IFS= read -r token; do
+      token=${token#*PR }
+      while :; do
+        case "$token" in
+          *[\).,\;:\'\"]) token=${token%?} ;;
+          *) break ;;
+        esac
+      done
+      if fm_pr_url_parse "$token"; then
+        found=$FM_PR_URL
+        break
+      fi
+    done < <(status_line_note "$line" | grep -oE '(^|[^[:alnum:]_])PR https://[^[:space:]]+' || true)
+  done < <(grep -E '^[[:space:]]*done' "$1" | grep -F 'PR https://' || true)
+  [ -n "$found" ] || return 1
+  printf '%s\n' "$found"
+}
+
+pr_check_rotate() {  # <last-id>: start the lines on stdin just after the line for last-id, wrapping
+  awk -v last="$1" '{ a[NR] = $0; split($0, f, " "); if (f[1] == last) s = NR } END { for (i = 0; i < NR; i++) print a[(i + s) % NR + 1] }'
+}
+
+pr_check_pr_retired() {  # <id> <recorded-url>
+  [ -n "$2" ] && fm_pr_url_parse "$2" || return 1
+  fm_pr_poll_merge_already_notified "$STATE" "$1" "$FM_PR_PROVIDER" "$FM_PR_HOST" "$FM_PR_PATH" "$FM_PR_NUMBER" && return 0
+  fm_pr_poll_retirement_parse "$STATE/$1.pr-poll-retirement" && [ "$FM_PR_RETIRE_URL" = "$2" ]
+}
+
+pr_check_scan() {
+  local budget start meta id kind url recorded left marker err rc tmp candidates='' cursor_file cursor
+  budget=${FM_CHECK_TIMEOUT:-30}
+  case "$budget" in ''|*[!0-9]*) budget=30 ;; esac
+  budget=$((budget - 5))
+  start=$(date +%s)
+  export FM_HOME FM_STATE_OVERRIDE="$STATE"
+  for meta in "$STATE"/*.meta; do
+    [ -f "$meta" ] && [ ! -L "$meta" ] || continue
+    id=${meta##*/}
+    id=${id%.meta}
+    fm_pr_task_id_valid "$id" || continue
+    kind=$(sed -n 's/^kind=//p' "$meta" | tail -1)
+    case "$kind" in secondmate|scout) continue ;; esac
+    url=$(pr_check_reported_url "$STATE/$id.status") || continue
+    recorded=$(grep '^pr=' "$meta" | tail -1 | cut -d= -f2- || true)
+    pr_check_pr_retired "$id" "$recorded" && continue
+    [ -z "$recorded" ] || { [ "$recorded" = "$url" ] && ! fm_pr_poll_artifacts_valid "$STATE" "$id" "$SCRIPT_DIR/fm-pr-poll.sh"; } || continue
+    candidates="$candidates$id $url"$'\n'
+  done
+  cursor_file="$STATE/.pr-check-scan-cursor"
+  cursor=$(cat "$cursor_file" 2>/dev/null || true)
+  candidates=$(printf '%s' "$candidates" | pr_check_rotate "$cursor")
+  while IFS=' ' read -r id url; do
+    [ -n "$id" ] || continue
+    left=$((start + budget - $(date +%s)))
+    [ "$left" -gt 0 ] || break
+    marker="$STATE/$id.pr-register-refused"
+    printf '%s\n' "$id" > "$cursor_file" 2>/dev/null || true
+    rc=0
+    err=$(fm_run_timed "$left" env FM_PR_CHECK_SCAN=1 bash "$SCRIPT_DIR/fm-pr-check.sh" "$id" "$url" 2>&1 >/dev/null) || rc=$?
+    if [ "$rc" -eq 0 ]; then
+      rm -f -- "$marker"
+      continue
+    fi
+    [ "$rc" -ne 124 ] || continue
+    if [ -f "$marker" ] && [ ! -L "$marker" ] && [ "$(cat "$marker")" = "$url" ]; then
+      continue
+    fi
+    tmp=$(mktemp "$STATE/.pr-register-refused.XXXXXX") || continue
+    if ! { printf '%s\n' "$url" > "$tmp" && mv -f -- "$tmp" "$marker"; }; then
+      rm -f -- "$tmp"
+      continue
+    fi
+    err=$(printf '%s\n' "$err" | sed -n 's/^error: //p' | head -1)
+    printf '%s reported %s in a done line, but it was not recorded: %s\n' "$id" "$url" "${err:-registration failed}"
+  done <<EOF_SCAN
+$candidates
+EOF_SCAN
+}
+
+if [ "$#" -eq 1 ] && [ "$1" = scan ]; then
+  pr_check_scan
+  exit 0
+fi
 
 if [ "$#" -ne 2 ]; then
   echo "error: invalid PR check request" >&2
@@ -49,6 +164,13 @@ PROVIDER=$FM_PR_PROVIDER
 HOST=$FM_PR_HOST
 PROJECT_PATH=$FM_PR_PATH
 NUMBER=$FM_PR_NUMBER
+# gh and gh-axi address github.com unless told otherwise, so a GitHub Enterprise
+# host is exported once here and every forge read this run makes, including the
+# bin/fm-dod-lib.sh children, addresses the host the recorded identity names.
+# A gitlab, gerrit, or forgejo run keeps its own per-call host handling.
+if [ "$PROVIDER" = github ]; then
+  fm_pr_github_host_export "$HOST"
+fi
 
 # Task-derived paths are constructed only after the canonical ID validation.
 META="$STATE/$ID.meta"
@@ -98,6 +220,26 @@ if [ "$PROVIDER" = gerrit ]; then
   fi
 fi
 
+# Refuse to arm a Forgejo watch with no tea or jq on PATH, for the same reason
+# as the GitLab and Gerrit cases above. tea also addresses a repo by slug only, resolving the
+# host from a named "tea login" rather than from the URL the way gh and glab
+# do, so a poll can only ever succeed when exactly one registered login
+# matches this host; refuse now rather than watch something that can never
+# resolve. This duplicates bin/fm-pr-poll.sh's own login match deliberately:
+# that script is a static, standalone watcher body with no sourced
+# dependency, so it re-derives the same match at every poll instead of
+# trusting a name recorded here.
+if [ "$PROVIDER" = forgejo ]; then
+  if ! command -v tea >/dev/null 2>&1 || ! command -v jq >/dev/null 2>&1; then
+    echo "error: watching a Forgejo pull request requires tea and jq on PATH" >&2
+    exit 1
+  fi
+  fm_pr_forgejo_login "$HOST" >/dev/null || {
+    echo "error: watching a Forgejo pull request at $HOST requires exactly one 'tea login' registered for that host (see 'tea login list')" >&2
+    exit 1
+  }
+fi
+
 # The draft state is read before anything is recorded or armed. Only a positive
 # draft reading refuses, because an unreadable one must not block arming.
 if [ "$PROVIDER" = github ] && [ "${FM_PR_CHECK_MERGE:-}" != 1 ] && command -v gh >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
@@ -112,18 +254,20 @@ fi
 
 # pr_head is recorded only when the forge's CLI can supply it. gh exposes the
 # head commit as a selectable field; plain glab exposes it only inside its JSON
-# output, which would need a JSON processor firstmate does not require, so a
-# GitLab task records no pr_head, and neither does a Gerrit task: a Gerrit
-# revision names one patch set, every amend or rebase is a new patch set, and
-# bin/fm-review-diff.sh has no Gerrit path to resolve a current head with, so a
-# recorded revision would silently become the reviewed content. Both consumers
-# already treat it as optional:
+# output, which would need a JSON processor firstmate does not require, and
+# tea's single-PR view ignores field selection entirely, so neither a GitLab
+# nor a Forgejo task records a pr_head here, and neither does a Gerrit task: a
+# Gerrit revision names one patch set, every amend or rebase is a new patch set,
+# and bin/fm-review-diff.sh has no Gerrit path to resolve a current head with,
+# so a recorded revision would silently become the reviewed content. Both
+# consumers already treat it as optional:
 # bin/fm-teardown.sh reads the head from the forge at teardown rather than from
 # metadata and falls back to its provider-agnostic content check, and
 # bin/fm-review-diff.sh fetches a pull request head from the remote when none is
 # recorded and otherwise diffs the local branch, which is the current content.
-# bin/fm-pr-merge.sh reads a GitLab head live at merge time for the same reason,
-# and treats a recorded value that disagrees as stale rather than authoritative.
+# bin/fm-pr-merge.sh reads a GitLab or Forgejo head live at merge time for the
+# same reason, and treats a recorded value that disagrees as stale rather than
+# authoritative.
 WT=$(grep '^worktree=' "$META" | tail -1 | cut -d= -f2- || true)
 PR_HEAD=
 if [ "$PROVIDER" = github ] && [ -n "$WT" ] && [ -d "$WT" ] && command -v gh >/dev/null 2>&1; then
@@ -175,6 +319,12 @@ fm_lock_acquire_wait "$META_LOCK"
 META_LOCK_HELD=1
 [ -f "$META" ] && [ ! -L "$META" ] && [ "$(fm_pr_file_link_count "$META")" = 1 ] \
   || { echo "error: task metadata is unavailable" >&2; exit 1; }
+# A scan gathers its candidates before it registers them, so the supervisor may
+# have recorded another PR meanwhile; that choice is never overwritten.
+if [ "${FM_PR_CHECK_SCAN:-}" = 1 ]; then
+  RECORDED_PR=$(grep '^pr=' "$META" | tail -1 | cut -d= -f2- || true)
+  [ -z "$RECORDED_PR" ] || [ "$RECORDED_PR" = "$URL" ] || exit 0
+fi
 META_DEVICE=$(fm_pr_file_device "$META") || exit 1
 STATE_DEVICE=$(fm_pr_file_device "$STATE") || exit 1
 [ "$META_DEVICE" = "$STATE_DEVICE" ] || { echo "error: task metadata is unavailable" >&2; exit 1; }
@@ -229,6 +379,29 @@ if command -v jq >/dev/null 2>&1; then
 else
   printf 'contributions: jq unavailable; coverage is unconfirmed\n' >&2
 fi
+# Opt-in config/ready-after-green: a no-mistakes PR is ready only once the
+# child's own status holds the checks-green report naming this exact PR, so a
+# PR registered while its checks are pending or failing publishes no ready
+# line. The report is read with the same test bin/fm-crew-state.sh uses, so
+# text around `PR <url> checks green` does not withhold the line.
+# The child's later done line still reaches the parent through
+# bin/fm-inactive-reconcile.sh, and registering again after the report
+# publishes this line. Only the last done line counts, so a later done that
+# does not report green withdraws an earlier one.
+fm_pr_check_ready_line_waits_for_green() {
+  local note
+  [ -e "${FM_CONFIG_OVERRIDE:-$FM_HOME/config}/ready-after-green" ] || return 1
+  case "$PROVIDER:$PR_MODE" in
+    gerrit:*|*:direct-PR|*:local-only) return 1 ;;
+  esac
+  note=$(grep -E '^done( \[at=[^]]*\])?: ' "$STATE/$ID.status" 2>/dev/null | tail -1 | sed -E 's/^done( \[at=[^]]*\])?: //' || true)
+  fm_dod_note_reports_ci_ready "$note" || return 0
+  case " $note " in
+    *"$URL"[^[:alnum:]]*) return 1 ;;
+  esac
+  return 0
+}
+
 # In a secondmate home the registration itself is a captain-facing fact:
 # publish the child's PR-ready line with the canonical URL just recorded, so it
 # reaches the parent whether or not the mate model appends anything
@@ -242,7 +415,9 @@ PR_YOLO=$(grep '^yolo=' "$META" | tail -1 | cut -d= -f2- || true)
 [ -z "$PR_MODE" ] || READY_LINE="$READY_LINE mode=$(fm_parent_channel_clean_note "$PR_MODE")"
 [ -z "$PR_YOLO" ] || READY_LINE="$READY_LINE yolo=$(fm_parent_channel_clean_note "$PR_YOLO")"
 READY_RC=0
-fm_parent_channel_report "$FM_HOME" "$STATE" "$READY_LINE" || READY_RC=$?
+if ! fm_pr_check_ready_line_waits_for_green; then
+  fm_parent_channel_report "$FM_HOME" "$STATE" "$READY_LINE" || READY_RC=$?
+fi
 case "$READY_RC" in
   0|1) ;;
   *) printf 'actionable: PR %s is registered but its ready line did not reach the parent channel (rc=%s)\n' "$URL" "$READY_RC" >&2 ;;
