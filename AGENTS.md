@@ -85,6 +85,7 @@ config/fleet-stall.env  optional fleet-stall watch thresholds and captain page c
 config/change-watch-kubeconfig  optional path of the kubeconfig every post-merge change-watch cluster read uses, taking precedence over an operator's KUBECONFIG and the ambient default; LOCAL, gitignored; inherited by secondmate homes; see docs/configuration.md "Post-merge change watch"
 config/change-watch-repos  optional repository map for the post-merge change watch (namespace/Deployment, image, Sentry project, deploy workflow), replacing a repository's built-in entry; LOCAL, gitignored; inherited by secondmate homes; see docs/configuration.md "Post-merge change watch"
 config/sentry-watch.json  optional Sentry watch thresholds, signatures, per-project overrides, and rail settings read by the check armed with bin/fm-sentry-watch.sh; absent means built-in defaults; LOCAL, gitignored, and NOT inherited by secondmate homes; see docs/configuration.md "Sentry watch"
+config/watchdog.env  optional fleet watchdog thresholds, unit allow and deny lists, chair unit, steering-inbox and connection ladder timings, and the fallback worker model, read by the timer-driven bin/fm-watchdog-worker.sh; absent means built-in defaults; LOCAL, gitignored, and NOT inherited by secondmate homes; see docs/configuration.md "Fleet watchdog"
 config/x-mode.env    generated Relay watcher cadence; LOCAL, gitignored; source before arming watcher when present
 data/                personal fleet records; LOCAL, gitignored as a whole
   backlog.md         task queue, dependencies, history
@@ -151,6 +152,7 @@ state/               runtime records and signals; gitignored
   .cursor-park-owner .cursor-park-owner.lock .turnend-cursor-blocks   Cursor stop-hook owner record, publication and commit lock, and bounded repair-nag budget; never touch
   .hash-* .count-* .stale-* .stale-since-* .churn-since-* .paused-* .wedge-escalations-* .wedge-alarmed-* .writing-* .gw-busy-* .seen-* .hb-surfaced-* .last-* .heartbeat-streak   watcher internals; never touch
   .watch-triage.log  watcher's absorbed-wake debug log (size-capped); never relied on, safe to delete
+  .watchdog-worker.json .watchdog-worker.lock  fleet watchdog record (boot identity, per-task pane shape and stall/inbox ladder stages, connection strikes, per-unit restart history, last reported backlog difference) and its pass lock, both owned by bin/fm-watchdog-worker.sh
   .last-watcher-beat watcher liveness beacon, touched every poll (including while absorbing benign wakes) and between a slow poll's stages; guard scripts read it
   .chair-source .chair-flip-at .chair-alarm .chair-fable-unknown-ticks   firstmate chair sentinel records: the lock holder's bound token source, the flip hysteresis stamp, the no-tank alarm, and the consecutive Fable-unmeasured count; bin/fm-chair-flip.sh and bin/fm-chair-sentinel.sh own the formats; never touch
   .subsuper-* .supervise-daemon.*   sub-supervisor internals; never touch
@@ -450,6 +452,7 @@ When Relay-linked work reaches a milestone or terminal state, load `fmx-respond`
 
 An agent left idle by a transient inference-gateway failure is re-rung automatically with a bounded continue instruction rather than surfaced as a wedge, so a continue message you did not send is expected; only a spent budget surfaces, as that agent's own `paused [key=gateway-503]` declared wait ([`docs/gateway-keepalive.md`](docs/gateway-keepalive.md)).
 
+Per-worker liveness, the unread-steering ladder, connection-error lanes, stall recovery, idle nudges, failed fleet units, the post-reboot rebuild, and the in-flight backlog reconcile report belong to the timer-driven `bin/fm-watchdog-worker.sh`, not to a firstmate turn: it acts on its own and reports only what it could not settle, as an ordinary `watchdog ...` check wake (docs/configuration.md "Fleet watchdog").
 A secondmate's idle endpoint is healthy, and parent supervision relies on its routed status rather than treating a quiet pane as stale.
 Waiting on a healthy supervision cycle is silent; empty polls, elapsed time, and no-change updates are not captain-facing progress.
 Never broadly kill watchers, especially never `pkill -f bin/fm-watch.sh`, because that can kill sibling firstmate homes.

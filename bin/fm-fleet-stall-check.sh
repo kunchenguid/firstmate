@@ -16,6 +16,11 @@
 # business. A gateway outage is a FLEET event, and only a fleet-wide view sees
 # it. This check takes that view on every watcher slow-poll.
 #
+# ONE OWNER. This check owns the fleet-wide episode and the captain page. The
+# per-worker half - a single dead endpoint, one frozen pane, one failed unit -
+# is owned by bin/fm-watchdog-worker.sh, which runs off the fleet's own timer
+# with no firstmate turn and no watcher poll.
+#
 # PER WORKER. Every task record in state/*.meta whose endpoint answers a capture
 # is a live worker; a capture that fails is a gone endpoint and is not counted.
 # A live worker is STALLED for one of two reasons:

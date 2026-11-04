@@ -131,6 +131,7 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-fable-runway-check.sh` | Registered slow-poll check that wakes firstmate on a Fable or pool runway change, a sustained RED, or an account needing a login |
 | `fm-fable-runway-alert.sh` | The runway check's outward actions: the once-per-episode handoff note, Grok doorbell, and notifications |
 | `fm-fleet-stall-check.sh` | Registered check that wakes firstmate when several live workers stall on the model gateway at once, pages the captain when it persists, and probes the local CLIProxyAPI gateway |
+| `fm-watchdog-worker.sh`  | Timer-driven model-free fleet watchdog: relaunch dead or missing endpoints, walk a frozen worker up a stall ladder, nudge an idle one, restart failed fleet units, and rebuild the fleet after a reboot |
 | `fm-sentry-watch.sh`     | Registered check that watches every Sentry project the API lists, pages on P0/P1/regression, cross-checks the CTO rail, and emits a DARK wake when its own visibility is lost |
 | `fm-pr-lib.sh`           | Own canonical task and PR validation plus private atomic PR-poll publication, merge-notification identity, and retirement |
 | `fm-pr-poll.sh`          | Provide the byte-static watcher program for validated PR/MR-poll sidecars           |

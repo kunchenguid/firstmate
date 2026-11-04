@@ -704,6 +704,115 @@ Arm the check once per home with `bin/fm-fleet-stall-check.sh arm`, which writes
 A whole poll is budgeted at half of `FM_CHECK_TIMEOUT`, at most 15 seconds, because the watcher runs its checks one after another and a check that spends most of its timeout on every sweep holds the whole sweep back; a worker the pane captures do not reach in time is not counted that poll and keeps its history.
 `bin/fm-fleet-stall-check.sh status` prints the last recorded verdict, and `bin/fm-fleet-stall-check.sh disarm` removes the shim, its trust binding, and `state/.fleet-stall.json`.
 
+## Fleet watchdog (config/watchdog.env)
+
+[`bin/fm-watchdog-worker.sh`](../bin/fm-watchdog-worker.sh) is the fleet's watchdog: a systemd user timer runs one bounded pass every five minutes, outside the firstmate session, and that pass needs no model and no firstmate turn to act.
+It exists because every other signal that noticed a broken worker ended in a firstmate turn - the watcher raised a `stale:` wake and a person read the pane and relaunched by hand.
+The 2026-11-03 autonomy measurements are the evidence: rows that already had an owner stalled 50-70 minutes on a pool-swap connection reset, and a 17:36Z power loss needed a hand relaunch for every worker because the old boot helper waited on a chair that itself needed one.
+Its header owns the exact stall rules, the ladder, the caps, and the record format; this section owns the configuration and the operator contract.
+
+A pass does six things in order.
+First, on the first pass after a reboot, it relaunches every ordinary task whose endpoint is gone and then brings the chair up last, so a reboot needs no hand relaunch and nothing waits on the chair.
+Second, it restarts fleet-owned `fm-*` units systemd reports as failed, capped per unit per hour.
+Third, it walks each live lane's oldest unacknowledged steering message up an age ladder: a re-ring at 20 minutes, an interrupt plus a bounded continue at 45, and a relaunch at 90, one rung per message and never repeated.
+The record it re-rings is the same durable one [`bin/fm-task-inbox-lib.sh`](../bin/fm-task-inbox-lib.sh) writes, and the watcher's per-attempt ladder keeps running underneath, which is free because a duplicated doorbell is a no-op.
+Fourth, it relaunches every task whose endpoint reads `dead` or `missing` through `bin/fm-backend.sh`'s recovery-grade classifier; an `ambiguous`, `unreadable`, or `unverified` endpoint is recorded and left alone, because a duplicate agent in one worktree is worse than waiting another minute.
+Fifth, it walks each live but frozen worker up a stall ladder: one re-ring through `bin/fm-send.sh`, then a relaunch, then a reassign, then one wake for firstmate - one rung per pass, never sooner than the grace interval after the previous rung, and the ladder resets the moment the worker writes a new status line.
+A worker that is alive and idle rather than frozen is nudged at most once an hour, and only while `bin/fm-crew-state.sh` still reads `working` from a source the worker itself owns.
+Sixth, it reports in-flight backlog items that no task record can serve, and live lanes whose record went missing, once per change of that set.
+Such a lane cannot be steered at all - `bin/fm-send.sh` resolves targets from the record - so the report names every id for firstmate to adopt or close instead of leaving it unowned.
+The watchdog never writes a task record: a wrong endpoint binding is worse than a lane that is visibly unowned.
+
+A live lane whose pane shows a connection error or a connection reset and has produced nothing new for ten minutes is not working on anything, so it takes a lane of its own: one bounded continue per pass, and a relaunch once three of those have failed to move it.
+That relaunch puts a worker lane (`ship`, `scout`) on `FM_WATCHDOG_FALLBACK_MODEL` and leaves a review or planning seat on the model the captain chose for it, because a lane that died on transport three times running is not converging where it is, while a seat chosen for its judgement is not a worker to be downgraded.
+Reaching that model needs the second gateway's endpoint, so the repoint is recorded first by the script that owns the move, [`bin/fm-lane-model-switch.sh`](../bin/fm-lane-model-switch.sh) - never by typing `/model` into a live lane - and a lane that refuses the repoint (it owns scheduled ticks) still gets the plain relaunch, on its own model, with the refusal reported.
+A gateway-owned transient failure is left to the gateway re-ring ladder that already owns it ([`docs/gateway-keepalive.md`](gateway-keepalive.md)), and a permanent failure - a spent usage limit, an expired login, a prompt too long - is never retried at all.
+
+The boot pass restarts the chair unit rather than starting it, because that unit is a `RemainAfterExit` oneshot: once its session dies the unit still reads active, where `start` would do nothing, while `restart` re-runs the unit's own guard against ever holding two chairs.
+
+One owner per signal: the fleet-wide gateway episode and the captain page belong to [`config/fleet-stall.env`](#fleet-stall-watch-configfleet-stallenv), secondmate liveness belongs to the session start's sweep and to each secondmate's own home, and the per-worker recovery above belongs here.
+This script replaces the old `fm-fleet-revive.service` boot helper, whose `After=fm-chair.service` ordering and fixed 90-second wait are the reason a reboot used to need a hand.
+
+`config/watchdog.env` is optional, local, gitignored, and not inherited by secondmate homes.
+It holds `KEY=value` lines, it is parsed rather than sourced, and a set environment variable of the same name wins.
+
+```sh
+FM_WATCHDOG_RELAUNCH_PER_HOUR=3        # relaunches per task per rolling hour
+FM_WATCHDOG_UNIT_RESTARTS_PER_HOUR=3   # restarts per failed unit per rolling hour
+FM_WATCHDOG_RINGS_PER_HOUR=2           # stall re-rings per task per rolling hour
+FM_WATCHDOG_IDLE_STEERS_PER_HOUR=1     # idle nudges per task per rolling hour
+FM_WATCHDOG_NO_PROGRESS_SECS=1800      # a busy pane frozen this long is a stall
+FM_WATCHDOG_IDLE_SECS=1800             # an idle worker quiet this long may be nudged
+FM_WATCHDOG_RUNG_GRACE_SECS=600        # a rung may not be followed for this long
+FM_WATCHDOG_UNITS=on                   # off skips the unit pass and the chair start
+FM_WATCHDOG_UNIT_ALLOW='fm-*'          # glob list of units it may restart
+FM_WATCHDOG_UNIT_DENY='fm-watchdog-worker.service fm-watchdog-worker.timer'
+FM_WATCHDOG_CHAIR_UNIT=fm-chair.service
+FM_WATCHDOG_CHAIR_SESSION=chair        # tmux session whose first window is the chair
+FM_WATCHDOG_CAPTURE_LINES=24           # pane lines that make up a pane's shape
+FM_WATCHDOG_READ_TIMEOUT_SECS=10
+FM_WATCHDOG_RELAUNCH_TIMEOUT_SECS=240
+FM_WATCHDOG_BOOT_BUDGET_SECS=1500      # a boot pass stops taking new tasks past this
+FM_WATCHDOG_INBOX_RING_SECS=1200       # an unread steer this old is re-rung
+FM_WATCHDOG_INBOX_INTERRUPT_SECS=2700  # ... interrupted and continued this old
+FM_WATCHDOG_INBOX_RELAUNCH_SECS=5400   # ... and relaunched this old
+FM_WATCHDOG_CONNECTION_SECS=600        # a connection error frozen this long is stuck
+FM_WATCHDOG_CONNECTION_STRIKES=3       # continues before the lane is relaunched
+FM_WATCHDOG_FALLBACK_MODEL='openrouter-named/deepseek/deepseek-v4.1-flash-1017'
+FM_WATCHDOG_FALLBACK_KINDS='ship scout'  # lane kinds the fallback model applies to
+FM_WATCHDOG_BACKLOG=on                 # off skips the backlog reconcile report
+FM_WATCHDOG_BACKLOG_BIN=tasks-axi
+FM_WATCHDOG_BACKLOG_LIST_MAX=25        # ids named in one report
+```
+
+`FM_WATCHDOG_FALLBACK_MODEL` is the model spec the fleet already records for DeepSeek V4.1 Flash; set it empty on a home with no second gateway, where no lane can reach that model.
+
+The pass records what it did in `state/.watchdog-worker.json`: the boot identity, each task's last pane shape with when it last changed, its stall and inbox ladder stages, its connection strikes, its capped action history, each unit's restart history, and the identity of the last backlog difference it reported.
+`bin/fm-watchdog-worker.sh status` prints that record without acting, and a record carrying a different schema stamp is treated as no record at all.
+A pass holds `state/.watchdog-worker.lock`, so a slow pass never overlaps the next tick.
+
+Install it once per home, as the user that owns the fleet:
+
+```sh
+mkdir -p ~/.config/systemd/user
+cat > ~/.config/systemd/user/fm-watchdog-worker.service <<'UNIT'
+[Unit]
+Description=firstmate fleet watchdog (one pass)
+After=default.target
+
+[Service]
+Type=oneshot
+ExecStart=%h/Projects/firstmate/bin/fm-watchdog-worker.sh
+TimeoutStartSec=1800
+Nice=5
+UNIT
+cat > ~/.config/systemd/user/fm-watchdog-worker.timer <<'UNIT'
+[Unit]
+Description=firstmate fleet watchdog
+
+[Timer]
+OnBootSec=60
+OnUnitActiveSec=5min
+AccuracySec=30s
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+UNIT
+systemctl --user daemon-reload
+systemctl --user enable --now fm-watchdog-worker.timer
+systemctl --user disable --now fm-fleet-revive.service 2>/dev/null || true
+loginctl enable-linger "$USER"
+```
+
+`ExecStart` names this repo's own path; adjust it for a home that lives elsewhere.
+The timer's first pass runs a minute after boot and every five minutes after that, which is what puts a killed worker back inside five minutes.
+Disabling `fm-fleet-revive.service` is part of the install, not an optional tidy-up: two boot helpers racing would double every relaunch.
+Verify with `systemctl --user list-timers fm-watchdog-worker.timer`, `bin/fm-watchdog-worker.sh status`, and `journalctl --user -u fm-watchdog-worker.service -n 20 --no-pager`; a quiet pass writes nothing, so an empty journal is healthy.
+`bin/fm-watchdog-worker.sh --dry-run` is the same pass with every action replaced by a `would ...` line, a `lane/state/busy/conn/quiet/inbox/action` row for every lane, and no write, call, or wake at all - run it against a live home before trusting the timer, and read its action column to see what the ladder would have done.
+A pass over a few hundred lanes takes one to two minutes of wall time, which is why the timer's period is five minutes rather than one.
+`systemctl --user disable --now fm-watchdog-worker.timer` stops it.
+
 ## Sentry watch (config/sentry-watch.json)
 
 [`bin/fm-sentry-watch.sh`](../bin/fm-sentry-watch.sh) is the one firstmate-owned Sentry watch for the organization, and it replaces the per-lane scratch checks that used to live in `state/`.

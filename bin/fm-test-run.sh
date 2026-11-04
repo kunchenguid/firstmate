@@ -246,7 +246,7 @@ family_for_basename() {
     fm-wake-drain-unread-status.test.sh|fm-wake-drain-fleet-cost.test.sh|\
     fm-tool-update-check.test.sh|\
     fm-wake-queue.test.sh|fm-watch-arm.test.sh|fm-watch-checkpoint.test.sh|fm-watch-recovery-loop.test.sh|\
-    fm-watch-triage.test.sh|fm-task-inbox.test.sh|fm-leave-stopped.test.sh|\
+    fm-watch-triage.test.sh|fm-watchdog-worker.test.sh|fm-task-inbox.test.sh|fm-leave-stopped.test.sh|\
     fm-watcher-lock.test.sh|fm-inactive-reconcile.test.sh|fm-lock-reap.test.sh)
       printf '%s\n' watcher-wake-lock
       ;;
@@ -697,6 +697,7 @@ tests/fm-watch-checkpoint.test.sh 5779
 tests/fm-watch-recovery-loop.test.sh 58731
 tests/fm-watch-triage.test.sh 262626
 tests/fm-watcher-lock.test.sh 88554
+tests/fm-watchdog-worker.test.sh 40000
 EOF
 }
 
@@ -1218,6 +1219,7 @@ families_for_changed_path() {
       printf '%s\n' backend-dispatch
       printf '%s\n' real-herdr-gated
       ;;
+    # bin/fm-watch* covers the timer-driven bin/fm-watchdog-worker.sh too.
     bin/fm-watch*|bin/fm-wake*|bin/fm-inactive-reconcile.sh|\
     bin/fm-classify-lib.sh|bin/fm-daemon*|bin/fm-turnend-guard*|bin/fm-guard.sh)
       printf '%s\n' watcher-wake-lock
