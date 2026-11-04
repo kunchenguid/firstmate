@@ -564,6 +564,64 @@ test_keyless_wait_survives_stated_default_retraction
 test_declared_wait_survives_answers_past_the_event_window
 test_bare_prose_cannot_open_or_close_a_decision
 
+test_route_keys_open_until_their_own_resolution() {
+  local dir f verb full incr
+  dir=$(case_dir route-key)
+  for verb in working paused note unfamiliar 'done' failed captain-held; do
+    f="$dir/$verb.status"
+    printf '%s [key=route-check]: run the real-app check\n' "$verb" > "$f"
+    full=$(status_open_decisions "$f")
+    incr=$(status_open_decisions_incremental "$f")
+    [ "$full" = "$(printf 'route-check\t%s\trun the real-app check\n' "$verb")" ] \
+      || fail "$verb route key did not open: '$full'"
+    [ "$incr" = "$full" ] || fail "$verb route key incremental fold diverged: '$incr'"
+    status_span_has_actionable "$f" 0 \
+      || fail "$verb route key was not actionable"
+  done
+
+  f="$dir/persistence.status"
+  printf 'working [key=route-check]: run the real-app check\n' > "$f"
+  {
+    printf 'resolved [key=other]: unrelated answer\ndone: finished another task\n'
+    printf 'failed: another task failed\n'
+    printf 'captain-held [key=route-check]: transferred\n'
+  } >> "$f"
+  assert_fold "$f" "$(printf 'route-check\tcaptain-held\ttransferred\n')" \
+    "unrelated and terminal lines do not close a route key"
+  printf 'resolved [key=route-check]: request completed\n' >> "$f"
+  assert_fold "$f" '' "matching resolution closes a route key"
+
+  f="$dir/reopen.status"
+  printf 'note [key=route-check]: first request\nresolved [key=route-check]: cleared\nworking [key=route-check]: reopened request\n' > "$f"
+  assert_fold "$f" "$(printf 'route-check\tworking\treopened request\n')" \
+    "same route key can reopen after resolution"
+
+  f="$dir/prose.status"
+  printf 'working: the note mentions [key=route-prose]\n' > "$f"
+  assert_fold "$f" '' "route text in note does not open a route key"
+  status_span_has_actionable "$f" 0 && fail "route text in note became actionable"
+
+  f="$dir/note-head.status"
+  printf 'working: [key=route-not-header] note-head key\n' > "$f"
+  assert_fold "$f" '' "note-head key is not a status-header route key"
+
+  f="$dir/resolved-only.status"
+  printf 'resolved [key=route-check]: already handled\n' > "$f"
+  status_span_has_actionable "$f" 0 && fail "a route resolution was treated as a new action"
+  printf 'working [key=route-check]: request\nresolved [key=route-check]: completed\n' > "$f"
+  status_span_has_actionable "$f" 0 && fail "a closed route request stayed actionable"
+
+  f="$dir/reserved.status"
+  printf 'blocked [key=pending-reply-route-check]: not the owner vocabulary\n' > "$f"
+  assert_fold "$f" '' "reserved pending-reply key retains its vocabulary guard"
+  printf 'working [key=route-guarded]: generic note\n' > "$dir/reserved-route.status"
+  full=$(FM_CLASSIFY_RESERVED_KEY_PREFIXES=route- status_open_decisions "$dir/reserved-route.status")
+  [ -z "$full" ] || fail "reserved route namespace bypassed its transition vocabulary"
+  pass "route-key requests remain actionable across verbs until their matching resolution"
+}
+
+test_route_keys_open_until_their_own_resolution
+
 # status_event_recorded is an idempotent retry check: a stamped retry matches,
 # and no later resolved line - for another key, outside the reserved-key
 # vocabulary, or the real close of that key - makes a recorded line new again.
