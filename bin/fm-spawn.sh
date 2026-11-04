@@ -5490,18 +5490,29 @@ spawn_enter_recorded_worktree() {
 # starts. Zellij and cmux implement this read with a shell probe, so keeping it
 # before launch prevents the probe from becoming input to a live worker.
 spawn_assert_agent_worktree() {
-  local expected seen i
+  local expected seen i last_poll=19 agent_status
   [ "$KIND" = secondmate ] && return 0
   case "$BACKEND" in orca|t3code) return 0 ;; esac
   expected=$(real_path_or_raw "$WT")
-  for i in $(seq 1 20); do
+  # The out-of-pane Herdr lease no longer waits for the new shell to process
+  # treehouse get. Allow its former minute of startup tolerance here, and
+  # repeat the idempotent cd once in case input arrived before shell readiness.
+  [ "$BACKEND" != herdr ] || last_poll=120
+  for i in $(seq 0 "$last_poll"); do
+    [ "$i" -eq 0 ] || sleep 0.5
     seen=$(spawn_current_path "$WT_TARGET" || true)
     if [ -n "$seen" ] && [ "$(real_path_or_raw "$seen")" = "$expected" ]; then
       return 0
     fi
-    [ "$i" -ge 20 ] || sleep 0.5
+    if [ "$BACKEND" = herdr ] && [ "$i" -eq 20 ]; then
+      spawn_enter_recorded_worktree
+    fi
   done
   echo "error: task $ID's worker started in '${seen:-unknown}', not its recorded worktree '$WT'; refusing to continue outside the copy holding its work" >&2
+  if [ "$BACKEND" = herdr ] && fm_backend_herdr_parse_target "$WT_TARGET"; then
+    agent_status=$(fm_backend_herdr_agent_status_raw "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE")
+    echo "error: Herdr pane '$WT_TARGET': last foreground_cwd='${seen:-unknown}', agent_status='${agent_status:-unknown}'" >&2
+  fi
   exit 1
 }
 

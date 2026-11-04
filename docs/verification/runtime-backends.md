@@ -1396,6 +1396,23 @@ The whole real-Herdr lane's latest active verification uses both Herdr 0.7.4 pro
 Protocol 17 keeps every protocol-16 feature gate satisfied; the event and workspace-move floors remain 16.
 Default-on presentation projection has its own floor at Herdr 0.8.0, protocol 19, verified below.
 
+Projected worktree entry was verified on 2026-11-03 with Herdr 0.9.5 on macOS arm64:
+
+```sh
+bash bin/fm-test-run.sh tests/fm-herdr-projected-cd-live-e2e.test.sh
+```
+
+```text
+ok - Herdr 0.9.5 projected spawn enters its recorded copy (delayed=0)
+ok - Herdr 0.9.5 projected spawn enters its recorded copy (delayed=1)
+```
+
+This token-free guard provisions only a named non-default Herdr lab session, drives the real projected spawn, cd, and cwd assertion, and verifies the exact foreground cwd against the recorded copy.
+On a supported Herdr below the presentation floor, where `fm_backend_herdr_presentation_release_supported` keeps spawns flat, it prints a skip naming the release and exits 0 instead of running the projected cases.
+Its delayed case holds the first real cd behind a 15-second shell command and verifies exactly one resend; its ordinary case verifies no redundant cd.
+The lease fixture returns a disposable clone without accessing a shared Treehouse pool.
+The portable delayed, dropped, and never-moving entry regressions are in `tests/fm-spawn-herdr-lease.test.sh`.
+
 Core read-only probes:
 
 ```sh
