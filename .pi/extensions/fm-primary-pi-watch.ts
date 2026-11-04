@@ -71,6 +71,16 @@ type ArmResult = {
 
 type LockOwnership = "owned" | "missing" | "other";
 
+// Supervision evidence this extension publishes for the OTHER primary extension
+// (.pi/extensions/fm-primary-turnend-guard.ts) in the same Pi process. The
+// turn-end guard is a child process that cannot read this module's state, so it
+// asks its own parent through this shared-runtime hook instead of watching files
+// (see bin/fm-wake-lib.sh fm_pi_watch_arm_owner for the consumed contract).
+type WatchSupervisionEvidence = {
+  armOwner: "none" | "failed" | `child:${string}` | `retry:${number}`;
+  version: string;
+};
+
 type CloseClassification = {
   kind: "actionable" | "failure";
   message: string;
@@ -117,6 +127,11 @@ type SessionGeneration = {
   replacement: boolean;
   child: ChildProcess | null;
   retryTimer: ReturnType<typeof setTimeout> | null;
+  // Epoch second the pending retry timer is due, published as retry evidence.
+  retryDueEpoch: number;
+  // Set when this generation's bounded continuity retry is spent or it cannot own
+  // recovery at all; cleared when it starts a replacement again.
+  continuityFailed: boolean;
   cleanupTimer: ReturnType<typeof setTimeout> | null;
   retryFailures: number;
   restoring: boolean;
@@ -246,28 +261,67 @@ function pidAlive(pid: string): boolean {
   }
 }
 
-function lockOwnership(): LockOwnership {
+type LockOwnershipEvidence = { ownership: LockOwnership; sessionPid: string };
+
+function lockOwnershipEvidence(): LockOwnershipEvidence {
   let lockPid = "";
   try {
     lockPid = readFileSync(`${state}/.lock`, "utf8").trim();
   } catch {
-    return "missing";
+    return { ownership: "missing", sessionPid: "" };
   }
-  if (!/^[0-9]+$/.test(lockPid) || lockPid === "1") return "other";
+  if (!/^[0-9]+$/.test(lockPid) || lockPid === "1") return { ownership: "other", sessionPid: "" };
   let pid = String(process.pid);
   for (let i = 0; i < 8; i += 1) {
-    if (pid === lockPid) return "owned";
+    if (pid === lockPid) return { ownership: "owned", sessionPid: lockPid };
     pid = parentPid(pid);
     if (!pid || pid === "1") break;
   }
-  return pidAlive(lockPid) ? "other" : "missing";
+  return pidAlive(lockPid)
+    ? { ownership: "other", sessionPid: "" }
+    : { ownership: "missing", sessionPid: "" };
 }
 
-function markLoaded(): void {
-  if (lockOwnership() === "other") return;
-  mkdirSync(state, { recursive: true });
-  writeFileSync(marker, `${extensionVersion}\n${process.pid}\n`);
+function lockOwnership(): LockOwnership {
+  return lockOwnershipEvidence().ownership;
 }
+
+// The marker names the SESSION process that owns this home, never the process
+// that happened to write it. Every Pi process sharing the home loads the same
+// tracked extensions - a primary's own short-lived subagent is a descendant of
+// the lock holder, so it passes the ownership test - and writing its own pid left
+// a marker naming a process that dies with that turn. The session lock pid is the
+// one identity bin/fm-wake-lib.sh's fm_pi_extension_loaded can keep proving.
+function markLoaded(): void {
+  const evidence = lockOwnershipEvidence();
+  if (evidence.ownership !== "owned") return;
+  mkdirSync(state, { recursive: true });
+  writeFileSync(marker, `${extensionVersion}\n${evidence.sessionPid}\n`);
+}
+
+function supervisionEvidence(): WatchSupervisionEvidence {
+  const owner = activeGeneration;
+  if (!owner || owner.stopping) return { armOwner: "none", version: extensionVersion };
+  const child = owner.child;
+  if (child && child.exitCode === null && child.signalCode === null && child.pid) {
+    return { armOwner: `child:${child.pid}`, version: extensionVersion };
+  }
+  if (owner.retryTimer) {
+    return { armOwner: `retry:${owner.retryDueEpoch}`, version: extensionVersion };
+  }
+  if (owner.continuityFailed) return { armOwner: "failed", version: extensionVersion };
+  return { armOwner: "none", version: extensionVersion };
+}
+
+// Registered at module load so the turn-end guard extension can ask this same Pi
+// process what continuity work is in flight when it spawns its guard. Two copies
+// of this module (one per Pi process sharing the home) publish into their own
+// process, so a guard always reads the state of the session that spawned it.
+type WatchSupervisionEvidenceGlobal = typeof globalThis & {
+  __firstmatePiWatchSupervisionEvidence?: () => WatchSupervisionEvidence;
+};
+const supervisionEvidenceGlobal = globalThis as WatchSupervisionEvidenceGlobal;
+supervisionEvidenceGlobal.__firstmatePiWatchSupervisionEvidence = supervisionEvidence;
 
 function actionableLine(output: string): string {
   const lines = output.split(/\r?\n/);
@@ -448,6 +502,8 @@ function createGeneration(): SessionGeneration {
     replacement: false,
     child: null,
     retryTimer: null,
+    retryDueEpoch: 0,
+    continuityFailed: false,
     cleanupTimer: null,
     retryFailures: 0,
     restoring: false,
@@ -984,29 +1040,38 @@ export default function (pi: ExtensionAPI) {
       if (attempt === retryLimit) break;
       await waitForRetry(attempt + 1);
     }
+    owner.continuityFailed = true;
     return { failure: `${failure}\nwatcher: FAILED - Pi extension could not restore watcher continuity after ${retryLimit} retries` };
   }
 
   function scheduleRetry(owner: SessionGeneration, message: string, predecessorArmPid: string): void {
     if (!generationIsLive(owner) || owner.child || owner.retryTimer) return;
+    // Losing the lock or spending the retry budget are real supervision failures,
+    // not a hand-off: publish them so the turn-end guard blocks instead of
+    // reading the gap as the extension's own in-flight restoration.
     const ownership = lockOwnership();
     if (ownership !== "owned") {
+      owner.continuityFailed = true;
       surfaceFailure(owner, `watcher: FAILED - Pi extension cannot restore continuity because this session no longer owns the lock\n${message}`);
       return;
     }
     owner.retryFailures += 1;
     if (owner.retryFailures > retryLimit) {
+      owner.continuityFailed = true;
       surfaceFailure(owner, `watcher: FAILED - Pi extension could not restore watcher continuity after ${retryLimit} retries\n${message}`);
       return;
     }
+    const delay = retryDelay(owner.retryFailures);
+    owner.retryDueEpoch = Math.floor((Date.now() + delay) / 1000);
     const timer = setTimeout(() => {
       if (owner.retryTimer === timer) owner.retryTimer = null;
       if (!generationIsLive(owner)) return;
       const result = startArm(owner, predecessorArmPid);
       if (!result.ok) {
+        owner.continuityFailed = true;
         surfaceFailure(owner, `watcher: FAILED - Pi extension could not launch a continuity retry\n${result.message}`);
       }
-    }, retryDelay(owner.retryFailures));
+    }, delay);
     timer.unref();
     owner.retryTimer = timer;
   }
@@ -1055,6 +1120,8 @@ export default function (pi: ExtensionAPI) {
         message: `watcher: unchanged - Pi extension already owns a scheduled continuity retry; no manual re-arm needed; ${repairOnlyHint}`,
       };
     }
+    owner.continuityFailed = false;
+    owner.retryDueEpoch = 0;
     const id = ++owner.seq;
     const env = {
       ...process.env,
@@ -1094,6 +1161,7 @@ export default function (pi: ExtensionAPI) {
       const recovery = combined.match(/^watcher: started pid=([0-9]+).* recovery-generation=([A-Za-z0-9._-]+)$/m);
       if (recovery) armRecovery.set(armChild, { watcherPid: recovery[1], generation: recovery[2] });
       if (/^watcher: (?:started|attached)\b/m.test(combined)) {
+        owner.continuityFailed = false;
         settleReadiness(true);
       }
       const reason = completedActionableLine(stdout) || completedActionableLine(stderr);

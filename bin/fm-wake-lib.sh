@@ -252,6 +252,96 @@ fm_pi_extension_loaded() {
   [ "$marker_version" = "$expected_version" ] && [ "$marker_pid" = "$lock_pid" ]
 }
 
+# fm_pid_descends_from <pid> <ancestor>
+# True when <ancestor> is <pid> itself or one of its parents within a bounded
+# walk. Used to prove a calling extension runs INSIDE the session that owns a
+# home, so a process outside that session can never stand in for its owner.
+# The user process can always break the chain (a re-parented orphan).
+fm_pid_descends_from() {
+  local pid=$1 ancestor=$2 hop parent
+  case "$pid" in ''|*[!0-9]*) return 1 ;; esac
+  case "$ancestor" in ''|*[!0-9]*) return 1 ;; esac
+  for hop in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16; do
+    [ "$pid" = "$ancestor" ] && return 0
+    parent=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d '[:space:]')
+    case "$parent" in ''|*[!0-9]*|0|1) return 1 ;; esac
+    pid=$parent
+  done
+  return 1
+}
+
+# fm_pi_extension_call_owner <state> <root>
+# True when THIS process was invoked by a loaded primary extension that runs
+# inside the live session owning this home, at its current on-disk build. This is
+# the ground-truth ownership proof for a guard the extension itself spawns: the
+# caller's own identity, never a durable marker two processes can overwrite.
+#   FM_PI_EXTENSION_PID            the calling extension's process id (must be
+#                                  this process's parent)
+#   FM_PI_EXTENSION_VERSION        the build that caller loaded (must match
+#                                  .pi/extensions/fm-primary-turnend-guard.ts)
+#   FM_PI_WATCH_EXTENSION_VERSION  the watch extension build the caller shares a
+#                                  runtime with, or empty to fall back to the
+#                                  watch marker's recorded build (the marker only
+#                                  proves which build was loaded, so a marker left
+#                                  by another process sharing this home is not a
+#                                  reason to disbelieve the running session)
+# Every other condition fails closed: an unset or mismatched pid, a drifted build,
+# a dead or foreign session lock, and a caller outside that session all refuse.
+fm_pi_extension_call_owner() {
+  local state=$1 root=$2 pid lock_pid watch_version turnend_version
+  pid=${FM_PI_EXTENSION_PID:-}
+  case "$pid" in ''|*[!0-9]*) return 1 ;; esac
+  [ "$pid" = "${PPID:-}" ] || return 1
+  fm_pid_alive "$pid" || return 1
+  turnend_version=${FM_PI_EXTENSION_VERSION:-}
+  [ -n "$turnend_version" ] || return 1
+  [ "$turnend_version" = "$(fm_pi_extension_version "$root/.pi/extensions/fm-primary-turnend-guard.ts" || true)" ] || return 1
+  watch_version=${FM_PI_WATCH_EXTENSION_VERSION:-}
+  [ -n "$watch_version" ] || watch_version=$(sed -n '1p' "$state/.pi-watch-extension-loaded" 2>/dev/null)
+  [ -n "$watch_version" ] || return 1
+  [ "$watch_version" = "$(fm_pi_extension_version "$root/.pi/extensions/fm-primary-pi-watch.ts" || true)" ] || return 1
+  lock_pid=$(sed -n '1p' "$state/.lock" 2>/dev/null | tr -d '[:space:]')
+  fm_pid_alive "$lock_pid" || return 1
+  fm_pid_descends_from "$pid" "$lock_pid"
+}
+
+# fm_pi_watch_arm_owner
+# Print the state of the continuity work the Pi watch extension currently owns,
+# as published by that extension for its own guard invocation:
+#   healthy  it owns a live arm child, or a scheduled continuity retry that is
+#            still within its delay plus a bounded scheduling slack
+#   failed   its bounded retry is spent, or it cannot own recovery at all - the
+#            same condition it surfaces as 'watch: FAILED' to the captain
+#   none     it owns no in-flight continuity work right now
+# FM_PI_WATCH_ARM_OWNER carries it: "child:<pid>", "retry:<epoch-due>", or
+# "failed". Anything unrecognized reads as none, so a missing or malformed value
+# can never be mistaken for proven continuity.
+FM_PI_WATCH_ARM_RETRY_SLACK=${FM_PI_WATCH_ARM_RETRY_SLACK:-30}
+fm_pi_watch_arm_owner() {
+  local value=${FM_PI_WATCH_ARM_OWNER:-} detail now
+  case "$value" in
+    failed) printf 'failed\n'; return 0 ;;
+    child:*)
+      detail=${value#child:}
+      if fm_pid_alive "$detail"; then printf 'healthy\n'; else printf 'none\n'; fi
+      return 0
+      ;;
+    retry:*)
+      detail=${value#retry:}
+      now=$(date +%s 2>/dev/null || printf '0')
+      case "$detail" in ''|*[!0-9]*) printf 'none\n'; return 0 ;; esac
+      case "$now" in ''|*[!0-9]*) printf 'none\n'; return 0 ;; esac
+      if [ "$now" -le $(( detail + FM_PI_WATCH_ARM_RETRY_SLACK )) ]; then
+        printf 'healthy\n'
+      else
+        printf 'none\n'
+      fi
+      return 0
+      ;;
+  esac
+  printf 'none\n'
+}
+
 # fm_pi_extension_owns_supervision <state> <root>
 # True when a LIVE Pi session owns supervision continuity for this home: both
 # primary extensions are loaded at their current on-disk builds by the process
@@ -259,9 +349,16 @@ fm_pi_extension_loaded() {
 # Requiring the turn-end guard extension too is deliberate - it is the structural
 # backstop that catches a cycle the watch extension failed to restore, so a home
 # missing it has no benign hand-off to tolerate.
+# Evidence is either the calling extension itself (fm_pi_extension_call_owner,
+# available only to a guard it spawns) or those durable markers, which the primary
+# extensions write for themselves and for every other consumer (bin/fm-guard.sh
+# mid-turn, the session-start digest). Markers name the SESSION pid, not the
+# writing process, so an extension host that shares the home cannot overwrite
+# another process's proof with a pid that dies with its own short-lived turn.
 fm_pi_extension_owns_supervision() {
   local state=$1 root=$2 lock session_pid pair source marker version
   lock="$state/.lock"
+  fm_pi_extension_call_owner "$state" "$root" && return 0
   for pair in \
     "fm-primary-pi-watch.ts:.pi-watch-extension-loaded" \
     "fm-primary-turnend-guard.ts:.pi-turnend-extension-loaded"; do
@@ -318,11 +415,14 @@ fm_afk_daemon_owns_supervision() {
 # autoarm: a fresh beacon within grace is healthy even with no live watcher,
 # because the watcher only runs between turns; only a stale beacon is a lapse.
 # extension: a live identity-matched watcher is the ordinary healthy state, but a
-# genuinely unheld lock is also healthy while the beacon is fresh AND a live Pi
-# session provably owns continuity (fm_pi_extension_owns_supervision) - that is the
-# extension's own tear-down-and-respawn hand-off, which it retries and escalates
-# itself. A lock with any recorded pid remains down if the strict health check fails.
-# Without ownership proof an unheld lock is down exactly as before, so an unloaded,
+# fresh beacon is also healthy while a live Pi session provably owns continuity
+# (fm_pi_extension_owns_supervision) AND that owner is actively restoring the
+# cycle - either its arm child is alive or its scheduled retry is still due
+# (fm_pi_watch_arm_owner), or the lock is genuinely unheld, which is the
+# extension's own tear-down-and-respawn window between generations. A lock with
+# any recorded pid stays down when the owner holds no in-flight replacement, and
+# the owner's spent retry budget ('failed') stays down even with an unheld lock.
+# Without ownership proof everything is down exactly as before, so an unloaded,
 # version-drifted, or exited Pi session still alarms immediately, and a cycle the
 # extension never restores still alarms once the beacon passes grace.
 # persistent: require a live identity-matched watcher with a fresh beacon
@@ -352,10 +452,26 @@ fm_watcher_supervision_verdict() {
     # shellcheck disable=SC2034 # Read by callers after the function returns.
     FM_WATCHER_VERDICT_OK=true
   elif [ "$fresh" = true ]; then
-    if [ "$model" = extension ] && fm_watcher_lock_unheld "$state" \
-      && fm_pi_extension_owns_supervision "$state" "$root"; then
-      # shellcheck disable=SC2034 # Read by callers after the function returns.
-      FM_WATCHER_VERDICT_OK=true
+    if [ "$model" = extension ] && fm_pi_extension_owns_supervision "$state" "$root"; then
+      case "$(fm_pi_watch_arm_owner)" in
+        healthy)
+          # shellcheck disable=SC2034 # Read by callers after the function returns.
+          FM_WATCHER_VERDICT_OK=true
+          ;;
+        failed)
+          # shellcheck disable=SC2034 # Read by callers after the function returns.
+          FM_WATCHER_VERDICT_REASON=no-watcher
+          ;;
+        *)
+          if fm_watcher_lock_unheld "$state"; then
+            # shellcheck disable=SC2034 # Read by callers after the function returns.
+            FM_WATCHER_VERDICT_OK=true
+          else
+            # shellcheck disable=SC2034 # Read by callers after the function returns.
+            FM_WATCHER_VERDICT_REASON=no-watcher
+          fi
+          ;;
+      esac
     else
       # shellcheck disable=SC2034 # Read by callers after the function returns.
       FM_WATCHER_VERDICT_REASON=no-watcher

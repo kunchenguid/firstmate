@@ -5266,6 +5266,148 @@ test_opencode_unretired_successor_falls_back_without_retry
 test_opencode_late_unretired_close_resumes_supervision
 test_opencode_empty_close_retries_instead_of_disappearing
 test_opencode_established_empty_close_honors_retry_limit
+# --- extension ownership evidence (bin/fm-wake-lib.sh consumers) -------------
+# bin/fm-wake-lib.sh owns the two decisions these tests stand up: the loaded
+# extension identity a guard spawned by the extension declares for itself, and
+# the continuity work (arm child, due retry, spent budget) the watch extension
+# publishes through the shared Pi runtime. Both are read from the extension's own
+# published values rather than asserted from its source, so the handshake is
+# proven end to end in the one process both primary extensions load into.
+
+test_pi_extension_marker_names_the_session_and_publishes_its_arm_child() {
+  local repo home plugin out status
+  repo="$TMP_ROOT/pi-evidence-root"
+  home="$TMP_ROOT/pi-evidence-home"
+  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  install_pi_watch_extension_fixture "$repo"
+  plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+sleep 60
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+  printf '%s\n' "$$" > "$home/state/.lock"
+  out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_TEST_SESSION_PID="$$" \
+    node --input-type=module 2>&1 <<'EOF'
+import { readFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+let handler = null;
+const pi = {
+  on() {},
+  registerTool() {},
+  registerCommand(name, options) {
+    if (name === "fm-watch-arm-pi") handler = options.handler;
+  },
+  sendUserMessage: async () => {},
+};
+// The session lock belongs to this process's parent, exactly as it does for a
+// command a live Pi session runs: ownership is real while the writer's pid is
+// not the session's.
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+mod.default(pi);
+if (!handler) {
+  console.error("Pi watch command was not registered");
+  process.exit(1);
+}
+await handler("", { ui: { notify() {} } });
+const marker = readFileSync(`${process.env.FM_HOME}/state/.pi-watch-extension-loaded`, "utf8").trim().split("\n");
+if (!/^sha256:[0-9a-f]{64}$/.test(marker[0])) {
+  console.error(`marker did not record a build digest: ${marker[0]}`);
+  process.exit(1);
+}
+if (marker[1] !== process.env.FM_TEST_SESSION_PID) {
+  console.error(`marker named pid ${marker[1]}, not the session ${process.env.FM_TEST_SESSION_PID}`);
+  process.exit(1);
+}
+const evidence = globalThis.__firstmatePiWatchSupervisionEvidence?.();
+if (!evidence) {
+  console.error("watch extension published no supervision evidence hook");
+  process.exit(1);
+}
+if (evidence.version !== marker[0]) {
+  console.error(`evidence build ${evidence.version} disagrees with the marker ${marker[0]}`);
+  process.exit(1);
+}
+if (!/^child:[0-9]+$/.test(evidence.armOwner)) {
+  console.error(`armed extension reported ${evidence.armOwner} instead of its live arm child`);
+  process.exit(1);
+}
+process.kill(Number(evidence.armOwner.slice("child:".length)), 0);
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "the watch extension must publish its session build and live arm child"
+  [ -z "$out" ] || fail "Pi extension evidence test printed output: $out"
+  pass "Pi extension publishes the session-pid marker and its live arm-child continuity evidence"
+}
+
+test_pi_turnend_guard_runs_with_the_live_extension_evidence() {
+  local repo home plugin turnend log watch_version turnend_version out status
+  repo="$TMP_ROOT/pi-guard-evidence-root"
+  home="$TMP_ROOT/pi-guard-evidence-home"
+  log="$TMP_ROOT/pi-guard-evidence.log"
+  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  install_pi_watch_extension_fixture "$repo"
+  plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
+  turnend="$repo/.pi/extensions/fm-primary-turnend-guard.ts"
+  cp "$ROOT/.pi/extensions/fm-primary-turnend-guard.ts" "$turnend"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+sleep 60
+SH
+  cat > "$repo/bin/fm-turnend-guard.sh" <<'SH'
+#!/usr/bin/env bash
+cat >/dev/null
+{
+  printf 'pid=%s\n' "${FM_PI_EXTENSION_PID:-}"
+  printf 'version=%s\n' "${FM_PI_EXTENSION_VERSION:-}"
+  printf 'watch-version=%s\n' "${FM_PI_WATCH_EXTENSION_VERSION:-}"
+  printf 'arm-owner=%s\n' "${FM_PI_WATCH_ARM_OWNER:-}"
+} >> "${FM_GUARD_ENV_LOG:?}"
+exit 0
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh" "$repo/bin/fm-turnend-guard.sh"
+  printf '%s\n' "$$" > "$home/state/.lock"
+  rm -f "$log"
+  out=$(PLUGIN="$plugin" TURNEND="$turnend" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_GUARD_ENV_LOG="$log" \
+    node --input-type=module 2>&1 <<'EOF'
+import { pathToFileURL } from "node:url";
+
+const handlers = new Map();
+const pi = {
+  on(event, handler) { handlers.set(event, handler); },
+  registerTool() {},
+  registerCommand() {},
+  sendUserMessage: async () => {},
+};
+for (const plugin of [process.env.PLUGIN, process.env.TURNEND]) {
+  const mod = await import(pathToFileURL(plugin).href);
+  mod.default(pi);
+}
+const settled = handlers.get("agent_settled");
+if (!settled) {
+  console.error("agent_settled handler was not registered");
+  process.exit(1);
+}
+await settled({ type: "agent_settled" }, {});
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "the turn-end guard must run with the live extension evidence"
+  [ -z "$out" ] || fail "Pi guard evidence test printed output: $out"
+  watch_version=$(shasum -a 256 "$plugin" 2>/dev/null | awk '{print "sha256:" $1}')
+  turnend_version=$(shasum -a 256 "$turnend" 2>/dev/null | awk '{print "sha256:" $1}')
+  [ -f "$log" ] || fail "the guard was not spawned at all"
+  grep -qE '^pid=[0-9]+$' "$log" || fail "the guard did not receive FM_PI_EXTENSION_PID: $(cat "$log")"
+  grep -qx "version=$turnend_version" "$log" || fail "the guard did not receive the loaded turn-end build: $(cat "$log")"
+  grep -qx "watch-version=$watch_version" "$log" || fail "the guard did not receive the loaded watch build: $(cat "$log")"
+  grep -qx "arm-owner=none" "$log" || fail "an idle extension must publish no continuity work: $(cat "$log")"
+  pass "Pi turn-end guard receives the live extension identity, both loaded builds, and its continuity evidence"
+}
+
 test_opencode_actionable_close_rechecks_session_lock
 test_opencode_watch_arm_coordinates_with_turnend_guard
 test_opencode_healthy_arm_output_does_not_suppress_guard
+test_pi_extension_marker_names_the_session_and_publishes_its_arm_child
+test_pi_turnend_guard_runs_with_the_live_extension_evidence

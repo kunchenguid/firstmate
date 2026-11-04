@@ -13,6 +13,15 @@ let guardFollowupActive = false;
 
 type LockOwnership = "owned" | "missing" | "other";
 
+// What the watch extension publishes into this same Pi process: the continuity
+// work it currently owns, plus the build it loaded. bin/fm-wake-lib.sh's
+// fm_pi_extension_call_owner and fm_pi_watch_arm_owner consume both when this
+// extension spawns the guard, so the guard can tell the extension's own
+// tear-down-and-respawn window from a real supervision lapse without reading a
+// marker file another process can overwrite.
+type WatchSupervisionEvidence = { armOwner: string; version: string };
+const watchSupervisionEvidenceHook = "__firstmatePiWatchSupervisionEvidence";
+
 const extensionFile = fileURLToPath(import.meta.url);
 const extensionDir = dirname(extensionFile);
 const root = resolve(extensionDir, "../..");
@@ -36,26 +45,54 @@ function pidAlive(pid: string): boolean {
   }
 }
 
-function lockOwnership(): LockOwnership {
+type LockOwnershipEvidence = { ownership: LockOwnership; sessionPid: string };
+
+function lockOwnershipEvidence(): LockOwnershipEvidence {
   let lockPid = "";
   try {
     lockPid = readFileSync(`${state}/.lock`, "utf8").trim();
   } catch {
-    return "missing";
+    return { ownership: "missing", sessionPid: "" };
   }
-  if (!/^[0-9]+$/.test(lockPid) || lockPid === "1") return "other";
+  if (!/^[0-9]+$/.test(lockPid) || lockPid === "1") return { ownership: "other", sessionPid: "" };
   let pid = String(process.pid);
   for (let i = 0; i < 8; i += 1) {
-    if (pid === lockPid) return "owned";
+    if (pid === lockPid) return { ownership: "owned", sessionPid: lockPid };
     pid = parentPid(pid);
     if (!pid || pid === "1") break;
   }
-  return pidAlive(lockPid) ? "other" : "missing";
+  return pidAlive(lockPid)
+    ? { ownership: "other", sessionPid: "" }
+    : { ownership: "missing", sessionPid: "" };
 }
 
+function lockOwnership(): LockOwnership {
+  return lockOwnershipEvidence().ownership;
+}
+
+// Names the SESSION that owns this home, never the writing process: a short-lived
+// Pi subagent descending from the lock holder would otherwise replace this marker
+// with a pid that dies with its own turn, and bin/fm-wake-lib.sh's
+// fm_pi_extension_loaded compares it against the session lock pid.
 function markLoaded(): void {
-  if (!existsSync(state) || lockOwnership() === "other") return;
-  writeFileSync(marker, `${extensionVersion}\n${process.pid}\n`);
+  const evidence = lockOwnershipEvidence();
+  if (!existsSync(state) || evidence.ownership !== "owned") return;
+  writeFileSync(marker, `${extensionVersion}\n${evidence.sessionPid}\n`);
+}
+
+function watchSupervisionEvidence(): WatchSupervisionEvidence {
+  const hook = (globalThis as Record<string, unknown>)[watchSupervisionEvidenceHook];
+  const unknown = { armOwner: "", version: "" };
+  if (typeof hook !== "function") return unknown;
+  try {
+    const value = (hook as () => { armOwner?: unknown; version?: unknown })();
+    return {
+      armOwner: typeof value?.armOwner === "string" ? value.armOwner : "",
+      version: typeof value?.version === "string" ? value.version : "",
+    };
+  } catch {
+    return unknown;
+  }
 }
 
 // Pi's session_start reasons are startup | reload | new | resume | fork, and a
@@ -440,8 +477,16 @@ async function claimSessionstartMessage(
 
 function runGuard(): Promise<{ code: number; stderr: string }> {
   return new Promise((resolveResult) => {
+    const watch = watchSupervisionEvidence();
     const child = spawn(`${root}/bin/fm-turnend-guard.sh`, {
       stdio: ["pipe", "ignore", "pipe"],
+      env: {
+        ...process.env,
+        FM_PI_EXTENSION_PID: String(process.pid),
+        FM_PI_EXTENSION_VERSION: extensionVersion,
+        FM_PI_WATCH_EXTENSION_VERSION: watch.version,
+        FM_PI_WATCH_ARM_OWNER: watch.armOwner,
+      },
     });
     let stderr = "";
     child.stderr.on("data", (chunk) => {

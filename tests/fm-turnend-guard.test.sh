@@ -21,6 +21,8 @@ fm_git_identity fmtest fmtest@example.invalid
 
 REQUIRED_REASON='watcher supervision needs Stop-owned automatic recovery; inspect the hook registration and startup status before ending the turn'
 AWAY_REQUIRED_REASON='Away mode owns watcher supervision'
+# The extension-model banner names the Pi repair instead of the Stop auto-arm.
+PI_REQUIRED_REASON='TURN WOULD END BLIND - SUPERVISION IS OFF'
 
 # --- PREDICATE: bin/fm-supervision-lib.sh -----------------------------------
 
@@ -2028,6 +2030,259 @@ test_hook_pi_hand_off_does_not_leak_into_autoarm_model() {
   pass "fm-turnend-guard: the extension hand-off tolerance is scoped to the extension model only"
 }
 
+# --- Pi extension continuity evidence --------------------------------------
+# The extension tears the predecessor watcher down and arms its successor itself,
+# so a turn boundary can land after the predecessor released the lock and before
+# the successor published its own identity. Two proofs cover that window, and this
+# layer pins both: the continuity work the extension publishes to the guard it
+# spawns (a live arm child, a due retry, or a spent budget), and the caller proof
+# that the guard was invoked by the loaded extension inside the session that owns
+# this home. bin/fm-wake-lib.sh owns both decisions.
+start_arm_child() {  # <output-variable>
+  local name=$1
+  sleep 60 &
+  printf -v "$name" '%s' "$!"
+}
+
+stop_arm_child() {  # <pid>
+  [ -n "${1:-}" ] || return 0
+  kill "$1" 2>/dev/null || true
+  wait "$1" 2>/dev/null || true
+}
+
+set_beat_age() {  # <dir> <seconds-ago>
+  local dir=$1 ago=$2 epoch stamp
+  epoch=$(( $(date +%s) - ago ))
+  if stamp=$(date -r "$epoch" +%Y%m%d%H%M.%S 2>/dev/null); then
+    touch -t "$stamp" "$dir/state/.last-watcher-beat"
+  else
+    stamp=$(date -d "@$epoch" +%Y%m%d%H%M.%S)
+    touch -t "$stamp" "$dir/state/.last-watcher-beat"
+  fi
+}
+
+# A watcher lock that names a live holder which has not published its identity,
+# home, or path yet: the exact shape of a successor that has just claimed the
+# singleton and is still initialising.
+record_unpublished_watcher_lock() {  # <dir> <pid>
+  local dir=$1 pid=$2
+  mkdir -p "$dir/state/.watch.lock"
+  printf '%s\n' "$pid" > "$dir/state/.watch.lock/pid"
+}
+
+run_hook_as_extension_model() {  # <dir> [arm-owner]
+  local dir=$1 arm=${2:-} home
+  home=$(cd "$dir" && pwd)
+  printf '{"stop_hook_active":false}' \
+    | FM_SUPERVISION_MODEL=extension FM_HOME="$home" FM_PI_WATCH_ARM_OWNER="$arm" \
+      bash "$dir/bin/fm-turnend-guard.sh" 2>&1
+}
+
+# The guard's real caller: a stand-in for the loaded turn-end extension. It
+# declares its own identity and the watch extension's build through the shared
+# runtime, holds the session lock, and spawns the guard as its own child, so the
+# guard's PPID is the declared extension pid exactly as in a live Pi session.
+write_fake_extension() {  # <dir>
+  local dir=$1
+  cat > "$dir/fake-extension.sh" <<'RUNNER'
+#!/usr/bin/env bash
+set -u
+home=$(cd "$(dirname "$0")" && pwd)
+. "$home/bin/fm-wake-lib.sh"
+export FM_PI_EXTENSION_PID=${FM_TEST_EXTENSION_PID:-$$}
+export FM_PI_EXTENSION_VERSION=${FM_TEST_EXTENSION_VERSION:-$(fm_pi_extension_version "$home/.pi/extensions/fm-primary-turnend-guard.ts")}
+export FM_PI_WATCH_EXTENSION_VERSION=$(fm_pi_extension_version "$home/.pi/extensions/fm-primary-pi-watch.ts")
+export FM_PI_WATCH_ARM_OWNER=${FM_TEST_ARM_OWNER:-}
+printf '%s\n' "$$" > "$home/state/.lock"
+printf '{"stop_hook_active":false}' \
+  | FM_SUPERVISION_MODEL=extension FM_HOME="$home" bash "$home/bin/fm-turnend-guard.sh" 2>&1
+RUNNER
+  chmod +x "$dir/fake-extension.sh"
+}
+
+# Both primary extension files on disk plus the calling-extension runner, with no
+# ownership markers at all: only the caller proof can satisfy the guard here.
+make_extension_fixtures() {  # <dir>
+  local dir=$1
+  mkdir -p "$dir/.pi/extensions" "$dir/state"
+  printf '// %s fixture\n' "$(basename "$dir")" > "$dir/.pi/extensions/fm-primary-pi-watch.ts"
+  printf '// %s fixture\n' "$(basename "$dir")" > "$dir/.pi/extensions/fm-primary-turnend-guard.ts"
+  write_fake_extension "$dir"
+}
+
+test_hook_pi_hand_off_allows_turn_with_extension_arm_child() {
+  local dir pid child out status
+  dir=$(make_primary_dir "$TMP_ROOT/hook-pi-arm-child")
+  : > "$dir/state/task1.meta"
+  sleep 60 & pid=$!
+  record_pi_extension_session "$dir" "$pid" || {
+    stop_arm_child "$pid"
+    fail "could not record Pi extension session evidence"
+  }
+  start_arm_child child
+  set_beat_age "$dir" 90
+  out=$(run_hook_as_extension_model "$dir" "child:$child"); status=$?
+  stop_arm_child "$pid"
+  stop_arm_child "$child"
+  expect_code 0 "$status" "the extension's own live arm child must cover the hand-off gap"
+  [ -z "$out" ] || fail "an extension-owned arm child still produced a block banner: $out"
+  pass "fm-turnend-guard: a live extension arm child covers the hand-off gap at a 90s beat"
+}
+
+test_hook_pi_hand_off_allows_turn_with_due_retry() {
+  local dir pid out status due
+  dir=$(make_primary_dir "$TMP_ROOT/hook-pi-arm-retry")
+  : > "$dir/state/task1.meta"
+  sleep 60 & pid=$!
+  record_pi_extension_session "$dir" "$pid" || {
+    stop_arm_child "$pid"
+    fail "could not record Pi extension session evidence"
+  }
+  set_beat_age "$dir" 60
+  due=$(( $(date +%s) + 2 ))
+  out=$(run_hook_as_extension_model "$dir" "retry:$due"); status=$?
+  stop_arm_child "$pid"
+  expect_code 0 "$status" "a scheduled continuity retry still inside its delay must cover the hand-off gap"
+  [ -z "$out" ] || fail "a due extension retry still produced a block banner: $out"
+  pass "fm-turnend-guard: a scheduled extension retry covers the hand-off gap"
+}
+
+test_hook_pi_restart_window_blocks_without_extension_continuity() {
+  local dir pid holder out status
+  dir=$(make_primary_dir "$TMP_ROOT/hook-pi-slow-lock")
+  : > "$dir/state/task1.meta"
+  sleep 60 & pid=$!
+  sleep 60 & holder=$!
+  record_pi_extension_session "$dir" "$pid" || {
+    stop_arm_child "$pid"
+    stop_arm_child "$holder"
+    fail "could not record Pi extension session evidence"
+  }
+  record_unpublished_watcher_lock "$dir" "$holder"
+  touch "$dir/state/.last-watcher-beat"
+  out=$(run_hook_as_extension_model "$dir" ''); status=$?
+  stop_arm_child "$pid"
+  stop_arm_child "$holder"
+  expect_code 2 "$status" "a lock held by a successor with no extension-owned replacement must still block"
+  assert_contains "$out" "$PI_REQUIRED_REASON" "an unexplained live holder must keep the blind-turn instruction"
+  pass "fm-turnend-guard: a lock held by an unproven successor still blocks without extension continuity"
+}
+
+test_hook_pi_restart_window_allows_extension_owned_child() {
+  local dir pid holder child out status
+  dir=$(make_primary_dir "$TMP_ROOT/hook-pi-slow-lock-owner")
+  : > "$dir/state/task1.meta"
+  sleep 60 & pid=$!
+  sleep 60 & holder=$!
+  record_pi_extension_session "$dir" "$pid" || {
+    stop_arm_child "$pid"
+    stop_arm_child "$holder"
+    fail "could not record Pi extension session evidence"
+  }
+  record_unpublished_watcher_lock "$dir" "$holder"
+  touch "$dir/state/.last-watcher-beat"
+  start_arm_child child
+  out=$(run_hook_as_extension_model "$dir" "child:$child"); status=$?
+  stop_arm_child "$pid"
+  stop_arm_child "$holder"
+  stop_arm_child "$child"
+  expect_code 0 "$status" "the extension's live arm child must cover a successor still publishing its identity"
+  [ -z "$out" ] || fail "an extension-owned arm child still produced a block banner: $out"
+  pass "fm-turnend-guard: a live extension arm child covers a successor that has not published identity yet"
+}
+
+test_hook_pi_arm_child_is_not_evidence_without_extension_ownership() {
+  local dir child out status
+  dir=$(make_primary_dir "$TMP_ROOT/hook-pi-arm-child-orphan")
+  : > "$dir/state/task1.meta"
+  touch "$dir/state/.last-watcher-beat"
+  start_arm_child child
+  out=$(run_hook_as_extension_model "$dir" "child:$child"); status=$?
+  stop_arm_child "$child"
+  expect_code 2 "$status" "an arm-owner value with no loaded extension must not prove supervision"
+  assert_contains "$out" "$PI_REQUIRED_REASON" "an unloaded extension must keep the blind-turn instruction"
+  pass "fm-turnend-guard: arm-child evidence is only read under proven extension ownership"
+}
+
+test_hook_pi_hand_off_blocks_when_retry_is_exhausted() {
+  local dir pid out status
+  dir=$(make_primary_dir "$TMP_ROOT/hook-pi-retry-exhausted")
+  : > "$dir/state/task1.meta"
+  sleep 60 & pid=$!
+  record_pi_extension_session "$dir" "$pid" || {
+    stop_arm_child "$pid"
+    fail "could not record Pi extension session evidence"
+  }
+  touch "$dir/state/.last-watcher-beat"
+  out=$(run_hook_as_extension_model "$dir" failed); status=$?
+  stop_arm_child "$pid"
+  expect_code 2 "$status" "a spent extension retry budget must block even with an unheld lock"
+  assert_contains "$out" "$PI_REQUIRED_REASON" "an exhausted retry must keep the blind-turn instruction"
+  pass "fm-turnend-guard: a spent extension retry budget blocks even with no watcher holding the lock"
+}
+
+test_hook_pi_hand_off_blocks_on_stale_beacon_with_arm_child() {
+  local dir pid child out status
+  dir=$(make_primary_dir "$TMP_ROOT/hook-pi-arm-child-stale")
+  : > "$dir/state/task1.meta"
+  sleep 60 & pid=$!
+  record_pi_extension_session "$dir" "$pid" || {
+    stop_arm_child "$pid"
+    fail "could not record Pi extension session evidence"
+  }
+  start_arm_child child
+  touch -t 202001010000 "$dir/state/.last-watcher-beat"
+  out=$(run_hook_as_extension_model "$dir" "child:$child"); status=$?
+  stop_arm_child "$pid"
+  stop_arm_child "$child"
+  expect_code 2 "$status" "a beacon past grace must block even while the extension owns a child"
+  assert_contains "$out" "$PI_REQUIRED_REASON" "a stale beacon must keep the blind-turn instruction"
+  pass "fm-turnend-guard: the arm-child tolerance never covers a beacon past grace"
+}
+
+test_hook_pi_guard_accepts_its_calling_extension() {
+  local dir out status
+  dir=$(make_primary_dir "$TMP_ROOT/hook-pi-caller")
+  : > "$dir/state/task1.meta"
+  make_extension_fixtures "$dir"
+  # Both markers absent: the shape left behind when another Pi process sharing the
+  # home overwrites them, and the false alarm the caller proof exists to remove.
+  rm -f "$dir/state/.pi-watch-extension-loaded" "$dir/state/.pi-turnend-extension-loaded"
+  touch "$dir/state/.last-watcher-beat"
+  out=$(bash "$dir/fake-extension.sh" 2>&1); status=$?
+  expect_code 0 "$status" "the guard must trust the live extension that invoked it, not a durable marker"
+  [ -z "$out" ] || fail "the calling extension was still reported blind: $out"
+  pass "fm-turnend-guard: a guard invoked by the loaded extension accepts its caller's ownership proof"
+}
+
+test_hook_pi_guard_rejects_a_foreign_caller() {
+  local dir other out status
+  dir=$(make_primary_dir "$TMP_ROOT/hook-pi-caller-foreign")
+  : > "$dir/state/task1.meta"
+  make_extension_fixtures "$dir"
+  rm -f "$dir/state/.pi-watch-extension-loaded" "$dir/state/.pi-turnend-extension-loaded"
+  sleep 60 & other=$!
+  touch "$dir/state/.last-watcher-beat"
+  out=$(FM_TEST_EXTENSION_PID="$other" bash "$dir/fake-extension.sh" 2>&1); status=$?
+  stop_arm_child "$other"
+  expect_code 2 "$status" "a declared extension pid that is not the actual caller must not prove ownership"
+  assert_contains "$out" "$PI_REQUIRED_REASON" "an unprovable caller must keep the blind-turn instruction"
+  pass "fm-turnend-guard: caller ownership requires the declared extension pid to be the actual parent"
+}
+
+test_hook_pi_guard_rejects_a_drifted_extension_build() {
+  local dir out status
+  dir=$(make_primary_dir "$TMP_ROOT/hook-pi-caller-drift")
+  : > "$dir/state/task1.meta"
+  make_extension_fixtures "$dir"
+  rm -f "$dir/state/.pi-watch-extension-loaded" "$dir/state/.pi-turnend-extension-loaded"
+  touch "$dir/state/.last-watcher-beat"
+  out=$(FM_TEST_EXTENSION_VERSION='sha256:drifted' bash "$dir/fake-extension.sh" 2>&1); status=$?
+  expect_code 2 "$status" "an extension loaded from a build other than the on-disk one must not prove ownership"
+  assert_contains "$out" "$PI_REQUIRED_REASON" "a drifted build must keep the blind-turn instruction"
+  pass "fm-turnend-guard: caller ownership requires the loaded build to match the on-disk extension"
+}
+
 test_predicate_healthy_no_inflight
 test_predicate_unhealthy_no_beacon
 test_predicate_unhealthy_stale_beacon
@@ -2110,3 +2365,13 @@ test_hook_pi_hand_off_blocks_without_owner_proof
 test_hook_pi_hand_off_blocks_when_one_extension_is_unloaded
 test_hook_pi_hand_off_blocks_on_stale_beacon
 test_hook_pi_hand_off_does_not_leak_into_autoarm_model
+test_hook_pi_hand_off_allows_turn_with_extension_arm_child
+test_hook_pi_hand_off_allows_turn_with_due_retry
+test_hook_pi_restart_window_blocks_without_extension_continuity
+test_hook_pi_restart_window_allows_extension_owned_child
+test_hook_pi_arm_child_is_not_evidence_without_extension_ownership
+test_hook_pi_hand_off_blocks_when_retry_is_exhausted
+test_hook_pi_hand_off_blocks_on_stale_beacon_with_arm_child
+test_hook_pi_guard_accepts_its_calling_extension
+test_hook_pi_guard_rejects_a_foreign_caller
+test_hook_pi_guard_rejects_a_drifted_extension_build
