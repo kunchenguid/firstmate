@@ -835,7 +835,7 @@ test_remote_secondmate_is_refused_by_placement() {
       out=$(run_control "$dir" t1 "$verb"); rc=$?
     fi
     expect_code 1 "$rc" "$verb on a remotely placed secondmate should refuse"
-    assert_contains "$out" "remotely placed secondmate on example.invalid" \
+    assert_contains "$out" "remotely placed Project Director on example.invalid" \
       "the $verb refusal should name the remote placement, not blame the record"
     assert_not_contains "$out" "malformed" \
       "a correctly configured remote route must not be reported as malformed"

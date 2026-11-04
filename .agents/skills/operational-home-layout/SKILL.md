@@ -82,7 +82,7 @@ data/                personal team records; LOCAL, gitignored as a whole
   learnings.md       team-local operational facts and gotchas; LOCAL, gitignored; dated, evidence-backed, curated, and updated with inspect-then-update - rewrite and prune rather than append forever, the same contract as captain.md; created lazily, absent until this home has a learning to store
   projects.md        thin project navigation registry recording each project's standing delivery posture and optional Builder-branch prefix; firstmate-private, parsed by fm-project-mode.sh (section 6)
   secondmates.md      local and remote Project Director routing table; firstmate-private, maintained by the Project Director seed helpers (section 6)
-  <id>/brief.md      per-task worker brief, or per-Project Director charter brief when kind=Project Director
+  <id>/brief.md      per-task worker brief, or per-Project Director charter brief when the task record uses compatibility `kind=secondmate`
   <id>/report.md     Investigator task deliverable, written by the worker; survives teardown
   <id>/status.log <id>/status.<N>.log <id>/children/<child>/...  optional teardown archives; see docs/architecture.md "Task status archives"
   pipeline-spend.jsonl  optional per-task no-mistakes pipeline spend, written only when config/pipeline-spend is present; bin/fm-pipeline-spend.sh owns the schema

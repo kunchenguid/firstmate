@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Host-local lifecycle control for the remote secondmate home selected by fm-on.
+# Host-local lifecycle control for the remote Project Director home selected by fm-on.
 #
 # Usage:
 #   fm-remote-secondmate-control.sh launch <id> <harness> <model|-> <effort|-> {herdr|rex} [traceparent]
@@ -15,10 +15,10 @@
 #   fm-remote-secondmate-control.sh update <id>
 #   fm-remote-secondmate-control.sh retire <id> [--force]
 #
-# Remote placement ends here, but the second-mate agent runs only on a
+# Remote placement ends here, but the Project Director agent runs only on a
 # session-provider backend whose server survives every SSH disconnection that
 # supervises it: herdr in the dedicated fm-remote session, or rex in this
-# home's own 2ndmate-<id>-<hash> session on the host's personal rex server.
+# home's own compatibility 2ndmate-<id>-<hash> session on the host's personal rex server.
 # Launch refuses any other selection rather than reading this home's
 # config/backend. The user's interactive sessions remain for the user's work.
 # fm-spawn/fm-send/fm-teardown keep owning the local endpoint mechanics.
@@ -70,7 +70,7 @@ export FM_BACKEND_REX_NO_AUTOSTART=1
 
 die() { printf 'error: %s\n' "$1" >&2; exit 1; }
 usage() { sed -n '2,27p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
-validate_id() { case "$1" in ''|*[!A-Za-z0-9._-]*) die "invalid secondmate id: $1" ;; esac; }
+validate_id() { case "$1" in ''|*[!A-Za-z0-9._-]*) die "invalid Project Director id: $1" ;; esac; }
 
 # Sourcing fm-wake-lib.sh through the libraries below creates "$FM_HOME/state",
 # so recognize an already-retired home before loading them rather than
@@ -94,9 +94,9 @@ fi
 
 validate_home() { # <id>
   local id=$1 marker
-  [ -d "$TARGET_HOME" ] && [ ! -L "$TARGET_HOME" ] || die "remote secondmate home is unavailable or unsafe"
+  [ -d "$TARGET_HOME" ] && [ ! -L "$TARGET_HOME" ] || die "remote Project Director home is unavailable or unsafe"
   [ -f "$TARGET_HOME/.fm-secondmate-home" ] && [ ! -L "$TARGET_HOME/.fm-secondmate-home" ] \
-    || die "remote home is not a seeded secondmate home"
+    || die "remote home is not a seeded Project Director home"
   marker=$(cat "$TARGET_HOME/.fm-secondmate-home")
   [ "$marker" = "$id" ] || die "remote home belongs to $marker, not $id"
   [ -f "$TARGET_HOME/AGENTS.md" ] && [ -d "$TARGET_HOME/bin" ] || die "remote home is not a Firstmate checkout"
@@ -223,7 +223,7 @@ cmd_route() {
   validate_home "$id"
   meta=$(meta_path "$id")
   if [ ! -f "$meta" ] || [ -L "$meta" ]; then
-    die "remote secondmate has no endpoint metadata"
+    die "remote Project Director has no endpoint metadata"
   fi
   print_route "$id"
 }
@@ -237,9 +237,9 @@ cmd_launch() {
   validate_home "$id"
   case "$harness" in
     claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|omp) ;;
-    *) die "unverified remote secondmate harness: $harness" ;;
+    *) die "unverified remote Project Director harness: $harness" ;;
   esac
-  case "$effort" in -|low|medium|high|xhigh|max|ultra) ;; *) die "invalid remote secondmate effort: $effort" ;; esac
+  case "$effort" in -|low|medium|high|xhigh|max|ultra) ;; *) die "invalid remote Project Director effort: $effort" ;; esac
   if [ "$effort" = ultra ]; then
     "$SCRIPT_DIR/fm-harness.sh" validate-native-effort "$harness" "$model" "$effort" || return 1
   fi
@@ -248,7 +248,7 @@ cmd_launch() {
   # GUI login session, and a persistent `rex server start` server is a
   # detached daemon no SSH session owns. bin/fm-remote-doctor.sh is the
   # readiness owner for whichever backend the parent selected.
-  case "$selected_backend" in herdr|rex) ;; *) die "a remote secondmate runs only on the herdr or rex backend, not '$selected_backend'" ;; esac
+  case "$selected_backend" in herdr|rex) ;; *) die "a remote Project Director runs only on the herdr or rex backend, not '$selected_backend'" ;; esac
   mkdir -p "$CONTROL_STATE" "$CONTROL_DATA"
   meta=$(meta_path "$id")
   if [ -f "$meta" ]; then
@@ -258,9 +258,9 @@ cmd_launch() {
     # (shape, herdr session, rex server locality) keep their own reason.
     if remote_endpoint_load "$id"; then
       [ "$REMOTE_ENDPOINT_BACKEND" = "$selected_backend" ] \
-        || die "remote secondmate $id endpoint is recorded on backend '$REMOTE_ENDPOINT_BACKEND', expected '$selected_backend'; refusing access until it is explicitly migrated"
+        || die "remote Project Director $id endpoint is recorded on backend '$REMOTE_ENDPOINT_BACKEND', expected '$selected_backend'; refusing access until it is explicitly migrated"
     elif [ -n "$REMOTE_ENDPOINT_BACKEND" ] && [ "$REMOTE_ENDPOINT_BACKEND" != "$selected_backend" ]; then
-      die "remote secondmate $id endpoint is recorded on backend '$REMOTE_ENDPOINT_BACKEND', expected '$selected_backend'; refusing access until it is explicitly migrated"
+      die "remote Project Director $id endpoint is recorded on backend '$REMOTE_ENDPOINT_BACKEND', expected '$selected_backend'; refusing access until it is explicitly migrated"
     else
       die "$REMOTE_ENDPOINT_ERROR"
     fi
@@ -293,7 +293,7 @@ cmd_launch() {
   [ "$selected_backend" != herdr ] || launch_env=("HERDR_SESSION=$REMOTE_HERDR_SESSION" "${launch_env[@]}")
   if ! out=$(env "${launch_env[@]}" "$SCRIPT_DIR/fm-spawn.sh" "${ARGS[@]}" 2>&1); then
     [ -z "$out" ] || printf '%s\n' "$out" >&2
-    die "remote host-local secondmate launch failed"
+    die "remote host-local Project Director launch failed"
   fi
   [ -f "$meta" ] || die "remote launch returned without endpoint metadata"
   # remote_endpoint_load's per-backend record checks are the post-spawn
@@ -324,9 +324,9 @@ cmd_relaunch() {
   validate_home "$id"
   case "$harness" in
     claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|omp) ;;
-    *) die "unverified remote secondmate harness: $harness" ;;
+    *) die "unverified remote Project Director harness: $harness" ;;
   esac
-  case "$effort" in -|default|low|medium|high|xhigh|max|ultra) ;; *) die "invalid remote secondmate effort: $effort" ;; esac
+  case "$effort" in -|default|low|medium|high|xhigh|max|ultra) ;; *) die "invalid remote Project Director effort: $effort" ;; esac
   case "$model" in *[[:space:]]*) die "invalid remote Project Director model: $model" ;; esac
   if [ "$effort" = ultra ]; then
     "$SCRIPT_DIR/fm-harness.sh" validate-native-effort "$harness" "$model" "$effort" || return 1
@@ -360,9 +360,9 @@ cmd_send_body() {
   [ -z "$delivery_mode" ] || [ "$delivery_mode" = fire-and-forget ] || die "invalid send delivery mode"
   validate_home "$id"
   meta=$(meta_path "$id")
-  meta_lock=$(fm_meta_lock_path "$meta") || die "remote secondmate metadata lock path is invalid"
+  meta_lock=$(fm_meta_lock_path "$meta") || die "remote Project Director metadata lock path is invalid"
   fm_task_inbox_lock_acquire "$meta_lock" \
-    || die "remote secondmate endpoint metadata could not be locked for final delivery validation"
+    || die "remote Project Director endpoint metadata could not be locked for final delivery validation"
   if ! remote_endpoint_load "$id"; then
     fm_lock_release "$meta_lock"
     die "$REMOTE_ENDPOINT_ERROR"
@@ -487,7 +487,7 @@ cmd_sync() {
     # rather than as "nothing changed".
     updated) printf 'synced: %s instr=%s\n' "$commit" "$(printf '%s' "$FF_INSTR" | tr -d ' ')" ;;
     current) printf 'current: %s\n' "$commit" ;;
-    *) die "remote secondmate home sync skipped: ${out#remote home: skipped: }" ;;
+    *) die "remote Project Director home sync skipped: ${out#remote home: skipped: }" ;;
   esac
 }
 

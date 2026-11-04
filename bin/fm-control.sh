@@ -381,7 +381,7 @@ fi
 # operator about a correctly configured remote route. Name the placement
 # instead, using the same `remote_host` signal bin/fm-send.sh routes on.
 if [ -n "$(fm_meta_get "$META" remote_host)" ]; then
-  die "task $ID is a remotely placed secondmate on $(fm_meta_get "$META" remote_host); its agent runs outside this home, so no lifecycle action here could verify that it interrupted, stopped, or came back. Drive its lifecycle on that host, and reconcile it through the secondmate recovery path rather than this plane"
+  die "task $ID is a remotely placed Project Director on $(fm_meta_get "$META" remote_host); its agent runs outside this home, so no lifecycle action here could verify that it interrupted, stopped, or came back. Drive its lifecycle on that host, and reconcile it through the Project Director recovery path rather than this plane"
 fi
 
 fm_backend_validate_task_endpoint "$META" "$ID" || exit 1
@@ -1004,13 +1004,13 @@ resolve_relaunch_profile() {
     # from firstmate's own dispatch-profile judgment at intake, and silently
     # re-resolving it would bypass that consultation.
     if ! CONFIG_HARNESS=$("$SCRIPT_DIR/fm-harness.sh" secondmate "$ID"); then
-      die "the configured secondmate runtime pin for $ID cannot be read; fix config/secondmate-harness rather than relaunching onto an unresolved runtime"
+      die "the configured Project Director runtime pin for $ID cannot be read; fix config/secondmate-harness rather than relaunching onto an unresolved runtime"
     fi
     if ! CONFIG_MODEL=$("$SCRIPT_DIR/fm-harness.sh" secondmate-model "$ID"); then
       die "the configured Project Director model pin for $ID cannot be read; fix the compatibility config/secondmate-harness setting rather than relaunching onto an unresolved model"
     fi
     if ! CONFIG_EFFORT=$("$SCRIPT_DIR/fm-harness.sh" secondmate-effort "$ID"); then
-      die "the configured secondmate effort pin for $ID cannot be read; fix config/secondmate-harness rather than relaunching onto an unresolved effort"
+      die "the configured Project Director effort pin for $ID cannot be read; fix config/secondmate-harness rather than relaunching onto an unresolved effort"
     fi
     case "$CONFIG_EFFORT" in
       ''|low|medium|high|xhigh|max|ultra) ;;
@@ -1026,7 +1026,7 @@ resolve_relaunch_profile() {
     TARGET_HARNESS=$NEW_HARNESS
   elif [ "$HARNESS_SET" = 0 ] && [ -n "$CONFIG_HARNESS" ]; then
     fm_control_harness_supported "$CONFIG_HARNESS" \
-      || die "the configured secondmate harness '$CONFIG_HARNESS' is not verified; fm-control refuses to relaunch onto an adapter with no verified control or launch mechanics"
+      || die "the configured Project Director harness '$CONFIG_HARNESS' is not verified; fm-control refuses to relaunch onto an adapter with no verified control or launch mechanics"
     TARGET_HARNESS=$CONFIG_HARNESS
   else
     TARGET_HARNESS=$PRIOR_HARNESS
@@ -1161,11 +1161,11 @@ safe_checkpoint() {
     # work behind an unreadable home.
     marker=$(cat "$WT/.fm-secondmate-home" 2>/dev/null || true)
     [ "$marker" = "$ID" ] \
-      || die "task $ID's home $WT is not marked as its own seeded secondmate home (marker: ${marker:-none}); refusing to relaunch"
+      || die "task $ID's home $WT is not marked as its own seeded Project Director home (marker: ${marker:-none}); refusing to relaunch"
     # Do not walk state/ with find(1): watcher scratch files can vanish
     # mid-scan and make find fail even when every child *.meta is readable.
     [ -d "$WT/state" ] && [ -r "$WT/state" ] && [ -x "$WT/state" ] \
-      || die "secondmate $ID's home has no readable state directory, so its child work cannot be accounted for; refusing to relaunch"
+      || die "Project Director $ID's home has no readable state directory, so its child work cannot be accounted for; refusing to relaunch"
     children=0
     for child_meta in "$WT/state"/*.meta; do
       if [ ! -e "$child_meta" ] && [ ! -L "$child_meta" ]; then
@@ -1173,7 +1173,7 @@ safe_checkpoint() {
       fi
       if [ ! -f "$child_meta" ] || [ -L "$child_meta" ] \
          || ! cat "$child_meta" >/dev/null 2>&1; then
-        die "secondmate $ID's child record $child_meta is not a readable regular file; refusing to relaunch"
+        die "Project Director $ID's child record $child_meta is not a readable regular file; refusing to relaunch"
       fi
       children=$((children + 1))
     done

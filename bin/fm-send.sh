@@ -699,7 +699,7 @@ if [ -n "$FIRE_AND_FORGET_ID" ]; then
     }
   [ "$MARK_FROM_FIRSTMATE" = 1 ] ||
     {
-      echo "error: --fire-and-forget requires a recorded secondmate task selector" >&2
+      echo "error: --fire-and-forget requires a recorded Project Director task selector" >&2
       exit 1
     }
   [ -z "$RESOLVE_KEYS" ] ||
@@ -915,7 +915,7 @@ if [ "${1:-}" = "--key" ]; then
     esac
     if ! fm_run_timed "$FM_SEND_REMOTE_BUDGET" "$SCRIPT_DIR/fm-on.sh" "$TARGET_REMOTE_ID" \
       fm-remote-secondmate-control.sh key "$TARGET_REMOTE_ID" "$key" </dev/null; then
-      echo "error: key '$key' not sent to remote secondmate $TARGET_REMOTE_ID; completion may be unknown" >&2
+      echo "error: key '$key' not sent to remote Project Director $TARGET_REMOTE_ID; completion may be unknown" >&2
       exit 1
     fi
   elif ! fm_backend_send_key "$TARGET_BACKEND" "$T" "$key" "$EXPECTED_LABEL"; then
@@ -966,7 +966,7 @@ else
         exit 1
       fi
       if [ -z "$TARGET_TASK_ID" ]; then
-        echo "error: cannot create pending-reply expectation without a resolvable secondmate task id" >&2
+        echo "error: cannot create pending-reply expectation without a resolvable Project Director task id" >&2
         exit 1
       fi
       PENDING_REPLY_CORR=$(fm_pending_reply_create "$FM_HOME" "$STATE" "$TARGET_TASK_ID" "$MESSAGE") ||
@@ -1038,7 +1038,7 @@ else
       if [ "$PENDING_REPLY_CREATED" = 1 ] && [ -n "$PENDING_REPLY_CORR" ]; then
         fm_pending_reply_discard_undelivered "$STATE" "$PENDING_REPLY_CORR" || true
       fi
-      echo "error: steer not sent to remote secondmate $TARGET_REMOTE_ID: its parent task metadata could not be locked for final delivery validation" >&2
+      echo "error: steer not sent to remote Project Director $TARGET_REMOTE_ID: its parent task metadata could not be locked for final delivery validation" >&2
       exit 1
     fi
     CURRENT_REMOTE_ID=
@@ -1060,7 +1060,7 @@ else
       if [ "$PENDING_REPLY_CREATED" = 1 ] && [ -n "$PENDING_REPLY_CORR" ]; then
         fm_pending_reply_discard_undelivered "$STATE" "$PENDING_REPLY_CORR" || true
       fi
-      echo "error: steer not sent to remote secondmate $TARGET_REMOTE_ID: its parent task retired or changed route during target resolution" >&2
+      echo "error: steer not sent to remote Project Director $TARGET_REMOTE_ID: its parent task retired or changed route during target resolution" >&2
       exit 1
     fi
     remote_rc=0
@@ -1087,18 +1087,18 @@ else
     fm_lock_release "$REMOTE_META_LOCK"
     if [ "$remote_rc" -ne 0 ] && [ "$remote_completion_unknown" -eq 1 ]; then
       if [ -n "$FIRE_AND_FORGET_ID" ]; then
-        echo "error: fire-and-forget steer to remote secondmate $TARGET_REMOTE_ID is unconfirmed (delivery-id=$FIRE_AND_FORGET_ID); retry only with the same delivery id" >&2
+        echo "error: fire-and-forget steer to remote Project Director $TARGET_REMOTE_ID is unconfirmed (delivery-id=$FIRE_AND_FORGET_ID); retry only with the same delivery id" >&2
         exit 3
       fi
       if [ -n "$PENDING_REPLY_CORR" ]; then
         fm_pending_reply_mark_delivery_unknown "$STATE" "$PENDING_REPLY_CORR" || true
       fi
       if [ "$remote_rc" -eq 255 ]; then
-        echo "error: steer to remote secondmate $TARGET_REMOTE_ID is unconfirmed (transport lost twice; remote completion unknown). Only the correlation-reusing resend below is idempotent and lands on the same remote inbox record:" >&2
+        echo "error: steer to remote Project Director $TARGET_REMOTE_ID is unconfirmed (transport lost twice; remote completion unknown). Only the correlation-reusing resend below is idempotent and lands on the same remote inbox record:" >&2
       elif [ "$remote_rc" -eq 124 ]; then
-        echo "error: steer to remote secondmate $TARGET_REMOTE_ID is unconfirmed (the remote transport did not complete within its ${FM_SEND_REMOTE_BUDGET}s budget; remote completion unknown). Only the correlation-reusing resend below is idempotent and lands on the same remote inbox record:" >&2
+        echo "error: steer to remote Project Director $TARGET_REMOTE_ID is unconfirmed (the remote transport did not complete within its ${FM_SEND_REMOTE_BUDGET}s budget; remote completion unknown). Only the correlation-reusing resend below is idempotent and lands on the same remote inbox record:" >&2
       else
-        echo "error: steer to remote secondmate $TARGET_REMOTE_ID is unconfirmed (the first transport attempt had unknown completion and the retry failed). Only the correlation-reusing resend below is idempotent and lands on the same remote inbox record:" >&2
+        echo "error: steer to remote Project Director $TARGET_REMOTE_ID is unconfirmed (the first transport attempt had unknown completion and the retry failed). Only the correlation-reusing resend below is idempotent and lands on the same remote inbox record:" >&2
       fi
       printf '%s' "$(fm_send_resend_env)" >&2
       printf 'FM_PENDING_REPLY_EXISTING_CORR=%q %s' \
@@ -1112,7 +1112,7 @@ else
     if [ "$remote_rc" -ne 0 ]; then
       fm_send_known_undelivered_cleanup ||
         echo "error: known-undelivered pending-reply state could not be reset for $TARGET_TASK_ID" >&2
-      echo "error: steer not sent to remote secondmate $TARGET_REMOTE_ID (the remote steering-inbox record could not be written; the remote leg's stderr above has the reason)" >&2
+      echo "error: steer not sent to remote Project Director $TARGET_REMOTE_ID (the remote steering-inbox record could not be written; the remote leg's stderr above has the reason)" >&2
       exit 1
     fi
     # The remote record is durable delivery, exactly as a local enqueue is.

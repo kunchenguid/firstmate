@@ -57,7 +57,7 @@ if [ ! -f "$META" ] || [ -L "$META" ] || [ "$(fm_pr_file_link_count "$META")" !=
 fi
 KIND=$(fm_dod_meta_value "$META" kind)
 if [ "$KIND" = secondmate ]; then
-  echo "error: $ID is a secondmate, not a delivery lane - $URL belongs to a task in the mate's own home, which records it there" >&2
+  echo "error: $ID is a Project Director, not a delivery lane - $URL belongs to a task in the Project Director's own home, which records it there" >&2
   exit 1
 fi
 if [ "$(fm_dod_meta_value "$META" forge)" != external ]; then

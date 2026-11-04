@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Restart second mates onto the current instruction surface and launch-time
+# Restart Project Directors onto the current instruction surface and launch-time
 # wiring, persisting their open records first.
 #
 # Usage: fm-secondmate-restart.sh <secondmate-id>... [--help]
@@ -7,43 +7,43 @@
 # This is the executable half of /updatefirstmate's reload step. A running agent
 # holds AGENTS.md and every skill it has loaded frozen from launch, and no
 # verified harness offers a reload, so a re-read steer cannot replace either -
-# it appends a second copy of the mate's own job description with no defined
+# it appends a second copy of the Project Director's own job description with no defined
 # precedence. Replacing the agent is the only mechanism that guarantees the new
 # bytes are the ones read, and the only one that re-resolves the launch-time
 # wiring - harness, model, effort, turn-end hooks, and every other flag a harness
 # reads once at startup. That second half is why the update pass sends every live
-# mate here, including one already on the target commit: launch-time wiring is
+# Project Director here, including one already on the target commit: launch-time wiring is
 # not derivable from a git diff, so an unchanged tracked surface does not mean
 # the running agent is already on the current behavior.
 #
 # The cost of that guarantee is the conversation, which is why this command runs
 # in two phases and why the first one is a GATE, not a courtesy:
 #
-#   A. PERSIST. Every mate is asked, in one marked request, to durably record the
+#   A. PERSIST. Every Project Director is asked, in one marked request, to durably record the
 #      open work it holds only in conversation - a task for each unfiled open
-#      record, including a captain call it formed but never registered, and a
+#      record, including a user decision it formed but never registered, and a
 #      status correction for each task whose recorded state is now stale. That is
 #      the /stow skill's "Open-record persistence" contract and nothing else from
-#      it: no memory, learnings, or captain-preference sweep, which would make
+#      it: no memory, learnings, or user-preference sweep, which would make
 #      every instruction update cost far more than the reload it is paying for.
 #      All requests go out before any restart, so a slow mate delays only its own
 #      restart instead of serializing the fleet behind it.
-#   B. RESTART. Only after that mate's own correlated answer lands on the parent
-#      channel. The gate is that answer, never a wall clock, so a mate that is
+#   B. RESTART. Only after that Project Director's own correlated answer lands on the parent
+#      channel. The gate is that answer, never a wall clock, so a Project Director that is
 #      mid-turn queues the request behind that turn; the bound below exists to
 #      end the wait, not to authorize a restart without the answer. A timeout
 #      deliberately leaves that unanswered expectation open: it is a genuine
 #      open loop owned by the ordinary pending-reply recovery ladder, not state
 #      this restart pass may close.
 #
-# A mate whose persist answer did not arrive or whose runtime cannot prove a
+# A Project Director whose persist answer did not arrive or whose runtime cannot prove a
 # restart gets the ordinary re-read nudge and is reported as a nudge, never as a
 # clean reload. Once a relaunch is attempted, any failed or ambiguous result is
 # reported as unknown rather than attributing it to either incarnation.
 #
-# Placement changes the transport and nothing else. A local mate is restarted
+# Placement changes the transport and nothing else. A local Project Director is restarted
 # with bin/fm-control.sh <id> relaunch, which republishes this home's own
-# metadata directly; a remote mate is restarted with
+# metadata directly; a remote Project Director is restarted with
 # bin/fm-remote-secondmate-relaunch.sh, which runs that same command on its
 # host over bin/fm-on.sh and then republishes this primary's own route
 # metadata from the identity the host confirmed, since the host-local verb can
@@ -53,7 +53,7 @@
 #
 # Nothing here forces, stashes, or discards anything. bin/fm-control.sh owns the
 # restart transaction, its checkpoint, its journal, and its rollback; a refusal
-# before the agent is stopped leaves the mate running exactly as it was.
+# before the agent is stopped leaves the Project Director running exactly as it was.
 #
 # Restart candidacy itself belongs to bin/fm-update.sh, which knows which homes
 # the update pass actually left on the target commit; this command re-checks
@@ -63,8 +63,8 @@
 #   FM_SECONDMATE_PERSIST_WAIT  seconds to wait for one mate's persist answer (900)
 #   FM_SECONDMATE_PERSIST_POLL  seconds between checks of that answer (5)
 #
-# Exit status: 0 every named mate restarted; 3 at least one was nudged or left
-# unreached and every mate was still accounted for; 1 the input itself is
+# Exit status: 0 every named Project Director restarted; 3 at least one was nudged or left
+# unreached and every Project Director was still accounted for; 1 the input itself is
 # unusable; 2 invalid use.
 set -u
 
@@ -81,12 +81,12 @@ case "${1:-}" in
 esac
 
 if [ -z "${FM_HOME:-}" ]; then
-  echo "error: FM_HOME is not set; fm-secondmate-restart refuses to resolve second mates without an explicit firstmate home" >&2
+  echo "error: FM_HOME is not set; fm-secondmate-restart refuses to resolve Project Directors without an explicit firstmate home" >&2
   exit 1
 fi
 [ -d "$FM_HOME" ] || { echo "error: FM_HOME '$FM_HOME' is not a directory" >&2; exit 1; }
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
-[ -d "$STATE" ] || { echo "error: state dir '$STATE' is missing; fm-secondmate-restart cannot resolve second mates for FM_HOME '$FM_HOME'" >&2; exit 1; }
+[ -d "$STATE" ] || { echo "error: state dir '$STATE' is missing; fm-secondmate-restart cannot resolve Project Directors for FM_HOME '$FM_HOME'" >&2; exit 1; }
 
 # shellcheck source=bin/fm-secondmate-restart-lib.sh
 . "$SCRIPT_DIR/fm-secondmate-restart-lib.sh"
@@ -108,7 +108,7 @@ for arg in "$@"; do
   # /updatefirstmate's action line names each mate by its fm-<id> selector; the
   # bare id is equally acceptable so a hand-run stays natural.
   id=${arg#fm-}
-  case "$id" in ''|*[!A-Za-z0-9._-]*) echo "error: invalid second mate id: $arg" >&2; exit 2 ;; esac
+  case "$id" in ''|*[!A-Za-z0-9._-]*) echo "error: invalid Project Director id: $arg" >&2; exit 2 ;; esac
   case " ${IDS[*]:-} " in
     *" $id "*) continue ;;
   esac

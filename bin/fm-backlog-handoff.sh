@@ -136,7 +136,7 @@ else
   }
   ID=$1
   case "$ID" in '' | *[!A-Za-z0-9._-]*)
-    echo "error: unsafe secondmate id: $ID" >&2
+    echo "error: unsafe Project Director id: $ID" >&2
     exit 1
     ;;
   esac
@@ -146,12 +146,12 @@ fi
 secondmate_home() {
   local id=$1 home
   [ -f "$REG" ] || {
-    echo "error: no secondmate registry at $REG" >&2
+    echo "error: no Project Director registry at $REG" >&2
     return 1
   }
   home=$(secondmate_registry_field "$REG" "$id" home || true)
   [ -n "$home" ] || {
-    echo "error: secondmate $id has no home in $REG" >&2
+    echo "error: Project Director $id has no home in $REG" >&2
     return 1
   }
   printf '%s\n' "$home"
@@ -182,27 +182,27 @@ validate_operational_dirs() {
   for name in data state config projects; do
     dir="$abs_home/$name"
     if [ -L "$dir" ] && [ ! -e "$dir" ]; then
-      echo "error: secondmate $name directory must resolve inside the secondmate home: $dir" >&2
+      echo "error: Project Director $name directory must resolve inside the Project Director home: $dir" >&2
       return 1
     fi
     if [ -d "$dir" ]; then
       abs_dir=$(cd "$dir" && pwd -P)
     elif [ -e "$dir" ]; then
-      echo "error: secondmate $name path is not a directory: $dir" >&2
+      echo "error: Project Director $name path is not a directory: $dir" >&2
       return 1
     else
       abs_dir="$abs_home/$name"
     fi
     if ! path_is_ancestor_of "$abs_home" "$abs_dir"; then
-      echo "error: secondmate $name directory must resolve inside the secondmate home: $dir" >&2
+      echo "error: Project Director $name directory must resolve inside the Project Director home: $dir" >&2
       return 1
     fi
     if [ "$abs_dir" = "$abs_active_home" ] || path_is_ancestor_of "$abs_active_home" "$abs_dir"; then
-      echo "error: secondmate $name directory cannot be inside the active firstmate home: $dir" >&2
+      echo "error: Project Director $name directory cannot be inside the active firstmate home: $dir" >&2
       return 1
     fi
     if [ "$abs_dir" = "$abs_root" ] || path_is_ancestor_of "$abs_root" "$abs_dir"; then
-      echo "error: secondmate $name directory cannot be inside the firstmate repo: $dir" >&2
+      echo "error: Project Director $name directory cannot be inside the firstmate repo: $dir" >&2
       return 1
     fi
   done
@@ -214,41 +214,41 @@ validate_secondmate_home() {
   abs_active_home=$(resolved_existing_dir "$FM_HOME")
   abs_root=$(resolved_existing_dir "$FM_ROOT")
   if [ "$abs_home" = "/" ]; then
-    echo "error: secondmate home cannot be the filesystem root: $home" >&2
+    echo "error: Project Director home cannot be the filesystem root: $home" >&2
     return 1
   fi
   if [ "$abs_home" = "$abs_active_home" ]; then
-    echo "error: secondmate home cannot be the active firstmate home: $home" >&2
+    echo "error: Project Director home cannot be the active firstmate home: $home" >&2
     return 1
   fi
   if [ "$abs_home" = "$abs_root" ]; then
-    echo "error: secondmate home cannot be the firstmate repo: $home" >&2
+    echo "error: Project Director home cannot be the firstmate repo: $home" >&2
     return 1
   fi
   if path_is_ancestor_of "$abs_active_home" "$abs_home"; then
-    echo "error: secondmate home cannot be inside the active firstmate home: $home" >&2
+    echo "error: Project Director home cannot be inside the active firstmate home: $home" >&2
     return 1
   fi
   if path_is_ancestor_of "$abs_root" "$abs_home"; then
-    echo "error: secondmate home cannot be inside the firstmate repo: $home" >&2
+    echo "error: Project Director home cannot be inside the firstmate repo: $home" >&2
     return 1
   fi
   if path_is_ancestor_of "$abs_home" "$abs_active_home"; then
-    echo "error: secondmate home cannot be an ancestor of the active firstmate home: $home" >&2
+    echo "error: Project Director home cannot be an ancestor of the active firstmate home: $home" >&2
     return 1
   fi
   if path_is_ancestor_of "$abs_home" "$abs_root"; then
-    echo "error: secondmate home cannot be an ancestor of the firstmate repo: $home" >&2
+    echo "error: Project Director home cannot be an ancestor of the firstmate repo: $home" >&2
     return 1
   fi
   validate_operational_dirs "$abs_home" "$abs_active_home" "$abs_root" || return 1
   if [ ! -f "$abs_home/.fm-secondmate-home" ]; then
-    echo "error: firstmate home $home is not a seeded secondmate home" >&2
+    echo "error: firstmate home $home is not a seeded Project Director home" >&2
     return 1
   fi
   marker_id=$(cat "$abs_home/.fm-secondmate-home" 2>/dev/null || true)
   if [ "$marker_id" != "$id" ]; then
-    echo "error: firstmate home $home is marked for secondmate ${marker_id:-unknown}, expected $id" >&2
+    echo "error: firstmate home $home is marked for Project Director ${marker_id:-unknown}, expected $id" >&2
     return 1
   fi
   if [ ! -f "$abs_home/AGENTS.md" ]; then
@@ -520,12 +520,12 @@ receiver_wake_drop_marker() { # <secondmate-id> <reason>
   printf 'receiver wake state: DROPPED marker=%s\n' "$marker"
   if [ -e "$marker" ] || [ -L "$marker" ]; then
     if rm -f -- "$marker"; then
-      printf 'warning: best-effort receiver wake for secondmate %s was dropped; removed stale wake marker %s because %s\n' "$id" "$marker" "$reason" >&2
+      printf 'warning: best-effort receiver wake for Project Director %s was dropped; removed stale wake marker %s because %s\n' "$id" "$marker" "$reason" >&2
     else
-      printf 'warning: best-effort receiver wake for secondmate %s was dropped; stale wake marker remains at %s because %s\n' "$id" "$marker" "$reason" >&2
+      printf 'warning: best-effort receiver wake for Project Director %s was dropped; stale wake marker remains at %s because %s\n' "$id" "$marker" "$reason" >&2
     fi
   else
-    printf 'warning: best-effort receiver wake for secondmate %s was dropped; no wake marker remains at %s because %s\n' "$id" "$marker" "$reason" >&2
+    printf 'warning: best-effort receiver wake for Project Director %s was dropped; no wake marker remains at %s because %s\n' "$id" "$marker" "$reason" >&2
   fi
   return 0
 }
@@ -553,11 +553,11 @@ receiver_wake_clear_confirmed() { # <secondmate-id>
 wake_secondmate_receiver() { # <secondmate-id> <correlation-id>
   local id=$1 corr=$2 meta="$STATE/$1.meta" out rc=0
   if [ ! -f "$meta" ] || [ -L "$meta" ]; then
-    printf 'error: handed off work to secondmate %s, but no live receiver endpoint is recorded; the destination backlog is durable and the receiver was not woken\n' "$id" >&2
+    printf 'error: handed off work to Project Director %s, but no live receiver endpoint is recorded; the destination backlog is durable and the receiver was not woken\n' "$id" >&2
     return 1
   fi
   [ "$(grep '^kind=' "$meta" | cut -d= -f2-)" = secondmate ] || {
-    printf 'error: secondmate %s has non-secondmate endpoint metadata; backlog is durable but the receiver was not woken\n' "$id" >&2
+    printf 'error: Project Director %s has non-Project-Director endpoint metadata; backlog is durable but the receiver was not woken\n' "$id" >&2
     return 1
   }
   out=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_ROOT_OVERRIDE="$FM_ROOT" \
@@ -565,7 +565,7 @@ wake_secondmate_receiver() { # <secondmate-id> <correlation-id>
     "$SCRIPT_DIR/fm-send.sh" "$id" "$RECEIVER_WAKE_MESSAGE" 2>&1) || rc=$?
   if [ "$rc" -ne 0 ]; then
     [ -z "$out" ] || printf '%s\n' "$out" >&2
-    printf 'error: backlog delivery to secondmate %s succeeded, but its receiver wake failed; retry a tracked remote wake with --resume-pending or a later new handoff, and retry a local wake by rerunning its handoff\n' "$id" >&2
+    printf 'error: backlog delivery to Project Director %s succeeded, but its receiver wake failed; retry a tracked remote wake with --resume-pending or a later new handoff, and retry a local wake by rerunning its handoff\n' "$id" >&2
     return 1
   fi
   [ -z "$out" ] || printf '%s\n' "$out"
@@ -575,14 +575,14 @@ wake_pending_secondmate_receiver() { # <secondmate-id> [retain-confirmed]
   local id=$1 retain=${2:-0} marker="$STATE/.backlog-handoff-$1.wake-pending" value corr rec delivered
   [ -e "$marker" ] || [ -L "$marker" ] || return 0
   if [ ! -f "$marker" ] || [ -L "$marker" ]; then
-    printf 'error: receiver wake state for secondmate %s is unsafe or invalid\n' "$id" >&2
+    printf 'error: receiver wake state for Project Director %s is unsafe or invalid\n' "$id" >&2
     return 1
   fi
   value=$(cat "$marker" 2>/dev/null || true)
   case "$value" in
   confirmed | confirmed:*) return 0 ;;
   prepared | prepared:*)
-    printf 'error: receiver wake for secondmate %s was prepared before its backlog became durable\n' "$id" >&2
+    printf 'error: receiver wake for Project Director %s was prepared before its backlog became durable\n' "$id" >&2
     return 1
     ;;
   pending)
@@ -591,7 +591,7 @@ wake_pending_secondmate_receiver() { # <secondmate-id> [retain-confirmed]
     ;;
   esac
   case "$value" in pending:*) corr=${value#pending:} ;; *)
-    printf 'error: receiver wake state for secondmate %s is unsafe or invalid\n' "$id" >&2
+    printf 'error: receiver wake state for Project Director %s is unsafe or invalid\n' "$id" >&2
     return 1
     ;;
   esac
@@ -602,19 +602,19 @@ wake_pending_secondmate_receiver() { # <secondmate-id> [retain-confirmed]
   delivered=$(fm_pending_reply_get "$rec" delivered_epoch)
   if [ -z "$delivered" ]; then
     fm_pending_reply_corr_reusable "$STATE" "$corr" "$id" || {
-      printf 'error: receiver wake delivery for secondmate %s is unresolved; refusing to resend correlation %s\n' "$id" "$corr" >&2
+      printf 'error: receiver wake delivery for Project Director %s is unresolved; refusing to resend correlation %s\n' "$id" "$corr" >&2
       return 1
     }
     wake_secondmate_receiver "$id" "$corr" || return 1
   fi
   if [ "$retain" = 1 ]; then
     receiver_wake_state_write "$id" "confirmed:$corr" || {
-      printf 'error: receiver wake for secondmate %s was confirmed, but confirmed state could not be recorded\n' "$id" >&2
+      printf 'error: receiver wake for Project Director %s was confirmed, but confirmed state could not be recorded\n' "$id" >&2
       return 1
     }
   else
     rm -f -- "$marker" || {
-      printf 'error: receiver wake for secondmate %s was confirmed, but pending state could not be cleared\n' "$id" >&2
+      printf 'error: receiver wake for Project Director %s was confirmed, but pending state could not be cleared\n' "$id" >&2
       return 1
     }
   fi
@@ -768,7 +768,7 @@ remote_handoff() { # <secondmate-id> <keys...>
   validate_backlog_file "remote handoff outbox" "$outbox" || return 1
   if [ ! -e "$outbox" ] && [ ! -L "$outbox" ]; then
     receiver_wake_clear_confirmed "$id" || {
-      echo "error: stale receiver wake state for secondmate $id could not be cleared" >&2
+      echo "error: stale receiver wake state for Project Director $id could not be cleared" >&2
       return 1
     }
   fi
@@ -821,7 +821,7 @@ remote_handoff() { # <secondmate-id> <keys...>
   if [ "${#to_move[@]}" -gt 0 ] && [ -f "$outbox" ] &&
     [ "$(outbox_item_count "$outbox")" -gt 0 ]; then
     remote_deliver_outbox "$id" "$outbox" || {
-      echo "error: previous remote handoff for secondmate $id could not be completed; nothing new was staged" >&2
+      echo "error: previous remote handoff for Project Director $id could not be completed; nothing new was staged" >&2
       return 1
     }
   fi
@@ -838,7 +838,7 @@ remote_handoff() { # <secondmate-id> <keys...>
   # deleting only duplicates that tasks-axi itself confirms are dependency-safe.
   remove_interrupted_source_duplicates "$outbox" "${requested[@]}" || return 1
   remote_deliver_outbox "$id" "$outbox" || return 1
-  echo "handed off ${#requested[@]} item(s) to remote secondmate $id: ${requested[*]}"
+  echo "handed off ${#requested[@]} item(s) to remote Project Director $id: ${requested[*]}"
   [ "${#already[@]}" -eq 0 ] || echo "  already staged (recovered): ${already[*]}"
   warn_stale_public_commitments "$id" "${requested[@]}"
 }
@@ -854,7 +854,7 @@ with_remote_route_locks() { # <secondmate-id> <function> <args...>
   ACTIVE_REGISTRY_LOCK=$(secondmate_registry_lock_path "$STATE")
   fm_lock_acquire_wait "$ACTIVE_REGISTRY_LOCK"
   if [ "$(secondmate_registry_field "$REG" "$id" remote 2>/dev/null || true)" != 1 ]; then
-    echo "error: pending outbox has no matching remote secondmate route: $id" >&2
+    echo "error: pending outbox has no matching remote Project Director route: $id" >&2
     release_remote_locks
     return 1
   fi
@@ -945,7 +945,7 @@ ACTIVE_REGISTRY_LOCK=
 
 RAW_HOME=$(secondmate_home "$ID") || exit 1
 [ -n "$RAW_HOME" ] || {
-  echo "error: secondmate $ID has no home in $REG" >&2
+  echo "error: Project Director $ID has no home in $REG" >&2
   exit 1
 }
 SUB_HOME=$(validate_secondmate_home "$ID" "$RAW_HOME") || exit 1
@@ -1008,7 +1008,7 @@ if [ "${#TO_MOVE[@]}" -eq 0 ]; then
   case "$(cat "$WAKE_PENDING_MARKER" 2>/dev/null || true)" in
   prepared:*:"$REQUESTED_BATCH") receiver_wake_promote_prepared "$ID" "$REQUESTED_BATCH" || exit 1 ;;
   prepared:*)
-    echo "error: a prepared receiver wake for secondmate $ID belongs to a different routed batch; retry that original handoff before handling ${ALREADY[*]}" >&2
+    echo "error: a prepared receiver wake for Project Director $ID belongs to a different routed batch; retry that original handoff before handling ${ALREADY[*]}" >&2
     exit 1
     ;;
   esac
@@ -1040,19 +1040,19 @@ if [ -e "$WAKE_PENDING_MARKER" ] || [ -L "$WAKE_PENDING_MARKER" ]; then
   case "$(cat "$WAKE_PENDING_MARKER" 2>/dev/null || true)" in
   prepared:*:"$REQUESTED_BATCH") receiver_wake_discard_prepared "$ID" || exit 1 ;;
   prepared:*)
-    echo "error: a prepared receiver wake for secondmate $ID belongs to a different routed batch; retry that original handoff before moving ${TO_MOVE[*]}" >&2
+    echo "error: a prepared receiver wake for Project Director $ID belongs to a different routed batch; retry that original handoff before moving ${TO_MOVE[*]}" >&2
     exit 1
     ;;
   *)
     wake_pending_secondmate_receiver "$ID" || {
-      echo "error: previous receiver wake for secondmate $ID is unresolved; nothing new was moved" >&2
+      echo "error: previous receiver wake for Project Director $ID is unresolved; nothing new was moved" >&2
       exit 1
     }
     ;;
   esac
 fi
 receiver_wake_mark_prepared "$ID" "$REQUESTED_BATCH" || {
-  echo "error: receiver wake state for secondmate $ID could not be recorded; nothing was moved" >&2
+  echo "error: receiver wake state for Project Director $ID could not be recorded; nothing was moved" >&2
   exit 1
 }
 
@@ -1090,7 +1090,7 @@ fi
 echo "handed off ${#TO_MOVE[@]} item(s) to $ID: ${TO_MOVE[*]}"
 echo "  into $SUB_BACKLOG"
 receiver_wake_promote_prepared "$ID" "$REQUESTED_BATCH" || {
-  echo "error: handed off work to secondmate $ID, but durable receiver wake state could not be recorded" >&2
+  echo "error: handed off work to Project Director $ID, but durable receiver wake state could not be recorded" >&2
   exit 1
 }
 wake_pending_secondmate_receiver "$ID" || exit 1

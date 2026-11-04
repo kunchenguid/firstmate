@@ -591,7 +591,7 @@ test_remote_real_failure_still_fails() {
     "$SEND" rsm "please rename the metric" >"$dir/out" 2>"$dir/err" || rc=$?
   err=$(cat "$dir/err")
   [ "$rc" -ne 0 ] || fail "a genuinely failed remote send must exit nonzero"
-  assert_contains "$err" "steer not sent to remote secondmate rsm" \
+  assert_contains "$err" "steer not sent to remote Project Director rsm" \
     "a real remote failure must still report a real error"
   assert_contains "$err" "endpoint metadata is invalid" \
     "a real remote failure must surface the remote leg's own stderr"
@@ -617,9 +617,9 @@ test_remote_exit3_no_longer_delivered() {
     "$SEND" rsm "please rename the metric" >"$dir/out" 2>"$dir/err" || rc=$?
   err=$(cat "$dir/err")
   [ "$rc" -ne 0 ] || fail "a nonzero remote leg must no longer be remapped to delivered"
-  assert_not_contains "$err" "delivered to remote secondmate" \
+  assert_not_contains "$err" "delivered to remote Project Director" \
     "the deleted exit-3-as-delivered remap must be gone"
-  assert_contains "$err" "steer not sent to remote secondmate rsm" \
+  assert_contains "$err" "steer not sent to remote Project Director rsm" \
     "a failed remote leg must report the steer as not sent"
   [ -z "$(pending_record "$home")" ] \
     || fail "a failed remote leg must discard its undelivered expectation"

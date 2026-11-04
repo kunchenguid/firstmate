@@ -375,7 +375,7 @@ teardown_require_backend_prerequisites() {  # <backend> <task-id>
 # have left it (t3code_secondmate_home_shutdown_barrier).
 t3code_secondmate_lsof_check() {  # <task-id> <home>
   command -v lsof >/dev/null 2>&1 && return 0
-  echo "REFUSED: cannot prove T3 secondmate $1's provider processes have left ${2:-its home} (lsof is unavailable); preserving the home and its records for retry" >&2
+  echo "REFUSED: cannot prove T3 Project Director $1's provider processes have left ${2:-its home} (lsof is unavailable); preserving the home and its records for retry" >&2
   return 1
 }
 for _teardown_source in \
@@ -675,7 +675,7 @@ TEARDOWN_META_KIND=$(fm_meta_get "$META" kind)
 # removed with the route instead of surviving for a reused id.
 if [ "$TEARDOWN_META_KIND" = secondmate ]; then
   fm_lock_try_acquire "$STATE/.secondmate-liveness-$ID.lock" || {
-    echo "error: a secondmate liveness check is in progress for $ID; nothing was changed - retry teardown" >&2
+    echo "error: a Project Director liveness check is in progress for $ID; nothing was changed - retry teardown" >&2
     exit 1
   }
   SM_LIVENESS_LOCK="$STATE/.secondmate-liveness-$ID.lock"
@@ -815,7 +815,7 @@ handoff_wake_retire_validate() {
   HANDOFF_WAKE_RETIRE_CORR=
   [ -e "$marker" ] || [ -L "$marker" ] || return 0
   [ -f "$marker" ] && [ ! -L "$marker" ] || {
-    echo "REFUSED: receiver wake state for secondmate $ID is unsafe" >&2
+    echo "REFUSED: receiver wake state for Project Director $ID is unsafe" >&2
     return 1
   }
   value=$(cat "$marker" 2>/dev/null || true)
@@ -825,19 +825,19 @@ handoff_wake_retire_validate() {
       corr=${value#prepared:}
       corr=${corr%%:*}
       printf '%s' "$value" | grep -Eq '^prepared:[a-f0-9]{16}:[a-f0-9]{16}$' || {
-        echo "REFUSED: receiver wake state for secondmate $ID is invalid" >&2
+        echo "REFUSED: receiver wake state for Project Director $ID is invalid" >&2
         return 1
       }
       ;;
     pending:*|confirmed:*)
       corr=${value#*:}
       printf '%s' "$corr" | grep -Eq '^[a-f0-9]{16}$' || {
-        echo "REFUSED: receiver wake state for secondmate $ID is invalid" >&2
+        echo "REFUSED: receiver wake state for Project Director $ID is invalid" >&2
         return 1
       }
       ;;
     *)
-      echo "REFUSED: receiver wake state for secondmate $ID is invalid" >&2
+      echo "REFUSED: receiver wake state for Project Director $ID is invalid" >&2
       return 1
       ;;
   esac
@@ -846,14 +846,14 @@ handoff_wake_retire_validate() {
     if [ -e "$rec" ] || [ -L "$rec" ]; then
       [ -f "$rec" ] && [ ! -L "$rec" ] \
         && [ "$(fm_pending_reply_get "$rec" task_id)" = "$ID" ] || {
-        echo "REFUSED: receiver wake correlation for secondmate $ID is unsafe or belongs to another task" >&2
+        echo "REFUSED: receiver wake correlation for Project Director $ID is unsafe or belongs to another task" >&2
         return 1
       }
     fi
     confirmation=$(fm_pending_reply_delivery_confirmation_path "$STATE" "$corr")
     if [ -e "$confirmation" ] || [ -L "$confirmation" ]; then
       [ -f "$confirmation" ] && [ ! -L "$confirmation" ] || {
-        echo "REFUSED: receiver wake delivery state for secondmate $ID is unsafe" >&2
+        echo "REFUSED: receiver wake delivery state for Project Director $ID is unsafe" >&2
         return 1
       }
     fi
@@ -933,28 +933,28 @@ handoff_wake_retire_stage_recover() {
   local home=$1 stage="$STATE/.backlog-handoff-$ID.wake-retiring" corr
   [ -e "$stage" ] || [ -L "$stage" ] || return 0
   [ -d "$stage" ] && [ ! -L "$stage" ] || {
-    echo "REFUSED: receiver wake retirement state for secondmate $ID is unsafe" >&2
+    echo "REFUSED: receiver wake retirement state for Project Director $ID is unsafe" >&2
     return 1
   }
   if [ ! -e "$stage/corr" ] && [ ! -L "$stage/corr" ]; then
     rmdir -- "$stage" 2>/dev/null && return 0
-    echo "REFUSED: receiver wake retirement state for secondmate $ID is incomplete" >&2
+    echo "REFUSED: receiver wake retirement state for Project Director $ID is incomplete" >&2
     return 1
   fi
   [ -f "$stage/corr" ] && [ ! -L "$stage/corr" ] || {
-    echo "REFUSED: receiver wake retirement state for secondmate $ID is unsafe" >&2
+    echo "REFUSED: receiver wake retirement state for Project Director $ID is unsafe" >&2
     return 1
   }
   corr=$(cat "$stage/corr" 2>/dev/null || true)
   [ -z "$corr" ] || printf '%s' "$corr" | grep -Eq '^[a-f0-9]{16}$' || {
-    echo "REFUSED: receiver wake retirement correlation for secondmate $ID is invalid" >&2
+    echo "REFUSED: receiver wake retirement correlation for Project Director $ID is invalid" >&2
     return 1
   }
   local staged
   for staged in "$stage/marker" "$stage/record" "$stage/confirmation"; do
     [ ! -e "$staged" ] && [ ! -L "$staged" ] && continue
     [ -f "$staged" ] && [ ! -L "$staged" ] || {
-      echo "REFUSED: receiver wake retirement state for secondmate $ID is unsafe" >&2
+      echo "REFUSED: receiver wake retirement state for Project Director $ID is unsafe" >&2
       return 1
     }
   done
@@ -1134,7 +1134,7 @@ secondmate_unresolved_pending_replies_refuse() {
     [ "$task_id" = "$ID" ] || continue
     phase=$(fm_meta_get "$rec" phase)
     [ "$phase" = resolved ] || {
-      echo "REFUSED: secondmate $ID still has an unresolved routed reply" >&2
+      echo "REFUSED: Project Director $ID still has an unresolved routed reply" >&2
       return 1
     }
   done
@@ -1156,28 +1156,28 @@ remote_secondmate_teardown() {
   remote_host=$(fm_meta_get "$META" remote_host)
   [ -n "$remote_host" ] || return 3
   kind=$(fm_meta_get "$META" kind)
-  [ "$kind" = secondmate ] || { echo "REFUSED: remote placement metadata is valid only for a secondmate" >&2; return 1; }
+  [ "$kind" = secondmate ] || { echo "REFUSED: remote placement metadata is valid only for a Project Director" >&2; return 1; }
   remote_root=$(fm_meta_get "$META" remote_root)
   remote_home=$(fm_meta_get "$META" home)
-  [ -n "$remote_root" ] && [ -n "$remote_home" ] || { echo "REFUSED: remote secondmate metadata is incomplete" >&2; return 1; }
-  secondmate_registry_line_for_id "$SECONDMATE_REG" "$ID" || { echo "REFUSED: remote secondmate route is missing or ambiguous" >&2; return 1; }
-  [ "$SECONDMATE_REGISTRY_REMOTE" -eq 1 ] || { echo "REFUSED: secondmate registry route is not remote" >&2; return 1; }
+  [ -n "$remote_root" ] && [ -n "$remote_home" ] || { echo "REFUSED: remote Project Director metadata is incomplete" >&2; return 1; }
+  secondmate_registry_line_for_id "$SECONDMATE_REG" "$ID" || { echo "REFUSED: remote Project Director route is missing or ambiguous" >&2; return 1; }
+  [ "$SECONDMATE_REGISTRY_REMOTE" -eq 1 ] || { echo "REFUSED: Project Director registry route is not remote" >&2; return 1; }
   route_host=$SECONDMATE_REGISTRY_HOST
   route_root=$SECONDMATE_REGISTRY_ROOT
   route_home=$SECONDMATE_REGISTRY_HOME
   [ "$route_host" = "$remote_host" ] && [ "$route_root" = "$remote_root" ] && [ "$route_home" = "$remote_home" ] \
-    || { echo "REFUSED: remote secondmate metadata does not match its registry route" >&2; return 1; }
+    || { echo "REFUSED: remote Project Director metadata does not match its registry route" >&2; return 1; }
   handoff_wake_retire_validate || return 1
   remote_recovery_paths_validate initial || return 1
   if [ "$FORCE" != --force ] && [ "$REMOTE_OUTBOX_PRESENT" -eq 1 ]; then
-    echo "REFUSED: remote secondmate $ID still has a pending backlog outbox; deliver it or explicitly discard with --force" >&2
+    echo "REFUSED: remote Project Director $ID still has a pending backlog outbox; deliver it or explicitly discard with --force" >&2
     return 1
   fi
   if [ "$FORCE" != --force ]; then
     secondmate_unresolved_pending_replies_refuse || return 1
   fi
   "$SCRIPT_DIR/fm-procevent-remote-reply.sh" retire-quiesce-locked "$ID" "$FORCE" >/dev/null 2>&1 || {
-    echo "REFUSED: remote secondmate $ID still has an unhandled captured reply" >&2
+    echo "REFUSED: remote Project Director $ID still has an unhandled captured reply" >&2
     return 1
   }
   "$FM_ROOT/bin/fm-guard.sh" || true
@@ -2746,7 +2746,7 @@ registered_descendant_home_for_removal() {
     case "$line" in
       "- "*)
         secondmate_registry_parse_line "$line" || {
-          echo "REFUSED: malformed secondmate registry entry: $line" >&2
+          echo "REFUSED: malformed Project Director registry entry: $line" >&2
           return 2
         }
         id=$SECONDMATE_REGISTRY_ID
@@ -2771,7 +2771,7 @@ validate_firstmate_operational_dirs_for_removal() {
     dir="$home/$name"
     [ -e "$dir" ] || [ -L "$dir" ] || continue
     if [ -L "$dir" ] && [ ! -e "$dir" ]; then
-      echo "REFUSED: unsafe $label $name directory $dir resolves outside the secondmate home" >&2
+      echo "REFUSED: unsafe $label $name directory $dir resolves outside the Project Director home" >&2
       return 1
     fi
     if [ -d "$dir" ]; then
@@ -2783,7 +2783,7 @@ validate_firstmate_operational_dirs_for_removal() {
       abs_dir=
     fi
     if [ -z "$abs_dir" ] || ! path_is_ancestor_of "$abs_home" "$abs_dir"; then
-      echo "REFUSED: unsafe $label $name directory $dir resolves outside the secondmate home" >&2
+      echo "REFUSED: unsafe $label $name directory $dir resolves outside the Project Director home" >&2
       return 1
     fi
   done
@@ -2830,20 +2830,20 @@ validate_firstmate_home_for_removal() {
   [ -e "$home" ] || return 0
   abs_home_path=$(validate_removal_target "$home" "$label") || return 1
   if [ ! -f "$abs_home_path/$SUB_HOME_MARKER" ]; then
-    echo "REFUSED: unsafe $label removal target $home is not a seeded secondmate home" >&2
+    echo "REFUSED: unsafe $label removal target $home is not a seeded Project Director home" >&2
     return 1
   fi
   if [ -n "$expected_id" ]; then
     marker_id=$(cat "$abs_home_path/$SUB_HOME_MARKER" 2>/dev/null || true)
     if [ "$marker_id" != "$expected_id" ]; then
-      echo "REFUSED: unsafe $label removal target $home is marked for secondmate ${marker_id:-unknown}, expected $expected_id" >&2
+      echo "REFUSED: unsafe $label removal target $home is marked for Project Director ${marker_id:-unknown}, expected $expected_id" >&2
       return 1
     fi
     if [ -e "$SECONDMATE_REG" ] || [ -L "$SECONDMATE_REG" ]; then
       if ! secondmate_registry_validate_bindings "$SECONDMATE_REG" secondmate_registry_path_key "$expected_id" "$abs_home_path"; then
         case "$SECONDMATE_REGISTRY_ERROR" in
           overlapping\ secondmate\ home\ assignment:*)
-            echo "REFUSED: unsafe $label removal target $home contains registered secondmate home; $SECONDMATE_REGISTRY_ERROR" >&2
+            echo "REFUSED: unsafe $label removal target $home contains registered Project Director home; $SECONDMATE_REGISTRY_ERROR" >&2
             ;;
           *) echo "REFUSED: $SECONDMATE_REGISTRY_ERROR" >&2 ;;
         esac
@@ -2871,7 +2871,7 @@ validate_firstmate_home_for_removal() {
     IFS=$'\t' read -r child_id child_home <<EOF
 $conflict
 EOF
-    echo "REFUSED: unsafe $label removal target $home contains registered secondmate home $child_home for $child_id" >&2
+    echo "REFUSED: unsafe $label removal target $home contains registered Project Director home $child_home for $child_id" >&2
     return 1
   fi
   printf '%s\n' "$abs_home_path"
@@ -3068,19 +3068,19 @@ collect_descendant_task_locks() {
   local -a child_ids
   sub_state="$home/state"
   if [ -L "$sub_state" ]; then
-    echo "REFUSED: secondmate home $home has a symbolic-link state path at $sub_state; forced teardown changed nothing" >&2
+    echo "REFUSED: Project Director home $home has a symbolic-link state path at $sub_state; forced teardown changed nothing" >&2
     return 1
   fi
   if [ -e "$sub_state" ] && [ ! -d "$sub_state" ]; then
-    echo "REFUSED: secondmate home $home has a non-directory state path at $sub_state; forced teardown changed nothing" >&2
+    echo "REFUSED: Project Director home $home has a non-directory state path at $sub_state; forced teardown changed nothing" >&2
     return 1
   fi
   if ! mkdir -p -- "$sub_state"; then
-    echo "REFUSED: secondmate home $home state directory could not be established at $sub_state; forced teardown changed nothing" >&2
+    echo "REFUSED: Project Director home $home state directory could not be established at $sub_state; forced teardown changed nothing" >&2
     return 1
   fi
   if [ -L "$sub_state" ] || [ ! -d "$sub_state" ]; then
-    echo "REFUSED: secondmate home $home state path is not a safe directory at $sub_state; forced teardown changed nothing" >&2
+    echo "REFUSED: Project Director home $home state path is not a safe directory at $sub_state; forced teardown changed nothing" >&2
     return 1
   fi
   # Freeze this home's task SET before reading it. Everything below locks the
@@ -3090,16 +3090,16 @@ collect_descendant_task_locks() {
   # fm_task_set_lock_path owns why). Taken per home, parent before child, and
   # held until this teardown exits.
   task_set_lock=$(fm_task_set_lock_path "$sub_state") || {
-    echo "REFUSED: secondmate home $home has an invalid task-set lock path; forced teardown changed nothing" >&2
+    echo "REFUSED: Project Director home $home has an invalid task-set lock path; forced teardown changed nothing" >&2
     return 1
   }
   if ! fm_lock_try_acquire "$task_set_lock"; then
-    echo "REFUSED: secondmate home $home is publishing a task right now (task-set lock is held); forced teardown changed nothing" >&2
+    echo "REFUSED: Project Director home $home is publishing a task right now (task-set lock is held); forced teardown changed nothing" >&2
     return 1
   fi
   if ! fm_lock_set_role "$task_set_lock" forced-teardown; then
     fm_lock_release "$task_set_lock" || true
-    echo "REFUSED: secondmate home $home could not record its task-set lock holder; forced teardown changed nothing" >&2
+    echo "REFUSED: Project Director home $home could not record its task-set lock holder; forced teardown changed nothing" >&2
     return 1
   fi
   DESCENDANT_LOCK_PATHS+=("$task_set_lock")
@@ -3646,7 +3646,7 @@ if [ "$KIND" = secondmate ] && [ "$FORCE" != "--force" ]; then
   if [ -d "$SUB_STATE" ]; then
     for child_meta in "$SUB_STATE"/*.meta; do
       [ -e "$child_meta" ] || continue
-      echo "REFUSED: secondmate $ID still has in-flight work in $SUB_STATE." >&2
+      echo "REFUSED: Project Director $ID still has in-flight work in $SUB_STATE." >&2
       echo "Found $(basename "$child_meta"). Let that home finish or explicitly discard with --force." >&2
       exit 1
     done
@@ -3683,7 +3683,7 @@ fi
 # work. Both gates live in bin/fm-public-followup-lib.sh, so a home that never
 # opted into the myfirstmate relay runs one [ -f ] test and nothing else here.
 if [ "$FORCE" != "--force" ] && [ "$PUBLIC_FOLLOWUP_PARENT_UNRESOLVED" = 1 ]; then
-  echo "REFUSED: cannot resolve the primary home for marked secondmate $SECOND_MATE_ID; refusing cleanup without its durable parent binding." >&2
+  echo "REFUSED: cannot resolve the primary home for marked Project Director $SECOND_MATE_ID; refusing cleanup without its durable parent binding." >&2
   exit 1
 fi
 if [ "$FORCE" != "--force" ] \
@@ -4069,9 +4069,9 @@ teardown_export_records "$STATE" "$ID" || exit 1
 if [ "$KIND" = secondmate ]; then
   [ -n "$HOME_PATH" ] || HOME_PATH=$WT
   handoff_wake_retire_stage \
-    || { echo "error: receiver wake cleanup could not be staged; preserving the secondmate home and route" >&2; exit 1; }
+    || { echo "error: receiver wake cleanup could not be staged; preserving the Project Director home and route" >&2; exit 1; }
   pending_replies_recovery_validate recheck \
-    || { echo "error: local pending-reply recovery paths changed; preserving the secondmate home and route" >&2; exit 1; }
+    || { echo "error: local pending-reply recovery paths changed; preserving the Project Director home and route" >&2; exit 1; }
   if remove_firstmate_home "$HOME_PATH" "secondmate home" "$ID" "$BACKEND"; then
     :
   else
@@ -4081,10 +4081,10 @@ if [ "$KIND" = secondmate ]; then
     exit "$rc"
   fi
   handoff_wake_retire_stage_commit \
-    || { echo "error: receiver wake cleanup failed; preserving the secondmate route for retry" >&2; exit 1; }
+    || { echo "error: receiver wake cleanup failed; preserving the Project Director route for retry" >&2; exit 1; }
   if [ "$PENDING_REPLIES_DIR_PRESENT" -eq 1 ]; then
     pending_replies_cleanup_for_task "$STATE/pending-replies" "$PENDING_REPLIES_DIR_REAL" \
-      || { echo "error: local pending-reply cleanup failed; preserving the secondmate route for retry" >&2; exit 1; }
+      || { echo "error: local pending-reply cleanup failed; preserving the Project Director route for retry" >&2; exit 1; }
   fi
   remove_secondmate_registry_entry "$ID"
 fi

@@ -206,11 +206,11 @@
 #   banner inline, never a silent failure or a non-zero exit that would make
 #   an agent skip the rest of the digest.
 #
-#   --reemit  This process ALREADY took the helm at its own startup and has
+#   --reemit  This process ALREADY completed its own startup and has
 #             only lost its context (a /clear or a compaction). Skip the
 #             mutating sweeps that startup already reconciled - the stale Herdr
 #             projection cleanup and bootstrap's six mutating sweeps (fleet
-#             sync, same-home backlog reconciliation, secondmate convergence and
+#             sync, same-home backlog reconciliation, Project Director convergence and
 #             liveness, pending remote handoff retry, X-mode
 #             artifact writes) - and
 #             re-emit the rest. Wake-queue presentation is NOT skipped: queued
@@ -347,7 +347,7 @@ if [ -z "${FM_SESSION_START_STAGE_FILE:-}" ]; then
     printf '●  only up to that point.\n'
     printf '●  RECONCILE these stages before acting on anything they would have shown:\n'
     printf '●    %s\n' "${SESSION_START_PENDING% }"
-    printf '●  Rerun bin/fm-session-start.sh now to finish taking the helm. If it truncates\n'
+    printf '●  Rerun bin/fm-session-start.sh now to finish session startup. If it truncates\n'
     if [ "$SESSION_START_RC" -eq 124 ]; then
       printf '●  again, raise FM_SESSION_START_TIMEOUT and report the slow stage - a stage that\n'
       printf '●  cannot finish inside the bound is a team problem, not a reporting detail.\n'
@@ -681,10 +681,10 @@ if [ "$REEMIT" -eq 1 ]; then
   printf 'read that whole file now, before acting. Otherwise read data/captain.md, data/captain-shared.md,\n'
   printf 'and data/learnings.md under %s now if any of them is missing below.\n' "$DATA"
   section "SESSION START (CONTEXT RE-EMIT) - $FM_HOME"
-  printf 'This session already took the helm at its own startup and has only lost its\n'
+  printf 'This session already completed its own startup and has only lost its\n'
   printf 'context. Lock ownership is re-verified and the durable records below are\n'
   printf 'reprinted, but the sweeps startup already reconciled - project clone refresh,\n'
-  printf 'secondmate convergence and liveness, pending remote handoff\n'
+  printf 'Project Director convergence and liveness, pending remote handoff\n'
   printf 'retry, X-mode artifact writes, and stale Herdr child cleanup - are NOT repeated.\n'
   printf 'Queued wakes ARE still drained: they arrived after startup and are this turn work.\n'
 else
@@ -705,7 +705,7 @@ if [ "$LOCK_RC" -ne 0 ]; then
     printf '●  READ-ONLY SESSION - TEAM LOCK OWNERSHIP WAS NOT VERIFIED\n'
     printf '●  %s\n' "$LOCK_OUT"
     printf '●  Skipping every mutating step: stale Herdr child cleanup,\n'
-    printf '●  secondmate convergence, secondmate liveness, pending remote handoff retry,\n'
+    printf '●  Project Director convergence, Project Director liveness, pending remote handoff retry,\n'
     printf '●  X-mode artifacts, team sync, and wake-queue drain. Detect-only bootstrap\n'
     printf '●  diagnostics and the rest of this read-only-safe digest still ran below.\n'
     printf '●  Operate read-only until this resolves - do not spawn, steer, merge, or\n'
@@ -1038,7 +1038,7 @@ stage network-checks
 section "NETWORK CHECKS"
 if [ "$READ_ONLY" -eq 1 ]; then
   printf 'skipped (read-only session) - GitHub authentication, project clone refresh,\n'
-  printf 'secondmate liveness and convergence, and pending handoff delivery were not run.\n'
+  printf 'Project Director liveness and convergence, and pending handoff delivery were not run.\n'
   printf 'They need the team lock, and this session must not spawn, steer, or merge, so it\n'
   printf 'has no action they would gate. The session holding the lock runs them.\n'
 else

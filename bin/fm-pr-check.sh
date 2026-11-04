@@ -186,7 +186,7 @@ fi
 # work once that pull request merges.
 KIND=$(grep '^kind=' "$META" | tail -1 | cut -d= -f2- || true)
 if [ "$KIND" = secondmate ]; then
-  echo "error: $ID is a secondmate, not a delivery lane - $URL was reported on its status channel but belongs to a task in the mate's own home, which arms its own merge watch" >&2
+  echo "error: $ID is a Project Director, not a delivery lane - $URL was reported on its status channel but belongs to a task in the Project Director's own home, which arms its own merge watch" >&2
   exit 1
 fi
 

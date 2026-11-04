@@ -568,7 +568,7 @@ if [ "$mode" = report ]; then
     invalid) echo "Lanes: $lanes running, target unreadable ($target_error)." ;;
     *) echo "Lanes: $lanes running of $target target, $free_lanes open." ;;
   esac
-  [ "$secondmates" -eq 0 ] || echo "Secondmates: $secondmates (hold no lane)."
+  [ "$secondmates" -eq 0 ] || echo "Project Directors: $secondmates (hold no lane)."
   mem_text="${mem_free_pct}%"; [ "$mem_free_pct" != unknown ] || mem_text=unknown
   disk_text="$disk_free_mb MB"; [ "$disk_free_mb" != unknown ] || disk_text=unknown
   echo "Host: load $load1 on $cores cores, memory free $mem_text, disk free $disk_text."
