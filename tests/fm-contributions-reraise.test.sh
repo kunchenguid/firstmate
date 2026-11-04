@@ -248,6 +248,7 @@ test_clear_on_our_push() {
     || fail "unanswered wake missing before push: $out"
   # Push a new commit at 12:30:00Z (head sha changes to HEAD_B).
   printf '%s\n' "$HEAD_B" > "$home/forge/head"
+  printf '2026-09-16T12:30:00Z\n' > "$home/forge/pushed_at"
   # Poll at 13:00:00Z: head sha changed, so unanswered condition clears!
   out=$(with_home "$home" env FM_CONTRIBUTIONS_NOW=2026-09-16T13:00:00Z "$ROOT/bin/fm-contributions.sh" poll) \
     || fail 'poll after push failed'
@@ -334,9 +335,101 @@ test_reraise_interval_configurable() {
   pass 'the re-raise interval is configurable via env and plumbs into the check shim'
 }
 
+test_reminder_waits_full_interval_not_every_poll() {
+  local home out
+  home=$(new_home reminder-interval)
+  # Review requesting changes at 08:00:00Z
+  jq -n --arg head "$HEAD_A" '[{id:201,user:{login:"maintainer"},author_association:"OWNER",
+    body:"Please address this review comment",html_url:"https://github.com/o/r/pull/8#pullrequestreview-201",
+    state:"CHANGES_REQUESTED",submitted_at:"2026-09-16T08:00:00Z",commit_id:$head}]' > "$home/forge/reviews.json"
+  # Initial poll at 08:01:00Z with 1h interval (3600s).
+  with_home "$home" env FM_CONTRIBUTIONS_NOW=2026-09-16T08:01:00Z FM_CONTRIBUTIONS_REPLY_AGE=3600 \
+    "$ROOT/bin/fm-contributions.sh" poll >/dev/null || fail 'initial poll failed'
+  ack_pending "$home" 2026-09-16T08:01:00Z
+  # At 09:05:00Z (1h 4m after ack), snooze expired, reminder is raised.
+  out=$(with_home "$home" env FM_CONTRIBUTIONS_NOW=2026-09-16T09:05:00Z FM_CONTRIBUTIONS_REPLY_AGE=3600 \
+    "$ROOT/bin/fm-contributions.sh" poll) || fail 'poll at 09:05:00Z failed'
+  printf '%s\n' "$out" | grep -Eq 'unanswered' || fail "reminder missing at 09:05:00Z: $out"
+  # Next poll at 09:06:00Z (1 minute later without ack): MUST NOT wake again!
+  out=$(with_home "$home" env FM_CONTRIBUTIONS_NOW=2026-09-16T09:06:00Z FM_CONTRIBUTIONS_REPLY_AGE=3600 \
+    "$ROOT/bin/fm-contributions.sh" poll) || fail 'poll at 09:06:00Z failed'
+  [ -z "$out" ] || fail "reminder repeated on subsequent poll before interval passed: $out"
+  # At 10:10:00Z (1h 5m after last raise at 09:05:00Z): wakes again!
+  out=$(with_home "$home" env FM_CONTRIBUTIONS_NOW=2026-09-16T10:10:00Z FM_CONTRIBUTIONS_REPLY_AGE=3600 \
+    "$ROOT/bin/fm-contributions.sh" poll) || fail 'poll at 10:10:00Z failed'
+  printf '%s\n' "$out" | grep -Eq 'unanswered' || fail "reminder missing at 10:10:00Z: $out"
+  pass 'reminders wait a full interval after snooze expires instead of repeating every poll'
+}
+
+test_push_does_not_clear_subsequent_comment() {
+  local home out
+  home=$(new_home push-subsequent)
+  # Author pushed HEAD_B at 12:00:00Z.
+  printf '%s\n' "$HEAD_B" > "$home/forge/head"
+  printf '2026-09-16T12:00:00Z\n' > "$home/forge/pushed_at"
+  # Maintainer commented at 12:30:00Z (AFTER author's push!).
+  jq -n '[{id:301,user:{login:"maintainer"},author_association:"OWNER",
+    body:"Tests are failing on HEAD_B",html_url:"https://github.com/o/r/pull/8#issuecomment-301",
+    created_at:"2026-09-16T12:30:00Z",updated_at:"2026-09-16T12:30:00Z"}]' > "$home/forge/comments.json"
+  # Poll at 13:00:00Z (first time Firstmate sees HEAD_B):
+  # Even though HEAD_B is newly seen, its push time (12:00:00Z) was before the maintainer comment (12:30:00Z).
+  # The comment must NOT be treated as answered by the push!
+  out=$(with_home "$home" env FM_CONTRIBUTIONS_NOW=2026-09-16T13:00:00Z "$ROOT/bin/fm-contributions.sh" poll) \
+    || fail 'poll at 13:00:00Z failed'
+  # Maintainer comment was signaled and is pending.
+  ack_pending "$home" 2026-09-16T13:00:00Z
+  # Record must retain unanswered state pointing to the comment.
+  jq -e '.records[0].unanswered != null and .records[0].unanswered.at == "2026-09-16T12:30:00Z"' \
+    "$home/data/delivery/contributions.json" >/dev/null \
+    || fail 'unanswered condition was wrongly cleared by preceding push'
+  # Also test unknown push time: when pushed_at is unknown, comment remains unanswered.
+  rm -f "$home/forge/pushed_at"
+  printf 'cccccccccccccccccccccccccccccccccccccccc\n' > "$home/forge/head"
+  out=$(with_home "$home" env FM_CONTRIBUTIONS_NOW=2026-09-16T14:00:00Z "$ROOT/bin/fm-contributions.sh" poll) \
+    || fail 'poll with unknown push time failed'
+  jq -e '.records[0].unanswered != null' "$home/data/delivery/contributions.json" >/dev/null \
+    || fail 'unknown push time wrongly cleared unanswered condition'
+  pass 'push only clears comments known to precede it and treats unknown as not-answered'
+}
+
+test_ack_matches_exact_thread_key() {
+  local home
+  home=$(new_home exact-ack)
+  # Two review threads: id 12 and id 123
+  jq -n --arg head "$HEAD_A" '[
+    {id:12,user:{login:"maintainer"},author_association:"OWNER",body:"Review 12",
+      html_url:"https://github.com/o/r/pull/8#pullrequestreview-12",state:"CHANGES_REQUESTED",
+      submitted_at:"2026-09-16T08:00:00Z",commit_id:$head},
+    {id:123,user:{login:"maintainer"},author_association:"OWNER",body:"Review 123",
+      html_url:"https://github.com/o/r/pull/8#pullrequestreview-123",state:"CHANGES_REQUESTED",
+      submitted_at:"2026-09-16T08:00:00Z",commit_id:$head}]' > "$home/forge/reviews.json"
+  with_home "$home" env FM_CONTRIBUTIONS_NOW=2026-09-16T08:01:00Z FM_CONTRIBUTIONS_REPLY_AGE=3600 \
+    "$ROOT/bin/fm-contributions.sh" poll >/dev/null || fail 'initial poll failed'
+  # Both threads are tracked in the record.
+  jq -e '.records[0].threads | length == 2' "$home/data/delivery/contributions.json" >/dev/null \
+    || fail 'expected 2 tracked threads'
+  # Acknowledge review:123 specifically.
+  with_home "$home" env FM_CONTRIBUTIONS_NOW=2026-09-16T08:05:00Z \
+    "$ROOT/bin/fm-contributions.sh" ack delivery https://github.com/o/r/pull/8 "review:123:2026-09-16T08:00:00Z:CHANGES_REQUESTED" \
+    || fail 'ack review:123 failed'
+  # Thread 123 must be acked; thread 12 must NOT be acked!
+  jq -e '(.records[0].threads[] | select(.key == "review:123") | .acked != null) and
+         (.records[0].threads[] | select(.key == "review:12") | .acked == null)' \
+    "$home/data/delivery/contributions.json" >/dev/null \
+    || fail 'ack review:123 wrongly snoozed review:12'
+  # Also test unanswered token format: "unanswered:review:123:2026-09-16T09:05:00Z"
+  with_home "$home" env FM_CONTRIBUTIONS_NOW=2026-09-16T09:05:00Z \
+    "$ROOT/bin/fm-contributions.sh" ack delivery https://github.com/o/r/pull/8 "unanswered:review:123:2026-09-16T09:05:00Z" \
+    || fail 'ack unanswered:review:123 failed'
+  jq -e '(.records[0].threads[] | select(.key == "review:12") | .acked == null)' \
+    "$home/data/delivery/contributions.json" >/dev/null \
+    || fail 'unanswered ack for review:123 wrongly snoozed review:12'
+  pass 'ack matches thread keys exactly and does not snooze prefix-matching keys'
+}
+
 if [ "${BASH_SOURCE[0]}" = "$0" ]; then
   failures=0
-  for test_name in test_reraise_after_ack test_clear_on_our_reply test_clear_on_no_action_verdict test_no_reraise_when_we_spoke_last test_clear_on_our_push test_ack_restarts_snooze test_reraise_is_opt_in test_reraise_interval_configurable; do
+  for test_name in test_reraise_after_ack test_clear_on_our_reply test_clear_on_no_action_verdict test_no_reraise_when_we_spoke_last test_clear_on_our_push test_ack_restarts_snooze test_reraise_is_opt_in test_reraise_interval_configurable test_reminder_waits_full_interval_not_every_poll test_push_does_not_clear_subsequent_comment test_ack_matches_exact_thread_key; do
     ( "$test_name" ) || failures=$((failures + 1))
   done
   [ "$failures" -eq 0 ] || exit 1

@@ -522,7 +522,7 @@ observe() { # canonical GitHub URL -> normalized JSON
            | select(any($reviews[]; .user.login == $rev.user.login and (.state | IN("APPROVED","DISMISSED")) and .id > $rev.id) | not)
            | {author:.user.login, at:.submitted_at, source:(.html_url // ($c.html_url + "#pullrequestreview-" + (.id|tostring))), id:.id}])
          | sort_by([.at, .id]) | last // null) as $latest_external
-      | ($c.pushed_at // $c.head.pushed_at // null) as $pushed_at
+      | ($c.pushed_at // $c.head.pushed_at // ($after[0].commits // [] | map(select(.oid == $c.head.sha)) | last | (.committedDate // .pushedDate)) // null) as $pushed_at
       | {head:$c.head.sha,state:(if $c.merged_at != null then "merged" else $c.state end),
           draft:$c.draft,mergeable:(if $c.mergeable == true then "mergeable" elif $c.mergeable == false then "conflicting" else "unknown" end),
           can_merge:($repo[0].permissions.push // false),
@@ -718,15 +718,14 @@ poll() {
           | ($due | map(.key)) as $due_keys
           | $o.latest_external as $ext
           | ($old.verdict // null) as $verdict
-          | (if $old.observation != null and $old.observation.head != null and $old.observation.head != $o.head then $now
-             else ($o.pushed_at // $old.observation.pushed_at // null) end) as $pushed_at
+          | ($o.pushed_at // (if $old.observation != null and $old.observation.head == $o.head then $old.observation.pushed_at else null end)) as $pushed_at
           | (if $o.state == "open" and $ext != null
                  and ($o.latest_reply == null or $ext.at > $o.latest_reply)
                  and ($pushed_at == null or $pushed_at <= $ext.at)
                  and ($verdict == null or $verdict.source != $ext.source or $verdict.actor != "nobody")
              then true else false end) as $unanswered_cond
           | ($old.unanswered // null) as $old_un
-          | ((([($old_un.acked // $old_un.raised), ($old.threads // [] | map(.acked // .raised)[])] | map(select(. != null)) | max) // null)) as $last_contact
+          | ((([$old_un.acked, $old_un.raised] + ($old.threads // [] | map(.acked, .raised))) | map(select(. != null)) | max // null)) as $last_contact
           | (if $reraise_interval > 0 and $unanswered_cond
                  and (any($tracked[]; .source == $ext.source) | not) then
               ($epoch - ($ext.at | fromdateiso8601)) as $ext_age
@@ -755,7 +754,7 @@ poll() {
               + $pr_due_events | unique_by(.token))}
           | (.pending | map(.token)) as $held
           | if has("notified") then .notified |= map(select((startswith("unanswered:") | not) or IN($held[]))) else . end
-          | if $track then .threads = [$tracked[] | if .key | IN($due_keys[]) then .raised = $now else . end]
+          | if $track then .threads = [$tracked[] | if .key | IN($due_keys[]) then .raised = $now | .acked = null else . end]
             else del(.threads) end
           | if $unanswered_cond then
               .unanswered = {source:$ext.source, author:$ext.author, at:$ext.at,
@@ -862,12 +861,13 @@ case "${1:-}" in
       [ "$#" -eq 1 ] || fail 'ack needs one exact event token'
       jq --arg token "$1" --arg now "$NOW" '
         ([$now, (try ($token | capture("(?<ts>[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z)").ts) catch null)] | map(select(. != null)) | max) as $ack_time
+        | ($token | split(":") | if .[0] == "unanswered" then .[1:3] else .[:2] end | join(":")) as $token_key
         | .pending |= map(select(.token != $token))
         | if .unanswered != null then
             .unanswered.acked = $ack_time
           else . end
         | if .threads != null then
-            .threads |= map(if $token == ("unanswered:" + .key + ":*") or (.key as $k | $token | contains($k))
+            .threads |= map(if .key == $token_key
                             then .acked = $ack_time else . end)
           else . end' "$TMP/row.json" > "$TMP/update.json"
     else

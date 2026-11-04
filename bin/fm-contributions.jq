@@ -54,7 +54,8 @@ def tracked_threads($previous; $events; $new_tokens; $now_iso):
       + (if .review_bot == true then {review_bot:true} else {} end)];
 def due_threads($threads; $now; $age):
   [$threads[] | (.at | try fromdateiso8601 catch null) as $at
-    | ((.acked // .raised) as $ref | $ref == null or ($now - ($ref | fromdateiso8601)) >= $age) as $snoozed
+    | (([(.acked | try fromdateiso8601 catch null), (.raised | try fromdateiso8601 catch null)] | map(select(. != null)) | max) // null) as $ref
+    | ($ref == null or ($now - $ref) >= $age) as $snoozed
     | select($at != null and ($now - $at) >= $age and $snoozed)];
 def reraise_event($thread; $now; $now_iso):
   duration_text($now - ($thread.at | fromdateiso8601)) as $age
