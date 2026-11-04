@@ -611,6 +611,21 @@ assert_no_grep "bootstrap gui/$(id -u) $CASE_PLIST" "$CASE_LAUNCHCTL_LOG" \
   "a healthy launch agent was reloaded while repairing the remote job worker"
 pass "the remote job worker reload survives the same settling-domain refusal"
 
+# The herdr launch agent has its own reload, so drive it alone with the remote
+# job worker already healthy and loaded; the worker repair cannot consume the
+# injected refusal first.
+rm -f "$CASE_STATE/loaded-$LABEL"
+printf '1\n' > "$CASE_STATE/bootstrap-eio"
+: > "$CASE_LAUNCHCTL_LOG"
+doctor --fix
+expect_code 0 "$DOCTOR_RC" "--fix gave up on a transient EIO while loading the herdr launch agent"
+assert_contains "$DOCTOR_OUT" 'check launchagent-loaded=ok:' "the herdr launch agent did not survive a transient EIO"
+[ "$(grep -cF -- "bootstrap gui/$(id -u) $CASE_PLIST" "$CASE_LAUNCHCTL_LOG")" -eq 2 ] \
+  || fail "the herdr launch agent reload did not retry exactly once"$'\n'"$(cat "$CASE_LAUNCHCTL_LOG")"
+assert_no_grep "bootstrap gui/$(id -u) $CASE_JOB_PLIST" "$CASE_LAUNCHCTL_LOG" \
+  "a healthy remote job worker was reloaded while repairing the herdr launch agent"
+pass "the herdr launch agent reload survives the same settling-domain refusal"
+
 # A refusal that no amount of settling clears is still reported on the spot.
 new_case Darwin with-herdr no-gui
 doctor --fix
