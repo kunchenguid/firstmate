@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # Spawn a direct report: a crewmate in a treehouse or Orca worktree, or a
 # secondmate in its isolated firstmate home.
-# Usage: fm-spawn.sh <task-id> <project-dir> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--branch-prefix <prefix>] [--base-branch <branch>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--hermes-profile <name>] [--account <entry>] [--backend <name>] [--herdr-resume-lock-wait]
-#        fm-spawn.sh <task-id> <project-dir> --scout [--base-branch <branch>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--hermes-profile <name>] [--account <entry>] [--backend <name>] [--herdr-resume-lock-wait]
-#        fm-spawn.sh <task-id> [<firstmate-home>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] --secondmate
+# Usage: fm-spawn.sh <task-id> <project-dir> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--branch-prefix <prefix>] [--base-branch <branch>] [--work-item <url-or-id>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--hermes-profile <name>] [--account <entry>] [--backend <name>] [--herdr-resume-lock-wait]
+#        fm-spawn.sh <task-id> <project-dir> --scout [--base-branch <branch>] [--work-item <url-or-id>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--hermes-profile <name>] [--account <entry>] [--backend <name>] [--herdr-resume-lock-wait]
+#        fm-spawn.sh <task-id> [<firstmate-home>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] [--work-item <url-or-id>] --secondmate
 #   --mode and --yolo are this task's delivery contract, REQUIRED for every ship
 #   spawn and refused on --scout and --secondmate spawns. Firstmate resolves both
 #   per task at intake (AGENTS.md section 7); data/projects.md holds the captain's
@@ -60,6 +60,17 @@
 #   base_branch= in state/<id>.meta, which a relaunch reuses and later review and
 #   cleanup read; it is refused on secondmates and relaunches, and without it
 #   nothing changes.
+#   --work-item is the optional identifier of the external work item this task
+#   is for, such as a card URL or id.
+#   A ship, scout, or secondmate spawn records it as work_item= in
+#   state/<id>.meta when the flag is present.
+#   Absent records nothing and never refuses the spawn.
+#   A control character or newline is refused because it would split that
+#   one-line record; the identifier's shape is otherwise unchecked.
+#   --relaunch reuses the recorded value and refuses the flag.
+#   A secondmate spawn that republishes an existing record without the flag
+#   keeps the recorded value, including the remote route's own task record.
+#   bin/fm-fleet-snapshot.sh publishes it as tasks[].work_item, null when absent.
 #   Ship/scout launches always put fm-dod-lib.sh's current worker role scope
 #   first in the private launch-brief overlay, including the exact task-owned
 #   steering inbox. This never rewrites a project's instruction files or a
@@ -1000,6 +1011,8 @@ YOLO_SET=0
 BRANCH_PREFIX_SET=0
 BASE_BRANCH=
 BASE_BRANCH_SET=0
+WORK_ITEM=
+WORK_ITEM_SET=0
 UPSTREAM_CONSENT=
 UPSTREAM_CONSENT_SET=0
 TRACEPARENT_SET=0
@@ -1055,6 +1068,10 @@ for a in "$@"; do
     base-branch)
       BASE_BRANCH=$a
       BASE_BRANCH_SET=1
+      ;;
+    work-item)
+      WORK_ITEM=$a
+      WORK_ITEM_SET=1
       ;;
     upstream-consent)
       UPSTREAM_CONSENT=$a
@@ -1129,6 +1146,11 @@ for a in "$@"; do
     BASE_BRANCH=${a#--base-branch=}
     BASE_BRANCH_SET=1
     ;;
+  --work-item) want_value="work-item" ;;
+  --work-item=*)
+    WORK_ITEM=${a#--work-item=}
+    WORK_ITEM_SET=1
+    ;;
   --upstream-consent) want_value="upstream-consent" ;;
   --upstream-consent=*)
     UPSTREAM_CONSENT=${a#--upstream-consent=}
@@ -1195,6 +1217,20 @@ fi
   echo "error: --account requires a non-empty value" >&2
   exit 1
 }
+# A control character or newline would split the one-line work_item= record
+# or smuggle another field into it, so those values are refused. Nothing else
+# about the identifier is checked, and omitting the flag never refuses a spawn.
+if [ "$WORK_ITEM_SET" -eq 1 ]; then
+  [ -n "$WORK_ITEM" ] || {
+    echo "error: --work-item requires a non-empty value" >&2
+    exit 1
+  }
+  work_item_bytes=$(fm_backlog_bytes_of_string "$WORK_ITEM") || exit 1
+  if ! fm_backlog_control_bytes_valid 0 "$work_item_bytes"; then
+    echo "error: --work-item must be one line with no control characters; a control character or newline would break the task record" >&2
+    exit 1
+  fi
+fi
 # A secondmate, local or remote, launches on its own per-mate pin, so --account
 # is refused here, before the remote route could ignore it.
 [ "$ACCOUNT_SET" -eq 0 ] || [ "$KIND" != secondmate ] || {
@@ -1249,6 +1285,10 @@ if [ "$RELAUNCH" -eq 1 ]; then
   }
   [ "$BASE_BRANCH_SET" -eq 0 ] || {
     echo "error: --relaunch reuses the task's recorded base branch; --base-branch cannot override it" >&2
+    exit 1
+  }
+  [ "$WORK_ITEM_SET" -eq 0 ] || {
+    echo "error: --relaunch reuses the task's recorded work item; --work-item cannot override it" >&2
     exit 1
   }
   [ "$UPSTREAM_CONSENT_SET" -eq 0 ] || {
@@ -1327,6 +1367,7 @@ spawn_remote_secondmate() {
   local remote_backend remote_target remote_harness remote_herdr_session registry_lock remote_lock remote_generation
   local remote_rex_session_id remote_rex_server remote_rex_ok
   local remote_traceparent remote_recorded_traceparent sm_primary_head sync_out sync_rc account_config
+  local recorded_work_item=
   local -a launch_args
   id=${POS[0]:-}
   fm_task_id_creation_valid "$id" || {
@@ -1606,6 +1647,11 @@ spawn_remote_secondmate() {
   # reports it here so the parent does not deny the agent's actual identity.
   remote_recorded_traceparent=$(printf '%s\n' "$out" | sed -n 's/^traceparent=//p' | tail -1)
   fm_trace_context_valid "$remote_recorded_traceparent" || remote_recorded_traceparent=
+  if [ "$WORK_ITEM_SET" -eq 1 ]; then
+    recorded_work_item=$WORK_ITEM
+  elif [ -f "$meta" ]; then
+    recorded_work_item=$(fm_meta_get "$meta" work_item)
+  fi
   tmp="$meta.tmp.$$"
   {
     echo "window=remote:$id"
@@ -1617,6 +1663,7 @@ spawn_remote_secondmate() {
     echo "mode=secondmate"
     echo "yolo=off"
     echo "tasktmp="
+    [ -z "$recorded_work_item" ] || echo "work_item=$recorded_work_item"
     echo "model=${model#-}"
     echo "effort=${effort#-}"
     echo "home=$home"
@@ -2153,6 +2200,7 @@ if [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart" ] && case "$idpart" in *
   [ "$YOLO_SET" -eq 0 ] || shared_args+=(--yolo "$YOLO")
   [ "$BRANCH_PREFIX_SET" -eq 0 ] || shared_args+=(--branch-prefix "$BRANCH_PREFIX")
   [ "$BASE_BRANCH_SET" -eq 0 ] || shared_args+=(--base-branch "$BASE_BRANCH")
+  [ "$WORK_ITEM_SET" -eq 0 ] || shared_args+=(--work-item "$WORK_ITEM")
   [ "$HERDR_RESUME_LOCK_WAIT" -eq 0 ] || shared_args+=(--herdr-resume-lock-wait)
   [ "$ACCOUNT_SET" -eq 0 ] || shared_args+=(--account "$ACCOUNT_ARG")
   for pair in "${POS[@]}"; do
@@ -7185,6 +7233,16 @@ if [ "$SPAWN_META_LOCK_HELD" != 1 ]; then
   fm_lock_acquire_wait "$SPAWN_META_LOCK"
   SPAWN_META_LOCK_HELD=1
 fi
+# --relaunch, and a secondmate republish that did not pass --work-item, keep
+# the link already stored. The flag's value was accepted above, so a kept
+# value is one this spawn already allowed into the record.
+if [ "$WORK_ITEM_SET" -eq 0 ]; then
+  if [ "$RELAUNCH" -eq 1 ]; then
+    WORK_ITEM=$(fm_meta_get "$RELAUNCH_META" work_item)
+  elif [ -f "$STATE/$ID.meta" ]; then
+    WORK_ITEM=$(fm_meta_get "$STATE/$ID.meta" work_item)
+  fi
+fi
 if [ "$RELAUNCH" -eq 1 ]; then
   SPAWN_META_TMP="$STATE/.$ID.meta.relaunch.${BASHPID:-$$}"
 else
@@ -7195,7 +7253,7 @@ SPAWN_META_PATH=$SPAWN_META_TMP
 preserve_relaunch_meta() {
   awk -F= '
     BEGIN {
-      split("window endpoint_task_id worktree project harness hermes_profile hermes_home kind mode yolo branch tasktmp base_branch upstream_consent forge backup_remote backup_prefix model effort opencode_version account account_provider omp_profile busy_gen spawn_gen approval_mode traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id paseo_terminal_id paseo_workspace_id rex_server rex_session_id rex_window_id rex_block_id t3_thread_id t3_project_id tern_session_id tern_tab_id tern_block_id hc_session hc_terminal home projects control_relaunch_tx polytoken_session polytoken_port polytoken_credential", keys, " ")
+      split("window endpoint_task_id worktree project harness hermes_profile hermes_home kind mode yolo branch tasktmp base_branch work_item upstream_consent forge backup_remote backup_prefix model effort opencode_version account account_provider omp_profile busy_gen spawn_gen approval_mode traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id paseo_terminal_id paseo_workspace_id rex_server rex_session_id rex_window_id rex_block_id t3_thread_id t3_project_id tern_session_id tern_tab_id tern_block_id hc_session hc_terminal home projects control_relaunch_tx polytoken_session polytoken_port polytoken_credential", keys, " ")
       for (i in keys) owned[keys[i]] = 1
     }
     !($1 in owned)
@@ -7219,6 +7277,7 @@ preserve_relaunch_meta() {
   [ -z "${BRANCH:-}" ] || echo "branch=$BRANCH"
   echo "tasktmp=$TASK_TMP"
   [ -z "$BASE_BRANCH" ] || echo "base_branch=$BASE_BRANCH"
+  [ -z "$WORK_ITEM" ] || echo "work_item=$WORK_ITEM"
   [ -z "$UPSTREAM_CONSENT" ] || echo "upstream_consent=$UPSTREAM_CONSENT"
   # Read by bin/fm-dod-lib.sh's ready-report gate; absent on every other forge.
   [ "$EXTERNAL_REVIEW" = 0 ] || echo "forge=external"
