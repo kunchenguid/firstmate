@@ -130,7 +130,7 @@ A home can start its hc ship and scout workers on another machine its hc core al
 - It is added to this core's session and connected (`hc machine ls`), this machine's hc is 0.1.16 or later, and the other machine's is 0.1.18 or later.
 - A clone of the project at `<projects>/<project name>` whose origin is the same remote as this machine's clone.
 - Its own hc reaches this machine back, under the name `firstmate-as` gives (`hc machine add <ssh target> --name <that name>` there).
-  The worker reads its instructions and reports through that route.
+  The worker reads its instructions and reports through that route, which lets programs on that machine run commands here as this machine's user, so place workers only on a machine you already trust that far.
 - Claude Code installed and logged in, and the clone already trusted there (open `claude` in it once).
   A placed worker uses that machine's own login, so `--account` is refused.
 - The tools its brief uses, such as `gh` and, for a no-mistakes ship, `no-mistakes`, since the worker pushes and validates from there.
