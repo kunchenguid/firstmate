@@ -353,6 +353,10 @@ load_decision() {  # <path>; sets DECISION_TEXT and DECISION_DIGEST
   [ -n "$decision" ] || fail "decision file must not be empty"
   [ "$(printf '%s' "$decision" | LC_ALL=C wc -c | tr -d ' ')" -le 8192 ] \
     || fail "decision file exceeds 8192 bytes"
+  case "$decision" in
+    [A-Z]) fail "decision file contains only option $decision; include the displayed option words"
+      ;;
+  esac
   DECISION_TEXT=$decision
   DECISION_DIGEST=$(sha256_text "$decision")
 }
@@ -531,9 +535,17 @@ closed_answer_replay_mode_compatible() {  # <mode> <task-body>
 # and carries verified evidence; every other mode carries what the captain said.
 resolution_block() {  # <mode>
   local label='Captain decision:'
+  local selected=''
   [ "$1" != reconciled ] || label='Reconciliation evidence:'
   printf 'Resolution recorded by fm-captain-hold.\nDecision digest: %s\nResolution mode: %s\n\n%s\n%s\n' \
     "$DECISION_DIGEST" "$1" "$label" "$DECISION_TEXT"
+  case "$DECISION_TEXT" in
+    *$'\nAnswer as shown to the captain: '*) selected=${DECISION_TEXT##*$'\nAnswer as shown to the captain: '} ;;
+    *$'\nAnswer: '*) selected=${DECISION_TEXT##*$'\nAnswer: '} ;;
+    *$'\n'*) ;;
+    *) selected=$DECISION_TEXT ;;
+  esac
+  [ -z "$selected" ] || printf 'Selected answer: %s\n' "$selected"
 }
 
 # Durable state of one captain call: an active captain hold (annotations
@@ -1557,6 +1569,15 @@ command_answers() {
     answer=$(sanitize_field "${answer:-}")
     [ -n "$answer" ] || continue
     label=$(sanitize_field "${label:-}")
+    case "$answer" in
+      [A-Z])
+        [ -n "$label" ] || {
+          printf 'skipped: %s (option %s requires its displayed meaning)\n' "$key" "$answer"
+          skipped=$((skipped + 1))
+          continue
+        }
+        ;;
+    esac
     if [ "$answer" = "$RECONCILE_VALUE" ]; then
       printf 'refused: %s (reconcile requests require a bound captured source)\n' "$key"
       skipped=$((skipped + 1))

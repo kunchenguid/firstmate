@@ -835,6 +835,11 @@ test_answer_records_and_closes() {
     > "$home/empty-answer.out" 2> "$home/empty-answer.err"; then
     fail "answer accepted an empty captain decision"
   fi
+  printf 'A' > "$home/letter-only.txt"
+  if run_captain "$home" answer sample-guard-call --decision-file "$home/letter-only.txt" \
+    > "$home/letter-answer.out" 2> "$home/letter-answer.err"; then
+    fail "answer accepted an option letter without its displayed meaning"
+  fi
   if run_captain "$home" answer sample-guard-call > "$home/bare-answer.out" 2> "$home/bare-answer.err"; then
     fail "answer accepted a close with no captain decision file at all"
   fi
@@ -860,6 +865,8 @@ test_answer_records_and_closes() {
   assert_contains "$show" "Resolution mode: answered" "the answered task did not record its close path"
   assert_contains "$show" "Captain chose the guard option." \
     "the answered task did not record the captain decision text"
+  assert_contains "$show" "Selected answer: Captain chose the guard option." \
+    "the answered task did not expose its deterministic selected-answer field"
   run_captain "$home" answer sample-guard-call --decision-file "$home/guard-decision.txt" >/dev/null \
     || fail "identical answer retry was not idempotent"
   printf 'Captain chose something else entirely.\n' > "$home/drifted.txt"
@@ -1828,6 +1835,8 @@ SH
   assert_contains "$show" "state: done" "capturing the captain's answer left the membership call open"
   assert_contains "$show" "Resolution mode: answered" "the membership call did not record its close path"
   assert_contains "$show" "Answer: gold-only" "the closed call did not record the captain's actual answer"
+  assert_contains "$show" "Answer as shown to the captain: Membership: gold-only - captain detail" "the annotated normal answer lost its displayed meaning"
+  assert_contains "$show" "Selected answer: Membership: gold-only - captain detail" "the closed call did not expose its selected-answer field"
   assert_contains "$show" "captain detail" "the annotated normal answer lost the captain's note"
   show=$(tasks_in "$home" show sample-gated-work --full)
   assert_contains "$show" "state: queued" "the released work item did not stay queued"
