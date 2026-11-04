@@ -5,6 +5,7 @@
 # an already-registered id's line and must carry the icon across.
 set -u
 
+# shellcheck source=tests/secondmate-helpers.sh disable=SC1091
 . "$(dirname "${BASH_SOURCE[0]}")/secondmate-helpers.sh"
 # shellcheck source=bin/fm-secondmate-registry-lib.sh
 . "$ROOT/bin/fm-secondmate-registry-lib.sh"
