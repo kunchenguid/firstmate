@@ -33,7 +33,8 @@
 #      not match is not a signal. No adapter ships with firstmate.
 # Status line text is never a signal.
 # A snapshot is for one account. A task record with account= accepts a snapshot
-# only with a matching --account. A profile quota_scope matches alongside the
+# only with a matching --account. For pi and pi-signed workers account= is a Pi
+# root, so consider refuses every snapshot for such a task. A profile quota_scope matches alongside the
 # model-wide rows. shared_quota: true in the dispatch file ignores the snapshot.
 # A quota snapshot, when passed, also vetoes a candidate whose applicable runway
 # is exhausted_now. A missing snapshot does not invent exhaustion. Unknown
@@ -407,6 +408,9 @@ cmd_consider() {
   fi
   if [ -n "$snapshot" ]; then
     [ "$(fm_meta_get "$meta" account)" = "$account" ] || die "quota snapshot is not for the task's recorded account"
+    case "$(fm_meta_get "$meta" harness)" in
+      pi|pi-signed) [ -z "$account" ] || die "account= on a pi worker is a Pi root; no quota snapshot describes it" ;;
+    esac
     [ -f "$snapshot" ] || die "quota snapshot is missing: $snapshot"
     fm_quota_json_valid < "$snapshot" || die "quota snapshot is not a valid quota-axi document"
   fi
