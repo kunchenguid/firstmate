@@ -185,7 +185,7 @@ run_spawn() {
   local case_dir=$1 home=$2 proj=$3 wt=$4 fakebin=$5 id=$6
   shift 6
   local -a spawn_flags
-  read -r -a spawn_flags <<<"${SPAWN_FLAGS---mode no-mistakes --yolo off}"
+  read -r -a spawn_flags <<<"${SPAWN_FLAGS---harness bob --mode no-mistakes --yolo off}"
   HOME="$home" FM_ROOT_OVERRIDE='' FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
@@ -200,7 +200,7 @@ run_spawn() {
     FM_FAKE_BOB_CURSOR="${FM_FAKE_BOB_CURSOR:-0}" \
     FM_BOB_READY_POLLS=3 FM_BOB_DELIVERY_POLLS=3 FM_BOB_POLL_INTERVAL=0 \
     PATH="$fakebin:$BASE_PATH" \
-    "$SPAWN" "$id" "$proj" --harness bob "${spawn_flags[@]}" "$@" 2>&1
+    "$SPAWN" "$id" "$proj" ${spawn_flags[@]+"${spawn_flags[@]}"} "$@" 2>&1
 }
 
 test_bob_launch_then_send_is_verified() {
@@ -379,6 +379,44 @@ test_bob_concurrent_trust_registrations_all_persist() {
   pass "fm-bob-trust: concurrent registrations all persist"
 }
 
+# Bob truncates and rewrites its store in place, so a parallel spawn can read it
+# empty or half-written. That read must wait for the writer, neither aborting the
+# spawn nor replacing the entries the writer is about to put back.
+test_bob_trust_waits_out_a_truncating_writer() {
+  local dir="$TMP_ROOT/trust-writer" midwrite i=0 store writer rc wt_real
+  for midwrite in '' '{"version": 1, "fold'; do
+    i=$((i + 1))
+    fm_git_worktree "$dir/proj-$i" "$dir/wt-$i" "trust-writer-$i"
+    mkdir -p "$dir/home-$i/.bob"
+    store="$dir/home-$i/.bob/trustedFolders.json"
+    printf '%s' "$midwrite" > "$store"
+    (sleep 0.6; printf '{"version":1,"folders":{"/prior":"TRUST_FOLDER"}}\n' > "$store") &
+    writer=$!
+    HOME="$dir/home-$i" "$ROOT/bin/fm-bob-trust.sh" "$dir/wt-$i" "$dir/proj-$i" >/dev/null 2>"$dir/err-$i"
+    rc=$?
+    wait "$writer"
+    expect_code 0 "$rc" "a store read mid-write must be retried: $(cat "$dir/err-$i")"
+    wt_real=$(cd "$dir/wt-$i" && pwd -P)
+    node -e 'const f=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")).folders;
+      if(f["/prior"]!=="TRUST_FOLDER"||f[process.argv[2]]!=="TRUST_FOLDER") process.exit(1)' "$store" "$wt_real" \
+      || fail "the writer's entry and this worktree's entry must both survive: $(cat "$store")"
+  done
+  pass "fm-bob-trust: a store read mid-write waits for the writer and keeps its entries"
+}
+
+test_bob_trust_refuses_a_store_that_stays_broken() {
+  local dir="$TMP_ROOT/trust-broken" store rc=0 out
+  fm_git_worktree "$dir/proj" "$dir/wt" trust-broken
+  mkdir -p "$dir/home/.bob"
+  store="$dir/home/.bob/trustedFolders.json"
+  printf '{"version": 1, "fold' > "$store"
+  out=$(HOME="$dir/home" "$ROOT/bin/fm-bob-trust.sh" "$dir/wt" "$dir/proj" 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "a store that never becomes readable must be refused"
+  assert_contains "$out" "stayed empty or unparsable" "the broken-store refusal was not reported"
+  [ "$(cat "$store")" = '{"version": 1, "fold' ] || fail "a broken store must not be overwritten"
+  pass "fm-bob-trust: a store that stays broken is refused and left in place"
+}
+
 # The matcher runs on every foreign node process, some holding a whole brief in
 # argv, so a miss must not fork per word. Any helper a word could reach logs here.
 test_bob_matcher_forks_nothing_on_a_foreign_long_argv() {
@@ -399,17 +437,47 @@ test_bob_matcher_forks_nothing_on_a_foreign_long_argv() {
   pass "fm_bob_process_matches: a miss on a long foreign argv forks nothing"
 }
 
+# A /bob word in a brief gets a foreign argv past the matcher's cheap prefilter, so
+# the scan itself must stay linear: a quadratic one takes tens of seconds here.
+test_bob_matcher_scan_stays_linear_on_a_foreign_long_argv() {
+  local args start
+  # shellcheck source=bin/fm-bob-process-lib.sh
+  . "$ROOT/bin/fm-bob-process-lib.sh"
+  args="node /srv/app.js /opt/refs/bob.md $(printf 'word%d ' $(seq 1 30000))"
+  start=$SECONDS
+  if fm_bob_process_matches MainThread "$args"; then
+    fail "a foreign node process naming a bob file matched Bob"
+  fi
+  [ $((SECONDS - start)) -lt 5 ] || fail "the Bob matcher took $((SECONDS - start))s on a 30000-word argv"
+  pass "fm_bob_process_matches: a miss past the prefilter stays linear in argv length"
+}
+
 test_bob_secondmate_is_refused() {
   local id rec out rc
   id="bob-second-z1-$$"
   rec=$(make_spawn_case second "$id")
   read_spawn_record "$rec"
-  out=$(SPAWN_FLAGS='' run_spawn "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" --secondmate)
+  out=$(SPAWN_FLAGS='--harness bob' run_spawn "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" --secondmate)
   rc=$?
   [ "$rc" -ne 0 ] || fail "bob must be refused as a secondmate"
   assert_contains "$out" "bob is a verified crewmate/scout adapter only" "bob secondmate refusal did not come from the crewmate-only guard"
   [ ! -s "$CASE_DIR/launch.log" ] || fail "bob secondmate was launched despite the refusal"
   pass "fm-spawn: bob is refused as a secondmate"
+}
+
+# The positional harness parser must read bob as a harness, not as a home path.
+test_bob_positional_secondmate_is_refused() {
+  local id rec out rc
+  id="bob-secondpos-z1-$$"
+  rec=$(make_spawn_case secondpos "$id")
+  read_spawn_record "$rec"
+  printf 'claude\n' > "$HOME_DIR/config/crew-harness"
+  out=$(SPAWN_FLAGS='' run_spawn "$CASE_DIR" "$HOME_DIR" bob "$WT_DIR" "$FAKEBIN_DIR" "$id" --secondmate)
+  rc=$?
+  [ "$rc" -ne 0 ] || fail "a positional bob must be refused as a secondmate"
+  assert_contains "$out" "bob is a verified crewmate/scout adapter only" "positional bob did not reach the crewmate-only guard"
+  [ ! -s "$CASE_DIR/launch.log" ] || fail "bob secondmate was launched despite the refusal"
+  pass "fm-spawn: a positional bob is refused as a secondmate"
 }
 
 test_bob_launch_then_send_is_verified
@@ -421,5 +489,9 @@ test_bob_tracked_settings_refuses_spawn
 test_bob_tracked_brief_refuses_spawn
 test_bob_symlinked_dir_refuses_spawn
 test_bob_concurrent_trust_registrations_all_persist
+test_bob_trust_waits_out_a_truncating_writer
+test_bob_trust_refuses_a_store_that_stays_broken
 test_bob_matcher_forks_nothing_on_a_foreign_long_argv
+test_bob_matcher_scan_stays_linear_on_a_foreign_long_argv
 test_bob_secondmate_is_refused
+test_bob_positional_secondmate_is_refused

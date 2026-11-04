@@ -2645,7 +2645,7 @@ if [ "$RELAUNCH" -eq 1 ]; then
   }
 elif [ "$KIND" = secondmate ]; then
   case "${POS[1]:-}" in
-  '' | claude | codex | opencode | pi | pi-signed | grok | kimi | cursor | gemini | muse | rovo | omp | agy | devin | commandcode | polytoken | cortex | kiro | hermes)
+  '' | claude | codex | opencode | pi | pi-signed | grok | kimi | cursor | gemini | muse | rovo | omp | agy | devin | commandcode | polytoken | cortex | kiro | hermes | bob)
     ARG3=${POS[1]:-}
     ;;
   *' '*)
@@ -6241,20 +6241,10 @@ bob)
   # backstop. bin/fm-bob-trust.sh owns the structural scope test and refuses
   # anything outside the isolated worktree; the refusal blocks the spawn rather
   # than launching a worker with silent suppression of approval and hooks.
-  # Firstmate writes .bob/settings.json and .bob/launch-brief.md into the
-  # worktree: refuse when either path is committed (it would replace project
-  # content that then enters the worker's commit), and when .bob itself is a
-  # symlink (the writes would follow it out of the worktree).
-  if [ -L "$WT/.bob" ]; then
-    echo "error: $WT has .bob as a symlink; firstmate writes its hook file and brief copy through .bob, which would land outside the worktree; refusing to launch a bob worker; $(spawn_endpoint_hint)" >&2
+  fm_control_bob_require_wiring_free "$WT" "$STATE" "$ID" || {
+    echo "error: refusing to launch a bob worker; $(spawn_endpoint_hint)" >&2
     exit 1
-  fi
-  for bob_owned in .bob/settings.json .bob/launch-brief.md; do
-    if git -C "$WT" ls-files --error-unmatch -- "$bob_owned" >/dev/null 2>&1; then
-      echo "error: $WT tracks its own $bob_owned; firstmate writes its Bob hook file and brief copy to that path, so it would replace the project's committed content; refusing to launch a bob worker; $(spawn_endpoint_hint)" >&2
-      exit 1
-    fi
-  done
+  }
   if ! "$FM_ROOT/bin/fm-bob-trust.sh" "$WT" "$PROJ_ABS" >/dev/null; then
     echo "error: could not pre-register Bob workspace trust for $WT; refusing to launch a bob worker whose --auto-approve and workspace hooks would be silently suppressed; $(spawn_endpoint_hint)" >&2
     exit 1

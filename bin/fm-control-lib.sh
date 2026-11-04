@@ -512,7 +512,7 @@ fm_control_endpoint_absence_verdict() {  # <backend> <target> [meta]
 # changes harness (or re-arms the same one with a fresh busy generation) can
 # clear the previous incarnation's wiring instead of leaving a stale hook
 # pointing at a retired generation. Teardown's worktree return also reads this
-# table for Polytoken; both consumers preserve git-tracked Polytoken layers.
+# table for Polytoken and Bob; both consumers preserve their git-tracked layers.
 # Prints zero or more absolute paths, one per line: worktree-resident
 # hook files and firstmate-owned state tokens only, never a harness's own
 # managed config.
@@ -609,6 +609,26 @@ fm_control_harness_wiring_paths() {  # <harness> <worktree> <state-dir> <id> [ki
       printf '%s\n' "$state/$id.kiro-home/hooks/stop"
       ;;
   esac
+}
+
+# Refuse a worktree firstmate cannot wire for bob, before anything has changed:
+# a committed wiring path would be replaced by content that then enters the
+# worker's commit, and a .bob symlink would carry the writes out of the worktree.
+# fm-spawn runs this at launch and fm-control before a relaunch stops the worker.
+fm_control_bob_require_wiring_free() {  # <worktree> <state-dir> <id>
+  local wt=$1 path name
+  if [ -L "$wt/.bob" ]; then
+    echo "error: $wt has .bob as a symlink; firstmate writes its hook file and brief copy through .bob, which would land outside the worktree" >&2
+    return 1
+  fi
+  while IFS= read -r path; do
+    name=${path#"$wt"/}
+    git -C "$wt" ls-files --error-unmatch -- "$name" >/dev/null 2>&1 || continue
+    echo "error: $wt tracks its own $name; firstmate writes its Bob hook file and brief copy to that path, so it would replace the project's committed content" >&2
+    return 1
+  done <<EOF
+$(fm_control_harness_wiring_paths bob "$wt" "$2" "$3")
+EOF
 }
 
 # The firstmate-owned per-task DIRECTORIES a harness mints, one per line:

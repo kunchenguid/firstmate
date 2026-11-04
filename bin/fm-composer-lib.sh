@@ -637,13 +637,10 @@ FM_COMPOSER_SHELL_PROMPT_GLYPHS=$(printf '%s\n' '>' '$' '%' '#')
 # Command Code renders the anchored `Ask your question...`
 # after its `❯` glyph (verified live, Command Code 1.74.1); its truecolor is too
 # bright for the default ghost ceiling, so fm_composer_classify_screen reads its
-# screen with a raised one. Bob renders the anchored `Build Anything, @ for
-# context, / for commands, $ for skills` after its `❯` glyph between two `─`
-# rules (verified live, bob 2.0.9; a 256-colour grey run, with a reverse-video
-# cell after the glyph). kiro's bare `›` composer needs no entry here: see
+# screen with a raised one. kiro's bare `›` composer needs no entry here: see
 # FM_COMPOSER_HINTED_IDLE_RE_DEFAULT below. FM_COMPOSER_IDLE_RE overrides for an unverified harness;
 # matching is case-insensitive.
-FM_COMPOSER_IDLE_RE_DEFAULT='^Type a message\.\.\.$|^Ask anything(\.\.\.|…)|^Plan, search, build anything$|^Add a follow-up$|^Ask Devin to build features, fix bugs, or work on your code$|^Ask your question\.\.\.$|^Type your message\.\.\.$|^Type to queue message\.\.\.$|^Build Anything, @ for context, / for commands, \$ for skills$'
+FM_COMPOSER_IDLE_RE_DEFAULT='^Type a message\.\.\.$|^Ask anything(\.\.\.|…)|^Plan, search, build anything$|^Add a follow-up$|^Ask Devin to build features, fix bugs, or work on your code$|^Ask your question\.\.\.$|^Type your message\.\.\.$|^Type to queue message\.\.\.$'
 
 # KIRO ONLY (fm_composer_kiro_scope): idle placeholders that carry a submit hint
 # typed input never renders, so the whole anchored row proves an empty composer

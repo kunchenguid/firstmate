@@ -117,7 +117,10 @@ fi
 # different homes share this one store, so a moved store is re-read and retried
 # with randomized backoff, and a recorded entry is read back again after a short
 # randomized settle, which catches a writer that passed its own fingerprint check
-# just before this rename and replaced the store from an older read.
+# just before this rename and replaced the store from an older read. Bob truncates
+# and rewrites the file in place, so only an absent store counts as empty: an
+# empty or unparsable read is a write in progress, never written over and retried
+# like a moved store, and a store that stays that way is refused.
 # Bob's store schema: { "version": 1, "folders": { "<path>": "TRUST_FOLDER" } }
 # "TRUST_FOLDER" = the exact folder is trusted; "TRUST_PARENT" = all children
 # are trusted. We register as TRUST_FOLDER for the isolated worktree: the exact
@@ -137,25 +140,27 @@ const readStore = () => {
 };
 const fingerprint = (buf) =>
   buf === null ? "absent" : crypto.createHash("sha256").update(buf).digest("hex");
+const parseStore = (buf) => {
+  const root = JSON.parse(buf.toString("utf8"));
+  if (root === null || typeof root !== "object" || Array.isArray(root)) {
+    throw new Error(`${store} is not a JSON object`);
+  }
+  return root;
+};
 const isTrusted = (root) =>
   root.folders &&
   typeof root.folders === "object" &&
   !Array.isArray(root.folders) &&
   (root.folders[wantedPath] === "TRUST_FOLDER" ||
    root.folders[wantedPath] === "TRUST_PARENT");
+const retained = () => {
+  const current = readStore();
+  return current !== null && isTrusted(parseStore(current));
+};
 const attempt = () => {
   const original = readStore();
   const before = fingerprint(original);
-  let root = { version: 1, folders: {} };
-  if (original !== null) {
-    const raw = original.toString("utf8");
-    if (raw.trim() !== "") {
-      root = JSON.parse(raw);
-      if (root === null || typeof root !== "object" || Array.isArray(root)) {
-        throw new Error(`${store} is not a JSON object`);
-      }
-    }
-  }
+  const root = original === null ? { version: 1, folders: {} } : parseStore(original);
   if (!root.folders || typeof root.folders !== "object" || Array.isArray(root.folders)) {
     root.folders = {};
   }
@@ -172,21 +177,26 @@ const attempt = () => {
   } finally {
     if (!renamed) fs.rmSync(tmp, { force: true });
   }
-  return isTrusted(JSON.parse(fs.readFileSync(store, "utf8"))) ? "recorded" : "dropped";
+  return retained() ? "recorded" : "dropped";
 };
 const sleep = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 const jitter = (minMs, maxMs) => sleep(minMs + crypto.randomInt(maxMs - minMs));
 const maxAttempts = 40;
+const settled = () => {
+  const outcome = attempt();
+  if (outcome !== "recorded") return outcome;
+  jitter(50, 200);
+  return retained() ? "recorded" : "dropped";
+};
 let outcome = "dropped";
 try {
-  for (let i = 0; i < maxAttempts; i += 1) {
-    outcome = attempt();
-    if (outcome === "recorded") {
-      jitter(50, 200);
-      if (isTrusted(JSON.parse(fs.readFileSync(store, "utf8")))) break;
-      outcome = "dropped";
-    } else {
-      jitter(10, 150);
+  for (let i = 0; i < maxAttempts && outcome !== "recorded"; i += 1) {
+    if (i > 0) jitter(10, 150);
+    try {
+      outcome = settled();
+    } catch (err) {
+      if (!(err instanceof SyntaxError)) throw err;
+      outcome = "unparsable";
     }
   }
 } catch (err) {
@@ -194,6 +204,10 @@ try {
   process.exit(1);
 }
 if (outcome === "recorded") process.exit(0);
+if (outcome === "unparsable") {
+  console.error(`error: ${store} stayed empty or unparsable while trust was being recorded; refusing to overwrite it`);
+  process.exit(1);
+}
 if (outcome === "moved") {
   console.error(`error: ${store} kept changing while trust was being recorded; refusing to overwrite it`);
   process.exit(1);
