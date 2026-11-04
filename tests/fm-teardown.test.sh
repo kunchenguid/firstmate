@@ -1177,6 +1177,10 @@ test_no_pr_recorded_discovers_merged_pr_by_branch_allows() {
   ! grep -q REFUSED "$case_dir/stderr" || fail "no-pr-branch-discovery: teardown printed a REFUSED line"
   assert_grep 'https://github.com/example/repo/pull/7' "$case_dir/data/backlog.md" \
     "no-pr-branch-discovery: resolved PR URL was not recorded on completion"
+  assert_grep '(merged' "$case_dir/data/backlog.md" \
+    "no-pr-branch-discovery: forge-confirmed merge was not archived as merged"
+  assert_no_grep 'PR not confirmed merged' "$case_dir/data/backlog.md" \
+    "no-pr-branch-discovery: forge-confirmed merge was recorded as unconfirmed"
   pass "teardown discovers a merged PR by branch name and tears down when no pr= was ever recorded"
 }
 
