@@ -13,8 +13,10 @@
 #
 # With no test paths, the tests are the tests/*.test.sh files that differ from
 # the merge base with --base (default: origin/main, else main), including
-# uncommitted and untracked ones. The working tree is copied into a scratch
-# directory and mounted read-write, so the checkout is never modified.
+# uncommitted and untracked ones. A local clone of the repo, overlaid with the
+# working tree files, is mounted read-write from a scratch directory, so tests
+# see git history and the checkout is never modified. Tests run as the host
+# user, not root, to match CI file-mode behavior.
 # --list prints the selected tests and exits without a container runtime.
 #
 # Runtime: FM_CONTAINER_RUNTIME, else docker, else podman. With none installed
@@ -92,6 +94,7 @@ image=fm-test-linux:bookworm
 
 scratch=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-linux.XXXXXX")
 trap 'rm -rf "$scratch"' EXIT
+git clone -q --local "$root" "$scratch" || die "could not clone $root into the scratch directory"
 files=()
 while IFS= read -r -d '' path; do
   [ -e "$root/$path" ] && files+=("$path")
@@ -101,7 +104,7 @@ done < <(git -C "$root" ls-files -z --cached --others --exclude-standard)
 printf 'fm-test-linux: %s on %s\n' "${#tests[@]}" "$("$runtime" run --rm "$image" sh -c 'uname -sr')"
 failed=()
 for t in "${tests[@]}"; do
-  if "$runtime" run --rm -v "$scratch:/work" -w /work -e TMPDIR=/tmp "$image" bash "$t"; then
+  if "$runtime" run --rm --user "$(id -u):$(id -g)" -v "$scratch:/work" -w /work -e HOME=/tmp -e TMPDIR=/tmp "$image" bash "$t"; then
     printf 'PASS %s\n' "$t"
   else
     printf 'FAIL %s\n' "$t"
