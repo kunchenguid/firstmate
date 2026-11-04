@@ -28,7 +28,7 @@ Create the private, gitignored `local-llm.json` in the effective config director
 ```
 
 Use `bin/fm-local-llm.py` to draft a conventional commit message from a diff or to summarise a test log; its command help owns the input forms and exact commands.
-The helper requires Python 3, sends requests without an API key, disables model thinking, and exits unsuccessfully without stdout when configuration or the endpoint is unavailable.
+The helper requires Python 3, sends requests without an API key, disables model thinking, and exits unsuccessfully without stdout when configuration, the endpoint, or a complete valid response is unavailable.
 
 ## FM_HOME
 
