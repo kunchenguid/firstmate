@@ -60,7 +60,8 @@
 # machine's filesystem or process table: fm_backend_hc_remote_exec is the one
 # transport and reports a transport failure (exit 255) apart from the
 # program's own exit code, so a caller can refuse instead of reading an
-# unreachable machine as an empty answer. A remote foreground pid is never
+# unreachable machine as an empty answer. Teardown's worktree process reap and
+# the staged launch file's removal run there the same way. A remote foreground pid is never
 # passed to the local process classifier, which would read whatever local
 # process holds that number.
 
@@ -581,6 +582,30 @@ fm_backend_hc_reverse_route_check() {  # <session> <machine> <firstmate-as> <sta
   return 1
 }
 
+# fm_backend_hc_claude_runs_check: `claude --version` succeeds on <machine> in
+# the environment the placed launch gets: the login shell there
+# (${SHELL:-/bin/sh} -l, stdin from /dev/null, bounded by the exec timeout),
+# with CLAUDE_CONFIG_DIR=<claude-config> when configured, as the launch sets it.
+fm_backend_hc_claude_runs_check() {  # <session> <machine> [claude-config]
+  local session=$1 machine=$2 cfg=${3:-} out rc
+  # shellcheck disable=SC2016 # expands on the other machine
+  out=$(fm_backend_hc_remote_exec "$session" "$machine" 60 - /bin/sh -c '
+    if [ -n "$1" ]; then
+      FM_HC_CLAUDE_CONFIG=$1
+      export FM_HC_CLAUDE_CONFIG
+      exec "${SHELL:-/bin/sh}" -lc "CLAUDE_CONFIG_DIR=\"\$FM_HC_CLAUDE_CONFIG\" claude --version" </dev/null
+    fi
+    exec "${SHELL:-/bin/sh}" -lc "claude --version" </dev/null
+  ' sh "$cfg" 2>&1) && rc=0 || rc=$?
+  [ "$rc" -ne 0 ] || return 0
+  if [ "$rc" -eq 255 ]; then
+    echo "error: could not reach hc machine '$machine' to check that claude runs there" >&2
+  else
+    echo "error: claude does not run on hc machine '$machine' in its login shell (claude --version exited $rc: $(printf '%s' "$out" | tr '\n' ' ' | cut -c1-200)); install Claude Code there or put it on that login shell's PATH" >&2
+  fi
+  return 1
+}
+
 # fm_backend_hc_claude_trust_check: Claude Code on <machine> already trusts
 # <clone> or an ancestor of <worktree> in the store the worker will read
 # (<claude-config>/.claude.json when configured, else the login shell's
@@ -687,6 +712,71 @@ fm_backend_hc_remote_file_write() {  # <session> <machine> <path>
   fm_backend_hc_atom_valid "$session" || { echo "error: refusing hc session '$session'" >&2; return 1; }
   fm_backend_hc_atom_valid "$machine" || { echo "error: refusing hc machine name '$machine'" >&2; return 1; }
   fm_backend_hc_env_run "$session" file write --json --on "$machine" "$path" >/dev/null
+}
+
+# fm_backend_hc_remote_file_remove: `rm -f` <path> on <machine>; an absent
+# file is success. A failure warns with the path and returns 1, never more.
+fm_backend_hc_remote_file_remove() {  # <session> <machine> <path>
+  fm_backend_hc_remote_exec "$1" "$2" 30 - rm -f -- "$3" >/dev/null 2>&1 && return 0
+  echo "warning: could not remove $3 on hc machine '$2'; remove it there by hand" >&2
+  return 1
+}
+
+# fm_backend_hc_remote_reap_cwd: the placed counterpart of fm-teardown.sh's
+# reap_task_worktree_processes, run in one `hc exec` on <machine>. Every
+# process whose current directory is <dir> or under it (lsof -a -d cwd where
+# that machine has lsof, else a /proc cwd scan) gets TERM, then KILL after a
+# one-second grace, then a recheck; the scan never signals its own shell.
+# Returns 0 when nothing is left (or <dir> is gone), and 1 with the reason on
+# stderr when the scan could not run there or a process survived.
+fm_backend_hc_remote_reap_cwd() {  # <session> <machine> <dir>
+  local session=$1 machine=$2 dir=$3 out rc
+  # shellcheck disable=SC2016 # expands on the other machine
+  out=$(fm_backend_hc_remote_exec "$session" "$machine" 60 - /bin/sh -c '
+    dir=$(cd "$1" 2>/dev/null && pwd -P) || exit 0
+    self=$$
+    if command -v lsof >/dev/null 2>&1; then how=lsof
+    elif readlink "/proc/$self/cwd" >/dev/null 2>&1; then how=proc
+    else exit 5
+    fi
+    scan() {
+      if [ "$how" = lsof ]; then
+        out=$(lsof -a -d cwd -Fpn 2>/dev/null) || return 1
+        printf "%s\n" "$out" | awk -v d="$dir" -v self="$self" "
+          /^p/ { pid = substr(\$0, 2); next }
+          /^n/ { path = substr(\$0, 2); if ((path == d || index(path, d \"/\") == 1) && pid != self) print pid }"
+      else
+        for p in /proc/[0-9]*; do
+          c=$(readlink "$p/cwd" 2>/dev/null) || continue
+          case "$c" in "$dir"|"$dir"/*) [ "${p#/proc/}" = "$self" ] || printf "%s\n" "${p#/proc/}" ;; esac
+        done
+      fi
+    }
+    pids=$(scan) || exit 4
+    [ -n "$pids" ] || exit 0
+    printf "%s\n" "$pids" | tr "\n" " "
+    kill -TERM $pids 2>/dev/null
+    sleep 1
+    pids=$(scan) || exit 4
+    if [ -n "$pids" ]; then
+      kill -KILL $pids 2>/dev/null
+      sleep 1
+      pids=$(scan) || exit 4
+    fi
+    [ -z "$pids" ] || { printf "\nsurvivors: %s" "$(printf "%s\n" "$pids" | tr "\n" " ")"; exit 3; }
+    exit 0
+  ' sh "$dir" 2>/dev/null) && rc=0 || rc=$?
+  case "$rc" in
+    0)
+      [ -z "$out" ] || echo "teardown: reaped leaked worktree process(es) on hc machine '$machine': $out" >&2
+      return 0
+      ;;
+    3) echo "REFUSED: processes under $dir on hc machine '$machine' survived TERM and KILL (${out##*survivors: }); preserving the worktree and every record for inspection or retry." >&2 ;;
+    5) echo "REFUSED: hc machine '$machine' has neither lsof nor a readable /proc, so no scan can find processes left under $dir there; preserving the worktree and every record." >&2 ;;
+    255) echo "REFUSED: cannot reach hc machine '$machine' to stop processes left under $dir there; preserving the worktree and every record for retry." >&2 ;;
+    *) echo "REFUSED: cannot determine leaked processes under $dir on hc machine '$machine' (scan failed there); preserving the worktree and every record for inspection or retry." >&2 ;;
+  esac
+  return 1
 }
 
 # fm_backend_hc_create_task: start a login shell terminal in <cwd> for

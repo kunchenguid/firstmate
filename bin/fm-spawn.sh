@@ -152,10 +152,12 @@
 #   config/hc-machine places every hc ship and scout, and with neither nothing
 #   changes (docs/configuration.md "hc worker placement" owns the file,
 #   docs/hc-backend.md "Workers on another machine" the behavior). A placed
-#   spawn proves the machine, its clone, its route back, and Claude's trust
-#   there before anything exists, creates the worktree there instead of
-#   leasing a Treehouse slot, and records hc_machine=, hc_firstmate_as=, and
-#   hc_clone=; it refuses any harness but claude, local-only, forge=gerrit or
+#   spawn proves the machine, that claude runs in its login shell there, its
+#   clone, its route back, and Claude's trust there before anything exists,
+#   creates the worktree there instead of leasing a Treehouse slot, and records
+#   hc_machine=, hc_firstmate_as=, hc_clone=, and hc_launch_file= (the launch
+#   file staged there, which abort cleanup and teardown remove once the
+#   terminal is closed); it refuses any harness but claude, local-only, forge=gerrit or
 #   external, --account, and relaunch, and never falls back to this machine.
 #   A rex crewmate or scout opens one tab in the Rex session the launching
 #   firstmate runs in when it runs directly inside Rex, otherwise in its home's
@@ -2011,16 +2013,26 @@ spawn_abort_cleanup() {
   # A placed worktree this spawn created on another hc machine holds nothing
   # but its fresh checkout until the launch is sent, so an abort that leaves no
   # record closes the terminal and removes it there. Once the launch was sent a
-  # worker may be running there, so both stay, named for the operator.
+  # worker may be running there, so both stay, named for the operator. A staged
+  # launch file goes once the terminal is confirmed closed, sent or not; a
+  # failed removal only warns.
   if [ "${HC_PLACED_WT_CREATED:-0}" = 1 ] && [ "$status" -ne 0 ] &&
     [ ! -e "$STATE/$ID.meta" ] && [ ! -L "$STATE/$ID.meta" ]; then
     HC_PLACED_WT_CREATED=0
-    if [ "$SPAWN_LAUNCH_SENT" = 0 ] &&
-      { [ -z "${T:-}" ] || fm_backend_kill hc "$T" "" "fm-$ID" 2>/dev/null; } &&
+    local hc_closed=0
+    if [ "$SPAWN_ENDPOINT_CLOSED" = 1 ] ||
+      { [ "$SPAWN_LAUNCH_SENT" = 0 ] &&
+        { [ -z "${T:-}" ] || fm_backend_kill hc "$T" "" "fm-$ID" 2>/dev/null; }; }; then
+      hc_closed=1
+    fi
+    if [ "$hc_closed" = 1 ] && [ "$HC_LAUNCH_STAGED" = 1 ]; then
+      fm_backend_hc_remote_file_remove "$HC_SES" "$HC_MACHINE" "$HC_LAUNCH_FILE" || true
+    fi
+    if [ "$SPAWN_LAUNCH_SENT" = 0 ] && [ "$hc_closed" = 1 ] &&
       fm_backend_hc_remote_worktree_remove "$HC_SES" "$HC_MACHINE" "$HC_CLONE" "$WT"; then
       :
     else
-      echo "warning: the worktree $WT on hc machine '$HC_MACHINE' and terminal ${T:-<none>} stay after the failed spawn of $ID; once inspected, close the terminal and run 'git -C $HC_CLONE worktree remove $WT' there" >&2
+      echo "warning: the worktree $WT on hc machine '$HC_MACHINE' and terminal ${T:-<none>} stay after the failed spawn of $ID; once inspected, close the terminal and run 'git -C $HC_CLONE worktree remove $WT' there${HC_LAUNCH_FILE:+, and remove $HC_LAUNCH_FILE there if it remains}" >&2
     fi
   fi
   # A spawn that aborts after claiming its slot but before its record survives
@@ -2411,6 +2423,8 @@ HC_CLONE=
 HC_REMOTE_ROOT=
 HC_SES=
 HC_PLACED_WT_CREATED=0
+HC_LAUNCH_FILE=
+HC_LAUNCH_STAGED=0
 spawn_resolve_hc_placement() {
   local rc=0
   if [ "$BACKEND" != hc ]; then
@@ -2447,8 +2461,9 @@ spawn_resolve_hc_placement() {
 }
 
 # Everything a placed spawn proves before any endpoint, worktree, record, or
-# backlog move exists: what it supports, then the machine, the project clone
-# there, the machine's route back to this one, and Claude's trust there. Any
+# backlog move exists: what it supports, then the machine, that claude runs in
+# its login shell there, the project clone there, the machine's route back to
+# this one, and Claude's trust there. Any
 # refusal leaves nothing to unwind and never falls back to this machine.
 spawn_hc_placement_preflight() {
   local state_real
@@ -2473,6 +2488,7 @@ spawn_hc_placement_preflight() {
   esac
   HC_SES=$(fm_backend_hc_container_ensure) || return 1
   fm_backend_hc_machine_ready "$HC_SES" "$HC_MACHINE" || return 1
+  fm_backend_hc_claude_runs_check "$HC_SES" "$HC_MACHINE" "$HC_CLAUDE_CONFIG" || return 1
   HC_CLONE=$(fm_backend_hc_remote_clone_check "$HC_SES" "$HC_MACHINE" "$HC_PROJECTS/${PROJ_ABS##*/}" "$PROJ_ABS") || return 1
   HC_REMOTE_ROOT="$HC_PROJECTS/.fm-hc/$(fm_backend_hometag)"
   mkdir -p "$STATE" || return 1
@@ -7423,6 +7439,9 @@ META_WINDOW=$T
 [ "$BACKEND" = orca ] && META_WINDOW=$W
 [ "$BACKEND" = t3code ] && META_WINDOW=$W
 SPAWN_GEN="s$(date +%s).${BASHPID:-$$}.$RANDOM"
+# A placed launch file is staged beside the worktree on its machine; the record
+# names it (hc_launch_file=) so abort cleanup and teardown can remove it there.
+[ "$HC_PLACED" != 1 ] || HC_LAUNCH_FILE="$HC_REMOTE_ROOT/$ID.launch.$SPAWN_GEN.sh"
 SPAWN_META_PATH="$STATE/$ID.meta"
 if [ "$SPAWN_META_LOCK_HELD" != 1 ]; then
   SPAWN_META_LOCK=$(fm_meta_lock_path "$STATE/$ID.meta") || exit 1
@@ -7542,6 +7561,7 @@ preserve_relaunch_meta() {
       echo "hc_machine=$HC_MACHINE"
       echo "hc_firstmate_as=$HC_FIRSTMATE_AS"
       echo "hc_clone=$HC_CLONE"
+      echo "hc_launch_file=$HC_LAUNCH_FILE"
     fi
   fi
   if [ "$KIND" = secondmate ]; then
@@ -8150,8 +8170,9 @@ else
     # The pane sources its launch file where it runs, so a placed launch is
     # staged on that machine, beside the worktree, and removes itself as it
     # starts.
-    LAUNCH_FILE="$HC_REMOTE_ROOT/$ID.launch.$SPAWN_GEN.sh"
+    LAUNCH_FILE=$HC_LAUNCH_FILE
     LAUNCH="command rm -f -- $(shell_quote "$LAUNCH_FILE"); $LAUNCH"
+    HC_LAUNCH_STAGED=1
     if ! printf '%s\n' "$LAUNCH" | fm_backend_hc_remote_file_write "$HC_SES" "$HC_MACHINE" "$LAUNCH_FILE"; then
       echo "error: could not stage the launch command at $LAUNCH_FILE on hc machine '$HC_MACHINE'" >&2
       exit 1

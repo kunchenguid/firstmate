@@ -721,7 +721,7 @@ A missing required key, an unknown key, a relative or `..`-carrying path, or a m
 Use them to place one heavy task on the other machine while lighter tasks stay here, or to keep one task here while the file places the rest.
 `claude-config` is for a machine whose default Claude login is kept for another use, such as a supervisor.
 Placed workers then use that named Claude config directory there; the launch pins it with `CLAUDE_CONFIG_DIR`, and the trust check reads its store.
-A placed task records `hc_machine=`, `hc_firstmate_as=`, and `hc_clone=` beside its hc endpoint fields, and every later step reads them.
+A placed task records `hc_machine=`, `hc_firstmate_as=`, `hc_clone=`, and `hc_launch_file=` beside its hc endpoint fields, and every later step reads them.
 
 ## Away-mode supervisor backend (FM_SUPERVISOR_BACKEND / FM_SUPERVISOR_TARGET)
 

@@ -3,8 +3,10 @@
 # scout workers on another hc machine (docs/hc-backend.md "Workers on another
 # machine"): the placement config, machine-qualified addresses and records, the
 # remote exec transport and machine readiness gates, the remote agent-state
-# scan, a real fm-spawn of a placed scout, and a real fm-teardown of a placed
-# ship whose landed-work proof runs on the other machine.
+# scan, a real fm-spawn of a placed scout (its claude check, and its abort's
+# launch-file cleanup), and a real fm-teardown of a placed ship whose
+# landed-work proof, process reap, and launch-file removal run on the other
+# machine.
 #
 # The fake hc stands in for both machines. Its "other machine" is a private
 # directory that every exec, file write, and run --cwd reaches only through a
@@ -30,6 +32,9 @@ REAL_GIT=$(command -v git)
 #   reverse-as      the name the other machine's hc uses for this one
 #   remote/         the other machine's filesystem, seen as /fm-remote-root
 #   exec.json       answered by every exec instead of running the command
+#   exec-refuse     an exec whose argv contains this text fails as unreachable
+#   file-write-lost a file write lands but its answer is lost (exit 5)
+#   remote-bin/     the only PATH the other machine's login shell has
 #   <address>.json  a terminal record for get; run writes it, rm removes it
 make_fake_hc() {  # <dir> -> fakebin
   local dir=$1 fb=$1/fakebin
@@ -82,6 +87,10 @@ case "$cmd" in
       printf '{"error":{"kind":"unreachable","message":"cannot reach %s"}}\n' "$on" >&2
       exit 5
     fi
+    if [ -f "$D/exec-refuse" ] && printf '%s\n' "$@" | grep -qF -- "$(cat "$D/exec-refuse")"; then
+      printf '{"error":{"kind":"unreachable","message":"cannot reach %s"}}\n' "$on" >&2
+      exit 5
+    fi
     if [ -f "$D/exec.json" ]; then cat "$D/exec.json"; exit 0; fi
     out=$(mktemp) err=$(mktemp)
     if [ "${1:-}" = hc ] && [ "${2:-}" = exec ] && [ "${3:-}" = --on ]; then
@@ -124,6 +133,7 @@ case "$cmd" in
     path=$(to_local "$path")
     mkdir -p "${path%/*}"
     cat > "$path"
+    [ ! -e "$D/file-write-lost" ] || exit 5
     printf '{"path":"%s"}\n' "$path"
     ;;
   run)
@@ -172,6 +182,19 @@ setup_case() {  # <name> -> sets D, FB, HOMEDIR
   mkdir -p "$D"
   D=$(cd "$D" && pwd -P)
   FB=$(make_fake_hc "$D")
+  # The other machine's login shell: `-lc <cmd>` runs <cmd> with only
+  # remote-bin on PATH, so a claude this machine has never answers for it.
+  mkdir -p "$D/remote-bin"
+  cat > "$D/remote-login-shell" <<SH
+#!/bin/sh
+[ "\$1" = -lc ] || exit 64
+PATH='$D/remote-bin'
+export PATH
+exec /bin/sh -c "\$2"
+SH
+  chmod +x "$D/remote-login-shell"
+  printf '#!/bin/sh\necho "2.1.0 (Claude Code)"\n' > "$D/remote-bin/claude"
+  chmod +x "$D/remote-bin/claude"
   : > "$D/log"
   HOMEDIR="$D/home"
   mkdir -p "$HOMEDIR/state" "$HOMEDIR/config" "$HOMEDIR/data"
@@ -394,7 +417,7 @@ placed_spawn_case() {  # <name> <id> -> sets D, FB, HOMEDIR, PROJ
 run_placed_spawn() {  # <id> [args...]
   local id=$1
   shift
-  FAKE_HC_DIR=$D FM_HC_BIN="$FB/hc" HC_SESSION=fmtest \
+  FAKE_HC_DIR=$D FM_HC_BIN="$FB/hc" HC_SESSION=fmtest SHELL="$D/remote-login-shell" \
     fm_test_run_spawn "$HOMEDIR" "$D/nowhere" "$FB" "$id" "$PROJ" --scout --backend hc "$@"
 }
 
@@ -411,6 +434,7 @@ test_placed_spawn_builds_everything_on_the_machine() {
   assert_grep "window=fmtest:laptop/t9" "$meta" "the target is machine-qualified"
   assert_grep "hc_clone=$VROOT/code/proj" "$meta" "the record names the clone there"
   assert_grep "hc_firstmate_as=mini" "$meta" "the record names the way back"
+  assert_grep "hc_launch_file=$wt.launch." "$meta" "the record names the launch file staged there"
   assert_grep "worktree=$wt" "$meta" "the worktree is the one on the machine: $(cat "$meta")"
   [ "$("$REAL_GIT" -C "$D/remote/code/.fm-hc/$tag/$id" rev-parse --show-toplevel)" = "$D/remote/code/.fm-hc/$tag/$id" ] \
     || fail "the worktree was not created as a checkout on the machine"
@@ -476,6 +500,17 @@ test_placed_spawn_refuses_before_creating_anything() {
   [ "$rc" -ne 0 ] || fail "an untrusted clone must refuse the spawn"
   assert_contains "$out" "workspace-trust dialog" "the refusal names the trust dialog"
 
+  id=refuse-claude
+  placed_spawn_case refuse-claude "$id"
+  rm -f "$D/remote-bin/claude"
+  rc=0
+  out=$(run_placed_spawn "$id") || rc=$?
+  [ "$rc" -ne 0 ] || fail "a machine whose login shell cannot run claude must refuse the spawn"
+  assert_contains "$out" "claude does not run on hc machine 'laptop'" "the refusal names the machine and what failed"
+  assert_no_grep $'run\x1f' "$D/log" "no terminal may start where claude cannot run"
+  assert_absent "$HOMEDIR/state/$id.meta" "no record may be written where claude cannot run"
+  assert_absent "$D/remote/code/.fm-hc" "no worktree may be created where claude cannot run"
+
   id=refuse5
   placed_spawn_case refuse-harness "$id"
   fm_fake_exit0 "$FB" codex
@@ -493,7 +528,28 @@ test_placed_spawn_refuses_before_creating_anything() {
   [ "$rc" -ne 0 ] || fail "--hc-machine without config/hc-machine must refuse"
   assert_contains "$out" "needs config/hc-machine" "the refusal names the missing declaration"
   assert_no_grep $'run\x1f' "$D/log" "no terminal may start on an undeclared machine"
-  pass "hc placement: a machine that is down, lacks the clone, the route back, or trust, or an unsupported harness, refuses before anything is created"
+  pass "hc placement: a machine that is down, cannot run claude, lacks the clone, the route back, or trust, or an unsupported harness, refuses before anything is created"
+}
+
+# A launch file whose write landed there although hc lost the answer aborts the
+# spawn before the launch is sent. Oracle: the abort closes the terminal, so
+# nothing there may source the file any more, and it must not outlive the
+# spawn beside a worktree that is itself removed.
+test_placed_spawn_abort_removes_its_launch_file_there() {
+  local id=abort1 out rc=0 tag f
+  placed_spawn_case spawn-abort "$id"
+  tag=$(hometag_for "$HOMEDIR")
+  touch "$D/file-write-lost"
+  out=$(run_placed_spawn "$id") || rc=$?
+  [ "$rc" -ne 0 ] || fail "a launch file whose write was not confirmed must abort the spawn"$'\n'"$out"
+  assert_contains "$out" "could not stage the launch command" "the abort names the launch file"
+  assert_grep $'kill\x1f--json\x1flaptop/t9' "$D/log" "the abort closes the terminal there"
+  for f in "$D/remote/code/.fm-hc/$tag/"*.launch.*; do
+    [ -e "$f" ] && fail "the staged launch file must be removed there after the abort: $f"
+  done
+  assert_absent "$D/remote/code/.fm-hc/$tag/$id" "the fresh worktree there is removed"
+  assert_absent "$HOMEDIR/state/$id.meta" "no record survives the abort"
+  pass "hc placement: an aborted placed spawn removes its staged launch file there once its terminal is closed"
 }
 
 # A projects path with a symlink component (macOS /tmp is /private/tmp) names
@@ -542,6 +598,9 @@ placed_teardown_case() {
   TWT_LOCAL="$D/remote/code/.fm-hc/$tag/task-x1"
   TWT="$VROOT/code/.fm-hc/$tag/task-x1"
   mkdir -p "$D/remote/code/.fm-hc/$tag"
+  # A launch file the pane never sourced, left beside the worktree there.
+  TLAUNCH_LOCAL="$D/remote/code/.fm-hc/$tag/task-x1.launch.s1.sh"
+  printf 'claude\n' > "$TLAUNCH_LOCAL"
   git_q -C "$D/remote/code/proj" worktree add -q -b fm/task-x1 "$TWT_LOCAL" origin/main
   mkdir -p "$D/laptop"
   jq -n --arg h "$tag" '{address: "laptop/t9", state: "live",
@@ -552,7 +611,7 @@ placed_teardown_case() {
     "project=$D/proj" "harness=claude" "kind=ship" "mode=no-mistakes" \
     "spawn_gen=placed-teardown-test" "backend=hc" "hc_session=fmtest" \
     "hc_terminal=laptop/t9" "hc_machine=laptop" "hc_firstmate_as=mini" \
-    "hc_clone=$VROOT/code/proj"
+    "hc_clone=$VROOT/code/proj" "hc_launch_file=$VROOT/code/.fm-hc/$tag/task-x1.launch.s1.sh"
   touch "$HOMEDIR/state/.last-watcher-beat"
   fakebin=$FB
   cat > "$fakebin/gh-axi" <<'SH'
@@ -635,6 +694,7 @@ test_placed_teardown_removes_landed_work_there() {
   assert_grep $'kill\x1f--json\x1flaptop/t9' "$D/log" "the terminal there is ended"
   assert_absent "$D/laptop/t9.json" "the terminal there is removed"
   assert_absent "$HOMEDIR/state/task-x1.meta" "the record is retired"
+  assert_absent "$TLAUNCH_LOCAL" "the staged launch file there is removed"
   assert_absent "$VROOT" "nothing was created under the placed path on this machine"
 
   placed_teardown_case teardown-force
@@ -644,6 +704,44 @@ test_placed_teardown_removes_landed_work_there() {
   expect_code 0 "$rc" "--force discards the work there as it does here"$'\n'"$out"
   assert_absent "$TWT_LOCAL" "the forced worktree there is removed"
   pass "hc placement: teardown removes a placed worktree there only after proving its work landed, or under --force"
+}
+
+# A disowned job the worker left running in its worktree survives the close of
+# its terminal (fm-teardown.sh header, Fix 2). Oracle: the local reap's own
+# contract, every process whose cwd is under the worktree is stopped before the
+# worktree is removed; a scan that cannot run there proves nothing, so the
+# teardown refuses and keeps every record.
+test_placed_teardown_reaps_processes_left_in_the_worktree_there() {
+  local out rc pid i
+  placed_teardown_case teardown-reap
+  rm -f "$FB/lsof"
+  git_q -C "$TWT_LOCAL" commit -q --allow-empty -m "the change"
+  git_q -C "$TWT_LOCAL" push -q origin fm/task-x1
+  mkdir -p "$TWT_LOCAL/build"
+  pid=$(bash -c 'cd "$1" && { sleep 300 >/dev/null 2>&1 </dev/null & echo $!; }' _ "$TWT_LOCAL/build")
+  kill -0 "$pid" 2>/dev/null || fail "the stand-in job did not start"
+  rc=0
+  out=$(run_placed_teardown 2>&1) || rc=$?
+  for i in 1 2 3 4 5 6 7 8 9 10; do kill -0 "$pid" 2>/dev/null || break; sleep 0.2; done
+  if kill -0 "$pid" 2>/dev/null; then
+    kill -KILL "$pid" 2>/dev/null || true
+    fail "a job left under the placed worktree must be stopped by teardown"$'\n'"$out"
+  fi
+  expect_code 0 "$rc" "a placed teardown with a leftover job should succeed once it is stopped"$'\n'"$out"
+  assert_contains "$out" "reaped leaked worktree process(es) on hc machine 'laptop': $pid" "the reap names the stopped job"
+  assert_absent "$TWT_LOCAL" "the worktree there is removed after the reap"
+
+  placed_teardown_case teardown-reap-blind
+  git_q -C "$TWT_LOCAL" commit -q --allow-empty -m "the change"
+  git_q -C "$TWT_LOCAL" push -q origin fm/task-x1
+  printf -- '-d cwd' > "$D/exec-refuse"
+  rc=0
+  out=$(run_placed_teardown 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "a process scan that cannot run there must refuse the teardown"$'\n'"$out"
+  assert_contains "$out" "cannot reach hc machine 'laptop' to stop processes" "the refusal names the scan that could not run"
+  assert_present "$HOMEDIR/state/task-x1.meta" "the record survives a refused reap"
+  assert_present "$TWT_LOCAL" "the worktree there survives a refused reap"
+  pass "hc placement: teardown stops processes left under a placed worktree there, and refuses when it cannot scan for them"
 }
 
 crew_state() {
@@ -708,8 +806,10 @@ fm_test_run \
   test_placed_busy_state_reads_hc_native_status \
   test_placed_spawn_builds_everything_on_the_machine \
   test_placed_spawn_refuses_before_creating_anything \
+  test_placed_spawn_abort_removes_its_launch_file_there \
   test_placed_clone_check_resolves_a_symlinked_projects_path \
   test_placed_teardown_refuses_unlanded_or_unreachable_work \
   test_placed_teardown_removes_landed_work_there \
+  test_placed_teardown_reaps_processes_left_in_the_worktree_there \
   test_placed_done_gate_reads_the_head_there \
   test_placed_crew_state_reads_the_worktree_there

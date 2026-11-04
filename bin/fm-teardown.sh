@@ -80,9 +80,11 @@
 # for the common case where there is no remote at all.
 # A worktree placed on another hc machine (hc_machine= in meta,
 # docs/hc-backend.md "Workers on another machine") gets this same proof, every
-# git read running there through hc; a machine that cannot be reached refuses,
-# its terminal is closed before the second proof, and the worktree and branch
-# are removed there instead of returned to a pool.
+# git read running there through hc; a machine that cannot be reached refuses.
+# Before the second proof its terminal is closed, its staged launch file
+# (hc_launch_file=) is removed there, and Fix 2's worktree process reap runs
+# there through hc, refusing when that scan cannot run or a process survives;
+# the worktree and branch are then removed there instead of returned to a pool.
 # Safety is proved again after task processes are reaped, before backlog-close
 # publication, branch deletion, or worktree return.
 # Scout tasks (kind=scout in meta) carve out of that check: their worktree is
@@ -1288,9 +1290,11 @@ fi
 TEARDOWN_HC_MACHINE=$(fm_meta_get "$META" hc_machine)
 TEARDOWN_HC_SESSION=
 TEARDOWN_HC_CLONE=
+TEARDOWN_HC_LAUNCH_FILE=
 if [ -n "$TEARDOWN_HC_MACHINE" ]; then
   TEARDOWN_HC_SESSION=$(fm_meta_get "$META" hc_session)
   TEARDOWN_HC_CLONE=$(fm_meta_get "$META" hc_clone)
+  TEARDOWN_HC_LAUNCH_FILE=$(fm_meta_get "$META" hc_launch_file)
   if [ "$BACKEND" != hc ] || [ -z "$TEARDOWN_HC_SESSION" ] || [ -z "$TEARDOWN_HC_CLONE" ] || [ -z "$WT" ]; then
     echo "REFUSED: task $ID records hc_machine=$TEARDOWN_HC_MACHINE without a complete hc placement (backend, hc_session, hc_clone, worktree); preserving task state." >&2
     exit 1
@@ -3958,8 +3962,8 @@ if [ "$BACKEND" = herdr ]; then
 fi
 
 if [ -n "$TEARDOWN_HC_MACHINE" ]; then
-  # Processes under a placed worktree run on its own machine; closing its
-  # terminal below stops the worker there, and only the local temp root is
+  # Processes under a placed worktree run on its own machine and are reaped
+  # there below, once its terminal is closed; only the local temp root is
   # reaped here.
   reap_task_worktree_processes tasktmp "$TASK_TMP"
 elif [ "$KIND" != secondmate ] && teardown_owns_worktree; then
@@ -3972,10 +3976,15 @@ fi
 # or its processes exit. Inspect the stopped copy before dropping its branch or
 # returning it on either backend path.
 if [ -n "$TEARDOWN_HC_MACHINE" ]; then
-  # Stop the placed worker first by closing its terminal there, so nothing
-  # can still be writing when its worktree is proved again.
+  # Stop the placed worker first by closing its terminal there, then remove
+  # its staged launch file (a failure only warns) and reap every process left
+  # under the worktree there (a scan that cannot run, or a survivor, refuses),
+  # so nothing can still be writing when its worktree is proved again.
   fm_backend_kill "$BACKEND" "$T" "" "fm-$ID" \
     || endpoint_close_refusal "$ID" "$BACKEND" "$T" 1 || exit 1
+  [ -z "$TEARDOWN_HC_LAUNCH_FILE" ] \
+    || fm_backend_hc_remote_file_remove "$TEARDOWN_HC_SESSION" "$TEARDOWN_HC_MACHINE" "$TEARDOWN_HC_LAUNCH_FILE" || true
+  fm_backend_hc_remote_reap_cwd "$TEARDOWN_HC_SESSION" "$TEARDOWN_HC_MACHINE" "$WT" || exit 1
   validate_worktree_teardown_safety || exit 1
 elif teardown_owns_worktree && [ -d "$WT" ] && [ "$FORCE" != "--force" ]; then
   validate_worktree_teardown_safety || exit 1

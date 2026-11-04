@@ -83,7 +83,7 @@ hc_terminal=<address>
 `backend_detect=` is `app-terminal` only when that signal automatically selected hc; an explicitly selected hc writes no `backend_detect=` line.
 
 `<address>` is hc's terminal address such as `t7`, or `<machine>/t7` for a worker placed on another machine.
-A placed task also records `hc_machine=<machine>`, `hc_firstmate_as=<name>`, and `hc_clone=<clone path there>`, and its `worktree=` is a path on that machine; the endpoint check accepts a machine-qualified terminal only with the matching `hc_machine=`.
+A placed task also records `hc_machine=<machine>`, `hc_firstmate_as=<name>`, `hc_clone=<clone path there>`, and `hc_launch_file=<launch file path there>`, and its `worktree=` is a path on that machine; the endpoint check accepts a machine-qualified terminal only with the matching `hc_machine=`.
 Every adapter call sets exactly the recorded `HC_SESSION` and drops any inherited `HC_SOCKET`, which hc would otherwise prefer, so a task keeps reaching its own core even when the caller's environment names another one.
 `FM_HC_SOCKET` is the deliberate socket pin tests and labs use instead of an inherited `HC_SOCKET`.
 An input, capture, or close that carries the task label refuses a terminal whose `firstmate.task` or `firstmate.home` label does not match, and a close without a label still refuses a terminal that lacks this home's labels.
@@ -131,7 +131,7 @@ A home can start its hc ship and scout workers on another machine its hc core al
 - A clone of the project at `<projects>/<project name>` whose origin is the same remote as this machine's clone.
 - Its own hc reaches this machine back, under the name `firstmate-as` gives (`hc machine add <ssh target> --name <that name>` there).
   The worker reads its instructions and reports through that route, which lets programs on that machine run commands here as this machine's user, so place workers only on a machine you already trust that far.
-- Claude Code installed and logged in, and the clone already trusted there (open `claude` in it once).
+- Claude Code installed and logged in, on the PATH of the login shell there (`claude --version` must succeed in it, with `CLAUDE_CONFIG_DIR` set as below when configured), and the clone already trusted there (open `claude` in it once).
   The default Claude login there may be kept for another use, such as a supervisor.
   In that case `claude-config` in `config/hc-machine` names a separate Claude config directory there for workers; the launch pins it with `CLAUDE_CONFIG_DIR`, and the trust check reads that directory's store.
   A placed worker uses that machine's own login, so `--account` is refused.
@@ -145,12 +145,15 @@ The route back is proved by reading back a one-time value written here, and Clau
 The worktree is a linked worktree of that clone at `<projects>/.fm-hc/<hometag>/<task-id>`, created there through `hc exec --on` from freshly fetched `origin/<base>`; no Treehouse runs on either machine.
 The terminal starts in it with `hc run --on`, carries the usual labels, and lives in that machine's core, so a Herdr.app bound to that machine's session shows it like any other hc terminal.
 The launch command is staged beside the worktree there and removes itself as it runs.
+A spawn that aborts removes it there once the terminal is closed, and teardown removes it after closing the terminal; a failed removal is a warning that names the path.
 
 The brief, status file, steering inbox, and task data stay on this machine, where supervision reads them exactly as for a local worker.
 The launch brief is prefixed with a placement section telling the worker to run each command the brief gives for a Firstmate path through `hc exec --on <firstmate-as>`, and to read or write those files with `hc file read`/`hc file write --on <firstmate-as>`; `FM_TASK_INBOX` names the inbox's path here.
 
 Every later step reaches the worker through hc and never through this machine's filesystem or process table: send, keys, capture, current path, and close use the `<machine>/t7` address through this core, and the agent-state group scan, the done gate's head check, and teardown's landed-work proof run their commands there with `hc exec --on`.
-Teardown applies the same landed-work proof it applies to a local worktree, refuses when that machine cannot be reached, closes the terminal before proving again, and only then removes the worktree and its branch there; `--force` keeps its usual meaning.
+Teardown applies the same landed-work proof it applies to a local worktree, refuses when that machine cannot be reached, and closes the terminal before proving again.
+Between the close and the second proof it stops every process left with its current directory under the worktree there (`lsof -a -d cwd`, or a `/proc` scan where that machine has no `lsof`; TERM, then KILL, then a recheck), as it does for a local worktree, and refuses with every record kept when that scan cannot run there or a process survives.
+Only then does it remove the worktree and its branch there; `--force` keeps its usual meaning.
 
 ### Limits of a placed worker
 
@@ -163,7 +166,7 @@ Teardown applies the same landed-work proof it applies to a local worktree, refu
 ## Tests
 
 `tests/fm-backend-hc.test.sh` pins the adapter against a fake `hc`.
-`tests/fm-backend-hc-placement.test.sh` pins placement against a fake core whose other machine is reachable only through hc: the config, the machine and route-back gates, a real placed spawn, and a real teardown that refuses unlanded or unreachable work there.
+`tests/fm-backend-hc-placement.test.sh` pins placement against a fake core whose other machine is reachable only through hc: the config, the machine, `claude`, and route-back gates, a real placed spawn and its abort cleanup, and a real teardown that refuses unlanded or unreachable work there and stops processes left in the worktree there.
 `tests/fm-backend-hc-liveness-live-e2e.test.sh` is the default-on live guard: it launches every installed harness bare in a private core and requires `alive`.
 `tests/fm-backend-hc-smoke.test.sh` drives the real binary in an isolated lab; [`bin/fm-hc-lab.sh`](../bin/fm-hc-lab.sh) owns the isolation and metadata-tripwire contract, and [`tests/hc-test-safety.sh`](../tests/hc-test-safety.sh) owns guarded test teardown.
 `tests/fm-backend-hc-appdetect-smoke.test.sh` runs a real `bin/fm-spawn.sh` spawn in the same kind of lab for the app-terminal and explicit cases, and checks that a live app window never selects hc for a marker-less process and starts nothing for a session with no running core.
