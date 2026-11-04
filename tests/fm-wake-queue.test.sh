@@ -608,7 +608,7 @@ secondmate_stall_watch_leg() { # <dir> <leg> <mode> [arg...]
       ;;
     reject)
       wait_for_exit "$pid" "$limit" || true
-      grep -F 'watcher: secondmate wake-loop observation failed' "$err" >/dev/null \
+      grep -F 'watcher: Project Director wake-loop observation failed' "$err" >/dev/null \
         || fail "watcher leg $leg did not refuse the stall marker path: $(cat "$out" 2>/dev/null) $(cat "$err" 2>/dev/null)"
       return 0
       ;;
@@ -3672,7 +3672,7 @@ test_secondmate_liveness_tick_error_keeps_scanning_and_wakes() {
   [ "$rc" -eq 0 ] || fail "a per-mate ledger error discarded the tick's pending wake (rc=$rc): $(cat "$out" "$dir/watch-mid-error.err")"
   grep -F 'check: secondmate sm2 auto-relaunched' "$out" >/dev/null \
     || fail "a mate after the ledger error was not recovered and surfaced: $(cat "$out" "$dir/watch-mid-error.err")"
-  grep -F 'watcher: secondmate sm1 liveness: relaunch ledger is unreadable' "$dir/watch-mid-error.err" >/dev/null \
+  grep -F 'watcher: Project Director sm1 liveness: relaunch ledger is unreadable' "$dir/watch-mid-error.err" >/dev/null \
     || fail "the per-mate ledger error was not reported: $(cat "$dir/watch-mid-error.err")"
   [ "$(grep -c 'new-window' "$dir/tmux.log")" -eq 1 ] \
     || fail "exactly the healthy mate should have been relaunched: $(cat "$dir/tmux.log")"
@@ -3701,7 +3701,7 @@ test_secondmate_liveness_tick_unqueued_outcome_is_an_error_not_a_wake() {
     || fail "an outcome whose check row was never queued did not fail the watcher (rc=$rc): $(cat "$dir/watch-unqueued.out" "$dir/watch-unqueued.err")"
   ! grep -F 'check: secondmate sm1 auto-relaunched' "$dir/watch-unqueued.out" >/dev/null \
     || fail "an unqueued outcome was printed as a delivered wake: $(cat "$dir/watch-unqueued.out")"
-  grep -F 'watcher: secondmate sm1 liveness: check wake row could not be queued' "$dir/watch-unqueued.err" >/dev/null \
+  grep -F 'watcher: Project Director sm1 liveness: check wake row could not be queued' "$dir/watch-unqueued.err" >/dev/null \
     || fail "the unqueued outcome was not reported as an error: $(cat "$dir/watch-unqueued.err")"
   pass "watch liveness: an outcome that could not be queued surfaces as an error, not a wake"
 }

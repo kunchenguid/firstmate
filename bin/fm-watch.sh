@@ -1233,7 +1233,7 @@ secondmate_liveness_tick() {
     fi
     fm_secondmate_liveness_unlock "$id"
     if [ -n "$err" ]; then
-      echo "watcher: secondmate $id liveness: $err" >&2
+      echo "watcher: Project Director $id liveness: $err" >&2
       triage_log "secondmate $id liveness error: $err" || true
       failed=1
     fi
@@ -3950,7 +3950,7 @@ while :; do
   # wake exits the cycle like every other wake, so its marker is stamped before
   # any relaunch and the restarted watcher will not re-probe early.
   secondmate_liveness_tick || {
-    echo "watcher: secondmate liveness check failed" >&2
+    echo "watcher: Project Director liveness check failed" >&2
     exit 1
   }
 
@@ -3958,7 +3958,7 @@ while :; do
   # Observe the foreign queue before the rest of this cycle so an aged row wakes
   # the parent without consuming or rewriting the receiving home's record.
   secondmate_wake_stall_tick || {
-    echo "watcher: secondmate wake-loop observation failed" >&2
+    echo "watcher: Project Director wake-loop observation failed" >&2
     exit 1
   }
 

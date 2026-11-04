@@ -55,7 +55,7 @@ How the reply lands depends on whether the work finishes during this turn:
        Linking before cleanup lets `bin/fm-x-link.sh` copy the context directly from the inbox, while the durable per-request context recorded by the poll preserves it independently for delayed and concurrent follow-ups.
        The exact resolution and fail-safe posting contract is owned by `docs/configuration.md`.
        If a recovery respawns the same relay request onto a successor task, relink with the paired `--carry-count <n> --carry-ts <epoch>` flags plus any prior `x_platform=` and `x_reply_max_chars=` as `--carry-platform <x|discord> --carry-max <n>` so the successor keeps the consumed follow-up count, original 7-day window, and reply split budget.
-     - **Second-mate-routed work (the request's project or domain belongs to a registered Project Director, so the work is or will be routed there):** the link cannot be used at all.
+     - **Project-Director-routed work (the request's project or domain belongs to a registered Project Director, so the work is or will be routed there):** the link cannot be used at all.
        It writes into this home's own `state/<task-id>.meta`, and a routed task's record lives in the Project Director's home, so `bin/fm-x-link.sh` refuses and points you back here.
        Register a **typed promised-final commitment bound to that home** up front instead - see "Promised final replies" below for the exact commands - and put its `bin/fm-public-followup.sh brief <obligation-id>` output into the routed worker's instructions so the terminal result comes back as typed data.
        Do this in the same turn as the acknowledgement, before routing, so the promise is durable state from the moment it is made.

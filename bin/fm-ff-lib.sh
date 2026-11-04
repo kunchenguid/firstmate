@@ -108,30 +108,30 @@ validate_operational_dirs() {
   for name in data state config projects; do
     dir="$abs_home/$name"
     if [ -L "$dir" ] && [ ! -e "$dir" ]; then
-      VALIDATION_ERROR="secondmate $name directory must resolve inside the secondmate home"
+      VALIDATION_ERROR="Project Director $name directory must resolve inside the Project Director home"
       return 1
     fi
     if [ -d "$dir" ]; then
       abs_dir=$(cd "$dir" && pwd -P) || {
-        VALIDATION_ERROR="secondmate $name directory cannot be resolved"
+        VALIDATION_ERROR="Project Director $name directory cannot be resolved"
         return 1
       }
     elif [ -e "$dir" ]; then
-      VALIDATION_ERROR="secondmate $name path is not a directory"
+      VALIDATION_ERROR="Project Director $name path is not a directory"
       return 1
     else
       abs_dir="$abs_home/$name"
     fi
     if ! path_is_ancestor_of "$abs_home" "$abs_dir"; then
-      VALIDATION_ERROR="secondmate $name directory must resolve inside the secondmate home"
+      VALIDATION_ERROR="Project Director $name directory must resolve inside the Project Director home"
       return 1
     fi
     if [ "$abs_dir" = "$abs_active_home" ] || path_is_ancestor_of "$abs_active_home" "$abs_dir"; then
-      VALIDATION_ERROR="secondmate $name directory cannot be inside the active firstmate home"
+      VALIDATION_ERROR="Project Director $name directory cannot be inside the active firstmate home"
       return 1
     fi
     if [ "$abs_dir" = "$abs_root" ] || path_is_ancestor_of "$abs_root" "$abs_dir"; then
-      VALIDATION_ERROR="secondmate $name directory cannot be inside the firstmate repo"
+      VALIDATION_ERROR="Project Director $name directory cannot be inside the firstmate repo"
       return 1
     fi
   done
@@ -154,45 +154,45 @@ validate_secondmate_home() {
     return 1
   }
   if [ "$abs_home" = "/" ]; then
-    VALIDATION_ERROR="secondmate home cannot be the filesystem root"
+    VALIDATION_ERROR="Project Director home cannot be the filesystem root"
     return 1
   fi
   if [ "$abs_home" = "$abs_active_home" ]; then
-    VALIDATION_ERROR="secondmate home cannot be the active firstmate home"
+    VALIDATION_ERROR="Project Director home cannot be the active firstmate home"
     return 1
   fi
   if [ "$abs_home" = "$abs_root" ]; then
-    VALIDATION_ERROR="secondmate home cannot be the firstmate repo"
+    VALIDATION_ERROR="Project Director home cannot be the firstmate repo"
     return 1
   fi
   if path_is_ancestor_of "$abs_active_home" "$abs_home"; then
-    VALIDATION_ERROR="secondmate home cannot be inside the active firstmate home"
+    VALIDATION_ERROR="Project Director home cannot be inside the active firstmate home"
     return 1
   fi
   if path_is_ancestor_of "$abs_root" "$abs_home"; then
-    VALIDATION_ERROR="secondmate home cannot be inside the firstmate repo"
+    VALIDATION_ERROR="Project Director home cannot be inside the firstmate repo"
     return 1
   fi
   if path_is_ancestor_of "$abs_home" "$abs_active_home"; then
-    VALIDATION_ERROR="secondmate home cannot be an ancestor of the active firstmate home"
+    VALIDATION_ERROR="Project Director home cannot be an ancestor of the active firstmate home"
     return 1
   fi
   if path_is_ancestor_of "$abs_home" "$abs_root"; then
-    VALIDATION_ERROR="secondmate home cannot be an ancestor of the firstmate repo"
+    VALIDATION_ERROR="Project Director home cannot be an ancestor of the firstmate repo"
     return 1
   fi
   validate_operational_dirs "$abs_home" "$abs_active_home" "$abs_root" || return 1
   if [ -L "$abs_home/$SUB_HOME_MARKER" ]; then
-    VALIDATION_ERROR="secondmate marker must not be a symlink"
+    VALIDATION_ERROR="Project Director marker must not be a symlink"
     return 1
   fi
   if [ ! -f "$abs_home/$SUB_HOME_MARKER" ]; then
-    VALIDATION_ERROR="not a seeded secondmate home"
+    VALIDATION_ERROR="not a seeded Project Director home"
     return 1
   fi
   marker_id=$(cat "$abs_home/$SUB_HOME_MARKER" 2>/dev/null || true)
   if [ "$marker_id" != "$id" ]; then
-    VALIDATION_ERROR="marked for secondmate ${marker_id:-unknown}, expected $id"
+    VALIDATION_ERROR="marked for Project Director ${marker_id:-unknown}, expected $id"
     return 1
   fi
   if [ ! -f "$abs_home/AGENTS.md" ]; then
@@ -553,7 +553,7 @@ process_secondmate() {
   home_real=$(resolve_path "$home")
   [ "$home_real" != "$fm_root_real" ] || return 0
   if ! validate_secondmate_home "$id" "$home"; then
-    echo "secondmate $id: skipped: unsafe home: $VALIDATION_ERROR"
+    echo "Project Director $id: skipped: unsafe home: $VALIDATION_ERROR"
     return 0
   fi
   home_real="$VALIDATED_HOME"
@@ -562,7 +562,7 @@ process_secondmate() {
   esac
   FF_SEEN_HOMES="$FF_SEEN_HOMES $home_real"
 
-  ff_target "$home_real" "secondmate $id" "$base_mode" yes yes "$id" "${FM_STATE_OVERRIDE:-$FM_HOME/state}"
+  ff_target "$home_real" "Project Director $id" "$base_mode" yes yes "$id" "${FM_STATE_OVERRIDE:-$FM_HOME/state}"
   if [ -n "$window" ] && { [ "$FF_STATUS" = "updated" ] || [ "$FF_STATUS" = "current" ]; } \
     && type fm_ff_after_secondmate_settled >/dev/null 2>&1; then
     fm_ff_after_secondmate_settled "$id" "$home_real" "$window" "$FF_STATUS" "$FF_INSTR"

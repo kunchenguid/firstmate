@@ -243,33 +243,33 @@ SH
   )
 
   assert_contains "$out" \
-    "SECONDMATE_LIVENESS: secondmate bravo: skipped: remote host unavailable or endpoint state unknown; route preserved on host-bravo" \
+    "SECONDMATE_LIVENESS: Project Director bravo: skipped: remote host unavailable or endpoint state unknown; route preserved on host-bravo" \
     "an unreachable mate must fail closed with its own liveness line"
   assert_contains "$out" \
-    "SECONDMATE_SYNC: secondmate bravo: skipped:" \
+    "SECONDMATE_SYNC: Project Director bravo: skipped:" \
     "an unreachable mate must also fail closed on convergence rather than disappearing"
   assert_contains "$out" \
-    "SECONDMATE_SYNC: secondmate charlie: skipped: remote tracked-file sync failed on host-charlie:" \
+    "SECONDMATE_SYNC: Project Director charlie: skipped: remote tracked-file sync failed on host-charlie:" \
     "a dirty remote mate must fail closed with its own sync line"
   assert_contains "$out" "dirty" \
     "the dirty mate's skip line must still name dirtiness"
 
-  n=$(printf '%s\n' "$out" | grep -c 'SECONDMATE_LIVENESS: secondmate bravo:' || true)
+  n=$(printf '%s\n' "$out" | grep -c 'SECONDMATE_LIVENESS: Project Director bravo:' || true)
   [ "$n" -eq 1 ] || fail "bravo liveness line was lost or duplicated (count=$n)"$'\n'"$out"
-  n=$(printf '%s\n' "$out" | grep -c 'SECONDMATE_SYNC: secondmate charlie:' || true)
+  n=$(printf '%s\n' "$out" | grep -c 'SECONDMATE_SYNC: Project Director charlie:' || true)
   [ "$n" -eq 1 ] || fail "charlie sync line was lost or duplicated (count=$n)"$'\n'"$out"
-  n=$(printf '%s\n' "$out" | sed -n 's/^SECONDMATE_SYNC: secondmate \([^:]*\):.*/\1/p' | tr '\n' ' ')
+  n=$(printf '%s\n' "$out" | sed -n 's/^SECONDMATE_SYNC: Project Director \([^:]*\):.*/\1/p' | tr '\n' ' ')
   [ "$n" = "alpha bravo bravo charlie " ] \
     || fail "sync diagnostics were lost, duplicated, or replayed outside spawn order: $n"$'\n'"$out"
 
   assert_not_contains "$out" \
-    "SECONDMATE_LIVENESS: secondmate alpha: skipped: remote host unavailable or endpoint state unknown" \
+    "SECONDMATE_LIVENESS: Project Director alpha: skipped: remote host unavailable or endpoint state unknown" \
     "a reachable mate must not inherit the unreachable mate's liveness skip"
   assert_contains "$out" \
-    "SECONDMATE_SYNC: secondmate alpha: skipped: remote tracked-file sync failed on host-alpha: synthetic tracked-file sync refusal for host-alpha" \
+    "SECONDMATE_SYNC: Project Director alpha: skipped: remote tracked-file sync failed on host-alpha: synthetic tracked-file sync refusal for host-alpha" \
     "the first worker's diagnostic must retain its own host and complete message"
   assert_not_contains "$out" \
-    "SECONDMATE_SYNC: secondmate alpha: skipped: remote tracked-file sync failed on host-alpha: remote secondmate checkout is dirty" \
+    "SECONDMATE_SYNC: Project Director alpha: skipped: remote tracked-file sync failed on host-alpha: remote secondmate checkout is dirty" \
     "the first worker must not inherit the dirty mate's reason"
 
   while IFS= read -r line; do
@@ -384,7 +384,7 @@ EOF
     "$ROOT/bin/fm-bootstrap.sh" 2>&1
   )
 
-  line=$(printf '%s\n' "$out" | grep '^SECONDMATE_SYNC: secondmate sm: skipped: remote inheritance failed on host-sm:' || true)
+  line=$(printf '%s\n' "$out" | grep '^SECONDMATE_SYNC: Project Director sm: skipped: remote inheritance failed on host-sm:' || true)
   [ -n "$line" ] || fail "expected a remote inheritance failure line: $out"
   case "$line" in
     *"shared user preferences"*) ;;
@@ -677,7 +677,7 @@ test_partial_push_failure_keeps_the_reread_owed() {
     "$ROOT/bin/fm-bootstrap.sh" 2>&1
   )
   assert_contains "$out" \
-    "SECONDMATE_SYNC: secondmate alpha: skipped: remote inheritance failed on host-alpha: error: synthetic refusal of config/item-b" \
+    "SECONDMATE_SYNC: Project Director alpha: skipped: remote inheritance failed on host-alpha: error: synthetic refusal of config/item-b" \
     "the failed push must be reported with its own error"
   assert_grep 'owed=1' "$CF_HOME/state/.secondmate-nudge-pending/alpha.pending" \
     "an item the failed push already applied changed the home, so the re-read must stay owed"

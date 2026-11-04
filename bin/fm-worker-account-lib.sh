@@ -348,7 +348,7 @@ fm_worker_account_select() {
     return 1
   fi
   if [ -n "$account" ] && [ -n "$mate" ]; then
-    echo "error: --account applies to ships and scouts; secondmate $mate launches on its own config/secondmate-accounts/$mate/claude-account pin" >&2
+    echo "error: --account applies to Builders and Investigators; Project Director $mate launches on its own config/secondmate-accounts/$mate/claude-account pin" >&2
     return 1
   fi
   listed=$(fm_worker_account_list "$harness" "$config") || return 1
@@ -364,13 +364,13 @@ fm_worker_account_select() {
   setting="config/$(fm_worker_account_file "$harness")"
   [ "$selected_config" = "$config" ] || setting="$selected_config/$(fm_worker_account_file "$harness")"
   if [ -n "$listed" ] && [ -n "$mate" ] && [ "$selected_config" = "$config" ]; then
-    echo "error: config/claude-accounts chooses accounts for ships and scouts only; secondmate $mate needs its own pin in config/secondmate-accounts/$mate/claude-account" >&2
+    echo "error: config/claude-accounts chooses accounts for Builders and Investigators only; Project Director $mate needs its own pin in config/secondmate-accounts/$mate/claude-account" >&2
     return 1
   elif [ -n "$listed" ] && [ -z "$mate" ]; then
     setting=config/claude-accounts
     if [ -z "$account" ]; then
       count=$(printf '%s\n' "$listed" | wc -l | tr -d ' ')
-      echo "error: config/claude-accounts declares $count Claude accounts, so a Claude ship or scout launch must name one with --account; bin/fm-claude-account-quota.sh measures each, and Firstmate never picks a default" >&2
+      echo "error: config/claude-accounts declares $count Claude accounts, so a Claude Builder or Investigator launch must name one with --account; bin/fm-claude-account-quota.sh measures each, and Firstmate never picks a default" >&2
       return 1
     fi
     declared=
@@ -394,7 +394,7 @@ fm_worker_account_select() {
     selection=$(fm_worker_account_resolve "$harness" "$selected_config" "$setting") || return 1
     if [ -z "$selection" ]; then
       [ "$selected_config" = "$config" ] && return 0
-      echo "error: secondmate account pin disappeared during selection: $setting" >&2
+      echo "error: Project Director account pin disappeared during selection: $setting" >&2
       return 1
     fi
     declared=${selection%%$'\t'*}

@@ -3665,7 +3665,7 @@ fi
 if [ "$KIND" = scout ] && [ "$FORCE" != "--force" ]; then
   REPORT="$DATA/$ID/report.md"
   if [ ! -f "$REPORT" ]; then
-    echo "REFUSED: scout task $ID has no report at $REPORT." >&2
+    echo "REFUSED: Investigator task $ID has no report at $REPORT." >&2
     echo "The report is the work product. Have the Investigator write it, or use --force after explicit discard approval." >&2
     exit 1
   fi
@@ -3706,7 +3706,7 @@ if [ "$KIND" = ship ] && [ -n "$PR_URL" ] \
     && [ -n "$PUBLIC_FOLLOWUP_STATE" ] \
     && [ "${PUBLIC_FOLLOWUP_RELAY_ACTIVE:-0}" = 1 ] \
     && fm_pf_has_delivered_open_loops "$PUBLIC_FOLLOWUP_STATE"; then
-  echo "warning: an open public loop with nothing owed is still recorded in the consent-holding home while cleaning up ship task $ID. Hand it on with bin/fm-public-followup.sh rechain or close it with retire --reason." >&2
+  echo "warning: an open public loop with nothing owed is still recorded in the consent-holding home while cleaning up Builder task $ID. Hand it on with bin/fm-public-followup.sh rechain or close it with retire --reason." >&2
 fi
 
 # Non-blocking: the legacy Relay link is not guarded as a refusal.
@@ -3717,7 +3717,7 @@ fi
 
 if [ "$BACKEND" = orca ] && [ "$KIND" != scout ] && [ "$KIND" != secondmate ] && [ "$FORCE" != "--force" ]; then
   if ! inspectable_git_worktree "$WT"; then
-    echo "REFUSED: Orca ship task $ID has no inspectable git worktree at ${WT:-<missing>}." >&2
+    echo "REFUSED: Orca Builder task $ID has no inspectable git worktree at ${WT:-<missing>}." >&2
     echo "Cannot verify dirty or unlanded work; restore the worktree path or get explicit OK to discard, then --force." >&2
     exit 1
   fi

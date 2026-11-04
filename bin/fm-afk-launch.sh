@@ -651,10 +651,10 @@ fm_afk_launch_restore_backup() {  # <backup> <had-afk>
   return "$result"
 }
 
-# Launch the daemon in a non-visible herdr terminal in the CAPTAIN's session
-# (so the daemon can inject into the captain pane, which lives there). A
+# Launch the daemon in a non-visible herdr terminal in the user's session
+# (so the daemon can inject into the user-facing pane, which lives there). A
 # dedicated background workspace (--no-focus) holds exactly one tab/pane; it
-# never touches the captain's active tab. Prints the record line on success.
+# never touches the user's active tab. Prints the record line on success.
 fm_afk_launch_create_herdr() {  # <captain-target> <captain-backend>
   local captain_target=$1 captain_backend=$2 session out wsid pane cmd label recovered create_result
   session=${captain_target%%:*}

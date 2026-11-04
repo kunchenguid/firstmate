@@ -512,7 +512,7 @@ test_bootstrap_nudge_retry_rejects_malformed_marker_id() {
     FM_SEND_SETTLE=0 FM_FAKE_TMUX_LOG="$log" \
     "$ROOT/bin/fm-bootstrap.sh" 2>/dev/null)
 
-  assert_contains "$out" "NUDGE_SECONDMATES: secondmate ../escape: send failed: retry marker has unsafe id" \
+  assert_contains "$out" "NUDGE_SECONDMATES: Project Director ../escape: send failed: retry marker has unsafe id" \
     "malformed retry marker id should be rejected before target resolution"
   assert_not_contains "$out" "BOOTSTRAP_INFO: nudged fm-../escape" \
     "malformed retry marker id must never send through a path-traversed selector"
@@ -536,7 +536,7 @@ test_bootstrap_nudge_failure_records_retry_marker() {
     FM_SEND_SETTLE=0 \
     "$ROOT/bin/fm-bootstrap.sh" 2>/dev/null)
 
-  assert_contains "$out" "NUDGE_SECONDMATES: secondmate sm-instr: send failed:" \
+  assert_contains "$out" "NUDGE_SECONDMATES: Project Director sm-instr: send failed:" \
     "failed nudge send should be surfaced as actionable bootstrap output"
   marker="$w/home/state/.secondmate-nudge-pending/sm-instr.pending"
   assert_present "$marker" "failed nudge should leave a retry marker"
@@ -558,7 +558,7 @@ test_bootstrap_nudge_retry_is_idempotent() {
   out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$w/home" FM_ROOT_OVERRIDE="$w/main" \
     FM_SEND_SETTLE=0 \
     "$ROOT/bin/fm-bootstrap.sh" 2>/dev/null)
-  assert_contains "$out" "NUDGE_SECONDMATES: secondmate sm-instr: send failed:" \
+  assert_contains "$out" "NUDGE_SECONDMATES: Project Director sm-instr: send failed:" \
     "precondition: first nudge should fail"
   marker="$w/home/state/.secondmate-nudge-pending/sm-instr.pending"
   assert_present "$marker" "precondition: failed nudge should leave marker"
@@ -588,7 +588,7 @@ test_bootstrap_nudge_retry_refuses_changed_home() {
   out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$w/home" FM_ROOT_OVERRIDE="$w/main" \
     FM_SEND_SETTLE=0 \
     "$ROOT/bin/fm-bootstrap.sh" 2>/dev/null)
-  assert_contains "$out" "NUDGE_SECONDMATES: secondmate sm-instr: send failed:" \
+  assert_contains "$out" "NUDGE_SECONDMATES: Project Director sm-instr: send failed:" \
     "precondition: first nudge should fail"
   marker="$w/home/state/.secondmate-nudge-pending/sm-instr.pending"
   assert_present "$marker" "precondition: failed nudge should leave marker"
@@ -602,7 +602,7 @@ test_bootstrap_nudge_retry_refuses_changed_home() {
 
   out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$w/home" FM_ROOT_OVERRIDE="$w/main" \
     FM_SEND_SETTLE=0 "$ROOT/bin/fm-bootstrap.sh" 2>/dev/null)
-  assert_contains "$out" "NUDGE_SECONDMATES: secondmate sm-instr: send failed: retry target home changed" \
+  assert_contains "$out" "NUDGE_SECONDMATES: Project Director sm-instr: send failed: retry target home changed" \
     "retry must not infer a nudge target outside the recorded failed home"
   assert_present "$marker" "ambiguous retry should keep marker for operator inspection"
   pass "T8e bootstrap nudge retry refuses a changed home instead of guessing"
@@ -747,7 +747,7 @@ test_bootstrap_sweep_surfaces_skipped_home() {
   out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$w/home" FM_ROOT_OVERRIDE="$w/main" \
     "$ROOT/bin/fm-bootstrap.sh" 2>/dev/null)
 
-  skip_line=$(printf '%s\n' "$out" | grep '^SECONDMATE_SYNC: secondmate sm-dirty: skipped:' || true)
+  skip_line=$(printf '%s\n' "$out" | grep '^SECONDMATE_SYNC: Project Director sm-dirty: skipped:' || true)
   [ -n "$skip_line" ] || fail "no SECONDMATE_SYNC skip line emitted (got: $out)"
   assert_contains "$skip_line" "dirty working tree" "dirty skipped home reports the actionable reason"
   [ "$(head_of "$w/sm-dirty")" = "$before" ] || fail "dirty home HEAD moved"
@@ -820,7 +820,7 @@ SH
     "$ROOT/bin/fm-spawn.sh" sm "$w/sm" codex --secondmate >/dev/null 2>"$err" || true
 
   assert_contains "$(cat "$err")" \
-    "warning: secondmate sm sync skipped before launch: dirty working tree" \
+    "warning: Project Director sm sync skipped before launch: dirty working tree" \
     "spawn warning reports the skipped sync reason"
   [ "$(head_of "$w/sm")" = "$before" ] || fail "dirty spawn home HEAD moved"
   grep -q 'uncommitted local edit' "$w/sm/AGENTS.md" || fail "dirty spawn edit was discarded"
@@ -1287,7 +1287,7 @@ test_bootstrap_reports_outdated_host_actionably() {
     FM_INHERITABLE_CONFIG='' FM_FAKE_TREEHOUSE_LEASE_HELP=1 FM_SEND_SETTLE=0 \
     "$ROOT/bin/fm-bootstrap.sh" 2>&1)
 
-  assert_contains "$out" "SECONDMATE_SYNC: secondmate sm: skipped:" \
+  assert_contains "$out" "SECONDMATE_SYNC: Project Director sm: skipped:" \
     "an outdated host did not produce its own convergence line"
   assert_contains "$out" "too old to sync to this primary's commit; run /updatefirstmate" \
     "the outdated-host report does not say how to fix it"
@@ -1347,32 +1347,32 @@ test_bootstrap_nudges_remote_home_only_when_owed() {
 
   remote_marker "$w" 0
   out=$(remote_nudge_bootstrap "$w")
-  assert_not_contains "$out" "NUDGE_SECONDMATES: secondmate sm" \
+  assert_not_contains "$out" "NUDGE_SECONDMATES: Project Director sm" \
     "a marker left by a cut-off attempt that changed nothing must not nudge (out: $out)"
   [ ! -e "$marker" ] || fail "a converged attempt with nothing owed must clear the marker"
 
   remote_marker "$w" 1
   out=$(remote_nudge_bootstrap "$w")
-  assert_contains "$out" "NUDGE_SECONDMATES: secondmate sm: send failed" \
+  assert_contains "$out" "NUDGE_SECONDMATES: Project Director sm: send failed" \
     "a reread an earlier attempt still owes must be sent (out: $out)"
   assert_contains "$(cat "$marker")" "owed=1" "a failed send must keep the reread owed"
 
   out=$(remote_nudge_bootstrap "$w")
-  assert_contains "$out" "NUDGE_SECONDMATES: secondmate sm: send failed" "an owed reread is retried until it is sent"
+  assert_contains "$out" "NUDGE_SECONDMATES: Project Director sm: send failed" "an owed reread is retried until it is sent"
   rm -f "$marker"
 
   bump_primary "$w" readme
   git -C "$w/main" push -q origin main
   out=$(remote_nudge_bootstrap "$w")
   [ "$(head_of "$w/sm")" = "$(head_of "$w/main")" ] || fail "the README-only advance did not reach the remote home (out: $out)"
-  assert_not_contains "$out" "NUDGE_SECONDMATES: secondmate sm" \
+  assert_not_contains "$out" "NUDGE_SECONDMATES: Project Director sm" \
     "an advance outside the instruction surface must not nudge (out: $out)"
   [ ! -e "$marker" ] || fail "an advance outside the instruction surface owes no reread"
 
   bump_primary "$w" instr
   git -C "$w/main" push -q origin main
   out=$(remote_nudge_bootstrap "$w")
-  assert_contains "$out" "NUDGE_SECONDMATES: secondmate sm: send failed" \
+  assert_contains "$out" "NUDGE_SECONDMATES: Project Director sm: send failed" \
     "an instruction advance must nudge (out: $out)"
   assert_contains "$(cat "$marker")" "owed=1" "an instruction advance whose send failed stays owed"
   pass "R11 a remote home is nudged only for an owed reread or a real instruction change, never for a cut-off attempt that changed nothing"

@@ -1273,8 +1273,8 @@ EOF
   # happen is silence: the section names the relaunch as either done or not yet
   # confirmed.
   assert_contains "$out" "NETWORK CHECKS" "the digest lost its deferred network-check section"
-  assert_contains "$out" "dead-secondmate relaunch" \
-    "the digest never accounted for the dead-secondmate relaunch"
+  assert_contains "$out" "Project Director relaunch" \
+    "the digest never accounted for the Project Director relaunch"
 
   wait_for_network_stage "$home" "$root" \
     || fail "the deferred network stage never published: $(network_stage_report "$home" "$root")"
@@ -1330,7 +1330,7 @@ EOF
   wait_for_network_stage "$home" "$root" || fail "the deferred network stage never published"
 
   assert_contains "$(network_stage_report "$home" "$root")" \
-    "SECONDMATE_LIVENESS: secondmate $SESSION_START_SECOND_MATE_ID: skipped: existing endpoint has ambiguous agent process (backend=tmux)" \
+    "SECONDMATE_LIVENESS: Project Director $SESSION_START_SECOND_MATE_ID: skipped: existing endpoint has ambiguous agent process (backend=tmux)" \
     "session start did not distinguish an existing Pi-shaped process from a missing window"
   [ ! -s "$log" ] || fail "session start touched an ambiguous existing Pi process: $(cat "$log")"
   assert_contains "$out" "endpoint: alive (backend=tmux window=firstmate:fm-$SESSION_START_SECOND_MATE_ID)" \
@@ -1349,7 +1349,7 @@ EOF
   wait_for_network_stage "$home" "$root" || fail "the deferred network stage never published"
 
   assert_contains "$(network_stage_report "$home" "$root")" \
-    "SECONDMATE_LIVENESS: secondmate $SESSION_START_SECOND_MATE_ID: skipped: endpoint probe unreadable (backend=tmux)" \
+    "SECONDMATE_LIVENESS: Project Director $SESSION_START_SECOND_MATE_ID: skipped: endpoint probe unreadable (backend=tmux)" \
     "session start did not distinguish transient unreadability from absence"
   [ ! -s "$log" ] || fail "session start touched a transiently unreadable target: $(cat "$log")"
   assert_contains "$out" "endpoint: dead (backend=tmux window=firstmate:fm-$SESSION_START_SECOND_MATE_ID)" \
@@ -1900,7 +1900,7 @@ EOF
   assert_contains "$out" "SESSION START" "the digest did not complete"
   assert_contains "$out" "IN PROGRESS - the deferred network checks have not finished yet." \
     "the digest did not disclose that its network checks were still running"
-  assert_contains "$out" "NOT yet confirmed: GitHub authentication, dead-secondmate relaunch" \
+  assert_contains "$out" "NOT yet confirmed: GitHub authentication, Project Director relaunch" \
     "the digest did not name the checks it has not confirmed"
   assert_not_contains "$out" "NEEDS_GH_AUTH" \
     "the digest reported a GitHub-auth verdict it could not yet have"
@@ -1911,7 +1911,7 @@ EOF
   assert_contains "$(network_stage_report "$home" "$root")" "NEEDS_GH_AUTH" \
     "the deferred stage lost the GitHub-auth verdict it was deferring"
   assert_contains "$(cat "$log")" "new-window" \
-    "the deferred stage lost the dead-secondmate relaunch"
+    "the deferred stage lost the Project Director relaunch"
   pass "session start: an unreachable host delays a reported check, not the digest"
 }
 

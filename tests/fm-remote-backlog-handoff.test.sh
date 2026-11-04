@@ -328,7 +328,7 @@ set -e
 [ "$rc" -ne 0 ] || fail "offline handoff claimed success"
 bootstrap_out=$(FM_HOME="$PARENT" FM_ROOT_OVERRIDE="$ROOT" FM_BACKEND=tmux \
   FM_BOOTSTRAP_DETECT_ONLY=1 "$ROOT/bin/fm-bootstrap.sh" 2>&1)
-assert_contains "$bootstrap_out" 'SECONDMATE_HANDOFF: secondmate ios: pending delivery: 1 item(s)' \
+assert_contains "$bootstrap_out" 'SECONDMATE_HANDOFF: Project Director ios: pending delivery: 1 item(s)' \
   "bootstrap did not surface the pending outbox count"
 handoff_env "$ROOT/bin/fm-backlog-handoff.sh" --resume-pending >/dev/null \
   || fail "pending bootstrap-visible outbox did not later converge"

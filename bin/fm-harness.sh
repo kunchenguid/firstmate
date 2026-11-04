@@ -560,7 +560,7 @@ secondmate_parse() {
       id=${BASH_REMATCH[1]}
       rest=${BASH_REMATCH[2]}
       if [[ ! "$id" =~ ^[A-Za-z0-9._-]+$ ]]; then
-        echo "error: config/secondmate-harness line $num: 'mate $id:' names an invalid secondmate id (letters, digits, dot, underscore, hyphen)" >&2
+        echo "error: config/secondmate-harness line $num: 'mate $id:' names an invalid Project Director id (letters, digits, dot, underscore, hyphen)" >&2
         return 1
       fi
       for i in "${!SM_MATE_IDS[@]}"; do

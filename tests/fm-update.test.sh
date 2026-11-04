@@ -158,7 +158,7 @@ test_updates_main_and_secondmate() {
   out=$(run_update "$w")
 
   assert_contains "$out" "firstmate: updated " "firstmate fast-forwarded"
-  assert_contains "$out" "secondmate sm1: updated " "secondmate fast-forwarded"
+  assert_contains "$out" "Project Director sm1: updated " "secondmate fast-forwarded"
   assert_contains "$out" "reread-firstmate: yes" "instruction change triggers reread"
   assert_contains "$out" "restart-secondmates: fm-sm1" "a changed AGENTS.md must move the secondmate into the restart set"
   assert_contains "$out" "nudge-secondmates: none" "a restarted secondmate must not also be nudged"
@@ -244,7 +244,7 @@ test_dead_secondmate_gets_no_action() {
 
   out=$(run_update "$w")
 
-  assert_contains "$out" "secondmate sm1: updated " "the stopped mate's safe checkout still advances"
+  assert_contains "$out" "Project Director sm1: updated " "the stopped mate's safe checkout still advances"
   assert_contains "$out" "restart-secondmates: none" "a stopped mate must not be sent to restart"
   assert_contains "$out" "nudge-secondmates: none" "a stopped mate must not receive a queued nudge"
   pass "T3d an already-stopped secondmate is left to startup recovery"
@@ -311,7 +311,7 @@ test_dirty_secondmate_skipped() {
 
   out=$(run_update "$w")
 
-  assert_contains "$out" "secondmate sm1: skipped: dirty working tree" "dirty home skipped"
+  assert_contains "$out" "Project Director sm1: skipped: dirty working tree" "dirty home skipped"
   assert_not_contains "$out" "fm-sm1" "skipped secondmate is not nudged"
   grep -q 'uncommitted local edit' "$w/sm1/AGENTS.md" \
     || fail "dirty edit was discarded"
@@ -332,7 +332,7 @@ test_diverged_secondmate_skipped() {
 
   out=$(run_update "$w")
 
-  assert_contains "$out" "secondmate sm1: skipped: diverged from origin/main" "diverged home skipped"
+  assert_contains "$out" "Project Director sm1: skipped: diverged from origin/main" "diverged home skipped"
   assert_contains "$out" "reconciliation required (record:" "diverged skip is actionable"
   assert_not_contains "$out" "fm-sm1" "diverged secondmate is not nudged"
   [ "$(git -C "$w/sm1" rev-parse HEAD)" = "$before" ] \
@@ -365,7 +365,7 @@ test_squash_merged_divergence_reconciles() {
   bump_origin "$w" readme
   out=$(run_update "$w")
   marker="$w/home/state/.secondmate-update-reconcile/sm1.pending"
-  assert_contains "$out" "secondmate sm1: skipped: diverged from origin/main" \
+  assert_contains "$out" "Project Director sm1: skipped: diverged from origin/main" \
     "unique local work was not initially protected"
   assert_present "$marker" "initial divergence did not leave its durable record"
 
@@ -376,7 +376,7 @@ test_squash_merged_divergence_reconciles() {
 
   out=$(run_update "$w")
 
-  assert_contains "$out" "secondmate sm1: reconciled redundant divergence" \
+  assert_contains "$out" "Project Director sm1: reconciled redundant divergence" \
     "the squash-merged local result did not heal"
   [ "$(git -C "$w/sm1" rev-parse HEAD)" = "$(git -C "$w/sm1" rev-parse origin/main)" ] \
     || fail "reconciled secondmate did not reach origin/main"
@@ -400,7 +400,7 @@ test_already_current_secondmate_still_restarts() {
   out=$(run_update "$w")       # second run: nothing left to fast-forward
 
   assert_contains "$out" "firstmate: already current" "firstmate already current"
-  assert_contains "$out" "secondmate sm1: already current" "secondmate already current"
+  assert_contains "$out" "Project Director sm1: already current" "secondmate already current"
   assert_contains "$out" "reread-firstmate: no" "no reread when nothing changed"
   restart_line=$(printf '%s\n' "$out" | grep '^restart-secondmates:')
   assert_contains "$restart_line" "fm-sm1" \
@@ -420,7 +420,7 @@ test_already_current_unprovable_mate_is_nudged() {
 
   out=$(run_update "$w")       # second run: the home is already on the tip
 
-  assert_contains "$out" "secondmate sm1: already current" "the mate must need no advance"
+  assert_contains "$out" "Project Director sm1: already current" "the mate must need no advance"
   restart_line=$(printf '%s\n' "$out" | grep '^restart-secondmates:')
   nudge_line=$(printf '%s\n' "$out" | grep '^nudge-secondmates:')
   assert_not_contains "$restart_line" "sm1" "an unprovable runtime must stay out of the restart set"
@@ -450,11 +450,11 @@ test_registry_backstop_dedup_and_self_exclusion() {
 
   out=$(run_update "$w")
 
-  assert_contains "$out" "secondmate reg1: updated " "registry-only secondmate fast-forwarded"
-  assert_contains "$out" "secondmate sm1: updated " "meta+registry secondmate fast-forwarded"
-  count=$(printf '%s\n' "$out" | grep -c '^secondmate sm1:' || true)
+  assert_contains "$out" "Project Director reg1: updated " "registry-only secondmate fast-forwarded"
+  assert_contains "$out" "Project Director sm1: updated " "meta+registry secondmate fast-forwarded"
+  count=$(printf '%s\n' "$out" | grep -c '^Project Director sm1:' || true)
   [ "$count" -eq 1 ] || fail "secondmate sm1 processed $count times, expected 1 (dedup across meta+registry)"
-  assert_not_contains "$out" "secondmate selfish" "firstmate repo re-processed as its own secondmate"
+  assert_not_contains "$out" "Project Director selfish" "firstmate repo re-processed as its own secondmate"
   # sm1 has live metadata, so it is nudged; reg1 has none, so it is not. Pin the
   # nudge line exactly and confirm reg1 is absent from it (not from the whole
   # output, where 'secondmate reg1: updated' legitimately appears).
@@ -517,7 +517,7 @@ test_unsafe_secondmate_home_skipped_before_git_update() {
 
   out=$(run_update "$w")
 
-  assert_contains "$out" "secondmate bad: skipped: unsafe home: secondmate home cannot be inside the active firstmate home" \
+  assert_contains "$out" "Project Director bad: skipped: unsafe home: Project Director home cannot be inside the active firstmate home" \
     "unsafe project-like home skipped"
   assert_contains "$out" "nudge-secondmates: none" "unsafe home is not nudged"
   [ "$(git -C "$bad" rev-parse HEAD)" = "$before" ] \
@@ -687,7 +687,7 @@ test_self_update_source_rewrite_is_skipped() {
   assert_contains "$out" "firstmate: skipped: diverged from refs/remotes/fork/carry" "a rewritten branch must be skipped"
   assert_equals "$(git -C "$w/main" rev-parse HEAD)" "$carry" "the primary was moved off its commit"
   assert_not_equals "$(git -C "$w/main" rev-parse HEAD)" "$other" "the primary was forced to the rewritten branch"
-  assert_contains "$out" "secondmate sm1: already current" "a secondmate stays on the primary's unchanged commit"
+  assert_contains "$out" "Project Director sm1: already current" "a secondmate stays on the primary's unchanged commit"
   pass "T15 a non-fast-forward self-update source is skipped, never forced"
 }
 

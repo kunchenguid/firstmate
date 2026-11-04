@@ -480,7 +480,7 @@ test_remote_secondmate_account_override_refuses_locally() {
     "$id" > "$HOME_DIR/data/secondmates.md"
   out=$(fm_test_run_spawn "$HOME_DIR" "$WT" "$FAKEBIN" "$id" --secondmate); rc=$?
   expect_code 1 "$rc" "a primary-side remote account override must refuse"
-  assert_refused_before_launch "$id" "$out" "$HOME_DIR/config/secondmate-accounts/$id/claude-account cannot pin remote secondmate"
+  assert_refused_before_launch "$id" "$out" "$HOME_DIR/config/secondmate-accounts/$id/claude-account cannot pin remote Project Director"
   assert_absent "$CASE/claude-checks" "a remote refusal must not inspect a local login"
   pass "a remote route refuses a primary-side account override instead of silently ignoring it"
 }
@@ -494,7 +494,7 @@ test_remote_secondmate_refuses_account() {
     "$id" > "$HOME_DIR/data/secondmates.md"
   out=$(fm_test_run_spawn "$HOME_DIR" "$WT" "$FAKEBIN" "$id" --secondmate --account "$CASE/first"); rc=$?
   expect_code 1 "$rc" "--account on a remote secondmate must refuse"
-  assert_refused_before_launch "$id" "$out" "--account applies to ships and scouts"
+  assert_refused_before_launch "$id" "$out" "--account applies to Builders and Investigators"
   assert_absent "$CASE/claude-checks" "a refused remote launch must not inspect a local login"
   pass "a remote secondmate refuses --account instead of launching on the remote home's account"
 }
@@ -560,7 +560,7 @@ test_account_list_refusals() {
   declare_accounts "$CASE/first" "$CASE/second" "$CASE/signed-out" ordinary
   out=$(spawn_ship "$id-none"); rc=$?
   expect_code 1 "$rc" "a Claude spawn without --account must refuse under a list"
-  assert_refused_before_launch "$id-none" "$out" "config/claude-accounts declares 4 Claude accounts, so a Claude ship or scout launch must name one with --account"
+  assert_refused_before_launch "$id-none" "$out" "config/claude-accounts declares 4 Claude accounts, so a Claude Builder or Investigator launch must name one with --account"
   out=$(spawn_ship "$id-other" --account "$CASE/elsewhere"); rc=$?
   expect_code 1 "$rc" "an undeclared account must refuse"
   assert_refused_before_launch "$id-other" "$out" "account '$CASE/elsewhere' is not declared in config/claude-accounts"
@@ -618,10 +618,10 @@ test_account_list_secondmate_needs_its_own_pin() {
   declare_accounts "$CASE/first"
   out=$(spawn_account_secondmate "$id"); rc=$?
   expect_code 1 "$rc" "a secondmate without its own pin must refuse under a list: $out"
-  assert_refused_before_launch "$id" "$out" "secondmate $id needs its own pin in config/secondmate-accounts/$id/claude-account"
+  assert_refused_before_launch "$id" "$out" "Project Director $id needs its own pin in config/secondmate-accounts/$id/claude-account"
   out=$(spawn_account_secondmate "$id" --account "$CASE/first"); rc=$?
   expect_code 1 "$rc" "--account on a secondmate must refuse"
-  assert_refused_before_launch "$id" "$out" "--account applies to ships and scouts"
+  assert_refused_before_launch "$id" "$out" "--account applies to Builders and Investigators"
   mkdir -p "$HOME_DIR/config/secondmate-accounts/$id"
   printf '%s\n' "$CASE/mate" > "$HOME_DIR/config/secondmate-accounts/$id/claude-account"
   out=$(spawn_account_secondmate "$id"); rc=$?

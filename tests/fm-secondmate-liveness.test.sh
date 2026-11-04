@@ -395,7 +395,7 @@ test_sweep_respawns_confirmed_dead_secondmate() {
 
   out=$(run_bootstrap "$tmuxfb:$fb" "$w/home" zsh "$log")
 
-  assert_not_contains "$out" "SECONDMATE_LIVENESS: secondmate sm1: respawned" \
+  assert_not_contains "$out" "SECONDMATE_LIVENESS: Project Director sm1: respawned" \
     "a successfully respawned secondmate should be handled silently"
   assert_contains "$(cat "$log")" "kill-window -t =firstmate:=fm-sm1" \
     "the stale endpoint must be killed before respawn (tmux refuses a same-named window over a live one)"
@@ -416,7 +416,7 @@ test_sweep_respawns_on_the_recorded_backend() {
   # The home now selects hc for new spawns; the dead mate is recorded on tmux.
   out=$(run_bootstrap "$tmuxfb:$fb" "$w/home" zsh "$log" FM_BACKEND=hc)
 
-  assert_not_contains "$out" "SECONDMATE_LIVENESS: secondmate sm1:" \
+  assert_not_contains "$out" "SECONDMATE_LIVENESS: Project Director sm1:" \
     "the respawn should succeed on the recorded backend: $out"
   assert_contains "$(cat "$log")" "new-window" \
     "the respawn must land on the backend the mate is recorded on, not the configured default"
@@ -444,7 +444,7 @@ SH
   log="$w/calls.log"; : > "$log"
   out=$(run_bootstrap "$tmuxfb:$fb" "$w/home" zsh "$log" \
     HOME="$w/user-home" CLAUDE_CONFIG_DIR="$w/ambient-account" FM_FAKE_LAUNCH_LOG="$w/launch.log")
-  assert_not_contains "$out" 'SECONDMATE_LIVENESS: secondmate sm1:' "account recovery should succeed: $out"
+  assert_not_contains "$out" 'SECONDMATE_LIVENESS: Project Director sm1:' "account recovery should succeed: $out"
   assert_grep 'relaunched' "$w/home/state/.secondmate-relaunch-sm1" "recovery must finish"
   assert_grep "account=$w/mate-account" "$w/home/state/sm1.meta" "recovery must record the configured mate account"
   assert_grep "CLAUDE_CONFIG_DIR='$w/mate-account'" "$w/launch.log" "recovery must launch on the durable mate pin, not the ambient account"
@@ -463,7 +463,7 @@ test_sweep_serializes_distinct_secondmate_relaunches() {
   # A parallel sweep races the second spawn into that lock and loses it.
   out=$(run_bootstrap "$tmuxfb:$fb" "$w/home" missing "$log" FM_TEST_NEW_WINDOW_PAUSE=2)
 
-  assert_not_contains "$out" 'SECONDMATE_LIVENESS: secondmate sm' \
+  assert_not_contains "$out" 'SECONDMATE_LIVENESS: Project Director sm' \
     "both distinct mates should relaunch without task-set contention"
   for id in sm1 sm2; do
     assert_grep 'relaunched' "$w/home/state/.secondmate-relaunch-$id" \
@@ -488,7 +488,7 @@ test_sweep_keeps_tmux_best_effort_kill_when_close_fails() {
 
   assert_contains "$(cat "$log")" "kill-window -t =firstmate:=fm-sm1" "the close is attempted"
   assert_not_contains "$out" "could not prove the old" "a non-T3 close failure must not take the T3-only refusal path"
-  assert_contains "$out" "SECONDMATE_LIVENESS: secondmate sm1: respawn failed after confirmed agent absence on existing endpoint" \
+  assert_contains "$out" "SECONDMATE_LIVENESS: Project Director sm1: respawn failed after confirmed agent absence on existing endpoint" \
     "the guarded spawn still runs after a failed tmux close, as before"
   pass "sweep: a tmux secondmate whose close fails keeps the existing best-effort kill and guarded spawn"
 }
@@ -514,7 +514,7 @@ test_sweep_skips_mate_whose_liveness_lock_is_held() {
 
   out=$(run_bootstrap "$tmuxfb:$fb" "$w/home" zsh "$log")
 
-  assert_contains "$out" "SECONDMATE_LIVENESS: secondmate sm1: skipped: another liveness check is already in progress" \
+  assert_contains "$out" "SECONDMATE_LIVENESS: Project Director sm1: skipped: another liveness check is already in progress" \
     "a mate under an active liveness lock should be skipped, not probed"
   [ ! -s "$log" ] || fail "a locked mate must never be killed or respawned: $(cat "$log")"
   kill "$holder" 2>/dev/null || true
@@ -581,7 +581,7 @@ test_sweep_refuses_relaunch_on_ledger_errors() {
     out=$(run_bootstrap "$tmuxfb:$fb" "$w/home" zsh "$log")
     chmod 644 "$ledger"
 
-    assert_contains "$out" "SECONDMATE_LIVENESS: secondmate sm1: skipped: relaunch ledger $ledger is $word" \
+    assert_contains "$out" "SECONDMATE_LIVENESS: Project Director sm1: skipped: relaunch ledger $ledger is $word" \
       "a mode-$mode relaunch ledger should skip the relaunch with its reason"
     [ ! -s "$log" ] || fail "a mode-$mode relaunch ledger still killed or spawned: $(cat "$log")"
     [ ! -s "$ledger" ] || fail "a mode-$mode ledger gained rows: $(cat "$ledger")"
@@ -598,12 +598,12 @@ test_sweep_leaves_alive_secondmate_untouched() {
 
   out=$(run_bootstrap "$tmuxfb:$fb" "$w/home" claude "$log")
 
-  assert_not_contains "$out" "SECONDMATE_LIVENESS: secondmate sm1: already-live" \
+  assert_not_contains "$out" "SECONDMATE_LIVENESS: Project Director sm1: already-live" \
     "an already-live secondmate should be handled silently"
   [ ! -s "$log" ] || fail "an already-live secondmate must never be killed or respawned: $(cat "$log")"
 
   out=$(run_bootstrap "$tmuxfb:$fb" "$w/home" claude "$log" FM_BOOTSTRAP_VERBOSE_FACTS=1)
-  assert_contains "$out" "BOOTSTRAP_INFO: secondmate sm1 already live (backend=tmux)" \
+  assert_contains "$out" "BOOTSTRAP_INFO: Project Director sm1 already live (backend=tmux)" \
     "verbose diagnostics should identify the already-live outcome"
   [ ! -s "$log" ] || fail "verbose reporting must not touch an already-live secondmate: $(cat "$log")"
   pass "sweep: an already-live secondmate is untouched and distinguishable in verbose diagnostics"
@@ -652,7 +652,7 @@ test_sweep_never_acts_on_ambiguous_existing_process() {
 
   out=$(run_bootstrap "$tmuxfb:$fb" "$w/home" node "$log")
 
-  assert_contains "$out" "SECONDMATE_LIVENESS: secondmate sm1: skipped: existing endpoint has ambiguous agent process" \
+  assert_contains "$out" "SECONDMATE_LIVENESS: Project Director sm1: skipped: existing endpoint has ambiguous agent process" \
     "an existing Pi-shaped node process should be reported as ambiguous"
   [ ! -s "$log" ] || fail "an ambiguous existing process must never trigger kill or relaunch: $(cat "$log")"
   pass "sweep: an existing ambiguous Pi process prevents duplicate recovery"
@@ -667,7 +667,7 @@ test_sweep_never_acts_on_transient_unreadability() {
 
   out=$(run_bootstrap "$tmuxfb:$fb" "$w/home" unreadable "$log")
 
-  assert_contains "$out" "SECONDMATE_LIVENESS: secondmate sm1: skipped: endpoint probe unreadable" \
+  assert_contains "$out" "SECONDMATE_LIVENESS: Project Director sm1: skipped: endpoint probe unreadable" \
     "a transiently unreadable target should be distinguished from an absent one"
   [ ! -s "$log" ] || fail "an unreadable target must never trigger kill or relaunch: $(cat "$log")"
   pass "sweep: transient target unreadability never licenses recovery"
@@ -682,7 +682,7 @@ test_sweep_reports_missing_endpoint_relaunch_failure() {
 
   out=$(run_bootstrap "$tmuxfb:$fb" "$w/home" missing "$log" FM_TEST_FAIL_NEW_WINDOW=1)
 
-  assert_contains "$out" "SECONDMATE_LIVENESS: secondmate sm1: respawn failed after recorded endpoint confidently missing" \
+  assert_contains "$out" "SECONDMATE_LIVENESS: Project Director sm1: respawn failed after recorded endpoint confidently missing" \
     "a failed missing-endpoint relaunch should retain its authorizing cause"
   pass "sweep: failed relaunch diagnostics distinguish a confidently missing endpoint"
 }
@@ -696,7 +696,7 @@ test_sweep_never_acts_on_unverified_harness_dead_reading() {
 
   out=$(run_bootstrap "$tmuxfb:$fb" "$w/home" zsh "$log")
 
-  assert_contains "$out" "SECONDMATE_LIVENESS: secondmate sm1: skipped: recorded harness 'custom-agent' is unverified for recovery" \
+  assert_contains "$out" "SECONDMATE_LIVENESS: Project Director sm1: skipped: recorded harness 'custom-agent' is unverified for recovery" \
     "an unverified harness should not let a dead endpoint become actionable"
   [ ! -s "$log" ] || fail "an unverified harness must never trigger kill or relaunch: $(cat "$log")"
   pass "sweep: an unverified harness blocks recovery with a concrete diagnostic"
@@ -711,14 +711,14 @@ test_sweep_converges_no_retouch_once_alive() {
 
   # Round 1: dead -> respawned silently (kill + new-window logged).
   out1=$(run_bootstrap "$tmuxfb:$fb" "$w/home" zsh "$log")
-  assert_not_contains "$out1" "SECONDMATE_LIVENESS: secondmate sm1: respawned" "round 1 should handle the successful respawn silently"
+  assert_not_contains "$out1" "SECONDMATE_LIVENESS: Project Director sm1: respawned" "round 1 should handle the successful respawn silently"
   [ -s "$log" ] || fail "round 1 should have logged the kill+respawn window operations"
 
   # Round 2: the (now-respawned) secondmate is genuinely alive - a second
   # sweep must converge to a pure no-op, not respawn again.
   : > "$log"
   out2=$(run_bootstrap "$tmuxfb:$fb" "$w/home" claude "$log")
-  assert_not_contains "$out2" "SECONDMATE_LIVENESS: secondmate sm1: already-live" "round 2 should handle the already-live secondmate silently"
+  assert_not_contains "$out2" "SECONDMATE_LIVENESS: Project Director sm1: already-live" "round 2 should handle the already-live secondmate silently"
   [ ! -s "$log" ] || fail "round 2 must not re-kill or re-respawn an already-live secondmate: $(cat "$log")"
   pass "sweep: idempotent by construction - a live secondmate is never re-touched on a later run"
 }

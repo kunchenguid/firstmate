@@ -427,8 +427,8 @@ It takes no wake, so every wake reaches main as it would without the host.
 Each away-posture wake includes a line naming the problem.
 The running host reads both files at every wake, so an engine change or an opt-out takes effect at the next wake without a restart.
 
-The opt-out is inherited into Project Director homes: a primary that opts out also opts its Project Directors out, and clearing it restores each mate's own host setting at its next spawn or convergence.
-The primary-authoritative propagation contract, including removal of a mate's local opt-out when the primary has none, is owned by [`secondmate-provisioning`](../.agents/skills/secondmate-provisioning/SKILL.md).
+The opt-out is inherited into Project Director homes: a primary that opts out also opts its Project Directors out, and clearing it restores each Project Director's own host setting at its next spawn or convergence.
+The primary-authoritative propagation contract, including removal of a Project Director's local opt-out when the primary has none, is owned by [`secondmate-provisioning`](../.agents/skills/secondmate-provisioning/SKILL.md).
 `config/supervision-host` is local to each home and not inherited, because each home's engine and model are its own choice.
 While the home runs the host, main's lease-checked commands also take the per-task lease lock, so a claim by the host's engine cannot race a mutation main already started (`bin/fm-lease-lib.sh`).
 
@@ -499,7 +499,7 @@ A home may instead select another tasks-axi adapter such as Beads through its ow
 user-hold row creation is owned by [`bin/fm-captain-hold.sh`](../bin/fm-captain-hold.sh) `hold`: when no work item exists, it creates an ordinary backlog row (`--kind captain` metadata; Beads native type `task`) and then applies the user hold.
 user rows have no Beads due semantics, so that create path waives a Beads `due.required` setting rather than passing a synthetic `--due`; `--until` remains the optional hold deferral.
 
-Do not register a Beads `types.custom` `captain` type for this: user is a hold kind, and the team Beads `due.required` policy for ordinary work stays in the federated beads config.
+Do not register a Beads `types.custom` `captain` type for this: compatibility `captain` is the hold kind for a user decision, and the team Beads `due.required` policy for ordinary work stays in the federated beads config.
 
 ### Automatic dispatch and completion
 
@@ -533,7 +533,7 @@ An unreadable backend configuration can refuse lifecycle work before the no-back
 
 ### Handoffs between homes
 
-Project Director handoffs bypass that routine-backend choice: `fm-backlog-handoff.sh` keeps only its own fleet-level validation and delegates the item move to `tasks-axi mv`; its [script header](../bin/fm-backlog-handoff.sh) owns route-specific wake outcomes and remote outbox release.
+Project Director handoffs bypass that routine-backend choice: `fm-backlog-handoff.sh` keeps only its own team-level validation and delegates the item move to `tasks-axi mv`; its [script header](../bin/fm-backlog-handoff.sh) owns route-specific wake outcomes and remote outbox release.
 It moves in-scope `## Queued` items only and refuses `## In flight` and historical `## Done` records, which stay with their home for pruning or archiving.
 
 Handoff item bodies must use at least two leading spaces, and the helper refuses a selected item with a single-space or tab-indented continuation rather than risk orphaning it.
@@ -803,7 +803,7 @@ The receipt prevents accidental publication through supported paths; it proves c
 ## Waiting worker spends no turns (config/wait-no-turns)
 
 The optional local, gitignored `config/wait-no-turns` presence flag opts this home into keeping a waiting worker from spending turns until it is answered.
-With it present, Builder and Investigator briefs gain the `# Waiting` section and the foreground no-mistakes drive text, every brief's inbox section keeps the natural-checkpoint check and adds that a waiting worker does not poll or list its inbox because a waiting instruction rings, a pending-reply recovery waits while that mate has its own open decision or blocker, and a fire-and-forget steer whose doorbell did not land gets one later ring.
+With it present, Builder and Investigator briefs gain the `# Waiting` section and the foreground no-mistakes drive text, every brief's inbox section keeps the natural-checkpoint check and adds that a waiting worker does not poll or list its inbox because a waiting instruction rings, a pending-reply recovery waits while that Project Director has its own open decision or blocker, and a fire-and-forget steer whose doorbell did not land gets one later ring.
 With the file absent, generated briefs omit the waiting section and the no-poll inbox line, the drive text backgrounds the call, recovery sends during an open decision, and a fire-and-forget steer is not owed a retry ring.
 The flag is a home-local preference and is not inherited by Project Director homes.
 
@@ -1336,7 +1336,7 @@ When it is absent or contains `default`, workers mirror the firstmate's own harn
 ### Choose the Project Director harness
 
 `config/secondmate-harness` is a separate local, gitignored file containing the adapter the primary uses to launch Project Director agents, optionally followed by model and effort tokens on the same line. The file belongs to the primary, is not inherited by Project Director homes, and Project Directors do not launch Project Directors.
-Without a `mate <secondmate-id>:` declaration, the first non-empty, non-comment line supplies the default, parsed as `<harness> [<model>] [<effort>]`; later lines and additional tokens retain their legacy ignored behavior.
+Without a compatibility `mate <secondmate-id>:` declaration, the first non-empty, non-comment line supplies the default, parsed as `<harness> [<model>] [<effort>]`; later lines and additional tokens retain their legacy ignored behavior.
 With an override declaration, at most one non-empty, non-comment line without that prefix supplies the default.
 Any number of override lines can pin named Project Directors rather than the whole home:
 
@@ -1345,10 +1345,10 @@ mate <secondmate-id>: <harness> [<model>] [<effort>]
 ```
 
 Override ids use letters, digits, dots, underscores, and hyphens, and matching is case-sensitive.
-A mate line replaces the default line for that exact Project Director id, so raising the default pin cannot migrate a mate the user pinned separately.
-Precedence is the override for that mate's id, then the default line, then `config/crew-harness`, then the primary's own harness.
+A compatibility `mate` line replaces the default line for that exact Project Director id, so raising the default pin cannot migrate a Project Director the user pinned separately.
+Precedence is the override for that Project Director's id, then the default line, then `config/crew-harness`, then the primary's own harness.
 An override whose harness token is `default` skips the file's default line and falls back to `config/crew-harness`, then the primary's own harness, contributing no model or effort.
-Blank lines and `#` comments stay legal anywhere, and a mate line is honored wherever it sits in the file.
+Blank lines and `#` comments stay legal anywhere, and a compatibility `mate` line is honored wherever it sits in the file.
 In a file that declares an override, a second default line, two overrides for one id, an override with no tokens or more than three, or a `mate` keyword naming an invalid Project Director id is an actionable error: resolution exits nonzero naming the file's line number and prints no token, so malformed pin config cannot resolve to a fallback in silence.
 In a file that declares no override, none of that applies: the legacy first-line rule governs, so an existing, already-valid file is read exactly as it was before this grammar existed.
 
@@ -1357,8 +1357,8 @@ When the harness token is absent or `default`, Project Director launch falls bac
 
 [`fm-harness.sh`](../bin/fm-harness.sh)'s header owns the resolver commands and optional secondmate-id argument.
 Without an id they select the default line only; model and effort output is empty when no token applies.
-When the file declares an override, every resolver read validates the whole file, even when no id is supplied or the malformed line concerns another mate.
-Every resolution site that knows which mate it is launching passes that id, so spawn, control-plane relaunch, and Project Director restart all land on one decision.
+When the file declares an override, every resolver read validates the whole file, even when no id is supplied or the malformed line concerns another Project Director.
+Every resolution site that knows which Project Director it is launching passes that id, so spawn, control-plane relaunch, and Project Director restart all land on one decision.
 `config/crew-harness` remains a bare adapter-name file and is never parsed for a model.
 Changing this pin affects the next Project Director spawn or control-plane relaunch; the relaunch profile rules are owned by [`docs/agent-control.md`](agent-control.md#transactional-relaunch).
 For a separate account choice for one local Project Director, see [per-Project Director account pins](#per-project-director-account-pins).
@@ -1394,7 +1394,7 @@ For omp Project Director launches, `fm-spawn.sh` names only the parent home's `s
 
 For a Claude Project Director, `fm-spawn.sh` writes the busy hooks into the parent home's `state/<id>.claude-settings.json` and passes that file as Claude Code's one `--settings` value.
 The same file carries `feedbackDrafts` and, unless `config/keep-ai-trailers` is present, the attribution policy every other Claude launch puts in its inline `--settings` JSON.
-Claude Code applies `--settings` for that session and does not write the file into the mate home.
+Claude Code applies `--settings` for that session and does not write the file into the Project Director home.
 A key the file sets overrides the same key in user, project, and local settings.
 A key it omits keeps the file-based value, so a `.claude/settings.local.json` already in the home is left untouched.
 Hook entries merge across settings files rather than replacing each other, so the home's tracked Stop guard still runs beside these hooks.
@@ -1551,7 +1551,7 @@ An unqualified model, an undeclared provider, or a raw Pi launch command, which 
 
 ### Launch scope and sign-in checks
 
-When a file is present, supported command-line launches of that runner from this home use it: ships, Investigators, local Project Director agents, raw Claude launch commands, and relaunches.
+When a file is present, supported command-line launches of that runner from this home use it: Builders, Investigators, local Project Director agents, raw Claude launch commands, and relaunches.
 A local Project Director can override this default with its own [per-Project Director account pin](#per-project-director-account-pins).
 T3 Code selects the account through its provider instance instead, so `backend=t3code` refuses a worker account pin before mutation; [`t3code-backend.md`](t3code-backend.md#active-limits) owns that backend limit.
 A raw Claude launch command refuses if its leading assignments set `CLAUDE_CONFIG_DIR` or a credential that a pinned launch unsets, such as `ANTHROPIC_API_KEY`.
@@ -1602,7 +1602,7 @@ A relaunch or recovery of that task keeps its recorded account, re-checking that
 To move a task to another declared account, for example when its own account is exhausted, relaunch it explicitly with `bin/fm-control.sh <id> relaunch --account <entry> --note <text>`; nothing moves a running task automatically.
 A task with no recorded account, or one whose account is no longer declared, refuses a plain relaunch and needs that explicit `--account`.
 
-The list covers Claude ships and Investigators only.
+The list covers Claude Builders and Investigators only.
 A local Project Director's own agent never draws from it: under a list it needs its own [per-Project Director account pin](#per-project-director-account-pins), and `--account` refuses for every Project Director, local or remote.
 Other runners ignore the list, and `--account` refuses for them.
 Like the single pin, the list is not inherited into Project Director homes.
@@ -1622,7 +1622,7 @@ An empty, malformed, unreadable, or unusable per-Project Director pin refuses wi
 For example, `config/secondmate-accounts/work/claude-account` containing `/home/me/.claude-work` selects that existing Claude login for the local Project Director named `work`.
 Removing that file restores the primary home's account selection on the next launch.
 Every spawn, control-plane relaunch, and automatic recovery reads the durable setting again, never a previous task record or ambient account choice.
-After changing a live mate's pin, use `bin/fm-control.sh <id> relaunch` to apply it.
+After changing a live Project Director's pin, use `bin/fm-control.sh <id> relaunch` to apply it.
 The relaunch checks the selected pin before stopping the current agent.
 
 Per-Project Director pins stay in the primary home and are not inherited or copied into the Project Director's home.
@@ -1641,7 +1641,7 @@ When the file is absent, the launch carries no `--profile` flag and is unchanged
 There is no home-wide fallback file.
 
 Only a local Project Director's own omp agent reads this file.
-Ships, Investigators, other runners, and remote Project Directors never read it, and another Project Director's file never applies.
+Builders, Investigators, other runners, and remote Project Directors never read it, and another Project Director's file never applies.
 The profile pin is independent of the [per-Project Director account pins](#per-project-director-account-pins), which select a Claude or Pi login root rather than an omp profile.
 
 For example, `config/secondmate-accounts/speak4/omp-profile` containing `speak4` launches the local Project Director named `speak4` with `omp --profile speak4`.
@@ -1651,7 +1651,7 @@ The Director does not create, sign in, or copy an omp profile; sign in to it you
 
 The spawn prints the pin as `omp_profile=` and records the same field in the task record.
 Every spawn, control-plane relaunch, and automatic recovery reads the file again, and a relaunch checks it before stopping the current agent.
-After changing a live mate's pin, use `bin/fm-control.sh <id> relaunch` to apply it.
+After changing a live Project Director's pin, use `bin/fm-control.sh <id> relaunch` to apply it.
 The file stays in the primary home and is not inherited or copied into the Project Director's home, because a Project Director does not launch Project Directors.
 [`bin/fm-omp-profile-lib.sh`](../bin/fm-omp-profile-lib.sh) owns parsing and the refusals.
 
@@ -2288,7 +2288,7 @@ A Forgejo (or Gitea) project needs `tea` on `PATH` plus a `tea login` registered
 A GitLab project needs no forge token, only `glab` on `PATH`, authenticated via `glab auth login`.
 [`docs/gitlab-merge-watch.md`](gitlab-merge-watch.md) and [`docs/forgejo-tea-integration.md`](forgejo-tea-integration.md) hold the empirically verified CLI behavior each provider's watch and merge path depends on.
 
-A project whose reviews are created by a review tool that uploads its own snapshot of the worker's commits is registered `[direct-PR forge=external]`; it is never detected, ships `direct-PR` only, carries no yolo, and needs the [external review tool](#external-review-tool-configexternal-reviewmd-configexternal-review-url-configexternal-review-backup) configuration below.
+A project whose reviews are created by a review tool that uploads its own snapshot of the worker's commits is registered `[direct-PR forge=external]`; it is never detected, delivers through `direct-PR` only, carries no yolo, and needs the [external review tool](#external-review-tool-configexternal-reviewmd-configexternal-review-url-configexternal-review-backup) configuration below.
 [`docs/external-review-forge.md`](external-review-forge.md) is the design.
 
 ## PR text selection (data/projects.md pr= token)
@@ -3461,10 +3461,10 @@ FM_STALE_ESCALATE_SECS=240         # idle seconds before a provably-working stal
 FM_BUSY_TURN_MAX_SECS=3600         # maximum age without a completed turn, explicit native-harness progress, or opted-in model progress (see the stream option above; bin/fm-watch.sh owns marker selection), before the same wedge escalation used for a provably-working non-busy stale takes over; inspection-only, never an automatic interrupt or restart; a declared external wait, an attended verified user-held transfer, an attended backlog user hold on the worker's task, or - where config/wedge-defer-worker-wait or config/wedge-defer-parked-gate arms it - the worker's own still-open newest `blocked:` or `needs-decision:` line or a validation gate awaiting the Director's still-unanswered decision, or - where config/wedge-defer-validating arms it - an attributed validation run that is running or fixing, takes the FM_PAUSE_RESURFACE_SECS recheck below instead
 FM_STREAM_SILENT_MAX_SECS=         # opt-in Pi worker foreground model-stream silence threshold; off by default; see the option above and bin/fm-busy-lib.sh
 FM_PAUSE_RESURFACE_SECS=14400      # four hours between bounded rechecks of a declared external wait or verified user-held transfer, repeated new-hash stale alarms for an ordinary worker task with an open backlog user call, and repeated first-sight alarms from an otherwise-unclassifiable pane whose recovery-grade endpoint probe proves its agent alive and whose own status log or task worktree was written within FM_STALE_ESCALATE_SECS (without that progress evidence every new hash still surfaces immediately); a structured until time can make an external-wait recheck occur sooner but cannot extend this bound; this includes a live idle pane after its first inconclusive stale wake, a provably-working pane whose own unelapsed declared wait, backlog user hold, or, where config/wedge-defer-worker-wait or config/wedge-defer-parked-gate arms it, its worker's own still-open `blocked:` or `needs-decision:` line or unanswered Director-owed validation gate, or, where config/wedge-defer-validating arms it, attributed validation run that is running or fixing, defers its FM_STALE_ESCALATE_SECS escalation, and a live busy pane past FM_BUSY_TURN_MAX_SECS, while the away-mode daemon uses the same setting and ages its window against the worker's own latest status line rather than pane busy state; set it in config/watch.env for durable non-Relay tuning of watchers started through bin/fm-watch-arm.sh, while the Codex checkpoint route with no config/supervision-host and the away-mode daemon start the watcher directly and use the default; a user-held transfer or backlog user hold is never rechecked while the away-posture record exists, while an armed validation gate awaiting the Director's decision keeps this recheck in either posture
-FM_SECONDMATE_WAKE_STALL_SECS=180  # minimum interval with no change of the oldest actionable foreign wake-queue row (it advances as the mate drains, and a queue reprovisioned under the same task id starts a fresh interval at whatever sequence it restarts) before an endpoint-recorded local secondmate produces one durable parent wake-loop-stall notification for that no-progress episode; a mate that is provably inside an active turn (an exact busy verdict) does not escalate until that same no-progress interval reaches FM_BUSY_TURN_MAX_SECS above; a mate whose busy class is exactly idle, whose agent is alive, and whose composer is not pending is rung once so its own home can drain, and the parent notification is withheld until that same row stays frozen for another stall interval; unknown or ring-unsafe panes keep the parent alarm; declared external-wait pause rows are excluded, and zero or invalid values use 180
-FM_SECONDMATE_LIVENESS_SECS=60   # seconds between watcher probes of each registered secondmate's recorded endpoint; bin/fm-secondmate-liveness-lib.sh owns recovery actions and refusal rules; zero or invalid values use 60
+FM_SECONDMATE_WAKE_STALL_SECS=180  # minimum interval with no change of the oldest actionable foreign wake-queue row (it advances as the Project Director drains, and a queue reprovisioned under the same task id starts a fresh interval at whatever sequence it restarts) before an endpoint-recorded local Project Director produces one durable parent wake-loop-stall notification for that no-progress episode; a Project Director that is provably inside an active turn (an exact busy verdict) does not escalate until that same no-progress interval reaches FM_BUSY_TURN_MAX_SECS above; a Project Director whose busy class is exactly idle, whose agent is alive, and whose composer is not pending is rung once so its own home can drain, and the parent notification is withheld until that same row stays frozen for another stall interval; unknown or ring-unsafe panes keep the parent alarm; declared external-wait pause rows are excluded, and zero or invalid values use 180
+FM_SECONDMATE_LIVENESS_SECS=60   # seconds between watcher probes of each registered Project Director's recorded endpoint; bin/fm-secondmate-liveness-lib.sh owns recovery actions and refusal rules; zero or invalid values use 60
 FM_SECONDMATE_LIVENESS_TIMEOUT=120   # seconds allowed separately for a watcher-driven relaunch's per-home lock wait and its spawn execution; a lock-wait timeout skips recovery without touching the endpoint or recording an attempt; zero or invalid values use 120
-FM_SECONDMATE_LIVENESS_MAX_ATTEMPTS=3   # automatic relaunch attempts allowed per mate inside the window before the watcher parks auto-relaunch behind state/.secondmate-relaunch-bound-<id> and escalates once; a later live probe clears the marker and restores the full attempt budget (the ledger keeps its history behind a `rearmed` row); zero or invalid values use 3
+FM_SECONDMATE_LIVENESS_MAX_ATTEMPTS=3   # automatic relaunch attempts allowed per Project Director inside the window before the watcher parks auto-relaunch behind state/.secondmate-relaunch-bound-<id> and escalates once; a later live probe clears the marker and restores the full attempt budget (the ledger keeps its history behind a `rearmed` row); zero or invalid values use 3
 FM_SECONDMATE_LIVENESS_WINDOW_SECS=3600   # window the relaunch bound counts state/.secondmate-relaunch-<id> attempt lines over; the file is also the durable per-Project-Director relaunch record; zero or invalid values use 3600
 FM_WEDGE_DEMAND_INSPECT_COUNT=3    # consecutive provably-working stale escalations on the same unchanged pane before demand-deep-inspection is added
 FM_WEDGE_GUARD_TIMEOUT_SECS=5      # seconds one guard from config/wedge-evidence-guards may run before it counts as no answer; zero or invalid values use 5
@@ -3473,7 +3473,7 @@ FM_WEDGE_MAX_ESCALATIONS=0    # optional ceiling on consecutive wedge escalation
 FM_CAP_HORIZON_SECS=86400    # seconds a fired cap's window-scoped marker keeps silencing the wedge path for that window, after which a new wedge escalates again; an invalid, out-of-range, or zero value uses 86400
 FM_ROLLBACK_SENTINEL_TTL_SECS=3600   # seconds a cap-state write failure that could not be rolled back keeps the wedge path silenced through state/.wedge-rollback-failed-<key> - a failed cap-marker write whose own rollback also failed, an escalation count the state dir would not take, whose failed write leaves the ceiling unenforceable, or the cap-fire counter reset whose failed reset leaves the saturated counter standing - so a persistent write failure is observed once per wedge event instead of on every poll; an invalid, out-of-range, or zero value uses 3600
 FM_WORKTREE_WRITE_PRUNE='.git node_modules .venv venv __pycache__ .mypy_cache .pytest_cache .ruff_cache .tox target dist build .next .cache vendor'   # directory names the wedge detector's task-worktree write probe skips; the default keeps .git out so a supervisor's own read-only git command can never look like crew progress; set it to the empty string to prune nothing, which widens the probe to the whole depth-bounded tree rather than disabling it
-FM_WORKTREE_WRITE_MAXDEPTH=6       # depth that same probe walks below the recorded worktree; it runs only at the moment a wedge escalation would otherwise fire, never on every poll; no probe knob applies to a secondmate, whose recorded worktree is a provisioned home the probe skips entirely
+FM_WORKTREE_WRITE_MAXDEPTH=6       # depth that same probe walks below the recorded worktree; it runs only at the moment a wedge escalation would otherwise fire, never on every poll; no probe knob applies to a Project Director, whose recorded worktree is a provisioned home the probe skips entirely
 FM_WORKTREE_WRITE_TIMEOUT=10       # wall-clock seconds that one walk may take, so a worktree on a hung mount cannot stall the watcher poll that started it; hitting the bound reads as no write evidence, which leaves the escalation schedule exactly as it was; a value that is not a positive integer falls back to the default
 FM_WATCH_TRIAGE_LOG_MAX_BYTES=262144   # size cap for the watcher's absorbed-wake debug log
 FM_FLEET_SYNC_BOOTSTRAP_TIMEOUT=     # optional seconds allowed for bootstrap's best-effort clone refresh; unset/blank defaults to max(20, 5 + 3 * origin-backed-project-count)

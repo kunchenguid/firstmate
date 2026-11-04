@@ -1291,7 +1291,7 @@ BOOT_REPAIRED=$(FM_FAKE_SSH_MODE=doctor-fixable remote_env "$ROOT/bin/fm-bootstr
 [ "$(cat "$DOCTOR_LOG")" = 'doctor-fixable --backend
 doctor-fixable --fix
 doctor-fixable --backend' ] || fail "liveness did not check, repair, and re-check readiness before probing"$'\n'"$(cat "$DOCTOR_LOG")"
-assert_not_contains "$BOOT_REPAIRED" 'SECONDMATE_LIVENESS: secondmate ios:' \
+assert_not_contains "$BOOT_REPAIRED" 'SECONDMATE_LIVENESS: Project Director ios:' \
   "successful pre-probe readiness repair produced a liveness failure"
 launches_after_repair=$(grep -c '^tab create' "$HERDR_LOG" || true)
 [ "$launches_before_repair" -eq "$launches_after_repair" ] \
@@ -1454,7 +1454,7 @@ printf 'fm-ios|%s\n' "$REMOTE_HOME" > "$TMUX_STATE"
 tmux_state_before=$(cat "$TMUX_STATE")
 launches_before_legacy=$(grep -c '^tab create' "$HERDR_LOG" || true)
 BOOT_LEGACY=$(remote_env "$ROOT/bin/fm-bootstrap.sh")
-assert_contains "$BOOT_LEGACY" "SECONDMATE_LIVENESS: secondmate ios: skipped: remote endpoint state is unverified on remote-mac" \
+assert_contains "$BOOT_LEGACY" "SECONDMATE_LIVENESS: Project Director ios: skipped: remote endpoint state is unverified on remote-mac" \
   "liveness accepted an alive legacy remote backend"
 cmp -s "$TMP_ROOT/remote-ios-liveness-legacy.meta" "$remote_route_meta" \
   || fail "liveness rewrote the alive legacy endpoint metadata"
@@ -1572,7 +1572,7 @@ mv -f "$TMP_ROOT/remote-ios-rex-good.meta" "$remote_route_meta"
 # The parent's startup liveness probe keeps a live rex route alive and reports
 # a recorded/remote backend mismatch instead of migrating it.
 BOOT_REX=$(remote_env "$ROOT/bin/fm-bootstrap.sh")
-assert_not_contains "$BOOT_REX" 'SECONDMATE_LIVENESS: secondmate ios:' \
+assert_not_contains "$BOOT_REX" 'SECONDMATE_LIVENESS: Project Director ios:' \
   "the full sweep did not keep the live rex route alive"
 cp "$PARENT/state/ios.meta" "$TMP_ROOT/parent-ios-rex-good.meta"
 awk '/^remote_backend=/{print "remote_backend=herdr"; next} {print}' \
@@ -1600,7 +1600,7 @@ rm -f "$REX_FAKE/agent-blocks"
 [ "$(remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh state ios)" = dead ] \
   || fail "the exited rex agent was not projected dead from its own host"
 BOOT_REX_DEAD=$(FM_BOOTSTRAP_VERBOSE_FACTS=1 remote_env "$ROOT/bin/fm-bootstrap.sh")
-assert_not_contains "$BOOT_REX_DEAD" 'SECONDMATE_LIVENESS: secondmate ios:' \
+assert_not_contains "$BOOT_REX_DEAD" 'SECONDMATE_LIVENESS: Project Director ios:' \
   "the dead rex secondmate was not relaunched cleanly"
 assert_contains "$BOOT_REX_DEAD" 'secondmate ios relaunched after remote endpoint dead' \
   "the dead rex secondmate was not reported relaunched"
@@ -1679,7 +1679,7 @@ launches_before=$(grep -c '^tab create' "$HERDR_LOG" || true)
 rm -rf -- "$PARENT/state/.watch.lock"
 rm -f -- "$PARENT/state/.last-watcher-beat"
 BOOT_UNAVAILABLE=$(FM_FAKE_SSH_MODE=unreachable remote_env "$ROOT/bin/fm-bootstrap.sh")
-assert_contains "$BOOT_UNAVAILABLE" 'SECONDMATE_LIVENESS: secondmate ios: skipped: remote host unavailable or endpoint state unknown' \
+assert_contains "$BOOT_UNAVAILABLE" 'SECONDMATE_LIVENESS: Project Director ios: skipped: remote host unavailable or endpoint state unknown' \
   "bootstrap did not preserve an unreachable remote endpoint as unknown"
 UNAVAILABLE=$(FM_FAKE_SSH_MODE=unreachable remote_env "$ROOT/bin/fm-fleet-snapshot.sh" --json)
 printf '%s' "$UNAVAILABLE" | jq -e '.secondmate_current.records | any(.id == "ios"

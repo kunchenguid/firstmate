@@ -2543,7 +2543,7 @@ if [ "$RELAUNCH" -eq 1 ]; then
   # here as well would be a second path to the same outcome, so this refuses
   # and names the one that owns it.
   if [ "$RELAUNCH_REBIND" -eq 1 ] && [ "$KIND" = secondmate ]; then
-    echo "error: Project Director $ID's recorded endpoint is gone; its recovery is owned by the secondmate respawn path, not by relaunch (run bin/fm-spawn.sh $ID --secondmate, or let the session-start liveness sweep do it)" >&2
+    echo "error: Project Director $ID's recorded endpoint is gone; its recovery is owned by the Project Director respawn path, not by relaunch (run bin/fm-spawn.sh $ID --secondmate, or let the session-start liveness sweep do it)" >&2
     exit 1
   fi
   MODE=$(fm_meta_get "$RELAUNCH_META" mode)
@@ -4040,7 +4040,7 @@ validate_firstmate_home_for_spawn() {
   fi
   marker_id=$(cat "$abs_home/$SUB_HOME_MARKER" 2>/dev/null || true)
   if [ "$marker_id" != "$id" ]; then
-    echo "error: firstmate home $home is marked for secondmate ${marker_id:-unknown}, expected $id" >&2
+    echo "error: firstmate home $home is marked for Project Director ${marker_id:-unknown}, expected $id" >&2
     return 1
   fi
   if [ ! -f "$abs_home/AGENTS.md" ]; then
@@ -4145,11 +4145,11 @@ if [ "$KIND" = secondmate ]; then
   }
   if [ "${FM_SKIP_SECONDMATE_INHERIT:-0}" != 1 ]; then
     CONFIG_INHERIT_LOCK=$(fm_config_inherit_lock_path "$PROJ_ABS") || {
-      echo "error: could not resolve secondmate inheritance lock for $PROJ_ABS" >&2
+      echo "error: could not resolve Project Director inheritance lock for $PROJ_ABS" >&2
       exit 1
     }
     if ! fm_lock_acquire_wait "$CONFIG_INHERIT_LOCK"; then
-      echo "error: could not acquire secondmate inheritance lock for $PROJ_ABS" >&2
+      echo "error: could not acquire Project Director inheritance lock for $PROJ_ABS" >&2
       exit 1
     fi
     CONFIG_INHERIT_LOCK_HELD=1

@@ -18,11 +18,11 @@
 #                 "BACKLOG_RECONCILE: <id>: <what this home could not reconcile>",
 #                 "BACKLOG_RECONCILE: code-root <file> is not this home's <file>; ...",
 #                 "TANGLE: <remediation>",
-#                 "SECONDMATE_SYNC: secondmate <id>: skipped: <reason>",
-#                 "NUDGE_SECONDMATES: secondmate <id>: send failed: <reason>",
+#                 "SECONDMATE_SYNC: Project Director <id>: skipped: <reason>",
+#                 "NUDGE_SECONDMATES: Project Director <id>: send failed: <reason>",
 #                 "BOOTSTRAP_INFO: nudged fm-<id> with '<message>'",
-#                 "SECONDMATE_LIVENESS: secondmate <id>: skipped: <reason>|respawn failed after <cause>: <reason>",
-#                 "SECONDMATE_HANDOFF: secondmate <id>: pending delivery: <n> item(s)",
+#                 "SECONDMATE_LIVENESS: Project Director <id>: skipped: <reason>|respawn failed after <cause>: <reason>",
+#                 "SECONDMATE_HANDOFF: Project Director <id>: pending delivery: <n> item(s)",
 #                 "FMX: X mode on ..." or "FMX: X mode off ...".
 #          When a RUNNING secondmate home is fast-forwarded, its target is
 #          firstmate's own current default-branch commit. A local worktree uses
@@ -411,7 +411,7 @@ secondmate_sync() {
       [ -f "$meta" ] || continue
       grep -q '^kind=secondmate' "$meta" 2>/dev/null || continue
       id=$(basename "$meta" .meta)
-      echo "SECONDMATE_SYNC: secondmate $id: skipped: primary default-branch commit cannot be resolved"
+      echo "SECONDMATE_SYNC: Project Director $id: skipped: primary default-branch commit cannot be resolved"
     done
     return 0
   fi
@@ -434,18 +434,18 @@ secondmate_sync() {
     local id=$1 home=$2 commit=$3 instr=$4 selector marker out
     selector="fm-$id"
     marker=$(secondmate_nudge_marker_path "$id") || {
-      echo "NUDGE_SECONDMATES: secondmate $id: send failed: unsafe id"
+      echo "NUDGE_SECONDMATES: Project Director $id: send failed: unsafe id"
       return 0
     }
     if ! secondmate_write_nudge_marker "$id" "$home" "$commit" "$instr"; then
-      echo "NUDGE_SECONDMATES: secondmate $id: send failed: cannot record retry marker"
+      echo "NUDGE_SECONDMATES: Project Director $id: send failed: cannot record retry marker"
       return 0
     fi
     if out=$(FM_HOME="$FM_HOME" FM_ROOT_OVERRIDE="$FM_ROOT" FM_STATE_OVERRIDE="$STATE" "$SCRIPT_DIR/fm-send.sh" "$selector" "$SECOND_MATE_NUDGE_MESSAGE" 2>&1); then
       rm -f "$marker"
       echo "BOOTSTRAP_INFO: nudged $selector with '$SECOND_MATE_NUDGE_MESSAGE'"
     else
-      echo "NUDGE_SECONDMATES: secondmate $id: send failed: $(first_line "$out")"
+      echo "NUDGE_SECONDMATES: Project Director $id: send failed: $(first_line "$out")"
     fi
   }
 
@@ -461,11 +461,11 @@ secondmate_sync() {
       [ -f "$marker" ] || continue
       id=$(fm_meta_get "$marker" id)
       if ! expected_marker=$(secondmate_nudge_marker_path "$id"); then
-        echo "NUDGE_SECONDMATES: secondmate ${id:-unknown}: send failed: retry marker has unsafe id"
+        echo "NUDGE_SECONDMATES: Project Director ${id:-unknown}: send failed: retry marker has unsafe id"
         continue
       fi
       [ "$expected_marker" = "$marker" ] || {
-        echo "NUDGE_SECONDMATES: secondmate $id: send failed: retry marker filename mismatch"
+        echo "NUDGE_SECONDMATES: Project Director $id: send failed: retry marker filename mismatch"
         continue
       }
       selector=$(fm_meta_get "$marker" selector)
@@ -475,50 +475,50 @@ secondmate_sync() {
       remote=$(fm_meta_get "$marker" remote)
       [ -n "$remote" ] || remote=0
       [ "$selector" = "fm-$id" ] || {
-        echo "NUDGE_SECONDMATES: secondmate ${id:-unknown}: send failed: retry marker selector mismatch"
+        echo "NUDGE_SECONDMATES: Project Director ${id:-unknown}: send failed: retry marker selector mismatch"
         continue
       }
       case "$remote" in
         0) [ "$message" = "$SECOND_MATE_NUDGE_MESSAGE" ] || {
-          echo "NUDGE_SECONDMATES: secondmate ${id:-unknown}: send failed: retry marker message mismatch"
+          echo "NUDGE_SECONDMATES: Project Director ${id:-unknown}: send failed: retry marker message mismatch"
           continue
         } ;;
         1) [ "$message" = "$REMOTE_SECOND_MATE_NUDGE_MESSAGE" ] || {
-          echo "NUDGE_SECONDMATES: secondmate ${id:-unknown}: send failed: remote retry marker message mismatch"
+          echo "NUDGE_SECONDMATES: Project Director ${id:-unknown}: send failed: remote retry marker message mismatch"
           continue
         } ;;
         *)
-          echo "NUDGE_SECONDMATES: secondmate ${id:-unknown}: send failed: retry marker placement is invalid"
+          echo "NUDGE_SECONDMATES: Project Director ${id:-unknown}: send failed: retry marker placement is invalid"
           continue
           ;;
       esac
       [ "$remote" -ne 1 ] || continue
       meta="$STATE/$id.meta"
       [ -f "$meta" ] && [ "$(fm_meta_get "$meta" kind)" = secondmate ] || {
-        echo "NUDGE_SECONDMATES: secondmate ${id:-unknown}: send failed: retry target has no live secondmate metadata"
+        echo "NUDGE_SECONDMATES: Project Director ${id:-unknown}: send failed: retry target has no live Project Director metadata"
         continue
       }
       meta_home=$(fm_meta_get "$meta" home)
       [ -n "$meta_home" ] || meta_home=$(secondmate_registry_field "$DATA/secondmates.md" "$id" home || true)
       if ! validate_secondmate_home "$id" "$meta_home"; then
-        echo "NUDGE_SECONDMATES: secondmate $id: send failed: retry target home unsafe: $VALIDATION_ERROR"
+        echo "NUDGE_SECONDMATES: Project Director $id: send failed: retry target home unsafe: $VALIDATION_ERROR"
         continue
       fi
       home_real="$VALIDATED_HOME"
       [ "$home_real" = "$home" ] || {
-        echo "NUDGE_SECONDMATES: secondmate $id: send failed: retry target home changed"
+        echo "NUDGE_SECONDMATES: Project Director $id: send failed: retry target home changed"
         continue
       }
       head=$(git -C "$home_real" rev-parse HEAD 2>/dev/null || true)
       [ -n "$head" ] && [ "$head" = "$commit" ] || {
-        echo "NUDGE_SECONDMATES: secondmate $id: send failed: retry target is not at recorded instruction commit"
+        echo "NUDGE_SECONDMATES: Project Director $id: send failed: retry target is not at recorded instruction commit"
         continue
       }
       if out=$(FM_HOME="$FM_HOME" FM_ROOT_OVERRIDE="$FM_ROOT" FM_STATE_OVERRIDE="$STATE" "$SCRIPT_DIR/fm-send.sh" "$selector" "$SECOND_MATE_NUDGE_MESSAGE" 2>&1); then
         rm -f "$marker"
         echo "BOOTSTRAP_INFO: nudged $selector with '$SECOND_MATE_NUDGE_MESSAGE'"
       else
-        echo "NUDGE_SECONDMATES: secondmate $id: send failed: $(first_line "$out")"
+        echo "NUDGE_SECONDMATES: Project Director $id: send failed: $(first_line "$out")"
       fi
     done
   }
@@ -529,7 +529,7 @@ secondmate_sync() {
   sweep_live_secondmate_metas "$STATE" "$primary_head" yes "$DATA/secondmates.md" >"$tmp"
   while IFS= read -r line; do
     case "$line" in
-      secondmate\ *': skipped:'*) echo "SECONDMATE_SYNC: $line" ;;
+      Project\ Director\ *': skipped:'*) echo "SECONDMATE_SYNC: $line" ;;
       BOOTSTRAP_INFO:\ *) echo "$line" ;;
       NUDGE_SECONDMATES:\ *) echo "$line" ;;
     esac
@@ -559,15 +559,15 @@ secondmate_sync() {
     esac
     propagated_homes="$propagated_homes $home_real"
     mkdir -p "$home_real/state" || {
-      echo "CONFIG_REREAD: secondmate $id: send failed: could not create state directory"
+      echo "CONFIG_REREAD: Project Director $id: send failed: could not create state directory"
       continue
     }
     home_lock=$(fm_config_inherit_lock_path "$home_real") || {
-      echo "CONFIG_REREAD: secondmate $id: send failed: could not resolve per-home lock"
+      echo "CONFIG_REREAD: Project Director $id: send failed: could not resolve per-home lock"
       continue
     }
     fm_lock_acquire_wait "$home_lock" || {
-      echo "CONFIG_REREAD: secondmate $id: send failed: could not acquire per-home lock"
+      echo "CONFIG_REREAD: Project Director $id: send failed: could not acquire per-home lock"
       continue
     }
     reread_skip_pending=0
@@ -578,13 +578,13 @@ secondmate_sync() {
       && fm_config_reread_retry_queue_is_full "$FM_HOME" "$id"; then
       fm_config_reread_retry_pending "$id" "$home_real" || true
       if fm_config_reread_retry_queue_is_full "$FM_HOME" "$id"; then
-        echo "CONFIG_REREAD: secondmate $id: send failed: retry instruction queue is full"
+        echo "CONFIG_REREAD: Project Director $id: send failed: retry instruction queue is full"
         fm_lock_release "$home_lock" || true
         continue
       fi
     fi
     report=$(mktemp "${TMPDIR:-/tmp}/fm-bootstrap-inherit.XXXXXX" 2>/dev/null) || {
-      echo "SECONDMATE_SYNC: secondmate $id: skipped: inheritance failed"
+      echo "SECONDMATE_SYNC: Project Director $id: skipped: inheritance failed"
       fm_lock_release "$home_lock" || true
       continue
     }
@@ -592,7 +592,7 @@ secondmate_sync() {
       propagate_secondmate_inheritance "$FM_HOME" "$home_real" "$CONFIG" "$DATA"; then
       :
     else
-      echo "SECONDMATE_SYNC: secondmate $id: skipped: inheritance failed"
+      echo "SECONDMATE_SYNC: Project Director $id: skipped: inheritance failed"
     fi
     if ! reread_out=$(FM_HOME="$FM_HOME" FM_ROOT_OVERRIDE="$FM_ROOT" \
       FM_STATE_OVERRIDE="$STATE" \
@@ -601,7 +601,7 @@ secondmate_sync() {
       if [ -n "$reread_out" ]; then
         printf '%s\n' "$reread_out"
       else
-        echo "CONFIG_REREAD: secondmate $id: send failed: unknown error"
+        echo "CONFIG_REREAD: Project Director $id: send failed: unknown error"
       fi
     elif [ -n "$reread_out" ]; then
       printf '%s\n' "$reread_out"
@@ -636,15 +636,15 @@ secondmate_sync() {
     deadline=$(( $(date +%s) + budget ))
     remote_lock=$(fm_remote_inherit_transaction_lock_path "$STATE" "$id" 2>/dev/null || true)
     if [ -z "$remote_lock" ] || ! fm_lock_acquire_wait "$remote_lock"; then
-      echo "NUDGE_SECONDMATES: secondmate $id: send failed: cannot lock remote inheritance transaction"
+      echo "NUDGE_SECONDMATES: Project Director $id: send failed: cannot lock remote inheritance transaction"
       return 0
     fi
     if ! "$SCRIPT_DIR/fm-procevent-remote-reply.sh" arm "$id" >/dev/null 2>&1; then
-      echo "SECONDMATE_LIVENESS: secondmate $id: skipped: remote reply source could not be registered"
+      echo "SECONDMATE_LIVENESS: Project Director $id: skipped: remote reply source could not be registered"
     fi
     remote_generation=$(fm_remote_inherit_generation_next "$STATE" "$id" 2>/dev/null || true)
     if [ -z "$remote_generation" ]; then
-      echo "SECONDMATE_SYNC: secondmate $id: skipped: remote inheritance generation could not be published"
+      echo "SECONDMATE_SYNC: Project Director $id: skipped: remote inheritance generation could not be published"
       fm_lock_release "$remote_lock" || true
       return 0
     fi
@@ -657,7 +657,7 @@ secondmate_sync() {
     if fm_secondmate_remote_nudge_owed "$STATE" "$id"; then remote_pending=1; fi
     if ! secondmate_write_nudge_marker "$id" "$_home" "" remote \
       "$REMOTE_SECOND_MATE_NUDGE_MESSAGE" 1 1; then
-      echo "NUDGE_SECONDMATES: secondmate $id: send failed: cannot record remote retry marker"
+      echo "NUDGE_SECONDMATES: Project Director $id: send failed: cannot record remote retry marker"
       fm_lock_release "$remote_lock" || true
       return 0
     fi
@@ -679,7 +679,7 @@ secondmate_sync() {
       converged=0
       nudge_needed=1
     elif [ "$sync_rc" -ne 0 ]; then
-      echo "SECONDMATE_SYNC: secondmate $id: skipped: remote tracked-file sync failed on $remote_host: $(remote_sync_failure_reason "$sync_rc" "$sync_out")"
+      echo "SECONDMATE_SYNC: Project Director $id: skipped: remote tracked-file sync failed on $remote_host: $(remote_sync_failure_reason "$sync_rc" "$sync_out")"
       converged=0
     fi
     inherit_rc=0
@@ -699,7 +699,7 @@ secondmate_sync() {
       converged=0
       nudge_needed=1
     elif [ "$inherit_rc" -ne 0 ]; then
-      echo "SECONDMATE_SYNC: secondmate $id: skipped: remote inheritance failed on $remote_host: $(remote_inherit_failure_reason "$inherit_out")"
+      echo "SECONDMATE_SYNC: Project Director $id: skipped: remote inheritance failed on $remote_host: $(remote_inherit_failure_reason "$inherit_out")"
       converged=0
     fi
     if [ "$converged" -eq 1 ] && [ "$nudge_needed" -eq 1 ]; then
@@ -708,13 +708,13 @@ secondmate_sync() {
         rm -f "$remote_marker"
         [ "${FM_BOOTSTRAP_VERBOSE_FACTS:-0}" != 1 ] || echo "BOOTSTRAP_INFO: nudged remote fm-$id after convergence"
       else
-        echo "NUDGE_SECONDMATES: secondmate $id: send failed: $(first_line "$out")"
+        echo "NUDGE_SECONDMATES: Project Director $id: send failed: $(first_line "$out")"
       fi
     elif [ "$converged" -eq 1 ]; then
       rm -f "$remote_marker"
     elif [ "$nudge_needed" -eq 0 ] && ! secondmate_write_nudge_marker "$id" "$_home" "" remote \
       "$REMOTE_SECOND_MATE_NUDGE_MESSAGE" 1 0; then
-      echo "NUDGE_SECONDMATES: secondmate $id: send failed: cannot record remote retry marker"
+      echo "NUDGE_SECONDMATES: Project Director $id: send failed: cannot record remote retry marker"
     fi
     fm_lock_release "$remote_lock" || true
     return 0
@@ -755,7 +755,7 @@ secondmate_sync() {
 # acted on.
 report_relaunch() {  # <id> <cause> <where>
   [ "${FM_BOOTSTRAP_VERBOSE_FACTS:-0}" = 1 ] || ! local_phase || return 0
-  echo "BOOTSTRAP_INFO: secondmate $1 relaunched after $2 ($3)"
+  echo "BOOTSTRAP_INFO: Project Director $1 relaunched after $2 ($3)"
 }
 
 secondmate_liveness_sweep() {
@@ -812,7 +812,7 @@ secondmate_liveness_one_timed() {  # <meta> <id> <label>
 secondmate_liveness_one() {  # <meta> <id>
   local meta=$1 id=$2
   if ! fm_secondmate_liveness_lock "$id"; then
-    echo "SECONDMATE_LIVENESS: secondmate $id: skipped: another liveness check is already in progress"
+    echo "SECONDMATE_LIVENESS: Project Director $id: skipped: another liveness check is already in progress"
     return 0
   fi
   fm_secondmate_liveness_probe "$meta" "$id" full
@@ -827,13 +827,13 @@ secondmate_liveness_one() {  # <meta> <id>
         [ "$FM_SM_LIVE_RESUME" = 1 ] || secondmate_note_respawned "$id"
         report_relaunch "$id" "$FM_SM_LIVE_CAUSE" "$FM_SM_LIVE_WHERE"
       elif [ "$FM_SM_LIVE_STATUS" = skipped ]; then
-        echo "SECONDMATE_LIVENESS: secondmate $id: skipped: $FM_SM_LIVE_REASON"
+        echo "SECONDMATE_LIVENESS: Project Director $id: skipped: $FM_SM_LIVE_REASON"
       else
-        echo "SECONDMATE_LIVENESS: secondmate $id: respawn failed after $FM_SM_LIVE_CAUSE: $(first_line "$FM_SM_LIVE_OUT")"
+        echo "SECONDMATE_LIVENESS: Project Director $id: respawn failed after $FM_SM_LIVE_CAUSE: $(first_line "$FM_SM_LIVE_OUT")"
       fi
       ;;
     skipped)
-      echo "SECONDMATE_LIVENESS: secondmate $id: skipped: $FM_SM_LIVE_REASON"
+      echo "SECONDMATE_LIVENESS: Project Director $id: skipped: $FM_SM_LIVE_REASON"
       ;;
   esac
   fm_secondmate_liveness_unlock "$id"
@@ -853,11 +853,11 @@ secondmate_handoff_detect() {
     id=$(basename "$outbox" .outbox.md)
     case "$id" in ''|*[!A-Za-z0-9._-]*) id=unknown ;; esac
     if [ ! -f "$outbox" ] || [ -L "$outbox" ]; then
-      echo "SECONDMATE_HANDOFF: secondmate $id: pending delivery: unsafe outbox"
+      echo "SECONDMATE_HANDOFF: Project Director $id: pending delivery: unsafe outbox"
       continue
     fi
     count=$(awk '/^- \[[ x]\] / { count++ } END { print count + 0 }' "$outbox" 2>/dev/null || printf unknown)
-    echo "SECONDMATE_HANDOFF: secondmate $id: pending delivery: $count item(s)"
+    echo "SECONDMATE_HANDOFF: Project Director $id: pending delivery: $count item(s)"
   done
 }
 

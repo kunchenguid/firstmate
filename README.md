@@ -20,10 +20,6 @@
 
 <h3 align="center">Talk to one agent. Deliver with a team.</h3>
 
-<p align="center">
-  <img alt="Firstmate - talk to one agent, deliver with a team" src="assets/banner.png" width="100%" />
-</p>
-
 ## What it is
 
 You can run one coding agent easily.

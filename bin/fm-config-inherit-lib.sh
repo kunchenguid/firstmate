@@ -899,7 +899,7 @@ fm_config_reread_retry_queue_is_full() {
 fm_config_reread_retry_pending() {
   local id=$1 dest_home=$2 report retry_out rc
   report=$(mktemp "${TMPDIR:-/tmp}/fm-config-reread-retry.XXXXXX" 2>/dev/null) || {
-    printf 'CONFIG_REREAD: secondmate %s: send failed: could not create retry report\n' "$id"
+    printf 'CONFIG_REREAD: Project Director %s: send failed: could not create retry report\n' "$id"
     return 1
   }
   retry_out=$(fm_config_send_reread_nudge "$id" "$dest_home" "$report" 2>&1)
@@ -1114,7 +1114,7 @@ fm_config_reread_send_failure() {
   if ! fm_config_reread_mark_pending "$instruction_path" "$pending_path"; then
     detail="$detail; could not record retry marker"
   fi
-  printf 'CONFIG_REREAD: secondmate %s: send failed: %s\n' "$id" "$detail"
+  printf 'CONFIG_REREAD: Project Director %s: send failed: %s\n' "$id" "$detail"
   return 1
 }
 
@@ -1123,12 +1123,12 @@ fm_config_reread_send_pointer() {
   local id=$1 instruction_path=$2 pending_path selector out rc send_bin message pending_pointer
   pending_path="$instruction_path.pending"
   if [ ! -f "$instruction_path" ] || [ -L "$instruction_path" ]; then
-    printf 'CONFIG_REREAD: secondmate %s: send failed: pending instruction file is missing\n' "$id"
+    printf 'CONFIG_REREAD: Project Director %s: send failed: pending instruction file is missing\n' "$id"
     return 1
   fi
   pending_pointer=$(cat "$pending_path" 2>/dev/null || true)
   if [ "$pending_pointer" != "$instruction_path" ]; then
-    printf 'CONFIG_REREAD: secondmate %s: send failed: pending instruction file is mismatched\n' "$id"
+    printf 'CONFIG_REREAD: Project Director %s: send failed: pending instruction file is mismatched\n' "$id"
     return 1
   fi
   selector="fm-$id"
@@ -1317,7 +1317,7 @@ fm_config_send_reread_nudge() {
   [ -n "$dest_home" ] || return 1
   [ -n "$report" ] && [ -f "$report" ] || return 1
   dest_home_abs=$(cd "$dest_home" 2>/dev/null && pwd -P) || {
-    printf 'CONFIG_REREAD: secondmate %s: send failed: destination home is not readable\n' "$id"
+    printf 'CONFIG_REREAD: Project Director %s: send failed: destination home is not readable\n' "$id"
     return 1
   }
   state="$dest_home_abs/${FM_CONFIG_REREAD_INSTRUCTION_PREFIX_REL%/*}"
@@ -1363,11 +1363,11 @@ fm_config_send_reread_nudge() {
         fi
         stage_paths+="$retry_stage_path"
       elif [ -n "$exact_tmp" ] && [ -f "$exact_tmp" ]; then
-        printf 'CONFIG_REREAD: secondmate %s: send failed: retained exact retry temporary %s\n' "$id" "$exact_tmp"
+        printf 'CONFIG_REREAD: Project Director %s: send failed: retained exact retry temporary %s\n' "$id" "$exact_tmp"
         send_failures=1
         break
       else
-        printf 'CONFIG_REREAD: secondmate %s: send failed: could not rebuild retry instruction\n' "$id"
+        printf 'CONFIG_REREAD: Project Director %s: send failed: could not rebuild retry instruction\n' "$id"
         send_failures=1
         break
       fi
@@ -1382,31 +1382,31 @@ EOF
   if [ -n "$changed_items" ]; then
     source_home_abs=$(cd "${FM_HOME:-}" 2>/dev/null && pwd -P || true)
     if [ -z "$source_home_abs" ]; then
-      printf 'CONFIG_REREAD: secondmate %s: send failed: could not reserve retry instruction\n' "$id"
+      printf 'CONFIG_REREAD: Project Director %s: send failed: could not reserve retry instruction\n' "$id"
       return 1
     fi
     if fm_config_reread_retry_queue_is_full "$source_home_abs" "$id"; then
-      printf 'CONFIG_REREAD: secondmate %s: send failed: retry instruction queue is full\n' "$id"
+      printf 'CONFIG_REREAD: Project Director %s: send failed: retry instruction queue is full\n' "$id"
       return 1
     fi
     current_stage_path=$(fm_config_reread_new_retry_stage_path "$source_home_abs" "$id") || {
-      printf 'CONFIG_REREAD: secondmate %s: send failed: could not reserve retry instruction\n' "$id"
+      printf 'CONFIG_REREAD: Project Director %s: send failed: could not reserve retry instruction\n' "$id"
       return 1
     }
     if ! fm_config_write_reread_instruction "$dest_home_abs" "$report" "$current_stage_path"; then
       exact_tmp=${FM_CONFIG_REREAD_FAILED_TEMP:-}
       if [ -n "$exact_tmp" ] \
         && fm_config_reread_adopt_exact_temp "$exact_tmp" "$current_stage_path"; then
-        printf 'CONFIG_REREAD: secondmate %s: send failed: could not publish retry instruction; retained exact retry generation %s\n' "$id" "$current_stage_path"
+        printf 'CONFIG_REREAD: Project Director %s: send failed: could not publish retry instruction; retained exact retry generation %s\n' "$id" "$current_stage_path"
       elif [ -n "$exact_tmp" ] && [ -f "$exact_tmp" ]; then
         rm -f "$current_stage_path" 2>/dev/null || true
-        printf 'CONFIG_REREAD: secondmate %s: send failed: retained exact retry temporary %s\n' "$id" "$exact_tmp"
+        printf 'CONFIG_REREAD: Project Director %s: send failed: retained exact retry temporary %s\n' "$id" "$exact_tmp"
       elif retry_record_path=$(fm_config_reread_save_retry_report "$report" "$current_stage_path"); then
         rm -f "$current_stage_path" 2>/dev/null || true
-        printf 'CONFIG_REREAD: secondmate %s: send failed: could not write retry instruction; retained retry report %s\n' "$id" "$retry_record_path"
+        printf 'CONFIG_REREAD: Project Director %s: send failed: could not write retry instruction; retained retry report %s\n' "$id" "$retry_record_path"
       else
         rm -f "$current_stage_path" 2>/dev/null || true
-        printf 'CONFIG_REREAD: secondmate %s: send failed: could not write retry instruction or retain retry report\n' "$id"
+        printf 'CONFIG_REREAD: Project Director %s: send failed: could not write retry instruction or retain retry report\n' "$id"
       fi
       return 1
     fi
@@ -1428,7 +1428,7 @@ EOF
         delivery_paths="$instruction_path"
       fi
     else
-      printf 'CONFIG_REREAD: secondmate %s: send failed: could not publish retry instruction\n' "$id"
+      printf 'CONFIG_REREAD: Project Director %s: send failed: could not publish retry instruction\n' "$id"
       send_failures=1
       break
     fi

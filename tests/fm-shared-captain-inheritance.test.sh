@@ -509,7 +509,7 @@ EOF
     FM_DATA_OVERRIDE="$data_override" \
     "$ROOT/bin/fm-bootstrap.sh" 2>/dev/null)
 
-  assert_not_contains "$out" "SECONDMATE_SYNC: secondmate sm: skipped: inheritance failed" \
+  assert_not_contains "$out" "SECONDMATE_SYNC: Project Director sm: skipped: inheritance failed" \
     "bootstrap inheritance should succeed"
   cmp -s "$data_override/captain-shared.md" "$sm/data/captain-shared.md" \
     || fail "bootstrap convergence point did not copy shared captain preferences from FM_DATA_OVERRIDE"

@@ -489,7 +489,7 @@ EOF
   report=$(run_stage "$home" "$root" report)
   assert_contains "$report" "NETWORK_CHECKS: the deferred check worker stopped before publishing" \
     "an abandoned run still read as in progress: $report"
-  assert_contains "$report" "dead-secondmate relaunch" \
+  assert_contains "$report" "Project Director relaunch" \
     "the abandoned run did not name the checks that never completed"
 
   # A record older than the whole aggregate bound is abandoned even when its pid

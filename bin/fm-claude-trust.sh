@@ -360,7 +360,7 @@ else
   [ -f "$SUB_MARKER" ] || refuse "'$TARGET_REAL' carries no .fm-secondmate-home marker, so it is not a seeded secondmate home"
   [ -O "$SUB_MARKER" ] || refuse "'$SUB_MARKER' is not owned by this user"
   SUB_MARKER_ID=$(cat "$SUB_MARKER" 2>/dev/null) || true
-  [ "$SUB_MARKER_ID" = "$SUB_ID" ] || refuse "'$TARGET_REAL' is marked for secondmate '${SUB_MARKER_ID:-unknown}', not '$SUB_ID'"
+  [ "$SUB_MARKER_ID" = "$SUB_ID" ] || refuse "'$TARGET_REAL' is marked for Project Director '${SUB_MARKER_ID:-unknown}', not '$SUB_ID'"
   [ -f "$TARGET_REAL/AGENTS.md" ] || refuse "'$TARGET_REAL' has no AGENTS.md, so it is not a firstmate home"
   [ -d "$TARGET_REAL/bin" ] || refuse "'$TARGET_REAL' has no bin/, so it is not a firstmate home"
   for sub_dir_name in data state config projects; do

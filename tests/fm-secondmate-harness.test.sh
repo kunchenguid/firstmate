@@ -1649,7 +1649,7 @@ test_bootstrap_sweep_defers_dispatch_on_stale_unignored_home() {
   printf 'manual\n' > "$w/home/config/backlog-backend"
   out=$(run_bootstrap "$w")
 
-  assert_contains "$out" "SECONDMATE_SYNC: secondmate sm: skipped: diverged from" \
+  assert_contains "$out" "SECONDMATE_SYNC: Project Director sm: skipped: diverged from" \
     "stale dispatch: expected fast-forward skip"
   [ ! -e "$w/sm/config/crew-dispatch.json" ] \
     || fail "stale dispatch: crew-dispatch.json was copied before the home ignored it"
@@ -1888,7 +1888,7 @@ test_bootstrap_sweep_surfaces_config_propagation_failure() {
 
   out=$(run_bootstrap "$w")
 
-  fail_line=$(printf '%s\n' "$out" | grep '^SECONDMATE_SYNC: secondmate sm: skipped: inheritance failed' || true)
+  fail_line=$(printf '%s\n' "$out" | grep '^SECONDMATE_SYNC: Project Director sm: skipped: inheritance failed' || true)
   [ -n "$fail_line" ] || fail "bootstrap did not surface inheritance propagation failure (got: $out)"
   [ -d "$w/sm/config/crew-harness" ] || fail "failed propagation removed the wrong path"
   pass "B11 bootstrap sweep surfaces config propagation failures"
@@ -1904,7 +1904,7 @@ test_bootstrap_rereads_after_partial_propagation() {
   log="$w/boot-prop-partial.tmux.log"
 
   out=$(run_bootstrap "$w" "$log")
-  assert_contains "$out" "SECONDMATE_SYNC: secondmate sm: skipped: inheritance failed" \
+  assert_contains "$out" "SECONDMATE_SYNC: Project Director sm: skipped: inheritance failed" \
     "partial bootstrap propagation did not remain diagnostic"
   [ "$(cat "$w/sm/config/crew-dispatch.json")" = '{"default":{"harness":"codex"}}' ] \
     || fail "partial bootstrap propagation did not retain the completed config write"
@@ -2291,7 +2291,7 @@ test_config_reread_isolation_and_absent_and_send_failure() {
     FM_HOME="$w/home" FM_ROOT_OVERRIDE="$w/main" FM_SEND_SETTLE=0 \
     "$ROOT/bin/fm-config-push.sh" 2>"$err"); status=$?
   expect_code 1 "$status" "send failure should make config-push exit non-zero"
-  assert_contains "$out" "CONFIG_REREAD: secondmate" "send failure diagnostic missing"
+  assert_contains "$out" "CONFIG_REREAD: Project Director" "send failure diagnostic missing"
   assert_contains "$out" "send failed" "send failure must say send failed"
   assert_not_contains "$out" "config-reread: sent" \
     "must not claim reread landed when send failed"
@@ -2363,7 +2363,7 @@ SH
   out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$w/home" FM_ROOT_OVERRIDE="$w/main" \
     FM_SEND_SETTLE=0 "$ROOT/bin/fm-config-push.sh" 2>&1); status=$?
   expect_code 1 "$status" "publication failure should remain diagnostic"
-  assert_contains "$out" "CONFIG_REREAD: secondmate" "publication failure diagnostic missing"
+  assert_contains "$out" "CONFIG_REREAD: Project Director" "publication failure diagnostic missing"
   assert_not_contains "$out" "config-reread: sent" \
     "publication failure must not claim reread delivery"
   [ "$(cat "$w/alpha/config/crew-harness")" = codex ] \
@@ -2654,7 +2654,7 @@ SH
   out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$w/home" FM_ROOT_OVERRIDE="$w/main" \
     FM_SEND_SETTLE=0 fm_config_send_reread_nudge sm "$w/sm" "$report" 2>&1); status=$?
   expect_code 1 "$status" "mixed delivery failure should remain diagnostic"
-  assert_contains "$out" "CONFIG_REREAD: secondmate sm: send failed" \
+  assert_contains "$out" "CONFIG_REREAD: Project Director sm: send failed" \
     "mixed delivery failure diagnostic missing"
   count=0
   for path in "$state_real"/.fm-inherited-config-reread.*; do
@@ -2701,7 +2701,7 @@ SH
     FM_SEND_SETTLE=0 FM_FAKE_TMUX_LOG="$log" \
     fm_config_send_reread_nudge sm "$w/sm" "$report" 2>&1); status=$?
   expect_code 1 "$status" "an older failed generation should remain diagnostic"
-  assert_contains "$out" "CONFIG_REREAD: secondmate sm: send failed" \
+  assert_contains "$out" "CONFIG_REREAD: Project Director sm: send failed" \
     "older generation failure diagnostic missing"
   assert_not_contains "$(cat "$log" 2>/dev/null || true)" ".0001-new" \
     "newer generation was delivered after an older failure"
@@ -2931,7 +2931,7 @@ SH
     FM_SPAWN_NO_GUARD=1 FM_FAKE_LAUNCH_LOG="$launchlog" \
     "$ROOT/bin/fm-spawn.sh" sm "$sm" --secondmate 2>&1); status=$?
   expect_code 0 "$status" "spawn should remain available after reread cleanup failure"
-  assert_contains "$out" "CONFIG_REREAD: secondmate sm: quarantined pre-relaunch generations" \
+  assert_contains "$out" "CONFIG_REREAD: Project Director sm: quarantined pre-relaunch generations" \
     "spawn cleanup failure did not emit a CONFIG_REREAD quarantine diagnostic"
   assert_no_reread_pending "$sm"
   assert_no_reread_instructions "$sm"
