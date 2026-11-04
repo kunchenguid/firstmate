@@ -16,7 +16,7 @@ Inspect after spawn within the tool's readiness window.
 Select only its documented trust choice from the active Firstmate home, binding `FM_HOME` unless already correct, then inspect again under the router-owned completion postcondition.
 No observed dialog proves only that launch.
 Accepting a folder-trust dialog for your own worker with the tool's documented choice is the supervisor's call under these rules and needs no captain word.
-When a launch still shows no start proof `FM_START_CHECK_SECS` (default 120) seconds after spawn, the watcher queues one `check: start` wake on its next poll, naming what it found - an exited agent, a vanished endpoint, or a recognized launch dialog - with the command that clears it, or saying no key accepts that dialog; `../../../bin/fm-watch.sh` owns the proofs and wording, and each tool reference below owns its accept form. For local workers, this is within about that plus one watcher poll; remote secondmates add the proof-read and cause-read route round trips, each capped at `FM_START_CHECK_ROUTE_SECS` (default 20).
+For the watcher start-check timing and remote-route behavior, see [architecture](../../../../../docs/architecture.md#event-driven-supervision).
 Each supported harness handles its folder-trust gate differently, and the tool reference owns the detail.
 For Claude, load `references/harness/claude.md`; its workspace-trust section owns the non-key-answerable gate and spawn-time pre-registration for every spawn kind.
 agy gates every fresh worktree too; the spawn pre-registers it in agy's own store the same way, and a strict post-launch gate answers any dialog that still renders before the spawn reports success.
