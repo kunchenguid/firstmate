@@ -61,9 +61,15 @@
 #     age derived from it is published here. A future event time leaves that age
 #     unknown rather than clamped to zero.
 #     hints.open_decisions is the keyed open-decision set returned by
-#     fm-classify-lib.sh's authoritative status_open_decisions fold and reconciled
+#     fm-classify-lib.sh's authoritative fold - the cursor-backed
+#     status_open_decisions_incremental in its read-only mode, so this command
+#     pays only for status-log appends since the cursor bin/fm-wake-drain.sh
+#     keeps current while still writing no cursor of its own - and reconciled
 #     against current_state; hints.pending_decision and hints.blocked_event are
-#     booleans derived from that set.
+#     booleans derived from that set. A missing or unusable cursor costs one
+#     full fold, identical to status_open_decisions, and so does any fold that
+#     cannot serve the live log (it moved or was truncated under the run, or a
+#     read failed): the row then folds the capture it already made.
 #     endpoint.exists is the cheap local backend endpoint-presence read.
 #     endpoint.agent_alive is populated for local secondmates only, where it is
 #     useful return-channel supervision data; remote secondmates use "unknown"
@@ -749,7 +755,7 @@ task_json_lines() {
   local remote_host remote_root current_file endpoint_file observation_line index=0
   local pr pr_source event_json current_json endpoint_exists agent_alive meta_json status_json report_json worktree_json home_json
   local last_event_raw current_state current_source pending_decision blocked_event report_present=0 pr_from_status
-  local open_decisions_tsv open_decisions_json
+  local open_decisions_tsv open_decisions_json captured_end status_capture
 
   while [ "$index" -lt "$SNAPSHOT_TASK_META_COUNT" ]; do
     meta=${SNAPSHOT_TASK_METAS[index]}
@@ -778,6 +784,7 @@ task_json_lines() {
       target=$(fm_backend_target_of_meta "$meta")
     fi
     status_log="$SNAPSHOT_TASK_DIR/$id.status"
+    status_capture=$status_log
     report_path="$SNAPSHOT_TASK_DIR/$id.report"
     pr=$(meta_value "$meta" pr)
     pr_source=meta
@@ -801,13 +808,44 @@ task_json_lines() {
       printf '%s' "$current_json" | jq -r '[.state // "", .source // ""] | @tsv'
     )
 
-    # Durable keyed open-decision set: fold the WHOLE status stream
-    # (fm-classify-lib.sh's status_open_decisions) so a later unrelated event can
-    # never mask a still-open captain decision. The set is derived purely from the
-    # keyed fold - never from report bodies or decision-like prose - and then
-    # reconciled against the crew LIFECYCLE, which only clears a stale decision the
-    # crew has provably moved past. Two lifecycle signals clear it, neither of which
-    # reads any report content:
+    # Durable keyed open-decision set: fold the status stream with the
+    # cursor-backed incremental sibling (fm-classify-lib.sh's
+    # status_open_decisions_incremental) so a later unrelated event can never
+    # mask a still-open captain decision, while this read-only command pays only
+    # for bytes appended since the cursor bin/fm-wake-drain.sh keeps current -
+    # not for the log's whole lifetime, whose whole-file fold grows with every
+    # line ever appended.
+    #
+    # The fold reads the LIVE log, bounded to the byte length of the capture
+    # this run already made and only while that capture's task generation is
+    # still the current one. The capture is a per-run copy with a fresh
+    # identity and no cursor, so folding it directly would refold everything
+    # every run; the live file is the one the drain's cursor is validated
+    # against. Bounding the read keeps the row generation-coherent: within one
+    # generation a status log is only appended to, so bytes before the captured
+    # length are the captured bytes, and a task respawned or replaced while the
+    # run was reading is folded from its capture instead, which is exactly what
+    # the whole-file fold on that capture produced before this change. The
+    # capture also supplies current_state and last_event, so a generation-
+    # changed row keeps every observation from one generation.
+    #
+    # FM_OPEN_DECISIONS_CURSOR_WRITE=0 keeps the command's writes-nothing
+    # contract: on a missing, stale, truncated, replaced, or corrupt cursor the
+    # library folds nothing and leaves the drain's cursor alone, so the row
+    # folds its capture with status_open_decisions at the whole-file fold's
+    # old cost. The explicit kind preserves the
+    # snapshot's captured generation instead of re-reading the live .meta. An
+    # incremental result is used only when it served the live log - the log is
+    # still there, the capture still bounds it, and every read succeeded - and
+    # the captured generation is still current after the fold. A log retired or
+    # truncated under the run, a failed read, or a respawn inside the fold
+    # therefore falls back to folding the capture: the whole-file fold's old
+    # input, and empty when the row captured no status at all.
+    #
+    # The set is derived purely from the keyed fold - never from report bodies
+    # or decision-like prose - and then reconciled against the crew LIFECYCLE,
+    # which only clears a stale decision the crew has provably moved past. Two
+    # lifecycle signals clear it, neither of which reads any report content:
     #   - a live activity read (run-step or busy pane) that is working/done, so a
     #     crew that resumed past a gate is not still reported as parked; and
     #   - a TERMINAL done/failed state on a single-owner task (scout or ship), whose
@@ -818,7 +856,20 @@ task_json_lines() {
     # never clear another concern's keyed decision. A parked/blocked state, or a
     # non-authoritative status-log/none read on a still-live task, keeps the fold's
     # open decision surfacing.
-    open_decisions_tsv=$(status_open_decisions "$status_log" "$kind")
+    captured_end=''
+    if [ -f "$status_capture" ]; then
+      captured_end=$(LC_ALL=C wc -c < "$status_capture" 2>/dev/null) || captured_end=''
+      captured_end=${captured_end//[[:space:]]/}
+      case "$captured_end" in ''|*[!0-9]*) captured_end='' ;; esac
+    fi
+    if [ -n "$captured_end" ] && snapshot_task_generation_is_current "$meta" "$id" \
+       && open_decisions_tsv=$(FM_OPEN_DECISIONS_CURSOR_WRITE=0 \
+            status_open_decisions_incremental "$STATE/$id.status" "$captured_end" '' "$kind") \
+       && snapshot_task_generation_is_current "$meta" "$id"; then
+      :
+    else
+      open_decisions_tsv=$(status_open_decisions "$status_capture" "$kind")
+    fi
     if [ "$kind" != secondmate ] && \
        { { { [ "$current_source" = run-step ] || [ "$current_source" = pane ]; } \
            && [ "$current_state" != parked ] && [ "$current_state" != blocked ]; } \

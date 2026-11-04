@@ -1206,6 +1206,28 @@ EOF
 # drop an open decision - because a losing writer's offset can only ever be
 # equal to or behind an already-recorded byte position, and the next call
 # re-derives from whatever offset actually landed on disk.
+#
+# Read-only consumers: FM_OPEN_DECISIONS_CURSOR_WRITE=0 folds against the same
+# persisted cursor but writes nothing - no cursor rewrite, and its one-shot span
+# chunk goes to TMPDIR instead of beside the cursor - so a caller whose published
+# contract is "mutates no fleet state" (bin/fm-fleet-snapshot.sh) can still pay
+# only for new appends. The read-only call is strictly a reader of the cursor
+# bin/fm-wake-drain.sh keeps current; on a missing, corrupt, replaced, or stale
+# cursor it folds nothing and returns 6, so the consumer pays exactly the
+# status_open_decisions whole-file fold it paid before, and it never leaves a
+# partial cursor behind for the drain. The optional 4th <kind>
+# argument lets such a caller keep the task kind it already captured instead of
+# re-reading the sibling .meta; it enters the cursor version string exactly as a
+# meta-derived kind does.
+#
+# A read-only call also reports whether it could serve the live stream at all,
+# because its caller's fallback is its captured copy, not the cursor's stale
+# set: it returns 0 only when it folded [0, captured-end) of the live file whose
+# cursor it read, and otherwise a distinct non-zero status after printing
+# whatever set it holds - 3 when the live file is absent or unreadable, 4 when
+# the captured boundary is unusable, 5 when a stat, size, temp-file, or span
+# read failed, and 6, printing nothing, when there is no usable cursor. Writing mode keeps its contract unchanged: 0 with the trusted set
+# on every failed read.
 _fm_open_decisions_cursor_path() {  # <status-file>
   local f=$1 dir base
   dir=$(dirname "$f")
@@ -1329,13 +1351,27 @@ _fm_status_read_span() {  # <status-file> <start-offset> <byte-length>
   ' "$f" "$start" "$length"
 }
 
-status_open_decisions_incremental() {  # <status-file> [<captured-end-offset>] [timed]
+# Report an incremental fold that could not serve the live stream. Writing mode
+# keeps its failure contract - the trusted set and status 0 - so a reader of the
+# persisted fold is never wiped; read-only mode returns <read-only-status> so its
+# caller can fold its own capture instead.
+_fm_open_decisions_unserved() {  # <cursor-write> <read-only-status> <trusted-open>
+  printf '%s' "$3"
+  [ "$1" -eq 1 ] || return "$2"
+  return 0
+}
+
+status_open_decisions_incremental() {  # <status-file> [<captured-end-offset>] [timed] [<kind>]
   local f=$1 captured_end=${2:-} cf offset ident open='' trusted_open='' cursor_data first rest offset_line ident_line
   local version='' size actual_size cur_ident resolve held chunk_file chunk_size line cursor_dirty=0
-  local target_cursor kind fold_version timed=${3:-}
+  local target_cursor kind fold_version timed=${3:-} cursor_write=1
   case "$timed" in ''|timed) ;; *) return 2 ;; esac
-  [ -f "$f" ] && [ -r "$f" ] && [ ! -L "$f" ] || return 0
-  kind=$(_fm_status_kind "$f")
+  case "${FM_OPEN_DECISIONS_CURSOR_WRITE:-1}" in
+    0) cursor_write=0 ;;
+  esac
+  [ -f "$f" ] && [ -r "$f" ] && [ ! -L "$f" ] \
+    || { _fm_open_decisions_unserved "$cursor_write" 3 "$trusted_open"; return $?; }
+  kind=$(_fm_status_kind "$f" "${4:-}")
   fold_version="$FM_OPEN_DECISIONS_FOLD_VERSION:$kind"
   cf=$(_fm_open_decisions_cursor_path "$f")
   # A separate cursor keeps the ordinary presentation view byte-compatible.
@@ -1386,23 +1422,35 @@ status_open_decisions_incremental() {  # <status-file> [<captured-end-offset>] [
 
   # A stat/size-read failure is a genuine I/O error, not "the file is empty" -
   # report the already-trusted persisted set unchanged rather than risking a
-  # silent invalidation that would wipe it.
-  _fm_status_read_ident_size "$f" || { printf '%s' "$trusted_open"; return 0; }
+  # silent invalidation that would wipe it, and let a read-only caller fall back
+  # to its capture.
+  _fm_status_read_ident_size "$f" \
+    || { _fm_open_decisions_unserved "$cursor_write" 5 "$trusted_open"; return $?; }
   cur_ident=$_FM_STAT_IDENTITY actual_size=$_FM_STAT_SIZE
-  [ -n "$cur_ident" ] || { printf '%s' "$trusted_open"; return 0; }
+  [ -n "$cur_ident" ] \
+    || { _fm_open_decisions_unserved "$cursor_write" 5 "$trusted_open"; return $?; }
   actual_size=${actual_size//[[:space:]]/}
-  case "$actual_size" in ''|*[!0-9]*) printf '%s' "$trusted_open"; return 0 ;; esac
+  case "$actual_size" in
+    ''|*[!0-9]*) _fm_open_decisions_unserved "$cursor_write" 5 "$trusted_open"; return $? ;;
+  esac
   if [ -n "$captured_end" ]; then
+    # A malformed or oversized boundary means the caller's capture no longer
+    # describes the live file, so a read-only caller is told to use it instead.
     case "$captured_end" in
-      ''|*[!0-9]*) printf '%s' "$trusted_open"; return 0 ;;
+      ''|*[!0-9]*) _fm_open_decisions_unserved "$cursor_write" 4 "$trusted_open"; return $? ;;
     esac
-    [ "$captured_end" -le "$actual_size" ] || { printf '%s' "$trusted_open"; return 0; }
+    [ "$captured_end" -le "$actual_size" ] \
+      || { _fm_open_decisions_unserved "$cursor_write" 4 "$trusted_open"; return $?; }
     size=$captured_end
   else
     size=$actual_size
   fi
 
   if [ -z "$version" ] || [ -z "$ident" ] || [ "$ident" != "$cur_ident" ] || [ "$offset" -gt "$actual_size" ]; then
+    # A read-only caller has no cursor to warm, and this per-line refold from
+    # byte 0 is far slower than status_open_decisions, so it is told to fold
+    # its capture with that instead.
+    [ "$cursor_write" -eq 1 ] || return 6
     offset=0
     open=''
     trusted_open=''
@@ -1410,14 +1458,21 @@ status_open_decisions_incremental() {  # <status-file> [<captured-end-offset>] [
   fi
 
   if [ "$offset" -lt "$size" ]; then
-    chunk_file="$cf.read.$$"
+    if [ "$cursor_write" -eq 1 ]; then
+      chunk_file="$cf.read.$$"
+    else
+      # A read-only caller must not write beside the status file, so its span
+      # copy is a private TMPDIR scratch file.
+      chunk_file=$(umask 077; mktemp "${TMPDIR:-/tmp}/fm-open-decisions-span.XXXXXX" 2>/dev/null) \
+        || { _fm_open_decisions_unserved "$cursor_write" 5 "$trusted_open"; return $?; }
+    fi
     _fm_status_read_span "$f" "$offset" "$((size - offset))" > "$chunk_file" 2>/dev/null \
-      || { rm -f "$chunk_file"; printf '%s' "$trusted_open"; return 0; }
+      || { rm -f "$chunk_file"; _fm_open_decisions_unserved "$cursor_write" 5 "$trusted_open"; return $?; }
     chunk_size=$(LC_ALL=C wc -c < "$chunk_file" 2>/dev/null) \
-      || { rm -f "$chunk_file"; printf '%s' "$trusted_open"; return 0; }
+      || { rm -f "$chunk_file"; _fm_open_decisions_unserved "$cursor_write" 5 "$trusted_open"; return $?; }
     chunk_size=${chunk_size//[[:space:]]/}
     case "$chunk_size" in
-      ''|*[!0-9]*) rm -f "$chunk_file"; printf '%s' "$trusted_open"; return 0 ;;
+      ''|*[!0-9]*) rm -f "$chunk_file"; _fm_open_decisions_unserved "$cursor_write" 5 "$trusted_open"; return $? ;;
     esac
     # Test-only observability seam (off by default, no production behavior
     # change): when set, records exactly how many bytes THIS call folded, so a
@@ -1434,7 +1489,7 @@ status_open_decisions_incremental() {  # <status-file> [<captured-end-offset>] [
     offset=$size
     cursor_dirty=1
   fi
-  if [ "$cursor_dirty" -eq 1 ]; then
+  if [ "$cursor_dirty" -eq 1 ] && [ "$cursor_write" -eq 1 ]; then
     target_cursor="$cf.tmp.$$"
     {
       printf 'version=%s\n' "$fold_version"
