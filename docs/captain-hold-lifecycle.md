@@ -66,10 +66,12 @@ Repeat and edge cases:
 - `--until` stores the captain's own deferral date through tasks-axi's date gate.
 - A new ask must carry the agent's recommended pick: `--rec "<pick>"` is required, and `hold` refuses before writing anything when it is missing.
   The pick is appended to the hold reason as a `Rec:` line, after up to four `--option "<text>"` values rendered as numbered lines, so every place the hold text is shown carries them.
+  `--option` without `--rec` is refused.
   A task that is already captain-held (a retry) and a `--until` deferral record are not new asks and need no pick.
 - `--key <slug>` names the ask's subject, in the decision-key charset owned by [`bin/fm-classify-lib.sh`](../bin/fm-classify-lib.sh), and is recorded on a `Captain hold key:` body line.
   A new ask whose key matches another open captain hold creates nothing: the output says it attached to the existing hold and prints that task id.
   Different keys stay separate holds.
+  A new ask without `--key` drops any key line left from an earlier released ask on the same task.
 - `--origin` resolves the backend origin identity before writing the hold-set stamp.
   The association lives on its own `Captain hold origin:` body line; [completion inventory checks](#recording-a-reviewed-inventory-complete) own how it is verified.
   The ordering above prevents an interrupted or refused backend hold from publishing the new association, even when an old captain hold is still active or date-expired.
