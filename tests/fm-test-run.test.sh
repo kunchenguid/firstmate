@@ -2247,12 +2247,19 @@ test_unmapped_new_test_never_inherits_family_concurrency
 test_changed_shared_fixture_selects_its_readers
 test_changed_t3_sources_select_their_readers
 test_concurrent_runs_are_ordered_longest_first
-test_stop_is_scoped_to_one_run
-test_stop_refuses_an_unprivate_registry
+# --stop is refused on native Windows Bash, so its tests only apply to Unix hosts.
+run_unix_only() {
+  case "$(uname -s)" in
+    MINGW* | MSYS* | CYGWIN*) return 0 ;;
+  esac
+  "$@"
+}
+run_unix_only test_stop_is_scoped_to_one_run
+run_unix_only test_stop_refuses_an_unprivate_registry
 test_windows_bash_skips_run_registration
 test_term_to_runner_aborts_a_hung_suite
-test_stop_kills_term_ignoring_children
-test_stop_spares_a_pid_whose_identity_changed
+run_unix_only test_stop_kills_term_ignoring_children
+run_unix_only test_stop_spares_a_pid_whose_identity_changed
 test_per_script_timeout_bounds_a_hang
 test_changed_bound_gives_slow_watcher_suites_headroom
 test_max_wall_ms_is_a_result_not_advice
