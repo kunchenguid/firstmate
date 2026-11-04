@@ -5705,6 +5705,56 @@ test_lane_disk_refused_teardown_deletes_nothing() {
   pass "a refused teardown leaves scratch and build output untouched"
 }
 
+test_lane_disk_build_dir_through_symlink_spares_the_copy() {
+  local case_dir rc=0 meta
+  case_dir=$(lane_disk_case lane-disk-build-alias)
+  # The recorded <root>/<task-id> reaches the copy itself through a symlinked
+  # root component, though its spelling sits outside the worktree path.
+  mkdir -p "$case_dir/real"
+  git -C "$case_dir/project" worktree move "$case_dir/wt" "$case_dir/real/task-x1"
+  ln -s "$case_dir/real" "$case_dir/buildroot/alias"
+  meta="$case_dir/state/task-x1.meta"
+  write_meta "$case_dir" no-mistakes ship "$case_dir/real/task-x1"
+  printf 'build_output_dir=%s\n' "$case_dir/buildroot/alias/task-x1" >> "$meta"
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  expect_code 0 "$rc" "symlinked build root teardown: $(cat "$case_dir/stderr")"
+  assert_present "$case_dir/real/task-x1/tracked/keep.txt" "build-output cleanup deleted the copy through a symlinked root"
+  assert_grep "build-output directory '$case_dir/buildroot/alias/task-x1' for task-x1 is not <root>/task-x1 outside the worktree; left in place" \
+    "$case_dir/stderr" "a build-output path resolving to the copy was not reported"
+  pass "build-output cleanup refuses a recorded directory that resolves to the copy"
+}
+
+test_lane_disk_scratch_through_symlinked_parent_is_skipped() {
+  local case_dir rc=0 exclude
+  case_dir=$(lane_disk_case lane-disk-scratch-alias)
+  exclude=$(git -C "$case_dir/wt" rev-parse --path-format=absolute --git-common-dir)/info/exclude
+  printf '%s\n' alias >> "$exclude"
+  ln -s . "$case_dir/wt/alias"
+  FM_SCRATCH_DIRS="alias/.git:alias/tracked" run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  expect_code 0 "$rc" "symlinked scratch parent teardown: $(cat "$case_dir/stderr")"
+  assert_present "$case_dir/wt/.git" "scratch cleanup deleted the copy's .git through a symlinked parent"
+  assert_present "$case_dir/wt/tracked/keep.txt" "scratch cleanup deleted tracked files through a symlinked parent"
+  assert_grep "scratch path 'alias/.git' passes through a symlinked directory; skipped" "$case_dir/stderr" \
+    "a scratch path through a symlinked parent was not reported"
+  pass "scratch cleanup skips a declared path that passes through a symlinked directory"
+}
+
+test_lane_disk_tracked_scratch_symlink_is_kept() {
+  local case_dir rc=0
+  case_dir=$(lane_disk_case lane-disk-scratch-tracked-link)
+  ln -s tracked "$case_dir/wt/tlink"
+  git -C "$case_dir/wt" add -- tlink
+  git -C "$case_dir/wt" -c user.email=t@t -c user.name=t commit -q -m "tracked link"
+  git -C "$case_dir/wt" push -q origin HEAD:main
+  git -C "$case_dir/wt" fetch -q origin
+  FM_SCRATCH_DIRS=tlink run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  expect_code 0 "$rc" "tracked scratch symlink teardown: $(cat "$case_dir/stderr")"
+  [ -L "$case_dir/wt/tlink" ] || fail "scratch cleanup removed a tracked symlink"
+  assert_grep "scratch path 'tlink' holds tracked files; skipped" "$case_dir/stderr" \
+    "a tracked scratch symlink was skipped silently"
+  pass "scratch cleanup keeps a declared path that is a tracked symlink"
+}
+
 test_lane_disk_clone_discipline_warns_only() {
   local case_dir rc=0 mode
   for mode in off on; do
@@ -6447,4 +6497,7 @@ test_lane_disk_cleanup_after_landed_work
 test_lane_disk_cleanup_is_default_off
 test_lane_disk_scratch_env_override
 test_lane_disk_refused_teardown_deletes_nothing
+test_lane_disk_build_dir_through_symlink_spares_the_copy
+test_lane_disk_scratch_through_symlinked_parent_is_skipped
+test_lane_disk_tracked_scratch_symlink_is_kept
 test_lane_disk_clone_discipline_warns_only

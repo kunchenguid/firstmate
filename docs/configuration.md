@@ -1094,7 +1094,7 @@ A fresh ship or scout spawn creates `<root>/<task-id>/`, records it as `build_ou
 SwiftPM's `--scratch-path`, Xcode's `-derivedDataPath`, and Gradle's `--project-cache-dir` have no documented environment variable, so the worker brief gains a `# Disk use` line naming those flags with `$FM_BUILD_OUTPUT_DIR` for when that variable is set.
 Bazel keeps its output base outside the checkout by default ([output directories](https://bazel.build/remote/output-directories)), so nothing is exported for it.
 A relaunch reuses the recorded directory and never resolves the setting again.
-Teardown removes only the recorded directory, and leaves a recorded path in place with a warning when it is not absolute, does not end in the task id, or equals or contains the task's local copy.
+Teardown removes only the recorded directory, and leaves a recorded path in place with a warning when it is not absolute, does not end in the task id, or equals or contains the task's local copy, judged by the physical paths its parent directory and the copy resolve to as well as by their spelling.
 The source tree is never touched.
 
 ### Clone discipline (config/clone-discipline / FM_CLONE_DISCIPLINE)
@@ -1111,7 +1111,7 @@ The check only warns: it never deletes a clone and never blocks teardown.
 `config/scratch-dirs` declares scratch directories, one path per line, relative to the root of the task's local copy; blank lines and lines starting with `#` are ignored.
 `FM_SCRATCH_DIRS` overrides the file with a colon-separated list, `off` disables it, and unset or empty defers to the file.
 An empty, absolute, or `.` path, a path with a `..` component, or a path inside `.git` is skipped with a warning.
-At teardown each declared path that exists is removed, except a path that holds tracked files or whose parent resolves outside the local copy; a declared path that is itself a symlink has only the link removed.
+At teardown each declared path that exists is removed, except a path that is tracked or holds tracked files, or that passes through a symlinked directory; a declared path that is itself an untracked symlink has only the link removed.
 Declare paths the project ignores, such as `.build`, `DerivedData`, or a captures directory: an untracked path the project does not ignore still makes teardown refuse an uncommitted copy before cleanup runs.
 
 ## Gate defaults (.no-mistakes.yaml)
