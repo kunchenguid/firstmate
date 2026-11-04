@@ -232,13 +232,6 @@ presented_max_row() { # <rows-file>
 
 case "${1:-}" in
   '') ;;
-  --help|-h)
-    printf '%s\n' \
-      'usage: fm-wake-drain.sh [--open-decisions | --ack-through SEQUENCE --recovery-generation GENERATION]' \
-      '--open-decisions: print every folded status decision with its full key and content, without claiming or acknowledging wakes.' \
-      'After truncation or recovery, read and reconcile that full set before acknowledging.'
-    exit 0
-    ;;
   --open-decisions)
     [ "$#" -eq 1 ] || { echo "wake drain: --open-decisions takes no arguments" >&2; exit 2; }
     FULL_OPEN_DECISIONS=true
