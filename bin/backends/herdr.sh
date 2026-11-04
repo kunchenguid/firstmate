@@ -750,7 +750,9 @@ fm_backend_herdr_projection_journal_replace_endpoint() {  # <journal> <task-id> 
 # Removes firstmate/, 2ndmate-<id>/, and a presentation-level fm- owner
 # prefix when present. The ordinary task tab remains fm-<id> and is not
 # built by this helper.
-fm_backend_herdr_projection_concise_task_label() {  # <task-id>
+# The _set form stores the result in FM_BACKEND_HERDR_CONCISE_TASK_LABEL
+# without a subshell, for callers that derive it for many records.
+fm_backend_herdr_projection_concise_task_label_set() {  # <task-id>
   local task=$1
   case "$task" in
     firstmate/*) task=${task#firstmate/} ;;
@@ -759,7 +761,12 @@ fm_backend_herdr_projection_concise_task_label() {  # <task-id>
   case "$task" in
     fm-*) task=${task#fm-} ;;
   esac
-  printf '%s' "$task"
+  FM_BACKEND_HERDR_CONCISE_TASK_LABEL=$task
+}
+
+fm_backend_herdr_projection_concise_task_label() {  # <task-id>
+  fm_backend_herdr_projection_concise_task_label_set "$1"
+  printf '%s' "$FM_BACKEND_HERDR_CONCISE_TASK_LABEL"
 }
 
 # fm_backend_herdr_projection_workspace_label: presentation-only child label.
@@ -1148,12 +1155,13 @@ fm_backend_herdr_projection_close_pane_focus_preserving() {  # <session> <pane-i
 # where every removal primitive preserves focus and the proof stops being
 # load-bearing. That floor has ONE owner, the spawn-time gate
 # fm_backend_herdr_presentation_enabled, so every new projection is either on a
-# supported release or is a home's deliberate below-floor opt-in. Session-start
-# cleanup deliberately retires a leftover projection husk on every release,
-# including below the floor. The accepted exposure is limited to the rare
-# downgrade path where a home projected on Herdr 0.8.0 or newer and then moved
-# to a 0.7.x release, and occurs once per leftover workspace at session start
-# rather than once per task teardown; the exact prior-tab restore bounds it.
+# supported release or is a home's deliberate below-floor opt-in. Leftover
+# cleanup, at task cleanup and at session start, deliberately retires a leftover
+# projection husk on every release, including below the floor. The accepted
+# exposure is limited to the rare downgrade path where a home projected on Herdr
+# 0.8.0 or newer and then moved to a 0.7.x release, and occurs once per leftover
+# workspace rather than once per ordinary task teardown; the exact prior-tab
+# restore bounds it.
 # Refusing that close below the floor would leak workspaces that nothing else
 # removes and block teardown because fm-teardown treats an unconfirmed close as
 # a hard stop. That cleanup is therefore authorized containment rather than a
@@ -3135,6 +3143,229 @@ fm_backend_herdr_projection_token_workspace_gone() {  # <session> <journal> <tas
     else "gone"
     end' 2>/dev/null) || return 1
   [ "$verdict" = "gone" ]
+}
+
+# --- leftover projected task workspaces --------------------------------------
+#
+# A leftover is a projected task workspace that outlived its task pane: after a
+# Herdr session restore it holds only a restored idle shell, and nothing removes
+# it because no task record names it any more. docs/herdr-backend.md "Leftover
+# task workspaces" owns the contract; these helpers are its single
+# implementation, shared by bin/fm-teardown.sh (the task's own leftover, at
+# cleanup) and bin/fm-herdr-session-cleanup.sh (every leftover, at locked
+# session start). A title and token are discovery only. Authority comes from the
+# exact one-tab one-pane topology, the absent agent, the idle-shell process
+# proof, the caller's record checks, and a fresh recheck of all of them right
+# before the exact-pane focus-preserving close. Nothing here calls
+# `workspace close`: closing the last pane lets Herdr remove the emptied
+# workspace through the focus-safe removal plan.
+
+# fm_backend_herdr_projection_token_workspace <session> <title> <token>: print
+# the one workspace id labeled exactly <title>, when <token> occurs exactly once
+# across every workspace label in the session.
+# Return codes: 0 found, 1 the list was read and no workspace carries the
+# title, 2 the list is unreadable or the title or token is ambiguous.
+fm_backend_herdr_projection_token_workspace() {  # <session> <title> <token>
+  local session=$1 title=$2 token=$3 list verdict
+  list=$(fm_backend_herdr_cli "$session" workspace list 2>/dev/null) || return 2
+  verdict=$(printf '%s' "$list" | jq -r --arg title "$title" --arg token "$token" '
+    if (.result.workspaces | type) != "array" then "ambiguous"
+    elif any(.result.workspaces[]; (type != "object") or (has("label") and (.label | type != "string"))) then "ambiguous"
+    else
+      ([.result.workspaces[] | select(.label == $title)]) as $matches
+      | ([.result.workspaces[] | (.label // "") | ((split("p:" + $token) | length) - 1)] | add // 0) as $count
+      | if ($matches | length) == 0 and $count == 0 then "none"
+        elif ($matches | length) == 1 and $count == 1
+          and ($matches[0].workspace_id | type) == "string" and ($matches[0].workspace_id | length) > 0
+        then "found\t" + $matches[0].workspace_id
+        else "ambiguous"
+        end
+    end' 2>/dev/null) || return 2
+  case "$verdict" in
+    none) return 1 ;;
+    found$'\t'?*) printf '%s' "${verdict#found$'\t'}" ;;
+    *) return 2 ;;
+  esac
+}
+
+# fm_backend_herdr_projection_unclaimed: true only when no Firstmate record in
+# any given state directory can still claim one leftover projected workspace.
+# A claim is a presentation journal that names <token>, a presentation journal
+# or task record whose task id has <concise> as its presentation label, or a
+# task record whose Herdr endpoint fields (docs/herdr-backend.md "Endpoint
+# metadata") name <workspace>, <tab>, or <pane>.
+# <exclude-state> and <exclude-id> name the one task whose own journal and
+# record the caller has already accounted for, or are both empty.
+# An absent state directory holds no claim, an unreadable state directory,
+# record, or journal counts as one, and an empty state-directory list proves
+# nothing. Read-only.
+fm_backend_herdr_projection_unclaimed() {  # <workspace> <tab> <pane> <concise> <token> <exclude-state> <exclude-id> <state-dir>...
+  local workspace=$1 tab=$2 pane=$3 concise=$4 token=$5 exclude_state=$6 exclude_id=$7
+  local state file id rc
+  local -a metas journals
+  shift 7
+  [ "$#" -gt 0 ] && [ -n "$workspace" ] && [ -n "$concise" ] && [ -n "$token" ] || return 1
+  for state in "$@"; do
+    # A home that has never written state/ holds no records to claim anything.
+    [ -e "$state" ] || [ -L "$state" ] || continue
+    [ -d "$state" ] && [ -r "$state" ] && [ -x "$state" ] || return 1
+    metas=()
+    journals=()
+    for file in "$state"/*.meta "$state"/*"$FM_BACKEND_HERDR_PRESENTATION_JOURNAL_SUFFIX"; do
+      [ -e "$file" ] || [ -L "$file" ] || continue
+      id=${file##*/}
+      case "$id" in
+        *.meta) id=${id%.meta} ;;
+        *) id=${id%"$FM_BACKEND_HERDR_PRESENTATION_JOURNAL_SUFFIX"} ;;
+      esac
+      if [ -n "$exclude_id" ] && [ "$id" = "$exclude_id" ] && [ "$state" -ef "$exclude_state" ]; then
+        continue
+      fi
+      fm_backend_herdr_projection_concise_task_label_set "$id"
+      [ "$FM_BACKEND_HERDR_CONCISE_TASK_LABEL" != "$concise" ] || return 1
+      [ -f "$file" ] && [ -r "$file" ] || return 1
+      case "$file" in
+        *.meta) metas+=("$file") ;;
+        *) journals+=("$file") ;;
+      esac
+    done
+    if [ "${#journals[@]}" -gt 0 ]; then
+      rc=0
+      grep -Fq -- "$token" "${journals[@]}" 2>/dev/null || rc=$?
+      [ "$rc" -eq 1 ] || return 1
+    fi
+    if [ "${#metas[@]}" -gt 0 ]; then
+      rc=0
+      awk -v ws="$workspace" -v tab="$tab" -v pane="$pane" '
+        $0 == "herdr_workspace_id=" ws { found = 1; exit }
+        tab != "" && $0 == "herdr_tab_id=" tab { found = 1; exit }
+        pane != "" && $0 == "herdr_pane_id=" pane { found = 1; exit }
+        pane != "" && index($0, "window=") == 1 {
+          value = substr($0, 8)
+          colon = index(value, ":")
+          if (colon > 0 && substr(value, colon + 1) == pane) { found = 1; exit }
+        }
+        END { exit(found ? 0 : 1) }
+      ' "${metas[@]}" 2>/dev/null || rc=$?
+      [ "$rc" -eq 1 ] || return 1
+    fi
+  done
+  return 0
+}
+
+# fm_backend_herdr_projection_leftover_snapshot: from one API snapshot, accept
+# <workspace> as a leftover candidate only when it is labeled exactly <title>,
+# <token> occurs once across the session, it holds exactly one tab and one pane
+# (matching <bound-tab> and <bound-pane> when given), and the session reports
+# one unambiguous focus that is not on that tab.
+# Sets FM_BACKEND_HERDR_LEFTOVER_TAB and FM_BACKEND_HERDR_LEFTOVER_PANE.
+fm_backend_herdr_projection_leftover_snapshot() {  # <session> <workspace> <title> <token> <bound-tab> <bound-pane>
+  local session=$1 workspace=$2 title=$3 token=$4 bound_tab=$5 bound_pane=$6 snapshot record
+  FM_BACKEND_HERDR_LEFTOVER_TAB=
+  FM_BACKEND_HERDR_LEFTOVER_PANE=
+  snapshot=$(fm_backend_herdr_cli "$session" api snapshot 2>/dev/null) || return 1
+  [ -n "$snapshot" ] || return 1
+  record=$(printf '%s' "$snapshot" | jq -er \
+    --arg workspace "$workspace" --arg title "$title" --arg token "$token" \
+    --arg bound_tab "$bound_tab" --arg bound_pane "$bound_pane" '
+    .result.snapshot as $s
+    | [$s.workspaces[]? | select(.workspace_id == $workspace)] as $workspaces
+    | [$s.tabs[]? | select(.workspace_id == $workspace)] as $tabs
+    | [$s.panes[]? | select(.workspace_id == $workspace)] as $panes
+    | ([ $s.workspaces[]?.label? // "" |
+         ((split("p:" + $token) | length) - 1) ] | add // 0) as $token_count
+    | select($workspaces | length == 1)
+    | select($workspaces[0].label == $title)
+    | select($workspaces[0].tab_count == 1 and $workspaces[0].pane_count == 1)
+    | select($tabs | length == 1)
+    | select($panes | length == 1)
+    | select($panes[0].tab_id == $tabs[0].tab_id)
+    | select($bound_tab == "" or $tabs[0].tab_id == $bound_tab)
+    | select($bound_pane == "" or $panes[0].pane_id == $bound_pane)
+    | select($token_count == 1)
+    | select(($s.focused_workspace_id | type) == "string")
+    | select(($s.focused_tab_id | type) == "string")
+    | select(($s.focused_pane_id | type) == "string")
+    | select($s.focused_tab_id != $tabs[0].tab_id)
+    | [$tabs[0].tab_id, $panes[0].pane_id] | @tsv
+  ' 2>/dev/null) || return 1
+  [ -n "$record" ] && [ "${record#*$'\t'}" != "$record" ] || return 1
+  FM_BACKEND_HERDR_LEFTOVER_TAB=${record%%$'\t'*}
+  FM_BACKEND_HERDR_LEFTOVER_PANE=${record#*$'\t'}
+  [ -n "$FM_BACKEND_HERDR_LEFTOVER_TAB" ] && [ -n "$FM_BACKEND_HERDR_LEFTOVER_PANE" ]
+}
+
+# fm_backend_herdr_projection_leftover_recheck: immediately re-prove one
+# candidate's exact title and token uniqueness, one-tab one-pane topology,
+# absent agent, idle-shell proof, and non-target focus before mutation.
+fm_backend_herdr_projection_leftover_recheck() {  # <session> <workspace> <tab> <pane> <title> <token>
+  local session=$1 workspace=$2 tab=$3 pane=$4 title=$5 token=$6
+  local workspaces workspace_info tabs panes focus
+  workspaces=$(fm_backend_herdr_cli "$session" workspace list 2>/dev/null) || return 1
+  printf '%s' "$workspaces" | jq -e --arg workspace "$workspace" --arg title "$title" --arg token "$token" '
+    ([.result.workspaces[]? | select(.workspace_id == $workspace and .label == $title)] | length) == 1
+    and ([.result.workspaces[]?.label? // "" |
+          ((split("p:" + $token) | length) - 1)] | add // 0) == 1
+  ' >/dev/null 2>&1 || return 1
+  workspace_info=$(fm_backend_herdr_cli "$session" workspace get "$workspace" 2>/dev/null) || return 1
+  printf '%s' "$workspace_info" | jq -e --arg workspace "$workspace" --arg title "$title" '
+    .result.workspace.workspace_id == $workspace
+    and .result.workspace.label == $title
+    and .result.workspace.tab_count == 1
+    and .result.workspace.pane_count == 1
+  ' >/dev/null 2>&1 || return 1
+  tabs=$(fm_backend_herdr_cli "$session" tab list --workspace "$workspace" 2>/dev/null) || return 1
+  printf '%s' "$tabs" | jq -e --arg workspace "$workspace" --arg tab "$tab" '
+    (.result.tabs | type) == "array"
+    and (.result.tabs | length) == 1
+    and .result.tabs[0].workspace_id == $workspace
+    and .result.tabs[0].tab_id == $tab
+  ' >/dev/null 2>&1 || return 1
+  panes=$(fm_backend_herdr_cli "$session" pane list --workspace "$workspace" 2>/dev/null) || return 1
+  printf '%s' "$panes" | jq -e --arg workspace "$workspace" --arg tab "$tab" --arg pane "$pane" '
+    (.result.panes | type) == "array"
+    and (.result.panes | length) == 1
+    and .result.panes[0].workspace_id == $workspace
+    and .result.panes[0].tab_id == $tab
+    and .result.panes[0].pane_id == $pane
+  ' >/dev/null 2>&1 || return 1
+  [ "$(fm_backend_herdr_pane_agent_state "$session" "$pane")" = no-agent ] || return 1
+  fm_backend_herdr_pane_idle_shell_pid "$session" "$pane" >/dev/null || return 1
+  focus=$(fm_backend_herdr_projection_focus_snapshot "$session") || return 1
+  [ "${focus#*$'\t'}" != "$tab" ]
+}
+
+# fm_backend_herdr_projection_retire_leftover: retire one leftover projected
+# task workspace by closing its one exact pane. The caller must already hold
+# the named session's presentation lock and must have checked its own record
+# preconditions; <record-recheck>, when given, names a caller function with no
+# arguments that re-proves them just before mutation and can read the
+# candidate's FM_BACKEND_HERDR_LEFTOVER_TAB and FM_BACKEND_HERDR_LEFTOVER_PANE.
+# Return codes: 0 the exact pane is confirmed gone; 2 the locked snapshot is
+# not one unambiguous candidate; 3 the pane holds a registered or unknown agent
+# or is not a provably idle childless shell; 4 the immediate recheck changed or
+# was unreadable; 5 the focus-safe close was refused or unconfirmed; 6 the
+# pane's absence could not be confirmed after the close.
+fm_backend_herdr_projection_retire_leftover() {  # <session> <workspace> <title> <token> <bound-tab> <bound-pane> [<record-recheck>]
+  local session=$1 workspace=$2 title=$3 token=$4 bound_tab=$5 bound_pane=$6 recheck=${7:-}
+  local pane close_status=0
+  fm_backend_herdr_projection_leftover_snapshot \
+    "$session" "$workspace" "$title" "$token" "$bound_tab" "$bound_pane" || return 2
+  pane=$FM_BACKEND_HERDR_LEFTOVER_PANE
+  if [ "$(fm_backend_herdr_pane_agent_state "$session" "$pane")" != no-agent ] \
+    || ! fm_backend_herdr_pane_idle_shell_pid "$session" "$pane" >/dev/null; then
+    return 3
+  fi
+  if { [ -n "$recheck" ] && ! "$recheck"; } \
+    || ! fm_backend_herdr_projection_leftover_recheck \
+      "$session" "$workspace" "$FM_BACKEND_HERDR_LEFTOVER_TAB" "$pane" "$title" "$token"; then
+    return 4
+  fi
+  fm_backend_herdr_projection_close_pane_focus_preserving \
+    "$session" "$pane" no-agent || close_status=$?
+  [ "$(fm_backend_herdr_pane_agent_state "$session" "$pane")" != dead ] || return 0
+  [ "$close_status" -eq 0 ] || return 5
+  return 6
 }
 
 # fm_backend_herdr_parse_target: split "<session>:<pane_id>" (pane_id itself

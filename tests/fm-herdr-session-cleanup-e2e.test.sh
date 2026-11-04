@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
-# Real restored-shell E2E for home-local session-start Herdr projection cleanup.
+# Real restored-shell E2E for session-start Herdr leftover task-workspace cleanup.
+# It covers a journal-correlated leftover, an unjournaled leftover, and the
+# claimed, busy, and captain workspaces the cleanup must leave alone.
 # Every CLI operation is routed through one guarded named non-default lab, and
 # lab teardown verifies that the default fleet session is byte-identical.
 set -u
@@ -61,11 +63,26 @@ SH
 chmod +x "$FAKEBIN/herdr"
 
 lab() { env PATH="$HERDR_ORIGINAL_PATH" "$HERDR_LAB_HELPER" run "$HERDR_LAB_SESSION" "$@"; }
-production_process_proof() {
+production_process_proof() {  # [pane]
   FM_HOME="$HOME_DIR" FM_BACKEND=herdr HERDR_SESSION="$HERDR_LAB_SESSION" \
     FM_HERDR_SESSION_CLEANUP_SOURCE_ONLY=1 PATH="$FAKEBIN:$HERDR_ORIGINAL_PATH" \
     bash -c '. "$1"; fm_backend_herdr_pane_idle_shell_pid "$2" "$3" >/dev/null' \
-      _ "$ROOT/bin/fm-herdr-session-cleanup.sh" "$HERDR_LAB_SESSION" "$PANE"
+      _ "$ROOT/bin/fm-herdr-session-cleanup.sh" "$HERDR_LAB_SESSION" "${1:-$PANE}"
+}
+await_idle_shell() {  # <pane>
+  local attempt=0
+  while [ "$attempt" -lt 50 ]; do
+    production_process_proof "$1" && return 0
+    sleep 0.1
+    attempt=$((attempt + 1))
+  done
+  return 1
+}
+make_workspace() {  # <label>; prints "<workspace-id> <root-pane-id>"
+  local out
+  out=$(lab workspace create --cwd "$ROOT" --label "$1" --no-focus) || return 1
+  printf '%s %s' "$(printf '%s' "$out" | jq -r '.result.workspace.workspace_id')" \
+    "$(printf '%s' "$out" | jq -r '.result.root_pane.pane_id')"
 }
 focus_snapshot() {
   local list workspace tab tabs
@@ -90,6 +107,27 @@ PANE=$(printf '%s' "$CANDIDATE" | jq -r '.result.root_pane.pane_id')
   printf 'task_id=%s\n' "$ID"
   printf 'projection_id=%s\n' "$TOKEN"
 } > "$HOME_DIR/state/$ID.herdr-presentation"
+# An unjournaled leftover: its task and journal were already cleaned up.
+read -r LOST_WS LOST_PANE <<EOF
+$(make_workspace "└ lost-journal · p:LoStJoUrNaLlEfToVeR001")
+EOF
+[ -n "$LOST_WS" ] && [ -n "$LOST_PANE" ] || fail 'could not create unjournaled leftover fixture'
+# A leftover another task record still names.
+read -r CLAIMED_WS CLAIMED_PANE <<EOF
+$(make_workspace "└ claimed · p:ClAiMeDlEfToVeR0000001")
+EOF
+[ -n "$CLAIMED_WS" ] && [ -n "$CLAIMED_PANE" ] || fail 'could not create claimed leftover fixture'
+printf 'backend=herdr\nherdr_workspace_id=%s\n' "$CLAIMED_WS" > "$HOME_DIR/state/claimant.meta"
+# A task-grammar workspace whose pane runs a foreground command.
+read -r BUSY_WS BUSY_PANE <<EOF
+$(make_workspace "└ busy · p:BuSyLeFtOvEr0000000001")
+EOF
+[ -n "$BUSY_WS" ] && [ -n "$BUSY_PANE" ] || fail 'could not create busy leftover fixture'
+# A captain workspace outside the task grammar holding the same idle shell shape.
+read -r CAPTAIN_WS CAPTAIN_PANE <<EOF
+$(make_workspace "captain-scratch")
+EOF
+[ -n "$CAPTAIN_WS" ] && [ -n "$CAPTAIN_PANE" ] || fail 'could not create captain workspace fixture'
 
 "$HERDR_LAB_HELPER" stop "$HERDR_LAB_SESSION" >/dev/null || fail 'could not stop named lab for restored-shell reproduction'
 "$HERDR_LAB_HELPER" provision "$HERDR_LAB_SESSION" || fail 'could not restore named lab layout'
@@ -117,6 +155,17 @@ while [ "$attempt" -lt 50 ]; do
   attempt=$((attempt + 1))
 done
 [ "$attempt" -lt 50 ] || fail 'restored child did not converge to the exact childless idle-shell process-group shape'
+for fixture_pane in "$LOST_PANE" "$CLAIMED_PANE" "$CAPTAIN_PANE" "$BUSY_PANE"; do
+  lab pane get "$fixture_pane" >/dev/null || fail "restored fixture pane $fixture_pane is missing after the lab restart"
+  await_idle_shell "$fixture_pane" || fail "restored fixture pane $fixture_pane did not converge to an idle shell"
+done
+lab pane run "$BUSY_PANE" 'sleep 600' >/dev/null || fail 'could not start the busy fixture command'
+attempt=0
+while [ "$attempt" -lt 50 ] && production_process_proof "$BUSY_PANE"; do
+  sleep 0.1
+  attempt=$((attempt + 1))
+done
+[ "$attempt" -lt 50 ] || fail 'busy fixture pane still reads as an idle shell'
 pass 'real named lab reproduced the exact restored one-tab one-pane childless no-agent shell shape'
 
 FM_HOME="$HOME_DIR" FM_BACKEND=herdr HERDR_SESSION="$HERDR_LAB_SESSION" \
@@ -131,7 +180,16 @@ if lab workspace get "$WS" >/dev/null 2>&1; then
   fail 'last-pane side effect did not remove the stale projected child workspace'
 fi
 [ ! -e "$HOME_DIR/state/$ID.herdr-presentation" ] || fail 'matching journal survived confirmed exact pane closure'
-pass 'real named lab cleanup closes only the exact stale pane and preserves exact focus'
+if lab workspace get "$LOST_WS" >/dev/null 2>&1; then
+  fail 'unjournaled restored leftover survived cleanup'
+fi
+lab workspace get "$CLAIMED_WS" >/dev/null 2>&1 || fail 'cleanup closed a leftover another task record names'
+lab pane get "$CLAIMED_PANE" >/dev/null 2>&1 || fail 'cleanup closed the claimed leftover pane'
+lab workspace get "$BUSY_WS" >/dev/null 2>&1 || fail 'cleanup closed a workspace running a foreground command'
+lab pane get "$BUSY_PANE" >/dev/null 2>&1 || fail 'cleanup closed the busy pane'
+lab workspace get "$CAPTAIN_WS" >/dev/null 2>&1 || fail 'cleanup closed a captain workspace outside the task grammar'
+[ -e "$HOME_DIR/state/claimant.meta" ] || fail 'cleanup touched a task record'
+pass 'real named lab cleanup closes journal-correlated and unjournaled leftovers, leaves claimed, busy, and captain workspaces, and preserves exact focus'
 
 FM_HOME="$HOME_DIR" FM_BACKEND=herdr HERDR_SESSION="$HERDR_LAB_SESSION" \
   PATH="$FAKEBIN:$HERDR_ORIGINAL_PATH" "$ROOT/bin/fm-herdr-session-cleanup.sh" \

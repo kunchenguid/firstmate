@@ -1816,14 +1816,27 @@ The flag applies to a fresh ship or scout spawn, and the multi-task path forward
 It has no effect on `--relaunch` and `--secondmate`, because those paths take no exact-resume presentation-order lock.
 That run measured the default-on projection on Herdr 0.8.0 only, while the focus-flash regression below was last run on 0.7.5 before the flip, so neither run covered a defective release under default-on projection; the version floor and the focus-flash suite's Part C close that gap.
 
-The restored-shell session-start cleanup ran on 2026-07-24 against Herdr 0.7.5 protocol 17:
+The restored-shell leftover cleanup at session start ran on 2026-11-04 against Herdr 0.9.3 protocol 22 on Linux x86_64:
 
 ```sh
 HERDR_LAB_HELPER=bin/fm-herdr-lab.sh \
   tests/fm-herdr-session-cleanup-e2e.test.sh
 ```
 
-Observed guarantee: one exact home-local, journal-correlated, one-tab and one-pane childless idle shell was closed after restoration while the exact non-target focus and default fleet session remained unchanged, and a repeat run was a no-op.
+Observed output:
+
+```text
+ok - real named lab reproduced the exact restored one-tab one-pane childless no-agent shell shape
+warning: herdr session-start projection cleanup: leftover '└ busy · p:BuSyLeFtOvEr0000000001' preserved because its pane is not a provably idle childless shell
+ok - real named lab cleanup closes journal-correlated and unjournaled leftovers, leaves claimed, busy, and captain workspaces, and preserves exact focus
+warning: herdr session-start projection cleanup: leftover '└ busy · p:BuSyLeFtOvEr0000000001' preserved because its pane is not a provably idle childless shell
+ok - real named lab cleanup is idempotent and leaves the default fleet session to the teardown tripwire
+evidence: herdr=0.9.3 protocol=22 default-session-tripwire=armed
+```
+
+Observed guarantee: after a real restore, one journal-correlated and one unjournaled one-tab and one-pane childless idle shell were closed, which removed both workspaces.
+A leftover another task record names, a task workspace running a foreground command, and a captain workspace outside the task grammar all stayed.
+The exact non-target focus and the default fleet session remained unchanged, and a repeat run was a no-op.
 
 ### Workspace-removal focus safety
 

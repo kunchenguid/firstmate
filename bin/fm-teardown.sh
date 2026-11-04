@@ -112,11 +112,11 @@
 # signature for its status file and its .hb-surfaced- heartbeat marker are
 # already retired by status_retire_presentation_task) - and, once the
 # recorded pane is proven gone, an orphaned Herdr presentation journal: a
-# binding of exactly that pane, or a version 1 attempt whose
-# token-bearing projected workspace is itself confirmed gone, names nothing the
-# session-start sweep could still close, while a journal bound to any other pane
-# - or a version 1 attempt whose workspace is still present or unreadable - may
-# name a live quarantined space and is retained for that sweep.
+# binding of exactly that pane, or any journal whose token-bearing projected
+# workspace is itself confirmed gone, names nothing the session-start sweep
+# needs it for, while a journal bound to any other pane whose workspace is still
+# present or unreadable may name a live quarantined space and is retained for
+# that sweep.
 # data/<id>/ is deliberately left in place: a successor spawn reads brief.md
 # from it.
 # Worktree-slot ownership (teardown-slot-collision): a treehouse pool slot is
@@ -180,11 +180,15 @@
 # Orca tasks use the same safety checks, then close the recorded terminal and
 # remove the recorded worktree through `orca worktree rm`; teardown never guesses
 # an Orca target from ambient CLI state.
-# A Herdr presentation journal never authorizes cleanup. Teardown still closes
-# only the exact task pane from ordinary endpoint metadata and never calls
+# A Herdr presentation journal never authorizes cleanup. Teardown closes the
+# exact task pane from ordinary endpoint metadata and never calls
 # `workspace close`. It retires the non-authoritative journal only when a
 # read-only token correlation agrees with that endpoint and pane closure is
 # confirmed. Otherwise the journal stays quarantined for manual inspection.
+# Once that pane is proven gone, the journal's token-bearing workspace may
+# still be there holding a restored idle shell; teardown then retires that
+# leftover through the shared proof in bin/backends/herdr.sh
+# (docs/herdr-backend.md "Leftover task workspaces"), and any refusal only warns.
 # Projected closes share the presentation-order lock, refuse to close the
 # captain's active tab, and restore the exact response-derived pre-close tab
 # if Herdr's last-pane cleanup focuses an unrelated neighboring workspace.
@@ -3773,21 +3777,97 @@ fi
 # before anything ends processes in the copy.
 HERDR_PRESENTATION_JOURNAL="$STATE/$ID.herdr-presentation"
 # teardown_herdr_journal_orphaned: true when the task's own journal names
-# nothing the session-start sweep could still close - a version 1 attempt whose
-# token-bearing projected workspace is confirmed gone, or a version 2 binding of
-# exactly the recorded pane this teardown proves gone. Unreadable, malformed, or
-# otherwise-bound journals, and a version 1 workspace still present or
-# unreadable, are not orphans.
+# nothing the session-start sweep could still close by it - its token-bearing
+# projected workspace is confirmed gone from the journal's session, or it is a
+# version 2 binding of exactly the recorded pane this teardown proves gone,
+# whose leftover workspace the sweep retires without a journal. Unreadable or
+# malformed journals, and a workspace still present or unreadable for any other
+# binding, are not orphans.
 teardown_herdr_journal_orphaned() {
+  local session=$TEARDOWN_HERDR_SESSION
   fm_backend_source herdr || return 1
   fm_backend_herdr_projection_journal_snapshot "$HERDR_PRESENTATION_JOURNAL" "$ID" || return 1
-  if [ "$FM_BACKEND_HERDR_JOURNAL_VERSION" = 1 ]; then
-    fm_backend_herdr_projection_token_workspace_gone \
-      "$TEARDOWN_HERDR_SESSION" "$HERDR_PRESENTATION_JOURNAL" "$ID"
-  else
-    [ "$FM_BACKEND_HERDR_JOURNAL_SESSION:$FM_BACKEND_HERDR_JOURNAL_PANE_ID" = "$T" ]
+  if [ "$FM_BACKEND_HERDR_JOURNAL_VERSION" = 2 ]; then
+    [ "$FM_BACKEND_HERDR_JOURNAL_SESSION:$FM_BACKEND_HERDR_JOURNAL_PANE_ID" != "$T" ] || return 0
+    session=$FM_BACKEND_HERDR_JOURNAL_SESSION
   fi
+  fm_backend_herdr_projection_token_workspace_gone \
+    "$session" "$HERDR_PRESENTATION_JOURNAL" "$ID"
 }
+# teardown_herdr_retire_leftover_projection: once the recorded pane is proven
+# gone, retire this task's own projected workspace when it outlived that pane -
+# a Herdr restore left an idle shell in it, or the task moved to the flat layout
+# and left it behind (docs/herdr-backend.md "Leftover task workspaces").
+# It runs under the presentation lock teardown already holds, before the reaper
+# can end that shell outside the focus-preserving close. Presentation only and
+# never fatal: every refusal leaves the workspace and journal and says why.
+teardown_herdr_leftover_unclaimed() {
+  if fm_local_firstmate_state_dirs "$STATE" \
+    && fm_backend_herdr_projection_unclaimed \
+      "$TEARDOWN_HERDR_LEFTOVER_WORKSPACE" \
+      "${FM_BACKEND_HERDR_LEFTOVER_TAB:-}" "${FM_BACKEND_HERDR_LEFTOVER_PANE:-}" \
+      "$TEARDOWN_HERDR_LEFTOVER_CONCISE" "$TEARDOWN_HERDR_LEFTOVER_TOKEN" \
+      "$STATE" "$ID" "${FM_LOCAL_FIRSTMATE_STATES[@]}"; then
+    return 0
+  fi
+  TEARDOWN_HERDR_LEFTOVER_CLAIMED=1
+  return 1
+}
+teardown_herdr_retire_leftover_projection() {
+  local session=$TEARDOWN_HERDR_SESSION token=$TEARDOWN_HERDR_JOURNAL_TOKEN title workspace status=0 reason
+  [ -n "$token" ] && [ "$TEARDOWN_HERDR_JOURNAL_SESSION" = "$session" ] || return 0
+  title=$(fm_backend_herdr_projection_workspace_label "$ID" "$token")
+  workspace=$(fm_backend_herdr_projection_token_workspace "$session" "$title" "$token") || status=$?
+  case "$status" in
+    0) ;;
+    1) return 0 ;;
+    *)
+      echo "warning: herdr leftover workspace for $ID is ambiguous or unreadable; leaving it in place" >&2
+      return 0
+      ;;
+  esac
+  if ! teardown_herdr_session_lock_held "$session"; then
+    echo "warning: herdr session presentation lock is not held for $ID; leaving its leftover workspace in place" >&2
+    return 0
+  fi
+  fm_backend_herdr_projection_concise_task_label_set "$ID"
+  TEARDOWN_HERDR_LEFTOVER_WORKSPACE=$workspace
+  TEARDOWN_HERDR_LEFTOVER_CONCISE=$FM_BACKEND_HERDR_CONCISE_TASK_LABEL
+  TEARDOWN_HERDR_LEFTOVER_TOKEN=$token
+  FM_BACKEND_HERDR_LEFTOVER_TAB=
+  FM_BACKEND_HERDR_LEFTOVER_PANE=
+  TEARDOWN_HERDR_LEFTOVER_CLAIMED=0
+  if teardown_herdr_leftover_unclaimed; then
+    fm_backend_herdr_projection_retire_leftover \
+      "$session" "$workspace" "$title" "$token" '' '' \
+      teardown_herdr_leftover_unclaimed || status=$?
+  fi
+  [ "$TEARDOWN_HERDR_LEFTOVER_CLAIMED" != 1 ] || status=7
+  case "$status" in
+    0) return 0 ;;
+    2) reason="its topology or focus is not one unambiguous idle candidate" ;;
+    3) reason="its pane is not a provably idle childless shell without an agent" ;;
+    4) reason="its immediate revalidation changed or was unreadable" ;;
+    5) reason="its focus-safe pane close was refused or unconfirmed" ;;
+    7) reason="another task record or journal still claims it" ;;
+    *) reason="its pane close could not be confirmed" ;;
+  esac
+  echo "warning: herdr leftover workspace for $ID was left in place because $reason" >&2
+  return 0
+}
+# The leftover step needs the journal's token even after the exact close below
+# retires the journal, so it is read once here while the journal is intact.
+TEARDOWN_HERDR_JOURNAL_TOKEN=
+TEARDOWN_HERDR_JOURNAL_SESSION=
+if [ "$BACKEND" = herdr ] \
+   && [ -f "$HERDR_PRESENTATION_JOURNAL" ] && [ ! -L "$HERDR_PRESENTATION_JOURNAL" ]; then
+  fm_backend_source herdr || true
+  if declare -F fm_backend_herdr_projection_journal_snapshot >/dev/null 2>&1 \
+     && fm_backend_herdr_projection_journal_snapshot "$HERDR_PRESENTATION_JOURNAL" "$ID"; then
+    TEARDOWN_HERDR_JOURNAL_TOKEN=$FM_BACKEND_HERDR_JOURNAL_PROJECTION_ID
+    TEARDOWN_HERDR_JOURNAL_SESSION=${FM_BACKEND_HERDR_JOURNAL_SESSION:-$TEARDOWN_HERDR_SESSION}
+  fi
+fi
 HERDR_PRESENTATION_RETIRE_CANDIDATE=0
 HERDR_PRESENTATION_SESSION=
 HERDR_PRESENTATION_PANE=
@@ -3856,6 +3936,7 @@ if [ "$BACKEND" = herdr ]; then
     echo "error: herdr pane $T for $ID is not confirmed gone after its close was refused, skipped, or failed; retaining every durable task record - rerun teardown once the close can run under the session lock" >&2
     exit 1
   fi
+  teardown_herdr_retire_leftover_projection
 fi
 
 if [ "$KIND" != secondmate ] && teardown_owns_worktree; then
