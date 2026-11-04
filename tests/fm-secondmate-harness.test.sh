@@ -930,6 +930,71 @@ SH
   pass "C9 spawn: secondmate launch pins supervision to its own harness"
 }
 
+# Stand up the extension-ownership evidence a live Pi session records: both primary
+# extensions present at their current on-disk build, each state marker naming the
+# live process that loaded it, and this home's session lock naming that process too.
+record_pi_extension_ownership() {  # <home> <session-pid>
+  local home=$1 pid=$2 pair source marker version
+  mkdir -p "$home/.pi/extensions" "$home/state"
+  for pair in \
+    "fm-primary-pi-watch.ts:.pi-watch-extension-loaded" \
+    "fm-primary-turnend-guard.ts:.pi-turnend-extension-loaded"; do
+    source=${pair%%:*}
+    marker=${pair#*:}
+    printf '// %s fixture\n' "$home" > "$home/.pi/extensions/$source"
+    version=$(FM_STATE_OVERRIDE="$home/state" bash -c '. "$1"; fm_pi_extension_version "$2"' _ \
+      "$ROOT/bin/fm-wake-lib.sh" "$home/.pi/extensions/$source") || return 1
+    printf '%s\n%s\n' "$version" "$pid" > "$home/state/$marker"
+  done
+  printf '%s\n' "$pid" > "$home/state/.lock"
+}
+
+# A secondmate's supervision model must come from the harness its launch really
+# starts, not a hand-kept copy of the owner's table. A pi secondmate pinned
+# `persistent` keeps the turn-end guard's PID-strict predicate, so it alarms
+# "TURN WOULD END BLIND" through the Pi extension's own tear-down-and-respawn
+# hand-off even though the extension owns continuity. This spawns the real launch,
+# stands up the ownership evidence above, and lets the real guard decide.
+test_spawned_pi_secondmate_uses_extension_supervision_model() {
+  local w sm launchlog launch fakebin out status pid
+  w="$TMP_ROOT/spawn-pi-supervision-model"
+  sm="$w/sm"
+  launchlog="$w/launch.log"
+  mkdir -p "$w/home/config"
+  printf 'pi\n' > "$w/home/config/secondmate-harness"
+  make_seeded_home "$sm" sm
+  spawn_secondmate_capture "$w" sm "$sm" "$launchlog" >/dev/null 2>&1
+  mkdir -p "$sm/state"
+  fm_write_meta "$sm/state/task.meta" "window=firstmate:fm-task" "kind=ship"
+  sleep 60 &
+  pid=$!
+  touch "$sm/state/.last-watcher-beat"
+  record_pi_extension_ownership "$sm" "$pid" || {
+    kill "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+    fail "could not record Pi extension ownership evidence for the secondmate home"
+  }
+  fakebin="$w/tmux-sm/fakebin"
+  mkdir -p "$fakebin"
+  # The spawned pi stands in for the secondmate's own session process: its home is
+  # its own checkout root, so the guard it runs at its turn boundary is this home's.
+  cat > "$fakebin/pi" <<SH
+#!/usr/bin/env bash
+printf '{"stop_hook_active":false}' | FM_ROOT_OVERRIDE="$sm" "$ROOT/bin/fm-turnend-guard.sh"
+SH
+  chmod +x "$fakebin/pi"
+  launch=$(cat "$launchlog")
+  status=0
+  out=$(PATH="$fakebin:$BASE_PATH" CLAUDECODE=1 bash -c "$launch" 2>&1) || status=$?
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  expect_code 0 "$status" \
+    "a pi secondmate pinned persistent keeps the strict turn-end predicate and alarms on a healthy extension hand-off: $out"
+  [ -z "$out" ] \
+    || fail "a healthy Pi hand-off in a secondmate home must not print the blind-turn banner: $out"
+  pass "C10 spawn: a pi secondmate pins the extension model, so its turn-end guard accepts the extension hand-off"
+}
+
 # The harness fallback chain (secondmate-harness -> crew-harness -> own) still
 # resolves correctly with no model/effort tokens anywhere in the chain, and a
 # crew/scout (non-secondmate) launch is entirely unaffected by this feature: no
@@ -2578,6 +2643,7 @@ test_spawn_explicit_effort_overrides_secondmate_harness_token
 test_spawn_explicit_harness_does_not_inherit_secondmate_harness_tokens
 test_spawn_explicit_harness_uses_explicit_profile_axes
 test_spawned_secondmate_uses_its_harness_supervision_model
+test_spawned_pi_secondmate_uses_extension_supervision_model
 test_spawn_fallback_chain_and_crew_scout_unaffected
 test_bootstrap_sweep_propagates_and_reconverges
 test_bootstrap_sweep_propagates_when_tracked_current

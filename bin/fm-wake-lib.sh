@@ -167,10 +167,28 @@ fm_watcher_healthy() {
 # arm layer (bin/fm-watch-arm.sh, bin/fm-claude-stop-autoarm.sh) needs exactly
 # that - it decides whether to start, attach to, or replace a real watcher
 # process, so a leftover beacon must never satisfy it. bin/fm-turnend-guard.sh
-# also keeps this strict check because it fires at the turn boundary where the
-# auto-arm brings a fresh watcher up. The pull warning (bin/fm-guard.sh) fires
-# mid-turn, where the auto-arm model runs no watcher at all, so it wants a
-# different, model-aware question:
+# keeps this strict check as its base predicate because it fires at the turn
+# boundary where the auto-arm brings a fresh watcher up, and it consults the
+# model-aware question below for the extension model ONLY, never for autoarm. The
+# pull warning (bin/fm-guard.sh) fires mid-turn, where the autoarm model runs no
+# watcher at all, so it governs itself with that model-aware question:
+
+# fm_supervision_model_for_harness <harness>
+# The single owner of the harness -> supervision-model table. fm_supervision_model
+# applies it to THIS home's detected harness, and bin/fm-spawn.sh applies it to the
+# harness it is launching, so a secondmate launch pins the model its own harness
+# really runs under rather than a hand-kept copy of this table that drifts as soon
+# as a harness's supervision shape changes - a Pi secondmate reports extension, or
+# its turn-end guard would keep the PID-strict predicate and alarm through the
+# extension's own hand-off. It reads no environment override on purpose: the harness
+# of the home being resolved decides, never a pin inherited from its spawner.
+fm_supervision_model_for_harness() {
+  case "${1:-unknown}" in
+    claude|cursor) printf 'autoarm\n' ;;
+    pi|pi-signed) printf 'extension\n' ;;
+    *) printf 'persistent\n' ;;
+  esac
+}
 
 # fm_supervision_model
 # Print the supervision model of this home's PRIMARY harness:
@@ -195,11 +213,7 @@ fm_supervision_model() {
     autoarm|extension|persistent) printf '%s\n' "$FM_SUPERVISION_MODEL"; return 0 ;;
   esac
   harness=$("$FM_WAKE_LIB_DIR/fm-harness.sh" 2>/dev/null || printf unknown)
-  case "$harness" in
-    claude|cursor) printf 'autoarm\n' ;;
-    pi|pi-signed) printf 'extension\n' ;;
-    *) printf 'persistent\n' ;;
-  esac
+  fm_supervision_model_for_harness "$harness"
 }
 
 # Pi primary supervision evidence. The Pi extensions record, in their state
@@ -291,7 +305,9 @@ fm_afk_daemon_owns_supervision() {
 
 # fm_watcher_supervision_verdict <state> <watch-path> [grace] [home] [root]
 # Model-aware "is supervision healthy right now" verdict for the pull warning
-# guard (bin/fm-guard.sh), NOT the arm layer or the turn-end guard. Sets:
+# guard (bin/fm-guard.sh) and, for the extension model only, for
+# bin/fm-turnend-guard.sh. Never for the arm layer, and never for the turn-end
+# guard under the autoarm or persistent model. Sets:
 #   FM_WATCHER_VERDICT_OK      true when supervision is healthy for this model
 #   FM_WATCHER_VERDICT_REASON  when not ok, the true failing condition:
 #                              no-watcher   - a live watcher process is the real

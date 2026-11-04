@@ -3490,13 +3490,13 @@ fi
 if [ "$KIND" = secondmate ]; then
   sq_home=$(shell_quote "$PROJ_ABS")
   sq_primary_home=$(shell_quote "$FM_HOME")
-  # Keep this in step with fm_supervision_model (bin/fm-wake-lib.sh): Claude's
-  # Stop auto-arm and Cursor's stop-hook park both run the watcher only BETWEEN
-  # turns, so a fresh beacon with no live watcher is their healthy mid-turn state.
-  case "$HARNESS" in
-    claude|cursor) supervision_model=autoarm ;;
-    *) supervision_model=persistent ;;
-  esac
+  # Resolve the launched harness's supervision model from its single owner rather
+  # than a copy of the table kept here: the child's own harness decides its model,
+  # so a Pi secondmate pins extension and its turn-end guard keeps the extension
+  # hand-off tolerance, while Claude's Stop auto-arm and Cursor's stop-hook park
+  # still pin autoarm because they run the watcher only BETWEEN turns and a fresh
+  # beacon with no live watcher is their healthy mid-turn state.
+  supervision_model=$(fm_supervision_model_for_harness "$HARNESS")
   # Deliver the primary's EFFECTIVE trace-context decision as a normalized on/off
   # literal (never the raw FM_TRACE_CONTEXT string) so a FM_TRACE_CONTEXT override
   # on the primary reaches the secondmate's OWN workers, not just the copied

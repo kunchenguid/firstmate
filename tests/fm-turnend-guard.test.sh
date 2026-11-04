@@ -1901,6 +1901,133 @@ test_hook_daemon_lock_is_ignored_without_away_mode() {
   pass "fm-turnend-guard: a daemon lock proves nothing while away mode is off"
 }
 
+# --- Pi extension hand-off --------------------------------------------------
+# The Pi extension model tears the watcher down and respawns it on every
+# actionable wake, so a turn boundary can land in a hand-off where a fresh beacon
+# is real but no watcher process holds the lock. fm_watcher_supervision_verdict is
+# the single owner of that rule and it needs provable ownership: both primary
+# extensions loaded at their current on-disk build by the live process in
+# state/.lock. These fixtures stand that evidence up, and each test breaks exactly
+# one part so the hook cannot pass on a fresh beacon alone.
+record_pi_extension_session() {  # <dir> <session_pid> [omit-part]
+  local dir=$1 session_pid=${2:-} omit=${3:-} root pair source marker version
+  root=$(cd "$dir" && pwd)
+  mkdir -p "$root/.pi/extensions" "$dir/state"
+  for pair in \
+    "fm-primary-pi-watch.ts:.pi-watch-extension-loaded:watch" \
+    "fm-primary-turnend-guard.ts:.pi-turnend-extension-loaded:turnend"; do
+    source=${pair%%:*}
+    marker=${pair#*:}; marker=${marker%%:*}
+    printf '// %s fixture\n' "$(basename "$dir")" > "$root/.pi/extensions/$source"
+    [ "$omit" = "${pair##*:}" ] && continue
+    version=$(FM_STATE_OVERRIDE="$dir/state" bash -c '. "$1"; fm_pi_extension_version "$2"' \
+      _ "$dir/bin/fm-wake-lib.sh" "$root/.pi/extensions/$source") || return 1
+    printf '%s\n%s\n' "$version" "$session_pid" > "$dir/state/$marker"
+  done
+  [ -n "$session_pid" ] && printf '%s\n' "$session_pid" > "$dir/state/.lock"
+  return 0
+}
+
+# Pin the supervision model explicitly instead of asking bin/fm-harness.sh to
+# detect one: these cases test the model-aware branch, not detection.
+run_hook_as_model() {  # <dir> <model>
+  local dir=$1 model=$2 home
+  home=$(cd "$dir" && pwd)
+  printf '{"stop_hook_active":false}' \
+    | CLAUDECODE=1 FM_SUPERVISION_MODEL="$model" FM_HOME="$home" bash "$dir/bin/fm-turnend-guard.sh" 2>&1
+}
+
+test_hook_pi_hand_off_allows_turn_without_watcher_lock() {
+  local dir pid out status
+  dir=$(make_primary_dir "$TMP_ROOT/hook-pi-handoff")
+  : > "$dir/state/task1.meta"
+  sleep 60 &
+  pid=$!
+  record_pi_extension_session "$dir" "$pid" || {
+    kill "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+    fail "could not record Pi extension session evidence"
+  }
+  touch "$dir/state/.last-watcher-beat"
+  out=$(run_hook_as_model "$dir" extension); status=$?
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  expect_code 0 "$status" "a live Pi session owning continuity must allow the turn during the extension hand-off"
+  [ -z "$out" ] || fail "healthy Pi hand-off still produced a block banner: $out"
+  pass "fm-turnend-guard: fresh beacon plus a provably live Pi session allows the turn with no watcher holding the lock"
+}
+
+test_hook_pi_hand_off_blocks_without_owner_proof() {
+  local dir out status
+  dir=$(make_primary_dir "$TMP_ROOT/hook-pi-no-owner")
+  : > "$dir/state/task1.meta"
+  touch "$dir/state/.last-watcher-beat"
+  out=$(run_hook_as_model "$dir" extension); status=$?
+  expect_code 2 "$status" "an unheld lock with no proven Pi owner must still block despite a fresh beacon"
+  assert_contains "$out" "$REQUIRED_REASON" "block reason must contain the exact required instruction"
+  pass "fm-turnend-guard: an unowned fresh beacon still blocks, so the hand-off tolerance cannot pass on the beacon alone"
+}
+
+test_hook_pi_hand_off_blocks_when_one_extension_is_unloaded() {
+  local dir pid out status
+  dir=$(make_primary_dir "$TMP_ROOT/hook-pi-partial-owner")
+  : > "$dir/state/task1.meta"
+  sleep 60 &
+  pid=$!
+  record_pi_extension_session "$dir" "$pid" turnend || {
+    kill "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+    fail "could not record Pi extension session evidence"
+  }
+  touch "$dir/state/.last-watcher-beat"
+  out=$(run_hook_as_model "$dir" extension); status=$?
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  expect_code 2 "$status" "a missing turn-end extension must not prove ownership"
+  assert_contains "$out" "$REQUIRED_REASON" "partial ownership must explain the missing proof"
+  pass "fm-turnend-guard: the hand-off tolerance requires both primary extensions, so a half-loaded session still blocks"
+}
+
+test_hook_pi_hand_off_blocks_on_stale_beacon() {
+  local dir pid out status
+  dir=$(make_primary_dir "$TMP_ROOT/hook-pi-stale")
+  : > "$dir/state/task1.meta"
+  sleep 60 &
+  pid=$!
+  record_pi_extension_session "$dir" "$pid" || {
+    kill "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+    fail "could not record Pi extension session evidence"
+  }
+  touch -t 202001010000 "$dir/state/.last-watcher-beat"
+  out=$(run_hook_as_model "$dir" extension); status=$?
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  expect_code 2 "$status" "a beacon past grace must still block even with a proven Pi owner"
+  assert_contains "$out" "$REQUIRED_REASON" "stale beacon must keep the blind-turn instruction"
+  pass "fm-turnend-guard: the hand-off tolerance never covers a beacon past grace"
+}
+
+test_hook_pi_hand_off_does_not_leak_into_autoarm_model() {
+  local dir pid out status
+  dir=$(make_primary_dir "$TMP_ROOT/hook-pi-autoarm-scope")
+  : > "$dir/state/task1.meta"
+  sleep 60 &
+  pid=$!
+  record_pi_extension_session "$dir" "$pid" || {
+    kill "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+    fail "could not record Pi extension session evidence"
+  }
+  touch "$dir/state/.last-watcher-beat"
+  out=$(run_hook_as_model "$dir" autoarm); status=$?
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  expect_code 2 "$status" "the autoarm model must keep its strict turn-boundary predicate"
+  assert_contains "$out" "$REQUIRED_REASON" "autoarm must not inherit the extension hand-off tolerance"
+  pass "fm-turnend-guard: the extension hand-off tolerance is scoped to the extension model only"
+}
+
 test_predicate_healthy_no_inflight
 test_predicate_unhealthy_no_beacon
 test_predicate_unhealthy_stale_beacon
@@ -1978,3 +2105,8 @@ test_hook_away_mode_blocks_on_dead_daemon
 test_hook_away_mode_blocks_on_pid_reused_daemon
 test_hook_away_mode_blocks_on_stale_beacon
 test_hook_daemon_lock_is_ignored_without_away_mode
+test_hook_pi_hand_off_allows_turn_without_watcher_lock
+test_hook_pi_hand_off_blocks_without_owner_proof
+test_hook_pi_hand_off_blocks_when_one_extension_is_unloaded
+test_hook_pi_hand_off_blocks_on_stale_beacon
+test_hook_pi_hand_off_does_not_leak_into_autoarm_model
