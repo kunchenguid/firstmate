@@ -1109,6 +1109,7 @@ The spoken interface in [`docs/voice-relay.md`](voice-relay.md) and the model-ba
 Each is one line in a local, gitignored `config/` file, with an environment variable that overrides it for a single run, and a missing required value refuses with the path to write rather than falling back to a value that belongs to another home.
 That configuration is the whole opt-in: an unconfigured home cannot start the relay and cannot run `fm-inbox.sh say` or `ask`, while `note`, `status`, `list` and `drain` need no configuration at all because they make no model call.
 The voice handover depends on `note`, so it keeps working in a home that has configured nothing.
+A note is filed under the class of the source that wrote it, and an automated source files into its own `state/inbox-auto/` queue so `list` and `drain` always present the captain's own notes first; `bin/fm-inbox.sh --help` owns the class list and the queue each one uses.
 
 | File | Environment | Holds |
 | --- | --- | --- |
