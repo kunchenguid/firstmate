@@ -435,7 +435,7 @@ The away-posture restriction on queued merges and its residual limits are owned 
 ## Record divergence
 
 A captain call can have two records, and closing one does not close the other.
-The status-log fold is the open-decision set `bin/fm-classify-lib.sh` reads from a task's status log, where a keyed `needs-decision` or `blocked` line opens a decision.
+The status-log fold is the open-decision set `bin/fm-classify-lib.sh` reads from a task's status log, under the opening and closing rules documented above `status_open_decisions` in that file.
 A `resolved [key=...]` line closes the status-log fold.
 The structured captain-held task closes only through `answer`.
 
