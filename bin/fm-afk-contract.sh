@@ -52,8 +52,9 @@
 #   expected_return: <UTC ISO 8601> | -
 #   reach_channels: none
 #   reach_announced: <the one-sentence reach announcement>
-#   spend_max_concurrent_workers: <n>   without --spend, the ordinary worker
-#                                  records this home already holds at entry,
+#   spend_max_concurrent_workers: <n>   without --spend, the working or
+#                                  uncertain ordinary workers this home
+#                                  already runs at entry,
 #                                  and never fewer than the default
 #                                  (SPEND CAP below)
 #   confirmed: <UTC ISO 8601>       when this mandate was recorded; /afk itself
