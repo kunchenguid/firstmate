@@ -106,6 +106,15 @@ bob
 comm bob
 ```
 
+A full ship spawn on that version, under `de_DE`, read the brief through the delivered pointer, committed its file, reported done, and closed its turn through the hook record:
+
+```text
+v1 gen=g1793830393.375908.32687 seq=3 state=idle source=bob-hook event=stop ts=1793830416
+done [at=1793830412]: ready in branch fm/bob-full-1
+```
+
+A `fm-harness.sh` run as a real worker tool call printed `bob`, and `bin/fm-control.sh <id> interrupt` ended a running `sleep 90` tool call while the busy record stayed `busy`, the documented consequence of `Stop` not firing on Escape.
+
 The portable regressions pin the matcher with real processes and no installed Bob, and the live guard refreshes the rendered and process facts for the installed version:
 
 ```sh

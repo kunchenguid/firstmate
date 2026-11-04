@@ -1,6 +1,6 @@
 # Bob CLI
 
-Verified for crewmate/scout work only: a full worker run on IBM Bob CLI 2.0.9, and launch, gates, hooks, identity, interrupt, exit, and relaunch on 2.0.6.
+Verified for crewmate/scout work only: a full worker run on IBM Bob CLI 2.0.9 and 2.0.6, plus identity, interrupt, exit, and relaunch on 2.0.6.
 Not verified as a secondmate: bob has no primary supervision protocol, so `../../../bin/fm-spawn.sh` refuses `--secondmate` on it, the same gap that scopes kiro, muse, and rovo to crewmate/scout.
 A Bob session is recognized for harness detection and the session lock so firstmate's own commands run from one identify Bob instead of its launcher and take the generic supervision fallback; it is no supervision-branch pin, and [`runtime-backends.md`](../../../../../docs/verification/runtime-backends.md#bob-session-identity-and-session-lock) owns that evidence.
 
@@ -13,7 +13,7 @@ A Bob session is recognized for harness detection and the session lock so firstm
 | Trust | `--auto-approve` and workspace hooks are silently suppressed in an untrusted folder, so `../../../bin/fm-spawn.sh` pre-registers the worktree in `~/.bob/trustedFolders.json` through `../../../bin/fm-bob-trust.sh` and refuses the spawn if that fails. |
 | Busy state | `bob-hook`, bob's only state source: the per-task `.bob/settings.json` in the worktree carries a `UserPromptSubmit` hook that opens a turn and a `Stop` hook that closes it and keeps the turn-ended touch. Bob has no `StopFailure` or `SessionEnd` equivalent, so an abnormal turn end leaves the record busy until the next prompt; `../../../bin/fm-busy-lib.sh` owns the disclosure. |
 | Exit command | `/exit`. |
-| Interrupt | Single Escape; `Stop` does not fire on it, so `../../../bin/fm-control.sh` preserves the adapter-owned busy record and `../../../bin/fm-control-lib.sh` records the acknowledgement source as `none`. |
+| Interrupt | Single Escape, which ends the running tool call (verified live, 2.0.6); `Stop` does not fire on it, so `../../../bin/fm-control.sh` preserves the adapter-owned busy record and `../../../bin/fm-control-lib.sh` records the acknowledgement source as `none`. |
 | Identity | `BOB_SESSION=1`, set by bob's session process for its tool subprocesses, named by `../../../bin/fm-harness.sh` after the claude and pi markers, plus the installed entry script, owned by `../../../bin/fm-bob-process-lib.sh`; the npm package is `@ibm/bob` at 2.0.9 and `bobshell` at 2.0.6. |
 | Locale | Bob translates its UI from `LC_ALL`, `LC_MESSAGES`, then `LANG`, so the composer read proves an empty row from styling rather than from the placeholder wording. |
 | Self-update | Bob's default `bobShell.autoUpdate` runs `npm install -g --force` against whichever node is active, which can write outside the running install; it reads only the user settings, so firstmate cannot pin it per task and the operator sets it in `~/.bob/settings/settings.json`. |
