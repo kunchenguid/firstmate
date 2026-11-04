@@ -1412,18 +1412,17 @@ test_lock_stale_plain_file_single_winner_under_concurrency() {
   : > "$lockdir"
   touch -t 200001010000 "$lockdir"
   : > "$marker"
-  mkfifo "$gate" "$hold"
   # try_acquire is nonblocking, so every one-shot contender may lose to a
   # transient steal mutex. A waiting contender guarantees eventual acquisition,
-  # and the FIFO keeps the winner alive until every other contender has
+  # and the release file keeps the winner alive until every other contender has
   # finished, so a late contender on a busy runner cannot take the lock after
   # the winner exits.
   FM_STATE_OVERRIDE="$state" bash -c '
     . "$1"
     fm_lock_acquire_wait "$2" || exit 1
     printf "%s\n" "${BASHPID:-$$}" >> "$3"
-    printf "%s\n" "${BASHPID:-$$}" > "$4"
-    IFS= read -r _ < "$5"
+    printf "%s\n" "${BASHPID:-$$}" > "$4.tmp" && mv "$4.tmp" "$4"
+    while [ ! -e "$5" ]; do sleep 0.05; done
   ' _ "$LIB" "$lockdir" "$marker" "$gate" "$hold" &
   waiter=$!
   pids=
@@ -1433,20 +1432,21 @@ test_lock_stale_plain_file_single_winner_under_concurrency() {
       . "$1"
       if fm_lock_try_acquire "$2"; then
         printf "%s\n" "${BASHPID:-$$}" >> "$3"
-        printf "%s\n" "${BASHPID:-$$}" > "$4"
-        IFS= read -r _ < "$5"
+        printf "%s\n" "${BASHPID:-$$}" > "$4.tmp" && mv "$4.tmp" "$4"
+        while [ ! -e "$5" ]; do sleep 0.05; done
       fi
     ' _ "$LIB" "$lockdir" "$marker" "$gate" "$hold" &
     pids="$pids $!"
     i=$((i + 1))
   done
+  until [ -s "$gate" ]; do sleep 0.05; done
   IFS= read -r winner < "$gate"
   [ "$winner" = "$waiter" ] || { kill "$waiter" 2>/dev/null || true; wait "$waiter" 2>/dev/null || true; }
   for pid in $pids; do
     [ "$pid" = "$winner" ] || wait "$pid" 2>/dev/null || true
   done
   wins=$(awk 'NF { c++ } END { print c + 0 }' "$marker")
-  printf 'release\n' > "$hold"
+  : > "$hold"
   wait "$winner" 2>/dev/null || true
   [ "$wins" -eq 1 ] || fail "expected exactly one plain-file reclaimer, got $wins"
   [ -L "$lockdir" ] || fail "reclaimed lock path is not a symlink lock after the race"
