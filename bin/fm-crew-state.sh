@@ -185,7 +185,7 @@
 #      reading that row could not be bound to, so a single line never labels one
 #      run's outcome with another run's identity, and never asserts a second,
 #      earlier run the unbindable row does not prove.
-#   3. Reconcile the status log through fm-classify-lib.sh's status_current_line:
+#   3. Reconcile the status log through fm-hold-status-lib.sh's status_current_line:
 #      open decisions survive unrelated events and continuation prose cannot
 #      hide a declaration. Ship/scout terminal declarations supersede stale log
 #      decisions. If it says needs-decision/blocked but
@@ -194,9 +194,9 @@
 #      agree, and are reported as parked. A `blocked:` line that reports a
 #      refused or missing daemon socket remains blocked even if an attributed
 #      run record is stale or terminal, for as long as that blocker is still the
-#      log's latest event; this reconciliation runs BEFORE rule 2b, so that
-#      blocker also outranks rule 2b's supersession and unknown answers. The
-#      same holds for any open decision when the run
+#      worker's latest event on the log; this reconciliation runs BEFORE rule
+#      2b, so that blocker also outranks rule 2b's supersession and unknown
+#      answers. The same holds for any open decision when the run
 #      record itself is UNVERIFIED (its daemon answered down): the crew saw its
 #      gate or blocker first hand, so needs-decision stays parked and blocked
 #      stays blocked, with the unverified record named as the reason.
@@ -235,6 +235,8 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 . "$SCRIPT_DIR/fm-backend.sh"
 # shellcheck source=bin/fm-classify-lib.sh
 . "$SCRIPT_DIR/fm-classify-lib.sh"
+# shellcheck source=bin/fm-hold-status-lib.sh
+. "$SCRIPT_DIR/fm-hold-status-lib.sh"
 # shellcheck source=bin/fm-busy-lib.sh
 . "$SCRIPT_DIR/fm-busy-lib.sh"
 # shellcheck source=bin/fm-nm-run-lib.sh
@@ -1436,8 +1438,9 @@ if [ "$HAVE_RUN" = 1 ]; then
   # A refused or missing daemon socket is positive daemon-down evidence and
   # outranks any attributed run record, including a terminal one left behind
   # after the daemon stopped, but only while that blocker is itself the log's
-  # LATEST recognized event: a later event of any kind means the crew has moved
-  # on, and the attributed run is the better witness again. The evidence is
+  # LATEST recognized worker event: a later event of any kind means the crew has
+  # moved on, and the attributed run is the better witness again, while a captain
+  # hold's mirror lines are firstmate's and move nothing. The evidence is
   # therefore read off that latest event, not off the reconciled declaration -
   # the two are the same line while the blocker is current, and when they differ
   # the open blocker is by definition no longer the log's tip. Other blocked
@@ -1446,7 +1449,7 @@ if [ "$HAVE_RUN" = 1 ]; then
   # without touching the shared daemon.
   case "$LOG_VERB" in
     needs-decision|blocked)
-      LOG_LATEST=$(last_status_line "$LOG")
+      LOG_LATEST=$(last_worker_status_line "$LOG")
       if [ "$LOG_VERB" = blocked ] \
         && [ "$(status_line_verb "$LOG_LATEST")" = blocked ] \
         && log_reports_daemon_socket_down "$LOG_LATEST"; then

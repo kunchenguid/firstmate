@@ -152,6 +152,20 @@ test_on_groups_by_project_and_sorts_by_status_rank() {
   pass "on: one group per project, status order needs-captain, problem, running, done"
 }
 
+test_on_keeps_the_worker_state_under_a_hold_mirror() {
+  local out
+  new_home mirror
+  printf 'on\n' > "$HOME_DIR/config/herdr-project-groups"
+  add_task api-standing ship /p/api-server w2 "$(printf 'done [at=1]: PR ready, checks green\ncaptain-held [key=captain-hold-api-standing-1] [at=2]: merge approval')"
+  add_task api-settled ship /p/api-server w3 "$(printf 'done [at=1]: PR ready, checks green\ncaptain-held [key=captain-hold-api-settled-1] [at=2]: merge approval\nresolved [key=captain-hold-api-settled-1] [at=3]: captain call released by fm-captain-hold')"
+  add_task api-transfer ship /p/api-server w4 "$(printf 'needs-decision [key=q] [at=1]: which one\ncaptain-held [key=q] [at=2]: tracked by held-1')"
+  out=$(groups plan 2>&1) || fail "plan failed: $out"
+  assert_contains "$out" $'api-standing\tapi-server\tdone\t' "a standing hold mirror keeps the done state"
+  assert_contains "$out" $'api-settled\tapi-server\tdone\t' "a settled hold mirror keeps the done state"
+  assert_contains "$out" $'api-transfer\tapi-server\tneeds-captain\t' "a transferred decision waits on the captain"
+  pass "on: a hold mirror never changes the labeled state, a transfer does"
+}
+
 test_rules_order_groups_and_prefer_task_over_repo_over_catch_all() {
   local out
   new_home rules
@@ -390,6 +404,7 @@ test_watcher_poll_tags_tasks() {
 test_absent_or_off_setting_does_nothing
 test_on_with_zero_tasks_plan_is_empty
 test_on_groups_by_project_and_sorts_by_status_rank
+test_on_keeps_the_worker_state_under_a_hold_mirror
 test_rules_order_groups_and_prefer_task_over_repo_over_catch_all
 test_all_invalid_rules_leave_empty_rule_group_and_still_plan
 test_sync_reports_only_differences_and_sets_the_view

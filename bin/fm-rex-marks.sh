@@ -174,6 +174,8 @@ load_status_libs() {
   . "$SCRIPT_DIR/fm-wake-lib.sh" || return 1
   # shellcheck source=bin/fm-classify-lib.sh
   . "$SCRIPT_DIR/fm-classify-lib.sh" || return 1
+  # shellcheck source=bin/fm-hold-status-lib.sh
+  . "$SCRIPT_DIR/fm-hold-status-lib.sh" || return 1
   LIBS_LOADED=1
 }
 

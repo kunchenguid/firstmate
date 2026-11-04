@@ -120,10 +120,11 @@ An ordinary spawn refuses any block carrying the task's scoped label.
 
 Opt-in: with `config/rex-status-marks` set to `on`, the captain sees which worker needs them from Rex itself.
 `bin/fm-rex-marks.sh` turns each Rex task's latest status into one program-status record (OSC 7501, `app=firstmate`, `id=fm`) on that worker's pane, so Rex badges its tab, session, and Activity entry while the worker's own agent keeps the pane's root status.
+The status is read with the hold-aware readers of `bin/fm-hold-status-lib.sh`, so a captain hold on the task leaves the worker's own mark in place ([captain-hold-lifecycle.md](captain-hold-lifecycle.md) owns that mirror).
 
 | Worker status | Record | Message |
 | --- | --- | --- |
-| `needs-decision`, or a captain hold | `blocked`, kind `question` | `Needs your decision: <note>` |
+| `needs-decision`, or a `captain-held` line - a transfer, or the hold's own declaration - that the hold-aware read leaves as the current line | `blocked`, kind `question` | `Needs your decision: <note>` |
 | `blocked` naming a credential or login | `blocked`, kind `auth` | `Blocked: <note>` |
 | other `blocked` | `blocked`, kind `permission` | `Blocked: <note>` |
 | `failed` | `error` | `Failed: <note>` |

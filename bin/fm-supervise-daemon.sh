@@ -52,11 +52,11 @@
 #     only after it has been idle for STALE_ESCALATE_SECS
 #     (configurable), rechecked once. A wedged crewmate is therefore detected
 #     within STALE_ESCALATE_SECS + a tick, never lost. A declared wait - either a
-#     paused: external wait or a verified captain-held transfer, per
+#     paused: external wait or a captain-held declaration, per
 #     fm-classify-lib.sh's combined predicate - instead gets its own longer
 #     PAUSE_RESURFACE_SECS recheck, never a wedge escalation, whether its pane
 #     reads idle or busy; only a status append that stops declaring the wait
-#     ends that routing. A captain-held transfer is not rechecked at all while
+#     ends that routing. A captain-held declaration is not rechecked at all while
 #     an away record (state/.afk-contract, never quiet mode's) exists: nobody
 #     is there to answer it, and the return brief lists it.
 #     Crewmates are autonomous, so a delayed stale response does not stall a
@@ -112,7 +112,7 @@
 #                                   idle or busy, before it re-surfaces as a
 #                                   recheck (default 14400, four hours); an
 #                                   `until` time cannot extend this bound, and a
-#                                   captain-held transfer is never rechecked
+#                                   captain-held declaration is never rechecked
 #                                   while an away record exists
 #          FM_ESCALATE_BATCH_SECS   buffer window for batched escalation
 #                                   digests; 0 = flush immediately (default 90)
@@ -187,9 +187,13 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 # Shared wake classifier (last_status_line, status_is_captain_relevant,
 # window_to_task, and the status-span reader). The SAME library backs the
 # always-on watcher's triage, so the captain-relevant verb set and the
-# classification predicates have exactly one definition.
+# classification predicates have exactly one definition. The hold-status
+# library then replaces the status readers with ones that honor a captain
+# hold's mirror lines, as the watcher's do.
 # shellcheck source=bin/fm-classify-lib.sh
 . "$FM_DAEMON_DIR/fm-classify-lib.sh"
+# shellcheck source=bin/fm-hold-status-lib.sh
+. "$FM_DAEMON_DIR/fm-hold-status-lib.sh"
 # The away-posture record owner: while state/.afk-contract exists an item held
 # for the captain is never rechecked (the watcher applies the same rule).
 # shellcheck source=bin/fm-afk-contract.sh
@@ -239,7 +243,8 @@ INJECT_LAST_VERDICT=
 INJECT_SENT_MSG=
 # The captain-relevant verb set and the status classifiers (last_status_line,
 # status_is_captain_relevant, window_to_task, and the status-span reader) now
-# live in bin/fm-classify-lib.sh, shared with the always-on watcher.
+# live in bin/fm-classify-lib.sh and bin/fm-hold-status-lib.sh, shared with
+# the always-on watcher.
 # Composer-empty detection, submit acknowledgement, and the harness-scoped
 # supervisor-pane busy guard live in bin/fm-tmux-lib.sh.
 # FM_BUSY_REGEX also overrides Grok's isolated task-state fallback.
@@ -369,9 +374,10 @@ _collapse_newlines() {  # <text>
 
 # --- classification helpers (PURE: no side effects, testable) ---------------
 # last_status_line, status_is_captain_relevant, window_to_task, and the
-# status-span reader come from bin/fm-classify-lib.sh (sourced above),
-# the single classifier shared with bin/fm-watch.sh. The decision-string wrappers
-# and dedup state below layer the daemon's escalation-digest concerns on top.
+# status-span reader come from bin/fm-classify-lib.sh and
+# bin/fm-hold-status-lib.sh (sourced above), the single classifier shared with
+# bin/fm-watch.sh. The decision-string wrappers and dedup state below layer the
+# daemon's escalation-digest concerns on top.
 #
 # Decision protocol: every classifier prints exactly one line on stdout of the
 # form "<action>|<distilled>" where action is "self" or "escalate". The distilled
@@ -454,7 +460,7 @@ classify_stale() {  # <window> <state> [<span-record> <span-status>]
   fi
   declared=$(status_declared_wait_line "$state/$task.status")
   if [ -n "$declared" ] && status_is_paused_or_captain_held "$declared"; then
-    # A DECLARED external-wait pause or a verified captain-held transfer
+    # A DECLARED external-wait pause or a captain-held declaration
     # (fm-classify-lib.sh owns which declarations qualify): an idle pane is
     # EXPECTED, so this is not a wedge. The caller records a pause marker (long
     # re-surface cadence in housekeeping) rather than a wedge stale marker. Cheap:
@@ -577,7 +583,7 @@ stale_dialog_name() {  # <stale-detail>
 }
 
 # Pause marker: state/.subsuper-paused-<key> holds the epoch a declared wait (a
-# paused: external wait or a verified captain-held transfer) was first observed
+# paused: external wait or a captain-held declaration) was first observed
 # declared, whether its pane read idle or busy. Housekeeping ages it against
 # PAUSE_RESURFACE_SECS (much longer than a wedge) and re-surfaces the wait once
 # per window. Recording is create-if-absent so the timestamp is stable across a
@@ -1851,7 +1857,7 @@ handle_wake() {  # <reason> <state>
       fi
       ;;
     pause)
-      # Declared wait, an external-wait pause or a verified captain-held transfer:
+      # Declared wait, an external-wait pause or a captain-held declaration:
       # record a pause marker (long re-surface cadence in housekeeping) and drop any
       # wedge stale marker, so a pane that transitioned working->declared-wait is not
       # still wedge-aged. Only stale produces this action.

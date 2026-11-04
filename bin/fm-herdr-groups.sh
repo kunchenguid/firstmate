@@ -201,12 +201,14 @@ load_status_libs() {
   . "$SCRIPT_DIR/fm-wake-lib.sh" || return 1
   # shellcheck source=bin/fm-classify-lib.sh
   . "$SCRIPT_DIR/fm-classify-lib.sh" || return 1
+  # shellcheck source=bin/fm-hold-status-lib.sh
+  . "$SCRIPT_DIR/fm-hold-status-lib.sh" || return 1
   LIBS_LOADED=1
 }
 
 # resolve_state <task> <kind>: sets STATE_LABEL and STATE_RANK from the task's
 # status log through the shared classifier: an open decision or a captain-held
-# transfer waits on the captain, blocked or failed is a problem, done is done,
+# line waits on the captain, blocked or failed is a problem, done is done,
 # and everything else is running.
 resolve_state() {
   local line verb

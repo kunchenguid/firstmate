@@ -225,20 +225,26 @@ test_wedge_threshold_recheck_names_the_captain_for_a_held_lane() {
   pass "a captain-held lane is rechecked as a hold on the captain, never as an external wait, and never at all while the captain is away"
 }
 
-# The backlog record of the same hold. Once firstmate hands a decision to the
-# captain through bin/fm-captain-hold.sh, the worker's own line stays whatever it
-# was, so a stuck worker on a stable pane reaches the wedge timer with nothing in
-# its status log that reads as a wait. The open captain call must bound the wedge
-# ladder exactly as a `captain-held:` line does.
+# The backlog record of the same hold. bin/fm-captain-hold.sh hold also declares
+# the hold on the lane's status log, but a hold recorded before that declaration
+# existed, or one a later worker line replaced, leaves the log reading as the
+# worker's own line, so a stuck worker on a stable pane reaches the wedge timer
+# with nothing in its status log that reads as a wait. The open captain call must
+# bound the wedge ladder exactly as a `captain-held:` line does. The fixture
+# models that log by restoring the worker's line after the hold is recorded.
 backlog_hold_wedge_fixture() {  # <name> <status-age-secs> [<wedge-timer-age-secs>] [<status-log>]
-  local dir
-  dir=$(wedge_threshold_fixture "$1" "${4:-working: answering the dialog}" "$2" "${3-}") || return 1
+  local dir log=${4:-working: answering the dialog} statusf
+  dir=$(wedge_threshold_fixture "$1" "$log" "$2" "${3-}") || return 1
   mkdir -p "$dir/data"
   fm_test_tasks_toml "$dir/.tasks.toml" || return 1
   printf '## In flight\n\n## Queued\n\n## Done\n' > "$dir/data/backlog.md"
   (cd "$dir" && tasks-axi add wedge 'stuck at a captain-only dialog' --file data/backlog.md) >/dev/null 2>&1 \
     || return 1
   run_hold "$dir" hold wedge --reason 'awaiting the captain on the dialog' || return 1
+  statusf="$dir/state/wedge.status"
+  printf '%s\n' "$log" > "$statusf"
+  set_mtime "$(( $(date +%s) - $2 ))" "$statusf"
+  printf '%s' "$(seen_sig "$statusf")" > "$dir/state/.seen-wedge_status"
   printf '%s\n' "$dir"
 }
 
