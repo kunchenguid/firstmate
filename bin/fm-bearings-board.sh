@@ -125,6 +125,10 @@ validate_payload() {  # <data.json>
         then try ((fromdateiso8601 | strftime("%Y-%m-%dT%H:%M:%SZ")) == $filed) catch false
         else try (((. + "T00:00:00Z") | fromdateiso8601 | strftime("%Y-%m-%d")) == $filed) catch false
         end);
+    def valid_generated:
+      type == "string"
+      and test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T([01][0-9]|2[0-3]):[0-5][0-9](:[0-5][0-9](\\.[0-9]+)?)?(Z|[+-]([01][0-9]|2[0-3]):[0-5][0-9])$")
+      and (.[0:10] as $day | try (($day + "T00:00:00Z") | fromdateiso8601 | strftime("%Y-%m-%d") == $day) catch false);
     def optional_filed:
       (has("filed") | not) or (.filed == null) or (.filed | valid_filed);
     def optional_string($name): (has($name) | not) or (.[$name] | type == "string");
@@ -187,7 +191,7 @@ validate_payload() {  # <data.json>
     type == "object"
     and (.schema == $schema)
     and (.home | nonempty_string)
-    and (.generated | nonempty_string)
+    and (.generated | valid_generated)
     and (.prs_live | type == "boolean")
     and (.captains_call | type == "array")
     and (.underway | type == "array")

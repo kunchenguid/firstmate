@@ -107,7 +107,8 @@ render_board() {  # <home> <underway-json> <charted-json> [charted_more] [charte
     LAVISH_AXI_STATE_DIR="$home/lavish-state" \
     "$BOARD" build "$data" >/dev/null || fail "the board did not build"
   require_listener_reached_poll "$home"
-  BOARD_NOW=${BOARD_NOW:-2026-08-26T01:40:00Z} BOARD_TICK_NOW=${BOARD_TICK_NOW:-} \
+  LC_ALL=en_US.UTF-8 LANG=en_US.UTF-8 \
+    BOARD_NOW=${BOARD_NOW:-2026-08-26T01:40:00Z} BOARD_TICK_NOW=${BOARD_TICK_NOW:-} \
     BOARD_GENERATED_OVERRIDE=${BOARD_GENERATED_OVERRIDE:-} \
     node "$HARNESS" "$home/.lavish/bearings-board.html" \
     || fail "the built board could not be rendered"
