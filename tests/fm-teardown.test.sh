@@ -5421,6 +5421,28 @@ test_missing_lsof_does_not_block_orca_or_tasktmp_removal() {
   pass "a missing lsof falls back to base behavior for Orca and tasktmp removal, with and without force"
 }
 
+test_missing_lsof_does_not_block_local_secondmate_tasktmp_removal() {
+  local case_dir rc path_without_lsof home mode flag
+  for mode in plain force; do
+    flag=
+    [ "$mode" != force ] || flag=--force
+    case_dir=$(make_case "no-lsof-secondmate-tasktmp-$mode")
+    write_meta "$case_dir" local-only secondmate
+    home="$case_dir/secondmate-home"
+    mkdir -p "$home/state" "$home/data" "$home/config" "$home/projects" "$case_dir/tasktmp"
+    printf '%s\n' task-x1 > "$home/.fm-secondmate-home"
+    printf '%s\n' "home=$home" "tasktmp=$case_dir/tasktmp" >> "$case_dir/state/task-x1.meta"
+    path_without_lsof=$(make_path_without_lsof "$case_dir")
+    rc=0
+    FM_TEARDOWN_TEST_PATH="$path_without_lsof" \
+      run_teardown "$case_dir" $flag > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+    expect_code 0 "$rc" "no-lsof-secondmate-$mode: a missing lsof must not block teardown: $(cat "$case_dir/stderr")"
+    assert_absent "$case_dir/tasktmp" "no-lsof-secondmate-$mode: tasktmp was kept because lsof is missing"
+    assert_absent "$case_dir/state/task-x1.meta" "no-lsof-secondmate-$mode: the secondmate record was not retired"
+  done
+  pass "a missing lsof does not keep a local secondmate's tasktmp, with and without force"
+}
+
 test_tasktmp_with_a_spared_process_is_not_deleted() {
   local case_dir rc pid
   case_dir=$(make_case tasktmp-occupied)
@@ -7075,6 +7097,7 @@ test_orca_work_saved_during_the_wait_is_not_removed
 test_late_write_is_still_returned_with_force
 test_orca_worktree_with_a_spared_process_is_not_removed
 test_missing_lsof_does_not_block_orca_or_tasktmp_removal
+test_missing_lsof_does_not_block_local_secondmate_tasktmp_removal
 test_tasktmp_with_a_spared_process_is_not_deleted
 test_herdr_pane_close_does_not_orphan_task_owned_children
 test_reparented_child_in_endpoint_session_is_reaped
