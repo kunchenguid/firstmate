@@ -96,6 +96,20 @@ FIXTURE
   out=$(cd "$repo" && "$BASH" "$LINUX_CHECK" --base main tests/stat-green.test.sh 2>&1) || rc=$?
   assert_equals 0 "$rc" "fixed fixture form must pass on Linux: $out"
   assert_contains "$out" "PASS tests/stat-green.test.sh" "green fixture reported"
+  cat > "$repo/tests/tools.test.sh" <<'FIXTURE'
+#!/usr/bin/env bash
+[ -L tests/dangling-link ] || { echo "not ok - dangling link lost"; exit 1; }
+[ "$(python3 -c 'print(6 * 7)')" = 42 ] || exit 1
+[ "$(node -e 'console.log(6 * 7)')" = 42 ] || exit 1
+curl --version >/dev/null || exit 1
+FIXTURE
+  ln -s missing-target "$repo/tests/dangling-link"
+  git -C "$repo" add tests/dangling-link
+  git -C "$repo" "${GIT_IDENT[@]}" commit -q -m link
+  rc=0
+  out=$(cd "$repo" && "$BASH" "$LINUX_CHECK" --base main tests/tools.test.sh 2>&1) || rc=$?
+  assert_equals 0 "$rc" "tools and dangling link must survive the scratch copy: $out"
+  assert_contains "$out" "PASS tests/tools.test.sh" "tools fixture reported"
   pass "gnu stat fixture goes red on the original form and green on the fixed form"
 }
 
