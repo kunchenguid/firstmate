@@ -3423,6 +3423,19 @@ test_control_move_refuses_before_stop_when_herdr_cannot_run() {
   pass "fm-control relaunch --backend herdr: refuses before the old agent stops when herdr cannot run"
 }
 
+test_control_move_refuses_a_hermes_task_before_stop() {
+  local dir out rc=0
+  dir=$(new_case control-move-hermes rl95)
+  add_ship_task "$dir" rl95 hermes
+  cp "$dir/home/state/rl95.meta" "$dir/meta.before"
+  out=$(run_control "$dir" rl95 relaunch --backend hc --note "moved") || rc=$?
+  expect_code 1 "$rc" "a Hermes task must refuse a move off tmux"$'\n'"$out"
+  assert_contains "$out" "Hermes is verified on tmux only" "the refusal must name the Hermes limit"
+  [ ! -s "$dir/fake/literal" ] || fail "a refused move must not touch the running agent"
+  cmp -s "$dir/meta.before" "$dir/home/state/rl95.meta" || fail "a refused move must leave the record unchanged"
+  pass "fm-control relaunch --backend hc: refuses a Hermes task before the old agent stops"
+}
+
 test_control_move_resumes_the_claude_conversation() {
   local dir out rc=0 agent sid=0f1e2d3c-4b5a-4697-8877-665544332211 launched
   dir=$(new_case control-move-resume rl96)
@@ -3629,6 +3642,7 @@ test_aborted_move_closes_its_new_hc_terminal
 test_control_relaunch_moves_a_running_task_to_hc
 test_control_move_refuses_before_stop_when_hc_is_unreachable
 test_control_move_refuses_before_stop_when_herdr_cannot_run
+test_control_move_refuses_a_hermes_task_before_stop
 test_control_move_resumes_the_claude_conversation
 test_control_move_without_a_session_record_starts_fresh
 test_hc_task_moves_back_to_herdr

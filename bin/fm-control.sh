@@ -1082,7 +1082,7 @@ resolve_relaunch_profile() {
     "$SCRIPT_DIR/fm-harness.sh" validate-native-effort "$TARGET_HARNESS" "$TARGET_MODEL" "$TARGET_EFFORT" || return 1
   fi
   if [ "$TARGET_HARNESS" = hermes ]; then
-    [ "$BACKEND" = tmux ] || die 'Hermes is verified on tmux only; refusing before the current worker stops'
+    [ "${NEW_BACKEND:-$BACKEND}" = tmux ] || die 'Hermes is verified on tmux only; refusing before the current worker stops'
     [ "$TARGET_MODEL" = default ] || die 'Hermes models are profile-owned; relaunch requires the default model axis'
     # shellcheck source=bin/fm-hermes-lib.sh
     . "$SCRIPT_DIR/fm-hermes-lib.sh"

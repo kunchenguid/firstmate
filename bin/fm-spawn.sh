@@ -3349,12 +3349,6 @@ fi
 # owns them) refuse before any worker provisioning.
 fm_backend_validate_harness "$BACKEND" "$HARNESS" || exit 1
 
-# Hermes is verified only as a visible tmux worker. Other backends do not
-# yet prove its profile-prefixed composer or native process identity.
-if [ "$HARNESS" = hermes ] && [ "$BACKEND" != tmux ]; then
-  echo "error: hermes is verified on the tmux backend only; backend=$BACKEND is unsupported" >&2
-  exit 1
-fi
 if [ "$HERMES_PROFILE_SET" -eq 1 ] && [ "$HARNESS" != hermes ]; then
   echo "error: --hermes-profile requires --harness hermes" >&2
   exit 1

@@ -1701,6 +1701,14 @@ fm_backend_validate_harness() {  # <backend> <harness>
           ;;
       esac
       ;;
+    hermes)
+      # Hermes is verified only as a visible tmux worker. Other backends do not
+      # yet prove its profile-prefixed composer or native process identity.
+      [ "$1" = tmux ] || {
+        echo "error: hermes is verified on the tmux backend only; backend=$1 is unsupported" >&2
+        return 1
+      }
+      ;;
   esac
   case "$1" in
     t3code) fm_backend_t3code_validate_harness "$2" ;;
