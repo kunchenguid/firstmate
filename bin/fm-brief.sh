@@ -518,7 +518,7 @@ Rule 7 still reserves \`git worktree\` administration for firstmate, so append \
 "
 fi
 if fm_lane_disk_build_root "$CONFIG" >/dev/null 2>&1; then
-  DISK_BLOCK+="\`\$FM_BUILD_OUTPUT_DIR\` is this task's build-output directory, removed at cleanup: point build tools that take only a flag at it, such as \`swift build --scratch-path \"\$FM_BUILD_OUTPUT_DIR/swiftpm\"\`, \`xcodebuild -derivedDataPath \"\$FM_BUILD_OUTPUT_DIR/DerivedData\"\`, and \`gradle --project-cache-dir \"\$FM_BUILD_OUTPUT_DIR/gradle\"\`.
+  DISK_BLOCK+="When \`\$FM_BUILD_OUTPUT_DIR\` is set, it is this task's build-output directory, removed at cleanup: point build tools that take only a flag at it, such as \`swift build --scratch-path \"\$FM_BUILD_OUTPUT_DIR/swiftpm\"\`, \`xcodebuild -derivedDataPath \"\$FM_BUILD_OUTPUT_DIR/DerivedData\"\`, and \`gradle --project-cache-dir \"\$FM_BUILD_OUTPUT_DIR/gradle\"\`.
 "
 fi
 [ -z "$DISK_BLOCK" ] || DISK_BLOCK="# Disk use"$'\n'"$DISK_BLOCK"$'\n'
