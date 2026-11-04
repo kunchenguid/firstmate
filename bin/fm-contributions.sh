@@ -127,13 +127,15 @@
 # comment, review or review-thread reply from someone other than our own
 # account is newer than our latest reply on that PR (or our latest push after
 # it). While that condition holds, poll wakes firstmate after a re-raise
-# interval (default 14400 seconds / 4 hours, configurable via
-# FM_CONTRIBUTIONS_RERAISE_INTERVAL or config/contribution-reraise-interval, 0
-# disables), even if an earlier signal was acknowledged; ack only snoozes until
-# the next interval. A verdict recording actor nobody (e.g. thanks-only) for
-# that comment clears it. The condition clears automatically once we reply or
-# push after it. The wake text names the PR URL, who commented and how long it
-# has waited: "check: contributions <task> <key> unanswered <url> <author> <age>".
+# interval (opt-in; off unless FM_CONTRIBUTIONS_RERAISE_INTERVAL,
+# config/contribution-reraise-interval, or FM_CONTRIBUTIONS_REPLY_AGE is
+# set; 0 or off disables), even if an earlier signal was acknowledged; ack
+# restarts the snooze until the next interval from the acknowledgement.
+# A verdict recording actor nobody (e.g. thanks-only) for that comment clears
+# it. The condition clears automatically once we reply or push after it (push
+# evidence tied to this pull request's head sha changing). The wake text names
+# the PR URL, who commented and how long it has waited:
+# "check: contributions <task> <key> unanswered <url> <author> <age>".
 #
 # Re-raising unanswered review threads is opt-in. Unless
 # FM_CONTRIBUTIONS_REPLY_AGE is set to a positive number of seconds, poll makes
@@ -201,9 +203,6 @@ REPLY_AGE=${FM_CONTRIBUTIONS_REPLY_AGE:-}
 RERAISE_INTERVAL=${FM_CONTRIBUTIONS_RERAISE_INTERVAL:-}
 if [ -z "$RERAISE_INTERVAL" ] && [ -f "$CONFIG/contribution-reraise-interval" ]; then
   RERAISE_INTERVAL=$(tr -d '[:space:]' < "$CONFIG/contribution-reraise-interval")
-  if [ -z "$RERAISE_INTERVAL" ]; then
-    RERAISE_INTERVAL=14400
-  fi
 fi
 if [ -z "$RERAISE_INTERVAL" ] && [ -n "$REPLY_AGE" ]; then
   RERAISE_INTERVAL=$REPLY_AGE
@@ -523,9 +522,7 @@ observe() { # canonical GitHub URL -> normalized JSON
            | select(any($reviews[]; .user.login == $rev.user.login and (.state | IN("APPROVED","DISMISSED")) and .id > $rev.id) | not)
            | {author:.user.login, at:.submitted_at, source:(.html_url // ($c.html_url + "#pullrequestreview-" + (.id|tostring))), id:.id}])
          | sort_by([.at, .id]) | last // null) as $latest_external
-      | ($c.pushed_at // $c.head.pushed_at // $c.head.repo.pushed_at
-         // (([$checks[0][]? | .check_runs[]? | .started_at] + [$statuses[0][]? | .[]? | .created_at])
-             | map(select(. != null)) | max) // null) as $pushed_at
+      | ($c.pushed_at // $c.head.pushed_at // null) as $pushed_at
       | {head:$c.head.sha,state:(if $c.merged_at != null then "merged" else $c.state end),
           draft:$c.draft,mergeable:(if $c.mergeable == true then "mergeable" elif $c.mergeable == false then "conflicting" else "unknown" end),
           can_merge:($repo[0].permissions.push // false),
@@ -721,18 +718,20 @@ poll() {
           | ($due | map(.key)) as $due_keys
           | $o.latest_external as $ext
           | ($old.verdict // null) as $verdict
+          | (if $old.observation != null and $old.observation.head != null and $old.observation.head != $o.head then $now
+             else ($o.pushed_at // $old.observation.pushed_at // null) end) as $pushed_at
           | (if $o.state == "open" and $ext != null
                  and ($o.latest_reply == null or $ext.at > $o.latest_reply)
-                 and ($o.pushed_at == null or $o.pushed_at <= $ext.at)
+                 and ($pushed_at == null or $pushed_at <= $ext.at)
                  and ($verdict == null or $verdict.source != $ext.source or $verdict.actor != "nobody")
              then true else false end) as $unanswered_cond
           | ($old.unanswered // null) as $old_un
-          | ([$old_un.raised, ($old.threads // [] | map(.raised)[])] | map(select(. != null)) | max) // null as $last_raised
+          | ((([($old_un.acked // $old_un.raised), ($old.threads // [] | map(.acked // .raised)[])] | map(select(. != null)) | max) // null)) as $last_contact
           | (if $reraise_interval > 0 and $unanswered_cond
                  and (any($tracked[]; .source == $ext.source) | not) then
               ($epoch - ($ext.at | fromdateiso8601)) as $ext_age
               | ($ext_age >= $reraise_interval) as $waited
-              | ($last_raised == null or ($epoch - ($last_raised | fromdateiso8601)) >= $reraise_interval) as $interval_passed
+              | ($last_contact == null or ($epoch - ($last_contact | fromdateiso8601)) >= $reraise_interval) as $interval_passed
               | ($waited and ($old_un == null or $old_un.source != $ext.source or $interval_passed))
             else false end) as $pr_unanswered_due
           | (if $pr_unanswered_due and ($due | length) == 0 then
@@ -742,7 +741,7 @@ poll() {
                   body:("no reply on " + $old.url + " for " + $age)}]
              else [] end) as $pr_due_events
           | $old + {checked_at:$now,error:null,
-            observation:($o + {absent_checks:((($old.observation.absent_checks // []) + [($old.observation.checks // [])[] | .name]) - [$o.checks[].name] | unique)}),
+            observation:($o + {pushed_at:$pushed_at, absent_checks:((($old.observation.absent_checks // []) + [($old.observation.checks // [])[] | .name]) - [$o.checks[].name] | unique)}),
             seen:((($old.seen // []) + ($events | map(.token))) | unique),
             pending:((($old.pending // []) + $arrived
                 | map(select(
@@ -761,7 +760,10 @@ poll() {
           | if $unanswered_cond then
               .unanswered = {source:$ext.source, author:$ext.author, at:$ext.at,
                              raised:(if (($pr_due_events | length) > 0 or ($due | length) > 0) then $now
-                                     else ($old_un.raised // null) end)}
+                                     else ($old_un.raised // null) end),
+                             acked:(if ($old_un != null and $old_un.source == $ext.source
+                                        and ($pr_due_events | length) == 0 and ($due | length) == 0)
+                                    then ($old_un.acked // null) else null end)}
             else del(.unanswered) end' > "$TMP/row.json"
       else
         error="forge observation unavailable: $why"
@@ -858,7 +860,16 @@ case "${1:-}" in
       || fail 'observe the contribution before recording evidence'
     if [ "$action" = ack ]; then
       [ "$#" -eq 1 ] || fail 'ack needs one exact event token'
-      jq --arg token "$1" '.pending |= map(select(.token != $token))' "$TMP/row.json" > "$TMP/update.json"
+      jq --arg token "$1" --arg now "$NOW" '
+        ([$now, (try ($token | capture("(?<ts>[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z)").ts) catch null)] | map(select(. != null)) | max) as $ack_time
+        | .pending |= map(select(.token != $token))
+        | if .unanswered != null then
+            .unanswered.acked = $ack_time
+          else . end
+        | if .threads != null then
+            .threads |= map(if $token == ("unanswered:" + .key + ":*") or (.key as $k | $token | contains($k))
+                            then .acked = $ack_time else . end)
+          else . end' "$TMP/row.json" > "$TMP/update.json"
     else
       [ "$#" -eq 4 ] || fail 'verdict needs judged-head, source-url, actor and summary'
       fm_pr_head_valid "$1" || fail 'an exact judged commit is required'

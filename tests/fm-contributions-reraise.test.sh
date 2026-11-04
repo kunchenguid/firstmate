@@ -80,9 +80,13 @@ with_home() {
 }
 
 ack_pending() {
-  local home=$1 token
+  local home=$1 token now=${2:-}
   token=$(with_home "$home" "$ROOT/bin/fm-contributions.sh" pending | jq -er 'first | .token') || fail 'no pending signal to acknowledge'
-  with_home "$home" "$ROOT/bin/fm-contributions.sh" ack delivery https://github.com/o/r/pull/8 "$token" || fail 'ack failed'
+  if [ -n "$now" ]; then
+    with_home "$home" env FM_CONTRIBUTIONS_NOW="$now" "$ROOT/bin/fm-contributions.sh" ack delivery https://github.com/o/r/pull/8 "$token" || fail 'ack failed'
+  else
+    with_home "$home" "$ROOT/bin/fm-contributions.sh" ack delivery https://github.com/o/r/pull/8 "$token" || fail 'ack failed'
+  fi
 }
 
 test_reraise_after_ack() {
@@ -236,18 +240,75 @@ test_clear_on_our_push() {
   # Initial poll at 08:01:00Z and ack.
   with_home "$home" env FM_CONTRIBUTIONS_NOW=2026-09-16T08:01:00Z "$ROOT/bin/fm-contributions.sh" poll >/dev/null \
     || fail 'initial poll failed'
-  ack_pending "$home"
-  # Push a new commit at 09:00:00Z (after the 08:00:00Z comment).
+  ack_pending "$home" 2026-09-16T08:01:00Z
+  # Poll at 12:05:00Z wakes with unanswered.
+  out=$(with_home "$home" env FM_CONTRIBUTIONS_NOW=2026-09-16T12:05:00Z "$ROOT/bin/fm-contributions.sh" poll) \
+    || fail 'poll before push failed'
+  printf '%s\n' "$out" | grep -Eq 'unanswered https://github.com/o/r/pull/8 maintainer 4h$' \
+    || fail "unanswered wake missing before push: $out"
+  # Push a new commit at 12:30:00Z (head sha changes to HEAD_B).
   printf '%s\n' "$HEAD_B" > "$home/forge/head"
-  printf '2026-09-16T09:00:00Z\n' > "$home/forge/pushed_at"
-  # Poll at 13:00:00Z (5 hours after comment, 4 hours after push): push is newer, so clear!
+  # Poll at 13:00:00Z: head sha changed, so unanswered condition clears!
   out=$(with_home "$home" env FM_CONTRIBUTIONS_NOW=2026-09-16T13:00:00Z "$ROOT/bin/fm-contributions.sh" poll) \
     || fail 'poll after push failed'
-  [ -z "$out" ] || fail "woke after author pushed: $out"
+  [ -z "$out" ] || fail "woke after author pushed new head commit: $out"
   with_home "$home" "$ROOT/bin/fm-contributions.sh" pending \
     | jq -e 'any(.type == "unanswered") | not' >/dev/null \
     || fail 'pending unanswered signal present after push'
-  pass 'a push after the comment clears the unanswered condition'
+  # Subsequent poll at 18:00:00Z: still clear.
+  out=$(with_home "$home" env FM_CONTRIBUTIONS_NOW=2026-09-16T18:00:00Z "$ROOT/bin/fm-contributions.sh" poll) \
+    || fail 'later poll failed'
+  [ -z "$out" ] || fail "woke later when head push cleared condition: $out"
+  pass 'a push changing the PR head sha clears the unanswered condition'
+}
+
+test_ack_restarts_snooze() {
+  local home out
+  home=$(new_home ack-snooze)
+  jq -n --arg head "$HEAD_A" '[{id:101,user:{login:"maintainer"},author_association:"OWNER",
+    body:"Please check this",html_url:"https://github.com/o/r/pull/8#issuecomment-101",
+    created_at:"2026-09-16T08:00:00Z",updated_at:"2026-09-16T08:00:00Z"}]' > "$home/forge/comments.json"
+  with_home "$home" env FM_CONTRIBUTIONS_NOW=2026-09-16T08:01:00Z "$ROOT/bin/fm-contributions.sh" poll >/dev/null \
+    || fail 'first poll failed'
+  ack_pending "$home" 2026-09-16T08:01:00Z
+  # 4h 5m later (12:05:00Z): unanswered wake fires (raise time = 12:05:00Z).
+  out=$(with_home "$home" env FM_CONTRIBUTIONS_NOW=2026-09-16T12:05:00Z "$ROOT/bin/fm-contributions.sh" poll) \
+    || fail 'poll at 4h failed'
+  printf '%s\n' "$out" | grep -Eq 'unanswered https://github.com/o/r/pull/8 maintainer 4h$' \
+    || fail "unanswered re-raise wake missing: $out"
+  # Acknowledge at 13:00:00Z (almost an hour after the wake was raised).
+  ack_pending "$home" 2026-09-16T13:00:00Z
+  # At 16:30:00Z (4h 25m after raise at 12:05:00Z, but only 3h 30m after ack at 13:00:00Z):
+  # It must STILL be snoozed, because ack restarted the 4h snooze from 13:00:00Z!
+  out=$(with_home "$home" env FM_CONTRIBUTIONS_NOW=2026-09-16T16:30:00Z "$ROOT/bin/fm-contributions.sh" poll) \
+    || fail 'poll during snooze failed'
+  [ -z "$out" ] || fail "woke early before 4h from acknowledgement passed: $out"
+  # At 17:05:00Z (4h 5m after ack at 13:00:00Z): now snooze has expired, wakes again!
+  out=$(with_home "$home" env FM_CONTRIBUTIONS_NOW=2026-09-16T17:05:00Z "$ROOT/bin/fm-contributions.sh" poll) \
+    || fail 'poll after snooze expiry failed'
+  printf '%s\n' "$out" | grep -Eq 'unanswered https://github.com/o/r/pull/8 maintainer 9h$' \
+    || fail "re-raise after ack snooze missing: $out"
+  pass 'acknowledgement restarts the snooze interval from the time of the ack'
+}
+
+test_reraise_is_opt_in() {
+  local home out
+  home=$(new_home opt-in)
+  rm -f "$home/config/contribution-reraise-interval"
+  jq -n --arg head "$HEAD_A" '[{id:101,user:{login:"maintainer"},author_association:"OWNER",
+    body:"Needs changes",html_url:"https://github.com/o/r/pull/8#issuecomment-101",
+    created_at:"2026-09-16T08:00:00Z",updated_at:"2026-09-16T08:00:00Z"}]' > "$home/forge/comments.json"
+  out=$(with_home "$home" env -u FM_CONTRIBUTIONS_RERAISE_INTERVAL -u FM_CONTRIBUTIONS_REPLY_AGE \
+    FM_CONTRIBUTIONS_NOW=2026-09-16T08:01:00Z "$ROOT/bin/fm-contributions.sh" poll) || fail 'initial poll failed'
+  printf '%s\n' "$out" | grep -Eq '^contribution-wake: check: contributions delivery [0-9a-f]{64}$' \
+    || fail "initial comment wake missing: $out"
+  ack_pending "$home" 2026-09-16T08:01:00Z
+  out=$(with_home "$home" env -u FM_CONTRIBUTIONS_RERAISE_INTERVAL -u FM_CONTRIBUTIONS_REPLY_AGE \
+    FM_CONTRIBUTIONS_NOW=2026-09-16T18:00:00Z "$ROOT/bin/fm-contributions.sh" poll) || fail 'poll failed'
+  [ -z "$out" ] || fail "unconfigured install woke for unanswered PR: $out"
+  with_home "$home" "$ROOT/bin/fm-contributions.sh" pending | jq -e 'length == 0' >/dev/null \
+    || fail 'unconfigured install produced pending unanswered signals'
+  pass 'PR-level re-raise stays off unless explicitly configured'
 }
 
 test_reraise_interval_configurable() {
@@ -275,7 +336,7 @@ test_reraise_interval_configurable() {
 
 if [ "${BASH_SOURCE[0]}" = "$0" ]; then
   failures=0
-  for test_name in test_reraise_after_ack test_clear_on_our_reply test_clear_on_no_action_verdict test_no_reraise_when_we_spoke_last test_clear_on_our_push test_reraise_interval_configurable; do
+  for test_name in test_reraise_after_ack test_clear_on_our_reply test_clear_on_no_action_verdict test_no_reraise_when_we_spoke_last test_clear_on_our_push test_ack_restarts_snooze test_reraise_is_opt_in test_reraise_interval_configurable; do
     ( "$test_name" ) || failures=$((failures + 1))
   done
   [ "$failures" -eq 0 ] || exit 1
