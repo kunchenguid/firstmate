@@ -622,6 +622,71 @@ test_route_keys_open_until_their_own_resolution() {
 
 test_route_keys_open_until_their_own_resolution
 
+# Issue #8151: "Later unrelated or terminal lines must not silently clear it."
+# A ship's done/failed line still supersedes a stale plain decision, but a
+# route-* request survives it, and status_key_closing_verb reads both the same
+# way the fold does.
+test_route_keys_survive_ship_terminal_declarations() {
+  local dir f terminal
+  dir=$(case_dir route-key-ship)
+  for terminal in 'done: finished the task' 'failed: the task failed'; do
+    f="$dir/${terminal%%:*}.status"
+    printf 'kind=ship\n' > "${f%.status}.meta"
+    printf 'needs-decision [key=env]: which env\nworking [key=route-check]: run the real-app check\n%s\n' \
+      "$terminal" > "$f"
+    assert_fold "$f" "$(printf 'route-check\tworking\trun the real-app check\n')" \
+      "a ship ${terminal%%:*} line closes a plain decision but not a route key"
+    [ "$(status_key_closing_verb "$f" route-check)" = working ] \
+      || fail "route key after ship ${terminal%%:*}: '$(status_key_closing_verb "$f" route-check)'"
+    [ "$(status_key_closing_verb "$f" env)" = "${terminal%%:*}" ] \
+      || fail "plain key after ship ${terminal%%:*}: '$(status_key_closing_verb "$f" env)'"
+    [ "$(status_span_first_actionable "$f" 0)" = "working [key=route-check]: run the real-app check ; $terminal" ] \
+      || fail "span after ship ${terminal%%:*}: '$(status_span_first_actionable "$f" 0)'"
+    printf 'resolved [key=route-check]: request completed\n' >> "$f"
+    assert_fold "$f" '' "resolution closes a route key after a ship ${terminal%%:*}"
+    [ "$(status_key_closing_verb "$f" route-check)" = resolved ] \
+      || fail "resolved route key reported '$(status_key_closing_verb "$f" route-check)'"
+  done
+  pass "route-key requests survive ship terminal declarations until their own resolution"
+}
+
+test_route_keys_survive_ship_terminal_declarations
+
+# A route request that is not the first open record in a span must surface
+# alongside the record before it, and a route-keyed needs-decision or
+# captain-held line keeps the decision-owned side-band marker the plain path
+# sets for those verbs.
+test_route_keys_surface_behind_other_open_records() {
+  local dir f record needs
+  dir=$(case_dir route-key-span)
+  f="$dir/behind-plain.status"
+  printf 'blocked [key=vendor]: waiting on vendor\nworking [key=route-check]: run the real-app check\n' > "$f"
+  [ "$(status_span_first_actionable "$f" 0)" = 'blocked [key=vendor]: waiting on vendor ; working [key=route-check]: run the real-app check' ] \
+    || fail "route request behind an open decision: '$(status_span_first_actionable "$f" 0)'"
+  f="$dir/behind-route.status"
+  printf 'working [key=route-a]: first\nworking [key=route-b]: second\n' > "$f"
+  [ "$(status_span_first_actionable "$f" 0)" = 'working [key=route-a]: first ; working [key=route-b]: second' ] \
+    || fail "route request behind another route request: '$(status_span_first_actionable "$f" 0)'"
+  f="$dir/superseded.status"
+  printf 'working [key=route-a]: first\nblocked [key=route-a]: second\n' > "$f"
+  [ "$(status_span_first_actionable "$f" 0)" = 'blocked [key=route-a]: second' ] \
+    || fail "only the live route line surfaces: '$(status_span_first_actionable "$f" 0)'"
+
+  f="$dir/marker.status"
+  printf 'needs-decision [key=route-check]: which env\n' > "$f"
+  status_span_first_actionable_record "$f" 0 record needs || fail "route needs-decision was not actionable"
+  [ "$needs" = 1 ] || fail "route needs-decision lost the decision marker: '$needs'"
+  printf 'captain-held [key=route-check]: transferred\n' > "$f"
+  status_span_first_actionable_record "$f" 0 record needs || fail "route captain-held was not actionable"
+  [ "$needs" = 1 ] || fail "route captain-held lost the decision marker: '$needs'"
+  printf 'working [key=route-check]: run the real-app check\n' > "$f"
+  status_span_first_actionable_record "$f" 0 record needs || fail "route working was not actionable"
+  [ "$needs" = 0 ] || fail "route working set the decision marker: '$needs'"
+  pass "route-key requests surface behind other open records and keep their decision marker"
+}
+
+test_route_keys_surface_behind_other_open_records
+
 # status_event_recorded is an idempotent retry check: a stamped retry matches,
 # and no later resolved line - for another key, outside the reserved-key
 # vocabulary, or the real close of that key - makes a recorded line new again.
