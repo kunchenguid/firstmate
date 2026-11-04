@@ -53,5 +53,17 @@ test_changed_facts_and_other_sources_do_not_log() {
   pass "changed payloads and distinct sources never log a would-skip"
 }
 
+test_redrain_without_ack_does_not_log() {
+  local dir state log
+  dir=$(make_case redrain); state="$dir/state"; log="$state/.wake-would-skip.log"
+  append_wake "$state" check job-a "build green"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$dir/1.out" 2>/dev/null || fail "first drain failed"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$dir/2.out" 2>/dev/null || fail "second drain failed"
+  grep -F 'build green' "$dir/2.out" >/dev/null || fail "unacked wake was not re-presented: $(cat "$dir/2.out")"
+  [ ! -s "$log" ] || fail "re-presented unacked row logged a would-skip: $(cat "$log")"
+  pass "re-draining an unacknowledged row never logs a would-skip"
+}
+
 test_equal_facts_log_one_would_skip_and_still_present
+test_redrain_without_ack_does_not_log
 test_changed_facts_and_other_sources_do_not_log
