@@ -2098,11 +2098,9 @@ test_recovery_replays_a_discarded_scout_close_as_discarded() {
   out=$(run_bootstrap "$case_dir")
   [ "$(row_state "$case_dir" "$id")" = "done" ] \
     || fail "session start left a recorded scout discard at $(row_state "$case_dir" "$id"): $out"
-  assert_grep 'discarded' "$(backlog_of "$case_dir")" \
-    "the replayed scout discard dropped its discarded outcome"
-  if grep -Fq 'local main' "$(backlog_of "$case_dir")"; then
-    fail "the replayed scout discard was relabeled as a local main landing"
-  fi
+  tasks-axi show "$id" --file "$(backlog_of "$case_dir")" --full \
+    | grep -Fxq '  body: discarded' \
+    || fail "the replayed scout discard did not record discarded as its note"
   assert_absent "$(home_of "$case_dir")/state/$id.backlog-close" \
     "a replayed scout discard left its record behind"
   pass "session start replays a recorded scout discard as discarded"

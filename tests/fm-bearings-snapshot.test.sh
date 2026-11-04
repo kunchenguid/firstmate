@@ -1787,8 +1787,9 @@ EOF
     || failures="${failures}reportless scout PR was listed; "
   printf '%s' "$json" | jq -e '.landed | any(.id == "discarded-scout") | not' >/dev/null \
     || failures="${failures}discarded scout was listed as delivered; "
-  "$TASKS_AXI_BIN" show discarded-scout --full --file "$main_backlog" | grep -Fq 'discarded' \
-    || failures="${failures}discarded scout outcome was not retained in backlog; "
+  "$TASKS_AXI_BIN" show discarded-scout --full --file "$main_backlog" \
+    | grep -Fxq '  body: discarded' \
+    || failures="${failures}discarded scout note was not retained in backlog; "
   # At the base commit a ship can fall through to a report path, so this
   # exclusion assertion fails when artifact-kind ownership is not enforced.
   printf '%s' "$json" | jq -e '.landed | any(.id == "ship-reported-path") | not' >/dev/null \
