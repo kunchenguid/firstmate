@@ -3,7 +3,7 @@
 #
 # Usage:
 #   fm-midtask-fallback.sh bind <task-id> (--rule <index> | --default)
-#   fm-midtask-fallback.sh consider <task-id> [--snapshot <quota-json>] [--pane-text-file <path>]
+#   fm-midtask-fallback.sh consider <task-id> [--snapshot <quota-json> [--account <entry>]] [--pane-text-file <path>]
 #
 # bind     Copy one profile array from config/crew-dispatch.json onto the task
 #          record. The index is zero-based among rules. --default records the
@@ -32,6 +32,9 @@
 #      version is one of the versions it pins. An adapter whose version does
 #      not match is not a signal. No adapter ships with firstmate.
 # Status line text is never a signal.
+# A snapshot is for one account. A task record with account= accepts a snapshot
+# only with a matching --account. A profile quota_scope matches alongside the
+# model-wide rows. shared_quota: true in the dispatch file ignores the snapshot.
 # A quota snapshot, when passed, also vetoes a candidate whose applicable runway
 # is exhausted_now. A missing snapshot does not invent exhaustion. Unknown
 # quota stays eligible. A lower effort than the effort on the task record is
@@ -172,9 +175,9 @@ lower_effort() {
 }
 
 quota_exhausted() {
-  local snapshot=$1 provider=$2 harness=$3 model=$4 evidence
+  local snapshot=$1 provider=$2 harness=$3 model=$4 qscope=${5-} evidence
   [ -n "$provider" ] || return 1
-  evidence=$(jq -c --arg provider "$provider" --arg harness "$harness" --arg model "$model" "$FM_QUOTA_ROW_JQ"'
+  evidence=$(jq -c --arg provider "$provider" --arg harness "$harness" --arg model "$model" --arg qscope "$qscope" "$FM_QUOTA_ROW_JQ"'
     (($model | split("/") | last) // "") as $scope_model |
     quota_lane($harness; $model) as $lane |
     quota_row(.; $provider; $lane) as $p |
@@ -183,6 +186,7 @@ quota_exhausted() {
       ($p.quotaSemantics.effectiveAvailability // [])
       | map(select(.scope as $scope |
           $scope == "all_models" or $scope == "all_products" or
+          ($qscope != "" and $scope == $qscope) or
           ($scope_model != "" and $scope_model != "default" and
            (($scope | startswith("model:")) or ($scope | startswith("product:"))) and
            ($scope_model == ($scope | sub("^(model|product):"; ""))))))
@@ -202,18 +206,21 @@ default_provider() {
 }
 
 current_exhausted() {
-  local array_json=$1 snapshot=$2 harness=$3 model=$4 effort=$5 provider
+  local array_json=$1 snapshot=$2 harness=$3 model=$4 effort=$5 provider qscope
   provider=$(printf '%s\n' "$array_json" | jq -r \
     --arg h "$harness" --arg m "$model" --arg e "$effort" '
     [.[] | select(type == "object" and .harness == $h)
-      | {p: (.provider // ""), m: (.model // "default"), e: (.effort // "default")}]
+      | {p: (.provider // "-"), q: (.quota_scope // "-"), m: (.model // "default"), e: (.effort // "default")}]
     | ([.[] | select(.m == $m and .e == $e)]) as $exact
     | (if ($exact | length) > 0 then $exact
        else [.[] | select((.m == "default" or .m == $m) and (.e == "default" or .e == $e))] end)
-    | last.p // ""
+    | last | "\(.p // "-")\t\(.q // "-")"
   ' 2>/dev/null) || return 1
+  IFS=$'\t' read -r provider qscope <<< "$provider"
+  [ "$provider" != - ] || provider=''
+  [ "$qscope" != - ] || qscope=''
   [ -n "$provider" ] || provider=$(default_provider "$harness" "$model")
-  quota_exhausted "$snapshot" "$provider" "$harness" "$model"
+  quota_exhausted "$snapshot" "$provider" "$harness" "$model" "$qscope"
 }
 
 profile_rows() {
@@ -223,7 +230,7 @@ profile_rows() {
     | to_entries[]
     | select((.value | type) == "object")
     | select((.value.harness | type) == "string" and (.value.harness | length) > 0)
-    | [.key, .value.harness, (.value.model // "default"), (.value.effort // "default"), (.value.provider // "")]
+    | [.key, .value.harness, (.value.model // "default"), (.value.effort // "default"), (.value.provider // "-"), (.value.quota_scope // "-")]
     | @tsv
   '
 }
@@ -357,8 +364,8 @@ cmd_bind() {
 }
 
 cmd_consider() {
-  local id snapshot='' pane='' mode meta kind array cur_h cur_m cur_e
-  local rows='' idx harness model effort provider last_match=-1 exact_match=-1 wild_match=-1
+  local id snapshot='' account='' pane='' mode meta kind array cur_h cur_m cur_e
+  local rows='' idx harness model effort provider qscope last_match=-1 exact_match=-1 wild_match=-1
   local ch='' cm='' ce='' reason='' epoch note rc=0
   [ "$#" -ge 1 ] || usage
   id=$(task_id_or_die "$1")
@@ -368,6 +375,11 @@ cmd_consider() {
       --snapshot)
         [ -n "${2-}" ] || die "--snapshot needs a path"
         snapshot=$2
+        shift 2
+        ;;
+      --account)
+        [ -n "${2-}" ] || die "--account needs an entry"
+        account=$2
         shift 2
         ;;
       --pane-text-file)
@@ -390,7 +402,11 @@ cmd_consider() {
   esac
   array=$(fm_meta_get "$meta" dispatch_array)
   [ -n "$array" ] || return 0
+  if [ -n "$snapshot" ] && [ "$(jq -r '.shared_quota // false' "$DISPATCH_FILE")" = true ]; then
+    snapshot=''
+  fi
   if [ -n "$snapshot" ]; then
+    [ "$(fm_meta_get "$meta" account)" = "$account" ] || die "quota snapshot is not for the task's recorded account"
     [ -f "$snapshot" ] || die "quota snapshot is missing: $snapshot"
     fm_quota_json_valid < "$snapshot" || die "quota snapshot is not a valid quota-axi document"
   fi
@@ -411,7 +427,7 @@ cmd_consider() {
   fi
   rows=$(profile_rows "$array") || die "task $id dispatch array is unreadable"
   [ -n "$rows" ] || die "task $id dispatch array is empty"
-  while IFS=$'\t' read -r idx harness model effort provider; do
+  while IFS=$'\t' read -r idx harness model effort provider qscope; do
     [ "$harness" = "$cur_h" ] || continue
     if [ "$model" = "$cur_m" ] && [ "$effort" = "$cur_e" ]; then
       exact_match=$idx
@@ -426,8 +442,10 @@ cmd_consider() {
     report_no_candidate "$id" "a $reason"
     return 2
   fi
-  while IFS=$'\t' read -r idx harness model effort provider; do
+  while IFS=$'\t' read -r idx harness model effort provider qscope; do
     [ "$idx" -gt "$last_match" ] || continue
+    [ "$provider" != - ] || provider=''
+    [ "$qscope" != - ] || qscope=''
     if [ "$mode" != lower ] && lower_effort "$cur_e" "$effort"; then
       continue
     fi
@@ -437,7 +455,7 @@ cmd_consider() {
     if [ -n "$snapshot" ]; then
       [ -n "$provider" ] || provider=$(default_provider "$harness" "$model")
       if [ -n "$provider" ]; then
-        quota_exhausted "$snapshot" "$provider" "$harness" "$model"
+        quota_exhausted "$snapshot" "$provider" "$harness" "$model" "$qscope"
         rc=$?
         if [ "$rc" -eq 0 ]; then
           continue

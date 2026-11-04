@@ -534,3 +534,58 @@ invoke consider "$ID" --snapshot "$CASE/snap.json" >/dev/null || fail "agy switc
 [ -s "$CASE/control-calls" ] || fail "exhausted agy worker did not relaunch"
 grep -Eq '^switched .*agy default high -> codex gpt-5.5 high' "$CASE/state/$ID.status" || fail "missing agy switch outcome"
 ok "an exhausted agy worker switches by its agy quota provider"
+
+scope_doc() {
+  jq -n --arg scope "$2" --arg runway "$3" '{schemaVersion:5, providers:[
+    {provider:"agy", quotaSemantics:{status:"known", effectiveAvailability:[{scope:$scope, status:"known", effectivePercentRemaining:0, runway:{status:$runway}}]}},
+    {provider:"codex", quotaSemantics:{status:"known", effectiveAvailability:[{scope:"all_models", status:"known", effectivePercentRemaining:40, runway:{status:"through_reset"}}]}}]}' > "$1"
+}
+
+begin_agy_scope() {
+  begin "$1"
+  jq -n --argjson shared "$2" '{mid_task_fallback:true, rules:[{when:"work", use:[
+    {harness:"agy", model:"default", effort:"high", quota_scope:"claude_gpt"},
+    {harness:"codex", model:"gpt-5.5", effort:"high"}]}]} + (if $shared then {shared_quota:true} else {} end)' > "$CASE/config/crew-dispatch.json"
+  printf 'kind=ship\nharness=agy\nmodel=default\neffort=high\nworktree=%s\n' "$CASE/work" > "$CASE/state/$ID.meta"
+  invoke bind "$ID" --rule 0 >/dev/null
+  printf 'paused [at=100]: out of credits\n' > "$CASE/state/$ID.status"
+}
+
+begin_agy_scope quota-scope false
+scope_doc "$CASE/snap.json" claude_gpt exhausted_now
+invoke consider "$ID" --snapshot "$CASE/snap.json" >/dev/null || fail "quota_scope switch failed"
+[ -s "$CASE/control-calls" ] || fail "exhausted quota_scope row did not relaunch"
+ok "an exhausted declared quota_scope row switches the worker"
+
+begin quota-scope-candidate
+jq -n '{mid_task_fallback:true, rules:[{when:"work", use:[
+  {harness:"claude", model:"claude-sonnet-5", effort:"high"},
+  {harness:"agy", model:"default", effort:"high", quota_scope:"claude_gpt"}]}]}' > "$CASE/config/crew-dispatch.json"
+write_meta
+invoke bind "$ID" --rule 0 >/dev/null
+printf 'paused [at=100]: out of credits\n' > "$CASE/state/$ID.status"
+jq -n '{schemaVersion:5, providers:[
+  {provider:"claude", quotaSemantics:{status:"known", effectiveAvailability:[{scope:"all_models", status:"known", effectivePercentRemaining:0, runway:{status:"exhausted_now"}}]}},
+  {provider:"agy", quotaSemantics:{status:"known", effectiveAvailability:[{scope:"claude_gpt", status:"known", effectivePercentRemaining:0, runway:{status:"exhausted_now"}}]}}]}' > "$CASE/snap.json"
+out=$(invoke consider "$ID" --snapshot "$CASE/snap.json"); rc=$?
+[ "$rc" -eq 2 ] || fail "exhausted quota_scope candidate exited $rc: $out"
+assert_no_control "exhausted quota_scope candidate"
+ok "a candidate with an exhausted declared quota_scope row is not selected"
+
+begin_agy_scope other-account false
+printf 'account=work\n' >> "$CASE/state/$ID.meta"
+scope_doc "$CASE/snap.json" claude_gpt exhausted_now
+invoke consider "$ID" --snapshot "$CASE/snap.json" >/dev/null 2>&1; rc=$?
+[ "$rc" -ne 0 ] || fail "snapshot without the task account was accepted"
+invoke consider "$ID" --snapshot "$CASE/snap.json" --account other >/dev/null 2>&1; rc=$?
+[ "$rc" -ne 0 ] || fail "snapshot for another account was accepted"
+assert_no_control "snapshot for another account"
+invoke consider "$ID" --snapshot "$CASE/snap.json" --account work >/dev/null || fail "matching account failed"
+[ -s "$CASE/control-calls" ] || fail "matching account snapshot did not relaunch"
+ok "a snapshot is used only for the task's recorded account"
+
+begin_agy_scope shared-quota true
+scope_doc "$CASE/snap.json" claude_gpt exhausted_now
+invoke consider "$ID" --snapshot "$CASE/snap.json" >/dev/null || fail "shared_quota consider failed"
+assert_no_control "shared_quota with an exhausted snapshot"
+ok "shared_quota ignores per-provider exhaustion"
