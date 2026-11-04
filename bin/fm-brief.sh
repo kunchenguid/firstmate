@@ -178,6 +178,8 @@ esac
 . "$SCRIPT_DIR/fm-dod-lib.sh"
 # shellcheck source=bin/fm-role-lib.sh
 . "$SCRIPT_DIR/fm-role-lib.sh"
+# shellcheck source=bin/fm-lane-disk-lib.sh
+. "$SCRIPT_DIR/fm-lane-disk-lib.sh"
 PAUSED_VERB=${FM_CLASSIFY_PAUSED_VERB:-$FM_CLASSIFY_PAUSED_VERB_DEFAULT}
 IFS= read -r -d '' CREWMATE_PAUSE_INSTRUCTIONS <<EOF || true
    Use \`$PAUSED_VERB: {why}\` - distinct from \`blocked:\` - when deliberately waiting for work or an external condition expected to clear on its own, including your own validation round.
@@ -505,6 +507,22 @@ if [ -e "$CONFIG/wait-no-turns" ]; then
   WAIT_BLOCK="$WAIT_SECTION"$'\n\n'
 fi
 
+# Opt-in lane disk settings (bin/fm-lane-disk-lib.sh owns their resolution).
+# Clone discipline adds the checkout rule; a build-output root adds the line
+# naming the per-lane directory that tools without an environment variable
+# need on their command line. Both off emits nothing.
+DISK_BLOCK=
+if fm_lane_disk_clone_discipline_on "$CONFIG"; then
+  DISK_BLOCK+="Never make a full clone of any repository: an extra checkout of this repository uses \`git clone --reference \"\$(git -C <this worktree> rev-parse --path-format=absolute --git-common-dir)\" <url> <dir>\`, and an extra checkout of another repository uses \`git clone --reference <an existing local clone of it>\`.
+Rule 7 still reserves \`git worktree\` administration for firstmate, so append \`blocked:\` when you need a real worktree.
+"
+fi
+if fm_lane_disk_build_root "$CONFIG" >/dev/null 2>&1; then
+  DISK_BLOCK+="When \`\$FM_BUILD_OUTPUT_DIR\` is set, it is this task's build-output directory, removed at cleanup: point build tools that take only a flag at it, such as \`swift build --scratch-path \"\$FM_BUILD_OUTPUT_DIR/swiftpm\"\`, \`xcodebuild -derivedDataPath \"\$FM_BUILD_OUTPUT_DIR/DerivedData\"\`, and \`gradle --project-cache-dir \"\$FM_BUILD_OUTPUT_DIR/gradle\"\`.
+"
+fi
+[ -z "$DISK_BLOCK" ] || DISK_BLOCK="# Disk use"$'\n'"$DISK_BLOCK"$'\n'
+
 if [ "$KIND" = secondmate ]; then
 SECONDMATE_PROJECTS=""
 idx=1
@@ -738,7 +756,7 @@ $CREWMATE_PAUSE_INSTRUCTIONS
 $SHARED_INFRA_RULE
 $SHARED_NO_CD_RULE
 
-$WAIT_BLOCK$INBOX_SECTION
+$DISK_BLOCK$WAIT_BLOCK$INBOX_SECTION
 
 # Definition of done
 Write your findings to \`$DATA/$ID/report.md\`.
@@ -823,7 +841,7 @@ $ASK_USER_BLOCK
 $SHARED_INFRA_RULE
 $SHARED_NO_CD_RULE
 
-$WAIT_BLOCK$INBOX_SECTION
+$DISK_BLOCK$WAIT_BLOCK$INBOX_SECTION
 
 # Project memory
 A project's \`AGENTS.md\` or \`CLAUDE.md\` is loaded into every agent session in that project, so edit it only to correct information that is factually wrong - including information your own change made wrong - and never to add knowledge because it is missing.

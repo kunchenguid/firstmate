@@ -338,6 +338,10 @@
 # logs and orphaned staging files older than 30 completed days by mtime.
 # Pruning failures warn, never abort teardown, and leave other task data and
 # symlinks alone.
+# Opt-in lane disk settings run after the landed-work gates and process reap and
+# before the copy is returned: clone discipline warns about separate full
+# clones, scratch cleanup removes declared paths in the copy, and a recorded
+# build_output_dir is removed. bin/fm-lane-disk-lib.sh owns the mechanics.
 # Opt-in config/record-export-root delegates the record archive transaction to
 # bin/fm-record-export.sh immediately before status, metadata, or inbox records
 # for the retiring task are removed. A failed commit retains those sources.
@@ -401,7 +405,8 @@ for _teardown_source in \
   fm-nm-run-lib.sh \
   fm-wake-lib.sh \
   fm-path-lib.sh \
-  fm-lease-lib.sh
+  fm-lease-lib.sh \
+  fm-lane-disk-lib.sh
 do
   teardown_require_source "$SCRIPT_DIR/$_teardown_source"
 done
@@ -430,6 +435,8 @@ unset _teardown_source
 . "$SCRIPT_DIR/fm-secondmate-parent-lib.sh"
 # shellcheck source=bin/fm-nm-run-lib.sh
 . "$SCRIPT_DIR/fm-nm-run-lib.sh"
+# shellcheck source=bin/fm-lane-disk-lib.sh
+. "$SCRIPT_DIR/fm-lane-disk-lib.sh"
 # Archive paths live only in teardown; presentation/wake readers stay unaware.
 teardown_archive_directory() {  # <directory>
   if [ -L "$1" ] || { [ -e "$1" ] && [ ! -d "$1" ]; }; then
@@ -3944,6 +3951,22 @@ if [ "$KIND" = ship ] && teardown_owns_worktree && [ -e "$CONFIG/pipeline-spend"
   FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$DATA" FM_CONFIG_OVERRIDE="$CONFIG" \
     "$SCRIPT_DIR/fm-pipeline-spend.sh" record "$ID" >/dev/null \
     || echo "warning: could not record $ID's no-mistakes pipeline spend; cleanup continues" >&2
+fi
+
+# Opt-in lane disk settings (bin/fm-lane-disk-lib.sh). Every landed-work gate
+# above has passed or was lifted by --force, the task's processes are reaped,
+# and the copy is not yet returned, so nothing here can discard unlanded work.
+if [ "$KIND" != secondmate ]; then
+  LANE_BUILD_DIR=$(meta_value "$META" build_output_dir)
+  if teardown_owns_worktree; then
+    if fm_lane_disk_clone_discipline_on "$CONFIG"; then
+      fm_lane_disk_clone_warn "$ID" "$WT" "$WT" "$TASK_TMP" "$LANE_BUILD_DIR"
+    fi
+    fm_lane_disk_scratch_cleanup "$WT" "$CONFIG"
+    fm_lane_disk_remove_build_dir "$LANE_BUILD_DIR" "$ID" "$WT"
+  elif [ -n "$LANE_BUILD_DIR" ]; then
+    echo "warning: $ID's pool slot was reassigned, so its build-output directory $LANE_BUILD_DIR was left in place" >&2
+  fi
 fi
 
 # Fix 3 (see script header): sweep remote job workers abandoned by an already
