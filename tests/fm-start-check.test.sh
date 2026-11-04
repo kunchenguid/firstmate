@@ -139,7 +139,7 @@ test_same_second_turn_end_is_proof() {
   open_pane t1 "$PI_DIALOG"
   arm_task t1 pi 1000
   touch "$STATE/t1.turn-ended"
-  epoch=$(stat -f %m "$STATE/t1.turn-ended" 2>/dev/null || stat -c %Y "$STATE/t1.turn-ended")
+  epoch=$(stat_mtime "$STATE/t1.turn-ended")
   printf '%s %s pi\n' "$epoch" "$ARMED_GEN" > "$STATE/t1.start-pending"
   start_check_tick 1120 || fail "tick failed"
   [ "$(count_wakes)" = 0 ] || fail "turn-ended in the launch second was not accepted as proof"
@@ -153,7 +153,7 @@ test_launch_epoch_excludes_existing_markers() {
     open_pane "e-$marker" "$PI_DIALOG"
     arm_task "e-$marker" pi 1000
     touch "$STATE/e-$marker.$marker"
-    epoch=$(stat -f %m "$STATE/e-$marker.$marker" 2>/dev/null || stat -c %Y "$STATE/e-$marker.$marker")
+    epoch=$(stat_mtime "$STATE/e-$marker.$marker")
     boundary=$(fm_start_check_launch_epoch "$STATE" "e-$marker")
     [ "$boundary" -gt "$epoch" ] || fail "$marker did not advance the launch boundary"
     printf '%s %s pi\n' "$boundary" "$ARMED_GEN" > "$STATE/e-$marker.start-pending"
