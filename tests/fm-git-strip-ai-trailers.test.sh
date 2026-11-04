@@ -289,6 +289,59 @@ test_valueless_project_hookspath_still_refuses() {
   pass "a valueless project core.hooksPath still refuses the commit"
 }
 
+# A relative core.hooksPath in the shared config (here the aegis incident's
+# .git/worktrees/<name>/hooks) is resolved by git per worktree, and in a linked
+# worktree .git is a file, so git cannot resolve it there. The wrapper resolves
+# it against the main worktree and chains to it when that is a directory.
+make_linked_worktree_with_relative_hookspath() {  # <name> <value>
+  local name=$1 value=$2 repo wt
+  repo="$TMP_ROOT/$name/main"
+  wt="$TMP_ROOT/$name/linked"
+  make_repo "$repo"
+  git -C "$repo" worktree add -q -b "branch-$name" "$wt"
+  git -C "$repo" config core.hooksPath "$value"
+  printf 'note\n' >>"$wt/README.md"
+  git -C "$wt" add README.md
+  printf '%s\n' "$repo|$wt"
+}
+
+test_relative_shared_hookspath_resolves_against_the_main_worktree() {
+  local rec repo wt hooks body
+  rec=$(make_linked_worktree_with_relative_hookspath relative-shared-ok .git/worktrees/linked/hooks)
+  repo=${rec%%|*}
+  wt=${rec##*|}
+  mkdir -p "$repo/.git/worktrees/linked/hooks"
+  write_marker_hook "$repo/.git/worktrees/linked/hooks/pre-commit" shared-relative-pre-commit
+  hooks="$TMP_ROOT/hooks-relative-shared-ok"
+  "$STRIP" install "$hooks" "$wt" || fail "install should succeed in a linked worktree"
+  git -C "$wt" rev-parse --path-format=absolute --git-path hooks >/dev/null 2>&1 &&
+    fail "git resolved the relative value in the linked worktree, so this case proves nothing"
+  with_hooks_env "$hooks" git -C "$wt" commit -q --trailer 'Co-authored-by: Cursor <cursoragent@cursor.com>' -m 'fix: relative shared value' ||
+    fail "a commit in a linked worktree was refused although the relative hooksPath resolves in the main worktree"
+  [ -f "$wt/shared-relative-pre-commit.ran" ] || fail "the hook named by the relative shared core.hooksPath did not run"
+  body=$(git -C "$wt" log -1 --format=%B)
+  assert_not_contains "$body" "Co-authored-by: Cursor" "Cursor trailer survived a relative shared core.hooksPath"
+  pass "a relative shared core.hooksPath resolves against the main worktree from a linked worktree and chains"
+}
+
+test_unresolvable_relative_shared_hookspath_refuses_with_the_fix() {
+  local rec repo wt hooks head err
+  rec=$(make_linked_worktree_with_relative_hookspath relative-shared-missing .git/worktrees/gone/hooks)
+  repo=${rec%%|*}
+  wt=${rec##*|}
+  hooks="$TMP_ROOT/hooks-relative-shared-missing"
+  "$STRIP" install "$hooks" "$wt" || fail "install should succeed in a linked worktree"
+  head=$(git -C "$wt" rev-parse HEAD)
+  err=$(with_hooks_env "$hooks" git -C "$wt" commit -q -m 'fix: relative shared missing' 2>&1) &&
+    fail "a commit succeeded although the relative hooksPath names no directory"
+  assert_contains "$err" "refusing to skip its pre-commit hook" "the refusal did not name the skipped hook"
+  assert_contains "$err" ".git/worktrees/gone/hooks" "the refusal did not name the bad value"
+  assert_contains "$err" "file:$repo/.git/config" "the refusal did not name where the value is set"
+  assert_contains "$err" "git -C \"$repo\" config --local --unset-all core.hooksPath" "the refusal did not give the unset command"
+  assert_equals "$head" "$(git -C "$wt" rev-parse HEAD)" "a refused commit still moved HEAD"
+  pass "an unresolvable relative shared core.hooksPath refuses naming the value, its origin and the unset command"
+}
+
 write_refusing_pre_push() {  # <path> <marker>
   cat >"$1" <<SH
 #!/usr/bin/env bash
@@ -533,6 +586,8 @@ test_pane_hookspath_does_not_reroute_another_repository
 test_empty_project_hookspath_runs_no_repository_hook
 test_unresolvable_project_hookspath_still_refuses
 test_valueless_project_hookspath_still_refuses
+test_relative_shared_hookspath_resolves_against_the_main_worktree
+test_unresolvable_relative_shared_hookspath_refuses_with_the_fix
 test_repository_pre_push_runs_on_every_override_channel
 test_git_c_override_still_strips_and_chains_commit_hooks
 test_repository_hook_keeps_inherited_git_config
