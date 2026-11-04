@@ -15,8 +15,8 @@
 # Removing state/<id>.meta and landing the backlog transition are one step, not
 # two: bin/fm-backlog-transition-lib.sh owns that invariant, and both halves run
 # under the task's own meta lock before this script reports success. Because the
-# completion links (the PR, the report path, a local-main note) live only in the
-# record being removed, the intended transition is recorded in
+# completion links (a proven PR, an open-PR note, the report path, a local-main
+# note) live only in the record being removed, the intended transition is recorded in
 # state/<id>.backlog-close first, so a process killed between the halves leaves
 # the next session start enough to finish it; a landed close removes that record.
 # A close that fails is fatal and loud, preserves its pending-close record, and
@@ -1800,11 +1800,13 @@ work_is_landed() {
 }
 
 # The completion links this teardown already holds locally. A scout's
-# deliverable is its report, a local-only ship lands on local main, and every
-# other ship carries the PR recorded on its own record.
+# deliverable is its report and a local-only ship lands on local main. A ship
+# carries its PR as a merged link only when a local merge record matches that
+# URL. Checked here, while those records still exist: cleanup removes them
+# before the close runs. An unproven GitHub or Forgejo PR is the open-PR note.
 BACKLOG_DONE_ARGS=()
 backlog_done_args() {
-  local data_relative
+  local data_relative close_mode
   BACKLOG_DONE_ARGS=()
   case "$KIND" in
     scout)
@@ -1815,7 +1817,12 @@ backlog_done_args() {
       if [ "$MODE" = local-only ]; then
         BACKLOG_DONE_ARGS=(--note "local main")
       elif [ -n "$PR_URL" ]; then
-        BACKLOG_DONE_ARGS=(--pr "$PR_URL")
+        close_mode=$(fm_backlog_ship_pr_close_mode "$STATE" "$ID" "$PR_URL")
+        case "$close_mode" in
+          proven) BACKLOG_DONE_ARGS=(--pr "$PR_URL") ;;
+          open) BACKLOG_DONE_ARGS=(--note "$(fm_backlog_open_pr_note "$PR_URL")") ;;
+          *) BACKLOG_DONE_ARGS=(--pr "$PR_URL") ;;
+        esac
       fi
       ;;
   esac

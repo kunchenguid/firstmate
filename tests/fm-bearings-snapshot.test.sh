@@ -1745,6 +1745,8 @@ test_landed_accepts_only_kind_owned_delivery_artifacts() {
   printf '# Reported scout\n' > "$home/$report_path"
   cat >> "$main_backlog" <<EOF
 - [x] done-pr-nondelivery - Closed without merge https://github.com/o/r/pull/5 (repo: firstmate) (kind: ship) (done 2026-07-12)
+- [x] cleaned-open-pr - Idle worker cleaned up (repo: firstmate) (kind: ship) (done 2026-07-12)
+  PR still open https://github.com/o/r/pull/11
 - [x] scout-pr-no-report - Scout without report https://github.com/o/r/pull/6 (repo: firstmate) (kind: scout) (merged 2026-07-12)
 - [x] ship-reported-path - Ship naming data/ship-reported-path/report.md (repo: firstmate) (kind: ship) (reported 2026-07-12)
 - [x] reported-scout - Report with $report_pr context $report_path (repo: firstmate) (kind: scout) (reported 2026-07-12)
@@ -1775,6 +1777,14 @@ EOF
   # row, so this exclusion assertion fails when the selector fix is absent.
   printf '%s' "$json" | jq -e '.landed | any(.id == "done-pr-nondelivery") | not' >/dev/null \
     || failures="${failures}non-merged PR row was listed; "
+  printf '%s' "$fleet_json" | jq -e '
+    .backlog.records | any(.id == "cleaned-open-pr"
+      and .completion.verb == "done"
+      and .pr_url == "https://github.com/o/r/pull/11"
+      and ((.links // []) | index("https://github.com/o/r/pull/11")))
+  ' >/dev/null || failures="${failures}open-PR cleanup was not kept as an open pull request; "
+  printf '%s' "$json" | jq -e '.landed | any(.id == "cleaned-open-pr") | not' >/dev/null \
+    || failures="${failures}open-PR cleanup was listed as landed; "
   # At the base commit a scout can fall through to its pull request, so this
   # exclusion assertion fails when report ownership is not enforced.
   printf '%s' "$json" | jq -e '.landed | any(.id == "scout-pr-no-report") | not' >/dev/null \
