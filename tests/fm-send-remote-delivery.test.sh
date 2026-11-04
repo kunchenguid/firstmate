@@ -3,7 +3,7 @@
 #
 # A remote steer is delivered by durable record, never by typing its payload:
 # fm-send crosses fm-on.sh to the host-local leg (fm-remote-secondmate-control.sh
-# cmd_send), which writes the message idempotently into the remote home's
+# cmd_send_stdin), which writes the message idempotently into the remote home's
 # steering inbox and rings the remote doorbell best-effort. These tests drive
 # the real fm-send + fm-on executables with a stubbed ssh transport that
 # EXECUTES the real host-local leg against a seeded remote-home fixture (the
@@ -100,11 +100,12 @@ SH
   cat > "$fb/fake-ssh" <<'SH'
 #!/usr/bin/env bash
 set -u
-cat > /dev/null
 count=$(cat "$FM_SSH_COUNT" 2>/dev/null || echo 0)
 count=$((count + 1))
 printf '%s\n' "$count" > "$FM_SSH_COUNT"
 printf '%s\n' "$*" >> "$FM_SSH_LOG"
+stdin_file="$FM_SSH_LOG.stdin.$count"
+cat > "$stdin_file"
 if [ -n "${FM_FAKE_SSH_HANG:-}" ]; then
   # A busy remote lane: the transport attempt never returns on its own. The
   # real sleep, because the stubbed one on PATH returns immediately.
@@ -124,6 +125,7 @@ done
 shift 2  # host, fm-remote-entrypoint.sh
 home_b64=$3
 argv_b64=$4
+[ "${#argv_b64}" -le "${FM_FAKE_SSH_ARG_MAX:-32768}" ] || exit 255
 remote_home=$(perl -MMIME::Base64=decode_base64 -e 'print decode_base64($ARGV[0])' "$home_b64")
 rargs=()
 while IFS= read -r -d '' a; do rargs+=("$a"); done \
@@ -131,7 +133,7 @@ while IFS= read -r -d '' a; do rargs+=("$a"); done \
 cmd=${rargs[0]}
 rc=0
 env FM_HOME="$remote_home" FM_ROOT_OVERRIDE="$FM_REMOTE_CODE_ROOT" \
-  "$FM_REMOTE_CODE_ROOT/bin/$cmd" "${rargs[@]:1}" || rc=$?
+  "$FM_REMOTE_CODE_ROOT/bin/$cmd" "${rargs[@]:1}" < "$stdin_file" || rc=$?
 if [ "${FM_FAKE_SSH_AMBIGUOUS:-0}" = 1 ] \
   || { [ "${FM_FAKE_SSH_AFTER_AMBIGUOUS_RC:-0}" -ne 0 ] && [ "$count" -eq 1 ]; }; then
   exit 255
@@ -215,6 +217,37 @@ send_env() {  # <fakebin> <parent-home> <ssh-log> [extra env...] -- <cmd...>
     FM_SSH_BIN="$fb/fake-ssh" FM_SSH_LOG="$ssh_log" \
     FM_SSH_COUNT="$ssh_log.count" FM_REMOTE_CODE_ROOT="$ROOT" \
     "$@"
+}
+
+test_remote_large_steer_uses_stdin() {
+  local dir fb ssh_log home rhome rc rec
+  dir="$TMP_ROOT/remote-large"; mkdir -p "$dir"
+  fb=$(make_stubs "$dir"); ssh_log="$dir/ssh.log"; : > "$ssh_log"
+  rhome=$(setup_remote_secondmate_home remote-large)
+  home=$(setup_remote_parent_home remote-large "$rhome")
+  python3 - "$dir/expected" <<'PY'
+import sys
+with open(sys.argv[1], "w") as f:
+    f.write("large steer " + "x" * 46000)
+PY
+
+  rc=0
+  send_env "$fb" "$home" "$ssh_log" FM_FAKE_SSH_ARG_MAX=32768 \
+    "$SEND" rsm "$(cat "$dir/expected")" >"$dir/out" 2>"$dir/err" || rc=$?
+  expect_code 0 "$rc" "a large remote steer must be delivered through the remote stdin channel: $(cat "$dir/err")"
+  rec=$(remote_inbox_records "$rhome" | head -1)
+  [ -n "$rec" ] || fail "the large remote steer must land in the remote steering inbox"
+  python3 - "$dir/expected" "$ssh_log.stdin.1" "$rec" <<'PY'
+import sys
+expected = open(sys.argv[1]).read()
+stdin_payload = open(sys.argv[2]).read()
+record = open(sys.argv[3]).read()
+if expected not in stdin_payload:
+    raise SystemExit("the large remote steer did not cross the SSH transport on stdin")
+if expected not in record:
+    raise SystemExit("remote inbox record omitted the large steer body")
+PY
+  pass "fm-send remote: large text steers use stdin instead of the SSH exec argument"
 }
 
 test_remote_steer_lands_in_remote_inbox() {
@@ -785,6 +818,7 @@ test_local_pending_does_not_close_resolve_key() {
   pass "fm-send local: an unconfirmed submit still never closes a --resolve-key decision"
 }
 
+test_remote_large_steer_uses_stdin
 test_remote_steer_lands_in_remote_inbox
 test_remote_rerun_is_idempotent
 test_remote_retry_failure_preserves_ambiguous_expectation

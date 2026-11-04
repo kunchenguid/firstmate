@@ -20,6 +20,7 @@
 # `no-mistakes "$@"` specialization. The bounded
 # form preserves stdout, stderr, and exit status; the checked form discards
 # stderr, while fm_nm_run keeps the fail-open query contract for read-only callers.
+# The no-mistakes forms route host reads through the opt-in home resolver below.
 fm_nm_bounded() {  # <dir> <timeout_secs> <command> <args...>
   local dir=$1 timeout_secs=$2 have_timeout=none
   shift 2
@@ -35,10 +36,71 @@ fm_nm_bounded() {  # <dir> <timeout_secs> <command> <args...>
   esac
 }
 
+# Opt-in no-mistakes home resolver for sites that run one no-mistakes daemon
+# per isolated workspace, each against its own NM_HOME. The home cannot be
+# derived from the worktree's `no-mistakes` remote, because every workspace of
+# a project shares one gate URL, so the site provides a resolver and Firstmate
+# only calls it. The resolver is the executable whose absolute path is the
+# first line of this home's config/nm-home-resolver; it is called with the
+# worktree path as its only argument, bounded by 5 seconds, and its stdout,
+# when it exits 0 with exactly one line naming an existing directory by
+# absolute path, is the no-mistakes home for that worktree. The directory
+# must already exist because the CLI creates a fresh home's skeleton on first
+# read, so a wrong answer must not plant one.
+# An explicit non-empty NM_HOME always wins and the resolver is not called.
+# With no config file, a config file naming no absolute executable, or a
+# resolver that fails, times out, or prints anything else, nothing is resolved
+# and every read uses the ambient home exactly as without the hook.
+# Prints the resolved home, or nothing. Never starts a daemon.
+fm_nm_home_resolver_home() {  # <worktree>
+  local wt=$1 cfg cmd out
+  [ -z "${NM_HOME:-}" ] || return 0
+  cfg=${FM_CONFIG_OVERRIDE:-${FM_HOME:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}/config}/nm-home-resolver
+  [ -f "$cfg" ] || return 0
+  IFS= read -r cmd < "$cfg" || [ -n "$cmd" ] || return 0
+  cmd=$(fm_nm_trim "$cmd")
+  case "$cmd" in /*) ;; *) return 0 ;; esac
+  [ -f "$cmd" ] && [ -x "$cmd" ] || return 0
+  out=$(fm_nm_bounded "$wt" 5 "$cmd" "$wt" 2>/dev/null </dev/null) || return 0
+  case "$out" in
+    /*) ;;
+    *) return 0 ;;
+  esac
+  case "$out" in *$'\n'*) return 0 ;; esac
+  [ -d "$out" ] || return 0
+  printf '%s\n' "$out"
+}
+
+# 0 when the `no-mistakes` arguments are a host read or a run-targeted abort,
+# the only calls the home resolver above may redirect: the bare `axi`
+# overview, `axi status`, `axi logs`, `runs`, `daemon status`, and
+# `axi abort --run <id>`. Anything else, such as starting or driving a run,
+# keeps the ambient home.
+fm_nm_home_resolver_applies() {  # <no-mistakes args...>
+  case "${1:-}" in
+    axi)
+      [ "$#" -eq 1 ] && return 0
+      case "${2:-}" in
+        status|logs) return 0 ;;
+        abort) [ "${3:-}" = --run ] && [ -n "${4:-}" ] && return 0 ;;
+      esac ;;
+    runs) return 0 ;;
+    daemon) [ "${2:-}" = status ] && return 0 ;;
+  esac
+  return 1
+}
+
 fm_nm_run_bounded() {  # <dir> <timeout_secs> <args...>
-  local dir=$1 timeout_secs=$2
+  local dir=$1 timeout_secs=$2 home=''
   shift 2
-  fm_nm_bounded "$dir" "$timeout_secs" no-mistakes "$@"
+  if fm_nm_home_resolver_applies "$@"; then
+    home=$(fm_nm_home_resolver_home "$dir")
+  fi
+  if [ -n "$home" ]; then
+    NM_HOME=$home fm_nm_bounded "$dir" "$timeout_secs" no-mistakes "$@"
+  else
+    fm_nm_bounded "$dir" "$timeout_secs" no-mistakes "$@"
+  fi
 }
 
 fm_nm_run_checked() {  # <dir> <timeout_secs> <args...>
@@ -66,11 +128,13 @@ fm_nm_strip_quotes() {
 }
 
 # Path of no-mistakes' local state database as the CLI would see it from
-# worktree $1: <NM_HOME>/state.sqlite, with NM_HOME defaulting to
-# ~/.no-mistakes and a relative NM_HOME resolving from that worktree. Readers
-# open it with SQLite's mode=ro, so a missing database is never created.
+# worktree $1: <NM_HOME>/state.sqlite, with NM_HOME falling back to the home
+# resolver above and then to ~/.no-mistakes, and a relative NM_HOME resolving
+# from that worktree. Readers open it with SQLite's mode=ro, so a missing
+# database is never created.
 fm_nm_state_db() {  # <worktree>
   local root=${NM_HOME:-}
+  [ -n "$root" ] || root=$(fm_nm_home_resolver_home "$1")
   [ -n "$root" ] || root=~/.no-mistakes
   case "$root" in
     /*) ;;
@@ -136,6 +200,31 @@ fm_nm_run_status_class() {  # <status_word>
     pending|running)            printf 'live' ;;
     *)                          printf 'unknown' ;;
   esac
+}
+
+# 0 when the status identity with $3 is newer than the same-branch candidate
+# run with $2; 2 means same-head ULIDs share a creation timestamp. The runs
+# ledger $6 is read only for different heads.
+fm_nm_run_is_newer_than() {  # <branch> <candidate-id> <reported-id> <candidate-head> <reported-head> <runs-list>
+  local branch=$1 selected_id=$2 reported_id=$3 selected_head=$4 reported_head=$5 runs=$6 first_match
+  if [ -n "$selected_head" ] && [ "${selected_head:0:7}" = "${reported_head:0:7}" ]; then
+    [[ "$selected_id" =~ ^[0-9A-HJKMNP-TV-Z]{26}$ && "$reported_id" =~ ^[0-9A-HJKMNP-TV-Z]{26}$ ]] || return 1
+    [ "${selected_id:0:10}" = "${reported_id:0:10}" ] && return 2
+    [[ "${reported_id:0:10}" > "${selected_id:0:10}" ]] && return 0
+    return 1
+  fi
+  [ -n "$selected_head" ] && [ -n "$reported_head" ] \
+    && [ "${selected_head:0:7}" != "${reported_head:0:7}" ] || return 1
+  first_match=$(printf '%s\n' "$runs" | awk -v branch="$branch" \
+    -v selected="${selected_head:0:7}" -v reported="${reported_head:0:7}" '
+    $2 == branch {
+      if (index($3, selected) == 1) { selected_count++; if (first == "") first = "selected" }
+      else if (index($3, reported) == 1) { reported_count++; if (first == "") first = "reported" }
+    }
+    END {
+      if (selected_count == 1 && reported_count == 1) print first
+    }')
+  [ "$first_match" = reported ]
 }
 
 # Select from a complete `no-mistakes axi` overview with the existing awk
@@ -421,6 +510,40 @@ fm_nm_run_is_executing() {  # <toon-output>
   return 1
 }
 
+# Structural validation for one ledger row, already split into its columns.
+# Both readers of the `no-mistakes runs` listing apply exactly this rule, so a
+# row one of them rejects is never evidence for the other.
+fm_nm_runs_row_valid() {  # <status> <branch> <sha> <day> <clock> <pr> <extra>
+  local st=$1 br=$2 sha=$3 day=$4 clock=$5 pr=$6 extra=$7
+  local year_num month_num day_num max_day
+  [ -n "$st" ] && [ -n "$br" ] && [ -n "$sha" ] && [ -n "$day" ] && [ -n "$clock" ] || return 1
+  [ -z "$extra" ] || return 1
+  case "$st" in *[!a-z_-]*) return 1 ;; esac
+  case "$br" in *[!A-Za-z0-9._/-]*) return 1 ;; esac
+  case "$sha" in *[!A-Fa-f0-9]*) return 1 ;; esac
+  case "$day" in [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]) ;; *) return 1 ;; esac
+  case "$clock" in [01][0-9]:[0-5][0-9]|2[0-3]:[0-5][0-9]) ;; *) return 1 ;; esac
+  case "$pr" in ''|https://*) ;; *) return 1 ;; esac
+  [ "${#sha}" -ge 7 ] && [ "${#sha}" -le 40 ] || return 1
+  year_num=$((10#${day%%-*}))
+  month_num=${day#*-}; month_num=${month_num%%-*}; month_num=$((10#$month_num))
+  day_num=$((10#${day##*-}))
+  [ "$year_num" -gt 0 ] && [ "$month_num" -ge 1 ] && [ "$month_num" -le 12 ] || return 1
+  case "$month_num" in
+    1|3|5|7|8|10|12) max_day=31 ;;
+    4|6|9|11) max_day=30 ;;
+    2)
+      if (( year_num % 400 == 0 || (year_num % 4 == 0 && year_num % 100 != 0) )); then
+        max_day=29
+      else
+        max_day=28
+      fi
+      ;;
+  esac
+  [ "$day_num" -ge 1 ] && [ "$day_num" -le "$max_day" ] || return 1
+  return 0
+}
+
 # ONE owner for attribution from the pipeline's own runs ledger, replacing a
 # per-row scan-and-skip. The ledger is the real top-level `no-mistakes runs
 # --limit N` listing (plain text, no run id, no quoting, newest-first, columns
@@ -454,7 +577,7 @@ fm_nm_run_is_executing() {  # <toon-output>
 # Read-only: git reads resolve objects in place; custody never changes.
 fm_nm_runs_status_for_worktree() {  # <worktree> <branch> <runs-list-output> [expected-head]
   local wt=$1 branch=$2 list=$3 expected_head=${4:-}
-  local local_full row_full row st br sha day clock pr extra year_num month_num day_num max_day pending_st=''
+  local local_full row_full row st br sha day clock pr extra pending_st=''
   local decided=''
   local_full=$(git -C "$wt" rev-parse HEAD 2>/dev/null) || return 0
   [ -n "$list" ] || return 0
@@ -462,31 +585,7 @@ fm_nm_runs_status_for_worktree() {  # <worktree> <branch> <runs-list-output> [ex
     row=$(fm_nm_trim "$row")
     [ -n "$row" ] || continue
     IFS=$' \t' read -r st br sha day clock pr extra <<< "$row"
-    [ -n "$st" ] && [ -n "$br" ] && [ -n "$sha" ] && [ -n "$day" ] && [ -n "$clock" ] || break
-    [ -z "$extra" ] || break
-    case "$st" in *[!a-z_-]*|'') break ;; esac
-    case "$br" in *[!A-Za-z0-9._/-]*|'') break ;; esac
-    case "$sha" in *[!A-Fa-f0-9]*|'') break ;; esac
-    case "$day" in [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]) ;; *) break ;; esac
-    case "$clock" in [01][0-9]:[0-5][0-9]|2[0-3]:[0-5][0-9]) ;; *) break ;; esac
-    case "$pr" in ''|https://*) ;; *) break ;; esac
-    [ "${#sha}" -ge 7 ] && [ "${#sha}" -le 40 ] || break
-    year_num=$((10#${day%%-*}))
-    month_num=${day#*-}; month_num=${month_num%%-*}; month_num=$((10#$month_num))
-    day_num=$((10#${day##*-}))
-    [ "$year_num" -gt 0 ] && [ "$month_num" -ge 1 ] && [ "$month_num" -le 12 ] || break
-    case "$month_num" in
-      1|3|5|7|8|10|12) max_day=31 ;;
-      4|6|9|11) max_day=30 ;;
-      2)
-        if (( year_num % 400 == 0 || (year_num % 4 == 0 && year_num % 100 != 0) )); then
-          max_day=29
-        else
-          max_day=28
-        fi
-        ;;
-    esac
-    [ "$day_num" -ge 1 ] && [ "$day_num" -le "$max_day" ] || break
+    fm_nm_runs_row_valid "$st" "$br" "$sha" "$day" "$clock" "$pr" "$extra" || break
     [ "$br" = "$branch" ] || continue
     if [ -n "$pending_st" ]; then
       # This is the row immediately older than the active unresolvable row:
@@ -516,5 +615,102 @@ fm_nm_runs_status_for_worktree() {  # <worktree> <branch> <runs-list-output> [ex
     pending_st=$st
   done <<< "$list"
   printf '%s' "$decided"
+  return 0
+}
+
+# Values of column $3 in table $2 (for example `steps` or `active_steps`) of
+# captured `axi status` TOON $1, one line per row, quotes stripped. The column
+# is found by name in the table's own header, so column order is never
+# assumed; a quoted cell may hold commas. Prints nothing when the table or
+# column is absent.
+fm_nm_table_column() {  # <toon-output> <table> <column>
+  printf '%s\n' "$1" | awk -v table="$2" -v column="$3" '
+    function cells(line, out,    n, i, c, q, cur) {
+      n = 0; cur = ""; q = 0
+      for (i = 1; i <= length(line); i++) {
+        c = substr(line, i, 1)
+        if (c == "\"") { q = !q; continue }
+        if (c == "," && !q) { out[++n] = cur; cur = ""; continue }
+        cur = cur c
+      }
+      out[++n] = cur
+      return n
+    }
+    function trim(s) { sub(/^[ \t]+/, "", s); sub(/[ \t]+$/, "", s); return s }
+    !inblock {
+      if (match($0, "^[ \t]*" table "\\[[0-9]+\\]\\{[^}]*\\}:")) {
+        hdr = index($0, table)
+        cols = substr($0, index($0, "{") + 1)
+        cols = substr(cols, 1, index(cols, "}") - 1)
+        ncol = split(cols, names, ",")
+        want = 0
+        for (i = 1; i <= ncol; i++) if (trim(names[i]) == column) want = i
+        if (!want) exit
+        inblock = 1
+      }
+      next
+    }
+    {
+      if ($0 ~ /^[ \t]*$/) exit
+      match($0, /[^ \t]/)
+      if (RSTART <= hdr) exit
+      n = cells(trim($0), row)
+      print (want <= n ? trim(row[want]) : "")
+    }
+  '
+}
+
+# Validation progress of the run in captured `axi status` TOON $1, as
+# "<percent>\t<position>\t<total>\t<step>\t<round>": <total> is the number of
+# rows in the run's steps[] table, completed and skipped steps count as done,
+# <percent> is done*100/total, <step> is the active step (from active_steps[],
+# else the first step not yet done) at 1-based <position>, and <round> is the
+# active step's round, such as `auto-fix 1/3`. Fails when the run has no steps
+# table. Display only: it does not decide which run is the task's.
+fm_nm_run_progress() {  # <toon-output>
+  local names=() statuses=() total done=0 position=0 step='' round='' active i
+  while IFS= read -r i; do names+=("$i"); done < <(fm_nm_table_column "$1" steps step)
+  while IFS= read -r i; do statuses+=("$i"); done < <(fm_nm_table_column "$1" steps status)
+  total=${#names[@]}
+  [ "$total" -gt 0 ] || return 1
+  for ((i = 0; i < total; i++)); do
+    case "${statuses[i]:-}" in
+      completed | skipped) done=$((done + 1)) ;;
+      *) [ -n "$step" ] || { step=${names[i]}; position=$((i + 1)); } ;;
+    esac
+  done
+  active=$(fm_nm_table_column "$1" active_steps step | head -1)
+  if [ -n "$active" ]; then
+    for ((i = 0; i < total; i++)); do
+      [ "${names[i]}" = "$active" ] || continue
+      step=$active
+      position=$((i + 1))
+      round=$(fm_nm_table_column "$1" active_steps round | head -1)
+      break
+    done
+  fi
+  printf '%s\t%s\t%s\t%s\t%s\n' "$((done * 100 / total))" "$position" "$total" "$step" "$round"
+}
+
+# The branch's NEWEST ledger row as "<status>|<short-sha>|<pr>", or nothing when
+# the branch has no row. The ledger is newest-first and its newest row for a branch
+# IS that branch's current run, which is the same rule
+# fm_nm_runs_status_for_worktree applies; this accessor exists because a caller
+# holding a TERMINAL run answer needs to know whether a LATER run has since
+# superseded it, which the status word alone cannot say. The ledger has no run
+# ID, so these fields can expose disagreement with a full run answer but cannot
+# establish identity; BINDING a run still needs the strict rules above.
+fm_nm_runs_newest_for_branch() {  # <branch> <runs-list-output>
+  local branch=$1 list=$2 row st br sha day clock pr extra
+  [ -n "$list" ] || return 0
+  while IFS= read -r row; do
+    row=$(fm_nm_trim "$row")
+    [ -n "$row" ] || continue
+    IFS=$' \t' read -r st br sha day clock pr extra <<< "$row"
+    fm_nm_runs_row_valid "$st" "$br" "$sha" "$day" "$clock" "$pr" "$extra" || break
+    [ "$br" = "$branch" ] || continue
+    printf '%s|%s|%s' "$st" "$sha" "$pr"
+    return 0
+  done <<< "$list"
   return 0
 }

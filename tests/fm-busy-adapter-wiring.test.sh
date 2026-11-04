@@ -23,7 +23,7 @@ make_spawn_case() {  # <name> <harness> <id>
   home="$case_dir/home"
   proj="$case_dir/project"
   wt="$case_dir/wt"
-  fakebin=$(make_spawn_fakebin "$case_dir/fake" pi opencode claude codex gemini)
+  fakebin=$(make_spawn_fakebin "$case_dir/fake" pi opencode claude codex gemini kiro-cli)
   fm_test_spawn_home "$home" "$harness"
   fm_git_worktree "$proj" "$wt" "wt-$name"
   fm_test_spawn_brief "$home" "$id"
@@ -77,6 +77,106 @@ if (["turn-end", "progress"].includes(process.env.MODE)) {
   await new Promise((resolve) => setTimeout(resolve, 200));
 }
 EOF
+}
+
+test_pi_stream_extension_activation_and_lifecycle() {
+  local rec id=stream-pi state ext out version option enabled label
+  for label in disabled zero negative malformed leading maximum overflow verified newer malformed-version older; do
+    version=1.2.0 option=300 enabled=1
+    case "$label" in
+      disabled) option='' enabled=0 ;;
+      zero) option=0 enabled=0 ;;
+      negative) option=-1 enabled=0 ;;
+      malformed) option=invalid enabled=0 ;;
+      leading) option=00300 ;;
+      maximum) option=999999999 ;;
+      overflow) option=1000000000 enabled=0 ;;
+      newer) version=1.3.0 enabled=0 ;;
+      malformed-version) version=not-a-version enabled=0 ;;
+      older) version=0.82.0 enabled=0 ;;
+    esac
+    rec=$(make_spawn_case "stream-$label" pi "$id")
+    read_case_record "$rec"
+    cat > "$FAKEBIN_DIR/pi" <<SH
+#!/usr/bin/env bash
+if [ "\${1:-}" = --version ]; then printf '%s\\n' '$version'; fi
+exit 0
+SH
+    chmod +x "$FAKEBIN_DIR/pi"
+    out=$(FM_STREAM_SILENT_MAX_SECS="$option" run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR")
+    expect_code 0 $? "stream spawn should succeed: $out"
+    case "$label" in
+      newer|older|malformed-version)
+        printf '%s\n' "$out" | grep -Fx "warning: pi model-stream observation unavailable for version $version; verified version: 1.2.0; existing busy bound remains active" >/dev/null || fail "missing exact version warning"
+        ;;
+    esac
+    state="$HOME_DIR/state"
+    ext="$state/$id.pi-ext.ts"
+    STREAM_STATE="$state" STREAM_ID="$id" STREAM_ENABLED="$enabled" EXT_PATH="$ext" node --input-type=module <<'JS' || fail "generated stream lifecycle failed for $label"
+import { pathToFileURL } from "node:url";
+import { existsSync, readFileSync } from "node:fs";
+const { default: extension } = await import(pathToFileURL(process.env.EXT_PATH).href);
+const handlers = {};
+extension({on: (name, fn) => { handlers[name] = fn; }, events: { on() {} }});
+const state = process.env.STREAM_STATE, id = process.env.STREAM_ID;
+const marker = state + "/" + id + ".model-stream";
+let idle = true;
+const ctx = {isIdle: () => idle};
+let clock = 10000;
+Date.now = () => clock;
+const fire = async (name, event = {}) => { await handlers[name]?.(event, ctx); };
+const assert = (ok, message) => { if (!ok) throw new Error(message); };
+await fire("agent_start");
+await fire("context", {messages: []});
+if (process.env.STREAM_ENABLED !== "1") {
+  assert(!existsSync(marker), "disabled/unverified worker produced stream evidence");
+  for (const name of ["context", "message_update", "message_end", "tool_execution_start"]) {
+    assert(!handlers[name], "unverified worker installed stream handler " + name);
+  }
+} else {
+  assert(existsSync(marker), "foreground context did not open stream evidence");
+  const initial = readFileSync(marker, "utf8");
+  await fire("message_update", {message: {role: "assistant", content: [{type:"text",text:""}]}});
+  assert(readFileSync(marker,"utf8") === initial, "empty event refreshed stream");
+  await fire("message_update", {message: {role: "assistant", content: [{type:"thinking",thinking:"reason"}]}});
+  const progressed = readFileSync(marker,"utf8");
+  assert(progressed !== initial, "thinking did not advance progress");
+  await fire("message_update", {message: {role: "assistant", content: [{type:"text",text:"token"}]}});
+  assert(readFileSync(marker,"utf8") === progressed, "unthrottled content event");
+  clock += 1001;
+  await fire("message_update", {message: {role: "assistant", content: [{type:"toolCall",name:"bash",arguments:{command:"true"}}]}});
+  assert(readFileSync(marker,"utf8") !== progressed, "tool arguments did not advance progress");
+  const last = readFileSync(marker,"utf8");
+  clock += 1001;
+  await fire("message_update", {message: {role: "assistant", content: [{type:"toolCall",name:"bash",arguments:{command:"true"}}]}});
+  assert(readFileSync(marker,"utf8") === last, "unchanged content refreshed progress after throttle");
+  idle = false;
+  await fire("agent_settled");
+  assert(readFileSync(marker,"utf8") === last, "continuing settlement closed active request");
+  idle = true;
+  await fire("message_end", {message: {role:"user"}});
+  assert(existsSync(marker), "user message end closed assistant stream");
+  await fire("message_end", {message: {role:"assistant"}});
+  assert(!existsSync(marker), "assistant end left stream open");
+  clock += 1001;
+  await fire("message_update", {message: {role:"assistant", content:[{type:"text",text:"late"}]}});
+  assert(!existsSync(marker), "late event resurrected closed stream");
+  await fire("context", {messages: []});
+  assert(existsSync(marker), "retry did not open new stream");
+  const retry = readFileSync(marker,"utf8");
+  const closing = fire("message_end", {message: {role:"assistant"}});
+  const opening = fire("context", {messages: []});
+  await Promise.all([closing, opening]);
+  assert(existsSync(marker) && readFileSync(marker,"utf8") !== retry, "overlapping close/open lost new request");
+  await fire("tool_execution_start");
+  assert(!existsSync(marker), "tool phase retained stream");
+  await fire("context", {messages: []});
+  await fire("agent_settled");
+  assert(!existsSync(marker), "settlement retained stream");
+}
+JS
+  done
+  pass "generated Pi wiring gates stream observation and clears model phases without accepting late updates"
 }
 
 test_pi_extension_semantic_lifecycle() {
@@ -179,15 +279,37 @@ oc_idle() {  # <sessionID>
   printf '{"type":"session.idle","properties":{"sessionID":"%s"}}' "$1"
 }
 
+# OpenCode 2 emits turn lifecycle as session.execution.* rather than the
+# OpenCode 1 session.status/session.idle names; the busy-state plugin maps both.
+oc_exec_started() {  # <sessionID>
+  printf '{"type":"session.execution.started","properties":{"sessionID":"%s"}}' "$1"
+}
+
+oc_exec_terminal() {  # <sessionID> <succeeded|interrupted|failed>
+  printf '{"type":"session.execution.%s","properties":{"sessionID":"%s"}}' "$2" "$1"
+}
+
 test_opencode_plugin_semantic_lifecycle() {
   local rec id=busy-oc-1 out state plugin
   rec=$(make_spawn_case oc-lifecycle opencode "$id")
   read_case_record "$rec"
+  # A detected 1.x install provisions the pre-port session.status/session.idle
+  # busy-state plugin (OpenCode 1 genuinely needs a busy plugin, so it keeps the
+  # exact wiring it had before the OpenCode 2 port). Report 1.18.32 so this test
+  # exercises that OpenCode 1 plugin; the v2 execution test covers major >= 2.
+  cat > "$FAKEBIN_DIR/opencode" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = --version ]; then
+  printf '%s\n' "${FM_FAKE_OPENCODE_VERSION:-1.18.32}"
+fi
+exit 0
+SH
+  chmod +x "$FAKEBIN_DIR/opencode"
   out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR")
   expect_code 0 $? "opencode spawn should succeed: $out"
   state="$HOME_DIR/state"
   plugin="$WT_DIR/.opencode/plugins/fm-busy-state.js"
-  assert_present "$plugin" "opencode spawn did not write the busy-state plugin"
+  assert_present "$plugin" "opencode 1.x spawn did not write the pre-port busy-state plugin"
 
   out=$(classify opencode "$id" "$state")
   [ "$out" = "busy fm-spawn" ] || fail "seed after spawn must be 'busy fm-spawn', got '$out'"
@@ -224,7 +346,94 @@ test_opencode_plugin_semantic_lifecycle() {
   [ -f "$state/$id.turn-ended" ] || fail "the marker touch must stay a notification for every session.idle"
   out=$(classify opencode "$id" "$state")
   [ "$out" = "busy opencode-plugin" ] || fail "another session's idle must not clear the latched busy, got '$out'"
-  pass "opencode plugin classifies from session.status, scoped to the latched worker session"
+
+  # Behavioral proof of the version gate: the OpenCode 1 plugin fm-spawn
+  # provisioned for a 1.x install does NOT react to OpenCode 2
+  # session.execution.* events. Settle to idle on session.status, then drive a
+  # session.execution.started: the OpenCode 2 plugin would latch busy here, so a
+  # state that stays idle proves fm-spawn emitted the pre-port session.status
+  # plugin and not the OpenCode 2 execution plugin.
+  out=$(drive_oc_plugin "$plugin" \
+    "$(oc_status ses_v1 busy)" \
+    "$(oc_status ses_v1 idle)") || fail "settle-to-idle drive failed: $out"
+  out=$(classify opencode "$id" "$state")
+  [ "$out" = "idle opencode-plugin" ] || fail "pre-check: latched session.status idle must classify idle, got '$out'"
+  out=$(drive_oc_plugin "$plugin" "$(oc_exec_started ses_v1)") || fail "exec-started drive failed: $out"
+  out=$(classify opencode "$id" "$state")
+  [ "$out" = "idle opencode-plugin" ] || fail "the OpenCode 1 plugin must ignore session.execution.started (would be 'busy opencode-plugin' on the OpenCode 2 plugin), got '$out'"
+  pass "opencode 1.x plugin classifies from session.status and ignores OpenCode 2 session.execution.* events"
+}
+
+test_opencode_plugin_v2_execution_lifecycle() {
+  local rec id=busy-oc-2 out state plugin
+  rec=$(make_spawn_case oc-exec-lifecycle opencode "$id")
+  read_case_record "$rec"
+  # The session.execution.* lifecycle this test drives is only emitted by the
+  # OpenCode 2.x busy-state plugin. fm-spawn keys that shape off the probed
+  # `opencode --version`, but the shared make_spawn_fakebin opencode stub is a
+  # bare exit-0 that reports nothing, so the probe would fall back to the 1.x
+  # session.status plugin. Report a 2.x version (as the dispatch-profile suite
+  # does) so the 2.x plugin is generated and these events reach a handler.
+  cat > "$FAKEBIN_DIR/opencode" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = --version ]; then
+  printf '%s\n' "${FM_FAKE_OPENCODE_VERSION:-2.0.21}"
+fi
+exit 0
+SH
+  chmod +x "$FAKEBIN_DIR/opencode"
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR")
+  expect_code 0 $? "opencode spawn should succeed: $out"
+  state="$HOME_DIR/state"
+  plugin="$WT_DIR/.opencode/plugins/fm-busy-state.js"
+  assert_present "$plugin" "opencode spawn did not write the busy-state plugin"
+
+  out=$(drive_oc_plugin "$plugin" "$(oc_exec_started ses_main)") || fail "exec-started drive failed: $out"
+  out=$(classify opencode "$id" "$state")
+  [ "$out" = "busy opencode-plugin" ] || fail "session.execution.started must classify 'busy opencode-plugin', got '$out'"
+
+  out=$(drive_oc_plugin "$plugin" \
+    "$(oc_exec_started ses_main)" \
+    "$(oc_exec_started ses_child)" \
+    "$(oc_exec_terminal ses_child succeeded)") || fail "child-session exec drive failed: $out"
+  out=$(classify opencode "$id" "$state")
+  [ "$out" = "busy opencode-plugin" ] || fail "a child session's terminal event must not clear the worker, got '$out'"
+
+  out=$(drive_oc_plugin "$plugin" \
+    "$(oc_exec_started ses_main)" \
+    '{"type":"session.execution.succeeded","properties":{"session":{"parentID":"ses_main"}}}') \
+    || fail "parent-keyed child exec drive failed: $out"
+  out=$(classify opencode "$id" "$state")
+  [ "$out" = "busy opencode-plugin" ] || fail "a child event carrying only its parent's id must not settle the parent, got '$out'"
+
+  rm -f "$state/$id.turn-ended"
+  out=$(drive_oc_plugin "$plugin" \
+    "$(oc_exec_started ses_main)" \
+    "$(oc_exec_terminal ses_main succeeded)") || fail "exec-succeeded drive failed: $out"
+  [ -f "$state/$id.turn-ended" ] || fail "session.execution.succeeded no longer touches the notification marker"
+  out=$(classify opencode "$id" "$state")
+  [ "$out" = "idle opencode-plugin" ] || fail "the latched session's terminal event must classify idle, got '$out'"
+
+  out=$(drive_oc_plugin "$plugin" \
+    "$(oc_exec_started ses_main)" \
+    "$(oc_exec_terminal ses_main interrupted)") || fail "exec-interrupted drive failed: $out"
+  out=$(classify opencode "$id" "$state")
+  [ "$out" = "idle opencode-plugin" ] || fail "session.execution.interrupted must settle the latched session to idle, got '$out'"
+
+  out=$(drive_oc_plugin "$plugin" \
+    "$(oc_exec_started ses_main)" \
+    "$(oc_exec_terminal ses_main failed)") || fail "exec-failed drive failed: $out"
+  out=$(classify opencode "$id" "$state")
+  [ "$out" = "idle opencode-plugin" ] || fail "session.execution.failed must settle the latched session to idle, got '$out'"
+
+  rm -f "$state/$id.turn-ended"
+  out=$(drive_oc_plugin "$plugin" \
+    "$(oc_exec_started ses2)" \
+    "$(oc_exec_terminal ses_other succeeded)") || fail "other-session terminal drive failed: $out"
+  [ -f "$state/$id.turn-ended" ] || fail "the marker touch must stay a notification for every session.execution terminal event"
+  out=$(classify opencode "$id" "$state")
+  [ "$out" = "busy opencode-plugin" ] || fail "another session's terminal event must not clear the latched busy, got '$out'"
+  pass "opencode plugin classifies from session.execution.* (OpenCode 2), scoped to the latched worker session"
 }
 
 run_claude_hook() {  # <settings.json> <hook-event>
@@ -405,6 +614,87 @@ test_gemini_is_refused_as_a_secondmate() {
   assert_contains "$out" 'crewmate/scout adapter only' \
     "refusing a gemini secondmate must name the crewmate/scout boundary: $out"
   pass "gemini is refused as a secondmate because it has no primary supervision protocol"
+}
+
+# Kiro's hooks live in a firstmate-owned per-task agent config outside the
+# worktree, and each trigger is a FLAT array of {"command": ...} (no nested
+# hooks array like claude/gemini). No stdout contract applies.
+#
+# The command is EXECUTED DIRECTLY, never through `sh -c`: kiro may exec a hook
+# command as argv rather than hand it to a shell, and running it under a shell
+# here would make this suite green for a wiring the real tool cannot run. That is
+# what a single-token script path buys, so this is where it gets proven.
+run_kiro_hook() {  # <agent-config.json> <trigger>
+  local cmd
+  cmd=$(jq -r ".hooks[\"$2\"][0].command" "$1")
+  [ -n "$cmd" ] && [ "$cmd" != null ] || fail "no $2 hook command in $1"
+  [ "$cmd" = "${cmd%%[[:space:]]*}" ] || fail "the $2 hook command is not a single token: '$cmd'"
+  [ -x "$cmd" ] || fail "the $2 hook command is not an executable file: '$cmd'"
+  "$cmd"
+}
+
+test_kiro_hooks_semantic_lifecycle() {
+  local rec id=busy-ki-1 out state agent
+  rec=$(make_spawn_case kiro-lifecycle kiro "$id")
+  read_case_record "$rec"
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR")
+  expect_code 0 $? "kiro spawn should succeed: $out"
+  state="$HOME_DIR/state"
+  agent="$state/$id.kiro-home/agents/firstmate.json"
+  assert_present "$agent" "kiro spawn did not write the per-task agent config"
+  jq -e . "$agent" >/dev/null || fail "the kiro agent config is not valid JSON"
+  # The worktree's own .kiro/ belongs to the project and must never be written.
+  assert_absent "$WT_DIR/.kiro" "kiro spawn must not write the worktree's own .kiro/"
+
+  out=$(classify kiro "$id" "$state")
+  [ "$out" = "busy fm-spawn" ] || fail "seed after spawn must be 'busy fm-spawn', got '$out'"
+
+  rm -f "$state/$id.turn-ended"
+  run_kiro_hook "$agent" stop || fail "stop hook command failed"
+  [ -f "$state/$id.turn-ended" ] || fail "stop no longer touches the notification marker"
+  out=$(classify kiro "$id" "$state")
+  [ "$out" = "idle kiro-hook" ] || fail "stop must classify 'idle kiro-hook', got '$out'"
+
+  run_kiro_hook "$agent" userPromptSubmit || fail "userPromptSubmit hook command failed"
+  out=$(classify kiro "$id" "$state")
+  [ "$out" = "busy kiro-hook" ] || fail "userPromptSubmit must classify 'busy kiro-hook', got '$out'"
+
+  # kiro V2 has no StopFailure/SessionEnd equivalent, so an abnormal turn end
+  # leaves this record open; only the next userPromptSubmit or stop moves it.
+  run_kiro_hook "$agent" stop || fail "a repeated stop hook command failed"
+  out=$(classify kiro "$id" "$state")
+  [ "$out" = "idle kiro-hook" ] || fail "a second stop must stay idle, got '$out'"
+  pass "kiro hooks open on userPromptSubmit and close on stop, keeping the turn-end touch"
+}
+
+test_kiro_hooks_stale_incarnation_harmless() {
+  local rec id=busy-ki-2 out state agent
+  rec=$(make_spawn_case kiro-stale kiro "$id")
+  read_case_record "$rec"
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR")
+  expect_code 0 $? "kiro spawn should succeed: $out"
+  state="$HOME_DIR/state"
+  agent="$state/$id.kiro-home/agents/firstmate.json"
+  "$ROOT/bin/fm-busy-event.sh" arm "$state" "$id" >/dev/null
+  run_kiro_hook "$agent" userPromptSubmit \
+    || fail "a stale-gen hook must still exit 0 so kiro's lifecycle is never broken"
+  out=$(classify kiro "$id" "$state")
+  [ "$out" = "busy fm-spawn" ] || fail "a stale-gen hook event must not change state, got '$out'"
+  pass "kiro hook events from a superseded incarnation are rejected without breaking the hook"
+}
+
+test_raw_kiro_launch_has_no_semantic_wiring() {
+  local rec id=busy-ki-raw out state
+  rec=$(make_spawn_case kiro-raw kiro "$id")
+  read_case_record "$rec"
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR" 'kiro chat --agent-engine v2')
+  expect_code 0 $? "raw kiro spawn should succeed: $out"
+  state="$HOME_DIR/state"
+  assert_absent "$state/$id.busy-gen" "raw kiro launch must not arm a busy generation"
+  assert_absent "$state/$id.kiro-home" "raw kiro launch must not write a per-task hook config"
+  out=$(classify kiro "$id" "$state")
+  [ "$out" = "unknown missing" ] || fail "raw kiro launch must classify unknown, got '$out'"
+  pass "raw kiro launch remains unwired and classifies unknown"
 }
 
 test_kimi_and_grok_install_no_unverified_wiring() {
@@ -841,6 +1131,7 @@ test_raw_secondmate_launch_writes_no_busy_wiring
 test_secondmate_claude_stop_guard_owns_the_stop_verdict
 test_secondmate_claude_older_home_guard_keeps_the_stop_idle_hook
 test_secondmate_claude_spawn_leaves_local_settings_untouched
+test_pi_stream_extension_activation_and_lifecycle
 test_secondmate_pi_extension_reports_busy_without_a_parent_turnend
 test_secondmate_omp_extension_reports_busy_without_a_parent_turnend
 test_secondmate_opencode_plugin_closes_without_a_parent_turnend
@@ -850,12 +1141,16 @@ test_pi_extension_serializes_settle_before_next_start
 test_pi_extension_stale_incarnation_rejected
 test_kimi_and_grok_install_no_unverified_wiring
 test_opencode_plugin_semantic_lifecycle
+test_opencode_plugin_v2_execution_lifecycle
 test_claude_hooks_semantic_lifecycle
 test_claude_hooks_stale_incarnation_harmless
 test_gemini_hooks_semantic_lifecycle
 test_gemini_hooks_stale_incarnation_harmless
 test_raw_gemini_launch_has_no_semantic_wiring
 test_gemini_is_refused_as_a_secondmate
+test_kiro_hooks_semantic_lifecycle
+test_kiro_hooks_stale_incarnation_harmless
+test_raw_kiro_launch_has_no_semantic_wiring
 test_codex_unverified_until_a_semantic_source_exists
 
 echo "all fm-busy-adapter-wiring tests passed"

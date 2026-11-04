@@ -428,6 +428,19 @@ print("\n".join((parts + ["", "", ""])[:3]))' "$argv_b64")
 command_name=$(printf '%s\n' "$cmd" | sed -n '1p')
 subcommand=$(printf '%s\n' "$cmd" | sed -n '2p')
 item_rel=$(printf '%s\n' "$cmd" | sed -n '3p')
+if [ "$command_name" = fm-remote-inherit.sh ] && [ -n "${FM_FAKE_OLDER_RECEIVER_CONFIG:-}" ]; then
+  printf 'START %s %s %s %s\n' "$host" "$command_name" "$subcommand" "$item_rel" >> "$log"
+  remote_home=$(python3 -c 'import sys, base64; sys.stdout.write(base64.b64decode(sys.argv[1]).decode())' "${3:-}")
+  argv=()
+  while IFS= read -r -d '' part; do argv+=("$part"); done \
+    < <(python3 -c 'import sys, base64; sys.stdout.buffer.write(base64.b64decode(sys.argv[1]))' "$argv_b64")
+  rc=0
+  env -i PATH="$PATH" HOME="$remote_home" FM_HOME="$remote_home" \
+    FM_INHERITABLE_CONFIG="$FM_FAKE_OLDER_RECEIVER_CONFIG" \
+    "${FM_FAKE_RECEIVER_BIN:?}/${argv[0]}" "${argv[@]:1}" || rc=$?
+  printf 'END %s %s %s %s\n' "$host" "$command_name" "$subcommand" "$item_rel" >> "$log"
+  exit "$rc"
+fi
 cat > /dev/null
 printf 'START %s %s %s %s\n' "$host" "$command_name" "$subcommand" "$item_rel" >> "$log"
 case "$command_name:$subcommand" in
@@ -557,6 +570,42 @@ test_inherit_push_failure_stops_new_sends() {
     fail "a concurrent push kept starting items after the first item failed"$'\n'"$(cat "$CF_LOG")"
   fi
   pass "remote inheritance push: a failed item fails the push and no later item is started"
+}
+
+# An older remote code root declares fewer items. The real receiver runs with
+# that older allowlist, so its refusal is the receiver's own words.
+run_inherit_push_to_older_receiver() {  # <id> <generation>
+  FM_FAKE_OLDER_RECEIVER_CONFIG='item-a item-b item-d item-e item-f' \
+    FM_FAKE_RECEIVER_BIN="$ROOT/bin" \
+    FM_REMOTE_INHERIT_PUSH_JOBS=1 \
+    run_inherit_push "$@"
+}
+
+test_inherit_push_older_receiver_absent_item_is_unchanged() {
+  local out rc remote_home
+  convergence_fixture "$TMP_ROOT/push-older-absent" sm:host-sm
+  remote_home="$TMP_ROOT/push-older-absent/remote/sm/home"
+  printf 'first\n' > "$CF_HOME/config/item-a"
+  printf 'last\n' > "$CF_HOME/config/item-f"
+  out=$(run_inherit_push_to_older_receiver sm 1); rc=$?
+  expect_code 0 "$rc" "an older receiver's refusal of an absent item it does not declare must not fail the push: $out"
+  assert_contains "$out" "unchanged: config/item-c" "the undeclared absent item reads as unchanged"
+  assert_not_contains "$out" "error:" "the older receiver's refusal of an absent item is not reported as an error"
+  assert_contains "$out" "pushed: config/item-f" "items after the undeclared one are still sent"
+  assert_contains "$out" "unchanged: data/captain-shared.md" "the shared captain file is still converged"
+  [ "$(cat "$remote_home/config/item-f")" = last ] \
+    || fail "an item after the undeclared one did not land in the remote home"
+  assert_absent "$remote_home/config/item-c" "the older receiver must not gain the undeclared item"
+
+  : > "$CF_LOG"
+  printf 'present\n' > "$CF_HOME/config/item-c"
+  out=$(run_inherit_push_to_older_receiver sm 2); rc=$?
+  expect_code 1 "$rc" "an older receiver's refusal of a present item must still fail the push: $out"
+  assert_contains "$out" "error: path is not inherited material: config/item-c" "the refusal of a present item is reported"
+  if grep -q 'START .* config/item-d' "$CF_LOG"; then
+    fail "an item after the refused present item was still sent"$'\n'"$(cat "$CF_LOG")"
+  fi
+  pass "remote inheritance push: an older receiver's refusal counts as unchanged only for an absent item"
 }
 
 test_inherit_push_local_refusal_sends_nothing() {
@@ -761,6 +810,7 @@ test_remote_probe_scheduling_keeps_per_mate_lines fallback
 test_remote_inheritance_failure_names_its_own_error_not_an_unchanged_item
 test_inherit_push_overlaps_items_and_replays_in_order
 test_inherit_push_failure_stops_new_sends
+test_inherit_push_older_receiver_absent_item_is_unchanged
 test_inherit_push_local_refusal_sends_nothing
 test_convergence_budget_isolates_a_hung_mate
 test_partial_push_failure_keeps_the_reread_owed

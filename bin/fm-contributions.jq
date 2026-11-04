@@ -16,6 +16,8 @@ def valid_record:
     and all(.pending[]; (.token | type == "string" and length > 0))
     and all(.seen[]; type == "string")
     and ((.notified // []) | type == "array" and all(.[]; type == "string"))
+    and ((.threads // []) | type == "array" and all(.[]; (.key | type == "string")
+      and (.raised == null or (.raised | fromdateiso8601 | type == "number"))))
     and (.error == null or (.error | type == "string"))
     and (.checked_at == null or (.checked_at | fromdateiso8601 | type == "number"))
     and (.retired == null or (.retired | (.actor == "captain")
@@ -31,6 +33,28 @@ def valid_record:
         and (.mergeable | IN("mergeable","conflicting","unknown")) and (.can_merge | type == "boolean")
         and (.review_decision | IN("","APPROVED","CHANGES_REQUESTED","REVIEW_REQUIRED"))
         else (.ready | type == "boolean") end))))) catch false;
+def duration_text($seconds):
+  if $seconds < 3600 then "\($seconds / 60 | floor)m" else "\($seconds / 3600 | floor)h" end;
+# Unanswered pull-request threads of one observation, keyed by event kind and id
+# so an edited comment stays one thread. A signal raised in this poll counts as
+# the thread's first raise.
+def tracked_threads($previous; $events; $new_tokens; $now_iso):
+  [$events[] | select(.unanswered == true)
+    | (.token | split(":") | .[:2] | join(":")) as $key
+    | {key:$key,type,source,author,at:(.at // null),
+       raised:(([$previous[]? | select(.key == $key) | .raised] | first)
+         // (if .token | IN($new_tokens[]) then $now_iso else null end))}
+      + (if .review_bot == true then {review_bot:true} else {} end)];
+def due_threads($threads; $now; $age):
+  [$threads[] | (.at | try fromdateiso8601 catch null) as $at
+    | select($at != null and ($now - $at) >= $age
+      and (.raised == null or ($now - (.raised | fromdateiso8601)) >= $age))];
+def reraise_event($thread; $now; $now_iso):
+  duration_text($now - ($thread.at | fromdateiso8601)) as $age
+  | {token:("unanswered:" + $thread.key + ":" + $now_iso),type:"unanswered",thread:$thread.key,
+     source:$thread.source,head:null,author:$thread.author,age:$age,
+     body:("no reply from the contribution author for " + $age)}
+    + (if $thread.review_bot == true then {review_bot:true} else {} end);
 def known($input; $saved):
   ([($input.tasks // [])[] | select(.kind != "secondmate")
      | select(.pr.url | canonical_url) | {task:.id,url:.pr.url}]
@@ -82,7 +106,8 @@ def projected($input; $saved; $now; $max_age):
        elif $hold != null then {actor:"captain",reason:$hold.hold_reason,hold:$hold.id}
        elif $fresh | not then {actor:"fleet",reason:($record.error // "contribution not recently checked")}
        elif $stale then {actor:"fleet",reason:"STALE maintainer verdict; reassess the current head"}
-       elif ($record.pending | length) > 0 then {actor:"fleet",reason:"incoming maintainer signal needs triage"}
+       elif ($record.pending | length) > 0 then {actor:"fleet",reason:(if all($record.pending[]; .review_bot == true)
+         then "incoming review-bot finding needs triage" else "incoming maintainer signal needs triage" end)}
        elif $record.kind == "issue" then
          if $o.ready then {actor:"fleet",reason:"filed issue is ready-for-pr"}
          else {actor:"maintainer",reason:"awaiting issue triage"} end

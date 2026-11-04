@@ -977,6 +977,30 @@ test_bootstrap_inert_without_token() {
   pass "bootstrap is inert without a non-empty .env token (non-X users unaffected)"
 }
 
+test_bootstrap_preserves_nonrelay_watcher_tuning() {
+  local copy home out rc seen
+  copy="$TMP_ROOT/boot-nonrelay-watcher-tuning"; home="$copy/home"
+  mkdir -p "$home/config" "$home/state"
+  cp -R "$ROOT/bin" "$copy/bin"
+  cat > "$copy/bin/fm-watch.sh" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "${FM_PAUSE_RESURFACE_SECS:-unset}" > "$FM_HOME/watcher-saw"
+SH
+  chmod +x "$copy/bin/fm-watch.sh"
+  printf 'export FM_PAUSE_RESURFACE_SECS=777\n' > "$home/config/watch.env"
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-bootstrap.sh" 2>/dev/null)
+  assert_not_contains "$out" "FMX:" "a non-Relay watcher setting must not activate Relay"
+  assert_present "$home/config/watch.env" "bootstrap must preserve non-Relay watcher tuning"
+  rc=0
+  out=$(env -u CONFIG -u FM_PAUSE_RESURFACE_SECS FM_HOME="$home" FM_GUARD_GRACE=3 \
+    "$copy/bin/fm-watch-arm.sh" 2>&1) || rc=$?
+  assert_not_contains "$out" "unbound variable" "the watcher arm crashed while loading watch.env"
+  [ -f "$home/watcher-saw" ] || fail "the watcher arm never launched the watcher (rc=$rc): $out"
+  seen=$(cat "$home/watcher-saw")
+  [ "$seen" = 777 ] || fail "the watcher did not inherit watch.env tuning: saw '$seen'"
+  pass "bootstrap preserves home-local watcher tuning and the arm hands it to the watcher"
+}
+
 test_poll_empty_text_is_silent() {
   local home fakebin out rc
   home="$TMP_ROOT/poll-empty-text"; mkdir -p "$home"
@@ -2972,7 +2996,13 @@ test_followup_post_record_failure_clears_link() {
   err="$home/err.txt"
   cat > "$fakebin/mv" <<'SH'
 #!/usr/bin/env bash
-if [ -n "${FAKE_MV_FAIL_AFTER_FLAG:-}" ] \
+# Fail the counter publication, not an unrelated lock-pid publication.
+dest=
+for arg in "$@"; do
+  dest=$arg
+done
+if [ "$dest" = "${FAKE_MV_FAIL_TARGET:-}" ] \
+  && [ -n "${FAKE_MV_FAIL_AFTER_FLAG:-}" ] \
   && [ -f "$FAKE_MV_FAIL_AFTER_FLAG" ] \
   && [ -n "${FAKE_MV_FAILED_ONCE:-}" ] \
   && [ ! -f "$FAKE_MV_FAILED_ONCE" ]; then
@@ -2987,9 +3017,10 @@ SH
   meta="$home/state/task-rf.meta"
   out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FMX_RELAY_URL="https://relay.test" \
     FMX_NOW_OVERRIDE=1700003600 FAKE_FOLLOWUP_CODE=200 FAKE_CURL_TOUCH_AFTER_POST="$flag" \
-    FAKE_MV_FAIL_AFTER_FLAG="$flag" FAKE_MV_FAILED_ONCE="$mvflag" \
+    FAKE_MV_FAIL_AFTER_FLAG="$flag" FAKE_MV_FAILED_ONCE="$mvflag" FAKE_MV_FAIL_TARGET="$meta" \
     "$ROOT/bin/fm-x-followup.sh" task-rf - <<<"posted but local state write fails" 2>"$err"); rc=$?
   expect_code 0 "$rc" "followup post state-record failure exit"
+  assert_present "$mvflag" "the post-success counter publication must actually fail"
   [ "$out" = "req-rf" ] || fail "posted followup with tombstoned state must echo the request_id (got: $out)"
   assert_no_grep "x_request=" "$meta" "a failed counter write must tombstone the link"
   assert_no_grep "x_followups=" "$meta" "a failed counter write must remove the stale counter"
@@ -3284,5 +3315,6 @@ test_bootstrap_reports_missing_x_dependency
 test_bootstrap_does_not_announce_when_arm_fails
 test_bootstrap_does_not_follow_x_artifact_symlinks
 test_bootstrap_inert_without_token
+test_bootstrap_preserves_nonrelay_watcher_tuning
 test_bootstrap_opt_out_cleanup
 test_bootstrap_opt_out_reports_cleanup_failure
