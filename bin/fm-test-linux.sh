@@ -100,6 +100,9 @@ while IFS= read -r -d '' path; do
   [ -e "$root/$path" ] && files+=("$path")
 done < <(git -C "$root" ls-files -z --cached --others --exclude-standard)
 (cd "$root" && printf '%s\0' "${files[@]}" | tar --null -T - -cf -) | tar -C "$scratch" -xf -
+while IFS= read -r -d '' path; do
+  [ -e "$root/$path" ] || rm -f "$scratch/$path"
+done < <(git -C "$scratch" ls-files -z)
 
 printf 'fm-test-linux: %s on %s\n' "${#tests[@]}" "$("$runtime" run --rm "$image" sh -c 'uname -sr')"
 failed=()
