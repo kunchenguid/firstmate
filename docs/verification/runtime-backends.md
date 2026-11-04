@@ -6,6 +6,32 @@ This record contains reusable version-scoped evidence for active runtime guarant
 The backend guides own current setup, safety boundaries, and limitations.
 Exact task chronology, branch names, temporary homes, local paths, process ids, thread ids, and delivery transcripts remain in private reports or PR evidence.
 
+## Claude unattended session signal
+
+Verified on 2026-10-31 with Claude Code 2.1.280 on macOS arm64, by a probe SessionStart hook that recorded its environment and payload in a scratch project.
+
+| Launch | `CLAUDE_CODE_ENTRYPOINT` | `CLAUDE_CODE_SESSION_ATTENDED` | `CLAUDE_JOB_DIR` |
+|---|---|---|---|
+| `claude -p ... --model haiku --no-session-persistence --permission-mode dontAsk` from inside an interactive session | `sdk-cli` | `0` | absent |
+| the same `claude -p` from a clean environment | `sdk-cli` | `0` | absent |
+| `claude -p --input-format stream-json --output-format stream-json` | `sdk-cli` | `0` | absent |
+| `claude -p` with a preset `CLAUDE_CODE_ENTRYPOINT=sdk-ts` | `sdk-ts` | `0` | absent |
+| `claude -p` with a preset `claude-vscode` or `claude-desktop` entrypoint | unchanged | `1` | absent |
+| interactive `claude` in tmux, clean environment | `cli` | `1` | absent |
+| interactive `claude` in tmux, inheriting `CLAUDE_CODE_ENTRYPOINT=sdk-cli` and `CLAUDE_CODE_SESSION_ATTENDED=0` | `sdk-cli` | `1` | absent |
+| `claude --bg --model haiku --permission-mode dontAsk "Reply with just: ok"` (ancestry `claude bg-spare` -> `claude bg-pty-host` -> `claude daemon run --origin transient`) | `cli` | `0` | `$HOME/.claude/jobs/<first 8 characters of CLAUDE_CODE_SESSION_ID>` |
+
+Every payload's `session_id` equalled the hook's `CLAUDE_CODE_SESSION_ID`.
+So `CLAUDE_CODE_SESSION_ATTENDED` is recomputed per session in both directions, while an inherited `sdk-cli` entrypoint survives into an interactive session and cannot mark a headless one.
+A background session takes its environment from the Claude daemon's pre-warmed spare rather than its caller, so a caller-set `FM_SESSIONSTART_ALLOW_UNATTENDED=1` may not reach it; its session-bound `CLAUDE_JOB_DIR` is what lets it take the helm as a primary.
+The live guard refreshes the stand-down half of this evidence:
+
+```text
+$ FM_SESSIONSTART_UNATTENDED_LIVE_E2E=1 tests/fm-sessionstart-unattended-live-e2e.test.sh
+ok - Claude 2.1.280 (Claude Code): a headless claude -p session opened in the home stands down without the session lock
+ok - Claude 2.1.280 (Claude Code): FM_SESSIONSTART_ALLOW_UNATTENDED=1 still runs the real session start under claude -p
+```
+
 ## Polytoken worker lifecycle
 
 Verified on 2026-10-14 with Polytoken 0.9.0 on macOS arm64 using the tmux worker path.

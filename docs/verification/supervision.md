@@ -155,6 +155,7 @@ finished=1786048723
 ```
 
 The worker started before the harness exited and published 6s after it was gone.
+Rerunning this recipe now needs `FM_SESSIONSTART_ALLOW_UNATTENDED=1` on the `claude -p` command, because the run wrapper otherwise stands down for an unattended Claude session ([`sessionstart-nudge.md`](../sessionstart-nudge.md#shared-wrapper-and-safety)).
 
 The latency this buys was re-measured on 2026-08-06 against default-branch tip `8398d31`, in a throwaway home holding one remote secondmate whose host hangs 25s per SSH connection (an `FM_SSH_BIN`-shaped stub; no real host was contacted).
 Both runs used the same fixture and the same `bin/fm-session-start.sh` invocation, differing only in which checkout supplied the script:

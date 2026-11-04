@@ -26,7 +26,8 @@ fi
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
-unset NO_MISTAKES_GATE
+unset NO_MISTAKES_GATE CLAUDE_CODE_SESSION_ATTENDED CLAUDE_CODE_SESSION_ID FM_NO_LOCK \
+  FM_SESSIONSTART_ALLOW_UNATTENDED
 
 TMP_ROOT=$(fm_test_tmproot fm-sessionstart-nudge)
 NUDGE="$ROOT/bin/fm-sessionstart-nudge.sh"
@@ -222,6 +223,15 @@ make_run_primary() {
 }
 
 run_hook() {  # <root> [args...]
+  local root=$1
+  shift
+  env -u CLAUDECODE -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT \
+    FM_GATE_REFUSE_BYPASS=0 FM_ROOT_OVERRIDE="$root" FM_HOME="$root" PATH="$RUN_PATH" "$RUN" "$@"
+}
+
+# Like run_hook, but passes this call's Claude session and stand-down variables
+# through; the suite unsets them up front so only a case's own values arrive.
+run_hook_claude() {  # <root> [args...]
   local root=$1
   shift
   env -u CLAUDECODE -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT \
@@ -1037,6 +1047,72 @@ test_run_gate_and_scope_are_silent() {
   pass "run wrapper: ordinary ineligible opens stay silent-zero and Pi preflight gets an explicit silent stand-down"
 }
 
+# A headless `claude -p` or Agent SDK session opened in the home (a plugin's
+# background reviewer) must never take the helm, while an interactive session,
+# an inherited stale value, and Firstmate's own opted-in live checks still do.
+test_run_unattended_claude_stands_down() {
+  local root="$TMP_ROOT/run-unattended" out status=0
+  local payload='{"session_id":"sid-headless","hook_event_name":"SessionStart","source":"startup"}'
+  make_run_primary "$root"
+  rmdir "$root/state"
+  printf '%s' "$payload" | CLAUDE_CODE_SESSION_ATTENDED=0 CLAUDE_CODE_SESSION_ID=sid-headless \
+    expect_silent_zero "unattended Claude startup" run_hook_claude "$root"
+  assert_absent "$root/state" "an unattended Claude session created the home's state dir"
+  mkdir "$root/state"
+  printf '%s' "${payload/startup/resume}" | CLAUDE_CODE_SESSION_ATTENDED=0 CLAUDE_CODE_SESSION_ID=sid-headless \
+    expect_silent_zero "unattended Claude resume" run_hook_claude "$root"
+  assert_absent "$root/state/.lock" "an unattended Claude session took the fleet lock"
+
+  root="$TMP_ROOT/run-no-lock"
+  make_run_primary "$root"
+  FM_NO_LOCK=1 FM_SESSIONSTART_ALLOW_UNATTENDED=1 \
+    expect_silent_zero "FM_NO_LOCK startup" run_hook_claude "$root" --source startup </dev/null
+  assert_absent "$root/state/.lock" "an FM_NO_LOCK=1 session took the fleet lock"
+
+  root="$TMP_ROOT/run-attended"
+  make_run_primary "$root"
+  out=$(printf '%s' "$payload" | CLAUDE_CODE_SESSION_ATTENDED=1 CLAUDE_CODE_SESSION_ID=sid-headless \
+    run_hook_claude "$root") || status=$?
+  expect_code 0 "$status" "attended Claude startup"
+  assert_contains "$out" "$FULL_BANNER$root" "an attended Claude session lost its full digest"
+
+  root="$TMP_ROOT/run-unattended-inherited"
+  make_run_primary "$root"
+  out=$(printf '%s' "$payload" | CLAUDE_CODE_SESSION_ATTENDED=0 CLAUDE_CODE_SESSION_ID=sid-parent \
+    run_hook_claude "$root") || status=$?
+  expect_code 0 "$status" "inherited unattended value startup"
+  assert_contains "$out" "$FULL_BANNER$root" \
+    "an unattended value inherited from another session stood down this session's start"
+
+  root="$TMP_ROOT/run-background-bound"
+  make_run_primary "$root"
+  out=$(printf '%s' "$payload" | CLAUDE_CODE_SESSION_ATTENDED=0 CLAUDE_CODE_SESSION_ID=sid-headless \
+    CLAUDE_JOB_DIR="$TMP_ROOT/jobs/sid-head" run_hook_claude "$root") || status=$?
+  expect_code 0 "$status" "bound background-session startup"
+  assert_contains "$out" "$FULL_BANNER$root" "a Claude background-session primary stood down"
+
+  root="$TMP_ROOT/run-background-mismatched"
+  make_run_primary "$root"
+  printf '%s' "$payload" | CLAUDE_CODE_SESSION_ATTENDED=0 CLAUDE_CODE_SESSION_ID=sid-headless \
+    CLAUDE_JOB_DIR="$TMP_ROOT/jobs/parent00" expect_silent_zero "inherited background job dir" run_hook_claude "$root"
+  assert_absent "$root/state/.lock" "a child claude -p with an inherited background job dir took the fleet lock"
+
+  root="$TMP_ROOT/run-background-no-lock"
+  make_run_primary "$root"
+  printf '%s' "$payload" | FM_NO_LOCK=1 CLAUDE_CODE_SESSION_ATTENDED=0 CLAUDE_CODE_SESSION_ID=sid-headless \
+    CLAUDE_JOB_DIR="$TMP_ROOT/jobs/sid-head" expect_silent_zero "FM_NO_LOCK background session" run_hook_claude "$root"
+  assert_absent "$root/state/.lock" "an FM_NO_LOCK=1 background session took the fleet lock"
+
+  root="$TMP_ROOT/run-unattended-allowed"
+  make_run_primary "$root"
+  out=$(printf '%s' "$payload" | CLAUDE_CODE_SESSION_ATTENDED=0 CLAUDE_CODE_SESSION_ID=sid-headless \
+    FM_SESSIONSTART_ALLOW_UNATTENDED=1 run_hook_claude "$root") || status=$?
+  expect_code 0 "$status" "opted-in unattended Claude startup"
+  assert_contains "$out" "$FULL_BANNER$root" "FM_SESSIONSTART_ALLOW_UNATTENDED=1 did not run session start"
+  assert_contains "$out" "lock acquired: harness pid" "an opted-in unattended session did not take the lock"
+  pass "run wrapper: an unattended Claude or FM_NO_LOCK=1 session stands down silently; attended, inherited, bound background, and opted-in opens take the helm"
+}
+
 test_run_creates_missing_state_on_a_fresh_primary() {
   local root="$TMP_ROOT/run-fresh-primary" base="$TMP_ROOT/run-fresh-linked-base"
   local linked="$TMP_ROOT/run-fresh-linked" out status=0
@@ -1113,6 +1189,7 @@ test_run_resume_delegates_to_the_nudge
 test_run_reads_source_from_the_hook_payload
 test_run_unknown_source_takes_the_helm
 test_run_gate_and_scope_are_silent
+test_run_unattended_claude_stands_down
 test_run_creates_missing_state_on_a_fresh_primary
 test_run_reports_a_state_dir_it_cannot_create
 test_run_reports_a_failed_session_start_as_digest_text

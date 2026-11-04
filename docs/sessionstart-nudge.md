@@ -184,6 +184,23 @@ So a truncated digest does neither of these:
 - They source `bin/fm-gate-refuse-lib.sh` and stay silent for a no-mistakes gate agent identified by `NO_MISTAKES_GATE` or a `.no-mistakes/repos/*.git` git-common-dir.
 - They share `bin/fm-primary-scope-lib.sh` with `bin/fm-turnend-guard.sh`, so every hook uses one primary-detection owner.
 
+The run wrapper also stands down silently, before any state or lock work, for a session that is never the captain's primary:
+
+- An unattended Claude session, such as a plugin's background reviewer launched with `claude -p` or an Agent SDK script whose cwd is the home.
+  Without this, that session would take the session lock and leave the captain's interactive session read-only.
+  The signal is `CLAUDE_CODE_SESSION_ATTENDED=0`, honored only when the payload's `session_id` equals `CLAUDE_CODE_SESSION_ID`.
+  Claude Code recomputes that value for every session, so interactive sessions and the attended VS Code and desktop hosts still take the helm, and a value inherited into another harness's hook is ignored.
+  `CLAUDE_CODE_ENTRYPOINT` is not used because an interactive session keeps an inherited `sdk-cli` value.
+- A session marked `FM_NO_LOCK=1`, the generic opt-out for any tool that launches Claude in the home and must not take the fleet lock.
+
+`FM_SESSIONSTART_ALLOW_UNATTENDED=1` opts an unattended Claude session back in, for Firstmate's own live checks that drive a throwaway primary through `claude -p`; it never overrides `FM_NO_LOCK=1`.
+A Claude background session (`claude --bg`) is also unattended but may be the captain's primary, so it still takes the helm when its `CLAUDE_JOB_DIR` basename equals the first 8 characters of its own `CLAUDE_CODE_SESSION_ID`; a child `claude -p` that inherited a background parent's `CLAUDE_JOB_DIR` does not match and still stands down.
+`bin/fm-session-standdown-lib.sh` owns this one predicate, and `bin/fm-session-start.sh` applies it too, so an agent in such a session that runs session start itself, because no digest arrived, still never takes the lock.
+Run directly, it has no payload, so the unattended signal counts only when `fm_session_lock_trusted_session_id` in `bin/fm-session-lock-lib.sh` proves `CLAUDE_PID` is a Claude member of the caller's contiguous harness ancestry; another harness that inherited the value, such as a Codex session started from a Claude pane, still takes the helm.
+When it stands down, it prints one stderr line saying so and exits 0.
+The run wrapper marks its own downstream call with `FM_SESSION_STANDDOWN_CHECKED=1`, so its payload-bound decision is not re-made from an inherited value.
+The signal evidence lives in [`verification/runtime-backends.md`](verification/runtime-backends.md#claude-unattended-session-signal).
+
 A fresh clone has no gitignored state directory yet.
 When the root otherwise qualifies as primary, the run wrapper creates the state directory before the unchanged scope check, so the first session takes the helm without a manual `mkdir state`.
 If that creation fails, the run wrapper prints one stderr line naming the state directory and the reason, then stands down as it would for any ineligible root.
@@ -408,6 +425,9 @@ It also proves the nudge wrapper's exact U+2063 `FIRSTMATE_OP:`-prefixed, `sessi
 It separately proves the run wrapper's silence for the gate environment and an unmarked linked worktree, including the internal Pi prerequisite's explicit silent stand-down.
 It proves the run wrapper creates a missing state directory on a fresh primary and delivers the full digest, while an unmarked linked worktree gets none.
 It proves a fresh primary whose state directory cannot be created reports that on one stderr line and stands down without a digest.
+It proves an unattended Claude payload and `FM_NO_LOCK=1` stand down without creating state or taking the lock, while attended, inherited-value, bound background-session, and `FM_SESSIONSTART_ALLOW_UNATTENDED=1` opens still take the helm.
+The opt-in live guard `tests/fm-sessionstart-unattended-live-e2e.test.sh` proves the same stand-down and override against a real `claude -p`.
+`tests/fm-session-start.test.sh` proves a direct session start stands down with its stderr line and no lock for an unattended, mismatched background, or `FM_NO_LOCK=1` session, while attended, bound background, and opted-in sessions still take the lock.
 
 It proves the run wrapper's source routing end to end against a real `fm-session-start.sh`, including:
 
