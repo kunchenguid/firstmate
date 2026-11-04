@@ -1624,6 +1624,32 @@ test_completion_closes_a_scout_with_its_report() {
   pass "completion closes a scout item against its report"
 }
 
+test_forced_scout_discard_records_no_report() {
+  local case_dir id report out
+  for report in missing partial; do
+    id="atomic-discard-scout-$report"
+    case_dir=$(make_home "discard-scout-$report")
+    add_item "$case_dir" "$id" scout
+    start_item "$case_dir" "$id"
+    write_task_meta "$case_dir" "$id" scout '' "spawn_gen=spawn-discard-$report"
+    if [ "$report" = partial ]; then
+      mkdir -p "$(home_of "$case_dir")/data/$id"
+      printf 'unfinished findings\n' > "$(home_of "$case_dir")/data/$id/report.md"
+    fi
+
+    out=$(run_teardown "$case_dir" "$id" --force) \
+      || fail "forced scout discard failed for $report report: $out"
+    [ "$(row_state "$case_dir" "$id")" = "done" ] \
+      || fail "forced scout discard did not close the backlog item"
+    assert_grep 'discarded' "$(backlog_of "$case_dir")" \
+      "forced scout discard did not record its discarded outcome"
+    if grep -Fq "data/$id/report.md" "$(backlog_of "$case_dir")"; then
+      fail "forced scout discard recorded a report path for $report report"
+    fi
+  done
+  pass "forced scout discards record no report for missing or partial reports"
+}
+
 test_completion_refuses_a_legacy_record_without_an_incarnation() {
   local case_dir id meta out rc=0
   id=atomic-close-legacy-no-incarnation-b7
@@ -3106,6 +3132,7 @@ test_dispatch_does_not_resurrect_a_row_closed_after_preflight
 test_dispatch_fails_when_its_row_vanishes_after_preflight
 test_completion_closes_a_local_only_ship_before_reporting_success
 test_completion_closes_a_scout_with_its_report
+test_forced_scout_discard_records_no_report
 test_completion_refuses_a_legacy_record_without_an_incarnation
 test_completion_refuses_ambiguous_incarnation_metadata
 test_completion_records_a_relative_report_for_relocated_data
