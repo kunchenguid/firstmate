@@ -65,6 +65,17 @@ test_index_matches_scan() {
   done
   [ "$(fm_backend_meta_for_window sess:dup:p4 "$state")" = "$state/delta.meta" ] \
     || fail "a duplicated target did not resolve to the first meta"
+  # window_to_task keeps its own three-way rule (a thread id answers even when
+  # terminal= shadows it), so it is compared with its own unindexed scan.
+  for target in sess:w1:p1 sess:w1:p2 term-bravo sess:w2:p3 sess:dup:p4 sess:old:p9 thread-golf thread-hotel term-hotel sess:w7:p7 nowhere; do
+    got=$(window_to_task "$target" "$state")
+    fm_backend_meta_index_clear
+    want=$(window_to_task "$target" "$state")
+    fm_backend_meta_index_build "$state"
+    [ "$got" = "$want" ] || fail "indexed window_to_task of $target returned '$got', scan returned '$want'"
+  done
+  [ "$(window_to_task thread-hotel "$state")" = hotel ] \
+    || fail "window_to_task did not resolve a thread id that terminal= shadows"
   [ "$(window_to_task term-bravo "$state")" = bravo ] \
     || fail "window_to_task did not resolve a terminal target through the index"
   [ "$(window_to_task sess:w2:p3 "$state")" = charlie ] \
@@ -129,9 +140,12 @@ wait_done() {
 }
 
 test_index_hit_reads_no_other_meta() {
-  local state="$TMP_ROOT/noscan/state" out="$TMP_ROOT/noscan/out" fifo pid
+  local state="$TMP_ROOT/noscan/state" out="$TMP_ROOT/noscan/out" fifo pid probe want
   mkdir -p "$state"
   fm_write_meta "$state/mike.meta" window=sess:w5:p5
+  fm_write_meta "$state/november.meta" window=sess:w8:p8 terminal=term-november
+  fm_write_meta "$state/oscar.meta" window=sess:w9:p9 t3_thread_id=thread-oscar
+  fm_write_meta "$state/papa.meta" window=sess:w10:p10 terminal=term-papa t3_thread_id=thread-papa
   fm_backend_meta_index_build "$state"
   # A FIFO meta that sorts first blocks any scan that opens it, so a lookup
   # that finishes proves it never walked the other records.
@@ -142,6 +156,16 @@ test_index_hit_reads_no_other_meta() {
   pid=$!
   wait_done "$pid" 50 || { kill "$pid" 2>/dev/null; fail "an indexed hit opened another meta"; }
   [ "$(basename "$(cat "$out")" .meta)" = mike ] || fail "the indexed hit returned '$(cat "$out")'"
+
+  # window_to_task answers a window, a terminal, a thread, and a thread that
+  # terminal= shadows from the index without opening the blocking meta.
+  for probe in sess:w5:p5:mike term-november:november thread-oscar:oscar thread-papa:papa; do
+    want=${probe##*:}
+    ( window_to_task "${probe%:*}" "$state" > "$out" ) &
+    pid=$!
+    wait_done "$pid" 50 || { kill "$pid" 2>/dev/null; fail "an indexed window_to_task of ${probe%:*} opened another meta"; }
+    [ "$(cat "$out")" = "$want" ] || fail "indexed window_to_task of ${probe%:*} returned '$(cat "$out")', want $want"
+  done
 
   # Control: the same lookup without the index blocks on that FIFO, so the
   # construction above genuinely distinguishes an index hit from a scan.

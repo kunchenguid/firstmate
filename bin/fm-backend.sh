@@ -962,11 +962,13 @@ FM_BACKEND_META_INDEX_STATE=''
 FM_BACKEND_META_INDEX_HIT=''
 
 # fm_meta_last_target_fields: sets FM_META_LAST_WINDOW and FM_META_LAST_TERMINAL
-# to the last window= and terminal= (else t3_thread_id=) values of <meta-file>, in one read.
+# to the last window= and terminal= (else t3_thread_id=) values of <meta-file>, in one read,
+# and FM_META_LAST_THREAD to its own last t3_thread_id=.
 fm_meta_last_target_fields() {  # <meta-file>
   local line thread=''
   FM_META_LAST_WINDOW=''
   FM_META_LAST_TERMINAL=''
+  FM_META_LAST_THREAD=''
   [ -f "$1" ] || return 1
   {
     while IFS= read -r line || [ -n "$line" ]; do
@@ -978,6 +980,7 @@ fm_meta_last_target_fields() {  # <meta-file>
     done < "$1"
   } 2>/dev/null
   # Same fallback the scan applies: a record without terminal= answers to its T3 thread id.
+  FM_META_LAST_THREAD=$thread
   [ -n "$FM_META_LAST_TERMINAL" ] || FM_META_LAST_TERMINAL=$thread
   return 0
 }
@@ -994,6 +997,10 @@ fm_backend_meta_index_build() {  # <state-dir>
     fm_meta_last_target_fields "$meta" || continue
     [ -z "$FM_META_LAST_WINDOW" ] || FM_BACKEND_META_INDEX+=("$FM_META_LAST_WINDOW$tab$meta")
     [ -z "$FM_META_LAST_TERMINAL" ] || FM_BACKEND_META_INDEX+=("$FM_META_LAST_TERMINAL$tab$meta")
+    # A thread id that terminal= shadows still answers window_to_task, so it gets
+    # its own entry, marked so fm_backend_meta_for_window never returns it.
+    { [ -z "$FM_META_LAST_THREAD" ] || [ "$FM_META_LAST_THREAD" = "$FM_META_LAST_TERMINAL" ]; } \
+      || FM_BACKEND_META_INDEX+=("$FM_META_LAST_THREAD$tab$meta${tab}t3")
   done
   FM_BACKEND_META_INDEX_STATE=$state
 }
@@ -1006,8 +1013,12 @@ fm_backend_meta_index_clear() {
 # fm_backend_meta_index_lookup: sets FM_BACKEND_META_INDEX_HIT to the indexed,
 # still-valid meta for <target> and returns 0, or returns 1 when the caller must
 # scan. Sets a variable rather than printing so a caller pays no subshell.
-fm_backend_meta_index_lookup() {  # <target> <state-dir>
-  local target=$1 state=$2 tab=$'\t' entry meta=''
+# By default only window and terminal-or-thread entries answer, the rule
+# fm_backend_meta_for_window scans by. With a third argument of "any", an entry
+# for a thread id that terminal= shadows answers too and the hit is re-read
+# against window, terminal-or-thread, or thread, the rule window_to_task scans by.
+fm_backend_meta_index_lookup() {  # <target> <state-dir> [any]
+  local target=$1 state=$2 mode=${3:-} tab=$'\t' entry rest meta='' kind
   FM_BACKEND_META_INDEX_HIT=''
   [ -n "$target" ] && [ -n "$FM_BACKEND_META_INDEX_STATE" ] || return 1
   [ "$FM_BACKEND_META_INDEX_STATE" = "$state" ] || return 1
@@ -1015,12 +1026,19 @@ fm_backend_meta_index_lookup() {  # <target> <state-dir>
   [ "${#FM_BACKEND_META_INDEX[@]}" -gt 0 ] || return 1
   for entry in "${FM_BACKEND_META_INDEX[@]}"; do
     [ "${entry%%"$tab"*}" = "$target" ] || continue
-    meta=${entry#*"$tab"}
+    rest=${entry#*"$tab"}
+    meta=${rest%%"$tab"*}
+    kind=${rest#"$meta"}
+    if [ -n "$kind" ] && [ "$mode" != any ]; then
+      meta=''
+      continue
+    fi
     break
   done
   [ -n "$meta" ] || return 1
   fm_meta_last_target_fields "$meta" || return 1
-  [ "$FM_META_LAST_WINDOW" = "$target" ] || [ "$FM_META_LAST_TERMINAL" = "$target" ] || return 1
+  [ "$FM_META_LAST_WINDOW" = "$target" ] || [ "$FM_META_LAST_TERMINAL" = "$target" ] \
+    || { [ "$mode" = any ] && [ "$FM_META_LAST_THREAD" = "$target" ]; } || return 1
   FM_BACKEND_META_INDEX_HIT=$meta
   return 0
 }
