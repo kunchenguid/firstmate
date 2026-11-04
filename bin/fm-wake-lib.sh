@@ -2909,26 +2909,29 @@ fm_wake_print_deduped() {
 # fm_wake_shadow_skip <state> <deduped-raw-rows>
 # Shadow mode only: nothing is suppressed. A row's source is "kind<TAB>key" and
 # its facts are kind, key and payload; the epoch and sequence columns change on
-# every append and are excluded. When a drained row's fingerprint (cksum of the
-# facts) equals the last one drained for its source, append
-# "epoch<TAB>kind<TAB>key<TAB>fingerprint" to .wake-would-skip.log. Last
-# fingerprints and sequences live in .wake-last-facts. Best effort: never fails the drain.
+# every append and are excluded. Rows are compared in sequence order (the
+# deduped presentation order is not sequence order). When a row's fingerprint
+# (cksum of the facts) equals the last one for its source and its sequence
+# differs, append "epoch<TAB>kind<TAB>key<TAB>fingerprint" to
+# .wake-would-skip.log. .wake-last-facts holds "kind<TAB>key<TAB>fingerprint<TAB>seq"
+# for the most recently drained sources and is rewritten once per drain.
+# Best effort: never fails the drain.
 # ponytail: a payload with an embedded elapsed time never matches; normalize it if the log shows that.
+# ponytail: only the 1000 most recently drained sources are kept; a source idle past that starts fresh.
 fm_wake_shadow_skip() {
   local state=$1 rows=$2 last="$1/.wake-last-facts" log="$1/.wake-would-skip.log"
-  local seq kind key payload fp prev
+  local seq kind key payload
   [ -n "$rows" ] || return 0
   [ -f "$last" ] || : > "$last" || return 0
-  while IFS=$'\t' read -r _ seq kind key payload; do
-    fp=$(printf '%s\t%s\t%s' "$kind" "$key" "$payload" | cksum | tr ' ' :)
-    prev=$(awk -F '\t' -v k="$kind" -v n="$key" '$1 == k && $2 == n { v = $3 "\t" $4 } END { print v }' "$last")
-    [ "${prev%%$'\t'*}" != "$fp" ] || [ "${prev#*$'\t'}" = "$seq" ] \
-      || printf '%s\t%s\t%s\t%s\n' "$(date +%s)" "$kind" "$key" "$fp" >> "$log"
-    { awk -F '\t' -v k="$kind" -v n="$key" '!($1 == k && $2 == n)' "$last"
-      printf '%s\t%s\t%s\t%s\n' "$kind" "$key" "$fp" "$seq"; } > "$last.tmp" && mv -f "$last.tmp" "$last"
-  done <<EOF
-$rows
-EOF
+  printf '%s\n' "$rows" | sort -t $'\t' -k2,2n | while IFS=$'\t' read -r _ seq kind key payload; do
+    printf '%s\t%s\t%s\t%s\n' "$kind" "$key" \
+      "$(printf '%s\t%s\t%s' "$kind" "$key" "$payload" | cksum | tr ' ' :)" "$seq"
+  done | awk -F '\t' -v now="$(date +%s)" -v lf="$log" '
+    { s = $1 FS $2 }
+    drained && s in fp && fp[s] == $3 && sq[s] != $4 { printf "%s\t%s\t%s\t%s\n", now, $1, $2, $3 >> lf }
+    { fp[s] = $3; sq[s] = $4; t[s] = ++c }
+    END { for (s in t) at[t[s]] = s; for (i = 1; i <= c; i++) if (i in at) print at[i] FS fp[at[i]] FS sq[at[i]] }
+  ' "$last" drained=1 - | tail -n 1000 > "$last.tmp" && mv -f "$last.tmp" "$last"
   return 0
 }
 

@@ -64,6 +64,20 @@ test_redrain_without_ack_does_not_log() {
   pass "re-draining an unacknowledged row never logs a would-skip"
 }
 
+test_batch_compares_in_sequence_order() {
+  local dir state log
+  dir=$(make_case order); state="$dir/state"; log="$state/.wake-would-skip.log"
+  append_wake "$state" check job-a "build green"
+  append_wake "$state" check job-a "build red"
+  append_wake "$state" check job-a "build green"
+  drain_ack "$state" "$dir/1.out"
+  append_wake "$state" check job-a "build red"
+  drain_ack "$state" "$dir/2.out"
+  [ ! -s "$log" ] || fail "red after a newest green logged a would-skip: $(cat "$log")"
+  pass "rows in one drain are compared in sequence order, not presentation order"
+}
+
 test_equal_facts_log_one_would_skip_and_still_present
+test_batch_compares_in_sequence_order
 test_redrain_without_ack_does_not_log
 test_changed_facts_and_other_sources_do_not_log
