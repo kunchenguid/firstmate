@@ -1407,6 +1407,7 @@ ok - Herdr 0.9.5 projected spawn enters its recorded copy (delayed=1)
 ```
 
 This token-free guard provisions only a named non-default Herdr lab session, drives the real projected spawn, cd, and cwd assertion, and verifies the exact foreground cwd against the recorded copy.
+On a supported Herdr below the presentation floor, where `fm_backend_herdr_presentation_release_supported` keeps spawns flat, it prints a skip naming the release and exits 0 instead of running the projected cases.
 Its delayed case holds the first real cd behind a 15-second shell command and verifies exactly one resend; its ordinary case verifies no redundant cd.
 The lease fixture returns a disposable clone without accessing a shared Treehouse pool.
 The portable delayed, dropped, and never-moving entry regressions are in `tests/fm-spawn-herdr-lease.test.sh`.
