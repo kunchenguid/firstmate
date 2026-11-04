@@ -74,15 +74,17 @@
 #     mode, never quiet mode's record, whose captain is present; docs/pi-
 #     supervision-branch.md "Postures"), main is parked and its STANDING authority
 #     relocates to the branch for exactly the actions whose guarded script
-#     opts in with --away-relocated: a PR merge, a fresh spawn of queued work,
-#     and a decision answer. Each guarded script keeps its own mechanical gate;
+#     opts in with --away-relocated: a PR merge, a local-only landing, a fresh
+#     spawn of queued work, and a decision answer. Each guarded script keeps
+#     its own mechanical gate (bin/fm-merge-local.sh's away gate lands only a
+#     yolo=on task for the branch; its --attended-override path is main-only);
 #     bin/fm-branch-prompt.sh "Postures" owns how the branch judges the
 #     captain's away words before invoking one. The
 #     relocation grants nothing beyond what main could do attended: it only
-#     changes which actor may reach the guarded script's own gate. An action
-#     that has no record-side gate of its own - landing local-only work or
-#     retiring a secondmate - is never relocated and keeps refusing the branch
-#     in both postures. An archived, absent, unconfirmed, or unreadable record
+#     changes which actor may reach the guarded script's own gate. Retiring a
+#     secondmate has no record-side gate of its own, so it is never relocated
+#     and keeps refusing the branch in both postures. An archived, absent,
+#     unconfirmed, or unreadable record
 #     is absence: the
 #     attended refusal, byte for byte. The record is validated immediately
 #     before the guarded script's first persistent side effect and the lock is

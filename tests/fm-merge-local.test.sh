@@ -308,7 +308,127 @@ SH
   pass 'two approved tasks with the same tree cannot roll back a successful landing'
 }
 
+enter_away() {
+  FM_HOME="$HOME_DIR" FM_STATE_OVERRIDE="$HOME_DIR/state" \
+    "$ROOT/bin/fm-afk-contract.sh" enter --spend 2 --words 'keep going while I sleep' >/dev/null \
+    || fail 'away entry failed'
+}
+
+# Away parity: the away posture never approves less than the standing authority
+# the captain already granted, so a yolo-on local-only task lands while away
+# exactly as it does attended, for main and for the relocated supervision
+# branch alike, while a task whose posture needs the captain's word for each
+# landing still waits for the captain's return.
+test_away_landing_matches_standing_authority() {
+  local out rc actor
+  for actor in main branch; do
+    make_case "away-yolo-on-$actor"
+    printf 'yolo=on\n' >> "$META"
+    record_done || fail 'away yolo-on readiness was not accepted'
+    enter_away
+    rc=0
+    if [ "$actor" = branch ]; then
+      out=$(FM_SUPERVISION_ACTOR=branch land 2>&1) || rc=$?
+    else
+      out=$(land 2>&1) || rc=$?
+    fi
+    [ "$rc" -eq 0 ] || fail "a yolo-on local-only landing by $actor refused while away (rc=$rc): $out"
+    [ "$(git -C "$PROJ" rev-parse HEAD)" = "$X" ] || fail "the away landing by $actor did not land X"
+    [ "$(cat "$PROJ/approved.txt")" = 'approved X' ] || fail "the away landing by $actor did not update the checkout"
+  done
+  assert_contains "$out" 'main is parked' 'the relocated branch landing did not announce itself'
+
+  for actor in main branch; do
+    make_case "away-yolo-off-$actor"
+    printf 'yolo=off\n' >> "$META"
+    record_done || fail 'away yolo-off readiness was not accepted'
+    enter_away
+    rc=0
+    if [ "$actor" = branch ]; then
+      out=$(FM_SUPERVISION_ACTOR=branch land 2>&1) || rc=$?
+    else
+      out=$(land 2>&1) || rc=$?
+    fi
+    [ "$rc" -ne 0 ] || fail "a yolo-off local-only landing by $actor proceeded while away: $out"
+    assert_contains "$out" "waits for the captain's word" "the yolo-off refusal by $actor did not name the captain"
+    [ "$(git -C "$PROJ" rev-parse HEAD)" = "$BASE" ] || fail "a yolo-off away refusal by $actor moved main"
+    [ ! -e "$PROJ/approved.txt" ] || fail "a yolo-off away refusal by $actor left approved files behind"
+  done
+
+  # A task record that predates recorded yolo carries no standing grant.
+  make_case away-yolo-missing
+  record_done || fail 'away no-yolo readiness was not accepted'
+  enter_away
+  out=$(land 2>&1) && fail "a task with no recorded yolo landed while away: $out"
+  assert_contains "$out" "waits for the captain's word" 'the missing-yolo refusal did not name the captain'
+
+  # Attended, the branch still never lands, and main lands as before.
+  make_case attended-branch
+  printf 'yolo=on\n' >> "$META"
+  record_done || fail 'attended readiness was not accepted'
+  rc=0
+  out=$(FM_SUPERVISION_ACTOR=branch land 2>&1) || rc=$?
+  [ "$rc" -eq 6 ] || fail "an attended branch landing was not refused at the role partition (rc=$rc): $out"
+  [ "$(git -C "$PROJ" rev-parse HEAD)" = "$BASE" ] || fail 'an attended branch refusal moved main'
+  land >/dev/null 2>&1 || fail 'an attended main landing refused'
+
+  # Quiet mode is a present captain: a yolo-off landing the captain approved
+  # in chat still proceeds, because quiet records hold nothing for a return.
+  make_case quiet-yolo-off
+  printf 'yolo=off\n' >> "$META"
+  record_done || fail 'quiet readiness was not accepted'
+  FM_AFK_MODE=quiet FM_HOME="$HOME_DIR" FM_STATE_OVERRIDE="$HOME_DIR/state" \
+    "$ROOT/bin/fm-afk-contract.sh" enter --words 'quiet please' >/dev/null || fail 'quiet entry failed'
+  land >/dev/null 2>&1 || fail 'a quiet-mode main landing refused'
+  [ "$(git -C "$PROJ" rev-parse HEAD)" = "$X" ] || fail 'the quiet-mode landing did not land X'
+  pass 'while away a yolo-on local-only task lands for main and the branch, and a task whose posture needs the captain waits'
+}
+
+land_with_override() {
+  FM_ROOT_OVERRIDE="$HOME_DIR" FM_HOME="$HOME_DIR" FM_STATE_OVERRIDE="$HOME_DIR/state" \
+    bash "$ROOT/bin/fm-merge-local.sh" local-task --attended-override
+}
+
+# Away never approves less than the captain already authorized: a yolo-off
+# landing the captain named lands for main with --attended-override, exactly as
+# fm-pr-merge.sh's attended override carries an explicit captain instruction.
+# The supervision branch cannot hear the captain, so it is refused the override,
+# and without it a yolo-off landing still waits.
+test_away_attended_override_lands_only_for_main() {
+  local out rc
+  make_case away-override-main
+  printf 'yolo=off\n' >> "$META"
+  record_done || fail 'override readiness was not accepted'
+  enter_away
+  out=$(land 2>&1) && fail "a yolo-off landing with no override proceeded while away: $out"
+  assert_contains "$out" "waits for the captain's word" 'the no-override refusal did not name the captain'
+  [ "$(git -C "$PROJ" rev-parse HEAD)" = "$BASE" ] || fail 'the no-override refusal moved main'
+  out=$(land_with_override 2>&1) || fail "main's away landing with the captain's override refused: $out"
+  [ "$(git -C "$PROJ" rev-parse HEAD)" = "$X" ] || fail "main's override landing did not land X"
+  [ "$(cat "$PROJ/approved.txt")" = 'approved X' ] || fail "main's override landing did not update the checkout"
+
+  make_case away-override-branch
+  printf 'yolo=off\n' >> "$META"
+  record_done || fail 'branch override readiness was not accepted'
+  enter_away
+  rc=0
+  out=$(FM_SUPERVISION_ACTOR=branch land_with_override 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "the supervision branch landed with --attended-override: $out"
+  assert_contains "$out" 'cannot hear' 'the branch override refusal did not say why'
+  [ "$(git -C "$PROJ" rev-parse HEAD)" = "$BASE" ] || fail 'the branch override refusal moved main'
+  [ ! -e "$PROJ/approved.txt" ] || fail 'the branch override refusal left approved files behind'
+
+  make_case override-bad-arg
+  record_done || fail 'bad-arg readiness was not accepted'
+  rc=0
+  out=$(FM_ROOT_OVERRIDE="$HOME_DIR" FM_HOME="$HOME_DIR" FM_STATE_OVERRIDE="$HOME_DIR/state" \
+    bash "$ROOT/bin/fm-merge-local.sh" local-task --attended-override=yes 2>&1) || rc=$?
+  [ "$rc" -eq 2 ] || fail "an unknown second argument was not refused as invalid (rc=$rc): $out"
+  pass 'while away main lands a captain-named yolo-off task with --attended-override, the branch never may, and no override still waits'
+}
+
 fm_test_run test_two_tasks_cannot_undo_a_same_tree_landing test_branch_advance_does_not_change_approval \
+  test_away_landing_matches_standing_authority test_away_attended_override_lands_only_for_main \
   test_missing_and_malformed_head_refuse test_change_after_hold_check_refuses \
   test_diverged_default_refuses test_change_during_approval_check_refuses \
   test_snapshot_cannot_pin_a_replacement_task test_done_recording_preserves_caller_locks
