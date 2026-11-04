@@ -2230,7 +2230,7 @@ spawn_refuse_if_away_spend_cap() {
   case "$cap" in
   '' | *[!0-9]* | 0) return 0 ;;
   esac
-  live=$(FM_STATE_OVERRIDE="$STATE" "$SCRIPT_DIR/fm-afk-contract.sh" live-workers 2>/dev/null || true)
+  live=$(FM_AFK_LIVE_WORKERS_TIMEOUT="${SPAWN_SPEND_CAP_TIMEOUT:-${FM_AFK_LIVE_WORKERS_TIMEOUT:-20}}" FM_STATE_OVERRIDE="$STATE" "$SCRIPT_DIR/fm-afk-contract.sh" live-workers 2>/dev/null || true)
   case "$live" in
   '' | *[!0-9]*)
     echo "error: spawn refused - the away-posture record caps concurrent workers at $cap and this home's live ordinary task count could not be read; task $ID stays queued (spend cap: bin/fm-afk-contract.sh)" >&2
@@ -2336,7 +2336,7 @@ if [ "$RELAUNCH" -eq 0 ]; then
     exit 1
   fi
   SPAWN_TASK_SET_LOCK_HELD=1
-  spawn_refuse_if_away_spend_cap
+  SPAWN_SPEND_CAP_TIMEOUT=5 spawn_refuse_if_away_spend_cap
   spawn_require_relocated_queued_work
 fi
 if [ "$KIND" = secondmate ]; then
