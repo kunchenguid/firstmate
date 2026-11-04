@@ -1751,7 +1751,11 @@ SH
   done
   [ -s "$fix" ] || fail "the fixture script never started"
   read -r script_pid sleep_pid <"$fix"
-  trap 'kill -KILL "$sleep_pid" 2>/dev/null || true; fm_test_cleanup' EXIT INT TERM HUP QUIT
+  trap 'kill -KILL "$sleep_pid" 2>/dev/null || true; fm_test_cleanup' EXIT
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+  trap 'exit 129' HUP
+  trap 'exit 131' QUIT
   id=$(TMPDIR="$tmp" "$runner" --stop | awk -v p="pid=$pid" '$2 == p {print $1}')
   [ -n "$id" ] || fail "--stop did not list the live run"
   TMPDIR="$tmp" "$runner" --stop "$id" >/dev/null || fail "--stop <run> failed"
