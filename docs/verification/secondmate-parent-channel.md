@@ -4,6 +4,7 @@ Maintainer-verification record for the guarantee in [`secondmate-parent-channel.
 Refresh it by rerunning the fixture below after changing any publisher named in `bin/fm-parent-channel-lib.sh`.
 This run predates emission-time stamping, so each published line below is the payload without its stamp: a rerun now writes the same bytes with an `[at=<epoch>]` tag closing the head, as in `done [key=child-outcome-child-done-05b032a1] [at=<epoch>]: child ...`.
 [`bin/fm-classify-lib.sh`](../../bin/fm-classify-lib.sh) owns that tag's syntax; nothing this record proves about delivery depends on it.
+Steps 3 and 4 were rerun on 2026-11-04 after `hold` began requiring `--rec` on a new ask: the same two `fm-captain-hold.sh` calls against a fresh local-route fixture, without tmux watchers, so their command and parent-channel lines below come from that rerun and the wake counts from the original run.
 
 ## What was run
 
@@ -57,7 +58,7 @@ signal: $P/state/mate.status
 
 $ # Step 3: the mate holds a task for the captain; the hold reaches the parent from fm-captain-hold itself
 
-$ FM_HOME=$M bin/fm-captain-hold.sh hold child-call --title 'Pick the rollout window' --reason 'rollout window choice pending' --repo alpha
+$ FM_HOME=$M bin/fm-captain-hold.sh hold child-call --title 'Pick the rollout window' --reason 'rollout window choice pending' --rec 'roll out on Monday' --repo alpha
 child-call
 
 $ # Step 4: the captain's answer is recorded in the mate home; the close reaches the parent from fm-captain-hold itself
@@ -69,7 +70,7 @@ $ cat $P/state/mate.status   (final parent channel)
 working: delegated scope
 done [key=child-outcome-child-done-05b032a1]: child child done: PR https://github.com/kunchenguid/firstmate/pull/9999 checks green pr=https://github.com/kunchenguid/firstmate/pull/9999 mode=no-mistakes yolo=off
 done [key=child-pr-child]: child child PR ready: https://github.com/kunchenguid/firstmate/pull/9999 mode=no-mistakes yolo=off
-needs-decision [key=captain-hold-child-call-1]: captain hold child-call: rollout window choice pending
+needs-decision [key=captain-hold-child-call-1]: captain hold child-call: rollout window choice pending Rec: roll out on Monday
 resolved [key=captain-hold-child-call-1]: captain hold child-call: answered
 
 $ parent watcher wakes, one per delivered line (4 signals)
