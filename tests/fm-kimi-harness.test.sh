@@ -70,6 +70,18 @@ fake_screen() {
     trust-wrapped)
       printf '╭─ Trust this folder? ─╮\n│ ↑↓ navigate ·        │\n│ Enter select · Esc   │\n│ exit                 │\n│ %s │\n│ ❯ Trust this folder  │\n│   Don'"'"'t trust         │\n╰──────────────────────╯\n' "$FM_FAKE_PANE_PATH"
       ;;
+    trust-230|trust-230-rootmcp|trust-230-kimimcp|trust-230-small|trust-230-paged)
+      # Recorded from Kimi Code CLI 2.3.0; tests/captures/kimi-code-2.3.0/README.md
+      # owns the provenance. The directory line becomes the fake pane's path.
+      case "$state" in
+        trust-230) capture=plain.pane ;;
+        trust-230-rootmcp) capture=root-mcp-json.pane ;;
+        trust-230-kimimcp) capture=kimi-code-mcp-json.pane ;;
+        trust-230-small) capture=small-terminal.pane ;;
+        trust-230-paged) capture=paged.pane ;;
+      esac
+      sed "s|{WORKDIR}|$FM_FAKE_PANE_PATH|g" "$FM_FAKE_KIMI_CAPTURES/$capture"
+      ;;
     pointer-typed)
       printf 'context: 0%% (0/256k)\n╭────────────────────────────────╮\n│ > Read the brief and follow it │\n│                                │\n╰────────────────────────────────╯\n'
       ;;
@@ -133,7 +145,7 @@ case "${1:-}" in
         *)
           printf '%s\n' "$literal" >> "$FM_FAKE_POINTER_LOG"
           case "$state" in
-            trust|trust-wrapped|trust-partial|trust-decoy|booting|banner-only|banner-first|blank-frame) ;;
+            trust|trust-wrapped|trust-partial|trust-decoy|trust-230|trust-230-rootmcp|trust-230-kimimcp|trust-230-small|trust-230-paged|booting|banner-only|banner-first|blank-frame) ;;
             *) printf 'pointer-typed\n' > "$FM_FAKE_KIMI_STATE" ;;
           esac
           ;;
@@ -152,11 +164,16 @@ case "${1:-}" in
                 late) printf 'booting\n' > "$FM_FAKE_KIMI_STATE" ;;
                 blink) printf 'banner-first\n' > "$FM_FAKE_KIMI_STATE" ;;
                 wrapped) printf 'trust-wrapped\n' > "$FM_FAKE_KIMI_STATE" ;;
+                230) printf 'trust-230\n' > "$FM_FAKE_KIMI_STATE" ;;
+                230-rootmcp) printf 'trust-230-rootmcp\n' > "$FM_FAKE_KIMI_STATE" ;;
+                230-kimimcp) printf 'trust-230-kimimcp\n' > "$FM_FAKE_KIMI_STATE" ;;
+                230-small) printf 'trust-230-small\n' > "$FM_FAKE_KIMI_STATE" ;;
+                230-paged) printf 'trust-230-paged\n' > "$FM_FAKE_KIMI_STATE" ;;
                 *) printf 'ready\n' > "$FM_FAKE_KIMI_STATE" ;;
               esac
             fi
             ;;
-          trust|trust-wrapped)
+          trust|trust-wrapped|trust-230)
             printf 'enter\n' >> "$FM_FAKE_KIMI_TRUST_ENTER_LOG"
             trust_enters=$(wc -l < "$FM_FAKE_KIMI_TRUST_ENTER_LOG" | tr -d ' ')
             case "${FM_FAKE_KIMI_TRUST_CLEARS:-yes}" in
@@ -165,6 +182,18 @@ case "${1:-}" in
                 [ "$trust_enters" -lt 2 ] || printf 'ready\n' > "$FM_FAKE_KIMI_STATE"
                 ;;
             esac
+            ;;
+          trust-230-rootmcp|trust-230-kimimcp|trust-230-paged)
+            # Observed live on Kimi 2.3.0: Enter on a prompt that announces
+            # project servers starts the declared command before any login,
+            # and the paged prompt is that same prompt with the announcement
+            # on a page that is not shown.
+            printf 'enter\n' >> "$FM_FAKE_KIMI_TRUST_ENTER_LOG"
+            printf 'started-by-fake-kimi\n' >> "$FM_FAKE_MCP_MARKER_LOG"
+            printf 'ready\n' > "$FM_FAKE_KIMI_STATE"
+            ;;
+          trust-230-small)
+            printf 'enter\n' >> "$FM_FAKE_KIMI_TRUST_ENTER_LOG"
             ;;
           ready|delivered)
             printf 'enter\n' >> "$FM_FAKE_KIMI_STRAY_ENTER_LOG"
@@ -282,6 +311,8 @@ run_spawn() {
     FM_FAKE_KIMI_SWALLOWED="$case_dir/kimi.swallowed" \
     FM_FAKE_KIMI_SWALLOW_FIRST="${FM_FAKE_KIMI_SWALLOW_FIRST:-no}" \
     FM_FAKE_TMUX_CALL_LOG="$case_dir/tmux-calls.log" \
+    FM_FAKE_KIMI_CAPTURES="$ROOT/tests/captures/kimi-code-2.3.0" \
+    FM_FAKE_MCP_MARKER_LOG="$case_dir/marker.log" \
     FM_FAKE_BRIEF_REAL="$(cd "$home/data/$id" && pwd -P)/launch-brief.md" \
     FM_KIMI_READY_POLLS="${FM_KIMI_READY_POLLS:-2}" FM_KIMI_DELIVERY_POLLS=2 FM_KIMI_POLL_INTERVAL=0 \
     PATH="$fakebin:$BASE_PATH" \
@@ -1134,6 +1165,98 @@ test_kimi_bordered_prompt_needs_no_override() {
   pass "composer classifier: kimi's existing bordered > shape is already safe without an override"
 }
 
+assert_project_server_stayed_idle() {
+  [ ! -s "$CASE_DIR/marker.log" ] \
+    || fail "the declared project MCP server started: $(cat "$CASE_DIR/marker.log")"
+}
+
+test_kimi_230_prompt_with_no_project_servers_is_answered_and_verified() {
+  local id rec out rc
+  id=kimi-230-plain-a1
+  rec=$(make_spawn_case trust-230 "$id")
+  read_spawn_record "$rec"
+  rc=0
+  out=$(FM_KIMI_READY_POLLS=3 FM_FAKE_KIMI_TRUST=230 run_spawn \
+    "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id") || rc=$?
+  expect_code 0 "$rc" "the recorded 2.3.0 prompt with no project servers should be answered into a verified spawn"
+  assert_contains "$out" "spawned $id harness=kimi" "Kimi spawn did not continue after the 2.3.0 prompt cleared"
+  [ "$(wc -l < "$CASE_DIR/trust-enter.log" | tr -d ' ')" = 1 ] \
+    || fail "the 2.3.0 prompt was not answered exactly once"
+  assert_grep 'Read the brief at' "$CASE_DIR/pointer.log" \
+    "Kimi brief pointer was not delivered after the 2.3.0 prompt"
+  assert_contains "$(cat "$CASE_DIR/launch.log")" "--auto" "the launch did not stay kimi --auto"
+  assert_project_server_stayed_idle
+  pass "fm-spawn: the recorded Kimi 2.3.0 prompt with no project servers is answered once and the brief is delivered"
+}
+
+test_kimi_230_prompt_announcing_a_root_mcp_json_server_receives_no_key() {
+  local id rec out rc
+  id=kimi-230-rootmcp-a2
+  rec=$(make_spawn_case trust-230-rootmcp "$id")
+  read_spawn_record "$rec"
+  rc=0
+  out=$(FM_KIMI_READY_POLLS=3 FM_FAKE_KIMI_TRUST=230-rootmcp run_spawn \
+    "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id") || rc=$?
+  [ "$rc" -ne 0 ] || fail "a 2.3.0 prompt announcing a root .mcp.json server should not pass readiness"
+  [ ! -s "$CASE_DIR/trust-enter.log" ] || fail "a key was sent to a 2.3.0 prompt announcing a root .mcp.json server"
+  [ ! -s "$CASE_DIR/pointer.log" ] || fail "the brief pointer was sent to a 2.3.0 prompt announcing project servers"
+  assert_contains "$out" "announces project MCP servers" "the refusal did not name the announcement"
+  assert_contains "$out" "Config line names the file" "the refusal did not tell the operator where the declaration is"
+  assert_grep "failed: kimi's folder prompt announces project MCP servers" \
+    <(sed -E 's/ \[at=[0-9]+\]//' "$HOME_DIR/state/$id.status") \
+    "the announcing prompt did not leave a supervisor-visible failure"
+  assert_project_server_stayed_idle
+  pass "fm-spawn: a recorded Kimi 2.3.0 prompt announcing a root .mcp.json server receives no key and reports why"
+}
+
+test_kimi_230_prompt_announcing_a_kimi_code_mcp_json_server_receives_no_key() {
+  local id rec out rc
+  id=kimi-230-kimimcp-a3
+  rec=$(make_spawn_case trust-230-kimimcp "$id")
+  read_spawn_record "$rec"
+  rc=0
+  out=$(FM_KIMI_READY_POLLS=3 FM_FAKE_KIMI_TRUST=230-kimimcp run_spawn \
+    "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id") || rc=$?
+  [ "$rc" -ne 0 ] || fail "a 2.3.0 prompt announcing a .kimi-code/mcp.json server should not pass readiness"
+  [ ! -s "$CASE_DIR/trust-enter.log" ] || fail "a key was sent to a 2.3.0 prompt announcing a .kimi-code/mcp.json server"
+  [ ! -s "$CASE_DIR/pointer.log" ] || fail "the brief pointer was sent to a 2.3.0 prompt announcing project servers"
+  assert_contains "$out" "announces project MCP servers" "the refusal did not name the announcement"
+  assert_project_server_stayed_idle
+  pass "fm-spawn: a recorded Kimi 2.3.0 prompt announcing a .kimi-code/mcp.json server receives no key and reports why"
+}
+
+test_kimi_230_prompt_in_a_terminal_too_small_to_confirm_receives_no_key() {
+  local id rec out rc
+  id=kimi-230-small-a4
+  rec=$(make_spawn_case trust-230-small "$id")
+  read_spawn_record "$rec"
+  rc=0
+  out=$(FM_FAKE_KIMI_TRUST=230-small run_spawn \
+    "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id") || rc=$?
+  [ "$rc" -ne 0 ] || fail "a 2.3.0 prompt collapsed to its title should not pass readiness"
+  [ ! -s "$CASE_DIR/trust-enter.log" ] || fail "a key was sent to a 2.3.0 prompt collapsed to its title"
+  [ ! -s "$CASE_DIR/pointer.log" ] || fail "the brief pointer was sent to a 2.3.0 prompt collapsed to its title"
+  assert_contains "$out" "trust dialog text stayed on screen without the complete dialog" \
+    "the collapsed prompt did not report that it was never safe to answer"
+  pass "fm-spawn: a recorded Kimi 2.3.0 prompt collapsed to its title receives no key and reports that it is not ready"
+}
+
+test_kimi_230_prompt_that_pages_its_disclosure_receives_no_key() {
+  local id rec out rc
+  id=kimi-230-paged-a5
+  rec=$(make_spawn_case trust-230-paged "$id")
+  read_spawn_record "$rec"
+  rc=0
+  out=$(FM_KIMI_READY_POLLS=3 FM_FAKE_KIMI_TRUST=230-paged run_spawn \
+    "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id") || rc=$?
+  [ "$rc" -ne 0 ] || fail "a 2.3.0 prompt that pages its disclosure should not pass readiness"
+  [ ! -s "$CASE_DIR/trust-enter.log" ] || fail "a key was sent to a 2.3.0 prompt that pages its disclosure"
+  [ ! -s "$CASE_DIR/pointer.log" ] || fail "the brief pointer was sent to a 2.3.0 prompt that pages its disclosure"
+  assert_contains "$out" "pages what trusting would activate" "the paged prompt did not report why it was not answered"
+  assert_project_server_stayed_idle
+  pass "fm-spawn: a recorded Kimi 2.3.0 prompt that pages its disclosure receives no key, because the announcement can sit on a hidden page"
+}
+
 test_kimi_hook_install_is_surgical_idempotent_and_removable
 test_kimi_hook_remove_preserves_owned_newline_boundary
 test_kimi_hook_fails_closed_on_missing_malformed_or_partial_config
@@ -1164,3 +1287,8 @@ test_kimi_session_lock_identity
 test_kimi_busy_signature_is_scoped_to_spinner_lines
 test_watcher_never_classifies_kimi_from_its_spinner
 test_kimi_bordered_prompt_needs_no_override
+test_kimi_230_prompt_with_no_project_servers_is_answered_and_verified
+test_kimi_230_prompt_announcing_a_root_mcp_json_server_receives_no_key
+test_kimi_230_prompt_announcing_a_kimi_code_mcp_json_server_receives_no_key
+test_kimi_230_prompt_in_a_terminal_too_small_to_confirm_receives_no_key
+test_kimi_230_prompt_that_pages_its_disclosure_receives_no_key

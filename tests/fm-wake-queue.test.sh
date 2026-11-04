@@ -19,6 +19,90 @@ GUARD="$ROOT/bin/fm-guard.sh"
 TMP_ROOT=$(fm_test_tmproot fm-wake-tests)
 
 
+test_branch_grant_requires_lock_acquisition() {
+  local dir fixture state action outcome rc
+  local -a args
+  dir=$(make_case grant-lock-failure)
+  fixture="$dir/bin"
+  mkdir -p "$fixture"
+  cp "$GRANT" "$ROOT/bin/fm-wake-lib.sh" "$ROOT/bin/fm-path-lib.sh" "$fixture/"
+  # Inject only the acquire result in this disposable copy. Keep real owner
+  # validation, grant mutations, and pid-guarded lock release in use.
+  cat >> "$fixture/fm-wake-lib.sh" <<'SH'
+fm_lock_acquire_wait() {
+  printf 'acquire\n' >> "$STATE/acquire.log"
+  [ "${FM_GRANT_FAIL_ACQUIRE:-0}" = 0 ] || return 2
+  fm_lock_try_acquire "$1"
+}
+SH
+  for outcome in failure success; do
+    for action in release deactivate activate publish; do
+      state="$dir/$outcome-$action"
+      mkdir -p "$state"
+      FM_STATE_OVERRIDE="$state" bash "$GRANT" activate "$$" existing \
+        || fail "could not seed $action owner"
+      printf '1\n' > "$state/.branch-eligible-rows"
+      printf '1\t1\tsignal\ttask.status\tsignal: task\n' > "$state/.wake-queue"
+      cp "$state/.branch-eligible-owner" "$state/owner.before"
+      cp "$state/.branch-eligible-rows" "$state/rows.before"
+      case "$action" in
+        release) args=(release existing) ;;
+        deactivate) args=(deactivate "$$" existing) ;;
+        activate) args=(activate "$$" replacement) ;;
+        publish) args=(publish existing 1) ;;
+      esac
+      if [ "$outcome" = failure ]; then
+        # A foreign live holder must survive both the command and its EXIT trap.
+        mkdir "$state/.wake-queue.lock"
+        printf '%s\n' "$$" > "$state/.wake-queue.lock/pid"
+        FM_STATE_OVERRIDE="$state" FM_GRANT_FAIL_ACQUIRE=1 \
+          bash "$fixture/fm-wake-grant.sh" "${args[@]}"
+        rc=$?
+        [ "$rc" -ne 0 ] || fail "$action returned success after failed lock acquisition"
+        cmp -s "$state/owner.before" "$state/.branch-eligible-owner" \
+          || fail "$action changed the owner after failed lock acquisition"
+        cmp -s "$state/rows.before" "$state/.branch-eligible-rows" \
+          || fail "$action changed rows after failed lock acquisition"
+        [ "$(cat "$state/.wake-queue.lock/pid")" = "$$" ] \
+          || fail "$action released another owner's lock"
+      else
+        # Publication must also work when it needs to install a new snapshot.
+        [ "$action" != publish ] || rm "$state/.branch-eligible-rows"
+        FM_STATE_OVERRIDE="$state" FM_GRANT_FAIL_ACQUIRE=0 \
+          bash "$fixture/fm-wake-grant.sh" "${args[@]}" \
+          || fail "$action failed after successful lock acquisition"
+        [ ! -e "$state/.wake-queue.lock" ] && [ ! -L "$state/.wake-queue.lock" ] \
+          || fail "$action retained its acquired lock"
+        case "$action" in
+          release)
+            [ ! -e "$state/.branch-eligible-rows" ] \
+              || fail "release did not remove rows"
+            cmp -s "$state/owner.before" "$state/.branch-eligible-owner" \
+              || fail "release changed ownership" ;;
+          deactivate)
+            [ ! -e "$state/.branch-eligible-rows" ] && [ ! -e "$state/.branch-eligible-owner" ] \
+              || fail "deactivate did not remove grant records" ;;
+          activate)
+            [ ! -e "$state/.branch-eligible-rows" ] \
+              && [ "$(tail -n 1 "$state/.branch-eligible-owner")" = replacement ] \
+              || fail "activate did not replace ownership" ;;
+          publish)
+            cmp -s "$state/rows.before" "$state/.branch-eligible-rows" \
+              || fail "publish did not install rows"
+            cmp -s "$state/owner.before" "$state/.branch-eligible-owner" \
+              || fail "publish changed ownership" ;;
+        esac
+      fi
+      [ "$(cat "$state/acquire.log")" = acquire ] \
+        || fail "$action did not exercise lock acquisition"
+      set -- "$state"/.branch-eligible-*.tmp.*
+      [ ! -e "$1" ] || fail "$action leaked a temporary grant record"
+      pass "branch grant $action lock acquisition: $outcome"
+    done
+  done
+}
+
+
 test_concurrent_append_and_drain() {
   local dir state out1 out2 pids i pid count unique malformed sequence generation
   dir=$(make_case concurrent)
@@ -55,7 +139,7 @@ test_concurrent_append_and_drain() {
 }
 
 test_signal_catchup_without_running_watcher() {
-  local dir state fakebin out drain_out drain_err status_file sequence generation
+  local dir state fakebin out drain_out drain_err status_file sequence generation watcher
   dir=$(make_case signal)
   state="$dir/state"
   fakebin="$dir/fakebin"
@@ -68,8 +152,14 @@ test_signal_catchup_without_running_watcher() {
   # Use a captain-relevant verb so the wake is surfaced and the catch-up path is
   # tested.
   printf 'blocked: first\n' > "$status_file"
+  # Each run's deadline starts once the watcher holds its lock. The run is one
+  # poll cycle plus the fixed one-second signal grace, measured near 9s under
+  # heavy fork contention; with heartbeat and checks disabled, a watcher that
+  # misses the catch-up never exits, so the finite bound still fails it.
   PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
-  wait_for_exit "$!" 40 || fail "watcher did not exit for first signal"
+  watcher=$!
+  wait_for_watcher_lock "$watcher" "$state" || fail "watcher never started for first signal"
+  wait_for_exit "$watcher" 150 || fail "watcher did not exit for first signal"
   grep -F "signal: $status_file" "$out" >/dev/null || fail "watcher did not print first signal"
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2> "$drain_err" || fail "drain after first signal failed"
   grep "$(printf '\tsignal\t')" "$drain_out" | grep -F "$status_file" >/dev/null || fail "first signal was not queued"
@@ -81,7 +171,9 @@ test_signal_catchup_without_running_watcher() {
   printf 'done: second\n' >> "$status_file"
   : > "$out"
   PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
-  wait_for_exit "$!" 40 || fail "watcher did not exit for second signal"
+  watcher=$!
+  wait_for_watcher_lock "$watcher" "$state" || fail "watcher never started for second signal"
+  wait_for_exit "$watcher" 150 || fail "watcher did not exit for second signal"
   grep -F "signal: $status_file" "$out" >/dev/null || fail "signal written with no watcher was not caught"
   pass "signal written while no watcher runs is caught on next run"
 }
@@ -1852,6 +1944,32 @@ test_branch_actor_without_eligible_snapshot_refuses() {
   pass "a branch-actor drain with no eligible-row snapshot refuses loudly instead of draining nothing"
 }
 
+test_branch_repeat_ack_after_consumed_grant_names_the_consumed_grant() {
+  local dir state seq gen
+  dir=$(make_case branch-repeat-ack-consumed)
+  state="$dir/state"
+  append_wake "$state" signal "task-a.status" "signal: task-a" || fail "append failed"
+  FM_STATE_OVERRIDE="$state" "$GRANT" activate "$$" branch-repeat || fail "branch owner activation failed"
+  FM_STATE_OVERRIDE="$state" "$GRANT" publish branch-repeat 1 || fail "grant publication failed"
+  FM_STATE_OVERRIDE="$state" FM_SUPERVISION_ACTOR=branch "$DRAIN" > "$dir/drain.out" 2> "$dir/drain.err" \
+    || fail "branch drain failed: $(cat "$dir/drain.err")"
+  seq=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through \([0-9][0-9]*\) --recovery-generation .*/\1/p' "$dir/drain.err")
+  gen=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--recovery-generation \([A-Za-z0-9._-][A-Za-z0-9._-]*\)$/\1/p' "$dir/drain.err")
+  FM_STATE_OVERRIDE="$state" FM_SUPERVISION_ACTOR=branch "$DRAIN" --ack-through "$seq" --recovery-generation "$gen" \
+    || fail "first branch acknowledgement failed"
+  if FM_STATE_OVERRIDE="$state" FM_SUPERVISION_ACTOR=branch "$DRAIN" --ack-through "$seq" --recovery-generation "$gen" \
+    >/dev/null 2>"$dir/repeat.err"; then
+    fail "a repeat branch acknowledgement after its grant was consumed must still refuse"
+  fi
+  grep -q "already consumed" "$dir/repeat.err" \
+    || fail "the repeat acknowledgement did not say the grant was already consumed: $(cat "$dir/repeat.err")"
+  if grep -q "wiring" "$dir/repeat.err"; then
+    fail "the repeat acknowledgement still blamed wiring: $(cat "$dir/repeat.err")"
+  fi
+  FM_STATE_OVERRIDE="$state" "$GRANT" deactivate "$$" branch-repeat || fail "branch owner deactivation failed"
+  pass "a repeat branch acknowledgement after its own ack consumed the grant says the grant was already consumed"
+}
+
 test_wake_publish_requires_atomic_recovery_evidence() {
   local dir state fakebin real_mv rc out
   dir=$(make_case wake-publish-recovery-evidence)
@@ -1952,6 +2070,50 @@ test_recovery_mint_and_delivery_log_avoid_sibling_subst() {
   fi
 
   pass "recovery mint and delivery log avoid sibling \$()"
+}
+
+# Sequence identifiers are exact digit-only decimals end to end. The allocator
+# keeps bash's 64-bit counter contract whatever the counter's state; the drain
+# compares sequences as awk numbers, so presentation and acknowledgement are
+# exercised through the largest exactly representable one (2^53).
+test_large_sequences_stay_exact_decimal_identifiers() {
+  local start counter dir state queued expected new_seq sequence generation
+  for start in 2147483647 9007199254740991 9223372036854775806; do
+    for counter in intact missing malformed; do
+      dir=$(make_case "large-sequence-$start-$counter")
+      state="$dir/state"
+      queued=$(printf '1700000000\t%s\tcheck\tinbox:queued\tcheck: queued large row' "$start")
+      printf '%s\n' "$queued" > "$state/.wake-queue"
+      case "$counter" in
+        intact) printf '%s\n' "$start" > "$state/.wake-queue.seq" ;;
+        malformed) printf 'not-a-sequence\n' > "$state/.wake-queue.seq" ;;
+      esac
+      append_wake "$state" check inbox:next 'check: appended after large row' \
+        || fail "append after sequence $start ($counter counter) failed"
+      expected=$((start + 1))
+      new_seq=$(awk -F '\t' '$4 == "inbox:next" { print $2 }' "$state/.wake-queue")
+      [ "$new_seq" = "$expected" ] \
+        || fail "sequence $start ($counter counter) advanced to '$new_seq', not $expected"
+      [ "$(cat "$state/.wake-queue.seq")" = "$expected" ] \
+        || fail "counter after $start ($counter counter) is not $expected"
+      [ "$start" = 9223372036854775806 ] && continue
+      FM_STATE_OVERRIDE="$state" "$DRAIN" > "$dir/drain.out" 2> "$dir/drain.err" \
+        || fail "drain failed after sequence $expected"
+      grep -F "$queued" "$dir/drain.out" >/dev/null \
+        || fail "drain did not present the queued row at sequence $start"
+      grep -F "$(printf '\t%s\tcheck\tinbox:next\t' "$expected")" "$dir/drain.out" >/dev/null \
+        || fail "drain did not present the appended row at sequence $expected"
+      sequence=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through \([0-9][0-9]*\) --recovery-generation [A-Za-z0-9._-][A-Za-z0-9._-]*$/\1/p' "$dir/drain.err")
+      generation=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through [0-9][0-9]* --recovery-generation \([A-Za-z0-9._-][A-Za-z0-9._-]*\)$/\1/p' "$dir/drain.err")
+      [ "$sequence" = "$expected" ] && [ -n "$generation" ] \
+        || fail "drain named acknowledgement '$sequence', not $expected"
+      FM_STATE_OVERRIDE="$state" "$DRAIN" --ack-through "$sequence" \
+        --recovery-generation "$generation" \
+        || fail "acknowledgement through $expected failed"
+      [ ! -s "$state/.wake-queue" ] || fail "acknowledgement through $expected left rows queued"
+    done
+  done
+  pass "wake queue: large sequences advance and acknowledge as exact digit-only decimals"
 }
 
 test_legacy_generationless_wake_is_adopted() {
@@ -2587,6 +2749,57 @@ test_self_held_lock_reclaims_instead_of_deadlocking() {
   pass "an abandoned same-process lock hold is reclaimed; a parent's live hold is not"
 }
 
+# A waiter behind a live holder keeps waiting while the lock's directory
+# exists, but once a teardown removes that directory the lock can never be
+# created, so the wait must return within its stated 0.2s bound instead of
+# polling at 0.1s forever - the shape that kept orphaned watchers and
+# reconcile scans of removed test homes spinning under init.
+test_lock_wait_returns_when_its_directory_is_removed() {
+  local dir state holder waiter rc i
+  dir=$(make_case lock-dir-removed)
+  state="$dir/state"
+  FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    fm_lock_acquire_wait "$2/.fixture.lock" || exit 10
+    : > "$2/holder.ready"
+    exec sleep "$3"
+  ' _ "$ROOT/bin/fm-wake-lib.sh" "$state" "$FM_TEST_STUB_MAX_BLOCK_SECONDS" &
+  holder=$!
+  i=0
+  while [ "$i" -lt 100 ] && [ ! -e "$state/holder.ready" ]; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  [ -e "$state/holder.ready" ] || fail "the fixture holder never took the lock"
+  FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    fm_lock_acquire_wait "$2/.fixture.lock"
+  ' _ "$ROOT/bin/fm-wake-lib.sh" "$state" &
+  waiter=$!
+  sleep 1
+  if ! kill -0 "$waiter" 2>/dev/null; then
+    kill -TERM "$holder" 2>/dev/null || true
+    fail "the waiter stopped waiting on a live hold while its directory still existed"
+  fi
+  rm -rf "$state"
+  i=0
+  while [ "$i" -lt 20 ] && kill -0 "$waiter" 2>/dev/null; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  kill -TERM "$holder" 2>/dev/null || true
+  wait "$holder" 2>/dev/null || true
+  if kill -0 "$waiter" 2>/dev/null; then
+    kill -TERM "$waiter" 2>/dev/null || true
+    wait "$waiter" 2>/dev/null || true
+    fail "the lock wait kept polling after its directory was removed"
+  fi
+  rc=0
+  wait "$waiter" || rc=$?
+  [ "$rc" -eq 1 ] || fail "the lock wait over a removed directory returned $rc, not 1"
+  pass "a lock wait returns within its bound once its directory is removed"
+}
+
 test_subshell_lock_ownership_without_bashpid() {
   local dir state rc
   dir=$(make_case subshell-lock-ownership)
@@ -2680,6 +2893,12 @@ SH
   recorded_pid=$(cat "$dir/waiter.ready")
   [ "$recorded_pid" = "$waiter_pid" ] && [ "$(cat "$lock/pid" 2>/dev/null || true)" = "$waiter_pid" ] \
     || { kill "$waiter_pid" 2>/dev/null || true; fail "bounded acquire did not hand lock ownership to its caller"; }
+  FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    if fm_lock_try_acquire "$2"; then fm_lock_release "$2"; exit 1; fi
+    [ "${FM_LOCK_HELD_PID:-}" = "$3" ]
+  ' _ "$ROOT/bin/fm-wake-lib.sh" "$lock" "$waiter_pid" \
+    || { kill "$waiter_pid" 2>/dev/null || true; fail "a contender took the lock from its live handed-off caller"; }
 
   : > "$dir/release-waiter"
   wait "$waiter_pid" || fail "caller could not release its handed-off lock"
@@ -2846,7 +3065,9 @@ test_malformed_presentation_lock_reports_acquire_failure() {
     || fail "could not seed the malformed-lock wake"
   : > "$state/.status-presentation-lock"
 
-  FM_STATE_OVERRIDE="$state" FM_STATUS_PRESENTATION_LOCK_TIMEOUT=1 \
+  # Keep the malformed lock within the freshness window during this case.
+  # Even after that window expires, recovery refuses this regular-file lock.
+  FM_STATE_OVERRIDE="$state" FM_STATUS_PRESENTATION_LOCK_TIMEOUT=1 FM_LOCK_STALE_AFTER=3600 \
     "$DRAIN" > "$out" 2> "$err" || fail "malformed-lock drain failed"
   grep -F 'wake drain: status presentation lock could not be acquired safely' "$err" >/dev/null \
     || fail "malformed presentation lock did not report an acquire failure"
@@ -3514,7 +3735,9 @@ SH
   pass "watch liveness: an unreachable remote secondmate is probed, preserved, and never failed over"
 }
 
+test_branch_grant_requires_lock_acquisition
 test_self_held_lock_reclaims_instead_of_deadlocking
+test_lock_wait_returns_when_its_directory_is_removed
 test_subshell_lock_ownership_without_bashpid
 test_bounded_lock_handoff_after_contention
 test_live_presentation_holder_is_deadlined_without_weakening_ack
@@ -3559,8 +3782,10 @@ test_main_ack_leaves_a_row_that_arrived_after_its_drain_unclaimed
 test_actor_filter_precedes_same_key_deduplication
 test_main_reclaims_a_grant_whose_branch_owner_exited
 test_branch_actor_without_eligible_snapshot_refuses
+test_branch_repeat_ack_after_consumed_grant_names_the_consumed_grant
 test_wake_publish_requires_atomic_recovery_evidence
 test_recovery_mint_and_delivery_log_avoid_sibling_subst
+test_large_sequences_stay_exact_decimal_identifiers
 test_legacy_generationless_wake_is_adopted
 test_handover_restore_undoes_only_its_own_stop
 test_stale_recovery_generation_cannot_touch_a_newer_episode

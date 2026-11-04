@@ -189,6 +189,47 @@ test_matrix_claude_bare_nbsp_row() {
   pass "matrix: claude's ❯+NBSP row reads empty on every profile in both locales (#1988)"
 }
 
+test_matrix_claude_named_session_titled_rule() {
+  # Real claude 2.1.284 started as `claude -n <name>` (captured live through
+  # Herdr 0.9.1): the session name is right-aligned inside the rule ABOVE the
+  # composer, `───…─── <name> ─`, at the same width as the solid rule below.
+  # Herdr gives no cursor, so before the titled rule was recognized the
+  # cursorless path saw only the lower rule, read the idle composer `unknown`,
+  # and the away-mode injector deferred every escalation on a named primary.
+  local rule titled multi idle ghost typed out claude_idle pi_idle
+  claude_idle=$(printf 'claude\tidle'); pi_idle=$(printf 'pi\tidle')
+  rule='────────────────────────────────'
+  titled='─────────────────────── Andrew ─'
+  idle="transcript line"$'\n'"$titled"$'\n'"❯$NBSP"$'\n'"$rule"$'\n  ⏵⏵ auto mode on (shift+tab to cycle)'
+  assert_screen "named claude idle on herdr" empty "$CAPS_STYLED" "$idle" '' "$claude_idle"
+  assert_screen "named claude idle on zellij" empty "$CAPS_STYLED_NOID" "$idle"
+  assert_screen "named claude idle on cmux/orca" empty "$CAPS_PLAIN" "$idle"
+  assert_screen "named claude idle on tmux" empty "$CAPS_TMUX" "$idle" 2 "$claude_idle"
+  # A multiword session name renders the same way, at the same width.
+  multi='────────────────── Andrew Chen ─'
+  assert_screen "multiword named claude idle on herdr" empty "$CAPS_STYLED" \
+    "${idle/"$titled"/"$multi"}" '' "$claude_idle"
+  assert_screen "multiword named claude typed on herdr" pending "$CAPS_STYLED" \
+    "transcript line"$'\n'"$multi"$'\n'"❯ fix the login bug"$'\n'"$rule" '' "$claude_idle"
+  # Claude's prompt suggestion is dim ghost text, not input.
+  ghost="transcript line"$'\n'"$titled"$'\n'"❯$NBSP${ESC}[0m${ESC}[2mTry \"fix lint errors\"${ESC}[0m"$'\n'"$rule"
+  assert_screen "named claude ghost suggestion on herdr" empty "$CAPS_STYLED" "$ghost" '' "$claude_idle"
+  out=$(fm_composer_classify_screen "$CAPS_STYLED" "${ghost/ Andrew ─/─────────}" '' "$claude_idle")
+  [ "$out" = empty ] || fail "unnamed claude ghost suggestion on herdr: expected empty, got '$out'"
+  # The protection that must not move: typed text in the named composer.
+  typed="transcript line"$'\n'"$titled"$'\n'"❯ fix the login bug"$'\n'"$rule"
+  assert_screen "named claude typed on herdr" pending "$CAPS_STYLED" "$typed" '' "$claude_idle"
+  assert_screen "named claude typed on tmux" pending "$CAPS_TMUX" "$typed" 2 "$claude_idle"
+  out=$(fm_composer_extract_selected_content "$CAPS_STYLED" "$typed")
+  [ "$out" = 'fix the login bug' ] \
+    || fail "named claude composer content should extract the typed text, got '$out'"
+  # Pi non-regression: a titled rule over a blank row never proves a pi
+  # composer, even with a live idle pi identity.
+  assert_screen "titled pair over a blank row is not pi" unknown "$CAPS_STYLED" \
+    "transcript"$'\n'"$titled"$'\n\n'"$rule"$'\n footer' '' "$pi_idle"
+  pass "matrix: a named claude session's titled top rule proves its composer; pi stays unchanged"
+}
+
 test_matrix_claude_arrow_statusline_footer() {
   # Real claude 2.x on herdr (captured live 2026-09-20, herdr 0.8.0): the
   # composer is a bare `❯`+U+00A0 row between two solid rules, and the harness
@@ -397,6 +438,52 @@ test_matrix_cursor_reverse_video_placeholder_remnant() {
   [ "$out" != empty ] \
     || fail "an unstyled cursor row matching the placeholder must not read empty, got '$out'"
   pass "matrix: cursor's reverse-video placeholder remnant reads empty; real typed text stays pending"
+}
+
+test_matrix_cursor_fully_dim_placeholder() {
+  # cursor-agent 2026.10.19-6bbf2c4, tmux, idle pane. The glyph and the whole
+  # placeholder are one SGR 2 run on a truecolor background. The terminal
+  # cursor sits below the footer (cursor_flag 0), so nothing on this row is
+  # reverse video. Ghost stripping therefore empties the row instead of
+  # leaving the lone-character remnant the case above covers. Half-block
+  # rules are the live frame; they are edges, not a cornered box.
+  local row screen plain stripped typed
+  row="${ESC}[48;2;42;44;57m ${ESC}[2m→ Add a follow-up${ESC}[0m"
+  row="${row}${ESC}[48;2;42;44;57m        ${ESC}[49m"
+  screen=$'transcript\n '"${ESC}[38;2;42;44;57m▄▄▄▄▄▄▄▄${ESC}[39m"$'\n'"$row"
+  screen="$screen"$'\n '"${ESC}[38;2;42;44;57m▀▀▀▀▀▀▀▀${ESC}[39m"
+  screen="$screen"$'\n  Auto · 64%                                                                   Run Everything\n  ~/wt · <branch>\n'
+  plain=$'transcript\n ▄▄▄▄▄▄▄▄\n  → Add a follow-up\n ▀▀▀▀▀▀▀▀\n  Auto · 64%                                                                   Run Everything\n  ~/wt · <branch>'
+
+  # NON-VACUOUSNESS: this row must strip to nothing. A surviving remnant would
+  # be the older case, and this one would no longer prove the empty-content path.
+  stripped=$(printf '%s' "$row" | fm_composer_strip_ghost)
+  fm_composer_normalize_trim_var stripped
+  [ -z "$stripped" ] \
+    || fail "the fully dim cursor row must ghost-strip to empty, got '$stripped'"
+
+  assert_screen "cursor 2026.10 fully dim idle on herdr" empty "$CAPS_STYLED" "$screen"
+  assert_screen "cursor 2026.10 fully dim idle on zellij" empty "$CAPS_STYLED_NOID" "$screen"
+  # The cursor-anchored read stays blind: the cursor is on the blank row under
+  # the footer, not on the composer. The tmux adapter reclassifies only after
+  # process identity; this owner must not treat that blank row as empty.
+  assert_screen "cursor 2026.10 anchored blank row stays unknown" unknown \
+    "$CAPS_TMUX" "$screen" 6
+  assert_screen "cursor 2026.10 unstyled placeholder stays unknown" unknown \
+    "$CAPS_PLAIN" "$plain"
+
+  # Bright typed text, including text that is exactly the placeholder, survives
+  # stripping and must stay pending.
+  typed="${ESC}[48;2;42;44;57m ${ESC}[2m→ ${ESC}[0m${ESC}[38;2;224;222;244mAdd a follow-up${ESC}[0m"
+  assert_screen "cursor 2026.10 typed placeholder stays pending" pending \
+    "$CAPS_STYLED" $'transcript\n '"${ESC}[38;2;42;44;57m▄▄▄▄▄▄▄▄${ESC}[39m"$'\n'"$typed"$'\n '"${ESC}[38;2;42;44;57m▀▀▀▀▀▀▀▀${ESC}[39m"$'\n'
+
+  # Dim text that is not an anchored placeholder is not proof of an empty
+  # composer. Unknown keeps the injection guard closed.
+  row="${ESC}[48;2;42;44;57m ${ESC}[2m→ ship the fix${ESC}[0m"
+  assert_screen "cursor 2026.10 dim non-placeholder stays unknown" unknown \
+    "$CAPS_STYLED" $'transcript\n '"${ESC}[38;2;42;44;57m▄▄▄▄▄▄▄▄${ESC}[39m"$'\n'"$row"$'\n '"${ESC}[38;2;42;44;57m▀▀▀▀▀▀▀▀${ESC}[39m"$'\n'
+  pass "matrix: cursor's fully dim placeholder reads empty; typed text stays pending"
 }
 
 test_matrix_herdr_halfblock_rule_bounds_bare_wrap() {
@@ -1058,6 +1145,87 @@ test_matrix_claude_titled_top_rule() {
   pass "matrix: claude's titled top rule proves an idle composer empty and a draft pending (#5601, #5558)"
 }
 
+test_matrix_grok_144_approval_titled_bottom_border() {
+  # Grok 1.0.44 draws the title inside a bottom border exactly as wide as the
+  # top border and appends its approval mode (` · always-approve`). The mid-dot
+  # used to survive the geometry residue test, so an idle pane read unknown and
+  # the guarded exit/relaunch refused to type /exit.
+  local top empty_row typed_row bottom idle typed
+  top='  ╭'$(_grok_rule 74)'╮'
+  empty_row='  │ ❯'"$(printf '%*s' 72 '')"'│'
+  typed_row='  │ ❯ deploy the fix'"$(printf '%*s' 57 '')"'│'
+  bottom=$(_grok_titled_bottom 74 'Grok 4.7 (high) · always-approve')
+  idle="$top"$'\n'"$empty_row"$'\n'"$bottom"
+  typed="$top"$'\n'"$typed_row"$'\n'"$bottom"
+  assert_screen "grok 1.0.44 idle on tmux content row" empty "$CAPS_TMUX" "$idle" 1
+  assert_screen "grok 1.0.44 idle on tmux bottom border" empty "$CAPS_TMUX" "$idle" 2
+  assert_screen "grok 1.0.44 idle on herdr" empty "$CAPS_STYLED" "$idle"
+  assert_screen "grok 1.0.44 idle on cmux/orca" empty "$CAPS_PLAIN" "$idle"
+  assert_screen "grok 1.0.44 typed on tmux" pending "$CAPS_TMUX" "$typed" 1
+  assert_screen "grok 1.0.44 typed on herdr" pending "$CAPS_STYLED" "$typed"
+  # The approval title is proven only on Grok's rounded box. An otherwise
+  # aligned box from another family must not grant permission to type.
+  local family tl tr bl br edge dash unobserved
+  for family in light heavy double ascii; do
+    case "$family" in
+      light) tl=┌; tr=┐; bl=└; br=┘; edge=│; dash=─ ;;
+      heavy) tl=┏; tr=┓; bl=┗; br=┛; edge=┃; dash=━ ;;
+      double) tl=╔; tr=╗; bl=╚; br=╝; edge=║; dash=═ ;;
+      ascii) tl=+; tr=+; bl=+; br=+; edge='|'; dash=- ;;
+    esac
+    unobserved=${idle//╭/$tl}; unobserved=${unobserved//╮/$tr}
+    unobserved=${unobserved//╰/$bl}; unobserved=${unobserved//╯/$br}
+    unobserved=${unobserved//│/$edge}; unobserved=${unobserved//─/$dash}
+    assert_screen "grok approval title rejects $family on tmux" unknown "$CAPS_TMUX" "$unobserved" 1
+    assert_screen "grok approval title rejects $family on herdr" unknown "$CAPS_STYLED" "$unobserved"
+    assert_screen "grok approval title rejects $family on cmux/orca" unknown "$CAPS_PLAIN" "$unobserved"
+  done
+  for effort in low medium high xhigh; do
+    bottom=$(_grok_titled_bottom 74 "Grok 4.6 ($effort) · always-approve")
+    assert_screen "grok 1.0.44 $effort effort" empty "$CAPS_TMUX" "$top"$'\n'"$empty_row"$'\n'"$bottom" 1
+  done
+  bottom=$(_grok_titled_bottom 74 'Grok 4.7 (high) · auto-approve')
+  assert_screen "grok unknown approval suffix" unknown "$CAPS_TMUX" "$top"$'\n'"$empty_row"$'\n'"$bottom" 1
+  bottom=$(_grok_titled_bottom 74 'Grok 4.7 (high) · always-approve now')
+  assert_screen "grok approval suffix with trailing text" unknown "$CAPS_TMUX" "$top"$'\n'"$empty_row"$'\n'"$bottom" 1
+  bottom=$(_grok_titled_bottom 74 'Other 4.7 (high) · always-approve')
+  assert_screen "unknown surface title with approval suffix" unknown "$CAPS_TMUX" "$top"$'\n'"$empty_row"$'\n'"$bottom" 1
+  bottom=$(_grok_titled_bottom 74 'Grok 4.7 (turbo) · always-approve')
+  assert_screen "unknown effort with approval suffix" unknown "$CAPS_TMUX" "$top"$'\n'"$empty_row"$'\n'"$bottom" 1
+  bottom=$(_grok_titled_bottom 74 'unknown surface · mode')
+  assert_screen "mid-dot title outside the known shape" unknown "$CAPS_TMUX" "$top"$'\n'"$empty_row"$'\n'"$bottom" 1
+  bottom=$(_grok_titled_bottom 74 'Grok 4.7 (high) · always-approve · extra')
+  assert_screen "second mid-dot after the known suffix" unknown "$CAPS_TMUX" "$top"$'\n'"$empty_row"$'\n'"$bottom" 1
+  # The approval title is only known at the aligned width.
+  bottom=$(_grok_titled_bottom 77 'Grok 4.7 (high) · always-approve')
+  assert_screen "approval title with 1.0.5 overhang" unknown "$CAPS_TMUX" "$top"$'\n'"$empty_row"$'\n'"$bottom" 1
+  # The 1.0.5 overhang shape keeps proving empty beside the new equal-width one.
+  bottom=$(_grok_titled_bottom 77 'Grok 4.6 (xhigh)')
+  assert_screen "grok 1.0.5 overhang still empty" empty "$CAPS_TMUX" "$top"$'\n'"$empty_row"$'\n'"$bottom" 1
+  bottom=$(_grok_titled_bottom 74 'Grok 4.6 (xhigh)')
+  assert_screen "grok typed title at equal width" empty "$CAPS_TMUX" "$top"$'\n'"$empty_row"$'\n'"$bottom" 1
+  pass "matrix: grok 1.0.44's approval-titled equal-width bottom is empty while typed and unknown titles stay safe"
+}
+
+# <count> box-drawing rule glyphs, one glyph per iteration so the emitted width
+# never depends on whether ${#} counts bytes or characters in the ambient locale.
+_grok_rule() {  # <count>
+  local n=$1 i=0 out=
+  while [ "$i" -lt "$n" ]; do out+='─'; i=$((i + 1)); done
+  printf '%s' "$out"
+}
+
+# Bottom border of total inner width <width> carrying <title> before a trailing rule.
+# Every non-ASCII glyph these fixtures use is one column wide, so the width is
+# measured on an ASCII twin: the rule stays byte-exact and ${#} equals the column
+# count under any locale, including LC_ALL=C.
+_grok_titled_bottom() {  # <width> <title>
+  local width=$1 title=" $2 " cols lead
+  cols=${title//·/.}
+  lead=$((width - ${#cols} - 1))
+  printf '  ╰%s%s─╯' "$(_grok_rule "$lead")" "$title"
+}
+
 test_matrix_kimi_bordered_shell_glyph_box() {
   # Kimi's bordered `│ > │` composer - the shape fm-spawn.sh's retired
   # spawn-local regex used to own. Now the shared owner proves it everywhere,
@@ -1285,6 +1453,130 @@ test_selected_content_is_composer_scoped_and_wrap_normalized() {
   pass "fm_composer_extract_selected_content: scopes user content and excludes furniture"
 }
 
+# KIRO-ONLY near-gray ghost text: kiro draws its idle placeholder in a
+# NEAR-ACHROMATIC truecolor above the 128 ghost ceiling, so it survived the strip
+# and read as real typed content - a composer that never reports empty, which
+# makes every steer defer forever on the exact `pending` skip. The wider ceiling
+# applies only when the caller names the harness kiro (FM_COMPOSER_HARNESS);
+# test_composer_widening_is_kiro_only below proves every other read is unchanged.
+#   kiro ghost      38;2;158;158;158  luma 158.0  spread   0  -> must STRIP
+#   grey real text  38;2;206;207;210  luma 207.0  spread   4  -> must SURVIVE
+#   muse real glyph 38;2;90;160;255   luma 149.9  spread 165  -> must SURVIVE
+test_kiro_near_gray_ghost_is_stripped_and_real_text_survives() {
+  local out
+  out=$(printf '%s' "${ESC}[38;2;158;158;158mask a question or describe a task${ESC}[0m" \
+    | FM_COMPOSER_HARNESS=kiro fm_composer_strip_ghost)
+  [ -z "${out//[[:space:]]/}" ] \
+    || fail "kiro's near-gray placeholder (luma 158.0, spread 0) must strip as ghost text, got '$out'"
+
+  # NON-REGRESSION: near-gray REAL typed text is separated from the placeholder
+  # by luminance alone (207.0 vs 158.0). Stripping it would delete input.
+  out=$(printf '%s' "${ESC}[38;2;206;207;210mdeploy the thing${ESC}[0m" \
+    | FM_COMPOSER_HARNESS=kiro fm_composer_strip_ghost)
+  [ "$out" = 'deploy the thing' ] \
+    || fail "NON-REGRESSION: near-gray real text (luma 207.0, spread 4) must survive the kiro strip, got '$out'"
+
+  # NON-REGRESSION: a strongly chromatic glyph (muse's, spread 165) is out of the
+  # near-gray ceiling's reach at any luminance.
+  out=$(printf '%s' "${ESC}[38;2;90;160;255m⟩${ESC}[0m" | FM_COMPOSER_HARNESS=kiro fm_composer_strip_ghost)
+  [ "$out" = '⟩' ] \
+    || fail "NON-REGRESSION: a chromatic glyph (luma 149.9, spread 165) must survive the kiro strip, got '$out'"
+
+  # The gray ceiling raises the applicable ceiling and never lowers an
+  # operator-set one: luma 190 is above the 180 gray default but below a raised
+  # FM_COMPOSER_GHOST_LUMA_MAX, so the knob keeps applying to gray text.
+  out=$(printf '%s' "${ESC}[38;2;190;190;190mplaceholder text${ESC}[0m" \
+    | FM_COMPOSER_HARNESS=kiro FM_COMPOSER_GHOST_LUMA_MAX=200 fm_composer_strip_ghost)
+  [ -z "${out//[[:space:]]/}" ] \
+    || fail "a near-gray run at luma 190 must strip under FM_COMPOSER_GHOST_LUMA_MAX=200, got '$out'"
+
+  pass "fm_composer_strip_ghost: on kiro, near-gray ghost strips while near-gray real text and a chromatic glyph survive"
+}
+
+# A kiro pane with no COLORTERM gets the SAME grey in the 256-colour encoding:
+# 38;5;247, xterm grey level 158, where a truecolor pane gets 38;2;158;158;158.
+# Only palette indices with a fixed grey RGB are tested, and only on kiro.
+test_kiro_palette_gray_ghost_is_stripped_and_chromatic_indexes_survive() {
+  local out
+  out=$(printf '%s' "${ESC}[38;5;247mask a question or describe a task${ESC}[0m" \
+    | FM_COMPOSER_HARNESS=kiro fm_composer_strip_ghost)
+  [ -z "${out//[[:space:]]/}" ] \
+    || fail "kiro's 256-colour placeholder (38;5;247, grey level 158) must strip as ghost text, got '$out'"
+
+  out=$(printf '%s' "${ESC}[38:5:247mask a question or describe a task${ESC}[0m" \
+    | FM_COMPOSER_HARNESS=kiro fm_composer_strip_ghost)
+  [ -z "${out//[[:space:]]/}" ] \
+    || fail "the colon form 38:5:247 must strip the same grey on kiro, got '$out'"
+
+  # SCOPE GUARD: only the 232-255 ramp is luminance-tested. The 6x6x6 cube's
+  # r==g==b diagonal is arithmetically grey (145 computes to level 175) and is
+  # deliberately NOT tested, because kiro has not been measured drawing ghost
+  # text there and widening the predicate reintroduces the palette-dependence
+  # problem the 38;5 carve-out exists for.
+  out=$(printf '%s' "${ESC}[38;5;145mplaceholder text${ESC}[0m" | FM_COMPOSER_HARNESS=kiro fm_composer_strip_ghost)
+  [ "$out" = 'placeholder text' ] \
+    || fail "SCOPE GUARD: a cube-diagonal grey outside 232-255 (38;5;145) must be untouched, got '$out'"
+
+  # NON-REGRESSION: a grey above the ceiling is real input, and a CHROMATIC or
+  # theme-remapped (0-15) index carries no fixed grey to measure.
+  out=$(printf '%s' "${ESC}[38;5;253mdeploy the thing${ESC}[0m" | FM_COMPOSER_HARNESS=kiro fm_composer_strip_ghost)
+  [ "$out" = 'deploy the thing' ] \
+    || fail "NON-REGRESSION: a bright palette grey (38;5;253, level 218) must survive, got '$out'"
+  out=$(printf '%s' "${ESC}[38;5;33mdeploy the thing${ESC}[0m" | FM_COMPOSER_HARNESS=kiro fm_composer_strip_ghost)
+  [ "$out" = 'deploy the thing' ] \
+    || fail "NON-REGRESSION: a chromatic palette index (38;5;33) must survive, got '$out'"
+  out=$(printf '%s' "${ESC}[38;5;8mdeploy the thing${ESC}[0m" | FM_COMPOSER_HARNESS=kiro fm_composer_strip_ghost)
+  [ "$out" = 'deploy the thing' ] \
+    || fail "NON-REGRESSION: a theme-remapped index (38;5;8) must survive, got '$out'"
+
+  pass "fm_composer_strip_ghost: on kiro, palette greys strip while bright, chromatic and theme-remapped indexes survive"
+}
+
+# The kiro widening must not reach any other harness, nor a read that names no
+# harness: Claude draws a typed slash command in grey 38;2;112;112;112, which the
+# herdr payload proof reads with FM_COMPOSER_GHOST_LUMA_MAX=0, and the wider gray
+# ceiling stripped it, so a typed /exit was judged unsent. Each case is first
+# shown to diverge under the kiro scope, so none of them can pass vacuously.
+test_composer_widening_is_kiro_only() {
+  local out h hinted screen
+  local saved=${FM_COMPOSER_HARNESS-__unset__}
+  unset FM_COMPOSER_HARNESS
+
+  out=$(printf '%s' "${ESC}[38;2;112;112;112m/exit${ESC}[0m" \
+    | FM_COMPOSER_HARNESS=kiro FM_COMPOSER_GHOST_LUMA_MAX=0 fm_composer_strip_ghost)
+  [ -z "${out//[[:space:]]/}" ] \
+    || fail "fixture drift: the kiro scope must strip grey 112 at FM_COMPOSER_GHOST_LUMA_MAX=0, or the Claude case is vacuous, got '$out'"
+  for h in '' claude codex rovo grok; do
+    out=$(printf '%s' "${ESC}[38;2;112;112;112m/exit${ESC}[0m" \
+      | FM_COMPOSER_HARNESS=$h FM_COMPOSER_GHOST_LUMA_MAX=0 fm_composer_strip_ghost)
+    [ "$out" = '/exit' ] \
+      || fail "harness '${h:-none}': Claude's grey typed /exit must survive with FM_COMPOSER_GHOST_LUMA_MAX=0, got '$out'"
+    out=$(printf '%s' "${ESC}[38;2;158;158;158mask a question${ESC}[0m" | FM_COMPOSER_HARNESS=$h fm_composer_strip_ghost)
+    [ "$out" = 'ask a question' ] \
+      || fail "harness '${h:-none}': a near-gray run above the shared ceiling must survive outside kiro, got '$out'"
+    out=$(printf '%s' "${ESC}[38;5;240mask a question${ESC}[0m" | FM_COMPOSER_HARNESS=$h fm_composer_strip_ghost)
+    [ "$out" = 'ask a question' ] \
+      || fail "harness '${h:-none}': a dark palette grey must stay untested outside kiro, got '$out'"
+  done
+  out=$(printf '%s' "${ESC}[38;5;240mask a question${ESC}[0m" | FM_COMPOSER_HARNESS=kiro fm_composer_strip_ghost)
+  [ -z "${out//[[:space:]]/}" ] \
+    || fail "fixture drift: the kiro scope must strip a dark palette grey, got '$out'"
+
+  # The hinted idle row reads empty only on kiro; on every other read it is
+  # ordinary bare-composer text, exactly as before kiro existed.
+  hinted=$'transcript line\n'"${ESC}[39m›  ask a question or describe a task ↵"
+  screen="$hinted"$'\n /copy to clipboard'
+  FM_COMPOSER_HARNESS=kiro assert_screen "kiro hinted idle row on tmux" empty "$CAPS_TMUX" "$hinted" 1
+  FM_COMPOSER_HARNESS=kiro assert_screen "kiro hinted idle row cursorless" empty "$CAPS_STYLED" "$screen"
+  for h in '' claude codex; do
+    FM_COMPOSER_HARNESS=$h assert_screen "hinted row on tmux, harness '${h:-none}'" pending "$CAPS_TMUX" "$hinted" 1
+    FM_COMPOSER_HARNESS=$h assert_screen "hinted row cursorless, harness '${h:-none}'" pending "$CAPS_STYLED" "$screen"
+  done
+
+  [ "$saved" = __unset__ ] || FM_COMPOSER_HARNESS=$saved
+  pass "composer widening: the near-gray ceiling, palette greys, and hinted idle row apply on kiro only"
+}
+
 test_bare_shell_glyphs_are_unknown
 test_stripped_unbordered_content_uses_plain_content
 test_bare_shell_prompt_with_command_is_not_empty
@@ -1295,6 +1587,7 @@ test_idle_placeholder_is_empty
 test_idle_placeholder_case_mode_is_explicit
 test_real_text_is_pending
 test_matrix_claude_bare_nbsp_row
+test_matrix_claude_named_session_titled_rule
 test_matrix_claude_arrow_statusline_footer
 test_composer_footer_demotion_needs_a_proven_pair
 test_composer_footer_zone_is_shape_independent
@@ -1302,6 +1595,7 @@ test_composer_footer_zone_refuses_rather_than_allows
 test_matrix_codex_dim_hint_row
 test_matrix_muse_truecolor_glyph_survives_signal_loss
 test_matrix_cursor_reverse_video_placeholder_remnant
+test_matrix_cursor_fully_dim_placeholder
 test_matrix_herdr_halfblock_rule_bounds_bare_wrap
 test_matrix_omp_status_row_bounds_bare_composer
 test_matrix_codex_idle_starfield_furniture
@@ -1312,6 +1606,7 @@ test_matrix_opencode_leftbar_cwd_furniture
 test_matrix_opencode_leftbar_abs_cwd_furniture
 test_matrix_grok_titled_bottom_border
 test_matrix_claude_titled_top_rule
+test_matrix_grok_144_approval_titled_bottom_border
 test_matrix_kimi_bordered_shell_glyph_box
 test_matrix_claude_inside_zellij_ansi_dump
 test_strict_blank_row_divergence
@@ -1511,3 +1806,6 @@ test_background_exit_picker_stays_pending_and_blocks_retry
 test_dialog_heading_and_footer_must_be_the_recorded_lines
 test_dialog_note_skips_the_match_when_no_sink_is_set
 test_quoted_exit_picker_text_is_not_a_dialog
+test_kiro_near_gray_ghost_is_stripped_and_real_text_survives
+test_kiro_palette_gray_ghost_is_stripped_and_chromatic_indexes_survive
+test_composer_widening_is_kiro_only

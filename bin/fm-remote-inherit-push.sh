@@ -118,6 +118,11 @@ send_item() {  # <n>
   else
     "$SCRIPT_DIR/fm-on.sh" "$ID" fm-remote-inherit.sh absent "$rel" 0 "$EMPTY_HASH" "$GENERATION" \
       < /dev/null > "$TMP/item.$n.out" 2> "$TMP/item.$n.err" || rc=$?
+    if [ "$rc" = 1 ] && grep -Fxq -- "error: path is not inherited material: $rel" "$TMP/item.$n.err"; then
+      printf 'unchanged: %s\n' "$rel" > "$TMP/item.$n.out"
+      : > "$TMP/item.$n.err"
+      rc=0
+    fi
   fi
   printf '%s\n' "$rc" > "$TMP/item.$n.rc.tmp" && mv -f "$TMP/item.$n.rc.tmp" "$TMP/item.$n.rc"
 }

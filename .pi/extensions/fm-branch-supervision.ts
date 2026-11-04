@@ -384,40 +384,53 @@ let ownedLockPid = "";
 // stays the wait.
 const LOCK_ANCESTRY_DEPTH = 8;
 
-function readLockPid(): { lockPid: string; verdict: LockOwnership | null } {
+// The session lock names a local pid or, on Windows, a tagged `win:<pid>`
+// (fm_session_pid_valid in bin/fm-session-lock-lib.sh owns that shape). Native
+// Node on Windows sees Windows pids directly, so a tagged holder is compared
+// and probed by its digits. Any other value is no usable identity, "".
+function lockHolderPid(lockPid: string): string {
+  const tagged = process.platform === "win32" ? /^win:([0-9]+)$/.exec(lockPid) : null;
+  const pid = tagged ? tagged[1] : lockPid;
+  return /^[0-9]+$/.test(pid) && pid !== "1" ? pid : "";
+}
+
+function readLockPid(): { lockPid: string; holderPid: string; verdict: LockOwnership | null } {
   ownedLockPid = "";
   let lockPid = "";
   try {
     lockPid = readFileSync(`${state}/.lock`, "utf8").trim();
   } catch {
-    return { lockPid: "", verdict: "missing" };
+    return { lockPid: "", holderPid: "", verdict: "missing" };
   }
-  if (!/^[0-9]+$/.test(lockPid) || lockPid === "1") return { lockPid, verdict: "other" };
-  return { lockPid, verdict: null };
+  const holderPid = lockHolderPid(lockPid);
+  if (!holderPid) return { lockPid, holderPid, verdict: "other" };
+  return { lockPid, holderPid, verdict: null };
 }
 
-function ownershipVerdict(lockPid: string, ancestryMatched: boolean): LockOwnership {
+// ownedLockPid keeps the lock's own value, tag included, because the lease the
+// branch takes must name the holder exactly as line 1 of the lock records it.
+function ownershipVerdict(lockPid: string, holderPid: string, ancestryMatched: boolean): LockOwnership {
   if (ancestryMatched) {
     ownedLockPid = lockPid;
     return "owned";
   }
-  return pidAlive(lockPid) ? "other" : "missing";
+  return pidAlive(holderPid) ? "other" : "missing";
 }
 
 async function lockOwnership(): Promise<LockOwnership> {
-  const { lockPid, verdict } = readLockPid();
+  const { lockPid, holderPid, verdict } = readLockPid();
   if (verdict) return verdict;
   let pid = String(process.pid);
   for (let i = 0; i < LOCK_ANCESTRY_DEPTH; i += 1) {
-    if (pid === lockPid) {
+    if (pid === holderPid) {
       const current = readLockPid();
       if (current.verdict || current.lockPid !== lockPid) return current.verdict ?? "other";
-      return ownershipVerdict(lockPid, true);
+      return ownershipVerdict(lockPid, holderPid, true);
     }
     pid = await parentPid(pid);
     if (!pid || pid === "1") break;
   }
-  return ownershipVerdict(lockPid, false);
+  return ownershipVerdict(lockPid, holderPid, false);
 }
 
 // Pi types its bash spawn hook as a synchronous function
@@ -426,15 +439,15 @@ async function lockOwnership(): Promise<LockOwnership> {
 // than caching the authority: what blocks there is one branch shell command
 // about to spawn a shell anyway, never an arriving outcome.
 function lockOwnershipSync(): LockOwnership {
-  const { lockPid, verdict } = readLockPid();
+  const { lockPid, holderPid, verdict } = readLockPid();
   if (verdict) return verdict;
   let pid = String(process.pid);
   for (let i = 0; i < LOCK_ANCESTRY_DEPTH; i += 1) {
-    if (pid === lockPid) return ownershipVerdict(lockPid, true);
+    if (pid === holderPid) return ownershipVerdict(lockPid, holderPid, true);
     pid = parentPidSync(pid);
     if (!pid || pid === "1") break;
   }
-  return ownershipVerdict(lockPid, false);
+  return ownershipVerdict(lockPid, holderPid, false);
 }
 
 function textOfContent(content: unknown): string {

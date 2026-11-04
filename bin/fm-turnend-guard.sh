@@ -100,6 +100,7 @@ GRACE=${FM_GUARD_GRACE:-300}
 WATCH="$SCRIPT_DIR/fm-watch.sh"
 CLAUDE_MODE=0
 CURSOR_MODE=0
+AGY_MODE=0
 SYNC_WAIT_MS=${FM_CLAUDE_AUTOARM_SYNC_WAIT_MS:-800}
 EPOCH_FRESH=${FM_CLAUDE_AUTOARM_EPOCH_FRESH:-15}
 BLOCK_BUDGET=${FM_CLAUDE_TURNEND_BLOCK_BUDGET:-3}
@@ -111,9 +112,15 @@ for arg in "$@"; do
   case "$arg" in
     --claude) CLAUDE_MODE=1 ;;
     --cursor) CURSOR_MODE=1 ;;
-    *) echo "usage: $(basename "$0") [--claude|--cursor]" >&2; exit 2 ;;
+    --agy) AGY_MODE=1 ;;
+    *) echo "usage: $(basename "$0") [--claude|--cursor|--agy]" >&2; exit 2 ;;
   esac
 done
+
+allow_exit() {
+  [ "$AGY_MODE" -eq 1 ] && printf '{}\n'
+  exit 0
+}
 
 # A Claude secondmate's home carries .fm-busy-stop (bin/fm-spawn.sh), and this
 # guard is then the only Stop writer of the parent home's busy record for that
@@ -152,20 +159,20 @@ trap record_parent_stop_state EXIT
 # Read the whole turn-end hook payload once; never block on unreadable/absent
 # stdin.
 PAYLOAD=$(cat 2>/dev/null || true)
-[ -n "$PAYLOAD" ] || exit 0
+[ -n "$PAYLOAD" ] || allow_exit
 
 # jq is the repo's established JSON dependency (bin/fm-x-poll.sh uses the same
 # "missing jq -> silent no-op" degrade). Without it we cannot safely read the
 # loop-guard field, so we must never block - fail open, not noisy.
-command -v jq >/dev/null 2>&1 || exit 0
+command -v jq >/dev/null 2>&1 || allow_exit
 
 # A Cursor primary also loads the tracked Claude settings, and Cursor's own
 # registration owns its turn boundary through bin/fm-turnend-guard-cursor.sh,
 # which calls this guard back with --cursor. Without that flag a Cursor-delivered
 # payload is the Claude-compatibility duplicate and must not create a second
 # continuation path (docs/turnend-guard.md "Harness integrations").
-if [ "$CURSOR_MODE" -eq 0 ] && fm_hook_payload_is_foreign_host "$PAYLOAD"; then
-  exit 0
+if [ "$CURSOR_MODE" -eq 0 ] && [ "$AGY_MODE" -eq 0 ] && fm_hook_payload_is_foreign_host "$PAYLOAD"; then
+  allow_exit
 fi
 
 STOP_HOOK_ACTIVE=$(printf '%s' "$PAYLOAD" | jq -r '
@@ -176,9 +183,9 @@ STOP_HOOK_ACTIVE=$(printf '%s' "$PAYLOAD" | jq -r '
     if ((.stop_hook_active | type) == "boolean") then .stop_hook_active else error("stop_hook_active") end
   else false
   end
-' 2>/dev/null) || exit 0
-if [ "$CLAUDE_MODE" -eq 0 ] && [ "$STOP_HOOK_ACTIVE" = "true" ]; then
-  exit 0
+' 2>/dev/null) || allow_exit
+if [ "$CLAUDE_MODE" -eq 0 ] && [ "$AGY_MODE" -eq 0 ] && [ "$STOP_HOOK_ACTIVE" = "true" ]; then
+  allow_exit
 fi
 
 # --- scope precisely to a PRIMARY checkout ----------------------------------
@@ -193,7 +200,7 @@ fi
 # and differs from the common (shared) git-dir, while a main, non-worktree
 # checkout has the two equal. Child worktrees never carry the gitignored marker,
 # so this exempts them while guarding every real secondmate home.
-fm_primary_scope_matches "$FM_ROOT" "$STATE" || exit 0
+fm_primary_scope_matches "$FM_ROOT" "$STATE" || allow_exit
 
 # --- the actual predicate ----------------------------------------------------
 # shellcheck source=bin/fm-wake-lib.sh
@@ -219,11 +226,17 @@ budget_reset() {
 fm_supervision_status "$STATE" "$GRACE"
 if [ "$FM_SUP_NEEDED" = false ]; then
   [ -e "$FAILURE_NOTICE" ] || budget_reset
-  exit 0
+  [ "$AGY_MODE" -eq 1 ] && rm -f "$STATE/.turnend-blocks" 2>/dev/null || true
+  allow_exit
 fi
 # One owner of the "supervision is on, let this turn end" exit contract, shared
 # by every proof of supervision below.
 allow_supervised_stop() {
+  if [ "$AGY_MODE" -eq 1 ]; then
+    rm -f "$STATE/.turnend-blocks" 2>/dev/null || true
+    printf '{}\n'
+    exit 0
+  fi
   [ "$CLAUDE_MODE" -eq 1 ] || exit 0
   fm_failure_episode_reset "$STATE" && exit 0
   exit 2
@@ -252,15 +265,31 @@ if [ "$(fm_path_age "$STATE/.last-watcher-beat")" -lt "$AFK_GRACE" ] \
 fi
 
 block_stop() {
-  local afk x_mode reason rule
+  local afk x_mode reason rule msg max_blocks cur_blocks
   afk=0
   [ -e "$STATE/.afk" ] && afk=1
   x_mode=0
   [ -f "$CONFIG/x-mode.env" ] && x_mode=1
-  reason=$("$SCRIPT_DIR/fm-supervision-instructions.sh" --afk "$afk" --x-mode "$x_mode" --repair-line 2>/dev/null \
-    || printf '%s\n' 'tasks in flight, no live watcher - repair missing watcher supervision according to the session-start operating block before ending the turn')
+  if [ "$AGY_MODE" -eq 1 ]; then
+    max_blocks=${FM_TURNEND_MAX_BLOCKS:-3}
+    case "$max_blocks" in ''|*[!0-9]*|0) max_blocks=3 ;; esac
+    cur_blocks=$(cat "$STATE/.turnend-blocks" 2>/dev/null || printf '0')
+    case "$cur_blocks" in ''|*[!0-9]*) cur_blocks=0 ;; esac
+    if [ "$cur_blocks" -ge "$max_blocks" ]; then
+      printf '{}\n'
+      exit 0
+    fi
+    cur_blocks=$((cur_blocks + 1))
+    mkdir -p "$STATE" 2>/dev/null || true
+    printf '%s\n' "$cur_blocks" > "$STATE/.turnend-blocks"
+    reason=$("$SCRIPT_DIR/fm-supervision-instructions.sh" --harness agy --afk "$afk" --x-mode "$x_mode" --repair-line 2>/dev/null \
+      || printf '%s\n' 'tasks in flight, no live watcher - repair missing watcher supervision according to the session-start operating block before ending the turn')
+  else
+    reason=$("$SCRIPT_DIR/fm-supervision-instructions.sh" --afk "$afk" --x-mode "$x_mode" --repair-line 2>/dev/null \
+      || printf '%s\n' 'tasks in flight, no live watcher - repair missing watcher supervision according to the session-start operating block before ending the turn')
+  fi
   rule='━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━'
-  {
+  msg=$(
     printf '●%s\n' "$rule"
     printf '●  TURN WOULD END BLIND - SUPERVISION IS OFF\n'
     if [ "$FM_SUP_IN_FLIGHT" -gt 0 ]; then
@@ -277,7 +306,12 @@ block_stop() {
     fi
     printf '●  %s\n' "$reason"
     printf '●%s\n' "$rule"
-  } >&2
+  )
+  if [ "$AGY_MODE" -eq 1 ]; then
+    jq -cn --arg r "$msg" '{decision:"continue",reason:$r}'
+    exit 0
+  fi
+  printf '%s\n' "$msg" >&2
   exit 2
 }
 

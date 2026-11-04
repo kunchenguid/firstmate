@@ -8,8 +8,10 @@
 # which is dead moments after it is written. For a Claude session that proves a
 # trusted session id the anchor is CLAUDE_PID, the model-loop process, so a
 # shared transient daemon or a front-end that outlives the session never keeps
-# a dead session's lock alive. Line 1 keeps its whole-line pid format because
-# every other reader takes the first line as the pid.
+# a dead session's lock alive. On Windows that pid is recorded tagged, and a
+# /clear re-key under the same tagged pid refreshes the sidecar as it does on
+# POSIX. Line 1 keeps its whole-line pid format because every other reader
+# takes the first line as the pid.
 #
 # The trusted id itself is recorded beside the lock in state/.lock-session, a
 # sidecar written only here and only under the claim lock: refreshed on every
@@ -69,7 +71,17 @@ if [ "${1:-}" = "status" ]; then
   exit 0
 fi
 
-me=$(fm_session_lock_anchor_pid) || { echo "error: cannot locate harness process in ancestry" >&2; exit 1; }
+me=$(fm_session_lock_anchor_pid) || {
+  if fm_win_boundary_applies; then
+    # Here the parent link does not reach the harness at all, so "not in the
+    # ancestry" would describe the wrong problem and send the reader hunting a
+    # process tree that can never contain the answer.
+    echo "error: cannot identify this harness session on Windows: it publishes no session pid this build recognizes (see FM_WIN_HARNESS_PID_VARS in bin/fm-session-lock-lib.sh; CLAUDE_PID is taken only together with CLAUDE_CODE_SESSION_ID); operate read-only until resolved" >&2
+  else
+    echo "error: cannot locate harness process in ancestry" >&2
+  fi
+  exit 1
+}
 probe=$(mktemp "$STATE/.lock-write.XXXXXX" 2>/dev/null) || {
   echo "error: cannot write session lock; operate read-only until resolved" >&2
   exit 1
