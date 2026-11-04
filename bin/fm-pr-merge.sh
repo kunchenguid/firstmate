@@ -619,10 +619,6 @@ note_expected_head() {
   fi
 }
 
-publish_merge_head() {
-  FM_PR_MERGE_HEAD=$1
-}
-
 gitlab_verify_mergeable() {
   local json fields line pipeline_waived
   local total=0 named=0 refusals=''
@@ -740,7 +736,7 @@ FIELDS
     printf 'verified: %s is open and mergeable, with a successful pipeline at head %s\n' \
       "$URL" "$live_head" >&2
   fi
-  publish_merge_head "$live_head"
+  FM_PR_MERGE_HEAD=$live_head
   FM_PR_GITLAB_ASYNC_CONFIGURED=$async_configured
 }
 
@@ -876,7 +872,7 @@ FIELDS
   fi
   printf 'verified: %s is open and mergeable, with a successful combined status at head %s\n' \
     "$URL" "$live_head" >&2
-  publish_merge_head "$live_head"
+  FM_PR_MERGE_HEAD=$live_head
 }
 
 # The caller's own extra arguments may only name a merge method, in the same
@@ -1236,7 +1232,7 @@ EOF
   fi
   printf 'verified: %s is open and mergeable, with every unwaived required check reported and every unwaived check green at head %s\n' \
     "$URL" "$live_head" >&2
-  publish_merge_head "$live_head"
+  FM_PR_MERGE_HEAD=$live_head
   FM_PR_GITHUB_BASE=$base
 }
 
