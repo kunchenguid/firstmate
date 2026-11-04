@@ -5,7 +5,9 @@
 # secondmate-shaped home (tracked .pi/extensions + .fm-secondmate-home) under a
 # disposable PI_CODING_AGENT_DIR, then proves the spawn-side --approve flag
 # clears that stall without rewriting the disposable trust store. An unseeded
-# path without --approve still prompts.
+# path without --approve still prompts. A worker-shaped worktree launched with
+# the spawn-side --no-approve starts unattended without running its project
+# .pi extension or rewriting the trust store.
 #
 # Token-free: never submits a prompt and never answers the dialog with Enter.
 # Uses Escape / kill-server only. Never touches ~/.pi.
@@ -134,6 +136,48 @@ fi
 "$REAL_TMUX" -L "$SOCKET" kill-session -t unseeded >/dev/null 2>&1 || true
 CHECKED=$((CHECKED + 1))
 pass "unseeded path without --approve still prompts on Trust project folder?"
+
+# --- 4. Worker worktree WITH --no-approve starts unattended, project code idle -
+if "$PI_BIN" --help 2>&1 | grep -Eq -- '(^|[[:space:]])--no-approve([^[:alnum:]_-]|$)'; then
+  WORKER="$LAB/worker"
+  MARKER="$LAB/worker-extension-ran"
+  mkdir -p "$WORKER/.pi/extensions"
+  printf '# test project\n' > "$WORKER/AGENTS.md"
+  printf 'import { writeFileSync } from "node:fs";\nexport default function () { writeFileSync(%s, "ran"); }\n' \
+    "'$MARKER'" > "$WORKER/.pi/extensions/marker.ts"
+  printf '{}\n' > "$PI_DIR/trust.json"
+  "$REAL_TMUX" -L "$SOCKET" new-session -d -s worker -n w -c "$WORKER" -- \
+    env HOME="$LAB/home-worker" PI_CODING_AGENT_DIR="$PI_DIR" PI_OFFLINE=1 \
+    "$PI_BIN" --no-approve --no-session --no-skills --no-prompt-templates \
+    || fail "could not launch pi with --no-approve"
+  if ! capture_until worker 'No models available|escape interrupt|not trusted' 15 "$LAB/pane-worker.txt"; then
+    fail "worker worktree with --no-approve never reached a post-trust TUI within 15s:
+$(cat "$LAB/pane-worker.txt")"
+  fi
+  if grep -qiE 'Trust project folder' "$LAB/pane-worker.txt"; then
+    fail "worker worktree with --no-approve still showed Trust project folder?:
+$(cat "$LAB/pane-worker.txt")"
+  fi
+  "$REAL_TMUX" -L "$SOCKET" send-keys -t worker:w Escape >/dev/null 2>&1 || true
+  "$REAL_TMUX" -L "$SOCKET" kill-session -t worker >/dev/null 2>&1 || true
+  [ ! -e "$MARKER" ] || fail "--no-approve still executed the worktree's project .pi extension"
+  [ "$(cat "$PI_DIR/trust.json")" = '{}' ] \
+    || fail "--no-approve rewrote the disposable trust store: $(cat "$PI_DIR/trust.json")"
+  # Control: the same extension does run under --approve, so the absent marker
+  # above proves --no-approve skipped it rather than a broken fixture.
+  "$REAL_TMUX" -L "$SOCKET" new-session -d -s workerctl -n w -c "$WORKER" -- \
+    env HOME="$LAB/home-worker" PI_CODING_AGENT_DIR="$PI_DIR" PI_OFFLINE=1 \
+    "$PI_BIN" --approve --no-session --no-skills --no-prompt-templates \
+    || fail "could not launch the --approve control"
+  capture_until workerctl 'No models available|escape interrupt' 15 "$LAB/pane-workerctl.txt" || :
+  "$REAL_TMUX" -L "$SOCKET" kill-session -t workerctl >/dev/null 2>&1 || true
+  [ -e "$MARKER" ] || fail "control: --approve never ran the marker extension, so the --no-approve check proved nothing:
+$(cat "$LAB/pane-workerctl.txt")"
+  CHECKED=$((CHECKED + 1))
+  pass "worker worktree with --no-approve starts past the trust dialog without running project .pi code or rewriting trust.json"
+else
+  note "installed pi does not advertise --no-approve; spawn omits it for workers and case 4 has nothing to prove"
+fi
 
 [ "$CHECKED" -ge 3 ] || fail "guard checked nothing useful (checked=$CHECKED)"
 echo "# all fm-pi-seeded-home-trust-live-e2e checks passed ($CHECKED)"
