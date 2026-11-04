@@ -825,6 +825,33 @@ The watch is read-only against Sentry and GitHub, makes no model calls, and boun
 That budget is shared fairly: each project's read gets the budget divided by the project count, at least 2 seconds and never more than `FM_SENTRY_WATCH_HTTP_TIMEOUT` (default 5), and the read order rotates round-robin every poll starting after the last project read, so a slow host starves no fixed tail and every project is read within a bounded number of polls.
 A project left unread for three consecutive polls is reported as `could-not-determine` on that transition.
 
+## Post-merge change watch (config/change-watch-kubeconfig, config/change-watch-repos)
+
+[`bin/fm-change-watch.sh`](../bin/fm-change-watch.sh) watches a merged change by effect for 12 hours; its header owns the commands, metrics, bars, schedule, target resolution, and test seams, and [`docs/architecture.md`](architecture.md) "Post-merge change watch" owns why it exists.
+This section owns only the two local, gitignored files that point its reads at this home's cluster and this home's repository map.
+
+`config/change-watch-kubeconfig` holds one path on its first non-comment line: the kubeconfig every cluster read of a watch uses.
+Precedence is `FM_CW_KUBECONFIG`, then this file, then an operator's own `KUBECONFIG`, then `~/.kube/mcp-viewer.kubeconfig`, and only then the ambient `~/.kube/config` default.
+The order exists because a watch once inherited an ambient context pointed at an unreachable cluster and every watch for months completed `unmeasured` while its record looked normal, so a home that reads production should name its reader here rather than rely on whatever `kubectl` was last configured with.
+A kubeconfig named here that cannot be read is reported, never silently replaced by another cluster.
+
+`config/change-watch-repos` maps a repository to the things a watch should sample, one repository per line, `<repo> <spec>...`, where `<repo>` is the GitHub repository name and each spec is one of:
+
+```
+<namespace>/<deployment>   an explicit Deployment target
+<deployment>               a Deployment in muso-prod
+image:<name>               every Deployment running an image whose repository is <name>
+sentry:<project-slug>      the repository's Sentry project
+run:<owner>/<repo>#<workflow-path>   the repository's deploy workflow, by path
+```
+
+A line for a repository replaces that repository's built-in entry rather than adding to it, so a home can point a watch at a different namespace, a narrower image, or its own Sentry project; a repository with no line and no built-in entry still resolves through the Deployments that run an image named after it.
+A `run:` spec names the workflow by file (`run:Muso-AI/hydra#.github/workflows/deploy.yml`) because a spec is one whitespace-free token and workflow display names contain spaces.
+Sentry reads use the org `auth_token` in `~/.config/muso/sentry-vault.json` (override `FM_CW_SENTRY_VAULT`); with no token or no mapped project the Sentry target is not registered and the registration line says so, and it is never a silent zero.
+A Sentry read waits for the watch's own landing — the Deployments' rollout fingerprint when the watch has any, otherwise its mapped `run:` workflow's run for this merge — because before that landing those are the errors of the code the release replaced.
+Every mapped target is bounded — an image family is watched by its busiest `FM_CW_MAX_TARGETS` (default 8) Deployments and the registration line states the cap — and a Kubernetes target is scored only once its rollout fingerprint (pod images plus pod-template hash) differs from registration, so a sample taken before the rollout is recorded as awaiting the deploy rather than as health and a rollout that changes no image still counts.
+The per-sample budget (`FM_CW_SAMPLE_DEADLINE`) bounds the cluster reads only: the Sentry and deploy-workflow reads go over the network under their own bounds, so a sample whose pod reads spent the budget still measures them.
+
 ## Relay (.env)
 
 Relay lets a firstmate instance answer public mentions and act on normal reversible mention requests through firstmate's normal lifecycle.
