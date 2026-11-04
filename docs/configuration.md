@@ -860,6 +860,7 @@ reserve-flag /var/run/fm-reserved.flag host reserved by the captain   # repeatab
 captain-idle 300       # opt-in, macOS: the captain counts as present when input was idle under 300 s
 quota-provider claude  # opt-in: publish that provider's quota runway
 max-load1 20           # keep a raw 1-minute load rule while beats replace it
+max-captain-holds 5     # opt-in: hold new dispatch while more than 5 captain holds are open
 ```
 
 `pressure-file` and `reserve-flag` may repeat and take an absolute or `~/` path; a `reserve-flag` path may be followed by the label it is reported by.
@@ -874,6 +875,12 @@ While the file exists, the watcher runs `bin/fm-capacity.sh --publish` detached 
 Publishing is best-effort and never changes what the watcher does; no spawn reads the verdict.
 `bin/fm-capacity.sh --admit` is an advisory check of the same verdict: it exits 0 when the verdict admits or the file is absent, and reports the reasons on stderr with exit 75 when it does not.
 No Firstmate script calls it.
+`max-captain-holds` adds the `captain-queue` constraint: with more open captain holds than that number, `reason=` names it and the verdict admits nothing.
+The verdict is per home, not per item, so it holds every new dispatch, scout and audit work included; with the key unset nothing is counted and nothing changes.
+
+When lanes are under the cap yet a constraint admits nothing while `tasks-axi ready` lists work, the watcher raises one captain-facing `check: dispatch halted ...` wake after the halt has lasted `FM_CAPACITY_HALT_ALERT_SECS` (default 1800; `0` turns the alert off).
+It names each constraint with its measured value against its threshold and the one-line fix, repeats at most once per 24 hours while the halt lasts, and stops the moment the constraint or the ready work clears.
+A full lane cap never raises it.
 The script's header owns the report line, the published document's fields, the verdict, the beat freshness rules, the host-constraint thresholds, and the probe fallbacks.
 
 ## PR-ready line after green (config/ready-after-green)

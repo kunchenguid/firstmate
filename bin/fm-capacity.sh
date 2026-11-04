@@ -45,6 +45,9 @@
 #   pressure  beat basis: the pressure level is warn or critical
 #   load      load1 is at or over max-load1
 #   reserve   a reserve-flag file exists
+#   captain-queue  max-captain-holds is set and more captain holds are open
+#             than it allows. The verdict is per home, not per item, so it holds
+#             every new dispatch, scout and audit work included
 #   battery   a fresh beat reports the machine on battery
 # Otherwise reason is ok when free_lanes > 0 and full when it is 0.
 # The human "Constrained" hold line is printed only when config/lane-capacity
@@ -206,6 +209,7 @@ target_error=
 min_avail_gb=
 min_disk_gb=
 max_load1=
+max_captain_holds=
 captain_idle=
 quota_provider=
 pressure_files=
@@ -240,7 +244,7 @@ parse_lane_config() {
     [ "$key" = "$line" ] || rest=$(printf '%s' "${line#* }" | sed 's/^ *//')
     value=${rest%% *}
     case "$key" in
-      min-avail-gb|min-disk-gb|max-load1|captain-idle|quota-provider|pressure-file|reserve-flag) ;;
+      min-avail-gb|min-disk-gb|max-load1|max-captain-holds|captain-idle|quota-provider|pressure-file|reserve-flag) ;;
       *) config_error "$lineno" "unknown key" "'$key'"; return 1 ;;
     esac
     case "$key" in
@@ -259,6 +263,10 @@ parse_lane_config() {
           min-disk-gb) min_disk_gb=$value ;;
           max-load1) max_load1=$value ;;
         esac
+        ;;
+      max-captain-holds)
+        is_uint "$value" && [ "${#value}" -le 9 ] || { config_error "$lineno" "max-captain-holds needs a non-negative integer"; return 1; }
+        max_captain_holds=$((10#$value))
         ;;
       captain-idle)
         is_uint "$value" && [ "${#value}" -le 9 ] && [ "$((10#$value))" -gt 0 ] || { config_error "$lineno" "captain-idle needs a positive number of seconds"; return 1; }
@@ -290,7 +298,7 @@ if [ -e "$LANE_CONFIG" ]; then
     target_error="config/lane-capacity: $target_error"
     target_reason="config/lane-capacity: $target_reason"
     target=invalid
-    min_avail_gb='' min_disk_gb='' max_load1='' captain_idle='' quota_provider='' pressure_files='' reserve_flags=''
+    min_avail_gb='' min_disk_gb='' max_load1='' max_captain_holds='' captain_idle='' quota_provider='' pressure_files='' reserve_flags=''
   fi
 fi
 
@@ -520,6 +528,16 @@ case "$level" in
 esac
 if [ -n "$max_load1" ] && [ -n "$lim_load1" ] && ! num_lt "$lim_load1" "$max_load1"; then
   add_constraint load "load: $lim_load1 over its max-load1 $max_load1"
+fi
+if [ -n "$max_captain_holds" ]; then
+  # Unreadable backlog: not evaluated, like an unavailable probe.
+  # shellcheck source=bin/fm-timeout-lib.sh
+  . "$SCRIPT_DIR/fm-timeout-lib.sh"
+  if v=$(FM_HOME=$FM_HOME fm_run_timed 10 "$SCRIPT_DIR/fm-tasks-axi.sh" list --state held --fields hold_kind 2>/dev/null); then
+    open_holds=$(printf '%s\n' "$v" | awk -F, '/^  [A-Za-z0-9._-]+,/ && $NF == "captain"' | grep -c .)
+    [ "$open_holds" -le "$max_captain_holds" ] ||
+      add_constraint captain-queue "captain-queue: $open_holds open captain holds, over max-captain-holds $max_captain_holds"
+  fi
 fi
 [ "$reserve_flag" != present ] || add_constraint reserve "captain reserve: $reserve_label"
 [ "$on_battery" != true ] || add_constraint battery "on battery"

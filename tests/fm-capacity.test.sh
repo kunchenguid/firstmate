@@ -524,6 +524,94 @@ test_watcher_publishes_only_when_opted_in() {
   pass "the watcher publishes lane facts only for an opted-in home"
 }
 
+# backlog_in <home> <fm-tasks-axi args...>: edit that home's real backlog.
+backlog_in() {
+  local home=$1
+  shift
+  mkdir -p "$home/data"
+  PATH="$PATH" FM_HOME="$home" "$ROOT/bin/fm-tasks-axi.sh" "$@" >/dev/null
+}
+
+test_captain_queue_constraint() {
+  local home fakebin out rc
+  command -v tasks-axi >/dev/null 2>&1 || { echo "skip: tasks-axi not found"; return 0; }
+  home=$(make_home queue 1 0)
+  fakebin=$(make_probes "$TMP_ROOT/p-queue" 0.50 60 8 20971520)
+  backlog_in "$home" add q1 "first call" --kind captain
+  backlog_in "$home" hold q1 --reason "pick" --kind captain
+  backlog_in "$home" add q2 "second call" --kind captain
+  backlog_in "$home" hold q2 --reason "pick" --kind captain
+  backlog_in "$home" add w1 "held for other reasons" --kind ship
+  backlog_in "$home" hold w1 --reason "waiting" --kind external
+  printf '4\n' > "$home/config/lane-capacity"
+  out=$(run_capacity_jq "$home" "$fakebin")
+  assert_contains "$out" 'free_lanes=3 reason=ok ' "an unset max-captain-holds must change nothing"
+  printf '4\nmax-captain-holds 2\n' > "$home/config/lane-capacity"
+  out=$(run_capacity_jq "$home" "$fakebin")
+  assert_contains "$out" 'free_lanes=3 reason=ok ' "holds at the threshold must not constrain; other hold kinds do not count"
+  backlog_in "$home" add q3 "third call" --kind captain
+  backlog_in "$home" hold q3 --reason "pick" --kind captain
+  out=$(run_capacity_jq "$home" "$fakebin")
+  assert_contains "$out" 'free_lanes=0 reason=captain-queue ' "holds over the threshold must close the lanes"
+  out=$(run_capacity_jq "$home" "$fakebin" --admit); rc=$?
+  expect_code 75 "$rc" "admit over the captain queue"
+  assert_contains "$out" 'captain-queue: 3 open captain holds, over max-captain-holds 2' "the deferral must give the measured value and threshold"
+  backlog_in "$home" unhold q3
+  out=$(run_capacity_jq "$home" "$fakebin")
+  assert_contains "$out" 'free_lanes=3 reason=ok ' "answering a hold must clear the constraint"
+  printf '4\nmax-captain-holds many\n' > "$home/config/lane-capacity"
+  out=$(run_capacity_jq "$home" "$fakebin"); rc=$?
+  expect_code 1 "$rc" "malformed max-captain-holds"
+  assert_contains "$out" 'line 2: max-captain-holds needs a non-negative integer' "a malformed value must be refused"
+  pass "captain-queue constrains only when max-captain-holds is set and exceeded"
+}
+
+# halt_tick <home> <fakebin> <now>: publish this home's lane facts, run the
+# watcher's real dispatch-halt tick at that clock, print "<wakes>|<alert>".
+halt_tick() {
+  PATH="$2:$PATH" FM_HOME="$1" FM_LANE_CAPACITY_PUBLISH_INTERVAL=0 "$CAPACITY" --publish
+  (
+    export PATH="$2:$PATH" FM_HOME="$1" FM_STATE_OVERRIDE="$1/state" FM_CONFIG_OVERRIDE="$1/config"
+    # shellcheck source=bin/fm-watch.sh
+    . "$ROOT/bin/fm-watch.sh"
+    capacity_halt_alert_tick "$3" || echo "tick failed"
+    n=0; [ ! -f "$FM_WAKE_QUEUE" ] || n=$(wc -l < "$FM_WAKE_QUEUE" | tr -d ' ')
+    printf '%s|%s\n' "$n" "$CAPACITY_HALT_ALERT"
+  )
+}
+
+test_dispatch_halt_alert() {
+  local home fakebin out
+  command -v tasks-axi >/dev/null 2>&1 || { echo "skip: tasks-axi not found"; return 0; }
+  home=$(make_home halt 1 0)
+  fakebin=$(make_probes "$TMP_ROOT/p-halt" 0.50 5 8 20971520)   # 5% memory free: constrained
+  printf '4\n' > "$home/config/lane-capacity"
+  out=$(halt_tick "$home" "$fakebin" 1000)
+  assert_equals '0|' "$out" "constrained with no ready work must never alert"
+  backlog_in "$home" add r1 "ready work" --kind ship
+  out=$(halt_tick "$home" "$fakebin" 1000)
+  assert_equals '0|' "$out" "the debounce window must start at first sight"
+  out=$(halt_tick "$home" "$fakebin" 2799)
+  assert_equals '0|' "$out" "no alert before the 30 minute window"
+  out=$(halt_tick "$home" "$fakebin" 2800)
+  assert_equals '1|check: dispatch halted for 1800s with 1 ready: memory: 5% free [fix: free memory, or lower min-avail-gb]' "$out" \
+    "one alert naming the constraint, its value and its fix"
+  out=$(halt_tick "$home" "$fakebin" 80000)
+  assert_equals '1|' "$out" "no re-raise within 24 h"
+  out=$(halt_tick "$home" "$fakebin" 89200)
+  assert_contains "$out" '2|check: dispatch halted for 88200s' "one re-raise after 24 h"
+  fakebin=$(make_probes "$TMP_ROOT/p-halt-clear" 0.50 60 8 20971520)
+  out=$(halt_tick "$home" "$fakebin" 89300)
+  assert_equals '2|' "$out" "a cleared constraint must not re-raise"
+  assert_absent "$home/state/.capacity-halt-alert" "clearing must drop the debounce record"
+  # A full cap, even with ready work, never alerts.
+  printf '1\n' > "$home/config/lane-capacity"
+  fakebin=$(make_probes "$TMP_ROOT/p-halt-full" 0.50 5 8 20971520)
+  out=$(halt_tick "$home" "$fakebin" 200000); out=$(halt_tick "$home" "$fakebin" 300000)
+  assert_equals '2|' "$out" "a full lane cap must never alert"
+  pass "the dispatch-halt alert debounces, re-raises once a day, clears, and ignores a full cap"
+}
+
 test_no_target_prints_counts_only
 test_no_target_never_prints_constrained_line
 test_target_yields_open_lanes_and_full
@@ -540,6 +628,8 @@ test_limits_and_admit
 test_publish_document
 test_captain_and_quota
 test_watcher_publishes_only_when_opted_in
+test_captain_queue_constraint
+test_dispatch_halt_alert
 test_real_host_smoke
 
 echo '# all fm-capacity tests passed'
