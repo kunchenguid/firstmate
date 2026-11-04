@@ -1394,7 +1394,7 @@ case "$1" in
 *-working) echo "state: working · source: pane · busy" ;;
 *-done) echo "state: done · source: status-log · done" ;;
 *-paused) echo "state: paused · source: status-log · waiting" ;;
-*-gone) echo "state: unknown · source: none · endpoint gone" ;;
+*-gone) echo "state: unknown · source: none · backend target gone: fm-x" ;;
 *) echo "state: unknown · source: none · no metadata" ;;
 esac
 STUB
@@ -1550,12 +1550,48 @@ test_away_spend_cap_counts_only_working_workers() {
     [ -f "$home/state/$f.meta" ] || fail "the cap count disturbed record $f"
   done
 
-  # The real classifier reads a record with no reachable endpoint as not working.
+  # The real classifier, with records that keep their worktrees so the read
+  # reaches the endpoint probe: a private tmux server that answers but omits
+  # the recorded window is positive evidence the endpoint is gone, so those
+  # records do not count, while a record with no reachable tmux at all reads an
+  # uncertain unknown and does count (the cap fails safe).
+  local tmuxdir wt
+  tmuxdir=$(mktemp -d /tmp/fmcap.XXXXXX)
   rm -f "$home"/state/*.meta
-  fm_write_meta "$home/state/real-dead.meta" "window=fm-no-such-window" "kind=ship" "worktree=$TMP_ROOT/absent"
-  fm_write_meta "$home/state/real-dead2.meta" "window=fm-no-such-window2" "kind=ship" "worktree=$TMP_ROOT/absent"
-  out=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" "$ROOT/bin/fm-spawn.sh" task-new --mode no-mistakes --yolo off 2>&1)
-  assert_not_contains "$out" "caps concurrent workers" "dead-endpoint records counted against the cap under the real classifier"
+  wt="$TMP_ROOT/cap-wt-1"; mkdir -p "$wt"
+  fm_write_meta "$home/state/real-gone1.meta" "window=cap-lab:fm-no-such-window" "kind=ship" "worktree=$wt"
+  wt="$TMP_ROOT/cap-wt-2"; mkdir -p "$wt"
+  fm_write_meta "$home/state/real-gone2.meta" "window=cap-lab:fm-no-such-window2" "kind=ship" "worktree=$wt"
+  if command -v tmux >/dev/null 2>&1; then
+    TMUX_TMPDIR="$tmuxdir" tmux new-session -d -s cap-lab 'sleep 60' || fail "private tmux server did not start"
+    out=$(TMUX_TMPDIR="$tmuxdir" FM_HOME="$home" "$ROOT/bin/fm-afk-contract.sh" live-workers 2>&1)
+    TMUX_TMPDIR="$tmuxdir" tmux kill-server >/dev/null 2>&1 || true
+    rm -rf "$tmuxdir"
+    [ "$out" = 0 ] || fail "endpoint-gone records with live worktrees counted against the cap: $out"
+  fi
+  # An uncertain reading counts: a record with a worktree but no recorded
+  # endpoint at all cannot be proved idle.
+  wt="$TMP_ROOT/cap-wt-3"; mkdir -p "$wt"
+  rm -f "$home"/state/*.meta
+  fm_write_meta "$home/state/real-unsure.meta" "kind=ship" "worktree=$wt"
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-afk-contract.sh" live-workers 2>&1)
+  [ "$out" = 1 ] || fail "an uncertain unknown reading was not counted against the cap: $out"
+
+  # The reads share one total time bound: a reader that never answers is cut
+  # off, counts as uncertain, and the whole count still returns promptly.
+  rm -f "$home"/state/*.meta "$root/bin/fm-crew-state.sh"
+  cat > "$root/bin/fm-crew-state.sh" <<'STUB'
+#!/usr/bin/env bash
+sleep 30
+STUB
+  chmod +x "$root/bin/fm-crew-state.sh"
+  for f in 1 2 3; do
+    fm_write_meta "$home/state/slow-$f.meta" "window=fm-slow-$f" "kind=ship"
+  done
+  local t0=$SECONDS
+  out=$(FM_AFK_LIVE_WORKERS_TIMEOUT=2 FM_HOME="$home" "$root/bin/fm-afk-contract-real.sh" live-workers 2>&1)
+  [ $((SECONDS - t0)) -le 8 ] || fail "live-workers ignored its total time bound ($((SECONDS - t0))s)"
+  [ "$out" = 3 ] || fail "records cut off by the time bound were not counted as uncertain: $out"
   pass "the away spend cap counts only genuinely working workers and its refusal names the true live count"
 }
 

@@ -641,7 +641,7 @@ case "$1" in
 *-working) echo "state: working · source: pane · busy" ;;
 *-done) echo "state: done · source: status-log · done" ;;
 *-paused) echo "state: paused · source: status-log · waiting" ;;
-*) echo "state: unknown · source: none · endpoint gone" ;;
+*) echo "state: unknown · source: none · backend target gone: fm-x" ;;
 esac
 STUB
   chmod +x "$stub/bin/fm-crew-state.sh"

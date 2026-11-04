@@ -132,8 +132,9 @@
 # away record stands; bin/fm-spawn.sh enforces it by refusing a fresh ordinary
 # spawn once the home already holds that many. An ordinary worker is a
 # state/*.meta record whose kind is not secondmate and whose bin/fm-crew-state.sh
-# reading is working; finished, paused, parked, failed, and endpoint-gone
-# records keep their worktrees but are not live spend. It is counted by
+# reading is not provably idle: finished, paused, parked, blocked, failed, and
+# positively endpoint-gone records are not live spend, while working and merely
+# uncertain (unknown) readings count, so the cap fails safe. It is counted by
 # fm_afk_contract_live_ordinary_workers and exposed as `live-workers`, which is
 # the one implementation both the entry default and that refusal read, so the
 # two can never count differently.
@@ -157,6 +158,8 @@ FM_AFK_CONTRACT_STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 
 # shellcheck source=bin/fm-classify-lib.sh
 . "$FM_AFK_CONTRACT_DIR/fm-classify-lib.sh"
+# shellcheck source=bin/fm-timeout-lib.sh
+. "$FM_AFK_CONTRACT_DIR/fm-timeout-lib.sh"
 
 FM_AFK_CONTRACT_VERSION=2
 # Older record versions this script still reads (never writes).
@@ -190,19 +193,38 @@ fm_afk_contract_present() {  # [state-dir]
 # The ordinary workers this home is running right now (the header's SPEND CAP):
 # every state/*.meta whose kind is not secondmate, because a secondmate is a
 # persistent home rather than spend, and whose bin/fm-crew-state.sh reading is
-# working, because a finished, paused, or endpoint-gone record spends nothing.
+# not provably idle. A finished, paused, parked, blocked, or failed reading
+# spends nothing, and so does an unknown one that positively names a gone
+# endpoint (worktree gone, backend target gone). Every other unknown - an
+# unreachable endpoint, a read error, or a read cut off by the time bound
+# below - counts, so the cap errs toward refusing a spawn rather than
+# admitting one on an uncertain count. The reads share one total deadline
+# (FM_AFK_LIVE_WORKERS_TIMEOUT seconds, default 20); once it is spent, each
+# remaining record counts as uncertain without being read.
 # This is the one implementation of that count, read by the entry default here
 # and by bin/fm-spawn.sh's refusal.
 fm_afk_contract_live_ordinary_workers() {  # [state-dir]
-  local state=${1:-$FM_AFK_CONTRACT_STATE} meta live=0 id
+  local state=${1:-$FM_AFK_CONTRACT_STATE} meta live=0 id reading left
+  local deadline=$((SECONDS + ${FM_AFK_LIVE_WORKERS_TIMEOUT:-20}))
   for meta in "$state"/*.meta; do
     [ -f "$meta" ] || continue
     [ "$(grep '^kind=' "$meta" 2>/dev/null | tail -1 | cut -d= -f2-)" != secondmate ] || continue
     id=${meta##*/}
     id=${id%.meta}
-    case "$(FM_CREW_STATE_NO_FORGE=1 FM_STATE_OVERRIDE="$state" "$FM_AFK_CONTRACT_DIR/fm-crew-state.sh" "$id" 2>/dev/null | head -1)" in
+    left=$((deadline - SECONDS))
+    reading=
+    if [ "$left" -gt 0 ]; then
+      reading=$(FM_CREW_STATE_NO_FORGE=1 FM_STATE_OVERRIDE="$state" \
+        fm_run_timed "$left" "$FM_AFK_CONTRACT_DIR/fm-crew-state.sh" "$id" 2>/dev/null | head -1) || true
+    fi
+    case "$reading" in
     'state: working '*) ;;
-    *) continue ;;
+    'state: unknown '*)
+      case "$reading" in
+      *'worktree gone'* | *'backend target gone'*) continue ;;
+      esac
+      ;;
+    'state: '*) continue ;;
     esac
     live=$((live + 1))
   done
