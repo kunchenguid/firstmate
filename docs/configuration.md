@@ -704,6 +704,46 @@ Arm the check once per home with `bin/fm-fleet-stall-check.sh arm`, which writes
 A whole poll is budgeted at half of `FM_CHECK_TIMEOUT`, at most 15 seconds, because the watcher runs its checks one after another and a check that spends most of its timeout on every sweep holds the whole sweep back; a worker the pane captures do not reach in time is not counted that poll and keeps its history.
 `bin/fm-fleet-stall-check.sh status` prints the last recorded verdict, and `bin/fm-fleet-stall-check.sh disarm` removes the shim, its trust binding, and `state/.fleet-stall.json`.
 
+## CLIProxyAPI credential expiry watch (state/.cliproxy-expiry)
+
+[`bin/fm-cliproxy-expiry-check.sh`](../bin/fm-cliproxy-expiry-check.sh) is a registered watcher check that wakes firstmate while a Claude credential in the local CLIProxyAPI pool is still replaceable.
+It exists because a Claude OAuth credential family dies 27-30 days after the human login however faithfully it refreshes, and the proxy cannot see that deadline: it ignores the refresh-token expiry the token endpoint omits, retries a rejected credential forever, and keeps serving the still-valid eight-hour access token after the family is already dead.
+The last wave therefore degraded quietly from 2026-10-09 and only surfaced as per-account 401s on 2026-10-18.
+Its header owns the exact signals, identity set, and record format; this section owns the configuration and the operator contract.
+
+Three conditions are reported, each on its own evidence: a `last_refresh` older than nine hours (a healthy account refreshes inside eight, so a frozen one means a dead refresh token); a login older than 23 days (roughly half a week of runway before the measured 27-30 day wall); and a `claude-setup-token` credential whose own one-year `expired` is inside 30 days, since a static token has no refresh to watch.
+A login date is not stored in a CLIProxyAPI auth file, so the age signal reads `config/cliproxy-login-registry.json`: one `"<email>": "<ISO date>"` entry per account, `_`-prefixed keys ignored.
+[`bin/cliproxy-relogin.sh`](../bin/cliproxy-relogin.sh) writes that entry on every re-login, and a missing or unreadable registry, or an account it does not name, is reported as its own condition rather than quietly disabling the age signal.
+The line names each affected account with its login age and expiry date, so the wake is actionable without opening anything.
+
+`check` prints one line only for conditions that were not in the previous sweep, so a standing condition wakes firstmate once and a condition that clears and returns is news again; `status` prints the whole current set and writes nothing.
+The sweep reads files only, makes no network call, and never prints secret material.
+Arm it once per home with `bin/fm-cliproxy-expiry-check.sh arm`, which writes `state/cliproxy-expiry.check.sh` and binds it with [`bin/fm-check-register.sh`](../bin/fm-check-register.sh); `disarm` removes the shim, its trust binding, and the record.
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `FM_CLIPROXY_AUTH_DIR` | `~/.cli-proxy-api` | credential directory swept |
+| `FM_CLIPROXY_LOGIN_REGISTRY` | `<home>/config/cliproxy-login-registry.json` | login-date registry |
+| `FM_CLIPROXY_STALL_SECS` | `32400` | refresh stall threshold (9h) |
+| `FM_CLIPROXY_MAX_AGE_DAYS` | `23` | login age threshold |
+| `FM_CLIPROXY_SETUP_WARN_DAYS` | `30` | setup-token expiry warning window |
+| `FM_CLIPROXY_FAMILY_DAYS` | `28` | family lifetime used for the printed expiry estimate |
+
+The registry is local and gitignored, like every other `config/` file, and is not shipped.
+Start one by copying whatever record the pool already has, or let the first re-login create it.
+
+`bin/cliproxy-relogin.sh` is the one re-login session for the whole pool.
+It walks the accounts in registry order, starts `claude setup-token` for each, relays the approval URL, waits for the token, and writes `<email>`'s setup-token credential into the auth dir by rename, mode 0600, never printing the token.
+After the first account it sends exactly one real request through the proxy and stops before the remaining accounts if that request fails, because nine more human approvals spent on an unproven credential path is the failure worth avoiding; the unverified credential is archived rather than left in the pool, and the 30-day credentials stay untouched.
+Round-robin routing means that one request proves the proxy still serves and the new credential did not break it, not that this exact account answered; this deployment has no per-credential endpoint to ask.
+`--dry-run` prints the plan and changes nothing, `--accounts` walks an explicit subset, and `--add codex` hands the Codex OAuth flow to CLIProxyAPI's own `-codex-login`, which writes its credential itself.
+A superseded 30-day credential is moved to `<archive-root>/<date>/`, never deleted.
+
+`bin/cliproxy-retire-legacy.sh` carries Step 2 of the same investigation: `plan` reports, `apply` disables `fm-ccflare-access-sync.timer` and archives the retired credential copies out of the auth directory.
+The timer is a permanent no-op whose keys no longer match the auth files, and worse, a live one would race CLIProxyAPI on the same refresh-token family, which is how accounts were lost early in the previous wave.
+The copies go to `~/.cli-proxy-api-archive/<date>/` (or `FM_CLIPROXY_ARCHIVE_ROOT`) and are never deleted, so a wrong retirement is one move away from reversible.
+Both helpers share [`bin/cliproxy-creds-lib.sh`](../bin/cliproxy-creds-lib.sh), which owns the credential filesystem contract.
+
 ## Fleet watchdog (config/watchdog.env)
 
 [`bin/fm-watchdog-worker.sh`](../bin/fm-watchdog-worker.sh) is the fleet's watchdog: a systemd user timer runs one bounded pass every five minutes, outside the firstmate session, and that pass needs no model and no firstmate turn to act.

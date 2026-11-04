@@ -131,6 +131,10 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-fable-runway-check.sh` | Registered slow-poll check that wakes firstmate on a Fable or pool runway change, a sustained RED, or an account needing a login |
 | `fm-fable-runway-alert.sh` | The runway check's outward actions: the once-per-episode handoff note, Grok doorbell, and notifications |
 | `fm-fleet-stall-check.sh` | Registered check that wakes firstmate when several live workers stall on the model gateway at once, pages the captain when it persists, and probes the local CLIProxyAPI gateway |
+| `fm-cliproxy-expiry-check.sh` | Registered check that wakes firstmate while a CLIProxyAPI Claude credential is still replaceable, on a stalled refresh, a login at the 27-30 day wall, or a setup token near its one-year expiry |
+| `cliproxy-relogin.sh`    | Walk the account pool through one setup-token re-login session in order, verify the first account with one real request, write each credential by rename without printing a secret, archive the superseded copy, and record the login date; `--add codex` runs CLIProxyAPI's own Codex login |
+| `cliproxy-retire-legacy.sh` | Plan or apply Step 2 of the refresh investigation: disable the retired ccflare access-sync unit and archive the dead credential copies, never deleting one |
+| `cliproxy-creds-lib.sh`  | Shared owner of the CLIProxyAPI credential filesystem contract: locations, atomic credential write, dated archive move, and the login-date registry record |
 | `fm-watchdog-worker.sh`  | Timer-driven model-free fleet watchdog: relaunch dead or missing endpoints, walk a frozen worker up a stall ladder, nudge an idle one, restart failed fleet units, and rebuild the fleet after a reboot |
 | `fm-sentry-watch.sh`     | Registered check that watches every Sentry project the API lists, pages on P0/P1/regression, cross-checks the CTO rail, and emits a DARK wake when its own visibility is lost |
 | `fm-pr-lib.sh`           | Own canonical task and PR validation plus private atomic PR-poll publication, merge-notification identity, and retirement |
