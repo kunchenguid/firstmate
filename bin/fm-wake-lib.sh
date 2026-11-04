@@ -2906,6 +2906,31 @@ fm_wake_print_deduped() {
   ' "$file"
 }
 
+# fm_wake_shadow_skip <state> <deduped-raw-rows>
+# Shadow mode only: nothing is suppressed. A row's source is "kind<TAB>key" and
+# its facts are kind, key and payload; the epoch and sequence columns change on
+# every append and are excluded. When a drained row's fingerprint (cksum of the
+# facts) equals the last one drained for its source, append
+# "epoch<TAB>kind<TAB>key<TAB>fingerprint" to .wake-would-skip.log. Last
+# fingerprints live in .wake-last-facts. Best effort: never fails the drain.
+# ponytail: a payload with an embedded elapsed time never matches; normalize it if the log shows that.
+fm_wake_shadow_skip() {
+  local state=$1 rows=$2 last="$1/.wake-last-facts" log="$1/.wake-would-skip.log"
+  local kind key payload fp prev
+  [ -n "$rows" ] || return 0
+  [ -f "$last" ] || : > "$last" || return 0
+  while IFS=$'\t' read -r _ _ kind key payload; do
+    fp=$(printf '%s\t%s\t%s' "$kind" "$key" "$payload" | cksum | tr ' ' :)
+    prev=$(awk -F '\t' -v k="$kind" -v n="$key" '$1 == k && $2 == n { v = $3 } END { print v }' "$last")
+    [ "$prev" != "$fp" ] || printf '%s\t%s\t%s\t%s\n' "$(date +%s)" "$kind" "$key" "$fp" >> "$log"
+    { awk -F '\t' -v k="$kind" -v n="$key" '!($1 == k && $2 == n)' "$last"
+      printf '%s\t%s\t%s\n' "$kind" "$key" "$fp"; } > "$last.tmp" && mv -f "$last.tmp" "$last"
+  done <<EOF
+$rows
+EOF
+  return 0
+}
+
 # --- branch grant evidence and per-actor pending rows ------------------------
 #
 # docs/watcher-continuity.md "Per-actor acknowledgement" owns the contract these

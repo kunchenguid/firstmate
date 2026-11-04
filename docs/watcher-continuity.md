@@ -576,3 +576,7 @@ The other harnesses rely on these mechanisms:
 - Codex retains bounded foreground checkpoints unless the home opts in to its [native Stop park](supervision-protocols/codex.md).
 
 [`verification/supervision.md`](verification/supervision.md#watcher-continuity) records the current cross-harness live evidence, the dated Stop-owned Claude auto-arm results, and exact opt-in commands.
+
+## Unchanged-wake shadow record
+
+`bin/fm-wake-drain.sh` fingerprints each drained wake row and compares it with the last drained row from the same source. A source is the row's kind and key. The facts are kind, key and payload; the epoch and sequence columns are excluded because they change on every append. The fingerprint is `cksum` of those three fields. When it equals the last one for that source, the drain appends `epoch<TAB>kind<TAB>key<TAB>fingerprint` to `.wake-would-skip.log` under the state dir; the last fingerprints live in `.wake-last-facts`. This is shadow mode only: the wake is still presented and acknowledged exactly as before, and there is no enforcement switch. A payload that embeds an elapsed time never matches. Pinned by `tests/fm-wake-drain-shadow-skip.test.sh`.
