@@ -25,6 +25,8 @@ _FM_SESSION_LOCK_LIB_DIR=${BASH_SOURCE[0]%/*}
 [ "$_FM_SESSION_LOCK_LIB_DIR" != "${BASH_SOURCE[0]}" ] || _FM_SESSION_LOCK_LIB_DIR=.
 # shellcheck source=bin/fm-cursor-lib.sh
 . "${_FM_SESSION_LOCK_LIB_DIR:-/}/fm-cursor-lib.sh"
+# shellcheck source=bin/fm-bob-process-lib.sh
+. "${_FM_SESSION_LOCK_LIB_DIR:-/}/fm-bob-process-lib.sh"
 unset _FM_SESSION_LOCK_LIB_DIR
 
 # Known harness command names; extend when a new adapter is verified. omp and
@@ -94,56 +96,6 @@ fm_ps_ppid() {  # <pid> -> parent pid
   printf '%s' "$out"
 }
 
-# True when path $1 is Bob's installed entry script: .../@ibm/bob/dist/bob.js
-# itself, or a `bob` launcher whose symlink chain ends there (npm's bin shim).
-fm_bob_script_is_bob() {  # <path>
-  local path=$1 target hop
-  for hop in 1 2 3 4 5 6 7 8 9; do
-    case "$path" in */@ibm/bob/dist/bob.js) return 0 ;; esac
-    [ "$hop" -gt 1 ] || [ "$(basename -- "$path")" = bob ] || return 1
-    [ -L "$path" ] || return 1
-    target=$(readlink -- "$path" 2>/dev/null) || return 1
-    case "$target" in
-      /*) path=$target ;;
-      *) path=$(dirname -- "$path")/$target ;;
-    esac
-  done
-  return 1
-}
-
-# True when command name $1 and argument string $2 describe Bob's session or
-# supervisor process. Bob (IBM Bob CLI) is a node bundle that sets no process
-# title, so Linux reports comm as MainThread and macOS as node, and neither the
-# name table above nor its own marker (BOB_SESSION, set only for descendants)
-# can identify it here (verified, bob 2.0.9 on Node v24). Its first script
-# argument is the structural fact: Bob is the process running Bob's installed
-# entry script (its path may contain spaces). Node options before the script are skipped. MainThread is
-# accepted ONLY together with that script, never widened to every node process.
-fm_bob_process_matches() {  # <comm> <args>
-  local comm=$1 args=$2 cand i j start=-1
-  local -a words=()
-  case "$(basename -- "$comm")" in
-    MainThread|node|node-*|node[0-9]*) ;;
-    *) return 1 ;;
-  esac
-  read -r -a words <<<"$args" || true
-  for ((i = 1; i < ${#words[@]}; i++)); do
-    case "${words[i]}" in -*) continue ;; esac
-    start=$i
-    break
-  done
-  [ "$start" -ge 0 ] || return 1
-  # ps joins argv with spaces, so an install path containing spaces arrives as
-  # several words (and may be followed by Bob's own arguments): try the longest
-  # candidate first and shorten until one is Bob's entry script.
-  for ((j = ${#words[@]}; j > start; j--)); do
-    cand=${words[start]}
-    for ((i = start + 1; i < j; i++)); do cand+=" ${words[i]}"; done
-    fm_bob_script_is_bob "$cand" && return 0
-  done
-  return 1
-}
-
 # True when the process described by command name $1 and full argument string $2
 # is a verified harness. Sets FM_HARNESS_IS_CLAUDE for the ancestry walk.
 #
@@ -154,7 +106,7 @@ fm_bob_process_matches() {  # <comm> <args>
 #      argv[0] in `ps -o comm=`, while procps on Linux reports the kernel exec
 #      name and ignores argv[0] entirely, so a version-named Claude Code binary
 #      is identified by its install path on macOS and by argv[0] on Linux.
-#   3. Bob's installed entry script as a node process's first script argument.
+#   3. Bob's installed entry script (bin/fm-bob-process-lib.sh).
 #   4. a bare interpreter (node, python) running a harness script path.
 #   5. Cursor's own structural identity, owned by bin/fm-cursor-lib.sh.
 FM_HARNESS_IS_CLAUDE=0

@@ -193,6 +193,23 @@ SH
   if FM_TEST_BOB_SCRIPT="$spaced/other/bin/bob" lib_eval "$fakebin" 'fm_harness_ancestry_pid' >/dev/null 2>&1; then
     fail "a spaced path around an unrelated script named bob was read as Bob"
   fi
+  # ps joins argv with spaces, so a later argument must not lend an unrelated
+  # first script Bob's identity, whether or not that argument names a real file.
+  for script in \
+    "inspect.js /opt/lib/node_modules/@ibm/bob/dist/bob.js" \
+    "inspect.js $BOB_INSTALL/lib/node_modules/@ibm/bob/dist/bob.js"; do
+    if FM_TEST_BOB_SCRIPT="$script" lib_eval "$fakebin" 'fm_harness_ancestry_pid' >/dev/null 2>&1; then
+      fail "a later argument impersonated Bob's entry script: node $script"
+    fi
+  done
+
+  # Bob 2.0.6 ships as the bobshell package with the same dist/bob.js layout.
+  mkdir -p "$TMP_ROOT/bobshell-install/lib/node_modules/bobshell/dist" "$TMP_ROOT/bobshell-install/bin"
+  : > "$TMP_ROOT/bobshell-install/lib/node_modules/bobshell/dist/bob.js"
+  ln -s ../lib/node_modules/bobshell/dist/bob.js "$TMP_ROOT/bobshell-install/bin/bob"
+  got=$(FM_TEST_BOB_SCRIPT="$TMP_ROOT/bobshell-install/bin/bob" lib_eval "$fakebin" 'fm_harness_ancestry_pid') \
+    || fail "the bobshell package's launcher was not recognized as Bob"
+  [ "$got" = 801 ] || fail "the bobshell launcher resolved '$got', expected 801"
   pass "session-lock: a bob session is identified from its installed entry script, never from MainThread alone"
 }
 
@@ -968,6 +985,7 @@ install_autoarm_scripts() {
   cp "$ROOT/bin/fm-path-lib.sh" "$dir/bin/fm-path-lib.sh"
   cp "$ROOT/bin/fm-session-lock-lib.sh" "$dir/bin/fm-session-lock-lib.sh"
   cp "$ROOT/bin/fm-cursor-lib.sh" "$dir/bin/fm-cursor-lib.sh"
+  cp "$ROOT/bin/fm-bob-process-lib.sh" "$dir/bin/fm-bob-process-lib.sh"
   # Launch probe sibling of fm-cursor-lib.sh; keep it next to the copy so a
   # fixture that ever verifies an executable does not source a missing file.
   cp "$ROOT/bin/fm-timeout-lib.sh" "$dir/bin/fm-timeout-lib.sh"

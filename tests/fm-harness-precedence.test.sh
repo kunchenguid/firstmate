@@ -246,11 +246,11 @@ test_pi_signed_survives_agreeing_ancestry() {
 
 # --- 3b. Bob's marker names bob only when nothing nearer does --------------
 
-# Bob's session process is a node bundle the ancestry walk cannot name, so its
-# own BOB_SESSION marker is the only evidence for a Bob primary. Every worker a
-# Bob primary launches inherits that marker, so a worker's own identity must
-# still win: claude and pi through their earlier markers, and any harness with a
-# structural ancestor through ancestry.
+# Bob's session process is a node bundle only its entry script identifies, so
+# with the ancestry blind its own BOB_SESSION marker is the evidence for a Bob
+# session. Every worker a Bob session launches inherits that marker, so a
+# worker's own identity must still win: claude and pi through their earlier
+# markers, and any harness with a structural ancestor through ancestry.
 test_bob_marker_names_bob_only_when_nothing_nearer_does() {
   local dir fakebin bin got
   dir="$TMP_ROOT/bob"
@@ -272,6 +272,49 @@ test_bob_marker_names_bob_only_when_nothing_nearer_does() {
       || fail "a $name tree carrying an inherited BOB_SESSION resolved '$got', expected $name"
   done
   pass "Bob's marker names bob only when no nearer marker or structural ancestor does"
+}
+
+# A Bob session started beneath another harness: the walk must stop at Bob's
+# MainThread node process, or the launcher's structural verdict overrides Bob's
+# own marker and hands Bob the launcher's supervision protocol. Non-vacuity: the
+# same process table running an unrelated script reads as the launcher.
+test_bob_session_under_codex_stays_bob() {
+  local dir fakebin got
+  dir="$TMP_ROOT/bob-under-codex"
+  mkdir -p "$dir/install/@ibm/bob/dist"
+  : > "$dir/install/@ibm/bob/dist/bob.js"
+  : > "$dir/install/unrelated.js"
+  fakebin=$(fm_fakebin "$dir/fakebin")
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+field= pid=
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -o) field=$2; shift 2 ;;
+    -p) pid=$2; shift 2 ;;
+    *) shift ;;
+  esac
+done
+case "$pid:$field" in
+  901:comm=) printf 'MainThread\n' ;;
+  901:args=) printf 'node %s chat\n' "$FM_TEST_BOB_SCRIPT" ;;
+  901:ppid=) printf '902\n' ;;
+  902:comm=) printf 'codex\n' ;;
+  902:args=) printf 'codex\n' ;;
+  902:ppid=) printf '1\n' ;;
+  *:comm=) printf 'bash\n' ;;
+  *:args=) printf 'bash\n' ;;
+  *:ppid=) printf '901\n' ;;
+esac
+SH
+  chmod +x "$fakebin/ps"
+  got=$(with_blind_ancestry "$fakebin" BOB_SESSION=1 FM_TEST_BOB_SCRIPT="$dir/install/@ibm/bob/dist/bob.js")
+  [ "$got" = bob ] || fail "a Bob session beneath codex resolved '$got', expected bob"
+  got=$(with_blind_ancestry "$fakebin" FM_TEST_BOB_SCRIPT="$dir/install/@ibm/bob/dist/bob.js")
+  [ "$got" = bob ] || fail "a Bob process without the marker resolved '$got', expected bob from its entry script"
+  got=$(with_blind_ancestry "$fakebin" BOB_SESSION=1 FM_TEST_BOB_SCRIPT="$dir/install/unrelated.js")
+  [ "$got" = codex ] || fail "an unrelated node script beneath codex resolved '$got', expected codex"
+  pass "a Bob session beneath codex keeps its own identity"
 }
 
 # --- 4. The weakest ancestry signal does not outrank a marker ---------------
@@ -806,10 +849,6 @@ test_supervision_branch_resolves_the_primary_pin() {
     FM_SUPERVISION_ACTOR=branch FM_SUPERVISION_PRIMARY_HARNESS=claude)
   [ "$got" = 'comm pi|0' ] || fail "the ancestry verb consulted the pin: '$got'"
 
-  # A bob primary is a known pin like any other.
-  got=$(pin_probe "$bin" "$home" '' PI_CODING_AGENT=true \
-    FM_SUPERVISION_ACTOR=branch FM_SUPERVISION_PRIMARY_HARNESS=bob)
-  [ "$got" = 'bob|0' ] || fail "a branch pinned to a bob primary resolved '$got', expected bob"
   pass "a supervision branch resolves own, crew, and secondmate to the primary's pinned harness"
 }
 
@@ -827,6 +866,10 @@ test_supervision_branch_refuses_an_unknown_primary_pin() {
     assert_contains "$(cat "$home/stderr")" "FM_SUPERVISION_PRIMARY_HARNESS='unknown' names no known harness" \
       "the refusal did not name the bad pin"
   done
+  # Bob has no primary supervision protocol, so it is no supervision-branch pin.
+  got=$(pin_probe "$bin" "$home" '' PI_CODING_AGENT=true \
+    FM_SUPERVISION_ACTOR=branch FM_SUPERVISION_PRIMARY_HARNESS=bob)
+  [ "$got" = '|2' ] || fail "a branch pinned to bob resolved '$got', expected a refusal"
   pass "a supervision branch refuses to resolve a harness from a pin that names none"
 }
 
@@ -867,6 +910,7 @@ test_cursor_ordering_still_decides_when_ancestry_is_silent
 test_retained_cursor_marker_does_not_rename_a_nested_claude
 test_pi_signed_survives_agreeing_ancestry
 test_bob_marker_names_bob_only_when_nothing_nearer_does
+test_bob_session_under_codex_stays_bob
 test_interpreter_args_match_does_not_outrank_a_marker
 test_native_child_of_an_interpreter_shim_decides_at_comm_strength
 test_harness_at_namespace_pid1_is_examined

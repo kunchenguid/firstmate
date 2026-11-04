@@ -99,7 +99,8 @@ fm_agent_process_classify_name() {  # <path> [argv0] -> agent|shell|other
 #   <argv0>  argv[0] as the process reports it - a bare name or an install
 #            path, whichever the launcher used (empty when unknown).
 #   <args>   the flattened command line, read only for the node-bundle
-#            harnesses whose identity sits in argv[1] (bin/fm-gemini-lib.sh).
+#            harnesses whose identity sits in argv[1] (bin/fm-gemini-lib.sh,
+#            bin/fm-bob-process-lib.sh).
 #   [pid]    when given, lets the Gemini rule read argv boundaries from the
 #            live process instead of the flattened line.
 fm_agent_process_classify() {  # <name> <argv0> <args> [pid] -> agent|shell|other
@@ -123,6 +124,10 @@ fm_agent_process_classify() {  # <name> <argv0> <args> [pid] -> agent|shell|othe
     return 0
   fi
   if [ -n "$args" ] && fm_gemini_args_are_gemini "$args"; then
+    printf 'agent'
+    return 0
+  fi
+  if [ -n "$args" ] && fm_bob_process_matches "${name:-${args%% *}}" "$args"; then
     printf 'agent'
     return 0
   fi
