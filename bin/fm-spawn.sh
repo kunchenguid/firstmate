@@ -243,11 +243,16 @@
 #   render, endpoint, worktree, record, or backlog move exists, so the task stays
 #   exactly as queued as it was; an unreadable declaration refuses with exit 1.
 #   A batch reports such a pair as `batch: DEFERRED` and exits 75 when nothing
-#   else failed. A relaunch of a finished scout or local-only ship reserves its
-#   released place before releasing the project lock, and that reservation holds
-#   until the replacement's status log records working or done. An aborted
-#   relaunch whose launch was never sent or whose endpoint was closed removes the
-#   reservation again; a --secondmate spawn is never counted against capacity.
+#   else failed. A relaunch of a finished scout or local-only ship writes a
+#   capacity reservation for its released place, whether or not this machine
+#   declares capacity, and that reservation holds until the replacement's status
+#   log records working or done; an aborted relaunch whose launch was never sent
+#   or whose endpoint was closed removes it again. The two pieces admission adds
+#   to an ordinary spawn - a `working: spawn admitted` status line for a scout or
+#   local-only ship, and taking that project lock on a relaunch - run only once
+#   the declaration caps some project, so with none capped a spawn records no
+#   admitted line and takes no project lock on a relaunch. A --secondmate spawn
+#   is never counted against capacity.
 #   With no harness arg, a crewmate/scout spawn resolves the CREW harness only when
 #   config/crew-dispatch.json is absent. When that file exists, crewmate/scout
 #   spawns require an explicit harness so firstmate cannot silently skip dispatch
@@ -4195,11 +4200,11 @@ fi
 # too: a finished scout or local-only ship releases its place, so the worker
 # being replaced no longer necessarily holds one, and the check excludes this
 # task's own record so a relaunch of a live worker never blocks itself. A
-# secondmate is not a worker. The two pieces this change adds on the default
-# path are opt-in: the shared Treehouse project lock on a relaunch and the
-# `working: spawn admitted` status line run only once the home declares project
-# capacity at all (SPAWN_PROJECT_CAPACITY_ANY), so an undeclared home behaves
-# exactly as main did.
+# secondmate is not a worker. The two pieces admission adds to an ordinary
+# spawn - taking the shared project lock on a relaunch and recording a `working:
+# spawn admitted` status line - run only once the home declares project capacity
+# at all (SPAWN_PROJECT_CAPACITY_ANY), so an undeclared home records no admitted
+# line and takes no project lock on a relaunch.
 SPAWN_PROJECT_CAPACITY=
 SPAWN_PROJECT_CAPACITY_ANY=
 if [ "$KIND" != secondmate ]; then
