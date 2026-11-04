@@ -26,15 +26,7 @@ class Node {
     this.checked = false;
     this.classList = {
       add: (c) => { this.className = (this.className + " " + c).trim(); },
-      remove: (c) => { this.className = this.className.split(/\s+/).filter((item) => item !== c).join(" "); },
       contains: (c) => this.className.split(/\s+/).includes(c),
-      toggle: (c, force) => {
-        const present = this.classList.contains(c);
-        const enabled = force === undefined ? !present : Boolean(force);
-        if (enabled && !present) this.classList.add(c);
-        if (!enabled && present) this.classList.remove(c);
-        return enabled;
-      },
     };
   }
   get textContent() {
