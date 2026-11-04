@@ -68,9 +68,11 @@ import {
   firstmateStateDirectory,
   hostHealthNote,
   newOutcomeNotes,
+  parseSecondmateIcons,
   parseHostHealth,
   parseOutcomeMarker,
   parseOutcomeTail,
+  secondmateRegistryPath,
   recordSessionShownThrough,
   replayOutcomeNotes,
   sessionShownThrough,
@@ -113,6 +115,7 @@ const BRANCH_NOTES_SHOWN_KEY = "supervision-notes-shown-through";
 // What the notes have shown in this session; each `session.start` replaces it.
 type NotesState = {
   state: string;
+  registry: string;
   tailStamp: string | undefined;
   healthStamp: string | undefined;
   lastSeen: number | undefined;
@@ -265,18 +268,17 @@ async function readIfChanged(
 
 /** Replay the due outcomes, then follow the store from its current tail. */
 async function startNotes($: EngineInterface): Promise<void> {
-  const state = firstmateStateDirectory(
-    {
-      FM_HOME: await $.env.get("FM_HOME"),
-      FM_ROOT_OVERRIDE: await $.env.get("FM_ROOT_OVERRIDE"),
-      FM_STATE_OVERRIDE: await $.env.get("FM_STATE_OVERRIDE"),
-    },
-    $.plugin.root,
-  );
+  const env = {
+    FM_HOME: await $.env.get("FM_HOME"),
+    FM_ROOT_OVERRIDE: await $.env.get("FM_ROOT_OVERRIDE"),
+    FM_STATE_OVERRIDE: await $.env.get("FM_STATE_OVERRIDE"),
+  };
+  const state = firstmateStateDirectory(env, $.plugin.root);
   const sessionId = await $.session.id().catch(() => undefined);
   const health = await readIfChanged($, `${state}/.supervision-host-health`, undefined);
   const current: NotesState = {
     state,
+    registry: secondmateRegistryPath(env, $.plugin.root),
     tailStamp: undefined,
     healthStamp: health?.stamp,
     lastSeen: undefined,
@@ -307,12 +309,14 @@ async function followTail($: EngineInterface, current: NotesState): Promise<void
   if (tail === undefined) return;
   current.tailStamp = tail.stamp;
   const rows = parseOutcomeTail(tail.text);
+  // The registry is read again per tail change so an edit shows without a restart.
+  const icons = parseSecondmateIcons(await readText($, current.registry));
   let lines: string[];
   if (current.lastSeen === undefined) {
-    lines = replayOutcomeNotes(rows, current.cursor, current.processed, current.shown);
+    lines = replayOutcomeNotes(rows, current.cursor, current.processed, current.shown, icons);
     current.lastSeen = rows[rows.length - 1]?.seq;
   } else {
-    const fresh = newOutcomeNotes(rows, current.lastSeen);
+    const fresh = newOutcomeNotes(rows, current.lastSeen, icons);
     lines = fresh.lines;
     current.lastSeen = fresh.lastSeen;
   }
