@@ -253,10 +253,61 @@ test_unborn_head_project_is_refused_at_once() {
   pass "a project with an unborn HEAD is refused at once with its cause named"
 }
 
+# A repository-local core.hooksPath that is relative, or absolute but missing,
+# is shared by every linked worktree of the project and breaks or silently
+# disables its hooks. Spawn warns, naming the value with its origin, and still
+# launches; a usable absolute directory draws no warning.
+spawn_with_shared_hookspath() {  # <case-name> <id> <value>
+  local rec
+  rec=$(make_settle_case "$1" "$2" 0)
+  read_settle_record "$rec"
+  git -C "$PROJ_DIR" config core.hooksPath "$3"
+  run_settle_spawn "$2"
+}
+
+test_relative_shared_hookspath_warns_at_spawn() {
+  local id out status
+  id=hookspath-relative-z6
+  out=$(spawn_with_shared_hookspath hookspath-relative "$id" .git/worktrees/wt/hooks)
+  status=$?
+  expect_code 0 "$status" "a relative shared core.hooksPath should warn, not refuse"$'\n'"$out"
+  assert_contains "$out" "shared relative core.hooksPath (.git/worktrees/wt/hooks)" "spawn did not warn about the relative value"
+  assert_contains "$out" "file:.git/config"$'\t'".git/worktrees/wt/hooks" "spawn did not print the value's origin"
+  assert_contains "$out" "config --local --unset-all core.hooksPath" "spawn did not name the unset command"
+  assert_contains "$out" "spawned $id" "the warning stopped the spawn"
+  pass "a relative shared core.hooksPath draws a spawn warning with its origin and still launches"
+}
+
+test_missing_absolute_shared_hookspath_warns_at_spawn() {
+  local id out status
+  id=hookspath-missing-z7
+  out=$(spawn_with_shared_hookspath hookspath-missing "$id" "$TMP_ROOT/no-such-hooks-dir")
+  status=$?
+  expect_code 0 "$status" "a missing shared core.hooksPath should warn, not refuse"$'\n'"$out"
+  assert_contains "$out" "does not exist ($TMP_ROOT/no-such-hooks-dir)" "spawn did not warn about the missing directory"
+  assert_contains "$out" "file:.git/config" "spawn did not print the value's origin"
+  assert_contains "$out" "spawned $id" "the warning stopped the spawn"
+  pass "an absolute but missing shared core.hooksPath draws a spawn warning"
+}
+
+test_usable_shared_hookspath_draws_no_warning() {
+  local id out status
+  id=hookspath-usable-z8
+  mkdir -p "$TMP_ROOT/usable-hooks"
+  out=$(spawn_with_shared_hookspath hookspath-usable "$id" "$TMP_ROOT/usable-hooks")
+  status=$?
+  expect_code 0 "$status" "a usable shared core.hooksPath should spawn"$'\n'"$out"
+  assert_not_contains "$out" "core.hooksPath" "spawn warned about a usable absolute core.hooksPath"
+  pass "an existing absolute shared core.hooksPath draws no spawn warning"
+}
+
 test_single_stale_first_read_is_not_accepted
 test_already_settled_pane_costs_one_confirm_read
 test_transient_primary_checkout_is_not_accepted
 test_primary_checkout_that_never_settles_fails_at_the_deadline
 test_unborn_head_project_is_refused_at_once
+test_relative_shared_hookspath_warns_at_spawn
+test_missing_absolute_shared_hookspath_warns_at_spawn
+test_usable_shared_hookspath_draws_no_warning
 
 echo "# all fm-spawn-worktree-settle tests passed"

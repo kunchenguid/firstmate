@@ -4172,6 +4172,38 @@ if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ] &&
   echo "error: spawn refused: project $PROJ_ABS has no commit yet (unborn HEAD), so there is nothing to branch a worktree from; make one commit in the project, for example 'git -C $PROJ_ABS commit --allow-empty -m \"chore: initial commit\"', then spawn again" >&2
   exit 1
 fi
+# A repository-local core.hooksPath that is relative, or absolute but missing,
+# is shared by every linked worktree of the project: git resolves a relative
+# value per worktree, where it usually points through a .git file and breaks
+# every commit, and plain git silently runs no hooks from a missing directory.
+# Warn once at spawn, naming each value with its origin, so the writer shows up
+# at the next occurrence. Advisory only: the project is not mine to rewrite, and
+# bin/fm-git-strip-ai-trailers.sh already copes with a resolvable relative value.
+# The lookup drops the pane's GIT_CONFIG_* so only the repository's own files
+# answer, as the wrapper's own lookup does.
+spawn_warn_unusable_shared_hookspath() {
+  local proj=$1 value
+  value=$(env -u GIT_CONFIG_COUNT -u GIT_CONFIG_PARAMETERS \
+    git -C "$proj" config --local --type=path --get core.hooksPath 2>/dev/null) || return 0
+  [ -n "$value" ] || return 0
+  case "$value" in
+  /*) [ ! -d "$value" ] || return 0 ;;
+  esac
+  {
+    case "$value" in
+    /*) echo "warning: project $proj has a shared core.hooksPath that does not exist ($value); git silently runs no hooks for any of its worktrees" ;;
+    *) echo "warning: project $proj has a shared relative core.hooksPath ($value); git resolves it per worktree, so commits in its linked worktrees can fail" ;;
+    esac
+    echo "  git config --show-origin --get-all core.hooksPath:"
+    env -u GIT_CONFIG_COUNT -u GIT_CONFIG_PARAMETERS \
+      git -C "$proj" config --show-origin --get-all core.hooksPath 2>&1 | sed 's/^/    /'
+    echo "  to clear it: git -C $proj config --local --unset-all core.hooksPath"
+  } >&2
+  return 0
+}
+if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ]; then
+  spawn_warn_unusable_shared_hookspath "$PROJ_ABS"
+fi
 # Project capacity admission (bin/fm-project-capacity-lib.sh owns the
 # declaration, what holds a place, and why this is race-safe). A fresh worker
 # for a project whose declared capacity is already held is deferred here, before
