@@ -138,10 +138,10 @@ test_index_hit_reads_no_other_meta() {
   fifo="$state/0-block.meta"
   mkfifo "$fifo" || fail "could not create the blocking meta"
 
-  ( window_to_task sess:w5:p5 "$state" > "$out" ) &
+  ( fm_backend_meta_for_window sess:w5:p5 "$state" > "$out" ) &
   pid=$!
   wait_done "$pid" 50 || { kill "$pid" 2>/dev/null; fail "an indexed hit opened another meta"; }
-  [ "$(cat "$out")" = mike ] || fail "the indexed hit returned '$(cat "$out")'"
+  [ "$(basename "$(cat "$out")" .meta)" = mike ] || fail "the indexed hit returned '$(cat "$out")'"
 
   # Control: the same lookup without the index blocks on that FIFO, so the
   # construction above genuinely distinguishes an index hit from a scan.
