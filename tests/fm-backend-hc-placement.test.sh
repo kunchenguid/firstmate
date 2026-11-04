@@ -215,6 +215,7 @@ make_repos() {
 test_placement_config_is_exact_or_refused() {
   local out rc
   setup_case config
+  # shellcheck disable=SC2016 # the inner shell expands it
   out=$(hc_shell 'fm_backend_hc_placement_config "$FM_HOME/config/hc-machine"; echo "rc=$?"')
   assert_equals "rc=1" "$out" "an absent config/hc-machine means no placement"
   cat > "$HOMEDIR/config/hc-machine" <<'EOF'
@@ -223,6 +224,7 @@ laptop
 firstmate-as mini   # what it calls this one
 projects /Users/me/code/
 EOF
+  # shellcheck disable=SC2016 # the inner shell expands it
   out=$(hc_shell 'fm_backend_hc_placement_config "$FM_HOME/config/hc-machine" && echo "$FM_BACKEND_HC_PLACE_MACHINE|$FM_BACKEND_HC_PLACE_FIRSTMATE_AS|$FM_BACKEND_HC_PLACE_PROJECTS|$FM_BACKEND_HC_PLACE_CLAUDE_CONFIG"')
   assert_equals "laptop|mini|/Users/me/code|" "$out" "a valid file names the machine, the way back, and the projects directory"
   for bad in $'laptop\nprojects /Users/me/code' $'laptop\nfirstmate-as mini\nprojects code' \
@@ -230,6 +232,7 @@ EOF
     $'laptop\nfirstmate-as mini\nprojects /a\nprojects /b' $'laptop\nfirstmate-as mini\nprojects /a/../b'; do
     printf '%s\n' "$bad" > "$HOMEDIR/config/hc-machine"
     rc=0
+    # shellcheck disable=SC2016 # the inner shell expands it
     out=$(hc_shell 'fm_backend_hc_placement_config "$FM_HOME/config/hc-machine"' 2>&1) || rc=$?
     expect_code 2 "$rc" "a malformed config/hc-machine must be refused, not read as no placement: $bad"
     assert_contains "$out" "error:" "the refusal names its reason"
@@ -240,6 +243,7 @@ EOF
 test_machine_qualified_records_bind_their_machine() {
   local meta out
   setup_case records
+  # shellcheck disable=SC2016 # the inner shell expands it
   out=$(hc_shell 'for a in t3 laptop/t3 a/b/t3 laptop/ /t3 laptop/x3; do fm_backend_hc_address_valid "$a" && printf "%s:ok " "$a" || printf "%s:no " "$a"; done')
   assert_equals "t3:ok laptop/t3:ok a/b/t3:no laptop/:no /t3:no laptop/x3:no " "$out" "an address is t<id> or <machine>/t<id>"
   meta="$D/a1.meta"
@@ -359,6 +363,7 @@ test_placed_busy_state_reads_hc_native_status() {
       jq -n --arg a "$addr" --arg h "$tag" --arg s "$status" \
         '{address: $a, state: "live", labels: {"firstmate.task": "x", "firstmate.home": $h}, status: {state: $s}}' > "$D/$addr.json"
     done
+    # shellcheck disable=SC2016 # the inner shell expands it
     out=$(hc_shell '. "'"$ROOT"'/bin/fm-busy-lib.sh"
       fm_busy_classify hc fmtest:laptop/t9 claude p1 "$FM_HOME/state"; echo
       fm_busy_classify hc fmtest:t8 claude l1 "$FM_HOME/state"')
@@ -414,7 +419,8 @@ test_placed_spawn_builds_everything_on_the_machine() {
   assert_contains "$(grep '^run' "$D/log")" $'\x1f--on\x1flaptop\x1f' "the terminal starts there"
   assert_contains "$(grep '^run' "$D/log")" $'--cwd\x1f'"$wt" "the terminal starts in the placed worktree"
   assert_not_contains "$(cat "$D/log")" "treehouse" "no treehouse runs for a placed task"
-  launch=$(ls "$D/remote/code/.fm-hc/$tag/"*.launch.*.sh 2>/dev/null | head -1)
+  launch=
+  for f in "$D/remote/code/.fm-hc/$tag/"*.launch.*.sh; do [ -e "$f" ] && { launch=$f; break; }; done
   [ -n "$launch" ] || fail "the launch file was not staged on the machine"
   assert_grep "command rm -f -- '$VROOT/code/.fm-hc/$tag/$id.launch." "$launch" "the launch removes itself there"
   assert_grep "hc file read --on mini" "$launch" "the launch prompt says how to read the brief from there"
@@ -458,7 +464,9 @@ test_placed_spawn_refuses_before_creating_anything() {
   [ "$rc" -ne 0 ] || fail "a missing route back must refuse the spawn"
   assert_contains "$out" "does not reach this machine as 'mini'" "the refusal names the missing route back"
   assert_no_grep $'run\x1f' "$D/log" "no terminal may start without the route back"
-  [ -z "$(ls "$HOMEDIR/state/" | grep hc-reverse-route)" ] || fail "the route probe must not be left behind"
+  for f in "$HOMEDIR/state/".hc-reverse-route.*; do
+    [ -e "$f" ] && fail "the route probe must not be left behind"
+  done
 
   id=refuse4
   placed_spawn_case refuse-trust "$id"
