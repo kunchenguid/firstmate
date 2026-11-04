@@ -125,7 +125,10 @@ export interface UnreadWakeScope {
    * The exact "key" field of every decision-owned signal or stale row this
    * scan excluded. Signal rows are marked by bin/fm-watch.sh; stale rows are
    * decision-owned when their task has an open needs-decision or its current
-   * declaration is captain-held. fm-primary-pi-watch.ts cross-references these
+   * declaration is captain-held. A row is also main-owned, and listed here, when
+   * its task's latest status line is a no-mistakes ship's pre-validation `done:`
+   * (isPreValidationHandoff), because only MAIN can start that validation.
+   * fm-primary-pi-watch.ts cross-references these
    * keys against the current trigger so its entire coalesced batch is forced
    * to main.
    */
@@ -264,6 +267,26 @@ function statusLineNote(rawLine: string): string {
   return match ? note.slice(match[0].length).trimStart() : note;
 }
 
+// A no-mistakes ship's `done:` that reports no PR and no green checks is the
+// handoff that starts validation: the worker idles until MAIN sends the trigger
+// (bin/fm-dod-lib.sh's fm_dod_should_gate_ship_done owns the definition, and
+// bin/fm-brief.sh tells the worker "Firstmate will then instruct you to run
+// /no-mistakes"). It is a step only MAIN can take, so it is main-owned exactly
+// like a decision, never a routine outcome for the branch to absorb. The CI-ready
+// and Gerrit published-change reports are the finished results, and stay the
+// branch's to report. As in the shell owner, a missing kind reads as ship and a
+// missing mode as no-mistakes.
+const PR_REFERENCE = /(^|[^A-Za-z0-9])PR\s*#[0-9]+([^A-Za-z0-9]|$)|\/pulls?\/[0-9]+([^A-Za-z0-9]|$)|\/merge_requests\/[0-9]+([^A-Za-z0-9]|$)/;
+
+function isPreValidationHandoff(rawLine: string, kind: string, mode: string): boolean {
+  if (kind !== "ship" || (mode !== "" && mode !== "no-mistakes")) return false;
+  if (statusLineVerb(rawLine) !== "done") return false;
+  const note = statusLineNote(rawLine);
+  const ciReady = note.includes("checks green") && PR_REFERENCE.test(note);
+  const published = /PR.*published for review/.test(note);
+  return !ciReady && !published;
+}
+
 interface StaleDecisionCacheEntry {
   version: string;
   config: string;
@@ -384,6 +407,9 @@ export function scopeForUnreadWake(state: string, heartbeat: boolean, afk = fals
   const projects = new Set<string>();
   const metadata = new Map<string, string>();
   const secondmates = new Set<string>();
+  // The delivery contract each task's metadata records (see isPreValidationHandoff).
+  const kinds = new Map<string, string>();
+  const modes = new Map<string, string>();
   // The task id behind each key a signal or stale row may carry: the task id
   // itself, or the endpoint its metadata records.
   const taskByKey = new Map<string, string>();
@@ -393,6 +419,8 @@ export function scopeForUnreadWake(state: string, heartbeat: boolean, afk = fals
       const task = name.slice(0, -5);
       const fields = readFileSync(`${state}/${name}`, "utf8").split(/\r?\n/);
       const project = fields.find((line) => line.startsWith("project="))?.slice(8) ?? "";
+      kinds.set(task, fields.filter((line) => line.startsWith("kind=")).at(-1)?.slice(5) || "ship");
+      modes.set(task, fields.filter((line) => line.startsWith("mode=")).at(-1)?.slice(5) ?? "");
       const window = fields.find((line) => line.startsWith("window="))?.slice(7) ?? "";
       if (fields.includes("kind=secondmate")) secondmates.add(task);
       // An Orca task's stale rows name its terminal handle, not its window
@@ -531,7 +559,9 @@ export function scopeForUnreadWake(state: string, heartbeat: boolean, afk = fals
                 heldVerb,
                 reservedPrefixes,
               )
-              : [...open.values()].includes("needs-decision") || statusLineVerb(statusLines.at(-1) ?? "") === heldVerb;
+              : [...open.values()].includes("needs-decision")
+                || statusLineVerb(statusLines.at(-1) ?? "") === heldVerb
+                || isPreValidationHandoff(statusLines.at(-1) ?? "", kinds.get(task) ?? "ship", modes.get(task) ?? "");
             staleDecisionCache.set(ownershipKey, { version, config, decisionOwned });
             if (staleDecisionCache.size > 512) {
               staleDecisionCache.delete(staleDecisionCache.keys().next().value!);

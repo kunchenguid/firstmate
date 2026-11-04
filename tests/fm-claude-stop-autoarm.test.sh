@@ -1936,6 +1936,18 @@ printf 'signal: fixture.status\n'
 printf 'supervision-host: branch-outcome: fixture\n'
 SH
         ;;
+      outcome-after-teardown|boundary-after-teardown)
+        # The engine's own handling tore down the last task (a finished scout),
+        # so the fleet is empty by the time the host closes.
+        printf 'rm -f "$FM_HOME/state/task.meta"\n'
+        printf "printf 'pending:downtime:fixture-generation\\n' > \"\$FM_HOME/state/.watcher-down\"\n"
+        printf 'touch "$FM_HOME/state/.last-watcher-beat"\n'
+        if [ "$kind" = outcome-after-teardown ]; then
+          printf "printf 'supervision-host: branch-outcome: the supervision session handled this wake and recorded captain outcomes for you (store rows 1)\\n'\n"
+        else
+          printf "printf 'supervision-host: cycle boundary - fixture\\n'\n"
+        fi
+        ;;
       handed-back-many)
         cat <<'SH'
 printf 'pending:downtime:fixture-generation\n' > "$FM_HOME/state/.watcher-down"
@@ -2009,6 +2021,37 @@ test_host_boundary_rewakes_with_the_host_line() {
   [ "$(sed -n 's/^.* owner=\([0-9]*\) .*$/\1/p' "$dir/state/host-env")" = "$(epoch_field "$dir" owner_pid)" ] \
     || fail "the host was not bound to the hook's owner pid: $(cat "$dir/state/host-env")"
   pass "auto-arm: an opted-in home runs the host bound to its generation, and a host line rewakes like a wake"
+}
+
+# A captain outcome is owed to main even when the engine's own handling emptied
+# the fleet: the supervision session tears down a finished scout, which leaves no
+# task to supervise, and the need gate must not discard the hand-back (docs/
+# supervision-host.md "Captain outcomes"). Any other host line keeps the quiet
+# close for a fleet that went idle.
+test_host_branch_outcome_is_delivered_after_the_fleet_emptied() {
+  local dir out status
+  dir=$(make_primary_dir "$TMP_ROOT/host-outcome-teardown")
+  mkdir -p "$dir/config"
+  rm -f "$dir/config/supervision-host-off"
+  : > "$dir/state/task.meta"
+  write_host_fixture "$dir" outcome-after-teardown
+  out=$(run_autoarm "$dir" 2>/dev/null); status=$?
+  [ ! -e "$dir/state/task.meta" ] || fail "fixture: the host did not empty the fleet"
+  expect_code 2 "$status" "a captain outcome handed back after the fleet emptied must still rewake main"
+  assert_contains "$out" "supervision-host: branch-outcome:" "the rewake must carry the captain-outcome line"
+  assert_contains "$out" "bin/fm-wake-drain.sh" "the rewake must tell main to drain"
+  [ "$(epoch_outcome "$dir")" = rewake ] || fail "the delivered hand-back must record outcome=rewake, got: $(epoch_outcome "$dir")"
+
+  dir=$(make_primary_dir "$TMP_ROOT/host-boundary-teardown")
+  mkdir -p "$dir/config"
+  rm -f "$dir/config/supervision-host-off"
+  : > "$dir/state/task.meta"
+  write_host_fixture "$dir" boundary-after-teardown
+  out=$(run_autoarm "$dir" 2>/dev/null); status=$?
+  expect_code 0 "$status" "a host line that is not a captain outcome stays quiet once the fleet went idle"
+  [ -z "$out" ] || fail "an idle-fleet boundary close produced output: $out"
+  [ "$(epoch_outcome "$dir")" = clean ] || fail "the idle-fleet boundary close must record outcome=clean, got: $(epoch_outcome "$dir")"
+  pass "auto-arm: a host captain-outcome hand-back survives an emptied fleet; other host closes stay quiet"
 }
 
 test_host_handback_under_away_record_is_not_a_return() {
@@ -2271,6 +2314,7 @@ test_long_poll_grace_reaches_arm_wrapper
 test_host_off_flag_keeps_the_arm
 test_host_absent_flag_runs_the_host
 test_host_boundary_rewakes_with_the_host_line
+test_host_branch_outcome_is_delivered_after_the_fleet_emptied
 test_host_handback_under_away_record_is_not_a_return
 test_host_handback_beside_a_quiet_record_carries_no_away_note
 test_plain_arm_banner_keeps_its_wake_line_cap

@@ -160,6 +160,59 @@ test_dispatch_entry_scopes_rows_and_renders_the_away_tail() {
   pass "dispatch entry: the host reads branch eligibility, the offer rule, and the wake prompt from the Pi branch's own owner"
 }
 
+# A no-mistakes ship's first `done:` (no PR, no green checks) is the handoff that
+# starts validation, which only main can send, so an attended close for it stays
+# main's instead of being absorbed as a routine outcome; every finished-result
+# `done:` and every other delivery mode stays the branch's.
+test_dispatch_entry_keeps_a_validation_handoff_with_main() {
+  local home state out
+  home="$TMP_ROOT/dispatch-handoff"
+  state="$home/state"
+  mkdir -p "$state"
+
+  offer_for() {  # <meta-lines> <status-lines> <wake-kind> <wake-key> <reason> [--afk]
+    local meta=$1 status=$2 kind=$3 key=$4 reason=$5
+    shift 5
+    printf '%b' "$meta" > "$state/demo.meta"
+    printf '%b' "$status" > "$state/demo.status"
+    : > "$state/.wake-queue"
+    append_wake "$state" "$kind" "$key" "$reason"
+    printf '%s\n' "$reason" | FM_HOME="$home" node "$DISPATCH" offer "$@"
+  }
+  local ship='project=demo\nwindow=fm-demo\nkind=ship\nmode=no-mistakes\n'
+  local handoff='working [at=1]: implementing\ndone [at=2]: T-1 committed on its branch. Ready for /no-mistakes\n'
+  local signal="signal: $state/demo.status"
+
+  out=$(offer_for "$ship" "$handoff" signal demo.status "$signal")
+  assert_contains "$out" "eligible=0" "an attended pre-validation done must stay main's"
+  assert_contains "$out" "rows=" "the scan must still describe what it judged"
+  assert_not_contains "$out" "rows=1" "the pre-validation done row must not be claimable by the branch"
+  out=$(offer_for "$ship" "$handoff" stale fm-demo "stale: fm-demo")
+  assert_contains "$out" "eligible=0" "an idle worker waiting for validation must stay main's on a stale wake"
+  out=$(offer_for 'project=demo\nwindow=fm-demo\nkind=ship\n' "$handoff" signal demo.status "$signal")
+  assert_contains "$out" "eligible=0" "a ship whose mode is unrecorded reads as no-mistakes"
+  out=$(offer_for "$ship" "$handoff" signal demo.status "$signal" --afk)
+  assert_contains "$out" "eligible=1" "an away close is the branch's whatever the status says"
+
+  out=$(offer_for "$ship" "${handoff}paused [at=3]: no-mistakes pipeline run in progress\n" signal demo.status "$signal")
+  assert_contains "$out" "eligible=1" "once validation is under way the close is the branch's again"
+  out=$(offer_for "$ship" "${handoff}done [at=4]: PR https://github.com/o/r/pull/9 checks green\n" signal demo.status "$signal")
+  assert_contains "$out" "eligible=1" "a CI-ready done is a finished result for the branch to report"
+  out=$(offer_for "$ship" "${handoff}done [at=4]: PR #9 checks green\n" signal demo.status "$signal")
+  assert_contains "$out" "eligible=1" "a CI-ready done naming the PR by number is a finished result"
+  out=$(offer_for "$ship" "${handoff}done [at=4]: PR https://gerrit.example.com/c/p/+/12 published for review\n" signal demo.status "$signal")
+  assert_contains "$out" "eligible=1" "a published-for-review done is a finished result"
+  out=$(offer_for "$ship" 'done [at=2]: checks green on the PROD branch\n' signal demo.status "$signal")
+  assert_contains "$out" "eligible=0" "the words PROD and checks green without a PR reference are still the handoff"
+
+  out=$(offer_for 'project=demo\nwindow=fm-demo\nkind=ship\nmode=direct-PR\n' "$handoff" signal demo.status "$signal")
+  assert_contains "$out" "eligible=1" "a direct-PR done is the finished result, not a validation handoff"
+  out=$(offer_for 'project=demo\nwindow=fm-demo\nkind=ship\nmode=local-only\n' "$handoff" signal demo.status "$signal")
+  assert_contains "$out" "eligible=1" "a local-only done is the finished result, not a validation handoff"
+  out=$(offer_for 'project=demo\nwindow=fm-demo\nkind=scout\n' "$handoff" signal demo.status "$signal")
+  assert_contains "$out" "eligible=1" "a scout done is never a validation handoff"
+  pass "dispatch entry: a no-mistakes ship's validation handoff stays with main, and every finished-result done stays the branch's"
+}
 
 # --- host loop ----------------------------------------------------------------
 
@@ -589,6 +642,7 @@ fm_test_run \
   test_report_surface_enforces_actor_turn_and_scope \
   test_report_after_the_return_is_queued_for_main \
   test_dispatch_entry_scopes_rows_and_renders_the_away_tail \
+  test_dispatch_entry_keeps_a_validation_handoff_with_main \
   test_branch_outcomes_only_on_a_host_home_off_pi \
   test_branch_outcomes_put_captain_first_and_collapse_routine_overflow \
   test_branch_outcomes_collapse_repeated_captain_outcomes_per_task \
