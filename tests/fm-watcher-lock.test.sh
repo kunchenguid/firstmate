@@ -1402,52 +1402,70 @@ test_lock_symlink_lock_is_never_reclaimed_as_plain_file() {
 }
 
 test_lock_stale_plain_file_single_winner_under_concurrency() {
-  local dir state lockdir marker gate hold i pids pid waiter winner wins
+  local dir state lockdir marker attempts hold i pid waiter deadline wins contenders=39
   dir=$(make_case lock-plain-concurrency)
   state="$dir/state"
   lockdir="$state/.contend.lock"
   marker="$dir/wins"
-  gate="$dir/first-winner"
-  hold="$dir/winner-release"
+  attempts="$dir/attempts"
+  hold="$dir/release"
+  mkdir -p "$attempts"
   : > "$lockdir"
   touch -t 200001010000 "$lockdir"
   : > "$marker"
   # try_acquire is nonblocking, so every one-shot contender may lose to a
-  # transient steal mutex. A waiting contender guarantees eventual acquisition,
-  # and the release file keeps the winner alive until every other contender has
-  # finished, so a late contender on a busy runner cannot take the lock after
-  # the winner exits.
+  # transient steal mutex. A waiting contender guarantees eventual acquisition.
+  # Every wait here is bounded, so a lock regression fails the assertion below
+  # rather than hanging the suite: each contender records a completed attempt
+  # (a ".done" file) whether it won or lost, a winner stays alive until the
+  # release file appears so a late contender cannot take the lock after it
+  # exits, and its own wait for the release is capped.
   FM_STATE_OVERRIDE="$state" bash -c '
     . "$1"
-    fm_lock_acquire_wait "$2" || exit 1
-    printf "%s\n" "${BASHPID:-$$}" >> "$3"
-    printf "%s\n" "${BASHPID:-$$}" > "$4.tmp" && mv "$4.tmp" "$4"
-    while [ ! -e "$5" ]; do sleep 0.05; done
-  ' _ "$LIB" "$lockdir" "$marker" "$gate" "$hold" &
+    if fm_lock_acquire_wait_max "$2" 20; then
+      printf "%s\n" "${BASHPID:-$$}" >> "$3"
+      : > "$4/waiter.done"
+      n=0
+      while [ ! -e "$5" ] && [ "$n" -lt 600 ]; do sleep 0.05; n=$((n + 1)); done
+    else
+      : > "$4/waiter.done"
+    fi
+  ' _ "$LIB" "$lockdir" "$marker" "$attempts" "$hold" &
   waiter=$!
   pids=
   i=1
-  while [ "$i" -le 39 ]; do
+  while [ "$i" -le "$contenders" ]; do
     FM_STATE_OVERRIDE="$state" bash -c '
       . "$1"
       if fm_lock_try_acquire "$2"; then
         printf "%s\n" "${BASHPID:-$$}" >> "$3"
-        printf "%s\n" "${BASHPID:-$$}" > "$4.tmp" && mv "$4.tmp" "$4"
-        while [ ! -e "$5" ]; do sleep 0.05; done
+        : > "$4/$6.done"
+        n=0
+        while [ ! -e "$5" ] && [ "$n" -lt 600 ]; do sleep 0.05; n=$((n + 1)); done
+      else
+        : > "$4/$6.done"
       fi
-    ' _ "$LIB" "$lockdir" "$marker" "$gate" "$hold" &
+    ' _ "$LIB" "$lockdir" "$marker" "$attempts" "$hold" "$i" &
     pids="$pids $!"
     i=$((i + 1))
   done
-  until [ -s "$gate" ]; do sleep 0.05; done
-  IFS= read -r winner < "$gate"
-  [ "$winner" = "$waiter" ] || { kill "$waiter" 2>/dev/null || true; wait "$waiter" 2>/dev/null || true; }
-  for pid in $pids; do
-    [ "$pid" = "$winner" ] || wait "$pid" 2>/dev/null || true
+  # Wait, bounded, for every one-shot attempt to complete and for some
+  # contender to hold the lock.
+  deadline=$((SECONDS + 30))
+  while [ "$SECONDS" -lt "$deadline" ]; do
+    [ "$(find "$attempts" -name '[0-9]*.done' | wc -l | tr -d ' ')" -ge "$contenders" ] && [ -s "$marker" ] && break
+    sleep 0.05
   done
   wins=$(awk 'NF { c++ } END { print c + 0 }' "$marker")
+  # A waiter that did not win must not take the lock once the winner is released.
+  grep -qx "$waiter" "$marker" || kill "$waiter" 2>/dev/null || true
+  # Release every holder before judging the count, so a failing run cleans up.
   : > "$hold"
-  wait "$winner" 2>/dev/null || true
+  for pid in $pids $waiter; do
+    wait "$pid" 2>/dev/null || true
+  done
+  [ "$(find "$attempts" -name '[0-9]*.done' | wc -l | tr -d ' ')" -ge "$contenders" ] \
+    || fail "contenders did not finish their lock attempts within the bound"
   [ "$wins" -eq 1 ] || fail "expected exactly one plain-file reclaimer, got $wins"
   [ -L "$lockdir" ] || fail "reclaimed lock path is not a symlink lock after the race"
   pass "concurrent stale plain-file reclaim yields exactly one winner"
