@@ -1801,17 +1801,22 @@ SH
 # The gateway keep-alive's stall record is per-task runtime state, so a retired
 # task must not leave one behind: a stale record carrying a spent budget would
 # make the next task reusing that id start its ladder already exhausted.
+# The same holds for the captain's left-stopped marker (bin/fm-leave-stopped.sh):
+# an order about a retired task must not silence the next task reusing its id.
 test_teardown_removes_the_gateway_stall_record() {
-  local case_dir rec
+  local case_dir rec stopped
   case_dir=$(make_case gateway-stall-cleanup)
   write_meta "$case_dir" local-only ship
   rec="$case_dir/state/task-x1.gateway-stall"
+  stopped="$case_dir/state/task-x1.stopped"
   printf 'v1 first=1 attempts=8 last=1 notified=1\n' > "$rec"
+  printf 'schema=fm-leave-stopped.v1\nat=2026-10-26T13:15:00Z\nreason=captain: leave it stopped\n' > "$stopped"
 
   run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" \
     || fail "gateway-stall-cleanup: forced teardown failed: $(cat "$case_dir/stderr")"
   [ ! -e "$rec" ] || fail "gateway-stall-cleanup: teardown left the task's gateway stall record behind"
-  pass "teardown removes the per-task gateway keep-alive stall record"
+  [ ! -e "$stopped" ] || fail "gateway-stall-cleanup: teardown left the task's left-stopped marker behind"
+  pass "teardown removes the per-task gateway keep-alive stall record and the left-stopped marker"
 }
 
 # Flat (non-projected) Herdr endpoint whose fake pane exists until a locked

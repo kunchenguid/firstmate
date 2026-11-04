@@ -3340,6 +3340,270 @@ test_wedge_escalation_resets_when_pane_becomes_active() {
   pass "a pane becoming active again resets the consecutive wedge-escalation counter"
 }
 
+# --- the wedge ladder ends at demand-deep-inspection; repeats are absorbed -----
+# 2026-10-26: the ladder above re-fired forever on an unchanged pane (202
+# escalations for one dead terminal in a day), each one a supervisor turn over
+# the same evidence. The first report and the bounded ladder still arrive; once
+# the demand-deep-inspection rung has been delivered for a pane hash, a later
+# timer expiry on that SAME hash is an already-reported repeat, absorbed at the
+# watcher until FM_WEDGE_REALARM_SECS have passed since the last delivered
+# escalation - then exactly one re-alarm fires, carrying the backstop clause, and
+# the quiet window restarts.
+
+# Shared fixture: a provably-working idle pane primed past the ladder - the
+# demand-deep-inspection rung (round 3) has just been delivered. Leaves the case
+# dir in $WEDGE_DIR, the window key in $WEDGE_KEY, and the pane file in
+# $WEDGE_CAPTURE for the caller's next rounds.
+prime_wedge_ladder_to_the_end() {  # <case-name>
+  local name=$1 dir state fakebin out capture_file window key pane_hash sig pid n
+  dir=$(make_case "$name"); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"
+  window="test:fm-$name"
+  printf 'idle: dropped to a shell' > "$capture_file"
+  printf 'window=%s\nkind=ship\n' "$window" > "$state/$name.meta"
+  printf 'working: still monitoring ci\n' > "$state/$name.status"
+  sig=$(seen_sig "$state/$name.status"); printf '%s' "$sig" > "$state/.seen-${name}_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "idle: dropped to a shell")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  export FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)'
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_poll_cycle "$state" "$pid"; then
+    reap "$pid"; fail "$name: watcher exited on the priming round (should absorb): $(cat "$out")"
+  fi
+  reap "$pid"
+  ack_stopped_cycle "$state" || fail "$name: could not acknowledge the priming stop"
+  n=1
+  while [ "$n" -le 3 ]; do
+    echo $(( $(date +%s) - 500 )) > "$state/.stale-since-$key"
+    : > "$out"
+    PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+      FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+      FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+    pid=$!
+    wait_for_exit "$pid" 100 || fail "$name: ladder round $n did not deliver: $(cat "$out")"
+    grep -F "escalation $n" "$out" >/dev/null || fail "$name: round $n did not carry escalation count $n: $(cat "$out")"
+    grep -F "re-alarm backstop" "$out" >/dev/null && fail "$name: an ordinary ladder rung carried the backstop clause: $(cat "$out")"
+    ack_stopped_cycle "$state" || fail "$name: could not acknowledge ladder round $n"
+    n=$((n + 1))
+  done
+  WEDGE_DIR=$dir; WEDGE_KEY=$key; WEDGE_CAPTURE=$capture_file; WEDGE_WINDOW=$window
+}
+
+# The same fixture reached by seeding the markers the delivered ladder leaves
+# behind (the escalation count at the threshold, a fresh last-delivery marker, the
+# classified hash) instead of re-climbing it through four watcher starts; the
+# climb itself is proven once, by test_wedge_repeat_after_the_ladder_is_absorbed_
+# until_the_backstop, and this seed only sets up what that test already showed.
+seed_wedge_ladder_at_the_end() {  # <case-name>
+  local name=$1 dir state window key sig
+  dir=$(make_case "$name"); state="$dir/state"
+  window="test:fm-$name"
+  printf 'idle: dropped to a shell' > "$dir/pane.txt"
+  printf 'window=%s\nkind=ship\n' "$window" > "$state/$name.meta"
+  printf 'working: still monitoring ci\n' > "$state/$name.status"
+  sig=$(seen_sig "$state/$name.status"); printf '%s' "$sig" > "$state/.seen-${name}_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  hash_text 'idle: dropped to a shell' > "$state/.hash-$key"
+  printf '2\n' > "$state/.count-$key"
+  hash_text 'idle: dropped to a shell' > "$state/.stale-$key"
+  printf '3\n' > "$state/.wedge-escalations-$key"
+  date +%s > "$state/.wedge-alarmed-$key"
+  export FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)'
+  WEDGE_DIR=$dir; WEDGE_KEY=$key; WEDGE_CAPTURE="$dir/pane.txt"; WEDGE_WINDOW=$window
+}
+
+# Run one watcher round against the primed fixture with the wedge timer already
+# past its threshold. Prints nothing; the caller asserts on $WEDGE_DIR/watch.out
+# and on whether the process exited (delivered) or completed a cycle (absorbed).
+# Sets WEDGE_PID.
+wedge_round_past_threshold() {  # <realarm-secs>
+  local realarm=$1 state="$WEDGE_DIR/state" fakebin="$WEDGE_DIR/fakebin" out="$WEDGE_DIR/watch.out"
+  echo $(( $(date +%s) - 500 )) > "$state/.stale-since-$WEDGE_KEY"
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$WEDGE_WINDOW" FM_FAKE_TMUX_CAPTURE="$WEDGE_CAPTURE" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=240 FM_WEDGE_REALARM_SECS="$realarm" \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  WEDGE_PID=$!
+}
+
+test_wedge_repeat_after_the_ladder_is_absorbed_until_the_backstop() {
+  local state out back
+  prime_wedge_ladder_to_the_end wedge-ladder-end
+  state="$WEDGE_DIR/state"; out="$WEDGE_DIR/watch.out"
+  [ -e "$state/.wedge-alarmed-$WEDGE_KEY" ] || fail "the delivered ladder did not record its last delivery"
+
+  # Round 4: the same pane, nothing changed, inside the re-alarm window. This
+  # used to be escalation 4; it is now an already-reported repeat.
+  wedge_round_past_threshold 86400
+  if ! wait_poll_cycle "$state" "$WEDGE_PID"; then
+    reap "$WEDGE_PID"; fail "an unchanged pane past the ladder re-alarmed inside the backstop window: $(cat "$out")"
+  fi
+  [ ! -s "$out" ] || { reap "$WEDGE_PID"; fail "the absorbed repeat printed a wake reason: $(cat "$out")"; }
+  [ ! -s "$state/.wake-queue" ] || { reap "$WEDGE_PID"; fail "the absorbed repeat enqueued a wake"; }
+  [ "$(cat "$state/.wedge-escalations-$WEDGE_KEY")" = 3 ] || { reap "$WEDGE_PID"; fail "an absorbed repeat advanced the delivered-escalation count"; }
+  [ -s "$state/.stale-since-$WEDGE_KEY" ] || { reap "$WEDGE_PID"; fail "the absorbed repeat did not restart the idle timer for the next backstop check"; }
+  grep -F "absorbed repeat wedge escalation" "$state/.watch-triage.log" >/dev/null \
+    || { reap "$WEDGE_PID"; fail "the absorbed repeat left no triage trace"; }
+  reap "$WEDGE_PID"
+  ack_stopped_cycle "$state" || fail "could not acknowledge an intentional absorbing-watcher stop"
+
+  # The backstop: age the last delivery past FM_WEDGE_REALARM_SECS. Exactly one
+  # re-alarm fires, as the next ladder rung, carrying the demand-deep-inspection
+  # marker and the backstop clause.
+  back=$(( $(date +%s) - 500 ))
+  if [ "$(uname)" = Darwin ]; then touch -mt "$(date -r "$back" '+%Y%m%d%H%M.%S')" "$state/.wedge-alarmed-$WEDGE_KEY"
+  else touch -m -d "@$back" "$state/.wedge-alarmed-$WEDGE_KEY"; fi
+  wedge_round_past_threshold 300
+  wait_for_exit "$WEDGE_PID" 100 || fail "the backstop did not re-alarm once FM_WEDGE_REALARM_SECS had passed: $(cat "$out")"
+  grep -F "escalation 4" "$out" >/dev/null || fail "the backstop re-alarm did not advance the ladder count: $(cat "$out")"
+  grep -F "demand-deep-inspection" "$out" >/dev/null || fail "the backstop re-alarm dropped the demand-deep-inspection marker: $(cat "$out")"
+  grep -F "re-alarm backstop" "$out" >/dev/null || fail "the backstop re-alarm did not say it was one: $(cat "$out")"
+  grep -E "unchanged since last report [0-9]+s ago" "$out" >/dev/null || fail "the backstop re-alarm did not name how long the pane has been reported: $(cat "$out")"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the backstop re-alarm"
+  [ "$(( $(date +%s) - $(file_mtime "$state/.wedge-alarmed-$WEDGE_KEY") ))" -lt 60 ] \
+    || fail "the backstop re-alarm did not restart the quiet window"
+
+  # And the window has restarted: the next expiry is a repeat again.
+  wedge_round_past_threshold 86400
+  if ! wait_poll_cycle "$state" "$WEDGE_PID"; then
+    reap "$WEDGE_PID"; fail "the pane re-alarmed again right after the backstop fired: $(cat "$out")"
+  fi
+  [ ! -s "$out" ] || { reap "$WEDGE_PID"; fail "a post-backstop repeat printed a wake reason: $(cat "$out")"; }
+  reap "$WEDGE_PID"
+  ack_stopped_cycle "$state" || fail "could not acknowledge an intentional absorbing-watcher stop"
+  unset FM_FAKE_CREW_STATE
+  pass "past the ladder an unchanged pane is absorbed as an already-reported repeat, re-alarms exactly once per FM_WEDGE_REALARM_SECS, and never advances the count while absorbed"
+}
+
+test_wedge_repeat_suppression_lifts_when_the_pane_changes() {
+  local state out new_hash i
+  seed_wedge_ladder_at_the_end wedge-ladder-change
+  state="$WEDGE_DIR/state"; out="$WEDGE_DIR/watch.out"
+
+  # Confirm the pane is in its suppressed state first.
+  wedge_round_past_threshold 86400
+  if ! wait_poll_cycle "$state" "$WEDGE_PID"; then
+    reap "$WEDGE_PID"; fail "precondition: the unchanged pane was not suppressed: $(cat "$out")"
+  fi
+  reap "$WEDGE_PID"
+  ack_stopped_cycle "$state" || fail "could not acknowledge an intentional absorbing-watcher stop"
+
+  # The terminal changes - it came back, died differently, rendered anything
+  # new. The ladder resets with the hash, so this is a first sight again:
+  # absorbed as provably working, with a fresh timer and no inherited count.
+  printf 'idle: a different final render' > "$WEDGE_CAPTURE"
+  : > "$out"
+  PATH="$WEDGE_DIR/fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$WEDGE_WINDOW" FM_FAKE_TMUX_CAPTURE="$WEDGE_CAPTURE" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$WEDGE_DIR/fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=999 FM_WEDGE_REALARM_SECS=86400 \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  WEDGE_PID=$!
+  # The new hash needs two stable polls before it is classified, so wait for the
+  # first-sight absorb itself (the suppressor advancing to the new hash) rather
+  # than for a fixed number of cycles.
+  new_hash=$(hash_text 'idle: a different final render')
+  i=0
+  while [ "$(cat "$state/.stale-$WEDGE_KEY" 2>/dev/null || true)" != "$new_hash" ]; do
+    kill -0 "$WEDGE_PID" 2>/dev/null || fail "a changed pane exited the watcher before its first-sight absorb: $(cat "$out")"
+    [ "$i" -lt 300 ] || { reap "$WEDGE_PID"; fail "the changed pane was never classified as a fresh stale hash"; }
+    sleep 0.1; i=$((i + 1))
+  done
+  [ ! -e "$state/.wedge-escalations-$WEDGE_KEY" ] || { reap "$WEDGE_PID"; fail "a changed pane kept the old ladder count"; }
+  [ ! -s "$out" ] || { reap "$WEDGE_PID"; fail "a changed pane's first sight printed a wake reason: $(cat "$out")"; }
+  reap "$WEDGE_PID"
+  ack_stopped_cycle "$state" || fail "could not acknowledge an intentional absorbing-watcher stop"
+
+  # Its own first ladder rung is delivered in full, regardless of the quiet
+  # window the OLD pane was still inside: a changed state is news.
+  wedge_round_past_threshold 86400
+  wait_for_exit "$WEDGE_PID" 100 || fail "a changed pane's first escalation was suppressed as a repeat: $(cat "$out")"
+  grep -F "escalation 1" "$out" >/dev/null || fail "a changed pane did not restart its ladder at escalation 1: $(cat "$out")"
+  grep -F "re-alarm backstop" "$out" >/dev/null && fail "a changed pane's first escalation was labeled a backstop re-alarm: $(cat "$out")"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the changed pane's escalation"
+  unset FM_FAKE_CREW_STATE
+  pass "a pane change resets the ladder: the changed terminal is reported again as a first sight, not suppressed as a repeat"
+}
+
+# --- a task the captain ordered left stopped never re-alarms ------------------
+# state/<id>.stopped (bin/fm-leave-stopped.sh) is the captain's durable "leave it"
+# for a dead worker. The watcher skips that endpoint's pane path outright - the
+# exact pane that would otherwise surface at once as a stopped-crew stale - in
+# normal and away mode alike, and resumes ordinary supervision the moment the
+# marker is cleared. Nothing here touches the worker.
+
+test_left_stopped_task_pane_never_realarms() {
+  local dir state fakebin out drain_out capture_file window key pane_hash sig pid
+  dir=$(make_case left-stopped); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; drain_out="$dir/drain.out"; capture_file="$dir/pane.txt"
+  window="test:fm-drawer"
+  printf 'Trust this folder? [y/N]\n$ ' > "$capture_file"
+  printf 'window=%s\nkind=ship\n' "$window" > "$state/drawer.meta"
+  printf 'working: starting the social-videos project\n' > "$state/drawer.status"
+  sig=$(seen_sig "$state/drawer.status"); printf '%s' "$sig" > "$state/.seen-drawer_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "$(printf 'Trust this folder? [y/N]\n$ ')")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  # Dead at a prompt: not provably working, so without the marker this pane
+  # surfaces on the very next poll (test_nonterminal_stale_not_working_surfaced).
+  export FM_FAKE_CREW_STATE='state: unknown · source: none · no current-state source available'
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    "$ROOT/bin/fm-leave-stopped.sh" drawer mark --reason "captain: leave the AI drawer worker stopped" >/dev/null \
+    || fail "could not mark the task left stopped"
+
+  # Normal mode: a full poll cycle completes with no wake, no queue row, and no
+  # stale bookkeeping for the skipped pane.
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_poll_cycle "$state" "$pid"; then
+    reap "$pid"; fail "a task left stopped re-alarmed through its dead pane: $(cat "$out")"
+  fi
+  [ ! -s "$out" ] || { reap "$pid"; fail "a task left stopped printed a wake reason: $(cat "$out")"; }
+  [ ! -s "$state/.wake-queue" ] || { reap "$pid"; fail "a task left stopped enqueued a wake"; }
+  [ ! -e "$state/.stale-$key" ] || { reap "$pid"; fail "a skipped pane still received stale bookkeeping"; }
+  grep -F "skipped pane of a task left stopped" "$state/.watch-triage.log" >/dev/null \
+    || { reap "$pid"; fail "the skip left no triage trace"; }
+  reap "$pid"
+  ack_stopped_cycle "$state" || fail "could not acknowledge an intentional absorbing-watcher stop"
+
+  # Away mode: the daemon-owned one-shot stale handoff is skipped the same way.
+  date '+%s' > "$state/.afk"
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_poll_cycle "$state" "$pid"; then
+    reap "$pid"; fail "away mode handed a task left stopped to the daemon as a stale: $(cat "$out")"
+  fi
+  [ ! -s "$state/.wake-queue" ] || { reap "$pid"; fail "away mode enqueued a stale for a task left stopped"; }
+  reap "$pid"
+  rm -f "$state/.afk"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the intentional away-mode watcher stop"
+
+  # Clearing the marker restores ordinary supervision: the same dead pane now
+  # surfaces at once, exactly as it would have without the order.
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-leave-stopped.sh" drawer clear >/dev/null \
+    || fail "could not clear the left-stopped marker"
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 100 || fail "after clearing the marker the dead pane did not surface: $(cat "$out")"
+  grep -Fx "stale: $window" "$out" >/dev/null || fail "the cleared task did not surface as an ordinary stale: $(cat "$out")"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after the cleared task's stale failed"
+  grep "$(printf '\tstale\t')" "$drain_out" | grep -F "$window" >/dev/null || fail "the cleared task's stale was not queued"
+  unset FM_FAKE_CREW_STATE
+  pass "a task left stopped on the captain's order never re-alarms through its pane, in normal or away mode, and is supervised again once the marker is cleared"
+}
+
 # --- busy pane duration bound: a completed-turn age gate on top of busy -----
 # 2026-07 hibit-agent-focus-nonsteal-r1 incident: a busy pane (herdr "working"
 # and/or the harness's rendered busy footer) is unconditional, unbounded proof
@@ -4808,6 +5072,9 @@ test_uncapturable_busy_window_is_waited_on
 test_nonterminal_stale_provably_working_absorbed_then_escalated
 test_wedge_escalation_marks_demand_deep_inspection_after_threshold
 test_wedge_escalation_resets_when_pane_becomes_active
+test_wedge_repeat_after_the_ladder_is_absorbed_until_the_backstop
+test_wedge_repeat_suppression_lifts_when_the_pane_changes
+test_left_stopped_task_pane_never_realarms
 test_busy_pane_below_turn_age_bound_is_absorbed
 test_busy_pane_stable_hash_escalates_past_turn_age_bound
 test_busy_pane_changing_hash_escalates_past_turn_age_bound

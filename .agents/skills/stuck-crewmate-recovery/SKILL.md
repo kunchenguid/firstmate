@@ -38,6 +38,7 @@ Before relaunch, prove that no live agent still owns the recorded task and that 
 Preserve its uncommitted changes and commits, keep the same task identity, and resume or relaunch the recorded harness in that existing worktree with the same brief plus a concise progress note.
 Do not use a fresh generic spawn while the recorded worktree is unaccounted for, because allocating another worktree can split one task across two copies.
 If the worktree or ownership cannot be reconciled safely, leave all state intact and report the task failed or blocked with the conflicting evidence.
+When the captain has ordered a dead worker left as it is, main records that order with `bin/fm-leave-stopped.sh <id> mark --reason '<the captain's words>'` (its header owns the marker): the watcher then stops alarming on that endpoint, while the record, worktree, and endpoint stay untouched.
 
 ## Live-endpoint escalation
 

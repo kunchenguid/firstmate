@@ -201,7 +201,12 @@ export function scopeForUnreadWake(state: string, heartbeat: boolean): UnreadWak
   const projects = new Set<string>();
   const metadata = new Map<string, string>();
   // The task id behind each key a signal or stale row may carry: the task id
-  // itself, or the endpoint its metadata records.
+  // itself, or the endpoint its metadata records. A stale row is keyed by the
+  // target bin/fm-watch.sh polls (bin/fm-backend.sh's fm_backend_target_of_meta):
+  // the recorded `window=` for every backend except Orca, whose target is its
+  // `terminal=` handle. Both must resolve here, or every Orca stale row reads as
+  // unresolvable and drags the whole scan - and every routine signal row queued
+  // beside it - to main.
   const taskByKey = new Map<string, string>();
   try {
     for (const name of readdirSync(state)) {
@@ -210,14 +215,16 @@ export function scopeForUnreadWake(state: string, heartbeat: boolean): UnreadWak
       const fields = readFileSync(`${state}/${name}`, "utf8").split(/\r?\n/);
       const project = fields.find((line) => line.startsWith("project="))?.slice(8) ?? "";
       const window = fields.find((line) => line.startsWith("window="))?.slice(7) ?? "";
+      const terminal = fields.find((line) => line.startsWith("terminal="))?.slice(9) ?? "";
       if (project) {
         metadata.set(task, project);
         taskByKey.set(task, task);
         taskByKey.set(`${task}.status`, task);
         taskByKey.set(`${task}.turn-ended`, task);
-        if (window) {
-          metadata.set(window, project);
-          taskByKey.set(window, task);
+        for (const endpoint of [window, terminal]) {
+          if (!endpoint) continue;
+          metadata.set(endpoint, project);
+          taskByKey.set(endpoint, task);
         }
       }
     }

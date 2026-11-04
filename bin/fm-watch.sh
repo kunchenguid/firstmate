@@ -34,7 +34,20 @@
 #                          also carries a "demand-deep-inspection" marker so the
 #                          wake payload itself, not just repetition, forces a
 #                          closer look instead of another routine supervision
-#                          resume. Unless afk is active. A pane whose own task
+#                          resume. That rung ends the ladder: while the pane
+#                          stays unchanged, later timer expiries are absorbed as
+#                          already-reported repeats until FM_WEDGE_REALARM_SECS
+#                          have passed since the last delivered escalation, when
+#                          one re-alarm fires (same reason, the ladder count
+#                          advanced, plus an "unchanged since last report"
+#                          backstop clause) and the quiet window restarts. An
+#                          idle pane whose render changes - the terminal coming
+#                          back, dying differently, new output - resets the
+#                          ladder with the hash, as does a pane leaving the busy
+#                          state, so that change is reported as a first sight
+#                          again; a busy pane past FM_BUSY_TURN_MAX_SECS keeps
+#                          its ladder across render changes until it goes idle.
+#                          Unless afk is active. A pane whose own task
 #                          worktree was written during the quiet window is
 #                          deferred rather than escalated (wedge_defer_writing),
 #                          because files appearing there are liveness the pane and
@@ -65,6 +78,13 @@
 #                          an unhandled record's ladder cannot advance; quiet
 #                          successful attempts never wake firstmate
 #                          (bin/fm-task-inbox-lib.sh owns the ladder policy)
+# A task the captain ordered left stopped carries state/<id>.stopped (written only
+# by bin/fm-leave-stopped.sh, whose header owns the marker). Its endpoint is
+# skipped by the whole pane path above - no capture, no stale classification, no
+# wedge timer, no steering-inbox ring, no declared-wait recheck - in normal and
+# away mode alike, so a dead terminal the captain chose to leave dead never
+# re-alarms. Its status log is still read by the signal path, because a line it
+# appends is a genuine state change.
 # An idle pane whose last output is a transient inference-gateway error is
 # absorbed instead, and re-rung with a bounded continue instruction through the
 # same steering inbox (gateway_stall_check; bin/fm-gateway-retry-lib.sh owns the
@@ -269,6 +289,9 @@ EVENT_CAP_FAIL_MAX=${FM_EVENT_CAP_FAIL_MAX:-3}
 _event_cap_key=""
 _event_cap_ok=0
 _event_cap_fails=0
+# Per-process memo of the left-stopped tasks already noted in the triage log, so
+# the skip is recorded once per watcher cycle rather than once per poll.
+_stopped_logged=""
 
 # afk_present: 0 while the away-mode flag exists. When set, the daemon wraps this
 # watcher and owns triage, so the watcher must behave one-shot (enqueue + exit on
@@ -844,6 +867,23 @@ EOF
 # below).
 FM_WEDGE_DEMAND_INSPECT_COUNT=${FM_WEDGE_DEMAND_INSPECT_COUNT:-3}
 
+# The demand-deep-inspection rung is also the END of the ladder for an unchanged
+# pane. Before this bound existed, every STALE_ESCALATE_SECS re-fired the same
+# escalation with the count advanced (202 wakes for one dead terminal in a day),
+# each one a supervisor turn that could only re-read the same evidence. Once the
+# ladder has delivered FM_WEDGE_DEMAND_INSPECT_COUNT escalations for the SAME
+# pane hash, a further timer expiry is an already-reported repeat and is absorbed
+# until FM_WEDGE_REALARM_SECS have passed since the last DELIVERED escalation
+# (the .wedge-alarmed-<key> marker's mtime); then one re-alarm fires and the
+# window restarts. The ladder resets when an idle pane's hash changes and when a
+# pane leaves the busy state, so a terminal that comes back, dies differently,
+# or renders anything new while idle is a fresh first sight, never a suppressed
+# repeat; a busy pane past FM_BUSY_TURN_MAX_SECS (busy_turn_bound_check) keeps
+# its ladder across render changes until it goes idle. Suppression is a watcher-level absorb
+# at zero token cost: the first report and the bounded ladder still reach the
+# supervisor, and nothing here ever interrupts, signals, or restarts the worker.
+FM_WEDGE_REALARM_SECS=${FM_WEDGE_REALARM_SECS:-86400}
+
 # One bounded re-surface for a pane the watcher is deliberately absorbing, so no
 # absorb can rot invisibly. <age> is how long the current absorb has held and
 # <throttle> is the per-window marker whose mtime records the last re-surface, so
@@ -912,7 +952,7 @@ clear_write_tracking() {  # <window-key>
 # about to escalate: at most one bounded walk per window per STALE_ESCALATE_SECS,
 # never per poll.
 wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-file> <task>
-  local win=$1 since_file=$2 label=$3 escalation_file=$4 task=$5 since age n reason
+  local win=$1 since_file=$2 label=$3 escalation_file=$4 task=$5 since age n reason delivered alarmed rage backstop
   since=$(cat "$since_file" 2>/dev/null || true)
   case "$since" in
     ''|*[!0-9]*)
@@ -925,17 +965,36 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-
     *)
       age=$(( $(date +%s) - since ))
       if [ "$age" -ge "$STALE_ESCALATE_SECS" ]; then
+        delivered=$(cat "$escalation_file" 2>/dev/null || echo 0)
+        case "$delivered" in ''|*[!0-9]*) delivered=0 ;; esac
+        alarmed="$STATE/.wedge-alarmed-$(window_key "$win")"
+        if [ "$delivered" -ge "$FM_WEDGE_DEMAND_INSPECT_COUNT" ] && [ -e "$alarmed" ]; then
+          rage=$(age_of "$alarmed")
+          if [ "$rage" -lt "$FM_WEDGE_REALARM_SECS" ]; then
+            # The ladder already ended on this exact pane and nothing about it
+            # has changed since: an already-reported repeat. Restart the idle
+            # timer so the backstop is re-checked on the same cadence, and
+            # keep the escalation count where the last delivery left it.
+            date +%s > "$since_file"
+            triage_log "absorbed repeat wedge escalation (unchanged pane, reported ${rage}s ago, re-alarm backstop ${FM_WEDGE_REALARM_SECS}s): $win"
+            return 0
+          fi
+          backstop=", unchanged since last report ${rage}s ago - re-alarm backstop"
+        else
+          backstop=""
+        fi
         if crew_worktree_written_since "$task" "$STATE" "$since_file"; then
           wedge_defer_writing "$win" "$since_file" "$label" "$age"
           return 0
         fi
-        n=$(( $(cat "$escalation_file" 2>/dev/null || echo 0) + 1 ))
+        n=$(( delivered + 1 ))
         echo "$n" > "$escalation_file"
         reason="stale: $win (idle ${age}s, possible wedge, escalation $n)"
         if [ "$n" -ge "$FM_WEDGE_DEMAND_INSPECT_COUNT" ]; then
-          reason="stale: $win (idle ${age}s, possible wedge, escalation $n, demand-deep-inspection: same pane has wedge-escalated $n times in a row - do not re-absorb on the run-step/pane state alone)"
+          reason="stale: $win (idle ${age}s, possible wedge, escalation $n, demand-deep-inspection: same pane has wedge-escalated $n times in a row - do not re-absorb on the run-step/pane state alone${backstop})"
         fi
         fm_wake_append stale "$win" "$reason" || exit 1
+        date +%s > "$alarmed"
         rm -f "$since_file"
         clear_write_tracking "$(window_key "$win")"
         wake "$reason"
@@ -2094,6 +2153,18 @@ EOF
     kind=$(window_kind "$w")
     task=$(window_to_task "$w" "$STATE")
     key=$(window_key "$w")
+    # A task the captain ordered left stopped (state/<id>.stopped, owned by
+    # bin/fm-leave-stopped.sh) is not supervised through its pane at all: no
+    # capture, no stale classification, no wedge timer, no steering ring, in
+    # normal and away mode alike. Logged once per watcher process, not per poll.
+    if [ -n "$task" ] && [ -e "$STATE/$task.stopped" ]; then
+      case "$_stopped_logged" in
+        *"|$task|"*) ;;
+        *) _stopped_logged="$_stopped_logged|$task|"
+           triage_log "skipped pane of a task left stopped on the captain's order (state/$task.stopped): $w" ;;
+      esac
+      continue
+    fi
     last=$(last_status_line "$STATE/$task.status")
     if ! status_is_paused_or_captain_held "$last" && [ -e "$STATE/.paused-$key" ]; then
       clear_pause_tracking "$key"
