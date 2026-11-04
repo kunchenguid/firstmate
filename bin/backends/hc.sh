@@ -668,7 +668,9 @@ fm_backend_hc_claude_trust_check() {  # <session> <machine> <clone> <worktree> [
 # fm_backend_hc_remote_worktree_add: create <worktree> on <machine> as a
 # detached linked worktree of <clone> at the freshly fetched origin/<base>.
 # Refuses a path that already exists there. Prints the worktree's own
-# top-level path as git reports it.
+# top-level path as git reports it. Only a worktree this call's own
+# `git worktree add` created is ever undone: a failed add leaves whatever is at
+# the path alone, and an add whose answer was lost is named, not removed.
 fm_backend_hc_remote_worktree_add() {  # <session> <machine> <clone> <worktree> <base-branch>
   local session=$1 machine=$2 clone=$3 wt=$4 base=$5 rc top
   fm_backend_hc_remote_exec "$session" "$machine" 30 - test -e "$wt" >/dev/null 2>&1 && rc=0 || rc=$?
@@ -681,12 +683,15 @@ fm_backend_hc_remote_worktree_add() {  # <session> <machine> <clone> <worktree> 
   fm_backend_hc_remote_git "$session" "$machine" "$clone" fetch --quiet origin \
     "+refs/heads/$base:refs/remotes/origin/$base" >/dev/null \
     || { echo "error: could not fetch origin/$base into $clone on '$machine'" >&2; return 1; }
-  # From here <wt> was proved absent, so anything at it is this call's own:
-  # a failure (including a lost answer) removes it there or names it.
   fm_backend_hc_remote_git "$session" "$machine" "$clone" worktree add --quiet --detach "$wt" \
-    "refs/remotes/origin/$base" >/dev/null \
-    || { echo "error: could not add worktree $wt from origin/$base on '$machine'" >&2
-         fm_backend_hc_remote_worktree_add_undo "$session" "$machine" "$clone" "$wt"; return 1; }
+    "refs/remotes/origin/$base" >/dev/null && rc=0 || rc=$?
+  case "$rc" in
+    0) ;;
+    255) echo "error: lost hc's answer while adding worktree $wt on '$machine'; it may exist there, so check it and remove it if this spawn made it (git -C $clone worktree remove --force $wt)" >&2; return 1 ;;
+    *) echo "error: could not add worktree $wt from origin/$base on '$machine'" >&2; return 1 ;;
+  esac
+  # This call's own git worktree add made <wt>, so a failure from here
+  # removes it there or names it.
   top=$(fm_backend_hc_remote_git "$session" "$machine" "$wt" rev-parse --show-toplevel 2>/dev/null) \
     || { echo "error: worktree $wt on '$machine' did not come up as a git checkout" >&2
          fm_backend_hc_remote_worktree_add_undo "$session" "$machine" "$clone" "$wt"; return 1; }

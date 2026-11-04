@@ -369,6 +369,38 @@ test_placed_worktree_add_failure_removes_what_it_made() {
   pass "hc placement: a worktree creation that fails part way removes what it made there"
 }
 
+# Oracle: a worktree this creation did not make is not its to remove. Here
+# another checkout (with its own branch and work) appears at the path after the
+# absence check, so this call's git worktree add fails; that checkout, its file,
+# and its branch must survive the failed creation untouched.
+test_placed_worktree_add_failure_leaves_a_foreign_worktree() {
+  local out rc wt
+  setup_case wt-add-race
+  make_repos "$D" proj
+  wt="$D/remote/code/.fm-hc/x/w1"
+  mkdir -p "$D/racebin"
+  cat > "$D/racebin/git" <<SH
+#!/bin/sh
+case " \$* " in
+  *" worktree add "*)
+    "$REAL_GIT" -C "$D/remote/code/proj" worktree add --quiet -b other-work "$wt" origin/main >/dev/null 2>&1 || exit 97
+    echo "their work" > "$wt/theirs.txt" ;;
+esac
+exec "$REAL_GIT" "\$@"
+SH
+  chmod +x "$D/racebin/git"
+  rc=0
+  out=$(PATH="$D/racebin:$PATH" hc_shell 'fm_backend_hc_remote_worktree_add fmtest worker-host /fm-remote-root/code/proj /fm-remote-root/code/.fm-hc/x/w1 main' 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "an add that finds the path taken must fail"$'\n'"$out"
+  assert_contains "$out" "could not add worktree" "the refusal names the failed add"
+  [ -f "$wt/theirs.txt" ] || fail "the other checkout's work must survive the failed creation"$'\n'"$out"
+  "$REAL_GIT" -C "$D/remote/code/proj" worktree list | grep -F ".fm-hc/x/w1" >/dev/null \
+    || fail "the clone there must still list the other checkout"
+  "$REAL_GIT" -C "$D/remote/code/proj" rev-parse --verify --quiet refs/heads/other-work >/dev/null \
+    || fail "the other checkout's branch must survive the failed creation"
+  pass "hc placement: a failed worktree add leaves a checkout it did not make, with its work and branch"
+}
+
 test_machine_readiness_gates_connection_and_versions() {
   local out
   setup_case ready
@@ -976,6 +1008,7 @@ fm_test_run \
   test_remote_exec_keeps_bytes_and_refuses_undecodable_output \
   test_placed_default_branch_is_read_from_origin \
   test_placed_worktree_add_failure_removes_what_it_made \
+  test_placed_worktree_add_failure_leaves_a_foreign_worktree \
   test_machine_readiness_gates_connection_and_versions \
   test_create_task_places_the_terminal_on_the_machine \
   test_remote_agent_state_reads_the_group_there \
