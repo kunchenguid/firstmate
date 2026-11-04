@@ -12,6 +12,7 @@ Start with the directory layout, then use the setting reference for the behavior
 | Worker permissions, accounts, or environment | [Codex approval review](#codex-automatic-approval-review), [Claude permission mode](#claude-permission-mode-configclaude-permission-mode), [Codex permission mode](#codex-permission-mode-configcodex-permission-mode), [persistent managed-policy failover](#persistent-managed-policy-failover), [worker account pin](#worker-account-pin-configclaude-account-configpi-account), [several Claude accounts](#several-claude-accounts-configclaude-accounts), [worker tool exclusions](#worker-tool-exclusions-configcrew-exclude-tools), [worker launch environment](#worker-launch-environment-configlaunch-env-allowlist), and its [Orca environment source](#orca-environment-source-configlaunch-env-tmux-session) |
 | Backlog, preferences, and memory | [Backlog backend](#backlog-backend-taskstoml--configbacklog-backend), [captain preferences](#captain-preferences-datacaptainmd--datacaptain-sharedmd), [external memory tiers](#external-memory-tiers-memory-layering-section), [record export](#record-export-configrecord-export-root), and [startup memory budget](#startup-memory-budget-configstartup-memory-budget) |
 | Supervision and presentation | [Pi supervision branch](#pi-supervision-branch), [supervision host](#supervision-host-configsupervision-host), [Codex native Stop park](#codex-native-stop-park-configcodex-stop-park), [warm-cache compaction](#warm-cache-compaction-configwarm-compact), and [Calm preference](#calm-preference-configcalm) |
+| Disk used by task lanes | [Lane disk use](#lane-disk-use-configbuild-output-root-configclone-discipline-configscratch-dirs) |
 | Persistent secondmates | [Secondmate routes](#secondmate-routes-datasecondmatesmd) |
 | Review bots on owned GitHub pull requests | [Contribution review bots](#contribution-review-bots-configcontribution-review-bots) |
 | Per-run overrides and tuning | [Environment variables](#environment-variables) |
@@ -1065,6 +1066,53 @@ A project without an origin remote is unaffected, and a relaunch never changes t
 The flag is per home and is not inherited by secondmate homes, which keep their own project clones and opt in separately.
 Only its presence is read, at each fresh spawn, review, and promotion.
 The [`fm-spawn.sh` header](../bin/fm-spawn.sh) owns the exact base rule, and the [`fm-review-diff.sh` header](../bin/fm-review-diff.sh) owns the review anchor.
+
+## Lane disk use (config/build-output-root, config/clone-discipline, config/scratch-dirs)
+
+Three independent, default-off settings keep the disk used by ship and scout lanes down.
+Each is a local, gitignored file under `config/` with an environment override, and each is a home-local preference that secondmate homes do not inherit.
+With every file absent and every override unset, spawn, briefs, and teardown behave exactly as before.
+The cleanup steps run only after teardown's landed-work checks pass and the task's processes are reaped, and before the local copy is returned, so a refused teardown deletes nothing.
+A lane whose pool slot was reassigned to another task gets none of the cleanup.
+[`bin/fm-lane-disk-lib.sh`](../bin/fm-lane-disk-lib.sh) owns the exact resolution and path checks.
+
+### Per-lane build output (config/build-output-root / FM_BUILD_OUTPUT_ROOT)
+
+`config/build-output-root` holds one absolute directory on its first non-blank line that does not start with `#`.
+`FM_BUILD_OUTPUT_ROOT` overrides the file: an absolute path enables that root, `off`, `0`, `false`, or `no` disables it, and unset or empty defers to the file.
+A relative path warns and leaves the setting off.
+Use a root dedicated to this home, because directories are named by task id alone.
+
+A fresh ship or scout spawn creates `<root>/<task-id>/`, records it as `build_output_dir=` in the task record, and exports these variables into the worker's launch:
+
+| Variable | Value | Source |
+| --- | --- | --- |
+| `FM_BUILD_OUTPUT_DIR` | `<root>/<task-id>` | Firstmate, for tools that take only a command-line flag |
+| `CARGO_TARGET_DIR` | `<root>/<task-id>/cargo-target` | [Cargo environment variables](https://doc.rust-lang.org/cargo/reference/environment-variables.html) |
+| `PYTHONPYCACHEPREFIX` | `<root>/<task-id>/pycache` | [Python command line and environment](https://docs.python.org/3/using/cmdline.html#envvar-PYTHONPYCACHEPREFIX) |
+
+SwiftPM's `--scratch-path`, Xcode's `-derivedDataPath`, and Gradle's `--project-cache-dir` have no documented environment variable, so the worker brief gains a `# Disk use` line naming those flags with `$FM_BUILD_OUTPUT_DIR`.
+Bazel keeps its output base outside the checkout by default ([output directories](https://bazel.build/remote/output-directories)), so nothing is exported for it.
+A relaunch reuses the recorded directory and never resolves the setting again.
+Teardown removes only the recorded directory, and leaves a recorded path in place with a warning when it is not absolute, does not end in the task id, or equals or contains the task's local copy.
+The source tree is never touched.
+
+### Clone discipline (config/clone-discipline / FM_CLONE_DISCIPLINE)
+
+`config/clone-discipline` is a presence flag.
+`FM_CLONE_DISCIPLINE` overrides it: `1`, `on`, `true`, or `yes` enables, any other non-empty value disables, and unset or empty defers to the file.
+When it is on, ship and scout briefs gain a `# Disk use` rule telling workers to make extra checkouts with `git clone --reference` against an existing local object store and to ask firstmate for a real worktree, never to make a full clone.
+Teardown then warns once for each separate full clone it finds within four directory levels of the task's local copy, its temp root, or its build-output directory.
+A clone that borrows objects through `objects/info/alternates`, as `git clone --reference` and `--shared` do, is not reported.
+The check only warns: it never deletes a clone and never blocks teardown.
+
+### Scratch cleanup (config/scratch-dirs / FM_SCRATCH_DIRS)
+
+`config/scratch-dirs` declares scratch directories, one path per line, relative to the root of the task's local copy; blank lines and lines starting with `#` are ignored.
+`FM_SCRATCH_DIRS` overrides the file with a colon-separated list, `off` disables it, and unset or empty defers to the file.
+An empty, absolute, or `.` path, a path with a `..` component, or a path inside `.git` is skipped with a warning.
+At teardown each declared path that exists is removed, except a path that holds tracked files or whose parent resolves outside the local copy; a declared path that is itself a symlink has only the link removed.
+Declare paths the project ignores, such as `.build`, `DerivedData`, or a captures directory: an untracked path the project does not ignore still makes teardown refuse an uncommitted copy before cleanup runs.
 
 ## Gate defaults (.no-mistakes.yaml)
 
@@ -3319,6 +3367,10 @@ FM_PROC_ROOT_OVERRIDE=   # alternate /proc root for Linux process-identity reade
 FM_BACKEND=             # optional runtime backend override for new spawns; tmux/herdr/zellij/orca/cmux/paseo/rex/t3code/tern support ship/scout spawns, codex-app is not accepted
 FM_T3CODE_ORIGIN=       # optional T3 Code server origin for bin/fm-t3-mcp.mjs login; the default is read from ~/.t3/userdata/server-runtime.json
 FM_TRACE_CONTEXT=       # optional trace-context override; see "Trace context propagation"
+FM_BUILD_OUTPUT_ROOT=   # optional per-lane build-output root override; see "Lane disk use"
+FM_CLONE_DISCIPLINE=    # optional clone-discipline override; see "Lane disk use"
+FM_SCRATCH_DIRS=        # optional colon-separated scratch-path override; see "Lane disk use"
+FM_BUILD_OUTPUT_DIR=    # internal: the task's build-output directory fm-spawn.sh exports when the root is set, never set by hand
 FM_TASK_ID=             # internal task-worker marker fm-spawn.sh delivers to ship and scout environments, never set by hand; bin/fm-test-run.sh refuses to execute in the repository primary checkout while it is set
 FM_TASK_INBOX=          # internal: absolute path of the task's steering inbox (state/<id>.inbox) that fm-spawn.sh exports into every ship, scout, and secondmate launch, never set by hand; the steering doorbell names "$FM_TASK_INBOX"
 HERDR_SESSION=default  # herdr-only: named session for normal backend ops; not enough for destructive cleanup (docs/herdr-backend.md)

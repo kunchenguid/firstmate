@@ -5608,6 +5608,132 @@ test_status_archive_opt_in() {
   pass "status archival is opt-in and preserves the complete log"
 }
 
+# Lane disk settings (bin/fm-lane-disk-lib.sh) through the real teardown.
+# lane_disk_case <name>: a landed ship copy holding a tracked directory, an
+# ignored scratch directory, an ignored symlink to a directory outside the
+# copy, and a recorded per-lane build-output directory. Echoes the case dir.
+lane_disk_case() {
+  local case_dir exclude
+  unset FM_SCRATCH_DIRS FM_CLONE_DISCIPLINE FM_BUILD_OUTPUT_ROOT
+  case_dir=$(make_case "$1")
+  mkdir -p "$case_dir/wt/tracked" "$case_dir/wt/.build/debug" "$case_dir/outside" \
+    "$case_dir/buildroot/task-x1/cargo-target"
+  printf 'keep\n' > "$case_dir/wt/tracked/keep.txt"
+  git -C "$case_dir/wt" add -- tracked/keep.txt
+  git -C "$case_dir/wt" -c user.email=t@t -c user.name=t commit -q -m "tracked dir"
+  git -C "$case_dir/wt" push -q origin HEAD:main
+  git -C "$case_dir/wt" fetch -q origin
+  exclude=$(git -C "$case_dir/wt" rev-parse --path-format=absolute --git-common-dir)/info/exclude
+  mkdir -p "$(dirname "$exclude")"
+  printf '%s\n' .build link clones >> "$exclude"
+  printf 'object\n' > "$case_dir/wt/.build/debug/out.o"
+  printf 'outside\n' > "$case_dir/outside/data.txt"
+  ln -s "$case_dir/outside" "$case_dir/wt/link"
+  printf 'artifact\n' > "$case_dir/buildroot/task-x1/cargo-target/lib.rlib"
+  write_meta "$case_dir" no-mistakes ship
+  printf 'build_output_dir=%s\n' "$case_dir/buildroot/task-x1" >> "$case_dir/state/task-x1.meta"
+  printf '%s\n' "$case_dir"
+}
+
+lane_disk_scratch_config() {  # <case-dir>
+  printf '%s\n' '# lane scratch' .build/ link tracked ../outside /etc .git > "$1/config/scratch-dirs"
+}
+
+test_lane_disk_cleanup_after_landed_work() {
+  local case_dir rc=0
+  case_dir=$(lane_disk_case lane-disk-on)
+  lane_disk_scratch_config "$case_dir"
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  expect_code 0 "$rc" "lane disk teardown: $(cat "$case_dir/stderr")"
+  assert_absent "$case_dir/wt/.build" "declared ignored scratch survived teardown"
+  assert_absent "$case_dir/wt/link" "declared scratch symlink survived teardown"
+  assert_present "$case_dir/outside/data.txt" "a declared symlink's target outside the copy was deleted"
+  assert_present "$case_dir/wt/tracked/keep.txt" "a declared path holding tracked files was deleted"
+  assert_absent "$case_dir/buildroot/task-x1" "the recorded build-output directory survived teardown"
+  assert_present "$case_dir/buildroot" "teardown removed the build-output root itself"
+  assert_grep "scratch path 'tracked' holds tracked files; skipped" "$case_dir/stderr" \
+    "a tracked scratch path was skipped silently"
+  assert_grep "scratch path '../outside' is not a plain path" "$case_dir/stderr" \
+    "an escaping scratch path was not reported"
+  assert_grep "scratch path '/etc' is not a plain path" "$case_dir/stderr" \
+    "an absolute scratch path was not reported"
+  pass "lane disk cleanup removes declared scratch and the recorded build output once work has landed"
+}
+
+test_lane_disk_cleanup_is_default_off() {
+  local case_dir rc=0
+  case_dir=$(lane_disk_case lane-disk-off)
+  # Without a recorded build_output_dir and with no scratch declaration,
+  # teardown leaves every lane directory exactly as before.
+  sed -i.bak '/^build_output_dir=/d' "$case_dir/state/task-x1.meta"
+  rm -f "$case_dir/state/task-x1.meta.bak"
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  expect_code 0 "$rc" "default-off lane disk teardown: $(cat "$case_dir/stderr")"
+  assert_present "$case_dir/wt/.build/debug/out.o" "default-off teardown removed ignored build output"
+  assert_present "$case_dir/wt/link" "default-off teardown removed an ignored symlink"
+  assert_present "$case_dir/buildroot/task-x1/cargo-target/lib.rlib" "default-off teardown removed an unrecorded directory"
+  pass "lane disk cleanup is off by default"
+}
+
+test_lane_disk_scratch_env_override() {
+  local case_dir rc=0
+  case_dir=$(lane_disk_case lane-disk-env)
+  lane_disk_scratch_config "$case_dir"
+  FM_SCRATCH_DIRS=off run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  expect_code 0 "$rc" "FM_SCRATCH_DIRS=off teardown: $(cat "$case_dir/stderr")"
+  assert_present "$case_dir/wt/.build/debug/out.o" "FM_SCRATCH_DIRS=off still removed declared scratch"
+  case_dir=$(lane_disk_case lane-disk-env-list)
+  rc=0
+  FM_SCRATCH_DIRS="link" run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  expect_code 0 "$rc" "FM_SCRATCH_DIRS=link teardown: $(cat "$case_dir/stderr")"
+  assert_absent "$case_dir/wt/link" "FM_SCRATCH_DIRS did not replace the file's list"
+  assert_present "$case_dir/wt/.build/debug/out.o" "FM_SCRATCH_DIRS removed a path it did not list"
+  pass "FM_SCRATCH_DIRS overrides config/scratch-dirs"
+}
+
+test_lane_disk_refused_teardown_deletes_nothing() {
+  local case_dir rc=0
+  case_dir=$(lane_disk_case lane-disk-refused)
+  lane_disk_scratch_config "$case_dir"
+  printf 'unlanded\n' > "$case_dir/wt/notes.txt"
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  expect_code 1 "$rc" "dirty lane disk teardown should refuse"
+  assert_present "$case_dir/wt/.build/debug/out.o" "a refused teardown removed declared scratch"
+  assert_present "$case_dir/wt/link" "a refused teardown removed a declared symlink"
+  assert_present "$case_dir/buildroot/task-x1/cargo-target/lib.rlib" "a refused teardown removed build output"
+  assert_present "$case_dir/state/task-x1.meta" "a refused teardown removed the task record"
+  pass "a refused teardown leaves scratch and build output untouched"
+}
+
+test_lane_disk_clone_discipline_warns_only() {
+  local case_dir rc=0 mode
+  for mode in off on; do
+    case_dir=$(lane_disk_case "lane-disk-clones-$mode")
+    git clone -q "$case_dir/origin.git" "$case_dir/wt/clones/full"
+    git clone -q --reference "$case_dir/project" "$case_dir/origin.git" "$case_dir/wt/clones/borrowed"
+    [ "$mode" = off ] || : > "$case_dir/config/clone-discipline"
+    rc=0
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+    expect_code 0 "$rc" "clone discipline $mode teardown: $(cat "$case_dir/stderr")"
+    assert_present "$case_dir/wt/clones/full/.git" "clone discipline $mode deleted a full clone"
+    assert_present "$case_dir/wt/clones/borrowed/.git" "clone discipline $mode deleted a reference clone"
+    if [ "$mode" = on ]; then
+      assert_grep "separate full clone at $case_dir/wt/clones/full;" "$case_dir/stderr" \
+        "clone discipline did not warn about a full clone"
+      assert_no_grep "clones/borrowed" "$case_dir/stderr" "clone discipline warned about a reference clone"
+    else
+      assert_no_grep "separate full clone" "$case_dir/stderr" "default-off teardown warned about clones"
+    fi
+  done
+  case_dir=$(lane_disk_case lane-disk-clones-env)
+  git clone -q "$case_dir/origin.git" "$case_dir/wt/clones/full"
+  rc=0
+  FM_CLONE_DISCIPLINE=on run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  expect_code 0 "$rc" "FM_CLONE_DISCIPLINE=on teardown: $(cat "$case_dir/stderr")"
+  assert_grep "separate full clone" "$case_dir/stderr" "FM_CLONE_DISCIPLINE=on did not enable the warning"
+  pass "clone discipline warns about separate full clones at teardown and deletes nothing"
+}
+
 test_record_export_config_absent_never_reads_the_exporter() {
   local case_dir rc=0
   case_dir=$(make_case record-export-off)
@@ -6317,3 +6443,8 @@ test_process_spawned_during_grace_is_reaped_on_later_pass
 test_persistent_scan_refuses_after_bounded_retries
 test_process_exit_during_identity_lookup_does_not_refuse
 test_run_abort_precedes_process_reap_precedes_worktree_removal
+test_lane_disk_cleanup_after_landed_work
+test_lane_disk_cleanup_is_default_off
+test_lane_disk_scratch_env_override
+test_lane_disk_refused_teardown_deletes_nothing
+test_lane_disk_clone_discipline_warns_only

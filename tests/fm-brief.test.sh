@@ -1266,6 +1266,60 @@ test_workers_wait_without_spending_turns() {
   pass "fm-brief: workers end the turn on a decision, wait in one bounded shell command, and never poll"
 }
 
+# Lane disk settings: clone discipline and a build-output root each add their
+# own "# Disk use" line to ship and scout briefs; both off adds nothing.
+test_lane_disk_settings_shape_the_disk_use_section() {
+  local home kind id brief
+  home="$TMP_ROOT/lane-disk-off"
+  mkdir -p "$home/data" "$home/config"
+  for kind in ship scout; do
+    id="brief-disk-off-$kind"
+    if [ "$kind" = scout ]; then
+      env -u FM_CLONE_DISCIPLINE -u FM_BUILD_OUTPUT_ROOT FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --scout >/dev/null 2>&1
+    else
+      env -u FM_CLONE_DISCIPLINE -u FM_BUILD_OUTPUT_ROOT FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode no-mistakes >/dev/null 2>&1
+    fi || fail "fm-brief.sh $kind scaffold exited non-zero with lane disk settings off"
+    assert_no_grep "# Disk use" "$home/data/$id/brief.md" "default-off $kind brief gained a disk-use section"
+  done
+
+  home="$TMP_ROOT/lane-disk-on"
+  mkdir -p "$home/data" "$home/config"
+  : > "$home/config/clone-discipline"
+  printf '# per-lane build output\n%s\n' "$TMP_ROOT/lane-build-root" > "$home/config/build-output-root"
+  for kind in ship scout; do
+    id="brief-disk-on-$kind"
+    if [ "$kind" = scout ]; then
+      env -u FM_CLONE_DISCIPLINE -u FM_BUILD_OUTPUT_ROOT FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --scout >/dev/null 2>&1
+    else
+      env -u FM_CLONE_DISCIPLINE -u FM_BUILD_OUTPUT_ROOT FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode no-mistakes >/dev/null 2>&1
+    fi || fail "fm-brief.sh $kind scaffold exited non-zero with lane disk settings on"
+    brief="$home/data/$id/brief.md"
+    assert_grep "# Disk use" "$brief" "$kind brief lacks the disk-use section"
+    assert_grep "Never make a full clone of any repository" "$brief" "$kind brief lacks the clone rule"
+    assert_grep "git clone --reference" "$brief" "$kind brief does not name git clone --reference"
+    # shellcheck disable=SC2016 # the brief text names the variable literally
+    assert_grep 'swift build --scratch-path "$FM_BUILD_OUTPUT_DIR/swiftpm"' "$brief" \
+      "$kind brief does not point flag-only build tools at the build-output directory"
+  done
+
+  # Each environment override wins over its file.
+  id="brief-disk-env-off"
+  FM_CLONE_DISCIPLINE=off FM_BUILD_OUTPUT_ROOT=off FM_HOME="$home" \
+    "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode no-mistakes >/dev/null 2>&1 \
+    || fail "fm-brief.sh scaffold exited non-zero with overrides off"
+  assert_no_grep "# Disk use" "$home/data/$id/brief.md" "off overrides still added a disk-use section"
+  home="$TMP_ROOT/lane-disk-env-on"
+  mkdir -p "$home/data" "$home/config"
+  id="brief-disk-env-on"
+  FM_CLONE_DISCIPLINE=on FM_BUILD_OUTPUT_ROOT=relative/root FM_HOME="$home" \
+    "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode no-mistakes >/dev/null 2>&1 \
+    || fail "fm-brief.sh scaffold exited non-zero with overrides on"
+  brief="$home/data/$id/brief.md"
+  assert_grep "Never make a full clone of any repository" "$brief" "FM_CLONE_DISCIPLINE=on did not add the clone rule"
+  assert_no_grep "FM_BUILD_OUTPUT_DIR" "$brief" "a relative build-output root still added the build-output line"
+  pass "fm-brief: lane disk settings add only their own disk-use lines, and overrides beat the files"
+}
+
 # Without config/wait-no-turns the scaffold matches the pre-flag brief and drive text.
 test_wait_no_turns_absent_keeps_the_previous_brief() {
   local home brief
@@ -1722,6 +1776,7 @@ test_scout_lavish_line_follows_presentation_floor
 test_inbox_listing_command_is_safe_on_empty_inbox
 test_workers_wait_without_spending_turns
 test_wait_no_turns_absent_keeps_the_previous_brief
+test_lane_disk_settings_shape_the_disk_use_section
 test_inbox_guidance_explains_marked_body_terminator
 test_home_brief_include_is_appended_last
 test_base_branch_is_rendered_and_bounded

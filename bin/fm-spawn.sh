@@ -731,6 +731,10 @@
 # one W3C traceparent= carrier, the same value injected into the pane as
 # TRACEPARENT; the default-off path writes neither, leaving the generated meta
 # and launch environment unchanged.
+# When the opt-in build-output root is set (bin/fm-lane-disk-lib.sh owns it), a
+# fresh ship or scout also records build_output_dir=<root>/<task-id>, creates it,
+# and exports FM_BUILD_OUTPUT_DIR and the tool variables that library lists on
+# the FM_TASK_INBOX export channel; a relaunch reuses the recorded directory.
 #   --traceparent <carrier> delivers a carrier that a REMOTE parent already
 #   resolved and will record, instead of resolving one from this home's frozen
 #   decision. It is accepted only for --secondmate spawns, only as a strictly
@@ -973,6 +977,8 @@ fm_backlog_directory_present "$STATE" "state directory" || {
 . "$SCRIPT_DIR/fm-worker-account-lib.sh"
 # shellcheck source=bin/fm-omp-profile-lib.sh
 . "$SCRIPT_DIR/fm-omp-profile-lib.sh"
+# shellcheck source=bin/fm-lane-disk-lib.sh
+. "$SCRIPT_DIR/fm-lane-disk-lib.sh"
 # Fail closed before any fleet mutation: a no-mistakes gate agent must never spawn
 # a direct report (see bin/fm-gate-refuse-lib.sh).
 fm_refuse_if_gate_agent
@@ -6176,6 +6182,25 @@ else
 fi
 mkdir -p "$TASK_TMP/gotmp"
 
+# Opt-in per-lane build-output directory (bin/fm-lane-disk-lib.sh owns the
+# setting). A fresh ship or scout resolves it and records build_output_dir=;
+# a relaunch keeps whatever the task record already names.
+BUILD_OUTPUT_DIR=
+if [ "$KIND" = ship ] || [ "$KIND" = scout ]; then
+  if [ "$RELAUNCH" -eq 1 ]; then
+    BUILD_OUTPUT_DIR=$(fm_meta_get "$RELAUNCH_META" build_output_dir 2>/dev/null || true)
+  elif BUILD_OUTPUT_ROOT=$(fm_lane_disk_build_root "$CONFIG"); then
+    BUILD_OUTPUT_DIR="$BUILD_OUTPUT_ROOT/$ID"
+  fi
+fi
+BUILD_OUTPUT_EXPORT_DIR=$BUILD_OUTPUT_DIR
+if [ -n "$BUILD_OUTPUT_DIR" ] && ! (umask 077 && mkdir -p "$BUILD_OUTPUT_DIR") 2>/dev/null; then
+  echo "warning: could not create build-output directory $BUILD_OUTPUT_DIR; this launch exports no build-output variables" >&2
+  BUILD_OUTPUT_EXPORT_DIR=
+  # A fresh spawn records nothing it could not create; a relaunch keeps the record.
+  [ "$RELAUNCH" -eq 1 ] || BUILD_OUTPUT_DIR=
+fi
+
 # Per-harness turn-end hook where enabled: a file that touches
 # state/<id>.turn-ended when the agent finishes a turn. Worktree-resident hooks
 # and token pointers stay out of git's view so they never block teardown's dirty
@@ -7229,6 +7254,8 @@ preserve_relaunch_meta() {
   [ -z "$YOLO" ] || echo "yolo=$YOLO"
   [ -z "${BRANCH:-}" ] || echo "branch=$BRANCH"
   echo "tasktmp=$TASK_TMP"
+  # A relaunch carries the recorded value through preserve_relaunch_meta.
+  [ "$RELAUNCH" -eq 1 ] || [ -z "$BUILD_OUTPUT_DIR" ] || echo "build_output_dir=$BUILD_OUTPUT_DIR"
   [ -z "$BASE_BRANCH" ] || echo "base_branch=$BASE_BRANCH"
   [ -z "$UPSTREAM_CONSENT" ] || echo "upstream_consent=$UPSTREAM_CONSENT"
   # Read by bin/fm-dod-lib.sh's ready-report gate; absent on every other forge.
@@ -7671,6 +7698,10 @@ fi
 # kill switch below it is an export statement, so it survives a compound raw
 # launch and the launch-env-allowlist `env -i` wrapper.
 LAUNCH="export FM_TASK_INBOX=$(shell_quote "$STATE_REAL/$ID.inbox"); $LAUNCH"
+# The opt-in per-lane build-output directory rides the same export channel.
+if [ -n "$BUILD_OUTPUT_EXPORT_DIR" ]; then
+  LAUNCH="$(fm_lane_disk_build_env_exports "$BUILD_OUTPUT_EXPORT_DIR")$LAUNCH"
+fi
 LAUNCH="export COMPACT_ADVISER_DISABLE=1; $LAUNCH"
 # When the live-harness gate has exported DISABLE_AUTOUPDATER into this spawn's
 # own environment, carry it into the launch command text so Claude Code's
@@ -7727,6 +7758,11 @@ if [ "$BACKEND" = t3code ]; then
   fi
   if [ "$KIND" = ship ] || [ "$KIND" = scout ]; then
     T3CODE_ENV+=("FM_TASK_ID=$ID")
+  fi
+  if [ -n "$BUILD_OUTPUT_EXPORT_DIR" ]; then
+    while IFS= read -r _fm_build_pair; do
+      T3CODE_ENV+=("$_fm_build_pair")
+    done < <(fm_lane_disk_build_env_pairs "$BUILD_OUTPUT_EXPORT_DIR")
   fi
   if [ -n "$SPAWN_TRACEPARENT" ] && spawn_record_traceparent; then
     T3CODE_ENV+=("TRACEPARENT=$SPAWN_TRACEPARENT")
