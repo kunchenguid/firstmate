@@ -14,6 +14,12 @@
 # .wake-queue.actor-view.*) is created and removed under the queue lock, so one
 # found while taking that lock was left by a drain that died mid-write; each
 # locked drain rotates such leftovers away before doing anything else.
+# Usage: fm-wake-drain.sh [--open-decisions | --ack-through SEQUENCE --recovery-generation GENERATION]
+# --open-decisions prints every folded status decision as task [key=KEY] verb:
+# note, without row or content limits. It neither claims nor acknowledges wakes
+# or status presentations. Normal drains retain their bounded preview and put
+# its full count (or unknown on read failure) before the acknowledgement command.
+# After truncation or recovery, reconcile the full reader before acknowledging.
 # FM_STATUS_PRESENTATION_LOCK_TIMEOUT sets the positive whole-second wait for
 # presentation-path locks (default 10); queue mutation locks remain blocking.
 set -u
@@ -50,6 +56,8 @@ ACK_FINGERPRINTS=
 ACK_NOTICE_FINGERPRINTS=
 PRESENTATION_LOCK_TIMEOUT=${FM_STATUS_PRESENTATION_LOCK_TIMEOUT:-10}
 BRANCH_OUTCOMES_RC=0
+FULL_OPEN_DECISIONS=false
+OPEN_DECISION_COUNT=unknown
 case "$PRESENTATION_LOCK_TIMEOUT" in ''|*[!0-9]*|0) PRESENTATION_LOCK_TIMEOUT=10 ;; esac
 
 # --- per-actor consume (docs/watcher-continuity.md "Per-actor acknowledgement") --
@@ -224,6 +232,17 @@ presented_max_row() { # <rows-file>
 
 case "${1:-}" in
   '') ;;
+  --help|-h)
+    printf '%s\n' \
+      'usage: fm-wake-drain.sh [--open-decisions | --ack-through SEQUENCE --recovery-generation GENERATION]' \
+      '--open-decisions: print every folded status decision with its full key and content, without claiming or acknowledging wakes.' \
+      'After truncation or recovery, read and reconcile that full set before acknowledging.'
+    exit 0
+    ;;
+  --open-decisions)
+    [ "$#" -eq 1 ] || { echo "wake drain: --open-decisions takes no arguments" >&2; exit 2; }
+    FULL_OPEN_DECISIONS=true
+    ;;
   --ack-through)
     ACK_THROUGH=${2:-}
     case "$ACK_THROUGH" in ''|*[!0-9]*) echo "wake drain: invalid acknowledgement sequence" >&2; exit 2 ;; esac
@@ -233,10 +252,10 @@ case "${1:-}" in
     case "$ACK_GENERATION" in ''|*[!A-Za-z0-9._-]*) echo "wake drain: invalid recovery generation" >&2; exit 2 ;; esac
     [ "$#" -eq 4 ] || { echo "wake drain: unexpected acknowledgement arguments" >&2; exit 2; }
     ;;
-  *) echo "usage: fm-wake-drain.sh [--ack-through SEQUENCE --recovery-generation GENERATION]" >&2; exit 2 ;;
+  *) echo "usage: fm-wake-drain.sh [--open-decisions | --ack-through SEQUENCE --recovery-generation GENERATION]" >&2; exit 2 ;;
 esac
 
-[ "$ACTOR" != branch ] || require_branch_eligible_rows || exit 1
+[ "$FULL_OPEN_DECISIONS" = true ] || [ "$ACTOR" != branch ] || require_branch_eligible_rows || exit 1
 
 # Defense in depth for the supervision chain: this script runs at the top of
 # every wake-handling and recovery turn, so assert supervision health here too. A
@@ -458,7 +477,7 @@ EOF
 # Print the consolidated OPEN DECISIONS section: every still-open
 # needs-decision/blocked, fleet-wide, folded from the durable status logs by
 # fm-classify-lib.sh's status_open_decisions fold (via its cursor-backed
-# scan_open_decisions_incremental wrapper) rather than from the annotations
+# scan_open_decisions_snapshot wrapper) rather than from the annotations
 # above, so a decision buried under later unrelated appends cannot be silently
 # missed. Informational `note:` lines and pending-reply resolutions are not
 # decisions; print_unread_status_section owns their one-shot surface. Runs on
@@ -472,13 +491,11 @@ EOF
 # common case.
 print_open_decisions_section() {
   local snapshot=${1:-} open task key verb note line item_bytes=220 global_bytes=4000
-  local output='' used=0 shown=0 omitted=0 bytes
+  local output='' used=0 shown=0 omitted=0 bytes truncated=false
 
-  if [ -n "$snapshot" ]; then
-    open=$(scan_open_decisions_snapshot "$STATE" "$snapshot") || return 1
-  else
-    open=$(scan_open_decisions_incremental "$STATE") || return 1
-  fi
+  if [ -z "$snapshot" ]; then snapshot=$(status_presentation_snapshot "$STATE") || return 1; fi
+  open=$(scan_open_decisions_snapshot "$STATE" "$snapshot") || return 1
+  OPEN_DECISION_COUNT=0
   [ -n "$open" ] || return 0
 
   while IFS=$(printf '\t') read -r task key verb note; do
@@ -491,11 +508,13 @@ print_open_decisions_section() {
     # that is NOT the key - so the listing read as naming a key it had not
     # folded, and the advised command then refused. An entry must always carry
     # the token that closes it.
+    OPEN_DECISION_COUNT=$((OPEN_DECISION_COUNT + 1))
     line="$task [key=$key] $verb: $note"
     # The shared cut counts the item's own characters; the trailing newline this
     # section's global budget also pays for is this caller's, so the per-item
     # allowance passed down is one short of the cap.
     fm_cap_line_var "$line" $((item_bytes - 1))
+    [ "$line" = "$FM_LINE_CAP_LINE" ] || truncated=true
     line=$FM_LINE_CAP_LINE
     bytes=$(( ${#line} + 1 ))
     if [ $((used + bytes)) -gt "$global_bytes" ]; then
@@ -514,7 +533,9 @@ EOF
   printf 'OPEN DECISIONS (still open, folded from the durable status logs - not just the latest line):\n' || return 1
   printf '%s' "$output" || return 1
   if [ "$omitted" -gt 0 ]; then
-    printf 'OPEN DECISIONS: %d more omitted (byte cap)\n' "$omitted" || return 1
+    printf 'OPEN DECISIONS: %d more omitted (byte cap). Read and reconcile the full set: bin/fm-wake-drain.sh --open-decisions\n' "$omitted" || return 1
+  elif [ "$truncated" = true ]; then
+    printf 'OPEN DECISIONS: content truncated. Read and reconcile the full set: bin/fm-wake-drain.sh --open-decisions\n' || return 1
   fi
   # Answerer-closes hint, printed at exactly the moment an answer gets written:
   # the send that answers a listed decision also closes it, so closure never
@@ -816,10 +837,43 @@ print_status_presentation() {  # [<deduped-raw-rows>]
       fully_presented=$(printf '%s\n' "$annotation_manifest" | awk -F '\t' '$2 == "direct" { sub(/\.status$/, "", $1); print $1 }') || rc=1
     fi
   fi
-  if [ "$rc" -eq 0 ] && [ -n "$snapshot" ]; then print_status_sections "$snapshot" "$fully_presented" || rc=1; fi
+  if [ "$rc" -eq 0 ]; then
+    OPEN_DECISION_COUNT=0
+    if [ -n "$snapshot" ]; then print_status_sections "$snapshot" "$fully_presented" || rc=1; fi
+  fi
+  [ "$rc" -eq 0 ] || OPEN_DECISION_COUNT=unknown
   fm_lock_release "$lock"
   return "$rc"
 }
+
+print_wake_ack_required() { # <sequence>
+  printf 'WAKE_ACK_REQUIRED: open-decisions=%s (full reader: bin/fm-wake-drain.sh --open-decisions). After full-set reconciliation and handling completes run bin/fm-wake-drain.sh --ack-through %s --recovery-generation %s\n' \
+    "$OPEN_DECISION_COUNT" "$1" "${RECOVERY_MARKER_TOKEN##*:}" >&2
+}
+
+print_full_open_decisions() {
+  local snapshot task endpoint ident open key verb note
+  snapshot=$(status_presentation_snapshot "$STATE") || return 1
+  while IFS=$'\t' read -r task endpoint ident; do
+    [ -n "$task" ] || continue
+    # An incremental fold can seed the legacy presentation cursor and hide
+    # unread notes. This reader must not record any presentation receipt.
+    open=$(status_open_decisions "$STATE/$task.status") || return 1
+    [ -n "$open" ] || continue
+    while IFS=$'\t' read -r key verb note; do
+      printf '%s [key=%s] %s: %s\n' "$task" "$key" "$verb" "$note" || return 1
+    done <<EOF
+$open
+EOF
+  done <<EOF
+$snapshot
+EOF
+}
+
+if [ "$FULL_OPEN_DECISIONS" = true ]; then
+  print_full_open_decisions
+  exit "$?"
+fi
 
 # shellcheck disable=SC2317,SC2329 # Invoked by trap handlers below.
 cleanup() {
@@ -1010,11 +1064,11 @@ if [ ! -s "$FM_WAKE_QUEUE" ]; then
   esac
   fm_lock_release "$FM_WAKE_QUEUE_LOCK"
   DRAIN_LOCK_HELD=false
-  (print_status_presentation) || true
+  (
+    print_status_presentation || true
+    if [ "$RECOVERY_ACK_REQUIRED" = true ]; then print_wake_ack_required 0; fi
+  )
   print_branch_outcomes_section || BRANCH_OUTCOMES_RC=1
-  if [ "$RECOVERY_ACK_REQUIRED" = true ]; then
-    printf 'WAKE_ACK_REQUIRED: after handling completes run bin/fm-wake-drain.sh --ack-through 0 --recovery-generation %s\n' "${RECOVERY_MARKER_TOKEN##*:}" >&2
-  fi
   assert_watcher_liveness
   exit "$BRANCH_OUTCOMES_RC"
 fi
@@ -1092,10 +1146,10 @@ case "$RECOVERY_MARKER_TOKEN" in
 esac
 fm_lock_release "$FM_WAKE_QUEUE_LOCK"
 DRAIN_LOCK_HELD=false
-printf 'WAKE_ACK_REQUIRED: after handling completes run bin/fm-wake-drain.sh --ack-through %s --recovery-generation %s\n' \
-  "$ACK_THROUGH" "${RECOVERY_MARKER_TOKEN##*:}" >&2
-
-(print_status_presentation "$RAW_ROWS") || true
+(
+  print_status_presentation "$RAW_ROWS" || true
+  print_wake_ack_required "$ACK_THROUGH"
+)
 print_branch_outcomes_section || BRANCH_OUTCOMES_RC=1
 assert_watcher_liveness
 exit "$BRANCH_OUTCOMES_RC"

@@ -203,6 +203,8 @@ test_over_long_decision_note_is_capped_with_a_marker() {
   esac
   longest=${#line}
   [ "$longest" -le 219 ] || fail "a capped decision item ran $longest characters past its per-item budget"
+  grep -F 'content truncated. Read and reconcile the full set: bin/fm-wake-drain.sh --open-decisions' "$out" >/dev/null \
+    || fail "content truncation omitted the full reader"
 
   printf 'needs-decision [key=short]: brief enough to keep whole\n' > "$state/task-short.status"
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" || fail "drain failed on a short decision note"
@@ -215,6 +217,82 @@ test_over_long_decision_note_is_capped_with_a_marker() {
   pass "an over-long open decision is cut to its per-item budget with the shared truncation marker"
 }
 
+test_full_reader_preserves_all_decisions_without_consuming_wakes() {
+  local dir state i note expected out
+  dir=$(make_case full-reader)
+  state="$dir/state"
+  expected="$dir/expected"
+  out="$dir/full.out"
+  printf 'kind=secondmate\n' > "$state/many.meta"
+  for i in $(seq 1 96); do
+    note="Question $i? $(printf 'Context %.0s' {1..40})END-$i"
+    printf 'needs-decision [key=call-%s]: %s\n' "$i" "$note" >> "$state/many.status"
+    printf 'many [key=call-%s] needs-decision: %s\n' "$i" "$note" >> "$expected"
+  done
+  printf 'note: Context that still needs presentation.\n' >> "$state/many.status"
+  append_wake "$state" check fixture 'Handle this separately.' || fail "could not queue fixture"
+  cp "$state/.wake-queue" "$dir/queue-before"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" --open-decisions > "$out" || fail "full reader failed"
+  [ "$(wc -l < "$out" | tr -d ' ')" = 96 ] || fail "full reader did not return all 96 decisions"
+  LC_ALL=C sort "$expected" > "$dir/expected-sorted"
+  LC_ALL=C sort "$out" > "$dir/actual-sorted"
+  cmp -s "$dir/expected-sorted" "$dir/actual-sorted" || fail "full reader lost keys or note content"
+  cmp -s "$dir/queue-before" "$state/.wake-queue" || fail "full reader consumed queued wakes"
+  [ ! -e "$state/.main-eligible-rows" ] || fail "full reader claimed queued wakes"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$dir/drain.out" 2> "$dir/drain.err" || fail "drain failed"
+  grep -F 'many note: Context that still needs presentation.' "$dir/drain.out" >/dev/null \
+    || fail "full reader consumed an unread status presentation"
+  grep -E '^OPEN DECISIONS: .*omitted.*bin/fm-wake-drain.sh --open-decisions' "$dir/drain.out" >/dev/null \
+    || fail "omission notice did not name the full reader"
+  grep -E '^WAKE_ACK_REQUIRED: .*open-decisions=96.*--ack-through 1 ' "$dir/drain.err" >/dev/null \
+    || fail "queued acknowledgement did not carry the complete count"
+  pass "the full reader preserves 96 decisions without consuming or claiming wakes"
+}
+
+test_empty_queue_recovery_counts_all_decisions() {
+  local dir state i
+  dir=$(make_case empty-recovery-count)
+  state="$dir/state"
+  for i in $(seq 1 96); do
+    printf 'needs-decision [key=call-%s]: Choose option %s.\n' "$i" "$i" >> "$state/many.status"
+  done
+  FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_recovery_marker_publish "$STATE/.watcher-down" downtime' \
+    _ "$ROOT/bin/fm-wake-lib.sh" || fail "could not publish recovery"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$dir/out" 2> "$dir/err" || fail "empty recovery drain failed"
+  grep -E '^WAKE_ACK_REQUIRED: .*open-decisions=96.*--ack-through 0 ' "$dir/err" >/dev/null \
+    || fail "empty-queue acknowledgement did not carry the complete count"
+  pass "empty-queue recovery names all 96 open decisions on the acknowledgement line"
+}
+
+test_count_distinguishes_empty_from_failed_read() {
+  local dir state reader
+  dir=$(make_case count-read-failure)
+  state="$dir/state"
+  reader="$dir/identity-reader"
+  append_wake "$state" check fixture 'Handle this separately.' || fail "could not queue fixture"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$dir/out" 2> "$dir/err" || fail "empty decision drain failed"
+  grep -E '^WAKE_ACK_REQUIRED: .*open-decisions=0 ' "$dir/err" >/dev/null || fail "empty set was not counted as zero"
+  printf 'needs-decision [key=route-check]: Choose the route.\n' > "$state/task.status"
+  printf '#!/usr/bin/env bash\nexit 1\n' > "$reader"
+  chmod +x "$reader"
+  FM_STATUS_IDENTITY_READER="$reader" FM_STATE_OVERRIDE="$state" "$DRAIN" > "$dir/out" 2> "$dir/err" \
+    || fail "drain did not preserve its wake after presentation failure"
+  grep -E '^WAKE_ACK_REQUIRED: .*open-decisions=unknown ' "$dir/err" >/dev/null || fail "failed read claimed a known count"
+  if FM_STATUS_IDENTITY_READER="$reader" FM_STATE_OVERRIDE="$state" "$DRAIN" --open-decisions > "$dir/full"; then
+    fail "full reader reported success after a failed read"
+  fi
+  FM_STATE_OVERRIDE="$state" "$DRAIN" --open-decisions > "$dir/full" || fail "full reader failed after recovery"
+  grep -Fx 'task [key=route-check] needs-decision: Choose the route.' "$dir/full" >/dev/null \
+    || fail "full reader lost the canonical routing key"
+  printf 'resolved [key=route-check]: Take the north route.\n' >> "$state/task.status"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" --open-decisions > "$dir/full" || fail "full reader failed after resolution"
+  [ ! -s "$dir/full" ] || fail "full reader retained a resolved routing key"
+  pass "empty, unreadable, and resolved decision sets remain distinct"
+}
+
+test_full_reader_preserves_all_decisions_without_consuming_wakes
+test_empty_queue_recovery_counts_all_decisions
+test_count_distinguishes_empty_from_failed_read
 test_buried_decision_still_surfaces
 test_over_long_decision_note_is_capped_with_a_marker
 test_explicit_resolution_closes_it

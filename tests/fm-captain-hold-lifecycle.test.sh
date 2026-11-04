@@ -724,7 +724,7 @@ EOF
 # attests a verified inventory of captain-held task ids, and transfers every
 # still-open status decision to that durable inventory.
 test_completion_gate_attests_and_transfers() {
-  local home id json open before after
+  local home id json open before after full
   home=$(make_home completion-gate)
   id=sample-systems-review
   mkdir -p "$home/data/$id"
@@ -772,8 +772,13 @@ EOF
     fm_wake_status_mark_current "$2" "$3"
   ' _ "$ROOT/bin/fm-wake-lib.sh" "$home/state" "$home/state/$id.status" \
     || fail "could not prime the announced decision baseline"
+  full=$(FM_HOME="$home" "$ROOT/bin/fm-wake-drain.sh" --open-decisions) || fail "full reader failed before transfer"
+  [ "$(printf '%s\n' "$full" | wc -l | tr -d ' ')" = 2 ] || fail "full reader lost the two status decisions"
   run_captain "$home" complete "$id" sample-route-call >/dev/null \
     || fail "shared investigation completion gate failed"
+  full=$(FM_HOME="$home" "$ROOT/bin/fm-wake-drain.sh" --open-decisions) || fail "full reader failed after transfer"
+  [ -z "$full" ] || fail "completed transfer left duplicate decisions in the full reader: $full"
+  assert_no_grep '^resolved' "$home/state/$id.status" "ownership transfer was recorded as an answer"
   FM_STATE_OVERRIDE="$home/state" bash -c '
     . "$1"; fm_wake_signal_seen_current "$2" "$3"
   ' _ "$ROOT/bin/fm-wake-lib.sh" "$home/state" "$home/state/$id.status" \
@@ -791,7 +796,7 @@ EOF
   after=$(shasum -a 256 "$home/data/backlog.md" | awk '{print $1}')
   [ "$before" = "$after" ] || fail "Bearings mutated the authoritative backlog"
   printf '%s' "$json" | jq -e '
-    (.decisions_open | any(.id == "sample-route-call" and .verb == "captain-hold" and .owner == "(main)"))
+    ([.decisions_open[] | select(.id == "sample-route-call" and .verb == "captain-hold" and .owner == "(main)")] | length == 1)
       and (.gates | any(.id == "sample-route-call") | not)
   ' >/dev/null || fail "Bearings did not surface the captain-held task: $json"
 
