@@ -25,6 +25,9 @@ Turning the setting off stops further switches.
 When `bin/fm-procevent-quota.sh` reports `exhausted_now` for a live task, or a task with a recorded array stops on exhausted credits and no quota wake is armed, run `bin/fm-midtask-fallback.sh consider <task-id> --snapshot <quota-json>`.
 The wake carries no quota document.
 In that turn, write the output of `quota-axi --json` to a file and pass that path as `--snapshot`.
+When the task record has `account=`, write `CLAUDE_CONFIG_DIR=<that account root> quota-axi --provider claude --profile-only --json` instead and pass `--account <entry>` with the recorded entry.
+Consider refuses a snapshot whose account differs from the record.
+When the dispatch file sets `shared_quota`, do not request `quota-axi --json`; consider ignores any snapshot.
 Do this for each live task that has a recorded array.
 Consider skips a finished task or a task that waits on the captain; `docs/configuration.md` (Mid-task fallback) owns the skip rule.
 Run that consider before `stuck-crewmate-recovery` relaunches the same profile.
