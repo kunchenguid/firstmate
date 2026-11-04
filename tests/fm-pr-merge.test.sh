@@ -4532,7 +4532,90 @@ test_allow_no_pipeline_merges_only_a_null_head_pipeline() {
   pass "fm-pr-merge --allow-no-pipeline waives only a null GitLab head pipeline and keeps every other condition"
 }
 
-test_allow_no_pipeline_is_attended_only_and_gitlab_only() {
+# On Forgejo the same absence is an empty combined commit status, as a
+# repository with no configured CI reports: the waiver accepts that and only
+# that, and the merge stays bound to the verified head.
+test_allow_no_pipeline_merges_only_an_empty_forgejo_status() {
+  local case_dir rc merge_line name spec expected
+  case_dir=$(make_forgejo_case forgejo-no-status-waived)
+  write_forgejo_status_json "$case_dir/tea-status.json" total_count=0
+  run_pr_merge "$case_dir" task-x1 "$FJ_URL" --allow-no-pipeline \
+    > "$case_dir/stdout" 2> "$case_dir/stderr" \
+    || fail "forgejo-no-status-waived: a head with no commit status should merge: $(cat "$case_dir/stderr")"
+  merge_line=$(tea_merge_line "$case_dir/tea.log")
+  case "$merge_line" in
+    *"head_commit_id=$FJ_HEAD"*) : ;;
+    *) fail "forgejo-no-status-waived: the merge was not bound to the verified head: '$merge_line'" ;;
+  esac
+  assert_grep "at head $FJ_HEAD, with no commit status, waived by --allow-no-pipeline" "$case_dir/stderr" \
+    "forgejo-no-status-waived: the waived verification was not reported"
+
+  # A status that exists is a verdict, never an absence, so the waiver does
+  # not reach it; and every other condition still holds beside the waiver.
+  set -- \
+    "failure|status|state=failure|the combined commit status is \"failure\", not success" \
+    "pending|status|state=pending|the combined commit status is \"pending\", not success" \
+    "error|status|state=error|the combined commit status is \"error\", not success" \
+    "closed|pr|state=closed|state is \"closed\", not open" \
+    "not-mergeable|pr|mergeable=false|mergeable is \"false\", not true" \
+    "draft|pr|draft=true|the pull request is a draft"
+  for spec in "$@"; do
+    name=${spec%%|*}
+    expected=${spec##*|}
+    spec=${spec#*|}
+    case "$spec" in
+      status\|*)
+        spec=${spec#status|}
+        case_dir=$(make_forgejo_case "forgejo-no-status-refuse-$name")
+        write_forgejo_status_json "$case_dir/tea-status.json" "${spec%%|*}"
+        ;;
+      *)
+        spec=${spec#pr|}
+        case_dir=$(make_forgejo_case "forgejo-no-status-refuse-$name" "${spec%%|*}")
+        write_forgejo_status_json "$case_dir/tea-status.json" total_count=0
+        ;;
+    esac
+    set +e
+    run_pr_merge "$case_dir" task-x1 "$FJ_URL" --allow-no-pipeline \
+      > "$case_dir/stdout" 2> "$case_dir/stderr"
+    rc=$?
+    set -e
+    expect_code 1 "$rc" "forgejo-no-status-refuse-$name: the waiver must not merge"
+    assert_grep "$expected" "$case_dir/stderr" \
+      "forgejo-no-status-refuse-$name: the refusal did not name the failing condition"
+    [ -z "$(tea_merge_line "$case_dir/tea.log")" ] \
+      || fail "forgejo-no-status-refuse-$name: a merge was attempted despite the refusal"
+  done
+
+  # A failure on a later page is a verdict too, even after a green first page.
+  case_dir=$(make_forgejo_case forgejo-no-status-refuse-page2)
+  write_forgejo_status_json "$case_dir/tea-status-page2.json" state=failure
+  set +e
+  run_pr_merge "$case_dir" task-x1 "$FJ_URL" --allow-no-pipeline \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "forgejo-no-status-refuse-page2: a later failing page must not be waived"
+  [ -z "$(tea_merge_line "$case_dir/tea.log")" ] \
+    || fail "forgejo-no-status-refuse-page2: a merge was attempted past a failing later page"
+
+  # A status page that cannot be read is unreadable state, not a reported absence.
+  case_dir=$(make_forgejo_case forgejo-no-status-unreadable)
+  : > "$case_dir/tea-status-fails"
+  set +e
+  run_pr_merge "$case_dir" task-x1 "$FJ_URL" --allow-no-pipeline \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "forgejo-no-status-unreadable: an unreadable status must not be waived"
+  assert_grep 'the combined commit status is "unreadable", not success' "$case_dir/stderr" \
+    "forgejo-no-status-unreadable: the refusal did not name the unreadable status"
+  [ -z "$(tea_merge_line "$case_dir/tea.log")" ] \
+    || fail "forgejo-no-status-unreadable: a merge was attempted on an unreadable status"
+  pass "fm-pr-merge --allow-no-pipeline waives only an empty Forgejo combined status and keeps every other condition"
+}
+
+test_allow_no_pipeline_is_attended_only_and_not_on_github() {
   local case_dir rc head
   case_dir=$(make_gitlab_case gitlab-no-pipeline-away pipeline=null)
   write_away_record "$case_dir" --words 'merge task-x1'
@@ -4566,22 +4649,25 @@ test_allow_no_pipeline_is_attended_only_and_gitlab_only() {
   rc=$?
   set -e
   expect_code 2 "$rc" "github-no-pipeline: the waiver must not apply on GitHub"
-  assert_grep '--allow-no-pipeline applies only to GitLab' "$case_dir/stderr" \
-    "github-no-pipeline: the refusal did not name GitLab"
+  assert_grep '--allow-no-pipeline does not apply to GitHub' "$case_dir/stderr" \
+    "github-no-pipeline: the refusal did not name GitHub"
   assert_no_grep 'pr merge' "$case_dir/gh.log" \
     "github-no-pipeline: gh pr merge ran despite the waiver"
 
-  case_dir=$(make_forgejo_case forgejo-no-pipeline)
+  case_dir=$(make_forgejo_case forgejo-no-status-away)
+  write_forgejo_status_json "$case_dir/tea-status.json" total_count=0
+  write_away_record "$case_dir" --words 'merge task-x1'
   set +e
   run_pr_merge "$case_dir" task-x1 "$FJ_URL" --allow-no-pipeline \
     > "$case_dir/stdout" 2> "$case_dir/stderr"
   rc=$?
   set -e
-  expect_code 2 "$rc" "forgejo-no-pipeline: the waiver must not apply on Forgejo"
-  assert_grep '--allow-no-pipeline applies only to GitLab' "$case_dir/stderr" \
-    "forgejo-no-pipeline: the refusal did not name GitLab"
-  [ ! -s "$case_dir/tea.log" ] || fail "forgejo-no-pipeline: tea ran despite the waiver"
-  pass "fm-pr-merge --allow-no-pipeline is attended-only, takes no value, and applies only to GitLab"
+  expect_code 2 "$rc" "forgejo-no-status-away: the waiver must be refused while away"
+  assert_grep '--allow-no-pipeline is attended-only' "$case_dir/stderr" \
+    "forgejo-no-status-away: the refusal did not name attended-only"
+  [ -z "$(tea_merge_line "$case_dir/tea.log")" ] \
+    || fail "forgejo-no-status-away: tea merged despite an away waiver"
+  pass "fm-pr-merge --allow-no-pipeline is attended-only, takes no value, and does not apply on GitHub"
 }
 
 test_gitlab_head_override_args_refuse_before_recording
@@ -4641,4 +4727,5 @@ test_required_partial_reads_report_all_failures
 test_allow_red_refused_on_forgejo
 test_allow_missing_refused_on_forgejo
 test_allow_no_pipeline_merges_only_a_null_head_pipeline
-test_allow_no_pipeline_is_attended_only_and_gitlab_only
+test_allow_no_pipeline_merges_only_an_empty_forgejo_status
+test_allow_no_pipeline_is_attended_only_and_not_on_github
