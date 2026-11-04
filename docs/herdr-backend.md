@@ -301,7 +301,7 @@ The worker remains on the ordinary flat or Herdr-current-order path.
 
 Normal task metadata remains the sole endpoint authority after creation.
 Cleanup closes only the exact recorded task pane and never calls `workspace close`.
-For a leased task copy, cleanup confirms that exact pane is gone before it reaps worktree processes or returns the copy.
+For a leased task copy, cleanup records the pane's shell ownership before the close, then confirms that exact pane is gone before it reaps worktree processes or returns the copy.
 If the pane remains or its absence is ambiguous, cleanup retains the task records and copy for a retry.
 
 Herdr 0.7.5's explicit close moves focus to a neighbor whenever it empties a non-focused workspace.
