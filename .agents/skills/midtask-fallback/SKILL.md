@@ -25,7 +25,8 @@ Turning the setting off stops further switches.
 When `bin/fm-procevent-quota.sh` reports `exhausted_now` for a live task, or a task with a recorded array stops on exhausted credits and no quota wake is armed, run `bin/fm-midtask-fallback.sh consider <task-id> --snapshot <quota-json>`.
 The wake carries no quota document.
 In that turn, write the output of `quota-axi --json` to a file and pass that path as `--snapshot`.
-When the task record has `account=`, write `CLAUDE_CONFIG_DIR=<that account root> quota-axi --provider claude --profile-only --json` instead and pass `--account <entry>` with the recorded entry.
+When a pi or pi-signed task record has `account=`, that is a Pi root; request no snapshot, because consider refuses one.
+When a claude task record has `account=`, write `CLAUDE_CONFIG_DIR=<that account root> quota-axi --provider claude --profile-only --json` instead and pass `--account <entry>` with the recorded entry.
 Consider refuses a snapshot whose account differs from the record.
 When the dispatch file sets `shared_quota`, do not request `quota-axi --json`; consider ignores any snapshot.
 Do this for each live task that has a recorded array.
