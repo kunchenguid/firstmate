@@ -83,6 +83,8 @@ def request_completion(url, model, task, source):
     with urlopen(req, timeout=TIMEOUT) as response:
         result = json.load(response)
     choice = result["choices"][0]
+    if not isinstance(choice, dict):
+        raise ValueError("model returned a malformed choice")
     if choice.get("finish_reason") == "length":
         raise ValueError("model reached the token limit before finishing")
     content = choice["message"]["content"]

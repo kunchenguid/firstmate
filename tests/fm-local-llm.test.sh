@@ -102,6 +102,11 @@ try:
         cut_off = run("summarise-log", input="FAIL test_one\n")
         assert cut_off.returncode != 0 and cut_off.stdout == ""
         assert "token limit" in cut_off.stderr, cut_off.stderr
+
+        reply["choices"][0] = "not an object"
+        malformed = run("summarise-log", input="FAIL test_one\n")
+        assert malformed.returncode != 0 and malformed.stdout == ""
+        assert malformed.stderr.startswith("fm-local-llm: "), malformed.stderr
 finally:
     server.shutdown()
     server.server_close()
