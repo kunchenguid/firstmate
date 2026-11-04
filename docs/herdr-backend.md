@@ -542,8 +542,8 @@ Such a workspace still needs manual cleanup in Herdr's UI; automatic retirement 
 | Test | What it covers |
 | --- | --- |
 | `tests/fm-backend-herdr-presentation-e2e.test.sh` | Multi-home ordering, concurrency, lock contention, legacy coexistence, focus preservation, exact same-identity restart replacement, ambiguous bindings and tokens, and exact-pane cleanup through the guarded lab path. |
-| `tests/fm-herdr-session-cleanup.test.sh` | Every discovery, journal and claim ownership, topology, process, locking, revalidation, focus, retirement, and continue-on-error boundary of the session-start leftover cleanup. |
-| `tests/fm-herdr-session-cleanup-e2e.test.sh` | Journal-correlated and unjournaled restored-shell leftover cleanup, and its refusals for a claimed leftover, a busy pane, and a captain workspace, in a guarded non-default named lab. |
+| `tests/fm-herdr-session-cleanup.test.sh` | Every discovery, journal, claim, and cwd ownership, topology, process, locking, revalidation, focus, retirement, and continue-on-error boundary of the session-start leftover cleanup. |
+| `tests/fm-herdr-session-cleanup-e2e.test.sh` | Journal-correlated and unjournaled restored-shell leftover cleanup, and its refusals for a foreign-cwd leftover, a claimed leftover, a busy pane, and a captain workspace, in a guarded non-default named lab. |
 | `tests/fm-teardown.test.sh` | Task cleanup's own-leftover retirement and its journal retention and retirement rules. |
 | `tests/fm-backend-herdr-focus-flash-e2e.test.sh` | Reproduces the raw explicit-close focus steal on the installed release, and proves the focus-safe emptying-close plan removes a doomed workspace with no wrong-focus interval. |
 | `tests/fm-backend-herdr-stale-active-tab-e2e.test.sh` | Proves a persisted-focused tab still closes when no foreground client is attached. |
