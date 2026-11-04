@@ -495,6 +495,40 @@ test_relaunch_appends_the_progress_note_to_the_instructions() {
   pass "fm-control relaunch: the progress note lands in the instructions the replacement reads"
 }
 
+# The note is the replacement worker's instruction sheet, so the acknowledgement
+# commands it names have to run exactly where the records live. A home path with
+# a space is supported, so the emitted forms must be executable verbatim rather
+# than only readable.
+test_relaunch_note_acknowledgement_commands_run_from_a_quoted_home() {
+  local dir out rc brief state rename helper
+  dir=$(new_case "note quoted" rlq)
+  add_ship_task "$dir" rlq claude
+  state="$dir/home/state"
+  mkdir -p "$state/rlq.inbox/handled" "$state/rlq.inbox/.unhandled"
+  printf 'first instruction\n' > "$state/rlq.inbox/001.msg"
+  printf 'second instruction\n' > "$state/rlq.inbox/002.msg"
+  case "$state" in *' '*) ;; *) fail "this case must exercise a home path containing a space" ;; esac
+
+  out=$(run_control "$dir" rlq relaunch --note "acknowledge the queued steer"); rc=$?
+  expect_code 0 "$rc" "relaunch with a space-bearing home should succeed"$'\n'"$out"
+  brief="$dir/home/data/rlq/brief.md"
+
+  rename=$(sed -n 's/^.*\. The plain form is \(.*\)\.$/\1/p' "$brief")
+  [ -n "$rename" ] || fail "the note did not name the plain rename acknowledgement"
+  sh -c "${rename//NNN/001}" >/dev/null 2>&1 \
+    || fail "the note's rename acknowledgement does not run for a quoted home: $rename"
+  [ -f "$state/rlq.inbox/handled/001.msg" ] \
+    || fail "the note's rename acknowledgement did not acknowledge the record"
+
+  helper=$(sed -n 's/^Where that helper path is reachable, \(.*\) acknowledges$/\1/p' "$brief")
+  [ -n "$helper" ] || fail "the note did not name the ack helper command"
+  sh -c "${helper//NNN/002}" >/dev/null 2>&1 \
+    || fail "the note's helper acknowledgement does not run for a quoted home: $helper"
+  [ -f "$state/rlq.inbox/handled/002.msg" ] \
+    || fail "the note's helper acknowledgement did not acknowledge the record"
+  pass "fm-control relaunch: the note's acknowledgement commands run from a quoted home"
+}
+
 test_relaunch_requires_a_note_for_a_ship_task() {
   local dir out rc before
   dir=$(new_case nonote rl3)
@@ -1538,6 +1572,7 @@ test_relaunch_preserves_durable_task_metadata
 test_relaunch_serializes_concurrent_durable_metadata_publication
 test_disabled_relaunch_clears_prior_trace_context
 test_relaunch_appends_the_progress_note_to_the_instructions
+test_relaunch_note_acknowledgement_commands_run_from_a_quoted_home
 test_relaunch_requires_a_note_for_a_ship_task
 test_harness_switch_moves_the_record_and_clears_prior_wiring
 test_harness_switch_does_not_carry_the_old_profile_axes

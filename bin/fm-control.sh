@@ -772,9 +772,14 @@ safe_checkpoint() {
 # never rewritten: a secondmate reconciles its own home's records at startup,
 # so the note stays parent-side audit evidence.
 record_note() {
-  local stamp
+  local stamp ack_cmd qstate qid qinbox qhandled
   [ -n "$NOTE" ] || return 0
   stamp=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+  ack_cmd=$(printf '%q' "$FM_ROOT/bin/fm-inbox-ack.sh")
+  qstate=$(printf '%q' "$STATE")
+  qid=$(printf '%q' "$ID")
+  qinbox=$(printf '%q' "$STATE/$ID.inbox")
+  qhandled=$(printf '%q' "$STATE/$ID.inbox/handled")
   printf '%s\n' "$NOTE" > "$NOTE_FILE"
   case "$KIND" in
     ship|scout)
@@ -787,9 +792,12 @@ record_note() {
         echo "This task was relaunched. Continue from here; the local copy and every"
         echo "uncommitted change are exactly as the previous worker left them."
         echo
-        echo "First, check your instruction inbox: list $STATE/$ID.inbox/*.msg, act on"
-        echo "each message in numeric order, then mv each handled file into"
-        echo "$STATE/$ID.inbox/handled/. A steer sent before the relaunch survives there."
+        echo "First, check your instruction inbox: list $qinbox/*.msg, act on each message"
+        echo "in numeric order, then acknowledge each handled record by moving it into"
+        echo "$qhandled/. The plain form is mv $qinbox/NNN.msg $qhandled/."
+        echo "Where that helper path is reachable, $ack_cmd $qstate $qid NNN acknowledges"
+        echo "the same way and also retires the hidden link. Never delete or clear the inbox."
+        echo "A steer sent before the relaunch survives there."
         echo
         printf '%s\n' "$NOTE"
       } >> "$RELAUNCH_BRIEF" \

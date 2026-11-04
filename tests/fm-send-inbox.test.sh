@@ -31,6 +31,10 @@
 #  12. Replacing the oldest unhandled tick keeps the watcher's re-ring ladder:
 #      the replacement inherits its age, ring count, and escalation, so a
 #      worker that never drains its ticks still surfaces as stale exactly once.
+#  13. Parallel sends from many processes all land as distinct intact records:
+#      concurrent steers never collapse, overwrite, or drop one another.
+#  14. A send whose record cannot be confirmed on disk fails loudly with the
+#      path, and leaves no false pending-reply expectation behind.
 # Every case below that passes a literal `$...` message quotes it on purpose
 # (the point is sending an unexpanded `$` line), so SC2016 is disabled.
 # shellcheck disable=SC2016
@@ -443,6 +447,91 @@ test_coalesce_keeps_reringing_ladder() {
   pass "fm-send inbox: a coalesced replacement keeps the oldest tick's age, ring count, and escalation"
 }
 
+# Several senders steer one task at the same moment (firstmate plus lead workers
+# on the same host). Every instruction must survive as its own record.
+# An idempotent steer that dedups onto a record the worker already acknowledged
+# was delivered and acted on: there is nothing left to announce, so the send must
+# succeed without typing a doorbell that asks the worker to acknowledge it again.
+test_already_acknowledged_steer_is_not_rung_again() {
+  local dir err rc inbox
+  dir=$(setup_case already-acked); err="$dir/send.err"
+  inbox="$dir/home/state/t1.inbox"
+  run_send "$dir" "$err" FM_SEND_IDEMPOTENT=1 -- t1 "steer that was already handled"; rc=$?
+  expect_code 0 "$rc" "the first idempotent steer should send"
+  [ -f "$inbox/001.msg" ] || fail "the first steer was not recorded"
+  mv "$inbox/001.msg" "$inbox/handled/"
+  : > "$dir/send.log"
+  run_send "$dir" "$err" FM_SEND_IDEMPOTENT=1 -- t1 "steer that was already handled"; rc=$?
+  expect_code 0 "$rc" "a dedup onto an acknowledged record is still a delivered steer"
+  [ -z "$(ls "$inbox"/*.msg 2>/dev/null)" ] \
+    || fail "the dedup wrote a new record instead of landing on the acknowledged one"
+  [ ! -s "$dir/send.log" ] \
+    || fail "an already-acknowledged steer was rung again:"$'\n'"$(cat "$dir/send.log")"
+  assert_contains "$(cat "$err")" "already delivered and acknowledged" \
+    "the send should say the steer was already handled"
+  pass "fm-send inbox: an already-acknowledged steer is never rung again"
+}
+
+test_parallel_sends_never_lose_a_record() {
+  local dir err i pids=() rc=0 inbox count
+  dir=$(setup_case parallel); err="$dir/send.err"
+  inbox="$dir/home/state/t1.inbox"
+  for i in 1 2 3 4 5 6 7 8 9 10 11 12; do
+    run_send "$dir" "$err.$i" -- t1 "parallel steer $i keep-me" &
+    pids+=($!)
+  done
+  for i in "${pids[@]}"; do
+    wait "$i" || rc=$((rc + 1))
+  done
+  [ "$rc" = 0 ] || fail "$rc parallel sends failed"
+  count=$(find "$inbox" -maxdepth 1 -name '*.msg' | wc -l | tr -d ' ')
+  [ "$count" = 12 ] || fail "12 parallel sends should yield 12 records, got $count:"$'\n'"$(ls "$inbox")"
+  for i in 1 2 3 4 5 6 7 8 9 10 11 12; do
+    grep -rqF "parallel steer $i keep-me" "$inbox" \
+      || fail "parallel steer $i was lost"
+  done
+  pass "fm-send inbox: parallel sends all land as distinct intact records"
+}
+
+# The record is the delivery: a send whose record vanishes between the enqueue
+# and the send's own confirmation - a replaced, retired, or reaped inbox - must
+# refuse, never report a durable steer that is not there. The record is
+# published for real (so the enqueue and its own verification succeed) and is
+# then removed while the send releases its task metadata lock, the last moment
+# before the send confirms the record itself.
+test_unconfirmed_record_fails_the_send() {
+  local dir err rc real_rm
+  dir=$(setup_case unconfirmed); err="$dir/send.err"
+  real_rm=$(command -v rm)
+  cat > "$dir/fakebin/rm" <<'SH'
+#!/usr/bin/env bash
+set -u
+for a in "$@"; do
+  case "$a" in
+    *"$FM_UNCONFIRMED_LOCK"*/role) "$FM_REAL_RM" -f "$FM_UNCONFIRMED_RECORD" 2>/dev/null || true ;;
+  esac
+done
+exec "$FM_REAL_RM" "$@"
+SH
+  chmod +x "$dir/fakebin/rm"
+  run_send "$dir" "$err" \
+    FM_REAL_RM="$real_rm" FM_UNCONFIRMED_LOCK='.meta-t1.lock' \
+    FM_UNCONFIRMED_RECORD="$dir/home/state/t1.inbox/001.msg" \
+    -- t1 "steer that vanishes before the confirmation"; rc=$?
+  [ "$rc" -ne 0 ] || fail "a send whose record vanished under it reported success"
+  assert_contains "$(cat "$err")" "steer not sent to t1" \
+    "the refusal should say the steer was not sent"
+  assert_contains "$(cat "$err")" "is not on disk carrying the instructed text" \
+    "the refusal should name the missing record rather than report delivery"
+  assert_contains "$(cat "$err")" "$dir/home/state/t1.inbox" \
+    "the refusal should name the inbox whose record could not be confirmed"
+  [ ! -e "$dir/home/state/t1.inbox/001.msg" ] || fail "the fixture did not remove the record"
+  [ ! -s "$dir/send.log" ] || fail "a refused send still typed something:"$'\n'"$(cat "$dir/send.log")"
+  [ -z "$(find "$dir/home/state/pending-replies" -type f -not -name '.*' 2>/dev/null)" ] \
+    || fail "an unconfirmed record should discard the just-created pending-reply expectation"
+  pass "fm-send inbox: an unconfirmable record fails the send instead of reporting delivery"
+}
+
 test_coalesce_refusals() {
   local dir err rc
   dir=$(setup_case coalesce-refuse); err="$dir/send.err"
@@ -535,6 +624,9 @@ test_secondmate_marker_and_enqueue_delivery
 test_post_enqueue_bookkeeping_failure_is_not_retryable
 test_meta_lock_contention_fails_bounded
 test_unwritable_inbox_fails_loudly
+test_parallel_sends_never_lose_a_record
+test_unconfirmed_record_fails_the_send
+test_already_acknowledged_steer_is_not_rung_again
 test_stranded_meta_lock_is_reclaimed
 test_coalesce_replaces_unhandled_ticks
 test_coalesce_keeps_reringing_ladder

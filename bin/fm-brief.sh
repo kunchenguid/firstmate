@@ -201,6 +201,9 @@ shell_quote() {
 
 STATUS_FILE=$(shell_quote "$STATE/$ID.status")
 INBOX_DIR=$(shell_quote "$STATE/$ID.inbox")
+ACK_CMD=$(shell_quote "$FM_ROOT/bin/fm-inbox-ack.sh")
+ACK_STATE=$(shell_quote "$STATE")
+ACK_TASK=$(shell_quote "$ID")
 
 # The receive-and-ack half of the steering-inbox contract, included in every
 # scaffold kind. The record format, doorbell line, and re-ring ladder are
@@ -210,8 +213,8 @@ INBOX_DIR=$(shell_quote "$STATE/$ID.inbox")
 IFS= read -r -d '' INBOX_SECTION <<EOF || true
 # Firstmate instruction inbox
 Firstmate steers you through durable message files in $INBOX_DIR.
-When a terminal message says an instruction is waiting there - and at any natural checkpoint when you are unsure - list $INBOX_DIR/*.msg, read and act on each message in numeric order, then acknowledge each handled message by moving it: \`mv $INBOX_DIR/NNN.msg $INBOX_DIR/handled/\`.
-The move IS the acknowledgement: without it firstmate rings again and eventually treats you as stuck. An empty or absent inbox needs no action.
+When a terminal message says an instruction is waiting there - and at any natural checkpoint when you are unsure - list $INBOX_DIR/*.msg, read and act on each message in numeric order, then acknowledge each handled message with \`$ACK_CMD $ACK_STATE $ACK_TASK NNN\` (a plain \`mv $INBOX_DIR/NNN.msg $INBOX_DIR/handled/\` does the same thing).
+The acknowledgement IS the record leaving the inbox: without it firstmate rings again and eventually treats you as stuck. Never delete a record and never clear the inbox with a glob or a broad cleanup command - deleting is not acknowledging, and firstmate restores any unread record you remove. An empty or absent inbox needs no action.
 EOF
 INBOX_SECTION=${INBOX_SECTION%$'\n'}
 

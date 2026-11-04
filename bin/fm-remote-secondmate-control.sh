@@ -273,6 +273,10 @@ cmd_send() {
     fm_lock_release "$meta_lock"
     die "steering-inbox record could not be written under $CONTROL_STATE/$id.inbox"
   fi
+  if ! fm_task_inbox_verify "$rec" "$message"; then
+    fm_lock_release "$meta_lock"
+    die "steering-inbox write reported ${rec:-no record}, but that record is not on disk carrying the instructed text under $CONTROL_STATE/$id.inbox"
+  fi
   fm_lock_release "$meta_lock"
   case "$rec" in
     */handled/*)
