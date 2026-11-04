@@ -1402,31 +1402,52 @@ test_lock_symlink_lock_is_never_reclaimed_as_plain_file() {
 }
 
 test_lock_stale_plain_file_single_winner_under_concurrency() {
-  local dir state lockdir marker i pids pid wins
+  local dir state lockdir marker gate hold i pids pid waiter winner wins
   dir=$(make_case lock-plain-concurrency)
   state="$dir/state"
   lockdir="$state/.contend.lock"
   marker="$dir/wins"
+  gate="$dir/first-winner"
+  hold="$dir/winner-release"
   : > "$lockdir"
   touch -t 200001010000 "$lockdir"
   : > "$marker"
+  mkfifo "$gate" "$hold"
+  # try_acquire is nonblocking, so every one-shot contender may lose to a
+  # transient steal mutex. A waiting contender guarantees eventual acquisition,
+  # and the FIFO keeps the winner alive until every other contender has
+  # finished, so a late contender on a busy runner cannot take the lock after
+  # the winner exits.
+  FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    fm_lock_acquire_wait "$2" || exit 1
+    printf "%s\n" "${BASHPID:-$$}" >> "$3"
+    printf "%s\n" "${BASHPID:-$$}" > "$4"
+    IFS= read -r _ < "$5"
+  ' _ "$LIB" "$lockdir" "$marker" "$gate" "$hold" &
+  waiter=$!
   pids=
   i=1
-  while [ "$i" -le 40 ]; do
+  while [ "$i" -le 39 ]; do
     FM_STATE_OVERRIDE="$state" bash -c '
       . "$1"
       if fm_lock_try_acquire "$2"; then
         printf "%s\n" "${BASHPID:-$$}" >> "$3"
-        sleep 1
+        printf "%s\n" "${BASHPID:-$$}" > "$4"
+        IFS= read -r _ < "$5"
       fi
-    ' _ "$LIB" "$lockdir" "$marker" &
+    ' _ "$LIB" "$lockdir" "$marker" "$gate" "$hold" &
     pids="$pids $!"
     i=$((i + 1))
   done
+  IFS= read -r winner < "$gate"
+  [ "$winner" = "$waiter" ] || { kill "$waiter" 2>/dev/null || true; wait "$waiter" 2>/dev/null || true; }
   for pid in $pids; do
-    wait "$pid" 2>/dev/null || true
+    [ "$pid" = "$winner" ] || wait "$pid" 2>/dev/null || true
   done
   wins=$(awk 'NF { c++ } END { print c + 0 }' "$marker")
+  printf 'release\n' > "$hold"
+  wait "$winner" 2>/dev/null || true
   [ "$wins" -eq 1 ] || fail "expected exactly one plain-file reclaimer, got $wins"
   [ -L "$lockdir" ] || fail "reclaimed lock path is not a symlink lock after the race"
   pass "concurrent stale plain-file reclaim yields exactly one winner"
