@@ -83,6 +83,7 @@ case "$FM_FAKE_RELAUNCH_MODE" in
     effort=medium
     ;;
 esac
+printf "model pin mismatch: pin '%s' but pinned Claude session remote-session reports 'claude-opus-5[1m]'\n" "$model" >&2
 printf 'relaunched %s harness=%s from=pi model=%s effort=%s backend=herdr endpoint=fm-remote:w1:p1 worktree=/srv/fm-home\n' \
   "$id" "$harness" "$model" "$effort"
 printf 'schema=fm-remote-secondmate-control.v1\n'
@@ -107,6 +108,8 @@ OUT=$(run_relaunch ios claude claude-opus-5-5 medium); RC=$?
 expect_code 0 "$RC" "a confirmed remote relaunch should succeed"$'\n'"$OUT"
 assert_contains "$OUT" "relaunched ios harness=claude" \
   "the wrapper should still print the host's own confirmation line"
+assert_contains "$OUT" "model pin mismatch: pin 'claude-opus-5-5' but pinned Claude session remote-session reports 'claude-opus-5[1m]'" \
+  "a successful remote relaunch must forward the model verdict unchanged"
 assert_grep 'harness=claude' "$HOME_DIR/state/ios.meta" \
   "the parent record did not pick up the confirmed harness"
 assert_grep 'model=claude-opus-5-5' "$HOME_DIR/state/ios.meta" \

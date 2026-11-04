@@ -1432,7 +1432,7 @@ test_watcher_exits_on_state_teardown_during_startup() {
   # A state directory torn down and recreated at the same path just after the
   # watcher claimed its lock - before the main loop - is still a teardown: the
   # empty lock in the recreated directory was never released by a successor.
-  local dir state fakebin out pid end stopped rc
+  local dir state fakebin out pid end stopped rc torn
   dir=$(make_case startup-teardown)
   state="$dir/state"
   fakebin="$dir/fakebin"
@@ -1447,8 +1447,16 @@ test_watcher_exits_on_state_teardown_during_startup() {
     [ -e "$state/.watch.lock/watcher-path" ] && kill -STOP "$pid" 2>/dev/null && { stopped=1; break; }
   done
   [ "$stopped" -eq 1 ] || fail "watcher never finished claiming its lock: $(cat "$out")"
-  rm -rf "$state"
-  mkdir -p "$state"
+  # Replace the directory by renaming the old tree away and creating the new
+  # one, never by emptying it in place: a stopped watcher's own children can
+  # still publish into the tree, and `rm -rf` that loses that race removes the
+  # contents but cannot rmdir the directory, so the same inode survives with no
+  # lock pid - which the watcher reads as a successor's release, not a teardown.
+  # Renaming keeps the old inode allocated, so the new directory's is new.
+  torn="$state.torn-down"
+  mv "$state" "$torn" || fail "could not tear down the state directory: $(cat "$out")"
+  mkdir -p "$state" || fail "could not recreate the state directory: $(cat "$out")"
+  rm -rf "$torn" 2>/dev/null || true
   kill -CONT "$pid" 2>/dev/null || true
   # wait_for_exit returns the watcher's own status, or TERMs a watcher that
   # kept running in the torn-down directory.
