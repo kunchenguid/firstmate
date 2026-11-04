@@ -61,5 +61,5 @@ Teardown removes the per-task home and retires the busy generation.
 ## Primary integration
 
 Unsupported and unverified.
-`../../../../../docs/supervision-protocols/` carries no kiro protocol, no turn-end guard adapter exists for it, and this adapter verified only the crewmate-side launch, busy state, interrupt, exit, and resume on the V2 engine.
+`../../../../../docs/supervision-protocols/` carries no kiro protocol, no turn-end guard adapter exists for it, and this adapter verified only the worker-side launch, busy state, interrupt, exit, and resume on the V2 engine.
 `references/common/primary-hooks.md`'s unsupported-boundary rule applies: never invent a wake protocol from a similar TUI.

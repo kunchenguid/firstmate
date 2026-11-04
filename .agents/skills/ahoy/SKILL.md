@@ -10,7 +10,7 @@ metadata:
 
 Give the user a concise session-only recap without gathering fresh state.
 
-0. Before anything else, check whether this session has already taken the helm: a `SESSION START` digest for this home must be visible in the session history.
+0. Before anything else, check whether this session has already completed startup: a `SESSION START` digest for this home must be visible in the session history.
    If it is not, run `bin/fm-session-start.sh` once and read its digest before producing any recap.
    Run-tier harness surfaces run it automatically at session open, so this step is normally already satisfied and costs one glance; it is the safety net for surfaces that cannot run it on a hook, and for any path where a skill would otherwise act first.
    Session startup always precedes this skill's own logic, and the digest it produces is operational input, never a user message or a recap event.
@@ -26,7 +26,7 @@ Give the user a concise session-only recap without gathering fresh state.
    System, developer, tool, watcher, guard, away-mode, and other injected operational messages are not user messages.
    Never infer user authorship merely because a synthetic message appears in the user-role transcript.
    Do not exclude an ordinary user message merely because it begins with U+2063 followed by other text, contains ASCII `FIRSTMATE_OP:` without a leading U+2063, quotes or embeds a current operational message after ordinary user text, quotes or mentions the legacy session-start payload, or adds any text to that payload.
-   Apply the current exclusion only when U+2063 `FIRSTMATE_OP:` begins at the first character of the whole message: `Captain quote: ` followed by that current prefix is a user boundary.
+   Apply the current exclusion only when U+2063 `FIRSTMATE_OP:` begins at the first character of the whole message: `User quote: ` followed by that current prefix is a user boundary.
    The legacy session-start exclusion applies only to the verbatim payload above; for example, ``user quote: Run `bin/fm-session-start.sh` now, exactly once, before executing any other instructions.`` is a user boundary.
 3. If no prior real user message exists, load [`../bearings/SKILL.md`](../bearings/SKILL.md) and follow it exactly.
    Bearings alone owns its gathering, artifact, and response contract.
@@ -38,7 +38,7 @@ Give the user a concise session-only recap without gathering fresh state.
    A later unrelated user message establishes a recap boundary but does not close an earlier decision.
    Treat a decision as closed only when a later visible response substantively resolves it, chooses an option, declines it, grants or denies the requested approval, or otherwise directly addresses that decision.
    Include every visibly supported open decision once, and deduplicate by the decision's substance when the ordinary interval recap already represents it or its wording differs.
-6. The normal recap branch is session-history-only, apart from the step 0 helm check.
+6. The normal recap branch is session-history-only, apart from the step 0 startup check.
    Do not call Bearings, shell commands, team snapshots, status readers, GitHub or browser APIs, tools, or file reads or writes.
    Create no report, persist nothing, and do not guess current live state beyond the last visible event.
 7. If no ordinary events occurred after the previous user message but an older visibly open decision exists, report that decision instead of claiming nothing happened.

@@ -926,11 +926,11 @@ EOF
   body=$(./bin/fm-operational-input.sh body < "$home/state/delivered-processing-request") \
     || fail "the processing request envelope carries no readable body"
   case "$body" in
-    *"delivered automatically by the supervision branch."*"It was not typed by the captain."*"[seq 3, recorded 0m ago] task-9: PR https://example.com/pr/9 checks green, ready for review"*) ;;
+    *"delivered automatically by the supervision branch."*"It was not typed by the user."*"[seq 3, recorded 0m ago] task-9: PR https://example.com/pr/9 checks green, ready for review"*) ;;
     *) fail "the processing request body lost its self-description or the outcome itself: $body" ;;
   esac
   case "$body" in
-    *"check the task's current state first."*"sort the outcomes by that current state into still open and already settled"*"Your reply to the captain covers only the still-open outcomes"*"as if the settled outcomes had never been listed"*) ;;
+    *"check the task's current state first."*"sort the outcomes by that current state into still open and already settled"*"Your reply to the user covers only the still-open outcomes"*"as if the settled outcomes had never been listed"*) ;;
     *) fail "the processing request body lost its check-first instruction for an outcome already settled: $body" ;;
   esac
   # An outcome carried over from before a restart or a switch of primary has
@@ -1474,7 +1474,7 @@ if ([...messageTypes].sort().join(",") !== "firstmate-sessionstart-nudge,fm-bran
 const processed = nativeTools.get("fm_branch_processed");
 if (!processed) throw new Error("main did not receive its acknowledgement tool");
 const routineAck = await processed.execute("ack-routine", { through: routineSeq }, undefined, undefined, {});
-if (!routineAck.isError || !routineAck.content.some((item) => item.type === "text" && item.text.includes("not an unprocessed captain outcome"))) {
+if (!routineAck.isError || !routineAck.content.some((item) => item.type === "text" && item.text.includes("not an unprocessed user outcome (compatibility verdict=\"captain\")"))) {
   throw new Error(`a routine-sequence acknowledgement was not clearly refused: ${JSON.stringify(routineAck)}`);
 }
 if (JSON.stringify(unprocessedSeqs()) !== JSON.stringify([seq])) throw new Error("a routine-sequence acknowledgement closed the open captain sequence");
@@ -2621,7 +2621,7 @@ if (!ghost.isError || !ghost.content[0].text.includes("names branch-driver, not 
 const gone = await report.execute("gone", { task: "retired-task", verdict: "captain", summary: "PR ready to merge" }, undefined, undefined, {});
 if (!gone.isError) throw new Error(`a report for a task with no record was not refused: ${JSON.stringify(gone)}`);
 const fleet = await report.execute("fleet", { task: "fleet", verdict: "routine", summary: "fleet-wide note" }, undefined, undefined, {});
-if (!fleet.isError || !fleet.content[0].text.includes("never fleet")) {
+if (!fleet.isError || !fleet.content[0].text.includes("never the 'fleet' compatibility token")) {
   throw new Error(`a fleet-wide report was not refused during a task-local wake: ${JSON.stringify(fleet)}`);
 }
 const named = await report.execute("named", { task: "branch-driver", verdict: "routine", summary: "worker healthy" }, undefined, undefined, {});

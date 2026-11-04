@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# fm-inbox.sh - the captain's out-of-band capture surface.
+# fm-inbox.sh - the user's out-of-band capture surface.
 #
 # Solves three DIFFERENT problems with three different mechanisms, because they
 # are not the same problem:
@@ -17,7 +17,7 @@
 #           to run in a loop.
 #   ask     Answer a side question with a one-shot model call that never touches
 #           firstmate, the backlog, or the wake queue. A side question is not
-#           fleet work and must not become fleet work.
+#           team work and must not become team work.
 #
 # Usage:
 #   fm-inbox.sh note [--request-id <id>] [--json] [--] <text>...
@@ -353,7 +353,7 @@ announce_note() {  # <id> <summary>
     fm_lock_release "$FM_WAKE_QUEUE_LOCK"
     return 2
   fi
-  if fm_wake_append_locked check "inbox:$id" "check: captain inbox note $id - $summary"; then
+  if fm_wake_append_locked check "inbox:$id" "check: user inbox note $id - $summary"; then
     mark_announced "$id"
   else
     status=1

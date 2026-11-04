@@ -104,6 +104,6 @@ Gemini does NOT read `.claude/skills`.
 ## Primary integration
 
 Unsupported and unverified.
-`../../../../../docs/supervision-protocols/` carries no gemini protocol, no turn-end guard adapter exists for it, and this adapter verified only the crewmate-side launch, busy state, interrupt, and exit.
+`../../../../../docs/supervision-protocols/` carries no gemini protocol, no turn-end guard adapter exists for it, and this adapter verified only the worker-side launch, busy state, interrupt, and exit.
 `references/common/primary-hooks.md`'s unsupported-boundary rule applies: never invent a wake protocol from a similar TUI.
 Gemini's `BeforeAgent`/`AfterAgent` pair and its `gemini hooks migrate` command make a future primary integration plausible, but it remains unbuilt work, not a fact to rely on.
