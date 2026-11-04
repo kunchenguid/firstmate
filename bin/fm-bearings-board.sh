@@ -74,6 +74,8 @@
 #
 # Every Underway row likewise carries a non-empty `name`: the durable task name
 # when known, otherwise its durable identifier.
+# Every decision card requires `close: "done"` or `close: "release"` before
+# publication, so an omitted mode cannot default a held work item to done.
 # A Charted Next row MAY carry `filed`, the durable filed date (YYYY-MM-DD, or
 # that date with a UTC timestamp) the template orders the section by, newest
 # first; a row with no comparable date keeps its payload order after every dated
@@ -161,7 +163,9 @@ validate_payload() {  # <data.json>
       and optional_subject
       and (if has("subject") then .type == "decision" else true end)
       and (optional_string("freeform_hint"))
-      and ((has("close") | not) or (.close == "done" or .close == "release"))
+      and (if .type == "decision"
+        then (.close == "done" or .close == "release")
+        else ((has("close") | not) or (.close == "done" or .close == "release")) end)
       and ((has("allow_freeform") | not) or (.allow_freeform | type == "boolean"))
       and ((has("recommend_value") | not)
         or ((.recommend_value | slug(128))
