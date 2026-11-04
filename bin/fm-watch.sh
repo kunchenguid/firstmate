@@ -2829,10 +2829,17 @@ EOF
 # moment the halt or the ready work clears, so a later halt debounces afresh.
 capacity_halt_alert_tick() {  # [now-epoch], for deterministic clock callers
   local now=${1:-} after=${FM_CAPACITY_HALT_ALERT_SECS:-1800} ledger="$STATE/.capacity-halt-alert"
-  local since last ready reasons detail='' r fix
+  local since last ready reasons detail='' r fix msg tmp
   CAPACITY_HALT_ALERT=
   case "$after" in ''|*[!0-9]*) after=1800 ;; esac
   if [ "$after" -gt 0 ] && [ -e "$CONFIG/lane-capacity" ] && [ -f "$STATE/lane-capacity.json" ]; then
+    # Facts are republished every 30s; older ones may describe a halt that has
+    # already cleared, so skip the observation and keep the ledger as it is.
+    local gen wall
+    gen=$(jq -r '.generated_epoch // 0' "$STATE/lane-capacity.json" 2>/dev/null) || return 0
+    fm_epoch_seconds_to wall
+    case "$gen" in ''|*[!0-9]*) return 0 ;; esac
+    [ "$((wall - gen))" -le 300 ] || return 0
     reasons=$(jq -r 'select(.cap.status == "ok" and .lanes.count < .cap.target and .verdict.admit == false)
       | .verdict.reasons | join("\n")' "$STATE/lane-capacity.json" 2>/dev/null) || return 0
   else
@@ -2870,11 +2877,16 @@ capacity_halt_alert_tick() {  # [now-epoch], for deterministic clock callers
     done <<EOF
 $reasons
 EOF
-    CAPACITY_HALT_ALERT="check: dispatch halted for $((now - since))s with $ready ready: $detail"
-    fm_wake_append check capacity-halt "$CAPACITY_HALT_ALERT" || return 1
+    msg="check: dispatch halted for $((now - since))s with $ready ready: $detail"
+    fm_wake_append check capacity-halt "$msg" || return 1
+    CAPACITY_HALT_ALERT=$msg
     last=$now
   fi
-  printf '%s %s\n' "$since" "$last" > "$ledger"
+  tmp=$(mktemp "$STATE/.capacity-halt-alert.XXXXXX") || return 1
+  if ! printf '%s %s\n' "$since" "$last" > "$tmp" || ! mv -f "$tmp" "$ledger"; then
+    rm -f -- "$tmp"
+    return 1
+  fi
 }
 
 # The identity a re-surface throttle is bound to: the task's whole status-log

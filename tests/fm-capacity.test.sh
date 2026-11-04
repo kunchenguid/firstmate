@@ -602,6 +602,19 @@ test_dispatch_halt_alert() {
   PATH="$fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_CONFIG_OVERRIDE="$home/config" \
     bash -c '. "$1/bin/fm-watch.sh" && capacity_halt_alert_tick 2900' _ "$ROOT"
   assert_equals '1000 2800' "$(cat "$home/state/.capacity-halt-alert" 2>/dev/null)" "an unreadable verdict must keep the debounce record"
+  # shellcheck disable=SC2031
+  PATH="$fakebin:$PATH" FM_HOME="$home" FM_LANE_CAPACITY_PUBLISH_INTERVAL=0 "$CAPACITY" --publish
+  jq '.generated_epoch -= 600' "$home/state/lane-capacity.json" > "$home/state/lc.tmp" && mv "$home/state/lc.tmp" "$home/state/lane-capacity.json"
+  # shellcheck disable=SC2031
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_CONFIG_OVERRIDE="$home/config" \
+    bash -c '. "$1/bin/fm-watch.sh" && capacity_halt_alert_tick 89200; printf "%s" "$CAPACITY_HALT_ALERT"' _ "$ROOT")
+  assert_equals '' "$out" "facts older than 5 minutes must not raise an alert"
+  assert_equals '1000 2800' "$(cat "$home/state/.capacity-halt-alert" 2>/dev/null)" "stale facts must keep the debounce record"
+  chmod a-w "$home/state/.wake-queue"
+  out=$(halt_tick "$home" "$fakebin" 89200)
+  chmod u+w "$home/state/.wake-queue"
+  assert_equals '1|' "${out#tick failed$'\n'}" "a failed wake write must not announce an alert"
+  assert_equals '1000 2800' "$(cat "$home/state/.capacity-halt-alert" 2>/dev/null)" "a failed wake write must keep the debounce record"
   out=$(halt_tick "$home" "$fakebin" 80000)
   assert_equals '1|' "$out" "no re-raise within 24 h"
   out=$(halt_tick "$home" "$fakebin" 89200)
