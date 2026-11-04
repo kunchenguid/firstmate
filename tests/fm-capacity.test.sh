@@ -571,6 +571,7 @@ test_captain_queue_constraint() {
 halt_tick() {
   PATH="$2:$PATH" FM_HOME="$1" FM_LANE_CAPACITY_PUBLISH_INTERVAL=0 "$CAPACITY" --publish
   (
+    # shellcheck disable=SC2030
     export PATH="$2:$PATH" FM_HOME="$1" FM_STATE_OVERRIDE="$1/state" FM_CONFIG_OVERRIDE="$1/config"
     # shellcheck source=bin/fm-watch.sh
     . "$ROOT/bin/fm-watch.sh"
@@ -594,8 +595,13 @@ test_dispatch_halt_alert() {
   out=$(halt_tick "$home" "$fakebin" 2799)
   assert_equals '0|' "$out" "no alert before the 30 minute window"
   out=$(halt_tick "$home" "$fakebin" 2800)
-  assert_equals '1|check: dispatch halted for 1800s with 1 ready: memory: 5% free [fix: free memory, or lower min-avail-gb]' "$out" \
+  assert_equals '1|check: dispatch halted for 1800s with 1 ready: memory: 5% free, under 10% [fix: free memory]' "$out" \
     "one alert naming the constraint, its value and its fix"
+  printf 'not json\n' > "$home/state/lane-capacity.json"
+  # shellcheck disable=SC2031
+  PATH="$fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_CONFIG_OVERRIDE="$home/config" \
+    bash -c '. "$1/bin/fm-watch.sh" && capacity_halt_alert_tick 2900' _ "$ROOT"
+  assert_equals '1000 2800' "$(cat "$home/state/.capacity-halt-alert" 2>/dev/null)" "an unreadable verdict must keep the debounce record"
   out=$(halt_tick "$home" "$fakebin" 80000)
   assert_equals '1|' "$out" "no re-raise within 24 h"
   out=$(halt_tick "$home" "$fakebin" 89200)
@@ -604,11 +610,16 @@ test_dispatch_halt_alert() {
   out=$(halt_tick "$home" "$fakebin" 89300)
   assert_equals '2|' "$out" "a cleared constraint must not re-raise"
   assert_absent "$home/state/.capacity-halt-alert" "clearing must drop the debounce record"
+  fakebin=$(make_probes "$TMP_ROOT/p-halt-disk" 0.50 60 8 4096000)   # 4000 MB free on the probe
+  halt_tick "$home" "$fakebin" 90000 >/dev/null
+  out=$(halt_tick "$home" "$fakebin" 91800)
+  assert_equals '3|check: dispatch halted for 1800s with 1 ready: disk: 4000 MB free, under 5120 MB [fix: free disk space]' "$out" \
+    "a probe disk halt names the built-in threshold and no config key"
   # A full cap, even with ready work, never alerts.
   printf '1\n' > "$home/config/lane-capacity"
   fakebin=$(make_probes "$TMP_ROOT/p-halt-full" 0.50 5 8 20971520)
   out=$(halt_tick "$home" "$fakebin" 200000); out=$(halt_tick "$home" "$fakebin" 300000)
-  assert_equals '2|' "$out" "a full lane cap must never alert"
+  assert_equals '3|' "$out" "a full lane cap must never alert"
   pass "the dispatch-halt alert debounces, re-raises once a day, clears, and ignores a full cap"
 }
 

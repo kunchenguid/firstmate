@@ -2834,13 +2834,14 @@ capacity_halt_alert_tick() {  # [now-epoch], for deterministic clock callers
   case "$after" in ''|*[!0-9]*) after=1800 ;; esac
   if [ "$after" -gt 0 ] && [ -e "$CONFIG/lane-capacity" ] && [ -f "$STATE/lane-capacity.json" ]; then
     reasons=$(jq -r 'select(.cap.status == "ok" and .lanes.count < .cap.target and .verdict.admit == false)
-      | .verdict.reasons | join("\n")' "$STATE/lane-capacity.json" 2>/dev/null)
+      | .verdict.reasons | join("\n")' "$STATE/lane-capacity.json" 2>/dev/null) || return 0
   else
     reasons=
   fi
   if [ -n "$reasons" ]; then
-    ready=$(FM_HOME=$FM_HOME fm_run_timed 10 "$SCRIPT_DIR/fm-tasks-axi.sh" ready 2>/dev/null | sed -n 's/^count: //p')
-    case "$ready" in ''|0|*[!0-9]*) reasons= ;; esac
+    ready=$(FM_HOME=$FM_HOME fm_run_timed 10 "$SCRIPT_DIR/fm-tasks-axi.sh" ready 2>/dev/null) || return 0
+    ready=$(printf '%s\n' "$ready" | sed -n 's/^count: //p')
+    case "$ready" in 0) reasons= ;; ''|*[!0-9]*) return 0 ;; esac
   fi
   if [ -z "$reasons" ]; then
     rm -f -- "$ledger"
@@ -2853,10 +2854,14 @@ capacity_halt_alert_tick() {  # [now-epoch], for deterministic clock callers
   if [ "$((now - since))" -ge "$after" ] && { [ "$last" -eq 0 ] || [ "$((now - last))" -ge 86400 ]; }; then
     while IFS= read -r r; do
       case "$r" in
-        cpu:*|load:*) fix='wait for load to fall, or raise max-load1' ;;
-        memory:*) fix='free memory, or lower min-avail-gb' ;;
-        disk:*) fix='free disk space, or lower min-disk-gb' ;;
-        pressure*) fix='wait for the pressure beat to clear' ;;
+        cpu:*) fix='wait for load to fall below the core count' ;;
+        load:*) fix='wait for load to fall, or raise max-load1' ;;
+        'memory: no room '*) fix='free memory, or lower min-avail-gb' ;;
+        memory:*) fix='free memory' ;;
+        disk:*' GB free, under '*) fix='free disk space, or lower min-disk-gb' ;;
+        disk:*) fix='free disk space' ;;
+        pressure*) fix='wait for the pressure beat to fall below warn' ;;
+        'on battery') fix='connect AC power' ;;
         captain-queue:*) fix='answer open captain holds, or raise max-captain-holds' ;;
         captain\ reserve:*) fix='remove the reserve-flag file' ;;
         *) fix='clear that condition' ;;

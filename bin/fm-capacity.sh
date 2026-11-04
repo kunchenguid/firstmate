@@ -500,9 +500,9 @@ add_constraint() {  # <name> <reason> [published reason, default the reason]
 "
 }
 if [ "$basis" = probe ]; then
-  [ "$probe_cpu" -eq 0 ] || add_constraint cpu "cpu: load $load1 on $cores cores"
-  [ "$probe_mem" -eq 0 ] || add_constraint memory "memory: $mem_free_pct% free"
-  [ "$probe_disk" -eq 0 ] || add_constraint disk "disk: $disk_free_mb MB free"
+  [ "$probe_cpu" -eq 0 ] || add_constraint cpu "cpu: load $load1 on $cores cores, at or over $cores"
+  [ "$probe_mem" -eq 0 ] || add_constraint memory "memory: $mem_free_pct% free, under $MEM_FREE_MIN_PCT%"
+  [ "$probe_disk" -eq 0 ] || add_constraint disk "disk: $disk_free_mb MB free, under $DISK_FREE_MIN_MB MB"
 fi
 lim_avail=${avail_gb:-$probe_avail_gb}
 lim_load1=$p_load1
