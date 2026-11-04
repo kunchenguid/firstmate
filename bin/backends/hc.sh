@@ -420,15 +420,25 @@ fm_backend_hc_remote_path_valid() {  # <path>
   return 0
 }
 
+# fm_backend_hc_b64_decode: decode base64 <text> into <file> byte for byte.
+# jq's @base64d is not used: it turns bytes that are not UTF-8 into U+FFFD, so
+# two different patches could read alike. Fails on input that is not base64.
+fm_backend_hc_b64_decode() {  # <text> <file>
+  if [ -z "$1" ]; then : > "$2"; return 0; fi
+  if printf '%s' "$1" | base64 --decode > "$2" 2>/dev/null; then return 0; fi
+  printf '%s' "$1" | base64 -D > "$2" 2>/dev/null
+}
+
 # fm_backend_hc_remote_exec: run <argv> on <machine> through the <session>
 # core (`hc exec --on`, no shell), printing the program's stdout and stderr
-# and returning its exit code. A transport failure - an unknown or unreachable
-# machine, a timeout, a signal, truncated output, or an answer that is not
-# hc's exec result - prints the reason and returns 255, which no caller reads
-# as an answer. <cwd> is `-` for that machine's home.
+# byte for byte and returning its exit code. A transport failure - an unknown
+# or unreachable machine, a timeout, a signal, truncated output, output that
+# is not base64, or an answer that is not hc's exec result - prints the reason
+# and returns 255, which no caller reads as an answer. <cwd> is `-` for that
+# machine's home.
 FM_BACKEND_HC_EXEC_FAILED=255
 fm_backend_hc_remote_exec() {  # <session> <machine> <timeout-secs> <cwd|-> <argv...>
-  local session=$1 machine=$2 timeout=$3 cwd=$4 out err_file fields code signal timed_out truncated
+  local session=$1 machine=$2 timeout=$3 cwd=$4 out err_file out_file fields code signal timed_out truncated
   local -a cwd_args=()
   shift 4
   fm_backend_hc_atom_valid "$machine" || { echo "error: refusing hc machine name '$machine'" >&2; return 255; }
@@ -446,16 +456,24 @@ fm_backend_hc_remote_exec() {  # <session> <machine> <timeout-secs> <cwd|-> <arg
     rm -f "$err_file"
     return 255
   fi
-  rm -f "$err_file"
   IFS=$'\x1f' read -r code signal timed_out truncated <<EOF
 $fields
 EOF
   if [ "$timed_out" = true ] || [ "$truncated" = true ] || [ -z "$code" ] || [ -n "$signal" ]; then
     echo "error: hc exec on machine '$machine' did not finish cleanly (timed_out=$timed_out truncated=$truncated signal=${signal:-none})" >&2
+    rm -f "$err_file"
     return 255
   fi
-  printf '%s' "$out" | jq -j '.stdout // "" | @base64d' 2>/dev/null
-  printf '%s' "$out" | jq -j '.stderr // "" | @base64d' >&2 2>/dev/null
+  out_file=$(mktemp "${TMPDIR:-/tmp}/fm-hc-exec.XXXXXX") || { rm -f "$err_file"; echo "error: could not stage hc exec output" >&2; return 255; }
+  if ! fm_backend_hc_b64_decode "$(printf '%s' "$out" | jq -r '.stdout // ""' 2>/dev/null)" "$out_file" \
+    || ! fm_backend_hc_b64_decode "$(printf '%s' "$out" | jq -r '.stderr // ""' 2>/dev/null)" "$err_file"; then
+    rm -f "$out_file" "$err_file"
+    echo "error: hc exec on machine '$machine' returned output that is not base64" >&2
+    return 255
+  fi
+  cat "$out_file"
+  cat "$err_file" >&2
+  rm -f "$out_file" "$err_file"
   case "$code" in ''|*[!0-9]*) return 255 ;; esac
   [ "$code" -ne 255 ] || code=254
   return "$code"
@@ -663,24 +681,30 @@ fm_backend_hc_remote_worktree_add() {  # <session> <machine> <clone> <worktree> 
   fm_backend_hc_remote_git "$session" "$machine" "$clone" fetch --quiet origin \
     "+refs/heads/$base:refs/remotes/origin/$base" >/dev/null \
     || { echo "error: could not fetch origin/$base into $clone on '$machine'" >&2; return 1; }
+  # From here <wt> was proved absent, so anything at it is this call's own:
+  # a failure (including a lost answer) removes it there or names it.
   fm_backend_hc_remote_git "$session" "$machine" "$clone" worktree add --quiet --detach "$wt" \
     "refs/remotes/origin/$base" >/dev/null \
-    || { echo "error: could not add worktree $wt from origin/$base on '$machine'" >&2; return 1; }
+    || { echo "error: could not add worktree $wt from origin/$base on '$machine'" >&2
+         fm_backend_hc_remote_worktree_add_undo "$session" "$machine" "$clone" "$wt"; return 1; }
   top=$(fm_backend_hc_remote_git "$session" "$machine" "$wt" rev-parse --show-toplevel 2>/dev/null) \
-    || { echo "error: worktree $wt on '$machine' did not come up as a git checkout" >&2; return 1; }
+    || { echo "error: worktree $wt on '$machine' did not come up as a git checkout" >&2
+         fm_backend_hc_remote_worktree_add_undo "$session" "$machine" "$clone" "$wt"; return 1; }
   printf '%s\n' "$top"
 }
 
-# fm_backend_hc_remote_default_branch: origin's default branch for <clone>.
+fm_backend_hc_remote_worktree_add_undo() {  # <session> <machine> <clone> <worktree>
+  fm_backend_hc_remote_worktree_remove "$@" >/dev/null 2>&1 \
+    || echo "warning: worktree $4 on '$2' may remain from this failed spawn; remove it there (git -C $3 worktree remove --force $4)" >&2
+}
+
+# fm_backend_hc_remote_default_branch: origin's current default branch for
+# <clone>, asked of origin itself (never the clone's cached origin/HEAD), and
+# a failure when origin cannot answer, as a local spawn refuses a stale base.
 fm_backend_hc_remote_default_branch() {  # <session> <machine> <clone>
-  local ref
-  ref=$(fm_backend_hc_remote_git "$1" "$2" "$3" symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null) || ref=
-  if [ -n "$ref" ]; then
-    printf '%s' "${ref#origin/}"
-    return 0
-  fi
-  ref=$(fm_backend_hc_remote_git "$1" "$2" "$3" ls-remote --symref origin HEAD 2>/dev/null \
-    | awk '$1 == "ref:" && $3 == "HEAD" { sub("^refs/heads/", "", $2); print $2; exit }')
+  local out ref
+  out=$(fm_backend_hc_remote_git "$1" "$2" "$3" ls-remote --symref origin HEAD 2>/dev/null) || return 1
+  ref=$(printf '%s\n' "$out" | awk '$1 == "ref:" && $3 == "HEAD" { sub("^refs/heads/", "", $2); print $2; exit }')
   [ -n "$ref" ] || return 1
   printf '%s' "$ref"
 }

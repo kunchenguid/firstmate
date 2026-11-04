@@ -155,10 +155,10 @@
 #   spawn proves the machine, that claude runs in its login shell there, its
 #   clone, its route back, and Claude's trust there before anything exists,
 #   creates the worktree there instead of leasing a Treehouse slot, and records
-#   hc_machine=, hc_firstmate_as=, hc_clone=, and hc_launch_file= (the launch
-#   file staged there, which abort cleanup and teardown remove once the
-#   terminal is closed); it refuses any harness but claude, local-only, forge=gerrit or
-#   external, --account, and relaunch, and never falls back to this machine.
+#   its placement (docs/hc-backend.md "Task shape and metadata"); abort cleanup
+#   removes the launch file staged there once the terminal is closed. It
+#   refuses any harness but claude, local-only, forge=gerrit or external,
+#   --account, and relaunch, and never falls back to this machine.
 #   A rex crewmate or scout opens one tab in the Rex session the launching
 #   firstmate runs in when it runs directly inside Rex, otherwise in its home's
 #   own Rex session; a --secondmate launch opens its tab in that secondmate
@@ -3679,10 +3679,16 @@ if [ "$RELAUNCH" -eq 1 ]; then
 fi
 # A worker placed on another hc machine runs on that machine's own login, so no
 # account root on this machine applies to it (spawn_hc_placement_preflight
-# refuses an explicit --account).
+# refuses an explicit --account); a pin or list this skips is named.
 WORKER_ACCOUNT=
 if [ "$HC_PLACED" != 1 ]; then
   WORKER_ACCOUNT=$(fm_worker_account_select "$HARNESS" "$CONFIG" "$MODEL" "${PI_BIN:-$HARNESS}" "$RAW_COMMAND" "$WORKER_ACCOUNT_MATE" "$WORKER_ACCOUNT_REQUEST") || exit 1
+else
+  for _hc_pin in claude-account claude-accounts; do
+    [ ! -e "$CONFIG/$_hc_pin" ] \
+      || echo "note: config/$_hc_pin does not apply to a worker placed on hc machine '$HC_MACHINE'; it uses that machine's Claude login${HC_CLAUDE_CONFIG:+ in $HC_CLAUDE_CONFIG}" >&2
+  done
+  unset _hc_pin
 fi
 WORKER_ACCOUNT_DECLARED=${WORKER_ACCOUNT%%$'\t'*}
 WORKER_ACCOUNT_ROOT=${WORKER_ACCOUNT#*$'\t'}

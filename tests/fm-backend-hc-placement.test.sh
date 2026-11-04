@@ -2,11 +2,12 @@
 # tests/fm-backend-hc-placement.test.sh - fake-hc tests for placing ship and
 # scout workers on another hc machine (docs/hc-backend.md "Workers on another
 # machine"): the placement config, machine-qualified addresses and records, the
-# remote exec transport and machine readiness gates, the remote agent-state
-# scan, a real fm-spawn of a placed scout (its claude check, and its abort's
+# remote exec transport (byte-exact output) and machine readiness gates, the
+# remote default branch and worktree creation, the remote agent-state scan, a
+# real fm-spawn of a placed scout (its claude check, and its abort's
 # launch-file cleanup), and a real fm-teardown of a placed ship whose
-# landed-work proof, process reap, and launch-file removal run on the other
-# machine.
+# landed-work proof, no-mistakes abort, process reap, and launch-file removal
+# run on the other machine.
 #
 # The fake hc stands in for both machines. Its "other machine" is a private
 # directory that every exec, file write, and run --cwd reaches only through a
@@ -27,7 +28,7 @@ REAL_GIT=$(command -v git)
 
 # make_fake_hc <dir>: the fake core. Every call is logged as
 # <cmd>\x1f<arg>... in <dir>/log. State lives in <dir>:
-#   machines.json   `machine ls` answer (default: laptop connected at 0.1.18)
+#   machines.json   `machine ls` answer (default: worker-host connected at 0.1.18)
 #   unreachable     every --on call fails as an unreachable machine
 #   reverse-as      the name the other machine's hc uses for this one
 #   remote/         the other machine's filesystem, seen as /fm-remote-root
@@ -69,7 +70,7 @@ case "$cmd" in
     ;;
   machine)
     if [ -f "$D/machines.json" ]; then cat "$D/machines.json"
-    else printf '{"machines":[{"name":"laptop","state":"connected","version":"0.1.18"}]}\n'; fi
+    else printf '{"machines":[{"name":"worker-host","state":"connected","version":"0.1.18"}]}\n'; fi
     ;;
   exec)
     on='' cwd=''
@@ -243,16 +244,16 @@ test_placement_config_is_exact_or_refused() {
   assert_equals "rc=1" "$out" "an absent config/hc-machine means no placement"
   cat > "$HOMEDIR/config/hc-machine" <<'EOF'
 # the bigger machine
-laptop
-firstmate-as mini   # what it calls this one
+worker-host
+firstmate-as firstmate-host   # what it calls this one
 projects /Users/me/code/
 EOF
   # shellcheck disable=SC2016 # the inner shell expands it
   out=$(hc_shell 'fm_backend_hc_placement_config "$FM_HOME/config/hc-machine" && echo "$FM_BACKEND_HC_PLACE_MACHINE|$FM_BACKEND_HC_PLACE_FIRSTMATE_AS|$FM_BACKEND_HC_PLACE_PROJECTS|$FM_BACKEND_HC_PLACE_CLAUDE_CONFIG"')
-  assert_equals "laptop|mini|/Users/me/code|" "$out" "a valid file names the machine, the way back, and the projects directory"
-  for bad in $'laptop\nprojects /Users/me/code' $'laptop\nfirstmate-as mini\nprojects code' \
-    $'laptop\nfirstmate-as mini\nprojects /a\ncolour blue' $'laptop pro\nfirstmate-as mini\nprojects /a' \
-    $'laptop\nfirstmate-as mini\nprojects /a\nprojects /b' $'laptop\nfirstmate-as mini\nprojects /a/../b'; do
+  assert_equals "worker-host|firstmate-host|/Users/me/code|" "$out" "a valid file names the machine, the way back, and the projects directory"
+  for bad in $'worker-host\nprojects /Users/me/code' $'worker-host\nfirstmate-as firstmate-host\nprojects code' \
+    $'worker-host\nfirstmate-as firstmate-host\nprojects /a\ncolour blue' $'worker-host pro\nfirstmate-as firstmate-host\nprojects /a' \
+    $'worker-host\nfirstmate-as firstmate-host\nprojects /a\nprojects /b' $'worker-host\nfirstmate-as firstmate-host\nprojects /a/../b'; do
     printf '%s\n' "$bad" > "$HOMEDIR/config/hc-machine"
     rc=0
     # shellcheck disable=SC2016 # the inner shell expands it
@@ -267,13 +268,14 @@ test_machine_qualified_records_bind_their_machine() {
   local meta out
   setup_case records
   # shellcheck disable=SC2016 # the inner shell expands it
-  out=$(hc_shell 'for a in t3 laptop/t3 a/b/t3 laptop/ /t3 laptop/x3; do fm_backend_hc_address_valid "$a" && printf "%s:ok " "$a" || printf "%s:no " "$a"; done')
-  assert_equals "t3:ok laptop/t3:ok a/b/t3:no laptop/:no /t3:no laptop/x3:no " "$out" "an address is t<id> or <machine>/t<id>"
+  out=$(hc_shell 'for a in t3 worker-host/t3 a/b/t3 worker-host/ /t3 worker-host/x3; do fm_backend_hc_address_valid "$a" && printf "%s:ok " "$a" || printf "%s:no " "$a"; done')
+  assert_equals "t3:ok worker-host/t3:ok a/b/t3:no worker-host/:no /t3:no worker-host/x3:no " "$out" "an address is t<id> or <machine>/t<id>"
   meta="$D/a1.meta"
-  printf 'window=fmtest:laptop/t4\nendpoint_task_id=a1\nworktree=/wt\nproject=/p\nbackend=hc\nhc_session=fmtest\nhc_terminal=laptop/t4\nhc_machine=laptop\n' > "$meta"
+  printf 'window=fmtest:worker-host/t4\nendpoint_task_id=a1\nworktree=/wt\nproject=/p\nbackend=hc\nhc_session=fmtest\nhc_terminal=worker-host/t4\nhc_machine=worker-host\n' > "$meta"
   out=$(bash -c '. "'"$ROOT"'/bin/fm-backend.sh"; fm_backend_validate_task_endpoint "'"$meta"'" a1 && echo "$FM_BACKEND_VALIDATED_BACKEND $FM_BACKEND_VALIDATED_TARGET"')
-  assert_equals "hc fmtest:laptop/t4" "$out" "a placed record validates to its machine-qualified target"
-  for bad in 'hc_machine=desk|hc_terminal=laptop/t4' '|hc_terminal=laptop/t4' 'hc_machine=laptop|hc_terminal=t4'; do
+  assert_equals "hc fmtest:worker-host/t4" "$out" "a placed record validates to its machine-qualified target"
+  for bad in 'hc_machine=desk|hc_terminal=worker-host/t4' '|hc_terminal=worker-host/t4' 'hc_machine=worker-host|hc_terminal=t4' \
+    '|hc_terminal=/t4'; do
     printf 'window=fmtest:%s\nendpoint_task_id=a1\nworktree=/wt\nproject=/p\nbackend=hc\nhc_session=fmtest\n%s\n%s\n' \
       "${bad#*hc_terminal=}" "${bad%%|*}" "${bad#*|}" > "$meta"
     expect_refused bash -c '. "'"$ROOT"'/bin/fm-backend.sh"; fm_backend_validate_task_endpoint "'"$meta"'" a1 2>/dev/null'
@@ -292,11 +294,11 @@ test_remote_exec_separates_transport_from_exit_codes() {
   setup_case exec
   mkdir -p "$D/remote/work"
   rc=0
-  out=$(hc_shell 'fm_backend_hc_remote_exec fmtest laptop 30 /fm-remote-root/work sh -c "pwd; echo hi; exit 7"' 2>/dev/null) || rc=$?
+  out=$(hc_shell 'fm_backend_hc_remote_exec fmtest worker-host 30 /fm-remote-root/work sh -c "pwd; echo hi; exit 7"' 2>/dev/null) || rc=$?
   expect_code 7 "$rc" "the program's own exit code comes back"
   assert_equals "/fm-remote-root/work"$'\n'"hi" "$out" "stdout comes back decoded, from the requested directory there"
   rc=0
-  hc_shell 'fm_backend_hc_remote_exec fmtest laptop 30 - sh -c "exit 255"' >/dev/null 2>&1 || rc=$?
+  hc_shell 'fm_backend_hc_remote_exec fmtest worker-host 30 - sh -c "exit 255"' >/dev/null 2>&1 || rc=$?
   expect_code 254 "$rc" "a program's own 255 never reads as a transport failure"
   for answer in '{"code":null,"signal":1,"stdout":"","stderr":"","timed_out":false,"truncated":false}' \
     '{"code":null,"signal":9,"stdout":"","stderr":"","timed_out":false,"truncated":false}' \
@@ -304,33 +306,84 @@ test_remote_exec_separates_transport_from_exit_codes() {
     '{"code":0,"signal":"","stdout":"","stderr":"","timed_out":false,"truncated":true}'; do
     printf '%s\n' "$answer" > "$D/exec.json"
     rc=0
-    hc_shell 'fm_backend_hc_remote_exec fmtest laptop 30 - true' >/dev/null 2>&1 || rc=$?
+    hc_shell 'fm_backend_hc_remote_exec fmtest worker-host 30 - true' >/dev/null 2>&1 || rc=$?
     expect_code 255 "$rc" "a killed, timed-out, or truncated run is a transport failure, never an exit code: $answer"
   done
   rm -f "$D/exec.json"
   touch "$D/unreachable"
   rc=0
-  out=$(hc_shell 'fm_backend_hc_remote_exec fmtest laptop 30 - true' 2>&1) || rc=$?
+  out=$(hc_shell 'fm_backend_hc_remote_exec fmtest worker-host 30 - true' 2>&1) || rc=$?
   expect_code 255 "$rc" "an unreachable machine is a transport failure"
   assert_contains "$out" "did not run" "the transport failure is named"
   pass "hc placement: remote exec returns the program's code and keeps 255 for a transport failure"
 }
 
+# Oracle: hc's exec stdout is base64 of the program's raw bytes. Two different
+# patches must never read alike, and an answer that cannot be decoded is no
+# answer at all (the remote_exec header: a failure never reads as output).
+test_remote_exec_keeps_bytes_and_refuses_undecodable_output() {
+  local out rc
+  setup_case exec-bytes
+  # "6Xg=" is the bytes e9 78: a Latin-1 e-acute then x, which is not UTF-8.
+  printf '{"code":0,"signal":null,"stdout":"6Xg=","stderr":"","timed_out":false,"truncated":false}\n' > "$D/exec.json"
+  out=$(hc_shell 'fm_backend_hc_remote_exec fmtest worker-host 30 - true | od -An -tx1' 2>/dev/null | tr -d ' \n')
+  assert_equals "e978" "$out" "stdout comes back byte for byte, with no replacement character"
+  printf '{"code":0,"signal":null,"stdout":" M dirty.txt\\n","stderr":"","timed_out":false,"truncated":false}\n' > "$D/exec.json"
+  rc=0
+  out=$(hc_shell 'fm_backend_hc_remote_exec fmtest worker-host 30 - true' 2>&1) || rc=$?
+  expect_code 255 "$rc" "output that is not base64 is a transport failure, never an empty answer"
+  assert_contains "$out" "not base64" "the failure is named"
+  pass "hc placement: remote exec returns raw bytes and refuses output it cannot decode"
+}
+
+# Oracle: a local spawn reads origin's current default branch and refuses when
+# it cannot (fm-spawn's pooled-worktree base check); a placed spawn's base
+# follows the same rule there, so a renamed default branch is never read stale.
+test_placed_default_branch_is_read_from_origin() {
+  local out
+  setup_case default-branch
+  make_repos "$D" proj
+  git_q -C "$D/origin.git" branch trunk main
+  git_q -C "$D/origin.git" symbolic-ref HEAD refs/heads/trunk
+  out=$(hc_shell 'fm_backend_hc_remote_default_branch fmtest worker-host /fm-remote-root/code/proj')
+  assert_equals "trunk" "$out" "origin's current default branch is read, not the clone's cached origin/HEAD"
+  git_q -C "$D/remote/code/proj" remote set-url origin "$D/no-such-origin.git"
+  expect_refused hc_shell 'fm_backend_hc_remote_default_branch fmtest worker-host /fm-remote-root/code/proj'
+  pass "hc placement: a placed base is origin's current default branch, or nothing"
+}
+
+# Oracle: once the worktree path is proved absent there, anything at it is the
+# creation's own, so a creation that fails after that point (here the answer
+# after git worktree add is lost) removes it rather than leaking it.
+test_placed_worktree_add_failure_removes_what_it_made() {
+  local out rc
+  setup_case wt-add-fail
+  make_repos "$D" proj
+  printf 'rev-parse\n' > "$D/exec-refuse"
+  rc=0
+  out=$(hc_shell 'fm_backend_hc_remote_worktree_add fmtest worker-host /fm-remote-root/code/proj /fm-remote-root/code/.fm-hc/x/w1 main' 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "a creation whose check cannot run must fail"$'\n'"$out"
+  assert_absent "$D/remote/code/.fm-hc/x/w1" "the worktree the failed creation made there is removed"
+  "$REAL_GIT" -C "$D/remote/code/proj" worktree list | grep -F ".fm-hc/x/w1" >/dev/null \
+    && fail "the clone there still lists the failed worktree"
+  pass "hc placement: a worktree creation that fails part way removes what it made there"
+}
+
 test_machine_readiness_gates_connection_and_versions() {
   local out
   setup_case ready
-  hc_shell 'fm_backend_hc_machine_ready fmtest laptop' >/dev/null 2>&1 || fail "a connected machine at the floor must be ready"
+  hc_shell 'fm_backend_hc_machine_ready fmtest worker-host' >/dev/null 2>&1 || fail "a connected machine at the floor must be ready"
   out=$(hc_shell 'fm_backend_hc_machine_ready fmtest desk' 2>&1) && fail "an unadded machine must refuse"
   assert_contains "$out" "not added" "an unadded machine is named as such"
-  printf '{"machines":[{"name":"laptop","state":"connecting","version":"0.1.18"}]}\n' > "$D/machines.json"
-  out=$(hc_shell 'fm_backend_hc_machine_ready fmtest laptop' 2>&1) && fail "a machine that is not connected must refuse"
+  printf '{"machines":[{"name":"worker-host","state":"connecting","version":"0.1.18"}]}\n' > "$D/machines.json"
+  out=$(hc_shell 'fm_backend_hc_machine_ready fmtest worker-host' 2>&1) && fail "a machine that is not connected must refuse"
   assert_contains "$out" "not connected" "the refusal says the machine is not connected"
   assert_contains "$out" "never falling back" "the refusal says nothing starts here instead"
-  printf '{"machines":[{"name":"laptop","state":"connected","version":"0.1.17"}]}\n' > "$D/machines.json"
-  out=$(hc_shell 'fm_backend_hc_machine_ready fmtest laptop' 2>&1) && fail "an old hc there must refuse"
+  printf '{"machines":[{"name":"worker-host","state":"connected","version":"0.1.17"}]}\n' > "$D/machines.json"
+  out=$(hc_shell 'fm_backend_hc_machine_ready fmtest worker-host' 2>&1) && fail "an old hc there must refuse"
   assert_contains "$out" "older than 0.1.18" "the refusal names the remote floor"
   rm -f "$D/machines.json"
-  out=$(FAKE_HC_VERSION=0.1.15 hc_shell 'fm_backend_hc_machine_ready fmtest laptop' 2>&1) && fail "an old local hc must refuse placement"
+  out=$(FAKE_HC_VERSION=0.1.15 hc_shell 'fm_backend_hc_machine_ready fmtest worker-host' 2>&1) && fail "an old local hc must refuse placement"
   assert_contains "$out" "older than 0.1.16" "the refusal names the local placement floor"
   pass "hc placement: a machine must be added, connected, and at the verified hc floor on both ends"
 }
@@ -338,13 +391,13 @@ test_machine_readiness_gates_connection_and_versions() {
 test_create_task_places_the_terminal_on_the_machine() {
   local out
   setup_case create
-  out=$(hc_shell 'fm_backend_hc_create_task fmtest fm-a1 /fm-remote-root/wt laptop')
-  assert_equals "laptop/t9" "$out" "the address names the machine"
-  assert_contains "$(grep '^run' "$D/log")" $'\x1f--on\x1flaptop\x1f' "hc run carries --on"
+  out=$(hc_shell 'fm_backend_hc_create_task fmtest fm-a1 /fm-remote-root/wt worker-host')
+  assert_equals "worker-host/t9" "$out" "the address names the machine"
+  assert_contains "$(grep '^run' "$D/log")" $'\x1f--on\x1fworker-host\x1f' "hc run carries --on"
   assert_contains "$(grep '^run' "$D/log")" $'--cwd\x1f/fm-remote-root/wt' "the terminal starts in the placed worktree"
-  rm -f "$D/laptop/t9.json"
+  rm -f "$D/worker-host/t9.json"
   printf '{"address":"t9"}\n' > "$D/run.json"
-  expect_refused hc_shell 'fm_backend_hc_create_task fmtest fm-a1 /fm-remote-root/wt laptop'
+  expect_refused hc_shell 'fm_backend_hc_create_task fmtest fm-a1 /fm-remote-root/wt worker-host'
   pass "hc placement: create_task starts the terminal there and refuses one that came up elsewhere"
 }
 
@@ -356,20 +409,20 @@ test_remote_agent_state_reads_the_group_there() {
   bash -c '(exec -a claude sleep 30); :' &
   wrapper=$!
   set +m
-  mkdir -p "$D/laptop"
+  mkdir -p "$D/worker-host"
   jq -n --argjson p "$wrapper" --arg h "$tag" \
-    '{address: "laptop/t9", state: "live", labels: {"firstmate.task": "fm-a1", "firstmate.home": $h},
-      foreground: {name: "bash", argv: ["bash"], cwd: "/x", pid: $p}}' > "$D/laptop/t9.json"
+    '{address: "worker-host/t9", state: "live", labels: {"firstmate.task": "fm-a1", "firstmate.home": $h},
+      foreground: {name: "bash", argv: ["bash"], cwd: "/x", pid: $p}}' > "$D/worker-host/t9.json"
   for _ in 1 2 3 4 5 6 7 8 9 10; do pgrep -g "$wrapper" -f '^claude' >/dev/null && break; sleep 0.1; done
-  out=$(hc_shell 'fm_backend_agent_state hc fmtest:laptop/t9')
+  out=$(hc_shell 'fm_backend_agent_state hc fmtest:worker-host/t9')
   assert_equals "alive" "$out" "a wrapper whose group runs a harness there is alive"
-  assert_contains "$(grep '^exec' "$D/log")" $'\x1f--on\x1flaptop\x1f' "the group is read on the machine the terminal runs on"
+  assert_contains "$(grep '^exec' "$D/log")" $'\x1f--on\x1fworker-host\x1f' "the group is read on the machine the terminal runs on"
   kill -- "-$wrapper" 2>/dev/null || true
   wait "$wrapper" 2>/dev/null || true
   out=$(FAKE_HC_DIR=$D PATH="$FB:$PATH" FM_HC_BIN="$FB/hc" FM_HOME=$HOMEDIR FM_ROOT_OVERRIDE=$HOMEDIR bash -c '
     . "'"$ROOT"'/bin/fm-backend.sh"; fm_backend_source hc
     fm_backend_hc_remote_exec() { return 255; }
-    fm_backend_agent_state hc fmtest:laptop/t9')
+    fm_backend_agent_state hc fmtest:worker-host/t9')
   assert_equals "unreadable" "$out" "a group scan that cannot run there proves nothing, so a shell is not called dead"
   pass "hc placement: agent state reads a placed terminal's process group on its own machine"
 }
@@ -378,17 +431,17 @@ test_placed_busy_state_reads_hc_native_status() {
   local tag out status
   setup_case busy
   tag=$(hometag_for "$HOMEDIR")
-  mkdir -p "$D/laptop"
-  printf 'backend=hc\nhc_session=fmtest\nhc_terminal=laptop/t9\nhc_machine=laptop\n' > "$HOMEDIR/state/p1.meta"
+  mkdir -p "$D/worker-host"
+  printf 'backend=hc\nhc_session=fmtest\nhc_terminal=worker-host/t9\nhc_machine=worker-host\n' > "$HOMEDIR/state/p1.meta"
   printf 'backend=hc\nhc_session=fmtest\nhc_terminal=t8\n' > "$HOMEDIR/state/l1.meta"
   for status in working idle; do
-    for addr in laptop/t9 t8; do
+    for addr in worker-host/t9 t8; do
       jq -n --arg a "$addr" --arg h "$tag" --arg s "$status" \
         '{address: $a, state: "live", labels: {"firstmate.task": "x", "firstmate.home": $h}, status: {state: $s}}' > "$D/$addr.json"
     done
     # shellcheck disable=SC2016 # the inner shell expands it
     out=$(hc_shell '. "'"$ROOT"'/bin/fm-busy-lib.sh"
-      fm_busy_classify hc fmtest:laptop/t9 claude p1 "$FM_HOME/state"; echo
+      fm_busy_classify hc fmtest:worker-host/t9 claude p1 "$FM_HOME/state"; echo
       fm_busy_classify hc fmtest:t8 claude l1 "$FM_HOME/state"')
     case "$status" in
       working) assert_equals "busy hc-native"$'\n'"unknown missing" "$out" "a placed worker reads hc's working as busy; a local hc task with no record stays unknown" ;;
@@ -406,8 +459,8 @@ placed_spawn_case() {  # <name> <id> -> sets D, FB, HOMEDIR, PROJ
   PROJ="$D/proj"
   fm_test_spawn_home "$HOMEDIR" claude
   fm_test_spawn_brief "$HOMEDIR" "$2"
-  printf 'laptop\nfirstmate-as mini\nprojects %s/code\n' "$VROOT" > "$HOMEDIR/config/hc-machine"
-  printf 'mini\n' > "$D/reverse-as"
+  printf 'worker-host\nfirstmate-as firstmate-host\nprojects %s/code\n' "$VROOT" > "$HOMEDIR/config/hc-machine"
+  printf 'firstmate-host\n' > "$D/reverse-as"
   mkdir -p "$HOMEDIR/user-home"
   jq -n --arg c "$D/remote/code/proj" '{projects: {($c): {hasTrustDialogAccepted: true}}}' \
     > "$HOMEDIR/user-home/.claude.json"
@@ -426,35 +479,38 @@ test_placed_spawn_builds_everything_on_the_machine() {
   placed_spawn_case spawn-ok "$id"
   tag=$(hometag_for "$HOMEDIR")
   wt="$VROOT/code/.fm-hc/$tag/$id"
-  out=$(run_placed_spawn "$id") || rc=$?
+  # A pinned account on this machine cannot follow the worker there.
+  printf '%s\n' "$HOMEDIR/pinned-claude" > "$HOMEDIR/config/claude-account"
+  out=$(run_placed_spawn "$id" 2>&1) || rc=$?
   expect_code 0 "$rc" "a placed scout spawn should succeed"$'\n'"$out"
+  assert_contains "$out" "config/claude-account does not apply to a worker placed on hc machine 'worker-host'" "a skipped account pin is named"
   meta="$HOMEDIR/state/$id.meta"
-  assert_grep "hc_machine=laptop" "$meta" "the record names the machine"
-  assert_grep "hc_terminal=laptop/t9" "$meta" "the record names the machine-qualified terminal"
-  assert_grep "window=fmtest:laptop/t9" "$meta" "the target is machine-qualified"
+  assert_grep "hc_machine=worker-host" "$meta" "the record names the machine"
+  assert_grep "hc_terminal=worker-host/t9" "$meta" "the record names the machine-qualified terminal"
+  assert_grep "window=fmtest:worker-host/t9" "$meta" "the target is machine-qualified"
   assert_grep "hc_clone=$VROOT/code/proj" "$meta" "the record names the clone there"
-  assert_grep "hc_firstmate_as=mini" "$meta" "the record names the way back"
+  assert_grep "hc_firstmate_as=firstmate-host" "$meta" "the record names the way back"
   assert_grep "hc_launch_file=$wt.launch." "$meta" "the record names the launch file staged there"
   assert_grep "worktree=$wt" "$meta" "the worktree is the one on the machine: $(cat "$meta")"
   [ "$("$REAL_GIT" -C "$D/remote/code/.fm-hc/$tag/$id" rev-parse --show-toplevel)" = "$D/remote/code/.fm-hc/$tag/$id" ] \
     || fail "the worktree was not created as a checkout on the machine"
   "$REAL_GIT" -C "$D/remote/code/proj" worktree list | grep -F "$D/remote/code/.fm-hc/$tag/$id" >/dev/null \
     || fail "the worktree is not a linked worktree of the clone there"
-  assert_contains "$(grep '^run' "$D/log")" $'\x1f--on\x1flaptop\x1f' "the terminal starts there"
+  assert_contains "$(grep '^run' "$D/log")" $'\x1f--on\x1fworker-host\x1f' "the terminal starts there"
   assert_contains "$(grep '^run' "$D/log")" $'--cwd\x1f'"$wt" "the terminal starts in the placed worktree"
   assert_not_contains "$(cat "$D/log")" "treehouse" "no treehouse runs for a placed task"
   launch=
   for f in "$D/remote/code/.fm-hc/$tag/"*.launch.*.sh; do [ -e "$f" ] && { launch=$f; break; }; done
   [ -n "$launch" ] || fail "the launch file was not staged on the machine"
   assert_grep "command rm -f -- '$VROOT/code/.fm-hc/$tag/$id.launch." "$launch" "the launch removes itself there"
-  assert_grep "hc file read --on mini" "$launch" "the launch prompt says how to read the brief from there"
+  assert_grep "hc file read --on firstmate-host" "$launch" "the launch prompt says how to read the brief from there"
   assert_no_grep "--add-dir" "$launch" "no local directory is granted to a worker that cannot see it"
   assert_no_grep "$HOMEDIR/state/$id.git-hooks" "$launch" "no local git hooks reach the placed worker"
   assert_contains "$(grep '^send' "$D/log")" ". '$VROOT/code/.fm-hc/$tag/$id.launch." "the pane sources the launch file there"
   assert_absent "$HOMEDIR/state/$id.busy-gen" "a placed worker gets no busy record nothing there could clear"
   record=$(grep -l 'Machine placement' "$HOMEDIR/state/operational-inbox/"*.msg 2>/dev/null | head -1)
   [ -n "$record" ] || fail "the launch brief record does not carry the placement section"
-  assert_grep "hc exec --on mini -- sh -c" "$record" "the brief says how to run Firstmate-path commands"
+  assert_grep "hc exec --on firstmate-host -- sh -c" "$record" "the brief says how to run Firstmate-path commands"
   assert_grep "brief for $id" "$record" "the brief itself follows the placement section"
   pass "hc placement: a placed scout gets its worktree, terminal, and launch on the machine, and its brief stays here"
 }
@@ -463,7 +519,7 @@ test_placed_spawn_refuses_before_creating_anything() {
   local id out rc
   id=refuse1
   placed_spawn_case refuse-disconnected "$id"
-  printf '{"machines":[{"name":"laptop","state":"disconnected","version":"0.1.18"}]}\n' > "$D/machines.json"
+  printf '{"machines":[{"name":"worker-host","state":"disconnected","version":"0.1.18"}]}\n' > "$D/machines.json"
   rc=0
   out=$(run_placed_spawn "$id") || rc=$?
   [ "$rc" -ne 0 ] || fail "a disconnected machine must refuse the spawn"
@@ -486,7 +542,7 @@ test_placed_spawn_refuses_before_creating_anything() {
   rc=0
   out=$(run_placed_spawn "$id") || rc=$?
   [ "$rc" -ne 0 ] || fail "a missing route back must refuse the spawn"
-  assert_contains "$out" "does not reach this machine as 'mini'" "the refusal names the missing route back"
+  assert_contains "$out" "does not reach this machine as 'firstmate-host'" "the refusal names the missing route back"
   assert_no_grep $'run\x1f' "$D/log" "no terminal may start without the route back"
   for f in "$HOMEDIR/state/".hc-reverse-route.*; do
     [ -e "$f" ] && fail "the route probe must not be left behind"
@@ -506,7 +562,7 @@ test_placed_spawn_refuses_before_creating_anything() {
   rc=0
   out=$(run_placed_spawn "$id") || rc=$?
   [ "$rc" -ne 0 ] || fail "a machine whose login shell cannot run claude must refuse the spawn"
-  assert_contains "$out" "claude does not run on hc machine 'laptop'" "the refusal names the machine and what failed"
+  assert_contains "$out" "claude does not run on hc machine 'worker-host'" "the refusal names the machine and what failed"
   assert_no_grep $'run\x1f' "$D/log" "no terminal may start where claude cannot run"
   assert_absent "$HOMEDIR/state/$id.meta" "no record may be written where claude cannot run"
   assert_absent "$D/remote/code/.fm-hc" "no worktree may be created where claude cannot run"
@@ -524,7 +580,7 @@ test_placed_spawn_refuses_before_creating_anything() {
   placed_spawn_case refuse-flag "$id"
   rm -f "$HOMEDIR/config/hc-machine"
   rc=0
-  out=$(run_placed_spawn "$id" --hc-machine laptop) || rc=$?
+  out=$(run_placed_spawn "$id" --hc-machine worker-host) || rc=$?
   [ "$rc" -ne 0 ] || fail "--hc-machine without config/hc-machine must refuse"
   assert_contains "$out" "needs config/hc-machine" "the refusal names the missing declaration"
   assert_no_grep $'run\x1f' "$D/log" "no terminal may start on an undeclared machine"
@@ -543,7 +599,7 @@ test_placed_spawn_abort_removes_its_launch_file_there() {
   out=$(run_placed_spawn "$id") || rc=$?
   [ "$rc" -ne 0 ] || fail "a launch file whose write was not confirmed must abort the spawn"$'\n'"$out"
   assert_contains "$out" "could not stage the launch command" "the abort names the launch file"
-  assert_grep $'kill\x1f--json\x1flaptop/t9' "$D/log" "the abort closes the terminal there"
+  assert_grep $'kill\x1f--json\x1fworker-host/t9' "$D/log" "the abort closes the terminal there"
   for f in "$D/remote/code/.fm-hc/$tag/"*.launch.*; do
     [ -e "$f" ] && fail "the staged launch file must be removed there after the abort: $f"
   done
@@ -563,17 +619,17 @@ test_placed_clone_check_resolves_a_symlinked_projects_path() {
   make_repos "$D" proj
   ln -s "$D/remote/code" "$D/remote/link"
   rc=0
-  out=$(hc_shell 'fm_backend_hc_remote_clone_check fmtest laptop /fm-remote-root/link/proj "'"$D/proj"'"' 2>&1) || rc=$?
+  out=$(hc_shell 'fm_backend_hc_remote_clone_check fmtest worker-host /fm-remote-root/link/proj "'"$D/proj"'"' 2>&1) || rc=$?
   expect_code 0 "$rc" "a clone reached through a symlinked projects path is the clone: $out"
   assert_equals "$VROOT/code/proj" "$out" "the check reports the clone's physical path there"
   rc=0
-  out=$(hc_shell 'fm_backend_hc_remote_clone_check fmtest laptop /fm-remote-root/link/nosuch "'"$D/proj"'"' 2>&1) || rc=$?
+  out=$(hc_shell 'fm_backend_hc_remote_clone_check fmtest worker-host /fm-remote-root/link/nosuch "'"$D/proj"'"' 2>&1) || rc=$?
   [ "$rc" -ne 0 ] || fail "a symlinked path with no clone behind it must be refused"
   assert_contains "$out" "no clone of this project" "the refusal names the missing clone"
 
   placed_spawn_case clone-link-spawn "$id"
   ln -s "$D/remote/code" "$D/remote/link"
-  printf 'laptop\nfirstmate-as mini\nprojects %s/link\n' "$VROOT" > "$HOMEDIR/config/hc-machine"
+  printf 'worker-host\nfirstmate-as firstmate-host\nprojects %s/link\n' "$VROOT" > "$HOMEDIR/config/hc-machine"
   tag=$(hometag_for "$HOMEDIR")
   rc=0
   out=$(run_placed_spawn "$id") || rc=$?
@@ -602,15 +658,15 @@ placed_teardown_case() {
   TLAUNCH_LOCAL="$D/remote/code/.fm-hc/$tag/task-x1.launch.s1.sh"
   printf 'claude\n' > "$TLAUNCH_LOCAL"
   git_q -C "$D/remote/code/proj" worktree add -q -b fm/task-x1 "$TWT_LOCAL" origin/main
-  mkdir -p "$D/laptop"
-  jq -n --arg h "$tag" '{address: "laptop/t9", state: "live",
+  mkdir -p "$D/worker-host"
+  jq -n --arg h "$tag" '{address: "worker-host/t9", state: "live",
     labels: {"firstmate.task": "fm-task-x1", "firstmate.home": $h},
-    foreground: {name: "zsh", argv: ["zsh"], cwd: "/x", pid: 1}}' > "$D/laptop/t9.json"
+    foreground: {name: "zsh", argv: ["zsh"], cwd: "/x", pid: 1}}' > "$D/worker-host/t9.json"
   fm_write_meta "$HOMEDIR/state/task-x1.meta" \
-    "window=fmtest:laptop/t9" "endpoint_task_id=task-x1" "worktree=$TWT" \
+    "window=fmtest:worker-host/t9" "endpoint_task_id=task-x1" "worktree=$TWT" \
     "project=$D/proj" "harness=claude" "kind=ship" "mode=no-mistakes" \
     "spawn_gen=placed-teardown-test" "backend=hc" "hc_session=fmtest" \
-    "hc_terminal=laptop/t9" "hc_machine=laptop" "hc_firstmate_as=mini" \
+    "hc_terminal=worker-host/t9" "hc_machine=worker-host" "hc_firstmate_as=firstmate-host" \
     "hc_clone=$VROOT/code/proj" "hc_launch_file=$VROOT/code/.fm-hc/$tag/task-x1.launch.s1.sh"
   touch "$HOMEDIR/state/.last-watcher-beat"
   fakebin=$FB
@@ -674,7 +730,7 @@ test_placed_teardown_refuses_unlanded_or_unreachable_work() {
   rc=0
   out=$(run_placed_teardown 2>&1) || rc=$?
   [ "$rc" -ne 0 ] || fail "an unreachable machine must refuse cleanup, even for pushed work"$'\n'"$out"
-  assert_contains "$out" "cannot reach hc machine 'laptop'" "the refusal names the unreachable machine"
+  assert_contains "$out" "cannot reach hc machine 'worker-host'" "the refusal names the unreachable machine"
   assert_present "$HOMEDIR/state/task-x1.meta" "the record must survive an unreachable machine"
   assert_present "$TWT_LOCAL" "the worktree there must survive an unreachable machine"
   pass "hc placement: teardown refuses uncommitted, unlanded, or unreachable work on the machine and keeps every record"
@@ -691,8 +747,8 @@ test_placed_teardown_removes_landed_work_there() {
   assert_absent "$TWT_LOCAL" "the worktree there is removed"
   "$REAL_GIT" -C "$D/remote/code/proj" show-ref --verify --quiet refs/heads/fm/task-x1 \
     && fail "the task branch in the clone there must be deleted"
-  assert_grep $'kill\x1f--json\x1flaptop/t9' "$D/log" "the terminal there is ended"
-  assert_absent "$D/laptop/t9.json" "the terminal there is removed"
+  assert_grep $'kill\x1f--json\x1fworker-host/t9' "$D/log" "the terminal there is ended"
+  assert_absent "$D/worker-host/t9.json" "the terminal there is removed"
   assert_absent "$HOMEDIR/state/task-x1.meta" "the record is retired"
   assert_absent "$TLAUNCH_LOCAL" "the staged launch file there is removed"
   assert_absent "$VROOT" "nothing was created under the placed path on this machine"
@@ -704,6 +760,76 @@ test_placed_teardown_removes_landed_work_there() {
   expect_code 0 "$rc" "--force discards the work there as it does here"$'\n'"$out"
   assert_absent "$TWT_LOCAL" "the forced worktree there is removed"
   pass "hc placement: teardown removes a placed worktree there only after proving its work landed, or under --force"
+}
+
+# fake_nm_there <head> <abort-works 1|0>: a no-mistakes on the machine whose
+# run R1, on the task branch at <head>, is parked at a gate until aborted.
+fake_nm_there() {
+  cat > "$FB/no-mistakes" <<SH
+#!/usr/bin/env bash
+case "\$*" in
+  "axi abort --run R1") [ "$2" = 0 ] || touch "$D/nm-aborted"; exit 0 ;;
+  "axi status"|"axi status --run R1")
+    if [ -e "$D/nm-aborted" ]; then
+      printf 'run:\n  id: "R1"\n  branch: fm/task-x1\n  status: cancelled\n  head: $1\noutcome: cancelled\n'
+    else
+      printf 'run:\n  id: "R1"\n  branch: fm/task-x1\n  status: awaiting_approval\n  head: $1\ngate:\n  step: review\n'
+    fi ;;
+esac
+exit 0
+SH
+  chmod +x "$FB/no-mistakes"
+}
+
+# Oracle: the header's Fix 1 - a ship's own run parked at a gate is aborted
+# before its worker is removed, and a run still parked afterwards refuses -
+# applied to the machine that run's daemon is on.
+test_placed_teardown_aborts_its_parked_no_mistakes_run_there() {
+  local out rc head
+  placed_teardown_case teardown-nm
+  git_q -C "$TWT_LOCAL" commit -q --allow-empty -m "the change"
+  git_q -C "$TWT_LOCAL" push -q origin fm/task-x1
+  head=$("$REAL_GIT" -C "$TWT_LOCAL" rev-parse HEAD)
+  fake_nm_there "$head" 1
+  rc=0
+  out=$(run_placed_teardown 2>&1) || rc=$?
+  expect_code 0 "$rc" "a parked run there is aborted and cleanup goes on"$'\n'"$out"
+  assert_present "$D/nm-aborted" "the parked run there was aborted"
+  assert_contains "$(grep '^exec' "$D/log")" $'no-mistakes\x1faxi\x1fabort\x1f--run\x1fR1' "the abort runs through hc on the machine"
+  assert_absent "$TWT_LOCAL" "the worktree there is removed after the abort"
+
+  placed_teardown_case teardown-nm-stuck
+  git_q -C "$TWT_LOCAL" commit -q --allow-empty -m "the change"
+  git_q -C "$TWT_LOCAL" push -q origin fm/task-x1
+  head=$("$REAL_GIT" -C "$TWT_LOCAL" rev-parse HEAD)
+  fake_nm_there "$head" 0
+  rc=0
+  out=$(run_placed_teardown 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "a run still parked after the abort must refuse cleanup"$'\n'"$out"
+  assert_contains "$out" "still parked after axi abort" "the refusal names the parked run"
+  assert_present "$HOMEDIR/state/task-x1.meta" "the record survives a run that would not stop"
+  assert_present "$TWT_LOCAL" "the worktree there survives a run that would not stop"
+  pass "hc placement: teardown aborts a placed ship's parked no-mistakes run on its machine, or refuses"
+}
+
+# Oracle: docs/hc-backend.md "Limits of a placed worker" - no relaunch path
+# reaches a placed worker; it refuses and stops nothing there.
+test_placed_relaunch_refuses_and_stops_nothing() {
+  local out rc
+  placed_teardown_case relaunch
+  mkdir -p "$HOMEDIR/data/task-x1"
+  printf 'brief\n' > "$HOMEDIR/data/task-x1/brief.md"
+  rc=0
+  out=$(FAKE_HC_DIR=$D FM_HC_BIN="$FB/hc" FM_HOME=$HOMEDIR FM_ROOT_OVERRIDE="$ROOT" \
+    FM_STATE_OVERRIDE="$HOMEDIR/state" FM_DATA_OVERRIDE="$HOMEDIR/data" \
+    FM_CONFIG_OVERRIDE="$HOMEDIR/config" PATH="$FB:$PATH" \
+    "$ROOT/bin/fm-control.sh" task-x1 relaunch --note "pick up where it stopped" 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "relaunching a placed worker must refuse"$'\n'"$out"
+  assert_contains "$out" "refusing" "the refusal says so"$'\n'"$out"
+  assert_no_grep $'kill\x1f' "$D/log" "nothing there is stopped"
+  assert_no_grep $'send\x1f' "$D/log" "nothing is typed there"
+  assert_present "$TWT_LOCAL" "the worktree there is untouched"
+  pass "hc placement: relaunch refuses a placed worker and stops nothing there"
 }
 
 # A disowned job the worker left running in its worktree survives the close of
@@ -728,7 +854,7 @@ test_placed_teardown_reaps_processes_left_in_the_worktree_there() {
     fail "a job left under the placed worktree must be stopped by teardown"$'\n'"$out"
   fi
   expect_code 0 "$rc" "a placed teardown with a leftover job should succeed once it is stopped"$'\n'"$out"
-  assert_contains "$out" "reaped leaked worktree process(es) on hc machine 'laptop': $pid" "the reap names the stopped job"
+  assert_contains "$out" "reaped leaked worktree process(es) on hc machine 'worker-host': $pid" "the reap names the stopped job"
   assert_absent "$TWT_LOCAL" "the worktree there is removed after the reap"
 
   placed_teardown_case teardown-reap-blind
@@ -738,7 +864,7 @@ test_placed_teardown_reaps_processes_left_in_the_worktree_there() {
   rc=0
   out=$(run_placed_teardown 2>&1) || rc=$?
   [ "$rc" -ne 0 ] || fail "a process scan that cannot run there must refuse the teardown"$'\n'"$out"
-  assert_contains "$out" "cannot reach hc machine 'laptop' to stop processes" "the refusal names the scan that could not run"
+  assert_contains "$out" "cannot reach hc machine 'worker-host' to stop processes" "the refusal names the scan that could not run"
   assert_present "$HOMEDIR/state/task-x1.meta" "the record survives a refused reap"
   assert_present "$TWT_LOCAL" "the worktree there survives a refused reap"
   pass "hc placement: teardown stops processes left under a placed worktree there, and refuses when it cannot scan for them"
@@ -812,7 +938,7 @@ test_placed_crew_state_reads_the_worktree_there() {
   rm -f "$D/unreachable"
   rm -rf "$TWT_LOCAL"
   out=$(crew_state)
-  assert_contains "$out" "worktree gone on hc machine laptop" "a placed worktree removed there reads as gone"
+  assert_contains "$out" "worktree gone on hc machine worker-host" "a placed worktree removed there reads as gone"
   pass "hc placement: current state reads a placed worktree's presence on its own machine"
 }
 
@@ -832,7 +958,7 @@ test_placed_done_gate_reads_the_head_there() {
   rc=0
   out=$(dod_gate "$line") || rc=$?
   [ "$rc" -ne 0 ] || fail "a head that exists only in the worktree there must not be accepted"
-  assert_contains "$out" "unreachable outside the worker copy on hc machine 'laptop'" "the refusal names the unpushed head there"
+  assert_contains "$out" "unreachable outside the worker copy on hc machine 'worker-host'" "the refusal names the unpushed head there"
   git_q -C "$TWT_LOCAL" push -q origin fm/task-x1
   dod_gate "$line" >/dev/null || fail "a head reachable from the clone's remote-tracking refs there must be accepted"
   touch "$D/unreachable"
@@ -847,6 +973,9 @@ fm_test_run \
   test_placement_config_is_exact_or_refused \
   test_machine_qualified_records_bind_their_machine \
   test_remote_exec_separates_transport_from_exit_codes \
+  test_remote_exec_keeps_bytes_and_refuses_undecodable_output \
+  test_placed_default_branch_is_read_from_origin \
+  test_placed_worktree_add_failure_removes_what_it_made \
   test_machine_readiness_gates_connection_and_versions \
   test_create_task_places_the_terminal_on_the_machine \
   test_remote_agent_state_reads_the_group_there \
@@ -857,6 +986,8 @@ fm_test_run \
   test_placed_clone_check_resolves_a_symlinked_projects_path \
   test_placed_teardown_refuses_unlanded_or_unreachable_work \
   test_placed_teardown_removes_landed_work_there \
+  test_placed_teardown_aborts_its_parked_no_mistakes_run_there \
+  test_placed_relaunch_refuses_and_stops_nothing \
   test_placed_teardown_reaps_processes_left_in_the_worktree_there \
   test_placed_teardown_reap_skips_a_reused_pid \
   test_placed_done_gate_reads_the_head_there \

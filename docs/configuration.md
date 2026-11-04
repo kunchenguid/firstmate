@@ -708,7 +708,7 @@ It applies only to spawns that resolve the `hc` backend; every other backend ign
 The first non-comment line is the machine's name as `hc machine ls` shows it; the other lines are one key and its value, with `#` starting a comment:
 
 ```text
-laptop                        # the hc machine new ship and scout terminals start on
+worker-host                   # the hc machine new ship and scout terminals start on
 firstmate-as firstmate-host   # required: what that machine's own hc calls this machine
 projects /Users/me/code       # required: the absolute directory there holding one clone per project name
 claude-config /Users/me/.claude-work   # optional: the Claude config directory a worker there uses
@@ -717,11 +717,13 @@ claude-config /Users/me/.claude-work   # optional: the Claude config directory a
 Each key may appear once.
 A missing required key, an unknown key, a relative or `..`-carrying path, or a machine line with spaces makes the whole file invalid, and every hc ship or scout spawn then refuses rather than starting here.
 
-`fm-spawn.sh --hc-machine <name>` places one task explicitly and must name the machine the file declares; `--hc-machine local` keeps one task on this machine while the file exists.
-Use them to place one heavy task on the other machine while lighter tasks stay here, or to keep one task here while the file places the rest.
+While the file exists, every hc ship and scout spawn is placed on that machine unless it passes `--hc-machine local`, which keeps that one task here.
+`fm-spawn.sh --hc-machine <name>` states the placement explicitly and must name the machine the file declares; it never places a task when the file is absent.
+So to send heavy tasks to the other machine and keep lighter ones here, keep the file and pass `--hc-machine local` on each lighter task.
 `claude-config` is for a machine whose default Claude login is kept for another use, such as a supervisor.
 Placed workers then use that named Claude config directory there; the launch pins it with `CLAUDE_CONFIG_DIR`, and the trust check reads its store.
-A placed task records `hc_machine=`, `hc_firstmate_as=`, `hc_clone=`, and `hc_launch_file=` beside its hc endpoint fields, and every later step reads them.
+A placed worker's Claude account is whichever login that directory (or that machine's default) holds: `config/claude-account` and `config/claude-accounts` do not apply to it, and a spawn that skips them says so.
+[`hc-backend.md`](hc-backend.md#task-shape-and-metadata) lists the record fields a placed task carries.
 
 ## Away-mode supervisor backend (FM_SUPERVISOR_BACKEND / FM_SUPERVISOR_TARGET)
 

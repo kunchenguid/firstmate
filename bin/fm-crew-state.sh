@@ -212,13 +212,17 @@
 #      `resolved` never become current state or detail.
 #   5. Missing meta or torn-down worktree: report unknown · none. If no run is
 #      attributed to this crew, a dead endpoint also reports unknown · none rather
-#      than trusting a stale status log. On tmux, herdr, and rex, which own a
+#      than trusting a stale status log. On tmux, herdr, and rex, and for an hc
+#      task placed on another machine (hc_machine=), each of which has a
 #      recovery-grade classifier, only its positive death evidence reads as gone
 #      (the endpoint is authoritatively absent, or its pane holds no agent); an
 #      endpoint that merely failed to answer reports unknown · none as
 #      unreachable, and an alive endpoint whose scrollback read failed is still
-#      classified by step 4. Backends with no classifier keep reading a failed
-#      capture as gone. The fallback's own comment owns the per-verdict rules.
+#      classified by step 4. A placed task's worktree is checked on its machine
+#      through hc, and a machine that cannot be reached reads as unreachable,
+#      never as a torn-down worktree. Backends with no classifier keep reading
+#      a failed capture as gone. The fallback's own comment owns the
+#      per-verdict rules.
 #
 # Read-only and side-effect free. Always exits 0 on a successful read regardless
 # of state; exit 2 only on a usage error (no id).

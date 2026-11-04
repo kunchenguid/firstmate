@@ -3744,17 +3744,17 @@ Real Herdr.app exercise on 2026-11-02: the official herdr-app 0.1.11 bundle (sha
 ### Workers on another machine
 
 Measured on 2026-11-04 with `hc 0.1.16` on this machine (Linux 7.2) and `hc 0.1.18` on the other machine (macOS, Darwin 25.6.0), entirely inside lab sessions.
-This machine ran an `fm-hclab-*` core, and the other machine was added into a same-named lab session there with `bin/fm-hc-lab.sh run <s> machine add <ssh-target> --name laptop --session <s>`.
-That lab core was given its route back with `hc exec --on laptop -- hc machine add <ssh-target> --name <firstmate-as> --session <s>`.
+This machine ran an `fm-hclab-*` core, and the other machine was added into a same-named lab session there with `bin/fm-hc-lab.sh run <s> machine add <ssh-target> --name worker-host --session <s>`.
+That lab core was given its route back with `hc exec --on worker-host -- hc machine add <ssh-target> --name <firstmate-as> --session <s>`.
 A scratch home here and a scratch directory there held everything else.
 Afterward no lab process, lab core state, or scratch file remained on either machine.
 
 | Probe | Result |
 | --- | --- |
-| `hc run --bg --json --on laptop --no-parent --outlive-parent --no-notify --cwd <dir> --label ...` | Printed `{"address":"laptop/t1",...}`; `get`, `read`, `send`, `keys`, `kill`, and `rm` through this core all accept `laptop/t1`. |
-| `hc ls --json --label firstmate.task=<label>` | Listed `laptop/t1`: a label query spans the added machines. |
-| `hc get --json laptop/t99` and `hc get --json nosuch/t1` | Exit 3 `not_found` for a missing terminal there; exit 4 `machine_unknown` for an unknown machine. |
-| `hc exec --on laptop -- sh -c 'exit 7'` | Exit 7; in `--json` form hc exits 0 and reports `code`, base64 `stdout`/`stderr`, `timed_out`, and `truncated`, and a `--timeout` overrun reports `code:null, timed_out:true`. |
+| `hc run --bg --json --on worker-host --no-parent --outlive-parent --no-notify --cwd <dir> --label ...` | Printed `{"address":"worker-host/t1",...}`; `get`, `read`, `send`, `keys`, `kill`, and `rm` through this core all accept `worker-host/t1`. |
+| `hc ls --json --label firstmate.task=<label>` | Listed `worker-host/t1`: a label query spans the added machines. |
+| `hc get --json worker-host/t99` and `hc get --json nosuch/t1` | Exit 3 `not_found` for a missing terminal there; exit 4 `machine_unknown` for an unknown machine. |
+| `hc exec --on worker-host -- sh -c 'exit 7'` | Exit 7; in `--json` form hc exits 0 and reports `code`, base64 `stdout`/`stderr`, `timed_out`, and `truncated`, and a `--timeout` overrun reports `code:null, timed_out:true`. |
 | `hc machine ls --json` | Each machine's `state` (`connecting` right after `add`, then `connected`) and its hc `version`. |
 | A lab session name of 23 characters, added on macOS | Refused there: `the socket path ... is too long here (105 bytes; this system allows 103)`, so a two-machine lab needs a short name. |
 
@@ -3762,7 +3762,7 @@ A real `bin/fm-spawn.sh` then placed a Claude scout there, with `config/hc-machi
 
 | Step | Result |
 | --- | --- |
-| `bin/fm-spawn.sh e2e1 <project> --scout --backend hc --harness claude` | `spawned e2e1 harness=claude kind=scout window=<s>:laptop/t1 worktree=<scratch>/code/.fm-hc/<hometag>/e2e1`; meta carried `hc_terminal=laptop/t1`, `hc_machine=laptop`, `hc_firstmate_as`, and `hc_clone`. |
+| `bin/fm-spawn.sh e2e1 <project> --scout --backend hc --harness claude` | `spawned e2e1 harness=claude kind=scout window=<s>:worker-host/t1 worktree=<scratch>/code/.fm-hc/<hometag>/e2e1`; meta carried `hc_terminal=worker-host/t1`, `hc_machine=worker-host`, `hc_firstmate_as`, and `hc_clone`. |
 | That machine's own core | Listed `t1` with `firstmate.task`, `firstmate.home`, `herdr.space`, and `herdr.tab`, with its cwd in the placed worktree. |
 | `git -C <worktree> worktree list` there | The worktree was a detached linked worktree of the scratch clone. |
 | Launch | The staged launch file had removed itself; Claude started there and showed its first-run screen. |
@@ -3775,7 +3775,7 @@ A placed ship record over a second worktree there then exercised teardown's land
 
 | State there | `bin/fm-teardown.sh ship1` |
 | --- | --- |
-| Machine removed from the lab core | `REFUSED: cannot reach hc machine 'laptop' to inspect worktree ... for unlanded work`; record and worktree kept. |
+| Machine removed from the lab core | `REFUSED: cannot reach hc machine 'worker-host' to inspect worktree ... for unlanded work`; record and worktree kept. |
 | One unpushed commit | `REFUSED: worktree ... has work not on any remote and not landed`, naming the commit; record and worktree kept. |
 | Clean at `origin/master` | Complete; the worktree and its branch were removed there and the record retired. |
 

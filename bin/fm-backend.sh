@@ -926,7 +926,7 @@ fm_backend_validate_task_endpoint() {  # <meta-file> <task-id>
       case "$terminal" in
         */*)
           hc_address=${terminal#*/}
-          [ "${terminal%%/*}" = "$hc_machine" ] || hc_address=
+          [ -n "$hc_machine" ] && [ "${terminal%%/*}" = "$hc_machine" ] || hc_address=
           ;;
         *) [ -z "$hc_machine" ] || hc_address= ;;
       esac

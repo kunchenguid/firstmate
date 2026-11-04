@@ -81,9 +81,11 @@
 # A worktree placed on another hc machine (hc_machine= in meta,
 # docs/hc-backend.md "Workers on another machine") gets this same proof, every
 # git read running there through hc; a machine that cannot be reached refuses.
-# Before the second proof its terminal is closed, its staged launch file
-# (hc_launch_file=) is removed there, and Fix 2's worktree process reap runs
-# there through hc, refusing when that scan cannot run or a process survives;
+# Fix 1 reads and aborts its parked no-mistakes run there through hc
+# (conclude_placed_no_mistakes_run). Before the second proof its terminal is
+# closed, its staged launch file (hc_launch_file=) is removed there, and Fix
+# 2's worktree process reap runs there through hc, refusing when that scan
+# cannot run or a process survives;
 # the worktree and branch are then removed there instead of returned to a pool.
 # Safety is proved again after task processes are reaped, before backlog-close
 # publication, branch deletion, or worktree return.
@@ -2392,6 +2394,43 @@ conclude_task_no_mistakes_run() {  # <worktree>
   return 1
 }
 
+# Fix 1 for a worktree placed on another hc machine: its no-mistakes runs
+# belong to that machine's daemon, so status and abort run there through hc,
+# in the worktree. Only a run on this worktree's exact branch, parked at a
+# gate, whose head is this worktree's HEAD or a descendant of it, is aborted;
+# a run this cannot attribute that strictly is left alone, as is a machine
+# with no no-mistakes (the same best-effort residual as the local read).
+placed_nm() {  # <no-mistakes args...>
+  fm_backend_hc_remote_exec "$TEARDOWN_HC_SESSION" "$TEARDOWN_HC_MACHINE" "$NM_TEARDOWN_TIMEOUT" "$WT" no-mistakes "$@"
+}
+conclude_placed_no_mistakes_run() {
+  local out branch head run_id run_branch run_head run_full status outcome rc
+  [ "$KIND" = ship ] || return 0
+  out=$(placed_nm axi status 2>/dev/null) || return 0
+  branch=$(teardown_wt_git symbolic-ref --quiet --short HEAD 2>/dev/null) || return 0
+  head=$(teardown_wt_git rev-parse --verify HEAD 2>/dev/null) || return 0
+  run_id=$(fm_nm_strip_quotes "$(fm_nm_field "$out" id)")
+  run_branch=$(fm_nm_strip_quotes "$(fm_nm_field "$out" branch)")
+  run_head=$(fm_nm_strip_quotes "$(fm_nm_field "$out" head)")
+  outcome=$(fm_nm_strip_quotes "$(fm_nm_field "$out" outcome)")
+  status=$(fm_nm_strip_quotes "$(fm_nm_field "$out" status)")
+  [ -n "$run_id" ] && [ -n "$branch" ] && [ "$run_branch" = "$branch" ] && [ -z "$outcome" ] || return 0
+  case "$status" in awaiting_approval|fix_review) ;; *) return 0 ;; esac
+  [ -n "$run_head" ] || return 0
+  run_full=$(teardown_wt_git rev-parse --verify --quiet "$run_head^{commit}" 2>/dev/null) || return 0
+  [ "$run_full" = "$head" ] || teardown_wt_git merge-base --is-ancestor "$head" "$run_full" >/dev/null 2>&1 || return 0
+  echo "teardown: no-mistakes run for $ID on hc machine '$TEARDOWN_HC_MACHINE' is parked at a gate; aborting before the worker is removed" >&2
+  placed_nm axi abort --run "$run_id" >/dev/null 2>&1 || true
+  out=$(placed_nm axi status --run "$run_id" 2>&1) && rc=0 || rc=$?
+  if [ "$rc" -eq 0 ]; then
+    task_status_is_terminal_run "$out" "$run_id" && return 0
+  elif [ "$rc" -ne 255 ] && task_status_is_run_not_found "$out" "$run_id"; then
+    return 0
+  fi
+  echo "REFUSED: no-mistakes run for $ID on hc machine '$TEARDOWN_HC_MACHINE' is still parked after axi abort; abort it there (hc exec --on $TEARDOWN_HC_MACHINE --cwd $WT -- no-mistakes axi abort --run $run_id) before retrying teardown." >&2
+  return 1
+}
+
 # Fix 2 (see script header): pids of every process whose CURRENT WORKING
 # DIRECTORY is exactly $1 or under it, from one bounded system-wide `lsof -a
 # -d cwd` scan (never the recursive +D file-tree walk, which lsof itself
@@ -3864,10 +3903,14 @@ fi
 # kind=secondmate: a secondmate home's own runtime lifecycle is owned by the
 # dedicated process-event and firstmate-home removal machinery further below,
 # not by task-worktree cleanup.
-# A placed worktree's no-mistakes runs belong to its own machine's daemon,
-# which this machine cannot address.
-if [ "$KIND" != secondmate ] && teardown_owns_worktree && [ -z "$TEARDOWN_HC_MACHINE" ]; then
-  conclude_task_no_mistakes_run "$WT"
+# A placed worktree's no-mistakes runs belong to its own machine's daemon, so
+# they are concluded there through hc.
+if [ "$KIND" != secondmate ] && teardown_owns_worktree; then
+  if [ -n "$TEARDOWN_HC_MACHINE" ]; then
+    conclude_placed_no_mistakes_run
+  else
+    conclude_task_no_mistakes_run "$WT"
+  fi
 fi
 
 # A Herdr pane's top-level shell lives in its leased copy, so the reap and the
