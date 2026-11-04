@@ -516,12 +516,10 @@ fm_dod_manual_pr_block() {  # <branch> <forge-cli> <draft-check> <contract-suffi
 # Definition of done
 Delivery contract: mode=no-mistakes$suffix pr=manual
 Ship branch: $branch
+Terminal condition: \`done [at=<epoch>]: PR {url} checks green\`. That is this task's ONLY legal \`done:\` line: a commit with no PR is not done.
 This project's pull-request text is written by hand: the pipeline's \`pr\` step would rewrite the title and body you write on every validated push, so **no-mistakes runs here as a validation pass that pushes the branch**, and you then open the PR yourself.
 Pass \`--skip pr,ci\` on every \`no-mistakes axi run\` for this task, and skip nothing else: \`review\`, \`test\`, \`document\`, \`lint\`, and \`push\` still run, and \`ci\` has no pipeline-opened PR to watch.
-The task is complete only when committed on your branch.
-When you believe it is complete, append \`done [at=<epoch>]: {summary}\` to the status file and stop.
-Firstmate will then instruct you to run /no-mistakes to validate and push.
-That first \`done:\` is the handoff that starts the pipeline, which owns the push; it is not a request to push from this copy.
+Commit the finished implementation, then append \`working [at=<epoch>]: implemented, ready for the pipeline\` to the status file and stop the turn. Do not start the pipeline yourself; firstmate owns that runtime-specific invocation and sends it to you.
 ${nm_base}
 EOF
   fm_nm_driving_block no-ci

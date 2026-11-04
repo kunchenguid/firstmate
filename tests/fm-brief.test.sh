@@ -560,10 +560,10 @@ dod_body_line() {  # <brief> <n>
 # mode's single legal `done:` form, immediately after the machine-readable
 # delivery contract and ship branch lines a ship brief opens with.
 test_definition_of_done_leads_with_its_terminal_condition() {
-  local home id kind flag expect first second third
+  local home id kind contract flag expect first second third
   home="$TMP_ROOT/terminal-condition-home"
   mkdir -p "$home/data"
-  while IFS='|' read -r kind flag expect; do
+  while IFS='|' read -r kind contract flag expect; do
     [ -n "$kind" ] || continue
     id="brief-terminal-$kind"
     # shellcheck disable=SC2086  # flag is an intentional word-split arg list
@@ -577,7 +577,7 @@ test_definition_of_done_leads_with_its_terminal_condition() {
       [ "$first" = "$expect" ] \
         || fail "$kind: Definition of done must open with its terminal condition, got: $first"
     else
-      [ "$first" = "Delivery contract: mode=$kind" ] \
+      [ "$first" = "Delivery contract: mode=$contract" ] \
         || fail "$kind: Definition of done must open with its delivery contract line, got: $first"
       [ "$second" = "Ship branch: fm/$id" ] \
         || fail "$kind: ship branch must follow the delivery contract, got: $second"
@@ -585,10 +585,11 @@ test_definition_of_done_leads_with_its_terminal_condition() {
         || fail "$kind: terminal condition must follow the ship branch, got: $third"
     fi
   done <<ROWS
-no-mistakes|--mode no-mistakes|Terminal condition: \`done [at=<epoch>]: PR {url} checks green\`. That is this task's ONLY legal \`done:\` line: a commit with no PR is not done.
-direct-PR|--mode direct-PR|Terminal condition: \`done [at=<epoch>]: PR {url}\`. That is this task's ONLY legal \`done:\` line: a commit with no PR is not done.
-local-only|--mode local-only|Terminal condition: \`done [at=<epoch>]: ready in branch fm/brief-terminal-local-only\`. That is this task's ONLY legal \`done:\` line.
-scout|--scout|Terminal condition: \`done [at=<epoch>]: {one-line conclusion}\`. That is this task's ONLY legal \`done:\` line, and it is legal only once the report below exists and the completion gate passes; then append it to the status file and stop.
+no-mistakes|no-mistakes|--mode no-mistakes|Terminal condition: \`done [at=<epoch>]: PR {url} checks green\`. That is this task's ONLY legal \`done:\` line: a commit with no PR is not done.
+no-mistakes-manual|no-mistakes pr=manual|--mode no-mistakes --pr manual|Terminal condition: \`done [at=<epoch>]: PR {url} checks green\`. That is this task's ONLY legal \`done:\` line: a commit with no PR is not done.
+direct-PR|direct-PR|--mode direct-PR|Terminal condition: \`done [at=<epoch>]: PR {url}\`. That is this task's ONLY legal \`done:\` line: a commit with no PR is not done.
+local-only|local-only|--mode local-only|Terminal condition: \`done [at=<epoch>]: ready in branch fm/brief-terminal-local-only\`. That is this task's ONLY legal \`done:\` line.
+scout||--scout|Terminal condition: \`done [at=<epoch>]: {one-line conclusion}\`. That is this task's ONLY legal \`done:\` line, and it is legal only once the report below exists and the completion gate passes; then append it to the status file and stop.
 ROWS
   pass "fm-brief.sh: every scaffold's Definition of done leads with its mode-specific terminal condition"
 }
@@ -614,10 +615,11 @@ test_no_mistakes_hands_off_the_implementation_commit_without_done() {
 
   # A PR-delivering mode is never complete at a commit. local-only is excluded
   # deliberately: its terminal condition really is the committed branch.
-  for mode in no-mistakes direct-PR direct-PR:gerrit; do
+  for mode in no-mistakes no-mistakes:manual direct-PR direct-PR:gerrit; do
     id="brief-premature-${mode/:/-}"
     case "$mode" in
       *:gerrit) set -- --mode "${mode%%:*}" --forge gerrit ;;
+      *:manual) set -- --mode "${mode%%:*}" --pr manual ;;
       *) set -- --mode "$mode" ;;
     esac
     FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj "$@" >/dev/null 2>&1 \
@@ -625,6 +627,14 @@ test_no_mistakes_hands_off_the_implementation_commit_without_done() {
     assert_present "$home/data/$id/brief.md" "$mode: brief was not scaffolded"
     assert_no_grep "The task is complete only when committed on your branch" "$home/data/$id/brief.md" \
       "$mode: brief still calls a commit with no PR complete"
+    assert_no_grep "done [at=<epoch>]: {summary}" "$home/data/$id/brief.md" \
+      "$mode: brief still licenses a done: line for a bare implementation commit"
+    case "$mode" in
+      no-mistakes*)
+        assert_grep "Commit the finished implementation, then append \`working [at=<epoch>]: implemented, ready for the pipeline\` to the status file and stop the turn" "$home/data/$id/brief.md" \
+          "$mode: brief must hand off the implementation commit with the nonterminal working verb"
+        ;;
+    esac
   done
 
   # The handoff belongs to the pipeline mode alone; the faster paths deliver in
