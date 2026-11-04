@@ -26,7 +26,15 @@ class Node {
     this.checked = false;
     this.classList = {
       add: (c) => { this.className = (this.className + " " + c).trim(); },
+      remove: (c) => { this.className = this.className.split(/\s+/).filter((item) => item !== c).join(" "); },
       contains: (c) => this.className.split(/\s+/).includes(c),
+      toggle: (c, force) => {
+        const present = this.classList.contains(c);
+        const enabled = force === undefined ? !present : Boolean(force);
+        if (enabled && !present) this.classList.add(c);
+        if (!enabled && present) this.classList.remove(c);
+        return enabled;
+      },
     };
   }
   get textContent() {
@@ -58,6 +66,12 @@ const dataNode = new Node("script");
 dataNode.textContent = html
   .split('<script id="bearings-data" type="application/json">')[1]
   .split("</script>")[0];
+if (process.env.BOARD_GENERATED_OVERRIDE) {
+  const payload = JSON.parse(dataNode.textContent);
+  if (process.env.BOARD_GENERATED_OVERRIDE === "missing") delete payload.generated;
+  else payload.generated = process.env.BOARD_GENERATED_OVERRIDE;
+  dataNode.textContent = JSON.stringify(payload);
+}
 byId.set("bearings-data", dataNode);
 
 globalThis.document = {
@@ -67,6 +81,7 @@ globalThis.document = {
   getElementById: (id) => {
     if (!byId.has(id)) {
       const n = new Node("div");
+      if (id === "bb-freshness") n.hidden = true;
       new Node("div").appendChild(n);
       byId.set(id, n);
     }
@@ -80,9 +95,22 @@ globalThis.document = {
 };
 globalThis.window = {};
 globalThis.TextEncoder = TextEncoder;
+const NativeDate = Date;
+let currentTime = process.env.BOARD_NOW || "2026-08-26T00:00:00Z";
+globalThis.Date = class extends NativeDate {
+  constructor(...args) { super(...(args.length ? args : [currentTime])); }
+  static now() { return new NativeDate(currentTime).getTime(); }
+};
+const intervals = [];
+globalThis.window.setInterval = (callback) => { intervals.push(callback); return intervals.length; };
 
 const script = html.slice(html.indexOf("<script>") + "<script>".length, html.lastIndexOf("</script>"));
 new Function(script)();
+
+if (process.env.BOARD_TICK_NOW) {
+  currentTime = process.env.BOARD_TICK_NOW;
+  intervals.forEach((callback) => callback());
+}
 
 const badgesOf = (row) =>
   row.children
@@ -121,6 +149,8 @@ const errorText = [...byId.entries()]
   .join(" ");
 const empty = ch.children.filter((c) => c.className.includes("bb-empty")).map((c) => c.textContent);
 const more = ch.children.filter((c) => c.className.includes("bb-morechip")).map((c) => c.textContent);
+const freshness = byId.get("bb-freshness")?.textContent ?? "";
+const freshnessVisible = byId.has("bb-freshness") && !byId.get("bb-freshness").hidden;
 
 process.stdout.write(
-  JSON.stringify({ stats, underway, charted, empty, more, error: errorText }) + "\n");
+  JSON.stringify({ stats, underway, charted, empty, more, freshness, freshnessVisible, error: errorText }) + "\n");

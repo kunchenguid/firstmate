@@ -139,6 +139,11 @@ a { color: inherit; text-decoration: none; }
   max-width: var(--container-app); margin: 0 auto;
   padding: 26px 28px 72px; display: flex; flex-direction: column; gap: 22px;
 }
+.bb-freshness {
+  margin: 0; color: var(--text-muted); font-size: var(--fs-xs);
+  background: var(--surface-card-warm); border: 1px solid var(--border-soft);
+  border-radius: var(--radius-pill); padding: 5px 12px;
+}
 
 /* stat strip */
 .bb-stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; }
@@ -275,6 +280,11 @@ a { color: inherit; text-decoration: none; }
 @media (max-width: 900px) {
   .bb-cols { grid-template-columns: 1fr; }
 }
+@media (max-width: 520px) {
+  .bb-nav__inner { height: auto; min-height: 64px; padding: 12px 18px; flex-wrap: wrap; }
+  .bb-main { padding: 20px 18px 56px; }
+  .bb-freshness { flex: 1 1 100%; max-width: 100%; white-space: normal; }
+}
 </style>
 </head>
 <body>
@@ -289,6 +299,7 @@ a { color: inherit; text-decoration: none; }
       </span>
       <span class="bb-brand__wm">bearings</span>
     </span>
+    <p class="bb-freshness" id="bb-freshness" hidden aria-live="polite"></p>
   </div>
 </header>
 
@@ -455,7 +466,29 @@ __FM_BEARINGS_BOARD_DATA__
   function utf8ByteLength(text) { return new TextEncoder().encode(text).length; }
   var CHECK_SVG = '<svg class="fm-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>';
 
-  document.getElementById("bb-provenance").textContent = data.schema + " · " + data.generated;
+  var generatedAt = typeof data.generated === "string" ? new Date(data.generated) : null;
+  if (generatedAt && Number.isFinite(generatedAt.getTime())) {
+    var freshness = document.getElementById("bb-freshness");
+    function renderFreshness() {
+      var now = new Date();
+      var sameDay = generatedAt.getFullYear() === now.getFullYear() &&
+        generatedAt.getMonth() === now.getMonth() && generatedAt.getDate() === now.getDate();
+      var date = sameDay ? "" : generatedAt.toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" }) + " · ";
+      var time = generatedAt.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" });
+      var minutes = Math.max(0, Math.floor((now.getTime() - generatedAt.getTime()) / 60000));
+      var age;
+      if (minutes < 1) age = "just now";
+      else if (minutes < 60) age = minutes + " min ago";
+      else if (minutes < 1440) age = Math.floor(minutes / 60) + " h " + (minutes % 60) + " min ago";
+      else age = Math.floor(minutes / 1440) + " d " + Math.floor((minutes % 1440) / 60) + " h ago";
+      freshness.textContent = "Updated " + date + time + " · " + age;
+      freshness.hidden = false;
+    }
+    renderFreshness();
+    window.setInterval(renderFreshness, 60000);
+  }
+
+  document.getElementById("bb-provenance").textContent = data.schema;
 
   /* stat strip */
   var callTotal = data.captains_call.length;

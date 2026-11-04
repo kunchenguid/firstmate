@@ -94,11 +94,11 @@ require_listener_reached_poll() {  # <home>
 
 # Build the board from <underway-json> plus <charted-json> and return what the
 # renderer produced.
-render_board() {  # <home> <underway-json> <charted-json> [charted_more] [charted_warning_more]
-  local home=$1 underway=$2 charted=$3 more=${4:-0} warning_more=${5:-0} data="$1/payload.json"
+render_board() {  # <home> <underway-json> <charted-json> [charted_more] [charted_warning_more] [generated]
+  local home=$1 underway=$2 charted=$3 more=${4:-0} warning_more=${5:-0} generated=${6:-2026-08-26T00:00:00Z} data="$1/payload.json"
   jq -n --argjson underway "$underway" --argjson charted "$charted" \
-    --argjson more "$more" --argjson warning_more "$warning_more" '{
-    schema:"fm-bearings-board.v1", home:"render-home", generated:"2026-08-26T00:00Z",
+    --argjson more "$more" --argjson warning_more "$warning_more" --arg generated "$generated" '{
+    schema:"fm-bearings-board.v1", home:"render-home", generated:$generated,
     prs_live:false, captains_call:[], underway:$underway, landed:[],
     charted:$charted, charted_more:$more, charted_warning_more:$warning_more}' > "$data"
   PATH="$home/fakebin:$PATH" FM_HOME="$home" \
@@ -107,7 +107,9 @@ render_board() {  # <home> <underway-json> <charted-json> [charted_more] [charte
     LAVISH_AXI_STATE_DIR="$home/lavish-state" \
     "$BOARD" build "$data" >/dev/null || fail "the board did not build"
   require_listener_reached_poll "$home"
-  node "$HARNESS" "$home/.lavish/bearings-board.html" \
+  BOARD_NOW=${BOARD_NOW:-2026-08-26T01:40:00Z} BOARD_TICK_NOW=${BOARD_TICK_NOW:-} \
+    BOARD_GENERATED_OVERRIDE=${BOARD_GENERATED_OVERRIDE:-} \
+    node "$HARNESS" "$home/.lavish/bearings-board.html" \
     || fail "the built board could not be rendered"
 }
 
@@ -266,6 +268,58 @@ test_charted_rows_without_a_filed_date_follow_the_dated_rows_in_payload_order() 
   pass "charted rows with no filed date follow the dated rows in payload order"
 }
 
+test_freshness_uses_local_time_and_formats_hours_and_minutes() {
+  local home out
+  home=$(make_home freshness-hours)
+  out=$(TZ=America/Los_Angeles BOARD_NOW=2026-08-26T01:40:00Z render_board "$home" '[]' '[]' 0 0 2026-08-26T00:00:00Z)
+  printf '%s' "$out" | jq -e '.freshness == "Updated 5:00 PM · 1 h 40 min ago" and .freshnessVisible' >/dev/null \
+    || fail "freshness did not use browser-local time and age: $out"
+  pass "freshness renders the local update time and an hour-minute age"
+}
+
+test_freshness_formats_minutes_and_just_now() {
+  local home out
+  home=$(make_home freshness-minutes)
+  out=$(TZ=UTC BOARD_NOW=2026-08-26T00:05:00Z render_board "$home" '[]' '[]' 0 0 2026-08-26T00:00:00Z)
+  printf '%s' "$out" | jq -e '.freshness == "Updated 12:00 AM · 5 min ago"' >/dev/null \
+    || fail "freshness did not format a minute age: $out"
+  out=$(TZ=UTC BOARD_NOW=2026-08-26T00:00:50Z render_board "$home" '[]' '[]' 0 0 2026-08-26T00:00:00Z)
+  printf '%s' "$out" | jq -e '.freshness == "Updated 12:00 AM · just now"' >/dev/null \
+    || fail "freshness did not use just now below one minute: $out"
+  pass "freshness formats minute ages and uses just now under one minute"
+}
+
+test_freshness_formats_a_previous_local_date_and_day_age() {
+  local home out
+  home=$(make_home freshness-days)
+  out=$(TZ=America/Los_Angeles BOARD_NOW=2026-08-26T07:10:00Z render_board "$home" '[]' '[]' 0 0 2026-08-25T00:00:00Z)
+  printf '%s' "$out" | jq -e '.freshness == "Updated Aug 24, 2026 · 5:00 PM · 1 d 7 h ago"' >/dev/null \
+    || fail "freshness did not show the prior local date and day-hour age: $out"
+  pass "freshness includes the local date across day rollover and formats days"
+}
+
+test_freshness_updates_on_the_minute_tick() {
+  local home out
+  home=$(make_home freshness-tick)
+  out=$(TZ=UTC BOARD_NOW=2026-08-26T00:00:00Z BOARD_TICK_NOW=2026-08-26T01:00:00Z \
+    render_board "$home" '[]' '[]' 0 0 2026-08-26T00:00:00Z)
+  printf '%s' "$out" | jq -e '.freshness == "Updated 12:00 AM · 1 h 0 min ago"' >/dev/null \
+    || fail "freshness did not update after a timer tick: $out"
+  pass "freshness recalculates its age on the live timer"
+}
+
+test_missing_or_invalid_generated_time_hides_freshness() {
+  local home out
+  home=$(make_home freshness-invalid)
+  out=$(BOARD_GENERATED_OVERRIDE=missing render_board "$home" '[]' '[]')
+  printf '%s' "$out" | jq -e '.freshness == "" and (.freshnessVisible | not)' >/dev/null \
+    || fail "freshness appeared without a generated timestamp: $out"
+  out=$(BOARD_GENERATED_OVERRIDE=not-a-time render_board "$home" '[]' '[]')
+  printf '%s' "$out" | jq -e '.freshness == "" and (.freshnessVisible | not)' >/dev/null \
+    || fail "freshness appeared with an invalid generated timestamp: $out"
+  pass "freshness stays hidden when generated is missing or invalid"
+}
+
 test_an_underway_row_leads_with_the_task_name_and_keeps_its_run_status
 test_an_underway_identifier_label_is_not_replaced_by_run_status
 test_charted_next_reads_newest_filed_first
@@ -275,3 +329,8 @@ test_warnings_are_excluded_from_the_charted_next_count
 test_a_board_of_only_warnings_still_reports_nothing_queued
 test_omitted_warnings_never_count_as_more_queued
 test_an_omitted_kind_keeps_the_existing_queued_rendering
+test_freshness_uses_local_time_and_formats_hours_and_minutes
+test_freshness_formats_minutes_and_just_now
+test_freshness_formats_a_previous_local_date_and_day_age
+test_freshness_updates_on_the_minute_tick
+test_missing_or_invalid_generated_time_hides_freshness
