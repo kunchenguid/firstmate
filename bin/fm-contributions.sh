@@ -214,7 +214,8 @@ case "$RERAISE_INTERVAL" in
   0|off) RERAISE_INTERVAL=0 ;;
   *[!0-9]*) fail 'invalid reraise interval' ;;
   *)
-    [ -n "${RERAISE_INTERVAL#"${RERAISE_INTERVAL%%[!0]*}"}" ] || RERAISE_INTERVAL=0
+    RERAISE_INTERVAL=${RERAISE_INTERVAL#"${RERAISE_INTERVAL%%[!0]*}"}
+    [ -n "$RERAISE_INTERVAL" ] || RERAISE_INTERVAL=0
     ;;
 esac
 BUDGET=${FM_CONTRIBUTIONS_BUDGET:-20}
@@ -481,7 +482,7 @@ observe() { # canonical GitHub URL -> normalized JSON
     local repo_pid=$!
     local -a pids=("$comments_pid" "$reviews_pid" "$inline_pid" "$checks_pid" "$statuses_pid" "$repo_pid")
     printf '[]\n' > "$TMP/threads.json"
-    if [ "$TRACK_THREADS" = true ]; then
+    if [ "$TRACK_THREADS" = true ] || [ "$RERAISE_INTERVAL" -gt 0 ]; then
       FORGE_ERR="$TMP/threads.err" forge api graphql --paginate --slurp -f owner="${part%/*}" -f name="${part#*/}" -F number="$number" \
         -f query='query($owner:String!,$name:String!,$number:Int!,$endCursor:String){repository(owner:$owner,name:$name){pullRequest(number:$number){reviewThreads(first:100,after:$endCursor){nodes{isResolved comments(first:1){nodes{databaseId}}}pageInfo{hasNextPage endCursor}}}}}' \
         > "$TMP/threads.json" &
@@ -866,7 +867,7 @@ case "${1:-}" in
         ([$now, (try ($token | capture("(?<ts>[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z)").ts) catch null)] | map(select(. != null)) | max) as $ack_time
         | ($token | split(":") | if .[0] == "unanswered" then .[1:3] else .[:2] end | join(":")) as $token_key
         | .pending |= map(select(.token != $token))
-        | if .unanswered != null then
+        | if .unanswered != null and ($token | startswith("unanswered:pr:")) then
             .unanswered.acked = $ack_time
           else . end
         | if .threads != null then
