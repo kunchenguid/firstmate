@@ -956,6 +956,33 @@ test_teardown_does_not_archive_an_open_pr_as_merged() {
   pass "cleanup archives a pull request as merged only when a local merge record matches it"
 }
 
+test_teardown_archives_a_forge_confirmed_merge_without_a_local_marker() {
+  local case_dir out pr_head url show
+  url=https://github.com/example/repo/pull/7
+  case_dir=$(make_case forge-confirmed-merge)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit_file "$case_dir" feature.txt hello "add feature"
+  append_pr_meta_for_current_head "$case_dir"
+  pr_head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  add_gh_pr_merged_for_head "$case_dir" "$pr_head"
+  seed_backlog_in_flight "$case_dir"
+  [ ! -e "$case_dir/state/task-x1.pr-poll-merge-notified" ] \
+    || fail "forge-confirmed-merge: fixture planted a merge notification"
+
+  out=$(run_teardown "$case_dir" 2>&1) || fail "teardown of a forge-confirmed merge failed: $out"
+  [ "$(backlog_row_state "$case_dir")" = "done" ] \
+    || fail "forge-confirmed merge left the item $(backlog_row_state "$case_dir")"
+  grep -F '(merged' "$case_dir/data/backlog.md" >/dev/null \
+    || fail "a pull request the forge confirmed merged was not archived as merged"
+  show=$(tasks-axi show task-x1 --file "$case_dir/data/backlog.md")
+  printf '%s\n' "$show" | grep -F "links: \"pr:$url\"" >/dev/null \
+    || fail "a forge-confirmed merge did not close as the item's pr link: $show"
+  if grep -F 'PR not confirmed merged' "$case_dir/data/backlog.md" >/dev/null; then
+    fail "a forge-confirmed merge was recorded as unconfirmed"
+  fi
+  pass "cleanup archives a pull request as merged when teardown already confirmed that merge"
+}
+
 test_teardown_manual_backend_leaves_the_backlog_to_the_operator() {
   local case_dir out backlog_path
   case_dir=$(make_case tasks-axi-manual-optout)
@@ -6309,6 +6336,7 @@ test_teardown_closes_the_backlog_item_itself
 test_teardown_closes_a_gerrit_task_with_its_change_url_as_a_note
 test_teardown_closes_a_gitlab_task_with_its_merge_request_url_as_a_note
 test_teardown_does_not_archive_an_open_pr_as_merged
+test_teardown_archives_a_forge_confirmed_merge_without_a_local_marker
 test_teardown_manual_backend_leaves_the_backlog_to_the_operator
 test_local_only_truly_unpushed_refuses
 test_local_only_merged_to_local_main_allows

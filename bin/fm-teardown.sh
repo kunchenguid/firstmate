@@ -1290,6 +1290,7 @@ if [ "${FM_TEARDOWN_GUARD_DONE:-0}" != 1 ]; then
 fi
 HOME_PATH=$(grep '^home=' "$META" | cut -d= -f2- || true)
 PR_URL=$(grep '^pr=' "$META" | tail -1 | cut -d= -f2- || true)
+PR_MERGE_PROVEN=0
 # tasktmp is recorded by fm-spawn for tasks that set up a per-task temp root
 # (/tmp/fm-<id>/); absent for tasks spawned before that change, so tolerate empty.
 TASK_TMP=$(grep '^tasktmp=' "$META" | cut -d= -f2- || true)
@@ -1794,16 +1795,21 @@ content_in_default() {
 # default branch (fallback, which also covers the no-PR and gh-error paths). False
 # when neither proof establishes that the work landed.
 work_is_landed() {
-  local branch=$1
-  pr_is_merged "$branch" && return 0
+  local branch=$1 had_pr_url=0
+  [ -z "$PR_URL" ] || had_pr_url=1
+  if pr_is_merged "$branch"; then
+    [ "$had_pr_url" = 1 ] && PR_MERGE_PROVEN=1
+    return 0
+  fi
   content_in_default
 }
 
-# The completion links this teardown already holds locally. A scout's
-# deliverable is its report and a local-only ship lands on local main. A ship
-# carries its PR as a merged link only when a local merge record matches that
-# URL. Checked here, while those records still exist: cleanup removes them
-# before the close runs. An unproven GitHub or Forgejo PR is the open-PR note.
+# The completion links this teardown already holds. A scout's deliverable is
+# its report and a local-only ship lands on local main. A ship carries its PR
+# as a merged link when a local merge record matches that URL, or when
+# pr_is_merged already confirmed this recorded URL. The local-record check
+# runs here, while those records still exist: cleanup removes them before the
+# close runs. An unproven GitHub or Forgejo PR is the open-PR note.
 BACKLOG_DONE_ARGS=()
 backlog_done_args() {
   local data_relative close_mode
@@ -1817,12 +1823,16 @@ backlog_done_args() {
       if [ "$MODE" = local-only ]; then
         BACKLOG_DONE_ARGS=(--note "local main")
       elif [ -n "$PR_URL" ]; then
-        close_mode=$(fm_backlog_ship_pr_close_mode "$STATE" "$ID" "$PR_URL")
-        case "$close_mode" in
-          proven) BACKLOG_DONE_ARGS=(--pr "$PR_URL") ;;
-          open) BACKLOG_DONE_ARGS=(--note "$(fm_backlog_open_pr_note "$PR_URL")") ;;
-          *) BACKLOG_DONE_ARGS=(--pr "$PR_URL") ;;
-        esac
+        if [ "$PR_MERGE_PROVEN" = 1 ]; then
+          BACKLOG_DONE_ARGS=(--pr "$PR_URL")
+        else
+          close_mode=$(fm_backlog_ship_pr_close_mode "$STATE" "$ID" "$PR_URL")
+          case "$close_mode" in
+            proven) BACKLOG_DONE_ARGS=(--pr "$PR_URL") ;;
+            open) BACKLOG_DONE_ARGS=(--note "$(fm_backlog_open_pr_note "$PR_URL")") ;;
+            *) BACKLOG_DONE_ARGS=(--pr "$PR_URL") ;;
+          esac
+        fi
       fi
       ;;
   esac
