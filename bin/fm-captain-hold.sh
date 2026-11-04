@@ -874,7 +874,8 @@ write_hold_origin() {  # <task-id> <shown-body> <origin> [<label>, default "orig
     || fail "task $id lost its hold-set stamp before its origin was recorded"
   rest=$(printf '%s\n' "$body" | sed 1d | awk -v p="Captain hold $label: " 'index($0, p) != 1' \
     | awk 'NF || started { started = 1; print }')
-  new_body=$(printf '%s\nCaptain hold %s: %s' "$stamp" "$label" "$origin")
+  new_body=$stamp
+  [ -z "$origin" ] || new_body=$(printf '%s\nCaptain hold %s: %s' "$stamp" "$label" "$origin")
   if [ -n "$rest" ]; then
     new_body=$(printf '%s\n\n%s' "$new_body" "$rest")
   fi
@@ -1117,6 +1118,7 @@ command_hold() {
   done
   validate_slug task-id "$id"
   [ -n "$reason" ] || fail "reason must not be empty"
+  [ -z "$options" ] || [ -n "$rec" ] || fail "--option needs --rec \"<the option you recommend and why>\""
   [ -z "$key" ] || _fm_decision_slug_ok "$key" || fail "--key must be a privacy-safe slug: $key"
   # The pick and options live in the reason text, so every place the hold is shown carries them.
   if [ -n "$rec" ]; then
@@ -1239,10 +1241,12 @@ command_hold() {
   if [ -n "$origin" ]; then
     write_hold_origin "$id" "$(show_field "$show" body)" "$origin" || exit $?
   fi
-  if [ -n "$key" ]; then
+  if [ -n "$key" ] || [ "$pre" = 0 ]; then
     task_show_or_fail "$id" "task $id disappeared before its decision key was recorded"
     show=$TASK_SHOW_OUTPUT
-    write_hold_origin "$id" "$(show_field "$show" body)" "$key" key || exit $?
+    if [ -n "$key" ] || printf '%s\n' "$(decode_shown_value "$(show_field "$show" body)")" | grep -q '^Captain hold key: '; then
+      write_hold_origin "$id" "$(show_field "$show" body)" "$key" key || exit $?
+    fi
   fi
   printf '%s\n' "$id"
 }

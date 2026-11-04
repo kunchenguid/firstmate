@@ -702,6 +702,9 @@ test_hold_requires_a_pick_and_renders_options() {
     --option a --option b --option c --option d --option e >/dev/null 2>&1; then
     fail "hold accepted five options"
   fi
+  if run_captain "$home" hold sample-pick --reason "which route?" --option a --option b >/dev/null 2>&1; then
+    fail "hold accepted --option without --rec"
+  fi
   pass "hold requires a recommended pick and renders numbered options"
 }
 
@@ -721,6 +724,14 @@ test_hold_collapses_a_duplicate_decision_key() {
   run_captain "$home" hold sample-other --title "Other" --reason "tag?" --rec yes --key tag-gate >/dev/null \
     || fail "a distinct key was collapsed"
   tasks_in "$home" show sample-other >/dev/null || fail "a distinct key did not create its own hold"
+  printf 'Ship it.\n' > "$home/go.txt"
+  run_captain "$home" answer sample-first --decision-file "$home/go.txt" --release >/dev/null \
+    || fail "could not release the keyed ask"
+  run_captain "$home" hold sample-first --reason "new unkeyed ask" --rec yes >/dev/null \
+    || fail "could not re-hold the released task for a new ask"
+  run_captain "$home" hold sample-third --title "Third" --reason "ship again?" --rec yes --key ship-gate >/dev/null \
+    || fail "a reused key after release failed"
+  tasks_in "$home" show sample-third >/dev/null || fail "a stale key on a re-held task swallowed a new ask"
   pass "a duplicate decision key attaches to the open hold and distinct keys stay distinct"
 }
 
