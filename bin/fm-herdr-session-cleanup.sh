@@ -52,6 +52,7 @@ fm_backend_source herdr
 
 FM_HERDR_CLEANUP_UNJOURNALED=0
 FM_HERDR_CLEANUP_OWNED_ROOTS=()
+FM_HERDR_CLEANUP_FOREIGN_ROOTS=()
 
 fm_herdr_cleanup_warn() {
   printf 'warning: herdr session-start projection cleanup: %s\n' "$*" >&2
@@ -235,13 +236,21 @@ fm_herdr_cleanup_one() { # <session> <workspace> <title> <home-real>
 # real path of every local home in FM_LOCAL_FIRSTMATE_STATES and of every git
 # worktree listed by that home or by a project clone under its projects/. A
 # directory whose git top level is not itself lists nothing, so an enclosing
-# unrelated repository never widens the set.
+# unrelated repository never widens the set. A listed worktree that is itself
+# a Firstmate home (it holds a state/ or data/ directory) but is not one of the
+# local homes goes to FM_HERDR_CLEANUP_FOREIGN_ROOTS instead: shared git
+# history does not prove it belongs to this home.
 fm_herdr_cleanup_owned_roots_load() {
-  local state home repo top listed line root
+  local state home repo top listed line root local_home foreign
+  local -a homes=()
   FM_HERDR_CLEANUP_OWNED_ROOTS=()
+  FM_HERDR_CLEANUP_FOREIGN_ROOTS=()
   for state in "${FM_LOCAL_FIRSTMATE_STATES[@]}"; do
     home=$(CDPATH='' cd -- "$(dirname "$state")" 2>/dev/null && pwd -P) || continue
-    FM_HERDR_CLEANUP_OWNED_ROOTS+=("$home")
+    homes+=("$home")
+  done
+  FM_HERDR_CLEANUP_OWNED_ROOTS=(${homes[@]+"${homes[@]}"})
+  for home in ${homes[@]+"${homes[@]}"}; do
     for repo in "$home" "$home"/projects/*/; do
       repo=$(CDPATH='' cd -- "$repo" 2>/dev/null && pwd -P) || continue
       top=$(git -C "$repo" rev-parse --show-toplevel 2>/dev/null) || continue
@@ -252,7 +261,18 @@ fm_herdr_cleanup_owned_roots_load() {
         case "$line" in
           'worktree '*)
             root=$(CDPATH='' cd -- "${line#worktree }" 2>/dev/null && pwd -P) || continue
-            FM_HERDR_CLEANUP_OWNED_ROOTS+=("$root")
+            foreign=0
+            if [ -d "$root/state" ] || [ -d "$root/data" ]; then
+              foreign=1
+              for local_home in "${homes[@]}"; do
+                [ "$local_home" != "$root" ] || foreign=0
+              done
+            fi
+            if [ "$foreign" -eq 1 ]; then
+              FM_HERDR_CLEANUP_FOREIGN_ROOTS+=("$root")
+            else
+              FM_HERDR_CLEANUP_OWNED_ROOTS+=("$root")
+            fi
             ;;
         esac
       done <<< "$listed"
@@ -262,7 +282,8 @@ fm_herdr_cleanup_owned_roots_load() {
 
 # fm_herdr_cleanup_pane_owned <session> <pane>: true only when Herdr reports at
 # least one cwd for the exact pane and every reported cwd resolves inside one
-# of FM_HERDR_CLEANUP_OWNED_ROOTS.
+# of FM_HERDR_CLEANUP_OWNED_ROOTS and inside none of
+# FM_HERDR_CLEANUP_FOREIGN_ROOTS.
 fm_herdr_cleanup_pane_owned() {
   local session=$1 pane=$2 info paths path real root owned
   [ "${#FM_HERDR_CLEANUP_OWNED_ROOTS[@]}" -gt 0 ] || return 1
@@ -277,6 +298,11 @@ fm_herdr_cleanup_pane_owned() {
   ' 2>/dev/null) || return 1
   while IFS= read -r path; do
     real=$(CDPATH='' cd -- "$path" 2>/dev/null && pwd -P) || return 1
+    for root in ${FM_HERDR_CLEANUP_FOREIGN_ROOTS[@]+"${FM_HERDR_CLEANUP_FOREIGN_ROOTS[@]}"}; do
+      case "$real/" in
+        "$root"/*) return 1 ;;
+      esac
+    done
     owned=0
     for root in "${FM_HERDR_CLEANUP_OWNED_ROOTS[@]}"; do
       case "$real/" in

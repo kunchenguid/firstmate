@@ -339,6 +339,20 @@ case "$warning" in
   *) fail "an unowned leftover was preserved without an ownership warning: $warning" ;;
 esac
 pass "an idle task-label leftover from an unknown home is preserved with a warning"
+
+# A foreign home that is another worktree of this home's project repository:
+# git lists it, but its home markers show it belongs to another home.
+FOREIGN_HOME="$TMP_ROOT/foreign-home"
+git -C "$OWNED_PROJECT" worktree add -q --detach "$FOREIGN_HOME"
+mkdir -p "$FOREIGN_HOME/state" "$FOREIGN_HOME/work"
+reset_unjournaled; printf '%s\n' "$FOREIGN_HOME/work" > "$FIXTURE_DIR/cwd"
+warning=$(fm_herdr_session_cleanup 2>&1 >/dev/null)
+[ ! -s "$CLOSE_LOG" ] || fail "an idle leftover inside a foreign home worktree of the same repo was closed"
+case "$warning" in
+  *"not proven to be inside a local Firstmate home"*) ;;
+  *) fail "a foreign-home leftover was preserved without an ownership warning: $warning" ;;
+esac
+pass "an idle task-label leftover inside a foreign home worktree of the same repo is preserved with a warning"
 reset_unjournaled; printf '%s\n' "$TMP_ROOT/missing-dir" > "$FIXTURE_DIR/cwd"
 assert_preserved "unjournaled leftover whose cwd no longer exists"
 reset_unjournaled; : > "$FIXTURE_DIR/cwd"

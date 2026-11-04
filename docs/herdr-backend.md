@@ -464,6 +464,9 @@ Under the presentation lock, every cwd Herdr reports for the pane (`cwd` and `fo
 - A git worktree listed by a local home's repository.
 - A git worktree listed by a project clone under a local home's `projects/` directory.
 
+A listed git worktree is not proof by itself.
+A listed worktree that is itself a Firstmate home (it holds a `state/` or `data/` directory) but is not a local home is foreign.
+Every path inside a foreign home counts as not owned.
 A pane with no reported cwd, an unreadable cwd, or a cwd outside every owned path is preserved with a warning.
 
 Both paths then follow the same order:
