@@ -783,6 +783,91 @@ test_compound_raw_launch_places_brief_at_placeholder() {
   pass "a compound raw launch places the brief where it names __BRIEF__, with nothing appended"
 }
 
+# A raw launch may end in a shell separator or a comment. The staged launch
+# must still parse, start the worker, and retire this pane's OSC 7501 reporter
+# after it: the reporter's documented pidfile <state>/.osc7501watch-<tty>,
+# planted by the stand-in agent, must be gone once the launch returns. A
+# mistyped config/osc7501-status must warn on the pane rather than silently.
+test_raw_launch_trailing_separator_or_comment_keeps_disarm() {
+  local rec id out status launch raw n=0 agentbin result
+  for raw in 'custom-agent --flag;' 'custom-agent --flag # captain note'; do
+    n=$((n + 1))
+    id=raw-tail-$n-z15
+    rec=$(make_spawn_case "raw-tail-$n" claude "$id")
+    read_case_record "$rec"
+    out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" "$raw")
+    status=$?
+    expect_code 0 "$status" "raw launch '$raw' should spawn: $out"
+    launch=$(cat "$LAUNCH_LOG")
+    agentbin="$CASE_DIR/agentbin"
+    mkdir -p "$agentbin"
+    cat > "$agentbin/custom-agent" <<'SH'
+#!/bin/sh
+: > "${FM_TASK_INBOX%/*}/.osc7501watch-no-tty" && echo WORKER-RAN
+SH
+    chmod +x "$agentbin/custom-agent"
+    printf 'onn\n' > "$HOME_DIR/config/osc7501-status"
+    # Config warnings apply only after the writable, known-aware tty gates.
+    : > "$CASE_DIR/no-tty"
+    result=$(cd "$CASE_DIR" && isolated_pane_env REX_BLOCK=b1 PATH="$agentbin:$PATH" FM_OSC7501_TTY=no-tty \
+      /bin/sh -c "$launch" 2>&1)
+    status=$?
+    expect_code 0 "$status" "staged launch for raw '$raw' failed: $result"
+    assert_contains "$result" WORKER-RAN "staged launch for raw '$raw' never started the worker or planted its pidfile"
+    assert_contains "$result" 'osc7501-status: unknown value' "staged launch hid the reporter config warning"
+    [ ! -e "$HOME_DIR/state/.osc7501watch-no-tty" ] \
+      || fail "staged launch for raw '$raw' skipped the reporter disarm"
+  done
+  pass "a raw launch ending in a separator or a comment still runs the worker, its disarm, and config warnings"
+}
+
+# A raw launch's reporter follows the agent it establishes, while PATH holds
+# Claude 1.0.0 below the 2.1.295 native floor. A simple command naming a
+# harness by path is probed as itself: an absolute Claude 1.0.0 keeps its
+# reporter and an absolute Claude Code 2.1.316 reports natively, so it gets
+# none. A wrapper (`env claude`, harness word env), a prefix assignment, and a
+# compound command hide what runs, so they get no reporter either. The
+# stand-in agent reports whether a reporter pidfile <state>/.osc7501watch-*
+# exists while it runs.
+test_raw_launch_reporter_follows_established_agent() {
+  local rec id out status launch raw want n=0 oldbin newbin result
+  for raw in 'old|REPORTER-ARMED' 'new|NO-REPORTER' 'env claude --flag|NO-REPORTER' \
+    'FOO=1 claude --flag|NO-REPORTER' 'compound|NO-REPORTER'; do
+    want=${raw#*|}
+    raw=${raw%|*}
+    n=$((n + 1))
+    id=raw-native-$n-z15
+    rec=$(make_spawn_case "raw-native-$n" claude "$id")
+    read_case_record "$rec"
+    oldbin="$CASE_DIR/oldbin"
+    newbin="$CASE_DIR/newbin"
+    mkdir -p "$oldbin" "$newbin"
+    cat > "$oldbin/claude" <<'SH'
+#!/bin/sh
+[ "$1" = --version ] && { echo "1.0.0 (Claude Code)"; exit 0; }
+if ls "${FM_TASK_INBOX%/*}"/.osc7501watch-* >/dev/null 2>&1; then echo REPORTER-ARMED; else echo NO-REPORTER; fi
+SH
+    sed 's/1\.0\.0/2.1.316/' "$oldbin/claude" > "$newbin/claude"
+    chmod +x "$oldbin/claude" "$newbin/claude"
+    case "$raw" in
+      old) raw="$oldbin/claude --flag" ;;
+      new) raw="$newbin/claude --flag" ;;
+      compound) raw="$oldbin/claude --flag && true" ;;
+    esac
+    out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" "$raw")
+    status=$?
+    expect_code 0 "$status" "raw launch '$raw' should spawn: $out"
+    launch=$(cat "$LAUNCH_LOG")
+    : > "$CASE_DIR/tty"
+    result=$(cd "$CASE_DIR" && isolated_pane_env REX_BLOCK=b1 \
+      PATH="$oldbin:$PATH" FM_OSC7501_TTY="$CASE_DIR/tty" /bin/sh -c "$launch" 2>&1)
+    status=$?
+    expect_code 0 "$status" "staged launch for raw '$raw' failed: $result"
+    assert_contains "$result" "$want" "raw '$raw' reporter state: $result"
+  done
+  pass "a raw launch keeps a reporter only for an established agent below its native floor"
+}
+
 test_chained_raw_launch_strips_ai_trailer_in_every_step() {
   local rec id out status launch body
   id=chained-raw-z15
@@ -2916,6 +3001,8 @@ test_plain_raw_launch_of_a_known_harness_gets_the_brief
 test_raw_claude_launch_gets_the_brief_doorbell
 test_other_raw_launches_launch_unchanged_with_a_warning
 test_compound_raw_launch_places_brief_at_placeholder
+test_raw_launch_trailing_separator_or_comment_keeps_disarm
+test_raw_launch_reporter_follows_established_agent
 test_chained_raw_launch_strips_ai_trailer_in_every_step
 test_claude_threads_model_and_effort
 test_codex_threads_model_and_effort
