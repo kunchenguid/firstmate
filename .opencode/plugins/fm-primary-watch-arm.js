@@ -24,6 +24,12 @@ let restorationInFlight = null;
 let armClose = new WeakMap();
 let armReadiness = new WeakMap();
 let armRecovery = new WeakMap();
+// Arms this plugin retired itself: their close is restoration bookkeeping, not
+// a supervision gap, so it never owes a retry.
+let armRetired = new WeakSet();
+// Arms a restoration is actively waiting on: their close is answered by that
+// restoration's own bounded retry, not by a second one.
+let restorationOwned = new WeakSet();
 
 function positiveInteger(name, fallback) {
   const value = Number(process.env[name]);
@@ -268,6 +274,7 @@ function waitForRetry(attempt) {
 
 async function retireArm(armChild) {
   if (!armChild) return true;
+  armRetired.add(armChild);
   armChild.kill("SIGTERM");
   const closed = armClose.get(armChild);
   if (!closed) return false;
@@ -291,19 +298,23 @@ function restorationFailure(status) {
 async function restoreAfterActionableClose(paths, sessionID, client, predecessorArmPid) {
   let failure = "";
   for (let attempt = 0; attempt <= REARM_RETRY_LIMIT; attempt += 1) {
-    const { status, armChild } = await ensureArm(paths, sessionID, client, predecessorArmPid, true);
-    if (status === "armed") return { failure: "", recovery: armRecovery.get(armChild) };
-    // An actionable line belongs to this arm's close handler.
-    // Do not retire it before that handler can start the successor cycle.
-    if (status === "wake") return { failure: "", recovery: armRecovery.get(armChild) };
-    failure = restorationFailure(status);
-    if (!(await retireArm(armChild))) {
-      setArmStatus("failed");
-      return { failure: `${failure}\nwatcher: FAILED - OpenCode could not restore watcher continuity because the unready successor arm did not exit within ${ARM_RETIRE_TIMEOUT_MS}ms` };
+    const { status, armChild } = await ensureArm(paths, sessionID, client, predecessorArmPid, true, true);
+    try {
+      if (status === "armed") return { failure: "", recovery: armRecovery.get(armChild) };
+      // An actionable line belongs to this arm's close handler.
+      // Do not retire it before that handler can start the successor cycle.
+      if (status === "wake") return { failure: "", recovery: armRecovery.get(armChild) };
+      failure = restorationFailure(status);
+      if (!(await retireArm(armChild))) {
+        setArmStatus("failed");
+        return { failure: `${failure}\nwatcher: FAILED - OpenCode could not restore watcher continuity because the unready successor arm did not exit within ${ARM_RETIRE_TIMEOUT_MS}ms` };
+      }
+      if (status === "read-only" || status === "not-primary" || status === "skipped") break;
+      if (attempt === REARM_RETRY_LIMIT) break;
+      await waitForRetry(attempt + 1);
+    } finally {
+      if (armChild) restorationOwned.delete(armChild);
     }
-    if (status === "read-only" || status === "not-primary" || status === "skipped") break;
-    if (attempt === REARM_RETRY_LIMIT) break;
-    await waitForRetry(attempt + 1);
   }
   setArmStatus("failed");
   return { failure: `${failure}\nwatcher: FAILED - OpenCode could not restore watcher continuity after ${REARM_RETRY_LIMIT} retries` };
@@ -394,9 +405,24 @@ function spawnArm(paths, sessionID, client, predecessorArmPid = "") {
     settleReadiness(classification.kind === "actionable" ? "wake" : "failed");
     const predecessor = String(armChild.pid ?? "");
     if (classification.kind === "actionable") {
-      if (restorationInFlight) return;
       retryFailures = 0;
       setArmStatus("wake");
+      if (restorationInFlight) {
+        // Continuity never queues behind delivery: this close would otherwise
+        // leave no watcher alive for the length of the wake prompt's handling
+        // turn. Arm its successor now; the durable row is still re-presented by
+        // whichever cycle picks the wake up (docs/watcher-continuity.md).
+        if (!child && !retryTimer) {
+          void ensureArm(paths, sessionID, client, predecessor).then((status) => {
+            // A quiet skip is not a failure: away mode and an unmet supervision
+            // need legitimately arm nothing, and a retry or an existing child
+            // already owns continuity.
+            if (["armed", "wake", "existing", "retrying", "not-needed", "skipped"].includes(status)) return;
+            surfaceFailure(paths, client, sessionID, `watcher: FAILED - OpenCode could not arm the successor for a wake that arrived while an earlier one was still being delivered (${status})`);
+          });
+        }
+        return;
+      }
       const restoration = restoreAfterActionableClose(paths, sessionID, client, predecessor);
       restorationInFlight = restoration;
       void restoration.then(async (result) => {
@@ -417,10 +443,15 @@ function spawnArm(paths, sessionID, client, predecessorArmPid = "") {
       });
       return;
     }
-    if (restorationInFlight) {
+    if (restorationOwned.has(armChild) || (restorationInFlight && armRetired.has(armChild))) {
       setArmStatus("failed");
       return;
     }
+    // A failing or empty close is the same turn-ends-blind class as an
+    // actionable one, so its bounded retry starts here instead of waiting for a
+    // delivery that can outlive many watch cycles. Backoff still damps a child
+    // that keeps dying, so no arm loop appears, and a retired arm's own late
+    // close outside the delivery still resumes supervision.
     void scheduleRetry(paths, sessionID, client, classification.message, predecessor);
   });
   armChild.on("error", (error) => {
@@ -429,10 +460,12 @@ function spawnArm(paths, sessionID, client, predecessorArmPid = "") {
     resolveClosed();
     releaseChild();
     settleReadiness("failed");
-    if (restorationInFlight) {
+    if (restorationOwned.has(armChild) || (restorationInFlight && armRetired.has(armChild))) {
       setArmStatus("failed");
       return;
     }
+    // A spawn failure is a supervision gap like a failing close, so it takes
+    // the bounded retry during an in-flight delivery too.
     void scheduleRetry(
       paths,
       sessionID,
@@ -458,7 +491,7 @@ function armAttempt(status, armChild, includeArmChild) {
   return includeArmChild ? { status, armChild } : status;
 }
 
-async function ensureArm(paths, sessionID, client, predecessorArmPid = "", includeArmChild = false) {
+async function ensureArm(paths, sessionID, client, predecessorArmPid = "", includeArmChild = false, ownedByRestoration = false) {
   let launchResult = null;
   if (!launchInFlight) {
     const launch = beginArm(paths, sessionID, client, predecessorArmPid);
@@ -475,6 +508,7 @@ async function ensureArm(paths, sessionID, client, predecessorArmPid = "", inclu
   if (!armChild) {
     return armAttempt(launchResult.status, null, includeArmChild);
   }
+  if (ownedByRestoration) restorationOwned.add(armChild);
   return armAttempt(await waitForArmReady(armChild), armChild, includeArmChild);
 }
 

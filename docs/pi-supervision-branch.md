@@ -30,6 +30,7 @@ The supervision branch itself is Pi-only by construction:
   The dispatcher resolves trigger keys and every currently unread excluded decision row to task identity before cross-referencing them: any signal or stale trigger containing a decision-owned task goes wholly to main, including a batch that also contains routine rows, and an unread decision for one task keeps every later signal or stale trigger for that same task on main until the decision row is read, regardless of whether the rows use its status-file key or window alias.
   Other tasks remain independently eligible.
   The wake message itself retains its existing shape, so other harness-arm scripts remain unchanged.
+  A branch settlement owns only that wake's delivery: [`watcher-continuity.md`](watcher-continuity.md#actionable-wake-ordering) owns the rule that arming never waits on it, so a long branch turn never leaves supervision dark.
   Heartbeat handling remains independent.
   A fleet-wide heartbeat keeps its own all-or-nothing rule (see "Heartbeat routing" below): it takes every branch-ownable unread row or none of them.
   A co-present main-owned check row no longer defers that review to main, because it is not fleet context the branch is missing and main is woken for it on its own triggering close.
