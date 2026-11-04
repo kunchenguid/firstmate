@@ -1296,6 +1296,32 @@ EOF
   pass "ci-monitoring run with checks already green surfaces done"
 }
 
+test_stood_down_record_does_not_override_live_checks_green() {
+  reset_fakes
+  local d out
+  d=$(new_case stood-down-live-checks-green)
+  make_repo_on_branch "$d/wt" fm/feat-held-green
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-held-green.meta" \
+    "window=fm:fm-feat-held-green" "worktree=$d/wt" "kind=ship"
+  cat > "$d/state/feat-held-green.worker-state" <<'EOF'
+schema=1
+task_id=feat-held-green
+endpoint=fm:fm-feat-held-green
+state=stood-down
+EOF
+  printf 'paused: waiting for merge authority\n' > "$d/state/feat-held-green.status"
+  FM_FAKE_TMUX_WINDOWS="fm-feat-held-green"
+  FM_FAKE_AXI_STATUS="$(run_ci_monitoring fm/feat-held-green)"
+  FM_FAKE_CI_LOGS="all CI checks passed - still monitoring until merged or closed"
+  out=$(run_crew_state "$d" feat-held-green)
+  assert_contains "$out" "state: done" "a live checks-green ci run remains done despite the hold record"
+  assert_contains "$out" "checks green" "the live run's green check evidence remains visible"
+  assert_not_contains "$out" "worker deliberately stood down" \
+    "the hold must not mask a live run's checks-green done verdict"
+  pass "a stood-down record does not override a live checks-green done"
+}
+
 test_top_level_ci_checks_green_surfaces_done() {
   reset_fakes
   local d; d=$(new_case top-level-ci-green)
@@ -7001,6 +7027,7 @@ test_scalar_gate_parked_not_superseded
 test_gate_block_parked_not_superseded
 test_ci_ready_done_log_beats_monitoring_run
 test_ci_monitoring_checks_green_surfaces_done
+test_stood_down_record_does_not_override_live_checks_green
 test_top_level_ci_checks_green_surfaces_done
 test_ci_monitoring_no_checks_stays_working
 test_ci_no_checks_status_log_override_stays_working

@@ -966,7 +966,13 @@ do_stand_down() {
       state=$(agent_state)
       case "$state" in
         dead) ;;
-        alive) do_exit >/dev/null ;;
+        alive)
+          result=$(do_exit)
+          case "$result" in
+            stopped|already-stopped) ;;
+            *) die "task $ID's stand-down retry exit reported '$result'; refusing to publish an intentional no-worker state" ;;
+          esac
+          ;;
         *) die "task $ID's interrupted stand-down reads '$state'; it remains under ordinary supervision until the endpoint can be reconciled" ;;
       esac
       ;;

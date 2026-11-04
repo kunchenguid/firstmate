@@ -873,6 +873,26 @@ test_stand_down_proves_stop_then_records_intent() {
   pass "fm-control stand-down: a proven exit becomes an exact durable no-worker declaration"
 }
 
+test_stand_down_retry_refuses_a_failed_exit() {
+  local dir out rc
+  dir=$(new_case stand-down-retry-exit-fails)
+  add_task "$dir" t1 claude
+  alive_as "$dir" claude
+  cat > "$dir/home/state/t1.worker-state" <<'EOF'
+schema=1
+task_id=t1
+endpoint=fmses:fm-t1
+state=standing-down
+EOF
+  out=$(FM_FAKE_NEVER_DIES=1 run_control "$dir" t1 stand-down); rc=$?
+  expect_code 1 "$rc" "a retry must refuse to publish stand-down when do_exit cannot stop the live agent"$'\n'"$out"
+  assert_grep 'state=standing-down' "$dir/home/state/t1.worker-state" \
+    "a failed retry must leave the transition recoverable"
+  [ "$(cat "$dir/fake/command")" = claude ] \
+    || fail "the failure fixture must leave the agent alive"
+  pass "fm-control stand-down: a retry does not ignore a failed exit"
+}
+
 test_stand_down_accepts_an_agent_that_stopped_during_its_own_exit() {
   local dir out rc record
   dir=$(new_case stand-down-race)
@@ -1004,6 +1024,25 @@ test_stand_down_refuses_when_no_run_check_can_answer() {
   assert_grep 'state=stood-down' "$dir/home/state/t1.worker-state" \
     "an answering run check that proves no active run permits the hold"
   pass "fm-control stand-down: an unanswerable run check refuses and names itself"
+}
+
+test_stand_down_refuses_when_run_listing_is_incomplete() {
+  local dir out rc
+  dir=$(new_case stand-down-incomplete-run-listing)
+  add_task "$dir" t1 claude
+  alive_as "$dir" claude
+  out=$(FM_CREW_STATE_RUNS_LIMIT=3 \
+    FM_FAKE_AXI_STATUS="$(axi_run_toon "other-task" "$(git -C "$dir/wt-t1" rev-parse HEAD)" running)" \
+    FM_FAKE_RUNS_LIST="running fm/other-1 aaaaaaa 2026-10-01
+running fm/other-2 bbbbbbb 2026-10-02
+running fm/other-3 ccccccc 2026-10-03" \
+    run_control "$dir" t1 stand-down); rc=$?
+  expect_code 1 "$rc" "a capped run listing cannot prove the branch quiet"$'\n'"$out"
+  assert_contains "$out" "limit" "the refusal names the capped run listing"
+  [ ! -e "$dir/home/state/t1.worker-state" ] \
+    || fail "an incomplete listing must not publish a worker-free hold"
+  [ -z "$(literals "$dir")" ] || fail "an incomplete listing must not stop the live worker"
+  pass "fm-control stand-down: an incomplete run listing does not prove quiet"
 }
 
 test_stand_down_refuses_an_active_status_without_a_placeable_branch() {
@@ -2100,12 +2139,14 @@ test_state_verified_backends_are_exactly_tmux_herdr_and_rex
 test_worker_state_verbs_refuse_herdr
 test_herdr_relaunch_reaches_existing_validation_path
 test_stand_down_proves_stop_then_records_intent
+test_stand_down_retry_refuses_a_failed_exit
 test_stand_down_accepts_an_agent_that_stopped_during_its_own_exit
 test_stand_down_refuses_to_relabel_an_unexpected_dead_agent
 test_stand_down_refuses_while_the_task_owns_an_active_run
 test_stand_down_allows_a_terminal_run_for_the_same_task
 test_stand_down_refuses_a_run_only_the_runs_list_can_attribute
 test_stand_down_refuses_when_no_run_check_can_answer
+test_stand_down_refuses_when_run_listing_is_incomplete
 test_stand_down_refuses_an_active_status_without_a_placeable_branch
 test_stand_down_allows_a_home_without_the_run_cli
 test_stand_down_allows_a_project_with_no_run_registration

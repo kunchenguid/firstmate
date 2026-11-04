@@ -693,10 +693,10 @@ fm_nm_run_capturing_stderr() {  # <dir> <stdout-var> <stderr-var> <timeout_secs>
 # listing's status column is each run's current status, so it catches a run a
 # stale `axi status` answer missed). Only that newest row is read: the listing
 # is ordered newest first, so an older live row never displaces the newer
-# terminal result that superseded it. Its absence proves nothing: a full window, an unreadable row, a
-# failed call, an unregistered repo or an absent CLI must never turn a readable
-# quiet branch read into a refusal. That is why widening FM_CREW_STATE_RUNS_LIMIT
-# is a reporting nicety rather than a safety setting.
+# terminal result that superseded it. Its absence proves quiet only when the
+# listing completed below its requested limit; a failed or capped listing
+# cannot prove that this branch has no active run. An unregistered repository
+# and an absent CLI remain explicit no-run cases.
 #
 # The verdict carries no run detail: it answers the safety question and names
 # the active run's id when the branch read placed one. Callers that need run
@@ -707,7 +707,7 @@ fm_nm_branch_run_verdict() {  # <worktree> <branch> <timeout_secs> [limit]
   local status_out='' status_rc status_stderr='' status_body='' direct_status=''
   local run_branch_raw='' run_branch='' run_head=''
   local branch_state=unknown branch_reason='' active_id=''
-  local inventory row st rest br sha listing_live=''
+  local inventory row st rest br sha listing_live='' listing_rows=0 status_unregistered=0
   FM_NM_BRANCH_RUN_VERDICT=unknown
   FM_NM_BRANCH_RUN_REASON=
   FM_NM_BRANCH_RUN_ID=
@@ -760,29 +760,41 @@ fm_nm_branch_run_verdict() {  # <worktree> <branch> <timeout_secs> [limit]
   elif [ "$status_rc" != 0 ] \
     && fm_nm_says_unregistered "$status_out" "$status_stderr"; then
     branch_state=quiet
+    status_unregistered=1
   else
     branch_reason="'no-mistakes axi status' could not answer whether branch $branch has a run in flight"
   fi
-  if [ "$branch_state" != active ] \
-    && inventory=$(fm_nm_run_checked "$wt" "$timeout" runs --limit "$limit"); then
-    while IFS= read -r row; do
-      row=$(fm_nm_trim "$row")
-      [ -n "$row" ] || continue
-      case "$row" in *" "*) ;; *) continue ;; esac
-      st=${row%% *}
-      rest=$(fm_nm_trim "${row#* }")
-      [ -n "$rest" ] || continue
-      br=${rest%% *}
-      rest=$(fm_nm_trim "${rest#* }")
-      sha=${rest%% *}
-      { [ -n "$br" ] && [ -n "$sha" ]; } || continue
-      [ "$br" = "$branch" ] || continue
-      case "$st" in
-        completed|failed|cancelled) ;;
-        *) listing_live=$st ;;
-      esac
-      break
-    done <<< "$inventory"
+  if [ "$branch_state" != active ]; then
+    if inventory=$(fm_nm_run_checked "$wt" "$timeout" runs --limit "$limit"); then
+      while IFS= read -r row; do
+        row=$(fm_nm_trim "$row")
+        [ -n "$row" ] || continue
+        listing_rows=$((listing_rows + 1))
+        case "$row" in *" "*) ;; *) continue ;; esac
+        st=${row%% *}
+        rest=$(fm_nm_trim "${row#* }")
+        [ -n "$rest" ] || continue
+        br=${rest%% *}
+        rest=$(fm_nm_trim "${rest#* }")
+        sha=${rest%% *}
+        { [ -n "$br" ] && [ -n "$sha" ]; } || continue
+        [ "$br" = "$branch" ] || continue
+        case "$st" in
+          completed|failed|cancelled) ;;
+          *) listing_live=$st ;;
+        esac
+        break
+      done <<< "$inventory"
+      if [ -z "$listing_live" ] \
+        && [ "$branch_state" = quiet ] \
+        && [ "$listing_rows" -ge "$limit" ]; then
+        branch_state=unknown
+        branch_reason="the runs listing reached its $limit-row limit, so whether branch $branch has an active run could not be proved"
+      fi
+    elif [ "$branch_state" = quiet ] && [ "$status_unregistered" != 1 ]; then
+      branch_state=unknown
+      branch_reason="the runs listing could not answer whether branch $branch has an active run"
+    fi
   fi
   if [ "$branch_state" = active ]; then
     FM_NM_BRANCH_RUN_VERDICT=active

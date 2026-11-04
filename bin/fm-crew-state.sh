@@ -1556,11 +1556,16 @@ if [ "$HAVE_RUN" = 1 ]; then
   esac
 
   # A terminal run is history; an intentional stand-down published after it is
-  # the newer statement about this task, so it outranks the terminal outcome
-  # only. Anything the run still reports as live (working, parked at a gate)
-  # stays authoritative.
+  # the newer statement about this task, so it outranks a terminal outcome
+  # only. A live run whose green CI has reached done still owns the branch, as
+  # do working runs and parked gates.
   case "$RUN_STATE" in
-    done|failed) emit_worker_state_if_current proven-only || true ;;
+    done|failed)
+      case "$RUN_STATUS" in
+        ci|running|fixing|awaiting_approval|fix_review) ;;
+        *) emit_worker_state_if_current proven-only || true ;;
+      esac
+      ;;
   esac
 
   READING_DETAIL=$RUN_DETAIL
