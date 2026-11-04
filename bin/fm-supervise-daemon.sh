@@ -1971,6 +1971,13 @@ fm_super_main() {
   # shellcheck source=bin/fm-wake-lib.sh
   FM_STATE_OVERRIDE="$STATE" . "$FM_DAEMON_DIR/fm-wake-lib.sh"
 
+  # Home-local supervision tuning (config/supervision-tuning): the daemon's
+  # cadence and escalation knobs. Loaded before any knob below takes its
+  # shipped default, and inherited by the watcher child it starts.
+  # shellcheck source=bin/fm-supervision-tuning-lib.sh
+  . "$FM_DAEMON_DIR/fm-supervision-tuning-lib.sh"
+  fm_supervision_tuning_load
+
   local WATCH="$FM_DAEMON_DIR/fm-watch.sh"
   local LOG="$STATE/.supervise-daemon.log"
   local WATCH_ERR="$STATE/.supervise-daemon.watcher.err"
