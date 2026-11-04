@@ -84,10 +84,11 @@ git -C "$WT" config user.email mcode-live-guard@example.invalid
 fm_test_spawn_brief "$H" "$ID" "Runtime verification only: compute 12345 plus 67890 using your shell tool and write only the result into answer.txt, then commit answer.txt with git using a commit message you write yourself. Also run 'bash $ROOT/bin/fm-harness.sh' and write its output to harness.txt. Do no other work, do not delegate, start no background task, and do not poll for anything: end your turn as soon as those files exist."
 
 # The pane's `treehouse get` enters the prepared clone in a subshell exactly as
-# the real tool does, so no worktree pool is touched.
+# the real tool does, and Herdr's durable `treehouse get --lease` prints that
+# clone's path, so no worktree pool is touched.
 mkdir -p "$LAB/bin"
-# shellcheck disable=SC2016 # the single-quoted shim expands its own argument
-printf '#!/bin/sh\n[ "${1:-}" = get ] || exit 0\ncd "%s" && exec /bin/bash --noprofile --norc\n' "$WT" > "$LAB/bin/treehouse"
+# shellcheck disable=SC2016 # the single-quoted shim expands its own arguments
+printf '#!/bin/sh\n[ "${1:-}" = get ] || exit 0\ncase " $* " in *" --lease "*) printf "%%s\\n" "%s"; exit 0 ;; esac\ncd "%s" && exec /bin/bash --noprofile --norc\n' "$WT" "$WT" > "$LAB/bin/treehouse"
 chmod +x "$LAB/bin/treehouse"
 export PATH="$LAB/bin:$PATH" FM_HOME="$H"
 unset TMUX FM_ROOT_OVERRIDE FM_STATE_OVERRIDE FM_DATA_OVERRIDE FM_CONFIG_OVERRIDE FM_PROJECTS_OVERRIDE
