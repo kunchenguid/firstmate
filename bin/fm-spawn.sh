@@ -2252,7 +2252,10 @@ spawn_refuse_if_away_spend_cap() {
 # counts, and a secondmate is a persistent home rather than spend, so both are
 # exempt. Checked before any endpoint, worktree, or record
 # exists, so a refusal costs nothing to unwind; rechecked after the task-set
-# lock so two fresh spawns cannot both publish from a stale count.
+# lock so two fresh spawns cannot both publish from a stale count. The locked
+# recheck caps the live-worker count at 5s (SPAWN_SPEND_CAP_TIMEOUT) so a slow
+# state read cannot hold the lock and make parallel spawns refuse each other;
+# the pre-lock check keeps the 20s default.
 spawn_refuse_if_away_spend_cap
 spawn_require_relocated_queued_work() {
   local actor
