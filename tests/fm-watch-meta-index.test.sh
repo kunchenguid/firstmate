@@ -54,8 +54,11 @@ test_index_matches_scan() {
   fm_write_meta "$state/delta.meta" window=sess:dup:p4 kind=ship
   fm_write_meta "$state/echo.meta" window=sess:dup:p4 kind=scout
   fm_write_meta "$state/foxtrot.meta" kind=ship
+  # A T3 Code record names its thread instead of a terminal.
+  fm_write_meta "$state/golf.meta" window=sess:w6:p6 t3_thread_id=thread-golf kind=ship
+  fm_write_meta "$state/hotel.meta" window=sess:w7:p7 terminal=term-hotel t3_thread_id=thread-hotel kind=ship
   fm_backend_meta_index_build "$state"
-  for target in sess:w1:p1 sess:w1:p2 term-bravo sess:w2:p3 sess:dup:p4 sess:old:p9 nowhere; do
+  for target in sess:w1:p1 sess:w1:p2 term-bravo sess:w2:p3 sess:dup:p4 sess:old:p9 thread-golf thread-hotel term-hotel nowhere; do
     want=$(scan_meta "$target" "$state")
     got=$(fm_backend_meta_for_window "$target" "$state")
     [ "$got" = "$want" ] || fail "indexed lookup of $target returned '$got', scan returned '$want'"
@@ -66,6 +69,8 @@ test_index_matches_scan() {
     || fail "window_to_task did not resolve a terminal target through the index"
   [ "$(window_to_task sess:w2:p3 "$state")" = charlie ] \
     || fail "window_to_task did not resolve a re-recorded window through the index"
+  [ "$(window_to_task thread-golf "$state")" = golf ] \
+    || fail "window_to_task did not resolve a T3 thread through the index"
   fm_backend_meta_index_lookup sess:old:p9 "$state" \
     && fail "a superseded window value was indexed"
   fm_backend_meta_index_clear
