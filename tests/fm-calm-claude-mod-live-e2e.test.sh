@@ -6,17 +6,17 @@
 #   1. With CLAUDE_CODE_ENABLE_FUNCTION_HOOKS unset, the mod is a complete no-op even
 #      with the per-home preference already on: no hooks module loads, /calm is not a
 #      command, the stock working row shows, and tool rows draw as stock.
-#   2. With the flag on, the sailboat replaces the working row and moves, tool rows and
+#   2. With the flag on, the neutral activity indicator replaces the working row and moves, tool rows and
 #      a record-backed operational doorbell (the carrier Firstmate types into Claude
 #      Code, which strips U+2063 from submitted prompts) draw at zero height, /calm
 #      restores them and persists off, /calm hides them again and persists on, all
 #      without a Calm output row in the transcript.
 #   3. `claude --continue` restores the transcript with those rows still hidden.
 #   4. With Calm off, the supervision notes draw from a store bin/fm-branch-outcome.sh
-#      writes: the session-start replay, new sailboat and anchor lines, and the latch
+#      writes: the session-start replay, new routine and user-outcome lines, and the latch
 #      note, each drawn behind the plugin's `fm:` label rather than `firstmate-calm:`,
 #      without moving a store marker or reaching the model, and a resume shows each
-#      anchor once.
+#      user-outcome marker once.
 # The project and FM_HOME are isolated; Claude keeps using its existing managed
 # authentication and one trusted temporary folder. A few Haiku turns are submitted.
 # shellcheck disable=SC2016 # the model, not this test shell, reads the prompt text
@@ -39,8 +39,7 @@ DEBUG_LOG_ON="$LAB/debug-on.log"
 DEBUG_LOG_RESUME="$LAB/debug-resume.log"
 SOCKET="fm-calm-claude-$$"
 SESSION="fm-calm-claude-e2e"
-HULL='╲▁▁▁╱'
-SAIL='◿│◣'
+MARKER='●'
 
 cleanup() {
   local i=0
@@ -168,8 +167,8 @@ command_listed() {  # <command>
   return $((1 - listed))
 }
 
-hull_column() {  # <screen text>
-  printf '%s\n' "$1" | awk -v hull="$HULL" 'index($0, hull) { print index($0, hull); exit }'
+marker_column() {  # <screen text>
+  printf '%s\n' "$1" | awk 'match($0, /[●◉○]/) { print RSTART; exit }'
 }
 
 # The answer names words that live only in notes.txt, so the settled turn is told apart
@@ -185,7 +184,7 @@ working_row_shown() {  # <screen text>
 }
 
 # Wait until the turn has settled: the answer is on screen and no working row or
-# boat remains.
+# activity indicator remains.
 wait_settled() {  # <what> [iterations]
   local what=$1 limit=${2:-600} i=0 shot
   while [ "$i" -lt "$limit" ]; do
@@ -198,7 +197,7 @@ wait_settled() {  # <what> [iterations]
       *'gamma'*)
         if ! working_row_shown "$shot"; then
           case "$shot" in
-            *"$HULL"*) ;;
+            *"$MARKER"*) ;;
             *) return 0 ;;
           esac
         fi
@@ -227,16 +226,16 @@ if command_listed calm; then
 fi
 send "$PROMPT"
 enter
-# Sample every frame until the turn settles: the boat must never appear, and the
+# Sample every frame until the turn settles: the indicator must never appear, and the
 # stock working row must have been seen, or the flag-off case proved nothing.
 saw_working=0
 i=0
 while [ "$i" -lt 600 ]; do
   off_frame=$(screen)
   case "$off_frame" in
-    *"$HULL"*|*"$SAIL"*)
+    *"$MARKER"*)
       printf '%s\n' "$off_frame" >&2
-      fail "the working ship appeared although the flag is unset"
+      fail "the activity indicator appeared although the flag is unset"
       ;;
     *'CLAUDE_EXIT='*)
       printf '%s\n' "$off_frame" >&2
@@ -268,7 +267,7 @@ enter
 sleep 2
 pass "Claude Code $CLAUDE_VERSION with the flag unset: no hooks module, no /calm, stock working row, stock tool rows, preference on ignored"
 
-# --- 2. Flag on: the boat, the hidden rows, the toggle, the persisted choice -------
+# --- 2. Flag on: the indicator, the hidden rows, the toggle, the persisted choice ---
 launch "$DEBUG_LOG_ON" 1
 wait_idle
 i=0
@@ -286,21 +285,14 @@ fi
 command_listed calm || fail "Claude Code $CLAUDE_VERSION does not list /calm with the flag on"
 send "$PROMPT"
 enter
-wait_screen "$HULL" 'the working ship during a real turn' 200
-boat_one=$(screen)
-case "$boat_one" in
-  *"$SAIL"*) : ;;
-  *)
-    printf '%s\n' "$boat_one" >&2
-    fail "the working ship lost its sail"
-    ;;
-esac
-column_one=$(hull_column "$boat_one")
+wait_screen "$MARKER" 'the activity indicator during a real turn' 200
+indicator_one=$(screen)
+column_one=$(marker_column "$indicator_one")
 column_two=$column_one
 i=0
 while [ "$i" -lt 120 ]; do
-  boat_two=$(screen)
-  column_two=$(hull_column "$boat_two")
+  indicator_two=$(screen)
+  column_two=$(marker_column "$indicator_two")
   if [ -n "$column_two" ] && [ "$column_two" != "$column_one" ]; then
     break
   fi
@@ -308,11 +300,11 @@ while [ "$i" -lt 120 ]; do
   i=$((i + 1))
 done
 [ -n "$column_two" ] && [ "$column_two" != "$column_one" ] \
-  || fail "the working ship never moved (hull stayed at column $column_one)"
+  || fail "the activity indicator never moved (marker stayed at column $column_one)"
 wait_settled 'the turn with the flag on'
 on_settled=$(screen)
 case "$on_settled" in
-  *"$HULL"*|*"$SAIL"*) fail "the working ship stayed on screen after the turn settled" ;;
+  *"$MARKER"*) fail "the activity indicator stayed on screen after the turn settled" ;;
   *'Bash('*|*'shell command'*|*'notes.txt)'*)
     printf '%s\n' "$on_settled" >&2
     fail "a tool row drew while Calm was on"
@@ -420,7 +412,7 @@ esac
 send '/exit'
 enter
 sleep 2
-pass "Claude Code $CLAUDE_VERSION with the flag on: the mod auto-loads from .claude/skills, /calm exists, the sailboat replaces and moves in the working row, tool rows and the record-backed operational doorbell draw at zero height, /calm restores and re-hides them while persisting the shared preference"
+pass "Claude Code $CLAUDE_VERSION with the flag on: the mod auto-loads from .claude/skills, /calm exists, the neutral indicator replaces and moves in the working row, tool rows and the record-backed operational doorbell draw at zero height, /calm restores and re-hides them while persisting the shared preference"
 
 # --- 3. Resume: the restored transcript keeps the hidden rows hidden ---------------
 launch "$DEBUG_LOG_RESUME" 1 --continue
@@ -459,8 +451,8 @@ wait_screen 'fm: ◆ [seq 2] fm-live-b: LIVE_REPLAY_CAPTAIN still open' 'the ses
 outcome append --task fm-live-c --verdict routine --summary 'LIVE_ROUTINE_NOTE worker healthy'
 outcome append --task fm-live-d --verdict routine --summary 'LIVE_SILENT_NOTE no change' --silent true
 outcome append --task fm-live-e --verdict captain --summary 'LIVE_NEW_CAPTAIN PR ready for review'
-wait_screen 'fm: • fm-live-c: LIVE_ROUTINE_NOTE worker healthy' 'the routine sailboat note' 200
-wait_screen 'fm: ◆ [seq 5] fm-live-e: LIVE_NEW_CAPTAIN PR ready for review' 'the new captain anchor line' 200
+wait_screen 'fm: • fm-live-c: LIVE_ROUTINE_NOTE worker healthy' 'the routine supervision note' 200
+wait_screen 'fm: ◆ [seq 5] fm-live-e: LIVE_NEW_CAPTAIN PR ready for review' 'the new user-outcome line' 200
 printf 'key=live-key\nerrors=2\ncooldown=300\nretry_after=0\n' >"$STATE_DIR/.supervision-host-health"
 wait_screen 'fm: • Supervision session paused after repeated engine errors' 'the latch-trip note' 200
 notes_screen=$(screen)
@@ -479,7 +471,7 @@ esac
 [ "$(cat "$FM_HOME_DIR/config/calm")" = off ] || fail "the supervision notes changed the Calm preference"
 # The notes never reach the model: a real turn asked to quote them quotes none. The
 # answer token is spelled out rather than typed, so the echoed prompt cannot match it.
-send 'Quote verbatim every line of this conversation that contains a sailboat emoji or an anchor emoji, other than this request. If there are none, reply with only the words green, harbor, and lantern in uppercase joined by underscores.'
+send 'Quote verbatim every line of this conversation that contains a bullet or diamond glyph, other than this request. If there are none, reply with only the words green, field, and lantern in uppercase joined by underscores.'
 enter
 wait_screen 'GREEN_HARBOR_LANTERN' 'the model reporting that it sees no supervision note' 400
 sleep 2
@@ -500,9 +492,9 @@ sleep 4
 resumed_notes=$(screen)
 [ "$(printf '%s\n' "$resumed_notes" | grep -c 'LIVE_REPLAY_CAPTAIN')" = 1 ] || {
   printf '%s\n' "$resumed_notes" >&2
-  fail "the resumed session did not show the earlier anchor exactly once"
+  fail "the resumed session did not show the earlier user-outcome marker exactly once"
 }
 send '/exit'
 enter
 sleep 1
-pass "Claude Code $CLAUDE_VERSION with Calm off shows the supervision notes: the session-start anchor for an unprocessed captain outcome, a sailboat for a new routine outcome, an anchor for a new captain outcome, and the latch-trip note, each behind the fm: label, skipping processed and silent outcomes, moving no store marker, never reaching the model, and on resume showing each anchor once"
+pass "Claude Code $CLAUDE_VERSION with Calm off shows the supervision notes: the session-start marker for an unprocessed user outcome, a bullet for a new routine outcome, a diamond for a new user outcome, and the latch-trip note, each behind the fm: label, skipping processed and silent outcomes, moving no store marker, never reaching the model, and on resume showing each user-outcome marker once"

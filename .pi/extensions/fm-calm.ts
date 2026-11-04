@@ -131,7 +131,7 @@ export default function (pi: ExtensionAPI) {
   let exportRendering = false;
   let removeTerminalInputHandler: (() => void) | undefined;
   // One logical agent run, tracked from agent_start through agent_settled rather than
-  // from turns or tool calls, so the boat never flickers between tool calls, automatic
+  // from turns or tool calls, so the indicator never flickers between tool calls, automatic
   // continuations, retries, or compaction that stay inside the same run.
   let agentRunActive = false;
   let workingShipShown = false;
@@ -434,7 +434,7 @@ export default function (pi: ExtensionAPI) {
     publishPresentationState();
     agentRunActive = false;
     workingShipShown = false;
-    // A genuine new session lifetime starts the boat at the normal initial position.
+    // A genuine new session lifetime starts the indicator at the normal initial position.
     workingShipAnimation.reset();
     applyWorkingPresentation(ctx.ui, true);
     ctx.ui.setHiddenThinkingLabel(calmPresentationIsActive() ? "" : undefined);

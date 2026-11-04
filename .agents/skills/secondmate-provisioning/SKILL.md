@@ -84,7 +84,7 @@ Release happens only on explicit retirement or seed rollback, never on routine r
 `bin/fm-home-seed.sh` copies the charter into the Project Director home as `data/charter.md`.
 It also writes the gitignored `.fm-secondmate-parent` durable binding before the required `.fm-secondmate-home` identity marker; the parser header in [`bin/fm-secondmate-parent-lib.sh`](../../../bin/fm-secondmate-parent-lib.sh) owns the record contract, and both files must remain in place.
 [`docs/configuration.md`](../../../docs/configuration.md#choose-the-project-director-harness) owns the primary's Project Director runtime pins, per-Project-Director overrides, launch precedence, compatibility, and malformed-file refusal.
-Select the registered mate's id when resolving its pin; [`bin/fm-harness.sh`](../../../bin/fm-harness.sh)'s header owns the resolver commands.
+Select the registered Project Director's id when resolving its pin; [`bin/fm-harness.sh`](../../../bin/fm-harness.sh)'s header owns the resolver commands.
 
 This section is the single owner of the Project Director sync and inherited-local-material propagation contract; `AGENTS.md` sections 3 and 4 point here.
 Before a local launch, `fm-spawn.sh --secondmate` locally fast-forwards the home to the primary firstmate checkout's current default-branch commit when it is safe, or reconciles a clean divergence whose complete local result is already present there (e.g. after a squash merge) with `reset --keep`; dirty, uniquely diverged, or in-flight homes launch unchanged with a warning, and a genuine divergence gets the same durable reconciliation record `bin/fm-ff-lib.sh` writes for `/updatefirstmate`.
@@ -162,8 +162,8 @@ For `no-mistakes` projects, seeding initializes only projects newly cloned into 
 Classify the domain before seeding, because this step applies to only one of the two cases.
 A greenfield domain has no delivered domain work yet: nothing already shipped in its projects, no live deployment, and no predecessor records to import.
 Seed a greenfield domain normally; there is nothing to reconcile and this section adds no work to it.
-An existing or inherited domain is any domain whose product is already in development, and any predecessor's domain a new mate takes over, including a consolidation after a retirement.
-Both of those cases require record intake before the new mate acts on any inherited plan.
+An existing or inherited domain is any domain whose product is already in development, and any predecessor's domain a new Project Director takes over, including a consolidation after a retirement.
+Both of those cases require record intake before the new Project Director acts on any inherited plan.
 
 For an existing or inherited domain, the creating agent must:
 
@@ -227,8 +227,8 @@ On a supported backend, set `config/secondmate-harness` and relaunch it with `bi
 The same relaunch and recovery paths honor the durable [per-Project Director account pin](../../../docs/configuration.md#per-project-director-account-pins).
 That plane refuses a remotely placed Project Director by name, because its agent runs on another host where none of the plane's postconditions can be read.
 Move a REMOTE one with `bin/fm-remote-secondmate-relaunch.sh <id> <harness> <model|default|-> <effort|default|->`, which runs that same control-plane relaunch on its host and then republishes this primary's own route metadata from the identity the host confirmed; pass the profile explicitly and use `default` for an absent pin, because `config/secondmate-harness` is not inherited and the copy on that host belongs to a different home ([`docs/remote-secondmates.md`](../../../docs/remote-secondmates.md)).
-Never call `fm-remote-secondmate-control.sh relaunch` through `fm-on.sh` directly for this: it leaves this primary's own record naming the runtime the mate used to run.
-A successful update restarts every live mate of both placements on its own, including one already on the target commit; the `/updatefirstmate` skill owns that pass, and `bin/fm-secondmate-restart.sh` owns its persist gate and failure vocabulary.
+Never call `fm-remote-secondmate-control.sh relaunch` through `fm-on.sh` directly for this: it leaves this primary's own record naming the runtime the Project Director used to run.
+A successful update restarts every live Project Director of both placements on its own, including one already on the target commit; the `/updatefirstmate` skill owns that pass, and `bin/fm-secondmate-restart.sh` owns its persist gate and failure vocabulary.
 
 Do not reconstruct a Project Director's whole tree from the main home.
 The main firstmate reconciles only direct reports.

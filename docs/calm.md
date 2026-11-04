@@ -28,36 +28,27 @@ Streaming text and the genuine reply that ends a response remain visible.
 
 ## Pi
 
-### Working boat
+### Activity indicator
 
-While Calm is active and an agent run is under way, Calm hides Pi's built-in `Working...` row and shows a small two-row animated boat in its place.
+While Calm is active and an agent run is under way, Calm hides Pi's built-in `Working...` row and shows a one-row activity indicator in its place.
 No separate Calm status row is added.
-The boat claims the same Pi working-row widget slot as the standalone Pi Calm extension, so a session that loads both Calms shows one boat rather than two, and turning Firstmate Calm off does not clear the standalone boat.
+The indicator claims the same Pi working-row widget slot as the standalone Pi Calm extension, so a session that loads both Calms shows one indicator rather than two, and turning Firstmate Calm off does not clear the standalone indicator.
 While Calm is off, Pi's stock working row is left exactly as Pi renders it.
 
-The boat looks like this:
+The indicator is a blue `·` track with one yellow marker that pulses through `●`, `◉`, `○`, `◉`.
+It always occupies exactly the usable width, including on a one-column terminal.
 
-- The water fills the usable width with low one-cell Unicode bars, all in standard ANSI blue, so the swell shows through bar height alone.
-- The asymmetric three-cell `◿│◣` sail is centered over the five-cell `╲▁▁▁╱` hull.
-- The whole boat is one standard ANSI yellow, including both sail halves, the mast, and the hull.
-- The hull's zero-height interior keeps the swell continuous beneath the boat.
-- Very narrow terminals fall back to a smaller deterministic sprite.
+### Indicator motion
 
-### Boat motion
+The marker pulses every 220ms and moves one column every 880ms, reversing at each edge.
+Every resize reflows the track without wrapping.
+The indicator disappears when the run settles, aborts, or fails.
 
-The boat is deliberately calm.
-It moves one column every 880ms.
-The long smooth wave advances one quarter-cell every 220ms, so the surface stays alive between boat steps.
-Deterministically varied half-waves stay between nine and thirteen cells.
-The boat remains phase-locked inside a broad zero-height trough through movement and edge reversals.
-Every resize reflows the sprite without wrapping.
-The boat disappears when the run settles, aborts, or fails.
+### Indicator position between working periods
 
-### Boat position between working periods
-
-Within one Pi session and Calm extension lifetime, the next working period resumes the boat from its last rendered column and travel direction rather than restarting at the left edge.
+Within one Pi session and Calm extension lifetime, the next working period resumes the marker from its last rendered column, pulse phase, and travel direction rather than restarting at the left edge.
 Hidden elapsed time does not advance the animation.
-A resize while hidden clamps the frozen boat to the new width without changing its valid travel direction.
+A resize while hidden clamps the frozen marker to the new width without changing its valid travel direction.
 A fresh Pi session or new Calm extension lifetime starts at the normal initial position.
 
 ### What Calm hides on Pi
@@ -204,19 +195,19 @@ A preference that cannot be written leaves the current choice unchanged, and the
 The mod reads the preference before the first row draws.
 Toggling Calm redraws every hooked row already on screen, so rows drawn before the toggle hide or restore retroactively.
 
-### Working sailboat on Claude Code
+### Activity indicator on Claude Code
 
-While Calm is on, the stock working row (`Sauteing... (12s · 300 tokens)`) becomes the same two-row sailboat Pi draws, from the same shared sprite geometry.
-The sailboat fills the row inside the transcript margin, under one blank row so its sail never touches the highlighted prompt above it.
-It repaints on the boat's 220ms cadence, with the hull moving every 880ms.
+While Calm is on, the stock working row (`Sauteing... (12s · 300 tokens)`) becomes the same one-row indicator Pi draws, from the same shared geometry.
+The indicator fills the row inside the transcript margin without adding a presentation-only blank row.
+It repaints on the 220ms pulse cadence, with the marker moving every 880ms.
 It reflows on resize, and appears and disappears exactly where the stock row would.
 
-On Claude Code the boat is painted in Claude Code's own theme colors rather than Pi's standard ANSI codes:
+On Claude Code the indicator is painted in Claude Code's own theme colors rather than Pi's standard ANSI codes:
 
 | Part | Color source | Dark theme | Light theme |
 | --- | --- | --- | --- |
-| Every water cell | Spinner blue of the active theme family | `#93a5ff` | `#5769f7` |
-| The whole boat: both sail halves, mast, and hull | Claude orange of the stock spinner | `#d77757` | `#d77757` |
+| Track | Spinner blue of the active theme family | `#93a5ff` | `#5769f7` |
+| Marker | Claude orange of the stock spinner | `#d77757` | `#d77757` |
 
 The theme family follows the `theme` setting by its prefix, `dark` or `light`, and is re-read when the theme changes.
 It uses the light set as the both-readable fallback for `auto`, custom, missing, or unreadable values.
@@ -294,7 +285,7 @@ Evidence for 2.1.280 and the record-backed doorbell is also in its [2026-09-25 r
 - On the main-screen layout (not the fullscreen alternate screen), a toggle redraws the live screen by clearing and reprinting it.
   The terminal's own scrollback keeps the earlier rendering above it.
   The fullscreen layout has no such stale copy.
-- The sailboat is painted through Claude Code's Raster element, whose colors are RGB quantized to 256-color escapes rather than the standard 16-color ANSI codes Pi's widget emits.
+- The activity indicator is painted through Claude Code's Raster element, whose colors are RGB quantized to 256-color escapes rather than the standard 16-color ANSI codes Pi's widget emits.
 - The detailed transcript view (`ctrl+o`) keeps its per-message timestamp and model headers where hidden assistant rows sat, because those headers are not a hookable drawing.
 - Collapsed thinking never appears in Claude Code's default view.
 - Supervision notes are system-notice rows rather than Pi's rendered entries: Claude Code draws them in one gray with its own bullet and the plugin's name, so the glyph cannot take its own color as on Pi.

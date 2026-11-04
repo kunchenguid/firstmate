@@ -1,17 +1,17 @@
 // Firstmate's Calm-only animated working presentation for Pi.
 //
-// Calm replaces Pi's stock working row with a tiny SSHHIP-derived boat while one
+// Calm replaces Pi's stock working row with a neutral activity indicator while one
 // logical agent run is active. The sprite geometry, bounce track, two animation
 // cadences, palette classes, and freeze/resume state are owned by the harness-neutral
 // ./fm-calm-working-ship-sprite.ts (a tracked symlink into the Claude Code Calm mod,
 // which both harnesses share); this module owns only Pi's rendering of those frames
 // as standard ANSI escapes and the temporary TUI widget. `.pi/extensions/fm-calm.ts`
 // owns when the presentation is installed and removed, and stays the sole caller of
-// setWorkingVisible(). docs/calm.md owns the captain-facing contract.
+// setWorkingVisible(). docs/calm.md owns the user-facing contract.
 //
 // Continuity: one extension-owned animation instance survives hide/show within the same
 // Pi process and Calm extension lifetime. Disposing the widget freezes column,
-// direction, water phase, and tick cadence without advancing them for hidden wall
+// direction, pulse phase, and tick cadence without advancing them for hidden wall
 // time. The next working period resumes from that exact logical state. A fresh session
 // or new extension lifetime calls reset() and starts at the normal initial position.
 // State is never a module-level or process-global singleton.
@@ -20,7 +20,7 @@
 // ExtensionUIContext.setWidget() with a component factory, per-widget dispose(), and
 // TUI.requestRender(). Pi renders a widget through Component.render(width), so this
 // module recomputes its track from that width on every frame instead of caching a
-// terminal size that a resize would invalidate. A resize while the boat is hidden is
+// terminal size that a resize would invalidate. A resize while the indicator is hidden is
 // applied on the first resumed frame through the same clamp path.
 import type { Component, TUI } from "@earendil-works/pi-tui";
 import {
@@ -35,20 +35,19 @@ import {
 export { CALM_WORKING_SHIP_TICK_MS, CALM_WORKING_SHIP_TICKS_PER_MOVE };
 
 // Standard ANSI foreground codes only: no theme lookup, bright variant, or 256/RGB.
-// Water is a single blue so the swell reads through glyph height alone; the boat is a
-// single yellow so its sail halves, mast, and hull never split into mismatched colors.
-const ANSI_FOREGROUND: Record<Exclude<CalmWorkingShipColor, "plain">, string> = {
-  water: "\u001b[34m",
-  boat: "\u001b[33m",
+// The track is blue and the moving marker is yellow.
+const ANSI_FOREGROUND: Record<CalmWorkingShipColor, string> = {
+  track: "\u001b[34m",
+  indicator: "\u001b[33m",
 };
 // Restores the default foreground so color never bleeds into padding or later frames.
 const RESET = "\u001b[39m";
 
 // The working-row widget slot is deliberately shared with the standalone Pi Calm
-// extension, which installs its boat under the same "calm-working-ship" key. Pi
+// extension, which installs its indicator under the same "calm-working-ship" key. Pi
 // replaces widgets under one key, so a session that loads both Calms renders a
-// single boat and a session loading either alone is unchanged. Rename the slot
-// in both implementations together, or dual-install sessions duplicate the boat.
+// single indicator and a session loading either alone is unchanged. Rename the slot
+// in both implementations together, or dual-install sessions duplicate the indicator.
 export const CALM_WORKING_SHIP_WIDGET_KEY = "calm-working-ship";
 
 export type CalmWorkingShipAnimation = Omit<CalmWorkingShipSprite, "frame"> & {
@@ -58,7 +57,6 @@ export type CalmWorkingShipAnimation = Omit<CalmWorkingShipSprite, "frame"> & {
 
 /** One run painted as its standard ANSI escape, closed with a default-foreground reset. */
 function paintRun(run: CalmWorkingShipRun): string {
-  if (run.color === "plain") return run.text;
   return `${ANSI_FOREGROUND[run.color]}${run.text}${RESET}`;
 }
 

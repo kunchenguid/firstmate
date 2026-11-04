@@ -1,7 +1,7 @@
 // Firstmate supervision notes for the Claude Code mod, kept free of the engine.
 //
-// Pi renders each supervision outcome in the transcript: a sailboat note for a visible
-// routine outcome and a sequence-keyed anchor entry for a captain outcome
+// Pi renders each supervision outcome in the transcript: a bullet note for a visible
+// routine outcome and a sequence-keyed diamond entry for a user outcome
 // (.pi/extensions/fm-branch-supervision.ts). This module owns the same lines for
 // Claude Code, read from the display tail copy of the one outcome store
 // (bin/fm-branch-outcome.sh owns every file format read here) and from the supervision
@@ -110,7 +110,7 @@ export function replayOutcomeNotes(
 /**
  * The lines for rows appended since `lastSeen`, and the new last seen sequence. Rows that
  * arrived faster than the tail copy holds are counted in one line rather than dropped
- * silently. A tail that ends below the anchor is a replaced store: re-anchor there
+ * silently. A tail that ends below the sequence is a replaced store: reset there
  * without replaying it.
  */
 export function newOutcomeNotes(rows: readonly OutcomeRow[], lastSeen: number): { lines: string[]; lastSeen: number } {

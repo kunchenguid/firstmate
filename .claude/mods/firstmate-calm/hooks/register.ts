@@ -6,7 +6,7 @@
 // loading remains a complete no-op.
 // The plugin carries no command, skill, agent, or classic hook of its own; the `/calm`
 // command below exists only once this module has registered it. docs/calm.md owns the
-// captain-facing contract and docs/calm-mode-feasibility.md the version-scoped evidence.
+// user-facing contract and docs/calm-mode-feasibility.md the version-scoped evidence.
 //
 // This file is the only place the engine interface `$` is touched: the geometry lives
 // in ../lib/fm-calm-working-ship-sprite.ts (shared with the Pi extension), the Raster
@@ -16,7 +16,7 @@
 // drawings and leaves the stored transcript, model context, and session storage alone.
 //
 // Presentation while Calm is on, sharing Pi Calm's goals where the mods API allows:
-// the stock working row (`Spinner`) becomes the two-row sailboat, repainted through
+// the stock working row (`Spinner`) becomes a one-row activity indicator, repainted through
 // `$.ui.blit` on the sprite's own tick; `ToolUse`, `ToolResult`, and `ToolGroup` rows
 // draw as zero-height boxes; a `UserMessage` whose text the canonical operational-input
 // classifier recognizes, or a record-backed doorbell whose record holds a current
@@ -24,7 +24,7 @@
 // draws as zero height; an `AssistantMessage` block recorded as a mid-turn working note
 // draws as zero height. Calm off returns every drawing to the
 // engine. A toggle invalidates every hooked drawing, so rows already on screen redraw.
-// The boat is painted in Claude Code's own theme colors: the family is read from the
+// The indicator is painted in Claude Code's own theme colors: the family is read from the
 // `theme` setting at load and re-read when a `config.set` changes it.
 //
 // Supervision notes, whether Calm is on or off, as Pi shows them regardless of Calm: a
@@ -94,7 +94,7 @@ const finalReplies = new Set<string>();
 const doorbellVerdicts = new Map<string, Promise<boolean>>();
 const sprite = createCalmWorkingShipSprite();
 let palette: CalmShipRasterPalette = CALM_SHIP_RASTER_PALETTES.light;
-// Every Spinner site currently drawing the boat, by its requestId, with the mounted
+// Every Spinner site currently drawing the indicator, by its requestId, with the mounted
 // Raster size a blit must repeat exactly.
 const sites = new Map<string, { columns: number; rows: number }>();
 /** How often the supervision notes check the store's tail copy and the host's latch. */
@@ -208,7 +208,7 @@ function invalidateDrawings($: EngineInterface): void {
   $.ui.invalidate("ui.render");
 }
 
-/** One scheduler tick: advance the sprite, then repaint every mounted boat in place. */
+/** One scheduler tick: advance the sprite, then repaint every mounted indicator in place. */
 async function repaintShip($: EngineInterface): Promise<void> {
   if (!calm || sites.size === 0) return;
   sprite.tick();
@@ -376,7 +376,7 @@ export const register: Register = (on) => {
     await startNotes($).catch(() => undefined);
     await $.command.register({
       name: CALM_COMMAND,
-      description: "Toggle Firstmate's Calm transcript presentation and working ship.",
+      description: "Toggle Firstmate's Calm transcript presentation and activity indicator.",
     });
     return next(e);
   });
@@ -464,10 +464,9 @@ export const register: Register = (on) => {
     const packed = packCalmShipRasterCells(sprite.frame(columns), columns, palette);
     sites.set(e.requestId, { columns, rows: packed.rows });
     const { Box, Raster } = $.ui.resolve(e);
-    // One blank row above the boat keeps its sail off the highlighted prompt, since Calm hides the rows between.
     return Box({
       flexDirection: "column",
-      paddingTop: 1,
+      paddingTop: 0,
       children: Raster({ key: CALM_SHIP_RASTER_KEY, columns, rows: packed.rows, cells: packed.cells }),
     });
   });

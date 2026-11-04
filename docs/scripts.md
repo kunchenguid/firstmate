@@ -23,12 +23,12 @@ The shared no-mistakes gate lifecycle boundary is summarized in [architecture.md
 | `fm-secondmate-reconcile.sh` | Queue Bearings reconcile requests for later supervision delivery and ask each mismatched home through its durable inbox with a per-home cooldown |
 | `fm-update.sh`           | Guarded self-update of firstmate and local or remote Project Director homes, reconciling redundant divergence and classifying every live Project Director left on the target commit for restart or fallback nudge |
 | `fm-secondmate-restart.sh` | Persist open conversational work, then restart eligible Project Directors or report the fallback outcome |
-| `fm-secondmate-restart-lib.sh` | Shared second-mate restart capability and persistence-request contract |
+| `fm-secondmate-restart-lib.sh` | Shared Project Director restart capability and persistence-request contract |
 | `fm-on.sh`               | Execute one tracked Firstmate command in a configured remote Project Director home, using its job worker except for the doctor bootstrap |
 | `fm-remote-job-lib.sh`   | Shared bounded remote job queue, worker readiness, LaunchAgent contract, and filesystem-composed PATH |
 | `fm-remote-job-worker.sh` | Long-lived remote queue worker for tracked `fm-*.sh` commands in the account runtime |
 | `fm-remote-job-reap-orphans.sh` | Stop remote job workers left running by a pruned code root, never one whose checkout still exists |
-| `fm-remote-doctor.sh`    | Check, and with `--fix` repair, one remote account's [second-mate readiness](remote-secondmates.md#readiness-repair-and-the-human-steps) |
+| `fm-remote-doctor.sh`    | Check, and with `--fix` repair, one remote account's [Project Director readiness](remote-secondmates.md#readiness-repair-and-the-human-steps) |
 | [`fm-backlog-handoff.sh`](../bin/fm-backlog-handoff.sh) | Move queued backlog items into a Project Director home; its header owns route-specific wake outcomes and retries |
 | `fm-backlog-receive.sh`  | Idempotently ingest one confined remote handoff outbox through tasks-axi             |
 | `fm-captain-hold.sh`     | Hold tasks for the user, record the user's answers, gate investigation completion, and report record divergence between the status log and the backlog |
@@ -66,7 +66,7 @@ The shared no-mistakes gate lifecycle boundary is summarized in [architecture.md
 | `fm-supervision-instructions.sh` | Render the session-start primary-harness supervision block or the one-line repair instruction |
 | `fm-home-seed.sh`        | Transactionally provision a local Project Director home and maintain `data/secondmates.md` |
 | `fm-remote-home-seed.sh` | Register and provision a whole Project Director home on an SSH-reachable host              |
-| `fm-remote-readiness-lib.sh` | Shared remote second-mate readiness gate: check and, when needed, repair then re-check through `fm-remote-doctor.sh` |
+| `fm-remote-readiness-lib.sh` | Shared remote Project Director readiness gate: check and, when needed, repair then re-check through `fm-remote-doctor.sh` |
 | [`fm-project-origin-lib.sh`](../bin/fm-project-origin-lib.sh) | Accepted origin-form owner shared by both remote provisioning boundaries |
 | `fm-spawn.sh`            | Spawn workers, Investigators, `id=repo` batches, and Project Directors on the resolved harness and runtime backend |
 | [`fm-approval-failover.sh`](../bin/fm-approval-failover.sh) | Save a user-approved managed-approval fallback and recover a worker after observed defeated bypass |

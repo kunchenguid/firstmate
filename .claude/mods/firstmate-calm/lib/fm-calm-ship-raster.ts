@@ -1,4 +1,4 @@
-// Packs one Calm working-ship frame as Claude Code Raster cells.
+// Packs one Calm activity-indicator frame as Claude Code Raster cells.
 //
 // The Claude Code mods API draws a grid of colored cells as one `Raster` element whose
 // `cells` prop is base64 of `columns * rows` little-endian u32 triplets
@@ -9,8 +9,8 @@
 // Raster colors are RGB, and the terminal paints them through a quantized 256-color
 // palette rather than the standard 16-color ANSI codes Pi's widget emits, which
 // docs/calm-mode-feasibility.md records as a bounded gap. The palette is Claude Code's
-// own: the water takes the theme's spinner blue and the whole boat takes the Claude
-// orange of the stock spinner, one set per theme family. The family follows the
+// own: the track takes the theme's spinner blue and the marker takes the Claude orange
+// of the stock spinner, one set per theme family. The family follows the
 // `theme` setting's prefix (`dark*` or `light*`); `auto`, custom, missing, and
 // unreadable values use the light set as the both-readable fallback. The Pi extension
 // keeps its standard ANSI colors and is unaffected.
@@ -42,12 +42,12 @@ export type CalmShipPaletteFamily = "dark" | "light";
 
 /**
  * Claude Code's own colors per theme family: the dark and light spinner blues for the
- * water and the Claude orange of the stock spinner for the boat, from the app's
+ * track and the Claude orange of the stock spinner for the marker, from the app's
  * built-in theme tables.
  */
 export const CALM_SHIP_RASTER_PALETTES: Readonly<Record<CalmShipPaletteFamily, CalmShipRasterPalette>> = {
-  dark: { plain: CALM_SHIP_RASTER_DEFAULT_COLOR, water: 0x93a5ff, boat: 0xd77757 },
-  light: { plain: CALM_SHIP_RASTER_DEFAULT_COLOR, water: 0x5769f7, boat: 0xd77757 },
+  dark: { track: 0x93a5ff, indicator: 0xd77757 },
+  light: { track: 0x5769f7, indicator: 0xd77757 },
 };
 
 /**
@@ -103,9 +103,8 @@ export type CalmShipRasterCells = {
 };
 
 /**
- * Pack a frame painted for exactly `columns` cells. Every row is padded with plain
- * spaces to the full width, so the sail row's short run still fills its Raster row,
- * and a row wider than the grid is clipped rather than wrapped.
+ * Pack a frame painted for exactly `columns` cells. Every row is padded with default
+ * spaces to the full width, and a row wider than the grid is clipped rather than wrapped.
  */
 export function packCalmShipRasterCells(
   frame: CalmWorkingShipFrame,

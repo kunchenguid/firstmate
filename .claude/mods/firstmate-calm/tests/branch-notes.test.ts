@@ -129,11 +129,11 @@ describe("supervision notes", () => {
     files.set(PROCESSED, "3\n");
     await $.session.start(sessionStart);
     expect(journal.logs).toEqual([]);
-    const replaced = tail([...history.slice(1), { seq: 6, task: "fm-new", verdict: "captain", summary: "fresh anchor here" }]);
+    const replaced = tail([...history.slice(1), { seq: 6, task: "fm-new", verdict: "captain", summary: "fresh user outcome here" }]);
     expect(replaced.length).toBe(tail(history).length);
     files.set(TAIL, replaced);
     await clock.advance(POLL);
-    expect(journal.logs).toEqual(["◆ [seq 6] fm-new: fresh anchor here"]);
+    expect(journal.logs).toEqual(["◆ [seq 6] fm-new: fresh user outcome here"]);
     await clock.advance(POLL * 3);
     expect(journal.logs).toHaveLength(1);
   });

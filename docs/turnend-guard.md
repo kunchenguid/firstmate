@@ -268,7 +268,7 @@ Each enabled primary harness adapts its own turn-end mechanism to the shared gua
 The registrations in detail:
 
 - Claude registers two `Stop` hooks in `.claude/settings.json`, both anchored through `CLAUDE_PROJECT_DIR`: `bin/fm-turnend-guard.sh --claude`, and `bin/fm-claude-stop-autoarm.sh` with `asyncRewake: true` and `timeout: 28800`.
-  In a Claude Project Director home, `bin/fm-spawn.sh` writes a `.fm-busy-stop` pointer and gives the mate no `Stop` busy hook, so `--claude` is the only Stop writer of the parent home's busy record for that generation.
+  In a Claude Project Director home, `bin/fm-spawn.sh` writes a `.fm-busy-stop` pointer and gives the Project Director no `Stop` busy hook, so `--claude` is the only Stop writer of the parent home's busy record for that generation.
   It records idle when it allows the Stop and busy when its exit 2 blocks it into a continuation, because Claude runs Stop hooks in parallel and that continuation fires no `UserPromptSubmit`.
   A home whose guard predates `.fm-busy-stop` cannot close the turn, so that launch keeps the ordinary `Stop` idle hook instead.
   [Runtime backend verification](verification/runtime-backends.md#secondmate-busy-contract) owns the live evidence.

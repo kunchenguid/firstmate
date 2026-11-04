@@ -111,16 +111,16 @@ A decision-owned event surfaced by `bin/fm-watch.sh`'s signal path gets the same
 
 - A newly surfaced `needs-decision`.
 - A `captain-held` declaration surfaced through the no-verb fallback.
-- A pending-reply second-mate escalation.
+- A pending-reply Project Director escalation.
 
-`scopeForUnreadWake` excludes every marked row from what the branch may claim, as well as second-mate signals classified by the span rule below.
+`scopeForUnreadWake` excludes every marked row from what the branch may claim, as well as Project Director signals classified by the span rule below.
 
 A Project Director's status log is one shared channel carrying many independently keyed decisions, so its signal row is judged by the lines presented since the last drain rather than by the whole log.
 The row is excluded when one of those lines is a decision, blocked, or user-held line, resolves a decision open just before it, or declares, in the status parser's key positions, the key of a decision still open in that log.
 A resolution that closes nothing, key-less beside only keyed decisions or keyed for a key never open, stays routine.
 A key-less line otherwise falls back to its verb; an unrelated open decision alone leaves a routine span eligible, while a mixed span goes wholly to main.
 The status-presentation cursor bounds that span, and a missing or unmatched cursor falls back to the whole log.
-Single-task worker signals keep their existing Pi payload and attended-host whole-log rules, except that the TypeScript decision fold now ignores bare transition words without a colon or complete key token, matching `bin/fm-classify-lib.sh` on both worker and second-mate logs.
+Single-task worker signals keep their existing Pi payload and attended-host whole-log rules, except that the TypeScript decision fold now ignores bare transition words without a colon or complete key token, matching `bin/fm-classify-lib.sh` on both worker and Project Director logs.
 
 For a stale row, `scopeForUnreadWake` folds the mapped task's status log.
 It excludes the row when any `needs-decision` remains open or the current meaningful declaration is `captain-held`.
@@ -258,7 +258,7 @@ The guards are wired into these scripts:
 
 A relaunch through `fm-control` stays branch-legal recovery in both postures.
 Under the away-posture record, the PR merge, a fresh spawn, and a decision answer relocate to the branch behind each script's own gate.
-Local-only landing and second-mate retirement never do ("Postures" below).
+Local-only landing and Project Director retirement never do ("Postures" below).
 
 ### Autonomy
 
@@ -654,12 +654,12 @@ The generated prompt includes the [scout-completion](../.agents/skills/scout-com
 - Post-construction provider-error and no-report fallback, the consecutive-error latch, cooldown probe, exponential backoff, report-plus-settlement recovery, and report-before-error re-latch.
 - Cache key, and model and effort selection.
 - In `test_branch_dispatch_classifies_main_only_rows_and_writes_the_eligible_snapshot`: decision-owned signal and stale rows' exclusion from `eligibleSeqs`, their presence in `needsDecisionKeys`, task alias resolution, reserved-key configuration, status-log race and symlink refusal, non-vetoing behavior for unrelated eligible rows, and decision-only queues reading as ordinary main-only absence.
-- In `test_branch_dispatch_routes_secondmate_signal_by_new_span`: second-mate signal routing by new span on the Pi and attended-host paths, including an unrelated open hold, mixed, same-key, stamped-key, key-less blocked, and resolution spans, the whole-log fallback, stale-row isolation, and worker routing.
+- In `test_branch_dispatch_routes_secondmate_signal_by_new_span`: Project Director signal routing by new span on the Pi and attended-host paths, including an unrelated open hold, mixed, same-key, stamped-key, key-less blocked, and resolution spans, the whole-log fallback, stale-row isolation, and worker routing.
 - In `test_branch_dispatch_resolves_terminal_keyed_orca_stale_row`: a unique Orca `terminal=` handle resolving to its task and project in routine and heartbeat scans, and conflicting terminal, window, or task aliases refusing the whole scan in either record order.
 
 `tests/fm-branch-supervision.test.sh` covers:
 
-- Prompt stability, including the landed-work cleanup instruction and the second-mate relay, signal-span, and stale-liveness rules.
+- Prompt stability, including the landed-work cleanup instruction and the Project Director relay, signal-span, and stale-liveness rules.
 - The emitted completed-Investigator cleanup instructions and verbatim completion policies, including incomplete-work boundaries and refusal reporting; these assertions verify prompt delivery, not a model's adherence.
 - Store append-only behavior, the user cursor barrier, processed-marker sequence bounds and absent-marker safety, and user-only recorded ages.
 - Leases, guards, and non-branch-home invariance.
@@ -669,7 +669,7 @@ The generated prompt includes the [scout-completion](../.agents/skills/scout-com
 
 `tests/fm-pr-merge.test.sh` covers the branch actor merging a green task under the record, being refused on a red check, an unreported required check, or `--allow-red`/`--allow-missing` under it, and being refused at the partition while attended.
 
-`tests/fm-secondmate-safety.test.sh` covers the branch actor being refused second-mate retirement with the mate's record, home, route, and endpoint left intact.
+`tests/fm-secondmate-safety.test.sh` covers the branch actor being refused Project Director retirement with the Project Director's record, home, route, and endpoint left intact.
 
 `tests/fm-send-resolve-key.test.sh` covers the decision-answer partition:
 
@@ -702,7 +702,7 @@ Other tests remain where they were:
 
 `tests/fm-watch-triage.test.sh` covers `bin/fm-watch.sh`'s side of the contract end to end:
 
-- Needs-decision, no-verb user-held, and pending-reply second-mate escalation signal rows are marked `needs-decision:`.
+- Needs-decision, no-verb user-held, and pending-reply Project Director escalation signal rows are marked `needs-decision:`.
 - A needs-decision whose key transition was rejected by the reserved-key vocabulary (`fm-classify-lib.sh`'s `reconciliation-required:` wrapper) is still marked.
 - Ordinary blocked or user-relevant signals stay unmarked.
 

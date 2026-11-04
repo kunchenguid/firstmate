@@ -21,7 +21,7 @@ Firstmate does not support placing an individual worker remotely or failing a re
 
 ## Where the remote agent runs
 
-The remote second-mate agent runs on one of two session-provider backends, selected per launch.
+The remote Project Director agent runs on one of two session-provider backends, selected per launch.
 [Launch selection and placement](#launch-or-recover) define the backend contract.
 Provisioning checks any available supported backend; launch checks the selected one.
 
@@ -299,7 +299,7 @@ It acts on whichever server owns the `fm-remote` socket:
 | --- | --- |
 | Nothing | Execs the server in the foreground under launchd. |
 | An Aqua-born server | Exits 0. |
-| Any other (foreign) server | Stops the foreign server and takes the session over, closing its panes so the parent firstmate relaunches its mates into the Aqua-born server. |
+| Any other (foreign) server | Stops the foreign server and takes the session over, closing its panes so the parent firstmate relaunches its Project Directors into the Aqua-born server. |
 
 `KeepAlive={SuccessfulExit=false}` lets that exit 0 rest instead of respawning against a held socket.
 The guard's header owns the decision table, and [`bin/fm-remote-herdr-owner-lib.sh`](../bin/fm-remote-herdr-owner-lib.sh) owns the birth markers it reads.
@@ -552,7 +552,7 @@ It stops when that registration is retired, the registered command changes, or t
 
 Only a structured `report=data/....md` pointer offers a document.
 A bare path inside prose is a mention.
-So writing about a document, including one the mate has not created yet, never asks this channel to fetch it.
+So writing about a document, including one the Project Director has not created yet, never asks this channel to fetch it.
 
 The adapter cleans up ingest staging, in-flight document-fetch, and source-read temporary files after normal handling, continuity breaks, payload validation failures, and SIGTERM during a fetch or source read.
 The focused cleanup regression is in [`tests/fm-remote-reply.test.sh`](../tests/fm-remote-reply.test.sh).
@@ -570,7 +570,7 @@ Recording that source line prevents another duplicate on later recaptures.
 
 ### Status, decisions, and correlation
 
-The channel carries the mate's status and decision model.
+The channel carries the Project Director's status and decision model.
 An uncorrelated progress line and a newly raised `needs-decision` travel the same path as a correlated answer, and reach the parent's open-decision fold identically.
 Correlation is a per-line property that settles a pending request.
 It is never a gate on the stream, so no single line can stop or wedge the relay or hold the cursor back.
@@ -586,7 +586,7 @@ It is never a gate on the stream, so no single line can stop or wedge the relay 
 
 If the confined remote reader cannot deliver an offered document, the channel fails open instead of stalling the stream:
 
-- The mate's line is mirrored with its original pointer.
+- The Project Director's line is mirrored with its original pointer.
 - The cursor still advances.
 - The adapter appends one unkeyed note carrying the reader's own reason.
 
@@ -601,13 +601,13 @@ An SSH exit status of 255 while fetching a referenced document leaves the delta 
 
 The process-event runner applies each captured delta through this adapter as soon as it is captured.
 So a mirrored reply reaches the primary status channel without depending on the wake handler running the adapter itself.
-A mirrored line that carries a correlation token settles the pending-reply record only when the mate it came from is the task that request was sent to.
-Another mate echoing the token leaves it open.
+A mirrored line that carries a correlation token settles the pending-reply record only when the Project Director it came from is the task that request was sent to.
+Another Project Director echoing the token leaves it open.
 A settled record also closes that request's own open escalation decision.
 
 A remote reply reaches the primary only through this asynchronous mirror.
 Because of that, the primary treats a missing correlated report as a missed report only once the mirror has been read through the end of the remote log after that turn ended.
-A remote mate that did answer is therefore never asked to repost while its answer is still in flight.
+A remote Project Director that did answer is therefore never asked to repost while its answer is still in flight.
 A genuinely missing answer still gets exactly one repost once the mirror is known to be current.
 
 The [process-to-event operating contract](configuration.md#process-to-event-sources-stateprocevent) owns automatic application, one-announcement replay deduplication, and the unhandled fallback path.
@@ -670,7 +670,7 @@ So the transaction, its checkpoint, and its postconditions are the local ones.
 
 The primary passes `<harness> <model|default|-> <effort|default|->` explicitly, using `default` when an axis has no parent pin.
 It passes them explicitly because `config/secondmate-harness` is not inherited into a Project Director's home, and the file on that host belongs to a different home.
-Letting the far side re-resolve it would silently move the mate onto another runtime.
+Letting the far side re-resolve it would silently move the Project Director onto another runtime.
 SSH exit 255 leaves completion unknown and the route preserved, exactly as every other verb here.
 Move a live remote Project Director onto a newly pinned harness, model, or effort with [`bin/fm-remote-secondmate-relaunch.sh`](../bin/fm-remote-secondmate-relaunch.sh) rather than calling `relaunch` through `fm-on.sh` directly: the host-local relaunch it drives can only rewrite the host's own endpoint record, so this wrapper reads the confirmed identity back from that record afterward and republishes the primary's own route metadata to match, the same way launch already records a fresh route.
 

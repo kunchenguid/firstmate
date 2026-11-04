@@ -18,14 +18,14 @@ Updating is consumption, not publication: it only pulls from upstream, so every 
 
 Pulling the files is only half of it.
 A running agent holds `AGENTS.md` and every skill it has already loaded frozen from the moment it launched, and no verified harness offers a reload, so new bytes on disk change nothing for it until it starts a fresh conversation.
-A re-read cannot substitute: it appends a second copy of the mate's own job description with no defined precedence, and it cannot reach a skill that is already loaded.
-Replacing the agent is also the only thing that re-resolves the launch-time wiring - turn-end hooks, harness flags, per-harness feature switches - which the mate froze when it started and which nothing on disk describes.
+A re-read cannot substitute: it appends a second copy of the Project Director's own job description with no defined precedence, and it cannot reach a skill that is already loaded.
+Replacing the agent is also the only thing that re-resolves the launch-time wiring - turn-end hooks, harness flags, per-harness feature switches - which the Project Director froze when it started and which nothing on disk describes.
 
 That is why **every live Project Director is restarted after a successful update, including one that was already on the target commit.**
 Launch-time wiring is not derivable from a file diff, so an unchanged tracked surface is not evidence the running agent is already on the current behavior.
-The only live mates that do not restart are the ones whose home the update pass had to skip, and the ones whose runtime cannot prove a restart; the updater keeps both cases honest and neither is reported as a reload.
+The only live Project Directors that do not restart are the ones whose home the update pass had to skip, and the ones whose runtime cannot prove a restart; the updater keeps both cases honest and neither is reported as a reload.
 
-**One-time rollout note:** the update that carries this change is still executed by the previous release, which restarts only the mates whose `AGENTS.md` or `.agents/skills/` moved on that pass. After it completes, run `bin/fm-secondmate-restart.sh <fm-id>...` once with every live Project Director ID, not only the ones that release named; later updates follow the normal flow below.
+**One-time rollout note:** the update that carries this change is still executed by the previous release, which restarts only the Project Directors whose `AGENTS.md` or `.agents/skills/` moved on that pass. After it completes, run `bin/fm-secondmate-restart.sh <fm-id>...` once with every live Project Director ID, not only the ones that release named; later updates follow the normal flow below.
 
 The source is `origin` unless this home has `config/self-update-source`, which names one remote branch for the primary to follow instead, with local Project Directors following the primary's resulting commit; [`docs/configuration.md`](../../../docs/configuration.md#self-update-source-configself-update-source) owns that contract, including its remote Project Director limit.
 The primary update is fast-forward only, while each Project Director uses the same guarded convergence path plus one narrow recovery for squash-merged local history.
@@ -49,9 +49,9 @@ This touches only the firstmate repo and its own worktrees, never anything under
    - `restart-secondmates: fm-<id>...|none`
    - `nudge-secondmates: fm-<id>...|none`
 
-   The two second-mate sets are disjoint and the script owns the split; do not re-derive it.
-   `restart-secondmates:` carries every live mate the pass left on the latest commit, whether it advanced or was already there.
-   A mate reaches neither set only because its home was skipped, because it has no live endpoint recorded here, or because its endpoint was positively classified as dead or missing.
+   The two compatibility `secondmate` sets are disjoint and the script owns the split; do not re-derive it.
+   `restart-secondmates:` carries every live Project Director the pass left on the latest commit, whether it advanced or was already there.
+   A Project Director reaches neither set only because its home was skipped, because it has no live endpoint recorded here, or because its endpoint was positively classified as dead or missing.
    A skipped genuine divergence still requires attention through its durable reconciliation record; the other two cases need no update action from you.
 
 2. **Re-read AGENTS.md if your own instructions changed.**
@@ -66,16 +66,16 @@ This touches only the firstmate repo and its own worktrees, never anything under
    ```
    Include `FM_HOME=<this-firstmate-home>` unless `FM_HOME` is already set to the active firstmate home.
    This is automatic and needs no per-Project-Director confirmation from the user.
-   Local and remote mates go in the same list; the command owns the transport, the profile each replacement runs on, and the wait.
+   Local and remote Project Directors go in the same list; the command owns the transport, the profile each replacement runs on, and the wait.
 
-   It asks every listed mate first to write down the open work it holds only in its conversation, and restarts one only after that mate's own answer comes back.
-   A mate that is mid-turn queues the request behind that turn.
+   It asks every listed Project Director first to write down the open work it holds only in its conversation, and restarts one only after that Project Director's own answer comes back.
+   A Project Director that is mid-turn queues the request behind that turn.
    That is the whole point of the step, so do not work around it: it is what keeps a user call the Project Director had formed but never registered from being lost with the conversation.
    Its header owns the request, the bound, and the two knobs that change them.
 
    Read its per-Project-Director lines and its closing `summary:` line as the outcome:
-   - `restarted: <id>` - that mate is now genuinely running the current instructions and launch-time settings.
-   - `nudged: <id>: <reason>` - the restart was not safe, so the mate got the older re-read message instead and is still running the conversation and launch-time settings it started with.
+   - `restarted: <id>` - that Project Director is now genuinely running the current instructions and launch-time settings.
+   - `nudged: <id>: <reason>` - the restart was not safe, so the Project Director got the older re-read message instead and is still running the conversation and launch-time settings it started with.
      Never report one of these as a clean reload.
    - `unreached: <id>: <reason>` - no safe running outcome could be confirmed, including an ambiguous relaunch result.
 
@@ -84,14 +84,14 @@ This touches only the firstmate repo and its own worktrees, never anything under
    ```sh
    FM_HOME=<this-firstmate-home> bin/fm-send.sh <id> 'firstmate was updated to the latest - please re-read your AGENTS.md to pick up the new instructions.'
    ```
-   These are the mates that are on the latest bytes but could not be restarted provably, so the steer is the most this pass can honestly do for them.
-   It is a gentle steer, not an interruption: the mate already got a safe tracked-files fast-forward, and the steer never forces, tears down, or discards its work.
+   These are the Project Directors that are on the latest bytes but could not be restarted provably, so the steer is the most this pass can honestly do for them.
+   It is a gentle steer, not an interruption: the Project Director already got a safe tracked-files fast-forward, and the steer never forces, tears down, or discards its work.
    Never describe one of these as reloaded; its agent is still running the wiring it launched with.
 
 5. **Report to the user in plain outcomes, in one line where you can.**
    Summarize what landed under `AGENTS.md` section 9 without firstmate's internal vocabulary: which parts of the team are now on the latest, and which were left as-is and why.
    For example: "user, firstmate and both Project Directors are now on the latest."
-   Say plainly when a mate got the message rather than a clean reload, and why - never let a partial reload read as a full one.
+   Say plainly when a Project Director got the message rather than a clean reload, and why - never let a partial reload read as a full one.
    Surface any skipped target whose reason needs the user's attention - for instance a home with its own un-landed changes (diverged) or local edits (dirty), which were left untouched on purpose.
 
 ## Safety
@@ -104,6 +104,6 @@ This touches only the firstmate repo and its own worktrees, never anything under
   It is the same sanctioned self-write as the team sync.
 - **Nothing with work in it is disrupted.**
   A local or remote Project Director gets a tracked-files fast-forward only when its own checkout is safe to advance, and a Project Director whose home was skipped is not restarted either.
-  A restart replaces that mate's agent in the same home and endpoint after its open work is written down; it is never a teardown and never forced.
+  A restart replaces that Project Director's agent in the same home and endpoint after its open work is written down; it is never a teardown and never forced.
   Its workers keep running in their own endpoints, and every durable record - backlog, held user calls, unread status, unhandled instructions - is re-presented to the replacement at startup.
-  A restart refused before it is attempted leaves that mate on the re-read path; once a relaunch is attempted, any failed or ambiguous result is reported as unknown rather than attributed to either incarnation.
+  A restart refused before it is attempted leaves that Project Director on the re-read path; once a relaunch is attempted, any failed or ambiguous result is reported as unknown rather than attributed to either incarnation.

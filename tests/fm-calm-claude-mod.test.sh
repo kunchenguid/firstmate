@@ -87,9 +87,9 @@ import { pathToFileURL } from "node:url";
 const pi = await import(pathToFileURL($(js_string "$PI_SHIP")).href);
 const core = await import(pathToFileURL($(js_string "$MOD") + "/lib/fm-calm-working-ship-sprite.ts").href);
 const ESC = "\\u001b";
-const ANSI = { water: ESC + "[34m", boat: ESC + "[33m" };
+const ANSI = { track: ESC + "[34m", indicator: ESC + "[33m" };
 const RESET = ESC + "[39m";
-const paint = (row) => row.map((run) => (run.color === "plain" ? run.text : ANSI[run.color] + run.text + RESET)).join("");
+const paint = (row) => row.map((run) => ANSI[run.color] + run.text + RESET).join("");
 const cells = (row) => row.map((run) => run.text).join("");
 const check = (condition, message) => { if (!condition) throw new Error(message); };
 check(pi.CALM_WORKING_SHIP_TICK_MS === core.CALM_WORKING_SHIP_TICK_MS, "Pi re-exports a different tick");
@@ -106,25 +106,15 @@ for (const width of [0, 1, 2, 3, 4, 5, 6, 9, 12, 24, 40, 80, 121]) {
     check(animation.position() === sprite.position() && animation.direction() === sprite.direction() && animation.waterPhase() === sprite.waterPhase(), \`Pi animation state diverged at width \${width} step \${step}\`);
     if (width === 0) check(frame.length === 0, "zero width painted a row");
     if (width > 0) {
-      const water = frame[frame.length - 1];
-      check(cells(water).length === width, \`water row is \${cells(water).length} cells at width \${width}\`);
+      const indicator = frame[0];
+      check(frame.length === 1, \`width \${width} did not paint one row\`);
+      check(cells(indicator).length === width, \`indicator row is \${cells(indicator).length} cells at width \${width}\`);
       for (const row of frame) {
-        check(cells(row).length <= width, \`a row overflowed width \${width}\`);
-        for (const run of row) check(["plain", "water", "boat"].includes(run.color), \`unknown color \${run.color}\`);
+        check(cells(row).length === width, \`a row did not exactly fit width \${width}\`);
+        for (const run of row) check(["track", "indicator"].includes(run.color), \`unknown color \${run.color}\`);
       }
-      if (width >= 5) {
-        check(frame.length === 2, \`width \${width} did not paint two rows\`);
-        check(JSON.stringify(frame[0].slice(1)) === JSON.stringify([{ text: "◿│◣", color: "boat" }]), "the sail is not one boat-colored run");
-        check(frame[0][0].color === "plain" && /^ +$/.test(frame[0][0].text), "sail padding is not plain spaces");
-        const hullAt = frame[1].findIndex((run) => run.text === "╲▁▁▁╱");
-        check(hullAt >= 0, "the hull is not one run");
-        check(frame[1][hullAt].color === "boat", "the hull is not boat-colored");
-        check(frame[1].filter((_run, index) => index !== hullAt).every((run) => run.text.length === 1 && run.color === "water"), "water outside the hull is not one water-colored bar per cell");
-      } else if (width >= 3) {
-        check(frame.length === 1 && cells(frame[0]).includes("◿│◣"), \`width \${width} lost the sail-only fallback\`);
-      } else {
-        check(frame.length === 1 && /^[▁▂▃▄]+$/.test(cells(frame[0])), \`width \${width} lost the water-only fallback\`);
-      }
+      check(indicator.filter((run) => run.color === "indicator").length === 1, "frame did not paint one marker");
+      check(/^[·●◉○]+$/.test(cells(indicator)), \`width \${width} painted a non-indicator glyph\`);
     }
     animation.tick();
     sprite.tick();
@@ -142,8 +132,8 @@ for (const width of [0, 1, 2, 3, 4, 5, 6, 9, 12, 24, 40, 80, 121]) {
   animation.restoreLastRendered(); sprite.restoreLastRendered();
   check(animation.position() === sprite.position() && animation.waterPhase() === sprite.waterPhase(), "restore diverged");
   check(sprite.waterPhase() === 1 && sprite.position() === 2, \`restore landed at phase \${sprite.waterPhase()} column \${sprite.position()}\`);
-  sprite.clampToWidth(6);
-  check(sprite.position() === 1 && sprite.direction() === -1, "a hidden clamp did not turn the boat at the new edge");
+  sprite.clampToWidth(3);
+  check(sprite.position() === 2 && sprite.direction() === -1, "a hidden clamp did not turn the marker at the new edge");
   sprite.reset();
   check(sprite.position() === 0 && sprite.direction() === 1 && sprite.waterPhase() === 0, "reset did not restore the initial state");
 }
@@ -151,7 +141,7 @@ console.log("sprite-ok frames=" + frames);
 JS
   out=$(run_node "$TMP_ROOT/sprite.mjs" 2>&1) || fail "shared sprite: $out"
   assert_contains "$out" "sprite-ok frames=533" "the sprite parity sweep did not cover every width and step"
-  pass "the Pi working ship renders byte-for-byte the shared sprite core's frame painted in standard ANSI, at every width, cadence step, freeze, clamp, and reset"
+  pass "the Pi activity indicator renders byte-for-byte the shared core frame in standard ANSI at every width, cadence step, freeze, clamp, and reset"
 }
 
 test_raster_packing() {
@@ -180,11 +170,10 @@ const decode = (cells, columns, rows) => {
   }
   return grid;
 };
-// Claude Code's own theme tables: spinner blue water per family, Claude orange boat.
+// Claude Code's own theme tables: spinner-blue track per family, Claude-orange marker.
 const palettes = raster.CALM_SHIP_RASTER_PALETTES;
-check(palettes.dark.water === 0x93a5ff && palettes.dark.boat === 0xd77757, "dark palette is not Claude Code's dark spinner blue and Claude orange");
-check(palettes.light.water === 0x5769f7 && palettes.light.boat === 0xd77757, "light palette is not Claude Code's light spinner blue and Claude orange");
-check(palettes.dark.plain === raster.CALM_SHIP_RASTER_DEFAULT_COLOR && palettes.light.plain === raster.CALM_SHIP_RASTER_DEFAULT_COLOR, "plain padding is not the terminal default");
+check(palettes.dark.track === 0x93a5ff && palettes.dark.indicator === 0xd77757, "dark palette is not Claude Code's dark spinner blue and Claude orange");
+check(palettes.light.track === 0x5769f7 && palettes.light.indicator === 0xd77757, "light palette is not Claude Code's light spinner blue and Claude orange");
 for (const [theme, family] of [["dark", "dark"], ["dark-ansi", "dark"], ["dark-daltonized", "dark"], ["light", "light"], ["light-ansi", "light"], ["light-daltonized", "light"], ["auto", "light"], ["custom:rose", "light"], [undefined, "light"], [42, "light"], ["", "light"]]) {
   check(raster.calmShipPaletteFamily(theme) === family, \`theme \${JSON.stringify(theme)} chose \${raster.calmShipPaletteFamily(theme)}, not \${family}\`);
 }
@@ -206,7 +195,7 @@ for (const [family, colors] of Object.entries(palettes)) for (const width of [1,
         }
       }
       for (; column < width; column += 1) {
-        check(grid[row][column].glyph === " " && grid[row][column].fg === colors.plain, \`padding at \${row},\${column} is not a plain space\`);
+        check(grid[row][column].glyph === " " && grid[row][column].fg === raster.CALM_SHIP_RASTER_DEFAULT_COLOR, \`padding at \${row},\${column} is not a default-colored space\`);
       }
       check(grid[row].every((cell) => cell.bg === raster.CALM_SHIP_RASTER_DEFAULT_COLOR), "a background was set");
       check(grid[row].every((cell) => cell.glyph.codePointAt(0) <= 0xffff), "a glyph left the BMP");
@@ -216,15 +205,15 @@ for (const [family, colors] of Object.entries(palettes)) for (const width of [1,
 }
 // The packer's pre-load default is the both-readable light fallback.
 {
-  const packed = raster.packCalmShipRasterCells([[{ text: "▁", color: "water" }]], 1);
-  check(decode(packed.cells, 1, 1)[0][0].fg === palettes.light.water, "the default packing palette is not the light fallback");
+  const packed = raster.packCalmShipRasterCells([[{ text: "·", color: "track" }]], 1);
+  check(decode(packed.cells, 1, 1)[0][0].fg === palettes.light.track, "the default packing palette is not the light fallback");
 }
 // A run wider than the grid is clipped, never wrapped into the next row.
 {
-  const packed = raster.packCalmShipRasterCells([[{ text: "▁▁▁▁▁▁▁▁", color: "water" }], [{ text: "◿│◣", color: "boat" }]], 4);
+  const packed = raster.packCalmShipRasterCells([[{ text: "········", color: "track" }], [{ text: "●", color: "indicator" }]], 4);
   check(packed.rows === 2, "clip changed the row count");
   const grid = decode(packed.cells, 4, 2);
-  check(grid[0].map((c) => c.glyph).join("") === "▁▁▁▁" && grid[1].map((c) => c.glyph).join("") === "◿│◣ ", "clip wrapped or dropped cells");
+  check(grid[0].map((c) => c.glyph).join("") === "····" && grid[1].map((c) => c.glyph).join("") === "●   ", "clip wrapped or dropped cells");
 }
 check(raster.packCalmShipRasterCells([], 3).rows === 1, "an empty frame did not pack one blank row");
 check(raster.calmShipRasterColumns(undefined) === 78, "unmeasured viewport width");
@@ -235,7 +224,7 @@ console.log("raster-ok");
 JS
   out=$(run_node "$TMP_ROOT/raster.mjs" 2>&1) || fail "raster packing: $out"
   assert_contains "$out" "raster-ok" "the raster packing check did not complete"
-  pass "the Raster packing lays the shared frame out row-major in Claude Code's dark or light theme palette, using light as the both-readable fallback, with plain padding, default backgrounds, BMP glyphs, clipping, and a standard base64 encoding"
+  pass "the Raster packing lays the shared frame out row-major in Claude Code's dark or light theme palette, using light as the both-readable fallback, with default padding, default backgrounds, BMP glyphs, clipping, and a standard base64 encoding"
 }
 
 test_presentation_policy() {
@@ -364,7 +353,7 @@ same(rows.map(notes.outcomeNoteLine), [
 ], "Pi's line for each row");
 const cursor = notes.parseOutcomeMarker(readFileSync(process.env.NOTES_START_CURSOR, "utf8"));
 same(notes.replayOutcomeNotes(rows, notes.parseOutcomeMarker(read(".branch-outcomes-cursor")), 4), [],
-  "the markers after the drain read seq 5 would drop its sailboat, so the replay judges by the session-start cursor");
+  "the markers after the drain read seq 5 would drop its routine note, so the replay judges by the session-start cursor");
 same(notes.replayOutcomeNotes(rows, cursor, notes.parseOutcomeMarker(read(".branch-outcomes-processed"))),
   ["• fm-e: reconciled the backlog"], "replay after main processed seq 4");
 same(notes.replayOutcomeNotes(rows, cursor, notes.parseOutcomeMarker(undefined)),
@@ -376,9 +365,9 @@ const replay = notes.replayOutcomeNotes(many, 0, 0);
 same(replay.length, 21, "replay bound");
 same(replay[0], "• 5 earlier supervision notes not replayed; bin/fm-branch-outcome.sh list shows them", "omitted count");
 same(replay[1], "• t6: s", "the newest rows are kept");
-same(notes.newOutcomeNotes(rows, 4), { lines: ["• fm-e: reconciled the backlog"], lastSeen: 5 }, "rows above the anchor");
+same(notes.newOutcomeNotes(rows, 4), { lines: ["• fm-e: reconciled the backlog"], lastSeen: 5 }, "rows above the sequence marker");
 same(notes.newOutcomeNotes(rows, 5), { lines: [], lastSeen: 5 }, "nothing new");
-same(notes.newOutcomeNotes(rows.slice(0, 2), 5), { lines: [], lastSeen: 2 }, "a replaced store re-anchors without replay");
+same(notes.newOutcomeNotes(rows.slice(0, 2), 5), { lines: [], lastSeen: 2 }, "a replaced store resets its sequence without replay");
 same(notes.newOutcomeNotes(rows.slice(2), 1), {
   lines: [
     "• 1 earlier supervision outcome not shown; bin/fm-branch-outcome.sh list shows them",
@@ -411,7 +400,7 @@ console.log("notes-ok");
 JS
   out=$(NOTES_MOD=$MOD NOTES_STATE=$state NOTES_START_CURSOR=$TMP_ROOT/notes-start-cursor run_node "$TMP_ROOT/notes.mjs" 2>&1) || fail "supervision notes: $out"
   assert_contains "$out" "notes-ok" "the supervision notes check did not complete"
-  pass "the supervision notes read the store owner's tail copy and markers as Pi does: sailboat and anchor lines, silent rows skipped, bounded replay of unread and unprocessed rows not already shown in the session, and latch notes"
+  pass "the supervision notes read the store owner's tail copy and markers as Pi does: routine and user-outcome lines, silent rows skipped, bounded replay of unread and unprocessed rows not already shown in the session, and latch notes"
 }
 
 # The classifier parity corpus: envelopes the shell owner encodes itself, its legacy
