@@ -62,7 +62,7 @@ fm_bob_process_matches() {  # <comm> <args>
   # only at a word that can end Bob's launcher or script.
   for ((i = start; i < ${#words[@]} && i <= start + 16; i++)); do
     case "${words[i]}" in
-      bob | */bob | */bob.js)
+      */bob | */bob.js)
         fm_bob_script_is_bob "${words[*]:start:i-start+1}" && return 0
         ;;
     esac
