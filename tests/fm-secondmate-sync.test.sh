@@ -136,7 +136,7 @@ seed_marked_home() {
 FF_OUT=""
 run_ff() {
   local dir=$1 base=$2 outfile="$TMP_ROOT/ff.out"
-  ff_target "$dir" "secondmate sm" "$base" yes yes >"$outfile" 2>&1
+  ff_target "$dir" "Project Director sm" "$base" yes yes >"$outfile" 2>&1
   FF_OUT=$(cat "$outfile")
 }
 
@@ -152,7 +152,7 @@ test_ff_updated() {
   run_ff "$w/sm" "$base"
 
   [ "$FF_STATUS" = updated ] || fail "FF_STATUS: expected updated, got '$FF_STATUS'"
-  assert_contains "$FF_OUT" "secondmate sm: updated " "updated home prints an advance line"
+  assert_contains "$FF_OUT" "Project Director sm: updated " "updated home prints an advance line"
   assert_contains "$FF_INSTR" "AGENTS.md" "instruction change is recorded in FF_INSTR"
   [ "$(head_of "$w/sm")" = "$base" ] || fail "home did not advance to the primary's local HEAD"
   git -C "$w/sm" symbolic-ref -q HEAD >/dev/null && fail "home is no longer detached"
@@ -173,7 +173,7 @@ test_ff_current() {
   run_ff "$w/sm" "$base"
 
   [ "$FF_STATUS" = current ] || fail "FF_STATUS: expected current, got '$FF_STATUS'"
-  assert_contains "$FF_OUT" "secondmate sm: already current" "current home reports already current"
+  assert_contains "$FF_OUT" "Project Director sm: already current" "current home reports already current"
   [ -z "$FF_INSTR" ] || fail "a no-op must not report instruction changes (would trigger a nudge)"
   [ "$(head_of "$w/sm")" = "$base" ] || fail "current home HEAD moved"
   pass "T2 current: an already-current home is a no-op and reports no instruction change"
@@ -193,7 +193,7 @@ test_ff_dirty() {
   run_ff "$w/sm" "$base"
 
   [ "$FF_STATUS" = skipped ] || fail "FF_STATUS: expected skipped, got '$FF_STATUS'"
-  assert_contains "$FF_OUT" "secondmate sm: skipped: dirty working tree" "dirty home is skipped"
+  assert_contains "$FF_OUT" "Project Director sm: skipped: dirty working tree" "dirty home is skipped"
   [ "$(head_of "$w/sm")" = "$before" ] || fail "dirty home HEAD moved"
   grep -q 'uncommitted local edit' "$w/sm/AGENTS.md" || fail "dirty edit was discarded"
   pass "T3 dirty: an uncommitted home is skipped, its edit preserved"
@@ -234,7 +234,7 @@ test_ff_diverged() {
   run_ff "$w/sm" "$base"
 
   [ "$FF_STATUS" = skipped ] || fail "FF_STATUS: expected skipped, got '$FF_STATUS'"
-  assert_contains "$FF_OUT" "secondmate sm: skipped: diverged from $base" "diverged home is skipped"
+  assert_contains "$FF_OUT" "Project Director sm: skipped: diverged from $base" "diverged home is skipped"
   [ "$(head_of "$w/sm")" = "$before" ] || fail "diverged home HEAD moved (unlanded work at risk)"
   pass "T4 diverged: a home that is not an ancestor of the primary's HEAD is skipped"
 }
@@ -257,7 +257,7 @@ test_ff_inflight_feature_branch() {
   run_ff "$w/sm" "$base"
 
   [ "$FF_STATUS" = skipped ] || fail "FF_STATUS: expected skipped, got '$FF_STATUS'"
-  assert_contains "$FF_OUT" "secondmate sm: skipped: on feature/wip, expected main" \
+  assert_contains "$FF_OUT" "Project Director sm: skipped: on feature/wip, expected main" \
     "a home on a feature branch is skipped"
   [ "$(head_of "$w/sm")" = "$before" ] || fail "in-flight home HEAD moved (work at risk)"
   pass "T5 in-flight: a home on a feature branch is skipped, its work preserved"
@@ -892,7 +892,7 @@ test_seed_marker_does_not_mask_real_dirt() {
   run_ff "$w/sm" "$base"
 
   [ "$FF_STATUS" = skipped ] || fail "a genuinely dirty home must skip, got '$FF_STATUS'"
-  assert_contains "$FF_OUT" "secondmate sm: skipped: dirty working tree" \
+  assert_contains "$FF_OUT" "Project Director sm: skipped: dirty working tree" \
     "a genuinely dirty home is skipped even with the marker present"
   [ "$(head_of "$w/sm")" = "$before" ] || fail "genuinely dirty home HEAD moved (work at risk)"
   grep -q 'real local change' "$w/sm/AGENTS.md" || fail "genuine local edit was discarded"

@@ -2977,9 +2977,9 @@ test_secondmate_charter_brief_is_idle_by_default() {
   brief="$home/data/idle-sm/brief.md"
   [ -f "$brief" ] || fail "secondmate charter brief was not scaffolded"
   # Idle contract: waits for routed work, never self-initiates.
-  grep -F 'go idle and wait silently for the main firstmate' "$brief" >/dev/null \
+  grep -F 'go idle and wait silently for the main Director' "$brief" >/dev/null \
     || fail "charter brief does not tell the secondmate to go idle and wait for routed work"
-  grep -F 'Act only on tasks the main firstmate routes to you' "$brief" >/dev/null \
+  grep -F 'Act only on tasks the main Director routes to you' "$brief" >/dev/null \
     || fail "charter brief does not restrict work to routed tasks"
   grep -F 'never spawn a survey, audit, or any self-directed' "$brief" >/dev/null \
     || fail "charter brief does not forbid self-initiated survey/audit work"
