@@ -125,6 +125,7 @@ case "$command_name" in
     ;;
   fm-remote-inherit.sh)
     case "$subcommand" in
+      generation) printf '0\n' ;;
       put) printf 'unchanged: %s\n' "$item_rel" ;;
     esac
     exit 0
@@ -455,6 +456,11 @@ case "$command_name:$subcommand" in
     ;;
   fm-remote-secondmate-control.sh:state) printf 'END %s\n' "$host" >> "$log"; printf 'alive\n'; exit 0 ;;
   fm-remote-secondmate-control.sh:route) printf 'END %s\n' "$host" >> "$log"; printf 'backend=herdr\n'; exit 0 ;;
+  fm-remote-inherit.sh:generation)
+    printf 'END %s %s %s\n' "$host" "$command_name" "$subcommand" >> "$log"
+    printf '0\n'
+    exit 0
+    ;;
   fm-remote-inherit.sh:*)
     if [ "$item_rel" = "${FM_FAKE_ITEM_UNKNOWN:-none}" ]; then
       sleep 0.2
