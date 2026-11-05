@@ -170,6 +170,7 @@ h1 { font-size: clamp(40px, 7vw, 64px); line-height: 1; letter-spacing: -0.04em;
 .chip .dot { margin-top: 0; }
 .sheet .box { min-height: 128px; font-size: 18px; }
 
+.notice { margin: -10px 0 14px; padding: 10px 14px; border-radius: 12px; background: var(--needs-soft); color: var(--ink-2); font-size: 14px; font-weight: 600; overflow-wrap: anywhere; }
 .err { padding: 18px; border-radius: 16px; background: var(--needs-soft); color: var(--ink); font-weight: 650; }
 
 @media (max-width: 1000px) {
@@ -246,6 +247,11 @@ __FM_PROJECTS_VIEW_DATA__
     if (s < 3600) return "Updated " + Math.round(s / 60) + " min ago";
     if (s < 86400) return "Updated " + Math.round(s / 3600) + " h ago";
     return "Updated " + Math.round(s / 86400) + " d ago";
+  }
+  function span(s) {
+    if (s < 3600) return Math.max(1, Math.round(s / 60)) + " min";
+    if (s < 86400) return Math.round(s / 3600) + " h";
+    return Math.round(s / 86400) + " d";
   }
   function when(day) {
     if (!day) return "";
@@ -360,7 +366,7 @@ __FM_PROJECTS_VIEW_DATA__
     chip.appendChild(el("span", "", p.name));
     sheet.appendChild(chip);
     var c = composer({
-      key: "add." + p.id, label: "Add a task to " + p.name, button: "Start",
+      key: p.add_key, label: "Add a task to " + p.name, button: "Start",
       placeholder: "What should happen?", rows: 4,
       sentText: "Sent. It shows up here once it starts.",
       onCancel: closeSheet,
@@ -386,6 +392,16 @@ __FM_PROJECTS_VIEW_DATA__
     });
     main.appendChild(totals);
 
+    /* a second mate whose rows are missing or old is said so, never shown as done */
+    (data.homes || []).forEach(function (h) {
+      var text = "";
+      if (h.status === "unread") text = h.id + " not read" + (h.reason ? ": " + h.reason : "");
+      else if (h.status === "partial") text = h.id + " partly read" + (h.reason ? ": " + h.reason : "");
+      else if (h.status === "cached") text = h.id + " last read " + span(h.age_seconds || 0) + " ago";
+      if (h.omitted > 0) text += (text ? " · " : h.id + " ") + h.omitted + " not shown";
+      if (text) main.appendChild(el("div", "notice", text));
+    });
+
     var grid = el("div", "grid");
     data.projects.forEach(function (p) {
       var card = el("div", "card");
@@ -406,11 +422,13 @@ __FM_PROJECTS_VIEW_DATA__
       card.appendChild(slider(p.counts));
       var foot = el("div", "card__foot");
       foot.appendChild(nums(p.counts));
-      var plus = el("button", "plus", "+");
-      plus.type = "button";
-      plus.setAttribute("aria-label", "Add a task to " + p.name);
-      plus.addEventListener("click", function (ev) { ev.stopPropagation(); openSheet(p); });
-      foot.appendChild(plus);
+      if (p.add_key && keyOk(p.add_key)) {
+        var plus = el("button", "plus", "+");
+        plus.type = "button";
+        plus.setAttribute("aria-label", "Add a task to " + p.name);
+        plus.addEventListener("click", function (ev) { ev.stopPropagation(); openSheet(p); });
+        foot.appendChild(plus);
+      }
       card.appendChild(foot);
       grid.appendChild(card);
     });
@@ -500,7 +518,7 @@ __FM_PROJECTS_VIEW_DATA__
     p.moving.forEach(function (it) {
       var sub = [it.status, it.since ? "since " + when(it.since) : "", elsewhere(it)].filter(Boolean).join(" · ");
       var r = row("item--moving", "var(--moving)", it.title, sub);
-      if (it.local && it.correctable && keyOk("fix." + it.id)) {
+      if (it.local && it.correctable && it.fix_key && keyOk(it.fix_key)) {
         var fix = el("button", "fix", "Correct");
         fix.type = "button";
         var box = null;
@@ -508,7 +526,7 @@ __FM_PROJECTS_VIEW_DATA__
           if (box) { box.parentNode.removeChild(box); box = null; r.className = "item item--moving"; return; }
           r.className = "item item--moving item--open";
           box = composer({
-            cls: "fixbox", key: "fix." + it.id, label: "Correction for " + it.title, button: "Send to this work",
+            cls: "fixbox", key: it.fix_key, label: "Correction for " + it.title, button: "Send to this work",
             placeholder: "What should change?", rows: 3, sentText: "Sent to this work",
             onCancel: function () { box.parentNode.removeChild(box); box = null; r.className = "item item--moving"; }
           });
@@ -558,12 +576,14 @@ __FM_PROJECTS_VIEW_DATA__
     if (p.next.more > 0) next.appendChild(el("div", "more", p.next.more + " more"));
     page.appendChild(group("Left", "var(--ink-3)", p.counts.next, next));
 
-    var add = el("button", "addbtn");
-    add.type = "button";
-    add.appendChild(el("span", "", "+"));
-    add.appendChild(document.createTextNode(" Add a task"));
-    add.addEventListener("click", function () { openSheet(p); });
-    page.appendChild(add);
+    if (p.add_key && keyOk(p.add_key)) {
+      var add = el("button", "addbtn");
+      add.type = "button";
+      add.appendChild(el("span", "", "+"));
+      add.appendChild(document.createTextNode(" Add a task"));
+      add.addEventListener("click", function () { openSheet(p); });
+      page.appendChild(add);
+    }
   }
 
   /* ---------- routing: the open project survives a live reload ----------

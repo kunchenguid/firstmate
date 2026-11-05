@@ -95,6 +95,10 @@
 #     Generated captain-hold rows in decisions_open and queued carry the full
 #     question for presentation; their overview summary, reason, title, and
 #     hold_reason fields stay bounded.
+#     Queued, captain-hold decisions_open, active_children, and landed rows
+#     also carry repo and project_hint, the task's `Project: <id>` body tag or
+#     null, so a parent renderer can apply project membership to delegated
+#     work (bin/fm-projects-view.sh); older producers omit both.
 #     Before that queued bound is applied, non-captain-actionable rows are selected
 #     ahead of captain-actionable rows so separately projected live decisions cannot
 #     crowd Charted-Next-eligible work out of the summary. Each group is ordered by
@@ -1010,6 +1014,11 @@ secondmate_home_summary_json() {  # <backlog-json-file> <tasks-json-file>
       | if ($filed | type) != "string" then null
         elif ($filed | test("T")) then try ($filed | fromdateiso8601) catch null
         else try (($filed + "T00:00:00Z") | fromdateiso8601) catch null end;
+    # The explicit project tag in a task body, carried so a parent renderer can
+    # apply the same membership rules to delegated work (fm-projects-view.sh).
+    def project_hint:
+      ([(.body_lines // [])[]
+        | (capture("^Project:[[:space:]]*(?<p>[a-z0-9][a-z0-9-]{0,63})[[:space:]]*$")? | .p)] | first) // null;
     def newest_filed_first:
       to_entries
       | sort_by((.value | filed_epoch) as $epoch
@@ -1031,14 +1040,18 @@ secondmate_home_summary_json() {  # <backlog-json-file> <tasks-json-file>
              question:(.title + ": " + .hold_reason),
             hold_until:(.hold_until // null),
             hold_bucket:(.hold_bucket // null),
-            hold_age_days:(.hold_age_days // null),source:"backlog"} ]) as $captain_holds_all
+            hold_age_days:(.hold_age_days // null),
+            repo:((.repo // null) | if . == null then null else trunc(120) end),
+            project_hint:project_hint,source:"backlog"} ]) as $captain_holds_all
     | ([ $backlog.records[]? | select(landed_record)
          | {id:(.id | trunc(120)),title:(.title | trunc(120)),
             kind:((.kind // null) | if . == null then null else trunc(40) end),
             hold_kind:((.hold_kind // null) | if . == null then null else trunc(40) end),
             pr_url:((.pr_url // null) | if . == null then null else trunc(500) end),
             report_path:((.report_path // null) | if . == null then null else trunc(500) end),
-            local_note:((.local_note // null) | if . == null then null else trunc(120) end),completion} ]
+            local_note:((.local_note // null) | if . == null then null else trunc(120) end),completion,
+            repo:((.repo // null) | if . == null then null else trunc(120) end),
+            project_hint:project_hint} ]
        | sort_by([(.completion.date // ""), .id]) | reverse) as $landed_all
     | ([ $tasks[] | select(.current_state.state == "unknown") ]) as $unknown_children
     | ([ $owned_in_flight[]
@@ -1081,6 +1094,7 @@ secondmate_home_summary_json() {  # <backlog-json-file> <tasks-json-file>
             repo:(($work.repo // .project // null) | if . == null then null else trunc(120) end),
             name:(($work.title // null) | if . == null then null else trunc(70) end),
             source:.current_state.source,
+            project_hint:($work | project_hint),
             doing:((.current_state.detail // "") | trunc(120))} ]) as $active_all
     | ($captain_holds_all
        + ([ $tasks[] as $t | ($t.hints.open_decisions // [])[]
@@ -1149,6 +1163,7 @@ secondmate_home_summary_json() {  # <backlog-json-file> <tasks-json-file>
           captain_actionable:(.captain_actionable // false),
           repo:((.repo // null) | if . == null then null else trunc(120) end),
           kind:((.kind // null) | if . == null then null else trunc(40) end),
+          project_hint:project_hint,
           since:((.since // null) | if . == null then null else trunc(40) end)}]
           | ((map(select(.captain_actionable != true)) | newest_filed_first)
              + (map(select(.captain_actionable == true)) | newest_filed_first))

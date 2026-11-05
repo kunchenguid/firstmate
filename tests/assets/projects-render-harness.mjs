@@ -130,7 +130,7 @@ function typeAndSend(container, words) {
   one(container, "send").fire("click");
 }
 
-const out = { error: "", totals: [], cards: [], tray: null, detail: null, reloaded: null, reloadedAfterBack: null, sent };
+const out = { error: "", totals: [], cards: [], tray: null, notices: [], addable: [], detail: null, reloaded: null, reloadedAfterBack: null, sent };
 Object.defineProperty(globalThis.window, "sessionStorage", storageDenied);
 Object.defineProperty(globalThis.window, "localStorage", storageDenied);
 // Load the page again as a fresh document at a URL without the hash, as the
@@ -154,6 +154,9 @@ try {
   }));
   const tray = one(main, "tray");
   out.tray = tray ? tray.textContent : null;
+  out.notices = all(main, hasClass("notice")).map((n) => n.textContent);
+  out.addable = all(main, hasClass("card")).filter((c) => one(c, "plus"))
+    .map((c) => one(c, "card__name").textContent);
 
   // Add a task from the overview card's plus.
   const card = all(main, hasClass("card")).find((c) => one(c, "card__name").textContent

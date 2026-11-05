@@ -37,7 +37,14 @@
 #            next    - queued work, plus dated or blocked captain holds
 #          counts.needs is the per-project counter the page always shows.
 #          Main-home items carry local=true and are the only ones the page
-#          offers actions on; secondmate items are read-only here.
+#          offers actions on; secondmate items are read-only here. A
+#          secondmate row joins a project by the same rules, through the
+#          project_hint and repo its home summary carries, and one task id in a
+#          home lands in one group (needs, then moving, then next, then done).
+#          `homes` lists every registered secondmate with how its rows were
+#          read (fresh, cached with an age, partial, or not read with the
+#          reason) and how many rows its summary omitted, so missing or old
+#          records never read as completed work.
 #          The snapshot runs in one of two scopes. A full snapshot
 #          (`fm-fleet-snapshot.sh --json`) fetches every remote secondmate's
 #          ledger over ssh and probes each local worker's crew state; only an
@@ -86,11 +93,14 @@
 #          secondmate's own record.
 # path     Print the stable page path for this home.
 #
-# Page answers ride the fleet board's fm-bearings-answer.v1 capture under keys
-# that never name a task, so the keyed-answer intake skips them and firstmate
-# routes them: `add.<project-id>` and `fix.<task-id>` (.agents/skills/bearings/
-# SKILL.md, "Projects view"). A needs-you card is read-only; the captain
-# answers in chat.
+# Page answers ride the fleet board's fm-bearings-answer.v1 capture under the
+# keys `pv.add.<project-id>` and `pv.fix.<task-id>`, and firstmate routes them
+# (.agents/skills/bearings/SKILL.md, "Projects view"). Task ids share the answer
+# key alphabet, so no prefix alone can keep a key from naming a task: `serve`
+# therefore never binds the page to the keyed-answer intake (it removes any
+# binding instead), and the model publishes a key only when it equals no task
+# id the snapshot knows, leaving that action off the page otherwise. A
+# needs-you card is read-only; the captain answers in chat.
 #
 # FM_PROJECTS_VIEW_TEMPLATE overrides the shipped template path (tests only).
 set -u
@@ -254,8 +264,9 @@ build_model() {  # <snapshot.json> <archive.json> <published-model.json>
     # Membership: explicit body line, then id glob, then exclusive repo.
     def project_of:
         . as $item
-        | ([($item.body_lines // [])[]
-            | (capture("^Project:[[:space:]]*(?<p>[a-z0-9][a-z0-9-]{0,63})[[:space:]]*$")? | .p)
+        | ([(if ($item.project_hint // null) != null then $item.project_hint else empty end),
+            (($item.body_lines // [])[]
+             | (capture("^Project:[[:space:]]*(?<p>[a-z0-9][a-z0-9-]{0,63})[[:space:]]*$")? | .p))
             | select(. as $p | $ids | index($p) != null)] | first) as $explicit
         | if $explicit != null then $explicit
           else
@@ -299,41 +310,64 @@ build_model() {  # <snapshot.json> <archive.json> <published-model.json>
        | select(landed_record and ((.completion.date // "") >= $cutoff))
        | {group:"done",id,title,repo,local:true,home:null,date:.completion.date,body_lines,sort:0}];
 
-    # Secondmate items, read-only here.
+    # Secondmate items, read-only here. One task id per home keeps one group,
+    # in the local precedence order.
+    def group_rank: {"needs":0,"moving":1,"next":2,"done":3}[.group];
     def mate_items:
       [($snap.secondmate_current.records // [])[]
        | . as $mate
-       | ([($mate.queued // [])[] | select(.hold_bucket == "live" or .hold_bucket == "aged") | .id]) as $needs_ids
-       | (($mate.queued // [])[]
+       | [(($mate.queued // [])[]
             | if (.hold_bucket == "live" or .hold_bucket == "aged") then
-                {group:"needs",id,title,repo,local:false,home:$mate.id,
+                {group:"needs",id,title,repo:(.repo // null),project_hint:(.project_hint // null),local:false,home:$mate.id,
                  question:(.hold_reason // ""),age_days:.hold_age_days,aged:(.hold_bucket == "aged"),sort:0}
               else
-                {group:"next",id,title,repo,local:false,home:$mate.id,
+                {group:"next",id,title,repo:(.repo // null),project_hint:(.project_hint // null),local:false,home:$mate.id,
                  reason:(if .hold_bucket == "dated" then "Back on " + (.hold_until // "")
                          else after(.unresolved_blocker_ids // []) end),sort:0}
               end),
-         (($mate.decisions_open // [])[]
-            | select(.verb == "captain-hold" and (.id as $id | $needs_ids | index($id) == null))
-            | {group:"needs",id,title:(.summary // .id),repo:null,local:false,home:$mate.id,
+          (($mate.decisions_open // [])[]
+            | select(.verb == "captain-hold")
+            | {group:"needs",id,title:(.summary // .id),repo:(.repo // null),project_hint:(.project_hint // null),
+               local:false,home:$mate.id,
                question:(.reason // ""),age_days:.hold_age_days,aged:(.hold_bucket == "aged"),sort:0}),
-         (($mate.active_children // [])[]
-            | {group:"moving",id,title:(.name // .id),repo,local:false,home:$mate.id,
+          (($mate.active_children // [])[]
+            | {group:"moving",id,title:(.name // .id),repo:(.repo // null),project_hint:(.project_hint // null),
+               local:false,home:$mate.id,
                status:((.state // "") | state_label),since:null,correctable:false,sort:0}),
-         (($mate.landed // [])[]
+          (($mate.landed // [])[]
             | select((.completion.date // "") >= $cutoff)
-            | {group:"done",id,title,repo:null,local:false,home:$mate.id,date:.completion.date,sort:0})];
+            | {group:"done",id,title,repo:(.repo // null),project_hint:(.project_hint // null),
+               local:false,home:$mate.id,date:.completion.date,sort:0})]
+       | group_by(.id) | map(min_by(group_rank)) | .[]];
+
+    # How each secondmate home was read, so a missing or old summary is shown
+    # as such rather than as an empty or current project.
+    def home_states:
+      [($snap.secondmate_current.records // [])[]
+       | {id,
+          status:(if (.provenance.selected // "") != "structured-home" then "unread"
+                  elif (.provenance.trust // "complete") != "complete" then "partial"
+                  elif (.freshness.status // "") == "cached" then "cached"
+                  else "fresh" end),
+          reason:(.current.reason // null),
+          age_seconds:(.freshness.age_seconds // null),
+          omitted:([(.omitted // [])[] | (.count // 0)] | add // 0)}];
 
     (main_items) as $main
     | ($main + archive_items([$main[].id]) + mate_items
-       | map(. + {project:project_of} | del(.body_lines))) as $items
+       | map(. + {project:project_of} | del(.body_lines, .project_hint))) as $items
+    # Every task id this snapshot knows; a page key equal to one is withheld.
+    | ([$items[].id] + [($snap.backlog.records // [])[] | .id // empty]
+       + [($archive[0] // [])[] | .id // empty] | unique) as $task_ids
+    | def page_key($k): if ($task_ids | index($k)) == null and ($k | test("^[A-Za-z0-9._-]{1,128}$")) then $k else null end;
 
-    | def group_rows($rows; $group):
+    def group_rows($rows; $group):
         [$rows[] | select(.group == $group)]
         | if $group == "done" then sort_by(.date, .id) | reverse
           elif $group == "moving" then sort_by(.since // "") | reverse
           else sort_by(.sort) end
-        | map(del(.group, .project, .sort));
+        | map(del(.group, .project, .sort)
+              | if .correctable == true then . + {fix_key:page_key("pv.fix." + .id)} else . end);
       def capped($list): {rows:$list[:$cap], more:([($list | length) - $cap, 0] | max)};
 
     {
@@ -341,6 +375,7 @@ build_model() {  # <snapshot.json> <archive.json> <published-model.json>
       generated:$snap.generated,
       home:$home,
       window_days:$window,
+      homes:home_states,
       totals:{
         needs:([$items[] | select(.group == "needs")] | length),
         moving:([$items[] | select(.group == "moving")] | length),
@@ -353,7 +388,7 @@ build_model() {  # <snapshot.json> <archive.json> <published-model.json>
         | group_rows($rows; "moving") as $moving
         | group_rows($rows; "done") as $done
         | group_rows($rows; "next") as $next
-        | {id:$p.id,name:$p.name,color:$p.color,
+        | {id:$p.id,name:$p.name,color:$p.color,add_key:page_key("pv.add." + $p.id),
            counts:{needs:($needs | length),moving:($moving | length),done:($done | length),next:($next | length)},
            now:(if ($moving | length) > 0 then $moving[0].title
                 elif ($needs | length) > 0 then $needs[0].title
@@ -494,7 +529,7 @@ command_serve() {
   # shellcheck source=bin/fm-lavish-board-lib.sh
   . "$SCRIPT_DIR/fm-lavish-board-lib.sh"
   FORCE_WRITE=1 publish_page ""
-  fm_lavish_board_serve "$(page_path)"
+  fm_lavish_board_serve "$(page_path)" --no-intake
 }
 
 # --- automatic refresh -------------------------------------------------------

@@ -4,7 +4,7 @@
 # bin/fm-projects-view.sh, which each own their own board file and payload.
 #
 # Usage (after the sourcing script defines `fail <message>` and SCRIPT_DIR):
-#   fm_lavish_board_serve <board.html>
+#   fm_lavish_board_serve <board.html> [--no-intake]
 #
 # fm_lavish_board_serve establishes the Lavish session on an already-written
 # board file and PROVES it is live BEFORE binding and arming its answer source,
@@ -16,6 +16,7 @@
 #   session: live | reopened
 #   served: <path>
 #   bound: <source-id>
+#   unbound: <source-id>          (--no-intake only)
 #   armed: <source-id>            (first registration)
 #   already-armed: <source-id>    (registration already present)
 #   listening: <owner>            (only when a replacement was needed)
@@ -30,6 +31,11 @@
 # accepts only the replacement listener as live. A registered board with no
 # live owner also gets a replacement before serving returns, because
 # `already-armed` is not the same fact as `listening`.
+#
+# --no-intake serves a board whose answers must never reach the keyed-answer
+# intake: instead of binding, it removes any binding left on the source, so no
+# answer key can resolve a captain-held task even when it equals a task id.
+# Its answers still arrive as ordinary process-event wakes for firstmate.
 
 # --- Lavish session liveness -------------------------------------------------
 # Verified against lavish-axi 0.1.61. The establish status is an initial signal
@@ -111,8 +117,9 @@ await_source_owner() {  # <source-id>
   printf '%s\n' "${owner:-none}"
 }
 
-fm_lavish_board_serve() {  # <board.html>
-  local board=$1 sid owner version pre_reopen_owner
+fm_lavish_board_serve() {  # <board.html> [--no-intake]
+  local board=$1 intake=${2-} sid owner version pre_reopen_owner
+  case "$intake" in ''|--no-intake) ;; *) fail "unknown serve option: $intake" ;; esac
   command -v lavish-axi >/dev/null 2>&1 || fail "lavish-axi is not installed"
   sid=$("$SCRIPT_DIR/fm-procevent-lavish.sh" source-id "$board") \
     || fail "cannot derive the board source id"
@@ -128,9 +135,15 @@ fm_lavish_board_serve() {  # <board.html>
   fi
   printf 'served: %s\n' "$board"
 
-  "$SCRIPT_DIR/fm-captain-hold.sh" bind "$sid" >/dev/null \
-    || fail "cannot bind the board source to the keyed-answer intake"
-  printf 'bound: %s\n' "$sid"
+  if [ "$intake" = --no-intake ]; then
+    "$SCRIPT_DIR/fm-captain-hold.sh" unbind "$sid" >/dev/null \
+      || fail "cannot remove the board source keyed-answer binding"
+    printf 'unbound: %s\n' "$sid"
+  else
+    "$SCRIPT_DIR/fm-captain-hold.sh" bind "$sid" >/dev/null \
+      || fail "cannot bind the board source to the keyed-answer intake"
+    printf 'bound: %s\n' "$sid"
+  fi
 
   owner=$(source_owner "$sid")
   if [ "$BOARD_SESSION_REOPENED" = 1 ]; then

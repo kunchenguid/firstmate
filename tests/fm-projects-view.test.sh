@@ -409,6 +409,169 @@ test_routine_refresh_is_local_only_and_rate_limited() {
   pass "routine refreshes are local-only and rate-limited; --full bypasses the cooldown with a full snapshot"
 }
 
+# --- review regressions --------------------------------------------------------
+
+test_page_keys_never_name_a_task() {
+  local home model
+  home=$(fixture_home keys)
+  fm_write_meta "$home/state/store-build.meta" "window=x:fm-store-build" "kind=ship"
+  model=$(model_of "$home") || fail "model failed"
+  printf '%s' "$model" | jq -e '
+    [.projects[] | .add_key] == ["pv.add.store-launch", "pv.add.platform"]
+    and [.projects[] | .moving[] | select(.id == "store-build") | .fix_key] == ["pv.fix.store-build"]
+  ' >/dev/null || fail "page keys are not namespaced: $model"
+  awk '{ print } /^## Queued$/ {
+      print "- [ ] pv.add.platform - Collides with the platform add key (since 2026-11-02)"
+      print "- [ ] pv.fix.store-build - Collides with the store-build fix key (since 2026-11-02)" }' \
+    "$home/data/backlog.md" > "$home/data/backlog.md.new" && mv "$home/data/backlog.md.new" "$home/data/backlog.md"
+  model=$(model_of "$home") || fail "model failed"
+  printf '%s' "$model" | jq -e '
+    [.projects[] | .add_key] == ["pv.add.store-launch", null]
+    and [.projects[] | .moving[] | select(.id == "store-build") | .fix_key] == [null]
+  ' >/dev/null || fail "a page key that names a task was published: $model"
+  pass "page keys are namespaced and withheld when they would name a task"
+}
+
+lavish_fakebin() {  # <home>
+  local fakebin
+  fakebin=$(fm_fakebin "$1")
+  cat > "$fakebin/lavish-axi" <<'SH'
+#!/usr/bin/env bash
+case "${1-}" in
+  --version) printf '0.1.80\n' ;;
+  '')
+    printf 'sessions[1]{file,status,url,pending_prompts}:\n'
+    [ ! -s "$FM_HOME/lavish-open" ] \
+      || printf '  %s,open,"http://127.0.0.1:4387/session/0123456789abcdef",0\n' "$(cat "$FM_HOME/lavish-open")"
+    ;;
+  poll)
+    printf 'entered\n' > "$FM_HOME/stub-poll"
+    while [ "$SECONDS" -lt "${FM_TEST_STUB_MAX_BLOCK_SECONDS:-120}" ]; do sleep 1; done
+    exit 75
+    ;;
+  *)
+    real=$(cd "$(dirname "$1")" && pwd -P)/$(basename "$1")
+    printf '%s\n' "$real" > "$FM_HOME/lavish-open"
+    jq -n --arg file "$real" \
+      '{sessions:{"0123456789abcdef":{file:$file,url:"http://127.0.0.1:4387/session/0123456789abcdef"}}}' \
+      > "$LAVISH_AXI_STATE_DIR/state.json"
+    printf 'session:\n  status: opened\n'
+    ;;
+esac
+exit 0
+SH
+  chmod +x "$fakebin/lavish-axi"
+}
+
+test_serve_keeps_the_page_out_of_the_answer_intake() {
+  local home page sid out
+  home=$(fixture_home serve)
+  fm_test_track_procevent_home "$home" "$home/procevent-claims"
+  mkdir -p "$home/lavish-state"
+  lavish_fakebin "$home"
+  page=$(FM_HOME="$home" bash "$VIEW" path)
+  mkdir -p "${page%/*}" && : > "$page"
+  sid=$("$ROOT/bin/fm-procevent-lavish.sh" source-id "$page")
+  # A page served by an earlier build was bound; serving again must remove it.
+  FM_HOME="$home" "$ROOT/bin/fm-captain-hold.sh" bind "$sid" >/dev/null || fail "could not pre-bind the source"
+  out=$(PATH="$home/fakebin:$PATH" FM_HOME="$home" FM_SNAPSHOT_NOW="$NOW" \
+    FM_PROCEVENT_CLAIM_ROOT="$home/procevent-claims" LAVISH_AXI_STATE_DIR="$home/lavish-state" \
+    bash "$VIEW" serve 2>&1) || fail "serve failed: $out"
+  assert_contains "$out" "unbound: $sid" "serve did not drop the answer binding"
+  ! printf '%s\n' "$out" | grep -qxF "bound: $sid" || fail "serve bound the page: $out"
+  ! FM_HOME="$home" "$ROOT/bin/fm-captain-hold.sh" binding "$sid" >/dev/null 2>&1 \
+    || fail "the projects page still feeds the keyed-answer intake"
+  pass "serve leaves the page unbound from the keyed-answer intake"
+}
+
+test_secondmate_rows_keep_membership_and_one_group() {
+  local home snap model
+  home=$(make_home mate-membership)
+  write_config "$home"
+  snap="$home/snapshot.json"
+  jq -n --arg now "$NOW" '{
+    schema: "fm-fleet-snapshot.v1", generated: $now,
+    backlog: {records: []}, tasks: [],
+    secondmate_current: {records: [{
+      id: "mate-pc",
+      provenance: {selected: "structured-home", trust: "complete"},
+      freshness: {status: "fresh", age_seconds: 1},
+      queued: [
+        {id: "held-x", title: "Held and worked", hold_bucket: "live", hold_reason: "Pick", repo: null, project_hint: "platform"},
+        {id: "tagged-next", title: "Tagged", hold_bucket: null, repo: "store-app", project_hint: "platform"}
+      ],
+      decisions_open: [{id: "held-x", verb: "captain-hold", summary: "Held and worked", reason: "Pick", hold_bucket: "live", project_hint: "platform"}],
+      active_children: [
+        {id: "held-x", name: "Held and worked", repo: null, state: "working", project_hint: "platform"},
+        {id: "remote-work", name: "Remote work", repo: "other", state: "working", project_hint: null}
+      ],
+      landed: [{id: "remote-done", title: "Remote shipped", repo: "store-app", project_hint: null,
+                completion: {date: "2026-11-01", verb: "done"}}]
+    }]}
+  }' > "$snap"
+  model=$(model_of "$home" --snapshot "$snap") || fail "model failed"
+  printf '%s' "$model" | jq -e '
+    (.projects[] | select(.id == "store-launch")) as $s
+    | (.projects[] | select(.id == "platform")) as $p
+    | [$p.needs[].id] == ["held-x"] and $p.moving == []
+    and [$p.next.rows[].id] == ["tagged-next"]
+    and [$s.done.rows[].id] == ["remote-done"]
+    and [.unassigned.rows[].id] == ["remote-work"]
+    and .totals == {needs: 1, moving: 1, done: 1}
+  ' >/dev/null || fail "secondmate membership or grouping is wrong: $model"
+  pass "secondmate rows follow the project tag and repo, done included, and count once"
+}
+
+test_unread_and_old_homes_are_disclosed() {
+  local home snap model
+  home=$(make_home mate-health)
+  write_config "$home"
+  snap="$home/snapshot.json"
+  jq -n --arg now "$NOW" '{
+    schema: "fm-fleet-snapshot.v1", generated: $now,
+    backlog: {records: []}, tasks: [],
+    secondmate_current: {records: [
+      {id: "mate-pc", provenance: {selected: "parent-status"}, current: {state: "unknown", reason: "remote ledger unreachable"},
+       freshness: {status: "observed", age_seconds: 0}, active_children: [], queued: [], landed: [], decisions_open: [], omitted: []},
+      {id: "mate-mac", provenance: {selected: "structured-home", trust: "complete"}, current: {state: "no_active_work", reason: null},
+       freshness: {status: "cached", age_seconds: 7200}, active_children: [], queued: [], landed: [], decisions_open: [],
+       omitted: [{surface: "queued", count: 3}, {surface: "landed", count: 2}]},
+      {id: "mate-ok", provenance: {selected: "structured-home", trust: "complete"}, current: {state: "no_active_work"},
+       freshness: {status: "fresh", age_seconds: 1}, active_children: [], queued: [], landed: [], decisions_open: [], omitted: []}
+    ]}
+  }' > "$snap"
+  model=$(model_of "$home" --snapshot "$snap") || fail "model failed"
+  printf '%s' "$model" | jq -e '
+    .homes == [
+      {id: "mate-pc", status: "unread", reason: "remote ledger unreachable", age_seconds: 0, omitted: 0},
+      {id: "mate-mac", status: "cached", reason: null, age_seconds: 7200, omitted: 5},
+      {id: "mate-ok", status: "fresh", reason: null, age_seconds: 1, omitted: 0}]
+  ' >/dev/null || fail "home read state is not carried: $model"
+  pass "an unread, cached, or truncated secondmate summary is disclosed in the model"
+}
+
+test_home_summary_carries_project_tag_and_repo() {
+  local home out
+  home=$(make_home summary-hints)
+  cat > "$home/data/backlog.md" <<'EOF'
+## In flight
+## Queued
+- [ ] tagged-q - Tagged queued (repo: store-app) (since 2026-11-02)
+  Project: platform
+## Done
+- [x] tagged-d - Tagged done (repo: store-app) (kind: ship) (done 2026-11-03)
+  Project: platform
+  local main
+EOF
+  out=$(FM_HOME="$home" FM_SNAPSHOT_NOW="$NOW" "$ROOT/bin/fm-fleet-snapshot.sh" --secondmate-home-summary) \
+    || fail "home summary failed"
+  printf '%s' "$out" | jq -e '
+    [.queued[] | select(.id == "tagged-q") | {repo, project_hint}] == [{repo: "store-app", project_hint: "platform"}]
+    and [.landed[] | select(.id == "tagged-d") | {repo, project_hint}] == [{repo: "store-app", project_hint: "platform"}]
+  ' >/dev/null || fail "the home summary dropped the project tag or repo: $out"
+  pass "a home summary carries each row's project tag and repo"
+}
+
 fm_test_run \
   test_check_accepts_a_valid_config \
   test_check_refuses_missing_and_malformed_configs \
@@ -421,4 +584,9 @@ fm_test_run \
   test_build_publishes_an_inert_model_and_skips_unchanged \
   test_refresh_is_opt_in_and_runs_detached \
   test_wake_drain_triggers_a_refresh \
-  test_routine_refresh_is_local_only_and_rate_limited
+  test_routine_refresh_is_local_only_and_rate_limited \
+  test_page_keys_never_name_a_task \
+  test_serve_keeps_the_page_out_of_the_answer_intake \
+  test_secondmate_rows_keep_membership_and_one_group \
+  test_unread_and_old_homes_are_disclosed \
+  test_home_summary_carries_project_tag_and_repo

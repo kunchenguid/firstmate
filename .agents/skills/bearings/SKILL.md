@@ -152,10 +152,10 @@ When the captain asks to add, rename, or regroup a project, edit `config/project
 When filing a task that clearly belongs to a configured project, start its body with a `Project: <id>` line so membership never depends on id or repo rules.
 
 A Projects view answer arrives as a `procevent lavish` wake whose source id equals `bin/fm-procevent-lavish.sh source-id "$(bin/fm-projects-view.sh path)"`; read it like a board wake (`process-event-sources`).
-Its keys never name a task, so the keyed-answer intake reports each one skipped and you route it:
+The page is never bound to the keyed-answer intake, so none of its answers can resolve a captain-held task; route each key yourself:
 
-- `add.<project-id>` carries the captain's words for new work in that project: run `bin/fm-projects-view.sh add <project-id> <words>`, then give the printed item normal section 7 intake and dispatch with those words verbatim as the brief's Captain's intent; an unclear ask becomes one captain hold instead.
-- `fix.<task-id>` corrects live work: append the words to that brief's Captain's intent and relay them with `bin/fm-projects-view.sh correct <task-id> <words>` (AGENTS.md section 7's mid-task ask rule); for queued work, update its backlog note instead.
+- `pv.add.<project-id>` carries the captain's words for new work in that project: run `bin/fm-projects-view.sh add <project-id> <words>`, then give the printed item normal section 7 intake and dispatch with those words verbatim as the brief's Captain's intent; an unclear ask becomes one captain hold instead.
+- `pv.fix.<task-id>` corrects live work: append the words to that brief's Captain's intent and relay them with `bin/fm-projects-view.sh correct <task-id> <words>` (AGENTS.md section 7's mid-task ask rule); for queued work, update its backlog note instead.
 
 Those are the page's only two actions. A needs-you card is read-only and tells the captain to answer in chat, where the ordinary captain-hold answer flow applies.
 The page offers actions only on this home's work; a secondmate's items are read-only there until remote-secondmate routing exists.

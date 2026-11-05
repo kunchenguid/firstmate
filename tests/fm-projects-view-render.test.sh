@@ -86,8 +86,8 @@ test_actions_queue_the_routed_answer_keys() {
   printf '%s' "$out" | jq -e '
     .error == ""
     and .sent == [
-      {schema: "fm-bearings-answer.v1", question: "add.store", selection: "", note: "Add the dark icon"},
-      {schema: "fm-bearings-answer.v1", question: "fix.store-build", selection: "", note: "Use the brand color"}]
+      {schema: "fm-bearings-answer.v1", question: "pv.add.store", selection: "", note: "Add the dark icon"},
+      {schema: "fm-bearings-answer.v1", question: "pv.fix.store-build", selection: "", note: "Use the brand color"}]
   ' >/dev/null || fail "actions queued the wrong answers: $out"
   pass "add and correct are the only page actions and queue the add. and fix. answer keys"
 }
@@ -104,8 +104,35 @@ test_open_project_survives_a_reload_without_the_hash() {
   pass "the open project survives an automatic redraw that drops the hash, and so does going back"
 }
 
+test_withheld_actions_and_unread_homes_render() {
+  local home page snap out
+  page=$(build_page notices)
+  home=${page%/.lavish/projects.html}
+  snap="$home/snapshot.json"
+  jq -n --arg now "$NOW" '{
+    schema: "fm-fleet-snapshot.v1", generated: $now, tasks: [],
+    backlog: {records: [{structured: true, id: "pv.add.quiet", title: "Collides", state: "queued", order: 1,
+      body_lines: [], unresolved_blocker_ids: [], hold_bucket: null}]},
+    secondmate_current: {records: [
+      {id: "mate-pc", provenance: {selected: "parent-status"}, current: {state: "unknown", reason: "remote ledger unreachable"},
+       freshness: {status: "observed", age_seconds: 0}, active_children: [], queued: [], landed: [], decisions_open: [], omitted: []},
+      {id: "mate-mac", provenance: {selected: "structured-home", trust: "complete"}, current: {state: "no_active_work"},
+       freshness: {status: "cached", age_seconds: 7200}, active_children: [], queued: [], landed: [], decisions_open: [],
+       omitted: [{surface: "queued", count: 3}]}]}
+  }' > "$snap"
+  FM_HOME="$home" bash "$VIEW" build --snapshot "$snap" >/dev/null || fail "build failed"
+  out=$(node "$HARNESS" "$page" store)
+  printf '%s' "$out" | jq -e '
+    .error == ""
+    and .notices == ["mate-pc not read: remote ledger unreachable", "mate-mac last read 2 h ago · 3 not shown"]
+    and .addable == ["Store launch"]
+  ' >/dev/null || fail "notices or withheld actions rendered wrong: $out"
+  pass "an unread or old second mate is shown as such, and a withheld add key hides its button"
+}
+
 fm_test_run \
   test_overview_shows_every_project_with_its_counter \
   test_detail_orders_needs_then_progress_then_done_then_left \
   test_actions_queue_the_routed_answer_keys \
-  test_open_project_survives_a_reload_without_the_hash
+  test_open_project_survives_a_reload_without_the_hash \
+  test_withheld_actions_and_unread_homes_render
