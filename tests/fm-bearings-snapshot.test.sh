@@ -1738,6 +1738,12 @@ test_landed_accepts_only_kind_owned_delivery_artifacts() {
   "$TASKS_AXI_BIN" 'done' shipping-scout --report "$shipping_report" \
     --file "$main_backlog" >/dev/null \
     || fail "could not complete the longer-word scout"
+  "$TASKS_AXI_BIN" add discarded-scout "Discarded investigation" --kind scout \
+    --repo firstmate --start --file "$main_backlog" >/dev/null \
+    || fail "could not create the discarded scout"
+  "$TASKS_AXI_BIN" 'done' discarded-scout --note "discarded" \
+    --file "$main_backlog" >/dev/null \
+    || fail "could not record the discarded scout outcome"
 
   report_path="data/reported-scout/report.md"
   report_pr="https://github.com/o/r/pull/8"
@@ -1779,6 +1785,11 @@ EOF
   # exclusion assertion fails when report ownership is not enforced.
   printf '%s' "$json" | jq -e '.landed | any(.id == "scout-pr-no-report") | not' >/dev/null \
     || failures="${failures}reportless scout PR was listed; "
+  printf '%s' "$json" | jq -e '.landed | any(.id == "discarded-scout") | not' >/dev/null \
+    || failures="${failures}discarded scout was listed as delivered; "
+  "$TASKS_AXI_BIN" show discarded-scout --full --file "$main_backlog" \
+    | grep -Fxq '  body: discarded' \
+    || failures="${failures}discarded scout note was not retained in backlog; "
   # At the base commit a ship can fall through to a report path, so this
   # exclusion assertion fails when artifact-kind ownership is not enforced.
   printf '%s' "$json" | jq -e '.landed | any(.id == "ship-reported-path") | not' >/dev/null \

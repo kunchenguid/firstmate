@@ -15,8 +15,8 @@
 # Removing state/<id>.meta and landing the backlog transition are one step, not
 # two: bin/fm-backlog-transition-lib.sh owns that invariant, and both halves run
 # under the task's own meta lock before this script reports success. Because the
-# completion links (the PR, the report path, a local-main note) live only in the
-# record being removed, the intended transition is recorded in
+# completion links (the PR, the report path, a local-main or discarded note) live
+# only in the record being removed, the intended transition is recorded in
 # state/<id>.backlog-close first, so a process killed between the halves leaves
 # the next session start enough to finish it; a landed close removes that record.
 # A close that fails is fatal and loud, preserves its pending-close record, and
@@ -207,8 +207,9 @@
 # leased home and state in place instead of hiding a still-held lease.
 # Usage: fm-teardown.sh <task-id> [--force] [--legacy-record]
 #   --force skips ordinary-task dirty and landed-work checks, skips scout report
-#   checks, and discards secondmate child work for kind=secondmate. Only use it
-#   when the captain has explicitly said to discard the work.
+#   checks and closes the scout as discarded with no report recorded, and
+#   discards secondmate child work for kind=secondmate. Only use it when the
+#   captain has explicitly said to discard the work.
 #   --legacy-record accepts a task record that predates the spawn_gen field:
 #   teardown then proceeds only when the recorded endpoint is confirmed dead or
 #   agent-less (bin/fm-backend.sh's recovery-grade classifier), and without
@@ -1799,17 +1800,27 @@ work_is_landed() {
   content_in_default
 }
 
-# The completion links this teardown already holds locally. A scout's
-# deliverable is its report, a local-only ship lands on local main, and every
-# other ship carries the PR recorded on its own record.
+# The completion links this teardown already holds locally. A retained scout
+# keeps its report as the held deliverable, while a force-closed scout is
+# recorded as discarded with no report. A local-only ship lands on local main,
+# and every other ship carries the PR recorded on its own record.
 BACKLOG_DONE_ARGS=()
 backlog_done_args() {
   local data_relative
   BACKLOG_DONE_ARGS=()
   case "$KIND" in
     scout)
-      data_relative=$(fm_backlog_data_relative "$DATA") || return 1
-      BACKLOG_DONE_ARGS=(--report "$data_relative/$ID/report.md")
+      if [ "$BACKLOG_TRANSITION" = retain ]; then
+        if [ -f "$DATA/$ID/report.md" ]; then
+          data_relative=$(fm_backlog_data_relative "$DATA") || return 1
+          BACKLOG_DONE_ARGS=(--report "$data_relative/$ID/report.md")
+        fi
+      elif [ "$FORCE" = "--force" ]; then
+        BACKLOG_DONE_ARGS=(--note "discarded")
+      else
+        data_relative=$(fm_backlog_data_relative "$DATA") || return 1
+        BACKLOG_DONE_ARGS=(--report "$data_relative/$ID/report.md")
+      fi
       ;;
     *)
       if [ "$MODE" = local-only ]; then

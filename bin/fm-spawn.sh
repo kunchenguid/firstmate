@@ -5490,18 +5490,29 @@ spawn_enter_recorded_worktree() {
 # starts. Zellij and cmux implement this read with a shell probe, so keeping it
 # before launch prevents the probe from becoming input to a live worker.
 spawn_assert_agent_worktree() {
-  local expected seen i
+  local expected seen i last_poll=19 agent_status
   [ "$KIND" = secondmate ] && return 0
   case "$BACKEND" in orca|t3code) return 0 ;; esac
   expected=$(real_path_or_raw "$WT")
-  for i in $(seq 1 20); do
+  # The out-of-pane Herdr lease no longer waits for the new shell to process
+  # treehouse get. Allow its former minute of startup tolerance here, and
+  # repeat the idempotent cd once in case input arrived before shell readiness.
+  [ "$BACKEND" != herdr ] || last_poll=120
+  for i in $(seq 0 "$last_poll"); do
+    [ "$i" -eq 0 ] || sleep 0.5
     seen=$(spawn_current_path "$WT_TARGET" || true)
     if [ -n "$seen" ] && [ "$(real_path_or_raw "$seen")" = "$expected" ]; then
       return 0
     fi
-    [ "$i" -ge 20 ] || sleep 0.5
+    if [ "$BACKEND" = herdr ] && [ "$i" -eq 20 ]; then
+      spawn_enter_recorded_worktree
+    fi
   done
   echo "error: task $ID's worker started in '${seen:-unknown}', not its recorded worktree '$WT'; refusing to continue outside the copy holding its work" >&2
+  if [ "$BACKEND" = herdr ] && fm_backend_herdr_parse_target "$WT_TARGET"; then
+    agent_status=$(fm_backend_herdr_agent_status_raw "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE")
+    echo "error: Herdr pane '$WT_TARGET': last foreground_cwd='${seen:-unknown}', agent_status='${agent_status:-unknown}'" >&2
+  fi
   exit 1
 }
 
@@ -7651,6 +7662,40 @@ fi
 # LAUNCH_ENV_PREFIX construction below sets it again at the `env -i` boundary,
 # so under an enabled allowlist the switch is established before the wrapping
 # `/bin/sh` starts rather than only inside the command that shell runs.
+# Arm the worker-side OSC 7501 status reporter (bin/fm-osc7501.sh) inside the
+# launch before the agent command, so the reporter's parent is the pane shell
+# that runs the agent. The reporter header owns eligibility and native-version
+# gates; pass the executable the launch runs so the native probe reads its
+# version. A raw launch command establishes it only as a simple command whose
+# first word is a plain path to a harness with a launch template; a wrapper,
+# assignment prefix, quoted or expanded path, compound command, or unknown
+# adapter hides what actually runs, so it passes none and gets no reporter.
+# Its stderr stays on the pane so a config warning reaches the user. The `disarm` after the agent
+# command retires the reporter when the agent exits, because the pane shell
+# that sourced the launch outlives it. Newlines, not `;`, delimit the agent
+# command, so a raw launch ending in a separator or a comment stays intact.
+OSC7501_AGENT_BIN=
+if [ "$RAW_LAUNCH" = 0 ]; then
+  case "$HARNESS" in
+    pi | pi-signed) OSC7501_AGENT_BIN=${PI_BIN:-} ;;
+    muse) OSC7501_AGENT_BIN=${MUSE_BIN:-} ;;
+    *) OSC7501_AGENT_BIN=$HARNESS ;;
+  esac
+else
+  read -r osc7501_word _ <<<"$RAW_COMMAND"
+  case "$RAW_COMMAND" in
+    *[\;\&\|]* | *$'\n'*) ;;
+    *)
+      case "$osc7501_word" in
+        '' | *[!A-Za-z0-9._/+-]*) ;;
+        *) (launch_template "$HARNESS" "$KIND") >/dev/null 2>&1 && OSC7501_AGENT_BIN=$osc7501_word ;;
+      esac
+      ;;
+  esac
+fi
+LAUNCH="$(shell_quote "$FM_ROOT/bin/fm-osc7501.sh") arm --task $(shell_quote "$ID") --harness $(shell_quote "$HARNESS") --backend $(shell_quote "$BACKEND") --kind $(shell_quote "$KIND") --state $(shell_quote "$STATE_REAL") --config $(shell_quote "$CONFIG") --target $(shell_quote "$T") --agent-bin $(shell_quote "$OSC7501_AGENT_BIN") >/dev/null || true
+$LAUNCH
+$(shell_quote "$FM_ROOT/bin/fm-osc7501.sh") disarm --state $(shell_quote "$STATE_REAL") >/dev/null 2>/dev/null || true"
 if [ "$LAVISH_AXI_HOST_CONFIG_PRESENT" = 1 ]; then
   LAUNCH="export LAVISH_AXI_HOST=$(shell_quote "$LAVISH_AXI_HOST"); $LAUNCH"
 fi
