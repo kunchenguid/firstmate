@@ -2408,7 +2408,7 @@ test_launch_environment_inherited_by_secondmate
 test_launch_environment_inheritance_preserves_on_source_errors
 
 test_worker_launch_delivers_role_scope() {
-  local rec id out launch kind prompt envelope encoded brief_kind brief content first_line role_line task_line inbox
+  local rec id out launch kind prompt envelope encoded brief_kind brief content first_line role_line task_line inbox expected_role
   for brief_kind in heading legacy scaffold; do
   for kind in no-mistakes direct-PR local-only scout; do
     [ "$brief_kind" = heading ] && [ "$kind" != no-mistakes ] && continue
@@ -2462,7 +2462,11 @@ SH
     task_line=$(grep -n '^# Task$' "$prompt" | head -1 | cut -d: -f1)
     [ "$role_line" -lt "$task_line" ] || fail "$brief_kind $kind put the worker identity after the task"
     assert_grep 'follow this brief instead of that supervisor contract' "$prompt" "$kind command did not deliver the role correction"
-    assert_grep 'You are a crewmate: an autonomous worker agent managed by firstmate' "$prompt" "$kind command did not establish the worker identity directly"
+    case "$kind" in
+      scout) expected_role='You are an Investigator: a knowledge-only investigation worker managed by the Director.' ;;
+      *) expected_role='You are a Builder: an implementation worker managed by the Director.' ;;
+    esac
+    assert_grep "$expected_role" "$prompt" "$kind command did not establish the worker identity directly"
     inbox="$HOME_DIR/state/$id.inbox"
     assert_grep "$inbox" "$prompt" "$kind command did not name the worker's own steering inbox"
     assert_grep "do not reject it as another home's state" "$prompt" "$kind command did not distinguish its inbox from another home's namespace"

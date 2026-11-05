@@ -3,7 +3,7 @@
 # project's default branch to local_done_head= in state/<task-id>.meta,
 # recorded when the done report was accepted by bin/fm-dod-lib.sh. Missing or
 # malformed heads refuse. Legacy tasks with no head must report readiness again
-# before approval. The recorded ship branch must still point at that exact commit.
+# before approval. The recorded Builder branch must still point at that exact commit.
 #
 # This is firstmate's merge gate-action (the captain's merge authority applied
 # locally instead of via a GitHub PR). It is the one sanctioned exception to hard
@@ -123,7 +123,7 @@ default_branch() {
 BRANCH=$(grep '^branch=' "$META" | cut -d= -f2- || true)
 [ -n "$BRANCH" ] || BRANCH="fm/$ID"
 if ! git check-ref-format --branch "$BRANCH" >/dev/null 2>&1; then
-  echo "error: task $ID has an invalid recorded ship branch '$BRANCH'" >&2
+  echo "error: task $ID has an invalid recorded Builder branch '$BRANCH'" >&2
   exit 1
 fi
 local_head_matches() {

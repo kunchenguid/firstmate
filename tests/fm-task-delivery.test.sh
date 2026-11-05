@@ -742,7 +742,7 @@ EOF
   out=$(run_spawn "$home" "$fakebin" pr-manual-a5 "$proj" claude --mode direct-PR --yolo off 2>&1)
   status=$?
   [ "$status" -ne 0 ] || fail "a project registered direct-PR with pr=manual launched"
-  assert_contains "$out" "only a no-mistakes ship takes it" "the refused entry's reason did not reach the operator"
+  assert_contains "$out" "only no-mistakes validation supports it" "the refused entry's reason did not reach the operator"
   assert_absent "$home/state/pr-manual-a5.meta" "the refused spawn still recorded a task"
   pass "fm-spawn: the registered pr=manual binding must agree with the brief's contract line"
 }

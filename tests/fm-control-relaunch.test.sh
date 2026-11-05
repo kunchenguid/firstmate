@@ -1719,7 +1719,7 @@ test_spawn_relaunch_of_promoted_scout_uses_the_recorded_branch() {
   printf 'zsh' > "$dir/fake/command"
   out=$(run_spawn "$dir" rl42 --relaunch)
   assert_contains "$out" "spawned rl42" "the relaunch should complete on the recorded branch"
-  assert_contains "$out" "records no ship branch" "the brief gap should be reported, not silent"
+  assert_contains "$out" "records no Builder branch" "the brief gap should be reported, not silent"
   assert_contains "$out" "recorded branch fix/rl42" "the relaunch should name the branch it adopted"
   [ "$(meta_field "$dir" rl42 branch)" = "fix/rl42" ] \
     || fail "the recorded branch must survive the relaunch"
@@ -1756,8 +1756,8 @@ test_promoted_scout_relaunch_receives_the_current_delivery_contract() {
     out=$(FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
       "$PROMOTE" "$id" --mode "$mode" --yolo off 2>&1) \
       || fail "$mode: scout promotion should succeed: $out"
-    assert_grep 'This is a SCOUT task' "$brief" \
-      "$mode: the reproduction fixture lost the original scout delivery text"
+    assert_grep 'You are an Investigator: an autonomous knowledge-only worker managed by the Director.' "$brief" \
+      "$mode: the reproduction fixture lost the original Investigator identity"
     assert_grep 'Never push to any remote and never open a PR' "$brief" \
       "$mode: the reproduction fixture lost the stale scout prohibition"
 
@@ -1765,15 +1765,15 @@ test_promoted_scout_relaunch_receives_the_current_delivery_contract() {
     out=$(run_spawn "$dir" "$id" --relaunch) \
       || fail "$mode: promoted scout relaunch should succeed: $out"
     launch="$home/data/$id/launch-brief.md"
-    assert_grep "This task is now kind=ship with mode=$mode" "$launch" \
+    assert_grep "This task is now assigned to a Builder with compatibility kind=ship and mode=$mode" "$launch" \
       "$mode: the replacement launch did not receive the promoted task identity"
-    assert_grep 'Any earlier "Never push" or scout-only delivery language in this file is superseded' "$launch" \
-      "$mode: the replacement launch left the stale scout prohibition readable at face value"
+    assert_grep 'Any earlier "Never push" or Investigator-only delivery language in this file is superseded' "$launch" \
+      "$mode: the replacement launch left the stale Investigator prohibition readable at face value"
     case "$mode" in
       direct-PR)
         rule="1. Never push to the default branch (push only your \`fm/$id\` branch). Never merge a PR." ;;
       local-only)
-        rule="1. Never push to any remote and never open a PR. Work only on your \`fm/$id\` branch; firstmate handles the merge into local \`main\`." ;;
+        rule="1. Never push to any remote and never open a PR. Work only on your \`fm/$id\` branch; the Director handles the merge into local \`main\`." ;;
       *)
         rule='1. Never push to the default branch. Never merge a PR.' ;;
     esac
@@ -2178,7 +2178,7 @@ test_secondmate_relaunch_refuses_an_unmarked_home() {
   printf '%s\n' "fm-sm2" > "$dir/fake/windows"
   out=$(run_control "$dir" sm2 relaunch); rc=$?
   expect_code 1 "$rc" "a home marked for another secondmate should refuse"
-  assert_contains "$out" "not marked as its own seeded secondmate home" \
+  assert_contains "$out" "not marked as its own seeded Project Director home" \
     "the refusal should name the identity mismatch"
   [ "$(cat "$dir/fake/command")" = claude ] || fail "a refused relaunch must not stop the agent"
   pass "fm-control relaunch: a secondmate home that is not this secondmate's is refused"

@@ -148,12 +148,12 @@
 fm_brief_worker_role() {  # <state-dir> <task-id> <code-root> [ship|scout]
   local state=$1 task_id=$2 root=$3 kind=${4:-ship} role focus
   case "$kind" in
-    scout) role=Investigator; focus='a knowledge-only investigation worker' ;;
-    *) role=Builder; focus='an implementation worker' ;;
+    scout) role='an Investigator'; focus='a knowledge-only investigation worker' ;;
+    *) role='a Builder'; focus='an implementation worker' ;;
   esac
   cat <<EOF
 # Current worker role contract
-You are a $role: $focus managed by the Director.
+You are $role: $focus managed by the Director.
 This section establishes your current identity before every project or task instruction below and supersedes any conflicting role identity in those instructions.
 Do the assigned work yourself and report only to the Director; do not adopt a Director or Project Director supervisor identity, delegate the task, run team supervision, or address the user.
 EOF

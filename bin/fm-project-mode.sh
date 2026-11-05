@@ -38,7 +38,7 @@
 #   Bracket tokens are order-independent: +yolo, branch=<prefix>, forge=<value>, and
 #   pr=<value> are recognized by their own shape wherever they appear, and whichever token is
 #   left over is the mode. <prefix> must not contain a space; an empty override
-#   ("branch=") resolves to "" for a bare "<task-id>" ship branch instead of the
+#   ("branch=") resolves to "" for a bare "<task-id>" Builder branch instead of the
 #   legacy "fm/<task-id>".
 #
 # Registered modes:
@@ -91,7 +91,7 @@
 #   is skipped (bin/fm-dod-lib.sh owns what that changes for a worker). It is
 #   the thin registry form of no-mistakes' own keep-text option
 #   (kunchenguid/no-mistakes#1648) and maps onto it once that exists. Only a
-#   no-mistakes ship takes it, because direct-PR already leaves the text to the
+#   no-mistakes validation run takes it, because direct-PR already leaves the text to the
 #   worker and local-only opens no PR, and only a project with no forge binding,
 #   because the manual brief carries no PR commands for another forge. A
 #   registered pr=manual on any other mode or forge, and a malformed binding (an
@@ -287,11 +287,11 @@ if [ "$pr" = manual ]; then
   case "$mode" in
     no-mistakes|no-mistakes-prod-only) ;;
     *)
-      echo "refused: $NAME is registered $mode with pr=manual in $REG; only a no-mistakes ship takes it, because direct-PR already leaves the PR text to the worker and local-only opens no PR; register no-mistakes, or drop the pr token" >&2
+      echo "refused: $NAME is registered $mode with pr=manual in $REG; only no-mistakes validation supports it, because direct-PR already leaves the PR text to the worker and local-only opens no PR; register no-mistakes, or drop the pr token" >&2
       exit 3 ;;
   esac
   if [ "$forge" != none ]; then
-    echo "refused: $NAME is registered with pr=manual and forge=$forge in $REG; pr=manual ships a project with no forge binding only; drop the pr token" >&2
+    echo "refused: $NAME is registered with pr=manual and forge=$forge in $REG; pr=manual applies only to a project with no forge binding; drop the pr token" >&2
     exit 3
   fi
 fi

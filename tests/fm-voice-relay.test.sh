@@ -3697,6 +3697,8 @@ handed=$(FM_HOME="$HOME_FIXTURE" python3 "$ROOT/bin/fm_voice_records.py" queue \
   "Refactor the login module and open a pull request for it" \
   --home "$HOME_FIXTURE") || fail "handover failed"
 assert_contains "$handed" '"queued": true' "handover should report the request queued"
+assert_contains "$handed" 'The Director now owns this request' \
+  "handover should name the coordinating role"
 assert_contains "$handed" 'did not do the work yourself' \
   "handover should tell the model it handed over rather than acted"
 

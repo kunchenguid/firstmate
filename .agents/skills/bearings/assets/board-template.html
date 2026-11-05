@@ -396,7 +396,7 @@ __FM_BEARINGS_BOARD_DATA__
     h.textContent = "This board could not load";
     var d = document.createElement("p");
     d.className = "bb-decision__detail";
-    d.textContent = msg + " - ask firstmate to rebuild the board.";
+    d.textContent = msg + " - ask the Director to rebuild the board.";
     pad.appendChild(h);
     pad.appendChild(d);
     card.appendChild(pad);
@@ -712,10 +712,10 @@ __FM_BEARINGS_BOARD_DATA__
   document.getElementById("bb-charted-sub").textContent =
     chartedMoreQueued ? "showing " + chartedShown + " of " + chartedTotal : "";
   if (chartedMoreQueued) {
-    ch.appendChild(el("span", "bb-morechip", "+" + chartedMoreQueued + " more queued - ask firstmate for the full list"));
+    ch.appendChild(el("span", "bb-morechip", "+" + chartedMoreQueued + " more queued - ask the Director for the full list"));
   }
   if (chartedMoreWarnings) {
-    ch.appendChild(el("span", "bb-morechip", "+" + chartedMoreWarnings + " more repair warning" + (chartedMoreWarnings === 1 ? "" : "s") + " - ask firstmate for the full list"));
+    ch.appendChild(el("span", "bb-morechip", "+" + chartedMoreWarnings + " more repair warning" + (chartedMoreWarnings === 1 ? "" : "s") + " - ask the Director for the full list"));
   }
 
   if (anyPickable) {

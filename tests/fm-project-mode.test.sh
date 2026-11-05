@@ -158,7 +158,7 @@ assert_contains "$err" "empty PR-text binding" "the empty pr= refusal did not na
 err=$(FM_DATA_OVERRIDE="$DATA" "$PROJECT_MODE" --pr hand-auto 2>&1 >/dev/null)
 assert_contains "$err" "pr=manual" "the unknown pr value refusal did not name the accepted value"
 err=$(FM_DATA_OVERRIDE="$DATA" "$PROJECT_MODE" --pr hand-direct 2>&1 >/dev/null)
-assert_contains "$err" "only a no-mistakes ship takes it" "the direct-PR refusal did not say why"
+assert_contains "$err" "only no-mistakes validation supports it" "the direct-PR refusal did not say why"
 pass "fm-project-mode: pr=manual refuses another mode, a bound forge, an empty value, and an unknown value, but leaves --forge answerable"
 
 echo "# fm-project-mode.test.sh: all assertions passed"

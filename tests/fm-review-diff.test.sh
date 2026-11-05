@@ -302,12 +302,12 @@ test_corrupt_recorded_branch_is_refused() {
   status=$?
   set -e
 
-  [ "$status" -ne 0 ] || fail "corrupt-branch: a corrupt recorded ship branch was accepted and reviewed the worktree HEAD"
-  assert_contains "$(cat "$case_dir/stderr")" "invalid recorded ship branch 'fix task-x1'" \
+  [ "$status" -ne 0 ] || fail "corrupt-branch: a corrupt recorded Builder branch was accepted and reviewed the worktree HEAD"
+  assert_contains "$(cat "$case_dir/stderr")" "invalid recorded Builder branch 'fix task-x1'" \
     "corrupt-branch: the refusal did not name the branch it refused"
   assert_not_contains "$out" '+stale-local' \
     "corrupt-branch: the corrupt branch silently fell back to the worktree HEAD diff"
-  pass "fm-review-diff refuses a corrupt recorded ship branch instead of reviewing the wrong content"
+  pass "fm-review-diff refuses a corrupt recorded Builder branch instead of reviewing the wrong content"
 }
 
 test_recorded_base_branch_is_the_review_base() {

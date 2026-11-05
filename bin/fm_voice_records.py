@@ -560,7 +560,7 @@ def queue_request(text, home=None, root=None):
         "queued": True,
         "note_id": note_id,
         "queued_text": body,
-        "handover": "Firstmate now owns this request and will pick it up at "
+        "handover": "The Director now owns this request and will pick it up at "
                     "its next check. You did not do the work yourself.",
     }
 

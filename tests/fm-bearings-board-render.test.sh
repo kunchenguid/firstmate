@@ -181,7 +181,7 @@ test_omitted_warnings_never_count_as_more_queued() {
     || fail "an omitted warning was counted as queued work: $out"
   printf '%s' "$out" | jq -e '
     (.empty | length) == 1 and (.empty[0] | test("Nothing is queued"))
-      and (.more == ["+1 more repair warning - ask firstmate for the full list"])
+      and (.more == ["+1 more repair warning - ask the Director for the full list"])
       and ([.more[] | select(test("more queued"))] | length) == 0
   ' >/dev/null || fail "an omitted warning was labeled as more queued: $out"
   pass "omitted warnings remain separate from omitted queued work"
