@@ -3224,7 +3224,9 @@ fm_backend_herdr_current_path() {  # <target>
 # Only a POSIX-absolute answer is accepted. PowerShell expands $PWD to a
 # drive-letter path and cmd.exe expands nothing, so a pane that is not running
 # Git Bash never yields an answer and the caller refuses instead of launching a
-# POSIX command line into it.
+# POSIX command line into it. Returns 2 when the answer arrived but is not
+# POSIX-absolute, which proves the pane runs another shell, so the caller need
+# not wait out its deadline.
 # It types into the pane: call it only before any harness starts in that pane,
 # never on relaunch, which adopts a pane that may hold a live agent.
 fm_backend_herdr_probe_path() {  # <target>
@@ -3241,6 +3243,7 @@ fm_backend_herdr_probe_path() {  # <target>
       | sed -n "s/^__FM_CWD_${nonce}__\\(.*\\)__[[:space:]]*\$/\\1/p" | tail -n 1)
     case "$raw" in
       /*) printf '%s' "$raw"; return 0 ;;
+      ?*) return 2 ;;
     esac
   done
   return 0

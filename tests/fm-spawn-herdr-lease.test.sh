@@ -337,7 +337,8 @@ test_windows_powershell_pane_refuses_before_launch() {
   : > "$dir/fake/pwsh-pane"
   out=$(run_lease_spawn "$dir" "$id"); status=$?
   [ "$status" -ne 0 ] || fail "a PowerShell pane was accepted"$'\n'"$out"
-  [ -s "$dir/fake/probes" ] || fail "no folder probe reached the pane"
+  [ "$(wc -l < "$dir/fake/probes" | tr -d '[:space:]')" = 1 ] \
+    || fail "a drive-letter answer did not stop the wait at the first probe"
   assert_contains "$out" "not its recorded worktree" "the refusal did not name the folder"
   assert_contains "$out" "default_shell" "the refusal did not name the Herdr shell setting"
   [ ! -e "$dir/fake/launched-command" ] || fail "a POSIX launch line was typed into PowerShell"

@@ -5490,7 +5490,7 @@ spawn_enter_recorded_worktree() {
 # starts. Zellij and cmux implement this read with a shell probe, so keeping it
 # before launch prevents the probe from becoming input to a live worker.
 spawn_assert_agent_worktree() {
-  local expected seen i last_poll=19 agent_status
+  local expected seen i last_poll=19 agent_status probe_status
   [ "$KIND" = secondmate ] && return 0
   case "$BACKEND" in orca|t3code) return 0 ;; esac
   expected=$(real_path_or_raw "$WT")
@@ -5504,8 +5504,11 @@ spawn_assert_agent_worktree() {
     # Native Windows Herdr has no passive folder read, so every tenth poll asks
     # the pane's shell instead. That probe types into the pane, which is safe
     # only here, before any harness starts; relaunch keeps the passive read.
+    # A non-POSIX answer proves the pane runs another shell, so stop waiting.
     if [ -z "$seen" ] && [ "$BACKEND" = herdr ] && [ $((i % 10)) -eq 0 ]; then
-      seen=$(fm_backend_herdr_probe_path "$WT_TARGET" || true)
+      probe_status=0
+      seen=$(fm_backend_herdr_probe_path "$WT_TARGET") || probe_status=$?
+      [ "$probe_status" -ne 2 ] || break
     fi
     if [ -n "$seen" ] && [ "$(real_path_or_raw "$seen")" = "$expected" ]; then
       return 0
