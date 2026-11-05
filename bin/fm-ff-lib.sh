@@ -46,8 +46,10 @@
 # (main/master) to the base and leaves the working-copy commit an empty child
 # of it - jj's clean state - under the same never-force/merge/stash guards and
 # the same status vocabulary. A diverged jj home is skipped and reported rather
-# than reconciled, with no durable reconciliation record: the content-equivalent
-# divergence proof is git-index-specific and deliberately not extended to jj.
+# than reconciled, with no new durable reconciliation record: the content-
+# equivalent divergence proof is git-index-specific and deliberately not
+# extended to jj. A jj home that does converge (current or updated) clears a
+# pending record left by an earlier git-backed era, exactly like the git route.
 
 SUB_HOME_MARKER="${SUB_HOME_MARKER:-.fm-secondmate-home}"
 # shellcheck source=bin/fm-secondmate-registry-lib.sh
@@ -391,14 +393,20 @@ jj_default_branch() {
 }
 
 # Which watched instruction paths changed between two jj revisions (comma list),
-# the jj equivalent of changed_instr. Diff direction is irrelevant to "changed".
+# the jj equivalent of changed_instr. Diff direction is irrelevant to "changed",
+# and so is a diff that cannot run at all: changed_instr treats a nonzero
+# `git diff --quiet` - differences OR failure - as changed, so a path whose jj
+# diff fails over-approximates to changed rather than silently reading as
+# unchanged and hiding a real instruction move behind `reread-firstmate: no`.
 # jj resolves fileset paths against the process cwd, not the -R repo, so the
 # diff runs from inside the repo (in a command-substitution subshell, which
 # never moves the caller's cwd) while the non-path revsets stay -R-relative.
 jj_changed_instr() {
-  local dir=$1 from=$2 to=$3 p out=""
+  local dir=$1 from=$2 to=$3 p out="" diff_out
   for p in "${WATCHED_INSTR_PATHS[@]}"; do
-    if [ -n "$(cd "$dir" && jj diff --from "$from" --to "$to" --git -- "$p" 2>/dev/null)" ]; then
+    if diff_out=$(cd "$dir" && jj diff --from "$from" --to "$to" --git -- "$p" 2>/dev/null); then
+      [ -z "$diff_out" ] || out="$out${out:+, }$p"
+    else
       out="$out${out:+, }$p"
     fi
   done
@@ -409,9 +417,13 @@ jj_changed_instr() {
 # The advance moves the default bookmark (main/master) to the base and leaves the
 # working-copy commit an empty child of it, which is jj's clean state. Divergence
 # is always skipped here: the content-equivalent reconciliation is
-# git-index-specific and out of scope for jj homes.
+# git-index-specific and out of scope for jj homes. A convergence that leaves the
+# home on the base (current or updated) is still a success, so it clears a durable
+# secondmate reconciliation record left by an earlier git-backed era exactly as
+# the git route does, through the same secondmate_id/reconciliation_state contract.
 ff_target_jj() {
   local dir=$1 label=$2 base_mode=$3
+  local secondmate_id=${4:-} reconciliation_state=${5:-}
   local default base cur_rev base_rev before after instr
   FF_STATUS="skipped"
   FF_INSTR=""
@@ -475,6 +487,7 @@ ff_target_jj() {
       || { [ -z "$(jj -R "$dir" log -r "parents(@) & ~$base" --no-graph -T 'commit_id' 2>/dev/null)" ] \
         && [ -n "$(jj -R "$dir" log -r "parents(@) & $base" --no-graph -T 'commit_id' 2>/dev/null)" ]; }; then
       FF_STATUS="current"
+      [ -z "$reconciliation_state" ] || secondmate_update_reconcile_clear "$reconciliation_state" "$secondmate_id" || true
       echo "$label: already current"
       return 0
     fi
@@ -494,6 +507,7 @@ ff_target_jj() {
   after=$(jj -R "$dir" log -r "$base" --no-graph -T 'commit_id.short(7)' 2>/dev/null)
   FF_STATUS="updated"
   FF_INSTR="$instr"
+  [ -z "$reconciliation_state" ] || secondmate_update_reconcile_clear "$reconciliation_state" "$secondmate_id" || true
   if [ -n "$instr" ]; then
     echo "$label: updated $before..$after (instructions changed: $instr)"
   else
@@ -543,7 +557,7 @@ ff_target() {
       echo "$label: skipped: jj-managed home but jj is not on PATH"
       return 0
     fi
-    ff_target_jj "$dir" "$label" "$base_mode"
+    ff_target_jj "$dir" "$label" "$base_mode" "$secondmate_id" "$reconciliation_state"
     return 0
   fi
   if ! git -C "$dir" rev-parse --is-inside-work-tree >/dev/null 2>&1; then

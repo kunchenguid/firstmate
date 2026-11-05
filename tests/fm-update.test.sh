@@ -939,6 +939,79 @@ test_jj_side_commit_wc_skipped() {
   pass "JJ8 a side-commit working copy under a current bookmark is skipped"
 }
 
+# Build a standalone jj colocated secondmate home (its own object store and its
+# own .jj), plus its state meta. The seeded identity marker is excluded through
+# .git/info/exclude so the jj working copy stays empty, which is the shape a real
+# home gets from the committed .gitignore. Args: world id.
+add_jj_sm() {
+  local w=$1 id=$2
+  git clone -q "$w/origin.git" "$w/$id"
+  git -C "$w/$id" remote set-head origin main >/dev/null 2>&1 || true
+  printf '.fm-secondmate-home\n' >> "$w/$id/.git/info/exclude"
+  printf '%s\n' "$id" > "$w/$id/.fm-secondmate-home"
+  ( cd "$w/$id" && jj git init --colocate >/dev/null 2>&1 )
+  [ -d "$w/$id/.jj" ] || fail "jj git init --colocate did not create $w/$id/.jj"
+  {
+    printf 'window=main:fm-%s\n' "$id"
+    printf 'endpoint_task_id=%s\n' "$id"
+    printf 'worktree=%s/%s\n' "$w" "$id"
+    printf 'project=%s/%s\n' "$w" "$id"
+    printf 'kind=secondmate\n'
+    printf 'harness=claude\n'
+    printf 'home=%s/%s\n' "$w" "$id"
+  } > "$w/home/state/$id.meta"
+  printf 'fm-%s\n' "$id" >> "$w/fake/windows"
+}
+
+# --- JJ12: a failed jj diff over-approximates to "instructions changed" ------
+# changed_instr treats a nonzero `git diff --quiet` - differences OR failure - as
+# changed, so the jj route must do the same; an empty-but-failed diff must never
+# read as "unchanged" and hide a moved instruction file behind reread-firstmate: no.
+test_jj_diff_failure_reports_changed() {
+  jj_available || { echo "skip: jj not found (jj colocated fixture)"; return 0; }
+  local w out real_jj
+  w=$(new_jj_world jj12)
+  real_jj=$(command -v jj)
+  cat > "$w/fakebin/jj" <<SH
+#!/usr/bin/env bash
+[ "\${1:-}" != diff ] || exit 1
+exec "$real_jj" "\$@"
+SH
+  chmod +x "$w/fakebin/jj"
+  bump_origin "$w" instr
+
+  out=$(run_update "$w")
+
+  assert_contains "$out" "firstmate: updated " "jj home still advanced"
+  assert_contains "$out" "reread-firstmate: yes" \
+    "a failed jj diff must be reported as a changed instruction path"
+  pass "JJ12 a failed jj diff over-approximates to changed"
+}
+
+# --- JJ13: a jj fast-forward clears a pending reconciliation record ---------
+# A record can predate a home's conversion from git to jj; a successful jj
+# convergence is the same success the git route clears on, so it must clear it.
+test_jj_secondmate_clears_pending_record() {
+  jj_available || { echo "skip: jj not found (jj colocated fixture)"; return 0; }
+  local w out marker
+  w=$(new_jj_world jj13)
+  add_jj_sm "$w" sm1
+  marker="$w/home/state/.secondmate-update-reconcile/sm1.pending"
+  mkdir -p "${marker%/*}"
+  {
+    printf 'schema=fm-secondmate-update-reconcile.v1\n'
+    printf 'id=sm1\n'
+    printf 'status=diverged\n'
+  } > "$marker"
+  bump_origin "$w" instr
+
+  out=$(run_update "$w")
+
+  assert_contains "$out" "secondmate sm1: updated " "jj secondmate fast-forwarded"
+  [ ! -e "$marker" ] || fail "a jj fast-forward did not clear the pending reconciliation record"
+  pass "JJ13 a jj fast-forward clears a pending reconciliation record"
+}
+
 test_jj_colocated_advances
 test_jj_dirty_skipped
 test_jj_diverged_skipped
@@ -950,6 +1023,8 @@ test_jj_side_commit_wc_skipped
 test_jj_reread_baselines_on_working_copy
 test_jj_described_nonempty_reports_description
 test_jj_plain_new_above_base_advances
+test_jj_diff_failure_reports_changed
+test_jj_secondmate_clears_pending_record
 
 test_updates_main_and_secondmate
 test_reread_gate_is_instruction_only
