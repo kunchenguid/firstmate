@@ -9,11 +9,14 @@
 //   { error, updated, totals:[text], cards:[{name,counter,now}], tray, notices:[text],
 //     detail:{name,counter,groups:[title],calls:[title],fixable:[title]},
 //     reloaded:{name,cards}, reloadedAfterBack:{cards},
+//     direct:{name,reloadedName},
 //     sent:[{question,selection,note}] }
 // `reloaded` is what the page shows after it is loaded again at a URL without
 // the hash, as Lavish's live reload of its sandboxed artifact frame does (no
 // web storage there, only window.name), while a project was open;
 // `reloadedAfterBack` the same after the captain went back to the overview.
+// `direct` is a fresh page opened at the project's deep link while window.name
+// still remembers a different project, then reloaded without the hash.
 import { readFileSync } from "node:fs";
 
 const html = readFileSync(process.argv[2], "utf8");
@@ -135,17 +138,22 @@ function typeAndSend(container, words) {
   one(container, "send").fire("click");
 }
 
-const out = { error: "", updated: "", totals: [], cards: [], tray: null, notices: [], addable: [], detail: null, reloaded: null, reloadedAfterBack: null, sent };
+const out = { error: "", updated: "", totals: [], cards: [], tray: null, notices: [], addable: [], detail: null, reloaded: null, reloadedAfterBack: null, direct: null, sent };
 Object.defineProperty(globalThis.window, "sessionStorage", storageDenied);
 Object.defineProperty(globalThis.window, "localStorage", storageDenied);
-// Load the page again as a fresh document at a URL without the hash, as the
-// sandboxed frame does on a live reload; only window.name survives.
-function reload() {
+// Load the page again as a fresh document at the given URL hash; a live reload
+// of the sandboxed frame drops the hash, and only window.name survives.
+function load(hash) {
   for (const id of Object.keys(byId)) if (id !== "projects-data") byId[id] = new Node("div");
   windowListeners = {};
-  location.hash = "";
+  location.hash = hash;
   new Function(code)();
 }
+const reload = () => load("");
+const detailName = () => {
+  const h2 = all(byId["pv-main"], (n) => n.tagName === "h2")[0];
+  return h2 ? h2.textContent : null;
+};
 try {
   new Function(code)();
   const main = byId["pv-main"];
@@ -199,6 +207,15 @@ try {
   if (back) back.fire("click");
   reload();
   out.reloadedAfterBack = { cards: all(byId["pv-main"], hasClass("card")).length };
+
+  // A fresh page opened directly at the deep link, with an older project still
+  // remembered from before, keeps the linked project across a hash-less reload.
+  const other = JSON.parse(dataNode.textContent).projects.find((p) => p.id !== projectId);
+  globalThis.window.name = other ? "fmopen:" + other.id : "";
+  load("#p=" + projectId);
+  out.direct = { name: detailName() };
+  reload();
+  out.direct.reloadedName = detailName();
 } catch (e) {
   out.error = String(e && e.message || e);
 }

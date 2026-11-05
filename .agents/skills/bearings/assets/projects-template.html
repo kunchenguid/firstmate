@@ -642,6 +642,10 @@ __FM_PROJECTS_VIEW_DATA__
       remember(m ? m[1] : null);
       render();
     });
+    // A page opened directly at a deep link remembers that project too, so the
+    // first hash-less live reload keeps it instead of an older remembered one.
+    var start = /^#p=([a-z0-9-]+)$/.exec(window.location.hash || "");
+    if (start && current()) remember(start[1]);
     render();
   } catch (e) {
     main.textContent = "";

@@ -130,6 +130,10 @@ case "$COOLDOWN_SECS" in ''|*[!0-9]*) COOLDOWN_SECS=600 ;; esac
 
 # shellcheck source=bin/fm-landed-lib.sh
 . "$SCRIPT_DIR/fm-landed-lib.sh"
+# shellcheck source=bin/fm-tasks-axi-lib.sh
+. "$SCRIPT_DIR/fm-tasks-axi-lib.sh"
+# shellcheck source=bin/fm-backlog-transition-lib.sh
+. "$SCRIPT_DIR/fm-backlog-transition-lib.sh"
 
 usage() {
   awk '
@@ -187,29 +191,18 @@ command_check() {
   printf 'ok: %s projects\n' "$(jq '.projects | length' "$PROJECTS_CONFIG")"
 }
 
-archive_path() {
-  local configured
-  configured=$(awk -F= '
-    /^\[/ { section = $0; next }
-    section == "[markdown]" && $1 ~ /^[[:space:]]*archive[[:space:]]*$/ {
-      v = $2; gsub(/^[[:space:]]*"|"[[:space:]]*$/, "", v); print v; exit
-    }' "$FM_HOME/.tasks.toml" 2>/dev/null)
-  [ -n "$configured" ] || configured=data/done-archive.md
-  case "$configured" in
-    /*) printf '%s\n' "$configured" ;;
-    data/*) printf '%s/%s\n' "$DATA" "${configured#data/}" ;;
-    *) printf '%s/%s\n' "$FM_HOME" "$configured" ;;
-  esac
-}
-
 # Done rows archived on or after the cutoff, parsed by the canonical snapshot
 # backlog parser so this view never owns a second row grammar. A row's archive
 # date is never earlier than its completion date, so this bounded read cannot
 # miss an in-window completion.
 archive_records() {  # <cutoff YYYY-MM-DD> <out.json>
   local cutoff=$1 out=$2 archive scratch
-  archive=$(archive_path)
-  if [ ! -f "$archive" ]; then
+  # The archive the backlog's own commands address: the [markdown] archive key
+  # of the data directory's parent `.tasks.toml`, else the user-level
+  # $HOME/.tasks-axi/config.toml, else done-archive.md beside the backlog. A
+  # backend that keeps no markdown archive contributes nothing.
+  archive=$(fm_backlog_markdown_archive_path "$DATA") || archive=
+  if [ -z "$archive" ] || [ ! -f "$archive" ]; then
     printf '[]\n' > "$out"
     return 0
   fi
@@ -492,11 +485,13 @@ publish_page() {  # [<snapshot.json>]
   [ "$(grep -cxF "$PLACEHOLDER" "$TEMPLATE")" -eq 1 ] \
     || fail "projects template does not carry exactly one data slot: $TEMPLATE"
   model=$(mktemp "${TMPDIR:-/tmp}/fm-projects-model.XXXXXX") || fail "cannot stage the model"
-  ( produce_model "$model" "$snapshot" ) || { rm -f -- "$model"; exit 1; }
+  PUBLISH_SCRATCH=$model
+  trap 'rm -f -- "$PUBLISH_SCRATCH" "$PUBLISH_SCRATCH.json"' EXIT
+  ( produce_model "$model" "$snapshot" ) || exit 1
   page=$(page_path)
   # The template digest rides in the model so an updated template republishes
   # an otherwise unchanged view.
-  digest=$(template_digest) || { rm -f -- "$model"; fail "cannot fingerprint the template"; }
+  digest=$(template_digest) || fail "cannot fingerprint the template"
   new=$(jq -cS --arg t "$digest" 'del(.generated) + {template:$t}' "$model")
   old=$(published_model "$page" | jq -cS 'del(.generated)' 2>/dev/null || true)
   if [ "${FORCE_WRITE:-0}" != 1 ] && [ -n "$old" ] && [ "$old" = "$new" ]; then
@@ -504,17 +499,26 @@ publish_page() {  # [<snapshot.json>]
     printf 'projects: %s\nunchanged\n' "$page"
     return 0
   fi
-  json=$(jq -c --arg t "$digest" '. + {template:$t}' "$model") || { rm -f -- "$model"; fail "cannot compact the model"; }
+  # The model reaches perl through a file rather than the environment, whose
+  # per-entry limit (128 KiB on Linux) a large fleet's model can exceed. `<`
+  # never appears in JSON syntax outside strings, so escaping every occurrence
+  # keeps the model valid JSON while making </script> inert.
+  json="$model.json"
+  jq -c --arg t "$digest" '. + {template:$t}' "$model" > "$json" || fail "cannot compact the model"
   rm -f -- "$model"
-  # `<` never appears in JSON syntax outside strings, so escaping every
-  # occurrence keeps the model valid JSON while making </script> inert.
-  json=${json//</\\u003c}
   (umask 077; mkdir -p "${page%/*}") || fail "cannot create ${page%/*}"
   tmp=$(umask 077; mktemp "${page%/*}/.projects.XXXXXX") || fail "cannot stage the page"
-  if ! VIEW_JSON="$json" perl -pe "s/^\\Q$PLACEHOLDER\\E\$/\$ENV{VIEW_JSON}/" "$TEMPLATE" > "$tmp"; then
-    rm -f -- "$tmp"
+  if ! VIEW_JSON_FILE="$json" perl -pe '
+      BEGIN {
+        open my $fh, "<", $ENV{VIEW_JSON_FILE} or die "$!";
+        local $/; $json = <$fh>; close $fh; chomp $json;
+        $json =~ s/</\\u003c/g;
+      }
+      s/^\Q'"$PLACEHOLDER"'\E$/$json/' "$TEMPLATE" > "$tmp"; then
+    rm -f -- "$tmp" "$json"
     fail "cannot inject the projects model"
   fi
+  rm -f -- "$json"
   extracted=$(published_model "$tmp")
   if ! printf '%s\n' "$extracted" | jq -e --arg schema "$MODEL_SCHEMA" '.schema == $schema' >/dev/null 2>&1; then
     rm -f -- "$tmp"

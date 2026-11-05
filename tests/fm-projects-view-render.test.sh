@@ -104,6 +104,17 @@ test_open_project_survives_a_reload_without_the_hash() {
   pass "the open project survives an automatic redraw that drops the hash, and so does going back"
 }
 
+test_a_direct_deep_link_survives_a_hash_less_reload() {
+  local page out
+  page=$(build_page direct)
+  out=$(node "$HARNESS" "$page" store)
+  printf '%s' "$out" | jq -e '
+    .error == ""
+    and .direct == {name: "Store launch", reloadedName: "Store launch"}
+  ' >/dev/null || fail "a page opened at its deep link lost the project on reload: $out"
+  pass "a page opened directly at #p=<id> keeps that project across a hash-less live reload"
+}
+
 test_withheld_actions_and_unread_homes_render() {
   local home page snap out
   page=$(build_page notices)
@@ -141,4 +152,5 @@ fm_test_run \
   test_detail_orders_needs_then_progress_then_done_then_left \
   test_actions_queue_the_routed_answer_keys \
   test_open_project_survives_a_reload_without_the_hash \
+  test_a_direct_deep_link_survives_a_hash_less_reload \
   test_withheld_actions_and_unread_homes_render

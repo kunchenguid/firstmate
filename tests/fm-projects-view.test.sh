@@ -95,6 +95,41 @@ model_of() {  # <home> [model args...]
   FM_HOME="$home" FM_SNAPSHOT_NOW="$NOW" bash "$VIEW" model "$@"
 }
 
+# The archive resolves the way the backlog's own commands address it: the data
+# directory's parent `.tasks.toml`, then $HOME/.tasks-axi/config.toml, each
+# relative value against that parent. Neither the home root's `.tasks.toml` nor
+# the default beside the backlog is consulted once another source names one.
+test_archive_follows_the_backlog_addressing() {
+  local home root model userhome
+  home=$(make_home relocated)
+  write_config "$home"
+  root="$home/elsewhere"
+  mkdir -p "$root/data" "$root/kept"
+  write_backlog "$home"
+  mv "$home/data/backlog.md" "$root/data/backlog.md"
+  mv "$home/data/done-archive.md" "$root/kept/done.md"
+  rm -f "$home/.tasks.toml"
+  printf 'backend = "markdown"\n\n[markdown]\narchive = "kept/done.md"\n' > "$root/.tasks.toml"
+  model=$(FM_HOME="$home" FM_DATA_OVERRIDE="$root/data" FM_SNAPSHOT_NOW="$NOW" bash "$VIEW" model) || fail "model failed"
+  printf '%s' "$model" | jq -e '
+    [.projects[] | select(.id == "store-launch") | .done.rows[].id] | index("store-arch") != null
+  ' >/dev/null || fail "the relocated data directory's own archive was not read: $model"
+
+  home=$(make_home userlevel)
+  write_config "$home"
+  write_backlog "$home"
+  mv "$home/data/done-archive.md" "$home/kept-archive.md"
+  printf 'backend = "markdown"\n' > "$home/.tasks.toml"
+  userhome="$TMP_ROOT/userlevel-home"
+  mkdir -p "$userhome/.tasks-axi"
+  printf '[markdown]\narchive = "kept-archive.md"\n' > "$userhome/.tasks-axi/config.toml"
+  model=$(HOME="$userhome" FM_HOME="$home" FM_SNAPSHOT_NOW="$NOW" bash "$VIEW" model) || fail "model failed"
+  printf '%s' "$model" | jq -e '
+    [.projects[] | select(.id == "store-launch") | .done.rows[].id] | index("store-arch") != null
+  ' >/dev/null || fail "the user-level archive setting was not honoured: $model"
+  pass "archived done work is read from the backlog's own archive path, relocated or user-configured"
+}
+
 # --- config parser -------------------------------------------------------------
 
 test_check_accepts_a_valid_config() {
@@ -244,7 +279,8 @@ test_correct_steers_only_live_local_work() {
   home=$(fixture_home correct)
   bin="$TMP_ROOT/correct-bin"
   mkdir -p "$bin"
-  cp "$VIEW" "$ROOT/bin/fm-landed-lib.sh" "$bin/"
+  cp "$VIEW" "$ROOT/bin/fm-landed-lib.sh" "$ROOT/bin/fm-tasks-axi-lib.sh" "$ROOT/bin/fm-backlog-transition-lib.sh" \
+    "$ROOT/bin/fm-timeout-lib.sh" "$ROOT/bin/fm-pr-lib.sh" "$bin/"
   cat > "$bin/fm-send.sh" <<'SH'
 #!/usr/bin/env bash
 printf '%s|%s|%s\n' "$FM_HOME" "$1" "$2" >> "$FM_HOME/sent.log"
@@ -294,6 +330,33 @@ test_build_publishes_an_inert_model_and_skips_unchanged() {
 
 # The refresh runs detached under the home's own lock, and its argv does not
 # name the fixture root, so wait for it to finish rather than leave it running.
+# Needs-you is uncapped, so a large fleet's model can pass the size one
+# environment entry may carry (128 KiB on Linux, 1 MiB for all arguments on
+# macOS). The page is built all the same.
+test_build_carries_a_model_larger_than_one_environment_entry() {
+  local home snap out page size
+  home=$(make_home big-fleet)
+  write_config "$home"
+  snap="$home/snapshot.json"
+  jq -n --arg now "$NOW" '{
+    schema: "fm-fleet-snapshot.v1", generated: $now, tasks: [],
+    backlog: {records: [range(0; 6000) | {
+      structured: true, id: ("store-ask-" + tostring), state: "queued", order: .,
+      title: ("Decide question number " + tostring + " about the store listing, its copy, and its screenshots"),
+      body_lines: [], unresolved_blocker_ids: [], hold_bucket: "live", hold_age_days: 1,
+      hold_reason: ("The listing draft " + tostring + " is ready for a look")}]},
+    secondmate_current: {records: []}
+  }' > "$snap"
+  out=$(FM_HOME="$home" bash "$VIEW" build --snapshot "$snap") || fail "a large model did not build: $out"
+  [ "${out##*$'\n'}" = written ] || fail "a large model was not written: $out"
+  page=$(FM_HOME="$home" bash "$VIEW" path)
+  size=$(sed -n '/<script id="projects-data" type="application\/json">/,/<\/script>/p' "$page" | sed '1d;$d' | wc -c | tr -d ' ')
+  [ "$size" -gt 1048576 ] || fail "the fixture model is only $size bytes"
+  sed -n '/<script id="projects-data" type="application\/json">/,/<\/script>/p' "$page" | sed '1d;$d' \
+    | jq -e '.projects[0].needs | length == 6000' >/dev/null || fail "the published large model is not intact"
+  pass "a model larger than one environment entry still builds the page"
+}
+
 wait_for_refresh() {  # <home>
   local home=$1 page i=0
   page="$home/.lavish/projects.html"
@@ -625,6 +688,7 @@ EOF
 fm_test_run \
   test_check_accepts_a_valid_config \
   test_check_refuses_missing_and_malformed_configs \
+  test_archive_follows_the_backlog_addressing \
   test_membership_follows_body_line_then_glob_then_exclusive_repo \
   test_counters_count_captain_waits_and_windowed_done \
   test_secondmate_work_groups_read_only \
@@ -632,6 +696,7 @@ fm_test_run \
   test_add_files_a_queued_item_with_its_project \
   test_correct_steers_only_live_local_work \
   test_build_publishes_an_inert_model_and_skips_unchanged \
+  test_build_carries_a_model_larger_than_one_environment_entry \
   test_refresh_is_opt_in_and_runs_detached \
   test_wake_drain_triggers_a_refresh \
   test_routine_refresh_is_local_only_and_rate_limited \
