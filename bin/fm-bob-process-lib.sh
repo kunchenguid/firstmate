@@ -40,23 +40,33 @@ fm_bob_comm_is_node() {  # <comm>
 }
 
 # True when command name $1 and argument string $2 describe Bob's session or
-# supervisor process. Node options before the script are skipped, and the script
+# supervisor process. An empty $1 leaves the proof to the interpreter in $2. Node
+# options before the script are skipped, and both the interpreter and the script
 # path may contain spaces. MainThread is accepted ONLY together with that script,
 # never widened to every node process. Every caller runs this on foreign node
 # processes too, some on each watcher poll and some holding a whole brief in
 # argv, so the cost is bounded whatever the argv length: only the head of argv
-# can hold the script, and at most 16 words after its first can continue a path
-# that spaces split. Anything past either bound is not Bob.
+# can hold the script, and at most 16 words can continue a path that spaces split.
+# Anything past either bound is not Bob.
 fm_bob_process_matches() {  # <comm> <args>
-  local comm=$1 args=${2:0:8192} i start=-1
+  local comm=$1 args=${2:0:8192} i last=0 start=-1
   local -a words=()
-  fm_bob_comm_is_node "$comm" || return 1
+  [ -z "$comm" ] || fm_bob_comm_is_node "$comm" || return 1
   case "$args" in
     */bob*) ;;
     *) return 1 ;;
   esac
   read -r -a words <<<"$args" || true
-  for ((i = 1; i < ${#words[@]}; i++)); do
+  # argv[0] ends at the first word that completes a real node executable, so a
+  # later argument can never pose as the end of the interpreter.
+  for ((i = 0; i < ${#words[@]} && i <= 16; i++)); do
+    fm_bob_comm_is_node "${words[i]}" || continue
+    [ -f "${words[*]:0:i+1}" ] && [ -x "${words[*]:0:i+1}" ] || continue
+    last=$i
+    break
+  done
+  [ -n "$comm" ] || fm_bob_comm_is_node "${words[last]}" || return 1
+  for ((i = last + 1; i < ${#words[@]}; i++)); do
     case "${words[i]}" in -*) continue ;; esac
     start=$i
     break

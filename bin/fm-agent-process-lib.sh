@@ -128,7 +128,7 @@ fm_agent_process_classify() {  # <name> <argv0> <args> [pid] -> agent|shell|othe
     printf 'agent'
     return 0
   fi
-  if [ -n "$args" ] && fm_bob_process_matches "${name:-${args%% *}}" "$args"; then
+  if [ -n "$args" ] && fm_bob_process_matches "$name" "$args"; then
     printf 'agent'
     return 0
   fi

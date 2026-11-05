@@ -630,6 +630,40 @@ test_bob_matcher_bound_keeps_a_spaced_install_and_stops_past_it() {
   pass "fm_bob_process_matches: a spaced install matches and the bound stops the scan"
 }
 
+# The launch names node absolutely, so argv[0] can be a path that spaces split. ps
+# joins it with the rest, and the interpreter has to end before the script search
+# starts without letting a later argument pose as that end.
+test_bob_matcher_reads_past_a_spaced_interpreter() {
+  local dir node script plain comm
+  dir="$TMP_ROOT/matcher spaced/node tools"
+  node="$dir/bin/node"
+  script="$dir/lib/node_modules/bobshell/dist/bob.js"
+  plain="$TMP_ROOT/matcher-plain/bin/electron"
+  mkdir -p "$(dirname "$node")" "$(dirname "$script")" "$(dirname "$plain")"
+  printf '#!/bin/sh\n' > "$node"
+  chmod +x "$node"
+  : > "$script"
+  cp "$node" "$plain"
+  # shellcheck source=bin/fm-bob-process-lib.sh
+  . "$ROOT/bin/fm-bob-process-lib.sh"
+  for comm in MainThread node ''; do
+    fm_bob_process_matches "$comm" "$node $script chat --trust" \
+      || fail "the launch's spaced node and script must match Bob (comm '$comm')"
+    fm_bob_process_matches "$comm" "$node --no-warnings $script chat" \
+      || fail "a node option after a spaced node must not hide Bob (comm '$comm')"
+    if fm_bob_process_matches "$comm" "$node /srv/inspect.js $script"; then
+      fail "a later argument impersonated Bob under a spaced node (comm '$comm')"
+    fi
+  done
+  if fm_bob_process_matches MainThread "$plain app.js node $script"; then
+    fail "a word named node after another program moved the script search onto Bob's script"
+  fi
+  if fm_bob_process_matches '' "python3 $script"; then
+    fail "an empty comm let a non-node interpreter pass as Bob"
+  fi
+  pass "fm_bob_process_matches: a spaced interpreter is read whole and a later argument still cannot impersonate Bob"
+}
+
 test_bob_secondmate_is_refused() {
   local id rec out rc
   id="bob-second-z1-$$"
@@ -677,5 +711,6 @@ test_bob_trust_refuses_a_store_that_stays_broken
 test_bob_matcher_forks_nothing_on_a_foreign_long_argv
 test_bob_matcher_cost_is_bounded_on_a_foreign_long_argv
 test_bob_matcher_bound_keeps_a_spaced_install_and_stops_past_it
+test_bob_matcher_reads_past_a_spaced_interpreter
 test_bob_secondmate_is_refused
 test_bob_positional_secondmate_is_refused
