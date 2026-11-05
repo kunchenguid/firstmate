@@ -278,6 +278,14 @@ test_build_refuses_malformed_payloads_before_touching_the_board() {
     [ "$rc" -ne 0 ] || fail "an invalid filed date was accepted: $invalid_filed"
   done
 
+  for invalid_generated in "" "26 Aug 2026 10:00 AEST" "2026-08-26T10:00" "2026-02-30T10:00Z" "2026-08-26T24:00Z"; do
+    write_valid_payload "$data"
+    jq --arg generated "$invalid_generated" '.generated = $generated' "$data" > "$data.tmp" \
+      && mv "$data.tmp" "$data"
+    set +e; out=$(run_board "$home" build "$data" 2>&1); rc=$?; set -e
+    [ "$rc" -ne 0 ] || fail "an invalid generated timestamp was accepted: $invalid_generated"
+  done
+
   write_valid_payload "$data"
   jq '.captains_call[0].allow_freeform = "yes"' "$data" > "$data.tmp" && mv "$data.tmp" "$data"
   set +e; out=$(run_board "$home" build "$data" 2>&1); rc=$?; set -e
@@ -490,6 +498,18 @@ test_build_refuses_a_template_without_exactly_one_slot() {
   assert_contains "$out" "data slot" "the slot refusal did not say why: $out"
   assert_absent "$home/.lavish/bearings-board.html" "a refused template still produced a board"
   pass "build refuses a template without exactly one data slot"
+}
+
+test_generated_accepts_zoned_iso_timestamps() {
+  local home data generated
+  home=$(make_home generatedzone)
+  data="$home/payload.json"
+  for generated in "2026-08-26T10:00Z" "2026-08-26T10:00:00.250Z" "2026-08-26T20:00:00+10:00" "2026-08-26T05:30-04:30"; do
+    write_valid_payload "$data"
+    jq --arg generated "$generated" '.generated = $generated' "$data" > "$data.tmp" && mv "$data.tmp" "$data"
+    run_board "$home" build "$data" >/dev/null || fail "a zoned ISO-8601 generated timestamp was refused: $generated"
+  done
+  pass "build accepts generated timestamps with Z or an explicit offset"
 }
 
 test_charted_kind_is_optional_and_accepts_both_values() {
@@ -771,6 +791,7 @@ test_build_refuses_a_nondecision_reconcile_value() {
 
 test_path_is_stable_and_home_scoped
 test_build_refuses_malformed_payloads_before_touching_the_board
+test_generated_accepts_zoned_iso_timestamps
 test_charted_kind_is_optional_and_accepts_both_values
 test_build_injects_binds_then_arms
 test_registration_cannot_consume_before_any_origin_binding
