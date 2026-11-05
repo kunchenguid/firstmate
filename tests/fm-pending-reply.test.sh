@@ -2262,6 +2262,33 @@ test_routine_resolution_appends_no_parent_line() {
   pass "a routine resolution records the child result without appending to the parent channel"
 }
 
+test_escalation_close_note_carries_child_result() {
+  local home state mate fb corr status
+  home=$(setup_parent escalation-child-result)
+  state="$home/state"
+  mate=$(bind_local_mate "$home" kid)
+  fb=$(make_child_stubs "$mate")
+  make_child "$mate" repack scout busy 'working: repacking panels'
+  export FM_PENDING_REPLY_SEND_HOOK='true'
+  export FM_PENDING_REPLY_NOW=9500
+  corr=$(fm_pending_reply_create "$home" "$state" "kid" "how far is the repacking")
+  fm_pending_reply_mark_delivered "$state" "$corr"
+  fm_pending_reply_mark_turn_completed "$state" "$corr" request
+  fm_pending_reply_send_recovery "$state" "$corr" || fail "recovery send failed"
+  fm_pending_reply_mark_turn_completed "$state" "$corr" recovery
+  fm_pending_reply_maybe_escalate "$state" "$corr" || fail "missed-report escalation should fire"
+  status="$state/kid.status"
+  grep -Fq 'pending-reply-missed' "$status" || fail "escalation did not open a missed-report decision"
+  PATH="$fb:$PATH" FM_HOME="$mate" "$REPORT" --task repack done "$corr" "narrow fix done" > /dev/null \
+    || fail "helper report failed"
+  fm_pending_reply_try_resolve "$state" "$corr" || fail "late helper reply should resolve the request"
+  [ "$(grep -Fc "resolved [key=pending-reply-$corr]" "$status")" -eq 1 ] \
+    || fail "resolution did not close the escalation decision once: $(cat "$status")"
+  [ "$(grep -Fc "pending-reply-resolved: task=kid pending-reply-id=$corr via=helper child=repack child-state=working overall=unfinished" "$status")" -eq 1 ] \
+    || fail "the escalation close note must carry the working child's unfinished result: $(cat "$status")"
+  pass "an escalation closed by a helper reply records the child and its unfinished verdict in the close note"
+}
+
 test_hand_written_reply_and_forged_note_read_unknown() {
   local home state corr out
   home=$(setup_parent child-forged)
@@ -2338,6 +2365,7 @@ test_unfinished_child_is_not_reported_finished
 test_finished_child_reads_finished
 test_missing_child_result_reads_unknown
 test_routine_resolution_appends_no_parent_line
+test_escalation_close_note_carries_child_result
 test_hand_written_reply_and_forged_note_read_unknown
 
 printf 'ok - all pending-reply tests passed\n'

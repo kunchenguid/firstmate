@@ -681,15 +681,6 @@ fm_pending_reply_resolve_via_of_line() {  # <line>
   esac
 }
 
-# The crew-state words fm-crew-state.sh can print; the single list both the
-# helper (writer) and the parent (reader) check a verdict against.
-fm_pending_reply_child_state_valid() {  # <state>
-  case "$1" in
-    working|parked|done|blocked|paused|failed|unknown) return 0 ;;
-  esac
-  return 1
-}
-
 # A plain task id the helper may read a verdict for; "-" is the no-child id.
 fm_pending_reply_child_id_valid() {  # <id>
   case "$1" in ''|-|*[!A-Za-z0-9._-]*) return 1 ;; esac
@@ -697,12 +688,12 @@ fm_pending_reply_child_id_valid() {  # <id>
 }
 
 # The marker the helper appends, as "child=<id> child-state=<verdict>". An id
-# that is not a plain task id reads as no child ("-") with an unknown verdict,
-# and a verdict outside the crew-state vocabulary reads unknown.
+# that is not a plain task id reads as no child ("-") with an unknown verdict;
+# the verdict word is fm-crew-state.sh's own, and fm_pending_reply_overall_label
+# alone decides what it means.
 fm_pending_reply_child_marker() {  # <child-id> <state>
   local id=$1 state=$2
   fm_pending_reply_child_id_valid "$id" || { id=-; state=unknown; }
-  fm_pending_reply_child_state_valid "$state" || state=unknown
   printf 'child=%s child-state=%s' "$id" "$state"
 }
 
@@ -712,8 +703,7 @@ fm_pending_reply_child_marker() {  # <child-id> <state>
 fm_pending_reply_child_result_of_line() {  # <line>
   local line=$1 marker_re='[( ]via-helper child=([A-Za-z0-9._-]+) child-state=([a-z]+)\)$'
   if [[ $line =~ $marker_re ]] \
-    && fm_pending_reply_child_id_valid "${BASH_REMATCH[1]}" \
-    && fm_pending_reply_child_state_valid "${BASH_REMATCH[2]}"; then
+    && fm_pending_reply_child_id_valid "${BASH_REMATCH[1]}"; then
     printf '%s %s' "${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}"
     return 0
   fi
