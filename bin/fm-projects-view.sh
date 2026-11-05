@@ -480,14 +480,19 @@ template_digest() {
 }
 
 publish_page() {  # [<snapshot.json>]
-  local snapshot=${1-} model json page tmp extracted old new digest
+  local snapshot=${1-} scratch model json page tmp extracted old new digest
   [ -f "$TEMPLATE" ] && [ ! -L "$TEMPLATE" ] || fail "projects template is missing: $TEMPLATE"
   [ "$(grep -cxF "$PLACEHOLDER" "$TEMPLATE")" -eq 1 ] \
     || fail "projects template does not carry exactly one data slot: $TEMPLATE"
-  model=$(mktemp "${TMPDIR:-/tmp}/fm-projects-model.XXXXXX") || fail "cannot stage the model"
-  PUBLISH_SCRATCH=$model
-  trap 'rm -f -- "$PUBLISH_SCRATCH" "$PUBLISH_SCRATCH.json"' EXIT
-  ( produce_model "$model" "$snapshot" ) || exit 1
+  # The model carries private task text, so every scratch copy lives in an
+  # owner-only directory (mode 700) and is written owner-only (mode 600)
+  # whatever umask the caller runs under.
+  scratch=$(umask 077; mktemp -d "${TMPDIR:-/tmp}/fm-projects-model.XXXXXX") || fail "cannot stage the model"
+  PUBLISH_SCRATCH=$scratch
+  trap 'rm -rf -- "$PUBLISH_SCRATCH"' EXIT
+  model=$scratch/model.json
+  json=$scratch/page.json
+  ( umask 077; produce_model "$model" "$snapshot" ) || exit 1
   page=$(page_path)
   # The template digest rides in the model so an updated template republishes
   # an otherwise unchanged view.
@@ -495,7 +500,7 @@ publish_page() {  # [<snapshot.json>]
   new=$(jq -cS --arg t "$digest" 'del(.generated) + {template:$t}' "$model")
   old=$(published_model "$page" | jq -cS 'del(.generated)' 2>/dev/null || true)
   if [ "${FORCE_WRITE:-0}" != 1 ] && [ -n "$old" ] && [ "$old" = "$new" ]; then
-    rm -f -- "$model"
+    rm -rf -- "$scratch"
     printf 'projects: %s\nunchanged\n' "$page"
     return 0
   fi
@@ -503,8 +508,7 @@ publish_page() {  # [<snapshot.json>]
   # per-entry limit (128 KiB on Linux) a large fleet's model can exceed. `<`
   # never appears in JSON syntax outside strings, so escaping every occurrence
   # keeps the model valid JSON while making </script> inert.
-  json="$model.json"
-  jq -c --arg t "$digest" '. + {template:$t}' "$model" > "$json" || fail "cannot compact the model"
+  (umask 077; jq -c --arg t "$digest" '. + {template:$t}' "$model" > "$json") || fail "cannot compact the model"
   rm -f -- "$model"
   (umask 077; mkdir -p "${page%/*}") || fail "cannot create ${page%/*}"
   tmp=$(umask 077; mktemp "${page%/*}/.projects.XXXXXX") || fail "cannot stage the page"
@@ -515,10 +519,11 @@ publish_page() {  # [<snapshot.json>]
         $json =~ s/</\\u003c/g;
       }
       s/^\Q'"$PLACEHOLDER"'\E$/$json/' "$TEMPLATE" > "$tmp"; then
-    rm -f -- "$tmp" "$json"
+    rm -f -- "$tmp"
+    rm -rf -- "$scratch"
     fail "cannot inject the projects model"
   fi
-  rm -f -- "$json"
+  rm -rf -- "$scratch"
   extracted=$(published_model "$tmp")
   if ! printf '%s\n' "$extracted" | jq -e --arg schema "$MODEL_SCHEMA" '.schema == $schema' >/dev/null 2>&1; then
     rm -f -- "$tmp"

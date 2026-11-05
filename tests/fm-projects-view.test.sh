@@ -357,6 +357,38 @@ test_build_carries_a_model_larger_than_one_environment_entry() {
   pass "a model larger than one environment entry still builds the page"
 }
 
+# The staged model carries private task text. A perl stand-in observes the file
+# and its directory at the moment the real perl reads them.
+test_build_stages_the_model_owner_only_under_a_permissive_umask() {
+  local home fakebin tmpdir out seen
+  home=$(fixture_home private-model)
+  fakebin=$(fm_fakebin "$home")
+  tmpdir="$home/scratch-tmp"
+  mkdir -p "$tmpdir"
+  cat > "$fakebin/perl" <<SH
+#!/usr/bin/env bash
+set -u
+if [ -n "\${VIEW_JSON_FILE-}" ]; then
+  {
+    ls -ld -- "\$VIEW_JSON_FILE" | cut -c1-10
+    ls -ld -- "\$(dirname -- "\$VIEW_JSON_FILE")" | cut -c1-10
+    case "\$VIEW_JSON_FILE" in "$tmpdir"/*) echo in-tmpdir ;; *) echo elsewhere ;; esac
+  } > "$home/perl-seen"
+fi
+exec "$(command -v perl)" "\$@"
+SH
+  chmod +x "$fakebin/perl"
+  out=$(umask 022; TMPDIR="$tmpdir" PATH="$fakebin:$PATH" FM_HOME="$home" FM_SNAPSHOT_NOW="$NOW" bash "$VIEW" build) \
+    || fail "build failed under umask 022: $out"
+  [ "${out##*$'\n'}" = written ] || fail "the page was not written: $out"
+  seen=$(cat "$home/perl-seen" 2>/dev/null) || fail "perl never read the staged model"
+  assert_equals "-rw-------
+drwx------
+in-tmpdir" "$seen" "the staged model and its directory are owner-only while perl reads them"
+  [ -z "$(ls -A "$tmpdir")" ] || fail "scratch left behind: $(ls -A "$tmpdir")"
+  pass "a permissive umask never exposes the staged model"
+}
+
 wait_for_refresh() {  # <home>
   local home=$1 page i=0
   page="$home/.lavish/projects.html"
@@ -697,6 +729,7 @@ fm_test_run \
   test_correct_steers_only_live_local_work \
   test_build_publishes_an_inert_model_and_skips_unchanged \
   test_build_carries_a_model_larger_than_one_environment_entry \
+  test_build_stages_the_model_owner_only_under_a_permissive_umask \
   test_refresh_is_opt_in_and_runs_detached \
   test_wake_drain_triggers_a_refresh \
   test_routine_refresh_is_local_only_and_rate_limited \
