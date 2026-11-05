@@ -193,6 +193,18 @@ _fm_status_corr_attempt() {  # <word>
   return 1
 }
 
+status_format_errors() {  # <status-file> -> repairable malformed status lines with line numbers
+  local file=$1 line number=0 unstamped
+  [ -f "$file" ] && [ -r "$file" ] && [ ! -L "$file" ] || return 0
+  while IFS= read -r line || [ -n "$line" ]; do
+    number=$((number + 1))
+    _fm_status_unstamped "$line" unstamped
+    if [[ "$unstamped" =~ ^[0-9]+[[:space:]]+(needs-decision|blocked|working|done|failed|note|paused|resolved)([[:space:]]|$) ]]; then
+      printf '%s:%s: malformed status line; repair the timestamp to [at=<epoch>] after the verb: %s\n' "$file" "$number" "$line"
+    fi
+  done < "$file"
+}
+
 # 0 when <line> declares a status prefix that did not parse as a recognized verb.
 # An unknown lowercase word (parked:, holding:) is one shape. A recognized verb
 # followed only by a missing or mismatched correlation token is the other, as is
@@ -904,11 +916,13 @@ _fm_decision_fold_line() {  # <open-set> <status-line> <resolve-verb> <held-verb
 # subprocess read, which exists for that function's much narrower payload-driven
 # path resolution rather than this directory-local glob.
 status_open_decisions() {  # <status-file> [<kind>]
-  local f=$1 kind=${2:-} line resolve held open='' verb
+  local f=$1 kind=${2:-} line resolve held open='' verb format_errors
   [ -f "$f" ] && [ -r "$f" ] && [ ! -L "$f" ] || return 0
   kind=$(_fm_status_kind "$f" "$kind")
   resolve=${FM_CLASSIFY_RESOLVE_VERB:-$FM_CLASSIFY_RESOLVE_VERB_DEFAULT}
   held=${FM_CLASSIFY_CAPTAIN_HELD_VERB:-$FM_CLASSIFY_CAPTAIN_HELD_VERB_DEFAULT}
+  format_errors=$(status_format_errors "$f")
+  [ -z "$format_errors" ] || printf '%s\n' "$format_errors" >&2
   while IFS= read -r line || [ -n "$line" ]; do
     status_line_verb "$line" verb
     case "$verb" in

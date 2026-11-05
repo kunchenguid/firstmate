@@ -99,6 +99,22 @@ test_resolution_closes_across_positions() {
   pass "a resolution closes its decision regardless of either line's key position"
 }
 
+test_raw_epoch_prefix_is_reported_without_erasing_open_decisions() {
+  local dir f open errors expected
+  dir=$(case_dir raw-epoch)
+  f="$dir/task.status"
+  printf 'blocked [at=1793378273] [key=example]: An earlier blocker remains open.\n' > "$f"
+  printf '1793378273 blocked [key=broken] A malformed later event.\n' >> "$f"
+
+  open=$(status_open_decisions "$f" ship 2>"$dir/errors")
+  expected=$(printf 'example\tblocked\tAn earlier blocker remains open.\n')
+  [ "$open" = "$expected" ] || fail "a malformed later line erased an earlier open decision: '$open'"
+  errors=$(<"$dir/errors")
+  [[ "$errors" == *"$f:2: malformed status line; repair"* ]] \
+    || fail "raw epoch line was not reported with its file and line number: '$errors'"
+  pass "a raw epoch prefix is reported as malformed while earlier decisions remain open"
+}
+
 test_blocked_is_position_tolerant_like_needs_decision() {
   local dir expected
   dir=$(case_dir blocked)
@@ -265,6 +281,7 @@ test_incremental_agrees_with_full_fold_across_appends() {
 }
 
 test_stated_key_is_honored_in_both_positions
+test_raw_epoch_prefix_is_reported_without_erasing_open_decisions
 test_bare_keyless_line_still_folds_to_default
 test_resolution_closes_across_positions
 test_blocked_is_position_tolerant_like_needs_decision
