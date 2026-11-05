@@ -4002,6 +4002,11 @@ if (process.env.FM_REPLACE_DURING_DELIVERY === "yes") {
 }
 if (process.env.FM_REJECT_ALARM === "yes") {
   await waitFor(() => alarmRejected, "rejected typed failure before the held delivery settles");
+  await waitFor(() => prompts.some((message) => message.includes(alarmText)), "retried typed failure while the earlier delivery stays held");
+  if (settled) throw new Error("fixture delivery settled before the rejected alarm was retried");
+  if (prompts.filter((message) => message.includes(alarmText)).length !== 1) {
+    throw new Error(`restoration failure retry was not delivered exactly once: ${prompts}`);
+  }
 } else if (process.env.FM_CLOSE_MODE === "refused") {
   await waitFor(() => prompts.some((message) => message.includes(alarmText)), "typed failure before the held delivery settles");
 } else {

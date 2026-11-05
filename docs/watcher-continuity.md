@@ -46,7 +46,7 @@ Pi treats an arm child whose process is already gone as an empty slot even while
 On Pi, successor restoration is serialized independently of delivery settlement.
 A pending main follow-up or accepted supervision-branch turn retains its delivery claim without blocking the next actionable close from restoring a successor.
 A failed follow-up never cancels continuity restoration, and an exhausted restoration reaches main with a typed failure even while an earlier branch delivery remains pending.
-If Pi rejects that failure, it stays unreported until main accepts it; the earlier branch settling does not clear it.
+If Pi rejects that failure, the extension retries it without waiting for the earlier branch; an unaccepted delivery stays pending rather than inheriting that branch's success.
 
 ### Pi session replacement
 
