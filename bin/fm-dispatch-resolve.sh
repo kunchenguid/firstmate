@@ -9,6 +9,10 @@
 # Opt-in gate: FM_DISPATCH_PROVIDER and FM_DISPATCH_MODEL select the provider
 #   and model from the environment or $FM_HOME/.env (environment wins). With no
 #   provider set, retain the original typesafe.ai/jev-latest key gate exactly.
+#   TYPESAFE_BASE optionally replaces the typesafe.ai base, from the environment
+#   or $FM_HOME/.env (environment wins). It must be an http(s) URL with a host
+#   and no userinfo, query, fragment, or whitespace. Trailing slashes are removed
+#   before appending /v1/systemone; an invalid value exits 2 without sending.
 #   OpenRouter and OpenAI require both their provider selection and a model.
 #   The generic systemone provider requires a model and FM_DISPATCH_BASE_URL
 #   (http:// or https://) and posts to <base>/v1/systemone; its optional
@@ -106,13 +110,13 @@
 #   Exit 2 only for a usage or configuration error (unreadable brief, an
 #   existing unreadable rules file, malformed rules, an unreadable or invalid
 #   credential source declaration, missing jq, an unknown provider, a selected
-#   non-typesafe provider without a model, or systemone without a valid base
-#   URL), which is actionable, never selected around.
+#   non-typesafe provider without a model, an invalid TYPESAFE_BASE, or systemone
+#   without a valid base URL), which is actionable, never selected around.
 #   The capability probe is the one other exit: 1 for an unsupported source.
 #
 # Environment:
 #   FM_DISPATCH_PROVIDER, FM_DISPATCH_MODEL, FM_DISPATCH_BASE_URL,
-#   FM_DISPATCH_API_KEY, TYPESAFE_API_KEY, OPENROUTER_API_KEY, and
+#   FM_DISPATCH_API_KEY, TYPESAFE_API_KEY, TYPESAFE_BASE, OPENROUTER_API_KEY, and
 #   OPENAI_API_KEY are read from the environment or $FM_HOME/.env.
 #
 # Authority: this tool never replaces firstmate's judgment, quota-array-dispatch,
@@ -239,6 +243,20 @@ select_key() {
   fi
 }
 
+# Select and validate the same optional base for implicit and explicit TypeSafe.
+# Never echo a rejected value: a misconfigured URL may contain credentials.
+select_typesafe_base() {
+  local base=${TYPESAFE_BASE:-}
+  [ -n "$base" ] || base=$(fmx_env_get TYPESAFE_BASE "$FM_HOME/.env")
+  [ -n "$base" ] || return 0
+  command -v jq >/dev/null 2>&1 || die "jq required"
+  jq -en --arg base "$base" '
+    $base | test("\\Ahttps?://(\\[[0-9A-Fa-f:.]+\\]|[A-Za-z0-9._~-]+)(:[0-9]+)?(/[^?#[:space:]\\\\]*)?\\z"; "i")
+  ' >/dev/null 2>&1 || die "TYPESAFE_BASE must be an http(s) URL with a host and no userinfo, query, fragment, or whitespace"
+  while [ "${base%/}" != "$base" ]; do base=${base%/}; done
+  TS_BASE=$base
+}
+
 DISPATCH_PROVIDER=${FM_DISPATCH_PROVIDER:-}
 [ -n "$DISPATCH_PROVIDER" ] || DISPATCH_PROVIDER=$(fmx_env_get FM_DISPATCH_PROVIDER "$FM_HOME/.env")
 DISPATCH_MODEL=${FM_DISPATCH_MODEL:-}
@@ -247,10 +265,12 @@ case "$DISPATCH_PROVIDER" in
   '')
     DISPATCH_PROVIDER=typesafe
     DISPATCH_MODEL=$TS_MODEL
+    select_typesafe_base
     select_key typesafe TYPESAFE_API_KEY TYPESAFE_API_KEY_PRIVATE
     ;;
   typesafe)
     [ -n "$DISPATCH_MODEL" ] || DISPATCH_MODEL=$TS_MODEL
+    select_typesafe_base
     select_key typesafe TYPESAFE_API_KEY TYPESAFE_API_KEY_PRIVATE
     ;;
   openrouter)

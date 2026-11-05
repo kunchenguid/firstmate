@@ -428,7 +428,7 @@ assert_contains "$out" '  note: 1 eligible candidate(s) unranked (kimi)' "clear 
 assert_not_contains "$out" '--effort' "cursor profile without effort emits no --effort"
 argv=$(cat "$LOG/argv")
 assert_not_contains "$argv" "$KEY" "the key never appears on curl argv"
-assert_contains "$argv" 'https://api.typesafe.ai/v1/systemone' "the request uses the fixed typesafe.ai endpoint"
+assert_contains "$argv" 'https://api.typesafe.ai/v1/systemone' "the request defaults to the typesafe.ai endpoint"
 assert_contains "$argv" $'--max-time\n5' "the request uses the fixed five-second timeout"
 assert_contains "$argv" '@/dev/fd/3' "the header is read from a file descriptor"
 assert_equals "Authorization: Bearer $KEY" "$(cat "$LOG/header")" "curl receives the bearer header on fd 3"
@@ -448,7 +448,7 @@ assert_not_contains "$body" 'cursor-grok' "use profiles never leave the machine"
 pass "clear: one rule Choice request, key on the fd header only, spendPriority argmax over every candidate"
 
 # --- TypeSafe base: default, environment/.env precedence, and safe URLs ------
-for base in https://gateway.example/typesafe/ http://localhost:8080/proxy///; do
+for base in https://gateway.example/typesafe/ http://localhost:8080/proxy/// 'https://[::1]:8443/typesafe/'; do
   reset_log
   TYPESAFE_BASE=$base TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
   expect_code 0 "$code" "custom TypeSafe base resolves"
@@ -477,6 +477,7 @@ for base in \
   https://gateway.example/typesafe#fragment \
   https://gateway.example/typesafe# \
   'https://gateway.example/bad path' \
+  $'https://gateway.example/\n' \
   $'https://gateway.example/\npath'; do
   reset_log
   TYPESAFE_BASE=$base TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
@@ -493,6 +494,13 @@ expect_code 2 "$code" "invalid .env base is a configuration error"
 assert_contains "$err" 'TYPESAFE_BASE' "invalid .env base names the setting"
 assert_not_contains "$err" 'password' "invalid base diagnostic does not echo credentials"
 assert_absent "$LOG/argv" "invalid .env base never sends a request"
+reset_log
+run code out err "$BRIEF"
+expect_code 2 "$code" "invalid base is actionable even without a key"
+assert_absent "$LOG/argv" "invalid base without a key never sends a request"
+reset_log
+TYPESAFE_BASE=https://environment.example TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
+assert_equals 'https://environment.example/v1/systemone' "$(grep -E '^https?://' "$LOG/argv")" "valid environment base overrides an invalid .env base"
 rm -f "$HOME_DIR/.env"
 pass "TypeSafe base supports environment and .env overrides and rejects unsafe URLs before sending"
 
@@ -511,7 +519,7 @@ assert_equals '' "$out" "an OpenRouter key alone does not select the provider"
 assert_contains "$err" 'TYPESAFE_API_KEY absent' "unset provider retains the typesafe off gate"
 assert_absent "$LOG/argv" "an OpenRouter key alone sends nothing"
 reset_log
-FM_DISPATCH_PROVIDER=openrouter FM_DISPATCH_MODEL=typesafe/jev-1.13 \
+TYPESAFE_BASE=invalid-but-unused FM_DISPATCH_PROVIDER=openrouter FM_DISPATCH_MODEL=typesafe/jev-1.13 \
   OPENROUTER_API_KEY=$OR_KEY FAKE_CURL_RESPONSE=$OR_RESPONSE run code out err "$BRIEF" --project pager
 expect_code 0 "$code" "OpenRouter clear exits 0"
 assert_contains "$out" '  status: clear' "OpenRouter clear status"
