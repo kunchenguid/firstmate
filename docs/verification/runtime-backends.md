@@ -560,7 +560,7 @@ The composer-classification record below observes the same gate from the other s
 
 ## Droid folder trust and model accounting
 
-Verified 2026-10-31 on macOS arm64 with Droid 1.1.0 and tmux 3.8.
+Verified 2026-11-01 on macOS arm64 with Droid 1.1.0 and tmux 3.8.
 The [Droid adapter reference](../../.agents/skills/harness-adapters/references/harness/droid.md#launch-settings) owns the launch contract; [configuration](../configuration.md) owns task model selection and accounting, and `bin/fm-spawn.sh` owns the executable gate.
 Refresh the live evidence with:
 
@@ -569,20 +569,25 @@ FM_DROID_SPAWN_LIVE_ONLY=1 bash bin/fm-test-run.sh tests/fm-droid-primary-live-e
 ```
 
 ```text
-Droid 1.1.0 live spawn: trust cleared; model=glm-5.3-flash; runtime model override absent
+Droid 1.1.0 live spawn: trust cleared; effective_model=custom:GPT-6.1-Sol-0; runtime model override absent
 ok - Droid live spawn: fresh-worktree folder trust is answered and the default model is observed
+Droid 1.1.0 live spawn: observed=gpt-6.1-sol; effort indicator unverified (no model-row High indicator)
+ok - Droid live spawn: exact native runtime model overrides conflicting project defaults
+Droid 1.1.0 live relaunch: effort indicator unverified (no model-row Medium indicator)
 ok - Droid 1.1.0 spawn live verification complete
 ```
 
-This captured output predates the split into requested and effective model fields and does not establish runtime-sidecar reconciliation.
-The current guard also requires a concrete model observation from the real session sidecar and checks its reconciliation into `effective_model`; that extended live assertion still needs a fresh run.
-The guard first opens a fresh linked worktree without a prompt and verifies the affirmative-selected folder-trust dialog.
-It then drives the real spawn path on a private tmux socket, verifies that the dialog cleared and the brief started processing, and checks that metadata records the configured default without adding a runtime model pin.
-Only the worktree provider is a fixture; the Droid binary, viewport reads, key delivery, and launch settings are real.
-This establishes the tmux path; Herdr and Zellij use their existing viewport-capture interface, while cmux and Orca are refused before endpoint allocation because they lack that capability.
+The refreshed guard establishes default-model observation and reconciliation from the real session sidecar, then an explicit native model launch against a conflicting `auto` project default.
+The requested native ID and the runtime-observed ID both remain `gpt-6.1-sol`.
+It does not establish the native launch's runtime effort: the single model-row capture did not expose the expected effort indicator.
+The generated runtime settings carry the requested `high` effort, and portable regressions verify its exact transport, omission, inheritance, and clearing.
+The bounded same-task relaunch returned success after changing requested effort from `high` to `medium`; its single capture did not establish runtime effort.
+The guard reports each effort-evidence limitation explicitly instead of treating a generated setting as an observed value.
+Only the worktree provider is a fixture; Droid, settings loading, viewport reads, key delivery, and runtime-sidecar model reconciliation are real.
+This establishes the tmux launch path; Herdr and Zellij use their existing viewport-capture interface, while cmux and Orca are refused before endpoint allocation because they lack that capability.
 
-Portable regressions in `tests/fm-spawn-dispatch-profile.test.sh` exercise the trust choice, incomplete and negative selections, failed reads and key delivery, bounded failure, default-model observation, and generation-bound runtime reconciliation that preserves requested selection and registered PR identity.
-`tests/fm-control-relaunch.test.sh` covers changed defaults, explicit model pins, and removal of Droid accounting on a harness switch; `tests/fm-remote-secondmate-relaunch.test.sh` covers the parent publication boundary for refreshed or unknown accounting, harness switches, and preserved PR registration.
+Portable regressions in `tests/fm-spawn-dispatch-profile.test.sh` exercise the trust choice, incomplete and negative selections, failed reads and key delivery, bounded failure, exact native/custom catalog selection, ambiguous or unavailable selection refusal, omitted defaults, and generation-bound runtime reconciliation that preserves requested selection and registered PR identity.
+`tests/fm-control-relaunch.test.sh` covers exact model changes, model/effort clearing, pre-stop catalog refusal, fresh generation accounting, and removal of Droid accounting on a harness switch; `tests/fm-remote-secondmate-relaunch.test.sh` covers the parent publication boundary for refreshed or unknown accounting, harness switches, and preserved PR registration.
 `tests/fm-remote-secondmate-lifecycle-e2e.test.sh` checks that the parent record preserves the model observed by the remote host.
 
 ## Pi seeded-secondmate project trust

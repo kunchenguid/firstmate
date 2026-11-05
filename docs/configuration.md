@@ -1255,8 +1255,12 @@ It also never answers a Kimi folder prompt that announces project MCP servers, p
 Droid's canonical launch likewise requires viewport capture to answer folder trust and confirm brief processing; [its adapter reference](../.agents/skills/harness-adapters/references/harness/droid.md#launch-settings) owns its launch settings.
 Task metadata `model` records the requested selection: an explicit `--model`, a dispatch-profile or secondmate pin, or `default` for an unset selection that follows the user's current default.
 `fm-control.sh` relaunch and recovery consume only this selection; observing a default never creates a model pin.
-Canonical Droid tasks additionally carry `effective_model`, an accounting and review identifier resolved from the launch pin, user/worktree settings, then the installed Droid CLI's authoritative `droid exec --help` catalog default.
-When no concrete identifier is available before launch, it is `unknown-at-spawn`, never the bare `default` selection sentinel.
+Canonical Droid launches accept only exact native or custom registry IDs listed by the installed Droid CLI's authoritative `droid exec --help` catalog; custom backing-model shorthand is refused.
+Exact IDs pass unchanged, even when a custom entry shares a native ID's backing model or several custom entries share one backing model.
+An unavailable catalog or a selection that does not match exactly one catalog entry refuses launch; relaunch checks this before stopping the current worker.
+Omitted or `default` selections emit no model pin, and omitted/default effort emits no reasoning-effort pin, preserving Droid's user and project precedence through the process-only settings overlay.
+Canonical Droid tasks additionally carry `effective_model`, an accounting and review identifier that starts as `unknown-at-spawn` for every generation until a concrete runtime observation arrives.
+A requested pin or configured default is not proof of execution.
 `fm-droid-model.sh` observes the runtime session settings sidecar through SessionStart, PreToolUse, and Stop hooks and reconciles only `effective_model` under the task lock, bound to `spawn_gen` so retired sessions cannot alter a replacement's record.
 An observation arriving while spawn holds that lock is reconciled after launch; no accounting hook waits for spawn's lock.
 Remote launch and relaunch replies mirror both fields from the launching host; switching away from Droid removes `effective_model` from both host and parent records.

@@ -108,7 +108,8 @@ SH
 #!/usr/bin/env bash
 if [ "${1:-}" = exec ] && [ "${2:-}" = --help ]; then
   [ ! -e "${0%/*}/droid-no-catalog" ] || exit 1
-  printf '%s\n' 'Available Models:' '  catalog-model  Catalog Model (default)' '' 'Custom Models:'
+  printf '%s\n' 'Available Models:' '  catalog-model  Catalog Model (default)' '  gpt-5.6-sol  GPT-5.6 Sol' '  gpt-6.1-sol  GPT-6.1 Sol' '' 'Custom Models:' '  custom:GPT-5.6-Sol-0  GPT-5.6 Sol BYOK' '  custom:first  Shared backing' '  custom:second  Shared backing'
+  [ ! -e "${0%/*}/extra-droid-models" ] || cat "${0%/*}/extra-droid-models"
 fi
 SH
   chmod +x "$fakebin/droid"
@@ -1549,7 +1550,7 @@ test_pi_signed_persistent_secondmate_uses_pi_extensions_and_identity() {
   pass "pi-signed is a distinct persistent secondmate runtime with shared Pi supervision semantics"
 }
 
-test_droid_threads_custom_model_and_dynamic_effort_through_settings() {
+test_droid_preserves_native_model_and_dynamic_effort_through_settings() {
   local rec id out status launch settings turnend
   id=profile-droid-z20
   rec=$(make_spawn_case profile-droid droid "$id")
@@ -1568,40 +1569,91 @@ test_droid_threads_custom_model_and_dynamic_effort_through_settings() {
   turnend="$(cd "$HOME_DIR/state" && pwd -P)/$id.turn-ended"
   assert_contains "$launch" "droid --settings '$settings' --auto high" \
     "droid launch did not use its process-only settings merge"
-  jq -e '.sessionDefaultSettings == {"model":"custom:GPT-5.6-Sol-0","reasoningEffort":"dynamic"}' "$settings" >/dev/null \
-    || fail "droid settings did not map the custom model id and retain dynamic effort"
+  jq -e '.sessionDefaultSettings == {"model":"gpt-5.6-sol","reasoningEffort":"dynamic"}' "$settings" >/dev/null \
+    || fail "droid settings changed an exact native model id or lost dynamic effort"
   jq -e --arg turnend "$turnend" \
     '.hooks.Stop[0].hooks[0] == {"type":"command","command":("touch '\''" + $turnend + "'\''")}' "$settings" >/dev/null \
     || fail "droid settings lost the Stop turn-end hook"
-  pass "droid receives custom model and dynamic effort through settings alongside its Stop hook"
+  pass "droid preserves native model identity and dynamic effort alongside its Stop hook"
+}
+
+test_droid_exact_model_ids_and_selection_refusals() {
+  local rec id selection scenario out status settings
+  for scenario in native custom-first custom-second unique-backing duplicate-backing unsupported unavailable duplicate-id; do
+    id="droid-exact-$scenario"
+    rec=$(make_spawn_case "$id" droid "$id")
+    read_case_record "$rec"
+    mkdir -p "$HOME_DIR/user-home/.factory" "$WT_DIR/.factory"
+    printf '%s\n' '{"sessionDefaultSettings":{"model":"custom:second","reasoningEffort":"low"},"customModels":[{"id":"custom:native-collision","model":"gpt-6.1-sol"},{"id":"custom:first","model":"shared-backing"},{"id":"custom:second","model":"shared-backing"},{"id":"custom:redirect","model":"custom:first"},{"id":"custom:unique","model":"unique-backing"}],"secret":"must-not-copy"}' \
+      > "$HOME_DIR/user-home/.factory/settings.json"
+    cp "$HOME_DIR/user-home/.factory/settings.json" "$CASE_DIR/user-before.json"
+    printf '.factory/\n' >> "$PROJ_DIR/.git/info/exclude"
+    printf '%s\n' '{"sessionDefaultSettings":{"model":"custom:first","reasoningEffort":"medium"}}' > "$WT_DIR/.factory/settings.local.json"
+    cp "$WT_DIR/.factory/settings.local.json" "$CASE_DIR/project-before.json"
+    selection=gpt-6.1-sol
+    case "$scenario" in
+      custom-first) selection=custom:first ;;
+      custom-second) selection=custom:second ;;
+      unique-backing) selection=unique-backing ;;
+      duplicate-backing) selection=shared-backing ;;
+      unsupported) selection=unlisted-model ;;
+      unavailable) touch "$FAKEBIN_DIR/droid-no-catalog" ;;
+      duplicate-id) printf '%s\n' '  gpt-6.1-sol  Duplicate ID' >> "$FAKEBIN_DIR/extra-droid-models" ;;
+    esac
+    out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+      "$id" "$PROJ_DIR" --harness droid --model "$selection" --effort high)
+    status=$?
+    case "$scenario" in
+      native|custom-first|custom-second)
+        expect_code 0 "$status" "exact Droid ID failed: $scenario"$'\n'"$out"
+        settings="$HOME_DIR/state/$id.droid-settings.json"
+        jq -e --arg model "$selection" '.sessionDefaultSettings == {model:$model,reasoningEffort:"high"} and (keys == ["hooks","sessionDefaultSettings"])' "$settings" >/dev/null || fail 'Droid changed exact ID, effort, or unrelated settings'
+        assert_meta_profile "$HOME_DIR/state/$id.meta" droid "$selection" high
+        assert_equals unknown-at-spawn "$(sed -n 's/^effective_model=//p' "$HOME_DIR/state/$id.meta")" 'Droid pin claimed execution without observation'
+        assert_not_contains "$(cat "$settings" "$HOME_DIR/state/$id.meta")" must-not-copy 'Droid copied unrelated settings'
+        ;;
+      *)
+        [ "$status" -ne 0 ] || fail "Droid should refuse $scenario"
+        assert_contains "$out" 'Droid model' 'missing actionable Droid selection error'
+        assert_contains "$out" 'droid exec --help' 'Droid refusal omitted catalog remedy'
+        [ ! -s "$LAUNCH_LOG" ] || fail 'invalid Droid ID allocated an endpoint'
+        [ ! -e "$HOME_DIR/state/$id.meta" ] || fail 'invalid Droid ID published metadata'
+        [ ! -e "$HOME_DIR/state/$id.droid-settings.json" ] || fail 'invalid Droid ID published settings'
+        ;;
+    esac
+    cmp -s "$CASE_DIR/user-before.json" "$HOME_DIR/user-home/.factory/settings.json" || fail 'Droid selection changed user defaults'
+    cmp -s "$CASE_DIR/project-before.json" "$WT_DIR/.factory/settings.local.json" || fail 'Droid selection changed project defaults'
+  done
+  pass 'Droid preserves exact native/custom IDs, refuses shorthand and ambiguous/unavailable catalog selections, and retains exact effort'
 }
 
 test_droid_observes_default_model_without_pinning_it() {
-  local rec id out status scenario expected
-  for scenario in omitted sentinel local project absent unknown invalid; do
+  local rec id out status scenario
+  for scenario in omitted sentinel local project absent unknown; do
     id="droid-default-$scenario"
     rec=$(make_spawn_case "$id" droid "$id")
     read_case_record "$rec"
     mkdir -p "$HOME_DIR/user-home/.factory" "$WT_DIR/.factory"
     printf '%s\n' '{"sessionDefaultSettings":{"model":"glm-5.3-flash"},"secret":"not-for-task-state"}' \
       > "$HOME_DIR/user-home/.factory/settings.json"
-    expected=glm-5.3-flash
+
     case "$scenario" in
       local)
         printf '%s\n' '{"sessionDefaultSettings":{"model":"custom:local-default"}}' \
           > "$HOME_DIR/user-home/.factory/settings.local.json"
-        expected=custom:local-default ;;
+        ;;
+
       project)
         printf '.factory/settings.local.json\n' >> "$PROJ_DIR/.git/info/exclude"
         printf '%s\n' '{"sessionDefaultSettings":{"model":"project-default"}}' \
           > "$WT_DIR/.factory/settings.local.json"
-        expected=project-default ;;
-      absent) rm "$HOME_DIR/user-home/.factory/settings.json"; expected=catalog-model ;;
+        ;;
+      absent) rm "$HOME_DIR/user-home/.factory/settings.json" ;;
       unknown)
         rm "$HOME_DIR/user-home/.factory/settings.json"
         touch "$FAKEBIN_DIR/droid-no-catalog"
-        expected=unknown-at-spawn ;;
-      invalid) printf '%s\n' '{bad json' > "$HOME_DIR/user-home/.factory/settings.json" ;;
+        ;;
+
     esac
     if [ "$scenario" = sentinel ]; then
       out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
@@ -1611,22 +1663,16 @@ test_droid_observes_default_model_without_pinning_it() {
         "$id" "$PROJ_DIR" --harness droid)
     fi
     status=$?
-    if [ "$scenario" = invalid ]; then
-      [ "$status" -ne 0 ] || fail "unreadable Droid model defaults should refuse launch"
-      assert_contains "$out" 'cannot read Droid model default' "missing default-settings diagnostic"
-      [ ! -s "$LAUNCH_LOG" ] || fail "unreadable model defaults launched Droid"
-      continue
-    fi
     expect_code 0 "$status" "Droid default observation failed: $scenario"$'\n'"$out"
     assert_meta_profile "$HOME_DIR/state/$id.meta" droid default default
-    assert_equals "$expected" "$(sed -n 's/^effective_model=//p' "$HOME_DIR/state/$id.meta")" 'Droid accounting model mismatch'
-    jq -e '(.sessionDefaultSettings // {}) | has("model") | not' \
+    assert_equals unknown-at-spawn "$(sed -n 's/^effective_model=//p' "$HOME_DIR/state/$id.meta")" 'Droid accounting model mismatch'
+    jq -e 'has("sessionDefaultSettings") | not' \
       "$HOME_DIR/state/$id.droid-settings.json" >/dev/null \
       || fail "observing the Droid default must not pin it"
     assert_not_contains "$(cat "$HOME_DIR/state/$id.meta" "$HOME_DIR/state/$id.droid-settings.json")" \
       'not-for-task-state' 'Droid model observation copied unrelated settings'
   done
-  pass "Droid records configured defaults and local overrides without changing model selection"
+  pass "Droid preserves default selection and waits for runtime evidence instead of predicting configured defaults"
 }
 
 test_droid_runtime_model_reconciliation() {
@@ -3545,7 +3591,8 @@ test_pi_tui_mode_probe_is_safe_for_old_and_new_pi
 test_pi_signed_threads_shared_pi_profile_and_preserves_identity
 test_pi_signed_missing_binary_refuses_before_endpoint_or_metadata
 test_pi_signed_persistent_secondmate_uses_pi_extensions_and_identity
-test_droid_threads_custom_model_and_dynamic_effort_through_settings
+test_droid_preserves_native_model_and_dynamic_effort_through_settings
+test_droid_exact_model_ids_and_selection_refusals
 test_droid_observes_default_model_without_pinning_it
 test_droid_runtime_model_reconciliation
 test_droid_trust_gate

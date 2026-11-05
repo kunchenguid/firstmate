@@ -129,7 +129,7 @@ pass "a successful remote relaunch republishes the parent's harness, model, and 
 
 reset_meta
 printf 'effective_model=previous-observation\n' >> "$HOME_DIR/state/ios.meta"
-for requested_model in default pinned-model; do
+for requested_model in default gpt-6.1-sol custom:first custom:second; do
   OUT=$(FM_FAKE_EFFECTIVE_MODEL="$requested_model-runtime-model" run_relaunch ios droid "$requested_model" high); RC=$?
   expect_code 0 "$RC" "Droid remote relaunch should refresh accounting"$'\n'"$OUT"
   assert_equals "$requested_model" "$(sed -n 's/^model=//p' "$HOME_DIR/state/ios.meta")" \

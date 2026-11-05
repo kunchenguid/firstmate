@@ -186,6 +186,15 @@ SH
 exit 0
 SH
   chmod +x "$fb/sleep"
+  cat > "$fb/droid" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = exec ] && [ "${2:-}" = --help ]; then
+  [ ! -e "$FM_FAKE_DIR/no-droid-catalog" ] || exit 1
+  printf '%s\n' 'Available Models:' '  pinned-model  Pinned Model' '  gpt-6.1-sol  GPT-6.1 Sol' \
+    'Custom Models:' '  custom:first  First' '  custom:second  Second'
+fi
+SH
+  chmod +x "$fb/droid"
 }
 
 # new_case <name> [id] -> echoes a case dir with a live claude ship task.
@@ -556,14 +565,18 @@ test_relaunch_serializes_concurrent_durable_metadata_publication() {
     FM_FAKE_TRACE_RELEASE="$launch_release" \
     run_control "$dir" rl28 relaunch --note "continue after publication" > "$dir/control.out" &
   control_pid=$!
-  while [ ! -e "$prepare" ] && [ "$i" -lt 500 ]; do
+  fm_test_track_child "$control_pid"
+  # This marker follows the complete relaunch preflight, not just a fork.
+  # Give that startup path headroom on loaded hosts while retaining the cadence.
+  while [ ! -e "$prepare" ] && [ "$i" -lt 3000 ]; do
+
     /bin/sleep 0.01
     i=$((i + 1))
   done
   [ -e "$prepare" ] || {
     kill "$control_pid" 2>/dev/null || true
     wait "$control_pid" 2>/dev/null || true
-    fail "relaunch did not reach trace delivery"
+    fail "relaunch did not reach trace delivery"$'\n'"$(cat "$dir/control.out")"
   }
   env PATH="$dir/fakebin:$PATH" FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" \
     FM_REAL_MV="$(command -v mv)" \
@@ -965,15 +978,14 @@ test_droid_relaunch_follows_requested_selection() {
     printf '%s\n' '{"sessionDefaultSettings":{"model":"new-default"}}' > "$dir/user-home/.factory/settings.json"
     out=$(run_control "$dir" rl-droid-selection relaunch --note "continue after default change"); rc=$?
     expect_code 0 "$rc" "Droid selection relaunch failed"$'\n'"$out"
-    expected=$selection
-    [ "$selection" != default ] || expected='new-default'
+    expected=unknown-at-spawn
     [ "$(meta_field "$dir" rl-droid-selection model)" = "$selection" ] || fail 'relaunch changed requested selection'
     [ "$(meta_field "$dir" rl-droid-selection effective_model)" = "$expected" ] || fail 'relaunch retained stale effective-model accounting'
     settings="$dir/home/state/rl-droid-selection.droid-settings.json"
     if [ "$selection" = default ]; then
       jq -e '(.sessionDefaultSettings // {}) | has("model") | not' "$settings" >/dev/null || fail 'default relaunch pinned a model'
     else
-      jq -e --arg model "$selection" '.sessionDefaultSettings.model == $model' "$settings" >/dev/null || fail 'relaunch lost explicit pin'
+      jq -e --arg model "$selection" '.sessionDefaultSettings == {model:$model}' "$settings" >/dev/null || fail 'relaunch lost explicit pin or added an effort override'
     fi
   done
   printf codex > "$dir/fake/becomes"
@@ -981,6 +993,64 @@ test_droid_relaunch_follows_requested_selection() {
   expect_code 0 "$rc" "switching away from Droid failed"$'\n'"$out"
   [ -z "$(meta_field "$dir" rl-droid-selection effective_model)" ] || fail 'harness switch preserved retired Droid accounting'
   pass 'fm-control relaunch: Droid follows new defaults while preserving explicit model pins'
+}
+
+test_droid_relaunch_changes_and_clears_pins() {
+  local dir out rc meta settings selection gen previous_gen expected_effort
+  local -a effort_args
+  dir=$(new_case droid-change rl-droid-change)
+  add_ship_task "$dir" rl-droid-change droid
+  printf droid > "$dir/fake/command"
+  printf droid > "$dir/fake/becomes"
+  meta="$dir/home/state/rl-droid-change.meta"
+  settings="$dir/home/state/rl-droid-change.droid-settings.json"
+  printf 'model=custom:first\neffort=high\neffective_model=custom:first\nspawn_gen=retired\n' >> "$meta"
+  mkdir -p "$dir/user-home/.factory" "$dir/wt/.factory"
+  printf '%s\n' '{"sessionDefaultSettings":{"model":"custom:second","reasoningEffort":"low"},"customModels":[{"id":"custom:first","model":"gpt-6.1-sol"},{"id":"custom:second","model":"gpt-6.1-sol"}]}' \
+    > "$dir/user-home/.factory/settings.json"
+  printf '%s\n' '{"sessionDefaultSettings":{"model":"custom:first","reasoningEffort":"medium"}}' > "$dir/wt/.factory/settings.local.json"
+  printf '.factory/\n' >> "$dir/proj/.git/info/exclude"
+  previous_gen=retired
+  for selection in gpt-6.1-sol custom:second default; do
+    effort_args=()
+    expected_effort=high
+    case "$selection" in
+      gpt-6.1-sol) effort_args=(--effort high) ;;
+      default) effort_args=(--effort default); expected_effort=default ;;
+    esac
+    out=$(run_control "$dir" rl-droid-change relaunch --model "$selection" "${effort_args[@]}" --note 'change selection'); rc=$?
+    expect_code 0 "$rc" "Droid model change failed"$'\n'"$out"
+    [ "$(meta_field "$dir" rl-droid-change model)" = "$selection" ] || fail 'Droid relaunch rewrote requested model'
+    [ "$(meta_field "$dir" rl-droid-change effort)" = "$expected_effort" ] || fail 'Droid relaunch lost effort selection'
+    [ "$(meta_field "$dir" rl-droid-change effective_model)" = unknown-at-spawn ] || fail 'Droid relaunch asserted unobserved execution'
+    gen=$(meta_field "$dir" rl-droid-change spawn_gen)
+    [ -n "$gen" ] && [ "$gen" != "$previous_gen" ] || fail 'Droid relaunch reused a runtime generation'
+    previous_gen=$gen
+    if [ "$selection" = default ]; then
+      jq -e 'has("sessionDefaultSettings") | not' "$settings" >/dev/null || fail 'Droid relaunch failed to clear model pin'
+    else
+      jq -e --arg model "$selection" '.sessionDefaultSettings == {model:$model,reasoningEffort:"high"}' "$settings" >/dev/null || fail 'Droid relaunch changed exact model identity'
+    fi
+  done
+  pass 'fm-control relaunch: Droid changes exact native/custom pins and clears model/effort with fresh generations'
+}
+
+test_droid_relaunch_refuses_unavailable_selection_before_stop() {
+  local dir out rc scenario
+  for scenario in unsupported backing-shorthand catalog-unavailable; do
+    dir=$(new_case "droid-refuse-$scenario" rl-droid-refuse)
+    add_ship_task "$dir" rl-droid-refuse droid
+    printf droid > "$dir/fake/command"
+    [ "$scenario" != catalog-unavailable ] || touch "$dir/fake/no-droid-catalog"
+    cp "$dir/home/state/rl-droid-refuse.meta" "$dir/prior.meta"
+    out=$(run_control "$dir" rl-droid-refuse relaunch --model "$scenario" --note 'must refuse'); rc=$?
+    expect_code 1 "$rc" 'Droid unavailable selection should refuse'
+    assert_contains "$out" 'Droid model' 'Droid refusal should name the selection failure'
+    [ "$(cat "$dir/fake/command")" = droid ] || fail 'invalid Droid selection stopped the worker'
+    cmp -s "$dir/prior.meta" "$dir/home/state/rl-droid-refuse.meta" || fail 'refused Droid selection changed metadata'
+    [ ! -s "$dir/fake/literal" ] || fail 'refused Droid selection sent lifecycle text'
+  done
+  pass 'fm-control relaunch: unsupported Droid selection and unavailable catalog refuse before stopping the worker'
 }
 
 test_relaunch_refuses_invalid_explicit_effort_before_stop() {
@@ -3244,6 +3314,8 @@ test_prefixed_recorded_harness_requires_explicit_replacement
 test_same_harness_relaunch_keeps_the_profile_axes
 test_same_droid_relaunch_preserves_dynamic_effort
 test_droid_relaunch_follows_requested_selection
+test_droid_relaunch_changes_and_clears_pins
+test_droid_relaunch_refuses_unavailable_selection_before_stop
 test_relaunch_refuses_invalid_explicit_effort_before_stop
 
 test_native_ultra_relaunch_preserves_profile_and_rejects_before_stop
