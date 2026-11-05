@@ -364,6 +364,25 @@ test_composer_footer_zone_refuses_rather_than_allows() {
   pass "fm_composer_classify_screen: the footer zone only ever refuses, never allows"
 }
 
+# Narrow guards supplement the popup delivery fix without duplicating its captures.
+test_claude_slash_popup_edge_guards() {
+  local FM_COMPOSER_HARNESS=claude
+  local rule='────────────────────────' caps locale screen out harness
+  for locale in "${LC_ALL:-${LANG:-C}}" C; do
+    for caps in "$CAPS_STYLED" "$CAPS_STYLED_NOID" "$CAPS_PLAIN"; do
+      screen="$rule"$'\n❯ /exit\n'"$rule"$'\n❯ /exit!  real draft'
+      out=$(LC_ALL="$locale" fm_composer_extract_selected_content "$caps" "$screen")
+      [ "$out" = '/exit! real draft' ] || fail "an invalid slash token must remain a draft, got '$out'"
+      screen="$rule"$'\n❯ /exit\n'"$rule"$'\n❯ /exit    Exit the CLI'
+      for harness in '' codex kiro; do
+        out=$(LC_ALL="$locale" FM_COMPOSER_HARNESS=$harness fm_composer_extract_selected_content "$caps" "$screen")
+        [ "$out" = '/exit Exit the CLI' ] || fail "harness '${harness:-none}' borrowed Claude popup recognition, got '$out'"
+      done
+    done
+  done
+  pass "Claude popup guards preserve invalid slash drafts and reject unidentified or non-Claude callers"
+}
+
 # Claude Code 2.1.291 marks the selected row of its slash-command popup with the
 # same `❯` its composer uses, where 2.1.289 drew that row unmarked. The popup
 # renders below the composer's closing rule, so the marked row became a second
@@ -375,6 +394,7 @@ test_composer_footer_zone_refuses_rather_than_allows() {
 # and `exit-typed-with-notice` carries the notification row Claude draws between
 # the rule and the popup when it runs inside another Claude session.
 test_claude_slash_popup_marked_row_is_not_a_second_composer() {
+  local FM_COMPOSER_HARNESS=claude
   local dir=$ROOT/tests/captures/claude-2.1.291-slash-popup pair name want screen out
   local claude_idle
   claude_idle=$(printf 'claude\tidle')
@@ -401,6 +421,7 @@ test_claude_slash_popup_marked_row_is_not_a_second_composer() {
 }
 
 test_claude_slash_popup_demotion_only_ever_refuses() {
+  local FM_COMPOSER_HARNESS=claude
   # The popup demotion falls back to the envelope above the marked row, so it
   # may only fire when that envelope holds typed `/` text and the row has the
   # popup shape (`/name` or a truncated `…name`, a gap, then a description).
@@ -1688,6 +1709,7 @@ test_matrix_claude_arrow_statusline_footer
 test_composer_footer_demotion_needs_a_proven_pair
 test_composer_footer_zone_is_shape_independent
 test_composer_footer_zone_refuses_rather_than_allows
+test_claude_slash_popup_edge_guards
 test_claude_slash_popup_marked_row_is_not_a_second_composer
 test_claude_slash_popup_demotion_only_ever_refuses
 test_matrix_codex_dim_hint_row

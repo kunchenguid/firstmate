@@ -117,7 +117,7 @@
 # it stale, and a row leading with the SAME glyph the envelope was proven by
 # (`❯ my typed draft`) is a live composer that keeps winning. The one exception
 # is the selected row of Claude 2.1.291's slash-command popup, which carries
-# that glyph too (_fm_composer_bare_is_popup_selection). Where a shape
+# that glyph too (_fm_composer_claude_popup_selection). Where a shape
 # cannot demonstrate which it is, the refusal is the answer. The zone is
 # bounded further by a blank row, and an envelope that closed over no glyph row
 # (codex's `permissions: YOLO mode` startup banner) proves nothing and demotes
@@ -1939,8 +1939,10 @@ _fm_composer_locate_footer_zone() {  # <plain>
     && [ "$FM_COMPOSER_SCAN_BARE_ROW" -le "$FM_COMPOSER_FOOTER_LAST" ]
 }
 
-# _fm_composer_bare_is_popup_selection: 0 when bare agent-glyph <row> is the
-# selected row of a slash-command suggestion popup, not a composer of its own.
+# _fm_composer_claude_popup_selection: 0 when bare agent-glyph <row> is the
+# selected row of a Claude slash-command popup, not a composer of its own.
+# Only callers identifying Claude through FM_COMPOSER_HARNESS may use this
+# rendering exception; other harnesses and unidentified panes keep their row.
 # Claude Code 2.1.291 marks the selected suggestion with the same `❯` its
 # composer uses (`  ❯ /exit    Exit the CLI`, where 2.1.289 drew it unmarked),
 # so that row became the bottom-most bare candidate and the whole popup was
@@ -1958,8 +1960,9 @@ _fm_composer_locate_footer_zone() {  # <plain>
 #   - the row opens `/` (or `…`, a name truncated to its column) and carries a
 #     gap of two or more spaces before its description. A numbered-choice
 #     dialog row (`❯ 1. Yes`) has neither, and stays a bare candidate.
-_fm_composer_bare_is_popup_selection() {  # <plain-screen> <screen> <styled> <row>
+_fm_composer_claude_popup_selection() {  # <plain-screen> <screen> <styled> <row>
   local plain=$1 screen=$2 styled=$3 row=$4 trimmed glyph='' rest
+  [ "${FM_COMPOSER_HARNESS:-}" = claude ] || return 1
   [ "$row" -ge 0 ] && [ "$FM_COMPOSER_FOOTER_GLYPH" -ge 0 ] \
     && [ "$row" -gt "$FM_COMPOSER_FOOTER_AFTER" ] || return 1
   trimmed=$(_fm_composer_screen_row "$FM_COMPOSER_FOOTER_GLYPH" "$plain")
@@ -1975,7 +1978,13 @@ _fm_composer_bare_is_popup_selection() {  # <plain-screen> <screen> <styled> <ro
   fm_composer_leading_agent_glyph_var glyph "$trimmed" || return 1
   rest=${trimmed#*"$glyph"}
   fm_composer_normalize_trim_var rest
-  [[ $rest =~ ^(/|…)[^[:space:]].*[[:space:]]{2,}[^[:space:]] ]]
+  # A slash token cannot contain punctuation such as `!`: description-like
+  # spacing in `/exit!  real draft` must not hide that genuine draft.
+  if [[ $rest == /* ]]; then
+    [[ $rest =~ ^/[A-Za-z0-9][A-Za-z0-9:_.-]*[[:space:]]{2,}[^[:space:]] ]]
+  else
+    [[ $rest =~ ^…[^[:space:]].*[[:space:]]{2,}[^[:space:]] ]]
+  fi
 }
 
 # _fm_composer_bare_rule_sandwich: 0 when bare agent-glyph <row> sits in its
@@ -2021,7 +2030,7 @@ _fm_composer_select_cursorless() {  # <plain-screen> <screen> <styled>
   # envelope (box, left bar) stays selected on its own. The selected row of the
   # slash-command popup under that envelope is demoted the same way.
   bare=$FM_COMPOSER_SCAN_BARE_ROW
-  if [ "$footer" = 1 ] || _fm_composer_bare_is_popup_selection "$plain" "$screen" "$styled" "$bare"; then
+  if [ "$footer" = 1 ] || _fm_composer_claude_popup_selection "$plain" "$screen" "$styled" "$bare"; then
     trimmed=$(_fm_composer_screen_row "$FM_COMPOSER_FOOTER_GLYPH" "$plain")
     fm_composer_normalize_trim_var trimmed
     if fm_composer_leading_agent_glyph_var glyph "$trimmed"; then
