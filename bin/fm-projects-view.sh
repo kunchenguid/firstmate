@@ -42,8 +42,10 @@
 #          project_hint and repo its home summary carries, and one task id in a
 #          home lands in one group (needs, then moving, then next, then done).
 #          `homes` lists every registered secondmate with how its rows were
-#          read (fresh, cached with an age, partial, or not read with the
-#          reason) and how many rows its summary omitted, so missing or old
+#          read (fresh, cached, partial, or not read with the reason), the
+#          absolute time `read_at` its rows were read (stable across passes
+#          over the same cache; the page shows the age live against its own
+#          clock), and how many rows its summary omitted, so missing or old
 #          records never read as completed work.
 #          The snapshot runs in one of two scopes. A full snapshot
 #          (`fm-fleet-snapshot.sh --json`) fetches every remote secondmate's
@@ -62,9 +64,8 @@
 #          (.agents/skills/bearings/assets/projects-template.html) at the stable
 #          path $FM_HOME/.lavish/projects.html with the same one-slot injection
 #          and `<` escaping as the fleet board. The write is skipped when the
-#          model, apart from its generated time and each cached home's age,
-#          equals the one already published, so an open page only reloads on a
-#          real change. Prints
+#          model, apart from its generated time, equals the one already
+#          published, so an open page only reloads on a real change. Prints
 #          `projects: <path>` and `unchanged` or `written`.
 # serve    Build, then establish the page's Lavish session, bind its answer
 #          source, and arm its listener through bin/fm-lavish-board-lib.sh (the
@@ -354,7 +355,8 @@ build_model() {  # <snapshot.json> <archive.json> <published-model.json>
                   elif (.freshness.status // "") == "cached" then "cached"
                   else "fresh" end),
           reason:(.current.reason // null),
-          age_seconds:(.freshness.age_seconds // null),
+          read_at:(if (.freshness.age_seconds // null) != null
+                   then (($snap.generated | fromdateiso8601) - .freshness.age_seconds) | todate else null end),
           omitted:([(.omitted // [])[] | (.count // 0)] | add // 0)}];
 
     (main_items) as $main
@@ -493,8 +495,8 @@ publish_page() {  # [<snapshot.json>]
   # The template digest rides in the model so an updated template republishes
   # an otherwise unchanged view.
   digest=$(template_digest) || { rm -f -- "$model"; fail "cannot fingerprint the template"; }
-  new=$(jq -cS --arg t "$digest" 'del(.generated) | .homes |= map(del(.age_seconds)) | . + {template:$t}' "$model")
-  old=$(published_model "$page" | jq -cS 'del(.generated) | .homes |= map(del(.age_seconds))' 2>/dev/null || true)
+  new=$(jq -cS --arg t "$digest" 'del(.generated) + {template:$t}' "$model")
+  old=$(published_model "$page" | jq -cS 'del(.generated)' 2>/dev/null || true)
   if [ "${FORCE_WRITE:-0}" != 1 ] && [ -n "$old" ] && [ "$old" = "$new" ]; then
     rm -f -- "$model"
     printf 'projects: %s\nunchanged\n' "$page"

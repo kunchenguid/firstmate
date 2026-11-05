@@ -121,13 +121,19 @@ test_withheld_actions_and_unread_homes_render() {
        omitted: [{surface: "queued", count: 3}]}]}
   }' > "$snap"
   FM_HOME="$home" bash "$VIEW" build --snapshot "$snap" >/dev/null || fail "build failed"
-  out=$(node "$HARNESS" "$page" store)
+  out=$(node "$HARNESS" "$page" store "$NOW")
   printf '%s' "$out" | jq -e '
     .error == ""
     and .notices == ["mate-pc not read: remote ledger unreachable", "mate-mac last read 2 h ago · 3 not shown"]
     and .addable == ["Store launch"]
   ' >/dev/null || fail "notices or withheld actions rendered wrong: $out"
-  pass "an unread or old second mate is shown as such, and a withheld add key hides its button"
+  out=$(node "$HARNESS" "$page" store 2026-11-05T17:00:00Z)
+  printf '%s' "$out" | jq -e '
+    .error == ""
+    and .notices[1] == "mate-mac last read 7 h ago · 3 not shown"
+    and .updated == "Updated 5 h ago"
+  ' >/dev/null || fail "the cached age is not read live from the page clock: $out"
+  pass "an unread or old second mate is shown as such with its age read live, and a withheld add key hides its button"
 }
 
 fm_test_run \

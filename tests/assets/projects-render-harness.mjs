@@ -3,9 +3,10 @@
 // sent, so page behavior is asserted through the real template rather than by
 // reading its source.
 //
-// Usage: node projects-render-harness.mjs <built-page.html> <project-id>
+// Usage: node projects-render-harness.mjs <built-page.html> <project-id> [<now-iso>]
+// `now-iso` pins the page's clock (Date.now) so ages render deterministically.
 // Prints one JSON document:
-//   { error, totals:[text], cards:[{name,counter,now}], tray,
+//   { error, updated, totals:[text], cards:[{name,counter,now}], tray, notices:[text],
 //     detail:{name,counter,groups:[title],calls:[title],fixable:[title]},
 //     reloaded:{name,cards}, reloadedAfterBack:{cards},
 //     sent:[{question,selection,note}] }
@@ -17,6 +18,10 @@ import { readFileSync } from "node:fs";
 
 const html = readFileSync(process.argv[2], "utf8");
 const projectId = process.argv[3];
+if (process.argv[4]) {
+  const fixedNow = Date.parse(process.argv[4]);
+  Date.now = () => fixedNow;
+}
 
 class Node {
   constructor(tag) {
@@ -130,7 +135,7 @@ function typeAndSend(container, words) {
   one(container, "send").fire("click");
 }
 
-const out = { error: "", totals: [], cards: [], tray: null, notices: [], addable: [], detail: null, reloaded: null, reloadedAfterBack: null, sent };
+const out = { error: "", updated: "", totals: [], cards: [], tray: null, notices: [], addable: [], detail: null, reloaded: null, reloadedAfterBack: null, sent };
 Object.defineProperty(globalThis.window, "sessionStorage", storageDenied);
 Object.defineProperty(globalThis.window, "localStorage", storageDenied);
 // Load the page again as a fresh document at a URL without the hash, as the
@@ -146,6 +151,7 @@ try {
   const main = byId["pv-main"];
   const err = one(main, "err");
   if (err) throw new Error(err.textContent);
+  out.updated = byId["pv-updated"].textContent;
   out.totals = all(main, hasClass("total")).map((t) => t.textContent);
   out.cards = all(main, hasClass("card")).map((c) => ({
     name: one(c, "card__name").textContent,

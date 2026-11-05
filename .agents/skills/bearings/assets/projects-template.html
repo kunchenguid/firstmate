@@ -253,6 +253,21 @@ __FM_PROJECTS_VIEW_DATA__
     if (s < 86400) return Math.round(s / 3600) + " h";
     return Math.round(s / 86400) + " d";
   }
+  function noticeText(h) {
+    var text = "", read = Date.parse(h.read_at || "");
+    if (h.status === "unread") text = h.id + " not read" + (h.reason ? ": " + h.reason : "");
+    else if (h.status === "partial") text = h.id + " partly read" + (h.reason ? ": " + h.reason : "");
+    else if (h.status === "cached") {
+      text = h.id + " last read" + (isNaN(read) ? "" : " " + span(Math.max(0, (Date.now() - read) / 1000)) + " ago");
+    }
+    if (h.omitted > 0) text += (text ? " · " : h.id + " ") + h.omitted + " not shown";
+    return text;
+  }
+  var clocks = [];
+  function tickClocks() {
+    updated.textContent = ago(data.generated);
+    clocks.forEach(function (c) { c.node.textContent = noticeText(c.home); });
+  }
   function when(day) {
     if (!day) return "";
     var today = (data.generated || "").slice(0, 10);
@@ -393,13 +408,13 @@ __FM_PROJECTS_VIEW_DATA__
     main.appendChild(totals);
 
     /* a second mate whose rows are missing or old is said so, never shown as done */
+    clocks = [];
     (data.homes || []).forEach(function (h) {
-      var text = "";
-      if (h.status === "unread") text = h.id + " not read" + (h.reason ? ": " + h.reason : "");
-      else if (h.status === "partial") text = h.id + " partly read" + (h.reason ? ": " + h.reason : "");
-      else if (h.status === "cached") text = h.id + " last read " + span(h.age_seconds || 0) + " ago";
-      if (h.omitted > 0) text += (text ? " · " : h.id + " ") + h.omitted + " not shown";
-      if (text) main.appendChild(el("div", "notice", text));
+      var text = noticeText(h), node;
+      if (!text) return;
+      node = el("div", "notice", text);
+      clocks.push({node: node, home: h});
+      main.appendChild(node);
     });
 
     var grid = el("div", "grid");
@@ -619,8 +634,8 @@ __FM_PROJECTS_VIEW_DATA__
   try {
     data = JSON.parse(document.getElementById("projects-data").textContent);
     if (!data || data.schema !== "fm-projects-view.v1") throw new Error("schema");
-    updated.textContent = ago(data.generated);
-    setInterval(function () { updated.textContent = ago(data.generated); }, 30000);
+    tickClocks();
+    setInterval(tickClocks, 30000);
     window.addEventListener("hashchange", function () {
       var m = /^#p=([a-z0-9-]+)$/.exec(window.location.hash || "");
       remember(m ? m[1] : null);
