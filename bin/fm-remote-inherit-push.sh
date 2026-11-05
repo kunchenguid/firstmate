@@ -14,7 +14,10 @@
 # their output is replayed in allowlist order.
 # The caller holds the sender transaction lock. Before sending, read the
 # receiver's committed high-water mark and durably advance a lost or restored
-# sender counter beyond it. An unavailable or malformed query fails closed.
+# sender counter beyond it. For older receivers, a query usage refusal (exit 2)
+# uses floor zero and leaves write-time generation checks intact; counter
+# recovery requires a receiver that supports the query. Other query failures
+# and malformed replies fail closed.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

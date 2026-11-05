@@ -660,6 +660,11 @@ Locked startup convergence and `bin/fm-config-push.sh` transfer only the declare
 The receiver accepts only the items its own remote Firstmate code root declares, so a remote secondmate must run code at least as new as its primary before the primary pushes newly declared inherited material it actually has: an older receiver refuses a present `config/t3code-instances`, and the remaining items of that push are skipped.
 When the primary does not have a newly declared item, the older receiver's refusal of its `absent` record counts as `unchanged` and the push continues, so a home that never configures `config/t3code-instances` converges as before.
 That item still costs one extra `absent` call on every inheritance push to a remote secondmate, on every home, including one that never selects `config/backend=t3code`: the remote job worker runs one home's commands one after another, and the lifecycle test legs that push inheritance measure about 5-12% slower; an older remote code root tolerates the call as above.
+Lost or restored sender counters recover automatically before inherited material is sent, without relaxing the receiver's rejection of delayed older writes or same-generation conflicting payloads.
+Malformed or unreadable generation state stops the push before inherited payloads change.
+Counter recovery requires a receiver that supports the generation query, so synchronize an older receiver's code before relying on recovery.
+The [`fm-remote-inherit-push.sh`](../bin/fm-remote-inherit-push.sh) header owns generation negotiation, transaction locking, and the compatibility fallback that keeps ordinary pushes to older receivers working.
+The synthetic transport regression is [`fm-remote-inherit-generation.test.sh`](../tests/fm-remote-inherit-generation.test.sh).
 The [`secondmate-provisioning` skill](../.agents/skills/secondmate-provisioning/SKILL.md#charter-and-seed) owns the placement-specific re-read contract, including changed transfers, unchanged retries, and partial or unknown completion.
 
 ### Relaunch a live remote second mate
