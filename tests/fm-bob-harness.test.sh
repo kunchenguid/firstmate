@@ -300,6 +300,22 @@ test_bob_unconfirmed_delivery_fails_loudly() {
   pass "fm-spawn: bob fails loudly when the brief pointer delivery is unconfirmed"
 }
 
+test_bob_missing_binary_refuses_before_launch() {
+  local id rec out rc
+  id="bob-missing-z1-$$"
+  rec=$(make_spawn_case missing "$id")
+  read_spawn_record "$rec"
+  rm "$FAKEBIN_DIR/bob"
+  out=$(run_spawn "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id")
+  rc=$?
+  [ "$rc" -ne 0 ] || fail "a missing bob executable must refuse the spawn"
+  assert_contains "$out" "bob executable not found on PATH" "the missing-bob refusal did not name its cause"
+  [ ! -e "$HOME_DIR/.bob/trustedFolders.json" ] || fail "a refused spawn wrote a trust entry"
+  [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "a refused spawn wrote task metadata"
+  [ ! -s "$CASE_DIR/launch.log" ] || fail "a missing bob executable reached the launch"
+  pass "fm-spawn: a missing bob executable refuses before trust, metadata, and launch"
+}
+
 test_bob_tracked_settings_refuses_spawn() {
   local id rec out rc
   id="bob-tracked-z1-$$"
@@ -512,6 +528,7 @@ test_bob_readiness_gate_precedes_pointer
 test_bob_stale_composer_frame_is_not_ready
 test_bob_stale_pointer_is_not_delivery
 test_bob_unconfirmed_delivery_fails_loudly
+test_bob_missing_binary_refuses_before_launch
 test_bob_tracked_settings_refuses_spawn
 test_bob_tracked_brief_refuses_spawn
 test_bob_symlinked_dir_refuses_spawn

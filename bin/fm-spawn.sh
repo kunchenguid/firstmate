@@ -3357,6 +3357,12 @@ cortex)
     exit 1
   }
   ;;
+bob)
+  command -v bob >/dev/null || {
+    echo "error: bob executable not found on PATH; install it or select a different verified harness" >&2
+    exit 1
+  }
+  ;;
 pi | pi-signed)
   PI_BIN=$(resolve_pi_executable "$HARNESS") || {
     echo "error: $HARNESS executable not found on PATH; install it or select a different verified harness" >&2

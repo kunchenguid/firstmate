@@ -810,20 +810,28 @@ test_refused_relaunch_onto_bob_leaves_the_running_agent() {
     printf 'project content\n' > "$dir/wt/.bob/$file"
     git -C "$dir/wt" add ".bob/$file"
     git -C "$dir/wt" -c user.email=t@t -c user.name=t commit -q -m "project bob file"
+    fm_fake_exit0 "$dir/fakebin" bob
     expect_bob_relaunch_refused "$dir" rl90 "tracks its own .bob/$file"
   done
   dir=$(new_case bobsymlink rl91)
   add_ship_task "$dir" rl91 claude
   mkdir -p "$dir/outside"
   ln -s "$dir/outside" "$dir/wt/.bob"
+  fm_fake_exit0 "$dir/fakebin" bob
   expect_bob_relaunch_refused "$dir" rl91 "has .bob as a symlink"
   [ -z "$(ls -A "$dir/outside")" ] || fail "a refused relaunch must not write through the .bob symlink"
   dir=$(new_case bobtrust rl92)
   add_ship_task "$dir" rl92 claude
   mkdir -p "$dir/user-home"
   printf 'not a directory\n' > "$dir/user-home/.bob"
+  fm_fake_exit0 "$dir/fakebin" bob
   expect_bob_relaunch_refused "$dir" rl92 "could not pre-register Bob workspace trust"
-  pass "fm-control relaunch: bob's wiring and trust refusals leave the running agent untouched"
+  dir=$(new_case bobmissing rl95)
+  add_ship_task "$dir" rl95 claude
+  PATH="${FM_TEST_BASE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}" \
+    expect_bob_relaunch_refused "$dir" rl95 "bob executable not found on PATH"
+  [ ! -e "$dir/user-home/.bob/trustedFolders.json" ] || fail "a refused relaunch must not write a trust entry"
+  pass "fm-control relaunch: bob's executable, wiring, and trust refusals leave the running agent untouched"
 }
 
 test_relaunch_off_bob_retires_its_wiring_and_keeps_a_tracked_copy() {

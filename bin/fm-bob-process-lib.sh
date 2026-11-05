@@ -31,6 +31,14 @@ fm_bob_script_is_bob() {  # <path>
   return 1
 }
 
+# True when command name $1 is the node runtime Bob's processes report.
+fm_bob_comm_is_node() {  # <comm>
+  case "${1##*/}" in
+    MainThread|node|node-*|node[0-9]*) return 0 ;;
+  esac
+  return 1
+}
+
 # True when command name $1 and argument string $2 describe Bob's session or
 # supervisor process. Node options before the script are skipped, and the script
 # path may contain spaces. MainThread is accepted ONLY together with that script,
@@ -42,10 +50,7 @@ fm_bob_script_is_bob() {  # <path>
 fm_bob_process_matches() {  # <comm> <args>
   local comm=$1 args=${2:0:8192} i start=-1
   local -a words=()
-  case "${comm##*/}" in
-    MainThread|node|node-*|node[0-9]*) ;;
-    *) return 1 ;;
-  esac
+  fm_bob_comm_is_node "$comm" || return 1
   case "$args" in
     */bob*) ;;
     *) return 1 ;;
@@ -68,4 +73,11 @@ fm_bob_process_matches() {  # <comm> <args>
     esac
   done
   return 1
+}
+
+# fm_bob_process_matches for a live process whose argv the caller has not read.
+# Only node processes pay for the ps.
+fm_bob_pid_matches() {  # <comm> <pid>
+  fm_bob_comm_is_node "$1" || return 1
+  fm_bob_process_matches "$1" "$(LC_ALL=C ps -p "$2" -o args= 2>/dev/null)"
 }

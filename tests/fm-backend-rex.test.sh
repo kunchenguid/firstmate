@@ -439,6 +439,50 @@ SH
   pass "fm_backend_agent_state rex: a harness below a shell foreground is alive and its records are trusted; a bare shell stays dead"
 }
 
+# node_foreground: the Rex process view of a node process once it has exec'd, so
+# the reported name is what the kernel names node and not the forking shell.
+node_foreground() {  # <pid>
+  local pid=$1 i=0
+  while [ "$i" -lt 200 ]; do
+    case "$(ps -o args= -p "$pid" 2>/dev/null)" in
+      node\ *) break ;;
+    esac
+    sleep 0.05
+    i=$((i + 1))
+  done
+  printf '{"foreground":{"pid":%s,"name":"%s"},"ancestors":[],"last_exit":null}' \
+    "$pid" "$(ps -o comm= -p "$pid" 2>/dev/null)"
+}
+
+# Rex reports no command line and Bob sets no process title, so the live process's
+# own argv is the only proof: Bob's entry script as its script, not as an argument.
+test_agent_state_identifies_bob_by_its_entry_script() {
+  command -v node >/dev/null 2>&1 || { echo "skip: node not found (Bob is a node bundle)"; return 0; }
+  local dir out sid bid t script decoy pid
+  dir=$(new_case bob-foreground)
+  out=$(rex_env "$dir" 'fm_backend_rex_create_task fm-alpha /tmp')
+  read -r sid _ bid <<<"$out"
+  t="${sid#session:}:${bid#block:}"
+  script="$dir/lib/node_modules/@ibm/bob/dist/bob.js"
+  decoy="$dir/decoy.js"
+  mkdir -p "$(dirname "$script")"
+  printf 'setTimeout(() => {}, 60000);\n' > "$script"
+  cp "$script" "$decoy"
+  node "$script" >/dev/null 2>&1 &
+  pid=$!
+  write_process "$dir" "$bid" "$(node_foreground "$pid")"
+  assert_equals alive "$(rex_env "$dir" "fm_backend_agent_state rex '$t'")" "a node process running Bob's entry script is alive"
+  kill "$pid" 2>/dev/null
+  wait "$pid" 2>/dev/null
+  node "$decoy" "$script" >/dev/null 2>&1 &
+  pid=$!
+  write_process "$dir" "$bid" "$(node_foreground "$pid")"
+  assert_equals ambiguous "$(rex_env "$dir" "fm_backend_agent_state rex '$t'")" "a node process naming Bob's script as an argument stays ambiguous"
+  kill "$pid" 2>/dev/null
+  wait "$pid" 2>/dev/null
+  pass "fm_backend_agent_state rex: a foreground running Bob's entry script is alive and a decoy is not"
+}
+
 test_native_busy_trusts_live_owner_only() {
   local dir out sid bid t
   dir=$(new_case busy)
@@ -1040,6 +1084,7 @@ test_capture_and_derived_viewport
 test_composer_reads_the_cursor_row
 test_agent_state_from_process_view
 test_agent_state_sees_a_harness_below_a_shell_foreground
+test_agent_state_identifies_bob_by_its_entry_script
 test_native_busy_trusts_live_owner_only
 test_current_path_follows_foreground
 test_send_literal_and_keys

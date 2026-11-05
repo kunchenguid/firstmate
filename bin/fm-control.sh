@@ -1107,9 +1107,10 @@ resolve_relaunch_profile() {
         | grep -qxF "$(fm_polytoken_hooks_file "$WT")" \
       || fm_polytoken_require_hooks_free "$WT" || return 1
   fi
-  # Likewise Bob's wiring and trust refusals. The launch owner repeats both, and
-  # registering the task's own worktree here is the same idempotent entry.
+  # Likewise Bob's executable, wiring, and trust refusals. The launch owner repeats
+  # them, and registering the task's own worktree here is the same idempotent entry.
   if [ "$TARGET_HARNESS" = bob ]; then
+    command -v bob >/dev/null || die 'bob executable not found on PATH; install it or select a different verified harness'
     fm_control_bob_require_wiring_free "$WT" "$STATE" "$ID" || return 1
     "$SCRIPT_DIR/fm-bob-trust.sh" "$WT" "$(fm_meta_get "$META" project)" >/dev/null \
       || die "could not pre-register Bob workspace trust for $WT; refusing before the current worker stops"

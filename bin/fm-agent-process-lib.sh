@@ -102,7 +102,8 @@ fm_agent_process_classify_name() {  # <path> [argv0] -> agent|shell|other
 #            harnesses whose identity sits in argv[1] (bin/fm-gemini-lib.sh,
 #            bin/fm-bob-process-lib.sh).
 #   [pid]    when given, lets the Gemini rule read argv boundaries from the
-#            live process instead of the flattened line.
+#            live process instead of the flattened line, and the Bob rule read
+#            argv a caller has no flattened line for.
 fm_agent_process_classify() {  # <name> <argv0> <args> [pid] -> agent|shell|other
   local name=${1:-} argv0=${2:-} args=${3:-} pid=${4:-} by_name by_argv0
   by_name=$(fm_agent_process_classify_name "$name" "$argv0")
@@ -128,6 +129,10 @@ fm_agent_process_classify() {  # <name> <argv0> <args> [pid] -> agent|shell|othe
     return 0
   fi
   if [ -n "$args" ] && fm_bob_process_matches "${name:-${args%% *}}" "$args"; then
+    printf 'agent'
+    return 0
+  fi
+  if [ -z "$args" ] && [ -n "$pid" ] && fm_bob_pid_matches "${name:-$argv0}" "$pid"; then
     printf 'agent'
     return 0
   fi
