@@ -473,12 +473,12 @@ esac
 # answer token is spelled out rather than typed, so the echoed prompt cannot match it.
 send 'Quote verbatim every line of this conversation that contains a bullet or diamond glyph, other than this request. If there are none, reply with only the words green, field, and lantern in uppercase joined by underscores.'
 enter
-wait_screen 'GREEN_HARBOR_LANTERN' 'the model reporting that it sees no supervision note' 400
+wait_screen 'GREEN_FIELD_LANTERN' 'the model reporting that it sees no supervision note' 400
 sleep 2
 send '/exit'
 enter
 sleep 2
-notes_session=$(grep -rlF 'GREEN_HARBOR_LANTERN' "$HOME/.claude/projects/"*"$(basename "$LAB" | tr -c 'A-Za-z0-9\n' -)"* 2>/dev/null | head -n 1)
+notes_session=$(grep -rlF 'GREEN_FIELD_LANTERN' "$HOME/.claude/projects/"*"$(basename "$LAB" | tr -c 'A-Za-z0-9\n' -)"* 2>/dev/null | head -n 1)
 [ -n "$notes_session" ] || fail "could not find the session transcript Claude Code stored for the notes turn"
 if jq -e 'select(.type == "assistant") | .message.content | tostring | test("LIVE_")' "$notes_session" >/dev/null 2>&1; then
   fail "the model quoted a supervision note, so the notes reached its context: $notes_session"

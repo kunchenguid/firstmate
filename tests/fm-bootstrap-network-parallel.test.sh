@@ -275,13 +275,13 @@ SH
   while IFS= read -r line; do
     [ -n "$line" ] || continue
     case "$line" in
-      SECONDMATE_LIVENESS:\ secondmate\ [A-Za-z0-9._-]*:*|SECONDMATE_SYNC:\ secondmate\ [A-Za-z0-9._-]*:*) ;;
+      SECONDMATE_LIVENESS:\ Project\ Director\ [A-Za-z0-9._-]*:*|SECONDMATE_SYNC:\ Project\ Director\ [A-Za-z0-9._-]*:*) ;;
       *) fail "a per-mate line was interleave-corrupted: $line" ;;
     esac
     n=0
-    case "$line" in *" secondmate alpha:"*) n=$((n + 1)) ;; esac
-    case "$line" in *" secondmate bravo:"*) n=$((n + 1)) ;; esac
-    case "$line" in *" secondmate charlie:"*) n=$((n + 1)) ;; esac
+    case "$line" in *" Project Director alpha:"*) n=$((n + 1)) ;; esac
+    case "$line" in *" Project Director bravo:"*) n=$((n + 1)) ;; esac
+    case "$line" in *" Project Director charlie:"*) n=$((n + 1)) ;; esac
     [ "$n" -le 1 ] || fail "a per-mate line named more than one mate: $line"
   done <<EOF
 $(printf '%s\n' "$out" | grep '^SECONDMATE_' || true)
