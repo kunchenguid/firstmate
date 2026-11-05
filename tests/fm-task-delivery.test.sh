@@ -1537,7 +1537,7 @@ test_forge_gerrit_changes_what_no_mistakes_means() {
     "the gerrit worker lost the pipeline initialization step no-mistakes still needs"
 
   # The forge changes the contract's head and tail only: how the pipeline is
-  # driven, what --intent may carry, and the two firstmate-specific rules are the
+  # driven, what --intent may carry, and the firstmate-specific rules are the
   # same text a GitHub-forge worker receives.
   assert_grep 'ask-user findings are never yours to answer: escalate to firstmate' "$brief" \
     "the gerrit worker lost the ask-user escalation rule"

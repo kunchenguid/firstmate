@@ -17,6 +17,7 @@ Firstmate always applies this judgment, decides any finding that is unambiguous 
 
 The implementation worker never decides or answers its own ask-user finding.
 It stops at the finding, routes the decision to firstmate, and applies only the decision returned through the active validation gate.
+The same holds for a Test or CI gate: approving, skipping, ignoring, or aborting it, or skipping a step its definition of done does not name, is firstmate's decision under this skill, and the default is fix or abort, never approve or skip.
 
 ## Decide
 
