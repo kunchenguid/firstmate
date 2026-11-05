@@ -342,7 +342,8 @@ inner = r'''set -eu
 home=$1 state=$2 lib=$3 ready=$4 stop=$5
 export FM_HOME=$home FM_STATE_OVERRIDE=$state
 . "$lib"
-/bin/sleep 300 &
+sleep_bin=$(command -v sleep)
+"$sleep_bin" 300 &
 holder=$!
 identity=$(fm_pid_identity "$holder")
 lock="$state/.watch.lock"

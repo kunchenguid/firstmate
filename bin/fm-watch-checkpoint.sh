@@ -154,6 +154,10 @@ positive_or() {  # <value> <default>
   case "$1" in ''|0*|*[!0-9]*) printf '%s\n' "$2" ;; *) printf '%s\n' "$1" ;; esac
 }
 
+if [ "$(uname -s)" = Linux ] && [ "$("$SCRIPT_DIR/fm-harness.sh" 2>/dev/null)" = codex ]; then
+  export FM_HOME
+fi
+
 # shellcheck source=bin/fm-supervision-engine-lib.sh
 . "$SCRIPT_DIR/fm-supervision-engine-lib.sh"
 if fm_supervision_host_enabled "$CONFIG" codex; then
@@ -195,11 +199,7 @@ fi
 
 set +e
 # Interrupt the checkpoint's active check group so the watcher's native EXIT cleanup can release its lock; ordinary watcher shutdown still uses TERM.
-if [ "$(uname -s)" = Linux ] && [ "$("$SCRIPT_DIR/fm-harness.sh" 2>/dev/null)" = codex ]; then
-  FM_HOME="$FM_HOME" run_bounded "$SECONDS_ARG" INT 5 "$SCRIPT_DIR/fm-watch.sh" >"$OUT" 2>"$ERR"
-else
-  run_bounded "$SECONDS_ARG" INT 5 "$SCRIPT_DIR/fm-watch.sh" >"$OUT" 2>"$ERR"
-fi
+run_bounded "$SECONDS_ARG" INT 5 "$SCRIPT_DIR/fm-watch.sh" >"$OUT" 2>"$ERR"
 RC=$?
 set -e
 
