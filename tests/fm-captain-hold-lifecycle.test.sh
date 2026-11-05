@@ -1638,7 +1638,7 @@ test_parent_publication_uses_verified_resolution_body() {
       run_captain "$home" hold "$id" --title 'Publication proof' --reason choose >/dev/null \
         || fail "could not create publication fixture"
       if [ "$mode" = repair ]; then
-        tasks_in "$home" done "$id" >/dev/null || fail "could not close repair fixture"
+        tasks_in "$home" 'done' "$id" >/dev/null || fail "could not close repair fixture"
       fi
       if [ "$mode" = answers ]; then
         run_captain "$home" hold proof-next --title 'Next answer' --reason choose >/dev/null \
