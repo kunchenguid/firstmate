@@ -1494,6 +1494,11 @@ families_for_unmapped_bin() {
 families_for_changed_path() {
   local path=$1 fixture_ref capture_ref
   case "$path" in
+    bin/fm-remote*|bin/fm-secondmate*)
+      printf '%s\n' "__script__:fm-remote-inherit-generation.test.sh"
+      ;;
+  esac
+  case "$path" in
     tests/fm-backend-herdr-eventwait.test.py)
       printf '%s\n' real-herdr-gated
       printf '%s\n' backend-dispatch
