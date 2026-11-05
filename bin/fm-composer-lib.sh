@@ -2218,6 +2218,10 @@ EOF
 # Codex only: recorded on codex-cli 0.162.1 under herdr 0.9.4, where wheel
 # reports landed in an idle composer (issue 7296). Any other character, even
 # one, keeps the caller on the `pending` verdict.
+# The one row allowed below the selection must be the codex footer, recorded
+# on codex-cli 0.166.0 as `<model> <effort> · <rest>`; an unknown footer is text.
+FM_COMPOSER_CODEX_FOOTER_RE='^[[:space:]]*[[:alnum:]][[:alnum:]._-]*[[:space:]]+(minimal|low|medium|high|xhigh)[[:space:]]+·[[:space:]]+[^[:space:]]'
+
 fm_composer_codex_mouse_noise_only() {  # <screen>
   local held rest tmp plain line below=0
   tmp=$(mktemp) || return 1
@@ -2229,7 +2233,9 @@ fm_composer_codex_mouse_noise_only() {  # <screen>
   # is not proven absent. Only the single codex footer row may follow.
   plain=$(printf '%s\n' "$1" | fm_composer_strip_ansi)
   while IFS= read -r line; do
-    [ -n "$(printf '%s' "$line" | tr -d '[:space:]')" ] && below=$((below + 1))
+    [ -n "$(printf '%s' "$line" | tr -d '[:space:]')" ] || continue
+    printf '%s\n' "$line" | LC_ALL=C grep -Eqi "$FM_COMPOSER_CODEX_FOOTER_RE" || return 1
+    below=$((below + 1))
   done <<EOF
 $(printf '%s\n' "$plain" | sed -n "$((FM_COMPOSER_SELECTED_LAST + 2)),\$p")
 EOF

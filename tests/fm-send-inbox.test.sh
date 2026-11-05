@@ -83,12 +83,13 @@ case "${1:-}" in
     noise="$glyph [<65;192;52M[<65;192;52M[<65;19"$'\n'"  2;52M[<65;192;52M"
     footer='  gpt-6 high · 100% left · ~/proj'
     case "${FM_FAKE_TMUX_COMPOSER:-}" in
-      codex-noise | codex-noise-late-busy | codex-noise-unreadable | codex-noise-returns | codex-noise-text | codex-noise-gap | codex-noise-busy)
+      codex-noise | codex-noise-late-busy | codex-noise-unreadable | codex-noise-returns | codex-noise-text | codex-noise-gap | codex-noise-nofooter | codex-noise-busy)
         row=$noise
         case "$FM_FAKE_TMUX_COMPOSER" in
           codex-noise) [ "$cleared" = 1 ] && row="$glyph" ;;
           codex-noise-unreadable) [ "$cleared" = 1 ] && { printf 'banner\n'; exit 0; } ;;
           codex-noise-gap) row="$glyph [<65;192;52M"$'\n\n'"  real draft after a blank row" ;;
+          codex-noise-nofooter) row="$glyph [<65;192;52M"$'\n\n'"  real draft after a blank row"; footer= ;;
           codex-noise-text) row="$glyph [<65;192;52M please keep this draft" ;;
         esac
         printf '0\n' > "$FM_SEND_LOG.lastbusy"
@@ -335,6 +336,15 @@ test_codex_mouse_noise_before_real_text_after_blank_row_is_never_cleared() {
     fail "a draft with real text after a blank row must never be cleared"
   [ ! -s "$dir/send.log" ] || fail "nothing may be typed onto a multiline draft"
   pass "fm-send inbox: reports followed by a blank row and real text are left alone"
+}
+
+test_codex_mouse_noise_before_real_text_without_footer_is_never_cleared() {
+  local dir
+  dir=$(codex_noise_case codexnofooter codex-noise-nofooter)
+  [ "$(count_lines "$dir/send.log.keys" C-c)" = 0 ] ||
+    fail "a draft with no footer row below must never be cleared"
+  [ ! -s "$dir/send.log" ] || fail "nothing may be typed onto a draft with no footer"
+  pass "fm-send inbox: reports followed by a blank row and real text with no footer are left alone"
 }
 
 test_watcher_retry_clears_noise_after_a_busy_first_send() {
@@ -665,6 +675,7 @@ test_codex_mouse_noise_that_returns_is_not_typed_onto
 test_codex_mouse_noise_unreadable_after_clear_is_not_typed_onto
 test_codex_turn_starting_between_reads_is_not_interrupted
 test_codex_mouse_noise_before_real_text_after_blank_row_is_never_cleared
+test_codex_mouse_noise_before_real_text_without_footer_is_never_cleared
 test_watcher_retry_clears_noise_after_a_busy_first_send
 test_codex_mouse_noise_on_a_busy_agent_is_not_interrupted
 test_other_harness_mouse_noise_keeps_current_behavior
