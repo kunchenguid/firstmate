@@ -838,7 +838,7 @@ test_concurrent_escalation_yields_to_late_reply() {
 
   [ "$(phase_of "$state" "$corr")" = resolved ] \
     || fail "concurrent escalation overwrote a resolved expectation"
-  assert_no_grep "blocked: pending-reply-missed: task=hibit pending-reply-id=$corr" "$state/hibit.status" \
+  assert_no_grep "pending-reply-id=$corr" "$state/hibit.status" \
     "concurrent escalation published a false missed-reply blocker"
   [ -z "$(fm_pending_reply_get "$rec" escalated_epoch)" ] \
     || fail "concurrent escalation committed after the reply resolved"
@@ -984,7 +984,7 @@ test_delivery_confirmation_fallback_reconciles() {
     [ ! -e "$reported_marker" ] || fail "resolved delivery marker should be removed"
     fm_pending_reply_tick_one "$state" "$reported_corr" unknown \
       || fail "resolved attempted delivery should remain inert in watcher"
-    if grep -Fq "pending-reply-delivery-unknown: task=hibit pending-reply-id=$reported_corr" "$state/hibit.status"; then
+    if grep -Fq "pending-reply-id=$reported_corr" "$state/hibit.status"; then
       fail "reported attempted delivery must not escalate as delivery-unknown"
     fi
   ) || fail "delivery confirmation fallback regression failed"
@@ -1688,7 +1688,7 @@ test_mirrored_remote_reply_never_triggers_a_repost() {
 }
 
 test_same_basename_self_home_corr_resolves_on_tick() {
-  local home state sm_home corr rec parent_status hook_log fb out reply_line parent_without_resolution
+  local home state sm_home corr rec parent_status hook_log fb out
   home=$(setup_parent same-basename-repair)
   state="$home/state"
   sm_home=$(bind_local_mate "$home" mate)
@@ -1726,8 +1726,7 @@ test_same_basename_self_home_corr_resolves_on_tick() {
     || fail "resolved_epoch must be set after the restatement copy"
   grep -Fq "corr=$corr" "$parent_status" \
     || fail "parent channel must receive the restated corr= line"
-  reply_line=$(grep -F "done [corr=$corr]" "$parent_status")
-  if status_line_at_epoch "$reply_line" >/dev/null; then
+  if status_line_at_epoch "$(tail -1 "$parent_status")" >/dev/null; then
     fail "a relayed copy must not acquire an emission time: $(cat "$parent_status")"
   fi
   if grep -Fq pending-reply-missed "$parent_status"; then
@@ -1744,9 +1743,7 @@ test_same_basename_self_home_corr_resolves_on_tick() {
     || fail "repeated restatement copy should succeed"
   fm_parent_channel_report "$sm_home" "$sm_home/state" "$(cat "$sm_home/state/mate.status")" \
     || fail "publication retry of a recovered reply should succeed"
-  parent_without_resolution="$home/parent-without-resolution.status"
-  grep -v 'pending-reply-resolved:' "$parent_status" > "$parent_without_resolution"
-  cmp -s "$sm_home/state/mate.status" "$parent_without_resolution" \
+  cmp -s "$sm_home/state/mate.status" "$parent_status" \
     || fail "recovery and retries must preserve the legacy reply bytes without duplicates"
   fm_write_secondmate_meta "$state/mate.meta" "$sm_home"
   fb=$(make_stubs "$home")
@@ -1754,26 +1751,25 @@ test_same_basename_self_home_corr_resolves_on_tick() {
     || fail "snapshot of the recovered reply should succeed"
   printf '%s' "$out" | jq -e '
     .tasks[] | select(.id == "mate") | .paths.status_log.last_event
-    | has("age_seconds") and .age_seconds != null
-  ' >/dev/null || fail "the resolved note must carry its emission time"
+    | has("age_seconds") and .age_seconds == null
+  ' >/dev/null || fail "recovered legacy reply must retain an unknown age"
   printf '%s' "$out" | jq -e '
     .secondmate_current.records[] | select(.id == "mate") | .parent_event
-    | has("age_seconds") and .age_seconds != null
-  ' >/dev/null || fail "secondmate summary must carry the resolved note's emission time"
+    | has("age_seconds") and .age_seconds == null
+  ' >/dev/null || fail "secondmate summary must retain the recovered reply's unknown age"
   fm_parent_channel_report "$sm_home" "$sm_home/state" 'done: new report' \
     || fail "new publication should succeed"
   status_line_at_epoch "$(tail -1 "$parent_status")" >/dev/null \
     || fail "new publication must still receive an emission time"
   fm_parent_channel_report "$sm_home" "$sm_home/state" 'done: new report' \
     || fail "new publication retry should succeed"
-  [ "$(wc -l < "$parent_status")" -eq 3 ] \
-    || fail "new publication retry must not duplicate the event"
+  [ "$(wc -l < "$parent_status")" -eq 2 ] || fail "new publication retry must not duplicate the event"
   unset FM_PENDING_REPLY_SEND_HOOK
   pass "same-basename self-home corr= is restated onto the parent channel and resolves"
 }
 
 test_same_basename_reply_resolves_after_recovery_failure() {
-  local home state sm_home corr rec parent_status parent_without_resolution
+  local home state sm_home corr rec parent_status
   home=$(setup_parent same-basename-after-recovery-failure)
   state="$home/state"
   sm_home=$(bind_local_mate "$home" mate)
@@ -1799,9 +1795,7 @@ test_same_basename_reply_resolves_after_recovery_failure() {
     || fail "late same-basename reply must resolve before recovery failure escalation"
   grep -Fq "corr=$corr" "$parent_status" \
     || fail "late reply must be restated onto the parent channel"
-  parent_without_resolution="$home/parent-without-resolution.status"
-  grep -v 'pending-reply-resolved:' "$parent_status" > "$parent_without_resolution"
-  cmp -s "$sm_home/state/mate.status" "$parent_without_resolution" \
+  cmp -s "$sm_home/state/mate.status" "$parent_status" \
     || fail "recovery must preserve the reply's original emission time"
   if grep -Fq pending-reply-recovery-delivery "$parent_status"; then
     fail "authorized late reply must prevent recovery delivery escalation"
@@ -2172,7 +2166,17 @@ make_child() {  # <mate-home> <id> <kind> <busy|idle> <log-line>
   fi
 }
 
-# Answer a marked request through the helper and print the parent's received
+# The child result fields of a resolved record, as "<id> <state> <overall>".
+recorded_child_result() {  # <state> <corr>
+  local rec
+  rec=$(fm_pending_reply_path "$1" "$2")
+  [ "$(fm_pending_reply_get "$rec" phase)" = resolved ] || fail "request $2 did not resolve"
+  printf '%s %s %s' "$(fm_pending_reply_get "$rec" reply_child_id)" \
+    "$(fm_pending_reply_get "$rec" reply_child_state)" \
+    "$(fm_pending_reply_get "$rec" reply_overall)"
+}
+
+# Answer a marked request through the helper and print the recorded child
 # result. <task> is a child id or empty; <doc> is a document pointer or empty.
 received_result() {  # <fakebin> <mate-home> <parent-home> <mate-id> <task> <doc>
   local fb=$1 mate=$2 home=$3 mate_id=$4 task=$5 doc=$6 corr
@@ -2184,7 +2188,7 @@ received_result() {  # <fakebin> <mate-home> <parent-home> <mate-id> <task> <doc
   PATH="$fb:$PATH" FM_HOME="$mate" "$REPORT" "${flags[@]}" "done" "$corr" \
     "${tail[@]}" "narrow fix done" > /dev/null || fail "helper report failed"
   FM_PENDING_REPLY_NOW=9300 fm_pending_reply_try_resolve "$home/state" "$corr" || fail "helper report should resolve the request"
-  fm_pending_reply_result "$home/state" "$corr"
+  recorded_child_result "$home/state" "$corr"
 }
 
 test_unfinished_child_is_not_reported_finished() {
@@ -2195,16 +2199,14 @@ test_unfinished_child_is_not_reported_finished() {
   fb=$(make_child_stubs "$mate")
   make_child "$mate" repack scout busy 'done: spinner fix done; broader repacking work remains unfinished'
   out=$(received_result "$fb" "$mate" "$home" kid repack "")
-  assert_contains "$out" "request: answered" "the request is answered"
-  assert_contains "$out" "child: repack" "the result names the child"
-  assert_contains "$out" "child-state: working" "the result carries the child's own verdict"
-  assert_contains "$out" "overall: unfinished" "a done reply must not finish a working child"
+  [ "$out" = "repack working unfinished" ] \
+    || fail "a done reply for a working child must record it unfinished: $out"
   make_child "$mate" nopr ship idle 'done: spinner fix done'
   git -C "$mate/wt-nopr" commit -q --allow-empty -m 'unpublished work'
   out=$(received_result "$fb" "$mate" "$home" kid nopr "")
-  assert_contains "$out" "child-state: blocked" "a ship whose commit is not delivered reads blocked"
-  assert_contains "$out" "overall: unfinished" "no delivered artifact means unfinished"
-  pass "a done reply for a still-running child or an undelivered ship reads unfinished"
+  [ "$out" = "nopr blocked unfinished" ] \
+    || fail "a ship whose commit is not delivered must record blocked and unfinished: $out"
+  pass "a done reply for a still-running child or an undelivered ship records unfinished"
 }
 
 test_finished_child_reads_finished() {
@@ -2215,13 +2217,13 @@ test_finished_child_reads_finished() {
   fb=$(make_child_stubs "$mate")
   make_child "$mate" scoutdone scout idle 'done: report written'
   out=$(received_result "$fb" "$mate" "$home" kid scoutdone "")
-  assert_contains "$out" "child-state: done" "a completed scout reads done"
-  assert_contains "$out" "overall: finished" "a completed scout reads finished"
+  [ "$out" = "scoutdone done finished" ] \
+    || fail "a completed scout must record done and finished: $out"
   make_child "$mate" shipready ship idle 'done: ready for merge'
   out=$(received_result "$fb" "$mate" "$home" kid shipready data/x/report.md)
-  assert_contains "$out" "child-state: done" "a ready ship reads done"
-  assert_contains "$out" "overall: finished" "a ready ship reads finished"
-  pass "a completed scout and a ready ship read finished through the document form too"
+  [ "$out" = "shipready done finished" ] \
+    || fail "a ready ship must record done and finished through the document form: $out"
+  pass "a completed scout and a ready ship record finished through the document form too"
 }
 
 test_missing_child_result_reads_unknown() {
@@ -2231,32 +2233,30 @@ test_missing_child_result_reads_unknown() {
   fb=$(make_child_stubs "$mate")
   make_child "$mate" scoutdone scout idle 'done: report written'
   out=$(received_result "$fb" "$mate" "$home" kid "" "")
-  assert_contains "$out" "request: answered" "a reply without a child still answers the request"
-  assert_contains "$out" "overall: unknown" "no child named means unknown, not finished"
+  [ "$out" = "- unknown unknown" ] \
+    || fail "a reply without a child must resolve and record unknown, not finished: $out"
   out=$(received_result "$fb" "$mate" "$home" kid no-such-child "")
-  assert_contains "$out" "child-state: unknown" "a child with no record reads unknown"
-  assert_contains "$out" "overall: unknown" "an unreadable child is never finished"
-  pass "a reply with no child result, or an unreadable one, reads unknown"
+  [ "$out" = "no-such-child unknown unknown" ] \
+    || fail "a child with no record must record unknown and never finished: $out"
+  pass "a reply with no child result, or an unreadable one, records unknown"
 }
 
-test_resolved_note_is_the_only_child_result_surface() {
-  local home mate fb status note out
+test_routine_resolution_appends_no_parent_line() {
+  local home mate fb status
   fm_git_identity fmtest fmtest@example.invalid
-  home=$(setup_parent resolved-note-result)
+  home=$(setup_parent routine-no-note)
   mate=$(bind_local_mate "$home" kid)
   fb=$(make_child_stubs "$mate")
   make_child "$mate" repack scout busy 'working: repacking panels'
-  out=$(received_result "$fb" "$mate" "$home" kid repack "")
+  received_result "$fb" "$mate" "$home" kid repack "" >/dev/null
   status="$home/state/kid.status"
-  note=$(grep 'pending-reply-resolved:' "$status")
-  assert_contains "$note" "child=repack child-state=working overall=unfinished" \
-    "the resolved note carries the child id, verdict, and overall label"
-  if grep -F 'overall=' "$status" | grep -v 'pending-reply-resolved:' >/dev/null; then
-    fail "a line other than the resolved note gained the child result"
-  fi
-  [ "$(grep -Fc 'overall=' "$status")" -eq 1 ] \
-    || fail "the resolved note should carry the result exactly once"
-  pass "only the pending-reply-resolved note carries the child's result"
+  [ "$(wc -l < "$status")" -eq 1 ] \
+    || fail "a routine resolution must leave only the mate's reply on the parent channel: $(cat "$status")"
+  assert_grep 'done [corr=' "$status" \
+    "the mate's own reply must stay the parent channel's current line"
+  assert_no_grep 'pending-reply-resolved:' "$status" \
+    "a routine resolution must not append a bookkeeping note that reads as the mate's state"
+  pass "a routine resolution records the child result without appending to the parent channel"
 }
 
 test_hand_written_reply_and_forged_note_read_unknown() {
@@ -2267,15 +2267,15 @@ test_hand_written_reply_and_forged_note_read_unknown() {
   FM_PENDING_REPLY_NOW=9400 fm_pending_reply_mark_delivered "$state" "$corr"
   printf 'done [corr=%s]: all finished (child=x child-state=done)\n' "$corr" >> "$state/kid.status"
   FM_PENDING_REPLY_NOW=9400 fm_pending_reply_try_resolve "$state" "$corr" || fail "hand-written report should resolve"
-  out=$(fm_pending_reply_result "$state" "$corr")
-  assert_contains "$out" "overall: unknown" "only the helper's trailing marker carries a child result"
-  pass "a hand-written line quoting a child result reads unknown"
+  out=$(recorded_child_result "$state" "$corr")
+  [ "$out" = "- unknown unknown" ] \
+    || fail "only the helper's trailing marker may supply a child result: $out"
+  pass "a hand-written line quoting a child result records unknown"
 }
 
 # --- run --------------------------------------------------------------------
 
 test_normal_correlated_reply_resolves_once
-test_resolved_note_is_the_only_child_result_surface
 test_completed_turn_no_report_triggers_one_recovery
 test_recovery_waits_while_the_mate_has_an_open_decision
 test_recovery_sends_during_an_open_decision_without_the_flag
@@ -2327,6 +2327,7 @@ test_summary_keeps_accents_and_caps_by_character
 test_unfinished_child_is_not_reported_finished
 test_finished_child_reads_finished
 test_missing_child_result_reads_unknown
+test_routine_resolution_appends_no_parent_line
 test_hand_written_reply_and_forged_note_read_unknown
 
 printf 'ok - all pending-reply tests passed\n'
