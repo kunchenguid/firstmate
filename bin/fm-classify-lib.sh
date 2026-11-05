@@ -1226,8 +1226,8 @@ EOF
 # cursor it read, and otherwise a distinct non-zero status after printing
 # whatever set it holds - 3 when the live file is absent or unreadable, 4 when
 # the captured boundary is unusable, 5 when a stat, size, temp-file, or span
-# read failed, and 6, printing nothing, when there is no usable cursor. Writing mode keeps its contract unchanged: 0 with the trusted set
-# on every failed read.
+# read failed, and 6, printing nothing, when there is no usable cursor. Writing
+# mode keeps its contract unchanged: 0 with the trusted set on every failed read.
 _fm_open_decisions_cursor_path() {  # <status-file>
   local f=$1 dir base
   dir=$(dirname "$f")
