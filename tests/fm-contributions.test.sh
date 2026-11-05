@@ -2077,6 +2077,28 @@ test_approved_review_with_findings_is_not_acknowledged_on_its_label() {
   pass 'an approved review with findings is not acknowledged on its label'
 }
 
+test_inline_comment_and_its_reraise_are_not_acknowledged_with_the_token_alone() {
+  local home token
+  home=$(unanswered_home inline-token-only)
+  poll_at "$home" 2026-09-16T08:01:00Z >/dev/null || fail 'first poll failed'
+  token=$(review_token "$home") || fail 'the inline comment was never captured'
+  if with_home "$home" "$ROOT/bin/fm-contributions.sh" ack delivery https://github.com/o/r/pull/8 "$token" 2>"$home/err"; then
+    fail 'an inline review comment was acknowledged with no handoff or disposition'
+  fi
+  grep -Fq 'handoff' "$home/err" || fail "the refusal did not name the handoff the comment needs: $(cat "$home/err")"
+  [ "$(pending_count "$home")" = 1 ] || fail 'a refused acknowledgement still removed the inline comment'
+  ack_pending "$home"
+  poll_at "$home" 2026-09-17T09:00:00Z >/dev/null || fail 'poll 25 hours after the comment failed'
+  token=$(with_home "$home" "$ROOT/bin/fm-contributions.sh" pending | jq -er '.[] | select(.type == "unanswered") | .token') \
+    || fail 'the unanswered thread was not raised again'
+  if with_home "$home" "$ROOT/bin/fm-contributions.sh" ack delivery https://github.com/o/r/pull/8 "$token" 2>"$home/err"; then
+    fail 'a re-raised unanswered thread was acknowledged with no handoff or disposition'
+  fi
+  grep -Fq 'handoff' "$home/err" || fail "the refusal did not name the handoff the re-raise needs: $(cat "$home/err")"
+  [ "$(pending_count "$home")" = 1 ] || fail 'a refused acknowledgement still removed the re-raised thread'
+  pass 'an inline review comment and its re-raise are not acknowledged with the token alone'
+}
+
 test_review_handoff_must_name_the_review_in_the_owning_task_inbox() {
   local home token
   home=$(review_home review-handoff CHANGES_REQUESTED 'The retry loop drops errors')
@@ -2101,6 +2123,19 @@ test_review_handoff_must_name_the_review_in_the_owning_task_inbox() {
   jq -e '(.records[0].receipts | length) == 1 and (.records[0].pending | length) == 0' "$home/data/delivery/contributions.json" >/dev/null \
     || fail 'a later poll lost the receipt or raised the acknowledged review again'
   pass 'a review is handed off only by a steer to the owning worker that names it'
+}
+
+test_review_handoff_is_found_under_a_home_path_with_spaces() {
+  local home token
+  home=$(review_home 'spaced home' CHANGES_REQUESTED 'The retry loop drops errors')
+  token=$(review_token "$home") || fail 'the review was never captured'
+  steer "$home" delivery 'Read https://github.com/o/r/pull/8#pullrequestreview-12 and fix it'
+  with_home "$home" "$ROOT/bin/fm-contributions.sh" ack delivery https://github.com/o/r/pull/8 "$token" handoff >/dev/null \
+    || fail 'a steer naming the review was not found when the home path contains a space'
+  [ "$(pending_count "$home")" = 0 ] || fail 'the handed-off review stayed pending'
+  jq -e '.records[0].receipts[0].ref == "001.msg"' "$home/data/delivery/contributions.json" >/dev/null \
+    || fail "the receipt does not name the steer record: $(cat "$home/data/delivery/contributions.json")"
+  pass 'a handoff finds the steer when the home path contains a space'
 }
 
 test_review_disposition_needs_evidence_on_this_contribution() {
@@ -2153,7 +2188,7 @@ test_late_owner_does_not_inherit_a_receipt() {
 }
 
 failures=0
-for test_name in test_actor_coverage test_stale_verdict test_unchecked_is_not_silence test_newest_check_has_no_verdict test_comment_wake test_review_wake test_inline_wake test_review_bot_inline_wake test_review_bot_watching_is_opt_in test_review_bot_allowlist_is_configurable test_ready_issue_wake test_fresh_issue_requires_maintainer test_missing_lane_remains_missing test_partial_freshness_keeps_measured_rows test_malformed_record_cannot_prove_silence test_issue_timeline_and_exact_ack test_verdict_retains_judged_head test_verdict_actor_values_are_discoverable test_observed_replacement_refreshes_verdict test_unobserved_head_leaves_verdict_unknown test_away_yolo_is_fleet_work test_away_yolo_cross_home_is_fleet_work test_retired_and_unsupported_coverage test_unsupported_forge_is_not_fleet_work test_held_unsupported_forge_is_not_captain_work test_unsupported_poll_is_silent_and_clears_legacy_errors test_legacy_cleanup_preserves_supported_failure test_shared_contribution_signal_wakes_once test_watcher_keeps_diagnostics_separate_from_contribution_wakes test_expired_child_unsupported_forge_stays_unmeasured test_watcher_surfaces_new_contribution_once test_home_summary_coverage test_unreadable_pending_is_not_empty test_record_task_identity_matches_dirname_basename test_read_only_views_create_no_state test_budget_refusal_between_calls test_budget_bounded_call_timeout test_genuine_failure_near_deadline_is_unavailable test_http_500_once_retries_without_waking test_http_500_twice_records_the_failed_read test_http_404_is_not_retried test_real_gh_errors_drive_retry_and_summary test_next_url_does_not_inherit_a_forge_diagnostic test_shared_url_observed_once test_terminal_contribution_settles test_late_owner_inherits_terminal_observation test_interrupted_multi_owner_poll_settles_every_owner test_done_task_open_pr_still_observed test_many_settled_records_keep_the_poll_inside_the_check_bound test_many_settled_records_beside_a_malformed_one_keep_the_poll_inside_the_check_bound test_record_without_trailing_newline_does_not_join_its_neighbour test_records_beyond_one_read_batch_are_all_read test_reservation_defers_later_url_when_fifteen_seconds_do_not_remain test_three_second_pr_reads_complete_fresh_in_one_cycle test_slow_read_deadline_kill_is_budget_refusal test_unmeasured_url_does_not_starve_the_tail test_budget_is_cut_down_to_the_watcher_check_bound test_arm_plumbs_a_configured_budget_into_the_check_shim test_unavailable_forge_records_error_and_wakes_once_per_episode test_late_owner_keeps_failure_episode_suppressed test_retire_ends_observation_of_a_gone_contribution test_late_owner_of_a_retired_final_contribution_is_not_retired test_retire_is_idempotent_and_refuses_unknown_pairs test_unanswered_thread_is_raised_again_under_hold test_resolved_thread_is_answered test_reply_rules test_reply_age_is_configurable_and_validated test_closed_pull_request_drops_its_threads test_unanswered_reraise_is_off_unless_configured test_arm_plumbs_the_reply_age_into_the_check_shim test_many_reviews_stay_readable test_approved_review_with_findings_is_not_acknowledged_on_its_label test_review_handoff_must_name_the_review_in_the_owning_task_inbox test_review_disposition_needs_evidence_on_this_contribution test_signals_without_findings_acknowledge_without_a_receipt test_late_owner_does_not_inherit_a_receipt; do
+for test_name in test_actor_coverage test_stale_verdict test_unchecked_is_not_silence test_newest_check_has_no_verdict test_comment_wake test_review_wake test_inline_wake test_review_bot_inline_wake test_review_bot_watching_is_opt_in test_review_bot_allowlist_is_configurable test_ready_issue_wake test_fresh_issue_requires_maintainer test_missing_lane_remains_missing test_partial_freshness_keeps_measured_rows test_malformed_record_cannot_prove_silence test_issue_timeline_and_exact_ack test_verdict_retains_judged_head test_verdict_actor_values_are_discoverable test_observed_replacement_refreshes_verdict test_unobserved_head_leaves_verdict_unknown test_away_yolo_is_fleet_work test_away_yolo_cross_home_is_fleet_work test_retired_and_unsupported_coverage test_unsupported_forge_is_not_fleet_work test_held_unsupported_forge_is_not_captain_work test_unsupported_poll_is_silent_and_clears_legacy_errors test_legacy_cleanup_preserves_supported_failure test_shared_contribution_signal_wakes_once test_watcher_keeps_diagnostics_separate_from_contribution_wakes test_expired_child_unsupported_forge_stays_unmeasured test_watcher_surfaces_new_contribution_once test_home_summary_coverage test_unreadable_pending_is_not_empty test_record_task_identity_matches_dirname_basename test_read_only_views_create_no_state test_budget_refusal_between_calls test_budget_bounded_call_timeout test_genuine_failure_near_deadline_is_unavailable test_http_500_once_retries_without_waking test_http_500_twice_records_the_failed_read test_http_404_is_not_retried test_real_gh_errors_drive_retry_and_summary test_next_url_does_not_inherit_a_forge_diagnostic test_shared_url_observed_once test_terminal_contribution_settles test_late_owner_inherits_terminal_observation test_interrupted_multi_owner_poll_settles_every_owner test_done_task_open_pr_still_observed test_many_settled_records_keep_the_poll_inside_the_check_bound test_many_settled_records_beside_a_malformed_one_keep_the_poll_inside_the_check_bound test_record_without_trailing_newline_does_not_join_its_neighbour test_records_beyond_one_read_batch_are_all_read test_reservation_defers_later_url_when_fifteen_seconds_do_not_remain test_three_second_pr_reads_complete_fresh_in_one_cycle test_slow_read_deadline_kill_is_budget_refusal test_unmeasured_url_does_not_starve_the_tail test_budget_is_cut_down_to_the_watcher_check_bound test_arm_plumbs_a_configured_budget_into_the_check_shim test_unavailable_forge_records_error_and_wakes_once_per_episode test_late_owner_keeps_failure_episode_suppressed test_retire_ends_observation_of_a_gone_contribution test_late_owner_of_a_retired_final_contribution_is_not_retired test_retire_is_idempotent_and_refuses_unknown_pairs test_unanswered_thread_is_raised_again_under_hold test_resolved_thread_is_answered test_reply_rules test_reply_age_is_configurable_and_validated test_closed_pull_request_drops_its_threads test_unanswered_reraise_is_off_unless_configured test_arm_plumbs_the_reply_age_into_the_check_shim test_many_reviews_stay_readable test_approved_review_with_findings_is_not_acknowledged_on_its_label test_inline_comment_and_its_reraise_are_not_acknowledged_with_the_token_alone test_review_handoff_must_name_the_review_in_the_owning_task_inbox test_review_handoff_is_found_under_a_home_path_with_spaces test_review_disposition_needs_evidence_on_this_contribution test_signals_without_findings_acknowledge_without_a_receipt test_late_owner_does_not_inherit_a_receipt; do
   ( "$test_name" ) || failures=$((failures + 1))
 done
 [ "$failures" -eq 0 ] || fail "$failures contribution regressions"

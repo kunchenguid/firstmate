@@ -205,8 +205,8 @@ When filing work corresponding to an upstream ticket, put its canonical issue UR
 That explicit task link, rather than repository membership or a text similarity guess, makes a ready-for-pr transition owned planning input.
 Filing is local record-keeping; the work itself still publishes only under the destination's authority, so a task targeting firstmate's own repository remains gated by this home's role (`firstmate-self-repo`) and a user/operator home carries it as a local draft instead.
 Acknowledge a signal through `ack` only after its disposition is durable, never merely because it was read.
-For a review with findings, `ack` takes a `handoff` or `disposition` receipt and refuses without one.
-Steer the owning worker with the review's source URL first, and never read an approved or non-blocking state as a reason to skip that.
+For a signal that carries reviewer findings (an inline review comment, a re-raised unanswered thread, or a review with text), `ack` takes a `handoff` or `disposition` receipt and refuses without one.
+Steer the owning worker with the signal's source URL first, and never read an approved or non-blocking state as a reason to skip that.
 For any other signal, filed work, a captain hold, or a recorded no-action decision in the task is that disposition, and `ack` takes the exact event token alone.
 The command's header owns the receipt forms.
 For secondmate-owned contributions, handle and acknowledge in that home and use the existing parent channel for any captain call.

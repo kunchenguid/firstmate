@@ -739,7 +739,8 @@ ack_handoff_record() { # task source-url: basename of a steering-inbox record na
   # shellcheck source=bin/fm-task-inbox-lib.sh
   . "$SCRIPT_DIR/fm-task-inbox-lib.sh"
   inbox=$(fm_task_inbox_dir "$STATE" "$1")
-  for record in $(find "$inbox" "$inbox/handled" -maxdepth 1 -name '*.msg' 2>/dev/null | sort -V); do
+  for record in "$inbox"/*.msg "$inbox/handled"/*.msg; do
+    [ -e "$record" ] || continue
     body=$(fm_task_inbox_body "$record") || continue
     # A source that is a prefix of another (review-12 inside review-123) is not a match.
     if printf '%s\n' "$body" | awk -v s="$2" 'BEGIN { n = length(s) } {
