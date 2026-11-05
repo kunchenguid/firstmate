@@ -509,7 +509,9 @@ observe() { # canonical GitHub URL -> normalized JSON
               | (.created_at // .submitted_at // "") as $at | (.in_reply_to_id // .id) as $root | . as $e
               | {token:((._signal + ":") + (.id|tostring) + ":" + (.updated_at // .submitted_at // "") + ":" + (.state // "")),
                  type:._signal,source:.html_url,head:.commit_id,
-                 author:.user.login,body:(.body // "" | .[:500])}
+                 # Leading whitespace is dropped before the cut so the saved
+                 # preview has text whenever the full body does (substantive_signal).
+                 author:.user.login,body:(.body // "" | sub("^\\s+"; "") | .[:500])}
                  + (if (.user.login | IN($bots[])) then {review_bot:true} else {} end)
                  + (if $track then {at:$at,
                    # A resolved inline thread counts as answered.
