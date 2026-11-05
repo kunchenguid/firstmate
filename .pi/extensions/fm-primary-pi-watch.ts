@@ -861,6 +861,18 @@ export default function (pi: ExtensionAPI) {
     owner.cleanupTimer = timer;
   }
 
+  async function sendRestorationFailure(owner: SessionGeneration, message: string): Promise<boolean> {
+    for (let attempt = 1; attempt <= 2; attempt += 1) {
+      try {
+        if (await sendWake(owner, message)) return true;
+      } catch {
+        // A rejected first follow-up gets one independent retry below.
+      }
+      if (attempt === 1) await waitForRetry(attempt);
+    }
+    return false;
+  }
+
   // Delivery can outlive a watcher cycle (notably an accepted branch turn).
   // Its claim prevents duplicate delivery, but must never occupy the serialized
   // restoration slot: every later actionable close still needs a successor.
@@ -876,7 +888,7 @@ export default function (pi: ExtensionAPI) {
       // A failed restoration must reach main even if an old branch claim
       // never settles. It stays unreported until Pi accepts it.
       const alarm = previousClaim && restoration.failure
-        ? sendWake(owner, restoration.failure).catch(() => false)
+        ? sendRestorationFailure(owner, restoration.failure)
         : Promise.resolve(false);
       // A replacement serializes delivery with the prior generation's claim,
       // while its watcher restoration remains free to handle later closes.
@@ -892,7 +904,9 @@ export default function (pi: ExtensionAPI) {
         ? !unreportedFailure || await sendWake(owner, unreportedFailure)
         : await deliverActionableWake(owner, message, Boolean(restoration.failure), pending, restoration.recovery);
       if (!delivered) {
-        settleClaim(previousSettlement);
+        // Keep the pending record reportable instead of inheriting an older
+        // branch's success when Pi did not accept this delivery.
+        settleClaim("failed");
         return;
       }
       const awaitingConsumption = owner.unconsumedWakes.has(pending.token);
