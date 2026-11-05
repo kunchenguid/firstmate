@@ -1,0 +1,16 @@
+1793842347	start	gen=host-63496-1793842347	primary=claude
+1793842356	failed	turn=host-63496-1793842347.1	posture=attended	rc=1	reports=0	unacked=1	error=1 cost=0 conversation_cost=0 input=0 cache_read=0 cache_write=0 output=0 turns=1		stale: fm-lab-stopfailure-20444-6397:w1:p1 (herdr: agent blocked - waiting on human, escalated immediately, not via wedge timer)
+1793842356	to-main	the supervision session could not take this wake: the engine turn failed (exit 1); this wake is yours
+1793842359	start	gen=host-72053-1793842358	primary=claude
+1793842360	pass-through	attended	main-only	check: rearm-resurface
+1793842372	start	gen=host-80730-1793842371	primary=claude
+1793842374	pass-through	attended	main-only	check: rearm-resurface
+1793842378	start	gen=host-90230-1793842378	primary=claude
+1793842378	take-over	arm=85258
+1793842380	pass-through	attended	main-only	check: rearm-resurface
+1793842385	start	gen=host-98553-1793842385	primary=claude
+1793842385	take-over	arm=93389
+1793842387	pass-through	attended	main-only	check: rearm-resurface
+1793842394	start	gen=host-6543-1793842394	primary=claude
+1793842394	take-over	arm=1448
+1793842396	pass-through	attended	main-only	check: rearm-resurface

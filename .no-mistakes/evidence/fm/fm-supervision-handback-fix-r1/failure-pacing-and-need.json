@@ -1,0 +1,74 @@
+{
+  "surface": "Real Claude CLI in named Herdr lab, localhost 401; unchanged tracked hook and autoarm; plain arm launch fault-injected by removing execute/read permissions from disposable fm-watch-arm.sh only",
+  "cooldown_seconds": 15,
+  "observed_marker_mtimes": [
+    1793842671.7214537,
+    1793842686.8377604
+  ],
+  "need_removed_during_pacing": {
+    "owner_pid": 86002,
+    "epoch": 3,
+    "at_observation": 1793842688.5498161,
+    "removed": "failure-home/state/probe.meta"
+  },
+  "terminal_epoch": "epoch=3 owner_pid=86002 outcome=clean updated_at=1793842701\nThu Nov  5 01:38:08 2026     bash {run-worktree}/.live-validation/project/bin/fm-claude-stop-autoarm.sh\n",
+  "turns": [
+    {
+      "type": "assistant",
+      "timestamp": "2026-11-05T01:37:51.313Z",
+      "session_id": "d0ae055c-995d-4417-852b-233df5d6519d",
+      "is_api_error_message": true,
+      "error": "authentication_failed",
+      "api_error_status": 401
+    },
+    {
+      "type": "result",
+      "session_id": "d0ae055c-995d-4417-852b-233df5d6519d",
+      "result_index": 0,
+      "terminal_reason": "api_error",
+      "result": "Failed to authenticate. API Error: 401 Disposable local StopFailure validation endpoint",
+      "api_error_status": 401
+    },
+    {
+      "type": "assistant",
+      "timestamp": "2026-11-05T01:37:53.127Z",
+      "session_id": "d0ae055c-995d-4417-852b-233df5d6519d",
+      "is_api_error_message": true,
+      "error": "authentication_failed",
+      "api_error_status": 401
+    },
+    {
+      "type": "result",
+      "session_id": "d0ae055c-995d-4417-852b-233df5d6519d",
+      "result_index": 1,
+      "terminal_reason": "api_error",
+      "origin": {
+        "kind": "task-notification",
+        "producer": "session-task"
+      },
+      "result": "Failed to authenticate. API Error: 401 Disposable local StopFailure validation endpoint",
+      "api_error_status": 401
+    },
+    {
+      "type": "assistant",
+      "timestamp": "2026-11-05T01:38:08.231Z",
+      "session_id": "d0ae055c-995d-4417-852b-233df5d6519d",
+      "is_api_error_message": true,
+      "error": "authentication_failed",
+      "api_error_status": 401
+    },
+    {
+      "type": "result",
+      "session_id": "d0ae055c-995d-4417-852b-233df5d6519d",
+      "result_index": 2,
+      "terminal_reason": "api_error",
+      "origin": {
+        "kind": "task-notification",
+        "producer": "session-task"
+      },
+      "result": "Failed to authenticate. API Error: 401 Disposable local StopFailure validation endpoint",
+      "api_error_status": 401
+    }
+  ],
+  "stable_result_count_after_wait": 3
+}

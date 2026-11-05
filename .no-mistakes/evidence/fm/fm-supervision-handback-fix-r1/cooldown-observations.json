@@ -1,0 +1,19 @@
+{
+  "configured_value": "08",
+  "oracle": "At most one committed StopFailure continuation per eight integer-clock seconds; continuations must not be dropped",
+  "real_claude_exit2_completion_times": [
+    "2026-11-05T01:32:37.287Z",
+    "2026-11-05T01:32:46.349Z",
+    "2026-11-05T01:32:55.918Z",
+    "2026-11-05T01:33:03.787Z",
+    "2026-11-05T01:33:11.993Z"
+  ],
+  "integer_clock_deltas_seconds": [
+    9,
+    9,
+    8,
+    8
+  ],
+  "observed_followup_results": 5,
+  "after_afk": "No additional turn; generation 6 committed afk instead of rewake"
+}

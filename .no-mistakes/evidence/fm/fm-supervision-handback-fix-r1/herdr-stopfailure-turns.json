@@ -1,0 +1,135 @@
+{
+  "surface": "Real Claude Code 2.1.318 persistent stream CLI running in Herdr 0.9.0 named lab; local HTTP 401 emulator; one initial input only",
+  "turns": [
+    {
+      "type": "assistant",
+      "timestamp": "2026-11-05T01:32:26.838Z",
+      "session_id": "1af0913b-ad32-48d4-aa89-1c6528c401ba",
+      "is_api_error_message": true,
+      "error": "authentication_failed",
+      "api_error_status": 401
+    },
+    {
+      "type": "result",
+      "session_id": "1af0913b-ad32-48d4-aa89-1c6528c401ba",
+      "result_index": 0,
+      "terminal_reason": "api_error",
+      "result": "Failed to authenticate. API Error: 401 Disposable local StopFailure validation endpoint",
+      "api_error_status": 401
+    },
+    {
+      "type": "assistant",
+      "timestamp": "2026-11-05T01:32:38.458Z",
+      "session_id": "1af0913b-ad32-48d4-aa89-1c6528c401ba",
+      "is_api_error_message": true,
+      "error": "authentication_failed",
+      "api_error_status": 401
+    },
+    {
+      "type": "result",
+      "session_id": "1af0913b-ad32-48d4-aa89-1c6528c401ba",
+      "result_index": 1,
+      "terminal_reason": "api_error",
+      "origin": {
+        "kind": "task-notification",
+        "producer": "session-task"
+      },
+      "result": "Failed to authenticate. API Error: 401 Disposable local StopFailure validation endpoint",
+      "api_error_status": 401
+    },
+    {
+      "type": "assistant",
+      "timestamp": "2026-11-05T01:32:48.910Z",
+      "session_id": "1af0913b-ad32-48d4-aa89-1c6528c401ba",
+      "is_api_error_message": true,
+      "error": "authentication_failed",
+      "api_error_status": 401
+    },
+    {
+      "type": "result",
+      "session_id": "1af0913b-ad32-48d4-aa89-1c6528c401ba",
+      "result_index": 2,
+      "terminal_reason": "api_error",
+      "origin": {
+        "kind": "task-notification",
+        "producer": "session-task"
+      },
+      "result": "Failed to authenticate. API Error: 401 Disposable local StopFailure validation endpoint",
+      "api_error_status": 401
+    },
+    {
+      "type": "assistant",
+      "timestamp": "2026-11-05T01:32:57.627Z",
+      "session_id": "1af0913b-ad32-48d4-aa89-1c6528c401ba",
+      "is_api_error_message": true,
+      "error": "authentication_failed",
+      "api_error_status": 401
+    },
+    {
+      "type": "result",
+      "session_id": "1af0913b-ad32-48d4-aa89-1c6528c401ba",
+      "result_index": 3,
+      "terminal_reason": "api_error",
+      "origin": {
+        "kind": "task-notification",
+        "producer": "session-task"
+      },
+      "result": "Failed to authenticate. API Error: 401 Disposable local StopFailure validation endpoint",
+      "api_error_status": 401
+    },
+    {
+      "type": "assistant",
+      "timestamp": "2026-11-05T01:33:05.259Z",
+      "session_id": "1af0913b-ad32-48d4-aa89-1c6528c401ba",
+      "is_api_error_message": true,
+      "error": "authentication_failed",
+      "api_error_status": 401
+    },
+    {
+      "type": "result",
+      "session_id": "1af0913b-ad32-48d4-aa89-1c6528c401ba",
+      "result_index": 4,
+      "terminal_reason": "api_error",
+      "origin": {
+        "kind": "task-notification",
+        "producer": "session-task"
+      },
+      "result": "Failed to authenticate. API Error: 401 Disposable local StopFailure validation endpoint",
+      "api_error_status": 401
+    },
+    {
+      "type": "assistant",
+      "timestamp": "2026-11-05T01:33:13.644Z",
+      "session_id": "1af0913b-ad32-48d4-aa89-1c6528c401ba",
+      "is_api_error_message": true,
+      "error": "authentication_failed",
+      "api_error_status": 401
+    },
+    {
+      "type": "result",
+      "session_id": "1af0913b-ad32-48d4-aa89-1c6528c401ba",
+      "result_index": 5,
+      "terminal_reason": "api_error",
+      "origin": {
+        "kind": "task-notification",
+        "producer": "session-task"
+      },
+      "result": "Failed to authenticate. API Error: 401 Disposable local StopFailure validation endpoint",
+      "api_error_status": 401
+    }
+  ],
+  "afk_observed": [
+    {
+      "at": 1793842398.898762,
+      "epoch_before": "epoch=6 owner_pid=6244 outcome=arming updated_at=1793842394 owner_session_id=1af0913b-ad32-48d4-aa89-1c6528c401ba\nThu Nov  5 01:33:13 2026     bash {run-worktree}/.live-validation/project/bin/fm-claude-stop-autoarm.sh\nThu Nov  5 01:32:21 2026     claude --setting-sources project --model haiku --tools  --strict-mcp-config --debug-file {run-worktree}/.live-validation/persistent-debug.log -p --input-format stream-json --output-format stream-json --verbose\n",
+      "pacing_child": [
+        "9685  6244 sleep 2"
+      ]
+    },
+    {
+      "at": 1793842400.2254589,
+      "epoch_after": "epoch=6 owner_pid=6244 outcome=afk updated_at=1793842400\nThu Nov  5 01:33:13 2026     bash {run-worktree}/.live-validation/project/bin/fm-claude-stop-autoarm.sh\n"
+    }
+  ],
+  "stable_results_after_afk": 6
+}

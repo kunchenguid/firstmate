@@ -1,0 +1,7 @@
+63874	Thu Nov  5 01:32:27 2026     bash {run-worktree}/.live-validation/project/bin/fm-watch.sh	stale: fm-lab-stopfailure-20444-6397:w1:p1 (herdr: agent blocked - waiting on human, escalated immediately, not via wedge timer)
+72361	Thu Nov  5 01:32:39 2026     bash {run-worktree}/.live-validation/project/bin/fm-watch.sh	check: rearm-resurface
+73327	Thu Nov  5 01:32:40 2026     bash {run-worktree}/.live-validation/project/bin/fm-watch.sh	stale: fm-lab-stopfailure-20444-6397:w1:p1
+81590	Thu Nov  5 01:32:52 2026     bash {run-worktree}/.live-validation/project/bin/fm-watch.sh	check: rearm-resurface
+91716	Thu Nov  5 01:32:58 2026     bash {run-worktree}/.live-validation/project/bin/fm-watch.sh	check: rearm-resurface
+99782	Thu Nov  5 01:33:06 2026     bash {run-worktree}/.live-validation/project/bin/fm-watch.sh	check: rearm-resurface
+7540	Thu Nov  5 01:33:15 2026     bash {run-worktree}/.live-validation/project/bin/fm-watch.sh	check: rearm-resurface

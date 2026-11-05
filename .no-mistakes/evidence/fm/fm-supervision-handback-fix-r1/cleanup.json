@@ -1,0 +1,11 @@
+{
+  "herdr_session": "fm-lab-stopfailure-20444-6397",
+  "guarded_teardown_exit": 0,
+  "default_session_tripwire": "teardown verified unchanged default-session snapshot",
+  "primary_driver_exit_statuses": {
+    "host": 143,
+    "plain_setup_attempt": 143,
+    "failure_and_need": 143
+  },
+  "remaining_disposable_product_processes": []
+}
