@@ -13,7 +13,7 @@
 #   fm-remote-secondmate-control.sh observe <id>
 #   fm-remote-secondmate-control.sh sync <id> [<parent-commit>]
 #   fm-remote-secondmate-control.sh update <id>
-#   fm-remote-secondmate-control.sh retire <id> [--force]
+#   fm-remote-secondmate-control.sh retire <id> [--force [--discard-scout-artifacts]]
 #
 # Remote placement ends here, but the second-mate agent runs only on a
 # session-provider backend whose server survives every SSH disconnection that
@@ -71,16 +71,22 @@ export FM_BACKEND_REX_NO_AUTOSTART=1
 die() { printf 'error: %s\n' "$1" >&2; exit 1; }
 usage() { sed -n '2,27p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
 validate_id() { case "$1" in ''|*[!A-Za-z0-9._-]*) die "invalid secondmate id: $1" ;; esac; }
+validate_retire_args() {
+  case "$#:${2:-}:${3:-}" in
+    1::|2::|2:--force:|3:--force:--discard-scout-artifacts) validate_id "$1" ;;
+    *) usage ;;
+  esac
+}
 
 # Sourcing fm-wake-lib.sh through the libraries below creates "$FM_HOME/state",
 # so recognize an already-retired home before loading them rather than
 # fabricating an unseeded home that every later retirement then refuses.
-# The accepted arguments match the retire dispatcher's.
-if [ "${1:-}" = retire ] && [ ! -e "$TARGET_HOME" ] && [ ! -L "$TARGET_HOME" ]; then
-  case "$#:${3:-}" in
-    2:|3:|3:--force) validate_id "$2"; printf 'already-retired: %s\n' "$2"; exit 0 ;;
-    *) usage ;;
-  esac
+if [ "${1:-}" = retire ]; then
+  validate_retire_args "${@:2}"
+  if [ ! -e "$TARGET_HOME" ] && [ ! -L "$TARGET_HOME" ]; then
+    printf 'already-retired: %s\n' "$2"
+    exit 0
+  fi
 fi
 
 # shellcheck source=bin/fm-backend.sh
@@ -513,9 +519,7 @@ cmd_update() {
 
 cmd_retire() {
   local id=$1 force=${2:-} recorded_server current_server
-  validate_id "$id"
   validate_home "$id"
-  [ -z "$force" ] || [ "$force" = --force ] || usage
   remote_endpoint_require "$id"
   if [ "$REMOTE_ENDPOINT_BACKEND" = rex ]; then
     recorded_server=$(fm_backend_meta_exact_value "$REMOTE_ENDPOINT_META" rex_server)
@@ -530,7 +534,7 @@ cmd_retire() {
     FM_HOME="$FM_ROOT" FM_ROOT_OVERRIDE="$FM_ROOT" \
       FM_STATE_OVERRIDE="$CONTROL_STATE" FM_DATA_OVERRIDE="$CONTROL_DATA" \
       FM_CONFIG_OVERRIDE="$TARGET_HOME/config" FM_TEARDOWN_GUARD_DONE=1 \
-      "$SCRIPT_DIR/fm-teardown.sh" "$id" --force
+      "$SCRIPT_DIR/fm-teardown.sh" "$@"
   else
     FM_HOME="$FM_ROOT" FM_ROOT_OVERRIDE="$FM_ROOT" \
       FM_STATE_OVERRIDE="$CONTROL_STATE" FM_DATA_OVERRIDE="$CONTROL_DATA" \
@@ -551,7 +555,7 @@ case "${1:-}" in
   observe) shift; [ "$#" -eq 1 ] || usage; cmd_observe "$@" ;;
   sync) shift; [ "$#" -ge 1 ] && [ "$#" -le 2 ] || usage; cmd_sync "$@" ;;
   update) shift; [ "$#" -eq 1 ] || usage; cmd_update "$@" ;;
-  retire) shift; [ "$#" -ge 1 ] && [ "$#" -le 2 ] || usage; cmd_retire "$@" ;;
+  retire) shift; cmd_retire "$@" ;;
   ''|-h|--help|help) usage ;;
   *) die "unknown command: $1" ;;
 esac

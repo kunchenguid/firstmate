@@ -1195,7 +1195,9 @@ remote_secondmate_teardown() {
     return 1
   }
   "$FM_ROOT/bin/fm-guard.sh" || true
-  if [ "$FORCE" = --force ]; then
+  if [ "$DISCARD_SCOUT_ARTIFACTS" = 1 ]; then
+    if out=$("$SCRIPT_DIR/fm-on.sh" "$ID" fm-remote-secondmate-control.sh retire "$ID" --force --discard-scout-artifacts < /dev/null 2>&1); then rc=0; else rc=$?; fi
+  elif [ "$FORCE" = --force ]; then
     if out=$("$SCRIPT_DIR/fm-on.sh" "$ID" fm-remote-secondmate-control.sh retire "$ID" --force < /dev/null 2>&1); then rc=0; else rc=$?; fi
   else
     if out=$("$SCRIPT_DIR/fm-on.sh" "$ID" fm-remote-secondmate-control.sh retire "$ID" < /dev/null 2>&1); then rc=0; else rc=$?; fi
