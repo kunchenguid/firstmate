@@ -447,6 +447,55 @@ assert_not_contains "$body" 'spendPriority' "quota never leaves the machine"
 assert_not_contains "$body" 'cursor-grok' "use profiles never leave the machine"
 pass "clear: one rule Choice request, key on the fd header only, spendPriority argmax over every candidate"
 
+# --- TypeSafe base: default, environment/.env precedence, and safe URLs ------
+for base in https://gateway.example/typesafe/ http://localhost:8080/proxy///; do
+  reset_log
+  TYPESAFE_BASE=$base TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
+  expect_code 0 "$code" "custom TypeSafe base resolves"
+  assert_contains "$out" '  status: clear' "custom TypeSafe base keeps the typed response contract"
+  endpoint=$(printf '%s\n' "$base" | sed 's:/*$::')/v1/systemone
+  assert_equals "$endpoint" "$(tail -n 1 "$LOG/argv")" "custom base has exactly one endpoint suffix"
+  assert_equals "Authorization: Bearer $KEY" "$(cat "$LOG/header")" "custom base keeps the fd header transport"
+  assert_not_contains "$(cat "$LOG/argv")" "$KEY" "custom base keeps the key out of argv"
+  assert_equals $'curl:clean\nquota-axi:clean' "$(cat "$LOG/child-env")" "custom base keeps the key out of child environments"
+done
+printf '%s\n' 'TYPESAFE_BASE=https://dotenv.example/typesafe/' > "$HOME_DIR/.env"
+reset_log
+FM_DISPATCH_PROVIDER=typesafe TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
+assert_equals 'https://dotenv.example/typesafe/v1/systemone' "$(tail -n 1 "$LOG/argv")" ".env supplies the TypeSafe base"
+reset_log
+TYPESAFE_BASE=https://environment.example/gateway/ TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
+assert_equals 'https://environment.example/gateway/v1/systemone' "$(tail -n 1 "$LOG/argv")" "environment base wins over .env"
+rm -f "$HOME_DIR/.env"
+for base in \
+  ftp://gateway.example/typesafe \
+  gateway.example/typesafe \
+  https:///typesafe \
+  https://user:password@gateway.example/typesafe \
+  https://gateway.example/typesafe?key=value \
+  https://gateway.example/typesafe? \
+  https://gateway.example/typesafe#fragment \
+  https://gateway.example/typesafe# \
+  'https://gateway.example/bad path' \
+  $'https://gateway.example/\npath'; do
+  reset_log
+  TYPESAFE_BASE=$base TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
+  expect_code 2 "$code" "invalid TypeSafe base is a configuration error"
+  assert_contains "$err" 'TYPESAFE_BASE' "invalid base names the setting"
+  assert_equals '' "$out" "invalid base never produces a fallback profile"
+  assert_absent "$LOG/argv" "invalid base never sends a request"
+  assert_absent "$LOG/quota-axi.calls" "invalid base never reads quota"
+done
+printf '%s\n' 'TYPESAFE_BASE=https://user:password@dotenv.example' > "$HOME_DIR/.env"
+reset_log
+TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
+expect_code 2 "$code" "invalid .env base is a configuration error"
+assert_contains "$err" 'TYPESAFE_BASE' "invalid .env base names the setting"
+assert_not_contains "$err" 'password' "invalid base diagnostic does not echo credentials"
+assert_absent "$LOG/argv" "invalid .env base never sends a request"
+rm -f "$HOME_DIR/.env"
+pass "TypeSafe base supports environment and .env overrides and rejects unsafe URLs before sending"
+
 # --- OpenRouter uses the same Choice validation and resolution path ---------
 OR_KEY='test-openrouter-key-never-in-child-env-or-argv'
 OR_RESPONSE="$TMP_ROOT/openrouter-response.json"
