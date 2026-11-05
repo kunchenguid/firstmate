@@ -580,6 +580,50 @@ SH
   pass 'hung destinations refuse readiness while inactive and ledger outcomes both progress'
 }
 
+# Force the portable Perl fallback: an outer report timer must not kill an
+# inner watchdog and leave its independently grouped forge process running.
+test_perl_destination_timeout_leaves_no_forge_process() {
+  local perl_bin tool tool_path mechanism pid state attempt running=0
+  command -v perl >/dev/null 2>&1 || { pass 'forge process cleanup (skipped: perl unavailable)'; return; }
+  make_world perl-forge-cleanup; bind_secondmate local
+  write_child "$MATE" a-hung 'done: PR https://github.com/owner/repo/pull/1 checks green'
+  printf 'expected_base=main\n' >> "$MATE/state/a-hung.meta"
+  printf 'epoch=%s\ncursor=\n' "$(date +%s)" > "$MATE/state/.inactive-outcome-reconcile"
+  perl_bin="$WORLD/perl-bin"
+  mkdir -p "$perl_bin"
+  for tool in perl bash sh sleep git dirname basename mkdir mktemp chmod mv rm rmdir cat grep tail cut tr sed stat date wc head sort find awk readlink id ps shasum sha256sum cksum touch ln uname cmp realpath; do
+    tool_path=$(type -P "$tool" 2>/dev/null) || continue
+    ln -s "$tool_path" "$perl_bin/$tool"
+  done
+  mechanism=$(PATH="$perl_bin" bash -c '. "$1"; fm_timeout_mechanism' _ "$ROOT/bin/fm-timeout-lib.sh")
+  [ "$mechanism" = perl ] || fail "the forge cleanup regression selected $mechanism instead of perl"
+  cat > "$WORLD/fakebin/gh" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$$" >> "${FM_FORGE_PIDS:?}"
+exec sleep 30
+SH
+  chmod +x "$WORLD/fakebin/gh"
+
+  PATH="$perl_bin" FM_FORGE_PIDS="$WORLD/forge.pids" FM_INACTIVE_RECONCILE_BUDGET_SECS=2 \
+    FM_FAKE_CREW_STATE=unknown run_reconcile "$MATE"
+  [ -s "$WORLD/forge.pids" ] || fail 'the Perl cleanup regression never started its forge command'
+  while IFS= read -r pid; do
+    for attempt in 1 2 3 4 5 6 7 8 9 10; do
+      state=$(ps -p "$pid" -o stat= 2>/dev/null || true)
+      case "$state" in ''|*Z*) break ;; esac
+      sleep 0.05
+    done
+    case "$state" in
+      ''|*Z*) ;;
+      *) running=1; reap "$pid" ;;
+    esac
+  done < "$WORLD/forge.pids"
+  [ "$running" = 0 ] || fail "a forge process survived the scan under the Perl timeout fallback after $attempt checks"
+  [ "$(outcome_count "$MATE" reported)" = 0 ] \
+    || fail 'a timed-out forge acquired a readiness receipt'
+  pass 'Perl destination timeouts leave no surviving forge process or readiness receipt'
+}
+
 # A scout's done line carries its report pointer, a failed line is delivered
 # under the failed verb, and a later terminal line after recovery is a new
 # delivery rather than a suppressed duplicate.
@@ -1519,6 +1563,7 @@ test_inactive_receipt_ignores_later_status_prose
 test_busy_child_does_not_starve_later_ledger_outcomes
 test_stalled_base_read_does_not_starve_later_ledger_outcomes
 test_several_stalled_base_reads_resume_before_later_ledger_outcomes
+test_perl_destination_timeout_leaves_no_forge_process
 test_secondmate_ledger_delivery_carries_report_and_failure
 test_pr_field_requires_recorded_pr_or_ready_signal_line
 test_terminal_line_during_state_read_yields_to_ledger_delivery

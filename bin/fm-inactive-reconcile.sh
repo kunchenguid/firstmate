@@ -523,8 +523,9 @@ claim_inactive_report_for_ledger() { # <task> <incarnation> <state> <ledger-fing
 # the child's meta lock. Returns 0 when the line is delivered, already
 # delivered, or nothing is owed, and 1 when it is owed but the parent channel
 # could not be written (the notice is queued once per record).
-report_child_ledger_locked() { # <id> <meta>
+report_child_ledger_locked() { # <id> <meta> [<destination-deadline>]
   local id=$1 meta=$2 status last previous state note pr mode yolo data incarnation fingerprint predecessor_head outcome_key line
+  local destination_deadline=${3:-}
   status="$STATE/$id.status"
   last=$(child_terminal_ledger_line "$status") || return 0
   state=$(status_line_verb "$last")
@@ -535,7 +536,7 @@ report_child_ledger_locked() { # <id> <meta>
     && [ ! -f "$(record_path "$fingerprint" pending)" ] \
     && ! fm_dod_accept_ship_done "$(meta_field "$meta" kind)" "$(meta_field "$meta" mode)" \
       "$(meta_field "$meta" worktree)" "$(meta_field "$meta" project)" "$last" \
-      "$STATE" "$id" "$meta" meta-locked >/dev/null; then
+      "$STATE" "$id" "$meta" meta-locked "$destination_deadline" >/dev/null; then
     return 0
   fi
   outcome_key="child-outcome-$id-$state-${fingerprint:0:8}"
@@ -607,7 +608,7 @@ ledger_pass() {
         fm_lock_release "$lock"
         return 1
       fi
-      fm_run_timed "$remaining" "$0" report "$id" || true
+      report_child_ledger_locked "$id" "$meta" "$deadline" || true
       fm_lock_release "$lock"
     done
   done

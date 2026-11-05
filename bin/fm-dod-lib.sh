@@ -992,8 +992,10 @@ fm_dod_named_head_reachable_outside_worktree() {  # <worktree> <project> <mode> 
 # (bin/fm-fleet-snapshot.sh), so the marker is read from <state>.
 # A supported PR URL also requires task metadata and a matching live destination;
 # published-head proof alone cannot supply that destination.
-fm_dod_accept_ship_done() {  # <kind> <mode> <worktree> <project> <line> [<state> <id> <meta> [meta-locked]]
+# An optional destination deadline caps that read at the scan budget remaining.
+fm_dod_accept_ship_done() {  # <kind> <mode> <worktree> <project> <line> [<state> <id> <meta> [meta-locked [destination-deadline]]]
   local kind=$1 mode=$2 wt=$3 project=$4 line=$5 state=${6:-} id=${7:-} meta=${8:-} url sha gerrit captured=''
+  local destination_deadline=${10:-} read_timeout=5 remaining
   fm_dod_should_gate_ship_done "$kind" "$mode" "$line" || return 0
   if [ "$mode" = local-only ] && [ -n "$meta" ]; then
     captured=$(cat "$meta") || return 1
@@ -1012,8 +1014,21 @@ fm_dod_accept_ship_done() {  # <kind> <mode> <worktree> <project> <line> [<state
     && fm_pr_url_parse "$url"; then
     # Readiness runs under a child's metadata lock during ledger scans. Bound
     # the forge read so unavailable proof refuses only this child's claim.
+    # Use one timer at the read, not a nested timer around the caller: killing
+    # an inner watchdog first can orphan its separately grouped forge command.
+    if [ -n "$destination_deadline" ]; then
+      case "$destination_deadline" in
+        0*|*[!0-9]*) printf '%s\n' 'PR destination deadline is invalid'; return 1 ;;
+      esac
+      [ "${#destination_deadline}" -le 18 ] \
+        || { printf '%s\n' 'PR destination deadline is invalid'; return 1; }
+      remaining=$((destination_deadline - $(date +%s)))
+      [ "$remaining" -gt 0 ] \
+        || { printf '%s\n' 'PR destination deadline expired'; return 1; }
+      [ "$remaining" -ge 5 ] || read_timeout=$remaining
+    fi
     # shellcheck disable=SC2016  # The child shell receives the arguments literally.
-    if ! captured=$(fm_run_timed 5 bash -c '
+    if ! captured=$(fm_run_timed "$read_timeout" bash -c '
       . "$1"
       shift
       fm_pr_require_base "$@"
