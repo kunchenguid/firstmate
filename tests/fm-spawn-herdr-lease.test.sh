@@ -20,7 +20,8 @@ TMP_ROOT=$(fm_test_tmproot fm-spawn-herdr-lease)
 mkdir -p "$TMP_ROOT"
 TMP_ROOT=$(cd "$TMP_ROOT" && pwd)
 
-# make_lease_case <name>: a home, a project, and the leased task copy.
+# make_lease_case <name> [harness] [slot]: a home, a project, and the leased
+# task copy at <case-dir>/<slot> (default `slot`).
 # The fake herdr models the two cwd fields: `cd` sent to the pane moves the
 # restorable top-level cwd ($D/cwd) and, unless a nested shell is running,
 # the foreground cwd with it. The fake treehouse opens that nested shell for
@@ -30,7 +31,7 @@ make_lease_case() {
   dir="$TMP_ROOT/$name"
   home="$dir/home"
   proj="$dir/project"
-  wt="$dir/slot"
+  wt="$dir/${3:-slot}"
   d="$dir/fake"
   fb="$dir/fakebin"
   mkdir -p "$d" "$fb" "$dir/user-home"
@@ -38,6 +39,7 @@ make_lease_case() {
   fm_git_init_commit "$proj"
   git clone -q "$proj" "$wt"
   fm_test_spawn_brief "$home" "$name" "Exercise the Herdr task-copy lease for $name."
+  printf '%s' "$wt" > "$d/slot"
   printf '%s' "$proj" > "$d/cwd"
   printf '%s' "$proj" > "$d/fg"
   : > "$d/treehouse-log"
@@ -87,7 +89,14 @@ case "${1:-} ${2:-}" in
     printf '{"result":{"pane":{"pane_id":"%s","cwd":"%s","foreground_cwd":"%s"}}}\n' \
       "${3:-}" "$(cat "$D/cwd")" "$(cat "$D/fg")"
     exit 0 ;;
-  'pane read') cat "$D/screen" 2>/dev/null; exit 0 ;;
+  'pane read')
+    # A 120-column pane: the recent source hard-wraps a longer line across
+    # rows, and only recent-unwrapped joins it back.
+    case " $* " in
+      *' --source recent-unwrapped '*) cat "$D/screen" 2>/dev/null ;;
+      *) fold -w 120 "$D/screen" 2>/dev/null ;;
+    esac
+    exit 0 ;;
   'pane run' | 'pane send-text')
     payload=${4:-}
     case "$payload" in
@@ -111,6 +120,10 @@ case "${1:-} ${2:-}" in
         printf '$ %s\n' "$payload" >> "$D/screen"
         if [ -f "$D/pwsh-pane" ]; then
           printf '__FM_CWD_%s__C:\\project__\n' "$nonce" >> "$D/screen"
+        elif [ -f "$D/silent-pane" ]; then
+          :
+        elif [ -f "$D/malformed-answer" ]; then
+          printf '__FM_CWD_%s__%s\n' "$nonce" "$(cat "$D/cwd")" >> "$D/screen"
         else
           printf '__FM_CWD_%s__%s__\n' "$nonce" "$(cat "$D/cwd")" >> "$D/screen"
         fi ;;
@@ -158,7 +171,7 @@ run_lease_spawn() {  # <case-dir> <id> [extra spawn args...]
   env -u HERDR_ENV -u HERDR_PANE_ID -u HERDR_SESSION -u HERDR_SOCKET_PATH \
     -u HERDR_TAB_ID -u HERDR_WORKSPACE_ID \
     PATH="$dir/fakebin:$PATH" FM_HOME="$dir/home" FM_FAKE_DIR="$dir/fake" \
-    FM_FAKE_SLOT="$dir/slot" HOME="$dir/user-home" CLAUDE_CONFIG_DIR='' \
+    FM_FAKE_SLOT="$(cat "$dir/fake/slot")" HOME="$dir/user-home" CLAUDE_CONFIG_DIR='' \
     FM_SPAWN_NO_GUARD=1 \
     "$SPAWN" "$id" "$dir/project" --backend herdr --mode no-mistakes --yolo off "$@" 2>&1
 }
@@ -361,6 +374,36 @@ test_windows_pane_that_never_moves_refuses() {
   pass "native Windows Herdr refuses a pane whose probe answers a folder other than its copy"
 }
 
+test_windows_probe_answer_wider_than_the_pane_is_accepted() {
+  local id=lease-windows-wide dir out status long
+  long=$(printf 'a-folder-name-long-enough-to-wrap-%.0s' 1 2 3)
+  dir=$(make_lease_case "$id" codex "$long/slot")
+  windows_shape "$dir" MINGW64_NT-10.0-26300
+  out=$(run_lease_spawn "$dir" "$id"); status=$?
+  expect_code 0 "$status" "a Git Bash pane whose probe answer is wider than the pane should spawn"$'\n'"$out"
+  [ "$(fold -w 120 "$dir/fake/screen" | wc -l)" -gt "$(wc -l < "$dir/fake/screen")" ] \
+    || fail "the probe answer fit the pane, so this case proved nothing about wrapping"
+  assert_grep "worktree=$dir/$long/slot" "$dir/home/state/$id.meta" "meta did not record the leased copy"
+  [ -e "$dir/fake/launched-command" ] || fail "the worker was not launched"
+  pass "native Windows Herdr accepts a folder probe answer the pane soft-wraps"
+}
+
+test_windows_missing_or_malformed_probe_answer_refuses() {
+  local id dir out status marker
+  for marker in silent-pane malformed-answer; do
+    id=lease-windows-$marker
+    dir=$(make_lease_case "$id")
+    windows_shape "$dir" MINGW64_NT-10.0-26300
+    : > "$dir/fake/$marker"
+    out=$(run_lease_spawn "$dir" "$id"); status=$?
+    [ "$status" -ne 0 ] || fail "$marker: a pane with no well-formed probe answer was accepted"$'\n'"$out"
+    [ -s "$dir/fake/probes" ] || fail "$marker: no folder probe reached the pane"
+    assert_contains "$out" "not its recorded worktree" "$marker: the refusal did not name the folder"
+    [ ! -e "$dir/fake/launched-command" ] || fail "$marker: a harness started in an unproven folder"
+  done
+  pass "native Windows Herdr refuses a missing or malformed folder probe answer"
+}
+
 test_windows_relaunch_refuses_without_probing() {
   local id=lease-windows-relaunch dir out status
   dir=$(make_lease_case "$id")
@@ -397,6 +440,8 @@ test_posix_host_never_probes() {
 test_windows_git_bash_pane_is_proven_by_its_folder_probe
 test_windows_powershell_pane_refuses_before_launch
 test_windows_pane_that_never_moves_refuses
+test_windows_probe_answer_wider_than_the_pane_is_accepted
+test_windows_missing_or_malformed_probe_answer_refuses
 test_windows_relaunch_refuses_without_probing
 test_posix_host_never_probes
 

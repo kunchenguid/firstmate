@@ -3236,6 +3236,10 @@ fm_backend_herdr_current_path() {  # <target>
 # POSIX command line into it. Returns 2 when the answer arrived but is not
 # POSIX-absolute, which proves the pane runs another shell, so the caller need
 # not wait out its deadline.
+# The answer is read with soft wraps joined (`--source recent-unwrapped`): a
+# long folder makes it wider than the pane, and the plain recent read splits it
+# across rows so the line never matches. A Herdr that rejects that source falls
+# back to the plain read, which still answers for a folder that fits the pane.
 # It types into the pane: call it only before any harness starts in that pane,
 # never on relaunch, which adopts a pane that may hold a live agent.
 fm_backend_herdr_probe_path() {  # <target>
@@ -3247,7 +3251,9 @@ fm_backend_herdr_probe_path() {  # <target>
     "printf '__FM_CWD_${nonce}__%s__\\n' \"\$PWD\"" >/dev/null 2>&1 || return 0
   for _ in 1 2 3 4 5 6; do
     sleep 0.5
-    out=$(fm_backend_herdr_capture "$1" 200) || continue
+    out=$(fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" pane read "$FM_BACKEND_HERDR_PANE" \
+      --source recent-unwrapped --lines 200 2>/dev/null) \
+      || out=$(fm_backend_herdr_capture "$1" 200) || continue
     raw=$(printf '%s\n' "$out" | tr -d '\r' \
       | sed -n "s/^__FM_CWD_${nonce}__\\(.*\\)__[[:space:]]*\$/\\1/p" | tail -n 1)
     case "$raw" in
