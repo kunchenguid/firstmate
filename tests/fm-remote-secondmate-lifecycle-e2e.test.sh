@@ -1972,6 +1972,10 @@ for artifact_outcome in preserve discard; do
   remote_env "$ROOT/bin/fm-spawn.sh" artifact-sm --secondmate --harness codex \
     > "$TMP_ROOT/artifact-launch.out" 2>&1 \
     || fail "could not launch the artifact retirement fixture: $(cat "$TMP_ROOT/artifact-launch.out")"
+  # Pin this fixture's parent generation after spawn publishes its metadata.
+  awk -F= '$1 != "spawn_gen"' "$PARENT/state/artifact-sm.meta" > "$TMP_ROOT/artifact-parent-meta.tmp"
+  printf 'spawn_gen=artifact-retirement-%s\n' "$artifact_outcome" >> "$TMP_ROOT/artifact-parent-meta.tmp"
+  mv -- "$TMP_ROOT/artifact-parent-meta.tmp" "$PARENT/state/artifact-sm.meta"
   cat > "$REMOTE_ROOT/bin/treehouse" <<'SH'
 #!/usr/bin/env bash
 exit 1
