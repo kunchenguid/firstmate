@@ -496,6 +496,41 @@ test_busy_child_does_not_starve_later_ledger_outcomes() {
   pass "busy child locks do not starve later ledger outcomes"
 }
 
+# Unreadable destination proof must refuse only that child's
+# readiness. A later child with matching live proof must still reach the parent
+# in the same scan, even when the earlier forge CLI never returns.
+test_stalled_base_read_does_not_starve_later_ledger_outcomes() {
+  local id url
+  make_world stalled-base-ledger; bind_secondmate local
+  for id in a-hung b-ready; do
+    url="https://github.com/owner/repo/pull/1"
+    [ "$id" != b-ready ] || url="https://github.com/owner/repo/pull/2"
+    write_child "$MATE" "$id" "done: PR $url checks green"
+    printf 'expected_base=main\n' >> "$MATE/state/$id.meta"
+  done
+  cat > "$WORLD/fakebin/gh" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "${FM_FORGE_LOG:?}"
+case "${3:-}" in
+  https://github.com/owner/repo/pull/1) exec sleep 60 ;;
+  https://github.com/owner/repo/pull/2) printf 'main\n' ;;
+  *) exit 97 ;;
+esac
+SH
+  chmod +x "$WORLD/fakebin/gh"
+
+  FM_FAKE_CREW_STATE=unknown run_reconcile "$MATE"
+  grep -Fq 'child-outcome-b-ready-done' "$MAIN/state/mate.status" 2>/dev/null \
+    || fail 'a hung base lookup starved a later ready child in the same scan'
+  ! grep -Fq 'child-outcome-a-hung-done' "$MAIN/state/mate.status" \
+    || fail 'a child with unavailable destination proof was reported done'
+  [ "$(outcome_count "$MATE" reported)" = 1 ] \
+    || fail 'a hung child acquired a readiness receipt'
+  grep -Fq 'pr view https://github.com/owner/repo/pull/1 --json baseRefName' "$WORLD/forge.log" \
+    || fail 'the regression never reached the hanging forge lookup'
+  pass 'a hung destination lookup refuses that child without starving the next ledger report'
+}
+
 # A scout's done line carries its report pointer, a failed line is delivered
 # under the failed verb, and a later terminal line after recovery is a new
 # delivery rather than a suppressed duplicate.
@@ -1433,6 +1468,7 @@ test_secondmate_multiline_terminal_outcome_is_delivered_once
 test_secondmate_unterminated_prose_reports_run_outcome
 test_inactive_receipt_ignores_later_status_prose
 test_busy_child_does_not_starve_later_ledger_outcomes
+test_stalled_base_read_does_not_starve_later_ledger_outcomes
 test_secondmate_ledger_delivery_carries_report_and_failure
 test_pr_field_requires_recorded_pr_or_ready_signal_line
 test_terminal_line_during_state_read_yields_to_ledger_delivery

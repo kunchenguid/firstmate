@@ -1010,9 +1010,16 @@ fm_dod_accept_ship_done() {  # <kind> <mode> <worktree> <project> <line> [<state
   if [ "$mode" != local-only ] \
     && url=$(fm_dod_pr_url_from_done_note "$(status_line_note "$line")") \
     && fm_pr_url_parse "$url"; then
-    if ! captured=$(fm_pr_require_base "$meta" "$FM_PR_PROVIDER" "$url" \
+    # Readiness runs under a child's metadata lock during ledger scans. Bound
+    # the forge read so unavailable proof refuses only this child's claim.
+    # shellcheck disable=SC2016  # The child shell receives the arguments literally.
+    if ! captured=$(fm_run_timed 5 bash -c '
+      . "$1"
+      shift
+      fm_pr_require_base "$@"
+    ' _ "$_FM_PR_LIB_ROOT/bin/fm-pr-lib.sh" "$meta" "$FM_PR_PROVIDER" "$url" \
       "$FM_PR_HOST" "$FM_PR_PATH" "$FM_PR_NUMBER" 2>&1); then
-      printf '%s\n' "$captured"
+      printf '%s\n' "${captured:-PR destination readiness could not be verified}"
       return 1
     fi
   fi
