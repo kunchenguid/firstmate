@@ -92,8 +92,9 @@
 #     reconcile_inventory independently of projection trust.
 #     Actionable captain holds appear in decisions_open; every captain hold remains
 #     in the bounded queued inventory with its structured classification metadata.
-#     Captain-hold rows carry the full question for presentation; their overview
-#     summary, reason, title, and hold_reason fields stay bounded.
+#     Generated captain-hold rows in decisions_open and queued carry the full
+#     question for presentation; their overview summary, reason, title, and
+#     hold_reason fields stay bounded.
 #     Before that queued bound is applied, non-captain-actionable rows are selected
 #     ahead of captain-actionable rows so separately projected live decisions cannot
 #     crowd Charted-Next-eligible work out of the summary. Each group is ordered by
