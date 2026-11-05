@@ -92,7 +92,20 @@ test_actions_queue_the_routed_answer_keys() {
   pass "add and correct are the only page actions and queue the add. and fix. answer keys"
 }
 
+test_open_project_survives_a_reload_without_the_hash() {
+  local page out
+  page=$(build_page reload)
+  out=$(node "$HARNESS" "$page" store)
+  printf '%s' "$out" | jq -e '
+    .error == ""
+    and .reloaded == {name: "Store launch", cards: 0}
+    and .reloadedAfterBack == {cards: 2}
+  ' >/dev/null || fail "reload lost the open project: $out"
+  pass "the open project survives an automatic redraw that drops the hash, and so does going back"
+}
+
 fm_test_run \
   test_overview_shows_every_project_with_its_counter \
   test_detail_orders_needs_then_progress_then_done_then_left \
-  test_actions_queue_the_routed_answer_keys
+  test_actions_queue_the_routed_answer_keys \
+  test_open_project_survives_a_reload_without_the_hash

@@ -7,7 +7,11 @@
 // Prints one JSON document:
 //   { error, totals:[text], cards:[{name,counter,now}], tray,
 //     detail:{name,counter,groups:[title],calls:[title],fixable:[title]},
+//     reloaded:{name,cards}, reloadedAfterBack:{cards},
 //     sent:[{question,selection,note}] }
+// `reloaded` is what the page shows after it is loaded again at a URL without
+// the hash, as Lavish's live reload does, while a project was open;
+// `reloadedAfterBack` the same after the captain went back to the overview.
 import { readFileSync } from "node:fs";
 
 const html = readFileSync(process.argv[2], "utf8");
@@ -80,8 +84,14 @@ const scripts = [...html.matchAll(/<script>\n([\s\S]*?)<\/script>/g)];
 const code = scripts.length ? scripts[scripts.length - 1][1] : "";
 
 const sent = [];
-const windowListeners = {};
+let windowListeners = {};
 const location = { hash: "" };
+const stored = {};
+const sessionStorage = {
+  getItem: (k) => (k in stored ? stored[k] : null),
+  setItem: (k, v) => { stored[k] = String(v); },
+  removeItem: (k) => { delete stored[k]; },
+};
 globalThis.document = {
   getElementById: (id) => byId[id] || null,
   createElement: (tag) => new Node(tag),
@@ -89,6 +99,7 @@ globalThis.document = {
 };
 globalThis.window = {
   location,
+  sessionStorage,
   lavish: { queuePrompt: (_prompt, ctx) => sent.push(ctx.data) },
   addEventListener: (type, fn) => { (windowListeners[type] ||= []).push(fn); },
   scrollTo() {},
@@ -114,7 +125,15 @@ function typeAndSend(container, words) {
   one(container, "send").fire("click");
 }
 
-const out = { error: "", totals: [], cards: [], tray: null, detail: null, sent };
+const out = { error: "", totals: [], cards: [], tray: null, detail: null, reloaded: null, reloadedAfterBack: null, sent };
+// Load the page again as a fresh document at a URL without the hash; only the
+// per-tab sessionStorage survives, as in a real same-tab navigation.
+function reload() {
+  for (const id of Object.keys(byId)) if (id !== "projects-data") byId[id] = new Node("div");
+  windowListeners = {};
+  location.hash = "";
+  new Function(code)();
+}
 try {
   new Function(code)();
   const main = byId["pv-main"];
@@ -153,6 +172,17 @@ try {
     one(fixRow, "fix").fire("click");
     typeAndSend(one(detail, "fixbox"), "Use the brand color");
   }
+
+  // The open project survives an automatic redraw (reload without the hash),
+  // and going back to the overview is remembered the same way.
+  reload();
+  const after = byId["pv-main"];
+  const h2 = all(after, (n) => n.tagName === "h2")[0];
+  out.reloaded = { name: h2 ? h2.textContent : null, cards: all(after, hasClass("card")).length };
+  const back = one(after, "back");
+  if (back) back.fire("click");
+  reload();
+  out.reloadedAfterBack = { cards: all(byId["pv-main"], hasClass("card")).length };
 } catch (e) {
   out.error = String(e && e.message || e);
 }
