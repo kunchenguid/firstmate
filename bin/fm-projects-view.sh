@@ -52,15 +52,19 @@
 #          `refresh --full` pays for it. A local-only snapshot
 #          (`fm-fleet-snapshot.sh --local-only`) reads this machine's files
 #          alone: secondmate rows come from the parent-side cached ledgers and
-#          no worker is probed, so an in-progress item keeps the status the
-#          page last published for it until the next full pass. Plain
+#          no worker is probed, so an in-progress item that still has a task
+#          record keeps the status the page last published for it until the
+#          next full pass; an item whose record is gone shows the plain state
+#          a full pass would. The scope is chosen by the command, never read
+#          from the environment. Plain
 #          `refresh`, the routine trigger, always uses the local-only scope.
 # build    Write the model into a fresh copy of the shipped template
 #          (.agents/skills/bearings/assets/projects-template.html) at the stable
 #          path $FM_HOME/.lavish/projects.html with the same one-slot injection
 #          and `<` escaping as the fleet board. The write is skipped when the
-#          model, apart from its generated time, equals the one already
-#          published, so an open page only reloads on a real change. Prints
+#          model, apart from its generated time and each cached home's age,
+#          equals the one already published, so an open page only reloads on a
+#          real change. Prints
 #          `projects: <path>` and `unchanged` or `written`.
 # serve    Build, then establish the page's Lavish session, bind its answer
 #          source, and arm its listener through bin/fm-lavish-board-lib.sh (the
@@ -118,7 +122,7 @@ PLACEHOLDER='__FM_PROJECTS_VIEW_DATA__'
 CONFIG_SCHEMA=fm-projects.v1
 MODEL_SCHEMA=fm-projects-view.v1
 LIST_CAP=30
-SNAPSHOT_SCOPE=${SNAPSHOT_SCOPE:-full}
+SNAPSHOT_SCOPE=full
 COOLDOWN_SECS=${FM_PROJECTS_VIEW_COOLDOWN_SECS:-600}
 case "$COOLDOWN_SECS" in ''|*[!0-9]*) COOLDOWN_SECS=600 ;; esac
 
@@ -290,7 +294,7 @@ build_model() {  # <snapshot.json> <archive.json> <published-model.json>
             body_lines:$r.body_lines,sort:($r.order)}
          elif $r.state == "in_flight" and $r.hold_bucket == null then
            {group:"moving",id:$r.id,title:$r.title,repo:$r.repo,local:true,home:null,
-            status:(if ($task.current_state.source // "none") == "none" and $kept[$r.id] != null then $kept[$r.id]
+            status:(if $task != null and ($task.current_state.source // "none") == "none" and $kept[$r.id] != null then $kept[$r.id]
                     else (($task.current_state.state // "") | state_label) end),since:$r.since,
             correctable:($task != null and ($task.kind // "") != "secondmate"),
             body_lines:$r.body_lines,sort:($r.order)}
@@ -489,8 +493,8 @@ publish_page() {  # [<snapshot.json>]
   # The template digest rides in the model so an updated template republishes
   # an otherwise unchanged view.
   digest=$(template_digest) || { rm -f -- "$model"; fail "cannot fingerprint the template"; }
-  new=$(jq -cS --arg t "$digest" 'del(.generated) + {template:$t}' "$model")
-  old=$(published_model "$page" | jq -cS 'del(.generated)' 2>/dev/null || true)
+  new=$(jq -cS --arg t "$digest" 'del(.generated) | .homes |= map(del(.age_seconds)) | . + {template:$t}' "$model")
+  old=$(published_model "$page" | jq -cS 'del(.generated) | .homes |= map(del(.age_seconds))' 2>/dev/null || true)
   if [ "${FORCE_WRITE:-0}" != 1 ] && [ -n "$old" ] && [ "$old" = "$new" ]; then
     rm -f -- "$model"
     printf 'projects: %s\nunchanged\n' "$page"
@@ -556,7 +560,7 @@ command_refresh() {
 }
 
 refresh_pass() {  # <scope>
-  ( SNAPSHOT_SCOPE=$1 publish_page "" ) >/dev/null 2>"$STATE/.projects-view.err" \
+  ( SNAPSHOT_SCOPE=$1; publish_page "" ) >/dev/null 2>"$STATE/.projects-view.err" \
     || refresh_log "$1 refresh failed: $(tr '\n' ' ' < "$STATE/.projects-view.err" 2>/dev/null)"
   rm -f -- "$STATE/.projects-view.err"
   : > "$STATE/.projects-view.refreshed" 2>/dev/null || true

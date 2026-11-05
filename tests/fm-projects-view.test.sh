@@ -411,6 +411,52 @@ test_routine_refresh_is_local_only_and_rate_limited() {
 
 # --- review regressions --------------------------------------------------------
 
+test_cached_home_age_alone_never_rewrites_the_page() {
+  local home snap out
+  home=$(fixture_home cached-age)
+  snap="$home/snapshot.json"
+  mate_snapshot() {  # <age-seconds> <omitted-count>
+    jq -n --arg now "$NOW" --argjson age "$1" --argjson omitted "$2" '{
+      schema: "fm-fleet-snapshot.v1", generated: $now,
+      backlog: {records: []}, tasks: [],
+      secondmate_current: {records: [
+        {id: "mate-mac", provenance: {selected: "structured-home", trust: "complete"}, current: {state: "no_active_work", reason: null},
+         freshness: {status: "cached", age_seconds: $age}, active_children: [], queued: [], landed: [], decisions_open: [],
+         omitted: [{surface: "queued", count: $omitted}]}
+      ]}
+    }' > "$snap"
+  }
+  mate_snapshot 3600 0
+  out=$(FM_HOME="$home" bash "$VIEW" build --snapshot "$snap") || fail "first build failed"
+  assert_contains "$out" "written" "first build writes"
+  mate_snapshot 4200 0
+  out=$(FM_HOME="$home" bash "$VIEW" build --snapshot "$snap") || fail "rebuild failed"
+  assert_contains "$out" "unchanged" "an older cached ledger with the same rows leaves the page alone"
+  sed -n '/<script id="projects-data" type="application\/json">/,/<\/script>/p' "$home/.lavish/projects.html" | sed '1d;$d' \
+    | jq -e '.homes == [{id: "mate-mac", status: "cached", reason: null, age_seconds: 3600, omitted: 0}]' >/dev/null \
+    || fail "the page lost the cached age it shows"
+  mate_snapshot 4200 2
+  out=$(FM_HOME="$home" bash "$VIEW" build --snapshot "$snap") || fail "changed rebuild failed"
+  assert_contains "$out" "written" "a changed home disclosure republishes"
+  pass "a cached ledger's growing age alone never rewrites the page"
+}
+
+test_local_refresh_shows_plain_state_without_a_task_record() {
+  local home fakebin
+  home=$(fixture_home torn-down)
+  fakebin=$(start_live_worker "$home" store-build)
+  SNAPSHOT_SCOPE=local PATH="$fakebin:$PATH" FM_HOME="$home" bash "$VIEW" build >/dev/null || fail "full build failed"
+  assert_equals Working "$(published_status "$home" store-launch store-build)" \
+    "build pays for the full scope whatever the caller's environment says"
+
+  rm -f -- "$home/state/store-build.meta"
+  PATH="$fakebin:$PATH" FM_HOME="$home" FM_PROJECTS_VIEW_COOLDOWN_SECS=0 bash "$VIEW" refresh || fail "refresh failed"
+  wait_for_refresh "$home" || fail "the routine refresh never finished"
+  assert_equals Started "$(published_status "$home" store-launch store-build)" \
+    "a routine refresh carries the published status only while the task record exists"
+  pass "a routine refresh shows the plain state once the task record is gone"
+}
+
 test_page_keys_never_name_a_task() {
   local home model
   home=$(fixture_home keys)
@@ -585,6 +631,8 @@ fm_test_run \
   test_refresh_is_opt_in_and_runs_detached \
   test_wake_drain_triggers_a_refresh \
   test_routine_refresh_is_local_only_and_rate_limited \
+  test_cached_home_age_alone_never_rewrites_the_page \
+  test_local_refresh_shows_plain_state_without_a_task_record \
   test_page_keys_never_name_a_task \
   test_serve_keeps_the_page_out_of_the_answer_intake \
   test_secondmate_rows_keep_membership_and_one_group \
