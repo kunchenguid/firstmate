@@ -1192,6 +1192,8 @@ command_hold() {
           task_show_or_fail "$dup" "task $dup disappeared before origin $origin was attached"
           [ "$(show_field_value "$show" held)" = yes ] && [ "$(show_field_value "$show" hold_kind)" = captain ] \
             || fail "task $dup was released before origin $origin was attached; retry the hold"
+          [ "$(printf '%s\n' "$(decode_shown_value "$(show_field "$show" body)")" | sed -n 's/^Captain hold key: \(.*\)$/\1/p' | head -1)" = "$key" ] \
+            || fail "task $dup no longer carries decision key $key; origin $origin was not attached, retry the hold"
           attached=$(printf '%s\n' "$(decode_shown_value "$(show_field "$show" body)")" \
             | sed -n 's/^Captain hold attached origins: \(.*\)$/\1/p' | head -1)
           list_has_line "${attached// /$'\n'}" "$origin" \

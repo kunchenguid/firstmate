@@ -779,6 +779,44 @@ SH
   pass "a duplicate decision key attaches to the open hold and distinct keys stay distinct"
 }
 
+# A duplicate ask that waits on the existing hold's lock must recheck that
+# hold's key under the lock: a key changed meanwhile is a different question.
+test_duplicate_key_rechecks_key_under_lock() {
+  local home holder pid rc i shown
+  home=$(make_home dup-key-race)
+  mkdir -p "$home/data/sample-review-b"
+  tasks_in "$home" add sample-review-b "Investigate sample-review-b" --kind scout --repo sample --start >/dev/null \
+    || fail "could not create the review fixture"
+  write_origin_meta "$home" sample-review-b
+  printf 'done: report complete\n' > "$home/state/sample-review-b.status"
+  FM_CAPTAIN_HOLD_NOW=2026-06-01T12:00:00Z run_captain "$home" hold sample-first --title "First" \
+    --reason "ship?" --rec yes --key ship-gate >/dev/null || fail "the first keyed ask failed"
+
+  bash -c '. "$1/bin/fm-wake-lib.sh"; fm_lock_acquire_wait "$2" && : > "$3" && sleep 30' _ \
+    "$ROOT" "$home/state/.control-sample-first.lock" "$home/control-held" &
+  holder=$!
+  for i in $(seq 1 100); do [ -e "$home/control-held" ] && break; sleep 0.1; done
+  [ -e "$home/control-held" ] || fail "the task control lock was not taken"
+
+  run_captain "$home" hold sample-second --title "Second" --reason "ship it?" --rec yes --key ship-gate \
+    --origin sample-review-b >/dev/null 2>"$home/race.err" &
+  pid=$!
+  sleep 1
+  printf 'Captain hold set: 2026-06-01T12:00:00Z\nCaptain hold key: tag-gate\n' > "$home/rekeyed.txt"
+  tasks_in "$home" update sample-first --body-file "$home/rekeyed.txt" >/dev/null \
+    || fail "could not change the held task's key"
+  kill "$holder" 2>/dev/null || true
+  pkill -P "$holder" 2>/dev/null || true
+  rm -rf "$home/state/.control-sample-first.lock"
+  rc=0
+  wait "$pid" || rc=$?
+  [ "$rc" -ne 0 ] || fail "a duplicate ask attached to a hold whose key changed while it waited"
+  assert_grep "no longer carries decision key ship-gate" "$home/race.err" "the key change was not named"
+  shown=$(tasks_in "$home" show sample-first --full)
+  assert_not_contains "$shown" "sample-review-b" "the review was attached to a different question"
+  pass "a duplicate ask rechecks the hold's key under its lock before attaching"
+}
+
 test_until_extension_keeps_the_unanswered_call() {
   local home out o shown
   home=$(make_home until-extension)
@@ -5302,3 +5340,4 @@ test_archived_answer_in_a_user_configured_archive_satisfies_the_gate
 test_hold_requires_a_pick_and_renders_options
 test_hold_collapses_a_duplicate_decision_key
 test_until_extension_keeps_the_unanswered_call
+test_duplicate_key_rechecks_key_under_lock
