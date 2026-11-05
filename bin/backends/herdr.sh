@@ -779,7 +779,8 @@ fm_backend_herdr_projection_workspace_label() {  # <task-id> <projection-id>
 # The namespace directory is suffixed with this account's uid, so another OS
 # account on the same host can never create it first by ordinary use and lock
 # this account out; a deliberately pre-created name still fails the ownership
-# and mode checks below and is refused, never adopted, chowned, or removed.
+# and mode checks below (on native Windows, the per-user %TEMP% check) and is
+# refused, never adopted, chowned, or removed.
 # The uid rather than $XDG_RUNTIME_DIR names it because that variable can differ
 # or be absent between login contexts of one account, which would split one
 # session's lock across processes.
@@ -808,13 +809,47 @@ fm_backend_herdr_presentation_lock_namespace_uid() {
   fi
 }
 
+# fm_backend_herdr_windows_host: true only on a Cygwin-family userspace (Git for
+# Windows, MSYS2, Cygwin) that has cygpath, which is where native Windows Herdr
+# runs. Every Windows-only branch in this adapter is gated on it, so a POSIX
+# host never reaches one.
+fm_backend_herdr_windows_host() {
+  case "$(uname -s 2>/dev/null)" in
+    CYGWIN*|MINGW*|MSYS*) command -v cygpath >/dev/null 2>&1 ;;
+    *) return 1 ;;
+  esac
+}
+
+# fm_backend_herdr_presentation_lock_namespace_usertemp: the native Windows
+# stand-in for the uid and mode-700 proof. Git for Windows and MSYS2 mount /tmp
+# `noacl`, where a directory stats 755 whatever chmod asked for and stat reports
+# the caller's own uid for every directory, so neither field proves anything
+# there. The namespace is accepted only when it sits directly inside a /tmp the
+# runtime mounts `usertemp` - the caller's own %TEMP%, which Windows ACLs keep
+# per-user - and that one mount is `noacl`, so mode bits genuinely cannot be
+# carried. Any other mount shape, or a namespace resolving elsewhere, is refused.
+fm_backend_herdr_presentation_lock_namespace_usertemp() {  # <dir>
+  local opts real root
+  opts=$(mount 2>/dev/null | sed -n 's|^.* on /tmp type [^ ]* (\(.*\))$|\1|p')
+  case "$opts" in *"
+"*) return 1 ;; esac
+  case ",$opts," in *,usertemp,*) ;; *) return 1 ;; esac
+  case ",$opts," in *,noacl,*) ;; *) return 1 ;; esac
+  real=$(cd "$1" 2>/dev/null && pwd -P) || return 1
+  root=$(cd /tmp 2>/dev/null && pwd -P) || return 1
+  [ "$(dirname "$real")" = "$root" ]
+}
+
 fm_backend_herdr_presentation_lock_namespace_valid() {
   local dir=$1 expected_uid owner mode
   [ -d "$dir" ] && [ ! -L "$dir" ] || return 1
   expected_uid=$(id -u 2>/dev/null) || return 1
   owner=$(fm_backend_herdr_presentation_lock_namespace_uid "$dir") || return 1
   mode=$(fm_backend_herdr_presentation_lock_namespace_mode "$dir") || return 1
-  [ "$owner" = "$expected_uid" ] && [ "$mode" = 700 ]
+  [ "$owner" = "$expected_uid" ] || return 1
+  [ "$mode" = 700 ] && return 0
+  fm_backend_herdr_windows_host || return 1
+  fm_backend_herdr_presentation_lock_namespace_usertemp "$dir"
 }
 
 # Resolve the one verified running named-session socket path as an absolute
@@ -3177,6 +3212,38 @@ fm_backend_herdr_current_path() {  # <target>
   fm_backend_herdr_target_ready "$1" || return 0
   fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" pane get "$FM_BACKEND_HERDR_PANE" 2>/dev/null \
     | jq -r '.result.pane.foreground_cwd // empty' 2>/dev/null
+}
+
+# fm_backend_herdr_probe_path: native Windows only - ask the pane's own shell
+# for its folder, or print nothing. Herdr never reports `foreground_cwd` off
+# Unix, and on Windows `.pane.cwd` is the launched shell process's folder, which
+# does not follow a cd in a Git Bash pane, so no passive read can prove where
+# the shell is. This types a printf carrying a fresh nonce and reads back the
+# line that starts with it, so neither the echoed command nor an earlier
+# probe's answer can be mistaken for this one.
+# Only a POSIX-absolute answer is accepted. PowerShell expands $PWD to a
+# drive-letter path and cmd.exe expands nothing, so a pane that is not running
+# Git Bash never yields an answer and the caller refuses instead of launching a
+# POSIX command line into it.
+# It types into the pane: call it only before any harness starts in that pane,
+# never on relaunch, which adopts a pane that may hold a live agent.
+fm_backend_herdr_probe_path() {  # <target>
+  local nonce out raw
+  fm_backend_herdr_windows_host || return 0
+  fm_backend_herdr_target_ready "$1" || return 0
+  nonce="$$$RANDOM$RANDOM"
+  fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" pane run "$FM_BACKEND_HERDR_PANE" \
+    "printf '__FM_CWD_${nonce}__%s__\\n' \"\$PWD\"" >/dev/null 2>&1 || return 0
+  for _ in 1 2 3 4 5 6; do
+    sleep 0.5
+    out=$(fm_backend_herdr_capture "$1" 200) || continue
+    raw=$(printf '%s\n' "$out" | tr -d '\r' \
+      | sed -n "s/^__FM_CWD_${nonce}__\\(.*\\)__[[:space:]]*\$/\\1/p" | tail -n 1)
+    case "$raw" in
+      /*) printf '%s' "$raw"; return 0 ;;
+    esac
+  done
+  return 0
 }
 
 # fm_backend_herdr_send_text_line: send one line of TEXT then submit,

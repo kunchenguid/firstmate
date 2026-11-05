@@ -6423,6 +6423,46 @@ test_wait_transition_clean_timeout_returns_1() {
   pass "fm_backend_herdr_wait_transition: stock macOS Bash clean timeout closes fd 9 and returns 1"
 }
 
+# --- presentation lock namespace on native Windows -----------------------------
+
+# Git for Windows mounts /tmp noacl, so a namespace directory stats 755 whatever
+# chmod asked for. Fake uname, cygpath, and mount stand in for that userspace so
+# these cases run on every host; the directory is a real 755 one directly under
+# /tmp, which is the only shape the relaxation can accept.
+# ns_valid_via <uname> <tmp-mount-options> <dir>: 0 when the namespace is valid.
+ns_valid_via() {
+  local fb
+  fb=$(fm_fakebin "$(mktemp -d "$TMP_ROOT/ns.XXXXXX")")
+  printf '#!/usr/bin/env bash\nprintf "%%s\\n" %q\n' "$1" > "$fb/uname"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$fb/cygpath"
+  printf '#!/usr/bin/env bash\nprintf "C:/Program Files/Git on / type ntfs (binary,noacl,auto)\\n"\nprintf "C:/Users/u/AppData/Local/Temp on /tmp type ntfs (%%s)\\n" %q\n' "$2" > "$fb/mount"
+  chmod +x "$fb/uname" "$fb/cygpath" "$fb/mount"
+  PATH="$fb:$PATH" bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_presentation_lock_namespace_valid "$1"' "$ROOT" "$3"
+}
+
+test_presentation_lock_namespace_on_a_windows_usertemp_mount() {
+  local ns nested status
+  ns=$(mktemp -d /tmp/fm-herdr-ns.XXXXXX)
+  chmod 755 "$ns"
+  nested="$ns/nested"
+  mkdir "$nested"
+  chmod 755 "$nested"
+  [ "$(stat -c '%a' "$ns" 2>/dev/null || /usr/bin/stat -f '%Lp' "$ns")" != 700 ] \
+    || fail "the fixture directory must not carry mode 700, or the relaxation is never reached"
+  ns_valid_via MINGW64_NT-10.0 'binary,noacl,posix=0,usertemp' "$ns" \
+    || fail "a 755 namespace directly in a noacl usertemp /tmp on native Windows was refused"
+  status=0; ns_valid_via Linux 'binary,noacl,posix=0,usertemp' "$ns" || status=$?
+  expect_code 1 "$status" "a POSIX host must still require mode 700"
+  status=0; ns_valid_via MINGW64_NT-10.0 'binary,noacl,posix=0' "$ns" || status=$?
+  expect_code 1 "$status" "a /tmp that is not the per-user usertemp mount must be refused"
+  status=0; ns_valid_via MINGW64_NT-10.0 'binary,posix=0,usertemp' "$ns" || status=$?
+  expect_code 1 "$status" "a /tmp mount that can carry modes must still require mode 700"
+  status=0; ns_valid_via MINGW64_NT-10.0 'binary,noacl,posix=0,usertemp' "$nested" || status=$?
+  expect_code 1 "$status" "a namespace not directly inside /tmp must be refused"
+  rm -rf "$ns"
+  pass "presentation lock namespace: a native Windows noacl usertemp /tmp replaces the mode-700 proof, and nothing else does"
+}
+
 # shellcheck source=bin/fm-backend.sh
 . "$ROOT/bin/fm-backend.sh"
 
@@ -6677,3 +6717,4 @@ test_wait_transition_stream_absorb_clears_then_timeout
 test_wait_transition_reader_failure_returns_2
 test_wait_transition_bad_ack_returns_2_and_cleans_up
 test_wait_transition_clean_timeout_returns_1
+test_presentation_lock_namespace_on_a_windows_usertemp_mount

@@ -42,6 +42,8 @@ Prerequisites:
 - `jq` for JSON responses.
 - The universal harness and toolchain requirements in [`configuration.md`](configuration.md#toolchain).
 - `python3` only for optional protocol-16 presentation-space ordering, native event subscription, and opt-in [project groups](#project-groups) agent-view transport.
+- On native Windows (Git for Windows, no WSL), Herdr's `[terminal] default_shell` set to Git Bash, such as `C:/Program Files/Git/bin/bash.exe`.
+  Herdr otherwise opens PowerShell, which cannot run the spawn's POSIX commands, so the spawn refuses before launching a worker.
 
 Herdr is Apache-2.0 licensed.
 Releases before 0.8.0 were dual-licensed AGPL-3.0-or-later or commercial.
@@ -993,6 +995,7 @@ Tests use thin compatibility wrappers in `tests/herdr-test-safety.sh` and never 
 - A Firstmate outside Herdr cannot resolve a launcher workspace, so a colliding home label refuses new spawns until the collision is cleared.
 - Ghost and placeholder recognition uses ANSI de-emphasis when available; an unstyled glyph row carrying trailing non-idle text fails safely to `unknown`.
 - Supervisor transport support is separate from task-spawn support; see [away-mode supervisor configuration](configuration.md#away-mode-supervisor-backend-fm_supervisor_backend--fm_supervisor_target).
+- On native Windows, Herdr reports no foreground folder, so a fresh spawn confirms its pane's folder with a one-line shell probe before any worker starts, and relaunch, which never types into a pane that may hold a live agent, refuses instead.
 
 ## Regression entry points
 

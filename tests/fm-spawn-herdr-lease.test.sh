@@ -79,9 +79,15 @@ case "${1:-} ${2:-}" in
         bash -c 'cd -- "$1" && pwd -P > "$2"' bash "$FM_FAKE_SLOT" "$D/fg"
       fi
     fi
+    if [ -f "$D/windows" ]; then
+      # Native Windows Herdr: no foreground_cwd, and a cwd frozen at launch.
+      printf '{"result":{"pane":{"pane_id":"%s","cwd":"C:\\\\project","foreground_cwd":null}}}\n' "${3:-}"
+      exit 0
+    fi
     printf '{"result":{"pane":{"pane_id":"%s","cwd":"%s","foreground_cwd":"%s"}}}\n' \
       "${3:-}" "$(cat "$D/cwd")" "$(cat "$D/fg")"
     exit 0 ;;
+  'pane read') cat "$D/screen" 2>/dev/null; exit 0 ;;
   'pane run' | 'pane send-text')
     payload=${4:-}
     case "$payload" in
@@ -97,6 +103,17 @@ case "${1:-} ${2:-}" in
         [ ! -f "$D/drop-first-cd" ] || [ "$sends" -gt 1 ] || exit 0
         bash -c 'cd -- "$1" && pwd -P > "$2"' bash "$path" "$D/cwd"
         cp "$D/cwd" "$D/fg" ;;
+      "printf '__FM_CWD_"*)
+        # The shell answers the folder probe: Git Bash with its POSIX folder,
+        # PowerShell with a drive-letter $PWD.
+        printf '%s\n' "$payload" >> "$D/probes"
+        nonce=${payload#"printf '__FM_CWD_"}; nonce=${nonce%%__*}
+        printf '$ %s\n' "$payload" >> "$D/screen"
+        if [ -f "$D/pwsh-pane" ]; then
+          printf '__FM_CWD_%s__C:\\project__\n' "$nonce" >> "$D/screen"
+        else
+          printf '__FM_CWD_%s__%s__\n' "$nonce" "$(cat "$D/cwd")" >> "$D/screen"
+        fi ;;
       *'encode launch-brief'* | *'Firstmate operational input waiting: read'*)
         [ ! -f "$D/launch-send-fails" ] || exit 1
         printf '%s\n' "$payload" > "$D/launched-command"
@@ -288,6 +305,73 @@ test_never_moving_worktree_entry() {
   [ ! -e "$dir/home/state/$id.meta" ] || fail "refused spawn published metadata"
   pass "Herdr refuses a never-moving pane with diagnostic context and no launch"
 }
+
+# windows_shape <case-dir> <uname>: native Windows Herdr output (no
+# foreground_cwd, a frozen drive-letter cwd) on a host whose uname is <uname>.
+# The fake uname and cygpath let every host drive the Windows-only branch.
+windows_shape() {
+  local dir=$1
+  printf '#!/usr/bin/env bash\nprintf "%%s\\n" %q\n' "$2" > "$dir/fakebin/uname"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$dir/fakebin/cygpath"
+  chmod +x "$dir/fakebin/uname" "$dir/fakebin/cygpath"
+  : > "$dir/fake/windows"
+}
+
+test_windows_git_bash_pane_is_proven_by_its_folder_probe() {
+  local id=lease-windows-bash dir out status
+  dir=$(make_lease_case "$id")
+  windows_shape "$dir" MINGW64_NT-10.0-26300
+  out=$(run_lease_spawn "$dir" "$id"); status=$?
+  expect_code 0 "$status" "a Git Bash pane that answers the probe from its copy should spawn"$'\n'"$out"
+  [ -s "$dir/fake/probes" ] || fail "no folder probe reached the pane"
+  [ "$(cat "$dir/fake/cd-sends")" = 1 ] || fail "a pane already in its copy received a redundant cd"
+  assert_grep "worktree=$dir/slot" "$dir/home/state/$id.meta" "meta did not record the leased copy"
+  [ -e "$dir/fake/launched-command" ] || fail "the worker was not launched"
+  pass "native Windows Herdr proves the pane's folder with a shell probe and launches"
+}
+
+test_windows_powershell_pane_refuses_before_launch() {
+  local id=lease-windows-pwsh dir out status
+  dir=$(make_lease_case "$id")
+  windows_shape "$dir" MINGW64_NT-10.0-26300
+  : > "$dir/fake/pwsh-pane"
+  out=$(run_lease_spawn "$dir" "$id"); status=$?
+  [ "$status" -ne 0 ] || fail "a PowerShell pane was accepted"$'\n'"$out"
+  [ -s "$dir/fake/probes" ] || fail "no folder probe reached the pane"
+  assert_contains "$out" "not its recorded worktree" "the refusal did not name the folder"
+  assert_contains "$out" "default_shell" "the refusal did not name the Herdr shell setting"
+  [ ! -e "$dir/fake/launched-command" ] || fail "a POSIX launch line was typed into PowerShell"
+  [ ! -e "$dir/home/state/$id.meta" ] || fail "refused spawn published metadata"
+  pass "native Windows Herdr refuses a PowerShell pane whose drive-letter answer proves no folder"
+}
+
+test_windows_pane_that_never_moves_refuses() {
+  local id=lease-windows-stuck dir out status
+  dir=$(make_lease_case "$id")
+  windows_shape "$dir" MINGW64_NT-10.0-26300
+  : > "$dir/fake/never-moves"
+  out=$(run_lease_spawn "$dir" "$id"); status=$?
+  [ "$status" -ne 0 ] || fail "a probe answering the project folder was accepted"$'\n'"$out"
+  [ -s "$dir/fake/probes" ] || fail "no folder probe reached the pane"
+  [ ! -e "$dir/fake/launched-command" ] || fail "a harness started outside its copy"
+  pass "native Windows Herdr refuses a pane whose probe answers a folder other than its copy"
+}
+
+test_posix_host_never_probes() {
+  local id=lease-posix-no-probe dir out status
+  dir=$(make_lease_case "$id")
+  windows_shape "$dir" Linux
+  out=$(run_lease_spawn "$dir" "$id"); status=$?
+  [ "$status" -ne 0 ] || fail "a pane with no folder read was accepted"$'\n'"$out"
+  [ ! -e "$dir/fake/probes" ] || fail "a POSIX host typed a folder probe into the pane"
+  assert_not_contains "$out" "default_shell" "a POSIX host refusal carried the Windows hint"
+  pass "a POSIX host keeps the passive folder read and never types a probe"
+}
+
+test_windows_git_bash_pane_is_proven_by_its_folder_probe
+test_windows_powershell_pane_refuses_before_launch
+test_windows_pane_that_never_moves_refuses
+test_posix_host_never_probes
 
 test_delayed_worktree_entry
 test_dropped_worktree_entry

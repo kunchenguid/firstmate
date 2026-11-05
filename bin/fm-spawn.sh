@@ -5501,6 +5501,12 @@ spawn_assert_agent_worktree() {
   for i in $(seq 0 "$last_poll"); do
     [ "$i" -eq 0 ] || sleep 0.5
     seen=$(spawn_current_path "$WT_TARGET" || true)
+    # Native Windows Herdr has no passive folder read, so every tenth poll asks
+    # the pane's shell instead. That probe types into the pane, which is safe
+    # only here, before any harness starts; relaunch keeps the passive read.
+    if [ -z "$seen" ] && [ "$BACKEND" = herdr ] && [ $((i % 10)) -eq 0 ]; then
+      seen=$(fm_backend_herdr_probe_path "$WT_TARGET" || true)
+    fi
     if [ -n "$seen" ] && [ "$(real_path_or_raw "$seen")" = "$expected" ]; then
       return 0
     fi
@@ -5512,6 +5518,9 @@ spawn_assert_agent_worktree() {
   if [ "$BACKEND" = herdr ] && fm_backend_herdr_parse_target "$WT_TARGET"; then
     agent_status=$(fm_backend_herdr_agent_status_raw "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE")
     echo "error: Herdr pane '$WT_TARGET': last foreground_cwd='${seen:-unknown}', agent_status='${agent_status:-unknown}'" >&2
+    if fm_backend_herdr_windows_host; then
+      echo "error: on native Windows a Herdr task pane must run Git Bash, set as [terminal] default_shell in Herdr's config; a PowerShell or cmd.exe pane cannot answer the folder probe" >&2
+    fi
   fi
   exit 1
 }
