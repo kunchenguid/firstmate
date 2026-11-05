@@ -2169,7 +2169,9 @@ EOF
   } >> "$home/state/mate.status"
   json=$(run "$home" "$fakebin" --json)
   printf '%s' "$json" | jq -e --arg key "pending-reply-$corr" '
-    (.decisions_open | any(.[]; .key == $key and (.summary | contains("finish the report"))))
+    (.decisions_open | any(.[]; .key == $key and (.summary | contains("finish the report"))
+                                 and (.question | type) == "string"
+                                 and (.question | contains("finish the report"))))
       and (.decisions_open | any(.[]; .key == "pending-reply-0123456789abcdef") | not)
       and (.decisions_open | any(.[]; .key == "pending-reply-fedcba9876543210") | not)
   ' >/dev/null || fail "bearings did not list exactly the open escalated pending reply: $json"

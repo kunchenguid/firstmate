@@ -80,7 +80,7 @@ fm_pending_reply_escalated_decisions_json() {  # <state-dir>
     key=$(fm_pending_reply_escalation_key "$corr")
     item=$(jq -nc --arg id "$task" --arg key "$key" \
       --arg summary "pending-reply escalated: task=$task pending-reply-id=$corr request=$summary" \
-      '{id:$id,key:$key,verb:"blocked",summary:$summary,owner:"(main)"}') || return 1
+      '{id:$id,key:$key,verb:"blocked",summary:$summary,question:$summary,owner:"(main)"}') || return 1
     if [ -n "$out" ]; then out="$out,$item"; else out=$item; fi
   done
   printf '[%s]' "$out"
