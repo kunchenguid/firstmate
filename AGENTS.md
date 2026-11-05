@@ -439,6 +439,8 @@ opencode api post "/api/session/$OPENCODE_SESSION_ID/compact" --data '{}'
 
 `OPENCODE_SESSION_ID` is already in the agent's environment. The 170k tier is native and unattended — `compaction.buffer` in `~/.config/opencode/opencode.json` sets it against the model's 1,000,000-token window — so the 150k tier is this role's own earlier cut, not a second native setting.
 
+The two commands above are the OpenCode implementation of this role, and the 150k, 170k and 180k tiers are OpenCode's, cut against OpenCode's native compaction buffer and its 1,000,000-token window. Under another verified harness, the agent measures the live prompt and compacts with that harness's own context readout and compaction command, and picks its cut tiers for that harness's window; the standing role's authority to measure, cut, and resume is the same on every harness.
+
 Before a cut, capture what the cut would lose: the open question, the pending decision, the paths in play, and the next unfinished step. In this home, run `/stow` first so durable knowledge and open-work records are persisted rather than left in conversation.
 This role authorizes the agent to invoke `/stow` on its own authority before it makes a cut, and the capture the role performs before the cut is what `/stow` persists.
 
