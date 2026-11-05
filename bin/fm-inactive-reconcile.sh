@@ -32,6 +32,9 @@
 # does before it removes the child's record; it exits 0 when the line is
 # delivered or nothing is owed, and non-zero when the parent channel could not
 # be written, so teardown refuses instead of discarding an undelivered outcome.
+# Ledger delivery keeps its own durable cursor, independent of the cadence
+# marker, so a scan interrupted by several stalled readiness reads resumes
+# after its last visited child on the next poll.
 # The cadence-gated scan below then evaluates at most once per
 # FM_INACTIVE_RECONCILE_SECS (default 900, valid 60..1800) per home, except
 # that --startup performs the same scan immediately in the locked session
@@ -317,20 +320,21 @@ scan_marker_age() {
   if [ "$now" -lt "$m" ]; then printf '0\n'; else printf '%s\n' $((now - m)); fi
 }
 
-scan_marker_cursor() {
-  [ -f "$SCAN_MARKER" ] && [ ! -L "$SCAN_MARKER" ] || return 0
-  grep '^cursor=' "$SCAN_MARKER" 2>/dev/null | tail -1 | cut -d= -f2- || true
+scan_marker_cursor() { # [<marker>]
+  local marker=${1:-$SCAN_MARKER}
+  [ -f "$marker" ] && [ ! -L "$marker" ] || return 0
+  grep '^cursor=' "$marker" 2>/dev/null | tail -1 | cut -d= -f2- || true
 }
 
-write_scan_marker() { # <cursor>
-  local cursor=$1 marker_tmp
+write_scan_marker() { # <cursor> [<marker>]
+  local cursor=$1 marker=${2:-$SCAN_MARKER} marker_tmp
   marker_tmp=$(mktemp "$STATE/.inactive-outcome-reconcile.XXXXXX") || return 1
   {
     printf 'epoch=%s\n' "$(reconcile_now)"
     printf 'cursor=%s\n' "$cursor"
   } > "$marker_tmp" || { rm -f "$marker_tmp"; return 1; }
   chmod 600 "$marker_tmp" 2>/dev/null || true
-  mv -f "$marker_tmp" "$SCAN_MARKER" || { rm -f "$marker_tmp"; return 1; }
+  mv -f "$marker_tmp" "$marker" || { rm -f "$marker_tmp"; return 1; }
 }
 
 meta_field() {
@@ -564,26 +568,39 @@ report_child_ledger_locked() { # <id> <meta>
   return 1
 }
 
-# Every direct child's ledger, under its meta lock. File reads, plus a local
-# git reachability check for a ship done: with no delivery record yet, so it
-# runs on every poll in a secondmate home; a delivery failure is already queued as a
-# notice and never fails the scan.
+# Every direct child's ledger, under its meta lock. A ship done: with no delivery
+# record also needs local head reachability and bounded live destination proof.
+# Persist the visit before that read: even the scan's aggregate backstop must
+# not make every poll start again at the same stalled children.
 ledger_pass() {
-  local meta id lock
-  for meta in "$STATE"/*.meta; do
-    [ -f "$meta" ] || continue
-    id=$(basename "$meta" .meta)
-    valid_id "$id" || continue
-    [ "$(meta_field "$meta" kind)" != secondmate ] || continue
-    lock=$(fm_meta_lock_path "$meta") || continue
-    fm_lock_try_acquire "$lock" || continue
-    if [ ! -f "$meta" ] || [ -L "$meta" ] \
-      || [ "$(meta_field "$meta" kind)" = secondmate ]; then
+  local meta id lock cursor range marker="$STATE/.terminal-outcome-ledger-scan"
+  cursor=$(scan_marker_cursor "$marker")
+  valid_id "$cursor" || cursor=''
+  for range in after through; do
+    [ "$range" != through ] || [ -n "$cursor" ] || break
+    for meta in "$STATE"/*.meta; do
+      [ -f "$meta" ] || continue
+      id=$(basename "$meta" .meta)
+      valid_id "$id" || continue
+      case "$range" in
+        after) [ -z "$cursor" ] || [[ "$id" > "$cursor" ]] || continue ;;
+        through) [[ "$id" > "$cursor" ]] && continue ;;
+      esac
+      [ "$(meta_field "$meta" kind)" != secondmate ] || continue
+      lock=$(fm_meta_lock_path "$meta") || continue
+      fm_lock_try_acquire "$lock" || continue
+      if [ ! -f "$meta" ] || [ -L "$meta" ] \
+        || [ "$(meta_field "$meta" kind)" = secondmate ]; then
+        fm_lock_release "$lock"
+        continue
+      fi
+      if ! write_scan_marker "$id" "$marker"; then
+        fm_lock_release "$lock"
+        return 1
+      fi
+      report_child_ledger_locked "$id" "$meta" || true
       fm_lock_release "$lock"
-      continue
-    fi
-    report_child_ledger_locked "$id" "$meta" || true
-    fm_lock_release "$lock"
+    done
   done
 }
 

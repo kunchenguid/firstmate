@@ -531,6 +531,46 @@ SH
   pass 'a hung destination lookup refuses that child without starving the next ledger report'
 }
 
+# Several individually bounded destination reads can exhaust the whole scan.
+# Repeated polls must resume beyond them instead of starting at the first hang.
+test_several_stalled_base_reads_resume_before_later_ledger_outcomes() {
+  local id number=0 attempt
+  make_world several-stalled-bases; bind_secondmate local
+  for id in a-hung b-hung c-hung z-ready; do
+    number=$((number + 1))
+    write_child "$MATE" "$id" "done: PR https://github.com/owner/repo/pull/$number checks green"
+    printf 'expected_base=main\n' >> "$MATE/state/$id.meta"
+  done
+  cat > "$WORLD/fakebin/gh" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "${FM_FORGE_LOG:?}"
+case "${3:-}" in
+  https://github.com/owner/repo/pull/1|https://github.com/owner/repo/pull/2|https://github.com/owner/repo/pull/3) exec sleep 30 ;;
+  https://github.com/owner/repo/pull/4) printf 'main\n' ;;
+  *) exit 97 ;;
+esac
+SH
+  chmod +x "$WORLD/fakebin/gh"
+
+  for attempt in 1 2 3 4 5; do
+    FM_INACTIVE_RECONCILE_BUDGET_SECS=2 FM_FAKE_CREW_STATE=unknown run_reconcile "$MATE"
+    grep -Fq 'child-outcome-z-ready-done' "$MAIN/state/mate.status" 2>/dev/null && break
+  done
+  grep -Fq 'child-outcome-z-ready-done' "$MAIN/state/mate.status" 2>/dev/null \
+    || fail 'several hung destination reads starved the healthy child across bounded retries'
+  for id in a-hung b-hung c-hung; do
+    ! grep -Fq "child-outcome-$id-done" "$MAIN/state/mate.status" \
+      || fail "a timed-out child was reported ready: $id"
+  done
+  [ "$(outcome_count "$MATE" reported)" = 1 ] \
+    || fail 'timed-out destination reads acquired readiness receipts'
+  for number in 1 2 3; do
+    grep -Fq "pr view https://github.com/owner/repo/pull/$number --json baseRefName" "$WORLD/forge.log" \
+      || fail "the regression never reached hung destination $number"
+  done
+  pass 'several hung destination reads refuse readiness without starving later ledger reports'
+}
+
 # A scout's done line carries its report pointer, a failed line is delivered
 # under the failed verb, and a later terminal line after recovery is a new
 # delivery rather than a suppressed duplicate.
@@ -1469,6 +1509,7 @@ test_secondmate_unterminated_prose_reports_run_outcome
 test_inactive_receipt_ignores_later_status_prose
 test_busy_child_does_not_starve_later_ledger_outcomes
 test_stalled_base_read_does_not_starve_later_ledger_outcomes
+test_several_stalled_base_reads_resume_before_later_ledger_outcomes
 test_secondmate_ledger_delivery_carries_report_and_failure
 test_pr_field_requires_recorded_pr_or_ready_signal_line
 test_terminal_line_during_state_read_yields_to_ledger_delivery
