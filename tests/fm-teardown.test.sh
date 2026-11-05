@@ -1783,6 +1783,61 @@ SH
   pass 'scout artifacts survive ordinary and forced cleanup, conflicts and unsafe paths'
 }
 
+test_scout_tracked_data_is_project_content() {
+  local shape material case_dir rc source
+  for shape in file symlink dangling-symlink directory; do
+    for material in absent directory symlink; do
+      case_dir=$(make_case "scout-tracked-data-$shape-$material")
+      write_meta "$case_dir" no-mistakes scout
+      prepare_scout_teardown "$case_dir"
+      case "$shape" in
+        file) printf 'project data\n' > "$case_dir/wt/data" ;;
+        symlink)
+          mkdir -p "$case_dir/wt/project-data"
+          printf 'project data\n' > "$case_dir/wt/project-data/fixture"
+          ln -s project-data "$case_dir/wt/data" ;;
+        dangling-symlink) ln -s project-data "$case_dir/wt/data" ;;
+        directory)
+          mkdir -p "$case_dir/wt/data"
+          printf 'project data\n' > "$case_dir/wt/data/fixture" ;;
+      esac
+      git -C "$case_dir/wt" add data
+      [ "$shape" != symlink ] || git -C "$case_dir/wt" add project-data
+      git -C "$case_dir/wt" commit -qm 'project-owned data entry'
+      if [ "$material" != absent ]; then
+        [ "$shape" != file ] || rm "$case_dir/wt/data"
+        case "$shape" in
+          symlink|dangling-symlink) mkdir -p "$case_dir/wt/project-data" ;;
+          *) mkdir -p "$case_dir/wt/data" ;;
+        esac
+        source="$case_dir/wt/data/task-x1"
+        if [ "$material" = directory ]; then
+          mkdir -p "$source"
+          printf 'labelled answer\n' > "$source/labels.txt"
+        else
+          ln -s "$case_dir/missing-answers" "$source"
+        fi
+      fi
+      rc=0
+      run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+      if [ "$material" = absent ]; then
+        expect_code 0 "$rc" "$shape: project-owned data blocked cleanup: $(cat "$case_dir/stderr")"
+        assert_absent "$case_dir/state/task-x1.meta" "$shape: cleanup retained metadata"
+      else
+        expect_code 1 "$rc" "$shape/$material: task material did not block cleanup"
+        assert_grep "$source" "$case_dir/stderr" "$shape/$material: refusal did not name task material"
+        assert_present "$case_dir/state/task-x1.meta" "$shape/$material: refusal removed metadata"
+        if [ "$material" = directory ]; then
+          [ "$(cat "$source/labels.txt")" = 'labelled answer' ] || fail "$shape: task bytes changed"
+        else
+          [ -L "$source" ] || fail "$shape: task symlink removed"
+        fi
+      fi
+    done
+  done
+  pass 'tracked data entries permit cleanup while untracked scout task material blocks it'
+}
+
 test_scout_artifact_discard_requires_force() {
   local case_dir rc
   case_dir=$(make_case scout-artifact-discard)
@@ -3723,6 +3778,105 @@ configure_secondmate_with_tmux_children() {  # <case-dir>
       "mode=local-only"
     : > "$home/state/$child.status"
   done
+}
+
+test_forced_secondmate_child_scout_artifacts() {
+  local backend state case_dir home child_wt rc
+  for backend in tmux pool orca; do
+    for state in present late missing clean reassigned; do
+      [ "$state" != reassigned ] || [ "$backend" = pool ] || continue
+      case_dir=$(make_case "child-scout-artifacts-$backend-$state")
+      write_meta "$case_dir" local-only secondmate
+      configure_secondmate_with_tmux_children "$case_dir"
+      home="$case_dir/secondmate-home"
+      child_wt="$case_dir/child-a-wt"
+      if [ "$backend" = pool ]; then
+        mkdir -p "$case_dir/pool/1"
+        git -C "$case_dir/project" worktree move "$child_wt" "$case_dir/pool/1/repo"
+        child_wt="$case_dir/pool/1/repo"
+        printf '{"worktrees":[{"name":"1","path":"%s"}]}\n' "$child_wt" > "$case_dir/pool/treehouse-state.json"
+        if [ "$state" = reassigned ]; then
+          printf 'task=other-task\nhome=%s\n' "$home" > "$case_dir/pool/1/.fm-slot-owner"
+        else
+          printf 'task=child-a\nhome=%s\n' "$home" > "$case_dir/pool/1/.fm-slot-owner"
+        fi
+      fi
+      fm_write_meta "$home/state/child-a.meta" \
+        "window=firstmate:fm-child-a" "endpoint_task_id=child-a" \
+        "worktree=$child_wt" "project=$case_dir/project" "kind=scout" "mode=local-only"
+      if [ "$backend" = orca ]; then
+        printf 'backend=orca\nterminal=child-terminal\norca_worktree_id=child-wt::/orca/child\n' >> "$home/state/child-a.meta"
+      fi
+      case "$state" in
+        present|reassigned)
+          mkdir -p "$child_wt/data/child-a"
+          printf 'labelled child answer\n' > "$child_wt/data/child-a/labels.txt" ;;
+        missing) git -C "$case_dir/project" worktree remove --force "$child_wt" ;;
+      esac
+      cat > "$case_dir/fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = kill-window ] && [[ "$*" = *fm-child-a* ]]; then
+  : > "$FM_SCOUT_CHILD_CASE/stopped"
+  if [ "$FM_SCOUT_CHILD_STATE" = late ]; then
+    mkdir -p "$FM_SCOUT_CHILD_WT/data/child-a"
+    printf 'labelled child answer\n' > "$FM_SCOUT_CHILD_WT/data/child-a/labels.txt"
+  fi
+fi
+exit 0
+SH
+      cat > "$case_dir/fakebin/orca" <<'SH'
+#!/usr/bin/env bash
+case "${1:-} ${2:-}" in
+  'worktree show')
+    printf '{"ok":true,"result":{"worktree":{"id":"child-wt::/orca/child","path":"%s"}}}\n' "$FM_SCOUT_CHILD_WT" ;;
+  'terminal close')
+    : > "$FM_SCOUT_CHILD_CASE/stopped"
+    if [ "$FM_SCOUT_CHILD_STATE" = late ]; then
+      mkdir -p "$FM_SCOUT_CHILD_WT/data/child-a"
+      printf 'labelled child answer\n' > "$FM_SCOUT_CHILD_WT/data/child-a/labels.txt"
+    fi
+    printf '{"ok":true,"result":{}}\n' ;;
+  'worktree rm')
+    : > "$FM_SCOUT_CHILD_CASE/removed"
+    printf '{"ok":true,"result":{}}\n' ;;
+  *) printf '{"ok":true,"result":{}}\n' ;;
+esac
+SH
+      cat > "$case_dir/fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+: > "$FM_SCOUT_CHILD_CASE/returned"
+exit 0
+SH
+      chmod +x "$case_dir/fakebin/orca"
+      rc=0
+      FM_SCOUT_CHILD_CASE="$case_dir" FM_SCOUT_CHILD_STATE="$state" FM_SCOUT_CHILD_WT="$child_wt" \
+        run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+      case "$state" in
+        present|late)
+          expect_code 1 "$rc" "$backend/$state: child artifact cleanup was allowed"
+          assert_grep "$child_wt/data/child-a" "$case_dir/stderr" "$backend/$state: source missing"
+          assert_grep "$home/data/child-a" "$case_dir/stderr" "$backend/$state: destination missing"
+          [ "$(cat "$child_wt/data/child-a/labels.txt")" = 'labelled child answer' ] || fail "$backend/$state: bytes lost"
+          assert_present "$home/state/child-a.meta" "$backend/$state: child identity lost"
+          assert_absent "$case_dir/removed" "$backend/$state: Orca removal ran"
+          assert_absent "$case_dir/returned" "$backend/$state: pool return ran"
+          if [ "$state" = late ]; then
+            assert_present "$case_dir/stopped" "$backend: late-write boundary not reached"
+          else
+            assert_absent "$case_dir/stopped" "$backend: preflight stopped endpoint"
+          fi
+          ;;
+        *)
+          expect_code 0 "$rc" "$backend/$state: retirement failed: $(cat "$case_dir/stderr")"
+          assert_absent "$home" "$backend/$state: retirement retained home"
+          if [ "$state" = reassigned ]; then
+            assert_present "$child_wt/data/child-a/labels.txt" 'reassigned copy lost artifacts'
+          fi
+          ;;
+      esac
+    done
+  done
+  pass 'forced retirement preserves child scout artifacts before and after endpoint close'
 }
 
 test_forced_secondmate_teardown_holds_descendant_lifecycle_locks() {
@@ -6254,6 +6408,8 @@ SH
 }
 
 test_scout_task_artifacts_refuse_cleanup
+test_scout_tracked_data_is_project_content
+test_forced_secondmate_child_scout_artifacts
 test_scout_artifact_discard_requires_force
 test_hidden_untracked_work_refuses_before_return
 test_content_fallback_git_capability_boundary

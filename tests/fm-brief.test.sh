@@ -1118,6 +1118,8 @@ test_scout_completion_write_exception_is_task_scoped() {
       'scout outside-write rule did not permit durable task artifacts beside the report'
     assert_grep "Keep every durable task artifact beside the report under \`$home/data/$id/\`" "$brief" \
       'scout brief did not name the absolute durable artifact directory'
+    assert_grep "Task material left in the worktree's mirrored data directory blocks cleanup and is discarded only with explicit approval through \`--force --discard-scout-artifacts\`." "$brief" \
+      'scout brief did not explain the cleanup refusal and explicit discard route'
     assert_no_grep 'The report is the only thing that survives' "$brief" \
       'scout brief still restricted durable evidence to the report'
     assert_grep "except for the task's empty-inventory attestation through \`fm-captain-hold.sh complete --none\`, exactly as specified under Definition of done." "$brief" \

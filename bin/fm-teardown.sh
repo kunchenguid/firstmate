@@ -87,8 +87,8 @@
 # A mirrored <copy>/data/<task-id> path blocks cleanup even with --force.
 # Teardown never moves or merges these artifacts. Preserve them in the home and
 # remove the copy, or use --force --discard-scout-artifacts only after explicit
-# approval to discard those artifacts. A symlinked or non-directory data parent
-# also refuses because absence of task material cannot be proved safely.
+# approval to discard those artifacts. An untracked symlinked or non-directory
+# data parent also refuses because absence cannot be proved safely.
 # A scratch copy (kind=scout) and a --force run discard untracked content.
 # Treehouse's return resets with `git clean -fd`, which never deletes a nested
 # git repository, so the pool slot stays dirty and later checkouts skip it.
@@ -2113,8 +2113,9 @@ require_scout_artifacts_preserved() {  # <copy> <task-id> <durable-task-director
   fm_task_id_path_safe "$task" || return 1
   [ -n "$wt" ] && [ -d "$wt" ] || return 0
   source="$wt/data/$task"
-  if [ -L "$wt/data" ] || { [ -e "$wt/data" ] && [ ! -d "$wt/data" ]; } \
-    || [ -e "$source" ] || [ -L "$source" ]; then
+  if [ -e "$source" ] || [ -L "$source" ] \
+    || { { [ -L "$wt/data" ] || { [ -e "$wt/data" ] && [ ! -d "$wt/data" ]; }; } \
+      && [ "$(git -C "$wt" cat-file -t HEAD:data 2>/dev/null)" != blob ]; }; then
     echo "REFUSED: scout task $task may still hold durable artifacts at $source (including an unsafe data parent)." >&2
     echo "Preserve the material under $destination and remove it from the copy before cleanup; teardown never moves or overwrites artifacts." >&2
     echo "Only after explicit approval to discard these artifacts, rerun with --force --discard-scout-artifacts." >&2
@@ -3306,10 +3307,13 @@ validate_firstmate_home_children_removal() {
       child_proj=$(meta_value "$child_meta" project)
       validate_child_worktree_for_removal "$child_wt" "$child_proj" >/dev/null || return 1
     fi
-    if [ "$child_kind" = scout ]; then
+    if [ "$child_kind" = scout ] && [ -n "$child_wt" ] && [ -d "$child_wt" ]; then
       # Reassigned slots belong to their new task and are records-only cleanup.
       local child_owner_rc=0
-      require_owned_worktree_slot_record "$child_id" "$child_wt" || child_owner_rc=$?
+      child_proj=$(meta_value "$child_meta" project)
+      if [ "$child_backend" != orca ] && fm_treehouse_pool_slot "$child_proj" "$child_wt"; then
+        require_owned_worktree_slot_record "$child_id" "$child_wt" || child_owner_rc=$?
+      fi
       if [ "$child_owner_rc" -ne "$TEARDOWN_SLOT_REASSIGNED_RC" ]; then
         [ "$child_owner_rc" -eq 0 ] || return 1
         require_scout_artifacts_preserved "$child_wt" "$child_id" "$home/data/$child_id" || return 1
@@ -3561,6 +3565,9 @@ cleanup_firstmate_home_children() {
     elif [ "$child_backend" = orca ]; then
       if [ -n "$child_wt" ] && [ -d "$child_wt" ]; then
         validate_child_worktree_for_removal "$child_wt" "$child_proj" >/dev/null || return 1
+        if [ "$child_kind" = scout ]; then
+          require_scout_artifacts_preserved "$child_wt" "$child_id" "$home/data/$child_id" || return 1
+        fi
         rm -f "$child_wt/.claude/settings.local.json" "$child_wt/.opencode/plugins/fm-turn-end.js" \
           "$child_wt/.fm-grok-turnend" "$child_wt/.fm-kimi-turnend"
       fi
@@ -3580,6 +3587,9 @@ cleanup_firstmate_home_children() {
         require_owned_worktree_slot_record "$child_id" "$child_wt" || return 1
       else
         validate_child_worktree_for_removal "$child_wt" "$child_proj" >/dev/null || return 1
+        if [ "$child_kind" = scout ]; then
+          require_scout_artifacts_preserved "$child_wt" "$child_id" "$home/data/$child_id" || return 1
+        fi
         rm -f "$child_wt/.claude/settings.local.json" "$child_wt/.opencode/plugins/fm-turn-end.js" \
           "$child_wt/.opencode/plugins/fm-busy-state.js" \
           "$child_wt/.fm-grok-turnend" "$child_wt/.fm-kimi-turnend"

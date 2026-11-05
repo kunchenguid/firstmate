@@ -714,7 +714,7 @@ $SETUP_BASE
 This is a SCOUT task: the deliverable is a written report, not a PR.
 The worktree is your laboratory - install, run, edit, and make scratch commits freely; all of it is discarded at teardown.
 Keep every durable task artifact beside the report under \`$DATA/$ID/\` by absolute path.
-The worktree is deleted at cleanup, including any task material left in its mirrored data directory.
+Task material left in the worktree's mirrored data directory blocks cleanup and is discarded only with explicit approval through \`--force --discard-scout-artifacts\`.
 
 # Rules
 1. Never push to any remote and never open a PR.
