@@ -2219,9 +2219,21 @@ EOF
 # reports landed in an idle composer (issue 7296). Any other character, even
 # one, keeps the caller on the `pending` verdict.
 fm_composer_codex_mouse_noise_only() {  # <screen>
-  local held rest
-  held=$(fm_composer_extract_selected_content styled=0 "$1") || return 1
+  local held rest tmp plain line below=0
+  tmp=$(mktemp) || return 1
+  fm_composer_extract_selected_content styled=0 "$1" >"$tmp" || { rm -f "$tmp"; return 1; }
+  held=$(cat "$tmp")
+  rm -f "$tmp"
   [ -n "$held" ] || return 1
+  # The bare selection ends at its first blank row, so text after a blank row
+  # is not proven absent. Only the single codex footer row may follow.
+  plain=$(printf '%s\n' "$1" | fm_composer_strip_ansi)
+  while IFS= read -r line; do
+    [ -n "$(printf '%s' "$line" | tr -d '[:space:]')" ] && below=$((below + 1))
+  done <<EOF
+$(printf '%s\n' "$plain" | sed -n "$((FM_COMPOSER_SELECTED_LAST + 2)),\$p")
+EOF
+  [ "$below" -le 1 ] || return 1
   rest=$(printf '%s' "$held" | LC_ALL=C tr -d '\033[:space:]' \
     | LC_ALL=C sed -E 's/\[<[0-9]+;[0-9]+;[0-9]+[Mm]//g')
   [ -z "$rest" ]

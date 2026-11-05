@@ -83,11 +83,12 @@ case "${1:-}" in
     noise="$glyph [<65;192;52M[<65;192;52M[<65;19"$'\n'"  2;52M[<65;192;52M"
     footer='  gpt-6 high · 100% left · ~/proj'
     case "${FM_FAKE_TMUX_COMPOSER:-}" in
-      codex-noise | codex-noise-late-busy | codex-noise-unreadable | codex-noise-returns | codex-noise-text | codex-noise-busy)
+      codex-noise | codex-noise-late-busy | codex-noise-unreadable | codex-noise-returns | codex-noise-text | codex-noise-gap | codex-noise-busy)
         row=$noise
         case "$FM_FAKE_TMUX_COMPOSER" in
           codex-noise) [ "$cleared" = 1 ] && row="$glyph" ;;
           codex-noise-unreadable) [ "$cleared" = 1 ] && { printf 'banner\n'; exit 0; } ;;
+          codex-noise-gap) row="$glyph [<65;192;52M"$'\n\n'"  real draft after a blank row" ;;
           codex-noise-text) row="$glyph [<65;192;52M please keep this draft" ;;
         esac
         printf '0\n' > "$FM_SEND_LOG.lastbusy"
@@ -325,6 +326,40 @@ test_codex_turn_starting_between_reads_is_not_interrupted() {
   done
   [ "$sent" -ge 1 ] && [ "$held" -ge 1 ] || fail "sweep must cover both outcomes (sent=$sent held=$held)"
   pass "fm-send inbox: no C-c follows a final pre-key read that shows a turn"
+}
+
+test_codex_mouse_noise_before_real_text_after_blank_row_is_never_cleared() {
+  local dir
+  dir=$(codex_noise_case codexgap codex-noise-gap)
+  [ "$(count_lines "$dir/send.log.keys" C-c)" = 0 ] ||
+    fail "a draft with real text after a blank row must never be cleared"
+  [ ! -s "$dir/send.log" ] || fail "nothing may be typed onto a multiline draft"
+  pass "fm-send inbox: reports followed by a blank row and real text are left alone"
+}
+
+test_watcher_retry_clears_noise_after_a_busy_first_send() {
+  local dir rec
+  dir=$(setup_case codexretry codex)
+  : >"$dir/send.log"
+  : >"$dir/send.log.keys"
+  rec="$dir/home/state/t1.inbox/001.msg"
+  mkdir -p "${rec%/*}"
+  printf 'delivery=fire-and-forget\n--\nwake up\n' >"$rec"
+  ring() { # <composer-mode>
+    rm -f "$dir/send.log.reads"
+    env PATH="$dir/fakebin:$PATH" FM_HOME="$dir/home" FM_SEND_LOG="$dir/send.log" \
+      FM_FAKE_TMUX_COMPOSER=$1 FM_COMPOSER_HARNESS=codex \
+      bash -c '. "$1"; fm_task_inbox_ring tmux sess:fm-t1 "$2" fm-t1' _ \
+      "$ROOT/bin/fm-task-inbox-lib.sh" "$rec" >/dev/null 2>&1
+  }
+  ring codex-noise-busy
+  [ "$(count_lines "$dir/send.log.keys" C-c)" = 0 ] || fail "a busy first send must not be cleared"
+  ring codex-noise
+  [ "$(count_lines "$dir/send.log.keys" C-c)" = 1 ] ||
+    fail "the idle retry should clear the noise once:"$'\n'"$(cat "$dir/send.log.keys")"
+  assert_contains "$(cat "$dir/send.log")" "Firstmate instruction waiting" \
+    "the retry should ring once the composer reads empty"
+  pass "fm-send inbox: a retry that reaches the ring without a harness argument still clears codex noise"
 }
 
 test_codex_mouse_noise_on_a_busy_agent_is_not_interrupted() {
@@ -629,6 +664,8 @@ test_codex_mouse_noise_mixed_with_text_is_never_cleared
 test_codex_mouse_noise_that_returns_is_not_typed_onto
 test_codex_mouse_noise_unreadable_after_clear_is_not_typed_onto
 test_codex_turn_starting_between_reads_is_not_interrupted
+test_codex_mouse_noise_before_real_text_after_blank_row_is_never_cleared
+test_watcher_retry_clears_noise_after_a_busy_first_send
 test_codex_mouse_noise_on_a_busy_agent_is_not_interrupted
 test_other_harness_mouse_noise_keeps_current_behavior
 test_failed_ring_is_still_sent

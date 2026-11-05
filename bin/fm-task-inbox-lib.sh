@@ -392,7 +392,7 @@ fm_task_inbox_doorbell_line() {  # <record-path>
 # read and the key. Only an empty read lets the doorbell type; anything else is
 # the ordinary skip.
 fm_task_inbox_ring() {  # <backend> <target> <record-path> [expected-label] [harness]
-  local backend=$1 target=$2 rec=$3 label=${4:-} harness=${5:-} line cstate verdict
+  local backend=$1 target=$2 rec=$3 label=${4:-} harness=${5:-${FM_COMPOSER_HARNESS:-}} line cstate verdict
   case "$(fm_backend_agent_state "$backend" "$target" 2>/dev/null || true)" in
     dead|missing) return 3 ;;
   esac

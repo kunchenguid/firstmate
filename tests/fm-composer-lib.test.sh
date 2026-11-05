@@ -470,6 +470,7 @@ test_codex_mouse_noise_only_adapter() {
   fm_composer_codex_mouse_noise_only "$noise" || fail "mouse reports alone should read as noise"
   fm_composer_codex_mouse_noise_only "$wrapped" || fail "a report cut by a row wrap should read as noise"
   fm_composer_codex_mouse_noise_only "$mixed" && fail "one extra character must keep the pending verdict"
+  fm_composer_codex_mouse_noise_only $'banner\n'"${ESC}[1m›${ESC}[0m [<65;192;52M"$'\n\n  real draft text\n\n  gpt-6 high · 100% left' && fail "text after a blank row is not noise"
   fm_composer_codex_mouse_noise_only "$typed" && fail "typed text is not noise"
   fm_composer_codex_mouse_noise_only $'banner\n'"${ESC}[1m›${ESC}[0m"$'\n' && fail "an empty composer is not noise"
   pass "fm_composer_codex_mouse_noise_only: SGR mouse reports alone are noise; any other character is not"
