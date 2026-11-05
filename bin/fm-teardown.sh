@@ -3579,7 +3579,7 @@ endpoint_close_refusal() {  # <subject> <backend> <target> <honors-force>
   echo "error: stopping this cleanup without removing the task's records, so the record naming $target is still here to reconcile from." >&2
   echo "error: that retention is not durable across a session start: if this task carries a backlog transition, the next session replays its pending close and removes the retained record, so reconcile the surviving endpoint yourself rather than trusting the retention." >&2
   if [ "$honors_force" = 1 ] && [ -n "$TEARDOWN_HC_MACHINE" ]; then
-    echo "error: reconnect hc machine '$TEARDOWN_HC_MACHINE' (hc machine ls); this task can be torn down once that machine is reachable again." >&2
+    echo "error: if hc machine '$TEARDOWN_HC_MACHINE' cannot be reached, reconnect it (hc machine ls) and rerun once it is reachable; otherwise rerun once the close can succeed, or rerun with --force to discard this task's records deliberately." >&2
   elif [ "$honors_force" = 1 ]; then
     echo "error: rerun teardown once the close can succeed, or rerun with --force to discard this task's records deliberately." >&2
   fi

@@ -845,6 +845,26 @@ test_placed_teardown_refuses_unlanded_or_unreachable_work() {
   pass "hc placement: teardown refuses uncommitted, unlanded, or unreachable work on the machine and keeps every record"
 }
 
+# A placed close also fails while the machine answers: here the terminal there
+# lacks this task's labels (fm_backend_hc_kill's foreign refusal). Oracle:
+# docs/hc-backend.md, only an unreachable machine defeats --force, so the hint
+# must still offer --force rather than only telling the operator to reconnect.
+test_placed_teardown_close_failure_on_a_reachable_machine_offers_force() {
+  local out rc
+  placed_teardown_case teardown-close-foreign
+  git_q -C "$TWT_LOCAL" commit -q --allow-empty -m "pushed" && git_q -C "$TWT_LOCAL" push -q origin fm/task-x1
+  jq '.labels["firstmate.task"] = "fm-someone-else"' "$D/worker-host/t9.json" > "$D/t9.tmp" \
+    && mv "$D/t9.tmp" "$D/worker-host/t9.json"
+  rc=0
+  out=$(run_placed_teardown 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "a placed close that fails must refuse cleanup"$'\n'"$out"
+  assert_contains "$out" "could not be closed" "the refusal names the failed close"
+  assert_contains "$out" "rerun with --force" "a reachable machine's failed close still offers --force"
+  assert_present "$HOMEDIR/state/task-x1.meta" "the record survives a failed close"
+  assert_present "$TWT_LOCAL" "the worktree there survives a failed close"
+  pass "hc placement: a placed close that fails on a reachable machine refuses, keeps the record, and still offers --force"
+}
+
 test_placed_teardown_removes_landed_work_there() {
   local out rc
   placed_teardown_case teardown-landed
@@ -1114,6 +1134,7 @@ fm_test_run \
   test_placed_spawn_failed_add_leaves_a_foreign_worktree \
   test_placed_clone_check_resolves_a_symlinked_projects_path \
   test_placed_teardown_refuses_unlanded_or_unreachable_work \
+  test_placed_teardown_close_failure_on_a_reachable_machine_offers_force \
   test_placed_teardown_removes_landed_work_there \
   test_placed_teardown_records_no_spend_here \
   test_placed_teardown_aborts_its_parked_no_mistakes_run_there \
