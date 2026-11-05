@@ -214,6 +214,40 @@ test_dispatch_entry_keeps_a_validation_handoff_with_main() {
   pass "dispatch entry: a no-mistakes ship's validation handoff stays with main, and every finished-result done stays the branch's"
 }
 
+# The Pi stale-row scan caches each status file's ownership verdict for the life
+# of the process. The verdict also depends on the task's recorded kind and mode,
+# so a metadata-only change between two scans in one process (a scout promoted
+# to a no-mistakes ship) must not reuse the earlier verdict.
+test_dispatch_scan_cache_follows_a_metadata_only_change() {
+  local home state out script
+  home="$TMP_ROOT/dispatch-cache"
+  state="$home/state"
+  script="$TMP_ROOT/dispatch-cache-scan.mjs"
+  mkdir -p "$state"
+  printf 'project=demo\nwindow=fm-demo\nkind=scout\n' > "$state/demo.meta"
+  printf 'working [at=1]: investigating\ndone [at=2]: report written\n' > "$state/demo.status"
+  : > "$state/.wake-queue"
+  append_wake "$state" signal demo.status "signal: $state/demo.status"
+  cat > "$script" <<'JS'
+import { writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+const [modulePath, state] = process.argv.slice(2);
+const dispatch = await import(pathToFileURL(modulePath).href);
+const scan = () => dispatch.scopeForUnreadWake(state, false, false, true).eligible ? "eligible" : "main";
+const first = scan();
+writeFileSync(`${state}/demo.meta`, "project=demo\nwindow=fm-demo\nkind=ship\nmode=no-mistakes\n");
+const second = scan();
+writeFileSync(`${state}/demo.meta`, "project=demo\nwindow=fm-demo\nkind=scout\n");
+const third = scan();
+console.log(`${first} ${second} ${third}`);
+JS
+  out=$(FM_HOME="$home" node "$script" "$ROOT/.pi/extensions/lib/fm-branch-dispatch.ts" "$state")
+  [ "$out" = "eligible main eligible" ] \
+    || fail "a metadata-only kind/mode change must re-judge the cached status verdict in the same process, got: $out"
+  pass "dispatch scan: the stale-row cache follows a metadata-only change of the task's kind and mode"
+}
+
+
 # --- host loop ----------------------------------------------------------------
 
 
@@ -643,6 +677,7 @@ fm_test_run \
   test_report_after_the_return_is_queued_for_main \
   test_dispatch_entry_scopes_rows_and_renders_the_away_tail \
   test_dispatch_entry_keeps_a_validation_handoff_with_main \
+  test_dispatch_scan_cache_follows_a_metadata_only_change \
   test_branch_outcomes_only_on_a_host_home_off_pi \
   test_branch_outcomes_put_captain_first_and_collapse_routine_overflow \
   test_branch_outcomes_collapse_repeated_captain_outcomes_per_task \

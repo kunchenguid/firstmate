@@ -528,7 +528,12 @@ export function scopeForUnreadWake(state: string, heartbeat: boolean, afk = fals
             if (presentationCursor === undefined) presentationCursor = readPresentationCursor(state);
             cursor = presentationCursor?.get(task);
           }
-          const config = spanRule ? `${decisionConfig}\0${cursor?.ident ?? ""}\0${cursor?.offset ?? 0}` : decisionConfig;
+          // The verdict also depends on the task's delivery contract (kind and
+          // mode), so a metadata-only change must not reuse a cached verdict.
+          const contract = `${kinds.get(task) ?? "ship"}\0${modes.get(task) ?? ""}`;
+          const config = spanRule
+            ? `${decisionConfig}\0${contract}\0${cursor?.ident ?? ""}\0${cursor?.offset ?? 0}`
+            : `${decisionConfig}\0${contract}`;
           const cached = staleDecisionCache.get(ownershipKey);
           if (cached?.version === version && cached.config === config) {
             decisionOwned = cached.decisionOwned;
