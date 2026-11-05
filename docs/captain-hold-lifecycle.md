@@ -139,7 +139,7 @@ A Done task still requires a recorded resolution, but is not subject to that sta
 An answered entry that markdown Done retention moved into the configured Done archive still counts, while an archived close with no recorded answer does not.
 The origin is never its own inventory entry, so a hold that failed cannot be vouched for by the origin row.
 For a historical inventory that names its own origin, hold a separate captain task with `--origin`, replace only the invalid entry in the final `decision_keys=` line of the origin metadata with that task id while preserving all other entries, and re-run `complete`.
-An entry whose recorded origin differs from the one being completed is refused, comparing backend identities rather than alias spellings.
+An entry whose recorded origin differs from the one being completed is refused, comparing backend identities rather than alias spellings, unless that origin is on the entry's `Captain hold attached origins:` line from a duplicate `--key` ask.
 An entry with no recorded origin, such as a hold made before origins were recorded or without `--origin`, is accepted on the durability check alone and named in the output.
 
 With a non-empty inventory, `complete` appends a `captain-held [key=<key>]` transfer event for every still-open keyed status decision.
@@ -571,7 +571,7 @@ The suite does not test the accepted merge-to-cleanup re-hold window or asynchro
 - Hold-set stamping precedes visible hold state, preserves an active lifecycle's timestamp, and resets after release.
 - Interrupted answer closure retains the stamp until close and restores resolution-first ordering on retry.
 - Deferral through `--until` leaves `captain_actionable` false until due.
-- A hold without `--rec` is refused and writes nothing, `--option` lines render numbered with the `Rec:` line, and a repeated `--key` attaches to the open hold while a different key creates a second one (`test_hold_requires_a_pick_and_renders_options`, `test_hold_collapses_a_duplicate_decision_key`).
+- A hold without `--rec` is refused and writes nothing, `--option` lines render numbered with the `Rec:` line, a retry without `--rec` keeps the stored options and `Rec:` line, a repeated `--key` attaches to the open hold (recording its `--origin` so `complete` accepts it) while a different key creates a second one, and a failed backlog listing refuses a keyed ask without creating a hold (`test_hold_requires_a_pick_and_renders_options`, `test_hold_collapses_a_duplicate_decision_key`).
 
 ### Legacy paths
 
