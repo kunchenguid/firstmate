@@ -436,6 +436,8 @@ Relaunch preserves the pinned destination across default-branch changes and refu
 Registration, ship readiness, and merged polls require the live forge destination to match that task-owned destination, and merge checks it again before calling the forge.
 Missing, unreadable, invalid, or inconsistent destination proof prevents those claims or actions without replacing the existing head and delivery checks.
 For legacy tasks without destination proof, follow the recovery instructions emitted by `bin/fm-pr-check.sh` rather than inferring a base from the current PR or repository default.
+An armed poll without valid task-owned destination metadata emits one local recovery wake, and a refused secondmate ledger delivery independently publishes one `blocked` parent notice.
+Successful re-registration resets both notices.
 [`tests/fm-pr-check-security.test.sh`](../tests/fm-pr-check-security.test.sh) covers destination refusals and [`tests/fm-control-relaunch.test.sh`](../tests/fm-control-relaunch.test.sh) covers preservation and corrupt-state refusal on relaunch.
 When a selected delivery path calls for a diff, `bin/fm-review-diff.sh` refreshes the authoritative base and, when task meta records a GitHub pull-request `pr=`, always fetches and compares against `refs/pull/<n>/head` by default (recorded `pr_head=` is only an offline fallback) before falling back to the local branch with a warning.
 A GitLab merge request and a Gerrit change expose no such ref, so a task recording one of those diffs the local branch under that same warning, which is its current content.

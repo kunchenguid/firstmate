@@ -159,7 +159,7 @@ merged
 
 ## A missing CLI produces no wake, never a false merge
 
-The poll is silent on every error by design, so a missing `glab` would otherwise be indistinguishable from a merge request that is never merged.
+The poll is silent on failed forge reads by design, so a missing `glab` would otherwise be indistinguishable from a merge request that is never merged.
 With `glab` removed from `PATH`, the poll stays silent even for the merge request that is genuinely merged:
 
 ```
