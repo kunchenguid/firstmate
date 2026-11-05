@@ -448,17 +448,20 @@ assert_not_contains "$body" 'cursor-grok' "use profiles never leave the machine"
 pass "clear: one rule Choice request, key on the fd header only, spendPriority argmax over every candidate"
 
 # --- TypeSafe base: default, environment/.env precedence, and safe URLs ------
-for base in https://gateway.example/typesafe/ http://localhost:8080/proxy/// 'https://[::1]:8443/typesafe/'; do
+while IFS='|' read -r base endpoint; do
   reset_log
   TYPESAFE_BASE=$base TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
   expect_code 0 "$code" "custom TypeSafe base resolves"
   assert_contains "$out" '  status: clear' "custom TypeSafe base keeps the typed response contract"
-  endpoint=$(printf '%s\n' "$base" | sed 's:/*$::')/v1/systemone
   assert_equals "$endpoint" "$(grep -E '^https?://' "$LOG/argv")" "custom base has exactly one endpoint suffix"
   assert_equals "Authorization: Bearer $KEY" "$(cat "$LOG/header")" "custom base keeps the fd header transport"
   assert_not_contains "$(cat "$LOG/argv")" "$KEY" "custom base keeps the key out of argv"
   assert_equals $'curl:clean\nquota-axi:clean' "$(cat "$LOG/child-env")" "custom base keeps the key out of child environments"
-done
+done <<'BASE_ENDPOINTS'
+https://gateway.example/typesafe/|https://gateway.example/typesafe/v1/systemone
+http://localhost:8080/proxy///|http://localhost:8080/proxy/v1/systemone
+https://[::1]:8443/typesafe/|https://[::1]:8443/typesafe/v1/systemone
+BASE_ENDPOINTS
 printf '%s\n' 'TYPESAFE_BASE=https://dotenv.example/typesafe/' > "$HOME_DIR/.env"
 reset_log
 FM_DISPATCH_PROVIDER=typesafe TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
