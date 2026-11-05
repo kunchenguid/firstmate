@@ -454,6 +454,8 @@ while IFS='|' read -r base endpoint; do
   expect_code 0 "$code" "custom TypeSafe base resolves"
   assert_contains "$out" '  status: clear' "custom TypeSafe base keeps the typed response contract"
   assert_equals "$endpoint" "$(grep -E '^https?://' "$LOG/argv")" "custom base has exactly one endpoint suffix"
+  # curl argv is the external request contract: --globoff makes punctuation literal.
+  assert_contains "$(cat "$LOG/argv")" $'--globoff\n' "custom base disables curl URL expansion"
   assert_equals "Authorization: Bearer $KEY" "$(cat "$LOG/header")" "custom base keeps the fd header transport"
   assert_not_contains "$(cat "$LOG/argv")" "$KEY" "custom base keeps the key out of argv"
   assert_equals $'curl:clean\nquota-axi:clean' "$(cat "$LOG/child-env")" "custom base keeps the key out of child environments"
@@ -461,6 +463,12 @@ done <<'BASE_ENDPOINTS'
 https://gateway.example/typesafe/|https://gateway.example/typesafe/v1/systemone
 http://localhost:8080/proxy///|http://localhost:8080/proxy/v1/systemone
 https://[::1]:8443/typesafe/|https://[::1]:8443/typesafe/v1/systemone
+https://gateway.example:1/tenant[1-2]/{a,b}/|https://gateway.example:1/tenant[1-2]/{a,b}/v1/systemone
+https://gateway.example:65535/|https://gateway.example:65535/v1/systemone
+http://127.0.0.1:8080/|http://127.0.0.1:8080/v1/systemone
+https://[2001:db8::abcd]/|https://[2001:db8::abcd]/v1/systemone
+https://[2001:db8:0:1:2:3:4:5]/|https://[2001:db8:0:1:2:3:4:5]/v1/systemone
+https://[::ffff:192.0.2.1]/|https://[::ffff:192.0.2.1]/v1/systemone
 BASE_ENDPOINTS
 printf '%s\n' 'TYPESAFE_BASE=https://dotenv.example/typesafe/' > "$HOME_DIR/.env"
 reset_log
@@ -479,6 +487,25 @@ for base in \
   https://gateway.example/typesafe? \
   https://gateway.example/typesafe#fragment \
   https://gateway.example/typesafe# \
+  https://gateway.example:0 \
+  https://gateway.example:65536 \
+  https://gateway.example:999999999999999999999999999999 \
+  https://gateway.example:abc \
+  https://gateway.example: \
+  'https://[abc]' \
+  'https://[1:2:3:4:5:6:7]' \
+  'https://[1:2:3:4:5:6:7:8:9]' \
+  'https://[1:2:3:4:5:6:7::8]' \
+  'https://[1::2::3]' \
+  'https://[:::1]' \
+  'https://[12345::1]' \
+  'https://[::ffff:192.0.2.999]' \
+  https://::1 \
+  https://bad..example \
+  https://-bad.example \
+  https://bad-.example \
+  https://bad_example \
+  https://256.0.0.1 \
   'https://gateway.example/bad path' \
   $'https://gateway.example/\n' \
   $'https://gateway.example/\npath'; do
@@ -505,6 +532,40 @@ reset_log
 TYPESAFE_BASE=https://environment.example TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
 assert_equals 'https://environment.example/v1/systemone' "$(grep -E '^https?://' "$LOG/argv")" "valid environment base overrides an invalid .env base"
 rm -f "$HOME_DIR/.env"
+
+# The configuration contract precedes both off and declared-key selection.
+# Invalid addresses must never reach Keychain, curl, or quota, for either
+# provider spelling and either configuration source. Literal errors are the
+# oracle; returning off or an HTTP error would violate that contract.
+for base in https://gateway.example:99999 'https://[abc]' https://bad..example; do
+  for provider in '' typesafe; do
+    for source in environment dotenv; do
+      for credential in absent environment declared; do
+        reset_log
+        configured_base=$base
+        configured_key=''
+        [ "$credential" != environment ] || configured_key=$KEY
+        if [ "$source" = dotenv ]; then
+          printf 'TYPESAFE_BASE=%s\n' "$base" > "$HOME_DIR/.env"
+          configured_base=''
+        fi
+        if [ "$credential" = declared ]; then
+          printf '%s\n' '{"typesafe":{"source":"macos-keychain","service":"must-not-be-read"}}' > "$HOME_DIR/config/dispatch-credential-sources.json"
+        fi
+        FM_DISPATCH_PROVIDER=$provider TYPESAFE_BASE=$configured_base TYPESAFE_API_KEY=$configured_key run code out err "$BRIEF"
+        expect_code 2 "$code" "invalid address fails before credential selection"
+        assert_contains "$err" 'TYPESAFE_BASE' "invalid address reports a configuration error"
+        assert_equals '' "$out" "invalid address emits no resolution"
+        assert_not_contains "$err" "$base" "invalid address is not echoed"
+        assert_not_contains "$err" "$KEY" "invalid address error keeps credentials private"
+        assert_absent "$LOG/security.argv" "invalid address never looks up credentials"
+        assert_absent "$LOG/argv" "invalid address never sends a request"
+        assert_absent "$LOG/quota-axi.calls" "invalid address never reads quota"
+        rm -f "$HOME_DIR/.env" "$HOME_DIR/config/dispatch-credential-sources.json"
+      done
+    done
+  done
+done
 pass "TypeSafe base supports environment and .env overrides and rejects unsafe URLs before sending"
 
 # --- OpenRouter uses the same Choice validation and resolution path ---------
@@ -896,6 +957,7 @@ assert_contains "$out" '  status: clear' "systemone clear status"
 assert_contains "$out" "  profile: --harness 'cursor' --model 'cursor-grok-4.6-medium'" "systemone uses the shared quota argmax"
 assert_contains "$(cat "$LOG/argv")" 'http://127.0.0.1:8080/v1/systemone' "systemone posts to <base>/v1/systemone with a trailing slash trimmed"
 assert_contains "$(cat "$LOG/argv")" $'--max-time\n10' "systemone timeout"
+assert_contains "$(cat "$LOG/argv")" $'--globoff\n' "the keyless request path also disables curl URL expansion"
 assert_not_contains "$(cat "$LOG/argv")" '@/dev/fd/3' "systemone without a key sends no Authorization header"
 assert_equals 'fd3 unreadable' "$(cat "$LOG/header")" "systemone without a key opens no header descriptor"
 assert_equals "$(jq -Sc 'del(.model)' "$TMP_ROOT/typesafe-body.json")" "$(jq -Sc 'del(.model)' "$LOG/body")" "systemone sends the unchanged System One request"

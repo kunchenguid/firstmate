@@ -251,7 +251,29 @@ select_typesafe_base() {
   [ -n "$base" ] || return 0
   command -v jq >/dev/null 2>&1 || die "jq required"
   jq -en --arg base "$base" '
-    $base | test("\\Ahttps?://(\\[[0-9A-Fa-f:.]+\\]|[A-Za-z0-9._~-]+)(:[0-9]+)?(/[^?#[:space:]\\\\]*)?\\z"; "i")
+    def ipv4:
+      split(".") | length == 4 and all(.[];
+        test("\\A(0|[1-9][0-9]{0,2})\\z") and (tonumber <= 255));
+    def ipv6:
+      # An IPv4 tail occupies two of the eight IPv6 groups.
+      (if contains(".") then
+        split(":") | if (.[-1] | ipv4) then .[-1] = "0:0" | join(":") else "!" end
+       else . end) |
+      split("::") as $sides |
+      if ($sides | length) == 1 then
+        test("\\A[0-9A-Fa-f]{1,4}(:[0-9A-Fa-f]{1,4}){7}\\z")
+      elif ($sides | length) == 2 then
+        all($sides[]; test("\\A([0-9A-Fa-f]{1,4}(:[0-9A-Fa-f]{1,4})*)?\\z")) and
+        (split(":") | map(select(length > 0)) | length < 8)
+      else false end;
+    $base | capture("\\Ahttps?://(?<host>\\[[0-9A-Fa-f:.]+\\]|[A-Za-z0-9.-]+)(:(?<port>[0-9]+))?(/[^?#[:space:]\\\\]*)?\\z"; "i") |
+    (if .host | startswith("[") then .host[1:-1] | ipv6
+     else .host | rtrimstr(".") |
+       length <= 253 and all(split(".")[];
+         length <= 63 and test("\\A[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?\\z")) and
+       (if test("\\A[0-9.]+\\z") then ipv4 else true end)
+     end) and
+    (.port == null or (.port | tonumber | . >= 1 and . <= 65535))
   ' >/dev/null 2>&1 || die "TYPESAFE_BASE must be an http(s) URL with a host and no userinfo, query, fragment, or whitespace"
   while [ "${base%/}" != "$base" ]; do base=${base%/}; done
   TS_BASE=$base
@@ -518,12 +540,12 @@ command -v curl >/dev/null 2>&1 || emit_error "curl not installed"
   never_send_check
   T0=$(fm_timing_now_ms)
   if [ -n "$KEY_PRIVATE" ]; then
-    HTTP=$(printf '%s' "$BODY" | curl -sS --max-time "$TIMEOUT" -o "$RESP_FILE" -w '%{http_code}' \
+    HTTP=$(printf '%s' "$BODY" | curl --globoff -sS --max-time "$TIMEOUT" -o "$RESP_FILE" -w '%{http_code}' \
       -X POST "$ENDPOINT" -H 'Content-Type: application/json' \
       -H @/dev/fd/3 3< <(printf 'Authorization: Bearer %s\n' "$KEY_PRIVATE") \
       --data-binary @- 2>/dev/null) || HTTP=000
   else
-    HTTP=$(printf '%s' "$BODY" | curl -sS --max-time "$TIMEOUT" -o "$RESP_FILE" -w '%{http_code}' \
+    HTTP=$(printf '%s' "$BODY" | curl --globoff -sS --max-time "$TIMEOUT" -o "$RESP_FILE" -w '%{http_code}' \
       -X POST "$ENDPOINT" -H 'Content-Type: application/json' \
       --data-binary @- 2>/dev/null) || HTTP=000
   fi
