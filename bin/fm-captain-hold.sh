@@ -23,7 +23,7 @@
 #   fm-captain-hold.sh hold <task-id> --reason <reason> \
 #     [--title <title>] [--repo <repo>] [--origin <origin-id>] [--until YYYY-MM-DD]
 #   fm-captain-hold.sh answer <task-id> --decision-file <path> --source-kind <kind> --source <reference> [--source-time <UTC>] [--release]
-#   fm-captain-hold.sh answers [<legacy-origin> | --any-origin] --source-kind <kind> --source <reference> [--source-time <UTC>]   (keyed answers on stdin)
+#   fm-captain-hold.sh answers [<legacy-origin> | --any-origin] --source-kind <kind> --source <reference> [--source-time <UTC>] [--delivery-task <task-id>]   (keyed answers on stdin)
 #   fm-captain-hold.sh reconcile-requests --source-id <source-id> --source <provenance>   (task ids on stdin)
 #   fm-captain-hold.sh bind <source-id> [<legacy-origin> | --any-origin]
 #   fm-captain-hold.sh unbind <source-id>
@@ -262,10 +262,18 @@ DECISION_SOURCE_TIME=
 
 PARENT_HOLD_PUBLISHED=0
 publish_parent_hold() {  # <task-id> <occurrence> <verb> <note>
-  local id=$1 occurrence=$2 verb=$3 note=$4 rc=0
+  local id=$1 occurrence=$2 verb=$3 note=$4 rc=0 source kind reference at
   PARENT_HOLD_PUBLISHED=0
-  if [ "$verb" = resolved ] && [ -n "$DECISION_SOURCE_KIND" ]; then
-    note="$note $(fm_resolution_source_note "$DECISION_SOURCE_KIND" "$DECISION_SOURCE" "$DECISION_SOURCE_TIME")"
+  if [ "$verb" = resolved ]; then
+    task_show "$id" || fail "cannot read the stored resolution source for $id"
+    source=$(recorded_resolution_source "$(show_field "$TASK_SHOW_OUTPUT" body)") \
+      || fail "cannot decode the stored resolution source for $id"
+    if [ -n "$source" ]; then
+      kind=$(printf '%s\n' "$source" | sed -n 's/^Source kind: //p')
+      reference=$(printf '%s\n' "$source" | sed -n 's/^Source reference: //p')
+      at=$(printf '%s\n' "$source" | sed -n 's/^Source message UTC: //p')
+      note="$note $(fm_resolution_source_note "$kind" "$reference" "$at")"
+    fi
   fi
   fm_parent_channel_report "$FM_HOME" "$STATE" \
     "$verb [key=captain-hold-$id-$occurrence]: captain hold $id: $(fm_parent_channel_clean_note "$note")" || rc=$?
@@ -553,13 +561,18 @@ resolution_block() {  # <mode>
 # New records bind replays to their declared source as well as their words.
 # Historical records have no source fields and retain their existing replay
 # rules. Never manufacture attribution while reading an old record.
-resolution_source_matches() { # <shown-body>
-  local body recorded expected
+recorded_resolution_source() {
+  local body
   body=$(decode_shown_value "$1") || return 1
   body=${body#*Resolution recorded by fm-}
   body=${body%%$'\n\n'*}
-  case "$body" in *'Source kind: '*) ;; *) return 0 ;; esac
-  recorded=$(printf '%s\n' "$body" | sed -n '/^Source kind: /p; /^Source reference: /p; /^Source message UTC: /p')
+  printf '%s\n' "$body" | sed -n '/^Source kind: /p; /^Source reference: /p; /^Source message UTC: /p'
+}
+
+resolution_source_matches() { # <shown-body>
+  local recorded expected
+  recorded=$(recorded_resolution_source "$1") || return 1
+  [ -n "$recorded" ] || return 0
   expected=$(fm_resolution_source_record "$DECISION_SOURCE_KIND" "$DECISION_SOURCE" "$DECISION_SOURCE_TIME")
   [ "$recorded" = "$expected" ]
 }
@@ -1532,12 +1545,13 @@ command_binding() {
 # The durable captain decision one keyed answer records. Pure function of its
 # inputs, so the same answer delivered twice is idempotent rather than a
 # conflicting decision.
-keyed_decision_text() {  # <source> <task-id> <answer> <label>
+keyed_decision_text() {  # <source> <task-id> <answer> <label> [delivery-task]
   if [ "$DECISION_SOURCE_KIND" = user ]; then
     printf 'Captain answered this call through %s.\n' "$1"
   else
     printf 'Resolution supplied through %s.\n' "$1"
   fi
+  [ -z "${5:-}" ] || printf 'Firstmate answer sent to %s.\n' "$5"
   printf 'Task: %s\n' "$2"
   printf 'Answer: %s\n' "$3"
   [ -z "$4" ] || printf 'Answer as shown to the captain: %s\n' "$4"
@@ -1561,12 +1575,13 @@ sanitize_reconcile_provenance() {
 command_answers() {
   local origin='' source='' row rest key answer label mode id show state hold_kind body digest legacy_digest legacy_key
   local recorded_digest recorded_mode occurrence tmp err closed=0 skipped=0 reason release_flag tab=$'\t'
-  local resolve_rc
+  local resolve_rc delivery_task=''
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --source) shift; source=${1:-} ;;
       --source-kind) shift; DECISION_SOURCE_KIND=${1:-} ;;
       --source-time) shift; DECISION_SOURCE_TIME=${1:-} ;;
+      --delivery-task) shift; delivery_task=${1:-}; validate_slug task-id "$delivery_task" ;;
       --any-origin) origin=$BINDING_ANY ;;
       --*) usage >&2; exit 2 ;;
       *)
@@ -1639,7 +1654,7 @@ command_answers() {
       skipped=$((skipped + 1))
       continue
     fi
-    keyed_decision_text "$source" "$id" "$answer" "$label" > "$tmp" \
+    keyed_decision_text "$source" "$id" "$answer" "$label" "$delivery_task" > "$tmp" \
       || fail "cannot stage the captain decision for $id"
     digest=$(sha256_text "$(cat "$tmp")")
     legacy_digest=''
@@ -1897,6 +1912,7 @@ reconcile_close() {
       || fail "task $id records a different resolution; it cannot be reconciled again"
     [ "$(recorded_resolution_mode "$body" || true)" = reconciled ] \
       || fail "task $id was not closed by reconciliation"
+    resolution_source_matches "$body" || fail "task $id records a different resolution source"
     occurrence=$(resolution_record_count "$body")
     remove_interrupted_answer_stamp "$id"
     publish_parent_hold "$id" "$occurrence" resolved reconciled
@@ -1913,6 +1929,7 @@ reconcile_close() {
     recorded_mode=$(recorded_resolution_mode "$body" || true)
     [ "$recorded_mode" = reconciled ] \
       || fail "task $id records this resolution with mode ${recorded_mode:-unknown}; it is not a reconciliation retry"
+    resolution_source_matches "$body" || fail "task $id records a different resolution source"
     occurrence=$(resolution_record_count "$body")
   else
     write_resolution_record "$id" reconciled "$body"

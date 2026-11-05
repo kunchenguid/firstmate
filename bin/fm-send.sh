@@ -540,9 +540,23 @@ fm_send_add_resolve_key() { # <key>
   esac
   RESOLVE_KEYS="${RESOLVE_KEYS}${RESOLVE_KEYS:+ }$k"
 }
+fm_send_has_resolve_key() {
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --resolve-key|--resolve-key=*) return 0 ;;
+      --source-kind|--source|--source-time|--fire-and-forget)
+        [ "$#" -ge 2 ] || return 1
+        shift 2 ;;
+      --fire-and-forget=*) shift ;;
+      *) return 1 ;;
+    esac
+  done
+  return 1
+}
 while :; do
   case "${1:-}" in
   --source-kind|--source|--source-time)
+    [ -n "$RESOLVE_KEYS" ] || fm_send_has_resolve_key "$@" || break
     [ $# -ge 2 ] || { echo "error: $1 requires a value" >&2; exit 1; }
     case "$1" in
       --source-kind) RESOLVE_SOURCE_KIND=$2 ;;
@@ -709,8 +723,12 @@ fm_send_resolve_close_note() { # <key> <excerpt>
   prefix="resolved [key=$k]: "
   budget=$((RESOLVE_CLOSE_MAX - ${#prefix} - ${#empty} - ${#source} - 1))
   [ "$budget" -ge 0 ] || return 1
-  fm_cap_line_var "$excerpt" "$budget"
-  excerpt=$FM_LINE_CAP_LINE
+  if [ "$budget" -lt "${#FM_LINE_CAP_SUFFIX}" ]; then
+    excerpt=${excerpt:0:budget}
+  else
+    fm_cap_line_var "$excerpt" "$budget"
+    excerpt=$FM_LINE_CAP_LINE
+  fi
   if owned=$(fm_pending_reply_close_note_for_key "$k" "$RESOLVE_TASK_ID" operator-resolve-key "$excerpt"); then
     printf '%s %s' "$owned" "$source"
     return 0
@@ -897,7 +915,7 @@ fm_send_close_resolved_keys() { # <answer-text>
 # it does not build a decision record or choose a close path; the keys were
 # already resolved to task ids above, so the intake needs no legacy origin.
 fm_send_feed_resolved_holds() { # <answer-text>
-  local note=$1 k lines=''
+  local note=$1 k lines='' source_args
   [ -n "$RESOLVE_HOLD_KEYS" ] || return 0
   note=$(printf '%s' "$note" | tr '\n\r\t' '   ' | LC_ALL=C tr -d '\000-\037\177')
   for k in $RESOLVE_HOLD_KEYS; do
@@ -905,8 +923,9 @@ fm_send_feed_resolved_holds() { # <answer-text>
   done
   if ! printf '%s' "$lines" | "$SCRIPT_DIR/fm-captain-hold.sh" answers \
     --source-kind "$RESOLVE_SOURCE_KIND" --source "$RESOLVE_SOURCE" \
-    --source-time "$RESOLVE_SOURCE_TIME" >/dev/null 2>&1; then
-    echo "error: the answer was delivered to $T, but this captain-held task could not be closed: ${RESOLVE_HOLD_KEYS}. Close it with fm-captain-hold.sh answer - do not resend the answer." >&2
+    --source-time "$RESOLVE_SOURCE_TIME" --delivery-task "$RESOLVE_TASK_ID" >/dev/null 2>&1; then
+    printf -v source_args ' --source-kind %q --source %q --source-time %q' "$RESOLVE_SOURCE_KIND" "$RESOLVE_SOURCE" "$RESOLVE_SOURCE_TIME"
+    echo "error: the answer was delivered to $T, but this captain-held task could not be closed: ${RESOLVE_HOLD_KEYS}. Close it with fm-captain-hold.sh answer$source_args - do not resend the answer." >&2
     return 1
   fi
 }

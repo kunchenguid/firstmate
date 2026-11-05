@@ -104,11 +104,18 @@ SH
 # with the stubs on PATH against the given home. Guard noise goes to stderr,
 # captured per test when the diagnostic matters.
 run_send() {
-  local fb=$1 home=$2 log=$3; shift 3
+  local fb=$1 home=$2 log=$3 arg source_args=(); shift 3
+  for arg in "${@:2}"; do
+    case "$arg" in
+      --resolve-key|--resolve-key=*)
+        source_args=(--source-kind supervisor --source "resolve-key fixture judgement")
+        break ;;
+    esac
+  done
   : > "$log"
   env PATH="$fb:$PATH" \
     FM_ROOT_OVERRIDE="$home" FM_HOME="$home" FM_SEND_LOG="$log" FM_SEND_SETTLE=0 \
-    "$SEND" "$1" --source-kind supervisor --source "resolve-key fixture judgement" "${@:2}" 2>/dev/null
+    "$SEND" "$1" "${source_args[@]}" "${@:2}" 2>/dev/null
 }
 
 setup_home() {  # <name> -> echoes a fresh home dir with an empty state/
@@ -1169,6 +1176,61 @@ test_refusal_keyed_resend_keeps_the_accepted_keys() {
   pass "fm-send --resolve-key: a refused key's keyed resend keeps every accepted key in order"
 }
 
+test_ordinary_source_flags_remain_message_text() {
+  local dir fb log home text got n=0
+  dir="$TMP_ROOT/ordinary-source-flags"; mkdir -p "$dir"
+  fb=$(make_stubs "$dir"); log="$dir/send.log"
+  home=$(setup_home ordinary-source-flags)
+  fm_write_meta "$home/state/t1.meta" "window=sess:fm-t1" "kind=ship"
+  for text in '--source is the flag to pass' '--source-kind user' '--source-time' \
+    '--source is the flag --resolve-key choice'; do
+    run_send "$fb" "$home" "$log" t1 "$text" >/dev/null \
+      || fail "ordinary source-like message was refused"
+    n=$((n + 1))
+    got=$(bash -c '. "$1"; fm_task_inbox_body "$2"' _ "$ROOT/bin/fm-task-inbox-lib.sh" \
+      "$home/state/t1.inbox/$(printf '%03d' "$n").msg")
+    [ "$got" = "$text" ] || fail "ordinary source-like message changed: $got"
+  done
+  run_send "$fb" "$home" "$log" t1 --source is the flag to pass >/dev/null \
+    || fail "ordinary source arguments were refused"
+  got=$(bash -c '. "$1"; fm_task_inbox_body "$2"' _ "$ROOT/bin/fm-task-inbox-lib.sh" \
+    "$home/state/t1.inbox/005.msg")
+  [ "$got" = '--source is the flag to pass' ] || fail "ordinary arguments lost text: $got"
+  pass "ordinary sends preserve source-like message text"
+}
+
+test_tight_status_budget_preserves_source() {
+  local dir fb log home key kind reference at spare size out rc
+  dir="$TMP_ROOT/tight-source-budget"; mkdir -p "$dir"
+  fb=$(make_stubs "$dir"); log="$dir/send.log"
+  for key in choice pending-reply-0123456789abcdef; do
+    for spare in 0 1 7 11 12 13; do
+      home=$(setup_home tight-source-budget)
+      fm_write_meta "$home/state/t1.meta" "window=sess:fm-t1" "kind=ship"
+      if [ "$key" = choice ]; then
+        kind=user; at=2026-11-04T15:23:07Z; size=$((107 - spare))
+        printf 'needs-decision [key=%s]: choose\n' "$key" > "$home/state/t1.status"
+      else
+        kind=supervisor; at=''; size=$((31 - spare))
+        printf 'blocked [key=%s]: pending-reply-missed: task=t1 pending-reply-id=0123456789abcdef\n' \
+          "$key" > "$home/state/t1.status"
+      fi
+      reference=$(printf '%*s' "$size" x | tr ' ' x)
+      env PATH="$fb:$PATH" FM_HOME="$home" FM_SEND_LOG="$log" FM_SEND_SETTLE=0 \
+        "$SEND" t1 --resolve-key "$key" --source-kind "$kind" --source "$reference" \
+        --source-time "$at" 'use REST and start the implementation' >/dev/null 2>&1; rc=$?
+      expect_code 0 "$rc" "a fitting source must survive a tight status budget"
+      out=$(grep '^resolved ' "$home/state/t1.status")
+      [ "${#out}" -le 220 ] || fail "status close exceeded the public line cap"
+      assert_contains "$out" "[source-kind=$kind]" "tight close lost the source kind"
+      assert_contains "$out" "[source=$reference]" "tight close lost the source reference"
+      [ "$kind" != user ] || assert_contains "$out" "[source-time=$at]" "tight close lost message UTC"
+      if drain_out "$home" | grep -q 'OPEN DECISIONS'; then fail "tight close left its key open"; fi
+    done
+  done
+  pass "ordinary and reserved closes retain provenance at the excerpt boundary"
+}
+
 test_resolution_requires_source_before_delivery() {
   local dir fb log home rc
   dir="$TMP_ROOT/source-required"; mkdir -p "$dir"
@@ -1226,6 +1288,8 @@ test_user_source_requires_message_time() {
   pass "user source requires the answering message UTC time before delivery"
 }
 
+test_ordinary_source_flags_remain_message_text
+test_tight_status_budget_preserves_source
 test_resolution_requires_source_before_delivery
 test_user_source_requires_message_time
 test_resolution_source_kinds_survive_closure

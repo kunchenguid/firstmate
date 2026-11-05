@@ -1702,10 +1702,10 @@ wedge_wait_evidence() {  # <task> -> one wait_record on stdout
   if [ -e "$CONFIG/wedge-defer-worker-wait" ] && verb=$(status_worker_wait_verb "$statusf"); then
     if [ "$verb" = blocked ]; then
       wait_record 'declared blocker' 'awaiting firstmate - its own newest line reports a blocker' \
-        supervisor 'clear the reported blocker and close it with fm-send --resolve-key' "$statusf"
+        supervisor 'clear the reported blocker and close it with fm-send --resolve-key <key> --source-kind <kind> --source <reference> --source-time <UTC>' "$statusf"
     else
       wait_record 'declared decision' 'awaiting firstmate - its own newest line asks for a decision' \
-        supervisor 'answer the reported decision with fm-send --resolve-key' "$statusf"
+        supervisor 'answer the reported decision with fm-send --resolve-key <key> --source-kind <kind> --source <reference> --source-time <UTC>' "$statusf"
     fi
     return 0
   fi

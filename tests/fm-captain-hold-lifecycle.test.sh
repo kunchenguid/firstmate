@@ -1708,6 +1708,45 @@ EOF
   pass "a secondmate home publishes each hold occurrence and its answer on the parent channel"
 }
 
+test_legacy_parent_replays_preserve_absent_attribution() {
+  local parent mate channel mode show before
+  parent=$(make_home legacy-source-parent)
+  mate=$(make_home legacy-source-mate)
+  printf 'legacy-source-mate\n' > "$mate/.fm-secondmate-home"
+  printf 'schema=fm-secondmate-parent.v1\nroute=local\nparent_home=%s\n' "$parent" \
+    > "$mate/.fm-secondmate-parent"
+  channel="$parent/state/legacy-source-mate.status"
+  printf 'ship it\n' > "$mate/decision.txt"
+  for mode in direct shared; do
+    run_captain "$mate" hold "legacy-$mode" --title 'Legacy call' --reason choose >/dev/null \
+      || fail "could not create legacy parent fixture"
+    if [ "$mode" = direct ]; then
+      run_captain "$mate" answer "legacy-$mode" --decision-file "$mate/decision.txt" >/dev/null \
+        || fail "could not close direct legacy fixture"
+    else
+      printf 'legacy-shared\tship it\t\n' | run_captain "$mate" answers --source 'legacy source' >/dev/null \
+        || fail "could not close shared legacy fixture"
+    fi
+    show=$(tasks_in "$mate" show "legacy-$mode" --full)
+    printf '%s\n' "$show" | sed -n 's/^  body: //p' | jq -r . \
+      | sed '/^Source kind: /d; /^Source reference: /d; /^Source message UTC: /d' > "$mate/legacy-body.txt"
+    tasks_in "$mate" update "legacy-$mode" --body-file "$mate/legacy-body.txt" >/dev/null \
+      || fail "could not stage legacy persisted record"
+    sed 's/ \[source-kind=.*//' "$channel" > "$mate/legacy-channel.txt"
+    mv "$mate/legacy-channel.txt" "$channel"
+    before=$(cat "$channel")
+    if [ "$mode" = direct ]; then
+      run_captain "$mate" answer "legacy-$mode" --decision-file "$mate/decision.txt" >/dev/null \
+        || fail "direct legacy replay failed"
+    else
+      printf 'legacy-shared\tship it\t\n' | run_captain "$mate" answers --source 'legacy source' >/dev/null \
+        || fail "shared legacy replay failed"
+    fi
+    [ "$(cat "$channel")" = "$before" ] || fail "legacy replay manufactured parent attribution"
+  done
+  pass "direct and shared legacy replays retain their source-free parent events"
+}
+
 test_secondmate_reconcile_publishes_before_request_retirement() {
   local parent mate channel evidence out show rc request
   parent=$(make_home reconcile-parent-channel)
@@ -1746,6 +1785,14 @@ test_secondmate_reconcile_publishes_before_request_retirement() {
     <(sed -E 's/ \[at=[0-9]+\]//' "$channel"))" -eq 1 ] \
     || fail "the parent resolution was not published before retirement failed: $(cat "$channel")"
 
+  cp "$evidence" "$mate/other-evidence.txt"
+  if run_captain "$mate" reconcile close reconcile-channel-call \
+    --evidence-file "$mate/other-evidence.txt" >/dev/null 2>&1; then
+    fail "closed reconciliation accepted a different evidence reference"
+  fi
+  [ -f "$request" ] || fail "source mismatch retired the retry request"
+  [ "$(grep -c 'resolved \[key=captain-hold-reconcile-channel-call-1\]' "$channel")" -eq 1 ] \
+    || fail "source mismatch duplicated the parent resolution"
   run_captain "$mate" reconcile close reconcile-channel-call --evidence-file "$evidence" >/dev/null \
     || fail "the closed reconciliation could not finish publication and retirement"
   [ ! -e "$request" ] || fail "the retry did not retire the published reconcile request"
@@ -2238,6 +2285,11 @@ SH
   rc=$?
   set -e
   [ "$rc" -ne 0 ] || fail "the forced reconcile close failure reported success"
+  cp "$home/retry-evidence.txt" "$home/other-retry-evidence.txt"
+  if run_captain "$home" reconcile close sample-reconcile-close-retry \
+    --evidence-file "$home/other-retry-evidence.txt" >/dev/null 2>&1; then
+    fail "interrupted reconciliation accepted a different evidence reference"
+  fi
   run_captain "$home" reconcile close sample-reconcile-close-retry \
     --evidence-file "$home/retry-evidence.txt" >/dev/null \
     || fail "reconcile close did not recover from its partial failure"
@@ -2609,6 +2661,7 @@ SH
   show=$(tasks_in "$home" show "$id-decision-chat-choice" --full)
   assert_contains "$show" "state: done" "a chat answer left the legacy row open"
   assert_contains "$show" "Answer: go with option A" "the chat-answered row lost the captain answer"
+  assert_contains "$show" "answer sent to $id" "the legacy chat answer lost its delivery target"
 
   : > "$home/send.log"
   env PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$home" FM_HOME="$home" \
@@ -2623,6 +2676,7 @@ SH
   assert_contains "$show" "Source kind: user" "the chat channel lost the declared source kind"
   assert_contains "$show" "Source reference: lifecycle fixture message" \
     "the chat channel lost the answering message reference"
+  assert_contains "$show" "answer sent to $id" "the chat channel lost its delivery target"
 
   : > "$home/send.log"
   set +e
@@ -5214,6 +5268,7 @@ test_completion_replaces_a_pair_recorded_after_pr
 test_terminal_single_owner_status_decision_does_not_block_empty_inventory
 test_secondmate_hold_stays_in_authoritative_home
 test_secondmate_home_publishes_holds_and_answers
+test_legacy_parent_replays_preserve_absent_attribution
 test_secondmate_reconcile_publishes_before_request_retirement
 test_bound_channel_answers_close_at_answer_time
 test_reconcile_never_closes_through_the_keyed_answer_intake

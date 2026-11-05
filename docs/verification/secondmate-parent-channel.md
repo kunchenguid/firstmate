@@ -62,7 +62,7 @@ child-call
 
 $ # Step 4: the captain's answer is recorded in the mate home; the close reaches the parent from fm-captain-hold itself
 
-$ FM_HOME=$M bin/fm-captain-hold.sh answer child-call --decision-file decision.txt   (decision: roll out on Monday)
+$ FM_HOME=$M bin/fm-captain-hold.sh answer child-call --decision-file decision.txt --source-kind user --source chat:message-17 --source-time 2026-11-05T12:00:00Z   (decision: roll out on Monday)
 answered: child-call
 
 $ cat $P/state/mate.status   (final parent channel)
