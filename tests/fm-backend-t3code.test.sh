@@ -1502,10 +1502,12 @@ test_codex_cleanup_without_journal_needs_no_python() {
 }
 
 test_spawn_leases_slot_creates_thread_and_starts_launch_turn() {
-  local proj wt data state id out fb thread
-  id=$(t3_uid t3spawnz1)
+  local proj wt data state id out fb thread kind=${1:-ship}
+  local kind_args=(--mode no-mistakes --yolo off)
+  [ "$kind" != scout ] || kind_args=(--scout)
+  id=$(t3_uid "t3spawnz1-$kind")
   t3_task_id "$id"
-  t3_case spawn
+  t3_case "spawn-$kind"
   proj="$CASE_DIR/spawn-project"
   wt="$CASE_DIR/spawn-wt"
   data="$CASE_DIR/data"
@@ -1519,9 +1521,10 @@ test_spawn_leases_slot_creates_thread_and_starts_launch_turn() {
   out=$( HOME="$SPAWN_HOME" CLAUDE_CONFIG_DIR='' PATH="$fb:$PATH" FM_T3_TREEHOUSE_LOG="$LOG" FM_T3_TREEHOUSE_WT="$wt" \
     FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$CASE_DIR/home" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$CONFIG" \
     FM_PROJECTS_OVERRIDE="$CASE_DIR/unused-projects" FM_SPAWN_NO_GUARD=1 \
-    "$ROOT/bin/fm-spawn.sh" "$id" "$proj" claude --mode no-mistakes --yolo off --model claude-sonnet-5 --effort high --backend t3code 2>&1 )
+    "$ROOT/bin/fm-spawn.sh" "$id" "$proj" claude "${kind_args[@]}" --model claude-sonnet-5 --effort high --backend t3code 2>&1 )
   expect_code 0 $? "fm-spawn.sh --backend t3code should succeed against the fake T3 server"$'\n'"$out"
-  assert_contains "$out" "spawned $id harness=claude kind=ship mode=no-mistakes yolo=off window=fm-$id worktree=$wt" \
+  assert_contains "$out" "spawned $id harness=claude kind=$kind " "spawn output missing the worker kind"
+  assert_contains "$out" "window=fm-$id worktree=$wt" \
     "spawn output missing the T3 window alias and worktree summary"
   assert_grep "backend=t3code" "$state/$id.meta" "meta missing backend=t3code"
   assert_grep "window=fm-$id" "$state/$id.meta" "meta missing the stable window alias"
@@ -1547,11 +1550,12 @@ test_spawn_leases_slot_creates_thread_and_starts_launch_turn() {
   assert_contains "$(t3_request "$turn" 'r.arguments.message')" "Verify the T3 lifecycle behavior under test." "the first message must carry the brief body"
   assert_present "$wt/.claude/settings.local.json" "spawn must still arm the Claude busy hooks in the worktree before the launch turn"
   local settings="$wt/.claude/settings.local.json"
+  [ "$(t3_json_field "$settings" 'd.outputStyle')" = default ] || fail "a $kind worker must use the default output style"
   [ "$(t3_json_field "$settings" 'Object.keys(d.hooks).sort().join(" ")')" = "SessionEnd Stop StopFailure UserPromptSubmit" ] \
     || fail "the env merge must keep the busy hooks, got hooks '$(t3_json_field "$settings" 'Object.keys(d.hooks || {})')'"
   [ "$(t3_json_field "$settings" 'd.env.GOTMPDIR')" = "/tmp/fm-$id/gotmp" ] || fail "settings env must carry GOTMPDIR, got '$(t3_json_field "$settings" 'd.env')'"
-  [ "$(t3_json_field "$settings" 'd.env.FM_TASK_ID')" = "$id" ] || fail "a ship worker's settings env must carry FM_TASK_ID"
-  [ "$(t3_json_field "$settings" 'd.env.FM_TASK_INBOX')" = "$state/$id.inbox" ] || fail "a ship worker's settings env must carry its steering inbox"
+  [ "$(t3_json_field "$settings" 'd.env.FM_TASK_ID')" = "$id" ] || fail "a $kind worker's settings env must carry FM_TASK_ID"
+  [ "$(t3_json_field "$settings" 'd.env.FM_TASK_INBOX')" = "$state/$id.inbox" ] || fail "a $kind worker's settings env must carry its steering inbox"
   [ "$(t3_json_field "$settings" 'd.env.GIT_CONFIG_VALUE_0')" = "$state/$id.git-hooks" ] || fail "T3 workers must select the installed Git hook"
   [ "$(t3_json_field "$settings" 'd.env.GIT_CONFIG_KEY_0')" = core.hooksPath ] || fail "T3 workers must select core.hooksPath"
   [ "$(t3_json_field "$settings" 'd.env.GIT_CONFIG_COUNT')" = 1 ] || fail "T3 workers must select one Git config override"
@@ -1568,7 +1572,7 @@ test_spawn_leases_slot_creates_thread_and_starts_launch_turn() {
   t3_excluded "$wt" CLAUDE.local.md || fail "CLAUDE.local.md must be git-excluded"
   [ "$(t3_log_line_of 'r.tool === "t3_thread_launch"')" -gt "$(t3_log_line_of 'r.tool === "treehouse"')" ] \
     || fail "the thread launch must follow the lease"
-  pass "fm-spawn.sh --backend t3code: leases the slot, launches the thread on it, records metadata, sends the launch brief"
+  pass "fm-spawn.sh --backend t3code $kind: leases the slot, launches the thread on it, records metadata, sends the launch brief"
 }
 
 test_spawn_codex_scout_writes_toml_env_with_traceparent() {
@@ -1723,7 +1727,7 @@ test_spawn_secondmate_runs_thread_in_home_with_env() {
   make_t3_secondmate_home "$home" "$id"
   # The home's own settings, plus a key an earlier spawn wrote that this one does not.
   mkdir -p "$home/.claude"
-  printf '{"permissions":{"allow":["Bash(ls:*)"]},"env":{"CAPTAIN_VAR":"keep","LAVISH_AXI_HOST":"stale","FM_T3CODE_ENV_KEYS":"LAVISH_AXI_HOST"}}\n' \
+  printf '{"outputStyle":"orchestrator","permissions":{"allow":["Bash(ls:*)"]},"env":{"CAPTAIN_VAR":"keep","LAVISH_AXI_HOST":"stale","FM_T3CODE_ENV_KEYS":"LAVISH_AXI_HOST"}}\n' \
     > "$home/.claude/settings.local.json"
   out=$(spawn_t3_secondmate "$id" "$home" claude claude-sonnet-5)
   expect_code 0 $? "fm-spawn.sh --backend t3code --secondmate should succeed against the fake T3 server"$'\n'"$out"
@@ -1751,6 +1755,8 @@ test_spawn_secondmate_runs_thread_in_home_with_env() {
   assert_grep "t3_project_id=$project" "$CASE_DIR/home/state/$id.meta" "meta missing the created project id"
   settings="$home/.claude/settings.local.json"
   assert_present "$settings" "a claude secondmate home gets .claude/settings.local.json"
+  [ "$(t3_json_field "$settings" 'd.outputStyle')" = orchestrator ] || fail "a secondmate must retain its configured output style"
+  [ "$(t3_json_field "$CASE_DIR/home/state/$id.claude-settings.json" 'd.outputStyle')" = undefined ] || fail "secondmate launch settings must not override its output style"
   [ "$(t3_json_field "$settings" 'd.hooks')" = undefined ] || fail "a secondmate home carries no busy hooks"
   [ "$(t3_json_field "$settings" 'd.env.FM_T3CODE_ENV_KEYS.split(",").length')" = 17 ] || fail "the env block should carry GOTMPDIR plus the secondmate environment, got $(t3_json_field "$settings" 'Object.keys(d.env)')"
   [ "$(t3_json_field "$settings" 'd.env.CAPTAIN_VAR')" = keep ] || fail "the home's own env entries must survive the T3 environment install"
@@ -2770,6 +2776,7 @@ test_control_lib_tables
 test_control_exit_refused_before_any_call
 test_control_relaunch_refused_before_any_dispatch
 test_spawn_leases_slot_creates_thread_and_starts_launch_turn
+test_spawn_leases_slot_creates_thread_and_starts_launch_turn scout
 test_claude_pr_tool_clause_version_boundary
 test_spawn_codex_preserves_tracked_codex_config
 test_tracked_codex_overlay_recovery
