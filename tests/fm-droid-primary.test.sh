@@ -81,18 +81,21 @@ test_claude_shaped_hook_contract() {
 test_registration_inventory() {
   jq -e '
     (.hooks.SessionStart | length) == 1 and
-    (.hooks.PreToolUse | length) == 1 and
+    (.hooks.PreToolUse | length) == 2 and
     (.hooks.Stop | length) == 1 and
     .hooks.PreToolUse[0].matcher == "Execute" and
+    .hooks.PreToolUse[1].matcher == "AskUser" and
     (.hooks.SessionStart[0].hooks | length) == 1 and
     (.hooks.PreToolUse[0].hooks | length) == 1 and
+    (.hooks.PreToolUse[1].hooks | length) == 1 and
     (.hooks.Stop[0].hooks | length) == 1 and
     (.hooks.SessionStart[0].hooks[0] | .type == "command" and (.command | type == "string" and length > 0) and .timeout == 180) and
     (.hooks.PreToolUse[0].hooks[0] | .type == "command" and (.command | type == "string" and length > 0)) and
+    (.hooks.PreToolUse[1].hooks[0] | .type == "command" and (.command | type == "string" and length > 0)) and
     (.hooks.Stop[0].hooks[0] | .type == "command" and (.command | type == "string" and length > 0))
   ' "$SETTINGS" >/dev/null \
-    || fail "Droid settings do not carry the one SessionStart, Execute PreToolUse, and Stop primary registration"
-  pass "Droid primary settings register the three verified hook transports"
+    || fail "Droid settings do not carry SessionStart, Execute/AskUser PreToolUse, and Stop primary registrations"
+  pass "Droid primary settings register the four verified hook transports"
 }
 
 make_probe_root() {
@@ -142,6 +145,66 @@ run_registered_hook() {  # <event> <payload> <root> <log>
   local event=$1 payload=$2 root=$3 log=$4 command
   command=$(jq -r --arg event "$event" '.hooks[$event][0].hooks[0].command' "$SETTINGS")
   printf '%s' "$payload" | DROID_PROJECT_DIR="$root" DROID_PROBE_LOG="$log" bash -c "$command"
+}
+
+test_askuser_registration_executes_away_deferral() {
+  local root="$TMP_ROOT/askuser-primary" command payload out err status before
+  local fakebin script
+  command -v tasks-axi >/dev/null 2>&1 \
+    || { printf 'skip: tasks-axi not found for AskUser registration behavior\n'; return; }
+  mkdir -p "$root/bin" "$root/state" "$root/data" "$root/config"
+  cp "$ROOT/.tasks.toml" "$root/.tasks.toml"
+  for script in fm-droid-afk-askuser-check.sh fm-primary-scope-lib.sh \
+    fm-decision-hold.sh fm-classify-lib.sh fm-tasks-axi-lib.sh fm-wake-lib.sh; do
+    cp "$ROOT/bin/$script" "$root/bin/"
+  done
+  printf '# fixture\n' > "$root/AGENTS.md"
+  printf 'askuser-primary\n' > "$root/.fm-secondmate-home"
+  printf '## In flight\n\n## Queued\n\n## Done\n' > "$root/data/backlog.md"
+  fm_write_meta "$root/state/review.meta" "window=synthetic:review" "kind=ship"
+  printf 'needs-decision [key=approval]: captain approval pending\n' > "$root/state/review.status"
+  fakebin=$(fm_fakebin "$root")
+  fm_fake_exit0 "$fakebin" tmux treehouse no-mistakes gh gh-axi
+  command=$(jq -er '
+    .hooks.PreToolUse[]
+    | select(.matcher == "AskUser")
+    | .hooks[]
+    | select(.type == "command")
+    | .command
+  ' "$SETTINGS") || fail "Droid settings expose no executable AskUser hook"
+  payload='{"hook_event_name":"PreToolUse","tool_name":"AskUser","tool_input":{"questionnaire":"1. [question] Approve the pending change?\n[firstmate-decision origin=review key=approval state=existing]\n[option] Approve\n[option] Keep parked"}}'
+  out="$root/out"
+  err="$root/err"
+  date +%s > "$root/state/.afk"
+
+  set +e
+  printf '%s' "$payload" | PATH="$fakebin:$PATH" DROID_PROJECT_DIR="$root" FM_HOME="$root" \
+    FM_STATE_OVERRIDE="$root/state" FM_DATA_OVERRIDE="$root/data" FM_CONFIG_OVERRIDE="$root/config" \
+    bash -c "$command" > "$out" 2> "$err"
+  status=$?
+  set -e
+  expect_code 2 "$status" "Droid AskUser registration must deny while away mode is active"
+  jq -e '.hookSpecificOutput.permissionDecision == "deny"' "$err" >/dev/null \
+    || fail "Droid AskUser registration did not return its deny contract"
+  assert_contains "$(cat "$root/state/review.status")" 'droid-afk-question' \
+    "Droid AskUser registration did not preserve the away-mode question"
+
+  before=$(cksum < "$root/state/review.status")
+  rm "$root/state/.afk"
+  : > "$out"
+  : > "$err"
+  set +e
+  printf '%s' "$payload" | PATH="$fakebin:$PATH" DROID_PROJECT_DIR="$root" FM_HOME="$root" \
+    FM_STATE_OVERRIDE="$root/state" FM_DATA_OVERRIDE="$root/data" FM_CONFIG_OVERRIDE="$root/config" \
+    bash -c "$command" > "$out" 2> "$err"
+  status=$?
+  set -e
+  expect_code 0 "$status" "Droid AskUser registration must be inert outside away mode"
+  [ ! -s "$out" ] && [ ! -s "$err" ] \
+    || fail "inactive Droid AskUser registration wrote output"
+  [ "$before" = "$(cksum < "$root/state/review.status")" ] \
+    || fail "inactive Droid AskUser registration mutated the decision owner"
+  pass "Droid AskUser registration denies and preserves only during away mode"
 }
 
 test_commands_anchor_and_preserve_transport() {
@@ -228,4 +291,5 @@ test_pretool_registration_is_inert_in_crewmate_worktrees() {
 test_claude_shaped_hook_contract
 test_registration_inventory
 test_commands_anchor_and_preserve_transport
+test_askuser_registration_executes_away_deferral
 test_pretool_registration_is_inert_in_crewmate_worktrees

@@ -65,6 +65,7 @@ Hold-for-return is the default and the only reach profile this release records: 
 - On a non-Pi home that runs the supervision host, the host's engine is that branch under the same rules, and a wake it hands back reaches main through that harness's own wake path (`Stop hook feedback` on Claude, a `watcher` follow-up on Cursor, OpenCode, and omp, the arm's background-task-completed notification on Grok, the checkpoint's output on Codex) with a `supervision-host:` line: that is automatic supervision, never the captain's return, so handle it under the away posture ([supervision protocol](../../../docs/supervision-protocols/supervision-host.md)).
 - The session-start digest reports the posture under its AFK subsection, so a restart re-enters the posture from the record, not from memory.
 
+
 ## How to exit: the return
 
 No `/back` is needed. The first genuine message is the return signal:
@@ -154,7 +155,25 @@ Tracked `SessionStart` owns registration and recovery context, including the com
 Droid documents blocking Stop continuation but no Claude `asyncRewake` equivalent, so its shared Stop guard may perform only the existing bounded one-block handoff and must never wait indefinitely or prevent captain input.
 Do not add a Droid-only delivery loop or treat `UserPromptSubmit` as an idle-session wake source.
 
+While `state/.afk` exists, Droid's tracked `AskUser` PreToolUse guard denies the interactive question without answering it.
+Because native `AskUser` carries one freeform questionnaire and no owner field, every question block Firstmate attempts while away must name its own decision owner on its own line, immediately after the `[question]` line:
+
+```text
+[firstmate-decision origin=<origin-slug> key=<decision-key> state=existing]
+[firstmate-decision origin=<origin-slug> key=derive state=unseeded]
+```
+
+Use `state=existing` with the decision's original key when a status decision or captain hold already holds it, and `state=unseeded` for a question with no prior record, supplying a stable key or `derive` to have one computed.
+`[topic]` is descriptive UI text and is never an owner, so one questionnaire may combine several origins and may omit topics entirely.
+A block whose binding is missing or malformed is rejected with an error naming the missing requirement rather than filed by inference, so re-attempt that block with its real owner instead of rewording the question.
+`bin/fm-captain-hold.sh` owns the filing itself and routes each block to the captain hold or status decision that already owns it, creating an ordinary captain hold only for an unseeded binding.
+Firstmate must continue every independently authorized action instead of retrying `AskUser` or asking the question in plain text.
+Repeated operational notifications do not close or duplicate that durable decision, and their operational prefix does not count as captain return.
+After a real unmarked captain message runs the ordered `bin/fm-afk-return.sh` catch-up, that catch-up presents every outstanding question in full, and the absent AFK flag makes `AskUser` available again under unchanged authority.
+Answer a returned question only through its owner's existing close path, and never treat presentation as approval.
+
 ### Submit model
+
 
 
 On tmux and Herdr, the digest is typed **once** with a literal, non-submitting send (`send-keys -l` on tmux, `pane send-text` on Herdr).

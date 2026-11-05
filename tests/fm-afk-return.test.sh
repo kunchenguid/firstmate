@@ -70,6 +70,13 @@ if [ -s "$file" ]; then
   printf 'WAKE_ACK_REQUIRED: after handling completes run bin/fm-wake-drain.sh --ack-through %s --recovery-generation fixture-generation\n' "$sequence" >&2
 fi
 SH
+  cat > "$dir/bin/fm-decision-hold.sh" <<'SH'
+#!/usr/bin/env bash
+[ "${1:-}" = open-questions ] && [ "${2:-}" = --render ] || exit 2
+if [ -e "$FM_HOME/state/.fail-question-projection" ]; then
+  exit 1
+fi
+SH
   chmod +x "$dir/bin/"*.sh
 }
 
@@ -253,13 +260,56 @@ window=synthetic:fm-decision-task
 backend=tmux
 kind=ship
 EOF
-  printf 'needs-decision [key=api-shape]: captain must choose the synthetic API shape\n' > "$dir/home/state/decision-task.status"
+  cat > "$dir/home/state/decision-task.status" <<'EOF'
+needs-decision [key=api-shape]: captain must choose the synthetic API shape
+needs-decision [key=retention]: captain must choose the synthetic retention policy
+working: independent evidence collection continued while both approvals waited
+EOF
   date +%s > "$dir/home/state/.afk"
-  printf '1784074271\t1\tsignal\tdecision-task.status\tsignal: synthetic decision\n' > "$dir/home/state/.fake-drain"
+  cat > "$dir/home/state/.fake-drain" <<'EOF'
+1784074271	1	signal	decision-task.status	signal: synthetic decision
+OPEN DECISIONS (still open, folded from the durable status logs - not just the latest line):
+decision-task [key=api-shape] needs-decision: captain must choose the synthetic API shape
+decision-task [key=retention] needs-decision: captain must choose the synthetic retention policy
+EOF
   out=$(run_return "$dir" begin) || fail "approval decision should not be treated as a firstmate blocker: $out"
   assert_contains "$out" 'catch-up wake:' "approval decision notification was not surfaced in catch-up"
+  assert_contains "$out" 'decision-task [key=api-shape] needs-decision:' "return catch-up lost the first outstanding question"
+  assert_contains "$out" 'decision-task [key=retention] needs-decision:' "return catch-up lost the second outstanding question"
+  assert_contains "$(cat "$dir/home/state/decision-task.status")" 'working: independent evidence collection continued' "return catch-up lost unrelated authorized progress"
+  assert_not_contains "$(cat "$dir/home/state/decision-task.status")" 'resolved [key=' "return catch-up automatically approved an outstanding question"
   [ ! -e "$dir/home/state/.afk-return-catchup" ] || fail "approval decision incorrectly opened a firstmate blocker gate"
-  pass "needs-decision remains reportable without masquerading as a firstmate-actionable blocker"
+  pass "return catch-up presents every outstanding approval without resolving it or masking independent progress"
+}
+
+test_incomplete_question_projection_keeps_catchup_pending() {
+  local dir out rc gate
+  dir="$TMP_ROOT/question-projection"
+  install_runner "$dir"
+  gate="$dir/home/state/.afk-return-catchup"
+  date +%s > "$dir/home/state/.afk"
+  touch "$dir/home/state/.droid-afk-question-deferral"
+  touch "$dir/home/state/.fail-question-projection"
+
+  set +e
+  out=$(run_return "$dir" begin)
+  rc=$?
+  set -e
+  [ "$rc" -eq 3 ] || fail "an incomplete question projection must keep catch-up pending (rc=$rc): $out"
+  [ -s "$gate" ] || fail "an incomplete question projection did not retain the catch-up gate"
+  assert_contains "$out" 'outstanding-question listing could not be projected' \
+    "the retained catch-up did not surface the question-projection limitation"
+
+  set +e
+  out=$(run_return "$dir" guard)
+  rc=$?
+  set -e
+  [ "$rc" -eq 3 ] || fail "ordinary work was allowed while question projection remained incomplete"
+
+  rm -f "$dir/home/state/.fail-question-projection"
+  out=$(run_return "$dir" check) || fail "catch-up did not clear after question projection recovered: $out"
+  [ ! -e "$gate" ] || fail "the recovered question projection left catch-up pending"
+  pass "incomplete question projection keeps catch-up pending until owner enumeration recovers"
 }
 
 test_evidence_publication_failure_preserves_wake_for_redrain() {
@@ -1356,6 +1406,7 @@ test_missing_final_archive_keeps_retained_contract_gated() {
 test_return_gate_owns_remediation_and_reports_catchup_to_bearings
 test_explicit_reclassification_requires_durable_reason
 test_captain_decision_does_not_masquerade_as_firstmate_blocker
+test_incomplete_question_projection_keeps_catchup_pending
 test_evidence_publication_failure_preserves_wake_for_redrain
 test_away_reentry_refuses_pending_return_gate
 test_return_is_mode_agnostic_for_quiet_mode
