@@ -5,6 +5,7 @@ It covers what the watch reads, why it reads that field and not a neighbouring o
 Every output below is reproduced verbatim except for the server host, project name, and change numbers, which are replaced throughout by the placeholders the test fixtures use.
 
 The transcripts predate task-owned destination checks. Their historical poll invocations do not include the expected-base argument now required by `bin/fm-pr-poll.sh`, whose header owns the current invocation contract. `tests/fm-pr-check-security.test.sh` verifies destination checks without a live server.
+For pre-upgrade tasks without destination proof, the supervising firstmate follows the recovery instructions emitted by `bin/fm-pr-check.sh <id> <PR-URL>` before registering again.
 
 ## Versions
 

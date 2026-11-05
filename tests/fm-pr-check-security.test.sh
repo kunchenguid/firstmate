@@ -243,6 +243,13 @@ printf 'title:\tfixture merge request\nstate:\t%s\nauthor:\tsomeone\n' "${FM_TES
 SH
   # gerrit-axi, reproducing the real CLI's contract: one JSON record on stdout
   # and exit 0 on success, and a non-zero exit with no stdout on any failure.
+  # Immutable show -> changeRow -> JSON contract, including branch:
+  # https://github.com/slnkjthien/gerrit-axi/blob/64544117b66ec4445f3c0b3cef36f752228952a8/src/axi/commands.js#L512
+  # https://github.com/slnkjthien/gerrit-axi/blob/64544117b66ec4445f3c0b3cef36f752228952a8/src/axi/records.js#L87
+  # https://github.com/slnkjthien/gerrit-axi/blob/64544117b66ec4445f3c0b3cef36f752228952a8/src/axi/main.js#L162
+  # https://github.com/slnkjthien/gerrit-axi/blob/64544117b66ec4445f3c0b3cef36f752228952a8/src/axi/output.js#L49
+  # Missing branch normalizes to an empty string:
+  # https://github.com/slnkjthien/gerrit-axi/blob/64544117b66ec4445f3c0b3cef36f752228952a8/src/core/changes.js#L337
   # Its defaults are the real server's readings for an OPEN change, and the
   # submit fields are settable independently of the status so a case can build
   # the reading a merged change and a merely submittable change share.
@@ -4206,8 +4213,14 @@ test_expected_destination_fail_closed_and_retarget() {
       invalid) printf 'expected_base=../main\n' >> "$state/task-a.meta" ;;
       drift) printf 'expected_base=main\nbase_branch=release/integration\n' >> "$state/task-a.meta" ;;
     esac
-    run_check_entry "$dir" task-a https://github.com/o/r/pull/1 >/dev/null 2>&1 \
-      && fail "$value expected destination armed"
+    rc=0
+    out=$(run_check_entry "$dir" task-a https://github.com/o/r/pull/1 2>&1) || rc=$?
+    [ "$rc" -ne 0 ] || fail "$value expected destination armed"
+    assert_contains "$out" 'The supervising firstmate must recover the originally authorized destination from task-owned launch/brief evidence' 'refusal lost the task-owned recovery source'
+    assert_contains "$out" 'never from the current PR or current default branch' 'refusal permits inferring the destination'
+    assert_contains "$out" 'Source bin/fm-wake-lib.sh and use fm_meta_lock_path with fm_lock_acquire_wait' 'refusal lost the metadata locking convention'
+    assert_contains "$out" 'exactly one valid expected_base=<branch> in state/<id>.meta, keeping any existing base_branch consistent' 'refusal lost the destination metadata repair'
+    assert_contains "$out" 'Release the lock with fm_lock_release, then rerun bin/fm-pr-check.sh <id> <PR-URL>' 'refusal lost the existing registration command'
     assert_absent "$state/task-a.pr-poll" "$value destination published a poll"
   done
   dir=$(make_case destination-legacy-named)

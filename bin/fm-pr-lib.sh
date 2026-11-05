@@ -400,7 +400,7 @@ fm_pr_require_base() {  # <meta> <provider> <url> <host> <path> <number>
   local meta=$1 expected actual
   shift
   if ! expected=$(fm_pr_expected_base "$meta"); then
-    echo 'error: expected PR base is unavailable or inconsistent in task metadata' >&2
+    printf '%s\n' 'error: expected PR base is unavailable or inconsistent in task metadata. The supervising firstmate must recover the originally authorized destination from task-owned launch/brief evidence, never from the current PR or current default branch. Source bin/fm-wake-lib.sh and use fm_meta_lock_path with fm_lock_acquire_wait to hold the task metadata lock while recording exactly one valid expected_base=<branch> in state/<id>.meta, keeping any existing base_branch consistent. Release the lock with fm_lock_release, then rerun bin/fm-pr-check.sh <id> <PR-URL>.' >&2
     return 1
   fi
   if ! actual=$(fm_pr_read_base "$@" 2>/dev/null) \
