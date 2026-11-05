@@ -62,6 +62,18 @@ test_resolution_attribution() {
       fail "an answer replay changed its recorded source"
     fi
   done
+  run_captain "$home" hold source-reheld --title "Re-held source" --reason choose >/dev/null
+  run_captain "$home" answer source-reheld --release --decision-file "$home/answer.txt" \
+    --source message:first >/dev/null || fail "could not release the first sourced answer"
+  run_captain "$home" hold source-reheld --reason choose-again >/dev/null
+  run_captain "$home" answer source-reheld --release --decision-file "$home/answer.txt" \
+    --source message:second --source-time 2026-11-05T12:01:00Z >/dev/null \
+    || fail "a re-held call could not record the same words from a new message"
+  show=$(tasks_in "$home" show source-reheld --full)
+  case "$show" in
+    *'Source reference: message:second'*'Source reference: message:first'*) ;;
+    *) fail "a new source on a re-held call replaced or reused the earlier source: $show" ;;
+  esac
   run_captain "$home" hold source-missing --title "Missing source" --reason choose >/dev/null
   PATH="$home/fakebin:$PATH" FM_HOME="$home" \
     "$ROOT/bin/fm-captain-hold.sh" answer source-missing --decision-file "$home/answer.txt" >/dev/null 2>&1; rc=$?
