@@ -823,6 +823,11 @@ fm_remote_job_reap_stale() { # <account-home>
 
 fm_remote_job_launchagent_paths() { # <account-home>
   local account_home=$1
+  # launchd is macOS-only; on Linux the remote job worker is started by systemd instead.
+  if [ "$(uname -s)" != Darwin ]; then
+    FM_REMOTE_JOB_ERROR="launchd is macOS-only; this host is $(uname -s), so the launch-agent path is unavailable"
+    return 1
+  fi
   FM_REMOTE_JOB_LAUNCH_AGENT_DIR="$account_home/Library/LaunchAgents"
   FM_REMOTE_JOB_LAUNCH_AGENT_PLIST="$FM_REMOTE_JOB_LAUNCH_AGENT_DIR/$FM_REMOTE_JOB_LABEL.plist"
   FM_REMOTE_JOB_LAUNCH_AGENT_LOG_DIR="$account_home/Library/Logs"

@@ -273,7 +273,7 @@ check_remote_job_worker() {
     fi
     if [ -z "$UID_NUM" ] || ! command -v launchctl >/dev/null 2>&1; then
       record remote-job-worker-loaded "human: the remote job worker cannot be inspected without launchctl and an account uid" \
-        "restore launchctl and a readable account uid, then rerun this command"
+        "launchctl/uid unavailable (launchd is macOS-only); on Linux use the systemd unit, not a launch agent"
     elif fm_remote_job_launchagent_loaded "$FM_ROOT" "${HOME:-}" "$UID_NUM"; then
       record remote-job-worker-loaded "ok: $FM_REMOTE_JOB_LABEL is loaded in gui/$UID_NUM"
     elif check_is_ok gui-session; then
@@ -472,7 +472,7 @@ check_gui_session() {
   fi
   if ! command -v launchctl >/dev/null 2>&1; then
     record gui-session "human: launchctl does not resolve, so the login session cannot be inspected" \
-      "restore /bin/launchctl on that macOS account; without it no launch agent can be inspected or loaded"
+      "launchd is macOS-only; on $(uname -s) there is no launch agent to inspect — use the systemd unit instead"
     return 0
   fi
   if launchctl print "gui/$UID_NUM" >/dev/null 2>&1; then
@@ -514,7 +514,7 @@ check_launch_agent() {
 check_launch_agent_loaded() {
   if [ -z "$UID_NUM" ] || ! command -v launchctl >/dev/null 2>&1; then
     record launchagent-loaded "human: the launch agent domain gui/<uid> cannot be inspected on this account" \
-      "restore launchctl and a readable account uid, then rerun this command"
+      "launchctl/uid unavailable (launchd is macOS-only); on Linux use the systemd unit, not a launch agent"
     return 0
   fi
   if launchctl print "gui/$UID_NUM/$LAUNCH_AGENT_LABEL" >/dev/null 2>&1; then

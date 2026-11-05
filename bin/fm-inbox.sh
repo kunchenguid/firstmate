@@ -37,6 +37,8 @@
 #   sentry      state/inbox-auto/    the Sentry bridge
 #   lane-tick   state/inbox-auto/    a lane tick
 #   ci          state/inbox-auto/    a CI or pull-request poll
+#   watch       state/inbox-auto/    the factory watch loop (fm-watch-all, fm-watch-threads)
+#   health      state/inbox-auto/    the box health check (ak47-health)
 #
 # An unknown class refuses rather than guessing, because a guess is how a machine
 # record lands in the captain's queue. `list` and `drain` print the captain's
@@ -104,7 +106,7 @@ INBOX="$STATE/inbox"
 # two; see "Source classes" in the header.
 INBOX_AUTO="$STATE/inbox-auto"
 CAPTAIN_CLASSES="text voice"
-AUTOMATED_CLASSES="sentry lane-tick ci"
+AUTOMATED_CLASSES="sentry lane-tick ci watch health"
 # How many automated records a listing prints. The automated queue holds hundreds,
 # and printing all of it is exactly what made the captain's own notes unreadable.
 AUTO_SHOWN_MAX=20

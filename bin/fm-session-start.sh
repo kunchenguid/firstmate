@@ -1211,11 +1211,30 @@ fi
 # Before CONTEXT: see this file's ORDERING note. Live fleet identity is what a
 # truncated tail must never take.
 print_work_under_way_full() {
-  local meta id window target backend status META_FOUND=0
+  local meta id window target backend status META_FOUND=0 printed=0 omitted=0
+  # A full dump of every task is what made this digest 9.9 MB / 9,117 lines with 250 recorded
+  # tasks: the chair then spent its whole startup ingesting metadata and appeared to hang, and
+  # every wake re-presented the same bulk. Print the tasks that are actually live or waiting —
+  # busy, holding an open decision, or touched in the last 24h — cap the list, and disclose the
+  # rest as a count. The full record is still on disk and named in the disclosure.
+  local cap=${FM_SESSION_START_TASK_LIMIT:-40}
+  case "$cap" in ''|*[!0-9]*|0) cap=40 ;; esac
+  local now; now=$(date +%s)
   for meta in "$STATE"/*.meta; do
     [ -f "$meta" ] || continue
     META_FOUND=1
     id=$(basename "$meta" .meta)
+    local keep=0
+    [ -f "$STATE/$id.busy-state" ] && grep -q 'state=busy' "$STATE/$id.busy-state" 2>/dev/null && keep=1
+    [ -f "$STATE/$id.status" ] && grep -q 'needs-decision:' "$STATE/$id.status" 2>/dev/null && keep=1
+    if [ "$keep" -eq 0 ] && [ -f "$STATE/$id.status" ]; then
+      local age=$(( now - $(stat -c %Y "$STATE/$id.status" 2>/dev/null || echo 0) ))
+      [ "$age" -lt 86400 ] && keep=1
+    fi
+    if [ "$keep" -eq 0 ] || [ "$printed" -ge "$cap" ]; then
+      omitted=$((omitted + 1)); continue
+    fi
+    printed=$((printed + 1))
     printf '\n--- %s ---\n' "$id"
     cat "$meta"
 
@@ -1240,6 +1259,11 @@ print_work_under_way_full() {
     fi
   done
   [ "$META_FOUND" -eq 1 ] || printf '(none)\n'
+  if [ "$omitted" -gt 0 ]; then
+    printf '\n(%d more recorded task(s) omitted from this digest: idle and untouched for 24h.\n' "$omitted"
+    printf ' Read one directly with: bin/fm-crew-state.sh <id>  or  state/<id>.meta + state/<id>.status.\n'
+    printf ' Raise the cap with FM_SESSION_START_TASK_LIMIT=<n>.\n)\n'
+  fi
 }
 
 # print_orphan_status_logs <full|compact>: status logs whose task record is

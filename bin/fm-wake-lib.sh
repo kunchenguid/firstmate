@@ -1657,12 +1657,65 @@ fm_wake_append() {
 
   clean_key=$(printf '%s' "$key" | fm_wake_clean_field)
   clean_payload=$(printf '%s' "$payload" | fm_wake_clean_field)
+  # Bound the payload. A signal wake lists every changed status path, and with ~250 lanes that
+  # reached 24 KB per row; the drain prints rows and the session-start digest prints the drain,
+  # so a handful of rows made the startup digest 9.9 MB and the chair appeared to hang ingesting
+  # it. The payload is display data — the drain re-reads the files it names — so a bounded prefix
+  # is enough, and the count of the rest is kept.
+  if [ "${#clean_payload}" -gt 500 ]; then
+    clean_payload="${clean_payload:0:500} …(truncated)"
+  fi
   epoch=$(date +%s)
   seq_file="$STATE/.wake-queue.seq"
   recovery_marker="$STATE/.watcher-down"
   status=0
 
   fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK"
+  # Coalesce repeated machine wakes, but APPEND FIRST and prune after.
+  #
+  # A process-event watcher re-fires the same key on every poll; 30 copies of one key were
+  # observed in the queue, which floods the chair and buries the real wakes. One pending row
+  # per key is enough, carrying the LATEST payload.
+  #
+  # Order matters: deleting the old row before the new one is written loses the wake if the
+  # append fails (a full disk, a failed seq write). Appending first and pruning after can only
+  # ever leave a duplicate, and a duplicate is delivered twice while a loss is never delivered.
+  # At-least-once beats exactly-once here.
+  #
+  # Scope: only `check` wakes whose key is a process-event key. `signal` rows are per-actor (a
+  # branch and main may legitimately hold the same key) and must never be coalesced;
+  # tests/fm-wake-queue.test.sh pins that.
+  coalesce=0
+  # A `signal` wake is per-actor, so it is never coalesced by key alone: a branch and main may
+  # legitimately hold the same key with different payloads (tests/fm-wake-queue.test.sh pins
+  # that). But the SAME key with the SAME payload already pending is a re-fire, not a second
+  # actor: the watcher re-appends a turn-ended signal on every poll while the marker persists,
+  # which produced 19 rows for 8 keys. Identical (key, payload) is therefore skipped outright.
+  # `signal` wakes are PER-ACTOR: a branch and main may legitimately hold the same key, and the
+  # drain gives each actor its own row (tests/fm-wake-queue.test.sh pins exactly that). So a
+  # signal row is never deleted or merged by key — that would starve one actor.
+  #
+  # What a re-firing watcher CAN do is stack unbounded duplicates: 103 rows for 55 keys, 7 copies
+  # of one key, which woke the chair in a loop. The correct control is backpressure, not
+  # coalescing: cap the pending rows per key. Two actors need two rows; a third is already a
+  # re-fire, and the drain re-reads the status files anyway, so the extra rows carry no new
+  # information.
+  if [ "$kind" = signal ]; then
+    pending=$(awk -F '\t' -v k="$clean_key" 'NF >= 5 && $4 == k { n++ } END { print n + 0 }' "$FM_WAKE_QUEUE" 2>/dev/null)
+    if [ "${pending:-0}" -ge 3 ]; then
+      fm_lock_release "$FM_WAKE_QUEUE_LOCK"
+      return 0
+    fi
+  fi
+  if [ "$kind" = check ]; then
+    case "$clean_key" in
+      procevent:*)
+        if awk -F '\t' -v k="$clean_key" 'NF >= 5 && $4 == k { found = 1; exit } END { exit !found }' "$FM_WAKE_QUEUE" 2>/dev/null; then
+          coalesce=1
+        fi
+        ;;
+    esac
+  fi
   _fm_recovery_marker_publish "$recovery_marker" downtime || status=$?
   if [ "$status" -eq 0 ]; then
     seq=$(cat "$seq_file" 2>/dev/null || echo 0)
@@ -1674,6 +1727,18 @@ fm_wake_append() {
   fi
   if [ "$status" -eq 0 ]; then
     printf '%s\t%s\t%s\t%s\t%s\n' "$epoch" "$seq" "$kind" "$clean_key" "$clean_payload" >> "$FM_WAKE_QUEUE" || status=$?
+  fi
+  # Prune only after a successful append: keep the newest row for this key, drop the older ones.
+  if [ "$status" -eq 0 ] && [ "$coalesce" -eq 1 ]; then
+    _tmp="$FM_WAKE_QUEUE.coalesce.$$"
+    if awk -F '\t' -v k="$clean_key" -v keep="$seq" '
+         NF >= 5 && $4 == k && $2 != keep { next }
+         { print }
+       ' "$FM_WAKE_QUEUE" > "$_tmp" 2>/dev/null; then
+      mv "$_tmp" "$FM_WAKE_QUEUE" 2>/dev/null || rm -f "$_tmp"
+    else
+      rm -f "$_tmp"
+    fi
   fi
   fm_lock_release "$FM_WAKE_QUEUE_LOCK"
   return "$status"

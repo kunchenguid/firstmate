@@ -271,6 +271,10 @@ case "${1:-tick}" in
     fi
     write_plist || exit 1
     "$LAUNCHCTL" unload "$PLIST" >/dev/null 2>&1 || true
+    if [ "$(uname -s)" != Darwin ]; then
+      echo "chair-sentinel: launchd install is macOS-only; on $(uname -s) use the systemd unit instead" >&2
+      exit 0
+    fi
     "$LAUNCHCTL" load "$PLIST" || { echo "chair-sentinel: launchctl load failed" >&2; exit 1; }
     echo "chair-sentinel: armed ($PLIST)"
     ;;
