@@ -2150,7 +2150,7 @@ SH
 # refuses as non-canonical. The close still lands, with the URL recorded as
 # a note instead, the same fallback a Gerrit change URL already takes.
 test_recovery_replays_an_http_forgejo_close_with_its_url_as_a_note() {
-  local case_dir id out real_tasks_axi pr_url=http://pi4:3001/joergspoerl/Scan2Excel/pulls/7
+  local case_dir id retained_id out real_tasks_axi pr_url=http://pi4:3001/joergspoerl/Scan2Excel/pulls/7
   id=atomic-heal-http-forgejo-b12
   case_dir=$(make_home heal-pending-http-forgejo-close)
   add_item "$case_dir" "$id"
@@ -2188,6 +2188,32 @@ SH
     || fail "the replayed plain-http Forgejo close did not record its URL as a note"
   assert_absent "$(home_of "$case_dir")/state/$id.backlog-close" \
     "a replayed plain-http Forgejo close left its record behind"
+
+  retained_id=atomic-heal-http-forgejo-retained-b12
+  add_item "$case_dir" "$retained_id"
+  start_item "$case_dir" "$retained_id"
+  FM_HOME="$(home_of "$case_dir")" PATH="$case_dir/fakebin:$PATH" \
+    bash -c '. "$1/bin/fm-tasks-axi-lib.sh"; . "$1/bin/fm-backlog-transition-lib.sh"; fm_backlog_retain "$2" "$3" --pr "$4"' \
+    _ "$ROOT" "$(home_of "$case_dir")/data" "$retained_id" "$pr_url" \
+    || fail "could not retain the plain-http Forgejo deliverable"
+  tasks-axi done "$retained_id" --file "$(backlog_of "$case_dir")" >/dev/null \
+    || fail "could not close the retained plain-http Forgejo row"
+
+  out=$(FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$(home_of "$case_dir")" PATH="$case_dir/fakebin:$PATH" \
+    "$ROOT/bin/fm-fleet-snapshot.sh" --json) \
+    || fail "could not read the generated plain-http Forgejo close output"
+  printf '%s' "$out" | jq -e --arg id "$id" --arg retained_id "$retained_id" --arg pr_url "$pr_url" '
+    any(.backlog.records[]; .id == $id and .pr_url == $pr_url and .completion.verb == "merged")
+      and any(.backlog.records[]; .id == $retained_id and .pr_url == $pr_url and .completion.verb == "merged")
+  ' >/dev/null || fail "the generated close note or retained deliverable lost its projected PR URL: $out"
+
+  out=$(FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$(home_of "$case_dir")" PATH="$case_dir/fakebin:$PATH" \
+    "$ROOT/bin/fm-fleet-snapshot.sh" --secondmate-home-summary) \
+    || fail "could not project the generated plain-http Forgejo close output"
+  printf '%s' "$out" | jq -e --arg id "$id" --arg retained_id "$retained_id" --arg pr_url "$pr_url" '
+    any(.landed[]; .id == $id and .pr_url == $pr_url)
+      and any(.landed[]; .id == $retained_id and .pr_url == $pr_url)
+  ' >/dev/null || fail "the generated close note or retained deliverable lost its landed PR URL: $out"
   pass "session start replays a recorded plain-http Forgejo close with its URL as a note"
 }
 

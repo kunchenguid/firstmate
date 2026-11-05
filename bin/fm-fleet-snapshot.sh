@@ -435,6 +435,17 @@ backlog_json() (  # [<backlog-path>] - defaults to this home's $BACKLOG
     def url_pattern: "https?://[^[:space:])\"<>]+";
     def wrapped_url_pattern: "<?" + url_pattern + ">?";
     def links($rest): [$rest | scan(url_pattern)];
+    def generated_pr_url($lines):
+      [ $lines[] as $line
+        | if ($line | startswith("PR ")) then
+            [$line | sub("^PR "; "")]
+          elif ($line | startswith("Deliverable of the finished work: ")) then
+            [$line | sub("^Deliverable of the finished work: "; "")
+              | split("; ")[] | select(startswith("PR ")) | sub("^PR "; "")]
+          else [] end
+        | .[]
+        | select(test("^" + url_pattern + "$") and test("/pulls?/[0-9]+$"))
+      ] | .[0] // null;
     def strip_trailing_metadata:
       reduce range(0; 20) as $_ (.;
         sub("[[:space:]]*\\([[:space:]]*(?:(?:repo|kind|priority|hold|hold-kind|hold-until):[[:space:]]*[^)]*|(?:since|merged|reported|done)[[:space:]]+[^)]*)[[:space:]]*\\)[[:space:]]*$"; ""));
@@ -542,6 +553,11 @@ backlog_json() (  # [<backlog-path>] - defaults to this home's $BACKLOG
                   else cap(.body_lines[-1]; "^(?<v>local main)$")
                   end))
           | .body_excerpt = ((.body_lines | join(" "))[:240])
+          | generated_pr_url(.body_lines) as $generated_pr
+          | .pr_url = (.pr_url // $generated_pr)
+          | if $generated_pr != null and .completion.verb == "done" then
+              .completion.verb = "merged"
+            else . end
         else . end)
     | .records as $records
     | (reduce ($records[] | select(.structured)) as $record ({};
