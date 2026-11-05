@@ -392,6 +392,30 @@ test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint() {
   pass "fm-control relaunch: a same-harness relaunch replaces the agent in the same endpoint and worktree"
 }
 
+# A start wake the previous launch already queued names the launch a relaunch
+# replaces, so the relaunch drops only that row: another task's start wake and
+# this task's other wakes stay queued for the supervisor.
+test_relaunch_drops_the_replaced_launchs_queued_start_wake() {
+  local dir out rc state rows
+  dir=$(new_case startwake rq1)
+  add_ship_task "$dir" rq1 claude
+  state="$dir/home/state"
+  printf 'busy_gen=%s\n' "$("$ROOT/bin/fm-busy-event.sh" arm "$state" rq1)" >> "$state/rq1.meta"
+  FM_STATE_OVERRIDE="$state" bash -c '. "$0/bin/fm-wake-lib.sh"
+    fm_wake_append check start:rq1 "check: start rq1: no start signal 120s after spawn (harness=claude)"
+    fm_wake_append check start:other "check: start other: no start signal 120s after spawn (harness=claude)"
+    fm_wake_append check "$1/rq1.check.sh" "check: rq1 poll result"' "$ROOT" "$state" \
+    || fail "fixture: could not queue the wakes"
+  out=$(run_control "$dir" rq1 relaunch --note "replace the parked launch"); rc=$?
+  expect_code 0 "$rc" "a same-harness relaunch should succeed"$'\n'"$out"
+  [ -f "$state/rq1.start-pending" ] || fail "the relaunch did not arm the replacement's start check"
+  rows=$(awk -F '\t' '$3 == "check" { print $4 }' "$state/.wake-queue")
+  case $'\n'"$rows"$'\n' in *$'\nstart:rq1\n'*) fail "the relaunch kept the replaced launch's queued start wake: $rows" ;; esac
+  case $'\n'"$rows"$'\n' in *$'\nstart:other\n'*) ;; *) fail "the relaunch dropped another task's start wake: $rows" ;; esac
+  case $'\n'"$rows"$'\n' in *$'\n'"$state/rq1.check.sh"$'\n'*) ;; *) fail "the relaunch dropped this task's other wake: $rows" ;; esac
+  pass "fm-control relaunch: a relaunch drops only the replaced launch's queued start wake"
+}
+
 test_relaunch_refuses_before_exit_when_the_composer_holds_pending_text() {
   local dir out rc
   dir=$(new_case pending-exit rl43)
@@ -3145,6 +3169,7 @@ test_relaunch_off_opencode_removes_tracked_wiring
 test_exit_and_relaunch_remove_the_dialog_file
 test_exit_removes_the_dialog_file_before_releasing_the_lock
 test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint
+test_relaunch_drops_the_replaced_launchs_queued_start_wake
 test_relaunch_refuses_before_exit_when_the_composer_holds_pending_text
 test_relaunch_refuses_before_exit_when_the_composer_state_is_unproven
 test_relaunch_from_linked_home_preserves_recorded_worktree

@@ -185,6 +185,32 @@ assert_absent "$HOME_DIR/state/ios.start-pending" \
   "kimi proves its start in its own gate, so no start check should stay armed"
 pass "a kimi replacement is not armed, and an older record is removed"
 
+# --- a relaunch drops the replaced launch's queued start wake ---------------
+# A start wake the previous launch already queued names a launch this relaunch
+# replaced, so only that row goes; another task's start wake and this task's
+# other wakes stay queued for the supervisor. Kimi arms no new check but still
+# replaces the launch the old wake named.
+queue_rows() {  # <kind> <key>
+  awk -F '\t' -v kind="$1" -v key="$2" '$3 == kind && $4 == key' "$HOME_DIR/state/.wake-queue" | wc -l | tr -d ' '
+}
+for harness in claude kimi; do
+  reset_meta
+  rm -f "$HOME_DIR/state/.wake-queue"
+  FM_STATE_OVERRIDE="$HOME_DIR/state" bash -c '. "$0/bin/fm-wake-lib.sh"
+    fm_wake_append check start:ios "check: start ios: no start signal 120s after spawn (harness=pi)"
+    fm_wake_append check start:other "check: start other: no start signal 120s after spawn (harness=pi)"
+    fm_wake_append check "$1/ios.check.sh" "check: ios poll result"' "$ROOT" "$HOME_DIR/state" \
+    || fail "fixture: could not queue the wakes"
+  OUT=$(run_relaunch ios "$harness" - -); RC=$?
+  expect_code 0 "$RC" "a confirmed $harness relaunch should succeed"$'\n'"$OUT"
+  [ "$(queue_rows check start:ios)" = 0 ] \
+    || fail "a $harness relaunch kept the replaced launch's queued start wake: $(cat "$HOME_DIR/state/.wake-queue")"
+  [ "$(queue_rows check start:other)" = 1 ] || fail "a $harness relaunch dropped another task's start wake"
+  [ "$(queue_rows check "$HOME_DIR/state/ios.check.sh")" = 1 ] || fail "a $harness relaunch dropped this task's other wake"
+done
+rm -f "$HOME_DIR/state/.wake-queue"
+pass "a remote relaunch drops only the replaced launch's queued start wake"
+
 # --- the relaunch takes its start-check boundary before the host delivers ----
 reset_meta
 rm -f "$HOME_DIR/state/ios.start-pending"

@@ -896,11 +896,18 @@ launches_after_inherit=0
 [ "$launches_before_inherit" -eq "$launches_after_inherit" ] \
   || fail "remote spawn reached launch after ambiguous partial inheritance"
 assert_absent "$PARENT/state/ios.meta" "failed remote inheritance published launch metadata"
+# A start wake an earlier launch of ios left queued names a launch this spawn
+# replaces; publishing the new check drops that row.
+FM_STATE_OVERRIDE="$PARENT/state" bash -c '. "$0/bin/fm-wake-lib.sh"
+  fm_wake_append check start:ios "check: start ios: no start signal 120s after spawn (harness=codex)"' "$ROOT" \
+  || fail "fixture: could not queue the earlier launch's start wake"
 # The agent replies the moment it starts, before the launch returns.
 printf '%s\n%s\n' "$REMOTE_HOME/state/parent-replies.status" 'note: ios fast launch reply' \
   > "$HERDR_STATE.launch-reply"
 out=$(remote_env "$ROOT/bin/fm-spawn.sh" ios --secondmate)
 assert_contains "$out" 'remote=remote-mac backend=herdr' "remote spawn did not report separate host and backend dimensions"
+[ "$(awk -F '\t' '$3 == "check" && $4 == "start:ios"' "$PARENT/state/.wake-queue" | wc -l | tr -d ' ')" = 0 ] \
+  || fail "remote spawn kept an earlier launch's queued start wake: $(cat "$PARENT/state/.wake-queue")"
 assert_grep 'remote_host=remote-mac' "$PARENT/state/ios.meta" "parent metadata omitted the remote host"
 assert_grep 'remote_backend=herdr' "$PARENT/state/ios.meta" "parent metadata omitted the remote-local backend"
 assert_grep 'remote_herdr_session=fm-remote' "$PARENT/state/ios.meta" "parent metadata omitted the pinned remote Herdr session"

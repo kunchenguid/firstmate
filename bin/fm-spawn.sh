@@ -1352,6 +1352,9 @@ spawn_arm_start_check() {  # <id> <enabled 0|1> <epoch> <busy-gen|-> <harness> [
   else
     fm_lock_acquire_wait "$lock"
   fi
+  # A start wake an earlier launch already queued names the launch this one
+  # replaced; drop only that row, under the lock the watcher holds to queue one.
+  fm_wake_queue_prune_task "$STATE" "$id" "" start 2>/dev/null || true
   if [ "$enabled" -eq 1 ]; then
     if ! { printf '%s %s %s\n' "$epoch" "$gen" "$harness" >"$record.tmp.$$" \
       && mv -f "$record.tmp.$$" "$record"; }; then

@@ -105,6 +105,8 @@ while IFS= read -r line || [ -n "$line" ]; do
 done < "$META"
 chmod 0600 "$META_TMP"
 mv -f -- "$META_TMP" "$META"
+# A start wake the replaced launch already queued is dropped with its record.
+fm_wake_queue_prune_task "$STATE" "$ID" "" start 2>/dev/null || true
 case "$NEW_HARNESS" in kimi*) rm -f -- "$STATE/$ID.start-pending" ;;
   *)
     if [ "${FM_SPAWN_NO_START_CHECK:-0}" = 1 ]; then
