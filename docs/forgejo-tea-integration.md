@@ -104,7 +104,8 @@ It never splits the output line by line, because a login printed as one compact 
 
 ## URL shape
 
-Forgejo (and Gitea) serve pull requests at `https://<host>/<owner>/<repo>/pulls/<number>` - plural "pulls", no `/-/` route separator, confirmed by the fixture's own PR-creation output:
+Firstmate accepts Forgejo (and Gitea) pull request URLs at `http://<host>[:<port>]/<owner>/<repo>/pulls/<number>` or the same shape with `https`, because a private LAN instance often has no TLS; GitHub, GitLab, and Gerrit URLs stay https-only.
+The route uses plural "pulls" and no `/-/` route separator, as the fixture's own PR-creation output confirms:
 
 ```
 $ tea pulls create --login fm-fixture --repo fixture/fixture-repo --head merged-branch --base main --title "..."
@@ -112,7 +113,6 @@ $ tea pulls create --login fm-fixture --repo fixture/fixture-repo --head merged-
   http://localhost:3980/fixture/fixture-repo/pulls/1
 ```
 
-Firstmate also accepts that URL with plain `http` and an optional port on the host, because a private LAN instance often has no TLS; GitHub, GitLab, and Gerrit URLs stay https-only.
 This never collides with GitHub's `.../pull/<n>` (singular), GitLab's `.../-/merge_requests/<n>`, or Gerrit's `.../c/<project>/+/<n>`.
 
 ## End to end: arming and polling a real pull request

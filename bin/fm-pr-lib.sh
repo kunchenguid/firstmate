@@ -127,9 +127,10 @@ fm_task_id_creation_valid() {
 }
 
 # GitLab, Gerrit, and Forgejo all serve self-hosted instances, so the host is part of the
-# identity rather than a constant. It is accepted only as a lowercase DNS name
-# with no userinfo, port, or trailing dot, which keeps one canonical spelling per
-# change. github.com is refused here even though its shape is otherwise valid:
+# identity rather than a constant. This shared DNS validator accepts no userinfo, port, or
+# trailing dot; fm_pr_forgejo_authority_valid below adds Forgejo's optional canonical port
+# before delegating here. These rules keep one canonical spelling per change.
+# github.com is refused here even though its shape is otherwise valid:
 # it is GitHub's own host and never another forge's instance, so a URL like
 # https://github.com/o/r/-/merge_requests/1 (a typo'd or spoofed GitHub URL)
 # would otherwise be armed as a watch that can never succeed.
