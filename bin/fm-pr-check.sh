@@ -77,8 +77,8 @@ pr_check_reported_url() {  # <status-file>
         found=$FM_PR_URL
         break
       fi
-    done < <(status_line_note "$line" | grep -oE '(^|[^[:alnum:]_])PR https://[^[:space:]]+' || true)
-  done < <(grep -E '^[[:space:]]*done' "$1" | grep -F 'PR https://' || true)
+    done < <(status_line_note "$line" | grep -oE '(^|[^[:alnum:]_])PR https?://[^[:space:]]+' || true)
+  done < <(grep -E '^[[:space:]]*done' "$1" | grep -E 'PR https?://' || true)
   [ -n "$found" ] || return 1
   printf '%s\n' "$found"
 }

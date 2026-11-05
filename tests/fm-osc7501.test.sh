@@ -172,8 +172,12 @@ t_status_transitions_and_final_done() {
   printf 'needs-decision [at=1]: ship it?\n' >"$d/state/t3.status"
   wait_cap 'state=blocked:kind=question' "$d/cap" 60 \
     || fail "transition: needs-decision did not emit blocked kind=question"
-  printf 'done [at=2]: PR https://example.test/pr/1\n' >"$d/state/t3.status"
-  wait_cap 'state=done' "$d/cap" 60 || fail "transition: done did not emit state=done"
+  printf 'done [at=2]: Published http://internal/docs\n' >"$d/state/t3.status"
+  wait_cap "msg=$(printf 'Done: Published http://internal/docs' | base64 | tr -d '\n')" "$d/cap" 60 \
+    || fail "transition: an unrelated HTTP link did not emit an ordinary done message"
+  printf 'done [at=3]: PR http://pi4:3001/o/r/pulls/1 checks green\n' >"$d/state/t3.status"
+  wait_cap "msg=$(printf 'PR ready: PR http://pi4:3001/o/r/pulls/1 checks green' | base64 | tr -d '\n')" "$d/cap" 60 \
+    || fail "transition: an HTTP PR did not emit a PR-ready done message"
   kill "$holder" 2>/dev/null; wait "$holder" 2>/dev/null || true
   local i=0
   while kill -0 "$wpid" 2>/dev/null && [ "$i" -lt 60 ]; do sleep 0.1; i=$((i + 1)); done

@@ -226,7 +226,7 @@ plan_mark() {
     done)
       P_STATE="done"
       case "$note" in
-        *https://* | *http://*) P_MSG="PR ready: $note" ;;
+        *https://* | *PR\ http://*) P_MSG="PR ready: $note" ;;
         *) P_MSG="Done: $note" ;;
       esac
       ;;

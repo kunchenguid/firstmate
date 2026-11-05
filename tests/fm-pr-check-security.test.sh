@@ -790,7 +790,19 @@ test_scan_records_a_pr_reported_in_a_done_line() {
     'done [at=2]: rebased and pushed; PR https://github.com/o/r/pull/7, not draft, only Full suite red' \
     'done [at=3]: live transcript posted on https://github.com/o/r/pull/99' > "$state/task-a.status"
   write_task_meta "$dir" task-prose
-  printf '%s\n' 'done [at=2]: opened https://github.com/o/r/pull/8' > "$state/task-prose.status"
+  printf '%s\n' \
+    'done [at=2]: opened https://github.com/o/r/pull/8' \
+    'done [at=3]: opened http://pi4:3001/o/r/pulls/8' > "$state/task-prose.status"
+  write_task_meta "$dir" task-http
+  printf '%s\n' 'done [at=2]: PR http://pi4:3001/o/r/pulls/7 checks green' > "$state/task-http.status"
+  cat > "$dir/fakebin/tea" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-} ${2:-}" = "login list" ]; then
+  printf '[{"name":"main","url":"http://pi4:3001"}]\n'
+fi
+SH
+  chmod +x "$dir/fakebin/tea"
+  ln -sf "$REAL_JQ" "$dir/fakebin/jq"
   fm_write_meta "$state/task-scout.meta" 'window=firstmate:fm-task-scout' 'endpoint_task_id=task-scout' \
     "worktree=$dir/wt" "project=$dir/project" 'kind=scout'
   printf '%s\n' 'done [at=2]: PR https://github.com/o/r/pull/10 reviewed' > "$state/task-scout.status"
@@ -803,6 +815,9 @@ test_scan_records_a_pr_reported_in_a_done_line() {
   grep -qxF 'pr=https://github.com/o/r/pull/7' "$state/task-a.meta" \
     || fail "the PR named in a done line was not recorded"
   fm_pr_poll_artifacts_valid "$state" task-a "$POLL" || fail "the reported PR's merge poll was not armed"
+  grep -qxF 'pr=http://pi4:3001/o/r/pulls/7' "$state/task-http.meta" \
+    || fail "the plain-http PR named in a done line was not recorded"
+  fm_pr_poll_artifacts_valid "$state" task-http "$POLL" || fail "the reported plain-http PR's merge poll was not armed"
   ! grep -q '^pr=' "$state/task-prose.meta" || fail "a URL without the PR prefix was recorded"
   [ ! -e "$state/task-prose.check.sh" ] || fail "a URL without the PR prefix armed a poll"
   ! grep -q '^pr=' "$state/task-scout.meta" || fail "a scout's PR mention was recorded"
