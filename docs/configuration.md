@@ -859,6 +859,7 @@ The flag takes effect at the next check sweep, and is a home-local preference th
 The optional local, gitignored `config/pipeline-spend` presence flag opts this home into recording per-task no-mistakes pipeline spend in `data/pipeline-spend.jsonl` during teardown.
 When the flag is absent, teardown skips recording and the recorder exits before reading task metadata, no-mistakes state, or the spend ledger.
 An existing ledger is left untouched while recording is disabled.
+Teardown records no entry for an hc ship placed on another machine; see [Limits of a placed worker](hc-backend.md#limits-of-a-placed-worker).
 
 ## No-mistakes home resolver (config/nm-home-resolver)
 
