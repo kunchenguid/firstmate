@@ -106,7 +106,13 @@ $ITEMS
 EOF
 
 # Query only after local validation, before any payload can change the receiver.
-REMOTE_GENERATION=$("$SCRIPT_DIR/fm-on.sh" "$ID" fm-remote-inherit.sh generation) || exit $?
+query_rc=0
+REMOTE_GENERATION=$("$SCRIPT_DIR/fm-on.sh" "$ID" fm-remote-inherit.sh generation) || query_rc=$?
+case "$query_rc" in
+  0) ;;
+  2) REMOTE_GENERATION=0 ;;
+  *) exit "$query_rc" ;;
+esac
 case "$REMOTE_GENERATION" in ''|*[!0-9]*) die "receiver inheritance generation is malformed" ;; esac
 [ "${#REMOTE_GENERATION}" -le 18 ] || die "receiver inheritance generation is outside the supported range"
 if [ "$REMOTE_GENERATION" -ge "$GENERATION" ]; then

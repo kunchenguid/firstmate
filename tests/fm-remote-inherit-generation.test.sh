@@ -33,7 +33,11 @@ while IFS= read -r -d '' arg; do args+=("$arg"); done < <(decode "$4")
 [ -d "$FM_FIXTURE_SENDER_LOCK" ] || { echo 'sender transaction is unlocked' >&2; exit 94; }
 if [ -n "${FM_FIXTURE_PROBE_MODE:-}" ] && [ "${args[1]}" = generation ]; then
   case "$FM_FIXTURE_PROBE_MODE" in
+    old) printf 'Usage: fm-remote-inherit.sh put|absent <path> <bytes> <sha256> <generation>\n'; exit 2 ;;
     malformed) printf 'invalid\n'; exit 0 ;;
+    empty) exit 0 ;;
+    refused) exit 1 ;;
+    failed) exit 3 ;;
     unreadable) exit 255 ;;
   esac
 fi
@@ -73,6 +77,18 @@ COUNTER="$PARENT/state/.remote-inherit-fixture.generation"
 RECORD="$REMOTE_HOME/config/.fm-inherit-crew-harness.generation"
 printf 'receiver original\n' > "$TMP_ROOT/original"
 printf 'current sender\n' > "$PARENT/config/crew-harness"
+if ! FM_FIXTURE_PROBE_MODE=old push_fixture > "$TMP_ROOT/old.out" 2>&1; then
+  fail "older receiver usage refusal blocked inheritance: $(cat "$TMP_ROOT/old.out")"
+fi
+cmp -s "$PARENT/config/crew-harness" "$REMOTE_HOME/config/crew-harness" || fail 'older receiver push did not converge'
+read -r committed < "$RECORD"
+[ "$committed" = 1 ] && [ "$(cat "$COUNTER")" = 1 ] || fail 'older receiver did not use generation floor zero'
+read -r absent_committed < "$REMOTE_HOME/data/.fm-inherit-captain-shared.md.generation"
+[ "$absent_committed" = 1 ] || fail 'older receiver absent item did not use generation floor zero'
+assert_not_contains "$(cat "$TMP_ROOT/old.out")" 'Usage:' 'older receiver usage was replayed as push output'
+rm -f -- "$COUNTER"
+pass 'older receiver generation usage refusal preserves inheritance at floor zero'
+
 receive 40 "$TMP_ROOT/original" >/dev/null
 : > "$TMP_ROOT/empty"
 FM_HOME="$REMOTE_HOME" FM_INHERITABLE_CONFIG=crew-harness \
@@ -127,7 +143,7 @@ pass 'racing pushes commit increasing generations through the shared sender tran
 
 cp "$RECORD" "$TMP_ROOT/record-good"
 cp "$REMOTE_HOME/config/crew-harness" "$TMP_ROOT/payload-good"
-for mode in malformed unreadable; do
+for mode in malformed empty refused failed unreadable; do
   if FM_FIXTURE_PROBE_MODE="$mode" push_fixture > "$TMP_ROOT/probe-$mode.out" 2>&1; then fail "$mode remote generation was accepted"; fi
   cmp -s "$RECORD" "$TMP_ROOT/record-good" || fail "$mode probe changed the receiver generation"
   cmp -s "$REMOTE_HOME/config/crew-harness" "$TMP_ROOT/payload-good" || fail "$mode probe changed the receiver payload"
