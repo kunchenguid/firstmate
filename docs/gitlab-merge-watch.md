@@ -4,7 +4,9 @@ Empirical record for the merge watch and the merge path on GitLab, alongside the
 The arming, poll, and missing-`glab` evidence through the GitHub-unaffected case was collected on 2026-07-21; "Merging a merge request" was run on 2026-08-22.
 Every output is reproduced exactly.
 
-The transcripts predate task-owned destination checks. Their historical poll invocations do not include the expected-base argument now required by `bin/fm-pr-poll.sh`, whose header owns the current invocation contract. The focused PR/check and merge suites verify destination checks without a live server.
+The transcripts predate the [task-owned destination checks](architecture.md#delivery-modes-are-explicit-per-task) and the JSON-based poll.
+Their historical poll invocations do not include the expected-base argument now required by `bin/fm-pr-poll.sh`, whose header owns the current invocation contract.
+The focused PR/check and merge suites verify destination checks without a live server.
 
 ## Versions
 
@@ -35,7 +37,7 @@ That `glab` is a locally built 1.82.0; only its build tag and commit are elided,
 
 All live evidence here reads <https://gitlab.com/KarotKris/gitlab-merge-watch-fixture>, a public project that exists only to be this evidence.
 It holds one deliberately merged merge request and one deliberately open one, so both outcomes can be shown against real data.
-Every command against it reads a public merge request and needs no credential, so a reader can rerun each one and see the same output.
+The fixture permits credential-free reads of both merge requests.
 Its README asks that the open merge request be left open.
 
 A non-default host appears below only as the placeholder `gitlab.example`, which resolves nowhere.
@@ -54,8 +56,9 @@ Two things about plain `glab` were established by running it, because assuming e
 
 First, plain `glab` has no field selector.
 `gh` reads one field with `--json state -q .state`; `glab mr view` offers only `-F, --output string  Format output as: text, json`.
-Its JSON would need a JSON processor, and `jq` is not one of firstmate's common tools, so the state is read from glab's own field output instead.
-Only an exact `merged` wakes firstmate, so a changed output format produces no wake rather than a false merge.
+The historical poll therefore read glab's text fields, as shown below.
+The current poll reads state and destination from one JSON response through `jq`, preventing a retarget between separate reads from combining a matching base with a later merged state.
+[`configuration.md`](configuration.md#forge-selection-dataprojectsmd-forge-token) owns the current tool requirements.
 
 Second, `glab` cannot take a merge request URL the way `gh pr view` can.
 That form shells out to git for the current repository, and the watcher runs in no repository:
@@ -207,9 +210,8 @@ $ echo $?
 
 Neither refusal armed a poll or recorded a `pr=`, so a missing tool leaves no half-prepared merge behind.
 
-`jq` is not one of firstmate's common tools, which is why the watch poll reads glab's field output instead.
-The merge path cannot do the same: `detailed_merge_status`, `has_conflicts`, `blocking_discussions_resolved`, and the head pipeline appear only in glab's JSON.
-The poll's silence on a missing tool is safe because silence means "not merged yet"; a merge cannot be silent about it, so the requirement is reported rather than assumed.
+The merge path reads `detailed_merge_status`, `has_conflicts`, `blocking_discussions_resolved`, and the head pipeline from glab's JSON.
+Registration and merging report missing tools before recording anything, while an already armed poll stays silent when it cannot read the record.
 
 The merged half of the fixture is refused, and every failing condition is listed rather than just the first:
 

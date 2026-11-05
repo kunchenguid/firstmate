@@ -5,7 +5,9 @@ The original findings were verified against a real, disposable Forgejo instance 
 All evidence below was collected on 2026-09-13.
 A project opts in with the `forge=forgejo` registry binding, which `bin/fm-project-mode.sh` owns; the watch and merge paths recorded here key off the pull request URL itself, and the binding decides only that a generated ship brief names `tea` rather than `gh-axi`.
 
-The transcripts predate task-owned destination checks. Their historical poll invocations do not include the expected-base argument now required by `bin/fm-pr-poll.sh`, whose header owns the current invocation contract. The focused PR/check and merge suites verify destination checks without a live server.
+The transcripts predate the [task-owned destination checks](architecture.md#delivery-modes-are-explicit-per-task).
+Their historical poll invocations do not include the expected-base argument now required by `bin/fm-pr-poll.sh`, whose header owns the current invocation contract.
+The focused PR/check and merge suites verify destination checks without a live server.
 
 ## Versions
 

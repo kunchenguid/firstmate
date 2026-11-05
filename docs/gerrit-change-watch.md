@@ -4,8 +4,9 @@ Empirical record for the merge watch on Gerrit, alongside the existing GitHub an
 It covers what the watch reads, why it reads that field and not a neighbouring one, and why the merge path refuses.
 Every output below is reproduced verbatim except for the server host, project name, and change numbers, which are replaced throughout by the placeholders the test fixtures use.
 
-The transcripts predate task-owned destination checks. Their historical poll invocations do not include the expected-base argument now required by `bin/fm-pr-poll.sh`, whose header owns the current invocation contract. `tests/fm-pr-check-security.test.sh` verifies destination checks without a live server.
-For pre-upgrade tasks without destination proof, the supervising firstmate follows the recovery instructions emitted by `bin/fm-pr-check.sh <id> <PR-URL>` before registering again.
+The transcripts predate the [task-owned destination checks and legacy recovery](architecture.md#delivery-modes-are-explicit-per-task).
+Their historical poll invocations do not include the expected-base argument now required by `bin/fm-pr-poll.sh`, whose header owns the current invocation contract.
+`tests/fm-pr-check-security.test.sh` verifies destination checks without a live server.
 
 ## Versions
 
@@ -127,7 +128,8 @@ The server permitting self-approval is what makes this a policy boundary rather 
 - Arming records no `pr_head`: a Gerrit revision names one patch set, and `bin/fm-review-diff.sh` has no Gerrit path to resolve a current head with, so a recorded revision would quietly become the reviewed content after the next amend.
 - The merge path refuses a Gerrit change.
 - Arming accepts a done naming a Gerrit change only when a live read shows the change's current patch set carrying the worker's HEAD tree, even when a remote-tracking ref such as the no-mistakes gate branch holds that HEAD, and refuses a mismatched, unknown, or unreadable patch set before recording anything.
-- Once arming has recorded the change as `pr=`, a later done naming it retains the recorded head/tree proof, so a server-side rebase or new patch set does not revoke it. The destination is still checked through `bin/fm-pr-lib.sh` before readiness is accepted.
+- Once arming has recorded the change as `pr=`, a later done naming it retains the recorded head/tree proof, so a server-side rebase or new patch set does not revoke it.
+  The [shared destination gate](architecture.md#delivery-modes-are-explicit-per-task) still applies.
 - A no-mistakes done naming a Gerrit change is also refused unless the copy holds a passed pipeline's result: refused when the run's outcome is missing or not a pass, while the run reports `recover_custody` or `continue_active_run`, when HEAD's tree differs from the pipeline head's, or when the run cannot be read, and accepted once recovered even after the Change-Id stamp rewrote the branch's messages.
 - A `published for review` done whose URL is not a canonical Gerrit change URL is refused, even when a remote-tracking ref holds HEAD.
 
