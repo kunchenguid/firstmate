@@ -34,7 +34,7 @@ write_merge_marker() {  # <state> <id> <provider> <host> <path> <number>
 
 test_gerrit_readiness_obeys_scan_deadline() {
   local dir repo wt meta url mode stalled deadline rc out elapsed start
-  local real_date published_head clock_start=2000000000 budget
+  local published_head budget
   dir="$TMP_ROOT/gerrit-deadline"
   repo="$dir/repo"
   wt="$dir/wt"
@@ -43,16 +43,7 @@ test_gerrit_readiness_obeys_scan_deadline() {
   mkdir -p "$dir/bin" "$dir/config"
   fm_git_worktree "$repo" "$wt" fm/gerrit-deadline
   git -C "$wt" commit -q --allow-empty -m 'published work'
-  real_date=$(type -P date)
   published_head=$(git -C "$wt" rev-parse HEAD)
-  cat > "$dir/bin/date" <<'SH'
-#!/usr/bin/env bash
-if [ "$#" -eq 1 ] && [ "$1" = +%s ] && [ -n "${FM_READ_CLOCK:-}" ]; then
-  cat "$FM_READ_CLOCK"
-else
-  exec "$FM_REAL_DATE" "$@"
-fi
-SH
   cat > "$dir/bin/gerrit-axi" <<'SH'
 #!/usr/bin/env bash
 count=$(cat "$FM_GERRIT_CALLS" 2>/dev/null || printf 0)
@@ -61,7 +52,6 @@ printf '%s\n' "$count" > "$FM_GERRIT_CALLS"
 if [ "$count" -gt 1 ]; then
   case "$FM_STALLED_READ" in
     revision|sequence)
-      printf '%s\n' "$(( $(cat "$FM_READ_CLOCK") + 1 ))" > "$FM_READ_CLOCK"
       sleep 5 ;;
   esac
 fi
@@ -71,12 +61,10 @@ SH
 #!/usr/bin/env bash
 printf 'status\n' >> "$FM_NM_CALLS"
 if [ "$FM_STALLED_READ" = custody ]; then
-  printf '%s\n' "$(( $(cat "$FM_READ_CLOCK") + 1 ))" > "$FM_READ_CLOCK"
   sleep 5
 fi
 if [ "$FM_STALLED_READ" = sequence ]; then
   sleep 1
-  printf '%s\n' "$(( $(cat "$FM_READ_CLOCK") + 1 ))" > "$FM_READ_CLOCK"
 fi
 printf 'run:\n  outcome: passed\n  head_sha: %s\n' "$FM_PUBLISHED_HEAD"
 SH
@@ -84,12 +72,10 @@ SH
 #!/usr/bin/env bash
 printf 'resolver\n' >> "$FM_NM_CALLS"
 if [ "$FM_STALLED_READ" = resolver ]; then
-  printf '%s\n' "$(( $(cat "$FM_READ_CLOCK") + 1 ))" > "$FM_READ_CLOCK"
   sleep 5
 fi
 if [ "$FM_STALLED_READ" = sequence ]; then
   sleep 1
-  printf '%s\n' "$(( $(cat "$FM_READ_CLOCK") + 1 ))" > "$FM_READ_CLOCK"
 fi
 printf '%s\n' "$FM_RESOLVED_HOME"
 SH
@@ -97,9 +83,9 @@ SH
   printf '%s\n' "$dir/bin/resolver" > "$dir/config/nm-home-resolver"
   printf 'kind=ship\nmode=no-mistakes\nforge=gerrit\nexpected_base=main\n' > "$meta"
   for mode in direct-PR no-mistakes ''; do
-    for deadline in '' "$(( $(date +%s) + 10 ))"; do
+    for deadline in '' "$(( $(fm_nm_now_ms) + 10000 ))"; do
       : > "$dir/gerrit.calls"
-      PATH="$dir/bin:$PATH" FM_READ_DEADLINE="$deadline" FM_REAL_DATE="$real_date" FM_CONFIG_OVERRIDE="$dir/config" NM_HOME='' \
+      PATH="$dir/bin:$PATH" FM_READ_DEADLINE="$deadline" FM_CONFIG_OVERRIDE="$dir/config" NM_HOME='' \
         FM_GERRIT_CALLS="$dir/gerrit.calls" FM_NM_CALLS="$dir/nm.calls" \
         FM_STALLED_READ=none FM_RESOLVED_HOME="$dir" \
         FM_PUBLISHED_HEAD="$published_head" \
@@ -111,23 +97,22 @@ SH
   for stalled in custody revision resolver sequence; do
     : > "$dir/gerrit.calls"
     : > "$dir/nm.calls"
-    printf '%s\n' "$clock_start" > "$dir/clock"
     budget=1
     [ "$stalled" != sequence ] || budget=3
-    deadline=$((clock_start + budget))
-    start=$(date +%s)
+    start=$(fm_nm_now_ms)
+    deadline=$((start + budget * 1000))
     rc=0
-    out=$(PATH="$dir/bin:$PATH" FM_READ_DEADLINE="$deadline" FM_REAL_DATE="$real_date" FM_READ_CLOCK="$dir/clock" \
+    out=$(PATH="$dir/bin:$PATH" FM_READ_DEADLINE="$deadline" \
       FM_CONFIG_OVERRIDE="$dir/config" NM_HOME='' \
       FM_GERRIT_CALLS="$dir/gerrit.calls" FM_NM_CALLS="$dir/nm.calls" \
       FM_STALLED_READ="$stalled" FM_RESOLVED_HOME="$dir" \
       FM_PUBLISHED_HEAD="$published_head" \
       fm_dod_accept_ship_done ship no-mistakes "$wt" "$repo" "done: PR $url published for review" \
       "$dir" task "$meta" meta-locked) || rc=$?
-    elapsed=$(( $(date +%s) - start ))
+    elapsed=$(( $(fm_nm_now_ms) - start ))
     [ "$rc" -ne 0 ] || fail "Gerrit $stalled accepted proof after the scan deadline: $out"
-    [ "$elapsed" -lt "$((budget + 3))" ] \
-      || fail "Gerrit $stalled outlived the scan deadline ($elapsed seconds)"
+    [ "$elapsed" -lt "$(( (budget + 3) * 1000 ))" ] \
+      || fail "Gerrit $stalled outlived the scan deadline ($elapsed ms)"
     if [ "$stalled" = custody ] || [ "$stalled" = resolver ]; then
       [ "$(cat "$dir/gerrit.calls")" = 1 ] || fail 'expired custody reached the revision read'
     fi
@@ -140,9 +125,9 @@ SH
       [ "$(cat "$dir/gerrit.calls")" = 2 ] || fail "Gerrit $stalled never reached the revision read"
     fi
   done
-  for deadline in invalid 00 9999999999999999999 "$(date +%s)"; do
+  for deadline in invalid 00 9999999999999999999 "$(fm_nm_now_ms)"; do
     : > "$dir/gerrit.calls"
-    if PATH="$dir/bin:$PATH" FM_READ_DEADLINE="$deadline" FM_REAL_DATE="$real_date" FM_GERRIT_CALLS="$dir/gerrit.calls" \
+    if PATH="$dir/bin:$PATH" FM_READ_DEADLINE="$deadline" FM_GERRIT_CALLS="$dir/gerrit.calls" \
       fm_dod_accept_ship_done ship direct-PR "$wt" "$repo" "done: PR $url published for review" \
       "$dir" task "$meta" meta-locked >/dev/null; then
       fail "Gerrit readiness accepted deadline '$deadline'"

@@ -4,6 +4,8 @@ set -u
 
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+# shellcheck source=bin/fm-nm-run-lib.sh
+. "$ROOT/bin/fm-nm-run-lib.sh"
 
 RECON="$ROOT/bin/fm-inactive-reconcile.sh"
 DRAIN="$ROOT/bin/fm-wake-drain.sh"
@@ -647,20 +649,18 @@ SH
       chmod +x "$WORLD/fakebin/"*
       for attempt in 1 2 3 4; do
         : > "$WORLD/forge.pids"
-        started=$(date +%s)
-        while [ "$(date +%s)" = "$started" ]; do sleep 0.05; done
-        started=$(date +%s)
+        started=$(fm_nm_now_ms)
         PATH="$tools_bin" FM_FORGE_PIDS="$WORLD/forge.pids" FM_TEST_DOD_LIB="$ROOT/bin/fm-dod-lib.sh" \
           FM_INACTIVE_RECONCILE_BUDGET_SECS=3 FM_FAKE_CREW_STATE=unknown \
           run_reconcile "$home" --startup
-        elapsed=$(( $(date +%s) - started ))
-        [ "$elapsed" -le 4 ] || fail "$timer/$route scan exceeded budget plus backstop: ${elapsed}s"
+        elapsed=$(( $(fm_nm_now_ms) - started ))
+        [ "$elapsed" -le 4000 ] || fail "$timer/$route scan exceeded budget plus backstop: ${elapsed}ms"
         running=0
         [ -s "$WORLD/forge.pids" ] \
           || fail "$timer/$route poll $attempt never started a forge read: $(cat "$WORLD/forge.pids.crew" 2>/dev/null)"
         while read -r pid deadline url; do
           printf '%s\n' "$url" >> "$WORLD/visited"
-          [ "$deadline" -gt 0 ] && [ "$(date +%s)" -le "$((deadline + 2))" ] \
+          [ "$deadline" -gt 0 ] && [ "$(fm_nm_now_ms)" -le "$((deadline + 2000))" ] \
             || fail "$timer/$route scan exceeded its read deadline"
           state=$(ps -p "$pid" -o stat= 2>/dev/null || true)
           case "$state" in
@@ -727,7 +727,7 @@ SH
     "$ROOT/bin/fm-crew-state.sh" child)
   case "$out" in 'state: done '*) ;; *) fail "ordinary idle handoff no longer reads done: $out" ;; esac
   out=$(PATH="$WORLD/fakebin:$PATH" FM_HOME="$MAIN" FM_STATE_OVERRIDE="$MAIN/state" \
-    FM_CONFIG_OVERRIDE="$MAIN/config" FM_READ_DEADLINE="$(( $(date +%s) + 2 ))" \
+    FM_CONFIG_OVERRIDE="$MAIN/config" FM_READ_DEADLINE="$(( $(fm_nm_now_ms) + 2000 ))" \
     FM_STALL_RUN_READ=1 FM_RUN_READ_LOG="$WORLD/run.calls" \
     "$ROOT/bin/fm-crew-state.sh" child) || rc=$?
   [ "$rc" = 124 ] || fail "deadline-truncated crew-state lost its timeout status: $rc $out"
@@ -742,36 +742,31 @@ SH
   pass 'deadline-truncated run reads return unknown and create no terminal outcome'
 }
 
-# Advance the fixture clock when ledger proof uses the remaining scan budget.
-# The real crew-state command must still get the first cadence visit's floor.
+# Exhaust ledger proof with a real stalled process, then measure the real
+# crew-state command. A clock frozen at a whole-second boundary cannot prove
+# that the forced visit gets a full second rather than the next clock tick.
 test_forced_cadence_visit_keeps_floor_after_ledger_deadline() {
-  local epoch branch head out real_date
-  make_world forced-cadence-floor; bind_secondmate local
+  local branch head out mode started elapsed deadline rc
+  for mode in failed stalled; do
+  make_world "forced-cadence-floor-$mode"; bind_secondmate local
   write_child "$MATE" 0-cadence 'working: awaiting the pipeline result'
   write_child "$MATE" a-ledger 'done: PR https://github.com/owner/repo/pull/1 checks green'
   printf 'expected_base=main\n' >> "$MATE/state/a-ledger.meta"
   branch=$(git -C "$MATE/projects/0-cadence" symbolic-ref --short HEAD)
   head=$(git -C "$MATE/projects/0-cadence" rev-parse HEAD)
-  real_date=$(type -P date)
-  epoch=$(date +%s)
-  printf '%s\n' "$epoch" > "$WORLD/clock"
-  cat > "$WORLD/fakebin/date" <<'SH'
-#!/usr/bin/env bash
-if [ "$#" = 1 ] && [ "$1" = +%s ]; then
-  cat "$FM_FLOOR_CLOCK"
-else
-  exec "$FM_REAL_DATE" "$@"
-fi
-SH
   cat > "$WORLD/fakebin/gh" <<'SH'
 #!/usr/bin/env bash
 printf 'ledger-read\n' >> "$FM_FORGE_LOG"
-printf '%s\n' "$((FM_FLOOR_EPOCH + 3))" > "$FM_FLOOR_CLOCK"
-exit 97
+exec sleep 30
 SH
   cat > "$WORLD/fakebin/no-mistakes" <<'SH'
 #!/usr/bin/env bash
 if [ "$#" = 1 ] && [ "$1" = axi ]; then
+  if [ "${FM_FLOOR_STALL:-0}" = 1 ]; then
+    printf 'run-read\n' >> "$FM_FLOOR_CALLS"
+    exec sleep 5
+  fi
+  [ "${FM_FLOOR_DELAY:-0}" = 0 ] || sleep "$FM_FLOOR_DELAY"
   printf 'current_branch: %s\ncount: 1 of 1 total\nruns[1]{id,branch,status,head,pr}:\n' "$FM_FLOOR_BRANCH"
   printf '  01RUN,%s,failed,%s,""\n' "$FM_FLOOR_BRANCH" "$FM_FLOOR_HEAD"
 else
@@ -787,25 +782,56 @@ outcome: failed
 EOF
 fi
 SH
+  cat > "$WORLD/fakebin/measured-crew-state" <<'SH'
+#!/usr/bin/env bash
+. "$FM_FLOOR_LIB"
+started=$(fm_nm_now_ms)
+rc=0
+"${FM_FLOOR_LIB%/*}/fm-crew-state.sh" "$@" || rc=$?
+printf '%s %s %s %s\n' "$started" "$(fm_nm_now_ms)" "$FM_READ_DEADLINE" "$rc" > "$FM_FLOOR_MEASURE"
+exit "$rc"
+SH
   chmod +x "$WORLD/fakebin/"*
   out=$(PATH="$WORLD/fakebin:$PATH" FM_HOME="$MATE" FM_STATE_OVERRIDE="$MATE/state" \
-    FM_CONFIG_OVERRIDE="$MATE/config" FM_READ_DEADLINE='' FM_FLOOR_CLOCK="$WORLD/clock" \
-    FM_REAL_DATE="$real_date" FM_FLOOR_BRANCH="$branch" FM_FLOOR_HEAD="$head" \
+    FM_CONFIG_OVERRIDE="$MATE/config" FM_READ_DEADLINE='' \
+    FM_FLOOR_BRANCH="$branch" FM_FLOOR_HEAD="$head" \
     "$ROOT/bin/fm-crew-state.sh" 0-cadence)
   case "$out" in
     'state: failed · source: run-step'*) ;;
     *) fail "the floor fixture did not supply a known failed run: $out" ;;
   esac
-  FM_TEST_CREW_STATE_BIN="$ROOT/bin/fm-crew-state.sh" FM_INACTIVE_RECONCILE_BUDGET_SECS=3 \
-    FM_FLOOR_CLOCK="$WORLD/clock" FM_REAL_DATE="$real_date" FM_FLOOR_EPOCH="$epoch" \
+  # Start away from the next whole-second tick to expose the old fractional
+  # floor. Every clock in the scan and crew-state continues advancing normally.
+  while :; do
+    started=$(fm_nm_now_ms)
+    [ "$((started % 1000))" -ge 600 ] && [ "$((started % 1000))" -le 650 ] && break
+    sleep 0.01
+  done
+  FM_TEST_CREW_STATE_BIN="$WORLD/fakebin/measured-crew-state" FM_INACTIVE_RECONCILE_BUDGET_SECS=3 \
+    FM_FLOOR_LIB="$ROOT/bin/fm-nm-run-lib.sh" FM_FLOOR_MEASURE="$WORLD/measure" \
+    FM_FLOOR_CALLS="$WORLD/run.calls" FM_FLOOR_STALL="$([ "$mode" = stalled ] && printf 1 || printf 0)" \
+    FM_FLOOR_DELAY=0.6 \
     FM_FLOOR_BRANCH="$branch" FM_FLOOR_HEAD="$head" run_reconcile "$MATE" --startup
   grep -Fxq ledger-read "$WORLD/forge.log" || fail 'the floor regression never exhausted ledger proof'
-  [ "$(cat "$WORLD/clock")" = "$((epoch + 3))" ] || fail 'the ledger read did not reach the scan deadline'
-  grep -Fq 'inactive-outcome-mate-0-cadence-failed' "$MAIN/state/mate.status" 2>/dev/null \
-    || fail 'the forced first cadence visit lost its one-second floor after the ledger deadline'
-  [ "$(outcome_count "$MATE" reported)" = 1 ] \
-    || fail 'the floor regression reported an unproved ledger child'
-  pass 'the forced first cadence visit retains its floor after ledger proof exhausts the deadline'
+  [ -s "$WORLD/measure" ] || fail 'the forced first cadence visit never completed its measured real crew-state read'
+  read -r started elapsed deadline rc < "$WORLD/measure"
+  elapsed=$((elapsed - started))
+  [ "$((deadline - started))" -ge 900 ] \
+    || fail 'the forced first cadence visit inherited less than a full second of real budget'
+  if [ "$mode" = stalled ]; then
+    grep -Fxq run-read "$WORLD/run.calls" || fail 'the floor regression never stalled a run read'
+    [ "$rc" = 124 ] && [ "$elapsed" -ge 900 ] \
+      || fail "the forced first cadence visit lost its one-second real-time floor: ${elapsed}ms rc=$rc"
+    [ "$(outcome_count "$MATE" reported)" = 0 ] \
+      || fail 'the floor regression reported a deadline-truncated read'
+  else
+    grep -Fq 'inactive-outcome-mate-0-cadence-failed' "$MAIN/state/mate.status" 2>/dev/null \
+      || fail 'the forced first cadence visit lost its one-second floor after the ledger deadline'
+    [ "$(outcome_count "$MATE" reported)" = 1 ] \
+      || fail 'the floor regression reported an unproved ledger child'
+  fi
+  done
+  pass 'the forced first cadence visit preserves a measured full-second floor after real stalled ledger proof'
 }
 
 # A scout's done line carries its report pointer, a failed line is delivered
