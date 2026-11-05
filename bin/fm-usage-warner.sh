@@ -106,7 +106,7 @@ Usage:
 
 Thresholds are read from config/usage-warner (local, gitignored), whose schema
 is owned by docs/configuration.md ("Local Claude usage warner").
-Add sound:off to that file for silent banners.
+Banners are always silent; a sound:off line is accepted and changes nothing.
 See docs/usage-warner.md for the behaviour reference and
 docs/examples/usage-warner for a starting point.
 EOF

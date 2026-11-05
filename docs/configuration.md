@@ -2441,9 +2441,10 @@ This section is the single owner of the canonical schema.
 <window-id>:<percent>
 ```
 
-An optional `sound:off` directive requests a silent Notification Center banner; without it the existing system-default sound behavior is unchanged.
+The usage-warner banner never carries a `sound name` clause, so it is silent by default.
+An optional `sound:off` directive is accepted and keeps it silent; deleting that line changes nothing for the usage warner.
 `sound:off` alone does not enable the warner without a threshold.
-Append the preference without opening an editor with `printf '\nsound:off\n' >> "${FM_CONFIG_OVERRIDE:-${FM_HOME:-.}/config}/usage-warner"`; delete that line to restore sound.
+Append the preference without opening an editor with `printf '\nsound:off\n' >> "${FM_CONFIG_OVERRIDE:-${FM_HOME:-.}/config}/usage-warner"`.
 
 One threshold directive per non-empty, non-comment line, split on the last colon so a per-model window id such as `model:fable` still parses.
 `<window-id>` is exactly the `id` field `quota-axi`'s own `--json` output already uses.
