@@ -103,6 +103,80 @@ printf 'Droid %s live spawn: trust cleared; effective_model=%s; runtime model ov
   "$(droid --version)" "$observed_model"
 pass "Droid live spawn: fresh-worktree folder trust is answered and the default model is observed"
 
+# Exercise a real exact native pin against a conflicting project default.
+# The installed catalog must advertise both IDs; there is no guessed fallback.
+PIN_MODEL=gpt-6.1-sol
+bash "$ROOT/bin/fm-droid-model.sh" resolve "$PIN_MODEL" >/dev/null \
+  || fail "Droid $(droid --version): native pin is not in the installed catalog"
+bash "$ROOT/bin/fm-droid-model.sh" resolve auto >/dev/null \
+  || fail "Droid $(droid --version): conflicting default is not in the installed catalog"
+mkdir -p "$SPAWN_WT/.factory"
+printf '.factory/\n' >> "$SPAWN_PROJECT/.git/info/exclude"
+printf '%s\n' '{"sessionDefaultSettings":{"model":"auto","reasoningEffort":"low"}}' \
+  > "$SPAWN_WT/.factory/settings.local.json"
+# Retire only the lab-owned default probe before reusing its scratch worktree.
+# Keep model selection verification independent of rendered composer lifecycle.
+"$REAL_TMUX" -L "$SOCKET" kill-window -t "$spawn_target"
+SPAWN_ID=droid-live-pin
+fm_test_spawn_brief "$FLEET_HOME" "$SPAWN_ID" \
+  'Reply with exactly DROID_LIVE_PIN_READY and end your turn. Do not use tools.'
+if ! pinned_spawn_output=$(FM_HOME="$FLEET_HOME" FM_ROOT_OVERRIDE='' FM_SPAWN_NO_GUARD=1 \
+  TMUX="$("$REAL_TMUX" -L "$SOCKET" display-message -p -t "$SPAWN_SESSION:setup" '#{socket_path}'),1,0" \
+  bash "$ROOT/bin/fm-spawn.sh" "$SPAWN_ID" "$SPAWN_PROJECT" --scout --harness droid \
+    --model "$PIN_MODEL" --effort high 2>&1); then
+  printf '%s\n' "$pinned_spawn_output"
+  fail "Droid $(droid --version): exact native pin spawn failed"
+fi
+spawn_gen=$(sed -n 's/^spawn_gen=//p' "$FLEET_HOME/state/$SPAWN_ID.meta")
+for _ in $(seq 1 120); do
+  bash "$ROOT/bin/fm-droid-model.sh" reconcile "$FLEET_HOME/state/$SPAWN_ID.meta" "$spawn_gen"
+  [ "$(sed -n 's/^effective_model=//p' "$FLEET_HOME/state/$SPAWN_ID.meta")" != "$PIN_MODEL" ] || break
+  sleep 0.5
+done
+assert_equals "$PIN_MODEL" "$(sed -n 's/^model=//p' "$FLEET_HOME/state/$SPAWN_ID.meta")" 'live spawn changed requested native ID'
+assert_equals "$PIN_MODEL" "$(sed -n 's/^effective_model=//p' "$FLEET_HOME/state/$SPAWN_ID.meta")" 'live spawn did not reconcile runtime native ID'
+spawn_target=$(sed -n 's/^window=//p' "$FLEET_HOME/state/$SPAWN_ID.meta")
+# Capture the model row once per incarnation, and exclude the autonomy label:
+# Auto (High) is not evidence of the model's reasoning effort.
+pin_capture=$("$REAL_TMUX" -L "$SOCKET" capture-pane -p -t "$spawn_target" -S -0)
+pin_indicator=$(printf '%s\n' "$pin_capture" | sed -n '/GPT-6[.]1 Sol/p' | sed 's/Auto.*//')
+if printf '%s' "$pin_indicator" | grep -Fq '(High)'; then
+  printf 'Droid %s live spawn: requested=%s/high; observed=%s/(High); project default=auto/low\n' \
+    "$(droid --version)" "$PIN_MODEL" "$PIN_MODEL"
+else
+  printf 'Droid %s live spawn: observed=%s; effort indicator unverified (no model-row High indicator)\n' \
+    "$(droid --version)" "$PIN_MODEL"
+fi
+pass 'Droid live spawn: exact native runtime model overrides conflicting project defaults'
+
+# Let the lab's synthetic prompt finish before the one bounded relaunch probe.
+for _ in $(seq 1 120); do
+  [ ! -f "$FLEET_HOME/state/$SPAWN_ID.turn-ended" ] || break
+  sleep 0.5
+done
+# shellcheck source=bin/fm-timeout-lib.sh
+. "$ROOT/bin/fm-timeout-lib.sh"
+if relaunch_output=$(FM_HOME="$FLEET_HOME" FM_ROOT_OVERRIDE='' FM_SPAWN_NO_GUARD=1 \
+  fm_run_timed 90 bash "$ROOT/bin/fm-control.sh" "$SPAWN_ID" relaunch --effort medium \
+    --note 'Reply with exactly DROID_LIVE_RELAUNCH_READY and end your turn. Do not use tools.' 2>&1); then
+  spawn_target=$(sed -n 's/^window=//p' "$FLEET_HOME/state/$SPAWN_ID.meta")
+  relaunch_capture=$("$REAL_TMUX" -L "$SOCKET" capture-pane -p -t "$spawn_target" -S -0)
+  relaunch_indicator=$(printf '%s\n' "$relaunch_capture" | sed -n '/GPT-6[.]1 Sol/p' | sed 's/Auto.*//')
+  if printf '%s' "$relaunch_indicator" | grep -Fq '(Medium)'; then
+    printf 'Droid %s live relaunch: observed=%s/(Medium) after high-to-medium change\n' "$(droid --version)" "$PIN_MODEL"
+  else
+    printf 'Droid %s live relaunch: effort indicator unverified (no model-row Medium indicator)\n' "$(droid --version)"
+  fi
+else
+  # Keep this optional evidence boundary explicit without copying other startup
+  # diagnostics, which can include account or provider information.
+  if printf '%s' "$relaunch_output" | grep -Fq "composer state is 'pending-unproven'"; then
+    printf '%s\n' 'Droid live relaunch: unverified; composer guard refused pending-unproven state before /quit'
+  else
+    printf '%s\n' 'Droid live relaunch: unverified; bounded control probe did not confirm replacement'
+  fi
+fi
+
 if [ "${FM_DROID_SPAWN_LIVE_ONLY:-0}" = 1 ]; then
   printf 'ok - Droid %s spawn live verification complete\n' "$(droid --version)"
   exit 0
