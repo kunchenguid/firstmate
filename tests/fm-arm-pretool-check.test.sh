@@ -43,6 +43,9 @@ matrix_case A14 allow "[ -f 'config/x-mode.env' ] && source 'config/x-mode.env';
 matrix_case A15 allow "cd $ROOT && exec bin/fm-watch-arm.sh"
 matrix_case A16 allow "export FM_HOME=$ROOT && bin/fm-watch-checkpoint.sh --seconds 180"
 matrix_case A17 allow $'source "config/x-mode.env"\nbin/fm-watch-checkpoint.sh --seconds 180'
+matrix_case A18 allow 'bin/fm-watch-droid-background.sh'
+matrix_case A19 allow "source '$ROOT/config/x-mode.env'; bin/fm-watch-droid-background.sh"
+matrix_case A20 allow 'exec bin/fm-watch-droid-background.sh'
 
 matrix_case R01 allow "pgrep -fl '/bin/fm-watch.sh' || true"
 matrix_case R02 allow "ps aux | rg '/bin/fm-watch.sh'"
@@ -242,6 +245,10 @@ test_direct_policy_contract() {
   assert_policy direct-watch-not-blessed $'deny\twatcher-direct' 'bin/fm-watch.sh'
   assert_policy direct-watch-expanded $'deny\twatcher-direct' '$FM_HOME/bin/fm-watch.sh'
   assert_policy direct-watch-safe-shape $'deny\twatcher-direct' 'cd /tmp; bin/fm-watch.sh'
+  assert_policy droid-tracked-cycle allow 'bin/fm-watch-droid-background.sh'
+  assert_policy droid-shell-background $'deny\twatcher-background' 'bin/fm-watch-droid-background.sh &'
+  assert_policy droid-nohup $'deny\twatcher-background' 'nohup bin/fm-watch-droid-background.sh'
+  assert_policy droid-malformed $'deny\tunclassifiable-protected-command' "bin/fm-watch-droid-background.sh 'unterminated"
   heredoc_data=$'cat <<\'EOF\'\nbin/fm-watch-arm.sh &\nEOF'
   heredoc_watcher=$'bin/fm-watch-arm.sh <<\'EOF\'\ndata only\nEOF'
   assert_policy direct-heredoc-data allow "$heredoc_data"
@@ -264,6 +271,14 @@ test_background_flag_accepted_and_non_gating() {
   rc_nobg=$?
   [ "$rc_bg" -eq 0 ] || fail "--background true must not change the allow decision on its own, got exit $rc_bg"
   [ "$rc_bg" -eq "$rc_nobg" ] || fail "--background flag must be accepted without altering the decision"
+  "$CHECK" --command 'bin/fm-watch-droid-background.sh' --background true >/dev/null 2>&1
+  expect_code 0 "$?" "Droid native background execution must pass"
+  printf '%s\n' '{"tool_name":"Execute","tool_input":{"command":"bin/fm-watch-droid-background.sh","fireAndForget":true}}' \
+    | "$CHECK" >/dev/null 2>&1
+  expect_code 0 "$?" "Droid native Execute payload must pass"
+  printf '%s\n' '{"tool_name":"Execute","tool_input":{"command":"bin/fm-watch-droid-background.sh &","fireAndForget":true}}' \
+    | "$CHECK" >/dev/null 2>&1
+  expect_code 2 "$?" "Droid native background flag must not allow shell backgrounding"
   pass "--background is accepted for interface parity and is never itself a deny signal"
 }
 

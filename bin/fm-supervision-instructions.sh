@@ -232,7 +232,7 @@ repair_line() {
       fi
       ;;
     droid)
-      printf '%s%s%s%s\n' "$prefix" 'repair missing watcher supervision with a foreground checkpoint: bin/fm-watch-checkpoint.sh --seconds ' "$droid_checkpoint_seconds" '.'
+      printf '%s%s%s%s\n' "$prefix" 'repair missing watcher supervision with one Droid tracked background job running bin/fm-watch-droid-background.sh; when completion notifications are unavailable or unreliable after restart, use the foreground checkpoint fallback: bin/fm-watch-checkpoint.sh --seconds ' "$droid_checkpoint_seconds" '.'
       ;;
     pi|pi-signed)
       printf '%s%s%s%s%s%s\n' "$prefix" 'repair a missing or failed watcher cycle with the Pi tool fm_watch_arm_pi, or restart Pi with -e ' "$pi_turnend_ext" ' -e ' "$pi_ext" ' if the extensions are not loaded.'
@@ -280,7 +280,7 @@ ordinary_wake_line() {
       fi
       ;;
     droid)
-      printf '%s\n' '- Ordinary wake: take the next foreground bin/fm-watch-checkpoint.sh checkpoint as directed below.'
+      printf '%s\n' '- Ordinary wake: drain and handle the completion wake, then re-arm exactly one Droid tracked background job running bin/fm-watch-droid-background.sh as directed below.'
       ;;
     pi|pi-signed)
       printf '%s\n' '- Ordinary wake: the Pi extension already owns watcher continuity; do not arm another cycle.'

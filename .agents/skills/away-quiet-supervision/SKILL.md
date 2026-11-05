@@ -18,7 +18,8 @@ These safety facts apply to both:
   The daemon is never launched on Pi, where the ordinary supervision session continues under the record with main parked: the branch takes every safe actionable wake it can, and only a declined wake (including a broken branch or unsafe scan) or a watcher failure wakes main.
   Away mode on a non-Pi home that runs the supervision host (by default on Claude; `docs/configuration.md` "Supervision host") works the same way with the supervision host as the branch; a wake it hands back arrives through that harness's own wake path and is never the captain's return.
 - A marked message while away or quiet mode is active is internal escalation and does not exit that mode.
-- A message beginning `/afk` refreshes away mode; a message beginning `/quiet` refreshes quiet mode.
-- Any other unmarked message means the captain returned in away mode (load `/afk`, run the return owner, and do not process that message as ordinary work until its durable catch-up gate clears), or, in quiet mode, is simply answered as ordinary work with the flag and daemon left untouched until an explicit `/quiet off`.
+- A message beginning `/afk` refreshes away mode; a message beginning `/quiet` follows the `quiet` skill's entry procedure.
+- Any other unmarked message, after applying the [internal supervision exclusions in `/afk`'s return classifier](../afk/SKILL.md#how-to-exit-the-return), means the captain returned in away mode (load `/afk`, run the return owner, and do not process that message as ordinary work until its durable catch-up gate clears), or, in quiet mode, is simply answered as ordinary work with the flag and daemon left untouched until an explicit `/quiet off`.
+
 - Away and quiet mode never expand approval authority for merges, ask-user findings, destructive actions, irreversible actions, or security-sensitive choices.
 - Bias ambiguous input toward exit because a present captain takes precedence.
