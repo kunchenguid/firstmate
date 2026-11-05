@@ -3482,56 +3482,60 @@ test_github_behind_update_refuses_concurrent_head_change() {
 }
 
 test_github_updated_head_other_refusals_stop_waiting() {
-  local case_dir rc blocker waiting reason reads advice violations=''
+  local case_dir rc blocker waiting visibility visible_head reason reads advice violations=''
   local old_head=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
   local new_head=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
-  for blocker in draft closed conflict required-source; do
-    for waiting in pending missing; do
-      case_dir=$(make_case "github-behind-blocker-$blocker-$waiting")
-      add_gh_mocks "$case_dir" "$old_head"
-      write_github_required "$case_dir" ruleset:ci
-      jq '.mergeStateStatus = "BEHIND"' "$case_dir/github-view.json" > "$case_dir/view.tmp"
-      mv "$case_dir/view.tmp" "$case_dir/github-view.json"
-      jq --arg head "$new_head" --arg waiting "$waiting" --arg blocker "$blocker" '
-        .mergeStateStatus = "CLEAN" | .headRefOid = $head |
-        .statusCheckRollup = (if $waiting == "pending" then
-          [{"__typename":"CheckRun","name":"ci","status":"IN_PROGRESS","conclusion":null}]
-        else [] end) |
-        if $blocker == "draft" then .isDraft = true
-        elif $blocker == "closed" then .state = "CLOSED"
-        elif $blocker == "conflict" then .mergeable = "CONFLICTING" | .mergeStateStatus = "DIRTY"
-        else . end' "$case_dir/github-view.json" > "$case_dir/github-view-after-update.json"
-      printf '%s\n' "$new_head" > "$case_dir/github-head-after-update"
-      case "$blocker" in
-        draft) reason='the pull request is a draft' ;;
-        closed) reason='state is "CLOSED", not open' ;;
-        conflict) reason='mergeStateStatus is DIRTY' ;;
-        required-source)
-          reason='the branch protection summary for base branch main could not be read'
-          printf '%s\n' 'HTTP 502: required-check source unavailable' > "$case_dir/github-branch-fail-after-update"
-          ;;
-      esac
-      set +e
-      FM_PR_GITHUB_MERGEABLE_RETRY_DELAY=1 \
-        run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/6190 --update-branch \
-        > "$case_dir/stdout" 2> "$case_dir/stderr"
-      rc=$?
-      set -e
-      expect_code 1 "$rc" "$blocker-$waiting: the updated head must refuse"
-      assert_grep "$reason" "$case_dir/stderr" "$blocker-$waiting: missing the actual refusal reason"
-      assert_no_grep 'pr merge' "$case_dir/gh.log" "$blocker-$waiting: merged despite a blocker"
-      assert_absent "$case_dir/state/.control-task-x1.lock" "$blocker-$waiting: task control lock remained held"
-      assert_absent "$case_dir/state/.afk-contract.lock" "$blocker-$waiting: away-authority lock remained held"
-      [ "$(grep -c '/pulls/6190/update-branch' "$case_dir/gh.log")" -eq 1 ] \
-        || fail "$blocker-$waiting: the update request was repeated"
-      reads=$(grep -c 'statusCheckRollup' "$case_dir/gh.log")
-      advice=false
-      if grep -q 'checks are not ready\|once its checks pass' "$case_dir/stderr"; then advice=true; fi
-      printf 'observation: blocker=%s waiting=%s preflight_reads=%s retry_advice=%s\n' \
-        "$blocker" "$waiting" "$reads" "$advice"
-      # Collect every masking combination before reporting a regression failure.
-      [ "$reads" -eq 2 ] || violations="$violations $blocker-$waiting retried after the blocker;"
-      [ "$advice" = false ] || violations="$violations $blocker-$waiting suggested waiting for checks;"
+  for visibility in updated delayed; do
+    visible_head=$new_head
+    [ "$visibility" != delayed ] || visible_head=$old_head
+    for blocker in draft closed conflict required-source; do
+      for waiting in pending missing; do
+        case_dir=$(make_case "github-behind-blocker-$visibility-$blocker-$waiting")
+        add_gh_mocks "$case_dir" "$old_head"
+        write_github_required "$case_dir" ruleset:ci
+        jq '.mergeStateStatus = "BEHIND"' "$case_dir/github-view.json" > "$case_dir/view.tmp"
+        mv "$case_dir/view.tmp" "$case_dir/github-view.json"
+        jq --arg head "$visible_head" --arg waiting "$waiting" --arg blocker "$blocker" '
+          .mergeStateStatus = "CLEAN" | .headRefOid = $head |
+          .statusCheckRollup = (if $waiting == "pending" then
+            [{"__typename":"CheckRun","name":"ci","status":"IN_PROGRESS","conclusion":null}]
+          else [] end) |
+          if $blocker == "draft" then .isDraft = true
+          elif $blocker == "closed" then .state = "CLOSED"
+          elif $blocker == "conflict" then .mergeable = "CONFLICTING" | .mergeStateStatus = "DIRTY"
+          else . end' "$case_dir/github-view.json" > "$case_dir/github-view-after-update.json"
+        printf '%s\n' "$visible_head" > "$case_dir/github-head-after-update"
+        case "$blocker" in
+          draft) reason='the pull request is a draft' ;;
+          closed) reason='state is "CLOSED", not open' ;;
+          conflict) reason='mergeStateStatus is DIRTY' ;;
+          required-source)
+            reason='the branch protection summary for base branch main could not be read'
+            printf '%s\n' 'HTTP 502: required-check source unavailable' > "$case_dir/github-branch-fail-after-update"
+            ;;
+        esac
+        set +e
+        FM_PR_GITHUB_MERGEABLE_RETRY_DELAY=1 \
+          run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/6190 --update-branch \
+          > "$case_dir/stdout" 2> "$case_dir/stderr"
+        rc=$?
+        set -e
+        expect_code 1 "$rc" "$visibility-$blocker-$waiting: the updated head must refuse"
+        assert_grep "$reason" "$case_dir/stderr" "$visibility-$blocker-$waiting: missing the actual refusal reason"
+        assert_no_grep 'pr merge' "$case_dir/gh.log" "$visibility-$blocker-$waiting: merged despite a blocker"
+        assert_absent "$case_dir/state/.control-task-x1.lock" "$visibility-$blocker-$waiting: task control lock remained held"
+        assert_absent "$case_dir/state/.afk-contract.lock" "$visibility-$blocker-$waiting: away-authority lock remained held"
+        [ "$(grep -c '/pulls/6190/update-branch' "$case_dir/gh.log")" -eq 1 ] \
+          || fail "$visibility-$blocker-$waiting: the update request was repeated"
+        reads=$(grep -c 'statusCheckRollup' "$case_dir/gh.log")
+        advice=false
+        if grep -q 'checks are not ready\|once its checks pass' "$case_dir/stderr"; then advice=true; fi
+        printf 'observation: visibility=%s blocker=%s waiting=%s preflight_reads=%s retry_advice=%s\n' \
+          "$visibility" "$blocker" "$waiting" "$reads" "$advice"
+        # Collect every masking combination before reporting a regression failure.
+        [ "$reads" -eq 2 ] || violations="$violations $visibility-$blocker-$waiting retried after the blocker;"
+        [ "$advice" = false ] || violations="$violations $visibility-$blocker-$waiting suggested waiting for checks;"
+      done
     done
   done
   [ -z "$violations" ] || fail "$violations"
@@ -3929,6 +3933,26 @@ test_github_behind_updates_and_rechecks_before_merge() {
   assert_logged_gh_merge "$case_dir" 6178 example/repo --merge
   grep -qxF "pr_head=$new_head" "$case_dir/meta-at-merge" \
     || fail "github-behind-green: the updated head was not recorded before the merge"
+
+  case_dir=$(make_case github-behind-delayed-head)
+  add_gh_mocks "$case_dir" "$old_head"
+  write_github_required "$case_dir" classic:ci
+  jq '.mergeStateStatus = "BEHIND"' "$case_dir/github-view.json" > "$case_dir/view.tmp"
+  mv "$case_dir/view.tmp" "$case_dir/github-view.json"
+  cp "$case_dir/github-view.json" "$case_dir/github-view-after-update.json"
+  jq --arg head "$new_head" '.mergeStateStatus = "CLEAN" | .headRefOid = $head' \
+    "$case_dir/github-view.json" > "$case_dir/github-view-after-update-final.json"
+  printf '%s\n' "$new_head" > "$case_dir/github-head-after-update"
+  FM_PR_GITHUB_MERGEABLE_RETRY_DELAY=1 \
+    run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/6178 --update-branch -- --merge \
+    > "$case_dir/stdout" 2> "$case_dir/stderr" \
+    || fail "github-behind-delayed-head: the old visible head should be awaited: $(cat "$case_dir/stderr")"
+  [ "$(grep -c 'statusCheckRollup' "$case_dir/gh.log")" -eq 3 ] \
+    || fail "github-behind-delayed-head: did not wait for the new head"
+  assert_grep "--match-head-commit $new_head" "$case_dir/gh.log" \
+    "github-behind-delayed-head: did not merge the verified new head"
+  grep -qxF "pr_head=$new_head" "$case_dir/meta-at-merge" \
+    || fail "github-behind-delayed-head: the updated head was not recorded before merging"
 
   case_dir=$(make_case github-behind-pending-after-update)
   add_gh_mocks "$case_dir" "$old_head"

@@ -1314,7 +1314,7 @@ EOF
 }
 
 github_update_behind_branch() {
-  local old_head=$FM_PR_MERGE_HEAD new_head attempt_error status
+  local old_head=$FM_PR_MERGE_HEAD new_head='' attempt_error status
   local poll=${mergeable_retry_delay:-3} deadline
   deadline=$((SECONDS + poll * 5))
   attempt_error=$(mktemp "${TMPDIR:-/tmp}/fm-pr-merge-update.XXXXXX") || return 1
@@ -1324,27 +1324,36 @@ github_update_behind_branch() {
     return 1
   fi
   while :; do
-    new_head=$(gh pr view "$URL" --json headRefOid -q .headRefOid 2>/dev/null) || new_head=
-    if fm_pr_head_valid "$new_head" && [ "$new_head" != "$old_head" ]; then
-      break
-    fi
-    if [ "$SECONDS" -ge "$deadline" ]; then
-      echo "error: $URL was updated but its new head is not visible yet; run the merge again once its checks pass" >&2
+    status=0
+    github_verify_mergeable 2> "$attempt_error" || status=$?
+    if [ -z "$FM_PR_GITHUB_LIVE_HEAD" ]; then
+      cat "$attempt_error" >&2
       rm -f "$attempt_error"
       return 1
     fi
-    sleep "$poll"
-  done
-  if ! record_pr_metadata || ! grep -qxF "pr_head=$new_head" "$META"; then
-    echo "error: could not record the updated GitHub head $new_head" >&2
-    rm -f "$attempt_error"
-    return 1
-  fi
-  while :; do
-    status=0
-    github_verify_mergeable 2> "$attempt_error" || status=$?
-    if [ "$status" -eq 0 ]; then
-      if [ "$FM_PR_MERGE_HEAD" = "$new_head" ] && [ "$FM_PR_GITHUB_BEHIND" = false ]; then
+    if [ -z "$new_head" ] && [ "$FM_PR_GITHUB_LIVE_HEAD" != "$old_head" ]; then
+      new_head=$FM_PR_GITHUB_LIVE_HEAD
+      if ! record_pr_metadata || ! grep -qxF "pr_head=$new_head" "$META"; then
+        echo "error: could not record the updated GitHub head $new_head" >&2
+        rm -f "$attempt_error"
+        return 1
+      fi
+    fi
+    if [ -n "$new_head" ] && [ "$FM_PR_GITHUB_LIVE_HEAD" != "$new_head" ]; then
+      echo "error: the GitHub pull request head moved again after its branch update" >&2
+      rm -f "$attempt_error"
+      return 1
+    fi
+    if [ "$status" -ne 0 ] && [ "$status" -ne 3 ] && { [ "$FM_PR_GITHUB_CHECKS_FAILED" = true ] \
+      || [ "$FM_PR_GITHUB_OTHER_REFUSAL" = true ] || {
+      [ "$FM_PR_GITHUB_CHECKS_PENDING" != true ] \
+      && [ "$FM_PR_GITHUB_UNREPORTED" != true ]; }; }; then
+      cat "$attempt_error" >&2
+      rm -f "$attempt_error"
+      return 1
+    fi
+    if [ "$status" -eq 0 ] && [ -n "$new_head" ]; then
+      if [ "$FM_PR_GITHUB_BEHIND" = false ]; then
         cat "$attempt_error" >&2
         rm -f "$attempt_error"
         return 0
@@ -1353,27 +1362,13 @@ github_update_behind_branch() {
       rm -f "$attempt_error"
       return 1
     fi
-    if [ -z "$FM_PR_GITHUB_LIVE_HEAD" ]; then
-      cat "$attempt_error" >&2
-      rm -f "$attempt_error"
-      return 1
-    fi
-    if [ "$FM_PR_GITHUB_LIVE_HEAD" != "$new_head" ]; then
-      echo "error: the GitHub pull request head moved again after its branch update" >&2
-      rm -f "$attempt_error"
-      return 1
-    fi
-    if [ "$status" -ne 3 ] && { [ "$FM_PR_GITHUB_CHECKS_FAILED" = true ] \
-      || [ "$FM_PR_GITHUB_OTHER_REFUSAL" = true ] || {
-      [ "$FM_PR_GITHUB_CHECKS_PENDING" != true ] \
-      && [ "$FM_PR_GITHUB_UNREPORTED" != true ]; }; }; then
-      cat "$attempt_error" >&2
-      rm -f "$attempt_error"
-      return 1
-    fi
     if [ "$SECONDS" -ge "$deadline" ]; then
       cat "$attempt_error" >&2
-      echo "error: $URL was updated to $new_head but its checks are not ready; run the merge again once its checks pass" >&2
+      if [ -z "$new_head" ]; then
+        echo "error: $URL was updated but its new head is not visible yet; run the merge again once its checks pass" >&2
+      else
+        echo "error: $URL was updated to $new_head but its checks are not ready; run the merge again once its checks pass" >&2
+      fi
       rm -f "$attempt_error"
       return 1
     fi
