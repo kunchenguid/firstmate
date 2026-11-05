@@ -8,7 +8,7 @@ The tracked harness adapters forward command text without classifying it.
 
 ## Purpose and boundary
 
-A firstmate primary must arm `bin/fm-watch-arm.sh` or run `bin/fm-watch-checkpoint.sh` through an observable harness call.
+A firstmate primary must run its protocol's blessed watcher entry point through an observable harness call.
 A shell background operator, pipeline, redirection, wrapper, or unrelated command list can hide failure or let the watcher child die with the tool call.
 The seatbelt rejects those command shapes before execution.
 
@@ -64,9 +64,10 @@ Quoted text, comments, heredoc bodies, and later argument words are data positio
 A command word in executed position is a protected execution when its normalized path suffix matches one of the protected watcher scripts:
 
 ```text
-bin/fm-watch-arm.sh          (arm; blessed entry point)
-bin/fm-watch-checkpoint.sh   (checkpoint; blessed entry point)
-bin/fm-watch.sh              (watch; protected but never blessed)
+bin/fm-watch-arm.sh                (arm; blessed entry point)
+bin/fm-watch-checkpoint.sh         (checkpoint; blessed entry point)
+bin/fm-watch-droid-background.sh   (Droid cycle; blessed entry point)
+bin/fm-watch.sh                    (watch; protected but never blessed)
 ```
 
 The relative form, the `<code-root>`-anchored absolute form, and any word ending in `/bin/<script>` all resolve to that identity.
@@ -96,7 +97,7 @@ An actual protected command with a heredoc still has a redirection and is denied
 ## Blessed syntax tree
 
 An allowed watcher program is one linear outer command list with zero or more approved setup nodes followed by exactly one direct protected node.
-`bin/fm-watch-arm.sh` and `bin/fm-watch-checkpoint.sh` are the only blessed final nodes, including their expanded-path forms; a `bin/fm-watch.sh` final node is never blessed and denies with `watcher-direct`.
+The blessed entry points listed above are the allowed final nodes, including their expanded-path forms; a `bin/fm-watch.sh` final node is never blessed and denies with `watcher-direct`.
 
 Approved setup nodes are:
 

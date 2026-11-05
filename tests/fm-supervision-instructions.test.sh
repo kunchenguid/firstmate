@@ -18,7 +18,11 @@ test_selected_harness_block_only() {
   assert_not_contains "$out" "Mode: Pi extension background wake." "renderer printed the pi snippet too"
   droid=$(FM_DROID_WATCH_CHECKPOINT=17 "$RENDER" --harness droid)
   assert_contains "$droid" "SUPERVISION OPERATING INSTRUCTIONS - primary harness: droid" "droid heading missing"
-  assert_contains "$droid" "Mode: Droid foreground checkpoint." "droid snippet missing"
+  assert_contains "$droid" "Mode: Droid tracked background cycle." "droid snippet missing"
+  assert_contains "$droid" "First cycle: arm exactly one fire-and-forget Droid native tracked background job running" "droid first cycle instruction missing"
+  assert_contains "$droid" "bin/fm-watch-droid-background.sh" "droid cycle command missing"
+  assert_contains "$droid" 'fireAndForget: true' "droid native background flag missing"
+  assert_contains "$droid" 'End turns freely while the cycle is running' "droid turn-end permission missing"
   assert_contains "$droid" 'FM_DROID_WATCH_CHECKPOINT:-180' "droid checkpoint override missing"
   assert_not_contains "$droid" "Mode: Unknown harness fallback." "droid still uses the unknown fallback"
   pass "renderer prints exactly the selected harness block"
@@ -291,12 +295,13 @@ test_cross_harness_ordinary_continuation_and_repair_matrix() {
 
   out=$("$RENDER" --harness droid)
   ordinary=$(printf '%s\n' "$out" | grep -F -- '- Ordinary wake:')
-  assert_contains "$ordinary" "next foreground" "droid ordinary-wake line lost its foreground checkpoint"
-  assert_contains "$ordinary" "bin/fm-watch-checkpoint.sh" "droid ordinary-wake line lost the checkpoint command"
+  assert_contains "$ordinary" "Droid tracked background job" "droid ordinary-wake line lost its native background cycle"
+  assert_contains "$ordinary" "bin/fm-watch-droid-background.sh" "droid ordinary-wake line lost the cycle command"
   assert_not_contains "$ordinary" "bin/fm-watch-arm.sh" "droid ordinary-wake line incorrectly uses a background arm"
   out=$("$RENDER" --harness droid --repair-line)
-  assert_contains "$out" "foreground checkpoint" "droid recovery line lost its checkpoint repair"
-  assert_contains "$out" "bin/fm-watch-checkpoint.sh" "droid recovery line lost the checkpoint command"
+  assert_contains "$out" "bin/fm-watch-droid-background.sh" "droid recovery line lost the cycle command"
+  assert_contains "$out" "foreground checkpoint fallback" "droid recovery line lost its checkpoint fallback"
+  assert_contains "$out" "bin/fm-watch-checkpoint.sh" "droid recovery line lost the fallback command"
 
   pass "renderer preserves every harness ordinary-continuation and missing-cycle repair path"
 }

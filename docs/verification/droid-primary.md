@@ -216,7 +216,7 @@ After the foreground command completed, the same capture command returned:
 ```
 
 Result: no new reasoning appeared in the running capture; the requested model output appeared only after `DROID_DOC_TOOL_DONE`.
-Droid therefore uses bounded foreground watcher checkpoints.
+This foreground limitation still applies to the bounded checkpoint fallback; the [current Droid protocol](../supervision-protocols/droid.md) uses native tracked background completion for normal supervision.
 
 ## Busy and composer signatures
 

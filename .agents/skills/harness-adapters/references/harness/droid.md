@@ -1,7 +1,6 @@
 # Droid
 
-Verified for crewmate and scout work only.
-Droid primary and secondmate supervision are unsupported; `../../../../../bin/fm-spawn.sh` and `../../../../../bin/fm-control-lib.sh` refuse secondmate launches and replacements.
+Verified for primary, secondmate, crewmate, and scout work.
 Current empirical evidence lives in [`docs/verification/runtime-backends.md`](../../../../../docs/verification/runtime-backends.md#droid).
 
 ## Operating facts
@@ -19,6 +18,8 @@ Current empirical evidence lives in [`docs/verification/runtime-backends.md`](..
 | Trust | Exact-worktree registration, receipt-only retirement, and pooled-path cleanup transfer are owned by [`fm-droid-trust.sh`](../../../../../bin/fm-droid-trust.sh). |
 | Model | `sessionDefaultSettings.model`; custom models use the user's registry id. |
 | Effort | `sessionDefaultSettings.reasoningEffort`; `low`, `medium`, `high`, `xhigh`, `max`, and `dynamic` are retained. |
+| Background execution | Native tracked Execute jobs (`fireAndForget: true`) notify the primary on completion. |
+
 
 ## Settings and discovery
 
@@ -28,3 +29,10 @@ An explicit native catalog id or custom registry id is passed unchanged; an omit
 `../../../../../bin/fm-droid-trust.sh` owns serialized settings updates, acquired-entry rollback, and cleanup transfer when another recorded task uses the same pooled path.
 Model availability depends on the installed CLI and account: inspect `droid --help`, the interactive `/model` catalog, and the user's `~/.factory/settings.json` custom-model registry without exposing credentials.
 Cross-harness provider and credential identity is owned by `references/common/model-and-effort.md`.
+## Primary integration
+
+Tracked `.factory/settings.json` registers SessionStart, Execute PreToolUse, AskUser PreToolUse, and Stop hooks.
+SessionStart runs `../../../../../bin/fm-session-start.sh`.
+Execute uses the shared primary seatbelt, AskUser defers captain-bound approval questions during away mode, and Stop invokes the Droid turn-end guard.
+The `/afk` skill owns the required question binding, and `../../../../../bin/fm-captain-hold.sh` preserves and projects the exact question through its existing owner.
+`../../../../../docs/supervision-protocols/droid.md` owns the primary tracked background-cycle procedure and foreground checkpoint fallback.

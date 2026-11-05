@@ -44,7 +44,7 @@ function parseArguments(argv) {
 }
 
 function rawMentionsProtected(command) {
-  return /(?:^|[/\s'"`(])fm-watch(?:-(?:arm|checkpoint))?\.sh\b/.test(normalizeLineContinuations(command));
+  return /(?:^|[/\s'"`(])fm-watch(?:-(?:arm|checkpoint|droid-background))?\.sh\b/.test(normalizeLineContinuations(command));
 }
 
 function rawMentionsBroadKill(command) {
@@ -598,6 +598,7 @@ export function commandPosition(tokens) {
 const PROTECTED_SCRIPTS = [
   { relative: "bin/fm-watch-arm.sh", kind: "arm" },
   { relative: "bin/fm-watch-checkpoint.sh", kind: "checkpoint" },
+  { relative: "bin/fm-watch-droid-background.sh", kind: "droid-background" },
   { relative: "bin/fm-watch.sh", kind: "watch" },
 ];
 
