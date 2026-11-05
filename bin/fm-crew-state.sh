@@ -276,8 +276,12 @@ FM_CREW_STATE_RUNS_LIMIT=${FM_CREW_STATE_RUNS_LIMIT:-200}
 case "$FM_CREW_STATE_RUNS_LIMIT" in ''|*[!0-9]*) FM_CREW_STATE_RUNS_LIMIT=200 ;; esac
 SEP=' · '
 
-# Emit the one canonical line and exit 0. Detail is optional.
+# Emit the one canonical line. Detail is optional.
 emit() {  # <state> <source> [detail]
+  if ! fm_nm_read_timeout 1 >/dev/null; then
+    printf 'state: unknown%ssource: none%sscan read deadline expired\n' "$SEP" "$SEP"
+    exit 124
+  fi
   local line="state: $1${SEP}source: $2"
   [ -n "${3:-}" ] && line="$line${SEP}$3"
   printf '%s\n' "$line"

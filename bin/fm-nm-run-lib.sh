@@ -23,9 +23,8 @@
 # The no-mistakes forms route host reads through the opt-in home resolver below.
 # The inherited FM_READ_DEADLINE caps both resolver and command reads at the
 # remaining whole seconds and refuses the command after the deadline expires.
-fm_nm_bounded() {  # <dir> <timeout_secs> <command> <args...>
-  local dir=$1 timeout_secs=$2 have_timeout=none deadline=${FM_READ_DEADLINE:-} remaining
-  shift 2
+fm_nm_read_timeout() {
+  local timeout_secs=$1 deadline=${FM_READ_DEADLINE:-} remaining
   if [ -n "$deadline" ]; then
     case "$deadline" in 0*|*[!0-9]*) return 124 ;; esac
     [ "${#deadline}" -le 18 ] || return 124
@@ -33,6 +32,13 @@ fm_nm_bounded() {  # <dir> <timeout_secs> <command> <args...>
     [ "$remaining" -gt 0 ] || return 124
     [ "$remaining" -ge "$timeout_secs" ] || timeout_secs=$remaining
   fi
+  printf '%s\n' "$timeout_secs"
+}
+
+fm_nm_bounded() {  # <dir> <timeout_secs> <command> <args...>
+  local dir=$1 timeout_secs have_timeout=none rc=0
+  timeout_secs=$(fm_nm_read_timeout "$2") || return 124
+  shift 2
   if command -v timeout >/dev/null 2>&1; then have_timeout=timeout
   elif command -v gtimeout >/dev/null 2>&1; then have_timeout=gtimeout
   elif command -v perl >/dev/null 2>&1; then have_timeout=perl
@@ -42,7 +48,9 @@ fm_nm_bounded() {  # <dir> <timeout_secs> <command> <args...>
     gtimeout) ( cd "$dir" && gtimeout "$timeout_secs" "$@" ) ;;
     perl)     ( cd "$dir" && perl -e 'my $t = shift; my $pid = fork; die "fork failed" unless defined $pid; if (!$pid) { setpgrp(0, 0); exec @ARGV } local $SIG{ALRM} = sub { kill "TERM", -$pid; select undef, undef, undef, 0.2; kill "KILL", -$pid; exit 124 }; alarm $t; waitpid $pid, 0; exit($? >> 8)' "$timeout_secs" "$@" ) ;;
     *)        return 1 ;;
-  esac
+  esac || rc=$?
+  fm_nm_read_timeout 1 >/dev/null || return 124
+  return "$rc"
 }
 
 # Opt-in no-mistakes home resolver for sites that run one no-mistakes daemon
@@ -118,7 +126,9 @@ fm_nm_run_checked() {  # <dir> <timeout_secs> <args...>
 }
 
 fm_nm_run() {  # <dir> <timeout_secs> <args...>
-  fm_nm_run_checked "$@" || true
+  fm_nm_run_checked "$@" || {
+    fm_nm_read_timeout 1 >/dev/null || return 124
+  }
 }
 
 fm_nm_trim() {
