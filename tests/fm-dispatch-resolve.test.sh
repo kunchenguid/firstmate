@@ -454,7 +454,7 @@ for base in https://gateway.example/typesafe/ http://localhost:8080/proxy///; do
   expect_code 0 "$code" "custom TypeSafe base resolves"
   assert_contains "$out" '  status: clear' "custom TypeSafe base keeps the typed response contract"
   endpoint=$(printf '%s\n' "$base" | sed 's:/*$::')/v1/systemone
-  assert_equals "$endpoint" "$(tail -n 1 "$LOG/argv")" "custom base has exactly one endpoint suffix"
+  assert_equals "$endpoint" "$(grep -E '^https?://' "$LOG/argv")" "custom base has exactly one endpoint suffix"
   assert_equals "Authorization: Bearer $KEY" "$(cat "$LOG/header")" "custom base keeps the fd header transport"
   assert_not_contains "$(cat "$LOG/argv")" "$KEY" "custom base keeps the key out of argv"
   assert_equals $'curl:clean\nquota-axi:clean' "$(cat "$LOG/child-env")" "custom base keeps the key out of child environments"
@@ -462,10 +462,10 @@ done
 printf '%s\n' 'TYPESAFE_BASE=https://dotenv.example/typesafe/' > "$HOME_DIR/.env"
 reset_log
 FM_DISPATCH_PROVIDER=typesafe TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
-assert_equals 'https://dotenv.example/typesafe/v1/systemone' "$(tail -n 1 "$LOG/argv")" ".env supplies the TypeSafe base"
+assert_equals 'https://dotenv.example/typesafe/v1/systemone' "$(grep -E '^https?://' "$LOG/argv")" ".env supplies the TypeSafe base"
 reset_log
 TYPESAFE_BASE=https://environment.example/gateway/ TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
-assert_equals 'https://environment.example/gateway/v1/systemone' "$(tail -n 1 "$LOG/argv")" "environment base wins over .env"
+assert_equals 'https://environment.example/gateway/v1/systemone' "$(grep -E '^https?://' "$LOG/argv")" "environment base wins over .env"
 rm -f "$HOME_DIR/.env"
 for base in \
   ftp://gateway.example/typesafe \
