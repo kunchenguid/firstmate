@@ -1235,8 +1235,10 @@ do_relaunch() {
         # is an open captain call; tasks-axi owns hold expiry.
         fm_backlog_row_probe "$DATA" "$ID" \
           || die "cannot verify task $ID's backlog hold before relaunch ($FM_BACKLOG_ROW_ERROR)"
-        case "${FM_BACKLOG_ROW_STATE#* }" in
-          'yes '*) die "task $ID is ${FM_BACKLOG_ROW_HOLD_KIND:-backlog}-held; relaunch skipped before stopping the agent" ;;
+        case "$FM_BACKLOG_ROW_HELD" in
+          no) ;;
+          yes) die "task $ID is ${FM_BACKLOG_ROW_HOLD_KIND:-backlog}-held; relaunch skipped before stopping the agent" ;;
+          *) die "cannot verify task $ID's backlog hold before relaunch (tasks-axi show did not report held: yes or no)" ;;
         esac
         ;;
       3) ;;

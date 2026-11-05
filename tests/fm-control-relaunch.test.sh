@@ -3141,9 +3141,16 @@ SH
   pass "fm-control exit removes the dialog file before it releases the control lock"
 }
 
+# The hold tests drive a real tasks-axi backlog; skip them, like the backlog
+# tests above, where compatible tasks-axi is unavailable.
+hold_tests_skip_without_tasks_axi() {
+  command -v tasks-axi >/dev/null 2>&1 && fm_tasks_axi_compatible && return 1
+  pass "skipped: compatible tasks-axi (${FM_TASKS_AXI_MIN}+) is unavailable, so relaunch hold checks cannot be exercised"
+}
+
 test_relaunch_refuses_an_active_hold_before_stopping() {
   local dir out rc hold_kind=${1:-captain}
-  fm_tasks_axi_compatible || { fail "captain-hold regression requires compatible tasks-axi"; }
+  hold_tests_skip_without_tasks_axi && return 0
   dir=$(new_case "$hold_kind-hold" rlhold)
   add_ship_task "$dir" rlhold claude
   seed_backlog "$dir" rlhold in_flight
@@ -3170,6 +3177,7 @@ test_relaunch_refuses_an_active_hold_before_stopping() {
 
 test_relaunch_respects_captain_hold_expiry() {
   local dir out rc until
+  hold_tests_skip_without_tasks_axi && return 0
   for until in indefinite 2000-01-01; do
     dir=$(new_case "captain-hold-$until" rlholdexpiry)
     add_ship_task "$dir" rlholdexpiry claude
@@ -3198,6 +3206,7 @@ test_relaunch_respects_captain_hold_expiry() {
 
 test_relaunch_refuses_when_captain_hold_state_is_unreadable() {
   local dir out rc real
+  hold_tests_skip_without_tasks_axi && return 0
   dir=$(new_case captain-hold-unreadable rlholdread)
   add_ship_task "$dir" rlholdread claude
   seed_backlog "$dir" rlholdread in_flight
@@ -3222,10 +3231,39 @@ SH
   pass "fm-control relaunch: unreadable captain hold state refuses before stopping the agent"
 }
 
+test_relaunch_refuses_when_show_omits_the_held_state() {
+  local dir out rc real
+  hold_tests_skip_without_tasks_axi && return 0
+  dir=$(new_case held-state-missing rlheldmissing)
+  add_ship_task "$dir" rlheldmissing claude
+  seed_backlog "$dir" rlheldmissing in_flight
+  mkdir -p "$dir/home/config"
+  printf 'manual\n' > "$dir/home/config/backlog-backend"
+  real=$(command -v tasks-axi)
+  cat > "$dir/fakebin/tasks-axi" <<SH
+#!/usr/bin/env bash
+if [ "\${1:-}" = show ]; then
+  out=\$("$real" "\$@"); status=\$?
+  printf '%s\\n' "\$out" | grep -v '^  held:'
+  exit "\$status"
+fi
+exec "$real" "\$@"
+SH
+  chmod +x "$dir/fakebin/tasks-axi"
+  out=$(run_control "$dir" rlheldmissing relaunch --note 'recover validation'); rc=$?
+  expect_code 1 "$rc" "tasks-axi output without a held state must refuse relaunch"$'\n'"$out"
+  assert_contains "$out" 'cannot verify task rlheldmissing' "the refusal must explain the missing proof"
+  [ ! -s "$dir/fake/literal" ] && [ ! -s "$dir/fake/keys" ] \
+    || fail "a missing held state allowed lifecycle input"
+  [ "$(cat "$dir/fake/command")" = claude ] || fail "a missing held state stopped the agent"
+  pass "fm-control relaunch: tasks-axi output without a held state refuses before stopping the agent"
+}
+
 test_relaunch_refuses_an_active_hold_before_stopping external
 test_relaunch_refuses_an_active_hold_before_stopping
 test_relaunch_respects_captain_hold_expiry
 test_relaunch_refuses_when_captain_hold_state_is_unreadable
+test_relaunch_refuses_when_show_omits_the_held_state
 test_relaunch_off_opencode_removes_tracked_wiring
 test_exit_and_relaunch_remove_the_dialog_file
 test_exit_removes_the_dialog_file_before_releasing_the_lock
