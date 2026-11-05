@@ -745,13 +745,14 @@ SH
 # Advance the fixture clock when ledger proof uses the remaining scan budget.
 # The real crew-state command must still get the first cadence visit's floor.
 test_forced_cadence_visit_keeps_floor_after_ledger_deadline() {
-  local epoch branch head
+  local epoch branch head out real_date
   make_world forced-cadence-floor; bind_secondmate local
   write_child "$MATE" 0-cadence 'working: awaiting the pipeline result'
   write_child "$MATE" a-ledger 'done: PR https://github.com/owner/repo/pull/1 checks green'
   printf 'expected_base=main\n' >> "$MATE/state/a-ledger.meta"
   branch=$(git -C "$MATE/projects/0-cadence" symbolic-ref --short HEAD)
   head=$(git -C "$MATE/projects/0-cadence" rev-parse HEAD)
+  real_date=$(type -P date)
   epoch=$(date +%s)
   printf '%s\n' "$epoch" > "$WORLD/clock"
   cat > "$WORLD/fakebin/date" <<'SH'
@@ -771,7 +772,7 @@ SH
   cat > "$WORLD/fakebin/no-mistakes" <<'SH'
 #!/usr/bin/env bash
 if [ "$#" = 1 ] && [ "$1" = axi ]; then
-  printf 'current_branch: %s\nruns[1]{id,branch,status,head,pr}:\n' "$FM_FLOOR_BRANCH"
+  printf 'current_branch: %s\ncount: 1 of 1 total\nruns[1]{id,branch,status,head,pr}:\n' "$FM_FLOOR_BRANCH"
   printf '  01RUN,%s,failed,%s,""\n' "$FM_FLOOR_BRANCH" "$FM_FLOOR_HEAD"
 else
   cat <<EOF
@@ -787,8 +788,16 @@ EOF
 fi
 SH
   chmod +x "$WORLD/fakebin/"*
+  out=$(PATH="$WORLD/fakebin:$PATH" FM_HOME="$MATE" FM_STATE_OVERRIDE="$MATE/state" \
+    FM_CONFIG_OVERRIDE="$MATE/config" FM_READ_DEADLINE='' FM_FLOOR_CLOCK="$WORLD/clock" \
+    FM_REAL_DATE="$real_date" FM_FLOOR_BRANCH="$branch" FM_FLOOR_HEAD="$head" \
+    "$ROOT/bin/fm-crew-state.sh" 0-cadence)
+  case "$out" in
+    'state: failed · source: run-step'*) ;;
+    *) fail "the floor fixture did not supply a known failed run: $out" ;;
+  esac
   FM_TEST_CREW_STATE_BIN="$ROOT/bin/fm-crew-state.sh" FM_INACTIVE_RECONCILE_BUDGET_SECS=3 \
-    FM_FLOOR_CLOCK="$WORLD/clock" FM_REAL_DATE="$(type -P date)" FM_FLOOR_EPOCH="$epoch" \
+    FM_FLOOR_CLOCK="$WORLD/clock" FM_REAL_DATE="$real_date" FM_FLOOR_EPOCH="$epoch" \
     FM_FLOOR_BRANCH="$branch" FM_FLOOR_HEAD="$head" run_reconcile "$MATE" --startup
   grep -Fxq ledger-read "$WORLD/forge.log" || fail 'the floor regression never exhausted ledger proof'
   [ "$(cat "$WORLD/clock")" = "$((epoch + 3))" ] || fail 'the ledger read did not reach the scan deadline'
