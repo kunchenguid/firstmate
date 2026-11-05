@@ -100,18 +100,32 @@ test_resolution_closes_across_positions() {
 }
 
 test_raw_epoch_prefix_is_reported_without_erasing_open_decisions() {
-  local dir f open errors expected
+  local dir f errors expected report
   dir=$(case_dir raw-epoch)
   f="$dir/task.status"
-  printf 'blocked [at=1793378273] [key=example]: An earlier blocker remains open.\n' > "$f"
-  printf '1793378273 blocked [key=broken] A malformed later event.\n' >> "$f"
+  # Line 2 is the exact line from issue #8048; lines 3-5 are the same mistake
+  # in the colon-first, indented and transfer-verb shapes the canonical reader
+  # accepts. Line 6 merely starts with a number and is ordinary prose.
+  printf '%s\n' \
+    'blocked [at=1793378273] [key=example]: An earlier blocker remains open.' \
+    '1793378273 blocked [key=broken] A malformed later event.' \
+    '1793378273 blocked: [key=colon] A colon-first raw epoch.' \
+    ' 1793378273 needs-decision [key=indent] An indented raw epoch.' \
+    '1793378273 captain-held [key=other] A raw epoch transfer.' \
+    '2026 release notes: nothing malformed here.' > "$f"
 
-  open=$(status_open_decisions "$f" ship 2>"$dir/errors")
+  # assert_fold's stderr is the report channel under test, so capture it in a
+  # subshell and replay a captured failure instead of hiding it.
   expected=$(printf 'example\tblocked\tAn earlier blocker remains open.\n')
-  [ "$open" = "$expected" ] || fail "a malformed later line erased an earlier open decision: '$open'"
-  errors=$(<"$dir/errors")
-  [[ "$errors" == *"$f:2: malformed status line; repair"* ]] \
-    || fail "raw epoch line was not reported with its file and line number: '$errors'"
+  errors=$(assert_fold "$f" "$expected" "raw epoch lines after an open blocker" 2>&1) \
+    || { printf '%s\n' "$errors" >&2; exit 1; }
+  report='malformed status line; repair the timestamp to [at=<epoch>] after the verb'
+  expected="$f:2: $report: 1793378273 blocked [key=broken] A malformed later event.
+$f:3: $report: 1793378273 blocked: [key=colon] A colon-first raw epoch.
+$f:4: $report:  1793378273 needs-decision [key=indent] An indented raw epoch.
+$f:5: $report: 1793378273 captain-held [key=other] A raw epoch transfer."
+  [ "$errors" = "$expected" ] \
+    || fail "raw epoch lines were not each reported with file and line number: got '$errors' want '$expected'"
   pass "a raw epoch prefix is reported as malformed while earlier decisions remain open"
 }
 

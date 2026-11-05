@@ -193,16 +193,16 @@ _fm_status_corr_attempt() {  # <word>
   return 1
 }
 
-status_format_errors() {  # <status-file> -> repairable malformed status lines with line numbers
-  local file=$1 line number=0 unstamped
-  [ -f "$file" ] && [ -r "$file" ] && [ ! -L "$file" ] || return 0
-  while IFS= read -r line || [ -n "$line" ]; do
-    number=$((number + 1))
-    _fm_status_unstamped "$line" unstamped
-    if [[ "$unstamped" =~ ^[0-9]+[[:space:]]+(needs-decision|blocked|working|done|failed|note|paused|resolved)([[:space:]]|$) ]]; then
-      printf '%s:%s: malformed status line; repair the timestamp to [at=<epoch>] after the verb: %s\n' "$file" "$number" "$line"
-    fi
-  done < "$file"
+# 0 when the verb status_line_verb read is a bare epoch ahead of one recognized
+# verb: the brief's <epoch> placeholder written before the verb instead of as
+# the [at=<epoch>] tag after it. Such a line matches no fold rule, so a reader
+# that would otherwise drop the declaration silently can name it for repair.
+_fm_status_raw_epoch_verb() {  # <verb>
+  local epoch=${1%%[[:space:]]*} verb=${1#*[[:space:]]}
+  case "$epoch" in ''|*[!0-9]*) return 1 ;; esac
+  [ "$verb" != "$1" ] || return 1
+  verb=${verb#"${verb%%[![:space:]]*}"}
+  _fm_status_verb_recognized "$verb"
 }
 
 # 0 when <line> declares a status prefix that did not parse as a recognized verb.
@@ -908,7 +908,9 @@ _fm_decision_fold_line() {  # <open-set> <status-line> <resolve-verb> <held-verb
 # when the caller passes no <kind>; no globals beyond the optional
 # FM_CLASSIFY_RESOLVE_VERB override. This is the durable open-set the fleet
 # snapshot and any point-in-time consumer must use instead of trusting the last
-# status line.
+# status line. A raw-epoch line (_fm_status_raw_epoch_verb) folds as nothing
+# and is reported on stderr as "<file>:<line>: malformed status line ..." so the
+# declaration it carries can be repaired instead of vanishing.
 # The scan_open_decisions wrapper below enumerates a whole directory rather than
 # a single caller-chosen path, so a status file that is itself a symlink (e.g.
 # escaping the state directory) is rejected outright with a plain [ -L ] check
@@ -916,18 +918,23 @@ _fm_decision_fold_line() {  # <open-set> <status-line> <resolve-verb> <held-verb
 # subprocess read, which exists for that function's much narrower payload-driven
 # path resolution rather than this directory-local glob.
 status_open_decisions() {  # <status-file> [<kind>]
-  local f=$1 kind=${2:-} line resolve held open='' verb format_errors
+  local f=$1 kind=${2:-} line resolve held open='' verb number=0
   [ -f "$f" ] && [ -r "$f" ] && [ ! -L "$f" ] || return 0
   kind=$(_fm_status_kind "$f" "$kind")
   resolve=${FM_CLASSIFY_RESOLVE_VERB:-$FM_CLASSIFY_RESOLVE_VERB_DEFAULT}
   held=${FM_CLASSIFY_CAPTAIN_HELD_VERB:-$FM_CLASSIFY_CAPTAIN_HELD_VERB_DEFAULT}
-  format_errors=$(status_format_errors "$f")
-  [ -z "$format_errors" ] || printf '%s\n' "$format_errors" >&2
   while IFS= read -r line || [ -n "$line" ]; do
+    number=$((number + 1))
     status_line_verb "$line" verb
     case "$verb" in
       needs-decision|blocked|done|failed|"$resolve"|"$held")
         open=$(_fm_decision_fold_line "$open" "$line" "$resolve" "$held" "$kind")
+        ;;
+      *)
+        if _fm_status_raw_epoch_verb "$verb"; then
+          printf '%s:%s: malformed status line; repair the timestamp to [at=<epoch>] after the verb: %s\n' \
+            "$f" "$number" "$line" >&2
+        fi
         ;;
     esac
   done < "$f"
