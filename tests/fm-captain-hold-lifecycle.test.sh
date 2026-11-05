@@ -782,7 +782,7 @@ SH
 # A duplicate ask that waits on the existing hold's lock must recheck that
 # hold's key under the lock: a key changed meanwhile is a different question.
 test_duplicate_key_rechecks_key_under_lock() {
-  local home holder pid rc i shown
+  local home holder pid rc i shown script waiting
   home=$(make_home dup-key-race)
   mkdir -p "$home/data/sample-review-b"
   tasks_in "$home" add sample-review-b "Investigate sample-review-b" --kind scout --repo sample --start >/dev/null \
@@ -801,7 +801,19 @@ test_duplicate_key_rechecks_key_under_lock() {
   run_captain "$home" hold sample-second --title "Second" --reason "ship it?" --rec yes --key ship-gate \
     --origin sample-review-b >/dev/null 2>"$home/race.err" &
   pid=$!
-  sleep 1
+  # The script only sleeps inside a lock wait; with its own lock free, that wait is on sample-first's.
+  waiting=0
+  for i in $(seq 1 100); do
+    script=$(pgrep -f -- "fm-captain-hold.sh hold sample-second" | head -1)
+    if [ -n "$script" ] && [ ! -e "$home/state/.control-sample-second.lock" ] \
+      && [ ! -L "$home/state/.control-sample-second.lock" ] && pgrep -P "$script" -x sleep >/dev/null; then
+      waiting=1
+      break
+    fi
+    kill -0 "$pid" 2>/dev/null || break
+    sleep 0.1
+  done
+  [ "$waiting" = 1 ] || fail "the duplicate ask never reached sample-first's control lock within 10s: $(cat "$home/race.err")"
   printf 'Captain hold set: 2026-06-01T12:00:00Z\nCaptain hold key: tag-gate\n' > "$home/rekeyed.txt"
   tasks_in "$home" update sample-first --body-file "$home/rekeyed.txt" >/dev/null \
     || fail "could not change the held task's key"
