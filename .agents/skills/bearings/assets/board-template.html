@@ -435,6 +435,23 @@ __FM_BEARINGS_BOARD_DATA__
     return n;
   }
   function badge(tone, text) { return el("span", "fm-badge fm-badge--" + tone, text); }
+  /* Ticket and PR links come only from payload URLs; no tracker or forge host
+     is assumed here. */
+  function link(cls, url, text) {
+    if (typeof url !== "string" || !/^https:\/\//.test(url)) return null;
+    var a = el("a", cls, text);
+    a.href = url; a.title = url; a.target = "_blank"; a.rel = "noopener";
+    return a;
+  }
+  function ticketLink(cls, t) { return link(cls, t.ticket_url, t.ticket || "ticket"); }
+  function prLink(cls, t) {
+    return link(cls, t.pr_url, t.pr_url ? "#" + t.pr_url.replace(/\/+$/, "").split("/").pop() : "");
+  }
+  function appendRowLinks(row, t) {
+    [ticketLink("bb-row__pr", t), prLink("bb-row__pr", t)].forEach(function (a) {
+      if (a) row.appendChild(a);
+    });
+  }
   /* Warnings ride the charted feed for layout only; they are alarms, not work,
      so every count of queued work excludes them. */
   function isWarning(t) { return t && t.kind === "warning"; }
@@ -502,11 +519,6 @@ __FM_BEARINGS_BOARD_DATA__
 
     if (item.type === "merge") {
       if (item.detail) pad.appendChild(el("p", "bb-decision__detail", item.detail));
-      if (item.pr_url) {
-        var pr = el("a", "bb-decision__link", item.pr_url);
-        pr.href = item.pr_url; pr.target = "_blank"; pr.rel = "noopener";
-        pad.appendChild(pr);
-      }
     } else {
       /* the rec marker on the option itself carries the recommendation */
       var ctx = el("div", "bb-ctx");
@@ -514,6 +526,8 @@ __FM_BEARINGS_BOARD_DATA__
       if (item.decide) ctx.appendChild(ctxRow("decide", item.decide));
       pad.appendChild(ctx);
     }
+    [ticketLink("bb-decision__link", item), link("bb-decision__link", item.pr_url, item.pr_url)]
+      .forEach(function (a) { if (a) pad.appendChild(a); });
 
     var form = document.createElement("form");
     form.setAttribute("data-lavish-question", item.key);
@@ -636,6 +650,7 @@ __FM_BEARINGS_BOARD_DATA__
     main.appendChild(el("div", "bb-row__sub",
       t.doing + " · " + t.kind + " · " + (t.repo || t.id)));
     row.appendChild(main);
+    appendRowLinks(row, t);
     uw.appendChild(row);
   });
 
@@ -651,11 +666,7 @@ __FM_BEARINGS_BOARD_DATA__
     main.appendChild(el("div", "bb-row__title", t.what));
     main.appendChild(el("div", "bb-row__sub", (t.repo || t.id) + " · " + t.owner));
     row.appendChild(main);
-    if (t.pr_url) {
-      var a = el("a", "bb-row__pr", "#" + t.pr_url.split("/").pop());
-      a.href = t.pr_url; a.title = t.pr_url; a.target = "_blank"; a.rel = "noopener";
-      row.appendChild(a);
-    }
+    appendRowLinks(row, t);
     ld.appendChild(row);
   });
 
@@ -703,6 +714,7 @@ __FM_BEARINGS_BOARD_DATA__
     var chSub = t.repo || t.id;
     main.appendChild(el("div", "bb-row__sub", t.reason ? t.reason + " · " + chSub : chSub));
     row.appendChild(main);
+    appendRowLinks(row, t);
     if (isWarning(t)) row.appendChild(badge("danger", "needs repair"));
     else if (t.reason) row.appendChild(badge("warn", "waiting"));
     ch.appendChild(row);
