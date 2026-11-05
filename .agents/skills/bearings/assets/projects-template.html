@@ -567,20 +567,20 @@ __FM_PROJECTS_VIEW_DATA__
   }
 
   /* ---------- routing: the open project survives a live reload ----------
-     The hash carries deep links, but Lavish's live reload navigates to a fresh
-     URL without it, so the open project is also kept in sessionStorage (per
-     tab) and used whenever the hash is absent. */
-  var OPEN_KEY = "fm-projects-view.open";
+     The hash carries deep links, but Lavish's live reload navigates its
+     artifact frame to a fresh URL without it. That frame is sandboxed with an
+     opaque origin (no web storage), so the open project is kept in
+     window.name, which survives the frame's navigation, and used whenever the
+     hash is absent. */
   function remember(id) {
-    try {
-      if (id) window.sessionStorage.setItem(OPEN_KEY, id);
-      else window.sessionStorage.removeItem(OPEN_KEY);
-    } catch (e) {}
+    try { window.name = id ? "fmopen:" + id : ""; } catch (e) {}
   }
   function current() {
     var m = /^#p=([a-z0-9-]+)$/.exec(window.location.hash || "");
     var id = m ? m[1] : null;
-    if (!id) { try { id = window.sessionStorage.getItem(OPEN_KEY); } catch (e) {} }
+    if (!id) {
+      try { m = /^fmopen:([a-z0-9-]+)$/.exec(window.name || ""); id = m ? m[1] : null; } catch (e) {}
+    }
     if (!id) return null;
     for (var i = 0; i < data.projects.length; i++) if (data.projects[i].id === id) return data.projects[i];
     return null;

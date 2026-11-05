@@ -10,7 +10,8 @@
 //     reloaded:{name,cards}, reloadedAfterBack:{cards},
 //     sent:[{question,selection,note}] }
 // `reloaded` is what the page shows after it is loaded again at a URL without
-// the hash, as Lavish's live reload does, while a project was open;
+// the hash, as Lavish's live reload of its sandboxed artifact frame does (no
+// web storage there, only window.name), while a project was open;
 // `reloadedAfterBack` the same after the captain went back to the overview.
 import { readFileSync } from "node:fs";
 
@@ -86,12 +87,16 @@ const code = scripts.length ? scripts[scripts.length - 1][1] : "";
 const sent = [];
 let windowListeners = {};
 const location = { hash: "" };
-const stored = {};
-const sessionStorage = {
-  getItem: (k) => (k in stored ? stored[k] : null),
-  setItem: (k, v) => { stored[k] = String(v); },
-  removeItem: (k) => { delete stored[k]; },
-};
+// Lavish serves the page in a sandboxed iframe without allow-same-origin
+// (both the iframe attribute and a `content-security-policy: sandbox` header),
+// so its origin is opaque and every web-storage access throws a SecurityError,
+// exactly as Chrome does. Only window.name survives a navigation of that frame.
+function denied() {
+  const e = new Error("Failed to read the 'sessionStorage' property from 'Window': The document is sandboxed and lacks the 'allow-same-origin' flag.");
+  e.name = "SecurityError";
+  throw e;
+}
+const storageDenied = { get: denied, set: denied };
 globalThis.document = {
   getElementById: (id) => byId[id] || null,
   createElement: (tag) => new Node(tag),
@@ -99,7 +104,7 @@ globalThis.document = {
 };
 globalThis.window = {
   location,
-  sessionStorage,
+  name: "",
   lavish: { queuePrompt: (_prompt, ctx) => sent.push(ctx.data) },
   addEventListener: (type, fn) => { (windowListeners[type] ||= []).push(fn); },
   scrollTo() {},
@@ -126,8 +131,10 @@ function typeAndSend(container, words) {
 }
 
 const out = { error: "", totals: [], cards: [], tray: null, detail: null, reloaded: null, reloadedAfterBack: null, sent };
-// Load the page again as a fresh document at a URL without the hash; only the
-// per-tab sessionStorage survives, as in a real same-tab navigation.
+Object.defineProperty(globalThis.window, "sessionStorage", storageDenied);
+Object.defineProperty(globalThis.window, "localStorage", storageDenied);
+// Load the page again as a fresh document at a URL without the hash, as the
+// sandboxed frame does on a live reload; only window.name survives.
 function reload() {
   for (const id of Object.keys(byId)) if (id !== "projects-data") byId[id] = new Node("div");
   windowListeners = {};
