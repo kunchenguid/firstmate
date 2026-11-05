@@ -548,6 +548,11 @@ fm_send_has_resolve_key() {
         [ "$#" -ge 2 ] || return 1
         shift 2 ;;
       --fire-and-forget=*) shift ;;
+      --key)
+        case "$*" in
+          *--resolve-key*) return 0 ;;
+          *) return 1 ;;
+        esac ;;
       *) return 1 ;;
     esac
   done
