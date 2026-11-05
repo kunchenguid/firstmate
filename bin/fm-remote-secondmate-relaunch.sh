@@ -13,7 +13,7 @@
 #
 # This wrapper is the missing other half. It runs the host-local relaunch
 # through bin/fm-on.sh exactly as secondmate-provisioning documents, then reads
-# the confirmed harness, model, and effort back out of the endpoint's own
+# the confirmed route fields back out of the endpoint's own
 # route report - the same read-back-from-the-endpoint shape bin/fm-spawn.sh
 # already uses when it first records a remote route - and republishes this
 # home's own metadata to match. A failed or refused relaunch leaves this
@@ -56,14 +56,14 @@ printf '%s\n' "$RELAUNCH_OUT"
 
 # The confirmed identity comes from the route block the host prints after a
 # successful relaunch, never from the human-readable "relaunched ..." summary
-# line: a relaunch onto "default" prints that literal word there, while the
-# endpoint's own record - and this parent's, to match it - store an empty
-# field for "no explicit pin".
+# line. Copy the endpoint's recorded selection verbatim, including its
+# default sentinel, rather than deriving a pin from the accounting observation.
 [ "$(printf '%s\n' "$RELAUNCH_OUT" | sed -n 's/^schema=//p' | tail -1)" \
   = fm-remote-secondmate-control.v1 ] \
   || die "the host relaunched $ID but reported no route confirmation to record"
 NEW_HARNESS=$(printf '%s\n' "$RELAUNCH_OUT" | sed -n 's/^harness=//p' | tail -1)
 NEW_MODEL=$(printf '%s\n' "$RELAUNCH_OUT" | sed -n 's/^model=//p' | tail -1)
+NEW_EFFECTIVE_MODEL=$(printf '%s\n' "$RELAUNCH_OUT" | sed -n 's/^effective_model=//p' | tail -1)
 NEW_EFFORT=$(printf '%s\n' "$RELAUNCH_OUT" | sed -n 's/^effort=//p' | tail -1)
 [ -n "$NEW_HARNESS" ] || die "the host's route confirmation carried no harness to record"
 
@@ -76,6 +76,7 @@ META_TMP=$(mktemp "$STATE/.fm-remote-relaunch-meta.XXXXXX") || {
 {
   printf 'harness=%s\n' "$NEW_HARNESS"
   printf 'model=%s\n' "$NEW_MODEL"
+  [ "$NEW_HARNESS" != droid ] || printf 'effective_model=%s\n' "${NEW_EFFECTIVE_MODEL:-unknown-at-spawn}"
   printf 'effort=%s\n' "$NEW_EFFORT"
 } >> "$META_TMP"
 # Every other line is preserved in its original relative order after the
@@ -87,7 +88,7 @@ META_TMP=$(mktemp "$STATE/.fm-remote-relaunch-meta.XXXXXX") || {
 # that already had one armed.
 while IFS= read -r line || [ -n "$line" ]; do
   case "$line" in
-    harness=*|model=*|effort=*) ;;
+    harness=*|model=*|effective_model=*|effort=*) ;;
     *) printf '%s\n' "$line" >> "$META_TMP" ;;
   esac
 done < "$META"

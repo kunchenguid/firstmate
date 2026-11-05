@@ -100,6 +100,8 @@ fm_test_fake_gh_axi() {
 # FM_FAKE_DUPLICATE_WINDOW is printed from list-windows. A staged OpenCode 2
 # launch simulates its busy-state plugin per FM_FAKE_OPENCODE_TURN (see below),
 # and FM_FAKE_ENTER_LOG records each bare Enter key.
+# FM_FAKE_PANE_CAPTURE supplies visible pane output (empty by default).
+
 #
 # The pane path defaults to empty when FM_FAKE_PANE_PATH is unset. Window
 # cleanup and option operations are no-ops. Launch logging is env-gated, so
@@ -167,6 +169,7 @@ case "${1:-}" in
     exit 0
     ;;
   capture-pane)
+    if [ -n "${FM_FAKE_PANE_CAPTURE:-}" ]; then printf '%s' "$FM_FAKE_PANE_CAPTURE"; exit 0; fi
     if ! fake_opencode_composer_drawn; then
       :
     elif [ -f "$(fake_opencode_plugin).fake-pending" ]; then

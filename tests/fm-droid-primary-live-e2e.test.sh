@@ -1,19 +1,14 @@
 #!/usr/bin/env bash
 # Opt-in live guard for Droid's primary hook, foreground-tool, and composer facts.
 # Requires an authenticated Droid installation and spends model tokens.
+# Set FM_DROID_SPAWN_LIVE_ONLY=1 to refresh only the spawn trust/model evidence.
 set -u
 
-# shellcheck source=tests/lib.sh
-. "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+# shellcheck source=tests/fixtures.sh
+. "$(dirname "${BASH_SOURCE[0]}")/fixtures.sh"
 
-if [ "${FM_DROID_PRIMARY_LIVE_E2E:-0}" != 1 ]; then
-  echo "skip: set FM_DROID_PRIMARY_LIVE_E2E=1 to run the real Droid primary probe"
-  exit 0
-fi
+fm_live_gate opt-in FM_DROID_PRIMARY_LIVE_E2E,FM_DROID_SPAWN_LIVE_ONLY droid tmux jq git
 
-for tool in droid tmux jq git; do
-  command -v "$tool" >/dev/null 2>&1 || { echo "skip: $tool not found"; exit 0; }
-done
 
 REAL_TMUX=$(command -v tmux)
 SOCKET="fm-droid-primary-live-$$"
@@ -23,7 +18,7 @@ SESSION=droid-primary-live
 
 cleanup() {
   "$REAL_TMUX" -L "$SOCKET" kill-server >/dev/null 2>&1 || true
-  rm -rf "$LAB"
+  fm_test_remove_tree "$LAB"
 }
 trap cleanup EXIT
 
@@ -35,6 +30,83 @@ cat > "$LAB/shim/tmux" <<SH
 exec "$REAL_TMUX" -L "$SOCKET" "\$@"
 SH
 chmod +x "$LAB/shim/tmux"
+PATH="$LAB/shim:$PATH"
+export PATH
+
+# Drive the actual spawn gate with a fresh linked worktree on the same private
+# tmux socket. The fake pool only supplies the lab-owned worktree; Droid and
+# the entire settings, trust-answer, and progress-confirmation path are real.
+SPAWN_PROJECT="$LAB/spawn-project"
+SPAWN_WT="$LAB/spawn-worktree"
+FLEET_HOME="$LAB/fleet"
+SPAWN_ID=droid-live-spawn
+SPAWN_SESSION=droid-spawn-live
+"$REAL_TMUX" -L "$SOCKET" new-session -d -s "$SPAWN_SESSION" -n setup -c "$PROJECT"
+fm_git_worktree "$SPAWN_PROJECT" "$SPAWN_WT" droid-live-worktree
+fm_test_spawn_home "$FLEET_HOME" droid
+fm_test_spawn_brief "$FLEET_HOME" "$SPAWN_ID" \
+  'Reply with exactly DROID_LIVE_SPAWN_READY and end your turn. Do not use tools.'
+cat > "$LAB/shim/treehouse" <<SH
+#!/usr/bin/env bash
+case "\${1:-}" in get) printf '%s\n' '$SPAWN_WT' ;; esac
+SH
+chmod +x "$LAB/shim/treehouse"
+
+# Establish the control arm without submitting a prompt. This worktree has
+# never been opened, and launch must be proven to have needed trust handling.
+"$REAL_TMUX" -L "$SOCKET" new-window -d -t "$SPAWN_SESSION:" -n trust-control -c "$SPAWN_WT" -- droid --auto high
+control=
+for _ in $(seq 1 120); do
+  control=$("$REAL_TMUX" -L "$SOCKET" capture-pane -p -t "$SPAWN_SESSION:trust-control" -S -0)
+  if printf '%s' "$control" | grep -Fq 'Trust this folder?'; then break; fi
+  sleep 0.5
+done
+printf '%s' "$control" | grep -Fq 'Trust this folder?' \
+  || fail "Droid $(droid --version): fresh-worktree control did not expose folder trust"
+printf '%s' "$control" | grep -Eq '^> 1\. Trust this folder[[:space:]]*$' \
+  || fail "Droid $(droid --version): affirmative trust selection drifted"
+printf '%s' "$control" | grep -Fq '2. Exit without trusting' \
+  || fail "Droid $(droid --version): negative trust choice drifted"
+printf '%s' "$control" | grep -Fq 'Enter to confirm' \
+  || fail "Droid $(droid --version): trust navigation hint drifted"
+"$REAL_TMUX" -L "$SOCKET" kill-window -t "$SPAWN_SESSION:trust-control"
+
+if ! spawn_output=$(FM_HOME="$FLEET_HOME" FM_ROOT_OVERRIDE='' FM_SPAWN_NO_GUARD=1 \
+  TMUX="$("$REAL_TMUX" -L "$SOCKET" display-message -p -t "$SPAWN_SESSION:setup" '#{socket_path}'),1,0" \
+  bash "$ROOT/bin/fm-spawn.sh" "$SPAWN_ID" "$SPAWN_PROJECT" --scout --harness droid 2>&1); then
+  printf '%s\n' "$spawn_output"
+  fail "Droid $(droid --version): real spawn did not clear folder trust and start its brief"
+fi
+assert_contains "$spawn_output" "spawned $SPAWN_ID harness=droid" 'live Droid spawn did not report success'
+spawn_target=$(sed -n 's/^window=//p' "$FLEET_HOME/state/$SPAWN_ID.meta")
+spawn_capture=$("$REAL_TMUX" -L "$SOCKET" capture-pane -p -t "$spawn_target" -S -0) \
+  || fail "Droid $(droid --version): launched pane could not be captured"
+if printf '%s' "$spawn_capture" | grep -Fq 'Trust this folder?'; then
+  fail "Droid $(droid --version): successful spawn still shows folder trust"
+fi
+jq -e '(.sessionDefaultSettings // {}) | has("model") | not' \
+  "$FLEET_HOME/state/$SPAWN_ID.droid-settings.json" >/dev/null \
+  || fail "Droid $(droid --version): default observation pinned the model"
+assert_equals "default" "$(sed -n 's/^model=//p' "$FLEET_HOME/state/$SPAWN_ID.meta")" 'live Droid launch lost default selection'
+spawn_gen=$(sed -n 's/^spawn_gen=//p' "$FLEET_HOME/state/$SPAWN_ID.meta")
+observation="$FLEET_HOME/state/$SPAWN_ID.meta.droid-model.$spawn_gen"
+observed_model=
+for _ in $(seq 1 120); do
+  [ ! -s "$observation" ] || observed_model=$(cat "$observation")
+  [ -z "$observed_model" ] || break
+  sleep 0.5
+done
+case "$observed_model" in ''|default|unknown-at-spawn) fail 'live Droid did not report a concrete runtime model' ;; esac
+bash "$ROOT/bin/fm-droid-model.sh" reconcile "$FLEET_HOME/state/$SPAWN_ID.meta" "$spawn_gen"
+assert_equals "$observed_model" "$(sed -n 's/^effective_model=//p' "$FLEET_HOME/state/$SPAWN_ID.meta")" 'live Droid runtime reconciliation failed'
+printf 'Droid %s live spawn: trust cleared; effective_model=%s; runtime model override absent\n' \
+  "$(droid --version)" "$observed_model"
+pass "Droid live spawn: fresh-worktree folder trust is answered and the default model is observed"
+
+if [ "${FM_DROID_SPAWN_LIVE_ONLY:-0}" = 1 ]; then
+  printf 'ok - Droid %s spawn live verification complete\n' "$(droid --version)"
+  exit 0
+fi
 
 cat > "$PROJECT/.factory/sessionstart.sh" <<'SH'
 #!/usr/bin/env bash
@@ -116,8 +188,6 @@ jq -s -e 'length >= 2 and .[0].stop_hook_active == false and .[1].stop_hook_acti
   || fail "Droid Stop blocking or stop_hook_active loop semantics drifted"
 pass "Droid live primary hooks: project settings, SessionStart, PreToolUse, Stop blocking, and loop guard"
 
-PATH="$LAB/shim:$PATH"
-export PATH
 # shellcheck source=bin/fm-tmux-lib.sh
 . "$ROOT/bin/fm-tmux-lib.sh"
 
