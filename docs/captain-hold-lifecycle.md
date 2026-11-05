@@ -70,8 +70,10 @@ Repeat and edge cases:
   A task that is already captain-held (a retry) and a `--until` deferral record are not new asks and need no pick.
   A retry without `--rec` keeps the numbered options and `Rec:` line from the stored reason.
 - `--key <slug>` names the ask's subject, in the decision-key charset owned by [`bin/fm-classify-lib.sh`](../bin/fm-classify-lib.sh), and is recorded on a `Captain hold key:` body line.
-  A new ask whose key matches another open captain hold creates nothing: the output says it attached to the existing hold and prints that task id.
+  A new ask that would create its task, and whose key matches another open captain hold, creates nothing: the output says it attached to the existing hold and prints that task id.
+  A task that already exists, often the work itself, is held on its own even when the key matches, because merge checks read that task's hold.
   With `--origin`, that origin is added to the existing hold's `Captain hold attached origins:` body line, so `complete` accepts the hold for it too.
+  A new ask on that task, or a move to another origin, drops the attached origins line.
   If the backlog listing fails, the keyed ask is refused instead of treated as an empty queue.
   Different keys stay separate holds.
   A new ask without `--key` drops any key line left from an earlier released ask on the same task.
@@ -571,7 +573,7 @@ The suite does not test the accepted merge-to-cleanup re-hold window or asynchro
 - Hold-set stamping precedes visible hold state, preserves an active lifecycle's timestamp, and resets after release.
 - Interrupted answer closure retains the stamp until close and restores resolution-first ordering on retry.
 - Deferral through `--until` leaves `captain_actionable` false until due.
-- A hold without `--rec` is refused and writes nothing, `--option` lines render numbered with the `Rec:` line, a retry without `--rec` keeps the stored options and `Rec:` line, a repeated `--key` attaches to the open hold (recording its `--origin` so `complete` accepts it) while a different key creates a second one, and a failed backlog listing refuses a keyed ask without creating a hold (`test_hold_requires_a_pick_and_renders_options`, `test_hold_collapses_a_duplicate_decision_key`).
+- A hold without `--rec` is refused and writes nothing, `--option` lines render numbered with the `Rec:` line, a retry without `--rec` keeps the stored options and `Rec:` line, a repeated `--key` attaches to the open hold (recording its `--origin` so `complete` accepts it until a new ask drops it) while existing work and a different key get their own hold, and a failed backlog listing refuses a keyed ask without creating a hold (`test_hold_requires_a_pick_and_renders_options`, `test_hold_collapses_a_duplicate_decision_key`).
 
 ### Legacy paths
 

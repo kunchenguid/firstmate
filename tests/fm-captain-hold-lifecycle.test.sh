@@ -738,6 +738,14 @@ test_hold_collapses_a_duplicate_decision_key() {
   assert_not_contains "$out" "no recorded origin" "the attached origin was not recorded on the hold"
   run_captain "$home" complete sample-review-a sample-first >/dev/null \
     || fail "attaching a second origin broke completion for the first"
+  tasks_in "$home" add sample-work "Ship work" --kind work --repo sample >/dev/null \
+    || fail "could not create the work fixture"
+  run_captain "$home" hold sample-work --reason "ship?" --rec yes --key ship-gate >/dev/null \
+    || fail "holding existing work on a shared key failed"
+  run_captain "$home" open sample-work || fail "existing work lost its own captain gate to a shared key"
+  printf 'Go.\n' > "$home/work-go.txt"
+  run_captain "$home" answer sample-work --decision-file "$home/work-go.txt" --release >/dev/null \
+    || fail "could not release the work fixture"
   mkdir -p "$home/listfail"
   cat > "$home/listfail/tasks-axi" <<'SH'
 #!/usr/bin/env bash
@@ -761,6 +769,10 @@ SH
     || fail "could not release the keyed ask"
   run_captain "$home" hold sample-first --reason "new unkeyed ask" --rec yes >/dev/null \
     || fail "could not re-hold the released task for a new ask"
+  if out=$(run_captain "$home" complete sample-review-b sample-first 2>&1); then
+    fail "an origin attached to the released ask still completed through the new ask"
+  fi
+  assert_contains "$out" "not sample-review-b" "the stale attached origin was not refused by origin"
   run_captain "$home" hold sample-third --title "Third" --reason "ship again?" --rec yes --key ship-gate >/dev/null \
     || fail "a reused key after release failed"
   tasks_in "$home" show sample-third >/dev/null || fail "a stale key on a re-held task swallowed a new ask"

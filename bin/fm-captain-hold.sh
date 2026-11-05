@@ -1109,7 +1109,7 @@ verify_entry_durable() {  # <origin-or-empty> <entry>; prints "<id> <how> <origi
 
 command_hold() {
   local id=${1:-} title='' reason='' rec='' key='' options='' nopt=0 dup='' other pre repo='' origin='' until='' show state existing_title body='' hold_kind hold_set occurrence
-  local existing_hold_kind='' existing_held='' preserve_hold_set=0 stored_reason original_body='' hold_status=0 ids attached
+  local existing_hold_kind='' existing_held='' preserve_hold_set=0 stored_reason original_body='' hold_status=0 ids attached exists prev_origin
   [ "$#" -ge 1 ] || { usage >&2; exit 2; }
   shift
   while [ "$#" -gt 0 ]; do
@@ -1157,7 +1157,9 @@ command_hold() {
   acquire_task_control_lock "$id"
   require_tasks_axi
   pre=0
+  exists=0
   if task_show "$id"; then
+    exists=1
     [ "$(show_field_value "$TASK_SHOW_OUTPUT" hold_kind)" = captain ] \
       && [ "$(show_field_value "$TASK_SHOW_OUTPUT" held)" = yes ] && pre=1
   fi
@@ -1168,7 +1170,9 @@ command_hold() {
   if [ "$pre" = 0 ] && [ -z "$until" ]; then
     [ -n "$rec" ] || fail "a new captain ask must carry your recommended pick: add --rec \"<the option you recommend and why>\" (optionally 1-4 --option \"<text>\")"
     # ponytail: locks are per task id, so two different ids racing on one key can both pass; add a key lock if that bites.
-    if [ -n "$key" ]; then
+    # Only an ask that would create its task collapses: an existing task (often
+    # the work itself) is what merge checks read, so it keeps its own hold.
+    if [ -n "$key" ] && [ "$exists" = 0 ]; then
       ids=$(open_task_ids) \
         || fail "could not list the backlog to check decision key $key for an open hold; no hold created for $id"
       while IFS= read -r other; do
@@ -1271,6 +1275,7 @@ command_hold() {
     || fail "task $id lost its hold-set stamp while being held"
   occurrence=$(( $(resolution_record_count "$(show_field "$show" body)") + 1 ))
   publish_parent_hold "$id" "$occurrence" needs-decision "$reason"
+  prev_origin=$(body_hold_origin "$(decode_shown_value "$(show_field "$show" body)")")
   if [ -n "$origin" ]; then
     write_hold_origin "$id" "$(show_field "$show" body)" "$origin" || exit $?
   fi
@@ -1279,6 +1284,14 @@ command_hold() {
     show=$TASK_SHOW_OUTPUT
     if [ -n "$key" ] || printf '%s\n' "$(decode_shown_value "$(show_field "$show" body)")" | grep -q '^Captain hold key: '; then
       write_hold_origin "$id" "$(show_field "$show" body)" "$key" key || exit $?
+    fi
+  fi
+  # Attached origins belong to one call: a new ask or a move to another origin drops them.
+  if [ "$pre" = 0 ] || { [ -n "$origin" ] && [ "$origin" != "$prev_origin" ]; }; then
+    task_show_or_fail "$id" "task $id disappeared before its attached origins were cleared"
+    show=$TASK_SHOW_OUTPUT
+    if printf '%s\n' "$(decode_shown_value "$(show_field "$show" body)")" | grep -q '^Captain hold attached origins: '; then
+      write_hold_origin "$id" "$(show_field "$show" body)" "" "attached origins" || exit $?
     fi
   fi
   printf '%s\n' "$id"
