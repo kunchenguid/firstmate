@@ -1799,17 +1799,22 @@ work_is_landed() {
   content_in_default
 }
 
-# The completion links this teardown already holds locally. A finished scout's
-# deliverable is its report while a forced scout is recorded as discarded with
-# no report, a local-only ship lands on local main, and every other ship
-# carries the PR recorded on its own record.
+# The completion links this teardown already holds locally. A retained scout
+# keeps its report as the held deliverable, while a force-closed scout is
+# recorded as discarded with no report. A local-only ship lands on local main,
+# and every other ship carries the PR recorded on its own record.
 BACKLOG_DONE_ARGS=()
 backlog_done_args() {
   local data_relative
   BACKLOG_DONE_ARGS=()
   case "$KIND" in
     scout)
-      if [ "$FORCE" = "--force" ]; then
+      if [ "$BACKLOG_TRANSITION" = retain ]; then
+        if [ -f "$DATA/$ID/report.md" ]; then
+          data_relative=$(fm_backlog_data_relative "$DATA") || return 1
+          BACKLOG_DONE_ARGS=(--report "$data_relative/$ID/report.md")
+        fi
+      elif [ "$FORCE" = "--force" ]; then
         BACKLOG_DONE_ARGS=(--note "discarded")
       else
         data_relative=$(fm_backlog_data_relative "$DATA") || return 1
