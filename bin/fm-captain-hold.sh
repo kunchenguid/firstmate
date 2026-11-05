@@ -261,12 +261,11 @@ DECISION_SOURCE_TIME=
 . "$SCRIPT_DIR/fm-afk-contract.sh"
 
 PARENT_HOLD_PUBLISHED=0
-publish_parent_hold() {  # <task-id> <occurrence> <verb> <note>
+publish_parent_hold() {  # <task-id> <occurrence> <verb> <note> [shown-body]
   local id=$1 occurrence=$2 verb=$3 note=$4 rc=0 source kind reference at
   PARENT_HOLD_PUBLISHED=0
   if [ "$verb" = resolved ]; then
-    task_show "$id" || fail "cannot read the stored resolution source for $id"
-    source=$(recorded_resolution_source "$(show_field "$TASK_SHOW_OUTPUT" body)") \
+    source=$(recorded_resolution_source "$5") \
       || fail "cannot decode the stored resolution source for $id"
     if [ -n "$source" ]; then
       kind=$(printf '%s\n' "$source" | sed -n 's/^Source kind: //p')
@@ -1392,9 +1391,9 @@ command_answer() {
       resolution_source_matches "$body" || fail "task $id records a different resolution source"
       remove_interrupted_answer_stamp "$id"
       if [ "$recorded_mode" = repaired ]; then
-        publish_parent_resolution_then_retire "$id" $((occurrence - 1)) "answered (repaired)"
+        publish_parent_resolution_then_retire "$id" $((occurrence - 1)) "answered (repaired)" "$body"
       else
-        publish_parent_resolution_then_retire "$id" $((occurrence - 1)) answered
+        publish_parent_resolution_then_retire "$id" $((occurrence - 1)) answered "$body"
       fi
       printf 'answered: %s\n' "$id"
       return 0
@@ -1412,7 +1411,7 @@ command_answer() {
     [ "$(show_field "$show" state)" = "done" ] || fail "recording the answer reopened closed task $id"
     body_has_resolution_record "$(show_field "$show" body)" \
       || fail "captain-held task $id did not retain its durable resolution record"
-    publish_parent_resolution_then_retire "$id" "$occurrence" "answered (repaired)"
+    publish_parent_resolution_then_retire "$id" "$occurrence" "answered (repaired)" "$(show_field "$show" body)"
     printf 'repaired: %s\n' "$id"
     return 0
   fi
@@ -1438,7 +1437,7 @@ command_answer() {
         fail "could not close answered captain-held task $id"
       fi
       remove_interrupted_answer_stamp "$id"
-      publish_parent_resolution_then_retire "$id" $((occurrence - 1)) "$outcome"
+      publish_parent_resolution_then_retire "$id" $((occurrence - 1)) "$outcome" "$body"
       printf '%s: %s\n' "$outcome" "$id"
       return 0
     fi
@@ -1451,7 +1450,7 @@ command_answer() {
     show=$TASK_SHOW_OUTPUT
     body_has_resolution_record "$(show_field "$show" body)" \
       || fail "captain-held task $id did not retain its durable resolution record"
-    publish_parent_resolution_then_retire "$id" "$occurrence" "$outcome"
+    publish_parent_resolution_then_retire "$id" "$occurrence" "$outcome" "$(show_field "$show" body)"
     printf '%s: %s\n' "$outcome" "$id"
     return 0
   fi
@@ -1465,7 +1464,7 @@ command_answer() {
       || fail "task $id records this answer with mode ${recorded_mode:-unknown}; replay requires matching --release"
     resolution_source_matches "$body" || fail "task $id records a different resolution source"
     remove_interrupted_answer_stamp "$id"
-    publish_parent_resolution_then_retire "$id" $((occurrence - 1)) released
+    publish_parent_resolution_then_retire "$id" $((occurrence - 1)) released "$body"
     printf 'released: %s\n' "$id"
     return 0
   fi
@@ -1687,9 +1686,9 @@ command_answers() {
           && [ "$hold_kind" != captain ] && [ "$recorded_mode" = released ]; }; then
         occurrence=$(resolution_record_count "$body")
         case "$recorded_mode" in
-          repaired) publish_parent_resolution_then_retire "$id" "$occurrence" "answered (repaired)" ;;
-          released) publish_parent_resolution_then_retire "$id" "$occurrence" released ;;
-          *) publish_parent_resolution_then_retire "$id" "$occurrence" answered ;;
+          repaired) publish_parent_resolution_then_retire "$id" "$occurrence" "answered (repaired)" "$body" ;;
+          released) publish_parent_resolution_then_retire "$id" "$occurrence" released "$body" ;;
+          *) publish_parent_resolution_then_retire "$id" "$occurrence" answered "$body" ;;
         esac
         printf 'closed: %s\n' "$id"
         closed=$((closed + 1))
@@ -1777,10 +1776,10 @@ reconcile_request_retire() {  # <task-id>
     || fail "could not retire the pending reconcile request for $1"
 }
 
-publish_parent_resolution_then_retire() {  # <task-id> <occurrence> <note>
-  local id=$1 occurrence=$2 note=$3 request
+publish_parent_resolution_then_retire() {  # <task-id> <occurrence> <note> <shown-body>
+  local id=$1 occurrence=$2 note=$3 body=$4 request
   request=$(reconcile_request_path "$id")
-  publish_parent_hold "$id" "$occurrence" resolved "$note"
+  publish_parent_hold "$id" "$occurrence" resolved "$note" "$body"
   if [ -e "$request" ] && [ "$PARENT_HOLD_PUBLISHED" != 1 ]; then
     fail "could not publish the answered captain-held task $id to its parent"
   fi
@@ -1915,7 +1914,7 @@ reconcile_close() {
     resolution_source_matches "$body" || fail "task $id records a different resolution source"
     occurrence=$(resolution_record_count "$body")
     remove_interrupted_answer_stamp "$id"
-    publish_parent_hold "$id" "$occurrence" resolved reconciled
+    publish_parent_hold "$id" "$occurrence" resolved reconciled "$body"
     [ "$PARENT_HOLD_PUBLISHED" = 1 ] \
       || fail "could not publish the reconciled captain-held task $id to its parent"
     reconcile_request_retire "$id"
@@ -1939,7 +1938,7 @@ reconcile_close() {
   task_show_or_fail "$id" "task $id disappeared after closing"
   body_has_resolution_record "$(show_field "$show" body)" \
     || fail "captain-held task $id did not retain its durable resolution record"
-  publish_parent_hold "$id" "$occurrence" resolved reconciled
+  publish_parent_hold "$id" "$occurrence" resolved reconciled "$(show_field "$show" body)"
   [ "$PARENT_HOLD_PUBLISHED" = 1 ] \
     || fail "could not publish the reconciled captain-held task $id to its parent"
   reconcile_request_retire "$id"

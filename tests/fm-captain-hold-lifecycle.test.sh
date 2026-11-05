@@ -1621,6 +1621,93 @@ EOF
 # the script itself, keyed per hold occurrence, so a re-held task opens and
 # closes a distinct parent decision and a retry never duplicates a line. A main
 # home publishes nothing anywhere.
+test_parent_publication_uses_verified_resolution_body() {
+  local route mode home parent channel id out show kind reference
+  for route in primary secondmate; do
+    for mode in answer repair release answers reconcile; do
+      home=$(make_home "publish-body-$route-$mode")
+      channel=''
+      if [ "$route" = secondmate ]; then
+        parent=$(make_home "publish-parent-$mode")
+        printf 'proof-mate\n' > "$home/.fm-secondmate-home"
+        printf 'schema=fm-secondmate-parent.v1\nroute=local\nparent_home=%s\n' "$parent" \
+          > "$home/.fm-secondmate-parent"
+        channel="$parent/state/proof-mate.status"
+      fi
+      id="proof-$mode"
+      run_captain "$home" hold "$id" --title 'Publication proof' --reason choose >/dev/null \
+        || fail "could not create publication fixture"
+      if [ "$mode" = repair ]; then
+        tasks_in "$home" done "$id" >/dev/null || fail "could not close repair fixture"
+      fi
+      if [ "$mode" = answers ]; then
+        run_captain "$home" hold proof-next --title 'Next answer' --reason choose >/dev/null \
+          || fail "could not create next batch call"
+      fi
+      if [ "$mode" = reconcile ]; then
+        request_reconciles "$home" proof-board "$id" || fail "could not request reconciliation"
+      fi
+      printf 'Proceed with the release.\n' > "$home/decision.txt"
+      cat > "$home/fakebin/tasks-axi" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = show ]; then
+  case "${2:-}" in
+    proof-*)
+      if [ -e "$FM_HOME/read-unavailable-$2" ]; then
+        : > "$FM_HOME/unexpected-read-$2"
+        exit 92
+      fi
+      "$REAL_TASKS_AXI" "$@" > "$FM_HOME/shown-$2" || exit $?
+      cat "$FM_HOME/shown-$2"
+      if grep -q 'Source kind: ' "$FM_HOME/shown-$2" \
+        && ! grep -q '^  body: "Captain hold set:' "$FM_HOME/shown-$2"; then
+        : > "$FM_HOME/read-unavailable-$2"
+      fi
+      exit 0 ;;
+  esac
+fi
+exec "$REAL_TASKS_AXI" "$@"
+SH
+      chmod +x "$home/fakebin/tasks-axi"
+      kind=user; reference='lifecycle fixture message'
+      case "$mode" in
+        answer|repair)
+          out=$(run_captain "$home" answer "$id" --decision-file "$home/decision.txt" 2>&1) \
+            || fail "$route $mode failed after verifying its committed resolution: $out" ;;
+        release)
+          out=$(run_captain "$home" answer "$id" --decision-file "$home/decision.txt" --release 2>&1) \
+            || fail "$route release failed after verifying its committed resolution: $out" ;;
+        answers)
+          reference='batch proof'
+          out=$(printf 'proof-answers\tproceed\t\nproof-next\tproceed\t\n' \
+            | run_captain "$home" answers --source "$reference" 2>&1) \
+            || fail "$route batch failed after verifying its committed resolutions: $out"
+          assert_contains "$out" 'answers: closed=2 skipped=0' "publication interrupted the answer batch"
+          assert_present "$home/read-unavailable-proof-next" "the batch never verified its next resolution"
+          assert_absent "$home/unexpected-read-proof-next" "the next answer reread its verified body" ;;
+        reconcile)
+          kind=mechanical; reference="fm-captain-hold reconcile close: $home/decision.txt"
+          out=$(run_captain "$home" reconcile close "$id" --evidence-file "$home/decision.txt" 2>&1) \
+            || fail "$route reconciliation failed after verifying its committed resolution: $out" ;;
+      esac
+      assert_present "$home/read-unavailable-$id" "the fixture never verified the committed resolution"
+      assert_absent "$home/unexpected-read-$id" "publication reread an already verified body"
+      show=$(tasks_in "$home" show "$id" --full)
+      assert_contains "$show" "Source reference: $reference" "the committed record lost its source"
+      if [ "$mode" = release ]; then
+        assert_contains "$show" 'held: no' "publication reversed the committed release"
+      else
+        assert_contains "$show" 'state: done' "publication reversed the committed close"
+      fi
+      if [ -n "$channel" ]; then
+        assert_grep "[source-kind=$kind] [source=$reference]" "$channel" \
+          "publication lost the verified record's attribution"
+      fi
+    done
+  done
+  pass "primary and secondmate resolutions publish from their verified bodies without rereading"
+}
+
 test_secondmate_home_publishes_holds_and_answers() {
   local parent mate fakebin channel decision out
   parent=$(make_home parent-channel)
@@ -5267,6 +5354,7 @@ test_completion_keeps_an_armed_pr_identity_last
 test_completion_replaces_a_pair_recorded_after_pr
 test_terminal_single_owner_status_decision_does_not_block_empty_inventory
 test_secondmate_hold_stays_in_authoritative_home
+test_parent_publication_uses_verified_resolution_body
 test_secondmate_home_publishes_holds_and_answers
 test_legacy_parent_replays_preserve_absent_attribution
 test_secondmate_reconcile_publishes_before_request_retirement
