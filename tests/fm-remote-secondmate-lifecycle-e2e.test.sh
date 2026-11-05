@@ -1983,7 +1983,8 @@ SH
   printf 'labelled remote answer\n' > "$ARTIFACT_COPY/data/artifact-child/labels.txt"
   fm_write_meta "$ARTIFACT_HOME/state/artifact-child.meta" \
     'window=firstmate:fm-artifact-child' 'endpoint_task_id=artifact-child' \
-    "worktree=$ARTIFACT_COPY" "project=$PARENT/projects/alpha" 'kind=scout' 'mode=local-only'
+    "worktree=$ARTIFACT_COPY" "project=$PARENT/projects/alpha" 'kind=scout' 'mode=local-only' \
+    'spawn_gen=child-generation'
   artifact_rc=0
   remote_env "$ROOT/bin/fm-on.sh" artifact-sm fm-remote-secondmate-control.sh retire artifact-sm --force \
     > "$TMP_ROOT/artifact-force.out" 2>&1 || artifact_rc=$?
