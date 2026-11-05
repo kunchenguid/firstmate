@@ -2196,7 +2196,7 @@ SH
     bash -c '. "$1/bin/fm-tasks-axi-lib.sh"; . "$1/bin/fm-backlog-transition-lib.sh"; fm_backlog_retain "$2" "$3" --pr "$4"' \
     _ "$ROOT" "$(home_of "$case_dir")/data" "$retained_id" "$pr_url" \
     || fail "could not retain the plain-http Forgejo deliverable"
-  tasks-axi done "$retained_id" --file "$(backlog_of "$case_dir")" >/dev/null \
+  tasks-axi "done" "$retained_id" --file "$(backlog_of "$case_dir")" >/dev/null \
     || fail "could not close the retained plain-http Forgejo row"
 
   out=$(FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$(home_of "$case_dir")" PATH="$case_dir/fakebin:$PATH" \
