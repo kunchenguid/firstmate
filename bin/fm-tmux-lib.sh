@@ -259,6 +259,7 @@ fm_tmux_pane_is_droid() {  # <target>
 $(LC_ALL=C ps -t "${tty#/dev/}" -o pid=,pgid=,tpgid=,comm= 2>/dev/null)
 EOF
   return 1
+
 }
 
 # fm_tmux_pane_is_cursor: true when the pane's FOREGROUND process group contains

@@ -1,0 +1,36 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "exec \"$DROID_PROJECT_DIR\"/bin/fm-sessionstart-run.sh",
+            "timeout": 180
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Execute",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "exec \"$DROID_PROJECT_DIR\"/bin/fm-arm-pretool-check.sh --primary-only"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "exec \"$DROID_PROJECT_DIR\"/bin/fm-turnend-guard.sh"
+          }
+        ]
+      }
+    ]
+  }
+}
