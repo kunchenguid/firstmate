@@ -97,7 +97,7 @@ case "\${1:-}" in
     esac
     exit 0
     ;;
-  capture-pane) printf '❯\n'; exit 0 ;;
+  capture-pane) printf '⛬  Ready\n❯\n'; exit 0 ;;
   send-keys) [ ! -f "\$fail_send" ] || exit 1; exit 0 ;;
   kill-window) rm -f -- "\$state"; exit 0 ;;
   list-panes) printf 'codex\n'; exit 0 ;;
@@ -898,6 +898,17 @@ launches_after_inherit=0
 assert_absent "$PARENT/state/ios.meta" "failed remote inheritance published launch metadata"
 out=$(remote_env "$ROOT/bin/fm-spawn.sh" ios --secondmate)
 assert_contains "$out" 'remote=remote-mac backend=herdr' "remote spawn did not report separate host and backend dimensions"
+assert_grep 'harness=droid' "$PARENT/state/ios.meta" "configured remote Droid launch lost its harness"
+assert_equals "default" "$(sed -n 's/^model=//p' "$PARENT/state/ios.meta")" "parent Droid record lost default selection"
+remote_model=$(sed -n 's/^effective_model=//p' "$REMOTE_HOME/state/parent-route/ios.meta")
+assert_grep "effective_model=$remote_model" "$PARENT/state/ios.meta" \
+  "parent Droid record did not preserve the remote host's observed model"
+assert_grep 'effort=dynamic' "$PARENT/state/ios.meta" "configured remote Droid launch lost dynamic effort in parent metadata"
+assert_grep 'effort=dynamic' "$REMOTE_HOME/state/parent-route/ios.meta" "configured remote Droid launch lost dynamic effort in host metadata"
+jq -e '.sessionDefaultSettings == {"reasoningEffort":"dynamic"} and (.hooks.Stop[0].hooks | length == 1)' \
+  "$REMOTE_HOME/state/parent-route/ios.droid-settings.json" >/dev/null \
+  || fail "configured remote Droid launch lost dynamic effort in runtime settings"
+
 assert_grep 'remote_host=remote-mac' "$PARENT/state/ios.meta" "parent metadata omitted the remote host"
 assert_grep 'remote_backend=herdr' "$PARENT/state/ios.meta" "parent metadata omitted the remote-local backend"
 assert_grep 'remote_herdr_session=fm-remote' "$PARENT/state/ios.meta" "parent metadata omitted the pinned remote Herdr session"
@@ -915,6 +926,43 @@ publish_healthy_watcher_identity "$PARENT/state" "$PARENT" "$ROOT/bin/fm-watch.s
 [ "$(remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh observe ios)" = idle ] \
   || fail "remote endpoint delivery observation did not execute on its own host"
 pass "remote spawn launches on the remote-local backend and records a host-qualified route"
+
+if remote_env "$ROOT/bin/fm-spawn.sh" ios --secondmate --harness droid --effort impossible \
+  > "$TMP_ROOT/remote-invalid-parent.out" 2>&1; then
+  fail "parent remote dispatch accepted an invalid explicit effort"
+fi
+assert_grep 'effort must be one of low, medium, high, xhigh, max, ultra, dynamic' \
+  "$TMP_ROOT/remote-invalid-parent.out" "parent remote dispatch did not enforce the shared effort vocabulary"
+if remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh launch ios droid - impossible herdr \
+  > "$TMP_ROOT/remote-invalid-host.out" 2>&1; then
+  fail "host-local remote control accepted an invalid effort"
+fi
+assert_grep 'invalid remote secondmate effort: impossible' "$TMP_ROOT/remote-invalid-host.out" \
+  "host-local remote control did not reject an invalid effort"
+pass "remote dispatch and host control reject efforts outside the shared vocabulary"
+
+remote_pane=$(sed -n 's/^herdr_pane_id=//p' "$REMOTE_HOME/state/parent-route/ios.meta")
+"$REMOTE_ROOT/bin/herdr" pane close "$remote_pane"
+remote_env "$ROOT/bin/fm-spawn.sh" ios --secondmate --harness droid --effort dynamic >/dev/null \
+  || fail "explicit remote Droid dynamic recovery failed"
+assert_grep 'effort=dynamic' "$REMOTE_HOME/state/parent-route/ios.meta" \
+  "explicit remote Droid recovery lost dynamic effort"
+jq -e '.sessionDefaultSettings == {"reasoningEffort":"dynamic"} and (.hooks.Stop[0].hooks | length == 1)' \
+  "$REMOTE_HOME/state/parent-route/ios.droid-settings.json" >/dev/null \
+  || fail "explicit remote Droid recovery lost dynamic runtime settings"
+pass "explicit remote Droid recovery preserves dynamic effort end to end"
+
+remote_pane=$(sed -n 's/^herdr_pane_id=//p' "$REMOTE_HOME/state/parent-route/ios.meta")
+"$REMOTE_ROOT/bin/herdr" pane close "$remote_pane"
+remote_env "$ROOT/bin/fm-spawn.sh" ios --secondmate >/dev/null \
+  || fail "configured remote Droid recovery failed"
+assert_grep 'effort=dynamic' "$REMOTE_HOME/state/parent-route/ios.meta" \
+  "configured remote Droid recovery lost dynamic effort"
+jq -e '.sessionDefaultSettings == {"reasoningEffort":"dynamic"} and (.hooks.Stop[0].hooks | length == 1)' \
+  "$REMOTE_HOME/state/parent-route/ios.droid-settings.json" >/dev/null \
+  || fail "configured remote Droid recovery lost dynamic runtime settings"
+pass "configured remote Droid recovery preserves dynamic effort end to end"
+
 
 remote_route_meta="$REMOTE_HOME/state/parent-route/ios.meta"
 cp "$remote_route_meta" "$TMP_ROOT/remote-ios-before-default-session.meta"
@@ -1025,6 +1073,7 @@ while [ ! -f "$TMP_ROOT/inherit.entered" ]; do
   kill -0 "$spawn_concurrent" 2>/dev/null || fail "remote spawn exited before its blocked inheritance write"
   spawn_inherit_wait=$((spawn_inherit_wait + 1))
   [ "$spawn_inherit_wait" -le "$(( ${FM_SECONDMATE_CONVERGENCE_TIMEOUT:-900} * 50 ))" ] || fail "remote spawn never reached its blocked inheritance write"
+
   sleep 0.02
 done
 cat > "$PARENT/data/captain-shared.md" <<'EOF'
@@ -1136,6 +1185,7 @@ while [ ! -f "$TMP_ROOT/inherit.entered" ]; do
   # Match the earlier spawn/inheritance wait: a loaded portable runner can
   # spend several seconds in the remote entrypoint before reaching this write.
   [ "$inherit_wait" -le "$(( ${FM_SECONDMATE_CONVERGENCE_TIMEOUT:-900} * 50 ))" ] || fail "first inheritance transaction never reached its blocked write"
+
   sleep 0.02
 done
 cat > "$PARENT/data/captain-shared.md" <<'EOF'

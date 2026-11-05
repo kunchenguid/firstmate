@@ -21,7 +21,27 @@ Current empirical evidence lives in [`docs/verification/runtime-backends.md`](..
 | Background execution | Native tracked Execute jobs (`fireAndForget: true`) notify the primary on completion. |
 
 
+
 ## Settings and discovery
+`../../../../../bin/fm-harness.sh` accepts only an exact `droid` ancestor.
+Control uses Escape for interrupt and `/quit` for exit.
+`../../../../../bin/fm-session-lock-lib.sh` and `../../../../../bin/fm-agent-process-lib.sh` recognize the same exact process identity.
+
+## Launch settings
+
+`../../../../../bin/fm-spawn.sh` writes `state/<id>.droid-settings.json` before endpoint allocation and launches Droid with that file through `--settings`.
+The settings file carries accounting hooks, the crewmate turn-end hook, and optional model and reasoning-effort pins.
+It is task-local runtime state and `../../../../../bin/fm-teardown.sh` removes it.
+[Task model selection and accounting](../../../../../docs/configuration.md) defines the separate requested and effective fields, catalog resolution, runtime reconciliation, and their consumers.
+`../../../../../bin/fm-spawn.sh` owns the folder-trust gate, its bounded wait, and the refusal on backends without verified viewport capture.
+Factory's [settings reference](https://docs.factory.com/droid-cli/settings) documents no settings-based folder-trust bypass, so spawn uses the verified control-plane answer instead of writing an undocumented trust store.
+
+## Working style
+
+Droid works programmatically and may use scripts for implementation, analysis, and other task work.
+Steering responses and validation-gate decisions remain agent actions on the doorbell plane: read the delivered instruction, reason about it, and respond through the required interface.
+Never move those lifecycle decisions into scripts that read an inbox or answer gates autonomously.
+
 
 `../../../../../bin/fm-spawn.sh` owns settings construction, literal native-model selection, supported effort omission, atomic publication, rollback, and relaunch replacement.
 An explicit native catalog id or custom registry id is passed unchanged; an omitted model or `default` leaves the CLI's model default intact, and no provider-facing alias is inferred from global settings.

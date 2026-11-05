@@ -191,10 +191,12 @@ state_value() { # <id>; prints recovery-grade state
 }
 
 print_route() { # <id>
-  local id=$1 harness model effort traceparent rex_session_id rex_server
+  local id=$1 harness model effort traceparent effective_model rex_session_id rex_server
+
   remote_endpoint_require "$id"
   harness=$(fm_meta_get "$REMOTE_ENDPOINT_META" harness)
   model=$(fm_meta_get "$REMOTE_ENDPOINT_META" model)
+  effective_model=$(fm_meta_get "$REMOTE_ENDPOINT_META" effective_model)
   effort=$(fm_meta_get "$REMOTE_ENDPOINT_META" effort)
   traceparent=$(fm_meta_get "$REMOTE_ENDPOINT_META" traceparent)
   printf 'schema=fm-remote-secondmate-control.v1\n'
@@ -213,6 +215,7 @@ print_route() { # <id>
   esac
   printf 'harness=%s\n' "$harness"
   printf 'model=%s\n' "$model"
+  [ -z "$effective_model" ] || printf 'effective_model=%s\n' "$effective_model"
   printf 'effort=%s\n' "$effort"
   [ -z "$traceparent" ] || printf 'traceparent=%s\n' "$traceparent"
 }

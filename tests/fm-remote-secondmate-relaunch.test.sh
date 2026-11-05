@@ -91,12 +91,16 @@ printf 'target=fm-remote:w1:p1\n'
 printf 'herdr_session=fm-remote\n'
 printf 'harness=%s\n' "$harness"
 printf 'model=%s\n' "$model"
+if [ "$harness" = droid ] && [ -n "${FM_FAKE_EFFECTIVE_MODEL:-}" ]; then
+  printf 'effective_model=%s\n' "$FM_FAKE_EFFECTIVE_MODEL"
+fi
 printf 'effort=%s\n' "$effort"
 SH
 chmod +x "$FAKEBIN/fake-ssh"
 
 run_relaunch() {  # <args...>
   env FM_HOME="$HOME_DIR" FM_SSH_BIN="$FAKEBIN/fake-ssh" \
+    FM_FAKE_EFFECTIVE_MODEL="${FM_FAKE_EFFECTIVE_MODEL:-}" \
     FM_FAKE_RELAUNCH_MODE="${FM_FAKE_RELAUNCH_MODE:-}" \
     "$ROOT/bin/fm-remote-secondmate-relaunch.sh" "$@" 2>&1
 }
@@ -122,6 +126,26 @@ assert_grep 'remote_host=remote-mac' "$HOME_DIR/state/ios.meta" \
 assert_grep 'window=remote:ios' "$HOME_DIR/state/ios.meta" \
   "unrelated identity fields must survive the update"
 pass "a successful remote relaunch republishes the parent's harness, model, and effort"
+
+reset_meta
+printf 'effective_model=previous-observation\n' >> "$HOME_DIR/state/ios.meta"
+for requested_model in default pinned-model; do
+  OUT=$(FM_FAKE_EFFECTIVE_MODEL="$requested_model-runtime-model" run_relaunch ios droid "$requested_model" high); RC=$?
+  expect_code 0 "$RC" "Droid remote relaunch should refresh accounting"$'\n'"$OUT"
+  assert_equals "$requested_model" "$(sed -n 's/^model=//p' "$HOME_DIR/state/ios.meta")" \
+    "remote relaunch replaced requested selection with an observation"
+  assert_equals "$requested_model-runtime-model" "$(sed -n 's/^effective_model=//p' "$HOME_DIR/state/ios.meta")" \
+    "remote relaunch retained or duplicated stale accounting"
+done
+OUT=$(run_relaunch ios droid default high); RC=$?
+expect_code 0 "$RC" "Droid remote relaunch without an observation should succeed"$'\n'"$OUT"
+assert_equals unknown-at-spawn "$(sed -n 's/^effective_model=//p' "$HOME_DIR/state/ios.meta")" \
+  "unresolved remote accounting reused an earlier observation"
+OUT=$(run_relaunch ios claude default medium); RC=$?
+expect_code 0 "$RC" "switching a remote mate away from Droid should succeed"$'\n'"$OUT"
+assert_equals '' "$(sed -n 's/^effective_model=//p' "$HOME_DIR/state/ios.meta")" \
+  "switching away from Droid retained its accounting field"
+pass "remote Droid relaunch refreshes accounting independently of selection and removes it on a harness switch"
 
 # --- the parent records what the host confirmed, not what it was asked ------
 reset_meta
@@ -183,7 +207,7 @@ fm_pr_poll_publish_prepared \
   || fail "could not publish the PR poll fixture for the relaunch-ordering test"
 fm_pr_poll_artifacts_valid "$HOME_DIR/state" ios "$ROOT/bin/fm-pr-poll.sh" \
   || fail "PR poll fixture did not authenticate before the relaunch"
-OUT=$(run_relaunch ios claude claude-opus-5-5 medium); RC=$?
+OUT=$(FM_FAKE_EFFECTIVE_MODEL=registered-runtime-model run_relaunch ios droid default medium); RC=$?
 expect_code 0 "$RC" "a confirmed remote relaunch should succeed with an armed PR poll"$'\n'"$OUT"
 fm_pr_poll_artifacts_valid "$HOME_DIR/state" ios "$ROOT/bin/fm-pr-poll.sh" \
   || fail "a remote relaunch broke PR poll authentication by writing harness/model/effort after pr="

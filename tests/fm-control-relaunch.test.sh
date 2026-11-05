@@ -125,6 +125,9 @@ case "${1:-}" in
     else
       printf '╭────╮\n│    │\n╰────╯\n'
     fi
+    if [ "${*: -1}" = -0 ] && [ "$(cat "$D/command")" = droid ]; then
+      printf 'Press ESC to stop\n'
+    fi
     exit 0 ;;
   list-windows)
     # The three shapes real tmux answers a per-session inventory with. The
@@ -949,6 +952,52 @@ test_same_droid_relaunch_preserves_dynamic_effort() {
   done
 }
 
+test_droid_relaunch_follows_requested_selection() {
+  local dir out rc selection expected settings meta
+  for selection in default pinned-model; do
+    dir=$(new_case "droid-selection-$selection" rl-droid-selection)
+    add_ship_task "$dir" rl-droid-selection droid
+    printf droid > "$dir/fake/command"
+    printf droid > "$dir/fake/becomes"
+    meta="$dir/home/state/rl-droid-selection.meta"
+    printf 'model=%s\neffective_model=old-default\n' "$selection" >> "$meta"
+    mkdir -p "$dir/user-home/.factory"
+    printf '%s\n' '{"sessionDefaultSettings":{"model":"new-default"}}' > "$dir/user-home/.factory/settings.json"
+    out=$(run_control "$dir" rl-droid-selection relaunch --note "continue after default change"); rc=$?
+    expect_code 0 "$rc" "Droid selection relaunch failed"$'\n'"$out"
+    expected=$selection
+    [ "$selection" != default ] || expected='new-default'
+    [ "$(meta_field "$dir" rl-droid-selection model)" = "$selection" ] || fail 'relaunch changed requested selection'
+    [ "$(meta_field "$dir" rl-droid-selection effective_model)" = "$expected" ] || fail 'relaunch retained stale effective-model accounting'
+    settings="$dir/home/state/rl-droid-selection.droid-settings.json"
+    if [ "$selection" = default ]; then
+      jq -e '(.sessionDefaultSettings // {}) | has("model") | not' "$settings" >/dev/null || fail 'default relaunch pinned a model'
+    else
+      jq -e --arg model "$selection" '.sessionDefaultSettings.model == $model' "$settings" >/dev/null || fail 'relaunch lost explicit pin'
+    fi
+  done
+  printf codex > "$dir/fake/becomes"
+  out=$(run_control "$dir" rl-droid-selection relaunch --harness codex --note "switch runtime"); rc=$?
+  expect_code 0 "$rc" "switching away from Droid failed"$'\n'"$out"
+  [ -z "$(meta_field "$dir" rl-droid-selection effective_model)" ] || fail 'harness switch preserved retired Droid accounting'
+  pass 'fm-control relaunch: Droid follows new defaults while preserving explicit model pins'
+}
+
+test_relaunch_refuses_invalid_explicit_effort_before_stop() {
+  local dir out rc
+  dir=$(new_case invalid-explicit-effort rl36)
+  add_ship_task "$dir" rl36 droid
+  printf 'droid' > "$dir/fake/command"
+
+  out=$(run_control "$dir" rl36 relaunch --effort impossible --note "must refuse"); rc=$?
+  expect_code 1 "$rc" "invalid explicit effort should refuse"
+  assert_contains "$out" "--effort must be one of default, low, medium, high, xhigh, max, dynamic, ultra" \
+    "invalid explicit effort should report the centralized vocabulary"
+  [ "$(cat "$dir/fake/command")" = droid ] || fail "invalid explicit effort stopped the running agent"
+  pass "fm-control relaunch: invalid explicit effort refuses before stop"
+
+}
+
 test_native_ultra_relaunch_preserves_profile_and_rejects_before_stop() {
   local dir out rc id=rl-ultra
   dir=$(new_case native-ultra "$id")
@@ -1396,6 +1445,7 @@ test_secondmate_relaunch_with_a_legacy_pin_file_uses_the_first_line() {
   [ "$(journal_field "$dir" sml2 to_effort)" = high ] \
     || fail "the relaunch should take the first line's effort token, got '$(journal_field "$dir" sml2 to_effort)'"
   pass "fm-control relaunch: a legacy secondmate pin file still relaunches the mate onto its first line"
+
 }
 
 test_secondmate_claude_relaunch_keeps_local_settings() {
@@ -3193,6 +3243,9 @@ test_harness_switch_resolves_a_prefixed_recorded_harness
 test_prefixed_recorded_harness_requires_explicit_replacement
 test_same_harness_relaunch_keeps_the_profile_axes
 test_same_droid_relaunch_preserves_dynamic_effort
+test_droid_relaunch_follows_requested_selection
+test_relaunch_refuses_invalid_explicit_effort_before_stop
+
 test_native_ultra_relaunch_preserves_profile_and_rejects_before_stop
 test_signed_out_worker_account_pin_refuses_before_stop
 test_worker_account_pin_follows_the_relaunch

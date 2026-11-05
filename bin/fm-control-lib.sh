@@ -552,7 +552,7 @@ fm_control_harness_wiring_paths() {  # <harness> <worktree> <state-dir> <id> [ki
       printf '%s\n' "$state/$id.muse-session-current"
       ;;
     cursor) printf '%s\n' "$state/$id.cursor-session" ;;
-    droid) printf '%s\n' "$state/$id.droid-settings.json" ;;
+    droid) printf '%s\n' "$state/$id.droid-settings.json" "$state/$id.meta".droid-model.* ;;
     # gemini's busy-state and turn-end hooks live in a firstmate-owned
     # settings file the launch reaches through GEMINI_CLI_SYSTEM_SETTINGS_PATH,
     # so retiring that one file retires the whole incarnation's wiring. Nothing

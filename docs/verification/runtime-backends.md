@@ -558,6 +558,33 @@ The lab home was deleted and the test entry was removed from the store and verif
 That automated spawn case runs against a fake claude, so it asserts the store entry and the launch command and nothing more; the live arms above are what establish that the entry actually suppresses the dialog.
 The composer-classification record below observes the same gate from the other side, where an untrusted worktree left Claude, Grok, and Muse unverified because the guard reads a first-launch trust dialog as an unreadable composer.
 
+## Droid folder trust and model accounting
+
+Verified 2026-10-31 on macOS arm64 with Droid 1.1.0 and tmux 3.8.
+The [Droid adapter reference](../../.agents/skills/harness-adapters/references/harness/droid.md#launch-settings) owns the launch contract; [configuration](../configuration.md) owns task model selection and accounting, and `bin/fm-spawn.sh` owns the executable gate.
+Refresh the live evidence with:
+
+```sh
+FM_DROID_SPAWN_LIVE_ONLY=1 bash bin/fm-test-run.sh tests/fm-droid-primary-live-e2e.test.sh
+```
+
+```text
+Droid 1.1.0 live spawn: trust cleared; model=glm-5.3-flash; runtime model override absent
+ok - Droid live spawn: fresh-worktree folder trust is answered and the default model is observed
+ok - Droid 1.1.0 spawn live verification complete
+```
+
+This captured output predates the split into requested and effective model fields and does not establish runtime-sidecar reconciliation.
+The current guard also requires a concrete model observation from the real session sidecar and checks its reconciliation into `effective_model`; that extended live assertion still needs a fresh run.
+The guard first opens a fresh linked worktree without a prompt and verifies the affirmative-selected folder-trust dialog.
+It then drives the real spawn path on a private tmux socket, verifies that the dialog cleared and the brief started processing, and checks that metadata records the configured default without adding a runtime model pin.
+Only the worktree provider is a fixture; the Droid binary, viewport reads, key delivery, and launch settings are real.
+This establishes the tmux path; Herdr and Zellij use their existing viewport-capture interface, while cmux and Orca are refused before endpoint allocation because they lack that capability.
+
+Portable regressions in `tests/fm-spawn-dispatch-profile.test.sh` exercise the trust choice, incomplete and negative selections, failed reads and key delivery, bounded failure, default-model observation, and generation-bound runtime reconciliation that preserves requested selection and registered PR identity.
+`tests/fm-control-relaunch.test.sh` covers changed defaults, explicit model pins, and removal of Droid accounting on a harness switch; `tests/fm-remote-secondmate-relaunch.test.sh` covers the parent publication boundary for refreshed or unknown accounting, harness switches, and preserved PR registration.
+`tests/fm-remote-secondmate-lifecycle-e2e.test.sh` checks that the parent record preserves the model observed by the remote host.
+
 ## Pi seeded-secondmate project trust
 
 [`fm-spawn.sh --help`](../../bin/fm-spawn.sh) owns the seeded-secondmate project-trust approval contract and compatibility fallback.

@@ -122,6 +122,14 @@
 #   OPENCODE_CONFIG_CONTENT JSON its launch already carries (config schema
 #   re-verified on opencode 2.0.21); without a model the effort axis is recorded
 #   but omitted.
+#   Canonical Droid launches observe user and worktree model defaults when no
+#   model override is requested; model= retains the requested selection and
+#   effective_model= records the accounting-only identifier or unknown-at-spawn.
+#   Their folder-trust gate requires viewport capture (tmux/herdr/zellij), sends
+#   Enter only on the complete affirmative-selected dialog, and waits for work
+#   or a response before success. FM_DROID_READY_POLLS (120) and
+#   FM_DROID_POLL_INTERVAL (0.5 seconds) bound that wait; raw launches bypass it.
+
 #   --backend <name> is the explicit runtime session-provider backend for this
 #   exact task only (docs/configuration.md "Runtime backend" owns when that flag
 #   is authorized). Without it, the script resolves FM_BACKEND, then
@@ -1328,7 +1336,8 @@ spawn_remote_secondmate() {
   local id=$1 remote host root home harness positional model effort backend out rc meta tmp
   local remote_backend remote_target remote_harness remote_herdr_session registry_lock remote_lock remote_generation
   local remote_rex_session_id remote_rex_server remote_rex_ok
-  local remote_traceparent remote_recorded_traceparent sm_primary_head sync_out sync_rc account_config
+  local remote_traceparent remote_recorded_traceparent sm_primary_head sync_out sync_rc account_config effective_model ledger_model
+
   local -a launch_args
   id=${POS[0]:-}
   fm_task_id_creation_valid "$id" || {
@@ -1608,6 +1617,11 @@ spawn_remote_secondmate() {
   # reports it here so the parent does not deny the agent's actual identity.
   remote_recorded_traceparent=$(printf '%s\n' "$out" | sed -n 's/^traceparent=//p' | tail -1)
   fm_trace_context_valid "$remote_recorded_traceparent" || remote_recorded_traceparent=
+  effective_model=$(printf '%s\n' "$out" | sed -n 's/^effective_model=//p' | tail -1)
+  if [ "$remote_harness" = droid ]; then
+    model=$(printf '%s\n' "$out" | sed -n 's/^model=//p' | tail -1)
+    model=${model:-default}
+  fi
   tmp="$meta.tmp.$$"
   {
     echo "window=remote:$id"
@@ -1620,6 +1634,7 @@ spawn_remote_secondmate() {
     echo "yolo=off"
     echo "tasktmp="
     echo "model=${model#-}"
+    [ "$remote_harness" != droid ] || echo "effective_model=${effective_model:-unknown-at-spawn}"
     echo "effort=${effort#-}"
     echo "home=$home"
     echo "projects=$(secondmate_registry_field "$DATA/secondmates.md" "$id" projects)"
@@ -1659,7 +1674,9 @@ spawn_remote_secondmate() {
     echo "error: remote secondmate $id launched, but its reply source could not be armed; endpoint metadata is preserved" >&2
     return 1
   fi
-  [ ! -e "$CONFIG/fleet-ledger" ] || FM_HOME=$FM_HOME FM_STATE_OVERRIDE=$STATE FM_CONFIG_OVERRIDE=$CONFIG "$SCRIPT_DIR/fm-fleet-ledger.sh" dispatched "$id" secondmate "" "$harness" "${model#-}" || true
+  ledger_model=${model#-}
+  [ "$harness" != droid ] || ledger_model=${effective_model:-unknown-at-spawn}
+  [ ! -e "$CONFIG/fleet-ledger" ] || FM_HOME=$FM_HOME FM_STATE_OVERRIDE=$STATE FM_CONFIG_OVERRIDE=$CONFIG "$SCRIPT_DIR/fm-fleet-ledger.sh" dispatched "$id" secondmate "" "$harness" "$ledger_model" || true
   echo "spawned $id harness=$harness kind=secondmate mode=secondmate yolo=off window=remote:$id worktree=$home remote=$host backend=$remote_backend"
   return 0
 }
@@ -1760,6 +1777,11 @@ spawn_orca_reclaim_launch_file() {
 
 spawn_abort_cleanup() {
   local status=$?
+  if [ -n "$DROID_SETTINGS_CLEANUP" ]; then
+    rm -f "$DROID_SETTINGS_CLEANUP" "$STATE/$ID.meta.droid-model.${SPAWN_GEN:-unset}" || true
+    DROID_SETTINGS_CLEANUP=
+  fi
+
   if [ -n "$DROID_SETTINGS_TMP" ]; then
     rm -f "$DROID_SETTINGS_TMP" || true
     DROID_SETTINGS_TMP=
@@ -3051,6 +3073,7 @@ launch_template() {
   # Droid settings are process-local and keep hooks outside the worktree.
   # Pin high autonomy in settings as well: user session defaults can override
   # --auto high (verified 0.237.0). Exact-worktree trust is registered below.
+
   droid) printf '%s' 'droid --settings __DROIDSETTINGS__ --auto high "$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
   # Cursor Agent CLI. --trust suppresses the workspace-trust prompt, which
   # --yolo does NOT cover and which would otherwise block every spawn, since
@@ -3467,6 +3490,11 @@ if [ "$KIND" = secondmate ] && [ -z "$ARG3" ]; then
   fi
 fi
 fm_backend_validate_harness "$BACKEND" "$HARNESS" || exit 1
+if [ "$DROID_TEMPLATE" -eq 1 ] && ! fm_backend_visible_capture_supported "$BACKEND"; then
+  echo "error: refusing Droid spawn because backend '$BACKEND' has no verified viewport-bounded capture for its folder-trust gate" >&2
+  exit 1
+fi
+
 # Ultra is an explicit native capability, never a Pi thinking-level alias.
 # Validate the fully resolved profile before worktree or endpoint provisioning.
 if [ "$EFFORT" = ultra ]; then
@@ -3904,6 +3932,34 @@ droid_effort_value() {
   case "$effort" in
   low | medium | high | xhigh | max | dynamic) printf '%s' "$effort" ;;
   esac
+}
+
+# Observe defaults without turning them into a runtime model override. The
+# session-default scalar is most-local-wins; local files overlay their peer.
+# Read only model identifiers, never copy credential-bearing settings to state.
+droid_default_model() { # <worktree>
+  local worktree=$1 settings model='' value catalog
+  for settings in "$HOME/.factory/settings.json" "$HOME/.factory/settings.local.json" \
+    "$worktree/.factory/settings.json" "$worktree/.factory/settings.local.json"; do
+    [ -f "$settings" ] || continue
+    value=$(jq -er '
+      (.sessionDefaultSettings.model // .model // "") |
+      select(type == "string" and (test("[\\r\\n]") | not))
+    ' "$settings") || {
+      echo "error: cannot read Droid model default from $settings" >&2
+      return 1
+    }
+    [ -z "$value" ] || model=$value
+  done
+  if [ -z "$model" ] || [ "$model" = default ]; then
+    catalog=$(fm_run_timed 10 droid exec --help 2>/dev/null || true)
+    model=$(printf '%s\n' "$catalog" | awk '
+      /^Available Models:/ { models=1; next }
+      models && /^[^[:space:]]/ { models=0 }
+      models && /\(default\)/ { print $1; exit }
+    ')
+  fi
+  printf '%s' "$model"
 }
 
 case "$LAUNCH" in
@@ -4550,25 +4606,38 @@ BRIEF_REAL="$BRIEF_DIR_REAL/$(basename "$BRIEF")"
 # (docs/herdr-backend.md "Known gaps").
 PROJ_ABS_REAL=$(cd "$PROJ_ABS" 2>/dev/null && pwd -P) || PROJ_ABS_REAL="$PROJ_ABS"
 
+mkdir -p "$STATE"
+STATE_REAL=$(cd "$STATE" && pwd -P)
+TURNEND="$STATE_REAL/$ID.turn-ended"
+
+SPAWN_GEN="s$(date +%s).${BASHPID:-$$}.$RANDOM"
+
+
 if [ "$DROID_TEMPLATE" -eq 1 ]; then
   mkdir -p "$STATE"
   STATE_REAL=$(cd "$STATE" && pwd -P)
   TURNEND="$STATE_REAL/$ID.turn-ended"
   DROID_MODEL=$(droid_model_reference "$MODEL")
   DROID_EFFORT=$(droid_effort_value "$EFFORT")
-  DROID_HOOK_COMMAND="touch $(shell_quote "$TURNEND")"
+  DROID_HOOK_COMMAND=
+  [ "$KIND" = secondmate ] || DROID_HOOK_COMMAND="touch $(shell_quote "$TURNEND")"
+  DROID_OBSERVE_COMMAND="bash $(shell_quote "$SCRIPT_DIR/fm-droid-model.sh") observe $(shell_quote "$STATE_REAL/$ID.meta") $(shell_quote "$SPAWN_GEN")"
+
   DROID_SETTINGS_TMP=$(mktemp "$STATE/.${ID}.droid-settings.XXXXXXXXXXXX")
   if jq -n \
     --arg model "$DROID_MODEL" \
     --arg effort "$DROID_EFFORT" \
+    --arg observe_command "$DROID_OBSERVE_COMMAND" \
     --arg hook_command "$DROID_HOOK_COMMAND" '
       {sessionDefaultSettings:
          ({autonomyLevel: "high", autonomyMode: "auto-high", interactionMode: "auto"} +
           (if $model == "" then {} else {model: $model} end) +
           (if $effort == "" then {} else {reasoningEffort: $effort} end))} +
-      (if $hook_command == "" then {}
-       else {hooks: {Stop: [{hooks: [{type: "command", command: $hook_command}]}]}}
-       end)
+      {hooks: {SessionStart: [{hooks: [{type: "command", command: $observe_command}]}],
+                PreToolUse: [{hooks: [{type: "command", command: $observe_command}]}],
+                Stop: [{hooks: ((if $hook_command == "" then [] else [{type: "command", command: $hook_command}] end) +
+                  [{type: "command", command: $observe_command}])}]}}
+
     ' > "$DROID_SETTINGS_TMP" \
     && jq -e 'type == "object"' "$DROID_SETTINGS_TMP" >/dev/null; then
     DROID_SETTINGS_PATH="$STATE/$ID.droid-settings.json"
@@ -5772,6 +5841,43 @@ kimi_spawn_fail() { # <detail>
   echo "error: $1; inspect window $T" >&2
 }
 
+# Droid has no documented settings-based workspace-trust bypass. Only the
+# complete, affirmative-selected dialog in a fresh viewport is safe to answer.
+# The pre-launch cwd assertion binds this endpoint to this task's own copy.
+droid_wait_for_working() {
+  local pane i=0 max=${FM_DROID_READY_POLLS:-120} interval=${FM_DROID_POLL_INTERVAL:-0.5}
+  DROID_READY_FAILURE_DETAIL='Droid did not start processing its launch brief'
+  while [ "$i" -lt "$max" ]; do
+    if ! pane=$(fm_backend_visible_capture "$BACKEND" "$T" "$W"); then
+      DROID_READY_FAILURE_DETAIL='Droid folder-trust gate could not read the visible viewport'
+      return 1
+    fi
+    if [[ "$pane" == *'Trust this folder?'* ]]; then
+      if printf '%s\n' "$pane" | grep -qE '^> 1\. Trust this folder[[:space:]]*$' \
+        && [[ "$pane" == *'2. Exit without trusting'* ]] \
+        && [[ "$pane" == *'Enter to confirm'* ]] \
+        && [[ "$pane" == *'Esc to exit'* ]]; then
+        if ! spawn_send_key "$T" Enter; then
+          DROID_READY_FAILURE_DETAIL='Droid folder-trust choice could not be submitted'
+          return 1
+        fi
+      fi
+      DROID_READY_FAILURE_DETAIL='Droid folder-trust dialog did not clear or its verified affirmative choice was unavailable'
+    elif [[ "$pane" != *'Exit without trusting'* ]]; then
+      # A banner or empty composer can precede trust. Require actual work or
+      # a response instead; either also proves the positional brief survived.
+      if [[ "$pane" == *'Press ESC to stop'* ]] \
+        || printf '%s\n' "$pane" | grep -qE '^[[:space:]]*⛬[[:space:]]'; then
+        return 0
+      fi
+      DROID_READY_FAILURE_DETAIL='Droid did not start processing its launch brief after folder-trust handling'
+    fi
+    i=$((i + 1))
+    [ "$i" -ge "$max" ] || sleep "$interval"
+  done
+  return 1
+}
+
 # rovo mirrors kimi's launch-then-send shape exactly: a positional brief is
 # dead-on-arrival, so rovo launches bare and takes its brief pointer only after a
 # readiness gate, then a delivery-confirmation gate. Both route their
@@ -6207,6 +6313,18 @@ fi
 # tab's original project directory.
 spawn_enter_recorded_worktree
 spawn_assert_agent_worktree
+
+RECORDED_MODEL=$MODEL
+if [ "$DROID_TEMPLATE" -eq 1 ]; then
+  RECORDED_MODEL=$DROID_MODEL
+  if [ -z "$RECORDED_MODEL" ]; then
+    RECORDED_MODEL=$(droid_default_model "$WT") || exit 1
+  fi
+  case "$RECORDED_MODEL" in
+    ''|default|*'*'*|anthropic-latest-*|openai-latest-*|oss-latest-*) RECORDED_MODEL=unknown-at-spawn ;;
+  esac
+fi
+
 
 # Pre-register Claude's workspace trust for the directory this launch starts in,
 # at the first point that directory is known and before any per-task state is
@@ -7312,7 +7430,7 @@ fi
 META_WINDOW=$T
 [ "$BACKEND" = orca ] && META_WINDOW=$W
 [ "$BACKEND" = t3code ] && META_WINDOW=$W
-SPAWN_GEN="s$(date +%s).${BASHPID:-$$}.$RANDOM"
+
 SPAWN_META_PATH="$STATE/$ID.meta"
 if [ "$SPAWN_META_LOCK_HELD" != 1 ]; then
   SPAWN_META_LOCK=$(fm_meta_lock_path "$STATE/$ID.meta") || exit 1
@@ -7329,7 +7447,8 @@ SPAWN_META_PATH=$SPAWN_META_TMP
 preserve_relaunch_meta() {
   awk -F= '
     BEGIN {
-      split("window endpoint_task_id worktree project harness hermes_profile hermes_home kind mode yolo branch tasktmp base_branch upstream_consent forge backup_remote backup_prefix model effort opencode_version account account_provider omp_profile busy_gen spawn_gen approval_mode traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id paseo_terminal_id paseo_workspace_id rex_server rex_session_id rex_window_id rex_block_id t3_thread_id t3_project_id tern_session_id tern_tab_id tern_block_id hc_session hc_terminal home projects control_relaunch_tx polytoken_session polytoken_port polytoken_credential", keys, " ")
+      split("window endpoint_task_id worktree project harness hermes_profile hermes_home kind mode yolo branch tasktmp base_branch upstream_consent forge backup_remote backup_prefix model effective_model effort opencode_version account account_provider omp_profile busy_gen spawn_gen approval_mode traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id paseo_terminal_id paseo_workspace_id rex_server rex_session_id rex_window_id rex_block_id t3_thread_id t3_project_id tern_session_id tern_tab_id tern_block_id hc_session hc_terminal home projects control_relaunch_tx polytoken_session polytoken_port polytoken_credential", keys, " ")
+
       for (i in keys) owned[keys[i]] = 1
     }
     !($1 in owned)
@@ -7359,6 +7478,7 @@ preserve_relaunch_meta() {
   [ -z "$EXTERNAL_BACKUP_REMOTE" ] || echo "backup_remote=$EXTERNAL_BACKUP_REMOTE"
   [ -z "$EXTERNAL_BACKUP_REMOTE" ] || echo "backup_prefix=$EXTERNAL_BACKUP_PREFIX"
   echo "model=${MODEL:-default}"
+  [ "$DROID_TEMPLATE" -ne 1 ] || echo "effective_model=$RECORDED_MODEL"
   echo "effort=${EFFORT:-default}"
   # The detected OpenCode major, recorded so fm-control sends the exit key this
   # agent's TUI understands. Written only when a version was resolved, so a
@@ -8130,6 +8250,11 @@ if [ "$HARNESS" = hermes ] && [ "$RAW_LAUNCH" -eq 0 ]; then
     exit 1
   fi
 fi
+if [ "$DROID_TEMPLATE" -eq 1 ] && ! droid_wait_for_working; then
+  printf '%s\n' "$(status_stamp_line "failed: $DROID_READY_FAILURE_DETAIL")" >>"$STATE/$ID.status"
+  echo "error: $DROID_READY_FAILURE_DETAIL; inspect window $T" >&2
+  exit 1
+fi
 if [ "$HARNESS" = kimi ]; then
   if ! kimi_wait_for_ready; then
     kimi_spawn_fail "$KIMI_READY_FAILURE_DETAIL"
@@ -8290,6 +8415,10 @@ fi
 DROID_SETTINGS_CLEANUP=
 fm_lock_release "$SPAWN_META_LOCK"
 SPAWN_META_LOCK_HELD=0
+if [ "$DROID_TEMPLATE" -eq 1 ]; then
+  bash "$SCRIPT_DIR/fm-droid-model.sh" reconcile "$STATE/$ID.meta" "$SPAWN_GEN"
+  RECORDED_MODEL=$(fm_meta_get "$STATE/$ID.meta" effective_model)
+fi
 
 if [ "$T3CODE_LAUNCH_UNCONFIRMED" = 1 ]; then
   echo "error: the launch brief for $ID may already have been delivered to T3 thread $T: its outcome is unproven (a lost reply or a T3 error that can follow a commit). The task record is kept; inspect the thread in T3 Code, and if the brief is absent resend only the identical brief text, which reuses its request id within the hour" >&2
@@ -8303,7 +8432,7 @@ SPAWN_ACCOUNT=
 [ -z "$WORKER_ACCOUNT_PROVIDER" ] || SPAWN_ACCOUNT="$SPAWN_ACCOUNT account_provider=$WORKER_ACCOUNT_PROVIDER"
 [ -z "$OMP_PROFILE_PIN" ] || SPAWN_ACCOUNT="$SPAWN_ACCOUNT omp_profile=$OMP_PROFILE_PIN"
 # Opt-in fleet activity ledger (docs/fleet-ledger.md); off costs one file test.
-[ ! -e "$CONFIG/fleet-ledger" ] || [ "$RELAUNCH" -eq 1 ] || FM_HOME=$FM_HOME FM_STATE_OVERRIDE=$STATE FM_CONFIG_OVERRIDE=$CONFIG "$SCRIPT_DIR/fm-fleet-ledger.sh" dispatched "$ID" "$KIND" "${PROJ_ABS##*/}" "$HARNESS" "$MODEL" || true
+[ ! -e "$CONFIG/fleet-ledger" ] || [ "$RELAUNCH" -eq 1 ] || FM_HOME=$FM_HOME FM_STATE_OVERRIDE=$STATE FM_CONFIG_OVERRIDE=$CONFIG "$SCRIPT_DIR/fm-fleet-ledger.sh" dispatched "$ID" "$KIND" "${PROJ_ABS##*/}" "$HARNESS" "$RECORDED_MODEL" || true
 # Opt-in Herdr project groups (docs/herdr-backend.md "Project groups") tag the
 # new endpoint now rather than at the next watcher poll; off costs one file test.
 [ ! -e "$CONFIG/herdr-project-groups" ] || [ "$BACKEND" != herdr ] || FM_HOME=$FM_HOME FM_STATE_OVERRIDE=$STATE FM_CONFIG_OVERRIDE=$CONFIG "$SCRIPT_DIR/fm-herdr-groups.sh" sync "$ID" || true

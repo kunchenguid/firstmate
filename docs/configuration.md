@@ -1252,6 +1252,18 @@ claude, codex, opencode, pi, pi-signed, grok, kimi, cursor, and omp are empirica
 
 `fm-spawn.sh` refuses kimi on cmux and Orca at preflight, because answering Kimi's folder-trust dialog needs a verified viewport-only capture those backends lack; [its adapter reference](../.agents/skills/harness-adapters/references/harness/kimi.md#readiness-gated-start) owns the trust-dialog handling.
 It also never answers a Kimi folder prompt that announces project MCP servers, pages what trusting would activate, or is collapsed for a short terminal, so no project MCP server starts without a consent decision that covers it; the launch fails with that reason, and the same adapter reference owns the exact rules.
+Droid's canonical launch likewise requires viewport capture to answer folder trust and confirm brief processing; [its adapter reference](../.agents/skills/harness-adapters/references/harness/droid.md#launch-settings) owns its launch settings.
+Task metadata `model` records the requested selection: an explicit `--model`, a dispatch-profile or secondmate pin, or `default` for an unset selection that follows the user's current default.
+`fm-control.sh` relaunch and recovery consume only this selection; observing a default never creates a model pin.
+Canonical Droid tasks additionally carry `effective_model`, an accounting and review identifier resolved from the launch pin, user/worktree settings, then the installed Droid CLI's authoritative `droid exec --help` catalog default.
+When no concrete identifier is available before launch, it is `unknown-at-spawn`, never the bare `default` selection sentinel.
+`fm-droid-model.sh` observes the runtime session settings sidecar through SessionStart, PreToolUse, and Stop hooks and reconciles only `effective_model` under the task lock, bound to `spawn_gen` so retired sessions cannot alter a replacement's record.
+An observation arriving while spawn holds that lock is reconciled after launch; no accounting hook waits for spawn's lock.
+Remote launch and relaunch replies mirror both fields from the launching host; switching away from Droid removes `effective_model` from both host and parent records.
+The fleet ledger receives the observed identifier available at dispatch, including an honest `unknown-at-spawn` if reconciliation has not happened yet.
+Neither runtime settings generation nor relaunch or recovery uses `effective_model` for selection.
+
+
 A cursor secondmate or primary runs the tracked project-scope `.cursor/hooks.json` in its own home and must be launched with `--trust`, or no project hook loads; [`docs/supervision-protocols/cursor.md`](supervision-protocols/cursor.md) owns its supervision protocol.
 
 Cursor typed-submit confirmation is verified on tmux and Herdr only.
