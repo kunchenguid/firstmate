@@ -1365,7 +1365,7 @@ _fm_open_decisions_unserved() {  # <cursor-write> <read-only-status> <trusted-op
 status_open_decisions_incremental() {  # <status-file> [<captured-end-offset>] [timed] [<kind>]
   local f=$1 captured_end=${2:-} cf offset ident open='' trusted_open='' cursor_data first rest offset_line ident_line
   local version='' size actual_size cur_ident resolve held chunk_file chunk_size line cursor_dirty=0
-  local target_cursor kind fold_version timed=${3:-} cursor_write=1
+  local target_cursor kind fold_version timed=${3:-} cursor_write=1 verb
   case "$timed" in ''|timed) ;; *) return 2 ;; esac
   case "${FM_OPEN_DECISIONS_CURSOR_WRITE:-1}" in
     0) cursor_write=0 ;;
@@ -1495,7 +1495,12 @@ status_open_decisions_incremental() {  # <status-file> [<captured-end-offset>] [
     resolve=${FM_CLASSIFY_RESOLVE_VERB:-$FM_CLASSIFY_RESOLVE_VERB_DEFAULT}
     held=${FM_CLASSIFY_CAPTAIN_HELD_VERB:-$FM_CLASSIFY_CAPTAIN_HELD_VERB_DEFAULT}
     while IFS= read -r line || [ -n "$line" ]; do
-      open=$(_fm_decision_fold_line "$open" "$line" "$resolve" "$held" "$kind" "$timed")
+      status_line_verb "$line" verb
+      case "$verb" in
+        needs-decision|blocked|done|failed|"$resolve"|"$held")
+          open=$(_fm_decision_fold_line "$open" "$line" "$resolve" "$held" "$kind" "$timed")
+          ;;
+      esac
     done < "$chunk_file"
     rm -f "$chunk_file"
     offset=$size
