@@ -52,8 +52,8 @@ fm_nm_bounded() {  # <dir> <timeout_secs> <command> <args...>
 # resolver that fails, times out, or prints anything else, nothing is resolved
 # and every read uses the ambient home exactly as without the hook.
 # Prints the resolved home, or nothing. Never starts a daemon.
-fm_nm_home_resolver_home() {  # <worktree>
-  local wt=$1 cfg cmd out
+fm_nm_home_resolver_home() {  # <worktree> [timeout_secs]
+  local wt=$1 timeout_secs=${2:-5} cfg cmd out
   [ -z "${NM_HOME:-}" ] || return 0
   cfg=${FM_CONFIG_OVERRIDE:-${FM_HOME:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}/config}/nm-home-resolver
   [ -f "$cfg" ] || return 0
@@ -61,7 +61,7 @@ fm_nm_home_resolver_home() {  # <worktree>
   cmd=$(fm_nm_trim "$cmd")
   case "$cmd" in /*) ;; *) return 0 ;; esac
   [ -f "$cmd" ] && [ -x "$cmd" ] || return 0
-  out=$(fm_nm_bounded "$wt" 5 "$cmd" "$wt" 2>/dev/null </dev/null) || return 0
+  out=$(fm_nm_bounded "$wt" "$timeout_secs" "$cmd" "$wt" 2>/dev/null </dev/null) || return 0
   case "$out" in
     /*) ;;
     *) return 0 ;;
@@ -90,11 +90,28 @@ fm_nm_home_resolver_applies() {  # <no-mistakes args...>
   return 1
 }
 
-fm_nm_run_bounded() {  # <dir> <timeout_secs> <args...>
-  local dir=$1 timeout_secs=$2 home=''
+fm_nm_run_bounded() {  # <dir> <timeout_secs> [--deadline epoch] <args...>
+  local dir=$1 timeout_secs=$2 home='' deadline='' remaining resolver_timeout=5
   shift 2
+  if [ "${1:-}" = --deadline ]; then
+    deadline=${2:-}
+    [ "$#" -ge 2 ] || return 1
+    case "$deadline" in 0*|*[!0-9]*) return 1 ;; esac
+    [ "${#deadline}" -le 18 ] || return 1
+    shift 2
+  fi
+  if [ -n "$deadline" ]; then
+    remaining=$((deadline - $(date +%s)))
+    [ "$remaining" -gt 0 ] || return 1
+    [ "$remaining" -ge "$resolver_timeout" ] || resolver_timeout=$remaining
+  fi
   if fm_nm_home_resolver_applies "$@"; then
-    home=$(fm_nm_home_resolver_home "$dir")
+    home=$(fm_nm_home_resolver_home "$dir" "$resolver_timeout")
+  fi
+  if [ -n "$deadline" ]; then
+    remaining=$((deadline - $(date +%s)))
+    [ "$remaining" -gt 0 ] || return 1
+    [ "$remaining" -ge "$timeout_secs" ] || timeout_secs=$remaining
   fi
   if [ -n "$home" ]; then
     NM_HOME=$home fm_nm_bounded "$dir" "$timeout_secs" no-mistakes "$@"
