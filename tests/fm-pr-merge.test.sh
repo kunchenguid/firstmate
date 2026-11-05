@@ -2325,7 +2325,7 @@ test_forgejo_url_resolves_and_merges() {
   rc=$?
   set -e
 
-  expect_code 0 "$rc" "forgejo-merges: a well-formed pull request URL should merge, not error"
+  expect_code 0 "$rc" "forgejo-merges: a well-formed pull request URL should merge, not error"$'\n'"$(cat "$case_dir/stderr")"
   assert_grep "pr=$FJ_URL" "$case_dir/state/task-x1.meta" \
     "forgejo-merges: pr= was not recorded before merging"
   assert_grep "--login $FJ_LOGIN --repo $FJ_OWNER/$FJ_REPO /repos/{owner}/{repo}/pulls/9" "$case_dir/tea.log" \

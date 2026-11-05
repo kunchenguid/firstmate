@@ -1391,6 +1391,7 @@ run_poll() {
 test_static_poll_contract() {
   local dir state out rc
   dir=$(make_case poll-contract)
+  write_task_meta "$dir"
   make_poll_fixture "$dir"
 
   for state in OPEN CLOSED EMPTY MALFORMED; do
@@ -1404,6 +1405,10 @@ test_static_poll_contract() {
   done
   out=$(FM_TEST_GH_STATE=MERGED run_poll "$dir")
   [ "$out" = merged ] || fail "static poll did not emit exactly one merged line"
+  mv "$dir/home/state/task-a.meta" "$dir/home/state/task-a.meta.missing"
+  out=$(FM_TEST_GH_STATE=MERGED run_poll "$dir")
+  [ -z "$out" ] || fail "static poll emitted without task destination metadata"
+  mv "$dir/home/state/task-a.meta.missing" "$dir/home/state/task-a.meta"
   out=$(FM_TEST_GH_FAIL=1 run_poll "$dir")
   [ -z "$out" ] || fail "static poll emitted after gh failure"
 
