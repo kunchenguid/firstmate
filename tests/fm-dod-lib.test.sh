@@ -450,6 +450,10 @@ EOF
       assert_grep 'against the base branch `feature/hub`' "$home/data/$id/ship-instructions.md" \
         "promotion did not target the PR at the recorded base"
       assert_grep 'base_branch=feature/hub' "$meta" "promotion dropped the recorded base"
+      assert_grep 'Expected PR base: feature/hub' "$home/data/$id/ship-instructions.md" \
+        "promotion instructions omitted the expected destination value"
+      assert_grep 'Expected PR base: feature/hub' "$home/data/$id/brief.md" \
+        "the relaunch brief omitted the promoted expected destination value"
     else
       [ "$status" -ne 0 ] || fail "promoting a based scout to local-only should be refused"
       assert_contains "$out" "mode=local-only" "the local-only promotion refusal did not explain itself"

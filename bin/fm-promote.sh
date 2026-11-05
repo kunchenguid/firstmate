@@ -247,6 +247,7 @@ if [ -n "$PROMOTE_PROJECT" ]; then
 fi
 BASE_BRANCH=$(sed -n 's/^base_branch=//p' "$META" | head -n 1)
 fm_base_branch_valid "$BASE_BRANCH" "$MODE" "$FORGE" "fm-promote.sh $ID" || exit 1
+PROMOTE_EXPECTED_BASE=$(fm_pr_expected_base "$META" 2>/dev/null || true)
 # The same self-repository publication gate bin/fm-spawn.sh applies to a fresh
 # ship spawn runs here on the recorded project: a promoted scout reaches no
 # greater upstream authority than the spawn path would grant.
@@ -340,6 +341,9 @@ The mode-specific Definition of done below is the current delivery contract.
 
 # Current ship safety rule
 EOF
+  if [ -n "$PROMOTE_EXPECTED_BASE" ]; then
+    printf 'Expected PR base: %s\n' "$PROMOTE_EXPECTED_BASE"
+  fi
   fm_ship_rule_one "$MODE" "$ID" "$BRANCH" "$FORGE" "$BASE_BRANCH"
   if [ -n "$PROMOTION_ASK_USER_BLOCK" ]; then
     printf '\nThe no-mistakes ask-user escalation below supersedes the scout rule 6 escalation shape.\n'
