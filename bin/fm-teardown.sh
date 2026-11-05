@@ -3277,7 +3277,7 @@ preflight_descendant_treehouse_slots() {
 }
 
 validate_firstmate_home_children_removal() {
-  local home=$1 sub_state child_meta child_id child_wt child_proj child_kind child_home child_backend child_orca_worktree_id
+  local home=$1 archive_parent=${2:-$ID} sub_state child_meta child_id child_wt child_proj child_kind child_home child_backend child_orca_worktree_id
   sub_state="$home/state"
   [ -d "$sub_state" ] || return 0
   for child_meta in "$sub_state"/*.meta; do
@@ -3295,7 +3295,7 @@ validate_firstmate_home_children_removal() {
       [ -n "$child_home" ] || child_home=$child_wt
       [ "$child_backend" != t3code ] || t3code_secondmate_lsof_check "$child_id" "$child_home" || return 1
       validate_firstmate_home_for_removal "$child_home" "child firstmate home" "$child_id" >/dev/null || return 1
-      validate_firstmate_home_children_removal "$child_home" || return 1
+      validate_firstmate_home_children_removal "$child_home" "$archive_parent/children/$child_id" || return 1
     elif [ "$child_backend" = orca ]; then
       child_orca_worktree_id=$(require_orca_worktree_id "$child_meta") || return 1
       if [ -n "$child_wt" ] && [ -e "$child_wt" ]; then
@@ -3316,7 +3316,7 @@ validate_firstmate_home_children_removal() {
       fi
       if [ "$child_owner_rc" -ne "$TEARDOWN_SLOT_REASSIGNED_RC" ]; then
         [ "$child_owner_rc" -eq 0 ] || return 1
-        require_scout_artifacts_preserved "$child_wt" "$child_id" "$home/data/$child_id" || return 1
+        require_scout_artifacts_preserved "$child_wt" "$child_id" "$DATA/$archive_parent/children/$child_id" || return 1
       fi
     fi
   done
@@ -3566,7 +3566,7 @@ cleanup_firstmate_home_children() {
       if [ -n "$child_wt" ] && [ -d "$child_wt" ]; then
         validate_child_worktree_for_removal "$child_wt" "$child_proj" >/dev/null || return 1
         if [ "$child_kind" = scout ]; then
-          require_scout_artifacts_preserved "$child_wt" "$child_id" "$home/data/$child_id" || return 1
+          require_scout_artifacts_preserved "$child_wt" "$child_id" "$DATA/$archive_parent/children/$child_id" || return 1
         fi
         rm -f "$child_wt/.claude/settings.local.json" "$child_wt/.opencode/plugins/fm-turn-end.js" \
           "$child_wt/.fm-grok-turnend" "$child_wt/.fm-kimi-turnend"
@@ -3588,7 +3588,7 @@ cleanup_firstmate_home_children() {
       else
         validate_child_worktree_for_removal "$child_wt" "$child_proj" >/dev/null || return 1
         if [ "$child_kind" = scout ]; then
-          require_scout_artifacts_preserved "$child_wt" "$child_id" "$home/data/$child_id" || return 1
+          require_scout_artifacts_preserved "$child_wt" "$child_id" "$DATA/$archive_parent/children/$child_id" || return 1
         fi
         rm -f "$child_wt/.claude/settings.local.json" "$child_wt/.opencode/plugins/fm-turn-end.js" \
           "$child_wt/.opencode/plugins/fm-busy-state.js" \

@@ -3781,14 +3781,16 @@ configure_secondmate_with_tmux_children() {  # <case-dir>
 }
 
 test_forced_secondmate_child_scout_artifacts() {
-  local backend state case_dir home child_wt rc
+  local backend state case_dir home child_wt child_window destination rc
   for backend in tmux pool orca; do
     for state in present late missing clean reassigned; do
       [ "$state" != reassigned ] || [ "$backend" = pool ] || continue
       case_dir=$(make_case "child-scout-artifacts-$backend-$state")
+      mkdir -p "$case_dir/active-home/state"
       write_meta "$case_dir" local-only secondmate
       configure_secondmate_with_tmux_children "$case_dir"
       home="$case_dir/secondmate-home"
+      destination="$case_dir/data/task-x1/children/child-a"
       child_wt="$case_dir/child-a-wt"
       if [ "$backend" = pool ]; then
         mkdir -p "$case_dir/pool/1"
@@ -3801,8 +3803,10 @@ test_forced_secondmate_child_scout_artifacts() {
           printf 'task=child-a\nhome=%s\n' "$home" > "$case_dir/pool/1/.fm-slot-owner"
         fi
       fi
+      child_window=firstmate:fm-child-a
+      [ "$backend" != orca ] || child_window=fm-child-a
       fm_write_meta "$home/state/child-a.meta" \
-        "window=firstmate:fm-child-a" "endpoint_task_id=child-a" \
+        "window=$child_window" "endpoint_task_id=child-a" \
         "worktree=$child_wt" "project=$case_dir/project" "kind=scout" "mode=local-only"
       if [ "$backend" = orca ]; then
         printf 'backend=orca\nterminal=child-terminal\norca_worktree_id=child-wt::/orca/child\n' >> "$home/state/child-a.meta"
@@ -3849,13 +3853,13 @@ exit 0
 SH
       chmod +x "$case_dir/fakebin/orca"
       rc=0
-      FM_SCOUT_CHILD_CASE="$case_dir" FM_SCOUT_CHILD_STATE="$state" FM_SCOUT_CHILD_WT="$child_wt" \
+      FM_HOME="$case_dir/active-home" FM_SCOUT_CHILD_CASE="$case_dir" FM_SCOUT_CHILD_STATE="$state" FM_SCOUT_CHILD_WT="$child_wt" \
         run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
       case "$state" in
         present|late)
           expect_code 1 "$rc" "$backend/$state: child artifact cleanup was allowed"
-          assert_grep "$child_wt/data/child-a" "$case_dir/stderr" "$backend/$state: source missing"
-          assert_grep "$home/data/child-a" "$case_dir/stderr" "$backend/$state: destination missing"
+          assert_grep "$child_wt/data/child-a" "$case_dir/stderr" "$backend/$state: source missing: $(cat "$case_dir/stderr")"
+          assert_grep "$destination" "$case_dir/stderr" "$backend/$state: destination missing"
           [ "$(cat "$child_wt/data/child-a/labels.txt")" = 'labelled child answer' ] || fail "$backend/$state: bytes lost"
           assert_present "$home/state/child-a.meta" "$backend/$state: child identity lost"
           assert_absent "$case_dir/removed" "$backend/$state: Orca removal ran"
@@ -3865,6 +3869,15 @@ SH
           else
             assert_absent "$case_dir/stopped" "$backend: preflight stopped endpoint"
           fi
+          mkdir -p "$destination"
+          mv "$child_wt/data/child-a/labels.txt" "$destination/labels.txt"
+          rmdir "$child_wt/data/child-a"
+          rc=0
+          FM_HOME="$case_dir/active-home" FM_SCOUT_CHILD_CASE="$case_dir" FM_SCOUT_CHILD_STATE=clean FM_SCOUT_CHILD_WT="$child_wt" \
+            run_teardown "$case_dir" --force > "$case_dir/retry.stdout" 2> "$case_dir/retry.stderr" || rc=$?
+          expect_code 0 "$rc" "$backend/$state: retirement after preservation failed: $(cat "$case_dir/retry.stderr")"
+          assert_absent "$home" "$backend/$state: retirement retained home"
+          [ "$(cat "$destination/labels.txt")" = 'labelled child answer' ] || fail "$backend/$state: preserved bytes lost"
           ;;
         *)
           expect_code 0 "$rc" "$backend/$state: retirement failed: $(cat "$case_dir/stderr")"
@@ -3877,6 +3890,41 @@ SH
     done
   done
   pass 'forced retirement preserves child scout artifacts before and after endpoint close'
+}
+
+test_forced_secondmate_grandchild_scout_destination_survives() {
+  local case_dir home nested_home child_wt destination rc
+  case_dir=$(make_case grandchild-scout-artifacts)
+  write_meta "$case_dir" local-only secondmate
+  home="$case_dir/secondmate-home"
+  nested_home="$home/nested-home"
+  mkdir -p "$home/state" "$home/data" "$home/config" "$home/projects" \
+    "$nested_home/state" "$nested_home/data" "$nested_home/config" "$nested_home/projects"
+  printf 'task-x1\n' > "$home/.fm-secondmate-home"
+  printf 'nested-sm\n' > "$nested_home/.fm-secondmate-home"
+  printf 'home=%s\n' "$home" >> "$case_dir/state/task-x1.meta"
+  fm_write_meta "$home/state/nested-sm.meta" "window=firstmate:fm-nested-sm" \
+    "kind=secondmate" "mode=local-only" "home=$nested_home" "project=$case_dir/project" "worktree=$case_dir/wt"
+  child_wt="$case_dir/grandchild-wt"
+  git -C "$case_dir/project" worktree add -q -b fm/grandchild "$child_wt" main
+  fm_write_meta "$nested_home/state/grandchild.meta" "window=firstmate:fm-grandchild" \
+    "endpoint_task_id=grandchild" "kind=scout" "mode=local-only" "project=$case_dir/project" "worktree=$child_wt"
+  mkdir -p "$child_wt/data/grandchild"
+  printf 'labelled grandchild answer\n' > "$child_wt/data/grandchild/labels.txt"
+  destination="$case_dir/data/task-x1/children/nested-sm/children/grandchild"
+  rc=0
+  run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  expect_code 1 "$rc" 'nested scout artifacts must block retirement'
+  assert_grep "$destination" "$case_dir/stderr" 'nested scout destination must survive both homes'
+  mkdir -p "$destination"
+  mv "$child_wt/data/grandchild/labels.txt" "$destination/labels.txt"
+  rmdir "$child_wt/data/grandchild"
+  rc=0
+  run_teardown "$case_dir" --force > "$case_dir/retry.stdout" 2> "$case_dir/retry.stderr" || rc=$?
+  expect_code 0 "$rc" "nested retirement after preservation failed: $(cat "$case_dir/retry.stderr")"
+  assert_absent "$home" 'nested retirement retained homes'
+  [ "$(cat "$destination/labels.txt")" = 'labelled grandchild answer' ] || fail 'preserved grandchild bytes lost'
+  pass 'nested scout artifact destination survives retirement of both ancestor homes'
 }
 
 test_forced_secondmate_teardown_holds_descendant_lifecycle_locks() {
@@ -6410,6 +6458,7 @@ SH
 test_scout_task_artifacts_refuse_cleanup
 test_scout_tracked_data_is_project_content
 test_forced_secondmate_child_scout_artifacts
+test_forced_secondmate_grandchild_scout_destination_survives
 test_scout_artifact_discard_requires_force
 test_hidden_untracked_work_refuses_before_return
 test_content_fallback_git_capability_boundary
