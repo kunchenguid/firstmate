@@ -73,6 +73,7 @@ Repeat and edge cases:
   A new ask that would create its task, and whose key matches another open captain hold, creates nothing: the output says it attached to the existing hold and prints that task id.
   A task that already exists, often the work itself, is held on its own even when the key matches, because merge checks read that task's hold.
   With `--origin`, that origin is added to the existing hold's `Captain hold attached origins:` body line, so `complete` accepts the hold for it too.
+  The key is checked again under that task's lock; if the hold was released or its key changed meanwhile, nothing is attached and the ask is refused with a retry message.
   A new ask on that task, or a move to another origin, drops the attached origins line.
   If the backlog listing fails, the keyed ask is refused instead of treated as an empty queue.
   Different keys stay separate holds.
