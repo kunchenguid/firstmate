@@ -99,7 +99,7 @@ SH
   for mode in direct-PR no-mistakes ''; do
     for deadline in '' "$(( $(date +%s) + 10 ))"; do
       : > "$dir/gerrit.calls"
-      PATH="$dir/bin:$PATH" FM_REAL_DATE="$real_date" FM_CONFIG_OVERRIDE="$dir/config" NM_HOME= \
+      PATH="$dir/bin:$PATH" FM_REAL_DATE="$real_date" FM_CONFIG_OVERRIDE="$dir/config" NM_HOME='' \
         FM_GERRIT_CALLS="$dir/gerrit.calls" FM_NM_CALLS="$dir/nm.calls" \
         FM_STALLED_READ=none FM_RESOLVED_HOME="$dir" \
         FM_PUBLISHED_HEAD="$published_head" \
@@ -118,7 +118,7 @@ SH
     start=$(date +%s)
     rc=0
     out=$(PATH="$dir/bin:$PATH" FM_REAL_DATE="$real_date" FM_READ_CLOCK="$dir/clock" \
-      FM_CONFIG_OVERRIDE="$dir/config" NM_HOME= \
+      FM_CONFIG_OVERRIDE="$dir/config" NM_HOME='' \
       FM_GERRIT_CALLS="$dir/gerrit.calls" FM_NM_CALLS="$dir/nm.calls" \
       FM_STALLED_READ="$stalled" FM_RESOLVED_HOME="$dir" \
       FM_PUBLISHED_HEAD="$published_head" \
