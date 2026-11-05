@@ -215,10 +215,10 @@ case "$provider" in
       || [ "$url" = "http://$host/$owner/$repo/pulls/$number" ] || exit 0
     command -v tea >/dev/null 2>&1 || exit 0
     command -v jq >/dev/null 2>&1 || exit 0
-    # tea addresses a repo by slug only; the host comes from a named login
+    # tea addresses a repo by slug only; the server comes from a named login
     # rather than a URL the way gh and glab take one, so the login registered
-    # for this exact host is resolved fresh on every poll rather than trusted
-    # from anywhere durable. Refuse to guess when zero or more than one
+    # for this exact scheme and authority is resolved fresh on every poll rather
+    # than trusted from anywhere durable. Refuse to guess when zero or more than one
     # registered login matches, rather than picking one arbitrarily.
     # The list is parsed as JSON, never split on quotes per line, so a login
     # printed as one compact object still matches; this is the same filter

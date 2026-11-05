@@ -222,9 +222,9 @@ fi
 
 # Refuse to arm a Forgejo watch with no tea or jq on PATH, for the same reason
 # as the GitLab and Gerrit cases above. tea also addresses a repo by slug only, resolving the
-# host from a named "tea login" rather than from the URL the way gh and glab
+# server from a named "tea login" rather than from the URL the way gh and glab
 # do, so a poll can only ever succeed when exactly one registered login
-# matches this host; refuse now rather than watch something that can never
+# matches this URL's scheme and authority; refuse now rather than watch something that can never
 # resolve. This duplicates bin/fm-pr-poll.sh's own login match deliberately:
 # that script is a static, standalone watcher body with no sourced
 # dependency, so it re-derives the same match at every poll instead of

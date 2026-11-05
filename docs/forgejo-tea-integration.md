@@ -1,7 +1,7 @@
 # Forgejo pull request watch and merge verification
 
 Empirical record for the merge watch and the merge path on Forgejo, alongside the existing GitHub and GitLab ones (`docs/gitlab-merge-watch.md`).
-Every finding here was verified against a real, disposable Forgejo instance rather than assumed from `tea --help`, because several of them contradict what the help text alone would suggest.
+The `tea` CLI and Forgejo API findings below were verified against a real, disposable Forgejo instance rather than assumed from `tea --help`, because several of them contradict what the help text alone would suggest.
 All evidence below was collected on 2026-09-13.
 A project opts in with the `forge=forgejo` registry binding, which `bin/fm-project-mode.sh` owns; the watch and merge paths recorded here key off the pull request URL itself, and the binding decides only that a generated ship brief names `tea` rather than `gh-axi`.
 
@@ -98,13 +98,15 @@ $ tea login list --output json
 ]
 ```
 
-Every Forgejo read parses this list as JSON with `jq`, requires the login URL's scheme to match the PR URL, and matches the validated PR authority, including its port, against each login URL's authority (stripping userinfo and path while preserving the port). It refuses when zero or more than one login matches, rather than guessing.
+Every Forgejo read parses this list as JSON with `jq`, requires the login URL's scheme to match the PR URL, and matches the validated PR authority, including its port, against each login URL's authority (stripping userinfo and path while preserving the port).
+It refuses when zero or more than one login matches, rather than guessing.
 It never splits the output line by line, because a login printed as one compact object would then read its name where the url belongs.
 `fm_pr_forgejo_login` in `bin/fm-pr-lib.sh` owns that match for every sourcing script; `bin/fm-pr-poll.sh` is a static, standalone watcher body with no sourced dependency, so it keeps its own copy and re-derives the match on every poll instead of trusting a name recorded anywhere durable.
 
 ## URL shape
 
-Firstmate accepts Forgejo (and Gitea) pull request URLs at `http://<host>[:<port>]/<owner>/<repo>/pulls/<number>` or the same shape with `https`, because a private LAN instance often has no TLS; a port must be in the range 1 through 65535. GitHub, GitLab, and Gerrit URLs stay https-only.
+Firstmate accepts Forgejo (and Gitea) pull request URLs at `http://<host>[:<port>]/<owner>/<repo>/pulls/<number>` or the same shape with `https`, because a private LAN instance often has no TLS; a port must be written without leading zeros and be in the range 1 through 65535.
+GitHub, GitLab, and Gerrit URLs stay https-only.
 The route uses plural "pulls" and no `/-/` route separator, as the fixture's own PR-creation output confirms:
 
 ```
@@ -212,4 +214,4 @@ Standing up a Forgejo Actions runner was out of scope for this pass; the merge g
 ## Registered `tea login`s used
 
 `fm-fixture` (`http://localhost:3980`) was created solely for this verification and removed afterward, along with the fixture instance itself.
-The two pre-existing real logins on the private instance (`forgejo`, `forgejo-admin`) were read only through `tea login list` to prove the host-matching logic against real data; no pull request on either was read, merged, or otherwise touched.
+The two pre-existing real logins on the private instance (`forgejo`, `forgejo-admin`) were read only through `tea login list` to prove the original host-matching logic against real data; no pull request on either was read, merged, or otherwise touched.

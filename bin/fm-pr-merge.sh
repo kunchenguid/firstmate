@@ -8,7 +8,7 @@
 # request is addressed through glab by the project URL rebuilt from the parsed
 # host and path, so any instance works and no host is hardcoded; a Forgejo
 # pull request is addressed through tea by the derived owner and repository
-# plus a "tea login" resolved fresh from the parsed host on every run. A Gerrit
+# plus a "tea login" resolved fresh from the parsed scheme and authority on every run. A Gerrit
 # change is refused outright: that adapter is read-only, and the refusal at the
 # parse below owns why.
 #
@@ -138,8 +138,8 @@
 # reports an HTTP-level failure with exit status 0, so the merge is never
 # judged by its own exit status: only a follow-up read confirming merged=true
 # counts as landed. tea addresses a repository by owner/repository slug only;
-# the host comes from a named "tea login" rather than the URL the way gh and
-# glab take one, so the login registered for the parsed host is re-resolved
+# the server comes from a named "tea login" rather than the URL the way gh and
+# glab take one, so the login registered for the parsed scheme and authority is re-resolved
 # fresh at merge time (bin/fm-pr-check.sh already required one at arm time,
 # but a login can be renamed or removed afterwards). Reading and merging both
 # need tea and jq, and either one absent stops the merge before any state is
@@ -575,9 +575,9 @@ if [ "$PROVIDER" = github ]; then
     exit 1
   fi
 fi
-# tea addresses a repo by slug only; the host comes from a named "tea login"
-# rather than the URL, so the login registered for this exact host is
-# resolved here too (bin/fm-pr-check.sh already refused arming without one,
+# tea addresses a repo by slug only; the server comes from a named "tea login"
+# rather than the URL, so the login registered for this exact scheme and
+# authority is resolved here too (bin/fm-pr-check.sh already refused arming without one,
 # but a login can be removed or renamed after arming, so this is re-derived
 # fresh rather than trusted from that earlier check).
 FORGEJO_MISSING=
