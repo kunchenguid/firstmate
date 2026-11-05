@@ -35,6 +35,7 @@ SCRIPT_DIR="$(d=${BASH_SOURCE[0]%/*}; [ "$d" != "${BASH_SOURCE[0]}" ] || d=.; cd
 . "$SCRIPT_DIR/fm-afk-contract.sh"
 
 DRAIN_TMP=
+DRAIN_PRESENTED_HEARTBEAT=false
 DRAIN_VIEW_TMP=
 DRAIN_LOCK_HELD=false
 RAW_ROWS=
@@ -830,9 +831,14 @@ cleanup() {
     fm_lock_release "$FM_WAKE_QUEUE_LOCK"
   fi
   # Every drain is a supervision wake, so redraw the opt-in Projects view; the
-  # refresh is detached and never fails or slows the drain.
+  # refresh is detached and never fails or slows the drain. Only a presented
+  # heartbeat row earns the full (remote-collecting) redraw.
   if [ -f "${FM_CONFIG_OVERRIDE:-$FM_HOME/config}/projects.json" ]; then
-    "$SCRIPT_DIR/fm-projects-view.sh" refresh >/dev/null 2>&1 || true
+    if [ "$DRAIN_PRESENTED_HEARTBEAT" = true ]; then
+      "$SCRIPT_DIR/fm-projects-view.sh" refresh --full >/dev/null 2>&1 || true
+    else
+      "$SCRIPT_DIR/fm-projects-view.sh" refresh >/dev/null 2>&1 || true
+    fi
   fi
   exit "$status"
 }
@@ -1078,6 +1084,9 @@ awk -F '\t' -v seqs="$ACTOR_ROWS_FILE" '
   NF >= 5 && ($2 in keep)
 ' "$FM_WAKE_QUEUE" > "$DRAIN_VIEW_TMP" || exit 1
 RAW_ROWS=$(fm_wake_print_deduped "$DRAIN_VIEW_TMP") || exit "$?"
+if printf '%s\n' "$RAW_ROWS" | awk -F '\t' '$3 == "heartbeat" { found=1 } END { exit !found }'; then
+  DRAIN_PRESENTED_HEARTBEAT=true
+fi
 rm -f -- "$DRAIN_VIEW_TMP" || exit 1
 DRAIN_VIEW_TMP=
 ACK_THROUGH=$(printf '%s\n' "$RAW_ROWS" | awk -F '\t' '$2 ~ /^[0-9]+$/ && $2 > max { max=$2 } END { print (max == "" ? 0 : max) }') || exit 1

@@ -11,7 +11,7 @@
 #   fm-projects-view.sh model [--snapshot <fleet-snapshot.json>]
 #   fm-projects-view.sh build [--snapshot <fleet-snapshot.json>]
 #   fm-projects-view.sh serve
-#   fm-projects-view.sh refresh
+#   fm-projects-view.sh refresh [--full]
 #   fm-projects-view.sh add <project-id> <words...>
 #   fm-projects-view.sh correct <task-id> <words...>
 #   fm-projects-view.sh path
@@ -38,6 +38,16 @@
 #          counts.needs is the per-project counter the page always shows.
 #          Main-home items carry local=true and are the only ones the page
 #          offers actions on; secondmate items are read-only here.
+#          The snapshot runs in one of two scopes. A full snapshot
+#          (`fm-fleet-snapshot.sh --json`) fetches every remote secondmate's
+#          ledger over ssh and probes each local worker's crew state; only an
+#          explicit `serve` (/bearings projects), `model`, `build`, or a
+#          `refresh --full` pays for it. A local-only snapshot
+#          (`fm-fleet-snapshot.sh --local-only`) reads this machine's files
+#          alone: secondmate rows come from the parent-side cached ledgers and
+#          no worker is probed, so an in-progress item keeps the status the
+#          page last published for it until the next full pass. Plain
+#          `refresh`, the routine trigger, always uses the local-only scope.
 # build    Write the model into a fresh copy of the shipped template
 #          (.agents/skills/bearings/assets/projects-template.html) at the stable
 #          path $FM_HOME/.lavish/projects.html with the same one-slot injection
@@ -55,6 +65,16 @@
 #          holds a home-scoped lock and loops while the view is still dirty, so
 #          concurrent triggers coalesce. It never prints, never fails its
 #          caller, and logs to state/projects-view.log.
+#          Plain `refresh` is the routine mode: local-only scope, and at most
+#          one rebuild per FM_PROJECTS_VIEW_COOLDOWN_SECS (default 600, the
+#          floor a routine wake may run at; lower values are for tests). A
+#          trigger inside the cooldown leaves the view dirty and the detached
+#          rebuild waits out the remainder, so the page still catches up
+#          without another trigger, and a routine wake never fans out over
+#          ssh. `refresh --full` is the heartbeat mode: the wake drain asks for
+#          it when it presents a heartbeat row, it uses the full scope, and it
+#          bypasses the cooldown (a waiting rebuild picks it up within a few
+#          seconds). `serve` always publishes a full snapshot inline.
 # add      File the captain's words as a new Queued backlog item for that
 #          project through bin/fm-tasks-axi.sh, with a `Project: <id>` body
 #          line and the words verbatim. The repo is the project's only repo when
@@ -68,8 +88,9 @@
 #
 # Page answers ride the fleet board's fm-bearings-answer.v1 capture under keys
 # that never name a task, so the keyed-answer intake skips them and firstmate
-# routes them: `add.<project-id>`, `fix.<task-id>`, and `decide.<task-id>`
-# (.agents/skills/bearings/SKILL.md, "Projects view").
+# routes them: `add.<project-id>` and `fix.<task-id>` (.agents/skills/bearings/
+# SKILL.md, "Projects view"). A needs-you card is read-only; the captain
+# answers in chat.
 #
 # FM_PROJECTS_VIEW_TEMPLATE overrides the shipped template path (tests only).
 set -u
@@ -87,6 +108,9 @@ PLACEHOLDER='__FM_PROJECTS_VIEW_DATA__'
 CONFIG_SCHEMA=fm-projects.v1
 MODEL_SCHEMA=fm-projects-view.v1
 LIST_CAP=30
+SNAPSHOT_SCOPE=${SNAPSHOT_SCOPE:-full}
+COOLDOWN_SECS=${FM_PROJECTS_VIEW_COOLDOWN_SECS:-600}
+case "$COOLDOWN_SECS" in ''|*[!0-9]*) COOLDOWN_SECS=600 ;; esac
 
 # shellcheck source=bin/fm-landed-lib.sh
 . "$SCRIPT_DIR/fm-landed-lib.sh"
@@ -199,9 +223,10 @@ snapshot_cutoff() {  # <snapshot.json> <window-days>
     | (($now - (($days - 1) * 86400)) | strftime("%Y-%m-%d"))' "$1"
 }
 
-build_model() {  # <snapshot.json> <archive.json>
-  jq -c --slurpfile cfg "$PROJECTS_CONFIG" --slurpfile archive "$2" \
+build_model() {  # <snapshot.json> <archive.json> <published-model.json>
+  jq -c --slurpfile cfg "$PROJECTS_CONFIG" --slurpfile archive "$2" --slurpfile published "$3" \
     --arg schema "$MODEL_SCHEMA" --arg home "$FM_HOME" --argjson cap "$LIST_CAP" \
+    --arg scope "$SNAPSHOT_SCOPE" \
     "$FM_LANDED_JQ_DEFS"'
     def palette: ["#ef4444","#0ea5e9","#8b5cf6","#14b8a6","#ec4899","#64748b","#f97316","#84cc16","#6366f1","#c026d3"];
     def glob_re: "^" + (gsub("\\."; "\\.") | gsub("\\*"; ".*") | gsub("\\?"; ".")) + "$";
@@ -221,6 +246,9 @@ build_model() {  # <snapshot.json> <archive.json>
     | ([$projects[].id]) as $ids
     | (reduce ($snap.tasks // [])[] as $t ({}; .[$t.id] = $t)) as $tasks
     | (reduce (($snap.backlog.records // [])[] | select(.structured and .id != null)) as $r ({}; .[$r.id] = $r.title)) as $titles
+    | (if $scope == "local" then
+         reduce (($published[0].projects // [])[] | .moving[]? | select(.local and .status != null)) as $m ({}; .[$m.id] = $m.status)
+       else {} end) as $kept
     | def after($ids): if ($ids | length) > 0 then "After " + ($ids | map($titles[.] // .) | join(", ")) else null end;
 
     # Membership: explicit body line, then id glob, then exclusive repo.
@@ -251,7 +279,8 @@ build_model() {  # <snapshot.json> <archive.json>
             body_lines:$r.body_lines,sort:($r.order)}
          elif $r.state == "in_flight" and $r.hold_bucket == null then
            {group:"moving",id:$r.id,title:$r.title,repo:$r.repo,local:true,home:null,
-            status:(($task.current_state.state // "") | state_label),since:$r.since,
+            status:(if ($task.current_state.source // "none") == "none" and $kept[$r.id] != null then $kept[$r.id]
+                    else (($task.current_state.state // "") | state_label) end),since:$r.since,
             correctable:($task != null and ($task.kind // "") != "secondmate"),
             body_lines:$r.body_lines,sort:($r.order)}
          elif $r.state == "in_flight" or $r.state == "queued" then
@@ -351,16 +380,23 @@ validate_model() {  # <model.json>
 
 # Writes the model to <out>; the snapshot is captured fresh unless supplied.
 produce_model() {  # <out.json> [<snapshot.json>]
-  local out=$1 snapshot=${2-} scratch window cutoff rc=0
+  local out=$1 snapshot=${2-} scratch window cutoff rc=0 snapshot_flag
   require_config
   scratch=$(mktemp -d "${TMPDIR:-/tmp}/fm-projects-view.XXXXXX") || fail "cannot stage the model"
   if [ -n "$snapshot" ]; then
     [ -f "$snapshot" ] || { rm -rf -- "$scratch"; fail "snapshot does not exist: $snapshot"; }
     cp -- "$snapshot" "$scratch/snapshot.json" || { rm -rf -- "$scratch"; fail "cannot read the snapshot"; }
-  elif ! "$SCRIPT_DIR/fm-fleet-snapshot.sh" --json > "$scratch/snapshot.json" 2>"$scratch/snapshot.err"; then
-    rm -rf -- "$scratch"
-    fail "cannot capture the fleet snapshot"
+  else
+    case "$SNAPSHOT_SCOPE" in
+      local) snapshot_flag=--local-only ;;
+      *) snapshot_flag=--json ;;
+    esac
+    if ! "$SCRIPT_DIR/fm-fleet-snapshot.sh" "$snapshot_flag" > "$scratch/snapshot.json" 2>"$scratch/snapshot.err"; then
+      rm -rf -- "$scratch"
+      fail "cannot capture the fleet snapshot"
+    fi
   fi
+  published_model "$(page_path)" 2>/dev/null | jq -c '.' > "$scratch/published.json" 2>/dev/null || : > "$scratch/published.json"
   jq -e '.schema == "fm-fleet-snapshot.v1" and (.generated | type == "string")' "$scratch/snapshot.json" >/dev/null 2>&1 \
     || { rm -rf -- "$scratch"; fail "the fleet snapshot is not a readable fm-fleet-snapshot.v1 document"; }
   window=$(jq '.window_days // 30' "$PROJECTS_CONFIG")
@@ -368,7 +404,7 @@ produce_model() {  # <out.json> [<snapshot.json>]
     || { rm -rf -- "$scratch"; fail "cannot compute the done window"; }
   archive_records "$cutoff" "$scratch/archive.json" \
     || { rm -rf -- "$scratch"; fail "cannot read the backlog archive"; }
-  build_model "$scratch/snapshot.json" "$scratch/archive.json" > "$out" || rc=1
+  build_model "$scratch/snapshot.json" "$scratch/archive.json" "$scratch/published.json" > "$out" || rc=1
   rm -rf -- "$scratch"
   [ "$rc" -eq 0 ] || fail "cannot build the projects model"
   validate_model "$out" || fail "the built model does not satisfy $MODEL_SCHEMA"
@@ -470,6 +506,12 @@ refresh_log() {
 command_refresh() {
   [ -f "$PROJECTS_CONFIG" ] || return 0
   [ -d "$STATE" ] || return 0
+  case "$#" in
+    0) ;;
+    1) [ "$1" = --full ] || { usage >&2; exit 2; }
+       : > "$STATE/.projects-view.full" 2>/dev/null || return 0 ;;
+    *) usage >&2; exit 2 ;;
+  esac
   : > "$STATE/.projects-view.dirty" 2>/dev/null || return 0
   # Detached three ways (nohup, every stdio stream redirected, background) so
   # the caller never waits on the snapshot or holds a pipe open for it.
@@ -478,18 +520,37 @@ command_refresh() {
   return 0
 }
 
+refresh_pass() {  # <scope>
+  ( SNAPSHOT_SCOPE=$1 publish_page "" ) >/dev/null 2>"$STATE/.projects-view.err" \
+    || refresh_log "$1 refresh failed: $(tr '\n' ' ' < "$STATE/.projects-view.err" 2>/dev/null)"
+  rm -f -- "$STATE/.projects-view.err"
+  : > "$STATE/.projects-view.refreshed" 2>/dev/null || true
+}
+
 command_refresh_run() {
-  local lock="$STATE/.projects-view.lock" pass=0
+  local lock="$STATE/.projects-view.lock" stamp="$STATE/.projects-view.refreshed" pass=0 age wait
   # shellcheck source=bin/fm-wake-lib.sh
   . "$SCRIPT_DIR/fm-wake-lib.sh"
   while [ -e "$STATE/.projects-view.dirty" ]; do
     fm_lock_try_acquire "$lock" || return 0
     while [ -e "$STATE/.projects-view.dirty" ] && [ "$pass" -lt 20 ]; do
+      if [ -e "$STATE/.projects-view.full" ]; then
+        rm -f -- "$STATE/.projects-view.full" "$STATE/.projects-view.dirty"
+        pass=$((pass + 1))
+        refresh_pass full
+        continue
+      fi
+      age=$COOLDOWN_SECS
+      [ ! -e "$stamp" ] || age=$(fm_path_age "$stamp")
+      if [ "$age" -lt "$COOLDOWN_SECS" ]; then
+        wait=$((COOLDOWN_SECS - age))
+        [ "$wait" -le 5 ] || wait=5
+        sleep "$wait"
+        continue
+      fi
       rm -f -- "$STATE/.projects-view.dirty"
       pass=$((pass + 1))
-      ( publish_page "" ) >/dev/null 2>"$STATE/.projects-view.err" \
-        || refresh_log "refresh failed: $(tr '\n' ' ' < "$STATE/.projects-view.err" 2>/dev/null)"
-      rm -f -- "$STATE/.projects-view.err"
+      refresh_pass local
     done
     fm_lock_release "$lock"
     [ "$pass" -lt 20 ] || return 0
@@ -545,7 +606,7 @@ case "${1-}" in
   model) shift; command_model "$@" ;;
   build) shift; command_build "$@" ;;
   serve) shift; command_serve "$@" ;;
-  refresh) command_refresh ;;
+  refresh) shift; command_refresh "$@" ;;
   refresh-run) command_refresh_run ;;
   add) shift; command_add "$@" ;;
   correct) shift; command_correct "$@" ;;

@@ -10,7 +10,7 @@
   model into the data slot below; this page only renders it. Self-contained:
   system fonts, no network loads. Answers leave only through
   window.lavish.queuePrompt with fm-bearings-answer.v1 context under the keys
-  add.<project-id>, fix.<task-id>, and decide.<task-id>.
+  add.<project-id> and fix.<task-id>. Needs-you cards are read-only.
 -->
 <style>
 :root {
@@ -489,14 +489,7 @@ __FM_PROJECTS_VIEW_DATA__
       call.appendChild(el("p", "call__q", it.title));
       if (it.question) call.appendChild(el("p", "call__why", it.question));
       if (it.aged && it.age_days !== null && it.age_days !== undefined) call.appendChild(el("p", "call__age", "Waiting " + it.age_days + " days"));
-      if (it.local && keyOk("decide." + it.id)) {
-        call.appendChild(composer({
-          key: "decide." + it.id, label: "Decision on " + it.title, button: "Send",
-          placeholder: "Your answer", rows: 2, sentText: "Sent"
-        }));
-      } else if (!it.local) {
-        call.appendChild(el("div", "item__s", elsewhere(it)));
-      }
+      call.appendChild(el("div", "item__s", it.local ? "Answer in chat" : elsewhere(it)));
       needs.appendChild(call);
     });
     page.appendChild(group("Needs you", "var(--needs)", p.counts.needs, needs));

@@ -117,6 +117,14 @@
 #
 # --contribution-input prints only the canonical backlog/tasks ownership pair,
 # without worker observations or cross-home collection, for the home-local poll.
+# --local-only prints the full `--json` document from this machine's files
+# alone: no remote ledger is fetched (a valid parent-side cached copy serves and
+# reports ledger_source remote-ledger-cache; a home without one is unreadable),
+# and no worker is probed (every local current_state reads unknown/none with
+# the detail "not probed by a local-only snapshot", endpoint liveness reads
+# unknown, and terminal evidence is not captured). Routine automatic consumers
+# such as bin/fm-projects-view.sh's drain-triggered refresh use it so a
+# supervision wake never fans out over ssh.
 # Compatibility: JSON is the primary machine-readable surface.
 # Human views must render this output instead of parsing state files again.
 set -u
@@ -236,11 +244,15 @@ esac
 usage() {
   cat <<'EOF'
 usage: fm-fleet-snapshot.sh --json
+       fm-fleet-snapshot.sh --local-only
        fm-fleet-snapshot.sh --secondmate-home-summary
 
 Print a structured snapshot of the firstmate fleet.
 JSON is the stable machine-readable output contract. The default snapshot
 refreshes only its parent-side remote-summary cache as an observational side effect.
+--local-only prints the same document without fetching any remote ledger (valid
+cached copies serve) and without probing any worker: local current_state reads
+unknown, endpoint liveness reads unknown, and terminal evidence is not captured.
 
 --contribution-input emits the canonical local backlog/tasks ownership pair only,
 without worker observations or cross-home collection.
@@ -290,8 +302,10 @@ EOF
 }
 
 OUTPUT_MODE=json
+SNAPSHOT_LOCAL_ONLY=0
 case "${1:---json}" in
   --json) ;;
+  --local-only) SNAPSHOT_LOCAL_ONLY=1 ;;
   --secondmate-home-summary) OUTPUT_MODE=secondmate-home-summary ;;
   --contribution-input) OUTPUT_MODE=contribution-input ;;
   -h|--help) usage; exit 0 ;;
@@ -652,6 +666,10 @@ prefetch_task_observations() {  # <meta> <id>
 
   if [ -n "$remote_host" ]; then
     jq -n '{state:"unknown",source:"none",detail:"remote endpoint liveness not collected by fleet snapshot",raw:""}' \
+      > "$current_file" || current_rc=1
+    agent_alive=unknown
+  elif [ "$SNAPSHOT_LOCAL_ONLY" = 1 ]; then
+    jq -n '{state:"unknown",source:"none",detail:"not probed by a local-only snapshot",raw:""}' \
       > "$current_file" || current_rc=1
     agent_alive=unknown
   elif [ "$generation_current" = 1 ]; then
@@ -1425,6 +1443,7 @@ manifest=$2
 out_dir=$3
 filter=$4
 max_bytes=$5
+local_only=$6
 
 valid_summary() {  # <file> <home>
   local file=$1 home=$2 bytes
@@ -1454,7 +1473,8 @@ collect_one() {  # <manifest-row>
   slot=$(printf '%s' "$row" | jq -r '.slot') || return
   fetch="$out_dir/$slot.fetch"
   status="$out_dir/$slot.status"
-  if bounded_collect "$fetch" "$out_dir/$slot.fetch.err" \
+  if [ "$local_only" != 1 ] \
+      && bounded_collect "$fetch" "$out_dir/$slot.fetch.err" \
       "$script_dir/fm-on.sh" "$id" fm-remote-file.sh get state/home-summary.json "$max_bytes" \
       && valid_summary "$fetch" "$home"; then
     printf 'fresh\n' > "$status"
@@ -1477,7 +1497,7 @@ BASH
   SNAPSHOT_COLLECTION_TIMED_OUT=0
   if fm_run_timed "$FM_SNAPSHOT_BUDGET" bash "$collector" \
       "$SCRIPT_DIR" "$manifest" "$SNAPSHOT_COLLECT_DIR" "$SNAPSHOT_SUMMARY_FILTER" \
-      "$FM_SNAPSHOT_SECONDMATE_MAX_BYTES"; then
+      "$FM_SNAPSHOT_SECONDMATE_MAX_BYTES" "$SNAPSHOT_LOCAL_ONLY"; then
     :
   else
     rc=$?
@@ -1600,6 +1620,11 @@ terminal_evidence_json() {  # <parent-task-json> <event-note> <evidence-contradi
   exists=$(printf '%s' "$task" | jq -r '.endpoint.exists // "unknown"')
   remote_host=$(printf '%s' "$task" | jq -r '.remote.host // ""')
   id=$(printf '%s' "$task" | jq -r '.id // ""')
+  if [ "$SNAPSHOT_LOCAL_ONLY" = 1 ]; then
+    jq -n --arg observed "$SNAPSHOT_NOW" --arg reason "terminal evidence is not captured by a local-only snapshot" \
+      '{provenance:"parent-direct-report-terminal",trust:"untrusted-supplement",captured:false,observed_at:$observed,freshness:"not-collected",reason:$reason,lines:0,bytes:0,event_note_seen:false,contradiction:false}'
+    return 0
+  fi
   if [ -n "$remote_host" ]; then
     jq -n --arg observed "$SNAPSHOT_NOW" --arg reason "remote terminal evidence is not collected by the primary" \
       '{provenance:"remote-direct-report-terminal",trust:"untrusted-supplement",captured:false,observed_at:$observed,freshness:"not-collected",reason:$reason,lines:0,bytes:0,event_note_seen:false,contradiction:false}'

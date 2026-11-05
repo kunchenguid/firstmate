@@ -318,8 +318,8 @@ test_refresh_is_opt_in_and_runs_detached() {
   assert_absent "$home/state/projects-view.log" "no config logs nothing"
   home=$(fixture_home refresh-on)
   page=$(FM_HOME="$home" bash "$VIEW" path)
-  FM_HOME="$home" bash "$VIEW" refresh || fail "refresh failed"
-  FM_HOME="$home" bash "$VIEW" refresh || fail "a second refresh failed"
+  FM_HOME="$home" FM_PROJECTS_VIEW_COOLDOWN_SECS=0 bash "$VIEW" refresh || fail "refresh failed"
+  FM_HOME="$home" FM_PROJECTS_VIEW_COOLDOWN_SECS=0 bash "$VIEW" refresh || fail "a second refresh failed"
   wait_for_refresh "$home" || fail "refresh never published the page"
   assert_present "$page" "the page is at its stable path"
   pass "refresh does nothing without a config and publishes the page in the background"
@@ -335,6 +335,80 @@ test_wake_drain_triggers_a_refresh() {
   pass "every wake drain redraws the projects page"
 }
 
+published_status() {  # <home> <project> <task>
+  sed -n '/<script id="projects-data" type="application\/json">/,/<\/script>/p' "$1/.lavish/projects.html" | sed '1d;$d' \
+    | jq -r --arg p "$2" --arg t "$3" '.projects[] | select(.id == $p) | .moving[] | select(.id == $t) | .status'
+}
+
+published_has_next() {  # <home> <project> <task>
+  sed -n '/<script id="projects-data" type="application\/json">/,/<\/script>/p' "$1/.lavish/projects.html" | sed '1d;$d' \
+    | jq -e --arg p "$2" --arg t "$3" 'any(.projects[] | select(.id == $p) | .next.rows[]; .id == $t)' >/dev/null
+}
+
+# A live worker the fleet snapshot can observe: a claude-harness task whose
+# semantic busy-state record says busy, behind a tmux stand-in that lists its
+# window and reports a working pane.
+start_live_worker() {  # <home> <task>
+  local home=$1 task=$2 fakebin gen
+  fakebin=$(fm_fakebin "$home")
+  cat > "$fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+set -u
+case "${1:-}" in
+  list-windows) sed -n 's/^window=[^:]*://p' "${FM_HOME:?}"/state/*.meta ;;
+  display-message) case "$*" in *pane_current_command*) printf 'claude\n' ;; *) printf '%%1\n' ;; esac ;;
+  capture-pane) printf 'work in progress\nesc to interrupt\n' ;;
+esac
+exit 0
+SH
+  chmod +x "$fakebin/tmux"
+  mkdir -p "$home/projects/$task"
+  fm_write_meta "$home/state/$task.meta" "window=firstmate:fm-$task" "worktree=$home/projects/$task" \
+    "project=store-app" "harness=claude" "kind=ship" "mode=ship"
+  gen=$("$ROOT/bin/fm-busy-event.sh" arm "$home/state" "$task") || fail "cannot arm the busy record"
+  "$ROOT/bin/fm-busy-event.sh" apply "$home/state" "$task" busy --gen "$gen" --source claude-hook --event user-prompt-submit \
+    || fail "cannot record the worker busy"
+  printf '%s\n' "$fakebin"
+}
+
+idle_worker() {  # <home> <task>
+  local gen
+  gen=$("$ROOT/bin/fm-busy-event.sh" arm "$1/state" "$2") || fail "cannot re-arm the busy record"
+  "$ROOT/bin/fm-busy-event.sh" apply "$1/state" "$2" idle --gen "$gen" --source claude-hook --event stop \
+    || fail "cannot record the worker idle"
+}
+
+test_routine_refresh_is_local_only_and_rate_limited() {
+  local home fakebin full_status
+  home=$(fixture_home routine)
+  fakebin=$(start_live_worker "$home" store-build)
+  PATH="$fakebin:$PATH" FM_HOME="$home" bash "$VIEW" build >/dev/null || fail "full build failed"
+  full_status=$(published_status "$home" store-launch store-build)
+  assert_equals Working "$full_status" "a full snapshot observes the live worker"
+
+  idle_worker "$home" store-build
+  PATH="$fakebin:$PATH" FM_HOME="$home" bash "$VIEW" refresh || fail "refresh failed"
+  wait_for_refresh "$home" || fail "the first routine refresh never finished"
+  assert_equals Working "$(published_status "$home" store-launch store-build)" \
+    "a routine refresh probes no worker and keeps the published status"
+
+  awk '{ print } /^## Queued$/ { print "- [ ] store-late - Late addition (repo: store-app) (since 2026-11-05)" }' \
+    "$home/data/backlog.md" > "$home/data/backlog.md.new" && mv "$home/data/backlog.md.new" "$home/data/backlog.md"
+  PATH="$fakebin:$PATH" FM_HOME="$home" bash "$VIEW" refresh || fail "second refresh failed"
+  sleep 1
+  assert_present "$home/state/.projects-view.dirty" "inside the cooldown the view stays dirty"
+  assert_present "$home/state/.projects-view.lock" "inside the cooldown the rebuild waits instead of running"
+  published_has_next "$home" store-launch store-late && fail "a routine refresh rebuilt inside the cooldown"
+
+  PATH="$fakebin:$PATH" FM_HOME="$home" bash "$VIEW" refresh --full || fail "full refresh failed"
+  wait_for_refresh "$home" || fail "the full refresh never finished"
+  published_has_next "$home" store-launch store-late || fail "the full refresh did not publish the new item"
+  assert_not_equals Working "$(published_status "$home" store-launch store-build)" \
+    "the full refresh probes the worker again"
+  assert_absent "$home/state/.projects-view.full" "the full request is consumed"
+  pass "routine refreshes are local-only and rate-limited; --full bypasses the cooldown with a full snapshot"
+}
+
 fm_test_run \
   test_check_accepts_a_valid_config \
   test_check_refuses_missing_and_malformed_configs \
@@ -346,4 +420,5 @@ fm_test_run \
   test_correct_steers_only_live_local_work \
   test_build_publishes_an_inert_model_and_skips_unchanged \
   test_refresh_is_opt_in_and_runs_detached \
-  test_wake_drain_triggers_a_refresh
+  test_wake_drain_triggers_a_refresh \
+  test_routine_refresh_is_local_only_and_rate_limited

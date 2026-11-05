@@ -135,7 +135,7 @@ try {
   one(card, "plus").fire("click");
   typeAndSend(byId["pv-sheet"], "Add the dark icon");
 
-  // Open the project, then decide and correct inside it.
+  // Open the project, then correct inside it; needs-you cards offer no composer.
   goTo("#p=" + projectId);
   const detail = byId["pv-main"];
   out.detail = {
@@ -143,11 +143,11 @@ try {
     counter: one(detail, "count").textContent,
     groups: all(detail, hasClass("group__title")).map((g) => g._text.trim()),
     calls: all(detail, hasClass("call__q")).map((q) => q.textContent),
+    callComposers: all(detail, hasClass("call")).filter((c) => all(c, (n) => n.tagName === "textarea").length).length,
+    callNotes: all(detail, hasClass("call")).map((c) => (one(c, "item__s") || { textContent: "" }).textContent),
     fixable: all(detail, hasClass("item--moving"))
       .filter((r) => one(r, "fix")).map((r) => one(r, "item__t").textContent),
   };
-  const call = all(detail, hasClass("call")).find((c) => all(c, (n) => n.tagName === "textarea").length);
-  if (call) typeAndSend(call, "Go with the first option");
   const fixRow = all(detail, hasClass("item--moving")).find((r) => one(r, "fix"));
   if (fixRow) {
     one(fixRow, "fix").fire("click");

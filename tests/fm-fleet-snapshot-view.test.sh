@@ -1058,6 +1058,23 @@ test_parked_scout_decision_stays_pending() {
 # Home-summary validity treats persistent secondmates as registered homes, not
 # in-flight children. They have no backlog rows, so they must not produce
 # unowned_current or terminal_in_flight. Ordinary crew/ship metas still do.
+test_local_only_snapshot_probes_no_worker() {
+  local home fakebin out
+  home=$(make_home local-only)
+  write_fixture "$home"
+  fakebin=$(make_fakebin "$home")
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$SNAPSHOT" --local-only) || fail "local-only snapshot failed"
+  printf '%s' "$out" | jq -e '
+    .schema == "fm-fleet-snapshot.v1"
+    and (.tasks | map(.id)) == ["cmux-task","scout-task","secondmate-task","ship-task"]
+    and all(.tasks[]; .current_state.state == "unknown" and .current_state.source == "none"
+                      and (.current_state.detail | contains("local-only")))
+    and (.tasks[] | select(.id == "secondmate-task") | .endpoint.agent_alive == "unknown")
+    and (.backlog.records | map(select(.structured)) | length) == 4
+  ' >/dev/null || fail "local-only snapshot still observed workers or lost structured state: $out"
+  pass "a local-only snapshot keeps the structured state and probes no worker"
+}
+
 test_home_summary_excludes_secondmate_from_child_inventory() {
   local home fakebin out
   home=$(make_home summary-secondmate-only)
@@ -1155,6 +1172,7 @@ EOF
 fm_test_run \
   test_empty_fleet_json \
   test_fixture_snapshot_json \
+  test_local_only_snapshot_probes_no_worker \
   test_home_summary_excludes_secondmate_from_child_inventory \
   test_undated_captain_hold_phrasing_and_aging \
   test_hold_buckets_are_total_and_text_blind \

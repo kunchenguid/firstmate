@@ -72,9 +72,11 @@ test_detail_orders_needs_then_progress_then_done_then_left() {
     and .detail.counter == "1"
     and .detail.groups == ["Needs you", "In progress", "Done", "Left"]
     and .detail.calls == ["Submit to the store?"]
+    and .detail.callComposers == 0
+    and .detail.callNotes == ["Answer in chat"]
     and .detail.fixable == ["Build the store package"]
   ' >/dev/null || fail "detail rendered wrong: $out"
-  pass "a project opens with needs-you first, then in progress, done, and left"
+  pass "a project opens with needs-you first (read-only, answered in chat), then in progress, done, and left"
 }
 
 test_actions_queue_the_routed_answer_keys() {
@@ -85,10 +87,9 @@ test_actions_queue_the_routed_answer_keys() {
     .error == ""
     and .sent == [
       {schema: "fm-bearings-answer.v1", question: "add.store", selection: "", note: "Add the dark icon"},
-      {schema: "fm-bearings-answer.v1", question: "decide.store-ask", selection: "", note: "Go with the first option"},
       {schema: "fm-bearings-answer.v1", question: "fix.store-build", selection: "", note: "Use the brand color"}]
   ' >/dev/null || fail "actions queued the wrong answers: $out"
-  pass "add, decide, and correct queue the add., decide., and fix. answer keys"
+  pass "add and correct are the only page actions and queue the add. and fix. answer keys"
 }
 
 fm_test_run \
