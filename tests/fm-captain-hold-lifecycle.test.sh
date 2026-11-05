@@ -2608,7 +2608,9 @@ SH
   assert_contains "$show" "state: done" "a chat answer left the task-id call open"
   assert_contains "$show" "Resolution mode: answered" "the chat-answered call did not record its close path"
   assert_contains "$show" "Answer: take the second option" "the chat-answered call lost the captain answer"
-  assert_contains "$show" "answer sent to $id" "the chat-answered call lost its channel provenance"
+  assert_contains "$show" "Source kind: user" "the chat channel lost the declared source kind"
+  assert_contains "$show" "Source reference: lifecycle fixture message" \
+    "the chat channel lost the answering message reference"
 
   : > "$home/send.log"
   set +e
