@@ -331,7 +331,7 @@ The blocking and bounded-follow-up mechanisms were validated across seven harnes
 
 ### Linux/Codex PID-namespace fallback, 2026-10-23
 
-The focused regression run covered the shared guard, watcher-lock behavior, and foreground checkpoint/watcher integration:
+The 2026-10-23 focused regression run covered the shared guard, watcher-lock behavior, and foreground checkpoint/watcher integration:
 
 ```sh
 bin/fm-test-run.sh tests/fm-turnend-guard.test.sh tests/fm-watcher-lock.test.sh tests/fm-watch-checkpoint.test.sh
@@ -339,8 +339,9 @@ bin/fm-test-run.sh tests/fm-turnend-guard.test.sh tests/fm-watcher-lock.test.sh 
 ```
 
 The Codex-only fixture accepts a fresh, identity-matched watcher across distinct PID namespaces and rejects stale or mismatched evidence, a dead holder, non-Linux, and other harnesses.
-The checkpoint regression also starts the production watcher with a scoped Codex harness pin, then verifies that `FM_HOME` reaches the watcher environment and its lock records the process PID namespace and boot ID.
-`bin/fm-lint.sh` and `bin/fm-doc-audience-check.sh` passed on the same source state.
+The current checkpoint regression uses a synthetic Codex ancestor owning the session lock and starts with `FM_HOME` unset on both direct and supervision-host paths, verifying the resolved home in the production watcher environment and its PID namespace and boot ID in the lock.
+The 2026-11-05 rerun of `tests/fm-watch-checkpoint.test.sh` and `tests/fm-turnend-guard.test.sh` reported `FM_TEST_SUMMARY total=2 failed=0 skipped_gate=0 duration_ms=232411`.
+`bin/fm-lint.sh` and `bin/fm-doc-audience-check.sh` passed in the 2026-10-23 run.
 
 Native Codex Stop visibility remains unverified.
 The installed codex-cli was 0.163.0, and `codex login status` reported `Not logged in`; that result alone does not establish whether the configured provider could run a native hook test.
