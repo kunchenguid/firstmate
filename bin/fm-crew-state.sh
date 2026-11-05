@@ -112,7 +112,8 @@
 #      it does not rewrite historical events or backlog records.
 #      passed-with-override is a passing outcome
 #      carrying an explicitly approved Test or CI exception (no-mistakes' own
-#      vocabulary), read identically to a clean passed. passed-with-skips is
+#      vocabulary), read as done but with the approved exception and its
+#      recorded test/CI override reason kept visible in the detail. passed-with-skips is
 #      also a passing outcome (publication or CI verification was
 #      automatically skipped, no-mistakes' own vocabulary), read as done but
 #      with that skip kept visible in the detail, unlike a clean passed.
@@ -512,6 +513,18 @@ change_read_record_bounded() {  # <host> <number>
   [ "$merged" = true ] || [ "$merged" = false ] || return 1
   FM_PR_RECORD_STATE=$state
   FM_PR_RECORD_MERGED=$merged
+}
+
+# The approved Test/CI exception a passed-with-override run carries, with the
+# override reasons the run record holds (none recorded still reads qualified).
+override_detail() {
+  local reasons="" field reason
+  for field in test_override_reason ci_override_reason; do
+    reason=$(strip_quotes "$(nm_field "$field")")
+    [ -n "$reason" ] || continue
+    reasons="${reasons:+$reasons; }${field%%_*}: $reason"
+  done
+  printf 'passed with approved exception%s' "${reasons:+ - $reasons}"
 }
 
 passed_pr_detail() {
@@ -1309,7 +1322,8 @@ if [ "$HAVE_RUN" = 1 ]; then
 
     if [ -n "$outcome" ]; then
       case "$outcome" in
-        passed|passed-with-override) RUN_STATE="done"; RUN_DETAIL=$(passed_pr_detail) ;;
+        passed) RUN_STATE="done"; RUN_DETAIL=$(passed_pr_detail) ;;
+        passed-with-override) RUN_STATE="done"; RUN_DETAIL="$(passed_pr_detail) ($(override_detail))" ;;
         passed-with-skips) RUN_STATE="done"; RUN_DETAIL="$(passed_pr_detail) (publication/CI verification skipped)" ;;
         checks-passed) RUN_STATE="done"; RUN_DETAIL="checks green: PR ready for review" ;;
         failed)
