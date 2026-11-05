@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Codex 0.163.0 model-free supervision. Native SessionStart registers the
+# Codex >=0.163.0 model-free supervision. Native SessionStart registers the
 # session; asynchronous Stop owns one foreground arm and queues only a real
 # wake through `codex queue --thread`. This works in embedded CLI mode without
 # an app-server daemon. No terminal injection or separate event selector.
@@ -72,8 +72,21 @@ CODEX_COMMAND=
 
 opted_in() { [ -f "$CONFIG/codex-stop-park" ]; }
 
+# Accept only canonical major.minor.patch releases, without prerelease/build
+# suffixes. Compare against 0.163.0 without overflowing on future components.
+# Version eligibility is a compatibility floor, not per-release live evidence.
+supported_release() {  # <codex --version output>
+  local major minor
+  [[ "$1" =~ ^codex-cli\ (0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]] || return 1
+  major=${BASH_REMATCH[1]}
+  minor=${BASH_REMATCH[2]}
+  [ "$major" != 0 ] && return 0
+  [ "${#minor}" -gt 3 ] && return 0
+  [ "$minor" -ge 163 ]
+}
+
 verified_cli() {
-  local pid executable
+  local pid executable version
   command -v jq >/dev/null 2>&1 || return 1
   [ "$("$SCRIPT_DIR/fm-harness.sh" 2>/dev/null)" = codex ] || return 1
   # Version the running native ancestor, not a possibly upgraded PATH shim.
@@ -85,7 +98,8 @@ verified_cli() {
     fi
     case "$executable" in */codex) ;; *) continue ;; esac
     [ -x "$executable" ] || return 1
-    [ "$("$executable" --version 2>/dev/null)" = 'codex-cli 0.163.0' ] || return 1
+    version=$("$executable" --version 2>/dev/null) || return 1
+    supported_release "$version" || return 1
     CODEX_COMMAND=$executable
     return 0
   done < <(fm_harness_ancestry_pids)
