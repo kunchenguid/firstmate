@@ -67,8 +67,8 @@ Repeat and edge cases:
 - A new ask must carry the agent's recommended pick: `--rec "<pick>"` is required, and `hold` refuses before writing anything when it is missing.
   The pick is appended to the hold reason as a `Rec:` line, after up to four `--option "<text>"` values rendered as numbered lines, so every place the hold text is shown carries them.
   `--option` without `--rec` is refused.
-  A task that is already captain-held (a retry) and a `--until` deferral record are not new asks and need no pick.
-  A retry without `--rec` keeps the numbered options and `Rec:` line from the stored reason.
+  A task that still carries its captain hold kind (a retry, including one whose `--until` date has passed but was never released) and a `--until` deferral record are not new asks and need no pick.
+  Such a retry without `--rec` keeps the numbered options and `Rec:` line from the stored reason, and it also keeps the key and attached origins lines.
 - `--key <slug>` names the ask's subject, in the decision-key charset owned by [`bin/fm-classify-lib.sh`](../bin/fm-classify-lib.sh), and is recorded on a `Captain hold key:` body line.
   A new ask that would create its task, and whose key matches another open captain hold, creates nothing: the output says it attached to the existing hold and prints that task id.
   A task that already exists, often the work itself, is held on its own even when the key matches, because merge checks read that task's hold.
@@ -574,6 +574,7 @@ The suite does not test the accepted merge-to-cleanup re-hold window or asynchro
 - Interrupted answer closure retains the stamp until close and restores resolution-first ordering on retry.
 - Deferral through `--until` leaves `captain_actionable` false until due.
 - A hold without `--rec` is refused and writes nothing, `--option` lines render numbered with the `Rec:` line, a retry without `--rec` keeps the stored options and `Rec:` line, a repeated `--key` attaches to the open hold (recording its `--origin` so `complete` accepts it until a new ask drops it) while existing work and a different key get their own hold, and a failed backlog listing refuses a keyed ask without creating a hold (`test_hold_requires_a_pick_and_renders_options`, `test_hold_collapses_a_duplicate_decision_key`).
+- Extending a date-expired, unanswered call with `--until` keeps its attached origins, `Rec:` line, and key (`test_until_extension_keeps_the_unanswered_call`).
 
 ### Legacy paths
 
