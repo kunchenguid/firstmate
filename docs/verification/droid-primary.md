@@ -327,9 +327,58 @@ The corrected opt-in guard gives SessionStart and UserPromptSubmit distinct hook
 Firstmate does not register UserPromptSubmit as a durable-event catch-up handler; no tracked `PreCompact` path was added.
 An indefinitely blocking Stop hook would prevent captain input and is outside the contract.
 
-`tests/fm-droid-primary.test.sh` executes the registered Droid and Claude SessionStart, PreToolUse, and Stop commands against observable fixture owners, then compares their stdin, arguments, stdout, stderr, and exit-status transport through `fm-sessionstart-run.sh`, `fm-arm-pretool-check.sh`, and `fm-turnend-guard.sh` respectively.
+`tests/fm-droid-primary.test.sh` executes the registered Droid and Claude SessionStart, Execute PreToolUse, and Stop commands against observable fixture owners, then compares their stdin, arguments, stdout, stderr, and exit-status transport through `fm-sessionstart-run.sh`, `fm-arm-pretool-check.sh`, and `fm-turnend-guard.sh` respectively.
+It also executes the registered Droid AskUser command and verifies observable deny-and-preserve behavior while away plus inert behavior after the AFK flag is absent.
 A real Claude primary under Herdr accepted a composer injection through the same shared classification and verified-submit path.
 No Droid-only composer, submit, or background-delivery owner was added.
+
+### AFK approval deferral
+
+Date: 2026-09-09.
+Platform: macOS arm64, Droid 0.215.1, Herdr 0.8.0.
+
+The same guarded non-default Herdr lab was refreshed with the tracked Droid `AskUser` PreToolUse registration.
+While `state/.afk` existed, a real Droid `AskUser` call carrying the owner-bearing `[firstmate-decision origin=... key=... state=existing]` line reached the exact matcher once, exited through the tracked deny guard without an answer, and the same turn completed an independently authorized file action.
+The attempted question was filed with the status decision its binding named, stayed one open identity, and was recoverable in full from that owner without its transport binding line.
+A second real call that deliberately named no owner was denied and filed nothing, leaving the durable decision bytes unchanged.
+A subsequent real unmarked return ran `fm-afk-return.sh`, presented the outstanding question during ordered catch-up, removed the AFK flag, and then displayed the real Droid questionnaire without selecting either option.
+The test cancelled that isolated questionnaire and tore down the named lab through `fm-herdr-lab.sh`; the live default Herdr session was unchanged.
+
+The exact command was:
+
+```sh
+FM_DROID_AFK_HERDR_E2E=1 \
+  HERDR_LAB_HELPER=/Users/dela/Developer/firstmate/bin/fm-herdr-lab.sh \
+  tests/fm-droid-afk-herdr-live-e2e.test.sh
+```
+
+Its approval-specific results were:
+
+```text
+ok - Droid denies interactive approval during AFK, files it with its bound owner, and continues independently authorized work
+ok - a live question naming no owner is rejected without inventing or mutating one
+ok - a real unmarked Droid return runs ordered catch-up and presents the outstanding question first
+ok - Droid AskUser becomes available on return without an automatic approval
+ok - Droid 0.215.1 / Herdr away-mode live verification complete
+ok - the isolated live probe left Droid's runtime-wide hook registration unchanged
+ok - guarded teardown deletes the isolated Herdr session after the scenario process exits
+```
+
+`PreToolUse` supplies the questionnaire as one freeform `.tool_input.questionnaire` string with no task, origin, or decision-key field, so the owner binding is transported inside that text and a question without one cannot be filed at all.
+The run also reported this observation, which is why the settings axis asserts the hook subtree rather than whole-file bytes:
+
+```text
+# observed: a real Droid launch rewrote vendor-managed fields in ~/.factory/settings.json; the hook subtree above is the isolation claim
+```
+
+A counterfactual `droid --version` left that file byte-identical, so the rewrite follows a real interactive launch and is vendor-managed rather than leakage from the probe.
+Only presence, digests, and the hook subtree were read; no setting, token, or credential value was inspected.
+
+The portable counterfactual removes only `state/.afk` and proves the guard becomes silent with exit 0; its linked-worktree negative control proves the primary-only scope remains inert for workers.
+The portable non-Droid return fixture leaves the Droid deferral marker absent and proves unavailable `tasks-axi` neither gates return nor adds an outstanding-question listing.
+Repeated AFK calls leave the durable decision bytes and every question digest unchanged.
+A direct live non-Droid `AskUser` comparison was not run, so this record does not claim interactive-question parity with another harness.
+Reliable model emission of a valid binding in ordinary operation is likewise not established: the native tool accepts an omitted or malformed binding exactly as readily as a valid one, which is why the guard rejects those loudly instead of inferring an owner.
 
 ## Refresh
 

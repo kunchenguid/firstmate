@@ -218,6 +218,7 @@ command_hold() {
 
 case "${1:-}" in
   id) shift; [ "$#" -eq 2 ] || { usage >&2; exit 2; }; compose "$1" "$2"; printf '\n' ;;
+  preserve-question|open-questions) exec "$CAPTAIN_HOLD" "$@" ;;
   hold) shift; command_hold "$@" ;;
   complete) shift; command_complete "$@" ;;
   verify) shift; exec "$CAPTAIN_HOLD" verify "$@" ;;

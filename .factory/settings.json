@@ -20,6 +20,15 @@
             "command": "exec \"$DROID_PROJECT_DIR\"/bin/fm-arm-pretool-check.sh --primary-only"
           }
         ]
+      },
+      {
+        "matcher": "AskUser",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "exec \"$DROID_PROJECT_DIR\"/bin/fm-droid-afk-askuser-check.sh"
+          }
+        ]
       }
     ],
     "Stop": [
