@@ -653,9 +653,67 @@ case "\$1" in
   */a1.status)
     if [ ! -e "$home/appended" ]; then
       : > "$home/appended"
-      { cat "$home/captured-b2.status"; printf 'needs-decision [key=later]: appended after the capture\n'; } \\
-        > "$home/state/b2.status.next"
-      mv -f "$home/state/b2.status.next" "$home/state/b2.status"
+      # Append instead of replacing the file: a replacement changes the
+      # identity the cursor records and would reject the cursor, so the fold
+      # would fall back to the capture without ever testing the bound.
+      printf 'needs-decision [key=later]: appended after the capture\n' >> "$home/state/b2.status"
+    fi
+    ;;
+esac
+exec perl -MFcntl=:DEFAULT -e '
+  my (\$path, \$start, \$length) = @ARGV;
+  sysopen(my \$file, \$path, O_RDONLY | O_NOFOLLOW) or exit 1;
+  sysseek(\$file, \$start, 0) == \$start or exit 1;
+  while (\$length > 0) {
+    my \$want = \$length > 65536 ? 65536 : \$length;
+    my \$read = sysread(\$file, my \$chunk, \$want);
+    defined(\$read) && \$read > 0 or exit 1;
+    print \$chunk or exit 1;
+    \$length -= \$read;
+  }
+' "\$1" "\$2" "\$3"
+SH
+  chmod +x "$reader"
+
+  got=$(FM_SNAPSHOT_LOCAL_READ_CONCURRENCY=1 FM_STATUS_SPAN_READER="$reader" \
+    FM_OPEN_DECISIONS_READ_PROBE="$home/probe.tsv" \
+    snapshot_set "$home" b2) \
+    || fail "the snapshot failed while bytes were appended after the capture"
+  [ -e "$home/appended" ] || fail "the append hook never fired, so the bound was never exercised"
+  [ -n "$(last_probe_bytes "$home/probe.tsv" "$home/state/b2.status")" ] \
+    || fail "the fold never read b2's bounded span, so the capture bound was not exercised"
+  want=$(oracle_json "$home/captured-b2.status" secondmate)
+  [ "$got" = "$want" ] \
+    || fail "bytes appended after the capture reached the published set want=$want got=$got"
+  case "$got" in
+    *later*) fail "the fold read past the capture bound: $got" ;;
+  esac
+
+  pass "bytes appended after the capture stay out of the published set"
+}
+
+# The drain can fold bytes appended after the snapshot captured a task's log, so
+# its cursor can be ahead of the captured boundary. The persisted set then
+# already holds bytes the capture does not, and publishing it would show a
+# decision absent from the capture or hide one the capture still held.
+test_cursor_ahead_of_the_capture_falls_back_to_the_capture() {
+  local home reader got want
+  home=$(make_two_task_home ahead-of-capture)
+  cp "$home/state/b2.status" "$home/captured-b2.status"
+  reader="$home/ahead-reader"
+  cat > "$reader" <<SH
+#!/usr/bin/env bash
+case "\$1" in
+  */a1.status)
+    if [ ! -e "$home/ahead" ]; then
+      : > "$home/ahead"
+      printf 'needs-decision [key=ahead]: opened after the capture\n' >> "$home/state/b2.status"
+      # The snapshot's own read-only call exports
+      # FM_OPEN_DECISIONS_CURSOR_WRITE=0 to this hook, so the drain side of the
+      # race must ask for the write explicitly.
+      FM_OPEN_DECISIONS_CURSOR_WRITE=1 \\
+        bash -c '. "\$1"; status_open_decisions_incremental "\$2" "" "" secondmate >/dev/null' \\
+        _ "$CLASSIFY" "$home/state/b2.status"
     fi
     ;;
 esac
@@ -676,16 +734,16 @@ SH
 
   got=$(FM_SNAPSHOT_LOCAL_READ_CONCURRENCY=1 FM_STATUS_SPAN_READER="$reader" \
     snapshot_set "$home" b2) \
-    || fail "the snapshot failed while bytes were appended after the capture"
-  [ -e "$home/appended" ] || fail "the append hook never fired, so the bound was never exercised"
+    || fail "the snapshot failed while the drain ran ahead of the capture"
+  [ -e "$home/ahead" ] || fail "the drain-advance hook never fired"
   want=$(oracle_json "$home/captured-b2.status" secondmate)
   [ "$got" = "$want" ] \
-    || fail "bytes appended after the capture reached the published set want=$want got=$got"
+    || fail "a cursor ahead of the capture published a newer set want=$want got=$got"
   case "$got" in
-    *later*) fail "the fold read past the capture bound: $got" ;;
+    *ahead*) fail "a decision opened after the capture reached the published set: $got" ;;
   esac
 
-  pass "bytes appended after the capture stay out of the published set"
+  pass "a cursor ahead of the capture falls back to the captured set"
 }
 
 fm_test_run \
@@ -703,4 +761,5 @@ fm_test_run \
   test_respawn_inside_the_fold_publishes_the_captured_set \
   test_retired_log_falls_back_to_the_capture \
   test_failed_read_without_a_cursor_falls_back_to_the_capture \
-  test_bytes_appended_after_the_capture_stay_out
+  test_bytes_appended_after_the_capture_stay_out \
+  test_cursor_ahead_of_the_capture_falls_back_to_the_capture

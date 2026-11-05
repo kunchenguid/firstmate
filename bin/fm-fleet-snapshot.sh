@@ -68,8 +68,9 @@
 #     against current_state; hints.pending_decision and hints.blocked_event are
 #     booleans derived from that set. A missing or unusable cursor costs one
 #     full fold, identical to status_open_decisions, and so does any fold that
-#     cannot serve the live log (it moved or was truncated under the run, or a
-#     read failed): the row then folds the capture it already made.
+#     cannot serve the live log (it moved or was truncated under the run, the
+#     drain's cursor already folded past the captured boundary, or a read
+#     failed): the row then folds the capture it already made.
 #     endpoint.exists is the cheap local backend endpoint-presence read.
 #     endpoint.agent_alive is populated for local secondmates only, where it is
 #     useful return-channel supervision data; remote secondmates use "unknown"
@@ -838,9 +839,10 @@ task_json_lines() {
     # incremental result is used only when it served the live log - the log is
     # still there, the capture still bounds it, and every read succeeded - and
     # the captured generation is still current after the fold. A log retired or
-    # truncated under the run, a failed read, or a respawn inside the fold
-    # therefore falls back to folding the capture: the whole-file fold's old
-    # input, and empty when the row captured no status at all.
+    # truncated under the run, a cursor the drain already advanced past the
+    # captured boundary, a failed read, or a respawn inside the fold therefore
+    # falls back to folding the capture: the whole-file fold's old input, and
+    # empty when the row captured no status at all.
     #
     # The set is derived purely from the keyed fold - never from report bodies
     # or decision-like prose - and then reconciled against the crew LIFECYCLE,

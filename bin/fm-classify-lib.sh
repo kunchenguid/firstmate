@@ -1225,7 +1225,8 @@ EOF
 # set: it returns 0 only when it folded [0, captured-end) of the live file whose
 # cursor it read, and otherwise a distinct non-zero status after printing
 # whatever set it holds - 3 when the live file is absent or unreadable, 4 when
-# the captured boundary is unusable, 5 when a stat, size, temp-file, or span
+# the captured boundary is unusable (including a cursor that already folded
+# past it), 5 when a stat, size, temp-file, or span
 # read failed, and 6, printing nothing, when there is no usable cursor. Writing
 # mode keeps its contract unchanged: 0 with the trusted set on every failed read.
 _fm_open_decisions_cursor_path() {  # <status-file>
@@ -1455,6 +1456,17 @@ status_open_decisions_incremental() {  # <status-file> [<captured-end-offset>] [
     open=''
     trusted_open=''
     cursor_dirty=1
+  fi
+
+  # A read-only caller's cursor can be AHEAD of the boundary it captured: the
+  # drain folded bytes appended after that capture. The persisted set at that
+  # offset already includes bytes the caller's capture does not, so it cannot
+  # stand in for the capture's fold - it would publish a decision the capture
+  # did not hold, or hide one it did. Report the boundary as unusable so the
+  # caller folds its capture instead, the same cost as any other unserved fold.
+  if [ "$cursor_write" -eq 0 ] && [ -n "$captured_end" ] && [ "$offset" -gt "$size" ]; then
+    _fm_open_decisions_unserved "$cursor_write" 4 "$trusted_open"
+    return $?
   fi
 
   if [ "$offset" -lt "$size" ]; then
