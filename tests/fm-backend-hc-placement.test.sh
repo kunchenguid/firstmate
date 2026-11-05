@@ -838,6 +838,8 @@ test_placed_teardown_refuses_unlanded_or_unreachable_work() {
   out=$(run_placed_teardown 2>&1) || rc=$?
   [ "$rc" -ne 0 ] || fail "an unreachable machine must refuse cleanup, even for pushed work"$'\n'"$out"
   assert_contains "$out" "cannot reach hc machine 'worker-host'" "the refusal names the unreachable machine"
+  assert_contains "$out" "once that machine is reachable again" "the refusal says the task waits for that machine"
+  assert_not_contains "$out" "--force" "the refusal must not offer --force, which also refuses while that machine is unreachable"
   assert_present "$HOMEDIR/state/task-x1.meta" "the record must survive an unreachable machine"
   assert_present "$TWT_LOCAL" "the worktree there must survive an unreachable machine"
   pass "hc placement: teardown refuses uncommitted, unlanded, or unreachable work on the machine and keeps every record"
