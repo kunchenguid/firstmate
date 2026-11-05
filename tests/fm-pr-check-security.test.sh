@@ -2217,8 +2217,8 @@ test_gerrit_arming_records_no_patch_set_revision() {
 # HEAD's tree - the squash is a new commit on the server's base, so the tree and
 # not the commit names what was published - and refuses otherwise, before
 # anything is recorded or armed. Once arming has recorded the change as pr=, a
-# later done naming it is accepted from that record without a read, so a
-# reviewer's rebase or new patch set on the server does not revoke it.
+# later done naming it retains that head/tree proof while rechecking the live
+# destination, so a reviewer's rebase or new patch set does not revoke it.
 test_gerrit_ready_gate_reads_the_published_tree() {
   local dir state base published other out rc
   dir=$(make_case gerrit-ready-gate)
@@ -2291,7 +2291,10 @@ test_gerrit_ready_gate_reads_the_published_tree() {
   rc=$?
   set -e
   [ "$rc" -eq 0 ] || fail "a server-side rebase after arming revoked the recorded change's done: $out"
-  [ ! -s "$dir/gerrit-axi.log" ] || fail "a done naming the recorded change read the server again"
+  assert_grep 'show 4201 --host gerrit.example --json' "$dir/gerrit-axi.log" \
+    'a done naming the recorded change did not recheck its destination'
+  [ "$(wc -l < "$dir/gerrit-axi.log")" -eq 1 ] \
+    || fail "a done naming the recorded change reread more than its destination"
   pass "Gerrit arming accepts a published HEAD only by the change's current patch set tree"
 }
 

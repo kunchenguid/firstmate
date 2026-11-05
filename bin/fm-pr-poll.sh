@@ -9,6 +9,11 @@
 # GitLab, gerrit-axi for Gerrit, and tea for Forgejo, so an upstream checkout
 # needs no extra tooling to follow GitHub. The other forge branches need jq
 # to read state and destination from the same structured response.
+# Usage: fm-pr-poll.sh --validated <provider> <url> <host> <path> <number> <expected-base>
+# A registered <task>.check.sh takes no arguments and reads its sibling .pr-poll
+# identity and task-owned expected_base from .meta (legacy base_branch is accepted).
+# This standalone copy sources nothing, so its metadata parser mirrors
+# fm_pr_expected_base in bin/fm-pr-lib.sh and refuses unavailable destination proof.
 set -uo pipefail
 LC_ALL=C
 export LC_ALL

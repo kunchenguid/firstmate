@@ -4,6 +4,8 @@ Empirical record for the merge watch and the merge path on GitLab, alongside the
 The arming, poll, and missing-`glab` evidence through the GitHub-unaffected case was collected on 2026-07-21; "Merging a merge request" was run on 2026-08-22.
 Every output is reproduced exactly.
 
+The transcripts predate task-owned destination checks. Their historical poll invocations do not include the expected-base argument now required by `bin/fm-pr-poll.sh`, whose header owns the current invocation contract. The focused PR/check and merge suites verify destination checks without a live server.
+
 ## Versions
 
 ```

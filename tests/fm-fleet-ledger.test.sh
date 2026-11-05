@@ -159,7 +159,6 @@ test_flag_on_records_a_pr_registration() {
   chmod +x "$FAKEBIN/gh"
   out=$(in_home "$ROOT/bin/fm-spawn.sh" "$TASK" "$PROJ_DIR" --mode direct-PR --yolo off 2>&1) \
     || fail "spawn failed: $out"
-  printf 'expected_base=main\n' >> "$HOME_DIR/state/$TASK.meta"
   printf 'done: PR %s\n' "$pr_url" >> "$HOME_DIR/state/$TASK.status"
   out=$(in_home "$ROOT/bin/fm-pr-check.sh" "$TASK" "$pr_url" 2>&1) || fail "PR registration failed: $out"
   out=$(in_home env FM_PR_CHECK_MERGE=1 "$ROOT/bin/fm-pr-check.sh" "$TASK" "$pr_url" 2>&1) \

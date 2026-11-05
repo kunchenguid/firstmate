@@ -2228,7 +2228,7 @@ test_gitlab_stale_recorded_head_is_reported() {
 }
 
 test_gitlab_unreadable_state_refuses() {
-  local case_dir rc name
+  local case_dir rc name diagnostic
   for name in view-fails not-an-object split-value; do
     case_dir=$(make_gitlab_case "gitlab-unreadable-$name")
     case "$name" in
@@ -2246,8 +2246,12 @@ test_gitlab_unreadable_state_refuses() {
     set -e
 
     expect_code 1 "$rc" "gitlab-unreadable-$name: fm-pr-merge should refuse"
-    assert_grep 'could not read the GitLab merge request state before merging' \
-      "$case_dir/stderr" "gitlab-unreadable-$name: refusal did not name the unreadable state"
+    case "$name" in
+      split-value) diagnostic='could not read the GitLab merge request state before merging' ;;
+      *) diagnostic='expected PR base main, actual base unavailable' ;;
+    esac
+    assert_grep "$diagnostic" "$case_dir/stderr" \
+      "gitlab-unreadable-$name: refusal did not name the unavailable proof"
     [ -z "$(glab_merge_line "$case_dir/glab.log")" ] \
       || fail "gitlab-unreadable-$name: a merge was attempted on an unreadable state"
   done
