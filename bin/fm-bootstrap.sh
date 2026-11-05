@@ -1702,12 +1702,12 @@ if [ "${FM_BOOTSTRAP_DETECT_ONLY:-0}" != 1 ]; then
     fi
   fi
   if network_phase; then
-    if network_sweep_authorized 'dead-secondmate relaunch'; then
+    if network_sweep_authorized 'Project Director relaunch'; then
       __fm_timing_stamp=$(fm_timing_now_ms)
       secondmate_liveness_sweep
       fm_timing_record phase secondmate-liveness "$__fm_timing_stamp"
     fi
-    if network_sweep_authorized 'secondmate convergence'; then
+    if network_sweep_authorized 'Project Director convergence'; then
       __fm_timing_stamp=$(fm_timing_now_ms)
       secondmate_sync
       fm_timing_record phase secondmate-sync "$__fm_timing_stamp"

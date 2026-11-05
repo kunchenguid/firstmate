@@ -214,7 +214,7 @@ fm_secondmate_liveness_probe() {  # <meta> <id> <full|poll>
           fi
         fi
         FM_SM_LIVE_STATUS=alive
-        FM_SM_LIVE_LINE="remote secondmate $id already live (host=$remote_host)"
+        FM_SM_LIVE_LINE="remote Project Director $id already live (host=$remote_host)"
         ;;
       dead|missing)
         FM_SM_LIVE_STATUS=relaunchable
@@ -246,7 +246,7 @@ fm_secondmate_liveness_probe() {  # <meta> <id> <full|poll>
   case "$agent_state" in
     alive)
       FM_SM_LIVE_STATUS=alive
-      FM_SM_LIVE_LINE="secondmate $id already live (backend=$backend)"
+      FM_SM_LIVE_LINE="Project Director $id already live (backend=$backend)"
       ;;
     dead|missing)
       FM_SM_LIVE_STATUS=relaunchable

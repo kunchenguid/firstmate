@@ -1098,7 +1098,7 @@ SH
   assert_absent "$marker" "a stale worker refreshed project clones after lock handoff"
   assert_contains "$out" "changed before Project Director relaunch" \
     "the stale worker did not report the refused liveness sweep"
-  assert_contains "$out" "changed before secondmate convergence" \
+  assert_contains "$out" "changed before Project Director convergence" \
     "the stale worker did not report the refused convergence sweep"
   assert_contains "$out" "changed before pending handoff delivery" \
     "the stale worker did not report the refused handoff sweep"
