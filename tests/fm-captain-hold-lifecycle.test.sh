@@ -1775,7 +1775,7 @@ test_secondmate_reconcile_publishes_before_request_retirement() {
 # answer time, a card-declared release mode frees held work, freeform prose can
 # forge nothing, and a replayed capture is idempotent.
 test_bound_channel_answers_close_at_answer_time() {
-  local home id sid artifact result out show rc
+  local home id sid artifact result out show rc captured_time
   home=$(make_home channel-answer-closure)
   id=sample-eval-proposal
   mkdir -p "$home/data/$id"
@@ -1894,12 +1894,17 @@ SH
     "feeding a captain answer retired the notification firstmate still needs"
   assert_present "$home/state/procevent-inbox/fixture-src.1.result" \
     "the fixture channel captured no result to feed"
+  captured_time=$(perl -MPOSIX=strftime -e '
+    print strftime("%Y-%m-%dT%H:%M:%SZ", gmtime((stat($ARGV[0]))[9]));
+  ' "$home/state/procevent-inbox/fixture-src.1.result")
 
   show=$(tasks_in "$home" show sample-membership-call --full)
   assert_contains "$show" "state: done" "capturing the captain's answer left the membership call open"
   assert_contains "$show" "Resolution mode: answered" "the membership call did not record its close path"
   assert_contains "$show" "Answer: gold-only" "the closed call did not record the captain's actual answer"
   assert_contains "$show" "captain detail" "the annotated normal answer lost the captain's note"
+  assert_contains "$show" "Source message UTC: $captured_time" \
+    "the captured answer did not retain the original message receipt time"
   show=$(tasks_in "$home" show sample-gated-work --full)
   assert_contains "$show" "state: queued" "the released work item did not stay queued"
   assert_contains "$show" "held: no" "the card-declared release did not lift the hold"
@@ -1942,7 +1947,8 @@ SH
   # run that could not close every answered key still reports nonzero.
   set +e
   out=$(run_lavish "$home" answers "$result" \
-    | run_captain "$home" answers --source "the captured result fixture-src sequence 1" 2>&1)
+    | run_captain "$home" answers --source "the captured result fixture-src sequence 1" \
+        --source-time "$captured_time" 2>&1)
   rc=$?
   set -e
   [ "$rc" -ne 0 ] || fail "a run that skipped a key reported success"
