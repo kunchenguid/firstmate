@@ -6428,15 +6428,20 @@ test_wait_transition_clean_timeout_returns_1() {
 # Git for Windows mounts /tmp noacl, so a namespace directory stats 755 whatever
 # chmod asked for. Fake uname, cygpath, and mount stand in for that userspace so
 # these cases run on every host; the directory is a real 755 one directly under
-# /tmp, which is the only shape the relaxation can accept.
+# /tmp, which is the only shape the relaxation can accept. A faked non-Darwin
+# uname sends the adapter to GNU `stat -c`, which macOS lacks, so a GNU-style
+# stat stub answers with the directory's real mode and owner read from the host.
 # ns_valid_via <uname> <tmp-mount-options> <dir>: 0 when the namespace is valid.
 ns_valid_via() {
-  local fb
+  local fb mode uid
   fb=$(fm_fakebin "$(mktemp -d "$TMP_ROOT/ns.XXXXXX")")
+  mode=$(stat -c '%a' "$3" 2>/dev/null || /usr/bin/stat -f '%Lp' "$3")
+  uid=$(stat -c '%u' "$3" 2>/dev/null || /usr/bin/stat -f '%u' "$3")
   printf '#!/usr/bin/env bash\nprintf "%%s\\n" %q\n' "$1" > "$fb/uname"
+  printf '#!/usr/bin/env bash\ncase "$2" in %%a) printf "%%s\\n" %q ;; %%u) printf "%%s\\n" %q ;; *) exit 1 ;; esac\n' "$mode" "$uid" > "$fb/stat"
   printf '#!/usr/bin/env bash\nexit 0\n' > "$fb/cygpath"
   printf '#!/usr/bin/env bash\nprintf "C:/Program Files/Git on / type ntfs (binary,noacl,auto)\\n"\nprintf "C:/Users/u/AppData/Local/Temp on /tmp type ntfs (%%s)\\n" %q\n' "$2" > "$fb/mount"
-  chmod +x "$fb/uname" "$fb/cygpath" "$fb/mount"
+  chmod +x "$fb/uname" "$fb/cygpath" "$fb/mount" "$fb/stat"
   PATH="$fb:$PATH" bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_presentation_lock_namespace_valid "$1"' "$ROOT" "$3"
 }
 
