@@ -56,8 +56,8 @@
 # fails the merge instead of landing commits nothing verified.
 # An optional --expected-head <full-sha> pins the commit the caller already
 # reviewed. It must be one full lowercase hex commit of 40 or 64 characters,
-# given once as its own argument. The live head must equal it or the merge is
-# refused before any forge write. The forge head match receives that same
+# given once as its own argument. The initial live head must equal it or the
+# request is refused before any forge write. The forge head match receives that same
 # supplied value on GitHub, GitLab, and Forgejo. A later preflight in this run
 # does not replace it with a newly read head. Omitting the flag keeps the
 # previous behavior: the live head read at verification is the matched value.
@@ -85,8 +85,8 @@
 # request: fm-pr-merge resolves the merge authority, passes the captain-hold
 # check and full live preflight, then re-resolves authority under the merge
 # locks before it updates. This helper has no standalone branch-update path;
-# any refused guard stops before the update.
-# Updating a green BEHIND PR requires explicit --update-branch consent on the
+# any refused pre-update guard stops before the update.
+# Updating a green BEHIND GitHub PR requires explicit --update-branch consent on the
 # authorized merge request; without it, refusal leaves the source branch alone.
 # Consent includes retaining the update if checks on the new head later fail.
 # With that opt-in, any merge method may update the branch.
@@ -96,10 +96,10 @@
 # The REST update is bound to the verified old head with expected_head_sha;
 # a concurrent push refuses the update without changing that replacement head,
 # and this request never retries against the newly observed head.
-# An accepted update uses GitHub's merge-commit default, records the new head, then
-# waits briefly (five poll delays, 15 seconds by default) under the merge and
-# away locks for that head to appear and for its checks and a transient UNKNOWN
-# mergeable state to settle, and repeats this full preflight before the
+# An accepted update uses GitHub's merge-commit default. Under the merge and
+# away locks, a shared polling budget (15 seconds by default) covers waiting for
+# the new head to appear, recording it, and waiting for its checks and a transient
+# UNKNOWN mergeable state to settle. The helper repeats this full preflight before the
 # exact-head merge. If the head or its checks are not ready in that time, the
 # helper stops without merging and says to run the merge again once checks
 # pass. Any unwaived failed check refuses immediately, even while other checks
