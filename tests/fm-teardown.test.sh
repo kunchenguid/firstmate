@@ -1717,6 +1717,91 @@ prepare_scout_teardown() {
   printf '%s\n' 'decisions_reviewed=1' >> "$case_dir/state/task-x1.meta"
 }
 
+test_scout_task_artifacts_refuse_cleanup() {
+  local case_dir shape flag rc source destination head
+  for shape in directory conflict file task-link dangling-link data-link dangling-data; do
+    case_dir=$(make_case "scout-artifacts-$shape")
+    write_meta "$case_dir" no-mistakes scout
+    prepare_scout_teardown "$case_dir"
+    source="$case_dir/wt/data/task-x1"
+    destination="$case_dir/data/task-x1"
+    mkdir -p "$case_dir/answers" "$case_dir/wt/data"
+    printf 'labelled answer: keep\n' > "$case_dir/answers/labels.txt"
+    case "$shape" in
+      directory|conflict) cp -R "$case_dir/answers" "$source" ;;
+      file) cp "$case_dir/answers/labels.txt" "$source" ;;
+      task-link) ln -s "$case_dir/answers" "$source" ;;
+      dangling-link) ln -s "$case_dir/missing" "$source" ;;
+      data-link) mv "$case_dir/wt/data" "$case_dir/linked-data";
+        ln -s "$case_dir/linked-data" "$case_dir/wt/data";
+        cp -R "$case_dir/answers" "$source" ;;
+      dangling-data) mv "$case_dir/wt/data" "$case_dir/linked-data";
+        ln -s "$case_dir/missing" "$case_dir/wt/data" ;;
+    esac
+    [ "$shape" != conflict ] || printf 'canonical answer\n' > "$destination/labels.txt"
+    head=$(git -C "$case_dir/wt" rev-parse HEAD)
+    cp "$case_dir/state/task-x1.meta" "$case_dir/meta-before"
+    cat > "$case_dir/fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+printf 'return\n' >> "$FM_STATE_OVERRIDE/returned"
+exit 0
+SH
+    for flag in ordinary --force; do
+      rc=0
+      if [ "$flag" = ordinary ]; then
+        run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+      else
+        run_teardown "$case_dir" "$flag" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+      fi
+      expect_code 1 "$rc" "$shape/$flag: scout task artifacts must block cleanup"
+      assert_grep "$source" "$case_dir/stderr" "$shape/$flag: source not named"
+      assert_grep "$destination" "$case_dir/stderr" "$shape/$flag: durable destination not named"
+      assert_absent "$case_dir/state/returned" "$shape/$flag: pool return ran"
+      cmp -s "$case_dir/meta-before" "$case_dir/state/task-x1.meta" || fail "$shape/$flag: task metadata changed"
+      [ "$head" = "$(git -C "$case_dir/wt" rev-parse HEAD)" ] || fail "$shape/$flag: HEAD changed"
+      [ "$(cat "$case_dir/answers/labels.txt")" = 'labelled answer: keep' ] || fail "$shape/$flag: linked bytes changed"
+      case "$shape" in
+        directory|conflict|data-link)
+          cmp -s "$source/labels.txt" "$case_dir/answers/labels.txt" || fail "$shape/$flag: source bytes changed" ;;
+        file) cmp -s "$source" "$case_dir/answers/labels.txt" || fail "$shape/$flag: source bytes changed" ;;
+        task-link|dangling-link) [ -L "$source" ] || fail "$shape/$flag: task link removed" ;;
+        dangling-data) [ -L "$case_dir/wt/data" ] || fail "$shape/$flag: data link removed" ;;
+      esac
+      [ "$shape" != conflict ] || [ "$(cat "$destination/labels.txt")" = 'canonical answer' ] \
+        || fail "$shape/$flag: destination overwritten"
+    done
+    if [ "$shape" = directory ]; then
+      # The worker, not teardown, preserves its material before normal cleanup.
+      mv "$source" "$destination/artifacts"
+      rc=0
+      run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+      expect_code 0 "$rc" 'preserved scout artifacts should permit normal cleanup'
+      cmp -s "$destination/artifacts/labels.txt" "$case_dir/answers/labels.txt" || fail 'preserved bytes changed'
+      assert_absent "$case_dir/state/task-x1.meta" 'normal cleanup retained metadata'
+    fi
+  done
+  pass 'scout artifacts survive ordinary and forced cleanup, conflicts and unsafe paths'
+}
+
+test_scout_artifact_discard_requires_force() {
+  local case_dir rc
+  case_dir=$(make_case scout-artifact-discard)
+  write_meta "$case_dir" no-mistakes scout
+  prepare_scout_teardown "$case_dir"
+  mkdir -p "$case_dir/wt/data/task-x1"
+  printf 'explicitly disposable\n' > "$case_dir/wt/data/task-x1/labels.txt"
+  rc=0
+  run_teardown "$case_dir" --discard-scout-artifacts > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  expect_code 2 "$rc" 'artifact discard must also require explicit --force authority'
+  assert_present "$case_dir/wt/data/task-x1/labels.txt" 'invalid discard removed artifacts'
+  rc=0
+  run_teardown "$case_dir" --force --discard-scout-artifacts > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  expect_code 0 "$rc" 'explicit authorized artifact discard should succeed'
+  assert_absent "$case_dir/wt/data/task-x1" 'explicit discard left artifacts'
+  assert_absent "$case_dir/state/task-x1.meta" 'explicit discard retained task metadata'
+  pass 'scout artifact discard requires the dedicated option together with --force'
+}
+
 # Clone a nested repository into the copy and add one plain scratch file.
 seed_nested_clone_and_scratch() {
   local case_dir=$1 wt=$2
@@ -6168,6 +6253,8 @@ SH
   pass "post-reap proof retains late work and retry records on ordinary and Orca paths, preserving clean/force/scout behavior"
 }
 
+test_scout_task_artifacts_refuse_cleanup
+test_scout_artifact_discard_requires_force
 test_hidden_untracked_work_refuses_before_return
 test_content_fallback_git_capability_boundary
 test_work_written_at_reap_boundary_is_preserved

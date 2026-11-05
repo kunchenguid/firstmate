@@ -713,11 +713,12 @@ $HERDR_SECTION
 $SETUP_BASE
 This is a SCOUT task: the deliverable is a written report, not a PR.
 The worktree is your laboratory - install, run, edit, and make scratch commits freely; all of it is discarded at teardown.
-The report is the only thing that survives, so anything worth keeping must be in it.
+Keep every durable task artifact beside the report under \`$DATA/$ID/\` by absolute path.
+The worktree is deleted at cleanup, including any task material left in its mirrored data directory.
 
 # Rules
 1. Never push to any remote and never open a PR.
-2. Stay inside this worktree; outside it, write only the report and status file below, except for the task's empty-inventory attestation through \`fm-captain-hold.sh complete --none\`, exactly as specified under Definition of done.
+2. Stay inside this worktree; outside it, write durable task artifacts only under \`$DATA/$ID/\` and append to the status file below, except for the task's empty-inventory attestation through \`fm-captain-hold.sh complete --none\`, exactly as specified under Definition of done.
 3. Use gh-axi for GitHub operations and chrome-devtools-axi for browser operations.
 4. Report status by appending one line:
    \`$STATUS_APPEND\`

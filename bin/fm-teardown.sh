@@ -81,9 +81,14 @@
 # Safety is proved again after task processes are reaped, before backlog-close
 # publication, branch deletion, or worktree return.
 # Scout tasks (kind=scout in meta) carve out of that check: their worktree is
-# declared scratch and the report at data/<task-id>/report.md is the work
-# product. Teardown proceeds only once the report exists and the shared
+# declared scratch and durable artifacts belong beside data/<task-id>/report.md
+# in the home. Teardown proceeds only once the report exists and the shared
 # unresolved-decision completion gate verifies its captain-held inventory.
+# A mirrored <copy>/data/<task-id> path blocks cleanup even with --force.
+# Teardown never moves or merges these artifacts. Preserve them in the home and
+# remove the copy, or use --force --discard-scout-artifacts only after explicit
+# approval to discard those artifacts. A symlinked or non-directory data parent
+# also refuses because absence of task material cannot be proved safely.
 # A scratch copy (kind=scout) and a --force run discard untracked content.
 # Treehouse's return resets with `git clean -fd`, which never deletes a nested
 # git repository, so the pool slot stays dirty and later checkouts skip it.
@@ -205,11 +210,14 @@
 # leased home releases its durable treehouse lease so the pool slot is freed,
 # never left leased forever. If the treehouse return fails, teardown leaves the
 # leased home and state in place instead of hiding a still-held lease.
-# Usage: fm-teardown.sh <task-id> [--force] [--legacy-record]
+# Usage: fm-teardown.sh <task-id> [--force] [--discard-scout-artifacts] [--legacy-record]
 #   --force skips ordinary-task dirty and landed-work checks, skips scout report
 #   checks and closes the scout as discarded with no report recorded, and
 #   discards secondmate child work for kind=secondmate. Only use it when the
 #   captain has explicitly said to discard the work.
+#   --discard-scout-artifacts requires --force and explicit captain approval to
+#   discard mirrored scout artifacts, including scouts in a retired secondmate.
+#   Plain --force never bypasses the scout artifact refusal.
 #   --legacy-record accepts a task record that predates the spawn_gen field:
 #   teardown then proceeds only when the recorded endpoint is confirmed dead or
 #   agent-less (bin/fm-backend.sh's recovery-grade classifier), and without
@@ -531,11 +539,13 @@ fi
 ID=$1
 TEARDOWN_LOST_SLOT_EXIT=4
 FORCE=
+DISCARD_SCOUT_ARTIFACTS=0
 LEGACY_RECORD_GIVEN=0
 shift
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --force) FORCE=--force ;;
+    --discard-scout-artifacts) DISCARD_SCOUT_ARTIFACTS=1 ;;
     --legacy-record) LEGACY_RECORD_GIVEN=1 ;;
     *)
       echo "error: invalid teardown request" >&2
@@ -544,6 +554,10 @@ while [ "$#" -gt 0 ]; do
   esac
   shift
 done
+if [ "$DISCARD_SCOUT_ARTIFACTS" = 1 ] && [ "$FORCE" != --force ]; then
+  echo "error: --discard-scout-artifacts requires --force and explicit approval to discard scout artifacts" >&2
+  exit 2
+fi
 fm_backlog_directory_present "$STATE" "state directory" || {
   echo "error: teardown refused: $FM_BACKLOG_TRANSITION_ERROR" >&2
   exit 1
@@ -2093,6 +2107,21 @@ report_worktree_dirt() {
 # Scratch and --force copies are scrubbed before Treehouse return. See the
 # script header for why `git clean -fd` is not enough and why a dirty return
 # is not reported as clean.
+require_scout_artifacts_preserved() {  # <copy> <task-id> <durable-task-directory>
+  local wt=$1 task=$2 destination=$3 source
+  [ "$DISCARD_SCOUT_ARTIFACTS" != 1 ] || return 0
+  fm_task_id_path_safe "$task" || return 1
+  [ -n "$wt" ] && [ -d "$wt" ] || return 0
+  source="$wt/data/$task"
+  if [ -L "$wt/data" ] || { [ -e "$wt/data" ] && [ ! -d "$wt/data" ]; } \
+    || [ -e "$source" ] || [ -L "$source" ]; then
+    echo "REFUSED: scout task $task may still hold durable artifacts at $source (including an unsafe data parent)." >&2
+    echo "Preserve the material under $destination and remove it from the copy before cleanup; teardown never moves or overwrites artifacts." >&2
+    echo "Only after explicit approval to discard these artifacts, rerun with --force --discard-scout-artifacts." >&2
+    return 1
+  fi
+}
+
 teardown_scrub_scratch_copy() {
   local wt=$1
   # A non-git path has no nested repository this clean can remove.
@@ -3277,6 +3306,15 @@ validate_firstmate_home_children_removal() {
       child_proj=$(meta_value "$child_meta" project)
       validate_child_worktree_for_removal "$child_wt" "$child_proj" >/dev/null || return 1
     fi
+    if [ "$child_kind" = scout ]; then
+      # Reassigned slots belong to their new task and are records-only cleanup.
+      local child_owner_rc=0
+      require_owned_worktree_slot_record "$child_id" "$child_wt" || child_owner_rc=$?
+      if [ "$child_owner_rc" -ne "$TEARDOWN_SLOT_REASSIGNED_RC" ]; then
+        [ "$child_owner_rc" -eq 0 ] || return 1
+        require_scout_artifacts_preserved "$child_wt" "$child_id" "$home/data/$child_id" || return 1
+      fi
+    fi
   done
 }
 
@@ -3617,6 +3655,10 @@ remove_secondmate_registry_entry() {
 require_exclusive_task_worktree_slot || exit 1
 require_owned_task_worktree_slot || exit 1
 
+if [ "$KIND" = scout ] && teardown_owns_worktree; then
+  require_scout_artifacts_preserved "$WT" "$ID" "$DATA/$ID" || exit 1
+fi
+
 validate_pr_poll_cleanup "$STATE" "$ID" || exit 1
 
 if [ "$KIND" = secondmate ]; then
@@ -3878,6 +3920,9 @@ fi
 # A worker can write after the first proof, including while its run is concluded
 # or its processes exit. Inspect the stopped copy before dropping its branch or
 # returning it on either backend path.
+if [ "$KIND" = scout ] && teardown_owns_worktree; then
+  require_scout_artifacts_preserved "$WT" "$ID" "$DATA/$ID" || exit 1
+fi
 if teardown_owns_worktree && [ -d "$WT" ] && [ "$FORCE" != "--force" ]; then
   validate_worktree_teardown_safety || exit 1
 fi
