@@ -1009,11 +1009,11 @@ fm_dod_named_head_reachable_outside_worktree() {  # <worktree> <project> <mode> 
 # output. <state> <id> <meta> supply pr=,
 # pr_head=, and the merge-notified marker; <meta> may be a captured copy
 # (bin/fm-fleet-snapshot.sh), so the marker is read from <state>.
-# A supported PR URL also requires task metadata and a matching live destination;
-# published-head proof alone cannot supply that destination.
+# Every CI-ready claim requires a supported PR URL, task metadata and a matching
+# live destination; published-head proof alone cannot supply that destination.
 # The inherited FM_READ_DEADLINE caps readiness reads at the scan budget remaining.
 fm_dod_accept_ship_done() {  # <kind> <mode> <worktree> <project> <line> [<state> <id> <meta> [meta-locked]]
-  local kind=$1 mode=$2 wt=$3 project=$4 line=$5 state=${6:-} id=${7:-} meta=${8:-} url sha gerrit captured=''
+  local kind=$1 mode=$2 wt=$3 project=$4 line=$5 state=${6:-} id=${7:-} meta=${8:-} url note sha gerrit captured=''
   local read_timeout
   fm_dod_should_gate_ship_done "$kind" "$mode" "$line" || return 0
   if [ "$mode" = local-only ] && [ -n "$meta" ]; then
@@ -1028,9 +1028,16 @@ fm_dod_accept_ship_done() {  # <kind> <mode> <worktree> <project> <line> [<state
     fm_dod_accept_external_review_done "$wt" "$project" "$line" "$meta"
     return
   fi
-  if [ "$mode" != local-only ] \
-    && url=$(fm_dod_pr_url_from_done_note "$(status_line_note "$line")") \
-    && fm_pr_url_parse "$url"; then
+  note=$(status_line_note "$line")
+  url=$(fm_dod_pr_url_from_done_note "$note") || url=
+  # Readiness, not a note prefix, owns this gate. An unresolved CI-ready PR
+  # cannot fall back to published-head evidence without proving its destination.
+  if [ "$mode" != local-only ] && fm_dod_note_reports_ci_ready "$note" \
+    && ! fm_pr_url_parse "$url"; then
+    printf '%s\n' 'CI-ready PR destination could not be resolved; report a canonical PR URL so its expected base can be verified'
+    return 1
+  fi
+  if [ "$mode" != local-only ] && fm_pr_url_parse "$url"; then
     # Readiness runs under a child's metadata lock during ledger scans. Bound
     # the forge read so unavailable proof refuses only this child's claim.
     # Use one timer at the read, not a nested timer around the caller: killing
@@ -1054,8 +1061,7 @@ fm_dod_accept_ship_done() {  # <kind> <mode> <worktree> <project> <line> [<state
       return 1
     fi
   fi
-  if url=$(fm_dod_pr_url_from_done_note "$(status_line_note "$line")") \
-    && fm_dod_recorded_pr_on_forge "$state" "$id" "$meta" "$mode" "$url"; then
+  if [ -n "$url" ] && fm_dod_recorded_pr_on_forge "$state" "$id" "$meta" "$mode" "$url"; then
     return 0
   fi
   if [ -z "$wt" ] || [ ! -d "$wt" ]; then

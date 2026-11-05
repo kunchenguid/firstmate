@@ -153,13 +153,16 @@ test_scout_done_is_not_gated() {
 }
 
 test_unpushed_ship_done_is_refused() {
-  local repo wt sha reason rc
+  local repo wt sha reason rc meta
   repo="$TMP_ROOT/unpushed-repo"
   wt="$TMP_ROOT/unpushed-wt"
   fm_git_worktree "$repo" "$wt" fm/unpushed
   git -C "$wt" commit -q --allow-empty -m 'fix only in the worktree'
   sha=$(git -C "$wt" rev-parse HEAD)
-  reason=$(accept_done ship no-mistakes "$wt" "$repo" "done: PR https://example.test/o/r/pull/1 checks green")
+  meta="$TMP_ROOT/unpushed.meta"
+  printf 'expected_base=main\n' > "$meta"
+  reason=$(accept_done ship no-mistakes "$wt" "$repo" "done: PR https://github.com/o/r/pull/1 checks green" \
+    "$TMP_ROOT" unpushed "$meta")
   rc=$?
   [ "$rc" -eq 1 ] || fail "unpushed ship done: was accepted (exit $rc)"
   case "$reason" in
@@ -170,20 +173,23 @@ test_unpushed_ship_done_is_refused() {
 }
 
 test_remote_containing_named_head_is_accepted() {
-  local repo wt sha
+  local repo wt sha meta
   repo="$TMP_ROOT/pushed-repo"
   wt="$TMP_ROOT/pushed-wt"
   fm_git_worktree "$repo" "$wt" fm/pushed
   git -C "$wt" commit -q --allow-empty -m 'fix on the branch'
   sha=$(git -C "$wt" rev-parse HEAD)
   git -C "$wt" update-ref refs/remotes/origin/fm/pushed "$sha"
-  accept_done ship no-mistakes "$wt" "$repo" "done: PR https://example.test/o/r/pull/2 checks green" \
+  meta="$TMP_ROOT/pushed.meta"
+  printf 'expected_base=main\n' > "$meta"
+  accept_done ship no-mistakes "$wt" "$repo" "done: PR https://github.com/o/r/pull/2 checks green" \
+    "$TMP_ROOT" pushed "$meta" \
     || fail "named head on a remote-tracking ref was refused"
   pass "named head on a remote-tracking ref is accepted"
 }
 
 test_moved_branch_without_named_head_is_refused() {
-  local repo wt main_sha fix_sha reason rc
+  local repo wt main_sha fix_sha reason rc meta
   repo="$TMP_ROOT/moved-repo"
   wt="$TMP_ROOT/moved-wt"
   fm_git_worktree "$repo" "$wt" fm/moved
@@ -193,7 +199,10 @@ test_moved_branch_without_named_head_is_refused() {
   # The fork branch exists and moved, but only to a merge of the default
   # branch: reachability of that branch is not reachability of the named head.
   git -C "$wt" update-ref refs/remotes/origin/fm/moved "$main_sha"
-  reason=$(accept_done ship no-mistakes "$wt" "$repo" "done: PR https://example.test/o/r/pull/3 checks green")
+  meta="$TMP_ROOT/moved.meta"
+  printf 'expected_base=main\n' > "$meta"
+  reason=$(accept_done ship no-mistakes "$wt" "$repo" "done: PR https://github.com/o/r/pull/3 checks green" \
+    "$TMP_ROOT" moved "$meta")
   rc=$?
   [ "$rc" -eq 1 ] || fail "moved remote branch without the named head was accepted"
   case "$reason" in
