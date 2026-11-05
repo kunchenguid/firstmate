@@ -6190,6 +6190,114 @@ SH
   printf '%s\n' "$path"
 }
 
+test_eventwait_connects_to_long_socket_path() {
+  local reader tmp_root
+  command -v python3 >/dev/null 2>&1 || {
+    echo "skip: python3 not found (required by the event subscriber)"
+    return 0
+  }
+  reader="$ROOT/bin/backends/herdr-eventwait.py"
+  tmp_root="$TMP_ROOT"
+  EVENTWAIT_READER="$reader" EVENTWAIT_TMP_ROOT="$tmp_root" python3 - <<'PY' || fail "eventwait could not connect over a long socket path"
+import os
+import subprocess
+import sys
+import tempfile
+
+reader = os.environ["EVENTWAIT_READER"]
+tmp_root = os.environ["EVENTWAIT_TMP_ROOT"]
+listener_code = r'''
+import json
+import os
+import socket
+import sys
+
+directory, name = sys.argv[1:]
+os.chdir(directory)
+server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+server.bind(name)
+server.listen(1)
+print("ready", flush=True)
+connection, _ = server.accept()
+with connection, server:
+    request_bytes = b""
+    while b"\n" not in request_bytes:
+        chunk = connection.recv(65536)
+        if not chunk:
+            raise SystemExit("client closed before subscribing")
+        request_bytes += chunk
+    request = json.loads(request_bytes.split(b"\n", 1)[0].decode("utf-8"))
+    if request.get("method") != "events.subscribe":
+        raise SystemExit(f"unexpected request: {request!r}")
+    connection.sendall(
+        b'{"id":"fm-eventwait","result":{"type":"subscription_started"}}\n'
+    )
+    while connection.recv(65536):
+        pass
+'''
+
+with tempfile.TemporaryDirectory(dir=tmp_root, prefix="eventwait-socket-") as base:
+    socket_dir = os.path.join(base, "d" * 45, "e" * 45)
+    os.makedirs(socket_dir)
+    socket_name = "herdr.sock"
+    socket_path = os.path.join(socket_dir, socket_name)
+    if len(os.fsencode(socket_path)) <= 104:
+        raise AssertionError(f"test socket path is not deep enough: {socket_path!r}")
+
+    listener = subprocess.Popen(
+        [sys.executable, "-c", listener_code, socket_dir, socket_name],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        ready = listener.stdout.readline().strip()
+        if ready != "ready":
+            error = listener.stderr.read()
+            raise AssertionError(f"listener did not start: {ready!r} {error!r}")
+        client = subprocess.run(
+            [sys.executable, reader, socket_path, "1.0", "pane-1"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=False,
+            timeout=10,
+        )
+        if client.returncode != 0:
+            raise AssertionError(
+                f"eventwait failed for a long socket path: rc={client.returncode} "
+                f"stdout={client.stdout!r} stderr={client.stderr!r}"
+            )
+        if client.stdout != "@subscribed\n":
+            raise AssertionError(f"unexpected eventwait output: {client.stdout!r}")
+        listener_rc = listener.wait(timeout=5)
+        if listener_rc != 0:
+            error = listener.stderr.read()
+            raise AssertionError(f"listener failed: rc={listener_rc} {error!r}")
+    finally:
+        if listener.poll() is None:
+            listener.terminate()
+            listener.wait(timeout=5)
+PY
+  pass "herdr-eventwait.py connects to a throwaway AF_UNIX listener beyond the 104-byte path limit"
+}
+
+test_eventwait_rejects_a_relative_socket_path() {
+  local out rc
+  command -v python3 >/dev/null 2>&1 || {
+    echo "skip: python3 not found (required by the event subscriber)"
+    return 0
+  }
+  out=$(cd "$TMP_ROOT" && python3 "$ROOT/bin/backends/herdr-eventwait.py" herdr.sock 1 pane-1 2>&1)
+  rc=$?
+  [ "$rc" -eq 2 ] || fail "eventwait accepted a relative socket path: rc=$rc out=$out"
+  case "$out" in
+    *"must be absolute"*) ;;
+    *) fail "eventwait did not name the absolute-path rule: $out" ;;
+  esac
+  pass "herdr-eventwait.py refuses a relative socket path"
+}
+
 set_fake_agent() {  # <agent-dir> <window-or-pane> <status>
   local dir=$1 target=$2 status=$3 key
   key=$(printf '%s' "$target" | tr ':/.' '___')
@@ -6735,6 +6843,8 @@ test_wait_transition_stream_absorb_clears_then_timeout
 test_wait_transition_reader_failure_returns_2
 test_wait_transition_bad_ack_returns_2_and_cleans_up
 test_wait_transition_clean_timeout_returns_1
+test_eventwait_connects_to_long_socket_path
+test_eventwait_rejects_a_relative_socket_path
 test_canonical_socket_path_folds_a_windows_drive_letter_spelling
 test_canonical_socket_path_refuses_a_failed_cygpath
 test_canonical_socket_path_refuses_empty_cygpath_output

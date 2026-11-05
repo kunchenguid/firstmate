@@ -19,6 +19,7 @@ Wire protocol (verified: herdr 0.7.3, protocol 16, newline-delimited JSON):
              "data":{"pane_id","workspace_id","agent_status","agent",...}}\n
 
 Usage: herdr-eventwait.py <socket_path> <timeout_seconds> <pane_id> [<pane_id> ...]
+<socket_path> must be absolute.
 
 Output (one line per pane.agent_status_changed event, TAB-separated, a raw
 projection - NOT the final normalized record; the bash normalizer adds the
@@ -36,6 +37,7 @@ A non-zero exit tells the bash caller to fall back to plain polling for this
 cycle (the permanent fail-closed backstop), never to go silent.
 """
 import json
+import os
 import socket
 import sys
 import time
@@ -75,6 +77,12 @@ def main(argv):
     if len(argv) < 4:
         return 2
     sock_path = argv[1]
+    if not sock_path.startswith("/"):
+        sys.stderr.write(
+            "herdr-eventwait.py: socket path must be absolute; the control "
+            "socket is connected by basename from its own directory\n"
+        )
+        return 2
     try:
         timeout = float(argv[2])
     except ValueError:
@@ -83,10 +91,16 @@ def main(argv):
     if not panes or timeout <= 0:
         return 2
 
+    # AF_UNIX addresses are capped near 104 bytes, and a Herdr session socket
+    # beneath a deep home can exceed that. Connect by basename from the socket
+    # directory; the socket path is absolute and nothing after the connect
+    # resolves a relative path, so the chdir leaks nowhere.
+    socket_dir, socket_name = os.path.split(sock_path)
     try:
+        os.chdir(socket_dir)
         sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         sock.settimeout(CONNECT_TIMEOUT)
-        sock.connect(sock_path)
+        sock.connect(socket_name)
     except OSError:
         return 2
 
