@@ -394,7 +394,8 @@ It preserves every captain hold in the bounded queued inventory of the owning ho
 
 ### Bearings placement
 
-`bin/fm-bearings-snapshot.sh` places each captain hold by its `hold_bucket` and inspects no prose of its own.
+`bin/fm-bearings-snapshot.sh` places each captain hold by its `hold_bucket` alone.
+Its only reason inspection is the per-call `presentation` flag: a decoded hold reason that is nothing but a canonical `data/<task>/report.md` pointer is marked as still needing presentation, which never moves the call between buckets.
 
 | `hold_bucket` | Where the hold appears |
 | --- | --- |
@@ -406,6 +407,7 @@ An available hold is therefore never in both Captain's Call and Charted Next.
 An actively worked held task may also appear in Underway, which reports running work independently of those decision buckets.
 
 Decision presentation uses the full-text field documented in [`bin/fm-bearings-snapshot.sh`](../bin/fm-bearings-snapshot.sh), preserving the recorded question and options while compact summaries remain overview-only.
+The same header owns the `presentation` and `stops_worker` fields and the rule that lists calls stopping a live worker before the rest of backlog order.
 Older secondmate summaries without that field fall back to the title and reason text they retained.
 
 ### Accepted limits
@@ -658,7 +660,7 @@ Projection and decision-text rendering regressions live in three suites:
 | Suite | What it covers |
 | --- | --- |
 | `tests/fm-fleet-snapshot-view.test.sh` | The total structured-only bucket classifier, hold-until parsing, kind-independent captain actionability, undated-hold aging, and title stripping. |
-| `tests/fm-bearings-snapshot.test.sh` | Default and expanded decision-bucket membership, deferral explanations, blocker-overflow disclosure, working-hold dual surfaces, remote-summary schema invalidation, exact leading-kind inference, artifact-kind mismatch and answered-question exclusion, kind-bearing and kindless local-only landings publishing their recorded note, scout-report precedence over competing pull-request links, and full local and secondmate question transport with Unicode, report pointers, and legacy optional-field fallbacks. |
+| `tests/fm-bearings-snapshot.test.sh` | Default and expanded decision-bucket membership, deferral explanations, blocker-overflow disclosure, working-hold dual surfaces, remote-summary schema invalidation, exact leading-kind inference, artifact-kind mismatch and answered-question exclusion, kind-bearing and kindless local-only landings publishing their recorded note, scout-report precedence over competing pull-request links, full local and secondmate question transport with Unicode, report pointers, and legacy optional-field fallbacks, and the presentation flag for encoded path-only reasons with worker-stopping calls listed first. |
 | `tests/fm-bearings-board-render.test.sh` | Complete snapshot question and option text reaching the rendered decision card, including Unicode. |
 
 ### Refreshing this record
