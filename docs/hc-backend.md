@@ -161,12 +161,16 @@ Only then does it remove the worktree and its branch there; `--force` keeps its 
 
 - Only the `claude` harness is placed, and a `local-only`, `forge=gerrit`, or `forge=external` ship refuses placement, because each is checked against a worktree on this machine.
 - No Firstmate hooks are installed there, since their scripts live in this machine's checkout, so a placed worker has no busy record, turn-end notification, commit-trailer strip, or push guard.
-- Its busy and idle state come from hc's native `status.state` and read as `hc-native`; the fake-hc unit tests cover this, but whether a real Claude worker started there reports `status.state` was not verified live, because the live run's Claude was logged out.
+- Its busy and idle state come from hc's native `status.state` and read as `hc-native`; the fake-hc unit tests cover this, but whether a real Claude worker started there reports `status.state` is not verified live.
 - `bin/fm-control.sh` interrupts a placed worker, but its `exit` and `relaunch` refuse it, as they refuse every hc task, because that script has no recovery-grade hc agent-state classifier; `fm-spawn.sh --relaunch` refuses a placed task too, and nothing there is stopped or changed.
 - Reads that look inside a worktree on this machine report nothing for a placed one: the no-mistakes run state in the fleet view, the review diff, and worktree write activity as stall evidence.
-- A spawn claims the worktree path there only by proving it absent before `git worktree add`, so two Firstmate installs at the same absolute path that place the same task id on one machine can race for it. The loser's add fails and leaves the winner's worktree alone: a failed spawn removes only a worktree its own `git worktree add` created.
+- A spawn claims the worktree path there only by proving it absent before `git worktree add`, so two Firstmate installs at the same absolute path that place the same task id on one machine can race for it.
+  The loser's add fails and leaves the winner's worktree alone: a failed spawn removes only a worktree its own `git worktree add` created.
 - Teardown, even with `--force`, refuses while the machine cannot be reached, because it can neither stop the worker there nor remove its worktree; a machine that never returns leaves the task's record in place.
 - `config/claude-account` and `config/claude-accounts` do not apply to a placed worker, which uses that machine's Claude login; the spawn prints a note when it skips one.
+- The spawn's trust check there reads only the workspace-trust entry in that machine's Claude config; Claude's separate "Allow external CLAUDE.md file imports?" dialog is not checked, so a worker whose config there imports files from outside the worktree can stop at that dialog.
+- `bin/fm-pr-health.sh` also discovers an open pull request from the branch of a task's copy on this machine, so for a placed ship it follows only the pull requests already recorded for the task.
+- Teardown records no `config/pipeline-spend` entry for a placed ship, because that ship's no-mistakes runs are in the other machine's no-mistakes state.
 - That the app shows a placed terminal is inferred from the label contract above; no Herdr.app window bound to the other machine's session was observed.
   Whether Claude, started on a fresh `claude-config` directory, stops at its Bypass Permissions warning there was not verified either.
 

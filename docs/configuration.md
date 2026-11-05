@@ -715,7 +715,7 @@ claude-config /Users/me/.claude-work   # optional: the Claude config directory a
 ```
 
 Each key may appear once.
-A missing required key, an unknown key, a relative or `..`-carrying path, or a machine line with spaces makes the whole file invalid, and every hc ship or scout spawn then refuses rather than starting here.
+A missing required key, an unknown key, a relative or `..`-carrying path, or a machine line with spaces makes the whole file invalid, and every hc ship or scout spawn then refuses rather than starting here, except one that passes `--hc-machine local`, which does not read the file.
 
 While the file exists, every hc ship and scout spawn is placed on that machine unless it passes `--hc-machine local`, which keeps that one task here.
 `fm-spawn.sh --hc-machine <name>` states the placement explicitly and must name the machine the file declares; it never places a task when the file is absent.

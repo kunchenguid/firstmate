@@ -335,7 +335,8 @@
 # recorded by bin/fm-pipeline-spend.sh, which owns the attribution and the
 # ledger. It runs before the task branch it attributes runs by is deleted and
 # before state/<id>.meta is removed, and is best effort: a failure warns and
-# never blocks cleanup.
+# never blocks cleanup. A placed hc ship is not recorded: its copy and its
+# no-mistakes runs are on another machine, which this recorder cannot read.
 # Opt-in config/status-archive preserves retired status logs in
 # data/<id>/status.log, then status.<N>.log for reused IDs. The presentation
 # lock covers archive publication, cursor retirement, then the existing live
@@ -4102,7 +4103,7 @@ else
   fi
 fi
 
-if [ "$KIND" = ship ] && teardown_owns_worktree && [ -e "$CONFIG/pipeline-spend" ]; then
+if [ "$KIND" = ship ] && [ -z "$TEARDOWN_HC_MACHINE" ] && teardown_owns_worktree && [ -e "$CONFIG/pipeline-spend" ]; then
   FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$DATA" FM_CONFIG_OVERRIDE="$CONFIG" \
     "$SCRIPT_DIR/fm-pipeline-spend.sh" record "$ID" >/dev/null \
     || echo "warning: could not record $ID's no-mistakes pipeline spend; cleanup continues" >&2

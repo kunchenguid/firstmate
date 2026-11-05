@@ -4,10 +4,10 @@
 # machine"): the placement config, machine-qualified addresses and records, the
 # remote exec transport (byte-exact output) and machine readiness gates, the
 # remote default branch and worktree creation, the remote agent-state scan, a
-# real fm-spawn of a placed scout (its claude check, and its abort's
-# launch-file cleanup), and a real fm-teardown of a placed ship whose
-# landed-work proof, no-mistakes abort, process reap, and launch-file removal
-# run on the other machine.
+# real fm-spawn of a placed scout and ship (its claude check, and its abort's
+# worktree and launch-file cleanup), and a real fm-teardown of a placed ship
+# whose landed-work proof, no-mistakes abort, process reap, and launch-file
+# removal run on the other machine, and which records no pipeline spend here.
 #
 # The fake hc stands in for both machines. Its "other machine" is a private
 # directory that every exec, file write, and run --cwd reaches only through a
@@ -35,6 +35,7 @@ REAL_GIT=$(command -v git)
 #   exec.json       answered by every exec instead of running the command
 #   exec-refuse     an exec whose argv contains this text fails as unreachable
 #   file-write-lost a file write lands but its answer is lost (exit 5)
+#   run-answer-lost run starts the terminal but its answer is lost (exit 5)
 #   remote-bin/     the only PATH the other machine's login shell has
 #   <address>.json  a terminal record for get; run writes it, rm removes it
 make_fake_hc() {  # <dir> -> fakebin
@@ -153,6 +154,7 @@ case "$cmd" in
     jq -n --arg a "$address" --arg c "$cwd" --argjson l "$labels" \
       '{address: $a, state: "live", labels: $l, cwd: $c, foreground: {name: "zsh", argv: ["zsh"], cwd: $c, pid: 1}}' \
       > "$D/$address.json"
+    [ ! -e "$D/run-answer-lost" ] || exit 5
     printf '{"address":"%s"}\n' "$address"
     ;;
   get)
@@ -499,11 +501,12 @@ placed_spawn_case() {  # <name> <id> -> sets D, FB, HOMEDIR, PROJ
   fm_fake_exit0 "$FB" treehouse claude
 }
 
-run_placed_spawn() {  # <id> [args...]
-  local id=$1
+run_placed_spawn() {  # <id> [args...]: a scout, or a ship with PLACED_SHIP=1
+  local id=$1 kind=(--scout)
   shift
+  [ "${PLACED_SHIP:-0}" = 0 ] || kind=(--mode no-mistakes --yolo off)
   FAKE_HC_DIR=$D FM_HC_BIN="$FB/hc" HC_SESSION=fmtest SHELL="$D/remote-login-shell" \
-    fm_test_run_spawn "$HOMEDIR" "$D/nowhere" "$FB" "$id" "$PROJ" --scout --backend hc "$@"
+    fm_test_run_spawn "$HOMEDIR" "$D/nowhere" "$FB" "$id" "$PROJ" "${kind[@]}" --backend hc "$@"
 }
 
 test_placed_spawn_builds_everything_on_the_machine() {
@@ -638,6 +641,78 @@ test_placed_spawn_abort_removes_its_launch_file_there() {
   assert_absent "$D/remote/code/.fm-hc/$tag/$id" "the fresh worktree there is removed"
   assert_absent "$HOMEDIR/state/$id.meta" "no record survives the abort"
   pass "hc placement: an aborted placed spawn removes its staged launch file there once its terminal is closed"
+}
+
+# Oracle: a placed ship is built like a placed scout, on the machine, and is
+# recorded as a ship with its delivery contract; the commit hooks that live in
+# this machine's checkout are not installed for a worker that cannot run them.
+test_placed_ship_spawn_builds_everything_on_the_machine() {
+  local id=ship1 out rc=0 tag wt meta
+  placed_spawn_case spawn-ship "$id"
+  tag=$(hometag_for "$HOMEDIR")
+  wt="$VROOT/code/.fm-hc/$tag/$id"
+  out=$(PLACED_SHIP=1 run_placed_spawn "$id" 2>&1) || rc=$?
+  expect_code 0 "$rc" "a placed ship spawn should succeed"$'\n'"$out"
+  meta="$HOMEDIR/state/$id.meta"
+  assert_grep "kind=ship" "$meta" "the record is a ship's"
+  assert_grep "mode=no-mistakes" "$meta" "the record carries the ship's delivery mode"
+  assert_grep "hc_machine=worker-host" "$meta" "the record names the machine"
+  assert_grep "worktree=$wt" "$meta" "the ship's worktree is the one on the machine: $(cat "$meta")"
+  [ "$("$REAL_GIT" -C "$D/remote/code/.fm-hc/$tag/$id" rev-parse --show-toplevel)" = "$D/remote/code/.fm-hc/$tag/$id" ] \
+    || fail "the ship's worktree was not created as a checkout on the machine"
+  assert_contains "$(grep '^run' "$D/log")" $'\x1f--on\x1fworker-host\x1f' "the ship's terminal starts there"
+  assert_absent "$HOMEDIR/state/$id.git-hooks" "no hooks from this machine's checkout are installed for a placed ship"
+  assert_absent "$HOMEDIR/state/$id.push-guard" "no push guard from this machine is written for a placed ship"
+  pass "hc placement: a placed ship gets its worktree and terminal on the machine, recorded as a ship"
+}
+
+# Oracle: hc started the terminal, but its answer was lost, so this spawn never
+# learned its address. An unknown address is no proof that no terminal is
+# there, so the abort must not remove the worktree a shell may be sitting in;
+# it keeps both and names them.
+test_placed_spawn_keeps_its_worktree_when_the_terminal_answer_is_lost() {
+  local id=lost1 out rc=0 tag
+  placed_spawn_case spawn-run-lost "$id"
+  tag=$(hometag_for "$HOMEDIR")
+  touch "$D/run-answer-lost"
+  out=$(run_placed_spawn "$id") || rc=$?
+  [ "$rc" -ne 0 ] || fail "a terminal whose answer was lost must abort the spawn"$'\n'"$out"
+  assert_present "$D/worker-host/t9.json" "the fake started the terminal there"
+  assert_present "$D/remote/code/.fm-hc/$tag/$id" "the worktree there must stay while its terminal may still be open"
+  assert_contains "$out" "address unknown" "the warning says the terminal's address is unknown"
+  assert_contains "$out" "worktree remove $VROOT/code/.fm-hc/$tag/$id" "the warning names how to remove the worktree there"
+  assert_absent "$HOMEDIR/state/$id.meta" "no record survives the abort"
+  pass "hc placement: a placed spawn that lost its terminal's answer keeps the worktree there and names both"
+}
+
+# Oracle: the worktree path was proved absent, then another checkout took it
+# before this spawn's git worktree add ran. That checkout is not this spawn's,
+# so the failed spawn must leave it, its work, and its branch, and start nothing.
+test_placed_spawn_failed_add_leaves_a_foreign_worktree() {
+  local id=race1 out rc=0 tag wt
+  placed_spawn_case spawn-add-race "$id"
+  tag=$(hometag_for "$HOMEDIR")
+  wt="$D/remote/code/.fm-hc/$tag/$id"
+  mkdir -p "$D/racebin"
+  cat > "$D/racebin/git" <<SH
+#!/bin/sh
+case " \$* " in
+  *" worktree add "*"$VROOT/code/.fm-hc/"*|*" worktree add "*"$D/remote/code/.fm-hc/"*)
+    "$REAL_GIT" -C "$D/remote/code/proj" worktree add --quiet -b other-work "$wt" origin/main >/dev/null 2>&1 || exit 97
+    echo "their work" > "$wt/theirs.txt" ;;
+esac
+exec "$REAL_GIT" "\$@"
+SH
+  chmod +x "$D/racebin/git"
+  out=$(PATH="$D/racebin:$PATH" run_placed_spawn "$id") || rc=$?
+  [ "$rc" -ne 0 ] || fail "a spawn whose worktree path was taken must fail"$'\n'"$out"
+  assert_contains "$out" "could not add worktree" "the refusal names the failed add"
+  [ -f "$wt/theirs.txt" ] || fail "the other checkout's work must survive the failed spawn"$'\n'"$out"
+  "$REAL_GIT" -C "$D/remote/code/proj" rev-parse --verify --quiet refs/heads/other-work >/dev/null \
+    || fail "the other checkout's branch must survive the failed spawn"
+  assert_no_grep $'run\x1f' "$D/log" "no terminal may start for a failed spawn"
+  assert_absent "$HOMEDIR/state/$id.meta" "no record may be written for a failed spawn"
+  pass "hc placement: a placed spawn whose add fails leaves the checkout it did not make, with its work and branch"
 }
 
 # A projects path with a symlink component (macOS /tmp is /private/tmp) names
@@ -792,6 +867,22 @@ test_placed_teardown_removes_landed_work_there() {
   expect_code 0 "$rc" "--force discards the work there as it does here"$'\n'"$out"
   assert_absent "$TWT_LOCAL" "the forced worktree there is removed"
   pass "hc placement: teardown removes a placed worktree there only after proving its work landed, or under --force"
+}
+
+# Oracle: a placed ship's copy and its no-mistakes runs are on the other
+# machine, so with config/pipeline-spend on, its cleanup must not write a spend
+# entry read from a copy that is not here.
+test_placed_teardown_records_no_spend_here() {
+  local out rc=0
+  placed_teardown_case teardown-spend
+  git_q -C "$TWT_LOCAL" commit -q --allow-empty -m "the change"
+  git_q -C "$TWT_LOCAL" push -q origin fm/task-x1
+  touch "$HOMEDIR/config/pipeline-spend"
+  out=$(run_placed_teardown 2>&1) || rc=$?
+  expect_code 0 "$rc" "pushed work on the machine should clean up"$'\n'"$out"
+  assert_absent "$HOMEDIR/data/pipeline-spend.jsonl" "no spend entry is written for a placed ship"
+  assert_absent "$HOMEDIR/state/task-x1.meta" "the record is retired"
+  pass "hc placement: a placed ship's cleanup writes no pipeline spend entry here"
 }
 
 # fake_nm_there <head> <abort-works 1|0>: a no-mistakes on the machine whose
@@ -1016,9 +1107,13 @@ fm_test_run \
   test_placed_spawn_builds_everything_on_the_machine \
   test_placed_spawn_refuses_before_creating_anything \
   test_placed_spawn_abort_removes_its_launch_file_there \
+  test_placed_ship_spawn_builds_everything_on_the_machine \
+  test_placed_spawn_keeps_its_worktree_when_the_terminal_answer_is_lost \
+  test_placed_spawn_failed_add_leaves_a_foreign_worktree \
   test_placed_clone_check_resolves_a_symlinked_projects_path \
   test_placed_teardown_refuses_unlanded_or_unreachable_work \
   test_placed_teardown_removes_landed_work_there \
+  test_placed_teardown_records_no_spend_here \
   test_placed_teardown_aborts_its_parked_no_mistakes_run_there \
   test_placed_relaunch_refuses_and_stops_nothing \
   test_placed_teardown_reaps_processes_left_in_the_worktree_there \

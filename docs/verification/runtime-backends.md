@@ -3748,6 +3748,7 @@ This machine ran an `fm-hclab-*` core, and the other machine was added into a sa
 That lab core was given its route back with `hc exec --on worker-host -- hc machine add <ssh-target> --name <firstmate-as> --session <s>`.
 A scratch home here and a scratch directory there held everything else.
 Afterward no lab process, lab core state, or scratch file remained on either machine.
+Machine names in the commands and output below are placeholders: `worker-host` stands for the other machine's name in the lab core, and `<ssh-target>` and `<firstmate-as>` for the real ssh target and route-back name.
 
 | Probe | Result |
 | --- | --- |
@@ -3785,3 +3786,4 @@ A placed ship record over a second worktree there then exercised teardown's land
 - A placed worker doing real work: the live placement run launched Claude against a logged-out configuration, so no turn ran there and its reporting back through hc was exercised only by the spawn's route-back proof.
 - `send --wait`'s `started`/`working` proof against a real status-reporting harness; the lab run covered a non-reporting shell, whose verdict falls to the composer screen.
 - Native `status.state` reported by a real harness launched through `bin/fm-spawn.sh`.
+- Placement behaviour added after the run recorded above, which only `tests/fm-backend-hc-placement.test.sh` covers: the spawn's check that `claude` runs in the login shell there, the default base read with `git ls-remote` there, the undo of a failed worktree creation, the recorded `hc_launch_file=` and its removal, the abort's handling of a terminal whose address is unknown, teardown's stop of processes left in the worktree there, its abort of a parked no-mistakes run there, and its skipped pipeline-spend entry.

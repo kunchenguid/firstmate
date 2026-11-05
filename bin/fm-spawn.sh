@@ -2015,15 +2015,21 @@ spawn_abort_cleanup() {
   # record closes the terminal and removes it there. Once the launch was sent a
   # worker may be running there, so both stay, named for the operator. A staged
   # launch file goes once the terminal is confirmed closed, sent or not; a
-  # failed removal only warns.
+  # failed removal only warns. With no address, the terminal counts as closed
+  # only if hc was never asked to start it: hc may have started one whose
+  # answer this spawn lost or rejected.
   if [ "${HC_PLACED_WT_CREATED:-0}" = 1 ] && [ "$status" -ne 0 ] &&
     [ ! -e "$STATE/$ID.meta" ] && [ ! -L "$STATE/$ID.meta" ]; then
     HC_PLACED_WT_CREATED=0
     local hc_closed=0
-    if [ "$SPAWN_ENDPOINT_CLOSED" = 1 ] ||
-      { [ "$SPAWN_LAUNCH_SENT" = 0 ] &&
-        { [ -z "${T:-}" ] || fm_backend_kill hc "$T" "" "fm-$ID" 2>/dev/null; }; }; then
+    if [ "$SPAWN_ENDPOINT_CLOSED" = 1 ]; then
       hc_closed=1
+    elif [ "$SPAWN_LAUNCH_SENT" = 0 ]; then
+      if [ -n "${T:-}" ]; then
+        fm_backend_kill hc "$T" "" "fm-$ID" 2>/dev/null && hc_closed=1
+      elif [ "${HC_TERMINAL_ASKED:-0}" = 0 ]; then
+        hc_closed=1
+      fi
     fi
     if [ "$hc_closed" = 1 ] && [ "$HC_LAUNCH_STAGED" = 1 ]; then
       fm_backend_hc_remote_file_remove "$HC_SES" "$HC_MACHINE" "$HC_LAUNCH_FILE" || true
@@ -2032,7 +2038,7 @@ spawn_abort_cleanup() {
       fm_backend_hc_remote_worktree_remove "$HC_SES" "$HC_MACHINE" "$HC_CLONE" "$WT"; then
       :
     else
-      echo "warning: the worktree $WT on hc machine '$HC_MACHINE' and terminal ${T:-<none>} stay after the failed spawn of $ID; once inspected, close the terminal and run 'git -C $HC_CLONE worktree remove $WT' there${HC_LAUNCH_FILE:+, and remove $HC_LAUNCH_FILE there if it remains}" >&2
+      echo "warning: the worktree $WT on hc machine '$HC_MACHINE' and terminal ${T:-labelled firstmate.task=$W, address unknown,} stay after the failed spawn of $ID; once inspected, close the terminal and run 'git -C $HC_CLONE worktree remove $WT' there${HC_LAUNCH_FILE:+, and remove $HC_LAUNCH_FILE there if it remains}" >&2
     fi
   fi
   # A spawn that aborts after claiming its slot but before its record survives
@@ -2425,6 +2431,9 @@ HC_SES=
 HC_PLACED_WT_CREATED=0
 HC_LAUNCH_FILE=
 HC_LAUNCH_STAGED=0
+# Set once hc is asked to start the placed terminal: from then on an unknown
+# address is no proof that no terminal exists there.
+HC_TERMINAL_ASKED=0
 spawn_resolve_hc_placement() {
   local rc=0
   if [ "$BACKEND" != hc ]; then
@@ -5497,6 +5506,7 @@ EOF
       # The worktree exists before its terminal, so the terminal starts in it
       # on that machine and no worktree provider runs in the pane.
       spawn_hc_placed_worktree_create || exit 1
+      HC_TERMINAL_ASKED=1
       HC_TERMINAL=$(fm_backend_hc_create_task "$HC_SES" "$W" "$WT" "$HC_MACHINE") || exit 1
     else
       HC_TERMINAL=$(fm_backend_hc_create_task "$HC_SES" "$W" "$PROJ_ABS") || exit 1
