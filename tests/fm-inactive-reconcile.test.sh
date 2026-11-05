@@ -59,7 +59,12 @@ SH
   for tool in gh gh-axi curl; do
     cat > "$fake/$tool" <<'SH'
 #!/usr/bin/env bash
-printf '%s\n' "$(basename "$0")" >> "${FM_FORGE_LOG:?}"
+printf '%s %s\n' "$(basename "$0")" "$*" >> "${FM_FORGE_LOG:?}"
+if [ "$(basename "$0")" = gh ] && [ "${GH_HOST:-}" = example.test ]; then
+  case " $* " in
+    *' --json baseRefName '*) printf 'main\n'; exit 0 ;;
+  esac
+fi
 exit 97
 SH
   done
@@ -71,6 +76,8 @@ make_world() { # <name>
   MAIN="$WORLD/main"
   MATE="$WORLD/mate"
   mkdir -p "$WORLD/root" "$MAIN"/{state,data,config,projects} "$MATE"/{state,data,config,projects,bin}
+  printf 'example.test\n' > "$MAIN/config/github-hosts"
+  printf 'example.test\n' > "$MATE/config/github-hosts"
   : > "$MATE/AGENTS.md"
   make_tools "$WORLD"
   : > "$WORLD/forge.log"
@@ -102,7 +109,7 @@ write_child() { # <home> <id> <status> [spawn-gen]
   git -C "$home/projects/$id" update-ref refs/remotes/origin/main "$sha"
   fm_write_meta "$home/state/$id.meta" \
     "window=firstmate:fm-$id" "worktree=$home/projects/$id" "project=$home/projects/$id" \
-    'harness=codex' 'kind=ship' 'mode=no-mistakes' 'yolo=off' \
+    'harness=codex' 'kind=ship' 'mode=no-mistakes' 'yolo=off' 'expected_base=main' \
     "spawn_gen=$spawn_gen" 'pr=https://example.test/owner/repo/pull/1' \
     "pr_head=$sha"
   printf '%s\n' "$status" > "$home/state/$id.status"
@@ -508,7 +515,6 @@ test_stalled_base_read_does_not_starve_later_ledger_outcomes() {
     url="https://github.com/owner/repo/pull/1"
     [ "$id" != b-ready ] || url="https://github.com/owner/repo/pull/2"
     write_child "$MATE" "$id" "done: PR $url checks green"
-    printf 'expected_base=main\n' >> "$MATE/state/$id.meta"
   done
   cat > "$WORLD/fakebin/gh" <<'SH'
 #!/usr/bin/env bash
@@ -542,7 +548,6 @@ test_several_stalled_base_reads_resume_before_later_ledger_outcomes() {
   for id in a-hung b-hung c-hung z-ready; do
     number=$((number + 1))
     write_child "$MATE" "$id" "done: PR https://github.com/owner/repo/pull/$number checks green"
-    printf 'expected_base=main\n' >> "$MATE/state/$id.meta"
   done
   cat > "$WORLD/fakebin/gh" <<'SH'
 #!/usr/bin/env bash
@@ -614,7 +619,6 @@ test_readiness_deadline_owns_forge_processes_on_both_paths() {
       for id in a-hung b-hung z-ready; do
         number=$((number + 1))
         write_child "$home" "$id" "done: PR https://github.com/owner/repo/pull/$number checks green"
-        printf 'expected_base=main\n' >> "$home/state/$id.meta"
         sed 's/^mode=no-mistakes$/mode=direct-PR/' "$home/state/$id.meta" > "$home/state/$id.meta.tmp"
         mv "$home/state/$id.meta.tmp" "$home/state/$id.meta"
         age "$home/state/$id.meta"
@@ -751,7 +755,6 @@ test_forced_cadence_visit_keeps_floor_after_ledger_deadline() {
   make_world "forced-cadence-floor-$mode"; bind_secondmate local
   write_child "$MATE" 0-cadence 'working: awaiting the pipeline result'
   write_child "$MATE" a-ledger 'done: PR https://github.com/owner/repo/pull/1 checks green'
-  printf 'expected_base=main\n' >> "$MATE/state/a-ledger.meta"
   branch=$(git -C "$MATE/projects/0-cadence" symbolic-ref --short HEAD)
   head=$(git -C "$MATE/projects/0-cadence" rev-parse HEAD)
   cat > "$WORLD/fakebin/gh" <<'SH'
@@ -1344,7 +1347,10 @@ test_watcher_poll_delivers_child_ledger_line_to_parent() {
   key=$(reported_outcome_key "$MATE" child 'done') || fail "watcher ledger receipt key missing"
   sed -E 's/ \[at=[0-9]+\]//' "$MAIN/state/mate.status" | grep -Fxq "done [key=$key]: child child done: PR https://example.test/owner/repo/pull/1 checks green pr=https://example.test/owner/repo/pull/1 mode=no-mistakes yolo=off" \
     || fail "the watcher poll did not deliver the child's ledger line to the parent: $(cat "$MAIN/state/mate.status" 2>/dev/null; cat "$WORLD/mate-watch.out")"
-  [ ! -s "$WORLD/forge.log" ] || fail "ledger delivery invoked a forge command"
+  grep -Fq 'gh pr view https://example.test/owner/repo/pull/1 --json baseRefName' "$WORLD/forge.log" \
+    || fail 'ledger delivery did not verify its destination'
+  [ "$(wc -l < "$WORLD/forge.log" | tr -d ' ')" = 1 ] \
+    || fail 'ledger delivery invoked a forge command beyond its destination check'
   pass "the real watcher poll delivers a child's terminal ledger line to the parent channel"
 }
 
