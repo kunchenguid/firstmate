@@ -65,7 +65,7 @@ The absence of a routed work item is not a divergence and the guard never requir
 4. Attest the full inventory for that review pass under the caller authority in Policy above.
 5. Relay the choices to the user as decisions from Bearings' user's Call section under `AGENTS.md` section 9; do not use the word hold in user chat.
 6. Close each call only through `answer` (or a channel that feeds `answers`), close a board-requested moot call through evidence-backed `reconcile close`, record a still-active reconciliation through `reconcile note`, use `--until` when the user defers it, or confirm a channel already closed it.
-7. Confirm Bearings reflects the outcome: answered or reconciled-moot calls leave user's Call, released work resumes, active reconciliations remain held, and deferred calls sit in Charted Next with their date.
+7. Confirm Bearings reflects the outcome: answered or reconciled-moot calls leave user's Call, released work resumes, active reconciliations remain held, and deferred calls sit in Next with their date.
 
 `bin/fm-captain-hold.sh --help` owns command syntax, close modes, legacy-identity compatibility, completion attestation, retry behavior, and close ordering.
 `docs/captain-hold-lifecycle.md` records the mechanism and regression evidence without restating this policy.

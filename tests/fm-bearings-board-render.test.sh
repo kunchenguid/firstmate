@@ -116,8 +116,8 @@ render() {  # <home> <charted-json> [charted_more] [charted_warning_more]
   render_board "$1" '[]' "$2" "${3:-0}" "${4:-0}"
 }
 
-charted_next_count() {  # <render-json>
-  printf '%s' "$1" | jq -r '.stats[] | select(.label == "charted next") | .n'
+next_count() {  # <render-json>
+  printf '%s' "$1" | jq -r '.stats[] | select(.label == "next") | .n'
 }
 
 test_a_warning_row_reads_as_a_repair_not_as_queued_work() {
@@ -141,7 +141,7 @@ test_a_warning_row_reads_as_a_repair_not_as_queued_work() {
   pass "a warning row badges needs repair while queued work keeps waiting"
 }
 
-test_warnings_are_excluded_from_the_charted_next_count() {
+test_warnings_are_excluded_from_the_next_count() {
   local home out
   home=$(make_home warning-count)
   out=$(render "$home" '[
@@ -149,11 +149,11 @@ test_warnings_are_excluded_from_the_charted_next_count() {
     {"id":"warn-one","repo":"sample","title":"Home unreadable","reason":"current home state unavailable","dispatchable":false,"kind":"warning"},
     {"id":"warn-two","repo":"sample","title":"Inventory mismatch","reason":"main inventory","dispatchable":false,"kind":"warning"}
   ]')
-  [ "$(charted_next_count "$out")" = 1 ] \
-    || fail "the charted next tally counted alarms as queued work: $out"
+  [ "$(next_count "$out")" = 1 ] \
+    || fail "the next tally counted alarms as queued work: $out"
   printf '%s' "$out" | jq -e '(.charted | length) == 3' >/dev/null \
     || fail "excluding warnings from the count also dropped their rows: $out"
-  pass "the charted next count counts queued work only, and still renders warnings"
+  pass "the next count counts queued work only, and still renders warnings"
 }
 
 test_a_board_of_only_warnings_still_reports_nothing_queued() {
@@ -162,7 +162,7 @@ test_a_board_of_only_warnings_still_reports_nothing_queued() {
   out=$(render "$home" '[
     {"id":"warn-only","repo":"sample","title":"Home unreadable","reason":"current home state unavailable","dispatchable":false,"kind":"warning"}
   ]')
-  [ "$(charted_next_count "$out")" = 0 ] \
+  [ "$(next_count "$out")" = 0 ] \
     || fail "a warning-only board claimed queued work: $out"
   printf '%s' "$out" | jq -e '
     (.empty | length) == 1 and (.empty[0] | test("Nothing is queued"))
@@ -177,11 +177,11 @@ test_omitted_warnings_never_count_as_more_queued() {
   out=$(render "$home" '[
     {"id":"warn-visible","repo":"sample","title":"Home unreadable","reason":"current home state unavailable","dispatchable":false,"kind":"warning"}
   ]' 0 1)
-  [ "$(charted_next_count "$out")" = 0 ] \
+  [ "$(next_count "$out")" = 0 ] \
     || fail "an omitted warning was counted as queued work: $out"
   printf '%s' "$out" | jq -e '
     (.empty | length) == 1 and (.empty[0] | test("Nothing is queued"))
-      and (.more == ["+1 more repair warning - ask firstmate for the full chart"])
+      and (.more == ["+1 more repair warning - ask firstmate for the full list"])
       and ([.more[] | select(test("more queued"))] | length) == 0
   ' >/dev/null || fail "an omitted warning was labeled as more queued: $out"
   pass "omitted warnings remain separate from omitted queued work"
@@ -194,8 +194,8 @@ test_an_omitted_kind_keeps_the_existing_queued_rendering() {
     {"id":"with-reason","repo":"sample","title":"With reason","reason":"blocked on prep","dispatchable":true},
     {"id":"no-reason","repo":"sample","title":"No reason","reason":"","dispatchable":true}
   ]' 2)
-  [ "$(charted_next_count "$out")" = 4 ] \
-    || fail "an omitted kind changed the charted next tally: $out"
+  [ "$(next_count "$out")" = 4 ] \
+    || fail "an omitted kind changed the next tally: $out"
   printf '%s' "$out" | jq -e '
     ([.charted[0].badges[] | .text] == ["waiting"])
       and (.charted[1].badges == [])
@@ -248,8 +248,8 @@ test_charted_next_reads_newest_filed_first() {
   ]')
   printf '%s' "$out" | jq -e '
     [.charted[] | .title] == ["Filed in August", "Filed in July", "Filed in June"]
-  ' >/dev/null || fail "charted next was not ordered newest filed first: $out"
-  pass "charted next renders the most recently filed work first"
+  ' >/dev/null || fail "next was not ordered newest filed first: $out"
+  pass "next renders the most recently filed work first"
 }
 
 test_charted_rows_without_a_filed_date_follow_the_dated_rows_in_payload_order() {
@@ -271,7 +271,7 @@ test_an_underway_identifier_label_is_not_replaced_by_run_status
 test_charted_next_reads_newest_filed_first
 test_charted_rows_without_a_filed_date_follow_the_dated_rows_in_payload_order
 test_a_warning_row_reads_as_a_repair_not_as_queued_work
-test_warnings_are_excluded_from_the_charted_next_count
+test_warnings_are_excluded_from_the_next_count
 test_a_board_of_only_warnings_still_reports_nothing_queued
 test_omitted_warnings_never_count_as_more_queued
 test_an_omitted_kind_keeps_the_existing_queued_rendering

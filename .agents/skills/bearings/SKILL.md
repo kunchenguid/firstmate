@@ -37,7 +37,7 @@ For a contribution wake or linked-issue filing, go directly to Contribution foll
 1. **Gather live team state with one deterministic command.**
    Run `snapshot=$(bin/fm-bearings-snapshot.sh --json)` at invocation time and read that compact output.
    It is the single bounded, deterministic team-state source for Bearings.
-   Do not create or consult a second fleet-state reader, parser contract, status-event-tail interpretation, visible-session recap, ad-hoc project probe, or ad-hoc `gh-axi`/`gh` query.
+   Do not create or consult a second team-state reader, parser contract, status-event-tail interpretation, visible-session recap, ad-hoc project probe, or ad-hoc `gh-axi`/`gh` query.
    The command's header and `--help` output own its exact fields, bounds, opt-ins, and output contract.
    The default performs bounded concurrent remote-ledger reads for registered remote homes under one shared snapshot budget and may refresh the parent-side cache.
    Only pass `--include-prs` when the user asks for repository-wide live GitHub PR enrichment.
@@ -47,17 +47,17 @@ For a contribution wake or linked-issue filing, go directly to Contribution foll
    A decision is simply a task held for the user (`captain-hold-lifecycle`), whatever its kind.
    The canonical snapshot assigns every user hold exactly one bucket from structured fields only: `blocked` when any blocker is unresolved, else `dated` while `hold_until` is in the future, else `aged` when an undated hold has reached the configured age threshold, else `live`.
    Never use hold-reason or body prose to classify or place a decision.
-   A `live` hold appears in user's Call; `blocked`, `dated`, and `aged` holds appear as disclosed Charted Next gates stating their structured reason.
-   Use `--all-decisions` to reveal every user hold available within the bounded snapshot and remove each revealed gate from Charted Next so the buckets remain exclusive.
+   A `live` hold appears in user's Call; `blocked`, `dated`, and `aged` holds appear as disclosed Next gates stating their structured reason.
+   Use `--all-decisions` to reveal every user hold available within the bounded snapshot and remove each revealed gate from Next so the buckets remain exclusive.
    Aging is only a presentation safety net, and re-holding with `--until` remains the durable deferral.
    Do not scrape reports, visual-review artifacts, raw status-event tails, or visible conversation history to supplement current state.
    A queued item under `gates` only becomes "next work" when its blocker is gone and its time/date gate has arrived.
    Until then it stays queued with the reason.
    The `(main-inventory)` gate is an action-free integrity warning rather than queued work.
-   Render it under Charted Next with the related `omitted` disclosure, never invent an Underway row from backlog-only state, and never move it into user's Call.
-   The same holds for a Project Director home whose current state is unavailable, and for a readable home whose `invalidity` reports a backlog-vs-metadata mismatch: the mismatch is a repair notice about that home's own books, not a reason to drop its separately projected decisions, queued, landed, or live work.
+   Render it under Next with the related `omitted` disclosure, never invent an In Progress row from backlog-only state, and never move it into user's Call.
+   The same holds for a Project Director home whose current state is unavailable, and for a readable home whose `invalidity` reports a backlog-vs-metadata mismatch: the mismatch is a repair notice about that home's own books, not a reason to drop its separately projected decisions, queued, completed, or live work.
    The `(return-catchup)` gate is the same shape: an action-free notice that an away-return catch-up is still open, naming the blockers left to clear or the reason the catch-up was retained.
-   Render it under Charted Next like any other warning row: reporting is not ordinary work, while acting on the team still waits for `bin/fm-afk-return.sh check` (`/afk`).
+   Render it under Next like any other warning row: reporting is not ordinary work, while acting on the team still waits for `bin/fm-afk-return.sh check` (`/afk`).
 
 2. **Record a later reconcile notification for any home whose own books disagree.**
    When the snapshot reports a Project Director home whose `invalidity` is `orphan_in_flight`, `unowned_current`, or `terminal_in_flight`, that home's backlog and its own task metadata disagree and only that home may fix it.
@@ -83,9 +83,9 @@ For a contribution wake or linked-issue filing, go directly to Contribution foll
    The detailed report includes:
    - **Title** - `# Bearings - <day> <YYYY-MM-DD>` (use "Morning status" only when the user specifically asks for a morning brief), followed by two or three sentences framing where things stand.
    - **user's Call** - every unsuppressed open decision summarized with its options from the structured decision record, plus each PR ready to merge and each needed credential or login, every PR with the full `https://...` URL, never a bare `#number`.
-   - **Recently Landed** - the bounded current recent-completions baseline from structured state across the main team and every registered Project Director home, rendered in full on every run.
-   - **Underway** - each live direct report making progress, with its current state, and the plans or main pickup pointers worth reopening (`data/<id>/report.md` files, `.lavish/*.html` boards).
-   - **Charted Next** - queued or gated work, including deferred or aged user-hold safety gates and any main-inventory integrity warning, with each item's blocker, date, age, or integrity reason.
+   - **Recently Completed** - the bounded current recent-completions baseline from structured state across the main team and every registered Project Director home, rendered in full on every run.
+   - **In Progress** - each live direct report making progress, with its current state, and the plans or main pickup pointers worth reopening (`data/<id>/report.md` files, `.lavish/*.html` boards).
+   - **Next** - queued or gated work, including deferred or aged user-hold safety gates and any main-inventory integrity warning, with each item's blocker, date, age, or integrity reason.
    After writing the file, return the concise four-section chat digest and include the report path or link without adding a fifth section.
    For a richer review surface, offer `/bearings lavish` when the report has enough structure to deserve one, but only after the required digest is ready.
 
@@ -96,21 +96,21 @@ For a contribution wake or linked-issue filing, go directly to Contribution foll
 
 Compose the payload from the same snapshot with the same ranking judgment as the chat digest, plus these board rules:
 
-- A user's Call decision key is the user-held TASK ID from `decisions_open` (legacy `<origin>-decision-<key>` rows are already task ids); a merge card's key is `merge.<task-id>`; the Charted Next dispatch picker's key is `dispatch.charted`.
+- A user's Call decision key is the user-held TASK ID from `decisions_open` (legacy `<origin>-decision-<key>` rows are already task ids); a merge card's key is `merge.<task-id>`; the Next dispatch picker's key is the compatibility value `dispatch.charted`.
 - Before carding a hold, check that its SUBJECT has not already landed, and omit it when it has. `build` drops a card whose task or PR appears in the payload's own landed rows, and one whose task is no longer an open user call. When a hold waits on one specific PR, put that PR in the card's `pr_url`. When it concerns a published version, put the artifact and numeric three-part version in the card's structured `subject`; landed rows for releases carry the same identity, and a matching or newer version drops the card. Identity matching is structured only, so verify any subject without one of these identities against current reality before carding it.
 - Never author a `reconcile` option on any card. `build` gives every decision card the standard reconcile choice itself, and the payload validator reserves that value across all card types; recommendations must name an authored option.
 - Compose exactly one decision card per user-held task id. When one task carries multiple questions, consolidate all of them and their options into that card; never emit duplicate cards with the same task-id key.
 - Decision cards carry agent-authored copy: a short noun-phrase title, one-line `about` and `decide` context rows, and option labels with hints, with the recommended option marked.
 - Card `type` (decision, merge, credential) is your composing judgment from the row's content; no backlog field types a card for you.
 - When the card's task is a user-gated WORK item (the answer should free it to proceed rather than complete it), set the card's `close: "release"` so the answer lifts the hold instead of closing the task; question-shaped items omit it.
-- A Charted Next row's optional `kind` separates work from alarms: omit it (or set `"queued"`) for real queued work, and set `"warning"` on every action-free fleet-integrity notice - the `(main-inventory)` gate, the `(return-catchup)` gate, an unavailable Project Director home, and an inventory-mismatch repair notice. The board badges a warning row `needs repair` instead of `waiting` and leaves it out of the Charted Next count, so those rows never read as dispatchable queued work.
-- `charted_more` counts omitted queued rows only, while `charted_warning_more` counts omitted warning rows only; keep both counts separate whenever the board payload truncates Charted Next.
-- Every Underway row copies the task-identifying `in_flight.name` from the snapshot into an explicit `name` field, which the board leads with while keeping the run status on its second line.
+- A Next row's optional `kind` separates work from alarms: omit it (or set `"queued"`) for real queued work, and set `"warning"` on every action-free team-integrity notice - the `(main-inventory)` gate, the `(return-catchup)` gate, an unavailable Project Director home, and an inventory-mismatch repair notice. The board badges a warning row `needs repair` instead of `waiting` and leaves it out of the Next count, so those rows never read as dispatchable queued work.
+- Compatibility field `charted_more` counts omitted queued rows only, while `charted_warning_more` counts omitted warning rows only; keep both counts separate whenever the board payload truncates Next.
+- Every In Progress row copies the task-identifying `in_flight.name` from the snapshot into an explicit `name` field, which the board leads with while keeping the run status on its second line.
   The snapshot command's header owns its durable-title-or-id normalization; never replace the projected label with run status or invent another label.
-- Every Charted Next row copies the snapshot gate's durable filed date into `filed`, and the board orders the section by it, newest filed first.
+- Every Next row copies the snapshot gate's durable filed date into `filed`, and the board orders the section by it, newest filed first.
   Follow `bin/fm-bearings-board.sh`'s payload contract for the accepted format.
   Omit it or pass null for a row with no durable filed date - the main-inventory or return-catchup warning, an unavailable Project Director home, or a queued row filed before dates were recorded - and the board keeps those rows in payload order after every dated row.
-- Every user's Call item and every Underway, Recently Landed, and Charted Next row carries an explicit `repo` field. Fill it from the snapshot and task records wherever known; use null or an empty string only as the deliberate genuinely-no-repo marker, in which case the template may show the internal id. Ids otherwise stay in the payload only as the routing channel, and composed reasons name blockers in plain words.
+- Every user's Call item and every In Progress, Recently Completed, and Next row carries an explicit `repo` field. Fill it from the snapshot and task records wherever known; use null or an empty string only as the deliberate genuinely-no-repo marker, in which case the template may show the internal id. Ids otherwise stay in the payload only as the routing channel, and composed reasons name blockers in plain words.
 
 Run `build` once after composing the payload.
 Its serve-first sequence publishes the board, establishes and verifies its Lavish session with `lavish-axi`, reopens an ended session when necessary, and only then binds the answer source and proves a live polling listener; use the session URL it prints in the chat digest.
@@ -151,24 +151,24 @@ Every `/bearings` chat response renders EXACTLY these four sections, in THIS ord
    Show the other contribution actors only as counts beside the checked/known coverage, and disclose `captain_omitted`, `unmeasured_homes`, stale verdicts and checks with no verdict when nonzero.
    Empty-state: "Nothing needs your action right now" is allowed only when `contributions.proven_clear` is true and the existing decision set is empty.
    When the section is empty but coverage is incomplete, say that no decision is recorded and give the checked/known count; a missing coverage field is also unverified.
-2. **Recently Landed** - the bounded current recent-completions baseline: merged PRs, completed Investigators, and finished local-only merges across the main team and every registered Project Director home.
+2. **Recently Completed** - the bounded current recent-completions baseline: merged PRs, completed Investigators, and finished local-only merges across the main team and every registered Project Director home.
    Empty-state: "No recent completions are in the current baseline."
-3. **Underway** - live work progressing on its own, one line of current state per direct report.
-   Empty-state: "Nothing is underway."
-4. **Charted Next** - queued or gated work waiting on the team or a date, deferred or aged user-hold safety gates, plus action-free team-integrity warnings.
+3. **In Progress** - live work progressing on its own, one line of current state per direct report.
+   Empty-state: "Nothing is in progress."
+4. **Next** - queued or gated work waiting on the team or a date, deferred or aged user-hold safety gates, plus action-free team-integrity warnings.
    Empty-state: "Nothing is queued."
 
 Rules that keep the contract unambiguous:
 
 - Every section ALWAYS renders, even when empty, with its short empty-state sentence; never omit a section.
 - Every chat digest and file-mode report is a complete current snapshot, never a delta against a prior report.
-- Recently Landed always renders the bounded current baseline, even when the same completions appeared in an earlier report.
-- A user hold appears in exactly one decision bucket: an unsuppressed live hold is in user's Call, while a blocked, dated, or aged hold is in Charted Next; `--all-decisions` moves the latter into user's Call and removes its gate.
-- Underway independently reports active work, so an actively worked user-held task may appear there plus its one decision bucket.
-- A Project Director home can contribute to more than one section at once. Each active child is an Underway row regardless of the home-level `bearings_state`, while that same home's live user hold is user's Call and its queued or external holds stay Charted Next. Do not hide active children because the home also has an open user hold.
-- The strict boundary keeps action-free items OUT of user's Call: a working or validating task, a queued item blocked on another task or a date, landed work, a completed Investigator's report pointer, a declared `paused:` external wait, and a bare recorded PR with no merge-ready signal each belong to one of the other three sections, never user's Call.
-- A Project Director's own home-level row is not an Underway unit: `externally_held` belongs in Charted Next, and `unknown` belongs there as an unavailable-state gate unless its reason requires the user's action.
-- Do not suppress separately projected decisions, landed records, or gates from a `partial-structured` home merely because that Project Director's own row is `unknown` or its `invalidity` reports an inventory mismatch.
+- Recently Completed always renders the bounded current baseline, even when the same completions appeared in an earlier report.
+- A user hold appears in exactly one decision bucket: an unsuppressed live hold is in user's Call, while a blocked, dated, or aged hold is in Next; `--all-decisions` moves the latter into user's Call and removes its gate.
+- In Progress independently reports active work, so an actively worked user-held task may appear there plus its one decision bucket.
+- A Project Director home can contribute to more than one section at once. Each active child is an In Progress row regardless of the home-level `bearings_state`, while that same home's live user hold is user's Call and its queued or external holds stay Next. Do not hide active children because the home also has an open user hold.
+- The strict boundary keeps action-free items OUT of user's Call: a working or validating task, a queued item blocked on another task or a date, completed work, a completed Investigator's report pointer, a declared `paused:` external wait, and a bare recorded PR with no merge-ready signal each belong to one of the other three sections, never user's Call.
+- A Project Director's own home-level row is not an In Progress unit: `externally_held` belongs in Next, and `unknown` belongs there as an unavailable-state gate unless its reason requires the user's action.
+- Do not suppress separately projected decisions, completion records, or gates from a `partial-structured` home merely because that Project Director's own row is `unknown` or its `invalidity` reports an inventory mismatch.
 - Include the required direct address to the user inside one item or empty-state sentence.
 - Every PR appears as the full `https://...` URL; a shorthand `#number` is fine only as a back-reference after the full URL has already appeared in the same digest.
 - The chat follows `AGENTS.md` section 9 and carries one scannable line per item.

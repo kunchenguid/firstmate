@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>Bearings - fleet board</title>
+<title>Bearings - team board</title>
 <style>
 /* ============================================================
    Bearings board - Firstmate Design System, inlined for portability.
@@ -155,7 +155,7 @@ a { color: inherit; text-decoration: none; }
 .bb-section__head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
 .bb-cols { display: grid; grid-template-columns: minmax(0,1fr) minmax(0,1fr); gap: 22px; }
 
-/* ---- Captain's Call: one card at a time, dealt off a visible stack ---- */
+/* ---- Your Call: one card at a time, dealt off a visible stack ---- */
 .bb-callwrap { display: flex; flex-direction: column; gap: 12px; }
 /* extra top margin clears the pile edges that poke below the active card */
 .bb-stacknav { display: flex; align-items: center; gap: 10px; margin-top: 6px; }
@@ -233,7 +233,7 @@ a { color: inherit; text-decoration: none; }
   background: var(--surface-card); border: 1.5px solid var(--border-default); border-radius: var(--radius-sm); padding: 8px 11px; }
 .bb-freeform:focus { outline: none; border-color: var(--rust-400); box-shadow: var(--focus-ring); }
 
-/* ---- compact rows (Underway / Landed / Charted) ---- */
+/* ---- compact rows (In Progress / Recently Completed / Next) ---- */
 .bb-rows { display: flex; flex-direction: column; }
 .bb-row {
   display: flex; align-items: center; gap: 12px; padding: 11px 18px;
@@ -258,7 +258,7 @@ a { color: inherit; text-decoration: none; }
 }
 .bb-empty { padding: 18px; font-size: var(--fs-sm); color: var(--text-muted); }
 
-/* ---- Charted Next dispatch picker ---- */
+/* ---- Next dispatch picker ---- */
 /* margin:0 kills the UA default checkbox margin so picker rows and spacer rows
    share one text left edge */
 .bb-pick { accent-color: var(--rust-500); width: 16px; height: 16px; flex: none; cursor: pointer; margin: 0; }
@@ -301,14 +301,14 @@ a { color: inherit; text-decoration: none; }
     <div class="bb-section__head">
       <span class="fm-sign fm-sign--eyebrow">
         <svg class="fm-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.268 21a2 2 0 0 0 3.464 0"/><path d="M3.262 15.326A1 1 0 0 0 4 17h16a1 1 0 0 0 .74-1.673C19.41 13.956 18 12.499 18 8A6 6 0 0 0 6 8c0 4.499-1.411 5.956-2.738 7.326"/></svg>
-        Captain's Call
+        Your Call
       </span>
       <span class="fm-sign fm-sign--muted" id="bb-call-sub"></span>
     </div>
     <div class="bb-callwrap">
       <div class="bb-call" id="bb-call"></div>
       <!-- nav sits under the stack so the active card's top edge aligns with
-           the Charted Next card across the row -->
+           the Next card across the row -->
       <div class="bb-stacknav">
         <span class="bb-stacknav__count" id="bb-stack-count">-</span>
         <button type="button" class="bb-stacknav__btn" id="bb-stack-prev" aria-label="Previous card">
@@ -325,7 +325,7 @@ a { color: inherit; text-decoration: none; }
     <div class="bb-section__head">
       <span class="fm-sign fm-sign--eyebrow">
         <svg class="fm-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="22 12 16 12 14 15 10 15 8 12 2 12"/><path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"/></svg>
-        Charted Next
+        Next
       </span>
       <span class="fm-sign fm-sign--muted" id="bb-charted-sub"></span>
     </div>
@@ -347,8 +347,8 @@ a { color: inherit; text-decoration: none; }
     <section class="bb-section">
       <div class="bb-section__head">
         <span class="fm-sign fm-sign--eyebrow">
-          <svg class="fm-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 10.189V14"/><path d="M12 2v3"/><path d="M19 13V7a2 2 0 0 0-2-2H7a2 2 0 0 0-2 2v6"/><path d="M19.38 20A11.6 11.6 0 0 0 21 14l-8.188-3.639a2 2 0 0 0-1.624 0L3 14a11.6 11.6 0 0 0 2.81 7.76"/><path d="M2 21c.6.5 1.2 1 2.5 1 2.5 0 2.5-2 5-2 1.3 0 1.9.5 2.5 1s1.2 1 2.5 1c2.5 0 2.5-2 5-2 1.3 0 1.9.5 2.5 1"/></svg>
-          Underway
+          <svg class="fm-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="m10 8 6 4-6 4Z"/></svg>
+          In Progress
         </span>
       </div>
       <div class="fm-card"><div class="bb-rows" id="bb-underway"></div></div>
@@ -358,7 +358,7 @@ a { color: inherit; text-decoration: none; }
       <div class="bb-section__head">
         <span class="fm-sign fm-sign--eyebrow">
           <svg class="fm-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21.801 10A10 10 0 1 1 17 3.335"/><path d="m9 11 3 3L22 4"/></svg>
-          Recently Landed
+          Recently Completed
         </span>
       </div>
       <div class="fm-card"><div class="bb-rows" id="bb-landed"></div></div>
@@ -383,7 +383,7 @@ __FM_BEARINGS_BOARD_DATA__
   "use strict";
 
   /* Fail closed: a board with unreadable or wrong-schema data says so plainly
-     instead of rendering an empty page that looks like an empty fleet. */
+     instead of rendering an empty page that looks like an empty team. */
   function renderBoardError(msg) {
     var main = document.querySelector(".bb-main");
     main.innerHTML = "";
@@ -414,7 +414,7 @@ __FM_BEARINGS_BOARD_DATA__
     renderBoardError("Unsupported board data schema: " + (data && data.schema ? data.schema : "(none)"));
     return;
   }
-  var fleetLists = [data.captains_call, data.underway, data.landed, data.charted];
+  var teamLists = [data.captains_call, data.underway, data.landed, data.charted];
   var callItemsValid = Array.isArray(data.captains_call) && data.captains_call.every(function (item) {
     return item && typeof item === "object" &&
       typeof item.key === "string" && item.key.length > 0 &&
@@ -422,7 +422,7 @@ __FM_BEARINGS_BOARD_DATA__
       typeof item.title === "string" && item.title.length > 0 &&
       Array.isArray(item.options);
   });
-  if (!fleetLists.every(Array.isArray) || !callItemsValid) {
+  if (!teamLists.every(Array.isArray) || !callItemsValid) {
     renderBoardError("The board data does not have the required structure");
     return;
   }
@@ -439,7 +439,7 @@ __FM_BEARINGS_BOARD_DATA__
      so every count of queued work excludes them. */
   function isWarning(t) { return t && t.kind === "warning"; }
   function chartedQueued(rows) { return (rows || []).filter(function (t) { return !isWarning(t); }); }
-  /* Charted Next reads newest filed first, so the most recently filed upcoming
+  /* Next reads newest filed first, so the most recently filed upcoming
      work is at the top. ISO filed dates compare as text; a row with no
      comparable date keeps its payload order after every dated row. */
   function chartedOrder(rows) {
@@ -461,9 +461,9 @@ __FM_BEARINGS_BOARD_DATA__
   var callTotal = data.captains_call.length;
   var stats = [
     { n: callTotal, l: "need you", call: true },
-    { n: data.underway.length, l: "underway" },
-    { n: data.landed.length, l: "landed recently" },
-    { n: chartedQueued(data.charted).length + chartedMoreQueued, l: "charted next" }
+    { n: data.underway.length, l: "in progress" },
+    { n: data.landed.length, l: "completed recently" },
+    { n: chartedQueued(data.charted).length + chartedMoreQueued, l: "next" }
   ];
   var strip = document.getElementById("bb-stats");
   stats.forEach(function (s) {
@@ -473,9 +473,9 @@ __FM_BEARINGS_BOARD_DATA__
     strip.appendChild(t);
   });
   document.getElementById("bb-call-sub").textContent =
-    callTotal ? callTotal + " item" + (callTotal === 1 ? "" : "s") + " wait on you, captain" : "nothing needs you, captain";
+    callTotal ? callTotal + " item" + (callTotal === 1 ? "" : "s") + " wait on you" : "nothing needs you";
 
-  /* Captain's Call deck: every item renders as the same full card */
+  /* Your Call deck: every item renders as the same full card */
   var deck = document.getElementById("bb-call");
   function ctxRow(k, v, rec) {
     var row = el("div", "bb-ctx__row" + (rec ? " bb-ctx__row--rec" : ""));
@@ -577,7 +577,7 @@ __FM_BEARINGS_BOARD_DATA__
         };
         if (item.close) ctxData.close = item.close;
         window.lavish.queuePrompt(
-          "Captain's Call answer - " + item.title + ": " + displayAnswer,
+          "Your Call answer - " + item.title + ": " + displayAnswer,
           { tag: "choice", text: item.title + " -> " + displayAnswer, element: form,
             data: ctxData }
         );
@@ -621,9 +621,9 @@ __FM_BEARINGS_BOARD_DATA__
     stackNav.hidden = true;
   }
 
-  /* Underway */
+  /* In Progress */
   var uw = document.getElementById("bb-underway");
-  if (!data.underway.length) uw.appendChild(el("div", "bb-empty", "Nothing is underway."));
+  if (!data.underway.length) uw.appendChild(el("div", "bb-empty", "Nothing is in progress."));
   data.underway.forEach(function (t) {
     var row = el("div", "bb-row");
     row.appendChild(badge(t.state === "working" ? "online" : "info", t.state));
@@ -631,7 +631,7 @@ __FM_BEARINGS_BOARD_DATA__
     /* the snapshot's durable name-or-id label leads the row so a scan says
        WHICH task this is; the run status keeps its place on the second line */
     main.appendChild(el("div", "bb-row__title", t.name));
-    /* captain-facing rows name the repo; the internal task id shows only when
+    /* user-facing rows name the repo; the internal task id shows only when
        no repo is known */
     main.appendChild(el("div", "bb-row__sub",
       t.doing + " · " + t.kind + " · " + (t.repo || t.id)));
@@ -639,7 +639,7 @@ __FM_BEARINGS_BOARD_DATA__
     uw.appendChild(row);
   });
 
-  /* Landed */
+  /* Recently Completed */
   var ld = document.getElementById("bb-landed");
   if (!data.landed.length) ld.appendChild(el("div", "bb-empty", "No recent completions are in the current baseline."));
   data.landed.forEach(function (t) {
@@ -659,7 +659,7 @@ __FM_BEARINGS_BOARD_DATA__
     ld.appendChild(row);
   });
 
-  /* Charted Next + dispatch picker */
+  /* Next + dispatch picker */
   var ch = document.getElementById("bb-charted");
   var bar = document.getElementById("bb-dispatch");
   var barCount = document.getElementById("bb-dispatch-count");
@@ -712,10 +712,10 @@ __FM_BEARINGS_BOARD_DATA__
   document.getElementById("bb-charted-sub").textContent =
     chartedMoreQueued ? "showing " + chartedShown + " of " + chartedTotal : "";
   if (chartedMoreQueued) {
-    ch.appendChild(el("span", "bb-morechip", "+" + chartedMoreQueued + " more queued - ask firstmate for the full chart"));
+    ch.appendChild(el("span", "bb-morechip", "+" + chartedMoreQueued + " more queued - ask firstmate for the full list"));
   }
   if (chartedMoreWarnings) {
-    ch.appendChild(el("span", "bb-morechip", "+" + chartedMoreWarnings + " more repair warning" + (chartedMoreWarnings === 1 ? "" : "s") + " - ask firstmate for the full chart"));
+    ch.appendChild(el("span", "bb-morechip", "+" + chartedMoreWarnings + " more repair warning" + (chartedMoreWarnings === 1 ? "" : "s") + " - ask firstmate for the full list"));
   }
 
   if (anyPickable) {

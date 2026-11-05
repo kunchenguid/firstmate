@@ -172,7 +172,7 @@ After cleanup, and still under the task's own lock, teardown does three things:
 - It runs `tasks-axi reopen`.
 
 The row returns to Queued with its hold intact.
-It remains on the appropriate user's Call or Charted Next decision surface instead of reading as work still under way.
+It remains on the appropriate user's Call or Next decision surface instead of reading as work still in progress.
 
 ### Interrupted cleanup
 
@@ -195,7 +195,7 @@ They are recorded for separate upstream work rather than representing defects in
   `done` reports `Task report link must be a data/<id>/report.md path`, and `update` reports `--report must be a data/<id>/report.md path`.
 
 When an interrupted retention leaves such a relocated report in the validated pending-close record, `answer` skips only that known-unsupported row artifact and closes normally.
-The delivery then remains absent from Recently Landed instead of wedging the user's answer.
+The delivery then remains absent from Recently Completed instead of wedging the user's answer.
 
 A pending-close record that fails validation outright is a different case, and it still refuses the answer.
 The refusal names the record and the validation reason, so the user can repair it rather than facing a bare failure.
@@ -399,11 +399,11 @@ It preserves every user hold in the bounded queued inventory of the owning home.
 | `hold_bucket` | Where the hold appears |
 | --- | --- |
 | `live` | A default user's Call entry. |
-| `blocked`, `dated`, or `aged` | Leaves the default user's Call, renders as a Charted Next gate stating why - the blocking work, the `until <date>`, or the floored age - and contributes to the concrete `omitted[]` disclosure. |
+| `blocked`, `dated`, or `aged` | Leaves the default user's Call, renders as a Next gate stating why - the blocking work, the `until <date>`, or the floored age - and contributes to the concrete `omitted[]` disclosure. |
 
 `--all-decisions` reveals every user hold available within the remote-summary bound and drops its gate.
-An available hold is therefore never in both user's Call and Charted Next.
-An actively worked held task may also appear in Underway, which reports running work independently of those decision buckets.
+An available hold is therefore never in both user's Call and Next.
+An actively worked held task may also appear in In Progress, which reports running work independently of those decision buckets.
 
 ### Accepted limits
 
@@ -416,9 +416,9 @@ Three accepted limits remain deliberate:
 
 Re-holding through the wrapper with `--until` remains the durable fix rather than relying on the projection safety net.
 
-### Recently Landed notes
+### Recently Completed notes
 
-[`bin/fm-landed-lib.sh`](../bin/fm-landed-lib.sh) owns Recently Landed's shared selection and artifact-display compatibility rules.
+[`bin/fm-landed-lib.sh`](../bin/fm-landed-lib.sh) owns Recently Completed's shared selection and artifact-display compatibility rules.
 A local-only landing's note is written by `tasks-axi done --note` as the last of the row's indented body lines rather than into the row title.
 The snapshot therefore reads that final line as the note as well as parsing the title, and the landing is published carrying its recorded note.
 A body that carries a user resolution record is the user's own prose and is never mined for that note, so a decision worded `local main` does not become a delivery artifact.
@@ -519,14 +519,14 @@ The suite does not test the accepted merge-to-cleanup re-hold window or asynchro
   An ordinary finished task in the same home still closes with its report link.
 - An interrupted cleanup leaves the row In flight and untouched with its pending record.
   When the row remains unanswered, the next session start retains it as queued and held with the deliverable recorded.
-  An answer before replay preserves that record's completed report while closing the call, so the next session start retires the satisfied record without losing the delivery from Recently Landed.
+  An answer before replay preserves that record's completed report while closing the call, so the next session start retires the satisfied record without losing the delivery from Recently Completed.
 - A pending-close record that cannot be validated refuses the answer while naming the record and the reason.
 - A relocated data directory keeps the retention in its one configured backlog.
 
 ### Merges, releases, and unreadable holds
 
 - Direct PR and local-only merge entrypoint calls refuse a still-held task before reaching the forge or moving local main.
-- A released pull request passes the guarded PR entrypoint, cleanup records its artifact, and Recently Landed publishes it.
+- A released pull request passes the guarded PR entrypoint, cleanup records its artifact, and Recently Completed publishes it.
 - An ordinary release still survives zero-retention cleanup and archives when configured.
 - a Builder row whose user hold cannot be read refuses cleanup before any destructive step and surfaces the read failure.
 - A released call whose decision text is `local main`, closed with no artifact, is not published as a local-only landing.

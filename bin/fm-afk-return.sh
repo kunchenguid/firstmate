@@ -653,10 +653,10 @@ EOF
   done
   [ "$count" -gt 0 ] || printf '  (nothing)\n'
 
-  # 5. landed, cleanup due: finished work whose task record is still live.
-  # Listing it keeps a landed task that remains live past the return from being
-  # overlooked. The cleanup itself is ordinary fleet work and waits for the gate.
-  printf 'Landed, cleanup due:\n'
+  # 5. completed, cleanup due: finished work whose task record is still live.
+  # Listing it keeps a completed task that remains live past the return from being
+  # overlooked. The cleanup itself is ordinary team work and waits for the gate.
+  printf 'Completed, cleanup due:\n'
   count=0
   while IFS="$(printf '\t')" read -r task url; do
     [ -n "$task" ] || continue

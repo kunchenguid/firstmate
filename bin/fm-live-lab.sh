@@ -2,7 +2,7 @@
 # fm-live-lab.sh - stand up, check, drive, and tear down one disposable live
 # supervision lab: a real lab main session on Claude or Pi, with the
 # supervision host (Claude) or branch (Pi) wired as a real home runs it,
-# optionally a real seeded local second mate and a real gated worker.
+# optionally a real seeded local Project Director and a real gated worker.
 #
 # Usage:
 #   fm-live-lab.sh up --harness claude|pi [--mate] [--worker]
@@ -30,7 +30,7 @@
 #                    committed tree <ref> of <source> (default: HEAD of the
 #                    checkout this script runs from) checked out as a genuine
 #                    primary checkout, with FM_HOME at its root.
-#   config/          backend tmux, Claude crews and second mates, and
+#   config/          backend tmux, Claude workers and Project Directors, and
 #                    supervision-host <line> (default claude on Claude, absent
 #                    on Pi; none leaves the file absent; off writes the
 #                    inherited supervision-host-off opt-out instead, so the
@@ -344,17 +344,17 @@ check_watcher() {
 
 check_mate() {
   local pid gate_rc
-  window_alive mate || { echo "fail mate: the $MATE_ID window is not running"; return 1; }
+  window_alive mate || { echo "fail Project Director: the $MATE_ID window is not running"; return 1; }
   pid=$(sed -n 1p "$ROOT/mate/state/.lock" 2>/dev/null)
-  pid_alive "$pid" || { echo "fail mate: the mate holds no session lock yet (wedged before its charter?)"; return 1; }
+  pid_alive "$pid" || { echo "fail Project Director: the Project Director holds no session lock yet (wedged before its charter?)"; return 1; }
   if [ "$HOST_OFF" = yes ]; then
     [ -f "$ROOT/mate/config/supervision-host-off" ] \
-      || { echo "fail mate: the inherited supervision-host-off flag is missing"; return 1; }
+      || { echo "fail Project Director: the inherited supervision-host-off flag is missing"; return 1; }
     bash "$ROOT/mate/bin/fm-supervision-engine-lib.sh" enabled "$ROOT/mate/config" claude
     gate_rc=$?
-    [ "$gate_rc" -eq 1 ] || { echo "fail mate: the supervision-host gate did not read off (exit $gate_rc)"; return 1; }
+    [ "$gate_rc" -eq 1 ] || { echo "fail Project Director: the supervision-host gate did not read off (exit $gate_rc)"; return 1; }
   fi
-  echo "ok mate: $MATE_ID pid $pid in $ROOT/mate"
+  echo "ok Project Director: $MATE_ID pid $pid in $ROOT/mate"
 }
 
 check_worker() {
@@ -473,9 +473,9 @@ PY
 }
 
 spawn_mate() {
-  local charter='Provide an idle live-validation lab second mate. When explicitly steered for a synthetic test, report only honest local lab outcomes; do not claim external PR activity, merge, or retire yourself.'
+  local charter='Provide an idle live-validation lab Project Director. When explicitly steered for a synthetic test, report only honest local lab outcomes; do not claim external PR activity, merge, or retire yourself.'
   (cd "$LAB" && lab_run FM_HOME="$LAB" FM_SECONDMATE_CHARTER="$charter" \
-    FM_SECONDMATE_SCOPE='second-mate live validation synthetic status relay' \
+    FM_SECONDMATE_SCOPE='Project Director live validation synthetic status relay' \
     "$LAB/bin/fm-home-seed.sh" "$MATE_ID" "$ROOT/mate" --no-projects) || return 1
   (cd "$LAB" && lab_run FM_HOME="$LAB" "$LAB/bin/fm-spawn.sh" "$MATE_ID" --secondmate)
 }
@@ -573,7 +573,7 @@ cmd_up() {
   record_launch_pid "$(lab_tmux display-message -p '#{pid}')"
 
   if [ "$mate" = yes ]; then
-    spawn_mate || die "cannot seed and launch the second mate"
+    spawn_mate || die "cannot seed and launch the Project Director"
     record_launch_pid "$(window_field mate '#{pane_pid}')"
   fi
   if [ "$worker" = yes ]; then

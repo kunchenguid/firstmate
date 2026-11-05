@@ -182,7 +182,7 @@ Treat `state/x-inbox/` as the source of truth and process **every** file you fin
       Conversation continuity: resolve referents like "this", "it", "that", "and then?" against **all** the conversation context the payload carries - `in_reply_to.text` (what `in_reply_to.author_handle` said just before, when present) plus the full `in_reply_to_chain` transcript, whose oldest-first order puts what was said most recently just before the mention at the end.
       A standalone mention (`in_reply_to` null) can still carry a chain - a thread starter or recent nearby messages - and its referents usually point there, so read the chain before concluding a mention has no context; only a mention with neither answers on its own.
       When chain entries disagree, weigh the entries nearest the mention most heavily, and skip `unavailable: true` gaps.
-      If nothing is in flight and the mention just asks what you are up to, say so honestly and in-voice (e.g. "Calm seas just now - nothing underway, standing by for the user's next orders.").
+      If nothing is in flight and the mention just asks what you are up to, say so honestly and in-voice (e.g. "Nothing is in progress right now; ready for the user's next request.").
    e. **Submit it without ever inlining the reply into a shell command.**
       Public mention text can influence your prose, so a double-quoted shell argument is unsafe (command substitution, variable expansion, quote breakage).
       Write the composed reply to a temporary file with your own file-writing tool - never via shell interpolation - then pass it by path:
@@ -249,7 +249,7 @@ This section is the sole owner of that procedure.
 
 This is also the **only** mechanism that reaches work outside this home.
 The lightweight link of step 3 writes into this home's own task record, so it can never bind a Project Director's task; `--work-home secondmate:<id>` here can.
-So treat second-mate-routed Relay work as a promised final by construction: the acknowledgement you just posted **is** the promise, and there is no other way to keep it.
+So treat Project Director-routed Relay work as a promised final by construction: the acknowledgement you just posted **is** the promise, and there is no other way to keep it.
 
 **When you promise a final (including every Relay request whose work is routed to a Project Director):**
 
@@ -273,7 +273,7 @@ So treat second-mate-routed Relay work as a promised final by construction: the 
    That wake is at-least-once: a failed cleanup can raise the same refusal again, carrying the same event id and reason.
    When the event id is one you already took up, acknowledge the wake and do not re-brief the work; re-acting is safe but redundant, because the corrected result resolves to the event id that was already accepted.
 2. For each ready commitment, run `bin/fm-public-followup.sh deliver <obligation-id>`.
-   With no `--text-file` it reuses the accepted terminal outcome exactly, which is the preferred path for a landed result.
+   With no `--text-file` it reuses the accepted terminal outcome exactly, which is the preferred path for a completed result.
    Only pass `--text-file` when the outcome genuinely needs composing, and hold it to the same public-safety bar as every other reply here.
    Delivery clears the bound task's legacy Relay link at the validated receipt boundary and stamps the registration `state=delivered`; it does **not** close the public loop.
    If it reports a cleanup failure, use its reconciliation message and do not post a legacy final.
@@ -283,7 +283,7 @@ So treat second-mate-routed Relay work as a promised final by construction: the 
    - "held" means the thread's platform or budget is unresolvable right now; retry once it is recoverable.
    - "mid-delivery" means a previous post started and its outcome was never recorded.
      Do NOT deliver again.
-     Establish whether that post landed, then either record its receipt with `record-posted <id> --attempt <n> --chunks <exact-count>` or escalate.
+     Establish whether that post succeeded, then either record its receipt with `record-posted <id> --attempt <n> --chunks <exact-count>` or escalate.
      Posting again would put a second reply in a public thread.
    - "the relay no longer accepts a follow-up" is a user decision, not a retry.
 4. After a successful deliver (or when the digest lists an `open-loop` line), decide the disposition in that same turn:

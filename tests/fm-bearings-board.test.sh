@@ -292,7 +292,7 @@ test_build_refuses_malformed_payloads_before_touching_the_board() {
   write_valid_payload "$data"
   jq '.captains_call[1].pr_url = "javascript:alert(1)"' "$data" > "$data.tmp" && mv "$data.tmp" "$data"
   set +e; out=$(run_board "$home" build "$data" 2>&1); rc=$?; set -e
-  [ "$rc" -ne 0 ] || fail "a non-HTTPS Captain’s Call PR URL was accepted"
+  [ "$rc" -ne 0 ] || fail "a non-HTTPS User’s Call PR URL was accepted"
 
   write_valid_payload "$data"
   jq '.landed = [{
