@@ -108,7 +108,7 @@ fi
 
 # The child's state is read last, immediately before the line is written.
 CHILD_STATE=unknown
-if [ -n "$CHILD" ]; then
+if fm_pending_reply_child_id_valid "$CHILD"; then
   CHILD_RAW=$(FM_HOME="$HOME_DIR" fm_run_timed 30 "$SCRIPT_DIR/fm-crew-state.sh" "$CHILD" 2>/dev/null | head -1) || true
   case "$CHILD_RAW" in
     'state: '*) CHILD_STATE=${CHILD_RAW#state: }; CHILD_STATE=${CHILD_STATE%% *} ;;

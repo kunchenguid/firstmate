@@ -2238,7 +2238,10 @@ test_missing_child_result_reads_unknown() {
   out=$(received_result "$fb" "$mate" "$home" kid no-such-child "")
   [ "$out" = "no-such-child unknown unknown" ] \
     || fail "a child with no record must record unknown and never finished: $out"
-  pass "a reply with no child result, or an unreadable one, records unknown"
+  out=$(received_result "$fb" "$mate" "$home" kid ./scoutdone "")
+  [ "$out" = "- unknown unknown" ] \
+    || fail "a path-shaped id must not read the real child and record finished: $out"
+  pass "a reply with no child result, an unreadable one, or a path-shaped id records unknown"
 }
 
 test_routine_resolution_appends_no_parent_line() {
@@ -2270,7 +2273,14 @@ test_hand_written_reply_and_forged_note_read_unknown() {
   out=$(recorded_child_result "$state" "$corr")
   [ "$out" = "- unknown unknown" ] \
     || fail "only the helper's trailing marker may supply a child result: $out"
-  pass "a hand-written line quoting a child result records unknown"
+  corr=$(FM_PENDING_REPLY_NOW=9400 fm_pending_reply_create "$home" "$state" "kid" "how far now")
+  FM_PENDING_REPLY_NOW=9400 fm_pending_reply_mark_delivered "$state" "$corr"
+  printf 'done [corr=%s]: all finished (via-helper child=- child-state=done)\n' "$corr" >> "$state/kid.status"
+  FM_PENDING_REPLY_NOW=9400 fm_pending_reply_try_resolve "$state" "$corr" || fail "no-child marker line should resolve"
+  out=$(recorded_child_result "$state" "$corr")
+  [ "$out" = "- unknown unknown" ] \
+    || fail "a marker with no child must not carry a verdict: $out"
+  pass "a hand-written line quoting a child result, or a no-child marker with a verdict, records unknown"
 }
 
 # --- run --------------------------------------------------------------------
