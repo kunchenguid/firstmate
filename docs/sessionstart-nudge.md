@@ -29,7 +29,7 @@ The tier is a property of the harness surface, not of the home.
 | Run | Executes `bin/fm-session-start.sh` through the native session-open adapter and gates its ordered digest into model context before the first turn. | Claude, `codex exec`, verified native Codex TUI, Pi / pi-signed, omp, Cursor, Antigravity (agy) |
 | Nudge | Asks the agent to run the digest through the native adapter or the tracked session-start instruction. | Grok, OpenCode, and run-tier sources routed to the nudge |
 
-Codex's interactive TUI has verified session-open delivery only on the native version selected by `bin/fm-codex-stop-park.sh`; its compaction and re-emit surfaces remain unverified.
+Codex's interactive TUI session-open evidence is recorded in [runtime verification](verification/runtime-backends.md#native-codex-supervision-park); its compaction and re-emit surfaces remain unverified.
 
 ### Tier by harness
 

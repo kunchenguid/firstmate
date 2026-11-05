@@ -3621,6 +3621,29 @@ The native TUI fired project SessionStart and asynchronous Stop hooks, and `code
 [Supervision verification](supervision.md#codex-native-model-free-park-2026-10-19) records the commands, ten-minute provider-call comparison, real check delivery, input interrupt, park-death recovery and native-exit cleanup.
 This verifies the primary-session park, not a worker busy-state classifier or a Codex dialog-mirror writer.
 
+The [minimum-version policy](../configuration.md#codex-native-stop-park-configcodex-stop-park) admits releases beyond those exercised live.
+On 2026-11-05, the following focused checks passed on Linux with installed `codex-cli 0.166.0`:
+
+```sh
+bash bin/fm-test-run.sh tests/fm-codex-stop-park.test.sh tests/fm-codex-hook-layer-live-e2e.test.sh
+```
+
+Selected exact output:
+
+```text
+ok - the park admits numeric releases >=0.163.0 and fails closed on other version output
+codex-cli 0.166.0: Stop parser checked 12 isolated cases with clean wrapper JSON and bounded continuation
+FM_TEST_SUMMARY total=2 failed=0 skipped_gate=0 duration_ms=46017
+```
+
+The portable park suite exercises registration and capability through a compiled harness ancestor, including below-minimum, intermediate, patch, future-major, malformed, prerelease, and failed-probe cases.
+The real installed CLI guard checks hook flags and native Stop response parsing in isolated app-server fixtures; it does not prove a resumed TUI's watcher cycle.
+The CLI emitted a nonfatal stale arg0 cleanup warning (`Cross-device link`) during the guard.
+A separate functional trial on 2026-11-05 with real `codex-cli 0.166.0` completed resumed startup, native queued worker-report delivery, primary handling and acknowledgement, and automatic next-Stop rearm.
+That trial used additional local startup/ancestry, cleanup-lock, and resume-registration patches absent from this upstream change.
+It validates that local composition on 0.166.0, not the minimum-version comparison alone, every newly admitted release, or long-duration stability.
+The upstream ancestry reach and resume-registration behavior remain unchanged and do not inherit that trial's live resume guarantee.
+
 ## hc
 
 Measured on 2026-10-29 with `hc 0.1.13` on macOS (Darwin 27.0.0, `/bin/bash` 3.2.57), against private cores only: a unique `HC_SESSION`, `XDG_STATE_HOME` and `XDG_RUNTIME_DIR` under a short `/tmp/fmhc.*` directory, and `HC_TERMINAL_ID`, `HC_TERMINAL_SOCKET`, and `HC_SCOPE` unset.

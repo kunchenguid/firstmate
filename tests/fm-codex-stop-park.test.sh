@@ -46,8 +46,8 @@ mkdir -p "$FAKE_DIR/bin"
 cat > "$FAKE_DIR/impl.sh" <<'SH'
 case "${1:-}" in
   --version)
-    printf 'codex-cli %s\n' "${FM_FAKE_CODEX_VERSION:-0.163.0}"
-    exit 0
+    printf '%s\n' "${FM_FAKE_CODEX_OUTPUT-codex-cli ${FM_FAKE_CODEX_VERSION:-0.163.0}}"
+    exit "${FM_FAKE_CODEX_VERSION_RC:-0}"
     ;;
   queue)
     printf '%s\n' "$*" >> "$FM_HOME/queue.log"
@@ -193,32 +193,49 @@ test_unconfigured_home_keeps_the_foreground_checkpoint() {
   pass "an unconfigured home keeps the foreground checkpoint and every park hook is inert"
 }
 
-test_version_gate_selects_only_the_verified_cli() {
-  local home out version
-  for version in 0.163.0 0.164.0; do
-    home=$(make_home "version-$version" opted-in)
+test_version_gate_selects_supported_numeric_releases() {
+  local home out version expected case_id=0
+  for version in 0.163.0 0.164.0 0.165.0 0.166.0 0.167.0 0.163.1 0.166.1 0.1000.0 1.0.0 2.0.1 \
+    999999999999999999999999.0.0 0.999999999999999999999999.0 \
+    0.162.999 0.99.0 0.0.0 0.163 0.166.0.1 00.166.0 0.0166.0 0.166.00 \
+    0.163.0-alpha 0.166.0-alpha.1 1.0.0-rc.1 0.166.0+build unknown ''; do
+    case_id=$((case_id + 1))
+    case "$case_id" in 1|2|3|4|5|6|7|8|9|10|11|12) expected=0 ;; *) expected=1 ;; esac
+    home=$(make_home "version-$case_id" opted-in)
     out=$(under_codex "$home" '
       printf "%s" "{\"session_id\":\"$SESSION_ID\",\"transcript_path\":\"$FM_HOME/transcript.jsonl\"}" \
         | "$PARK" --session-start; echo "session-start=$?"
       "$PARK" --capable; echo "capable=$?"
       '"$REGISTER"'
       "$PARK" --capable; echo "registered-capable=$?"
-    ' FM_FAKE_CODEX_VERSION="$version" 2>&1)
+    ' FM_FAKE_CODEX_OUTPUT="codex-cli $version" 2>&1)
     assert_contains "$out" "session-start=0" "session start under codex-cli $version: $out"
-    if [ "$version" = 0.163.0 ]; then
+    if [ "$expected" = 0 ]; then
       assert_equals "$SESSION_ID" "$(sed -n 1p "$home/state/.codex-park-session" 2>/dev/null)" \
-        "the verified CLI's native session start must register the session"
+        "the supported CLI's native session start must register the session"
       assert_equals "$SESSION_ID" "$(cat "$home/sessionstart-park-session")" \
-        "the verified CLI's session start must select the park"
-      assert_contains "$out" "capable=0" "a registered verified session must be capable: $out"
+        "the supported CLI's session start must select the park"
+      assert_contains "$out" "capable=0" "a supported session must be capable: $out"
+      assert_contains "$out" "registered-capable=0" "a registered supported session must be capable: $out"
     else
       assert_equals "" "$(cat "$home/sessionstart-park-session")" \
-        "an unverified CLI's session start must not select the park"
-      assert_contains "$out" "capable=1" "an unverified CLI must not be capable: $out"
-      assert_contains "$out" "registered-capable=1" "an unverified CLI must not be capable even when registered: $out"
+        "an unsupported CLI's session start must not select the park"
+      assert_contains "$out" "capable=1" "an unsupported CLI must not be capable: $out"
+      assert_contains "$out" "registered-capable=1" "an unsupported CLI must not be capable even when registered: $out"
     fi
   done
-  pass "the park is selected only for the verified codex-cli version"
+  for version in 'Codex 0.166.0' 'codex-cli v0.166.0' 'codex-cli 0.166.0 extra' $'codex-cli 0.166.0\nwarning' ''; do
+    home=$(make_home "bad-output-$case_id" opted-in)
+    case_id=$((case_id + 1))
+    out=$(under_codex "$home" "$REGISTER"'"$PARK" --capable; echo "capable=$?"' \
+      FM_FAKE_CODEX_OUTPUT="$version" 2>&1)
+    assert_contains "$out" "capable=1" "malformed output must fail closed: $out"
+  done
+  home=$(make_home failed-version opted-in)
+  out=$(under_codex "$home" "$REGISTER"'"$PARK" --capable; echo "capable=$?"' \
+    FM_FAKE_CODEX_VERSION_RC=1 2>&1)
+  assert_contains "$out" "capable=1" "a failed version command must fail closed: $out"
+  pass "the park admits numeric releases >=0.163.0 and fails closed on other version output"
 }
 
 test_single_flight_claim_admits_one_park() {
@@ -530,7 +547,7 @@ test_host_quiet_boundary_retains_the_watcher() {
 }
 
 test_unconfigured_home_keeps_the_foreground_checkpoint
-test_version_gate_selects_only_the_verified_cli
+test_version_gate_selects_supported_numeric_releases
 test_single_flight_claim_admits_one_park
 test_stop_rearms_after_a_delivering_park_releases_its_claim delivered 1
 test_stop_rearms_after_a_delivering_park_releases_its_claim delivering 4
