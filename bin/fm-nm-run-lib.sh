@@ -22,17 +22,40 @@
 # stderr, while fm_nm_run keeps the fail-open query contract for read-only callers.
 # The no-mistakes forms route host reads through the opt-in home resolver below.
 # The inherited FM_READ_DEADLINE caps both resolver and command reads at the
-# remaining whole seconds and refuses the command after the deadline expires.
+# remaining fractional seconds and refuses the command after the deadline expires.
+fm_nm_now_ms() {
+  local raw sec frac
+  raw=${EPOCHREALTIME:-}
+  if [ -n "$raw" ]; then
+    sec=${raw%%[.,]*}
+    frac=${raw#*[.,]}
+    frac="${frac}000"
+    frac=${frac:0:3}
+    printf '%s\n' "$((sec * 1000 + 10#$frac))"
+  else
+    perl -MTime::HiRes=time -e 'printf "%.0f\n", time * 1000'
+  fi
+}
+
 fm_nm_read_timeout() {
-  local timeout_secs=$1 deadline=${FM_READ_DEADLINE:-} remaining
+  local timeout_secs=$1 deadline=${FM_READ_DEADLINE:-} remaining now sec frac timeout_ms
   if [ -n "$deadline" ]; then
     case "$deadline" in 0*|*[!0-9]*) return 124 ;; esac
     [ "${#deadline}" -le 18 ] || return 124
-    remaining=$((deadline - $(date +%s)))
+    now=$(fm_nm_now_ms) || return 124
+    remaining=$((deadline - now))
     [ "$remaining" -gt 0 ] || return 124
-    [ "$remaining" -ge "$timeout_secs" ] || timeout_secs=$remaining
+    sec=${timeout_secs%%.*}
+    frac=${timeout_secs#*.}
+    [ "$frac" != "$timeout_secs" ] || frac=0
+    frac="${frac}000"
+    frac=${frac:0:3}
+    timeout_ms=$((sec * 1000 + 10#$frac))
+    [ "$remaining" -ge "$timeout_ms" ] || timeout_ms=$remaining
+    printf '%d.%03d\n' "$((timeout_ms / 1000))" "$((timeout_ms % 1000))"
+  else
+    printf '%s\n' "$timeout_secs"
   fi
-  printf '%s\n' "$timeout_secs"
 }
 
 fm_nm_bounded() {  # <dir> <timeout_secs> <command> <args...>
@@ -46,7 +69,7 @@ fm_nm_bounded() {  # <dir> <timeout_secs> <command> <args...>
   case "$have_timeout" in
     timeout)  ( cd "$dir" && timeout "$timeout_secs" "$@" ) ;;
     gtimeout) ( cd "$dir" && gtimeout "$timeout_secs" "$@" ) ;;
-    perl)     ( cd "$dir" && perl -e 'my $t = shift; my $pid = fork; die "fork failed" unless defined $pid; if (!$pid) { setpgrp(0, 0); exec @ARGV } local $SIG{ALRM} = sub { kill "TERM", -$pid; select undef, undef, undef, 0.2; kill "KILL", -$pid; exit 124 }; alarm $t; waitpid $pid, 0; exit($? >> 8)' "$timeout_secs" "$@" ) ;;
+    perl)     ( cd "$dir" && perl -MTime::HiRes=alarm -e 'my $t = shift; my $pid = fork; die "fork failed" unless defined $pid; if (!$pid) { setpgrp(0, 0); exec @ARGV } local $SIG{ALRM} = sub { kill "TERM", -$pid; select undef, undef, undef, 0.2; kill "KILL", -$pid; exit 124 }; alarm $t; waitpid $pid, 0; exit($? >> 8)' "$timeout_secs" "$@" ) ;;
     *)        return 1 ;;
   esac || rc=$?
   fm_nm_read_timeout 1 >/dev/null || return 124

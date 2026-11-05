@@ -906,19 +906,10 @@ fm_dod_recorded_pr_on_forge() {  # <state> <id> <meta> <mode> <url>
 }
 
 fm_dod_read_timeout() {
-  local timeout=$1 deadline=${FM_READ_DEADLINE:-} remaining
-  if [ -n "$deadline" ]; then
-    case "$deadline" in
-      0*|*[!0-9]*) printf '%s\n' 'PR destination deadline is invalid' >&2; return 1 ;;
-    esac
-    [ "${#deadline}" -le 18 ] \
-      || { printf '%s\n' 'PR destination deadline is invalid' >&2; return 1; }
-    remaining=$((deadline - $(date +%s)))
-    [ "$remaining" -gt 0 ] \
-      || { printf '%s\n' 'PR destination deadline expired' >&2; return 1; }
-    [ "$remaining" -ge "$timeout" ] || timeout=$remaining
-  fi
-  printf '%s\n' "$timeout"
+  fm_nm_read_timeout "$1" || {
+    printf '%s\n' 'PR destination deadline expired or invalid' >&2
+    return 1
+  }
 }
 
 # 0 when <url> names a Gerrit change whose current patch set carries the tree of

@@ -40,13 +40,12 @@
 # that --startup performs the same scan immediately in the locked session
 # start's deferred worker. Ledger delivery and the cadence scan share one
 # FM_INACTIVE_RECONCILE_BUDGET_SECS deadline (default 10, valid 1..30).
-# When the cadence scan is due, ledger delivery stops one whole-second tick
+# When the cadence scan is due, ledger delivery stops one second
 # before that deadline to leave room for the cadence scan's first visit.
 # Each pass resumes after its own last visited child on its next invocation.
-# The scan enforces that budget itself through a whole-second deadline, and the
-# first due child of every scan is always visited: whole-second arithmetic can otherwise round a small budget
-# to zero mid-scan, and an invocation that exits having visited nothing would
-# advance the durable cursor past a child it never examined. A process-group
+# The scan enforces that budget itself through a millisecond deadline, and the
+# first due child of every scan gets at least one full second for its reads.
+# Later visits retain the shared scan deadline. A process-group
 # kill one second after the budget remains as a backstop for a scan wedged in
 # an unbounded wait (for example a live-held wake-queue lock), so the clean
 # deadline path is not racing its own backstop.
@@ -79,7 +78,7 @@
 # through fm_busy_classify_meta (bin/fm-busy-lib.sh); an unreadable or unknown
 # answer is never read as proof the agent is gone or idle and leaves the
 # verdict unchanged. Both reads share the scan budget left after the state
-# read (at least one second), and hitting that
+# read, and hitting that
 # bound ends the visit like a state-read timeout.
 # Working, paused, parked, blocked, unknown, persistent secondmates, and
 # captain-held work retain their existing supervision semantics.
@@ -589,7 +588,7 @@ ledger_pass() {
         after) [ -z "$cursor" ] || [[ "$id" > "$cursor" ]] || continue ;;
         through) [[ "$id" > "$cursor" ]] && continue ;;
       esac
-      [ "$(date +%s)" -lt "$deadline" ] || return 0
+      [ "$(fm_nm_now_ms)" -lt "$deadline" ] || return 0
       [ "$(meta_field "$meta" kind)" != secondmate ] || continue
       lock=$(fm_meta_lock_path "$meta") || continue
       fm_lock_try_acquire "$lock" || continue
@@ -598,7 +597,7 @@ ledger_pass() {
         fm_lock_release "$lock"
         continue
       fi
-      remaining=$((deadline - $(date +%s)))
+      remaining=$((deadline - $(fm_nm_now_ms)))
       if [ "$remaining" -le 0 ]; then
         fm_lock_release "$lock"
         return 0
@@ -652,8 +651,8 @@ task_holds_live_work() { # <id> <meta> <timeout> <last-status-line>; 0 when the 
   esac
 }
 
-reconcile_direct_child_locked() { # <id> <meta> <secondmate-id-or-empty> <timeout>
-  local id=$1 meta=$2 self=${3:-} timeout=$4 status turn last age state_line state pr incarnation fingerprint outcome_key payload kind state_rc=0 started left
+reconcile_direct_child_locked() { # <id> <meta> <secondmate-id-or-empty> <deadline> <first>
+  local id=$1 meta=$2 self=${3:-} deadline=$4 first=$5 status turn last age state_line state pr incarnation fingerprint outcome_key payload kind state_rc=0 started left
   [ -f "$meta" ] && [ ! -L "$meta" ] || return 0
   kind=$(meta_field "$meta" kind)
   [ "$kind" = secondmate ] && return 0
@@ -668,13 +667,19 @@ reconcile_direct_child_locked() { # <id> <meta> <secondmate-id-or-empty> <timeou
   fi
   age=$(last_activity_age "$meta" "$status" "$turn")
   [ "$age" -ge "$FM_INACTIVE_RECONCILE_SECS" ] || return 0
-  started=$(date +%s)
+  started=$(fm_nm_now_ms) || return 3
+  if [ "$first" -eq 1 ] && [ "$deadline" -lt "$((started + 1000))" ]; then
+    deadline=$((started + 1000))
+  fi
+  local FM_READ_DEADLINE=$deadline
+  fm_nm_read_timeout 1 >/dev/null || return 3
   # The visit budget includes the scan's guaranteed first-visit floor.
   # Give every read the same deadline without wrapping its watchdog.
   state_line=$(env FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_CREW_STATE_NO_FORGE=1 \
-    FM_READ_DEADLINE="$((started + timeout))" \
+    FM_READ_DEADLINE="$deadline" \
     "$CREW_STATE_BIN" "$id" 2>/dev/null) || state_rc=$?
   [ "$state_rc" -ne 124 ] || return 3
+  fm_nm_read_timeout 1 >/dev/null || return 3
   last=$(last_status_line "$status")
   if [ -n "$self" ]; then
     child_terminal_ledger_line "$status" >/dev/null
@@ -685,10 +690,10 @@ reconcile_direct_child_locked() { # <id> <meta> <secondmate-id-or-empty> <timeou
     'state: failed '*) state='failed' ;;
     *) return 0 ;;
   esac
-  left=$((timeout - ($(date +%s) - started)))
-  [ "$left" -ge 1 ] || left=1
+  left=$(fm_nm_read_timeout 30) || return 3
   task_holds_live_work "$id" "$meta" "$left" "$last" && return 0
   [ "$?" -ne 3 ] || return 3
+  fm_nm_read_timeout 1 >/dev/null || return 3
   terminal_outcome_corroborated "$state" "$last" "$state_line" || return 0
   pr=$(terminal_outcome_pr "$state_line" "$kind")
   incarnation=$(meta_incarnation "$meta")
@@ -719,22 +724,17 @@ reconcile_direct_child_locked() { # <id> <meta> <secondmate-id-or-empty> <timeou
   queue_presentation "$RECORD_PENDING" "$fingerprint" "$payload" || true
 }
 
-reconcile_direct_child() { # <id> <meta> <secondmate-id-or-empty> <timeout>
-  local id=$1 meta=$2 self=${3:-} timeout=$4 lock rc=0
+reconcile_direct_child() { # <id> <meta> <secondmate-id-or-empty> <deadline> <first>
+  local id=$1 meta=$2 self=${3:-} deadline=$4 first=$5 lock rc=0
   lock=$(fm_meta_lock_path "$meta") || return 1
   fm_lock_acquire_wait "$lock" || return 1
-  reconcile_direct_child_locked "$id" "$meta" "$self" "$timeout" || rc=$?
+  reconcile_direct_child_locked "$id" "$meta" "$self" "$deadline" "$first" || rc=$?
   fm_lock_release "$lock"
   return "$rc"
 }
 
-# SCAN_FIRST_VISIT_PENDING is armed by scan() before its passes. The deadline
-# below is whole-second arithmetic, so a small budget can quantize to zero
-# between the deadline computation and these checks; without the guaranteed
-# first visit, such a scan would return 3 having examined no child at all while
-# write_scan_marker had already advanced the cursor past the skipped child.
 scan_pass() { # <cursor> <after|through> <deadline> <secondmate-id-or-empty>
-  local cursor=$1 range=$2 deadline=$3 self=${4:-} meta id remaining rc first
+  local cursor=$1 range=$2 deadline=$3 self=${4:-} meta id rc first
   for meta in "$STATE"/*.meta; do
     [ -f "$meta" ] || continue
     id=$(basename "$meta" .meta)
@@ -749,15 +749,10 @@ scan_pass() { # <cursor> <after|through> <deadline> <secondmate-id-or-empty>
       SCAN_FIRST_VISIT_PENDING=0
     fi
     if [ "$first" -eq 0 ]; then
-      [ "$(date +%s)" -lt "$deadline" ] || return 3
+      [ "$(fm_nm_now_ms)" -lt "$deadline" ] || return 3
     fi
     write_scan_marker "$id" || return 1
-    remaining=$((deadline - $(date +%s)))
-    if [ "$first" -eq 1 ] && [ "$remaining" -lt 1 ]; then
-      remaining=1
-    fi
-    [ "$remaining" -gt 0 ] || return 3
-    reconcile_direct_child "$id" "$meta" "$self" "$remaining" || {
+    reconcile_direct_child "$id" "$meta" "$self" "$deadline" "$first" || {
       rc=$?
       [ "$rc" -eq 3 ] && return 3
       return "$rc"
@@ -770,13 +765,13 @@ scan() {
   local FM_READ_DEADLINE
   mkdir -p "$STATE" "$OUTCOME_DIR" || return 1
   [ ! -L "$OUTCOME_DIR" ] || return 1
-  deadline=$(( $(date +%s) + FM_INACTIVE_RECONCILE_BUDGET_SECS ))
+  deadline=$(( $(fm_nm_now_ms) + FM_INACTIVE_RECONCILE_BUDGET_SECS * 1000 ))
   export FM_READ_DEADLINE=$deadline
   ledger_deadline=$deadline
   if [ "$startup" != 1 ] && [ "$(scan_marker_age)" -lt "$FM_INACTIVE_RECONCILE_SECS" ]; then
     due=0
   else
-    ledger_deadline=$((deadline - 1))
+    ledger_deadline=$((deadline - 1000))
   fi
   if self=$(home_secondmate_id); then
     # The ledger-first delivery is per poll, not per cadence.
@@ -838,7 +833,7 @@ case "$mode" in
       --startup) startup=1 ;;
       *) printf 'usage: fm-inactive-reconcile.sh scan [--startup]\n' >&2; exit 2 ;;
     esac
-    # The scan's own whole-second deadline enforces the budget; this outer
+    # The scan's own millisecond deadline enforces the budget; this outer
     # process-group kill is only the backstop for a scan wedged outside every
     # bounded section (an unbounded lock wait), so it fires one second after
     # the deadline instead of racing the clean bounded exit it exists to guard.
