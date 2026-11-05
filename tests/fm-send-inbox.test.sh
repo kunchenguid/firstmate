@@ -358,7 +358,7 @@ test_watcher_retry_clears_noise_after_a_busy_first_send() {
   ring() { # <composer-mode>
     rm -f "$dir/send.log.reads"
     env PATH="$dir/fakebin:$PATH" FM_HOME="$dir/home" FM_SEND_LOG="$dir/send.log" \
-      FM_FAKE_TMUX_COMPOSER=$1 FM_COMPOSER_HARNESS=codex \
+      FM_FAKE_TMUX_COMPOSER="$1" FM_COMPOSER_HARNESS=codex \
       bash -c '. "$1"; fm_task_inbox_ring tmux sess:fm-t1 "$2" fm-t1' _ \
       "$ROOT/bin/fm-task-inbox-lib.sh" "$rec" >/dev/null 2>&1
   }
