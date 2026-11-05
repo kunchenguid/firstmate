@@ -1630,7 +1630,7 @@ EOF
   printf 'Resolution recorded by fm-captain-hold.\nDecision digest: %s\nResolution mode: answered\n\nCaptain decision:\n%s\n' \
     "$old_digest" "$old_text" > "$mate/upgrade-body.txt"
   tasks_in "$mate" update upgrade-call --body-file "$mate/upgrade-body.txt" --archive-body >/dev/null
-  tasks_in "$mate" done upgrade-call >/dev/null
+  tasks_in "$mate" "done" upgrade-call >/dev/null
   assert_no_grep 'resolved \[key=captain-hold-upgrade-call-1\]' "$channel" \
     "upgrade replay fixture already published its parent resolution"
   out=$(printf 'upgrade-call\tproceed\t\n' \
