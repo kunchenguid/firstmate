@@ -492,8 +492,9 @@ fm_send_resolve_target "$RAW_TARGET" || exit 1
 T=$RESOLVED_TARGET
 fm_send_detect_kiro_from_live_target
 # The recorded harness, or kiro detected from a meta-less explicit target's
-# live pane, scopes the kiro-only composer rules for every composer read this
-# send makes (fm_composer_kiro_scope in bin/fm-composer-lib.sh).
+# live pane, scopes the harness-only composer rules for every composer read this
+# send makes (fm_composer_kiro_scope and fm_composer_gray_scope in
+# bin/fm-composer-lib.sh).
 # shellcheck disable=SC2034
 FM_COMPOSER_HARNESS=$TARGET_HARNESS
 shift

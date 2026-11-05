@@ -247,11 +247,11 @@ fm_composer_normalize_trim_var() {  # <varname>
 
 # fm_composer_kiro_scope: 0 when the caller has named the pane's harness as kiro
 # through FM_COMPOSER_HARNESS, the one input that turns on the kiro-only composer
-# rules (the near-gray ghost ceiling in fm_composer_strip_ghost and the hinted
-# idle row, FM_COMPOSER_HINTED_IDLE_RE_DEFAULT). A caller that knows its target's
-# recorded harness sets it for its reads (bin/fm-send.sh, bin/fm-control.sh, the
-# watcher's and process-event re-rings); an unset or other value leaves every
-# read exactly as it was before kiro existed.
+# rules (the hinted idle row, FM_COMPOSER_HINTED_IDLE_RE_DEFAULT;
+# fm_composer_gray_scope owns the near-gray ghost ceiling). A caller that knows
+# its target's recorded harness sets it for its reads (bin/fm-send.sh,
+# bin/fm-control.sh, the watcher's and process-event re-rings); an unset or other
+# value leaves every read exactly as it was before kiro existed.
 fm_composer_kiro_scope() {
   [ "${FM_COMPOSER_HARNESS:-}" = kiro ]
 }
@@ -299,8 +299,8 @@ fm_composer_gray_scope() {
 # backend's identity probe attributes to Command Code is read with a fixed
 # ceiling of 160 in its place (fm_composer_classify_screen).
 #
-# KIRO ONLY: when the caller names the pane's harness as kiro
-# (FM_COMPOSER_HARNESS=kiro, see fm_composer_kiro_scope), a NEAR-ACHROMATIC run
+# KIRO AND BOB ONLY: when the caller names the pane's harness as kiro or bob
+# (FM_COMPOSER_HARNESS, see fm_composer_gray_scope), a NEAR-ACHROMATIC run
 # gets a higher ceiling, because kiro draws its idle placeholder in a grey above
 # the 128 default. Every other harness, and a read with no harness named, keeps
 # exactly the rules above: the wider ceiling read Claude's grey slash-command
@@ -318,11 +318,12 @@ fm_composer_gray_scope() {
 # The same scope also luminance-tests a 256-colour foreground, because kiro
 # draws the same grey in whichever encoding the terminal advertises:
 # 38;2;158;158;158 on a truecolor pane and 38;5;247 - the identical grey, xterm
-# level 158 - on a pane with no COLORTERM. Only the 232-255 greyscale ramp
-# (level 8 + (n-232)*10) is tested, because it is the one index range whose RGB
-# is fixed by definition rather than by a terminal theme. The 6x6x6 cube's
-# r==g==b diagonal is arithmetically grey too and stays untested: kiro has not
-# been measured drawing ghost text there, and widening the predicate is how the
+# level 158 - on a pane with no COLORTERM. Bob draws its placeholder at 38;5;243.
+# Only the 232-255 greyscale ramp (level 8 + (n-232)*10) is tested, because it is
+# the one index range whose RGB is fixed by definition rather than by a terminal
+# theme. The 6x6x6 cube's r==g==b diagonal is arithmetically grey too and stays
+# untested: kiro has not been measured drawing ghost text there, and widening the
+# predicate is how the
 # palette-dependence problem the 38;5 carve-out exists for gets in. A chromatic
 # index is kept untested rather than converted, and indices 0-15 stay untested
 # because every terminal theme remaps them. The base 30-37 / 90-97 foregrounds
@@ -354,7 +355,7 @@ fm_composer_strip_ghost() {
       return p + 1
     }
     # ceiling_for: the luminance ceiling that applies to one truecolor run.
-    # Outside the kiro scope (grayscope 0) that is always lumamax. Inside it, a
+    # Outside the gray scope (grayscope 0) that is always lumamax. Inside it, a
     # NEAR-ACHROMATIC run (max channel minus min channel within grayspreadmax)
     # takes the HIGHER of graylumamax and lumamax, so the gray ceiling only ever
     # raises the applicable ceiling and never reduces an operator-set one.
@@ -368,7 +369,7 @@ fm_composer_strip_ghost() {
     }
     # palette_gray_level: the channel level of a 256-colour index in the 232-255
     # greyscale ramp, and -1 for EVERY other index and for every index outside
-    # the kiro scope. A ramp entry has r == g == b, so its level IS its luminance.
+    # the gray scope. A ramp entry has r == g == b, so its level IS its luminance.
     #
     # The ramp alone is deliberate, not an oversight. It is the only index range
     # whose RGB is fixed by definition rather than by a theme, so it needs no
@@ -386,7 +387,7 @@ fm_composer_strip_ghost() {
       return (lv >= 0 && lv < ceiling_for(lv, lv, lv)) ? 1 : 0
     }
     # fg38_is_dark: 1 when the SGR 38 foreground starting at param p is a
-    # TRUECOLOR (38;2 / 38:2), or in the kiro scope a PALETTE GREY (38;5 / 38:5),
+    # TRUECOLOR (38;2 / 38:2), or in the gray scope a PALETTE GREY (38;5 / 38:5),
     # whose luminance is below the ceiling that applies to it; 0 otherwise (any
     # other palette index, a bright colour, or a malformed run).
     function fg38_is_dark(a, p, k,   spec, nf, f, r, g, b) {

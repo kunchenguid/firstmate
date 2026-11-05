@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# Bob (IBM Bob CLI) process identity, shared by harness detection and the
-# session lock. Bob is a node bundle that sets no process title, so Linux reports
-# comm as MainThread and macOS as node, and neither a name table nor its own
-# marker (BOB_SESSION, set only for descendants) can identify the process itself
-# (verified, bob 2.0.9 on Node v24). Its first script argument is the structural
-# fact: Bob is the process running Bob's installed entry script.
+# Bob (IBM Bob CLI) process identity, shared by harness detection, the session
+# lock, and pane liveness. Bob is a node bundle that sets no process title, so
+# Linux reports comm as MainThread and macOS as node, and neither a name table
+# nor its own marker (BOB_SESSION, set only for descendants) can identify the
+# process itself (verified, bob 2.0.9 on Node v24). Its first script argument is
+# the structural fact: Bob is the process running Bob's installed entry script.
 
 # True when path $1 is Bob's installed entry script, or a `bob` launcher whose
 # symlink chain ends there (npm's bin shim). The script must exist: ps joins argv
