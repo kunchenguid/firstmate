@@ -46,7 +46,12 @@ REMOTE_HOST=$(fm_meta_get "$META" remote_host)
 [ -n "$REMOTE_HOST" ] \
   || die "task $ID is not a remotely placed secondmate; use bin/fm-control.sh $ID relaunch instead"
 
+SPAWN_TASK_LOCK="$STATE/.spawn-$ID.lock"
+fm_lock_try_acquire "$SPAWN_TASK_LOCK" || die "a spawn is still creating task $ID; retry the relaunch"
+trap 'fm_lock_release "$SPAWN_TASK_LOCK" || true' EXIT
+# The start-check boundary is taken before the host relaunch delivers anything.
 LAUNCH_EPOCH=$(fm_start_check_launch_epoch "$STATE" "$ID")
+START_CHECK_FAILED=0
 RELAUNCH_OUT=$("$SCRIPT_DIR/fm-on.sh" "$ID" fm-remote-secondmate-control.sh \
   relaunch "$ID" "$HARNESS" "$MODEL" "$EFFORT" </dev/null 2>&1) || {
   rc=$?
@@ -108,8 +113,14 @@ case "$NEW_HARNESS" in kimi*) rm -f -- "$STATE/$ID.start-pending" ;;
       record_tmp="$STATE/$ID.start-pending.tmp.$$"
       if { printf '%s %s %s\n' "$LAUNCH_EPOCH" "${REMOTE_BUSY_GEN:--}" "$NEW_HARNESS" > "$record_tmp" \
         && mv -f -- "$record_tmp" "$STATE/$ID.start-pending"; }; then :
-      else rm -f -- "$record_tmp"; fi
+      else
+        rm -f -- "$record_tmp"
+        START_CHECK_FAILED=1
+      fi
     fi
     ;;
 esac
 fm_lock_release "$META_LOCK"
+# The replacement is running and its record is republished, but without its
+# start check; never report that as a clean relaunch.
+[ "$START_CHECK_FAILED" = 0 ] || die "relaunched $ID, but its start check could not be armed ($STATE/$ID.start-pending could not be written); inspect the worker yourself in about two minutes"

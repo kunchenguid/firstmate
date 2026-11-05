@@ -19,6 +19,8 @@ set -u
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 # shellcheck source=bin/fm-pr-lib.sh
 . "$ROOT/bin/fm-pr-lib.sh"
+# shellcheck source=bin/fm-wake-lib.sh
+. "$ROOT/bin/fm-wake-lib.sh"
 
 command -v perl >/dev/null 2>&1 || { echo "skip: perl not found"; exit 0; }
 
@@ -83,6 +85,9 @@ case "$FM_FAKE_RELAUNCH_MODE" in
     effort=medium
     ;;
 esac
+# FM_FAKE_DELIVERED: record when the host delivers the replacement, then hold
+# the relaunch two seconds.
+if [ -n "${FM_FAKE_DELIVERED:-}" ]; then date +%s > "$FM_FAKE_DELIVERED"; sleep 2; fi
 printf 'relaunched %s harness=%s from=pi model=%s effort=%s backend=herdr endpoint=fm-remote:w1:p1 worktree=/srv/fm-home\n' \
   "$id" "$harness" "$model" "$effort"
 printf 'schema=fm-remote-secondmate-control.v1\n'
@@ -179,6 +184,51 @@ expect_code 0 "$RC" "a confirmed kimi relaunch should succeed"$'\n'"$OUT"
 assert_absent "$HOME_DIR/state/ios.start-pending" \
   "kimi proves its start in its own gate, so no start check should stay armed"
 pass "a kimi replacement is not armed, and an older record is removed"
+
+# --- the relaunch takes its start-check boundary before the host delivers ----
+reset_meta
+rm -f "$HOME_DIR/state/ios.start-pending"
+export FM_FAKE_DELIVERED="$TMP/delivered"
+rm -f "$FM_FAKE_DELIVERED"
+OUT=$(run_relaunch ios claude claude-opus-5-5 medium); RC=$?
+unset FM_FAKE_DELIVERED
+expect_code 0 "$RC" "a slow confirmed remote relaunch should succeed"$'\n'"$OUT"
+read -r rec_epoch _ < "$HOME_DIR/state/ios.start-pending" || fail "the slow relaunch armed no start check"
+[ "$rec_epoch" -le "$(cat "$TMP/delivered")" ] \
+  || fail "the start-check boundary $rec_epoch was taken after the host delivered at $(cat "$TMP/delivered")"
+pass "a remote relaunch takes its start-check boundary before the host delivers the replacement"
+
+# --- a start check that cannot be written fails the relaunch -----------------
+reset_meta
+printf '1 - pi\n' > "$HOME_DIR/state/ios.start-pending"
+FAILMV=$(fm_fakebin "$TMP/failmv")
+cat > "$FAILMV/mv" <<'SH'
+#!/usr/bin/env bash
+case "${!#}" in *.start-pending) echo "mv: injected failure" >&2; exit 1 ;; esac
+exec /bin/mv "$@"
+SH
+chmod +x "$FAILMV/mv"
+OUT=$(PATH="$FAILMV:$PATH" run_relaunch ios claude claude-opus-5-5 medium); RC=$?
+[ "$RC" -ne 0 ] || fail "a relaunch whose start check could not be armed reported success"$'\n'"$OUT"
+assert_contains "$OUT" "relaunched ios, but its start check could not be armed" \
+  "the failed arm should say the replacement runs unchecked"
+assert_grep 'harness=claude' "$HOME_DIR/state/ios.meta" \
+  "the running replacement's identity should still be recorded"
+[ -z "$(ls "$HOME_DIR/state/ios.start-pending.tmp."* 2>/dev/null)" ] || fail "a failed arm left its temp record"
+pass "a remote relaunch whose start check cannot be armed fails with a clear error"
+
+# --- spawn ownership prevents a concurrent remote relaunch -------------------
+reset_meta
+printf '123 - pi\n' > "$HOME_DIR/state/ios.start-pending"
+SPAWN_LOCK="$HOME_DIR/state/.spawn-ios.lock"
+fm_lock_try_acquire "$SPAWN_LOCK" || fail "could not acquire spawn lock fixture"
+OUT=$(run_relaunch ios claude claude-opus-5-5 medium); RC=$?
+fm_lock_release "$SPAWN_LOCK" || fail "could not release spawn lock fixture"
+[ "$RC" -ne 0 ] || fail "a relaunch must refuse while spawn owns the task lock"
+assert_contains "$OUT" "a spawn is still creating task ios" "the lock refusal should be actionable"
+[ "$(cat "$HOME_DIR/state/ios.start-pending")" = '123 - pi' ] \
+  || fail "a refused relaunch changed the existing start check"
+pass "a remote relaunch refuses without changing state while spawn owns the task lock"
 
 # --- a refused relaunch leaves the parent's record untouched -----------------
 reset_meta

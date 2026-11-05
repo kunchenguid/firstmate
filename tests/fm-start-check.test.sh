@@ -121,6 +121,73 @@ test_spawn_arms_marker() {
   pass "spawn arms a start record carrying the launch's busy generation (pi) or none (codex)"
 }
 
+# A pi spawn into a fresh case home, after SPAWN_CASE_SETUP <fakebin> when set.
+# Sets SPAWN_CASE_HOME, SPAWN_CASE_OUT and SPAWN_CASE_RC.
+spawn_case() {  # <case-name>
+  local case_dir="$TMP_ROOT/$1" proj wt fakebin
+  SPAWN_CASE_HOME="$case_dir/home"; proj="$case_dir/project"; wt="$case_dir/wt"
+  fakebin=$(make_spawn_fakebin "$case_dir/fake" pi)
+  fm_test_spawn_home "$SPAWN_CASE_HOME" pi
+  fm_git_worktree "$proj" "$wt" "wt-$(basename "$case_dir")"
+  fm_test_spawn_brief "$SPAWN_CASE_HOME" "$SPAWN_ID"
+  [ -z "${SPAWN_CASE_SETUP:-}" ] || "$SPAWN_CASE_SETUP" "$fakebin"
+  SPAWN_CASE_OUT=$(fm_test_run_spawn "$SPAWN_CASE_HOME" "$wt" "$fakebin" "$SPAWN_ID" "$proj" --mode no-mistakes --yolo off)
+  SPAWN_CASE_RC=$?
+  chmod -R u+w /tmp/fm-"$SPAWN_ID" /tmp/fm-"$SPAWN_ID"+* 2>/dev/null || true
+  rm -rf /tmp/fm-"$SPAWN_ID" /tmp/fm-"$SPAWN_ID"+*
+}
+
+# The launch text reaches the pane as `. <launch file>`; record when that
+# happens, then hold the delivery two seconds.
+slow_launch_delivery() {  # <fakebin>
+  mv "$1/tmux" "$1/tmux.base"
+  cat > "$1/tmux" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = send-keys ] && [ ! -e "$FM_TEST_DELIVERED" ]; then
+  case "${!#}" in ". "*) date +%s > "$FM_TEST_DELIVERED"; sleep 2 ;; esac
+fi
+exec "$(dirname "$0")/tmux.base" "$@"
+SH
+  chmod +x "$1/tmux"
+}
+
+# Every local launch takes its start-check boundary before the launch text is
+# delivered, so a worker that proves its start during delivery is counted.
+test_spawn_boundary_precedes_delivery() {
+  local delivered="$TMP_ROOT/delivered" epoch
+  export FM_TEST_DELIVERED="$delivered"
+  SPAWN_CASE_SETUP=slow_launch_delivery spawn_case boundary
+  unset FM_TEST_DELIVERED
+  [ "$SPAWN_CASE_RC" = 0 ] || fail "spawn failed: $SPAWN_CASE_OUT"
+  [ -s "$delivered" ] || fail "fixture: the launch text was never delivered"
+  epoch=$(cut -d' ' -f1 "$SPAWN_CASE_HOME/state/$SPAWN_ID.start-pending") || fail "spawn armed no start check"
+  [ "$epoch" -le "$(cat "$delivered")" ] \
+    || fail "the start-check boundary $epoch was taken after the launch was delivered at $(cat "$delivered")"
+  pass "a spawn takes its start-check boundary before it delivers the launch"
+}
+
+# A start-pending rename that fails, as on a full or read-only state directory.
+failing_start_pending_mv() {  # <fakebin>
+  cat > "$1/mv" <<'SH'
+#!/usr/bin/env bash
+case "${!#}" in *.start-pending) echo "mv: injected failure" >&2; exit 1 ;; esac
+exec /bin/mv "$@"
+SH
+  chmod +x "$1/mv"
+}
+
+test_spawn_fails_when_start_check_cannot_be_armed() {
+  SPAWN_CASE_SETUP=failing_start_pending_mv spawn_case unarmed
+  [ "$SPAWN_CASE_RC" != 0 ] || fail "a spawn whose start check could not be armed reported success: $SPAWN_CASE_OUT"
+  case "$SPAWN_CASE_OUT" in
+    *"error: $SPAWN_ID launched, but its start check could not be armed"*) ;;
+    *) fail "the failed arm gave no clear error: $SPAWN_CASE_OUT" ;;
+  esac
+  [ ! -e "$SPAWN_CASE_HOME/state/$SPAWN_ID.start-pending" ] || fail "a failed arm left a start record"
+  [ -z "$(ls "$SPAWN_CASE_HOME/state/$SPAWN_ID.start-pending.tmp."* 2>/dev/null)" ] || fail "a failed arm left its temp record"
+  pass "a spawn whose start check cannot be armed fails with a clear error"
+}
+
 test_proof_before_deadline_is_silent() {
   reset_state
   open_pane p1 "$PI_DIALOG"
@@ -164,6 +231,54 @@ test_launch_epoch_excludes_existing_markers() {
     [ ! -e "$STATE/e-$marker.start-pending" ] || fail "post-boundary $marker was not accepted as proof"
   done
   pass "existing status and turn-ended markers precede the launch boundary; later proof still counts"
+}
+
+# The deliberate +1 in fm_start_check_launch_epoch: a write in the launch
+# second, whether the previous worker's or a fast first write, never clears the
+# check, and the launch gets exactly one start wake at the deadline.
+test_same_second_write_wakes_once_at_deadline() {
+  local m boundary
+  reset_state
+  open_pane s1 "$PI_DIALOG"
+  arm_task s1 pi 1000
+  touch "$STATE/s1.status"
+  m=$(stat_mtime "$STATE/s1.status")
+  boundary=$(fm_start_check_launch_epoch "$STATE" s1)
+  [ "$boundary" -gt "$m" ] || fail "a marker in the launch second did not advance the boundary"
+  printf '%s %s pi\n' "$boundary" "$ARMED_GEN" > "$STATE/s1.start-pending"
+  printf 'working [at=%s]: same-second write\n' "$m" >> "$STATE/s1.status"
+  touch -t "$(date -r "$m" '+%Y%m%d%H%M.%S' 2>/dev/null || date -d "@$m" '+%Y%m%d%H%M.%S')" "$STATE/s1.status"
+  [ "$(stat_mtime "$STATE/s1.status")" = "$m" ] || fail "fixture: status mtime is not the launch second"
+  start_check_tick "$((boundary + 5))" || fail "tick failed"
+  [ -e "$STATE/s1.start-pending" ] || fail "a write in the launch second cleared the start check"
+  start_check_tick "$((boundary + 119))" || fail "tick failed"
+  [ "$(count_wakes)" = 0 ] || fail "the start check woke before its deadline: $START_CHECK_WAKE"
+  start_check_tick "$((boundary + 120))" || fail "tick failed"
+  [ "$(count_wakes)" = 1 ] || fail "expected one start wake at the deadline, got $(count_wakes)"
+  case "$START_CHECK_WAKE" in "check: start s1: no start signal 120s after spawn"*) ;; *) fail "unexpected wake: $START_CHECK_WAKE" ;; esac
+  start_check_tick "$((boundary + 300))" || fail "tick failed"
+  [ "$(count_wakes)" = 1 ] || fail "the start check woke more than once"
+  pass "a write in the launch second never clears the check, and the launch wakes once at the deadline"
+}
+
+# Teardown's queue prune (fm_wake_queue_prune_task, bin/fm-teardown.sh) drops a
+# queued start wake for the torn-down task and keeps another task's.
+test_teardown_prune_drops_queued_start_wake() {
+  reset_state
+  open_pane q1 "$PI_DIALOG"
+  open_pane q2 "$PI_DIALOG"
+  arm_task q1 pi 1000
+  arm_task q2 pi 1000
+  start_check_tick 1200 || fail "tick failed"
+  start_check_tick 1200 || fail "tick failed"
+  [ "$(awk -F '\t' '$3 == "check" && $4 ~ /^start:q[12]$/' "$FM_WAKE_QUEUE" | wc -l | tr -d ' ')" = 2 ] \
+    || fail "fixture: expected both start wakes queued: $(cat "$FM_WAKE_QUEUE")"
+  fm_wake_queue_prune_task "$STATE" q1 "$SESSION:q1" || fail "prune failed"
+  [ "$(awk -F '\t' '$4 == "start:q1"' "$FM_WAKE_QUEUE" | wc -l | tr -d ' ')" = 0 ] \
+    || fail "teardown prune kept the torn-down task's start wake: $(cat "$FM_WAKE_QUEUE")"
+  [ "$(awk -F '\t' '$4 == "start:q2"' "$FM_WAKE_QUEUE" | wc -l | tr -d ' ')" = 1 ] \
+    || fail "teardown prune dropped another task's start wake"
+  pass "teardown's queue prune drops the torn-down task's queued start wake and keeps others"
 }
 
 test_pi_dialog_named_once() {
@@ -617,9 +732,13 @@ test_watcher_loop_single_named_wake() {
 
 fm_test_run \
   test_spawn_arms_marker \
+  test_spawn_boundary_precedes_delivery \
+  test_spawn_fails_when_start_check_cannot_be_armed \
   test_proof_before_deadline_is_silent \
   test_same_second_turn_end_is_proof \
   test_launch_epoch_excludes_existing_markers \
+  test_same_second_write_wakes_once_at_deadline \
+  test_teardown_prune_drops_queued_start_wake \
   test_pi_dialog_named_once \
   test_claude_dialog_has_no_key \
   test_claude_session_end_is_not_start_proof \

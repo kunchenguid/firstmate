@@ -167,6 +167,13 @@ fm_path_mtime() {
   fi
 }
 
+# fm_start_check_launch_epoch <state-dir> <task-id>: the launch boundary a
+# start check counts proof from. Marker mtimes have whole-second precision, so
+# when a status or turn-ended marker already carries the current second the
+# boundary moves one second past it: a previous worker's write in the launch
+# second must never clear the new launch's check. The cost is deliberate and
+# safe: a genuine first write in that same second is not counted either, so
+# that launch gets the one ordinary start wake instead of a missed one.
 fm_start_check_launch_epoch() {  # <state-dir> <task-id>
   local now newest m file
   fm_epoch_seconds_to now
