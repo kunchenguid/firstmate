@@ -742,6 +742,63 @@ SH
   pass 'deadline-truncated run reads return unknown and create no terminal outcome'
 }
 
+# Advance the fixture clock when ledger proof uses the remaining scan budget.
+# The real crew-state command must still get the first cadence visit's floor.
+test_forced_cadence_visit_keeps_floor_after_ledger_deadline() {
+  local epoch branch head
+  make_world forced-cadence-floor; bind_secondmate local
+  write_child "$MATE" 0-cadence 'working: awaiting the pipeline result'
+  write_child "$MATE" a-ledger 'done: PR https://github.com/owner/repo/pull/1 checks green'
+  printf 'expected_base=main\n' >> "$MATE/state/a-ledger.meta"
+  branch=$(git -C "$MATE/projects/0-cadence" symbolic-ref --short HEAD)
+  head=$(git -C "$MATE/projects/0-cadence" rev-parse HEAD)
+  epoch=$(date +%s)
+  printf '%s\n' "$epoch" > "$WORLD/clock"
+  cat > "$WORLD/fakebin/date" <<'SH'
+#!/usr/bin/env bash
+if [ "$#" = 1 ] && [ "$1" = +%s ]; then
+  cat "$FM_FLOOR_CLOCK"
+else
+  exec "$FM_REAL_DATE" "$@"
+fi
+SH
+  cat > "$WORLD/fakebin/gh" <<'SH'
+#!/usr/bin/env bash
+printf 'ledger-read\n' >> "$FM_FORGE_LOG"
+printf '%s\n' "$((FM_FLOOR_EPOCH + 3))" > "$FM_FLOOR_CLOCK"
+exit 97
+SH
+  cat > "$WORLD/fakebin/no-mistakes" <<'SH'
+#!/usr/bin/env bash
+if [ "$#" = 1 ] && [ "$1" = axi ]; then
+  printf 'current_branch: %s\nruns[1]{id,branch,status,head,pr}:\n' "$FM_FLOOR_BRANCH"
+  printf '  01RUN,%s,failed,%s,""\n' "$FM_FLOOR_BRANCH" "$FM_FLOOR_HEAD"
+else
+  cat <<EOF
+run:
+  id: "01RUN"
+  branch: $FM_FLOOR_BRANCH
+  status: failed
+  head: "$FM_FLOOR_HEAD"
+  pr: ""
+  findings: none
+outcome: failed
+EOF
+fi
+SH
+  chmod +x "$WORLD/fakebin/"*
+  FM_TEST_CREW_STATE_BIN="$ROOT/bin/fm-crew-state.sh" FM_INACTIVE_RECONCILE_BUDGET_SECS=3 \
+    FM_FLOOR_CLOCK="$WORLD/clock" FM_REAL_DATE="$(type -P date)" FM_FLOOR_EPOCH="$epoch" \
+    FM_FLOOR_BRANCH="$branch" FM_FLOOR_HEAD="$head" run_reconcile "$MATE" --startup
+  grep -Fxq ledger-read "$WORLD/forge.log" || fail 'the floor regression never exhausted ledger proof'
+  [ "$(cat "$WORLD/clock")" = "$((epoch + 3))" ] || fail 'the ledger read did not reach the scan deadline'
+  grep -Fq 'inactive-outcome-mate-0-cadence-failed' "$MAIN/state/mate.status" 2>/dev/null \
+    || fail 'the forced first cadence visit lost its one-second floor after the ledger deadline'
+  [ "$(outcome_count "$MATE" reported)" = 1 ] \
+    || fail 'the floor regression reported an unproved ledger child'
+  pass 'the forced first cadence visit retains its floor after ledger proof exhausts the deadline'
+}
+
 # A scout's done line carries its report pointer, a failed line is delivered
 # under the failed verb, and a later terminal line after recovery is a new
 # delivery rather than a suppressed duplicate.
@@ -1683,6 +1740,7 @@ test_stalled_base_read_does_not_starve_later_ledger_outcomes
 test_several_stalled_base_reads_resume_before_later_ledger_outcomes
 test_readiness_deadline_owns_forge_processes_on_both_paths
 test_deadline_truncated_run_read_has_no_verdict
+test_forced_cadence_visit_keeps_floor_after_ledger_deadline
 test_secondmate_ledger_delivery_carries_report_and_failure
 test_pr_field_requires_recorded_pr_or_ready_signal_line
 test_terminal_line_during_state_read_yields_to_ledger_delivery
