@@ -38,15 +38,17 @@ seen_sig() {
   if [ "$(uname)" = Darwin ]; then stat -f '%z:%Fm' "$1" 2>/dev/null; else stat -c '%s:%Y' "$1" 2>/dev/null; fi
 }
 
-# mark_status_seen <state> <status-file>: record the file's CURRENT complete
-# snapshot as both reported and classified, so a status this case writes itself
-# does not also raise a status-signal wake and mask which route the pane took.
+# mark_status_seen <bin-dir> <state> <status-file>: record the file's CURRENT
+# complete snapshot as both reported and classified, so a status this case
+# writes itself does not also raise a status-signal wake and mask which route
+# the pane took. The marker is written by the same bin/ tree as the watcher
+# that reads it, because the two trees may encode the snapshot differently.
 mark_status_seen() {
-  FM_STATE_OVERRIDE="$1" bash -c '
+  FM_STATE_OVERRIDE="$2" bash -c '
     # shellcheck disable=SC1090,SC1091
     . "$1"
     fm_wake_status_mark_current "$2" "$3"
-  ' _ "$ROOT/bin/fm-wake-lib.sh" "$1" "$2"
+  ' _ "$1/fm-wake-lib.sh" "$2" "$3"
 }
 
 # upstream_tree <dest-dir>: materialise upstream main's own bin/ tree, so the
@@ -168,7 +170,7 @@ run_scenario() {  # <watch> <tag> [cap-env] [rounds]: drive the stuck-pane scena
   record_pi_state "$state" wedge-cap-parity busy
   backdate_meta "$state/wedge-cap-parity.meta"
   printf 'working: still wedged\n' > "$statusf"
-  mark_status_seen "$state" "$statusf"
+  mark_status_seen "$(dirname "$watch")" "$state" "$statusf"
   printf '%s' "$(hash_text 'idle wedged content')" > "$state/.hash-$PARITY_KEY"
   printf '1\n' > "$state/.count-$PARITY_KEY"
 
