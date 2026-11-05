@@ -2270,18 +2270,17 @@ test_escalation_close_note_carries_child_result() {
   fb=$(make_child_stubs "$mate")
   make_child "$mate" repack scout busy 'working: repacking panels'
   export FM_PENDING_REPLY_SEND_HOOK='true'
-  export FM_PENDING_REPLY_NOW=9500
-  corr=$(fm_pending_reply_create "$home" "$state" "kid" "how far is the repacking")
-  fm_pending_reply_mark_delivered "$state" "$corr"
-  fm_pending_reply_mark_turn_completed "$state" "$corr" request
-  fm_pending_reply_send_recovery "$state" "$corr" || fail "recovery send failed"
-  fm_pending_reply_mark_turn_completed "$state" "$corr" recovery
-  fm_pending_reply_maybe_escalate "$state" "$corr" || fail "missed-report escalation should fire"
+  corr=$(FM_PENDING_REPLY_NOW=9500 fm_pending_reply_create "$home" "$state" "kid" "how far is the repacking")
+  FM_PENDING_REPLY_NOW=9500 fm_pending_reply_mark_delivered "$state" "$corr"
+  FM_PENDING_REPLY_NOW=9500 fm_pending_reply_mark_turn_completed "$state" "$corr" request
+  FM_PENDING_REPLY_NOW=9500 fm_pending_reply_send_recovery "$state" "$corr" || fail "recovery send failed"
+  FM_PENDING_REPLY_NOW=9500 fm_pending_reply_mark_turn_completed "$state" "$corr" recovery
+  FM_PENDING_REPLY_NOW=9500 fm_pending_reply_maybe_escalate "$state" "$corr" || fail "missed-report escalation should fire"
   status="$state/kid.status"
   grep -Fq 'pending-reply-missed' "$status" || fail "escalation did not open a missed-report decision"
-  PATH="$fb:$PATH" FM_HOME="$mate" "$REPORT" --task repack done "$corr" "narrow fix done" > /dev/null \
+  PATH="$fb:$PATH" FM_HOME="$mate" "$REPORT" --task repack "done" "$corr" "narrow fix done" > /dev/null \
     || fail "helper report failed"
-  fm_pending_reply_try_resolve "$state" "$corr" || fail "late helper reply should resolve the request"
+  FM_PENDING_REPLY_NOW=9500 fm_pending_reply_try_resolve "$state" "$corr" || fail "late helper reply should resolve the request"
   [ "$(grep -Fc "resolved [key=pending-reply-$corr]" "$status")" -eq 1 ] \
     || fail "resolution did not close the escalation decision once: $(cat "$status")"
   [ "$(grep -Fc "pending-reply-resolved: task=kid pending-reply-id=$corr via=helper child=repack child-state=working overall=unfinished" "$status")" -eq 1 ] \
