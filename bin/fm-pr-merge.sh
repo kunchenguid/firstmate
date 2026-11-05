@@ -93,7 +93,10 @@
 # A supplied --expected-head remains pinned through the update: the source
 # branch may advance under explicit consent, but merging that new head needs
 # a new authorized request naming it as the expected head.
-# The update uses GitHub's merge-commit default, records the new head, then
+# The REST update is bound to the verified old head with expected_head_sha;
+# a concurrent push refuses the update without changing that replacement head,
+# and this request never retries against the newly observed head.
+# An accepted update uses GitHub's merge-commit default, records the new head, then
 # waits briefly (five poll delays, 15 seconds by default) under the merge and
 # away locks for that head to appear and for its checks and a transient UNKNOWN
 # mergeable state to settle, and repeats this full preflight before the
@@ -1303,7 +1306,8 @@ github_update_behind_branch() {
   local poll=${mergeable_retry_delay:-3} deadline
   deadline=$((SECONDS + poll * 5))
   attempt_error=$(mktemp "${TMPDIR:-/tmp}/fm-pr-merge-update.XXXXXX") || return 1
-  if ! gh pr update-branch "$PR_NUMBER" --repo "$PR_OWNER/$PR_REPO"; then
+  if ! gh api --method PUT "repos/$PR_OWNER/$PR_REPO/pulls/$PR_NUMBER/update-branch" \
+    -f "expected_head_sha=$old_head"; then
     rm -f "$attempt_error"
     return 1
   fi
