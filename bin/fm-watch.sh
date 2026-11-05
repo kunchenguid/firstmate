@@ -1663,6 +1663,10 @@ wait_record() {  # <kind> <subject> <whom> <action> <age-record>
 #     crewmate's OWN next move;
 #   - the crewmate parked at a human-owed gate and went quiet before escalating
 #     it at all: nobody was ever told, so there is no wait to defer to.
+# A gate parked at `test` or `ci` with no ask-user row is admitted too, but only
+# under an open decision keyed exactly `nm-<run>-<step>` for that step: the brief
+# forbids the crewmate to waive such a gate on its own, so that key is its record
+# of escalating THIS gate (crew_gate_awaits_human_decision owns the admission).
 # A `blocked` record does not count here: a blocker is not an unanswered gate
 # decision and a different action clears it. A gate awaiting the CREWMATE's own answer is
 # deliberately NOT evidence either: a crewmate that goes quiet before answering
@@ -1679,7 +1683,7 @@ wait_record() {  # <kind> <subject> <whom> <action> <age-record>
 # window per STALE_ESCALATE_SECS, never on an ordinary poll.
 WEDGE_BACKLOG_HOLD_KIND='captain hold'
 wedge_wait_evidence() {  # <task> -> one wait_record on stdout
-  local task=$1 last until statusf run verb
+  local task=$1 last until statusf run verb gate gate_step
   [ -n "$task" ] || return 1
   statusf="$STATE/$task.status"
   last=$(status_declared_wait_line "$statusf")
@@ -1710,11 +1714,18 @@ wedge_wait_evidence() {  # <task> -> one wait_record on stdout
     return 0
   fi
   [ -e "$CONFIG/wedge-defer-parked-gate" ] || return 1
-  if status_has_open_needs_decision "$statusf" \
-    && run=$(crew_gate_awaits_human_decision "$task") \
-    && status_has_open_needs_decision "$statusf" "$run"; then
+  status_has_open_needs_decision "$statusf" || return 1
+  gate=$(crew_gate_awaits_human_decision "$task") || return 1
+  run=${gate%% *}; gate_step=''
+  [ "$gate" = "$run" ] || gate_step=${gate#* }
+  if [ -z "$gate_step" ] && status_has_open_needs_decision "$statusf" "$run"; then
     wait_record 'verified wait at a parked gate' "awaiting firstmate's ask-user decision" \
       supervisor "decide the gate's ask-user finding and relay the decision to the crewmate" ''
+    return 0
+  fi
+  if [ -n "$gate_step" ] && status_has_open_needs_decision "$statusf" "$run" "$gate_step"; then
+    wait_record 'verified wait at a parked gate' "awaiting firstmate's decision on the escalated $gate_step gate" \
+      supervisor "decide the escalated $gate_step gate and relay the decision to the crewmate" ''
     return 0
   fi
   return 1

@@ -490,6 +490,66 @@ working: still parked at that gate'
   pass "a gate awaiting firstmate's decision for its own run is rechecked on the long cadence in either posture, while a crewmate-owed gate, an unrelated open decision and a runless verdict keep the unchanged ladder"
 }
 
+# --- an escalated Test or CI gate is a wait on firstmate too ----------------
+# Issue 8165: the brief forbids a crewmate to approve, skip, or ignore a Test or
+# CI gate on its own, so it escalates one under `nm-<run>-<step>` even when every
+# finding is an ordinary fix row with no `ask-user` action. That lane is owed
+# firstmate's answer, so it takes the long recheck - but only when the open
+# decision names exactly this run AND this step; a decision for another step of
+# the run, or a non-Test/CI gate with no ask-user row, keeps the ladder.
+test_wedge_threshold_defers_to_an_escalated_test_or_ci_gate() {
+  local dir state fakebin out capture window step gate n
+  local review='state: parked · source: run-step · parked at review: 2 finding(s) · run: 01RUNGATE'
+  window="test:fm-wedge"
+
+  for step in test ci; do
+    gate="state: parked · source: run-step · parked at $step: 3 finding(s) · run: 01RUNGATE"
+    dir=$(wedge_threshold_fixture "escalated-$step-gate" "needs-decision [key=nm-01RUNGATE-$step]: findings=f1 file=/tmp/f.txt
+working: still parked at that gate" 2000)
+    arm_parked_gate "$dir"
+    state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"; capture="$dir/pane.txt"
+    wedge_threshold_round "$state" "$fakebin" "$out" "$capture" "$window" "$gate" exit \
+      || fail "an escalated $step gate was never rechecked at the threshold: $(cat "$out")"
+    grep -F "awaiting firstmate's decision on the escalated $step gate" "$out" >/dev/null \
+      || fail "the escalated $step gate recheck did not name firstmate's decision: $(cat "$out")"
+    grep -F "decide the escalated $step gate and relay the decision to the crewmate" "$out" >/dev/null \
+      || fail "the escalated $step gate recheck did not name the action that clears it: $(cat "$out")"
+    grep -F 'possible wedge' "$out" >/dev/null \
+      && fail "an escalated $step gate was reported as a possible wedge: $(cat "$out")"
+    ack_stopped_cycle "$state" || fail "could not acknowledge the escalated $step gate recheck"
+  done
+
+  # The decision names this run but another step: it is not the record of
+  # escalating this ci gate, so the lane keeps the ladder.
+  gate='state: parked · source: run-step · parked at ci: 3 finding(s) · run: 01RUNGATE'
+  dir=$(wedge_threshold_fixture escalated-gate-other-step "needs-decision [key=nm-01RUNGATE-review]: findings=f1 file=/tmp/f.txt
+working: still parked at that gate" 2000)
+  arm_parked_gate "$dir"
+  state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"; capture="$dir/pane.txt"
+  wedge_threshold_round "$state" "$fakebin" "$out" "$capture" "$window" "$gate" exit \
+    || fail "a ci gate under another step's decision never escalated: $(cat "$out")"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the other-step escalation"
+  grep -F 'possible wedge, escalation 1' "$out" >/dev/null \
+    || fail "a ci gate under another step's decision did not take the unchanged ladder: $(cat "$out")"
+
+  # A review gate with no ask-user row stays the crewmate's own move even with
+  # its run and step key open: only Test and CI gates are admitted by this rule.
+  dir=$(wedge_threshold_fixture unescalated-review-gate "needs-decision [key=nm-01RUNGATE-review]: findings=f1 file=/tmp/f.txt
+working: still parked at that gate" 2000)
+  arm_parked_gate "$dir"
+  state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"; capture="$dir/pane.txt"
+  n=1
+  while [ "$n" -le 2 ]; do
+    wedge_threshold_round "$state" "$fakebin" "$out" "$capture" "$window" "$review" exit \
+      || fail "a crewmate-owed review gate stopped escalating at threshold $n: $(cat "$out")"
+    ack_stopped_cycle "$state" || fail "could not acknowledge review-gate escalation $n"
+    grep -F "possible wedge, escalation $n" "$out" >/dev/null \
+      || fail "a crewmate-owed review gate did not reach escalation $n: $(cat "$out")"
+    n=$((n + 1))
+  done
+  pass "an escalated Test or CI gate keyed to its own run and step is rechecked on the long cadence, while another step's key or a review gate with no ask-user row keeps the ladder"
+}
+
 # --- an unconfigured home behaves exactly as it did before this evidence -----
 # The parked-gate record is the one wait here that is not the worker's own
 # declaration about its own silence: it is derived from a pipeline's gate state,
@@ -979,6 +1039,7 @@ fm_test_run \
   test_wedge_threshold_defers_to_a_backlog_captain_hold \
   test_wedge_threshold_defers_to_a_parked_gate_awaiting_a_human \
   test_wedge_threshold_parked_gate_needs_an_unanswered_decision \
+  test_wedge_threshold_defers_to_an_escalated_test_or_ci_gate \
   test_wedge_threshold_parked_gate_is_off_until_armed \
   test_wedge_threshold_defers_to_a_worker_blocker \
   test_wedge_threshold_worker_wait_is_off_until_armed \

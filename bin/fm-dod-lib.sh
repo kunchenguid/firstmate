@@ -480,9 +480,10 @@ Three firstmate-specific rules layer on top of that guidance:
   When the decision comes back, feed it to the gate with \`no-mistakes axi respond\` and let the pipeline apply it - do not route the question to "the user" or implement the fix yourself.
 - NEVER pass \`--yes\` (or \`-y\`) to \`no-mistakes axi run\` or \`no-mistakes axi respond\`. It is banned fleet-wide.
   It auto-resolves every gate including ask-user findings with no escalation, and answering your own ask-user finding is a hard rule violation.
-- Test and CI gates are not yours to waive: answer one only with \`--action fix\` on every finding it shows.
-  Never answer it with \`--action approve\`, \`--action skip\`, or \`--ignore\`, and never pass \`--skip\` to \`no-mistakes axi run\` $skip_clause.
+- Test and CI gates are not yours to waive: on your own, answer one only with \`--action fix\` on every finding it shows.
+  Never decide on your own to answer it with \`--action approve\`, \`--action skip\`, or \`--ignore\`, and never pass \`--skip\` to \`no-mistakes axi run\` $skip_clause.
   When a Test or CI finding looks wrong, unfixable, or worth approving, skipping, ignoring, or aborting, escalate that gate to firstmate in rule 6's ask-user format, with its findings verbatim in the file, and stop; firstmate decides, and its default is fix or abort.
+  When firstmate's decision comes back, relay it with exactly the command firstmate sends, even when that command approves, skips, or ignores.
 EOF
 }
 

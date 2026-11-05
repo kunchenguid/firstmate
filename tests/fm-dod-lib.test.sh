@@ -420,11 +420,13 @@ test_nm_dod_routes_test_and_ci_waivers_to_firstmate() {
       gerrit) fm_dod_block no-mistakes dod-waiver fm/dod-waiver gerrit > "$out"; skip='`no-mistakes axi run` beyond the `push,pr,ci` this definition of done names' ;;
     esac
     # shellcheck disable=SC2016  # single quotes are deliberate: the backticks must stay literal
-    assert_grep 'Test and CI gates are not yours to waive: answer one only with `--action fix` on every finding it shows.' "$out" \
+    assert_grep 'Test and CI gates are not yours to waive: on your own, answer one only with `--action fix` on every finding it shows.' "$out" \
       "$variant: DoD lets the worker answer a Test or CI gate with something other than fix"
     # shellcheck disable=SC2016  # single quotes are deliberate: the backticks must stay literal
-    assert_grep 'Never answer it with `--action approve`, `--action skip`, or `--ignore`' "$out" \
-      "$variant: DoD does not forbid approving, skipping, or ignoring a Test or CI gate"
+    assert_grep 'Never decide on your own to answer it with `--action approve`, `--action skip`, or `--ignore`' "$out" \
+      "$variant: DoD does not forbid approving, skipping, or ignoring a Test or CI gate on the worker's own decision"
+    assert_grep "When firstmate's decision comes back, relay it with exactly the command firstmate sends, even when that command approves, skips, or ignores." "$out" \
+      "$variant: DoD does not let the worker relay firstmate's returned Test or CI decision"
     assert_grep "never pass \`--skip\` to $skip." "$out" \
       "$variant: DoD's allowed --skip is not the one its definition of done names"
     assert_grep "escalate that gate to firstmate in rule 6's ask-user format" "$out" \
