@@ -351,16 +351,15 @@ POLL=${FM_POLL:-15}                   # seconds between cycles
 # liveness beacon must stay inside the grace for the LONGEST wait a cycle can
 # take, not the shortest. A grace derived from the fast poll alone would let a
 # healthy watcher that waits on the idle cadence age past its own bound.
-EFFECTIVE_POLL=$POLL
-[ "${FM_IDLE_POLL:-0}" -gt "$EFFECTIVE_POLL" ] && EFFECTIVE_POLL=$FM_IDLE_POLL
+EFFECTIVE_POLL=$(fm_effective_poll_seconds)
 WATCHER_STALE_GRACE=${FM_WATCHER_STALE_GRACE:-${FM_GUARD_GRACE:-$(fm_poll_derived_grace "$EFFECTIVE_POLL")}}
 # Hard bound on a live holder's beacon age. Under it a re-arm refuses and asks
 # for inspection (the grace above); at or past it the re-arm evicts the holder
 # instead, because a watcher whose beacon has stalled that long is not polling
 # and nothing else would ever replace it (evict_stalled_holder below).
 # fm_watcher_stall_bound (bin/fm-wake-lib.sh) owns the derivation, shared with
-# the arm that follows this watcher.
-WATCHER_STALL_BOUND=$(fm_watcher_stall_bound "$POLL")
+# the arm that follows this watcher; both bound on the same effective cadence.
+WATCHER_STALL_BOUND=$(fm_watcher_stall_bound "$EFFECTIVE_POLL")
 HEARTBEAT=${FM_HEARTBEAT:-600}        # base seconds between heartbeat scans
 HEARTBEAT_MAX=${FM_HEARTBEAT_MAX:-7200}  # heartbeat backoff cap
 CHECK_INTERVAL=${FM_CHECK_INTERVAL:-300}  # seconds between *.check.sh sweeps
@@ -3412,7 +3411,9 @@ fleet_idle_now() {
 # fleet is idle and the poll can find nothing. FM_IDLE_POLL is home-local tuning
 # and defaults to 0, which keeps the shipped fast cadence.
 supervision_poll_seconds() {
-  local fast=${POLL:-15} slow=${FM_IDLE_POLL:-0}
+  local fast slow
+  fast=$(fm_supervision_tuning_int "${POLL:-15}" 15)
+  slow=$(fm_supervision_tuning_int "${FM_IDLE_POLL:-0}" 0)
   [ "$slow" -gt "$fast" ] || { printf '%s\n' "$fast"; return 0; }
   if fleet_idle_now; then printf '%s\n' "$slow"; else printf '%s\n' "$fast"; fi
 }

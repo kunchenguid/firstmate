@@ -214,12 +214,9 @@ A fixed 300-second grace default stops correctly bounding staleness once a home'
 A perfectly healthy watcher mid-wait would then read stale at the edge of every full poll cycle by definition.
 That is exactly what a long-poll home (`FM_POLL=300`) hit against the Claude Stop-hook auto-arm (`bin/fm-claude-stop-autoarm.sh`).
 
-Two readers derive their default grace from the configured poll instead of a bare constant:
+Every beacon-age reader derives its default grace from the configured poll instead of a bare constant, through `fm_poll_derived_grace` with no argument: that hook, `bin/fm-watch.sh`'s own pre-acquisition staleness check, `bin/fm-turnend-guard.sh`, `bin/fm-supervision-host.sh`, `bin/fm-supervision-handoff.sh`, `bin/fm-claude-stop-autoarm.sh`, and `bin/fm-watch-arm.sh`'s freshness check (`fm_watcher_stall_bound` derives its default the same way).
 
-- That hook.
-- `bin/fm-watch.sh`'s own pre-acquisition staleness check (the "lock held by live pid but heartbeat is stale" refusal).
-
-Both use `max(300, effective_poll + 60)`.
+All use `max(300, effective_poll + 60)`.
 The default never drops below the historical 300-second floor for the common short-poll case, but grows with the poll cadence once that cadence would otherwise outrun it.
 The effective poll is the slower of the fast poll and the idle poll, not the fast poll alone: the beacon must stay inside the grace for the longest wait a cycle can take, and a grace derived from the fast poll alone would let a healthy watcher waiting on the idle cadence age past its own bound.
 `fm_poll_derived_grace` in `bin/fm-wake-lib.sh` is the single owner of that formula.

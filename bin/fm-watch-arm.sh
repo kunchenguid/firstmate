@@ -156,14 +156,10 @@ fi
 # derive from the SAME effective cadence a live watcher actually waits on -
 # the slower of the fast poll and the idle poll - not from the shipped
 # 300s default, which would let the arm evict or refuse a healthy watcher
-# whose idle cadence stretches past it. bin/fm-watch.sh owns the derivation
-# shape; this repeats it over the same loaded knobs.
-# shellcheck source=/dev/null
-. "$SCRIPT_DIR/fm-supervision-tuning-lib.sh"
-fm_supervision_tuning_load
-ARM_POLL=${FM_POLL:-15}
-ARM_EFFECTIVE_POLL=$ARM_POLL
-[ "${FM_IDLE_POLL:-0}" -gt "$ARM_EFFECTIVE_POLL" ] && ARM_EFFECTIVE_POLL=$FM_IDLE_POLL
+# whose idle cadence stretches past it. fm_effective_poll_seconds
+# (bin/fm-wake-lib.sh) is the single owner of the derivation shape - the
+# slower of the fast poll and the idle poll - shared with the watcher.
+ARM_EFFECTIVE_POLL=$(fm_effective_poll_seconds)
 
 # Home-local watcher tuning is independent of Relay's generated cadence
 # artifact. Relay, when active, is sourced second so its required 30s cadence
@@ -181,9 +177,10 @@ ARM_HOME_EXISTED=0
 WATCH_LOCK="$STATE/.watch.lock"
 BEAT="$STATE/.last-watcher-beat"
 # "Fresh" reuses the guard's threshold so there is one definition of liveness.
-# The default derives from the effective cadence above, exactly as the
-# watcher's own WATCHER_STALE_GRACE does (FM_WATCHER_STALE_GRACE, else
-# FM_GUARD_GRACE, else fm_poll_derived_grace over the effective poll).
+# The default derives from the effective cadence (fm_effective_poll_seconds,
+# bin/fm-wake-lib.sh), exactly as the watcher's own WATCHER_STALE_GRACE does
+# (FM_WATCHER_STALE_GRACE, else FM_GUARD_GRACE, else fm_poll_derived_grace
+# over the effective poll).
 GRACE=${FM_WATCHER_STALE_GRACE:-${FM_GUARD_GRACE:-$(fm_poll_derived_grace "$ARM_EFFECTIVE_POLL")}}
 case "$GRACE" in
   ''|*[!0-9]*) GRACE=300 ;;
@@ -229,8 +226,9 @@ esac
 ATTACH_POLL=${FM_ARM_ATTACH_POLL:-0.5}
 # The beacon age at which the watcher's own re-arm evicts a live holder; an
 # attached arm follows a slow holder up to it (attach_and_wait). Derived from
-# the same fast poll the watcher passes, so both sides share one bound.
-STALL_BOUND=$(fm_watcher_stall_bound "$ARM_POLL")
+# the same effective cadence the watcher derives its own bound from, so both
+# sides share one bound.
+STALL_BOUND=$(fm_watcher_stall_bound "$ARM_EFFECTIVE_POLL")
 CYCLE_LOG="$STATE/.watch-cycle-exits.log"
 CYCLE_LOG_LOCK="$STATE/.watch-cycle-exits.lock"
 CYCLE_LOG_MAX_BYTES=${FM_WATCH_CYCLE_LOG_MAX_BYTES:-262144}
