@@ -448,6 +448,21 @@ EOF
   pass "promotion keeps a scout's recorded base branch and refuses local-only for it"
 }
 
+test_canonical_pr_requires_destination_metadata() {
+  local repo wt reason rc
+  repo="$TMP_ROOT/unknown-destination-repo"
+  wt="$TMP_ROOT/unknown-destination-wt"
+  fm_git_worktree "$repo" "$wt" fm/unknown-destination
+  git -C "$wt" commit -q --allow-empty -m 'published head without task metadata'
+  git -C "$wt" update-ref refs/remotes/origin/fm/unknown-destination "$(git -C "$wt" rev-parse HEAD)"
+  reason=$(accept_done ship direct-PR "$wt" "$repo" 'done: PR https://github.com/o/r/pull/7')
+  rc=$?
+  [ "$rc" -eq 1 ] || fail 'a published head bypassed missing task destination metadata'
+  assert_contains "$reason" 'expected PR base is unavailable' 'readiness refusal lost the missing destination'
+  pass 'a canonical PR requires destination metadata even when its head is published'
+}
+
+test_canonical_pr_requires_destination_metadata
 test_scout_done_is_not_gated
 test_unpushed_ship_done_is_refused
 test_no_mistakes_prevalidation_done_is_not_gated
