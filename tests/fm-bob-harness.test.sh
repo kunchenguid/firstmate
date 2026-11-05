@@ -214,7 +214,7 @@ test_bob_launch_then_send_is_verified() {
   assert_contains "$out" "spawned $id harness=bob" "bob spawn did not report success"
 
   launch=$(cat "$CASE_DIR/launch.log")
-  assert_contains "$launch" "'$FAKEBIN_DIR/bob' chat --auto-approve --trust --workspace" \
+  assert_contains "$launch" "$(printf %q "$FAKEBIN_DIR/bob") chat --auto-approve --trust --workspace" \
     "bob launch must run the executable its preflight resolved, with its interactive flags"
   assert_contains "$launch" "env -u BOB_SESSION -u CLAUDECODE" "bob launch did not strip BOB_SESSION and foreign markers"
   assert_not_contains "$launch" "launch-brief" "bob launch carried a brief doorbell as a positional argument"
@@ -315,6 +315,140 @@ test_bob_missing_binary_refuses_before_launch() {
   [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "a refused spawn wrote task metadata"
   [ ! -s "$CASE_DIR/launch.log" ] || fail "a missing bob executable reached the launch"
   pass "fm-spawn: a missing bob executable refuses before trust, metadata, and launch"
+}
+
+# npm's install shape: a bin symlink to an entry script that runs under `env node`.
+# The script records how it was started, so running it proves the launch.
+install_npm_shaped_bob() {  # <case-dir> <fakebin>
+  local package="$1/package/bobshell/dist"
+  mkdir -p "$package"
+  cat > "$package/bob.js" <<'JS'
+#!/usr/bin/env node
+require("node:fs").writeFileSync(process.env.FM_BOB_PROOF, process.argv.slice(2).join(" "));
+JS
+  chmod +x "$package/bob.js"
+  rm "$2/bob"
+  ln -s "../../package/bobshell/dist/bob.js" "$2/bob"
+  ln -s "$(command -v node)" "$2/node"
+  printf '%s\n' "$(cd -P "$package" && pwd -P)/bob.js"
+}
+
+# The launch runs in a pane whose daemon does not share firstmate's PATH. This runs
+# the launched command the way such a pane would: env is all that PATH holds.
+run_launch_in_a_bare_pane() {  # <case-dir> <launch>
+  local launch=$2
+  mkdir -p "$1/pane-bin"
+  ln -sf "$(command -v env)" "$1/pane-bin/env"
+  launch="env -u BOB_SESSION${launch#*env -u BOB_SESSION}"
+  FM_BOB_PROOF="$1/proof" PATH="$1/pane-bin" /bin/sh -c "$launch" >/dev/null 2>&1
+}
+
+# A PATH holding every base tool except node and bob, for hosts that install them
+# beside the base tools.
+base_path_without_node() {  # <dir>
+  local dir=$1 entry
+  local -a entries=()
+  mkdir -p "$dir"
+  IFS=: read -r -a entries <<<"$BASE_PATH"
+  for entry in "${entries[@]}"; do
+    find "$entry/" -mindepth 1 -maxdepth 1 ! -name node ! -name bob \
+      -exec sh -c 'target=$0; ln -sf "$@" "$target"' "$dir" {} + 2>/dev/null
+  done
+  printf '%s\n' "$dir"
+}
+
+test_bob_launch_needs_no_node_on_the_pane_path() {
+  local id rec out rc script launch
+  id="bob-nodepath-z1-$$"
+  rec=$(make_spawn_case nodepath "$id")
+  read_spawn_record "$rec"
+  script=$(install_npm_shaped_bob "$CASE_DIR" "$FAKEBIN_DIR")
+  out=$(run_spawn "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id")
+  rc=$?
+  expect_code 0 "$rc" "an npm-shaped bob should launch: $out"
+  launch=$(cat "$CASE_DIR/launch.log")
+  assert_contains "$launch" "$(printf '%q %q' "$FAKEBIN_DIR/node" "$script") chat --auto-approve" \
+    "bob launch must name node and the entry script behind the symlink"
+  run_launch_in_a_bare_pane "$CASE_DIR" "$launch" || fail "the launch did not start without node on the pane's PATH"
+  assert_contains "$(cat "$CASE_DIR/proof" 2>/dev/null)" "chat --auto-approve --trust --workspace" \
+    "the entry script did not run with its arguments"
+  pass "fm-spawn: bob's launch names node and its entry script, so it starts on a node-less pane PATH"
+}
+
+test_bob_launcher_owning_its_interpreter_runs_directly() {
+  local id rec out rc launch
+  id="bob-launcher-z1-$$"
+  rec=$(make_spawn_case launcher "$id")
+  read_spawn_record "$rec"
+  rm "$FAKEBIN_DIR/bob"
+  cat > "$FAKEBIN_DIR/bob" <<'SH'
+#!/bin/sh
+echo "launcher $*" > "$FM_BOB_PROOF"
+SH
+  chmod +x "$FAKEBIN_DIR/bob"
+  out=$(run_spawn "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id")
+  rc=$?
+  expect_code 0 "$rc" "an operator's launcher should launch: $out"
+  launch=$(cat "$CASE_DIR/launch.log")
+  assert_contains "$launch" "$(printf %q "$FAKEBIN_DIR/bob") chat --auto-approve" \
+    "a launcher that owns its interpreter must run directly"
+  run_launch_in_a_bare_pane "$CASE_DIR" "$launch" || fail "the launcher did not start from a bare pane"
+  assert_contains "$(cat "$CASE_DIR/proof" 2>/dev/null)" "launcher chat --auto-approve" \
+    "the launcher did not run with its arguments"
+  pass "fm-spawn: a bob launcher with its own interpreter runs directly"
+}
+
+test_bob_missing_node_refuses_before_launch() {
+  local id rec out rc
+  id="bob-nonode-z1-$$"
+  rec=$(make_spawn_case nonode "$id")
+  read_spawn_record "$rec"
+  install_npm_shaped_bob "$CASE_DIR" "$FAKEBIN_DIR" >/dev/null
+  rm "$FAKEBIN_DIR/node"
+  out=$(BASE_PATH=$(base_path_without_node "$CASE_DIR/no-node") \
+    run_spawn "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id")
+  rc=$?
+  [ "$rc" -ne 0 ] || fail "a bob with no node to run it must refuse the spawn"
+  assert_contains "$out" "node was not found on PATH" "the missing-node refusal did not name its cause"
+  [ ! -e "$HOME_DIR/.bob/trustedFolders.json" ] || fail "a refused spawn wrote a trust entry"
+  [ ! -e "$WT_DIR/.bob/settings.json" ] || fail "a refused spawn wrote the hook file"
+  [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "a refused spawn wrote task metadata"
+  [ ! -s "$CASE_DIR/launch.log" ] || fail "a missing node reached the launch"
+  pass "fm-spawn: a bob with no node refuses before trust, hooks, metadata, and launch"
+}
+
+test_bob_relaunch_without_node_keeps_the_running_worker() {
+  local id rec out rc
+  id="bob-rlnonode-z1-$$"
+  rec=$(make_spawn_case rlnonode "$id")
+  read_spawn_record "$rec"
+  install_npm_shaped_bob "$CASE_DIR" "$FAKEBIN_DIR" >/dev/null
+  rm "$FAKEBIN_DIR/node"
+  {
+    echo "window=fmses:fm-$id"
+    echo "endpoint_task_id=$id"
+    echo "worktree=$WT_DIR"
+    echo "project=$PROJ_DIR"
+    echo "harness=claude"
+    echo "kind=ship"
+    echo "mode=no-mistakes"
+    echo "yolo=off"
+    echo "model=default"
+    echo "effort=default"
+  } > "$HOME_DIR/state/$id.meta"
+  printf 'fm-%s\n' "$id" > "$CASE_DIR/bob.state.window"
+  out=$(HOME="$HOME_DIR" FM_HOME="$HOME_DIR" FM_SPAWN_NO_GUARD=1 TMUX="fake,1,0" \
+    FM_FAKE_PANE_PATH="$WT_DIR" FM_FAKE_BOB_STATE="$CASE_DIR/bob.state" \
+    FM_FAKE_TMUX_CALL_LOG="$CASE_DIR/tmux-calls.log" \
+    PATH="$FAKEBIN_DIR:$(base_path_without_node "$CASE_DIR/no-node")" \
+    "$ROOT/bin/fm-control.sh" "$id" relaunch --harness bob --note "switching runtime" 2>&1)
+  rc=$?
+  [ "$rc" -ne 0 ] || fail "a relaunch onto a bob with no node must refuse"
+  assert_contains "$out" "node was not found on PATH" "the relaunch refusal did not name its cause: $out"
+  assert_not_contains "$(cat "$CASE_DIR/tmux-calls.log")" "send-keys" "a refused relaunch must not reach the running worker"
+  assert_contains "$(cat "$HOME_DIR/state/$id.meta")" "harness=claude" "a refused relaunch must keep the prior record"
+  [ ! -e "$HOME_DIR/.bob/trustedFolders.json" ] || fail "a refused relaunch wrote a trust entry"
+  pass "fm-control relaunch: a bob with no node refuses before the running worker stops"
 }
 
 test_bob_tracked_settings_refuses_spawn() {
@@ -530,6 +664,10 @@ test_bob_stale_composer_frame_is_not_ready
 test_bob_stale_pointer_is_not_delivery
 test_bob_unconfirmed_delivery_fails_loudly
 test_bob_missing_binary_refuses_before_launch
+test_bob_launch_needs_no_node_on_the_pane_path
+test_bob_launcher_owning_its_interpreter_runs_directly
+test_bob_missing_node_refuses_before_launch
+test_bob_relaunch_without_node_keeps_the_running_worker
 test_bob_tracked_settings_refuses_spawn
 test_bob_tracked_brief_refuses_spawn
 test_bob_symlinked_dir_refuses_spawn

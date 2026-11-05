@@ -631,6 +631,48 @@ $(fm_control_harness_wiring_paths bob "$wt" "$2" "$3")
 EOF
 }
 
+# Prints the shell-quoted absolute command that starts the bob on PATH, and fails
+# loudly when it cannot start, so a launch depends on nothing in the pane's PATH:
+# a long-lived pane daemon does not share firstmate's. npm's bin shim is a symlink
+# to an entry script that runs under `env node`, which would resolve there, so that
+# script is named together with the node firstmate's PATH selects. Anything else
+# owns its interpreter, like an operator's launcher, and runs as PATH found it.
+# node stays unresolved because version managers dispatch their shims on argv[0].
+# fm-spawn bakes this into the launch and fm-control runs it before a relaunch stops
+# the worker.
+fm_control_bob_launch_command() {
+  local bob node script target shebang=
+  bob=$(type -P bob) || {
+    echo "error: bob executable not found on PATH; install it or select a different verified harness" >&2
+    return 1
+  }
+  script=$bob
+  while [ -L "$script" ]; do
+    target=$(readlink -- "$script") || return 1
+    case "$target" in
+      /*) script=$target ;;
+      *) script=$(dirname -- "$script")/$target ;;
+    esac
+  done
+  IFS= read -r -n 64 shebang <"$script" || true
+  case "$shebang" in
+    '#!'*/env' node') ;;
+    *)
+      printf '%q' "$(fm_control_absolute_path "$bob")"
+      return 0
+      ;;
+  esac
+  node=$(type -P node) || {
+    echo "error: bob runs under node, and node was not found on PATH; install it or select a different verified harness" >&2
+    return 1
+  }
+  printf '%q %q' "$(fm_control_absolute_path "$node")" "$(fm_control_absolute_path "$script")"
+}
+
+fm_control_absolute_path() {  # <path>
+  printf '%s/%s\n' "$(cd -P -- "$(dirname -- "$1")" && pwd -P)" "${1##*/}"
+}
+
 # The firstmate-owned per-task DIRECTORIES a harness mints, one per line:
 # the same retirement contract as fm_control_harness_wiring_paths for
 # artifacts that are directory trees rather than single files. Consumers
