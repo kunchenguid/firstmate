@@ -83,9 +83,8 @@
 # verdict as a trailing marker (fm_pending_reply_child_marker), and the resolve
 # records it beside the request outcome. fm_pending_reply_result derives the
 # overall label from that verdict alone: a reply with no marker, or a verdict
-# the mate could not read, is "unknown" and never "finished". The drain's wake
-# annotation (bin/fm-wake-lib.sh) appends that result to the reply line the
-# parent reads.
+# the mate could not read, is "unknown" and never "finished". The resolved
+# note carries this result to the parent.
 #
 # Escalation lifecycle: an escalation is not just a message, it OPENS a durable
 # keyed decision in the parent status log, and bin/fm-classify-lib.sh's fold is
@@ -1288,16 +1287,30 @@ fm_pending_reply_close_escalation() {  # <state-dir> <corr_id>
 
 _fm_pending_reply_close_escalation_locked() {  # <state-dir> <corr_id>
   local state=$1 corr=$2 rec escalated closed parent_status escalation key note
-  local open_line open_key open_note now close_line close_rc _task _via
+  local open_line open_key open_note now close_line close_rc _task _via child_id child_state overall result_note
   rec=$(fm_pending_reply_path "$state" "$corr")
   [ -f "$rec" ] || return 1
   [ "$(fm_pending_reply_get "$rec" phase)" = resolved ] || return 0
-  escalated=$(fm_pending_reply_get "$rec" escalated_epoch)
-  [ -n "$escalated" ] || return 0
-  closed=$(fm_pending_reply_get "$rec" escalation_closed_epoch)
-  [ -z "$closed" ] || return 0
   parent_status=$(fm_pending_reply_get "$rec" parent_status)
   [ -n "$parent_status" ] || return 1
+  _task=$(fm_pending_reply_get "$rec" task_id)
+  _via=$(fm_pending_reply_get "$rec" resolved_via)
+  child_id=$(fm_pending_reply_get "$rec" reply_child_id)
+  child_state=$(fm_pending_reply_get "$rec" reply_child_state)
+  [ -n "$child_id" ] || child_id=-
+  fm_pending_reply_child_state_valid "$child_state" || child_state=unknown
+  overall=$(fm_pending_reply_overall_label "$child_state")
+  result_note=$(fm_pending_reply_resolved_note "$_task" "$corr" "$_via" \
+    "child=$child_id child-state=$child_state overall=$overall")
+  escalated=$(fm_pending_reply_get "$rec" escalated_epoch)
+  if [ -z "$escalated" ]; then
+    # A plain unread note is the one result surface for a routine resolution.
+    . "$_FM_PENDING_REPLY_LIB_DIR/fm-parent-channel-lib.sh"
+    fm_parent_channel_append_once "$parent_status" "$(status_stamp_line "note [corr=$corr]: $result_note")"
+    return $?
+  fi
+  closed=$(fm_pending_reply_get "$rec" escalation_closed_epoch)
+  [ -z "$closed" ] || return 0
   escalation=$(fm_pending_reply_escalation_line "$parent_status" "$rec" "$corr")
   if [ -n "$escalation" ]; then
     key=$(_fm_decision_key "$escalation") || key=''
@@ -1314,9 +1327,7 @@ _fm_pending_reply_close_escalation_locked() {  # <state-dir> <corr_id>
       # self-announced append (bin/fm-wake-lib.sh, sourced by this function's
       # wrappers) and does not wake the home that wrote it; the escalation
       # OPEN above stays a plain append because a new blocker must wake.
-      _task=$(fm_pending_reply_get "$rec" task_id)
-      _via=$(fm_pending_reply_get "$rec" resolved_via)
-      close_line="resolved [key=${key}]: $(fm_pending_reply_resolved_note "$_task" "$corr" "$_via")"
+      close_line="resolved [key=${key}]: $result_note"
       close_rc=0
       fm_wake_status_append_self_announced "${parent_status%/*}" "$parent_status" "$close_line" \
         2>/dev/null || close_rc=$?
