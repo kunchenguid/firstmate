@@ -5,9 +5,9 @@
 # outside the worker's disposable copy; in no-mistakes mode a forge-reported
 # head is that named head and is already stored on the forge.
 # The published check is a byte-for-byte copy of bin/fm-pr-poll.sh bound by its
-# own registration, so a later repository update does not invalidate it; task and
-# PR data live only in a private sidecar and are never interpolated into shell
-# source.
+# own registration; bin/fm-pr-lib.sh's header owns template-update compatibility.
+# Task and PR identity data live only in a private sidecar and are never
+# interpolated into shell source.
 # A GitHub pull request URL, a GitLab merge request URL, and a Gerrit change URL
 # are all accepted, including a merge request or change on a self-hosted
 # instance and a GitHub Enterprise pull request on a host this home names in
