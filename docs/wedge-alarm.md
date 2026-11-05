@@ -24,7 +24,7 @@ It lists channel directives, one per non-empty, non-comment line, and every list
 An absent `config/wedge-alarm` behaves as `auto`, which is default-on on macOS.
 This is deliberate because the alarm fires only after a genuine max-defer wedge and is rate-limited to at most once per max-defer window.
 
-Append the preference without opening an editor with `printf '\nsound:off\n' >> "${FM_HOME:-.}/config/wedge-alarm"`; delete that line to restore sound.
+Append the preference without opening an editor with `printf '\nsound:off\n' >> "${FM_CONFIG_OVERRIDE:-${FM_HOME:-.}/config}/wedge-alarm"`; delete that line to restore sound.
 
 Each channel is best-effort.
 A missing binary or non-zero exit logs a warning and continues to the next channel without crashing the daemon loop.
