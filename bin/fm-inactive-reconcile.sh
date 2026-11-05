@@ -573,7 +573,7 @@ report_child_ledger_locked() { # <id> <meta>
 # Persist the visit before that read: even the scan's aggregate backstop must
 # not make every poll start again at the same stalled children.
 ledger_pass() {
-  local meta id lock cursor range marker="$STATE/.terminal-outcome-ledger-scan"
+  local deadline=$1 meta id lock cursor range remaining marker="$STATE/.terminal-outcome-ledger-scan"
   cursor=$(scan_marker_cursor "$marker")
   valid_id "$cursor" || cursor=''
   for range in after through; do
@@ -586,6 +586,7 @@ ledger_pass() {
         after) [ -z "$cursor" ] || [[ "$id" > "$cursor" ]] || continue ;;
         through) [[ "$id" > "$cursor" ]] && continue ;;
       esac
+      [ "$(date +%s)" -lt "$deadline" ] || return 0
       [ "$(meta_field "$meta" kind)" != secondmate ] || continue
       lock=$(fm_meta_lock_path "$meta") || continue
       fm_lock_try_acquire "$lock" || continue
@@ -594,11 +595,16 @@ ledger_pass() {
         fm_lock_release "$lock"
         continue
       fi
+      remaining=$((deadline - $(date +%s)))
+      if [ "$remaining" -le 0 ]; then
+        fm_lock_release "$lock"
+        return 0
+      fi
       if ! write_scan_marker "$id" "$marker"; then
         fm_lock_release "$lock"
         return 1
       fi
-      report_child_ledger_locked "$id" "$meta" || true
+      fm_run_timed "$remaining" "$0" report "$id" || true
       fm_lock_release "$lock"
     done
   done
@@ -754,17 +760,24 @@ scan_pass() { # <cursor> <after|through> <deadline> <secondmate-id-or-empty>
 }
 
 scan() {
-  local startup=${1:-0} self='' cursor deadline rc=0 marker_rc=0
+  local startup=${1:-0} self='' cursor deadline ledger_deadline due=1 rc=0 marker_rc=0
   mkdir -p "$STATE" "$OUTCOME_DIR" || return 1
   [ ! -L "$OUTCOME_DIR" ] || return 1
+  deadline=$(( $(date +%s) + FM_INACTIVE_RECONCILE_BUDGET_SECS ))
+  ledger_deadline=$deadline
+  if [ "$startup" != 1 ] && [ "$(scan_marker_age)" -lt "$FM_INACTIVE_RECONCILE_SECS" ]; then
+    due=0
+  else
+    ledger_deadline=$((deadline - 1))
+  fi
   if self=$(home_secondmate_id); then
     # The ledger-first delivery is per poll, not per cadence.
-    ledger_pass
+    ledger_pass "$ledger_deadline"
   else
     marker_rc=$?
     self=''
   fi
-  if [ "$startup" != 1 ] && [ "$(scan_marker_age)" -lt "$FM_INACTIVE_RECONCILE_SECS" ]; then
+  if [ "$due" -eq 0 ]; then
     return 0
   fi
   cursor=$(scan_marker_cursor)
@@ -775,7 +788,6 @@ scan() {
       "inactive terminal outcomes remain unreconciled: invalid .fm-secondmate-home marker" || true
     return 0
   fi
-  deadline=$(( $(date +%s) + FM_INACTIVE_RECONCILE_BUDGET_SECS ))
   SCAN_FIRST_VISIT_PENDING=1
   scan_pass "$cursor" after "$deadline" "$self" || rc=$?
   if [ "$rc" -eq 0 ] && [ -n "$cursor" ]; then

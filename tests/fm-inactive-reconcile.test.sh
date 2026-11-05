@@ -536,6 +536,7 @@ SH
 test_several_stalled_base_reads_resume_before_later_ledger_outcomes() {
   local id number=0 attempt
   make_world several-stalled-bases; bind_secondmate local
+  write_child "$MATE" 0-dead 'working: stopped before writing an outcome'
   for id in a-hung b-hung c-hung z-ready; do
     number=$((number + 1))
     write_child "$MATE" "$id" "done: PR https://github.com/owner/repo/pull/$number checks green"
@@ -553,7 +554,11 @@ SH
   chmod +x "$WORLD/fakebin/gh"
 
   for attempt in 1 2 3 4 5; do
-    FM_INACTIVE_RECONCILE_BUDGET_SECS=2 FM_FAKE_CREW_STATE=unknown run_reconcile "$MATE"
+    FM_INACTIVE_RECONCILE_BUDGET_SECS=2 FM_FAKE_CREW_STATE=failed run_reconcile "$MATE"
+    grep -Fq 'inactive-outcome-mate-0-dead-failed' "$MAIN/state/mate.status" 2>/dev/null \
+      || fail "hung ledger reads starved the due inactive outcome on poll $attempt"
+    [ -f "$MATE/state/.inactive-outcome-reconcile" ] \
+      || fail 'hung ledger reads prevented the inactive cadence marker'
     grep -Fq 'child-outcome-z-ready-done' "$MAIN/state/mate.status" 2>/dev/null && break
   done
   grep -Fq 'child-outcome-z-ready-done' "$MAIN/state/mate.status" 2>/dev/null \
@@ -562,13 +567,17 @@ SH
     ! grep -Fq "child-outcome-$id-done" "$MAIN/state/mate.status" \
       || fail "a timed-out child was reported ready: $id"
   done
-  [ "$(outcome_count "$MATE" reported)" = 1 ] \
+  [ "$(grep -Fc 'inactive-outcome-mate-0-dead-failed' "$MAIN/state/mate.status")" = 1 ] \
+    || fail 'ledger retries duplicated the inactive outcome'
+  [ "$(outcome_count "$MATE" reported)" = 2 ] \
     || fail 'timed-out destination reads acquired readiness receipts'
+  [ "$(outcome_count "$MATE" pending)" = 0 ] \
+    || fail 'timed-out destination reads acquired pending receipts'
   for number in 1 2 3; do
     grep -Fq "pr view https://github.com/owner/repo/pull/$number --json baseRefName" "$WORLD/forge.log" \
       || fail "the regression never reached hung destination $number"
   done
-  pass 'several hung destination reads refuse readiness without starving later ledger reports'
+  pass 'hung destinations refuse readiness while inactive and ledger outcomes both progress'
 }
 
 # A scout's done line carries its report pointer, a failed line is delivered
