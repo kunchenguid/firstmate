@@ -59,6 +59,9 @@ trust_screen() {
     'Enter or y to trust' \
     'y  Yes, proceed' \
     'n  No, quit'
+  if [ "${FM_FAKE_GROK_TRUST_HAS_READY_FOOTER:-no}" = yes ]; then
+    printf 'Shift+Tab:mode\n'
+  fi
 }
 wrapped_screen() {
   printf '%s\n' \
@@ -318,7 +321,7 @@ SH
 }
 
 test_grok_fresh_directory_trust_is_answered_once() {
-  local out rc
+  local out rc viewport
   prepare_grok_trust trust-fresh
   rc=0
   out=$(FM_FAKE_GROK_TRUST=fresh run_grok_trust_spawn \
@@ -328,6 +331,14 @@ test_grok_fresh_directory_trust_is_answered_once() {
     "Grok spawn did not continue after the trust dialog cleared"
   [ "$(y_count "$CASE_DIR/y.log")" = 1 ] \
     || fail "a Grok trust dialog that cleared on its first answer was answered again"
+  viewport=$(FM_FAKE_GROK_STATE="$CASE_DIR/grok.state" \
+    "$FAKEBIN_DIR/tmux" capture-pane -p -S -0)
+  assert_contains "$viewport" '❯' "Grok did not leave a visible ready composer at spawn success"
+  case "$viewport" in
+    *'Do you trust the contents of this directory?'*|*'Yes, proceed'*|*'No, quit'*)
+      fail "Grok reported spawn success while the directory trust dialog was still visible"
+      ;;
+  esac
   pass "fm-spawn: a fresh Grok directory answers the exact trust dialog once and verifies it cleared"
 }
 
@@ -484,9 +495,13 @@ test_grok_stuck_dialog_fails_after_y_was_sent() {
   local out rc
   prepare_grok_trust trust-stuck
   rc=0
-  out=$(FM_GROK_READY_POLLS=4 FM_FAKE_GROK_TRUST=fresh FM_FAKE_GROK_TRUST_CLEARS=no run_grok_trust_spawn \
+  out=$(FM_GROK_READY_POLLS=4 FM_FAKE_GROK_TRUST=fresh FM_FAKE_GROK_TRUST_CLEARS=no \
+    FM_FAKE_GROK_TRUST_HAS_READY_FOOTER=yes run_grok_trust_spawn \
     "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$GROK_HOME_DIR" "$TASK_ID" "$CASE_DIR") || rc=$?
   [ "$rc" -ne 0 ] || fail "a Grok trust dialog that never clears should fail"
+  assert_contains "$(FM_FAKE_GROK_STATE="$CASE_DIR/grok.state" \
+    FM_FAKE_GROK_TRUST_HAS_READY_FOOTER=yes "$FAKEBIN_DIR/tmux" capture-pane -p -S -0)" \
+    'Shift+Tab:mode' "the stuck dialog fixture did not retain its competing ready footer"
   assert_contains "$out" "grok trust dialog did not clear after sending y for 'Yes, proceed'" \
     "a stuck Grok trust dialog lacked its concrete failure reason"
   assert_contains "$out" "'No, quit'" \
