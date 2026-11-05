@@ -3414,6 +3414,55 @@ test_projection_label_builder_uses_corner_and_strips_owner_prefixes() {
   pass "herdr presentation labels: └ concise-task · p:<full-token> for primary and secondmate children"
 }
 
+# AF_UNIX addresses are capped near 104 bytes (108 on Linux), and a named
+# Herdr session socket beneath a deep home can exceed that. The fake server
+# binds by basename from inside the socket directory, which is how such a
+# socket exists in practice, and the real mover must still reach it.
+test_workspace_mover_connects_to_socket_path_beyond_af_unix_limit() {
+  command -v python3 >/dev/null 2>&1 || { echo "skip: python3 not found (required by the workspace mover)"; return 0; }
+  local dir="$TMP_ROOT/long-socket" sock out rc ready="$TMP_ROOT/long-socket-ready" request="$TMP_ROOT/long-socket-request" server_pid
+  while [ "${#dir}" -lt 140 ]; do dir="$dir/deep-session-directory"; done
+  mkdir -p "$dir"
+  sock="$dir/herdr.sock"
+  [ "${#sock}" -gt 108 ] || fail "fixture socket path is not beyond the AF_UNIX limit: ${#sock} bytes"
+  python3 -c '
+import json, os, socket, sys
+sock_path, ready, request = sys.argv[1:]
+os.chdir(os.path.dirname(sock_path))
+server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+server.bind(os.path.basename(sock_path))
+server.listen(1)
+server.settimeout(10)
+open(ready, "w").close()
+conn, _ = server.accept()
+conn.settimeout(10)
+data = b""
+while b"\n" not in data:
+    chunk = conn.recv(65536)
+    if not chunk:
+        break
+    data += chunk
+with open(request, "wb") as handle:
+    handle.write(data)
+reply = {"id": "fm-workspace-move", "result": {"type": "workspace_list", "workspaces": [{"workspace_id": "wA"}, {"workspace_id": "wB"}]}}
+conn.sendall((json.dumps(reply) + "\n").encode())
+conn.close()
+' "$sock" "$ready" "$request" &
+  server_pid=$!
+  local waited=0
+  while [ ! -e "$ready" ] && [ "$waited" -lt 100 ]; do sleep 0.1; waited=$((waited + 1)); done
+  [ -e "$ready" ] || { kill "$server_pid" 2>/dev/null; fail "long-path fake Herdr socket server never listened"; }
+  rc=0
+  out=$("$ROOT/bin/backends/herdr-workspace-move.py" "$sock" wB 0) || rc=$?
+  kill "$server_pid" 2>/dev/null
+  wait "$server_pid" 2>/dev/null
+  [ "$rc" -eq 0 ] || fail "workspace mover could not use a ${#sock}-byte socket path (exit $rc)"
+  assert_contains "$out" '"type":"workspace_list"' "workspace mover printed the verified workspace_list response"
+  assert_contains "$(cat "$request")" '"method":"workspace.move"' "fake server received the workspace.move request"
+  assert_contains "$(cat "$request")" '"params":{"workspace_id":"wB","insert_index":0}' "fake server received the exact move params"
+  pass "herdr workspace mover reaches a ${#sock}-byte session socket beyond the AF_UNIX address limit"
+}
+
 test_projection_order_moves_only_exact_new_workspace_and_preserves_relative_order() {
   local dir log resp fb mover mover_log out status
   dir="$TMP_ROOT/projection-order"; mkdir -p "$dir/responses"
@@ -6608,6 +6657,7 @@ test_endpoint_confirmed_gone_gates_on_structured_presence
 test_kill_refuses_when_presentation_lock_is_unavailable
 test_projection_seeded_prune_refuses_active_tab
 test_projection_label_builder_uses_corner_and_strips_owner_prefixes
+test_workspace_mover_connects_to_socket_path_beyond_af_unix_limit
 test_projection_order_moves_only_exact_new_workspace_and_preserves_relative_order
 test_projection_order_secondmate_parent_block
 test_projection_order_group_key_places_new_task_inside_its_group
