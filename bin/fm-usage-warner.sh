@@ -228,12 +228,12 @@ usage_warner_read() {
 # independent of any terminal pane. The summary is passed as an argv item
 # (never interpolated into the AppleScript source) so its text can never break
 # the script, matching bin/fm-supervise-daemon.sh's own osascript notifier.
-# sound:off explicitly supplies an empty sound name; otherwise preserve the
-# existing Notification Center default by omitting the sound clause.
+# The banner never carries a `sound name` clause: macOS treats any clause, even
+# an empty `sound name ""`, as a sounding notification, and omitting it is the
+# silent form. sound:off in config/usage-warner therefore needs no extra
+# argument here; the default delivery already omits the clause.
 usage_warner_notify() {  # <summary>
   local summary=$1 script='display notification (item 1 of argv) with title "Firstmate: Claude usage"'
-  awk '{gsub(/^[[:space:]]+|[[:space:]]+$/, "")} $0=="sound:off" {found=1} END {exit !found}' "$CONFIG" 2>/dev/null &&
-    script="$script sound name \"\""
   command -v osascript >/dev/null 2>&1 || {
     printf 'fm-usage-warner: osascript not found; cannot post a notification\n' >&2
     return 1

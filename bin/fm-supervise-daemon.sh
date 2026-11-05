@@ -1139,10 +1139,17 @@ wedge_alarm_os_notifier_override() {  # <channel> <summary>
 # Post a macOS Notification Center banner. `display notification` is OS-level,
 # independent of any terminal pane or multiplexer status-line. The summary is
 # passed as an argv item (never interpolated into the AppleScript source) so its
-# text can never break the script. Best-effort: logs and returns 1 on failure.
+# text can never break the script. sound:off omits the `sound name` clause
+# entirely, because macOS still treats an empty `sound name ""` as a sounding
+# notification. Best-effort: logs and returns 1 on failure.
 wedge_alarm_via_osascript() {  # <summary>
   local summary=$1 rc sound=${WEDGE_ALARM_SOUND:-Basso}
-  [ "$sound" != off ] || sound=
+  local script='display notification (item 1 of argv) with title "firstmate: away-mode escalations WEDGED"'
+  local -a args=("$summary")
+  if [ "$sound" != off ]; then
+    script="$script sound name (item 2 of argv)"
+    args+=("$sound")
+  fi
   wedge_alarm_os_notifier_override osascript "$summary"
   rc=$?
   case "$rc" in
@@ -1152,8 +1159,8 @@ wedge_alarm_via_osascript() {  # <summary>
   command -v osascript >/dev/null 2>&1 || {
     log "wedge alarm: osascript not found; cannot post a macOS notification"; return 1; }
   wedge_alarm_run_bounded osascript osascript -e 'on run argv' \
-    -e 'display notification (item 1 of argv) with title "firstmate: away-mode escalations WEDGED" sound name (item 2 of argv)' \
-    -e 'end run' "$summary" "$sound" >/dev/null 2>&1 && return 0
+    -e "$script" \
+    -e 'end run' "${args[@]}" >/dev/null 2>&1 && return 0
   log "wedge alarm: osascript notification failed"
   return 1
 }

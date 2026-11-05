@@ -126,11 +126,9 @@ test_notification_sound_preference() {
     out=$(run_check "$home" "$fakebin")
     assert_contains "$out" "five_hour at 85% (>=80%)" "sound preference preserves the warning"
     assert_grep 'Firstmate: Claude usage' "$notify_log" "sound preference preserves the title"
-    if [ "$mode" = off ]; then
-      assert_grep 'sound name ""' "$notify_log" "silent delivery explicitly requests no sound"
-    else
-      grep -q 'sound name' "$notify_log" && fail "default delivery changed its sound arguments"
-    fi
+    # macOS treats any `sound name` clause, even an empty one, as a sounding
+    # banner, so neither silent nor default delivery may carry one.
+    grep -q 'sound name' "$notify_log" && fail "$mode delivery passed a sound name clause"
   done
   pass "usage banners support silent delivery and preserve the default"
 }

@@ -2823,11 +2823,13 @@ SH
       wedge_alarm_notify 'same summary "quoted"' '/s/.marker'
     assert_grep 'same summary "quoted"' "$dir/real.log" "sound preference preserves summary"
     assert_grep 'firstmate: away-mode escalations WEDGED' "$dir/real.log" "sound preference preserves title"
-    assert_grep 'sound name (item 2 of argv)' "$dir/real.log" "banner uses the selected sound argument"
     if [ "$mode" = off ]; then
-      grep -qx '<>' "$dir/real.log" || fail "silent wedge banner did not pass an empty sound"
+      # macOS treats an empty `sound name ""` as sounding, so silence means no clause.
+      grep -q 'sound name' "$dir/real.log" && fail "silent wedge banner passed a sound name clause"
+      grep -qx '<>' "$dir/real.log" && fail "silent wedge banner passed an empty sound argument"
       grep -q Basso "$dir/real.log" && fail "silent wedge banner requested Basso"
     else
+      assert_grep 'sound name (item 2 of argv)' "$dir/real.log" "default banner keeps its sound clause"
       grep -qx '<Basso>' "$dir/real.log" || fail "default wedge banner lost Basso"
     fi
   done
