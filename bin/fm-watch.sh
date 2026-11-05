@@ -134,8 +134,9 @@
 #                          within about FM_START_CHECK_SECS plus one FM_POLL for
 #                          local workers; remote secondmates add proof- and
 #                          cause-read route round trips, each capped at
-#                          FM_START_CHECK_ROUTE_SECS (one shared remote-read
-#                          budget per poll). <n> is the real elapsed time: one wake per launch,
+#                          FM_START_CHECK_ROUTE_SECS (proof reads share one
+#                          budget per poll; the wake's cause reads get one
+#                          more). <n> is the real elapsed time: one wake per launch,
 #                          including remote secondmates, naming an exited agent,
 #                          a vanished endpoint, a recognized launch dialog, or an
 #                          unsubmitted brief, and the command that clears it; the
@@ -2838,8 +2839,9 @@ EOF
 # after that append succeeded, so a crash in between can repeat the wake once
 # but never lose it. Nothing here presses a key: the supervisor accepts a
 # folder-trust dialog for its own worker under the harness-adapters trust
-# rules. Remote proofs wait until the deadline, remote route reads share one
-# START_CHECK_ROUTE_SECS wall-clock budget per poll, and at most one wake is queued.
+# rules. Remote proofs wait until the deadline, remote proof reads share one
+# START_CHECK_ROUTE_SECS wall-clock budget per poll, the one wake a poll may
+# queue gets a second budget to read its cause, and at most one wake is queued.
 START_CHECK_SECS=${FM_START_CHECK_SECS:-120}
 case "$START_CHECK_SECS" in ''|0*|*[!0-9]*) START_CHECK_SECS=120 ;; esac
 START_CHECK_ROUTE_SECS=${FM_START_CHECK_ROUTE_SECS:-20}
@@ -3106,6 +3108,9 @@ start_check_tick() {  # [now-epoch], for deterministic clock callers
     fi
     [ "$((now - epoch))" -ge "$START_CHECK_SECS" ] || { fm_lock_release "$lock"; continue; }
     [ -z "$START_CHECK_WAKE" ] || { fm_lock_release "$lock"; continue; }
+    # A proof read may have spent this poll's route budget; the wake's cause
+    # gets its own, so a slow host still yields the named dialog and its key.
+    [ -z "$remote" ] || START_CHECK_TICK_STARTED=$(date +%s)
     start_check_reason "$id" "$meta" "$harness" "$((now - epoch))"
     reason=$START_CHECK_REASON
     fm_wake_append check "start:$id" "$reason" || { fm_lock_release "$lock"; return 1; }

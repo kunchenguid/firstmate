@@ -304,6 +304,28 @@ test_pi_dialog_named_once() {
   pass "a parked Pi trust dialog wakes once at the deadline with its name and the Enter command"
 }
 
+# A launch parked on its trust dialog leaves the spawn's own busy seed
+# unchanged. That seed is not start proof, so the deadline still wakes and
+# names the dialog with its Enter command.
+test_unchanged_spawn_seed_is_not_start_proof() {
+  reset_state
+  open_pane sd1 "$PI_DIALOG"
+  arm_task sd1 pi 1000
+  [ "$(fm_busy_record_read "$STATE" sd1 | cut -d' ' -f1,2)" = "busy fm-spawn" ] \
+    || fail "fixture: the busy record is not the unchanged spawn seed"
+  [ "$(fm_busy_classify_meta "$STATE/sd1.meta" sd1 "$STATE")" = "busy fm-spawn" ] \
+    || fail "fixture: the unchanged seed did not classify as busy fm-spawn"
+  ! start_check_started sd1 "$STATE/sd1.meta" 1000 "$ARMED_GEN" \
+    || fail "the unchanged spawn seed counted as start proof"
+  start_check_tick 1120 || fail "tick failed"
+  case "$START_CHECK_WAKE" in
+    "check: start sd1: no start signal 120s after spawn (harness=pi; on screen: Pi project-trust dialog \"Trust project folder?\"); accept: FM_HOME=$FM_HOME $SCRIPT_DIR/fm-send.sh sd1 --key Enter") ;;
+    *) fail "a launch left at the spawn seed did not wake with its dialog: $START_CHECK_WAKE" ;;
+  esac
+  [ "$(count_wakes)" = 1 ] || fail "expected exactly one start wake for the seeded launch"
+  pass "an unchanged spawn seed is not start proof: the parked launch wakes once with its dialog"
+}
+
 test_claude_dialog_has_no_key() {
   reset_state
   open_pane c1 "$CLAUDE_DIALOG"
@@ -646,7 +668,8 @@ test_remote_secondmate_reads_route() {
   start_check_tick 1200 || fail "tick failed for a timed-out route"
   elapsed=$(($(date +%s) - start))
   SCRIPT_DIR=$saved_script_dir
-  [ "$elapsed" -lt 6 ] || fail "timed-out remote route stalled the tick for ${elapsed}s"
+  # The proof read and the wake's cause each get one 3s budget.
+  [ "$elapsed" -lt 9 ] || fail "timed-out remote route stalled the tick for ${elapsed}s"
   case "$START_CHECK_WAKE" in
     "check: start r7: no start signal 200s after spawn (harness=pi; remote host remote-mac); inspect: FM_HOME=$FM_HOME $TMP_ROOT/hanging-route/fm-crew-state.sh r7") ;;
     *) fail "a timed-out remote route was treated as proof or death: $START_CHECK_WAKE" ;;
@@ -656,7 +679,7 @@ test_remote_secondmate_reads_route() {
   start=$(date +%s)
   start_check_tick 1200 || fail "the deferred remote record did not get its next-poll turn"
   elapsed=$(($(date +%s) - start))
-  [ "$elapsed" -lt 6 ] || fail "the next remote route stalled the tick for ${elapsed}s"
+  [ "$elapsed" -lt 9 ] || fail "the next remote route stalled the tick for ${elapsed}s"
   [ ! -e "$STATE/r8.start-pending" ] || fail "the deferred record was not judged on the next poll"
   [ "$(count_wakes)" = 2 ] || fail "the deferred remote record did not queue its wake"
   pass "remote route calls share a bounded poll budget and later records wait for the next poll"
@@ -692,6 +715,37 @@ test_spent_route_budget_defers_remote_record() {
   eval "$real"
   START_CHECK_ROUTE_SECS=$saved_secs
   pass "a remote record past the poll's spent route budget waits for the next poll instead of waking"
+}
+
+# At the deadline a slow proof read can spend the whole route budget. The one
+# wake the poll then queues still reads its cause and names the remote dialog
+# with its Enter command, instead of the generic remote-host wake.
+test_spent_proof_budget_keeps_remote_cause() {
+  reset_state
+  local saved_script_dir=$SCRIPT_DIR saved_secs=$START_CHECK_ROUTE_SECS route=$TMP_ROOT/slow-observe-route
+  arm_remote sp1
+  mkdir -p "$route"
+  printf '%s\n' "$PI_DIALOG" > "$route/dialog.txt"
+  cat > "$route/fm-on.sh" <<SH
+#!/bin/sh
+case "\$3" in
+  observe) sleep 4; printf 'idle\nverdict=busy fm-spawn\nevent=launch-brief\nbusy_gen=g900.1.1\n' ;;
+  state) printf 'alive\n' ;;
+  capture) cat '$route/dialog.txt' ;;
+esac
+SH
+  chmod +x "$route/fm-on.sh"
+  SCRIPT_DIR=$route
+  START_CHECK_ROUTE_SECS=3
+  start_check_tick 1200 || fail "tick failed"
+  SCRIPT_DIR=$saved_script_dir
+  START_CHECK_ROUTE_SECS=$saved_secs
+  case "$START_CHECK_WAKE" in
+    "check: start sp1: no start signal 200s after spawn (harness=pi; on screen on remote-mac: Pi project-trust dialog \"Trust project folder?\"); accept: FM_HOME=$FM_HOME $route/fm-send.sh sp1 --key Enter") ;;
+    *) fail "a proof read that spent the route budget hid the remote dialog: $START_CHECK_WAKE" ;;
+  esac
+  [ "$(count_wakes)" = 1 ] || fail "expected exactly one start wake for the slow remote mate"
+  pass "a proof read that spends the route budget still leaves the wake its named remote cause"
 }
 
 test_one_wake_per_poll() {
@@ -740,6 +794,7 @@ fm_test_run \
   test_same_second_write_wakes_once_at_deadline \
   test_teardown_prune_drops_queued_start_wake \
   test_pi_dialog_named_once \
+  test_unchanged_spawn_seed_is_not_start_proof \
   test_claude_dialog_has_no_key \
   test_claude_session_end_is_not_start_proof \
   test_completed_turn_records_are_proof \
@@ -754,5 +809,6 @@ fm_test_run \
   test_held_lock_defers_without_waiting \
   test_remote_secondmate_reads_route \
   test_spent_route_budget_defers_remote_record \
+  test_spent_proof_budget_keeps_remote_cause \
   test_one_wake_per_poll \
   test_watcher_loop_single_named_wake
