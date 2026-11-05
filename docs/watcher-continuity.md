@@ -166,6 +166,7 @@ This is deliberate Option B ordering.
 Whenever restoration succeeds, the fleet is protected before the model handles the wake.
 When restoration does not succeed, the model is never left blind.
 
+
 ### Claude handling successor
 
 Claude's Stop hook also starts one handling successor before notification.
@@ -572,7 +573,7 @@ The other harnesses rely on these mechanisms:
 - Claude normally depends on the Stop `asyncRewake` rewake.
   The host's opt-in [acknowledged hand-back](supervision-host.md#acknowledged-hand-back) adds guarded tmux retries when that continuation is lost.
 - Cursor depends on its awaited stop-hook park.
-- Grok retains native background-completion notifications.
+- Grok and Droid retain native background-completion notifications.
 - Codex retains bounded foreground checkpoints unless the home opts in to its [native Stop park](supervision-protocols/codex.md).
 
 [`verification/supervision.md`](verification/supervision.md#watcher-continuity) records the current cross-harness live evidence, the dated Stop-owned Claude auto-arm results, and exact opt-in commands.

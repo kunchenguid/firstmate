@@ -510,6 +510,10 @@
       "audience": "agent-runtime"
     },
     {
+      "path": "docs/supervision-protocols/droid.md",
+      "audience": "agent-runtime"
+    },
+    {
       "path": "docs/supervision-protocols/grok.md",
       "audience": "agent-runtime"
     },
@@ -595,6 +599,7 @@
     },
     {
       "path": "docs/verification/lint-option-a.md",
+
       "audience": "maintainer-verification"
     },
     {

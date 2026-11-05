@@ -67,6 +67,7 @@
 #                rule is tolerated at the aligned width, including Grok 1.0.44's
 #                rounded typed model/effort title with ` · always-approve`; Grok 1.0.5's
 #                typed title also permits its proven three-column overhang.
+
 #   bare       - an agent prompt glyph row with no border at all (claude `❯`,
 #                codex `›`, muse `⟩`, cursor `→`). The agent glyph is itself the container
 #                proof; a bare SHELL glyph (`>` `$` `%` `#`) never is.

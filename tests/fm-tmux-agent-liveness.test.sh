@@ -379,6 +379,8 @@ pass "tmux liveness: an absent window classifies missing rather than inheriting 
 
 ln -s "$STANDIN_BIN" "$LAB/bin/cursor-agent"
 ln -s "$STANDIN_BIN" "$LAB/bin/notcursor"
+ln -s "$STANDIN_BIN" "$LAB/bin/droid"
+
 
 # Cursor's real screen shape: a BARE composer row carrying its U+2192 glyph, two
 # footer rows below it, and the terminal cursor left on a blank row past the
@@ -524,6 +526,7 @@ open_commandcode_pane() {  # <window> <binary> <idle|typed>
   while [ "$i" -lt 100 ]; do
     case "$("$REAL_TMUX" -L "$SOCKET" capture-pane -p -t "$SESSION:$window" 2>/dev/null)" in
       *'? for shortcuts'*) return 0 ;;
+
     esac
     sleep 0.1
     i=$((i + 1))
@@ -613,6 +616,7 @@ fi
 [ "$(fm_tmux_composer_state "$SESSION:hm-decoy")" = "$(cursor_anchored_verdict "$SESSION:hm-decoy")" ] \
   || fail "a non-Hermes prompt pane must keep the generic cursor-anchored verdict"
 pass "hermes composer: a non-Hermes prompt keeps the generic cursor-anchored verdict"
+
 
 cleanup_all
 trap - EXIT
