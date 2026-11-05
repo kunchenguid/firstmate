@@ -2422,8 +2422,8 @@ test_gerrit_nm_ready_gate_requires_recovered_custody() {
   out=$(FM_TEST_GERRIT_REVISION=$squash FM_TEST_NM_PIPELINE_HEAD=$fixed \
     FM_TEST_GERRIT_AXI_LOG="$dir/gerrit-axi.log" PATH="$dir/fakebin:$BASE_PATH" \
     bash -c '. "$1/bin/fm-timeout-lib.sh"; . "$1/bin/fm-dod-lib.sh"
-      fm_dod_accept_ship_done ship no-mistakes "$2" "$3" "$4"' \
-    _ "$ROOT" "$dir/wt" "$dir/project" "$line" 2>&1)
+      fm_dod_accept_ship_done ship no-mistakes "$2" "$3" "$4" "$5" task-unrecovered "$6"' \
+    _ "$ROOT" "$dir/wt" "$dir/project" "$line" "$state" "$state/task-unrecovered.meta" 2>&1)
   rc=$?
   set -e
   [ "$rc" -eq 0 ] || fail "the done gate refused a recovered, published copy: $out"

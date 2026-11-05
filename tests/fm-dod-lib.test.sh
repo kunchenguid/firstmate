@@ -12,8 +12,19 @@ set -u
 TMP_ROOT=$(fm_test_tmproot fm-dod-lib)
 fm_git_identity fmtest fmtest@example.invalid
 
+DOD_FAKEBIN="$TMP_ROOT/destination-bin"
+mkdir -p "$DOD_FAKEBIN"
+cat > "$DOD_FAKEBIN/gh" <<'SH'
+#!/usr/bin/env bash
+case " $* " in
+  *' --json baseRefName '*) printf 'main\n' ;;
+  *) exit 1 ;;
+esac
+SH
+chmod +x "$DOD_FAKEBIN/gh"
+
 accept_done() {  # <kind> <mode> <worktree> <project> <line> [<state> <id> <meta>]
-  fm_dod_accept_ship_done "$@"
+  PATH="$DOD_FAKEBIN:$PATH" fm_dod_accept_ship_done "$@"
 }
 
 write_merge_marker() {  # <state> <id> <provider> <host> <path> <number>
@@ -169,7 +180,7 @@ test_recorded_merged_pr_is_landed_after_prune() {
   fm_git_worktree "$repo" "$wt" fm/merged
   git -C "$wt" commit -q --allow-empty -m 'fix, squash-merged and branch pruned'
   meta="$state/merged.meta"
-  printf 'kind=ship\nmode=direct-PR\nworktree=%s\nproject=%s\npr=https://github.com/o/r/pull/7\n' \
+  printf 'kind=ship\nmode=direct-PR\nexpected_base=main\nworktree=%s\nproject=%s\npr=https://github.com/o/r/pull/7\n' \
     "$wt" "$repo" > "$meta"
   write_merge_marker "$state" merged github github.com o/r 7
   accept_done ship direct-PR "$wt" "$repo" "done: PR https://github.com/o/r/pull/7" "$state" merged "$meta" \
@@ -187,7 +198,7 @@ test_merge_marker_binds_to_the_named_pr() {
   git -C "$wt" commit -q --allow-empty -m 'second PR head, never pushed'
   sha=$(git -C "$wt" rev-parse HEAD)
   meta="$state/bind.meta"
-  printf 'kind=ship\nmode=direct-PR\nworktree=%s\nproject=%s\npr=https://github.com/o/r/pull/7\n' \
+  printf 'kind=ship\nmode=direct-PR\nexpected_base=main\nworktree=%s\nproject=%s\npr=https://github.com/o/r/pull/7\n' \
     "$wt" "$repo" > "$meta"
   write_merge_marker "$state" bind github github.com o/r 7
   reason=$(accept_done ship direct-PR "$wt" "$repo" "done: PR https://github.com/o/r/pull/9" "$state" bind "$meta")
@@ -215,7 +226,7 @@ test_forge_recorded_head_is_accepted_without_local_object() {
   # fetched into the worker clone.
   forge_head=0123456789abcdef0123456789abcdef01234567
   meta="$state/forge.meta"
-  printf 'kind=ship\nmode=no-mistakes\nworktree=%s\nproject=%s\npr=https://github.com/o/r/pull/5\npr_head=%s\n' \
+  printf 'kind=ship\nmode=no-mistakes\nexpected_base=main\nworktree=%s\nproject=%s\npr=https://github.com/o/r/pull/5\npr_head=%s\n' \
     "$wt" "$repo" "$forge_head" > "$meta"
   accept_done ship no-mistakes "$wt" "$repo" "done: PR https://github.com/o/r/pull/5 checks green" \
     "$state" forge "$meta" \
@@ -241,7 +252,7 @@ test_direct_pr_recorded_head_does_not_cover_unpushed_commit() {
   git -C "$wt" commit -q --allow-empty -m 'the fix, only in the worktree'
   later=$(git -C "$wt" rev-parse HEAD)
   meta="$state/postopen.meta"
-  printf 'kind=ship\nmode=direct-PR\nworktree=%s\nproject=%s\npr=https://github.com/o/r/pull/5\npr_head=%s\n' \
+  printf 'kind=ship\nmode=direct-PR\nexpected_base=main\nworktree=%s\nproject=%s\npr=https://github.com/o/r/pull/5\npr_head=%s\n' \
     "$wt" "$repo" "$pushed" > "$meta"
   reason=$(accept_done ship direct-PR "$wt" "$repo" "done: PR https://github.com/o/r/pull/5" "$state" postopen "$meta")
   rc=$?

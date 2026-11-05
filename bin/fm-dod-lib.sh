@@ -990,6 +990,8 @@ fm_dod_named_head_reachable_outside_worktree() {  # <worktree> <project> <mode> 
 # output. <state> <id> <meta> supply pr=,
 # pr_head=, and the merge-notified marker; <meta> may be a captured copy
 # (bin/fm-fleet-snapshot.sh), so the marker is read from <state>.
+# A supported PR URL also requires task metadata and a matching live destination;
+# published-head proof alone cannot supply that destination.
 fm_dod_accept_ship_done() {  # <kind> <mode> <worktree> <project> <line> [<state> <id> <meta> [meta-locked]]
   local kind=$1 mode=$2 wt=$3 project=$4 line=$5 state=${6:-} id=${7:-} meta=${8:-} url sha gerrit captured=''
   fm_dod_should_gate_ship_done "$kind" "$mode" "$line" || return 0
@@ -1005,7 +1007,7 @@ fm_dod_accept_ship_done() {  # <kind> <mode> <worktree> <project> <line> [<state
     fm_dod_accept_external_review_done "$wt" "$project" "$line" "$meta"
     return
   fi
-  if [ "$mode" != local-only ] && [ -n "$meta" ] \
+  if [ "$mode" != local-only ] \
     && url=$(fm_dod_pr_url_from_done_note "$(status_line_note "$line")") \
     && fm_pr_url_parse "$url"; then
     if ! captured=$(fm_pr_require_base "$meta" "$FM_PR_PROVIDER" "$url" \
