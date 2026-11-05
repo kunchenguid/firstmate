@@ -664,12 +664,35 @@ test_empty_message_refused() {
   pass "fm-send: an empty or whitespace-only text steer refuses before marking, recording, or typing"
 }
 
+test_overlapping_rings_on_one_noise_composer_send_one_c_c() {
+  local dir err
+  dir=$(setup_case codexoverlap codex)
+  err="$dir/send.err"
+  : >"$dir/send.log"
+  : >"$dir/send.log.keys"
+  rm -f "$dir/send.log.reads" "$dir/send.log.lastbusy"
+  fm_write_meta "$dir/home/state/t1.meta" "window=sess:fm-t1" "kind=ship" "harness=codex"
+  mkdir -p "$dir/home/state/t1.inbox"
+  : >"$dir/home/state/t1.inbox/001.msg"
+  for _ in 1 2 3; do
+    env PATH="$dir/fakebin:$PATH" FM_ROOT_OVERRIDE="$dir/home" FM_HOME="$dir/home" \
+      FM_SEND_LOG="$dir/send.log" FM_FAKE_TMUX_COMPOSER=codex-noise \
+      bash -c '. "$1/bin/fm-task-inbox-lib.sh"; fm_task_inbox_ring tmux sess:fm-t1 "$2" fm-t1 codex' \
+      _ "$ROOT" "$dir/home/state/t1.inbox/001.msg" >/dev/null 2>"$err" &
+  done
+  wait
+  [ "$(count_lines "$dir/send.log.keys" C-c)" = 1 ] ||
+    fail "overlapping rings on one noise composer must send exactly one C-c:"$'\n'"$(cat "$dir/send.log.keys")"
+  pass "fm-send inbox: overlapping rings on one noise-only composer send exactly one C-c"
+}
+
 test_text_steer_rides_inbox
 test_deep_home_doorbell_stays_short
 test_multiline_steer_is_legal
 test_resend_enqueues_new_sequence
 test_pending_composer_skips_ring_advisorily
 test_codex_mouse_noise_is_cleared_once_then_rung
+test_overlapping_rings_on_one_noise_composer_send_one_c_c
 test_codex_mouse_noise_mixed_with_text_is_never_cleared
 test_codex_mouse_noise_that_returns_is_not_typed_onto
 test_codex_mouse_noise_unreadable_after_clear_is_not_typed_onto

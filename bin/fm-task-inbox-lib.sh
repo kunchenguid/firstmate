@@ -27,6 +27,7 @@
 #   <task>.inbox/handled/      the worker's `mv` here IS the acknowledgement
 #   <task>.inbox/.seq.lock     serializes sequence allocation across writers
 #                              (the session and the away daemon)
+#   <task>.inbox/.ring.lock    serializes the mouse-noise clear across overlapping rings
 #   <task>.inbox/.ring-state   watcher re-ring ladder: "<msg>\t<count>\t<epoch>"
 #   <task>.inbox/.busy-state   consecutive busy deferrals: "<msg>\t<count>"
 #   <task>.inbox/.escalated    oldest-message name already surfaced as stale,
@@ -391,8 +392,27 @@ fm_task_inbox_doorbell_line() {  # <record-path>
 # check runs right before the key; the residual window is the time between that
 # read and the key. Only an empty read lets the doorbell type; anything else is
 # the ordinary skip.
+# Rings that meet mouse-report noise on one inbox serialize on its .ring.lock,
+# and the locked body re-reads the composer, so overlapping rings send one C-c.
+# A lock not taken within its bound skips the ring like pending text.
 fm_task_inbox_ring() {  # <backend> <target> <record-path> [expected-label] [harness]
-  local backend=$1 target=$2 rec=$3 label=${4:-} harness=${5:-${FM_COMPOSER_HARNESS:-}} line cstate verdict
+  local backend=$1 target=$2 rec=$3 label=${4:-} harness=${5:-${FM_COMPOSER_HARNESS:-}} dir lock status=0
+  if [ "$harness" != codex ] \
+     || [ "$(fm_backend_composer_state "$backend" "$target" "$label" 2>/dev/null)" != pending ] \
+     || ! fm_task_inbox_composer_is_mouse_noise "$backend" "$target" "$label"; then
+    _fm_task_inbox_ring_body "$backend" "$target" "$rec" "$label" "$harness"
+    return
+  fi
+  dir=$(cd "${rec%/*}" 2>/dev/null && pwd) || dir=${rec%/*}
+  lock="${dir%/handled}/.ring.lock"
+  fm_task_inbox_lock_acquire "$lock" || return 1
+  _fm_task_inbox_ring_body "$backend" "$target" "$rec" "$label" "$harness" || status=$?
+  fm_lock_release "$lock"
+  return "$status"
+}
+
+_fm_task_inbox_ring_body() {  # <backend> <target> <record-path> <expected-label> <harness>
+  local backend=$1 target=$2 rec=$3 label=$4 harness=$5 line cstate verdict
   case "$(fm_backend_agent_state "$backend" "$target" 2>/dev/null || true)" in
     dead|missing) return 3 ;;
   esac
