@@ -37,11 +37,8 @@
 # the home row on secondmates[] keeps the decision and gate classification.
 # Captain-hold placement follows the canonical snapshot's hold_bucket and
 # nothing else. The only reason inspection this wrapper performs is the
-# presentation flag: a main-home call whose hold reason is exactly the canonical
-# report_path still needs presenting, and a secondmate call whose reason is only
-# a canonical report pointer is judged by that same grammar because the summary
-# contract carries no report_path. Selected answers come from the canonical
-# record's recorded `Selected answer:` line, never from inferred prose. The
+# presentation flag: a call whose decoded hold reason is nothing but a canonical
+# report pointer (data/<task>/report.md) still needs presenting. The
 # buckets are total and mutually exclusive, so every captain hold appears in
 # exactly one decision bucket and none can fall through both. An actively worked
 # held task may also appear in Underway. A "live" hold is a default Captain's Call
@@ -155,8 +152,8 @@ remote homes under one shared snapshot budget and may refresh the parent-side ca
 Default fields: schema, home, generated, prs, in_flight{id,kind,state,repo,name,doing},
   secondmates{id,state,doing,provenance,freshness,age_seconds,contradiction,reason},
   secondmate_reconcile{id,spawn_gen,host,kind,ids},
-  decisions_open{id,key,verb,summary,question,presentation,stops_worker,blocked_by,owner},
-  decisions_answered{id,key,summary,selected_answer,owner}, landed{id,what,artifact,owner},
+  decisions_open{id,key,verb,summary,question,presentation,stops_worker,owner},
+  landed{id,what,artifact,owner},
   gates{id,title,blocked_by,reason,owner,filed}, reports{id,path}, recorded_prs{id,url},
   unhealthy_endpoints{...} (only when non-empty), omitted{surface,reveal}.
 Default gates are selected newest filed first before their bound; undated gates
@@ -164,8 +161,7 @@ Default gates are selected newest filed first before their bound; undated gates
 Decision presentation uses question, the full title and hold reason; summary
   remains a bounded overview and must not substitute for the question/options.
 decisions_open lists calls that stop a live worker first and otherwise keeps
-  backlog order. decisions_answered is bounded by FM_BEARINGS_LANDED with omitted[]
-  disclosure; --all-decisions reveals every answered call.
+  backlog order.
 landed merges this home's Done with registered secondmate homes' Done, bounded by
   a per-home cap (FM_BEARINGS_LANDED_PER_HOME) and an overall cap (FM_BEARINGS_LANDED),
   with omitted[] disclosure. Default selection is balanced across deterministic home
@@ -177,8 +173,7 @@ For every registered secondmate, readable structured facts from its own home are
   evidence and never become current work. The provenance and freshness fields
   distinguish live and cached ledgers; a home without either is explicitly unreadable.
 Opt-in surfaces: --fields bodies|paths|actions|endpoints, --all-in-flight,
-  --all-decisions (all open decisions, captain holds, and answered calls in the
-  bounded snapshot),
+  --all-decisions (all open decisions and captain holds in the bounded snapshot),
   --all-secondmates, --all-landed, --all-reports, --all-queued, --all-recorded-prs,
   --all-unhealthy, --all-pr-repos, --include-prs (adds candidate_prs).
 Raise FM_BEARINGS_PR_LIMIT to expand per-repository open-PR results.
@@ -403,8 +398,6 @@ MODEL=$(printf '%s' "$SNAP" | jq \
       elif length > $n then (if $n == 1 then "…" else (.[:($n - 1)] + "…") end)
       else . end;
   def live_captain_call: .hold_bucket == "live";
-  def report_pointer_reason($reason; $report_path):
-    $report_path != null and $reason == $report_path;
   def report_pointer_reason($reason):
     ($reason // "") | test("^data/[^[:space:])]+/report\\.md$");
   def decision_presentation(pointer):
@@ -551,8 +544,8 @@ MODEL=$(printf '%s' "$SNAP" | jq \
          | {id,key:.id,verb:"captain-hold",
             summary:hold_summary(.title; .hold_reason),
             question:(.title + ": " + .hold_reason),
-            presentation:decision_presentation(report_pointer_reason(.hold_reason; .report_path)),
-            stops_worker:decision_stops_worker,blocked_by:(.unresolved_blocker_ids // []),owner:"(main)"} ]
+            presentation:decision_presentation(report_pointer_reason(.hold_reason)),
+            stops_worker:decision_stops_worker,owner:"(main)"} ]
      + [ (.secondmate_current.records // [])[] as $m
          | ([ $m.decisions_open[]?
               | select(.source == "backlog" and .verb == "captain-hold")
@@ -562,7 +555,7 @@ MODEL=$(printf '%s' "$SNAP" | jq \
                                       (.reason // "captain decision pending")),
                  question:(.question // ((.summary // .id) + ": " + (.reason // "captain decision pending"))),
                  presentation:decision_presentation(report_pointer_reason(.reason)),
-                 stops_worker:false,blocked_by:(.unresolved_blocker_ids // []),owner:$m.id} ]
+                 stops_worker:false,owner:$m.id} ]
             + [ $m.queued[]?
                 | select($all_decisions == 1 and .hold_kind == "captain")
                 | select(.id as $id
@@ -575,12 +568,8 @@ MODEL=$(printf '%s' "$SNAP" | jq \
                                         (.hold_reason // "captain decision pending")),
                    question:(.question // ((.title // .id) + ": " + (.hold_reason // "captain decision pending"))),
                    presentation:decision_presentation(report_pointer_reason(.hold_reason)),
-                   stops_worker:false,blocked_by:(.unresolved_blocker_ids // []),owner:$m.id} ])[] ]
+                   stops_worker:false,owner:$m.id} ])[] ]
        | (map(select(.stops_worker)) + map(select(.stops_worker | not)))) as $decisions_all
-  | ([ .backlog.records[]
-       | select(.structured and .state == "done" and .hold_kind == "captain")
-       | {id,key:.id,summary:hold_summary(.title; .hold_reason),
-          selected_answer:.selected_answer,owner:"(main)"} ]) as $decisions_answered
   | ([ .backlog.records[]
          | . as $record
          | select(.structured and projected_deferred_hold) ]
@@ -677,7 +666,6 @@ MODEL=$(printf '%s' "$SNAP" | jq \
         | select(.reconcile_inventory != null)
         | {id, spawn_gen:(.spawn_gen // null), host:(.host // null), kind:(.reconcile_inventory.kind // null), ids:((.reconcile_inventory.ids // []) | map(select(type == "string")) | sort)} ],
       decisions_open: (if $all_decisions == 1 then $decisions_all else $decisions_all[:$decisions_n] end),
-      decisions_answered: (if $all_decisions == 1 then $decisions_answered else $decisions_answered[:$landed_n] end),
       landed: ($done | map({id, what:(.title | trunc(70)),
                             artifact:(landed_artifact // "-"),owner:.home_id})),
       gates: ($return_catchup_gate
@@ -723,7 +711,6 @@ MODEL=$(printf '%s' "$SNAP" | jq \
         (([($snap.secondmate_current.records // [])[] | select(.parent_event.activity_scan.input_truncated == true or .parent_event.activity_scan.retained_truncated == true)] | length) as $n | if $n > 0 then {surface:("secondmate parent activity evidence truncated for \($n) record(s)"), reveal:"raise FM_SNAPSHOT_PARENT_ACTIVITY_LINES, FM_SNAPSHOT_PARENT_ACTIVITY_BYTES, or FM_SNAPSHOT_PARENT_ACTIVITIES"} else empty end),
         (([($snap.secondmate_current.records // [])[] | select(.parent_event.activity_scan.available == false)] | length) as $n | if $n > 0 then {surface:("secondmate parent activity evidence unavailable for \($n) record(s)"), reveal:"inspect the parent status logs"} else empty end),
         (if $all_decisions == 0 and ($decisions_all | length) > $decisions_n then {surface:("decisions_open showing \($decisions_n) of \($decisions_all | length)"), reveal:"--all-decisions"} else empty end),
-        (if $all_decisions == 0 and ($decisions_answered | length) > $landed_n then {surface:("decisions_answered showing \($landed_n) of \($decisions_answered | length)"), reveal:"--all-decisions"} else empty end),
         (if $all_decisions == 0 and $decisions_marked_deferred > 0 then {surface:("captain holds bucketed blocked, dated, or aged: \($decisions_marked_deferred)"), reveal:"--all-decisions"} else empty end),
         (if $all_queued == 0 and ($gates_all | length) > $gates_n then {surface:("gates showing \($gates_n) of \($gates_all | length)"), reveal:"--all-queued"} else empty end),
         (if $all_reports == 0 and ($reports_all | length) > $reports_n then {surface:("reports showing \($reports_n) of \($reports_all | length)"), reveal:"--all-reports"} else empty end),
