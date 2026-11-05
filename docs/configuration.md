@@ -1960,11 +1960,12 @@ Secondmate homes inherit this file from the primary, so a secondmate's own crewm
 Each setting comes from the calling environment or the home's gitignored `.env` through `bin/fm-env-lib.sh`; a non-empty environment value wins.
 OpenRouter, `systemone`, and OpenAI each require their explicit `FM_DISPATCH_PROVIDER` value and a non-empty `FM_DISPATCH_MODEL`; an omitted model is an actionable configuration error, and the presence of a provider's key never selects that provider by itself.
 `systemone` also requires `FM_DISPATCH_BASE_URL`, an `http://` or `https://` base such as a local llama.cpp server or a hosted System One-compatible service, and posts to `<base>/v1/systemone`; a missing or scheme-less base URL is an actionable configuration error.
-With no provider setting, the original typesafe.ai behavior is unchanged: `jev-latest` is used when `TYPESAFE_API_KEY` is available, `FM_DISPATCH_MODEL` is ignored, and the resolver is off when no key is available and no `typesafe` credential source is declared.
+With no provider setting and a valid base, TypeSafe uses `jev-latest` when `TYPESAFE_API_KEY` is available, ignores `FM_DISPATCH_MODEL`, and is off when no key is available and no `typesafe` credential source is declared.
 Explicit `FM_DISPATCH_PROVIDER=typesafe` also uses `jev-latest` when no model is set.
 `TYPESAFE_BASE` optionally selects a different base for the TypeSafe request, from the environment or `.env` with the same non-empty-environment precedence.
-When unset or empty, it defaults to `https://api.typesafe.ai`.
-It must be an `http://` or `https://` URL with a host and no userinfo, query, or fragment; an invalid value is an actionable configuration error and sends nothing.
+If neither source supplies a non-empty value, the base defaults to `https://api.typesafe.ai`.
+It must be an `http://` or `https://` URL with a host and no userinfo, query, fragment, whitespace, or backslash.
+An invalid value exits 2 before credential lookup and sends nothing, even when no key is available.
 Trailing slashes are removed before appending `/v1/systemone`, so `TYPESAFE_BASE=https://ai-gateway.vercel.sh/typesafe/` sends to `https://ai-gateway.vercel.sh/typesafe/v1/systemone`.
 Gateway model IDs can differ from the direct service: the Vercel AI Gateway supports `jev-latest`, while `jev-1.13` returns `404 model_not_found`.
 The selected provider needs a non-empty key from the environment, else `.env`, else, for `typesafe` and `openrouter` only, the credential source the home declares for that provider; `systemone` is the exception, where an absent `FM_DISPATCH_API_KEY` means the request carries no `Authorization` header.
@@ -2069,7 +2070,7 @@ No qualifying option, or two equally probable qualifying options, produces `ambi
 Every result above exits 0.
 
 - Response probabilities must contain exactly every offered choice, use numeric values from 0 through 1, and sum to approximately 1 within 0.01.
-- Only a usage or configuration error exits 2: an unreadable brief, an existing but unreadable or malformed canonical rules file, an unreadable or invalid credential source declaration, a missing `jq`, an unknown provider, a non-typesafe provider without a model, or `systemone` without a valid base URL, each reported and never selected around.
+- Only a usage or configuration error exits 2: an unreadable brief, an existing but unreadable or malformed canonical rules file, an unreadable or invalid credential source declaration, a missing `jq`, an unknown provider, a non-typesafe provider without a model, an invalid `TYPESAFE_BASE` for TypeSafe, or `systemone` without a valid base URL, each reported and never selected around.
 - Missing `curl` is a normal structured `error` outcome with exit 0 so firstmate uses today's routing.
 
 **Firstmate retains the dispatch decision**
@@ -2133,7 +2134,7 @@ An installer should treat any status other than 0 as a refusal, because a resolv
 - The resolver copies every environment-provided key into a non-exported private variable and unsets `TYPESAFE_API_KEY`, `OPENROUTER_API_KEY`, `OPENAI_API_KEY`, and `FM_DISPATCH_API_KEY` before launching child processes; bootstrap also protects the typesafe key.
 - A key read from a declared source is captured into the same private variable, so it is never exported either.
 - The resolver sends only the selected key to `curl` as a header read from a file descriptor, never on argv, and never prints, logs, or writes any key.
-- The typesafe.ai endpoint is `https://api.typesafe.ai/v1/systemone`, the OpenRouter endpoint is `https://openrouter.ai/api/alpha/decisions`, the OpenAI endpoint is `https://api.openai.com/v1/decisions`, and the `systemone` endpoint is `<FM_DISPATCH_BASE_URL>/v1/systemone`.
+- TypeSafe endpoint selection follows `TYPESAFE_BASE` above; the OpenRouter endpoint is `https://openrouter.ai/api/alpha/decisions`, the OpenAI endpoint is `https://api.openai.com/v1/decisions`, and the `systemone` endpoint is `<FM_DISPATCH_BASE_URL>/v1/systemone`.
 - The default confidence floor remains 0.6; request timeouts are 5 seconds for typesafe.ai and 10 seconds for OpenRouter, `systemone`, and OpenAI.
 - A CPU-only local `systemone` host may not answer within its 10-second timeout; that is an ordinary `error` outcome, and firstmate keeps its existing intake.
 
@@ -3411,7 +3412,7 @@ FM_DISPATCH_MODEL=      # explicit model for the selected provider; required for
 FM_DISPATCH_BASE_URL=   # http(s) base of a System One-compatible host; required for systemone
 FM_DISPATCH_API_KEY=    # optional systemone key; absent sends no Authorization header
 TYPESAFE_API_KEY=       # typesafe dispatch key, from the environment, .env, or the declared credential source ("Typed dispatch resolution")
-TYPESAFE_BASE=          # optional TypeSafe http(s) base; default https://api.typesafe.ai; see "Typed dispatch resolution" for validation and gateway model IDs
+TYPESAFE_BASE=          # optional TypeSafe base; see "Typed dispatch resolution"
 OPENROUTER_API_KEY=     # OpenRouter dispatch key, from the environment, .env, or the declared credential source
 OPENAI_API_KEY=         # OpenAI dispatch key, from the environment or .env
 FMX_DISCORD_REPLY_MAX_CHARS=1900   # Discord reply per-message split budget; values below 50 clamp to 50, values above 2000 reset to 1900
