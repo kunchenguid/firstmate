@@ -1135,9 +1135,15 @@ test_decision_presentation_preserves_questions() {
 - [ ] blocked-call - Choice with unmet prerequisites blocked-by: missing-prerequisite (repo: firstmate) (kind: captain) (hold: Pick a route) (hold-kind: captain)
 - [ ] long-call - Choose how to configure this detailed feature (repo: firstmate) (kind: captain) (hold: Should the feature start enabled? A: Keep it disabled until checks pass. B: Enable it now and accept the initial risk.) (hold-kind: captain)
 - [ ] path-call - Review proposal (repo: firstmate) (kind: captain) (hold: $encoded) (hold-kind: captain)
+- [ ] pending-prerequisite - Groundwork still queued (repo: firstmate) (kind: ship)
 
 ## In flight
 - [ ] waiting-call - Worker needs a captain choice (repo: firstmate) (kind: ship) (hold: Should the worker continue? A: Continue now. B: Stop safely.) (hold-kind: captain)
+- [ ] cleared-call - Worker waits behind landed groundwork blocked-by: finished-prerequisite (repo: firstmate) (kind: ship) (hold: Ship now? A: Yes. B: No.) (hold-kind: captain)
+- [ ] gated-call - Worker waits behind queued groundwork blocked-by: pending-prerequisite (repo: firstmate) (kind: ship) (hold: Ship later? A: Yes. B: No.) (hold-kind: captain)
+
+## Done
+- [x] finished-prerequisite - Groundwork that landed (repo: firstmate) (kind: ship) (done 2026-07-10)
 EOF
   fm_write_meta "$home/state/waiting-call.meta" \
     "window=firstmate:fm-waiting-call" "worktree=$home/projects/waiting-call" \
@@ -1146,8 +1152,10 @@ EOF
   fakebin=$(make_fakebin "$home")
   json=$(run "$home" "$fakebin" --json --all-decisions)
   printf '%s' "$json" | jq -e '
-    [.decisions_open[].id] == ["waiting-call", "blocked-call", "long-call", "path-call"]
+    [.decisions_open[].id] == ["waiting-call", "cleared-call", "blocked-call", "long-call", "path-call", "gated-call"]
       and ([.decisions_open[] | select(.id == "waiting-call")][0].stops_worker == true)
+      and ([.decisions_open[] | select(.id == "cleared-call")][0].stops_worker == true)
+      and ([.decisions_open[] | select(.id == "gated-call")][0].stops_worker == false)
       and ([.decisions_open[] | select(.id == "blocked-call")][0]
         | .stops_worker == false and .presentation == "presented")
       and ([.decisions_open[] | select(.id == "long-call")][0].question
