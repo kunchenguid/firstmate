@@ -258,14 +258,15 @@ fm_pi_extension_loaded() {
 # home, so a process outside that session can never stand in for its owner.
 # The user process can always break the chain (a re-parented orphan).
 fm_pid_descends_from() {
-  local pid=$1 ancestor=$2 hop parent
+  local pid=$1 ancestor=$2 parent hops=0
   case "$pid" in ''|*[!0-9]*) return 1 ;; esac
   case "$ancestor" in ''|*[!0-9]*) return 1 ;; esac
-  for hop in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16; do
+  while [ "$hops" -lt 16 ]; do
     [ "$pid" = "$ancestor" ] && return 0
     parent=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d '[:space:]')
     case "$parent" in ''|*[!0-9]*|0|1) return 1 ;; esac
     pid=$parent
+    hops=$(( hops + 1 ))
   done
   return 1
 }
