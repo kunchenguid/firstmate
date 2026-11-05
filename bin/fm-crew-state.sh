@@ -516,11 +516,14 @@ change_read_record_bounded() {  # <host> <number>
 }
 
 # The approved Test/CI exception a passed-with-override run carries, with the
-# override reasons the run record holds (none recorded still reads qualified).
+# first line of each override reason the run record holds, so the detail stays
+# one line (none recorded still reads qualified). The TOON value encodes a
+# multi-line reason with literal \n escapes.
 override_detail() {
   local reasons="" field reason
   for field in test_override_reason ci_override_reason; do
     reason=$(strip_quotes "$(nm_field "$field")")
+    reason=${reason%%\\n*}
     [ -n "$reason" ] || continue
     reasons="${reasons:+$reasons; }${field%%_*}: $reason"
   done
