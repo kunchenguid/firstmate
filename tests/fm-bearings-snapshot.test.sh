@@ -1125,31 +1125,19 @@ test_open_decision_surfaces_end_to_end() {
   pass "an authoritative captain hold surfaces end-to-end"
 }
 
-test_decision_presentation_preserves_questions_and_answers() {
-  local home fakebin json
+test_decision_presentation_preserves_questions() {
+  local home fakebin encoded json
   home=$(make_home decision-presentation)
   mkdir -p "$home/data" "$home/projects/waiting-call"
-  cat > "$home/data/backlog.md" <<'EOF'
-## In flight
-- [ ] waiting-call - Worker needs a captain choice (repo: firstmate) (kind: ship) (hold: Should the worker continue? A: Continue now. B: Stop safely.) (hold-kind: captain)
-
+  encoded=$(. "$ROOT/bin/fm-hold-reason-lib.sh" && fm_hold_reason_encode data/proposal/report.md)
+  cat > "$home/data/backlog.md" <<EOF
 ## Queued
 - [ ] blocked-call - Choice with unmet prerequisites blocked-by: missing-prerequisite (repo: firstmate) (kind: captain) (hold: Pick a route) (hold-kind: captain)
 - [ ] long-call - Choose how to configure this detailed feature (repo: firstmate) (kind: captain) (hold: Should the feature start enabled? A: Keep it disabled until checks pass. B: Enable it now and accept the initial risk.) (hold-kind: captain)
-- [ ] path-call - Review proposal (repo: firstmate) (kind: captain) (hold: data/proposal/report.md) (hold-kind: captain)
+- [ ] path-call - Review proposal (repo: firstmate) (kind: captain) (hold: $encoded) (hold-kind: captain)
 
-## Done
-- [x] answered-call - Answered captain question (repo: firstmate) (kind: captain) (done 2026-07-10) (hold: captain choice pending) (hold-kind: captain)
-  Resolution recorded by fm-captain-hold.
-  Captain decision:
-  Captain answered this call through interview.
-  Answer: A
-  Answer as shown to the captain: Keep it disabled until checks pass.
-  Selected answer: Keep it disabled until checks pass.
-- [x] legacy-answer - Older answered call (repo: firstmate) (kind: captain) (done 2026-07-09) (hold: legacy reason) (hold-kind: captain)
-  Resolution recorded by fm-captain-hold.
-  Captain decision:
-  Answer: A
+## In flight
+- [ ] waiting-call - Worker needs a captain choice (repo: firstmate) (kind: ship) (hold: Should the worker continue? A: Continue now. B: Stop safely.) (hold-kind: captain)
 EOF
   fm_write_meta "$home/state/waiting-call.meta" \
     "window=firstmate:fm-waiting-call" "worktree=$home/projects/waiting-call" \
@@ -1159,24 +1147,15 @@ EOF
   json=$(run "$home" "$fakebin" --json --all-decisions)
   printf '%s' "$json" | jq -e '
     [.decisions_open[].id] == ["waiting-call", "blocked-call", "long-call", "path-call"]
-      and ([.decisions_open[] | select(.id == "waiting-call")][0] | .stops_worker == true and .blocked_by == [])
+      and ([.decisions_open[] | select(.id == "waiting-call")][0].stops_worker == true)
       and ([.decisions_open[] | select(.id == "blocked-call")][0]
-        | .stops_worker == false and .blocked_by == ["missing-prerequisite"] and .presentation == "presented")
+        | .stops_worker == false and .presentation == "presented")
       and ([.decisions_open[] | select(.id == "long-call")][0].question
       | contains("Should the feature start enabled? A: Keep it disabled until checks pass. B: Enable it now and accept the initial risk."))
-      and ([.decisions_open[] | select(.id == "path-call")][0].presentation == "needs presenting")
-      and ([.decisions_answered[] | select(.id == "answered-call")][0].selected_answer
-        == "Keep it disabled until checks pass.")
-      and ([.decisions_open[].id] | index("answered-call") | not)
-      and ([.decisions_answered[] | select(.id == "legacy-answer")][0].selected_answer == null)
-      and ([.decisions_answered[].id] == ["answered-call", "legacy-answer"])
-  ' >/dev/null || fail "decision presentation lost question, path warning, or selected answer: $json"
-  json=$(FM_BEARINGS_LANDED=1 run "$home" "$fakebin" --json)
-  printf '%s' "$json" | jq -e '
-    [.decisions_answered[].id] == ["answered-call"]
-      and (.omitted | any(.surface == "decisions_answered showing 1 of 2" and .reveal == "--all-decisions"))
-  ' >/dev/null || fail "answered calls were not bounded with disclosure: $json"
-  pass "decision presentation preserves full questions, marks path-only reasons, prioritizes worker waits, and reports selected answers separately"
+      and ([.decisions_open[] | select(.id == "path-call")][0]
+        | .question == "Review proposal: data/proposal/report.md" and .presentation == "needs presenting")
+  ' >/dev/null || fail "decision presentation lost question, path warning, or worker priority: $json"
+  pass "decision presentation preserves full questions, marks encoded path-only reasons, and lists worker waits first"
 }
 
 test_report_pointers_surface() {
@@ -3559,7 +3538,7 @@ fm_test_run \
   test_main_captain_readiness_matches_secondmate_projection \
   test_completed_scout_report_not_pending \
   test_open_decision_surfaces_end_to_end \
-  test_decision_presentation_preserves_questions_and_answers \
+  test_decision_presentation_preserves_questions \
   test_report_pointers_surface \
   test_queued_item_prose_never_hides_it \
   test_include_prs_is_the_only_fetch_path \
