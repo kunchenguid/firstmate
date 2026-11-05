@@ -779,6 +779,36 @@ SH
   pass "a duplicate decision key attaches to the open hold and distinct keys stay distinct"
 }
 
+test_until_extension_keeps_the_unanswered_call() {
+  local home out o shown
+  home=$(make_home until-extension)
+  for o in sample-review-a sample-review-b; do
+    mkdir -p "$home/data/$o"
+    tasks_in "$home" add "$o" "Investigate $o" --kind scout --repo sample --start >/dev/null \
+      || fail "could not create the $o fixture"
+    write_origin_meta "$home" "$o"
+    printf 'done: report complete\n' > "$home/state/$o.status"
+  done
+  run_captain "$home" hold sample-call --title "Call" --reason "ship?" --option north --rec north \
+    --key ship-gate --origin sample-review-a >/dev/null || fail "the first keyed ask failed"
+  run_captain "$home" hold sample-dup --title "Dup" --reason "ship?" --rec north --key ship-gate \
+    --origin sample-review-b >/dev/null || fail "the duplicate ask did not attach"
+  run_captain "$home" hold sample-call --reason "later" --until 2000-01-01 >/dev/null \
+    || fail "could not defer the call to a past date"
+  shown=$(tasks_in "$home" show sample-call --full)
+  assert_contains "$shown" "held: no" "the past --until did not expire the hold"
+  run_captain "$home" hold sample-call --reason "later still" --until 2099-01-01 >/dev/null \
+    || fail "could not extend the expired call"
+  out=$(run_captain "$home" complete sample-review-b sample-call 2>&1) \
+    || fail "extending the unanswered call dropped the attached origin: $out"
+  shown=$(FM_HOME="$home" "$ROOT/bin/fm-tasks-axi.sh" show sample-call --full)
+  assert_contains "$shown" "Rec: north" "extending the unanswered call dropped its recommended pick"
+  out=$(run_captain "$home" hold sample-again --title "Again" --reason "ship?" --rec north --key ship-gate 2>&1) \
+    || fail "a later duplicate ask failed: $out"
+  assert_contains "$out" "attached to sample-call" "extending the unanswered call dropped its decision key"
+  pass "extending an expired, unanswered call with --until keeps its attached origins, pick, and key"
+}
+
 # Reproduces the loss exactly with privacy-safe synthetic names: the investigation
 # and visual review have ended, the only genuine unresolved captain call is report
 # prose, no held backlog item or open status exists, and the authoritative
@@ -5271,3 +5301,4 @@ test_archived_answered_hold_still_satisfies_the_gate
 test_archived_answer_in_a_user_configured_archive_satisfies_the_gate
 test_hold_requires_a_pick_and_renders_options
 test_hold_collapses_a_duplicate_decision_key
+test_until_extension_keeps_the_unanswered_call

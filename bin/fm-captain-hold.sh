@@ -1160,8 +1160,7 @@ command_hold() {
   exists=0
   if task_show "$id"; then
     exists=1
-    [ "$(show_field_value "$TASK_SHOW_OUTPUT" hold_kind)" = captain ] \
-      && [ "$(show_field_value "$TASK_SHOW_OUTPUT" held)" = yes ] && pre=1
+    [ "$(show_field_value "$TASK_SHOW_OUTPUT" hold_kind)" = captain ] && pre=1
   fi
   if [ "$pre" = 1 ] && [ -z "$rec" ]; then
     reason="${reason}$(shown_hold_pick "$TASK_SHOW_OUTPUT")"
