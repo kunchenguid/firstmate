@@ -1158,17 +1158,24 @@ EOF
   fakebin=$(make_fakebin "$home")
   json=$(run "$home" "$fakebin" --json --all-decisions)
   printf '%s' "$json" | jq -e '
-    .decisions_open[0].id == "waiting-call"
-      and ([.decisions_open[] | select(.id == "blocked-call")][0].stops_worker == false)
+    [.decisions_open[].id] == ["waiting-call", "blocked-call", "long-call", "path-call"]
+      and ([.decisions_open[] | select(.id == "waiting-call")][0] | .stops_worker == true and .blocked_by == [])
+      and ([.decisions_open[] | select(.id == "blocked-call")][0]
+        | .stops_worker == false and .blocked_by == ["missing-prerequisite"] and .presentation == "presented")
       and ([.decisions_open[] | select(.id == "long-call")][0].question
       | contains("Should the feature start enabled? A: Keep it disabled until checks pass. B: Enable it now and accept the initial risk."))
       and ([.decisions_open[] | select(.id == "path-call")][0].presentation == "needs presenting")
       and ([.decisions_answered[] | select(.id == "answered-call")][0].selected_answer
         == "Keep it disabled until checks pass.")
       and ([.decisions_open[].id] | index("answered-call") | not)
-      and ([.decisions_answered[] | select(.id == "legacy-answer")][0].selected_answer
-        == "Older answered call: legacy reason")
+      and ([.decisions_answered[] | select(.id == "legacy-answer")][0].selected_answer == null)
+      and ([.decisions_answered[].id] == ["answered-call", "legacy-answer"])
   ' >/dev/null || fail "decision presentation lost question, path warning, or selected answer: $json"
+  json=$(FM_BEARINGS_LANDED=1 run "$home" "$fakebin" --json)
+  printf '%s' "$json" | jq -e '
+    [.decisions_answered[].id] == ["answered-call"]
+      and (.omitted | any(.surface == "decisions_answered showing 1 of 2" and .reveal == "--all-decisions"))
+  ' >/dev/null || fail "answered calls were not bounded with disclosure: $json"
   pass "decision presentation preserves full questions, marks path-only reasons, prioritizes worker waits, and reports selected answers separately"
 }
 
@@ -3444,7 +3451,10 @@ EOF
     | length == 2 and all(.[]; .question == $question and (.summary | length) <= 91)
   ' >/dev/null || fail "full local/secondmate question was lost: $json"
   printf '%s' "$json" | jq -e '
-    [.decisions_open[].id] == ["questions/full-call", "questions/report-call", "full-call", "report-call"]
+    [.decisions_open[].id] == ["full-call", "report-call", "questions/full-call", "questions/report-call"]
+    and all(.decisions_open[]; .stops_worker == false)
+    and ([.decisions_open[] | select(.id | endswith("report-call")) | .presentation]
+      == ["needs presenting", "needs presenting"])
     and ([.decisions_open[] | select(.id | endswith("report-call")) | .question]
       == ["Review the proposal: data/proposal/report.md", "Review the proposal: data/proposal/report.md"])
   ' >/dev/null || fail "question transport changed placement or report-only text: $json"
@@ -3490,7 +3500,8 @@ test_supplied_secondmate_questions_and_legacy_optional_fields() {
     FM_TEST_LEDGER_CALL_LOG="$home/ledger-calls.log" FM_SNAPSHOT_NOW_EPOCH=1000 \
     "$BEARINGS" --json --all-decisions)
   printf '%s' "$json" | jq -e --arg reason "$reason" '
-    [.decisions_open[].id] == ["ledger-1/minimal", "ledger-1/report", "ledger-1/supplied", "ledger-1/queued-only"]
+    [.decisions_open[].id] == ["ledger-1/supplied", "ledger-1/minimal", "ledger-1/report", "ledger-1/queued-only"]
+    and (.decisions_open | any(.id == "ledger-1/report" and .presentation == "needs presenting"))
     and (.decisions_open | any(.id == "ledger-1/supplied" and .question == ("Supplied question: " + $reason)))
     and (.decisions_open | any(.id == "ledger-1/minimal" and .question == "minimal: captain decision pending"))
     and (.decisions_open | any(.id == "ledger-1/report" and .question == "Review report: data/supplied/report.md"))
