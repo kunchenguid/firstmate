@@ -2863,13 +2863,10 @@ launch_template() {
   # otherwise run with attribution back on; carrying it per launch keeps the
   # policy in force regardless of which settings scopes end up loaded.
   # A task worker's inline --settings JSON also carries "outputStyle":"default".
-  # An output style set in the captain's user settings applies to every Claude
-  # session that loads that scope, so a task worker would otherwise inherit the
-  # captain's main-thread output style and its orchestration instructions;
-  # the per-launch flag-scope value outranks user settings and keeps the
-  # worker on Claude Code's default style whatever the captain's style is.
-  # A persistent secondmate is a supervisor, so its settings file omits this
-  # key and it keeps the captain's main-thread style.
+  # The worktree settings writer carries it too: T3 owns its provider command
+  # and bypasses this template, but loads the local settings scope.
+  # docs/configuration.md "Installed hooks and launch details" owns the
+  # worker/secondmate output-style policy.
   # Claude Code's --settings flag takes one value, a file path or an inline
   # JSON string (https://code.claude.com/docs/en/cli-reference). A secondmate's
   # busy hooks share that value, in state/<id>.claude-settings.json, and the
