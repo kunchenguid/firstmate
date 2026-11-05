@@ -255,6 +255,31 @@ test_fixture_snapshot_json() {
   pass "fixture snapshot covers task rows, backlog rows, pointers, stable ordering, and emission-time event age"
 }
 
+test_forgejo_pr_projection() {
+  local home fakebin out url=http://pi4:3001/o/r/pulls/7
+  home=$(make_home forgejo-pr)
+  mkdir -p "$home/projects/forgejo"
+  cat > "$home/data/backlog.md" <<EOF
+## Done
+- [x] forgejo-task - Forgejo PR $url (repo: alpha) (kind: ship) (merged 2026-07-06)
+EOF
+  fm_write_meta "$home/state/forgejo-task.meta" \
+    "window=firstmate:fm-forgejo-task" \
+    "worktree=$home/projects/forgejo" \
+    "project=alpha" \
+    "harness=codex" \
+    "kind=ship" \
+    "mode=no-mistakes"
+  printf 'done: PR %s checks green\n' "$url" > "$home/state/forgejo-task.status"
+  fakebin=$(make_fakebin "$home")
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$SNAPSHOT" --json)
+  printf '%s' "$out" | jq -e --arg url "$url" '
+    (.tasks[] | select(.id == "forgejo-task") | .pr.url == $url and .pr.source == "status_event")
+      and (.backlog.records[] | select(.id == "forgejo-task") | .pr_url == $url)
+  ' >/dev/null || fail "snapshot dropped the plain-http Forgejo PR projection: $out"
+  pass "snapshot projects plain-http Forgejo PRs from status and backlog records"
+}
+
 # R1 owner contract: main_inventory discloses orphan in-flight and unstructured
 # current rows without inventing task rows.
 test_hold_buckets_are_total_and_text_blind() {
@@ -1155,6 +1180,7 @@ EOF
 fm_test_run \
   test_empty_fleet_json \
   test_fixture_snapshot_json \
+  test_forgejo_pr_projection \
   test_home_summary_excludes_secondmate_from_child_inventory \
   test_undated_captain_hold_phrasing_and_aging \
   test_hold_buckets_are_total_and_text_blind \

@@ -360,7 +360,7 @@ osc_plan() { # <task> <kind> <state> <busy|idle|unknown> [busy-mark]
       else
         W_STATE='done'
         case "$note" in
-          *https://* | *PR\ http://*) W_MSG="PR ready: $note" ;;
+          *https://* | PR\ http://*) W_MSG="PR ready: $note" ;;
           *) W_MSG="Done: $note" ;;
         esac
       fi

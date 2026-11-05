@@ -982,6 +982,8 @@ test_marks_producer_converges_and_notifies_once() {
   assert_contains "$(marks_run plan t1)" $'done\t\tPR ready: PR http://' "a done line with a plain-http URL plans a PR-ready done mark"
   mark_task_status "done [at=1700000375]: Published http://internal/docs"
   assert_contains "$(marks_run plan t1)" $'done\t\tDone: Published http://internal/docs' "an unrelated plain-http URL plans an ordinary done mark"
+  mark_task_status "done [at=1700000380]: Documented PR http://pi4:3001/o/r/pulls/7 in the handbook"
+  assert_contains "$(marks_run plan t1)" $'done\t\tDone: Documented PR http://' "a plain-http PR mentioned in prose plans an ordinary done mark"
   mark_task_status "failed [at=1700000400]: build broke"
   assert_contains "$(marks_run plan t1)" $'error\t\tFailed: build broke' "failed plans an error mark"
   mark_task_status "needs-decision [at=1700000500] [key=k2]: second call"
