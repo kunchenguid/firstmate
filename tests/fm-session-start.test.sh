@@ -854,7 +854,7 @@ EOF
   assert_contains "$out" "Skipping every mutating step" "read-only banner did not explain what was skipped"
   assert_contains "$out" "skipped (read-only session)" "wake-queue section did not report itself skipped"
   assert_contains "$out" "WATCHER DOWN - SUPERVISION IS OFF" "read-only guard did not surface watcher-liveness alarm"
-  assert_contains "$out" "queued wakes pending - left untouched because this session lacks verified fleet-lock ownership" "read-only guard did not leave queued wakes untouched without verified lock ownership"
+  assert_contains "$out" "queued wakes pending - left untouched because this session lacks verified team-lock ownership" "read-only guard did not leave queued wakes untouched without verified lock ownership"
   assert_contains "$out" "TANGLE: primary checkout on feature branch 'fm/read-only-tangle'" "read-only bootstrap did not surface the tangle diagnostic"
   assert_contains "$out" "read-only session must leave restore work" "read-only tangle diagnostic did not explain restore ownership"
   assert_contains "$out" "Stay read-only: do not arm" "read-only next step did not block direct watcher repair"
@@ -899,9 +899,9 @@ EOF
   expect_code 0 "$status" "fm-session-start.sh must exit 0 when lock publication fails"
   assert_contains "$out" "cannot write session lock" "lock publication failure was not surfaced"
   assert_contains "$out" "READ-ONLY SESSION" "lock publication failure did not force a read-only session"
-  assert_contains "$out" "FLEET LOCK OWNERSHIP WAS NOT VERIFIED" "lock publication failure was misreported as a live holder"
-  assert_contains "$out" "lacks verified fleet-lock ownership" "lock publication failure did not explain why queued wakes remain untouched"
-  assert_not_contains "$out" "ANOTHER LIVE FIRSTMATE SESSION HOLDS THE FLEET LOCK" "lock publication failure falsely claimed a live lock holder"
+  assert_contains "$out" "TEAM LOCK OWNERSHIP WAS NOT VERIFIED" "lock publication failure was misreported as a live holder"
+  assert_contains "$out" "lacks verified team-lock ownership" "lock publication failure did not explain why queued wakes remain untouched"
+  assert_not_contains "$out" "ANOTHER LIVE FIRSTMATE SESSION HOLDS THE TEAM LOCK" "lock publication failure falsely claimed a live lock holder"
   [ -s "$home/state/.wake-queue" ] || fail "lock publication failure allowed the wake queue to mutate"
 
   pass "session start stays read-only when lock ownership cannot be published"
@@ -1312,7 +1312,7 @@ EOF
   wait_for_network_stage "$home" "$root" || fail "the deferred network stage never published"
 
   report=$(network_stage_report "$home" "$root")
-  assert_contains "$report" "secondmate $SESSION_START_SECOND_MATE_ID relaunched" \
+  assert_contains "$report" "Project Director $SESSION_START_SECOND_MATE_ID relaunched" \
     "a relaunch performed after the digest was composed went unreported"
   assert_contains "$report" "re-read any record" \
     "the report did not tell the reader the digest's records are now behind"
@@ -2676,7 +2676,7 @@ EOF
   # the lock, so it must still own repair rather than deferring to a lock holder.
   assert_contains "$reemit" "restore the primary with: git -C $root checkout main" \
     "--reemit disowned a repair it is entitled to perform"
-  assert_not_contains "$reemit" "must leave restore work to the session holding the fleet lock" \
+  assert_not_contains "$reemit" "must leave restore work to the session holding the team lock" \
     "--reemit misreported itself as an unlocked read-only session"
 
   rm -f "$home/state/.lock"
@@ -2691,7 +2691,7 @@ EOF
 
   assert_contains "$readonly_out" "READ-ONLY SESSION" \
     "--reemit assumed lock ownership instead of re-verifying it"
-  assert_contains "$readonly_out" "must leave restore work to the session holding the fleet lock" \
+  assert_contains "$readonly_out" "must leave restore work to the session holding the team lock" \
     "a lock-refused --reemit still claimed repair ownership"
 
   pass "--reemit re-verifies lock ownership and keeps repair ownership with whoever holds it"

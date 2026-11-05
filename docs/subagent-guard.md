@@ -11,7 +11,7 @@ That deny list must not Builder in tracked `.claude/settings.json` because it is
 On 2026-07-22 a firstmate primary ran four workers through Claude Code's built-in subagent tool instead of `bin/fm-spawn.sh`.
 Three consequences were observed, not hypothesized.
 
-- The team view showed zero work under way for the whole run, because no `state/<id>.meta` and no `data/<id>/brief.md` were ever created.
+- The team view showed zero work in progress for the whole run, because no `state/<id>.meta` and no `data/<id>/brief.md` were ever created.
 - When the primary session restarted, two of those workers died mid-flight and their work was lost.
   A real worker lives in its own backend session with durable state and survives a primary restart.
 - The supervision cycle then stayed down for 73 minutes unnoticed, which silently killed the user's Workflowy intake channel, since that channel only fires while a watch cycle runs.

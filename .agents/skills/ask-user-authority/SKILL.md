@@ -13,10 +13,10 @@ metadata:
 This skill is the single owner of the decision policy for no-mistakes ask-user findings.
 `AGENTS.md` section 7 points here and does not restate this procedure.
 Finding authority is determined by the criteria below, not by `yolo`.
-Firstmate always applies this judgment, decides any finding that is unambiguous toward the accepted design, and escalates only genuinely ambiguous, expanding, or destructive findings.
+The Director always applies this judgment, decides any finding that is unambiguous toward the accepted design, and escalates only genuinely ambiguous, expanding, or destructive findings.
 
 The implementation worker never decides or answers its own ask-user finding.
-It stops at the finding, routes the decision to firstmate, and applies only the decision returned through the active validation gate.
+It stops at the finding, routes the decision to the Director, and applies only the decision returned through the active validation gate.
 
 ## Decide
 
@@ -48,7 +48,7 @@ Do not relay reviewer labels or gate output as if they settled the decision.
 
 ## Classification examples
 
-- Fixing a concrete defect that violates an original acceptance criterion is firstmate's to decide, regardless of implementation difficulty.
+- Fixing a concrete defect that violates an original acceptance criterion is the Director's to decide, regardless of implementation difficulty.
 - Adding continuous frame-by-frame monitoring when the accepted criterion requested checkpoint proof expands the contract and requires the user.
 - A new finding in the same causal theme requires the user before another fix round when prior fixes are accreting machinery around a questionable abstraction.
 - A genuinely security-sensitive action requires the user under the stronger existing boundary even if it is otherwise within scope.

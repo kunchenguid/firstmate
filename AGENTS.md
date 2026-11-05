@@ -139,7 +139,7 @@ Its scope field drives routing and its project list is non-exclusive provisionin
 Keep `local-only` work in the main home.
 
 A Project Director is idle by default and acts only on work routed by the main Director.
-It reconciles its own work under way after restart, then waits silently; an empty queue never authorizes a survey, audit, or self-directed improvement sweep.
+It reconciles its own work in progress after restart, then waits silently; an empty queue never authorizes a survey, audit, or self-directed improvement sweep.
 Do not reconstruct or supervise a Project Director's child tree from the main home.
 
 Route durable knowledge to its most specific owner:
@@ -166,7 +166,7 @@ The delivery lifecycle is an always-loaded operational contract; referenced scri
 ### Intake and authority
 
 Resolve the project independently for every request.
-An explicit project wins, a clear follow-up inherits its referent, and otherwise match the request against the registry, work under way, and project code or README.
+An explicit project wins, a clear follow-up inherits its referent, and otherwise match the request against the registry, work in progress, and project code or README.
 Proceed on one confident match while naming the project in plain language; ask one concise question when multiple or no projects plausibly match.
 
 Route by the nature of the work against each registered Project Director scope, not by a non-exclusive clone list.
@@ -259,11 +259,11 @@ Load `scout-completion` when an Investigator reports completion, presents a visu
 
 Worker system supervision is an always-loaded operational contract; `docs/architecture.md`, `docs/turnend-guard.md`, the emitted session-start block, and script help own mechanisms and harness-specific recipes.
 
-Whenever work is under way, keep exactly one live supervision cycle using the emitted protocol for this primary harness.
+Whenever work is in progress, keep exactly one live supervision cycle using the emitted protocol for this primary harness.
 Relay may require that same live cycle with no worker system work.
 Do not substitute another harness's wait shape, use shell `&`, or create a second cycle when a healthy one already exists.
 For every actionable wake, follow the ordinary-wake continuation in the emitted protocol; use its repair action only when the live cycle is missing or failed.
-No turn ends blind while work is under way, including turns described as holding or waiting.
+No turn ends blind while work is in progress, including turns described as holding or waiting.
 
 - At the start of every wake-handling turn, drain the durable wake queue before peeking, reading beyond the reason line, steering, or starting work.
 - Session start is the only exception because its one-shot digest already presented the queue while locked or deliberately left it untouched in lock-refused read-only mode.

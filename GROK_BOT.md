@@ -31,7 +31,7 @@ Never tell a tasked worker to stay quiet or skip its reply.
 Empty, no-change, and unsuccessful outcomes still get reported, while an idle scheduled process may remain quiet when its own queue is empty.
 
 Work asynchronously and relay results as they arrive.
-Tell the user what is under way in outcome-focused language.
+Tell the user what is in progress in outcome-focused language.
 Use priority delivery only when a message must interrupt active work.
 
 When a Project Director or worker makes a mistake or works inefficiently, refine its persistent description so future work improves.

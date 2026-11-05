@@ -114,7 +114,7 @@ The bare `FM_INJECT_MARK` form remains accepted for legacy daemon escalations du
 U+2063 has no normal keyboard keystroke and survives terminal transport as UTF-8 text, but Claude Code (verified on 2.1.280) removes it, with every other invisible character, from each submitted prompt, whether typed, pasted, or passed as the launch prompt.
 For a primary harness the owner lists as stripping the marker (Claude Code), the daemon instead writes the envelope as a record in this home's `state/operational-inbox` and types only the owner's plain doorbell naming it.
 That doorbell is Firstmate's only when `open` verifies the record in this home, so the doorbell shape alone never counts; a verbatim copy of a live doorbell line, pasted back while its record still exists, is treated as Firstmate's, because the carrier does not track consumption.
-This is how firstmate tells a daemon escalation apart from a real message in the same pane.
+This is how the Director tells a daemon escalation apart from a real message in the same pane.
 For other harnesses, the operational prefix travels with the message text; neither carrier relies on harness-level typed-vs-injected detection.
 
 ### Busy-guard and composer guard
@@ -164,8 +164,8 @@ The daemon still clears its buffer only on the backend's `empty` success verdict
 ### Classification policy
 
 The daemon wraps `fm-watch.sh`, runs the watcher as a child, presents every durable wake after each actionable watcher close, classifies each presented record in bash, and acknowledges the presented generation only after routing completes.
-It self-handles the routine majority without consuming a firstmate turn.
-Events selected by the routing below escalate to firstmate's context as one pre-read, single-line, batched digest.
+It self-handles the routine majority without consuming a Director turn.
+Events selected by the routing below escalate to the Director's context as one pre-read, single-line, batched digest.
 The digest is byte-bounded so every transport can carry it; when it cuts an event or omits events past its budget, it names a `state/.subsuper-digests/` file that holds every buffered event verbatim, so read that file before acting on a cut event.
 The user-relevant verb set, declared-wait vocabulary, status-span classifier, and presentation-marker contract live in shared `bin/fm-classify-lib.sh`, while each supervisor owns its routing and team scan as a consumer of that policy.
 While `state/.afk` exists the daemon owns the watcher, so the watcher reverts to one-shot and lets the daemon do the triage - the two never run their triage at the same time.
@@ -182,7 +182,7 @@ Classify each wake this way, applying the steering-inbox exception before status
   With no unreported actionable event, the wake self-handles, and the current declaration outranks an enriched possible-wedge reason so it never escalates on the `FM_STALE_ESCALATE_SECS` cadence.
   If a declared external wait is still declared past `FM_PAUSE_RESURFACE_SECS` (default four hours), housekeeping sends one recheck and resets the pause window; a user-held transfer is never rechecked while the posture record exists.
   The window ages against the worker's own latest status line, so only a status append that stops declaring the wait ends this routing and restores wedge detection.
-- `check` -> always escalate. Check scripts print only when firstmate should wake.
+- `check` -> always escalate. Check scripts print only when the Director should wake.
 - `stale` with a terminal status, a bare legacy user-relevant line, or an unrecognized status prefix such as `parked:` -> escalate.
   Nonterminal progress remains transient even when its prose contains a legacy free-text token or its seen-status marker already matches, so record a marker and self-handle.
   If the pane is still idle past `FM_STALE_ESCALATE_SECS` (default 240s), housekeeping escalates it as a possible wedge.
@@ -192,7 +192,7 @@ Classify each wake this way, applying the steering-inbox exception before status
   An escalation this path already sends keeps that name, whether it comes from the status log or from housekeeping.
   A terminal status that was already reported still clears the persistence marker, the same as a stale with no dialog name.
   A declared wait keeps the pause cadence and does not carry the name.
-  Healthy workers are autonomous and do not wait on firstmate mid-task.
+  Healthy workers are autonomous and do not wait on the Director mid-task.
 - `heartbeat` -> self-handle.
   The daemon runs its own cheap bash team scan every `FM_HEARTBEAT_SCAN_SECS` (default 300s) as the catch-all for user-relevant events still unread by the per-wake classifier.
 - An unknown wake reason escalates fail-safe.
@@ -223,7 +223,7 @@ The single-line format makes submission unambiguous across harnesses; the carrie
 - **Verified submit model** - follow the [submit model](#submit-model) and its linked backend confirmation contracts.
 - **Marker strip** - `strip_injection_marker` removes the current operational
   prefix or legacy bare marker before classification or relay, so the digest
-  text firstmate sees is clean; `open` prints a record-backed doorbell's digest
+  text the Director sees is clean; `open` prints a record-backed doorbell's digest
   already stripped.
 - **Portable singleton lock** - the daemon uses the repo's portable lock helper
   (`fm-wake-lib.sh`) instead of `flock`, which is absent on macOS.

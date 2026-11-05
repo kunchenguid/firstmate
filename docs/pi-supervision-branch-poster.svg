@@ -13,10 +13,10 @@
   <g font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace">
     <text x="48" y="56" fill="#E6EDF3" font-size="36" font-weight="700">Multi-brain agent architecture</text>
     <text x="48" y="86" fill="#8CA3C7" font-size="18">One agent. Two branches of attention. Events are commits.</text>
-    <text x="1152" y="56" text-anchor="end" fill="#8CA3C7" fill-opacity="0.7" font-size="14">fig. 1 - firstmate</text>
+    <text x="1152" y="56" text-anchor="end" fill="#8CA3C7" fill-opacity="0.7" font-size="14">fig. 1 - Director</text>
   </g>
   <g transform="translate(0 100)" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace">
-<title id="mb-title">Multi-brain agent architecture drawn as a git graph: one fix's lifecycle. The worker finishes and CI runs (routine note), the captain's merge-when-green instruction is cherry-picked down, a flaky test is rerun (routine note), and when CI goes green the supervision brain persists the exact requested outcome visibly before main processes it.</title>
+<title id="mb-title">Multi-brain agent architecture drawn as a git graph: one fix's lifecycle. The worker finishes and CI runs (routine note), the user's merge-when-green instruction is cherry-picked down, a flaky test is rerun (routine note), and when CI goes green the supervision brain persists the exact requested outcome visibly before main processes it.</title>
         <defs>
           <marker id="ah-cyan" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7.5" markerHeight="7.5" orient="auto-start-reverse">
             <path d="M 0 0 L 10 5 L 0 10 z" fill="#56C8FF"></path>
@@ -53,12 +53,12 @@
 
         <!-- ================= EXAMPLE CHIPS ON THE ARCS ================= -->
         <g id="chip-quiet-1">
-          <title>A silent note: nothing needs the captain yet</title>
+          <title>A silent note: nothing needs the user yet</title>
           <rect x="385" y="312" width="230" height="36" rx="6" fill="#0D1321" stroke="#56C8FF" stroke-width="1.5" opacity="0.95"></rect>
           <text x="500" y="336" text-anchor="middle" fill="#B9E5FF" font-size="16">&#8220;PR opened, CI running&#8221;</text>
         </g>
         <g id="chip-cherry">
-          <title>The captain's own instruction, cherry-picked down as context</title>
+          <title>The user's own instruction, cherry-picked down as context</title>
           <rect x="530" y="377" width="260" height="36" rx="6" fill="#0D1321" stroke="#FFB454" stroke-width="1.5" opacity="0.95"></rect>
           <text x="660" y="401" text-anchor="middle" fill="#FFD9A0" font-size="16">you: &#8220;merge when CI green&#8221;</text>
         </g>
@@ -68,14 +68,14 @@
           <text x="800" y="296" text-anchor="middle" fill="#B9E5FF" font-size="16">&#8220;flaky test: reran, passed&#8221;</text>
         </g>
         <g id="chip-wake">
-          <title>The outcome the captain asked for: this exact entry persists visibly</title>
+          <title>The outcome the user asked for: this exact entry persists visibly</title>
           <rect x="865" y="342" width="250" height="38" rx="6" fill="#0D1321" stroke="#FFB454" stroke-width="2"></rect>
           <text x="990" y="367" text-anchor="middle" fill="#FFB454" font-size="17" font-weight="600">&#8220;merged: your fix is in&#8221;</text>
         </g>
 
         <!-- ================= MAIN COMMITS ================= -->
         <g id="main-commits">
-          <title>The captain's conversation, commit by commit</title>
+          <title>The user's conversation, commit by commit</title>
           <circle cx="310" cy="210" r="11" fill="#0D1321" stroke="#FFB454" stroke-width="3.5"></circle>
           <circle cx="620" cy="210" r="11" fill="#0D1321" stroke="#FFB454" stroke-width="3.5"></circle>
           <circle cx="1120" cy="210" r="11" fill="#0D1321" stroke="#FFB454" stroke-width="3.5"></circle>
@@ -88,9 +88,9 @@
         </g>
         <text x="545" y="174" text-anchor="middle" fill="#56C8FF" opacity="0.8" font-size="13.5">silent merge. zero turns</text>
         <text x="830" y="174" text-anchor="middle" fill="#56C8FF" opacity="0.8" font-size="13.5">silent merge. zero turns</text>
-        <!-- the merge commit that persists the exact captain outcome -->
+        <!-- the merge commit that persists the exact user outcome -->
         <g id="merge-commit">
-          <title>Merged and surfaced: the exact captain outcome persists visibly once</title>
+          <title>Merged and surfaced: the exact user outcome persists visibly once</title>
           <circle cx="1040" cy="210" r="13" fill="#FFB454"></circle>
           <circle cx="1040" cy="210" r="21" fill="none" stroke="#FFB454" stroke-width="1.5" opacity="0.5"></circle>
           <path d="M 1019 189 A 30 30 0 0 1 1061 189" fill="none" stroke="#FFB454" stroke-width="2.5" stroke-linecap="round" opacity="0.8"></path>

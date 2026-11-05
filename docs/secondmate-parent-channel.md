@@ -6,7 +6,7 @@ This note records why a Project Director home's user-facing outcomes are deliver
 
 ## The problem
 
-A Project Director is a firstmate in its own home, and nobody reads its chat: the user and the main firstmate see only what is appended to the parent channel.
+A Project Director coordinates its own FirstMate home, and nobody reads its chat: the user and the main Director see only what is appended to the parent channel.
 On 2026-09-02 four outcomes across two Project Director homes never reached the user.
 The watcher had delivered the parent's request within a minute each time, the Project Director did the work, and then the Project Director addressed "user" in its own chat instead of appending to the channel.
 The cause is structural rather than a one-off lapse: the Project Director can satisfy the [address rule in `AGENTS.md`](../AGENTS.md#firstmate) in local chat while missing the charter's later return-channel instruction.

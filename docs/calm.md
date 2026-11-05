@@ -30,7 +30,7 @@ Streaming text and the genuine reply that ends a response remain visible.
 
 ### Activity indicator
 
-While Calm is active and an agent run is under way, Calm hides Pi's built-in `Working...` row and shows a one-row activity indicator in its place.
+While Calm is active and an agent run is in progress, Calm hides Pi's built-in `Working...` row and shows a one-row activity indicator in its place.
 No separate Calm status row is added.
 The indicator claims the same Pi working-row widget slot as the standalone Pi Calm extension, so a session that loads both Calms shows one indicator rather than two, and turning Firstmate Calm off does not clear the standalone indicator.
 While Calm is off, Pi's stock working row is left exactly as Pi renders it.

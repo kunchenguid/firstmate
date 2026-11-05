@@ -42,8 +42,8 @@ For user-held rechecks under quiet, see [architecture](../../../docs/architectur
    mode from the record `enter` wrote.
    Keep `FM_AFK_MODE=quiet` on a quiet refresh: an `/afk` entry, even without new words, replaces a quiet record with an away record and starts hold-for-return.
 
-2. **Acknowledge** in `AGENTS.md` section 9 language: "user, quiet mode is
-   active; I will batch routine updates and surface only decisions, failures,
+2. **Acknowledge** in `AGENTS.md` section 9 language: "Quiet mode is active;
+   I will batch routine updates and surface only decisions, failures,
    credentials, or review-ready work - ordinary chat will not exit this, say
    `/quiet off` when you want normal per-wake responses back."
 
@@ -68,7 +68,7 @@ point of this mode (AGENTS.md section 8's away-mode stub, quiet branch).
 
 ## Orthogonal to approval authority
 
-Quiet mode changes how aggressively firstmate surfaces things, never who approves what.
+Quiet mode changes how aggressively the Director surfaces things, never who approves what.
 A PR ready for merge keeps the merge authority from `AGENTS.md` section 7, and a needs-decision finding keeps the `ask-user-authority` policy.
 
 The user is present, so quiet mode holds nothing for a return.
