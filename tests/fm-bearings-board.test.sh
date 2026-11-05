@@ -292,7 +292,7 @@ test_build_refuses_malformed_payloads_before_touching_the_board() {
   write_valid_payload "$data"
   jq '.captains_call[1].pr_url = "javascript:alert(1)"' "$data" > "$data.tmp" && mv "$data.tmp" "$data"
   set +e; out=$(run_board "$home" build "$data" 2>&1); rc=$?; set -e
-  [ "$rc" -ne 0 ] || fail "a non-HTTPS Captain’s Call PR URL was accepted"
+  [ "$rc" -ne 0 ] || fail "an unsafe Captain’s Call PR URL was accepted"
 
   write_valid_payload "$data"
   jq '.landed = [{
@@ -303,7 +303,7 @@ test_build_refuses_malformed_payloads_before_touching_the_board() {
     "pr_url": "data:text/html,unsafe"
   }]' "$data" > "$data.tmp" && mv "$data.tmp" "$data"
   set +e; out=$(run_board "$home" build "$data" 2>&1); rc=$?; set -e
-  [ "$rc" -ne 0 ] || fail "a non-HTTPS Landed PR URL was accepted"
+  [ "$rc" -ne 0 ] || fail "an unsafe Landed PR URL was accepted"
 
   assert_absent "$board" "a refused payload still produced a board"
   pass "build refuses malformed payloads before touching the board"
@@ -349,6 +349,29 @@ test_build_injects_binds_then_arms() {
   run_procevent "$home" list | awk 'NR > 1 { print $1 }' | grep -Fxq "$sid" \
     || fail "the board source is not registered after build"
   pass "build injects the payload, binds any-origin, then arms the source"
+}
+
+test_build_accepts_plain_http_forgejo_pr_urls() {
+  local home data board
+  home=$(make_home http-pr-urls)
+  data="$home/payload.json"
+  board="$home/.lavish/bearings-board.html"
+  write_valid_payload "$data"
+  jq '.captains_call[1].pr_url = "http://pi4:3001/o/r/pulls/7"
+    | .landed = [{
+      "id":"http-landed",
+      "repo":"sample",
+      "what":"Landed through Forgejo",
+      "owner":"firstmate",
+      "pr_url":"http://pi4:3001/o/r/pulls/8"
+    }]' "$data" > "$data.tmp" && mv "$data.tmp" "$data"
+
+  run_board "$home" build "$data" >/dev/null || fail "plain-http Forgejo PR URLs did not build"
+  extract_payload "$board" | jq -e '
+    .captains_call[1].pr_url == "http://pi4:3001/o/r/pulls/7"
+    and .landed[0].pr_url == "http://pi4:3001/o/r/pulls/8"' >/dev/null \
+    || fail "the built board did not preserve both plain-http Forgejo PR URLs"
+  pass "build accepts plain-http Forgejo PR URLs on cards and landed rows"
 }
 
 test_registration_cannot_consume_before_any_origin_binding() {
@@ -773,6 +796,7 @@ test_path_is_stable_and_home_scoped
 test_build_refuses_malformed_payloads_before_touching_the_board
 test_charted_kind_is_optional_and_accepts_both_values
 test_build_injects_binds_then_arms
+test_build_accepts_plain_http_forgejo_pr_urls
 test_registration_cannot_consume_before_any_origin_binding
 test_build_does_not_bind_or_arm_when_session_start_fails
 test_rebuild_is_idempotent_and_does_not_double_arm
