@@ -829,6 +829,11 @@ cleanup() {
   if [ "$DRAIN_LOCK_HELD" = true ]; then
     fm_lock_release "$FM_WAKE_QUEUE_LOCK"
   fi
+  # Every drain is a supervision wake, so redraw the opt-in Projects view; the
+  # refresh is detached and never fails or slows the drain.
+  if [ -f "${FM_CONFIG_OVERRIDE:-$FM_HOME/config}/projects.json" ]; then
+    "$SCRIPT_DIR/fm-projects-view.sh" refresh >/dev/null 2>&1 || true
+  fi
   exit "$status"
 }
 

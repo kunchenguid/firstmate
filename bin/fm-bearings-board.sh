@@ -35,16 +35,8 @@
 #            shrinking Captain's Call.
 # path       Print the stable board path for this home.
 #
-# A LIVE SESSION IS PROVED, NEVER ASSUMED. `lavish-axi <file>` exits 0 even
-# when it refuses to reopen a session the captain ended from the browser,
-# reporting `status: user-ended` with the same session id, so exit status alone
-# cannot tell a live board from a dead one. build requires the server's fresh
-# session listing to show the canonical board open and refuses rather than
-# arming an ended session. After a reopen it retires the pre-reopen source
-# generation through the guarded adapter path, arms a fresh registration, and
-# accepts only the replacement listener as live. A registered board with no
-# live owner also gets a replacement before build returns, because
-# `already-armed` is not the same fact as `listening`.
+# Serving, live-session proof, binding, and arming are owned by
+# bin/fm-lavish-board-lib.sh, which the Projects view shares.
 #
 # CAPTAIN'S CALL HYGIENE. A decision card is dropped when its work item, PR, or
 # structured artifact/version subject appears among the payload's own landed
@@ -91,6 +83,8 @@ set -eu
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-$FM_ROOT}"
+# shellcheck source=bin/fm-lavish-board-lib.sh
+. "$SCRIPT_DIR/fm-lavish-board-lib.sh"
 
 TEMPLATE="${FM_BEARINGS_BOARD_TEMPLATE:-$SCRIPT_DIR/../.agents/skills/bearings/assets/board-template.html}"
 PLACEHOLDER='__FM_BEARINGS_BOARD_DATA__'
@@ -204,69 +198,6 @@ validate_payload() {  # <data.json>
   ' "$1" >/dev/null
 }
 
-# --- Lavish session liveness -------------------------------------------------
-# Verified against lavish-axi 0.1.61. `lavish-axi <file>` EXITS 0 even when it
-# refuses to reopen a session the captain ended from the browser, reporting
-# `status: user-ended` and the same session id, so an exit-code check alone
-# cannot tell a live board from a dead one. The establish status is an initial
-# signal only; the server's fresh session listing must also show the canonical
-# board open before the build may bind or arm its source.
-
-board_realpath() {  # <board>
-  perl -MCwd=realpath -e '$p = realpath($ARGV[0]); defined($p) or exit 1; print "$p\n"' "$1" 2>/dev/null
-}
-
-lavish_status_field() {  # <lavish-axi output>
-  printf '%s\n' "$1" | sed -n 's/^[[:space:]]*status:[[:space:]]*//p' | head -1 | tr -d '"'
-}
-
-# The server's own listing, keyed on the canonical artifact path. Rows are
-# `<file>,<status>,"<url>",<pending>`, and only a live session is listed `open`.
-lavish_session_listed_open() {  # <canonical-board-path>
-  local listing
-  listing=$(lavish-axi 2>/dev/null) || return 1
-  printf '%s\n' "$listing" | awk -v path="$1" '
-    { line = $0; sub(/^[[:space:]]+/, "", line) }
-    index(line, path ",") == 1 {
-      rest = substr(line, length(path) + 2)
-      split(rest, field, ",")
-      if (field[1] == "open") { found = 1 }
-    }
-    END { exit found ? 0 : 1 }
-  '
-}
-
-lavish_board_live() {  # <establish output> <canonical-board-path>
-  lavish_session_listed_open "$2"
-}
-
-# Establish the board session and PROVE it is live before anything arms a poll
-# on it. A session the captain ended is reopened once - the captain asked for
-# this board, which is exactly the attention `--reopen` exists for - and a
-# session that is still not live after that refuses the build rather than
-# arming a poll that can never attach.
-establish_board_session() {  # <board>
-  local board=$1 real out status version
-  BOARD_SESSION_REOPENED=0
-  real=$(board_realpath "$board") || fail "cannot resolve the board path: $board"
-  out=$(lavish-axi "$board") || fail "cannot establish the board Lavish session"
-  printf '%s\n' "$out"
-  if lavish_board_live "$out" "$real"; then
-    printf 'session: live\n'
-    return 0
-  fi
-  out=$(lavish-axi "$board" --reopen) || fail "cannot reopen the ended board Lavish session"
-  printf '%s\n' "$out"
-  if lavish_board_live "$out" "$real"; then
-    BOARD_SESSION_REOPENED=1
-    printf 'session: reopened\n'
-    return 0
-  fi
-  status=$(lavish_status_field "$out")
-  version=$(lavish-axi --version 2>/dev/null | tr -d '[:space:]')
-  fail "the board Lavish session is not live after reopening it (lavish-axi ${version:-version-unknown} reported status ${status:-none}); refusing to arm a poll on an ended session"
-}
-
 # --- Captain's Call hygiene ---------------------------------------------------
 # A held decision whose subject already shipped is not a live call, so it is
 # dropped here instead of being carded again. All checks use exact structured
@@ -337,28 +268,8 @@ effective_payload() {  # <data.json> <dest.json>
     ]' "$data" > "$dest" || return 1
 }
 
-# The OWNER column bin/fm-procevent.sh already publishes: live, none,
-# orphaned, or uncertain. Empty means the source is not registered at all.
-source_owner() {  # <source-id>
-  "$SCRIPT_DIR/fm-procevent.sh" list 2>/dev/null \
-    | awk -v id="$1" 'NR > 1 && $1 == id { print $3 }'
-}
-
-# A replacement listener is started detached, so it claims the source shortly
-# after reconcile returns. Wait for that claim rather than reporting the race.
-await_source_owner() {  # <source-id>
-  local owner i=0
-  while [ "$i" -lt 50 ]; do
-    owner=$(source_owner "$1")
-    [ "$owner" != live ] || { printf '%s\n' "$owner"; return 0; }
-    sleep 0.1
-    i=$((i + 1))
-  done
-  printf '%s\n' "${owner:-none}"
-}
-
 command_build() {
-  local data=${1-} board json tmp sid extracted effective owner version pre_reopen_owner
+  local data=${1-} board json tmp extracted effective
   [ "$#" -eq 1 ] || { usage >&2; exit 2; }
   command -v jq >/dev/null 2>&1 || fail "jq is required"
   [ -f "$data" ] || fail "board data does not exist: $data"
@@ -405,50 +316,7 @@ command_build() {
   fi
   printf 'board: %s\n' "$board"
 
-  command -v lavish-axi >/dev/null 2>&1 || fail "lavish-axi is not installed"
-  sid=$("$SCRIPT_DIR/fm-procevent-lavish.sh" source-id "$board") \
-    || fail "cannot derive the board source id"
-  pre_reopen_owner=$(source_owner "$sid")
-  establish_board_session "$board"
-  if [ "$BOARD_SESSION_REOPENED" = 1 ]; then
-    "$SCRIPT_DIR/fm-procevent-lavish.sh" retire "$board" >/dev/null \
-      || fail "cannot retire the pre-reopen source generation (observed owner: ${pre_reopen_owner:-none})"
-  fi
-  if ! lavish_session_listed_open "$(board_realpath "$board")"; then
-    version=$(lavish-axi --version 2>/dev/null | tr -d '[:space:]')
-    fail "the board Lavish session is not listed open immediately before arming (lavish-axi ${version:-version-unknown}); refusing to arm a poll on observed state not-open"
-  fi
-  printf 'served: %s\n' "$board"
-
-  "$SCRIPT_DIR/fm-captain-hold.sh" bind "$sid" >/dev/null \
-    || fail "cannot bind the board source to the keyed-answer intake"
-  printf 'bound: %s\n' "$sid"
-
-  owner=$(source_owner "$sid")
-  if [ "$BOARD_SESSION_REOPENED" = 1 ]; then
-    "$SCRIPT_DIR/fm-procevent-lavish.sh" arm "$board" >/dev/null \
-      || fail "cannot arm a fresh board source after reopening"
-    printf 'armed: %s\n' "$sid"
-    owner=$(source_owner "$sid")
-  elif [ -n "$owner" ]; then
-    printf 'already-armed: %s\n' "$sid"
-  else
-    "$SCRIPT_DIR/fm-procevent-lavish.sh" arm "$board" >/dev/null \
-      || fail "cannot arm the board as a process-event source"
-    printf 'armed: %s\n' "$sid"
-    owner=$(source_owner "$sid")
-  fi
-  # Registered is not listening. A board whose source has no live owner gets a
-  # replacement started now rather than at the next supervision cycle, which is
-  # what keeps a rebuilt board from sitting silent behind `already-armed`.
-  if [ "$owner" != live ]; then
-    "$SCRIPT_DIR/fm-procevent.sh" reconcile >/dev/null 2>&1 || true
-    owner=$(await_source_owner "$sid")
-    if [ "$owner" != live ]; then
-      fail "source $sid is not listening after reconcile (observed owner: ${owner:-none})"
-    fi
-    printf 'listening: live\n'
-  fi
+  fm_lavish_board_serve "$board"
 }
 
 case "${1-}" in

@@ -11,7 +11,7 @@ Start with the directory layout, then use the setting reference for the behavior
 | Task windows and worker tools | [Runtime backend](#runtime-backend-configbackend--fm_backend) and [harness support](#harness-support) |
 | Worker permissions, accounts, or environment | [Codex approval review](#codex-automatic-approval-review), [Claude permission mode](#claude-permission-mode-configclaude-permission-mode), [Codex permission mode](#codex-permission-mode-configcodex-permission-mode), [persistent managed-policy failover](#persistent-managed-policy-failover), [worker account pin](#worker-account-pin-configclaude-account-configpi-account), [several Claude accounts](#several-claude-accounts-configclaude-accounts), [worker tool exclusions](#worker-tool-exclusions-configcrew-exclude-tools), [worker launch environment](#worker-launch-environment-configlaunch-env-allowlist), and its [Orca environment source](#orca-environment-source-configlaunch-env-tmux-session) |
 | Backlog, preferences, and memory | [Backlog backend](#backlog-backend-taskstoml--configbacklog-backend), [captain preferences](#captain-preferences-datacaptainmd--datacaptain-sharedmd), [external memory tiers](#external-memory-tiers-memory-layering-section), [record export](#record-export-configrecord-export-root), and [startup memory budget](#startup-memory-budget-configstartup-memory-budget) |
-| Supervision and presentation | [Pi supervision branch](#pi-supervision-branch), [supervision host](#supervision-host-configsupervision-host), [Codex native Stop park](#codex-native-stop-park-configcodex-stop-park), [warm-cache compaction](#warm-cache-compaction-configwarm-compact), and [Calm preference](#calm-preference-configcalm) |
+| Supervision and presentation | [Pi supervision branch](#pi-supervision-branch), [supervision host](#supervision-host-configsupervision-host), [Codex native Stop park](#codex-native-stop-park-configcodex-stop-park), [warm-cache compaction](#warm-cache-compaction-configwarm-compact), [Calm preference](#calm-preference-configcalm), and the [Projects view](#projects-view-configprojectsjson) |
 | Persistent secondmates | [Secondmate routes](#secondmate-routes-datasecondmatesmd) |
 | Review bots on owned GitHub pull requests | [Contribution review bots](#contribution-review-bots-configcontribution-review-bots) |
 | Per-run overrides and tuning | [Environment variables](#environment-variables) |
@@ -1787,6 +1787,40 @@ A repository whose config sets `core.hooksPath` to the empty string runs no proj
 When stripping is enabled, the hooks directory is read-only, so a hook manager run inside a fleet pane (lefthook's npm postinstall, `pre-commit install`) fails instead of displacing the strip; install a project's hooks from outside the pane, where the wrappers chain them.
 The flag is a home-wide attribution choice, so it is inherited into secondmate homes under the [`secondmate-provisioning`](../.agents/skills/secondmate-provisioning/SKILL.md) inherited-local-material contract and a secondmate's own workers keep AI trailers too.
 Per-machine Cursor `cli-config.json` attribution-off is not this contract: it does not travel with Firstmate, defaults back to on when unset, and only feeds the CLI's request to the server, so it suppresses the trailer rather than preventing it.
+
+## Projects view (config/projects.json)
+
+The optional local, gitignored `config/projects.json` turns on the Bearings Projects view: one page that tracks the captain's high-level projects and, per project, what needs the captain, what is in progress, what is done, and what is left.
+Without the file nothing builds and nothing refreshes.
+The captain does not edit it by hand; Firstmate applies "add a project", "rename", or "file X under Y" requests to it and runs `bin/fm-projects-view.sh check` afterwards.
+
+```json
+{
+  "schema": "fm-projects.v1",
+  "window_days": 30,
+  "projects": [
+    {"id": "store-launch", "name": "Store launch", "color": "#ef4444",
+     "repos": ["store-app"], "match": ["store-*", "launch-*"]},
+    {"id": "platform", "name": "Platform", "match": ["platform-*"]}
+  ]
+}
+```
+
+| Field | Meaning |
+| --- | --- |
+| `schema` | Always `fm-projects.v1`. |
+| `window_days` | Optional, 1 to 365, default 30: how far back Done reaches. |
+| `projects` | 1 to 50 projects, shown in this order. |
+| `id` | Lowercase slug, unique, at most 64 characters: the project's stable identity. |
+| `name` | Display name, at most 80 characters. |
+| `color` | Optional `#rrggbb` accent; a fixed palette fills it when absent. |
+| `repos` | Optional repo names; a repo listed by exactly one project assigns that repo's work to it. |
+| `match` | Optional task-id globs using `*` and `?`. |
+
+Any other key, a duplicate id, or a malformed value refuses the build rather than dropping a project silently.
+A task joins the first project that claims it, in this order: a `Project: <id>` line in its backlog body, then the first project in file order with a matching `match` glob, then a repo listed by exactly one project.
+Work no project claims is counted in a "Not in a project" tray.
+[`bin/fm-projects-view.sh`](../bin/fm-projects-view.sh) owns the data sources, grouping, page path, and refresh behavior.
 
 ## Project capacity (config/project-capacity)
 

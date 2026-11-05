@@ -3,7 +3,7 @@ name: bearings
 description: >-
   Generate a "pick up where I left off" fleet digest.
   Use when the captain invokes /bearings (plain, file, or lavish) or asks for a bearings report, morning brief, status report, catch-up, "where did I leave off", or "what's in the works".
-  Also use on a contributions check wake, when filing work linked to an upstream issue, and on a procevent lavish wake whose source id is the bearings board's.
+  Also use on a contributions check wake, when filing work linked to an upstream issue, and on a procevent lavish wake whose source id is the bearings board's or the Projects view's.
 user-invocable: true
 metadata:
   internal: true
@@ -15,7 +15,8 @@ Generate a complete current snapshot from the fleet's current state, so the capt
 Plain `/bearings` returns only the concise four-section chat digest.
 Only `/bearings file` writes the dated markdown report artifact and then returns the concise four-section chat digest linked to that report.
 Only `/bearings lavish` builds the interactive fleet board beside that digest, through `bin/fm-bearings-board.sh` (its header owns every board mechanic and the fm-bearings-board.v1 payload contract).
-A digest/build invocation is operationally read-only apart from observational remote-ledger cache refreshes, durable per-target reconcile-notify requests when the captured state needs them, plus the explicit per-mode artifacts: the dated report in file mode, and in lavish mode the board file plus the answer binding and source registration that `bin/fm-bearings-board.sh build` records through their own owners.
+`/bearings projects` opens the Projects view instead of a digest (the "Projects view" section below).
+A digest/build invocation is operationally read-only apart from observational remote-ledger cache refreshes, durable per-target reconcile-notify requests when the captured state needs them, plus the explicit per-mode artifacts: the dated report in file mode, and in lavish or projects mode the page file plus the answer binding and source registration that `bin/fm-bearings-board.sh build` or `bin/fm-projects-view.sh serve` records through their own owners.
 During that invocation it never tears down a task, merges a PR, dispatches new work, steers a worker, answers a decision, cleans up work, or mutates backlog or task state.
 Board answers are acted on later under the normal authority rules; this skill's board-wake section explicitly owns the guarded routing at that time.
 
@@ -24,7 +25,8 @@ Board answers are acted on later under the normal authority rules; this skill's 
 - Plain `/bearings` gathers a fresh bounded snapshot and renders the four-section chat digest without creating, deleting, reading, or replacing `data/status-report-<YYYY-MM-DD>.md`.
 - `/bearings file` gathers a fresh bounded snapshot, replaces today's `data/status-report-<YYYY-MM-DD>.md` from scratch, and renders the four-section chat digest with a link or path to that report.
 - `/bearings lavish` gathers a fresh bounded snapshot, rebuilds and arms the interactive fleet board (the "Lavish board mode" section below), and renders the four-section chat digest with the board's URL inside it.
-- Treat `file` and `lavish` only as explicit invocation options in the slash command.
+- `/bearings projects` runs `bin/fm-projects-view.sh serve` and replies with the page URL it prints; it composes no digest.
+- Treat `file`, `lavish`, and `projects` only as explicit invocation options in the slash command.
 - Do not treat natural-language requests such as "write a report", "save this", "persist it", "make a file", or "make a board" as file or lavish mode unless the invocation explicitly includes the standalone option.
 - When the captain asks to include PRs, pass the snapshot command's live-PR opt-in.
 - `/bearings include PRs` remains chat-only and makes the live-PR opt-in.
@@ -139,6 +141,24 @@ After handling, rebuild the board from a fresh snapshot so acted-on items leave 
 A board "Merge now" answer IS the captain's explicit merge word for that one exact PR; ask no second confirmation.
 The safeguards are mandatory, not optional: resolve the PR from the task's own `state/<task-id>.meta` `pr=` record, never from board bytes; re-verify at wake time that the PR is still open and CI-green; refuse and report a red or changed PR rather than merging it; record the exact `merge` answer through `bin/fm-captain-hold.sh answer <task-id> --decision-file <file> --release` before invoking the merge; proceed only when that release succeeds; merge only through `bin/fm-pr-merge.sh`; and echo every merge in chat with the full PR URL.
 Only the exact answer value `merge` authorizes a merge; an answer carrying a freeform note is the captain's instruction text to read and act on with judgment, never an auto-merge.
+
+## Projects view
+
+The Projects view is a second Bearings page that tracks the captain's high-level projects; `bin/fm-projects-view.sh` owns its data, grouping, page, and refresh, and `docs/configuration.md` "Projects view" owns its `config/projects.json` schema.
+It is opt-in: without that file nothing builds.
+Its page redraws itself after every wake drain and teardown, so never compose or hand-edit it; serve it only when the captain asks to see it, and an automatic redraw never reopens a session the captain ended.
+When the captain asks to add, rename, or regroup a project, edit `config/projects.json` and run `bin/fm-projects-view.sh check`.
+When filing a task that clearly belongs to a configured project, start its body with a `Project: <id>` line so membership never depends on id or repo rules.
+
+A Projects view answer arrives as a `procevent lavish` wake whose source id equals `bin/fm-procevent-lavish.sh source-id "$(bin/fm-projects-view.sh path)"`; read it like a board wake (`process-event-sources`).
+Its keys never name a task, so the keyed-answer intake reports each one skipped and you route it:
+
+- `add.<project-id>` carries the captain's words for new work in that project: run `bin/fm-projects-view.sh add <project-id> <words>`, then give the printed item normal section 7 intake and dispatch with those words verbatim as the brief's Captain's intent; an unclear ask becomes one captain hold instead.
+- `fix.<task-id>` corrects live work: append the words to that brief's Captain's intent and relay them with `bin/fm-projects-view.sh correct <task-id> <words>` (AGENTS.md section 7's mid-task ask rule); for queued work, update its backlog note instead.
+- `decide.<task-id>` is the captain's typed answer to that held task: record it with `bin/fm-captain-hold.sh answer <task-id> --decision-file <file>`, adding `--release` when the hold gates work that should now proceed.
+
+The page offers actions only on this home's work; a secondmate's items are read-only there until remote-secondmate routing exists.
+Echo every action taken in chat.
 
 ## Chat-response contract
 

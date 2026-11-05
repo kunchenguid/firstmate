@@ -1,0 +1,607 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="light dark">
+<title>Projects</title>
+<!--
+  Bearings Projects view. bin/fm-projects-view.sh injects one fm-projects-view.v1
+  model into the data slot below; this page only renders it. Self-contained:
+  system fonts, no network loads. Answers leave only through
+  window.lavish.queuePrompt with fm-bearings-answer.v1 context under the keys
+  add.<project-id>, fix.<task-id>, and decide.<task-id>.
+-->
+<style>
+:root {
+  color-scheme: light dark;
+  --bg: #f5f4f0; --surface: #ffffff; --surface-2: #f1efe9;
+  --ink: #141417; --ink-2: #4b4b53; --ink-3: #85858e;
+  --line: #e7e4dc; --track: #eceae4;
+  --done: #1f8f5b; --moving: #2f66de; --needs: #c27c00; --next: #cdc9bf;
+  --done-soft: #e3f3ea; --moving-soft: #e7eefc; --needs-soft: #fcefd6;
+  --counter: #f5a524; --counter-ink: #1b1300;
+  --shade: rgba(20, 20, 23, 0.07); --scrim: rgba(20, 20, 23, 0.38);
+  --btn: #141417; --btn-ink: #ffffff;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0d0e11; --surface: #16171b; --surface-2: #1e2025;
+    --ink: #f2f2f4; --ink-2: #b6b8c0; --ink-3: #7c7e88;
+    --line: #2a2c33; --track: #262830;
+    --done: #3ec486; --moving: #78a0ff; --needs: #f3b33d; --next: #3b3e47;
+    --done-soft: #13291d; --moving-soft: #18223a; --needs-soft: #33270f;
+    --shade: rgba(0, 0, 0, 0.55); --scrim: rgba(0, 0, 0, 0.6);
+    --btn: #f2f2f4; --btn-ink: #141417;
+  }
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; padding: 0; background: var(--bg); color: var(--ink); }
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  -webkit-font-smoothing: antialiased; line-height: 1.45;
+}
+button, textarea { font: inherit; color: inherit; }
+button { cursor: pointer; }
+[hidden] { display: none !important; }
+
+.wrap { max-width: 1120px; margin: 0 auto; padding: 28px 24px 96px; }
+.top { display: flex; justify-content: space-between; align-items: flex-end; gap: 16px; flex-wrap: wrap; margin-bottom: 24px; }
+.eyebrow { font-size: 13px; font-weight: 700; letter-spacing: 0.14em; text-transform: uppercase; color: var(--ink-3); }
+h1 { font-size: clamp(40px, 7vw, 64px); line-height: 1; letter-spacing: -0.04em; margin: 4px 0 0; font-weight: 750; }
+.updated { font-size: 14px; color: var(--ink-3); display: inline-flex; gap: 8px; align-items: center; }
+.updated::before { content: ""; width: 8px; height: 8px; border-radius: 50%; background: var(--done); box-shadow: 0 0 0 4px var(--done-soft); }
+
+.totals { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; margin-bottom: 22px; }
+.total { background: var(--surface); border: 1px solid var(--line); border-radius: 18px; padding: 16px 18px; display: grid; gap: 2px; }
+.total b { font-size: 40px; line-height: 1; letter-spacing: -0.04em; font-weight: 750; }
+.total span { font-size: 15px; color: var(--ink-2); font-weight: 550; }
+.total--needs b { color: var(--needs); }
+.total--moving b { color: var(--moving); }
+.total--done b { color: var(--done); }
+
+/* counter (C) */
+.count {
+  min-width: 28px; height: 28px; padding: 0 9px; border-radius: 999px; flex: none;
+  display: inline-grid; place-items: center; font-size: 15px; font-weight: 800;
+  background: var(--counter); color: var(--counter-ink);
+}
+.count--zero { background: var(--surface-2); color: var(--ink-3); font-weight: 700; }
+
+/* slider (A) */
+.seg { display: flex; gap: 3px; height: 12px; border-radius: 999px; overflow: hidden; background: var(--track); }
+.seg i { display: block; min-width: 6px; }
+.seg .d { background: var(--done); }
+.seg .m { background: var(--moving); }
+.seg .n { background: var(--counter); }
+.seg .x { background: var(--next); }
+.nums { display: flex; flex-wrap: wrap; gap: 4px 12px; font-size: 13px; font-weight: 600; color: var(--ink-3); }
+.nums span { display: inline-flex; align-items: center; gap: 6px; }
+.nums span::before { content: ""; width: 8px; height: 8px; border-radius: 3px; background: var(--c); }
+
+/* cards (B) */
+.grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; }
+.card {
+  position: relative; text-align: left; width: 100%;
+  background: var(--surface); border: 1px solid var(--line); border-radius: 22px;
+  padding: 18px 18px 16px; display: grid; gap: 12px; align-content: start;
+  box-shadow: 0 1px 2px var(--shade); transition: transform 0.12s ease, box-shadow 0.12s ease;
+}
+.card:hover { transform: translateY(-1px); box-shadow: 0 1px 2px var(--shade), 0 10px 28px var(--shade); }
+.card__open { position: absolute; inset: 0; border: 0; background: transparent; border-radius: 22px; }
+.card__head { display: flex; align-items: flex-start; gap: 12px; }
+.dot { width: 12px; height: 12px; border-radius: 50%; background: var(--pc); flex: none; margin-top: 6px; }
+.card__name { flex: 1; min-width: 0; font-size: 19px; font-weight: 700; letter-spacing: -0.015em; line-height: 1.25; }
+.card__now { font-size: 15px; color: var(--ink-2); margin-top: -6px; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; min-height: 22px; }
+.card__now--quiet { color: var(--ink-3); }
+.card__foot { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.plus {
+  position: relative; z-index: 1; width: 34px; height: 34px; border-radius: 50%; flex: none;
+  border: 1px solid var(--line); background: var(--surface); color: var(--ink-2);
+  display: grid; place-items: center; font-size: 21px; line-height: 1; padding: 0;
+}
+.plus:hover { background: var(--surface-2); }
+
+.tray { margin-top: 22px; background: var(--surface); border: 1px solid var(--line); border-radius: 18px; }
+.tray summary { list-style: none; cursor: pointer; padding: 14px 18px; display: flex; align-items: center; gap: 10px; font-size: 15px; font-weight: 650; color: var(--ink-2); }
+.tray summary::-webkit-details-marker { display: none; }
+.tray .list { border: 0; border-top: 1px solid var(--line); border-radius: 0 0 18px 18px; }
+
+/* detail */
+.back { border: 0; background: none; padding: 6px 0; font-size: 16px; font-weight: 650; color: var(--moving); margin-bottom: 10px; }
+.dhead { display: flex; align-items: center; gap: 12px; margin-bottom: 16px; }
+.dhead h2 { flex: 1; min-width: 0; font-size: clamp(28px, 4.4vw, 38px); line-height: 1.05; letter-spacing: -0.03em; margin: 0; font-weight: 750; }
+.dhead .dot { width: 16px; height: 16px; margin-top: 0; }
+.dhead .count { min-width: 36px; height: 36px; font-size: 18px; }
+.dsum { display: grid; gap: 10px; margin-bottom: 26px; }
+.dsum .seg { height: 14px; }
+.detail { max-width: 760px; margin: 0 auto; }
+.group { margin-bottom: 22px; }
+.group__title { display: flex; align-items: center; gap: 8px; font-size: 13px; font-weight: 800; letter-spacing: 0.1em; text-transform: uppercase; color: var(--ink-3); margin-bottom: 10px; }
+.group__title::before { content: ""; width: 9px; height: 9px; border-radius: 50%; background: var(--c); }
+.group__title b { color: var(--ink-2); font-weight: 800; }
+.list { background: var(--surface); border: 1px solid var(--line); border-radius: 18px; overflow: hidden; }
+.item { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: 12px; align-items: start; padding: 13px 14px 13px 16px; border-top: 1px solid var(--line); }
+.item:first-child { border-top: 0; }
+.item__dot { width: 10px; height: 10px; border-radius: 50%; background: var(--c); margin-top: 6px; }
+.item--moving .item__dot { box-shadow: 0 0 0 4px var(--moving-soft); }
+.item__t { font-size: 16px; font-weight: 600; line-height: 1.3; overflow-wrap: anywhere; }
+.item__s { font-size: 13.5px; color: var(--ink-3); margin-top: 2px; }
+.item--done .item__t { color: var(--ink-2); font-weight: 550; }
+.check { width: 20px; height: 20px; border-radius: 50%; background: var(--done-soft); color: var(--done); display: grid; place-items: center; font-size: 12px; font-weight: 900; margin-top: 1px; }
+.fix { border: 0; font-size: 13px; font-weight: 700; color: var(--moving); padding: 5px 11px; border-radius: 999px; background: var(--moving-soft); white-space: nowrap; }
+.more { display: block; width: 100%; text-align: left; border: 0; background: none; padding: 12px 16px; font-size: 14px; font-weight: 650; color: var(--ink-3); border-top: 1px solid var(--line); }
+.empty { padding: 14px 16px; font-size: 15px; color: var(--ink-3); }
+
+.call { background: var(--surface); border: 1.5px solid var(--needs); border-radius: 20px; padding: 16px; box-shadow: 0 0 0 5px var(--needs-soft); margin-bottom: 12px; }
+.call__q { font-size: 19px; font-weight: 750; line-height: 1.25; letter-spacing: -0.015em; margin: 0 0 6px; overflow-wrap: anywhere; }
+.call__why { font-size: 15px; color: var(--ink-2); margin: 0 0 12px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.call__age { font-size: 12.5px; font-weight: 700; color: var(--needs); margin: -4px 0 10px; }
+.box {
+  width: 100%; min-height: 72px; resize: vertical; font-size: 16px; line-height: 1.4;
+  background: var(--surface-2); border: 1px solid var(--line); border-radius: 14px; padding: 12px 14px; margin: 2px 0 10px;
+}
+.box:focus { outline: none; border-color: var(--moving); box-shadow: 0 0 0 4px var(--moving-soft); }
+.box::placeholder { color: var(--ink-3); }
+.acts { display: flex; align-items: center; gap: 10px; }
+.send { flex: 1; border: 0; font-size: 16px; font-weight: 750; padding: 13px; border-radius: 14px; background: var(--btn); color: var(--btn-ink); }
+.send:disabled { opacity: 0.45; cursor: default; }
+.ghost { border: 0; background: none; font-size: 15px; font-weight: 650; color: var(--ink-3); padding: 10px 6px; }
+.limit { font-size: 12.5px; color: var(--ink-3); white-space: nowrap; }
+.limit--over { color: #d14343; font-weight: 700; }
+.sent { display: inline-flex; gap: 6px; align-items: center; font-size: 14px; font-weight: 700; color: var(--done); }
+.sent::before { content: ""; width: 8px; height: 8px; border-radius: 50%; background: var(--done); }
+.fixbox { padding: 0 14px 14px 38px; background: var(--moving-soft); }
+.item--open { background: var(--moving-soft); }
+
+.addbtn { display: flex; align-items: center; justify-content: center; gap: 10px; width: 100%; border: 0; font-size: 17px; font-weight: 700; padding: 16px; border-radius: 16px; background: var(--btn); color: var(--btn-ink); margin-top: 6px; }
+.addbtn span { font-size: 24px; font-weight: 400; line-height: 0.8; }
+
+/* composer */
+.scrim { position: fixed; inset: 0; background: var(--scrim); z-index: 10; }
+.sheet {
+  position: fixed; left: 50%; bottom: 0; transform: translateX(-50%); z-index: 11;
+  width: min(560px, 100%); background: var(--surface); border-radius: 28px 28px 0 0;
+  padding: 10px 20px calc(22px + env(safe-area-inset-bottom)); box-shadow: 0 -10px 40px var(--shade);
+}
+.sheet__grip { width: 40px; height: 5px; border-radius: 999px; background: var(--next); margin: 0 auto 14px; }
+.sheet h3 { font-size: 24px; margin: 0 0 12px; letter-spacing: -0.025em; font-weight: 750; }
+.chip { display: inline-flex; align-items: center; gap: 8px; padding: 7px 14px 7px 10px; border-radius: 999px; background: var(--surface-2); border: 1px solid var(--line); font-size: 15px; font-weight: 700; margin-bottom: 12px; }
+.chip .dot { margin-top: 0; }
+.sheet .box { min-height: 128px; font-size: 18px; }
+
+.err { padding: 18px; border-radius: 16px; background: var(--needs-soft); color: var(--ink); font-weight: 650; }
+
+@media (max-width: 1000px) {
+  .grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+@media (max-width: 560px) {
+  .wrap { padding: 18px 14px 80px; }
+  .totals { gap: 8px; }
+  .total { padding: 12px 12px; border-radius: 16px; }
+  .total b { font-size: 30px; }
+  .total span { font-size: 13px; }
+  .grid { gap: 10px; }
+  .card { padding: 14px; gap: 10px; border-radius: 20px; }
+  .card__name { font-size: 16px; }
+  .card__now { display: none; }
+  .card__foot { display: none; }
+  .total span { line-height: 1.25; }
+  .dot { display: none; }
+  .card { border-top: 4px solid var(--pc); }
+}
+</style>
+</head>
+<body>
+<script id="projects-data" type="application/json">
+__FM_PROJECTS_VIEW_DATA__
+</script>
+<div class="wrap">
+  <div class="top">
+    <div>
+      <div class="eyebrow">Bearings</div>
+      <h1>Projects</h1>
+    </div>
+    <span class="updated" id="pv-updated"></span>
+  </div>
+  <main id="pv-main"></main>
+</div>
+<div class="scrim" id="pv-scrim" hidden></div>
+<div class="sheet" id="pv-sheet" hidden role="dialog" aria-modal="true" aria-labelledby="pv-sheet-title"></div>
+<script>
+(function () {
+  "use strict";
+  var LIMIT = 512;
+  var DONE_SHOWN = 5;
+  var main = document.getElementById("pv-main");
+  var updated = document.getElementById("pv-updated");
+  var scrim = document.getElementById("pv-scrim");
+  var sheet = document.getElementById("pv-sheet");
+  var data;
+
+  function el(tag, cls, text) {
+    var n = document.createElement(tag);
+    if (cls) n.className = cls;
+    if (text !== undefined && text !== null) n.textContent = String(text);
+    return n;
+  }
+  function bytes(s) {
+    var n = 0;
+    for (var i = 0; i < s.length; i++) {
+      var c = s.charCodeAt(i);
+      if (c < 0x80) n += 1;
+      else if (c < 0x800) n += 2;
+      else if (c >= 0xd800 && c <= 0xdbff) { n += 4; i++; }
+      else n += 3;
+    }
+    return n;
+  }
+  function keyOk(key) { return /^[A-Za-z0-9._-]{1,128}$/.test(key); }
+  function plural(n, one, many) { return n + " " + (n === 1 ? one : many); }
+  function ago(iso) {
+    var t = Date.parse(iso);
+    if (isNaN(t)) return "";
+    var s = Math.max(0, Math.round((Date.now() - t) / 1000));
+    if (s < 60) return "Updated just now";
+    if (s < 3600) return "Updated " + Math.round(s / 60) + " min ago";
+    if (s < 86400) return "Updated " + Math.round(s / 3600) + " h ago";
+    return "Updated " + Math.round(s / 86400) + " d ago";
+  }
+  function when(day) {
+    if (!day) return "";
+    var today = (data.generated || "").slice(0, 10);
+    if (day === today) return "Today";
+    var a = Date.parse(day + "T00:00:00Z"), b = Date.parse(today + "T00:00:00Z");
+    if (!isNaN(a) && !isNaN(b) && b - a === 86400000) return "Yesterday";
+    return day;
+  }
+
+  /* One answer channel for every action on this page. */
+  function send(key, words, label, anchor) {
+    var note = words.trim();
+    if (!note || !keyOk(key) || bytes(note) > LIMIT) return false;
+    if (!(window.lavish && window.lavish.queuePrompt)) return false;
+    window.lavish.queuePrompt(label + ": " + note, {
+      tag: "choice", text: label + " -> " + note, element: anchor,
+      data: { schema: "fm-bearings-answer.v1", question: key, selection: "", note: note }
+    });
+    return true;
+  }
+
+  /* A text box with a byte counter and one send button. */
+  function composer(opts) {
+    var wrapEl = el("div", opts.cls || "");
+    var box = el("textarea", "box");
+    box.placeholder = opts.placeholder;
+    box.rows = opts.rows || 3;
+    wrapEl.appendChild(box);
+    var acts = el("div", "acts");
+    if (opts.onCancel) {
+      var cancel = el("button", "ghost", "Cancel");
+      cancel.type = "button";
+      cancel.addEventListener("click", opts.onCancel);
+      acts.appendChild(cancel);
+    }
+    var limit = el("span", "limit", "");
+    acts.appendChild(limit);
+    var btn = el("button", "send", opts.button);
+    btn.type = "button";
+    btn.disabled = true;
+    acts.appendChild(btn);
+    wrapEl.appendChild(acts);
+    function refresh() {
+      var n = bytes(box.value.trim());
+      btn.disabled = n === 0 || n > LIMIT;
+      limit.textContent = n > LIMIT - 80 ? (LIMIT - n) + " left" : "";
+      limit.className = n > LIMIT ? "limit limit--over" : "limit";
+    }
+    box.addEventListener("input", refresh);
+    btn.addEventListener("click", function () {
+      if (btn.disabled) return;
+      if (send(opts.key, box.value, opts.label, wrapEl)) {
+        var done = el("div", "sent", opts.sentText);
+        wrapEl.textContent = "";
+        wrapEl.appendChild(done);
+        if (opts.onSent) opts.onSent();
+      } else {
+        limit.textContent = "Could not send here";
+        limit.className = "limit limit--over";
+      }
+    });
+    wrapEl.focusBox = function () { try { box.focus(); } catch (e) {} };
+    return wrapEl;
+  }
+
+  function counter(n) {
+    var c = el("span", n > 0 ? "count" : "count count--zero", n);
+    c.setAttribute("aria-label", plural(n, "item needs you", "items need you"));
+    return c;
+  }
+  function slider(counts) {
+    var seg = el("div", "seg");
+    [["d", counts.done], ["m", counts.moving], ["n", counts.needs], ["x", counts.next]].forEach(function (p) {
+      if (p[1] > 0) {
+        var i = el("i", p[0]);
+        i.style.flex = String(p[1]);
+        seg.appendChild(i);
+      }
+    });
+    return seg;
+  }
+  function nums(counts) {
+    var row = el("div", "nums");
+    [["done", counts.done, "--done"], ["in progress", counts.moving, "--moving"],
+     ["need you", counts.needs, "--counter"], ["left", counts.next, "--next"]].forEach(function (p) {
+      if (p[1] > 0) {
+        var s = el("span", "", p[1] + " " + p[0]);
+        s.style.setProperty("--c", "var(" + p[2] + ")");
+        row.appendChild(s);
+      }
+    });
+    return row;
+  }
+
+  /* ---------- add-a-task sheet ---------- */
+  function closeSheet() {
+    sheet.hidden = true;
+    scrim.hidden = true;
+    sheet.textContent = "";
+  }
+  function openSheet(p) {
+    sheet.textContent = "";
+    sheet.appendChild(el("div", "sheet__grip"));
+    var h = el("h3", "", "Add a task");
+    h.id = "pv-sheet-title";
+    sheet.appendChild(h);
+    var chip = el("div", "chip");
+    var d = el("span", "dot");
+    d.style.setProperty("--pc", p.color);
+    chip.appendChild(d);
+    chip.appendChild(el("span", "", p.name));
+    sheet.appendChild(chip);
+    var c = composer({
+      key: "add." + p.id, label: "Add a task to " + p.name, button: "Start",
+      placeholder: "What should happen?", rows: 4,
+      sentText: "Sent. It shows up here once it starts.",
+      onCancel: closeSheet,
+      onSent: function () { setTimeout(closeSheet, 1400); }
+    });
+    sheet.appendChild(c);
+    sheet.hidden = false;
+    scrim.hidden = false;
+    c.focusBox();
+  }
+  scrim.addEventListener("click", closeSheet);
+
+  /* ---------- overview ---------- */
+  function renderOverview() {
+    main.textContent = "";
+    var totals = el("div", "totals");
+    [["needs", data.totals.needs, "need you"], ["moving", data.totals.moving, "in progress"],
+     ["done", data.totals.done, "done · " + data.window_days + " days"]].forEach(function (t) {
+      var box = el("div", "total total--" + t[0]);
+      box.appendChild(el("b", "", t[1]));
+      box.appendChild(el("span", "", t[2]));
+      totals.appendChild(box);
+    });
+    main.appendChild(totals);
+
+    var grid = el("div", "grid");
+    data.projects.forEach(function (p) {
+      var card = el("div", "card");
+      card.style.setProperty("--pc", p.color);
+      var open = el("button", "card__open");
+      open.type = "button";
+      open.setAttribute("aria-label", "Open " + p.name);
+      open.addEventListener("click", function () { go(p.id); });
+      card.appendChild(open);
+      var head = el("div", "card__head");
+      head.appendChild(el("span", "dot"));
+      head.appendChild(el("div", "card__name", p.name));
+      head.appendChild(counter(p.counts.needs));
+      card.appendChild(head);
+      var total = p.counts.done + p.counts.moving + p.counts.needs + p.counts.next;
+      card.appendChild(el("div", p.now ? "card__now" : "card__now card__now--quiet",
+        p.now || (total ? "All done" : "Nothing yet. Add the first task")));
+      card.appendChild(slider(p.counts));
+      var foot = el("div", "card__foot");
+      foot.appendChild(nums(p.counts));
+      var plus = el("button", "plus", "+");
+      plus.type = "button";
+      plus.setAttribute("aria-label", "Add a task to " + p.name);
+      plus.addEventListener("click", function (ev) { ev.stopPropagation(); openSheet(p); });
+      foot.appendChild(plus);
+      card.appendChild(foot);
+      grid.appendChild(card);
+    });
+    main.appendChild(grid);
+
+    var un = data.unassigned;
+    if (un && un.count > 0) {
+      var tray = el("details", "tray");
+      var sum = el("summary", "", "Not in a project");
+      sum.appendChild(counter(un.needs));
+      sum.appendChild(el("span", "limit", plural(un.count, "item", "items")));
+      tray.appendChild(sum);
+      var list = el("div", "list");
+      un.rows.forEach(function (r) {
+        var row = el("div", "item");
+        row.style.setProperty("--c", r.group === "needs" ? "var(--needs)" : r.group === "moving" ? "var(--moving)" : r.group === "done" ? "var(--done)" : "var(--next)");
+        row.appendChild(el("span", "item__dot"));
+        row.appendChild(el("div", "item__t", r.title));
+        row.appendChild(el("span", ""));
+        list.appendChild(row);
+      });
+      if (un.count > un.rows.length) list.appendChild(el("div", "more", (un.count - un.rows.length) + " more"));
+      tray.appendChild(list);
+      main.appendChild(tray);
+    }
+  }
+
+  /* ---------- project detail ---------- */
+  function group(title, color, count, body) {
+    var g = el("section", "group");
+    var t = el("div", "group__title", title + " ");
+    t.style.setProperty("--c", color);
+    t.appendChild(el("b", "", count));
+    g.appendChild(t);
+    g.appendChild(body);
+    return g;
+  }
+  function row(cls, color, title, sub, lead) {
+    var r = el("div", "item " + cls);
+    r.style.setProperty("--c", color);
+    r.appendChild(lead || el("span", "item__dot"));
+    var body = el("div", "");
+    body.appendChild(el("div", "item__t", title));
+    if (sub) body.appendChild(el("div", "item__s", sub));
+    r.appendChild(body);
+    return r;
+  }
+  function elsewhere(it) { return it.local ? "" : "On " + it.home; }
+
+  function renderDetail(p) {
+    main.textContent = "";
+    var page = el("div", "detail");
+    main.appendChild(page);
+    var back = el("button", "back", "‹ Projects");
+    back.type = "button";
+    back.addEventListener("click", function () { go(null); });
+    page.appendChild(back);
+
+    var head = el("div", "dhead");
+    head.style.setProperty("--pc", p.color);
+    head.appendChild(el("span", "dot"));
+    head.appendChild(el("h2", "", p.name));
+    head.appendChild(counter(p.counts.needs));
+    page.appendChild(head);
+    var sum = el("div", "dsum");
+    sum.appendChild(slider(p.counts));
+    sum.appendChild(nums(p.counts));
+    page.appendChild(sum);
+
+
+    /* needs you */
+    var needs = el("div", "");
+    if (!p.needs.length) needs.appendChild(el("div", "list")).appendChild(el("div", "empty", "Nothing needs you"));
+    p.needs.forEach(function (it) {
+      var call = el("div", "call");
+      call.appendChild(el("p", "call__q", it.title));
+      if (it.question) call.appendChild(el("p", "call__why", it.question));
+      if (it.aged && it.age_days !== null && it.age_days !== undefined) call.appendChild(el("p", "call__age", "Waiting " + it.age_days + " days"));
+      if (it.local && keyOk("decide." + it.id)) {
+        call.appendChild(composer({
+          key: "decide." + it.id, label: "Decision on " + it.title, button: "Send",
+          placeholder: "Your answer", rows: 2, sentText: "Sent"
+        }));
+      } else if (!it.local) {
+        call.appendChild(el("div", "item__s", elsewhere(it)));
+      }
+      needs.appendChild(call);
+    });
+    page.appendChild(group("Needs you", "var(--needs)", p.counts.needs, needs));
+
+    /* in progress */
+    var moving = el("div", "list");
+    if (!p.moving.length) moving.appendChild(el("div", "empty", "Nothing in progress"));
+    p.moving.forEach(function (it) {
+      var sub = [it.status, it.since ? "since " + when(it.since) : "", elsewhere(it)].filter(Boolean).join(" · ");
+      var r = row("item--moving", "var(--moving)", it.title, sub);
+      if (it.local && it.correctable && keyOk("fix." + it.id)) {
+        var fix = el("button", "fix", "Correct");
+        fix.type = "button";
+        var box = null;
+        fix.addEventListener("click", function () {
+          if (box) { box.parentNode.removeChild(box); box = null; r.className = "item item--moving"; return; }
+          r.className = "item item--moving item--open";
+          box = composer({
+            cls: "fixbox", key: "fix." + it.id, label: "Correction for " + it.title, button: "Send to this work",
+            placeholder: "What should change?", rows: 3, sentText: "Sent to this work",
+            onCancel: function () { box.parentNode.removeChild(box); box = null; r.className = "item item--moving"; }
+          });
+          if (r.nextSibling) moving.insertBefore(box, r.nextSibling); else moving.appendChild(box);
+          box.focusBox();
+        });
+        r.appendChild(fix);
+      } else {
+        r.appendChild(el("span", ""));
+      }
+      moving.appendChild(r);
+    });
+    page.appendChild(group("In progress", "var(--moving)", p.counts.moving, moving));
+
+    /* done */
+    var done = el("div", "list");
+    if (!p.done.rows.length) done.appendChild(el("div", "empty", "Nothing done in " + data.window_days + " days"));
+    var folded = [];
+    p.done.rows.forEach(function (it, i) {
+      var r = row("item--done", "var(--done)", it.title, [when(it.date), elsewhere(it)].filter(Boolean).join(" · "), el("span", "check", "✓"));
+      r.appendChild(el("span", ""));
+      if (i >= DONE_SHOWN) { r.hidden = true; folded.push(r); }
+      done.appendChild(r);
+    });
+    var hiddenCount = folded.length + p.done.more;
+    if (hiddenCount > 0) {
+      var more = el("button", "more", hiddenCount + " more done");
+      more.type = "button";
+      if (!folded.length) more.disabled = true;
+      more.addEventListener("click", function () {
+        folded.forEach(function (r) { r.hidden = false; });
+        if (p.done.more > 0) { more.textContent = p.done.more + " older not shown"; more.disabled = true; }
+        else more.parentNode.removeChild(more);
+      });
+      done.appendChild(more);
+    }
+    page.appendChild(group("Done", "var(--done)", p.counts.done, done));
+
+    /* left */
+    var next = el("div", "list");
+    if (!p.next.rows.length) next.appendChild(el("div", "empty", "Nothing left"));
+    p.next.rows.forEach(function (it) {
+      var r = row("", "var(--next)", it.title, [it.reason, elsewhere(it)].filter(Boolean).join(" · "));
+      r.appendChild(el("span", ""));
+      next.appendChild(r);
+    });
+    if (p.next.more > 0) next.appendChild(el("div", "more", p.next.more + " more"));
+    page.appendChild(group("Left", "var(--ink-3)", p.counts.next, next));
+
+    var add = el("button", "addbtn");
+    add.type = "button";
+    add.appendChild(el("span", "", "+"));
+    add.appendChild(document.createTextNode(" Add a task"));
+    add.addEventListener("click", function () { openSheet(p); });
+    page.appendChild(add);
+  }
+
+  /* ---------- routing: the open project survives a live reload ---------- */
+  function current() {
+    var m = /^#p=([a-z0-9-]+)$/.exec(window.location.hash || "");
+    if (!m) return null;
+    for (var i = 0; i < data.projects.length; i++) if (data.projects[i].id === m[1]) return data.projects[i];
+    return null;
+  }
+  function render() {
+    var p = current();
+    if (p) renderDetail(p); else renderOverview();
+  }
+  function go(id) {
+    try { window.location.hash = id ? "p=" + id : ""; } catch (e) {}
+    render();
+    try { window.scrollTo(0, 0); } catch (e) {}
+  }
+
+  try {
+    data = JSON.parse(document.getElementById("projects-data").textContent);
+    if (!data || data.schema !== "fm-projects-view.v1") throw new Error("schema");
+    updated.textContent = ago(data.generated);
+    setInterval(function () { updated.textContent = ago(data.generated); }, 30000);
+    window.addEventListener("hashchange", render);
+    render();
+  } catch (e) {
+    main.textContent = "";
+    main.appendChild(el("div", "err", "This page could not be drawn. Ask firstmate to rebuild it."));
+  }
+})();
+</script>
+</body>
+</html>

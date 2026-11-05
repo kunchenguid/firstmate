@@ -421,7 +421,8 @@ family_for_basename() {
       printf '%s\n' afk
       ;;
     fm-bearings-board-render.test.sh|fm-bearings-snapshot.test.sh|fm-contributions.test.sh|\
-    fm-fleet-snapshot-view.test.sh|fm-home-summary-refresh.test.sh)
+    fm-fleet-snapshot-view.test.sh|fm-home-summary-refresh.test.sh|\
+    fm-projects-view.test.sh|fm-projects-view-render.test.sh)
       printf '%s\n' snapshot-bearings
       ;;
     fm-backend-cmux.test.sh|fm-backend-cmux-smoke.test.sh)
@@ -868,6 +869,8 @@ tests/fm-procevent-quota.test.sh 2459
 tests/fm-procevent-when.test.sh 25674
 tests/fm-procevent.test.sh 292297
 tests/fm-project-origin.test.sh 123
+tests/fm-projects-view-render.test.sh 2640
+tests/fm-projects-view.test.sh 8509
 tests/fm-public-followup.test.sh 381564
 tests/fm-quota-array-dispatch-live-e2e.test.sh 50
 tests/fm-quota-choose.test.sh 2860
@@ -1804,6 +1807,14 @@ families_for_changed_path() {
     bin/fm-bearings-snapshot.sh|bin/fm-fleet-snapshot.sh|bin/fm-fleet-view.sh|bin/fm-contributions.sh|bin/fm-contributions.jq|\
     bin/fm-home-summary-refresh.sh)
       printf '%s\n' snapshot-bearings
+      ;;
+    bin/fm-projects-view.sh|.agents/skills/bearings/assets/projects-template.html|tests/assets/projects-render-harness.mjs)
+      printf '%s\n' "__script__:fm-projects-view.test.sh"
+      printf '%s\n' "__script__:fm-projects-view-render.test.sh"
+      ;;
+    bin/fm-lavish-board-lib.sh)
+      printf '%s\n' "__script__:fm-bearings-board.test.sh"
+      printf '%s\n' "__script__:fm-projects-view.test.sh"
       ;;
     bin/fm-install-herdr.sh|bin/fm-install-treehouse.sh|bin/fm-herdr-ci-cleanup.sh)
       printf '%s\n' pure-contract-unit
