@@ -585,6 +585,7 @@
 #                  generated firstmate-worker facet (the project facet layer)
 #     __KIROBIN__   resolved, kiro-verified executable for a kiro launch
 #     __KIROHOME__  firstmate-owned per-task KIRO_HOME dir (hook agent config + trust setting)
+#     __BOBBIN__    resolved Bob executable
 # Verified per-harness turn-end hooks are installed automatically where enabled; some live outside the worktree.
 # A --secondmate launch arms the same semantic busy contract (bin/fm-busy-lib.sh) in THIS
 # parent home for claude, opencode, pi, pi-signed, and omp, so the parent's active-turn
@@ -3030,7 +3031,7 @@ launch_template() {
   # trusted folder, which --trust and fm-bob-trust.sh ensure before launch). The
   # foreign primary markers are cleared because Bob does not clear an inherited
   # CLAUDECODE, and bin/fm-harness.sh must not read a bob worker as its launcher.
-  bob) printf '%s' 'env -u BOB_SESSION -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS bob chat --auto-approve --trust --workspace __WORKTREE__' ;;
+  bob) printf '%s' 'env -u BOB_SESSION -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS __BOBBIN__ chat --auto-approve --trust --workspace __WORKTREE__' ;;
   # grok (Grok Build TUI): a positional prompt starts the supervised interactive
   # session. --always-approve auto-approves every tool execution (verified: the
   # crewmate runs fully autonomously, no permission gate), which an unattended
@@ -3358,7 +3359,7 @@ cortex)
   }
   ;;
 bob)
-  command -v bob >/dev/null || {
+  BOB_BIN=$(command -v bob) || {
     echo "error: bob executable not found on PATH; install it or select a different verified harness" >&2
     exit 1
   }
@@ -7649,6 +7650,7 @@ cortex)
   LAUNCH=${LAUNCH//__CORTEXPLUGIN__/"$(shell_quote "$STATE_REAL/$ID.cortex-plugin")"}
   ;;
 agy) LAUNCH=${LAUNCH//__AGYBIN__/"$(shell_quote "$AGY_BIN")"} ;;
+bob) LAUNCH=${LAUNCH//__BOBBIN__/"$(shell_quote "$BOB_BIN")"} ;;
 opencode)
   # The resolved absolute path probed for the version gate above, so the pane
   # runs exactly the binary whose major was recorded. An unresolved executable

@@ -214,7 +214,8 @@ test_bob_launch_then_send_is_verified() {
   assert_contains "$out" "spawned $id harness=bob" "bob spawn did not report success"
 
   launch=$(cat "$CASE_DIR/launch.log")
-  assert_contains "$launch" "bob chat --auto-approve --trust --workspace" "bob launch lost its interactive flags"
+  assert_contains "$launch" "'$FAKEBIN_DIR/bob' chat --auto-approve --trust --workspace" \
+    "bob launch must run the executable its preflight resolved, with its interactive flags"
   assert_contains "$launch" "env -u BOB_SESSION -u CLAUDECODE" "bob launch did not strip BOB_SESSION and foreign markers"
   assert_not_contains "$launch" "launch-brief" "bob launch carried a brief doorbell as a positional argument"
   assert_not_contains "$launch" "encode launch-brief" "bob launch carried a positional brief"

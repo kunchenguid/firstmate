@@ -8,7 +8,7 @@ A Bob session is recognized for harness detection and the session lock so firstm
 
 | Fact | Value |
 |---|---|
-| Launch | Bare `bob chat --auto-approve --trust --workspace <worktree>`: `bob chat` has no positional prompt, so the brief is delivered after the TUI attaches, the kimi/rovo launch-then-send shape (see "Launch and readiness"). |
+| Launch | `<bob> chat --auto-approve --trust --workspace <worktree>` with the executable the preflight resolved, because a pane daemon's `PATH` can differ from firstmate's: `bob chat` has no positional prompt, so the brief is delivered after the TUI attaches, the kimi/rovo launch-then-send shape (see "Launch and readiness"). |
 | Models and effort | No `--model` or `--effort` flag; both axes are recorded in task metadata and never reach the launch command. |
 | Trust | `--auto-approve` and workspace hooks are silently suppressed in an untrusted folder, so `../../../bin/fm-spawn.sh` pre-registers the worktree in `~/.bob/trustedFolders.json` through `../../../bin/fm-bob-trust.sh` and refuses the spawn if that fails. |
 | Busy state | `bob-hook`, bob's only state source: the per-task `.bob/settings.json` in the worktree carries a `UserPromptSubmit` hook that opens a turn and a `Stop` hook that closes it and keeps the turn-ended touch. Bob has no `StopFailure` or `SessionEnd` equivalent, so an abnormal turn end leaves the record busy until the next prompt; `../../../bin/fm-busy-lib.sh` owns the disclosure. |
