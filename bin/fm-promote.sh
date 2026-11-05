@@ -247,7 +247,10 @@ if [ -n "$PROMOTE_PROJECT" ]; then
 fi
 BASE_BRANCH=$(sed -n 's/^base_branch=//p' "$META" | head -n 1)
 fm_base_branch_valid "$BASE_BRANCH" "$MODE" "$FORGE" "fm-promote.sh $ID" || exit 1
-PROMOTE_EXPECTED_BASE=$(fm_pr_expected_base "$META" 2>/dev/null || true)
+PROMOTE_EXPECTED_BASE=
+if [ "$MODE" != local-only ]; then
+  PROMOTE_EXPECTED_BASE=$(fm_pr_expected_base "$META" 2>/dev/null || true)
+fi
 # The same self-repository publication gate bin/fm-spawn.sh applies to a fresh
 # ship spawn runs here on the recorded project: a promoted scout reaches no
 # greater upstream authority than the spawn path would grant.

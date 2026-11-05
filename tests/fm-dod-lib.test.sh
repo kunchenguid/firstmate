@@ -463,6 +463,41 @@ EOF
   pass "promotion keeps a scout's recorded base branch and refuses local-only for it"
 }
 
+test_promotion_default_base_matches_delivery_mode() {
+  local home id meta out status mode surface
+  home="$TMP_ROOT/promote-default-base-home"
+  for mode in local-only direct-PR no-mistakes; do
+    id="promote-default-$mode"
+    meta="$home/state/$id.meta"
+    mkdir -p "$home/state" "$home/data/$id"
+    printf 'window=fm-%s\nkind=scout\nworktree=/tmp/wt\nexpected_base=main\n' "$id" > "$meta"
+    cat > "$home/data/$id/brief.md" <<'EOF'
+# Task
+## Captain's intent
+Fix the hub bug.
+
+## Firstmate spec
+Reproduce it first.
+EOF
+    out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$ROOT/bin/fm-promote.sh" "$id" --mode "$mode" --yolo off 2>&1)
+    status=$?
+    expect_code 0 "$status" "$mode promotion with a pinned default base should succeed"$'\n'"$out"
+    assert_grep 'expected_base=main' "$meta" "$mode promotion changed the task-owned pin"
+    assert_grep "mode=$mode" "$meta" "$mode promotion did not record its delivery mode"
+    assert_grep 'kind=ship' "$meta" "$mode promotion did not complete the scout transition"
+    for surface in ship-instructions.md brief.md; do
+      if [ "$mode" = local-only ]; then
+        assert_no_grep 'Expected PR base:' "$home/data/$id/$surface" \
+          "local-only $surface advertised a PR destination"
+      else
+        assert_grep 'Expected PR base: main' "$home/data/$id/$surface" \
+          "$mode $surface omitted the task-owned destination"
+      fi
+    done
+  done
+  pass "default-base promotion emits a PR destination only for publishing modes"
+}
+
 test_canonical_pr_requires_destination_metadata() {
   local repo wt reason rc
   repo="$TMP_ROOT/unknown-destination-repo"
@@ -498,6 +533,7 @@ test_non_done_lines_are_not_gated
 test_fenced_and_indented_captain_lines_are_not_intent
 test_pr_based_dod_draft_check_uses_gh_axi
 test_promotion_keeps_the_recorded_base_branch
+test_promotion_default_base_matches_delivery_mode
 
 # The launch role is the generated text a worker receives. It must keep the
 # skill name, so a session that registers the skill loads it by name, and must
