@@ -906,11 +906,12 @@ _fm_decision_fold_line() {  # <open-set> <status-line> <resolve-verb> <held-verb
 # most-recently-opened-last order; prints nothing when none are open. Reads the
 # status file, plus its sibling `.meta` for the task kind the terminal rule needs
 # when the caller passes no <kind>; no globals beyond the optional
-# FM_CLASSIFY_RESOLVE_VERB override. This is the durable open-set the fleet
-# snapshot and any point-in-time consumer must use instead of trusting the last
-# status line. A raw-epoch line (_fm_status_raw_epoch_verb) folds as nothing
-# and is reported on stderr as "<file>:<line>: malformed status line ..." so the
-# declaration it carries can be repaired instead of vanishing.
+# FM_CLASSIFY_RESOLVE_VERB and FM_CLASSIFY_CAPTAIN_HELD_VERB overrides. This is
+# the durable open-set the fleet snapshot and any point-in-time consumer must
+# use instead of trusting the last status line. A raw-epoch line
+# (_fm_status_raw_epoch_verb) folds as nothing and is reported on stderr as
+# "<file>:<line>: malformed status line ..." so the declaration it carries can
+# be repaired instead of vanishing.
 # The scan_open_decisions wrapper below enumerates a whole directory rather than
 # a single caller-chosen path, so a status file that is itself a symlink (e.g.
 # escaping the state directory) is rejected outright with a plain [ -L ] check
