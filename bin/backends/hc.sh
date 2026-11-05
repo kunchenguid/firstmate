@@ -394,9 +394,13 @@ fm_backend_hc_placement_config() {  # <file>
     echo "error: $file: claude-config '$claude_config' must be an absolute path without '.', '..', quotes, or control characters" >&2
     return 2
   fi
+  # shellcheck disable=SC2034 # callers consume the parsed placement
   FM_BACKEND_HC_PLACE_MACHINE=$machine
+  # shellcheck disable=SC2034 # callers consume the parsed placement
   FM_BACKEND_HC_PLACE_FIRSTMATE_AS=$as
+  # shellcheck disable=SC2034 # callers consume the parsed placement
   FM_BACKEND_HC_PLACE_PROJECTS=$projects
+  # shellcheck disable=SC2034 # callers consume the parsed placement
   FM_BACKEND_HC_PLACE_CLAUDE_CONFIG=$claude_config
   return 0
 }
@@ -436,7 +440,6 @@ fm_backend_hc_b64_decode() {  # <text> <file>
 # is not base64, or an answer that is not hc's exec result - prints the reason
 # and returns 255, which no caller reads as an answer. <cwd> is `-` for that
 # machine's home.
-FM_BACKEND_HC_EXEC_FAILED=255
 fm_backend_hc_remote_exec() {  # <session> <machine> <timeout-secs> <cwd|-> <argv...>
   local session=$1 machine=$2 timeout=$3 cwd=$4 out err_file out_file fields code signal timed_out truncated
   local -a cwd_args=()
