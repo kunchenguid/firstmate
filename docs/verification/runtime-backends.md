@@ -3662,9 +3662,9 @@ The portable park suite exercises registration and capability through a compiled
 The real installed CLI guard checks hook flags and native Stop response parsing in isolated app-server fixtures; it does not prove a resumed TUI's watcher cycle.
 The CLI emitted a nonfatal stale arg0 cleanup warning (`Cross-device link`) during the guard.
 A separate functional trial on 2026-11-05 with real `codex-cli 0.166.0` completed resumed startup, native queued worker-report delivery, primary handling and acknowledgement, and automatic next-Stop rearm.
-That trial used additional local startup/ancestry, cleanup-lock, and resume-registration patches absent from this upstream change.
+That trial included the ancestry fix described above, plus additional local cleanup-lock and resume-registration patches absent from this upstream change.
 It validates that local composition on 0.166.0, not the minimum-version comparison alone, every newly admitted release, or long-duration stability.
-The upstream ancestry reach and resume-registration behavior remain unchanged and do not inherit that trial's live resume guarantee.
+The ancestry fix makes the native SessionStart hook reach the Codex process; resume-registration behavior remains unchanged and does not inherit that trial's live resume guarantee.
 
 ## hc
 
