@@ -7,16 +7,16 @@
 #   fm-inactive-reconcile.sh acknowledge <fingerprint>
 #
 # This is an adjunct to the existing watcher poll loop and session-start path,
-# not a watcher, daemon, PR poll, or forge client of its own.
+# not a watcher, daemon, or PR poll of its own.
 # In a secondmate home every `scan` invocation, which is every watcher poll,
 # first runs the LEDGER-FIRST parent delivery: a direct child whose status
 # ledger ends in a whole `done:` or `failed:` line has stated its own outcome,
-# so that line is published on the parent channel at once through
+# so that line is eligible for publication on the parent channel through
 # bin/fm-parent-channel-lib.sh from this unstamped payload:
 #   <state> [key=child-outcome-<child>-<state>-<fp8>]: child <child> <state>: <note> [pr=<url>] [mode=<mode>] [yolo=<posture>] [report=data/<child>/report.md]
 # carrying the child's recorded PR, delivery mode, merge posture, and scout
 # report pointer, without consulting fm-crew-state.sh. A ship `done:` is
-# published only when bin/fm-dod-lib.sh accepts the named head, so an
+# published only when bin/fm-dod-lib.sh accepts its readiness proof, so an
 # unpushed copy is not reported upstream as ready. The cadence path uses
 # fm-crew-state.sh, which applies the same gate: a no-mistakes
 # pre-validation `done: {summary}` still reads done (the pipeline handoff),
@@ -38,9 +38,11 @@
 # The cadence-gated scan below then evaluates at most once per
 # FM_INACTIVE_RECONCILE_SECS (default 900, valid 60..1800) per home, except
 # that --startup performs the same scan immediately in the locked session
-# start's deferred worker. Each scan uses an aggregate
-# FM_INACTIVE_RECONCILE_BUDGET_SECS deadline (default 10, valid 1..30) and
-# resumes after its last visited child on the next scan.
+# start's deferred worker. Ledger delivery and the cadence scan share one
+# FM_INACTIVE_RECONCILE_BUDGET_SECS deadline (default 10, valid 1..30).
+# When the cadence scan is due, ledger delivery stops one whole-second tick
+# before that deadline to leave room for the cadence scan's first visit.
+# Each pass resumes after its own last visited child on its next invocation.
 # The scan enforces that budget itself through a whole-second deadline, and the
 # first due child of every scan is always visited with at least a one-second
 # state-read bound: whole-second arithmetic can otherwise round a small budget
@@ -112,10 +114,11 @@
 # busy, or whose spawn_gen epoch is later than the last status line's [at=]
 # epoch (a newer incarnation; an unknown epoch counts as not newer).
 #
-# The scan reads only durable local state, fm-crew-state.sh, and one endpoint
+# The cadence path reads durable local state, fm-crew-state.sh, and one endpoint
 # liveness and busy read per terminal candidate, bounded by the scan budget left
-# after the crew-state read; it never invokes
-# gh, gh-axi, curl, fm-pr-check.sh, fm-pr-poll.sh, or a state *.check.sh.
+# after the crew-state read. Both paths can make live forge reads through
+# bin/fm-dod-lib.sh's bounded destination check when verifying ship readiness.
+# Neither path runs fm-pr-check.sh, fm-pr-poll.sh, or a state *.check.sh.
 set -u
 export LC_ALL=C
 
