@@ -6190,15 +6190,14 @@ SH
   printf '%s\n' "$path"
 }
 
-test_eventwait_connects_to_long_socket_path() {
-  local reader tmp_root
-  command -v python3 >/dev/null 2>&1 || {
-    echo "skip: python3 not found (required by the event subscriber)"
-    return 0
-  }
-  reader="$ROOT/bin/backends/herdr-eventwait.py"
-  tmp_root="$TMP_ROOT"
-  EVENTWAIT_READER="$reader" EVENTWAIT_TMP_ROOT="$tmp_root" python3 - <<'PY' || fail "eventwait could not connect over a long socket path"
+# eventwait_subscribes_over_socket <mode>: start a throwaway AF_UNIX listener
+# whose absolute path is past the 104-byte limit, then run herdr-eventwait.py
+# against it and require the subscription acknowledgement. <mode> picks how the
+# reader names the socket: "absolute" passes the full path; "relative-down"
+# runs from an ancestor directory and passes a descending relative path;
+# "relative-up" runs from a child directory and passes "../herdr.sock".
+eventwait_subscribes_over_socket() {  # <mode>
+  EVENTWAIT_READER="$ROOT/bin/backends/herdr-eventwait.py" EVENTWAIT_TMP_ROOT="$TMP_ROOT" EVENTWAIT_MODE=$1 python3 - <<'PY'
 import os
 import subprocess
 import sys
@@ -6206,6 +6205,7 @@ import tempfile
 
 reader = os.environ["EVENTWAIT_READER"]
 tmp_root = os.environ["EVENTWAIT_TMP_ROOT"]
+mode = os.environ["EVENTWAIT_MODE"]
 listener_code = r'''
 import json
 import os
@@ -6243,6 +6243,17 @@ with tempfile.TemporaryDirectory(dir=tmp_root, prefix="eventwait-socket-") as ba
     socket_path = os.path.join(socket_dir, socket_name)
     if len(os.fsencode(socket_path)) <= 104:
         raise AssertionError(f"test socket path is not deep enough: {socket_path!r}")
+    if mode == "absolute":
+        client_cwd, socket_arg = None, socket_path
+    elif mode == "relative-down":
+        client_cwd = base
+        socket_arg = os.path.relpath(socket_path, base)
+    elif mode == "relative-up":
+        client_cwd = os.path.join(socket_dir, "child")
+        os.mkdir(client_cwd)
+        socket_arg = os.path.join("..", socket_name)
+    else:
+        raise AssertionError(f"unknown mode: {mode!r}")
 
     listener = subprocess.Popen(
         [sys.executable, "-c", listener_code, socket_dir, socket_name],
@@ -6256,7 +6267,8 @@ with tempfile.TemporaryDirectory(dir=tmp_root, prefix="eventwait-socket-") as ba
             error = listener.stderr.read()
             raise AssertionError(f"listener did not start: {ready!r} {error!r}")
         client = subprocess.run(
-            [sys.executable, reader, socket_path, "1.0", "pane-1"],
+            [sys.executable, reader, socket_arg, "1.0", "pane-1"],
+            cwd=client_cwd,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
@@ -6265,7 +6277,7 @@ with tempfile.TemporaryDirectory(dir=tmp_root, prefix="eventwait-socket-") as ba
         )
         if client.returncode != 0:
             raise AssertionError(
-                f"eventwait failed for a long socket path: rc={client.returncode} "
+                f"eventwait failed for {mode} socket {socket_arg!r}: rc={client.returncode} "
                 f"stdout={client.stdout!r} stderr={client.stderr!r}"
             )
         if client.stdout != "@subscribed\n":
@@ -6279,23 +6291,25 @@ with tempfile.TemporaryDirectory(dir=tmp_root, prefix="eventwait-socket-") as ba
             listener.terminate()
             listener.wait(timeout=5)
 PY
-  pass "herdr-eventwait.py connects to a throwaway AF_UNIX listener beyond the 104-byte path limit"
 }
 
-test_eventwait_rejects_a_relative_socket_path() {
-  local out rc
+test_eventwait_connects_to_long_socket_path() {
   command -v python3 >/dev/null 2>&1 || {
     echo "skip: python3 not found (required by the event subscriber)"
     return 0
   }
-  out=$(cd "$TMP_ROOT" && python3 "$ROOT/bin/backends/herdr-eventwait.py" herdr.sock 1 pane-1 2>&1)
-  rc=$?
-  [ "$rc" -eq 2 ] || fail "eventwait accepted a relative socket path: rc=$rc out=$out"
-  case "$out" in
-    *"must be absolute"*) ;;
-    *) fail "eventwait did not name the absolute-path rule: $out" ;;
-  esac
-  pass "herdr-eventwait.py refuses a relative socket path"
+  eventwait_subscribes_over_socket absolute || fail "eventwait could not connect over a long socket path"
+  pass "herdr-eventwait.py connects to a throwaway AF_UNIX listener beyond the 104-byte path limit"
+}
+
+test_eventwait_connects_to_relative_socket_path() {
+  command -v python3 >/dev/null 2>&1 || {
+    echo "skip: python3 not found (required by the event subscriber)"
+    return 0
+  }
+  eventwait_subscribes_over_socket relative-down || fail "eventwait could not connect over a descending relative socket path"
+  eventwait_subscribes_over_socket relative-up || fail "eventwait could not connect over a ../ relative socket path"
+  pass "herdr-eventwait.py resolves relative socket paths against its working directory"
 }
 
 set_fake_agent() {  # <agent-dir> <window-or-pane> <status>
@@ -6844,7 +6858,7 @@ test_wait_transition_reader_failure_returns_2
 test_wait_transition_bad_ack_returns_2_and_cleans_up
 test_wait_transition_clean_timeout_returns_1
 test_eventwait_connects_to_long_socket_path
-test_eventwait_rejects_a_relative_socket_path
+test_eventwait_connects_to_relative_socket_path
 test_canonical_socket_path_folds_a_windows_drive_letter_spelling
 test_canonical_socket_path_refuses_a_failed_cygpath
 test_canonical_socket_path_refuses_empty_cygpath_output
