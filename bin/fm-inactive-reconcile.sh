@@ -540,9 +540,9 @@ report_child_ledger_locked() { # <id> <meta>
       && fm_pr_url_parse "$url" && ! fm_pr_expected_base "$meta" >/dev/null 2>&1; then
       note=$("$SCRIPT_DIR/fm-pr-poll.sh" --base-unavailable "$meta") || return 1
       if [ -n "$note" ]; then
-        outcome_key="child-pr-base-$id-$(cat "${meta%.meta}.pr-base-notified")"
+        outcome_key="child-pr-base-$id-$(cat "${meta%.meta}.pr-base-parent-notified")"
         if ! fm_parent_channel_report "$FM_HOME" "$STATE" "blocked [key=$outcome_key]: $note"; then
-          rm -f -- "${meta%.meta}.pr-base-notified"
+          rm -f -- "${meta%.meta}.pr-base-parent-notified"
           return 1
         fi
       fi

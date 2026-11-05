@@ -21,7 +21,7 @@ LC_ALL=C
 export LC_ALL
 
 base_unavailable_notice() {
-  local meta=${1:-} id marker state
+  local meta=${1:-} suffix=${2:-pr-base-notified} id marker state
   case "$meta" in *.meta) ;; *) return 1 ;; esac
   id=${meta##*/}
   id=${id%.meta}
@@ -29,14 +29,14 @@ base_unavailable_notice() {
   state=${meta%/*}
   [ "$state" != "$meta" ] || state=.
   [ -d "$state" ] && [ ! -L "$state" ] || return 1
-  marker=${meta%.meta}.pr-base-notified
+  marker=${meta%.meta}.$suffix
   (umask 077; set -C; printf '%s-%s\n' "$$" "$RANDOM" > "$marker") 2>/dev/null || return 0
   printf 'task %s merge/readiness refused: expected PR base unavailable. Follow bin/fm-pr-check.sh recovery steps.\n' "$id"
 }
 
 meta=
 if [ "$#" -eq 2 ] && [ "$1" = --base-unavailable ]; then
-  base_unavailable_notice "$2"
+  base_unavailable_notice "$2" pr-base-parent-notified
   exit "$?"
 elif { [ "$#" -eq 7 ] || [ "$#" -eq 8 ]; } && [ "$1" = --validated ]; then
   provider=$2

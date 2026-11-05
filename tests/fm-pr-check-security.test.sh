@@ -4279,6 +4279,75 @@ test_legacy_poll_notices_once_until_rearmed() {
   pass 'legacy polls wake once without merge proof and reset their notice on re-arm'
 }
 
+test_legacy_notice_audiences_are_independent() {
+  local dir state replies route order cycle
+  for route in local remote; do
+    for order in ledger-first watcher-first; do
+      dir=$(make_case "legacy-audiences-$route-$order")
+      state="$dir/home/state"
+      seed_secondmate_home "$dir" "$route"
+      replies="$state/parent-replies.status"
+      if [ "$route" = local ]; then
+        mkdir -p "$dir/parent/state"
+        printf 'parent_home=%s\n' "$dir/parent" >> "$dir/home/.fm-secondmate-parent"
+        replies="$dir/parent/state/mate-x.status"
+      fi
+      FM_TEST_META_EXPECTED_BASE='' fm_write_meta "$state/task-a.meta" \
+        "worktree=$dir/wt" 'kind=ship' 'mode=direct-PR' 'pr=https://github.com/o/r/pull/1'
+      seed_canonical_poll "$dir" task-a https://github.com/o/r/pull/1
+      add_stop_custom_check "$dir"
+      if [ "$order" = ledger-first ]; then
+        printf 'done: PR https://github.com/o/r/pull/1\n' > "$state/task-a.status"
+      else
+        printf 'working: implementing\n' > "$state/task-a.status"
+      fi
+      FM_TEST_GH_STATE=MERGED run_watcher_bounded "$dir/home" "$dir/fakebin" \
+        > "$dir/first.out" 2> "$dir/first.err" || fail "$route $order first watcher failed"
+      assert_grep 'task task-a merge/readiness refused' "$dir/first.out" 'parent report suppressed the local wake'
+      assert_no_grep 'task-a.check.sh: merged' "$dir/first.out" 'legacy task claimed a merge'
+      [ "$(grep -c 'task task-a merge/readiness refused' "$state/.wake-queue")" = 1 ] \
+        || fail 'local audience did not receive exactly one recovery wake'
+      if [ "$order" = watcher-first ]; then
+        assert_absent "$replies" 'working child unexpectedly produced a parent outcome'
+        printf 'done: PR https://github.com/o/r/pull/1\n' > "$state/task-a.status"
+        mv "$dir/home/.fm-secondmate-parent" "$dir/home/.fm-secondmate-parent.saved"
+        if FM_HOME="$dir/home" FM_STATE_OVERRIDE="$state" PATH="$dir/fakebin:$BASE_PATH" \
+          "$ROOT/bin/fm-inactive-reconcile.sh" report task-a > "$dir/refused.out" 2> "$dir/refused.err"; then
+          fail 'unavailable parent route accepted the refusal report'
+        fi
+        assert_present "$state/task-a.pr-base-notified" 'parent failure cleared local suppression'
+        assert_absent "$state/task-a.pr-base-parent-notified" 'parent failure suppressed its retry'
+        mv "$dir/home/.fm-secondmate-parent.saved" "$dir/home/.fm-secondmate-parent"
+      fi
+      ack_watcher_cycle "$state" || fail 'could not acknowledge the local recovery wake'
+      for cycle in second third; do
+        FM_TEST_GH_STATE=MERGED run_watcher_bounded "$dir/home" "$dir/fakebin" \
+          > "$dir/$cycle.out" 2> "$dir/$cycle.err" || fail "$route $order $cycle watcher failed"
+        assert_grep 'z-stop.check.sh' "$dir/$cycle.out" 'repeat watcher never reached its control check'
+        assert_no_grep 'merge/readiness refused' "$dir/$cycle.out" 'local notice repeated'
+        assert_no_grep 'task-a.check.sh: merged' "$dir/$cycle.out" 'repeat watcher claimed a merge'
+        [ "$(grep -c 'task task-a merge/readiness refused' "$state/.wake-queue")" = 0 ] \
+          || fail 'local recovery wake repeated after acknowledgement'
+        [ "$(grep -c 'task task-a merge/readiness refused' "$replies")" = 1 ] \
+          || fail 'local wake suppressed or duplicated the parent notice'
+        grep -Eq '^blocked( \[[^]]*\])*: .*task task-a merge/readiness refused' "$replies" \
+          || fail 'parent refusal was not a blocked event'
+        assert_no_regex '^done' "$replies" 'legacy task claimed readiness'
+        ack_watcher_cycle "$state" || fail 'could not acknowledge the control wake'
+      done
+      [ ! -s "$dir/gh.log" ] || fail 'missing destination caused a forge read'
+      assert_present "$state/task-a.pr-poll" 'refusal retired the poll'
+      write_task_meta "$dir"
+      run_check_entry "$dir" task-a https://github.com/o/r/pull/1 >/dev/null \
+        || fail 'recovery could not re-arm the task'
+      assert_absent "$state/task-a.pr-base-notified" 're-arm retained local suppression'
+      assert_absent "$state/task-a.pr-base-parent-notified" 're-arm retained parent suppression'
+    done
+  done
+  pass 'legacy watcher and parent notices are independent in either order and reset on re-arm'
+}
+
+test_legacy_notice_audiences_are_independent
 test_legacy_poll_notices_once_until_rearmed
 test_expected_destination_refuses_registration
 test_expected_destination_fail_closed_and_retarget
