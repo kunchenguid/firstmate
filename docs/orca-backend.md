@@ -68,7 +68,7 @@ A missing, unreadable, or mismatched identity preserves metadata and stops rathe
 After those checks, Firstmate closes the exact terminal and releases the exact worktree with Orca's worktree command.
 If a spared process still runs in the worktree after the close, or work appears there during the wait, cleanup exits 1, keeps the worktree and metadata, and logs the kept worktree in `state/teardown-processes.log`.
 Cleanup writes the pending backlog close marker before the irreversible removal, and every later refusal clears it, so startup replay never closes a retained task.
-Without `lsof`, cleanup cannot list processes in the worktree, so it reaps the pane's process group and then removes the worktree, with or without `--force`.
+Without `lsof`, cleanup cannot list processes in the worktree and has no process-group fallback for Orca, so it warns and then removes the worktree, with or without `--force`.
 It never raw-deletes an Orca worktree.
 A close the CLI never attempted, because `orca` is not on the path, stops cleanup with the metadata intact even under `--force`: removing those records would leave nothing on disk naming a terminal that may still be live.
 Reinstall the CLI and rerun; [`verification/runtime-backends.md`](verification/runtime-backends.md) "Endpoint close" owns what this arm can and cannot prove about its own close.
