@@ -9,8 +9,9 @@
   Bearings Projects view. bin/fm-projects-view.sh injects one fm-projects-view.v1
   model into the data slot below; this page only renders it. Self-contained:
   system fonts, no network loads. Answers leave only through
-  window.lavish.queuePrompt with fm-bearings-answer.v1 context under the keys
-  add.<project-id> and fix.<task-id>. Needs-you cards are read-only.
+  window.lavish.queuePrompt with fm-bearings-answer.v1 context under the model's
+  add_key (pv.add.<project-id>) and fix_key (pv.fix.<task-id>), published only
+  when the key names no task id. Needs-you cards are read-only.
 -->
 <style>
 :root {
