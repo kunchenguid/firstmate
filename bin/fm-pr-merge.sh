@@ -99,11 +99,15 @@
 # An accepted update uses GitHub's merge-commit default. Under the merge and
 # away locks, a shared polling budget (15 seconds by default) covers waiting for
 # the new head to appear, recording it, and waiting for its checks and a transient
-# UNKNOWN mergeable state to settle. The helper repeats this full preflight before the
-# exact-head merge. If the head or its checks are not ready in that time, the
-# helper stops without merging and says to run the merge again once checks
-# pass. Any unwaived failed check refuses immediately, even while other checks
-# are pending; only unsettled checks or mergeability are awaited.
+# UNKNOWN mergeable state to settle. Every poll repeats the full preflight,
+# even before the updated head appears. A draft, closed PR, conflict, unreadable
+# required-check source or producer, or any other non-transient refusal stops
+# the wait immediately, even while checks are pending or missing. Any unwaived
+# failed check also refuses immediately. These refusals release both locks and
+# report the actual reason without advice to retry once checks pass. Only an
+# unseen updated head, unsettled checks, or UNKNOWN mergeability are awaited.
+# If that budget expires, the helper stops without merging and says to run
+# the merge again once checks pass.
 # If the pull request remains open and the base branch has an effective
 # merge_queue rule, an attended refusal names the queue's configured merge
 # method and exact --attended-override -- --auto --<method> retry flags. While
