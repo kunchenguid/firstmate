@@ -342,7 +342,7 @@ Three checks run, all on exact identity and none on prose:
 
   Exits 2 and 3 keep the card because a card wrongly shown is recoverable and a call wrongly hidden is not.
 - The payload's own `landed` rows are the recently-landed artifacts.
-  A decision card whose task id or `pr_url` appears among them has already shipped its subject, so it drops.
+  A decision card whose task id or `pr_url` appears among them has already delivered its subject, so it drops.
 - A version decision can carry a structured `subject` with an artifact and numeric three-part version.
   A landed row carrying the same artifact at that version or a newer one supersedes the card without parsing prose.
 
