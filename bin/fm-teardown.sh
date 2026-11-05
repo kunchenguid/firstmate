@@ -86,9 +86,17 @@
 # unresolved-decision completion gate verifies its captain-held inventory.
 # A mirrored <copy>/data/<task-id> path blocks cleanup even with --force.
 # Teardown never moves or merges these artifacts. Preserve them in the home and
-# remove the copy, or use --force --discard-scout-artifacts only after explicit
-# approval to discard those artifacts. An untracked symlinked or non-directory
-# data parent also refuses because absence cannot be proved safely.
+# remove the material from the copy, or use --force --discard-scout-artifacts
+# only after explicit approval to discard those artifacts. A symlinked or
+# non-directory data parent also refuses unless data is a blob at the copy's
+# HEAD and the task path is absent.
+# For scouts in a retiring secondmate, preserve artifacts under the surviving
+# parent's data/<retiring-id>/children/<child-id>/, repeating children/<id>/ for
+# nested descendants, never inside the home being retired. Remote retirement
+# names that destination on the parent host using the durable parent binding
+# (bin/fm-secondmate-parent-lib.sh); copy the material back before retrying.
+# A legacy remote binding without the parent archive root refuses while scout
+# material remains and asks for re-seeding from the parent.
 # A scratch copy (kind=scout) and a --force run discard untracked content.
 # Treehouse's return resets with `git clean -fd`, which never deletes a nested
 # git repository, so the pool slot stays dirty and later checkouts skip it.
@@ -2106,9 +2114,6 @@ report_worktree_dirt() {
   ' >&2
 }
 
-# Scratch and --force copies are scrubbed before Treehouse return. See the
-# script header for why `git clean -fd` is not enough and why a dirty return
-# is not reported as clean.
 require_scout_artifacts_preserved() {  # <copy> <task-id> <archive-relative-path>
   local wt=$1 task=$2 archive=$3 source destination retiring_home artifact_data
   [ "$DISCARD_SCOUT_ARTIFACTS" != 1 ] || return 0
@@ -2142,6 +2147,9 @@ require_scout_artifacts_preserved() {  # <copy> <task-id> <archive-relative-path
   fi
 }
 
+# Scratch and --force copies are scrubbed before Treehouse return. See the
+# script header for why `git clean -fd` is not enough and why a dirty return
+# is not reported as clean.
 teardown_scrub_scratch_copy() {
   local wt=$1
   # A non-git path has no nested repository this clean can remove.

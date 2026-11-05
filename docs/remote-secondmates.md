@@ -420,7 +420,9 @@ SSH exit 255 preserves the route, because remote completion is unknown and must 
 Seeding also writes a durable `.fm-secondmate-parent` record next to the home's `.fm-secondmate-home` identity marker.
 That record names this home's route to its parent as `local` or `remote`.
 The promised-public-reply subsystem is same-filesystem by construction, so a remote route can never carry a delegated public-reply promise.
-`bin/fm-teardown.sh`'s cleanup gate reads this record to treat a remote parent as out of scope rather than an unresolved binding.
+`bin/fm-teardown.sh`'s public-reply cleanup gate reads this record to treat a remote parent as out of scope rather than an unresolved binding.
+[`bin/fm-secondmate-parent-lib.sh`](../bin/fm-secondmate-parent-lib.sh)'s header owns the record fields and legacy compatibility.
+The [teardown artifact-preservation contract](../bin/fm-teardown.sh) uses the binding to name a surviving parent archive during remote retirement.
 
 ### Local and remote routes together
 
@@ -702,7 +704,7 @@ It refuses while any of these holds:
 Herdr retirement closes only the retiring secondmate's panes or `2ndmate-<id>` workspace in `fm-remote`, never the shared session or a sibling's workspace or panes.
 Rex retirement follows the [recorded-block and empty-session cleanup contract](rex-backend.md#cleanup-and-the-absence-proof), never stopping the shared server.
 SSH exit 255 preserves both the route and local records because completion is unknown.
-`--force` remains the explicit discard path and requires the same captain authority as local secondmate discard.
+Explicit discard authority and the additional option required for mirrored scout artifacts are defined in [`bin/fm-teardown.sh`'s header](../bin/fm-teardown.sh), including preservation on the parent host and legacy-binding refusals.
 
 No generic remote delete or write surface exists:
 
