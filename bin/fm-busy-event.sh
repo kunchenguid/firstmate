@@ -156,6 +156,7 @@ fi
 lock_acquire() {
   local stale=${FM_BUSY_LOCK_STALE_SECS:-5} start now mtime age
   case "$stale" in ''|*[!0-9]*) stale=5 ;; esac
+  stale=$((10#$stale))
   start=$(date +%s)
   while ! mkdir "$LOCK" 2>/dev/null; do
     now=$(date +%s)
