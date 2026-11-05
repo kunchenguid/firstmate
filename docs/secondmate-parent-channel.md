@@ -41,12 +41,8 @@ Other correlated mate-home status lines remain wrong-home evidence, while a remo
 The mate home's own status scans treat that remote channel the same way: `status_scan_parent_channel_exclude` in `bin/fm-classify-lib.sh` resolves the outbound path through the same `bin/fm-parent-channel-lib.sh` binding, and the watcher's signal scan and heartbeat backstop, the away-mode daemon's catch-all scan, and the fleet-wide folds skip exactly that resolved path, never a file name.
 The remote reply adapter already mirrors every channel line into the parent home, so folding the channel again here would only spin spurious wakes and a phantom `parent-replies` task, while a `parent-replies.status` in a main home or in a local mate is an ordinary task log that keeps folding and waking.
 A missed-reply escalation includes the complete first sighting path and line number in readable shell-escaped form.
-A correlated reply answers the request, not the work behind it, so the parent reads the child's recorded verdict and never the reply's verb as the overall label.
-`fm_pending_reply_result` in `bin/fm-pending-reply-lib.sh` prints the request outcome and the child outcome side by side, and `finished` appears only for a child whose verdict is `done`.
-The drain's wake annotation (`bin/fm-wake-lib.sh`) appends that result to the correlated reply line it presents, so the parent sees the child's verdict in the same line it reads the answer from.
-The annotation resolves the request itself when the watcher's tick has not reached the reply yet, because the line is presented once and a reply appended between that tick and the signal scan would otherwise show no verdict.
-The secondmate charter (`bin/fm-brief.sh`) tells the mate to pass `--task <child>` whenever the request concerns one of its child tasks.
-A reply with no `--task`, a child the helper could not read, or a hand-written line reads `unknown`, never `finished`.
+A correlated reply answers the request, not the work behind it, so the parent records the child's `bin/fm-crew-state.sh` verdict beside the answer and derives the overall label from that verdict alone: `finished` only for a `done` child, `unfinished` for every other verdict it could read, and `unknown` for a reply with no `--task`, a child the helper could not read, or a hand-written line.
+The record and the derived label are owned by the child-result note in `bin/fm-pending-reply-lib.sh`; the drain's wake annotation in `bin/fm-wake-lib.sh` presents that label on the correlated reply line, and the secondmate charter (`bin/fm-brief.sh`) tells the mate when to pass `--task <child>`.
 
 ## What is deliberately not built
 
@@ -63,9 +59,8 @@ A reply with no `--task`, a child the helper could not read, or a hand-written l
 `tests/fm-teardown.test.sh` covers teardown delivering a child's final line and refusing when the channel cannot be written.
 It also covers the registration-time ready line and its withholding until checks are green under `config/ready-after-green`.
 `tests/fm-brief.test.sh` pins the charter's channel rule.
-`tests/fm-pending-reply.test.sh` covers child results on correlated replies, including unfinished and finished children and missing or hand-written results.
-`tests/fm-wake-drain-unread-status.test.sh` covers the drain presenting that result beside the correlated reply line.
-`tests/fm-pending-reply.test.sh` covers helper-selected local routing, remote-channel classification, same-basename restatement before false escalation, readable wrong-home diagnostics, and the rule that arbitrary mate-home sightings never acknowledge a reply.
+`tests/fm-pending-reply.test.sh` covers helper-selected local routing, remote-channel classification, same-basename restatement before false escalation, readable wrong-home diagnostics, the rule that arbitrary mate-home sightings never acknowledge a reply, and child results on correlated replies, including unfinished and finished children and missing or hand-written results.
+`tests/fm-wake-drain-unread-status.test.sh` covers the drain presenting that child result beside the correlated reply line.
 `tests/fm-parent-channel-scan-exclusion.test.sh` covers the home-shape-aware scan exclusion against real remote, main-home, and local-mate fixtures: the watcher signal scan, both heartbeat backstops, the fleet-wide folds, and the real `fm-wake-drain.sh` end to end.
 
 ## Live verification
