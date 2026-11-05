@@ -17,7 +17,9 @@ mkdir -p "$DOD_FAKEBIN"
 cat > "$DOD_FAKEBIN/gh" <<'SH'
 #!/usr/bin/env bash
 case " $* " in
-  *' --json baseRefName '*) printf 'main\n' ;;
+  *' --json baseRefName '*)
+    [ "${DOD_FORGE_UNREADABLE:-0}" != 1 ] || exit 1
+    printf '%s\n' "${DOD_FORGE_BASE:-main}" ;;
   *) exit 1 ;;
 esac
 SH
@@ -395,6 +397,60 @@ test_ci_ready_requires_pr_reference() {
   pass "CI-ready notes require checks green and an actual PR reference"
 }
 
+test_ci_ready_destination_gate_covers_every_accepted_form() {
+  local repo wt state meta missing sha note mode reason rc proof
+  repo="$TMP_ROOT/ci-destination-repo"
+  wt="$TMP_ROOT/ci-destination-wt"
+  state="$TMP_ROOT/ci-destination-state"
+  mkdir -p "$state"
+  fm_git_worktree "$repo" "$wt" fm/ci-destination
+  git -C "$wt" commit -q --allow-empty -m 'published readiness candidate'
+  sha=$(git -C "$wt" rev-parse HEAD)
+  git -C "$wt" update-ref refs/remotes/origin/fm/ci-destination "$sha"
+  meta="$state/task.meta"
+  missing="$state/missing.meta"
+  printf 'kind=ship\nexpected_base=main\npr=https://github.com/o/r/pull/12\npr_head=%s\n' "$sha" > "$meta"
+  printf 'kind=ship\npr=https://github.com/o/r/pull/12\npr_head=%s\n' "$sha" > "$missing"
+  for mode in no-mistakes direct-PR ''; do
+    DOD_FORGE_BASE=main accept_done ship "$mode" "$wt" "$repo" \
+      'done: PR https://github.com/o/r/pull/12 checks green' "$state" task "$meta" \
+      || fail "matching destination and published head were refused for mode '$mode'"
+    for note in \
+      'PR https://github.com/o/r/pull/12 checks green' \
+      'checks green: https://github.com/o/r/pull/12' \
+      'PR #12 checks green' \
+      'checks green: PR#12' \
+      'https://github.com/o/r/pull/12 checks green' \
+      'https://gitlab.com/o/r/-/merge_requests/12 checks green' \
+      'https://git.example.org/team/repo/pulls/12 checks green' \
+      '/pull/12 checks green' \
+      'checks green after review (https://github.com/o/r/pull/12)' \
+      'PR http://github.com/o/r/pull/12 checks green'; do
+      fm_dod_note_reports_ci_ready "$note" || fail "fixture is not CI-ready: $note"
+      for proof in wrong unreadable missing; do
+        rc=0
+        case "$proof" in
+          wrong)
+            reason=$(DOD_FORGE_BASE=wrong accept_done ship "$mode" "$wt" "$repo" \
+              "done: $note" "$state" task "$meta") || rc=$? ;;
+          unreadable)
+            reason=$(DOD_FORGE_UNREADABLE=1 accept_done ship "$mode" "$wt" "$repo" \
+              "done: $note" "$state" task "$meta") || rc=$? ;;
+          missing)
+            reason=$(accept_done ship "$mode" "$wt" "$repo" \
+              "done: $note" "$state" task "$missing") || rc=$? ;;
+        esac
+        [ "$rc" -eq 1 ] || fail "$proof destination accepted CI-ready mode '$mode': $note"
+        case "$reason" in
+          *'expected PR base'*|*'CI-ready PR destination could not be resolved'*) ;;
+          *) fail "destination refusal was masked by another guard: $reason" ;;
+        esac
+      done
+    done
+  done
+  pass 'every accepted CI-ready note form requires destination proof despite a published head'
+}
+
 test_ci_ready_variants_are_gated() {
   local repo wt line rc
   repo="$TMP_ROOT/variant-repo"
@@ -620,6 +676,7 @@ test_canonical_pr_requires_destination_metadata() {
 }
 
 test_canonical_pr_requires_destination_metadata
+test_ci_ready_destination_gate_covers_every_accepted_form
 test_scout_done_is_not_gated
 test_unpushed_ship_done_is_refused
 test_no_mistakes_prevalidation_done_is_not_gated
