@@ -839,6 +839,7 @@ test_secondmate_marked_request_reporting_contract() {
     "secondmate charter lost the mechanical helper invocation"
   assert_grep 'do not pass a status path' "$brief" \
     "secondmate charter still tells the mate to pass a hand path to the helper"
+  # shellcheck disable=SC2016 # Backticks are literal generated brief text.
   assert_grep 'pass `--task <child>` to that helper' "$brief" \
     "secondmate charter never tells the mate to name the child task behind a reply"
   assert_grep 'reads the overall result from that verdict, never from your verb' "$brief" \
