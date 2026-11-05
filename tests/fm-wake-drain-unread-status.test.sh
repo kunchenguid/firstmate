@@ -12,6 +12,9 @@ set -u
 # shellcheck source=tests/wake-helpers.sh
 . "$(dirname "${BASH_SOURCE[0]}")/wake-helpers.sh"
 
+# shellcheck source=bin/fm-pending-reply-lib.sh
+. "$ROOT/bin/fm-pending-reply-lib.sh"
+
 DRAIN="$ROOT/bin/fm-wake-drain.sh"
 
 TMP_ROOT=$(fm_test_tmproot fm-wake-drain-unread-status-tests)
@@ -225,6 +228,49 @@ test_self_announced_pending_reply_close_still_surfaces() {
     fail "an already-presented self-announced resolution was replayed: $(cat "$out")"
   fi
   pass "a self-announced pending-reply close does not wake yet still surfaces once in UNREAD STATUS"
+}
+
+# A secondmate's correlated reply answers the request, not the work behind it:
+# the annotation the parent reads must carry the child's recorded verdict, and
+# the overall label comes from that verdict, never from the reply's verb.
+test_correlated_reply_annotation_carries_child_result() {
+  local dir state out status corr
+  dir=$(make_case correlated-reply-result)
+  state="$dir/state"
+  out="$dir/drain.out"
+  status="$state/kid.status"
+  prime_cursor "$state" "$status"
+
+  corr=$(FM_PENDING_REPLY_NOW=9300 fm_pending_reply_create "$dir" "$state" kid "how far is the repacking") \
+    || fail "creating the pending-reply record failed"
+  FM_PENDING_REPLY_NOW=9300 fm_pending_reply_mark_delivered "$state" "$corr" \
+    || fail "marking the request delivered failed"
+  printf 'done [corr=%s] [at=9301]: narrow fix done (via-helper child=repack child-state=working)\n' "$corr" >> "$status"
+  FM_PENDING_REPLY_NOW=9301 fm_pending_reply_try_resolve "$state" "$corr" \
+    || fail "the helper-written reply should resolve the request"
+  append_wake "$state" signal kid.status "signal: kid.status" \
+    || fail "queueing the reply signal failed"
+
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" || fail "drain failed on a correlated reply"
+  grep -F "kid.status: done [corr=$corr] [at=9301]: narrow fix done (via-helper child=repack child-state=working) · request: answered · child: repack · child-state: working · overall: unfinished" "$out" >/dev/null \
+    || fail "the reply annotation did not carry the child's verdict and an unfinished label: $(cat "$out")"
+  if grep -F 'overall: finished' "$out" >/dev/null; then
+    fail "a done reply for a working child was presented as finished: $(cat "$out")"
+  fi
+
+  corr=$(FM_PENDING_REPLY_NOW=9400 fm_pending_reply_create "$dir" "$state" kid "is the audit done") \
+    || fail "creating the second pending-reply record failed"
+  FM_PENDING_REPLY_NOW=9400 fm_pending_reply_mark_delivered "$state" "$corr" \
+    || fail "marking the second request delivered failed"
+  printf 'done [corr=%s] [at=9401]: audit clean\n' "$corr" >> "$status"
+  FM_PENDING_REPLY_NOW=9401 fm_pending_reply_try_resolve "$state" "$corr" \
+    || fail "the plain echoed reply should resolve the request"
+  append_wake "$state" signal kid.status "signal: kid.status" \
+    || fail "queueing the second reply signal failed"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" || fail "drain failed on a plain correlated reply"
+  grep -F "kid.status: done [corr=$corr] [at=9401]: audit clean · request: answered · child: - · child-state: unknown · overall: unknown" "$out" >/dev/null \
+    || fail "a reply with no child result was not presented as unknown: $(cat "$out")"
+  pass "the drain presents the child's verdict beside a correlated reply, unfinished for a working child and unknown without one"
 }
 
 test_unread_output_over_cap_remains_recoverable() {
@@ -455,6 +501,7 @@ test_brand_new_note_after_presentation_is_surfaced
 test_signal_annotation_surfaces_every_unread_note_not_only_the_newest
 test_pending_reply_resolution_surfaces_once
 test_self_announced_pending_reply_close_still_surfaces
+test_correlated_reply_annotation_carries_child_result
 test_unread_output_over_cap_remains_recoverable
 test_snapshot_does_not_ack_a_later_append
 test_retired_task_id_starts_new_status_unread

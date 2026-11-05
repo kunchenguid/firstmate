@@ -83,7 +83,9 @@
 # verdict as a trailing marker (fm_pending_reply_child_marker), and the resolve
 # records it beside the request outcome. fm_pending_reply_result derives the
 # overall label from that verdict alone: a reply with no marker, or a verdict
-# the mate could not read, is "unknown" and never "finished".
+# the mate could not read, is "unknown" and never "finished". The drain's wake
+# annotation (bin/fm-wake-lib.sh) appends that result to the reply line the
+# parent reads.
 #
 # Escalation lifecycle: an escalation is not just a message, it OPENS a durable
 # keyed decision in the parent status log, and bin/fm-classify-lib.sh's fold is
@@ -705,13 +707,12 @@ fm_pending_reply_child_result_of_line() {  # <line>
   printf -- '- unknown'
 }
 
-# finished only for a done child; a failed child is failed; a child nobody
-# could read is unknown; every other verdict is still unfinished.
+# finished only for a done child; a child nobody could read is unknown; every
+# other verdict is still unfinished.
 fm_pending_reply_overall_label() {  # <child-state>
   case "$1" in
     done) printf 'finished' ;;
-    failed) printf 'failed' ;;
-    working|parked|blocked|paused) printf 'unfinished' ;;
+    working|parked|blocked|paused|failed) printf 'unfinished' ;;
     *) printf 'unknown' ;;
   esac
 }
@@ -1221,10 +1222,10 @@ fm_pending_reply_escalation_payload() {  # <record-path> <kind>
   [ -n "$task_id" ] && [ -n "$corr" ] || return 1
   case "$kind" in
     missed)
-      token=pending-reply-missed
+      token='pending-reply-missed'
       ;;
     delivery-unknown)
-      token=pending-reply-delivery-unknown
+      token='pending-reply-delivery-unknown'
       ;;
     recovery-delivery)
       outcome=$(fm_pending_reply_get "$rec" recovery_delivery_outcome)

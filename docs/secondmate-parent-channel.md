@@ -43,6 +43,8 @@ The remote reply adapter already mirrors every channel line into the parent home
 A missed-reply escalation includes the complete first sighting path and line number in readable shell-escaped form.
 A correlated reply answers the request, not the work behind it, so the parent reads the child's recorded verdict and never the reply's verb as the overall label.
 `fm_pending_reply_result` in `bin/fm-pending-reply-lib.sh` prints the request outcome and the child outcome side by side, and `finished` appears only for a child whose verdict is `done`.
+The drain's wake annotation (`bin/fm-wake-lib.sh`) appends that result to the correlated reply line it presents, so the parent sees the child's verdict in the same line it reads the answer from.
+The secondmate charter (`bin/fm-brief.sh`) tells the mate to pass `--task <child>` whenever the request concerns one of its child tasks.
 A reply with no `--task`, a child the helper could not read, or a hand-written line reads `unknown`, never `finished`.
 
 ## What is deliberately not built
@@ -61,6 +63,7 @@ A reply with no `--task`, a child the helper could not read, or a hand-written l
 It also covers the registration-time ready line and its withholding until checks are green under `config/ready-after-green`.
 `tests/fm-brief.test.sh` pins the charter's channel rule.
 `tests/fm-pending-reply.test.sh` covers child results on correlated replies, including unfinished and finished children and missing or hand-written results.
+`tests/fm-wake-drain-unread-status.test.sh` covers the drain presenting that result beside the correlated reply line.
 `tests/fm-pending-reply.test.sh` covers helper-selected local routing, remote-channel classification, same-basename restatement before false escalation, readable wrong-home diagnostics, and the rule that arbitrary mate-home sightings never acknowledge a reply.
 `tests/fm-parent-channel-scan-exclusion.test.sh` covers the home-shape-aware scan exclusion against real remote, main-home, and local-mate fixtures: the watcher signal scan, both heartbeat backstops, the fleet-wide folds, and the real `fm-wake-drain.sh` end to end.
 

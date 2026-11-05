@@ -3303,6 +3303,21 @@ fm_wake_latest_event() {  # <validated-status-path> <tail-byte-cap>
   fm_wake_unread_events "$1" "$2" 0
 }
 
+# " · request: answered · child: <id> · child-state: <verdict> · overall: <label>"
+# for a status line that answers a marked request whose pending-reply record is
+# resolved (bin/fm-pending-reply-lib.sh, sourced by the drain), so the parent
+# reads the child's verdict beside the reply and never the reply's verb as the
+# result. Empty for every other line.
+_fm_wake_pending_reply_result_suffix() {  # <status-line>
+  local corr result
+  case "$1" in *corr=*) ;; *) return 0 ;; esac
+  command -v fm_pending_reply_result >/dev/null 2>&1 || return 0
+  corr=$(fm_pending_reply_extract_corr "$1")
+  [ -n "$corr" ] || return 0
+  result=$(fm_pending_reply_result "$STATE" "$corr") || return 0
+  printf ' · %s' "$result"
+}
+
 # Print supplemental drain-time context only after the caller has committed the
 # raw queue consumption and released the append lock.
 fm_wake_print_annotations() {  # <deduped-raw-rows> [<presentation-snapshot>]
@@ -3380,7 +3395,7 @@ EOF
       if [ "$mode" = historical ]; then
         prefix="$prefix; historical / not necessarily the triggering event"
       fi
-      line="$prefix: $status_key: $event_line"
+      line="$prefix: $status_key: $event_line$(_fm_wake_pending_reply_result_suffix "$event_line")"
       printf '%s\n' "$line" || return 1
     done <<EOF
 $FM_WAKE_UNREAD_LINES
