@@ -2,6 +2,7 @@
 """Azure DevOps Services PR identity, live verification and completion transport.
 
 Usage: fm-azure-pr.py parse|head|ready-head|disposition|merged|landed|complete <canonical-pr-url>
+Completion accepts --expected-head <full-source-sha> to pin the verified revision.
 `parse` prints host, repository path and number; `head` prints the live source
 SHA; `ready-head` first refuses a positively identified draft.
 `disposition` prints open, closed or merged; `merged` prints only `merged`
@@ -179,12 +180,14 @@ class Azure:
                 f"{self.i.url} is a draft pull request; mark it ready for review before registering merge monitoring")
         return sha(self.latest_iteration().get("sourceRefCommit", {}).get("commitId"))
 
-    def verify(self):
+    def verify(self, expected_head=None):
         pr = self.pr()
         require(pr.get("status") == "active" and pr.get("isDraft") is False and
                 pr.get("mergeStatus") == "succeeded" and pr.get("mergeFailureType") in (None, "none") and
                 not pr.get("autoCompleteSetBy"), "Azure PR is not active, non-draft and immediately mergeable")
         head = sha(pr["lastMergeSourceCommit"]["commitId"])
+        require(expected_head is None or head == expected_head,
+                "Azure source revision does not match the expected head")
         target = sha(pr.get("lastMergeTargetCommit", {}).get("commitId"))
         iteration = self.latest_iteration()
         require(sha(iteration.get("sourceRefCommit", {}).get("commitId")) == head,
@@ -286,8 +289,8 @@ class Azure:
         require(final == pr, "Azure PR changed while verifying; retry against its current revision")
         return head, method
 
-    def complete(self):
-        head, method = self.verify()
+    def complete(self, expected_head=None):
+        head, method = self.verify(expected_head)
         result = self.invoke("pullRequests", body={
             "status": "completed", "lastMergeSourceCommit": {"commitId": head},
             "completionOptions": {"mergeStrategy": method, "bypassPolicy": False,
@@ -305,8 +308,12 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("action", choices=("parse", "head", "ready-head", "disposition", "merged", "landed", "complete"))
     parser.add_argument("url")
+    parser.add_argument("--expected-head")
     args = parser.parse_args()
     try:
+        if args.expected_head is not None:
+            require(args.action == "complete", "--expected-head is only supported for completion")
+            sha(args.expected_head)
         identity = Identity(args.url)
         if args.action == "parse":
             print(identity.host, identity.path, identity.number, sep="\n")
@@ -322,7 +329,7 @@ def main():
         elif args.action == "landed":
             print(azure.landed())
         else:
-            azure.complete()
+            azure.complete(args.expected_head)
     except (Refused, ValueError, KeyError, TypeError, AttributeError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         sys.exit(1)

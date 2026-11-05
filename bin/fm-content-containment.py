@@ -252,7 +252,7 @@ class Repository:
         base_tree = self.tree(self.commit(base)[0])
         local_tree = self.tree(self.commit(local)[0])
         merged_tree = self.tree(self.commit(merged)[0])
-        histories, comparisons, paths = [], [], set()
+        comparisons = {}
         local_commits = set(commits)
         for oid in commits:
             root, parents = self.commit(oid)
@@ -262,19 +262,19 @@ class Repository:
             upstream_parents = [parent for parent in parents if parent not in local_commits]
             for parent in parents:
                 previous = self.tree(self.commit(parent)[0])
-                histories.append(previous)
                 if upstream_parents and parent not in upstream_parents:
                     continue
-                comparisons.append((previous, current))
-                paths.update(path for path in current.keys() | previous.keys()
-                             if current.get(path) != previous.get(path))
-            histories.append(current)
+                for path in current.keys() | previous.keys():
+                    before, after = previous.get(path), current.get(path)
+                    if before != after:
+                        comparisons.setdefault(path, []).append((before, after))
         # Read every required raw blob before accepting a result, including
         # superseded versions, so later equality cannot mask missing history.
-        for tree in [base_tree, local_tree, merged_tree, *histories]:
-            for path in paths:
-                self.contents(tree.get(path))
-        for path in paths:
+        for path, changes in comparisons.items():
+            for entry in [base_tree.get(path), local_tree.get(path), merged_tree.get(path),
+                          *(entry for pair in changes for entry in pair)]:
+                self.contents(entry)
+        for path, changes in comparisons.items():
             before, final, landed = base_tree.get(path), local_tree.get(path), merged_tree.get(path)
             if final == landed:
                 continue
@@ -282,14 +282,14 @@ class Repository:
                     or any(entry.mode not in (0o100644, 0o100755) for entry in (before, final, landed))
                     or final.mode != landed.mode):
                 return False
-            versions = [tree.get(path) for tree in histories]
+            versions = [entry for pair in changes for entry in pair]
             if any(entry is None or entry.mode not in (0o100644, 0o100755) for entry in versions):
                 # File creation/deletion/type transitions require exact final
                 # entries rather than an invented text-line correspondence.
                 return False
             if not text_contained(self.contents(before),
-                                  [(self.contents(previous.get(path)), self.contents(current.get(path)))
-                                   for previous, current in comparisons],
+                                  [(self.contents(previous), self.contents(current))
+                                   for previous, current in changes],
                                   self.contents(final), self.contents(landed)):
                 return False
         # Same immutable input must still be selected at the caller boundary.

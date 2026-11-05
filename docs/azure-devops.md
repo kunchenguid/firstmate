@@ -48,7 +48,7 @@ Configure any requirement that must survive that final race as a mandatory Azure
 
 Firstmate preserves the PR-selected allowed merge strategy, or uses the sole allowed strategy when unambiguous.
 If neither is available, select an allowed strategy on the PR and retry rather than overriding repository convention.
-The Azure entrypoint accepts no extra completion flags, red-check waivers or policy bypass.
+The Azure entrypoint accepts `--expected-head` to pin the verified source commit, but no extra completion flags, red-check waivers or policy bypass.
 Completion is attended-only because Azure can finish the server operation asynchronously.
 An accepted request with unconfirmed landing returns a diagnostic and leaves monitoring in place; it is never reported as merged work.
 

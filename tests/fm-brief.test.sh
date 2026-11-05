@@ -226,8 +226,8 @@ test_ship_modes_generate_clean_briefs() {
 # names tea instead of gh-axi in the ship brief's forge-CLI rule and in the
 # direct-PR Definition of done's own open-a-PR line, and it marks the delivery
 # contract line so bin/fm-spawn.sh can check it against the registry. A brief
-# with no --forge renders the unchanged gh-axi wording. The forge is a ship
-# input only, and the closed set refuses anything else.
+# with no --forge renders provider-aware PR instructions and the gh-axi rule.
+# The forge is a ship input only, and the closed set refuses anything else.
 test_forge_selection_renders_correct_cli() {
   local home brief out rc
   home="$TMP_ROOT/forge-home"
@@ -238,9 +238,8 @@ test_forge_selection_renders_correct_cli() {
   brief="$home/data/brief-forge-default/brief.md"
   assert_grep "3. Use gh-axi for GitHub operations and chrome-devtools-axi for browser operations." "$brief" \
     "a brief with no --forge must render the exact pre-existing gh-axi Rule 3 line"
-  # shellcheck disable=SC2016 # Backticks are literal generated brief text.
-  assert_grep 'open a PR with `gh-axi`' "$brief" \
-    "a direct-PR brief with no --forge must still tell the worker to open the PR with gh-axi"
+  assert_grep "open a PR with the forge's CLI (\`gh-axi\` for GitHub, \`az repos pr\` for Azure DevOps)" "$brief" \
+    "a direct-PR brief with no --forge must name both supported provider CLIs"
   grep -qx "Delivery contract: mode=direct-PR" "$brief" \
     || fail "a brief with no --forge must keep the bare delivery contract line"
 

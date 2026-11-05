@@ -1649,7 +1649,7 @@ remove_pr_poll_artifacts() {
 azure_work_is_landed() {
   local head current
   head=$(python3 "$SCRIPT_DIR/fm-azure-pr.py" landed "$PR_URL") || return 1
-  [ -d "$WT" ] || return 0
+  teardown_owns_worktree && [ -d "$WT" ] || return 0
   ensure_commit_object "$PR_URL" "$head" || return 1
   current=$(git -C "$WT" rev-parse --verify HEAD 2>/dev/null) || return 1
   git -C "$WT" merge-base --is-ancestor "$current" "$head" 2>/dev/null \
@@ -1787,7 +1787,6 @@ pr_is_merged() {
 # override a refusal. Returns non-zero when inconclusive, so the caller refuses.
 content_in_default() {
   local name=${BASE_BRANCH:-} ref
-  CONTENT_LANDED_PROOF_ERROR=
   [ -n "$name" ] || name=$(default_branch) || return 1
   if git -C "$WT" remote get-url origin >/dev/null 2>&1; then
     git -C "$WT" fetch --quiet origin "+refs/heads/$name:refs/remotes/origin/$name" >/dev/null 2>&1 || return 1
@@ -2130,16 +2129,32 @@ teardown_note_dirty_return() {
   printf '%s\n' "$residue" | sed 's/^/  /' >&2
 }
 
-validate_worktree_teardown_safety() {
+validate_task_teardown_safety() {
   local dirty_raw dirty submodule_dirty unpushed_raw unpushed DEFAULT unmerged_raw unmerged branch origin_url verdict
   [ "$FORCE" != "--force" ] || return 0
   case "$KIND" in
     secondmate|scout) return 0 ;;
   esac
+  CONTENT_LANDED_PROOF_ERROR=
+  TEARDOWN_AZURE_LANDED=0
+  case "$PR_URL" in
+    https://dev.azure.com/*|https://*.visualstudio.com/*)
+      if ! azure_work_is_landed; then
+        if [ -n "$CONTENT_LANDED_PROOF_ERROR" ]; then
+          echo "REFUSED: content-landed proof unavailable for worktree $WT: $CONTENT_LANDED_PROOF_ERROR." >&2
+        else
+          echo "REFUSED: Azure PR completion and containment of local work are not confirmed; preserving work." >&2
+        fi
+        return 1
+      fi
+      TEARDOWN_AZURE_LANDED=1
+      ;;
+  esac
+  teardown_owns_worktree && [ -d "$WT" ] || return 0
   # An Azure feature branch being pushed is not proof of completion. Without
   # the registered PR identity, preserve it rather than using the generic
   # remote-reachability shortcut. SSH clone URLs identify Azure here as well.
-  if [ -z "$PR_URL" ] && [ "$MODE" != local-only ] && [ -d "$WT" ]; then
+  if [ -z "$PR_URL" ] && [ "$MODE" != local-only ]; then
     origin_url=$(git -C "$WT" remote get-url origin 2>/dev/null || true)
     verdict=$(azure_remote_origin_requires_pr "$origin_url" 2>/dev/null) || verdict=
     case "$verdict" in
@@ -2154,17 +2169,6 @@ validate_worktree_teardown_safety() {
         ;;
     esac
   fi
-  case "$PR_URL" in
-    https://dev.azure.com/*|https://*.visualstudio.com/*)
-      if ! azure_work_is_landed; then
-        echo "REFUSED: Azure PR completion and containment of local work are not confirmed; preserving work." >&2
-        return 1
-      fi
-      TEARDOWN_AZURE_LANDED=1
-      ;;
-  esac
-  [ -d "$WT" ] || return 0
-
   if ! dirty_raw=$(git -C "$WT" -c diff.ignoreSubmodules=none status --porcelain --untracked-files=all --ignore-submodules=none 2>/dev/null); then
     if worktree_safety_blocked_by_lock "uncommitted changes"; then
       return "$TEARDOWN_WORKTREE_SAFETY_LOCK_BLOCKED"
@@ -2178,7 +2182,7 @@ validate_worktree_teardown_safety() {
   # alone can hide a dirty nested module through that module's own configuration.
   # shellcheck disable=SC2016 # These variables belong to each submodule's shell.
   if ! submodule_dirty=$(git -C "$WT" submodule foreach --quiet --recursive '
-    changes=$(git -c diff.ignoreSubmodules=none status --porcelain --ignore-submodules=none) || exit 1
+    changes=$(git -c diff.ignoreSubmodules=none status --porcelain --untracked-files=all --ignore-submodules=none) || exit 1
     [ -z "$changes" ] || printf "%s\n" "submodule has uncommitted changes"
   ' 2>/dev/null); then
     echo "REFUSED: cannot inspect initialized submodules for uncommitted changes." >&2
@@ -3772,17 +3776,15 @@ if [ "$BACKEND" = orca ] && [ "$KIND" != scout ] && [ "$KIND" != secondmate ] &&
   ORCA_PATH_MATCH_VERIFIED=1
 fi
 
-if teardown_owns_worktree && [ -d "$WT" ] && [ "$FORCE" != "--force" ]; then
-  if validate_worktree_teardown_safety; then
-    :
+if validate_task_teardown_safety; then
+  :
+else
+  safety_rc=$?
+  if [ "$safety_rc" -eq "$TEARDOWN_WORKTREE_SAFETY_LOCK_BLOCKED" ]; then
+    cleanup_stale_lock_for_safety_check "$WT" || exit 1
+    validate_task_teardown_safety || exit 1
   else
-    safety_rc=$?
-    if [ "$safety_rc" -eq "$TEARDOWN_WORKTREE_SAFETY_LOCK_BLOCKED" ]; then
-      cleanup_stale_lock_for_safety_check "$WT" || exit 1
-      validate_worktree_teardown_safety || exit 1
-    else
-      exit 1
-    fi
+    exit 1
   fi
 fi
 
@@ -3925,9 +3927,7 @@ fi
 # A worker can write after the first proof, including while its run is concluded
 # or its processes exit. Inspect the stopped copy before dropping its branch or
 # returning it on either backend path.
-if teardown_owns_worktree && [ -d "$WT" ] && [ "$FORCE" != "--force" ]; then
-  validate_worktree_teardown_safety || exit 1
-fi
+validate_task_teardown_safety || exit 1
 
 if [ "$TEARDOWN_BACKLOG_APPLIES" = 1 ]; then
 # Roll the accepted legacy incarnation's stamp back to the record's exact
@@ -4072,7 +4072,7 @@ elif [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
   # left by a killed crew process; see the script header for retry and stale-lock proof.
   post_lock_cleanup_check=
   if [ "$FORCE" != "--force" ] && [ "$KIND" != scout ] && [ "$KIND" != secondmate ]; then
-    post_lock_cleanup_check=validate_worktree_teardown_safety
+    post_lock_cleanup_check=validate_task_teardown_safety
   fi
   if [ "$KIND" = scout ] || [ "$FORCE" = "--force" ]; then
     teardown_scrub_scratch_copy "$WT" || exit 1

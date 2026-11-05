@@ -130,8 +130,8 @@ class AzureContract(unittest.TestCase):
             dict(self.policies[0], configuration=config,
                  context=dict(iterationId=2, sourceCommitId=HEAD, latestStatusId=status_id))])
 
-    def run_helper(self, action, url=URL):
-        return subprocess.run([sys.executable, str(ROOT / "bin/fm-azure-pr.py"), action, url], env=self.env,
+    def run_helper(self, action, url=URL, *args):
+        return subprocess.run([sys.executable, str(ROOT / "bin/fm-azure-pr.py"), action, url, *args], env=self.env,
                               text=True, capture_output=True, timeout=15)
 
     def script(self, script, *args):
@@ -307,6 +307,42 @@ else:
                                    completionOptions=dict(mergeStrategy="squash", bypassPolicy=False,
                                                           deleteSourceBranch=False, transitionWorkItems=False)))
         self.assertEqual(self.run_helper("merged").stdout, "merged\n")
+
+    def test_matching_expected_head_completes_through_merge_entrypoint(self):
+        p = self.script("fm-pr-merge.sh", "task", URL, "--expected-head", HEAD)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertIn("merged", p.stdout.splitlines())
+        body = json.loads((self.dir / "patch").read_text())
+        self.assertEqual(body["lastMergeSourceCommit"], dict(commitId=HEAD))
+        self.assertIs(body["completionOptions"]["bypassPolicy"], False)
+        self.assertTrue((self.dir / "state/task.merge-authority").exists())
+
+    def test_mismatched_expected_head_refuses_without_authority(self):
+        p = self.script("fm-pr-merge.sh", "task", URL, "--expected-head", TARGET)
+        self.assertNotEqual(p.returncode, 0, p.stdout)
+        self.assertIn("does not match the expected head", p.stderr)
+        self.assertFalse((self.dir / "patch").exists())
+        self.assertFalse((self.dir / "state/task.merge-authority").exists())
+        self.assertTrue((self.dir / "state/task.pr-poll").exists())
+
+    def test_expected_head_still_requires_policies(self):
+        self.rows("evaluations", [dict(self.policies[0], status="queued"), self.policies[1]])
+        p = self.script("fm-pr-merge.sh", "task", URL, "--expected-head", HEAD)
+        self.assertNotEqual(p.returncode, 0, p.stdout)
+        self.assertIn("mandatory Azure policy", p.stderr)
+        self.assertFalse((self.dir / "patch").exists())
+        self.assertFalse((self.dir / "state/task.merge-authority").exists())
+
+    def test_expected_head_input_validation_precedes_transport(self):
+        for head in ("", "abc", "A" * 40, "a" * 64, HEAD + "\n"):
+            with self.subTest(head=head):
+                p = self.run_helper("complete", URL, "--expected-head", head)
+                self.assertNotEqual(p.returncode, 0, p.stdout)
+        for action in ("parse", "head", "ready-head", "disposition", "merged", "landed"):
+            with self.subTest(action=action):
+                p = self.run_helper(action, URL, "--expected-head", HEAD)
+                self.assertNotEqual(p.returncode, 0, p.stdout)
+        self.assertEqual(self.calls(), [])
 
     def test_landed_identity_is_actual_merge_result_not_source_snapshot(self):
         self.save("pullRequests", dict(self.pr, status="completed", closedDate="2026-01-01T00:00:00Z"))

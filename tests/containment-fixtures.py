@@ -16,7 +16,9 @@ def change(repo,files,msg):
 def lines(first='zero',last='zero'):return '\n'.join([first]+[f'context-{n}' for n in range(2,100)]+[last])+'\n'
 initial_shared=''.join(f'line-{n}\n' for n in range(1,5001)) if scenario.startswith('large-') else lines()
 initial_f='zero\n' if scenario.startswith('merge-main-') else 'keep\nremove\ntail\n'
-base=change(project,{'f.txt':initial_f,'shared.txt':initial_shared,'feature.txt':'zero\n','g.txt':'zero\n','h.txt':'zero\n'},'baseline')
+initial={'f.txt':initial_f,'shared.txt':initial_shared,'feature.txt':'zero\n','g.txt':'zero\n','h.txt':'zero\n'}
+if scenario.startswith('path-provenance-') and scenario!='path-provenance-replaced':initial.pop('g.txt')
+base=change(project,initial,'baseline')
 git(project,'push','-q','origin','main');git(wt,'merge','--ff-only','-q',base)
 missing=None
 if scenario in ('unlanded-delete','landed-delete','unlanded-replace'):
@@ -58,6 +60,25 @@ elif scenario.startswith('merge-main-'):
   assert git(wt,'show',local+':g.txt')=='one'
   assert git(project,'show','HEAD:f.txt')=='one'
   assert git(project,'show','HEAD:g.txt')=='two'
+elif scenario.startswith('path-provenance-'):
+ change(wt,{'f.txt':'one\n'},'C local f')
+ upstream=change(project,{'g.txt':'zero\nanchor\ntail0\n'},'U upstream g')
+ git(wt,'merge','--no-ff','-m','M merge upstream',upstream)
+ local=change(wt,{'g.txt':'one\nanchor\ntail0\n'},'D local g')
+ change(project,{'g.txt':'zero\nanchor\ntail1\n'},'U2 independent upstream tail')
+ pipeline=c/'pipeline'
+ git(project,'worktree','add','--detach',str(pipeline),local)
+ result=subprocess.run(['git','-C',str(pipeline),'rebase','main'],capture_output=True,text=True)
+ if result.returncode:
+  assert git(pipeline,'diff','--name-only','--diff-filter=U')=='g.txt',result.stderr
+  (pipeline/'g.txt').write_text('one\nanchor\ntail1\n')
+  git(pipeline,'add','g.txt');git(pipeline,'-c','core.editor=true','rebase','--continue')
+ git(project,'merge','--squash',git(pipeline,'rev-parse','HEAD'))
+ git(project,'commit','-qm','squash rebased publication')
+ assert git(wt,'merge-base',local,git(project,'rev-parse','HEAD'))==upstream
+ if scenario=='path-provenance-restored':local=change(wt,{'g.txt':'zero\nanchor\ntail0\n'},'unlanded g restoration')
+ if scenario=='path-provenance-deleted':
+  git(wt,'rm','g.txt');git(wt,'commit','-qm','unlanded g deletion');local=git(wt,'rev-parse','HEAD')
 elif scenario in ('large-rebased-upstream','large-rebased-unlanded'):
  local_lines=initial_shared.splitlines(keepends=True);local_lines[0]='local edit\n'
  local=change(wt,{'shared.txt':''.join(local_lines)},'local line 1')

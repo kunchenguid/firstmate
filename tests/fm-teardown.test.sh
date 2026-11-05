@@ -757,6 +757,17 @@ make_path_without_lsof() {  # <case-dir>
   printf '%s\n' "$path_dir"
 }
 
+add_azure_pr_result() {
+  local case_dir=$1 api_state=$2 head=$3
+  printf '%s\n' 'pr=https://dev.azure.com/example/Project/_git/repo/pullrequest/7' >> "$case_dir/state/task-x1.meta"
+  cat > "$case_dir/fakebin/az" <<SH
+#!/usr/bin/env bash
+printf 'read\n' >> '$case_dir/azure.log'
+printf '%s\n' '{"continuation_token":null,"pullRequestId":7,"status":"$api_state","mergeStatus":"succeeded","closedDate":"2026-01-01T00:00:00Z","lastMergeSourceCommit":{"commitId":"$head"},"lastMergeCommit":{"commitId":"$head"},"repository":{"id":"22222222-2222-2222-2222-222222222222","name":"repo","project":{"id":"11111111-1111-1111-1111-111111111111","name":"Project"}}}'
+SH
+  chmod +x "$case_dir/fakebin/az"
+}
+
 test_history_location_containment_matrix() {
   local scenario route case_dir merged local_head expected rc
   PYTHONDONTWRITEBYTECODE=1 python3 "$ROOT/tests/containment-contract.py" \
@@ -766,8 +777,9 @@ test_history_location_containment_matrix() {
     whole-file-restoration missing-intermediate-tree complete-enumeration \
     large-rebased-upstream large-rebased-unlanded large-alignment-bound \
     merge-main-upstream merge-main-same-file merge-main-resolution \
-    merge-main-merge-restoration merge-main-local-restoration; do
-    for route in pr default; do
+    merge-main-merge-restoration merge-main-local-restoration \
+    path-provenance-created path-provenance-replaced path-provenance-restored path-provenance-deleted; do
+    for route in pr default azure; do
       case_dir=$(make_case "history-$scenario-$route")
       write_meta "$case_dir" no-mistakes ship
       add_lsof_no_holder "$case_dir"
@@ -776,11 +788,12 @@ test_history_location_containment_matrix() {
       merged=$(cat "$case_dir/merged-sha")
       local_head=$(git -C "$case_dir/wt" rev-parse HEAD)
       case "$scenario" in
-        large-*|merge-main-*)
+        large-*|merge-main-*|path-provenance-created|path-provenance-replaced|path-provenance-restored)
           local proof_path=shared.txt
           case "$scenario" in
             merge-main-upstream|merge-main-resolution|merge-main-merge-restoration) proof_path=g.txt ;;
             merge-main-local-restoration) proof_path=f.txt ;;
+            path-provenance-*) proof_path=g.txt ;;
           esac
           [ "$(git -C "$case_dir/wt" rev-parse HEAD:"$proof_path")" != "$(git -C "$case_dir/wt" rev-parse "$merged:$proof_path")" ] \
             || fail "$scenario: fixture must require non-identical text alignment"
@@ -792,14 +805,18 @@ test_history_location_containment_matrix() {
       if [ "$route" = pr ]; then
         add_gh_pr_merged_for_head "$case_dir" "$merged" "$merged"
         append_pr_meta_url "$case_dir"
-        case "$scenario" in
-          large-*|merge-main-*) printf 'base_branch=unavailable-fallback\n' >> "$case_dir/state/task-x1.meta" ;;
-        esac
+      elif [ "$route" = azure ]; then
+        add_azure_pr_result "$case_dir" completed "$merged"
       else
         add_gh_axi_error "$case_dir"
       fi
+      if [ "$route" != default ]; then
+        case "$scenario" in
+          large-*|merge-main-*|path-provenance-*) printf 'base_branch=unavailable-fallback\n' >> "$case_dir/state/task-x1.meta" ;;
+        esac
+      fi
       case "$scenario" in
-        landed-delete|successive-upstream|one-upstream|large-rebased-upstream|merge-main-upstream|merge-main-same-file) expected=0 ;;
+        landed-delete|successive-upstream|one-upstream|large-rebased-upstream|merge-main-upstream|merge-main-same-file|path-provenance-created|path-provenance-replaced) expected=0 ;;
         *) expected=1 ;;
       esac
       rc=0
@@ -808,6 +825,10 @@ test_history_location_containment_matrix() {
       if [ "$scenario" = large-alignment-bound ]; then
         assert_grep 'text alignment exceeds the exact-proof memory bound' "$case_dir/stderr" \
           "$scenario/$route: refusal did not report bounded-computation exhaustion"
+        assert_grep 'content-landed proof unavailable' "$case_dir/stderr" \
+          "$scenario/$route: fallback lost the unavailable-proof classification"
+        assert_no_grep 'not landed' "$case_dir/stderr" \
+          "$scenario/$route: unavailable proof was mislabeled as unlanded work"
       fi
       if [ "$expected" = 1 ]; then
         assert_refusal_retained_task_state "$case_dir" "$scenario/$route" "$local_head"
@@ -817,32 +838,54 @@ test_history_location_containment_matrix() {
       fi
     done
   done
-  pass "history/location containment passes the combined 40-case matrix and independent oracles"
+  pass "history/location containment passes the combined 72-case matrix and independent oracles"
 }
 
 test_dirty_initialized_nested_submodule_refuses() {
-  local case_dir head rc
-  case_dir=$(make_case dirty-initialized-nested)
-  setup_submodule_fixture "$case_dir" >/dev/null
-  git init -q "$case_dir/vendor"
-  printf '%s\n' clean > "$case_dir/vendor/README.md"
-  git -C "$case_dir/vendor" add README.md
-  git -C "$case_dir/vendor" -c user.name=t -c user.email=t@t commit -qm "vendor baseline"
-  git -C "$case_dir/wt/libs/sdk" -c protocol.file.allow=always submodule add -q "$case_dir/vendor" vendor
-  git -C "$case_dir/wt/libs/sdk" -c user.name=t -c user.email=t@t commit -qam "nested module"
-  git -C "$case_dir/wt" -c user.name=t -c user.email=t@t commit -qam "nested pointer"
-  head=$(git -C "$case_dir/wt" rev-parse HEAD)
-  write_meta "$case_dir" no-mistakes ship
-  append_pr_meta_url "$case_dir"
-  add_gh_pr_merged_for_head "$case_dir" "$head"
-  set_submodule_ignores_all "$case_dir"
-  git -C "$case_dir/wt/libs/sdk" config submodule.vendor.ignore all
-  printf '%s\n' uncommitted > "$case_dir/wt/libs/sdk/vendor/README.md"
-  rc=0
-  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
-  expect_code 1 "$rc" "dirty nested module hidden by ignore settings must refuse"
-  assert_refusal_retained_task_state "$case_dir" nested-dirty "$head"
-  pass "dirty initialized nested submodule survives cleanup despite parent ignore settings"
+  local case_dir head rc kind nested expected
+  for kind in tracked untracked clean; do
+    case_dir=$(make_case "dirty-initialized-nested-$kind")
+    add_lsof_no_holder "$case_dir"
+    setup_submodule_fixture "$case_dir" >/dev/null
+    git init -q "$case_dir/vendor"
+    printf '%s\n' clean > "$case_dir/vendor/README.md"
+    git -C "$case_dir/vendor" add README.md
+    git -C "$case_dir/vendor" -c user.name=t -c user.email=t@t commit -qm "vendor baseline"
+    git -C "$case_dir/wt/libs/sdk" -c protocol.file.allow=always submodule add -q "$case_dir/vendor" vendor
+    git -C "$case_dir/wt/libs/sdk" -c user.name=t -c user.email=t@t commit -qam "nested module"
+    git -C "$case_dir/wt" -c user.name=t -c user.email=t@t commit -qam "nested pointer"
+    head=$(git -C "$case_dir/wt" rev-parse HEAD)
+    write_meta "$case_dir" no-mistakes ship
+    append_pr_meta_url "$case_dir"
+    add_gh_pr_merged_for_head "$case_dir" "$head"
+    set_submodule_ignores_all "$case_dir"
+    git -C "$case_dir/wt/libs/sdk" config submodule.vendor.ignore all
+    nested="$case_dir/wt/libs/sdk/vendor"
+    git -C "$nested" config status.showUntrackedFiles no
+    expected=1
+    case "$kind" in
+      tracked) printf '%s\n' uncommitted > "$nested/README.md" ;;
+      untracked)
+        printf '%s\n' uncommitted > "$nested/source.txt"
+        [ -z "$(git -C "$nested" status --porcelain)" ] || fail "untracked fixture must hide its source file"
+        [ -z "$(git -C "$case_dir/wt" status --porcelain)" ] || fail "ancestors must hide nested dirt"
+        ;;
+      clean) expected=0 ;;
+    esac
+    rc=0
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+    expect_code "$expected" "$rc" "nested $kind with ignore settings: $(cat "$case_dir/stderr")"
+    if [ "$expected" = 1 ]; then
+      assert_grep 'uncommitted changes' "$case_dir/stderr" "nested dirt did not cause refusal"
+      assert_refusal_retained_task_state "$case_dir" "nested-$kind" "$head"
+      if [ "$kind" = untracked ]; then
+        assert_grep uncommitted "$nested/source.txt" "nested untracked source was lost"
+      fi
+    else
+      assert_absent "$case_dir/state/task-x1.meta" "clean nested modules blocked cleanup"
+    fi
+  done
+  pass "nested tracked and hidden untracked work survives cleanup while clean modules permit it"
 }
 
 test_local_only_fork_remote_allows() {
@@ -1131,16 +1174,14 @@ test_azure_requires_completed_pr_and_local_containment() {
     write_meta "$case_dir" no-mistakes ship
     wt_commit_file "$case_dir" feature.txt hello
     head=$(git -C "$case_dir/wt" rev-parse HEAD)
-    if [[ "$state" != unregistered-* ]]; then
-      printf '%s\n' 'pr=https://dev.azure.com/example/Project/_git/repo/pullrequest/7' >> "$case_dir/state/task-x1.meta"
-    fi
     api_state=$state
     case "$state" in dirty|later) api_state=completed ;; esac
-    cat > "$case_dir/fakebin/az" <<SH
-#!/usr/bin/env bash
-printf '%s\n' '{"continuation_token":null,"pullRequestId":7,"status":"$api_state","mergeStatus":"succeeded","closedDate":"2026-01-01T00:00:00Z","lastMergeSourceCommit":{"commitId":"$head"},"lastMergeCommit":{"commitId":"$head"},"repository":{"id":"22222222-2222-2222-2222-222222222222","name":"repo","project":{"id":"11111111-1111-1111-1111-111111111111","name":"Project"}}}'
-SH
-    chmod +x "$case_dir/fakebin/az"
+    if [[ "$state" != unregistered-* ]]; then
+      add_azure_pr_result "$case_dir" "$api_state" "$head"
+    else
+      printf '#!/usr/bin/env bash\nexit 1\n' > "$case_dir/fakebin/az"
+      chmod +x "$case_dir/fakebin/az"
+    fi
     case "$state" in
       unreadable) printf '#!/usr/bin/env bash\nexit 1\n' > "$case_dir/fakebin/az" ;;
       dirty|later)
@@ -1208,6 +1249,73 @@ SH
     fi
   done
   pass "Azure cleanup requires completed PR and contained clean local work, even after push"
+}
+
+test_azure_completion_required_without_owned_copy() {
+  local case_dir copy state head wt rc expected
+  for copy in missing reassigned; do
+    for state in active abandoned unreadable completed; do
+      case_dir=$(make_case "azure-$copy-$state")
+      mkdir -p "$case_dir/active-home/state"
+      add_lsof_no_holder "$case_dir"
+      wt_commit_file "$case_dir" feature.txt original
+      head=$(git -C "$case_dir/wt" rev-parse HEAD)
+      wt="$case_dir/wt"
+      if [ "$copy" = missing ]; then
+        git -C "$case_dir/project" worktree move "$wt" "$case_dir/preserved-wt"
+      else
+        mkdir -p "$case_dir/pool/1"
+        git -C "$case_dir/project" worktree move "$wt" "$case_dir/pool/1/project"
+        wt="$case_dir/pool/1/project"
+        printf '{}\n' > "$case_dir/pool/treehouse-state.json"
+        printf 'task=next-task\nhome=%s\n' "$case_dir/other-home" > "$case_dir/pool/1/.fm-slot-owner"
+        git -C "$wt" checkout -qb next-task
+        printf 'other task work\n' > "$wt/untracked.txt"
+      fi
+      write_meta "$case_dir" no-mistakes ship "$wt"
+      add_azure_pr_result "$case_dir" "$state" "$head"
+      if [ "$state" = unreadable ]; then
+        printf '#!/usr/bin/env bash\nprintf "read\\n" >> "%s/azure.log"\nexit 1\n' "$case_dir" > "$case_dir/fakebin/az"
+      fi
+      printf '#!/bin/sh\nexit 0\n' > "$case_dir/state/task-x1.check.sh"
+      cp "$case_dir/state/task-x1.meta" "$case_dir/meta-before"
+      cp "$case_dir/state/task-x1.check.sh" "$case_dir/check-before"
+      cat > "$case_dir/fakebin/treehouse" <<SH
+#!/usr/bin/env bash
+printf 'return\n' >> '$case_dir/return.log'
+exit 0
+SH
+      expected=1
+      if [ "$state" = completed ]; then
+        expected=0
+      else
+        seed_backlog_in_flight "$case_dir"
+      fi
+      rc=0
+      run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+      expect_code "$expected" "$rc" "Azure $copy/$state: $(cat "$case_dir/stderr")"
+      assert_present "$case_dir/azure.log" "Azure $copy/$state skipped completion verification: $(cat "$case_dir/stderr")"
+      assert_absent "$case_dir/return.log" "Azure $copy/$state returned an unowned copy"
+      if [ "$expected" = 1 ]; then
+        cmp -s "$case_dir/meta-before" "$case_dir/state/task-x1.meta" || fail "Azure refusal changed its record"
+        cmp -s "$case_dir/check-before" "$case_dir/state/task-x1.check.sh" || fail "Azure refusal removed monitoring"
+        [ "$(backlog_row_state "$case_dir")" = in_flight ] || fail "Azure refusal closed the backlog"
+        assert_absent "$case_dir/state/task-x1.backlog-close" "Azure refusal left a replayable close"
+      else
+        assert_absent "$case_dir/state/task-x1.meta" "completed Azure task retained its record"
+        assert_absent "$case_dir/state/task-x1.check.sh" "completed Azure task retained monitoring"
+      fi
+      if [ "$copy" = reassigned ]; then
+        [ "$(git -C "$wt" symbolic-ref --short HEAD)" = next-task ] || fail "Azure cleanup detached another task"
+        [ "$(git -C "$wt" rev-parse HEAD)" = "$head" ] || fail "Azure cleanup moved another task"
+        assert_grep 'other task work' "$wt/untracked.txt" "Azure cleanup lost another task's work"
+        assert_grep 'task=next-task' "$case_dir/pool/1/.fm-slot-owner" "Azure cleanup changed another task's claim"
+      else
+        [ "$(git -C "$case_dir/preserved-wt" rev-parse HEAD)" = "$head" ] || fail "missing copy cleanup lost preserved work"
+      fi
+    done
+  done
+  pass "Azure completion protects records, monitors and backlog even without an owned copy"
 }
 
 test_azure_origin_classification_failures_preserve_work() {
@@ -1793,9 +1901,16 @@ test_pr_check_records_remote_head_when_local_lags() {
 # fetches, and preservation checks are otherwise real.
 test_content_fallback_proof_capability_boundary() {
   local mode case_dir rc head
-  for mode in contained conflict unlanded error; do
+  for mode in contained conflict unlanded error pr-error-unavailable pr-error-unlanded pr-error-contained; do
     case_dir=$(make_case "content-proof-$mode")
     write_meta "$case_dir" no-mistakes ship
+    add_lsof_no_holder "$case_dir"
+    if [ "$mode" = pr-error-unlanded ]; then
+      git -C "$case_dir/project" push -q origin main:unlanded
+      printf 'base_branch=unlanded\n' >> "$case_dir/state/task-x1.meta"
+    elif [ "$mode" = pr-error-unavailable ]; then
+      printf 'base_branch=unavailable\n' >> "$case_dir/state/task-x1.meta"
+    fi
     wt_commit_file "$case_dir" feature.txt hello "add feature"
     case "$mode" in
       conflict) land_on_origin_main "$case_dir" feature.txt different ;;
@@ -1803,12 +1918,18 @@ test_content_fallback_proof_capability_boundary() {
       *) land_on_origin_main "$case_dir" feature.txt hello ;;
     esac
     head=$(git -C "$case_dir/wt" rev-parse HEAD)
+    if [[ "$mode" = pr-error-* ]]; then
+      git -C "$case_dir/project" fetch -q origin main
+      add_gh_pr_merged_for_head "$case_dir" "$(git -C "$case_dir/project" rev-parse origin/main)"
+      append_pr_meta_url "$case_dir"
+    fi
     cat > "$case_dir/fakebin/git" <<'SH'
 #!/usr/bin/env bash
 args=("$@")
 [ "${1:-}" != --no-replace-objects ] || shift
 if [ "${1:-}" = -C ]; then shift 2; fi
-if [ "${1:-}" = rev-list ] && [ "${FM_TEST_PROOF_MODE:?}" = error ]; then
+if [ "${1:-}" = rev-list ] && { [ "${FM_TEST_PROOF_MODE:?}" = error ] ||
+    { [[ "$FM_TEST_PROOF_MODE" = pr-error-* ]] && [ ! -e "${FM_TEST_PROOF_LOG:?}" ]; }; }; then
   printf '%s\n' "$*" >> "${FM_TEST_PROOF_LOG:?}"
   echo 'fatal: unable to read commit object' >&2
   exit 128
@@ -1830,18 +1951,21 @@ SH
     rc=$?
     set -e
 
-    if [ "$mode" = contained ]; then
-      expect_code 0 "$rc" "content-proof-contained: supported containment should allow cleanup"
-      assert_present "$case_dir/treehouse.log" "content-proof-contained: cleanup never ran"
-      assert_absent "$case_dir/state/task-x1.meta" "content-proof-contained: task record survived cleanup"
+    if [ "$mode" = contained ] || [ "$mode" = pr-error-contained ]; then
+      expect_code 0 "$rc" "content-proof-$mode: supported containment should allow cleanup"
+      assert_present "$case_dir/treehouse.log" "content-proof-$mode: cleanup never ran"
+      assert_absent "$case_dir/state/task-x1.meta" "content-proof-$mode: task record survived cleanup"
+      if [ "$mode" = pr-error-contained ]; then
+        assert_present "$case_dir/proof.log" "PR proof must be unavailable before successful fallback"
+      fi
       continue
     fi
     expect_code 1 "$rc" "content-proof-$mode: teardown must refuse"
     assert_refusal_retained_task_state "$case_dir" "content-proof-$mode" "$head"
     assert_absent "$case_dir/treehouse.log" "content-proof-$mode: cleanup ran despite refusal"
     case "$mode" in
-      error)
-        assert_present "$case_dir/proof.log" "content-proof-error: the injected Git failure was never reached"
+      error|pr-error-*)
+        assert_present "$case_dir/proof.log" "content-proof-$mode: the injected Git failure was never reached"
         grep -q 'content-landed proof unavailable' "$case_dir/stderr" \
           || fail "content-proof-error: unavailable proof was reported as unlanded work"
         ! grep -q 'not landed' "$case_dir/stderr" \
@@ -6783,6 +6907,7 @@ test_no_mistakes_origin_remote_allows
 test_no_mistakes_truly_unpushed_refuses
 test_no_mistakes_mirror_only_branch_refuses
 test_azure_requires_completed_pr_and_local_containment
+test_azure_completion_required_without_owned_copy
 test_azure_origin_classification_failures_preserve_work
 test_local_only_force_overrides_unpushed
 test_secondmate_pr_registration_publishes_ready_line
