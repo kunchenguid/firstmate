@@ -24,7 +24,7 @@ test_report_surface_enforces_actor_turn_and_scope() {
   home="$TMP_ROOT/report"
   state="$home/state"
   mkdir -p "$state"
-  printf 'turn=t1\nrows=4\ntasks=alpha\nunscoped=0\nwake=signal: alpha.status\n' > "$state/.supervision-host-turn"
+  printf 'turn=t1\nrows=4\ntasks=alpha\nunscoped=0\nwake=signal: alpha.status\nposture=attended\n' > "$state/.supervision-host-turn"
 
   out=$(FM_HOME="$home" "$REPORT" --task alpha --verdict routine --summary ok 2>&1); rc=$?
   expect_code 3 "$rc" "a report outside the branch actor must be refused"
@@ -46,7 +46,7 @@ test_report_surface_enforces_actor_turn_and_scope() {
 
   out=$(FM_HOME="$home" FM_SUPERVISION_ACTOR=branch FM_BRANCH_REPORT_TURN=t1 "$REPORT" --task alpha --verdict captain --summary 'PR ready' 2>&1); rc=$?
   expect_code 0 "$rc" "an in-scope report must be recorded"
-  assert_contains "$out" "recorded seq 1 [captain]" "the report must name its store sequence"
+  assert_contains "$out" "recorded seq 1 [user outcome; compatibility verdict=captain]" "the report must name its store sequence"
   assert_grep '"task":"alpha"' "$state/branch-outcomes.jsonl" "the outcome store did not receive the report"
   assert_grep '"wake":"signal: alpha.status"' "$state/branch-outcomes.jsonl" "the report did not default its wake to the turn's wake"
   [ "$(cat "$state/.supervision-host-receipts")" = "$(printf 't1\t1\tcaptain\talpha')" ] \
@@ -62,7 +62,7 @@ test_report_surface_enforces_actor_turn_and_scope() {
   [ "$(cat "$state/.wake-queue" 2>/dev/null || true)" = "$wake_queue_before" ] \
     || fail "a silent task outcome queued a captain notification"
 
-  printf 'turn=t2\nrows=5\ntasks=\nunscoped=1\nwake=heartbeat\n' > "$state/.supervision-host-turn"
+  printf 'turn=t2\nrows=5\ntasks=\nunscoped=1\nwake=heartbeat\nposture=attended\n' > "$state/.supervision-host-turn"
   out=$(FM_HOME="$home" FM_SUPERVISION_ACTOR=branch FM_BRANCH_REPORT_TURN=t2 "$REPORT" --task fleet --verdict routine --summary quiet --silent true 2>&1); rc=$?
   expect_code 0 "$rc" "an unscoped heartbeat turn must accept a silent fleet report"
   pass "report surface: only the branch actor's current turn may report, and only on the tasks its wake names"
@@ -78,7 +78,7 @@ test_report_after_the_return_is_queued_for_main() {
   state="$home/state"
   mkdir -p "$state"
   FM_HOME="$home" "$CONTRACT" enter --words 'watch the fleet' >/dev/null 2>&1 || fail "fixture: could not record the away posture"
-  printf 'turn=t1\nrows=4\ntasks=alpha\nunscoped=0\nwake=signal: alpha.status\n' > "$state/.supervision-host-turn"
+  printf 'turn=t1\nrows=4\ntasks=alpha\nunscoped=0\nwake=signal: alpha.status\nposture=away\n' > "$state/.supervision-host-turn"
 
   out=$(FM_HOME="$home" FM_SUPERVISION_ACTOR=branch FM_BRANCH_REPORT_TURN=t1 "$REPORT" --task alpha --verdict routine --summary 'steered while away' 2>&1); rc=$?
   expect_code 0 "$rc" "a report during the away window must be recorded"

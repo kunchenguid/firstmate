@@ -453,7 +453,7 @@ test_return_brief_composes_from_record_store_and_held_set() {
   assert_contains "$out" 'dead: failed: the reproduction never compiled' "the failed task was not listed"
   assert_contains "$out" '4 routine outcome(s) recorded' "the routine outcome count was not reported"
   assert_contains "$out" 'other: resent the steer; worker resumed' "the routine outcome was not listed"
-  assert_contains "$out" 'Cost: 6 supervision outcome(s) recorded (4 routine, 2 captain); 3 task(s) live at return.' "the cost line is wrong"
+  assert_contains "$out" 'Cost: 6 supervision outcome(s) recorded (4 routine, 2 user-visible); 3 task(s) live at return.' "the cost line is wrong"
   assert_contains "$out" 'firstmate-actionable blocker: other [key=dep]' "the unreached blocker did not gate"
   assert_contains "$out" 'firstmate-actionable blocker: fix-windows [key=token]' "a captain outcome incorrectly exempted an open blocker"
   grep -F "$(printf 'contract\t')" "$gate" >/dev/null || fail "the gate did not retain the posture-record window"
@@ -503,8 +503,8 @@ test_return_brief_points_at_the_drain_on_a_host_home_only() {
       "$fakebin/$harness" -c '"$0" begin 2>&1' "$dir/bin/fm-afk-return.sh") || fail "$harness: the return did not clear: $out"
     assert_contains "$out" '7 outcome(s) handled by the away session (6 routine, 1 escalated above)' "$harness: the brief must count the window's outcomes"
     if [ "$harness" = claude ]; then
-      assert_contains "$out" "  1 captain outcome(s) escalated by the away session, presented in the drain's BRANCH OUTCOMES section" \
-        "a host home's brief must point at the drain for its captain outcomes"
+      assert_contains "$out" "  1 user outcome(s) escalated by the away session, presented in the drain's BRANCH OUTCOMES section" \
+        "a host home's brief must point at the drain for its user outcomes"
       assert_contains "$out" "the drain's BRANCH OUTCOMES section presents the visible outcomes" "a host home's brief must point at the visible outcomes in the drain"
       assert_not_contains "$out" 'PR ready for review' "a host home's brief must leave the captain outcome to the drain"
       assert_not_contains "$out" 'routine 6' "a host home's brief must leave the routine outcomes to the drain"
@@ -585,8 +585,8 @@ EOF
   [ -f "$gate" ] || fail "a drain that could not record its outcomes did not retain the return gate"
   assert_contains "$out" 'BRANCH OUTCOMES: the store could not record this presentation' "the return did not surface the drain's failure"
   assert_contains "$out" 'durable wake drain failed; retry catch-up before ordinary work' "the gate did not name the drain failure"
-  assert_contains "$out" '1 captain outcome(s) escalated by the away session, awaiting a successful drain' \
-    "a failed drain's brief must say its captain outcomes await a successful drain"
+  assert_contains "$out" '1 user outcome(s) escalated by the away session, awaiting a successful drain' \
+    "a failed drain's brief must say its user outcomes await a successful drain"
   assert_contains "$out" 'visible outcomes awaiting a successful drain' "a failed drain's brief must say its visible outcomes await a successful drain"
   assert_not_contains "$out" 'presented in the drain' "a failed drain's brief must not claim the drain presented its outcomes"
   assert_not_contains "$out" 'section presents the visible outcomes' "a failed drain's brief must not claim the drain presents its outcomes"
