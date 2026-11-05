@@ -21,11 +21,18 @@
 # form preserves stdout, stderr, and exit status; the checked form discards
 # stderr, while fm_nm_run keeps the fail-open query contract for read-only callers.
 # The no-mistakes forms route host reads through the opt-in home resolver below.
-# Their optional --deadline epoch caps both resolver and command reads at the
+# The inherited FM_READ_DEADLINE caps both resolver and command reads at the
 # remaining whole seconds and refuses the command after the deadline expires.
 fm_nm_bounded() {  # <dir> <timeout_secs> <command> <args...>
-  local dir=$1 timeout_secs=$2 have_timeout=none
+  local dir=$1 timeout_secs=$2 have_timeout=none deadline=${FM_READ_DEADLINE:-} remaining
   shift 2
+  if [ -n "$deadline" ]; then
+    case "$deadline" in 0*|*[!0-9]*) return 124 ;; esac
+    [ "${#deadline}" -le 18 ] || return 124
+    remaining=$((deadline - $(date +%s)))
+    [ "$remaining" -gt 0 ] || return 124
+    [ "$remaining" -ge "$timeout_secs" ] || timeout_secs=$remaining
+  fi
   if command -v timeout >/dev/null 2>&1; then have_timeout=timeout
   elif command -v gtimeout >/dev/null 2>&1; then have_timeout=gtimeout
   elif command -v perl >/dev/null 2>&1; then have_timeout=perl
@@ -55,8 +62,8 @@ fm_nm_bounded() {  # <dir> <timeout_secs> <command> <args...>
 # resolver that fails, times out, or prints anything else, nothing is resolved
 # and every read uses the ambient home exactly as without the hook.
 # Prints the resolved home, or nothing. Never starts a daemon.
-fm_nm_home_resolver_home() {  # <worktree> [timeout_secs]
-  local wt=$1 timeout_secs=${2:-5} cfg cmd out
+fm_nm_home_resolver_home() {  # <worktree>
+  local wt=$1 timeout_secs=5 cfg cmd out
   [ -z "${NM_HOME:-}" ] || return 0
   cfg=${FM_CONFIG_OVERRIDE:-${FM_HOME:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}/config}/nm-home-resolver
   [ -f "$cfg" ] || return 0
@@ -93,28 +100,11 @@ fm_nm_home_resolver_applies() {  # <no-mistakes args...>
   return 1
 }
 
-fm_nm_run_bounded() {  # <dir> <timeout_secs> [--deadline epoch] <args...>
-  local dir=$1 timeout_secs=$2 home='' deadline='' remaining resolver_timeout=5
+fm_nm_run_bounded() {  # <dir> <timeout_secs> <args...>
+  local dir=$1 timeout_secs=$2 home=''
   shift 2
-  if [ "${1:-}" = --deadline ]; then
-    deadline=${2:-}
-    [ "$#" -ge 2 ] || return 1
-    case "$deadline" in 0*|*[!0-9]*) return 1 ;; esac
-    [ "${#deadline}" -le 18 ] || return 1
-    shift 2
-  fi
-  if [ -n "$deadline" ]; then
-    remaining=$((deadline - $(date +%s)))
-    [ "$remaining" -gt 0 ] || return 1
-    [ "$remaining" -ge "$resolver_timeout" ] || resolver_timeout=$remaining
-  fi
   if fm_nm_home_resolver_applies "$@"; then
-    home=$(fm_nm_home_resolver_home "$dir" "$resolver_timeout")
-  fi
-  if [ -n "$deadline" ]; then
-    remaining=$((deadline - $(date +%s)))
-    [ "$remaining" -gt 0 ] || return 1
-    [ "$remaining" -ge "$timeout_secs" ] || timeout_secs=$remaining
+    home=$(fm_nm_home_resolver_home "$dir")
   fi
   if [ -n "$home" ]; then
     NM_HOME=$home fm_nm_bounded "$dir" "$timeout_secs" no-mistakes "$@"

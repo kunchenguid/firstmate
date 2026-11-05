@@ -44,8 +44,7 @@
 # before that deadline to leave room for the cadence scan's first visit.
 # Each pass resumes after its own last visited child on its next invocation.
 # The scan enforces that budget itself through a whole-second deadline, and the
-# first due child of every scan is always visited with at least a one-second
-# state-read bound: whole-second arithmetic can otherwise round a small budget
+# first due child of every scan is always visited: whole-second arithmetic can otherwise round a small budget
 # to zero mid-scan, and an invocation that exits having visited nothing would
 # advance the durable cursor past a child it never examined. A process-group
 # kill one second after the budget remains as a backstop for a scan wedged in
@@ -80,7 +79,7 @@
 # through fm_busy_classify_meta (bin/fm-busy-lib.sh); an unreadable or unknown
 # answer is never read as proof the agent is gone or idle and leaves the
 # verdict unchanged. Both reads share the scan budget left after the state
-# read (at least one second, like the first visit above), and hitting that
+# read (at least one second), and hitting that
 # bound ends the visit like a state-read timeout.
 # Working, paused, parked, blocked, unknown, persistent secondmates, and
 # captain-held work retain their existing supervision semantics.
@@ -523,9 +522,8 @@ claim_inactive_report_for_ledger() { # <task> <incarnation> <state> <ledger-fing
 # the child's meta lock. Returns 0 when the line is delivered, already
 # delivered, or nothing is owed, and 1 when it is owed but the parent channel
 # could not be written (the notice is queued once per record).
-report_child_ledger_locked() { # <id> <meta> [<destination-deadline>]
+report_child_ledger_locked() { # <id> <meta>
   local id=$1 meta=$2 status last previous state note pr mode yolo data incarnation fingerprint predecessor_head outcome_key line
-  local destination_deadline=${3:-}
   status="$STATE/$id.status"
   last=$(child_terminal_ledger_line "$status") || return 0
   state=$(status_line_verb "$last")
@@ -536,7 +534,7 @@ report_child_ledger_locked() { # <id> <meta> [<destination-deadline>]
     && [ ! -f "$(record_path "$fingerprint" pending)" ] \
     && ! fm_dod_accept_ship_done "$(meta_field "$meta" kind)" "$(meta_field "$meta" mode)" \
       "$(meta_field "$meta" worktree)" "$(meta_field "$meta" project)" "$last" \
-      "$STATE" "$id" "$meta" meta-locked "$destination_deadline" >/dev/null; then
+      "$STATE" "$id" "$meta" meta-locked >/dev/null; then
     return 0
   fi
   outcome_key="child-outcome-$id-$state-${fingerprint:0:8}"
@@ -578,6 +576,7 @@ report_child_ledger_locked() { # <id> <meta> [<destination-deadline>]
 # not make every poll start again at the same stalled children.
 ledger_pass() {
   local deadline=$1 meta id lock cursor range remaining marker="$STATE/.terminal-outcome-ledger-scan"
+  local FM_READ_DEADLINE=$deadline
   cursor=$(scan_marker_cursor "$marker")
   valid_id "$cursor" || cursor=''
   for range in after through; do
@@ -608,7 +607,7 @@ ledger_pass() {
         fm_lock_release "$lock"
         return 1
       fi
-      report_child_ledger_locked "$id" "$meta" "$deadline" || true
+      report_child_ledger_locked "$id" "$meta" || true
       fm_lock_release "$lock"
     done
   done
@@ -670,7 +669,7 @@ reconcile_direct_child_locked() { # <id> <meta> <secondmate-id-or-empty> <timeou
   age=$(last_activity_age "$meta" "$status" "$turn")
   [ "$age" -ge "$FM_INACTIVE_RECONCILE_SECS" ] || return 0
   started=$(date +%s)
-  state_line=$(fm_run_timed "$timeout" env FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_CREW_STATE_NO_FORGE=1 \
+  state_line=$(env FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_CREW_STATE_NO_FORGE=1 \
     "$CREW_STATE_BIN" "$id" 2>/dev/null) || state_rc=$?
   [ "$state_rc" -ne 124 ] || return 3
   last=$(last_status_line "$status")
@@ -765,9 +764,11 @@ scan_pass() { # <cursor> <after|through> <deadline> <secondmate-id-or-empty>
 
 scan() {
   local startup=${1:-0} self='' cursor deadline ledger_deadline due=1 rc=0 marker_rc=0
+  local FM_READ_DEADLINE
   mkdir -p "$STATE" "$OUTCOME_DIR" || return 1
   [ ! -L "$OUTCOME_DIR" ] || return 1
   deadline=$(( $(date +%s) + FM_INACTIVE_RECONCILE_BUDGET_SECS ))
+  export FM_READ_DEADLINE=$deadline
   ledger_deadline=$deadline
   if [ "$startup" != 1 ] && [ "$(scan_marker_age)" -lt "$FM_INACTIVE_RECONCILE_SECS" ]; then
     due=0

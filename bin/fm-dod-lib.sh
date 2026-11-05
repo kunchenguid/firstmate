@@ -906,7 +906,7 @@ fm_dod_recorded_pr_on_forge() {  # <state> <id> <meta> <mode> <url>
 }
 
 fm_dod_read_timeout() {
-  local timeout=$1 deadline=${2:-} remaining
+  local timeout=$1 deadline=${FM_READ_DEADLINE:-} remaining
   if [ -n "$deadline" ]; then
     case "$deadline" in
       0*|*[!0-9]*) printf '%s\n' 'PR destination deadline is invalid' >&2; return 1 ;;
@@ -926,12 +926,12 @@ fm_dod_read_timeout() {
 # is the only place a refs/for/ push leaves it, and it must already be an object
 # in the worktree - the publish that made it ran there - so a patch set pushed
 # from elsewhere matches only once this copy holds it.
-fm_dod_gerrit_change_carries_head() {  # <worktree> <url> [deadline]
-  local wt=$1 url=$2 deadline=${3:-} revision head_tree revision_tree lib read_timeout
+fm_dod_gerrit_change_carries_head() {  # <worktree> <url>
+  local wt=$1 url=$2 revision head_tree revision_tree lib read_timeout
   fm_pr_url_parse "$url" || return 1
   [ "$FM_PR_PROVIDER" = gerrit ] || return 1
   lib="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/fm-pr-lib.sh"
-  read_timeout=$(fm_dod_read_timeout 10 "$deadline") || return 1
+  read_timeout=$(fm_dod_read_timeout 10) || return 1
   # shellcheck disable=SC2016  # The inner script expands after bash -c receives positional args.
   revision=$(fm_run_timed "$read_timeout" bash -c '
     . "$1"
@@ -942,7 +942,7 @@ fm_dod_gerrit_change_carries_head() {  # <worktree> <url> [deadline]
   head_tree=$(git -C "$wt" rev-parse --verify --quiet 'HEAD^{tree}' 2>/dev/null) || return 1
   revision_tree=$(git -C "$wt" rev-parse --verify --quiet "$revision^{tree}" 2>/dev/null) || return 1
   [ -n "$head_tree" ] && [ "$head_tree" = "$revision_tree" ] \
-    && fm_dod_read_timeout 10 "$deadline" >/dev/null
+    && fm_dod_read_timeout 10 >/dev/null
 }
 
 # 0 when the worker copy holds the result of its own passed no-mistakes run:
@@ -956,13 +956,13 @@ fm_dod_gerrit_change_carries_head() {  # <worktree> <url> [deadline]
 # are compared rather than ancestry because the publish stamps a Change-Id and
 # rewrites the branch's messages. An unreadable status refuses, as an unreadable
 # change does. 1 when refused; stdout then holds a one-line reason.
-fm_dod_nm_custody_returned() {  # <worktree> [deadline]
-  local wt=$1 deadline=${2:-} out outcome code pipeline_head head_tree pipeline_tree read_timeout
-  if ! read_timeout=$(fm_dod_read_timeout 15 "$deadline" 2>&1); then
+fm_dod_nm_custody_returned() {  # <worktree>
+  local wt=$1 out outcome code pipeline_head head_tree pipeline_tree read_timeout
+  if ! read_timeout=$(fm_dod_read_timeout 15 2>&1); then
     printf '%s\n' "$read_timeout"
     return 1
   fi
-  if ! out=$(fm_nm_run_checked "$wt" "$read_timeout" --deadline "$deadline" axi status) || ! printf '%s\n' "$out" | grep -q '^run:'; then
+  if ! out=$(fm_nm_run_checked "$wt" "$read_timeout" axi status) || ! printf '%s\n' "$out" | grep -q '^run:'; then
     printf '%s\n' "the no-mistakes run for this copy could not be read, so its fixes cannot be proven recovered"
     return 1
   fi
@@ -990,7 +990,7 @@ fm_dod_nm_custody_returned() {  # <worktree> [deadline]
     printf '%s\n' "this copy's HEAD does not carry the no-mistakes run's result ${pipeline_head:-(unknown head)}, so the pipeline's fixes are not in the published work"
     return 1
   fi
-  if ! read_timeout=$(fm_dod_read_timeout 15 "$deadline" 2>&1); then
+  if ! read_timeout=$(fm_dod_read_timeout 15 2>&1); then
     printf '%s\n' "$read_timeout"
     return 1
   fi
@@ -1020,10 +1020,10 @@ fm_dod_named_head_reachable_outside_worktree() {  # <worktree> <project> <mode> 
 # (bin/fm-fleet-snapshot.sh), so the marker is read from <state>.
 # A supported PR URL also requires task metadata and a matching live destination;
 # published-head proof alone cannot supply that destination.
-# An optional destination deadline caps readiness reads at the scan budget remaining.
-fm_dod_accept_ship_done() {  # <kind> <mode> <worktree> <project> <line> [<state> <id> <meta> [meta-locked [destination-deadline]]]
+# The inherited FM_READ_DEADLINE caps readiness reads at the scan budget remaining.
+fm_dod_accept_ship_done() {  # <kind> <mode> <worktree> <project> <line> [<state> <id> <meta> [meta-locked]]
   local kind=$1 mode=$2 wt=$3 project=$4 line=$5 state=${6:-} id=${7:-} meta=${8:-} url sha gerrit captured=''
-  local destination_deadline=${10:-} read_timeout
+  local read_timeout
   fm_dod_should_gate_ship_done "$kind" "$mode" "$line" || return 0
   if [ "$mode" = local-only ] && [ -n "$meta" ]; then
     captured=$(cat "$meta") || return 1
@@ -1044,7 +1044,7 @@ fm_dod_accept_ship_done() {  # <kind> <mode> <worktree> <project> <line> [<state
     # the forge read so unavailable proof refuses only this child's claim.
     # Use one timer at the read, not a nested timer around the caller: killing
     # an inner watchdog first can orphan its separately grouped forge command.
-    if ! read_timeout=$(fm_dod_read_timeout 5 "$destination_deadline" 2>&1); then
+    if ! read_timeout=$(fm_dod_read_timeout 5 2>&1); then
       printf '%s\n' "$read_timeout"
       return 1
     fi
@@ -1058,7 +1058,7 @@ fm_dod_accept_ship_done() {  # <kind> <mode> <worktree> <project> <line> [<state
       printf '%s\n' "${captured:-PR destination readiness could not be verified}"
       return 1
     fi
-    if ! captured=$(fm_dod_read_timeout 5 "$destination_deadline" 2>&1); then
+    if ! captured=$(fm_dod_read_timeout 5 2>&1); then
       printf '%s\n' "$captured"
       return 1
     fi
@@ -1088,9 +1088,9 @@ fm_dod_accept_ship_done() {  # <kind> <mode> <worktree> <project> <line> [<state
   if [ "$gerrit" = 1 ]; then
     case "$mode" in
       no-mistakes|'')
-        fm_dod_nm_custody_returned "$wt" "$destination_deadline" || return 1 ;;
+        fm_dod_nm_custody_returned "$wt" || return 1 ;;
     esac
-    if fm_dod_gerrit_change_carries_head "$wt" "$url" "$destination_deadline"; then
+    if fm_dod_gerrit_change_carries_head "$wt" "$url"; then
       return 0
     fi
     printf '%s\n' "named head $sha is not the published content of $url: the change's current patch set does not carry this copy's HEAD tree, or it could not be read"

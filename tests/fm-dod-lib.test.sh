@@ -99,12 +99,12 @@ SH
   for mode in direct-PR no-mistakes ''; do
     for deadline in '' "$(( $(date +%s) + 10 ))"; do
       : > "$dir/gerrit.calls"
-      PATH="$dir/bin:$PATH" FM_REAL_DATE="$real_date" FM_CONFIG_OVERRIDE="$dir/config" NM_HOME='' \
+      PATH="$dir/bin:$PATH" FM_READ_DEADLINE="$deadline" FM_REAL_DATE="$real_date" FM_CONFIG_OVERRIDE="$dir/config" NM_HOME='' \
         FM_GERRIT_CALLS="$dir/gerrit.calls" FM_NM_CALLS="$dir/nm.calls" \
         FM_STALLED_READ=none FM_RESOLVED_HOME="$dir" \
         FM_PUBLISHED_HEAD="$published_head" \
         fm_dod_accept_ship_done ship "$mode" "$wt" "$repo" "done: PR $url published for review" \
-        "$dir" task "$meta" meta-locked "$deadline" \
+        "$dir" task "$meta" meta-locked \
         || fail "matching Gerrit readiness was refused for mode '$mode'"
     done
   done
@@ -117,13 +117,13 @@ SH
     deadline=$((clock_start + budget))
     start=$(date +%s)
     rc=0
-    out=$(PATH="$dir/bin:$PATH" FM_REAL_DATE="$real_date" FM_READ_CLOCK="$dir/clock" \
+    out=$(PATH="$dir/bin:$PATH" FM_READ_DEADLINE="$deadline" FM_REAL_DATE="$real_date" FM_READ_CLOCK="$dir/clock" \
       FM_CONFIG_OVERRIDE="$dir/config" NM_HOME='' \
       FM_GERRIT_CALLS="$dir/gerrit.calls" FM_NM_CALLS="$dir/nm.calls" \
       FM_STALLED_READ="$stalled" FM_RESOLVED_HOME="$dir" \
       FM_PUBLISHED_HEAD="$published_head" \
       fm_dod_accept_ship_done ship no-mistakes "$wt" "$repo" "done: PR $url published for review" \
-      "$dir" task "$meta" meta-locked "$deadline") || rc=$?
+      "$dir" task "$meta" meta-locked) || rc=$?
     elapsed=$(( $(date +%s) - start ))
     [ "$rc" -ne 0 ] || fail "Gerrit $stalled accepted proof after the scan deadline: $out"
     [ "$elapsed" -lt "$((budget + 3))" ] \
@@ -142,9 +142,9 @@ SH
   done
   for deadline in invalid 00 9999999999999999999 "$(date +%s)"; do
     : > "$dir/gerrit.calls"
-    if PATH="$dir/bin:$PATH" FM_REAL_DATE="$real_date" FM_GERRIT_CALLS="$dir/gerrit.calls" \
+    if PATH="$dir/bin:$PATH" FM_READ_DEADLINE="$deadline" FM_REAL_DATE="$real_date" FM_GERRIT_CALLS="$dir/gerrit.calls" \
       fm_dod_accept_ship_done ship direct-PR "$wt" "$repo" "done: PR $url published for review" \
-      "$dir" task "$meta" meta-locked "$deadline" >/dev/null; then
+      "$dir" task "$meta" meta-locked >/dev/null; then
       fail "Gerrit readiness accepted deadline '$deadline'"
     fi
     [ ! -s "$dir/gerrit.calls" ] || fail 'an invalid or expired deadline started a forge read'
