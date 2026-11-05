@@ -28,6 +28,9 @@
 #   stale_escalate_secs    idle seconds before a stale pane escalates
 #   max_fix_rounds         validation fix rounds a task may spend before the
 #                           remainder becomes follow-up work
+#   brief_gate_policy      1 = include the validation gate-policy section in
+#                           scaffolded ship briefs (0 = off, the shipped
+#                           default; the shared brief stays captain-agnostic)
 #
 # Every knob defaults to the shipped behaviour when the file is absent, so a
 # home that never writes this file behaves exactly as before.
@@ -37,7 +40,7 @@ fm_supervision_tuning_int() {
   local v=${1:-} fallback=${2:-0}
   case "$v" in
     ''|*[!0-9]*) printf '%s\n' "$fallback" ;;
-    *) printf '%s\n' "$v" ;;
+    *) printf '%s\n' "$((10#$v))" ;;
   esac
 }
 
@@ -48,7 +51,17 @@ fm_supervision_tuning_int() {
 # shipped defaults.
 fm_supervision_tuning_load() {
   local cfg line key val
-  cfg="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}/supervision-tuning"
+  # A set -u caller with neither override nor FM_HOME set must not abort here:
+  # the loader is sourced by every surface that reads the tuning file, and an
+  # unset home simply means there is no tuning file to read.
+  if [ -n "${FM_CONFIG_OVERRIDE:-}" ]; then
+    cfg=$FM_CONFIG_OVERRIDE
+  elif [ -n "${FM_HOME:-}" ]; then
+    cfg=$FM_HOME/config
+  else
+    return 0
+  fi
+  cfg=$cfg/supervision-tuning
   [ -f "$cfg" ] || return 0
   while IFS= read -r line || [ -n "$line" ]; do
     line="${line%%#*}"
@@ -62,6 +75,9 @@ fm_supervision_tuning_load() {
     val="${val#"${val%%[![:space:]]*}"}"
     val="${val%"${val##*[![:space:]]}"}"
     case "$val" in ''|*[!0-9]*) continue ;; esac
+    # Normalize a leading-zero value (e.g. "090") to decimal before any caller
+    # does Bash arithmetic with it: $((...)) would read it as invalid octal.
+    val=$((10#$val))
     case "$key" in
       wedge_max_escalations)
         [ -n "${FM_WEDGE_MAX_ESCALATIONS:-}" ] || FM_WEDGE_MAX_ESCALATIONS=$val ;;
@@ -73,6 +89,8 @@ fm_supervision_tuning_load() {
         [ -n "${FM_STALE_ESCALATE_SECS:-}" ] || FM_STALE_ESCALATE_SECS=$val ;;
       max_fix_rounds)
         [ -n "${FM_MAX_FIX_ROUNDS:-}" ] || FM_MAX_FIX_ROUNDS=$val ;;
+      brief_gate_policy)
+        [ -n "${FM_BRIEF_GATE_POLICY:-}" ] || FM_BRIEF_GATE_POLICY=$val ;;
       *) continue ;;
     esac
   done < "$cfg"

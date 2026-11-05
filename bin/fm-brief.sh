@@ -655,19 +655,19 @@ IFS= read -r -d '' TASK_SECTION <<'EOF' || true
 EOF
 TASK_SECTION=${TASK_SECTION%$'\n'}
 
-# Validation-gate policy for a ship brief.
+# Validation-gate policy for a ship brief (OPT-IN).
 #
-# Every validation round that parks for a decision costs a full extra round of
-# the most expensive step in the pipeline, and a round that answers ONE finding
-# per round multiplies that cost by the finding count. The brief therefore
-# states, before the run starts, how many rounds may be spent, that every
-# finding is answered at once, and which recurring finding classes are already
-# answered - so the run asks the captain only about a decision only the captain
-# can make.
+# This section is NOT part of the shared, always-on captain-agnostic brief:
+# always shipping it made the brief read as a new default and pre-approved
+# scope changes beyond a task's ask. A home that wants the cost guidance turns
+# it on locally via config/supervision-tuning (brief_gate_policy=1) or the
+# FM_BRIEF_GATE_POLICY environment variable; the shipped template omits the
+# section entirely.
 #
 # The fix-round ceiling is home-local tuning (config/supervision-tuning,
 # max_fix_rounds), defaulting to 2.
 FIX_ROUNDS=$(fm_supervision_tuning_int "${FM_MAX_FIX_ROUNDS:-}" 2)
+GATE_POLICY_ENABLED=$(fm_supervision_tuning_int "${FM_BRIEF_GATE_POLICY:-}" 0)
 IFS= read -r -d '' GATE_POLICY_SECTION <<EOF || true
 # Validation gate policy
 - Answer EVERY finding the validation round raises IN ONE response, batched by class, each with its
@@ -676,17 +676,15 @@ IFS= read -r -d '' GATE_POLICY_SECTION <<EOF || true
 - Spend at most $FIX_ROUNDS fix rounds on this run's own findings. If the last allowed round still
   leaves findings, STOP the round loop: commit what you have, list the remaining findings
   explicitly as follow-up work in the PR body, and continue. Another round is not a fix; it is cost.
-- These classes are ALREADY answered for this task and must NOT come back as a gate:
-  * a deviation from the brief or from the intent: disclose it in the PR body and continue;
-  * a refactor, rename, or style change the review suggests but the task did not ask for: skip it and
-    list it as follow-up work;
-  * a missing campaign number, a null Sharpe, or an empty cell: that is a measurement result, not a
-    defect - report it as such;
-  * a promotion or graduation criterion: apply the registered bar exactly as written, do not re-ask.
 - A genuine gate is a decision only the captain can make: a product choice, a destructive action, or
   new spend. Everything else is yours to decide and record.
 EOF
 GATE_POLICY_SECTION=${GATE_POLICY_SECTION%$'\n'}
+# Collapsed to empty when the home has not opted in, so the shared template
+# stays byte-identical to the pre-tuning brief.
+if [ "$GATE_POLICY_ENABLED" -le 0 ]; then
+  GATE_POLICY_SECTION=
+fi
 
 # One shared string keeps the ship and scout infrastructure rule identical.
 # Rule 2 governs file edits, so it does not prohibit pool administration.

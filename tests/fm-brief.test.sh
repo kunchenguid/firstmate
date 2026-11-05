@@ -459,6 +459,42 @@ test_faster_paths_use_configured_authority_without_stacked_review() {
 # A PR-based ship must not report done on a draft, which cannot be merged; a
 # lane that deliberately holds a draft declares a wait instead. local-only opens
 # no PR, so it must not carry the requirement.
+# The validation gate-policy section is OPT-IN: the shared, always-on ship
+# brief omits it entirely unless the home enables it through the tuning file
+# (brief_gate_policy=1) or FM_BRIEF_GATE_POLICY. The enabled brief keeps the
+# batched-findings and fix-round-ceiling guidance but must NOT carry the
+# pre-approved deviation class or domain-specific examples: those belong in a
+# home's own brief include, not the shared captain-agnostic surface.
+test_brief_gate_policy_is_opt_in() {
+  local home brief
+  home="$TMP_ROOT/gate-policy-home"
+  mkdir -p "$home/data" "$home/config"
+
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-gate-off some-proj --mode no-mistakes >/dev/null 2>&1 \
+    || fail "a ship brief without the gate policy opt-in should still scaffold"
+  brief="$home/data/brief-gate-off/brief.md"
+  assert_no_grep "# Validation gate policy" "$brief" \
+    "the default ship brief must omit the validation gate-policy section"
+  assert_no_grep "Answer EVERY finding" "$brief" \
+    "the default ship brief must omit the batched-findings policy"
+
+  printf 'brief_gate_policy=1\n' > "$home/config/supervision-tuning"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-gate-on some-proj --mode no-mistakes >/dev/null 2>&1 \
+    || fail "a ship brief with brief_gate_policy=1 should still scaffold"
+  brief="$home/data/brief-gate-on/brief.md"
+  assert_grep "# Validation gate policy" "$brief" \
+    "brief_gate_policy=1 must include the validation gate-policy section"
+  assert_grep "Answer EVERY finding" "$brief" \
+    "the enabled gate-policy section must keep the batched-findings policy"
+  assert_grep "Spend at most 2 fix rounds" "$brief" \
+    "the enabled gate-policy section must state the max_fix_rounds ceiling"
+  assert_no_grep "ALREADY answered" "$brief" \
+    "the gate-policy section must not pre-approve deviation classes"
+  assert_no_grep "campaign number" "$brief" \
+    "the gate-policy section must not carry domain-specific examples"
+  pass "fm-brief.sh: the validation gate-policy section is opt-in via brief_gate_policy"
+}
+
 test_pr_based_dod_requires_non_draft() {
   local home mode id brief
   home="$TMP_ROOT/draft-dod-home"
@@ -1703,6 +1739,7 @@ test_faster_paths_use_configured_authority_without_stacked_review
 test_no_mistakes_dod_wording
 test_no_mistakes_dod_green_detection
 test_pr_based_dod_requires_non_draft
+test_brief_gate_policy_is_opt_in
 test_ask_user_escalation_format
 test_ship_project_memory_wording
 test_herdr_lab_contract_is_explicit_and_complete

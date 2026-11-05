@@ -1064,10 +1064,11 @@ An absent file leaves every knob at the shipped default, so a home that never wr
 The keys, with their environment-variable overrides and shipped defaults:
 
 - `wedge_max_escalations` (`FM_WEDGE_MAX_ESCALATIONS`, default 0 = cap off): the wedge-escalation ceiling the [wedge ladder](architecture.md) describes and the [environment variables](#environment-variables) section owns in detail.
-- `escalate_batch_secs` (`FM_ESCALATE_BATCH_SECS`, default 0 = flush immediately): buffer window for batched escalation digests.
+- `escalate_batch_secs` (`FM_ESCALATE_BATCH_SECS`, default 90, settable to 0 = flush immediately): buffer window for batched escalation digests.
 - `idle_poll_secs` (`FM_IDLE_POLL`, default 0 = off): the slow poll cadence while no crew pane shows live work; the watcher still polls, only less often, and any live crew work returns the fast `FM_POLL` cadence at once.
 - `stale_escalate_secs` (`FM_STALE_ESCALATE_SECS`): the same escalation threshold the [environment variables](#environment-variables) section owns; this file is only another way to set it.
-- `max_fix_rounds` (`FM_MAX_FIX_ROUNDS`, default 2): the validation fix rounds a ship brief allows before the round loop must stop and list the remaining findings as follow-up work; `bin/fm-brief.sh` states the ceiling in the brief's `# Validation gate policy` section, which also tells the worker to answer every finding in one response and pre-answers the recurring finding classes (brief deviations, unrequested refactors, measurement results, registered promotion bars) so they never come back as a gate.
+- `max_fix_rounds` (`FM_MAX_FIX_ROUNDS`, default 2): the validation fix rounds a ship brief allows before the round loop must stop and list the remaining findings as follow-up work.
+- `brief_gate_policy` (`FM_BRIEF_GATE_POLICY`, default 0 = off): 1 includes the `# Validation gate policy` section in scaffolded ship briefs, telling the worker to answer every finding in one response and to stop the round loop at the `max_fix_rounds` ceiling. The section is opt-in, so the shared captain-agnostic brief carries no validation policy unless this home asks for it.
 
 The tuning file is a home-local policy file and is not inherited by secondmate homes.
 
@@ -3378,7 +3379,8 @@ FM_GUARD_READ_ONLY=0    # internal/read-only guard mode: keep alarms but suppres
 FM_GUARD_CONTINUE_LINE='This is a supervision warning only; the guarded operation WILL still run.'   # banner continuation line; fm-send.sh overrides it to name the requested message specifically
 FM_POLL=15              # seconds between watcher poll cycles
 FM_IDLE_POLL=0          # slow watcher poll cadence while no crew pane shows live work; usually set as idle_poll_secs in config/supervision-tuning; 0 keeps the FM_POLL cadence (see the "Supervision tuning (config/supervision-tuning)" section above)
-FM_MAX_FIX_ROUNDS=      # validation fix-round ceiling bin/fm-brief.sh states in a ship brief's # Validation gate policy; usually set as max_fix_rounds in config/supervision-tuning; default 2
+FM_MAX_FIX_ROUNDS=      # validation fix-round ceiling a brief_gate_policy=1 ship brief states; usually set as max_fix_rounds in config/supervision-tuning; default 2
+FM_BRIEF_GATE_POLICY=   # 1 opts this home into the # Validation gate policy section in scaffolded ship briefs; usually set as brief_gate_policy in config/supervision-tuning; default 0 (section omitted)
 FM_HOME_SUMMARY_INTERVAL=300   # seconds before a live watcher refreshes this home's state/home-summary.json even without a status signal; invalid or zero values use 300
 FM_HOME_SUMMARY_TIMEOUT=60     # seconds bounding the complete best-effort home-summary refresh, including lock acquisition, validation, atomic publication, and worker-side failure logging; invalid or zero values use 60
 FM_HOME_SUMMARY_ERROR_LOG_MAX_BYTES=65536   # approximate size cap for state/.home-summary-refresh.log before it is trimmed to the newest 200 lines; invalid or zero values use 65536
