@@ -34,7 +34,7 @@ It never reads report bodies, review artifacts, terminal output, or chat.
 | Subcommand | What it does | Details |
 | --- | --- | --- |
 | `hold` | Creates or reuses a task and holds it for the captain. | [Creating a hold](#creating-a-hold-hold) |
-| `answer` | Records the captain's exact words and resolves the call. | [Answering a call](#answering-a-call-answer) |
+| `answer` | Records a decision with its declared source and resolves the call. | [Answering a call](#answering-a-call-answer) |
 | `complete` | Records the reviewed captain-held task ids in the originating task's metadata. | [Recording a reviewed inventory](#recording-a-reviewed-inventory-complete) |
 | `verify` | Read-only check that scout teardown runs before removing source state. | [Checking before scout teardown](#checking-before-scout-teardown-verify) |
 | `open` | Read-only check of whether a row is still an open captain call. | [Cleanup never closes a captain call](#cleanup-never-closes-a-captain-call) |
@@ -80,19 +80,22 @@ Repeat and edge cases:
 
 ### Answering a call (`answer`)
 
-The `answer` subcommand records the captain's exact words and resolves the call in the same act.
+The `answer` subcommand records the supplied decision and resolves the call in the same act.
 
 | Form | Effect |
 | --- | --- |
 | `answer` | Closes a question-shaped call. |
 | `answer --release` | Frees a captain-gated work item to proceed without completing it. |
 
-It requires a non-empty captain decision file of at most 8192 bytes.
+It requires a non-empty decision file of at most 8192 bytes and the [shared source fields](../bin/fm-resolution-source-lib.sh).
 `answer --release` is attended-only: while the away-posture record exists it is refused before anything is written, and the keyed-answer intake refuses a `release` line the same way, because only the captain in an attended session releases a captain hold.
 A quiet record is a present captain and does not refuse.
 It then works in this order:
 
-1. It durably writes a resolution block carrying the decision digest and a `Resolution mode:`.
+1. It durably writes a resolution block carrying the decision digest, a `Resolution mode:`, and the declared source.
+   User answers carry the `Captain decision:` label.
+   Supervisor and mechanical answers carry `Resolution decision:`.
+   Evidence-backed reconciliation retains its separate [reconcile record](#verifying-and-retiring-a-request).
 2. It retains the leading hold-set stamp until the selected `tasks-axi done` or `tasks-axi unhold` transition succeeds.
 3. It then restores the successful record's resolution-first body ordering.
    The previous body remains preserved below the block and archived through tasks-axi `--archive-body`.
@@ -230,11 +233,8 @@ Each key is reported as follows:
 | A replay with a mode mismatch | Skipped. |
 
 The command exits nonzero when any key was skipped.
-Every new resolution records a declared source kind and reference, distinguishing user answers, supervisor judgements, and mechanical operations with evidence.
-User answers also retain the answering message's UTC time, which is provenance rather than proof of authorship.
-Direct `answer`, shared `answers`, and `fm-send --resolve-key` use the source contract owned by `bin/fm-resolution-source-lib.sh` and expose its fields in their `--help` output.
-The captured-channel intake uses the immutable result's receipt time for that answering message, so replay does not substitute the current clock.
-Reconciliation records its owning operation and evidence file under its existing evidence label.
+Direct `answer`, shared `answers`, and `fm-send --resolve-key` use the [source contract](../bin/fm-resolution-source-lib.sh).
+Their command headers and `--help` own invocation syntax.
 Earlier valid records remain readable and replayable without invented source attribution.
 
 ### Source bindings
@@ -257,6 +257,8 @@ Two channels feed that one intake today, and both are ordinary callers rather th
 
 - After capture, the runner passes a bound built-in source's result to `bin/fm-procevent-<adapter>.sh answers <result-file>`.
 - The runner pipes whatever that prints into the intake.
+  It declares a user source referencing the captured result and sequence, with the immutable result's receipt time rather than the replay clock.
+  That timestamp does not authenticate authorship.
 - Any built-in adapter with an `answers` command therefore works.
 - The runner names no adapter, parses no result, and carries no decision rule.
 
@@ -320,6 +322,7 @@ Each outcome requires both the pending board-created request and the operator in
 
 - `reconcile close <task-id> --evidence-file <path>` is the moot outcome.
   It writes a resolution record whose mode is `reconciled` and whose body is the supplied EVIDENCE under a `Reconciliation evidence:` label, then closes the task.
+  Its mechanical source names the reconciliation operation and evidence file.
   The distinct mode and label are what keep the record honest: it says the call dissolved against verified evidence, and it never claims the captain answered.
 - `reconcile note <task-id> --note-file <path>` is the still-active outcome.
   It appends one dated `Captain hold reconciled:` note to the task body, leaves the hold in place, and retires the request.
@@ -558,6 +561,8 @@ The suite does not test the accepted merge-to-cleanup re-hold window or asynchro
 
 ### Answers, stamps, and deferral
 
+- `test_resolution_attribution` covers direct and shared answers with declared sources, user-message UTC retention, distinct decision labels, and mechanical reconciliation attribution.
+  `tests/fm-send-resolve-key.test.sh` covers refusal before delivery when required source fields are missing or invalid, preservation under tight status-line caps, and ordinary source-like message text.
 - Answer-time resolution works through a bound channel with task-id keys.
   This includes the `release` mode, mode-matched replay idempotence, and the refusal of drifted, mode-mismatched, absent, unheld, and already-closed keys.
 - The chat channel reaches the same intake.

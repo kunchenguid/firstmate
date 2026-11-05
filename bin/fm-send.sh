@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Steer a task by durable record: write the message into the task's steering
 # inbox and ring a constant doorbell through its backend endpoint, best-effort.
-# Usage: fm-send.sh <target> [--resolve-key <key>]... [--source-kind <kind> --source <reference> [--source-time <UTC>]] [--fire-and-forget <delivery-id>] <text...>
+# Usage: fm-send.sh <target> [--fire-and-forget <delivery-id>] <text...>
+#   fm-send.sh <target> --resolve-key <key> [--resolve-key <key>]... --source-kind <kind> --source <reference> [--source-time <UTC>] <text...>
 #   <target> may be an exact task id, a legacy fm-<id> task label resolved
 #   through this home's state/<id>.meta, or an explicit well-formed backend
 #   target. fm-send refuses unresolved guesses rather than falling back to a
@@ -161,6 +162,7 @@
 # OPEN DECISIONS record closes at answer time and never depends on the busy
 # worker writing a matching resolved line. Every resolution requires source
 # fields validated by bin/fm-resolution-source-lib.sh (the provenance owner).
+# Source flags without --resolve-key remain literal ordinary message text.
 # For ordinary keys the payload is
 # "resolved [key=<key>]: answered: <capped excerpt> <source fields>" before the emission-time
 # handling owned by bin/fm-classify-lib.sh. A reserved key
@@ -169,8 +171,8 @@
 # (fm_pending_reply_close_note_for_key / fm_pending_reply_resolved_note), so
 # the fold actually drops it; a bare answered: note is not a reserved-key
 # transition and is never written for those keys. If this send cannot produce
-# a note the guard will accept, or the structural key would be lost to the
-# status-line cap, it refuses before sending and names the cause rather than
+# a note the guard will accept, or the source fields and structural key cannot
+# fit within the status-line cap, it refuses before sending and names the cause rather than
 # exiting 0 on a silent no-op. A key nothing owns refuses the same way, for the
 # same reason: delivering an answer this send cannot close would leave the
 # decision open behind an answer the operator believes settled it. That refusal
