@@ -31,8 +31,8 @@ Holding the work item the question gates is safe for exactly that reason: cleanu
 Only `answer` with the user's words or an evidence-backed `reconcile close` may resolve it.
 
 Never close anything the user owns without recording what he actually said: `bin/fm-captain-hold.sh answer` writes his exact words into the task and closes a question-shaped call, while `--release` frees a user-gated work item to proceed.
-A merge approval uses that existing release path because approval permits the merge to proceed; cleanup closes the work only after it lands and records what shipped.
-Closing a held row at merge approval instead records completion before landing, so the backlog claims completion before the work actually ships.
+A merge approval uses that existing release path because approval permits the merge to proceed; cleanup closes the work only after it lands and records what landed.
+Closing a held row at merge approval instead records completion before landing, so the backlog claims completion before the work actually lands.
 When the answer changes what a task must build, follow `AGENTS.md` section 7's mid-task ask rule to preserve the user's words in the brief and steer the worker.
 When the user says "later", that is an answer too: re-hold with `bin/fm-captain-hold.sh hold <id> --reason "<reason>" --until <date>` so the item leaves the live user's Call and resurfaces on its date, instead of leaving a live-looking card or fabricating a closure.
 "A keyed answer resolves its matching user-held task" is one capability with one owner, `bin/fm-captain-hold.sh answers`, and every channel that carries a user answer feeds it the same task id and answer; a channel never maps keys to tasks, records a decision, or resolves anything itself.
