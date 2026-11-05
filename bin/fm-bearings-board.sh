@@ -132,7 +132,12 @@ validate_payload() {  # <data.json>
       (has($name) | not)
       or (.[$name]
         | type == "string"
-          and test("^https?://[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?(?::[0-9]{1,5})?(?:[/?#][^[:space:]]*)?$"));
+          and test("^https?://[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?(?::[0-9]{1,5})?(?:[/?#][^[:space:]]*)?$")
+          and (capture("^https?://(?<authority>[^/?#]+)").authority
+            | if test(":[0-9]+$") then
+                (capture(":(?<port>[0-9]+)$").port | tonumber) as $port
+                | $port >= 1 and $port <= 65535
+              else true end));
     def version: type == "string" and test("^(0|[1-9][0-9]{0,8})\\.(0|[1-9][0-9]{0,8})\\.(0|[1-9][0-9]{0,8})$");
     def optional_subject:
       (has("subject") | not)

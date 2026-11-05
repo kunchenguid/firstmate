@@ -539,11 +539,12 @@ https://code.internal/my-org/repo.name_with-parts/pulls/123456|code.internal|my-
 http://git.example.com/fixture/fixture-repo/pulls/1|git.example.com|fixture|fixture-repo|1
 http://pi4:3001/joergspoerl/Scan2Excel/pulls/7|pi4:3001|joergspoerl|Scan2Excel|7
 https://git.example.com:8443/my-org/repo/pulls/42|git.example.com:8443|my-org|repo|42
+https://git.example.com:65535/my-org/repo/pulls/42|git.example.com:65535|my-org|repo|42
 EOF
   # A Forgejo-shaped URL on github.com is refused under either scheme
   # (anti-spoofing, mirroring fm_pr_forge_host_valid's refusal of github.com),
   # neither GitHub's singular "pull" nor a three-segment project path is
-  # accepted as forgejo, and a port is canonical only as one to five digits
+  # accepted as forgejo, and a port is canonical only in the range 1..65535
   # with no leading zero.
   for row in \
     'https://github.com/fixture/fixture-repo/pulls/1' \
@@ -555,6 +556,8 @@ EOF
     'https://git.example.com:0/fixture/fixture-repo/pulls/1' \
     'https://git.example.com:03001/fixture/fixture-repo/pulls/1' \
     'http://pi4:03001/joergspoerl/Scan2Excel/pulls/7' \
+    'https://git.example.com:65536/fixture/fixture-repo/pulls/1' \
+    'http://pi4:99999/joergspoerl/Scan2Excel/pulls/7' \
     'https://git.example.com:123456/fixture/fixture-repo/pulls/1' \
     'https://git.example.com:abc/fixture/fixture-repo/pulls/1' \
     'https://git.example.com:/fixture/fixture-repo/pulls/1' \
@@ -2444,7 +2447,7 @@ test_gerrit_nm_ready_gate_requires_recovered_custody() {
 # stay silent, and the read never depends on how many newer pull requests the
 # repository has.
 test_forgejo_merge_watch() {
-  local dir state out url value
+  local dir state out url value rc
   dir=$(make_case forgejo-merge-watch)
   state="$dir/home/state"
   url=https://forgejo.example/o/r/pulls/7
@@ -2453,7 +2456,7 @@ test_forgejo_merge_watch() {
 printf '%s\n' "$*" >> "$FM_TEST_TEA_LOG"
 if [ "${1:-} ${2:-}" = "login list" ]; then
   printf '[\n'
-  printf '  {\n    "name": "main",\n    "url": "https://forgejo.example"\n  }'
+  printf '  {\n    "name": "main",\n    "url": "%s"\n  }' "${FM_TEST_TEA_LOGIN_URL:-https://forgejo.example}"
   if [ -n "${FM_TEST_TEA_SECOND_LOGIN:-}" ]; then
     printf ',\n  {\n    "name": "other",\n    "url": "https://forgejo.example"\n  }'
   fi
@@ -2492,7 +2495,19 @@ SH
     || fail "the poll did not read the one pull request by number on the host's login"
   ! grep -qF -- "pulls list" "$dir/tea.log" \
     || fail "the poll scanned a pull request list instead of reading by number"
-  pass "Forgejo poll reads one pull request by number through tea api and wakes only on merged true"
+
+  write_task_meta "$dir" task-downgrade
+  : > "$dir/tea.log"
+  set +e
+  FM_TEST_TEA_LOGIN_URL=http://forgejo.example FM_TEST_TEA_LOG="$dir/tea.log" \
+    run_check_entry "$dir" task-downgrade "$url" > "$dir/stdout" 2> "$dir/stderr"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "Forgejo arming accepted a plain-http login for an HTTPS PR"
+  ! grep -q '^pr=' "$state/task-downgrade.meta" || fail "a scheme-downgraded PR was recorded"
+  [ ! -e "$state/task-downgrade.check.sh" ] || fail "a scheme-downgraded PR poll was armed"
+  ! grep -q '^api ' "$dir/tea.log" || fail "Forgejo arming read through a scheme-downgraded login"
+  pass "Forgejo poll and arming require an exact scheme-and-authority login and wake only on merged true"
 }
 
 # A Forgejo instance on a private LAN often serves plain http on a
@@ -2512,7 +2527,8 @@ if [ "${1:-} ${2:-}" = "login list" ]; then
   if [ -n "${FM_TEST_TEA_WRONG_PORT_ONLY:-}" ]; then
     printf '[{"name":"other","url":"http://pi4:3002"}]\n'
   else
-    printf '[{"name":"main","url":"http://pi4:3001"},{"name":"other","url":"http://pi4:3002"}]\n'
+    printf '[{"name":"main","url":"%s"},{"name":"other","url":"http://pi4:3002"}]\n' \
+      "${FM_TEST_TEA_LOGIN_URL:-http://pi4:3001}"
   fi
   exit 0
 fi
@@ -2547,7 +2563,13 @@ SH
   sed -i.bak '3s|^pi4:3001$|pi4|' "$state/task-a.pr-poll" && rm -f "$state/task-a.pr-poll.bak"
   out=$(FM_TEST_TEA_LOG="$dir/tea.log" FM_TEST_TEA_PULL=merged run_poll "$dir")
   [ -z "$out" ] || fail "the static poll accepted a sidecar whose recorded authority dropped its port"
-  pass "plain-http Forgejo poll resolves only the exact host-and-port login"
+
+  sed -i.bak -e '2s/pi4:3001/pi4:99999/' -e '3s/^pi4$/pi4:99999/' \
+    "$state/task-a.pr-poll" && rm -f "$state/task-a.pr-poll.bak"
+  out=$(FM_TEST_TEA_LOG="$dir/tea.log" FM_TEST_TEA_PULL=merged \
+    FM_TEST_TEA_LOGIN_URL=http://pi4:99999 run_poll "$dir")
+  [ -z "$out" ] || fail "the static poll accepted an out-of-range Forgejo port"
+  pass "plain-http Forgejo poll resolves only the exact host-and-port login with a valid port"
 }
 
 # The one tea login for a Forgejo host is found by parsing
@@ -2557,8 +2579,8 @@ SH
 # object per line and as one line, the shapes a line-oriented split misread as
 # a url equal to the login name, refusing every host. Both the sourced helper
 # and the static watcher body, which keeps its own copy of the filter, must
-# resolve every shape by exact authority, preserving any port while stripping
-# scheme, userinfo, and path, and refuse an ambiguous authority.
+# resolve every shape by exact scheme and authority, preserving any port while
+# stripping userinfo and path, and refuse an ambiguous or downgraded login.
 test_forgejo_login_list_shapes() {
   local dir state out shape url
   dir=$(make_case forgejo-login-shapes)
@@ -2617,40 +2639,56 @@ SH
   ln -sf "$(command -v jq)" "$dir/fakebin/jq"
   : > "$dir/tea.log"
 
-  url=https://code.internal/o/r/pulls/7
+  url=http://code.internal/o/r/pulls/7
   write_poll_meta "$state" task-a "$url"
   fm_pr_poll_prepare "$state" task-a forgejo "$url" code.internal o/r 7 "$POLL" \
     || fail "could not prepare a Forgejo poll"
   fm_pr_poll_publish_prepared || fail "could not publish a Forgejo poll"
 
   for shape in multiline oneline perobject; do
-    out=$(FM_TEST_TEA_LOGINS="$dir/tea-$shape.json" PATH="$dir/fakebin:$PATH" fm_pr_forgejo_login git.example.com) \
+    out=$(FM_TEST_TEA_LOGINS="$dir/tea-$shape.json" PATH="$dir/fakebin:$PATH" fm_pr_forgejo_login git.example.com https) \
       || fail "$shape: the login helper refused a host with exactly one login"
     [ "$out" = fixture-one ] || fail "$shape: the login helper resolved '$out' for git.example.com"
-    out=$(FM_TEST_TEA_LOGINS="$dir/tea-$shape.json" PATH="$dir/fakebin:$PATH" fm_pr_forgejo_login code.internal) \
+    out=$(FM_TEST_TEA_LOGINS="$dir/tea-$shape.json" PATH="$dir/fakebin:$PATH" fm_pr_forgejo_login code.internal http) \
       || fail "$shape: the login helper refused a url with a trailing slash"
     [ "$out" = fixture-two ] || fail "$shape: the login helper resolved '$out' for code.internal"
-    out=$(FM_TEST_TEA_LOGINS="$dir/tea-$shape.json" PATH="$dir/fakebin:$PATH" fm_pr_forgejo_login code.internal:3000) \
+    out=$(FM_TEST_TEA_LOGINS="$dir/tea-$shape.json" PATH="$dir/fakebin:$PATH" fm_pr_forgejo_login code.internal:3000 http) \
       || fail "$shape: the login helper refused a recorded authority carrying the instance's own port"
     [ "$out" = fixture-three ] || fail "$shape: the login helper resolved '$out' for code.internal:3000"
-    out=$(FM_TEST_TEA_LOGINS="$dir/tea-$shape.json" PATH="$dir/fakebin:$PATH" fm_pr_forgejo_login code.internal:3001) \
+    out=$(FM_TEST_TEA_LOGINS="$dir/tea-$shape.json" PATH="$dir/fakebin:$PATH" fm_pr_forgejo_login code.internal:3001 http) \
       || fail "$shape: the login helper refused the same host's other ported login"
     [ "$out" = fixture-four ] || fail "$shape: the login helper resolved '$out' for code.internal:3001"
-    ! FM_TEST_TEA_LOGINS="$dir/tea-$shape.json" PATH="$dir/fakebin:$PATH" fm_pr_forgejo_login code.internal:3002 >/dev/null \
+    ! FM_TEST_TEA_LOGINS="$dir/tea-$shape.json" PATH="$dir/fakebin:$PATH" fm_pr_forgejo_login code.internal:3002 http >/dev/null \
       || fail "$shape: the login helper resolved an authority with no exact registered login"
-    ! FM_TEST_TEA_LOGINS="$dir/tea-$shape.json" PATH="$dir/fakebin:$PATH" fm_pr_forgejo_login elsewhere.example >/dev/null \
+    ! FM_TEST_TEA_LOGINS="$dir/tea-$shape.json" PATH="$dir/fakebin:$PATH" fm_pr_forgejo_login elsewhere.example http >/dev/null \
       || fail "$shape: the login helper resolved a host with no registered login"
+    ! FM_TEST_TEA_LOGINS="$dir/tea-$shape.json" PATH="$dir/fakebin:$PATH" fm_pr_forgejo_login git.example.com http >/dev/null \
+      || fail "$shape: the login helper downgraded an HTTPS identity to plain HTTP"
     out=$(FM_TEST_TEA_LOGINS="$dir/tea-$shape.json" FM_TEST_TEA_LOG="$dir/tea.log" run_poll "$dir")
     [ "$out" = merged ] || fail "$shape: the static poll did not resolve the login and report the merge"
     grep -qF -- "api --login fixture-two --repo o/r" "$dir/tea.log" \
       || fail "$shape: the static poll did not read through the host's login"
     : > "$dir/tea.log"
   done
-  ! FM_TEST_TEA_LOGINS="$dir/tea-ambiguous.json" PATH="$dir/fakebin:$PATH" fm_pr_forgejo_login git.example.com >/dev/null \
+  ! FM_TEST_TEA_LOGINS="$dir/tea-ambiguous.json" PATH="$dir/fakebin:$PATH" fm_pr_forgejo_login git.example.com https >/dev/null \
     || fail "the login helper picked one of two logins for the same host"
   out=$(FM_TEST_TEA_LOGINS="$dir/tea-ambiguous.json" FM_TEST_TEA_LOG="$dir/tea.log" run_poll "$dir")
   [ -z "$out" ] || fail "the static poll read through an ambiguous login"
-  pass "Forgejo login match parses tea's JSON in every line shape, in the helper and the static poll"
+
+  : > "$dir/tea.log"
+  ! FM_TEST_TEA_LOGINS="$dir/tea-multiline.json" FM_TEST_TEA_LOG="$dir/tea.log" PATH="$dir/fakebin:$PATH" \
+    fm_pr_forgejo_read_record git.example.com o/r 7 http >/dev/null \
+    || fail "the record reader selected a plain-http login for an HTTPS identity"
+  ! grep -q '^api ' "$dir/tea.log" || fail "the record reader called tea through a downgraded login"
+
+  url=https://code.internal/o/r/pulls/7
+  write_poll_meta "$state" task-a "$url"
+  fm_pr_poll_prepare "$state" task-a forgejo "$url" code.internal o/r 7 "$POLL" \
+    || fail "could not prepare an HTTPS Forgejo poll"
+  fm_pr_poll_publish_prepared || fail "could not publish an HTTPS Forgejo poll"
+  out=$(FM_TEST_TEA_LOGINS="$dir/tea-multiline.json" FM_TEST_TEA_LOG="$dir/tea.log" run_poll "$dir")
+  [ -z "$out" ] || fail "the static poll downgraded an HTTPS identity to a plain-http login"
+  pass "Forgejo login matching requires the exact scheme and authority in the helper, reader, and static poll"
 }
 
 test_gitlab_merge_watch() {

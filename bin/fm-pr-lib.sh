@@ -218,6 +218,7 @@ fm_pr_forgejo_authority_valid() {
       case "$port" in
         ''|*[!0-9]*|0*|??????*) return 1 ;;
       esac
+      [ "$port" -le 65535 ] || return 1
       ;;
   esac
   fm_pr_forge_host_valid "$host"
@@ -1184,29 +1185,34 @@ FIELDS
 # than split on quotes per line, because tea's JSON is not guaranteed to put
 # each field on its own line: a login printed as one compact object would hand
 # a line-oriented split the name where it expects the url, and arming would
-# then refuse every host. A login matches when its url's authority - scheme,
-# userinfo, and path stripped, with any port preserved - is exactly <host>.
+# then refuse every host. A login matches when its url has the pull request's
+# scheme and its authority - userinfo and path stripped, with any port preserved -
+# is exactly <host>.
 # bin/fm-pr-poll.sh keeps its own copy of this filter because the watcher body
 # sources nothing.
-# shellcheck disable=SC2016 # $h is a jq variable bound by --arg, not a shell one.
+# shellcheck disable=SC2016 # $h and $scheme are jq variables bound by --arg, not shell ones.
 FM_PR_FORGEJO_LOGIN_JQ='
   if type == "array" then
     [ .[]
       | select(type == "object" and (.name | type) == "string" and (.name | length) > 0
                and (.url | type) == "string")
-      | select((.url
-                | sub("^[A-Za-z][A-Za-z0-9+.-]*://"; "")
-                | sub("[/?#].*$"; "")
-                | sub("^.*@"; "")) == $h)
+      | select((.url | startswith($scheme + "://"))
+               and ((.url
+                     | sub("^[A-Za-z][A-Za-z0-9+.-]*://"; "")
+                     | sub("[/?#].*$"; "")
+                     | sub("^.*@"; "")) == $h))
       | .name ]
     | if length == 1 then .[0] else error("not exactly one matching login") end
   else
     error("login list is not an array")
   end'
-fm_pr_forgejo_login() {  # <host>
+fm_pr_forgejo_login() {  # <host> <scheme>
+  local host=${1-} scheme=${2-}
+  case "$scheme" in http|https) ;; *) return 1 ;; esac
   command -v tea >/dev/null 2>&1 || return 1
   command -v jq >/dev/null 2>&1 || return 1
-  tea login list --output json 2>/dev/null | jq -er --arg h "$1" "$FM_PR_FORGEJO_LOGIN_JQ" 2>/dev/null
+  tea login list --output json 2>/dev/null \
+    | jq -er --arg h "$host" --arg scheme "$scheme" "$FM_PR_FORGEJO_LOGIN_JQ" 2>/dev/null
 }
 
 # The state, merged flag, and head commit of one Forgejo pull request, read
@@ -1214,8 +1220,8 @@ fm_pr_forgejo_login() {  # <host>
 # "tea api" exits 0 on an HTTP error and prints the error body instead, so
 # only a record whose state, merged, and head.sha fields all have the expected
 # types is accepted; anything else returns 1 for an honest unknown.
-fm_pr_forgejo_read_record() {  # <host> <path> <number>
-  local host=$1 path=$2 number=$3 login json fields line
+fm_pr_forgejo_read_record() {  # <host> <path> <number> <scheme>
+  local host=$1 path=$2 number=$3 scheme=${4-} login json fields line
   local total=0 named=0 state='' merged='' head=''
   FM_PR_RECORD_STATE=
   FM_PR_RECORD_MERGED=
@@ -1224,7 +1230,7 @@ fm_pr_forgejo_read_record() {  # <host> <path> <number>
   case "$number" in
     ''|*[!0-9]*) return 1 ;;
   esac
-  login=$(fm_pr_forgejo_login "$host") || return 1
+  login=$(fm_pr_forgejo_login "$host" "$scheme") || return 1
   [ -n "$login" ] || return 1
   if ! json=$(tea api --login "$login" --repo "$path" \
       "/repos/{owner}/{repo}/pulls/$number" 2>/dev/null) || [ -z "$json" ]; then

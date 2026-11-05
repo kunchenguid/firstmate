@@ -234,7 +234,7 @@ if [ "$PROVIDER" = forgejo ]; then
     echo "error: watching a Forgejo pull request requires tea and jq on PATH" >&2
     exit 1
   fi
-  fm_pr_forgejo_login "$HOST" >/dev/null || {
+  fm_pr_forgejo_login "$HOST" "${URL%%://*}" >/dev/null || {
     echo "error: watching a Forgejo pull request at $HOST requires exactly one 'tea login' registered for that host (see 'tea login list')" >&2
     exit 1
   }

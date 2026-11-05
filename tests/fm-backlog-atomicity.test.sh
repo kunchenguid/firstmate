@@ -2605,6 +2605,32 @@ test_recovery_rejects_invalid_close_arguments() {
   pass "recovery rejects close-marker arguments outside its protocol"
 }
 
+test_recovery_rejects_unsupported_pr_urls_before_mutation() {
+  local case_dir id marker out url n=0
+  for url in \
+    http://git.example.com/group/repo/-/merge_requests/7 \
+    http://pi4:99999/o/r/pulls/7
+  do
+    n=$((n + 1))
+    id="atomic-marker-unsupported-pr-$n"
+    case_dir=$(make_home "marker-unsupported-pr-$n")
+    add_item "$case_dir" "$id"
+    start_item "$case_dir" "$id"
+    write_task_meta "$case_dir" "$id" ship no-mistakes "spawn_gen=spawn-unsupported-pr"
+    marker="$(home_of "$case_dir")/state/$id.backlog-close"
+    printf 'id=%s\ndata=%s\nspawn_gen=spawn-unsupported-pr\narg=--pr\narg=%s\n' \
+      "$id" "$(home_of "$case_dir")/data" "$url" > "$marker"
+
+    out=$(run_bootstrap "$case_dir")
+    assert_present "$marker" "unsupported PR close marker was consumed: $url"
+    assert_present "$(home_of "$case_dir")/state/$id.meta" \
+      "unsupported PR close removed its task record before validation: $url"
+    [ "$(row_state "$case_dir" "$id")" = in_flight ] \
+      || fail "unsupported PR close changed the backlog row: $url: $out"
+  done
+  pass "recovery rejects unsupported PR URLs before either record mutates"
+}
+
 test_recovery_rejects_a_symlinked_close_marker() {
   local case_dir id marker payload out rc=0
   id=atomic-marker-symlink-b12
@@ -3295,6 +3321,7 @@ test_recovery_rejects_raw_control_bytes
 test_recovery_rejects_malformed_pr_urls
 test_failed_close_replay_is_not_started_as_live_work
 test_recovery_rejects_invalid_close_arguments
+test_recovery_rejects_unsupported_pr_urls_before_mutation
 test_recovery_rejects_a_symlinked_close_marker
 test_recovery_drops_a_close_for_a_newer_meta_incarnation
 test_recovery_rejects_a_legacy_close_without_an_incarnation

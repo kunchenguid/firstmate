@@ -2356,7 +2356,22 @@ test_forgejo_login_resolves_from_the_host() {
     "forgejo-login-wrong-port: refusal did not name the login requirement"
   [ -z "$(tea_merge_line "$case_dir/tea.log")" ] \
     || fail "forgejo-login-wrong-port: a merge was attempted through another port's login"
-  pass "fm-pr-merge resolves the exact host-and-port login and refuses another port's login"
+
+  case_dir=$(make_forgejo_case forgejo-login-scheme-downgrade)
+  url="https://$host/$FJ_OWNER/$FJ_REPO/pulls/12"
+  write_tea_logins_json "$case_dir/tea-logins.json" "$FJ_LOGIN" "http://$host"
+  set +e
+  run_pr_merge "$case_dir" task-x1 "$url" \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "forgejo-login-scheme-downgrade: fm-pr-merge should refuse a plain-http login for an HTTPS PR"
+  assert_grep "requires exactly one 'tea login' registered for that host" "$case_dir/stderr" \
+    "forgejo-login-scheme-downgrade: refusal did not name the login requirement: $(cat "$case_dir/stderr")"
+  assert_no_regex '^api ' "$case_dir/tea.log" \
+    "forgejo-login-scheme-downgrade: tea api used a login with a weaker scheme"
+  pass "fm-pr-merge resolves only logins with the exact scheme, host, and port"
 }
 
 test_forgejo_refuses_when_login_is_ambiguous() {

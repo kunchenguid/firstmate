@@ -398,6 +398,21 @@ test_local_secondmate_extracts_forgejo_ledger_pr() {
   pass "secondmate preserves an unrecorded plain-http Forgejo PR from its ledger line"
 }
 
+test_local_secondmate_omits_noncanonical_ledger_pr() {
+  local key url=https://github.com/o/r/pulls/7
+  make_world noncanonical-ledger; bind_secondmate local
+  write_child "$MATE" child "done: PR $url checks green"
+  awk '!/^pr=/' "$MATE/state/child.meta" > "$MATE/state/child.meta.tmp" \
+    && mv "$MATE/state/child.meta.tmp" "$MATE/state/child.meta"
+  age "$MATE/state/child.meta"
+  FM_FAKE_CREW_STATE='unknown' run_reconcile "$MATE"
+  key=$(reported_outcome_key "$MATE" child 'done') || fail "noncanonical ledger receipt was not recorded"
+  sed -E 's/ \[at=[0-9]+\]//' "$MAIN/state/mate.status" \
+    | grep -Fxq "done [key=$key]: child child done: PR $url checks green mode=no-mistakes yolo=off" \
+    || fail "secondmate published a parser-invalid ledger PR: $(cat "$MAIN/state/mate.status" 2>/dev/null)"
+  pass "secondmate omits a noncanonical PR from its structured ledger report"
+}
+
 # A terminal record written as a multi-line block belongs to the ledger path
 # whether the block lands before or during the state read: it is delivered once,
 # under the ledger's own outcome key, and the inactive fallback stays out of it.
@@ -1445,6 +1460,7 @@ test_local_done_head_is_pinned_before_parent_delivery
 test_delivered_ledger_done_skips_git_gate
 test_local_secondmate_delivers_terminal_ledger_line
 test_local_secondmate_extracts_forgejo_ledger_pr
+test_local_secondmate_omits_noncanonical_ledger_pr
 test_secondmate_multiline_terminal_outcome_is_delivered_once
 test_secondmate_unterminated_prose_reports_run_outcome
 test_inactive_receipt_ignores_later_status_prose

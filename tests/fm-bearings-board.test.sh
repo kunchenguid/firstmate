@@ -352,7 +352,7 @@ test_build_injects_binds_then_arms() {
 }
 
 test_build_accepts_plain_http_forgejo_pr_urls() {
-  local home data board
+  local home data board port
   home=$(make_home http-pr-urls)
   data="$home/payload.json"
   board="$home/.lavish/bearings-board.html"
@@ -371,7 +371,15 @@ test_build_accepts_plain_http_forgejo_pr_urls() {
     .captains_call[1].pr_url == "http://pi4:3001/o/r/pulls/7"
     and .landed[0].pr_url == "http://pi4:3001/o/r/pulls/8"' >/dev/null \
     || fail "the built board did not preserve both plain-http Forgejo PR URLs"
-  pass "build accepts plain-http Forgejo PR URLs on cards and landed rows"
+
+  for port in 0 65536 99999; do
+    jq --arg url "http://pi4:$port/o/r/pulls/7" '.captains_call[1].pr_url = $url' \
+      "$data" > "$data.tmp" && mv "$data.tmp" "$data"
+    if run_board "$home" build "$data" >/dev/null 2>&1; then
+      fail "the board accepted an out-of-range PR port: $port"
+    fi
+  done
+  pass "build accepts plain-http Forgejo PR URLs with valid ports only"
 }
 
 test_registration_cannot_consume_before_any_origin_binding() {

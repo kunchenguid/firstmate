@@ -98,13 +98,13 @@ $ tea login list --output json
 ]
 ```
 
-Every Forgejo read parses this list as JSON with `jq`, matches the validated PR authority, including its port, against each login URL's authority (stripping scheme, userinfo, and path while preserving the port), and refuses when zero or more than one login matches, rather than guessing.
+Every Forgejo read parses this list as JSON with `jq`, requires the login URL's scheme to match the PR URL, and matches the validated PR authority, including its port, against each login URL's authority (stripping userinfo and path while preserving the port). It refuses when zero or more than one login matches, rather than guessing.
 It never splits the output line by line, because a login printed as one compact object would then read its name where the url belongs.
 `fm_pr_forgejo_login` in `bin/fm-pr-lib.sh` owns that match for every sourcing script; `bin/fm-pr-poll.sh` is a static, standalone watcher body with no sourced dependency, so it keeps its own copy and re-derives the match on every poll instead of trusting a name recorded anywhere durable.
 
 ## URL shape
 
-Firstmate accepts Forgejo (and Gitea) pull request URLs at `http://<host>[:<port>]/<owner>/<repo>/pulls/<number>` or the same shape with `https`, because a private LAN instance often has no TLS; GitHub, GitLab, and Gerrit URLs stay https-only.
+Firstmate accepts Forgejo (and Gitea) pull request URLs at `http://<host>[:<port>]/<owner>/<repo>/pulls/<number>` or the same shape with `https`, because a private LAN instance often has no TLS; a port must be in the range 1 through 65535. GitHub, GitLab, and Gerrit URLs stay https-only.
 The route uses plural "pulls" and no `/-/` route separator, as the fixture's own PR-creation output confirms:
 
 ```
@@ -139,7 +139,7 @@ $ state/task-f1.check.sh
 merged
 ```
 
-Current login matching compares complete authorities, including ports, so a `localhost:3980` login matches neither `localhost` nor another port on `localhost`.
+Current login matching compares schemes and complete authorities, including ports, so an `http://localhost:3980` login matches neither `https://localhost:3980`, `localhost`, nor another port on `localhost`.
 The `https://localhost` commands in this record were captured before exact-authority matching; with the fixture login shown above, current commands must instead use `http://localhost:3980/fixture/fixture-repo/pulls/<n>`.
 
 ## A missing tea produces no wake, never a false merge
