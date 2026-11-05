@@ -12,6 +12,10 @@
 # tab's only pane closes the tab, and agent get reports agent_not_found for a
 # pane no agent has registered on.
 #
+# A pane opened by `tab create --cwd` reports that directory as its
+# foreground_cwd, which a host-local relaunch reads to prove the endpoint still
+# sits in its recorded worktree.
+#
 # Beyond that it models the pane IO a real launch performs. A pane reports a
 # registered agent once anything has been typed into it, and submitting starts
 # one turn: the next agent read reports working and the pane settles back to
@@ -86,7 +90,8 @@ case "${1:-} ${2:-}" in
     if [ "$(jq_state -r --arg p "$pane" '[.tabs[]|select(.pane_id==$p)]|length')" = 0 ]; then
       printf '{"error":{"code":"pane_not_found","message":"%s"}}\n' "$pane"
     else
-      printf '{"result":{"pane":{"pane_id":"%s"}}}\n' "$pane"
+      jq_state -c --arg p "$pane" \
+        '{result:{pane:({pane_id:$p} + ([.tabs[]|select(.pane_id==$p)][0] | if (.cwd // "") != "" then {foreground_cwd:.cwd} else {} end))}}'
     fi
     ;;
   "pane close")

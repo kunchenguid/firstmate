@@ -1420,6 +1420,31 @@ cp "$WATCH_STATE/ios.meta" "$PARENT/state/ios.meta"
 cp "$WATCH_STATE/.remote-inherit-ios.generation" "$PARENT/state/" 2>/dev/null || true
 pass "watch liveness: a dead remote secondmate is auto-relaunched on its own host with one wake"
 
+# --- an operator remote relaunch records a fresh reply boundary --------------
+# bin/fm-remote-secondmate-relaunch.sh republishes the parent's reply boundary
+# from the host's route report, which the host-local relaunch (bin/fm-control.sh
+# relaunch -> bin/fm-spawn.sh --relaunch) re-samples before the replacement
+# launches. A reply the previous worker wrote just before the relaunch, which
+# the parent's mirror may read only afterwards, must stay below that boundary,
+# so it can never count as the replacement's start proof. The previous worker
+# replies and then exits, the endpoint an operator relaunch replaces.
+printf 'note: ios previous worker late reply\n' >> "$REMOTE_HOME/state/parent-replies.status"
+ios_pane=$(sed -n 's/^herdr_pane_id=//p' "$remote_route_meta")
+[ -n "$ios_pane" ] || fail "the remote route meta did not record its Herdr pane"
+jq --arg p "$ios_pane" \
+  '.typed |= with_entries(select(.key != $p)) | .working |= with_entries(select(.key != $p))' \
+  "$HERDR_STATE" > "$TMP_ROOT/herdr-dead.json" && mv "$TMP_ROOT/herdr-dead.json" "$HERDR_STATE"
+[ "$(remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh state ios)" = dead ] \
+  || fail "the exited previous worker's pane did not classify dead"
+printf '%s\n%s\n' "$REMOTE_HOME/state/parent-replies.status" 'note: ios operator relaunch fast reply' \
+  > "$HERDR_STATE.launch-reply"
+OPERATOR_RELAUNCH=$(remote_env "$ROOT/bin/fm-remote-secondmate-relaunch.sh" ios codex - - 2>&1) \
+  || fail "the operator remote relaunch failed: $OPERATOR_RELAUNCH"
+assert_absent "$HERDR_STATE.launch-reply" "the operator-relaunched fake agent did not write its fast reply"
+assert_replies_offset_precedes "$PARENT/state/ios.meta" 'note: ios operator relaunch fast reply' \
+  "operator remote relaunch"
+pass "an operator remote relaunch keeps the previous worker's replies below the replacement's reply boundary"
+
 # Host loss mid-supervision is never evidence of death: the same tick on an
 # unreachable route probes, preserves, and stays silent.
 WATCH_STATE_UNREACHABLE="$TMP_ROOT/watch-liveness-unreachable"
