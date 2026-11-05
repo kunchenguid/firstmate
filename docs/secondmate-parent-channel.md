@@ -44,6 +44,7 @@ A missed-reply escalation includes the complete first sighting path and line num
 A correlated reply answers the request, not the work behind it, so the parent reads the child's recorded verdict and never the reply's verb as the overall label.
 `fm_pending_reply_result` in `bin/fm-pending-reply-lib.sh` prints the request outcome and the child outcome side by side, and `finished` appears only for a child whose verdict is `done`.
 The drain's wake annotation (`bin/fm-wake-lib.sh`) appends that result to the correlated reply line it presents, so the parent sees the child's verdict in the same line it reads the answer from.
+The annotation resolves the request itself when the watcher's tick has not reached the reply yet, because the line is presented once and a reply appended between that tick and the signal scan would otherwise show no verdict.
 The secondmate charter (`bin/fm-brief.sh`) tells the mate to pass `--task <child>` whenever the request concerns one of its child tasks.
 A reply with no `--task`, a child the helper could not read, or a hand-written line reads `unknown`, never `finished`.
 

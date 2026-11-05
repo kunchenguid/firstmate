@@ -3304,16 +3304,19 @@ fm_wake_latest_event() {  # <validated-status-path> <tail-byte-cap>
 }
 
 # " · request: answered · child: <id> · child-state: <verdict> · overall: <label>"
-# for a status line that answers a marked request whose pending-reply record is
-# resolved (bin/fm-pending-reply-lib.sh, sourced by the drain), so the parent
-# reads the child's verdict beside the reply and never the reply's verb as the
-# result. Empty for every other line.
+# for a status line that answers a marked request (bin/fm-pending-reply-lib.sh,
+# sourced by the drain), so the parent reads the child's verdict beside the
+# reply and never the reply's verb as the result. The line is presented once, so
+# the request is resolved here when the watcher's tick has not reached it yet:
+# a reply appended between that tick and the signal scan would otherwise show
+# no verdict. Empty for every other line.
 _fm_wake_pending_reply_result_suffix() {  # <status-line>
   local corr result
   case "$1" in *corr=*) ;; *) return 0 ;; esac
-  command -v fm_pending_reply_result >/dev/null 2>&1 || return 0
+  command -v fm_pending_reply_try_resolve >/dev/null 2>&1 || return 0
   corr=$(fm_pending_reply_extract_corr "$1")
   [ -n "$corr" ] || return 0
+  fm_pending_reply_try_resolve "$STATE" "$corr" >/dev/null 2>&1 || return 0
   result=$(fm_pending_reply_result "$STATE" "$corr") || return 0
   printf ' · %s' "$result"
 }
