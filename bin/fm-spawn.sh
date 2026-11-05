@@ -2862,6 +2862,14 @@ launch_template() {
   # sources are not guaranteed to load that scope, so a worker would
   # otherwise run with attribution back on; carrying it per launch keeps the
   # policy in force regardless of which settings scopes end up loaded.
+  # A task worker's inline --settings JSON also carries "outputStyle":"default".
+  # An output style set in the captain's user settings applies to every Claude
+  # session that loads that scope, so a task worker would otherwise inherit the
+  # captain's main-thread output style and its orchestration instructions;
+  # the per-launch flag-scope value outranks user settings and keeps the
+  # worker on Claude Code's default style whatever the captain's style is.
+  # A persistent secondmate is a supervisor, so its settings file omits this
+  # key and it keeps the captain's main-thread style.
   # Claude Code's --settings flag takes one value, a file path or an inline
   # JSON string (https://code.claude.com/docs/en/cli-reference). A secondmate's
   # busy hooks share that value, in state/<id>.claude-settings.json, and the
@@ -7435,7 +7443,7 @@ case "$LAUNCH" in
   if [ "$KIND" = secondmate ]; then
     LAUNCH=${LAUNCH//__CLAUDESETTINGS__/$(shell_quote "$STATE_REAL/$ID.claude-settings.json")}
   else
-    claude_settings="'{\"feedbackDrafts\":\"off\"__CLAUDEATTRIBUTION__}'"
+    claude_settings="'{\"feedbackDrafts\":\"off\",\"outputStyle\":\"default\"__CLAUDEATTRIBUTION__}'"
     LAUNCH=${LAUNCH//__CLAUDESETTINGS__/$claude_settings}
   fi
   ;;
