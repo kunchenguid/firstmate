@@ -554,7 +554,7 @@ print_record_divergence_section() {
 
   while IFS=$(printf '\t') read -r task origin key title; do
     [ -n "$task" ] || continue
-    line="$task [key=$key] reads resolved in $origin's status log but is still held for the captain"
+    line="$task [key=$key] reads resolved in $origin's status log but is still held for the user"
     [ -z "$title" ] || line="$line: $title"
     fm_cap_line_var "$line" $((item_bytes - 1))
     line=$FM_LINE_CAP_LINE

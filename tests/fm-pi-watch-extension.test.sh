@@ -5033,7 +5033,7 @@ for (const needle of [
 ]) {
   if (!prompts[0].includes(needle)) throw new Error(`the wake prompt lacks '${needle}': ${prompts[0]}`);
 }
-const awayNote = prompts[0].includes("not from the captain: it is not a return");
+const awayNote = prompts[0].includes("not from the user: it is not a return");
 if (process.env.RECORD_KIND === "quiet" ? awayNote : !awayNote) {
   throw new Error(`the away note must appear exactly under an away record (${process.env.RECORD_KIND}): ${prompts[0]}`);
 }

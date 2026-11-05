@@ -403,7 +403,7 @@ if [ "$ACTIONABLE" -eq 1 ]; then
     if [ -e "$STATE/.afk-contract" ] \
       && [ "$(FM_STATE_OVERRIDE="$STATE" "$SCRIPT_DIR/fm-afk-contract.sh" mode 2>/dev/null)" != quiet ]; then
       WAKE="$WAKE
-This wake comes from automatic supervision under the away-posture record, not from the captain: it is not a return, so handle it under the away posture."
+This wake comes from automatic supervision under the away-posture record, not from the user: it is not a return, so handle it under the away posture."
     fi
   else
     WAKE=$(grep -E '^(signal:|stale:|check:|heartbeat)' "$ARM_OUT" 2>/dev/null | head -8)

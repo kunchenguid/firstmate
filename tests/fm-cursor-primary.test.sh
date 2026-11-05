@@ -539,7 +539,7 @@ test_park_runs_the_supervision_host_only_when_opted_in() {
     || fail "the follow-up must carry every supervision-host line: $body"
   [ "$(printf '%s\n' "$body" | grep -c '^stale: fixture-win')" -eq 8 ] \
     || fail "the follow-up must keep the eight-line cap on wake lines: $body"
-  case "$body" in *'not from the captain: it is not a return'*) ;; *) fail "an away handback must say it is not the captain's return: $body" ;; esac
+  case "$body" in *'not from the user: it is not a return'*) ;; *) fail "an away handback must say it is not the user's return: $body" ;; esac
 
   # Quiet mode's record is a present captain (bin/fm-afk-contract.sh AWAY OR
   # QUIET), so the same handback beside it carries no away note.

@@ -151,9 +151,9 @@ test_wedge_threshold_recheck_names_the_captain_for_a_held_lane() {
   window="test:fm-wedge"; key=$(printf '%s' "$window" | tr ':/.' '___')
   FM_TEST_PAUSE_RESURFACE=240 wedge_threshold_round "$state" "$fakebin" "$out" "$capture" "$window" "$working" exit \
     || fail "a captain-held lane older than the recheck cadence was never rechecked: $(cat "$out")"
-  grep -F 'awaiting the captain' "$out" >/dev/null \
-    || fail "the captain-held recheck did not name the captain as the human the wait is on: $(cat "$out")"
-  grep -F 'answer the held decision or release the hold' "$out" >/dev/null \
+  grep -F 'awaiting the user' "$out" >/dev/null \
+    || fail "the captain-held recheck did not name the user as the human the wait is on: $(cat "$out")"
+  grep -F 'answer the user-held decision or release the hold' "$out" >/dev/null \
     || fail "the captain-held recheck did not name the action that clears the hold: $(cat "$out")"
   grep -F 'awaiting external' "$out" >/dev/null \
     && fail "a captain-held transfer was published as a wait on an external dependency: $(cat "$out")"
@@ -219,8 +219,8 @@ test_wedge_threshold_recheck_names_the_captain_for_a_held_lane() {
   : > "$out"
   FM_TEST_PAUSE_RESURFACE=240 wedge_threshold_round "$state" "$fakebin" "$out" "$capture" "$window" "$working" exit \
     || fail "a captain-held lane was never rechecked after the away-posture record was archived: $(cat "$out")"
-  grep -F 'awaiting the captain' "$out" >/dev/null \
-    || fail "the recheck owed on return did not name the captain: $(cat "$out")"
+  grep -F 'awaiting the user' "$out" >/dev/null \
+    || fail "the recheck owed on return did not name the user: $(cat "$out")"
   ack_stopped_cycle "$state" || fail "could not acknowledge the on-return captain-held recheck"
   pass "a captain-held lane is rechecked as a hold on the captain, never as an external wait, and never at all while the captain is away"
 }
@@ -257,8 +257,8 @@ test_wedge_threshold_defers_to_a_backlog_captain_hold() {
   FM_HOME="$dir" FM_DATA_OVERRIDE="$dir/data" \
     wedge_threshold_round "$state" "$fakebin" "$out" "$capture" "$window" "$working" exit \
     || fail "a backlog-held lane was never rechecked at the threshold: $(cat "$out")"
-  grep -F 'awaiting the captain' "$out" >/dev/null \
-    || fail "the backlog-hold recheck did not name the captain: $(cat "$out")"
+  grep -F 'awaiting the user' "$out" >/dev/null \
+    || fail "the backlog-hold recheck did not name the user: $(cat "$out")"
   grep -F 'possible wedge' "$out" >/dev/null \
     && fail "a backlog-held lane was reported as a possible wedge: $(cat "$out")"
   grep -E ', waiting [0-9]+s' "$out" >/dev/null \
@@ -289,8 +289,8 @@ test_wedge_threshold_defers_to_a_backlog_captain_hold() {
   FM_HOME="$dir" FM_DATA_OVERRIDE="$dir/data" \
     wedge_threshold_round "$state" "$fakebin" "$out" "$capture" "$window" "$working" exit \
     || fail "a backlog-held lane behind an elapsed pause was never rechecked: $(cat "$out")"
-  grep -F 'awaiting the captain' "$out" >/dev/null \
-    || fail "a backlog-held lane behind an elapsed pause was not rechecked as a wait on the captain: $(cat "$out")"
+  grep -F 'awaiting the user' "$out" >/dev/null \
+    || fail "a backlog-held lane behind an elapsed pause was not rechecked as a wait on the user: $(cat "$out")"
   grep -F 'possible wedge' "$out" >/dev/null \
     && fail "a backlog-held lane behind an elapsed pause was reported as a possible wedge: $(cat "$out")"
   [ ! -e "$state/.wedge-escalations-$key" ] \
@@ -379,12 +379,12 @@ working: still parked at that gate'
     || fail "a gate awaiting a human was never rechecked at the threshold: $(cat "$out")"
   grep -F 'verified wait at a parked gate' "$out" >/dev/null \
     || fail "the parked-gate recheck did not name its evidence: $(cat "$out")"
-  grep -F "awaiting firstmate's ask-user decision" "$out" >/dev/null \
-    || fail "the parked-gate recheck did not name firstmate as the one the wait is on: $(cat "$out")"
-  grep -F "decide the gate's ask-user finding and relay the decision to the crewmate" "$out" >/dev/null \
+  grep -F "awaiting the Director's ask-user decision" "$out" >/dev/null \
+    || fail "the parked-gate recheck did not name the Director as the one the wait is on: $(cat "$out")"
+  grep -F "decide the gate's ask-user finding and relay the decision to the Builder" "$out" >/dev/null \
     || fail "the parked-gate recheck did not name the action that clears the lane: $(cat "$out")"
-  grep -F 'awaiting the captain' "$out" >/dev/null \
-    && fail "the parked-gate recheck named the captain for a decision firstmate owns: $(cat "$out")"
+  grep -F 'awaiting the user' "$out" >/dev/null \
+    && fail "the parked-gate recheck named the user for a decision firstmate owns: $(cat "$out")"
   grep -F 'confirm the wait still holds' "$out" >/dev/null \
     && fail "a parked gate borrowed the external-wait action, which does not clear it: $(cat "$out")"
   grep -F 'possible wedge' "$out" >/dev/null \
@@ -439,7 +439,7 @@ working: still parked at that gate'
   write_away_record "$state"
   wedge_threshold_round "$state" "$fakebin" "$out" "$capture" "$window" "$human" exit \
     || fail "a parked gate owed firstmate's decision was silenced while the away-posture record existed: $(cat "$out")"
-  grep -F "awaiting firstmate's ask-user decision" "$out" >/dev/null \
+  grep -F "awaiting the Director's ask-user decision" "$out" >/dev/null \
     || fail "the away-posture parked-gate recheck did not name firstmate: $(cat "$out")"
   grep -F 'possible wedge' "$out" >/dev/null \
     && fail "an away-posture parked gate was reported as a possible wedge: $(cat "$out")"

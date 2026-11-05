@@ -659,7 +659,7 @@ fm_afk_launch_create_herdr() {  # <captain-target> <captain-backend>
   local captain_target=$1 captain_backend=$2 session out wsid pane cmd label recovered create_result
   session=${captain_target%%:*}
   if [ -z "$session" ] || [ "$session" = "$captain_target" ]; then
-    fm_afk_launch_log "cannot derive herdr session from captain target '$captain_target'"
+    fm_afk_launch_log "cannot derive herdr session from user target '$captain_target'"
     return 1
   fi
   fm_backend_source herdr || return 1
@@ -772,10 +772,10 @@ fm_afk_launch_start() {
   fm_afk_launch_record_require || return 1
   # Capture the captain endpoint FIRST, before creating anything.
   captain_target=$(discover_supervisor_target) || {
-    fm_afk_launch_log "could not resolve the captain supervisor pane (set FM_SUPERVISOR_TARGET)"
+    fm_afk_launch_log "could not resolve the user supervisor pane (set FM_SUPERVISOR_TARGET)"
     return 1; }
   captain_backend=$(discover_supervisor_backend) || {
-    fm_afk_launch_log "could not resolve the captain supervisor backend (set FM_SUPERVISOR_BACKEND)"
+    fm_afk_launch_log "could not resolve the user supervisor backend (set FM_SUPERVISOR_BACKEND)"
     return 1; }
   if [ "$captain_backend" = t3code ]; then
     fm_afk_launch_log "backend t3code hosts no terminal to launch the daemon in; use 'fm-afk-launch.sh start-native' and run bin/fm-afk-start.sh through the harness's tracked background tool"

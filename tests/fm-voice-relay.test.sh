@@ -4345,7 +4345,7 @@ check(runs[1]["queued_note"] == note_id,
       % (runs[1]["queued_note"], note_id))
 check(note_id in " ".join(handover["said"]),
       "the agent did not confirm the queued note: %r" % handover["said"])
-check("handed to the first mate" in transcript,
+check("handed to the Director" in transcript,
       "the captain was never told it was handed over: %r" % transcript)
 note = os.path.join(root, "home", "state", "inbox", note_id + ".note")
 check(os.path.exists(note), "no note on disk at %s" % note)

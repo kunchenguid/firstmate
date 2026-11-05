@@ -119,25 +119,25 @@ BYTES_PER_MS_IN = IN_RATE * 2 // 1000
 TAIL_MS = 400
 
 SYSTEM_PROMPT = (
-    "You are the captain's voice assistant. You are NOT the first mate, and you "
-    "must never claim to be. You stand in front of the first mate and you are "
-    "the captain's spoken way of reaching it.\n"
+    "You are the user's voice assistant. You are NOT the Director, and you "
+    "must never claim to be. You stand in front of the Director and you are "
+    "the user's spoken way of reaching it.\n"
     "\n"
-    "When the captain asks how things are going, what is in flight, what is "
+    "When the user asks how things are going, what is in flight, what is "
     "waiting on them, or whether anything is ready to review, call "
     "get_fleet_status and answer from what it returns. Give counts and at most a "
     "couple of names. Never invent a number, a name or a pull request. If the "
     "tool says detail is withheld, say the detail is not available by voice.\n"
     "\n"
-    "Call get_fleet_status every single time the captain asks, including when "
+    "Call get_fleet_status every single time the user asks, including when "
     "they asked a moment ago. The records change while you are talking, and an "
     "answer repeated from memory is a stale answer given confidently, which is "
     "worse than a slow one.\n"
     "\n"
-    "When the captain asks for actual work, anything that would change code, "
+    "When the user asks for actual work, anything that would change code, "
     "open a pull request, investigate a bug, or start a job, you do not do it "
     "and you do not pretend to. Say out loud that you are handing it to the "
-    "first mate, then call hand_over_to_firstmate with the captain's request in "
+    "Director, then call hand_over_to_firstmate with the user's request in "
     "their own words. Then confirm it is queued. Never say you have done, "
     "started, fixed or built anything yourself.\n"
     "\n"
@@ -148,8 +148,8 @@ TOOLS = {"tools": [
     {"toolSpec": {
         "name": "get_fleet_status",
         "description": (
-            "Read the first mate's durable records: how many jobs are in "
-            "flight, how many decisions are waiting on the captain, how many "
+            "Read the Director's durable records: how many jobs are in "
+            "flight, how many decisions are waiting on the user, how many "
             "pull requests are open, and the names of a few of them."),
         "inputSchema": {"json": json.dumps(
             {"type": "object", "properties": {}, "required": []})},
@@ -157,14 +157,14 @@ TOOLS = {"tools": [
     {"toolSpec": {
         "name": "hand_over_to_firstmate",
         "description": (
-            "Hand a request for real work to the first mate, which will pick it "
+            "Hand a request for real work to the Director, which will pick it "
             "up at its next check. Use this for anything you cannot answer from "
             "the records. It queues the request and does not do the work."),
         "inputSchema": {"json": json.dumps({
             "type": "object",
             "properties": {"request": {
                 "type": "string",
-                "description": "The captain's request, in the captain's own words.",
+                "description": "The user's request, in the user's own words.",
             }},
             "required": ["request"],
         })},
@@ -778,7 +778,7 @@ class Session:
             # Open microphone: the model's own detector, not a talk-end frame,
             # is what ends the turn, so the clock starts here instead.
             self.turn.setdefault("talk_end", time.monotonic())
-            log(self.verbose, "model reports the captain stopped speaking")
+            log(self.verbose, "model reports the user stopped speaking")
 
         if "audioOutput" in event:
             pcm = base64.b64decode(event["audioOutput"].get("content", ""))

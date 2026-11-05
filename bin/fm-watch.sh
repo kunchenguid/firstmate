@@ -1684,8 +1684,8 @@ wedge_wait_evidence() {  # <task> -> one wait_record on stdout
   statusf="$STATE/$task.status"
   last=$(status_declared_wait_line "$statusf")
   if status_is_captain_held "$last"; then
-    wait_record 'captain-held' 'awaiting the captain - verified hold transfer' \
-      captain 'answer the held decision or release the hold' "$statusf"
+    wait_record 'captain-held' 'awaiting the user - verified hold transfer' \
+      captain 'answer the user-held decision or release the hold' "$statusf"
     return 0
   fi
   if status_is_paused "$last" \
@@ -1695,8 +1695,8 @@ wedge_wait_evidence() {  # <task> -> one wait_record on stdout
     return 0
   fi
   if task_captain_call_open "$task"; then
-    wait_record "$WEDGE_BACKLOG_HOLD_KIND" 'awaiting the captain - held in the backlog' \
-      captain 'answer the held decision or release the hold' ''
+    wait_record "$WEDGE_BACKLOG_HOLD_KIND" 'awaiting the user - held in the backlog' \
+      captain 'answer the user-held decision or release the hold' ''
     return 0
   fi
   if [ -e "$CONFIG/wedge-defer-worker-wait" ] && verb=$(status_worker_wait_verb "$statusf"); then
@@ -1713,7 +1713,7 @@ wedge_wait_evidence() {  # <task> -> one wait_record on stdout
   if status_has_open_needs_decision "$statusf" \
     && run=$(crew_gate_awaits_human_decision "$task") \
     && status_has_open_needs_decision "$statusf" "$run"; then
-    wait_record 'verified wait at a parked gate' "awaiting firstmate's ask-user decision" \
+    wait_record 'verified wait at a parked gate' "awaiting the Director's ask-user decision" \
       supervisor "decide the gate's ask-user finding and relay the decision to the Builder" ''
     return 0
   fi

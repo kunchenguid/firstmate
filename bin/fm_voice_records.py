@@ -525,7 +525,7 @@ def fleet_status(home=None, scope=None):
     answer["withheld_as_confidential"] = len(withheld_ids)
     answer["detail"] = (
         "The lists name at most {} items each; the counts above are the whole "
-        "picture. Give the captain the counts and a couple of names, not every "
+        "picture. Give the user the counts and a couple of names, not every "
         "row.".format(DETAIL_LIMIT))
     return answer
 

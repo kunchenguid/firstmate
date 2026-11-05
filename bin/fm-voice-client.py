@@ -880,7 +880,7 @@ class Client:
                         self.ready_notice = obj
                         self.ready.set()
                     elif event == "queued":
-                        say("  handed to the first mate: {}".format(
+                        say("  handed to the Director: {}".format(
                             obj.get("request", "")))
                         with self.lock:
                             if arrived_in == self.turn_id:

@@ -2023,7 +2023,7 @@ test_host_handback_under_away_record_is_not_a_return() {
   expect_code 2 "$status" "a wake the host hands back must rewake main"
   assert_contains "$out" "signal: fixture.status" "the handed-back wake must carry its reason line"
   assert_contains "$out" "supervision-host: the away session could not take this wake" "the handed-back wake must say why"
-  assert_contains "$out" "not from the captain: it is not a return" "an away-posture handback must say it is not the captain's return"
+  assert_contains "$out" "not from the user: it is not a return" "an away-posture handback must say it is not the user's return"
   pass "auto-arm: a wake the host hands back under the away record says it is automatic supervision, not a return"
 }
 
