@@ -30,7 +30,8 @@ from_status and builds the canonical shape):
 Exit status:
   0  streamed until the timeout elapsed with no error - a clean bounded wait;
      the caller treats this as "no fast escalation, poll cadence preserved".
-  2  bad arguments, could not connect, or could not send the subscribe request.
+  2  bad arguments, or failure to enter the socket directory, connect,
+     or send the subscribe request.
   3  the subscribe request did not return a subscription_started ack.
   4  the server closed the stream early or a receive operation failed.
 A non-zero exit tells the bash caller to fall back to plain polling for this
