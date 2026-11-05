@@ -54,9 +54,11 @@
 # content. In no-mistakes mode that live read is preceded by
 # fm_dod_nm_custody_returned: a copy that publishes before recovering the
 # pipeline's fix commits agrees with its own unfixed patch set, so the copy must
-# also hold the result of a passed run. These live reads are the one check at the ready
-# decision; a later rebase or patch set on the server does not revoke an armed
-# task's done. Teardown's landed-work test remains the complete discard gate.
+# also hold the result of a passed run. Custody and patch-set reads establish
+# head/tree proof at arming; a later rebase or patch set on the server does not
+# revoke that proof. The live destination gate in fm_dod_accept_ship_done below
+# still applies to an armed task's done. Teardown's landed-work test remains the
+# complete discard gate.
 # The block opens with the fixed machine-readable "Delivery contract: mode=<mode>"
 # line that bin/fm-spawn.sh checks a ship brief against; a forge=gerrit block
 # appends " forge=gerrit shape=squash" to that line, and a forge=forgejo or

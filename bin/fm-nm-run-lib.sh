@@ -21,6 +21,8 @@
 # form preserves stdout, stderr, and exit status; the checked form discards
 # stderr, while fm_nm_run keeps the fail-open query contract for read-only callers.
 # The no-mistakes forms route host reads through the opt-in home resolver below.
+# Their optional --deadline epoch caps both resolver and command reads at the
+# remaining whole seconds and refuses the command after the deadline expires.
 fm_nm_bounded() {  # <dir> <timeout_secs> <command> <args...>
   local dir=$1 timeout_secs=$2 have_timeout=none
   shift 2
@@ -42,7 +44,8 @@ fm_nm_bounded() {  # <dir> <timeout_secs> <command> <args...>
 # a project shares one gate URL, so the site provides a resolver and Firstmate
 # only calls it. The resolver is the executable whose absolute path is the
 # first line of this home's config/nm-home-resolver; it is called with the
-# worktree path as its only argument, bounded by 5 seconds, and its stdout,
+# worktree path as its only argument, bounded by 5 seconds or the caller's
+# shorter remaining deadline, and its stdout,
 # when it exits 0 with exactly one line naming an existing directory by
 # absolute path, is the no-mistakes home for that worktree. The directory
 # must already exist because the CLI creates a fresh home's skeleton on first

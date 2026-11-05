@@ -117,7 +117,7 @@
 # The cadence path reads durable local state, fm-crew-state.sh, and one endpoint
 # liveness and busy read per terminal candidate, bounded by the scan budget left
 # after the crew-state read. Both paths can make live forge reads through
-# bin/fm-dod-lib.sh's bounded destination check when verifying ship readiness.
+# bin/fm-dod-lib.sh's shared ship readiness gate.
 # Neither path runs fm-pr-check.sh, fm-pr-poll.sh, or a state *.check.sh.
 set -u
 export LC_ALL=C
