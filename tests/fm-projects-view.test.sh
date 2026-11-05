@@ -415,30 +415,34 @@ test_cached_home_age_alone_never_rewrites_the_page() {
   local home snap out
   home=$(fixture_home cached-age)
   snap="$home/snapshot.json"
-  mate_snapshot() {  # <generated> <age-seconds> <omitted-count>
-    jq -n --arg now "$1" --argjson age "$2" --argjson omitted "$3" '{
+  mate_snapshot() {  # <generated> <cached-age-seconds> <fresh-age-seconds> <omitted-count>
+    jq -n --arg now "$1" --argjson age "$2" --argjson fresh_age "$3" --argjson omitted "$4" '{
       schema: "fm-fleet-snapshot.v1", generated: $now,
       backlog: {records: []}, tasks: [],
       secondmate_current: {records: [
         {id: "mate-mac", provenance: {selected: "structured-home", trust: "complete"}, current: {state: "no_active_work", reason: null},
          freshness: {status: "cached", age_seconds: $age}, active_children: [], queued: [], landed: [], decisions_open: [],
-         omitted: [{surface: "queued", count: $omitted}]}
+         omitted: [{surface: "queued", count: $omitted}]},
+        {id: "mate-local", provenance: {selected: "structured-home", trust: "complete"}, current: {state: "no_active_work", reason: null},
+         freshness: {status: "fresh", age_seconds: $fresh_age}, active_children: [], queued: [], landed: [], decisions_open: [], omitted: []}
       ]}
     }' > "$snap"
   }
-  mate_snapshot "$NOW" 3600 0
+  mate_snapshot "$NOW" 3600 5 0
   out=$(FM_HOME="$home" bash "$VIEW" build --snapshot "$snap") || fail "first build failed"
   assert_contains "$out" "written" "first build writes"
-  mate_snapshot 2026-11-05T12:10:00Z 4200 0
+  mate_snapshot 2026-11-05T12:10:00Z 4200 2 0
   out=$(FM_HOME="$home" bash "$VIEW" build --snapshot "$snap") || fail "rebuild failed"
-  assert_contains "$out" "unchanged" "a later pass over the same cached ledger leaves the page alone"
+  assert_contains "$out" "unchanged" \
+    "a later pass over the same cached ledger and a regenerated fresh ledger leaves the page alone"
   sed -n '/<script id="projects-data" type="application\/json">/,/<\/script>/p' "$home/.lavish/projects.html" | sed '1d;$d' \
-    | jq -e '.homes == [{id: "mate-mac", status: "cached", reason: null, read_at: "2026-11-05T11:00:00Z", omitted: 0}]' >/dev/null \
-    || fail "the page lost the time the cached ledger was read"
-  mate_snapshot 2026-11-05T12:20:00Z 4200 2
+    | jq -e '.homes == [{id: "mate-mac", status: "cached", reason: null, read_at: "2026-11-05T11:00:00Z", omitted: 0},
+                        {id: "mate-local", status: "fresh", reason: null, read_at: null, omitted: 0}]' >/dev/null \
+    || fail "the page lost the time the cached ledger was read, or dates a fresh one"
+  mate_snapshot 2026-11-05T12:20:00Z 4200 1 2
   out=$(FM_HOME="$home" bash "$VIEW" build --snapshot "$snap") || fail "changed rebuild failed"
   assert_contains "$out" "written" "a freshly read ledger with new rows republishes"
-  pass "a cached ledger's growing age alone never rewrites the page"
+  pass "a cached ledger's growing age or a regenerated fresh ledger alone never rewrites the page"
 }
 
 test_local_refresh_shows_plain_state_without_a_task_record() {
@@ -589,9 +593,9 @@ test_unread_and_old_homes_are_disclosed() {
   model=$(model_of "$home" --snapshot "$snap") || fail "model failed"
   printf '%s' "$model" | jq -e '
     .homes == [
-      {id: "mate-pc", status: "unread", reason: "remote ledger unreachable", read_at: "2026-11-05T12:00:00Z", omitted: 0},
+      {id: "mate-pc", status: "unread", reason: "remote ledger unreachable", read_at: null, omitted: 0},
       {id: "mate-mac", status: "cached", reason: null, read_at: "2026-11-05T10:00:00Z", omitted: 5},
-      {id: "mate-ok", status: "fresh", reason: null, read_at: "2026-11-05T11:59:59Z", omitted: 0}]
+      {id: "mate-ok", status: "fresh", reason: null, read_at: null, omitted: 0}]
   ' >/dev/null || fail "home read state is not carried: $model"
   pass "an unread, cached, or truncated secondmate summary is disclosed in the model"
 }

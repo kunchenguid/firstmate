@@ -42,11 +42,12 @@
 #          project_hint and repo its home summary carries, and one task id in a
 #          home lands in one group (needs, then moving, then next, then done).
 #          `homes` lists every registered secondmate with how its rows were
-#          read (fresh, cached, partial, or not read with the reason), the
-#          absolute time `read_at` its rows were read (stable across passes
-#          over the same cache; the page shows the age live against its own
-#          clock), and how many rows its summary omitted, so missing or old
-#          records never read as completed work.
+#          read (fresh, cached, partial, or not read with the reason), for a
+#          cached home the absolute time `read_at` its rows were read (stable
+#          across passes over the same cache; the page shows the age live
+#          against its own clock; null for every other status, which the page
+#          never dates), and how many rows its summary omitted, so missing or
+#          old records never read as completed work.
 #          The snapshot runs in one of two scopes. A full snapshot
 #          (`fm-fleet-snapshot.sh --json`) fetches every remote secondmate's
 #          ledger over ssh and probes each local worker's crew state; only an
@@ -349,13 +350,14 @@ build_model() {  # <snapshot.json> <archive.json> <published-model.json>
     # as such rather than as an empty or current project.
     def home_states:
       [($snap.secondmate_current.records // [])[]
+       | (if (.provenance.selected // "") != "structured-home" then "unread"
+          elif (.provenance.trust // "complete") != "complete" then "partial"
+          elif (.freshness.status // "") == "cached" then "cached"
+          else "fresh" end) as $status
        | {id,
-          status:(if (.provenance.selected // "") != "structured-home" then "unread"
-                  elif (.provenance.trust // "complete") != "complete" then "partial"
-                  elif (.freshness.status // "") == "cached" then "cached"
-                  else "fresh" end),
+          status:$status,
           reason:(.current.reason // null),
-          read_at:(if (.freshness.age_seconds // null) != null
+          read_at:(if $status == "cached" and (.freshness.age_seconds // null) != null
                    then (($snap.generated | fromdateiso8601) - .freshness.age_seconds) | todate else null end),
           omitted:([(.omitted // [])[] | (.count // 0)] | add // 0)}];
 
