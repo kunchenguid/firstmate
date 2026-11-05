@@ -428,8 +428,7 @@ The agent compacts at 150k tokens, ahead of the automatic compaction at 170k, an
 Measure the live prompt, not the session totals: the newest assistant message's `input + cache.read + cache.write`. Session token totals are cumulative across the whole session and say nothing about the current prompt.
 
 ```sh
-opencode api get "/api/session/$OPENCODE_SESSION_ID/message" --param order=desc > /tmp/ctx.json
-jq -r '[.data[]|select(.type=="assistant" and .tokens!=null)][0]|((.tokens.input//0)+(.tokens.cache.read//0)+(.tokens.cache.write//0))' /tmp/ctx.json
+opencode api get "/api/session/$OPENCODE_SESSION_ID/message" --param order=desc | jq -r '[.data[]|select(.type=="assistant" and .tokens!=null)][0]|((.tokens.input//0)+(.tokens.cache.read//0)+(.tokens.cache.write//0))'
 ```
 
 Cut the same session with:
@@ -441,6 +440,7 @@ opencode api post "/api/session/$OPENCODE_SESSION_ID/compact" --data '{}'
 `OPENCODE_SESSION_ID` is already in the agent's environment. The 170k tier is native and unattended — `compaction.buffer` in `~/.config/opencode/opencode.json` sets it against the model's 1,000,000-token window — so the 150k tier is this role's own earlier cut, not a second native setting.
 
 Before a cut, capture what the cut would lose: the open question, the pending decision, the paths in play, and the next unfinished step. In this home, run `/stow` first so durable knowledge and open-work records are persisted rather than left in conversation.
+This role authorizes the agent to invoke `/stow` on its own authority before it makes a cut, and the capture the role performs before the cut is what `/stow` persists.
 
 After the cut, re-read the task's record and the branch, then resume at the next unfinished step. The task, its branch, and its next step survive the cut.
 
