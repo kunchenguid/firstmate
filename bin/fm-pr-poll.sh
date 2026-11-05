@@ -2,14 +2,16 @@
 # Static watcher program for a validated pull request, merge request, or Gerrit
 # change poll sidecar.
 # It emits exactly one merged line for a merged change and stays silent
-# otherwise, including on every error, so a failed lookup can never be read as
-# a merge. The provider-tagged identity is data in the sidecar and is never
+# otherwise, except for a one-time missing-base recovery notice when task
+# metadata is supplied. A failed lookup can never be read as a merge.
+# The provider-tagged identity is data in the sidecar and is never
 # interpolated into this source: these bytes are identical for every task.
 # Each provider is read through its own standard CLI, gh for GitHub, glab for
 # GitLab, gerrit-axi for Gerrit, and tea for Forgejo, so an upstream checkout
 # needs no extra tooling to follow GitHub. The other forge branches need jq
 # to read state and destination from the same structured response.
-# Usage: fm-pr-poll.sh --validated <provider> <url> <host> <path> <number> <expected-base>
+# Usage: fm-pr-poll.sh --validated <provider> <url> <host> <path> <number> <expected-base> [<task-meta>]
+#        fm-pr-poll.sh --base-unavailable <task-meta>
 # A registered <task>.check.sh takes no arguments and reads its sibling .pr-poll
 # identity and task-owned expected_base from .meta (legacy base_branch is accepted).
 # This standalone copy sources nothing, so its metadata parser mirrors
@@ -18,13 +20,32 @@ set -uo pipefail
 LC_ALL=C
 export LC_ALL
 
-if [ "$#" -eq 7 ] && [ "$1" = --validated ]; then
+base_unavailable_notice() {
+  local meta=${1:-} id marker state
+  case "$meta" in *.meta) ;; *) return 1 ;; esac
+  id=${meta##*/}
+  id=${id%.meta}
+  case "$id" in ''|.*|*[!A-Za-z0-9._-]*) return 1 ;; esac
+  state=${meta%/*}
+  [ "$state" != "$meta" ] || state=.
+  [ -d "$state" ] && [ ! -L "$state" ] || return 1
+  marker=${meta%.meta}.pr-base-notified
+  (umask 077; set -C; printf '%s-%s\n' "$$" "$RANDOM" > "$marker") 2>/dev/null || return 0
+  printf 'task %s merge/readiness refused: expected PR base unavailable. Follow bin/fm-pr-check.sh recovery steps.\n' "$id"
+}
+
+meta=
+if [ "$#" -eq 2 ] && [ "$1" = --base-unavailable ]; then
+  base_unavailable_notice "$2"
+  exit "$?"
+elif { [ "$#" -eq 7 ] || [ "$#" -eq 8 ]; } && [ "$1" = --validated ]; then
   provider=$2
   url=$3
   host=$4
   path=$5
   number=$6
   expected_base=$7
+  meta=${8:-}
 elif [ "$#" -eq 0 ]; then
   case "$0" in
     *.check.sh) data=${0%.check.sh}.pr-poll ;;
@@ -43,8 +64,9 @@ elif [ "$#" -eq 0 ]; then
   fi
   exec 3<&-
   meta=${0%.check.sh}.meta
-  [ -f "$meta" ] && [ ! -L "$meta" ] && [ -r "$meta" ] || exit 0
-  expected_base=$(awk -F= '
+  expected_base=
+  if [ -f "$meta" ] && [ ! -L "$meta" ] && [ -r "$meta" ]; then
+    expected_base=$(awk -F= '
     /^expected_base=/ { e++; expected=substr($0,15) }
     /^base_branch=/ { b++; named=substr($0,13) }
     END {
@@ -53,13 +75,17 @@ elif [ "$#" -eq 0 ]; then
       if (e) print expected
       else if (b) print named
       else exit 1
-    }' "$meta") || exit 0
+    }' "$meta") || expected_base=
+  fi
 else
   exit 0
 fi
 
-case "$expected_base" in ''|-*|*$'\n'*) exit 0 ;; esac
-git check-ref-format "refs/heads/$expected_base" >/dev/null 2>&1 || exit 0
+case "$expected_base" in ''|-*|*$'\n'*) expected_base= ;; esac
+if [ -z "$expected_base" ] || ! git check-ref-format "refs/heads/$expected_base" >/dev/null 2>&1; then
+  [ -z "$meta" ] || base_unavailable_notice "$meta"
+  exit 0
+fi
 
 case "$number" in
   [1-9]*) ;;

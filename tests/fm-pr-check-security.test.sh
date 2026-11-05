@@ -1414,7 +1414,10 @@ test_static_poll_contract() {
   [ "$out" = merged ] || fail "static poll did not emit exactly one merged line"
   mv "$dir/home/state/task-a.meta" "$dir/home/state/task-a.meta.missing"
   out=$(FM_TEST_GH_STATE=MERGED run_poll "$dir")
-  [ -z "$out" ] || fail "static poll emitted without task destination metadata"
+  assert_contains "$out" 'task task-a merge/readiness refused' 'missing metadata did not produce a refusal'
+  assert_contains "$out" 'bin/fm-pr-check.sh recovery steps' 'missing metadata lost its recovery pointer'
+  out=$(FM_TEST_GH_STATE=MERGED run_poll "$dir")
+  [ -z "$out" ] || fail "static poll repeated its missing-metadata notice"
   mv "$dir/home/state/task-a.meta.missing" "$dir/home/state/task-a.meta"
   out=$(FM_TEST_GH_FAIL=1 run_poll "$dir")
   [ -z "$out" ] || fail "static poll emitted after gh failure"
@@ -1451,7 +1454,7 @@ test_static_poll_contract() {
   set -e
   [ "$rc" -eq 0 ] || fail "watcher did not surface merged poll"
   [ "$(grep -c '^check: .*: merged$' "$dir/watch.out")" -eq 1 ] || fail "watcher did not convert merged output into exactly one wake"
-  pass "static poll is silent except for one merged line and remains watcher-bounded"
+  pass "static poll emits only exact merges or one missing-base notice and remains watcher-bounded"
 }
 
 test_atomic_interruption_leaves_no_partial_artifact() {
@@ -4230,6 +4233,53 @@ test_expected_destination_fail_closed_and_retarget() {
   pass 'destination proof fails closed through readiness, polling, restart, and legacy task records'
 }
 
+test_legacy_poll_notices_once_until_rearmed() {
+  local dir state surface out
+  for surface in standalone watcher; do
+    dir=$(make_case "legacy-base-notice-$surface")
+    state="$dir/home/state"
+    FM_TEST_META_EXPECTED_BASE='' fm_write_meta "$state/task-a.meta" \
+      "worktree=$dir/wt" 'kind=ship' 'mode=direct-PR' 'pr=https://github.com/o/r/pull/1'
+    seed_canonical_poll "$dir" task-a https://github.com/o/r/pull/1
+    if [ "$surface" = standalone ]; then
+      out=$(FM_TEST_GH_STATE=MERGED run_poll "$dir")
+      assert_contains "$out" 'task task-a merge/readiness refused' 'legacy poll lost the task refusal'
+      assert_contains "$out" 'bin/fm-pr-check.sh recovery steps' 'legacy poll lost the recovery pointer'
+      [ "$(printf '%s\n' "$out" | wc -l | tr -d ' ')" = 1 ] || fail 'legacy poll emitted multiple notice lines'
+      [ "$out" != merged ] || fail 'legacy poll claimed a merge'
+      out=$(FM_TEST_GH_STATE=MERGED run_poll "$dir")
+      [ -z "$out" ] || fail 'legacy poll repeated its recovery notice'
+      write_task_meta "$dir"
+      run_check_entry "$dir" task-a https://github.com/o/r/pull/1 >/dev/null \
+        || fail 'recovery did not re-arm the legacy task'
+      out=$(FM_TEST_GH_STATE=MERGED run_poll "$dir")
+      [ "$out" = merged ] || fail 're-armed task lost normal merge polling'
+      FM_TEST_META_EXPECTED_BASE='' fm_write_meta "$state/task-a.meta" \
+        "worktree=$dir/wt" 'kind=ship' 'mode=direct-PR' 'pr=https://github.com/o/r/pull/1'
+      out=$(FM_TEST_GH_STATE=MERGED run_poll "$dir")
+      assert_contains "$out" 'task task-a merge/readiness refused' 're-arming did not reset the notice'
+    else
+      FM_TEST_GH_STATE=MERGED run_watcher_bounded "$dir/home" "$dir/fakebin" \
+        > "$dir/first.out" 2> "$dir/first.err" || fail 'legacy poll did not wake the watcher'
+      assert_grep 'task task-a merge/readiness refused' "$dir/first.out" 'watcher lost the recovery notice'
+      assert_grep 'bin/fm-pr-check.sh recovery steps' "$dir/first.out" 'watcher lost the recovery pointer'
+      assert_no_grep 'task-a.check.sh: merged' "$dir/first.out" 'legacy watcher claimed a merge'
+      [ "$(grep -c 'task task-a merge/readiness refused' "$state/.wake-queue")" = 1 ] \
+        || fail 'watcher did not queue exactly one recovery notice'
+      ack_watcher_cycle "$state" || fail 'could not acknowledge the recovery wake'
+      add_stop_custom_check "$dir"
+      FM_TEST_GH_STATE=MERGED run_watcher_bounded "$dir/home" "$dir/fakebin" \
+        > "$dir/second.out" 2> "$dir/second.err" || fail 'second legacy poll failed'
+      assert_grep 'z-stop.check.sh' "$dir/second.out" 'second poll did not reach its control check'
+      assert_no_grep 'merge/readiness refused' "$dir/second.out" 'watcher repeated the recovery notice'
+      assert_no_grep 'task-a.check.sh: merged' "$dir/second.out" 'second legacy poll claimed a merge'
+    fi
+    assert_present "$state/task-a.pr-poll" 'missing-base refusal retired the armed poll'
+  done
+  pass 'legacy polls wake once without merge proof and reset their notice on re-arm'
+}
+
+test_legacy_poll_notices_once_until_rearmed
 test_expected_destination_refuses_registration
 test_expected_destination_fail_closed_and_retarget
 test_parser_matrix

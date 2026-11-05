@@ -815,6 +815,7 @@ fm_pr_poll_publish_prepared() {
     fm_pr_poll_revoke_final || true
     return 1
   fi
+  rm -f -- "${FM_PR_POLL_DATA_DEST%.pr-poll}.pr-base-notified"
 }
 
 fm_pr_poll_artifacts_valid() {
