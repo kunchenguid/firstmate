@@ -6,7 +6,7 @@
 #   fm-contributions.sh poll
 #   fm-contributions.sh pending
 #   fm-contributions.sh verdict <task> <url> <judged-head> <source-url> <captain|fleet|maintainer|nobody> <summary>
-#   fm-contributions.sh ack <task> <url> <event-token>
+#   fm-contributions.sh ack <task> <url> <event-token> [handoff | disposition <evidence-url> <summary>]
 #   fm-contributions.sh retire <task> <url> captain <reason>
 #   fm-contributions.sh arm [--if-owned]
 #   fm-contributions.sh owned
@@ -120,7 +120,21 @@
 # with the PR's event and edit history and is bounded only by the record cap.
 # poll appends ordinary durable check wakes through fm-wake-lib and emits only
 # newly durable signals for the authenticated check to surface.
-# ack removes only the named pending token.
+# ack removes only the named pending token. A signal that carries a reviewer's
+# findings (an inline review comment, a re-raised unanswered thread, or a review
+# with text; substantive_signal in fm-contributions.jq) is acknowledged only with
+# a receipt, because an approved or non-blocking state does not mean the owning
+# worker has nothing to act on. handoff needs a record in the owning task's
+# steering inbox (sent or already handled) that names the signal's source URL;
+# send the findings with fm-send first. disposition records why no worker action
+# follows: its evidence must be a different comment or review on this same
+# contribution (a URL starting with the contribution URL and "#"), and its
+# summary must not be blank. The receipt is stored in the task's record as
+# receipts[] {token,task,kind,ref,at[,summary]}, is bound to the token and the
+# task that owns the record, and is never copied to another owner. Any other
+# signal acknowledges with the token alone. A handoff matches by source URL, so
+# an edited review keeps the receipt its first version earned until it is
+# acknowledged again under its new token.
 # A crash after enqueue can duplicate a wake but cannot consume the pending signal.
 #
 # Re-raising unanswered review threads is opt-in. Unless
@@ -573,7 +587,7 @@ settle_final() { # canonical-url task... : copy the URL's final observation to e
       [$saved[0][] | select(.task == $task) | .records[] | select(.url == $url)] | first' > "$TMP/old.json"
     if jq -e '. == null' "$TMP/old.json" >/dev/null; then
       jq -n --slurpfile final "$TMP/final.json" '
-        $final[0] + {error:null,pending:[],notified:[]} | del(.retired)' > "$TMP/row.json"
+        $final[0] + {error:null,pending:[],notified:[]} | del(.retired, .receipts)' > "$TMP/row.json"
       write_record "$task" "$TMP/row.json"
     elif jq -e '(.observation.state | IN("merged","closed") | not) or .error != null' "$TMP/old.json" >/dev/null; then
       jq -n --slurpfile final "$TMP/final.json" --slurpfile old "$TMP/old.json" '
@@ -720,6 +734,58 @@ arm() {
   "$SCRIPT_DIR/fm-check-register.sh" contributions
 }
 
+ack_handoff_record() { # task source-url: basename of a steering-inbox record naming the exact source
+  local inbox record body
+  # shellcheck source=bin/fm-task-inbox-lib.sh
+  . "$SCRIPT_DIR/fm-task-inbox-lib.sh"
+  inbox=$(fm_task_inbox_dir "$STATE" "$1")
+  for record in $(find "$inbox" "$inbox/handled" -maxdepth 1 -name '*.msg' 2>/dev/null | sort -V); do
+    body=$(fm_task_inbox_body "$record") || continue
+    # A source that is a prefix of another (review-12 inside review-123) is not a match.
+    if printf '%s\n' "$body" | awk -v s="$2" 'BEGIN { n = length(s) } {
+        line = $0
+        while ((i = index(line, s)) > 0) {
+          c = substr(line, i + n, 1)
+          if (c == "" || c !~ /[0-9A-Za-z_-]/) { found = 1; exit }
+          line = substr(line, i + 1)
+        }
+      } END { exit !found }'; then
+      printf '%s\n' "${record##*/}"
+      return 0
+    fi
+  done
+  return 1
+}
+
+ack_receipt() { # task url handoff | disposition evidence-url summary: stage the receipt in update.json
+  local task=$1 url=$2 kind=${3:-} ref summary='' source
+  shift 2
+  [ "$#" -eq 0 ] || shift
+  source=$(jq -r '.source // ""' "$TMP/event.json")
+  case "$kind" in
+    handoff)
+      [ "$#" -eq 0 ] || fail 'handoff takes no further arguments'
+      [ -n "$source" ] || fail 'this signal names no source URL to match a handoff; use disposition'
+      ref=$(ack_handoff_record "$task" "$source") \
+        || fail "no steering-inbox record for task $task names $source; steer the owning worker with the findings first, or use disposition"
+      ;;
+    disposition)
+      [ "$#" -eq 2 ] || fail 'disposition needs an evidence URL and a summary'
+      ref=$1; summary=$2
+      case "$ref" in "$url"\#?*) ;; *) fail 'disposition evidence must be a comment or review on this contribution' ;; esac
+      [ "$ref" != "$source" ] || fail 'the signal itself cannot be the evidence for its own disposition'
+      [ -n "${summary//[[:space:]]/}" ] || fail 'disposition needs a non-empty summary'
+      ;;
+    *) fail "unknown receipt '$kind'; expected handoff or disposition" ;;
+  esac
+  jq --arg token "$(jq -r .token "$TMP/event.json")" --arg task "$task" --arg kind "$kind" --arg ref "$ref" \
+    --arg summary "$summary" --arg at "$NOW" '
+    .receipts = ((.receipts // []) | map(select(.token != $token))
+      + [{token:$token,task:$task,kind:$kind,ref:$ref} + (if $summary == "" then {} else {summary:$summary} end) + {at:$at}])' \
+    "$TMP/update.json" > "$TMP/receipt.json"
+  mv "$TMP/receipt.json" "$TMP/update.json"
+}
+
 case "${1:-}" in
   snapshot)
     [ "$#" -ge 2 ] && [ "$#" -le 3 ] || fail 'snapshot needs canonical input'
@@ -769,8 +835,18 @@ case "${1:-}" in
     jq -e --arg task "$task" --arg url "$url" '.[] | select(.task == $task) | .records[] | select(.url == $url)' "$TMP/saved.json" > "$TMP/row.json" \
       || fail 'observe the contribution before recording evidence'
     if [ "$action" = ack ]; then
-      [ "$#" -eq 1 ] || fail 'ack needs one exact event token'
-      jq --arg token "$1" '.pending |= map(select(.token != $token))' "$TMP/row.json" > "$TMP/update.json"
+      [ "$#" -ge 1 ] || fail 'ack needs one exact event token'
+      ack_token=$1; shift
+      jq_lib -nc --arg token "$ack_token" --slurpfile row "$TMP/row.json" \
+        '[$row[0].pending[] | select(.token == $token)] | first // empty | . + {substantive:substantive_signal}' > "$TMP/event.json"
+      jq --arg token "$ack_token" '.pending |= map(select(.token != $token))' "$TMP/row.json" > "$TMP/update.json"
+      if [ -s "$TMP/event.json" ]; then
+        if [ "$#" -gt 0 ]; then
+          ack_receipt "$task" "$url" "$@"
+        elif jq -e '.substantive' "$TMP/event.json" >/dev/null; then
+          fail 'this signal carries review findings; acknowledge it with handoff (after steering the owning worker) or disposition <evidence-url> <summary>'
+        fi
+      fi
     else
       [ "$#" -eq 4 ] || fail 'verdict needs judged-head, source-url, actor and summary'
       fm_pr_head_valid "$1" || fail 'an exact judged commit is required'

@@ -8,14 +8,23 @@ def canonical_url:
   type == "string" and (test("^https://github.com/[A-Za-z0-9-]+/[A-Za-z0-9._-]+/(pull|issues)/[1-9][0-9]*$")
     or test("^https://[A-Za-z0-9.-]+/[A-Za-z0-9._/-]+/-/merge_requests/[1-9][0-9]*$"));
 def sha: type == "string" and test("^[a-fA-F0-9]{40}$");
+# A signal that carries a reviewer's own findings for the owning worker: an
+# inline review comment, a re-raised unanswered thread, or a review with text.
+# Its state (approved, non-blocking) says nothing about whether findings exist.
+def substantive_signal:
+  (.type | IN("review-comment","unanswered"))
+  or (.type == "review" and ((.body // "") | test("\\S")));
 def valid_record:
-  try (.schema == "fm-contributions.v1" and (.task | type == "string")
+  try (.task as $task | .schema == "fm-contributions.v1" and (.task | type == "string")
   and (.records | type == "array")
   and all(.records[]; (.url | canonical_url) and (.kind == "pr" or .kind == "issue")
     and (.pending | type == "array") and (.seen | type == "array")
     and all(.pending[]; (.token | type == "string" and length > 0))
     and all(.seen[]; type == "string")
     and ((.notified // []) | type == "array" and all(.[]; type == "string"))
+    and ((.receipts // []) | type == "array" and all(.[]; (.token | type == "string" and length > 0)
+      and .task == $task and (.kind | IN("handoff","disposition"))
+      and (.ref | type == "string" and length > 0) and (.at | fromdateiso8601 | type == "number")))
     and ((.threads // []) | type == "array" and all(.[]; (.key | type == "string")
       and (.raised == null or (.raised | fromdateiso8601 | type == "number"))))
     and (.error == null or (.error | type == "string"))
