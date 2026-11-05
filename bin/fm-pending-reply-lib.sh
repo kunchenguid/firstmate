@@ -1288,7 +1288,7 @@ fm_pending_reply_close_escalation() {  # <state-dir> <corr_id>
 
 _fm_pending_reply_close_escalation_locked() {  # <state-dir> <corr_id>
   local state=$1 corr=$2 rec escalated closed parent_status escalation key note
-  local open_line open_key open_note now close_line close_rc _task _via
+  local open_line open_key open_note now close_line close_rc _task _via _child_id _child_state _overall
   rec=$(fm_pending_reply_path "$state" "$corr")
   [ -f "$rec" ] || return 1
   [ "$(fm_pending_reply_get "$rec" phase)" = resolved ] || return 0
@@ -1316,8 +1316,11 @@ _fm_pending_reply_close_escalation_locked() {  # <state-dir> <corr_id>
       # OPEN above stays a plain append because a new blocker must wake.
       _task=$(fm_pending_reply_get "$rec" task_id)
       _via=$(fm_pending_reply_get "$rec" resolved_via)
+      _child_id=$(fm_pending_reply_get "$rec" reply_child_id)
+      _child_state=$(fm_pending_reply_get "$rec" reply_child_state)
+      _overall=$(fm_pending_reply_get "$rec" reply_overall)
       close_line="resolved [key=${key}]: $(fm_pending_reply_resolved_note "$_task" "$corr" "$_via" \
-        "child=$(fm_pending_reply_get "$rec" reply_child_id) child-state=$(fm_pending_reply_get "$rec" reply_child_state) overall=$(fm_pending_reply_get "$rec" reply_overall)")"
+        "child=${_child_id:--} child-state=${_child_state:-unknown} overall=${_overall:-unknown}")"
       close_rc=0
       fm_wake_status_append_self_announced "${parent_status%/*}" "$parent_status" "$close_line" \
         2>/dev/null || close_rc=$?

@@ -37,8 +37,6 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$SCRIPT_DIR/fm-pending-reply-lib.sh"
 # shellcheck source=bin/fm-parent-channel-lib.sh
 . "$SCRIPT_DIR/fm-parent-channel-lib.sh"
-# shellcheck source=bin/fm-timeout-lib.sh
-. "$SCRIPT_DIR/fm-timeout-lib.sh"
 
 usage() {
   cat <<'EOF' >&2
@@ -109,7 +107,7 @@ fi
 # The child's state is read last, immediately before the line is written.
 CHILD_STATE=unknown
 if fm_pending_reply_child_id_valid "$CHILD"; then
-  CHILD_RAW=$(FM_HOME="$HOME_DIR" fm_run_timed 30 "$SCRIPT_DIR/fm-crew-state.sh" "$CHILD" 2>/dev/null | head -1) || true
+  CHILD_RAW=$(FM_HOME="$HOME_DIR" "$SCRIPT_DIR/fm-crew-state.sh" "$CHILD" 2>/dev/null | head -1) || true
   case "$CHILD_RAW" in
     'state: '*) CHILD_STATE=${CHILD_RAW#state: }; CHILD_STATE=${CHILD_STATE%% *} ;;
   esac
