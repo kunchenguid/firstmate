@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Apply one primary-authoritative inherited item inside the selected remote home.
+# Apply primary-authoritative inherited material or query remote generations.
 #
 # Usage:
 #   fm-remote-inherit.sh put <allowlisted-relative-path> <bytes> <sha256> <generation> < stdin
@@ -9,6 +9,9 @@
 # Only the inherited-material allowlist is writable or removable. Writes are
 # atomic ordinary-file replacements. data/captain-shared.md is read-only and is
 # quarantined before removal or before replacing bytes not last published here.
+# The generation query prints the maximum committed generation across this code
+# root's allowlist, or zero when no records exist. It locks and validates each
+# record and refuses unsafe, unreadable, or malformed state.
 set -eu
 
 FM_HOME=${FM_HOME:?FM_HOME is required}
