@@ -1965,6 +1965,7 @@ Explicit `FM_DISPATCH_PROVIDER=typesafe` also uses `jev-latest` when no model is
 `TYPESAFE_BASE` optionally selects a different base for the TypeSafe request, from the environment or `.env` with the same non-empty-environment precedence.
 If neither source supplies a non-empty value, the base defaults to `https://api.typesafe.ai`.
 It must be an `http://` or `https://` URL with a host and no userinfo, query, fragment, whitespace, or backslash.
+Its path must not contain literal `[` or `]` characters; IPv6 host brackets remain supported.
 An invalid value exits 2 before credential lookup and sends nothing, even when no key is available.
 Trailing slashes are removed before appending `/v1/systemone`, so `TYPESAFE_BASE=https://ai-gateway.vercel.sh/typesafe/` sends to `https://ai-gateway.vercel.sh/typesafe/v1/systemone`.
 Gateway model IDs can differ from the direct service: the Vercel AI Gateway supports `jev-latest`, while `jev-1.13` returns `404 model_not_found`.

@@ -11,7 +11,8 @@
 #   provider set, retain the original typesafe.ai/jev-latest key gate exactly.
 #   TYPESAFE_BASE optionally replaces the typesafe.ai base, from the environment
 #   or $FM_HOME/.env (environment wins). It must be an http(s) URL with a host
-#   and no userinfo, query, fragment, or whitespace. Trailing slashes are removed
+#   and no userinfo, query, fragment, whitespace, or brackets in its path.
+#   Trailing slashes are removed
 #   before appending /v1/systemone; an invalid value exits 2 without sending.
 #   OpenRouter and OpenAI require both their provider selection and a model.
 #   The generic systemone provider requires a model and FM_DISPATCH_BASE_URL
@@ -266,7 +267,8 @@ select_typesafe_base() {
         all($sides[]; test("\\A([0-9A-Fa-f]{1,4}(:[0-9A-Fa-f]{1,4})*)?\\z")) and
         (split(":") | map(select(length > 0)) | length < 8)
       else false end;
-    $base | capture("\\Ahttps?://(?<host>\\[[0-9A-Fa-f:.]+\\]|[A-Za-z0-9.-]+)(:(?<port>[0-9]+))?(/[^?#[:space:]\\\\]*)?\\z"; "i") |
+    $base | capture("\\Ahttps?://(?<host>\\[[0-9A-Fa-f:.]+\\]|[A-Za-z0-9.-]+)(:(?<port>[0-9]+))?(?<path>/[^?#[:space:]\\\\]*)?\\z"; "i") |
+    ((.path // "") | (contains("[") or contains("]")) | not) and
     (if .host | startswith("[") then .host[1:-1] | ipv6
      else .host | rtrimstr(".") |
        length <= 253 and all(split(".")[];
@@ -274,7 +276,7 @@ select_typesafe_base() {
        (if test("\\A[0-9.]+\\z") then ipv4 else true end)
      end) and
     (.port == null or (.port | tonumber | . >= 1 and . <= 65535))
-  ' >/dev/null 2>&1 || die "TYPESAFE_BASE must be an http(s) URL with a host and no userinfo, query, fragment, or whitespace"
+  ' >/dev/null 2>&1 || die "TYPESAFE_BASE must be an http(s) URL with a host and no userinfo, query, fragment, whitespace, or brackets in its path"
   while [ "${base%/}" != "$base" ]; do base=${base%/}; done
   TS_BASE=$base
 }

@@ -463,7 +463,7 @@ done <<'BASE_ENDPOINTS'
 https://gateway.example/typesafe/|https://gateway.example/typesafe/v1/systemone
 http://localhost:8080/proxy///|http://localhost:8080/proxy/v1/systemone
 https://[::1]:8443/typesafe/|https://[::1]:8443/typesafe/v1/systemone
-https://gateway.example:1/tenant[1-2]/{a,b}/|https://gateway.example:1/tenant[1-2]/{a,b}/v1/systemone
+https://gateway.example:1/tenant/{a,b}/|https://gateway.example:1/tenant/{a,b}/v1/systemone
 https://gateway.example:65535/|https://gateway.example:65535/v1/systemone
 http://127.0.0.1:8080/|http://127.0.0.1:8080/v1/systemone
 https://[2001:db8::abcd]/|https://[2001:db8::abcd]/v1/systemone
@@ -506,6 +506,9 @@ for base in \
   https://bad-.example \
   https://bad_example \
   https://256.0.0.1 \
+  'https://gateway.example/tenant[1-2]' \
+  'https://gateway.example/tenant[' \
+  'https://gateway.example/tenant]' \
   'https://gateway.example/bad path' \
   $'https://gateway.example/\n' \
   $'https://gateway.example/\npath'; do
@@ -537,7 +540,8 @@ rm -f "$HOME_DIR/.env"
 # Invalid addresses must never reach Keychain, curl, or quota, for either
 # provider spelling and either configuration source. Literal errors are the
 # oracle; returning off or an HTTP error would violate that contract.
-for base in https://gateway.example:99999 'https://[abc]' https://bad..example; do
+for base in https://gateway.example:99999 'https://[abc]' https://bad..example \
+  'https://gateway.example/tenant[1-2]' 'https://gateway.example/tenant[' 'https://gateway.example/tenant]'; do
   for provider in '' typesafe; do
     for source in environment dotenv; do
       for credential in absent environment declared; do
