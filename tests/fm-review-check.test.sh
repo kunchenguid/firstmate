@@ -48,6 +48,8 @@ test_records_one_review_and_no_watch() {
   assert_no_grep 'pr=' "$META" "a review was recorded as a forge PR"
   assert_absent "$HOME_DIR/state/t1.check.sh" "a merge watch was armed for an external review"
   assert_absent "$HOME_DIR/state/t1.pr-poll" "a PR poll sidecar was written for an external review"
+  assert_contains "$OUT" "the user or an authorized reviewer approves and merges the review" \
+    "the recorded review narrowed approval to the user alone"
   git -C "$WT" commit -q --allow-empty -m 'second upload'
   run_check t1 'https://review.example.test/r/124'
   expect_code 0 "$RC" "re-recording a review failed: $OUT"

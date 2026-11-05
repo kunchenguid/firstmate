@@ -1437,7 +1437,7 @@ test_forge_gerrit_refuses_yolo() {
     || fail "a registered +yolo survived the gerrit forge (got '$out')"
   err=$(FM_HOME="$home" "$PROJECT_MODE" fp 2>&1 >/dev/null)
   assert_contains "$err" "refused" "the dropped yolo posture was a silent no-op"
-  assert_contains "$err" "attributed claim that a named user approved" \
+  assert_contains "$err" "attributed claim that a named human reviewer approved" \
     "the refusal did not carry the reason yolo is inactive for this forge"
 
   rec=$(make_home forge-yolo-spawn "- proj [no-mistakes forge=gerrit] - fixture (added 2026-01-01)")
@@ -1452,7 +1452,7 @@ EOF
   status=$?
   [ "$status" -ne 0 ] || fail "a spawn with --yolo on launched on a gerrit-forge project"
   assert_contains "$out" "--yolo on is refused" "the spawn refusal did not name the refused flag"
-  assert_contains "$out" "attributed claim that a named user approved" \
+  assert_contains "$out" "attributed claim that a named human reviewer approved" \
     "the spawn refusal did not carry the captain's reason"
   assert_absent "$home/state/forge-yolo-s1.meta" "the refused spawn still recorded a task"
 

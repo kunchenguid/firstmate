@@ -528,6 +528,8 @@ test_external_dod_renders_the_adapter() {
   assert_contains "$dod" "done [at=<epoch>]: review {url} uploaded for review" "external DoD lacks the ready grammar"
   assert_contains "$dod" "## Review tool instructions (home configuration)" "external DoD lacks the adapter section"
   assert_contains "$dod" "review-tool upload --draft" "external DoD lacks the adapter body"
+  assert_contains "$dod" "The user or an authorized reviewer approves and merges the review" \
+    "external DoD narrowed approval to the user alone"
   assert_not_contains "$dod" "push your branch and open a PR" "external DoD still asks for a pushed PR"
   out=$(CONFIG="$TMP_ROOT/no-such-config" fm_dod_block direct-PR t1 fm/t1 external 2>&1) \
     && fail "external DoD rendered with no adapter"

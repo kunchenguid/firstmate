@@ -637,7 +637,7 @@ EOF
         printf '%s\n' "Commit nothing after uploading; if you must change the work, commit it and upload again before reporting done."
       fi
       cat <<EOF
-Do NOT run /no-mistakes. The user approves and merges the review; the Director relays the outcome.
+Do NOT run /no-mistakes. The user or an authorized reviewer approves and merges the review; the Director relays the outcome.
 
 ## Review tool instructions (home configuration)
 EOF

@@ -630,14 +630,14 @@ check_herdr() {
     return 0
   fi
   record herdr "human: the herdr CLI does not resolve on the remote runtime PATH" \
-    "install herdr from https://herdr.dev on that account, or add a ~/.local/bin wrapper for it; the remote second mate's herdr backend needs this CLI"
+    "install herdr from https://herdr.dev on that account, or add a ~/.local/bin wrapper for it; the remote Project Director's herdr backend needs this CLI"
 }
 
 # Reported only when no supported backend CLI resolves at all: one session-
 # provider gap rather than one gap per missing CLI.
 check_backend() {
   record backend "human: neither the herdr nor the rex CLI resolves on the remote runtime PATH" \
-    "install herdr from https://herdr.dev or Rex on that account, or add a ~/.local/bin wrapper for one; a remote second mate needs one session-provider backend"
+    "install herdr from https://herdr.dev or Rex on that account, or add a ~/.local/bin wrapper for one; a remote Project Director needs one session-provider backend"
 }
 
 # Rex server calls below read through a resolved rex CLI that can never
@@ -664,7 +664,7 @@ check_rex() {
   local rex raw client_api
   if ! rex=$(rex_bin) || [ ! -x "$rex" ]; then
     record rex "human: the rex CLI does not resolve on the remote runtime PATH" \
-      "install Rex on that account, or add a ~/.local/bin wrapper for it; the remote second mate's rex backend needs this CLI"
+      "install Rex on that account, or add a ~/.local/bin wrapper for it; the remote Project Director's rex backend needs this CLI"
     return 0
   fi
   raw=$("$rex" version 2>/dev/null || true)
@@ -724,14 +724,14 @@ check_rex_server() {
       return 0
       ;;
     *)
-      record rex-server "human: the rex server endpoint '$endpoint' is not a local unix socket; remote second mates stay on the account's personal unix:// server" \
+      record rex-server "human: the rex server endpoint '$endpoint' is not a local unix socket; remote Project Directors stay on the account's personal unix:// server" \
         "reconfigure that account's rex to serve the default unix:// endpoint, then rerun this command"
       return 0
       ;;
   esac
   exit_empty=$(printf '%s' "$whoami" | jq -r '.exit_empty | select(type == "boolean")' 2>/dev/null) || exit_empty=
   if [ "$exit_empty" = true ]; then
-    record rex-server "human: the rex server at $endpoint exits when empty, so a second mate's session would not survive an idle stretch" \
+    record rex-server "human: the rex server at $endpoint exits when empty, so a Project Director's session would not survive an idle stretch" \
       "at a time when nothing runs on that account's rex server, run 'rex server stop' and then 'rex server start' there to bring it back as a persistent server, then rerun this command; Firstmate never stops an answering server, because that ends every process in its sessions"
     return 0
   fi
@@ -1137,7 +1137,7 @@ if [ "${#MISSING[@]}" -gt 0 ] || [ "${#GAPS[@]}" -gt 0 ]; then
   for i in ${GAPS[@]+"${GAPS[@]}"}; do
     NAMES="${NAMES:+$NAMES }${CHECK_NAMES[$i]}"
   done
-  printf 'error: this host is not ready for a remote second mate%s\n' "${NAMES:+; unresolved: $NAMES}" >&2
+  printf 'error: this host is not ready for a remote Project Director%s\n' "${NAMES:+; unresolved: $NAMES}" >&2
   exit 1
 fi
-printf 'ok: remote second-mate readiness confirmed on this host\n'
+printf 'ok: remote Project Director readiness confirmed on this host\n'

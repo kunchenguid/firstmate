@@ -2784,6 +2784,8 @@ test_link_refuses_secondmate_routed_task_with_promised_final_pointer() {
   out=$(PATH="$BASE_PATH" FM_HOME="$main" "$ROOT/bin/fm-x-link.sh" routed-k1 req-routed 2>"$err"); rc=$?
   expect_code 1 "$rc" "secondmate-routed link exit"
   [ -z "$out" ] || fail "a refused link must print no success line (got: $out)"
+  assert_grep "Project Director task" "$err" \
+    "the refusal must use the Project Director role name"
   assert_grep "sm-axi" "$err" "the refusal must name the second mate holding the task"
   assert_grep "--work-home secondmate:sm-axi" "$err" \
     "the refusal must name the exact promised-final binding for that second mate"
@@ -2815,6 +2817,8 @@ test_link_missing_task_with_secondmates_points_at_promised_final() {
   PATH="$BASE_PATH" FM_HOME="$home" "$ROOT/bin/fm-x-link.sh" unknown-k1 req-unknown >/dev/null 2>"$err"; rc=$?
   expect_code 1 "$rc" "unknown-task link exit with second mates registered"
   assert_grep "no such task: state/unknown-k1.meta" "$err" "the concrete missing record must still be reported"
+  assert_grep "registered Project Directors" "$err" \
+    "the routing hint must use the Project Director role name"
   assert_grep "fm-public-followup.sh register" "$err" \
     "an unlocatable task in a home with second mates must be pointed at the promised-final path"
   assert_grep "--work-home secondmate:<id>" "$err" \

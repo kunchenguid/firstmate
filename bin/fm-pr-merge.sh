@@ -258,7 +258,7 @@ PROJECT_URL="https://$FM_PR_HOST/$FM_PR_PATH"
 # Firstmate never submits a Gerrit change, even though gerrit-axi can, so the
 # refusal is stated rather than left as a silently absent provider branch.
 # Submitting a Gerrit change means first recording a Code-Review+2, which is a
-# positive attributed claim that a named user approved the change, read by
+# positive attributed claim that a named human reviewer approved the change, read by
 # colleagues and by any audit of the repository. Firstmate must not manufacture
 # one. The server permitting self-approval is what makes this a policy boundary
 # rather than a capability limit, so it is enforced here rather than assumed.

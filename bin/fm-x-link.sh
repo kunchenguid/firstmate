@@ -163,10 +163,10 @@ if [ ! -f "$META" ]; then
   echo "fm-x-link: no such task: state/$ID.meta" >&2
   scan_secondmate_routes "$ID"
   if [ -n "$ROUTE_MATCHES" ]; then
-    printf 'fm-x-link: %s is a second mate task (found in: %s), so this home cannot link it - a link only binds work whose record lives here.\n' \
+    printf 'fm-x-link: %s is a Project Director task (found in: %s), so this home cannot link it - a link only binds work whose record lives here.\n' \
       "$ID" "$ROUTE_MATCHES" >&2
   elif [ "$ROUTE_REGISTERED" -eq 1 ]; then
-    printf 'fm-x-link: this home has registered second mates and no record of %s, so the work may be routed to one - a link only binds work whose record lives here.\n' \
+    printf 'fm-x-link: this home has registered Project Directors and no record of %s, so the work may be routed to one - a link only binds work whose record lives here.\n' \
       "$ID" >&2
   fi
   if [ -n "$ROUTE_MATCHES" ] || [ "$ROUTE_REGISTERED" -eq 1 ]; then

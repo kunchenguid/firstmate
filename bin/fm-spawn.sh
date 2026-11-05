@@ -4402,10 +4402,10 @@ if [ "$KIND" = ship ]; then
   fi
   # Merge authority on a Gerrit forge is refused rather than quietly dropped, on
   # the user's decision of 2026-09-15: a Code-Review+2 is a positive
-  # attributed claim that a named user approved, and the Director must not
+  # attributed claim that a named human reviewer approved, and the Director must not
   # manufacture one.
   if [ "$STANDING_FORGE" = gerrit ] && [ "$YOLO" = on ]; then
-    echo "error: --yolo on is refused for $ID: $PROJ_NAME is registered forge=gerrit, where yolo is inactive because a Code-Review+2 is a positive attributed claim that a named user approved and the Director must not manufacture one (user decision 2026-09-15); spawn with --yolo off" >&2
+    echo "error: --yolo on is refused for $ID: $PROJ_NAME is registered forge=gerrit, where yolo is inactive because a Code-Review+2 is a positive attributed claim that a named human reviewer approved and the Director must not manufacture one (user decision 2026-09-15); spawn with --yolo off" >&2
     exit 1
   fi
   # An external review tool uploads its own snapshot, so this task must never

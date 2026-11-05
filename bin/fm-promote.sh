@@ -161,7 +161,7 @@ fi
 refuse_impossible_forge_posture() {
   fm_forge_valid_for_mode "$FORGE" "$MODE" fm-promote.sh || return 1
   if [ "$FORGE" = gerrit ] && [ "$YOLO" = on ]; then
-    echo "error: --yolo on is refused for forge=gerrit: a Code-Review+2 is a positive attributed claim that a named user approved and the Director must not manufacture one (user decision 2026-09-15); promote with --yolo off and take any landing on a current explicit user instruction naming that concrete change" >&2
+    echo "error: --yolo on is refused for forge=gerrit: a Code-Review+2 is a positive attributed claim that a named human reviewer approved and the Director must not manufacture one (user decision 2026-09-15); promote with --yolo off and take any landing on a current explicit user instruction naming that concrete change" >&2
     return 1
   fi
   # An Investigator launches without the per-task push guard a forge=external Builder
