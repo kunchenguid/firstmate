@@ -1136,6 +1136,8 @@ ssh://git@git.example.com:2222/team/app.git|ssh://git@git.example.com:2222/team/
 git@git.example.com:team/app.git|ssh://git@git.example.com/team/app.git
 https://git.example.com/team/app/|https://git.example.com/team/app.git
 ssh://git@Git.Example.COM/team/app.git|ssh://git@git.example.com/team/app.git
+Git.Example.COM:team/app.git|git.example.com:team/app.git
+git.example.com:team/app.git|ssh://git.example.com/team/app.git
 CASES
   while IFS='|' read -r here there; do
     rc=0; out=$(clone_check_with "$here" "$there") || rc=$?
@@ -1145,6 +1147,7 @@ CASES
 ssh://git@git.example.com:2222/team/app.git|ssh://git@git.example.com:2223/team/app.git
 ssh://git@git.example.com/Team/App.git|ssh://git@git.example.com/team/app.git
 git@git.example.com:Team/App.git|git@git.example.com:team/app.git
+git.example.com:Team/App.git|git.example.com:team/app.git
 CASES
   pass "hc placement: the clone check accepts only the same remote, port and path case included"
 }

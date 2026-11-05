@@ -529,7 +529,7 @@ EOF
 
 # A remote's identity for comparing two clones of one project: host, port, and
 # path, with only the host lowercased. It drops the scheme, the user, a trailing
-# .git, and a trailing slash, so scp-style user@host:path equals
+# .git, and a trailing slash, so scp-style [user@]host:path equals
 # scheme://user@host/path; a different port or path case is a different remote.
 fm_backend_hc_url_key() {  # <url>
   local u=$1 host=
@@ -542,10 +542,16 @@ fm_backend_hc_url_key() {  # <url>
       host=${u%%/*}
       u=${u#"$host"}
       ;;
-    *@*:*)
-      u=${u#*@}
-      host=${u%%:*}
-      u=/${u#*:}
+    *:*)
+      # git's scp-like [user@]host:path: no slash before the first colon.
+      case "${u%%:*}" in
+        */*) ;;
+        *)
+          host=${u%%:*}
+          host=${host#*@}
+          u=/${u#*:}
+          ;;
+      esac
       ;;
   esac
   printf '%s%s' "$(printf '%s' "$host" | tr '[:upper:]' '[:lower:]')" "$u"
