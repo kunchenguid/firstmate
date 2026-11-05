@@ -3860,6 +3860,7 @@ SH
           expect_code 1 "$rc" "$backend/$state: child artifact cleanup was allowed"
           assert_grep "$child_wt/data/child-a" "$case_dir/stderr" "$backend/$state: source missing: $(cat "$case_dir/stderr")"
           assert_grep "$destination" "$case_dir/stderr" "$backend/$state: destination missing"
+          assert_no_grep "under $home/" "$case_dir/stderr" "$backend/$state: destination is inside the retiring home"
           [ "$(cat "$child_wt/data/child-a/labels.txt")" = 'labelled child answer' ] || fail "$backend/$state: bytes lost"
           assert_present "$home/state/child-a.meta" "$backend/$state: child identity lost"
           assert_absent "$case_dir/removed" "$backend/$state: Orca removal ran"

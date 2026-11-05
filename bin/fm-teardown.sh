@@ -2109,8 +2109,8 @@ report_worktree_dirt() {
 # Scratch and --force copies are scrubbed before Treehouse return. See the
 # script header for why `git clean -fd` is not enough and why a dirty return
 # is not reported as clean.
-require_scout_artifacts_preserved() {  # <copy> <task-id> <durable-task-directory>
-  local wt=$1 task=$2 destination=$3 source
+require_scout_artifacts_preserved() {  # <copy> <task-id> <archive-relative-path>
+  local wt=$1 task=$2 archive=$3 source destination retiring_home artifact_data
   [ "$DISCARD_SCOUT_ARTIFACTS" != 1 ] || return 0
   fm_task_id_path_safe "$task" || return 1
   [ -n "$wt" ] && [ -d "$wt" ] || return 0
@@ -2119,7 +2119,24 @@ require_scout_artifacts_preserved() {  # <copy> <task-id> <durable-task-director
     || { { [ -L "$wt/data" ] || { [ -e "$wt/data" ] && [ ! -d "$wt/data" ]; }; } \
       && [ "$(git -C "$wt" cat-file -t HEAD:data 2>/dev/null)" != blob ]; }; then
     echo "REFUSED: scout task $task may still hold durable artifacts at $source (including an unsafe data parent)." >&2
-    echo "Preserve the material under $destination and remove it from the copy before cleanup; teardown never moves or overwrites artifacts." >&2
+    destination="$DATA/$archive"
+    retiring_home=
+    if [ "$KIND" = secondmate ]; then
+      retiring_home=$(removal_target_abs_path "${HOME_PATH:-$WT}") || return 1
+    fi
+    artifact_data=$(removal_target_abs_path "$DATA") || return 1
+    if [ -n "$retiring_home" ] \
+      && { [ "$artifact_data" = "$retiring_home" ] || path_is_ancestor_of "$retiring_home" "$artifact_data"; }; then
+      if fm_secondmate_parent_record_parse "$retiring_home/$SUB_HOME_PARENT_MARKER" \
+        && [ "$FM_SECONDMATE_PARENT_ROUTE" = remote ] && [ -n "$FM_SECONDMATE_PARENT_DATA" ]; then
+        destination="$FM_SECONDMATE_PARENT_DATA/$archive"
+        echo "Copy $source from the remote host ${FM_SECONDMATE_PARENT_HOST:-hosting this secondmate} to $destination on the parent host, then remove the material from the copy before retrying; teardown never moves or overwrites artifacts." >&2
+      else
+        echo "Cannot resolve the surviving parent's archive from $retiring_home/$SUB_HOME_PARENT_MARKER; re-seed this secondmate from its parent before retrying." >&2
+      fi
+    else
+      echo "Preserve the material under $destination and remove it from the copy before cleanup; teardown never moves or overwrites artifacts." >&2
+    fi
     echo "Only after explicit approval to discard these artifacts, rerun with --force --discard-scout-artifacts." >&2
     return 1
   fi
@@ -3318,7 +3335,7 @@ validate_firstmate_home_children_removal() {
       fi
       if [ "$child_owner_rc" -ne "$TEARDOWN_SLOT_REASSIGNED_RC" ]; then
         [ "$child_owner_rc" -eq 0 ] || return 1
-        require_scout_artifacts_preserved "$child_wt" "$child_id" "$DATA/$archive_parent/children/$child_id" || return 1
+        require_scout_artifacts_preserved "$child_wt" "$child_id" "$archive_parent/children/$child_id" || return 1
       fi
     fi
   done
@@ -3568,7 +3585,7 @@ cleanup_firstmate_home_children() {
       if [ -n "$child_wt" ] && [ -d "$child_wt" ]; then
         validate_child_worktree_for_removal "$child_wt" "$child_proj" >/dev/null || return 1
         if [ "$child_kind" = scout ]; then
-          require_scout_artifacts_preserved "$child_wt" "$child_id" "$DATA/$archive_parent/children/$child_id" || return 1
+          require_scout_artifacts_preserved "$child_wt" "$child_id" "$archive_parent/children/$child_id" || return 1
         fi
         rm -f "$child_wt/.claude/settings.local.json" "$child_wt/.opencode/plugins/fm-turn-end.js" \
           "$child_wt/.fm-grok-turnend" "$child_wt/.fm-kimi-turnend"
@@ -3590,7 +3607,7 @@ cleanup_firstmate_home_children() {
       else
         validate_child_worktree_for_removal "$child_wt" "$child_proj" >/dev/null || return 1
         if [ "$child_kind" = scout ]; then
-          require_scout_artifacts_preserved "$child_wt" "$child_id" "$DATA/$archive_parent/children/$child_id" || return 1
+          require_scout_artifacts_preserved "$child_wt" "$child_id" "$archive_parent/children/$child_id" || return 1
         fi
         rm -f "$child_wt/.claude/settings.local.json" "$child_wt/.opencode/plugins/fm-turn-end.js" \
           "$child_wt/.opencode/plugins/fm-busy-state.js" \
@@ -3668,7 +3685,7 @@ require_exclusive_task_worktree_slot || exit 1
 require_owned_task_worktree_slot || exit 1
 
 if [ "$KIND" = scout ] && teardown_owns_worktree; then
-  require_scout_artifacts_preserved "$WT" "$ID" "$DATA/$ID" || exit 1
+  require_scout_artifacts_preserved "$WT" "$ID" "$ID" || exit 1
 fi
 
 validate_pr_poll_cleanup "$STATE" "$ID" || exit 1
@@ -3933,7 +3950,7 @@ fi
 # or its processes exit. Inspect the stopped copy before dropping its branch or
 # returning it on either backend path.
 if [ "$KIND" = scout ] && teardown_owns_worktree; then
-  require_scout_artifacts_preserved "$WT" "$ID" "$DATA/$ID" || exit 1
+  require_scout_artifacts_preserved "$WT" "$ID" "$ID" || exit 1
 fi
 if teardown_owns_worktree && [ -d "$WT" ] && [ "$FORCE" != "--force" ]; then
   validate_worktree_teardown_safety || exit 1
