@@ -68,8 +68,11 @@ Repeat and edge cases:
   The pick is appended to the hold reason as a `Rec:` line, after up to four `--option "<text>"` values rendered as numbered lines, so every place the hold text is shown carries them.
   `--option` without `--rec` is refused.
   A task that is already captain-held (a retry) and a `--until` deferral record are not new asks and need no pick.
+  A retry without `--rec` keeps the numbered options and `Rec:` line from the stored reason.
 - `--key <slug>` names the ask's subject, in the decision-key charset owned by [`bin/fm-classify-lib.sh`](../bin/fm-classify-lib.sh), and is recorded on a `Captain hold key:` body line.
   A new ask whose key matches another open captain hold creates nothing: the output says it attached to the existing hold and prints that task id.
+  With `--origin`, that origin is added to the existing hold's `Captain hold attached origins:` body line, so `complete` accepts the hold for it too.
+  If the backlog listing fails, the keyed ask is refused instead of treated as an empty queue.
   Different keys stay separate holds.
   A new ask without `--key` drops any key line left from an earlier released ask on the same task.
 - `--origin` resolves the backend origin identity before writing the hold-set stamp.

@@ -696,8 +696,13 @@ test_hold_requires_a_pick_and_renders_options() {
   assert_contains "$show" "1. north" "option one is not rendered as a numbered line"
   assert_contains "$show" "2. south" "option two is not rendered as a numbered line"
   assert_contains "$show" "Rec: south, it is cheaper" "the pick is not in the hold text"
-  run_captain "$home" hold sample-pick --reason "which route?" >/dev/null \
+  run_captain "$home" hold sample-pick --reason "which route, again?" >/dev/null \
     || fail "retrying an already captain-held task was refused for lacking a pick"
+  show=$(FM_HOME="$home" "$ROOT/bin/fm-tasks-axi.sh" show sample-pick --full)
+  assert_contains "$show" "which route, again?" "the retry did not record its new reason"
+  assert_contains "$show" "1. north" "the retry dropped option one"
+  assert_contains "$show" "2. south" "the retry dropped option two"
+  assert_contains "$show" "Rec: south, it is cheaper" "the retry dropped the recommended pick"
   if run_captain "$home" hold sample-five --title "Five" --reason "q" --rec x \
     --option a --option b --option c --option d --option e >/dev/null 2>&1; then
     fail "hold accepted five options"
@@ -711,15 +716,42 @@ test_hold_requires_a_pick_and_renders_options() {
 # A second ask for the same decision key attaches to the open hold instead of
 # creating another; a different key stays a separate hold.
 test_hold_collapses_a_duplicate_decision_key() {
-  local home out
+  local home out o
   home=$(make_home dup-key)
-  run_captain "$home" hold sample-first --title "First" --reason "ship?" --rec yes --key ship-gate >/dev/null \
-    || fail "the first keyed ask failed"
-  out=$(run_captain "$home" hold sample-second --title "Second" --reason "ship it?" --rec yes --key ship-gate 2>&1) \
-    || fail "the duplicate ask failed instead of attaching"
-  assert_contains "$out" "attached to sample-first" "the duplicate ask did not say it attached"
+  for o in sample-review-a sample-review-b; do
+    mkdir -p "$home/data/$o"
+    tasks_in "$home" add "$o" "Investigate $o" --kind scout --repo sample --start >/dev/null \
+      || fail "could not create the $o fixture"
+    write_origin_meta "$home" "$o"
+    printf 'done: report complete\n' > "$home/state/$o.status"
+  done
+  run_captain "$home" hold sample-first --title "First" --reason "ship?" --rec yes --key ship-gate \
+    --origin sample-review-a >/dev/null || fail "the first keyed ask failed"
+  out=$(run_captain "$home" hold sample-second --title "Second" --reason "ship it?" --rec yes --key ship-gate \
+    --origin sample-review-b 2>&1) || fail "the duplicate ask failed instead of attaching"
+  assert_contains "$out" "attached to sample-first for origin sample-review-b" "the duplicate ask did not say it attached"
   if tasks_in "$home" show sample-second >/dev/null 2>&1; then
     fail "a duplicate ask created a second captain task"
+  fi
+  out=$(run_captain "$home" complete sample-review-b sample-first) \
+    || fail "the attached origin could not complete through the hold it attached to"
+  assert_not_contains "$out" "no recorded origin" "the attached origin was not recorded on the hold"
+  run_captain "$home" complete sample-review-a sample-first >/dev/null \
+    || fail "attaching a second origin broke completion for the first"
+  mkdir -p "$home/listfail"
+  cat > "$home/listfail/tasks-axi" <<'SH'
+#!/usr/bin/env bash
+[ "${1:-}" != list ] || exit 1
+exec "$REAL_TASKS_AXI" "$@"
+SH
+  chmod +x "$home/listfail/tasks-axi"
+  if out=$(PATH="$home/listfail:$PATH" run_captain "$home" hold sample-blind --title "Blind" \
+    --reason "ship?" --rec yes --key ship-gate 2>&1); then
+    fail "a failed backlog listing let a keyed ask through as if the queue were empty"
+  fi
+  assert_contains "$out" "could not list the backlog" "the listing failure was not named"
+  if tasks_in "$home" show sample-blind >/dev/null 2>&1; then
+    fail "a failed backlog listing still created a hold"
   fi
   run_captain "$home" hold sample-other --title "Other" --reason "tag?" --rec yes --key tag-gate >/dev/null \
     || fail "a distinct key was collapsed"
