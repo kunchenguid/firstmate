@@ -97,6 +97,11 @@ check_locale() {  # <session> <LANG value> <expected placeholder fragment>
 
 check_locale fmbobde de_DE.UTF-8 'Baue Alles'
 
+# The hook writes hook.out line by line, so wait for its last line before reading.
+for ((i = 0; i < 60; i++)); do
+  grep -q '^ancestry=' "$LAB/hook.out" 2>/dev/null && break
+  sleep 0.5
+done
 out=$(cat "$LAB/hook.out")
 assert_contains "$out" 'marker=1' "bob $BOB_VERSION: a hook subprocess did not inherit BOB_SESSION"
 assert_contains "$out" 'own=bob' "bob $BOB_VERSION: fm-harness.sh did not name bob from a real subprocess"
