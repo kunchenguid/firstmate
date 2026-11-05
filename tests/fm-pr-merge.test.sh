@@ -325,6 +325,10 @@ case "${1:-} ${2:-}" in
         exit 0
         ;;
       *" repos/"*"/branches/"*)
+        if [ -f "$FM_TEST_GH_BRANCH_FAIL-after-update" ] && [ -f "$FM_TEST_GH_UPDATE_DONE" ]; then
+          cat "$FM_TEST_GH_BRANCH_FAIL-after-update" >&2
+          exit 1
+        fi
         if [ -f "${FM_TEST_GH_BRANCH_FAIL:-}" ]; then
           cat "$FM_TEST_GH_BRANCH_FAIL" >&2
           exit 1
@@ -3477,6 +3481,64 @@ test_github_behind_update_refuses_concurrent_head_change() {
   pass "fm-pr-merge refuses a concurrent source-head change before updating, with or without --expected-head"
 }
 
+test_github_updated_head_other_refusals_stop_waiting() {
+  local case_dir rc blocker waiting reason reads advice violations=''
+  local old_head=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  local new_head=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+  for blocker in draft closed conflict required-source; do
+    for waiting in pending missing; do
+      case_dir=$(make_case "github-behind-blocker-$blocker-$waiting")
+      add_gh_mocks "$case_dir" "$old_head"
+      write_github_required "$case_dir" ruleset:ci
+      jq '.mergeStateStatus = "BEHIND"' "$case_dir/github-view.json" > "$case_dir/view.tmp"
+      mv "$case_dir/view.tmp" "$case_dir/github-view.json"
+      jq --arg head "$new_head" --arg waiting "$waiting" --arg blocker "$blocker" '
+        .mergeStateStatus = "CLEAN" | .headRefOid = $head |
+        .statusCheckRollup = (if $waiting == "pending" then
+          [{"__typename":"CheckRun","name":"ci","status":"IN_PROGRESS","conclusion":null}]
+        else [] end) |
+        if $blocker == "draft" then .isDraft = true
+        elif $blocker == "closed" then .state = "CLOSED"
+        elif $blocker == "conflict" then .mergeable = "CONFLICTING" | .mergeStateStatus = "DIRTY"
+        else . end' "$case_dir/github-view.json" > "$case_dir/github-view-after-update.json"
+      printf '%s\n' "$new_head" > "$case_dir/github-head-after-update"
+      case "$blocker" in
+        draft) reason='the pull request is a draft' ;;
+        closed) reason='state is "CLOSED", not open' ;;
+        conflict) reason='mergeStateStatus is DIRTY' ;;
+        required-source)
+          reason='the branch protection summary for base branch main could not be read'
+          printf '%s\n' 'HTTP 502: required-check source unavailable' > "$case_dir/github-branch-fail-after-update"
+          ;;
+      esac
+      set +e
+      FM_PR_GITHUB_MERGEABLE_RETRY_DELAY=1 \
+        run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/6190 --update-branch \
+        > "$case_dir/stdout" 2> "$case_dir/stderr"
+      rc=$?
+      set -e
+      expect_code 1 "$rc" "$blocker-$waiting: the updated head must refuse"
+      assert_grep "$reason" "$case_dir/stderr" "$blocker-$waiting: missing the actual refusal reason"
+      assert_no_grep 'pr merge' "$case_dir/gh.log" "$blocker-$waiting: merged despite a blocker"
+      assert_absent "$case_dir/state/.control-task-x1.lock" "$blocker-$waiting: task control lock remained held"
+      assert_absent "$case_dir/state/.afk-contract.lock" "$blocker-$waiting: away-authority lock remained held"
+      [ "$(grep -c '/pulls/6190/update-branch' "$case_dir/gh.log")" -eq 1 ] \
+        || fail "$blocker-$waiting: the update request was repeated"
+      reads=$(grep -c 'statusCheckRollup' "$case_dir/gh.log")
+      advice=false
+      if grep -q 'checks are not ready\|once its checks pass' "$case_dir/stderr"; then advice=true; fi
+      printf 'observation: blocker=%s waiting=%s preflight_reads=%s retry_advice=%s\n' \
+        "$blocker" "$waiting" "$reads" "$advice"
+      # Collect every masking combination before reporting a regression failure.
+      [ "$reads" -eq 2 ] || violations="$violations $blocker-$waiting retried after the blocker;"
+      [ "$advice" = false ] || violations="$violations $blocker-$waiting suggested waiting for checks;"
+    done
+  done
+  [ -z "$violations" ] || fail "$violations"
+  pass "fm-pr-merge immediately refuses draft, closed, conflicting, or unreadable updated heads despite pending or missing checks"
+}
+
+test_github_updated_head_other_refusals_stop_waiting
 test_github_behind_update_refuses_concurrent_head_change
 test_github_zero_exit_queue_required_refuses_with_exact_retry
 test_github_closed_unqueued_outcome_omits_retry_flags

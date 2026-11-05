@@ -1133,6 +1133,7 @@ github_verify_mergeable() {
   FM_PR_GITHUB_BEHIND=false
   FM_PR_GITHUB_CHECKS_PENDING=false
   FM_PR_GITHUB_CHECKS_FAILED=false
+  FM_PR_GITHUB_OTHER_REFUSAL=false
   FM_PR_GITHUB_UNREPORTED=false
   FM_PR_GITHUB_LIVE_HEAD=
 
@@ -1205,19 +1206,26 @@ EOF
   case "$state" in
     [oO][pP][eE][nN]) ;;
     *)
+      FM_PR_GITHUB_OTHER_REFUSAL=true
       refusals="$refusals  - state is \"${state:-unreadable}\", not open
 "
       ;;
   esac
-  [ "$draft" = false ] \
-    || refusals="$refusals  - the pull request is a draft
+  if [ "$draft" != false ]; then
+    FM_PR_GITHUB_OTHER_REFUSAL=true
+    refusals="$refusals  - the pull request is a draft
 "
-  [ "$mergeable" = MERGEABLE ] \
-    || mergeable_refusal="  - mergeable is \"${mergeable:-unreadable}\", not MERGEABLE
+  fi
+  if [ "$mergeable" != MERGEABLE ]; then
+    mergeable_refusal="  - mergeable is \"${mergeable:-unreadable}\", not MERGEABLE
 "
-  [ "$merge_state" != DIRTY ] \
-    || refusals="$refusals  - mergeStateStatus is DIRTY (conflicts)
+    [ "$mergeable" = UNKNOWN ] || FM_PR_GITHUB_OTHER_REFUSAL=true
+  fi
+  if [ "$merge_state" = DIRTY ]; then
+    FM_PR_GITHUB_OTHER_REFUSAL=true
+    refusals="$refusals  - mergeStateStatus is DIRTY (conflicts)
 "
+  fi
 
   uncovered=''
   while IFS= read -r name; do
@@ -1239,6 +1247,7 @@ EOF
 
   unreported=''
   if ! github_read_required_contexts "$base"; then
+    FM_PR_GITHUB_OTHER_REFUSAL=true
     while IFS= read -r line; do
       refusals="$refusals  - $line, so a required check that has not reported cannot be ruled out
 "
@@ -1255,11 +1264,13 @@ EOF
           | if (.name | type) == "string" and (.app.id | type) == "number" and .head_sha == $head
             then . else error("invalid check producer") end ]' 2>/dev/null); then
       producers='[]'
+      FM_PR_GITHUB_OTHER_REFUSAL=true
       refusals="$refusals  - required check producers at head $live_head could not be read
 "
     fi
   fi
   if ! missing=$(github_required_checks_missing "$json" "$FM_PR_GITHUB_REQUIRED" "$producers"); then
+    FM_PR_GITHUB_OTHER_REFUSAL=true
     refusals="$refusals  - the GitHub pull request check rollup could not be read
 "
   else
@@ -1277,6 +1288,7 @@ EOF
 
   note_expected_head "$live_head"
   if [ -n "$FM_PR_EXPECTED_HEAD_REFUSAL" ]; then
+    FM_PR_GITHUB_OTHER_REFUSAL=true
     refusals="$refusals$FM_PR_EXPECTED_HEAD_REFUSAL
 "
   fi
@@ -1351,7 +1363,8 @@ github_update_behind_branch() {
       rm -f "$attempt_error"
       return 1
     fi
-    if [ "$status" -ne 3 ] && { [ "$FM_PR_GITHUB_CHECKS_FAILED" = true ] || {
+    if [ "$status" -ne 3 ] && { [ "$FM_PR_GITHUB_CHECKS_FAILED" = true ] \
+      || [ "$FM_PR_GITHUB_OTHER_REFUSAL" = true ] || {
       [ "$FM_PR_GITHUB_CHECKS_PENDING" != true ] \
       && [ "$FM_PR_GITHUB_UNREPORTED" != true ]; }; }; then
       cat "$attempt_error" >&2
