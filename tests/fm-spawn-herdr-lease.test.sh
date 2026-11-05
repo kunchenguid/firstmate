@@ -121,7 +121,9 @@ case "${1:-} ${2:-}" in
     esac
     exit 0 ;;
   'agent get')
-    if [ -f "$D/herdr-agent-live" ]; then
+    if [ -f "$D/agent-gone" ]; then
+      printf '{"error":{"code":"agent_not_found"}}\n'
+    elif [ -f "$D/herdr-agent-live" ]; then
       printf '{"result":{"agent":{"agent_status":"idle"}}}\n'
     else
       printf '{"result":{"agent":{"agent_status":"shell-starting"}}}\n'
@@ -355,7 +357,30 @@ test_windows_pane_that_never_moves_refuses() {
   [ "$status" -ne 0 ] || fail "a probe answering the project folder was accepted"$'\n'"$out"
   [ -s "$dir/fake/probes" ] || fail "no folder probe reached the pane"
   [ ! -e "$dir/fake/launched-command" ] || fail "a harness started outside its copy"
+  assert_not_contains "$out" "default_shell" "a Git Bash pane that answered the wrong folder was told to change its shell"
   pass "native Windows Herdr refuses a pane whose probe answers a folder other than its copy"
+}
+
+test_windows_relaunch_refuses_without_probing() {
+  local id=lease-windows-relaunch dir out status
+  dir=$(make_lease_case "$id")
+  rm -rf "$dir/slot"
+  git -C "$dir/project" worktree add -q --detach "$dir/slot"
+  windows_shape "$dir" MINGW64_NT-10.0-26300
+  out=$(run_lease_spawn "$dir" "$id"); status=$?
+  expect_code 0 "$status" "the first Windows spawn should succeed"$'\n'"$out"
+  rm -f "$dir/fake/probes" "$dir/fake/launched-command" "$dir/fake/herdr-agent-live"
+  : > "$dir/fake/agent-gone"
+  out=$(env -u HERDR_ENV -u HERDR_PANE_ID -u HERDR_SESSION -u HERDR_SOCKET_PATH \
+    -u HERDR_TAB_ID -u HERDR_WORKSPACE_ID \
+    PATH="$dir/fakebin:$PATH" FM_HOME="$dir/home" FM_FAKE_DIR="$dir/fake" \
+    FM_FAKE_SLOT="$dir/slot" HOME="$dir/user-home" CLAUDE_CONFIG_DIR='' \
+    FM_SPAWN_NO_GUARD=1 "$SPAWN" "$id" --relaunch 2>&1); status=$?
+  [ "$status" -ne 0 ] || fail "a Windows relaunch with no passive folder read was accepted"$'\n'"$out"
+  assert_contains "$out" "did not return to its recorded worktree" "the relaunch refusal did not name the folder check"
+  [ ! -e "$dir/fake/probes" ] || fail "a relaunch typed a folder probe into an adopted pane"
+  [ ! -e "$dir/fake/launched-command" ] || fail "a relaunch launched a worker into an unproven folder"
+  pass "native Windows Herdr relaunch refuses on its passive folder read and never types a probe"
 }
 
 test_posix_host_never_probes() {
@@ -372,6 +397,7 @@ test_posix_host_never_probes() {
 test_windows_git_bash_pane_is_proven_by_its_folder_probe
 test_windows_powershell_pane_refuses_before_launch
 test_windows_pane_that_never_moves_refuses
+test_windows_relaunch_refuses_without_probing
 test_posix_host_never_probes
 
 test_delayed_worktree_entry
