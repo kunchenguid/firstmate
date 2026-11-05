@@ -560,6 +560,9 @@ fm_dod_block() {  # <mode> <task-id> [branch] [<forge>] [<base>] [<consent>] [<p
     nm_base="This task's base branch is \`$base\`, not the repository default: pass \`--base-branch $base_q\` on every \`no-mistakes axi run\` that starts a run, so the pipeline rebases onto, opens its PR against, and watches CI for that branch.
 "
   fi
+  if [ "$forge" != gerrit ] && [ "$forge" != external ] && [ "$mode" != local-only ]; then
+    printf '%s\n' 'Before reporting ready, verify the live PR base against the task-owned expected destination and inspect the diff against that base for task-only changes. Refuse readiness when the expected or actual base is unavailable or differs.'
+  fi
   case "$mode:$forge" in
     direct-PR:gerrit)
       cat <<EOF
@@ -1001,6 +1004,15 @@ fm_dod_accept_ship_done() {  # <kind> <mode> <worktree> <project> <line> [<state
   if [ -n "$meta" ] && [ "$(fm_dod_meta_value "$meta" forge)" = external ]; then
     fm_dod_accept_external_review_done "$wt" "$project" "$line" "$meta"
     return
+  fi
+  if [ "$mode" != local-only ] && [ -n "$meta" ] \
+    && url=$(fm_dod_pr_url_from_done_note "$(status_line_note "$line")") \
+    && fm_pr_url_parse "$url"; then
+    if ! captured=$(fm_pr_require_base "$meta" "$FM_PR_PROVIDER" "$url" \
+      "$FM_PR_HOST" "$FM_PR_PATH" "$FM_PR_NUMBER" 2>&1); then
+      printf '%s\n' "$captured"
+      return 1
+    fi
   fi
   if url=$(fm_dod_pr_url_from_done_note "$(status_line_note "$line")") \
     && fm_dod_recorded_pr_on_forge "$state" "$id" "$meta" "$mode" "$url"; then

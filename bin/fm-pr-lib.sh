@@ -348,6 +348,72 @@ fm_pr_head_valid() {
   [[ "$head" =~ ^[0-9a-f]{40}$|^[0-9a-f]{64}$ ]]
 }
 
+# Task-owned destination, pinned at launch. Legacy named-base tasks retain their
+# explicit base_branch; an old default-base task has no proof and must rearm
+# only after its supervisor restores the original destination, never from the PR.
+# Duplicate, invalid, or disagreeing fields fail closed.
+fm_pr_expected_base() {  # <meta>
+  local meta=$1 base
+  [ -f "$meta" ] && [ ! -L "$meta" ] && [ -r "$meta" ] || return 1
+  base=$(awk -F= '
+    /^expected_base=/ { e++; expected=substr($0,15) }
+    /^base_branch=/ { b++; named=substr($0,13) }
+    END {
+      if (e > 1 || b > 1 || (e && expected == "") || (b && named == "")) exit 1
+      if (e && b && expected != named) exit 1
+      if (e) print expected
+      else if (b) print named
+      else exit 1
+    }' "$meta") || return 1
+  case "$base" in ''|-*|*$'\n'*) return 1 ;; esac
+  git check-ref-format "refs/heads/$base" >/dev/null 2>&1 || return 1
+  printf '%s\n' "$base"
+}
+
+fm_pr_read_base() (  # <provider> <url> <host> <path> <number>
+  set -o pipefail
+  local provider=$1 url=$2 host=$3 path=$4 number=$5 login
+  case "$provider" in
+    github)
+      fm_pr_github_host_export "$host"
+      gh pr view "$url" --json baseRefName -q .baseRefName
+      ;;
+    gitlab)
+      GITLAB_HOST=$host glab mr view "$number" -R "https://$host/$path" -F json \
+        | jq -er 'if (.target_branch | type) == "string" then .target_branch else error("missing base") end'
+      ;;
+    gerrit)
+      gerrit-axi show "$number" --host "$host" --json | jq -er --argjson n "$number" '
+        if .ok == true then [.changes[] | select(.change == $n)] else [] end
+        | if length == 1 and (.[0].branch | type) == "string" then .[0].branch else error("missing base") end'
+      ;;
+    forgejo)
+      login=$(fm_pr_forgejo_login "$host") || return 1
+      tea api --login "$login" --repo "$path" "/repos/{owner}/{repo}/pulls/$number" \
+        | jq -er 'if (.base.ref | type) == "string" then .base.ref else error("missing base") end'
+      ;;
+    *) return 1 ;;
+  esac
+)
+
+fm_pr_require_base() {  # <meta> <provider> <url> <host> <path> <number>
+  local meta=$1 expected actual
+  shift
+  if ! expected=$(fm_pr_expected_base "$meta"); then
+    echo 'error: expected PR base is unavailable or inconsistent in task metadata' >&2
+    return 1
+  fi
+  if ! actual=$(fm_pr_read_base "$@" 2>/dev/null) \
+    || [ -z "$actual" ] || ! git check-ref-format "refs/heads/$actual" >/dev/null 2>&1; then
+    printf 'error: expected PR base %s, actual base unavailable\n' "$expected" >&2
+    return 1
+  fi
+  if [ "$actual" != "$expected" ]; then
+    printf 'error: expected PR base %s, actual base %s\n' "$expected" "$actual" >&2
+    return 1
+  fi
+}
+
 # Resolve the PR number for a task copy's branch via gh-axi, run inside that
 # copy so gh-axi resolves the copy's own repository. Echoes the number on a
 # single match and returns 0; returns non-zero on no match or any lookup

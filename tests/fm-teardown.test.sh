@@ -219,6 +219,7 @@ write_meta() {
     "worktree=$wt" \
     "project=$case_dir/project" \
     "kind=$kind" \
+    "expected_base=main" \
     "mode=$mode" \
     "spawn_gen=teardown-test-task-x1"
 }
@@ -286,6 +287,7 @@ SH
 case "\${1:-} \${2:-}" in
   "pr view")
     case " \$* " in
+      *"baseRefName"*) printf 'main\n' ; exit 0 ;;
       *"state,headRefOid,url"*) printf '%s\t%s\t%s\n' 'MERGED' '$head' 'https://github.com/example/repo/pull/7' ; exit 0 ;;
       *"headRefOid"*) printf '%s\n' '$head' ; exit 0 ;;
     esac

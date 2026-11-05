@@ -7,19 +7,19 @@
 # interpolated into this source: these bytes are identical for every task.
 # Each provider is read through its own standard CLI, gh for GitHub, glab for
 # GitLab, gerrit-axi for Gerrit, and tea for Forgejo, so an upstream checkout
-# needs no extra tooling to follow GitHub or GitLab. The Gerrit and Forgejo
-# branches additionally need jq, which bin/fm-pr-check.sh refuses to arm those
-# watches without.
-set -u
+# needs no extra tooling to follow GitHub. The other forge branches need jq
+# to read state and destination from the same structured response.
+set -uo pipefail
 LC_ALL=C
 export LC_ALL
 
-if [ "$#" -eq 6 ] && [ "$1" = --validated ]; then
+if [ "$#" -eq 7 ] && [ "$1" = --validated ]; then
   provider=$2
   url=$3
   host=$4
   path=$5
   number=$6
+  expected_base=$7
 elif [ "$#" -eq 0 ]; then
   case "$0" in
     *.check.sh) data=${0%.check.sh}.pr-poll ;;
@@ -37,9 +37,24 @@ elif [ "$#" -eq 0 ]; then
     exit 0
   fi
   exec 3<&-
+  meta=${0%.check.sh}.meta
+  [ -f "$meta" ] && [ ! -L "$meta" ] && [ -r "$meta" ] || exit 0
+  expected_base=$(awk -F= '
+    /^expected_base=/ { e++; expected=substr($0,15) }
+    /^base_branch=/ { b++; named=substr($0,13) }
+    END {
+      if (e > 1 || b > 1 || (e && expected == "") || (b && named == "")) exit 1
+      if (e && b && expected != named) exit 1
+      if (e) print expected
+      else if (b) print named
+      else exit 1
+    }' "$meta") || exit 0
 else
   exit 0
 fi
+
+case "$expected_base" in ''|-*|*$'\n'*) exit 0 ;; esac
+git check-ref-format "refs/heads/$expected_base" >/dev/null 2>&1 || exit 0
 
 case "$number" in
   [1-9]*) ;;
@@ -73,8 +88,10 @@ case "$provider" in
       .|..|*[!A-Za-z0-9._-]*) exit 0 ;;
     esac
     [ "$url" = "https://$host/$owner/$repo/pull/$number" ] || exit 0
-    state=$(GH_HOST=$host gh pr view "$url" --json state -q .state 2>/dev/null) || exit 0
-    [ "$state" = MERGED ] && printf '%s\n' merged
+    record=$(GH_HOST=$host gh pr view "$url" --json state,baseRefName \
+      -q '[.baseRefName, .state] | @tsv' 2>/dev/null) || exit 0
+    [ "$record" = "$expected_base"$'\t'MERGED ] || exit 0
+    printf '%s\n' merged
     ;;
   gitlab)
     [ "${#host}" -ge 1 ] && [ "${#host}" -le 253 ] || exit 0
@@ -108,12 +125,10 @@ case "$provider" in
     # comes from the validated record rather than glab's configured default.
     # It cannot take a merge request URL the way gh does: that form shells out
     # to git for the current repository, and the watcher runs in no repository.
-    # The state is read from glab's own field output rather than its JSON,
-    # because plain glab has no field selector and firstmate does not require a
-    # JSON processor; only an exact "merged" wakes, so a changed format or an
-    # unreadable merge request stays silent instead of reporting a merge.
-    raw=$(glab mr view "$number" -R "https://$host/$path" 2>/dev/null) || exit 0
-    state=$(printf '%s\n' "$raw" | sed -n 's/^state:[[:space:]]*//p' | head -1) || exit 0
+    # Read state and destination from one JSON record; a retarget cannot join
+    # a previously matching destination to a later merged state.
+    state=$(glab mr view "$number" -R "https://$host/$path" -F json 2>/dev/null \
+      | jq -er --arg base "$expected_base" 'select(.target_branch == $base) | .state' 2>/dev/null) || exit 0
     [ "$state" = merged ] && printf '%s\n' merged
     ;;
   gerrit)
@@ -166,11 +181,11 @@ case "$provider" in
     # a server, and this poll has no channel to report that it never matched.
     json=$(gerrit-axi show "$number" --host "$host" --json 2>/dev/null) || exit 0
     [ -n "$json" ] || exit 0
-    status=$(printf '%s' "$json" | jq -r --argjson change "$number" '
+    status=$(printf '%s' "$json" | jq -r --argjson change "$number" --arg base "$expected_base" '
       if type == "object" and .ok == true and (.changes | type) == "array" then
         [.changes[] | select((.change | type) == "number" and .change == $change)] as $match
         | if ($match | length) == 1
-             and ($match[0].status | type) == "string"
+              and ($match[0].status | type) == "string" and $match[0].branch == $base
           then $match[0].status
           else error("no exact change record")
           end
@@ -232,8 +247,8 @@ case "$provider" in
     # error body as output, so only a boolean merged field of true wakes this
     # poll and every other reading stays silent.
     merged=$(tea api --login "$login" --repo "$owner/$repo" \
-      "/repos/{owner}/{repo}/pulls/$number" 2>/dev/null | jq -r '
-        if type == "object" and (.merged | type) == "boolean"
+      "/repos/{owner}/{repo}/pulls/$number" 2>/dev/null | jq -r --arg base "$expected_base" '
+        if type == "object" and (.merged | type) == "boolean" and .base.ref == $base
         then .merged | tostring
         else error("invalid pull request record")
         end' 2>/dev/null) || exit 0

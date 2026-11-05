@@ -927,10 +927,16 @@ fm_git_worktree() {
 
 # fm_write_meta <file> <key=val> ...: write the given key=val lines to a meta
 # file (truncating any prior content).
+# A suite may declare FM_TEST_META_EXPECTED_BASE for fixtures of freshly launched
+# tasks. An explicit expected_base or base_branch always owns its own value.
 fm_write_meta() {
-  local file=$1 kv
+  local file=$1 kv default_base=${FM_TEST_META_EXPECTED_BASE:-}
   shift
   : > "$file"
+  for kv in "$@"; do
+    case "$kv" in expected_base=*|base_branch=*) default_base= ;; esac
+  done
+  [ -z "$default_base" ] || printf 'expected_base=%s\n' "$default_base" >> "$file"
   for kv in "$@"; do
     printf '%s\n' "$kv" >> "$file"
   done

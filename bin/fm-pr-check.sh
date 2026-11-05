@@ -40,6 +40,8 @@
 # cannot take the whole budget on every sweep. Registrations
 # stop FM_CHECK_TIMEOUT (default 30) minus 5 seconds after the scan starts; a
 # registration cut at that bound prints nothing and is retried.
+# Registration requires the live destination to match task-owned expected_base
+# (or a legacy explicit base_branch); missing destination proof refuses.
 # Usage: fm-pr-check.sh <task-id> <pr-url>
 #        fm-pr-check.sh scan
 set -eu
@@ -209,6 +211,10 @@ if [ "$PROVIDER" = gitlab ] && ! command -v glab >/dev/null 2>&1; then
   echo "error: watching a GitLab merge request requires glab on PATH" >&2
   exit 1
 fi
+if [ "$PROVIDER" = gitlab ] && ! command -v jq >/dev/null 2>&1; then
+  echo "error: watching a GitLab merge request requires jq on PATH" >&2
+  exit 1
+fi
 if [ "$PROVIDER" = gerrit ]; then
   if ! command -v gerrit-axi >/dev/null 2>&1; then
     echo "error: watching a Gerrit change requires gerrit-axi on PATH" >&2
@@ -249,6 +255,8 @@ if [ "$PROVIDER" = github ] && [ "${FM_PR_CHECK_MERGE:-}" != 1 ] && command -v g
     exit 1
   fi
 fi
+
+fm_pr_require_base "$META" "$PROVIDER" "$URL" "$HOST" "$PROJECT_PATH" "$NUMBER" || exit 1
 
 "$FM_ROOT/bin/fm-guard.sh" || true
 

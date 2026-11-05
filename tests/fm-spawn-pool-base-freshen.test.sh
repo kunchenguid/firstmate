@@ -183,6 +183,8 @@ test_stale_pool_base_refreshes_before_branching() {
   branch_head=$(git -C "$POOL_DIR" rev-parse HEAD)
   [ "$branch_head" = "$current" ] || fail "spawn left the pooled worktree on stale history"
   [ "$branch_head" != "$INITIAL_SHA" ] || fail "fixture did not prove origin/main advanced past the pool base"
+  assert_grep 'expected_base=main' "$HOME_DIR/state/$id.meta" 'default destination was not pinned in task metadata'
+  assert_grep 'Expected PR base: main' "$HOME_DIR/data/$id/launch-brief.md" 'worker instructions drifted from the pinned default'
   if [ "${FM_TEST_EVIDENCE:-0}" = 1 ]; then
     printf '# observed spawn: %s\n' "$(printf '%s\n' "$out" | tail -n 1)"
     printf '# observed base: HEAD=%s origin/main=%s advanced-main=%s\n' \
@@ -218,6 +220,8 @@ test_non_main_default_branch_refreshes_before_branching() {
   branch_head=$(git -C "$POOL_DIR" rev-parse HEAD)
   [ "$branch_head" = "$current" ] || fail "spawn did not refresh to current origin/$DEFAULT_BRANCH"
   [ "$branch_head" != "$INITIAL_SHA" ] || fail "fixture did not prove origin/$DEFAULT_BRANCH advanced past the pool base"
+  assert_grep 'expected_base=trunk' "$HOME_DIR/state/$id.meta" 'non-main default destination was not pinned'
+  assert_grep 'Expected PR base: trunk' "$HOME_DIR/data/$id/launch-brief.md" 'non-main worker destination differs from metadata'
   pass "a stale pooled worktree resolves and refreshes a non-main default branch"
 }
 
@@ -1083,6 +1087,10 @@ test_named_base_branch_starts_from_that_branch() {
       "the $kind copy is missing the base branch content"
     assert_grep 'base_branch=feature/hub' "$HOME_DIR/state/$id.meta" \
       "the $kind spawn did not record its base branch"
+    if [ "$kind" = ship ]; then
+      assert_grep 'expected_base=feature/hub' "$HOME_DIR/state/$id.meta" 'named destination was not pinned'
+      assert_grep 'Expected PR base: feature/hub' "$HOME_DIR/data/$id/launch-brief.md" 'named worker destination differs from metadata'
+    fi
   done
 
   id='pool-named-base-missing-r1'

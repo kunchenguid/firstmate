@@ -12,6 +12,9 @@
 # change is refused outright: that adapter is read-only, and the refusal at the
 # parse below owns why.
 #
+# The task's expected destination is re-read from task metadata and compared
+# with the live forge base before registration and again before the merge call.
+#
 # Usage:
 #   fm-pr-merge.sh <task-id> <pr-url> [--attended-override] [--expected-head <full-sha>]
 #     [--allow-red <check>] [--allow-missing <check>] [--allow-no-pipeline]
@@ -1782,6 +1785,7 @@ case "$PROVIDER" in
     require_current_away_authority || away_status=$?
     [ "$away_status" -eq 0 ] || exit "$away_status"
     refuse_github_queue_while_away || exit 2
+    fm_pr_require_base "$META" "$PROVIDER" "$URL" "$PR_HOST" "$PR_PATH" "$PR_NUMBER" || exit 1
     merge_status=0
     merge_output=$(gh pr merge "$PR_NUMBER" --repo "$PR_OWNER/$PR_REPO" \
       --match-head-commit "$FM_PR_MERGE_HEAD" \
@@ -1826,6 +1830,7 @@ case "$PROVIDER" in
     ;;
   gitlab)
     gitlab_verify_mergeable || exit 1
+    fm_pr_require_base "$META" "$PROVIDER" "$URL" "$PR_HOST" "$PR_PATH" "$PR_NUMBER" || exit 1
     # --sha binds the merge to the head this run verified, so a push that lands
     # in between is refused by GitLab instead of merged unverified. --yes only
     # skips the interactive confirmation, which no supervised run can answer;
@@ -1862,6 +1867,7 @@ case "$PROVIDER" in
     forgejo_method=$(caller_merge_method "$@")
     [ -n "$forgejo_method" ] || forgejo_method=$(forgejo_default_merge_style) || exit 1
     forgejo_verify_mergeable || exit 1
+    fm_pr_require_base "$META" "$PROVIDER" "$URL" "$PR_HOST" "$PR_PATH" "$PR_NUMBER" || exit 1
     # The away record is locked first, so this last presence and authority
     # read and the forge command below share one live-owner critical section.
     hold_away_record_for_merge || exit 1

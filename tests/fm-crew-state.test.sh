@@ -55,6 +55,9 @@ set -u
 CREW_STATE="$ROOT/bin/fm-crew-state.sh"
 TMP_ROOT=$(fm_test_tmproot fm-crew-state)
 fm_git_identity fmtest fmtest@example.invalid
+# These fixtures model tasks launched for main; legacy unknown-base behavior is
+# exercised by the focused PR/check suite without this fixture default.
+FM_TEST_META_EXPECTED_BASE=main
 
 # A real git repo checked out on <branch>, so the helper's branch attribution
 # (git symbolic-ref) resolves like it would for a live crew worktree.
@@ -154,6 +157,9 @@ SH
 #!/usr/bin/env bash
 set -u
 case "${1:-} ${2:-}" in
+  "pr view")
+    case " $* " in *" baseRefName "*) printf 'main\n'; exit 0 ;; esac
+    exit 1 ;;
   "api graphql")
     [ -z "${FM_FAKE_PR_READ_LOG:-}" ] || printf 'gh\n' >> "$FM_FAKE_PR_READ_LOG"
     number=1
@@ -192,7 +198,7 @@ case "${1:-} ${2:-}" in
   "mr view")
     [ -z "${FM_FAKE_GLAB_READ_LOG:-}" ] || printf '%s|%s\n' "${GITLAB_HOST:-}" "$*" >> "$FM_FAKE_GLAB_READ_LOG"
     [ "${FM_FAKE_GLAB_READ_FAIL:-0}" = 1 ] && exit 1
-    printf '{"state":"%s"}\n' "${FM_FAKE_GLAB_STATE:-merged}"
+    printf '{"state":"%s","target_branch":"main"}\n' "${FM_FAKE_GLAB_STATE:-merged}"
     exit 0 ;;
 esac
 exit 1
@@ -213,7 +219,7 @@ if [ "${FM_FAKE_TEA_READ_FAIL:-0}" = 1 ]; then
   printf '{"message":"not found"}\n'
   exit 0
 fi
-printf '{"state":"%s","merged":%s,"head":{"sha":"abc"}}\n' \
+printf '{"state":"%s","merged":%s,"base":{"ref":"main"},"head":{"sha":"abc"}}\n' \
   "${FM_FAKE_TEA_STATE:-closed}" "${FM_FAKE_TEA_MERGED:-true}"
 SH
   cat > "$fb/gerrit-axi" <<'SH'
@@ -225,7 +231,7 @@ case "${1:-}" in
     [ "${FM_FAKE_GERRIT_READ_FAIL:-0}" = 1 ] && exit 1
     # url defaults to null, the shape a server whose gerrit.canonicalWebUrl is
     # unset returns, so every case here reads a record that carries no URL.
-    printf '{"ok":true,"op":"show","changes":[{"change":%s,"subject":"fixture change","status":"%s","url":%s}]}\n' \
+    printf '{"ok":true,"op":"show","changes":[{"change":%s,"subject":"fixture change","branch":"main","status":"%s","url":%s}]}\n' \
       "${FM_FAKE_GERRIT_CHANGE:-${2:-0}}" "${FM_FAKE_GERRIT_STATUS:-MERGED}" \
       "${FM_FAKE_GERRIT_URL_JSON:-null}"
     exit 0 ;;

@@ -18,6 +18,7 @@ TEARDOWN="$ROOT/bin/fm-teardown.sh"
 REGISTER="$ROOT/bin/fm-check-register.sh"
 TMP_ROOT=$(fm_test_tmproot fm-pr-check-security)
 fm_git_identity fmtest fmtest@example.invalid
+FM_TEST_META_EXPECTED_BASE=main
 BASE_PATH=${FM_TEST_BASE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}
 REAL_CP=$(command -v cp)
 REAL_MV=$(command -v mv)
@@ -128,6 +129,7 @@ make_case() {
   fakebin="$dir/fakebin"
   fake_root="$dir/root"
   mkdir -p "$dir/home/state" "$dir/home/data" "$dir/home/config" "$dir/wt" "$fakebin" "$fake_root/bin"
+  ln -s "$REAL_JQ" "$fakebin/jq"
   git -C "$dir/wt" init -q
   git -C "$dir/wt" commit -q --allow-empty -m init
   git -C "$dir/wt" update-ref refs/remotes/origin/main "$(git -C "$dir/wt" rev-parse HEAD)"
@@ -151,6 +153,18 @@ case "${1:-} ${2:-}" in
     ;;
   "pr view")
     case " $* " in
+      *" --json state,baseRefName "*)
+        [ "${FM_TEST_BASE_FAIL:-0}" = 0 ] && [ "${FM_TEST_GH_FAIL:-0}" = 0 ] || exit 1
+        [ -z "${FM_TEST_GH_STATE_STARTED:-}" ] || : > "$FM_TEST_GH_STATE_STARTED"
+        [ "${FM_TEST_GH_SLEEP:-0}" = 0 ] || sleep "$FM_TEST_GH_SLEEP"
+        printf '%s\t%s\n' "${FM_TEST_BASE-main}" "${FM_TEST_GH_STATE:-OPEN}"
+        exit 0
+        ;;
+      *" --json baseRefName "*)
+        [ "${FM_TEST_BASE_FAIL:-0}" = 0 ] || exit 1
+        printf '%s\n' "${FM_TEST_BASE-main}"
+        exit 0
+        ;;
       *statusCheckRollup*)
         printf '%s\n' "{\"state\":\"OPEN\",\"isDraft\":false,\"mergeable\":\"MERGEABLE\",\"mergeStateStatus\":\"CLEAN\",\"headRefOid\":\"${FM_TEST_GH_HEAD:-0123456789abcdef0123456789abcdef01234567}\",\"baseRefName\":\"main\",\"statusCheckRollup\":[{\"__typename\":\"CheckRun\",\"name\":\"ci\",\"status\":\"COMPLETED\",\"conclusion\":\"SUCCESS\"}]}"
         exit 0
@@ -222,6 +236,9 @@ SH
 printf '%s\n' "$*" >> "$FM_TEST_GLAB_LOG"
 [ "${FM_TEST_GLAB_FAIL:-0}" = 0 ] || exit 1
 [ "${FM_TEST_GLAB_SLEEP:-0}" = 0 ] || sleep "$FM_TEST_GLAB_SLEEP"
+case " $* " in
+  *" -F json "*) printf '{"target_branch":"%s","state":"%s"}\n' "${FM_TEST_BASE-main}" "${FM_TEST_GLAB_STATE:-opened}"; exit 0 ;;
+esac
 printf 'title:\tfixture merge request\nstate:\t%s\nauthor:\tsomeone\n' "${FM_TEST_GLAB_STATE:-opened}"
 SH
   # gerrit-axi, reproducing the real CLI's contract: one JSON record on stdout
@@ -238,9 +255,10 @@ if [ -n "${FM_TEST_GERRIT_RAW:-}" ]; then
   exit 0
 fi
 change=${FM_TEST_GERRIT_CHANGE:-${2:-0}}
-printf '{"ok":true,"op":"show","count":1,"missing":[],"changes":[{"change":%s,"subject":%s,"project":"p","status":"%s","wip":false,"submit":"%s","submittable":%s,"blocked_on":"%s","patch_set":1,"revision":"%s","url":"%s"}]}\n' \
+printf '{"ok":true,"op":"show","count":1,"missing":[],"changes":[{"change":%s,"subject":%s,"project":"p","branch":"%s","status":"%s","wip":false,"submit":"%s","submittable":%s,"blocked_on":"%s","patch_set":1,"revision":"%s","url":"%s"}]}\n' \
   "$change" \
   "${FM_TEST_GERRIT_SUBJECT:-\"fixture change\"}" \
+  "${FM_TEST_BASE-main}" \
   "${FM_TEST_GERRIT_STATUS:-NEW}" \
   "${FM_TEST_GERRIT_SUBMIT:-NOT_READY}" \
   "${FM_TEST_GERRIT_SUBMITTABLE:-false}" \
@@ -279,14 +297,15 @@ SH
 }
 
 write_task_meta() {
-  local dir=$1 id=${2:-task-a}
+  local dir=$1 id=${2:-task-a} base=${3:-main}
   fm_write_meta "$dir/home/state/$id.meta" \
     "window=firstmate:fm-$id" \
     "endpoint_task_id=$id" \
     "worktree=$dir/wt" \
     "project=$dir/project" \
     "kind=ship" \
-    "mode=no-mistakes"
+    "mode=no-mistakes" \
+    "expected_base=$base"
 }
 
 # Extra "field=value" arguments are written before pr=, because
@@ -298,6 +317,7 @@ write_poll_meta() {
   fm_write_meta "$state/$id.meta" \
     "window=fm-$id" \
     "worktree=$case_dir/wt" \
+    "expected_base=main" \
     "$@" \
     "pr=$url"
 }
@@ -323,6 +343,18 @@ run_merge_entry() {
     FM_TEST_GERRIT_AXI_LOG="$dir/gerrit-axi.log" \
     PATH="$dir/fakebin:$BASE_PATH" \
     "$PR_MERGE" "$@"
+}
+
+test_expected_destination_refuses_registration() {
+  local dir out rc
+  dir=$(make_case expected-destination)
+  write_task_meta "$dir" task-a release/integration
+  out=$(run_check_entry "$dir" task-a https://github.com/o/r/pull/1 2>&1); rc=$?
+  [ "$rc" -ne 0 ] || fail "a PR on main armed for a task expecting release/integration"
+  assert_contains "$out" 'release/integration' 'refusal must name the expected base'
+  assert_contains "$out" 'main' 'refusal must name the actual base'
+  assert_absent "$dir/home/state/task-a.pr-poll" 'wrong-base PR published a poll'
+  pass "registration refuses a PR on the wrong destination"
 }
 
 # shellcheck disable=SC2016 # Literal rejected URL bytes are parser test data.
@@ -749,7 +781,7 @@ test_direct_pr_unpushed_commit_refuses_registration() {
   dir=$(make_case direct-pr-unpushed)
   fm_write_meta "$dir/home/state/task-a.meta" \
     "window=firstmate:fm-task-a" "endpoint_task_id=task-a" "worktree=$dir/wt" \
-    "project=$dir/project" "kind=ship" "mode=direct-PR"
+    "project=$dir/project" "kind=ship" "mode=direct-PR" "expected_base=main"
   pushed=$(git -C "$dir/wt" rev-parse HEAD)
   git -C "$dir/wt" commit -q --allow-empty -m 'fix only in the copy'
   later=$(git -C "$dir/wt" rev-parse HEAD)
@@ -2027,6 +2059,13 @@ group/apps/console
   out=$(FM_TEST_GERRIT_STATUS=MERGED FM_TEST_GERRIT_SUBMIT=OK \
     FM_TEST_GERRIT_SUBMITTABLE=true FM_TEST_GERRIT_BLOCKED_ON='' run_poll "$dir")
   [ "$out" = merged ] || fail "Gerrit poll did not emit exactly one merged line"
+  for value in other ''; do
+    out=$(FM_TEST_BASE="$value" FM_TEST_GERRIT_STATUS=MERGED run_poll "$dir")
+    [ -z "$out" ] || fail 'Gerrit wrong or missing destination reported merged'
+    write_task_meta "$dir" task-destination
+    FM_TEST_BASE="$value" run_check_entry "$dir" task-destination "$url" >/dev/null 2>&1 \
+      && fail 'Gerrit wrong or missing destination armed'
+  done
 
   out=$(FM_TEST_GERRIT_FAIL=1 FM_TEST_GERRIT_STATUS=MERGED run_poll "$dir")
   [ -z "$out" ] || fail "Gerrit poll emitted after a gerrit-axi failure"
@@ -2050,10 +2089,10 @@ group/apps/console
   # it when that setting is unset, so a merge must still be reported when the
   # server returns the field null or does not return it at all. Comparing it
   # against the stored URL is what would leave such a watch silent forever.
-  out=$(FM_TEST_GERRIT_RAW='{"ok":true,"op":"show","changes":[{"change":4201,"status":"MERGED","url":null}]}' \
+  out=$(FM_TEST_GERRIT_RAW='{"ok":true,"op":"show","changes":[{"change":4201,"branch":"main","status":"MERGED","url":null}]}' \
     run_poll "$dir")
   [ "$out" = merged ] || fail "Gerrit poll stayed silent for a merged change with a null url"
-  out=$(FM_TEST_GERRIT_RAW='{"ok":true,"op":"show","changes":[{"change":4201,"status":"MERGED"}]}' \
+  out=$(FM_TEST_GERRIT_RAW='{"ok":true,"op":"show","changes":[{"change":4201,"branch":"main","status":"MERGED"}]}' \
     run_poll "$dir")
   [ "$out" = merged ] || fail "Gerrit poll stayed silent for a merged change with no url field"
   out=$(FM_TEST_GERRIT_STATUS=MERGED \
@@ -2433,9 +2472,9 @@ fi
 [ "${1:-}" = api ] || exit 0
 [ -z "${FM_TEST_TEA_FAIL:-}" ] || exit 1
 case "${FM_TEST_TEA_PULL:-open}" in
-  merged) printf '{"state":"closed","merged":true,"head":{"sha":"abc"}}\n' ;;
+  merged) printf '{"state":"closed","merged":true,"base":{"ref":"%s"},"head":{"sha":"abc"}}\n' "${FM_TEST_BASE-main}" ;;
   error) printf '{"message":"The target couldn'"'"'t be found.","url":"x"}\n' ;;
-  *) printf '{"state":"open","merged":false,"head":{"sha":"abc"}}\n' ;;
+  *) printf '{"state":"open","merged":false,"base":{"ref":"%s"},"head":{"sha":"abc"}}\n' "${FM_TEST_BASE-main}" ;;
 esac
 SH
   chmod +x "$dir/fakebin/tea"
@@ -2457,6 +2496,13 @@ SH
   [ -z "$out" ] || fail "Forgejo poll emitted with an ambiguous tea login"
   out=$(FM_TEST_TEA_LOG="$dir/tea.log" FM_TEST_TEA_PULL=merged run_poll "$dir")
   [ "$out" = merged ] || fail "Forgejo poll did not emit exactly one merged line"
+  for value in other ''; do
+    out=$(FM_TEST_BASE="$value" FM_TEST_TEA_LOG="$dir/tea.log" FM_TEST_TEA_PULL=merged run_poll "$dir")
+    [ -z "$out" ] || fail 'Forgejo wrong or missing destination reported merged'
+    write_task_meta "$dir" task-destination
+    FM_TEST_BASE="$value" FM_TEST_TEA_LOG="$dir/tea.log" run_check_entry "$dir" task-destination "$url" >/dev/null 2>&1 \
+      && fail 'Forgejo wrong or missing destination armed'
+  done
 
   grep -qF -- "api --login main --repo o/r /repos/{owner}/{repo}/pulls/7" "$dir/tea.log" \
     || fail "the poll did not read the one pull request by number on the host's login"
@@ -2512,7 +2558,7 @@ if [ "${1:-} ${2:-}" = "login list" ]; then
 fi
 [ "${1:-}" = api ] || exit 0
 printf '%s\n' "$*" >> "$FM_TEST_TEA_LOG"
-printf '{"state":"closed","merged":true,"head":{"sha":"abc"}}\n'
+printf '{"state":"closed","merged":true,"base":{"ref":"main"},"head":{"sha":"abc"}}\n'
 SH
   chmod +x "$dir/fakebin/tea"
   ln -sf "$(command -v jq)" "$dir/fakebin/jq"
@@ -2572,6 +2618,13 @@ group/subgroup/project
   done
   out=$(FM_TEST_GLAB_STATE=merged run_poll "$dir")
   [ "$out" = merged ] || fail "GitLab poll did not emit exactly one merged line"
+  for value in other ''; do
+    out=$(FM_TEST_BASE="$value" FM_TEST_GLAB_STATE=merged run_poll "$dir")
+    [ -z "$out" ] || fail 'GitLab wrong or missing destination reported merged'
+    write_task_meta "$dir" task-destination
+    FM_TEST_BASE="$value" run_check_entry "$dir" task-destination "$url" >/dev/null 2>&1 \
+      && fail 'GitLab wrong or missing destination armed'
+  done
   out=$(FM_TEST_GLAB_FAIL=1 run_poll "$dir")
   [ -z "$out" ] || fail "GitLab poll emitted after a glab failure"
 
@@ -2634,9 +2687,8 @@ EOF
   [ ! -e "$state/task-b.check.sh" ] || fail "refused GitLab arming left a poll armed"
 
   # The merge path addresses the forge the URL names, and never the other one.
-  # This fixture's glab answers with the field output the poll reads, so the
-  # merge's JSON read cannot be parsed, which must refuse rather than merge on a
-  # state it could not read.
+  # This fixture supplies the poll's destination/state record but no head.
+  # Merge must still refuse before a forge call when that head is unreadable.
   write_task_meta "$dir" task-c
   : > "$dir/glab.log"
   # The merge path needs jq before it reads anything, so this case supplies it
@@ -2647,8 +2699,8 @@ EOF
   rc=$?
   set -e
   [ "$rc" -ne 0 ] || fail "merge wrapper merged a GitLab merge request it could not read"
-  grep -qF 'could not read the GitLab merge request state before merging' "$dir/merge-c.err" \
-    || fail "merge wrapper refused for some reason other than the state it could not read"
+  grep -qF 'could not read the GitLab merge request head commit before merging' "$dir/merge-c.err" \
+    || fail "merge wrapper refused for some reason other than the head it could not read"
   [ ! -s "$dir/gh-axi.log" ] || fail "merge wrapper reached the GitHub CLI for a GitLab URL"
   grep -qF "mr view 7 -R https://gitlab.example/group/subgroup/project" "$dir/glab.log" \
     || fail "merge wrapper did not read the merge request through glab at its own instance"
@@ -4102,6 +4154,63 @@ SH
   pass "device re-record publication waits without rewriting its registration"
 }
 
+test_expected_destination_fail_closed_and_retarget() {
+  local dir state out value rc
+  dir=$(make_case destination-retarget)
+  state="$dir/home/state"
+  write_task_meta "$dir"
+  run_check_entry "$dir" task-a https://github.com/o/r/pull/1 >/dev/null \
+    || fail 'matching destination did not arm'
+  for value in other ''; do
+    out=$(FM_TEST_BASE="$value" run_check_entry "$dir" task-a https://github.com/o/r/pull/1 2>&1); rc=$?
+    [ "$rc" -ne 0 ] || fail 'changed or missing live base was accepted'
+    out=$(FM_TEST_BASE="$value" FM_TEST_GH_STATE=MERGED run_poll "$dir")
+    [ -z "$out" ] || fail 'retargeted or unknown-base PR reported merged'
+  done
+  FM_TEST_BASE_FAIL=1 run_check_entry "$dir" task-a https://github.com/o/r/pull/1 >/dev/null 2>&1 \
+    && fail 'unreadable live destination armed'
+  out=$(FM_TEST_BASE_FAIL=1 FM_TEST_GH_STATE=MERGED run_poll "$dir")
+  [ -z "$out" ] || fail 'unreadable destination reported merged'
+  out=$(FM_TEST_BASE=other FM_TEST_GH_LOG="$dir/gh.log" PATH="$dir/fakebin:$BASE_PATH" bash -c '
+    . "$1/bin/fm-wake-lib.sh"
+    . "$1/bin/fm-dod-lib.sh"
+    fm_dod_accept_ship_done ship no-mistakes "$2/wt" "$2/project" \
+      "done: PR https://github.com/o/r/pull/1 checks green" "$2/home/state" task-a "$2/home/state/task-a.meta"
+  ' _ "$ROOT" "$dir" 2>&1); rc=$?
+  [ "$rc" -ne 0 ] || fail 'recorded ready head bypassed the live destination check'
+  assert_contains "$out" 'actual base other' 'readiness refusal lost the live base'
+
+  # A fresh watcher process must re-read the destination even for a poll armed
+  # before restart. Its authenticated stop check proves that the cycle ran.
+  retire_contributions_observer "$dir"
+  add_stop_custom_check "$dir"
+  FM_TEST_BASE=other FM_TEST_GH_STATE=MERGED run_watcher_bounded "$dir/home" "$dir/fakebin" \
+    > "$dir/restart.out" 2> "$dir/restart.err" || fail 'retarget restart cycle failed'
+  assert_no_grep 'task-a.check.sh: merged' "$dir/restart.out" 'restart reported a wrong-base merge'
+  assert_grep 'z-stop.check.sh' "$dir/restart.out" 'restart never reached its control check'
+
+  for value in missing duplicate invalid drift; do
+    dir=$(make_case "destination-$value")
+    state="$dir/home/state"
+    FM_TEST_META_EXPECTED_BASE='' fm_write_meta "$state/task-a.meta" "worktree=$dir/wt" 'kind=ship' 'mode=no-mistakes'
+    case "$value" in
+      duplicate) printf 'expected_base=main\nexpected_base=main\n' >> "$state/task-a.meta" ;;
+      invalid) printf 'expected_base=../main\n' >> "$state/task-a.meta" ;;
+      drift) printf 'expected_base=main\nbase_branch=release/integration\n' >> "$state/task-a.meta" ;;
+    esac
+    run_check_entry "$dir" task-a https://github.com/o/r/pull/1 >/dev/null 2>&1 \
+      && fail "$value expected destination armed"
+    assert_absent "$state/task-a.pr-poll" "$value destination published a poll"
+  done
+  dir=$(make_case destination-legacy-named)
+  fm_write_meta "$dir/home/state/task-a.meta" "worktree=$dir/wt" 'kind=ship' 'mode=no-mistakes' 'base_branch=main'
+  run_check_entry "$dir" task-a https://github.com/o/r/pull/1 >/dev/null \
+    || fail 'legacy explicit base was not preserved'
+  pass 'destination proof fails closed through readiness, polling, restart, and legacy task records'
+}
+
+test_expected_destination_refuses_registration
+test_expected_destination_fail_closed_and_retarget
 test_parser_matrix
 test_github_enterprise_config_resolution
 test_github_enterprise_hosts
