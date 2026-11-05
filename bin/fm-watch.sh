@@ -1308,6 +1308,49 @@ scan_signals() {
   return 0
 }
 
+# Stable identity for one coalesced signal batch: a digest of the batch's
+# sorted file paths. The drain presents one row per (kind, key), so a per-batch
+# key is what keeps two different batches from collapsing into one another
+# while an identical re-enqueued batch still dedupes. It is deliberately not a
+# status filename: a batch spans many files, and a file-shaped key would both
+# collide across batches and misattribute the whole batch to one task.
+signal_batch_key() {  # <file> ...
+  local digest
+  if command -v shasum >/dev/null 2>&1; then
+    digest=$(printf '%s\n' "$@" | LC_ALL=C sort | shasum -a 256 2>/dev/null | awk '{print $1}')
+  elif command -v sha256sum >/dev/null 2>&1; then
+    digest=$(printf '%s\n' "$@" | LC_ALL=C sort | sha256sum 2>/dev/null | awk '{print $1}')
+  else
+    digest=$(printf '%s\n' "$@" | LC_ALL=C sort | cksum 2>/dev/null | awk '{print $1}')
+  fi
+  case "$digest" in
+    ''|*[!A-Za-z0-9]*) return 1 ;;
+  esac
+  printf 'signal-batch-%s' "${digest:0:16}"
+}
+
+# Enqueue one coalesced signal wake for a batch of changed files. The ordinary
+# row keeps the byte-identical "signal:$files" payload every harness-arm
+# consumer pattern-matches. A batch containing a decision-owned file emits one
+# additional row keyed by that file's status name, because the Pi branch
+# dispatcher resolves a decision row's task from its key; the ordinary row
+# still carries the whole batch, so the dispatcher's trigger cross-reference
+# keeps the entire coalesced batch on main.
+signal_enqueue_batch() {  # <reason> <decision-files> <file> ...
+  local reason=$1 decision_files=$2 batch_key decision_key f
+  shift 2
+  [ "$#" -gt 0 ] || return 1
+  batch_key=$(signal_batch_key "$@") || return 1
+  fm_wake_append signal "$batch_key" "$reason" || return 1
+  [ -n "$decision_files" ] || return 0
+  for f in $decision_files; do
+    decision_key=$(basename "$f")
+    break
+  done
+  [ -n "$decision_key" ] || return 1
+  fm_wake_append signal "$decision_key" "needs-decision:${reason#signal:}" || return 1
+}
+
 # Deliver a durably queued process-event result to firstmate. Publication is
 # owned by bin/fm-procevent.sh - by the runner at capture time and by reconcile's
 # re-announcement - so this decides only whether a queued check record has been
@@ -2070,26 +2113,21 @@ EOF
     # shellcheck disable=SC2086  # $files is a space-separated status-path list (ids carry no spaces)
     signal_files_actionable $files
     signal_actionable=$?
-    # A decision-owned file's queued row payload is marked "needs-decision:"
-    # instead of the ordinary "signal:" below (other files in the same batch
-    # keep the ordinary payload). The wake reason line itself, and every
-    # harness-arm consumer that pattern-matches it, stays byte-identical -
-    # only the per-row payload changes, which is what
-    # docs/pi-supervision-branch.md's Pi-only branch dispatcher reads to keep a
+    # One coalesced row per batch, not one per file: a busy fleet used to
+    # enqueue N rows that each repeated the whole "signal:$files" list. The
+    # wake reason line itself, and every harness-arm consumer that
+    # pattern-matches it, stays byte-identical. A decision-owned file in the
+    # batch still gets its own "needs-decision:$files" row (keyed by that
+    # file's status name so the Pi branch dispatcher can resolve it), which is
+    # what docs/pi-supervision-branch.md's dispatcher reads to keep a
     # decision-owned row off the supervision branch (fm-branch-dispatch.ts,
     # fm-primary-pi-watch.ts). Every other harness and script keeps seeing the
     # exact same "signal:$files" wake it always has.
     # shellcheck disable=SC2086  # same space-separated status-path list
     if afk_present || [ "$signal_actionable" -eq 0 ] \
       || { ! signal_crew_provably_working $files && ! signal_turnend_panes_churned $files; }; then
-      while IFS=$'\t' read -r sf sig f; do
-        [ -n "$sf" ] || continue
-        file_reason="$reason"
-        case " $FM_SIGNAL_NEEDS_DECISION_FILES " in *" $f "*) file_reason="needs-decision:$files" ;; esac
-        fm_wake_append signal "$(basename "$f")" "$file_reason" || exit 1
-      done <<EOF
-$pending
-EOF
+      # shellcheck disable=SC2086  # $files is a space-separated status-path list
+      signal_enqueue_batch "$reason" "$FM_SIGNAL_NEEDS_DECISION_FILES" $files || exit 1
       # The wake signature advances for every file in this batch, including one
       # whose span could not be classified: it has now been reported, and this is
       # what bounds an unreadable log to one report per distinct file state. Only
@@ -2131,12 +2169,8 @@ EOF
 $FM_SIGNAL_SURFACE_ENDPOINTS
 EOF
       if [ "$signal_commit_error" -ne 0 ]; then
-        while IFS=$'\t' read -r sf sig f; do
-          [ -n "$sf" ] || continue
-          fm_wake_append signal "$(basename "$f")" "$reason" || exit 1
-        done <<EOF
-$pending
-EOF
+        # shellcheck disable=SC2086  # $files is a space-separated status-path list
+        signal_enqueue_batch "$reason" '' $files || exit 1
         wake "$reason"
       fi
       triage_log "absorbed benign $reason"

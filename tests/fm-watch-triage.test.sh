@@ -1612,9 +1612,11 @@ test_ordinary_blocked_signal_payload_remains_branch_eligible() {
   watch_bg "$state" "$fakebin" "$out"
   pid=$!
   wait_for_exit "$pid" 100 || fail "watcher did not exit for an ordinary blocked event"
-  grep -F "$(printf 'signal\ttask.status\tsignal:')" "$state/.wake-queue" >/dev/null \
+  awk -F '\t' -v f="$status_file" '$3 == "signal" && $5 ~ /^signal:/ && index($5, f) { found = 1 } END { exit !found }' \
+    "$state/.wake-queue" \
     || fail "an ordinary blocked event lost branch-eligible routing: $(cat "$state/.wake-queue")"
-  if grep -F "$(printf 'signal\ttask.status\tneeds-decision:')" "$state/.wake-queue" >/dev/null; then
+  if awk -F '\t' '$3 == "signal" && $5 ~ /^needs-decision:/ { found = 1 } END { exit !found }' \
+    "$state/.wake-queue"; then
     fail "an ordinary blocked event was marked as a second-mate escalation"
   fi
   pass "an ordinary blocked event remains branch-eligible"
@@ -1631,9 +1633,11 @@ test_routine_signal_payload_not_marked_needs_decision() {
   watch_bg "$state" "$fakebin" "$out"
   pid=$!
   wait_for_exit "$pid" 100 || fail "watcher did not exit for an actionable done signal"
-  grep -F "$(printf 'signal\ttask.status\tneeds-decision:')" "$state/.wake-queue" >/dev/null \
+  awk -F '\t' '$3 == "signal" && $5 ~ /^needs-decision:/ { found = 1 } END { exit !found }' \
+    "$state/.wake-queue" \
     && fail "a routine done signal was incorrectly payload-marked needs-decision: $(cat "$state/.wake-queue")"
-  grep -F "$(printf 'signal\ttask.status\tsignal:')" "$state/.wake-queue" >/dev/null \
+  awk -F '\t' -v f="$status_file" '$3 == "signal" && $5 ~ /^signal:/ && index($5, f) { found = 1 } END { exit !found }' \
+    "$state/.wake-queue" \
     || fail "a routine signal lost its ordinary payload: $(cat "$state/.wake-queue")"
   pass "a routine event containing a needs-decision phrase keeps its ordinary payload, unmarked"
 }

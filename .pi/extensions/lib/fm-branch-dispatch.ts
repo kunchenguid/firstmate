@@ -187,6 +187,21 @@ function hasOpenNeedsDecision(
   return [...open.values()].includes("needs-decision");
 }
 
+// The status files a signal row names. A legacy row is keyed by one status
+// filename; a coalesced batch row is keyed by a stable batch identity and
+// carries the whole batch in its byte-identical "signal:$files" payload, so
+// the task set comes from that payload. An empty result is an unresolvable
+// row, which the caller treats as a scan veto exactly as before.
+function signalRowFiles(key: string, payload: string): string[] {
+  if (/^[A-Za-z0-9._-]+\.(?:status|turn-ended)$/.test(key)) return [key];
+  const match = /^signal:(.*)$/.exec(payload);
+  if (!match) return [];
+  return match[1]
+    .split(/\s+/)
+    .filter(Boolean)
+    .map((path) => path.split("/").pop() ?? path);
+}
+
 export function scopeForUnreadWake(state: string, heartbeat: boolean): UnreadWakeScope {
   let queue = "";
   try {
@@ -270,8 +285,17 @@ export function scopeForUnreadWake(state: string, heartbeat: boolean): UnreadWak
         needsDecisionKeys.push(key);
         continue;
       }
-      task = key.replace(/\.(?:status|turn-ended)$/, "");
-      project = metadata.get(task) ?? "";
+      const files = signalRowFiles(key, payload);
+      if (files.length === 0) return UNSAFE_SCOPE;
+      for (const file of files) {
+        const fileTask = file.replace(/\.(?:status|turn-ended)$/, "");
+        const fileProject = metadata.get(fileTask) ?? "";
+        if (!fileTask || !fileProject) return UNSAFE_SCOPE;
+        projects.add(fileProject);
+        eligibleTasks.add(fileTask);
+      }
+      eligibleSeqs.push(seq);
+      continue;
     } else if (kind === "stale") {
       task = taskByKey.get(key) ?? taskByKey.get(key.replace(/^fm-/, "")) ?? "";
       project = metadata.get(key) ?? metadata.get(key.replace(/^fm-/, "")) ?? "";

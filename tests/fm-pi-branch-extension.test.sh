@@ -3736,6 +3736,7 @@ test_branch_dispatch_classifies_main_only_rows_and_writes_the_eligible_snapshot(
   cp "$ROOT/.pi/extensions/lib/fm-async-exec.ts" "$repo/.pi/extensions/lib/fm-async-exec.ts"
   cp "$ROOT/.pi/extensions/lib/fm-branch-model-picker.ts" "$repo/.pi/extensions/lib/fm-branch-model-picker.ts"
   printf 'project=%s/projects/approved\nwindow=fm-window\n' "$home" > "$home/state/task-a.meta"
+  printf 'project=%s/projects/approved\nwindow=fm-window-b\n' "$home" > "$home/state/task-b.meta"
   LIB="$repo/.pi/extensions/lib/fm-branch-dispatch.ts" FM_HOME="$home" GRANT="$ROOT/bin/fm-wake-grant.sh" \
     node --input-type=module > "$TMP_ROOT/node-output" 2>&1 <<'EOF'
 import { pathToFileURL } from "node:url";
@@ -3809,6 +3810,24 @@ writeFileSync(`${state}/.wake-queue`, "1\t1\tsignal\ttask-a.status\tneeds-decisi
 const needsDecisionOnly = scopeForUnreadWake(state, false);
 if (needsDecisionOnly.eligible || needsDecisionOnly.eligibleSeqs.length !== 0 || needsDecisionOnly.corrupted) {
   throw new Error(`a needs-decision-only queue must be ordinary main-only absence: ${JSON.stringify(needsDecisionOnly)}`);
+}
+
+// A coalesced batch row is keyed by a stable batch identity, not a status
+// filename, so its task set comes from the byte-identical "signal:$files"
+// payload. Every task in the batch stays independently reportable.
+writeFileSync(
+  `${state}/.wake-queue`,
+  `1\t1\tsignal\tsignal-batch-abc123\tsignal: ${state}/task-a.status ${state}/task-b.status`,
+);
+const batchRow = scopeForUnreadWake(state, false);
+if (!batchRow.eligible || batchRow.corrupted || batchRow.eligibleSeqs.join(",") !== "1") {
+  throw new Error(`a coalesced batch row was not branch-eligible: ${JSON.stringify(batchRow)}`);
+}
+if (batchRow.eligibleTasks.slice().sort().join(",") !== "task-a,task-b") {
+  throw new Error(`a coalesced batch row lost a task from its payload: ${JSON.stringify(batchRow)}`);
+}
+if (!batchRow.projects.includes(project)) {
+  throw new Error(`a coalesced batch row lost its project context: ${JSON.stringify(batchRow)}`);
 }
 
 // A captain-held task's bounded stale recheck is itself a decision wake. It is
