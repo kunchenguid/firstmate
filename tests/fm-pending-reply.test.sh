@@ -2123,6 +2123,129 @@ test_summary_keeps_accents_and_caps_by_character() {
   pass "the summary keeps accented letters, drops control characters, and caps by character"
 }
 
+# --- child result on a correlated reply ---------------------------------------
+# A routed request can be answered while the child task behind it is unfinished,
+# so the parent reads the child's fm-crew-state verdict, never the reply's verb.
+
+make_child_stubs() {  # <dir> -> fakebin with a tmux that lists the mate's windows
+  local fb="$1/fakebin"
+  mkdir -p "$fb"
+  cat > "$fb/tmux" <<'SH'
+#!/usr/bin/env bash
+case "${1:-}" in
+  list-windows) sed -n 's/^window=[^:]*://p' "${FM_STATE_OVERRIDE:-${FM_HOME:?}/state}"/*.meta 2>/dev/null ;;
+  display-message) printf '%%1\n' ;;
+  capture-pane) printf 'all quiet\n> \n' ;;
+esac
+exit 0
+SH
+  chmod +x "$fb/tmux"
+  printf '%s\n' "$fb"
+}
+
+# A child task in <mate-home> whose log ends with <log-line>, working or idle.
+make_child() {  # <mate-home> <id> <kind> <busy|idle> <log-line>
+  local mate=$1 id=$2 kind=$3 busy=$4 log=$5 wt gen
+  wt="$mate/wt-$id"
+  mkdir -p "$wt"
+  if [ "$kind" = ship ]; then
+    git -C "$wt" init -q
+    git -C "$wt" commit -q --allow-empty -m init
+    git -C "$wt" update-ref refs/remotes/origin/main "$(git -C "$wt" rev-parse HEAD)"
+  fi
+  printf 'window=fm:fm-%s\nworktree=%s\nkind=%s\nmode=direct-PR\nharness=claude\n' \
+    "$id" "$wt" "$kind" > "$mate/state/$id.meta"
+  printf '%s\n' "$log" > "$mate/state/$id.status"
+  gen=$("$ROOT/bin/fm-busy-event.sh" arm "$mate/state" "$id")
+  if [ "$busy" = busy ]; then
+    "$ROOT/bin/fm-busy-event.sh" apply "$mate/state" "$id" busy --gen "$gen" \
+      --source claude-hook --event user-prompt-submit
+  else
+    "$ROOT/bin/fm-busy-event.sh" apply "$mate/state" "$id" idle --gen "$gen" \
+      --source claude-hook --event stop
+  fi
+}
+
+# Answer a marked request through the helper and print the parent's received
+# result. <task> is a child id or empty; <doc> is a document pointer or empty.
+received_result() {  # <fakebin> <mate-home> <parent-home> <mate-id> <task> <doc>
+  local fb=$1 mate=$2 home=$3 mate_id=$4 task=$5 doc=$6 corr
+  local -a flags=() tail=()
+  [ -z "$task" ] || flags+=(--task "$task")
+  [ -z "$doc" ] || { flags+=(--doc); tail+=("$doc"); }
+  corr=$(FM_PENDING_REPLY_NOW=9300 fm_pending_reply_create "$home" "$home/state" "$mate_id" "how far is the repacking")
+  FM_PENDING_REPLY_NOW=9300 fm_pending_reply_mark_delivered "$home/state" "$corr"
+  PATH="$fb:$PATH" FM_HOME="$mate" "$REPORT" "${flags[@]}" "done" "$corr" \
+    "${tail[@]}" "narrow fix done" > /dev/null || fail "helper report failed"
+  FM_PENDING_REPLY_NOW=9300 fm_pending_reply_try_resolve "$home/state" "$corr" || fail "helper report should resolve the request"
+  fm_pending_reply_result "$home/state" "$corr"
+}
+
+test_unfinished_child_is_not_reported_finished() {
+  local home mate fb out
+  fm_git_identity fmtest fmtest@example.invalid
+  home=$(setup_parent child-open)
+  mate=$(bind_local_mate "$home" kid)
+  fb=$(make_child_stubs "$mate")
+  make_child "$mate" repack scout busy 'done: spinner fix done; broader repacking work remains unfinished'
+  out=$(received_result "$fb" "$mate" "$home" kid repack "")
+  assert_contains "$out" "request: answered" "the request is answered"
+  assert_contains "$out" "child: repack" "the result names the child"
+  assert_contains "$out" "child-state: working" "the result carries the child's own verdict"
+  assert_contains "$out" "overall: unfinished" "a done reply must not finish a working child"
+  make_child "$mate" nopr ship idle 'done: spinner fix done'
+  git -C "$mate/wt-nopr" commit -q --allow-empty -m 'unpublished work'
+  out=$(received_result "$fb" "$mate" "$home" kid nopr "")
+  assert_contains "$out" "child-state: blocked" "a ship whose commit is not delivered reads blocked"
+  assert_contains "$out" "overall: unfinished" "no delivered artifact means unfinished"
+  pass "a done reply for a still-running child or an undelivered ship reads unfinished"
+}
+
+test_finished_child_reads_finished() {
+  local home mate fb out
+  fm_git_identity fmtest fmtest@example.invalid
+  home=$(setup_parent child-done)
+  mate=$(bind_local_mate "$home" kid)
+  fb=$(make_child_stubs "$mate")
+  make_child "$mate" scoutdone scout idle 'done: report written'
+  out=$(received_result "$fb" "$mate" "$home" kid scoutdone "")
+  assert_contains "$out" "child-state: done" "a completed scout reads done"
+  assert_contains "$out" "overall: finished" "a completed scout reads finished"
+  make_child "$mate" shipready ship idle 'done: ready for merge'
+  out=$(received_result "$fb" "$mate" "$home" kid shipready data/x/report.md)
+  assert_contains "$out" "child-state: done" "a ready ship reads done"
+  assert_contains "$out" "overall: finished" "a ready ship reads finished"
+  pass "a completed scout and a ready ship read finished through the document form too"
+}
+
+test_missing_child_result_reads_unknown() {
+  local home mate fb out
+  home=$(setup_parent child-missing)
+  mate=$(bind_local_mate "$home" kid)
+  fb=$(make_child_stubs "$mate")
+  make_child "$mate" scoutdone scout idle 'done: report written'
+  out=$(received_result "$fb" "$mate" "$home" kid "" "")
+  assert_contains "$out" "request: answered" "a reply without a child still answers the request"
+  assert_contains "$out" "overall: unknown" "no child named means unknown, not finished"
+  out=$(received_result "$fb" "$mate" "$home" kid no-such-child "")
+  assert_contains "$out" "child-state: unknown" "a child with no record reads unknown"
+  assert_contains "$out" "overall: unknown" "an unreadable child is never finished"
+  pass "a reply with no child result, or an unreadable one, reads unknown"
+}
+
+test_hand_written_reply_and_forged_note_read_unknown() {
+  local home state corr out
+  home=$(setup_parent child-forged)
+  state="$home/state"
+  corr=$(FM_PENDING_REPLY_NOW=9400 fm_pending_reply_create "$home" "$state" "kid" "how far")
+  FM_PENDING_REPLY_NOW=9400 fm_pending_reply_mark_delivered "$state" "$corr"
+  printf 'done [corr=%s]: all finished (child=x child-state=done)\n' "$corr" >> "$state/kid.status"
+  FM_PENDING_REPLY_NOW=9400 fm_pending_reply_try_resolve "$state" "$corr" || fail "hand-written report should resolve"
+  out=$(fm_pending_reply_result "$state" "$corr")
+  assert_contains "$out" "overall: unknown" "only the helper's trailing marker carries a child result"
+  pass "a hand-written line quoting a child result reads unknown"
+}
+
 # --- run --------------------------------------------------------------------
 
 test_normal_correlated_reply_resolves_once
@@ -2174,5 +2297,9 @@ test_local_parent_replies_is_wrong_home_evidence
 test_escalated_undelivered_correlation_stays_retryable
 test_same_kind_escalation_reopens_after_operator_close
 test_summary_keeps_accents_and_caps_by_character
+test_unfinished_child_is_not_reported_finished
+test_finished_child_reads_finished
+test_missing_child_result_reads_unknown
+test_hand_written_reply_and_forged_note_read_unknown
 
 printf 'ok - all pending-reply tests passed\n'

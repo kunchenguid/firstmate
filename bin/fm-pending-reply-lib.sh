@@ -63,6 +63,10 @@
 #                           lifecycle note below); empty until then
 #   resolved_epoch=
 #   resolved_via=           status | document | helper | empty
+#   reply_child_id=         child task the resolving reply reported on, or "-"
+#   reply_child_state=      that child's fm-crew-state verdict as the reply
+#                           recorded it, or "unknown" (see the child result
+#                           note below)
 #   wrong_home_hits=        count of corr sightings under the secondmate home
 #   wrong_home_first_sighting= encoded path:line identity of the first sighting
 #   wrong_home_sightings=   comma-separated encoded path:line identities
@@ -71,6 +75,15 @@
 #                           missed-report escalation, are eligible - measured
 #                           from the relevant turn's completion (request or
 #                           recovery), never from delivery or send time
+#
+# Child result: answering a request is not finishing the work behind it. A mate
+# may report a completed investigation or a passing test while the child task is
+# still unfinished, so the reply verb says only that the request was answered.
+# bin/fm-secondmate-report.sh --task <child> appends the child's bin/fm-crew-state.sh
+# verdict as a trailing marker (fm_pending_reply_child_marker), and the resolve
+# records it beside the request outcome. fm_pending_reply_result derives the
+# overall label from that verdict alone: a reply with no marker, or a verdict
+# the mate could not read, is "unknown" and never "finished".
 #
 # Escalation lifecycle: an escalation is not just a message, it OPENS a durable
 # keyed decision in the parent status log, and bin/fm-classify-lib.sh's fold is
@@ -660,6 +673,63 @@ fm_pending_reply_resolve_via_of_line() {  # <line>
   esac
 }
 
+# The crew-state words fm-crew-state.sh can print; the single list both the
+# helper (writer) and the parent (reader) check a verdict against.
+fm_pending_reply_child_state_valid() {  # <state>
+  case "$1" in
+    working|parked|done|blocked|paused|failed|unknown) return 0 ;;
+  esac
+  return 1
+}
+
+# The marker the helper appends, as "child=<id> child-state=<verdict>". An id
+# that is empty or not a plain task id reads as no child ("-"), and a verdict
+# outside the crew-state vocabulary reads unknown.
+fm_pending_reply_child_marker() {  # <child-id> <state>
+  local id=$1 state=$2
+  case "$id" in ''|*[!A-Za-z0-9._-]*) id=- ;; esac
+  fm_pending_reply_child_state_valid "$state" || state=unknown
+  printf 'child=%s child-state=%s' "$id" "$state"
+}
+
+# Prints "<child-id> <state>" from the marker that closes a helper-written
+# line, or "- unknown" when the line carries none. Only the trailing marker
+# counts, so a note that quotes "child-state=done" cannot supply one.
+fm_pending_reply_child_result_of_line() {  # <line>
+  local line=$1 marker_re='[( ]via-helper child=([A-Za-z0-9._-]+) child-state=([a-z]+)\)$'
+  if [[ $line =~ $marker_re ]] \
+    && fm_pending_reply_child_state_valid "${BASH_REMATCH[2]}"; then
+    printf '%s %s' "${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}"
+    return 0
+  fi
+  printf -- '- unknown'
+}
+
+# finished only for a done child; a failed child is failed; a child nobody
+# could read is unknown; every other verdict is still unfinished.
+fm_pending_reply_overall_label() {  # <child-state>
+  case "$1" in
+    done) printf 'finished' ;;
+    failed) printf 'failed' ;;
+    working|parked|blocked|paused) printf 'unfinished' ;;
+    *) printf 'unknown' ;;
+  esac
+}
+
+# The received result of a resolved request: the request outcome and the child
+# outcome side by side. Returns 1 while the request is unresolved.
+fm_pending_reply_result() {  # <state-dir> <corr_id>
+  local rec child_id child_state
+  rec=$(fm_pending_reply_path "$1" "$2")
+  [ -f "$rec" ] && [ "$(fm_pending_reply_get "$rec" phase)" = resolved ] || return 1
+  child_id=$(fm_pending_reply_get "$rec" reply_child_id)
+  child_state=$(fm_pending_reply_get "$rec" reply_child_state)
+  [ -n "$child_id" ] || child_id=-
+  fm_pending_reply_child_state_valid "$child_state" || child_state=unknown
+  printf 'request: answered · child: %s · child-state: %s · overall: %s\n' \
+    "$child_id" "$child_state" "$(fm_pending_reply_overall_label "$child_state")"
+}
+
 # Idempotently resolve an expectation from a correlated parent report.
 # Returns 0 when the record is resolved after the call (already or newly).
 fm_pending_reply_try_resolve() {  # <state-dir> <corr_id> [status-file-override]
@@ -684,7 +754,7 @@ fm_pending_reply_try_resolve() {  # <state-dir> <corr_id> [status-file-override]
 
 _fm_pending_reply_try_resolve_locked() {  # <state-dir> <corr_id> [status-file-override]
   local state=$1 corr=$2 status_override=${3-}
-  local rec phase delivered marker delivery_entry delivery_state status_file signature previous line via now
+  local rec phase delivered marker delivery_entry delivery_state status_file signature previous line via now child
   local unconfirmed=0
   rec=$(fm_pending_reply_path "$state" "$corr")
   [ -f "$rec" ] || return 1
@@ -722,7 +792,10 @@ _fm_pending_reply_try_resolve_locked() {  # <state-dir> <corr_id> [status-file-o
     return 1
   fi
   via=$(fm_pending_reply_resolve_via_of_line "$line")
+  child=$(fm_pending_reply_child_result_of_line "$line")
   now=$(fm_pending_reply_now)
+  fm_pending_reply_set "$rec" reply_child_id "${child% *}" || return 1
+  fm_pending_reply_set "$rec" reply_child_state "${child#* }" || return 1
   fm_pending_reply_set "$rec" phase resolved || return 1
   if [ -z "$delivered" ]; then
     fm_pending_reply_mark_delivered "$state" "$corr" "$now" || return 1
@@ -1148,10 +1221,10 @@ fm_pending_reply_escalation_payload() {  # <record-path> <kind>
   [ -n "$task_id" ] && [ -n "$corr" ] || return 1
   case "$kind" in
     missed)
-      token='pending-reply-missed'
+      token=pending-reply-missed
       ;;
     delivery-unknown)
-      token='pending-reply-delivery-unknown'
+      token=pending-reply-delivery-unknown
       ;;
     recovery-delivery)
       outcome=$(fm_pending_reply_get "$rec" recovery_delivery_outcome)
