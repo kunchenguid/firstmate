@@ -189,7 +189,8 @@ The 2026-08-27 review inspected `bin/fm-harness.sh`, `bin/fm-supervision-instruc
 
 The [operating contract](../configuration.md#process-to-event-sources-stateprocevent) owns stop authority, the guard's lease and two-read debounce, claim reclamation, and the permanent leak and silent loss of listening after an unrelated leader death.
 
-Detached startup lease checks were verified on 2026-11-05 on macOS (Darwin 25.5.0) with `/bin/bash` 3.2.57 using `bin/fm-test-run.sh tests/fm-procevent.test.sh`.
+Detached startup lease checks were verified on 2026-11-05 in a disposable Debian 13 CI-box guest with Bash 5.2.37 against candidate `1a34c1f2b918a020d321c804fb9c006cc1bae3d7` using `bin/fm-test-run.sh tests/fm-procevent.test.sh`.
+The command exited 0 with 146 passing checks and `failed=0`.
 The focused run included:
 
 ```text
