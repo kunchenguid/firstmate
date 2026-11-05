@@ -93,7 +93,7 @@ COMPOSER=$(fm_backend_cmux_composer_state "$TARGET" "$TASK")
 [ "$COMPOSER" = empty ] || fail "cmux classified the real Claude $(claude --version) idle composer as '$COMPOSER'"
 pass "cmux classifies the real Claude borderless composer as empty"
 
-FM_SEND_SETTLE=0 FM_HOME="$LAB" "$ROOT/bin/fm-send.sh" "$TASK" --resolve-key probe-decision ALBATROSS \
+FM_SEND_SETTLE=0 FM_HOME="$LAB" "$ROOT/bin/fm-send.sh" "$TASK" --source-kind supervisor --source "fixture supervisor judgement" --resolve-key probe-decision ALBATROSS \
   || fail "cmux did not confirm the real Claude steer"
 for _ in $(seq 1 30); do
   untimed_status "$STATUS" | grep -q '^done: received ALBATROSS' && break

@@ -520,7 +520,7 @@ EOF
   # the send that answers a listed decision also closes it, so closure never
   # depends on the busy worker writing a matching resolved line (contract:
   # bin/fm-send.sh header).
-  printf "OPEN DECISIONS: close one by answering it: bin/fm-send.sh <task> --resolve-key <key> '<answer>'\n" || return 1
+  printf "OPEN DECISIONS: close one by answering it: bin/fm-send.sh <task> --resolve-key <key> --source-kind <user|supervisor|mechanical> --source '<reference>' [--source-time <message-UTC>] '<answer>'\n" || return 1
   printf 'OPEN DECISIONS: <key> is the [key=...] printed before the verb; a token inside a note is prose, not a key.\n' || return 1
 }
 
@@ -581,7 +581,7 @@ EOF
   # captain ruled: a call can dissolve, or turn out to have been a question of
   # fact. Reconcile with what actually happened - never by closing on the
   # strength of this line.
-  printf 'RECORD DIVERGENCE: reconcile each one - record the captain'"'"'s own words with bin/fm-captain-hold.sh answer <task> --decision-file <path>, or re-open the status decision when that resolution was not the captain'"'"'s word.\n' || return 1
+  printf 'RECORD DIVERGENCE: reconcile each one - record the captain'"'"'s own words with bin/fm-captain-hold.sh answer <task> --decision-file <path> --source-kind user --source <message-reference> --source-time <message-UTC>, or re-open the status decision when that resolution was not the captain'"'"'s word.\n' || return 1
 }
 
 # Print BRANCH OUTCOMES: what the supervision host's session recorded since

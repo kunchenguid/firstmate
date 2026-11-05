@@ -230,7 +230,12 @@ Each key is reported as follows:
 | A replay with a mode mismatch | Skipped. |
 
 The command exits nonzero when any key was skipped.
-`--source` is provenance text recorded in the durable decision, never a behavior switch, and the command carries no per-channel branch.
+Every new resolution records a declared source kind and reference, distinguishing user answers, supervisor judgements, and mechanical operations with evidence.
+User answers also retain the answering message's UTC time, which is provenance rather than proof of authorship.
+Direct `answer`, shared `answers`, and `fm-send --resolve-key` use the source contract owned by `bin/fm-resolution-source-lib.sh` and expose its fields in their `--help` output.
+The captured-channel intake uses the immutable result's receipt time for that answering message, so replay does not substitute the current clock.
+Reconciliation records its owning operation and evidence file under its existing evidence label.
+Earlier valid records remain readable and replayable without invented source attribution.
 
 ### Source bindings
 

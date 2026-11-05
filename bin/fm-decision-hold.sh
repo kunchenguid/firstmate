@@ -26,6 +26,8 @@
 #                                             task ids first and legacy identities second)
 #   bind <source> (<origin> | --any-origin) -> bind <source> [<origin>]
 #   unbind | binding <source>              -> unchanged
+# Answer and resolve commands forward the source fields required by
+# fm-captain-hold.sh; its --help owns their usage.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -107,11 +109,15 @@ recorded_field() {
 command_resolve() {
   local origin=${1:-} key=${2:-} decision_file='' routed='' routed_csv id dep tmp answer_file show state blocked hold_show hold_body
   local resolution_recorded=0 legacy_replay=0 decision_text decision_digest recorded_digest recorded_routes
+  local source_args=()
   [ "$#" -ge 2 ] || { usage >&2; exit 2; }
   shift 2
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --decision-file) shift; decision_file=${1:-} ;;
+      --source-kind|--source|--source-time)
+        [ "$#" -ge 2 ] || { usage >&2; exit 2; }
+        source_args+=("$1" "$2"); shift ;;
       --routed-to) shift; validate_slug routed-task "${1:-}"; routed="${routed}${routed:+ }${1:-}" ;;
       *) usage >&2; exit 2 ;;
     esac
@@ -161,7 +167,7 @@ command_resolve() {
   fi
   answer_file=$tmp
   [ "$legacy_replay" = 0 ] || answer_file=$decision_file
-  if ! "$CAPTAIN_HOLD" answer "$id" --decision-file "$answer_file"; then
+  if ! "$CAPTAIN_HOLD" answer "$id" --decision-file "$answer_file" "${source_args[@]+"${source_args[@]}"}"; then
     rm -f -- "$tmp"
     exit 1
   fi
@@ -198,14 +204,18 @@ command_close() {  # <origin> <key> <flag-args...>
   id=$(compose "$origin" "$key")
   shift 2
   local decision_file=''
+  local source_args=()
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --decision-file) shift; decision_file=${1:-} ;;
+      --source-kind|--source|--source-time)
+        [ "$#" -ge 2 ] || { usage >&2; exit 2; }
+        source_args+=("$1" "$2"); shift ;;
       *) usage >&2; exit 2 ;;
     esac
     shift
   done
-  exec "$CAPTAIN_HOLD" answer "$id" --decision-file "$decision_file"
+  exec "$CAPTAIN_HOLD" answer "$id" --decision-file "$decision_file" "${source_args[@]+"${source_args[@]}"}"
 }
 
 command_hold() {

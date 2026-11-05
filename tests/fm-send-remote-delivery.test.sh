@@ -547,7 +547,7 @@ test_remote_resolve_key_closes_at_enqueue() {
 
   rc=0
   send_env "$fb" "$home" "$ssh_log" \
-    "$SEND" rsm --resolve-key upgrade-window "the weekend, freeze Friday" >/dev/null 2>&1 || rc=$?
+    "$SEND" rsm --source-kind supervisor --source "fixture supervisor judgement" --resolve-key upgrade-window "the weekend, freeze Friday" >/dev/null 2>&1 || rc=$?
   expect_code 0 "$rc" "a durably recorded remote answer must exit 0"
   sed -E 's/ \[at=[0-9]+\]//' "$home/state/rsm.status" | grep -qF 'resolved [key=upgrade-window]: answered: the weekend, freeze Friday' \
     || fail "a recorded remote answer must close the decision at enqueue: $(cat "$home/state/rsm.status")"
@@ -807,7 +807,7 @@ test_local_pending_does_not_close_resolve_key() {
   rc=0
   env PATH="$fb:$PATH" FM_FAKE_TMUX_PENDING=1 \
     FM_ROOT_OVERRIDE="$home" FM_HOME="$home" FM_SEND_LOG="$log" FM_SEND_SETTLE=0 \
-    "$SEND" t2 --resolve-key creds "/vault fetch deploy-token" >/dev/null 2>&1 || rc=$?
+    "$SEND" t2 --source-kind supervisor --source "fixture supervisor judgement" --resolve-key creds "/vault fetch deploy-token" >/dev/null 2>&1 || rc=$?
   expect_code 3 "$rc" "an unconfirmed local answer must exit with the delivered-unconfirmed status"
   if grep -F 'resolved' "$home/state/t2.status" >/dev/null; then
     fail "an unconfirmed local answer must not close the decision: $(cat "$home/state/t2.status")"

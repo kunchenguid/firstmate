@@ -35,6 +35,58 @@ EOF
   printf '%s\n' "$home"
 }
 
+test_resolution_attribution() {
+  local home kind show at rc
+  home=$(make_home attribution)
+  printf 'Use the north route.\n' > "$home/answer.txt"
+  for kind in user supervisor mechanical; do
+    run_captain "$home" hold "source-$kind" --title "Source $kind" --reason choose >/dev/null \
+      || fail "could not create attribution fixture"
+    at=''
+    [ "$kind" != user ] || at=2026-11-04T15:23:07Z
+    run_captain "$home" answer "source-$kind" --decision-file "$home/answer.txt" \
+      --source-kind "$kind" --source "$kind:message-or-operation-3" --source-time "$at" >/dev/null \
+      || fail "$kind direct answer failed"
+    show=$(tasks_in "$home" show "source-$kind" --full)
+    assert_contains "$show" "Source kind: $kind" "direct answer lost its source kind"
+    assert_contains "$show" "Source reference: $kind:message-or-operation-3" "direct answer lost its reference"
+    if [ "$kind" = user ]; then
+      assert_contains "$show" "Source message UTC: $at" "user answer lost its message UTC time"
+      assert_contains "$show" 'Captain decision:' "user answer lost its decision label"
+    else
+      assert_contains "$show" 'Resolution decision:' "non-user answer lost its distinct label"
+      assert_not_contains "$show" 'Captain decision:' "non-user judgement was labelled as captain words"
+    fi
+    if run_captain "$home" answer "source-$kind" --decision-file "$home/answer.txt" \
+      --source-kind "$kind" --source "different-source" --source-time "$at" >/dev/null 2>&1; then
+      fail "an answer replay changed its recorded source"
+    fi
+  done
+  run_captain "$home" hold source-missing --title "Missing source" --reason choose >/dev/null
+  PATH="$home/fakebin:$PATH" FM_HOME="$home" \
+    "$ROOT/bin/fm-captain-hold.sh" answer source-missing --decision-file "$home/answer.txt" >/dev/null 2>&1; rc=$?
+  [ "$rc" -ne 0 ] || fail "direct answer accepted missing source"
+  show=$(tasks_in "$home" show source-missing --full)
+  assert_not_contains "$show" 'Resolution recorded' "missing source changed the hold"
+  run_captain "$home" hold source-batch --title "Batch source" --reason choose >/dev/null
+  printf 'source-batch\tnorth\t\n' | run_captain "$home" answers \
+    --source-kind supervisor --source "supervisor:judgement-4" --source-time '' >/dev/null \
+    || fail "shared answer failed"
+  show=$(tasks_in "$home" show source-batch --full)
+  assert_contains "$show" 'Source kind: supervisor' "shared intake changed source kind"
+  assert_contains "$show" 'Source reference: supervisor:judgement-4' "shared intake changed source reference"
+  assert_not_contains "$show" 'Captain answered' "shared supervisor answer claims human authorship"
+  run_captain "$home" hold source-reconcile --title "Reconcile source" --reason choose >/dev/null
+  request_reconciles "$home" source-fixture source-reconcile || fail "reconcile request failed"
+  run_captain "$home" reconcile close source-reconcile --evidence-file "$home/answer.txt" >/dev/null \
+    || fail "mechanical reconciliation failed"
+  show=$(tasks_in "$home" show source-reconcile --full)
+  assert_contains "$show" 'Source kind: mechanical' "reconciliation lost its source kind"
+  assert_contains "$show" "Source reference: fm-captain-hold reconcile close: $home/answer.txt" "reconciliation lost its operation and evidence"
+  assert_contains "$show" 'Reconciliation evidence:' "reconciliation lost its evidence label"
+  pass "direct, shared, and reconciliation records preserve their distinct source"
+}
+
 # The Lavish review adapter, run against this suite's isolated home. The
 # machine-wide process-event claim root is redirected into the fixture so arming
 # a review here can never contend with a real one on this machine.
@@ -83,9 +135,19 @@ tasks_in() {  # <home> <tasks-axi args...>
 run_captain() {  # <home> <command args...>
   local home=$1
   shift
+  local command=$1 id
+  shift
+  case "$command" in
+    answer)
+      id=$1; shift
+      set -- "$id" --source-kind user --source "lifecycle fixture message" \
+        --source-time 2026-11-05T12:00:00Z "$@"
+      ;;
+    answers) set -- --source-kind user --source-time 2026-11-05T12:00:00Z "$@" ;;
+  esac
   PATH="$home/fakebin:$PATH" REAL_TASKS_AXI="$TASKS_AXI_BIN" \
     FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
-    FM_CONFIG_OVERRIDE="$home/config" "$ROOT/bin/fm-captain-hold.sh" "$@"
+    FM_CONFIG_OVERRIDE="$home/config" "$ROOT/bin/fm-captain-hold.sh" "$command" "$@"
 }
 
 # Completes <id>'s captain-call inventory through a separate held task, because
@@ -199,9 +261,18 @@ SH
 run_shim() {  # <home> <command args...>
   local home=$1
   shift
+  local command=$1 origin key
+  shift
+  case "$command" in
+    resolve|answer|decline|repair)
+      origin=$1; key=$2; shift 2
+      set -- "$origin" "$key" --source-kind user --source "lifecycle fixture message" \
+        --source-time 2026-11-05T12:00:00Z "$@"
+      ;;
+  esac
   PATH="$home/fakebin:$PATH" REAL_TASKS_AXI="$TASKS_AXI_BIN" \
     FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
-    FM_CONFIG_OVERRIDE="$home/config" "$ROOT/bin/fm-decision-hold.sh" "$@"
+    FM_CONFIG_OVERRIDE="$home/config" "$ROOT/bin/fm-decision-hold.sh" "$command" "$@"
 }
 
 write_origin_meta() {  # <home> <id> [kind]
@@ -631,7 +702,7 @@ SH
   PATH="$fb:$PATH" REAL_TASKS_AXI="$TASKS_AXI_BIN" \
     FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
     FM_DATA_OVERRIDE="$home/data" FM_CONFIG_OVERRIDE="$home/config" \
-    "$ROOT/bin/fm-captain-hold.sh" answer "$id" --decision-file "$decision" >/dev/null \
+    "$ROOT/bin/fm-captain-hold.sh" answer "$id" --source-kind user --source "lifecycle fixture message" --source-time 2026-11-05T12:00:00Z --decision-file "$decision" >/dev/null \
     || fail "answering on a beads-configured home failed without a markdown backlog"
   assert_grep "update $id --body-file" "$log" \
     "the captain answer never reached the configured backend"
@@ -2446,6 +2517,8 @@ SH
   assert_contains "$show" "north" "the board answer lost the captain's selection"
   assert_contains "$show" "the captured result $sid sequence 1" \
     "the recorded answer did not name the board result that carried it"
+  assert_contains "$show" "Source kind: user" "the captured user answer lost its source kind"
+  assert_contains "$show" "Source message UTC:" "the captured answer lost its receipt time"
   pass "a board answer reaches the keyed-answer intake and wakes firstmate"
 }
 
@@ -2509,7 +2582,7 @@ SH
   env PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$home" FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_SEND_LOG="$home/send.log" FM_SEND_SETTLE=0 \
-    "$ROOT/bin/fm-send.sh" "$id" --resolve-key chat-choice "go with option A" >/dev/null 2>&1 \
+    "$ROOT/bin/fm-send.sh" "$id" --source-kind user --source "lifecycle fixture message" --source-time 2026-11-05T12:00:00Z --resolve-key chat-choice "go with option A" >/dev/null 2>&1 \
     || fail "an answer to a transferred legacy decision was refused by the chat channel"
   # The answer rides fm-send's durable inbox plane: the record carries the
   # text while the typed channel carries only the doorbell.
@@ -2523,7 +2596,7 @@ SH
   env PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$home" FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_SEND_LOG="$home/send.log" FM_SEND_SETTLE=0 \
-    "$ROOT/bin/fm-send.sh" "$id" --resolve-key sample-chat-followup "take the second option" >/dev/null 2>&1 \
+    "$ROOT/bin/fm-send.sh" "$id" --source-kind user --source "lifecycle fixture message" --source-time 2026-11-05T12:00:00Z --resolve-key sample-chat-followup "take the second option" >/dev/null 2>&1 \
     || fail "an answer keyed by a task id was refused by the chat channel"
   show=$(tasks_in "$home" show sample-chat-followup --full)
   assert_contains "$show" "state: done" "a chat answer left the task-id call open"
@@ -2536,7 +2609,7 @@ SH
   env PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$home" FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_SEND_LOG="$home/send.log" FM_SEND_SETTLE=0 \
-    "$ROOT/bin/fm-send.sh" "$id" --resolve-key sample-chat-reconcile reconcile >/dev/null 2>&1
+    "$ROOT/bin/fm-send.sh" "$id" --source-kind user --source "lifecycle fixture message" --source-time 2026-11-05T12:00:00Z --resolve-key sample-chat-reconcile reconcile >/dev/null 2>&1
   set -e
   show=$(tasks_in "$home" show sample-chat-reconcile --full)
   assert_contains "$show" "state: queued" "a chat reconcile answer closed the call"
@@ -2553,7 +2626,7 @@ SH
   if env PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$home" FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_SEND_LOG="$home/send.log" FM_SEND_SETTLE=0 \
-    "$ROOT/bin/fm-send.sh" "$id" --resolve-key sample-chat-followup "again" \
+    "$ROOT/bin/fm-send.sh" "$id" --source-kind user --source "lifecycle fixture message" --source-time 2026-11-05T12:00:00Z --resolve-key sample-chat-followup "again" \
     > "$home/closed-key.out" 2> "$home/closed-key.err"; then
     fail "a key already closed in both ledgers was accepted"
   fi
@@ -3342,7 +3415,7 @@ SH
   printf 'Proceed despite the reporting limitation.\n' > "$home/answer.txt"
   PATH="$home/fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
     FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$home/config" \
-    "$ROOT/bin/fm-captain-hold.sh" answer "$id" --decision-file "$home/answer.txt" \
+    "$ROOT/bin/fm-captain-hold.sh" answer "$id" --source-kind user --source "lifecycle fixture message" --source-time 2026-11-05T12:00:00Z --decision-file "$home/answer.txt" \
     >/dev/null || fail "the unsupported relocated report wedged the captain's answer"
   show=$(cd "$home" && tasks-axi show "$id" --full --file "$data/backlog.md") \
     || fail "the answered relocated row disappeared"
@@ -5094,6 +5167,7 @@ EOF
   pass "an answered captain call archived to a user-configured location still satisfies the completion gate"
 }
 
+test_resolution_attribution
 test_hold_reason_round_trips_awkward_characters
 test_hold_origins_follow_backend_holds
 test_interrupted_origin_move_does_not_inherit_the_previous_answer

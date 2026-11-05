@@ -22,8 +22,8 @@
 # Usage:
 #   fm-captain-hold.sh hold <task-id> --reason <reason> \
 #     [--title <title>] [--repo <repo>] [--origin <origin-id>] [--until YYYY-MM-DD]
-#   fm-captain-hold.sh answer <task-id> --decision-file <path> [--release]
-#   fm-captain-hold.sh answers [<legacy-origin> | --any-origin] --source <provenance>   (keyed answers on stdin)
+#   fm-captain-hold.sh answer <task-id> --decision-file <path> --source-kind <kind> --source <reference> [--source-time <UTC>] [--release]
+#   fm-captain-hold.sh answers [<legacy-origin> | --any-origin] --source-kind <kind> --source <reference> [--source-time <UTC>]   (keyed answers on stdin)
 #   fm-captain-hold.sh reconcile-requests --source-id <source-id> --source <provenance>   (task ids on stdin)
 #   fm-captain-hold.sh bind <source-id> [<legacy-origin> | --any-origin]
 #   fm-captain-hold.sh unbind <source-id>
@@ -57,9 +57,11 @@
 # --until`, so a "revisit later" answer is stored as a date instead of a live
 # card.
 #
-# `answer` records the captain's exact words and resolves the call in the same
-# act. It requires a non-empty captain decision file of at most 8192 bytes and
-# writes a resolution block while preserving the leading hold-set stamp until
+# `answer` records the supplied decision and resolves the call in the same
+# act. It requires a non-empty decision file of at most 8192 bytes and source
+# fields validated by bin/fm-resolution-source-lib.sh, the provenance owner
+# shared with fm-send. Only a user source is labelled Captain decision.
+# It writes a resolution block while preserving the leading hold-set stamp until
 # the close succeeds (the previous body is preserved and archived through
 # tasks-axi --archive-body). It closes a question with `tasks-axi done` - or,
 # with `--release`, lifts the hold with `tasks-axi unhold` so a captain-gated
@@ -96,8 +98,8 @@
 # and feeds nothing. A replayed delivery whose answer digest and requested
 # close mode both match the newest record is reported `closed:` and is a no-op;
 # a mode mismatch is skipped. The command exits nonzero when any key was
-# skipped. `--source` is provenance text recorded in the
-# durable decision, never a behavior switch: this command has no per-channel
+# skipped. Source fields are recorded in the durable decision, never a
+# per-channel behavior switch: this command has no per-channel
 # branch and no knowledge of chat, review decks, or any transport.
 # Legacy input: an optional positional origin (or a stored concrete-origin
 # binding) makes a key that names no task fall back to the old
@@ -233,6 +235,12 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 # shellcheck source=bin/fm-classify-lib.sh
 # shellcheck disable=SC1091
 . "$SCRIPT_DIR/fm-classify-lib.sh"
+# shellcheck source=bin/fm-resolution-source-lib.sh
+. "$SCRIPT_DIR/fm-resolution-source-lib.sh"
+
+DECISION_SOURCE_KIND=
+DECISION_SOURCE=
+DECISION_SOURCE_TIME=
 # shellcheck source=bin/fm-tasks-axi-lib.sh
 # shellcheck disable=SC1091
 . "$SCRIPT_DIR/fm-tasks-axi-lib.sh"
@@ -256,6 +264,9 @@ PARENT_HOLD_PUBLISHED=0
 publish_parent_hold() {  # <task-id> <occurrence> <verb> <note>
   local id=$1 occurrence=$2 verb=$3 note=$4 rc=0
   PARENT_HOLD_PUBLISHED=0
+  if [ "$verb" = resolved ] && [ -n "$DECISION_SOURCE_KIND" ]; then
+    note="$note $(fm_resolution_source_note "$DECISION_SOURCE_KIND" "$DECISION_SOURCE" "$DECISION_SOURCE_TIME")"
+  fi
   fm_parent_channel_report "$FM_HOME" "$STATE" \
     "$verb [key=captain-hold-$id-$occurrence]: captain hold $id: $(fm_parent_channel_clean_note "$note")" || rc=$?
   case "$rc" in
@@ -481,6 +492,7 @@ body_has_resolution_record() {  # <task-body>
     *"Resolution recorded by fm-captain-hold."*"Captain decision:"*) return 0 ;;
     *"Resolution recorded by fm-decision-hold."*"Captain decision:"*) return 0 ;;
     *"Resolution recorded by fm-captain-hold."*"Reconciliation evidence:"*) return 0 ;;
+    *"Resolution recorded by fm-captain-hold."*"Resolution decision:"*) return 0 ;;
   esac
   return 1
 }
@@ -528,12 +540,28 @@ closed_answer_replay_mode_compatible() {  # <mode> <task-body>
 
 # The record's label is what keeps an evidence-backed reconciliation from
 # reading as the captain's own words. `reconciled` closes a call that went moot
-# and carries verified evidence; every other mode carries what the captain said.
+# and carries verified evidence; other modes keep the declared source distinct.
 resolution_block() {  # <mode>
-  local label='Captain decision:'
+  local label='Resolution decision:'
+  [ "$DECISION_SOURCE_KIND" != user ] || label='Captain decision:'
   [ "$1" != reconciled ] || label='Reconciliation evidence:'
-  printf 'Resolution recorded by fm-captain-hold.\nDecision digest: %s\nResolution mode: %s\n\n%s\n%s\n' \
-    "$DECISION_DIGEST" "$1" "$label" "$DECISION_TEXT"
+  printf 'Resolution recorded by fm-captain-hold.\nDecision digest: %s\nResolution mode: %s\n' "$DECISION_DIGEST" "$1"
+  fm_resolution_source_record "$DECISION_SOURCE_KIND" "$DECISION_SOURCE" "$DECISION_SOURCE_TIME"
+  printf '\n%s\n%s\n' "$label" "$DECISION_TEXT"
+}
+
+# New records bind replays to their declared source as well as their words.
+# Historical records have no source fields and retain their existing replay
+# rules. Never manufacture attribution while reading an old record.
+resolution_source_matches() { # <shown-body>
+  local body recorded expected
+  body=$(decode_shown_value "$1") || return 1
+  body=${body#*Resolution recorded by fm-}
+  body=${body%%$'\n\n'*}
+  case "$body" in *'Source kind: '*) ;; *) return 0 ;; esac
+  recorded=$(printf '%s\n' "$body" | sed -n '/^Source kind: /p; /^Source reference: /p; /^Source message UTC: /p')
+  expected=$(fm_resolution_source_record "$DECISION_SOURCE_KIND" "$DECISION_SOURCE" "$DECISION_SOURCE_TIME")
+  [ "$recorded" = "$expected" ]
 }
 
 # Durable state of one captain call: an active captain hold (annotations
@@ -1308,12 +1336,16 @@ command_answer() {
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --decision-file) shift; decision_file=${1:-} ;;
+      --source-kind) shift; DECISION_SOURCE_KIND=${1:-} ;;
+      --source) shift; DECISION_SOURCE=${1:-} ;;
+      --source-time) shift; DECISION_SOURCE_TIME=${1:-} ;;
       --release) release=1 ;;
       *) usage >&2; exit 2 ;;
     esac
     shift
   done
   validate_slug task-id "$id"
+  fm_resolution_source_validate "$DECISION_SOURCE_KIND" "$DECISION_SOURCE" "$DECISION_SOURCE_TIME" || exit 1
   if [ "$release" = 1 ] && ! release_attended; then
     fail "task $id stays held: $RELEASE_AWAY_REASON"
   fi
@@ -1329,6 +1361,10 @@ command_answer() {
   state=$(show_field "$show" state)
   hold_kind=$(show_field_value "$show" hold_kind)
   body=$(show_field "$show" body)
+  if body_has_resolution_record "$body" \
+    && [ "$(recorded_decision_digest "$body" || true)" = "$DECISION_DIGEST" ]; then
+    resolution_source_matches "$body" || fail "task $id records a different resolution source"
+  fi
   if [ "$release" = 1 ]; then outcome=released; else outcome=answered; fi
   # The occurrence the parent line names: the record about to be written is
   # one past those already in the body, and a retry names the newest one.
@@ -1497,7 +1533,11 @@ command_binding() {
 # inputs, so the same answer delivered twice is idempotent rather than a
 # conflicting decision.
 keyed_decision_text() {  # <source> <task-id> <answer> <label>
-  printf 'Captain answered this call through %s.\n' "$1"
+  if [ "$DECISION_SOURCE_KIND" = user ]; then
+    printf 'Captain answered this call through %s.\n' "$1"
+  else
+    printf 'Resolution supplied through %s.\n' "$1"
+  fi
   printf 'Task: %s\n' "$2"
   printf 'Answer: %s\n' "$3"
   [ -z "$4" ] || printf 'Answer as shown to the captain: %s\n' "$4"
@@ -1525,6 +1565,8 @@ command_answers() {
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --source) shift; source=${1:-} ;;
+      --source-kind) shift; DECISION_SOURCE_KIND=${1:-} ;;
+      --source-time) shift; DECISION_SOURCE_TIME=${1:-} ;;
       --any-origin) origin=$BINDING_ANY ;;
       --*) usage >&2; exit 2 ;;
       *)
@@ -1537,8 +1579,8 @@ command_answers() {
   if [ -n "$origin" ] && [ "$origin" != "$BINDING_ANY" ]; then
     validate_slug legacy-origin "$origin"
   fi
-  [ -n "$source" ] || fail "--source provenance is required so the durable decision records where the answer came from"
-  source=$(sanitize_field "$source")
+  fm_resolution_source_validate "$DECISION_SOURCE_KIND" "$source" "$DECISION_SOURCE_TIME" || exit 1
+  DECISION_SOURCE=$source
   require_tasks_axi
   tmp=$(umask 077; mktemp "${TMPDIR:-/tmp}/fm-keyed-decision.XXXXXX") || fail "cannot stage the captain decision"
   err=$(umask 077; mktemp "${TMPDIR:-/tmp}/fm-keyed-decision-err.XXXXXX") \
@@ -1620,6 +1662,7 @@ command_answers() {
     recorded_digest=$(recorded_decision_digest "$body" || true)
     recorded_mode=$(recorded_resolution_mode "$body" || true)
     if body_has_resolution_record "$body" \
+      && resolution_source_matches "$body" \
       && { [ "$recorded_digest" = "$digest" ] \
         || { case "$body" in *"Resolution recorded by fm-decision-hold."*) true ;; *) false ;; esac \
           && [ -n "$legacy_digest" ] && [ "$recorded_digest" = "$legacy_digest" ]; }; }; then
@@ -1649,7 +1692,8 @@ command_answers() {
       continue
     fi
     # shellcheck disable=SC2086  # release_flag is empty or a single literal flag.
-    if "$0" answer "$id" --decision-file "$tmp" $release_flag </dev/null >/dev/null 2>"$err"; then
+    if "$0" answer "$id" --decision-file "$tmp" --source-kind "$DECISION_SOURCE_KIND" \
+      --source "$source" --source-time "$DECISION_SOURCE_TIME" $release_flag </dev/null >/dev/null 2>"$err"; then
       # A parent-channel delivery problem is reported on stderr by the answer
       # path even when the close succeeded; keep it visible.
       [ ! -s "$err" ] || cat "$err" >&2
@@ -1831,6 +1875,10 @@ reconcile_close() {
   validate_slug task-id "$id"
   [ -n "$evidence_file" ] || fail "--evidence-file is required; a moot call closes on evidence, never on assertion"
   load_decision "$evidence_file"
+  DECISION_SOURCE_KIND=mechanical
+  DECISION_SOURCE="fm-captain-hold reconcile close: $evidence_file"
+  DECISION_SOURCE_TIME=
+  fm_resolution_source_validate "$DECISION_SOURCE_KIND" "$DECISION_SOURCE" "$DECISION_SOURCE_TIME" || exit 1
   acquire_task_control_lock "$id"
   reconcile_request_read "$id" \
     || fail "task $id has no pending board-created reconcile request"
