@@ -865,7 +865,7 @@ test_already_current_mate_restarts_end_to_end() {
 
   out=$(run_update_in_case "$dir")
 
-  assert_contains "$out" "secondmate sm1: already current" \
+  assert_contains "$out" "Project Director sm1: already current" \
     "the fixture must model a home that needs no advance"
   restart_line=$(printf '%s\n' "$out" | grep '^restart-secondmates:')
   assert_contains "$restart_line" "fm-sm1" \
@@ -911,7 +911,7 @@ test_already_current_unprovable_mate_stays_on_the_nudge_path() {
 
   out=$(run_update_in_case "$dir")
 
-  assert_contains "$out" "secondmate sm1: already current" \
+  assert_contains "$out" "Project Director sm1: already current" \
     "the fixture must model a home that needs no advance"
   restart_line=$(printf '%s\n' "$out" | grep '^restart-secondmates:')
   nudge_line=$(printf '%s\n' "$out" | grep '^nudge-secondmates:')

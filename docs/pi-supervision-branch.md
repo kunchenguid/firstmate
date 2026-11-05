@@ -633,7 +633,7 @@ It sets these limits:
 
 ### Cleanup after task completion
 
-Ordinary cleanup of landed ships and completed Investigators needs no authority relocation; [`bin/fm-branch-prompt.sh`](../bin/fm-branch-prompt.sh) owns the branch's cleanup instructions in both postures, including lease acquisition and refusal reporting.
+Ordinary cleanup of completed Builders and Investigators needs no authority relocation; [`bin/fm-branch-prompt.sh`](../bin/fm-branch-prompt.sh) owns the branch's cleanup instructions in both postures, including lease acquisition and refusal reporting.
 The generated prompt includes the [scout-completion](../.agents/skills/scout-completion/SKILL.md) and [user-hold-lifecycle](../.agents/skills/captain-hold-lifecycle/SKILL.md) policies verbatim so their completion gate reaches hosts without automatic skill loading.
 
 ## Verification
