@@ -1114,6 +1114,41 @@ test_placed_done_gate_reads_the_head_there() {
   pass "hc placement: the done gate reads a placed worker's head on its own machine"
 }
 
+# The clone check accepts a clone there only when its origin is the same remote
+# as this project's origin. Oracle: git URL syntax (git-clone(1) "GIT URLS"):
+# the port selects the server, and the path is the server's to interpret, so
+# only the host name is case-insensitive (RFC 3986 3.2.2), and scp-style
+# user@host:path names the same repository as ssh://user@host/path.
+test_placed_clone_check_matches_only_the_same_remote() {
+  local out rc here there
+  setup_case clone-remote
+  make_repos "$D" proj
+  clone_check_with() {  # <local-origin> <remote-origin>
+    git_q -C "$D/proj" remote set-url origin "$1"
+    git_q -C "$D/remote/code/proj" remote set-url origin "$2"
+    hc_shell 'fm_backend_hc_remote_clone_check fmtest worker-host /fm-remote-root/code/proj "'"$D/proj"'"' 2>&1
+  }
+  while IFS='|' read -r here there; do
+    rc=0; out=$(clone_check_with "$here" "$there") || rc=$?
+    expect_code 0 "$rc" "$here and $there are the same remote: $out"
+  done <<'CASES'
+ssh://git@git.example.com:2222/team/app.git|ssh://git@git.example.com:2222/team/app
+git@git.example.com:team/app.git|ssh://git@git.example.com/team/app.git
+https://git.example.com/team/app/|https://git.example.com/team/app.git
+ssh://git@Git.Example.COM/team/app.git|ssh://git@git.example.com/team/app.git
+CASES
+  while IFS='|' read -r here there; do
+    rc=0; out=$(clone_check_with "$here" "$there") || rc=$?
+    [ "$rc" -ne 0 ] || fail "$here and $there are different remotes and must be refused"
+    assert_contains "$out" "tracks origin '$there'" "the refusal names the clone's origin"
+  done <<'CASES'
+ssh://git@git.example.com:2222/team/app.git|ssh://git@git.example.com:2223/team/app.git
+ssh://git@git.example.com/Team/App.git|ssh://git@git.example.com/team/app.git
+git@git.example.com:Team/App.git|git@git.example.com:team/app.git
+CASES
+  pass "hc placement: the clone check accepts only the same remote, port and path case included"
+}
+
 fm_test_run \
   test_placement_config_is_exact_or_refused \
   test_machine_qualified_records_bind_their_machine \
@@ -1133,6 +1168,7 @@ fm_test_run \
   test_placed_spawn_keeps_its_worktree_when_the_terminal_answer_is_lost \
   test_placed_spawn_failed_add_leaves_a_foreign_worktree \
   test_placed_clone_check_resolves_a_symlinked_projects_path \
+  test_placed_clone_check_matches_only_the_same_remote \
   test_placed_teardown_refuses_unlanded_or_unreachable_work \
   test_placed_teardown_close_failure_on_a_reachable_machine_offers_force \
   test_placed_teardown_removes_landed_work_there \

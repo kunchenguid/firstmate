@@ -527,10 +527,12 @@ EOF
   return 0
 }
 
-# A remote's identity for comparing two clones of one project: host and path,
-# lowercased, without scheme, user, port, or a trailing .git.
+# A remote's identity for comparing two clones of one project: host, port, and
+# path, with only the host lowercased. It drops the scheme, the user, a trailing
+# .git, and a trailing slash, so scp-style user@host:path equals
+# scheme://user@host/path; a different port or path case is a different remote.
 fm_backend_hc_url_key() {  # <url>
-  local u=$1 host rest
+  local u=$1 host=
   u=${u%/}
   u=${u%.git}
   case "$u" in
@@ -538,15 +540,15 @@ fm_backend_hc_url_key() {  # <url>
       u=${u#*://}
       u=${u#*@}
       host=${u%%/*}
-      rest=${u#"$host"}
-      u=${host%%:*}$rest
+      u=${u#"$host"}
       ;;
     *@*:*)
       u=${u#*@}
-      u=${u%%:*}/${u#*:}
+      host=${u%%:*}
+      u=/${u#*:}
       ;;
   esac
-  printf '%s' "$u" | tr '[:upper:]' '[:lower:]'
+  printf '%s%s' "$(printf '%s' "$host" | tr '[:upper:]' '[:lower:]')" "$u"
 }
 
 # fm_backend_hc_remote_clone_check: <clone> on <machine> is a git checkout's
