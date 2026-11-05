@@ -6438,6 +6438,7 @@ ns_valid_via() {
   mode=$(stat -c '%a' "$3" 2>/dev/null || /usr/bin/stat -f '%Lp' "$3")
   uid=$(stat -c '%u' "$3" 2>/dev/null || /usr/bin/stat -f '%u' "$3")
   printf '#!/usr/bin/env bash\nprintf "%%s\\n" %q\n' "$1" > "$fb/uname"
+  # shellcheck disable=SC2016 # $2 is the generated stub's own argument.
   printf '#!/usr/bin/env bash\ncase "$2" in %%a) printf "%%s\\n" %q ;; %%u) printf "%%s\\n" %q ;; *) exit 1 ;; esac\n' "$mode" "$uid" > "$fb/stat"
   printf '#!/usr/bin/env bash\nexit 0\n' > "$fb/cygpath"
   printf '#!/usr/bin/env bash\nprintf "C:/Program Files/Git on / type ntfs (binary,noacl,auto)\\n"\nprintf "C:/Users/u/AppData/Local/Temp on /tmp type ntfs (%%s)\\n" %q\n' "$2" > "$fb/mount"
