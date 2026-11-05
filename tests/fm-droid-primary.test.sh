@@ -6,9 +6,77 @@ set -u
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 SETTINGS="$ROOT/.factory/settings.json"
+CLAUDE_SETTINGS="$ROOT/.claude/settings.json"
 TMP_ROOT=$(fm_test_tmproot fm-droid-primary)
 
 [ -f "$SETTINGS" ] || fail "tracked Droid primary settings are missing"
+[ -f "$CLAUDE_SETTINGS" ] || fail "tracked Claude primary settings are missing"
+
+test_claude_shaped_hook_contract() {
+  local droid_root="$TMP_ROOT/droid-ab" claude_root="$TMP_ROOT/claude-ab"
+  local event script payload droid_args claude_args expected_status expected_out expected_err
+  local droid_log="$TMP_ROOT/droid-ab.log" claude_log="$TMP_ROOT/claude-ab.log"
+  local droid_out="$TMP_ROOT/droid-ab.out" claude_out="$TMP_ROOT/claude-ab.out"
+  local droid_err="$TMP_ROOT/droid-ab.err" claude_err="$TMP_ROOT/claude-ab.err"
+  local droid_status claude_status expected_record
+  make_ab_probe_root "$droid_root"
+  make_ab_probe_root "$claude_root"
+
+  for event in SessionStart PreToolUse Stop; do
+    case "$event" in
+      SessionStart)
+        script=fm-sessionstart-run.sh
+        payload='{"hook_event_name":"SessionStart","source":"startup"}'
+        droid_args='' claude_args='' expected_status=0
+        expected_out=SHARED_SESSIONSTART_OUTPUT expected_err=''
+        ;;
+      PreToolUse)
+        script=fm-arm-pretool-check.sh
+        payload='{"hook_event_name":"PreToolUse","tool_name":"Execute"}'
+        droid_args=--primary-only claude_args=--claude expected_status=21
+        expected_out='' expected_err=SHARED_PRETOOL_BLOCK
+        ;;
+      Stop)
+        script=fm-turnend-guard.sh
+        payload='{"hook_event_name":"Stop","stop_hook_active":false}'
+        droid_args='' claude_args=--claude expected_status=22
+        expected_out='' expected_err=SHARED_STOP_BLOCK
+        ;;
+    esac
+
+    : > "$droid_out"
+    : > "$claude_out"
+    : > "$droid_err"
+    : > "$claude_err"
+    set +e
+    run_ab_registered_hook "$SETTINGS" "$event" DROID_PROJECT_DIR "$droid_root" "$droid_log" "$payload" \
+      > "$droid_out" 2> "$droid_err"
+    droid_status=$?
+    run_ab_registered_hook "$CLAUDE_SETTINGS" "$event" CLAUDE_PROJECT_DIR "$claude_root" "$claude_log" "$payload" \
+      > "$claude_out" 2> "$claude_err"
+    claude_status=$?
+    set -e
+
+    expect_code "$expected_status" "$droid_status" "Droid $event registration must preserve shared-owner status"
+    expect_code "$expected_status" "$claude_status" "Claude $event registration must preserve shared-owner status"
+    [ "$(cat "$droid_out")" = "$expected_out" ] \
+      || fail "Droid $event registration did not preserve shared-owner stdout"
+    [ "$(cat "$claude_out")" = "$expected_out" ] \
+      || fail "Claude $event registration did not preserve shared-owner stdout"
+    [ "$(cat "$droid_err")" = "$expected_err" ] \
+      || fail "Droid $event registration did not preserve shared-owner stderr"
+    [ "$(cat "$claude_err")" = "$expected_err" ] \
+      || fail "Claude $event registration did not preserve shared-owner stderr"
+
+    expected_record=$(printf '%s\t%s\t%s' "$script" "$droid_args" "$payload")
+    grep -Fqx "$expected_record" "$droid_log" \
+      || fail "Droid $event registration did not execute $script with its expected arguments and stdin"
+    expected_record=$(printf '%s\t%s\t%s' "$script" "$claude_args" "$payload")
+    grep -Fqx "$expected_record" "$claude_log" \
+      || fail "Claude $event registration did not execute $script with its expected arguments and stdin"
+  done
+  pass "Droid SessionStart, PreToolUse, and blocking Stop retain Claude's shared hook owners"
+}
 
 test_registration_inventory() {
   jq -e '
@@ -43,6 +111,31 @@ esac
 SH
     chmod +x "$dir/bin/$script"
   done
+}
+
+make_ab_probe_root() {
+  local dir=$1 script
+  mkdir -p "$dir/bin"
+  for script in fm-sessionstart-run.sh fm-arm-pretool-check.sh fm-turnend-guard.sh; do
+    cat > "$dir/bin/$script" <<'SH'
+#!/usr/bin/env bash
+payload=$(cat)
+printf '%s\t%s\t%s\n' "${0##*/}" "$*" "$payload" >> "$HOOK_AB_LOG"
+case "${0##*/}" in
+  fm-sessionstart-run.sh) printf '%s\n' SHARED_SESSIONSTART_OUTPUT ;;
+  fm-arm-pretool-check.sh) printf '%s\n' SHARED_PRETOOL_BLOCK >&2; exit 21 ;;
+  fm-turnend-guard.sh) printf '%s\n' SHARED_STOP_BLOCK >&2; exit 22 ;;
+esac
+SH
+    chmod +x "$dir/bin/$script"
+  done
+}
+
+run_ab_registered_hook() {
+  local settings=$1 event=$2 project_var=$3 root=$4 log=$5 payload=$6 command
+  command=$(jq -r --arg event "$event" '.hooks[$event][0].hooks[0].command' "$settings")
+  printf '%s' "$payload" \
+    | env "$project_var=$root" HOOK_AB_LOG="$log" GROK_AGENT= GROK_HOOK_EVENT= bash -c "$command"
 }
 
 run_registered_hook() {  # <event> <payload> <root> <log>
@@ -132,6 +225,7 @@ test_pretool_registration_is_inert_in_crewmate_worktrees() {
   pass "Droid PreToolUse registration denies only in genuine primary homes"
 }
 
+test_claude_shaped_hook_contract
 test_registration_inventory
 test_commands_anchor_and_preserve_transport
 test_pretool_registration_is_inert_in_crewmate_worktrees

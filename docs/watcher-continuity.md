@@ -167,6 +167,7 @@ Whenever restoration succeeds, the fleet is protected before the model handles t
 When restoration does not succeed, the model is never left blind.
 
 
+
 ### Claude handling successor
 
 Claude's Stop hook also starts one handling successor before notification.
@@ -567,6 +568,7 @@ It also covers generation-claim single-flight, stuck-claim supersession, superse
 The goal is continuity without a Pi, omp, or OpenCode model-memory re-arm step.
 No zero-latency guarantee is claimed, because lock verification, watcher startup, and bounded retry delays remain deliberate safety work.
 OpenCode support targets persistent TUI sessions rather than headless `opencode run`.
+
 
 The other harnesses rely on these mechanisms:
 

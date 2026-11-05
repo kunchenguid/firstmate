@@ -68,6 +68,7 @@
 #                rounded typed model/effort title with ` · always-approve`; Grok 1.0.5's
 #                typed title also permits its proven three-column overhang.
 
+
 #   bare       - an agent prompt glyph row with no border at all (claude `❯`,
 #                codex `›`, muse `⟩`, cursor `→`). The agent glyph is itself the container
 #                proof; a bare SHELL glyph (`>` `$` `%` `#`) never is.
@@ -1879,6 +1880,7 @@ _fm_composer_row_is_composer_furniture() {  # <trimmed-row> <proof-glyph>
     "${FM_COMPOSER_MODE_HINT_RE:-$FM_COMPOSER_MODE_HINT_RE_DEFAULT}" sensitive && return 0
   fm_composer_leading_agent_glyph_var glyph "$row" || return 1
   [ -n "$proof" ] && [ "$glyph" != "$proof" ]
+
 }
 
 # _fm_composer_locate_footer_zone: THE composer footer zone of <plain> (see THE

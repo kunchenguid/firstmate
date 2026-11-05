@@ -287,6 +287,50 @@ Its relevant exact output rendered the placeholder as `\e[7m\e[39mE\e[0;2mnter t
 The reverse-video `E` is the parked cursor and `\e[0;2m` de-emphasizes the remaining ghost text, while the typed capture contains no dim styling around `DROID_DOC_TYPED`.
 No other idle ghost or placeholder was observed.
 
+## Away-mode delivery under Herdr
+
+Date: 2026-09-04.
+Platform: macOS arm64, Droid 0.212.0, Herdr 0.8.0.
+
+The opt-in regression is:
+
+```sh
+FM_DROID_AFK_HERDR_E2E=1 \
+  HERDR_LAB_HELPER=/Users/dela/Developer/firstmate/bin/fm-herdr-lab.sh \
+  tests/fm-droid-afk-herdr-live-e2e.test.sh
+```
+
+The live idle footer had advanced from `[⏱ 9s]` to `[⏱ 5s, context: 1%]`.
+The pre-fix shared classifier returned `unknown`, and deleting only the context field from that capture returned `empty`.
+The fix therefore extends only the shared exact Droid footer predicate, while malformed and unrelated following rows remain `unknown` and pending typed text remains `pending`.
+
+The bounded live scenario established this sequence before cleanup:
+
+1. A test-local `SessionStart` hook ran and recorded its startup payload; the original response probe was circular and did not independently confirm that hook output reached model context.
+2. Ordinary `fm-send` submitted a prompt, native Herdr state became busy, and a test-local `UserPromptSubmit` hook recorded it against session `ef7b416e-6f1f-46cb-b175-3d882b486894`.
+3. A pending captain draft remained byte-visible and unsubmitted while the decision stayed buffered and the max-defer path emitted its active alert.
+4. Clearing the draft caused the exact `FIRSTMATE_OP: v1 away-supervisor` prompt to reach `UserPromptSubmit` on that same interactive session and the escalation buffer to clear.
+5. A plain dead-shell pane remained `unknown` rather than borrowing Droid's composer exception.
+6. The child scenario exited before the outer process called the guarded teardown helper, and the named non-default lab was then absent.
+
+The bounded recent-pane capture did not reliably retain the operational prompt after submission, so same-session `UserPromptSubmit` is the durable delivery assertion and rendered viewport retention remains narrowly unproven.
+The regression's five-second marker-retirement wait has portable coverage but was not rerun live in this refresh.
+
+The same lab proved `droid exec -s <session-id>` can continue the durable Droid session headlessly but does not steer the already-running interactive TUI pane.
+It is therefore not an away-delivery transport.
+The shared verified composer path remains authoritative.
+
+The [Factory hook reference](https://docs.factory.ai/harness/hooks) documents blocking Stop continuation and the available SessionStart, UserPromptSubmit, PreToolUse, Stop, and PreCompact events, but no Claude `asyncRewake` field.
+The retained hierarchy is therefore tracked SessionStart recovery, one bounded shared Stop handoff, and disk durability plus compact-sourced SessionStart across compaction.
+The test-local `UserPromptSubmit` hook proved same-session receipt, but its original response probe did not independently prove hook-output context.
+The corrected opt-in guard gives SessionStart and UserPromptSubmit distinct hook-only response values, and those assertions remain pending the next captain-authorized live refresh.
+Firstmate does not register UserPromptSubmit as a durable-event catch-up handler; no tracked `PreCompact` path was added.
+An indefinitely blocking Stop hook would prevent captain input and is outside the contract.
+
+`tests/fm-droid-primary.test.sh` executes the registered Droid and Claude SessionStart, PreToolUse, and Stop commands against observable fixture owners, then compares their stdin, arguments, stdout, stderr, and exit-status transport through `fm-sessionstart-run.sh`, `fm-arm-pretool-check.sh`, and `fm-turnend-guard.sh` respectively.
+A real Claude primary under Herdr accepted a composer injection through the same shared classification and verified-submit path.
+No Droid-only composer, submit, or background-delivery owner was added.
+
 ## Refresh
 
 Run the opt-in guard after a Droid upgrade:

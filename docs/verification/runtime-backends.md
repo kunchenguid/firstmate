@@ -2244,6 +2244,9 @@ The current catch-up reporting boundary is pinned by `tests/fm-afk-return.test.s
 The fixture captures submitted input through Pi's `input` extension hook, so the lab agent directory needs no provider credentials.
 The daemon injection transport into a live composer keeps its coverage in `tests/fm-afk-inject-herdr-e2e.test.sh` for the harnesses that still run the daemon, and the dedicated Herdr daemon workspace topology is covered by `tests/fm-afk-launch.test.sh` and preserves the captain tab's pane count.
 
+The Droid/Herdr away-mode path was refreshed on 2026-09-04 with Droid 0.212.0 and Herdr 0.8.0.
+[`droid-primary.md`](droid-primary.md#away-mode-delivery-under-herdr) owns the exact command, causal and disconfirming evidence, pending-text and max-defer results, same-session delivery signal, cleanup proof, shared-hook comparison, and backend applicability review.
+
 ## Zellij
 
 The current compatibility floor and latest verification are Zellij 0.44.0 with `jq` on macOS aarch64.

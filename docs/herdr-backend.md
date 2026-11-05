@@ -785,7 +785,10 @@ If the ANSI capture ever fails, the plain fallback declares itself unstyled.
 The classifier then degrades a glyph row carrying trailing text to `unknown` instead of misreading ghost suggestions as typed input.
 That safely defers injection and eventually raises the wedge alarm.
 
+Droid's cursorless bordered composer also admits its elapsed footer with an optional context percentage.
+
 ### Away-mode injection
+
 
 A bare shell prompt is never an empty agent composer.
 Away-mode injection proceeds only on an affirmative `empty` result, never on unknown.
@@ -937,6 +940,7 @@ There is still one watcher process; the event reader is a bounded child of that 
 [Away-mode supervisor configuration](configuration.md#away-mode-supervisor-backend-fm_supervisor_backend--fm_supervisor_target) owns supported backends and detection.
 For Herdr, target existence, native state, capture, composer state, and verified submit all route through the shared backend dispatcher and the explicit named-session CLI owner.
 The pane-independent max-defer alert is configured in [`wedge-alarm.md`](wedge-alarm.md).
+Droid uses the same shared Herdr composer and submit path; the `afk` skill owns its evaluated background-delivery hierarchy, and [`verification/droid-primary.md`](verification/droid-primary.md#away-mode-delivery-under-herdr) owns the live proof.
 
 ### Where the daemon runs
 
@@ -1016,6 +1020,7 @@ tests/fm-herdr-groups.test.sh
 tests/fm-herdr-attached-viewer-live-e2e.test.sh
 tests/fm-afk-inject-herdr-e2e.test.sh
 tests/fm-afk-pi-herdr-return-e2e.test.sh
+tests/fm-droid-afk-herdr-live-e2e.test.sh
 ```
 
 Real Herdr tests use the named lab helper and default-session tripwire.

@@ -519,6 +519,7 @@ commandcode_screen() {  # <composer-row-kind idle|typed>
     printf '%s[39m\342\235\257 half typed captain text%s[7m %s[0m\n' "$e" "$e" "$e"
   fi
   printf '%s[38;2;138;148;168m%s\n%s[39m  ? for shortcuts\n\n\n' "$e" "$rule" "$e"
+
 }
 open_commandcode_pane() {  # <window> <binary> <idle|typed>
   local window=$1 binary=$2 kind=$3 i=0
