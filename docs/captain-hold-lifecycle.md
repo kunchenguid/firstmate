@@ -145,7 +145,7 @@ Scout teardown calls the read-only `verify` subcommand after checking for the re
 - No keyed status decision opened after the last `complete`.
 
 A keyed status decision opened after the last `complete` makes `verify` fail, and re-running `complete` is the repair.
-The `--force` path remains the explicit captain-approved discard escape hatch.
+[`bin/fm-teardown.sh`'s header](../bin/fm-teardown.sh) owns the explicitly authorized bypass of this completion check and the separate scout artifact-preservation gate.
 
 ## Cleanup never closes a captain call
 
