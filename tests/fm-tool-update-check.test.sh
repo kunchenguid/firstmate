@@ -1222,6 +1222,40 @@ test_malformed_registry_is_reported_not_ignored() {
   pass "a malformed registry is reported instead of quietly skipped"
 }
 
+test_a_moving_upstream_tip_is_reported_once() {
+  local home work out other
+  home=$(make_home git-moving)
+  work=$(git_fixture git-moving-repo)
+  git -C "$work" reset -q --hard HEAD~2
+  write_config "$home" "{\"tools\":[{\"name\":\"firstmate\",\"git\":{\"repo\":\"$work\",\"remote\":\"origin\",\"branch\":\"main\"}}]}"
+  out="$home/out.txt"
+  run_check "$home" "$PATH" "$out"
+  assert_contains "$(cat "$out")" "update available" "the pending git update was not reported"
+  # Upstream advances with a commit this clone has never fetched, so the old
+  # finding text embedded a new sha.
+  other="$TMP_ROOT/git-moving-other"
+  git clone -q "$TMP_ROOT/git-moving-repo.git" "$other" 2>/dev/null
+  printf 'x\n' > "$other/f9"
+  git -C "$other" add f9
+  git -C "$other" commit -qm nine
+  git -C "$other" push -q origin HEAD:main
+  run_check "$home" "$PATH" "$out"
+  [ ! -s "$out" ] || fail "a moving upstream tip re-reported one pending update: $(cat "$out")"
+  # Fetching changes the report from an unknown tip to an exact behind-count.
+  git -C "$work" fetch -q origin
+  run_check "$home" "$PATH" "$out"
+  [ ! -s "$out" ] || fail "fetching re-reported one pending update: $(cat "$out")"
+
+  # Clearing the condition must allow a later pending update to be reported.
+  git -C "$work" reset -q --hard origin/main
+  run_check "$home" "$PATH" "$out"
+  [ ! -s "$out" ] || fail "a current clone still reported an update: $(cat "$out")"
+  git -C "$work" reset -q --hard HEAD~1
+  run_check "$home" "$PATH" "$out"
+  assert_contains "$(cat "$out")" "1 commit behind" "a returning git update was suppressed"
+  pass "a pending git update is reported once while the upstream tip moves"
+}
+
 test_findings_are_reported_once_until_they_change() {
   local home stale fresh out path
   home=$(make_home no-nag)
@@ -1620,6 +1654,7 @@ test_a_stalled_repository_probe_is_not_reported_as_not_a_repository
 test_absent_registry_is_silent
 test_malformed_registry_is_reported_not_ignored
 test_findings_are_reported_once_until_they_change
+test_a_moving_upstream_tip_is_reported_once
 test_an_overlong_report_says_it_was_cut
 test_a_finding_past_the_cut_is_still_reported
 test_probes_are_skipped_between_intervals
