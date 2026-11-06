@@ -4,8 +4,9 @@
 #
 # This file is the single owner of the one-key .env read: the Relay pairing
 # token (bin/fm-x-lib.sh and its callers), dispatch provider settings, and
-# optional typesafe.ai or OpenRouter dispatch keys (bin/fm-dispatch-resolve.sh)
-# resolve through fmx_env_get, so $FM_HOME/.env uses one parsing rule.
+# optional typesafe.ai, OpenRouter, System One-host, or OpenAI dispatch keys
+# (bin/fm-dispatch-resolve.sh) resolve through fmx_env_get, so $FM_HOME/.env
+# uses one parsing rule.
 # (bin/fm-mail.sh loads its whole .env block itself under the same env-wins
 # contract.) The value is printed to the caller's command substitution only;
 # nothing is logged.

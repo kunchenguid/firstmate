@@ -255,6 +255,66 @@ tests/fm-busy-adapter-wiring.test.sh
 tests/fm-crew-state.test.sh
 ```
 
+## No-mistakes run ledger and terminal run fields
+
+The terminal-reading precedence rules in `bin/fm-crew-state.sh`, which bound both failed and done readings, read the run ledger's rows and a terminal run's `pr` field, so both were confirmed against the installed CLI on 2026-09-04 with no-mistakes v1.60.2 (eb4e379).
+
+Column layout and newest-first ordering:
+
+```sh
+no-mistakes runs --limit 5
+```
+
+Observed result, abbreviated to two rows:
+
+```
+  cancelled    fm/fm-afk-inject-never-delivers eebd9498  2026-08-31 22:48  https://github.com/kunchenguid/firstmate/pull/3050
+  completed    fm/fm-stooddown-worker-false-wedge-alarms b387086f  2026-08-30 10:03  https://github.com/kunchenguid/firstmate/pull/3281
+```
+
+The date column stamps a run's START, not its end:
+
+```sh
+ls -la ~/.no-mistakes/logs/01M186HDY76G4RJHW5Z7CFHQDB
+```
+
+Observed result: `intent.log`, the run's first step, has mtime `30 Aug 10:03`, matching that run's ledger date `2026-08-30 10:03`, while `ci.log`, its last step, has mtime `30 Aug 11:13`.
+The column therefore cannot order a status-log record against the moment a run finished, which is why the reader orders the crew's own word against the run not at all and answers unknown where currency cannot be proven.
+
+A terminal run that never reached its `pr` step emits no `pr` field at all:
+
+```sh
+no-mistakes axi status --run 01M14G3F9BEYBSYSZRVRQJ9XYT
+```
+
+Observed result: `status: failed`, `review,failed` with `test` through `ci` still pending, `outcome: failed`, and no `pr:` line at all.
+The completed run above reports `pr: "https://github.com/kunchenguid/firstmate/pull/3281"` in the same field.
+That absence is what lets a terminal outcome take its pull-request identity from the same record as its state instead of an older recorded one.
+
+The ledger's first column is the RUN STATUS, not the axi outcome, established on 2026-09-19 against the installed no-mistakes v1.72.0 (9fcc865):
+
+```sh
+no-mistakes runs --limit 400 | awk 'NF{print $1}' | sort | uniq -c
+```
+
+Observed result: across the 313 stored runs the column holds only `running`, `completed`, `failed`, and `cancelled`.
+`checks-passed` is an axi OUTCOME and never appears in that column; a run still at its ci step, which has no outcome yet, reads `running` there.
+
+Every captured run record agrees with that column in its own `status:` field - `failed.toon` reports `status: failed`, `superseded.toon` `status: cancelled`, `completed.toon` `status: completed` - so the record already carries the ledger's vocabulary once.
+The reader therefore derives the status it compares against from that field alone, normalising the live words (`ci`, `running`, `fixing`, `awaiting_approval`, `fix_review`) to `running`, rather than keeping a second mapping keyed on the outcome word.
+
+That derivation change removes a second definition; it is not observable, and the shapes were traced rather than assumed:
+a record carrying any outcome is terminal under the run-selection contract, so beside a still-live ledger row it is answered `unknown` by the liveness cross-check before the comparison is reached, on both the inventory and the ledger-fallback path.
+Where the comparison IS reached, the overview row and the record report the same run from the same store and therefore the same status word, which is the word the derivation now uses.
+The only input that separates the two derivations is a record whose `status:` disagrees with its own overview row, which the CLI does not produce - so no regression test can distinguish them, and none is claimed.
+
+Deterministic entry points:
+
+```sh
+tests/fm-crew-state.test.sh
+tests/fm-inactive-reconcile.test.sh
+```
+
 ## Turn-end guard
 
 The blocking and bounded-follow-up mechanisms were validated across seven harnesses on 2026-07-08 through 2026-09-21, with Claude's replacement Stop-owned path revalidated on 2026-09-21, Cursor's stop-hook park validated on 2026-08-13, and omp's blocking `session_stop` hook validated on 2026-09-05.
@@ -734,7 +794,10 @@ The Herdr return guard needs the operator's login shell: under `SHELL=/bin/bash`
 Deterministic entry points:
 
 ```sh
+tests/fm-supervision-host-drain.test.sh
 tests/fm-supervision-host.test.sh
+tests/fm-supervision-host-park.test.sh
+tests/fm-supervision-host-hook.test.sh
 tests/fm-claude-stop-autoarm.test.sh
 tests/fm-afk-launch.test.sh
 tests/fm-supervision-instructions.test.sh
@@ -787,7 +850,10 @@ The Grok stop guard was last verified on 0.2.112 and has drifted from Grok 1.0.4
 Deterministic entry points:
 
 ```sh
+tests/fm-supervision-host-drain.test.sh
 tests/fm-supervision-host.test.sh
+tests/fm-supervision-host-park.test.sh
+tests/fm-supervision-host-hook.test.sh
 tests/fm-wake-queue.test.sh
 tests/fm-cursor-primary.test.sh
 tests/fm-pi-watch-extension.test.sh
@@ -859,7 +925,10 @@ ok - supervision host live (2.1.283 (Claude Code)): a real engine handles and re
 Deterministic entry points:
 
 ```sh
+tests/fm-supervision-host-drain.test.sh
 tests/fm-supervision-host.test.sh
+tests/fm-supervision-host-park.test.sh
+tests/fm-supervision-host-hook.test.sh
 tests/fm-afk-return.test.sh
 tests/fm-branch-supervision.test.sh
 ```
@@ -896,3 +965,48 @@ Observed output:
 ```
 
 The safe command-channel contract is covered without a notification by `tests/fm-daemon.test.sh`: the summary reaches both `$1` and stdin, every channel is process-group bounded, and a failed channel falls through.
+
+## Codex native model-free park (2026-10-19)
+
+Verified on macOS arm64 with `codex-cli 0.163.0` in an isolated named Herdr lab, using the tracked project hooks and an embedded native TUI:
+
+```sh
+codex --no-daemon --no-alt-screen --dangerously-bypass-hook-trust \
+  -a never -s danger-full-access -C "$FM_HOME" '<isolated supervision smoke prompt>'
+codex queue --thread "$SESSION_ID" --message '<real watcher wake>'
+```
+
+The lab supplied a private `CODEX_HOME`, a disposable marked `FM_HOME`, and guarded Herdr lifecycle operations.
+The native SessionStart payload's transcript identified `originator=codex-tui`; the session registered before its first model turn.
+A synchronous Stop probe parked without tokens but delayed typed input until Escape.
+An asynchronous Stop probe allowed immediate input, but its exit status alone did not wake an idle model.
+Native `codex queue` delivered to the embedded TUI with no daemon running, providing the wake path used by `bin/fm-codex-stop-park.sh`.
+
+Provider calls were counted as unique `token_usage_record.payload.response_id` values in the native session JSONL, using half-open UTC windows and excluding startup.
+
+| Protocol | UTC idle window | Duration | Provider calls | Input tokens | Cached input tokens |
+|---|---|---:|---:|---:|---:|
+| Separate 180-second foreground checkpoints | 01:04:00 to 01:14:00 | 600 seconds | 25 | 419,305 | 406,656 |
+| Native asynchronous park | 01:36:30 to 01:46:30 | 600 seconds | 0 | 0 | 0 |
+
+Both windows were on 2026-10-19 with `gpt-6.1-sol`, low effort.
+The after window contained no task starts, and the same watcher survived 31 deliberately short host boundaries over the complete parked interval.
+Those boundaries were logged as `quiet-boundary` and retained the recovery generation without producing model input.
+The smaller lab context means the token totals are not a forecast of production fleet savings.
+
+An authenticated custom check then produced `LAB_REAL_EVENT`, which reached the model through the native queue.
+The model drained first and executed the exact printed `--ack-through 1 --recovery-generation <generation>` command; the queue was empty afterward and a replacement watcher was live.
+A SIGKILL of the lab's identity-verified park removed its old arm/host/watcher subtree; on the next user turn the model received a recovery notice, drained and acknowledged the recovery generation, and restored supervision.
+A healthy-park user message was processed without Escape or waiting for a checkpoint.
+Ordinary `/quit` also removed the park, host, arm and watcher: the watcher's owner-identity self-expiry covers native teardown that kills the hook and its timeout wrapper together.
+
+The synchronous guard waits up to fifty 0.2-second polls, about 10 seconds, for the asynchronous hook to publish its live claim before latching the session to foreground fallback.
+The retained successful native macOS arm64 Codex CLI 0.163.0 lab sessions recorded no fallback latch under the earlier grace of about 2 seconds (ten polls); 10 seconds is 5x that observation bound and the approved ceiling.
+This is derived from those no-latch observations, not from measured per-Stop minimum, median or maximum values or a cold-shell latency distribution.
+The retained native rollouts carry no paired hook-start and claim-publication timestamps, so no such measurement is claimed and the wait is not a strict wall-clock guarantee.
+
+The native mode is selected only in a home that opts in with `config/codex-stop-park`, for the verified CLI version and a registered TUI session owning this home's lock.
+Unverified sessions retain the foreground protocol, whose existing live guard remains `FM_CODEX_LIVE_E2E=1 tests/fm-codex-continuity-live-e2e.test.sh`.
+The native proof above was a real adapter smoke; it did not add a test case or modify the foreground live guard.
+`tests/fm-codex-stop-park.test.sh` separately covers the opt-in and version gates, single-flight claim, fallback latch, final-result delivery when supervision ends, owner-gone watcher exit and retained quiet boundary against a fake `codex`.
+[The Codex protocol](../supervision-protocols/codex.md) owns operating instructions; script headers own registration, failure fallback and process ownership.
