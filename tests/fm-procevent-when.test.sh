@@ -108,6 +108,30 @@ out=$(when "$H" retire arm-test)
 assert_contains "$out" "retired: when-arm-test" "retire is idempotent"
 pass "arm binds, refuses duplicates, and retire cleans up"
 
+# --- retire accepts the exact source id that list prints ---------------------
+H="$TMP_ROOT/h-retire-listed"; new_home "$H"
+when "$H" arm listed --condition false --action true >/dev/null
+listed=$(pe "$H" list | awk '$2 == "when" {print $1}')
+assert_contains "$listed" "when-listed" "list prints the prefixed source id"
+out=$(when "$H" retire "$listed")
+assert_contains "$out" "retired: when-listed" "retire accepts the listed source id"
+assert_absent "$H/state/when/when-listed.spec" "the listed id retires the real spec"
+assert_absent "$H/state/procevent/when-listed.source" "the listed id drops the real registration"
+if when "$H" retire when-missing >"$TMP_ROOT/missing.out" 2>"$TMP_ROOT/missing.err"; then
+  fail "retire must refuse a listed id that matches no watch"
+fi
+assert_grep "no watch registered as when-missing" "$TMP_ROOT/missing.err" "the refusal names the missing id"
+when "$H" arm when-named --condition false --action true >/dev/null
+out=$(when "$H" retire when-when-named)
+assert_contains "$out" "retired: when-when-named" "a watch named when-<x> retires by its listed id"
+assert_absent "$H/state/procevent/when-when-named.source" "the doubled listed id drops its registration"
+long_name=$(printf '%059d' 1)
+when "$H" arm "$long_name" --condition false --action true >/dev/null
+out=$(when "$H" retire "when-$long_name")
+assert_contains "$out" "retired: when-$long_name" "retire accepts the longest listed source id"
+assert_absent "$H/state/when/when-$long_name.spec" "retire removes a maximum-length listed watch"
+pass "retire accepts the exact source id list prints"
+
 # --- concurrent arms publish exactly one complete registration ---------------
 H="$TMP_ROOT/h-concurrent-arm"; new_home "$H"
 (
