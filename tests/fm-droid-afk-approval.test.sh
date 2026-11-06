@@ -288,6 +288,30 @@ test_transferred_hold_wins_and_status_is_never_reopened() {
   pass "an active captain hold wins and the status ledger is never reopened behind it"
 }
 
+test_unrelated_hold_does_not_capture_status_decision() {
+  local home rc=0 before show
+  home=$(make_home owner-collision)
+  seed_task "$home" review 'needs-decision [key=approval]: approve review'
+  seed_task "$home" release 'working: release prep'
+  (cd "$home" && tasks-axi add approval 'Release approval' --kind fix --repo fixture) >/dev/null
+  HOLD="$ROOT/bin/fm-captain-hold.sh" holds "$home" hold approval --origin release --reason 'release decision' >/dev/null ||
+    fail "could not create unrelated hold"
+  before=$(cd "$home" && tasks-axi show approval --full)
+  date +%s >"$home/state/.afk"
+  ask "$home" '1. [question] Approve review?
+[firstmate-decision origin=review key=approval state=existing]
+[option] Yes' || rc=$?
+  assert_denied "$rc" "$home" 'a question whose key collides with an unrelated hold'
+  assert_contains "$(deny_message "$home")" 'question 1 status review/approval' 'question did not stay with its status owner'
+  show=$(cd "$home" && tasks-axi show approval --full)
+  [ "$show" = "$before" ] || fail "the unrelated hold was modified or resolved"
+  # shellcheck disable=SC1091
+  . "$ROOT/bin/fm-classify-lib.sh"
+  assert_contains "$(status_open_decisions "$home/state/review.status")" "$(printf 'approval\tneeds-decision')" \
+    'the review decision was incorrectly transferred'
+  pass "a colliding unrelated hold cannot capture or close a status decision"
+}
+
 test_status_question_moves_to_hold_before_transfer_closes() {
   local home rc=0 listing
   home=$(make_home transfer-evidence)
@@ -426,7 +450,7 @@ test_open_questions_reports_unsafe_status_owners() {
 # Ownership must come from the caller. Anything less is rejected loudly rather
 # than guessed from a topic, the question text, or the session.
 test_unbound_and_malformed_questions_are_rejected_without_mutation() {
-  local home rc=0 before
+  local home rc=0 before questionnaire
   home=$(make_home rejection)
   seed_task "$home" review 'needs-decision [key=helper-versions]: restrict helper equality to MAS'
   date +%s >"$home/state/.afk"
@@ -441,6 +465,18 @@ test_unbound_and_malformed_questions_are_rejected_without_mutation() {
     'an unbound question was not rejected explicitly'
   assert_contains "$(deny_message "$home")" 'has no [firstmate-decision origin=' \
     'the rejection did not name the missing requirement'
+
+  for questionnaire in '1. Approve this change?' 'Approve this change?' 'Framing text.
+1. Approve this change?
+2. Another question?'; do
+    rc=0
+    ask "$home" "$questionnaire" || rc=$?
+    assert_denied "$rc" "$home" 'an untagged unbound question'
+    assert_contains "$(deny_message "$home")" 'CONTRACT VIOLATION, not filed' \
+      'an untagged unbound question was silently skipped'
+    assert_contains "$(deny_message "$home")" 'has no [firstmate-decision origin=' \
+      'the untagged question did not identify the missing binding'
+  done
 
   rc=0
   ask "$home" '1. [question] Keep the fixture parked?
@@ -838,6 +874,7 @@ test_identical_questions_are_preserved_for_each_status_key
 test_status_evidence_uses_the_authoritative_transition_key
 test_unseeded_binding_creates_an_ordinary_captain_hold
 test_transferred_hold_wins_and_status_is_never_reopened
+test_unrelated_hold_does_not_capture_status_decision
 test_status_question_moves_to_hold_before_transfer_closes
 test_ordinary_captain_held_task_preserves_multiple_question_owners
 test_ambiguous_transfer_preserves_the_status_question

@@ -1171,6 +1171,16 @@ hold_is_active() {  # <hold-id>
   return 0
 }
 
+hold_owned_by() {  # <hold-id> <origin>
+  local id=$1 origin=$2 body stored
+  hold_is_active "$id" || return 1
+  body=$(decode_body "$(show_field "$TASK_SHOW_OUTPUT" body)")
+  stored=$(body_hold_origin "$body")
+  [ -n "$stored" ] || stored=$(printf '%s\n' "$body" | sed -n 's/^Origin: //p' | head -1)
+  [ -n "$stored" ] || return 1
+  [ "$(task_identity "$stored")" = "$(task_identity "$origin")" ]
+}
+
 status_open_verb() {  # <status-file> <decision-key>
   status_open_decisions "$1" | LC_ALL=C awk -F '\t' -v k="$2" '$1 == k { print $2; exit }'
 }
@@ -1302,6 +1312,7 @@ preserve_in_status() {  # <status-file> <key> <verb> <summary> <digest> <referen
 # reopened duplicate would swallow the answer the real hold is waiting for.
 finish_status_transfer() {  # <origin> <key> <hold-id> <status-file>
   local origin=$1 key=$2 id=$3 status_file=$4 rc=0
+  hold_owned_by "$id" "$origin" || fail "captain hold $id is not owned by $origin"
   [ -f "$status_file" ] || return 0
   [ -n "$(status_open_verb "$status_file" "$key")" ] || return 0
   fm_wake_status_append_self_announced "$STATE" "$status_file" \
@@ -1315,7 +1326,7 @@ find_transferred_question_hold() {  # <origin> <key>; prints the receipt's curre
   ids=$(printf '%s\n' "$rows" | LC_ALL=C awk -F ',' '/^  [A-Za-z0-9._-]+,/ { sub(/^  /, "", $1); print $1 }')
   for id in $ids; do
     task_show "$id" || fail "cannot read captain hold $id while locating $origin/$key"
-    [ "$(show_field_value "$TASK_SHOW_OUTPUT" hold_kind)" = captain ] || continue
+    hold_owned_by "$id" "$origin" || continue
     body=$(decode_body "$(show_field "$TASK_SHOW_OUTPUT" body)")
     evidence=$(hold_question_evidence "$body") || fail "captain hold $id has malformed deferred-question evidence"
     while IFS=$'\t' read -r digest reference pair; do
@@ -1365,18 +1376,18 @@ command_preserve_question() {
   fm_lock_acquire_wait "$CAPTAIN_META_LOCK"
   CAPTAIN_META_LOCK_HELD=1
   origin_exists_here "$origin" || fail "origin $origin disappeared while preserving a question"
-  if task_show "$key"; then
+  if hold_owned_by "$key" "$origin"; then
     id=$key
   else
     id=$(legacy_hold_id "$origin" "$key")
   fi
   status_file="$STATE/$origin.status"
 
-  if ! hold_is_active "$id"; then
+  if ! hold_owned_by "$id" "$origin"; then
     transferred=$(find_transferred_question_hold "$origin" "$key") || exit $?
     [ -z "$transferred" ] || id=$transferred
   fi
-  if hold_is_active "$id"; then
+  if hold_owned_by "$id" "$origin"; then
     reference=$(activate_question_evidence "$origin" "$digest" "$question")
     preserve_in_hold "$id" "$digest" "$reference" "$origin" "$key"
     finish_status_transfer "$origin" "$key" "$id" "$status_file"
@@ -1395,6 +1406,9 @@ command_preserve_question() {
   [ "$state" = unseeded ] || fail \
     "binding claims state=existing but $origin/$key has no active captain hold and no open status decision; re-attempt with the owner's real key or state=unseeded"
 
+  if task_show "$id"; then
+    fail "captain hold $id is not owned by $origin; choose another decision key"
+  fi
   command_hold "$id" --origin "$origin" \
     --title "Deferred away-mode approval question $key" \
     --reason "deferred away-mode approval question awaiting captain decision" >/dev/null

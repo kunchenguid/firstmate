@@ -176,7 +176,7 @@ trap 'rm -rf "$WORK"' EXIT
 # several origins. An unnumbered questionnaire is one block.
 printf '%s\n' "$QUESTIONNAIRE" | LC_ALL=C awk -v dir="$WORK" '
   /^[0-9]+\.[[:space:]]/ { n++ }
-  { if (n == 0) n = 1; printf "%s\n", $0 >> sprintf("%s/block.%03d", dir, n) }
+  { printf "%s\n", $0 >> sprintf("%s/block.%03d", dir, n) }
 '
 
 # shellcheck source=bin/fm-wake-lib.sh
@@ -196,9 +196,10 @@ FAULT=''
 INDEX=0
 for BLOCK in "$WORK"/block.*; do
   [ -f "$BLOCK" ] || continue
-  # Text before the first numbered block is preamble, not a question, so it is
-  # skipped rather than rejected for carrying no binding.
-  grep -q '\[question\]\|^\[firstmate-decision[[:space:]]' "$BLOCK" || continue
+  if [ "$BLOCK" = "$WORK/block.000" ] && [ -f "$WORK/block.001" ] &&
+    ! grep -q '?\|\[question\]\|^\[firstmate-decision' "$BLOCK"; then
+    continue
+  fi
   INDEX=$((INDEX + 1))
   if ! BINDING=$(question_binding "$BLOCK" 2>"$WORK/binding-error.$INDEX"); then
     REJECTED="${REJECTED}question $INDEX $(cat "$WORK/binding-error.$INDEX"); "
