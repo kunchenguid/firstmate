@@ -238,8 +238,16 @@ fm_run_timed() {  # <seconds> <command...>
       fm_run_external_timeout "$timeout_path" "$seconds" "$@"
       ;;
     perl)
-      local saved_traps runner_pid='' interrupted='' runner_rc monitor_was_on=0
-      saved_traps=$(trap -p INT HUP TERM)
+      local saved_traps='' caller_trap signal runner_pid='' interrupted='' runner_rc monitor_was_on=0
+      trap - KILL
+      for signal in INT HUP TERM; do
+        caller_trap=$(trap -p "$signal")
+        trap - "$signal"
+        if [ "$caller_trap" != "$(trap -p "$signal")" ]; then
+          saved_traps="$saved_traps
+$caller_trap"
+        fi
+      done
       # wait on an asynchronous runner so Bash handles a process-directed signal
       # immediately instead of deferring the trap until a foreground Perl exits.
       trap 'interrupted=INT; [ -z "$runner_pid" ] || kill -INT "$runner_pid" 2>/dev/null || true' INT

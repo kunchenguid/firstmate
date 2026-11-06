@@ -588,8 +588,8 @@ test_run_timed_perl_interrupt_cleanup() {
   for signal in INT HUP TERM timeout; do
     for target in caller group; do
       [ "$signal:$target" != timeout:group ] || continue
-      for disposition in default exit return ignore; do
-        [ "$signal" != timeout ] || [ "$disposition" = default ] || continue
+      for disposition in default exit return ignore substitution-default substitution-exit substitution-return substitution-ignore substitution-partial; do
+        [ "$signal" != timeout ] || [ "$disposition" = default ] || [ "$disposition" = substitution-default ] || continue
         PATH=$PERL_ONLY perl -MPOSIX=setpgid,WNOHANG -MTime::HiRes=time,sleep -MIO::Select -e '
           my ($root, $dir, $signal, $target, $disposition) = @ARGV;
           mkdir $dir or die "mkdir $dir: $!";
@@ -604,46 +604,62 @@ test_run_timed_perl_interrupt_cleanup() {
             close $writer;
             exec "/bin/bash", "-c", q{
               . "$1/bin/fm-timeout-lib.sh"
-              case $4 in
-                exit|return)
-                  handler_exit=""
-                  [ "$4" != exit ] || handler_exit="; exit 61"
-                  for caught in INT HUP TERM; do
-                    trap "printf \"handled $caught\\n\"$handler_exit" "$caught"
-                done
-                ;;
-              ignore) trap "" INT HUP TERM ;;
-            esac
-            fm_run_timed "$3" perl -e '\''
-              my $dir = shift;
-              $SIG{$_} = "IGNORE" for qw(INT HUP TERM);
-              my $child = fork;
-              die "fork: $!" unless defined $child;
-              if (!$child) {
-                open my $f, ">", "$dir/descendant" or die $!;
-                print $f "$$\n";
-                close $f;
-                sleep 300;
-                exit;
+              run_fixture() {
+                case ${4#substitution-} in
+                  exit|return)
+                    handler_exit=""
+                    [ "${4#substitution-}" != exit ] || handler_exit="; exit 61"
+                    for caught in INT HUP TERM; do
+                      trap "printf \"handled $caught\\n\"$handler_exit" "$caught"
+                    done
+                    ;;
+                  ignore) trap "" INT HUP TERM ;;
+                  partial) trap "printf \"handled TERM\\n\"" TERM ;;
+                esac
+                printf "%s\n" "$(exec perl -e '\''print getppid()'\'')" > "$2/owner"
+                fm_run_timed "$3" perl -e '\''
+                  my $dir = shift;
+                  $SIG{$_} = "IGNORE" for qw(INT HUP TERM);
+                  my $child = fork;
+                  die "fork: $!" unless defined $child;
+                  if (!$child) {
+                    open my $f, ">", "$dir/descendant" or die $!;
+                    print $f "$$\n";
+                    close $f;
+                    sleep 300;
+                    exit;
+                  }
+                  open my $f, ">", "$dir/command" or die $!;
+                  print $f "$$\n";
+                  close $f;
+                  waitpid $child, 0;
+                '\'' "$2"
+                rc=$?
+                printf "continued %s\n" "$rc"
+                exit "$rc"
               }
-              open my $f, ">", "$dir/command" or die $!;
-              print $f "$$\n";
-              close $f;
-              waitpid $child, 0;
-            '\'' "$2"
-            rc=$?
-            printf "continued %s\n" "$rc"
-            exit "$rc"
+              case $4 in
+                substitution-*)
+                  for caught in INT HUP TERM; do
+                    trap "printf \"parent $caught\\n\"" "$caught"
+                  done
+                  out=$(run_fixture "$@")
+                  rc=$?
+                  printf "%s" "$out" > "$2/captured"
+                  exit "$rc"
+                  ;;
+                *) run_fixture "$@" ;;
+              esac
           }, "_", $root, $dir, ($signal eq "timeout" ? 1 : 30), $disposition;
           die "exec: $!";
         }
         close $writer;
         setpgid($caller, $caller);
-        my ($command, $descendant, $status, $eof, $error);
+        my ($command, $descendant, $owner, $status, $eof, $error);
         my $captured = "";
         eval {
           my $ready_by = time + 10;
-          for my $entry ([command => \$command], [descendant => \$descendant]) {
+          for my $entry ([command => \$command], [descendant => \$descendant], [owner => \$owner]) {
             my ($name, $pid) = @$entry;
             until (-s "$dir/$name") {
               die "fixture not ready" if time >= $ready_by;
@@ -655,7 +671,7 @@ test_run_timed_perl_interrupt_cleanup() {
             die "invalid fixture pid" unless $$pid =~ /^\d+$/ && $$pid > 1;
           }
           if ($signal ne "timeout") {
-            kill $signal, ($target eq "group" ? -$caller : $caller) or die "signal: $!";
+            kill $signal, ($target eq "group" ? -$caller : $owner) or die "signal: $!";
           }
           my $end = time + 5;
           my $select = IO::Select->new($output);
@@ -671,12 +687,20 @@ test_run_timed_perl_interrupt_cleanup() {
           }
           my %number = (HUP => 1, INT => 2, TERM => 15);
           my $rc = ($status & 127) ? 128 + ($status & 127) : $status >> 8;
+          my $substitution = $disposition =~ s/^substitution-//;
+          $disposition = $signal eq "TERM" ? "return" : "default" if $disposition eq "partial";
           my $expected = $signal eq "timeout" ? 124 : 128 + $number{$signal};
           $expected = 61 if $disposition eq "exit";
           die "incorrect status $rc" unless $rc == $expected;
           my $expected_output = $signal eq "timeout" || $disposition eq "ignore"
             ? "continued $expected\n" : $disposition eq "exit" ? "handled $signal\n"
             : $disposition eq "return" ? "handled $signal\ncontinued $expected\n" : "";
+          if ($substitution) {
+            open my $f, "<", "$dir/captured" or die "captured stdout missing: $!";
+            local $/;
+            $captured = <$f> // "";
+            $expected_output =~ s/\n+\z//;
+          }
           die "incorrect caller behavior: $captured" unless $captured eq $expected_output;
           # Allow the host init to reap orphaned descendants after KILL.
           while (kill(0, $command) || kill(0, $descendant) || kill(0, -$command)) {
