@@ -781,6 +781,13 @@ fm_session_lock_pid_blocks_reclaim() {
 # from fm_proc_info, the file's single ps-primary, ps-free-fallback reader. A
 # tagged Windows pid is never native: that bridge exposes no argv to prove the
 # app-server subcommand, and it publishes no Codex session pid at all.
+# For codex, scan flattened arguments past known global options and their values.
+# The first non-option token decides whether this is app-server, so ordinary
+# CLI prompt text cannot select native ownership after an unambiguous parse.
+# An unclosed bracket, brace, or quote in a config token makes its boundary
+# ambiguous. A later standalone app-server then selects native restrictions,
+# but cannot prove native ancestry for identity trust, even with a runtime id.
+# The optional verified argument excludes these ambiguous cases from proof.
 fm_session_lock_codex_native_pid() {  # <pid> [verified]
   local base argv0
   case "$1" in ''|*[!0-9]*) return 1 ;; esac

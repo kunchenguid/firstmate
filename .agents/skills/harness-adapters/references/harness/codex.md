@@ -51,6 +51,6 @@ Verified on 2026-07-08 with codex-cli 0.142.1: Codex runs the Stop command with 
 Codex CLI 0.163.0 supports the native asynchronous Stop park registered by `bin/fm-codex-stop-park.sh` in a home that opts in with [`config/codex-stop-park`](../../../../../docs/configuration.md#codex-native-stop-park-configcodex-stop-park), verified in an isolated real CLI lab on 2026-10-19.
 The hook waits outside the model and delivers actionable wakes with `codex queue --thread`, including in embedded mode without a shared app-server daemon.
 The script owns version and native-session selection; [`codex.md`](../../../../../docs/supervision-protocols/codex.md) owns the operating protocol and failure fallback.
-Homes without the opt-in, unverified versions, and sessions without the native registration keep [`codex-checkpoint.md`](../../../../../docs/supervision-protocols/codex-checkpoint.md), the unchanged bounded foreground protocol.
+For sessions that do not select the native park, see the [foreground checkpoint protocol](../../../../../docs/supervision-protocols/codex-checkpoint.md) and its [ownership check](../../../../../bin/fm-watch-checkpoint.sh).
 The [supervision host](../../../../../docs/supervision-host.md) retains its existing posture decisions on both paths.
 Codex's PreToolUse watcher-arm seatbelt blocks directly through its project hook.
