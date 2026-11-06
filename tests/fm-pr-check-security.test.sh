@@ -4349,6 +4349,54 @@ test_legacy_poll_notices_once_until_rearmed() {
   pass 'legacy polls wake once without merge proof and reset their notice on re-arm'
 }
 
+test_legacy_parent_notice_retries_after_delivery() {
+  local dir state replies route rc
+  for route in local remote; do
+    dir=$(make_case "legacy-parent-crash-$route")
+    state="$dir/home/state"
+    seed_secondmate_home "$dir" "$route"
+    replies="$state/parent-replies.status"
+    if [ "$route" = local ]; then
+      mkdir -p "$dir/parent/state"
+      printf 'parent_home=%s\n' "$dir/parent" >> "$dir/home/.fm-secondmate-parent"
+      replies="$dir/parent/state/mate-x.status"
+    fi
+    FM_TEST_META_EXPECTED_BASE='' fm_write_meta "$state/task-a.meta" \
+      "worktree=$dir/wt" 'kind=ship' 'mode=direct-PR' 'pr=https://github.com/o/r/pull/1'
+    printf 'done: PR https://github.com/o/r/pull/1\n' > "$state/task-a.status"
+    # Interrupt immediately after the observable parent append, before its
+    # delivery receipt. The retry must converge to one parent blocker.
+    cat > "$dir/stop-after-append.sh" <<'SH'
+printf() {
+  builtin printf "$@" || return
+  if [ -s "$FM_TEST_PARENT_REPLIES" ]; then
+    : > "$FM_TEST_PARENT_STOPPED"
+    kill -TERM "$$"
+    exit 143
+  fi
+}
+SH
+    rc=0
+    FM_HOME="$dir/home" FM_STATE_OVERRIDE="$state" PATH="$dir/fakebin:$BASE_PATH" \
+      BASH_ENV="$dir/stop-after-append.sh" FM_TEST_PARENT_REPLIES="$replies" \
+      FM_TEST_PARENT_STOPPED="$dir/stopped" \
+      bash "$ROOT/bin/fm-inactive-reconcile.sh" report task-a \
+      > "$dir/interrupted.out" 2> "$dir/interrupted.err" || rc=$?
+    [ "$rc" -ne 0 ] || fail 'parent delivery interruption did not stop reporting'
+    assert_present "$dir/stopped" 'report never reached the parent append'
+    [ "$(grep -c 'task task-a merge/readiness refused' "$replies")" = 1 ] \
+      || fail 'interrupted report did not publish exactly one blocker'
+    assert_absent "$state/task-a.pr-base-parent-notified" 'interrupted report wrote a delivery receipt'
+    FM_HOME="$dir/home" FM_STATE_OVERRIDE="$state" PATH="$dir/fakebin:$BASE_PATH" \
+      bash "$ROOT/bin/fm-inactive-reconcile.sh" report task-a \
+      > "$dir/retry.out" 2> "$dir/retry.err" || fail 'parent delivery retry failed'
+    [ "$(grep -c 'task task-a merge/readiness refused' "$replies")" = 1 ] \
+      || fail 'parent delivery retry duplicated its blocker'
+    assert_present "$state/task-a.pr-base-parent-notified" 'retry did not record successful delivery'
+  done
+  pass 'parent delivery retries reuse one blocker after an append-before-receipt crash'
+}
+
 test_legacy_notice_audiences_are_independent() {
   local dir state replies route order cycle note
   for route in local remote; do
@@ -4421,6 +4469,7 @@ test_legacy_notice_audiences_are_independent() {
 
 test_legacy_notice_retries_failed_delivery queue-failure
 test_legacy_notice_retries_failed_delivery interrupted
+test_legacy_parent_notice_retries_after_delivery
 test_legacy_notice_audiences_are_independent
 test_legacy_poll_notices_once_until_rearmed
 test_expected_destination_refuses_registration

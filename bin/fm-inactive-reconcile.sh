@@ -539,7 +539,9 @@ report_child_ledger_locked() { # <id> <meta>
       && ! fm_pr_expected_base "$meta" >/dev/null 2>&1; then
       note=$("$SCRIPT_DIR/fm-pr-poll.sh" --base-unavailable "$meta") || return 1
       if [ -n "$note" ]; then
-        notice_token="$$-$RANDOM"
+        # Parent delivery can succeed before the local receipt is written.
+        # Bind retries to this ledger event so the parent deduplicates them.
+        notice_token=$fingerprint
         outcome_key="child-pr-base-$id-$notice_token"
         fm_parent_channel_report "$FM_HOME" "$STATE" "blocked [key=$outcome_key]: $note" || return 1
         (umask 077; set -C; printf '%s\n' "$notice_token" \
