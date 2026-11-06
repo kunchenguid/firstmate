@@ -128,7 +128,10 @@
 #   effective_model= stays unknown-at-spawn until this generation is observed.
 #   Their folder-trust gate requires viewport capture (tmux/herdr/zellij), sends
 #   Enter only on the complete affirmative-selected dialog, and waits for work
-#   or a response before success. FM_DROID_READY_POLLS (120) and
+#   or a response before success. Relaunch also requires SessionStart to write
+#   its spawn_gen into state/<id>.meta.droid-model.<spawn_gen>.started; old
+#   output alone is insufficient. Retirement, abort, and teardown remove it.
+#   FM_DROID_READY_POLLS (120) and
 #   FM_DROID_POLL_INTERVAL (0.5 seconds) bound that wait; raw launches bypass it.
 #   --backend <name> is the explicit runtime session-provider backend for this
 #   exact task only (docs/configuration.md "Runtime backend" owns when that flag
@@ -1382,7 +1385,7 @@ spawn_remote_secondmate() {
     harness=$("$FM_ROOT/bin/fm-harness.sh" secondmate "$id")
   fi
   case "$harness" in
-  claude | codex | opencode | pi | pi-signed | grok | kimi | cursor | omp) ;;
+  claude | codex | opencode | pi | pi-signed | grok | kimi | cursor | omp | droid) ;;
   *)
     fm_lock_release "$registry_lock" || true
     fm_lock_release "$SPAWN_TASK_LOCK" || true
@@ -1930,7 +1933,8 @@ spawn_abort_cleanup() {
     # worker's settings; deleting them would strip its profile and Stop hook.
     if [ "${RELAUNCH:-0}" -eq 1 ] ||
       { [ ! -e "$STATE/$ID.meta" ] && [ ! -L "$STATE/$ID.meta" ]; }; then
-      rm -f "$DROID_SETTINGS_CLEANUP" "$STATE/$ID.meta.droid-model.${SPAWN_GEN:-unset}" || true
+      rm -f "$DROID_SETTINGS_CLEANUP" "$STATE/$ID.meta.droid-model.${SPAWN_GEN:-unset}" \
+        "$STATE/$ID.meta.droid-model.${SPAWN_GEN:-unset}.started" || true
     fi
     DROID_SETTINGS_CLEANUP=
   fi
@@ -4579,18 +4583,24 @@ if [ "$DROID_TEMPLATE" -eq 1 ]; then
   DROID_HOOK_COMMAND=
   [ "$KIND" = secondmate ] || DROID_HOOK_COMMAND="touch $(shell_quote "$TURNEND")"
   DROID_OBSERVE_COMMAND="bash $(shell_quote "$SCRIPT_DIR/fm-droid-model.sh") observe $(shell_quote "$STATE_REAL/$ID.meta") $(shell_quote "$SPAWN_GEN")"
+  DROID_START_COMMAND=$DROID_OBSERVE_COMMAND
+  if [ "$RELAUNCH" -eq 1 ]; then
+    DROID_START_RECEIPT="$STATE_REAL/$ID.meta.droid-model.$SPAWN_GEN.started"
+    DROID_START_COMMAND="(umask 077; printf '%s\\n' $(shell_quote "$SPAWN_GEN") > $(shell_quote "$DROID_START_RECEIPT")) && $DROID_OBSERVE_COMMAND"
+  fi
 
   DROID_SETTINGS_TMP=$(mktemp "$STATE/.${ID}.droid-settings.XXXXXXXXXXXX")
   if jq -n \
     --arg model "$DROID_MODEL" \
     --arg effort "$DROID_EFFORT" \
+    --arg start_command "$DROID_START_COMMAND" \
     --arg observe_command "$DROID_OBSERVE_COMMAND" \
     --arg hook_command "$DROID_HOOK_COMMAND" '
       {sessionDefaultSettings:
          ({autonomyLevel: "high", autonomyMode: "auto-high", interactionMode: "auto"} +
           (if $model == "" then {} else {model: $model} end) +
           (if $effort == "" then {} else {reasoningEffort: $effort} end))} +
-      {hooks: {SessionStart: [{hooks: [{type: "command", command: $observe_command}]}],
+      {hooks: {SessionStart: [{hooks: [{type: "command", command: $start_command}]}],
                 PreToolUse: [{hooks: [{type: "command", command: $observe_command}]}],
                 Stop: [{hooks: ((if $hook_command == "" then [] else [{type: "command", command: $hook_command}] end) +
                   [{type: "command", command: $observe_command}])}]}}
@@ -5821,13 +5831,19 @@ droid_wait_for_working() {
       fi
       DROID_READY_FAILURE_DETAIL='Droid folder-trust dialog did not clear or its verified affirmative choice was unavailable'
     elif [[ "$pane" != *'Exit without trusting'* ]]; then
-      # A banner or empty composer can precede trust. Require actual work or
-      # a response instead; either also proves the positional brief survived.
+      # A reused pane can retain both work and response markers from the
+      # retired launch. Its replacement must also confirm its own generation.
       if [[ "$pane" == *'Press ESC to stop'* ]] \
         || printf '%s\n' "$pane" | grep -qE '^[[:space:]]*⛬[[:space:]]'; then
-        return 0
+        if [ "$RELAUNCH" -eq 0 ] ||
+          { [ -f "$DROID_START_RECEIPT" ] && [ ! -L "$DROID_START_RECEIPT" ] \
+            && [ "$(cat "$DROID_START_RECEIPT" 2>/dev/null)" = "$SPAWN_GEN" ]; }; then
+          return 0
+        fi
+        DROID_READY_FAILURE_DETAIL='Droid replacement did not confirm its current launch generation'
+      else
+        DROID_READY_FAILURE_DETAIL='Droid did not start processing its launch brief after folder-trust handling'
       fi
-      DROID_READY_FAILURE_DETAIL='Droid did not start processing its launch brief after folder-trust handling'
     fi
     i=$((i + 1))
     [ "$i" -ge "$max" ] || sleep "$interval"

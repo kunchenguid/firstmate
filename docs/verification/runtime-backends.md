@@ -3566,7 +3566,7 @@ This proves the hook transport and runtime model observations, not a rendered re
 [Primary verification](droid-primary.md) records historical away-mode evidence, portable coverage, and remaining live limitations.
 No Herdr lifecycle was driven for this refresh.
 
-The independent lifecycle guard also passed on Droid 1.4.1 in a private HOME and tmux server:
+The independent lifecycle guard was refreshed on 2026-11-06 UTC with Droid 1.4.1 in a private HOME and tmux server, including generation-bound replacement-start confirmation:
 
 ```sh
 FM_DROID_SIGNALS_LIVE=1 bash tests/fm-droid-signals-live-e2e.test.sh
@@ -3583,6 +3583,7 @@ ok - Droid 1.4.1 single Escape interrupts a running turn
 ok - Droid 1.4.1 /quit exits the agent
 DROID_LIVE_RESULT version=1.4.1 detection=pass launch=pass busy=pass stop=pass composer=pass profile=pass interrupt=pass exit=pass
 ok - Droid 1.4.1 exact-worktree trust is retired after exit
+ok - Droid 1.4.1 replacement SessionStart confirms its current launch generation
 ok - Droid 1.4.1 public scout relaunch completes a replacement turn with dynamic effort
 DROID_FISH_IDLE command=fish cursor=42
 ok - Droid 1.4.1 public Fish-backed ship exit preserves drafts and stops the idle agent

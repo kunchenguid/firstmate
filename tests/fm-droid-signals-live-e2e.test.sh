@@ -211,6 +211,10 @@ scout_id="droid-recovery-$$"
   rm "$report" "$LAB/fleet/state/$scout_id.turn-ended"
   "$ROOT/bin/fm-control.sh" "$scout_id" relaunch --note 'Repeat the original arithmetic verification and write the report again; do not perform other tasks.' \
     || fail 'idle scout relaunch through fm-control failed'
+  gen=$(sed -n 's/^spawn_gen=//p' "$LAB/fleet/state/$scout_id.meta")
+  [ -n "$gen" ] && [ "$(cat "$LAB/fleet/state/$scout_id.meta.droid-model.$gen.started" 2>/dev/null)" = "$gen" ] \
+    || fail 'replacement SessionStart did not confirm its current launch generation'
+  pass "Droid $VERSION replacement SessionStart confirms its current launch generation"
   wait_scout_idle || fail 'replacement scout did not complete its turn with an empty composer'
   [ "$(tr -d '[:space:]' < "$report")" = 80235 ] || fail 'replacement scout did not write the computed result'
   jq -e '.sessionDefaultSettings.reasoningEffort == "dynamic"' "$LAB/fleet/state/$scout_id.droid-settings.json" >/dev/null \

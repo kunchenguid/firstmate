@@ -105,6 +105,14 @@ esac
 exit 0
 SH
 chmod +x "$REMOTE_ROOT/bin/tmux"
+# The remote entrypoint restores the real account HOME. Keep native Droid trust
+# in a private HOME while exercising the real trust helper.
+mkdir -p "$TMP_ROOT/droid-user-home"
+cat > "$REMOTE_ROOT/bin/fm-droid-trust.sh" <<SH
+#!/usr/bin/env bash
+HOME='$TMP_ROOT/droid-user-home' exec bash '$ROOT/bin/fm-droid-trust.sh' "\$@"
+SH
+chmod +x "$REMOTE_ROOT/bin/fm-droid-trust.sh"
 install_remote_herdr_fixture "$REMOTE_ROOT" "$HERDR_STATE" "$HERDR_LOG" \
   "$TMP_ROOT/herdr-send-fail" "$TMP_ROOT/herdr.sock"
 git -C "$REMOTE_ROOT" init -q -b main
@@ -885,6 +893,7 @@ pass "mixed local and remote routes validate without migration"
 # Launch on the remote home's own configured backend. Parent metadata records
 # host placement separately from that backend and arms the reply source.
 printf 'pi\n' > "$PARENT/config/crew-harness"
+printf 'droid default dynamic\n' > "$PARENT/config/secondmate-harness"
 launches_before_inherit=0
 [ ! -f "$HERDR_LOG" ] || launches_before_inherit=$(grep -c '^tab create' "$HERDR_LOG" || true)
 if FM_FAKE_SSH_MODE=inherit-partial remote_env "$ROOT/bin/fm-spawn.sh" ios --secondmate \
@@ -905,7 +914,7 @@ assert_grep "effective_model=$remote_model" "$PARENT/state/ios.meta" \
   "parent Droid record did not preserve the remote host's observed model"
 assert_grep 'effort=dynamic' "$PARENT/state/ios.meta" "configured remote Droid launch lost dynamic effort in parent metadata"
 assert_grep 'effort=dynamic' "$REMOTE_HOME/state/parent-route/ios.meta" "configured remote Droid launch lost dynamic effort in host metadata"
-jq -e '.sessionDefaultSettings == {"reasoningEffort":"dynamic"} and (.hooks.Stop[0].hooks | length == 1)' \
+jq -e '.sessionDefaultSettings == {"autonomyLevel":"high","autonomyMode":"auto-high","interactionMode":"auto","reasoningEffort":"dynamic"} and (.hooks.Stop[0].hooks | length == 1)' \
   "$REMOTE_HOME/state/parent-route/ios.droid-settings.json" >/dev/null \
   || fail "configured remote Droid launch lost dynamic effort in runtime settings"
 
@@ -947,7 +956,7 @@ remote_env "$ROOT/bin/fm-spawn.sh" ios --secondmate --harness droid --effort dyn
   || fail "explicit remote Droid dynamic recovery failed"
 assert_grep 'effort=dynamic' "$REMOTE_HOME/state/parent-route/ios.meta" \
   "explicit remote Droid recovery lost dynamic effort"
-jq -e '.sessionDefaultSettings == {"reasoningEffort":"dynamic"} and (.hooks.Stop[0].hooks | length == 1)' \
+jq -e '.sessionDefaultSettings == {"autonomyLevel":"high","autonomyMode":"auto-high","interactionMode":"auto","reasoningEffort":"dynamic"} and (.hooks.Stop[0].hooks | length == 1)' \
   "$REMOTE_HOME/state/parent-route/ios.droid-settings.json" >/dev/null \
   || fail "explicit remote Droid recovery lost dynamic runtime settings"
 pass "explicit remote Droid recovery preserves dynamic effort end to end"
@@ -958,10 +967,17 @@ remote_env "$ROOT/bin/fm-spawn.sh" ios --secondmate >/dev/null \
   || fail "configured remote Droid recovery failed"
 assert_grep 'effort=dynamic' "$REMOTE_HOME/state/parent-route/ios.meta" \
   "configured remote Droid recovery lost dynamic effort"
-jq -e '.sessionDefaultSettings == {"reasoningEffort":"dynamic"} and (.hooks.Stop[0].hooks | length == 1)' \
+jq -e '.sessionDefaultSettings == {"autonomyLevel":"high","autonomyMode":"auto-high","interactionMode":"auto","reasoningEffort":"dynamic"} and (.hooks.Stop[0].hooks | length == 1)' \
   "$REMOTE_HOME/state/parent-route/ios.droid-settings.json" >/dev/null \
   || fail "configured remote Droid recovery lost dynamic runtime settings"
 pass "configured remote Droid recovery preserves dynamic effort end to end"
+printf 'codex\n' > "$PARENT/config/secondmate-harness"
+remote_pane=$(sed -n 's/^herdr_pane_id=//p' "$REMOTE_HOME/state/parent-route/ios.meta")
+"$REMOTE_ROOT/bin/herdr" pane close "$remote_pane"
+remote_env "$ROOT/bin/fm-spawn.sh" ios --secondmate >/dev/null \
+  || fail "could not restore the Codex endpoint for subsequent lifecycle cases"
+assert_equals codex "$(sed -n 's/^harness=//p' "$PARENT/state/ios.meta")" "parent fixture did not return to Codex"
+assert_equals codex "$(sed -n 's/^harness=//p' "$REMOTE_HOME/state/parent-route/ios.meta")" "remote fixture did not return to Codex"
 
 remote_route_meta="$REMOTE_HOME/state/parent-route/ios.meta"
 cp "$remote_route_meta" "$TMP_ROOT/remote-ios-before-default-session.meta"
@@ -1088,7 +1104,7 @@ sleep 0.2
 kill -0 "$spawn_config_push" 2>/dev/null \
   || fail "config push bypassed the active remote spawn inheritance transaction"
 touch "$TMP_ROOT/inherit.release"
-wait "$spawn_concurrent" || fail "serialized remote spawn failed"
+wait "$spawn_concurrent" || fail "serialized remote spawn failed"$'\n'"$(cat "$TMP_ROOT/spawn-concurrent.out")"
 wait "$spawn_config_push" || fail "config push failed after serialized remote spawn"$'\n'"$(cat "$TMP_ROOT/spawn-concurrent-push.out")"
 [ "$(tail -1 "$REMOTE_HOME/data/captain-shared.md")" = 'current post-spawn preference' ] \
   || fail "stale spawn inheritance overwrote later config convergence"
