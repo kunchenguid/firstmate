@@ -1601,14 +1601,13 @@ The notification row Claude draws under the composer when it runs inside another
 `_fm_composer_select_cursorless` demotes that row through `_fm_composer_claude_popup_selection` only when the caller identifies Claude and every condition holds.
 The row lies below the closing row of a glyph-proven envelope.
 That envelope's own glyph row leads with the agent glyph, with no side border to strip (a bordered box keeps its previous reading), and holds typed text opening with `/`, read under the ghost-strip threshold of the calling read (the state read or the payload read), so the read it falls back to is never empty: typed text that read strips as ghost cannot license the demotion.
-The row opens with a valid slash-command token (or `…`, a name truncated to its column) and carries a gap of two or more spaces before its description, which a numbered-choice dialog row lacks.
-Invalid slash tokens such as `/exit!  real draft` retain their draft reading.
+The row opens with `/` (or `…`, a name truncated to its column) and carries a gap of two or more spaces before its description, which a numbered-choice dialog row lacks.
 The selected popup row is not always the typed text (typing `/` selects the first command, and a long plugin command name is truncated), so no equality check is made.
 Any other row keeps its previous reading, and none of these can read `empty`.
 Unverified follow-up: a bordered-box composer with the marked popup row below it is out of scope here.
 Its state read still refuses with `pending`, but its payload read still returns the popup list, so a slash command typed into a boxed Claude 2.1.291 composer would still fail the pre-Enter proof; no capture or live run here shows 2.1.291 drawing the box with the popup up.
 The other cursorless backends (cmux, orca, tern, zellij) share this classifier; the popup exception requires the same explicit Claude identification there, without a live check here.
-Fixture verification on 2026-11-05 additionally covers invalid-token draft preservation and unknown/Codex/Kiro caller isolation across styled/plain profiles under UTF-8 and C locales (`test_claude_slash_popup_edge_guards` in the composer suite below).
+Fixture verification additionally covers unknown/Codex/Kiro caller isolation across styled/plain profiles under UTF-8 and C locales (`test_claude_slash_popup_harness_isolation` in the composer suite below).
 
 Portable tests run against real captures (`tests/captures/claude-2.1.291-slash-popup`):
 

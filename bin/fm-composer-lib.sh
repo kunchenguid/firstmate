@@ -1978,13 +1978,7 @@ _fm_composer_claude_popup_selection() {  # <plain-screen> <screen> <styled> <row
   fm_composer_leading_agent_glyph_var glyph "$trimmed" || return 1
   rest=${trimmed#*"$glyph"}
   fm_composer_normalize_trim_var rest
-  # A slash token cannot contain punctuation such as `!`: description-like
-  # spacing in `/exit!  real draft` must not hide that genuine draft.
-  if [[ $rest == /* ]]; then
-    [[ $rest =~ ^/[A-Za-z0-9][A-Za-z0-9:_.-]*[[:space:]]{2,}[^[:space:]] ]]
-  else
-    [[ $rest =~ ^…[^[:space:]].*[[:space:]]{2,}[^[:space:]] ]]
-  fi
+  [[ $rest =~ ^(/|…)[^[:space:]].*[[:space:]]{2,}[^[:space:]] ]]
 }
 
 # _fm_composer_bare_rule_sandwich: 0 when bare agent-glyph <row> sits in its
