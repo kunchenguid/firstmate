@@ -406,6 +406,32 @@ test_pr_based_dod_draft_check_uses_gh_axi() {
   pass "PR-based DoD draft check uses gh-axi"
 }
 
+# The same delivery text reaches every worker harness, and skill invocation
+# syntax differs by harness (Claude uses a slash, Codex a dollar sign), so the
+# emitted instructions name the skill without one harness's invocation form.
+test_dod_skill_wording_is_harness_neutral() {
+  local spec mode pr out
+  for spec in no-mistakes:auto no-mistakes:manual direct-PR:auto; do
+    mode=${spec%%:*} pr=${spec#*:}
+    out="$TMP_ROOT/dod-neutral-$mode-$pr.md"
+    fm_dod_block "$mode" dod-neutral-task fm/dod-neutral-task none '' '' "$pr" > "$out" \
+      || fail "$spec: DoD did not render"
+    if grep -Eq '(^|[^[:alnum:]_.-])[/$]no-mistakes' "$out"; then
+      fail "$spec: DoD names one harness's skill invocation form"$'\n'"$(grep -E '(^|[^[:alnum:]_.-])[/$]no-mistakes' "$out")"
+    fi
+    if [ "$mode" = no-mistakes ]; then
+      assert_grep 'it loads when you invoke the no-mistakes skill,' "$out" \
+        "$spec: the driving block lost its pointer to the no-mistakes skill"
+      assert_grep 'Firstmate will then instruct you to run the no-mistakes skill to validate' "$out" \
+        "$spec: the handoff lost its pointer to the no-mistakes skill"
+    else
+      assert_grep 'Do NOT run the no-mistakes skill.' "$out" \
+        "$spec: the direct-PR worker was not kept off the no-mistakes skill"
+    fi
+  done
+  pass "DoD skill wording is harness-neutral for no-mistakes and direct-PR ships"
+}
+
 # A scout spawned on a named base keeps that base through promotion: the ship
 # instructions start from it and the PR targets it; local-only cannot carry it.
 test_promotion_keeps_the_recorded_base_branch() {
@@ -467,6 +493,7 @@ test_standalone_local_only_needs_project_ref
 test_non_done_lines_are_not_gated
 test_fenced_and_indented_captain_lines_are_not_intent
 test_pr_based_dod_draft_check_uses_gh_axi
+test_dod_skill_wording_is_harness_neutral
 test_promotion_keeps_the_recorded_base_branch
 
 # The launch role is the generated text a worker receives. It must keep the
