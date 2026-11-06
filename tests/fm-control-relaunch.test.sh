@@ -29,6 +29,8 @@ set -u
 . "$ROOT/bin/fm-trace-context-lib.sh"
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-tasks-axi-lib.sh"
+# shellcheck source=tests/rex-fake-fixture.sh
+. "$(dirname "${BASH_SOURCE[0]}")/rex-fake-fixture.sh"
 
 CONTROL="$ROOT/bin/fm-control.sh"
 SPAWN="$ROOT/bin/fm-spawn.sh"
@@ -2907,6 +2909,124 @@ test_herdr_rebind_stays_in_the_recorded_session() {
   pass "reclaim: a herdr rebind is created in the session the record names, never the ambient one"
 }
 
+# A Rex Server stop discards the session, so the recorded block reads gone and
+# the relaunch rebinds into a fresh block. Runs against the shared stateful rex
+# fake (tests/rex-fake-fixture.sh); the real rex CLI is never called.
+REX_CLAUDE_SESSION=0a1b2c3d-1111-4222-8333-444455556666
+REX_CLAUDE_LIVE_SESSION=9f8e7d6c-5555-4444-8333-222211110000
+
+rex_claude_case() {  # <name> <id> <recorded-harness> <recorded-claude-session-id|-> <transcript yes|no> <live-session-id|->
+  local dir id=$2 harness=$3 recorded=$4 n uuid ids sess win blk
+  dir=$(new_case "$1" "$id")
+  make_rex_fake "$dir/rex"
+  ids=$(fake_rex "$dir/rex" new fmlab)
+  sess=$(jq -r '.session_id' <<<"$ids")
+  win=$(jq -r '.initial_windows[0].window_id' <<<"$ids")
+  blk=$(jq -r '.initial_windows[0].block_ids[0]' <<<"$ids")
+  fm_git_worktree "$dir/proj" "$dir/wt" "task-$id"
+  mkdir -p "$dir/home/data/$id"
+  printf '# Task\n## Captain'"'"'s intent\nExercise rex claude relaunch.\n\n## Firstmate spec\nKeep the conversation.\n' > "$dir/home/data/$id/brief.md"
+  {
+    echo "window=${sess#session:}:${blk#block:}"
+    echo "endpoint_task_id=$id"
+    echo "worktree=$dir/wt"
+    echo "project=$dir/proj"
+    echo "harness=$harness"
+    echo "kind=ship"
+    echo "mode=no-mistakes"
+    echo "yolo=off"
+    echo "tasktmp=/tmp/fm-$id"
+    echo "model=default"
+    echo "effort=default"
+    echo "backend=rex"
+    echo "rex_server=unix:///fake/rex.sock"
+    echo "rex_session_id=$sess"
+    echo "rex_window_id=$win"
+    echo "rex_block_id=$blk"
+    [ "$recorded" = - ] || echo "claude_session_id=$recorded"
+  } > "$dir/home/state/$id.meta"
+  TASK_TMPS+=("/tmp/fm-$id")
+  if [ "$5" = yes ]; then
+    mkdir -p "$dir/user-home/.claude/projects/p"
+    : > "$dir/user-home/.claude/projects/p/$recorded.jsonl"
+  fi
+  # The replacement block gets the next ids the fake mints; its foreground
+  # process is this test shell, which is alive.
+  for n in 4 5 6 7 8 9 10 11 12; do
+    uuid=$(printf '%08x-0000-7000-8000-%012x' "$n" "$n")
+    printf '{"foreground":{"pid":%s,"name":"claude","path":"/usr/bin/claude","argv0":"claude","cwd":"%s"},"ancestors":[],"last_exit":null}\n' \
+      "$$" "$dir/wt" > "$dir/rex/fake/process/$uuid.json"
+  done
+  if [ "$6" != - ]; then
+    mkdir -p "$dir/user-home/.claude/sessions"
+    printf '{"pid":%s,"cwd":"%s","sessionId":"%s"}\n' "$$" "$dir/wt" "$6" \
+      > "$dir/user-home/.claude/sessions/$$.json"
+  fi
+  mv "$dir/rex/bin/rex" "$dir/rex/bin/rex-fake"
+  cat > "$dir/rex/bin/rex" <<'SH'
+#!/usr/bin/env bash
+for a in "$@"; do
+  case "$a" in
+    ". '"*"'") staged=${a#". '"}; staged=${staged%"'"}; [ ! -f "$staged" ] || cat "$staged" >> "$FM_REX_FAKE_DIR/launched" ;;
+  esac
+done
+exec "$(dirname "$0")/rex-fake" "$@"
+SH
+  chmod +x "$dir/rex/bin/rex"
+  fake_rex "$dir/rex" server stop
+  printf '%s' "$dir"
+}
+
+run_rex_spawn() {  # <case-dir> <args...>
+  local dir=$1; shift
+  env -u HERDR_ENV -u HERDR_PANE_ID -u HERDR_SESSION -u HERDR_SOCKET_PATH \
+    -u HERDR_TAB_ID -u HERDR_WORKSPACE_ID -u TERM_PROGRAM -u REX_SESSION -u REX_BLOCK -u REX_SERVER \
+    PATH="$dir/fakebin:$PATH" FM_HOME="$dir/home" FM_FAKE_DIR="$dir/fake" \
+    REX_BIN_DIR="$dir/rex/bin" FM_REX_FAKE_DIR="$dir/rex/fake" FM_REX_FAKE_DEAD_PID=99999999 \
+    HOME="$dir/user-home" CLAUDE_CONFIG_DIR='' \
+    FM_SPAWN_NO_GUARD=1 GROK_HOME="$dir/grokhome" \
+    "$SPAWN" "$@" 2>&1
+}
+
+test_rex_claude_relaunch_resumes_the_recorded_conversation() {
+  local dir out rc=0 launched
+  command -v jq >/dev/null 2>&1 || { echo "skip - rex relaunch needs jq"; return 0; }
+  dir=$(rex_claude_case rex-resume rx1 claude "$REX_CLAUDE_SESSION" yes "$REX_CLAUDE_LIVE_SESSION")
+  out=$(run_rex_spawn "$dir" rx1 --relaunch --harness claude) || rc=$?
+  expect_code 0 "$rc" "a Rex claude relaunch should succeed"$'\n'"$out"$'\n'"$(cat "$dir/rex/fake/log")"
+  launched=$(cat "$dir/rex/fake/launched")
+  assert_contains "$launched" "claude --resume '$REX_CLAUDE_SESSION' --dangerously-skip-permissions" \
+    "a claude worker whose conversation is on disk must reopen it, keeping the rest of the launch line"
+  assert_contains "$launched" "--settings" "the resumed launch must keep its full flag set"
+  [ "$(meta_field "$dir" rx1 claude_session_id)" = "$REX_CLAUDE_LIVE_SESSION" ] \
+    || fail "the record must hold the session the replacement reports, got '$(meta_field "$dir" rx1 claude_session_id)'"
+  pass "fm-spawn --relaunch: a Rex claude worker resumes its recorded conversation and records the live session"
+}
+
+test_rex_pi_to_claude_relaunch_does_not_resume_an_old_claude_session() {
+  local dir out rc=0 launched
+  command -v jq >/dev/null 2>&1 || { echo "skip - rex relaunch needs jq"; return 0; }
+  dir=$(rex_claude_case rex-pi-claude rx2 pi "$REX_CLAUDE_SESSION" yes "$REX_CLAUDE_LIVE_SESSION")
+  out=$(run_rex_spawn "$dir" rx2 --relaunch --harness claude) || rc=$?
+  expect_code 0 "$rc" "a pi to claude Rex relaunch should succeed"$'\n'"$out"$'\n'"$(cat "$dir/rex/fake/log")"
+  launched=$(cat "$dir/rex/fake/launched")
+  assert_contains "$launched" "claude --dangerously-skip-permissions" "the replacement claude must launch"
+  assert_not_contains "$launched" "--resume" \
+    "a claude session id left from before the pi work must not be reopened"
+  pass "fm-spawn --relaunch: a pi to claude Rex relaunch starts a fresh claude session"
+}
+
+test_rex_claude_relaunch_without_a_live_session_file_drops_the_old_id() {
+  local dir out rc=0
+  command -v jq >/dev/null 2>&1 || { echo "skip - rex relaunch needs jq"; return 0; }
+  dir=$(rex_claude_case rex-no-record rx3 claude "$REX_CLAUDE_SESSION" yes -)
+  out=$(run_rex_spawn "$dir" rx3 --relaunch --harness claude) || rc=$?
+  expect_code 0 "$rc" "a Rex claude relaunch should succeed without a session file"$'\n'"$out"$'\n'"$(cat "$dir/rex/fake/log")"
+  [ -z "$(meta_field "$dir" rx3 claude_session_id)" ] \
+    || fail "a relaunch whose record step finds no session must not keep the old id, got '$(meta_field "$dir" rx3 claude_session_id)'"
+  pass "fm-spawn --relaunch: a Rex claude relaunch that records no session leaves no stale id"
+}
+
 test_herdr_reclaim_refuses_an_agent_that_came_back() {
   local dir out rc log
   herdr_case_or_skip gone-herdr-alive rl74 || {
@@ -3233,6 +3353,9 @@ test_herdr_reclaim_adopts_a_pane_that_outlived_its_server
 test_herdr_exit_reports_already_stopped_when_the_pane_outlived_its_server
 test_herdr_rebind_stays_in_the_recorded_session
 test_herdr_reclaim_refuses_an_agent_that_came_back
+test_rex_claude_relaunch_resumes_the_recorded_conversation
+test_rex_pi_to_claude_relaunch_does_not_resume_an_old_claude_session
+test_rex_claude_relaunch_without_a_live_session_file_drops_the_old_id
 test_herdr_reclaim_keeps_the_task_whole
 test_herdr_reclaim_of_a_secondmate_names_its_own_owner
 test_herdr_rebind_failure_from_a_plain_shell_names_the_real_cause
