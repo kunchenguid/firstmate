@@ -157,21 +157,10 @@ Droid documents blocking Stop continuation but no Claude `asyncRewake` equivalen
 Do not add a Droid-only delivery loop or treat `UserPromptSubmit` as an idle-session wake source.
 
 While `state/.afk` exists, Droid's tracked `AskUser` PreToolUse guard denies the interactive question without answering it.
-Because native `AskUser` carries one freeform questionnaire and no owner field, every question block Firstmate attempts while away must name its own decision owner on its own line, immediately after the `[question]` line:
-
-```text
-[firstmate-decision origin=<origin-slug> key=<decision-key> state=existing]
-[firstmate-decision origin=<origin-slug> key=derive state=unseeded]
-```
-
-Use `state=existing` with the decision's original key when a status decision or captain hold already holds it, and `state=unseeded` for a question with no prior record, supplying a stable key or `derive` to have one computed.
-`[topic]` is descriptive UI text and is never an owner, so one questionnaire may combine several origins and may omit topics entirely.
-A block whose binding is missing or malformed is rejected with an error naming the missing requirement rather than filed by inference, so re-attempt that block with its real owner instead of rewording the question.
-`bin/fm-captain-hold.sh` owns the filing itself and routes each block to the captain hold or status decision that already owns it, creating an ordinary captain hold only for an unseeded binding.
-Firstmate must continue every independently authorized action instead of retrying `AskUser` or asking the question in plain text.
-Repeated operational notifications do not close or duplicate that durable decision, and their operational prefix does not count as captain return.
-After a real unmarked captain message runs the ordered `bin/fm-afk-return.sh` catch-up, that catch-up presents every outstanding question in full, and the absent AFK flag makes `AskUser` available again under unchanged authority.
-Answer a returned question only through its owner's existing close path, and never treat presentation as approval.
+Do not retry the question or ask the captain in plain text while away.
+Record the decision with `bin/fm-captain-hold.sh hold`, creating a held task if needed, and continue independently authorized work.
+An operationally prefixed input does not count as captain return.
+After a real unmarked captain message completes `bin/fm-afk-return.sh` catch-up, `AskUser` is available again under unchanged authority.
 
 ### Submit model
 

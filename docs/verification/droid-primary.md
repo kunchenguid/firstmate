@@ -20,23 +20,14 @@ These historical observations are not a fresh pass for another version or for th
 | Busy state | A working spinner and `Press ESC to stop` were independent positive signals. |
 | Composer | Idle input could park the cursor outside the composer; styled ghost text differed from actual typed input. |
 | Away delivery | Same-session `UserPromptSubmit` established receipt through the shared delivery path, not a new Droid-only transport. |
-| AskUser deferral | A real bound questionnaire was denied, preserved with its status owner, and followed by independently authorized work; an unbound questionnaire was denied without filing a guessed owner. |
-| Return | Ordered catch-up presented the outstanding question before removing away mode; interactive AskUser then returned without selecting an answer. |
+| AskUser deferral | A real questionnaire was denied and followed by independently authorized work under the historical integration. |
+| Return | Interactive AskUser returned without selecting an answer after ordered catch-up. |
 
 The historical Stop payloads differed in the relevant field:
 
 ```json
 {"hook_event_name":"Stop","stop_hook_active":false}
 {"hook_event_name":"Stop","stop_hook_active":true}
-```
-
-The approval refresh reported:
-
-```text
-ok - Droid denies interactive approval during AFK, files it with its bound owner, and continues independently authorized work
-ok - a live question naming no owner is rejected without inventing or mutating one
-ok - a real unmarked Droid return runs ordered catch-up and presents the outstanding question first
-ok - Droid AskUser becomes available on return without an automatic approval
 ```
 
 `droid exec -s <session-id>` continued durable session history but did not steer an already-running interactive pane.
@@ -53,12 +44,12 @@ The scenario exited before guarded lab cleanup, leaving the named non-default la
 Same-session hook receipt established delivery, but the bounded viewport did not reliably retain the submitted prompt.
 The original response probes did not independently establish hook-output context for both SessionStart and UserPromptSubmit; corrected distinct hook-only nonce assertions still require a live refresh.
 The five-second marker-retirement wait has portable coverage but was not rerun in that historical refresh.
-The 2026-09-09 AskUser refresh established denial, durable owner filing, independent progress, and return without automatic approval as summarized above.
+The 2026-09-09 AskUser refresh established denial, independent progress, and return without automatic approval under the historical integration.
 
 ## Portable verification
 
 `tests/fm-droid-primary.test.sh` executes the registered SessionStart, Execute PreToolUse, AskUser PreToolUse, and Stop commands against observable fixture owners.
-`tests/fm-droid-afk-approval.test.sh` exercises question preservation, owner precedence, replay, variants, transfer, lossless return, ordinary captain-held tasks, and concurrent answers through the authoritative captain-hold interface.
+`tests/fm-droid-afk-approval.test.sh` exercises away-mode denial and inert behavior after return.
 `tests/fm-droid-harness.test.sh` exercises exact process identity, independent busy signals, composer safety, exact-path trust, and receipt ownership.
 `tests/fm-watch-checkpoint.test.sh` exercises the tracked background completion protocol and bounded foreground fallback.
 
@@ -81,6 +72,4 @@ The separate Herdr away-mode guard is `tests/fm-droid-afk-herdr-live-e2e.test.sh
 It requires explicit authorization for an isolated non-default lab through its guarded helper; a portable pass or the historical run does not authorize driving a live Herdr session.
 No Herdr refresh was performed during this integration.
 
-Reliable model emission of a valid owner binding in ordinary operation is not established.
-The native questionnaire permits omitted or malformed bindings, so the guard rejects those rather than guessing an owner.
 Rendered viewport retention after away-mode submission and direct live AskUser parity with another harness remain unproven.

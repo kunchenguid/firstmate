@@ -138,9 +138,6 @@ trap cleanup EXIT
 mkdir -p "$HOME_DIR"/{state,data,config,projects} "$PROJECT/.factory" "$FAKEBIN"
 git init -q "$PROJECT"
 printf '%s\n' '# Synthetic isolated Firstmate Droid primary' > "$PROJECT/AGENTS.md"
-# The guard files questions through the tracked decision owner, so the isolated
-# project reaches the real bin/ rather than a copied subset of it. Scope and
-# state stay isolated through FM_ROOT_OVERRIDE and FM_STATE_OVERRIDE below.
 ln -s "$ROOT/bin" "$PROJECT/bin"
 cp "$ROOT/.tasks.toml" "$HOME_DIR/.tasks.toml"
 printf '## In flight\n\n## Queued\n\n## Done\n' > "$HOME_DIR/data/backlog.md"
@@ -428,7 +425,7 @@ else
   ask_count_before=0
 fi
 
-AFK_APPROVAL_PROMPT='Read the open droid-herdr-live decision from the durable state. First use AskUser to ask whether to approve it, with APPROVE_ISOLATED_CHANGE and KEEP_ISOLATED_PARKED as the two options, and include this exact line immediately after the question line, copied without alteration: [firstmate-decision origin=live-worker key=droid-herdr-live state=existing]. If and only if the tool is denied, use Execute to run exactly: touch .factory/authorized-after-afk-denial. Then reply exactly DROID_AFK_ASKUSER_DEFERRED.'
+AFK_APPROVAL_PROMPT='Read the open droid-herdr-live decision from the durable state. First use AskUser to ask whether to approve it, with APPROVE_ISOLATED_CHANGE and KEEP_ISOLATED_PARKED as the two options. If and only if the tool is denied, use Execute to run exactly: touch .factory/authorized-after-afk-denial. Then reply exactly DROID_AFK_ASKUSER_DEFERRED.'
 FM_SEND_SETTLE=0 "$ROOT/bin/fm-send.sh" "$PRIMARY_TARGET" "$AFK_APPROVAL_PROMPT" >/dev/null \
   || fail "could not submit the AFK approval probe to Droid"
 for _ in $(seq 1 300); do
@@ -454,35 +451,7 @@ printf '%s' "$status_open" | grep -q '^droid-herdr-live	needs-decision	' \
 [ "$(printf '%s' "$status_open" | grep -c '^droid-herdr-live	')" -eq 1 ] \
   || fail "the deferred question forked its decision into more than one open identity"
 
-# The attempted question must be recoverable from its bound owner, byte for byte.
-live_listing=$(FM_HOME="$HOME_DIR" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$HOME_DIR/data" \
-  PATH="$FAKEBIN:$ORIGINAL_PATH" "$ROOT/bin/fm-decision-hold.sh" open-questions --render) \
-  || fail "the deferred live question could not be projected for the captain's return"
-printf '%s' "$live_listing" | grep -Fq 'APPROVE_ISOLATED_CHANGE' \
-  || fail "the deferred live question was not preserved with its bound decision owner"
-printf '%s' "$live_listing" | grep -Fq '[firstmate-decision origin=' \
-  && fail "the transport binding line leaked into the captain-facing listing"
-pass "Droid denies interactive approval during AFK, files it with its bound owner, and continues independently authorized work"
-
-# A question that names no owner must be rejected loudly rather than guessed at.
-ask_count_before=$(jq -s 'length' "$PROJECT/.factory/askuser-payloads.jsonl")
-status_bytes_before=$(cksum < "$STATE/live-worker.status")
-UNBOUND_PROMPT='Use AskUser exactly once to ask whether to approve the isolated change, with UNBOUND_APPROVE and UNBOUND_KEEP_PARKED as the two options, and include no other bracketed metadata lines at all. If and only if the tool is denied, use Execute to run exactly: touch .factory/unbound-question-denied. Then reply exactly DROID_AFK_UNBOUND_REJECTED.'
-FM_SEND_SETTLE=0 "$ROOT/bin/fm-send.sh" "$PRIMARY_TARGET" "$UNBOUND_PROMPT" >/dev/null \
-  || fail "could not submit the unbound-question probe to Droid"
-for _ in $(seq 1 300); do
-  status=$("$LAB_HELPER" run "$SESSION" agent get "$PRIMARY_PANE" 2>/dev/null \
-    | jq -r '.result.agent.agent_status // empty' 2>/dev/null || true)
-  [ -e "$PROJECT/.factory/unbound-question-denied" ] && [ "$status" = idle ] && break
-  sleep 0.1
-done
-[ -e "$PROJECT/.factory/unbound-question-denied" ] \
-  || fail "the unbound live question was not denied before becoming interactive"
-[ "$(jq -s 'length' "$PROJECT/.factory/askuser-payloads.jsonl")" -gt "$ask_count_before" ] \
-  || fail "the unbound-question probe never reached the tracked matcher"
-[ "$status_bytes_before" = "$(cksum < "$STATE/live-worker.status")" ] \
-  || fail "a rejected unbound question still mutated a durable decision owner"
-pass "a live question naming no owner is rejected without inventing or mutating one"
+pass "Droid denies interactive approval during AFK and continues independently authorized work"
 
 RETURN_OUTPUT="$PROJECT/.factory/return-output"
 POST_RETURN_PROMPT='DROID_REAL_RETURN_PROBE: this is an unmarked returning-captain message. Before any ordinary work, use Execute to run exactly: bash .factory/return-probe.sh > .factory/return-output 2>&1 . Only after that command succeeds, use AskUser to ask whether to approve the isolated change, with POST_RETURN_APPROVE and POST_RETURN_KEEP_PARKED as the two options. Do not answer the question yourself and do nothing after opening it.'
@@ -503,7 +472,7 @@ grep -Fq 'droid-herdr-live' "$RETURN_OUTPUT" \
 status_open=$(status_open_decisions "$STATE/live-worker.status")
 printf '%s' "$status_open" | grep -q '^droid-herdr-live	needs-decision	' \
   || fail "Droid return catch-up automatically approved or lost the question"
-pass "a real unmarked Droid return runs ordered catch-up and presents the outstanding question first"
+pass "a real unmarked Droid return runs ordered catch-up before AskUser"
 
 sleep 1
 capture=$("$LAB_HELPER" run "$SESSION" pane read "$PRIMARY_PANE" --source recent --lines 100 2>/dev/null || true)
