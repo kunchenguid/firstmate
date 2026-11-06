@@ -20,11 +20,9 @@ Current empirical evidence lives in [`docs/verification/runtime-backends.md`](..
 | Effort | `sessionDefaultSettings.reasoningEffort`; `low`, `medium`, `high`, `xhigh`, `max`, and `dynamic` are retained. |
 | Background execution | Native tracked Execute jobs (`fireAndForget: true`) notify the primary on completion. |
 
-## Settings and discovery
+## Identity
 
-`../../../../../bin/fm-harness.sh` accepts only an exact `droid` ancestor.
-Control uses Escape for interrupt and `/quit` for exit.
-`../../../../../bin/fm-session-lock-lib.sh` and `../../../../../bin/fm-agent-process-lib.sh` recognize the same exact process identity.
+[`fm-harness.sh`](../../../../../bin/fm-harness.sh), [`fm-session-lock-lib.sh`](../../../../../bin/fm-session-lock-lib.sh), and [`fm-agent-process-lib.sh`](../../../../../bin/fm-agent-process-lib.sh) share the exact process identity above.
 
 ## Launch settings
 

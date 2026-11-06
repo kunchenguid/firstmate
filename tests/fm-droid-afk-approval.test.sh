@@ -91,9 +91,8 @@ assert_denied() { # <rc> <home> <label>
   ' "$home/err" >/dev/null || fail "$label lost its timing or authority contract: $(cat "$home/err")"
 }
 
-# The reported defect: an approval question asked interactively during away mode.
-# The question must instead be denied and filed with the owner its binding names,
-# while unrelated authorized progress continues untouched.
+# Away-mode questions stay with their explicitly bound owner, so unrelated
+# authorized progress can continue without manufacturing an approval.
 test_existing_status_owner_receives_the_deferred_question() {
   local home rc=0 folded
   home=$(make_home status-owner)
@@ -259,8 +258,8 @@ test_unseeded_binding_creates_an_ordinary_captain_hold() {
   pass "an unseeded binding creates an ordinary captain hold under its real origin"
 }
 
-# The R4 defect: once `complete` transfers a key to its hold, the status fold no
-# longer matches it. Reopening status there would let fm-send close a duplicate
+# Once `complete` transfers a key to its hold, the status fold no longer matches
+# it. Reopening status there would let fm-send close a duplicate
 # and leave the authoritative hold unanswered forever.
 test_transferred_hold_wins_and_status_is_never_reopened() {
   local home rc=0 status_text

@@ -329,14 +329,18 @@ release_task_control_lock() {
   CAPTAIN_CONTROL_LOCK=
 }
 
-sha256_text() {  # <text>
+sha256_stdin() {
   if command -v shasum >/dev/null 2>&1; then
-    printf '%s' "$1" | shasum -a 256 | awk '{print $1}'
+    shasum -a 256 | awk '{print $1}'
   elif command -v sha256sum >/dev/null 2>&1; then
-    printf '%s' "$1" | sha256sum | awk '{print $1}'
+    sha256sum | awk '{print $1}'
   else
     fail "shasum or sha256sum is required"
   fi
+}
+
+sha256_text() {  # <text>
+  printf '%s' "$1" | sha256_stdin
 }
 
 # The legacy derived identity older installs minted for a captain call.
@@ -1181,13 +1185,7 @@ question_summary() {  # <question-text>
 }
 
 sha256_file() {  # <path>
-  if command -v shasum >/dev/null 2>&1; then
-    shasum -a 256 "$1" | awk '{print $1}'
-  elif command -v sha256sum >/dev/null 2>&1; then
-    sha256sum "$1" | awk '{print $1}'
-  else
-    fail "shasum or sha256sum is required"
-  fi
+  sha256_stdin < "$1"
 }
 
 question_evidence_path() {  # <origin> <digest> <reference>
@@ -1448,17 +1446,15 @@ status_question_evidence() {  # <status-file> <decision-key>
 }
 
 hold_question_evidence() {  # <decoded-hold-body>; digest, reference, origin/key
-  local line marker digest reference pair extra owner='' complete=1
+  local line marker digest reference pair extra complete=1
   while IFS= read -r line || [ -n "$line" ]; do
     case "$line" in
-      'Droid question owner: '*) owner=${line#'Droid question owner: '}; continue ;;
       "$QUESTION_MARKER "*) ;;
       *) continue ;;
     esac
     IFS=' ' read -r marker digest reference pair extra <<RECORD
 $line
 RECORD
-    pair=${pair:-$owner}
     if [ "$marker" != "$QUESTION_MARKER" ] || [ -z "$digest" ] \
         || [ -z "$reference" ] || [ -n "${extra:-}" ]; then
       complete=0
@@ -1494,9 +1490,40 @@ $(printf '%s' "$encoded" | LC_ALL=C fold -w "$QUESTION_CHUNK_CHARS")
 EOF
 }
 
+emit_question_variants() {  # <item> <origin> <owner-description> [origin/key]; evidence on stdin
+  local item=$1 origin=$2 owner=$3 pair=${4:-} digest reference evidence_pair encoded
+  local variant=0 complete=1
+  while IFS=$'\t' read -r digest reference evidence_pair; do
+    [ -n "$digest" ] && [ -n "$reference" ] || continue
+    [ -z "$pair" ] || [ "$evidence_pair" = "$pair" ] || continue
+    if ! encoded=$(encode_question_reference "$origin" "$digest" "$reference"); then
+      printf 'limitation\t%s has unreadable deferred-question evidence %s\n' "$owner" "$reference"
+      complete=0
+      continue
+    fi
+    variant=$((variant + 1))
+    emit_question_chunks "$item" "$variant" "$encoded"
+  done
+  [ "$complete" -eq 1 ]
+}
+
+hold_question_pairs() {  # <decoded-body> <evidence> <hold-id>
+  local body=$1 evidence=$2 id=$3 pairs origin key
+  pairs=$(printf '%s\n' "$evidence" | LC_ALL=C awk -F '\t' 'NF == 3 && !seen[$3]++ { print $3 }')
+  if [ -n "$pairs" ]; then
+    printf '%s\n' "$pairs"
+    return
+  fi
+  origin=$(body_hold_origin "$body")
+  [ -n "$origin" ] || origin=$(printf '%s\n' "$body" | sed -n 's/^Origin: //p' | head -1)
+  key=$(printf '%s\n' "$body" | sed -n 's/^Decision key: //p' | head -1)
+  [ -n "$key" ] || key=$id
+  [ -z "$origin" ] || printf '%s/%s\n' "$origin" "$key"
+}
+
 emit_question_records() {
   local held_ids='' held_rows='' id show body origin key status_file open summary \
-    item=0 variant digest reference encoded evidence seen=$'\n' pair pairs evidence_pair complete=1
+    item=0 evidence seen=$'\n' pair pairs complete=1
 
   if fm_tasks_axi_compatible 2>/dev/null; then
     if held_rows=$(tasks_axi list --state held 2>/dev/null); then
@@ -1525,32 +1552,15 @@ emit_question_records() {
       printf 'limitation\tcaptain-decision hold %s has malformed deferred-question evidence\n' "$id"
       complete=0
     fi
-    pairs=$(printf '%s\n' "$evidence" | LC_ALL=C awk -F '\t' 'NF == 3 && !seen[$3]++ { print $3 }')
-    if [ -z "$pairs" ]; then
-      origin=$(body_hold_origin "$body")
-      [ -n "$origin" ] || origin=$(printf '%s\n' "$body" | sed -n 's/^Origin: //p' | head -1)
-      key=$(printf '%s\n' "$body" | sed -n 's/^Decision key: //p' | head -1)
-      [ -n "$key" ] || key=$id
-      [ -n "$origin" ] || continue
-      pairs="$origin/$key"
-    fi
+    pairs=$(hold_question_pairs "$body" "$evidence" "$id")
+    [ -n "$pairs" ] || continue
     while IFS= read -r pair; do
       origin=${pair%%/*}
       key=${pair#*/}
       item=$((item + 1))
       seen="${seen}${pair}"$'\n'
       printf 'decision\t%s\t%s\t%s\thold\t%s\n' "$item" "$origin" "$key" "$(show_field "$show" title)"
-      variant=0
-      while IFS=$'\t' read -r digest reference evidence_pair; do
-        [ "$evidence_pair" = "$pair" ] || continue
-        if ! encoded=$(encode_question_reference "$origin" "$digest" "$reference"); then
-          printf 'limitation\tcaptain-decision hold %s has unreadable deferred-question evidence %s\n' "$id" "$reference"
-          complete=0
-          continue
-        fi
-        variant=$((variant + 1))
-        emit_question_chunks "$item" "$variant" "$encoded"
-      done <<RECORDS
+      emit_question_variants "$item" "$origin" "captain-decision hold $id" "$pair" <<RECORDS || complete=0
 $evidence
 RECORDS
     done <<PAIRS
@@ -1578,22 +1588,12 @@ PAIRS
       item=$((item + 1))
       summary=${summary%% | "$QUESTION_MARKER" *}
       printf 'decision\t%s\t%s\t%s\tstatus\t%s\n' "$item" "$origin" "$key" "$summary"
-      variant=0
       evidence=''
       if ! evidence=$(status_question_evidence "$status_file" "$key"); then
         printf 'limitation\tstatus owner %s/%s has malformed deferred-question evidence\n' "$origin" "$key"
         complete=0
       fi
-      while IFS=$'\t' read -r digest reference; do
-        [ -n "$digest" ] && [ -n "$reference" ] || continue
-        if ! encoded=$(encode_question_reference "$origin" "$digest" "$reference"); then
-          printf 'limitation\tstatus owner %s/%s has unreadable deferred-question evidence %s\n' "$origin" "$key" "$reference"
-          complete=0
-          continue
-        fi
-        variant=$((variant + 1))
-        emit_question_chunks "$item" "$variant" "$encoded"
-      done <<EOF
+      emit_question_variants "$item" "$origin" "status owner $origin/$key" <<EOF || complete=0
 $evidence
 EOF
     done <<EOF
