@@ -50,9 +50,8 @@
 #            record, and fired marker. Accepts the bare <name> or the exact
 #            when-<name> source id that `fm-procevent.sh list` prints. An
 #            argument starting with when- is always that exact id, so a watch
-#            armed as when-<x> retires as when-when-<x>, and an id that matches
-#            no registered watch is refused instead of gaining a second prefix.
-#            Repeating a bare-name retire is idempotent. Captured results and
+#            armed as when-<x> retires as when-when-<x>.
+#            Repeating a retire is idempotent. Captured results and
 #            their handled acknowledgements are never touched. Warns when the
 #            action had already fired without a captured outcome.
 # rebind-all Refresh the trust binding of every registered watch whose action
@@ -619,7 +618,6 @@ cmd_retire() {
     when-*)
       when_name_valid "${name#when-}" || die "invalid source id: $name"
       sid=$name
-      [ -e "$(spec_file "$sid")" ] || die "no watch registered as $sid (run list for the registered source ids)"
       ;;
     *)
       when_name_valid "$name" || die "name must be path-safe and at most 59 characters: ${name-}"
