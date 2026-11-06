@@ -1874,7 +1874,8 @@ The [profile-array procedure](../.agents/skills/quota-array-dispatch/SKILL.md#ra
 **Shared-quota opt-out**
 
 An optional top-level `"shared_quota": true` declares this home draws every provider's usage from one single shared budget, such as one workplace AI spend line, so per-provider quota rows do not describe what is left.
-With it set, typed dispatch resolution makes no `quota-axi` call, applies no quota floor or runway gate, ranks nothing by `spendPriority`, and resolves the matched rule's `use` profiles in declared order; every candidate line still prints, stating quota ranking is off by home declaration.
+With it set, typed dispatch resolution skips Pi session refresh and makes no `quota-axi` call.
+It applies no quota floor or runway gate, ranks nothing by `spendPriority`, and resolves the matched rule's `use` profiles in declared order; every candidate line still prints, stating quota ranking is off by home declaration.
 `preferred_provider` is a separate home preference, not a quota signal, so it still applies: `preferred_provider` still narrows the pool; declared order then picks within it.
 Firstmate's own `quota-array-dispatch` intake honors the same declaration.
 Without the setting, or with `"shared_quota": false`, behavior is unchanged.
@@ -2028,13 +2029,14 @@ After the answer, code applies all remaining checks and ranking:
 - Every applicable account-wide and model/product row from one `quota-axi --json` snapshot read with bounded reuse.
 - The optional `preferred_provider` restriction under the [profile-array procedure](../.agents/skills/quota-array-dispatch/SKILL.md#rank-by-spendpriority).
 - The numeric `spendPriority` argmax within that candidate pool, using each candidate's limiting row.
-- With the home's `shared_quota: true` declaration ("Crew dispatch profiles"), the quota snapshot, floors, runway gates, and `spendPriority` argmax are skipped entirely; resolution is the matched rule's declared profile order (`preferred_provider` still narrows the pool; declared order then picks within it).
+- For `shared_quota: true`, apply the shared-quota opt-out under [Crew dispatch profiles](#crew-dispatch-profiles-configcrew-dispatchjson).
 
 The resolver prints its preferred-family decision while retaining evidence for every candidate.
 If preferred candidates remain eligible but none is rankable, it escalates instead of selecting another family.
 It never introduces candidates outside the matched rule or its existing default fallback.
 
-Before reading quota, the resolver attempts a bounded session refresh for each distinct Pi executable/provider pair in unexpired rules and the top-level default.
+On the quota-ranked path, the resolver attempts a bounded session refresh before reading quota.
+This covers each distinct Pi executable/provider pair in unexpired rules and the top-level default.
 Refresh requires a `provider/model` value; the provider is that model prefix, not the profile's quota-family `provider` field.
 It uses the profile's `pi` or `pi-signed` executable and the [worker account pin](#worker-account-pin-configclaude-account-configpi-account) when configured.
 A refused pin skips refresh; an undeclared provider skips that provider's refresh, without retrying under an ambient account.
@@ -2054,7 +2056,7 @@ The [shared quota library](../bin/fm-quota-axi-lib.sh) accepts schema 5 and sche
 When the picked rule declares its own floor but its probability falls below it, the tool checks the other options:
 
 1. Find the most probable other option that clears its own floor: the rule's `min_confidence`, or 0.6 otherwise.
-2. Print a `fallback:` line naming both floors and resolve that rule as though it had been picked.
+2. Resolve that rule as though it had been picked.
 
 No qualifying option, or two equally probable qualifying options, produces `ambiguous`.
 
@@ -2064,6 +2066,7 @@ Options without a declared floor, including the neutral option, need no minimum 
 A tie between the highest-probability qualifying options returns `ambiguous`.
 Otherwise, the resolver applies approval and quota checks to the selected option.
 After approval and rule-floor checks permit candidate ranking, the result note marks low confidence.
+The [resolver header](../bin/fm-dispatch-resolve.sh) defines the output fields for the original choice and any confidence fallback.
 
 **Candidate eligibility and evidence**
 
@@ -2148,7 +2151,7 @@ An installer should treat any status other than 0 as a refusal, because a resolv
 - A key read from a declared source is captured into the same private variable, so it is never exported either.
 - The resolver sends only the selected key to `curl` as a header read from a file descriptor, never on argv, and never prints, logs, or writes any key.
 - The typesafe.ai endpoint is `https://api.typesafe.ai/v1/systemone`, the OpenRouter endpoint is `https://openrouter.ai/api/alpha/decisions`, the OpenAI endpoint is `https://api.openai.com/v1/decisions`, and the `systemone` endpoint is `<FM_DISPATCH_BASE_URL>/v1/systemone`.
-- The default confidence floor remains 0.6; request timeouts are 5 seconds for typesafe.ai and 10 seconds for OpenRouter, `systemone`, and OpenAI.
+- Request timeouts are 5 seconds for typesafe.ai and 10 seconds for OpenRouter, `systemone`, and OpenAI.
 - A CPU-only local `systemone` host may not answer within its 10-second timeout; that is an ordinary `error` outcome, and firstmate keeps its existing intake.
 
 The recommended OpenRouter model is `typesafe/jev-1.13` because it is built for fast typed choices and supplies native per-option probabilities without generated text.

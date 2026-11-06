@@ -49,11 +49,9 @@
 #   config/crew-dispatch.json plus one fixed generic none option. The `until`
 #   contract is owned by docs/configuration.md "Crew dispatch profiles".
 #   The provider returns the matched rule, a probability per option, and a
-#   confidence. Everything after that is jq: the confidence and fallback
-#   policy documented in docs/configuration.md "Confidence and fallback
-#   rules" (0.6 on the answer confidence, or a rule's declared
-#   `min_confidence` on that rule's probability, falling to the most probable
-#   other option that clears its own floor), the rule's declared
+#   confidence. Post-response checks apply the confidence and fallback
+#   policy owned by docs/configuration.md "Confidence and fallback rules",
+#   the rule's declared
 #   `approval` and `floor`, each profile's declared `provider`, `quota_scope`, and `floor`, the
 #   quota rows from ONE quota-axi --json snapshot (schema 5 or 6; each
 #   candidate binds to one row through quota_row in
@@ -66,8 +64,8 @@
 #   escalates rather than authorizing another family. Before the quota read,
 #   each distinct Pi executable/provider pair from live rules or the top-level
 #   default gets `<pi|pi-signed> auth check --provider <p>` (10 seconds,
-#   never fatal), subject to the account-pin rules in the operator contract
-#   below.
+#   never fatal), subject to the account-pin and shared-quota rules in
+#   docs/configuration.md "Typed dispatch resolution".
 #   The model never sees quota, catalogs, approvals, preferred_provider,
 #   confidence floors, `why`, or `use`. With no unexpired rules, it returns a non-clear
 #   result so firstmate keeps using the existing intake.
@@ -99,7 +97,7 @@
 # Output (stdout, TOON-style block):
 #   dispatch-resolve:
 #     status: clear | ambiguous | escalate | error
-#     model/latency_ms/tokens, rule (when excerpt) and confidence, probabilities
+#     model/latency_ms/tokens, original model rule (when excerpt) and confidence, probabilities
 #     fallback: <effective rule when confidence handling replaces the model choice>
 #     reason: <why the status is not clear>
 #     preferred_provider: <family and preference or fallback decision, when applied>
