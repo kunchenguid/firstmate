@@ -3408,6 +3408,18 @@ fleet_idle_now() {
   [ "${_fleet_busy:-0}" -eq 0 ]
 }
 
+# note_fleet_busy: the loop's per-window busy-evidence record, called from the
+# stale layer with the busy verdict and window kind that poll already read.
+# A crew pane showing a busy signature (kind other than secondmate) is live
+# work, so the fleet is NOT idle this cycle and the cadence decision at the
+# cycle's terminal wait must stay fast. The loop resets _fleet_busy=0 at the
+# top of every cycle; this is the only place a real crew sets it again.
+note_fleet_busy() {  # <busy_now> <kind>
+  if [ "$1" -eq 0 ] && [ "$2" != secondmate ]; then
+    _fleet_busy=1
+  fi
+}
+
 # supervision_poll_seconds: the cadence this cycle waits on. The fast cadence
 # whenever a crew pane shows live work; the slow one (FM_IDLE_POLL) when the
 # fleet is idle and the poll can find nothing. FM_IDLE_POLL is home-local tuning
@@ -4343,13 +4355,10 @@ EOF
     # content cannot suppress stale detection. Read once per window per poll and
     # reused below so a busy verdict is consistent within one cycle.
     if window_is_busy "$w" "$tail40"; then busy_now=0; else busy_now=1; fi
-    # Wave-scoped cadence evidence: a crew pane that shows a busy signature is
-    # live work, so the fleet is NOT idle this cycle. Recorded here because this
-    # is where the cycle already captured the pane tail; the idle decision at
-    # the cycle's terminal wait reads it instead of re-capturing anything.
-    if [ "$busy_now" -eq 0 ] && [ "$kind" != secondmate ]; then
-      _fleet_busy=1
-    fi
+    # Wave-scoped cadence evidence: recorded here because this is where the
+    # cycle already captured the pane tail; the idle decision at the cycle's
+    # terminal wait reads it instead of re-capturing anything.
+    note_fleet_busy "$busy_now" "$kind"
     if [ "$h" = "$prev" ]; then
       n=$(( $(cat "$cf" 2>/dev/null || echo 0) + 1 ))
       echo "$n" > "$cf"

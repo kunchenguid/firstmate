@@ -181,7 +181,10 @@ esac
 # Home-local supervision tuning (config/supervision-tuning): the fix-round
 # ceiling a scaffolded brief states to its worker.
 . "$SCRIPT_DIR/fm-supervision-tuning-lib.sh"
-fm_supervision_tuning_load
+# The load itself runs AFTER home and config resolution below: a launch with
+# neither FM_HOME nor FM_CONFIG_OVERRIDE set still defaults to the repository
+# home, and that home's tuning (brief_gate_policy, max_fix_rounds) must be
+# honoured exactly like every other config file this path resolves.
 PAUSED_VERB=${FM_CLASSIFY_PAUSED_VERB:-$FM_CLASSIFY_PAUSED_VERB_DEFAULT}
 IFS= read -r -d '' CREWMATE_PAUSE_INSTRUCTIONS <<EOF || true
    Use \`$PAUSED_VERB: {why}\` - distinct from \`blocked:\` - when deliberately waiting for work or an external condition expected to clear on its own, including your own validation round.
@@ -220,6 +223,7 @@ else
 fi
 CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 case "$CONFIG" in /*) ;; *) CONFIG="$PWD/$CONFIG" ;; esac
+fm_supervision_tuning_load
 KIND=ship
 HERDR_LAB=0
 NO_PROJECTS=0
@@ -677,7 +681,9 @@ IFS= read -r -d '' GATE_POLICY_SECTION <<EOF || true
   leaves findings, STOP the round loop: commit what you have, list the remaining findings
   explicitly as follow-up work in the PR body, and continue. Another round is not a fix; it is cost.
 - A genuine gate is a decision only the captain can make: a product choice, a destructive action, or
-  new spend. Everything else is yours to decide and record.
+  new spend. Those stay captain decisions and the ask-user stop rule stands. Within the
+  implementation choices this brief already grants you, decide and record your choice; anything
+  beyond them is a captain decision, never a pre-approved one.
 EOF
 GATE_POLICY_SECTION=${GATE_POLICY_SECTION%$'\n'}
 # When the home has not opted in the section renders nothing at all, so the

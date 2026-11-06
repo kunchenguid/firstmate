@@ -507,6 +507,33 @@ test_brief_gate_policy_is_opt_in() {
   pass "fm-brief.sh: the validation gate-policy section is opt-in via brief_gate_policy"
 }
 
+# The tuning load must run AFTER home and config resolution: a launch with
+# neither FM_HOME nor FM_CONFIG_OVERRIDE set still defaults to the repository
+# home (FM_ROOT), and that home's supervision-tuning must be honoured exactly
+# like every other config file the same path resolves.
+test_brief_tuning_honours_default_home() {
+  local brief tuning
+  tuning="$ROOT/config/supervision-tuning"
+  mkdir -p "$ROOT/config" "$ROOT/data"
+  printf 'brief_gate_policy=1\nmax_fix_rounds=5\n' > "$tuning"
+  {
+    env -u FM_HOME -u FM_CONFIG_OVERRIDE FM_ROOT_OVERRIDE="$ROOT" \
+      "$ROOT/bin/fm-brief.sh" brief-default-home some-proj --mode no-mistakes >/dev/null 2>&1
+    rc=$?
+  }
+  brief="$ROOT/data/brief-default-home/brief.md"
+  [ ! -f "$brief" ] || brief_content=$(cat "$brief")
+  rm -f "$tuning"
+  rm -rf "$ROOT/data/brief-default-home"
+  [ "$rc" -eq 0 ] \
+    || fail "a brief launched with neither FM_HOME nor FM_CONFIG_OVERRIDE set should still scaffold"
+  assert_grep "# Validation gate policy" <(printf '%s\n' "$brief_content") \
+    "the default home's brief_gate_policy must reach a launch with neither override set"
+  assert_grep "Spend at most 5 fix rounds" <(printf '%s\n' "$brief_content") \
+    "the default home's max_fix_rounds must reach a launch with neither override set"
+  pass "fm-brief.sh: the default home's tuning reaches a launch with neither FM_HOME nor FM_CONFIG_OVERRIDE set"
+}
+
 test_pr_based_dod_requires_non_draft() {
   local home mode id brief
   home="$TMP_ROOT/draft-dod-home"
@@ -1752,6 +1779,7 @@ test_no_mistakes_dod_wording
 test_no_mistakes_dod_green_detection
 test_pr_based_dod_requires_non_draft
 test_brief_gate_policy_is_opt_in
+test_brief_tuning_honours_default_home
 test_ask_user_escalation_format
 test_ship_project_memory_wording
 test_herdr_lab_contract_is_explicit_and_complete

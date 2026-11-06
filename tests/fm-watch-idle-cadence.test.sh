@@ -86,4 +86,48 @@ grace_unsets=$(printf '%s\n' "$out" | cut -d' ' -f3)
 [ "$grace_unsets" = 1860 ] || fail "an unset FM_HOME changed the derived grace: $grace_unsets"
 ok "hook-side grace and stall bound derive from the same effective cadence the watcher waits on"
 
+# 4. Loop-level busy evidence: a REAL busy crew state (the busy contract armed
+# for the window's task) is what makes the stale layer set _fleet_busy, and
+# the cycle's terminal wait (event_wait_or_sleep) then holds the fast cadence.
+# An idle crew (no busy record) leaves the flag unset and the wait on the slow
+# cadence. Removing the busy-evidence assignment makes this case fail: the
+# armed-busy fleet would then wait on the slow cadence while live work is in
+# flight.
+busy_case() {  # <state-dir> <wait-log> <arm 0|1>
+  env FM_HOME="$TMP" \
+      FM_CONFIG_OVERRIDE="$TMP/config" \
+      FM_STATE_OVERRIDE="$1" \
+      FM_POLL=15 \
+      bash -c '
+        . "$1"
+        wait_log=$2
+        sleep() { printf "%s\n" "$1" >> "$wait_log"; }
+        : > "$FM_STATE_OVERRIDE/t1.meta"
+        printf "%s\n" "window=w1" "backend=tmux" "harness=claude" "kind=ship" >> "$FM_STATE_OVERRIDE/t1.meta"
+        [ "$4" = 0 ] || "$3" arm "$FM_STATE_OVERRIDE" t1 >/dev/null
+        _fleet_busy=0
+        if window_is_busy w1 ""; then busy_now=0; else busy_now=1; fi
+        note_fleet_busy "$busy_now" "$(window_kind w1)"
+        event_wait_or_sleep
+        printf "%s\n" "$_fleet_busy"
+      ' _ "$ROOT/bin/fm-watch.sh" "$2" "$ROOT/bin/fm-busy-event.sh" "$3"
+}
+
+mkdir -p "$TMP/state-busy" "$TMP/state-idle"
+# Case 3 rewrote the tuning file for the grace derivation; restore the cadence
+# this case's tuning expects before driving the loop-level waits.
+printf 'idle_poll_secs=300\n' > "$TMP/config/supervision-tuning"
+: > "$TMP/wait-busy"; : > "$TMP/wait-idle"
+out=$(busy_case "$TMP/state-busy" "$TMP/wait-busy" 1)
+[ "$(cat "$TMP/wait-busy")" = 15 ] \
+  || fail "a live busy crew did not hold the fast cadence in the terminal wait: $(cat "$TMP/wait-busy")"
+[ "$out" = 1 ] || fail "a real busy crew did not set the fleet-busy evidence: $out"
+ok "a real busy crew sets the busy evidence and the terminal wait holds the fast cadence"
+
+out=$(busy_case "$TMP/state-idle" "$TMP/wait-idle" 0)
+[ "$(cat "$TMP/wait-idle")" = 300 ] \
+  || fail "an idle crew did not get the slow cadence in the terminal wait: $(cat "$TMP/wait-idle")"
+[ "$out" = 0 ] || fail "an idle crew wrongly set the fleet-busy evidence: $out"
+ok "an idle crew leaves the busy evidence unset and the terminal wait on the slow cadence"
+
 echo "PASS: fm-watch-idle-cadence"

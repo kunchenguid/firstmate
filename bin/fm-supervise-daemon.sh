@@ -1974,9 +1974,13 @@ fm_super_main() {
   FM_STATE_OVERRIDE="$STATE" . "$FM_DAEMON_DIR/fm-wake-lib.sh"
 
   # Home-local supervision tuning (config/supervision-tuning): the daemon's
-  # cadence and escalation knobs. Loaded before any knob below takes its
-  # shipped default. The daemon re-loads its own copy each watcher cycle; the
-  # watcher child loads the file itself.
+  # cadence and escalation knobs. Loaded ONCE at daemon startup, before any
+  # knob below takes its shipped default: the daemon's copy of
+  # escalate_batch_secs and stale_escalate_secs is fixed for the daemon's
+  # lifetime, so changing them takes effect only after a daemon restart. The
+  # watcher child loads the file itself at each launch, so watcher-side knobs
+  # (idle_poll_secs, wedge_max_escalations) apply to watchers started after
+  # the change without restarting the daemon.
   # shellcheck source=bin/fm-supervision-tuning-lib.sh
   . "$FM_DAEMON_DIR/fm-supervision-tuning-lib.sh"
   fm_supervision_tuning_load
