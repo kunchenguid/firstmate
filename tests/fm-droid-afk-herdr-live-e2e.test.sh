@@ -253,8 +253,8 @@ sed -i.bak "s/__PRIMARY_PANE__/$PRIMARY_PANE/" "$PROJECT/.factory/return-probe.s
 rm -f "$PROJECT/.factory/return-probe.sh.bak"
 
 DROID_PROMPT='Follow the exact startup verification instruction supplied by the SessionStart hook.'
-DROID_CMD=$(printf 'exec env FM_ROOT_OVERRIDE=%q FM_HOME=%q FM_STATE_OVERRIDE=%q droid --auto high %q' \
-  "$PROJECT" "$HOME_DIR" "$STATE" "$DROID_PROMPT")
+DROID_CMD=$(printf 'exec env HOME=%q FM_ROOT_OVERRIDE=%q FM_HOME=%q FM_STATE_OVERRIDE=%q droid --auto high %q' \
+  "$HOME_DIR" "$PROJECT" "$HOME_DIR" "$STATE" "$DROID_PROMPT")
 "$LAB_HELPER" run "$SESSION" pane run "$PRIMARY_PANE" "$DROID_CMD" >/dev/null \
   || fail "could not launch Droid in the isolated Herdr pane"
 
@@ -329,7 +329,7 @@ jq -s -e --arg session "$SESSION_ID" --arg prompt "$SEND_PROMPT" '
   || fail "ordinary fm-send did not leave a durable prompt receipt for the interactive Droid session"
 pass "ordinary fm-send reaches Droid through Herdr, UserPromptSubmit adds catch-up context, and the busy guard observes the turn"
 
-api_out=$(PATH="$ORIGINAL_PATH" droid exec -s "$SESSION_ID" --auto low \
+api_out=$(HOME="$HOME_DIR" PATH="$ORIGINAL_PATH" droid exec -s "$SESSION_ID" --auto low \
   'Reply exactly DROID_SESSION_API_HEADLESS_ONLY and do nothing else.' 2>&1) \
   || fail "Droid's native session continuation surface was unavailable: $api_out"
 printf '%s' "$api_out" | grep -q DROID_SESSION_API_HEADLESS_ONLY \
@@ -492,4 +492,4 @@ dead_composer=$(fm_backend_composer_state herdr "$SESSION:$DEAD_PANE")
   || fail "a real Herdr shell prompt classified $dead_composer instead of unknown"
 pass "a real dead shell stays outside the Droid composer exception"
 
-printf 'ok - Droid %s / Herdr away-mode live verification complete\n' "$(PATH="$ORIGINAL_PATH" droid --version)"
+printf 'ok - Droid %s / Herdr away-mode live verification complete\n' "$(HOME="$HOME_DIR" PATH="$ORIGINAL_PATH" droid --version)"
