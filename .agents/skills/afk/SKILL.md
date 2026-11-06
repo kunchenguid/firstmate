@@ -97,7 +97,7 @@ A PR ready for merge keeps the merge authority from `AGENTS.md` section 7, and a
 While the away-posture record exists, any pull request green at its live head may merge under away authority; which one the captain's words meant is the away session's reading, and a merge the words do not call for holds for the return.
 Away authority never releases a captain hold, and it expires when the away record is archived.
 `--allow-red`, `--allow-missing`, and `--allow-no-pipeline` remain attended-only and are refused while the away record exists.
-A merge under away authority must be synchronous; `fm-pr-merge.sh` refuses auto-merge and any GitHub queue state that cannot prove an immediate merge while the away record exists.
+A merge under away authority must be synchronous, except that a green GitLab merge request may enter its project's merge train, which merges it only after the train's own pipeline passes; otherwise `fm-pr-merge.sh` refuses auto-merge and any GitHub queue state that cannot prove an immediate merge while the away record exists.
 The same gates bind whichever actor performs the action: on Pi the parked main's standing authority relocates to the supervision branch, which meets exactly these rules, and the spend cap recorded at entry is enforced by `fm-spawn.sh` for both actors while the away record exists.
 The captain's away words are their explicit instruction given before leaving, recorded verbatim and acted on by the away session's judgment at the moment an event makes them relevant; the words cover nothing they do not say, are never applied by analogy, and die at archive.
 Destructive, irreversible, and security-sensitive actions are never pre-authorizable whatever the words say.
