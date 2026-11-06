@@ -5719,6 +5719,34 @@ EOF
   pass "a hung global lsof census refuses teardown before removal"
 }
 
+test_hung_lsof_descendant_is_reaped_after_parent_exits() {
+  local case_dir rc wt_path started elapsed fake_pid=99999995
+  case_dir=$(make_case hung-lsof-descendant-refusal)
+  write_meta "$case_dir" no-mistakes ship
+  land_shippable_commit "$case_dir"
+  wt_path=$(cd "$case_dir/wt" && pwd -P)
+  cat > "$case_dir/fakebin/lsof" <<EOF
+#!/usr/bin/env bash
+printf 'p%s\nfcwd\nn%s\n' '$fake_pid' '$wt_path'
+trap 'printf "term\\n" >> "$case_dir/lsof-signals.log"; exit 0' TERM
+bash -c 'trap "" TERM; while :; do sleep 1; done' &
+wait
+EOF
+  chmod +x "$case_dir/fakebin/lsof"
+
+  rc=0
+  started=$SECONDS
+  FM_TEARDOWN_LSOF_CENSUS_TIMEOUT=1 \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  elapsed=$((SECONDS - started))
+
+  expect_code 1 "$rc" "hung-lsof-descendant-refusal: teardown should refuse"
+  assert_present "$case_dir/lsof-signals.log" "hung-lsof-descendant-refusal: lsof parent never handled TERM"
+  [ "$elapsed" -le 10 ] || fail "hung-lsof-descendant-refusal: inherited-output descendant ran for ${elapsed}s"
+  assert_present "$case_dir/state/task-x1.meta" "hung-lsof-descendant-refusal: teardown removed task metadata"
+  pass "bounded census reaps a TERM-ignoring inherited-output descendant"
+}
+
 test_non_gnu_timeout_falls_back_to_bounded_perl() {
   local case_dir rc wt_path started elapsed fake_pid=99999996
   case_dir=$(make_case non-gnu-timeout-fallback)
@@ -5756,7 +5784,27 @@ EOF
   assert_present "$case_dir/lsof-signals.log" "non-gnu-timeout-fallback: Perl fallback never sent TERM"
   [ "$elapsed" -le 10 ] || fail "non-gnu-timeout-fallback: TERM-resistant census ran for ${elapsed}s"
   assert_present "$case_dir/state/task-x1.meta" "non-gnu-timeout-fallback: teardown removed task metadata"
-  pass "non-GNU timeout falls through to the bounded Perl runner"
+
+  case_dir=$(make_case non-gnu-timeout-signal-status)
+  write_meta "$case_dir" no-mistakes ship
+  land_shippable_commit "$case_dir"
+  cp "$TMP_ROOT/non-gnu-timeout-fallback/fakebin/timeout" "$case_dir/fakebin/timeout"
+  cp "$TMP_ROOT/non-gnu-timeout-fallback/fakebin/gtimeout" "$case_dir/fakebin/gtimeout"
+  cat > "$case_dir/fakebin/lsof" <<'SH'
+#!/usr/bin/env bash
+kill -TERM "$$"
+SH
+  chmod +x "$case_dir/fakebin/timeout" "$case_dir/fakebin/gtimeout" "$case_dir/fakebin/lsof"
+
+  rc=0
+  FM_TIMEOUT_MECHANISM_OVERRIDE=bash \
+  FM_NON_GNU_TIMEOUT_LOG="$case_dir/non-gnu-timeout-ran" \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  expect_code 1 "$rc" "non-gnu-timeout-signal-status: signalled census should refuse"
+  assert_absent "$case_dir/non-gnu-timeout-ran" "non-gnu-timeout-signal-status: incompatible timeout ran"
+  assert_present "$case_dir/state/task-x1.meta" "non-gnu-timeout-signal-status: signal death read as success"
+  pass "non-GNU timeout falls through with timeout and signal failures preserved"
 }
 
 test_persistent_scan_refuses_after_bounded_retries() {
@@ -6796,6 +6844,7 @@ test_reused_pid_identity_is_not_force_killed
 test_exec_changed_process_is_still_reaped
 test_process_spawned_during_grace_is_reaped_on_later_pass
 test_hung_lsof_census_refuses_before_removal
+test_hung_lsof_descendant_is_reaped_after_parent_exits
 test_non_gnu_timeout_falls_back_to_bounded_perl
 test_persistent_scan_refuses_after_bounded_retries
 test_process_exit_during_identity_lookup_does_not_refuse

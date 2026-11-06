@@ -1848,7 +1848,7 @@ backlog_done_args() {
       ;;
     *)
       if [ "$MODE" = local-only ] \
-         || { [ -z "$PR_URL" ] && landed_in_local_default; }; then
+         || { [ -z "$PR_URL" ] && teardown_owns_worktree && landed_in_local_default; }; then
         BACKLOG_DONE_ARGS=(--note "local main")
       elif [ -n "$PR_URL" ]; then
         BACKLOG_DONE_ARGS=(--pr "$PR_URL")

@@ -100,9 +100,30 @@ fm_external_timeout_path() {
   return 1
 }
 
+fm_gnu_timeout_path() {
+  local name timeout_path
+  for name in timeout gtimeout; do
+    timeout_path=$(type -P "$name" 2>/dev/null) || true
+    if [ -n "$timeout_path" ] && [ -x "$timeout_path" ] \
+      && "$timeout_path" --version 2>/dev/null | grep -q 'GNU coreutils'; then
+      printf '%s\n' "$timeout_path"
+      return 0
+    fi
+  done
+  return 1
+}
+
 fm_timeout_mechanism() {
   local timeout_path
-  if [ "${FM_TIMEOUT_MECHANISM_OVERRIDE:-}" = bash ]; then
+  if [ "${FM_TIMEOUT_REQUIRE_GNU:-0}" = 1 ]; then
+    if timeout_path=$(fm_gnu_timeout_path); then
+      printf '%s\n' "${timeout_path##*/}"
+    elif command -v perl >/dev/null 2>&1; then
+      printf 'perl\n'
+    else
+      printf 'bash\n'
+    fi
+  elif [ "${FM_TIMEOUT_MECHANISM_OVERRIDE:-}" = bash ]; then
     printf 'bash\n'
   elif timeout_path=$(fm_external_timeout_path); then
     printf '%s\n' "${timeout_path##*/}"
@@ -236,7 +257,11 @@ fm_run_timed() {  # <seconds> <command...>
   shift
   case "$(fm_timeout_mechanism)" in
     timeout|gtimeout)
-      timeout_path=$(fm_external_timeout_path) || return 127
+      if [ "${FM_TIMEOUT_REQUIRE_GNU:-0}" = 1 ]; then
+        timeout_path=$(fm_gnu_timeout_path) || return 127
+      else
+        timeout_path=$(fm_external_timeout_path) || return 127
+      fi
       fm_run_external_timeout "$timeout_path" "$seconds" "$@"
       ;;
     perl)

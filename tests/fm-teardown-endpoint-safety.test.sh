@@ -1042,7 +1042,7 @@ tomllib_python_available() {
 }
 
 test_reassigned_pool_slot_finishes_own_cleanup_without_touching_the_slot() {
-  local dir id=stale-task other=reassigned-task worker rc
+  local dir id=stale-task other=reassigned-task worker rc backlog
 
   # Dirty slot, --force, and a live worker inside it: --force authorizes
   # discarding this task's unlanded work, which is already gone with the slot,
@@ -1085,7 +1085,14 @@ test_reassigned_pool_slot_finishes_own_cleanup_without_touching_the_slot() {
     || fail "clean-slot fixture is not clean: $(git -C "$dir/worktree" status --porcelain)"
   fm_write_meta "$dir/home/state/$id.meta" \
     "window=firstmate:fm-$id" "endpoint_task_id=$id" \
-    "worktree=$dir/worktree" "project=$dir/project" "kind=ship"
+    "worktree=$dir/worktree" "project=$dir/project" "kind=ship" \
+    "mode=direct-PR" "spawn_gen=stale-task-generation"
+  git -C "$dir/project" branch -f main HEAD
+  printf '%s\n' '# Backlog' '' '## In flight' '' '## Queued' '' '## Done' \
+    > "$dir/home/data/backlog.md"
+  tasks-axi add "$id" "stale reassigned task" --kind ship \
+    --file "$dir/home/data/backlog.md" >/dev/null
+  tasks-axi start "$id" --file "$dir/home/data/backlog.md" >/dev/null
   claim_pool_slot "$dir" "$other" "$dir/other-home"
   ( cd "$dir/worktree" && exec sleep 30 ) &
   worker=$!
@@ -1099,6 +1106,11 @@ test_reassigned_pool_slot_finishes_own_cleanup_without_touching_the_slot() {
   [ "$rc" -eq 0 ] || fail "teardown of a clean ship task whose slot was reassigned failed: $(cat "$dir/stderr")"
   kill -0 "$worker" 2>/dev/null || fail "teardown killed the worker holding the clean reassigned pool slot"
   assert_reassigned_slot_left_alone "$dir" "$id" "$other" "clean reassigned slot without --force"
+  backlog=$(tasks-axi show "$id" --file "$dir/home/data/backlog.md" --full)
+  printf '%s\n' "$backlog" | grep -F 'state: done' >/dev/null \
+    || fail "clean reassigned slot: stale task's backlog item was not closed"
+  printf '%s\n' "$backlog" | grep -F 'body: local main' >/dev/null \
+    && fail "clean reassigned slot: stale task recorded the claimant's local-main landing"
   kill "$worker" 2>/dev/null || true
   wait "$worker" 2>/dev/null || true
 

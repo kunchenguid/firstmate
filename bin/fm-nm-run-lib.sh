@@ -21,25 +21,16 @@
 # form preserves stdout, stderr, and exit status; the checked form discards
 # stderr, while fm_nm_run keeps the fail-open query contract for read-only callers.
 # The no-mistakes forms route host reads through the opt-in home resolver below.
-fm_nm_bounded() {  # <dir> <timeout_secs> <command> <args...>
-  local dir=$1 timeout_secs=$2 have_timeout=none candidate
+fm_nm_bounded() (  # <dir> <timeout_secs> <command> <args...>
+  local dir=$1 timeout_secs=$2 lib_dir
   shift 2
-  for candidate in timeout gtimeout; do
-    if command -v "$candidate" >/dev/null 2>&1 \
-      && "$candidate" --version 2>/dev/null | grep -q 'GNU coreutils'; then
-      have_timeout=$candidate
-      break
-    fi
-  done
-  if [ "$have_timeout" = none ] && command -v perl >/dev/null 2>&1; then
-    have_timeout=perl
-  fi
-  case "$have_timeout" in
-    timeout|gtimeout) ( cd "$dir" && "$have_timeout" --kill-after=1s "$timeout_secs" "$@" ) ;;
-    perl)             ( cd "$dir" && perl -e 'my $t = shift; my $pid = fork; die "fork failed" unless defined $pid; if (!$pid) { setpgrp(0, 0); exec @ARGV } local $SIG{ALRM} = sub { kill "TERM", -$pid; select undef, undef, undef, 0.2; kill "KILL", -$pid; exit 124 }; alarm $t; waitpid $pid, 0; exit($? >> 8)' "$timeout_secs" "$@" ) ;;
-    *)        return 1 ;;
-  esac
-}
+  lib_dir=${BASH_SOURCE[0]%/*}
+  [ "$lib_dir" != "${BASH_SOURCE[0]}" ] || lib_dir=.
+  lib_dir=$(cd "$lib_dir" && pwd) || return 1
+  . "$lib_dir/fm-timeout-lib.sh" || return 1
+  cd "$dir" || return 1
+  FM_TIMEOUT_REQUIRE_GNU=1 fm_run_timed "$timeout_secs" "$@"
+)
 
 # Opt-in no-mistakes home resolver for sites that run one no-mistakes daemon
 # per isolated workspace, each against its own NM_HOME. The home cannot be
