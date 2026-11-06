@@ -9,9 +9,11 @@
 # The arms differ only in --disallowedTools, and the request's tool list must lose
 # exactly the excluded tool's schema.
 #
-# Enabled by default wherever claude and python3 are installed; FM_CLAUDE_TOOL_EXCLUDE_LIVE=1
-# makes an absent tool or an unusable claude (no login, so no request) a failure and
-# =0 skips. A host without a login skips otherwise.
+# The launch gets a clean environment, a private config directory and a synthetic API
+# key, so it needs no Claude Code login and cannot reach any endpoint but the capture
+# server, whatever provider variables the host sets. Enabled by default wherever claude
+# and python3 are installed; FM_CLAUDE_TOOL_EXCLUDE_LIVE=1 makes an absent tool or a claude
+# that sends no request a failure, and =0 skips.
 set -eu
 
 # shellcheck source=tests/lib.sh
@@ -26,7 +28,8 @@ stop_capture() {
   [ -z "$CAPTURE_PID" ] || kill "$CAPTURE_PID" 2>/dev/null || true
   CAPTURE_PID=''
 }
-trap 'stop_capture' EXIT
+# lib.sh's own EXIT trap is fm_test_cleanup; this one replaces it, so it must run it too.
+trap 'stop_capture; fm_test_cleanup' EXIT
 
 # unusable <reason>: skip when the host cannot run the comparison, fail when it was requested.
 unusable() {
@@ -52,13 +55,20 @@ capture_tools() {
   done
   [ -s "$port_file" ] || fail "the capture server did not start for $label"
   port=$(cat "$port_file")
+  # A clean environment, a private config directory and a synthetic key leave the
+  # capture server as the only endpoint this launch can reach: no inherited
+  # Bedrock, Vertex, proxy or login setting can send "say hi" to a real model.
   (
     cd "$TMP_ROOT" || exit 1
-    ANTHROPIC_BASE_URL="http://127.0.0.1:$port" \
-      fm_run_timed 40 claude -p "say hi" --max-turns 1 "$@" >/dev/null 2>&1 || true
+    fm_run_timed 40 env -i PATH="$PATH" HOME="$TMP_ROOT/home" TERM=dumb \
+      CLAUDE_CONFIG_DIR="$TMP_ROOT/claude-config" \
+      ANTHROPIC_API_KEY=sk-ant-synthetic-capture-only \
+      ANTHROPIC_BASE_URL="http://127.0.0.1:$port" \
+      DISABLE_AUTOUPDATER=1 CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 \
+      claude -p "say hi" --max-turns 1 "$@" >/dev/null 2>&1 || true
   )
   stop_capture
-  [ -s "$capture" ] || unusable "claude $CLAUDE_VERSION sent no model request for $label; is it logged in?"
+  [ -s "$capture" ] || unusable "claude $CLAUDE_VERSION sent no model request for $label"
   python3 -I - "$capture" >"$TMP_ROOT/$label.tools" <<'PY'
 import json, sys
 best = []
