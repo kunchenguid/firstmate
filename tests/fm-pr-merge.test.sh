@@ -3436,6 +3436,14 @@ test_expected_head_matching_reaches_each_forge() {
     *"head_commit_id=$FJ_HEAD"*) : ;;
     *) fail "expected-head-fj-match: the forge was not bound to the supplied head: '$merge_line'" ;;
   esac
+  case_dir=$(make_azure_devops_case expected-head-az-match)
+  run_pr_merge "$case_dir" task-x1 "$AZ_URL" --expected-head "$AZ_HEAD" \
+    > "$case_dir/stdout" 2> "$case_dir/stderr" \
+    || fail "expected-head-az-match: a matching head should complete: $(cat "$case_dir/stderr")"
+  # shellcheck disable=SC2016 # $head is a jq variable.
+  "$JQ_BIN" -e --arg head "$AZ_HEAD" '.lastMergeSourceCommit.commitId == $head' \
+    "$case_dir/az-rest-body.json" >/dev/null \
+    || fail "expected-head-az-match: the completion was not bound to the supplied head"
   pass "fm-pr-merge sends a matching --expected-head to each forge"
 }
 
@@ -3484,6 +3492,17 @@ test_expected_head_mismatch_refuses_before_merge() {
     "$case_dir/stderr" "expected-head-fj-before: the refusal did not name both heads"
   [ -z "$(tea_merge_line "$case_dir/tea.log")" ] \
     || fail "expected-head-fj-before: a Forgejo merge ran after the live head moved"
+  case_dir=$(make_azure_devops_case expected-head-az-before)
+  set +e
+  run_pr_merge "$case_dir" task-x1 "$AZ_URL" --expected-head "$old" \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "expected-head-az-before: a replaced head must refuse"
+  assert_grep "the live head is \"$AZ_HEAD\", not the expected head $old" \
+    "$case_dir/stderr" "expected-head-az-before: the refusal did not name both heads"
+  [ -z "$(az_completion_line "$case_dir/az.log")" ] \
+    || fail "expected-head-az-before: Azure DevOps completed after the live head moved"
   pass "fm-pr-merge refuses before any merge write when the live head differs from --expected-head"
 }
 

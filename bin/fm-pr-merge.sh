@@ -1215,6 +1215,12 @@ FIELDS
     || refusals="$refusals  - mergeStatus is \"${merge_status:-unreadable}\", not succeeded
 "
 
+  note_expected_head "$live_head"
+  if [ -n "$FM_PR_EXPECTED_HEAD_REFUSAL" ]; then
+    refusals="$refusals$FM_PR_EXPECTED_HEAD_REFUSAL
+"
+  fi
+
   if [ -n "$refusals" ]; then
     printf 'error: refusing to merge %s\n' "$URL" >&2
     printf '%s' "$refusals" >&2
