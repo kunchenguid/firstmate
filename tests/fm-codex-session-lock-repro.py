@@ -41,7 +41,7 @@ with tempfile.TemporaryDirectory(prefix='fm-codex-session-') as temp:
         (home / 'bin' / name).write_text('#!/usr/bin/env bash\nexit 0\n')
     (home / 'fakebin' / 'ps').write_text(f'''#!/usr/bin/env bash
 if [ "$*" = '-o comm= -p {os.getpid()}' ]; then printf '%s\\n' "${{FM_FIXTURE_COMM:-/opt/codex}}"; exit 0; fi
-if [ "$*" = '-o args= -p {os.getpid()}' ]; then printf '%s\\n' "${{FM_FIXTURE_ARGV0:-/opt/codex}} ${{FM_FIXTURE_SUBCOMMAND:-app-server}} --listen stdio://"; exit 0; fi
+if [ "$*" = '-o args= -p {os.getpid()}' ]; then printf '%s\\n' "${{FM_FIXTURE_ARGV0:-/opt/codex}} ${{FM_FIXTURE_SUBCOMMAND-app-server --listen stdio://}}"; exit 0; fi
 exec '{PS}' "$@"
 ''')
     (home / 'fakebin' / 'ps').chmod(0o755)
@@ -145,8 +145,15 @@ exec '{PS}' "$@"
     lock = '"$FM_HOME/bin/fm-lock.sh"'
     own = '. "$FM_HOME/bin/fm-session-lock-lib.sh"; fm_session_lock_owned_by_self "$FM_HOME/state"'
     for label, arguments in (
+        ('plain CLI', ''),
+        ('fm-spawn crewmate', '-m gpt-5.5 -c model_reasoning_effort="xhigh" --dangerously-bypass-approvals-and-sandbox --disable hooks -c notify=["bash","-c","touch /tmp/t"] FIRSTMATE_OP: v1 launch-brief'),
         ('option-first secondmate', '-m gpt-6.1-sol -c model_reasoning_effort="low" --dangerously-bypass-approvals-and-sandbox Launch brief'),
         ('approval-review secondmate', '-m gpt-6.1-sol --approve-for-me Launch brief'),
+        ('secondmate with server prompt text', '-m gpt-5.5 --approve-for-me FIRSTMATE_OP: v1 launch-brief Inspect codex app-server ownership'),
+        ('config value names server', '-c note="app-server" --approve-for-me FIRSTMATE_OP: Inspect ownership'),
+        ('split config without server token', '-c note="app-server exec" exec'),
+        ('long option values name server', '--model app-server --ask-for-approval app-server --sandbox app-server --cd app-server --profile app-server --disable app-server --enable app-server --image app-server --add-dir app-server Inspect ownership'),
+        ('attached option values name server', '-mapp-server -aapp-server -sapp-server -Capp-server -papp-server --model=app-server --config=note="app-server" --approve-for-me Inspect ownership'),
         ('embedded CLI primary', '--no-daemon --no-alt-screen --dangerously-bypass-hook-trust -a never -s danger-full-access -C ' + str(home) + ' Isolated supervision smoke prompt'),
     ):
         env['FM_FIXTURE_SUBCOMMAND'] = arguments
@@ -246,7 +253,8 @@ exec '{PS}' "$@"
     env.pop('FM_FIXTURE_ARGV0')
     env['FM_FIXTURE_SUBCOMMAND'] = '-c features.hooks=true app-server'
     assert run(lock, OTHER).returncode == 1, 'global config flags hid the native server'
-    assert run(own).returncode == 1, 'flattened config arguments proved native ownership'
+    assert run(own).returncode == 0, 'balanced config arguments lost native ownership'
+    assert run(lock).returncode == 0, 'balanced config arguments blocked native reentry'
     env.pop('FM_FIXTURE_SUBCOMMAND')
     # Old PID-only native locks cannot be upgraded by guessing their thread.
     (home / 'state/.lock-session').unlink()
@@ -275,10 +283,29 @@ exec '{PS}' "$@"
     (home / 'state/.lock').unlink()
     (home / 'state/checkpoint-ran').unlink()
     for arguments in (
+        'app-server --listen stdio://',
+        '-c features.hooks=true app-server',
+        '--config features.hooks=true app-server',
+        '--config=features.hooks=true app-server',
+        '-cfeatures.hooks=true app-server',
+        '-m gpt-5.5 -a never -s danger-full-access -C ' + str(home) + ' -p fixture --disable hooks --enable app-server app-server',
+    ):
+        env['FM_FIXTURE_SUBCOMMAND'] = arguments
+        assert run(lock, None).returncode == 1, 'native server without identity acquired an empty home: ' + arguments
+        assert not (home / 'state/.lock').exists(), 'unidentified server published a lock'
+        assert not (home / 'state/.lock-session').exists(), 'unidentified server published an identity'
+        assert run(lock).returncode == 0, 'identified native server could not acquire an empty home: ' + arguments
+        assert (home / 'state/.lock-session').read_text().strip() == 'codex-native:' + OWNER
+        assert run(own).returncode == 0, 'identified native server lost ownership'
+        assert run(lock, OTHER).returncode == 1, 'identified native server accepted a competing session'
+        (home / 'state/.lock').unlink()
+        (home / 'state/.lock-session').unlink()
+    for arguments in (
         '-c sandbox_permissions=[ "disk-full-read-access" ] app-server',
         '--config sandbox_permissions=[ "disk-full-read-access" ] app-server',
         '--config=sandbox_permissions=[ "disk-full-read-access" ] app-server',
-        '-c note="app-server exec" exec',
+        '-cfeatures={ hooks=true } app-server',
+        '-c note="split value" app-server',
     ):
         env['FM_FIXTURE_SUBCOMMAND'] = arguments
         for identity in (OWNER, OTHER, None):
