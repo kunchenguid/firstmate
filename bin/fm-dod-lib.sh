@@ -938,7 +938,10 @@ fm_dod_claim_destination() {  # <kind> <mode> <meta> <claim-pr-url>
     fm_pr_require_base "$@"
   ' _ "$_FM_PR_LIB_ROOT/bin/fm-pr-lib.sh" "$meta" "$FM_PR_PROVIDER" "$url" \
     "$FM_PR_HOST" "$FM_PR_PATH" "$FM_PR_NUMBER" 2>&1); then
-    expected=$(fm_pr_expected_base "$meta") || expected=unavailable
+    if ! expected=$(fm_pr_expected_base "$meta"); then
+      printf 'expected PR base unavailable, actual base unavailable: %s\n' "$reason"
+      return 1
+    fi
     printf '%s\n' "${reason:-expected PR base $expected, actual base unavailable}"
     return 1
   fi

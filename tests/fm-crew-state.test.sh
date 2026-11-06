@@ -1584,7 +1584,7 @@ test_ready_claim_sources_require_destination() {
         url=https://github.com/o/r/pull/1
         case "$source" in
           gitlab) url=https://gitlab.com/group/repo/-/merge_requests/1 ;;
-          forgejo) url=https://git.example.org/owner/repo/pull/1 ;;
+          forgejo) url=https://git.example.org/owner/repo/pulls/1 ;;
           gerrit) url=https://review.example.com/c/project/+/1 ;;
         esac
         fm_write_meta "$d/state/destination.meta" "window=fm:fm-destination" \
@@ -1835,7 +1835,8 @@ test_terminal_passed_with_failed_gitlab_read_reports_unknown() {
   FM_FAKE_GLAB_READ_FAIL=1
   FM_FAKE_AXI_STATUS="$(run_passed_with_pr fm/feat-dgitlabunknown https://gitlab.com/group/repo/-/merge_requests/11)"
   out=$(run_crew_state "$d" feat-dgitlabunknown)
-  assert_contains "$out" "run passed: PR state unknown (unreadable)" "failed GitLab read is honest unknown"
+  assert_contains "$out" 'state: blocked' 'failed GitLab destination read refuses readiness'
+  assert_contains "$out" 'actual base unavailable' 'failed GitLab read names missing destination proof'
   assert_not_contains "$out" "PR merged" "failed GitLab read must not be reported merged"
   pass "terminal passed run handles failed GitLab read"
 }
@@ -1846,7 +1847,7 @@ test_terminal_passed_with_forgejo_pull_reports_its_state() {
   for spec in "open|open|false|0|run passed: PR open" \
     "merged|closed|true|0|run passed: PR merged" \
     "closed|closed|false|0|run passed: PR closed" \
-    "unreadable|open|false|1|run passed: PR state unknown (unreadable)"; do
+    "unreadable|open|false|1|actual base unavailable"; do
     IFS='|' read -r name state merged fail expected <<<"$spec"
     d=$(new_case "passed-forgejo-$name")
     make_repo_on_branch "$d/wt" "fm/feat-dforgejo$name"
@@ -1929,7 +1930,8 @@ test_terminal_passed_with_unreadable_gerrit_change_reports_unknown() {
   FM_FAKE_GERRIT_READ_FAIL=1
   FM_FAKE_AXI_STATUS="$(run_passed_with_pr fm/feat-dgerritunknown "$url")"
   out=$(run_crew_state "$d" feat-dgerritunknown)
-  assert_contains "$out" "run passed: PR state unknown (unreadable)" "failed Gerrit read is honest unknown"
+  assert_contains "$out" 'state: blocked' 'failed Gerrit destination read refuses readiness'
+  assert_contains "$out" 'actual base unavailable' 'failed Gerrit read names missing destination proof'
   assert_not_contains "$out" "PR merged" "failed Gerrit read must not be reported merged"
 
   # A record naming another change can never answer for this one, however the
@@ -1940,7 +1942,8 @@ test_terminal_passed_with_unreadable_gerrit_change_reports_unknown() {
   FM_FAKE_GERRIT_CHANGE=4203
   FM_FAKE_AXI_STATUS="$(run_passed_with_pr fm/feat-dgerritunknown "$url")"
   out=$(run_crew_state "$d" feat-dgerritunknown)
-  assert_contains "$out" "run passed: PR state unknown (unreadable)" "mismatched Gerrit record is honest unknown"
+  assert_contains "$out" 'state: blocked' 'another Gerrit change cannot prove the destination'
+  assert_contains "$out" 'actual base unavailable' 'mismatched Gerrit record supplies no destination proof'
   assert_not_contains "$out" "PR merged" "another change's merged record must not report merged"
   pass "terminal passed run handles an unreadable or mismatched Gerrit read"
 }
