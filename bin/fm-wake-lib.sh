@@ -195,7 +195,7 @@ _fm_wake_require_tuning() {
     # A minimal install (remote recovery fixture) ships this library alone: the
     # same sanitizing validator and a no-op loader keep the shipped defaults.
     fm_supervision_tuning_int() {
-      case ${1:-} in ''|*[!0-9]*) printf '%s\n' "${2:-0}" ;; *) printf '%s\n' "$1" ;; esac
+      case ${1:-} in ''|*[!0-9]*) printf '%s\n' "${2:-0}" ;; *) printf '%s\n' "$((10#$1))" ;; esac
     }
     fm_supervision_tuning_load() { return 0; }
     return 0

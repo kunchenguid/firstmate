@@ -151,16 +151,6 @@ fi
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 
-# Home-local supervision tuning (config/supervision-tuning): the arm must read
-# the same file the watcher reads, so its freshness grace and stall bound
-# derive from the SAME effective cadence a live watcher actually waits on -
-# the slower of the fast poll and the idle poll - not from the shipped
-# 300s default, which would let the arm evict or refuse a healthy watcher
-# whose idle cadence stretches past it. fm_effective_poll_seconds
-# (bin/fm-wake-lib.sh) is the single owner of the derivation shape - the
-# slower of the fast poll and the idle poll - shared with the watcher.
-ARM_EFFECTIVE_POLL=$(fm_effective_poll_seconds)
-
 # Home-local watcher tuning is independent of Relay's generated cadence
 # artifact. Relay, when active, is sourced second so its required 30s cadence
 # remains authoritative for an opted-in home.
@@ -169,6 +159,18 @@ CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 [ -f "$CONFIG/watch.env" ] && . "$CONFIG/watch.env"
 # shellcheck source=/dev/null
 [ -f "$CONFIG/x-mode.env" ] && . "$CONFIG/x-mode.env"
+
+# Home-local supervision tuning (config/supervision-tuning): the arm must read
+# the same file the watcher reads, so its freshness grace and stall bound
+# derive from the SAME effective cadence a live watcher actually waits on -
+# the slower of the fast poll and the idle poll - not from the shipped
+# 300s default, which would let the arm evict or refuse a healthy watcher
+# whose idle cadence stretches past it. fm_effective_poll_seconds
+# (bin/fm-wake-lib.sh) is the single owner of the derivation shape - the
+# slower of the fast poll and the idle poll - shared with the watcher.
+# Derived after watch.env/x-mode.env are sourced so FM_POLL/FM_IDLE_POLL set
+# by a home env file reach the derivation, exactly as they reach the watcher.
+ARM_EFFECTIVE_POLL=$(fm_effective_poll_seconds)
 
 WATCH="$SCRIPT_DIR/fm-watch.sh"
 ARM_SCRIPT="$SCRIPT_DIR/${BASH_SOURCE[0]##*/}"

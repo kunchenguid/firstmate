@@ -61,6 +61,13 @@ fm_supervision_tuning_load() {
   else
     return 0
   fi
+  # Same normalization fm-brief.sh applies before reading every other config
+  # file: a relative override resolves against the launch cwd, so the tuning
+  # file read here is the same one every consumer of the resolved path reads.
+  case "$cfg" in
+    /*) ;;
+    *) cfg=$PWD/$cfg ;;
+  esac
   cfg=$cfg/supervision-tuning
   [ -f "$cfg" ] || return 0
   while IFS= read -r line || [ -n "$line" ]; do
