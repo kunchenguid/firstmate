@@ -1571,6 +1571,96 @@ test_terminal_passed() {
   pass "terminal passed run is authoritative"
 }
 
+test_completed_run_closed_unmerged() {
+  local route provider disposition with_ledger failures=0
+  for route in passed passed-with-override passed-with-skips completed; do
+    for provider in github gitlab; do
+      for disposition in closed merged; do
+        for with_ledger in 0 1; do
+          (
+            reset_fakes
+            local d out url expected
+            d=$(new_case "completed-$route-$provider-$disposition-$with_ledger")
+            make_repo_on_branch "$d/wt" fm/closure
+            make_fakebin "$d" >/dev/null
+            fm_write_meta "$d/state/closure.meta" "window=fm:fm-closure" "worktree=$d/wt" "kind=ship"
+            case "$provider" in
+              github) url=https://github.com/o/r/pull/203 ;;
+              gitlab) url=https://gitlab.com/o/r/-/merge_requests/203 ;;
+            esac
+            FM_FAKE_AXI_STATUS=$(run_passed_with_pr fm/closure "$url")
+            if [ "$route" = completed ]; then
+              FM_FAKE_AXI_STATUS=$(printf '%s\n' "$FM_FAKE_AXI_STATUS" | sed '/^outcome:/d')
+            else
+              FM_FAKE_AXI_STATUS=${FM_FAKE_AXI_STATUS/outcome: passed/outcome: $route}
+            fi
+            if [ "$with_ledger" = 1 ]; then
+              FM_FAKE_AXI_HOME="count: 1 of 1 total
+runs[1]{id,branch,status,head,pr}:
+  \"01RUN\",fm/closure,completed,$FM_FAKE_RUN_HEAD,\"$url\""
+              FM_FAKE_AXI_STATUS_RUN="$FM_FAKE_AXI_STATUS"
+              FM_FAKE_RUNS_LIST="  completed  fm/closure ${FM_FAKE_RUN_HEAD:0:8}  2026-09-28 12:00  $url"
+            fi
+            FM_FAKE_PR_STATE=CLOSED
+            FM_FAKE_PR_MERGED=false
+            FM_FAKE_GLAB_STATE=closed
+            expected=failed
+            if [ "$disposition" = merged ]; then
+              FM_FAKE_PR_STATE=MERGED
+              FM_FAKE_PR_MERGED=true
+              FM_FAKE_GLAB_STATE=merged
+              expected="done"
+            fi
+            out=$(run_crew_state "$d" closure)
+            assert_contains "$out" "state: $expected" "$route/$provider/$disposition/$with_ledger: current disposition governs success: $out"
+            assert_not_contains "$out" "superseded by a newer completed run" "completed run must never supersede itself: $out"
+            if [ "$disposition" = closed ]; then
+              assert_contains "$out" "PR closed unmerged" "closure is distinguished from merge"
+              assert_not_contains "$out" "state: done" "closed unmerged must not pass"
+            else
+              assert_contains "$out" "PR merged" "merged delivery remains successful"
+            fi
+          ) || failures=$((failures + 1))
+        done
+      done
+    done
+  done
+
+  # Coarse ledger fallback and same-head ledger supersession must also fail
+  # closed when the completed ledger row's pull request was closed unmerged.
+  (
+    reset_fakes
+    local d short out
+    d=$(new_case completed-ledger-closed-unmerged)
+    make_repo_on_branch "$d/wt" fm/closure-ledger
+    short=$(git -C "$d/wt" rev-parse --short=8 HEAD)
+    make_fakebin "$d" >/dev/null
+    fm_write_meta "$d/state/closure-ledger.meta" "window=fm:fm-closure-ledger" "worktree=$d/wt" "kind=ship"
+    FM_FAKE_PR_STATE=CLOSED
+    FM_FAKE_PR_MERGED=false
+
+    FM_FAKE_AXI_STATUS=$(run_running fm/other-crew)
+    FM_FAKE_RUNS_LIST="  running    fm/other-crew aaaaaaa  2026-09-28 12:05
+  completed  fm/closure-ledger $short  2026-09-28 12:00  https://github.com/o/r/pull/204"
+    out=$(run_crew_state "$d" closure-ledger)
+    assert_contains "$out" "state: failed" "coarse completed row with closed PR -> failed: $out"
+    assert_contains "$out" "PR closed unmerged" "coarse completed row with closed PR reports unmerged: $out"
+    assert_not_contains "$out" "state: done" "coarse completed row with closed PR must not pass"
+
+    FM_FAKE_AXI_STATUS=$(run_failed_with_pr fm/closure-ledger https://github.com/o/r/pull/203)
+    FM_FAKE_RUNS_LIST="  completed  fm/closure-ledger $short  2026-09-28 12:10  https://github.com/o/r/pull/204
+  failed     fm/closure-ledger $short  2026-09-28 12:00  https://github.com/o/r/pull/203"
+    out=$(run_crew_state "$d" closure-ledger)
+    assert_contains "$out" "state: failed" "newer completed ledger row with closed PR -> failed: $out"
+    assert_contains "$out" "PR closed unmerged" "newer completed ledger row with closed PR reports unmerged: $out"
+    assert_contains "$out" "pr=https://github.com/o/r/pull/204" "newer completed ledger row publishes its own PR: $out"
+    assert_not_contains "$out" "state: done" "newer completed ledger row with closed PR must not pass"
+  ) || failures=$((failures + 1))
+
+  [ "$failures" -eq 0 ] || fail "$failures completed run disposition regressions"
+  pass "completed and passing outcomes distinguish closed-unmerged PRs from merged PRs"
+}
+
 test_terminal_passed_with_override() {
   reset_fakes
   local d; d=$(new_case passed-with-override)
@@ -1761,7 +1851,7 @@ test_terminal_passed_with_forgejo_pull_reports_its_state() {
   local d read_log out spec state merged fail expected name
   for spec in "open|open|false|0|run passed: PR open" \
     "merged|closed|true|0|run passed: PR merged" \
-    "closed|closed|false|0|run passed: PR closed" \
+    "closed|closed|false|0|PR closed unmerged" \
     "unreadable|open|false|1|run passed: PR state unknown (unreadable)"; do
     IFS='|' read -r name state merged fail expected <<<"$spec"
     d=$(new_case "passed-forgejo-$name")
@@ -1778,6 +1868,9 @@ test_terminal_passed_with_forgejo_pull_reports_its_state() {
     FM_FAKE_AXI_STATUS="$(run_passed_with_pr "fm/feat-dforgejo$name" https://git.example.org/team/repo/pulls/12)"
     out=$(run_crew_state "$d" "feat-dforgejo$name")
     assert_contains "$out" "$expected" "Forgejo pull request reading $name is reported"
+    if [ "$name" = closed ]; then
+      assert_contains "$out" "state: failed" "closed Forgejo pull request is not successful delivery"
+    fi
     [ "$name" = merged ] || assert_not_contains "$out" "PR merged" "Forgejo $name pull request must not be reported merged"
     assert_grep 'api --login fj --repo team/repo /repos/{owner}/{repo}/pulls/12' "$read_log" \
       "Forgejo read uses the host's tea login and the parsed project path"
@@ -1828,7 +1921,8 @@ test_terminal_passed_with_merged_gerrit_change_reports_merged() {
   # An abandoned change is this report's closed, and is never merged.
   FM_FAKE_GERRIT_STATUS=ABANDONED
   out=$(run_crew_state "$d" feat-dgerritmerged)
-  assert_contains "$out" "run passed: PR closed" "abandoned Gerrit change is reported closed"
+  assert_contains "$out" "PR closed unmerged" "abandoned Gerrit change is reported closed"
+  assert_contains "$out" "state: failed" "abandoned Gerrit change is not successful delivery"
   assert_not_contains "$out" "PR merged" "abandoned Gerrit change must not be reported merged"
   pass "terminal passed run reads merged and abandoned Gerrit change state"
 }
@@ -6793,6 +6887,7 @@ test_ci_fixing_after_green_stays_working
 test_top_level_fixing_ci_running_after_green_stays_working
 test_top_level_fixing_done_log_stays_working
 test_terminal_passed
+test_completed_run_closed_unmerged
 test_terminal_passed_with_override
 test_terminal_passed_with_skips
 test_terminal_passed_uses_matching_retirement_receipt_without_forge

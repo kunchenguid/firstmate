@@ -21,6 +21,7 @@
 # FM_CREW_STATE_NO_FORGE=1 keeps the receipt read but skips the forge fallback.
 # An absent or unreadable PR identity yields an honest unknown, never an
 # optimistic merged claim.
+# A confirmed closed, unmerged PR makes a terminal passing/completed run failed.
 # Output is one stable, parseable, token-tight line firstmate can read every
 # heartbeat:
 #
@@ -105,7 +106,9 @@
 #      The run-step is AUTHORITATIVE: running/fixing -> working, ci -> working
 #      (the id-addressed detail read carries step words the overview does not),
 #      awaiting_approval/fix_review -> parked (with gate findings), terminal
-#      passed/checks-passed/passed-with-override/passed-with-skips -> done,
+#      passed/checks-passed/passed-with-override/passed-with-skips -> done
+#      (except a passing/completed run whose PR is confirmed closed unmerged ->
+#      failed),
 #      failed -> failed, cancelled -> unknown (no verdict unless the green
 #      delivery safeguard below applies). A cancelled outcome takes precedence
 #      over an interrupted step's failed status or outstanding gate findings;
@@ -516,14 +519,18 @@ change_read_record_bounded() {  # <host> <number>
 
 passed_pr_detail() {
   local provider url host path number owner repo raw_pr state_lc
-  raw_pr=$(strip_quotes "$(nm_field pr)")
+  if [ "$#" -gt 0 ]; then
+    raw_pr=$1
+  else
+    raw_pr=$(strip_quotes "$(nm_field pr)")
+  fi
   if fm_pr_url_parse "$raw_pr"; then
     provider=$FM_PR_PROVIDER
     url=$FM_PR_URL
     host=$FM_PR_HOST
     path=$FM_PR_PATH
     number=$FM_PR_NUMBER
-  elif fm_pr_metadata_identity_parse "$META"; then
+  elif [ "$#" -eq 0 ] && fm_pr_metadata_identity_parse "$META"; then
     provider=$FM_PR_META_PROVIDER
     url=$FM_PR_META_URL
     host=$FM_PR_META_HOST
@@ -621,6 +628,16 @@ passed_pr_detail() {
       printf 'run passed: PR state unknown (unreadable: %s)' "$url"
       ;;
   esac
+}
+# A completed validator can mean its PR was closed without merging.
+# Reuse the bounded disposition read so closure never becomes delivery success.
+nm_completed_run_state() {
+  RUN_STATE="done"
+  RUN_DETAIL=$(passed_pr_detail)
+  if [ "$RUN_DETAIL" = "run passed: PR closed" ]; then
+    RUN_STATE=failed
+    RUN_DETAIL="PR closed unmerged"
+  fi
 }
 # Finding count from a findings[N]{...} table header; empty when none.
 nm_findings_count() {
@@ -1273,7 +1290,15 @@ if [ "$HAVE_RUN" = 1 ]; then
     # supervisor through fm-classify-lib.sh's status_span_first_actionable.
     case "$COARSE_STATUS" in
       running) RUN_STATE=working; RUN_DETAIL="validating (background run)" ;;
-      completed) RUN_STATE="done";  RUN_DETAIL="run completed" ;;
+      completed)
+        coarse_row=$(fm_nm_runs_newest_for_branch "$CREW_BRANCH" "$RUNS_LIST")
+        coarse_rest=${coarse_row#*|}
+        coarse_pr=${coarse_rest#*|}
+        if [ -n "$coarse_pr" ] && [ "$(passed_pr_detail "$coarse_pr")" = "run passed: PR closed" ]; then
+          RUN_STATE=failed; RUN_DETAIL="PR closed unmerged"
+        else
+          RUN_STATE="done"; RUN_DETAIL="run completed"
+        fi ;;
       failed)
         # The ledger row is terminal but the coarse path has no steps table
         # and no ci log, so the orphaned-monitor shape cannot be recognized
@@ -1309,8 +1334,8 @@ if [ "$HAVE_RUN" = 1 ]; then
 
     if [ -n "$outcome" ]; then
       case "$outcome" in
-        passed|passed-with-override) RUN_STATE="done"; RUN_DETAIL=$(passed_pr_detail) ;;
-        passed-with-skips) RUN_STATE="done"; RUN_DETAIL="$(passed_pr_detail) (publication/CI verification skipped)" ;;
+        passed|passed-with-override) nm_completed_run_state ;;
+        passed-with-skips) nm_completed_run_state; RUN_DETAIL="$RUN_DETAIL (publication/CI verification skipped)" ;;
         checks-passed) RUN_STATE="done"; RUN_DETAIL="checks green: PR ready for review" ;;
         failed)
           if nm_reclassify_failed_run_as_held_green; then :; else
@@ -1344,7 +1369,7 @@ if [ "$HAVE_RUN" = 1 ]; then
       case "$status" in
         ci)             RUN_STATE=working; RUN_DETAIL="ci running" ;;
         running|fixing) RUN_STATE=working; RUN_DETAIL="validating ($status)" ;;
-        completed)      RUN_STATE="done"; RUN_DETAIL="run completed" ;;
+        completed)      nm_completed_run_state ;;
         failed)
           if nm_reclassify_failed_run_as_held_green; then :; else
             RUN_STATE=failed; RUN_DETAIL="run failed"
@@ -1488,11 +1513,17 @@ if [ "$HAVE_RUN" = 1 ]; then
     if [ "$RUN_STATE" = "failed" ]; then
       case "$LEDGER_STATUS" in
         completed)
-          SUPERSEDED_DETAIL="run superseded by a newer completed run on this branch (earlier $READING_DETAIL)"
-          [ -z "$SELECTED_RUN_ID" ] \
-            || SUPERSEDED_DETAIL="$SUPERSEDED_DETAIL${SEP}earlier run: $SELECTED_RUN_ID"
-          TERMINAL_PR=$NEWEST_PR
-          emit_run "done" "$SUPERSEDED_DETAIL" "$TERMINAL_PR"
+          if [ "$NEWEST_ROW_AGREES" != 1 ]; then
+            TERMINAL_PR=$NEWEST_PR
+            if [ -n "$NEWEST_PR" ] && [ "$(passed_pr_detail "$NEWEST_PR")" = "run passed: PR closed" ]; then
+              LEDGER_DETAIL="PR closed unmerged from the ledger's completed row for this worktree; the $READING_DETAIL reading could not be bound to it"
+              emit_run failed "$LEDGER_DETAIL" "$TERMINAL_PR"
+            fi
+            SUPERSEDED_DETAIL="run superseded by a newer completed run on this branch (earlier $READING_DETAIL)"
+            [ -z "$SELECTED_RUN_ID" ] \
+              || SUPERSEDED_DETAIL="$SUPERSEDED_DETAIL${SEP}earlier run: $SELECTED_RUN_ID"
+            emit_run "done" "$SUPERSEDED_DETAIL" "$TERMINAL_PR"
+          fi
           ;;
         failed)
           if [ "$NEWEST_ROW_AGREES" != 1 ]; then
