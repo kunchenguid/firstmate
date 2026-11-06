@@ -986,6 +986,45 @@ test_local_default_branch_reachability_is_landed() {
   pass "local default reachability applies only to tasks targeting the default branch"
 }
 
+test_local_default_landing_records_backlog_evidence() {
+  local case_dir mode rc wt_head out url=https://github.com/example/repo/pull/7
+  for mode in direct-PR no-mistakes; do
+    case_dir=$(make_case "local-default-backlog-$mode")
+    write_meta "$case_dir" "$mode" ship
+    seed_backlog_in_flight "$case_dir"
+    wt_commit_file "$case_dir" feature.txt hello "add feature"
+    wt_head=$(git -C "$case_dir/wt" rev-parse HEAD)
+    git -C "$case_dir/project" update-ref refs/heads/main "$wt_head"
+
+    rc=0
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+    expect_code 0 "$rc" "local-default-backlog-$mode: teardown should succeed"
+    [ "$(backlog_row_state "$case_dir")" = done ] \
+      || fail "local-default-backlog-$mode: teardown did not close the backlog item"
+    out=$(tasks-axi show task-x1 --file "$case_dir/data/backlog.md" --full)
+    printf '%s\n' "$out" | grep -F 'body: local main' >/dev/null \
+      || fail "local-default-backlog-$mode: closed item omitted local-main landing evidence"
+  done
+
+  case_dir=$(make_case local-default-backlog-pr)
+  write_meta "$case_dir" direct-PR ship
+  printf 'pr=%s\n' "$url" >> "$case_dir/state/task-x1.meta"
+  seed_backlog_in_flight "$case_dir"
+  wt_commit_file "$case_dir" feature.txt hello "add feature"
+  wt_head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  git -C "$case_dir/project" update-ref refs/heads/main "$wt_head"
+
+  rc=0
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  expect_code 0 "$rc" "local-default-backlog-pr: teardown should succeed"
+  out=$(tasks-axi show task-x1 --file "$case_dir/data/backlog.md" --full)
+  printf '%s\n' "$out" | grep -F "links: \"pr:$url\"" >/dev/null \
+    || fail "local-default-backlog-pr: teardown replaced the available PR evidence"
+  pass "local-default teardown records landing evidence for every ship mode"
+}
+
 # Send the task branch's commits to <target> on origin from a separate clone, so
 # the task copy's tracking refs do not show them. Args: case_dir target
 land_task_commits_from_other_clone() {
@@ -5623,7 +5662,7 @@ test_process_spawned_during_grace_is_reaped_on_later_pass() {
 }
 
 test_hung_lsof_census_refuses_before_removal() {
-  local case_dir rc wt_path fake_pid=99999997
+  local case_dir rc wt_path started elapsed fake_pid=99999997
   case_dir=$(make_case hung-lsof-census-refusal)
   write_meta "$case_dir" no-mistakes ship
   land_shippable_commit "$case_dir"
@@ -5631,10 +5670,8 @@ test_hung_lsof_census_refuses_before_removal() {
   cat > "$case_dir/fakebin/lsof" <<EOF
 #!/usr/bin/env bash
 printf 'p%s\nfcwd\nn%s\n' '$fake_pid' '$wt_path'
-sleep 300 &
-child=\$!
-trap 'kill "\$child" 2>/dev/null || true; wait "\$child" 2>/dev/null || true; exit 143' TERM
-wait "\$child"
+trap 'printf "term\\n" >> "$case_dir/lsof-signals.log"' TERM
+while :; do sleep 1; done
 EOF
   cat > "$case_dir/fakebin/treehouse" <<EOF
 #!/usr/bin/env bash
@@ -5643,10 +5680,14 @@ EOF
   chmod +x "$case_dir/fakebin/lsof" "$case_dir/fakebin/treehouse"
 
   rc=0
+  started=$SECONDS
   FM_TEARDOWN_LSOF_CENSUS_TIMEOUT=1 \
     run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  elapsed=$((SECONDS - started))
 
   expect_code 1 "$rc" "hung-lsof-census-refusal: teardown should refuse"
+  assert_present "$case_dir/lsof-signals.log" "hung-lsof-census-refusal: lsof never resisted TERM"
+  [ "$elapsed" -le 10 ] || fail "hung-lsof-census-refusal: TERM-resistant census ran for ${elapsed}s"
   assert_grep "REFUSED: cannot determine leaked processes under $case_dir/wt for task-x1 (lsof failed)" "$case_dir/stderr" \
     "hung-lsof-census-refusal: incomplete census did not refuse"
   assert_present "$case_dir/wt" "hung-lsof-census-refusal: teardown removed the worktree"
@@ -6564,6 +6605,7 @@ test_teardown_manual_backend_leaves_the_backlog_to_the_operator
 test_local_only_truly_unpushed_refuses
 test_local_only_merged_to_local_main_allows
 test_local_default_branch_reachability_is_landed
+test_local_default_landing_records_backlog_evidence
 test_landed_on_other_origin_branch_with_stale_refs_allows
 test_refresh_failure_does_not_read_as_landed
 test_refreshed_refs_still_refuse_unreachable_commits

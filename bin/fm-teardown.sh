@@ -1802,13 +1802,15 @@ content_in_default() {
 # protected. A task targeting another recorded base must land there instead.
 # Returns non-zero when the local default branch cannot be resolved, so the
 # caller refuses rather than guesses.
+LANDED_VIA_LOCAL_DEFAULT=0
 landed_in_local_default() {
   local name ref
   name=$(default_branch) || return 1
   [ -z "$BASE_BRANCH" ] || [ "$BASE_BRANCH" = "$name" ] || return 1
   ref="refs/heads/$name"
   git -C "$WT" rev-parse --quiet --verify "$ref^{commit}" >/dev/null 2>&1 || return 1
-  git -C "$WT" merge-base --is-ancestor HEAD "$ref" 2>/dev/null
+  git -C "$WT" merge-base --is-ancestor HEAD "$ref" 2>/dev/null || return 1
+  LANDED_VIA_LOCAL_DEFAULT=1
 }
 
 # Has the worktree's committed work actually LANDED, though its commits are not
@@ -1847,7 +1849,8 @@ backlog_done_args() {
       fi
       ;;
     *)
-      if [ "$MODE" = local-only ]; then
+      if [ "$MODE" = local-only ] \
+         || { [ "$LANDED_VIA_LOCAL_DEFAULT" = 1 ] && [ -z "$PR_URL" ]; }; then
         BACKLOG_DONE_ARGS=(--note "local main")
       elif [ -n "$PR_URL" ]; then
         BACKLOG_DONE_ARGS=(--pr "$PR_URL")
@@ -2193,6 +2196,7 @@ read_worktree_dirt() {
 
 validate_worktree_teardown_safety() {
   local dirty unpushed_raw unpushed DEFAULT unmerged_raw unmerged branch
+  LANDED_VIA_LOCAL_DEFAULT=0
   [ -d "$WT" ] || return 0
   [ "$FORCE" != "--force" ] || return 0
   case "$KIND" in
@@ -3971,6 +3975,10 @@ if teardown_owns_worktree && [ -d "$WT" ] && [ "$FORCE" != "--force" ]; then
 fi
 
 if [ "$TEARDOWN_BACKLOG_APPLIES" = 1 ]; then
+  backlog_done_args || {
+    echo "error: the pending backlog $BACKLOG_TRANSITION for $ID is not replayable; refusing destructive teardown" >&2
+    exit 1
+  }
 # Roll the accepted legacy incarnation's stamp back to the record's exact
 # pre-stamp bytes. Uses perl - already in the teardown lifecycle's curated PATH
 # (truncate is not, and is absent on stock macOS) - and verifies the restored
