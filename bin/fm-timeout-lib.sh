@@ -32,8 +32,10 @@
 #       the command and restore that redirected stdin afterwards; they do not
 #       attach a terminal, and a closed stdin does not fail the call.
 #       On caller INT/HUP/TERM, the Perl fallback reaps its command group with
-#       up to 0.2s TERM-to-KILL grace, then restores the caller's traps and
-#       redelivers the signal. If the caller continues, it returns 128+n.
+#       up to 0.2s TERM-to-KILL grace, then restores traps active in the current
+#       process and redelivers the signal. In a command substitution, inherited
+#       but inactive parent handlers stay disabled. If the caller continues,
+#       it returns 128+n.
 #       Its deadline and cleanup grace use a monotonic clock.
 #
 #   fm_exec_timed <seconds> <grace-seconds> <command> [args...]
@@ -239,6 +241,8 @@ fm_run_timed() {  # <seconds> <command...>
       ;;
     perl)
       local saved_traps='' caller_trap signal runner_pid='' interrupted='' runner_rc monitor_was_on=0
+      # Bash 4.3+ drops inherited inactive trap strings on any trap change.
+      # Older Bash retains them across a reset, so save only strings it clears.
       trap - KILL
       for signal in INT HUP TERM; do
         caller_trap=$(trap -p "$signal")
