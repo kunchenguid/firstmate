@@ -84,6 +84,86 @@ derive_key() { # <origin> <block-file>
   printf 'droid-askuser-%s' "$digest"
 }
 
+parse_binding_fields() { # <binding>; origin, key and state on stdout, rejection on stderr
+  local binding=$1 origin='' key='' state='' field
+  local origin_count=0 key_count=0 state_count=0 extra_count=0
+  local -a fields
+  read -r -a fields <<<"$binding"
+  for field in "${fields[@]}"; do
+    case "$field" in
+    origin=*)
+      origin_count=$((origin_count + 1))
+      origin=${field#origin=}
+      ;;
+    key=*)
+      key_count=$((key_count + 1))
+      key=${field#key=}
+      ;;
+    state=*)
+      state_count=$((state_count + 1))
+      state=${field#state=}
+      ;;
+    *) extra_count=$((extra_count + 1)) ;;
+    esac
+  done
+  if [ "$origin_count" -eq 0 ]; then
+    echo 'has no valid origin= slug in its [firstmate-decision] line' >&2
+    return 1
+  fi
+  if [ "$key_count" -eq 0 ]; then
+    echo 'has no valid key= slug or key=derive in its [firstmate-decision] line' >&2
+    return 1
+  fi
+  if [ "$state_count" -eq 0 ]; then
+    echo 'has no state=existing or state=unseeded in its [firstmate-decision] line' >&2
+    return 1
+  fi
+  if [ "${#fields[@]}" -ne 3 ] || [ "$origin_count" -ne 1 ] ||
+    [ "$key_count" -ne 1 ] || [ "$state_count" -ne 1 ] || [ "$extra_count" -ne 0 ]; then
+    echo 'has a malformed [firstmate-decision] line; require exactly one origin=, one key=, and one state= field with no extra tokens' >&2
+    return 1
+  fi
+  case "$origin" in
+  '' | *[!A-Za-z0-9._-]*)
+    echo 'has no valid origin= slug in its [firstmate-decision] line' >&2
+    return 1
+    ;;
+  esac
+  case "$key" in
+  '' | *[!A-Za-z0-9._-]*)
+    echo 'has no valid key= slug or key=derive in its [firstmate-decision] line' >&2
+    return 1
+    ;;
+  esac
+  case "$state" in
+  existing | unseeded) ;;
+  *)
+    echo 'has no state=existing or state=unseeded in its [firstmate-decision] line' >&2
+    return 1
+    ;;
+  esac
+  printf '%s\t%s\t%s\n' "$origin" "$key" "$state"
+}
+
+question_binding() { # <block-file>
+  local block=$1 candidates binding
+  candidates=$(grep -c '^\[firstmate-decision' "$block" || true)
+  if [ "$candidates" -ne 1 ]; then
+    if [ "$candidates" -eq 0 ]; then
+      echo 'has no [firstmate-decision origin=<origin> key=<key|derive> state=existing|unseeded] line' >&2
+    else
+      echo 'has multiple [firstmate-decision] candidate lines; require exactly one origin=, one key=, and one state= field with no extra tokens' >&2
+    fi
+    return 1
+  fi
+  binding=$(sed -n 's/^\[firstmate-decision[[:space:]]\{1,\}\(.*\)\]$/\1/p' "$block")
+  if [ -z "$binding" ]; then
+    echo 'has a malformed [firstmate-decision] line; require exactly one origin=, one key=, and one state= field with no extra tokens' >&2
+    return 1
+  fi
+  parse_binding_fields "$binding"
+}
+
 QUESTIONNAIRE=$(printf '%s' "$PAYLOAD" | jq -r '.tool_input.questionnaire // empty' 2>/dev/null) || QUESTIONNAIRE=
 [ -n "$QUESTIONNAIRE" ] ||
   deny "[afk-approval-deferral] away mode is active and this AskUser call carries no questionnaire to file with a decision owner. $DEFERRAL"
@@ -120,85 +200,11 @@ for BLOCK in "$WORK"/block.*; do
   # skipped rather than rejected for carrying no binding.
   grep -q '\[question\]\|^\[firstmate-decision[[:space:]]' "$BLOCK" || continue
   INDEX=$((INDEX + 1))
-  BINDING_CANDIDATES=$(grep -c '^\[firstmate-decision' "$BLOCK" || true)
-  if [ "$BINDING_CANDIDATES" -ne 1 ]; then
-    if [ "$BINDING_CANDIDATES" -eq 0 ]; then
-      REJECTED="${REJECTED}question $INDEX has no [firstmate-decision origin=<origin> key=<key|derive> state=existing|unseeded] line; "
-    else
-      REJECTED="${REJECTED}question $INDEX has multiple [firstmate-decision] candidate lines; require exactly one origin=, one key=, and one state= field with no extra tokens; "
-    fi
+  if ! BINDING=$(question_binding "$BLOCK" 2>"$WORK/binding-error.$INDEX"); then
+    REJECTED="${REJECTED}question $INDEX $(cat "$WORK/binding-error.$INDEX"); "
     continue
   fi
-  BINDING=$(sed -n 's/^\[firstmate-decision[[:space:]]\{1,\}\(.*\)\]$/\1/p' "$BLOCK")
-  if [ -z "$BINDING" ]; then
-    REJECTED="${REJECTED}question $INDEX has a malformed [firstmate-decision] line; require exactly one origin=, one key=, and one state= field with no extra tokens; "
-    continue
-  fi
-  if [ "$(printf '%s\n' "$BINDING" | wc -l | tr -d ' ')" -ne 1 ]; then
-    REJECTED="${REJECTED}question $INDEX has multiple [firstmate-decision] lines; require exactly one origin=, one key=, and one state= field with no extra tokens; "
-    continue
-  fi
-  ORIGIN=''
-  KEY=''
-  BSTATE=''
-  ORIGIN_COUNT=0
-  KEY_COUNT=0
-  STATE_COUNT=0
-  EXTRA_COUNT=0
-  read -r -a BINDING_FIELDS <<<"$BINDING"
-  for FIELD in "${BINDING_FIELDS[@]}"; do
-    case "$FIELD" in
-      origin=*)
-        ORIGIN_COUNT=$((ORIGIN_COUNT + 1))
-        ORIGIN=${FIELD#origin=}
-        ;;
-      key=*)
-        KEY_COUNT=$((KEY_COUNT + 1))
-        KEY=${FIELD#key=}
-        ;;
-      state=*)
-        STATE_COUNT=$((STATE_COUNT + 1))
-        BSTATE=${FIELD#state=}
-        ;;
-      *) EXTRA_COUNT=$((EXTRA_COUNT + 1)) ;;
-    esac
-  done
-  if [ "$ORIGIN_COUNT" -eq 0 ]; then
-    REJECTED="${REJECTED}question $INDEX has no valid origin= slug in its [firstmate-decision] line; "
-    continue
-  fi
-  if [ "$KEY_COUNT" -eq 0 ]; then
-    REJECTED="${REJECTED}question $INDEX has no valid key= slug or key=derive in its [firstmate-decision] line; "
-    continue
-  fi
-  if [ "$STATE_COUNT" -eq 0 ]; then
-    REJECTED="${REJECTED}question $INDEX has no state=existing or state=unseeded in its [firstmate-decision] line; "
-    continue
-  fi
-  if [ "${#BINDING_FIELDS[@]}" -ne 3 ] || [ "$ORIGIN_COUNT" -ne 1 ] ||
-    [ "$KEY_COUNT" -ne 1 ] || [ "$STATE_COUNT" -ne 1 ] || [ "$EXTRA_COUNT" -ne 0 ]; then
-    REJECTED="${REJECTED}question $INDEX has a malformed [firstmate-decision] line; require exactly one origin=, one key=, and one state= field with no extra tokens; "
-    continue
-  fi
-  case "$ORIGIN" in
-    '' | *[!A-Za-z0-9._-]*)
-      REJECTED="${REJECTED}question $INDEX has no valid origin= slug in its [firstmate-decision] line; "
-      continue
-      ;;
-  esac
-  case "$KEY" in
-    '' | *[!A-Za-z0-9._-]*)
-      REJECTED="${REJECTED}question $INDEX has no valid key= slug or key=derive in its [firstmate-decision] line; "
-      continue
-      ;;
-  esac
-  case "$BSTATE" in
-    existing | unseeded) ;;
-    *)
-      REJECTED="${REJECTED}question $INDEX has no state=existing or state=unseeded in its [firstmate-decision] line; "
-      continue
-      ;;
-  esac
+  IFS=$'\t' read -r ORIGIN KEY BSTATE <<<"$BINDING"
 
   QUESTION="$WORK/question.$INDEX"
   grep -v '^\[firstmate-decision[[:space:]]' "$BLOCK" >"$QUESTION" || true
