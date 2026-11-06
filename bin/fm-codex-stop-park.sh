@@ -9,13 +9,15 @@
 # Hook modes read the native JSON payload on stdin. --capable is read-only.
 # The park is opt-in: only a home with config/codex-stop-park
 # (docs/configuration.md owns it) registers or parks. Without it --session-start
-# only runs the session start, --guard only runs the turn-end guard, the
-# asynchronous Stop hook exits at once, and --capable fails.
+# only runs the session start, the asynchronous Stop hook exits at once,
+# and --capable fails.
+# --guard delegates a live foreign owner to the shared turn-end guard before
+# park selection or retained fallback, regardless of opt-in or CLI version.
+# A matching fallback still applies when this session can no longer park.
 # Registration also requires the native transcript's codex-tui originator;
 # headless exec sessions have no persistent interactive input surface.
-# Homes without the opt-in, unsupported versions, manual session starts,
-# workers, and foreign session owners retain the existing foreground
-# checkpoint and turn-end guard.
+# Other sessions use the foreground checkpoint protocol subject to the
+# ownership check in bin/fm-watch-checkpoint.sh and the shared turn-end guard.
 #
 # state/.codex-park-session binds selection to the native session and fleet
 # lock PID. state/.codex-park.lock is the shared lock library's single-flight
