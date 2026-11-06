@@ -123,9 +123,13 @@
 # idempotent while allowing a later identical instruction to be distinct.
 #
 # Remote secondmate delivery: the send crosses fm-on.sh to a host-local leg
-# (bin/fm-remote-secondmate-control.sh cmd_send) that writes the message as a
+# (bin/fm-remote-secondmate-control.sh cmd_send_stdin) that writes the message as a
 # durable record into the remote home's steering inbox and rings the remote
-# doorbell, best-effort. The remote record is the delivery, exactly as it is
+# doorbell, best-effort. The message body travels on the leg's stdin, never as
+# an SSH exec argument, so its size is not bounded by remote argv limits; the
+# distinct send-stdin verb makes an older remote code root reject the call
+# with a usage error instead of misreading the mode word as the body.
+# The remote record is the delivery, exactly as it is
 # locally: leg exit 0 means durably recorded (fm-send then exits 0, marks the
 # pending-reply expectation delivered, and closes any --resolve-key
 # decisions), and any real remote failure fails loudly with the remote leg's
@@ -165,8 +169,22 @@
 # transition and is never written for those keys. If this send cannot produce
 # a note the guard will accept, or the structural key would be lost to the
 # status-line cap, it refuses before sending and names the cause rather than
-# exiting 0 on a silent no-op. After a delivered close it also
-# re-folds and fails loudly if the named key is still open. On the inbox plane
+# exiting 0 on a silent no-op. A key nothing owns refuses the same way, for the
+# same reason: delivering an answer this send cannot close would leave the
+# decision open behind an answer the operator believes settled it. That refusal
+# never costs the message - it lists the keys the status log still holds open and
+# prints the resend commands with the message quoted back verbatim. The keyed
+# resend leaves an explicit <key> placeholder for the operator to replace, even
+# when only one key is open, so an answer cannot be redirected to an unrelated
+# decision. Every named key is checked before refusing: the refusal names each
+# refused key, and the keyed resend keeps every accepted key in the operator's
+# order with a placeholder in each refused key's position, so the corrected
+# resend closes all of them. It is printed even when the status log holds
+# nothing open, because a key transferred to a captain-held task is answerable
+# through that other ledger alone; the status log's own emptiness is stated as
+# the emptiness of that FILE, never as a claim about the task. The plain resend
+# delivers the message without closing any decision. After a delivered close it
+# also re-folds and fails loudly if the named key is still open. On the inbox plane
 # the close happens at ENQUEUE time, because enqueue is durable delivery to
 # the task's record; the worker reading the answer late is covered by the
 # acknowledgement re-ring ladder. On the typed plane it still waits for the
@@ -339,6 +357,32 @@ fm_send_count_colons() { # <string>
   printf '%s' $((${#s} - ${#no_colons}))
 }
 
+# When an explicit outside-home target has no recorded harness, detect kiro
+# from the live pane's foreground process group so the kiro-only composer
+# rules apply (fm_composer_kiro_scope). The live e2e guard owns why this
+# reads the foreground group through fm-harness.sh ancestry rather than
+# #{pane_current_command}: a toolbox wrapper can rename the tmux field
+# while comm still reads kiro-cli. Any other (or unreadable) process leaves
+# TARGET_HARNESS empty, which is the pre-kiro default and keeps the
+# non-kiro typed path - including the unknown-harness `$` settle - unchanged.
+fm_send_detect_kiro_from_live_target() {
+  local pid verdict
+  [ -n "$TARGET_HARNESS" ] && return 0
+  [ "$TARGET_BACKEND" = tmux ] || return 0
+  [ -n "$RESOLVED_TARGET" ] || return 0
+  fm_backend_source tmux || return 0
+  while IFS= read -r pid; do
+    [ -n "$pid" ] || continue
+    case "$pid" in *[!0-9]*) continue ;; esac
+    verdict=$("$SCRIPT_DIR/fm-harness.sh" ancestry "$pid" 2>/dev/null || true)
+    [ "$verdict" = "comm kiro" ] || continue
+    TARGET_HARNESS=kiro
+    return 0
+  done <<EOF
+$(fm_backend_tmux_foreground_pids "$RESOLVED_TARGET" 2>/dev/null || true)
+EOF
+}
+
 fm_send_resolve_target() { # <raw-target>
   local raw=$1 meta pane_meta target backend assumed colons id session hint
 
@@ -446,6 +490,12 @@ fm_send_resolve_target() { # <raw-target>
 RAW_TARGET=$1
 fm_send_resolve_target "$RAW_TARGET" || exit 1
 T=$RESOLVED_TARGET
+fm_send_detect_kiro_from_live_target
+# The recorded harness, or kiro detected from a meta-less explicit target's
+# live pane, scopes the kiro-only composer rules for every composer read this
+# send makes (fm_composer_kiro_scope in bin/fm-composer-lib.sh).
+# shellcheck disable=SC2034
+FM_COMPOSER_HARNESS=$TARGET_HARNESS
 shift
 
 # Supervision lease guard: a steer is overlap territory between the two Pi
@@ -585,6 +635,50 @@ fm_send_hold_resolved_id() { # <task-id> <decision-key>
   return 1
 }
 
+# The still-open keys in a folded "<key>\t<verb>\t<note>" open set, one per line.
+fm_send_open_set_keys() {  # <open-set>
+  [ -n "$1" ] || return 0
+  printf '%s\n' "$1" | cut -f1
+}
+
+# The message this send was carrying, quoted for a copy-paste resend, so a
+# refused key never costs the operator the text they typed.
+fm_send_quoted_message() {  # <text...>
+  printf '%q' "$*"
+}
+
+# --- printed resend commands ------------------------------------------------
+#
+# Every command this script prints for the operator to run must reach the SAME
+# home and the SAME script this invocation used. Neither is recoverable from the
+# command line alone: a one-shot "FM_HOME=<home> bin/fm-send.sh ..." leaves
+# nothing exported for the next command, and a relative invocation cannot be
+# re-run from any other directory. A printed command missing either resolves
+# somewhere else - another home's state dir, or no script at all - so the
+# operator's preserved message is still never delivered.
+# These two are the ONE statement of that context; both printed resend paths
+# (the unconfirmed remote retry and the refused --resolve-key) call them rather
+# than restating the quoting and fallback rules.
+
+# The environment prefix a printed resend must carry: the absolute home always,
+# and FM_STATE_OVERRIDE only when this invocation was actually given one, so the
+# printed command never invents a state dir the caller was not using.
+fm_send_resend_env() {  # -> "FM_HOME=<q> [FM_STATE_OVERRIDE=<q> ]"
+  local home state
+  home=$(cd "$FM_HOME" 2>/dev/null && pwd) || home=$FM_HOME
+  printf 'FM_HOME=%q ' "$home"
+  if [ "${FM_STATE_OVERRIDE+x}" = x ]; then
+    state=$(cd "$STATE" 2>/dev/null && pwd) || state=$STATE
+    printf 'FM_STATE_OVERRIDE=%q ' "$state"
+  fi
+}
+
+# This script's absolute path, quoted. Deliberately not "$0": a relative "$0" is
+# only valid from the directory this invocation happened to run in.
+fm_send_resend_exe() {
+  printf '%q' "$SCRIPT_DIR/fm-send.sh"
+}
+
 # Close-note body for --resolve-key. Ordinary keys keep answered: <excerpt>.
 # A pending-reply-* key uses the owning library's vocabulary so the reserved-key
 # fold actually closes it (fm_pending_reply_close_note_for_key).
@@ -631,10 +725,13 @@ if [ -n "$RESOLVE_KEYS" ]; then
   RESOLVE_TASK_ID=$(fm_send_id_from_meta "$TARGET_META")
   RESOLVE_STATUS_FILE="$STATE/$RESOLVE_TASK_ID.status"
   resolve_open_set=$(status_open_decisions "$RESOLVE_STATUS_FILE")
+  resolve_resend_args=
+  resolve_refused_keys=
   for k in $RESOLVE_KEYS; do
     case "$resolve_open_set" in
     "$k"$'\t'* | *$'\n'"$k"$'\t'*)
       RESOLVE_STATUS_KEYS="${RESOLVE_STATUS_KEYS}${RESOLVE_STATUS_KEYS:+ }$k"
+      resolve_resend_args="$resolve_resend_args --resolve-key $k"
       continue
       ;;
     esac
@@ -643,11 +740,43 @@ if [ -n "$RESOLVE_KEYS" ]; then
     # through the other ledger - so check there before refusing.
     if resolved_hold_id=$(fm_send_hold_resolved_id "$RESOLVE_TASK_ID" "$k"); then
       RESOLVE_HOLD_KEYS="${RESOLVE_HOLD_KEYS}${RESOLVE_HOLD_KEYS:+ }$resolved_hold_id"
+      resolve_resend_args="$resolve_resend_args --resolve-key $k"
       continue
     fi
-    echo "error: --resolve-key '$k': no open decision or blocker with that key in $RESOLVE_STATUS_FILE, and no captain-held task '$k' or '$RESOLVE_TASK_ID-decision-$k' still open (already closed or mistyped). Re-check the OPEN DECISIONS listing, then resend without that key or with the right one; nothing was sent." >&2
-    exit 1
+    resolve_refused_keys="${resolve_refused_keys}${resolve_refused_keys:+ }$k"
+    resolve_resend_args="$resolve_resend_args --resolve-key '<key>'"
   done
+  # Nothing owns a refused key, so refuse rather than deliver. Sending the
+  # answer anyway would leave the decision open behind an answer the operator
+  # believes settled it - the orphaned decision --resolve-key exists to
+  # prevent - so the send keeps ONE meaning: answered and closed, or neither.
+  # The cost of refusing is paid here instead of by the operator: name what is
+  # actually open and hand the message back quoted so a refused key never
+  # costs the text they typed.
+  if [ -n "$resolve_refused_keys" ]; then
+    {
+      for k in $resolve_refused_keys; do
+        echo "error: --resolve-key '$k': no open decision or blocker with that key in $RESOLVE_STATUS_FILE, and no captain-held task '$k' or '$RESOLVE_TASK_ID-decision-$k' still open (already closed or mistyped); nothing was sent."
+      done
+      resolve_open_keys=$(fm_send_open_set_keys "$resolve_open_set")
+      if [ -n "$resolve_open_keys" ]; then
+        printf '  open on %s: %s\n' "$RESOLVE_TASK_ID" "$(printf '%s' "$resolve_open_keys" | tr '\n' ' ')"
+      else
+        printf '  no decision or blocker is open in %s.\n' "$RESOLVE_STATUS_FILE"
+      fi
+      resolve_quoted_message=$(fm_send_quoted_message "$@")
+      # Carry this invocation's own routing context into both printed commands:
+      # a resend that resolves to another home, or to no script at all, delivers
+      # the preserved message nowhere.
+      resolve_resend_prefix="$(fm_send_resend_env)$(fm_send_resend_exe)"
+      printf '  resend, your message preserved:\n'
+      printf '    %s %s%s %s\n' \
+        "$resolve_resend_prefix" "$RESOLVE_TASK_ID" "$resolve_resend_args" "$resolve_quoted_message"
+      printf '    %s %s %s   # deliver without closing anything\n' \
+        "$resolve_resend_prefix" "$RESOLVE_TASK_ID" "$resolve_quoted_message"
+    } >&2
+    exit 1
+  fi
   # The decision-answer partition (the header's "Answering a decision"
   # contract): a key that is an open needs-decision, or already a captain-held
   # task, is a decision, and answering one is main-owned while attended. A
@@ -748,10 +877,12 @@ fm_send_feed_resolved_holds() { # <answer-text>
   fi
 }
 
-# Resolve the target's harness from its meta (recorded by fm-spawn), used only to
-# scope the codex `$<skill>` popup-settle below. A task selector carries
-# meta; an explicit backend-target escape hatch has none, so its harness is
-# unknown and treated as non-codex (the safe default that keeps the fast path).
+# Resolve the target's harness from its meta (recorded by fm-spawn), used to
+# scope the codex `$<skill>` popup-settle below and the kiro composer rules
+# above. A task selector carries meta. An explicit backend-target escape hatch
+# has none, so its harness stays unknown and is treated as non-codex (the safe
+# default that keeps the `$` fast path) unless the live pane's foreground
+# process group is kiro (fm_send_detect_kiro_from_live_target).
 # The target's BACKEND comes from selector meta, from matching an explicit target
 # back to recorded meta, or from strict explicit-target shape validation.
 # Do not add a separate passive liveness preflight here. Active send paths own
@@ -934,7 +1065,7 @@ else
     fi
     remote_rc=0
     remote_completion_unknown=0
-    REMOTE_SEND_ARGS=("$TARGET_REMOTE_ID" "$MESSAGE")
+    REMOTE_SEND_ARGS=("$TARGET_REMOTE_ID")
     [ -z "$FIRE_AND_FORGET_ID" ] || REMOTE_SEND_ARGS+=(fire-and-forget)
     # Each transport attempt is bounded by FM_SEND_REMOTE_BUDGET seconds.
     # fm_run_timed's 124 means the attempt was killed at the bound with remote
@@ -943,15 +1074,15 @@ else
     # retry that would only wait out the same busy remote queue again. (A
     # remote job's own timeout also relays as 124; treating it as unconfirmed
     # stays safe because the remote enqueue deduplicates.)
-    fm_run_timed "$FM_SEND_REMOTE_BUDGET" "$SCRIPT_DIR/fm-on.sh" "$TARGET_REMOTE_ID" \
-      fm-remote-secondmate-control.sh send "${REMOTE_SEND_ARGS[@]}" </dev/null || remote_rc=$?
+    printf '%s' "$MESSAGE" | fm_run_timed "$FM_SEND_REMOTE_BUDGET" "$SCRIPT_DIR/fm-on.sh" --stdin \
+      "$TARGET_REMOTE_ID" fm-remote-secondmate-control.sh send-stdin "${REMOTE_SEND_ARGS[@]}" || remote_rc=$?
     if [ "$remote_rc" -eq 124 ]; then
       remote_completion_unknown=1
     elif [ "$remote_rc" -eq 255 ]; then
       remote_completion_unknown=1
       remote_rc=0
-      fm_run_timed "$FM_SEND_REMOTE_BUDGET" "$SCRIPT_DIR/fm-on.sh" "$TARGET_REMOTE_ID" \
-        fm-remote-secondmate-control.sh send "${REMOTE_SEND_ARGS[@]}" </dev/null || remote_rc=$?
+      printf '%s' "$MESSAGE" | fm_run_timed "$FM_SEND_REMOTE_BUDGET" "$SCRIPT_DIR/fm-on.sh" --stdin \
+        "$TARGET_REMOTE_ID" fm-remote-secondmate-control.sh send-stdin "${REMOTE_SEND_ARGS[@]}" || remote_rc=$?
     fi
     fm_lock_release "$REMOTE_META_LOCK"
     if [ "$remote_rc" -ne 0 ] && [ "$remote_completion_unknown" -eq 1 ]; then
@@ -969,13 +1100,9 @@ else
       else
         echo "error: steer to remote secondmate $TARGET_REMOTE_ID is unconfirmed (the first transport attempt had unknown completion and the retry failed). Only the correlation-reusing resend below is idempotent and lands on the same remote inbox record:" >&2
       fi
-      resend_home=$(cd "$FM_HOME" 2>/dev/null && pwd) || resend_home=$FM_HOME
-      printf 'FM_HOME=%q ' "$resend_home" >&2
-      if [ "${FM_STATE_OVERRIDE+x}" = x ]; then
-        resend_state=$(cd "$STATE" 2>/dev/null && pwd) || resend_state=$STATE
-        printf 'FM_STATE_OVERRIDE=%q ' "$resend_state" >&2
-      fi
-      printf 'FM_PENDING_REPLY_EXISTING_CORR=%q %q' "$PENDING_REPLY_CORR" "$SCRIPT_DIR/fm-send.sh" >&2
+      printf '%s' "$(fm_send_resend_env)" >&2
+      printf 'FM_PENDING_REPLY_EXISTING_CORR=%q %s' \
+        "$PENDING_REPLY_CORR" "$(fm_send_resend_exe)" >&2
       for resend_arg in "${FM_SEND_ORIGINAL_ARGS[@]}"; do
         printf ' %q' "$resend_arg" >&2
       done

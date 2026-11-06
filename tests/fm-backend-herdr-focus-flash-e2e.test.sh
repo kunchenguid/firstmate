@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Real-Herdr regression for the projected-cleanup focus flash (upstream
-# ogulcancelik/herdr#1621 family, live on 0.7.5 stable).
+# herdrdev/herdr#1621 family, live on 0.7.5 stable).
 # Part A reproduces the OLD path: an explicit last-pane close that empties a
 # non-focused workspace steals the focused workspace.
 # Part B proves the mitigation: the focus-safe emptying-close plan
