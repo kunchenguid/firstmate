@@ -4028,6 +4028,20 @@ while :; do
             triage_log "PR poll for $id changed before its validated check; skipping the stale snapshot"
             continue
           fi
+          if [ "$(fm_meta_get "$STATE/$id.meta" kind)" = secondmate ]; then
+            # Legacy residue on a persistent worker has no delivery destination.
+            # This state-only reading can clean up the poll, never reach the
+            # task-outcome publication path below, even if kind changes later.
+            run_check_capture "$SCRIPT_DIR/fm-pr-poll.sh" --retire-secondmate \
+              "$provider" "$url" "$host" "$path" "$number" "$STATE/$id.meta" || exit 1
+            if [ "$FM_CHECK_RESULT" = merged ]; then
+              retire_merged_pr_poll "$id"
+              touch "$STATE/.last-check"
+              triage_log "retired a merge poll armed on secondmate $id without reporting an outcome"
+            fi
+            pr_poll_control_release || exit 1
+            continue
+          fi
           expected_base=$(fm_pr_expected_base "$STATE/$id.meta" 2>/dev/null || true)
           run_check_capture "$SCRIPT_DIR/fm-pr-poll.sh" --validated \
             "$provider" "$url" "$host" "$path" "$number" "$expected_base" "$STATE/$id.meta" || exit 1

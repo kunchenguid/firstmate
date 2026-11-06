@@ -3104,10 +3104,35 @@ test_different_merged_pr_for_same_task_is_not_absorbed() {
 # poll silently - no merge outcome, no notified marker, no wake that could put
 # the mate itself up for teardown - and leaves every lifecycle artifact whole.
 test_persistent_secondmate_retirement_is_poll_only() {
-  local dir state meta_before status_before registry_before endpoint_before rc
-  dir=$(make_case merged-retirement-secondmate)
+  local dir state meta_before status_before registry_before endpoint_before rc provider url phase out
+  for provider in github gitlab gerrit forgejo; do
+  dir=$(make_case "merged-retirement-secondmate-$provider")
   state="$dir/home/state"
-  fm_write_meta "$state/domain.meta" \
+  case "$provider" in
+    github) url=https://github.com/o/r/pull/2 ;;
+    gitlab) url=https://gitlab.example/group/project/-/merge_requests/2 ;;
+    gerrit) url=https://gerrit.example/c/group/project/+/2 ;;
+    forgejo) url=https://forgejo.example/o/r/pulls/2 ;;
+  esac
+  if [ "$provider" = forgejo ]; then
+    cat > "$dir/fakebin/tea" <<'SH'
+#!/usr/bin/env bash
+[ "${FM_TEST_TEA_FAIL:-0}" = 0 ] || exit 1
+if [ "${1:-} ${2:-}" = 'login list' ]; then
+  printf '[{"name":"fixture","url":"https://forgejo.example"}]\n'
+elif [ "${1:-}" = api ]; then
+  if [ "${FM_TEST_TEA_PULL:-open}" = merged ]; then
+    printf '{"merged":true}\n'
+  else
+    printf '{"merged":false}\n'
+  fi
+fi
+SH
+    chmod +x "$dir/fakebin/tea"
+  fi
+  # Real legacy secondmate records predate expected-base state. Do not let the
+  # general fixture helper silently give them a ship's destination contract.
+  FM_TEST_META_EXPECTED_BASE='' fm_write_meta "$state/domain.meta" \
     'window=session:fm-domain' \
     "worktree=$dir/secondmate-home" \
     "project=$dir/project" \
@@ -3115,8 +3140,10 @@ test_persistent_secondmate_retirement_is_poll_only() {
     'mode=secondmate' \
     'backend=tmux' \
     "home=$dir/secondmate-home" \
-    'pr=https://github.com/o/r/pull/2' \
+    "pr=$url" \
     'pr_head=0123456789abcdef0123456789abcdef01234567'
+  ! grep -Eq '^(expected_base|base_branch)=' "$state/domain.meta" \
+    || fail 'legacy secondmate fixture unexpectedly has a delivery destination'
   mkdir -p "$dir/secondmate-home"
   printf 'working: persistent endpoint remains healthy\n' > "$state/domain.status"
   printf -- '- domain | scope: test | home: %s\n' "$dir/secondmate-home" > "$dir/home/data/secondmates.md"
@@ -3125,11 +3152,28 @@ test_persistent_secondmate_retirement_is_poll_only() {
   status_before=$(shasum -a 256 "$state/domain.status")
   registry_before=$(shasum -a 256 "$dir/home/data/secondmates.md")
   endpoint_before=$(shasum -a 256 "$dir/endpoint-sentinel")
-  seed_canonical_poll "$dir" domain https://github.com/o/r/pull/2
+  seed_canonical_poll "$dir" domain "$url"
   add_stop_custom_check "$dir"
 
+  for phase in open unreadable; do
+    rc=0
+    FM_TEST_GH_STATE=OPEN FM_TEST_GLAB_STATE=opened FM_TEST_GERRIT_STATUS=NEW \
+      FM_TEST_GH_FAIL="$([ "$phase" = unreadable ] && printf 1 || printf 0)" \
+      FM_TEST_GLAB_FAIL="$([ "$phase" = unreadable ] && printf 1 || printf 0)" \
+      FM_TEST_GERRIT_FAIL="$([ "$phase" = unreadable ] && printf 1 || printf 0)" \
+      FM_TEST_TEA_FAIL="$([ "$phase" = unreadable ] && printf 1 || printf 0)" \
+      run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/$phase.out" 2> "$dir/$phase.err" || rc=$?
+    [ "$rc" = 0 ] || fail "$provider secondmate $phase watcher failed"
+    assert_grep 'z-stop.check.sh' "$dir/$phase.out" "$provider secondmate $phase poll produced a recovery wake"
+    assert_present "$state/domain.pr-poll" "$provider secondmate $phase poll was prematurely retired"
+    assert_absent "$state/domain.pr-base-notified" "$provider secondmate $phase poll recorded an unrecoverable base notice"
+    assert_no_grep 'domain.check.sh' "$state/.wake-queue" "$provider secondmate $phase poll queued a claim"
+    ack_watcher_cycle "$state" || fail 'could not acknowledge secondmate control cycle'
+  done
   set +e
-  FM_TEST_GH_STATE=MERGED run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/watch.out" 2> "$dir/watch.err"
+  FM_TEST_BASE='' FM_TEST_GH_STATE=MERGED FM_TEST_GLAB_STATE=merged \
+    FM_TEST_GERRIT_STATUS=MERGED FM_TEST_TEA_PULL=merged \
+    run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/watch.out" 2> "$dir/watch.err"
   rc=$?
   set -e
   [ "$rc" -eq 0 ] || fail "persistent secondmate merged watcher failed: $(cat "$dir/watch.err")"
@@ -3149,6 +3193,14 @@ test_persistent_secondmate_retirement_is_poll_only() {
   [ "$(shasum -a 256 "$dir/home/data/secondmates.md")" = "$registry_before" ] || fail "retirement changed secondmate registry"
   [ "$(shasum -a 256 "$dir/endpoint-sentinel")" = "$endpoint_before" ] || fail "retirement changed secondmate endpoint evidence"
   [ -d "$dir/secondmate-home" ] || fail "retirement removed the persistent secondmate home"
+  assert_absent "$state/domain.pr-base-notified" "$provider retirement recorded a base notice"
+  done
+  dir=$(make_case retirement-only-refuses-ship)
+  write_task_meta "$dir"
+  out=$(FM_TEST_GH_LOG="$dir/gh.log" FM_TEST_GH_STATE=MERGED PATH="$dir/fakebin:$BASE_PATH" \
+    bash "$POLL" --retire-secondmate github https://github.com/o/r/pull/1 github.com o/r 1 "$dir/home/state/task-a.meta")
+  [ -z "$out" ] || fail 'ship used the secondmate-only retirement entrypoint'
+  [ ! -s "$dir/gh.log" ] || fail 'secondmate-only retirement looked up a ship PR'
   pass "a merged poll on a persistent secondmate retires silently: no outcome, marker, or wake, and every lifecycle artifact preserved"
 }
 

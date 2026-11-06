@@ -12,6 +12,9 @@
 # to read state and destination from the same structured response.
 # Usage: fm-pr-poll.sh --validated <provider> <url> <host> <path> <number> <expected-base> [<task-meta>]
 #        fm-pr-poll.sh --base-unavailable <task-meta>
+# Internal watcher cleanup: --retire-secondmate <provider> <url> <host> <path> <number> <task-meta>.
+# This requires kind=secondmate and reads merge state only. Its result may retire
+# a leftover poll, never publish a task outcome or readiness claim.
 # A registered <task>.check.sh takes no arguments and reads its sibling .pr-poll
 # identity and task-owned expected_base from .meta (legacy base_branch is accepted).
 # This standalone copy sources nothing, so its metadata parser mirrors
@@ -40,6 +43,7 @@ base_unavailable_notice() {
 
 matching_destination() { # <base-and-state TSV record>
   local record=$1 actual
+  [ "$retirement_only" -eq 0 ] || return 0
   case "$record" in *$'\t'*) ;; *) return 1 ;; esac
   actual=${record%%$'\t'*}
   case "$actual" in ''|-*|*$'\n'*) return 1 ;; esac
@@ -51,6 +55,7 @@ matching_destination() { # <base-and-state TSV record>
 }
 
 meta=
+retirement_only=0
 if [ "$#" -eq 2 ] && [ "$1" = --base-unavailable ]; then
   base_unavailable_notice "$2" pr-base-parent-notified
   exit "$?"
@@ -62,6 +67,19 @@ elif { [ "$#" -eq 7 ] || [ "$#" -eq 8 ]; } && [ "$1" = --validated ]; then
   number=$6
   expected_base=$7
   meta=${8:-}
+elif [ "$#" -eq 7 ] && [ "$1" = --retire-secondmate ]; then
+  provider=$2
+  url=$3
+  host=$4
+  path=$5
+  number=$6
+  meta=$7
+  expected_base=
+  [ -f "$meta" ] && [ ! -L "$meta" ] && [ -r "$meta" ] || exit 0
+  kind=$(awk -F= '/^kind=/ { n++; value=substr($0,6) }
+    END { if (n == 1) print value; else exit 1 }' "$meta") || exit 0
+  [ "$kind" = secondmate ] || exit 0
+  retirement_only=1
 elif [ "$#" -eq 0 ]; then
   case "$0" in
     *.check.sh) data=${0%.check.sh}.pr-poll ;;
@@ -98,7 +116,7 @@ else
 fi
 
 case "$expected_base" in ''|-*|*$'\n'*) expected_base= ;; esac
-if [ -z "$expected_base" ] || ! git check-ref-format "refs/heads/$expected_base" >/dev/null 2>&1; then
+if [ "$retirement_only" -eq 0 ] && { [ -z "$expected_base" ] || ! git check-ref-format "refs/heads/$expected_base" >/dev/null 2>&1; }; then
   [ -z "$meta" ] || base_unavailable_notice "$meta"
   exit 0
 fi
@@ -176,8 +194,11 @@ case "$provider" in
     # Read state and destination from one JSON record; a retarget cannot join
     # a previously matching destination to a later merged state.
     record=$(glab mr view "$number" -R "https://$host/$path" -F json 2>/dev/null \
-      | jq -er 'select((.target_branch | type) == "string" and (.state | type) == "string")
-        | [.target_branch, .state] | @tsv' 2>/dev/null) || exit 0
+      | jq -er --argjson retirement "$retirement_only" '
+        select((.state | type) == "string")
+        | if $retirement == 1 then ["", .state]
+          else select((.target_branch | type) == "string") | [.target_branch, .state]
+          end | @tsv' 2>/dev/null) || exit 0
     matching_destination "$record" || exit 0
     [ "${record#*$'\t'}" = merged ] && printf '%s\n' merged
     ;;
@@ -231,12 +252,13 @@ case "$provider" in
     # a server, and this poll has no channel to report that it never matched.
     json=$(gerrit-axi show "$number" --host "$host" --json 2>/dev/null) || exit 0
     [ -n "$json" ] || exit 0
-    record=$(printf '%s' "$json" | jq -r --argjson change "$number" '
+    record=$(printf '%s' "$json" | jq -r --argjson change "$number" --argjson retirement "$retirement_only" '
       if type == "object" and .ok == true and (.changes | type) == "array" then
         [.changes[] | select((.change | type) == "number" and .change == $change)] as $match
         | if ($match | length) == 1
-              and ($match[0].status | type) == "string" and ($match[0].branch | type) == "string"
-          then [$match[0].branch, $match[0].status] | @tsv
+              and ($match[0].status | type) == "string"
+              and ($retirement == 1 or ($match[0].branch | type) == "string")
+          then [(if $retirement == 1 then "" else $match[0].branch end), $match[0].status] | @tsv
           else error("no exact change record")
           end
       else
@@ -298,9 +320,10 @@ case "$provider" in
     # error body as output, so only a boolean merged field of true wakes this
     # poll and every other reading stays silent.
     record=$(tea api --login "$login" --repo "$owner/$repo" \
-      "/repos/{owner}/{repo}/pulls/$number" 2>/dev/null | jq -r '
-        if type == "object" and (.merged | type) == "boolean" and (.base.ref | type) == "string"
-        then [.base.ref, (.merged | tostring)] | @tsv
+      "/repos/{owner}/{repo}/pulls/$number" 2>/dev/null | jq -r --argjson retirement "$retirement_only" '
+        if type == "object" and (.merged | type) == "boolean"
+            and ($retirement == 1 or (.base.ref | type) == "string")
+        then [(if $retirement == 1 then "" else .base.ref end), (.merged | tostring)] | @tsv
         else error("invalid pull request record")
         end' 2>/dev/null) || exit 0
     matching_destination "$record" || exit 0
