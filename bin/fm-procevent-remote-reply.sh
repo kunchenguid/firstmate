@@ -99,6 +99,20 @@ DOCUMENT_LOCAL_FAILURE=2
 die() { printf 'error: %s\n' "$1" >&2; exit 1; }
 usage() { sed -n '2,66p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
 
+# Lifecycle-lock EXIT traps must compose temporary-path cleanup with lock
+# release; installing only one would silently drop the other obligation.
+# Track ingest/fetch paths outside function locals so cleanup survives unwinding.
+# Those traps name the lock through LIFECYCLE_LOCK because cmd_ingest's own
+# local lock would shadow the subshell's when a die fires inside it.
+INGEST_TMP=''
+FETCH_ERR=''
+FETCH_TMP=''
+SOURCE_OUT=''
+cleanup_temp_paths() {
+  rm -rf -- ${INGEST_TMP:+"$INGEST_TMP"} ${FETCH_ERR:+"$FETCH_ERR"} ${FETCH_TMP:+"$FETCH_TMP"} ${SOURCE_OUT:+"$SOURCE_OUT"}
+}
+trap cleanup_temp_paths EXIT
+
 sha256_file() {
   if command -v shasum >/dev/null 2>&1; then
     shasum -a 256 "$1" | awk '{print $1}'
@@ -109,13 +123,7 @@ sha256_file() {
   fi
 }
 
-empty_hash() {
-  local tmp
-  tmp=$(mktemp "${TMPDIR:-/tmp}/fm-empty-hash.XXXXXX") || return 1
-  : > "$tmp"
-  sha256_file "$tmp"
-  rm -f -- "$tmp"
-}
+empty_hash() { sha256_file /dev/null; }
 
 validate_id() {
   case "$1" in ''|*[!A-Za-z0-9._-]*) die "invalid secondmate id: $1" ;; esac
@@ -128,6 +136,7 @@ source_id() {
 
 cursor_path() { printf '%s/%s.cursor\n' "$CURSOR_DIR" "$1"; }
 ingest_receipt_path() { printf '%s/%s.%s.ingested\n' "$CURSOR_DIR" "$1" "$2"; }
+retirement_count_path() { printf '%s/%s.retirements\n' "$CURSOR_DIR" "$1"; }
 mirrored_source_path() { printf '%s/.remote-reply-mirrored-%s\n' "$STATE" "$1"; }
 
 read_cursor() { # <id>; sets CURSOR_OFFSET and CURSOR_HASH
@@ -162,6 +171,43 @@ write_cursor() { # <id> <offset> <hash>
   } > "$tmp" || { rm -f -- "$tmp"; return 1; }
   chmod 600 "$tmp" || { rm -f -- "$tmp"; return 1; }
   mv -f -- "$tmp" "$path"
+}
+
+# A missing file is zero and is not created. Ingest only reads this.
+# Retirement is the one writer, so a crash during ingest cannot change it.
+read_retirement_count() { # <id>; sets RETIREMENT_COUNT
+  local path count lines
+  path=$(retirement_count_path "$1")
+  RETIREMENT_COUNT=0
+  [ -e "$path" ] || [ -L "$path" ] || return 0
+  [ -f "$path" ] && [ ! -L "$path" ] || die "reply retirement count is unsafe: $path"
+  lines=$(grep -c '^count=' "$path" 2>/dev/null || true)
+  [ "$lines" = 1 ] || die "reply retirement count is invalid: $path"
+  count=$(sed -n 's/^count=//p' "$path")
+  case "$count" in ''|*[!0-9]*) die "reply retirement count is invalid: $path" ;; esac
+  RETIREMENT_COUNT=$count
+}
+
+write_retirement_count() { # <id> <count>
+  local id=$1 count=$2 path tmp
+  case "$count" in ''|*[!0-9]*) return 1 ;; esac
+  mkdir -p "$CURSOR_DIR" || return 1
+  chmod 700 "$CURSOR_DIR" 2>/dev/null || true
+  path=$(retirement_count_path "$id")
+  [ ! -L "$path" ] || return 1
+  tmp=$(umask 077; mktemp "$CURSOR_DIR/.retirements.XXXXXX") || return 1
+  printf 'count=%s\n' "$count" > "$tmp" || { rm -f -- "$tmp"; return 1; }
+  chmod 600 "$tmp" || { rm -f -- "$tmp"; return 1; }
+  if ! mv -f -- "$tmp" "$path"; then
+    rm -f -- "$tmp"
+    return 1
+  fi
+}
+
+# Twelve characters distinguish breaks in the status line. The cursor keeps
+# the full digest the reader uses.
+continuity_prefix() {
+  printf '%.12s' "$CURSOR_HASH"
 }
 
 ingest_receipt_matches() { # <id> <sequence> <result>
@@ -245,7 +291,8 @@ cmd_arm() {
   lock=$(secondmate_reply_lifecycle_lock_path "$STATE" "$id")
   (
     fm_lock_acquire_wait "$lock" || die "cannot lock remote reply lifecycle for $id"
-    trap 'fm_lock_release "$lock"' EXIT
+    LIFECYCLE_LOCK=$lock
+    trap 'cleanup_temp_paths; fm_lock_release "$LIFECYCLE_LOCK"' EXIT
     cmd_arm_locked "$id"
   )
 }
@@ -268,17 +315,39 @@ WINDOW_CLOSED_EMPTY=75
 JOB_PREEMPTED=76
 
 cmd_source() {
-  local id=${1:-} started rc=0
+  local id=${1:-} started rc=0 output class
   validate_id "$id"
   read_cursor "$id"
   started=$(fm_pending_reply_now)
+  output=$(umask 077; mktemp "${TMPDIR:-/tmp}/fm-remote-reply-source.XXXXXX") \
+    || die "cannot stage remote reply source output"
+  SOURCE_OUT=$output
   "$SCRIPT_DIR/fm-on.sh" "$id" fm-remote-delta-read.sh \
-    "$REMOTE_LOG" "$CURSOR_OFFSET" "$CURSOR_HASH" "$WAIT_SECONDS" < /dev/null || rc=$?
+    "$REMOTE_LOG" "$CURSOR_OFFSET" "$CURSOR_HASH" "$WAIT_SECONDS" \
+    < /dev/null > "$output" || rc=$?
   if [ "$rc" -eq "$WINDOW_CLOSED_EMPTY" ]; then
+    rm -f -- "$output"
     fm_pending_reply_note_remote_channel_caught_up "$STATE" "$id" "$started" || true
+    return "$WINDOW_CLOSED_EMPTY"
   elif [ "$rc" -eq "$JOB_PREEMPTED" ]; then
-    rc=$WINDOW_CLOSED_EMPTY
+    rm -f -- "$output"
+    return "$WINDOW_CLOSED_EMPTY"
   fi
+  # A remote transport failure can leave diagnostic bytes on stdout, especially
+  # when the remote OpenSSH shell is a Windows WSL wrapper. Such bytes are not a
+  # delta and must never reach the runner as a malformed capture. Never pass a
+  # failed or non-schema leg to the runner. Returning a nonzero status with no
+  # output leaves the registration available for reconciliation without
+  # advancing the cursor or ingesting transport diagnostics.
+  class=$(classify_result "$output")
+  if [ "$rc" -ne 0 ] || [ "$class" = malformed ]; then
+    rm -f -- "$output"
+    [ "$rc" -ne 0 ] && return "$rc"
+    return 1
+  fi
+  cat "$output"
+  rc=$?
+  rm -f -- "$output"
   return "$rc"
 }
 
@@ -397,17 +466,22 @@ fetch_document() { # <id> <remote-relative> <result-var>
   case "$parent_real" in "$base"|"$base"/*) ;; *) return "$DOCUMENT_LOCAL_FAILURE" ;; esac
   [ ! -L "$destination" ] || return "$DOCUMENT_LOCAL_FAILURE"
   err=$(umask 077; mktemp "${TMPDIR:-/tmp}/fm-remote-doc-reason.XXXXXX") || return "$DOCUMENT_LOCAL_FAILURE"
-  tmp=$(umask 077; mktemp "$parent/.remote-doc.XXXXXX") || { rm -f -- "$err"; return "$DOCUMENT_LOCAL_FAILURE"; }
+  FETCH_ERR=$err
+  tmp=$(umask 077; mktemp "$parent/.remote-doc.XXXXXX") || { rm -f -- "$err"; FETCH_ERR=''; return "$DOCUMENT_LOCAL_FAILURE"; }
+  FETCH_TMP=$tmp
   "$SCRIPT_DIR/fm-on.sh" "$id" fm-remote-file.sh get "$rel" "$MAX_DOC_BYTES" < /dev/null > "$tmp" 2> "$err" || rc=$?
   if [ "$rc" -ne 0 ]; then
     FETCH_DOC_REASON=$(summarize_fetch_reason "$err" "$rel")
     rm -f -- "$tmp" "$err"
+    FETCH_TMP='' FETCH_ERR=''
     [ "$rc" -ne "$SSH_UNAVAILABLE" ] || return "$SSH_UNAVAILABLE"
     return 1
   fi
   rm -f -- "$err"
-  chmod 600 "$tmp" || { rm -f -- "$tmp"; return "$DOCUMENT_LOCAL_FAILURE"; }
-  mv -f -- "$tmp" "$destination" || { rm -f -- "$tmp"; return "$DOCUMENT_LOCAL_FAILURE"; }
+  FETCH_ERR=''
+  chmod 600 "$tmp" || { rm -f -- "$tmp"; FETCH_TMP=''; return "$DOCUMENT_LOCAL_FAILURE"; }
+  mv -f -- "$tmp" "$destination" || { rm -f -- "$tmp"; FETCH_TMP=''; return "$DOCUMENT_LOCAL_FAILURE"; }
+  FETCH_TMP=''
   local_rel="data/remote-secondmates/$id/$rel"
   printf -v "$result_var" '%s' "$local_rel"
 }
@@ -506,7 +580,7 @@ cmd_ingest() {
   blank=$(LC_ALL=C awk '$0 == "" { print NR; exit }' "$result")
   case "$blank" in ''|*[!0-9]*) die "result has no payload boundary" ;; esac
   tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-remote-reply-ingest.XXXXXX") || die "cannot create ingest staging directory"
-  trap 'rm -rf -- "$tmp"' EXIT
+  INGEST_TMP=$tmp
   payload="$tmp/payload"
   tail -n "+$((blank + 1))" "$result" > "$payload"
   actual_bytes=$(LC_ALL=C wc -c < "$payload" | tr -d ' ')
@@ -544,7 +618,12 @@ cmd_ingest() {
     die "result does not continue the current cursor for $id"
   fi
   if [ "$class" = continuity-broken ]; then
-    line="blocked [key=remote-reply-continuity-$id]: remote reply continuity broke for $id ($reason)"
+    # The same offset, prefix, and retirement count build the same line, so a
+    # retry appends nothing. Retirement removes the cursor before it records
+    # the next count, so a later break is a new line even when the restored
+    # bytes match, and a stop between those steps leaves the count unchanged.
+    read_retirement_count "$id"
+    line="blocked [key=remote-reply-continuity-$id]: remote reply continuity broke for $id ($reason) at offset ${CURSOR_OFFSET} prefix $(continuity_prefix) retirements ${RETIREMENT_COUNT}"
     append_rc=0
     if status_event_recorded "$status_file" "$line"; then
       append_rc=1
@@ -553,6 +632,8 @@ cmd_ingest() {
     fi
     [ "$append_rc" -ne 2 ] || { fm_lock_release "$lock"; die "cannot append continuity escalation"; }
     fm_lock_release "$lock"
+    rm -rf -- "$tmp"
+    INGEST_TMP=''
     printf 'continuity-broken: %s (%s)\n' "$id" "$reason"
     return 3
   fi
@@ -633,8 +714,8 @@ EOF
     write_cursor "$id" "$to" "$to_hash" || { fm_lock_release "$lock"; die "cannot commit remote reply cursor"; }
   fi
   fm_lock_release "$lock"
-  trap - EXIT
   rm -rf -- "$tmp"
+  INGEST_TMP=''
   printf 'ingested: %s appended=%s offset=%s\n' "$id" "$appended" "$to"
 }
 
@@ -683,7 +764,8 @@ cmd_handle() {
   lock=$(secondmate_reply_lifecycle_lock_path "$STATE" "$id")
   (
     fm_lock_acquire_wait "$lock" || die "cannot lock remote reply lifecycle for $id"
-    trap 'fm_lock_release "$lock"' EXIT
+    LIFECYCLE_LOCK=$lock
+    trap 'cleanup_temp_paths; fm_lock_release "$LIFECYCLE_LOCK"' EXIT
     cmd_handle_locked "$@"
   )
 }
@@ -726,7 +808,7 @@ cmd_retire_quiesce_locked() {
 }
 
 cmd_retire_finalize_locked() {
-  local id=${1:-} force=${2:-} sid path
+  local id=${1:-} force=${2:-} sid path cursor
   validate_id "$id"
   [ -z "$force" ] || [ "$force" = --force ] || die "invalid retirement option: $force"
   sid=$(source_id "$id")
@@ -742,7 +824,16 @@ cmd_retire_finalize_locked() {
       done
     fi
   fi
-  rm -f -- "$(cursor_path "$id")"
+  # Remove the cursor first. A stop before the count write leaves that count
+  # unchanged, so the same break still builds the same line.
+  cursor=$(cursor_path "$id")
+  rm -f -- "$cursor" || die "cannot remove remote reply cursor"
+  if [ -e "$cursor" ] || [ -L "$cursor" ]; then
+    die "cannot remove remote reply cursor"
+  fi
+  read_retirement_count "$id"
+  write_retirement_count "$id" "$((RETIREMENT_COUNT + 1))" \
+    || die "cannot record remote reply retirement"
   rm -f -- "$CURSOR_DIR/$id".*.ingested
   rm -f -- "$(fm_pending_reply_remote_channel_watermark_path "$STATE" "$id")"
 }
@@ -753,7 +844,8 @@ cmd_retire() {
   lock=$(secondmate_reply_lifecycle_lock_path "$STATE" "$id")
   (
     fm_lock_acquire_wait "$lock" || die "cannot lock remote reply lifecycle for $id"
-    trap 'fm_lock_release "$lock"' EXIT
+    LIFECYCLE_LOCK=$lock
+    trap 'cleanup_temp_paths; fm_lock_release "$LIFECYCLE_LOCK"' EXIT
     cmd_retire_quiesce_locked "$id" "$force" || return 1
     cmd_retire_finalize_locked "$id" "$force"
   )

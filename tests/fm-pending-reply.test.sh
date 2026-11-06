@@ -13,6 +13,8 @@
 #   4. Second missed turn escalates once and remains durable
 #   5. Transport success cannot masquerade as reply success
 #   6. Unrelated events and stale correlation ids cannot resolve a request
+#      - including another mate's line that echoes the request's token, or a
+#        token embedded in a longer word
 #   7. Restart/compaction preserves the expectation and exact parent destination
 #   8. Wrong-home reports are detected but do not silently acknowledge
 #   9. Direct unmarked captain input creates no expectation
@@ -32,6 +34,10 @@
 #  17. Recovery and escalation grace are measured from the relevant turn's
 #      completion, never from delivery or send time, and each takes one fresh,
 #      uncached status read - accepting any verb - immediately before firing
+#  18. A same-kind escalation after an operator close appends again and reopens
+#      the decision; a retry while that decision is still open appends nothing
+#  19. A request summary keeps accented letters, drops control characters, and
+#      caps at 120 characters without splitting one under any caller locale
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -1065,6 +1071,37 @@ test_unrelated_and_stale_corr_cannot_resolve() {
   pass "unrelated events and stale correlation ids cannot resolve"
 }
 
+test_another_mates_echo_cannot_resolve() {
+  local home state corr_a corr_b
+  home=$(setup_parent two-mates)
+  state="$home/state"
+  # shellcheck disable=SC2031
+  export FM_PENDING_REPLY_NOW=6100
+  corr_a=$(fm_pending_reply_create "$home" "$state" "alpha" "need alpha's answer")
+  corr_b=$(fm_pending_reply_create "$home" "$state" "beta" "need beta's answer")
+  fm_pending_reply_mark_delivered "$state" "$corr_a"
+  fm_pending_reply_mark_delivered "$state" "$corr_b"
+  # Beta's reply echoes alpha's token; remote reply ingest hands every corr= in
+  # beta's payload over together with beta's own status log.
+  printf 'done [corr=%s]: answered, and alpha still owes corr=%s\n' "$corr_b" "$corr_a" \
+    > "$state/beta.status"
+  if fm_pending_reply_try_resolve "$state" "$corr_a" "$state/beta.status"; then
+    fail "another mate's line echoing the token must not resolve the request"
+  fi
+  [ "$(phase_of "$state" "$corr_a")" = awaiting_report ] || fail "alpha's request must stay open"
+  fm_pending_reply_try_resolve "$state" "$corr_b" "$state/beta.status" \
+    || fail "beta's own correlated line should resolve beta's request"
+  printf 'done corr=%sff: a longer token is a different token\n' "$corr_a" > "$state/alpha.status"
+  printf 'done xcorr=%s: so is a prefixed one\n' "$corr_a" >> "$state/alpha.status"
+  if fm_pending_reply_try_resolve "$state" "$corr_a"; then
+    fail "a token embedded in a longer word must not resolve"
+  fi
+  printf 'done [corr=%s]: alpha answered\n' "$corr_a" >> "$state/alpha.status"
+  fm_pending_reply_try_resolve "$state" "$corr_a" "$state/alpha.status" \
+    || fail "alpha's own correlated line should resolve alpha's request"
+  pass "another mate's echoed token cannot resolve a request"
+}
+
 test_restart_preserves_expectation_and_parent_destination() {
   local home state corr rec parent_status parent_home
   home=$(setup_parent restart)
@@ -1992,6 +2029,100 @@ test_escalated_undelivered_correlation_stays_retryable() {
   pass "an escalated correlation stays retryable only while undelivered"
 }
 
+test_same_kind_escalation_reopens_after_operator_close() {
+  (
+    local dir fb log home state corr status blocked open
+    dir="$TMP_ROOT/same-kind-reescalation"
+    mkdir -p "$dir"
+    fb=$(make_stubs "$dir")
+    log="$dir/send.log"
+    home=$(setup_parent same-kind)
+    state="$home/state"
+    fm_write_secondmate_meta "$state/mate.meta" "$home/sm" "sess:fm-mate"
+    export FM_PENDING_REPLY_NOW=10000
+    corr=$(fm_pending_reply_create "$home" "$state" mate "wake after lost transport")
+    status="$state/mate.status"
+    fm_pending_reply_prepare_delivery "$state" "$corr" \
+      || fail "prepare failed"
+    fm_pending_reply_tick_one "$state" "$corr" unknown \
+      || fail "first tick failed"
+    [ "$(phase_of "$state" "$corr")" = escalated ] \
+      || fail "first loss should escalate"
+    blocked=$(grep -cF "blocked [key=pending-reply-$corr]" "$status")
+    [ "$blocked" = 1 ] \
+      || fail "first escalation should append one blocked line, got $blocked"
+    fm_pending_reply_reset_known_undelivered "$state" "$corr" \
+      || fail "reset before close failed"
+    fm_pending_reply_prepare_delivery "$state" "$corr" \
+      || fail "retry prepare failed"
+    export FM_PENDING_REPLY_NOW=15000
+    fm_pending_reply_tick_one "$state" "$corr" unknown \
+      || fail "retry tick failed"
+    [ "$(phase_of "$state" "$corr")" = escalated ] \
+      || fail "retry should escalate the record again"
+    blocked=$(grep -cF "blocked [key=pending-reply-$corr]" "$status")
+    [ "$blocked" = 1 ] \
+      || fail "a retry while the decision is open must not append, got $blocked"
+    open=$(status_open_decisions "$status" | cut -f1)
+    [ "$open" = "pending-reply-$corr" ] \
+      || fail "the first decision must stay open, got '$open'"
+    run_send "$fb" "$home" "$log" mate --resolve-key "pending-reply-$corr" \
+      "dismiss the unknown-delivery hold" \
+      || fail "operator close failed"
+    open=$(status_open_decisions "$status")
+    [ -z "$open" ] || fail "operator close left the decision open: $open"
+    fm_pending_reply_reset_known_undelivered "$state" "$corr" \
+      || fail "reset after close failed"
+    fm_pending_reply_prepare_delivery "$state" "$corr" \
+      || fail "second-episode prepare failed"
+    export FM_PENDING_REPLY_NOW=20000
+    fm_pending_reply_tick_one "$state" "$corr" unknown \
+      || fail "second episode tick failed"
+    [ "$(phase_of "$state" "$corr")" = escalated ] \
+      || fail "second loss should escalate"
+    blocked=$(grep -cF "blocked [key=pending-reply-$corr]" "$status")
+    [ "$blocked" = 2 ] \
+      || fail "a new escalation after the close should append, got $blocked"
+    open=$(status_open_decisions "$status" | cut -f1)
+    [ "$open" = "pending-reply-$corr" ] \
+      || fail "the second escalation should reopen the decision, got '$open'"
+    fm_pending_reply_reset_known_undelivered "$state" "$corr" \
+      || fail "reset of the reopened decision failed"
+    fm_pending_reply_prepare_delivery "$state" "$corr" \
+      || fail "reopened retry prepare failed"
+    export FM_PENDING_REPLY_NOW=25000
+    fm_pending_reply_tick_one "$state" "$corr" unknown \
+      || fail "reopened retry tick failed"
+    blocked=$(grep -cF "blocked [key=pending-reply-$corr]" "$status")
+    [ "$blocked" = 2 ] \
+      || fail "a retry of the reopened decision must not append, got $blocked"
+    open=$(status_open_decisions "$status" | cut -f1)
+    [ "$open" = "pending-reply-$corr" ] \
+      || fail "the reopened decision must stay open across the retry, got '$open'"
+  ) || fail "same-kind re-escalation after an operator close failed"
+  pass "a same-kind escalation after an operator close opens the decision again"
+}
+
+test_summary_keeps_accents_and_caps_by_character() {
+  local out long cap_chars loc
+  out=$(fm_pending_reply_summarize "não faça a correção")
+  [ "$out" = "não faça a correção" ] || fail "accented summary must survive unchanged, got '$out'"
+  out=$(fm_pending_reply_summarize "$(printf 'a\001b\033c\177d\tnão\r\nfaça')")
+  [ "$out" = "abcd não  faça" ] || fail "control characters must be removed and whitespace flattened, got '$out'"
+  long=$(printf 'ç%.0s' $(seq 1 130))
+  for loc in C "" en_US.UTF-8; do
+    out=$(LC_ALL=${loc:-C} fm_pending_reply_summarize "$long")
+    cap_chars=$(printf '%s' "$out" | LC_ALL=C tr -d '\200-\277' | LC_ALL=C wc -c | tr -d ' ')
+    [ "$cap_chars" = 120 ] || fail "capped accented text must hold 120 characters under locale '${loc:-C}', got $cap_chars"
+    printf '%s' "$out" | iconv -f UTF-8 -t UTF-8 >/dev/null 2>&1 \
+      || fail "capped accented text must stay valid UTF-8 under locale '${loc:-C}'"
+    [ "$out" = "$(printf 'ç%.0s' $(seq 1 117))..." ] || fail "capped text must be 117 characters plus an ellipsis under locale '${loc:-C}'"
+  done
+  out=$(fm_pending_reply_summarize "$(printf 'x%.0s' $(seq 1 120))")
+  [ "${#out}" = 120 ] || fail "a 120-character summary must not be capped, got ${#out}"
+  pass "the summary keeps accented letters, drops control characters, and caps by character"
+}
+
 # --- run --------------------------------------------------------------------
 
 test_normal_correlated_reply_resolves_once
@@ -2017,6 +2148,7 @@ test_undelivered_records_are_scan_immutable
 test_delivery_confirmation_fallback_reconciles
 test_delivery_confirmation_serializes_with_reconciliation
 test_unrelated_and_stale_corr_cannot_resolve
+test_another_mates_echo_cannot_resolve
 test_restart_preserves_expectation_and_parent_destination
 test_wrong_home_detected_not_acknowledged
 test_unmarked_captain_input_creates_no_expectation
@@ -2040,5 +2172,7 @@ test_mechanical_helper_writes_parent_channel
 test_remote_parent_replies_is_not_wrong_home
 test_local_parent_replies_is_wrong_home_evidence
 test_escalated_undelivered_correlation_stays_retryable
+test_same_kind_escalation_reopens_after_operator_close
+test_summary_keeps_accents_and_caps_by_character
 
 printf 'ok - all pending-reply tests passed\n'

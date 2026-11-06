@@ -1,7 +1,8 @@
 import { spawn, spawnSync } from "node:child_process";
-import { existsSync, readFileSync, readdirSync, realpathSync } from "node:fs";
+import { existsSync, readFileSync, realpathSync } from "node:fs";
 import { resolve } from "node:path";
 import { encodeFirstmateOperationalInput } from "./lib/fm-operational-input.js";
+import { contextDirectory, createTurnEndLatch, promptSession, setupEventSubscription } from "./lib/fm-opencode2.js";
 
 // Supervision host: a home opted in with config/supervision-host
 // (docs/configuration.md "Supervision host" owns the gate, which
@@ -117,14 +118,32 @@ async function isPrimaryRoot(root, home) {
   return gitDir.stdout.trim() === commonDir.stdout.trim();
 }
 
+// bin/fm-supervision-lib.sh's fm_supervision_needed is the single owner of the
+// arm condition set (the turn-end guard decides with the same shared
+// predicate), so this plugin can never disagree with the guard again. Away
+// mode stays a local decline: its daemon owns supervision. X-mode homes arm
+// before their relay poll is registered in the state directory.
 function shouldArm(paths) {
   if (existsSync(`${paths.state}/.afk`)) return false;
   if (existsSync(`${paths.config}/x-mode.env`)) return true;
-  try {
-    return readdirSync(paths.state).some((name) => name.endsWith(".meta"));
-  } catch {
-    return false;
-  }
+  return supervisionNeeded(paths);
+}
+
+// fm_supervision_needed <state-dir> exits 0 exactly when the shared predicate
+// says the home needs supervision; exit 0 means arm here.
+function supervisionNeeded(paths) {
+  const result = spawnSync(
+    "bash",
+    [
+      "-c",
+      '. "$1/bin/fm-supervision-lib.sh" && fm_supervision_needed "$2"',
+      "fm-primary-watch-arm",
+      paths.root,
+      paths.state,
+    ],
+    { stdio: "ignore" },
+  );
+  return result.status === 0;
 }
 
 async function sessionOwnsLock(paths) {
@@ -248,12 +267,7 @@ function observeArmOutput(hostMode, stdout, stderr, settleReadiness) {
 
 async function sendPrompt(paths, client, sessionID, text) {
   const encoded = await encodeFirstmateOperationalInput(paths.root, "watcher", text);
-  await client.session.promptAsync({
-    path: { id: sessionID },
-    body: {
-      parts: [{ type: "text", text: encoded }],
-    },
-  });
+  await promptSession(client?.__ctx, client?.session ? client : null, sessionID, encoded);
 }
 
 function confirmHandlingDelivery(paths, recovery) {
@@ -558,4 +572,29 @@ export const FmPrimaryWatchArm = async ({ client, directory, worktree }) => {
       void ensureArm(paths, sessionID, client);
     },
   };
+};
+
+function installWatchArm(ctx) {
+  const anchor = contextDirectory(ctx);
+  const transport = { __ctx: ctx };
+  let pathsPromise = null;
+  const getPaths = () => (pathsPromise ??= resolveRoot(anchor).then(effectivePaths));
+  globalThis[COORDINATOR_KEY] = {
+    ensureArmed: async (sessionID, activeClient) => ensureArm(await getPaths(), sessionID, activeClient ?? transport),
+  };
+
+  const latch = createTurnEndLatch();
+  setupEventSubscription(ctx, async (event) => {
+    const sessionID = latch(event);
+    if (!sessionID) return;
+    void ensureArm(await getPaths(), sessionID, transport);
+  });
+}
+
+export default {
+  id: "fm.primary.watch-arm",
+  server: FmPrimaryWatchArm,
+  setup(ctx) {
+    installWatchArm(ctx);
+  },
 };

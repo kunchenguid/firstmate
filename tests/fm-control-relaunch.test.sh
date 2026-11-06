@@ -24,6 +24,8 @@ set -u
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-control-lib.sh"
 # shellcheck source=/dev/null
+. "$ROOT/bin/fm-pr-lib.sh"
+# shellcheck source=/dev/null
 . "$ROOT/bin/fm-trace-context-lib.sh"
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-tasks-axi-lib.sh"
@@ -43,9 +45,9 @@ TASK_TMPS=()
 relaunch_cleanup() {
   local d
   for d in "${TASK_TMPS[@]:-}"; do
-    [ -n "$d" ] && rm -rf "$d"
+    [ -n "$d" ] && fm_test_remove_tree "$d"
   done
-  rm -rf "$TMP_ROOT"
+  fm_test_cleanup
 }
 trap relaunch_cleanup EXIT
 
@@ -471,23 +473,66 @@ test_relaunch_preserves_durable_task_metadata() {
   dir=$(new_case durable-meta rl19)
   add_ship_task "$dir" rl19 claude
   {
-    printf '%s\n' 'pr=https://github.com/example/repo/pull/19'
-    printf '%s\n' 'pr_head=feature/relaunch'
     printf '%s\n' 'x_request=request-19'
     printf '%s\n' 'decisions_reviewed=1'
+    printf '%s\n' 'pr=https://github.com/example/repo/pull/19'
+    printf '%s\n' 'pr_head=0123456789012345678901234567890123456789'
   } >> "$dir/home/state/rl19.meta"
+  fm_pr_poll_prepare "$dir/home/state" rl19 github \
+    https://github.com/example/repo/pull/19 github.com example/repo 19 \
+    "$ROOT/bin/fm-pr-poll.sh" \
+    || fail "could not prepare the PR poll fixture for relaunch"
+  fm_pr_poll_publish_prepared \
+    || fail "could not publish the PR poll fixture for relaunch"
+  fm_pr_poll_artifacts_valid "$dir/home/state" rl19 "$ROOT/bin/fm-pr-poll.sh" \
+    || fail "the PR poll fixture did not authenticate before relaunch"
 
   out=$(run_control "$dir" rl19 relaunch --note "continuing review work"); rc=$?
   expect_code 0 "$rc" "relaunch should preserve durable metadata"$'\n'"$out"
   [ "$(meta_field "$dir" rl19 pr)" = "https://github.com/example/repo/pull/19" ] \
     || fail "the task PR must survive relaunch"
-  [ "$(meta_field "$dir" rl19 pr_head)" = "feature/relaunch" ] \
+  [ "$(meta_field "$dir" rl19 pr_head)" = "0123456789012345678901234567890123456789" ] \
     || fail "the task PR head must survive relaunch"
   [ "$(meta_field "$dir" rl19 x_request)" = "request-19" ] \
     || fail "the task X request must survive relaunch"
   [ "$(meta_field "$dir" rl19 decisions_reviewed)" = 1 ] \
     || fail "the task decision state must survive relaunch"
-  pass "fm-control relaunch: durable task metadata survives replacement launch publication"
+  fm_pr_poll_artifacts_valid "$dir/home/state" rl19 "$ROOT/bin/fm-pr-poll.sh" \
+    || fail "relaunch must keep an armed PR poll authenticated"
+  pass "fm-control relaunch: an armed PR poll survives replacement launch publication"
+}
+
+test_traced_relaunch_keeps_an_armed_pr_poll_authenticated() {
+  local dir out rc
+  dir=$(new_case traced-pr-poll rl52)
+  add_ship_task "$dir" rl52 claude
+  {
+    printf '%s\n' 'pr=https://github.com/example/repo/pull/52'
+    printf '%s\n' 'pr_head=0123456789012345678901234567890123456789'
+    printf '%s\n' 'x_request=request-52'
+  } >> "$dir/home/state/rl52.meta"
+  printf '%s\n' "$$" > "$dir/home/state/.lock"
+  printf '%s on\n' "$$" > "$dir/home/state/.trace-context-effective"
+  fm_pr_poll_prepare "$dir/home/state" rl52 github \
+    https://github.com/example/repo/pull/52 github.com example/repo 52 \
+    "$ROOT/bin/fm-pr-poll.sh" \
+    || fail "could not prepare the PR poll fixture for traced relaunch"
+  fm_pr_poll_publish_prepared \
+    || fail "could not publish the PR poll fixture for traced relaunch"
+  fm_pr_poll_artifacts_valid "$dir/home/state" rl52 "$ROOT/bin/fm-pr-poll.sh" \
+    || fail "the PR poll fixture did not authenticate before traced relaunch"
+
+  out=$(run_control "$dir" rl52 relaunch --note "continuing traced review"); rc=$?
+  expect_code 0 "$rc" "traced relaunch should succeed"$'\n'"$out"
+  fm_trace_context_valid "$(meta_field "$dir" rl52 traceparent)" \
+    || fail "traced relaunch must record the replacement trace carrier"
+  [ "$(grep -c '^traceparent=' "$dir/home/state/rl52.meta")" = 1 ] \
+    || fail "traced relaunch must leave exactly one trace carrier"
+  [ "$(meta_field "$dir" rl52 x_request)" = request-52 ] \
+    || fail "traced relaunch must keep the X request"
+  fm_pr_poll_artifacts_valid "$dir/home/state" rl52 "$ROOT/bin/fm-pr-poll.sh" \
+    || fail "traced relaunch must keep an armed PR poll authenticated"
+  pass "fm-control relaunch: a traced replacement keeps an armed PR poll authenticated"
 }
 
 test_relaunch_serializes_concurrent_durable_metadata_publication() {
@@ -611,6 +656,35 @@ test_relaunch_appends_the_progress_note_to_the_instructions() {
   pass "fm-control relaunch: progress and the Firstmate-worktree worker identity reach the replacement"
 }
 
+test_relaunch_note_inbox_listing_is_safe_on_empty_inbox() {
+  local dir out rc brief cmd inbox shell_name status
+  dir=$(new_case notelist rl2b)
+  add_ship_task "$dir" rl2b claude
+  out=$(run_control "$dir" rl2b relaunch --note "resume"); rc=$?
+  expect_code 0 "$rc" "relaunch should succeed"$'\n'"$out"
+  brief="$dir/home/data/rl2b/brief.md"
+  # shellcheck disable=SC2016
+  cmd=$(sed -n 's/^`\(find [^`]*\)`.*/\1/p' "$brief" | head -1)
+  [ -n "$cmd" ] || fail "the progress note does not give a find-based inbox listing command"
+  inbox="$dir/home/state/rl2b.inbox"
+  for shell_name in bash zsh; do
+    command -v "$shell_name" >/dev/null 2>&1 || continue
+    rm -rf "$inbox"
+    status=0
+    out=$("$shell_name" -c "$cmd" 2>&1) || status=$?
+    [ "$status" -eq 0 ] && [ -z "$out" ] || fail "$shell_name: absent inbox listing was not silent success (exit $status): $out"
+    mkdir -p "$inbox"
+    status=0
+    out=$("$shell_name" -c "$cmd" 2>&1) || status=$?
+    [ "$status" -eq 0 ] && [ -z "$out" ] || fail "$shell_name: empty inbox listing was not silent success (exit $status): $out"
+    : > "$inbox/1000.msg"
+    : > "$inbox/999.msg"
+    out=$("$shell_name" -c "$cmd" 2>&1 | sed 's#.*/##' | tr '\n' ' ')
+    [ "$out" = "999.msg 1000.msg " ] || fail "$shell_name: messages not listed in numeric order: $out"
+  done
+  pass "fm-control relaunch: the progress note's inbox listing is silent on an empty inbox"
+}
+
 test_relaunch_requires_a_note_for_a_ship_task() {
   local dir out rc before
   dir=$(new_case nonote rl3)
@@ -646,6 +720,115 @@ test_harness_switch_moves_the_record_and_clears_prior_wiring() {
   [ "$(journal_field "$dir" rl4 from_harness)" = claude ] || fail "the journal should record the origin harness"
   [ "$(journal_field "$dir" rl4 to_harness)" = codex ] || fail "the journal should record the target harness"
   pass "fm-control relaunch: switching harness is one ordinary relaunch, and the old wiring goes with the old agent"
+}
+
+test_refused_relaunch_onto_polytoken_keeps_the_project_hook_layer() {
+  local dir out rc
+  dir=$(new_case polytokenownhooks rl45)
+  add_ship_task "$dir" rl45 claude
+  # The project's own polytoken hook layer and a same-named facet, neither
+  # generated by firstmate; the refused arm and its abort cleanup must keep both.
+  mkdir -p "$dir/wt/.polytoken/facets"
+  printf '[{"name":"project-own","event":"stop","handler":{"bash":"/bin/true"}}]\n' \
+    > "$dir/wt/.polytoken/hooks.json"
+  printf -- '---\nname: firstmate-worker\n---\nproject facet\n' \
+    > "$dir/wt/.polytoken/facets/firstmate-worker.md"
+  printf 'polytoken' > "$dir/fake/becomes"
+  # Profile validation precedes the hook-layer refusal, so the fixture must
+  # advertise its explicit pin without requiring a real Polytoken installation.
+  cat > "$dir/fakebin/polytoken" <<'SH'
+#!/usr/bin/env bash
+case "$*" in
+  'print models') printf '%s\n' 'zai/glm-5.3-flash' 'zai/glm-5.3-flash(low)' ;;
+  *) exit 1 ;;
+esac
+SH
+  chmod +x "$dir/fakebin/polytoken"
+  out=$(run_control "$dir" rl45 relaunch --harness polytoken \
+    --model zai/glm-5.3-flash --effort low --note "switching runtime"); rc=$?
+  [ "$rc" -ne 0 ] || fail "a relaunch onto polytoken over a project hook layer must refuse"$'\n'"$out"
+  assert_contains "$out" "not firstmate's to clobber" \
+    "the refusal must come from the polytoken arm"$'\n'"$out"
+  assert_contains "$(cat "$dir/wt/.polytoken/hooks.json" 2>/dev/null)" "project-own" \
+    "an aborted relaunch must leave the project's own hook layer in place"
+  assert_contains "$(cat "$dir/wt/.polytoken/facets/firstmate-worker.md" 2>/dev/null)" "project facet" \
+    "an aborted relaunch must leave a facet it did not generate in place"
+  [ "$(meta_field "$dir" rl45 harness)" = claude ] \
+    || fail "a refused relaunch must keep the prior record"
+  [ -z "$(cat "$dir/fake/literal")" ] || fail "a refused relaunch onto polytoken must send nothing"
+  [ "$(cat "$dir/fake/command")" = claude ] || fail "a refused relaunch onto polytoken must not stop the agent"
+  pass "fm-control relaunch: a refused relaunch onto polytoken keeps the project's own hook layer and the running agent"
+}
+
+test_refused_polytoken_profile_leaves_the_running_agent() {
+  local dir out rc
+  dir=$(new_case polytokenprofile rl47)
+  add_ship_task "$dir" rl47 claude
+  printf 'polytoken' > "$dir/fake/becomes"
+  cat > "$dir/fakebin/polytoken" <<'SH'
+#!/usr/bin/env bash
+case "$*" in
+  'print models') printf '%s\n' 'zai/glm-5.3-flash' 'zai/glm-5.3-flash(low)' ;;
+  *) exit 1 ;;
+esac
+SH
+  chmod +x "$dir/fakebin/polytoken"
+  out=$(run_control "$dir" rl47 relaunch --harness polytoken --note "switching runtime"); rc=$?
+  [ "$rc" -ne 0 ] || fail "a switch onto polytoken with default axes must refuse"$'\n'"$out"
+  assert_contains "$out" "requires concrete --model and --effort" \
+    "the refusal must name the missing worker profile"$'\n'"$out"
+  out=$(run_control "$dir" rl47 relaunch --harness polytoken \
+    --model zai/unlisted --effort low --note "switching runtime"); rc=$?
+  [ "$rc" -ne 0 ] || fail "a switch onto an unlisted polytoken model must refuse"$'\n'"$out"
+  assert_contains "$out" "is not listed by 'polytoken print models'" \
+    "the refusal must come from the polytoken catalog"$'\n'"$out"
+  [ -z "$(cat "$dir/fake/literal")" ] || fail "a refused polytoken profile must send nothing"
+  [ "$(cat "$dir/fake/command")" = claude ] || fail "a refused polytoken profile must not stop the agent"
+  [ "$(meta_field "$dir" rl47 harness)" = claude ] || fail "a refused polytoken profile must keep the prior record"
+  [ ! -e "$dir/wt/.polytoken" ] || fail "a refused polytoken profile must write no wiring"
+  pass "fm-control relaunch: a refused polytoken profile leaves the running agent untouched"
+}
+
+test_relaunch_off_opencode_removes_tracked_wiring() {
+  local dir out
+  dir=$(new_case opencodetracked rl78)
+  add_ship_task "$dir" rl78 opencode
+  mkdir -p "$dir/wt/.opencode/plugins"
+  printf 'prior busy plugin\n' > "$dir/wt/.opencode/plugins/fm-busy-state.js"
+  git -C "$dir/wt" add .opencode/plugins/fm-busy-state.js
+  git -C "$dir/wt" -c user.email=t@t -c user.name=t commit -q -m "tracked prior wiring"
+  printf 'zsh' > "$dir/fake/command"
+  out=$(run_spawn "$dir" rl78 --relaunch --harness claude)
+  assert_contains "$out" "spawned rl78 harness=claude" "the relaunch off opencode should complete"
+  [ ! -e "$dir/wt/.opencode/plugins/fm-busy-state.js" ] \
+    || fail "retiring opencode wiring must still remove tracked files as on main"
+  pass "fm-spawn --relaunch: tracked opencode wiring is retired as on main"
+}
+
+test_relaunch_from_a_raw_polytoken_launch_keeps_the_project_layers() {
+  local dir out
+  dir=$(new_case polytokenrawprior rl46)
+  add_ship_task "$dir" rl46 polytoken
+  # A raw-launched polytoken task never had firstmate wiring, so the tracked
+  # project hook layer and an untracked facet it did not generate both belong
+  # to the project and must outlive the prior-wiring retirement.
+  mkdir -p "$dir/wt/.polytoken/facets"
+  printf '[{"name":"project-own","event":"stop","handler":{"bash":"/bin/true"}}]\n' \
+    > "$dir/wt/.polytoken/hooks.json"
+  git -C "$dir/wt" add .polytoken/hooks.json
+  git -C "$dir/wt" -c user.email=t@t -c user.name=t commit -q -m "project hook layer"
+  printf -- '---\nname: firstmate-worker\n---\nproject facet\n' \
+    > "$dir/wt/.polytoken/facets/firstmate-worker.md"
+  printf 'zsh' > "$dir/fake/command"
+  out=$(run_spawn "$dir" rl46 --relaunch --harness claude)
+  assert_contains "$out" "spawned rl46 harness=claude" "the relaunch off polytoken should complete"
+  assert_contains "$(cat "$dir/wt/.polytoken/hooks.json" 2>/dev/null)" "project-own" \
+    "retiring the prior polytoken wiring must keep the project's tracked hook layer"
+  assert_contains "$(cat "$dir/wt/.polytoken/facets/firstmate-worker.md" 2>/dev/null)" "project facet" \
+    "retiring the prior polytoken wiring must keep a facet firstmate did not generate"
+  [ -z "$(git -C "$dir/wt" status --porcelain -- .polytoken/hooks.json)" ] \
+    || fail "the tracked project hook layer must be left unmodified"
+  pass "fm-spawn --relaunch: retiring a raw polytoken launch's wiring keeps the project's own layers"
 }
 
 test_harness_switch_does_not_carry_the_old_profile_axes() {
@@ -814,6 +997,213 @@ test_worker_account_pin_follows_the_relaunch() {
   pass "fm-control relaunch: the replacement follows the home's current worker account pin"
 }
 
+# add_listed_task <case-dir> <id> <recorded-account>: a live Claude ship
+# recorded on <recorded-account> in a home declaring two signed-in accounts,
+# first and second, plus a signed-out one.
+add_listed_task() {
+  local dir=$1 id=$2 recorded=$3
+  add_ship_task "$dir" "$id" claude
+  make_claude_auth_stub "$dir"
+  mkdir -p "$dir/home/config" "$dir/first" "$dir/second" "$dir/signed-out"
+  : > "$dir/first/.credentials.json"
+  : > "$dir/second/.credentials.json"
+  printf '%s\n' "$dir/first" "$dir/second" "$dir/signed-out" > "$dir/home/config/claude-accounts"
+  [ -z "$recorded" ] || echo "account=$recorded" >> "$dir/home/state/$id.meta"
+}
+
+test_account_list_relaunch_reuses_the_recorded_account() {
+  local dir out rc id=rl-list
+  dir=$(new_case list-reuse "$id")
+  add_listed_task "$dir" "$id" "$dir/first"
+  out=$(run_control "$dir" "$id" relaunch --note "same account"); rc=$?
+  expect_code 0 "$rc" "a relaunch under a list should reuse the recorded account"$'\n'"$out"
+  [ "$(meta_field "$dir" "$id" account)" = "$dir/first" ] || fail "the relaunched record should keep the recorded account"
+  assert_contains "$(cat "$dir/fake/literal")" "CLAUDE_CONFIG_DIR='$dir/first'" \
+    "the replacement should launch under the recorded account"
+  : > "$dir/fake/literal"
+  printf 'zsh' > "$dir/fake/command"
+  out=$(run_spawn "$dir" "$id" --relaunch); rc=$?
+  expect_code 0 "$rc" "a direct fm-spawn --relaunch under a list should reuse the recorded account"$'\n'"$out"
+  assert_contains "$out" "account=$dir/first" "the direct relaunch should report the recorded account"
+  pass "fm-control relaunch: a declared account list keeps the account the task records"
+}
+
+test_account_list_relaunch_moves_only_on_explicit_account() {
+  local dir out rc id=rl-list-move
+  dir=$(new_case list-move "$id")
+  add_listed_task "$dir" "$id" "$dir/first"
+  out=$(run_control "$dir" "$id" relaunch --account "$dir/second" --note "first is exhausted"); rc=$?
+  expect_code 0 "$rc" "an explicit --account relaunch should move the task"$'\n'"$out"
+  [ "$(meta_field "$dir" "$id" account)" = "$dir/second" ] || fail "the relaunched record should name the new account"
+  assert_contains "$(cat "$dir/fake/literal")" "CLAUDE_CONFIG_DIR='$dir/second'" \
+    "the replacement should launch under the explicitly chosen account"
+  : > "$dir/fake/literal"
+  out=$(run_control "$dir" "$id" relaunch --note "stay"); rc=$?
+  expect_code 0 "$rc" "a later plain relaunch should succeed"$'\n'"$out"
+  [ "$(meta_field "$dir" "$id" account)" = "$dir/second" ] || fail "a later relaunch should keep the moved account"
+  pass "fm-control relaunch: only an explicit --account moves a task to another declared account"
+}
+
+test_account_list_relaunch_refusals_happen_before_stop() {
+  local dir out rc id=rl-list-refuse case_name recorded flag needle
+  for case_name in undeclared newline signed-out unrecorded removed wrong-harness; do
+    dir=$(new_case "list-refuse-$case_name" "$id")
+    recorded="$dir/first"
+    flag=()
+    case "$case_name" in
+      undeclared)
+        flag=(--account "$dir/elsewhere")
+        needle="account '$dir/elsewhere' is not declared in config/claude-accounts" ;;
+      newline)
+        flag=(--account "$dir/elsewhere"$'\n'"$dir/second")
+        needle="--account must name one config/claude-accounts entry exactly, with no control characters" ;;
+      signed-out)
+        flag=(--account "$dir/signed-out")
+        needle="config/claude-accounts pins Claude workers to $dir/signed-out, which is not signed in" ;;
+      unrecorded)
+        recorded=
+        needle="must name one with --account" ;;
+      removed)
+        recorded="$dir/retired"
+        needle="account '$dir/retired' is not declared in config/claude-accounts" ;;
+      wrong-harness)
+        flag=(--harness codex --account "$dir/second")
+        needle="applies to Claude workers only, not codex" ;;
+    esac
+    add_listed_task "$dir" "$id" "$recorded"
+    cp "$dir/home/state/$id.meta" "$dir/meta-before"
+    out=$(run_control "$dir" "$id" relaunch ${flag[@]+"${flag[@]}"} --note "refuse $case_name"); rc=$?
+    expect_code 1 "$rc" "the $case_name relaunch must refuse"$'\n'"$out"
+    assert_contains "$out" "$needle" "the $case_name refusal should say why"
+    [ "$(cat "$dir/fake/command")" = claude ] || fail "the $case_name refusal must happen before the running agent stops"
+    [ ! -s "$dir/fake/literal" ] || fail "the $case_name refusal must send no lifecycle input"
+    cmp -s "$dir/meta-before" "$dir/home/state/$id.meta" || fail "the $case_name refusal must leave the task record untouched"
+  done
+  pass "fm-control relaunch: undeclared, newline-split, signed-out, unrecorded, retired, and wrong-runner accounts refuse before the old agent stops"
+}
+
+test_secondmate_account_pin_follows_relaunch_and_refuses_before_stop() {
+  local dir out rc id=rl-sm-acct harness file variable pin
+  for harness in claude pi; do
+    dir=$(new_case "sm-account-$harness" "$id")
+    add_ship_task "$dir" "$id" "$harness"
+    make_claude_auth_stub "$dir"
+    cat > "$dir/fakebin/pi" <<'SH'
+#!/usr/bin/env bash
+case "${1:-}" in
+  --help) printf 'Options: --tui-mode\n' ;;
+  auth)
+    if grep -qx "$4" "$PI_CODING_AGENT_DIR/signed-in" 2>/dev/null; then
+      printf '{"status":"ready"}\n'
+    else
+      printf '{"status":"not_ready","reason":"credentials_not_configured"}\n'
+      exit 1
+    fi ;;
+esac
+SH
+    chmod +x "$dir/fakebin/pi"
+    file=claude-account; variable=CLAUDE_CONFIG_DIR
+    if [ "$harness" = pi ]; then file=pi-account; variable=PI_CODING_AGENT_DIR; fi
+    printf '%s' "$harness" > "$dir/fake/command"
+    printf '%s' "$harness" > "$dir/fake/becomes"
+    mkdir -p "$dir/wt/state" "$dir/wt/data" "$dir/wt/bin" \
+      "$dir/home/config/secondmate-accounts/$id" "$dir/primary" "$dir/mate" "$dir/new-mate"
+    printf '%s\n' "$id" > "$dir/wt/.fm-secondmate-home"
+    printf '# agents\n' > "$dir/wt/AGENTS.md"
+    printf '# charter\n' > "$dir/wt/data/charter.md"
+    printf '%s openai-codex/gpt-5.5\n' "$harness" > "$dir/home/config/secondmate-harness"
+    {
+      printf 'window=fmses:fm-%s\nendpoint_task_id=%s\n' "$id" "$id"
+      printf 'worktree=%s\nproject=%s\nhome=%s\n' "$dir/wt" "$dir/wt" "$dir/wt"
+      printf 'harness=%s\nkind=secondmate\nmode=secondmate\nyolo=off\nmodel=default\neffort=default\n' "$harness"
+    } > "$dir/home/state/$id.meta"
+    : > "$dir/primary/.credentials.json"
+    : > "$dir/mate/.credentials.json"
+    : > "$dir/new-mate/.credentials.json"
+    printf 'openai-codex\n' > "$dir/primary/signed-in"
+    printf 'openai-codex\n' > "$dir/mate/signed-in"
+    printf 'openai-codex\n' > "$dir/new-mate/signed-in"
+    printf '%s\n' "$dir/primary" > "$dir/home/config/$file"
+    [ "$harness" = claude ] || printf 'openai-codex\n' >> "$dir/home/config/$file"
+    pin="$dir/home/config/secondmate-accounts/$id/$file"
+    printf '%s\n' "$dir/mate" > "$pin"
+    [ "$harness" = claude ] || printf 'openai-codex\n' >> "$pin"
+    out=$(run_control "$dir" "$id" relaunch); rc=$?
+    expect_code 0 "$rc" "the secondmate should relaunch on its $harness pin: $out"
+    assert_contains "$(cat "$dir/fake/literal")" "$variable='$dir/mate'" "the replacement must use the mate's pin"
+    [ "$(meta_field "$dir" "$id" account)" = "$dir/mate" ] || fail "the record must name the mate's account"
+    printf '%s\n' "$dir/new-mate" > "$pin"
+    [ "$harness" = claude ] || printf 'openai-codex\n' >> "$pin"
+    : > "$dir/fake/literal"
+    out=$(run_control "$dir" "$id" relaunch); rc=$?
+    expect_code 0 "$rc" "a changed durable pin should govern relaunch: $out"
+    assert_contains "$(cat "$dir/fake/literal")" "$variable='$dir/new-mate'" "relaunch must not reuse the old recorded account"
+    rm "$dir/new-mate/.credentials.json" "$dir/new-mate/signed-in"
+    cp "$dir/home/state/$id.meta" "$dir/meta-before"
+    : > "$dir/fake/literal"
+    out=$(run_control "$dir" "$id" relaunch); rc=$?
+    expect_code 1 "$rc" "a signed-out mate account must refuse before stop"
+    assert_contains "$out" "$pin" "the refusal must name the mate setting"
+    assert_contains "$out" 'not signed in' "the refusal must name the reason"
+    [ "$(cat "$dir/fake/command")" = "$harness" ] || fail "the running mate must remain alive"
+    [ ! -s "$dir/fake/literal" ] || fail "the refused relaunch must send no lifecycle input"
+    cmp -s "$dir/meta-before" "$dir/home/state/$id.meta" || fail "the refused relaunch must preserve metadata"
+    rm "$pin"
+    out=$(run_control "$dir" "$id" relaunch); rc=$?
+    expect_code 0 "$rc" "removing the mate pin should restore the primary's pin: $out"
+    assert_contains "$(cat "$dir/fake/literal")" "$variable='$dir/primary'" "an absent mate setting must restore the primary's pin"
+  done
+  pass "fm-control relaunch: mate pins are re-read for Claude and Pi, and unusable pins refuse before stopping the agent"
+}
+
+test_pi_exclude_tools_follow_the_relaunch() {
+  local dir out rc id=rl-pi-excl
+  dir=$(new_case pi-exclude "$id")
+  add_ship_task "$dir" "$id" pi
+  printf pi > "$dir/fake/command"
+  printf pi > "$dir/fake/becomes"
+  printf '#!/usr/bin/env bash\nprintf "Options: --tui-mode\\n"\n' > "$dir/fakebin/pi"
+  chmod +x "$dir/fakebin/pi"
+  mkdir -p "$dir/home/config"
+  printf '%s\n' '# hide writes' 'mcp__srv__writeTool' 'mcp__srv__adminTool' > "$dir/home/config/crew-exclude-tools"
+  out=$(run_control "$dir" "$id" relaunch --note "keep exclusions"); rc=$?
+  expect_code 0 "$rc" "a Pi relaunch with exclusions should succeed"$'\n'"$out"
+  assert_contains "$(cat "$dir/fake/literal")" "--exclude-tools 'mcp__srv__writeTool,mcp__srv__adminTool'" \
+    "the relaunched Pi worker must keep the home's tool exclusions"
+  rm "$dir/home/config/crew-exclude-tools"
+  : > "$dir/fake/literal"
+  printf pi > "$dir/fake/command"
+  out=$(run_control "$dir" "$id" relaunch --note "exclusions removed"); rc=$?
+  expect_code 0 "$rc" "a Pi relaunch after the file is removed should succeed"$'\n'"$out"
+  assert_not_contains "$(cat "$dir/fake/literal")" "--exclude-tools" \
+    "a relaunch without the file must launch with no exclusions"
+  pass "fm-control relaunch: a Pi replacement keeps the home's tool exclusions"
+}
+
+test_exclude_tools_refusals_happen_before_the_agent_stops() {
+  local dir out rc id=rl-excl-refuse
+  dir=$(new_case excl-refuse "$id")
+  add_ship_task "$dir" "$id" pi
+  printf pi > "$dir/fake/command"
+  printf pi > "$dir/fake/becomes"
+  printf '#!/usr/bin/env bash\nprintf "Options: --tui-mode\\n"\n' > "$dir/fakebin/pi"
+  chmod +x "$dir/fakebin/pi"
+  mkdir -p "$dir/home/config"
+  printf '%s\n' 'two words' > "$dir/home/config/crew-exclude-tools"
+  out=$(run_control "$dir" "$id" relaunch --note "bad list"); rc=$?
+  expect_code 1 "$rc" "a malformed exclusion list must refuse the relaunch"
+  assert_contains "$out" "config/crew-exclude-tools has a malformed entry" "refusal must name the entry"
+  [ "$(cat "$dir/fake/command")" = pi ] || fail "a malformed exclusion list stopped the running agent"
+  [ ! -s "$dir/fake/literal" ] || fail "a refused relaunch sent lifecycle input"
+  printf '%s\n' 'mcp__srv__writeTool' > "$dir/home/config/crew-exclude-tools"
+  out=$(run_control "$dir" "$id" relaunch --harness codex --note "switch runtime"); rc=$?
+  expect_code 1 "$rc" "relaunching onto a runtime that cannot hide tools must refuse"
+  assert_contains "$out" "config/crew-exclude-tools" "refusal must name the config file"
+  [ "$(cat "$dir/fake/command")" = pi ] || fail "an unhonorable exclusion list stopped the running agent"
+  [ ! -s "$dir/fake/literal" ] || fail "a refused relaunch sent lifecycle input"
+  pass "fm-control relaunch: exclusion-list refusals happen before the running agent stops"
+}
+
 test_explicit_model_wins_over_the_recorded_one() {
   local dir out rc
   dir=$(new_case explicit rl7)
@@ -937,6 +1327,213 @@ test_secondmate_relaunch_picks_up_the_configured_harness_pin() {
   pass "fm-control relaunch: a secondmate relaunch re-resolves its durable configured harness pin"
 }
 
+# The relaunch half of the opt-in scope: a pin file that declares no
+# "mate <id>:" line is read exactly as it was before that grammar existed, so a
+# second default line and a fourth token must not stop the relaunch. The mate
+# still lands on the first line's runtime.
+test_secondmate_relaunch_with_a_legacy_pin_file_uses_the_first_line() {
+  local dir home out rc
+  dir=$(new_case smlegacy sml2)
+  home="$dir/home"
+  mkdir -p "$home/config" "$home/data/sml2"
+  printf 'codex some-model high extra\ngrok other-model low\n' > "$home/config/secondmate-harness"
+  printf '# secondmate brief\n' > "$home/data/sml2/brief.md"
+  fm_git_worktree "$dir/proj" "$dir/smhome" sm-branch
+  mkdir -p "$dir/smhome/state" "$dir/smhome/data" "$dir/smhome/bin"
+  printf 'sml2\n' > "$dir/smhome/.fm-secondmate-home"
+  printf '# agents\n' > "$dir/smhome/AGENTS.md"
+  {
+    echo "window=fmses:fm-sml2"
+    echo "endpoint_task_id=sml2"
+    echo "worktree=$dir/smhome"
+    echo "project=$dir/smhome"
+    echo "harness=claude"
+    echo "kind=secondmate"
+    echo "mode=secondmate"
+    echo "yolo=off"
+    echo "model=default"
+    echo "effort=default"
+    echo "home=$dir/smhome"
+  } > "$home/state/sml2.meta"
+  printf '%s\n' "fm-sml2" > "$dir/fake/windows"
+  printf '%s' "$dir/smhome" > "$dir/fake/cwd"
+  printf 'codex' > "$dir/fake/becomes"
+  out=$(run_control "$dir" sml2 relaunch); rc=$?
+  expect_code 0 "$rc" "a legacy pin file must not refuse a secondmate relaunch"$'\n'"$out"
+  [ "$(journal_field "$dir" sml2 to_harness)" = codex ] \
+    || fail "the relaunch should take the first line's harness, got '$(journal_field "$dir" sml2 to_harness)'"
+  [ "$(journal_field "$dir" sml2 to_model)" = some-model ] \
+    || fail "the relaunch should take the first line's model token, got '$(journal_field "$dir" sml2 to_model)'"
+  [ "$(journal_field "$dir" sml2 to_effort)" = high ] \
+    || fail "the relaunch should take the first line's effort token, got '$(journal_field "$dir" sml2 to_effort)'"
+  pass "fm-control relaunch: a legacy secondmate pin file still relaunches the mate onto its first line"
+}
+
+test_secondmate_claude_relaunch_keeps_local_settings() {
+  local dir home prior settings out rc
+  dir=$(new_case smlocal sml)
+  home="$dir/home"
+  mkdir -p "$home/config" "$home/data/sml"
+  printf 'codex\n' > "$home/config/secondmate-harness"
+  printf '# secondmate brief\n' > "$home/data/sml/brief.md"
+  fm_git_worktree "$dir/proj" "$dir/smhome" sm-local-branch
+  mkdir -p "$dir/smhome/state" "$dir/smhome/data" "$dir/smhome/bin" "$dir/smhome/.claude"
+  printf 'sml\n' > "$dir/smhome/.fm-secondmate-home"
+  printf '# agents\n' > "$dir/smhome/AGENTS.md"
+  prior='{"permissions":{"allow":["Bash(echo hi)"]}}'
+  printf '%s\n' "$prior" > "$dir/smhome/.claude/settings.local.json"
+  printf '%s\n' '{"feedbackDrafts":"on"}' > "$home/state/sml.claude-settings.json"
+  printf 'gen=retired\n' > "$dir/smhome/.fm-busy-stop"
+  {
+    echo "window=fmses:fm-sml"
+    echo "endpoint_task_id=sml"
+    echo "worktree=$dir/smhome"
+    echo "project=$dir/smhome"
+    echo "harness=claude"
+    echo "kind=secondmate"
+    echo "mode=secondmate"
+    echo "yolo=off"
+    echo "model=default"
+    echo "effort=default"
+    echo "home=$dir/smhome"
+  } > "$home/state/sml.meta"
+  printf '%s\n' "fm-sml" > "$dir/fake/windows"
+  printf '%s' "$dir/smhome" > "$dir/fake/cwd"
+  printf 'codex' > "$dir/fake/becomes"
+  out=$(run_control "$dir" sml relaunch); rc=$?
+  expect_code 0 "$rc" "a claude secondmate relaunch should retire wiring without touching local settings"$'\n'"$out"
+  settings="$dir/smhome/.claude/settings.local.json"
+  [ "$(cat "$settings")" = "$prior" ] \
+    || fail "relaunch rewrote the mate home's settings.local.json"
+  [ ! -e "$home/state/sml.claude-settings.json" ] \
+    || fail "relaunch left the retired claude settings file in place"
+  [ ! -e "$dir/smhome/.fm-busy-stop" ] \
+    || fail "relaunch left the retired Stop pointer in the mate home"
+  pass "fm-control relaunch: a claude secondmate keeps settings.local.json and retires the state settings file and the Stop pointer"
+}
+
+# The captain's per-mate override line must win at the relaunch decision, so a
+# later change to the default pin cannot migrate a mate that has its own runtime
+# ruling onto the default. Synthetic mate ids only - no real home's pin values.
+test_secondmate_relaunch_lands_on_the_per_mate_pin() {
+  local dir home out rc
+  dir=$(new_case smpinmate smp1)
+  home="$dir/home"
+  mkdir -p "$home/config" "$home/data/smp1"
+  printf 'codex default-model high\nmate smp1: claude mate-model xhigh\n' > "$home/config/secondmate-harness"
+  printf '# secondmate brief\n' > "$home/data/smp1/brief.md"
+  fm_git_worktree "$dir/proj" "$dir/smhome" sm-branch
+  mkdir -p "$dir/smhome/state" "$dir/smhome/data" "$dir/smhome/bin"
+  printf 'smp1\n' > "$dir/smhome/.fm-secondmate-home"
+  printf '# agents\n' > "$dir/smhome/AGENTS.md"
+  {
+    echo "window=fmses:fm-smp1"
+    echo "endpoint_task_id=smp1"
+    echo "worktree=$dir/smhome"
+    echo "project=$dir/smhome"
+    echo "harness=codex"
+    echo "kind=secondmate"
+    echo "mode=secondmate"
+    echo "yolo=off"
+    echo "model=default"
+    echo "effort=default"
+    echo "home=$dir/smhome"
+  } > "$home/state/smp1.meta"
+  printf '%s\n' "fm-smp1" > "$dir/fake/windows"
+  printf '%s' "$dir/smhome" > "$dir/fake/cwd"
+  printf 'claude' > "$dir/fake/becomes"
+  out=$(run_control "$dir" smp1 relaunch); rc=$?
+  expect_code 0 "$rc" "a per-mate pin should relaunch that mate onto its own runtime"$'\n'"$out"
+  [ "$(journal_field "$dir" smp1 to_harness)" = claude ] \
+    || fail "the mate's own override should win over the default pin, got '$(journal_field "$dir" smp1 to_harness)'"
+  [ "$(journal_field "$dir" smp1 to_model)" = mate-model ] \
+    || fail "the override's model token should be used, got '$(journal_field "$dir" smp1 to_model)'"
+  [ "$(journal_field "$dir" smp1 to_effort)" = xhigh ] \
+    || fail "the override's effort token should be used, got '$(journal_field "$dir" smp1 to_effort)'"
+  pass "fm-control relaunch: a mate with a per-mate override line lands on that override, not the default pin"
+}
+
+# A mate with no override line keeps resolving through the default line, so
+# adding the override grammar cannot change any other mate's resolution.
+test_secondmate_relaunch_uses_the_default_for_an_unpinned_mate() {
+  local dir home out rc
+  dir=$(new_case smdefault smp2)
+  home="$dir/home"
+  mkdir -p "$home/config" "$home/data/smp2"
+  printf 'codex default-model high\nmate some-other-mate: claude opus max\n' > "$home/config/secondmate-harness"
+  printf '# secondmate brief\n' > "$home/data/smp2/brief.md"
+  fm_git_worktree "$dir/proj" "$dir/smhome" sm-branch
+  mkdir -p "$dir/smhome/state" "$dir/smhome/data" "$dir/smhome/bin"
+  printf 'smp2\n' > "$dir/smhome/.fm-secondmate-home"
+  printf '# agents\n' > "$dir/smhome/AGENTS.md"
+  {
+    echo "window=fmses:fm-smp2"
+    echo "endpoint_task_id=smp2"
+    echo "worktree=$dir/smhome"
+    echo "project=$dir/smhome"
+    echo "harness=codex"
+    echo "kind=secondmate"
+    echo "mode=secondmate"
+    echo "yolo=off"
+    echo "model=default"
+    echo "effort=default"
+    echo "home=$dir/smhome"
+  } > "$home/state/smp2.meta"
+  printf '%s\n' "fm-smp2" > "$dir/fake/windows"
+  printf '%s' "$dir/smhome" > "$dir/fake/cwd"
+  printf 'codex' > "$dir/fake/becomes"
+  out=$(run_control "$dir" smp2 relaunch); rc=$?
+  expect_code 0 "$rc" "an unpinned mate should relaunch onto the default pin"$'\n'"$out"
+  [ "$(journal_field "$dir" smp2 to_harness)" = codex ] \
+    || fail "a mate with no override must take the default harness, got '$(journal_field "$dir" smp2 to_harness)'"
+  [ "$(journal_field "$dir" smp2 to_model)" = default-model ] \
+    || fail "the default model token should be used, got '$(journal_field "$dir" smp2 to_model)'"
+  [ "$(journal_field "$dir" smp2 to_effort)" = high ] \
+    || fail "the default effort token should be used, got '$(journal_field "$dir" smp2 to_effort)'"
+  pass "fm-control relaunch: a mate with no override line still resolves the default pin"
+}
+
+# A pin file this home cannot parse must stop the relaunch, because the
+# alternative is launching the mate onto whatever it happened to run last time -
+# the silent migration the override grammar exists to prevent.
+test_secondmate_relaunch_refuses_an_unreadable_configured_pin_before_stop() {
+  local dir home out rc
+  dir=$(new_case smbadminpin smp3)
+  home="$dir/home"
+  mkdir -p "$home/config" "$home/data/smp3"
+  printf 'codex default-model high\nmate smp3: claude mate-model xhigh\nmate smp3: grok other-model max\n' > "$home/config/secondmate-harness"
+  printf '# secondmate brief\n' > "$home/data/smp3/brief.md"
+  fm_git_worktree "$dir/proj" "$dir/smhome" sm-branch
+  mkdir -p "$dir/smhome/state" "$dir/smhome/data" "$dir/smhome/bin"
+  printf 'smp3\n' > "$dir/smhome/.fm-secondmate-home"
+  printf '# agents\n' > "$dir/smhome/AGENTS.md"
+  {
+    echo "window=fmses:fm-smp3"
+    echo "endpoint_task_id=smp3"
+    echo "worktree=$dir/smhome"
+    echo "project=$dir/smhome"
+    echo "harness=claude"
+    echo "kind=secondmate"
+    echo "mode=secondmate"
+    echo "yolo=off"
+    echo "model=default"
+    echo "effort=default"
+    echo "home=$dir/smhome"
+  } > "$home/state/smp3.meta"
+  printf '%s\n' "fm-smp3" > "$dir/fake/windows"
+  printf '%s' "$dir/smhome" > "$dir/fake/cwd"
+  out=$(run_control "$dir" smp3 relaunch); rc=$?
+  expect_code 1 "$rc" "an unparseable configured pin must refuse the relaunch"$'\n'"$out"
+  assert_contains "$out" "config/secondmate-harness" \
+    "the refusal should name the pin file the mate cannot be resolved from"
+  assert_contains "$out" "line 3" "the refusal should name the offending line"
+  [ "$(cat "$dir/fake/command")" = claude ] \
+    || fail "a refused relaunch must not stop or replace the running agent"
+  [ "$(meta_field "$dir" smp3 harness)" = claude ] \
+    || fail "a refused relaunch must leave the durable record on the recorded harness"
+  pass "fm-control relaunch: an unparseable secondmate pin refuses before anything is stopped"
+}
+
 test_secondmate_relaunch_ignores_invalid_configured_effort_before_stop() {
   local dir home out rc
   dir=$(new_case invalid-effort sm6)
@@ -1049,6 +1646,36 @@ test_explicit_secondmate_harness_ignores_configured_profile_axes() {
     || fail "an explicit secondmate harness must not inherit the configured model"
   [ "$(meta_field "$dir" sm4 effort)" = default ] \
     || fail "an explicit secondmate harness must not inherit the configured effort"
+  printf 'claude opus high\nmate sm4: claude opus high\nmate sm4: codex other-model max\n' > "$home/config/secondmate-harness"
+  out=$(run_control "$dir" sm4 relaunch --harness codex --model explicit-model --effort xhigh); rc=$?
+  expect_code 0 "$rc" "an explicit profile must ignore an unreadable configured pin"$'\n'"$out"
+  [ "$(meta_field "$dir" sm4 harness)" = codex ] \
+    || fail "the explicit harness must be published"
+  [ "$(meta_field "$dir" sm4 model)" = explicit-model ] \
+    || fail "the explicit model must be published"
+  [ "$(meta_field "$dir" sm4 effort)" = xhigh ] \
+    || fail "the explicit effort must be published"
+  # The same explicit profile must succeed whatever the file holds, including a
+  # legacy file whose later lines and fourth token the strict rules would have
+  # rejected, and a file with no usable line at all.
+  printf 'claude opus high extra\ngrok other-model low\n' > "$home/config/secondmate-harness"
+  out=$(run_control "$dir" sm4 relaunch --harness codex --model explicit-model --effort xhigh); rc=$?
+  expect_code 0 "$rc" "an explicit profile must ignore a legacy configured pin"$'\n'"$out"
+  [ "$(meta_field "$dir" sm4 harness)" = codex ] \
+    || fail "the explicit harness must be published"
+  [ "$(meta_field "$dir" sm4 model)" = explicit-model ] \
+    || fail "the explicit model must be published"
+  [ "$(meta_field "$dir" sm4 effort)" = xhigh ] \
+    || fail "the explicit effort must be published"
+  printf '# only a comment\n' > "$home/config/secondmate-harness"
+  out=$(run_control "$dir" sm4 relaunch --harness codex --model explicit-model --effort xhigh); rc=$?
+  expect_code 0 "$rc" "an explicit profile must ignore a configured pin with no usable line"$'\n'"$out"
+  [ "$(meta_field "$dir" sm4 harness)" = codex ] \
+    || fail "the explicit harness must be published"
+  [ "$(meta_field "$dir" sm4 model)" = explicit-model ] \
+    || fail "the explicit model must be published"
+  [ "$(meta_field "$dir" sm4 effort)" = xhigh ] \
+    || fail "the explicit effort must be published"
   pass "fm-control relaunch: explicit secondmate harness resets unnamed profile axes"
 }
 
@@ -1235,6 +1862,51 @@ test_missing_worktree_refuses_before_stopping_anything() {
   [ "$(cat "$dir/fake/command")" = claude ] || fail "a refused relaunch must not stop the agent"
   [ -z "$(cat "$dir/fake/literal")" ] || fail "a refused relaunch must send nothing"
   pass "fm-control relaunch: an unaccountable local copy refuses before the agent is touched"
+}
+
+# A restart must never put a worker back in a primary home or a
+# repository's primary checkout; the recorded worktree is the only launch cwd.
+test_relaunch_refuses_a_recorded_worktree_that_is_the_primary_home() {
+  local dir out rc
+  dir=$(new_case homewt rl11)
+  add_ship_task "$dir" rl11 claude
+  sed -i.bak "s#^worktree=.*#worktree=$dir/home#" "$dir/home/state/rl11.meta"
+  printf 'zsh' > "$dir/fake/command"
+  out=$(run_spawn "$dir" rl11 --relaunch 2>&1); rc=$?
+  expect_code 1 "$rc" "a worktree that is the primary home should refuse"
+  assert_contains "$out" "primary home or checkout" "the refusal should name the primary home"
+  [ -z "$(cat "$dir/fake/literal")" ] || fail "a refused relaunch must launch nothing"
+  pass "fm-spawn --relaunch: a recorded worktree that is the primary home refuses"
+}
+
+test_relaunch_refuses_a_recorded_worktree_that_is_the_project_primary_checkout() {
+  local dir out rc
+  dir=$(new_case projwt rl12)
+  add_ship_task "$dir" rl12 claude
+  sed -i.bak "s#^worktree=.*#worktree=$dir/proj#" "$dir/home/state/rl12.meta"
+  printf 'zsh' > "$dir/fake/command"
+  out=$(run_spawn "$dir" rl12 --relaunch 2>&1); rc=$?
+  expect_code 1 "$rc" "a worktree that is the project primary checkout should refuse"
+  assert_contains "$out" "primary home or checkout" "the refusal should name the primary checkout"
+  [ -z "$(cat "$dir/fake/literal")" ] || fail "a refused relaunch must launch nothing"
+  pass "fm-spawn --relaunch: a recorded worktree that is the project primary checkout refuses"
+}
+
+# Inherited Git location overrides must not disguise the primary checkout:
+# a linked worktree's GIT_DIR plus the primary checkout as GIT_WORK_TREE would
+# make the git-dir and common-dir probes disagree.
+test_relaunch_refuses_the_primary_checkout_under_inherited_git_overrides() {
+  local dir out rc linked_gd
+  dir=$(new_case projwtenv rl13)
+  add_ship_task "$dir" rl13 claude
+  linked_gd=$(git -C "$dir/wt" rev-parse --absolute-git-dir)
+  sed -i.bak "s#^worktree=.*#worktree=$dir/proj#" "$dir/home/state/rl13.meta"
+  printf 'zsh' > "$dir/fake/command"
+  out=$(GIT_DIR="$linked_gd" GIT_WORK_TREE="$dir/proj" run_spawn "$dir" rl13 --relaunch 2>&1); rc=$?
+  expect_code 1 "$rc" "the primary checkout should refuse even under inherited GIT_DIR/GIT_WORK_TREE"
+  assert_contains "$out" "primary home or checkout" "the refusal should name the primary checkout"
+  [ -z "$(cat "$dir/fake/literal")" ] || fail "a refused relaunch must launch nothing"
+  pass "fm-spawn --relaunch: inherited Git overrides do not hide the project primary checkout"
 }
 
 test_missing_instructions_refuse_before_stopping_anything() {
@@ -1627,6 +2299,7 @@ test_concurrent_relaunch_is_refused() {
     i=$((i + 1))
   done
   [ -e "$lock" ] || { kill "$holder" 2>/dev/null; fail "could not stage a held control lock"; }
+  printf 'held\n' > "$dir/home/state/rl19.composer-dialog"
   out=$(run_control "$dir" rl19 relaunch --note "concurrent"); rc=$?
   kill "$holder" 2>/dev/null || true
   wait "$holder" 2>/dev/null || true
@@ -1635,6 +2308,8 @@ test_concurrent_relaunch_is_refused() {
     "the refusal should name the concurrent action"
   [ "$(cat "$dir/fake/command")" = claude ] \
     || fail "a refused concurrent relaunch must not stop the agent"
+  [ "$(cat "$dir/home/state/rl19.composer-dialog" 2>/dev/null)" = held ] \
+    || fail "a refused concurrent relaunch must not remove the lock holder's dialog file"
   pass "fm-control relaunch: two control actions on one task serialize instead of interleaving"
 }
 
@@ -2386,16 +3061,104 @@ test_relaunch_moves_a_drifted_item_back_in_flight() {
   pass "relaunch heals an item that drifted out of In flight while the task stayed live"
 }
 
+test_away_branch_relaunch_accepts_existing_dispatchable_items() {
+  local dir id out rc state
+  command -v tasks-axi >/dev/null 2>&1 || {
+    pass "skipped: tasks-axi is not installed, so the backlog transition is inert"
+    return 0
+  }
+  fm_tasks_axi_compatible || {
+    pass "skipped: installed tasks-axi predates ${FM_TASKS_AXI_MIN}, so dispatch refuses automatic backlog transitions"
+    return 0
+  }
+
+  for state in in_flight queued; do
+    id="rl-away-$state"
+    dir=$(new_case "away-$state" "$id")
+    add_ship_task "$dir" "$id" claude
+    seed_backlog "$dir" "$id" "$state"
+    FM_HOME="$dir/home" "$ROOT/bin/fm-afk-contract.sh" enter --spend 1 >/dev/null \
+      || fail "away entry failed for a $state relaunch"
+
+    rc=0
+    out=$(FM_SUPERVISION_ACTOR=branch run_control "$dir" "$id" relaunch \
+      --note "continue the existing task under away supervision") || rc=$?
+    expect_code 0 "$rc" "the away branch must relaunch an existing $state item"$'\n'"$out"
+    assert_contains "$out" "relaunched $id" \
+      "the away branch did not complete the existing $state task's relaunch"
+    [ "$(backlog_state "$dir" "$id")" = in_flight ] \
+      || fail "the away branch left a relaunched $state item at $(backlog_state "$dir" "$id")"
+  done
+  pass "away supervision relaunches existing In-flight and queued items under the saturated fresh-spawn spend cap"
+}
+
+test_exit_and_relaunch_remove_the_dialog_file() {
+  local dir out rc
+  dir=$(new_case dialog-file-exit rl70)
+  add_ship_task "$dir" rl70 claude
+  out=$(run_control "$dir" rl70 exit); rc=$?
+  expect_code 0 "$rc" "exit should stop the agent"$'\n'"$out"
+  [ ! -e "$dir/home/state/rl70.composer-dialog" ] \
+    || fail "exit should remove the dialog file"
+
+  dir=$(new_case dialog-file-relaunch rl71)
+  add_ship_task "$dir" rl71 claude
+  out=$(run_control "$dir" rl71 relaunch --note "replace the agent"); rc=$?
+  expect_code 0 "$rc" "relaunch should replace the agent"$'\n'"$out"
+  [ ! -e "$dir/home/state/rl71.composer-dialog" ] \
+    || fail "relaunch should remove the dialog file"
+  pass "fm-control removes the dialog file after exit and after relaunch"
+}
+
+# The lock release removes paths at or under the control lock with rm, so a
+# recording rm sees the state directory at the moment of release without a
+# second overlapping command.
+test_exit_removes_the_dialog_file_before_releasing_the_lock() {
+  local dir out rc lock sink trace
+  dir=$(new_case dialog-file-order rl72)
+  add_ship_task "$dir" rl72 claude
+  lock="$dir/home/state/.control-rl72.lock"
+  sink="$dir/home/state/rl72.composer-dialog"
+  trace="$dir/fake/rm-trace"
+  cat > "$dir/fakebin/rm" <<SH
+#!/usr/bin/env bash
+for arg in "\$@"; do
+  case "\$arg" in
+    "$lock"|"$lock"/*)
+      if [ -e "$sink" ]; then echo present; else echo absent; fi >> "$trace"
+      break
+      ;;
+  esac
+done
+exec "$(command -v rm)" "\$@"
+SH
+  chmod +x "$dir/fakebin/rm"
+  out=$(run_control "$dir" rl72 exit); rc=$?
+  expect_code 0 "$rc" "exit should stop the agent"$'\n'"$out"
+  [ ! -e "$lock" ] || fail "exit should release the control lock"
+  [ "$(tail -n 1 "$trace" 2>/dev/null)" = absent ] \
+    || fail "the dialog file must be gone when the control lock is released, got: $(cat "$trace" 2>/dev/null)"
+  pass "fm-control exit removes the dialog file before it releases the control lock"
+}
+
+test_relaunch_off_opencode_removes_tracked_wiring
+test_exit_and_relaunch_remove_the_dialog_file
+test_exit_removes_the_dialog_file_before_releasing_the_lock
 test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint
 test_relaunch_refuses_before_exit_when_the_composer_holds_pending_text
 test_relaunch_refuses_before_exit_when_the_composer_state_is_unproven
 test_relaunch_from_linked_home_preserves_recorded_worktree
 test_relaunch_preserves_durable_task_metadata
+test_traced_relaunch_keeps_an_armed_pr_poll_authenticated
 test_relaunch_serializes_concurrent_durable_metadata_publication
 test_disabled_relaunch_clears_prior_trace_context
 test_relaunch_appends_the_progress_note_to_the_instructions
+test_relaunch_note_inbox_listing_is_safe_on_empty_inbox
 test_relaunch_requires_a_note_for_a_ship_task
 test_harness_switch_moves_the_record_and_clears_prior_wiring
+test_refused_relaunch_onto_polytoken_keeps_the_project_hook_layer
+test_refused_polytoken_profile_leaves_the_running_agent
+test_relaunch_from_a_raw_polytoken_launch_keeps_the_project_layers
 test_harness_switch_does_not_carry_the_old_profile_axes
 test_harness_switch_resolves_a_prefixed_recorded_harness
 test_prefixed_recorded_harness_requires_explicit_replacement
@@ -2403,12 +3166,23 @@ test_same_harness_relaunch_keeps_the_profile_axes
 test_native_ultra_relaunch_preserves_profile_and_rejects_before_stop
 test_signed_out_worker_account_pin_refuses_before_stop
 test_worker_account_pin_follows_the_relaunch
+test_account_list_relaunch_reuses_the_recorded_account
+test_account_list_relaunch_moves_only_on_explicit_account
+test_account_list_relaunch_refusals_happen_before_stop
+test_secondmate_account_pin_follows_relaunch_and_refuses_before_stop
+test_pi_exclude_tools_follow_the_relaunch
+test_exclude_tools_refusals_happen_before_the_agent_stops
 test_explicit_model_wins_over_the_recorded_one
 test_relaunch_onto_an_unverified_harness_is_refused
 test_prior_harness_turnend_registry_entry_is_cleared
 test_wiring_removal_failure_refuses_before_replacement_arm
 test_turnend_auth_paths_are_owned_by_the_control_adapter
 test_secondmate_relaunch_picks_up_the_configured_harness_pin
+test_secondmate_claude_relaunch_keeps_local_settings
+test_secondmate_relaunch_lands_on_the_per_mate_pin
+test_secondmate_relaunch_uses_the_default_for_an_unpinned_mate
+test_secondmate_relaunch_with_a_legacy_pin_file_uses_the_first_line
+test_secondmate_relaunch_refuses_an_unreadable_configured_pin_before_stop
 test_secondmate_relaunch_ignores_invalid_configured_effort_before_stop
 test_secondmate_relaunch_onto_a_crewmate_only_adapter_refuses_before_stop
 test_explicit_secondmate_harness_ignores_configured_profile_axes
@@ -2420,6 +3194,9 @@ test_prefixed_prior_harness_wiring_is_still_retired
 test_muse_session_binding_is_retired_on_a_harness_switch
 test_cursor_session_binding_is_retired_on_a_harness_switch
 test_missing_worktree_refuses_before_stopping_anything
+test_relaunch_refuses_a_recorded_worktree_that_is_the_primary_home
+test_relaunch_refuses_a_recorded_worktree_that_is_the_project_primary_checkout
+test_relaunch_refuses_the_primary_checkout_under_inherited_git_overrides
 test_missing_instructions_refuse_before_stopping_anything
 test_checkpoint_refusal_leaves_the_record_byte_identical
 test_checkpoint_refuses_uninspectable_head_and_status
@@ -2458,3 +3235,4 @@ test_herdr_reclaim_of_a_secondmate_names_its_own_owner
 test_herdr_rebind_failure_from_a_plain_shell_names_the_real_cause
 test_relaunch_reverifies_an_already_in_flight_item_instead_of_rewriting_it
 test_relaunch_moves_a_drifted_item_back_in_flight
+test_away_branch_relaunch_accepts_existing_dispatchable_items

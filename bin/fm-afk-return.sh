@@ -375,8 +375,9 @@ engine_snapshot() {  # <evidence-file> <since-epoch>
   # shellcheck source=bin/fm-supervision-engine-lib.sh
   . "$SCRIPT_DIR/fm-supervision-engine-lib.sh" || return 0
   # fm-session-start.sh acquires fm-lock.sh first. That writer refreshes .lock
-  # on takeover and replaces .lock-session on a session-id change, but leaves
-  # both untouched on same-session confirmation. Both contribute to the host key.
+  # on takeover or when it re-anchors a live non-ancestor line 1, and replaces
+  # .lock-session on a session-id change, but otherwise leaves both untouched
+  # on same-session confirmation. Both contribute to the host key.
   # shellcheck source=bin/fm-lock-lib.sh
   . "$SCRIPT_DIR/fm-lock-lib.sh" || return 0
   lock_start=$(fm_lock_path_mtime "$STATE/.lock" 2>/dev/null) || lock_start=0

@@ -40,6 +40,7 @@ For unattended seeded-secondmate launches, `../../../bin/fm-spawn.sh --help` own
 `../../../bin/fm-spawn.sh` keeps the worker turn-end extension in `state/`, outside the worktree, because project-local extension files worsen the trust gate and pollute the project.
 The extension listens for Pi's `turn_end` event, not `agent_end`, so supervision is notified after each completed turn rather than only when the whole run exits.
 Native-harness progress uses the separate generation-bound marker owned by `../../../bin/fm-busy-event.sh`; it never fabricates Pi turn completion.
+Optional foreground model-stream observation is version-gated separately; `../../../docs/configuration.md` (Environment variables) owns activation and `../../../docs/verification/runtime-backends.md` (Pi worker model-stream observation) owns the real-Pi evidence.
 Pi sets `PI_CODING_AGENT=true` for its children as its harness-detection marker.
 
 ## Primary integration
@@ -56,6 +57,7 @@ Native-harness adapters can discover the same guarded FirstMate tools and operat
 The tool result and clean-exit fallback are owned by `../../../docs/supervision-protocols/pi.md`.
 `../../../bin/fm-session-start.sh` reports when the live Pi-family session has not loaded both extensions and points at the selected executable after project trust as the fix, with `-e` as a trust-free fallback.
 
-When a secondmate is launched on Pi or Pi-signed, `../../../bin/fm-spawn.sh --secondmate` launches the selected executable with both `-e .pi/extensions/fm-primary-turnend-guard.ts` and `-e .pi/extensions/fm-primary-pi-watch.ts`.
-Both files already exist in the secondmate home's git worktree.
+When a secondmate is launched on Pi or Pi-signed, `../../../bin/fm-spawn.sh --secondmate` launches the selected executable with `-e .pi/extensions/fm-primary-turnend-guard.ts`, `-e .pi/extensions/fm-primary-pi-watch.ts`, and `-e` of the parent home's `state/<id>.pi-ext.ts` busy extension.
+Both primary files already exist in the secondmate home's git worktree.
+The busy extension lives outside that home, so Pi's project-trust gate does not see it, and its turn-end handler does not touch the parent's turn-ended marker.
 The PreToolUse-equivalent watcher-arm seatbelt returns `{block: true}` from the `tool_call` event.
