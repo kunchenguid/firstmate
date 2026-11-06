@@ -197,6 +197,10 @@
 #                          budget and is parked until a probe reads it live
 #                          again (FM_SECONDMATE_LIVENESS_MAX_ATTEMPTS and
 #                          FM_SECONDMATE_LIVENESS_WINDOW_SECS)
+#   check: validation gate after <done|paused>: <task> <gate detail>
+#                          an idle ship whose newest status says done or paused
+#                          has its no-mistakes run parked at a new gate; one
+#                          wake per distinct gate (wait_gate_check)
 # For normal supervision, resume the session-start primary-harness protocol
 # after each printed reason. Direct duplicate invocations of this script still
 # no-op through the watcher singleton lock. A live holder whose beacon is stale
@@ -276,6 +280,9 @@ WATCH_HOME_EXISTED=0
 . "$SCRIPT_DIR/fm-pending-reply-lib.sh"
 # shellcheck source=bin/fm-busy-lib.sh
 . "$SCRIPT_DIR/fm-busy-lib.sh"
+# Only for the gate-opening stamp wait_gate_check reads.
+# shellcheck source=bin/fm-nm-run-lib.sh
+. "$SCRIPT_DIR/fm-nm-run-lib.sh"
 # Steering-inbox loss detection: bin/fm-task-inbox-lib.sh owns the record,
 # doorbell, re-ring ladder, and unavailable-endpoint contracts; this watcher
 # supplies their live endpoint and busy checks plus wake emission
@@ -576,7 +583,7 @@ window_label() {
 # watcher keeps is named by it (.hash-, .count-, .stale-, .stale-since-,
 # .wedge-escalations-, .wedge-permanent-, .wedge-terminal-queued-,
 # .wedge-rollback-failed-, .paused-*, .writing-*, .validating-*,
-# .waiting-*), and live homes
+# .waiting-*, .wait-gate-*), and live homes
 # hold those markers on disk under the current format, so the format lives here
 # alone: a second copy is how a future change to it silently orphans a window's
 # markers instead of clearing them. The helpers below take the derived key
@@ -2492,6 +2499,75 @@ handle_paused_stale() {  # <window> <task> <hash>
   triage_log "absorbed stale ($detail, age ${age}s): $win"
 }
 
+# An idle ship whose newest status says `done:` or `paused:` owes nothing, so no
+# route above reads its run again: its stale hash was already surfaced, or the
+# declared wait absorbs it. Its no-mistakes run can still stop at a new gate
+# afterwards (a ci-monitoring run that rebases onto an advanced base re-runs its
+# test step), and the worker writes nothing about it. So read the crew's current
+# state at most once per STALE_ESCALATE_SECS per window, without the forge
+# fallback, and wake once per distinct parked gate it reports. A gate is its
+# reported line plus the run record's gate-opening stamp
+# (fm_nm_run_gate_opened_at), read only when the line says parked: the same run
+# resuming and parking again at the same step between two reads renders an
+# identical line, but its stamp moves. An unreadable stamp never wakes by itself.
+wait_gate_check() {  # <window> <task>
+  local win=$1 task=$2 key statusf wait gate_file checked_file line state src reason
+  local run worktree opened saved_line saved_opened
+  key=$(window_key "$win")
+  gate_file="$STATE/.wait-gate-$key"
+  checked_file="$STATE/.wait-gate-checked-$key"
+  statusf="$STATE/$task.status"
+  if [ "$(status_line_verb "$(last_status_line "$statusf")")" = "done" ]; then
+    wait="done"
+  elif status_is_paused "$(status_declared_wait_line "$statusf")"; then
+    wait=paused
+  else
+    rm -f "$gate_file" "$checked_file"
+    return 0
+  fi
+  [ "$(age_of "$checked_file")" -ge "$STALE_ESCALATE_SECS" ] || return 0
+  date +%s > "$checked_file"
+  line=$(FM_CREW_STATE_NO_FORGE=1 "$FM_CREW_STATE_BIN" "$task" 2>/dev/null) || line=''
+  state=${line#state: }; state=${state%% *}
+  src=${line#*source: }; src=${src%% *}
+  if [ "$state" != parked ] || [ "$src" != run-step ]; then
+    case "$state" in ''|unknown) ;; *) rm -f "$gate_file" ;; esac
+    return 0
+  fi
+  opened=''
+  case "$line" in
+    *" · run: "*)
+      run=${line##* · run: }
+      worktree=$(fm_meta_get "$STATE/$task.meta" worktree 2>/dev/null || true)
+      case "$run" in
+        ''|*[!A-Za-z0-9_-]*) ;;
+        *) [ -z "$worktree" ] || opened=$(fm_nm_run_gate_opened_at "$worktree" "$run") ;;
+      esac
+      ;;
+  esac
+  saved_line='' saved_opened=''
+  [ ! -f "$gate_file" ] || { IFS= read -r saved_line || true; IFS= read -r saved_opened || true; } < "$gate_file"
+  if [ "$saved_line" = "$line" ] \
+    && { [ -z "$opened" ] || [ -z "$saved_opened" ] || [ "$opened" = "$saved_opened" ]; }; then
+    [ -z "$opened" ] || [ -n "$saved_opened" ] || printf '%s\n%s\n' "$line" "$opened" > "$gate_file"
+    return 0
+  fi
+  reason="check: validation gate after $wait: $task ${line#*source: run-step · }"
+  fm_wake_append check "wait-gate-$task" "$reason" || exit 1
+  printf '%s\n%s\n' "$line" "$opened" > "$gate_file"
+  wake "$reason"
+}
+
+# A busy poll means the worker may have answered the gate. A saved gate that
+# carries its opening stamp keeps its identity, because a real reopening moves
+# the stamp; only a line-only identity is cleared, so its re-park can wake.
+wait_gate_busy_clear() {  # <key>
+  local gate_file="$STATE/.wait-gate-$1" saved_line='' saved_opened=''
+  [ -f "$gate_file" ] || return 0
+  { IFS= read -r saved_line || true; IFS= read -r saved_opened || true; } < "$gate_file"
+  [ -n "$saved_opened" ] || rm -f "$gate_file"
+}
+
 # Apply the busy-pane completed-turn bound to a window whose bound has already
 # crossed, honoring the worker's OWN declared external wait. Prints/queues
 # nothing itself; it only chooses which absorber owns the crossed bound.
@@ -4309,6 +4385,9 @@ EOF
     # content cannot suppress stale detection. Read once per window per poll and
     # reused below so a busy verdict is consistent within one cycle.
     if window_is_busy "$w" "$tail40"; then busy_now=0; else busy_now=1; fi
+    if [ "$kind" = ship ]; then
+      if [ "$busy_now" -eq 0 ]; then wait_gate_busy_clear "$key"; else wait_gate_check "$w" "$task"; fi
+    fi
     if [ "$h" = "$prev" ]; then
       n=$(( $(cat "$cf" 2>/dev/null || echo 0) + 1 ))
       echo "$n" > "$cf"
