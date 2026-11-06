@@ -1323,6 +1323,45 @@ EOF
   pass "fm-control-lib: only a runtime's own recorded session has a relaunch resume form"
 }
 
+test_claude_session_resume_needs_a_recorded_transcript_backed_session() {
+  local d root harness rid wt id other got
+  d=$(fm_test_tmproot claude-resume)
+  mkdir -p "$d"
+  root="$d/claude"
+  wt="$d/worktree"
+  id=0a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d
+  other=ffffffff-eeee-4ddd-8ccc-bbbbbbbbbbbb
+  mkdir -p "$root/sessions" "$root/projects/-some-worktree"
+  printf '{"pid":4242,"sessionId":"%s","cwd":"%s"}\n' "$id" "$wt" > "$root/sessions/4242.json"
+  printf '{"pid":4343,"sessionId":"%s","cwd":"%s/elsewhere"}\n' "$other" "$d" > "$root/sessions/4343.json"
+  printf '{"pid":4444,"sessionId":"not-a-uuid","cwd":"%s"}\n' "$wt" > "$root/sessions/4444.json"
+
+  got=$(fm_control_claude_session_id "$root" "$wt" 4343 9999 4444 4242) \
+    || fail "the worktree's session file was not found among the candidate pids"
+  [ "$got" = "$id" ] || fail "expected session $id from the matching cwd, got '$got'"
+  fm_control_claude_session_id "$root" "$wt" 4343 4444 9999 >/dev/null \
+    && fail "a foreign cwd, a malformed id, and a missing file must each yield no session"
+
+  harness=claude rid=$id
+  fm_control_claude_resumable_session "$root" "$harness" "$rid" >/dev/null \
+    && fail "a session without a transcript must not be resumable"
+  : > "$root/projects/-some-worktree/$id.jsonl"
+  got=$(fm_control_claude_resumable_session "$root" "$harness" "$rid") \
+    || fail "a recorded session with a transcript must be resumable"
+  [ "$got" = "$id" ] || fail "expected resumable session $id, got '$got'"
+
+  harness=pi rid=$id
+  fm_control_claude_resumable_session "$root" "$harness" "$rid" >/dev/null \
+    && fail "a record whose harness is not claude must not resume"
+  harness=claude rid=
+  fm_control_claude_resumable_session "$root" "$harness" "$rid" >/dev/null \
+    && fail "a record with no session id must not resume"
+  harness=claude rid=../../etc
+  fm_control_claude_resumable_session "$root" "$harness" "$rid" >/dev/null \
+    && fail "a malformed session id must not resume"
+  pass "fm-control-lib: a Claude relaunch resumes only a recorded, transcript-backed session of the same harness"
+}
+
 test_exit_types_each_harness_verified_command
 test_opencode_exit_matches_recorded_major
 test_opencode2_exit_retries_ctrl_c_once
@@ -1336,6 +1375,7 @@ test_opencode_interrupts_twice_and_others_once
 test_unverified_harness_is_refused
 test_harness_family_resolution
 test_relaunch_resume_flag_is_per_adapter_and_reference_owner
+test_claude_session_resume_needs_a_recorded_transcript_backed_session
 test_prefixed_recorded_harness_reaches_each_control_verb
 test_backend_key_capability_matrix
 test_harness_kind_capability

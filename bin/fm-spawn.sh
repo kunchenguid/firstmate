@@ -523,6 +523,10 @@
 #   relaunch, and recovery re-reads the file; an absent file changes nothing.
 #   Launch templates live in launch_template() below; placeholders replaced before launch:
 #     __BRIEF__    absolute path to data/<task-id>/brief.md
+#     __CLAUDERESUME__ optional relaunch-only `--resume <session-id> ` that keeps a
+#                  Claude replacement on the conversation recorded in the task
+#                  record's claude_session_id (relaunch_claude_resume_args below
+#                  owns it; empty on every fresh spawn and every other harness)
 #     __CLAUDEPERMFLAG__ the claude permission flag selected by config/claude-permission-mode
 #     __CLAUDEADDDIRS__ quoted --add-dir flags granting exactly this task's
 #                  Firstmate channel directories (claude_add_dirs_flag below;
@@ -2889,7 +2893,7 @@ launch_template() {
   # project and fetched content. A persistent secondmate receives its own
   # supervisor contract instead, so this task-worker statement does not apply.
   claude)
-    printf '%s' 'CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false CLAUDE_CODE_SEND_FEEDBACK=0 claude __CLAUDEPERMFLAG__ __CLAUDEADDDIRS__--settings __CLAUDESETTINGS__ '
+    printf '%s' 'CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false CLAUDE_CODE_SEND_FEEDBACK=0 claude __CLAUDERESUME____CLAUDEPERMFLAG__ __CLAUDEADDDIRS__--settings __CLAUDESETTINGS__ '
     if [ "$kind" != secondmate ]; then
       printf '%s' "--append-system-prompt '$(spawn_claude_task_channel_statement)' "
     fi
@@ -3700,6 +3704,48 @@ relaunch_resume_args() {  # <harness> <backend> <target>
   flag=$(fm_control_relaunch_resume_flag "$harness" "$agent") || return 0
   [ -n "$flag" ] && [ -n "$ref" ] || return 0
   printf -- ' %s %s' "$flag" "$(shell_quote "$ref")"
+}
+
+# claude_config_root: the Claude store the launch line points the worker at,
+# which is where its sessions/<pid>.json and projects/*/<session>.jsonl live.
+claude_config_root() {
+  if [ -n "$WORKER_ACCOUNT" ]; then
+    printf '%s' "${WORKER_ACCOUNT_ROOT:-$HOME/.claude}"
+  else
+    printf '%s' "${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
+  fi
+}
+
+# relaunch_claude_resume_args: `--resume <session-id> ` for a Claude worker
+# relaunched on Rex, so the replacement keeps its conversation across a Rex
+# Server stop (bin/fm-control-lib.sh's fm_control_claude_resumable_session owns
+# the rule). Anything else prints nothing and keeps the fresh-session relaunch.
+relaunch_claude_resume_args() {  # <harness> <backend> <meta-file>
+  local harness=${1-} backend=${2-} meta=${3-} id
+  [ "$harness" = claude ] && [ "$backend" = rex ] || return 0
+  id=$(fm_control_claude_resumable_session "$(claude_config_root)" "$(fm_meta_get "$meta" harness)" "$(fm_meta_get "$meta" claude_session_id)") || return 0
+  printf -- '--resume %s ' "$(shell_quote "$id")"
+}
+
+# record_claude_session_id: store the session id of the Claude worker now
+# running in Rex block <target> as claude_session_id= in the task record, read
+# from Claude's own sessions/<pid>.json by fm_control_claude_session_id. Best
+# effort: a worker that has not written its file within the wait leaves the
+# record as it was, and a later relaunch then starts fresh.
+record_claude_session_id() {  # <target> <worktree> <meta-file>
+  local target=$1 wt=$2 meta=$3 root attempt pids id tmp
+  root=$(claude_config_root)
+  for attempt in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
+    pids=$(fm_backend_rex_live_pids "$target" | jq -r '.[]' 2>/dev/null) || pids=
+    # shellcheck disable=SC2086
+    if id=$(fm_control_claude_session_id "$root" "$wt" $pids); then
+      tmp="$meta.claude-session.${BASHPID:-$$}"
+      { grep -v '^claude_session_id=' "$meta" 2>/dev/null; printf 'claude_session_id=%s\n' "$id"; } >"$tmp" && mv "$tmp" "$meta"
+      return 0
+    fi
+    sleep 1
+  done
+  return 1
 }
 
 model_flag_for_harness() {
@@ -7460,6 +7506,11 @@ if [ "$RELAUNCH" -eq 1 ]; then
   RESUME_ARGS=$(relaunch_resume_args "$HARNESS" "$BACKEND" "$T") || RESUME_ARGS=
 fi
 LAUNCH=${LAUNCH//__PIRESUME__/$RESUME_ARGS}
+CLAUDE_RESUME_ARGS=
+if [ "$RELAUNCH" -eq 1 ]; then
+  CLAUDE_RESUME_ARGS=$(relaunch_claude_resume_args "$HARNESS" "$BACKEND" "$RELAUNCH_META") || CLAUDE_RESUME_ARGS=
+fi
+LAUNCH=${LAUNCH//__CLAUDERESUME__/$CLAUDE_RESUME_ARGS}
 LAUNCH=${LAUNCH//__CLAUDEPERMFLAG__/$CLAUDE_PERM_FLAG}
 case "$LAUNCH" in
 *__CLAUDESETTINGS__*)
@@ -8211,4 +8262,7 @@ SPAWN_ACCOUNT=
 # Opt-in Herdr project groups (docs/herdr-backend.md "Project groups") tag the
 # new endpoint now rather than at the next watcher poll; off costs one file test.
 [ ! -e "$CONFIG/herdr-project-groups" ] || [ "$BACKEND" != herdr ] || FM_HOME=$FM_HOME FM_STATE_OVERRIDE=$STATE FM_CONFIG_OVERRIDE=$CONFIG "$SCRIPT_DIR/fm-herdr-groups.sh" sync "$ID" || true
+if [ "$BACKEND" = rex ] && [ "$HARNESS" = claude ]; then
+  record_claude_session_id "$T" "$WT" "$STATE/$ID.meta" || true
+fi
 echo "spawned $ID harness=$HARNESS kind=$KIND$SPAWN_DELIVERY window=$META_WINDOW worktree=$WT$SPAWN_ACCOUNT"
