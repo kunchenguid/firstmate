@@ -392,14 +392,12 @@ fm_task_inbox_doorbell_line() {  # <record-path>
 # check runs right before the key; the residual window is the time between that
 # read and the key. Only an empty read lets the doorbell type; anything else is
 # the ordinary skip.
-# Rings that meet mouse-report noise on one inbox serialize on its .ring.lock,
-# and the locked body re-reads the composer, so overlapping rings send one C-c.
+# Every ring to a codex target runs under the inbox's .ring.lock, and the
+# locked body re-reads the composer, so overlapping rings send one C-c.
 # A lock not taken within its bound skips the ring like pending text.
 fm_task_inbox_ring() {  # <backend> <target> <record-path> [expected-label] [harness]
   local backend=$1 target=$2 rec=$3 label=${4:-} harness=${5:-${FM_COMPOSER_HARNESS:-}} dir lock status=0
-  if [ "$harness" != codex ] \
-     || [ "$(fm_backend_composer_state "$backend" "$target" "$label" 2>/dev/null)" != pending ] \
-     || ! fm_task_inbox_composer_is_mouse_noise "$backend" "$target" "$label"; then
+  if [ "$harness" != codex ]; then
     _fm_task_inbox_ring_body "$backend" "$target" "$rec" "$label" "$harness"
     return
   fi

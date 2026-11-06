@@ -66,6 +66,7 @@ case "${1:-}" in
     if [ "$literal" = 1 ]; then
       printf '%s\n' "${1:-}" >> "$FM_SEND_LOG"
     else
+      case "$*:${FM_FAKE_TMUX_COMPOSER:-}" in *C-c*:codex-noise-late) /bin/sleep 0.4 ;; esac
       printf '%s\n' "$*" >> "$FM_SEND_LOG.keys"
       case "$*" in *C-c*) cat "$FM_SEND_LOG.lastbusy" >> "$FM_SEND_LOG.cc-busy" 2>/dev/null ;; esac
     fi
@@ -83,10 +84,11 @@ case "${1:-}" in
     noise="$glyph [<65;192;52M[<65;192;52M[<65;19"$'\n'"  2;52M[<65;192;52M"
     footer='  gpt-6 high · 100% left · ~/proj'
     case "${FM_FAKE_TMUX_COMPOSER:-}" in
-      codex-noise | codex-noise-late-busy | codex-noise-unreadable | codex-noise-returns | codex-noise-text | codex-noise-gap | codex-noise-nofooter | codex-noise-busy)
+      codex-noise | codex-noise-late | codex-noise-late-busy | codex-noise-unreadable | codex-noise-returns | codex-noise-text | codex-noise-gap | codex-noise-nofooter | codex-noise-busy)
         row=$noise
         case "$FM_FAKE_TMUX_COMPOSER" in
           codex-noise) [ "$cleared" = 1 ] && row="$glyph" ;;
+          codex-noise-late) { [ "$cleared" = 1 ] || [ "$n" -le 1 ]; } && row="$glyph" ;;
           codex-noise-unreadable) [ "$cleared" = 1 ] && { printf 'banner\n'; exit 0; } ;;
           codex-noise-gap) row="$glyph [<65;192;52M"$'\n\n'"  real draft after a blank row" ;;
           codex-noise-nofooter) row="$glyph [<65;192;52M"$'\n\n'"  real draft after a blank row"; footer= ;;
@@ -664,6 +666,29 @@ test_empty_message_refused() {
   pass "fm-send: an empty or whitespace-only text steer refuses before marking, recording, or typing"
 }
 
+test_noise_appearing_after_first_read_sends_one_c_c() {
+  local dir err
+  dir=$(setup_case codexlate codex)
+  err="$dir/send.err"
+  : >"$dir/send.log"
+  : >"$dir/send.log.keys"
+  rm -f "$dir/send.log.reads" "$dir/send.log.lastbusy"
+  fm_write_meta "$dir/home/state/t1.meta" "window=sess:fm-t1" "kind=ship" "harness=codex"
+  mkdir -p "$dir/home/state/t1.inbox"
+  : >"$dir/home/state/t1.inbox/001.msg"
+  for _ in 1 2; do
+    env PATH="$dir/fakebin:$PATH" FM_ROOT_OVERRIDE="$dir/home" FM_HOME="$dir/home" \
+      FM_SEND_LOG="$dir/send.log" FM_FAKE_TMUX_COMPOSER=codex-noise-late \
+      bash -c '. "$1/bin/fm-task-inbox-lib.sh"; fm_task_inbox_ring tmux sess:fm-t1 "$2" fm-t1 codex' \
+      _ "$ROOT" "$dir/home/state/t1.inbox/001.msg" >/dev/null 2>"$err" &
+    /bin/sleep 0.15
+  done
+  wait
+  [ "$(count_lines "$dir/send.log.keys" C-c)" = 1 ] ||
+    fail "noise appearing after the first read must send exactly one C-c:"$'\n'"$(cat "$dir/send.log.keys")"
+  pass "fm-send inbox: noise that appears after the first composer read sends exactly one C-c across overlapping rings"
+}
+
 test_overlapping_rings_on_one_noise_composer_send_one_c_c() {
   local dir err
   dir=$(setup_case codexoverlap codex)
@@ -693,6 +718,7 @@ test_resend_enqueues_new_sequence
 test_pending_composer_skips_ring_advisorily
 test_codex_mouse_noise_is_cleared_once_then_rung
 test_overlapping_rings_on_one_noise_composer_send_one_c_c
+test_noise_appearing_after_first_read_sends_one_c_c
 test_codex_mouse_noise_mixed_with_text_is_never_cleared
 test_codex_mouse_noise_that_returns_is_not_typed_onto
 test_codex_mouse_noise_unreadable_after_clear_is_not_typed_onto
