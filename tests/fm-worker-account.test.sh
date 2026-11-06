@@ -372,6 +372,7 @@ test_local_secondmate_reads_the_launching_home_pin() {
   printf '%s\n' "$id" > "$sm/.fm-secondmate-home"
   printf 'charter for %s\n' "$id" > "$sm/data/charter.md"
   printf '%s\n' "$CASE/sm-own" > "$sm/config/claude-account"
+  fm_register_secondmate "$HOME_DIR/data/secondmates.md" "$id" "$sm"
   signed_in_claude_root "$CASE/ambient-claude"
   out=$(FM_FAKE_LAUNCH_LOG="$CASE/launch.log" FM_TEST_CLAUDE_CONFIG_DIR="$CASE/ambient-claude" \
     fm_test_run_spawn "$HOME_DIR" "$WT" "$FAKEBIN" "$id" "$sm" --secondmate); rc=$?

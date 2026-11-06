@@ -163,6 +163,7 @@ add_local_mate() {
   printf '%s\n' "$id" > "$smhome/.fm-secondmate-home"
   printf '# agents\n' > "$smhome/AGENTS.md"
   printf '# charter\n' > "$home/data/$id/brief.md"
+  fm_register_secondmate "$home/data/secondmates.md" "$id" "$smhome"
   {
     echo "window=fmses:fm-$id"
     echo "endpoint_task_id=$id"
@@ -212,6 +213,7 @@ add_repo_backed_mate() {  # <case-dir> <id> [harness] [backend]
   mkdir -p "$smhome/state" "$smhome/data" "$home/data/$id"
   printf '%s\n' "$id" > "$smhome/.fm-secondmate-home"
   printf '# charter\n' > "$home/data/$id/brief.md"
+  fm_register_secondmate "$home/data/secondmates.md" "$id" "$smhome"
   {
     echo "window=fmses:fm-$id"
     echo "endpoint_task_id=$id"
@@ -754,8 +756,6 @@ test_relaunches_do_not_block_persist_polling() {
   dir=$(new_case relaunch-polling)
   setup_remote_case "$dir" sm1 slow-relaunch
   add_local_mate "$dir" sm2
-  printf -- '- sm2 - local domain (home: %s; scope: things; projects: p; added 2026-09-03)\n' \
-    "$dir/sm2-home" >> "$dir/home/data/secondmates.md"
   export FM_FAKE_ANSWER_STATUS="$dir/home/state/sm1.status"
   arm_answer "$dir" sm2
 

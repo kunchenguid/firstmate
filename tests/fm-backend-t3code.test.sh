@@ -1681,6 +1681,8 @@ spawn_t3_secondmate() {
   local id=$1 home=$2 harness=$3 model=$4
   mkdir -p "$CASE_DIR/home/state" "$CASE_DIR/home/data"
   touch "$CASE_DIR/home/state/.last-watcher-beat"
+  grep -q -- "^- $id " "$CASE_DIR/home/data/secondmates.md" 2>/dev/null \
+    || fm_register_secondmate "$CASE_DIR/home/data/secondmates.md" "$id" "$home"
   HOME="$SPAWN_HOME" CLAUDE_CONFIG_DIR='' \
     FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$CASE_DIR/home" FM_STATE_OVERRIDE="$CASE_DIR/home/state" FM_DATA_OVERRIDE="$CASE_DIR/home/data" \
     FM_CONFIG_OVERRIDE="$CONFIG" FM_PROJECTS_OVERRIDE="$CASE_DIR/home/projects" FM_SPAWN_NO_GUARD=1 \

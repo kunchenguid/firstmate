@@ -177,6 +177,7 @@ test_secondmate_launch() {
     printf 'charter for sm-%s\n' "$setting" > "$sm/data/charter.md"
     printf '%s\n' 'projects/' 'state/' 'data/' 'config/' '.no-mistakes/' > "$sm/.gitignore"
     git -C "$sm" init -q -b main
+    fm_register_secondmate "$HOME_DIR/data/secondmates.md" "sm-$setting" "$sm"
     out=$(run_case_spawn "sm-$setting" "$sm" --secondmate)
     status=$?
     expect_code 0 "$status" "secondmate spawn with allowlist=$setting should succeed: $out"
