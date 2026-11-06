@@ -45,6 +45,7 @@ Cross-harness provider and credential identity is owned by `references/common/mo
 
 Tracked `.factory/settings.json` registers SessionStart, Execute PreToolUse, AskUser PreToolUse, and Stop hooks.
 SessionStart runs `../../../../../bin/fm-session-start.sh`.
-Execute uses the shared primary seatbelt, AskUser defers captain-bound approval questions during away mode, and Stop invokes the Droid turn-end guard.
+Execute uses the shared primary seatbelt, and Stop invokes the Droid turn-end guard.
+While away, the AskUser guard denies the call, directs the agent not to retry or ask in plain text, and directs decision recording through a captain hold; after return it is inert.
 The `/afk` skill owns the away-mode decision procedure.
 `../../../../../docs/supervision-protocols/droid.md` owns the primary tracked background-cycle procedure and foreground checkpoint fallback.
