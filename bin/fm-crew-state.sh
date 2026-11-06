@@ -19,6 +19,10 @@
 # For a terminal passed no-mistakes run, a matching merge-poll retirement
 # receipt is local merged evidence; otherwise a 5s-bounded forge read is tried.
 # FM_CREW_STATE_NO_FORGE=1 keeps the receipt read but skips the forge fallback.
+# FM_CREW_STATE_NO_RUN=1 skips the no-mistakes run lookup, so the pane and the
+# status log answer: a finished run still matching the worktree HEAD reads done
+# even while the agent has started its next fixes, and the away spend cap
+# (bin/fm-afk-contract.sh) uses this read to see that activity.
 # An absent or unreadable PR identity yields an honest unknown, never an
 # optimistic merged claim.
 # Output is one stable, parseable, token-tight line firstmate can read every
@@ -1073,7 +1077,7 @@ COARSE_STATUS=""
 SELECTED_RUN_ID=""
 # Scouts and secondmates never drive a no-mistakes validation of their own
 # worktree, so skip the lookup for them and read state from pane/log directly.
-if [ "$KIND" = ship ] && [ -n "$CREW_BRANCH" ] && command -v no-mistakes >/dev/null 2>&1; then
+if [ "$KIND" = ship ] && [ -n "$CREW_BRANCH" ] && [ "${FM_CREW_STATE_NO_RUN:-}" != 1 ] && command -v no-mistakes >/dev/null 2>&1; then
   RUN_OUT=$(nm_run axi status)
   if [ "$(strip_quotes "$(printf '%s\n' "$RUN_OUT" | sed -n 's/^error: //p')")" = "repo not initialized (run 'no-mistakes init' first)" ]; then
     RUN_OUT=""
