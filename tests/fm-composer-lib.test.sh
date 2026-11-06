@@ -460,6 +460,25 @@ test_claude_slash_popup_demotion_only_ever_refuses() {
   pass "fm_composer_classify_screen: the popup demotion needs typed slash text and the popup row shape, and never reads empty"
 }
 
+test_codex_mouse_noise_only_adapter() {
+  local noise mixed typed wrapped noise_live_footer
+  noise_live_footer=$'banner\n'"${ESC}[1m›${ESC}[0m [<65;192;52M"$'\n\n  GPT-6.1-Sol low · /tmp/scratch-cwd · Process Firstmate task inbox'
+  wrapped=$'banner\n'"${ESC}[1m›${ESC}[0m [<65;192;52M[<65;19"$'\n'"  2;52M[<65;192;52M"$'\n\n  gpt-6 high · 100% left'
+  noise=$'banner\n'"${ESC}[1m›${ESC}[0m [<65;192;52M[<65;192;52M[<64;1;2m"$'\n\n  gpt-6 high · 100% left'
+  mixed=$'banner\n'"${ESC}[1m›${ESC}[0m [<65;192;52M x [<65;192;52M"$'\n\n  gpt-6 high · 100% left'
+  typed=$'banner\n'"${ESC}[1m›${ESC}[0m hello"$'\n\n  gpt-6 high · 100% left'
+  assert_screen "codex mouse noise on herdr" pending "$CAPS_STYLED" "$noise"
+  fm_composer_codex_mouse_noise_only "$noise" || fail "mouse reports alone should read as noise"
+  fm_composer_codex_mouse_noise_only "$wrapped" || fail "a report cut by a row wrap should read as noise"
+  fm_composer_codex_mouse_noise_only "$mixed" && fail "one extra character must keep the pending verdict"
+  fm_composer_codex_mouse_noise_only $'banner\n'"${ESC}[1m›${ESC}[0m [<65;192;52M"$'\n\n  real draft text\n\n  gpt-6 high · 100% left' && fail "text after a blank row is not noise"
+  fm_composer_codex_mouse_noise_only $'banner\n'"${ESC}[1m›${ESC}[0m [<65;192;52M"$'\n\n  real draft text' && fail "text after a blank row with no footer is not noise"
+  fm_composer_codex_mouse_noise_only "$noise_live_footer" || fail "the 0.166.0 footer shape should read as noise"
+  fm_composer_codex_mouse_noise_only "$typed" && fail "typed text is not noise"
+  fm_composer_codex_mouse_noise_only $'banner\n'"${ESC}[1m›${ESC}[0m"$'\n' && fail "an empty composer is not noise"
+  pass "fm_composer_codex_mouse_noise_only: SGR mouse reports alone are noise; any other character is not"
+}
+
 test_matrix_codex_dim_hint_row() {
   # Real idle codex: bold `›`, reset, then an SGR-2 dim hint. Styled captures
   # strip the ghost and prove empty; plain captures must defer as unknown -
@@ -1691,6 +1710,7 @@ test_composer_footer_zone_refuses_rather_than_allows
 test_claude_slash_popup_marked_row_is_not_a_second_composer
 test_claude_slash_popup_demotion_only_ever_refuses
 test_matrix_codex_dim_hint_row
+test_codex_mouse_noise_only_adapter
 test_matrix_muse_truecolor_glyph_survives_signal_loss
 test_matrix_cursor_reverse_video_placeholder_remnant
 test_matrix_cursor_fully_dim_placeholder
