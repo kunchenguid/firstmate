@@ -477,16 +477,25 @@ __FM_BEARINGS_BOARD_DATA__
 
   /* Captain's Call deck: every item renders as the same full card */
   var deck = document.getElementById("bb-call");
+  /* Browser-side stores. Lavish can run the board in a sandboxed frame with no
+     storage, so every store here is best effort and silently does nothing when
+     the browser refuses it; Lavish's own review-state restore and its queue
+     report (below) carry a same-tab refresh in that case. */
   var DRAFT_KEY = "fm-bearings-board.drafts.v1";
-  function draftsLoad() {
+  var PICKS_KEY = "fm-bearings-board.picks.v1";
+  var QUEUED_KEY = "fm-bearings-board.queued.v1";
+  function jsonLoad(key, wantArray) {
     try {
-      var d = JSON.parse(window.localStorage.getItem(DRAFT_KEY) || "{}");
+      var d = JSON.parse(window.localStorage.getItem(key) || (wantArray ? "[]" : "{}"));
+      if (wantArray) return Array.isArray(d) ? d : [];
       return d && typeof d === "object" && !Array.isArray(d) ? d : {};
-    } catch (e) { return {}; }
+    } catch (e) { return wantArray ? [] : {}; }
   }
-  function draftsStore(d) {
-    try { window.localStorage.setItem(DRAFT_KEY, JSON.stringify(d)); } catch (e) { /* storage unavailable */ }
+  function jsonStore(key, v) {
+    try { window.localStorage.setItem(key, JSON.stringify(v)); } catch (e) { /* storage unavailable */ }
   }
+  function draftsLoad() { return jsonLoad(DRAFT_KEY, false); }
+  function draftsStore(d) { jsonStore(DRAFT_KEY, d); }
   function draftGet(key) { var d = draftsLoad(); return Object.prototype.hasOwnProperty.call(d, key) ? d[key] : null; }
   function draftSet(key, v) {
     var d = draftsLoad();
@@ -503,6 +512,47 @@ __FM_BEARINGS_BOARD_DATA__
     });
     if (changed) draftsStore(d);
   })();
+
+  /* Every answer the captain can queue (each card and the dispatch bar) is a
+     target. Its state lives in a hidden control inside a data-lavish-question
+     scope, so Lavish restores it with the form on a same-tab refresh: "queued"
+     means an answer is waiting in Lavish's queue, "sent" means it left the
+     queue. The unsent prompt is also kept in a browser store so it can be
+     queued again after the tab or session changes. */
+  var targets = {};
+  var ownQueued = jsonLoad(QUEUED_KEY, false);
+  var sawAnchors = false;
+  function ownSave() { jsonStore(QUEUED_KEY, ownQueued); }
+  function makeTarget(id, anchorEl, badgeEl, host) {
+    var hidden = document.createElement("input");
+    hidden.type = "hidden"; hidden.name = "lavish-state"; hidden.value = "";
+    host.appendChild(hidden);
+    var t = { id: id, el: anchorEl, badge: badgeEl, hidden: hidden, local: false, seen: false };
+    targets[id] = t;
+    return t;
+  }
+  function setState(t, state) {
+    if (t.hidden.value !== state) {
+      t.hidden.value = state;
+      /* Lavish saves review state on input events, so tell it the value moved */
+      try { t.hidden.dispatchEvent(new Event("input", { bubbles: true })); } catch (e) { /* no events */ }
+    }
+    if (state) t.badge.classList.add("is-queued"); else t.badge.classList.remove("is-queued");
+    if (state !== "queued" && ownQueued[t.id]) { delete ownQueued[t.id]; ownSave(); }
+  }
+  /* queue through Lavish, keeping the unsent prompt for a later restore */
+  function queueAnswer(t, prompt, opts, ids) {
+    if (window.lavish && window.lavish.queuePrompt) {
+      var o = {};
+      Object.keys(opts).forEach(function (k) { o[k] = opts[k]; });
+      o.element = t.el;
+      window.lavish.queuePrompt(prompt, o);
+      ownQueued[t.id] = { prompt: prompt, opts: opts, ids: ids || null };
+      ownSave();
+    }
+    t.local = true; t.seen = false;
+    setState(t, "queued");
+  }
   function ctxRow(k, v, rec) {
     var row = el("div", "bb-ctx__row" + (rec ? " bb-ctx__row--rec" : ""));
     row.appendChild(el("span", "bb-ctx__k", k));
@@ -543,6 +593,7 @@ __FM_BEARINGS_BOARD_DATA__
 
     var form = document.createElement("form");
     form.setAttribute("data-lavish-question", item.key);
+    var target = makeTarget("card:" + item.key, form, card, form);
     var opts = el("div", "bb-opts");
     item.options.forEach(function (o) {
       var lab = el("label", "bb-opt");
@@ -611,23 +662,17 @@ __FM_BEARINGS_BOARD_DATA__
         answerLimit.classList.add("is-visible");
         return;
       }
-      if (window.lavish && window.lavish.queuePrompt) {
-        /* The versioned context keeps the selected option separate from its
-           note, while close carries the composer-declared completion mode. */
-        var ctxData = {
-          schema: "fm-bearings-answer.v1",
-          question: item.key,
-          selection: value || "",
-          note: note
-        };
-        if (item.close) ctxData.close = item.close;
-        window.lavish.queuePrompt(
-          "Captain's Call answer - " + item.title + ": " + displayAnswer,
-          { tag: "choice", text: item.title + " -> " + displayAnswer, element: form,
-            data: ctxData }
-        );
-      }
-      card.classList.add("is-queued");
+      /* The versioned context keeps the selected option separate from its
+         note, while close carries the composer-declared completion mode. */
+      var ctxData = {
+        schema: "fm-bearings-answer.v1",
+        question: item.key,
+        selection: value || "",
+        note: note
+      };
+      if (item.close) ctxData.close = item.close;
+      queueAnswer(target, "Captain's Call answer - " + item.title + ": " + displayAnswer,
+        { tag: "choice", text: item.title + " -> " + displayAnswer, data: ctxData });
       /* deal the next card once this one is answered */
       setTimeout(function () { showCard(active < cards.length - 1 ? active + 1 : active); }, 450);
     });
@@ -710,6 +755,10 @@ __FM_BEARINGS_BOARD_DATA__
   var barCount = document.getElementById("bb-dispatch-count");
   var barBtn = document.getElementById("bb-dispatch-btn");
   var anyPickable = false;
+  var pickable = {};
+  var savedPicks = jsonLoad(PICKS_KEY, true);
+  /* Lavish restores the picks with the page on a same-tab refresh */
+  ch.setAttribute("data-lavish-question", "dispatch.picks");
 
   function pickedIds() {
     return Array.prototype.map.call(ch.querySelectorAll(".bb-pick:checked"), function (c) { return c.value; });
@@ -718,6 +767,13 @@ __FM_BEARINGS_BOARD_DATA__
     var n = pickedIds().length;
     barCount.textContent = limitMessage || (n ? n + " picked for dispatch" : "pick queued work to dispatch");
     barBtn.disabled = !n;
+  }
+  function savePicks() { jsonStore(PICKS_KEY, pickedIds()); }
+  /* keep picks inside the dispatch answer limit, dropping the overflow */
+  function enforcePickLimit() {
+    Array.prototype.forEach.call(ch.querySelectorAll(".bb-pick:checked"), function (c) {
+      if (utf8ByteLength(pickedIds().join(",")) > 512) c.checked = false;
+    });
   }
 
   if (!chartedQueued(data.charted).length && !chartedMoreQueued) {
@@ -728,7 +784,9 @@ __FM_BEARINGS_BOARD_DATA__
     if (t.dispatchable && !isWarning(t)) {
       anyPickable = true;
       var pick = document.createElement("input");
-      pick.type = "checkbox"; pick.className = "bb-pick"; pick.value = t.id;
+      pickable[t.id] = true;
+      pick.type = "checkbox"; pick.className = "bb-pick"; pick.name = t.id; pick.value = t.id;
+      if (savedPicks.indexOf(t.id) >= 0) pick.checked = true;
       pick.setAttribute("aria-label", "Pick " + t.id + " for dispatch");
       pick.addEventListener("change", function () {
         if (pick.checked && utf8ByteLength(pickedIds().join(",")) > 512) {
@@ -736,6 +794,7 @@ __FM_BEARINGS_BOARD_DATA__
           refreshBar("Selection limit reached (512 bytes maximum). ");
           return;
         }
+        savePicks();
         refreshBar();
       });
       row.appendChild(pick);
@@ -765,7 +824,12 @@ __FM_BEARINGS_BOARD_DATA__
 
   if (anyPickable) {
     bar.hidden = false;
+    /* picks saved for work that is no longer charted drop out here */
+    enforcePickLimit();
+    if (savedPicks.length) savePicks();
     refreshBar();
+    bar.setAttribute("data-lavish-question", "dispatch.state");
+    var barTarget = makeTarget("bar", bar, bar, bar);
     barBtn.addEventListener("click", function () {
       var ids = pickedIds();
       var dispatchAnswer = ids.join(",");
@@ -774,17 +838,67 @@ __FM_BEARINGS_BOARD_DATA__
         refreshBar("Selection is too long to queue (512 bytes maximum). ");
         return;
       }
-      if (window.lavish && window.lavish.queuePrompt) {
-        window.lavish.queuePrompt(
-          "Dispatch order - start this queued work now: " + ids.join(", "),
-          { tag: "choice", text: "Dispatch: " + ids.join(", "), element: bar,
-            queueKey: "dispatch.charted",
-            data: { question: "dispatch.charted", answer: dispatchAnswer } }
-        );
-      }
-      bar.classList.add("is-queued");
+      queueAnswer(barTarget, "Dispatch order - start this queued work now: " + ids.join(", "),
+        { tag: "choice", text: "Dispatch: " + ids.join(", "),
+          queueKey: "dispatch.charted",
+          data: { question: "dispatch.charted", answer: dispatchAnswer } }, ids);
     });
   }
+
+  /* Lavish restores the form controls itself but fires no events, so the
+     board re-reads them; it then reports which anchors still hold an unsent
+     answer, which is the only queue signal the board gets. */
+  function resync() {
+    Object.keys(targets).forEach(function (id) {
+      if (targets[id].hidden.value) targets[id].badge.classList.add("is-queued");
+    });
+    if (anyPickable) { enforcePickLimit(); savePicks(); refreshBar(); }
+    if (cards.length) showCard(active);
+  }
+  function onAnchors(selectors) {
+    resync();
+    var first = !sawAnchors;
+    sawAnchors = true;
+    var inQueue = [];
+    selectors.forEach(function (sel) {
+      try { var n = document.querySelector(sel); if (n) inQueue.push(n); } catch (e) { /* bad selector */ }
+    });
+    Object.keys(targets).forEach(function (id) {
+      var t = targets[id];
+      var state = t.hidden.value;
+      if (inQueue.indexOf(t.el) >= 0) {
+        t.seen = true;
+        if (state !== "queued") setState(t, "queued");
+        return;
+      }
+      /* gone from the queue after it held the answer: it was sent, so it
+         must never be queued again */
+      if (state === "queued") {
+        if (t.seen || !t.local) setState(t, "sent");
+        return;
+      }
+      if (state === "sent" || !first) return;
+      var rec = ownQueued[id];
+      if (!rec) return;
+      /* no record of this answer in this tab: queue the kept one again, but
+         never an order naming work that has left the chart */
+      var stale = id === "bar" && !(rec.ids || []).every(function (x) { return pickable[x]; });
+      if (stale) { delete ownQueued[id]; ownSave(); return; }
+      queueAnswer(t, rec.prompt, rec.opts, rec.ids);
+    });
+    /* drop kept answers for cards that left the board */
+    var pruned = false;
+    Object.keys(ownQueued).forEach(function (id) {
+      if (!targets[id]) { delete ownQueued[id]; pruned = true; }
+    });
+    if (pruned) ownSave();
+  }
+  window.addEventListener("message", function (ev) {
+    var d = ev && ev.data;
+    if (!d || typeof d !== "object" || ev.source !== window.parent) return;
+    if (d.type === "lavish:restoreReviewState") setTimeout(resync, 0);
+    else if (d.type === "lavish:queuedAnchors" && Array.isArray(d.selectors)) onAnchors(d.selectors);
+  });
   } catch (e) {
     renderBoardError("The board data could not be rendered");
   }

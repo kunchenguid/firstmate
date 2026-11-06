@@ -299,11 +299,11 @@ test_full_snapshot_question_reaches_the_rendered_decision
 
 # Build a board with the given Captain's Call keys and run it under the drafts
 # harness against a storage file shared across builds.
-build_call_board() {  # <home> <keys-json>
+build_call_board() {  # <home> <keys-json> [charted-json]
   local home=$1 data="$1/payload.json"
-  jq -n --argjson keys "$2" '{
+  jq -n --argjson keys "$2" --argjson charted "${3:-[]}" '{
     schema:"fm-bearings-board.v1", home:"render-home", generated:"2026-08-26T00:00Z",
-    prs_live:false, underway:[], landed:[], charted:[], charted_more:0, charted_warning_more:0,
+    prs_live:false, underway:[], landed:[], charted:$charted, charted_more:0, charted_warning_more:0,
     captains_call:[$keys[] | {key:., type:"decision", title:("Card " + .), repo:"r",
       about:"a", decide:"d", allow_freeform:true,
       options:[{value:"a",label:"A"},{value:"b",label:"B"}]}]}' > "$data"
@@ -333,6 +333,106 @@ test_a_rebuild_keeps_in_progress_answers_and_drops_only_departed_cards() {
   pass "a rebuild keeps in-progress answers for surviving cards and drops departed ones"
 }
 
+# Run the built board under the browser harness: <home> <actions> [env...].
+run_board() {  # <home> <actions>
+  node "$ROOT/tests/assets/board-drafts-harness.mjs" "$1/.lavish/bearings-board.html" "$1/storage.json" "$2" \
+    || fail "the board could not be exercised with: $2"
+}
+
+CHARTED_TWO='[{"id":"t1","repo":"r","title":"One","reason":"queued","dispatchable":true},
+  {"id":"t2","repo":"r","title":"Two","reason":"queued","dispatchable":true}]'
+
+test_dispatch_picks_survive_a_refresh_with_or_without_browser_storage() {
+  local home out
+  home=$(make_home picks)
+  build_call_board "$home" '["k1"]' "$CHARTED_TWO"
+  run_board "$home" "pick:t1,pick:t2" >/dev/null
+  out=$(run_board "$home" "")
+  printf '%s' "$out" | jq -e '.picks == ["t1","t2"] and .bar.disabled == false and (.bar.count | startswith("2 picked"))' >/dev/null \
+    || fail "a refresh lost the dispatch picks held in browser storage: $out"
+  # A sandboxed frame has no storage, so only Lavish's own restore can bring the picks back.
+  home=$(make_home picks-sandboxed)
+  build_call_board "$home" '["k1"]' "$CHARTED_TWO"
+  NO_STORAGE=1 run_board "$home" "pick:t2" >/dev/null
+  out=$(NO_STORAGE=1 run_board "$home" "load")
+  printf '%s' "$out" | jq -e '.picks == ["t2"] and .bar.disabled == false and (.bar.count | startswith("1 picked"))' >/dev/null \
+    || fail "a sandboxed refresh lost the dispatch picks: $out"
+  # Picks for work that left the chart drop away.
+  build_call_board "$home" '["k1"]' '[{"id":"t1","repo":"r","title":"One","reason":"queued","dispatchable":true}]'
+  out=$(run_board "$home" "")
+  printf '%s' "$out" | jq -e '.picks == []' >/dev/null || fail "a pick for departed work survived: $out"
+  pass "dispatch picks survive a refresh, in a sandboxed frame too, and drop with departed work"
+}
+
+test_a_queued_answer_shows_as_queued_after_a_refresh_and_is_not_queued_twice() {
+  local home out
+  home=$(make_home queued-badge)
+  build_call_board "$home" '["k1","k2"]' "$CHARTED_TWO"
+  NO_STORAGE=1 run_board "$home" "type,submit:k1,pick:t1,dispatch" >/dev/null
+  out=$(NO_STORAGE=1 run_board "$home" "load")
+  printf '%s' "$out" | jq -e '
+    .calls == [] and .bar.queued == true
+      and (.cards | map({key, queued}) == [{key:"k1",queued:true},{key:"k2",queued:false}])
+      and (.queue | sort) == ["dispatch.charted","question:k1"]
+  ' >/dev/null || fail "a refresh did not restore the queued badges, or queued an answer again: $out"
+  pass "a refresh restores the queued badges and queues nothing a second time"
+}
+
+test_an_answer_the_chrome_already_sent_is_not_queued_again() {
+  local home out
+  home=$(make_home sent)
+  build_call_board "$home" '["k1"]' "$CHARTED_TWO"
+  run_board "$home" "type,submit:k1,pick:t1,dispatch,load" >/dev/null
+  # The captain sends the queue from the chrome while the board is open.
+  out=$(run_board "$home" "load,send")
+  printf '%s' "$out" | jq -e '.cards[0].state == "sent" and .cards[0].queued == true and .bar.queued == true and .queue == []' >/dev/null \
+    || fail "the board did not note that the chrome sent the answers: $out"
+  # After a new tab (no chrome queue) the kept copies must not come back.
+  rm -f "$home/storage.json.session.json"
+  out=$(run_board "$home" "load")
+  printf '%s' "$out" | jq -e '.calls == [] and .queue == []' >/dev/null \
+    || fail "an answer already sent was queued again: $out"
+  # A refresh in the same tab keeps showing it as answered and still queues nothing.
+  out=$(run_board "$home" "load")
+  printf '%s' "$out" | jq -e '.calls == [] and .queue == []' >/dev/null || fail "a refresh requeued a sent answer: $out"
+  pass "an answer the chrome already sent is never queued again"
+}
+
+test_an_unsent_answer_is_queued_again_in_a_new_tab_exactly_once() {
+  local home out
+  home=$(make_home requeue)
+  build_call_board "$home" '["k1"]' "$CHARTED_TWO"
+  run_board "$home" "type,submit:k1,pick:t1,dispatch,load" >/dev/null
+  # New tab: the chrome queue is gone, the browser store still has both answers.
+  rm -f "$home/storage.json.session.json"
+  out=$(run_board "$home" "load")
+  printf '%s' "$out" | jq -e '
+    (.calls | length) == 2
+      and ([.calls[].key] | sort) == ["dispatch.charted","question:k1"]
+      and ([.calls[] | select(.key == "question:k1") | .data] == [{schema:"fm-bearings-answer.v1",question:"k1",selection:"a",note:"typed k1"}])
+      and ([.calls[] | select(.key == "dispatch.charted") | .data] == [{question:"dispatch.charted",answer:"t1"}])
+      and .cards[0].queued == true and .bar.queued == true
+  ' >/dev/null || fail "an unsent answer was not queued again in a new tab: $out"
+  # Reloading that same tab finds the answers still queued, so nothing more is queued.
+  out=$(run_board "$home" "load")
+  printf '%s' "$out" | jq -e '.calls == []' >/dev/null || fail "the restored answers were queued twice: $out"
+  pass "an unsent answer is queued again in a new tab exactly once"
+}
+
+test_a_kept_dispatch_order_is_dropped_when_its_work_left_the_chart() {
+  local home out
+  home=$(make_home requeue-departed)
+  build_call_board "$home" '["k1","k2"]' "$CHARTED_TWO"
+  run_board "$home" "type,submit:k1,submit:k2,pick:t1,pick:t2,dispatch,load" >/dev/null
+  build_call_board "$home" '["k1"]' '[{"id":"t1","repo":"r","title":"One","reason":"queued","dispatchable":true}]'
+  rm -f "$home/storage.json.session.json"
+  out=$(run_board "$home" "load")
+  printf '%s' "$out" | jq -e '
+    ([.calls[].key] == ["question:k1"]) and (.storage["fm-bearings-board.queued.v1"] | fromjson | keys) == ["card:k1"]
+  ' >/dev/null || fail "a stale dispatch order or a departed card's answer was queued again: $out"
+  pass "a kept answer for a departed card or for work that left the chart is dropped"
+}
+
 test_an_underway_row_leads_with_the_task_name_and_keeps_its_run_status
 test_an_underway_identifier_label_is_not_replaced_by_run_status
 test_charted_next_reads_newest_filed_first
@@ -343,3 +443,8 @@ test_a_board_of_only_warnings_still_reports_nothing_queued
 test_omitted_warnings_never_count_as_more_queued
 test_an_omitted_kind_keeps_the_existing_queued_rendering
 test_a_rebuild_keeps_in_progress_answers_and_drops_only_departed_cards
+test_dispatch_picks_survive_a_refresh_with_or_without_browser_storage
+test_a_queued_answer_shows_as_queued_after_a_refresh_and_is_not_queued_twice
+test_an_answer_the_chrome_already_sent_is_not_queued_again
+test_an_unsent_answer_is_queued_again_in_a_new_tab_exactly_once
+test_a_kept_dispatch_order_is_dropped_when_its_work_left_the_chart
