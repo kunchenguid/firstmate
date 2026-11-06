@@ -194,6 +194,10 @@ case "${1:-} ${2:-}" in
         exit 0
         ;;
       *statusCheckRollup*)
+        view_json=$FM_TEST_GH_VIEW_JSON
+        if [ -f "${FM_TEST_GH_UPDATE_VIEW:-}" ] && [ -f "${FM_TEST_GH_UPDATE_DONE:-}" ]; then
+          view_json=$FM_TEST_GH_UPDATE_VIEW
+        fi
         if [ -n "${FM_TEST_GH_MERGEABLE_SEQUENCE:-}" ]; then
           call_n=$(( $(cat "$FM_TEST_GH_MERGEABLE_CALLS" 2>/dev/null || echo 0) + 1 ))
           printf '%s\n' "$call_n" > "$FM_TEST_GH_MERGEABLE_CALLS"
@@ -208,9 +212,13 @@ case "${1:-} ${2:-}" in
           fi
           jq -c --arg m "$call_m" --arg c "${call_c:-}" --arg h "$call_h" \
             '.mergeable = $m | if $h != "" then .headRefOid = $h else . end | if $c != "" then .statusCheckRollup[0].conclusion = $c else . end' \
-            "$FM_TEST_GH_VIEW_JSON"
+            "$view_json"
         else
-          cat "$FM_TEST_GH_VIEW_JSON"
+          cat "$view_json"
+        fi
+        if [ -f "${FM_TEST_GH_UPDATE_VIEW:-}" ] && [ -f "${FM_TEST_GH_UPDATE_DONE:-}" ] \
+          && [ -f "${FM_TEST_GH_UPDATE_FINAL_VIEW:-}" ]; then
+          cp "$FM_TEST_GH_UPDATE_FINAL_VIEW" "$FM_TEST_GH_UPDATE_VIEW"
         fi
         if [ -f "${FM_TEST_AWAY_RECORD_AFTER_VIEW:-}" ]; then
           if [ -s "${FM_TEST_AWAY_RECORD_AFTER_VIEW}" ]; then
@@ -292,6 +300,25 @@ case "${1:-} ${2:-}" in
     # The required-check reads: the branch itself, and its rules read without
     # the merge-queue filter the queue reader below applies.
     case " $* " in
+      *" repos/"*"/pulls/"*"/update-branch "*)
+        [ "${2:-}" = --method ] && [ "${3:-}" = PUT ] || exit 2
+        expected=
+        for arg in "$@"; do
+          case "$arg" in expected_head_sha=*) expected=${arg#expected_head_sha=} ;; esac
+        done
+        [ -n "$expected" ] || exit 2
+        server_head="$(dirname "$FM_TEST_GH_VIEW_JSON")/github-server-head"
+        current=$(cat "$server_head" 2>/dev/null || cat "$FM_TEST_GH_HEAD")
+        if [ "$current" != "$expected" ]; then
+          printf 'gh: Head branch was modified. Review and try again. (HTTP 422)\n' >&2
+          exit 1
+        fi
+        cp "$FM_TEST_GH_UPDATE_HEAD" "$FM_TEST_GH_HEAD"
+        cp "$FM_TEST_GH_UPDATE_HEAD" "$server_head"
+        : > "$FM_TEST_GH_UPDATE_DONE"
+        printf '{"message":"Updating pull request branch."}\n'
+        exit 0
+        ;;
       *" repos/"*"/commits/"*"/check-runs"*)
         case "$*" in
           *"/commits/$(cat "$FM_TEST_GH_HEAD")/check-runs"*) ;;
@@ -310,6 +337,10 @@ case "${1:-} ${2:-}" in
         exit 0
         ;;
       *" repos/"*"/branches/"*)
+        if [ -f "$FM_TEST_GH_BRANCH_FAIL-after-update" ] && [ -f "$FM_TEST_GH_UPDATE_DONE" ]; then
+          cat "$FM_TEST_GH_BRANCH_FAIL-after-update" >&2
+          exit 1
+        fi
         if [ -f "${FM_TEST_GH_BRANCH_FAIL:-}" ]; then
           cat "$FM_TEST_GH_BRANCH_FAIL" >&2
           exit 1
@@ -730,6 +761,10 @@ run_pr_merge() {
   FM_TEST_GH_VIEW_JSON="$case_dir/github-view.json" \
   FM_TEST_GH_MERGEABLE_SEQUENCE="${FM_TEST_GH_MERGEABLE_SEQUENCE:-}" \
   FM_TEST_GH_MERGEABLE_CALLS="$case_dir/mergeable-calls" \
+  FM_TEST_GH_UPDATE_VIEW="$case_dir/github-view-after-update.json" \
+  FM_TEST_GH_UPDATE_FINAL_VIEW="$case_dir/github-view-after-update-final.json" \
+  FM_TEST_GH_UPDATE_DONE="$case_dir/github-update-done" \
+  FM_TEST_GH_UPDATE_HEAD="$case_dir/github-head-after-update" \
   FM_TEST_GH_HEAD="$case_dir/github-head" \
   FM_TEST_GH_RUNS="$case_dir/github-runs.json" \
   FM_TEST_GH_MERGE_RC_FILE="$case_dir/github-merge-rc" \
@@ -3456,13 +3491,116 @@ test_destination_refuses_forge_merge_calls() {
   run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/56 \
     > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
   [ "$rc" -ne 0 ] || fail 'retarget after registration reached merge'
-  assert_present "$case_dir/retargeted" 'retarget case did not reach live merge verification'
+  [ -f "$case_dir/retargeted" ] \
+    || fail "retarget case did not reach live merge verification: $(cat "$case_dir/stderr")"
   assert_grep 'pr=https://github.com/example/repo/pull/56' "$case_dir/state/task-x1.meta" 'retarget was not after registration'
   assert_no_regex '^pr merge ' "$case_dir/gh.log" 'retargeted PR reached the forge merge command'
   assert_grep 'expected PR base main, actual base other' "$case_dir/stderr" 'retarget refusal lost the two bases'
   pass 'wrong, missing, and retargeted destinations cannot reach a forge merge call'
 }
 
+test_github_behind_update_refuses_concurrent_head_change() {
+  local case_dir rc scenario old_head raced_head updated_head actual_head
+  old_head=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  raced_head=cccccccccccccccccccccccccccccccccccccccc
+  updated_head=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+  for scenario in no-pin expected-pin; do
+    case_dir=$(make_case "github-behind-concurrent-$scenario")
+    add_gh_mocks "$case_dir" "$old_head"
+    jq '.mergeStateStatus = "BEHIND"' "$case_dir/github-view.json" > "$case_dir/view.tmp"
+    mv "$case_dir/view.tmp" "$case_dir/github-view.json"
+    jq --arg head "$updated_head" '.mergeStateStatus = "CLEAN" | .headRefOid = $head' \
+      "$case_dir/github-view.json" > "$case_dir/github-view-after-update.json"
+    printf '%s\n' "$raced_head" > "$case_dir/github-head-after-view"
+    printf '%s\n' "$updated_head" > "$case_dir/github-head-after-update"
+    set -- --update-branch
+    [ "$scenario" != expected-pin ] || set -- "$@" --expected-head "$old_head"
+    set +e
+    run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/6189 "$@" \
+      > "$case_dir/stdout" 2> "$case_dir/stderr"
+    rc=$?
+    set -e
+    actual_head=$(cat "$case_dir/github-server-head")
+    [ "$actual_head" = "$raced_head" ] \
+      || fail "github-behind-concurrent-$scenario: unchecked replacement head was changed to $actual_head; expected $raced_head"
+    expect_code 1 "$rc" "github-behind-concurrent-$scenario: a concurrent push must refuse"
+    assert_grep 'HTTP 422' "$case_dir/stderr" \
+      "github-behind-concurrent-$scenario: refusal must surface the head-mismatch response"
+    assert_absent "$case_dir/github-update-done" \
+      "github-behind-concurrent-$scenario: the rejected update changed the source branch"
+    assert_no_grep 'pr merge' "$case_dir/gh.log" \
+      "github-behind-concurrent-$scenario: merged after the head mismatch"
+    [ "$(grep -c '/pulls/6189/update-branch' "$case_dir/gh.log")" -eq 1 ] \
+      || fail "github-behind-concurrent-$scenario: must make one bound request without retrying the replacement head"
+    assert_grep "api --method PUT repos/example/repo/pulls/6189/update-branch -f expected_head_sha=$old_head" \
+      "$case_dir/gh.log" "github-behind-concurrent-$scenario: update did not name the preflight head"
+  done
+  pass "fm-pr-merge refuses a concurrent source-head change before updating, with or without --expected-head"
+}
+
+test_github_updated_head_other_refusals_stop_waiting() {
+  local case_dir rc blocker waiting visibility visible_head reason reads advice violations=''
+  local old_head=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  local new_head=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+  for visibility in updated delayed; do
+    visible_head=$new_head
+    [ "$visibility" != delayed ] || visible_head=$old_head
+    for blocker in draft closed conflict required-source; do
+      for waiting in pending missing; do
+        case_dir=$(make_case "github-behind-blocker-$visibility-$blocker-$waiting")
+        add_gh_mocks "$case_dir" "$old_head"
+        write_github_required "$case_dir" ruleset:ci
+        jq '.mergeStateStatus = "BEHIND"' "$case_dir/github-view.json" > "$case_dir/view.tmp"
+        mv "$case_dir/view.tmp" "$case_dir/github-view.json"
+        jq --arg head "$visible_head" --arg waiting "$waiting" --arg blocker "$blocker" '
+          .mergeStateStatus = "CLEAN" | .headRefOid = $head |
+          .statusCheckRollup = (if $waiting == "pending" then
+            [{"__typename":"CheckRun","name":"ci","status":"IN_PROGRESS","conclusion":null}]
+          else [] end) |
+          if $blocker == "draft" then .isDraft = true
+          elif $blocker == "closed" then .state = "CLOSED"
+          elif $blocker == "conflict" then .mergeable = "CONFLICTING" | .mergeStateStatus = "DIRTY"
+          else . end' "$case_dir/github-view.json" > "$case_dir/github-view-after-update.json"
+        printf '%s\n' "$visible_head" > "$case_dir/github-head-after-update"
+        case "$blocker" in
+          draft) reason='the pull request is a draft' ;;
+          closed) reason='state is "CLOSED", not open' ;;
+          conflict) reason='mergeStateStatus is DIRTY' ;;
+          required-source)
+            reason='the branch protection summary for base branch main could not be read'
+            printf '%s\n' 'HTTP 502: required-check source unavailable' > "$case_dir/github-branch-fail-after-update"
+            ;;
+        esac
+        set +e
+        FM_PR_GITHUB_MERGEABLE_RETRY_DELAY=1 \
+          run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/6190 --update-branch \
+          > "$case_dir/stdout" 2> "$case_dir/stderr"
+        rc=$?
+        set -e
+        expect_code 1 "$rc" "$visibility-$blocker-$waiting: the updated head must refuse"
+        assert_grep "$reason" "$case_dir/stderr" "$visibility-$blocker-$waiting: missing the actual refusal reason"
+        assert_no_grep 'pr merge' "$case_dir/gh.log" "$visibility-$blocker-$waiting: merged despite a blocker"
+        assert_absent "$case_dir/state/.control-task-x1.lock" "$visibility-$blocker-$waiting: task control lock remained held"
+        assert_absent "$case_dir/state/.afk-contract.lock" "$visibility-$blocker-$waiting: away-authority lock remained held"
+        [ "$(grep -c '/pulls/6190/update-branch' "$case_dir/gh.log")" -eq 1 ] \
+          || fail "$visibility-$blocker-$waiting: the update request was repeated"
+        reads=$(grep -c 'statusCheckRollup' "$case_dir/gh.log")
+        advice=false
+        if grep -q 'checks are not ready\|once its checks pass' "$case_dir/stderr"; then advice=true; fi
+        printf 'observation: visibility=%s blocker=%s waiting=%s preflight_reads=%s retry_advice=%s\n' \
+          "$visibility" "$blocker" "$waiting" "$reads" "$advice"
+        # Collect every masking combination before reporting a regression failure.
+        [ "$reads" -eq 2 ] || violations="$violations $visibility-$blocker-$waiting retried after the blocker;"
+        [ "$advice" = false ] || violations="$violations $visibility-$blocker-$waiting suggested waiting for checks;"
+      done
+    done
+  done
+  [ -z "$violations" ] || fail "$violations"
+  pass "fm-pr-merge immediately refuses draft, closed, conflicting, or unreadable updated heads despite pending or missing checks"
+}
+
+test_github_updated_head_other_refusals_stop_waiting
+test_github_behind_update_refuses_concurrent_head_change
 test_destination_refuses_forge_merge_calls
 test_github_zero_exit_queue_required_refuses_with_exact_retry
 test_github_closed_unqueued_outcome_omits_retry_flags
@@ -3703,6 +3841,301 @@ test_backend_override_bypasses_unreadable_user_config() {
   expect_code 0 "$rc" "backend-override-bypasses-unreadable-user-config: an explicit backend must bypass config"
   assert_logged_gh_merge "$case_dir" 65 example/repo --squash
   pass "fm-pr-merge honors a backend override over an unreadable user configuration"
+}
+
+test_github_behind_update_requires_opt_in_and_passing_guards() {
+  local case_dir rc scenario head
+  head=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  for scenario in no-consent red draft unreadable-authority away-queue; do
+    case_dir=$(make_case "github-behind-guard-$scenario")
+    add_gh_mocks "$case_dir" "$head"
+    jq '.mergeStateStatus = "BEHIND"' "$case_dir/github-view.json" > "$case_dir/view.tmp"
+    mv "$case_dir/view.tmp" "$case_dir/github-view.json"
+    case "$scenario" in
+      red)
+        jq '.statusCheckRollup[0].conclusion = "FAILURE"' "$case_dir/github-view.json" > "$case_dir/view.tmp"
+        mv "$case_dir/view.tmp" "$case_dir/github-view.json"
+        ;;
+      draft)
+        jq '.isDraft = true' "$case_dir/github-view.json" > "$case_dir/view.tmp"
+        mv "$case_dir/view.tmp" "$case_dir/github-view.json"
+        ;;
+      unreadable-authority) chmod 000 "$case_dir/home/data/backlog.md" ;;
+      away-queue)
+        printf 'merge_method=MERGE\n' > "$case_dir/github-rules"
+        write_away_record "$case_dir" --words 'merge task-x1 when green'
+        ;;
+    esac
+    set +e
+    if [ "$scenario" = no-consent ]; then
+      run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/6184 \
+        > "$case_dir/stdout" 2> "$case_dir/stderr"
+    else
+      run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/6184 --update-branch \
+        > "$case_dir/stdout" 2> "$case_dir/stderr"
+    fi
+    rc=$?
+    set -e
+    chmod 644 "$case_dir/home/data/backlog.md"
+    [ "$rc" -ne 0 ] || fail "github-behind-guard-$scenario: the merge must refuse"
+    assert_no_grep '/update-branch' "$case_dir/gh.log" \
+      "github-behind-guard-$scenario: a refused merge changed the source branch"
+    assert_no_grep 'pr merge' "$case_dir/gh.log" \
+      "github-behind-guard-$scenario: a refused merge reached the forge"
+    [ "$(cat "$case_dir/github-head")" = "$head" ] \
+      || fail "github-behind-guard-$scenario: the source head changed"
+    if [ "$scenario" = no-consent ]; then
+      assert_grep 'requires explicit --update-branch consent' "$case_dir/stderr" \
+        "github-behind-guard-no-consent: refusal did not explain the opt-in"
+    fi
+  done
+  pass "fm-pr-merge updates behind branches only with explicit opt-in after all guards pass"
+}
+
+test_github_behind_update_keeps_expected_head_pin() {
+  local case_dir rc scenario expected old_head new_head
+  old_head=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  new_head=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+  for scenario in initial-mismatch updated-mismatch; do
+    case_dir=$(make_case "github-behind-expected-$scenario")
+    add_gh_mocks "$case_dir" "$old_head"
+    jq '.mergeStateStatus = "BEHIND"' "$case_dir/github-view.json" > "$case_dir/view.tmp"
+    mv "$case_dir/view.tmp" "$case_dir/github-view.json"
+    jq --arg head "$new_head" '.mergeStateStatus = "CLEAN" | .headRefOid = $head' \
+      "$case_dir/github-view.json" > "$case_dir/github-view-after-update.json"
+    printf '%s\n' "$new_head" > "$case_dir/github-head-after-update"
+    expected=$old_head
+    [ "$scenario" != initial-mismatch ] || expected=cccccccccccccccccccccccccccccccccccccccc
+    set +e
+    run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/6188 \
+      --update-branch --expected-head "$expected" \
+      > "$case_dir/stdout" 2> "$case_dir/stderr"
+    rc=$?
+    set -e
+    expect_code 1 "$rc" "github-behind-expected-$scenario: a mismatched head must refuse"
+    assert_grep "not the expected head $expected" "$case_dir/stderr" \
+      "github-behind-expected-$scenario: refusal must retain the caller's head pin"
+    assert_no_grep 'pr merge' "$case_dir/gh.log" \
+      "github-behind-expected-$scenario: merged a head the caller did not pin"
+    if [ "$scenario" = initial-mismatch ]; then
+      assert_no_grep '/update-branch' "$case_dir/gh.log" \
+        "github-behind-expected-$scenario: updated before the caller's head matched"
+      [ "$(cat "$case_dir/github-head")" = "$old_head" ] \
+        || fail "github-behind-expected-$scenario: changed the unapproved source head"
+    else
+      assert_grep "api --method PUT repos/example/repo/pulls/6188/update-branch -f expected_head_sha=$old_head" "$case_dir/gh.log" \
+        "github-behind-expected-$scenario: explicit consent should permit the update"
+      [ "$(cat "$case_dir/github-head")" = "$new_head" ] \
+        || fail "github-behind-expected-$scenario: the consented update did not advance"
+    fi
+  done
+  pass "fm-pr-merge retains --expected-head before and after a consented behind-branch update"
+}
+
+test_github_updated_head_failure_refuses_without_waiting_for_pending() {
+  local case_dir rc kind old_head new_head
+  old_head=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  new_head=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+  for kind in check-run status-context; do
+    case_dir=$(make_case "github-behind-failed-and-pending-$kind")
+    add_gh_mocks "$case_dir" "$old_head"
+    jq '.mergeStateStatus = "BEHIND"' "$case_dir/github-view.json" > "$case_dir/view.tmp"
+    mv "$case_dir/view.tmp" "$case_dir/github-view.json"
+    jq --arg head "$new_head" --arg kind "$kind" '
+      .mergeStateStatus = "CLEAN" | .headRefOid = $head |
+      .statusCheckRollup = (if $kind == "check-run" then
+        [{"__typename":"CheckRun","name":"ci","status":"COMPLETED","conclusion":"FAILURE"},
+         {"__typename":"CheckRun","name":"slow","status":"IN_PROGRESS","conclusion":null}]
+      else
+        [{"__typename":"StatusContext","context":"ci","state":"FAILURE"},
+         {"__typename":"StatusContext","context":"slow","state":"PENDING"}]
+      end)' "$case_dir/github-view.json" > "$case_dir/github-view-after-update.json"
+    printf '%s\n' "$new_head" > "$case_dir/github-head-after-update"
+    set +e
+    FM_PR_GITHUB_MERGEABLE_RETRY_DELAY=1 \
+      run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/6185 --update-branch \
+      > "$case_dir/stdout" 2> "$case_dir/stderr"
+    rc=$?
+    set -e
+    expect_code 1 "$rc" "github-behind-failed-and-pending-$kind: a failed check must refuse"
+    assert_grep "check 'ci' is not green" "$case_dir/stderr" \
+      "github-behind-failed-and-pending-$kind: refusal did not name the failure"
+    assert_no_grep 'checks are not ready' "$case_dir/stderr" \
+      "github-behind-failed-and-pending-$kind: refusal obscured failure with a timeout"
+    [ "$(grep -c 'statusCheckRollup' "$case_dir/gh.log")" -eq 2 ] \
+      || fail "github-behind-failed-and-pending-$kind: retried after a known failure"
+    assert_no_grep 'pr merge' "$case_dir/gh.log" \
+      "github-behind-failed-and-pending-$kind: merged the failed head"
+  done
+  pass "fm-pr-merge refuses failed updated checks immediately while other checks are pending"
+}
+
+test_github_behind_updates_and_rechecks_before_merge() {
+  local case_dir rc old_head new_head
+  old_head=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  new_head=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+  case_dir=$(make_case github-behind-green)
+  add_gh_mocks "$case_dir" "$old_head"
+  write_github_required "$case_dir" classic:ci
+  jq '.mergeStateStatus = "BEHIND"' "$case_dir/github-view.json" > "$case_dir/github-view-after-update.json"
+  mv "$case_dir/github-view-after-update.json" "$case_dir/github-view.json"
+  jq --arg head "$new_head" '.mergeStateStatus = "CLEAN" | .headRefOid = $head' \
+    "$case_dir/github-view.json" > "$case_dir/github-view-after-update.json"
+  printf '%s\n' "$new_head" > "$case_dir/github-head-after-update"
+
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/6178 --update-branch -- --merge \
+    > "$case_dir/stdout" 2> "$case_dir/stderr" \
+    || fail "github-behind-green: green updated head should merge: $(cat "$case_dir/stderr")"
+  assert_grep "api --method PUT repos/example/repo/pulls/6178/update-branch -f expected_head_sha=$old_head" "$case_dir/gh.log" \
+    "github-behind-green: the branch was not updated"
+  assert_logged_gh_merge "$case_dir" 6178 example/repo --merge
+  grep -qxF "pr_head=$new_head" "$case_dir/meta-at-merge" \
+    || fail "github-behind-green: the updated head was not recorded before the merge"
+
+  case_dir=$(make_case github-behind-delayed-head)
+  add_gh_mocks "$case_dir" "$old_head"
+  write_github_required "$case_dir" classic:ci
+  jq '.mergeStateStatus = "BEHIND"' "$case_dir/github-view.json" > "$case_dir/view.tmp"
+  mv "$case_dir/view.tmp" "$case_dir/github-view.json"
+  cp "$case_dir/github-view.json" "$case_dir/github-view-after-update.json"
+  jq --arg head "$new_head" '.mergeStateStatus = "CLEAN" | .headRefOid = $head' \
+    "$case_dir/github-view.json" > "$case_dir/github-view-after-update-final.json"
+  printf '%s\n' "$new_head" > "$case_dir/github-head-after-update"
+  FM_PR_GITHUB_MERGEABLE_RETRY_DELAY=1 \
+    run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/6178 --update-branch -- --merge \
+    > "$case_dir/stdout" 2> "$case_dir/stderr" \
+    || fail "github-behind-delayed-head: the old visible head should be awaited: $(cat "$case_dir/stderr")"
+  [ "$(grep -c 'statusCheckRollup' "$case_dir/gh.log")" -eq 3 ] \
+    || fail "github-behind-delayed-head: did not wait for the new head"
+  assert_grep "--match-head-commit $new_head" "$case_dir/gh.log" \
+    "github-behind-delayed-head: did not merge the verified new head"
+  grep -qxF "pr_head=$new_head" "$case_dir/meta-at-merge" \
+    || fail "github-behind-delayed-head: the updated head was not recorded before merging"
+
+  case_dir=$(make_case github-behind-pending-after-update)
+  add_gh_mocks "$case_dir" "$old_head"
+  write_github_required "$case_dir" classic:ci
+  jq '.mergeStateStatus = "BEHIND"' "$case_dir/github-view.json" > "$case_dir/github-view-after-update.json"
+  mv "$case_dir/github-view-after-update.json" "$case_dir/github-view.json"
+  jq --arg head "$new_head" '.mergeStateStatus = "CLEAN" | .headRefOid = $head | .statusCheckRollup[0].status = "IN_PROGRESS" | .statusCheckRollup[0].conclusion = null' \
+    "$case_dir/github-view.json" > "$case_dir/github-view-after-update.json"
+  jq '.statusCheckRollup[0].status = "COMPLETED" | .statusCheckRollup[0].conclusion = "SUCCESS"' \
+    "$case_dir/github-view-after-update.json" > "$case_dir/github-view-after-update-final.json"
+  printf '%s\n' "$new_head" > "$case_dir/github-head-after-update"
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/6180 --update-branch -- --merge \
+    > "$case_dir/stdout" 2> "$case_dir/stderr" \
+    || fail "github-behind-pending-after-update: pending new check should be awaited: $(cat "$case_dir/stderr")"
+  assert_logged_gh_merge "$case_dir" 6180 example/repo --merge
+
+  case_dir=$(make_case github-behind-red-after-update)
+  add_gh_mocks "$case_dir" "$old_head"
+  write_github_required "$case_dir" classic:ci
+  jq '.mergeStateStatus = "BEHIND"' "$case_dir/github-view.json" > "$case_dir/github-view-after-update.json"
+  mv "$case_dir/github-view-after-update.json" "$case_dir/github-view.json"
+  jq --arg head "$new_head" '.mergeStateStatus = "CLEAN" | .headRefOid = $head | .statusCheckRollup[0].conclusion = "FAILURE"' \
+    "$case_dir/github-view.json" > "$case_dir/github-view-after-update.json"
+  printf '%s\n' "$new_head" > "$case_dir/github-head-after-update"
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/6179 --update-branch -- --merge \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "github-behind-red-after-update: failed new check must refuse"
+  assert_grep "api --method PUT repos/example/repo/pulls/6179/update-branch -f expected_head_sha=$old_head" "$case_dir/gh.log" \
+    "github-behind-red-after-update: the branch was not updated"
+  assert_grep "check 'ci' is not green" "$case_dir/stderr" \
+    "github-behind-red-after-update: the failed new check was not named"
+  assert_no_grep 'pr merge' "$case_dir/gh.log" \
+    "github-behind-red-after-update: the failed updated head was merged"
+  grep -qxF "pr_head=$new_head" "$case_dir/state/task-x1.meta" \
+    || fail "github-behind-red-after-update: the updated head was not recorded"
+  case_dir=$(make_case github-behind-default-squash)
+  add_gh_mocks "$case_dir" "$old_head"
+  write_github_required "$case_dir" classic:ci
+  jq '.mergeStateStatus = "BEHIND"' "$case_dir/github-view.json" > "$case_dir/github-view-after-update.json"
+  mv "$case_dir/github-view-after-update.json" "$case_dir/github-view.json"
+  jq --arg head "$new_head" '.mergeStateStatus = "CLEAN" | .headRefOid = $head' \
+    "$case_dir/github-view.json" > "$case_dir/github-view-after-update.json"
+  printf '%s\n' "$new_head" > "$case_dir/github-head-after-update"
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/6181 --update-branch \
+    > "$case_dir/stdout" 2> "$case_dir/stderr" \
+    || fail "github-behind-default-squash: default method should update and merge: $(cat "$case_dir/stderr")"
+  assert_grep "api --method PUT repos/example/repo/pulls/6181/update-branch -f expected_head_sha=$old_head" "$case_dir/gh.log" \
+    "github-behind-default-squash: the branch was not updated"
+  assert_logged_gh_merge "$case_dir" 6181 example/repo --squash
+
+  case_dir=$(make_case github-behind-unknown-after-update)
+  add_gh_mocks "$case_dir" "$old_head"
+  write_github_required "$case_dir" classic:ci
+  jq '.mergeStateStatus = "BEHIND"' "$case_dir/github-view.json" > "$case_dir/github-view-after-update.json"
+  mv "$case_dir/github-view-after-update.json" "$case_dir/github-view.json"
+  jq --arg head "$new_head" '.mergeStateStatus = "CLEAN" | .headRefOid = $head | .mergeable = "UNKNOWN"' \
+    "$case_dir/github-view.json" > "$case_dir/github-view-after-update.json"
+  jq '.mergeable = "MERGEABLE"' "$case_dir/github-view-after-update.json" \
+    > "$case_dir/github-view-after-update-final.json"
+  printf '%s\n' "$new_head" > "$case_dir/github-head-after-update"
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/6182 --update-branch -- --squash \
+    > "$case_dir/stdout" 2> "$case_dir/stderr" \
+    || fail "github-behind-unknown-after-update: transient UNKNOWN should be awaited: $(cat "$case_dir/stderr")"
+  assert_logged_gh_merge "$case_dir" 6182 example/repo --squash
+
+  case_dir=$(make_case github-behind-unknown-after-waived-red)
+  add_gh_mocks "$case_dir" "$old_head"
+  jq '.mergeStateStatus = "BEHIND"' "$case_dir/github-view.json" > "$case_dir/github-view-after-update.json"
+  mv "$case_dir/github-view-after-update.json" "$case_dir/github-view.json"
+  jq --arg head "$new_head" '.mergeStateStatus = "CLEAN" | .headRefOid = $head | .mergeable = "UNKNOWN" | .statusCheckRollup[0].conclusion = "FAILURE"' \
+    "$case_dir/github-view.json" > "$case_dir/github-view-after-update.json"
+  jq '.mergeable = "MERGEABLE"' "$case_dir/github-view-after-update.json" \
+    > "$case_dir/github-view-after-update-final.json"
+  printf '%s\n' "$new_head" > "$case_dir/github-head-after-update"
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/6186 --update-branch --allow-red ci -- --squash \
+    > "$case_dir/stdout" 2> "$case_dir/stderr" \
+    || fail "github-behind-unknown-after-waived-red: UNKNOWN beside a waived failure should be awaited: $(cat "$case_dir/stderr")"
+  assert_logged_gh_merge "$case_dir" 6186 example/repo --squash
+
+  case_dir=$(make_case github-behind-unreadable-after-update)
+  add_gh_mocks "$case_dir" "$old_head"
+  jq '.mergeStateStatus = "BEHIND"' "$case_dir/github-view.json" > "$case_dir/github-view-after-update.json"
+  mv "$case_dir/github-view-after-update.json" "$case_dir/github-view.json"
+  printf '[]\n' > "$case_dir/github-view-after-update.json"
+  printf '%s\n' "$new_head" > "$case_dir/github-head-after-update"
+  set +e
+  FM_PR_GITHUB_MERGEABLE_RETRY_DELAY=0 \
+    run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/6187 --update-branch -- --merge \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "github-behind-unreadable-after-update: an unreadable updated state must refuse"
+  assert_grep 'could not read the GitHub pull request state' "$case_dir/stderr" \
+    "github-behind-unreadable-after-update: the read failure was not reported"
+  assert_no_grep 'head moved again' "$case_dir/stderr" \
+    "github-behind-unreadable-after-update: a read failure was reported as a head change"
+  assert_no_grep 'pr merge' "$case_dir/gh.log" \
+    "github-behind-unreadable-after-update: an unverified head was merged"
+
+  case_dir=$(make_case github-behind-pending-cap)
+  add_gh_mocks "$case_dir" "$old_head"
+  write_github_required "$case_dir" classic:ci
+  jq '.mergeStateStatus = "BEHIND"' "$case_dir/github-view.json" > "$case_dir/github-view-after-update.json"
+  mv "$case_dir/github-view-after-update.json" "$case_dir/github-view.json"
+  jq --arg head "$new_head" '.mergeStateStatus = "CLEAN" | .headRefOid = $head | .statusCheckRollup[0].status = "IN_PROGRESS" | .statusCheckRollup[0].conclusion = null' \
+    "$case_dir/github-view.json" > "$case_dir/github-view-after-update.json"
+  printf '%s\n' "$new_head" > "$case_dir/github-head-after-update"
+  set +e
+  FM_PR_GITHUB_MERGEABLE_RETRY_DELAY=1 \
+    run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/6183 --update-branch -- --merge \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "github-behind-pending-cap: checks still pending past the cap must stop"
+  assert_grep "api --method PUT repos/example/repo/pulls/6183/update-branch -f expected_head_sha=$old_head" "$case_dir/gh.log" \
+    "github-behind-pending-cap: the branch was not updated"
+  assert_grep "was updated to $new_head but its checks are not ready; run the merge again once its checks pass" "$case_dir/stderr" \
+    "github-behind-pending-cap: the stop message was not printed"
+  assert_no_grep 'pr merge' "$case_dir/gh.log" \
+    "github-behind-pending-cap: an unverified head was merged"
+  pass "fm-pr-merge updates a green behind branch and merges only after the new head is green"
 }
 
 test_github_red_checks_refuse_and_allow_red_waives_named() {
@@ -5124,6 +5557,10 @@ test_unreadable_user_backend_config_refuses_the_merge
 test_untraversable_user_backend_config_directory_refuses_the_merge
 test_absent_user_backend_config_directory_and_backlog_still_merge
 test_backend_override_bypasses_unreadable_user_config
+test_github_behind_update_requires_opt_in_and_passing_guards
+test_github_behind_update_keeps_expected_head_pin
+test_github_updated_head_failure_refuses_without_waiting_for_pending
+test_github_behind_updates_and_rechecks_before_merge
 test_github_red_checks_refuse_and_allow_red_waives_named
 test_github_draft_or_unreadable_draft_state_refuses
 test_superseded_failed_check_run_no_longer_refuses
