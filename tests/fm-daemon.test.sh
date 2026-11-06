@@ -26,6 +26,13 @@ TMP_ROOT=$(fm_test_tmproot fm-daemon-tests)
 FM_DAEMON_PRIMARY_HARNESS=claude
 export FM_DAEMON_PRIMARY_HARNESS
 
+# Ambient hc (herdr-core) terminal markers are scrubbed for the whole suite:
+# discover_supervisor_target/discover_supervisor_backend read HC_TERMINAL_ID
+# and HC_TERMINAL_SOCKET now, so running these tests inside a real hc
+# terminal would leak an hc resolution into the tmux/herdr/fallback
+# expectations below. Per-case fixtures set their own HC_* claims.
+unset HC_TERMINAL_ID HC_TERMINAL_SOCKET HC_SCOPE HC_SESSION HC_SOCKET
+
 # What the pinned claude primary received: each typed line, with every
 # record-backed doorbell followed by the envelope its record holds.
 delivered_digest() {  # <sent-log>
@@ -3167,6 +3174,57 @@ test_discover_supervisor_target_herdr() {
   pass "discover_supervisor_target: override > TMUX_PANE > herdr '<session>:<pane-id>' composition > firstmate:0 fallback"
 }
 
+# --- hc supervisor discovery (fm-herdr-core-s3-app) --------------------------
+# A firstmate inside an hc terminal - including a Herdr.app terminal, which
+# carries the same core markers - must resolve its own terminal as the
+# supervisor target and hc as the backend, so the away daemon's supported-
+# backend check refuses loudly instead of silently steering firstmate:0 tmux.
+test_discover_supervisor_hc() {
+  local out
+  out=$(FM_SUPERVISOR_TARGET='' TMUX_PANE='' HERDR_ENV='' HERDR_PANE_ID='' \
+    HC_TERMINAL_ID=t9 HC_TERMINAL_SOCKET=/tmp/fm-test.sock HC_SESSION='' \
+    FM_BACKEND_CONFIG_DIR="$TMP_ROOT/no-t3" discover_supervisor_target)
+  [ "$out" = "default:t9" ] || fail "hc target should default HC_SESSION to 'default': $out"
+
+  out=$(FM_SUPERVISOR_TARGET='' TMUX_PANE='' HERDR_ENV='' HERDR_PANE_ID='' \
+    HC_TERMINAL_ID=t9 HC_TERMINAL_SOCKET=/tmp/fm-test.sock HC_SESSION=iso1 \
+    FM_BACKEND_CONFIG_DIR="$TMP_ROOT/no-t3" discover_supervisor_target)
+  [ "$out" = "iso1:t9" ] || fail "hc target should use an explicit HC_SESSION: $out"
+
+  out=$(FM_SUPERVISOR_BACKEND='' TMUX_PANE='' HERDR_ENV='' HERDR_PANE_ID='' \
+    HC_TERMINAL_ID=t9 HC_TERMINAL_SOCKET=/tmp/fm-test.sock \
+    FM_BACKEND_CONFIG_DIR="$TMP_ROOT/no-t3" discover_supervisor_backend)
+  [ "$out" = hc ] || fail "hc markers should resolve the hc backend: $out"
+
+  # The pair is required: a bare HC_TERMINAL_ID without a socket keeps the
+  # fallback, and the earlier innermost markers still win.
+  if out=$(FM_SUPERVISOR_TARGET='' TMUX_PANE='' HERDR_ENV='' HERDR_PANE_ID='' \
+    HC_TERMINAL_ID=t9 HC_TERMINAL_SOCKET='' HC_SESSION='' \
+    FM_BACKEND_CONFIG_DIR="$TMP_ROOT/no-t3" discover_supervisor_target); then
+    fail "a bare HC_TERMINAL_ID must not resolve a supervisor target"
+  fi
+  [ "$out" = "firstmate:0" ] || fail "a bare HC_TERMINAL_ID must keep the tmux fallback: $out"
+
+  out=$(FM_SUPERVISOR_TARGET='' TMUX_PANE='%3' HERDR_ENV='' HERDR_PANE_ID='' \
+    HC_TERMINAL_ID=t9 HC_TERMINAL_SOCKET=/tmp/fm-test.sock discover_supervisor_target)
+  [ "$out" = '%3' ] || fail "TMUX_PANE nested in an hc terminal must keep tmux: $out"
+  out=$(FM_SUPERVISOR_TARGET='' TMUX_PANE='' HERDR_ENV=1 HERDR_PANE_ID=w1:p9 HERDR_SESSION='' \
+    HC_TERMINAL_ID=t9 HC_TERMINAL_SOCKET=/tmp/fm-test.sock discover_supervisor_target)
+  [ "$out" = "default:w1:p9" ] || fail "herdr markers nested in an hc terminal must keep herdr: $out"
+  out=$(FM_SUPERVISOR_BACKEND='' TMUX_PANE='' HERDR_ENV=1 HERDR_PANE_ID=w1:p9 \
+    HC_TERMINAL_ID=t9 HC_TERMINAL_SOCKET=/tmp/fm-test.sock discover_supervisor_backend)
+  [ "$out" = herdr ] || fail "herdr markers nested in an hc terminal must keep herdr: $out"
+
+  # The resolution is deliberately fail-closed: the away daemon's supported
+  # list does not name hc, so it refuses at startup with the supported set
+  # rather than silently steering the tmux fallback.
+  if fm_backend_list_contains "$FM_SUPERVISOR_SUPPORTED_BACKENDS" hc; then
+    fail "the away daemon must not list hc as a supported supervisor backend"
+  fi
+
+  pass "discover_supervisor_{target,backend}: hc markers resolve <session>:<address> + hc; bare id, nested tmux/herdr keep their verdicts; supported list stays closed to hc"
+}
+
 # --- t3code supervisor discovery and busy verdict --------------------------
 # The real adapter is sourced once so fm_backend_source's sourced flag keeps it
 # from re-sourcing over the stub; the stub records every home it is asked about
@@ -3586,6 +3644,7 @@ test_fm_send_exits_nonzero_on_initial_send_failure
 test_fm_send_exits_nonzero_on_unproven_submit
 test_discover_supervisor_backend_precedence
 test_discover_supervisor_target_herdr
+test_discover_supervisor_hc
 test_discover_supervisor_t3code_after_env_tmux_and_herdr
 test_pane_is_busy_t3code_trusts_native_verdict_without_capture
 test_pane_is_busy_herdr_native_busy_state

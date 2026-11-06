@@ -429,6 +429,8 @@ def collect_state_sources(state_fd: int) -> list[Source]:
     add_source(sources, state_fd, "fleet-ledger.jsonl", "state/fleet-ledger.jsonl", "state/fleet-ledger.jsonl")
     names = sorted(os.listdir(state_fd))
     for name in names:
+        if name.startswith("."):
+            continue
         if name.endswith(".meta"):
             task = name[: -len(".meta")]
             safe_component(task, "task metadata name")
@@ -1145,16 +1147,20 @@ def sync_records(home: str, config: str, data: str, state: str) -> None:
         os.close(data_fd)
 
 
+def env_or(name: str, default: str) -> str:
+    return os.environ.get(name) or default
+
+
 def main(argv: list[str]) -> int:
     if not argv or argv[0] not in {"sync", "archive-task"}:
         print("usage: fm-record-export.py sync | archive-task <task-id>", file=sys.stderr)
         return 2
     script_dir = os.path.dirname(os.path.realpath(__file__))
-    root = os.environ.get("FM_ROOT_OVERRIDE", os.path.dirname(script_dir))
-    home = os.environ.get("FM_HOME", root)
-    config = os.environ.get("FM_CONFIG_OVERRIDE", os.path.join(home, "config"))
-    data = os.environ.get("FM_DATA_OVERRIDE", os.path.join(home, "data"))
-    state = os.environ.get("FM_STATE_OVERRIDE", os.path.join(home, "state"))
+    root = env_or("FM_ROOT_OVERRIDE", os.path.dirname(script_dir))
+    home = env_or("FM_HOME", root)
+    config = env_or("FM_CONFIG_OVERRIDE", os.path.join(home, "config"))
+    data = env_or("FM_DATA_OVERRIDE", os.path.join(home, "data"))
+    state = env_or("FM_STATE_OVERRIDE", os.path.join(home, "state"))
     if argv == ["sync"]:
         sync_records(home, config, data, state)
     elif len(argv) == 2 and argv[0] == "archive-task":
