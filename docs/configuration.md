@@ -8,7 +8,7 @@ Start with the directory layout, then use the setting reference for the behavior
 | What you want to configure | Start here |
 | --- | --- |
 | Firstmate's code, private files, or project location | [FM_HOME](#fm_home) and [operational home layout](#operational-home-layout-and-state) |
-| Task windows and worker tools | [Runtime backend](#runtime-backend-configbackend--fm_backend) and [harness support](#harness-support) |
+| Task windows and worker tools | [Runtime backend](#runtime-backend-configbackend--fm_backend), [hc worker placement on another machine](#hc-worker-placement-confighc-machine), and [harness support](#harness-support) |
 | Worker permissions, accounts, or environment | [Codex approval review](#codex-automatic-approval-review), [Claude permission mode](#claude-permission-mode-configclaude-permission-mode), [Codex permission mode](#codex-permission-mode-configcodex-permission-mode), [persistent managed-policy failover](#persistent-managed-policy-failover), [worker account pin](#worker-account-pin-configclaude-account-configpi-account), [several Claude accounts](#several-claude-accounts-configclaude-accounts), [worker tool exclusions](#worker-tool-exclusions-configcrew-exclude-tools), [worker launch environment](#worker-launch-environment-configlaunch-env-allowlist), and its [Orca environment source](#orca-environment-source-configlaunch-env-tmux-session) |
 | Backlog, preferences, and memory | [Backlog backend](#backlog-backend-taskstoml--configbacklog-backend), [captain preferences](#captain-preferences-datacaptainmd--datacaptain-sharedmd), [external memory tiers](#external-memory-tiers-memory-layering-section), [record export](#record-export-configrecord-export-root), and [startup memory budget](#startup-memory-budget-configstartup-memory-budget) |
 | Supervision and presentation | [Pi supervision branch](#pi-supervision-branch), [supervision host](#supervision-host-configsupervision-host), [Codex native Stop park](#codex-native-stop-park-configcodex-stop-park), [warm-cache compaction](#warm-cache-compaction-configwarm-compact), and [Calm preference](#calm-preference-configcalm) |
@@ -698,6 +698,33 @@ The caller-facing endpoint is `<session-id>:<block-id>`; tab titles are `fm-<hom
 Test cleanup must use the guarded path in [`docs/tern-backend.md`](tern-backend.md#current-operation-and-safety) and only sessions named `fm-test-*`.
 `config/backend` is inherited into secondmate homes under the primary-authoritative contract owned by [`secondmate-provisioning`](../.agents/skills/secondmate-provisioning/SKILL.md).
 
+### hc worker placement (config/hc-machine)
+
+The optional local, gitignored `config/hc-machine` file starts this home's hc ship and scout workers on another machine its hc core already reaches, instead of on this one.
+With the file absent nothing changes.
+It applies only to spawns that resolve the `hc` backend; every other backend ignores it, and secondmates are never placed.
+[`hc-backend.md`](hc-backend.md#workers-on-another-machine) owns what a placed worker needs on that machine, how it runs, and its limits.
+
+The first non-comment line is the machine's name as `hc machine ls` shows it; the other lines are one key and its value, with `#` starting a comment:
+
+```text
+worker-host                   # the hc machine new ship and scout terminals start on
+firstmate-as firstmate-host   # required: what that machine's own hc calls this machine
+projects /Users/me/code       # required: the absolute directory there holding one clone per project name
+claude-config /Users/me/.claude-work   # optional: the Claude config directory a worker there uses
+```
+
+Each key may appear once.
+A missing required key, an unknown key, a relative or `..`-carrying path, or a machine line with spaces makes the whole file invalid, and every hc ship or scout spawn then refuses rather than starting here, except one that passes `--hc-machine local`, which does not read the file.
+
+While the file exists, every hc ship and scout spawn is placed on that machine unless it passes `--hc-machine local`, which keeps that one task here.
+`fm-spawn.sh --hc-machine <name>` states the placement explicitly and must name the machine the file declares; it never places a task when the file is absent.
+So to send heavy tasks to the other machine and keep lighter ones here, keep the file and pass `--hc-machine local` on each lighter task.
+`claude-config` is for a machine whose default Claude login is kept for another use, such as a supervisor.
+Placed workers then use that named Claude config directory there; the launch pins it with `CLAUDE_CONFIG_DIR`, and the trust check reads its store.
+A placed worker's Claude account is whichever login that directory (or that machine's default) holds: `config/claude-account` and `config/claude-accounts` do not apply to it, and a spawn that skips them says so.
+[`hc-backend.md`](hc-backend.md#task-shape-and-metadata) lists the record fields a placed task carries.
+
 ## Away-mode supervisor backend (FM_SUPERVISOR_BACKEND / FM_SUPERVISOR_TARGET)
 
 The `/afk` sub-supervisor injects escalation digests into firstmate's own endpoint independently of where new task endpoints are spawned.
@@ -832,6 +859,7 @@ The flag takes effect at the next check sweep, and is a home-local preference th
 The optional local, gitignored `config/pipeline-spend` presence flag opts this home into recording per-task no-mistakes pipeline spend in `data/pipeline-spend.jsonl` during teardown.
 When the flag is absent, teardown skips recording and the recorder exits before reading task metadata, no-mistakes state, or the spend ledger.
 An existing ledger is left untouched while recording is disabled.
+Teardown records no entry for an hc ship placed on another machine; see [Limits of a placed worker](hc-backend.md#limits-of-a-placed-worker).
 
 ## No-mistakes home resolver (config/nm-home-resolver)
 

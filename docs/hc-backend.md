@@ -82,7 +82,8 @@ hc_terminal=<address>
 
 `backend_detect=` is `app-terminal` only when that signal automatically selected hc; an explicitly selected hc writes no `backend_detect=` line.
 
-`<address>` is hc's terminal address such as `t7`.
+`<address>` is hc's terminal address such as `t7`, or `<machine>/t7` for a worker placed on another machine.
+A placed task also records `hc_machine=<machine>`, `hc_firstmate_as=<name>`, `hc_clone=<clone path there>`, and `hc_launch_file=<launch file path there>`, and its `worktree=` is a path on that machine; the endpoint check accepts a machine-qualified terminal only with the matching `hc_machine=`.
 Every adapter call sets exactly the recorded `HC_SESSION` and drops any inherited `HC_SOCKET`, which hc would otherwise prefer, so a task keeps reaching its own core even when the caller's environment names another one.
 `FM_HC_SOCKET` is the deliberate socket pin tests and labs use instead of an inherited `HC_SOCKET`.
 An input, capture, or close that carries the task label refuses a terminal whose `firstmate.task` or `firstmate.home` label does not match, and a close without a label still refuses a terminal that lacks this home's labels.
@@ -92,7 +93,7 @@ An input, capture, or close that carries the task label refuses a terminal whose
 | Operation | hc command |
 | --- | --- |
 | Container ensure | `hc server status` plus the `hello` generation handshake over `hc connect` |
-| Create task | `hc run --bg --no-parent --outlive-parent --no-notify --cwd <project> --label ...` |
+| Create task | `hc run --bg --no-parent --outlive-parent --no-notify --cwd <project> --label ...`, with `--on <machine>` for a placed worker |
 | Capture | `hc read --lines <n>` |
 | Visible capture | `hc read --lines 0` |
 | Send a line and submit | `hc send` |
@@ -100,7 +101,7 @@ An input, capture, or close that carries the task label refuses a terminal whose
 | Named key | `hc keys` |
 | Current path | `hc get`, the foreground process's `cwd` |
 | Busy state | `hc get`, native `status.state` (`working` is busy) |
-| Agent state | `hc get`, the foreground process and its process group, through the shared classifier |
+| Agent state | `hc get`, the foreground process and its process group, through the shared classifier; a placed worker's group is read with `hc exec --on` |
 | Close | `hc kill`, then `hc rm`, then `hc get` must answer not found |
 
 ## Limits
@@ -111,7 +112,7 @@ An input, capture, or close that carries the task label refuses a terminal whose
   A started turn or a still-working wait confirms it natively; otherwise the adapter falls back to the composer screen, with Enter retries only for a proven pending composer.
   A blocked terminal (exit 9) returns `unknown` without typing or retrying and is never forced.
 - hc reports one foreground process per terminal.
-  When that process is a launcher, the adapter also reads the rest of its process group from `ps`, which works only for terminals on the local machine.
+  When that process is a launcher, the adapter also reads the rest of its process group from `ps`: here for a local terminal, and on its own machine through `hc exec --on` for a placed one, where a scan that cannot run reads `unreadable`, never `dead`.
 - Right after a terminal starts, `hc get` can report no foreground process yet, and agent state reads `unreadable` until the shell is up.
 - `--secondmate` spawns are refused.
 - A worker inherits `HC_SESSION`, `HC_TERMINAL_ID`, `HC_TERMINAL_SOCKET`, and `HC_SCOPE` from its terminal, and the `config/launch-env-allowlist` floor keeps them; whether a real harness then reports native status under Firstmate's launch is not verified.
@@ -119,9 +120,64 @@ An input, capture, or close that carries the task label refuses a terminal whose
   The `herdr.space`/`herdr.tab` label contract above is the app's documented bridge (its window projects labeled terminals as spaces/tabs and keeps unlabeled ones hidden), verified against a real window: [`verification/runtime-backends.md`](verification/runtime-backends.md#hc) records the live exercise.
 - hc has no event stream this adapter consumes; supervision polls like tmux.
 
+## Workers on another machine
+
+A home can start its hc ship and scout workers on another machine its hc core already reaches (`hc machine add`), so the work runs there while Firstmate stays here.
+[`configuration.md`](configuration.md#hc-worker-placement-confighc-machine) owns the `config/hc-machine` file and the `--hc-machine` flag that select it; without either, nothing here applies.
+
+### What the other machine needs
+
+- It is added to this core's session and connected (`hc machine ls`), this machine's hc is 0.1.16 or later, and the other machine's is 0.1.18 or later.
+- A clone of the project at `<projects>/<project name>` whose origin is the same remote as this machine's clone.
+- Its own hc reaches this machine back, under the name `firstmate-as` gives (`hc machine add <ssh target> --name <that name>` there).
+  The worker reads its instructions and reports through that route, which lets programs on that machine run commands here as this machine's user, so place workers only on a machine you already trust that far.
+- Claude Code installed and logged in, on the PATH of the non-interactive login shell there (`$SHELL -lc 'claude --version'` must succeed, with `CLAUDE_CONFIG_DIR` set as below when configured; for zsh, set that PATH in `.zprofile`, since `.zshrc` is read only by interactive shells), and the clone already trusted there (open `claude` in it once).
+  The default Claude login there may be kept for another use, such as a supervisor.
+  In that case `claude-config` in `config/hc-machine` names a separate Claude config directory there for workers; the launch pins it with `CLAUDE_CONFIG_DIR`, and the trust check reads that directory's store.
+  A placed worker uses that machine's own login, so `--account` is refused.
+- The tools its brief uses, such as `gh` and, for a no-mistakes ship, `no-mistakes`, since the worker pushes and validates from there.
+
+The spawn proves every item before it creates anything, and refuses with the missing item named; it never falls back to starting the worker here.
+The route back is proved by reading back a one-time value written here, and Claude's trust is read, never written, from the store a worker there uses.
+
+### How a placed worker runs
+
+The worktree is a linked worktree of that clone at `<projects>/.fm-hc/<hometag>/<task-id>`, created there through `hc exec --on` from freshly fetched `origin/<base>`, where the default base is origin's current default branch as `git ls-remote --symref origin HEAD` reports it there; no Treehouse runs on either machine.
+A creation that fails after it began removes what it made there, or names the path it could not remove.
+The terminal starts in it with `hc run --on`, carries the usual labels, and lives in that machine's core, so a Herdr.app bound to that machine's session shows it like any other hc terminal.
+The launch command is staged beside the worktree there and removes itself as it runs.
+A spawn that aborts removes it there once the terminal is closed, and teardown removes it after closing the terminal; a failed removal is a warning that names the path.
+
+The brief, status file, steering inbox, and task data stay on this machine, where supervision reads them exactly as for a local worker.
+The launch brief is prefixed with a placement section telling the worker to run each command the brief gives for a Firstmate path through `hc exec --on <firstmate-as>`, and to read or write those files with `hc file read`/`hc file write --on <firstmate-as>`; `FM_TASK_INBOX` names the inbox's path here.
+
+Every later step reaches the worker through hc and never through this machine's filesystem or process table: send, keys, capture, current path, and close use the `<machine>/t7` address through this core, and the agent-state group scan, the done gate's head check, and teardown's landed-work proof run their commands there with `hc exec --on`.
+Teardown applies the same landed-work proof it applies to a local worktree, refuses when that machine cannot be reached, and closes the terminal before proving again.
+Before the close it aborts the ship's own no-mistakes run parked at a gate on that machine's daemon, through `hc exec --on` in the worktree: only a run on the worktree's branch whose head is its HEAD or a descendant of it, and it refuses when the run is still parked afterwards.
+Between the close and the second proof it stops every process left with its current directory under the worktree there (`lsof -a -d cwd`, or a `/proc` scan where that machine has no `lsof`; TERM, then KILL, then a recheck; each signal goes only to a process whose start identity still matches the one its scan read, so a reused pid is never signalled), as it does for a local worktree, and refuses with every record kept when that scan cannot run there or a process survives.
+Only then does it remove the worktree and its branch there; `--force` keeps its usual meaning.
+
+### Limits of a placed worker
+
+- Only the `claude` harness is placed, and a `local-only`, `forge=gerrit`, or `forge=external` ship refuses placement, because each is checked against a worktree on this machine.
+- No Firstmate hooks are installed there, since their scripts live in this machine's checkout, so a placed worker has no busy record, turn-end notification, commit-trailer strip, or push guard.
+- Its busy and idle state come from hc's native `status.state` and read as `hc-native`; the fake-hc unit tests cover this, but whether a real Claude worker started there reports `status.state` is not verified live.
+- `bin/fm-control.sh` interrupts a placed worker, but its `exit` and `relaunch` refuse it, as they refuse every hc task, because that script has no recovery-grade hc agent-state classifier; `fm-spawn.sh --relaunch` refuses a placed task too, and nothing there is stopped or changed.
+- Reads that look inside a worktree on this machine report nothing for a placed one: the no-mistakes run state in the fleet view, the review diff, and worktree write activity as stall evidence.
+- A spawn claims the worktree path there only by proving it absent before `git worktree add`, so two Firstmate installs at the same absolute path that place the same task id on one machine can race for it.
+  The loser's add fails and leaves the winner's worktree alone: a failed spawn removes only a worktree its own `git worktree add` created.
+- Teardown, even with `--force`, refuses while the machine cannot be reached, because it can neither stop the worker there nor remove its worktree; a machine that never returns leaves the task's record in place.
+- `config/claude-account` and `config/claude-accounts` do not apply to a placed worker, which uses that machine's Claude login; the spawn prints a note when it skips one.
+- The spawn's trust check there reads only the workspace-trust entry in that machine's Claude config; Claude's separate "Allow external CLAUDE.md file imports?" dialog is not checked, so a worker whose config there imports files from outside the worktree can stop at that dialog.
+- `bin/fm-pr-health.sh` also discovers an open pull request from the branch of a task's copy on this machine, so for a placed ship it follows only the pull requests already recorded for the task.
+- Teardown records no `config/pipeline-spend` entry for a placed ship, because that ship's no-mistakes runs are in the other machine's no-mistakes state.
+- That the app shows a placed terminal is inferred from the label contract above; no Herdr.app window bound to the other machine's session was observed.
+  Whether Claude, started on a fresh `claude-config` directory, stops at its Bypass Permissions warning there was not verified either.
+
 ## Tests
 
 `tests/fm-backend-hc.test.sh` pins the adapter against a fake `hc`.
+`tests/fm-backend-hc-placement.test.sh` pins placement against a fake core whose other machine is reachable only through hc: the config, the machine, `claude`, and route-back gates, a real placed spawn and its abort cleanup, and a real teardown that refuses unlanded or unreachable work there, aborts the ship's parked no-mistakes run there, and stops processes left in the worktree there.
 `tests/fm-backend-hc-liveness-live-e2e.test.sh` is the default-on live guard: it launches every installed harness bare in a private core and requires `alive`.
 `tests/fm-backend-hc-smoke.test.sh` drives the real binary in an isolated lab; [`bin/fm-hc-lab.sh`](../bin/fm-hc-lab.sh) owns the isolation and metadata-tripwire contract, and [`tests/hc-test-safety.sh`](../tests/hc-test-safety.sh) owns guarded test teardown.
 `tests/fm-backend-hc-appdetect-smoke.test.sh` runs a real `bin/fm-spawn.sh` spawn in the same kind of lab for the app-terminal and explicit cases, and checks that a live app window never selects hc for a marker-less process and starts nothing for a session with no running core.

@@ -212,13 +212,17 @@
 #      `resolved` never become current state or detail.
 #   5. Missing meta or torn-down worktree: report unknown · none. If no run is
 #      attributed to this crew, a dead endpoint also reports unknown · none rather
-#      than trusting a stale status log. On tmux, herdr, and rex, which own a
+#      than trusting a stale status log. On tmux, herdr, and rex, and for an hc
+#      task placed on another machine (hc_machine=), each of which has a
 #      recovery-grade classifier, only its positive death evidence reads as gone
 #      (the endpoint is authoritatively absent, or its pane holds no agent); an
 #      endpoint that merely failed to answer reports unknown · none as
 #      unreachable, and an alive endpoint whose scrollback read failed is still
-#      classified by step 4. Backends with no classifier keep reading a failed
-#      capture as gone. The fallback's own comment owns the per-verdict rules.
+#      classified by step 4. A placed task's worktree is checked on its machine
+#      through hc, and a machine that cannot be reached reads as unreachable,
+#      never as a torn-down worktree. Backends with no classifier keep reading
+#      a failed capture as gone. The fallback's own comment owns the
+#      per-verdict rules.
 #
 # Read-only and side-effect free. Always exits 0 on a successful read regardless
 # of state; exit 2 only on a usage error (no id).
@@ -309,7 +313,20 @@ REMOTE_HOST=$(meta_value remote_host)
 # A torn-down (or never-created) worktree has no current state to read. A
 # remote secondmate's recorded worktree is a path on ITS host, so the local
 # probe proves nothing for it - the remote arm below reads the true source.
-if [ -z "$REMOTE_HOST" ] && { [ -z "$WT" ] || [ ! -d "$WT" ]; }; then
+# A worktree placed on another hc machine (docs/hc-backend.md "Workers on
+# another machine") is a path there, so whether it still exists is read there
+# through hc; an unreachable machine proves nothing either way, so the status
+# log and endpoint below still decide.
+HC_MACHINE=$(meta_value hc_machine)
+if [ -n "$HC_MACHINE" ]; then
+  HC_WT_RC=0
+  if fm_backend_source hc; then
+    fm_backend_hc_remote_exec "$(meta_value hc_session)" "$HC_MACHINE" 30 - test -d "$WT" >/dev/null 2>&1 || HC_WT_RC=$?
+  else
+    HC_WT_RC=255
+  fi
+  [ -n "$WT" ] && [ "$HC_WT_RC" != 1 ] || emit unknown none "worktree gone on hc machine $HC_MACHINE (torn down?)"
+elif [ -z "$REMOTE_HOST" ] && { [ -z "$WT" ] || [ ! -d "$WT" ]; }; then
   emit unknown none "worktree gone (torn down?)"
 fi
 
@@ -1553,21 +1570,33 @@ if ! pane_readable "$BACKEND_TARGET"; then
   # t3code answers from the server's own session status through the same
   # contract. Backends with no classifier (orca, zellij, cmux, and paseo all
   # report unverified, and tern's classifier is not promoted to recovery grade)
-  # keep their historical capture-failure-means-gone reading.
+  # keep their historical capture-failure-means-gone reading. A worker placed on
+  # another hc machine is read through hc's own state instead, because a
+  # machine that is merely out of reach is the common case there and must
+  # read as unreachable, never gone.
+  TASK_STATE_KEY=
   case "$TASK_BACKEND" in
     tmux|herdr|rex|t3code) AGENT_STATE=$(fm_backend_agent_state "$TASK_BACKEND" "$BACKEND_TARGET") ;;
+    hc)
+      if [ -n "$HC_MACHINE" ]; then
+        AGENT_STATE=$(fm_backend_agent_state hc "$BACKEND_TARGET")
+        TASK_STATE_KEY=hc-placed
+      else
+        AGENT_STATE=none
+      fi
+      ;;
     *) AGENT_STATE=none ;;
   esac
-  case "$TASK_BACKEND:$AGENT_STATE" in
-    tmux:alive|herdr:alive|rex:alive|t3code:alive)
+  case "${TASK_STATE_KEY:-$TASK_BACKEND}:$AGENT_STATE" in
+    tmux:alive|herdr:alive|rex:alive|t3code:alive|hc-placed:alive)
       ;;
-    tmux:missing|herdr:missing|rex:missing|t3code:missing)
+    tmux:missing|herdr:missing|rex:missing|t3code:missing|hc-placed:missing)
       emit unknown none "backend target gone: $BACKEND_TARGET"
       ;;
-    tmux:dead|herdr:dead|rex:dead|t3code:dead)
+    tmux:dead|herdr:dead|rex:dead|t3code:dead|hc-placed:dead)
       emit unknown none "backend target gone: $BACKEND_TARGET (agent gone, pane shell remains)"
       ;;
-    tmux:*|herdr:*|rex:*|t3code:*)
+    tmux:*|herdr:*|rex:*|t3code:*|hc-placed:*)
       emit unknown none "backend unreachable ($TASK_BACKEND endpoint state: $AGENT_STATE)"
       ;;
     *)

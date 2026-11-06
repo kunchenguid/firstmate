@@ -975,6 +975,39 @@ fm_dod_named_head_reachable_outside_worktree() {  # <worktree> <project> <mode> 
   [ "$mode" = local-only ] && fm_dod_ref_contains "$project" refs/heads "$sha"
 }
 
+# The named-head gate for a worktree placed on another hc machine
+# (docs/hc-backend.md "Workers on another machine"): that worktree's HEAD,
+# read there through hc, must be reachable from a remote-tracking ref of its
+# clone there or of <project> here. Placement refuses local-only, Gerrit, and
+# external-review ships at spawn, so only this pull-request reachability test
+# applies. An unreachable machine refuses with its reason, never as unpushed.
+fm_dod_accept_placed_ship_done() {  # <worktree> <project> <meta>
+  local wt=$1 project=$2 meta=$3 machine session sha hit dir
+  machine=$(fm_dod_meta_value "$meta" hc_machine)
+  session=$(fm_dod_meta_value "$meta" hc_session)
+  if ! command -v fm_backend_hc_remote_git >/dev/null 2>&1; then
+    dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    if ! command -v fm_backend_source >/dev/null 2>&1; then
+      # shellcheck source=bin/fm-backend.sh
+      . "$dir/fm-backend.sh" || { printf '%s\n' "named head cannot be verified: the hc adapter could not be loaded"; return 1; }
+    fi
+    fm_backend_source hc || { printf '%s\n' "named head cannot be verified: the hc adapter could not be loaded"; return 1; }
+  fi
+  sha=$(fm_backend_hc_remote_git "$session" "$machine" "$wt" rev-parse --verify HEAD 2>/dev/null) || {
+    printf '%s\n' "named head cannot be verified: the worktree on hc machine '$machine' could not be read"
+    return 1
+  }
+  hit=$(fm_backend_hc_remote_git "$session" "$machine" "$wt" for-each-ref --format='%(refname)' \
+    --contains="$sha" --count=1 refs/remotes 2>/dev/null) || {
+    printf '%s\n' "named head cannot be verified: the worktree on hc machine '$machine' could not be read"
+    return 1
+  }
+  [ -z "$hit" ] || return 0
+  fm_dod_ref_contains "$project" refs/remotes "$sha" && return 0
+  printf '%s\n' "named head $sha is unreachable outside the worker copy on hc machine '$machine'"
+  return 1
+}
+
 # 0 when <line> is not a ship done: to gate, when the task's meta records
 # forge=external and fm_dod_accept_external_review_done accepts it, when it
 # names the task's recorded PR whose head the forge holds, when it names a
@@ -1005,6 +1038,10 @@ fm_dod_accept_ship_done() {  # <kind> <mode> <worktree> <project> <line> [<state
   if url=$(fm_dod_pr_url_from_done_note "$(status_line_note "$line")") \
     && fm_dod_recorded_pr_on_forge "$state" "$id" "$meta" "$mode" "$url"; then
     return 0
+  fi
+  if [ -n "$meta" ] && [ -n "$(fm_dod_meta_value "$meta" hc_machine)" ]; then
+    fm_dod_accept_placed_ship_done "$wt" "$project" "$meta"
+    return
   fi
   if [ -z "$wt" ] || [ ! -d "$wt" ]; then
     printf '%s\n' "named head cannot be verified: worktree missing"

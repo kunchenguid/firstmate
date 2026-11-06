@@ -80,7 +80,10 @@
 #      this way, however its rendered tail looks, so a genuinely working turn
 #      keeps its ordinary busy verdict and the general BUSY_TURN_MAX_SECS
 #      bound is unchanged.
-#   5. no record at all: a native busy verdict from herdr, rex, or tern is trusted as busy
+#   5. no record at all: an hc task placed on another machine (hc_machine= in
+#      its task record) reads hc's native busy or idle verdict as hc-native,
+#      since nothing there can post a record; otherwise a native busy verdict
+#      from herdr, rex, or tern is trusted as busy
 #      (generation state is sufficient for busy, not for idle), then the
 #      muse session-log and cursor transcript pull sources, then the
 #      Grok/Rovo/AGY temporary regex fallbacks classify a grok, rovo, or agy
@@ -1194,7 +1197,19 @@ fm_busy_classify() {  # <backend> <target> <harness> <id> <state-dir> [tail40]
       return 0
       ;;
   esac
-  # No record at all. A native herdr, rex, or tern busy verdict is semantic
+  # No record at all. A worker placed on another hc machine never gets a
+  # record (no hooks run there), so hc's native status is its only source.
+  if [ "$backend" = hc ] && grep -q '^hc_machine=.' "$state/$id.meta" 2>/dev/null \
+    && command -v fm_backend_busy_state >/dev/null 2>&1; then
+    native=$(fm_backend_busy_state "$backend" "$target" 2>/dev/null || true)
+    case "$native" in
+      busy|idle)
+        printf '%s hc-native' "$native"
+        return 0
+        ;;
+    esac
+  fi
+  # A native herdr, rex, or tern busy verdict is semantic
   # enough to trust for BUSY (streaming means a turn is running; rex trusts an
   # OSC 7501 working record only while its reporting process is still in the
   # block's foreground chain); native idle is narrower than turn state (a long

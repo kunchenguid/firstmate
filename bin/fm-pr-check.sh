@@ -269,9 +269,16 @@ fi
 # same reason, and treats a recorded value that disagrees as stale rather than
 # authoritative.
 WT=$(grep '^worktree=' "$META" | tail -1 | cut -d= -f2- || true)
+# gh reads the PR from a local checkout of the project. A worktree placed on
+# another hc machine (docs/hc-backend.md "Workers on another machine") is not
+# on this machine, so its project's clone here, which shares its origin, is.
+PR_GH_DIR=$WT
+if [ -n "$(grep '^hc_machine=' "$META" | tail -1 | cut -d= -f2- || true)" ]; then
+  PR_GH_DIR=$(grep '^project=' "$META" | tail -1 | cut -d= -f2- || true)
+fi
 PR_HEAD=
-if [ "$PROVIDER" = github ] && [ -n "$WT" ] && [ -d "$WT" ] && command -v gh >/dev/null 2>&1; then
-  if REMOTE_HEAD=$(cd "$WT" && gh pr view "$URL" --json headRefOid -q .headRefOid 2>/dev/null) \
+if [ "$PROVIDER" = github ] && [ -n "$PR_GH_DIR" ] && [ -d "$PR_GH_DIR" ] && command -v gh >/dev/null 2>&1; then
+  if REMOTE_HEAD=$(cd "$PR_GH_DIR" && gh pr view "$URL" --json headRefOid -q .headRefOid 2>/dev/null) \
     && fm_pr_head_valid "$REMOTE_HEAD"; then
     PR_HEAD=$REMOTE_HEAD
   fi

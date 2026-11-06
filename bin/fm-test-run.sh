@@ -442,7 +442,7 @@ family_for_basename() {
     fm-backend-tern.test.sh|fm-backend-tern-smoke.test.sh)
       printf '%s\n' tern
       ;;
-    fm-backend-hc.test.sh|fm-backend-hc-smoke.test.sh|fm-backend-hc-appdetect-smoke.test.sh)
+    fm-backend-hc.test.sh|fm-backend-hc-placement.test.sh|fm-backend-hc-smoke.test.sh|fm-backend-hc-appdetect-smoke.test.sh)
       printf '%s\n' hc
       ;;
     fm-branch-supervision.test.sh|fm-busy-adapter-wiring.test.sh|\
@@ -737,6 +737,7 @@ tests/fm-ask-user-authority.test.sh 171
 tests/fm-backend-cmux-smoke.test.sh 34
 tests/fm-backend-cmux.test.sh 3754
 tests/fm-backend-hc-liveness-live-e2e.test.sh 9000
+tests/fm-backend-hc-placement.test.sh 25000
 tests/fm-backend-hc-smoke.test.sh 3700
 tests/fm-backend-hc.test.sh 4000
 tests/fm-backend-orca.test.sh 27102

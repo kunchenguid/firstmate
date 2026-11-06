@@ -23,8 +23,11 @@
 # without group/other write access; new roots are created mode 0700.
 # Provision creates its session directory exclusively, never adopting one.
 #
-# The run command rejects caller-supplied --session/--socket flags, a leading
-# option before the hc subcommand, the `server` lifecycle subcommand (guarded
+# The run command rejects caller-supplied --session/--socket flags (except
+# `machine add --session <the lab's own name>`, which names the session on the
+# other machine, so a two-machine lab lands in a same-named lab session there
+# and never in that machine's default core), a leading option before the hc
+# subcommand, the `server` lifecycle subcommand (guarded
 # stop/teardown own it), and `connect` (raw protocol writes bypass the CLI
 # guards).
 #
@@ -267,14 +270,32 @@ fm_hclab_run() { # <session> <hc arguments...>
       return 1
       ;;
   esac
+  # `machine add --session <s>` names the session on the OTHER machine, not
+  # this core's; it is allowed only as the lab's own name, so a two-machine
+  # lab lands in a same-named lab session there and never in that machine's
+  # default core.
+  local prev='' remote_ok=0
+  [ "${1:-}" = machine ] && [ "${2:-}" = add ] && remote_ok=1
   for arg in "$@"; do
     case "$arg" in
-      --session|--session=*|--socket|--socket=*)
+      --session=*)
+        if [ "$remote_ok" -ne 1 ] || [ "${arg#--session=}" != "$name" ]; then
+          fm_hclab_error "run forbids caller-supplied --session/--socket; the helper pins the lab session and socket (machine add accepts only --session $name)"
+          return 1
+        fi
+        ;;
+      --socket|--socket=*)
         fm_hclab_error "run forbids caller-supplied --session/--socket; the helper pins the lab session and socket"
         return 1
         ;;
     esac
+    if [ "$prev" = --session ] && { [ "$remote_ok" -ne 1 ] || [ "$arg" != "$name" ]; }; then
+      fm_hclab_error "run forbids caller-supplied --session/--socket; the helper pins the lab session and socket (machine add accepts only --session $name)"
+      return 1
+    fi
+    prev=$arg
   done
+  [ "$prev" != --session ] || { fm_hclab_error "run: --session needs a value"; return 1; }
   fm_hclab_cli "$name" "$@"
 }
 

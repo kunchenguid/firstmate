@@ -82,6 +82,13 @@ for failure in find metadata roots baseline; do
   refuse 'refusing unverified teardown' env FAIL_READ=$failure bash "$LAB" teardown fm-hclab-good
   [ -d "$FM_HC_LAB_DIR/fm-hclab-good" ] || fail 'failed verification removed evidence'
 done
+# `machine add --session` names the other machine's session; run allows it only
+# as the lab's own name, and every other caller-supplied session stays refused.
+bash "$LAB" run fm-hclab-good machine add host --name m --session fm-hclab-good >/dev/null \
+  || fail 'machine add into the same-named lab session was refused'
+refuse 'machine add accepts only --session fm-hclab-good' bash "$LAB" run fm-hclab-good machine add host --name m --session default
+refuse 'machine add accepts only --session fm-hclab-good' bash "$LAB" run fm-hclab-good machine add host --name m --session=default
+refuse 'forbids caller-supplied --session' bash "$LAB" run fm-hclab-good ls --session fm-hclab-good
 refuse 'could not record the fleet-state tripwire' env FAIL_READ=find bash "$LAB" provision fm-hclab-incomplete
 [ ! -e "$FM_HC_LAB_DIR/fm-hclab-incomplete" ] || fail 'incomplete provision retained'
 bash "$LAB" teardown fm-hclab-good
