@@ -396,11 +396,13 @@ It states what `--force` authorizes rather than what will have happened, because
 T3 Code uses the [native cleanup path](../t3code-backend.md#current-lifecycle-and-safety) instead.
 
 The Orca close refuses under `--force` too.
-The step immediately after it removes the Orca worktree through the same CLI whose absence is the only thing that arm ever reports, so a forced continue would die there having removed nothing while claiming the records were already gone.
+The later Orca worktree release still requires the same CLI whose absence is the only thing that arm ever reports, so a forced continue would fail there while claiming cleanup could proceed.
 The two child close sites inside forced secondmate cleanup also keep refusing: that path is only ever reached under `--force`, so honoring force there would delete the refusal rather than override it, and would contradict the adjacent Herdr child gate that stops forced cleanup for the same hazard.
 
 [`bin/fm-teardown.sh`](../../bin/fm-teardown.sh)'s header and `endpoint_close_refusal` comment own cleanup ordering and the limits of record retention after a close refusal.
-Reconcile the surviving endpoint rather than assuming the retained record guarantees a later retry.
+Endpoint refusal alone does not determine whether startup can retire the retained record.
+[`bin/fm-backlog-transition-lib.sh`](../../bin/fm-backlog-transition-lib.sh)'s header owns replay eligibility, including the task-branch cleanup barrier.
+Reconcile the surviving endpoint after a refusal rather than trusting the record to still be there later.
 
 Both directions are proven non-vacuous.
 Restoring the swallowed status makes the refusal case report `teardown <id> complete`, delete the endpoint record, and leave the window live.
@@ -408,7 +410,6 @@ Keeping the refusal but dropping the exact re-read makes an already-exited endpo
 Letting an unreadable inventory pass for absence makes the unreadable case complete and remove the record while the window is still there.
 Removing the `--force` arm makes the forced generic case refuse; honoring `--force` at the child sites makes forced secondmate cleanup continue past a child endpoint it could not close, and honoring it at the Orca site makes that forced cleanup abort on the missing CLI after announcing that it was continuing.
 Restoring `fm_backend_orca_kill`'s swallowed tool check makes the CLI-absent adapter case report success.
-Dropping the retention-is-not-durable line makes the refusal claim a retention teardown does not own.
 
 ## Kimi folder prompt
 

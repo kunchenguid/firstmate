@@ -1042,13 +1042,16 @@ test_ship_teardown_refuses_orca_missing_worktree_path() {
 }
 
 test_ship_teardown_removes_orca_worktree_when_id_path_matches() {
-  local proj wt data state config id out rc neutral
+  local proj wt data state config id out rc neutral scenario ref head
+  local real_git
+  real_git=$(command -v git)
+  for scenario in removed detach-fails delete-fails detached present-on-other absent-on-other; do
   id="orcashipmatchz2"
-  proj="$TMP_ROOT/ship-match-project"
-  wt="$TMP_ROOT/ship-match-wt"
-  data="$TMP_ROOT/ship-match-data"
-  state="$TMP_ROOT/ship-match-state"
-  config="$TMP_ROOT/ship-match-config"
+  proj="$TMP_ROOT/ship-match-$scenario-project"
+  wt="$TMP_ROOT/ship-match-$scenario-wt"
+  data="$TMP_ROOT/ship-match-$scenario-data"
+  state="$TMP_ROOT/ship-match-$scenario-state"
+  config="$TMP_ROOT/ship-match-$scenario-config"
   fm_git_worktree "$proj" "$wt" "fm/$id"
   mkdir -p "$data/$id" "$state" "$config"
   touch "$state/.last-watcher-beat"
@@ -1056,16 +1059,57 @@ test_ship_teardown_removes_orca_worktree_when_id_path_matches() {
     "window=fm-$id" "endpoint_task_id=$id" "terminal=term-ship-match" "worktree=$wt" "project=$proj" \
     "harness=claude" "kind=ship" "mode=local-only" "yolo=off" \
     "backend=orca" "orca_worktree_id=wt-ship-match::/orca/wt-ship-match"
-  orca_case ship-match
+  printf 'branch=fm/%s\n' "$id" >> "$state/$id.meta"
+  ref="refs/heads/fm/$id"
+  head=$(git -C "$wt" rev-parse HEAD)
+  git -C "$wt" update-ref refs/no-mistakes/recover/test "$head"
+  git -C "$wt" update-ref refs/remotes/no-mistakes/task "$head"
+  [ "$scenario" != detached ] || git -C "$wt" checkout --detach -q
+  case "$scenario" in
+    present-on-other|absent-on-other)
+      git -C "$wt" checkout -q -b startup
+      [ "$scenario" != absent-on-other ] || git -C "$wt" branch -D "fm/$id" >/dev/null
+      ;;
+  esac
+  orca_case "ship-match-$scenario"
   printf '{"ok":true,"result":{"worktree":{"id":"wt-ship-match::/orca/wt-ship-match","path":"%s"}}}\n' "$wt" > "$RESP/1.out"
+  cat > "$FB/git" <<'SH'
+#!/usr/bin/env bash
+case " $* " in
+  *' checkout --detach '*)
+    if [ "${FM_BRANCH_FAILURE:-}" = detach-fails ]; then
+      echo 'synthetic detach failure' >&2
+      exit 1
+    fi ;;
+  *' branch -D '*)
+    if [ "${FM_BRANCH_FAILURE:-}" = delete-fails ]; then
+      echo 'synthetic deletion failure' >&2
+      exit 1
+    fi ;;
+esac
+exec "${FM_BRANCH_REAL_GIT:?}" "$@"
+SH
+  chmod +x "$FB/git"
   neutral=$(neutral_fm_root "$CASE_DIR/neutral")
   set +e
   out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+    FM_BRANCH_REAL_GIT="$real_git" FM_BRANCH_FAILURE="$scenario" \
     FM_ROOT_OVERRIDE="$neutral" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
     "$ROOT/bin/fm-teardown.sh" "$id" 2>&1 )
   rc=$?
   set -e
+  case "$scenario" in
+    detach-fails|delete-fails)
+      [ "$rc" -ne 0 ] || fail "Orca $scenario cleanup hid a retained ref"
+      assert_contains "$out" "$ref" "Orca $scenario must name the retained ref"
+      git -C "$proj" show-ref --verify --quiet "$ref" || fail "Orca $scenario lost the task ref"
+      assert_present "$state/$id.meta" "Orca $scenario must preserve retry metadata"
+      assert_not_contains "$out" "teardown $id complete" "Orca $scenario reported complete"
+      assert_not_contains "$(cat "$LOG")" $'orca\x1fworktree\x1frm' "Orca $scenario released the worktree"
+      ;;
+    *)
   expect_code 0 "$rc" "Orca ship teardown should succeed when the id path matches the inspected worktree"$'\n'"$out"
+  ! git -C "$proj" show-ref --verify --quiet "$ref" || fail "Orca $scenario completed with the task ref retained"
   assert_contains "$(cat "$LOG")" $'orca\x1f''worktree'$'\x1f''show'$'\x1f''--worktree'$'\x1f''id:wt-ship-match::/orca/wt-ship-match'$'\x1f''--json' \
     "teardown did not resolve the Orca worktree id before removal"
   assert_contains "$(cat "$LOG")" $'orca\x1f''terminal'$'\x1f''close'$'\x1f''--terminal'$'\x1f''term-ship-match'$'\x1f''--json' \
@@ -1073,7 +1117,20 @@ test_ship_teardown_removes_orca_worktree_when_id_path_matches() {
   assert_contains "$(cat "$LOG")" $'orca\x1f''worktree'$'\x1f''rm'$'\x1f''--worktree'$'\x1f''id:wt-ship-match::/orca/wt-ship-match'$'\x1f''--force'$'\x1f''--json' \
     "teardown did not remove the matched Orca worktree"
   assert_absent "$state/$id.meta" "successful matched teardown should remove task metadata"
-  pass "fm-teardown.sh backend=orca: ship teardown requires a matching Orca id path"
+  case "$scenario" in
+    present-on-other|absent-on-other)
+      [ "$(git -C "$proj" rev-parse refs/heads/startup)" = "$head" ] \
+        || fail "Orca $scenario altered the unrelated checkout branch"
+      ;;
+  esac
+      ;;
+  esac
+  [ "$(git -C "$proj" rev-parse refs/no-mistakes/recover/test)" = "$head" ] \
+    || fail "Orca $scenario erased a recovery ref"
+  [ "$(git -C "$proj" rev-parse refs/remotes/no-mistakes/task)" = "$head" ] \
+    || fail "Orca $scenario erased a staging ref"
+  done
+  pass "fm-teardown.sh backend=orca: matched worktree cleanup proves task-ref absence or names the retained ref and preserves retry records"
 }
 
 test_ship_teardown_refuses_orca_unresolvable_worktree_id() {

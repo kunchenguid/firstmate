@@ -74,6 +74,19 @@ run_teardown() {  # <home> <id>
     FM_CONFIG_OVERRIDE="$home/config" "$TEARDOWN" "$id"
 }
 
+# Fail after branch verification so these fixtures exercise ready-close replay,
+# rather than the unresolved-cleanup barrier covered by fm-teardown.test.sh.
+fail_task_record_retirement() {  # <home>
+  cat > "$1/fakebin/rm" <<'SH'
+#!/usr/bin/env bash
+for arg in "$@"; do
+  case "$arg" in "${FM_STATE_OVERRIDE:?}/"*.meta) exit 1 ;; esac
+done
+exec /bin/rm "$@"
+SH
+  chmod +x "$1/fakebin/rm"
+}
+
 tasks_in() {  # <home> <tasks-axi args...>
   local home=$1
   shift
@@ -3062,16 +3075,15 @@ test_retained_row_artifacts_survive_captain_answers() {
 }
 
 # Retention happens after destructive cleanup, through the same pending record
-# an ordinary close stages first. A cleanup that fails part-way therefore leaves
-# the row exactly as it was, and the next session start finishes the retention
-# instead of closing the captain's question.
+# an ordinary close stages first. Once branch cleanup is verified, a failure to
+# retire the task record leaves the row as it was, and startup finishes retention.
 test_interrupted_cleanup_keeps_the_captain_call_recoverable() {
   local home id wt show rc bootstrap
   home=$(make_home teardown-held-interrupted)
   id=sample-held-cleanup-failure
   wt="$home/projects/$id"
   mkdir -p "$home/data/$id" "$wt" "$home/projects/sample"
-  git -C "$home/projects/sample" init -q || fail "could not initialize cleanup-failure project fixture"
+  fm_git_worktree "$home/projects/sample" "$wt" "fm/$id"
   tasks_in "$home" add "$id" "Investigate failed sample cleanup" --kind scout \
     --repo sample --start >/dev/null || fail "could not create the cleanup-failure fixture"
   fm_write_meta "$home/state/$id.meta" \
@@ -3083,11 +3095,7 @@ test_interrupted_cleanup_keeps_the_captain_call_recoverable() {
     || fail "could not hold the cleanup-failure fixture"
   complete_through_sibling "$home" "$id" >/dev/null \
     || fail "completion gate failed for the cleanup-failure fixture"
-  cat > "$home/fakebin/treehouse" <<'SH'
-#!/usr/bin/env bash
-exit 1
-SH
-  chmod +x "$home/fakebin/treehouse"
+  fail_task_record_retirement "$home"
 
   set +e
   PATH="$home/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
@@ -3096,7 +3104,12 @@ SH
     > "$home/teardown.out" 2> "$home/teardown.err"
   rc=$?
   set -e
-  [ "$rc" -ne 0 ] || fail "cleanup succeeded despite the failed worktree return"
+  [ "$rc" -ne 0 ] || fail "cleanup succeeded despite failed task-record retirement"
+  if git -C "$home/projects/sample" show-ref --verify --quiet "refs/heads/fm/$id"; then
+    fail "fixture failed before branch cleanup was verified"
+  else
+    expect_code 1 "$?" "fixture could not prove branch absence"
+  fi
   assert_present "$home/state/$id.meta" "a failed cleanup removed the task record"
   assert_present "$home/state/$id.backlog-close" \
     "a failed cleanup lost the pending record that replays the retention"
@@ -3106,7 +3119,7 @@ SH
   assert_not_contains "$show" "Deliverable of the finished work" \
     "the deliverable was recorded before destructive cleanup succeeded"
 
-  fm_fake_exit0 "$home/fakebin" treehouse
+  rm -f "$home/fakebin/rm"
   bootstrap=$(PATH="$home/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_CONFIG_OVERRIDE="$home/config" FM_BOOTSTRAP_NETWORK=skip \
@@ -3131,6 +3144,7 @@ test_answer_before_cleanup_replay_preserves_the_retained_report() {
   id=sample-answer-before-cleanup-replay
   wt="$home/projects/$id"
   mkdir -p "$home/data/$id" "$wt" "$home/projects/sample"
+  fm_git_worktree "$home/projects/sample" "$wt" "fm/$id"
   tasks_in "$home" add "$id" "Investigate answer before cleanup replay" --kind scout \
     --repo sample --start >/dev/null || fail "could not create the answer-before-replay fixture"
   fm_write_meta "$home/state/$id.meta" \
@@ -3142,11 +3156,7 @@ test_answer_before_cleanup_replay_preserves_the_retained_report() {
     >/dev/null || fail "could not hold the answer-before-replay fixture"
   complete_through_sibling "$home" "$id" >/dev/null \
     || fail "completion gate failed for the answer-before-replay fixture"
-  cat > "$home/fakebin/treehouse" <<'SH'
-#!/usr/bin/env bash
-exit 1
-SH
-  chmod +x "$home/fakebin/treehouse"
+  fail_task_record_retirement "$home"
 
   set +e
   PATH="$home/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
@@ -3155,14 +3165,14 @@ SH
     > "$home/teardown.out" 2> "$home/teardown.err"
   rc=$?
   set -e
-  [ "$rc" -ne 0 ] || fail "cleanup succeeded despite the failed worktree return"
+  [ "$rc" -ne 0 ] || fail "cleanup succeeded despite failed task-record retirement"
   assert_present "$home/state/$id.backlog-close" \
     "the interrupted cleanup lost its retained-artifact record"
 
   printf 'Proceed with the reported result.\n' > "$home/answer.txt"
   run_captain "$home" answer "$id" --decision-file "$home/answer.txt" >/dev/null \
     || fail "the captain could not answer before cleanup replay"
-  fm_fake_exit0 "$home/fakebin" treehouse
+  rm -f "$home/fakebin/rm"
   bootstrap=$(PATH="$home/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_CONFIG_OVERRIDE="$home/config" FM_BOOTSTRAP_NETWORK=skip \
@@ -3208,11 +3218,7 @@ done
 exec "$real_tasks_axi" "\$@"
 SH
   chmod +x "$home/fakebin/tasks-axi"
-  cat > "$home/fakebin/treehouse" <<'SH'
-#!/usr/bin/env bash
-exit 1
-SH
-  chmod +x "$home/fakebin/treehouse"
+  fail_task_record_retirement "$home"
 
   set +e
   PATH="$home/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
@@ -3221,7 +3227,7 @@ SH
     > "$home/teardown.out" 2> "$home/teardown.err"
   rc=$?
   set -e
-  [ "$rc" -ne 0 ] || fail "cleanup succeeded despite the failed worktree return"
+  [ "$rc" -ne 0 ] || fail "cleanup succeeded despite failed task-record retirement"
   assert_present "$home/state/$id.backlog-close" \
     "the interrupted cleanup lost its retained-artifact record"
 
@@ -3242,6 +3248,7 @@ test_unusable_pending_close_record_names_its_reason() {
   wt="$home/projects/$id"
   marker="$home/state/$id.backlog-close"
   mkdir -p "$home/data/$id" "$wt" "$home/projects/sample" "$home/elsewhere"
+  fm_git_worktree "$home/projects/sample" "$wt" "fm/$id"
   tasks_in "$home" add "$id" "Investigate the unusable pending close" --kind scout \
     --repo sample --start >/dev/null || fail "could not create the unusable pending-close fixture"
   fm_write_meta "$home/state/$id.meta" \
@@ -3253,11 +3260,7 @@ test_unusable_pending_close_record_names_its_reason() {
     >/dev/null || fail "could not hold the unusable pending-close fixture"
   complete_through_sibling "$home" "$id" >/dev/null \
     || fail "completion gate failed for the unusable pending-close fixture"
-  cat > "$home/fakebin/treehouse" <<'SH'
-#!/usr/bin/env bash
-exit 1
-SH
-  chmod +x "$home/fakebin/treehouse"
+  fail_task_record_retirement "$home"
 
   set +e
   PATH="$home/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
@@ -3266,7 +3269,7 @@ SH
     > "$home/teardown.out" 2> "$home/teardown.err"
   rc=$?
   set -e
-  [ "$rc" -ne 0 ] || fail "cleanup succeeded despite the failed worktree return"
+  [ "$rc" -ne 0 ] || fail "cleanup succeeded despite failed task-record retirement"
   assert_present "$marker" "the interrupted cleanup lost its retained-artifact record"
   sed "s|^data=.*$|data=$home/elsewhere|" "$marker" > "$marker.rewritten" \
     || fail "could not rewrite the pending-close record"
@@ -3293,6 +3296,7 @@ test_relocated_report_does_not_wedge_an_answer_before_replay() {
   id=sample-relocated-answer-before-replay
   wt="$home/projects/$id"
   mkdir -p "$home/data" "$data/$id" "$wt" "$home/projects/sample"
+  fm_git_worktree "$home/projects/sample" "$wt" "fm/$id"
   cat > "$home/data/backlog.md" <<'EOF'
 ## In flight
 
@@ -3322,11 +3326,7 @@ EOF
     FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$home/config" \
     "$ROOT/bin/fm-captain-hold.sh" complete "$id" "$id-call" >/dev/null \
     || fail "completion gate failed for the relocated answer-before-replay fixture"
-  cat > "$home/fakebin/treehouse" <<'SH'
-#!/usr/bin/env bash
-exit 1
-SH
-  chmod +x "$home/fakebin/treehouse"
+  fail_task_record_retirement "$home"
 
   set +e
   PATH="$home/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
@@ -3335,7 +3335,7 @@ SH
     > "$home/teardown.out" 2> "$home/teardown.err"
   rc=$?
   set -e
-  [ "$rc" -ne 0 ] || fail "relocated cleanup succeeded despite the failed worktree return"
+  [ "$rc" -ne 0 ] || fail "relocated cleanup succeeded despite failed task-record retirement"
   assert_present "$home/state/$id.backlog-close" \
     "the interrupted relocated cleanup lost its pending record"
 
@@ -3349,7 +3349,7 @@ SH
   assert_contains "$show" "state: done" "the relocated report kept the answered call open"
   assert_contains "$show" "held: no" "the relocated report kept the answered call held"
 
-  fm_fake_exit0 "$home/fakebin" treehouse
+  rm -f "$home/fakebin/rm"
   bootstrap=$(PATH="$home/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$data" \
     FM_CONFIG_OVERRIDE="$home/config" FM_BOOTSTRAP_NETWORK=skip \
