@@ -446,24 +446,24 @@ last_closed_arm_pid() {
     END { if (pid != "") print pid }' "$STATE/.watch-cycle-exits.log" 2>/dev/null
 }
 
-# The newest record in the lifecycle ledger, as a change marker: a different
-# value means another watcher cycle closed since the last look, however briefly
-# it ran.
-stopfailure_cycle_mark() {
-  tail -n 1 "$STATE/.watch-cycle-exits.log" 2>/dev/null || true
+# A watcher cycle is live during a hold while a healthy watcher holds this
+# home's lock or the latest handling successor this hook started is still
+# running (it owns or is bringing up a cycle).
+stopfailure_cycle_live() {
+  fm_watcher_healthy "$STATE" "$SCRIPT_DIR/fm-watch.sh" "$GRACE" "$FM_HOME" && return 0
+  fm_pid_alive "${SUCCESSOR_PID:-}"
 }
 
-# A hold needs a verified watcher cycling through it: the arm, the host's
-# hand-back, or a failed arm can each leave none, so start the handling
-# successor of the closed cycle unless one is already beating. Fails only when
-# that successor did not confirm a live watcher.
+# A hold needs a watcher cycling through it: the arm, the host's hand-back, or
+# a failed arm can each leave none, so start the handling successor of the
+# newest closed cycle unless a cycle is already live.
 stopfailure_cover_hold() {
   local predecessor
   stopfailure_hold_pending || return 0
-  fm_watcher_healthy "$STATE" "$SCRIPT_DIR/fm-watch.sh" "$GRACE" "$FM_HOME" && return 0
+  stopfailure_cycle_live && return 0
   predecessor=${CLOSED_ARM_PID:-}
   [ -n "$predecessor" ] || predecessor=$(last_closed_arm_pid)
-  start_handling_successor "${predecessor:-$$}"
+  start_handling_successor "${predecessor:-$$}" || true
 }
 
 # Hold an impending exit 2 until the episode's retry time, whichever event
@@ -477,19 +477,14 @@ stopfailure_cover_hold() {
 # watcher is verified after the cover attempt: the first failure notice of an
 # episode is the only way to tell the model its supervision is down, so it is
 # never held behind a backoff nothing is covering. Coverage is rechecked on
-# every wait tick: with no healthy watcher, a replacement cycle starts when one
-# was seen healthy before or the lifecycle ledger recorded another close since
-# the last tick, so a cycle that ends before the next check is replaced too and
-# later events keep reaching the durable queue. At most one replacement starts
-# per tick, each after a real close, and replacements stop after
-# STOPFAILURE_REPLACE_LIMIT in a row that were never seen healthy, whether they
-# failed to confirm or closed at once, until a healthy watcher is seen again, so
-# a watcher that cannot start is not retried in a loop.
-STOPFAILURE_REPLACE_LIMIT=3
+# every wait tick: whenever no watcher cycle is live, however many ended since
+# the last tick, the tick starts one, so the home is never without a watcher
+# for longer than one tick and later events keep reaching the durable queue.
+# The tick is the rate bound: at most one start per second, and a watcher that
+# cannot start costs one failed start per tick rather than a tight loop.
 stopfailure_backoff() {  # [watched]
-  local waited=0 hold=1 covered=0 misses=0 mark now
-  mark=$(stopfailure_cycle_mark)
-  stopfailure_cover_hold || misses=1
+  local waited=0 hold=1
+  stopfailure_cover_hold
   if [ "${1:-}" = watched ] \
     && ! fm_watcher_healthy "$STATE" "$SCRIPT_DIR/fm-watch.sh" "$GRACE" "$FM_HOME"; then
     hold=0
@@ -497,20 +492,9 @@ stopfailure_backoff() {  # [watched]
   while [ "$hold" -eq 1 ] && stopfailure_hold_pending; do
     [ "$SECONDS" -lt "$HOLD_LIMIT" ] || break
     fm_autoarm_still_owner "$STATE" "$MY_GEN" || break
-    if fm_watcher_healthy "$STATE" "$SCRIPT_DIR/fm-watch.sh" "$GRACE" "$FM_HOME"; then
-      covered=1
-      misses=0
-      mark=$(stopfailure_cycle_mark)
-    else
-      now=$(stopfailure_cycle_mark)
-      if [ "$misses" -lt "$STOPFAILURE_REPLACE_LIMIT" ] \
-        && { [ "$covered" -eq 1 ] || [ "$now" != "$mark" ]; }; then
-        covered=0
-        mark=$now
-        misses=$((misses + 1))
-        CLOSED_ARM_PID=
-        stopfailure_cover_hold || true
-      fi
+    if ! stopfailure_cycle_live; then
+      CLOSED_ARM_PID=
+      stopfailure_cover_hold
     fi
     waited=1
     sleep 1
@@ -831,11 +815,14 @@ run_arm() {  # <output file, or empty for none>
 # away from the hook's pipes, and its own process group. Its one status line
 # is awaited within its own short successor budget plus slack - deliberately
 # not the arm's fresh-child backstop, which may run far longer. Sets
-# SUCCESSOR_FAILURE to the banner line for an unconfirmed successor.
+# SUCCESSOR_FAILURE to the banner line for an unconfirmed successor and
+# SUCCESSOR_PID to the successor arm's pid.
 SUCCESSOR_FAILURE=
+SUCCESSOR_PID=
 start_handling_successor() {  # <closed-arm-pid>
   local out pid deadline budget line monitor_was_on=0
   SUCCESSOR_FAILURE=
+  SUCCESSOR_PID=
   budget=${FM_ARM_SUCCESSOR_CONFIRM_TIMEOUT:-30}
   case "$budget" in ''|*[!0-9]*) budget=30 ;; esac
   if ! out=$(mktemp "$STATE/.claude-autoarm-successor.XXXXXX"); then
@@ -847,6 +834,7 @@ start_handling_successor() {  # <closed-arm-pid>
   FM_WATCH_PREDECESSOR_ARM_PID=$1 FM_GUARD_GRACE="$GRACE" \
     nohup "$SCRIPT_DIR/fm-watch-arm.sh" >"$out" 2>&1 </dev/null &
   pid=$!
+  SUCCESSOR_PID=$pid
   [ "$monitor_was_on" -eq 1 ] || set +m 2>/dev/null || true
   deadline=$(( $(date +%s) + budget + 2 ))
   while :; do

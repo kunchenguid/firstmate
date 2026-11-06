@@ -2476,8 +2476,9 @@ test_stopfailure_failed_arm_hold_starts_a_watcher() {
 }
 
 # A watcher that covers the hold can end mid-hold (its own cycle closing on an
-# actionable event). The hold rechecks coverage every tick and starts a
-# replacement cycle, so later events keep reaching the durable queue.
+# actionable event, which also ends the successor arm that owned it). The hold
+# rechecks coverage every tick and starts a replacement cycle, so later events
+# keep reaching the durable queue.
 test_stopfailure_hold_replaces_a_watcher_that_ends() {
   local dir rc watcher identity
   dir=$(make_primary_dir "$TMP_ROOT/stopfailure-watcher-ends")
@@ -2503,6 +2504,7 @@ test_stopfailure_hold_replaces_a_watcher_that_ends() {
     touch "$FM_HOME/state/.last-watcher-beat"
     sleep 2
     kill "$watcher"; wait "$watcher" 2>/dev/null
+    rm -f "$FM_HOME/state/successor-park"
     i=0
     while [ "$(wc -l < "$FM_HOME/state/successor-ran" | tr -d " ")" -lt 2 ]; do
       [ "$i" -lt 100 ] || exit 91
@@ -2520,102 +2522,65 @@ test_stopfailure_hold_replaces_a_watcher_that_ends() {
   pass "auto-arm: a StopFailure hold starts a replacement cycle when its covering watcher ends mid-hold"
 }
 
-# A replacement cycle can itself close before the next health check, so the
-# hold never sees it healthy. The lifecycle ledger still records that close, and
-# the hold replaces it again.
-test_stopfailure_hold_replaces_a_cycle_that_closes_before_the_next_check() {
-  local dir rc
-  dir=$(make_primary_dir "$TMP_ROOT/stopfailure-quick-close")
+# Several replacement cycles can end between two health checks. Whenever a tick
+# finds no live cycle it starts one, however many ended since the last tick, so
+# the hold keeps re-arming while cycles keep closing, at most once per tick.
+test_stopfailure_hold_rearms_when_several_cycles_end_between_ticks() {
+  local dir rc started ended count
+  dir=$(make_primary_dir "$TMP_ROOT/stopfailure-cycles-churn")
   : > "$dir/state/task.meta"
   write_arm_fixture "$dir" failed
   : > "$dir/state/.claude-autoarm-failure-notified"
   : > "$dir/state/successor-park"
-  FM_HOME="$dir" FM_CLAUDE_STOPFAILURE_BACKOFF_BASE=12 SF_PAYLOAD="$STOPFAILURE_PAYLOAD" \
-    LOCK_FN=$(declare -f record_watcher_lock watcher_identity) "$FAKE_CLAUDE" -c '
-    eval "$LOCK_FN"
+  FM_HOME="$dir" FM_CLAUDE_STOPFAILURE_BACKOFF_BASE=14 SF_PAYLOAD="$STOPFAILURE_PAYLOAD" "$FAKE_CLAUDE" -c '
     successors() { [ -e "$FM_HOME/state/successor-ran" ] && wc -l < "$FM_HOME/state/successor-ran" | tr -d " "; }
-    wait_successors() {  # <count> <exit code>
-      local i=0 count
-      while count=$(successors); [ "${count:-0}" -lt "$1" ]; do
-        [ "$i" -lt 100 ] || exit "$2"
-        sleep 0.05
-        i=$((i + 1))
-      done
-    }
     printf "%s\n" "$$" > "$FM_HOME/state/.lock"
     printf "%s\n" "$SF_PAYLOAD" | "$FM_HOME/bin/fm-claude-stop-autoarm.sh" >"$FM_HOME/state/hook.out" 2>&1 &
     hook=$!
-    wait_successors 1 90
-    sleep 60 &
-    watcher=$!
-    record_watcher_lock "$FM_HOME" "$watcher" "$(watcher_identity "$FM_HOME" "$watcher")"
-    touch "$FM_HOME/state/.last-watcher-beat"
-    sleep 2
-    kill "$watcher"; wait "$watcher" 2>/dev/null
-    wait_successors 2 91
-    printf "arm_pid=7001\twatcher_pid=7002\tsuccessor=none\n" >> "$FM_HOME/state/.watch-cycle-exits.log"
-    wait_successors 3 92
+    i=0
+    while count=$(successors); [ "${count:-0}" -lt 1 ]; do
+      [ "$i" -lt 100 ] || exit 90
+      sleep 0.05
+      i=$((i + 1))
+    done
+    sleep 1
+    date +%s > "$FM_HOME/state/churn-started"
+    rm -f "$FM_HOME/state/successor-park"
+    sleep 5
+    date +%s > "$FM_HOME/state/churn-ended"
+    successors > "$FM_HOME/state/churn-count"
+    : > "$FM_HOME/state/successor-park"
     kill -0 "$hook" 2>/dev/null && : > "$FM_HOME/state/hook-held"
     wait "$hook"
     echo "$?" > "$FM_HOME/state/hook-rc"
   '; rc=$?
   rm -f "$dir/state/successor-park"
-  expect_code 0 "$rc" "quick-close hold scenario did not complete (90: no first cover, 91: no replacement, 92: the quickly closed replacement was not replaced)"
-  assert_present "$dir/state/hook-held" "the hold ended before the quickly closed replacement was replaced"
+  expect_code 0 "$rc" "cycle-churn hold scenario did not complete (90: no first cover)"
+  assert_present "$dir/state/hook-held" "the hold ended during the cycle churn"
+  started=$(cat "$dir/state/churn-started"); ended=$(cat "$dir/state/churn-ended"); count=$(cat "$dir/state/churn-count")
+  [ "$count" -ge 4 ] \
+    || fail "every tick without a live cycle must start one while cycles keep ending, got $count successor starts: $(cat "$dir/state/successor-ran")"
+  [ "$count" -le $(( ended - started + 3 )) ] \
+    || fail "the hold must start at most one cycle per tick, got $count starts in $(( ended - started ))s"
   [ "$(cat "$dir/state/hook-rc")" = 2 ] || fail "the held retry must still rewake after the hold, got rc $(cat "$dir/state/hook-rc")"
-  pass "auto-arm: a StopFailure hold replaces a replacement cycle that closes before the next health check"
+  pass "auto-arm: a StopFailure hold re-arms on every tick that finds no live cycle, at most once per tick"
 }
 
-# Replacements that never become healthy are bounded: after three in a row
-# that failed to confirm a live watcher, more recorded closes during the hold
-# start no retry loop.
-test_stopfailure_hold_bounds_replacements_that_cannot_start() {
-  local dir rc
-  dir=$(make_primary_dir "$TMP_ROOT/stopfailure-replacement-fails")
+# A watcher that cannot start is retried once per tick for the whole hold, never
+# in a tight loop and never given up on while the hold lasts.
+test_stopfailure_hold_retries_an_unstartable_watcher_once_per_tick() {
+  local dir out status count
+  dir=$(make_primary_dir "$TMP_ROOT/stopfailure-unstartable")
   : > "$dir/state/task.meta"
   write_arm_fixture "$dir" failed
   : > "$dir/state/.claude-autoarm-failure-notified"
-  : > "$dir/state/successor-park"
-  FM_HOME="$dir" FM_CLAUDE_STOPFAILURE_BACKOFF_BASE=18 SF_PAYLOAD="$STOPFAILURE_PAYLOAD" \
-    LOCK_FN=$(declare -f record_watcher_lock watcher_identity) "$FAKE_CLAUDE" -c '
-    eval "$LOCK_FN"
-    successors() { [ -e "$FM_HOME/state/successor-ran" ] && wc -l < "$FM_HOME/state/successor-ran" | tr -d " "; }
-    wait_successors() {  # <count> <exit code>
-      local i=0 count
-      while count=$(successors); [ "${count:-0}" -lt "$1" ]; do
-        [ "$i" -lt 100 ] || exit "$2"
-        sleep 0.05
-        i=$((i + 1))
-      done
-    }
-    printf "%s\n" "$$" > "$FM_HOME/state/.lock"
-    printf "%s\n" "$SF_PAYLOAD" | "$FM_HOME/bin/fm-claude-stop-autoarm.sh" >"$FM_HOME/state/hook.out" 2>&1 &
-    hook=$!
-    wait_successors 1 90
-    sleep 60 &
-    watcher=$!
-    record_watcher_lock "$FM_HOME" "$watcher" "$(watcher_identity "$FM_HOME" "$watcher")"
-    touch "$FM_HOME/state/.last-watcher-beat"
-    sleep 2
-    : > "$FM_HOME/state/successor-fail"
-    kill "$watcher"; wait "$watcher" 2>/dev/null
-    wait_successors 2 91
-    for n in 1 2 3 4 5; do
-      printf "arm_pid=710%s\twatcher_pid=720%s\tsuccessor=none\n" "$n" "$n" >> "$FM_HOME/state/.watch-cycle-exits.log"
-      sleep 1.2
-    done
-    successors > "$FM_HOME/state/successor-count"
-    kill -0 "$hook" 2>/dev/null && : > "$FM_HOME/state/hook-held"
-    wait "$hook"
-    echo "$?" > "$FM_HOME/state/hook-rc"
-  '; rc=$?
-  rm -f "$dir/state/successor-park" "$dir/state/successor-fail"
-  expect_code 0 "$rc" "failed-replacement hold scenario did not complete (90: no first cover, 91: no replacement attempt)"
-  assert_present "$dir/state/hook-held" "the hold ended before the retry window was observed"
-  [ "$(cat "$dir/state/successor-count")" = 4 ] \
-    || fail "the hold must stop after three replacements that could not start (one cover plus three), got $(cat "$dir/state/successor-count") successor starts: $(cat "$dir/state/successor-ran")"
-  [ "$(cat "$dir/state/hook-rc")" = 2 ] || fail "the held retry must still rewake after the hold, got rc $(cat "$dir/state/hook-rc")"
-  pass "auto-arm: a StopFailure hold stops replacing after three cycles in a row that cannot start"
+  : > "$dir/state/successor-fail"
+  out=$(FM_CLAUDE_STOPFAILURE_BACKOFF_BASE=5 run_autoarm "$dir" "$STOPFAILURE_PAYLOAD" 2>&1); status=$?
+  expect_code 2 "$status" "the held retry must still rewake after the hold: $out"
+  count=$(wc -l < "$dir/state/successor-ran" | tr -d ' ')
+  [ "$count" -ge 3 ] || fail "an unstartable watcher must keep being retried during the hold, got $count starts"
+  [ "$count" -le 8 ] || fail "an unstartable watcher must be retried at most once per tick over a 5s hold, got $count starts"
+  pass "auto-arm: a StopFailure hold retries an unstartable watcher once per tick, without a tight loop"
 }
 
 # The first failure notice of an episode is not held behind the backoff when no
@@ -2813,8 +2778,8 @@ test_stopfailure_non_retryable_notifies_parent_once
 test_stopfailure_non_retryable_silences_a_parked_generation
 test_stopfailure_failed_arm_hold_starts_a_watcher
 test_stopfailure_hold_replaces_a_watcher_that_ends
-test_stopfailure_hold_replaces_a_cycle_that_closes_before_the_next_check
-test_stopfailure_hold_bounds_replacements_that_cannot_start
+test_stopfailure_hold_rearms_when_several_cycles_end_between_ticks
+test_stopfailure_hold_retries_an_unstartable_watcher_once_per_tick
 test_stopfailure_first_failure_notice_is_not_held_without_a_watcher
 test_stopfailure_notice_is_retried
 test_stopfailure_backoff_knobs_are_decimal
