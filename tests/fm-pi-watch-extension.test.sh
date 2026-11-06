@@ -686,7 +686,7 @@ const bus = {
   },
 };
 // The branch accepts the first wake and holds its settlement: that promise is
-// the branch's model turn, which no watcher cycle can shorten.
+// the branch model turn, which no watcher cycle can shorten.
 bus.on("fm-branch-supervision:dispatch", (offer) => {
   offers.push(offer.message);
   if (offers.length === 1) offer.accept(heldDelivery);
@@ -2703,8 +2703,8 @@ if (previous.prompts.length !== 0) {
   throw new Error(`accepted old-session branch wake reached main: ${previous.prompts.join(" | ")}`);
 }
 await waitFor(() => liveArms().length === 1 && armRows().length >= 2, "old-session successor");
-// Continuity never waits on delivery: this successor's own actionable close
-// lands while the old session's branch settlement is still outstanding, so it
+// Continuity never waits on delivery: the successor emits its own actionable
+// close and lands it while the old session branch settlement is still out, so it
 // arms the next successor immediately instead of leaving the chain dark until
 // that delivery settles.
 writeFileSync(process.env.FM_TRIGGER_FILE, "replacement-successor actionable outcome\n");
