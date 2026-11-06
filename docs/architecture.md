@@ -434,11 +434,12 @@ For publishing ships and scouts starting from origin, spawn pins the named base 
 Local-only and external-review tasks do not use this destination check.
 Relaunch preserves the pinned destination across default-branch changes and refuses corrupt `expected_base` metadata.
 [`bin/fm-pr-lib.sh`](../bin/fm-pr-lib.sh)'s `fm_pr_expected_base` owns destination metadata validation, including the legacy explicit `base_branch` fallback.
-Registration, ship readiness, and merged polls require the live forge destination to match that task-owned destination, and merge checks it again before calling the forge.
+Registration, ship readiness, and merge observations for delivered work require the live forge destination to match that task-owned destination, and merge checks it again before calling the forge.
 Missing, unreadable, invalid, or inconsistent destination proof prevents those claims or actions without replacing the existing head and delivery checks.
-For legacy tasks without destination proof, follow the recovery instructions emitted by `bin/fm-pr-check.sh` rather than inferring a base from the current PR or repository default.
-An armed poll without valid task-owned destination metadata emits one local recovery wake, and a refused secondmate ledger delivery independently publishes one `blocked` parent notice.
+For legacy delivery tasks without destination proof, follow the recovery instructions emitted by `bin/fm-pr-check.sh` rather than inferring a base from the current PR or repository default.
+An armed delivery poll without valid task-owned destination metadata emits one local recovery wake, and a refused secondmate ledger delivery independently publishes one `blocked` parent notice.
 Successful re-registration resets both notices.
+Secondmates cannot arm new merge polls. A legacy poll on a persistent secondmate reads merge state only and retires silently after merge, without a task outcome, destination metadata, or changes to its lifecycle records.
 [`tests/fm-pr-check-security.test.sh`](../tests/fm-pr-check-security.test.sh) covers destination refusals and [`tests/fm-control-relaunch.test.sh`](../tests/fm-control-relaunch.test.sh) covers preservation and corrupt-state refusal on relaunch.
 When a selected delivery path calls for a diff, `bin/fm-review-diff.sh` refreshes the authoritative base and, when task meta records a GitHub pull-request `pr=`, always fetches and compares against `refs/pull/<n>/head` by default (recorded `pr_head=` is only an offline fallback) before falling back to the local branch with a warning.
 A GitLab merge request and a Gerrit change expose no such ref, so a task recording one of those diffs the local branch under that same warning, which is its current content.
