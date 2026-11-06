@@ -444,7 +444,7 @@ run_extension_section_lane() {
 EXTENSION_SECTION_LANE_MAX_SECONDS=34
 
 run_extension_section_lanes() {
-  local section result_file section_rc timeout_seconds deadline index remaining launched total maximum_sections
+  local section result_file section_rc timeout_seconds deadline deadline_epoch index remaining launched total maximum_sections
   local active maximum_concurrent
   local -a sections=("$@")
   local -a section_pids=()
@@ -467,17 +467,18 @@ run_extension_section_lanes() {
   [ "$total" -le "$maximum_sections" ] || return 64
   launched=0
   active=0
+  deadline=$((SECONDS + timeout_seconds))
+  deadline_epoch=$(($(date +%s) + timeout_seconds))
   while [ "$launched" -lt "$total" ] && [ "$active" -lt "$maximum_concurrent" ]; do
     section=${sections[$launched]}
     result_file="$section_result_root/$launched.result"
-    run_extension_section_lane "$result_file" "$section" &
+    FM_EXTENSION_BINDING_LANE_DEADLINE_EPOCH="$deadline_epoch" run_extension_section_lane "$result_file" "$section" &
     section_pids+=("$!")
     section_results+=("$result_file")
     section_complete+=("")
     launched=$((launched + 1))
     active=$((active + 1))
   done
-  deadline=$((SECONDS + timeout_seconds))
   remaining=$total
   while [ "$remaining" -gt 0 ]; do
     for index in "${!section_pids[@]}"; do
@@ -509,7 +510,7 @@ run_extension_section_lanes() {
     while [ "$launched" -lt "$total" ] && [ "$active" -lt "$maximum_concurrent" ]; do
       section=${sections[$launched]}
       result_file="$section_result_root/$launched.result"
-      run_extension_section_lane "$result_file" "$section" &
+      FM_EXTENSION_BINDING_LANE_DEADLINE_EPOCH="$deadline_epoch" run_extension_section_lane "$result_file" "$section" &
       section_pids+=("$!")
       section_results+=("$result_file")
       section_complete+=("")
@@ -2153,7 +2154,13 @@ for orphan_source in orphan-first orphan-second; do
   orphan_runner=$(sed -n '2p' "$FM_PROCEVENT_CLAIM_ROOT/$orphan_source.claim" 2>/dev/null || true)
   [ -z "$orphan_runner" ] || orphan_runners+=("$orphan_source:$orphan_runner")
 done
-orphan_deadline=$((SECONDS + EXTENSION_SECTION_LANE_MAX_SECONDS))
+orphan_wait_seconds=$EXTENSION_SECTION_LANE_MAX_SECONDS
+if [ -n "${FM_EXTENSION_BINDING_LANE_DEADLINE_EPOCH:-}" ]; then
+  orphan_remaining=$((FM_EXTENSION_BINDING_LANE_DEADLINE_EPOCH - $(date +%s) - 3))
+  [ "$orphan_remaining" -ge "$orphan_wait_seconds" ] || orphan_wait_seconds=$orphan_remaining
+  [ "$orphan_wait_seconds" -ge 1 ] || orphan_wait_seconds=1
+fi
+orphan_deadline=$((SECONDS + orphan_wait_seconds))
 while :; do
   orphan_live=()
   for orphan_runner in "${orphan_runners[@]+"${orphan_runners[@]}"}"; do
@@ -2169,7 +2176,7 @@ if [ "${#orphan_live[@]}" -gt 0 ]; then
     kill -KILL -"${orphan_runner#*:}" 2>/dev/null || true
   done
   FM_HOME="$H_ORPHAN_READY" "$PROCEVENT" sweep-home >/dev/null 2>&1 || true
-  fail "recovered source ${orphan_live[*]%%:*} did not finish within ${EXTENSION_SECTION_LANE_MAX_SECONDS}s"
+  fail "recovered source ${orphan_live[*]%%:*} did not finish within ${orphan_wait_seconds}s"
 fi
 for orphan_source in orphan-first orphan-second; do
   assert_present "$H_ORPHAN_READY/state/procevent-inbox/$orphan_source.1.handled" \
