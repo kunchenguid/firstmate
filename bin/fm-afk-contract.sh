@@ -223,6 +223,22 @@ fm_afk_contract_live_ordinary_workers() {  # [state-dir]
       reading=$(FM_CREW_STATE_NO_FORGE=1 FM_STATE_OVERRIDE="$state" \
         fm_run_timed "$left" "$FM_AFK_CONTRACT_DIR/fm-crew-state.sh" "$id" 2>/dev/null | head -1) || true
     fi
+    # A reading taken from a finished validation run says nothing about what the
+    # agent is doing now: after the run it may have started its next fixes
+    # while HEAD still matches the run. Re-read from the pane and status log
+    # alone, and let a working or uncertain answer there stand.
+    case "$reading" in
+    'state: working '* | *'source: run-step'*)
+      if [ "${reading#state: working }" = "$reading" ] && [ "$(( deadline - SECONDS ))" -gt 0 ]; then
+        left=$((deadline - SECONDS))
+        recheck=$(FM_CREW_STATE_NO_FORGE=1 FM_CREW_STATE_NO_RUN=1 FM_STATE_OVERRIDE="$state" \
+          fm_run_timed "$left" "$FM_AFK_CONTRACT_DIR/fm-crew-state.sh" "$id" 2>/dev/null | head -1) || true
+        case "$recheck" in
+        'state: working '* | 'state: unknown '* | '') reading=$recheck ;;
+        esac
+      fi
+      ;;
+    esac
     case "$reading" in
     'state: working '*) ;;
     'state: unknown '*)

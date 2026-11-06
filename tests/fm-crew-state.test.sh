@@ -1571,6 +1571,22 @@ test_terminal_passed() {
   pass "terminal passed run is authoritative"
 }
 
+# FM_CREW_STATE_NO_RUN=1 skips the run lookup: the same passed run that reads
+# done from the run-step reads from the pane and status log instead.
+test_no_run_env_skips_the_run_lookup() {
+  reset_fakes
+  local d; d=$(new_case norun)
+  make_repo_on_branch "$d/wt" fm/feat-norun
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-norun.meta" "window=fm:fm-feat-norun" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_passed fm/feat-norun)"
+  local out; out=$(run_crew_state "$d" feat-norun)
+  assert_contains "$out" "source: run-step" "the run lookup answers by default"
+  out=$(FM_CREW_STATE_NO_RUN=1 run_crew_state "$d" feat-norun)
+  assert_not_contains "$out" "source: run-step" "FM_CREW_STATE_NO_RUN=1 must not read the run"
+  pass "FM_CREW_STATE_NO_RUN=1 skips the no-mistakes run lookup"
+}
+
 test_terminal_passed_with_override() {
   reset_fakes
   local d; d=$(new_case passed-with-override)
@@ -6793,6 +6809,7 @@ test_ci_fixing_after_green_stays_working
 test_top_level_fixing_ci_running_after_green_stays_working
 test_top_level_fixing_done_log_stays_working
 test_terminal_passed
+test_no_run_env_skips_the_run_lookup
 test_terminal_passed_with_override
 test_terminal_passed_with_skips
 test_terminal_passed_uses_matching_retirement_receipt_without_forge

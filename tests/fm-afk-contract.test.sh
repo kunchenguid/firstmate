@@ -698,6 +698,40 @@ STUB
   pass "entry without --spend records the live worker count, never below the default floor, and an explicit --spend still wins"
 }
 
+# A finished validation run still matches an unchanged HEAD while the agent has
+# started its next fixes: bin/fm-crew-state.sh reads that as done from the run
+# alone, so the cap re-reads from the pane and status log (FM_CREW_STATE_NO_RUN)
+# and counts the worker when that read is working or uncertain.
+test_finished_run_reading_does_not_hide_a_busy_worker() {
+  local home stub="$TMP_ROOT/run-stub" f
+  local CONTRACT="$stub/bin/fm-afk-contract.sh"
+  mkdir -p "$stub/bin"
+  for f in "$ROOT/bin"/*; do
+    [ "${f##*/}" = fm-crew-state.sh ] || ln -s "$f" "$stub/bin/${f##*/}"
+  done
+  cat > "$stub/bin/fm-crew-state.sh" <<'STUB'
+#!/usr/bin/env bash
+if [ "${FM_CREW_STATE_NO_RUN:-}" = 1 ]; then
+  case "$1" in
+  *-busy) echo "state: working · source: pane · harness busy" ;;
+  *-unsure) echo "state: unknown · source: pane · harness state unavailable (unknown)" ;;
+  *) echo "state: done · source: status-log · done" ;;
+  esac
+else
+  echo "state: done · source: run-step · run passed: PR state unknown (no PR identity)"
+fi
+STUB
+  chmod +x "$stub/bin/fm-crew-state.sh"
+  home=$(make_home finished-run-busy)
+  fm_write_meta "$home/state/t1-busy.meta" "window=fm-1" "kind=ship"
+  fm_write_meta "$home/state/t2-unsure.meta" "window=fm-2" "kind=ship"
+  fm_write_meta "$home/state/t3-finished.meta" "window=fm-3" "kind=ship"
+  [ "$(contract "$home" live-workers)" = 2 ] \
+    || fail "a worker busy past its finished run, or one with an uncertain pane, was not counted (a truly finished one must not be): $(contract "$home" live-workers)"
+  pass "a finished-run reading does not hide a worker that is busy or uncertain on its pane"
+}
+
+test_finished_run_reading_does_not_hide_a_busy_worker
 test_readback_renders_words_verbatim_with_the_record_scalars
 test_words_preserve_final_newline_shape
 test_enter_writes_a_v2_record_in_one_step_and_announces_hold_for_return
