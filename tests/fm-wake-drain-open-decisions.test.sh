@@ -15,6 +15,178 @@ DRAIN="$ROOT/bin/fm-wake-drain.sh"
 
 TMP_ROOT=$(fm_test_tmproot fm-wake-drain-open-decisions-tests)
 
+make_fake_tasks_axi_ready() {
+  local fakebin=$1
+  cat > "$fakebin/tasks-axi" <<'SH'
+#!/usr/bin/env bash
+case "$1 ${2:-}" in
+  '--version ') echo 'tasks-axi 0.2.6' ;;
+  'update --help')
+    if [ "${FM_FAKE_TASKS_AXI_STALL_UPDATE:-0}" = 1 ]; then
+      printf 'update-probe-started\n' >> "$FM_FAKE_TASKS_AXI_LOG"
+      sleep 5
+    fi
+    echo '--archive-body'
+    ;;
+  'mv --help') echo '[<id>...]' ;;
+  'ready '*|ready)
+    if [ "${FM_FAKE_TASKS_AXI_FAIL_READY:-0}" = 1 ]; then
+      echo 'fake ready failure' >&2
+      exit 1
+    elif [ "${FM_FAKE_TASKS_AXI_EMPTY:-0}" = 1 ]; then
+      printf 'ready[0]{id,since}:\nHelp for ready tasks-axi output\n'
+    else
+      printf 'ready[1]{id,since}:\n  ready-task,2026-10-30\n'
+    fi
+    ;;
+  *) exit 2 ;;
+esac
+SH
+  chmod +x "$fakebin/tasks-axi"
+}
+
+run_drain_with_backlog() {
+  local dir=$1 state=$2 out=$3
+  FM_HOME="$dir/home" FM_STATE_OVERRIDE="$state" \
+    FM_CONFIG_OVERRIDE="$dir/home/config" FM_DATA_OVERRIDE="$dir/home/data" \
+    PATH="$dir/fakebin:$PATH" "$DRAIN" > "$out"
+}
+
+test_ready_work_only_on_heartbeat() {
+  local dir state out
+  dir=$(make_case ready-work)
+  state="$dir/state"
+  mkdir -p "$dir/home/config" "$dir/home/data"
+  : > "$dir/home/.tasks.toml"
+  printf '# backlog\n' > "$dir/home/data/backlog.md"
+  make_fake_tasks_axi_ready "$dir/fakebin"
+  append_wake "$state" heartbeat '' 'scheduled review' || fail "queueing heartbeat failed"
+  out="$dir/heartbeat.out"
+  run_drain_with_backlog "$dir" "$state" "$out" || fail "heartbeat drain failed"
+  grep -F 'READY WORK (queued and dispatchable now):' "$out" >/dev/null \
+    || fail "heartbeat did not print READY WORK: $(cat "$out")"
+  grep -F 'ready-task,2026-10-30' "$out" >/dev/null \
+    || fail "READY WORK omitted its ready row and since date"
+
+  dir=$(make_case ready-work-empty)
+  state="$dir/state"
+  mkdir -p "$dir/home/config" "$dir/home/data"
+  : > "$dir/home/.tasks.toml"
+  printf '# backlog\n' > "$dir/home/data/backlog.md"
+  make_fake_tasks_axi_ready "$dir/fakebin"
+  append_wake "$state" heartbeat '' 'scheduled review' || fail "queueing heartbeat failed"
+  out="$dir/empty.out"
+  FM_FAKE_TASKS_AXI_EMPTY=1 run_drain_with_backlog "$dir" "$state" "$out" \
+    || fail "empty-ready heartbeat drain failed"
+  if grep -F 'READY WORK' "$out" >/dev/null; then
+    fail "heartbeat with no ready items printed READY WORK"
+  fi
+
+  dir=$(make_case ready-work-failed-ready)
+  state="$dir/state"
+  mkdir -p "$dir/home/config" "$dir/home/data"
+  : > "$dir/home/.tasks.toml"
+  printf '# backlog\n' > "$dir/home/data/backlog.md"
+  make_fake_tasks_axi_ready "$dir/fakebin"
+  append_wake "$state" heartbeat '' 'scheduled review' || fail "queueing heartbeat failed"
+  out="$dir/failed-ready.out"
+  FM_FAKE_TASKS_AXI_FAIL_READY=1 run_drain_with_backlog "$dir" "$state" "$out" \
+    || fail "heartbeat drain failed when the ready lookup failed"
+  grep -F 'READY WORK unavailable: fake ready failure' "$out" >/dev/null \
+    || fail "ready lookup failure was not reported: $(cat "$out")"
+  grep -F 'heartbeat' "$out" >/dev/null \
+    || fail "a ready lookup failure prevented heartbeat presentation"
+
+  dir=$(make_case ready-work-no-data-dir)
+  state="$dir/state"
+  mkdir -p "$dir/home/config"
+  : > "$dir/home/.tasks.toml"
+  make_fake_tasks_axi_ready "$dir/fakebin"
+  append_wake "$state" heartbeat '' 'scheduled review' || fail "queueing heartbeat failed"
+  out="$dir/no-data-dir.out"
+  run_drain_with_backlog "$dir" "$state" "$out" || fail "heartbeat drain failed without a data directory"
+  if grep -F 'READY WORK' "$out" >/dev/null; then
+    fail "home without a data directory printed READY WORK"
+  fi
+
+  dir=$(make_case ready-work-non-heartbeat)
+  state="$dir/state"
+  mkdir -p "$dir/home/config" "$dir/home/data"
+  : > "$dir/home/.tasks.toml"
+  printf '# backlog\n' > "$dir/home/data/backlog.md"
+  make_fake_tasks_axi_ready "$dir/fakebin"
+  append_wake "$state" signal task.status 'working: changed' || fail "queueing signal failed"
+  out="$dir/non-heartbeat.out"
+  run_drain_with_backlog "$dir" "$state" "$out" || fail "non-heartbeat drain failed"
+  if grep -F 'READY WORK' "$out" >/dev/null; then
+    fail "non-heartbeat drain printed READY WORK"
+  fi
+  pass "READY WORK is shown with its since date only when a heartbeat is drained"
+}
+
+test_large_drain_rows_reach_ready_lookup() {
+  local dir state out i payload
+  dir=$(make_case ready-work-large)
+  state="$dir/state"
+  mkdir -p "$dir/home/config" "$dir/home/data"
+  : > "$dir/home/.tasks.toml"
+  printf '# backlog\n' > "$dir/home/data/backlog.md"
+  make_fake_tasks_axi_ready "$dir/fakebin"
+  payload=$(printf '%0200d' 0)
+  append_wake "$state" heartbeat '' 'scheduled review' || fail "queueing heartbeat failed"
+  for ((i = 0; i < 700; i++)); do
+    append_wake "$state" signal "large-$i" "$payload" || fail "queueing large row $i failed"
+  done
+  out="$dir/large.out"
+  run_drain_with_backlog "$dir" "$state" "$out" || fail "large heartbeat drain failed"
+  grep -F 'ready-task,2026-10-30' "$out" >/dev/null \
+    || fail "large heartbeat rows prevented READY WORK output"
+  awk -F '\t' '$3 == "signal" && $4 ~ /^large-[0-9]+$/ { bytes += length($0) + 1; rows++ }
+    END { if (rows != 700 || bytes <= 131072) exit 1 }' "$out" \
+    || fail "deduped RAW_ROWS did not contain 700 distinct rows exceeding 128 KiB"
+  pass "more than 128 KiB of distinct drain rows reach the ready-work lookup"
+}
+
+test_stalled_backlog_gate_does_not_block_drain() {
+  local dir state out probe_log
+  dir=$(make_case ready-work-stalled-gate)
+  state="$dir/state"
+  mkdir -p "$dir/home/config" "$dir/home/data"
+  : > "$dir/home/.tasks.toml"
+  printf '# backlog\n' > "$dir/home/data/backlog.md"
+  make_fake_tasks_axi_ready "$dir/fakebin"
+  probe_log="$dir/tasks-axi.log"
+  append_wake "$state" heartbeat '' 'scheduled review' || fail "queueing heartbeat failed"
+  out="$dir/drain.out"
+  FM_TASKS_AXI_TIMEOUT=1 FM_FAKE_TASKS_AXI_STALL_UPDATE=1 \
+    FM_FAKE_TASKS_AXI_LOG="$probe_log" run_drain_with_backlog "$dir" "$state" "$out" \
+    || fail "drain failed after the backlog gate probe stalled"
+  grep -F 'update-probe-started' "$probe_log" >/dev/null \
+    || fail "the backlog gate probe did not reach the intentional stall"
+  grep -F 'heartbeat' "$out" >/dev/null \
+    || fail "the drain did not present the heartbeat after the lookup timed out"
+  if grep -F 'READY WORK' "$out" >/dev/null; then
+    fail "a stalled backlog gate printed READY WORK"
+  fi
+  pass "a stalled backlog gate times out and the drain continues"
+}
+
+test_manual_backlog_suppresses_ready_work() {
+  local dir state out
+  dir=$(make_case ready-work-manual)
+  state="$dir/state"
+  mkdir -p "$dir/home/config" "$dir/home/data"
+  printf 'manual\n' > "$dir/home/config/backlog-backend"
+  printf '# backlog\n' > "$dir/home/data/backlog.md"
+  append_wake "$state" heartbeat '' 'scheduled review' || fail "queueing heartbeat failed"
+  out="$dir/manual.out"
+  run_drain_with_backlog "$dir" "$state" "$out" || fail "manual-backend drain failed"
+  if grep -F 'READY WORK' "$out" >/dev/null; then
+    fail "manual backlog backend printed READY WORK"
+  fi
+  pass "manual backlog homes do not print READY WORK"
+}
+
 test_buried_decision_still_surfaces() {
   local dir state out
   dir=$(make_case buried)
@@ -216,6 +388,10 @@ test_over_long_decision_note_is_capped_with_a_marker() {
 }
 
 test_buried_decision_still_surfaces
+test_ready_work_only_on_heartbeat
+test_large_drain_rows_reach_ready_lookup
+test_stalled_backlog_gate_does_not_block_drain
+test_manual_backlog_suppresses_ready_work
 test_over_long_decision_note_is_capped_with_a_marker
 test_explicit_resolution_closes_it
 test_later_unrelated_terminal_line_does_not_close_it
