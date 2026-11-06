@@ -12,6 +12,12 @@
 # change is refused outright: that adapter is read-only, and the refusal at the
 # parse below owns why.
 #
+# Usage:
+#   fm-pr-merge.sh <task-id> <pr-url> [--attended-override] [--expected-head <full-sha>]
+#     [--allow-red <check>] [--allow-missing <check>] [--allow-no-pipeline]
+#     [-- <forge merge flags>]
+#   fm-pr-merge.sh -h | --help
+#
 # Merge method on GitHub defaults to --squash when the caller passes none of
 # --squash, --merge, --rebase, or --method after the optional -- separator.
 # On Forgejo the merge style defaults to the repository's own
@@ -46,8 +52,15 @@
 # Every failing condition is reported, not just the first.
 # The verified head is then passed to gh as
 # --match-head-commit, so a push that lands between that read and the merge
-# fails the merge instead of landing commits nothing verified. Reading that
-# state needs gh and jq, and either one absent stops the merge before any
+# fails the merge instead of landing commits nothing verified.
+# An optional --expected-head <full-sha> pins the commit the caller already
+# reviewed. It must be one full lowercase hex commit of 40 or 64 characters,
+# given once as its own argument. The live head must equal it or the merge is
+# refused before any forge write. The forge head match receives that same
+# supplied value on GitHub, GitLab, and Forgejo. A later preflight in this run
+# does not replace it with a newly read head. Omitting the flag keeps the
+# previous behavior: the live head read at verification is the matched value.
+# Reading that state needs gh and jq, and either one absent stops the merge before any
 # state is recorded. An attended --allow-red <check-name> may be passed once,
 # with the name as a separate argument; it waives only checks with that exact
 # name, still requires every other check green, and still binds the head. Its
@@ -163,8 +176,9 @@
 #
 # Extra args must not include --repo or -R in any form, including a bundled
 # short-option cluster such as -yR, because the repository comes only from the
-# URL, nor --sha or --match-head-commit because the head comes only from the
-# live read. An existing task-meta pr= must equal the requested canonical URL,
+# URL, nor --sha or --match-head-commit. The head match is the live read, or
+# the supplied --expected-head when the caller passed one. An existing task-meta
+# pr= must equal the requested canonical URL,
 # unless that bound PR has already merged - proven by its recorded merge
 # notification - in which case the task's next PR is accepted so several PRs
 # from one task can each merge in turn; while the bound PR is still unmerged a
@@ -176,7 +190,7 @@
 # explicit captain instruction and never skips the live green check, the
 # away-record read, or a captain hold.
 #
-# Usage: fm-pr-merge.sh <task-id> <pr-url> [--attended-override] [--allow-red <check-name>] [--allow-missing <check-name>] [--allow-no-pipeline] [-- <extra forge merge args>]
+# Usage: fm-pr-merge.sh <task-id> <pr-url> [--attended-override] [--expected-head <full-sha>] [--allow-red <check-name>] [--allow-missing <check-name>] [--allow-no-pipeline] [-- <extra forge merge args>]
 #
 # On GitLab, this script confirms the MR is actually merged before reporting it;
 # an auto-merge-queued or unconfirmed request leaves the poll armed and records
@@ -185,6 +199,17 @@
 # A landed merge whose outcome cannot be written is reported loudly rather than
 # misreported as a failed merge.
 set -eu
+
+usage() {
+  sed -n '2,${/^#/!q;p;}' "$0" | sed 's/^# \{0,1\}//'
+}
+
+case "${1:-}" in
+  -h | --help)
+    usage
+    exit 0
+    ;;
+esac
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
@@ -246,6 +271,7 @@ ATTENDED_OVERRIDE=false
 ALLOW_NO_PIPELINE=false
 ALLOW_RED=()
 ALLOW_MISSING=()
+EXPECTED_HEAD=
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --attended-override)
@@ -284,10 +310,32 @@ while [ "$#" -gt 0 ]; do
       echo "error: --allow-no-pipeline takes no value" >&2
       exit 2
       ;;
+    --expected-head)
+      if [ -n "$EXPECTED_HEAD" ]; then
+        echo "error: --expected-head may be specified only once" >&2
+        exit 2
+      fi
+      case "${2:-}" in
+        ''|--*)
+          echo "error: --expected-head requires a full commit sha" >&2
+          exit 2
+          ;;
+      esac
+      EXPECTED_HEAD=$2
+      shift 2
+      ;;
+    --expected-head=*)
+      echo "error: --expected-head requires a separate full commit sha argument" >&2
+      exit 2
+      ;;
     --) shift; break ;;
     *) break ;;
   esac
 done
+if [ -n "$EXPECTED_HEAD" ] && ! fm_pr_head_valid "$EXPECTED_HEAD"; then
+  echo "error: --expected-head requires a full lowercase commit sha" >&2
+  exit 2
+fi
 # --allow-red names one check run to waive, which only GitHub's per-check
 # reading can match. GitLab and Forgejo each collapse their checks into a
 # single head verdict - a head pipeline status and a combined commit status -
@@ -561,6 +609,16 @@ fi
 # returns non-zero after reporting every condition that failed.
 FM_PR_MERGE_HEAD=
 FM_PR_GITLAB_ASYNC_CONFIGURED=false
+FM_PR_EXPECTED_HEAD_REFUSAL=
+
+note_expected_head() {
+  if [ -n "$EXPECTED_HEAD" ] && [ "$1" != "$EXPECTED_HEAD" ]; then
+    FM_PR_EXPECTED_HEAD_REFUSAL="  - the live head is \"$1\", not the expected head $EXPECTED_HEAD"
+  else
+    FM_PR_EXPECTED_HEAD_REFUSAL=
+  fi
+}
+
 gitlab_verify_mergeable() {
   local json fields line pipeline_waived
   local total=0 named=0 refusals=''
@@ -659,11 +717,18 @@ FIELDS
 "
   fi
 
+  note_expected_head "$live_head"
+  if [ -n "$FM_PR_EXPECTED_HEAD_REFUSAL" ]; then
+    refusals="$refusals$FM_PR_EXPECTED_HEAD_REFUSAL
+"
+  fi
+
   if [ -n "$refusals" ]; then
     printf 'error: refusing to merge %s\n' "$URL" >&2
     printf '%s' "$refusals" >&2
     return 1
   fi
+
   if [ "$pipeline_waived" = true ]; then
     printf 'verified: %s is open and mergeable at head %s, with no head pipeline, waived by --allow-no-pipeline\n' \
       "$URL" "$live_head" >&2
@@ -793,6 +858,12 @@ FIELDS
   [ "$ci_state" = success ] \
     || refusals="$refusals  - the combined commit status is \"$ci_state\", not success
 "
+
+  note_expected_head "$live_head"
+  if [ -n "$FM_PR_EXPECTED_HEAD_REFUSAL" ]; then
+    refusals="$refusals$FM_PR_EXPECTED_HEAD_REFUSAL
+"
+  fi
 
   if [ -n "$refusals" ]; then
     printf 'error: refusing to merge %s\n' "$URL" >&2
@@ -1137,6 +1208,12 @@ EOF
     done <<EOF
 $missing
 EOF
+  fi
+
+  note_expected_head "$live_head"
+  if [ -n "$FM_PR_EXPECTED_HEAD_REFUSAL" ]; then
+    refusals="$refusals$FM_PR_EXPECTED_HEAD_REFUSAL
+"
   fi
 
   if [ -n "$mergeable_refusal" ]; then

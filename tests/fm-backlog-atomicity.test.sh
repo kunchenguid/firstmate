@@ -1626,6 +1626,32 @@ test_completion_closes_a_scout_with_its_report() {
   pass "completion closes a scout item against its report"
 }
 
+test_forced_scout_discard_records_no_report() {
+  local case_dir id report out
+  for report in missing partial; do
+    id="atomic-discard-scout-$report"
+    case_dir=$(make_home "discard-scout-$report")
+    add_item "$case_dir" "$id" scout
+    start_item "$case_dir" "$id"
+    write_task_meta "$case_dir" "$id" scout '' "spawn_gen=spawn-discard-$report"
+    if [ "$report" = partial ]; then
+      mkdir -p "$(home_of "$case_dir")/data/$id"
+      printf 'unfinished findings\n' > "$(home_of "$case_dir")/data/$id/report.md"
+    fi
+
+    out=$(run_teardown "$case_dir" "$id" --force) \
+      || fail "forced scout discard failed for $report report: $out"
+    [ "$(row_state "$case_dir" "$id")" = "done" ] \
+      || fail "forced scout discard did not close the backlog item"
+    assert_grep 'discarded' "$(backlog_of "$case_dir")" \
+      "forced scout discard did not record its discarded outcome"
+    if grep -Fq "data/$id/report.md" "$(backlog_of "$case_dir")"; then
+      fail "forced scout discard recorded a report path for $report report"
+    fi
+  done
+  pass "forced scout discards record no report for missing or partial reports"
+}
+
 test_completion_refuses_a_legacy_record_without_an_incarnation() {
   local case_dir id meta out rc=0
   id=atomic-close-legacy-no-incarnation-b7
@@ -2069,6 +2095,27 @@ test_recovery_replays_a_close_an_interrupted_cleanup_left_open() {
   assert_not_contains "$out" "endpoint or local copy may remain" \
     "recovery claimed incomplete cleanup without task metadata"
   pass "session start finishes a close an interrupted cleanup recorded but never landed"
+}
+
+test_recovery_replays_a_discarded_scout_close_as_discarded() {
+  local case_dir id out
+  id=atomic-heal-discarded-scout-b9
+  case_dir=$(make_home heal-pending-discarded-scout)
+  add_item "$case_dir" "$id" scout
+  start_item "$case_dir" "$id"
+  printf 'id=%s\ndata=%s\nspawn_gen=spawn-heal-discard\narg=--note\narg=discarded\n' \
+    "$id" "$(home_of "$case_dir")/data" \
+    > "$(home_of "$case_dir")/state/$id.backlog-close"
+
+  out=$(run_bootstrap "$case_dir")
+  [ "$(row_state "$case_dir" "$id")" = "done" ] \
+    || fail "session start left a recorded scout discard at $(row_state "$case_dir" "$id"): $out"
+  tasks-axi show "$id" --file "$(backlog_of "$case_dir")" --full \
+    | grep -Fxq '  body: discarded' \
+    || fail "the replayed scout discard did not record discarded as its note"
+  assert_absent "$(home_of "$case_dir")/state/$id.backlog-close" \
+    "a replayed scout discard left its record behind"
+  pass "session start replays a recorded scout discard as discarded"
 }
 
 test_recovery_replays_a_gerrit_close_with_its_change_url_as_a_note() {
@@ -3118,6 +3165,7 @@ test_dispatch_does_not_resurrect_a_row_closed_after_preflight
 test_dispatch_fails_when_its_row_vanishes_after_preflight
 test_completion_closes_a_local_only_ship_before_reporting_success
 test_completion_closes_a_scout_with_its_report
+test_forced_scout_discard_records_no_report
 test_completion_refuses_a_legacy_record_without_an_incarnation
 test_completion_refuses_ambiguous_incarnation_metadata
 test_completion_records_a_relative_report_for_relocated_data
@@ -3136,6 +3184,7 @@ test_recovery_marks_an_owned_record_in_flight
 test_recovery_rejects_an_internal_worker_record_symlink
 test_recovery_ignores_a_symlinked_worker_record
 test_recovery_replays_a_close_an_interrupted_cleanup_left_open
+test_recovery_replays_a_discarded_scout_close_as_discarded
 test_recovery_replays_a_gerrit_close_with_its_change_url_as_a_note
 test_recovery_backfills_a_recorded_link_on_an_already_done_item
 test_recovery_preserves_a_close_when_the_backlog_cannot_be_read
