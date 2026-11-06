@@ -1702,11 +1702,16 @@ test_terminal_passed_uses_matching_retirement_receipt_without_forge() {
   : > "$read_log"
   FM_FAKE_PR_READ_LOG=$read_log
   FM_FAKE_PR_READ_FAIL=1
-  FM_FAKE_AXI_STATUS="$(run_passed_with_pr fm/feat-dreceipt "$url")"
+  FM_FAKE_AXI_STATUS="$(run_passed_no_pr fm/feat-dreceipt)"
   out=$(run_crew_state "$d" feat-dreceipt)
   assert_contains "$out" "state: done" "passed run with retired PR receipt -> done"
   assert_contains "$out" "run passed: PR merged" "matching retirement receipt is local merged evidence"
+  assert_contains "$out" "pr=$url" "recorded PR is the published identity when the run has none"
   [ ! -s "$read_log" ] || fail "matching retirement receipt still attempted a forge read"
+  out=$(FM_FAKE_PR_BASE=other run_crew_state "$d" feat-dreceipt)
+  assert_contains "$out" 'state: blocked' 'recorded PR receipt cannot bypass a retarget'
+  out=$(FM_FAKE_BASE_FAIL=1 run_crew_state "$d" feat-dreceipt)
+  assert_contains "$out" 'state: blocked' 'recorded PR receipt cannot bypass unreadable destination proof'
   pass "terminal passed run uses matching retirement receipt without forge"
 }
 

@@ -413,18 +413,13 @@ terminal_outcome_pr() { # <state-line> <kind>
 # honest unknown, so a crew's own earlier prose is the weaker witness and never
 # vetoes it - otherwise the routine ship shape
 # (`done:` written, the run then fails, the crew goes silent) would reach nobody.
-# Destination proof is independent of that ordering: run-step success must
-# pass the same predicate as status-log readiness before it is presented.
+# The run-step emitter proves destination before publishing success.
 # The two sources are genuinely comparable only when the state itself came from
 # the status log, and there the crew's latest word still decides.
-terminal_outcome_corroborated() { # <state> <last-status-line> <state-line> <meta>
-  local state=$1 last=$2 line=${3:-} meta=$4 declared kind
+terminal_outcome_corroborated() { # <state> <last-status-line> <state-line>
+  local state=$1 last=$2 line=${3:-} declared
   if [ "$(state_line_source "$line")" = run-step ]; then
-    [ "$state" = 'done' ] || return 0
-    kind=$(meta_field "$meta" kind)
-    fm_dod_claim_destination "$kind" "$(meta_field "$meta" mode)" "$meta" \
-      "$(terminal_outcome_pr "$line" "$kind")"
-    return
+    return 0
   fi
   if status_is_paused "$last"; then
     declared=paused
@@ -694,10 +689,10 @@ reconcile_direct_child_locked() { # <id> <meta> <secondmate-id-or-empty> <deadli
     deadline=$((started + 1000))
   fi
   local FM_READ_DEADLINE=$deadline
-  fm_nm_read_timeout 1 >/dev/null || return 3
   # The visit budget includes the scan's guaranteed first-visit floor.
-  # Give every read the same deadline without wrapping its watchdog.
-  state_line=$(env FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_CREW_STATE_NO_FORGE=1 \
+  # Endpoint readers need an outer watchdog as well as the shared deadline.
+  left=$(fm_nm_read_timeout 30) || return 3
+  state_line=$(fm_run_timed "$left" env FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_CREW_STATE_NO_FORGE=1 \
     FM_READ_DEADLINE="$deadline" \
     "$CREW_STATE_BIN" "$id" 2>/dev/null) || state_rc=$?
   [ "$state_rc" -ne 124 ] || return 3
@@ -716,7 +711,7 @@ reconcile_direct_child_locked() { # <id> <meta> <secondmate-id-or-empty> <deadli
   task_holds_live_work "$id" "$meta" "$left" "$last" && return 0
   [ "$?" -ne 3 ] || return 3
   fm_nm_read_timeout 1 >/dev/null || return 3
-  terminal_outcome_corroborated "$state" "$last" "$state_line" "$meta" || return 0
+  terminal_outcome_corroborated "$state" "$last" "$state_line" || return 0
   pr=$(terminal_outcome_pr "$state_line" "$kind")
   incarnation=$(meta_incarnation "$meta")
   # The receipt identity binds structured fields only: a persistent child that

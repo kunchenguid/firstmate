@@ -290,16 +290,18 @@ emit() {  # <state> <source> [detail]
 }
 
 emit_run() {  # <state> <detail> [pr]
-  local detail=$2 reason
+  local detail=$2 reason pr=${3:-}
   # All run classifications are provisional until this shared publication
   # boundary: passed outcomes, green monitors, recovered monitors and merged
   # detail must prove the destination of this reading's own PR.
-  if [ "$1" = 'done' ] \
-    && ! reason=$(fm_dod_claim_destination "$KIND" "$(meta_value mode)" "$META" "${3:-}"); then
-    emit blocked run-step "$reason"
+  if [ "$1" = 'done' ]; then
+    pr=$(run_pr_identity "$pr") || pr=
+    if ! reason=$(fm_dod_claim_destination "$KIND" "$(meta_value mode)" "$META" "$pr"); then
+      emit blocked run-step "$reason"
+    fi
   fi
   case "$1" in
-    done|failed) [ -z "${3:-}" ] || detail="$detail${SEP}pr=$3" ;;
+    done|failed) [ -z "$pr" ] || detail="$detail${SEP}pr=$pr" ;;
   esac
   emit "$1" run-step "$detail"
 }
@@ -526,25 +528,27 @@ change_read_record_bounded() {  # <host> <number>
   FM_PR_RECORD_MERGED=$merged
 }
 
-passed_pr_detail() {
-  local provider url host path number owner repo raw_pr state_lc
-  raw_pr=$(strip_quotes "$(nm_field pr)")
-  if fm_pr_url_parse "$raw_pr"; then
-    provider=$FM_PR_PROVIDER
-    url=$FM_PR_URL
-    host=$FM_PR_HOST
-    path=$FM_PR_PATH
-    number=$FM_PR_NUMBER
+run_pr_identity() { # <run-pr>; fall back only to this task's recorded identity
+  if fm_pr_url_parse "${1:-}"; then
+    printf '%s\n' "$FM_PR_URL"
   elif fm_pr_metadata_identity_parse "$META"; then
-    provider=$FM_PR_META_PROVIDER
-    url=$FM_PR_META_URL
-    host=$FM_PR_META_HOST
-    path=$FM_PR_META_PATH
-    number=$FM_PR_META_NUMBER
+    printf '%s\n' "$FM_PR_META_URL"
   else
+    return 1
+  fi
+}
+
+passed_pr_detail() {
+  local provider url host path number owner repo state_lc
+  if ! url=$(run_pr_identity "$(strip_quotes "$(nm_field pr)")"); then
     printf 'run passed: PR state unknown (no PR identity)'
     return
   fi
+  fm_pr_url_parse "$url" || return
+  provider=$FM_PR_PROVIDER
+  host=$FM_PR_HOST
+  path=$FM_PR_PATH
+  number=$FM_PR_NUMBER
   if fm_pr_poll_retirement_receipt_valid "$STATE" "$ID" \
     && [ "$FM_PR_RETIRE_PROVIDER" = "$provider" ] \
     && [ "$FM_PR_RETIRE_URL" = "$url" ] \

@@ -1395,6 +1395,18 @@ run_poll() {
     bash "$dir/home/state/task-a.check.sh"
 }
 
+assert_destination_poll_refusal() { # <output> <actual-base> <provider>
+  local out=$1 actual=$2 provider=$3
+  if [ -n "$actual" ]; then
+    assert_contains "$out" 'task task-a merge/readiness refused' "$provider retarget lost recovery notice"
+    assert_contains "$out" "expected base main, actual base $actual" "$provider retarget lost destination names"
+    assert_contains "$out" 'bin/fm-pr-check.sh recovery steps' "$provider retarget lost recovery pointer"
+    [ "$(printf '%s\n' "$out" | wc -l | tr -d ' ')" = 1 ] || fail "$provider retarget emitted multiple lines"
+  else
+    [ -z "$out" ] || fail "$provider missing destination emitted a claim"
+  fi
+}
+
 test_static_poll_contract() {
   local dir state out rc
   dir=$(make_case poll-contract)
@@ -2077,7 +2089,7 @@ group/apps/console
   [ "$out" = merged ] || fail "Gerrit poll did not emit exactly one merged line"
   for value in other ''; do
     out=$(FM_TEST_BASE="$value" FM_TEST_GERRIT_STATUS=MERGED run_poll "$dir")
-    [ -z "$out" ] || fail 'Gerrit wrong or missing destination reported merged'
+    assert_destination_poll_refusal "$out" "$value" Gerrit
     write_task_meta "$dir" task-destination
     FM_TEST_BASE="$value" run_check_entry "$dir" task-destination "$url" >/dev/null 2>&1 \
       && fail 'Gerrit wrong or missing destination armed'
@@ -2517,7 +2529,7 @@ SH
   [ "$out" = merged ] || fail "Forgejo poll did not emit exactly one merged line"
   for value in other ''; do
     out=$(FM_TEST_BASE="$value" FM_TEST_TEA_LOG="$dir/tea.log" FM_TEST_TEA_PULL=merged run_poll "$dir")
-    [ -z "$out" ] || fail 'Forgejo wrong or missing destination reported merged'
+    assert_destination_poll_refusal "$out" "$value" Forgejo
     write_task_meta "$dir" task-destination
     FM_TEST_BASE="$value" FM_TEST_TEA_LOG="$dir/tea.log" run_check_entry "$dir" task-destination "$url" >/dev/null 2>&1 \
       && fail 'Forgejo wrong or missing destination armed'
@@ -2639,7 +2651,7 @@ group/subgroup/project
   [ "$out" = merged ] || fail "GitLab poll did not emit exactly one merged line"
   for value in other ''; do
     out=$(FM_TEST_BASE="$value" FM_TEST_GLAB_STATE=merged run_poll "$dir")
-    [ -z "$out" ] || fail 'GitLab wrong or missing destination reported merged'
+    assert_destination_poll_refusal "$out" "$value" GitLab
     write_task_meta "$dir" task-destination
     FM_TEST_BASE="$value" run_check_entry "$dir" task-destination "$url" >/dev/null 2>&1 \
       && fail 'GitLab wrong or missing destination armed'
@@ -4184,7 +4196,7 @@ test_expected_destination_fail_closed_and_retarget() {
     out=$(FM_TEST_BASE="$value" run_check_entry "$dir" task-a https://github.com/o/r/pull/1 2>&1); rc=$?
     [ "$rc" -ne 0 ] || fail 'changed or missing live base was accepted'
     out=$(FM_TEST_BASE="$value" FM_TEST_GH_STATE=MERGED run_poll "$dir")
-    [ -z "$out" ] || fail 'retargeted or unknown-base PR reported merged'
+    assert_destination_poll_refusal "$out" "$value" GitHub
   done
   FM_TEST_BASE_FAIL=1 run_check_entry "$dir" task-a https://github.com/o/r/pull/1 >/dev/null 2>&1 \
     && fail 'unreadable live destination armed'
@@ -4206,7 +4218,17 @@ test_expected_destination_fail_closed_and_retarget() {
   FM_TEST_BASE=other FM_TEST_GH_STATE=MERGED run_watcher_bounded "$dir/home" "$dir/fakebin" \
     > "$dir/restart.out" 2> "$dir/restart.err" || fail 'retarget restart cycle failed'
   assert_no_grep 'task-a.check.sh: merged' "$dir/restart.out" 'restart reported a wrong-base merge'
+  assert_grep 'expected base main, actual base other' "$state/.wake-queue" 'retarget did not queue its recovery notice'
+  assert_present "$state/task-a.pr-base-notified" 'retarget delivery did not record its receipt'
+  assert_present "$state/task-a.pr-poll" 'retarget retired the armed poll'
   assert_grep 'z-stop.check.sh' "$dir/restart.out" 'restart never reached its control check'
+  ack_watcher_cycle "$state" || fail 'could not acknowledge retarget recovery notice'
+  FM_TEST_BASE=other FM_TEST_GH_STATE=MERGED run_watcher_bounded "$dir/home" "$dir/fakebin" \
+    > "$dir/retry.out" 2> "$dir/retry.err" || fail 'retarget retry cycle failed'
+  assert_grep 'z-stop.check.sh' "$dir/retry.out" 'retarget retry never reached its control check'
+  assert_no_grep 'merge/readiness refused' "$state/.wake-queue" 'delivered retarget notice repeated'
+  out=$(FM_TEST_BASE=main FM_TEST_GH_STATE=MERGED run_poll "$dir")
+  [ "$out" = merged ] || fail 'restored destination did not resume merge observation'
 
   for value in missing duplicate invalid drift; do
     dir=$(make_case "destination-$value")
