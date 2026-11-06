@@ -561,9 +561,32 @@ test_old_pr_reminder_ack_does_not_snooze_newer_comment() {
   pass 'acking an old PR reminder does not snooze a newer comment'
 }
 
+test_thread_reminders_do_not_delay_pr_reminder() {
+  local home
+  home=$(new_home thread-vs-pr)
+  printf '7200\n' > "$home/config/contribution-reraise-interval"
+  jq -n --arg head "$HEAD_A" '[{id:12,user:{login:"maintainer"},author_association:"OWNER",body:"Review 12",
+      html_url:"https://github.com/o/r/pull/8#pullrequestreview-12",state:"CHANGES_REQUESTED",
+      submitted_at:"2026-09-16T08:00:00Z",commit_id:$head}]' > "$home/forge/reviews.json"
+  jq -n '[{id:201,user:{login:"maintainer"},author_association:"OWNER",
+    body:"Separate PR-level ask",html_url:"https://github.com/o/r/pull/8#issuecomment-201",
+    created_at:"2026-09-16T08:30:00Z",updated_at:"2026-09-16T08:30:00Z"}]' > "$home/forge/comments.json"
+  with_home "$home" env FM_CONTRIBUTIONS_NOW=2026-09-16T08:31:00Z FM_CONTRIBUTIONS_REPLY_AGE=3600 "$ROOT/bin/fm-contributions.sh" poll >/dev/null \
+    || fail 'initial poll failed'
+  # The review thread is reminded hourly at 09:31.
+  with_home "$home" env FM_CONTRIBUTIONS_NOW=2026-09-16T09:31:00Z FM_CONTRIBUTIONS_REPLY_AGE=3600 "$ROOT/bin/fm-contributions.sh" poll >/dev/null \
+    || fail 'thread reminder poll failed'
+  # Thread activity must not push back the separate PR-level comment's own interval.
+  with_home "$home" env FM_CONTRIBUTIONS_NOW=2026-09-16T10:30:30Z FM_CONTRIBUTIONS_REPLY_AGE=3600 "$ROOT/bin/fm-contributions.sh" poll >/dev/null \
+    || fail 'PR reminder poll failed'
+  with_home "$home" "$ROOT/bin/fm-contributions.sh" pending | jq -e 'any(.[]; .token | startswith("unanswered:pr:201:"))' >/dev/null \
+    || fail 'thread reminders delayed the PR-level reminder past its interval'
+  pass 'review thread reminders do not delay a separate PR comment reminder'
+}
+
 if [ "${BASH_SOURCE[0]}" = "$0" ]; then
   failures=0
-  for test_name in test_reraise_after_ack test_clear_on_our_reply test_clear_on_no_action_verdict test_no_reraise_when_we_spoke_last test_clear_on_our_push test_ack_restarts_snooze test_reraise_is_opt_in test_reraise_interval_configurable test_reminder_waits_full_interval_not_every_poll test_push_does_not_clear_subsequent_comment test_ack_matches_exact_thread_key test_excluded_bot_does_not_cause_unanswered_wake test_push_after_comment_clears_via_forge_commit_time test_ack_of_source_comment_records_ack test_old_pr_reminder_ack_does_not_snooze_newer_comment; do
+  for test_name in test_reraise_after_ack test_clear_on_our_reply test_clear_on_no_action_verdict test_no_reraise_when_we_spoke_last test_clear_on_our_push test_ack_restarts_snooze test_reraise_is_opt_in test_reraise_interval_configurable test_reminder_waits_full_interval_not_every_poll test_push_does_not_clear_subsequent_comment test_ack_matches_exact_thread_key test_excluded_bot_does_not_cause_unanswered_wake test_push_after_comment_clears_via_forge_commit_time test_ack_of_source_comment_records_ack test_old_pr_reminder_ack_does_not_snooze_newer_comment test_thread_reminders_do_not_delay_pr_reminder; do
     ( "$test_name" ) || failures=$((failures + 1))
   done
   [ "$failures" -eq 0 ] || exit 1

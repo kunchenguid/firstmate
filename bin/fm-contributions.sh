@@ -729,7 +729,7 @@ poll() {
                  and ($verdict == null or $verdict.source != $ext.source or $verdict.actor != "nobody")
              then true else false end) as $unanswered_cond
           | ($old.unanswered // null) as $old_un
-          | ((([$old_un.acked, $old_un.raised] + ($old.threads // [] | map(.acked, .raised))) | map(select(. != null)) | max // null)) as $last_contact
+          | (([$old_un.acked, $old_un.raised] | map(select(. != null)) | max // null)) as $last_contact
           | (if $reraise_interval > 0 and $unanswered_cond
                  and (any($tracked[]; .source == $ext.source) | not) then
               ($epoch - ($ext.at | fromdateiso8601)) as $ext_age
@@ -762,10 +762,10 @@ poll() {
             else del(.threads) end
           | if $unanswered_cond then
               .unanswered = {source:$ext.source, id:$ext.id, author:$ext.author, at:$ext.at,
-                             raised:(if (($pr_due_events | length) > 0 or ($due | length) > 0) then $now
+                             raised:(if ($pr_due_events | length) > 0 then $now
                                      else ($old_un.raised // null) end),
                              acked:(if ($old_un != null and $old_un.source == $ext.source
-                                        and ($pr_due_events | length) == 0 and ($due | length) == 0)
+                                        and ($pr_due_events | length) == 0)
                                     then ($old_un.acked // null) else null end)}
             else del(.unanswered) end' > "$TMP/row.json"
       else
