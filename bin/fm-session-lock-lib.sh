@@ -801,7 +801,11 @@ fm_session_lock_codex_native_pid() {  # <pid> [verified]
       fi
       printf '%s\n' "$FM_PROC_ARGS" | awk -v proof="${2:-}" '
         { if (NF < 2) exit 1
-          if ($2 ~ /^-/) exit (proof == "verified" ? 1 : 0)
+          if ($2 ~ /^-/) {
+            if ($0 ~ /(^|[[:space:]=\042\047])app-server([[:space:]\042\047]|$)/)
+              exit (proof == "verified" ? 1 : 0)
+            exit 1
+          }
           exit ($2 == "app-server" ? 0 : 1) }
       '
       return

@@ -144,6 +144,28 @@ exec '{PS}' "$@"
     start = '"$FM_HOME/bin/fm-session-start.sh"'
     lock = '"$FM_HOME/bin/fm-lock.sh"'
     own = '. "$FM_HOME/bin/fm-session-lock-lib.sh"; fm_session_lock_owned_by_self "$FM_HOME/state"'
+    for label, arguments in (
+        ('option-first secondmate', '-m gpt-6.1-sol -c model_reasoning_effort="low" --dangerously-bypass-approvals-and-sandbox Launch brief'),
+        ('approval-review secondmate', '-m gpt-6.1-sol --approve-for-me Launch brief'),
+        ('embedded CLI primary', '--no-daemon --no-alt-screen --dangerously-bypass-hook-trust -a never -s danger-full-access -C ' + str(home) + ' Isolated supervision smoke prompt'),
+    ):
+        env['FM_FIXTURE_SUBCOMMAND'] = arguments
+        for identity in (None, OWNER):
+            acquired = run(lock, identity)
+            assert acquired.returncode == 0, label + ' could not acquire an empty home: ' + acquired.stdout + acquired.stderr
+            assert (home / 'state/.lock').read_text().strip() == str(os.getpid()), label + ' lost its PID anchor'
+            assert not (home / 'state/.lock-session').exists(), label + ' published a native session identity'
+            assert run(lock, identity).returncode == 0, label + ' could not re-enter its lock'
+            assert run(own, identity).returncode == 0, label + ' lost ownership'
+            assert 'lock acquired:' in run('"$FM_HOME/bin/fm-sessionstart-run.sh"', identity,
+                json.dumps({'source': 'startup', 'session_id': OWNER})).stdout, label + ' hook startup became read-only'
+            assert not run('"$FM_HOME/bin/fm-sessionstart-nudge.sh"', identity).stdout, label + ' received a redundant startup nudge'
+            assert run('"$FM_HOME/bin/fm-watch-checkpoint.sh" --seconds 1', identity).returncode == 0, label + ' could not start a checkpoint'
+            assert (home / 'state/checkpoint-ran').exists(), label + ' checkpoint did not run'
+            (home / 'state/checkpoint-ran').unlink()
+            (home / 'state/.lock').unlink()
+        print('ok - ' + label + ' retains ordinary CLI lock ownership')
+    env.pop('FM_FIXTURE_SUBCOMMAND')
     first = run(start)
     assert first.returncode == 0 and 'lock acquired:' in first.stdout, first.stdout + first.stderr
     assert run(lock).returncode == 0, 'same-session reentry failed'
