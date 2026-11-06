@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Register or retire Droid folder trust for exactly an isolated task worktree.
-# Usage: fm-droid-trust.sh [--receipt <file>] [--remove] <worktree> <project>
+# Usage: fm-droid-trust.sh [--receipt <file>] <worktree> <project>
 #        fm-droid-trust.sh [--receipt <file>] --secondmate-home <home> <id>
 #        fm-droid-trust.sh --rollback <receipt>
 #        fm-droid-trust.sh --retire <receipt> <state> <task-id>
@@ -8,7 +8,6 @@
 # removes only unchanged entries acquired by registration. Retirement transfers
 # cleanup to another recorded task using the path, or removes only those paths.
 # All Firstmate mutations serialize at the resolved Factory settings store.
-# --remove retires only those exact paths before teardown returns the worktree.
 # The worktree must be a linked worktree of that project, never its primary
 # checkout, a parent, or the user's home. Only the exact logical and physical
 # worktree paths enter ~/.factory/settings.json trustedFolders. Other settings
@@ -34,10 +33,6 @@ if [ "${1:-}" = --receipt ]; then
   shift 2
 fi
 case "${1:-}" in
-  --remove)
-    ACTION=remove
-    shift
-    ;;
   --rollback)
     ACTION=rollback
     RECEIPT=${2:-}
@@ -50,6 +45,8 @@ case "${1:-}" in
     TASK_ID=${4:-}
     shift 4
     ;;
+  --secondmate-home) ;;
+  -*) exit 2 ;;
 esac
 case "$ACTION" in
   rollback | retire)
@@ -66,7 +63,7 @@ case "$ACTION" in
       PROJ_ARG=$2
     else
       [ "$#" -eq 2 ] || {
-        echo "usage: fm-droid-trust.sh [--receipt <file>] [--remove] <worktree> <project>" >&2
+        echo "usage: fm-droid-trust.sh [--receipt <file>] <worktree> <project>" >&2
         exit 2
       }
       WT_ARG=$1
@@ -95,7 +92,7 @@ HOME_REAL=$(real_dir "$HOME") || true
 [ -n "$HOME_REAL" ] || refuse "HOME is not an accessible directory"
 WT_REAL=
 WT_LOGICAL=
-if [ "$ACTION" = register ] || [ "$ACTION" = remove ]; then
+if [ "$ACTION" = register ]; then
   WT_REAL=$(real_dir "$WT_ARG") || true
   [ -n "$WT_REAL" ] || refuse "worktree '$WT_ARG' is not an accessible directory"
   WT_LOGICAL=$(logical_dir "$WT_ARG") || true
@@ -284,7 +281,7 @@ try {
       if (receiptFile) atomic(receiptFile, owned);
     } else {
       for (const p of paths) {
-        if (action === "remove" || (Object.hasOwn(owned.acquired, p) && same(folders[p], owned.acquired[p]))) delete folders[p];
+        if (Object.hasOwn(owned.acquired, p) && same(folders[p], owned.acquired[p])) delete folders[p];
       }
     }
     if (read(store) !== original) continue;

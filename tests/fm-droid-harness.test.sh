@@ -215,13 +215,13 @@ pass 'Droid trust is exact-worktree scoped, idempotent, and preserves user setti
 
 # Cleanup is idempotent and preserves settings outside the task's exact paths.
 printf '%s\n' '{"otherSetting":"preserve","trustedFolders":{"/already-trusted":{"trustedAt":"existing"}}}' >"$store"
-HOME="$TMP_ROOT/user" "$ROOT/bin/fm-droid-trust.sh" "$TMP_ROOT/task" "$TMP_ROOT/project" >/dev/null || fail 'cleanup setup failed'
-HOME="$TMP_ROOT/user" "$ROOT/bin/fm-droid-trust.sh" --remove "$TMP_ROOT/task" "$TMP_ROOT/project" >/dev/null || fail 'Droid trust cleanup failed'
+HOME="$TMP_ROOT/user" "$ROOT/bin/fm-droid-trust.sh" --receipt "$TMP_ROOT/state/cleanup.droid-trust" "$TMP_ROOT/task" "$TMP_ROOT/project" >/dev/null || fail 'cleanup setup failed'
+HOME="$TMP_ROOT/user" "$ROOT/bin/fm-droid-trust.sh" --retire "$TMP_ROOT/state/cleanup.droid-trust" "$TMP_ROOT/state" cleanup >/dev/null || fail 'Droid trust cleanup failed'
 jq -e --arg path "$physical" '.otherSetting == "preserve" and .trustedFolders["/already-trusted"].trustedAt == "existing" and (.trustedFolders | has($path) | not) and (.trustedFolders | length == 1)' "$store" >/dev/null || fail 'cleanup changed unrelated settings or retained task trust'
 before=$(cat "$store")
-HOME="$TMP_ROOT/user" "$ROOT/bin/fm-droid-trust.sh" --remove "$TMP_ROOT/task" "$TMP_ROOT/project" >/dev/null || fail 'repeated trust cleanup failed'
+HOME="$TMP_ROOT/user" "$ROOT/bin/fm-droid-trust.sh" --retire "$TMP_ROOT/state/cleanup.droid-trust" "$TMP_ROOT/state" cleanup >/dev/null || fail 'repeated trust cleanup failed'
 [ "$(cat "$store")" = "$before" ] || fail 'repeated trust cleanup changed settings'
-if HOME="$TMP_ROOT/user" "$ROOT/bin/fm-droid-trust.sh" --remove "$TMP_ROOT/project" "$TMP_ROOT/project" >/dev/null 2>&1; then fail 'cleanup accepted the primary checkout'; fi
+if HOME="$TMP_ROOT/user" "$ROOT/bin/fm-droid-trust.sh" --remove "$TMP_ROOT/task" "$TMP_ROOT/project" >/dev/null 2>&1; then fail 'unsupported unowned removal succeeded'; fi
 [ "$(cat "$store")" = "$before" ] || fail 'scope refusal changed trust during cleanup'
 pass 'Droid trust cleanup removes only task paths and is idempotent'
 
@@ -275,13 +275,17 @@ HOME="$TMP_ROOT/user" "$ROOT/bin/fm-droid-trust.sh" --rollback "$receipt" >/dev/
 [ ! -e "$receipt" ] || fail 'rollback retained receipt'
 jq -e --arg path "$physical" '.trustedFolders | has($path) | not' "$store" >/dev/null || fail 'rollback retained acquired trust'
 # A grant predating this spawn must survive its failure.
-HOME="$TMP_ROOT/user" "$ROOT/bin/fm-droid-trust.sh" "$TMP_ROOT/task" "$TMP_ROOT/project" >/dev/null || fail 'existing grant setup failed'
+jq --arg path "$physical" '.trustedFolders[$path] = {trustedAt:"pre-existing"}' "$store" >"$store.new"
+mv "$store.new" "$store"
 before=$(cat "$store")
+if HOME="$TMP_ROOT/user" "$ROOT/bin/fm-droid-trust.sh" --remove "$TMP_ROOT/task" "$TMP_ROOT/project" >/dev/null 2>&1; then fail 'unsupported removal accepted a pre-existing grant'; fi
+[ "$(cat "$store")" = "$before" ] || fail 'unsupported removal changed a pre-existing grant'
 HOME="$TMP_ROOT/user" "$ROOT/bin/fm-droid-trust.sh" --receipt "$receipt" "$TMP_ROOT/task" "$TMP_ROOT/project" >/dev/null || fail 'existing grant receipt failed'
 HOME="$TMP_ROOT/user" "$ROOT/bin/fm-droid-trust.sh" --rollback "$receipt" >/dev/null || fail 'existing grant rollback failed'
 [ "$(cat "$store")" = "$before" ] || fail 'rollback removed pre-existing trust'
 # Preserve a grant another writer changed after acquisition.
-HOME="$TMP_ROOT/user" "$ROOT/bin/fm-droid-trust.sh" --remove "$TMP_ROOT/task" "$TMP_ROOT/project" >/dev/null || fail 'changed grant setup failed'
+jq --arg path "$physical" 'del(.trustedFolders[$path])' "$store" >"$store.new"
+mv "$store.new" "$store"
 HOME="$TMP_ROOT/user" "$ROOT/bin/fm-droid-trust.sh" --receipt "$receipt" "$TMP_ROOT/task" "$TMP_ROOT/project" >/dev/null || fail 'changed grant receipt failed'
 jq --arg path "$physical" '.trustedFolders[$path].trustedAt = "changed-by-user"' "$store" >"$store.new"
 mv "$store.new" "$store"
@@ -290,7 +294,8 @@ HOME="$TMP_ROOT/user" "$ROOT/bin/fm-droid-trust.sh" --rollback "$receipt" >/dev/
 [ "$(cat "$store")" = "$before" ] || fail 'rollback removed a grant changed by another writer'
 pass 'Droid receipts roll back only unchanged newly acquired grants'
 
-HOME="$TMP_ROOT/user" "$ROOT/bin/fm-droid-trust.sh" --remove "$TMP_ROOT/task" "$TMP_ROOT/project" >/dev/null || fail 'retirement setup failed'
+jq --arg path "$physical" 'del(.trustedFolders[$path])' "$store" >"$store.new"
+mv "$store.new" "$store"
 HOME="$TMP_ROOT/user" "$ROOT/bin/fm-droid-trust.sh" --receipt "$receipt" "$TMP_ROOT/task" "$TMP_ROOT/project" >/dev/null || fail 'retirement receipt failed'
 jq --arg path "$physical" '.trustedFolders[$path].trustedAt = "changed-by-user"' "$store" >"$store.new"
 mv "$store.new" "$store"
@@ -325,7 +330,7 @@ for _ in 1 2 3; do
   for i in 1 2 3 4; do
     user="$TMP_ROOT/user"
     [ "$((i % 2))" -eq 0 ] || user="$TMP_ROOT/alias-user"
-    HOME="$user" "$ROOT/bin/fm-droid-trust.sh" "$TMP_ROOT/concurrent-$i" "$TMP_ROOT/project" >/dev/null &
+    HOME="$user" "$ROOT/bin/fm-droid-trust.sh" --receipt "$TMP_ROOT/state/concurrent-$i.droid-trust" "$TMP_ROOT/concurrent-$i" "$TMP_ROOT/project" >/dev/null &
     pids+=("$!")
   done
   for pid in "${pids[@]}"; do wait "$pid" || fail 'concurrent registration failed'; done
@@ -334,7 +339,7 @@ for _ in 1 2 3; do
   for i in 1 2 3 4; do
     user="$TMP_ROOT/user"
     [ "$((i % 2))" -eq 0 ] || user="$TMP_ROOT/alias-user"
-    HOME="$user" "$ROOT/bin/fm-droid-trust.sh" --remove "$TMP_ROOT/concurrent-$i" "$TMP_ROOT/project" >/dev/null &
+    HOME="$user" "$ROOT/bin/fm-droid-trust.sh" --rollback "$TMP_ROOT/state/concurrent-$i.droid-trust" >/dev/null &
     pids+=("$!")
   done
   for pid in "${pids[@]}"; do wait "$pid" || fail 'concurrent removal failed'; done
