@@ -884,12 +884,6 @@ SH
   chmod +x "$home/fakebin/gh" "$home/fakebin/date"
 }
 
-# A budget refusal may update scheduling evidence, never observation evidence.
-same_observation_record() {
-  cmp -s <(jq -S 'del(.records[].attempted_at)' "$1") \
-    <(jq -S 'del(.records[].attempted_at)' "$2")
-}
-
 schedule_forge() { # home: deterministic per-URL cost, with arbitrary PR numbers
   local home=$1
   forge_home "$home"
@@ -953,35 +947,108 @@ test_oldest_observations_use_the_whole_rotation() {
   pass 'five due URLs rotate within ceil(5/2) sweeps, oldest first with URL ties and one attempt per URL'
 }
 
-test_failed_attempts_do_not_starve_older_observations() {
+
+test_scheduler_attempts_preserve_owner_observations() {
   local home mode cycle at
   for mode in error budget; do
-    home=$(new_home "schedule-$mode")
+    home=$(new_home "scheduler-$mode")
     schedule_forge "$home"
     record "$home" second 9 open mergeable
     record "$home" third 10 open mergeable
     mutate_record "$home" delivery '.records[0].checked_at="2026-09-15T08:00:00Z"'
-    mutate_record "$home" second '.records[0].checked_at="2026-09-15T09:00:00Z"'
-    mutate_record "$home" third '.records[0].checked_at="2026-09-15T09:00:00Z"'
+    for cycle in second third; do
+      mutate_record "$home" "$cycle" '.records[0].checked_at="2026-09-15T09:00:00Z"'
+    done
     cp "$home/data/delivery/contributions.json" "$home/prior.json"
     for cycle in 0 1 2; do
       at=$(jq -nr --arg now "$NOW" --argjson cycle "$cycle" '(($now | fromdateiso8601) + $cycle * 300) | todateiso8601')
       with_home "$home" env FORGE_SCHEDULE_COST=6 FORGE_SCHEDULE_FAULT="$mode" FM_CONTRIBUTIONS_NOW="$at" \
-        "$ROOT/bin/fm-contributions.sh" poll >/dev/null || fail "failed-attempt scheduling failed ($mode)"
+        "$ROOT/bin/fm-contributions.sh" poll >/dev/null || fail "scheduler poll failed ($mode)"
     done
     [ "$(paste -sd ' ' "$home/forge/order")" = '8 10 9' ] \
-      || fail "a permanently failing URL starved the tail ($mode): $(cat "$home/forge/order")"
+      || fail "a failing head monopolized the scheduler ($mode): $(cat "$home/forge/order")"
+    jq -e --arg now "$NOW" '.attempts["https://github.com/o/r/pull/8"] == $now' \
+      "$home/state/contributions-poll.json" >/dev/null || fail "scheduler lost its attempt ($mode)"
+    jq -e 'all(.records[]; has("attempted_at") | not)' "$home/data/delivery/contributions.json" >/dev/null \
+      || fail 'scheduler metadata leaked into an owner record'
     if [ "$mode" = budget ]; then
-      same_observation_record "$home/prior.json" "$home/data/delivery/contributions.json" \
-        || fail 'a budget-refused scheduling update changed good-observation evidence'
-      jq -e --arg now "$NOW" '.records[0].attempted_at == $now' "$home/data/delivery/contributions.json" >/dev/null \
-        || fail 'budget refusal did not retain its separate attempt marker'
-    else
-      NOW="$at" bearings "$home" | jq -e '.contributions.checked == 2 and .contributions.complete == false' >/dev/null \
-        || fail 'a failed attempt was projected as a good observation'
+      cmp -s "$home/prior.json" "$home/data/delivery/contributions.json" \
+        || fail 'budget refusal changed the owner record'
     fi
+    NOW="$at" bearings "$home" | jq -e '.contributions.checked == 2 and .contributions.complete == false' >/dev/null \
+      || fail 'a scheduling attempt was mistaken for a good observation'
   done
-  pass 'failed and budget-refused attempts yield to the tail without inventing good observations'
+  pass 'scheduler attempts move failed heads behind the tail without changing observation freshness'
+}
+
+test_rejected_sole_owner_never_uses_a_read_slot() {
+  local home task cycle at expected
+  home=$(new_home scheduler-rejected-owner)
+  schedule_forge "$home"
+  for task in 9 10 11 12 13; do
+    record "$home" "task$task" "$task" open mergeable
+    mutate_record "$home" "task$task" '.records[0].checked_at="2026-09-15T09:00:00Z"'
+  done
+  printf '{broken\n' > "$home/data/delivery/contributions.json"
+  cp "$home/data/delivery/contributions.json" "$home/malformed-prior.json"
+  for cycle in 0 1 2; do
+    at=$(jq -nr --arg now "$NOW" --argjson cycle "$cycle" '(($now | fromdateiso8601) + $cycle * 300) | todateiso8601')
+    expected=$(with_home "$home" env FM_CONTRIBUTIONS_NOW="$at" "$ROOT/bin/fm-contributions.sh" poll) \
+      || fail 'a rejected sole owner aborted the sweep'
+    [ "$expected" = 'contributions: 1 unreadable durable record(s)' ] || fail "unreadable warning changed: $expected"
+    case "$cycle" in
+      0) expected='10 11' ;;
+      1) expected='10 11 12 13' ;;
+      2) expected='10 11 12 13 9 10' ;;
+    esac
+    [ "$(paste -sd ' ' "$home/forge/order")" = "$expected" ] \
+      || fail "a rejected owner consumed a read slot: $(cat "$home/forge/order")"
+  done
+  cmp -s "$home/malformed-prior.json" "$home/data/delivery/contributions.json" \
+    || fail 'poll overwrote a rejected owner record'
+  pass 'a rejected sole owner is not read and five eligible URLs rotate in three two-read sweeps'
+}
+
+test_scheduler_accepts_owner_created_mid_poll() {
+  local home input out
+  home=$(new_home scheduler-created-owner)
+  forge_home "$home"
+  wrap_forge "$home"
+  rm -f "$home/data/delivery/contributions.json"
+  printf -- '- [ ] delivery - Contributions https://github.com/o/r/pull/8 https://github.com/o/r/pull/10 (repo: sample) (kind: ship)\n' \
+    > "$home/data/backlog.md"
+  input=$(with_home "$home" "$ROOT/bin/fm-fleet-snapshot.sh" --contribution-input) || fail 'could not diagnose the old fixture'
+  printf 'old-mid-poll-fixture structured-owners=%s\n' "$(printf '%s' "$input" | jq '[.backlog.records[] | select(.structured == true)] | length')"
+  printf '# Backlog\n\n## Queued\n- [ ] delivery - Contributions https://github.com/o/r/pull/8 https://github.com/o/r/pull/10 (repo: sample) (kind: ship)\n' \
+    > "$home/data/backlog.md"
+  input=$(with_home "$home" "$ROOT/bin/fm-fleet-snapshot.sh" --contribution-input) || fail 'could not inspect valid fixture ownership'
+  printf '%s' "$input" | jq -e 'any(.backlog.records[]; .id == "delivery" and .structured == true and (.links | length) == 2)' >/dev/null \
+    || fail 'the mid-poll fixture does not own both URLs'
+  printf '1000\n' > "$home/forge/clock"
+  printf 'budget-head\n' > "$home/forge/fault"
+  out=$(with_home "$home" "$ROOT/bin/fm-contributions.sh" poll) || fail 'mid-poll owner creation aborted the scheduler'
+  [ -z "$out" ] || fail "mid-poll owner creation printed a diagnostic: $out"
+  jq -e --arg now "$NOW" '.records | length == 1 and .[0].url == "https://github.com/o/r/pull/10"
+    and .[0].checked_at == $now and .[0].observation.state == "open" and (.[0] | has("attempted_at") | not)' \
+    "$home/data/delivery/contributions.json" >/dev/null || fail 'the successful observation was not preserved exactly as an owner record'
+  jq -e --arg now "$NOW" '.attempts["https://github.com/o/r/pull/8"] == $now' \
+    "$home/state/contributions-poll.json" >/dev/null || fail 'a later budget refusal lost its URL scheduling attempt'
+  pass 'a newly created owner keeps its observation while a later refused URL updates only scheduler state'
+}
+
+test_scheduler_state_refuses_symlinks() {
+  local home out
+  home=$(new_home scheduler-symlink)
+  forge_home "$home"
+  wrap_forge "$home"
+  printf 'untouched\n' > "$home/target.json"
+  cp "$home/target.json" "$home/target-prior.json"
+  ln -s "$home/target.json" "$home/state/contributions-poll.json"
+  out=$(with_home "$home" "$ROOT/bin/fm-contributions.sh" poll 2>&1) && fail 'poll accepted a symlinked scheduler file'
+  [ -n "$out" ] || fail 'unsafe scheduler state had no diagnostic'
+  cmp -s "$home/target-prior.json" "$home/target.json" || fail 'scheduler overwrote a symlink target'
+  [ ! -s "$home/forge/calls" ] || fail 'poll contacted the forge before refusing unsafe scheduler state'
+  pass 'unsafe scheduler state is refused before forge reads or writes'
 }
 
 test_budget_exhaustion_keeps_prior_record() { # exhaust|hang
@@ -1000,7 +1067,7 @@ test_budget_exhaustion_keeps_prior_record() { # exhaust|hang
   [ -z "$out" ] || fail "budget exhaustion ($mode) printed a wake line: $out"
   grep -F 'api repos/o/r/pulls/8' "$home/forge/calls" >/dev/null \
     || fail "budget exhaustion ($mode) never started the observation"
-  same_observation_record "$home/prior.json" "$home/data/delivery/contributions.json" \
+  cmp -s "$home/prior.json" "$home/data/delivery/contributions.json" \
     || fail "budget exhaustion ($mode) rewrote the prior record: $(cat "$home/data/delivery/contributions.json")"
   [ ! -s "$home/state/.wake-queue" ] || fail "budget exhaustion ($mode) enqueued a wake"
   pass "budget exhausted mid-observation ($mode) keeps the prior record and stays silent"
@@ -1261,13 +1328,7 @@ test_next_url_does_not_inherit_a_forge_diagnostic() {
   # fails on its reviews read before it checks comments.
   printf '{}\n' > "$home/forge/comments.json"
   printf 'fail\n' > "$home/forge/fault"
-  # Seed a newer issue observation so the failing PR is read first.
-  mutate_record "$home" delivery '.records[0].checked_at="2026-09-15T08:00:00Z"'
-  mkdir -p "$home/data/filed"
-  jq -n --arg now "$NOW" '{schema:"fm-contributions.v1",task:"filed",records:[{
-    url:"https://github.com/o/r/issues/9",kind:"issue",checked_at:$now,error:null,pending:[],seen:[],
-    observation:{state:"open",head:null,ready:false,checks:[],reviews:[],events:[]}}]}' \
-    > "$home/data/filed/contributions.json"
+  # This rotation bucket reads the failing PR before the issue.
   out=$(with_home "$home" env FM_CONTRIBUTIONS_NOW=2026-09-16T08:05:00Z "$ROOT/bin/fm-contributions.sh" poll) \
     || fail 'poll failed while a GitHub issue followed a failed PR read'
   pull_line=$(grep -nF 'api repos/o/r/pulls/8/reviews?' "$home/forge/calls" | head -n 1 | cut -d: -f1)
@@ -1582,7 +1643,7 @@ test_slow_read_deadline_kill_is_budget_refusal() {
   out=$(with_home "$home" env FM_CONTRIBUTIONS_BUDGET=20 FORGE_LATENCY=6 "$ROOT/bin/fm-contributions.sh" poll) \
     || fail 'poll failed on a deadline-killed slow read'
   [ -z "$out" ] || fail "a deadline-killed slow read printed an unavailable wake: $out"
-  same_observation_record "$home/prior.json" "$home/data/delivery/contributions.json" \
+  cmp -s "$home/prior.json" "$home/data/delivery/contributions.json" \
     || fail 'a deadline-killed slow read rewrote the prior record'
   [ ! -s "$home/state/.wake-queue" ] || fail 'a deadline-killed slow read enqueued a wake'
   pass 'a read killed at the five-second bound is budget refusal and stays silent'
@@ -1612,7 +1673,7 @@ test_unmeasured_url_does_not_starve_the_tail() {
         fail 'a tail PR began without its observation reserve'
       fi
     fi
-    same_observation_record "$home/prior.json" "$home/data/delivery/contributions.json" \
+    cmp -s "$home/prior.json" "$home/data/delivery/contributions.json" \
       || fail 'a timed-out observation changed its prior freshness or record'
   done
   for task in second third; do
@@ -1681,7 +1742,7 @@ test_budget_is_cut_down_to_the_watcher_check_bound() {
   out=$(with_home "$home" env FM_CHECK_TIMEOUT=6 "$ROOT/bin/fm-contributions.sh" poll) \
     || fail 'poll failed under a small watcher check bound'
   [ -z "$out" ] || fail "a check-bound-capped poll printed a wake: $out"
-  same_observation_record "$home/prior.json" "$home/data/delivery/contributions.json" \
+  cmp -s "$home/prior.json" "$home/data/delivery/contributions.json" \
     || fail 'a poll observed with the full budget despite a six-second check bound'
   [ ! -s "$home/state/.wake-queue" ] || fail 'a check-bound-capped poll enqueued a wake'
   pass 'the effective budget is cut down to the watcher per-check bound with margin'
@@ -1715,7 +1776,7 @@ test_arm_plumbs_a_configured_budget_into_the_check_shim() {
     fi
     [ -z "$out" ] || fail "generated check printed an unavailable wake: $out"
     grep -Fxq 'api repos/o/r/pulls/8' "$home/forge/calls" || fail 'generated check did not attempt a read'
-    same_observation_record "$home/prior.json" "$home/data/delivery/contributions.json" \
+    cmp -s "$home/prior.json" "$home/data/delivery/contributions.json" \
       || fail "generated check failed to preserve the $mode one-second budget"
   done
   pass 'generated checks enforce configured and inherited budgets at runtime'
@@ -2136,7 +2197,7 @@ test_arm_plumbs_the_reply_age_into_the_check_shim() {
 }
 
 failures=0
-for test_name in test_oldest_observations_use_the_whole_rotation test_failed_attempts_do_not_starve_older_observations; do
+for test_name in test_oldest_observations_use_the_whole_rotation test_scheduler_attempts_preserve_owner_observations test_rejected_sole_owner_never_uses_a_read_slot test_scheduler_accepts_owner_created_mid_poll test_scheduler_state_refuses_symlinks; do
   ( "$test_name" ) || failures=$((failures + 1))
 done
 for test_name in test_actor_coverage test_stale_verdict test_unchecked_is_not_silence test_newest_check_has_no_verdict test_comment_wake test_review_wake test_inline_wake test_review_bot_inline_wake test_review_bot_watching_is_opt_in test_review_bot_allowlist_is_configurable test_ready_issue_wake test_fresh_issue_requires_maintainer test_missing_lane_remains_missing test_partial_freshness_keeps_measured_rows test_malformed_record_cannot_prove_silence test_issue_timeline_and_exact_ack test_verdict_retains_judged_head test_verdict_actor_values_are_discoverable test_observed_replacement_refreshes_verdict test_unobserved_head_leaves_verdict_unknown test_away_yolo_is_fleet_work test_away_yolo_cross_home_is_fleet_work test_retired_and_unsupported_coverage test_unsupported_forge_is_not_fleet_work test_held_unsupported_forge_is_not_captain_work test_unsupported_poll_is_silent_and_clears_legacy_errors test_legacy_cleanup_preserves_supported_failure test_shared_contribution_signal_wakes_once test_watcher_keeps_diagnostics_separate_from_contribution_wakes test_expired_child_unsupported_forge_stays_unmeasured test_watcher_surfaces_new_contribution_once test_home_summary_coverage test_unreadable_pending_is_not_empty test_record_task_identity_matches_dirname_basename test_read_only_views_create_no_state test_budget_refusal_between_calls test_budget_bounded_call_timeout test_genuine_failure_near_deadline_is_unavailable test_http_500_once_retries_without_waking test_http_500_twice_records_the_failed_read test_http_404_is_not_retried test_real_gh_errors_drive_retry_and_summary test_next_url_does_not_inherit_a_forge_diagnostic test_shared_url_observed_once test_terminal_contribution_settles test_late_owner_inherits_terminal_observation test_interrupted_multi_owner_poll_settles_every_owner test_done_task_open_pr_still_observed test_many_settled_records_keep_the_poll_inside_the_check_bound test_many_settled_records_beside_a_malformed_one_keep_the_poll_inside_the_check_bound test_record_without_trailing_newline_does_not_join_its_neighbour test_records_beyond_one_read_batch_are_all_read test_reservation_defers_later_url_when_fifteen_seconds_do_not_remain test_three_second_pr_reads_complete_fresh_in_one_cycle test_slow_read_deadline_kill_is_budget_refusal test_unmeasured_url_does_not_starve_the_tail test_budget_is_cut_down_to_the_watcher_check_bound test_arm_plumbs_a_configured_budget_into_the_check_shim test_unavailable_forge_records_error_and_wakes_once_per_episode test_late_owner_keeps_failure_episode_suppressed test_retire_ends_observation_of_a_gone_contribution test_late_owner_of_a_retired_final_contribution_is_not_retired test_retire_is_idempotent_and_refuses_unknown_pairs test_unanswered_thread_is_raised_again_under_hold test_resolved_thread_is_answered test_reply_rules test_reply_age_is_configurable_and_validated test_closed_pull_request_drops_its_threads test_unanswered_reraise_is_off_unless_configured test_arm_plumbs_the_reply_age_into_the_check_shim test_many_reviews_stay_readable; do

@@ -34,7 +34,6 @@
 #
 # This script owns fm-contributions.v1: one atomic file per durable task with
 # task and records[]. Each record contains url, kind, checked_at, error,
-# optional attempted_at (the last budget-refused attempt, never freshness),
 # observation, verdict, seen event tokens, pending events, notified tokens,
 # unanswered threads, and retired provenance once retired.
 # observation is one coherent forge read (a PR head is rechecked after fetching
@@ -56,7 +55,7 @@
 # never be read again, such as a PR in a deleted repository. It records retired
 # with actor captain, a non-empty reason and the UTC time. It refuses any
 # other actor, a blank reason, and a task/url pair with no saved record or
-# with unacknowledged pending signals. A retired pair leaves known, scheduling and coverage even while a
+# with unacknowledged pending signals. A retired pair leaves known, rotation and coverage even while a
 # backlog link remains. Retiring a retired pair again is a no-op that keeps the
 # first provenance. Nothing un-retires a record, poll never retires one on its
 # own, and a later owner settled from a retired record is not retired. A
@@ -79,19 +78,16 @@
 # is set), then the closing head read;
 # an issue has two waves. Before starting a URL, poll reserves the smaller of
 # the effective budget and 15 seconds for those waves. URLs needing forge
-# reads are ordered by the oldest scheduling timestamp, with the URL as a stable
-# tie-break. That timestamp is the latest checked_at or attempted_at across the
-# URL's owners, or zero when neither exists, so never-attempted URLs come first.
-# checked_at on an error records an attempt, not a good observation. A budget
-# refusal stamps only attempted_at so a repeatedly timed-out oldest URL yields
-# to the tail without refreshing its observation. Terminal URLs settle separately
-# before the forge budget starts and consume no read slots.
+# reads are sorted by URL and rotated by the current five-minute epoch bucket
+# modulo their count, without stored scheduling state or freshness-based
+# reordering. Terminal URLs settle separately before the forge budget starts
+# and consume no rotation slots.
 # A deliberately smaller configured budget remains bounded and may be
 # unmeasured, rather than being mislabeled unavailable. Each distinct supported
 # URL is attempted at most once per poll and its observation applied to every owner.
 # A supported URL's final observation applies
 # to every owner without another forge read. When the budget refuses a read
-# mid-observation, only attempted_at changes and the poll moves to the
+# mid-observation, that URL's records stay untouched and the poll moves to the
 # next URL that still has a full observation reserve; only a genuine forge
 # failure, structural refusal or head change records an error.
 # API failure leaves error evidence; an expired or absent observation is not
@@ -100,8 +96,7 @@
 # output (control characters dropped, at most 160 characters), or the
 # structural check that refused the observation. A later good read clears the
 # record's error, so the unavailable line is the copy that outlives it.
-# FM_CONTRIBUTIONS_MAX_AGE (default 900 seconds) bounds projected freshness;
-# observing every live URL within that time still requires enough sweep capacity.
+# FM_CONTRIBUTIONS_MAX_AGE (default 900 seconds) bounds freshness.
 # A supported URL whose last good observation is merged or closed is final: it is
 # never re-read, stays fresh, and every owner's saved row converges on that
 # observation, with a stale error beside it cleared.
@@ -612,18 +607,13 @@ poll() {
   read_saved
   [ "$ERRORS" -eq 0 ] || printf 'contributions: %s unreadable durable record(s)\n' "$ERRORS"
   clear_unsupported_errors
-  # Only supported URLs enter final settlement and the forge-read schedule.
+  # Only supported URLs enter final settlement and the forge-read rotation.
   # One line per distinct URL: its settlement, the URL, then every owning task.
   # A contribution with a final observation is not re-read for any owner; it
   # is settled once every owner holds that final observation without an error.
   jq_lib -nr --slurpfile input "$TMP/input.json" --slurpfile saved "$TMP/saved.json" '
     known($input[0];$saved[0]) | map(select(.url | supported_url))
     | group_by(.url) | map({url:.[0].url,tasks:(map(.task) | unique)})
-    | map(. as $known
-      | . + {scheduled: ([$saved[0][] | select(.task | IN($known.tasks[])) | .records[]
-          | select(.url == $known.url) | (.checked_at, .attempted_at)
-          | select(. != null) | fromdateiso8601] | max // 0)})
-    | sort_by(.scheduled, .url)
     | .[] | . as $known
     | [$known.tasks[] as $task | [$saved[0][] | select(.task == $task) | .records[] | select(.url == $known.url)] | first
       | if . != null and (.observation.state | IN("merged","closed")) then .error == null else null end] as $final
@@ -638,7 +628,9 @@ poll() {
       *) (IFS=$'\t'; printf '%s\n' "${row[*]:1}") >> "$TMP/live.tsv" ;;
     esac
   done < "$TMP/known.tsv"
-  mv "$TMP/live.tsv" "$TMP/known.tsv"
+  jq -Rnr --argjson bucket "$((EPOCH / 300))" '
+    [inputs] | if length == 0 then . else ($bucket % length) as $offset | .[$offset:] + .[:$offset] end
+    | .[]' < "$TMP/live.tsv" > "$TMP/known.tsv"
   DEADLINE=$(( $(date +%s) + BUDGET ))
   OBSERVATION_RESERVE=$((BUDGET < 15 ? BUDGET : 15))
   while IFS=$'\t' read -r -a row; do
@@ -646,10 +638,11 @@ poll() {
     url=${row[0]}
     observed=0
     observe "$url" || observed=$?
+    [ "$BUDGET_EXHAUSTED" -eq 0 ] || continue
     why='no failing step recorded'
     [ ! -s "$TMP/why" ] || IFS= read -r why < "$TMP/why"
     # Wake once per failure episode: only when no owner has a prior error.
-    if [ "$BUDGET_EXHAUSTED" -eq 0 ] && [ "$observed" -ne 0 ] && jq -ne --slurpfile saved "$TMP/saved.json" --arg url "$url" --args \
+    if [ "$observed" -ne 0 ] && jq -ne --slurpfile saved "$TMP/saved.json" --arg url "$url" --args \
       'all($ARGS.positional[] as $task | [$saved[0][] | select(.task == $task) | .records[] | select(.url == $url)] | first;
         .error == null)' "${row[@]:1}" >/dev/null; then
       printf 'contributions: observation unavailable for %s - %s\n' "$url" "$why"
@@ -661,11 +654,7 @@ poll() {
       jq -n --slurpfile saved "$TMP/saved.json" --arg task "$task" --arg url "$url" --arg kind "$kind" '
         ([$saved[0][] | select(.task == $task) | .records[] | select(.url == $url)] | first)
         // {url:$url,kind:$kind,checked_at:null,observation:null,verdict:null,seen:[],pending:[],notified:[]}' > "$old"
-      if [ "$BUDGET_EXHAUSTED" -ne 0 ]; then
-        jq --arg now "$NOW" '.attempted_at=$now' "$old" > "$TMP/row.json"
-        write_record "$task" "$TMP/row.json"
-        continue
-      elif [ "$observed" -eq 0 ]; then
+      if [ "$observed" -eq 0 ]; then
         jq_lib -n --arg now "$NOW" --argjson epoch "$EPOCH" --argjson reply_age "$REPLY_AGE" --argjson track "$TRACK_THREADS" \
           --slurpfile old "$old" --slurpfile observation "$TMP/observation.json" '
           $old[0] as $old | $observation[0] as $o
