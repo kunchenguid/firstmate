@@ -512,19 +512,23 @@ test_brief_gate_policy_is_opt_in() {
 # home (FM_ROOT), and that home's supervision-tuning must be honoured exactly
 # like every other config file the same path resolves.
 test_brief_tuning_honours_default_home() {
-  local brief tuning
-  tuning="$ROOT/config/supervision-tuning"
-  mkdir -p "$ROOT/config" "$ROOT/data"
+  local brief tuning rc=0 fixture
+  # Run entirely inside a temporary fixture: with neither FM_HOME nor
+  # FM_CONFIG_OVERRIDE set, FM_ROOT_OVERRIDE supplies the default home, so the
+  # tuning file lives under the fixture's config and no file under the real
+  # checkout is created, overwritten, or deleted. The script under test stays
+  # the real checkout's bin/fm-brief.sh.
+  fixture="$TMP_ROOT/brief-default-home"
+  mkdir -p "$fixture/config"
+  tuning="$fixture/config/supervision-tuning"
   printf 'brief_gate_policy=1\nmax_fix_rounds=5\n' > "$tuning"
   {
-    env -u FM_HOME -u FM_CONFIG_OVERRIDE FM_ROOT_OVERRIDE="$ROOT" \
+    env -u FM_HOME -u FM_CONFIG_OVERRIDE FM_ROOT_OVERRIDE="$fixture" \
       "$ROOT/bin/fm-brief.sh" brief-default-home some-proj --mode no-mistakes >/dev/null 2>&1
     rc=$?
   }
-  brief="$ROOT/data/brief-default-home/brief.md"
+  brief="$fixture/data/brief-default-home/brief.md"
   [ ! -f "$brief" ] || brief_content=$(cat "$brief")
-  rm -f "$tuning"
-  rm -rf "$ROOT/data/brief-default-home"
   [ "$rc" -eq 0 ] \
     || fail "a brief launched with neither FM_HOME nor FM_CONFIG_OVERRIDE set should still scaffold"
   assert_grep "# Validation gate policy" <(printf '%s\n' "$brief_content") \
