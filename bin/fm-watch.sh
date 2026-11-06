@@ -200,7 +200,9 @@
 # For normal supervision, resume the session-start primary-harness protocol
 # after each printed reason. Direct duplicate invocations of this script still
 # no-op through the watcher singleton lock. A live holder whose beacon is stale
-# past the grace (FM_WATCHER_STALE_GRACE, default max(300, FM_POLL+60)) is
+# past the grace (FM_WATCHER_STALE_GRACE, default max(300, effective_poll+60),
+# where the effective poll is the slower of FM_POLL and the idle cadence —
+# docs/turnend-guard.md "Guard grace and the poll cadence" owns the formula) is
 # refused with "lock held by live pid ... but heartbeat is stale"; one stale past
 # the hard bound FM_WATCHER_STALL_BOUND (default 3x that grace) is instead
 # evicted with TERM after its recorded identity is re-verified, and this arm
