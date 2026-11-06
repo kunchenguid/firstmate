@@ -56,7 +56,7 @@ jq -n --arg model "$model" --arg cmd "touch '$LAB/state/turn-ended'" \
 git -C "$LAB/workspace" init -q -b main
 git -C "$LAB/workspace" -c user.name=guard -c user.email=guard@local commit -q --allow-empty -m init
 git -C "$LAB/workspace" worktree add -q "$LAB/task" -b guard
-HOME="$LAB/home" "$ROOT/bin/fm-droid-trust.sh" "$LAB/task" "$LAB/workspace" >/dev/null || fail 'exact-worktree trust registration failed'
+HOME="$LAB/home" "$ROOT/bin/fm-droid-trust.sh" --receipt "$LAB/state/live.droid-trust" "$LAB/task" "$LAB/workspace" >/dev/null || fail 'exact-worktree trust registration failed'
 
 printf '# Droid guard\nOnly execute the explicit verification commands in the prompt.\n' > "$LAB/task/AGENTS.md"
 capture() { "$REAL_TMUX" -L "$SOCKET" capture-pane -p -t "$TARGET" -S -60; }
@@ -164,7 +164,7 @@ done
 pass "Droid $VERSION /quit exits the agent"
 printf 'DROID_LIVE_RESULT version=%s detection=pass launch=pass busy=pass stop=pass composer=pass profile=pass interrupt=pass exit=pass\n' "$VERSION"
 
-HOME="$LAB/home" "$ROOT/bin/fm-droid-trust.sh" --remove "$LAB/task" "$LAB/workspace" >/dev/null || fail 'exact-worktree trust cleanup failed'
+HOME="$LAB/home" "$ROOT/bin/fm-droid-trust.sh" --retire "$LAB/state/live.droid-trust" "$LAB/state" live >/dev/null || fail 'exact-worktree trust cleanup failed'
 physical=$(cd "$LAB/task" && pwd -P)
 jq -e --arg logical "$LAB/task" --arg physical "$physical" '.trustedFolders | has($logical) == false and has($physical) == false' "$LAB/home/.factory/settings.json" >/dev/null || fail 'native settings retained task trust'
 printf 'ok - Droid %s exact-worktree trust is retired after exit\n' "$VERSION"
