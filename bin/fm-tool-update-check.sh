@@ -67,8 +67,9 @@
 # refused outright.
 #
 # The report record state/.tool-updates is written only when a sweep runs to its
-# end, and it carries the whole finding set the last report was made from,
-# uncut, so the same pending update is reported once rather than on every poll
+# end, and it carries the whole dedupe-key set the last report was made from,
+# uncut. Git update keys track the behind condition, not the moving upstream
+# tip or count, so the same pending update is reported once rather than on every poll
 # while a new finding that lands past the one-line cut is still news. A sweep
 # killed part way through leaves no record and is retried, instead of
 # suppressing its finding.
@@ -201,18 +202,25 @@ record_epoch_now() {
 real_epoch() { date +%s; }
 
 FINDINGS=
+# Report text may contain a moving upstream tip or behind-count. Keep stable
+# keys separately so those values do not turn one pending update into news.
+KEYS=
 DEADLINE=0
 INCOMPLETE_REPORTED=0
 
 # Each finding is flattened to a single line here, because the whole report must
-# stay one line for the wake record.
+# stay one line for the wake record. An optional second argument supplies a
+# stable dedupe key when the text carries moving upstream values.
 emit() {
-  local text
+  local text key
   text=$(printf '%s' "$1" | tr '\t\r\n' '   ')
+  key=$(printf '%s' "${2:-$1}" | tr '\t\r\n' '   ')
   if [ -z "$FINDINGS" ]; then
     FINDINGS=$text
+    KEYS=$key
   else
     FINDINGS="$FINDINGS; $text"
+    KEYS="$KEYS; $key"
   fi
 }
 
@@ -759,12 +767,14 @@ git_findings() {
       ''|*[!0-9]*|0) count= ;;
     esac
     if [ -n "$count" ]; then
-      emit "$name update available: $local_label is $(commit_phrase "$count") behind $remote/$branch"
+      emit "$name update available: $local_label is $(commit_phrase "$count") behind $remote/$branch" \
+        "$name update available: $local_label is behind $remote/$branch"
       return 0
     fi
   fi
 
-  emit "$name update available: $remote/$branch is at $short which this copy does not have"
+  emit "$name update available: $remote/$branch is at $short which this copy does not have" \
+    "$name update available: $local_label is behind $remote/$branch"
   return 0
 }
 
@@ -860,10 +870,10 @@ action_check() {
   #
   # Report before recording, so a record that cannot be written costs a repeated
   # report rather than a lost one.
-  if [ -n "$line" ] && [ "$FINDINGS" != "$RECORD_REPORTED" ]; then
+  if [ -n "$line" ] && [ "$KEYS" != "$RECORD_REPORTED" ]; then
     printf '%s\n' "$line"
   fi
-  record_write "$FINDINGS" || true
+  record_write "$KEYS" || true
   return 0
 }
 
