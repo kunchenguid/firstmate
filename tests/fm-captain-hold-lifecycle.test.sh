@@ -1625,6 +1625,37 @@ EOF
   pass "a secondmate home publishes each hold occurrence and its answer on the parent channel"
 }
 
+test_hold_and_answer_republish_the_home_summary() {
+  local home decision before
+  home=$(make_home summary-refresh)
+  decision="$home/decision.txt"
+  printf 'go\n' > "$decision"
+  [ ! -e "$home/state/home-summary.json" ] || fail "fixture started with a published summary"
+  run_captain "$home" hold summary-call --title "Choose the summary option" \
+    --reason "summary choice pending" --repo sample >/dev/null || fail "hold failed"
+  [ -s "$home/state/home-summary.json" ] \
+    || fail "a successful hold did not publish the home summary"
+  jq -e . "$home/state/home-summary.json" >/dev/null \
+    || fail "the published home summary is not valid JSON"
+  rm -f "$home/state/home-summary.json"
+  run_captain "$home" answer summary-call --decision-file "$decision" >/dev/null \
+    || fail "answer failed"
+  [ -s "$home/state/home-summary.json" ] \
+    || fail "a successful answer did not republish the home summary"
+
+  # A refresh that cannot publish must never fail the hold or the answer.
+  rm -f "$home/state/home-summary.json"
+  mkdir "$home/state/home-summary.json"
+  run_captain "$home" hold summary-call-two --title "Choose again" \
+    --reason "second choice pending" --repo sample >/dev/null \
+    || fail "a refresh failure failed the hold"
+  before=$(tasks_in "$home" show summary-call-two --full)
+  assert_contains "$before" "held: yes" "the hold was not recorded when the refresh failed"
+  run_captain "$home" answer summary-call-two --decision-file "$decision" >/dev/null \
+    || fail "a refresh failure failed the answer"
+  pass "hold and answer republish the home summary and never fail on a refresh error"
+}
+
 test_secondmate_reconcile_publishes_before_request_retirement() {
   local parent mate channel evidence out show rc request
   parent=$(make_home reconcile-parent-channel)
@@ -5120,6 +5151,7 @@ test_completion_replaces_a_pair_recorded_after_pr
 test_terminal_single_owner_status_decision_does_not_block_empty_inventory
 test_secondmate_hold_stays_in_authoritative_home
 test_secondmate_home_publishes_holds_and_answers
+test_hold_and_answer_republish_the_home_summary
 test_secondmate_reconcile_publishes_before_request_retirement
 test_bound_channel_answers_close_at_answer_time
 test_reconcile_never_closes_through_the_keyed_answer_intake

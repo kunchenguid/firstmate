@@ -2258,9 +2258,21 @@ command_open() {  # <task-id> [--identity] [--distinguish-absent]
   exit 2
 }
 
+# A hold or answer changes what this home's published summary says about open
+# captain calls, so a successful one republishes it. The refresh is side-band
+# and best-effort: it can never change the hold's or answer's result.
+run_then_refresh_home_summary() {  # <command-function> <args...>
+  local rc=0
+  ( "$@" ) || rc=$?
+  if [ "$rc" -eq 0 ]; then
+    "$SCRIPT_DIR/fm-home-summary-refresh.sh" --best-effort >/dev/null 2>&1 || true
+  fi
+  exit "$rc"
+}
+
 case "${1:-}" in
-  hold) shift; command_hold "$@" ;;
-  answer) shift; command_answer "$@" ;;
+  hold) shift; run_then_refresh_home_summary command_hold "$@" ;;
+  answer) shift; run_then_refresh_home_summary command_answer "$@" ;;
   answers) shift; command_answers "$@" ;;
   reconcile-requests) shift; command_reconcile_requests "$@" ;;
   bind) shift; command_bind "$@" ;;
