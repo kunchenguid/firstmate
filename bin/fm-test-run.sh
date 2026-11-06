@@ -1693,6 +1693,9 @@ families_for_changed_path() {
       printf '%s\n' __script__:fm-read-repetition-live.test.sh
       printf '%s\n' __script__:fm-pi-primary-types.test.sh
       ;;
+    tests/fixtures/fm-claude-request-capture.py)
+      printf '%s\n' __script__:fm-claude-tool-exclude-live.test.sh
+      ;;
     .pi/extensions/fm-branch-supervision.ts|.pi/extensions/lib/fm-async-exec.ts|\
     .pi/extensions/lib/fm-branch-dispatch.ts|.pi/extensions/lib/fm-native-contract.ts)
       # The portable suites that actually load these files, named one by one.
