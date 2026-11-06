@@ -4,7 +4,8 @@
 //
 // Usage: node board-render-harness.mjs <built-board.html>
 // Prints one JSON document:
-//   { stats:[{n,label}], captains_call:[text], underway:[{title,sub,badges}],
+//   { stats:[{n,label,tag,type,scrolls_to,target_declared,prompts}],
+//     captains_call:[text], underway:[{title,sub,badges}],
 //     charted:[{title,sub,badges,pickable}], empty, more, error }
 import { readFileSync } from "node:fs";
 
@@ -24,6 +25,8 @@ class Node {
     this.type = "";
     this.value = "";
     this.checked = false;
+    this.listeners = {};
+    this.id = "";
     this.classList = {
       add: (c) => { this.className = (this.className + " " + c).trim(); },
       contains: (c) => this.className.split(/\s+/).includes(c),
@@ -44,7 +47,9 @@ class Node {
   set textContent(v) { this._text = String(v); this.children = []; }
   appendChild(n) { n.parentNode = this; this.children.push(n); return n; }
   setAttribute(k, v) { this.attributes[k] = v; }
-  addEventListener() {}
+  addEventListener(type, fn) { (this.listeners[type] ||= []).push(fn); }
+  dispatch(type) { for (const fn of this.listeners[type] || []) fn({ type, preventDefault() {} }); }
+  scrollIntoView(opts) { scrolls.push({ id: this.id, opts }); }
   querySelectorAll(sel) {
     const want = sel.replace(/^\./, "").replace(/:checked$/, "");
     const checkedOnly = sel.endsWith(":checked");
@@ -60,6 +65,14 @@ class Node {
   }
 }
 
+// Ids the built page declares in its static markup. getElementById below mints
+// any id the script asks for, so a tile aimed at an id the page never declares
+// is visible as a scroll to an undeclared target.
+const declaredIds = new Set(
+  [...html.split("<script")[0].matchAll(/\sid="([^"]+)"/g)].map((m) => m[1]));
+const scrolls = [];
+const prompts = [];
+
 const byId = new Map();
 const dataNode = new Node("script");
 dataNode.textContent = html
@@ -74,6 +87,7 @@ globalThis.document = {
   getElementById: (id) => {
     if (!byId.has(id)) {
       const n = new Node("div");
+      n.id = id;
       new Node("div").appendChild(n);
       byId.set(id, n);
     }
@@ -85,7 +99,7 @@ globalThis.document = {
     return byId.get(id);
   },
 };
-globalThis.window = {};
+globalThis.window = { lavish: { queuePrompt: (...args) => prompts.push(args) } };
 globalThis.TextEncoder = TextEncoder;
 
 const script = html.slice(html.indexOf("<script>") + "<script>".length, html.lastIndexOf("</script>"));
@@ -97,10 +111,22 @@ const badgesOf = (row) =>
     .map((c) => ({ tone: c.className.replace(/.*fm-badge--/, "").trim(), text: c.textContent }));
 
 const strip = byId.get("bb-stats") || new Node("div");
-const stats = strip.children.map((t) => ({
-  n: Number(t.children.find((c) => c.className.includes("bb-stat__num"))?.textContent),
-  label: t.children.find((c) => c.className.includes("bb-stat__label"))?.textContent,
-}));
+// Click each tile and record where the page scrolled and whether the click
+// queued anything for the agent.
+const stats = strip.children.map((t) => {
+  const before = { scrolls: scrolls.length, prompts: prompts.length };
+  t.dispatch("click");
+  const hit = scrolls.slice(before.scrolls);
+  return {
+    n: Number(t.children.find((c) => c.className.includes("bb-stat__num"))?.textContent),
+    label: t.children.find((c) => c.className.includes("bb-stat__label"))?.textContent,
+    tag: t.tagName,
+    type: t.type,
+    scrolls_to: hit.map((h) => h.id),
+    target_declared: hit.length > 0 && hit.every((h) => declaredIds.has(h.id)),
+    prompts: prompts.length - before.prompts,
+  };
+});
 
 const rowsOf = (container) =>
   container.children
