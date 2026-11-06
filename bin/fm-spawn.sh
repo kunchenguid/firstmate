@@ -243,8 +243,16 @@
 #   render, endpoint, worktree, record, or backlog move exists, so the task stays
 #   exactly as queued as it was; an unreadable declaration refuses with exit 1.
 #   A batch reports such a pair as `batch: DEFERRED` and exits 75 when nothing
-#   else failed. A relaunch and a --secondmate spawn are never counted against
-#   capacity.
+#   else failed. A relaunch of a finished scout or local-only ship writes a
+#   capacity reservation for its released place, whether or not this machine
+#   declares capacity, and that reservation holds until the replacement's status
+#   log records working or done; an aborted relaunch whose launch was never sent
+#   or whose endpoint was closed removes it again. The two pieces admission adds
+#   to an ordinary spawn - a `working: spawn admitted` status line for a scout or
+#   local-only ship, and taking that project lock on a relaunch - run only once
+#   the declaration caps some project, so with none capped a spawn records no
+#   admitted line and takes no project lock on a relaunch. A --secondmate spawn
+#   is never counted against capacity.
 #   With no harness arg, a crewmate/scout spawn resolves the CREW harness only when
 #   config/crew-dispatch.json is absent. When that file exists, crewmate/scout
 #   spawns require an explicit harness so firstmate cannot silently skip dispatch
@@ -1710,6 +1718,7 @@ GIT_HOOKS_DIR=
 SPAWN_LAUNCH_SENT=0
 SPAWN_ENDPOINT_CLOSED=0
 SPAWN_STAGED_LAUNCH_FILE=
+SPAWN_CAPACITY_RESERVATION=
 
 spawn_fresh_commit_rollback() {
   if fm_backlog_atomic_transition rollback "$STATE/$ID.meta" \
@@ -2020,6 +2029,17 @@ spawn_abort_cleanup() {
         0) kimi_spawn_fail "spawn ended before Orca terminal $T ran the launch command; removed the launch file and refused the worker launch" || true ;;
         2) echo "warning: could not remove Orca launch file $SPAWN_STAGED_LAUNCH_FILE; remove it by hand" >&2 ;;
       esac
+    fi
+  fi
+  if [ "$status" -ne 0 ] && [ -n "$SPAWN_CAPACITY_RESERVATION" ] &&
+    { [ "$SPAWN_LAUNCH_SENT" = 0 ] || [ "$SPAWN_ENDPOINT_CLOSED" = 1 ]; }; then
+    if fm_lock_try_acquire "$SPAWN_TASK_LOCK"; then
+      if [ "$(fm_meta_get "$SPAWN_CAPACITY_RESERVATION" gen)" = "$SPAWN_GEN" ]; then
+        rm -f -- "$SPAWN_CAPACITY_RESERVATION" || true
+      fi
+      fm_lock_release "$SPAWN_TASK_LOCK" || true
+    else
+      echo "warning: another spawn of $ID holds its spawn lock; keeping its capacity reservation" >&2
     fi
   fi
   if [ "$CONFIG_INHERIT_LOCK_HELD" = 1 ]; then
@@ -4176,11 +4196,18 @@ fi
 # declaration, what holds a place, and why this is race-safe). A fresh worker
 # for a project whose declared capacity is already held is deferred here, before
 # any brief render, endpoint, worktree, record, or backlog move exists, so the
-# deferral leaves the task exactly as queued as it was. A relaunch replaces a
-# worker that already holds a place, and a secondmate is not a worker.
+# deferral leaves the task exactly as queued as it was. A relaunch is admitted
+# too: a finished scout or local-only ship releases its place, so the worker
+# being replaced no longer necessarily holds one, and the check excludes this
+# task's own record so a relaunch of a live worker never blocks itself. A
+# secondmate is not a worker. The two pieces admission adds to an ordinary
+# spawn - taking the shared project lock on a relaunch and recording a `working:
+# spawn admitted` status line - run only once the home declares project capacity
+# at all (SPAWN_PROJECT_CAPACITY_ANY), so an undeclared home records no admitted
+# line and takes no project lock on a relaunch.
 SPAWN_PROJECT_CAPACITY=
 SPAWN_PROJECT_CAPACITY_ANY=
-if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ]; then
+if [ "$KIND" != secondmate ]; then
   SPAWN_CAPACITY_CONFIG=$(fm_project_capacity_config_dir "$FM_HOME" "$CONFIG") || {
     echo "error: could not resolve the root Firstmate home that declares project capacity for $PROJ_ABS" >&2
     exit 1
@@ -4192,8 +4219,8 @@ if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ]; then
   SPAWN_PROJECT_CAPACITY=$FM_PROJECT_CAPACITY
   SPAWN_PROJECT_CAPACITY_ANY=$FM_PROJECT_CAPACITY_ANY
 fi
-if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ] &&
-  { [ "$BACKEND" != orca ] || [ -n "$SPAWN_PROJECT_CAPACITY_ANY" ]; }; then
+if [ "$KIND" != secondmate ] &&
+  { { [ "$RELAUNCH" -eq 0 ] && [ "$BACKEND" != orca ]; } || [ -n "$SPAWN_PROJECT_CAPACITY_ANY" ]; }; then
   SPAWN_TREEHOUSE_PROJECT_LOCK=$(fm_treehouse_project_lock_path "$PROJ_ABS") || {
     echo "error: could not resolve the shared Treehouse project lock for $PROJ_ABS" >&2
     exit 1
@@ -4214,7 +4241,7 @@ if [ -n "$SPAWN_PROJECT_CAPACITY" ]; then
     exit 1
   fi
   if [ "$FM_PROJECT_CAPACITY_OCCUPANTS" -ge "$SPAWN_PROJECT_CAPACITY" ]; then
-    echo "deferred: project $(basename "$PROJ_ABS") admits $SPAWN_PROJECT_CAPACITY worker(s) at once on this machine ($FM_PROJECT_CAPACITY_FILE) and $FM_PROJECT_CAPACITY_OCCUPANTS already hold a place ($FM_PROJECT_CAPACITY_OCCUPANT_IDS); task $ID was not launched and its backlog item stays queued - dispatch it again once one of them records its ready PR or is cleaned up" >&2
+    echo "deferred: project $(basename "$PROJ_ABS") admits $SPAWN_PROJECT_CAPACITY worker(s) at once on this machine ($FM_PROJECT_CAPACITY_FILE) and $FM_PROJECT_CAPACITY_OCCUPANTS already hold a place ($FM_PROJECT_CAPACITY_OCCUPANT_IDS); task $ID was not launched and its backlog item stays queued - dispatch it again once one of them records its ready PR, reports done as a scout or local-only ship, or is cleaned up" >&2
     exit "$FM_PROJECT_CAPACITY_DEFER_EXIT"
   fi
 fi
@@ -7320,6 +7347,34 @@ preserve_relaunch_meta() {
   echo "error: task record for $ID could not be prepared at $SPAWN_META_PATH" >&2
   exit 1
 }
+if [ "$RELAUNCH" -eq 0 ]; then
+  rm -f -- "$(fm_project_capacity_reservation_path "$STATE" "$ID")" || {
+    echo "error: could not remove stale capacity reservation for $ID" >&2
+    exit 1
+  }
+fi
+if [ "$KIND" = scout ] || { [ "$KIND" = ship ] && [ "$MODE" = local-only ]; }; then
+  if [ "$RELAUNCH" -eq 1 ] && fm_project_capacity_status_finished "$STATE/$ID.status"; then
+    CAPACITY_RESERVATION_PATH=$(fm_project_capacity_reservation_path "$STATE" "$ID")
+    CAPACITY_STATUS_OFFSET=$(wc -c < "$STATE/$ID.status" | tr -d '[:space:]') || exit 1
+    case "$CAPACITY_STATUS_OFFSET" in
+      ''|*[!0-9]*) echo "error: could not measure status history for $ID" >&2; exit 1 ;;
+    esac
+    CAPACITY_RESERVATION_TMP=$(mktemp "$STATE/.$ID.capacity-reservation.XXXXXX") || exit 1
+    if ! (umask 077 && chmod 600 "$CAPACITY_RESERVATION_TMP" &&
+      printf 'gen=%s\nstatus_offset=%s\n' "$SPAWN_GEN" "$CAPACITY_STATUS_OFFSET" > "$CAPACITY_RESERVATION_TMP" &&
+      mv -f "$CAPACITY_RESERVATION_TMP" "$CAPACITY_RESERVATION_PATH"); then
+      rm -f -- "$CAPACITY_RESERVATION_TMP"
+      echo "error: could not reserve the released place of $ID" >&2
+      exit 1
+    fi
+    SPAWN_CAPACITY_RESERVATION=$CAPACITY_RESERVATION_PATH
+  elif [ -n "$SPAWN_PROJECT_CAPACITY_ANY" ] &&
+    ! printf '%s\n' "$(status_stamp_line 'working: spawn admitted')" >> "$STATE/$ID.status"; then
+    echo "error: could not record working status for spawn of $ID" >&2
+    exit 1
+  fi
+fi
 if [ "$RELAUNCH" -eq 0 ]; then
   if ! fm_backlog_atomic_transition publish "$SPAWN_META_TMP" "$STATE/$ID.meta" "task record" "$STATE"; then
     echo "error: task record for $ID could not be published ($FM_BACKLOG_TRANSITION_ERROR)" >&2
