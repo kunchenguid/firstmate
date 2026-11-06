@@ -1,0 +1,16 @@
+projects/
+state/
+data/
+scratchpad*
+.no-mistakes/
+.lavish/
+.fm-secondmate-home
+.fm-secondmate-parent
+.DS_Store
+__pycache__/
+*.pyc
+.env
+config/
+.claude/settings.local.json
+
+.tools/

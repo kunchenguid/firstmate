@@ -1,0 +1,1004 @@
+#!/usr/bin/env bash
+# fm-afk-launch.sh - the single owner of away-mode ENTRY and EXIT: the
+# same-turn entry that writes the away-posture record through
+# bin/fm-afk-contract.sh, and the away-mode daemon TERMINAL lifecycle where a
+# daemon still runs: launch it in a NON-VISIBLE tracked terminal per backend,
+# record its exact id, tear it down by that exact id, and reconcile a leaked one
+# after a crash.
+#
+# ENTRY (the posture record). `/afk [words]` is itself the captain's go, because
+# the captain who typed it may not look at the screen again: `enter` records the
+# away words verbatim straight into state/.afk-contract in the same turn, with no
+# separate confirmation step, then prints the entry announcement (hold-for-return
+# only: no phone channel exists; a quiet entry's says nothing is held) and the
+# read-back, which is informational and never waits for a go
+# (bin/fm-afk-contract.sh owns the record schema; the words are the whole
+# mandate and no script parses them). The record is the posture in every
+# harness.
+# On Pi and pi-signed the entry ENDS there: the away daemon is no longer launched
+# on Pi, the ordinary supervision session keeps running in both postures, and
+# `start` refuses on those harnesses. The same holds for away mode (not quiet
+# mode) on a claude, cursor, opencode, omp, grok, codex, or agy primary whose home
+# runs the supervision host (fm_supervision_host_enabled: by default on
+# Claude, by config/supervision-host elsewhere), where the host runs the away
+# session; `enter` there adds one line when the host has no
+# engine, because every away wake then reaches main. Every other harness still
+# runs the daemon for now, so `start` and `start-native` require the record
+# `enter` wrote before they launch the daemon.
+# QUIET MODE on a home that runs the supervision host needs nothing
+# where the attended host runs (docs/supervision-host.md "Quiet mode"): its
+# primary is attended-ready (fm_supervision_host_attended_ready: engine, tools,
+# and a verified dialog-mirror writer), the main session can be identified,
+# and the dialog mirror passes the feed's validation (bin/fm-host-mirror.sh
+# check), because that host already keeps the wakes it can take off a present
+# captain's main. `quiet-check` then says so, or, while the host's
+# broken-session latch holds, that the session is paused and when it retries;
+# either way a quiet `enter` refuses (exit 3) before writing anything, so quiet
+# mode never leaves a record that would park a present captain's main. While
+# an away record (one without the quiet mode a quiet entry records) is live on
+# that home, whatever state/.afk says, `quiet-check` (exit 2) and a quiet
+# `enter` (exit 3) refuse and name it: the captain's return
+# (bin/fm-afk-return.sh and its catch-up gate) comes first. Where the attended
+# host lacks one of those parts, `quiet-check` names it and quiet mode enters
+# through the daemon as it does without the host. A quiet `enter` records its
+# mode, so `start` and `start-native` launch the quiet daemon without
+# FM_AFK_MODE; a running quiet daemon is refreshed by a later `/quiet` and runs
+# until `/quiet off`. A quiet `start` or `start-native` that fails while no
+# daemon runs ends quiet mode as `stop` does, so no quiet record outlives its
+# daemon to park a present captain's main.
+# On backend=t3code there is no terminal for `start` to create, so only a
+# harness with a tracked native background job can run `start-native` there.
+# `stop` (the return, driven by bin/fm-afk-return.sh) shuts the daemon down,
+# clears state/.afk last, and archives the record under state/afk-contracts/.
+#
+# Why the terminal lifecycle exists (docs/herdr-backend.md "Away-mode daemon terminal launch"):
+# bin/fm-afk-start.sh execs the supervise daemon in the FOREGROUND of whatever
+# terminal it is already in. Harnesses with a native in-pane tracked-background
+# tool (claude, grok) run it there directly and it is fine. A harness with NO
+# native background mechanism (pi) has to manufacture a terminal, and doing that
+# by SPLITTING the captain's active pane visibly shrinks it - the regression this
+# script fixes. Instead this creates a non-visible tracked terminal (a herdr tab/
+# workspace with --no-focus, or a detached tmux session) that never touches the
+# captain's active tab, and NEVER uses shell `&` (which herdr/codex can reap).
+#
+# Correct supervisor targeting: the daemon finds the captain endpoint to inject
+# into from its OWN inherited env (discover_supervisor_target). Running it in a
+# separate terminal would make it discover its OWN pane, so this captures the
+# captain endpoint FIRST (from the pane this script runs in) and passes it as
+# FM_SUPERVISOR_TARGET/FM_SUPERVISOR_BACKEND explicitly.
+#
+# Usage:
+#   fm-afk-launch.sh enter [--words-file <path> | --words <text>]
+#                          [--expected-return <UTC ISO 8601>] [--spend <n>]
+#                              Write the away-posture record now, with no
+#                              separate confirmation, then print the entry
+#                              announcement and the read-back. With no words
+#                              while away it is a refresh; new words replace
+#                              the mandate. On Pi this is the whole entry.
+#   fm-afk-launch.sh start     Capture the captain pane, then (unless the daemon
+#                              is already running) launch the daemon in a fresh
+#                              non-visible terminal for the detected backend and
+#                              record it. Idempotent: an already-running daemon
+#                              just refreshes state/.afk; a recorded-but-dead
+#                              terminal is reconciled (closed by id) first.
+#   fm-afk-launch.sh start-native
+#                              Prepare lifecycle state for a harness-native
+#                              background job and record that no terminal exists.
+#   fm-afk-launch.sh stop      Correct-ordered exit: SIGTERM the daemon so its
+#                              cleanup flushes WHILE state/.afk is still present,
+#                              wait for it, close a recorded non-native terminal
+#                              by exact id, clear state/.afk, then archive the
+#                              record last. A Pi or native entry that never
+#                              launched a daemon reports that none was running.
+#   fm-afk-launch.sh reconcile Close a recorded-but-dead daemon terminal by exact
+#                              id and drop the record (recovery after a crash).
+#   fm-afk-launch.sh quiet-check
+#                              Whether /quiet needs anything here (QUIET MODE
+#                              above): exit 0 with one line when it needs
+#                              nothing; exit 1 when quiet mode enters through
+#                              `enter` and the daemon, with one line naming why
+#                              only on a home that runs the host; exit 2 with one
+#                              line naming a live away record on that home.
+#
+# Supported backends: herdr, tmux, and rex for `start`; t3code only through
+# `start-native` (T3 hosts no terminal to create, so the daemon runs as the
+# captain's own tracked background job, which means a Codex captain on t3code
+# has no away mode). Others (zellij, orca, cmux, paseo, tern) have no verified
+# non-visible-launch primitive here yet and refuse loudly. On rex the daemon
+# runs in a dedicated Rex session of its own, so the captain's session gains no
+# tab and keeps its focus.
+#
+# Test seam: FM_AFK_LAUNCH_ENTRY overrides the command run in the created
+# terminal (default bin/fm-afk-start.sh), so a topology test can run a harmless
+# placeholder instead of a real daemon. FM_SUPERVISOR_TARGET/FM_SUPERVISOR_BACKEND
+# override the captured captain pane/backend (an isolated lab pane in tests).
+# FM_AFK_MODE (away|quiet, default away) declares which mode an `enter` writes;
+# with it unset, a daemon start/refresh uses the record's mode.
+# FM_TEST_HARNESS pins the primary harness this launch path judges, through
+# fm_supervision_host_primary (bin/fm-supervision-engine-lib.sh owns the seam).
+set -u
+
+FM_AFK_LAUNCH_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$FM_AFK_LAUNCH_DIR/.." && pwd)}"
+FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
+case "$FM_HOME" in
+  /*) ;;
+  *)
+    FM_AFK_LAUNCH_HOME_INPUT=$FM_HOME
+    FM_HOME=$(CDPATH='' cd -- "$FM_AFK_LAUNCH_HOME_INPUT" 2>/dev/null && pwd -P) || {
+      echo "error: FM_HOME directory cannot be resolved: $FM_AFK_LAUNCH_HOME_INPUT" >&2
+      exit 1
+    }
+    ;;
+esac
+if [ -n "${FM_STATE_OVERRIDE:-}" ]; then
+  case "$FM_STATE_OVERRIDE" in
+    /*) ;;
+    *)
+      FM_AFK_LAUNCH_STATE_INPUT=$FM_STATE_OVERRIDE
+      FM_STATE_OVERRIDE=$(CDPATH='' cd -- "$FM_AFK_LAUNCH_STATE_INPUT" 2>/dev/null && pwd -P) || {
+        echo "error: FM_STATE_OVERRIDE directory cannot be resolved: $FM_AFK_LAUNCH_STATE_INPUT" >&2
+        exit 1
+      }
+      ;;
+  esac
+fi
+FM_AFK_LAUNCH_STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
+FM_AFK_LAUNCH_RECORD="$FM_AFK_LAUNCH_STATE/.afk-daemon-terminal"
+FM_AFK_LAUNCH_LOCK="$FM_AFK_LAUNCH_STATE/.afk-launch.lock"
+FM_AFK_LAUNCH_WS_LABEL="firstmate-afk-daemon"
+
+# shellcheck source=bin/fm-backend.sh
+. "$FM_AFK_LAUNCH_DIR/fm-backend.sh"
+# shellcheck source=bin/fm-supervisor-target-lib.sh
+. "$FM_AFK_LAUNCH_DIR/fm-supervisor-target-lib.sh"
+# fm-afk-start.sh provides the daemon-lock liveness helpers and
+# fm_afk_clear_stale_artifacts; it is sourceable (BASH_SOURCE guard) and its
+# main does not run on source. It sets `set -eu`, so turn errexit back off for
+# this script's best-effort flow immediately after.
+# shellcheck source=bin/fm-afk-start.sh
+. "$FM_AFK_LAUNCH_DIR/fm-afk-start.sh"
+set +e
+# The away-posture record owner; sourced for its path helpers, driven as a
+# command for every record mutation so its output reaches the captain.
+# shellcheck source=bin/fm-afk-contract.sh
+. "$FM_AFK_LAUNCH_DIR/fm-afk-contract.sh"
+FM_AFK_CONTRACT_CMD="$FM_AFK_LAUNCH_DIR/fm-afk-contract.sh"
+# The supervision host's home gate and attended readiness check.
+# shellcheck source=bin/fm-supervision-engine-lib.sh
+. "$FM_AFK_LAUNCH_DIR/fm-supervision-engine-lib.sh"
+
+fm_afk_launch_log() { printf 'fm-afk-launch: %s\n' "$*" >&2; }
+
+fm_afk_launch_lock_owned() {
+  local pid expected actual
+  [ -d "$FM_AFK_LAUNCH_LOCK" ] || return 1
+  pid=$(cat "$FM_AFK_LAUNCH_LOCK/pid" 2>/dev/null) || return 1
+  expected=$(cat "$FM_AFK_LAUNCH_LOCK/pid-identity" 2>/dev/null) || return 1
+  actual=$(fm_pid_identity "$pid" 2>/dev/null) || return 1
+  [ -n "$expected" ] && [ "$actual" = "$expected" ]
+}
+
+fm_afk_launch_lock_acquire() {
+  local attempt=0 incomplete=0 identity
+  mkdir -p "$FM_AFK_LAUNCH_STATE" || return 1
+  while [ "$attempt" -lt 200 ]; do
+    attempt=$((attempt + 1))
+    if mkdir "$FM_AFK_LAUNCH_LOCK" 2>/dev/null; then
+      if ! printf '%s' "$$" > "$FM_AFK_LAUNCH_LOCK/pid"; then
+        rm -rf "$FM_AFK_LAUNCH_LOCK"
+        return 1
+      fi
+      identity=$(fm_pid_identity "$$" 2>/dev/null) || {
+        rm -rf "$FM_AFK_LAUNCH_LOCK"
+        return 1
+      }
+      if [ -z "$identity" ] || ! printf '%s' "$identity" > "$FM_AFK_LAUNCH_LOCK/pid-identity"; then
+        rm -rf "$FM_AFK_LAUNCH_LOCK"
+        return 1
+      fi
+      return 0
+    fi
+    if [ ! -s "$FM_AFK_LAUNCH_LOCK/pid" ] || [ ! -s "$FM_AFK_LAUNCH_LOCK/pid-identity" ]; then
+      incomplete=$((incomplete + 1))
+      if [ "$incomplete" -lt 20 ]; then
+        sleep 0.05
+        continue
+      fi
+    else
+      incomplete=0
+    fi
+    if ! fm_afk_launch_lock_owned; then
+      rm -rf "$FM_AFK_LAUNCH_LOCK" 2>/dev/null || return 1
+      incomplete=0
+      continue
+    fi
+    sleep 0.05
+  done
+  fm_afk_launch_log "timed out waiting for launcher lock"
+  return 1
+}
+
+fm_afk_launch_lock_release() {
+  local pid
+  pid=$(cat "$FM_AFK_LAUNCH_LOCK/pid" 2>/dev/null || true)
+  [ "$pid" = "$$" ] || return 0
+  rm -rf "$FM_AFK_LAUNCH_LOCK"
+}
+
+fm_afk_launch_usage() {
+  sed -n '/^# Usage:/,/^# Supported backends:/p' "${BASH_SOURCE[0]}" | sed '$d' | sed 's/^# \{0,1\}//'
+}
+
+fm_afk_launch_primary_harness() {
+  fm_supervision_host_primary
+}
+
+# The primary harnesses whose arm owner runs the supervision host when the
+# home runs it (docs/supervision-host.md).
+fm_afk_launch_host_primary() {  # <harness>
+  case "$1" in
+    claude|cursor|opencode|omp|grok|codex|agy) return 0 ;;
+  esac
+  return 1
+}
+
+# True when the posture record is a quiet entry's (bin/fm-afk-contract.sh mode).
+fm_afk_launch_record_quiet() {
+  [ "$(fm_afk_contract_mode "$FM_AFK_LAUNCH_STATE")" = quiet ]
+}
+
+# An explicit request takes precedence; otherwise the record owns the mode
+# for both a new daemon and a refresh of an existing one.
+fm_afk_launch_requested_mode() {
+  if [ -n "${FM_AFK_MODE:-}" ]; then
+    printf '%s' "$FM_AFK_MODE"
+  else
+    fm_afk_contract_mode "$FM_AFK_LAUNCH_STATE"
+  fi
+}
+
+# Whether /quiet needs anything here (the header's QUIET MODE): 0 when it needs
+# nothing; 2 while an away record is live on a home that runs the host;
+# otherwise 1, with FM_AFK_LAUNCH_QUIET_WHY naming what the attended host
+# lacks on a home that runs it, or empty where quiet mode is the daemon's as
+# it is without the host (no host, another primary, or quiet mode already
+# entered).
+fm_afk_launch_quiet_needs_nothing() {
+  local harness config
+  FM_AFK_LAUNCH_QUIET_WHY=
+  harness=$(fm_afk_launch_primary_harness)
+  fm_afk_launch_host_primary "$harness" || return 1
+  config=${FM_CONFIG_OVERRIDE:-$FM_HOME/config}
+  fm_supervision_host_enabled "$config" "$harness" || return 1
+  if fm_afk_contract_present "$FM_AFK_LAUNCH_STATE"; then
+    fm_afk_launch_record_quiet || return 2
+    return 1
+  fi
+  [ ! -e "$FM_AFK_LAUNCH_STATE/.afk" ] || return 1
+  if ! fm_supervision_host_attended_ready "$config" "$harness"; then
+    FM_AFK_LAUNCH_QUIET_WHY="$FM_SUPERVISION_HOST_UNREADY${FM_SUPERVISION_ENGINE_PROBLEM:+: $FM_SUPERVISION_ENGINE_PROBLEM}"
+  elif ! fm_supervision_host_main_key "$FM_AFK_LAUNCH_STATE" >/dev/null; then
+    FM_AFK_LAUNCH_QUIET_WHY="the main session could not be identified"
+  elif ! FM_STATE_OVERRIDE="$FM_AFK_LAUNCH_STATE" "$FM_AFK_LAUNCH_DIR/fm-host-mirror.sh" check; then
+    FM_AFK_LAUNCH_QUIET_WHY="the dialog mirror is missing or could not be read"
+  fi
+  [ -z "$FM_AFK_LAUNCH_QUIET_WHY" ]
+}
+
+fm_afk_launch_quiet_check() {
+  local rc retry
+  fm_afk_launch_quiet_needs_nothing
+  rc=$?
+  if [ "$rc" -eq 2 ]; then
+    printf 'Quiet mode starts nothing on this home while its away record (state/.afk-contract) is live: the captain has returned, so run the /afk return (bin/fm-afk-return.sh), pass its catch-up gate, then run quiet-check again.\n'
+    return 2
+  fi
+  if [ "$rc" -ne 0 ]; then
+    [ -z "$FM_AFK_LAUNCH_QUIET_WHY" ] \
+      || printf 'Quiet mode is not already the ordinary posture on this home, because %s, so every attended wake reaches this conversation; quiet mode enters through the quiet daemon instead.\n' "$FM_AFK_LAUNCH_QUIET_WHY"
+    return 1
+  fi
+  if retry=$(fm_supervision_host_paused_until "$FM_AFK_LAUNCH_STATE"); then
+    if [ "$(date +%s)" -lt "$retry" ]; then
+      retry="its next retry is due at $(fm_supervision_host_clock "$retry")"
+    else
+      retry="its next wake retries it"
+    fi
+    printf 'Quiet mode starts nothing on this home, but its supervision session is paused after repeated engine errors: routine wakes reach this conversation until it recovers, and %s.\n' "$retry"
+    return 0
+  fi
+  printf 'Quiet mode needs nothing on this home: the ordinary supervision session already handles the wakes it can while the captain is present, never opens a turn here for a routine outcome, and hands this conversation only what needs it; no daemon and no away record are used.\n'
+}
+
+# The away daemon is no longer launched on Pi, nor for away mode on a primary
+# whose home runs the supervision host (fm_supervision_host_enabled,
+# docs/supervision-host.md): the posture record is the whole entry there and
+# the ordinary supervision session runs in both postures. Quiet mode runs the
+# daemon on that home only where a quiet `enter` found the attended host
+# unready (the header's QUIET MODE), so a quiet entry or a refresh of a running
+# quiet daemon is allowed.
+fm_afk_launch_daemon_allowed() {
+  local harness mode
+  harness=$(fm_afk_launch_primary_harness)
+  case "$harness" in
+    pi|pi-signed)
+      fm_afk_launch_log "the away daemon is no longer launched on $harness; the away-posture record is the posture there (run bin/fm-afk-launch.sh enter and stop)"
+      return 1 ;;
+  esac
+  fm_afk_launch_host_primary "$harness" || return 0
+  fm_supervision_host_enabled "${FM_CONFIG_OVERRIDE:-$FM_HOME/config}" "$harness" || return 0
+  mode=$(fm_afk_launch_requested_mode)
+  if [ -z "$mode" ] && [ -f "$FM_AFK_LAUNCH_STATE/.afk" ]; then
+    mode=$(head -n 1 "$FM_AFK_LAUNCH_STATE/.afk" 2>/dev/null || true)
+  fi
+  [ "$mode" != quiet ] || return 0
+  fm_afk_launch_log "the away daemon is not launched on this $harness home, which runs the supervision host (docs/supervision-host.md); the away-posture record is the posture here (run bin/fm-afk-launch.sh enter and stop)"
+  return 1
+}
+
+# One line for the entry when this home runs the supervision host but the host
+# has no engine (bin/fm-supervision-engine-lib.sh owns the home gate), so
+# the away posture would hand every wake to main.
+fm_afk_launch_host_engine_note() {
+  local harness config
+  [ "${FM_AFK_MODE:-}" != quiet ] || return 0
+  config=${FM_CONFIG_OVERRIDE:-$FM_HOME/config}
+  harness=$(fm_afk_launch_primary_harness)
+  fm_afk_launch_host_primary "$harness" || return 0
+  fm_supervision_host_config "$config" "$harness" || return 0
+  [ -z "$FM_SUPERVISION_ENGINE" ] || return 0
+  printf 'Supervision host: no engine runs the away session on this home (%s), so every away wake reaches this conversation; name a verified engine in config/supervision-host (for example "claude").\n' \
+    "$FM_SUPERVISION_ENGINE_PROBLEM"
+}
+
+fm_afk_launch_catchup_pending() {
+  if [ -e "$FM_AFK_LAUNCH_STATE/.afk-return-catchup" ]; then
+    fm_afk_launch_log "return catch-up is still pending; run bin/fm-afk-return.sh check before re-entering away mode"
+    return 0
+  fi
+  return 1
+}
+
+fm_afk_launch_record_require() {
+  local record
+  record=$(fm_afk_contract_path "$FM_AFK_LAUNCH_STATE")
+  if ! fm_afk_contract_present "$FM_AFK_LAUNCH_STATE"; then
+    fm_afk_launch_log "an away-posture record is required; run enter before starting the daemon"
+    return 1
+  fi
+  fm_afk_contract_validate "$record" || {
+    fm_afk_launch_log "the away-posture record is unreadable; run enter before starting the daemon"
+    return 1
+  }
+}
+
+fm_afk_launch_enter() {
+  fm_afk_launch_catchup_pending && return 1
+  if [ "${FM_AFK_MODE:-}" = quiet ]; then
+    fm_afk_launch_quiet_needs_nothing
+    case $? in
+      0)
+        fm_afk_launch_log "quiet mode writes no away-posture record on this home, whose attended supervision host already is quiet mode; run bin/fm-afk-launch.sh quiet-check"
+        return 3 ;;
+      2)
+        fm_afk_launch_log "quiet mode refuses while this home's away record (state/.afk-contract) is live; run the /afk return (bin/fm-afk-return.sh) and pass its catch-up gate, then run bin/fm-afk-launch.sh quiet-check"
+        return 3 ;;
+    esac
+  fi
+  "$FM_AFK_CONTRACT_CMD" enter "$@" || return
+  fm_afk_launch_host_engine_note
+}
+
+# The command run inside the created terminal. Real launch runs the shared
+# daemon entry; a test overrides it with a harmless placeholder.
+fm_afk_launch_entry_cmd() {
+  printf '%s' "${FM_AFK_LAUNCH_ENTRY:-$FM_ROOT/bin/fm-afk-start.sh}"
+}
+
+# The shell command a created daemon terminal runs. The terminal is not in the
+# captain's process tree, so the daemon cannot detect the captain's harness
+# itself; the launcher names it here (bin/fm-supervise-daemon.sh
+# fm_daemon_primary_harness).
+fm_afk_launch_daemon_cmd() {  # <captain-target> <captain-backend>
+  printf 'exec env FM_HOME=%q FM_SUPERVISOR_TARGET=%q FM_SUPERVISOR_BACKEND=%q FM_DAEMON_PRIMARY_HARNESS=%q %q' \
+    "$FM_HOME" "$1" "$2" "$(fm_afk_launch_primary_harness)" "$(fm_afk_launch_entry_cmd)"
+}
+
+fm_afk_launch_record_write() {  # <backend> <target> <extra>
+  local pending
+  mkdir -p "$FM_AFK_LAUNCH_STATE" || return 1
+  pending=$(mktemp "$FM_AFK_LAUNCH_STATE/.afk-daemon-terminal.pending.XXXXXX") || return 1
+  printf '%s\t%s\t%s\n' "$1" "$2" "$3" > "$pending" || { rm -f "$pending"; return 1; }
+  mv "$pending" "$FM_AFK_LAUNCH_RECORD" || { rm -f "$pending"; return 1; }
+}
+
+fm_afk_launch_flag_write() {
+  # Use the explicit request or the record's mode, so /afk over a quiet
+  # record switches a running daemon's flag to away on refresh.
+  fm_afk_flag_write "$FM_AFK_LAUNCH_STATE" "$(fm_afk_launch_requested_mode)"
+}
+
+# Read the recorded terminal into FM_AFK_REC_BACKEND/FM_AFK_REC_TARGET. The third
+# field (a herdr workspace id, kept for the record's own documentation) is not
+# needed to close by id, so it is discarded; a rex record's third field is the
+# dedicated session id, kept in FM_AFK_REC_EXTRA because closing kills it.
+# Returns 1 when no record exists.
+fm_afk_launch_record_read() {
+  local extra record
+  FM_AFK_REC_BACKEND=""; FM_AFK_REC_TARGET=""; FM_AFK_REC_EXTRA=""; extra=""
+  [ -f "$FM_AFK_LAUNCH_RECORD" ] || return 1
+  record=$(cat "$FM_AFK_LAUNCH_RECORD" 2>/dev/null) || record=""
+  IFS=$'\t' read -r FM_AFK_REC_BACKEND FM_AFK_REC_TARGET extra \
+    < "$FM_AFK_LAUNCH_RECORD" || true
+  if ! printf '%s\n' "$record" | awk -F '\t' 'NF != 3 { bad=1 } END { exit !(NR == 1 && !bad) }' \
+    || [ -z "$FM_AFK_REC_BACKEND" ] || [ -z "$FM_AFK_REC_TARGET" ]; then
+    fm_afk_launch_log "daemon terminal record is malformed; refusing to act on it"
+    return 2
+  fi
+  FM_AFK_REC_EXTRA=$extra
+  case "$FM_AFK_REC_BACKEND" in
+    herdr) [ -n "$extra" ] ;;
+    rex) [ "${extra%%:*}" = session ] && [ "${FM_AFK_REC_TARGET%%:*}" = "${extra#session:}" ] ;;
+    tmux) : ;;
+    none) [ "$FM_AFK_REC_TARGET" = - ] && [ "$extra" = native ] ;;
+    *) return 2 ;;
+  esac || { fm_afk_launch_log "daemon terminal record is malformed; refusing to act on it"; return 2; }
+}
+
+fm_afk_launch_record_validate_if_present() {
+  local result
+  fm_afk_launch_record_read
+  result=$?
+  [ "$result" -ne 2 ]
+}
+
+# Close a recorded terminal by EXACT id (never a broad sweep). The
+# recorded workspace id (herdr) needs no separate close: closing the pane takes
+# its single-tab dedicated workspace with it. A rex daemon owns a dedicated
+# session, which is killed by its exact recorded id.
+fm_afk_launch_close_terminal() {  # <backend> <target> [extra]
+  local backend=$1 target=$2 extra=${3:-}
+  case "$backend" in
+    rex)
+      fm_backend_source rex || return 1
+      [ "${extra%%:*}" = session ] || return 1
+      fm_backend_rex_cli kill "$extra" >/dev/null 2>&1
+      ;;
+    herdr)
+      fm_backend_source herdr || return 1
+      local session=${target%%:*} pane=${target#*:}
+      [ -n "$session" ] && [ -n "$pane" ] && [ "$pane" != "$target" ] || return 1
+      fm_backend_herdr_cli "$session" pane close "$pane" >/dev/null 2>&1
+      ;;
+    tmux)
+      # target is the dedicated daemon session name - kill exactly it.
+      tmux kill-session -t "$target" 2>/dev/null
+      ;;
+    none)
+      return 0
+      ;;
+    *)
+      fm_afk_launch_log "cannot close unknown recorded backend '$backend'"
+      return 1
+      ;;
+  esac
+}
+
+fm_afk_launch_terminal_absent() {  # <backend> <target>
+  local backend=$1 target=$2 session pane out result code
+  case "$backend" in
+    rex)
+      fm_backend_source rex || return 1
+      [ "$(fm_backend_rex_block_presence "$target")" = missing ]
+      ;;
+    herdr)
+      session=${target%%:*}
+      pane=${target#*:}
+      [ -n "$session" ] && [ -n "$pane" ] && [ "$pane" != "$target" ] || return 1
+      out=$(fm_backend_herdr_cli "$session" pane get "$pane" 2>&1)
+      result=$?
+      [ "$result" -ne 0 ] || return 1
+      code=$(printf '%s' "$out" | jq -r '.error.code // empty' 2>/dev/null) || return 1
+      [ "$code" = pane_not_found ]
+      ;;
+    tmux)
+      out=$(tmux has-session -t "$target" 2>&1)
+      result=$?
+      [ "$result" -eq 1 ] || return 1
+      printf '%s' "$out" | grep -Eq "can't find session"
+      ;;
+    none)
+      return 0
+      ;;
+    *) return 1 ;;
+  esac
+}
+
+fm_afk_launch_close_recorded() {
+  local close_result=0
+  fm_afk_launch_close_terminal "$FM_AFK_REC_BACKEND" "$FM_AFK_REC_TARGET" "${FM_AFK_REC_EXTRA:-}" || close_result=$?
+  if fm_afk_launch_terminal_absent "$FM_AFK_REC_BACKEND" "$FM_AFK_REC_TARGET"; then
+    rm -f "$FM_AFK_LAUNCH_RECORD" || return 1
+    [ "$close_result" -eq 0 ] || fm_afk_launch_log "terminal close command failed, but exact absence was confirmed"
+    return 0
+  fi
+  fm_afk_launch_log "recorded terminal teardown is unconfirmed; preserving exact id"
+  return 1
+}
+
+fm_afk_launch_terminal_alive() {  # <backend> <target>
+  local backend=$1 target=$2 session pane
+  case "$backend" in
+    rex)
+      fm_backend_source rex || return 1
+      fm_backend_rex_target_ready "$target"
+      ;;
+    herdr)
+      session=${target%%:*}
+      pane=${target#*:}
+      [ -n "$session" ] && [ -n "$pane" ] && [ "$pane" != "$target" ] || return 1
+      fm_backend_herdr_cli "$session" pane get "$pane" >/dev/null 2>&1
+      ;;
+    tmux)
+      tmux has-session -t "$target" 2>/dev/null
+      ;;
+    *) return 1 ;;
+  esac
+}
+
+fm_afk_launch_wait_ready() {  # <backend> <target>
+  local backend=$1 target=$2 attempt=0
+  if [ -n "${FM_AFK_LAUNCH_ENTRY:-}" ]; then
+    fm_afk_launch_terminal_alive "$backend" "$target"
+    return
+  fi
+  while [ "$attempt" -lt 100 ]; do
+    attempt=$((attempt + 1))
+    daemon_lock_held_by_live_daemon && return 0
+    fm_afk_launch_terminal_alive "$backend" "$target" || return 1
+    sleep 0.05
+  done
+  return 1
+}
+
+fm_afk_launch_commit_terminal() {  # <backend> <target> <extra> [already-recorded]
+  local backend=$1 target=$2 extra=$3 already_recorded=${4:-0}
+  if [ "$already_recorded" -ne 1 ] && ! fm_afk_launch_record_write "$backend" "$target" "$extra"; then
+    fm_afk_launch_log "failed to persist daemon terminal record; closing $backend:$target"
+    fm_afk_launch_close_terminal "$backend" "$target" "$extra"
+    return 1
+  fi
+  if ! fm_afk_launch_wait_ready "$backend" "$target"; then
+    fm_afk_launch_log "daemon did not become ready; closing $backend:$target"
+    FM_AFK_REC_BACKEND=$backend
+    FM_AFK_REC_TARGET=$target
+    FM_AFK_REC_EXTRA=$extra
+    fm_afk_launch_close_recorded
+    return 1
+  fi
+}
+
+fm_afk_launch_herdr_recover_created() {  # <session> <label>
+  local session=$1 label=$2 workspaces ws_count wsid panes pane_count pane attempt=0
+  while [ "$attempt" -lt 20 ]; do
+    attempt=$((attempt + 1))
+    workspaces=$(fm_backend_herdr_cli "$session" workspace list 2>/dev/null) || { sleep 0.05; continue; }
+    ws_count=$(printf '%s' "$workspaces" | jq --arg want "$label" \
+      '[.result.workspaces[]? | select(.label == $want)] | length' 2>/dev/null) || { sleep 0.05; continue; }
+    if [ "$ws_count" = 0 ]; then
+      sleep 0.05
+      continue
+    fi
+    [ "$ws_count" = 1 ] || return 1
+    wsid=$(printf '%s' "$workspaces" | jq -r --arg want "$label" \
+      '.result.workspaces[]? | select(.label == $want) | .workspace_id' 2>/dev/null) || return 1
+    [ -n "$wsid" ] || return 1
+    panes=$(fm_backend_herdr_cli "$session" pane list --workspace "$wsid" 2>/dev/null) || { sleep 0.05; continue; }
+    pane_count=$(printf '%s' "$panes" | jq '[.result.panes[]?] | length' 2>/dev/null) || { sleep 0.05; continue; }
+    if [ "$pane_count" = 0 ]; then
+      sleep 0.05
+      continue
+    fi
+    [ "$pane_count" = 1 ] || return 1
+    pane=$(printf '%s' "$panes" | jq -r '.result.panes[0].pane_id // empty' 2>/dev/null) || return 1
+    [ -n "$pane" ] || return 1
+    printf '%s\t%s' "$wsid" "$pane"
+    return 0
+  done
+  return 1
+}
+
+# Reconcile a recorded-but-dead terminal: if a record exists and no live daemon
+# owns it, close the leaked terminal by exact id and drop the record.
+fm_afk_launch_reconcile() {
+  local read_result
+  if daemon_lock_held_by_live_daemon; then
+    return 0
+  fi
+  fm_afk_launch_record_read
+  read_result=$?
+  if [ "$read_result" -eq 0 ]; then
+    fm_afk_launch_log "reconciling leaked daemon terminal ${FM_AFK_REC_BACKEND}:${FM_AFK_REC_TARGET}"
+    fm_afk_launch_close_recorded
+  elif [ "$read_result" -eq 2 ]; then
+    return 1
+  fi
+}
+
+fm_afk_launch_restore_backup() {  # <backup> <had-afk>
+  local backup=$1 had_afk=$2 artifact result=0
+  rm -f "$FM_AFK_LAUNCH_STATE/.afk" \
+    "$FM_AFK_LAUNCH_STATE/.subsuper-escalations" \
+    "$FM_AFK_LAUNCH_STATE/.subsuper-escalations.since" \
+    "$FM_AFK_LAUNCH_STATE/.subsuper-inject-wedged" \
+    "$FM_AFK_LAUNCH_STATE/.subsuper-unknown-acked" \
+    "$FM_AFK_LAUNCH_STATE"/.subsuper-reported-stale-* || result=1
+  if [ "$had_afk" -eq 1 ]; then
+    cp "$backup/.afk" "$FM_AFK_LAUNCH_STATE/.afk" || result=1
+  fi
+  for artifact in .subsuper-escalations .subsuper-escalations.since .subsuper-inject-wedged .subsuper-unknown-acked "$backup"/.subsuper-reported-stale-*; do
+    artifact=${artifact##*/}
+    if [ -e "$backup/$artifact" ]; then
+      cp -p "$backup/$artifact" "$FM_AFK_LAUNCH_STATE/$artifact" || result=1
+    fi
+  done
+  if [ "$result" -eq 0 ]; then
+    rm -rf "$backup" || return 1
+  else
+    fm_afk_launch_log "rollback restoration incomplete; backup retained at $backup"
+  fi
+  return "$result"
+}
+
+# Launch the daemon in a non-visible herdr terminal in the CAPTAIN's session
+# (so the daemon can inject into the captain pane, which lives there). A
+# dedicated background workspace (--no-focus) holds exactly one tab/pane; it
+# never touches the captain's active tab. Prints the record line on success.
+fm_afk_launch_create_herdr() {  # <captain-target> <captain-backend>
+  local captain_target=$1 captain_backend=$2 session out wsid pane cmd label recovered create_result
+  session=${captain_target%%:*}
+  if [ -z "$session" ] || [ "$session" = "$captain_target" ]; then
+    fm_afk_launch_log "cannot derive herdr session from captain target '$captain_target'"
+    return 1
+  fi
+  fm_backend_source herdr || return 1
+  fm_backend_herdr_server_ensure "$session" || { fm_afk_launch_log "herdr server not ready for session '$session'"; return 1; }
+  label=${FM_AFK_LAUNCH_LABEL:-"$FM_AFK_LAUNCH_WS_LABEL-$$-${RANDOM:-0}-$(date '+%s')"}
+  out=$(fm_backend_herdr_cli "$session" workspace create --cwd "$FM_HOME" --label "$label" --no-focus 2>/dev/null)
+  create_result=$?
+  wsid=$(printf '%s' "$out" | jq -r '.result.workspace.workspace_id // empty' 2>/dev/null)
+  pane=$(printf '%s' "$out" | jq -r '.result.root_pane.pane_id // empty' 2>/dev/null)
+  if [ "$create_result" -ne 0 ] && [ -n "$wsid" ] && [ -n "$pane" ]; then
+    fm_afk_launch_log "herdr create failed after returning exact ids; closing $session:$pane"
+    if fm_afk_launch_record_write herdr "$session:$pane" "$wsid"; then
+      FM_AFK_REC_BACKEND=herdr
+      FM_AFK_REC_TARGET="$session:$pane"
+      fm_afk_launch_close_recorded || true
+    else
+      fm_afk_launch_log "failed to persist exact id for failed herdr create"
+    fi
+    return 1
+  fi
+  if [ -z "$wsid" ] || [ -z "$pane" ]; then
+    recovered=$(fm_afk_launch_herdr_recover_created "$session" "$label") || {
+      fm_afk_launch_log "herdr create did not yield a recoverable exact workspace/pane id"
+      return 1
+    }
+    IFS=$'\t' read -r wsid pane <<< "$recovered"
+  fi
+  cmd=$(fm_afk_launch_daemon_cmd "$captain_target" "$captain_backend")
+  if ! fm_afk_launch_record_write herdr "$session:$pane" "$wsid"; then
+    fm_afk_launch_log "failed to persist herdr daemon terminal record; closing $session:$pane"
+    fm_afk_launch_close_terminal herdr "$session:$pane"
+    return 1
+  fi
+  if ! fm_backend_herdr_cli "$session" pane run "$pane" "$cmd" >/dev/null 2>&1; then
+    fm_afk_launch_log "failed to run daemon in herdr pane $session:$pane; closing it"
+    FM_AFK_REC_BACKEND=herdr
+    FM_AFK_REC_TARGET="$session:$pane"
+    fm_afk_launch_close_recorded || true
+    return 1
+  fi
+  fm_afk_launch_commit_terminal herdr "$session:$pane" "$wsid" 1 || return 1
+  fm_afk_launch_log "daemon launched in non-visible herdr workspace $wsid (pane $session:$pane), supervising $captain_target"
+}
+
+# Launch the daemon in a dedicated Rex session of its own (never a tab in the
+# captain's session), recorded by exact ids before the daemon command is typed
+# into its shell, mirroring the herdr create-record-run order.
+fm_afk_launch_create_rex() {  # <captain-target> <captain-backend>
+  local captain_target=$1 captain_backend=$2 out sid bid target cmd label
+  fm_backend_source rex || return 1
+  fm_backend_rex_version_check || { fm_afk_launch_log "rex server not ready"; return 1; }
+  label=${FM_AFK_LAUNCH_LABEL:-"$FM_AFK_LAUNCH_WS_LABEL-$$-${RANDOM:-0}-$(date '+%s')"}
+  out=$(fm_backend_rex_cli new "$label" --cwd "$FM_HOME" --json 2>/dev/null) || {
+    fm_afk_launch_log "rex could not create the daemon session '$label'"
+    return 1
+  }
+  sid=$(printf '%s' "$out" | jq -r '.session_id // empty' 2>/dev/null)
+  bid=$(printf '%s' "$out" | jq -r '.initial_windows[0].block_ids[0] // empty' 2>/dev/null)
+  if ! fm_backend_rex_id_valid session "$sid" || ! fm_backend_rex_id_valid block "$bid"; then
+    fm_afk_launch_log "rex create did not yield exact session/block ids for '$label'"
+    return 1
+  fi
+  target=$(fm_backend_rex_target "$sid" "$bid")
+  cmd=$(fm_afk_launch_daemon_cmd "$captain_target" "$captain_backend")
+  if ! fm_afk_launch_record_write rex "$target" "$sid"; then
+    fm_afk_launch_log "failed to persist rex daemon terminal record; closing $sid"
+    fm_afk_launch_close_terminal rex "$target" "$sid"
+    return 1
+  fi
+  if ! fm_backend_rex_send_text_line "$target" "$cmd"; then
+    fm_afk_launch_log "failed to run daemon in rex block $target; closing its session"
+    FM_AFK_REC_BACKEND=rex
+    FM_AFK_REC_TARGET=$target
+    FM_AFK_REC_EXTRA=$sid
+    fm_afk_launch_close_recorded || true
+    return 1
+  fi
+  fm_afk_launch_commit_terminal rex "$target" "$sid" 1 || return 1
+  fm_afk_launch_log "daemon launched in dedicated rex session $sid (block $target), supervising $captain_target"
+}
+
+# Launch the daemon in a detached tmux session (never a split-window in the
+# captain's window). tmux pane ids are server-global, so the daemon reaches the
+# captain pane by its %id from this separate session.
+fm_afk_launch_create_tmux() {  # <captain-target> <captain-backend>
+  local captain_target=$1 captain_backend=$2 session cmd hash nonce
+  hash=$(printf '%s' "$FM_HOME" | cksum | cut -d' ' -f1)
+  nonce="$$-${RANDOM:-0}-$(date '+%s')"
+  session="fm-afk-daemon-$hash-$nonce"
+  cmd=$(fm_afk_launch_daemon_cmd "$captain_target" "$captain_backend")
+  if ! fm_afk_launch_record_write tmux "$session" ""; then
+    fm_afk_launch_log "failed to persist planned tmux daemon session '$session'"
+    return 1
+  fi
+  if ! tmux new-session -d -s "$session" "$cmd" 2>/dev/null; then
+    fm_afk_launch_log "failed to create detached tmux daemon session '$session'"
+    if ! rm -f "$FM_AFK_LAUNCH_RECORD"; then
+      fm_afk_launch_log "failed to remove planned tmux daemon record after creation failure"
+    fi
+    return 1
+  fi
+  fm_afk_launch_commit_terminal tmux "$session" "" 1 || return 1
+  fm_afk_launch_log "daemon launched in detached tmux session '$session', supervising $captain_target"
+}
+
+fm_afk_launch_start() {
+  local captain_target captain_backend backup artifact had_afk=0 result
+  fm_afk_launch_catchup_pending && return 1
+  fm_afk_launch_daemon_allowed || return 1
+  fm_afk_launch_record_require || return 1
+  # Capture the captain endpoint FIRST, before creating anything.
+  captain_target=$(discover_supervisor_target) || {
+    fm_afk_launch_log "could not resolve the captain supervisor pane (set FM_SUPERVISOR_TARGET)"
+    return 1; }
+  captain_backend=$(discover_supervisor_backend) || {
+    fm_afk_launch_log "could not resolve the captain supervisor backend (set FM_SUPERVISOR_BACKEND)"
+    return 1; }
+  if [ "$captain_backend" = t3code ]; then
+    fm_afk_launch_log "backend t3code hosts no terminal to launch the daemon in; use 'fm-afk-launch.sh start-native' and run bin/fm-afk-start.sh through the harness's tracked background tool"
+    return 1
+  fi
+
+  mkdir -p "$FM_AFK_LAUNCH_STATE"
+
+  if daemon_lock_held_by_live_daemon; then
+    fm_afk_launch_record_validate_if_present || return 1
+    if ! fm_afk_launch_flag_write; then
+      fm_afk_launch_log "failed to refresh away-mode flag"
+      return 1
+    fi
+    fm_afk_launch_log "daemon already running; refreshed away-mode flag (no new terminal)"
+    return 0
+  fi
+
+  backup=$(mktemp -d "$FM_AFK_LAUNCH_STATE/.afk-launch-backup.XXXXXX") || return 1
+  if [ -f "$FM_AFK_LAUNCH_STATE/.afk" ]; then
+    had_afk=1
+    cp "$FM_AFK_LAUNCH_STATE/.afk" "$backup/.afk" || { rm -rf "$backup"; return 1; }
+  fi
+  for artifact in .subsuper-escalations .subsuper-escalations.since .subsuper-inject-wedged .subsuper-unknown-acked "$FM_AFK_LAUNCH_STATE"/.subsuper-reported-stale-*; do
+    artifact=${artifact##*/}
+    if [ -e "$FM_AFK_LAUNCH_STATE/$artifact" ]; then
+      cp -p "$FM_AFK_LAUNCH_STATE/$artifact" "$backup/$artifact" || { rm -rf "$backup"; return 1; }
+    fi
+  done
+  if ! fm_afk_launch_reconcile; then
+    result=1
+  else
+    if fm_afk_clear_stale_artifacts "$FM_AFK_LAUNCH_STATE"; then
+      result=0
+    else
+      fm_afk_launch_log "failed to clear stale away-mode artifacts"
+      result=1
+    fi
+  fi
+  if [ "$result" -eq 0 ]; then
+    if ! fm_afk_launch_flag_write; then
+      fm_afk_launch_log "failed to write away-mode flag"
+      result=1
+    fi
+  fi
+
+  if [ "$result" -eq 0 ]; then
+    case "$captain_backend" in
+      herdr) fm_afk_launch_create_herdr "$captain_target" "$captain_backend"; result=$? ;;
+      tmux)  fm_afk_launch_create_tmux "$captain_target" "$captain_backend"; result=$? ;;
+      rex)   fm_afk_launch_create_rex "$captain_target" "$captain_backend"; result=$? ;;
+      *)
+        fm_afk_launch_log "no non-visible daemon-launch primitive for backend '$captain_backend' yet (supported: herdr, tmux, rex)"
+        result=1
+        ;;
+    esac
+  fi
+  if [ "$result" -ne 0 ]; then
+    fm_afk_launch_restore_backup "$backup" "$had_afk" || result=1
+  else
+    rm -rf "$backup" || result=1
+  fi
+  return "$result"
+}
+
+fm_afk_launch_start_native() {
+  local backup artifact had_afk=0 result=0
+  mkdir -p "$FM_AFK_LAUNCH_STATE" || return 1
+  fm_afk_launch_catchup_pending && return 1
+  fm_afk_launch_daemon_allowed || return 1
+  fm_afk_launch_record_require || return 1
+  if daemon_lock_held_by_live_daemon; then
+    fm_afk_launch_record_validate_if_present || return 1
+    fm_afk_launch_flag_write || return 1
+    fm_afk_launch_log "daemon already running; refreshed away-mode flag"
+    return 0
+  fi
+  backup=$(mktemp -d "$FM_AFK_LAUNCH_STATE/.afk-launch-backup.XXXXXX") || return 1
+  if [ -f "$FM_AFK_LAUNCH_STATE/.afk" ]; then
+    had_afk=1
+    cp "$FM_AFK_LAUNCH_STATE/.afk" "$backup/.afk" || { rm -rf "$backup"; return 1; }
+  fi
+  for artifact in .subsuper-escalations .subsuper-escalations.since .subsuper-inject-wedged .subsuper-unknown-acked "$FM_AFK_LAUNCH_STATE"/.subsuper-reported-stale-*; do
+    artifact=${artifact##*/}
+    if [ -e "$FM_AFK_LAUNCH_STATE/$artifact" ]; then
+      cp -p "$FM_AFK_LAUNCH_STATE/$artifact" "$backup/$artifact" || { rm -rf "$backup"; return 1; }
+    fi
+  done
+  fm_afk_launch_reconcile || result=1
+  if [ "$result" -eq 0 ]; then
+    if ! fm_afk_clear_stale_artifacts "$FM_AFK_LAUNCH_STATE"; then
+      fm_afk_launch_log "failed to clear stale away-mode artifacts"
+      result=1
+    elif ! fm_afk_launch_flag_write; then
+      result=1
+    fi
+  fi
+  if [ "$result" -eq 0 ]; then
+    fm_afk_launch_record_write none - native || result=1
+  fi
+  if [ "$result" -ne 0 ]; then
+    fm_afk_launch_restore_backup "$backup" "$had_afk" || result=1
+  else
+    rm -rf "$backup" || result=1
+  fi
+  return "$result"
+}
+
+fm_afk_launch_stop() {
+  local pid pid_identity current_identity result=0 read_result archived closed_daemon_terminal=0
+  fm_afk_launch_record_read
+  read_result=$?
+  if [ "$read_result" -eq 2 ]; then
+    fm_afk_launch_log "malformed daemon terminal record; refusing to stop away mode"
+    return 1
+  fi
+  # (1) SIGTERM the daemon so its cleanup trap flushes buffered escalations
+  # WHILE state/.afk is still present (the exit-ordering fix: clearing .afk
+  # first would make that flush a no-op via inject_msg's presence gate).
+  pid=""
+  pid_identity=""
+  if daemon_lock_held_by_live_daemon; then
+    pid=$(daemon_lock_pid 2>/dev/null) || return 1
+    pid_identity=$(fm_pid_identity "$pid" 2>/dev/null) || return 1
+  fi
+  if [ -n "$pid" ]; then
+    if ! kill -TERM "$pid" 2>/dev/null; then
+      fm_afk_launch_log "failed to signal away-mode daemon pid=$pid"
+      result=1
+    fi
+    for _ in $(seq 1 40); do
+      fm_pid_alive "$pid" || break
+      sleep 0.25
+    done
+  fi
+  if [ -n "$pid" ] && fm_pid_alive "$pid"; then
+    current_identity=$(fm_pid_identity "$pid" 2>/dev/null) || {
+      fm_afk_launch_log "could not confirm away-mode daemon exit; preserving lifecycle state"
+      return 1
+    }
+    if [ "$current_identity" = "$pid_identity" ]; then
+      fm_afk_launch_log "away-mode daemon did not exit after SIGTERM; preserving lifecycle state"
+      return 1
+    fi
+  fi
+  # (2) Close the daemon's own terminal by exact id. A native/none record or
+  # an absent record means no terminal existed for this entry (Pi never
+  # launches one).
+  if [ "$read_result" -eq 0 ]; then
+    if [ "$FM_AFK_REC_BACKEND" != none ]; then
+      closed_daemon_terminal=1
+    fi
+    fm_afk_launch_close_recorded || result=1
+    [ "$result" -eq 0 ] || closed_daemon_terminal=0
+  fi
+  # (3) Clear the away-mode flag, then (4) archive the posture record LAST so the
+  # posture ends only once every daemon-side artifact is down.
+  if ! rm -f "$FM_AFK_LAUNCH_STATE/.afk"; then
+    fm_afk_launch_log "failed to clear away-mode flag"
+    result=1
+  fi
+  if [ "$result" -eq 0 ] && fm_afk_contract_present "$FM_AFK_LAUNCH_STATE"; then
+    if archived=$("$FM_AFK_CONTRACT_CMD" archive); then
+      fm_afk_launch_log "away-posture record archived at $archived"
+    else
+      fm_afk_launch_log "failed to archive the away-posture record; it still stands"
+      result=1
+    fi
+  fi
+  if [ "$result" -eq 0 ]; then
+    if [ "$closed_daemon_terminal" -eq 1 ]; then
+      fm_afk_launch_log "away mode stopped; daemon terminal torn down, .afk cleared, and the posture record archived"
+    else
+      fm_afk_launch_log "away mode stopped; no daemon terminal was running, .afk cleared, and the posture record archived"
+    fi
+  else
+    fm_afk_launch_log "away mode stopped; terminal teardown or the record archive remains recorded for retry"
+  fi
+  return "$result"
+}
+
+# Roll back a failed quiet start (the header's QUIET MODE): with a quiet record
+# and no live daemon, archive the record as `stop` does. Returns <status>.
+fm_afk_launch_quiet_rollback() {  # <status>
+  local status=$1
+  if [ "$(fm_afk_launch_requested_mode)" = quiet ] && fm_afk_launch_record_quiet \
+    && ! daemon_lock_held_by_live_daemon; then
+    fm_afk_launch_log "the quiet daemon did not start; ending quiet mode so its record does not outlive it"
+    fm_afk_launch_stop
+  fi
+  return "$status"
+}
+
+fm_afk_launch_main() {
+  local result
+  # Traps first, lock second. Acquiring before the handlers exist leaves a
+  # window where a signal terminates this process by default action and leaks
+  # the lock directory, which then blocks the next away-mode launch until the
+  # stale-owner reclaim path clears it. fm_afk_launch_lock_release only removes
+  # a lock this process owns, so arming it before acquisition is safe.
+  trap fm_afk_launch_lock_release EXIT
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+  fm_afk_launch_lock_acquire || return 1
+  case "${1:-start}" in
+    enter) shift; fm_afk_launch_enter "$@" ;;
+    propose|confirm)
+      fm_afk_launch_log "'$1' was retired with the wait-for-go gate: /afk is itself the go, so run 'enter' to write the record in the same turn"
+      (exit 2) ;;
+    start) fm_afk_launch_start || fm_afk_launch_quiet_rollback $? ;;
+    start-native) fm_afk_launch_start_native || fm_afk_launch_quiet_rollback $? ;;
+    stop) fm_afk_launch_stop ;;
+    reconcile) fm_afk_launch_reconcile ;;
+    quiet-check) fm_afk_launch_quiet_check ;;
+    -h|--help|help) fm_afk_launch_usage ;;
+    *) fm_afk_launch_usage >&2; return 2 ;;
+  esac
+  result=$?
+  fm_afk_launch_lock_release || result=1
+  trap - EXIT INT TERM
+  return "$result"
+}
+
+if [ "${BASH_SOURCE[0]}" = "${0}" ]; then
+  fm_afk_launch_main "$@"
+fi
