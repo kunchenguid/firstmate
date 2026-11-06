@@ -417,7 +417,11 @@ Kimi 2.3.0 reworded its folder prompt: the options read `Trust and continue` and
 It also reads a root `.mcp.json` at the git worktree root as a project declaration, which its documentation does not name; the prompt's `Config:` line names whichever file declared the servers.
 Pressing Enter on an announcing prompt started the declared stdio command before any login, so `bin/fm-spawn.sh` never answers one.
 In a pane too short for the prompt Kimi shows only the title and `Enlarge terminal to review sources. Esc exit.`, and in a pane a few rows taller it keeps the complete dialog and pages the lines between the directory and the options, marked `←→ page · N / M`, which can hide the announcement.
-`bin/fm-kimi-trust-lib.sh` owns the predicates and `tests/captures/kimi-code-2.3.0/README.md` the recorded panes.
+`bin/fm-kimi-trust-lib.sh` owns the predicates, `tests/captures/kimi-code-2.3.0/README.md` the 2.3.0 panes, and `tests/captures/kimi-code-2.4.0/README.md` the 2.4.0 instruction disclosure.
+Verified again on 2026-10-29 on Linux with tmux 3.6 against the installed Kimi Code CLI 2.4.0.
+The option pair and selection glyph are unchanged from 2.3.0.
+In a directory whose project instructions are `AGENTS.md`, the empty-disclosure line is replaced by `Load project instructions` over `Check: AGENTS.md`.
+That disclosure is not a project MCP announcement, and the same predicates answer it with Enter.
 The default-on live guard launches the installed Kimi bare in a private tmux server, spends no tokens, needs no login, and refreshes this evidence:
 
 ```sh
@@ -439,9 +443,48 @@ ok - kimi 2.3.0: a short pane collapses the prompt below the complete dialog, an
 ok - kimi 2.3.0: folder-prompt predicates agree with the installed Kimi on every recorded wording
 ```
 
-The portable regression `tests/fm-kimi-harness.test.sh` replays the recorded panes through its fake pane: the plain prompt is answered once and the brief delivered, each announcing wording and the paged prompt receive no key and report why, and the collapsed prompt reports that it is not ready.
-Each case is non-vacuous: dropping the 2.3.0 option pair from the complete-dialog test fails the plain case, making the announcement test never fire fails the root `.mcp.json` case, and making the page test never fire fails the paged case.
+The portable regression `tests/fm-kimi-harness.test.sh` replays the recorded panes through its fake pane: the plain prompt is answered once and the brief delivered, each announcing wording and the paged prompt receive no key and report why, the collapsed prompt reports that it is not ready, and the 2.4.0 instruction prompt is answered once and the brief delivered.
+Each case is non-vacuous: dropping the 2.3.0 option pair from the complete-dialog test fails the plain case and the 2.4.0 instruction case, making the announcement test never fire fails the root `.mcp.json` case, and making the page test never fire fails the paged case.
 The 2.0.0 wording keeps its existing cases in the same suite.
+
+Observed output against the installed Kimi Code CLI 2.4.0 on 2026-10-29, from `bash tests/fm-kimi-trust-prompt-live-e2e.test.sh`:
+
+```text
+# kimi 2.4.0: plain prompt options read 'Trust and continue' / 'Exit'
+ok - kimi 2.4.0: a plain directory's folder prompt is the complete dialog, and Enter clears it into a ready pane
+# kimi 2.4.0: instructions prompt options read 'Trust and continue' / 'Exit'
+# kimi 2.4.0: instructions disclosure: Load project instructions;Check: AGENTS.md;
+ok - kimi 2.4.0: a directory with project instructions shows a complete folder prompt, and Enter clears it into a ready pane
+# kimi 2.4.0: root-mcp-json prompt announces: Start 1 MCP server automatically;Config: .mcp.json;
+ok - kimi 2.4.0: a root-mcp-json declaration is announced on the folder prompt, which receives no answer, and its command never ran
+# kimi 2.4.0: kimi-code-mcp-json prompt announces: Start 1 MCP server automatically;Config: .kimi-code/mcp.json;
+ok - kimi 2.4.0: a kimi-code-mcp-json declaration is announced on the folder prompt, which receives no answer, and its command never ran
+# kimi 2.4.0: 100x7 pane shows: Trust this folder?;Enlarge terminal to review sources. Esc exit.;
+# kimi 2.4.0: 100x12 pane: the announcement is on a hidden page, so only the page marker refuses this prompt
+ok - kimi 2.4.0: a short pane collapses the prompt below the complete dialog, and a slightly taller one pages it with the page marker on screen
+ok - kimi 2.4.0: folder-prompt predicates agree with the installed Kimi on every recorded wording
+```
+
+## Kimi brief delivery
+
+Verified on 2026-10-29 on Linux with tmux 3.6 against Kimi Code CLI 2.4.0, launched with a disposable home and its updater off.
+An immediate Enter after the brief pointer is typed leaves that pointer in the composer.
+One Enter after a 0.25s pause clears the composer.
+With no login, Kimi answers that submit locally with `Error: LLM not set, send "/login" to login` and leaves `context: 0%`, so the run spends no model tokens.
+`tests/fm-kimi-harness.test.sh` pins the delivery decision: a cleared box plus the `❯` user line confirms even at `context: 0%`, nonzero context confirms a cleared box with no echo, and an echo or a nonzero percentage does not confirm while the pointer is still in the box.
+The opt-in live guard refreshes the installed-binary half:
+
+```sh
+FM_KIMI_BRIEF_DELIVERY_LIVE=1 bin/fm-test-run.sh tests/fm-kimi-brief-delivery-live-e2e.test.sh
+```
+
+Observed output:
+
+```text
+ok - kimi 2.4.0: an immediate Enter leaves the brief pointer typed in the composer
+# kimi 2.4.0: one Enter after 0.25s cleared the composer; Error: LLM not set, send "/login" to login;context: 0%;
+ok - kimi 2.4.0: one Enter after the paste-burst window submits the brief pointer
+```
 
 ## Claude workspace trust
 
