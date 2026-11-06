@@ -64,6 +64,19 @@
 #   first in the private launch-brief overlay, including the exact task-owned
 #   steering inbox. This never rewrites a project's instruction files or a
 #   secondmate's charter.
+#   Optional worker-selection.json is owned by fm-brief.sh's typed selection
+#   flags. Resolve it with fm-worker-preparation.mjs before allocating a worker:
+#   inject current role and unique canonical skill bodies into launch-brief.md,
+#   and record resolved paths/hashes/associations/origins in worker-preparation.json.
+#   No native OMP subagent is involved. A missing/unreadable/malformed binding
+#   refuses launch; an absent selection preserves legacy behavior.
+#   Initial-input adapters carry those bodies through their existing envelope.
+#   Claude keeps its record doorbell and receives worker-context.md through a
+#   SessionStart stdout hook; Kimi/Rovo serialize that context and the brief
+#   pointer as one JSON line for readiness-gated text submission. Backend
+#   placement and lifecycle are unchanged.
+#   Relaunch re-resolves the same selection; raw custom commands cannot guarantee
+#   prepared delivery and are refused when typed worker selection is present.
 #        fm-spawn.sh <task-id> --relaunch [--harness <name>] [--model <name>] [--effort <level>] [--account <entry>]
 #   --relaunch launches a replacement agent for an EXISTING task into that
 #   task's own recorded worktree, reusing its recorded endpoint when that
@@ -4274,6 +4287,21 @@ if [ "$KIND" = ship ] || [ "$KIND" = scout ]; then
     echo "error: $BRIEF records a Base branch line but the spawn has no --base-branch; pass the brief's base with --base-branch or re-scaffold the brief without one" >&2
     exit 1
   fi
+  WORKER_PREPARATION=
+  WORKER_SELECTION="$DATA/$ID/worker-selection.json"
+  if [ -e "$WORKER_SELECTION" ] || [ -L "$WORKER_SELECTION" ]; then
+    [ "$RAW_LAUNCH" -eq 0 ] || {
+      echo "error: typed worker selection requires a supported launch template, not a raw launch command" >&2
+      exit 1
+    }
+    WORKER_PREPARATION=$(node "$SCRIPT_DIR/fm-worker-preparation.mjs" prepare \
+      "$WORKER_SELECTION" "$DATA/$ID/worker-preparation.json") || exit 1
+    # Pointer-only adapters need the same bytes before their first model turn,
+    # not a later tool read. Keep the generic worker identity first here too.
+    WORKER_CONTEXT_FILE="$DATA/$ID/worker-context.md"
+    { fm_brief_worker_role "$STATE" "$ID" "$FM_ROOT" &&
+      printf '\n%s\n' "$WORKER_PREPARATION"; } > "$WORKER_CONTEXT_FILE" || exit 1
+  fi
   # Use the existing launch-brief overlay for every worker kind, including
   # pre-scope briefs and relaunches. Charters never enter this worker path.
   SOURCE_BRIEF=$BRIEF
@@ -4282,6 +4310,7 @@ if [ "$KIND" = ship ] || [ "$KIND" = scout ]; then
   {
     fm_brief_worker_role "$STATE" "$ID" "$FM_ROOT" &&
       printf '\n' &&
+      { [ -z "$WORKER_PREPARATION" ] || printf '%s\n\n' "$WORKER_PREPARATION"; } &&
       cat "$SOURCE_BRIEF" &&
       if [ "$KIND" = ship ] && [ "$MODE" = no-mistakes ]; then
         fm_brief_intent_overlay "$CAPTAIN_INTENT"
@@ -4326,10 +4355,10 @@ if [ "$KIND" = ship ]; then
   fi
   [ -n "$STANDING_FORGE" ] || STANDING_FORGE=none
   STANDING_MODE=$("$FM_ROOT/bin/fm-project-mode.sh" --raw "$PROJ_NAME" 2>/dev/null | cut -d' ' -f1) || STANDING_MODE=
-  BRIEF_MODE=$(sed -n 's/^Delivery contract: mode=\([^ ]*\).*$/\1/p' "$BRIEF" | head -n 1)
-  BRIEF_FORGE=$(sed -n 's/^Delivery contract: mode=[^ ]*.*[[:space:]]forge=\([^ ]*\).*$/\1/p' "$BRIEF" | head -n 1)
+  BRIEF_MODE=$(sed -n 's/^Delivery contract: mode=\([^ ]*\).*$/\1/p' "$SOURCE_BRIEF" | head -n 1)
+  BRIEF_FORGE=$(sed -n 's/^Delivery contract: mode=[^ ]*.*[[:space:]]forge=\([^ ]*\).*$/\1/p' "$SOURCE_BRIEF" | head -n 1)
   [ -n "$BRIEF_FORGE" ] || BRIEF_FORGE=none
-  BRIEF_BRANCH=$(sed -n 's/^Ship branch: //p' "$BRIEF" | head -n 1)
+  BRIEF_BRANCH=$(sed -n 's/^Ship branch: //p' "$SOURCE_BRIEF" | head -n 1)
   if [ -n "$BRIEF_BRANCH" ]; then
     [ "$BRIEF_BRANCH" = "$BRANCH" ] || {
       echo "error: branch mismatch for $ID: the brief says branch=$BRIEF_BRANCH but this spawn selected branch=$BRANCH" >&2
@@ -4340,16 +4369,16 @@ if [ "$KIND" = ship ]; then
     # there), so a promoted scout whose brief never carried a Ship branch line
     # must relaunch on that recorded branch rather than be refused.
     if [ "$RELAUNCH" -eq 1 ]; then
-      echo "warning: $BRIEF records no ship branch; relaunching on the task's recorded branch $BRANCH" >&2
+      echo "warning: $SOURCE_BRIEF records no ship branch; relaunching on the task's recorded branch $BRANCH" >&2
     else
-      echo "error: $BRIEF records no ship branch; regenerate it with --branch-prefix before spawning $BRANCH" >&2
+      echo "error: $SOURCE_BRIEF records no ship branch; regenerate it with --branch-prefix before spawning $BRANCH" >&2
       exit 1
     fi
   else
-    echo "warning: $BRIEF records no ship branch; defaulting to legacy branch $BRANCH" >&2
+    echo "warning: $SOURCE_BRIEF records no ship branch; defaulting to legacy branch $BRANCH" >&2
   fi
   if [ -z "$BRIEF_MODE" ]; then
-    echo "warning: $BRIEF records no delivery contract line (scaffolded before ship briefs recorded one); launching on the explicit --mode $MODE - confirm its definition of done matches" >&2
+    echo "warning: $SOURCE_BRIEF records no delivery contract line (scaffolded before ship briefs recorded one); launching on the explicit --mode $MODE - confirm its definition of done matches" >&2
   elif [ "$BRIEF_MODE" != "$MODE" ]; then
     echo "error: delivery mismatch for $ID: the brief says mode=$BRIEF_MODE but this spawn passed --mode $MODE; correct the flag or re-scaffold the brief so the worker's instructions and the task record agree" >&2
     exit 1
@@ -4358,9 +4387,9 @@ if [ "$KIND" = ship ]; then
   # as an upstream-consent= token on that same line; like mode and forge, the
   # brief and the spawn flag must agree so the worker's contract and the task
   # record carry the same authority.
-  BRIEF_CONSENT=$(sed -n 's/^Delivery contract: mode=[^ ]*.*[[:space:]]upstream-consent=\([^ ]*\).*$/\1/p' "$BRIEF" | head -n 1)
+  BRIEF_CONSENT=$(sed -n 's/^Delivery contract: mode=[^ ]*.*[[:space:]]upstream-consent=\([^ ]*\).*$/\1/p' "$SOURCE_BRIEF" | head -n 1)
   if [ "$BRIEF_CONSENT" != "$UPSTREAM_CONSENT" ]; then
-    echo "error: upstream-consent mismatch for $ID: $BRIEF records upstream-consent=${BRIEF_CONSENT:-none} but this spawn passed ${UPSTREAM_CONSENT:-none}; correct the flag or re-scaffold the brief so the worker's contract and the task record agree" >&2
+    echo "error: upstream-consent mismatch for $ID: $SOURCE_BRIEF records upstream-consent=${BRIEF_CONSENT:-none} but this spawn passed ${UPSTREAM_CONSENT:-none}; correct the flag or re-scaffold the brief so the worker's contract and the task record agree" >&2
     exit 1
   fi
   # The registered forge is the captain's confirmed binding (bin/fm-project-mode.sh)
@@ -4387,7 +4416,7 @@ if [ "$KIND" = ship ]; then
   fi
   [ -n "$STANDING_PR" ] || STANDING_PR=auto
   [ "$MODE" = no-mistakes ] || STANDING_PR=auto
-  BRIEF_PR=$(sed -n 's/^Delivery contract: mode=[^ ]*.*[[:space:]]pr=\([^ ]*\).*$/\1/p' "$BRIEF" | head -n 1)
+  BRIEF_PR=$(sed -n 's/^Delivery contract: mode=[^ ]*.*[[:space:]]pr=\([^ ]*\).*$/\1/p' "$SOURCE_BRIEF" | head -n 1)
   [ -n "$BRIEF_PR" ] || BRIEF_PR=auto
   if [ "$BRIEF_PR" != "$STANDING_PR" ]; then
     pr_scaffold="fm-brief.sh $ID $PROJ_NAME --mode $MODE"
@@ -7436,6 +7465,15 @@ case "$LAUNCH" in
     LAUNCH=${LAUNCH//__CLAUDESETTINGS__/$(shell_quote "$STATE_REAL/$ID.claude-settings.json")}
   else
     claude_settings="'{\"feedbackDrafts\":\"off\"__CLAUDEATTRIBUTION__}'"
+    if [ -n "${WORKER_PREPARATION:-}" ]; then
+      # SessionStart stdout is Claude's native pre-turn context channel. Keep
+      # the canonical one-line operational doorbell and its durable envelope.
+      worker_context_command="cat -- $(shell_quote "$WORKER_CONTEXT_FILE")"
+      claude_settings=$(jq -cn --arg command "$worker_context_command" \
+        '{feedbackDrafts:"off",hooks:{SessionStart:[{hooks:[{type:"command",command:$command}]}]}}') || exit 1
+      claude_settings="${claude_settings%\}}__CLAUDEATTRIBUTION__}"
+      claude_settings=$(shell_quote "$claude_settings")
+    fi
     LAUNCH=${LAUNCH//__CLAUDESETTINGS__/$claude_settings}
   fi
   ;;
@@ -8010,6 +8048,11 @@ if [ "$HARNESS" = kimi ]; then
     exit 1
   fi
   KIMI_POINTER="Read the brief at $BRIEF_REAL and follow it exactly."
+  if [ -n "${WORKER_PREPARATION:-}" ]; then
+    # Literal terminal delivery must not turn source newlines into submissions.
+    KIMI_POINTER=$(jq -cn --rawfile workerContext "$WORKER_CONTEXT_FILE" \
+      --arg task "$KIMI_POINTER" '{workerContext:$workerContext,task:$task}') || exit 1
+  fi
   KIMI_SUBMIT_RETRIES=${FM_KIMI_SUBMIT_RETRIES:-3}
   KIMI_SUBMIT_SLEEP=${FM_KIMI_SUBMIT_SLEEP:-${FM_KIMI_POLL_INTERVAL:-0.5}}
   KIMI_SUBMIT_SETTLE=${FM_KIMI_SUBMIT_SETTLE:-0}
@@ -8034,6 +8077,10 @@ if [ "$HARNESS" = rovo ]; then
     exit 1
   fi
   ROVO_POINTER="Read the brief at $BRIEF_REAL and follow it exactly."
+  if [ -n "${WORKER_PREPARATION:-}" ]; then
+    ROVO_POINTER=$(jq -cn --rawfile workerContext "$WORKER_CONTEXT_FILE" \
+      --arg task "$ROVO_POINTER" '{workerContext:$workerContext,task:$task}') || exit 1
+  fi
   ROVO_SUBMIT_RETRIES=${FM_ROVO_SUBMIT_RETRIES:-3}
   ROVO_SUBMIT_SLEEP=${FM_ROVO_SUBMIT_SLEEP:-${FM_ROVO_POLL_INTERVAL:-0.5}}
   ROVO_SUBMIT_SETTLE=${FM_ROVO_SUBMIT_SETTLE:-0}
