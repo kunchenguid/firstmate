@@ -3039,7 +3039,7 @@ test_teardown_missing_busy_sidecar_completes() {
   pass "teardown completes when an exact busy-state sidecar is already absent"
 }
 
-test_teardown_preserves_opencode_busy_plugin_on_pool_return() {
+test_teardown_retires_opencode_busy_plugin_on_pool_return() {
   local case_dir rc plugin
   case_dir=$(make_case opencode-busy-wiring)
   write_meta "$case_dir" local-only ship
@@ -3052,10 +3052,8 @@ test_teardown_preserves_opencode_busy_plugin_on_pool_return() {
   rc=0
   run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
   expect_code 0 "$rc" "opencode-busy-wiring: teardown should succeed ($(cat "$case_dir/stderr"))"
-  [ -f "$plugin" ] || fail "opencode-busy-wiring: pool return must retain the busy plugin as on main"
-  assert_contains "$(cat "$plugin")" "prior busy plugin" \
-    "opencode-busy-wiring: pool return must leave the plugin unchanged"
-  pass "teardown leaves opencode's busy plugin in the returned pool worktree as on main"
+  assert_absent "$plugin" "opencode-busy-wiring: pool return left the busy plugin"
+  pass "teardown retires opencode's busy plugin before pool return"
 }
 
 seed_polytoken_wiring() {
@@ -5580,7 +5578,7 @@ test_retained_sources_still_reach_the_ordinary_refusal() {
   pass "present required sources still reach the ordinary teardown refusal"
 }
 
-test_teardown_preserves_opencode_busy_plugin_on_pool_return
+test_teardown_retires_opencode_busy_plugin_on_pool_return
 
 # Archive coverage uses the real teardown entry point over isolated homes.
 test_status_archive_opt_in() {

@@ -17,7 +17,7 @@
 # while an away record (state/.afk-contract, never quiet mode's) exists an
 # item held for the captain is never rechecked at all, in either posture.
 # While state/.afk exists, the daemon owns triage and this watcher queues and exits
-# on every wake. Printed reason lines:
+# on every wake except a bounded paused turn-end. Printed reason lines:
 #   signal: <file>...      status/turn-end signals, surfaced when a listed status
 #                          span has a captain-relevant event OR a no-verb signal lacks
 #                          positive execution evidence, unless afk is active
@@ -3019,6 +3019,24 @@ age_of() {  # seconds since file mtime; "due immediately" if missing
   echo $(( now - m ))
 }
 
+turnend_pause_bound() {  # <turn-ended-file>
+  local task last until now age key
+  task=${1##*/}; task=${task%.turn-ended}
+  STALE_WAIT_DECLARATION=
+  last=$(status_declared_wait_line "$STATE/$task.status")
+  status_is_paused "$last" || return 1
+  STALE_WAIT_DECLARATION=$(stale_wait_declaration "$task")
+  now=$(date +%s)
+  age=$(age_of "$STATE/$task.status")
+  if until=$(status_paused_until "$last") && [ "$now" -ge "$until" ]; then
+    STALE_WAIT_DECLARATION="$STALE_WAIT_DECLARATION:due"
+  elif [ "$age" -lt "$PAUSE_RESURFACE_SECS" ]; then
+    return 0
+  fi
+  key="turnend-$task"
+  stale_wait_throttled "$key" "$STALE_WAIT_DECLARATION"
+}
+
 # Layer 2 + 3 signal scan: status files and turn-end markers.
 # Each file is compared against its persisted reported signature in .seen-* rather
 # than mtime-vs-a-startup-touch, so signals that land while no watcher is running
@@ -3031,6 +3049,9 @@ age_of() {  # seconds since file mtime; "due immediately" if missing
 # bookkeeping appends; fm_wake_signal_seen_current (bin/fm-wake-lib.sh) owns that
 # rule and every other signature change still reads as unreported.
 # Pure read: prints one "<seen-file>\t<sig>\t<file>" line per changed file.
+# Declared pauses bound turn-ends by status age and a declaration-scoped throttle.
+# Only a changed turn-end signature is bounded; rechecks of a reported one stay with
+# handle_paused_stale.
 # The caller records reported state only after surfacing or intentional absorption,
 # and commits a status classification position only after a successful span read.
 scan_signals() {
@@ -3049,7 +3070,10 @@ scan_signals() {
     sf=$(fm_wake_signal_seen_path "$STATE" "$f")
     case "$f" in
       *.status) fm_wake_signal_seen_current "$STATE" "$f" && continue ;;
-      *) [ "$sig" = "$(cat "$sf" 2>/dev/null)" ] && continue ;;
+      *)
+        [ "$sig" = "$(cat "$sf" 2>/dev/null)" ] && continue
+        turnend_pause_bound "$f" && continue
+        ;;
     esac
     printf '%s\t%s\t%s\n' "$sf" "$sig" "$f"
   done
@@ -4154,9 +4178,16 @@ EOF
     # path. Publication failure stays side-band.
     home_summary_refresh_detached
     files=""
+    signal_pause_due=1
     while IFS=$(printf '\t') read -r sf sig f; do
       [ -n "$sf" ] || continue
       case " $files " in *" $f "*) ;; *) files="$files $f" ;; esac
+      case "$f" in
+        *.turn-ended)
+          turnend_pause_bound "$f" || true
+          [ -z "$STALE_WAIT_DECLARATION" ] || signal_pause_due=0
+          ;;
+      esac
     done <<EOF
 $pending
 EOF
@@ -4200,13 +4231,20 @@ EOF
     # passes it to handle_wake (see the comment above handle_wake in
     # bin/fm-supervise-daemon.sh).
     # shellcheck disable=SC2086  # same space-separated status-path list
-    if afk_present || [ "$signal_actionable" -eq 0 ] \
+    if afk_present || [ "$signal_actionable" -eq 0 ] || [ "$signal_pause_due" -eq 0 ] \
       || { ! signal_crew_provably_working $files && ! signal_turnend_panes_churned $files; }; then
       while IFS=$(printf '\t') read -r sf sig f; do
         [ -n "$sf" ] || continue
         file_reason="$reason"
         case " $FM_SIGNAL_NEEDS_DECISION_FILES " in *" $f "*) file_reason="needs-decision:$files" ;; esac
         fm_wake_append signal "$(basename "$f")" "$file_reason" || exit 1
+        case "$f" in
+          *.turn-ended)
+            turnend_pause_bound "$f" || true
+            task=${f##*/}; task=${task%.turn-ended}
+            stale_wait_record "turnend-$task"
+            ;;
+        esac
       done <<EOF
 $pending
 EOF
