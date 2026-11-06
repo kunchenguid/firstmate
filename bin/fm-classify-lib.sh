@@ -170,6 +170,19 @@ last_status_line() {  # <status-file> [<previous-event-var>]
   printf '%s\n' "${scan##*$'\n'}"
 }
 
+# The newest event the crew itself declared: last_status_line past the resolved
+# and captain-held lines a supervisor writes about it. Bounded the same way as
+# last_status_line.
+last_crew_status_line() {  # <status-file>
+  local f=$1 scan='' annotations
+  [ -f "$f" ] && [ -r "$f" ] || return 0
+  annotations="^[[:space:]]*(${FM_CLASSIFY_RESOLVE_VERB:-$FM_CLASSIFY_RESOLVE_VERB_DEFAULT}|${FM_CLASSIFY_CAPTAIN_HELD_VERB:-$FM_CLASSIFY_CAPTAIN_HELD_VERB_DEFAULT})[[:space:]:[]"
+  if ! scan=$(tail -n "$FM_CLASSIFY_EVENT_WINDOW_LINES" "$f" 2>/dev/null | grep -Ev "$annotations" | _fm_status_event_scan); then
+    scan=$(grep -Ev "$annotations" "$f" | _fm_status_event_scan) || :
+  fi
+  printf '%s\n' "${scan##*$'\n'}"
+}
+
 # 0 when <verb> is exactly one recognized status verb, with no leftover token.
 _fm_status_verb_recognized() {  # <verb>
   case "$1" in

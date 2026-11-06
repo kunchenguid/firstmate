@@ -151,8 +151,9 @@
 #   check: pr-register: <lines>
 #                          with config/pr-register-scan present, a task's done
 #                          line reported a PR that the check sweep's
-#                          fm-pr-check.sh scan could not record; the line
-#                          names the task, the PR, and the refusal
+#                          fm-pr-check.sh scan could not record, or whose
+#                          merge watch it could not arm in time; the line
+#                          names the task, the PR, and the refusal or timeout
 #   check: rejected unauthenticated state checks: <paths>
 #                          unsafe state checks were refused without execution
 #   check: rejected unauthenticated PR poll retirement receipts: <paths>
@@ -3197,6 +3198,7 @@ run_check_capture() {
   local pgid rc=0
   fm_check_output_cleanup
   FM_CHECK_RESULT=
+  FM_CHECK_CUT=
   FM_CHECK_OUTPUT=$(mktemp "$STATE/.fm-check-output.XXXXXX") || return 1
   chmod 0600 "$FM_CHECK_OUTPUT" || { fm_check_output_cleanup; return 1; }
   FM_CHECK_SIGNAL_PENDING=
@@ -3223,7 +3225,10 @@ run_check_capture() {
   FM_CHECK_RESULT=$(cat "$FM_CHECK_OUTPUT" 2>/dev/null || true)
   fm_check_output_cleanup
   # Keep what the check printed before the cut, then report the cut itself.
-  [ "$rc" -ne 124 ] || FM_CHECK_RESULT="${FM_CHECK_RESULT:+$FM_CHECK_RESULT$'\n'}timed out after ${CHECK_TIMEOUT}s"
+  [ "$rc" -ne 124 ] || {
+    FM_CHECK_CUT="timed out after ${CHECK_TIMEOUT}s"
+    FM_CHECK_RESULT="${FM_CHECK_RESULT:+$FM_CHECK_RESULT$'\n'}$FM_CHECK_CUT"
+  }
 }
 
 FM_CAPTURE_OUTPUT=
@@ -4005,10 +4010,10 @@ while :; do
     pr_register_reason=
     if [ -e "$CONFIG/pr-register-scan" ]; then
       FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" run_check_capture "$SCRIPT_DIR/fm-pr-check.sh" scan || exit 1
-      if [ -n "$FM_CHECK_RESULT" ]; then
-        pr_register_reason="check: pr-register: $FM_CHECK_RESULT"
-        fm_wake_append check pr-register "$pr_register_reason" || exit 1
-      fi
+      # The scan queued each notice itself, before marking it as sent; only a
+      # scan cut at the check bound, the line run_check_capture writes, is queued here.
+      [ -z "$FM_CHECK_RESULT" ] || pr_register_reason="check: pr-register: $FM_CHECK_RESULT"
+      [ -z "$FM_CHECK_CUT" ] || fm_wake_append check pr-register "check: pr-register: $FM_CHECK_CUT" || exit 1
     fi
     for c in "$STATE"/*.check.sh; do
       [ -e "$c" ] || continue
