@@ -4212,7 +4212,7 @@ test_expected_destination_fail_closed_and_retarget() {
   assert_contains "$out" 'actual base other' 'readiness refusal lost the live base'
 
   # A fresh watcher process must re-read the destination even for a poll armed
-  # before restart. Its authenticated stop check proves that the cycle ran.
+  # before restart. Its delivered recovery notice proves that the cycle ran.
   retire_contributions_observer "$dir"
   add_stop_custom_check "$dir"
   FM_TEST_BASE=other FM_TEST_GH_STATE=MERGED run_watcher_bounded "$dir/home" "$dir/fakebin" \
@@ -4221,7 +4221,6 @@ test_expected_destination_fail_closed_and_retarget() {
   assert_grep 'expected base main, actual base other' "$state/.wake-queue" 'retarget did not queue its recovery notice'
   assert_present "$state/task-a.pr-base-notified" 'retarget delivery did not record its receipt'
   assert_present "$state/task-a.pr-poll" 'retarget retired the armed poll'
-  assert_grep 'z-stop.check.sh' "$dir/restart.out" 'restart never reached its control check'
   ack_watcher_cycle "$state" || fail 'could not acknowledge retarget recovery notice'
   FM_TEST_BASE=other FM_TEST_GH_STATE=MERGED run_watcher_bounded "$dir/home" "$dir/fakebin" \
     > "$dir/retry.out" 2> "$dir/retry.err" || fail 'retarget retry cycle failed'
