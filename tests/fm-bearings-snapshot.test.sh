@@ -3466,12 +3466,12 @@ EOF
   ' >/dev/null || fail "question transport changed placement or report-only text: $json"
   summary=$(PATH="$fakebin:$PATH" FM_HOME="$mate" FM_SNAPSHOT_NOW=2026-07-11T18:00:00Z \
     "$ROOT/bin/fm-fleet-snapshot.sh" --secondmate-home-summary)
-  printf '%s' "$summary" | jq -e --arg question "$title: $reason" '
+  printf '%s' "$summary" | jq -e --arg question "$title: $reason" --arg title "$title" --arg reason "$reason" '
     (.decisions_open | any(.id == "full-call" and .question == $question
       and (.summary | length) <= 161 and (.reason | length) <= 161))
     and (.queued | any(.id == "dated-call" and .question == $question
-      and (.title | length) <= 121 and (.hold_reason | length) <= 161))
-  ' >/dev/null || fail "secondmate transport discarded the full question or expanded compact fields: $summary"
+      and .title == $title and .hold_reason == $reason))
+  ' >/dev/null || fail "secondmate transport discarded the full question, expanded compact decision fields, or truncated queued text: $summary"
   expanded=$(run "$home" "$fakebin" --json --all-decisions)
   printf '%s' "$expanded" | jq -e --arg question "$title: $reason" '
     [.decisions_open[] | select(.id == "dated-call" or .id == "questions/dated-call")]
