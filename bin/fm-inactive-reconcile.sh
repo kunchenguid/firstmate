@@ -413,12 +413,14 @@ terminal_outcome_pr() { # <state-line> <kind>
 # honest unknown, so a crew's own earlier prose is the weaker witness and never
 # vetoes it - otherwise the routine ship shape
 # (`done:` written, the run then fails, the crew goes silent) would reach nobody.
+# Destination proof is independent of that ordering: run-step success must
+# pass the same predicate as status-log readiness before it is presented.
 # The two sources are genuinely comparable only when the state itself came from
 # the status log, and there the crew's latest word still decides.
 terminal_outcome_corroborated() { # <state> <last-status-line> <state-line> <meta>
   local state=$1 last=$2 line=${3:-} meta=$4 declared kind
   if [ "$(state_line_source "$line")" = run-step ]; then
-    [ "$state" = done ] || return 0
+    [ "$state" = 'done' ] || return 0
     kind=$(meta_field "$meta" kind)
     fm_dod_claim_destination "$kind" "$(meta_field "$meta" mode)" "$meta" \
       "$(terminal_outcome_pr "$line" "$kind")"

@@ -291,7 +291,10 @@ emit() {  # <state> <source> [detail]
 
 emit_run() {  # <state> <detail> [pr]
   local detail=$2 reason
-  if [ "$1" = done ] \
+  # All run classifications are provisional until this shared publication
+  # boundary: passed outcomes, green monitors, recovered monitors and merged
+  # detail must prove the destination of this reading's own PR.
+  if [ "$1" = 'done' ] \
     && ! reason=$(fm_dod_claim_destination "$KIND" "$(meta_value mode)" "$META" "${3:-}"); then
     emit blocked run-step "$reason"
   fi

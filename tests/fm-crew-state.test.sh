@@ -158,7 +158,11 @@ SH
 set -u
 case "${1:-} ${2:-}" in
   "pr view")
-    case " $* " in *" baseRefName "*) printf 'main\n'; exit 0 ;; esac
+    case " $* " in
+      *" baseRefName "*)
+        [ "${FM_FAKE_BASE_FAIL:-0}" = 0 ] || exit 1
+        printf '%s\n' "${FM_FAKE_PR_BASE-main}"; exit 0 ;;
+    esac
     exit 1 ;;
   "api graphql")
     [ -z "${FM_FAKE_PR_READ_LOG:-}" ] || printf 'gh\n' >> "$FM_FAKE_PR_READ_LOG"
@@ -198,7 +202,7 @@ case "${1:-} ${2:-}" in
   "mr view")
     [ -z "${FM_FAKE_GLAB_READ_LOG:-}" ] || printf '%s|%s\n' "${GITLAB_HOST:-}" "$*" >> "$FM_FAKE_GLAB_READ_LOG"
     [ "${FM_FAKE_GLAB_READ_FAIL:-0}" = 1 ] && exit 1
-    printf '{"state":"%s","target_branch":"main"}\n' "${FM_FAKE_GLAB_STATE:-merged}"
+    printf '{"state":"%s","target_branch":"%s"}\n' "${FM_FAKE_GLAB_STATE:-merged}" "${FM_FAKE_PR_BASE-main}"
     exit 0 ;;
 esac
 exit 1
@@ -219,8 +223,8 @@ if [ "${FM_FAKE_TEA_READ_FAIL:-0}" = 1 ]; then
   printf '{"message":"not found"}\n'
   exit 0
 fi
-printf '{"state":"%s","merged":%s,"base":{"ref":"main"},"head":{"sha":"abc"}}\n' \
-  "${FM_FAKE_TEA_STATE:-closed}" "${FM_FAKE_TEA_MERGED:-true}"
+printf '{"state":"%s","merged":%s,"base":{"ref":"%s"},"head":{"sha":"abc"}}\n' \
+  "${FM_FAKE_TEA_STATE:-closed}" "${FM_FAKE_TEA_MERGED:-true}" "${FM_FAKE_PR_BASE-main}"
 SH
   cat > "$fb/gerrit-axi" <<'SH'
 #!/usr/bin/env bash
@@ -231,8 +235,8 @@ case "${1:-}" in
     [ "${FM_FAKE_GERRIT_READ_FAIL:-0}" = 1 ] && exit 1
     # url defaults to null, the shape a server whose gerrit.canonicalWebUrl is
     # unset returns, so every case here reads a record that carries no URL.
-    printf '{"ok":true,"op":"show","changes":[{"change":%s,"subject":"fixture change","branch":"main","status":"%s","url":%s}]}\n' \
-      "${FM_FAKE_GERRIT_CHANGE:-${2:-0}}" "${FM_FAKE_GERRIT_STATUS:-MERGED}" \
+    printf '{"ok":true,"op":"show","changes":[{"change":%s,"subject":"fixture change","branch":"%s","status":"%s","url":%s}]}\n' \
+      "${FM_FAKE_GERRIT_CHANGE:-${2:-0}}" "${FM_FAKE_PR_BASE-main}" "${FM_FAKE_GERRIT_STATUS:-MERGED}" \
       "${FM_FAKE_GERRIT_URL_JSON:-null}"
     exit 0 ;;
 esac
@@ -384,6 +388,8 @@ reset_fakes() {
   FM_FAKE_DAEMON_OUTPUT='  ● daemon running (pid 4242)'
   FM_FAKE_DAEMON_PROBE_LOG=
   FM_FAKE_PR_STATE=MERGED
+  FM_FAKE_PR_BASE=main
+  FM_FAKE_BASE_FAIL=0
   FM_FAKE_PR_MERGED=true
   FM_FAKE_PR_READ_FAIL=0
   FM_FAKE_PR_READ_LOG=
@@ -412,6 +418,7 @@ reset_fakes() {
   export FM_FAKE_AXI_HOME_ERROR FM_FAKE_AXI_STATUS_RUN_ERROR FM_FAKE_AXI_STATUS_ERROR
   export FM_FAKE_AXI_STATUS_RUN_01OLD FM_FAKE_AXI_STATUS_RUN_01NEW
   export FM_FAKE_PR_STATE FM_FAKE_PR_MERGED FM_FAKE_PR_READ_FAIL FM_FAKE_PR_READ_LOG FM_FAKE_PR_STATE_AXI
+  export FM_FAKE_PR_BASE FM_FAKE_BASE_FAIL
   export FM_FAKE_GLAB_STATE FM_FAKE_GLAB_READ_FAIL FM_FAKE_GLAB_READ_LOG
   export FM_FAKE_TEA_STATE FM_FAKE_TEA_MERGED FM_FAKE_TEA_READ_FAIL FM_FAKE_TEA_READ_LOG
   export FM_FAKE_GERRIT_STATUS FM_FAKE_GERRIT_CHANGE FM_FAKE_GERRIT_URL_JSON
@@ -1562,6 +1569,77 @@ test_top_level_fixing_done_log_stays_working() {
 }
 
 # (d) terminal run-step is authoritative
+# Every internal classification reaches emit_run's shared proof boundary.
+# Keep the sources separate so a new shortcut cannot silently bypass it.
+test_ready_claim_sources_require_destination() {
+  local source proof failures=0
+  for source in passed checks-passed held-green merged monitor status-log gitlab forgejo gerrit; do
+    for proof in matching mismatch absent unreadable; do
+      (
+        reset_fakes
+        local d out url
+        d=$(new_case "destination-$source-$proof")
+        make_repo_on_branch "$d/wt" fm/destination
+        make_fakebin "$d" >/dev/null
+        url=https://github.com/o/r/pull/1
+        case "$source" in
+          gitlab) url=https://gitlab.com/group/repo/-/merge_requests/1 ;;
+          forgejo) url=https://git.example.org/owner/repo/pull/1 ;;
+          gerrit) url=https://review.example.com/c/project/+/1 ;;
+        esac
+        fm_write_meta "$d/state/destination.meta" "window=fm:fm-destination" \
+          "worktree=$d/wt" 'kind=ship' 'mode=no-mistakes' \
+          'expected_base=release/integration' "pr=$url"
+        FM_FAKE_PR_BASE=release/integration
+        FM_FAKE_AXI_STATUS="$(run_passed_with_pr fm/destination "$url")"
+        FM_FAKE_PR_STATE=OPEN
+        FM_FAKE_PR_MERGED=false
+        case "$source" in
+          checks-passed) FM_FAKE_AXI_STATUS=${FM_FAKE_AXI_STATUS/outcome: passed/outcome: checks-passed} ;;
+          held-green)
+            FM_FAKE_AXI_STATUS="$(run_failed_ci_orphan fm/destination)"
+            FM_FAKE_PR_STATE_AXI=open
+            FM_FAKE_CI_LOGS='all CI checks passed - still monitoring until merged or closed'
+            ;;
+          merged|gitlab|forgejo|gerrit)
+            FM_FAKE_PR_STATE=MERGED; FM_FAKE_PR_MERGED=true ;;
+          monitor)
+            FM_FAKE_AXI_STATUS="$(run_ci_monitoring fm/destination)"
+            FM_FAKE_CI_LOGS='all CI checks passed - still monitoring until merged or closed'
+            ;;
+          status-log)
+            FM_FAKE_AXI_STATUS="$(run_ci_monitoring fm/destination)"
+            printf 'done: PR %s checks green\n' "$url" > "$d/state/destination.status"
+            ;;
+        esac
+        case "$proof" in
+          mismatch) FM_FAKE_PR_BASE=main ;;
+          absent) FM_FAKE_PR_BASE='' ;;
+          unreadable)
+            FM_FAKE_BASE_FAIL=1
+            FM_FAKE_GLAB_READ_FAIL=1
+            FM_FAKE_TEA_READ_FAIL=1
+            FM_FAKE_GERRIT_READ_FAIL=1 ;;
+        esac
+        out=$(FM_HOME="$d" run_crew_state "$d" destination)
+        if [ "$proof" = matching ]; then
+          assert_contains "$out" 'state: done' "$source matching named base must remain ready: $out"
+        else
+          assert_not_contains "$out" 'state: done' "$source/$proof must refuse readiness: $out"
+          assert_not_contains "$out" 'PR merged' "$source/$proof must refuse a merged claim: $out"
+          assert_contains "$out" 'expected PR base release/integration' "$source/$proof must name expected destination: $out"
+          case "$proof" in
+            mismatch) assert_contains "$out" 'actual base main' 'wrong destination must be named' ;;
+            *) assert_contains "$out" 'actual base unavailable' 'unavailable proof must be named' ;;
+          esac
+        fi
+      ) || failures=$((failures + 1))
+    done
+  done
+  [ "$failures" -eq 0 ] || fail "$failures destination claim regressions"
+  pass 'every run-step and status-log ready/merged source requires its own live destination proof'
+}
+
 test_terminal_passed() {
   reset_fakes
   local d; d=$(new_case passed)
@@ -1624,7 +1702,7 @@ test_terminal_passed_uses_matching_retirement_receipt_without_forge() {
   : > "$read_log"
   FM_FAKE_PR_READ_LOG=$read_log
   FM_FAKE_PR_READ_FAIL=1
-  FM_FAKE_AXI_STATUS="$(run_passed_no_pr fm/feat-dreceipt)"
+  FM_FAKE_AXI_STATUS="$(run_passed_with_pr fm/feat-dreceipt "$url")"
   out=$(run_crew_state "$d" feat-dreceipt)
   assert_contains "$out" "state: done" "passed run with retired PR receipt -> done"
   assert_contains "$out" "run passed: PR merged" "matching retirement receipt is local merged evidence"
@@ -1703,8 +1781,8 @@ test_terminal_passed_without_readable_pr_identity_reports_unknown() {
   fm_write_meta "$d/state/feat-dnopr.meta" "window=fm:fm-feat-dnopr" "worktree=$d/wt" "kind=ship"
   FM_FAKE_AXI_STATUS="$(run_passed_no_pr fm/feat-dnopr)"
   local out; out=$(run_crew_state "$d" feat-dnopr)
-  assert_contains "$out" "state: done" "passed run without PR identity -> done"
-  assert_contains "$out" "run passed: PR state unknown (no PR identity)" "missing PR identity is honest unknown"
+  assert_contains "$out" "state: blocked" "passed run without PR identity cannot prove its destination"
+  assert_contains "$out" "actual base unavailable" "missing PR identity reports unavailable destination"
   assert_not_contains "$out" "merged/closed" "unknown PR state must not get the old merged/closed label"
   assert_not_contains "$out" "PR merged" "unknown PR state must not be reported merged"
   pass "terminal passed run without readable PR identity reports unknown"
@@ -6798,6 +6876,7 @@ test_ci_ready_done_log_relapse_stays_working
 test_ci_fixing_after_green_stays_working
 test_top_level_fixing_ci_running_after_green_stays_working
 test_top_level_fixing_done_log_stays_working
+test_ready_claim_sources_require_destination
 test_terminal_passed
 test_terminal_passed_with_override
 test_terminal_passed_with_skips

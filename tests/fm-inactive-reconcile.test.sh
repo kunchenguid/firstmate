@@ -62,7 +62,9 @@ SH
 printf '%s %s\n' "$(basename "$0")" "$*" >> "${FM_FORGE_LOG:?}"
 if [ "$(basename "$0")" = gh ] && [ "${GH_HOST:-}" = example.test ]; then
   case " $* " in
-    *' --json baseRefName '*) printf 'main\n'; exit 0 ;;
+    *' --json baseRefName '*)
+      [ "${FM_FAKE_BASE_FAIL:-0}" = 0 ] || exit 1
+      printf '%s\n' "${FM_FAKE_PR_BASE-main}"; exit 0 ;;
   esac
 fi
 exit 97
@@ -1525,6 +1527,32 @@ test_terminal_outcome_never_names_a_pr_the_run_did_not_open() {
 }
 
 # When the run DID open one, that identity wins over the older recorded PR.
+test_run_step_destination_is_independently_corroborated() {
+  local proof out
+  for proof in matching mismatch absent unreadable; do
+    make_world "run-destination-$proof"
+    write_child "$MAIN" child 'working: still validating'
+    case "$proof" in
+      matching) FM_FAKE_PR_BASE=main; FM_FAKE_BASE_FAIL=0 ;;
+      mismatch) FM_FAKE_PR_BASE=other; FM_FAKE_BASE_FAIL=0 ;;
+      absent) FM_FAKE_PR_BASE=''; FM_FAKE_BASE_FAIL=0 ;;
+      unreadable) FM_FAKE_PR_BASE=main; FM_FAKE_BASE_FAIL=1 ;;
+    esac
+    export FM_FAKE_PR_BASE FM_FAKE_BASE_FAIL
+    out=$(FM_FAKE_CREW_STATE='done' FM_FAKE_CREW_SOURCE='run-step' \
+      FM_FAKE_CREW_DETAIL='checks green: PR ready for review · pr=https://example.test/owner/repo/pull/42' \
+      run_reconcile "$MAIN" --startup)
+    if [ "$proof" = matching ]; then
+      [ -n "$(queued_payload "$MAIN" 'inactive-outcome:')" ] || fail 'matching run-step destination was not delivered'
+    else
+      assert_nothing_queued "$MAIN" 'inactive-outcome:' "$proof run-step destination was presented as done"
+      [ "$(outcome_count "$MAIN" pending)" = 0 ] || fail "$proof run-step destination minted a receipt: $out"
+    fi
+  done
+  unset FM_FAKE_PR_BASE FM_FAKE_BASE_FAIL
+  pass 'inactive run-step success independently proves its own PR destination'
+}
+
 test_terminal_outcome_takes_the_pr_its_run_opened() {
   local payload
   make_world outcome-pr-current; write_child "$MAIN" child 'working: still validating'
@@ -1842,6 +1870,7 @@ test_missing_parent_binding_names_itself
 test_reconciliation_never_calls_forge
 test_reconciliation_sets_no_forge_mode_for_state_read
 test_terminal_outcome_never_names_a_pr_the_run_did_not_open
+test_run_step_destination_is_independently_corroborated
 test_terminal_outcome_takes_the_pr_its_run_opened
 test_status_log_sourced_outcome_keeps_its_own_pr
 test_status_log_outcome_keeps_gitlab_and_gerrit_reviews

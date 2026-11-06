@@ -912,7 +912,11 @@ fm_dod_read_timeout() {
   }
 }
 
-fm_dod_claim_destination() {
+# One destination predicate for status-log readiness, run-step readiness and
+# inactive terminal presentation. The caller supplies the PR from that claim's
+# own source, never a different run's recorded PR. All live reads share the
+# caller's remaining scan deadline, including timeout cleanup.
+fm_dod_claim_destination() {  # <kind> <mode> <meta> <claim-pr-url>
   local kind=${1:-ship} mode=$2 meta=$3 url=$4 read_timeout reason expected
   [ "$kind" = ship ] || return 0
   [ "$mode" != local-only ] || return 0
@@ -923,9 +927,11 @@ fm_dod_claim_destination() {
     return 1
   fi
   if ! read_timeout=$(fm_dod_read_timeout 5 2>&1); then
-    printf '%s\n' "$read_timeout"
+    expected=$(fm_pr_expected_base "$meta") || expected=unavailable
+    printf 'expected PR base %s, actual base unavailable: %s\n' "$expected" "$read_timeout"
     return 1
   fi
+  # shellcheck disable=SC2016  # Positional arguments expand in the bounded child.
   if ! reason=$(fm_run_timed "$read_timeout" bash -c '
     . "$1"
     shift
@@ -936,7 +942,11 @@ fm_dod_claim_destination() {
     printf '%s\n' "${reason:-expected PR base $expected, actual base unavailable}"
     return 1
   fi
-  fm_dod_read_timeout 5 >/dev/null
+  if ! fm_dod_read_timeout 5 >/dev/null 2>&1; then
+    expected=$(fm_pr_expected_base "$meta") || expected=unavailable
+    printf 'expected PR base %s, actual base unavailable: scan deadline expired\n' "$expected"
+    return 1
+  fi
 }
 
 # 0 when <url> names a Gerrit change whose current patch set carries the tree of
