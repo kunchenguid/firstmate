@@ -2566,6 +2566,56 @@ test_stopfailure_hold_rearms_when_several_cycles_end_between_ticks() {
   pass "auto-arm: a StopFailure hold re-arms on every tick that finds no live cycle, at most once per tick"
 }
 
+# A watcher can stall or be suspended while the successor arm that started it
+# stays alive. A running successor counts as live only inside its own
+# confirmation window; after it, only a healthy watcher counts, so the hold
+# starts a replacement even though the stalled watcher's arm is still running.
+test_stopfailure_hold_replaces_a_stalled_watcher_whose_arm_stays_alive() {
+  local dir rc
+  dir=$(make_primary_dir "$TMP_ROOT/stopfailure-stalled-watcher")
+  : > "$dir/state/task.meta"
+  write_arm_fixture "$dir" failed
+  : > "$dir/state/.claude-autoarm-failure-notified"
+  : > "$dir/state/successor-park"
+  FM_HOME="$dir" FM_CLAUDE_STOPFAILURE_BACKOFF_BASE=14 FM_ARM_SUCCESSOR_CONFIRM_TIMEOUT=1 SF_PAYLOAD="$STOPFAILURE_PAYLOAD" \
+    LOCK_FN=$(declare -f record_watcher_lock watcher_identity) "$FAKE_CLAUDE" -c '
+    eval "$LOCK_FN"
+    successors() { [ -e "$FM_HOME/state/successor-ran" ] && wc -l < "$FM_HOME/state/successor-ran" | tr -d " "; }
+    printf "%s\n" "$$" > "$FM_HOME/state/.lock"
+    sleep 60 &
+    stalled=$!
+    record_watcher_lock "$FM_HOME" "$stalled" "$(watcher_identity "$FM_HOME" "$stalled")"
+    touch -t 202001010000 "$FM_HOME/state/.last-watcher-beat"
+    printf "%s\n" "$SF_PAYLOAD" | "$FM_HOME/bin/fm-claude-stop-autoarm.sh" >"$FM_HOME/state/hook.out" 2>&1 &
+    hook=$!
+    i=0
+    while count=$(successors); [ "${count:-0}" -lt 1 ]; do
+      [ "$i" -lt 100 ] || exit 90
+      sleep 0.05
+      i=$((i + 1))
+    done
+    first=$(sed -n "s/^arm=\([0-9]*\) .*$/\1/p" "$FM_HOME/state/successor-ran" | head -n 1)
+    i=0
+    while count=$(successors); [ "${count:-0}" -lt 2 ]; do
+      [ "$i" -lt 160 ] || exit 91
+      sleep 0.05
+      i=$((i + 1))
+    done
+    kill -0 "$first" 2>/dev/null && : > "$FM_HOME/state/first-arm-alive"
+    kill -0 "$hook" 2>/dev/null && : > "$FM_HOME/state/hook-held"
+    rm -f "$FM_HOME/state/successor-park"
+    kill "$stalled" 2>/dev/null
+    wait "$hook"
+    echo "$?" > "$FM_HOME/state/hook-rc"
+  '; rc=$?
+  rm -f "$dir/state/successor-park"
+  expect_code 0 "$rc" "stalled-watcher hold scenario did not complete (90: no first cover, 91: the stalled watcher was never replaced)"
+  assert_present "$dir/state/first-arm-alive" "the scenario must keep the stalled watcher's arm alive when the replacement starts"
+  assert_present "$dir/state/hook-held" "the replacement must start while the hold is still in force"
+  [ "$(cat "$dir/state/hook-rc")" = 2 ] || fail "the held retry must still rewake after the hold, got rc $(cat "$dir/state/hook-rc")"
+  pass "auto-arm: a StopFailure hold replaces a stalled watcher whose arm stays alive once the arm's startup window ends"
+}
+
 # A watcher that cannot start is retried once per tick for the whole hold, never
 # in a tight loop and never given up on while the hold lasts.
 test_stopfailure_hold_retries_an_unstartable_watcher_once_per_tick() {
@@ -2780,6 +2830,7 @@ test_stopfailure_failed_arm_hold_starts_a_watcher
 test_stopfailure_hold_replaces_a_watcher_that_ends
 test_stopfailure_hold_rearms_when_several_cycles_end_between_ticks
 test_stopfailure_hold_retries_an_unstartable_watcher_once_per_tick
+test_stopfailure_hold_replaces_a_stalled_watcher_whose_arm_stays_alive
 test_stopfailure_first_failure_notice_is_not_held_without_a_watcher
 test_stopfailure_notice_is_retried
 test_stopfailure_backoff_knobs_are_decimal

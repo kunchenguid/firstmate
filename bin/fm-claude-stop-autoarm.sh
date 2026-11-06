@@ -447,11 +447,14 @@ last_closed_arm_pid() {
 }
 
 # A watcher cycle is live during a hold while a healthy watcher holds this
-# home's lock or the latest handling successor this hook started is still
-# running (it owns or is bringing up a cycle).
+# home's lock. The latest handling successor this hook started also counts
+# while it is still running inside its own confirmation window, because it may
+# still be bringing its watcher up; after that window only a healthy watcher
+# counts, so a stalled or suspended watcher whose arm stays alive is replaced
+# on the next tick.
 stopfailure_cycle_live() {
   fm_watcher_healthy "$STATE" "$SCRIPT_DIR/fm-watch.sh" "$GRACE" "$FM_HOME" && return 0
-  fm_pid_alive "${SUCCESSOR_PID:-}"
+  fm_pid_alive "${SUCCESSOR_PID:-}" && [ "$(date +%s)" -lt "${SUCCESSOR_STARTUP_UNTIL:-0}" ]
 }
 
 # A hold needs a watcher cycling through it: the arm, the host's hand-back, or
@@ -815,10 +818,12 @@ run_arm() {  # <output file, or empty for none>
 # away from the hook's pipes, and its own process group. Its one status line
 # is awaited within its own short successor budget plus slack - deliberately
 # not the arm's fresh-child backstop, which may run far longer. Sets
-# SUCCESSOR_FAILURE to the banner line for an unconfirmed successor and
-# SUCCESSOR_PID to the successor arm's pid.
+# SUCCESSOR_FAILURE to the banner line for an unconfirmed successor,
+# SUCCESSOR_PID to the successor arm's pid, and SUCCESSOR_STARTUP_UNTIL to the
+# end of its confirmation window.
 SUCCESSOR_FAILURE=
 SUCCESSOR_PID=
+SUCCESSOR_STARTUP_UNTIL=0
 start_handling_successor() {  # <closed-arm-pid>
   local out pid deadline budget line monitor_was_on=0
   SUCCESSOR_FAILURE=
@@ -837,6 +842,7 @@ start_handling_successor() {  # <closed-arm-pid>
   SUCCESSOR_PID=$pid
   [ "$monitor_was_on" -eq 1 ] || set +m 2>/dev/null || true
   deadline=$(( $(date +%s) + budget + 2 ))
+  SUCCESSOR_STARTUP_UNTIL=$deadline
   while :; do
     if grep -Eq '^watcher: (started|attached) pid=[0-9]+' "$out" 2>/dev/null; then
       rm -f "$out" 2>/dev/null || true
