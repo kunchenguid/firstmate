@@ -800,13 +800,41 @@ fm_session_lock_codex_native_pid() {  # <pid> [verified]
         [ "${2:-}" != verified ]; return
       fi
       printf '%s\n' "$FM_PROC_ARGS" | awk -v proof="${2:-}" '
-        { if (NF < 2) exit 1
-          if ($2 ~ /^-/) {
-            if ($0 ~ /(^|[[:space:]=\042\047])app-server([[:space:]\042\047]|$)/)
-              exit (proof == "verified" ? 1 : 0)
-            exit 1
+        function unbalanced(value, j, c, quote, square, brace, escaped) {
+          for (j = 1; j <= length(value); j++) {
+            c = substr(value, j, 1)
+            if (escaped) { escaped = 0; continue }
+            if (c == "\\" && quote != "\047") { escaped = 1; continue }
+            if (quote != "") {
+              if (c == quote) quote = ""
+            } else if (c == "\042" || c == "\047") quote = c
+            else if (c == "[") square++
+            else if (c == "]") square--
+            else if (c == "{") brace++
+            else if (c == "}") brace--
           }
-          exit ($2 == "app-server" ? 0 : 1) }
+          return quote != "" || square > 0 || brace > 0
+        }
+        {
+          for (i = 2; i <= NF; i++) {
+            token = $i
+            if (token == "-c" || token == "--config") value = $(++i)
+            else if (token ~ /^--config=/) value = substr(token, 10)
+            else if (token ~ /^-c./) value = substr(token, 3)
+            else if (token ~ /^(-m|--model|-a|--ask-for-approval|-s|--sandbox|-C|--cd|-p|--profile|--disable|--enable|-i|--image|--add-dir)$/) {
+              i++
+              continue
+            } else if (token == "--") exit 1
+            else if (token ~ /^-/) continue
+            else exit (token == "app-server" ? 0 : 1)
+            if (unbalanced(value)) {
+              for (j = i + 1; j <= NF; j++)
+                if ($j == "app-server") exit (proof == "verified" ? 1 : 0)
+              exit 1
+            }
+          }
+          exit 1
+        }
       '
       return
       ;;
