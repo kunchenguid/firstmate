@@ -54,13 +54,14 @@
 # --match-head-commit, so a push that lands between that read and the merge
 # fails the merge instead of landing commits nothing verified.
 # An optional --expected-head <full-sha> pins the commit the caller already
-# reviewed. It must be one full lowercase hex commit of 40 or 64 characters,
-# given once as its own argument. The live head must equal it or the merge is
+# reviewed. It must be one full lowercase hex commit of 40 or 64 characters
+# (Azure accepts only 40), given once as its own argument. The live head must
+# equal it or the merge is
 # refused before any forge write. The forge head match receives that same
-# supplied value on GitHub, GitLab, and Forgejo. A later preflight in this run
-# does not replace it with a newly read head. Omitting the flag keeps the
+# supplied value on GitHub, GitLab, Forgejo, and Azure DevOps. A later preflight
+# in this run does not replace it with a newly read head. Omitting the flag keeps the
 # previous behavior: the live head read at verification is the matched value.
-# Reading that state needs gh and jq, and either one absent stops the merge before any
+# Reading GitHub state needs gh and jq, and either one absent stops the merge before any
 # state is recorded. An attended --allow-red <check-name> may be passed once,
 # with the name as a separate argument; it waives only checks with that exact
 # name, still requires every other check green, and still binds the head. Its
@@ -150,13 +151,21 @@
 # because there is no established translation from a gh/glab-style flag into
 # a Forgejo API field yet.
 #
-# Before either forge merge, the task's existing per-task control lock
+# Azure Services uses bin/fm-azure-pr.py for live policy/revision verification
+# and a non-bypass completion PATCH. It accepts no extra forge flags or red
+# waiver, preserves an allowed PR-selected merge strategy, and refuses while
+# away because Azure completion may be asynchronous. An --expected-head must
+# equal the verified source commit, which the completion request then binds.
+# Accepted-but-unconfirmed completion leaves the poll armed and returns
+# nonzero, never a landed outcome.
+#
+# Before any forge merge, the task's existing per-task control lock
 # serializes the captain-hold check through the forge command. A still-held or
 # unreadable row refuses before that command, so a captain approval must be
 # recorded as an `answer --release` before this entrypoint is invoked. While
 # an away record exists (a quiet-mode record is a present captain, so its
-# merges stay attended: bin/fm-afk-contract.sh mode) any green merge may
-# proceed under away authority:
+# merges stay attended: bin/fm-afk-contract.sh mode) an otherwise permitted
+# synchronous green merge may proceed under away authority:
 # the record's presence is the whole mechanical fact, and which merge the
 # captain's away words meant is the supervision session's reading
 # (bin/fm-branch-prompt.sh "Postures"). An unreadable record refuses rather
@@ -373,6 +382,11 @@ if [ "${#ALLOW_MISSING[@]}" -gt 0 ]; then
       exit 2
       ;;
   esac
+fi
+
+if [ "$PROVIDER" = azuredevops ] && { [ "$#" -ne 0 ] || [ "${#ALLOW_RED[@]}" -gt 0 ] || [ "${#ALLOW_MISSING[@]}" -gt 0 ]; }; then
+  echo "error: Azure completion accepts no extra merge flags, --allow-red, or --allow-missing; repository policies cannot be bypassed" >&2
+  exit 2
 fi
 
 caller_has_merge_method() {
@@ -1495,6 +1509,10 @@ require_current_away_authority() {
   FM_PR_AWAY_POSTURE=false
   if fm_afk_contract_away_present "$STATE"; then
     FM_PR_AWAY_POSTURE=true
+    if [ "$PROVIDER" = azuredevops ]; then
+      echo "error: Azure completion is attended-only because its server operation can be asynchronous" >&2
+      return 2
+    fi
     if [ "$PROVIDER" = github ] && [ "$FM_PR_GITHUB_AUTO_REQUESTED" = true ]; then
       echo "error: --auto is attended-only; while the away-posture record exists only a synchronous merge may run under its authority lock" >&2
       return 2
@@ -1724,7 +1742,7 @@ forgejo_confirm_merged() {
   [ "$merged" = true ]
 }
 
-# Record before either forge call. This arms the merge poll without claiming a
+# Record before any forge call. This arms the merge poll without claiming a
 # landed outcome, so even a provider read failure after a real merge cannot
 # leave teardown without the PR identity it needs to verify the result.
 away_status=0
@@ -1856,6 +1874,24 @@ case "$PROVIDER" in
     gitlab_confirm_rc=0
     gitlab_confirm_merged || gitlab_confirm_rc=$?
     [ "$gitlab_confirm_rc" -eq 0 ] || exit 0
+    ;;
+  azuredevops)
+    hold_away_record_for_merge || exit 1
+    require_current_away_authority || exit 1
+    # The helper verifies inside this same authority lock and uses Azure's
+    # lastMergeSourceCommit compare-and-swap, never a convenience update that
+    # re-reads a different source, or inherited options that could bypass policy.
+    azure_complete_args=(complete "$URL")
+    [ -z "$EXPECTED_HEAD" ] || azure_complete_args+=(--expected-head "$EXPECTED_HEAD")
+    python3 "$SCRIPT_DIR/fm-azure-pr.py" "${azure_complete_args[@]}" || exit 1
+    persist_accepted_merge_authority || exit 1
+    fm_afk_contract_lock_release || true
+    fm_lock_release "$MERGE_CONTROL_LOCK" || true
+    MERGE_CONTROL_LOCK=
+    if ! python3 "$SCRIPT_DIR/fm-azure-pr.py" merged "$URL"; then
+      echo "actionable: Azure accepted completion but landing is unconfirmed; the merge poll remains armed" >&2
+      exit 1
+    fi
     ;;
   forgejo)
     forgejo_reject_unsupported_args "$@" || exit 1

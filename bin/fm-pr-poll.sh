@@ -10,6 +10,9 @@
 # needs no extra tooling to follow GitHub or GitLab. The Gerrit and Forgejo
 # branches additionally need jq, which bin/fm-pr-check.sh refuses to arm those
 # watches without.
+# Azure uses python3 and az/azure-devops via the trusted code-root helper
+# bin/fm-azure-pr.py; the watcher invokes this file in that code root,
+# never the non-executable copy in state.
 set -u
 LC_ALL=C
 export LC_ALL
@@ -178,6 +181,10 @@ case "$provider" in
         error("invalid gerrit record")
       end' 2>/dev/null) || exit 0
     [ "$status" = MERGED ] && printf '%s\n' merged
+    ;;
+  azuredevops)
+    [ "$url" = "https://$host/$path/pullrequest/$number" ] || exit 0
+    python3 "$(dirname "$0")/fm-azure-pr.py" merged "$url" 2>/dev/null || exit 0
     ;;
   forgejo)
     [ "${#host}" -ge 1 ] && [ "${#host}" -le 253 ] || exit 0

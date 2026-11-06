@@ -49,6 +49,44 @@ test_unpushed_ship_done_is_refused() {
   pass "unpushed ship done: is refused"
 }
 
+test_azure_ci_ready_requires_published_work() {
+  local repo wt meta sha url mode reason rc
+  repo="$TMP_ROOT/azure-repo"
+  wt="$TMP_ROOT/azure-wt"
+  meta="$TMP_ROOT/azure.meta"
+  fm_git_worktree "$repo" "$wt" users/example/azure
+  printf 'unpublished work\n' > "$wt/feature"
+  git -C "$wt" add feature
+  git -C "$wt" commit -q -m 'work awaiting publication'
+  sha=$(git -C "$wt" rev-parse HEAD)
+
+  for url in \
+    https://dev.azure.com/example/Project/_git/repo/pullrequest/7 \
+    https://example.visualstudio.com/Project/_git/repo/pullrequest/7 \
+    https://example.visualstudio.com/DefaultCollection/Project/_git/repo/pullrequest/7; do
+    for mode in no-mistakes ''; do
+      printf 'pr=%s\n' "$url" > "$meta"
+      reason=$(accept_done ship "$mode" "$wt" "$repo" "done [at=1]: PR $url checks green" \
+        "$TMP_ROOT" azure "$meta")
+      rc=$?
+      [ "$rc" -eq 1 ] || fail "Azure checks-green report accepted unpublished work: $url (mode=$mode)"
+      assert_contains "$reason" "named head $sha is unreachable outside the worker copy" \
+        "Azure refusal did not identify the unpublished head"
+
+      git -C "$wt" update-ref refs/remotes/origin/users/example/azure "$sha"
+      accept_done ship "$mode" "$wt" "$repo" "done [at=1]: PR $url checks green" \
+        "$TMP_ROOT" azure "$meta" || fail "Azure checks-green report refused a published head: $url"
+      git -C "$wt" update-ref -d refs/remotes/origin/users/example/azure
+
+      # The pipeline may publish a head this worker copy has never fetched.
+      printf 'pr_head=0123456789abcdef0123456789abcdef01234567\n' >> "$meta"
+      accept_done ship "$mode" "$wt" "$repo" "done [at=1]: PR $url checks green" \
+        "$TMP_ROOT" azure "$meta" || fail "Azure checks-green report refused a forge-recorded head: $url"
+    done
+  done
+  pass "Azure checks-green reports require a published head for modern and legacy URLs"
+}
+
 test_remote_containing_named_head_is_accepted() {
   local repo wt sha
   repo="$TMP_ROOT/pushed-repo"
@@ -400,7 +438,7 @@ test_pr_based_dod_draft_check_uses_gh_axi() {
     fm_dod_block "$mode" dod-draft-task > "$out"
     assert_no_grep 'gh pr view' "$out" "$mode: DoD must not document a raw gh draft check"
     # shellcheck disable=SC2016  # single quotes are deliberate: the backticks must stay literal
-    assert_grep 'confirm it is not a draft (`gh-axi pr view <number>` must print `draft: no`' "$out" \
+    assert_grep 'On GitHub, `gh-axi pr view <number>` must print `draft: no`' "$out" \
       "$mode: DoD must read the draft state through gh-axi"
   done
   pass "PR-based DoD draft check uses gh-axi"
@@ -450,6 +488,7 @@ EOF
 
 test_scout_done_is_not_gated
 test_unpushed_ship_done_is_refused
+test_azure_ci_ready_requires_published_work
 test_no_mistakes_prevalidation_done_is_not_gated
 test_remote_containing_named_head_is_accepted
 test_moved_branch_without_named_head_is_refused
