@@ -2928,9 +2928,12 @@ SH
   REAL_PS=$(command -v ps) || fail "the post-TERM reuse fixture requires ps"
   pe_register "$HPOST_TERM" lavish post-term-src -- \
     "$POST_TERM_SOURCE" "$POST_TERM_PID" "$POST_TERM_SIGNALS" >/dev/null
-  FM_PROC_ROOT_OVERRIDE="$TMP_ROOT/no-post-term-proc" \
-    FM_PROCEVENT_OWNER_CHECK_SECONDS=5 pe "$HPOST_TERM" reconcile >/dev/null
-  wait_for "$POST_TERM_PID" || fail "the post-TERM reuse fixture did not start"
+  # reconcile exits 1 when the launch is not confirmed within its window, which
+  # a loaded host can miss; the PID wait below still fails a real non-start.
+  POST_TERM_RECONCILE=$(FM_PROC_ROOT_OVERRIDE="$TMP_ROOT/no-post-term-proc" \
+    FM_PROCEVENT_OWNER_CHECK_SECONDS=5 pe "$HPOST_TERM" reconcile 2>&1) || true
+  wait_for "$POST_TERM_PID" \
+    || fail "the post-TERM reuse fixture did not start: $POST_TERM_RECONCILE"
   wait_for "$FM_PROCEVENT_CLAIM_ROOT/post-term-src.claim" \
     || fail "the post-TERM reuse fixture did not claim its source"
   POST_TERM_RUNNER=$(sed -n '2p' "$FM_PROCEVENT_CLAIM_ROOT/post-term-src.claim")
