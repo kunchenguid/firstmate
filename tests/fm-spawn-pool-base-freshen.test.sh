@@ -987,6 +987,45 @@ test_refused_launch_closes_its_tmux_window_and_a_retry_launches() {
   pass "a codex launch refused on tmux closes its window and a retry launches"
 }
 
+# A launch refused after its Firstmate wiring was written and before its record
+# was published removes that wiring with the endpoint, so the slot returns to the
+# pool without hooks bound to a task that never existed.
+test_refused_non_polytoken_launch_removes_its_wiring() {
+  local rec id out status slot_root world real_git
+  id='pool-refused-claude-r1'
+  rec=$(make_case refused-claude "$id")
+  read_case_record "$rec"
+  slot_root="$CASE_DIR/slots"
+  mkdir -p "$slot_root/1"
+  git -C "$PROJECT_DIR" worktree move "$POOL_DIR" "$slot_root/1/project"
+  printf '{"worktrees":[{"name":"1","path":"%s"}]}\n' "$slot_root/1/project" \
+    > "$slot_root/treehouse-state.json"
+  world="$CASE_DIR/tmux-world"
+  install_pool_world_tmux "$FAKEBIN_DIR" "$world" "$slot_root"
+  fm_fake_exit0 "$FAKEBIN_DIR" claude
+  real_git=$(command -v git)
+  cat > "$FAKEBIN_DIR/git" <<SH
+#!/usr/bin/env bash
+if [ "\$1" = -C ] && [ "\$3" = rev-parse ] && [ "\$4" = --is-inside-work-tree ] \\
+  && [ -e "\$2/.claude/settings.local.json" ]; then
+  exit 1
+fi
+exec '$real_git' "\$@"
+SH
+  chmod +x "$FAKEBIN_DIR/git"
+
+  out=$(run_spawn "$id" --harness claude --mode no-mistakes --yolo off)
+  status=$?
+  [ "$status" -ne 0 ] || fail "a claude launch whose hooks directory is blocked should refuse"
+  assert_contains "$out" "could not install the AI-trailer strip hooks" \
+    "the claude refusal did not come from the step after its wiring was written"$'\n'"$out"
+  [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "the refused claude launch published a task record"
+  [ ! -e "$world/fm-$id.id" ] || fail "the refused claude launch left its window open"
+  [ ! -e "$slot_root/1/project/.claude/settings.local.json" ] \
+    || fail "the refused claude launch left hooks bound to its dead task in the returned slot"
+  pass "a refused claude launch removes its wiring from the returned slot"
+}
+
 # A stateful herdr-core stand-in for the same sequence. Each terminal is a file
 # of its labels and cwd; `treehouse get` typed into one moves it into the lowest
 # slot no live terminal sits in, so a slot stays leased exactly while its
@@ -1499,6 +1538,7 @@ test_pool_slot_claim_follows_the_spawn_outcome
 test_refused_launch_leaves_the_pool_for_a_retry_and_a_second_task
 test_refused_launch_spares_per_id_paths_under_a_contended_spawn_lock
 test_refused_launch_closes_its_tmux_window_and_a_retry_launches
+test_refused_non_polytoken_launch_removes_its_wiring
 test_refused_launch_closes_its_hc_terminal_and_a_retry_launches
 test_treehouse_isolation_refusal_points_at_what_survives
 test_linked_spawning_home_rejects_primary_before_refresh
