@@ -305,7 +305,6 @@ WATCHER_DOWNTIME_MARKER="$STATE/.watcher-down"
 # including the event-wait splice below - and returns before acquiring the lock
 # or starting the loop. Running it as a script executes the runtime exactly as
 # before, byte-for-byte.
-
 # Portable stat. macOS (BSD) stat uses `-f <fmt>`; Linux (GNU) stat uses `-c <fmt>`.
 # Do NOT use the `stat -f <fmt> ... || stat -c <fmt> ...` fallback form: on Linux
 # `stat -f` is *filesystem* stat and writes a partial filesystem dump ("File: ...",
@@ -3680,7 +3679,6 @@ watcher_cleanup() {
       && ! afk_present; then
       fm_lock_release "$WATCH_LOCK" || cleanup_status=1
     elif ! fm_recovery_transition "$WATCHER_DOWNTIME_MARKER" "$transition" "$WATCH_LOCK" \
-
       downtime "$CLEANUP_LOCK_BOUND"; then
       echo "watcher: recovery state could not be persisted; retaining stale lock evidence" >&2
       cleanup_status=1

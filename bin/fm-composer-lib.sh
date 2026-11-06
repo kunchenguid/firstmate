@@ -67,8 +67,6 @@
 #                rule is tolerated at the aligned width, including Grok 1.0.44's
 #                rounded typed model/effort title with ` · always-approve`; Grok 1.0.5's
 #                typed title also permits its proven three-column overhang.
-
-
 #   bare       - an agent prompt glyph row with no border at all (claude `❯`,
 #                codex `›`, muse `⟩`, cursor `→`). The agent glyph is itself the container
 #                proof; a bare SHELL glyph (`>` `$` `%` `#`) never is.
@@ -181,7 +179,6 @@
 #
 # Re-sourcing is a cheap idempotent redefinition, so this file needs no
 # include guard (matching bin/fm-tmux-lib.sh).
-
 # fm_composer_strip_ansi: drop every CSI escape sequence, leaving plain text.
 # Used for STRUCTURAL row/shape detection, where ghost text must be KEPT so the
 # composer box border or bare prompt glyph is still visible; content extraction
@@ -440,7 +437,6 @@ fm_composer_strip_ghost() {
     }
   '
 }
-
 
 # --- Delivery-only rendered busy footers (backend-agnostic) -------------------
 #
@@ -955,7 +951,6 @@ fm_composer_classify_content() {  # <bordered> <content> [idle_re] [idle_case] [
 # Consumers that can overwrite input or confirm delivery must accept only the
 # exact positive proof they require (`empty`), so unrecognized future verdicts
 # fail safe by default.
-
 # _fm_composer_pi_separator_row: a solid pi separator - nothing but `─`, at
 # least 8 columns wide. The width floor is a literal substring test so it is
 # byte-exact in every locale.
@@ -1637,7 +1632,6 @@ _fm_composer_classify_bare_wrap() {  # <screen> <styled> <glyph-row> <cursor-row
 # "/<name>..." token typed
 # so far right that its text starts beyond the region's midpoint
 # (_fm_composer_leftbar_cwd_start).
-
 # _fm_composer_leftbar_cwd_start: the first row of that furniture run inside
 # a leftbar composer region (<first-row>..<last-row>), or -1 when the region
 # carries none. Recognition is structural and position-gated:

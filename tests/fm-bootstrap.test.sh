@@ -49,7 +49,6 @@ unset TMUX TMUX_PANE HERDR_ENV HERDR_PANE_ID HERDR_SESSION HERDR_SOCKET_PATH PAS
 # case curates its base path with tests/lib.sh's fm_test_base_path_sans, which
 # resolves every other tool as before while hiding the named one. Every other
 # case keeps bare BASE_PATH.
-
 # A fake toolchain where every required tool is present and gh is authenticated.
 # treehouse's `get --help` advertises --lease only when FM_FAKE_TREEHOUSE_LEASE_HELP=1.
 make_fake_toolchain() {

@@ -624,7 +624,6 @@ test_droid_stop_hook_and_rendered_state() {
   pass "Droid spawn installs its Stop notification and keeps worker state on the isolated rendered fallback"
 }
 
-
 test_gemini_is_refused_as_a_secondmate() {
   local rec id=busy-gm-3 out
   rec=$(make_spawn_case gemini-secondmate gemini "$id")

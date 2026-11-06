@@ -104,8 +104,8 @@
 # harness-specific trust pre-registration already exists (fm-claude-trust.sh,
 # GEMINI_CLI_TRUST_WORKSPACE) to stop the dialog from appearing at all.
 # Apart from the launch-prompt backstop above, Grok, Droid, Rovo, and AGY are the only
-# harnesses whose rendered text is their SOLE classification, because none of
-# their structured lifecycles was credited-live-verified
+# rendered-text busy fallbacks that survive the redesign, because none of their
+# structured lifecycles was credited-live-verified
 # in the approved audit (Rovo's clean ACP stopReason lives outside the TUI
 # path firstmate drives, see references/harness/rovo.md; agy 1.2.0 exposes no
 # hook surface at all, see references/harness/agy.md); each is scoped to
@@ -1028,7 +1028,6 @@ fm_busy_agy_tail_busy() {
 # the footer fallbacks - a screen taller than the capture can still scroll a
 # signature out, so absence never proves the pane is NOT parked, only that
 # this check cannot confirm it.
-
 # fm_busy_claude_launch_prompt_tail: Claude's workspace-trust dialog
 # ("Quick safety check: Is this a project you created or one you trust?",
 # re-verified live on Claude Code 2.1.278, docs/verification/runtime-backends.md

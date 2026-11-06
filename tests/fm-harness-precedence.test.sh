@@ -127,7 +127,6 @@ named_bin() {  # <dir> <name>
 }
 
 # --- 1. A foreign marker never renames a markerless harness -----------------
-
 # codex, opencode, kimi, muse, and agy publish no identity marker, so before
 # this boundary existed ANY retained marker renamed them outright. This is the
 # reported live failure, generalized to every markerless adapter and to both
@@ -220,7 +219,6 @@ test_retained_cursor_marker_does_not_rename_a_nested_claude() {
 }
 
 # --- 3. Pi keeps the marker's more specific identity ------------------------
-
 # Both Pi identities share the launcher name, so ancestry can only prove the
 # family. A marker that agrees on the family must keep its finer verdict rather
 # than being flattened to pi by the ancestry walk.
@@ -245,7 +243,6 @@ test_pi_signed_survives_agreeing_ancestry() {
 }
 
 # --- 4. The weakest ancestry signal does not outrank a marker ---------------
-
 # A bare interpreter matched only by a harness name inside the script path it
 # was handed is the weakest inference in fm-harness.sh: any node process holding
 # a harness-shaped path matches it. It answers when nothing else does, but it
@@ -332,7 +329,6 @@ SH
 }
 
 # --- 5. A harness that is pid 1 of its own namespace ------------------------
-
 # The walk used to stop as soon as the NEXT pid was 1, on the assumption that
 # pid 1 is always init. Inside a PID namespace that assumption inverts: the
 # harness itself is pid 1, so the one process that proves who owns the tree was
@@ -365,7 +361,6 @@ test_harness_at_namespace_pid1_is_examined() {
 }
 
 # --- 6. The vantage point a probe asks from decides what strength it can see --
-
 # The shipped guarantee is a strength claim, not just an identity one: detect_own
 # hands an args-strength verdict back to a retained marker, so a harness is only
 # protected where the walk reaches it at comm strength. Which strength is even
@@ -717,7 +712,6 @@ SH
 }
 
 # --- 7. A supervision branch resolves the primary's harness, not its own -----
-
 # A supervision branch running as its own process under another harness sees
 # its own harness in both evidence layers: a Pi engine under a Claude primary
 # carries PI_CODING_AGENT and a pi ancestor. Left alone, an absent or "default"
@@ -796,7 +790,6 @@ test_supervision_branch_refuses_an_unknown_primary_pin() {
 }
 
 # --- 8. Session start's supervision protocol follows the corrected verdict ---
-
 # The consequence the captain actually hit: the wrong verdict emitted Claude's
 # Stop-owned protocol to a Codex primary, so every turn end was blocked for
 # missing Claude recovery.

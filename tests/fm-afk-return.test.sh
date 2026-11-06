@@ -70,7 +70,7 @@ if [ -s "$file" ]; then
   printf 'WAKE_ACK_REQUIRED: after handling completes run bin/fm-wake-drain.sh --ack-through %s --recovery-generation fixture-generation\n' "$sequence" >&2
 fi
 SH
-  cat > "$dir/bin/fm-decision-hold.sh" <<'SH'
+  cat > "$dir/bin/fm-captain-hold.sh" <<'SH'
 #!/usr/bin/env bash
 [ "${1:-}" = open-questions ] && [ "${2:-}" = --render ] || exit 2
 if [ -e "$FM_HOME/state/.fail-question-projection" ]; then
@@ -304,7 +304,7 @@ test_incomplete_question_projection_keeps_catchup_pending() {
   out=$(run_return "$dir" guard)
   rc=$?
   set -e
-  [ "$rc" -eq 3 ] || fail "ordinary work was allowed while question projection remained incomplete"
+  [ "$rc" -eq 4 ] || fail "ordinary work was allowed while question projection remained incomplete"
 
   rm -f "$dir/home/state/.fail-question-projection"
   out=$(run_return "$dir" check) || fail "catch-up did not clear after question projection recovered: $out"
@@ -1332,8 +1332,6 @@ test_return_brief_without_a_record_reports_the_legacy_flag() {
   [ ! -e "$dir/home/state/.afk" ] || fail "the legacy flag survived the return"
   pass "a return with only the legacy away flag still renders the brief and measures the window from the flag"
 }
-
-
 
 test_unreadable_superseded_archive_keeps_return_gated() {
   local dir out rc epoch archive backup
