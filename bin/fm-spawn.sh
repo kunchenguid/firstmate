@@ -3720,10 +3720,10 @@ claude_config_root() {
 # relaunched on Rex, so the replacement keeps its conversation across a Rex
 # Server stop (bin/fm-control-lib.sh's fm_control_claude_resumable_session owns
 # the rule). Anything else prints nothing and keeps the fresh-session relaunch.
-relaunch_claude_resume_args() {  # <harness> <backend> <meta-file>
-  local harness=${1-} backend=${2-} meta=${3-} id
+relaunch_claude_resume_args() {  # <harness> <backend> <meta-file> <prior-harness>
+  local harness=${1-} backend=${2-} meta=${3-} prior=${4-} id
   [ "$harness" = claude ] && [ "$backend" = rex ] || return 0
-  id=$(fm_control_claude_resumable_session "$(claude_config_root)" "$(fm_meta_get "$meta" harness)" "$(fm_meta_get "$meta" claude_session_id)") || return 0
+  id=$(fm_control_claude_resumable_session "$(claude_config_root)" "$prior" "$(fm_meta_get "$meta" claude_session_id)") || return 0
   printf -- '--resume %s ' "$(shell_quote "$id")"
 }
 
@@ -7533,7 +7533,7 @@ fi
 LAUNCH=${LAUNCH//__PIRESUME__/$RESUME_ARGS}
 CLAUDE_RESUME_ARGS=
 if [ "$RELAUNCH" -eq 1 ]; then
-  CLAUDE_RESUME_ARGS=$(relaunch_claude_resume_args "$HARNESS" "$BACKEND" "$RELAUNCH_META") || CLAUDE_RESUME_ARGS=
+  CLAUDE_RESUME_ARGS=$(relaunch_claude_resume_args "$HARNESS" "$BACKEND" "$RELAUNCH_META" "$RELAUNCH_PRIOR_HARNESS") || CLAUDE_RESUME_ARGS=
 fi
 LAUNCH=${LAUNCH//__CLAUDERESUME__/$CLAUDE_RESUME_ARGS}
 LAUNCH=${LAUNCH//__CLAUDEPERMFLAG__/$CLAUDE_PERM_FLAG}
