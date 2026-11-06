@@ -226,16 +226,74 @@ test_a_different_reply_under_the_same_id_is_recorded() {
   local home
   home=$(make_home same-id-reply)
   as_session "$home" "$SAY"'
-    say captain "ship it" p1
+    say captain "the real final answer" p1
     say main "interim reply before the guard blocked" p1
     say main "the real final answer" p1
     say main "the real final answer" p1
+    say main "the real final answer" p2
   ' || fail "a writer failed"
-  assert_equals "captain|ship it
+  assert_equals "captain|the real final answer
 main|interim reply before the guard blocked
+main|the real final answer
 main|the real final answer" "$(entries "$home")" \
-    "a different reply under the same id must be recorded, and an identical repeat only once"
-  pass "mirror: a later different reply under the same id is recorded, while an identical repeat is recorded once"
+    "deduplication must preserve different text, tags, and ids, while recording an identical repeat only once"
+  pass "mirror: reply deduplication preserves different text, tags, and ids, while recording an identical repeat once"
+}
+
+# Presentation can be identical while the uncapped reply changes. Exercise
+# both tracked writers, including the transition from records without a raw
+# identity, after the first reply has already advanced the feed cursor.
+test_equal_capped_replies_keep_their_uncapped_identity() {
+  local harness legacy home mirror
+  for harness in claude cursor; do
+    for legacy in no yes; do
+      home=$(make_home "raw-identity-$harness-$legacy")
+      mirror="$home/state/.host-mirror.jsonl"
+      HARNESS=$harness LEGACY=$legacy \
+      RESPONSE_CMD=$(if [ "$harness" = claude ]; then claude_cmd Stop; else cursor_cmd afterAgentResponse; fi) \
+      as_session "$home" '
+        run() {
+          env CLAUDE_PROJECT_DIR="$PRIMARY_ROOT" CURSOR_PROJECT_DIR="$PRIMARY_ROOT" \
+            bash -c "$RESPONSE_CMD" < "$FM_HOME/$1.json"
+        }
+        for middle in A B; do
+          jq -cn --arg middle "$middle" --arg harness "$HARNESS" '\''
+            ("H" * 2500 + $middle * 1000 + "T" * 2500) as $text
+            | if $harness == "claude" then
+                {hook_event_name: "Stop", prompt_id: "same-id", last_assistant_message: $text}
+              else
+                {hook_event_name: "afterAgentResponse", generation_id: "same-id", text: $text, cursor_version: "x"}
+              end'\'' > "$FM_HOME/$middle.json"
+        done
+        run A
+        if [ "$LEGACY" = yes ]; then
+          jq -c "{seq, epoch, key, id, tag, text}" "$FM_HOME/state/.host-mirror.jsonl" > "$FM_HOME/legacy.jsonl"
+          mv "$FM_HOME/legacy.jsonl" "$FM_HOME/state/.host-mirror.jsonl"
+        fi
+        "$MIRROR" check || exit 1
+        "$MIRROR" feed s1 new > "$FM_HOME/feed.first" && "$MIRROR" commit || exit 1
+        run B
+        "$MIRROR" feed s1 resume > "$FM_HOME/feed.final" && "$MIRROR" commit || exit 1
+        # Trailing whitespace is normalized before reply identity is compared.
+        jq '\''if .text then .text += " \n\t" else .last_assistant_message += " \n\t" end'\'' \
+          "$FM_HOME/B.json" > "$FM_HOME/repeat.json"
+        run repeat
+        "$MIRROR" check || exit 1
+        "$MIRROR" feed s1 resume > "$FM_HOME/feed.repeat"
+      ' || fail "$harness writer or feed failed with legacy=$legacy"
+      assert_equals "2" "$(jq -s 'length' "$mirror")" \
+        "$harness must retain both uncapped replies and suppress an identical final callback with legacy=$legacy"
+      jq -se 'all(.tag == "main" and .id == "same-id" and (.text | length) == 4000)
+        and (.[0].text == .[1].text)' "$mirror" >/dev/null \
+        || fail "$harness replies must have identical capped text with legacy=$legacy"
+      [ -s "$home/feed.first" ] || fail "$harness first reply must remain feedable with legacy=$legacy"
+      assert_equals "$(cat "$home/feed.first")" "$(cat "$home/feed.final")" \
+        "$harness must feed the distinct final event even when its capped text is unchanged with legacy=$legacy"
+      assert_contains "$(cat "$home/feed.final")" "[mirror truncated:" "the feed must preserve capping"
+      assert_equals "" "$(cat "$home/feed.repeat")" "$harness must not feed the identical final callback twice"
+    done
+  done
+  pass "mirror: Claude and Cursor keep distinct uncapped replies, deduplicate normalized repeats, and conservatively accept legacy records"
 }
 
 # A hook id names an entry only within one main session: a later session
@@ -243,12 +301,12 @@ main|the real final answer" "$(entries "$home")" \
 test_a_later_session_may_reuse_an_entry_id() {
   local home
   home=$(make_home reused-id)
-  as_session "$home" "$SAY"'say captain "asked in the first session" p1' || fail "the first session failed"
+  as_session "$home" "$SAY"'say captain "the same ask" p1' || fail "the first session failed"
   as_session "$home" "$SAY"'
-    say captain "asked in the second session" p1
+    say captain "the same ask" p1
     "$MIRROR" feed s1 new > "$FM_HOME/feed.second"
   ' || fail "the second session failed"
-  assert_equals "[captain] asked in the second session" "$(cat "$home/feed.second")" \
+  assert_equals "[captain] the same ask" "$(cat "$home/feed.second")" \
     "a later session's entry must be recorded even when an earlier session used its id"
   pass "mirror: an entry id already recorded by an earlier main session does not drop a later session's dialog"
 }
@@ -466,6 +524,7 @@ test_operational_foreign_and_unowned_input_is_dropped
 test_internal_whitespace_is_recorded_verbatim
 test_entries_are_deduplicated_and_capped
 test_a_different_reply_under_the_same_id_is_recorded
+test_equal_capped_replies_keep_their_uncapped_identity
 test_a_later_session_may_reuse_an_entry_id
 test_a_failed_append_leaves_the_mirror_valid
 test_mirror_is_owner_only_under_an_open_umask
