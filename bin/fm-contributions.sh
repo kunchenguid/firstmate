@@ -55,7 +55,7 @@
 # never be read again, such as a PR in a deleted repository. It records retired
 # with actor captain, a non-empty reason and the UTC time. It refuses any
 # other actor, a blank reason, and a task/url pair with no saved record or
-# with unacknowledged pending signals. A retired pair leaves known, rotation and coverage even while a
+# with unacknowledged pending signals. A retired pair leaves known, scheduling and coverage even while a
 # backlog link remains. Retiring a retired pair again is a no-op that keeps the
 # first provenance. Nothing un-retires a record, poll never retires one on its
 # own, and a later owner settled from a retired record is not retired. A
@@ -92,9 +92,8 @@
 # An unsafe or invalid scheduler file refuses the poll before forge reads.
 # A deliberately smaller configured budget remains bounded and may be
 # unmeasured, rather than being mislabeled unavailable. Each distinct supported
-# URL is attempted at most once per poll and its observation applied to every owner.
-# A supported URL's final observation applies
-# to every owner without another forge read. When the budget refuses a read
+# URL is attempted at most once per poll and its observation applied to every eligible owner.
+# When the budget refuses a read
 # mid-observation, that URL's records stay untouched and the poll moves to the
 # next URL that still has a full observation reserve; only a genuine forge
 # failure, structural refusal or head change records an error.
@@ -107,7 +106,7 @@
 # FM_CONTRIBUTIONS_MAX_AGE (default 900 seconds) bounds projected freshness;
 # observing every live URL within that time still requires enough sweep capacity.
 # A supported URL whose last good observation is merged or closed is final: it is
-# never re-read, stays fresh, and every owner's saved row converges on that
+# never re-read, stays fresh, and every eligible owner's saved row converges on that
 # observation, with a stale error beside it cleared.
 # A genuine failure prints its unavailable line only when it starts an episode
 # (no prior owner has an error); a successful read ends the episode.
@@ -577,7 +576,7 @@ publish_pending() { # task canonical-url record-file
     | [.token, .type, (.source // "-"), (.age // "-")] | @tsv' "$record")
 }
 
-settle_final() { # canonical-url task... : copy the URL's final observation to every owner
+settle_final() { # canonical-url task... : copy the URL's final observation to the supplied eligible owners
   local url=$1 task
   shift
   jq -n --slurpfile saved "$TMP/saved.json" --arg url "$url" '
@@ -655,9 +654,9 @@ poll() {
   clear_unsupported_errors
   read_schedule
   # Only supported URLs with eligible owners enter settlement and scheduling.
-  # One line per distinct URL: its settlement, the URL, then every owning task.
+  # One line per distinct URL: its settlement, the URL, then every eligible owning task.
   # A contribution with a final observation is not re-read for any owner; it
-  # is settled once every owner holds that final observation without an error.
+  # is settled once every eligible owner holds that final observation without an error.
   jq_lib -nr --slurpfile input "$TMP/input.json" --slurpfile saved "$TMP/saved.json" \
     --slurpfile rejected "$TMP/rejected.json" --slurpfile schedule "$TMP/schedule.json" '
     known($input[0];$saved[0]) | map(select(.url | supported_url))
