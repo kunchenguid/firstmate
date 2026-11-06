@@ -445,6 +445,13 @@ STUB
     "promoted no-mistakes worker did not receive the --yes prohibition"
   assert_grep "It is banned fleet-wide" "$payload" \
     "promoted no-mistakes worker did not receive the fleet-wide ban wording"
+  # Promotion reaches workers on every harness, so the skill is named without
+  # one harness's invocation syntax.
+  assert_grep "it loads when you invoke the no-mistakes skill," "$payload" \
+    "promoted no-mistakes worker lost its pointer to the no-mistakes skill"
+  if grep -Eq '(^|[^[:alnum:]_.-])[/$]no-mistakes' "$payload"; then
+    fail "promoted no-mistakes worker was told one harness's skill invocation form"
+  fi
 
   payload="$TMP_ROOT/promote-dod/payload-promote-dod-direct-pr"
   assert_grep "supersede the scout delivery rules and report-based Definition of done" "$payload" \
@@ -453,7 +460,7 @@ STUB
     "promoted worker lost the scout protocols and safety rules that still apply"
 
   # The faster paths keep their own contracts rather than inheriting the pipeline's.
-  assert_grep "Do NOT run /no-mistakes" "$payload" \
+  assert_grep "Do NOT run the no-mistakes skill" "$payload" \
     "promoted direct-PR worker lost its no-pipeline contract"
   assert_grep "Do NOT push, do NOT open a PR, do NOT merge" "$TMP_ROOT/promote-dod/payload-promote-dod-local-only" \
     "promoted local-only worker lost its no-remote contract"
@@ -643,7 +650,7 @@ test_pr_manual_brief_hands_the_pr_text_to_the_worker() {
   # shellcheck disable=SC2016 # Backticks are literal generated Markdown.
   assert_grep 'gh-axi pr checks <number> --watch' "$brief" "the worker was not told how to wait for the PR's checks"
   assert_grep 'done [at=<epoch>]: PR {url} checks green' "$brief" "the CI-green ready report was lost"
-  assert_grep 'is one the /no-mistakes run pushed' "$brief" "the named-head rule was lost"
+  assert_grep 'is one the no-mistakes run pushed' "$brief" "the named-head rule was lost"
   assert_grep 'ask-user findings are never yours to answer' "$brief" "the ask-user escalation rule was lost"
   assert_no_grep 'checks-passed' "$brief" "the worker was told to wait for a return its skipped ci step never gives"
   assert_no_grep 'Pass `--skip push' "$brief" "the worker was told to skip the push the named-head rule depends on"
@@ -1896,7 +1903,7 @@ test_forge_gerrit_direct_pr_publishes_one_change() {
     "the direct-PR worker was given pipeline vocabulary for a pipeline it never runs"
   # shellcheck disable=SC2016 # Backticks are literal generated Markdown.
   assert_grep 'Never run `gerrit-axi submit`' "$brief" "the direct-PR worker was not kept from submitting"
-  assert_grep 'Do NOT run /no-mistakes.' "$brief" "the direct-PR worker was not kept off the pipeline"
+  assert_grep 'Do NOT run the no-mistakes skill.' "$brief" "the direct-PR worker was not kept off the pipeline"
   assert_no_grep 'pipeline changes:' "$brief" \
     "the direct-PR worker was asked to report pipeline fixes from a pipeline it never runs"
 
