@@ -8,12 +8,8 @@
 #
 # Opt-in gate: FM_DISPATCH_PROVIDER and FM_DISPATCH_MODEL select the provider
 #   and model from the environment or $FM_HOME/.env (environment wins). With no
-#   provider set, retain the original typesafe.ai/jev-latest key gate exactly.
-#   TYPESAFE_BASE optionally replaces the typesafe.ai base, from the environment
-#   or $FM_HOME/.env (environment wins). It must be an http(s) URL with a host
-#   and no userinfo, query, fragment, whitespace, or brackets in its path.
-#   Trailing slashes are removed
-#   before appending /v1/systemone; an invalid value exits 2 without sending.
+#   provider set, TypeSafe uses jev-latest. TYPESAFE_BASE selection and validation
+#   follow docs/configuration.md "Typed dispatch resolution".
 #   OpenRouter and OpenAI require both their provider selection and a model.
 #   The generic systemone provider requires a model and FM_DISPATCH_BASE_URL
 #   (http:// or https://) and posts to <base>/v1/systemone; its optional

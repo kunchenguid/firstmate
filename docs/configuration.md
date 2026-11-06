@@ -1966,10 +1966,11 @@ Explicit `FM_DISPATCH_PROVIDER=typesafe` also uses `jev-latest` when no model is
 `TYPESAFE_BASE` optionally selects a different base for the TypeSafe request, from the environment or `.env` with the same non-empty-environment precedence.
 If neither source supplies a non-empty value, the base defaults to `https://api.typesafe.ai`.
 It must be an `http://` or `https://` URL with a host and no userinfo, query, fragment, whitespace, or backslash.
+An explicit port must be between 1 and 65535, and a bracketed host must be a valid IPv6 address.
 Its path must not contain literal `[` or `]` characters; IPv6 host brackets remain supported.
 An invalid value exits 2 before credential lookup and sends nothing, even when no key is available.
 Trailing slashes are removed before appending `/v1/systemone`, so `TYPESAFE_BASE=https://ai-gateway.vercel.sh/typesafe/` sends to `https://ai-gateway.vercel.sh/typesafe/v1/systemone`.
-Gateway model IDs can differ from the direct service: the Vercel AI Gateway supports `jev-latest`, while `jev-1.13` returns `404 model_not_found`.
+To select a gateway-specific model ID, set `FM_DISPATCH_PROVIDER=typesafe` and `FM_DISPATCH_MODEL` to that ID.
 The selected provider needs a non-empty key from the environment, else `.env`, else, for `typesafe` and `openrouter` only, the credential source the home declares for that provider; `systemone` is the exception, where an absent `FM_DISPATCH_API_KEY` means the request carries no `Authorization` header.
 
 Off means one `dispatch-resolve: off` line on stderr, nothing on stdout, exit 0, and no network call, so firstmate dispatches exactly as it does without the tool.
