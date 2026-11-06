@@ -889,7 +889,26 @@ test_same_origin_clone_worktree_is_trusted() {
   expect_code 0 $? "a worktree of a same-origin clone of the project must be trusted: $out"
   assert_trusted "$CLONE_CONFIG/.claude.json" "$CLONE_WT" \
     "a same-origin clone's worktree was not registered as trusted"
+  assert_store_value "$CLONE_CONFIG/.claude.json" undefined \
+    "registration wrote an entry for the caller's own clone" projects "$CLONE_MATE"
   pass "fm-claude-trust.sh: trusts a worktree of a same-origin clone of the project"
+}
+
+# Consent is read from the worktree's owning checkout, so a decline there wins
+# over an approval on the caller's own clone.
+test_same_origin_clone_worktree_honors_the_owning_checkouts_decline() {
+  local rec out store before after
+  rec=$(make_same_origin_clones same-origin-decline)
+  read_clone_case "$rec"
+  store="$CLONE_CONFIG/.claude.json"
+  node -e 'const fs=require("node:fs");fs.writeFileSync(process.argv[1],JSON.stringify({projects:{[process.argv[2]]:{hasTrustDialogAccepted:true,hasClaudeMdExternalIncludesApproved:false,hasClaudeMdExternalIncludesWarningShown:true},[process.argv[3]]:{hasTrustDialogAccepted:true,hasClaudeMdExternalIncludesApproved:true,hasClaudeMdExternalIncludesWarningShown:true}}}));' \
+    "$store" "$CLONE_MAIN" "$CLONE_MATE"
+  before=$(cat "$store")
+  out=$(run_trust "$CLONE_CONFIG" "$CLONE_WT" "$CLONE_MATE")
+  expect_code 1 $? "a decline on the worktree's owning checkout must refuse registration: $out"
+  after=$(cat "$store")
+  [ "$before" = "$after" ] || fail "the store was modified despite the owning checkout's decline"
+  pass "fm-claude-trust.sh: honors the owning checkout's import decline over the caller's clone"
 }
 
 test_same_origin_clone_worktree_refreshes_the_worktrees_own_canonical_import_consent() {
@@ -938,6 +957,20 @@ test_originless_clone_worktree_is_refused() {
   expect_code 1 $? "a worktree whose owning clone has no origin must be refused: $out"
   assert_not_trusted "$CLONE_CONFIG/.claude.json" "$CLONE_WT" "an origin-less owning clone's worktree was trusted"
   pass "fm-claude-trust.sh: refuses an origin-less repository with no shared identity to prove"
+}
+
+test_missing_file_url_origin_collision_is_refused() {
+  local rec out origin
+  rec=$(make_same_origin_clones missing-file-origin)
+  read_clone_case "$rec"
+  origin="file://$CASE_DIR/missing/project.git"
+  git -C "$CLONE_MAIN" remote set-url origin "$origin"
+  git -C "$CLONE_MATE" remote set-url origin "$origin"
+  out=$(run_trust "$CLONE_CONFIG" "$CLONE_WT" "$CLONE_MATE")
+  expect_code 1 $? "a missing file:// origin must not prove a shared identity: $out"
+  assert_contains "$out" "is not a worktree of project" "the refusal did not name the project mismatch"
+  assert_absent "$CLONE_CONFIG/.claude.json" "trust was written for clones sharing a missing file:// origin"
+  pass "fm-claude-trust.sh: refuses two clones sharing a missing file:// origin"
 }
 
 test_unresolvable_relative_origin_collision_is_refused() {
@@ -1032,6 +1065,8 @@ test_same_origin_clone_worktree_is_trusted
 test_same_origin_clone_worktree_refreshes_the_worktrees_own_canonical_import_consent
 test_different_origin_clone_worktree_is_refused
 test_originless_clone_worktree_is_refused
+test_missing_file_url_origin_collision_is_refused
+test_same_origin_clone_worktree_honors_the_owning_checkouts_decline
 test_unresolvable_relative_origin_collision_is_refused
 test_colon_in_relative_origin_is_not_a_url
 test_same_origin_spellings

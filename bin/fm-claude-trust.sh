@@ -250,11 +250,17 @@ common_dir_of() {
 }
 
 # Compare remote URLs exactly and absolute local origins by resolved path.
+# A file:// origin is a local path, not a remote URL, so it resolves the same way.
 # Missing, relative, or unresolvable origins prove no shared identity.
 origin_identity() {  # <path-inside-repo>
   local dir=$1 url
   url=$(git -C "$dir" remote get-url origin 2>/dev/null) || return 1
   [ -n "$url" ] || return 1
+  case $url in
+    file://localhost/*) url=${url#file://localhost} ;;
+    file:///*) url=${url#file://} ;;
+    file:*) return 1 ;;
+  esac
   case $url in
     /*) [ -d "$url" ] && (CDPATH='' cd -P -- "$url" && pwd -P) || return 1 ;;
     *) case ${url%%/*} in *:*) printf '%s\n' "$url" ;; *) return 1 ;; esac ;;
