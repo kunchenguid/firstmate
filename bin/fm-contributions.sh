@@ -78,10 +78,18 @@
 # is set), then the closing head read;
 # an issue has two waves. Before starting a URL, poll reserves the smaller of
 # the effective budget and 15 seconds for those waves. URLs needing forge
-# reads are sorted by URL and rotated by the current five-minute epoch bucket
-# modulo their count, without stored scheduling state or freshness-based
-# reordering. Terminal URLs settle separately before the forge budget starts
-# and consume no rotation slots.
+# reads use oldest scheduling key first, with the URL as a stable tie-break.
+# The key is the latest good observation or scheduling
+# attempt across that URL's eligible owners. An owner whose saved file failed
+# this sweep's validation is ineligible; a URL with no eligible owners consumes
+# no read slot, while the unreadable-record warning remains. Terminal URLs
+# settle separately before the forge budget starts and consume no read slots.
+# state/contributions-poll.json is scheduler-owned fm-contributions-poll.v1:
+# {schema,attempts}, with attempts mapping supported URLs to ISO UTC timestamps.
+# Every attempted read, including an error or budget refusal, updates this one
+# file atomically under the poll lock. It never updates owner observations or
+# proves freshness, and a missing file means no prior scheduling attempts.
+# An unsafe or invalid scheduler file refuses the poll before forge reads.
 # A deliberately smaller configured budget remains bounded and may be
 # unmeasured, rather than being mislabeled unavailable. Each distinct supported
 # URL is attempted at most once per poll and its observation applied to every owner.
@@ -96,7 +104,8 @@
 # output (control characters dropped, at most 160 characters), or the
 # structural check that refused the observation. A later good read clears the
 # record's error, so the unavailable line is the copy that outlives it.
-# FM_CONTRIBUTIONS_MAX_AGE (default 900 seconds) bounds freshness.
+# FM_CONTRIBUTIONS_MAX_AGE (default 900 seconds) bounds projected freshness;
+# observing every live URL within that time still requires enough sweep capacity.
 # A supported URL whose last good observation is merged or closed is final: it is
 # never re-read, stays fresh, and every owner's saved row converges on that
 # observation, with a stale error beside it cleared.
@@ -224,8 +233,9 @@ jq_lib() { # jq options/program via final argument
 
 read_saved() {
   local file dir task
-  local -a files=() tasks=()
+  local -a files=() tasks=() rejected=()
   ERRORS=0
+  printf '[]\n' > "$TMP/rejected.json"
   if [ -L "$DATA" ]; then
     ERRORS=1; printf '[]\n' > "$TMP/saved.json"; return 0
   fi
@@ -235,10 +245,14 @@ read_saved() {
     fm_basename_to task "$dir"
     if [ -L "$file" ] || [ -L "$dir" ] || [ ! -f "$file" ] || [ "$(wc -c < "$file")" -gt 1048576 ]; then
       ERRORS=$((ERRORS + 1))
+      rejected+=("$task")
       continue
     fi
     files+=("$file"); tasks+=("$task")
   done
+  if [ "${#rejected[@]}" -gt 0 ]; then
+    printf '%s\0' "${rejected[@]}" | jq -Rs 'split("\u0000")[:-1]' > "$TMP/rejected.json"
+  fi
   # Validate records in bounded jq batches: one process per file outgrows the
   # watcher's check timeout, and one process for all files outgrows ARG_MAX.
   [ "${#files[@]}" -gt 0 ] || { printf '[]\n' > "$TMP/saved.json"; return 0; }
@@ -256,14 +270,17 @@ read_saved() {
             and (try ($parsed[0] | valid_record) catch false)
             and $parsed[0].task == $tasks[0][$i]
           then $parsed[0] else null end] as $checked
-      | {records: [$checked[] | select(. != null)], errors: ($checked | map(select(. == null)) | length)}' \
+      | {records: [$checked[] | select(. != null)], errors: ($checked | map(select(. == null)) | length),
+          rejected: [range(0; $checked | length) as $i | select($checked[$i] == null) | $tasks[0][$i]]}' \
       > "$TMP/checked.$n.json"
     n=$((n + 1))
   done
-  jq -s '{records: (map(.records) | add), errors: (map(.errors) | add)}' "$TMP"/checked.*.json > "$TMP/checked.json"
+  jq -s --slurpfile rejected "$TMP/rejected.json" '{records: (map(.records) | add), errors: (map(.errors) | add),
+    rejected: ($rejected[0] + (map(.rejected) | add))}' "$TMP"/checked.*.json > "$TMP/checked.json"
   rm -f "$TMP"/checked.[0-9]*.json
   ERRORS=$((ERRORS + $(jq '.errors' "$TMP/checked.json")))
   jq '.records' "$TMP/checked.json" > "$TMP/saved.json"
+  jq '.rejected' "$TMP/checked.json" > "$TMP/rejected.json"
 }
 
 get_input() {
@@ -599,6 +616,34 @@ clear_unsupported_errors() {
     | [$task,.url] | @tsv')
 }
 
+read_schedule() {
+  local file="$STATE/contributions-poll.json" device
+  device=$(fm_pr_file_device "$STATE")
+  fm_pr_regular_destination_on_device_or_absent "$file" "$device" || fail 'unsafe contribution scheduler state'
+  if [ -f "$file" ]; then
+    jq_lib -e 'select(try (.schema == "fm-contributions-poll.v1"
+      and (.attempts | type == "object")
+      and all(.attempts | to_entries[]; (.key | supported_url)
+        and (.value | type == "string") and (.value | fromdateiso8601 | type == "number"))) catch false)' \
+      "$file" > "$TMP/schedule.json" || fail 'invalid contribution scheduler state'
+  else
+    printf '{"schema":"fm-contributions-poll.v1","attempts":{}}\n' > "$TMP/schedule.json"
+  fi
+}
+
+record_attempt() { # supported URL; scheduling evidence only
+  local file="$STATE/contributions-poll.json" device staged
+  device=$(fm_pr_file_device "$STATE")
+  fm_pr_regular_destination_on_device_or_absent "$file" "$device" || fail 'unsafe contribution scheduler destination'
+  jq --arg url "$1" --arg now "$NOW" '.attempts[$url]=$now' "$TMP/schedule.json" > "$TMP/next-schedule.json"
+  staged=$(umask 077; mktemp "$STATE/.contributions-poll.XXXXXX")
+  cp "$TMP/next-schedule.json" "$staged"
+  chmod 600 "$staged"
+  fm_pr_regular_destination_on_device_or_absent "$file" "$device" || fail 'contribution scheduler destination changed'
+  mv -f -- "$staged" "$file"
+  mv "$TMP/next-schedule.json" "$TMP/schedule.json"
+}
+
 poll() {
   local task url old kind error observed why
   local -a row
@@ -607,13 +652,22 @@ poll() {
   read_saved
   [ "$ERRORS" -eq 0 ] || printf 'contributions: %s unreadable durable record(s)\n' "$ERRORS"
   clear_unsupported_errors
-  # Only supported URLs enter final settlement and the forge-read rotation.
+  read_schedule
+  # Only supported URLs with eligible owners enter settlement and scheduling.
   # One line per distinct URL: its settlement, the URL, then every owning task.
   # A contribution with a final observation is not re-read for any owner; it
   # is settled once every owner holds that final observation without an error.
-  jq_lib -nr --slurpfile input "$TMP/input.json" --slurpfile saved "$TMP/saved.json" '
+  jq_lib -nr --slurpfile input "$TMP/input.json" --slurpfile saved "$TMP/saved.json" \
+    --slurpfile rejected "$TMP/rejected.json" --slurpfile schedule "$TMP/schedule.json" '
     known($input[0];$saved[0]) | map(select(.url | supported_url))
+    | map(select(.task as $task | ($rejected[0] | index($task)) == null))
     | group_by(.url) | map({url:.[0].url,tasks:(map(.task) | unique)})
+    | map(. as $known
+      | . + {scheduled: (([$saved[0][] | select(.task | IN($known.tasks[])) | .records[]
+          | select(.url == $known.url and .error == null and .observation != null) | .checked_at]
+          + [$schedule[0].attempts[$known.url]])
+          | map(select(. != null) | fromdateiso8601) | max // 0)})
+    | sort_by(.scheduled, .url)
     | .[] | . as $known
     | [$known.tasks[] as $task | [$saved[0][] | select(.task == $task) | .records[] | select(.url == $known.url)] | first
       | if . != null and (.observation.state | IN("merged","closed")) then .error == null else null end] as $final
@@ -628,9 +682,7 @@ poll() {
       *) (IFS=$'\t'; printf '%s\n' "${row[*]:1}") >> "$TMP/live.tsv" ;;
     esac
   done < "$TMP/known.tsv"
-  jq -Rnr --argjson bucket "$((EPOCH / 300))" '
-    [inputs] | if length == 0 then . else ($bucket % length) as $offset | .[$offset:] + .[:$offset] end
-    | .[]' < "$TMP/live.tsv" > "$TMP/known.tsv"
+  mv "$TMP/live.tsv" "$TMP/known.tsv"
   DEADLINE=$(( $(date +%s) + BUDGET ))
   OBSERVATION_RESERVE=$((BUDGET < 15 ? BUDGET : 15))
   while IFS=$'\t' read -r -a row; do
@@ -638,6 +690,7 @@ poll() {
     url=${row[0]}
     observed=0
     observe "$url" || observed=$?
+    record_attempt "$url"
     [ "$BUDGET_EXHAUSTED" -eq 0 ] || continue
     why='no failing step recorded'
     [ ! -s "$TMP/why" ] || IFS= read -r why < "$TMP/why"
