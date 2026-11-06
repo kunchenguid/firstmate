@@ -506,7 +506,7 @@ Any other configured adapter is addressed by that root alone, because `--file` w
 ### Exemptions and refusal conditions
 
 The gate does not apply to persistent secondmates, manual-backend homes, or markdown homes without a backlog file.
-Those retain their existing persistent-agent, manual, or ad-hoc lifecycle behavior.
+The [recovery contract](../bin/fm-backlog-transition-lib.sh) owns interrupted records-only cleanup in exempt homes.
 Configured non-markdown adapters remain active without that file.
 Migrated-hold resolution on a beads home reads its graph path, binary, and prefix from the root `.tasks.toml` `[beads]` section only, and refuses (rc=2) when the beads backend is selected elsewhere (a `TASKS_AXI_BACKEND` override or user-level config) with no root-level `[beads]` section.
 
