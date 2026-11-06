@@ -871,6 +871,7 @@ case "$fault:$*" in
   down:*) printf 'gh: Bad Gateway (HTTP 502)\n' >&2; exit 1 ;;
   not-found:'api repos/o/r/'*) printf 'gh: Not Found (HTTP 404)\n' >&2; exit 1 ;;
   hang:'api repos/o/r/pulls/8') sleep 4 ;;
+  budget-head:'api repos/o/r/pulls/8') sleep 6 ;;
   head:'pr view '*) printf '{"headRefOid":"%s","reviewDecision":"APPROVED"}\n' "$(printf 'b%.0s' $(seq 40))"; exit 0 ;;
   headless:'pr view '*) printf '{"headRefOid":null,"reviewDecision":"APPROVED"}\n'; exit 0 ;;
 esac
