@@ -794,16 +794,11 @@ SH
   pass "teardown closes a landed Gerrit task with its change URL as a note and a GitHub task with --pr"
 }
 
-test_teardown_closes_a_gitlab_task_with_its_merge_request_url_as_a_note() {
-  local case_dir out real_tasks_axi url forge
-  local gitlab_url=https://gitlab.example.com/group/sub/repo/-/merge_requests/12
-  case_dir=$(make_case tasks-axi-close-gitlab)
-  write_meta "$case_dir" no-mistakes ship
-  printf 'pr=%s\n' "$gitlab_url" >> "$case_dir/state/task-x1.meta"
-  seed_backlog_in_flight "$case_dir"
-  # Pin the refusal tasks-axi applies to a --pr link that is neither a GitHub
-  # nor a Forgejo pull request, so this case keeps reproducing whatever the
-  # installed release accepts.
+# Pin the refusal tasks-axi applies to a --pr link that is neither a GitHub
+# nor a Forgejo pull request, so a case keeps reproducing whatever the
+# installed release accepts.
+write_tasks_axi_pr_link_refusal() {
+  local case_dir=$1 real_tasks_axi
   real_tasks_axi=$(command -v tasks-axi)
   cat > "$case_dir/fakebin/tasks-axi" <<SH
 #!/usr/bin/env bash
@@ -818,6 +813,16 @@ done
 exec "$real_tasks_axi" "\$@"
 SH
   chmod +x "$case_dir/fakebin/tasks-axi"
+}
+
+test_teardown_closes_a_gitlab_task_with_its_merge_request_url_as_a_note() {
+  local case_dir out url forge
+  local gitlab_url=https://gitlab.example.com/group/sub/repo/-/merge_requests/12
+  case_dir=$(make_case tasks-axi-close-gitlab)
+  write_meta "$case_dir" no-mistakes ship
+  printf 'pr=%s\n' "$gitlab_url" >> "$case_dir/state/task-x1.meta"
+  seed_backlog_in_flight "$case_dir"
+  write_tasks_axi_pr_link_refusal "$case_dir"
 
   out=$(run_teardown "$case_dir" 2>&1) || fail "teardown of a landed GitLab task failed: $out"
   [ "$(backlog_row_state "$case_dir")" = "done" ] \
@@ -834,7 +839,7 @@ SH
     write_meta "$case_dir" no-mistakes ship
     printf 'pr=%s\n' "$url" >> "$case_dir/state/task-x1.meta"
     seed_backlog_in_flight "$case_dir"
-    cp "$TMP_ROOT/tasks-axi-close-gitlab/fakebin/tasks-axi" "$case_dir/fakebin/tasks-axi"
+    write_tasks_axi_pr_link_refusal "$case_dir"
     out=$(run_teardown "$case_dir" 2>&1) || fail "teardown of a landed task with $url failed: $out"
     tasks-axi show task-x1 --file "$case_dir/data/backlog.md" \
       | grep -F "links: \"pr:$url\"" >/dev/null \
@@ -852,7 +857,7 @@ test_teardown_closes_an_azure_devops_task_with_its_pull_request_url_as_a_note() 
   write_meta "$case_dir" no-mistakes ship
   printf 'pr=%s\n' "$ado_url" >> "$case_dir/state/task-x1.meta"
   seed_backlog_in_flight "$case_dir"
-  cp "$TMP_ROOT/tasks-axi-close-gitlab/fakebin/tasks-axi" "$case_dir/fakebin/tasks-axi"
+  write_tasks_axi_pr_link_refusal "$case_dir"
 
   out=$(run_teardown "$case_dir" 2>&1) || fail "teardown of a landed Azure DevOps task failed: $out"
   [ "$(backlog_row_state "$case_dir")" = "done" ] \
