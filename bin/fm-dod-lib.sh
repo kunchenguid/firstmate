@@ -468,6 +468,7 @@ A killed or timed-out call is never evidence the daemon died: the daemon accepts
 Reattach and keep going rather than reporting the pipeline blocked; rule 7 owns the checks that decide when a pipeline block is real.
 
 Two firstmate-specific rules layer on top of that guidance:
+- Before starting validation, append \`working [at=<epoch>]: validation started\` to the status file so Firstmate can verify that the run exists for this branch.
 - ask-user findings are never yours to answer: escalate to firstmate using rule 6's ask-user format and stop.
   Firstmate applies \`ask-user-authority\` and obtains any required captain decision.
   When the decision comes back, feed it to the gate with \`no-mistakes axi respond\` and let the pipeline apply it - do not route the question to "the user" or implement the fix yourself.

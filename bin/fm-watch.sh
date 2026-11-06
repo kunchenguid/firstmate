@@ -127,6 +127,10 @@
 #                          opt-in config/open-decision-reminders record-age
 #                          backstop, independent of pane and branch state;
 #                          open_decision_reminder_tick owns its bounded repeats
+#   check: validation claim has no run for <branch> (worker reported validation started)
+#                          a worker's validation-started status has no
+#                          no-mistakes run on its branch FM_CLAIMED_RUN_DELAY
+#                          seconds later; reported once per claim
 #   check: process-event result captured: <keys>
 #                          a durably captured process-to-event result is queued
 #                          and has not been surfaced yet; reported once per
@@ -215,6 +219,8 @@
 set -u
 
 SCRIPT_DIR="$(d=${BASH_SOURCE[0]%/*}; [ "$d" != "${BASH_SOURCE[0]}" ] || d=.; cd "${d:-/}" && pwd)"
+# shellcheck source=bin/fm-nm-run-lib.sh
+. "$SCRIPT_DIR/fm-nm-run-lib.sh"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
@@ -318,9 +324,11 @@ WATCHER_DOWNTIME_MARKER="$STATE/.watcher-down"
 if [ "$(uname)" = Darwin ]; then
   stat_mtime() { /usr/bin/stat -f %m "$1" 2>/dev/null; }        # epoch seconds of mtime
   stat_devino() { /usr/bin/stat -f '%d %i' "$1" 2>/dev/null; }  # device + inode pair
+  stat_log_identities() { /usr/bin/stat -L -f '%d %i %z %c %N' "$@" 2>/dev/null; }  # dev ino size ctime path, one line per path
 else
   stat_mtime() { stat -c %Y "$1" 2>/dev/null; }
   stat_devino() { stat -c '%d %i' "$1" 2>/dev/null; }
+  stat_log_identities() { stat -L -c '%d %i %s %Z %n' "$@" 2>/dev/null; }
 fi
 # Record the held state directory's device+inode now that stat_devino exists.
 # The per-poll teardown check re-stats the path instead of comparing /dev/fd/6
@@ -333,6 +341,8 @@ fi
 # turn-ended signature, annotation staleness checks, and guarded bookkeeping writes.
 
 POLL=${FM_POLL:-15}                   # seconds between cycles
+CLAIMED_RUN_DELAY=${FM_CLAIMED_RUN_DELAY:-180}
+case "$CLAIMED_RUN_DELAY" in ''|*[!0-9]*) CLAIMED_RUN_DELAY=180 ;; esac
 # The liveness beacon is touched once per cycle, immediately before the
 # terminal wait below (event_wait_or_sleep) as well as at the top of the next
 # one, so a healthy cycle's beacon can legitimately age up to POLL seconds
@@ -3492,6 +3502,129 @@ event_wait_or_sleep() {
   esac
 }
 
+# --- validation-claim verification --------------------------------------------
+# A worker's `working: validation started` line claims a no-mistakes run exists
+# for its branch. .claimed-run-<task> holds the claim's epoch while it is pending,
+# and .claimed-run-cursor-<task> remembers how far the log was read: a header line
+# `dev ino size ctime offset verified_at`, then the bytes that end at `offset`,
+# bounded by CLAIMED_RUN_WITNESS_BYTES. Those bytes identify the log, because a
+# status log only ever grows; a replacement, shrink, or rewrite of its tail is a
+# new log whose pending claim is void.
+# ponytail: a same-size rewrite that leaves the last 4096 bytes intact goes
+# unnoticed, which keeps a poll's read bounded; widen the witness if one appears.
+CLAIMED_RUN_WITNESS_BYTES=4096
+# File times are whole seconds here and can lag the clock slightly, so a rewrite
+# can keep its predecessor's ctime only while that ctime is this close to the
+# last read. Past it, the single batched stat alone proves a log unchanged.
+CLAIMED_RUN_CTIME_SLACK_SECS=2
+
+# Sets CLAIMED_RUN_BYTES to <file> from byte <offset> through its end.
+claimed_run_read_from() {  # <file> <offset>
+  CLAIMED_RUN_BYTES=$(tail -c +"$(($2 + 1))" "$1" 2>/dev/null && printf '\001') || return 1
+  CLAIMED_RUN_BYTES=${CLAIMED_RUN_BYTES%$'\001'}
+}
+
+# True when <text>'s complete lines include a validation claim.
+claimed_run_text_claims() {  # <text>
+  local line line_verb line_note
+  case "$1" in *'validation started'*) ;; *) return 1 ;; esac
+  while IFS= read -r line; do
+    status_line_verb "$line" line_verb
+    status_line_note "$line" line_note
+    if [ "$line_verb" = working ] && [ "$line_note" = 'validation started' ]; then
+      return 0
+    fi
+  done <<EOF
+$1
+EOF
+  return 1
+}
+
+# Advances one log's cursor from its batched stat, arming a claim found in the
+# newly complete lines. A log whose stat matches a settled cursor costs no fork.
+claimed_run_scan_log() {  # <status-log> <task> <dev> <ino> <size> <ctime>
+  local LC_ALL=C f=$1 task=$2 dev=$3 ino=$4 size=$5 ctime=$6
+  local marker="$STATE/.claimed-run-$task" cursor="$STATE/.claimed-run-cursor-$task"
+  local c_dev='' c_ino='' c_size='' c_ctime='' c_offset='' c_verified='' witness='' verified_at start kept offset complete
+  [ ! -f "$cursor" ] || read -r c_dev c_ino c_size c_ctime c_offset c_verified < "$cursor"
+  case ":$c_dev:$c_ino:$c_size:$c_ctime:$c_offset:$c_verified:" in
+    *::*|*[!0-9:]*) c_dev= ;;
+    *)
+      if [ "$dev $ino $size $ctime" = "$c_dev $c_ino $c_size $c_ctime" ] \
+        && [ "$((c_ctime + CLAIMED_RUN_CTIME_SLACK_SECS))" -lt "$c_verified" ]; then
+        return 0
+      fi
+      ;;
+  esac
+  # Taken before the read, so a later rewrite cannot look settled.
+  verified_at=$(date +%s)
+  start=0
+  kept=-1
+  if [ -n "$c_dev" ] && [ "$dev $ino" = "$c_dev $c_ino" ] && [ "$size" -ge "$c_offset" ]; then
+    { read -r _; IFS= read -r -d '' witness; } < "$cursor"
+    start=$((c_offset - ${#witness}))
+    claimed_run_read_from "$f" "$start" || return 0
+    [ "${CLAIMED_RUN_BYTES:0:${#witness}}" != "$witness" ] || kept=${#witness}
+  fi
+  if [ "$kept" -lt 0 ]; then
+    [ -z "$c_dev" ] || rm -f "$marker"
+    start=0
+    kept=0
+    claimed_run_read_from "$f" 0 || return 0
+  fi
+  complete=${CLAIMED_RUN_BYTES:kept}
+  case "$complete" in
+    *$'\n'*) complete=${complete%$'\n'*}$'\n' ;;
+    *) complete= ;;
+  esac
+  offset=$((start + kept + ${#complete}))
+  if claimed_run_text_claims "$complete" && [ ! -f "$marker" ]; then
+    printf '%s\n' "$verified_at" > "$marker" || return 0
+  fi
+  kept=$((offset - start))
+  witness=${CLAIMED_RUN_BYTES:0:kept}
+  [ "$kept" -le "$CLAIMED_RUN_WITNESS_BYTES" ] || witness=${witness:kept-CLAIMED_RUN_WITNESS_BYTES}
+  printf '%s %s %s %s %s %s\n%s' "$dev" "$ino" "$size" "$ctime" "$offset" "$verified_at" "$witness" > "$cursor.tmp" \
+    && mv -f "$cursor.tmp" "$cursor"
+}
+
+# Settles one pending claim once it is due: a run on the task's branch clears it,
+# and its absence raises one wake. A failed run lookup leaves it pending.
+claimed_run_verify() {  # <task>
+  local task=$1 marker="$STATE/.claimed-run-$1" stamp wt branch runs reason
+  read -r stamp < "$marker" 2>/dev/null || stamp=
+  case "$stamp" in ''|*[!0-9]*) rm -f "$marker"; return 0 ;; esac
+  [ "$(( $(date +%s) - stamp ))" -ge "$CLAIMED_RUN_DELAY" ] || return 0
+  wt=$(fm_meta_get "$STATE/$task.meta" worktree)
+  branch=
+  [ ! -d "$wt" ] || branch=$(git -C "$wt" symbolic-ref --quiet --short HEAD 2>/dev/null || true)
+  [ -n "$branch" ] || { rm -f "$marker"; return 0; }
+  runs=$(fm_nm_run_checked "$wt" 10 runs --limit 2147483647) || return 0
+  if printf '%s\n' "$runs" | awk -v branch="$branch" '$2 == branch { found=1 } END { exit !found }'; then
+    rm -f "$marker"
+    return 0
+  fi
+  reason="check: validation claim has no run for $branch (worker reported validation started)"
+  fm_wake_append check "claimed-run-$task" "$reason" || return 1
+  rm -f "$marker"
+  wake "$reason"
+}
+
+claimed_run_tick() {
+  local logs=("$STATE"/*.status) listing dev ino size ctime f task
+  [ -e "${logs[0]}" ] || return 0
+  listing=$(stat_log_identities "${logs[@]}") || :
+  while read -r dev ino size ctime f; do
+    [ -f "$f" ] || continue
+    task=${f##*/}; task=${task%.status}
+    claimed_run_scan_log "$f" "$task" "$dev" "$ino" "$size" "$ctime" </dev/null
+    [ -f "$STATE/.claimed-run-$task" ] || continue
+    claimed_run_verify "$task" </dev/null || return 1
+  done <<EOF
+$listing
+EOF
+}
+
 # --- Main entry: the runtime below runs only when this file is executed as a
 # script. When sourced (unit tests loading the functions above), return here
 # before acquiring the singleton lock or entering the blocking loop.
@@ -3991,6 +4124,8 @@ while :; do
   fi
 
   # Slow per-task checks (firstmate writes these, e.g. a merged-PR poll).
+  claimed_run_tick || { echo 'watcher: claimed-run verification failed' >&2; exit 1; }
+
   # Time-based via .last-check mtime so the cadence survives watcher restarts.
   # Evaluated BEFORE the signal scan: wake() exits the cycle, so a check placed
   # after the signal scan would be starved whenever a chatty sibling crewmate

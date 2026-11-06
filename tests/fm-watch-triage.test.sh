@@ -724,6 +724,349 @@ test_secondmate_status_routine_absorbed_routed_surfaced_classifier() {
   pass "a secondmate's unmarked routine progress absorbs when provably working; routed, terminal, note, marked, and unknown lines surface"
 }
 
+
+
+test_claimed_run_outcomes() {
+  local outcome dir state fakebin out wt task branch pid expected delay age
+  for outcome in missing matching invalid-delay; do
+    dir=$(make_case "claimed-run-$outcome"); state="$dir/state"; fakebin="$dir/fakebin"
+    out="$dir/watch.out"; wt="$dir/worktree"; task=claim
+    mkdir -p "$wt"
+    git -C "$wt" init -q
+    branch=$(git -C "$wt" symbolic-ref --short HEAD)
+    printf 'worktree=%s\n' "$wt" > "$state/$task.meta"
+    if [ "$outcome" = invalid-delay ]; then
+      printf 'working: routine progress\n' > "$state/$task.status"
+    else
+      printf 'working [at=1234567890] [key=validation]: validation started\nworking: implementing validation setup\nworking: checking progress\n' > "$state/$task.status"
+    fi
+    age=60; delay=0
+    if [ "$outcome" = invalid-delay ]; then age=200; delay=invalid; else
+      { printf '%s\n' "$(( $(date +%s) - age ))"; printf '%s\n%s\n' "$branch" '1'; } > "$state/.claimed-run-$task"
+    fi
+    printf 'v2\t%s\t%s@%s' "$(status_observed_signature "$state/$task.status")" \
+      "$(size_of "$state/$task.status")" "$(_fm_open_decisions_file_ident "$state/$task.status")" \
+      > "$state/.seen-claim_status"
+    if [ "$outcome" = matching ]; then
+      cat > "$fakebin/no-mistakes" <<'SH'
+#!/usr/bin/env bash
+printf 'run %s\n' "$FM_EXPECT_BRANCH"
+SH
+      expected=0
+    else
+      cat > "$fakebin/no-mistakes" <<'SH'
+#!/usr/bin/env bash
+printf 'run other-branch\n'
+SH
+      expected=1
+    fi
+    chmod +x "$fakebin/no-mistakes"
+    export FM_EXPECT_BRANCH="$branch"
+    export FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)'
+    PATH="$fakebin:$PATH" FM_CLAIMED_RUN_DELAY="$delay" FM_STATE_OVERRIDE="$state" \
+      FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_POLL=1 FM_SIGNAL_GRACE=1 \
+      FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+    pid=$!
+    if [ "$outcome" = invalid-delay ]; then
+      wait_poll_cycle "$state" "$pid" || { reap "$pid"; fail "invalid-delay watcher exited before its first cycle"; }
+      { printf '%s\n' "$(( $(date +%s) - age ))"; printf '%s\n%s\n' "$branch" '1'; } > "$state/.claimed-run-$task"
+    fi
+    if [ "$expected" = 1 ]; then
+      wait_for_exit "$pid" 100 || { reap "$pid"; fail "claimed-run $outcome did not surface"; }
+      [ "$(grep -c 'validation claim has no run' "$out")" -eq 1 ] || fail "missing run did not emit exactly one wake: $(cat "$out")"
+    else
+      wait_poll_cycle "$state" "$pid" || { reap "$pid"; fail "matching-run watcher exited"; }
+      [ ! -s "$out" ] || fail "matching run emitted a wake: $(cat "$out")"
+      kill "$pid" 2>/dev/null || true
+      wait "$pid" 2>/dev/null || true
+    fi
+    [ ! -e "$state/.claimed-run-$task" ] || fail "claimed-run $outcome retained its marker"
+  done
+  unset FM_EXPECT_BRANCH
+  pass "delayed validation claims flag only when the branch has no run, then clear their markers"
+}
+
+test_claimed_run_path_with_spaces() {
+  local dir state fakebin out wt task branch pid
+  dir=$(make_case claimed-run-spaces)
+  state="$dir/home with  two spaces/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; wt="$dir/worktree"; task=claim
+  mkdir -p "$state" "$wt"
+  git -C "$wt" init -q
+  branch=$(git -C "$wt" symbolic-ref --short HEAD)
+  printf 'worktree=%s\n' "$wt" > "$state/$task.meta"
+  printf 'working [at=1234567890]: validation started\n' > "$state/$task.status"
+  cat > "$fakebin/no-mistakes" <<'SH'
+#!/usr/bin/env bash
+printf 'run other-branch\n'
+SH
+  chmod +x "$fakebin/no-mistakes"
+  export FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)'
+  PATH="$fakebin:$PATH" FM_CLAIMED_RUN_DELAY=0 FM_STATE_OVERRIDE="$state" \
+    FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 100 || { reap "$pid"; fail "spaced-path claimed run did not surface"; }
+  [ "$(grep -c 'validation claim has no run' "$out")" -eq 1 ] \
+    || fail "spaced-path claim did not produce exactly one wake: $(cat "$out")"
+  pass "claimed-run stat rows preserve paths containing repeated spaces"
+}
+
+test_claimed_run_incremental_log() {
+  local dir state fakebin out wt status_file cursor pid
+  dir=$(make_case claimed-run-incremental); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; wt="$dir/worktree"; status_file="$state/claim.status"
+  mkdir -p "$wt"
+  git -C "$wt" init -q
+  printf 'worktree=%s\n' "$wt" > "$state/claim.meta"
+  printf 'working: preparing validation\n' > "$status_file"
+  printf 'v2\t%s\t%s@%s' "$(status_observed_signature "$status_file")" \
+    "$(size_of "$status_file")" "$(_fm_open_decisions_file_ident "$status_file")" \
+    > "$state/.seen-claim_status"
+  cursor="$state/.claimed-run-cursor-claim"
+  cat > "$fakebin/no-mistakes" <<'SH'
+#!/usr/bin/env bash
+printf 'run other-branch\n'
+SH
+  chmod +x "$fakebin/no-mistakes"
+  export FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)'
+  PATH="$fakebin:$PATH" FM_CLAIMED_RUN_DELAY=0 FM_STATE_OVERRIDE="$state" \
+    FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_poll_cycle "$state" "$pid" || { reap "$pid"; fail "incremental watcher exited before its first cycle"; }
+  [ -s "$cursor" ] || { reap "$pid"; fail "watcher did not create the byte-offset cursor"; }
+  printf 'working [at=1234567890]: validation started\n' >> "$status_file"
+  wait_for_exit "$pid" 100 || { reap "$pid"; fail "appended validation claim was not detected"; }
+  [ "$(grep -c 'validation claim has no run' "$out")" -eq 1 ] || fail "appended claim did not produce exactly one wake: $(cat "$out")"
+  unset FM_FAKE_CREW_STATE
+  pass "an appended validation claim on a running watcher is detected once"
+}
+
+# Drives the real poll tick with a controllable ctime and clock. Inside a tick PATH
+# is empty, so any external command that is not one of the logged wrappers fails
+# on stderr, which each poll asserts is empty.
+test_claimed_run_poll_cost() {
+  local dir state fakebin driver wt rc
+  dir=$(make_case claimed-run-poll-cost); state="$dir/state"; fakebin="$dir/fakebin"
+  driver="$dir/driver.sh"; wt="$dir/worktree"
+  mkdir -p "$wt"
+  git -C "$wt" init -q
+  cat > "$fakebin/no-mistakes" <<'SH'
+#!/usr/bin/env bash
+printf 'run %s\n' "${FM_TEST_RUN_BRANCH:-other-branch}"
+SH
+  chmod +x "$fakebin/no-mistakes"
+  cat > "$driver" <<'DRIVER'
+set -u
+. "$FM_ROOT_OVERRIDE/bin/fm-watch.sh"
+REAL_PATH=$PATH
+NOW=$(date +%s)
+CTIME=
+CALLS="$STATE/.test-calls"
+ERR="$STATE/.test-err"
+WAKES="$STATE/.test-wakes"
+STATS="$STATE/.test-stats"
+: > "$WAKES"
+CLAIMED_RUN_DELAY=0
+eval "real_$(declare -f stat_log_identities)"
+stat_log_identities() {
+  local dev ino size ctime path
+  printf '%s\n' "$#" >> "$STATS"
+  while read -r dev ino size ctime path; do
+    printf '%s %s %s %s %s\n' "$dev" "$ino" "$size" "${CTIME:-$ctime}" "$path"
+  done <<EOF
+$(PATH=$REAL_PATH real_stat_log_identities "$@")
+EOF
+}
+for cmd in tail mv rm; do
+  eval "$cmd() { printf '%s %s\n' $cmd \"\$*\" >> \"\$CALLS\"; PATH=\$REAL_PATH command $cmd \"\$@\"; }"
+done
+date() { printf 'date\n' >> "$CALLS"; printf '%s\n' "$NOW"; }
+wake() { printf '%s\n' "$1" >> "$WAKES"; }
+check() { "$@" || { printf 'FAILED: %s\n' "$*" >&2; exit 1; }; }
+equals() { [ "$1" = "$2" ] || { printf 'FAILED %s: got [%s], want [%s]\n' "$3" "$1" "$2" >&2; exit 1; }; }
+# A poll with no external command at all beyond the wrappers.
+poll() {
+  : > "$CALLS"; : > "$STATS"; : > "$ERR"
+  PATH=/nonexistent claimed_run_tick 2> "$ERR"
+  [ ! -s "$ERR" ] || { printf 'FAILED unexpected external command: %s\n' "$(cat "$ERR")" >&2; exit 1; }
+}
+# A poll allowed to resolve a due claim, which needs git and the run lookup.
+resolving_poll() { : > "$CALLS"; : > "$STATS"; claimed_run_tick; }
+pending_stamp() { read -r REPLY < "$STATE/.claimed-run-$1"; printf '%s' "$REPLY"; }
+cursor_offset() { read -r _ _ _ _ REPLY _ < "$STATE/.claimed-run-cursor-$1"; printf '%s' "$REPLY"; }
+
+printf 'worktree=%s\n' "$TEST_WT" > "$STATE/a.meta"
+printf 'worktree=%s\n' "$TEST_WT" > "$STATE/b.meta"
+printf 'worktree=%s\n' "$TEST_WT" > "$STATE/c.meta"
+printf 'working: first\n' > "$STATE/a.status"
+printf 'working: second\n' > "$STATE/b.status"
+printf 'working: third\n' > "$STATE/c.status"
+
+# Unchanged logs cost one stat for all of them, and nothing else.
+CTIME=$((NOW - 100))
+poll
+poll
+equals "$(cat "$STATS")" 3 'one stat naming every log'
+equals "$(cat "$CALLS")" '' 'settled logs ran no command'
+
+# A recent ctime is rechecked by content only until it is safely in the past.
+CTIME=$NOW
+poll
+equals "$(grep -c '^tail ' "$CALLS")" 3 'a changed ctime reads each tail'
+NOW=$((NOW + 3))
+poll
+equals "$(grep -c '^tail ' "$CALLS")" 3 'a racy ctime is reread'
+poll
+equals "$(cat "$CALLS")" '' 'a settled ctime needs no read'
+
+# A resolved claim leaves nothing to do on later polls.
+printf 'working [at=1234567890]: validation started\n' >> "$STATE/a.status"
+CTIME=$((NOW - 100))
+export FM_TEST_RUN_BRANCH=$TEST_BRANCH
+resolving_poll
+unset FM_TEST_RUN_BRANCH
+check test ! -e "$STATE/.claimed-run-a"
+equals "$(cat "$WAKES")" '' 'a claim with a run raises no wake'
+poll
+equals "$(cat "$CALLS")" '' 'a resolved claim costs nothing'
+
+# Only appended bytes and the bounded witness are read, in byte offsets.
+{
+  printf 'working: caf\303\251 progress\n'
+  i=0
+  while [ "$i" -lt 2000 ]; do printf 'working: routine progress line number %s\n' "$i"; i=$((i + 1)); done
+} > "$STATE/b.status"
+poll
+before=$(wc -c < "$STATE/b.status")
+equals "$(cursor_offset b)" "$((before + 0))" 'the cursor counts bytes'
+CLAIMED_RUN_DELAY=999
+printf 'working [at=1234567890]: validation started\n' >> "$STATE/b.status"
+poll
+read -r _ _ tail_from _ <<EOF
+$(grep "^tail .*b\.status" "$CALLS")
+EOF
+tail_from=${tail_from#+}
+check test "$tail_from" -gt "$((before - CLAIMED_RUN_WITNESS_BYTES))"
+equals "$(cursor_offset b)" "$(($(wc -c < "$STATE/b.status") + 0))" 'the cursor reached the end'
+
+# A pending claim keeps its first stamp through routine lines and repeated claims.
+stamp=$(pending_stamp b)
+NOW=$((NOW + 50))
+printf 'working: checking progress\n' >> "$STATE/b.status"
+poll
+printf 'working: validation started\n' >> "$STATE/b.status"
+poll
+equals "$(pending_stamp b)" "$stamp" 'the pending claim keeps its stamp'
+
+# An unterminated line is left for the write that completes it.
+printf 'working: routine\nworking: validation sta' >> "$STATE/c.status"
+poll
+check test ! -e "$STATE/.claimed-run-c"
+printf 'rted\n' >> "$STATE/c.status"
+poll
+check test -f "$STATE/.claimed-run-c"
+rm -f "$STATE/.claimed-run-c" "$STATE/.claimed-run-b"
+
+# A same-size rewrite inside one timestamp second is caught by its tail witness.
+printf 'working: head\nworking: validation pending\n' > "$STATE/a.status"
+CTIME=$NOW
+poll
+printf 'working: head\nworking: validation started\n' > "$STATE/a.status"
+CLAIMED_RUN_DELAY=0
+resolving_poll
+equals "$(grep -c 'validation claim has no run' "$WAKES")" 1 'the rewritten claim raises one wake'
+CTIME=$((NOW - 100))
+poll
+poll
+resolving_poll
+equals "$(grep -c 'validation claim has no run' "$WAKES")" 1 'the same claim does not repeat'
+
+# Retiring a task removes its claim records.
+printf 'working: validation started\n' >> "$STATE/a.status"
+CLAIMED_RUN_DELAY=999
+poll
+check test -f "$STATE/.claimed-run-a"
+status_retire_presentation_task "$STATE" a
+check test ! -e "$STATE/.claimed-run-a"
+check test ! -e "$STATE/.claimed-run-cursor-a"
+DRIVER
+  env FM_STATE_OVERRIDE="$state" FM_CONFIG_OVERRIDE="$dir/config" FM_ROOT_OVERRIDE="$ROOT" \
+    PATH="$fakebin:$PATH" TEST_WT="$wt" TEST_BRANCH="$(git -C "$wt" symbolic-ref --short HEAD)" \
+    bash "$driver" > "$dir/driver.out" 2>&1
+  rc=$?
+  [ "$rc" -eq 0 ] || fail "claimed-run poll cost scenario failed: $(cat "$dir/driver.out")"
+  pass "claimed-run polls batch one stat, read only appended bytes, and catch a same-second rewrite"
+}
+
+test_claimed_run_same_size_rewrite_resets_cursor() {
+  local dir state fakebin out wt status_file cursor pid old_size
+  dir=$(make_case claimed-run-same-size-rewrite); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; wt="$dir/worktree"; status_file="$state/claim.status"
+  mkdir -p "$wt"
+  git -C "$wt" init -q
+  printf 'worktree=%s\n' "$wt" > "$state/claim.meta"
+  printf 'working: validation pending\nworking: validation pending\n' > "$status_file"
+  printf 'v2\t%s\t%s@%s' "$(status_observed_signature "$status_file")" \
+    "$(size_of "$status_file")" "$(_fm_open_decisions_file_ident "$status_file")" \
+    > "$state/.seen-claim_status"
+  cursor="$state/.claimed-run-cursor-claim"
+  cat > "$fakebin/no-mistakes" <<'SH'
+#!/usr/bin/env bash
+printf 'run other-branch\n'
+SH
+  chmod +x "$fakebin/no-mistakes"
+  export FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)'
+  PATH="$fakebin:$PATH" FM_CLAIMED_RUN_DELAY=0 FM_STATE_OVERRIDE="$state" \
+    FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_poll_cycle "$state" "$pid" || { reap "$pid"; fail "same-size watcher exited before its first cycle"; }
+  read -r _ _ old_size _ < "$cursor"
+  printf 'working: validation pending\nworking: validation started\n' > "$status_file"
+  [ "$(size_of "$status_file")" -eq "$old_size" ] || { reap "$pid"; fail "same-size fixture changed the status log size"; }
+  touch -r "$cursor" "$status_file"
+  wait_for_exit "$pid" 100 || { reap "$pid"; fail "same-size rewritten claim was not detected"; }
+  [ "$(grep -c 'validation claim has no run' "$out")" -eq 1 ] || fail "same-size rewritten claim did not produce exactly one wake: $(cat "$out")"
+  unset FM_FAKE_CREW_STATE
+  pass "a same-size status rewrite resets its cursor and detects validation claims"
+}
+
+test_claimed_run_shrink_resets_cursor() {
+  local dir state fakebin out wt status_file cursor old_size pid long_line
+  dir=$(make_case claimed-run-shrink); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; wt="$dir/worktree"; status_file="$state/claim.status"
+  mkdir -p "$wt"
+  git -C "$wt" init -q
+  printf 'worktree=%s\n' "$wt" > "$state/claim.meta"
+  long_line=$(printf '%200s' '')
+  printf 'working: preparing validation %s\n' "$long_line" > "$status_file"
+  printf 'v2\t%s\t%s@%s' "$(status_observed_signature "$status_file")" \
+    "$(size_of "$status_file")" "$(_fm_open_decisions_file_ident "$status_file")" \
+    > "$state/.seen-claim_status"
+  cursor="$state/.claimed-run-cursor-claim"
+  cat > "$fakebin/no-mistakes" <<'SH'
+#!/usr/bin/env bash
+printf 'run other-branch\n'
+SH
+  chmod +x "$fakebin/no-mistakes"
+  export FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)'
+  PATH="$fakebin:$PATH" FM_CLAIMED_RUN_DELAY=0 FM_STATE_OVERRIDE="$state" \
+    FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_poll_cycle "$state" "$pid" || { reap "$pid"; fail "shrink watcher exited before its first cycle"; }
+  read -r _ _ old_size _ < "$cursor"
+  printf 'working [at=1234567890]: validation started\n' > "$status_file"
+  [ "$(size_of "$status_file")" -lt "$old_size" ] || { reap "$pid"; fail "shrink fixture did not reduce the status log"; }
+  touch -r "$cursor" "$status_file"
+  wait_for_exit "$pid" 100 || { reap "$pid"; fail "claim after same-tick shrink was not detected"; }
+  [ "$(grep -c 'validation claim has no run' "$out")" -eq 1 ] || fail "shrunken log claim did not produce exactly one wake: $(cat "$out")"
+  unset FM_FAKE_CREW_STATE
+  pass "a truncated status log resets its cursor and redetects a validation claim"
+}
+
 # --- benign wakes are absorbed ONLY when the crew is provably working ---------
 
 test_provably_working_signal_absorbed() {
@@ -5321,6 +5664,12 @@ fm_test_run \
   test_worktree_write_probe_is_wall_clock_bounded \
   test_signal_crew_provably_working_classifier \
   test_secondmate_status_routine_absorbed_routed_surfaced_classifier \
+  test_claimed_run_outcomes \
+  test_claimed_run_path_with_spaces \
+  test_claimed_run_incremental_log \
+  test_claimed_run_poll_cost \
+  test_claimed_run_same_size_rewrite_resets_cursor \
+  test_claimed_run_shrink_resets_cursor \
   test_provably_working_signal_absorbed \
   test_turn_ended_provably_working_absorbed \
   test_turn_ended_not_working_surfaced \
