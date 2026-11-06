@@ -8,6 +8,26 @@ set -u
 CHECKPOINT="$ROOT/bin/fm-watch-checkpoint.sh"
 TMP_ROOT=$(fm_test_tmproot fm-watch-checkpoint)
 
+# The checkpoint refuses a native Codex thread that does not own the home lock,
+# and the runner itself may live under a native Codex server. Each case runs
+# under an ordinary Codex CLI-shaped ancestor instead, so the innermost harness
+# is never a shared server and the verdicts stay independent of the runner.
+mkdir -p "$TMP_ROOT/bin"
+FIXTURE_CODEX="$TMP_ROOT/bin/codex"
+BASH_BIN=$(command -v bash) || fail "could not locate bash for the checkpoint fixture"
+ln -s "$BASH_BIN" "$FIXTURE_CODEX"
+run_checkpoint() {
+  "$FIXTURE_CODEX" -c '"$@"; exit $?' bash "$@"
+}
+
+# Copy the checkpoint and the session-lock library it sources into code root $1.
+copy_checkpoint() {  # <bin-dir>
+  cp "$CHECKPOINT" "$1/fm-watch-checkpoint.sh"
+  cp "$ROOT/bin/fm-supervision-engine-lib.sh" "$1/fm-supervision-engine-lib.sh"
+  cp "$ROOT/bin/fm-session-lock-lib.sh" "$1/fm-session-lock-lib.sh"
+  cp "$ROOT/bin/fm-cursor-lib.sh" "$1/fm-cursor-lib.sh"
+}
+
 make_home() {
   local name=$1 home
   home="$TMP_ROOT/$name"
@@ -34,7 +54,7 @@ test_quiet_checkpoint_exits_124_cleanly() {
   out="$home/out.txt"
   err="$home/err.txt"
   status=0
-  FM_HOME="$home" FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 "$CHECKPOINT" --seconds 1 >"$out" 2>"$err" || status=$?
+  FM_HOME="$home" FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 run_checkpoint "$CHECKPOINT" --seconds 1 >"$out" 2>"$err" || status=$?
   expect_code 124 "$status" "quiet checkpoint exit"
   assert_contains "$(cat "$out")" "checkpoint: no actionable wake within 1s" "quiet checkpoint line missing"
   assert_absent "$home/state/.watch.lock/pid" "watch lock pid survived quiet checkpoint timeout"
@@ -47,8 +67,7 @@ make_isolated_checkpoint() {  # <home> <tool...>
   local home=$1 tool tool_path
   shift
   mkdir -p "$home/root/bin" "$home/fixture-bin"
-  cp "$CHECKPOINT" "$home/root/bin/fm-watch-checkpoint.sh"
-  cp "$ROOT/bin/fm-supervision-engine-lib.sh" "$home/root/bin/fm-supervision-engine-lib.sh"
+  copy_checkpoint "$home/root/bin"
   for tool in "$@"; do
     tool_path=$(command -v "$tool") || fail "could not locate $tool for the isolated checkpoint fixture"
     ln -s "$tool_path" "$home/fixture-bin/$tool"
@@ -87,7 +106,7 @@ expect_gnu_timeout_call() {  # <home> <command-name> <label>
   local home=$1 name=$2 label=$3 status
   status=0
   PATH="$home/fixture-bin" FM_HOME="$home" FM_SIGNAL_GRACE=1 \
-    "$home/root/bin/fm-watch-checkpoint.sh" --seconds 1 >"$home/out.txt" 2>"$home/err.txt" || status=$?
+    run_checkpoint "$home/root/bin/fm-watch-checkpoint.sh" --seconds 1 >"$home/out.txt" 2>"$home/err.txt" || status=$?
   expect_code 124 "$status" "$label checkpoint exit"
   assert_contains "$(cat "$home/out.txt")" "checkpoint: no actionable wake within 1s" \
     "$label did not return a quiet checkpoint"
@@ -150,7 +169,7 @@ PL
 
   status=0
   PATH="$fallback_bin" FM_HOME="$home" FM_POLL=1 FM_SIGNAL_GRACE=1 FM_WATCHER_CLEANUP_LOCK_BOUND=8 \
-    "$home/root/bin/fm-watch-checkpoint.sh" --seconds 1 >"$home/out.txt" 2>"$home/err.txt" || status=$?
+    run_checkpoint "$home/root/bin/fm-watch-checkpoint.sh" --seconds 1 >"$home/out.txt" 2>"$home/err.txt" || status=$?
 
   expect_code 124 "$status" "Perl fallback checkpoint exit"
   assert_contains "$(cat "$home/out.txt")" "checkpoint: no actionable wake within 1s" \
@@ -176,7 +195,7 @@ test_announced_recovery_is_not_reannounced_by_next_checkpoint() {
 
   status=0
   FM_HOME="$home" FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 \
-    "$CHECKPOINT" --seconds 5 >"$out" 2>"$err" || status=$?
+    run_checkpoint "$CHECKPOINT" --seconds 5 >"$out" 2>"$err" || status=$?
   expect_code 0 "$status" "first recovery checkpoint exit"
   assert_contains "$(cat "$out")" "check: rearm-resurface" \
     "first checkpoint did not announce the pending recovery"
@@ -190,7 +209,7 @@ test_announced_recovery_is_not_reannounced_by_next_checkpoint() {
 
   status=0
   FM_HOME="$home" FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 \
-    "$CHECKPOINT" --seconds 1 >"$out" 2>"$err" || status=$?
+    run_checkpoint "$CHECKPOINT" --seconds 1 >"$out" 2>"$err" || status=$?
 
   expect_code 124 "$status" "announced recovery checkpoint exit"
   assert_contains "$(cat "$out")" "checkpoint: no actionable wake within 1s" \
@@ -214,7 +233,7 @@ test_never_announced_recovery_is_announced_once() {
 
   status=0
   FM_HOME="$home" FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 \
-    "$CHECKPOINT" --seconds 5 >"$out" 2>"$err" || status=$?
+    run_checkpoint "$CHECKPOINT" --seconds 5 >"$out" 2>"$err" || status=$?
 
   expect_code 0 "$status" "pending recovery checkpoint exit"
   [ "$(grep -c '^check: rearm-resurface$' "$out" || true)" -eq 1 ] \
@@ -230,8 +249,10 @@ test_queue_append_during_checkpoint_still_resurfaces() {
   out="$home/out.txt"
   err="$home/err.txt"
 
+  # This checks delivery, not five-second latency. Leave time for the real
+  # watcher's startup and next poll on a loaded host.
   FM_HOME="$home" FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 \
-    "$CHECKPOINT" --seconds 5 >"$out" 2>"$err" &
+    run_checkpoint "$CHECKPOINT" --seconds 20 >"$out" 2>"$err" &
   checkpoint_pid=$!
   wait_for_checkpoint_lock "$home" || {
     kill "$checkpoint_pid" 2>/dev/null || true
@@ -262,7 +283,7 @@ test_signal_passes_through_and_exits_zero() {
     printf 'done: synthetic wake\n' > "$home/state/demo.status"
   ) &
   status=0
-  FM_HOME="$home" FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 "$CHECKPOINT" --seconds 8 >"$out" 2>"$err" || status=$?
+  FM_HOME="$home" FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 run_checkpoint "$CHECKPOINT" --seconds 8 >"$out" 2>"$err" || status=$?
   expect_code 0 "$status" "signal checkpoint exit"
   assert_contains "$(cat "$out")" "signal:" "signal wake was not passed through"
   drained=$(FM_HOME="$home" "$ROOT/bin/fm-wake-drain.sh")
@@ -283,7 +304,7 @@ SH
   FM_HOME="$home" "$ROOT/bin/fm-check-register.sh" env-check >/dev/null \
     || fail "could not register checkpoint custom check"
   status=0
-  FM_HOME="$home" FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=1 "$CHECKPOINT" --seconds 5 >"$out" 2>"$err" || status=$?
+  FM_HOME="$home" FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=1 run_checkpoint "$CHECKPOINT" --seconds 5 >"$out" 2>"$err" || status=$?
   expect_code 0 "$status" "check checkpoint exit"
   assert_contains "$(cat "$out")" "check:" "check wake was not passed through"
   assert_contains "$(cat "$out")" "FM_CHECK_INTERVAL=1" "watcher environment was not preserved"
@@ -298,7 +319,7 @@ test_existing_singleton_watcher_is_not_success() {
   mkdir "$home/state/.watch.lock"
   printf '%s\n' "$$" > "$home/state/.watch.lock/pid"
   status=0
-  FM_HOME="$home" FM_GUARD_GRACE=300 "$CHECKPOINT" --seconds 5 >"$out" 2>"$err" || status=$?
+  FM_HOME="$home" FM_GUARD_GRACE=300 run_checkpoint "$CHECKPOINT" --seconds 5 >"$out" 2>"$err" || status=$?
   expect_code 1 "$status" "singleton checkpoint exit"
   assert_contains "$(cat "$out")" "watcher: already running" "singleton watcher output was not passed through"
   assert_contains "$(cat "$err")" "outside this foreground checkpoint" "singleton watcher failure was not explained"
@@ -312,8 +333,7 @@ make_host_home() {  # <name>
   local home
   home=$(make_home "$1")
   mkdir -p "$home/root/bin"
-  cp "$CHECKPOINT" "$home/root/bin/fm-watch-checkpoint.sh"
-  cp "$ROOT/bin/fm-supervision-engine-lib.sh" "$home/root/bin/fm-supervision-engine-lib.sh"
+  copy_checkpoint "$home/root/bin"
   cat > "$home/root/bin/fm-supervision-host.sh" <<'SH'
 #!/usr/bin/env bash
 printf 'args=%s\nprimary=%s\npark=%s\nlimit=%s\n' "$*" "${FM_SUPERVISION_HOST_PRIMARY:-}" \
@@ -337,7 +357,7 @@ run_host_checkpoint() {  # <home> <kind> [checkpoint args...]; sets STATUS
   printf '%s\n' "$2" > "$home/host-kind"
   shift 2
   STATUS=0
-  FM_HOME="$home" "$home/root/bin/fm-watch-checkpoint.sh" "$@" >"$home/out.txt" 2>"$home/err.txt" || STATUS=$?
+  FM_HOME="$home" run_checkpoint "$home/root/bin/fm-watch-checkpoint.sh" "$@" >"$home/out.txt" 2>"$home/err.txt" || STATUS=$?
 }
 
 test_host_checkpoint_bounds_the_park_by_posture() {
@@ -345,6 +365,7 @@ test_host_checkpoint_bounds_the_park_by_posture() {
   home=$(make_host_home host-bound)
   run_host_checkpoint "$home" boundary --seconds 5
   expect_code 124 "$STATUS" "a host park that reached its bound is a quiet checkpoint"
+  [ ! -s "$home/err.txt" ] || fail "host checkpoint emitted unexpected errors: $(cat "$home/err.txt")"
   assert_contains "$(cat "$home/out.txt")" "checkpoint: no actionable wake within 5s" "the boundary must read as the ordinary quiet line"
   assert_contains "$(cat "$home/host-env")" $'args=park\nprimary=codex\npark=5\nlimit=1235' \
     "attended, the host must park for the checkpoint's own bound with the codex pin and a turn limit past it"
@@ -400,14 +421,11 @@ test_host_checkpoint_needs_the_file_and_honors_off() {
 # The real host under a fake Codex harness that holds the home's session lock.
 # shellcheck disable=SC2016 # the fake harness's script expands in its own shell
 test_real_host_checkpoint_ends_quietly_at_its_bound() {
-  local home fakebin status
+  local home status
   home=$(make_home host-real)
   : > "$home/config/supervision-host"
-  fakebin="$TMP_ROOT/host-real-bin"
-  mkdir -p "$fakebin"
-  ln -s /bin/bash "$fakebin/codex"
   status=0
-  FM_HOME="$home" FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$fakebin/codex" -c '
+  FM_HOME="$home" FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$FIXTURE_CODEX" -c '
     printf "%s\n" "$$" > "$FM_HOME/state/.lock"
     "$0" --seconds 4
   ' "$CHECKPOINT" >"$home/out.txt" 2>"$home/err.txt" || status=$?

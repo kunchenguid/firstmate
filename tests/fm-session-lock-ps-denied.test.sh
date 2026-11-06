@@ -38,10 +38,11 @@ SH
 # provider. The table reads FM_TEST_TRIPLE_N records (fake table rows
 # "<pid>|<ppid>|<comm>|<args>"); a pid absent from the table is unreadable,
 # which is how a dead pid behaves. FM_TEST_KILL_RC decides kill as before.
-# CLAUDE identity envs are scrubbed the same way the ancestry suite scrubs
-# them, so a suite running inside a real Claude session cannot leak in.
+# Harness identity envs are scrubbed so a suite running inside a real
+# Claude or native Codex session cannot leak its identity into the table.
 lib_eval_denied() {  # <fakebin> <provider-table-file> <expression>
   env -u CLAUDE_CODE_SESSION_ID -u CLAUDE_PID \
+    -u CODEX_SESSION_ID -u CODEX_THREAD_ID -u FM_CODEX_HOOK_SESSION_ID \
     FM_PROVIDER_FILE="$2" PATH="$1:$PATH" bash -c "
     . \"\$0\"
     kill() { return \${FM_TEST_KILL_RC:-0}; }
@@ -684,8 +685,8 @@ test_procinfo_helper_fails_closed() {
 # control byte, in place, with every printable and UTF-8 byte intact, so
 # a byte-for-byte comparison here would pin one procps build instead of
 # the rule and fail on the other. A route that spells control bytes with
-# characters ps itself prints (BSD and the macOS provider render them as
-# ^I / ^J) keeps them through the fold, which is why this touches only
+# characters ps itself prints (such as caret notation or octal escapes)
+# keeps them through the fold, which is why this touches only
 # the space and non-printable bytes.
 normalize_control_bytes() {  # <text>
   printf '%s' "$1" \
@@ -712,6 +713,12 @@ os.execv(sys.executable, [os.fsencode(sys.executable), b"-c", b"import sys,time;
     || { kill "$child"; fail "provider refused control-byte child"; }
   kill "$child" 2>/dev/null
   wait "$child" 2>/dev/null || :
+  # macOS has one shared vis contract for both fields, including Unicode
+  # and control-byte escapes. Linux permits different placeholder bytes.
+  if [ "$(uname -s)" = Darwin ]; then
+    [ "$got" = "$expected" ] \
+      || fail "macOS control-byte routes disagree: provider '$got', ps '$expected'"
+  fi
   # ppid and comm carry no control bytes, so those fields stay a raw
   # comparison; only the argv field is compared by shape.
   [ "${got%$'\t'*}" = "${expected%$'\t'*}" ] \
@@ -721,8 +728,8 @@ os.execv(sys.executable, [os.fsencode(sys.executable), b"-c", b"import sys,time;
   # Non-vacuity: every fixture word that sits around a control byte must
   # still arrive from both routes, so a route that swallowed that text
   # cannot pass by matching a loss on the other route. The words are
-  # asserted without their placeholder, because a BSD ps and the macOS
-  # provider spell it ^I / ^J while a Linux one spells it as one byte.
+  # asserted without their placeholder, because BSD and macOS can use
+  # visible escape sequences while Linux uses one placeholder byte.
   local word
   for word in tab newline high; do
     case $got in
@@ -825,12 +832,19 @@ os.execv(sys.executable, [sys.executable, "-c", "import sys,time; open(sys.argv[
       middle) suffix='aa  bb' ;;
       space) suffix='tail ' ;;
     esac
+    # macOS ps joins all argc entries. Linux drops trailing empty ones.
+    if [ "$(uname -s)" = Darwin ]; then
+      case "$shape" in
+        one) suffix='--resume ' ;;
+        two) suffix='--resume  ' ;;
+      esac
+    fi
     case "$args" in
       *"$marker $suffix") ;;
       *) fail "$shape argv lost element spacing: '$args'" ;;
     esac
   done
-  pass "trailing empty argv elements are dropped; interior empties and argument spaces survive"
+  pass "empty argv elements and argument spaces match the platform ps"
 }
 
 test_unreadable_owner_refuses_acquisition() {
@@ -950,8 +964,44 @@ test_unreadable_verdict_returns_success() {
   pass "live owner with unreadable identity returns a successful verdict"
 }
 
+test_denied_ps_reads_native_codex_identity() {
+  # The native Codex server check reads identity through the same denied-ps
+  # route as every other read here, so a host that blocks ps still tells a
+  # shared app-server thread from an ordinary CLI session.
+  local dir fakebin table uuid=00000000-0000-4000-8000-000000000001 got
+  dir="$TMP_ROOT/native-codex"
+  fakebin=$(fm_fakebin "$dir"); make_denied_ps "$fakebin"
+  table="$dir/t"
+  write_native_table() {  # <comm> <args>
+    printf '800|1|%s|%s\ndefault|800|bash|bash run.sh\n' "$1" "$2" > "$table"
+  }
+  write_native_table /opt/codex '/opt/codex -c features.hooks=true app-server --listen stdio://'
+  got=$(lib_eval_denied "$fakebin" "$table" \
+    "export CODEX_SESSION_ID=$uuid CODEX_THREAD_ID=$uuid; fm_session_lock_trusted_session_id") \
+    || fail "denied-ps route did not read a native app-server identity"
+  [ "$got" = "codex-native:$uuid" ] || fail "denied-ps native identity was '$got'"
+  if lib_eval_denied "$fakebin" "$table" \
+    "export CODEX_SESSION_ID=$uuid CODEX_THREAD_ID=00000000-0000-4000-8000-000000000002; fm_session_lock_trusted_session_id" >/dev/null 2>&1; then
+    fail "denied-ps route trusted a descendant thread as its root session"
+  fi
+  if lib_eval_denied "$fakebin" "$table" 'fm_session_lock_anchor_pid' >/dev/null 2>&1; then
+    fail "denied-ps route anchored a native thread that proves no identity"
+  fi
+  write_native_table codex-code-mode /opt/codex-code-mode-host
+  lib_eval_denied "$fakebin" "$table" 'fm_session_lock_codex_native_pid 800' \
+    || fail "denied-ps route missed a truncated code-mode host comm"
+  write_native_table /opt/codex '/opt/codex exec app-server'
+  if lib_eval_denied "$fakebin" "$table" 'fm_session_lock_codex_native_ancestry' >/dev/null 2>&1; then
+    fail "denied-ps route read an exec prompt as a native app-server"
+  fi
+  [ "$(lib_eval_denied "$fakebin" "$table" 'fm_session_lock_anchor_pid')" = 800 ] \
+    || fail "denied-ps route lost the ordinary Codex CLI anchor"
+  pass "denied-ps route reads native Codex server identity and keeps the CLI contract"
+}
+
 test_unreadable_verdict_returns_success
 test_partial_identity_reads_refuse
+test_denied_ps_reads_native_codex_identity
 test_nonpid_records_allow_acquisition
 
 test_unreadable_owner_refuses_acquisition
