@@ -406,6 +406,37 @@ test_pr_based_dod_draft_check_uses_gh_axi() {
   pass "PR-based DoD draft check uses gh-axi"
 }
 
+# A Test or CI gate is firstmate's to waive, not the worker's (issue 8165): every
+# no-mistakes DoD variant forbids approve, skip, and ignore answers, routes them
+# to firstmate, and allows only the --skip its own definition of done names.
+test_nm_dod_routes_test_and_ci_waivers_to_firstmate() {
+  local variant out skip
+  for variant in default manual gerrit; do
+    out="$TMP_ROOT/dod-waiver-$variant.md"
+    # shellcheck disable=SC2016  # single quotes are deliberate: the backticks must stay literal
+    case $variant in
+      default) fm_dod_block no-mistakes dod-waiver > "$out"; skip='`no-mistakes axi run` at all: this definition of done names no step to skip' ;;
+      manual) fm_dod_block no-mistakes dod-waiver fm/dod-waiver none '' '' manual > "$out"; skip='`no-mistakes axi run` beyond the `pr,ci` this definition of done names' ;;
+      gerrit) fm_dod_block no-mistakes dod-waiver fm/dod-waiver gerrit > "$out"; skip='`no-mistakes axi run` beyond the `push,pr,ci` this definition of done names' ;;
+    esac
+    # shellcheck disable=SC2016  # single quotes are deliberate: the backticks must stay literal
+    assert_grep 'Test and CI gates are not yours to waive: on your own, answer one only with `--action fix` on every finding it shows.' "$out" \
+      "$variant: DoD lets the worker answer a Test or CI gate with something other than fix"
+    # shellcheck disable=SC2016  # single quotes are deliberate: the backticks must stay literal
+    assert_grep 'Never decide on your own to answer it with `--action approve`, `--action skip`, or `--ignore`' "$out" \
+      "$variant: DoD does not forbid approving, skipping, or ignoring a Test or CI gate on the worker's own decision"
+    assert_grep "When firstmate's decision comes back, relay it with exactly the command firstmate sends, even when that command approves, skips, or ignores." "$out" \
+      "$variant: DoD does not let the worker relay firstmate's returned Test or CI decision"
+    assert_grep "never pass \`--skip\` to $skip." "$out" \
+      "$variant: DoD's allowed --skip is not the one its definition of done names"
+    assert_grep "escalate that gate to firstmate in rule 6's ask-user format" "$out" \
+      "$variant: DoD does not route a Test or CI waiver to firstmate"
+    assert_grep 'firstmate decides, and its default is fix or abort' "$out" \
+      "$variant: DoD does not name firstmate's default for a Test or CI waiver"
+  done
+  pass "no-mistakes DoD routes Test and CI waivers to firstmate in the default, pr=manual, and gerrit variants"
+}
+
 # A scout spawned on a named base keeps that base through promotion: the ship
 # instructions start from it and the PR targets it; local-only cannot carry it.
 test_promotion_keeps_the_recorded_base_branch() {
@@ -467,6 +498,7 @@ test_standalone_local_only_needs_project_ref
 test_non_done_lines_are_not_gated
 test_fenced_and_indented_captain_lines_are_not_intent
 test_pr_based_dod_draft_check_uses_gh_axi
+test_nm_dod_routes_test_and_ci_waivers_to_firstmate
 test_promotion_keeps_the_recorded_base_branch
 
 # The launch role is the generated text a worker receives. It must keep the

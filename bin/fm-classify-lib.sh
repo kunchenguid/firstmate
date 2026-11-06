@@ -969,9 +969,10 @@ status_own_open_decisions() {  # <status-file>
 # Given a <run-id>, only a decision whose key is exactly `nm-<run-id>-<step>` for
 # a non-empty step counts - the key shape the brief mandates for a gate
 # escalation - so an unrelated question left open earlier in the same task is
-# never read as firstmate being told about THIS run's gate.
-status_has_open_needs_decision() {  # <status-file> [<run-id>]
-  local run=${2-} open line key verb
+# never read as firstmate being told about THIS run's gate. Given a <step> too,
+# the key must be exactly `nm-<run-id>-<step>` for that step.
+status_has_open_needs_decision() {  # <status-file> [<run-id> [<step>]]
+  local run=${2-} step=${3-} open line key verb
   open=$(status_open_decisions "$1")
   [ -n "$open" ] || return 1
   if [ $# -ge 2 ] && [ -z "$run" ]; then return 1; fi
@@ -980,6 +981,10 @@ status_has_open_needs_decision() {  # <status-file> [<run-id>]
     verb=${line#*$'\t'}; verb=${verb%%$'\t'*}
     [ "$verb" = needs-decision ] || continue
     [ $# -ge 2 ] || return 0
+    if [ -n "$step" ]; then
+      [ "$key" = "nm-$run-$step" ] && return 0
+      continue
+    fi
     case "$key" in "nm-$run-"?*) return 0 ;; esac
   done <<EOF
 $open
@@ -2635,15 +2640,22 @@ FM_GATE_HUMAN_DECISION='ask-user: authority decision'
 # The whole component is compared for equality rather than searched for, so a
 # gate name or a reconciliation note that happens to contain the words cannot
 # mint it downstream either.
+# A gate parked at the `test` or `ci` step is owed firstmate's answer too
+# whenever the crewmate escalated it, because the brief forbids a worker to
+# approve, skip, or ignore one on its own; its findings carry no `ask-user` row,
+# so for such a gate the step is printed beside the run and the caller must bind
+# the decision to exactly `nm-<run>-<step>`, which is what proves the crewmate
+# escalated THIS gate rather than merely parked at one.
 # On success it prints the reported run id, read from the line's whole
 # `run: <id>` component, so the caller can bind the gate to the decision that
-# names that run; a line carrying no run id is not evidence, since nothing could
-# then tie a decision to this gate.
+# names that run, followed by ` <step>` when only the Test/CI rule admitted it; a
+# line carrying no run id is not evidence, since nothing could then tie a
+# decision to this gate.
 # Same cost and the same caveat as crew_absorb_class: one fm-crew-state.sh read,
 # which may make a bounded no-mistakes call, so callers take it only where they
 # already accept that cost.
-crew_gate_awaits_human_decision() {  # <id> -> <run-id> on stdout
-  local id=$1 line state src rest part human='' run=''
+crew_gate_awaits_human_decision() {  # <id> -> "<run-id>" or "<run-id> <test|ci>" on stdout
+  local id=$1 line state src rest part human='' run='' step=''
   [ -n "$id" ] || return 1
   line=$("$FM_CREW_STATE_BIN" "$id" 2>/dev/null) || true
   case "$line" in state:*) ;; *) return 1 ;; esac
@@ -2656,11 +2668,21 @@ crew_gate_awaits_human_decision() {  # <id> -> <run-id> on stdout
     part=${rest%% · *}
     rest=${rest#* · }
     [ "$part" = "$FM_GATE_HUMAN_DECISION" ] && human=1
-    case "$part" in "run: "?*) run=${part#run: } ;; esac
+    case "$part" in
+      "run: "?*) run=${part#run: } ;;
+      "parked at test" | "parked at test: "* | "parked at ci" | "parked at ci: "*)
+        step=${part#parked at }; step=${step%%:*} ;;
+    esac
   done
-  [ -n "$human" ] && [ -n "$run" ] || return 1
+  [ -n "$run" ] || return 1
   case "$run" in *[[:space:]]*) return 1 ;; esac
-  printf '%s\n' "$run"
+  if [ -n "$human" ]; then
+    printf '%s\n' "$run"
+  elif [ -n "$step" ]; then
+    printf '%s %s\n' "$run" "$step"
+  else
+    return 1
+  fi
 }
 
 # 0 if crew <id>'s authoritative current state is an attributed no-mistakes run

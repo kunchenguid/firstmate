@@ -423,12 +423,19 @@ EOF
 }
 
 # The forge-independent middle of the no-mistakes contract: how a worker drives
-# the pipeline, what `--intent` may carry, and the two firstmate-specific rules.
+# the pipeline, what `--intent` may carry, and the firstmate-specific rules.
 # Written once; only the two sentences about a green PR depend on the forge,
 # because on gerrit, and under pr=manual (the `no-ci` argument), the ci step is
-# skipped and the drive call never reports a green PR.
+# skipped and the drive call never reports a green PR. The one skip a worker may
+# pass is whatever its caller's definition of done names, so it follows the same
+# argument.
 fm_nm_driving_block() {  # <forge|no-ci>
-  local pr_return_line='' pr_reattach_clause=';' drive_block wait_cfg
+  local pr_return_line='' pr_reattach_clause=';' drive_block wait_cfg skip_clause
+  case $1 in
+    gerrit) skip_clause="beyond the \`push,pr,ci\` this definition of done names" ;;
+    no-ci) skip_clause="beyond the \`pr,ci\` this definition of done names" ;;
+    *) skip_clause="at all: this definition of done names no step to skip" ;;
+  esac
   if [ "$1" != gerrit ] && [ "$1" != no-ci ]; then
     pr_return_line="Only a drive call's return reports the green PR: \`no-mistakes axi status\` shows progress but never reports \`checks-passed\` while the ci step is still monitoring the PR for merge, so never wait on a status poll for the next gate or outcome.
 "
@@ -467,12 +474,16 @@ $drive_block
 A killed or timed-out call is never evidence the daemon died: the daemon accepts your response immediately and runs the round in the background, so the call was only ever waiting for a read while the run kept working.
 Reattach and keep going rather than reporting the pipeline blocked; rule 7 owns the checks that decide when a pipeline block is real.
 
-Two firstmate-specific rules layer on top of that guidance:
+Three firstmate-specific rules layer on top of that guidance:
 - ask-user findings are never yours to answer: escalate to firstmate using rule 6's ask-user format and stop.
   Firstmate applies \`ask-user-authority\` and obtains any required captain decision.
   When the decision comes back, feed it to the gate with \`no-mistakes axi respond\` and let the pipeline apply it - do not route the question to "the user" or implement the fix yourself.
 - NEVER pass \`--yes\` (or \`-y\`) to \`no-mistakes axi run\` or \`no-mistakes axi respond\`. It is banned fleet-wide.
   It auto-resolves every gate including ask-user findings with no escalation, and answering your own ask-user finding is a hard rule violation.
+- Test and CI gates are not yours to waive: on your own, answer one only with \`--action fix\` on every finding it shows.
+  Never decide on your own to answer it with \`--action approve\`, \`--action skip\`, or \`--ignore\`, and never pass \`--skip\` to \`no-mistakes axi run\` $skip_clause.
+  When a Test or CI finding looks wrong, unfixable, or worth approving, skipping, ignoring, or aborting, escalate that gate to firstmate in rule 6's ask-user format, with its findings verbatim in the file, and stop; firstmate decides, and its default is fix or abort.
+  When firstmate's decision comes back, relay it with exactly the command firstmate sends, even when that command approves, skips, or ignores.
 EOF
 }
 
