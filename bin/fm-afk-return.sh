@@ -7,7 +7,7 @@
 #   fm-afk-return.sh begin    Same as the default command.
 #   fm-afk-return.sh check    Re-render the brief and close the gate only after blockers resolve.
 #   fm-afk-return.sh guard    Read-only consult: exit 3 while away mode is still
-#                            active, exit 4 while return catch-up is pending.
+#                            active (quiet passes), exit 4 while return catch-up is pending.
 #   fm-afk-return.sh catchup-summary  Read-only catch-up projection for a reporting surface.
 #
 # THE RETURN BRIEF (stdout, on begin and on every check) is rendered from durable
@@ -294,8 +294,12 @@ catchup_summary() {
 }
 
 return_guard() {
-  local reasons
-  if [ -e "$STATE/.afk" ] || fm_afk_contract_present "$STATE"; then
+  local reasons flag_mode
+  # Match fm-wake-lib.sh's fm_afk_mode read without sourcing its state-creating
+  # initialization: only an exact first-line quiet flag is captain-present.
+  flag_mode=$(head -n 1 "$STATE/.afk" 2>/dev/null) || flag_mode=
+  if { [ -e "$STATE/.afk" ] && [ "$flag_mode" != quiet ]; } \
+    || fm_afk_contract_away_present "$STATE"; then
     printf 'fm-afk-return: away mode is still active; run bin/fm-afk-return.sh before ordinary captain work\n' >&2
     return 3
   fi
