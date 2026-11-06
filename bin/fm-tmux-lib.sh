@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# shellcheck source=bin/fm-hermes-process-lib.sh
+. "${BASH_SOURCE[0]%/*}/fm-hermes-process-lib.sh"
+
 # fm-tmux-lib.sh — shared tmux pane primitives for firstmate.
 #
 # ONE tmux source for delivery-busy detection, composer capture primitives,
@@ -108,15 +111,18 @@ fm_tmux_composer_caps() {
 # It answers Command Code the same way, from its anchored `command-code`
 # foreground process name and its own verified busy footer: its composer is a
 # bare `❯` row between the same two rules, and its placeholder needs the
-# identity-scoped ghost ceiling in bin/fm-composer-lib.sh.
+# identity-scoped ghost ceiling in bin/fm-composer-lib.sh. Hermes runs under
+# an interpreter, so it is matched by foreground argv through
+# bin/fm-hermes-process-lib.sh rather than by process name.
 # Prints "<owner><TAB>idle" or "<owner><TAB>working" for owner pi,
-# polytoken, or commandcode; exits 1 when the pane is not a live shape owner.
+# polytoken, commandcode, or hermes; exits 1 when the pane is not a live
+# shape owner.
 fm_tmux_composer_identity() {  # <target>
-  local target=$1 tty pgid tpgid comm owner='' status
+  local target=$1 tty pid pgid tpgid comm args owner='' status
   tty=$(tmux display-message -p -t "$target" '#{pane_tty}' 2>/dev/null) || tty=
   case "$tty" in
     /dev/*)
-      while read -r _ pgid tpgid comm; do
+      while read -r pid pgid tpgid comm; do
         [ -n "$comm" ] || continue
         [ "$pgid" = "$tpgid" ] || continue
         case "${comm##*/}" in
@@ -124,6 +130,10 @@ fm_tmux_composer_identity() {  # <target>
           polytoken) owner=polytoken ;;
           command-code) owner=commandcode ;;
         esac
+        if [ -z "$owner" ]; then
+          args=$(LC_ALL=C ps -p "$pid" -o args= 2>/dev/null) || args=
+          fm_hermes_process_matches "$args" "$pid" && owner=hermes
+        fi
         [ -n "$owner" ] && break
       done <<EOF
 $(LC_ALL=C ps -t "${tty#/dev/}" -o pid=,pgid=,tpgid=,comm= 2>/dev/null)
@@ -155,14 +165,22 @@ EOF
 # pending-unproven | unknown, positive proof required for empty, unrecognized
 # future verdicts failing safe) is owned by bin/fm-composer-lib.sh. Identity
 # is fetched lazily, only when the classifier reports the verdict depends on
-# it (a pi separator pair under the cursor) or the cursor-anchored read is
-# `unknown` (the Command Code check below), so an `unknown` read pays one
-# process probe and a definite read never does.
+# it (a pi separator pair under the cursor), the cursor-anchored read is
+# `unknown` (the Command Code check below), or the pane shows a `❯` prompt
+# that may be Hermes's; any other definite read pays no process probe.
 fm_tmux_composer_state() {  # <target> -> empty|pending|pending-unproven|unknown
   local target=$1 cy pane verdict identity
   cy=$(fm_tmux_composer_cursor_row "$target") || { printf 'unknown'; return 0; }
   case "$cy" in ''|*[!0-9]*) printf 'unknown'; return 0 ;; esac
   pane=$(fm_tmux_composer_capture "$target") || { printf 'unknown'; return 0; }
+  # Hermes's unprefixed default-profile prompt is also a generic `❯` row, so a
+  # pane with any `❯` is checked for Hermes identity before the generic read;
+  # a Hermes pane is then read only by its identity-scoped classifier.
+  if [[ $pane == *❯* ]] \
+     && identity=$(fm_tmux_composer_identity "$target") && [ "${identity%%$'\t'*}" = hermes ]; then
+    fm_composer_classify_screen "$(fm_tmux_composer_caps)" "$pane" '' "$identity"
+    return 0
+  fi
   verdict=$(fm_composer_classify_screen "$(fm_tmux_composer_caps)" "$pane" "$cy")
   if [ "$verdict" = need-identity ]; then
     if ! identity=$(fm_tmux_composer_identity "$target") || [ -z "$identity" ]; then

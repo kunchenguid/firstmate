@@ -1356,6 +1356,27 @@ async function cleanupRecordedInvocations(home, { sourceId = null, bindingDigest
     await clearInvocationFiles(invocation);
     cleaned += 1;
   }
+  // A readiness record can outlive its owner after interrupted finalization.
+  // It carries no source/binding authority and must never authorize signalling.
+  // Reclaim only the core barrier's exact token after both PID and group are gone.
+  for (const name of (await readdir(root)).filter((entry) => /^[0-9a-f]{64}\.ready\.json$/u.test(entry)).sort()) {
+    const token = `sha256:${name.slice(0, -".ready.json".length)}`;
+    const paths = invocationPaths(root, token);
+    if (await maybeLstat(paths.ownerFile)) continue;
+    const readyValue = await readPrivateJson(paths.readyFile, "extension invocation readiness");
+    if (!readyValue) continue;
+    const ready = validateInvocationReady(readyValue, token);
+    if (ready.group_identity !== `barrier-token:${token}`
+        || await processGroupState(ready.group_pid, ready.group_identity) !== 1) {
+      fail("process-cleanup-failed", "ownerless extension readiness process group cannot be proved gone");
+    }
+    const rechecked = await readPrivateJson(paths.readyFile, "extension invocation readiness");
+    if (canonicalJson(rechecked) !== canonicalJson(ready) || await maybeLstat(paths.ownerFile)) {
+      fail("process-cleanup-failed", "ownerless extension readiness changed before cleanup");
+    }
+    await unlink(paths.readyFile);
+    cleaned += 1;
+  }
   const remaining = await readdir(root);
   const known = new Set();
   for (const name of remaining.filter((entry) => /^[0-9a-f]{64}\.owner\.json$/u.test(entry))) {

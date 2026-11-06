@@ -533,6 +533,27 @@ check("Linux real parent ancestry is read through ps", () => {
   }
   assert.equal(primaryOwnsContext(ctx, { ...options, read: () => "" }), false);
 }, process.platform === "linux");
+check("numbered backlog excerpts stop before fourth identical read", () => {
+  const command = `(cd /fixture && sed -n '180,230p' BACKLOG.md | nl -ba -v180)`;
+  assert.ok(identifyRead("bash", {command}, root));
+  const h=harness();for(let i=0;i<3;i++)assert.equal(h.complete({command}),undefined);
+  assert.equal(h.complete({command}).block,true);assert.equal(h.aborts,1);
+});
+check("grouped byte excerpts stop before fourth identical read", () => {
+  const command = `(cd /fixture\necho excerpt\nsed -n '61p' fixture.jsonl | od -An -c | head -40\n)`;
+  assert.ok(identifyRead("bash", {command}, root));
+  const h=harness();for(let i=0;i<3;i++)assert.equal(h.complete({command}),undefined);
+  assert.equal(h.complete({command}).block,true);assert.equal(h.aborts,1);
+});
+check("excerpt additions do not recognize writes, substitutions or unknown flags", () => {
+ for(const command of [
+  'nl -ba -v180 FILE > output', 'od -An -c FILE; rm FILE',
+  'nl -ba -v180 FILE | sh', 'od -An -c "$(touch output)"',
+  'nl -ba -v180 FILE | sed -i s/a/b/ FILE', 'nl -ba -vbanana FILE',
+  'od --output=FILE', '(od -An -c FILE; (cat OTHER))'
+ ])assert.equal(identifyRead("bash",{command},root),undefined,command);
+});
+
 TS
 ); then
   printf '%s\n' "$policy_results" >&2

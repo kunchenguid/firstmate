@@ -26,10 +26,10 @@ The tier is a property of the harness surface, not of the home.
 
 | Tier | What the adapter does | Used by |
 | --- | --- | --- |
-| Run | Executes `bin/fm-session-start.sh` through the native session-open adapter and gates its ordered digest into model context before the first turn. | Claude, `codex exec`, Pi / pi-signed, omp, Cursor |
+| Run | Executes `bin/fm-session-start.sh` through the native session-open adapter and gates its ordered digest into model context before the first turn. | Claude, `codex exec`, verified native Codex TUI, Pi / pi-signed, omp, Cursor, Antigravity (agy) |
 | Nudge | Asks the agent to run the digest through the native adapter or the tracked session-start instruction. | Grok, OpenCode, and run-tier sources routed to the nudge |
 
-Codex's interactive TUI has no tracked session-open, compaction, or re-emit channel and is not covered by either tier.
+Codex's interactive TUI has verified session-open delivery only on the native version selected by `bin/fm-codex-stop-park.sh`; its compaction and re-emit surfaces remain unverified.
 
 ### Tier by harness
 
@@ -37,12 +37,13 @@ Codex's interactive TUI has no tracked session-open, compaction, or re-emit chan
 | --- | --- | --- |
 | Claude | Run | [Claude](#claude) |
 | Codex exec | Run | [Codex exec](#codex-exec) |
-| Codex interactive TUI | Uncovered | [Codex interactive TUI](#codex-interactive-tui) |
+| Codex interactive TUI | Run on the verified native version; otherwise uncovered | [Codex interactive TUI](#codex-interactive-tui) |
 | Pi / pi-signed | Run | [Pi and pi-signed](#pi-and-pi-signed) |
 | OpenCode | Nudge | [OpenCode](#opencode) |
 | Grok | Nudge | [Grok](#grok) |
 | Cursor | Run | [Cursor](#cursor) |
 | omp | Run | [omp](#omp) |
+| Antigravity (agy) | Run | [Antigravity (agy)](#antigravity-agy) |
 | Cursor compaction | Uncovered | [Cursor compaction](#cursor-compaction) |
 
 ### Why the run tier exists
@@ -210,6 +211,7 @@ It does this in its own separate, hard-coded loop, independent of two other owne
 - Pi's `lockOwnership()`.
 
 If the lock names a live pid in that ancestry, session start already ran in this harness session and the wrapper stays silent.
+That loop reads each parent link through the `ps` binary, so a host that refuses `ps` cannot confirm a numeric lock's ancestry and the wrapper prints the nudge even for a session that already holds the lock.
 On Windows/Git Bash, a lock holding a tagged `win:<pid>` identity is outside this process table, so the wrapper instead asks the library's `fm_session_lock_owned_by_self`, whose Windows process-boundary bridge owns that identity.
 
 ### Exit codes
@@ -256,10 +258,10 @@ Native stdout context injection is supported under `codex exec`.
 
 ### Codex interactive TUI
 
-The Codex interactive TUI is uncovered and has no tracked transport.
-Codex 0.146.0 does not fire the tracked project `SessionStart` hook in its interactive TUI.
-Firstmate ships no global hook and has no tracked compaction or re-emit channel for it.
-Firstmate does not claim instruction-refresh delivery for this surface.
+The verified native version fires the tracked project `SessionStart` hook and delivers the ordered digest before the first model call.
+The transport delegates through `bin/fm-codex-stop-park.sh --session-start`, whose [opt-in](configuration.md#codex-native-stop-park-configcodex-stop-park), version, and native-session receipt select the [Codex supervision protocol](supervision-protocols/codex.md).
+Earlier versions where project hooks do not fire retain the uncovered behavior and manual session start.
+Firstmate ships no global hook and does not claim compaction, re-emit, or instruction-refresh delivery for this surface.
 
 ### Pi and pi-signed
 
@@ -369,6 +371,15 @@ So the source is derived following the Cursor precedent:
 A later in-process `clear` re-emits only when this lock owner completed a full startup.
 `before_agent_start` message delivery was verified to reach model context on 18.1.11.
 
+### Antigravity (agy)
+
+Antigravity CLI is a run-tier harness.
+`.agents/hooks.json` registers `SessionStart`, anchored to the project root with a 30s timeout, invoking `bin/fm-sessionstart-agy.sh`.
+The wrapper drains stdin for the payload's `source` and delegates to `bin/fm-sessionstart-run.sh`, which owns primary or persistent secondmate home scope, source routing, and the digest.
+In linked crewmate worktrees or foreign checkouts, `bin/fm-sessionstart-run.sh` stands down silently and the wrapper emits `{}`.
+In primary or secondmate homes, the wrapper emits the captured digest as `{injectSteps:[{systemMessage:{systemMessage:$digest}}]}` on stdout with exit 0.
+Native stdout context injection gates the ordered digest into model context before the first agent turn.
+
 ### Cursor compaction
 
 Cursor compaction is uncovered and has no tracked transport.
@@ -377,7 +388,7 @@ So it cannot inject a re-emit digest.
 Delivering one needs its own design and is deliberately deferred to a follow-up.
 A Cursor primary does not re-emit its digest after a compaction.
 
-Cursor's compaction surface is uncovered in the same sense as [Codex's interactive TUI](#codex-interactive-tui).
+Cursor's compaction surface is uncovered in the same sense as compaction in [Codex's interactive TUI](#codex-interactive-tui).
 Firstmate registers nothing for `preCompact`.
 So a compacted Cursor session keeps whatever context survived rather than receiving a fresh digest.
 
