@@ -89,7 +89,7 @@ Put either in user settings or the untracked `.claude/settings.local.json`, neve
 This differs from the worker hook, which only touches a task marker through `.claude/settings.local.json`.
 A Claude secondmate's busy hooks are not that file: `bin/fm-spawn.sh` passes the parent home's `state/<id>.claude-settings.json` through `--settings` and does not edit the mate home's `settings.local.json`.
 
-Primary `.claude/settings.json` registers `../../../bin/fm-turnend-guard.sh --claude` and `../../../bin/fm-claude-stop-autoarm.sh` with `asyncRewake: true` and `timeout: 28800`.
+Primary `.claude/settings.json` registers `../../../bin/fm-turnend-guard.sh --claude` and `../../../bin/fm-claude-stop-autoarm.sh` with `asyncRewake: true` and `timeout: 28800`, and registers the same auto-arm on `StopFailure`, which Claude fires instead of `Stop` when an API error ends the turn.
 Guard exit 2 plus stderr forces continuation.
 Stop payload `stop_hook_active=true` follows any hook-driven continuation, including async reawakening, so Claude mode ignores it and uses cooperative claim and epoch plus bounded re-block; default Codex mode keeps it as a one-block loop guard.
 
@@ -97,7 +97,7 @@ Project `.claude/settings.json` loads only when the exact project root is the se
 Hooks still run through cwd-sensitive `/bin/sh`, so tracked commands anchor through `"$CLAUDE_PROJECT_DIR"/bin/...`.
 `../../../docs/turnend-guard.md` owns details.
 
-The Stop-owned watcher hook runs every Stop, foregrounds `../../../bin/fm-watch-arm.sh` only when eligible, and uses exit-2 async reawakening as notification.
+The Stop-owned watcher hook runs on every Stop and StopFailure, foregrounds `../../../bin/fm-watch-arm.sh` only when eligible, and uses exit-2 async reawakening as notification.
 The model handles notifications but never routine re-arm.
 Unless `config/supervision-host-off` opts the home out, the hook foregrounds the supervision host instead, which also runs Claude's print mode as its headless engine; [`supervision-host.md`](../../../../../docs/supervision-host.md#engines) owns the verified engine facts.
 Claude's PreToolUse seatbelt blocks directly, and its deny is honored only with empty stdout; `../../../docs/arm-pretool-check.md` owns that contract.
