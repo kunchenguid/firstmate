@@ -150,7 +150,7 @@ remote homes under one shared snapshot budget and may refresh the parent-side ca
 Default fields: schema, home, generated, prs, in_flight{id,kind,state,repo,name,doing},
   secondmates{id,state,doing,provenance,freshness,age_seconds,contradiction,reason},
   secondmate_reconcile{id,spawn_gen,host,kind,ids},
-  decisions_open{id,key,verb,summary,question,owner}, landed{id,what,artifact,owner},
+  decisions_open{id,key,verb,title,reason,summary,question,owner}, landed{id,what,artifact,owner},
   gates{id,title,blocked_by,reason,owner,filed}, reports{id,path}, recorded_prs{id,url},
   unhealthy_endpoints{...} (only when non-empty), omitted{surface,reveal}.
 Default gates are selected newest filed first before their bound; undated gates
@@ -531,6 +531,7 @@ MODEL=$(printf '%s' "$SNAP" | jq \
          | select(.structured and .hold_bucket != null)
          | select(($all_decisions == 1) or live_captain_call)
          | {id,key:.id,verb:"captain-hold",
+            title:(.title | trunc(60)),reason:((.hold_reason // "-") | trunc(80)),
             summary:hold_summary(.title; .hold_reason),
             question:(.title + ": " + .hold_reason),owner:"(main)"} ]
      + [ (.secondmate_current.records // [])[] as $m
@@ -538,6 +539,7 @@ MODEL=$(printf '%s' "$SNAP" | jq \
               | select(.source == "backlog" and .verb == "captain-hold")
               | select(($all_decisions == 1) or live_captain_call)
               | {id:($m.id + "/" + .id),key,verb,
+                 title:((.summary // .id) | trunc(60)),reason:((.reason // "-") | trunc(80)),
                  summary:hold_summary((.summary // .id);
                                       (.reason // "captain decision pending")),
                  question:(.question // ((.summary // .id) + ": " + (.reason // "captain decision pending"))),owner:$m.id} ]
@@ -549,6 +551,7 @@ MODEL=$(printf '%s' "$SNAP" | jq \
                             | .id]
                          | index($id) | not)
                 | {id:($m.id + "/" + .id),key:.id,verb:"captain-hold",
+                   title:((.title // .id) | trunc(60)),reason:((.hold_reason // "-") | trunc(80)),
                    summary:hold_summary((.title // .id);
                                         (.hold_reason // "captain decision pending")),
                    question:(.question // ((.title // .id) + ": " + (.hold_reason // "captain decision pending"))),owner:$m.id} ])[] ]) as $decisions_all
