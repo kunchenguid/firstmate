@@ -532,9 +532,38 @@ test_ack_of_source_comment_records_ack() {
   pass 'acking the unanswered source comment records the ack and an unrelated comment does not'
 }
 
+test_old_pr_reminder_ack_does_not_snooze_newer_comment() {
+  local home token
+  home=$(new_home old-reminder-ack)
+  printf '3600\n' > "$home/config/contribution-reraise-interval"
+  jq -n '[{id:101,user:{login:"maintainer"},author_association:"OWNER",
+    body:"First ask",html_url:"https://github.com/o/r/pull/8#issuecomment-101",
+    created_at:"2026-09-16T08:00:00Z",updated_at:"2026-09-16T08:00:00Z"}]' > "$home/forge/comments.json"
+  with_home "$home" env FM_CONTRIBUTIONS_NOW=2026-09-16T09:05:00Z "$ROOT/bin/fm-contributions.sh" poll >/dev/null \
+    || fail 'poll for the first comment failed'
+  token=$(with_home "$home" "$ROOT/bin/fm-contributions.sh" pending | jq -er 'map(select(.token | startswith("unanswered:pr:101:"))) | first | .token') \
+    || fail 'no reminder for the first comment'
+  # A newer maintainer comment arrives while that reminder is still pending.
+  jq -n '[{id:101,user:{login:"maintainer"},author_association:"OWNER",
+    body:"First ask",html_url:"https://github.com/o/r/pull/8#issuecomment-101",
+    created_at:"2026-09-16T08:00:00Z",updated_at:"2026-09-16T08:00:00Z"},
+   {id:102,user:{login:"maintainer"},author_association:"OWNER",
+    body:"Newer ask",html_url:"https://github.com/o/r/pull/8#issuecomment-102",
+    created_at:"2026-09-16T09:10:00Z",updated_at:"2026-09-16T09:10:00Z"}]' > "$home/forge/comments.json"
+  with_home "$home" env FM_CONTRIBUTIONS_NOW=2026-09-16T09:15:00Z "$ROOT/bin/fm-contributions.sh" poll >/dev/null \
+    || fail 'poll for the newer comment failed'
+  jq -e '.records[0].unanswered.id == 102' "$home/data/delivery/contributions.json" >/dev/null \
+    || fail 'unanswered source is not the newer comment'
+  with_home "$home" env FM_CONTRIBUTIONS_NOW=2026-09-16T09:20:00Z "$ROOT/bin/fm-contributions.sh" ack delivery https://github.com/o/r/pull/8 "$token" \
+    || fail 'ack of the old reminder failed'
+  jq -e '.records[0].unanswered.acked == null' "$home/data/delivery/contributions.json" >/dev/null \
+    || fail 'acking the old reminder snoozed the newer comment'
+  pass 'acking an old PR reminder does not snooze a newer comment'
+}
+
 if [ "${BASH_SOURCE[0]}" = "$0" ]; then
   failures=0
-  for test_name in test_reraise_after_ack test_clear_on_our_reply test_clear_on_no_action_verdict test_no_reraise_when_we_spoke_last test_clear_on_our_push test_ack_restarts_snooze test_reraise_is_opt_in test_reraise_interval_configurable test_reminder_waits_full_interval_not_every_poll test_push_does_not_clear_subsequent_comment test_ack_matches_exact_thread_key test_excluded_bot_does_not_cause_unanswered_wake test_push_after_comment_clears_via_forge_commit_time test_ack_of_source_comment_records_ack; do
+  for test_name in test_reraise_after_ack test_clear_on_our_reply test_clear_on_no_action_verdict test_no_reraise_when_we_spoke_last test_clear_on_our_push test_ack_restarts_snooze test_reraise_is_opt_in test_reraise_interval_configurable test_reminder_waits_full_interval_not_every_poll test_push_does_not_clear_subsequent_comment test_ack_matches_exact_thread_key test_excluded_bot_does_not_cause_unanswered_wake test_push_after_comment_clears_via_forge_commit_time test_ack_of_source_comment_records_ack test_old_pr_reminder_ack_does_not_snooze_newer_comment; do
     ( "$test_name" ) || failures=$((failures + 1))
   done
   [ "$failures" -eq 0 ] || exit 1

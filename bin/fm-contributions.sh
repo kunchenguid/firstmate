@@ -761,7 +761,7 @@ poll() {
           | if $track then .threads = [$tracked[] | if .key | IN($due_keys[]) then .raised = $now | .acked = null else . end]
             else del(.threads) end
           | if $unanswered_cond then
-              .unanswered = {source:$ext.source, author:$ext.author, at:$ext.at,
+              .unanswered = {source:$ext.source, id:$ext.id, author:$ext.author, at:$ext.at,
                              raised:(if (($pr_due_events | length) > 0 or ($due | length) > 0) then $now
                                      else ($old_un.raised // null) end),
                              acked:(if ($old_un != null and $old_un.source == $ext.source
@@ -868,7 +868,7 @@ case "${1:-}" in
         | ($token | split(":") | if .[0] == "unanswered" then .[1:3] else .[:2] end | join(":")) as $token_key
         | ((.unanswered.source // null) as $un_source | any(.pending[]?; .token == $token and .source == $un_source)) as $acks_source
         | .pending |= map(select(.token != $token))
-        | if .unanswered != null and (($token | startswith("unanswered:pr:")) or $acks_source) then
+        | if .unanswered != null and ((($token | startswith("unanswered:pr:")) and (.unanswered.id == null or (($token | split(":")[2]) == (.unanswered.id | tostring)))) or $acks_source) then
             .unanswered.acked = $ack_time
           else . end
         | if .threads != null then
