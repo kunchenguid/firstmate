@@ -333,6 +333,39 @@ fm_control_relaunch_resume_flag() {  # <harness> <registered-agent>
   return 0
 }
 
+# fm_control_claude_session_of_worktree: the session id of the one interactive
+# Claude agent running in <worktree>, read from the per-process record Claude
+# keeps at <store>/sessions/<pid>.json (store: CLAUDE_CONFIG_DIR, else
+# ~/.claude). A record counts only while its pid is alive and still a Claude
+# process, its cwd is the worktree, and its kind is interactive; anything but
+# exactly one such record prints nothing, so a caller starts a fresh session
+# rather than resuming a guessed one.
+fm_control_claude_session_of_worktree() {  # <worktree> [store]
+  local wt=$1 store=${2:-${CLAUDE_CONFIG_DIR:-$HOME/.claude}} wt_real record fields pid id cwd kind found=
+  command -v jq >/dev/null 2>&1 || return 0
+  wt_real=$(cd "$wt" 2>/dev/null && pwd -P) || return 0
+  for record in "$store"/sessions/*.json; do
+    [ -f "$record" ] || continue
+    fields=$(jq -r '[(.pid // "" | tostring), .sessionId // "", .cwd // "", .kind // ""] | @tsv' "$record" 2>/dev/null) || continue
+    IFS=$'\t' read -r pid id cwd kind <<EOF
+$fields
+EOF
+    case "$pid" in ''|*[!0-9]*) continue ;; esac
+    [ "$kind" = interactive ] || continue
+    [ "$(cd "$cwd" 2>/dev/null && pwd -P)" = "$wt_real" ] || continue
+    kill -0 "$pid" 2>/dev/null || continue
+    case "$(LC_ALL=C ps -o args= -p "$pid" 2>/dev/null)" in
+      *claude*) ;;
+      *) continue ;;
+    esac
+    [ -z "$found" ] || return 0
+    found=$id
+  done
+  case "$found" in
+    ????????-????-????-????-????????????) printf '%s' "$found" ;;
+  esac
+}
+
 # Which named keys a backend adapter can deliver. Every session provider
 # normalizes Enter, Ctrl+C, and the Ctrl+U composer clear; Orca's terminal API
 # exposes only an interrupt and an Enter, so it can deliver neither Escape nor
@@ -356,14 +389,14 @@ fm_control_backend_supports_key() {  # <backend> <key>
 }
 
 # Whether <backend> has a recovery-grade agent-state classifier. tmux, herdr,
-# rex, and t3code implement fm_backend_agent_state; zellij, orca, cmux, and paseo report
+# rex, t3code, and hc implement fm_backend_agent_state; zellij, orca, cmux, and paseo report
 # `unverified`, and tern's `tern process` classifier answers for display but is
 # not promoted to this list, so no reading of theirs can prove an agent stopped.
 # The control plane refuses a stop-proving verb there instead of reporting an
 # unprovable transition as success.
 fm_control_backend_state_verified() {  # <backend>
   case "${1-}" in
-    tmux|herdr|rex|t3code) return 0 ;;
+    tmux|herdr|rex|t3code|hc) return 0 ;;
   esac
   return 1
 }
@@ -391,7 +424,7 @@ fm_control_backend_exit_supported() {  # <backend>
 # fm_control_backend_state_verified first.
 fm_control_backend_relaunch_supported() {  # <backend>
   case "${1-}" in
-    tmux|herdr|rex) return 0 ;;
+    tmux|herdr|rex|hc) return 0 ;;
   esac
   return 1
 }
@@ -449,6 +482,11 @@ fm_control_absence_recheck_applies() {  # <backend> <raw-state>
 #     (rex_server, from the task's [meta]); the recheck refuses unless the
 #     server this process reaches - starting a stopped personal server, which
 #     then answers with authority - is that one.
+#   hc CAN prove it. Every read sets the recorded HC_SESSION, hc never reuses
+#     an address, and a finished terminal stays readable across core restarts.
+#     A finished terminal with this task's labels, or a structured not-found
+#     from the core whose id the record names (hc_core), proves the terminal
+#     gone (bin/backends/hc.sh owns the read).
 #   t3code has a native absence verdict: `missing` means archived or not found
 #     on the verified server, while an unreachable server reads `unreadable`.
 #     The proof re-reads the thread, but exit and relaunch refuse before it:
@@ -488,6 +526,14 @@ fm_control_endpoint_absence_verdict() {  # <backend> <target> [meta]
         alive) printf 'alive\t' ;;
         missing) printf 'gone\t' ;;
         *) printf 'unproven\tthe Rex server the task was created on could not be reached from here, or its block could not be classified' ;;
+      esac
+      ;;
+    hc)
+      case "$(fm_backend_hc_endpoint_absence_recheck "$target" "$(fm_meta_get "$meta" hc_core)" "fm-$(fm_meta_get "$meta" endpoint_task_id)")" in
+        dead) printf 'dead\t' ;;
+        alive) printf 'alive\t' ;;
+        missing) printf 'gone\t' ;;
+        *) printf 'unproven\tthe hc terminal could not be proven gone: it is not on the core the task was created on, that core could not be read, or its terminal could not be classified' ;;
       esac
       ;;
     t3code)

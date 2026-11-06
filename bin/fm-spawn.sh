@@ -527,6 +527,9 @@
 #     __CLAUDEADDDIRS__ quoted --add-dir flags granting exactly this task's
 #                  Firstmate channel directories (claude_add_dirs_flag below;
 #                  supplies its own trailing space, empty never used)
+#     __CLAUDESESSION__ --resume <id> on a move whose old Claude agent's
+#                  session fm-control captured and whose transcript exists
+#                  (supplies its own trailing space), empty otherwise
 #     __CLAUDESETTINGS__ the single claude --settings value: a quoted inline
 #                  JSON object for a crewmate or scout, or a quoted path to
 #                  state/<task-id>.claude-settings.json for a secondmate
@@ -1006,6 +1009,10 @@ TRACEPARENT_SET=0
 ACCOUNT_ARG=
 ACCOUNT_SET=0
 RELAUNCH=0
+MOVE_BACKEND=
+MOVE_BACKEND_SET=0
+MOVE_FROM_BACKEND=
+MOVE_FROM_TARGET=
 # Opt-in only: exact-resume presentation-order lock waits instead of refusing.
 # Absent/unset keeps upstream refuse-on-contention. See header.
 HERDR_RESUME_LOCK_WAIT=0
@@ -1039,6 +1046,10 @@ for a in "$@"; do
     backend)
       BACKEND_ARG=$a
       BACKEND_SET=1
+      ;;
+    move-backend)
+      MOVE_BACKEND=$a
+      MOVE_BACKEND_SET=1
       ;;
     mode)
       MODE=$a
@@ -1109,6 +1120,11 @@ for a in "$@"; do
     BACKEND_ARG=${a#--backend=}
     BACKEND_SET=1
     ;;
+  --move-backend) want_value=move-backend ;;
+  --move-backend=*)
+    MOVE_BACKEND=${a#--move-backend=}
+    MOVE_BACKEND_SET=1
+    ;;
   --mode) want_value=mode ;;
   --mode=*)
     MODE=${a#--mode=}
@@ -1173,6 +1189,14 @@ fi
 }
 [ "$BACKEND_SET" -eq 0 ] || [ -n "$BACKEND_ARG" ] || {
   echo "error: --backend requires a non-empty value" >&2
+  exit 1
+}
+[ "$MOVE_BACKEND_SET" -eq 0 ] || [ -n "$MOVE_BACKEND" ] || {
+  echo "error: --move-backend requires a non-empty value" >&2
+  exit 1
+}
+[ "$MOVE_BACKEND_SET" -eq 0 ] || [ "$RELAUNCH" -eq 1 ] || {
+  echo "error: --move-backend moves an existing task and applies to --relaunch only" >&2
   exit 1
 }
 [ "$MODE_SET" -eq 0 ] || [ -n "$MODE" ] || {
@@ -1751,8 +1775,22 @@ spawn_orca_reclaim_launch_file() {
   return 1
 }
 
+# The hc terminal a relaunch rebind or move opened, until the republished
+# record names it. An abort before then closes it, so a retry is not refused
+# by hc's one-live-terminal-per-task rule.
+SPAWN_HC_REBIND_TARGET=
+# The finished hc terminal an in-place rebind replaces. It stays until the
+# republished record names the new terminal, so an aborted rebind leaves the
+# record naming a terminal that still proves itself finished.
+SPAWN_HC_REBIND_OLD=
 spawn_abort_cleanup() {
   local status=$?
+  if [ -n "$SPAWN_HC_REBIND_TARGET" ] && [ "$status" -ne 0 ] &&
+    [ "$(fm_meta_get "$STATE/$ID.meta" window 2>/dev/null)" != "$SPAWN_HC_REBIND_TARGET" ]; then
+    fm_backend_kill hc "$SPAWN_HC_REBIND_TARGET" "" "fm-$ID" 2>/dev/null ||
+      echo "warning: could not close hc terminal $SPAWN_HC_REBIND_TARGET after the aborted relaunch of $ID; close it by hand before retrying" >&2
+    SPAWN_HC_REBIND_TARGET=
+  fi
   if [ "$RELAUNCH_REPLACEMENT_PENDING" = 1 ] &&
     [ "$SPAWN_META_PUBLISH_STARTED" = 1 ] &&
     [ -n "$SPAWN_META_TMP" ] &&
@@ -2424,6 +2462,9 @@ PROJ=
 ARG3=
 FIRSTMATE_HOME=
 RAW_LAUNCH=0
+HC_SES=
+HC_TERMINAL=
+HC_CORE=
 
 # --relaunch adoption: every identity axis comes from the task's own validated
 # durable record, never from the command line, so a relaunch can only ever
@@ -2598,6 +2639,58 @@ if [ "$RELAUNCH" -eq 1 ]; then
       echo "error: task $ID has no recorded project; refusing to relaunch" >&2
       exit 1
     }
+  fi
+  # --move-backend: the same replacement, launched on another backend. The
+  # recorded endpoint was proven agent-free above on its OWN backend, so the
+  # move only changes where the replacement runs: one fresh endpoint is created
+  # on the target backend in the recorded worktree (the rebind path below), the
+  # republished record names it, and the old endpoint is closed only after that
+  # record is published (spawn_close_moved_endpoint). The worktree, branch, and
+  # every uncommitted change are reused untouched. A target backend needs a
+  # fresh-endpoint branch in the rebind block below and the control plane's
+  # stop-proving classifier, so a later exit or relaunch works there too.
+  MOVE_FROM_BACKEND=
+  MOVE_FROM_TARGET=
+  if [ "$MOVE_BACKEND_SET" -eq 1 ]; then
+    [ "$MOVE_BACKEND" != "$BACKEND" ] || {
+      echo "error: task $ID already runs on backend '$BACKEND'; --move-backend names a different backend (use a plain --relaunch to replace the agent in place)" >&2
+      exit 1
+    }
+    case "$MOVE_BACKEND" in
+      hc|herdr) ;;
+      *)
+        echo "error: --move-backend supports the hc and herdr backends only; '$MOVE_BACKEND' has no verified fresh-endpoint path for a moved task" >&2
+        exit 1
+        ;;
+    esac
+    case "$KIND" in
+      ship|scout) ;;
+      *)
+        echo "error: task $ID records kind '$KIND'; --move-backend moves ship and scout tasks only" >&2
+        exit 1
+        ;;
+    esac
+    fm_backend_validate_spawn "$MOVE_BACKEND" || exit 1
+    fm_backend_source "$MOVE_BACKEND" || exit 1
+    fm_backend_runtime_check "$MOVE_BACKEND" || exit 1
+    if ! fm_control_backend_state_verified "$MOVE_BACKEND" || ! fm_control_backend_relaunch_supported "$MOVE_BACKEND"; then
+      echo "error: backend '$MOVE_BACKEND' cannot prove an agent stopped or host a replacement, so a task moved there could never be relaunched; refusing to move $ID" >&2
+      exit 1
+    fi
+    MOVE_FROM_BACKEND=$BACKEND
+    MOVE_FROM_TARGET=$RELAUNCH_TARGET
+    BACKEND=$MOVE_BACKEND
+    RELAUNCH_REBIND=1
+  fi
+  if [ "$BACKEND" = hc ]; then
+    HC_SES=$(fm_meta_get "$RELAUNCH_META" hc_session)
+    HC_TERMINAL=$(fm_meta_get "$RELAUNCH_META" hc_terminal)
+    HC_CORE=$(fm_meta_get "$RELAUNCH_META" hc_core)
+    if [ "$MOVE_BACKEND_SET" -eq 1 ]; then
+      HC_SES=
+      HC_TERMINAL=
+      HC_CORE=
+    fi
   fi
   if [ "$BACKEND" = herdr ]; then
     # fm-spawn uses HERDR_PANE_ID for the TASK's pane, while the herdr adapter
@@ -2884,7 +2977,7 @@ launch_template() {
   # project and fetched content. A persistent secondmate receives its own
   # supervisor contract instead, so this task-worker statement does not apply.
   claude)
-    printf '%s' 'CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false CLAUDE_CODE_SEND_FEEDBACK=0 claude __CLAUDEPERMFLAG__ __CLAUDEADDDIRS__--settings __CLAUDESETTINGS__ '
+    printf '%s' 'CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false CLAUDE_CODE_SEND_FEEDBACK=0 claude __CLAUDEPERMFLAG__ __CLAUDEADDDIRS____CLAUDESESSION__--settings __CLAUDESETTINGS__ '
     if [ "$kind" != secondmate ]; then
       printf '%s' "--append-system-prompt '$(spawn_claude_task_channel_statement)' "
     fi
@@ -3252,28 +3345,10 @@ if [ "$KIND" = secondmate ] && [ "$HARNESS" = rovo ]; then
   exit 1
 fi
 
-# Command Code's idle placeholder reads empty only with a Command Code pane
-# identity, which tmux and Herdr supply and zellij, cmux, orca, paseo, and tern do not, so
-# there the composer would never read empty and steering would stall.
-if [ "$HARNESS" = commandcode ] && [ "$BACKEND" != tmux ] && [ "$BACKEND" != herdr ]; then
-  echo "error: commandcode is verified on the tmux and herdr backends only; backend=$BACKEND cannot prove its composer empty. Select backend tmux or herdr." >&2
-  exit 1
-fi
+# Per-backend harness limits (bin/fm-backend.sh's fm_backend_validate_harness
+# owns them) refuse before any worker provisioning.
+fm_backend_validate_harness "$BACKEND" "$HARNESS" || exit 1
 
-# Cortex's titled composer box is proven only with a Cortex pane identity,
-# which tmux and Herdr supply and zellij, cmux, orca, paseo, rex, and t3code do not, so there the
-# composer would never read empty and steering would stall.
-if [ "$HARNESS" = cortex ] && [ "$BACKEND" != tmux ] && [ "$BACKEND" != herdr ]; then
-  echo "error: cortex is verified on the tmux and herdr backends only; backend=$BACKEND cannot prove its composer empty. Select backend tmux or herdr." >&2
-  exit 1
-fi
-
-# Hermes is verified only as a visible tmux worker. Other backends do not
-# yet prove its profile-prefixed composer or native process identity.
-if [ "$HARNESS" = hermes ] && [ "$BACKEND" != tmux ]; then
-  echo "error: hermes is verified on the tmux backend only; backend=$BACKEND is unsupported" >&2
-  exit 1
-fi
 if [ "$HERMES_PROFILE_SET" -eq 1 ] && [ "$HARNESS" != hermes ]; then
   echo "error: --hermes-profile requires --harness hermes" >&2
   exit 1
@@ -3415,7 +3490,6 @@ if [ "$KIND" = secondmate ] && [ -z "$ARG3" ]; then
     fi
   fi
 fi
-fm_backend_validate_harness "$BACKEND" "$HARNESS" || exit 1
 # Ultra is an explicit native capability, never a Pi thinking-level alias.
 # Validate the fully resolved profile before worktree or endpoint provisioning.
 if [ "$EFFORT" = ultra ]; then
@@ -3659,6 +3733,29 @@ muse_credential_present() {
 # agent, a stale one, a malformed reference - degrades to that same
 # fresh-session launch rather than refusing, because nothing here is a safety
 # property; it preserves a display and supervision signal.
+claude_session_id_valid() {  # <id>
+  case "$1" in
+    ????????-????-????-????-????????????) ;;
+    *) return 1 ;;
+  esac
+  case "$1" in
+    *[!0-9a-f-]*) return 1 ;;
+  esac
+}
+
+# claude_session_transcript_present: whether Claude saved <id>'s conversation in
+# the store this launch uses, so --resume can find it. A missing transcript
+# (saving off, another account, a pruned store) falls back to a fresh session.
+claude_session_transcript_present() {  # <id>
+  local id=$1 store transcript
+  claude_session_id_valid "$id" || return 1
+  store=${CLAUDE_CONFIG_DIR:-$HOME/.claude}
+  for transcript in "$store"/projects/*/"$id".jsonl; do
+    [ -s "$transcript" ] && return 0
+  done
+  return 1
+}
+
 relaunch_resume_args() {  # <harness> <backend> <target>
   local harness=${1-} backend=${2-} target=${3-} identity agent ref flag
   [ "$backend" = herdr ] || return 0
@@ -4922,6 +5019,22 @@ EOF
     T=$(fm_backend_rex_target "$FM_REX_TASK_SESSION_ID" "$FM_REX_TASK_BLOCK_ID")
     SES=${T%%:*}
     WT_TARGET=$T
+  elif [ "$BACKEND" = hc ]; then
+    # One fresh terminal opened directly in the recorded worktree. A rebind on
+    # hc reaches here only on a terminal proven gone from the core the record
+    # names (fm_control_endpoint_absence_verdict), and is re-created in that
+    # recorded session; a move from another backend lands in this seat's own hc
+    # session, exactly where a fresh spawn would.
+    # shellcheck disable=SC2034 # fm_backend_hc_container_ensure reads it.
+    [ -z "$HC_SES" ] || HC_SESSION=$HC_SES
+    HC_SES=$(fm_backend_hc_container_ensure) || exit 1
+    HC_CORE=$(fm_backend_hc_core_id "$HC_SES") || HC_CORE=
+    [ "$MOVE_BACKEND_SET" -eq 1 ] || SPAWN_HC_REBIND_OLD=$RELAUNCH_TARGET
+    HC_TERMINAL=$(fm_backend_hc_create_task "$HC_SES" "$W" "$WT") || exit 1
+    T="$HC_SES:$HC_TERMINAL"
+    SPAWN_HC_REBIND_TARGET=$T
+    SES=$HC_SES
+    WT_TARGET=$T
   else
     # The recorded endpoint is authoritatively gone, so there is nothing to
     # adopt: create ONE fresh endpoint for the same task, opened directly in the
@@ -4931,8 +5044,9 @@ EOF
     #
     # Herdr reaches here only on a PROVEN-gone pane: its every read is scoped to
     # the session the record names (fm_control_endpoint_absence_verdict owns
-    # that argument). tmux and every secondmate were already refused, and rex
-    # took the branch above, so there is no dispatch left to make.
+    # that argument), or here as a move target. tmux and every secondmate were
+    # already refused, and rex and hc took the branches above, so there is no
+    # dispatch left to make.
     #
     # This deliberately uses the FLAT container shape rather than Herdr's
     # presentation projection: projection is a presentation-only layout that is
@@ -4952,7 +5066,14 @@ EOF
     # session from a seat that is not in it would silently relocate the task
     # onto another herdr server - an identity change, published as a
     # self-consistent but wrong record.
-    HERDR_REBIND_SES=${RELAUNCH_TARGET%%:*}
+    #
+    # A move from another backend has no recorded herdr session, so it lands
+    # where a fresh spawn from this seat would: this seat's session.
+    if [ "$MOVE_BACKEND_SET" -eq 1 ]; then
+      HERDR_REBIND_SES=$(fm_backend_herdr_session)
+    else
+      HERDR_REBIND_SES=${RELAUNCH_TARGET%%:*}
+    fi
     HERDR_CONTAINER_RAW=$(HERDR_PANE_ID="$RELAUNCH_LAUNCHER_PANE_ID" \
       fm_backend_herdr_container_ensure "$PROJ_ABS" launcher-home "$HERDR_REBIND_SES") || {
       # container_ensure returns 1 for several unrelated reasons - a failed
@@ -5274,6 +5395,7 @@ EOF
     ;;
   hc)
     HC_SES=$(fm_backend_hc_container_ensure) || exit 1
+    HC_CORE=$(fm_backend_hc_core_id "$HC_SES") || HC_CORE=
     HC_TERMINAL=$(fm_backend_hc_create_task "$HC_SES" "$W" "$PROJ_ABS") || exit 1
     T="$HC_SES:$HC_TERMINAL"
     ;;
@@ -5979,7 +6101,7 @@ elif [ "$RELAUNCH" -eq 1 ]; then
     sleep 0.5
   done
   if [ -z "$relaunch_seen" ] || [ "$(real_path_or_raw "$relaunch_seen")" != "$relaunch_wt_real" ]; then
-    if [ "$BACKEND" != herdr ] && [ "$BACKEND" != rex ]; then
+    if [ "$BACKEND" != herdr ] && [ "$BACKEND" != rex ] && [ "$BACKEND" != hc ]; then
       echo "error: task $ID's endpoint is in '${relaunch_seen:-unknown}', not its recorded worktree '$WT'; refusing to relaunch an agent outside the copy holding its work" >&2
       exit 1
     fi
@@ -7189,6 +7311,17 @@ fi
 META_WINDOW=$T
 [ "$BACKEND" = orca ] && META_WINDOW=$W
 [ "$BACKEND" = t3code ] && META_WINDOW=$W
+# A move continues the old Claude agent's conversation: bin/fm-control.sh
+# captures that agent's session id before stopping it and hands it over in
+# FM_CONTROL_CLAUDE_RESUME. Only a move resumes; an in-place relaunch replaces
+# an agent that may be confused or out of context, so it starts fresh from the
+# brief and the progress note.
+CLAUDE_SESSION_FLAG=
+if [ "$HARNESS" = claude ] && [ "$RAW_LAUNCH" = 0 ] && [ -n "$MOVE_FROM_BACKEND" ] \
+  && [ "$RELAUNCH_PRIOR_HARNESS" = claude ] && [ "$SPAWN_CONTROL_PARENT" = 1 ] \
+  && claude_session_transcript_present "${FM_CONTROL_CLAUDE_RESUME:-}"; then
+  CLAUDE_SESSION_FLAG="--resume $FM_CONTROL_CLAUDE_RESUME "
+fi
 SPAWN_GEN="s$(date +%s).${BASHPID:-$$}.$RANDOM"
 SPAWN_META_PATH="$STATE/$ID.meta"
 if [ "$SPAWN_META_LOCK_HELD" != 1 ]; then
@@ -7206,7 +7339,7 @@ SPAWN_META_PATH=$SPAWN_META_TMP
 preserve_relaunch_meta() {
   awk -F= '
     BEGIN {
-      split("window endpoint_task_id worktree project harness hermes_profile hermes_home kind mode yolo branch tasktmp base_branch upstream_consent forge backup_remote backup_prefix model effort opencode_version account account_provider omp_profile busy_gen spawn_gen approval_mode traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id paseo_terminal_id paseo_workspace_id rex_server rex_session_id rex_window_id rex_block_id t3_thread_id t3_project_id tern_session_id tern_tab_id tern_block_id hc_session hc_terminal home projects control_relaunch_tx polytoken_session polytoken_port polytoken_credential", keys, " ")
+      split("window endpoint_task_id worktree project harness hermes_profile hermes_home kind mode yolo branch tasktmp base_branch upstream_consent forge backup_remote backup_prefix model effort opencode_version account account_provider omp_profile busy_gen spawn_gen approval_mode traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id paseo_terminal_id paseo_workspace_id rex_server rex_session_id rex_window_id rex_block_id t3_thread_id t3_project_id tern_session_id tern_tab_id tern_block_id hc_session hc_terminal hc_core home projects control_relaunch_tx polytoken_session polytoken_port polytoken_credential", keys, " ")
       for (i in keys) owned[keys[i]] = 1
     }
     !($1 in owned)
@@ -7303,6 +7436,7 @@ preserve_relaunch_meta() {
   if [ "$BACKEND" = hc ]; then
     echo "hc_session=$HC_SES"
     echo "hc_terminal=$HC_TERMINAL"
+    [ -z "$HC_CORE" ] || echo "hc_core=$HC_CORE"
   fi
   if [ "$KIND" = secondmate ]; then
     echo "home=$PROJ_ABS"
@@ -7425,7 +7559,11 @@ LAUNCH=${LAUNCH//__EFFORTFLAG__/$EFFORTFLAG}
 # known, and substituted only into the Pi-family template's `__PIRESUME__`
 # placeholder; an empty value leaves every other launch byte-identical.
 RESUME_ARGS=
-if [ "$RELAUNCH" -eq 1 ]; then
+if [ "$RELAUNCH" -eq 1 ] && [ -n "$MOVE_FROM_BACKEND" ]; then
+  # A move reads the session the OLD endpoint's runtime recorded, so the
+  # replacement continues that conversation on the new backend.
+  RESUME_ARGS=$(relaunch_resume_args "$HARNESS" "$MOVE_FROM_BACKEND" "$MOVE_FROM_TARGET") || RESUME_ARGS=
+elif [ "$RELAUNCH" -eq 1 ]; then
   RESUME_ARGS=$(relaunch_resume_args "$HARNESS" "$BACKEND" "$T") || RESUME_ARGS=
 fi
 LAUNCH=${LAUNCH//__PIRESUME__/$RESUME_ARGS}
@@ -7543,6 +7681,7 @@ case "$LAUNCH" in
   LAUNCH=${LAUNCH//__BRIEFDOORBELL__/"$(shell_quote "$brief_doorbell")"}
   ;;
 esac
+LAUNCH=${LAUNCH//__CLAUDESESSION__/$CLAUDE_SESSION_FLAG}
 case "$LAUNCH" in
 *__CLAUDEADDDIRS__*)
   CLAUDE_ADD_DIRS=$(claude_add_dirs_flag "$KIND" "$STATE" "$DATA" "$FM_ROOT" "$ID") || {
@@ -8161,6 +8300,40 @@ if [ -n "$SPAWN_DEFERRED_SIGNAL" ]; then
   echo "error: spawn of $ID was interrupted after launch delivery began; $SPAWN_PRESERVED_CLAIM" >&2
   exit "$SPAWN_DEFERRED_SIGNAL_STATUS"
 fi
+# A moved task's old endpoint is closed only now: its replacement record is
+# published and committed, so nothing still names the old endpoint. It was
+# proven agent-free before the move began; it is re-read here and closed only
+# while it still reads agent-free, so an agent that somehow came back there is
+# reported and left running instead of being killed.
+spawn_close_moved_endpoint() {
+  local state journal
+  state=$(fm_backend_agent_state "$MOVE_FROM_BACKEND" "$MOVE_FROM_TARGET")
+  case "$state" in
+    dead) ;;
+    missing) return 0 ;;
+    *)
+      echo "warning: task $ID moved to $BACKEND endpoint $T, but its old $MOVE_FROM_BACKEND endpoint $MOVE_FROM_TARGET now reads '$state', so it was left open; inspect it before closing it by hand" >&2
+      return 0
+      ;;
+  esac
+  if ! fm_backend_kill "$MOVE_FROM_BACKEND" "$MOVE_FROM_TARGET" "" "$W"; then
+    echo "warning: task $ID moved to $BACKEND endpoint $T, but its old agent-free $MOVE_FROM_BACKEND endpoint $MOVE_FROM_TARGET could not be closed; close it by hand" >&2
+    return 0
+  fi
+  [ "$MOVE_FROM_BACKEND" = herdr ] || return 0
+  journal="$STATE/$ID.herdr-presentation"
+  fm_backend_herdr_projection_journal_snapshot "$journal" "$ID" || return 0
+  [ "$FM_BACKEND_HERDR_JOURNAL_VERSION" = 2 ] \
+    && [ "$FM_BACKEND_HERDR_JOURNAL_SESSION:$FM_BACKEND_HERDR_JOURNAL_PANE_ID" = "$MOVE_FROM_TARGET" ] \
+    && fm_backend_herdr_endpoint_confirmed_gone "$MOVE_FROM_TARGET" \
+    && rm -f "$journal"
+  return 0
+}
+[ -z "$MOVE_FROM_BACKEND" ] || spawn_close_moved_endpoint
+if [ -n "$SPAWN_HC_REBIND_OLD" ] && ! fm_backend_kill hc "$SPAWN_HC_REBIND_OLD" "" "$W"; then
+  echo "warning: task $ID rebound to hc terminal $T, but its finished hc terminal $SPAWN_HC_REBIND_OLD could not be removed; remove it by hand" >&2
+fi
+
 fm_lock_release "$SPAWN_META_LOCK"
 SPAWN_META_LOCK_HELD=0
 

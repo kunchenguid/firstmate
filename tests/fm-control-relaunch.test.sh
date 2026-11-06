@@ -2693,6 +2693,14 @@ case "${1:-} ${2:-}" in
         : > "$D/herdr-agent-live" ;;
     esac
     exit 0 ;;
+  'session list')
+    printf '{"sessions":[{"name":"fmlab","running":true,"socket_path":"%s/herdr.sock"}]}\n' "$D"
+    exit 0 ;;
+  'pane close')
+    # A closed pane reads back as structurally gone.
+    printf '%s\n' "${3:-}" >> "$D/herdr-closed-panes"
+    printf '%s' '%closed' > "$D/herdr-pane"
+    exit 0 ;;
   'workspace list')
     printf '{"result":{"workspaces":[]}}\n'
     exit 0 ;;
@@ -3144,6 +3152,397 @@ SH
 test_relaunch_off_opencode_removes_tracked_wiring
 test_exit_and_relaunch_remove_the_dialog_file
 test_exit_removes_the_dialog_file_before_releasing_the_lock
+# --- moving a task to the hc backend ----------------------------------------
+#
+# A stateful fake hc core: `run` mints t1, t2, ... as files under fake/hc/,
+# `get` answers from them (exit 3, hc's structured not-found, once removed),
+# and `send` of the launch brief turns the terminal's foreground into the
+# harness, exactly as the tmux and herdr fakes model a launch.
+make_hc_stub() {  # <case-dir>
+  local fb="$1/fakebin"
+  mkdir -p "$fb" "$1/fake/hc"
+  cat > "$fb/hc" <<'SH'
+#!/usr/bin/env bash
+set -u
+D=$FM_FAKE_DIR/hc
+{
+  printf 'HC_SESSION=%s' "${HC_SESSION:-}"
+  for a in "$@"; do printf ' %s' "$a"; done
+  printf '\n'
+} >> "$D/log"
+cmd=${1:-}
+shift || true
+last=
+for a in "$@"; do last=$a; done
+term_set() {  # <address> <jq-filter> [args...]
+  local f="$D/$1.json" filter=$2
+  shift 2
+  jq "$@" "$filter" "$f" > "$f.tmp" && mv "$f.tmp" "$f"
+}
+case "$cmd" in
+  --version) printf 'hc 0.1.14\n' ;;
+  connect)
+    IFS= read -r _req || true
+    printf '{"jsonrpc":"2.0","id":1,"result":{"generation":1}}\n'
+    ;;
+  server)
+    [ ! -f "$D/core-down" ] || { echo 'error: core unreachable' >&2; exit 4; }
+    printf '{"core":{"id":"%s"},"live":0}\n' "$(cat "$D/core-id" 2>/dev/null || printf c0ffee)"
+    ;;
+  ls)
+    want_task= want_home=
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        --label) case "$2" in firstmate.task=*) want_task=${2#*=} ;; firstmate.home=*) want_home=${2#*=} ;; esac; shift 2 ;;
+        *) shift ;;
+      esac
+    done
+    cat "$D"/t*.json 2>/dev/null | jq -s --arg t "$want_task" --arg h "$want_home" \
+      '{terminals: [.[] | select(.state == "live" and ($t == "" or .labels["firstmate.task"] == $t) and ($h == "" or .labels["firstmate.home"] == $h))]}'
+    ;;
+  run)
+    n=$(( $(cat "$D/next" 2>/dev/null || printf 0) + 1 ))
+    printf '%s' "$n" > "$D/next"
+    cwd= labels='{}'
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        --cwd) cwd=$2; shift 2 ;;
+        --label) labels=$(printf '%s' "$labels" | jq --arg k "${2%%=*}" --arg v "${2#*=}" '. + {($k): $v}'); shift 2 ;;
+        *) shift ;;
+      esac
+    done
+    jq -n --arg a "t$n" --arg c "$cwd" --argjson l "$labels" \
+      '{address: $a, state: "live", labels: $l, cwd: $c, foreground: {name: "zsh", argv: ["-zsh"], cwd: $c, pid: 1}}' > "$D/t$n.json"
+    printf '{"address":"t%s"}\n' "$n"
+    ;;
+  get)
+    [ -f "$D/$last.json" ] || { printf '{"error":{"kind":"not_found"}}\n' >&2; exit 3; }
+    cat "$D/$last.json"
+    ;;
+  send)
+    # hc send [--json] [--wait] [--timeout <s>] <address> -- <text>
+    addr= payload=
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        --) payload=${2:-}; break ;;
+        --timeout) shift 2 ;;
+        --*) shift ;;
+        *) [ -n "$addr" ] || addr=$1; shift ;;
+      esac
+    done
+    [ -f "$D/$addr.json" ] || exit 3
+    [ ! -f "$D/send-fails" ] || exit 1
+    case "$payload" in
+      ". '"*"'") staged=${payload#". '"}; staged=${staged%"'"}; [ ! -f "$staged" ] || payload=$(cat "$staged") ;;
+    esac
+    printf '%s\n' "$payload" >> "$D/sent"
+    case "$payload" in
+      *'encode launch-brief'* | *'Firstmate operational input waiting: read'*)
+        printf '%s\n' "$payload" > "$D/launched-command"
+        term_set "$addr" '.foreground.name = "claude" | .foreground.argv = ["claude"]' ;;
+      /exit|/quit) term_set "$addr" '.foreground.name = "zsh" | .foreground.argv = ["-zsh"]' ;;
+      "cd -- '"*"'") dir=${payload#"cd -- '"}; dir=${dir%"'"}; term_set "$addr" '.foreground.cwd = $c' --arg c "$dir" ;;
+    esac
+    printf '{}\n'
+    ;;
+  read) printf '╭────╮\n│    │\n╰────╯\n' ;;
+  kill) [ ! -f "$D/$last.json" ] || term_set "$last" '.state = "finished" | .foreground = null'; printf '{}\n' ;;
+  rm) rm -f "$D/$last.json"; printf '{}\n' ;;
+  *) printf '{}\n' ;;
+esac
+SH
+  chmod +x "$fb/hc"
+}
+
+run_spawn_hc() {  # <case-dir> <args...>; FM_TEST_HERDR_SESSION names this seat's herdr session
+  local dir=$1; shift
+  local -a seat=()
+  [ -z "${FM_TEST_HERDR_SESSION:-}" ] || seat=(HERDR_SESSION="$FM_TEST_HERDR_SESSION")
+  mkdir -p "$dir/user-home"
+  env -u HERDR_ENV -u HERDR_PANE_ID -u HERDR_SESSION -u HERDR_SOCKET_PATH \
+    -u HERDR_TAB_ID -u HERDR_WORKSPACE_ID -u HC_SOCKET -u HC_TERMINAL_ID \
+    ${seat[@]+"${seat[@]}"} PATH="$dir/fakebin:$PATH" FM_HOME="$dir/home" FM_FAKE_DIR="$dir/fake" \
+    HOME="$dir/user-home" CLAUDE_CONFIG_DIR='' HC_SESSION=fmhc FM_HC_BIN="$dir/fakebin/hc" \
+    FM_SPAWN_NO_GUARD=1 GROK_HOME="$dir/grokhome" \
+    "$SPAWN" "$@" 2>&1
+}
+
+run_control_hc() {  # <case-dir> <args...>
+  local dir=$1; shift
+  mkdir -p "$dir/user-home"
+  env -u HERDR_ENV -u HERDR_PANE_ID -u HERDR_SESSION -u HERDR_SOCKET_PATH \
+    -u HERDR_TAB_ID -u HERDR_WORKSPACE_ID -u HC_SOCKET -u HC_TERMINAL_ID \
+    PATH="$dir/fakebin:$PATH" FM_HOME="$dir/home" FM_FAKE_DIR="$dir/fake" \
+    HOME="$dir/user-home" CLAUDE_CONFIG_DIR='' HC_SESSION=fmhc FM_HC_BIN="$dir/fakebin/hc" \
+    FM_SPAWN_NO_GUARD=1 GROK_HOME="$dir/grokhome" \
+    FM_CONTROL_POLL=0.01 FM_CONTROL_EXIT_WAIT=0.05 FM_CONTROL_LAUNCH_WAIT=0.05 \
+    "$CONTROL" "$@" 2>&1
+}
+
+test_herdr_task_moves_to_hc_in_the_same_worktree() {
+  local dir out rc=0 status_before
+  herdr_case_or_skip move-herdr-hc rl90 || {
+    echo "skip - an hc move needs jq (both adapters parse JSON with it)"
+    return 0
+  }
+  dir=$HERDR_CASE_DIR
+  rm -f "$dir/fake/herdr-stopped"
+  make_hc_stub "$dir"
+  # Pi resolves its executable from PATH before launch; a stub that answers
+  # --help is all the move needs.
+  printf '#!/bin/sh\necho "usage: pi"\n' > "$dir/fakebin/pi"
+  chmod +x "$dir/fakebin/pi"
+  sed 's/^harness=claude$/harness=pi/' "$dir/home/state/rl90.meta" > "$dir/meta.tmp" \
+    && mv "$dir/meta.tmp" "$dir/home/state/rl90.meta"
+  # The exited agent's Herdr registration still names its Pi session, and
+  # process-info shows a shell-only pane: the recorded endpoint is dead.
+  printf '{"result":{"agent":{"agent":"pi","agent_status":"idle","agent_session":{"kind":"path","value":"/tmp/pi-moved-session.jsonl"}}}}\n' \
+    > "$dir/fake/herdr-agent-registration"
+  printf 'uncommitted\n' > "$dir/wt/scratch.txt"
+  status_before=$(git -C "$dir/wt" status --porcelain)
+
+  out=$(run_spawn_hc "$dir" rl90 --relaunch --harness pi --move-backend hc) || rc=$?
+  expect_code 0 "$rc" "a dead herdr task should move to hc"$'\n'"$out"
+  [ "$(meta_field "$dir" rl90 backend)" = hc ] || fail "the record must name the hc backend, got $(meta_field "$dir" rl90 backend)"
+  [ "$(meta_field "$dir" rl90 window)" = fmhc:t1 ] || fail "the record must name the new hc terminal, got $(meta_field "$dir" rl90 window)"
+  [ "$(meta_field "$dir" rl90 hc_core)" = c0ffee ] || fail "the record must name the core the terminal lives on"
+  [ -z "$(meta_field "$dir" rl90 herdr_pane_id)" ] || fail "the moved record must drop the herdr endpoint ids"
+  [ "$(meta_field "$dir" rl90 worktree)" = "$dir/wt" ] || fail "the move must keep the recorded worktree"
+  [ "$(git -C "$dir/wt" status --porcelain)" = "$status_before" ] || fail "the move must leave uncommitted work untouched"
+  assert_grep "--cwd $dir/wt" "$dir/fake/hc/log" "the hc terminal must open in the recorded worktree"
+  assert_grep "firstmate.task=fm-rl90" "$dir/fake/hc/log" "the hc terminal must carry the task label"
+  assert_contains "$(cat "$dir/fake/hc/launched-command")" "--session '/tmp/pi-moved-session.jsonl'" \
+    "the replacement Pi must resume the session the old herdr endpoint recorded"
+  assert_not_contains "$(cat "$dir/fake/herdr-log")" "pane send-text %7" \
+    "nothing may be launched into the old herdr pane"
+  assert_grep '%7' "$dir/fake/herdr-closed-panes" "the old herdr pane must be closed after the move"
+  pass "fm-spawn --relaunch --move-backend hc: a dead herdr task moves into an hc terminal in its own worktree"
+}
+
+test_move_to_hc_refuses_a_live_agent() {
+  local dir out rc=0
+  herdr_case_or_skip move-live rl91 || { echo "skip - needs jq"; return 0; }
+  dir=$HERDR_CASE_DIR
+  rm -f "$dir/fake/herdr-stopped"
+  : > "$dir/fake/herdr-agent-live"
+  make_hc_stub "$dir"
+  out=$(run_spawn_hc "$dir" rl91 --relaunch --move-backend hc) || rc=$?
+  expect_code 1 "$rc" "a live agent must refuse the move"
+  assert_contains "$out" "positively agent-free endpoint" "the refusal must name the unproven stop"
+  assert_absent "$dir/fake/hc/next" "a refused move must not create an hc terminal"
+  [ "$(meta_field "$dir" rl91 backend)" = herdr ] || fail "a refused move must leave the record on herdr"
+  [ ! -s "$dir/fake/herdr-closed-panes" ] || fail "a refused move must not close the old pane"
+  pass "fm-spawn --relaunch --move-backend hc: refuses while the old agent is not proven stopped"
+}
+
+test_move_backend_refuses_other_shapes() {
+  local dir out rc=0
+  herdr_case_or_skip move-shapes rl92 || { echo "skip - needs jq"; return 0; }
+  dir=$HERDR_CASE_DIR
+  rm -f "$dir/fake/herdr-stopped"
+  make_hc_stub "$dir"
+  out=$(run_spawn_hc "$dir" rl92 --relaunch --move-backend herdr) || rc=$?
+  expect_code 1 "$rc" "moving to the recorded backend must refuse"
+  assert_contains "$out" "already runs on backend 'herdr'" "the refusal must name the recorded backend"
+  rc=0
+  out=$(run_spawn_hc "$dir" rl92 --relaunch --move-backend tmux) || rc=$?
+  expect_code 1 "$rc" "a move to a backend without a verified move path must refuse"
+  assert_contains "$out" "supports the hc and herdr backends only" "the refusal must name the supported targets"
+  rc=0
+  out=$(run_spawn_hc "$dir" rl92 --move-backend hc) || rc=$?
+  expect_code 1 "$rc" "--move-backend without --relaunch must refuse"
+  assert_contains "$out" "applies to --relaunch only" "the refusal must say it needs --relaunch"
+  assert_absent "$dir/fake/hc/next" "no refused shape may create an hc terminal"
+  pass "fm-spawn --move-backend: refuses a same-backend, unsupported, or fresh-spawn move"
+}
+
+test_aborted_move_closes_its_new_hc_terminal() {
+  local dir out rc=0
+  herdr_case_or_skip move-abort rl93 || { echo "skip - needs jq"; return 0; }
+  dir=$HERDR_CASE_DIR
+  rm -f "$dir/fake/herdr-stopped"
+  printf '{"result":{"agent":{"agent":"claude","agent_status":"idle"}}}\n' > "$dir/fake/herdr-agent-registration"
+  make_hc_stub "$dir"
+  : > "$dir/fake/hc/send-fails"
+  out=$(run_spawn_hc "$dir" rl93 --relaunch --move-backend hc) || rc=$?
+  [ "$rc" -ne 0 ] || fail "a move whose terminal cannot take input must fail"$'\n'"$out"
+  [ "$(cat "$dir/fake/hc/next" 2>/dev/null)" = 1 ] || fail "the move must have opened its hc terminal before failing"
+  assert_absent "$dir/fake/hc/t1.json" "an aborted move must close the hc terminal it opened, so a retry is not refused"
+  [ "$(meta_field "$dir" rl93 backend)" = herdr ] || fail "an aborted move must leave the record on herdr"
+  [ ! -s "$dir/fake/herdr-closed-panes" ] || fail "an aborted move must keep the old pane"
+  pass "fm-spawn --relaunch --move-backend hc: an abort before publication closes the new terminal and keeps the old record"
+}
+
+test_control_relaunch_moves_a_running_task_to_hc() {
+  local dir out rc=0
+  dir=$(new_case control-move rl94)
+  add_ship_task "$dir" rl94 claude
+  make_hc_stub "$dir"
+  out=$(run_control_hc "$dir" rl94 relaunch --backend hc --note "moved to the Herdr app") || rc=$?
+  expect_code 0 "$rc" "fm-control should move a running tmux task to hc"$'\n'"$out"
+  assert_contains "$out" "backend=hc endpoint=fmhc:t1" "the outcome must name the new backend and endpoint"
+  assert_grep "/exit" "$dir/fake/literal" "the old agent must be exited through the control plane first"
+  [ "$(meta_field "$dir" rl94 backend)" = hc ] || fail "the record must name hc"
+  [ "$(journal_field "$dir" rl94 to_backend)" = hc ] || fail "the journal must record the target backend"
+  [ "$(journal_field "$dir" rl94 phase)" = complete ] || fail "the transaction must complete"
+  assert_grep "Progress note" "$dir/home/data/rl94/brief.md" "the progress note must reach the replacement's instructions"
+  pass "fm-control relaunch --backend hc: exits the old agent, launches on hc, and completes the transaction"
+}
+
+test_control_move_refuses_before_stop_when_hc_is_unreachable() {
+  local dir out rc=0
+  dir=$(new_case control-move-down rl95)
+  add_ship_task "$dir" rl95 claude
+  make_hc_stub "$dir"
+  : > "$dir/fake/hc/core-down"
+  out=$(run_control_hc "$dir" rl95 relaunch --backend hc --note "moved") || rc=$?
+  expect_code 1 "$rc" "an unreachable hc core must refuse the move"
+  [ ! -s "$dir/fake/literal" ] || fail "a refused move must not touch the running agent"
+  [ -z "$(meta_field "$dir" rl95 backend)" ] || fail "a refused move must leave the record unchanged"
+  rc=0
+  out=$(run_control_hc "$dir" rl95 exit --backend hc) || rc=$?
+  expect_code 1 "$rc" "--backend must be refused outside relaunch"
+  pass "fm-control relaunch --backend hc: refuses before the old agent stops when hc cannot take the task"
+}
+
+test_control_move_refuses_before_stop_when_herdr_cannot_run() {
+  local dir out rc=0
+  command -v jq >/dev/null 2>&1 || { echo "skip - herdr's checks need jq"; return 0; }
+  dir=$(new_case control-move-herdr-down rl99)
+  add_ship_task "$dir" rl99 claude
+  cp "$dir/home/state/rl99.meta" "$dir/meta.before"
+  # A herdr on PATH that cannot report its status, so it cannot run a task.
+  mkdir -p "$dir/fakebin"
+  printf '#!/bin/sh\necho "herdr: broken install" >&2\nexit 1\n' > "$dir/fakebin/herdr"
+  chmod +x "$dir/fakebin/herdr"
+  out=$(run_control "$dir" rl99 relaunch --backend herdr --note "moved") || rc=$?
+  expect_code 1 "$rc" "a herdr that cannot run must refuse the move"$'\n'"$out"
+  assert_contains "$out" "herdr status --json' failed" "the refusal must name the failed herdr check"
+  [ ! -s "$dir/fake/literal" ] || fail "a refused move must not touch the running agent"
+  cmp -s "$dir/meta.before" "$dir/home/state/rl99.meta" || fail "a refused move must leave the record unchanged"
+  pass "fm-control relaunch --backend herdr: refuses before the old agent stops when herdr cannot run"
+}
+
+test_control_move_refuses_a_hermes_task_before_stop() {
+  local dir out rc=0
+  dir=$(new_case control-move-hermes rl95)
+  add_ship_task "$dir" rl95 hermes
+  cp "$dir/home/state/rl95.meta" "$dir/meta.before"
+  out=$(run_control "$dir" rl95 relaunch --backend hc --note "moved") || rc=$?
+  expect_code 1 "$rc" "a Hermes task must refuse a move off tmux"$'\n'"$out"
+  assert_contains "$out" "Hermes is verified on tmux only" "the refusal must name the Hermes limit"
+  [ ! -s "$dir/fake/literal" ] || fail "a refused move must not touch the running agent"
+  cmp -s "$dir/meta.before" "$dir/home/state/rl95.meta" || fail "a refused move must leave the record unchanged"
+  pass "fm-control relaunch --backend hc: refuses a Hermes task before the old agent stops"
+}
+
+test_control_move_resumes_the_claude_conversation() {
+  local dir out rc=0 agent sid=0f1e2d3c-4b5a-4697-8877-665544332211 launched
+  dir=$(new_case control-move-resume rl96)
+  add_ship_task "$dir" rl96 claude
+  make_hc_stub "$dir"
+  # The running agent's own session record, as Claude keeps it per process.
+  set -m
+  ( cd "$dir/wt" && exec -a claude sleep 60 ) &
+  # shellcheck disable=SC2031 # $! names the job started on the line above, in this shell
+  agent=$!
+  set +m
+  mkdir -p "$dir/user-home/.claude/sessions" "$dir/user-home/.claude/projects/p"
+  printf '{"pid":%s,"sessionId":"%s","cwd":"%s","kind":"interactive"}\n' "$agent" "$sid" "$dir/wt" \
+    > "$dir/user-home/.claude/sessions/$agent.json"
+  printf '{"type":"user"}\n' > "$dir/user-home/.claude/projects/p/$sid.jsonl"
+  out=$(run_control_hc "$dir" rl96 relaunch --backend hc --note "moved") || rc=$?
+  kill "$agent" 2>/dev/null || true
+  wait "$agent" 2>/dev/null || true
+  expect_code 0 "$rc" "the move should succeed"$'\n'"$out"
+  launched=$(cat "$dir/fake/hc/launched-command")
+  assert_contains "$launched" "--resume $sid" "a moved Claude agent must continue its own conversation"
+  pass "fm-control relaunch --backend hc: a moved Claude agent resumes its conversation"
+}
+
+test_control_move_without_a_session_record_starts_fresh() {
+  local dir out rc=0 launched
+  dir=$(new_case control-move-fresh rl97)
+  add_ship_task "$dir" rl97 claude
+  make_hc_stub "$dir"
+  out=$(run_control_hc "$dir" rl97 relaunch --backend hc --note "moved") || rc=$?
+  expect_code 0 "$rc" "the move should succeed"$'\n'"$out"
+  launched=$(cat "$dir/fake/hc/launched-command")
+  assert_not_contains "$launched" "--resume" "with no live session record the replacement starts fresh"
+  pass "fm-control relaunch --backend hc: without a live session record the replacement starts fresh"
+}
+
+test_hc_task_moves_back_to_herdr() {
+  local dir out rc=0 status_before
+  herdr_case_or_skip move-back rl98 || { echo "skip - needs jq"; return 0; }
+  dir=$HERDR_CASE_DIR
+  rm -f "$dir/fake/herdr-stopped"
+  make_hc_stub "$dir"
+  printf '{"result":{"agent":{"agent":"claude","agent_status":"idle"}}}\n' > "$dir/fake/herdr-agent-registration"
+  out=$(run_spawn_hc "$dir" rl98 --relaunch --move-backend hc) || rc=$?
+  expect_code 0 "$rc" "the move to hc should succeed"$'\n'"$out"
+  # The hc agent stops: its terminal returns to the login shell.
+  jq '.foreground.name = "zsh" | .foreground.argv = ["-zsh"]' "$dir/fake/hc/t1.json" > "$dir/t1.tmp" \
+    && mv "$dir/t1.tmp" "$dir/fake/hc/t1.json"
+  : > "$dir/fake/herdr-log"
+  rm -f "$dir/fake/herdr-agent-registration" "$dir/fake/herdr-agent-live"
+  status_before=$(git -C "$dir/wt" status --porcelain)
+  rc=0
+  out=$(FM_TEST_HERDR_SESSION=fmlab run_spawn_hc "$dir" rl98 --relaunch --move-backend herdr) || rc=$?
+  expect_code 0 "$rc" "an hc task should move back to herdr"$'\n'"$out"
+  [ "$(meta_field "$dir" rl98 backend)" = herdr ] || fail "the record must name herdr again"
+  [ -z "$(meta_field "$dir" rl98 hc_terminal)" ] || fail "the record must drop the hc endpoint"
+  [ "$(meta_field "$dir" rl98 herdr_pane_id)" = '%9' ] || fail "the record must name the new herdr pane, got $(meta_field "$dir" rl98 herdr_pane_id)"
+  [ "$(meta_field "$dir" rl98 worktree)" = "$dir/wt" ] || fail "the move back must keep the worktree"
+  [ "$(git -C "$dir/wt" status --porcelain)" = "$status_before" ] || fail "the move back must leave the worktree untouched"
+  assert_contains "$(cat "$dir/fake/herdr-log")" "--session fmlab" "the new pane must land in this seat's herdr session"
+  assert_absent "$dir/fake/hc/t1.json" "the old hc terminal must be closed after the move back"
+  pass "fm-spawn --relaunch --move-backend herdr: an hc task moves back to a Herdr pane in its worktree"
+}
+
+test_move_to_hc_without_a_core_id_records_none() {
+  local dir out rc=0
+  herdr_case_or_skip move-no-core rl99 || { echo "skip - needs jq"; return 0; }
+  dir=$HERDR_CASE_DIR
+  rm -f "$dir/fake/herdr-stopped"
+  printf '{"result":{"agent":{"agent":"claude","agent_status":"idle"}}}\n' > "$dir/fake/herdr-agent-registration"
+  make_hc_stub "$dir"
+  : > "$dir/fake/hc/core-id"
+  out=$(run_spawn_hc "$dir" rl99 --relaunch --move-backend hc) || rc=$?
+  expect_code 0 "$rc" "a core that reports no id must not refuse the move"$'\n'"$out"
+  [ "$(meta_field "$dir" rl99 window)" = fmhc:t1 ] || fail "the record must name the new hc terminal"
+  [ -z "$(meta_field "$dir" rl99 hc_core)" ] || fail "a core without an id must leave hc_core unrecorded"
+  pass "fm-spawn --relaunch --move-backend hc: a core without an id records no hc_core instead of refusing"
+}
+
+test_aborted_hc_rebind_keeps_the_finished_terminal() {
+  local dir out rc=0
+  herdr_case_or_skip hc-rebind-abort rl89 || { echo "skip - needs jq"; return 0; }
+  dir=$HERDR_CASE_DIR
+  rm -f "$dir/fake/herdr-stopped"
+  printf '{"result":{"agent":{"agent":"claude","agent_status":"idle"}}}\n' > "$dir/fake/herdr-agent-registration"
+  make_hc_stub "$dir"
+  out=$(run_spawn_hc "$dir" rl89 --relaunch --move-backend hc) || rc=$?
+  expect_code 0 "$rc" "the move to hc should succeed"$'\n'"$out"
+  # A record written before hc_core existed, whose terminal has finished.
+  grep -v '^hc_core=' "$dir/home/state/rl89.meta" > "$dir/meta.tmp" && mv "$dir/meta.tmp" "$dir/home/state/rl89.meta"
+  jq '.state = "finished" | .foreground = null' "$dir/fake/hc/t1.json" > "$dir/t1.tmp" && mv "$dir/t1.tmp" "$dir/fake/hc/t1.json"
+  : > "$dir/fake/hc/send-fails"
+  rc=0
+  out=$(run_spawn_hc "$dir" rl89 --relaunch) || rc=$?
+  [ "$rc" -ne 0 ] || fail "a rebind whose terminal cannot take input must fail"$'\n'"$out"
+  [ "$(meta_field "$dir" rl89 window)" = fmhc:t1 ] || fail "an aborted rebind must keep the record on the old terminal"
+  [ -f "$dir/fake/hc/t1.json" ] || fail "an aborted rebind must keep the finished terminal the record names"
+  assert_absent "$dir/fake/hc/t2.json" "an aborted rebind must close the terminal it opened"
+  rm -f "$dir/fake/hc/send-fails"
+  rc=0
+  out=$(run_spawn_hc "$dir" rl89 --relaunch) || rc=$?
+  expect_code 0 "$rc" "a retried rebind must still prove the finished terminal gone"$'\n'"$out"
+  [ "$(meta_field "$dir" rl89 window)" = fmhc:t3 ] || fail "the retried rebind must name its new terminal, got $(meta_field "$dir" rl89 window)"
+  assert_absent "$dir/fake/hc/t1.json" "the finished terminal must be removed once the new record is published"
+  pass "fm-spawn --relaunch on hc: an aborted rebind keeps the finished terminal, so a retry still proves it gone"
+}
+
 test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint
 test_relaunch_refuses_before_exit_when_the_composer_holds_pending_text
 test_relaunch_refuses_before_exit_when_the_composer_state_is_unproven
@@ -3236,3 +3635,16 @@ test_herdr_rebind_failure_from_a_plain_shell_names_the_real_cause
 test_relaunch_reverifies_an_already_in_flight_item_instead_of_rewriting_it
 test_relaunch_moves_a_drifted_item_back_in_flight
 test_away_branch_relaunch_accepts_existing_dispatchable_items
+test_herdr_task_moves_to_hc_in_the_same_worktree
+test_move_to_hc_refuses_a_live_agent
+test_move_backend_refuses_other_shapes
+test_aborted_move_closes_its_new_hc_terminal
+test_control_relaunch_moves_a_running_task_to_hc
+test_control_move_refuses_before_stop_when_hc_is_unreachable
+test_control_move_refuses_before_stop_when_herdr_cannot_run
+test_control_move_refuses_a_hermes_task_before_stop
+test_control_move_resumes_the_claude_conversation
+test_control_move_without_a_session_record_starts_fresh
+test_hc_task_moves_back_to_herdr
+test_move_to_hc_without_a_core_id_records_none
+test_aborted_hc_rebind_keeps_the_finished_terminal
