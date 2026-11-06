@@ -2549,7 +2549,7 @@ test_unpushed_ship_done_is_blocked() {
   fm_write_meta "$d/state/unpushed.meta" \
     "window=fm:fm-unpushed" "worktree=$d/wt" "project=$d/wt" \
     "kind=ship" "mode=no-mistakes" "harness=claude"
-  printf 'done: PR https://example.test/o/r/pull/9 checks green\n' \
+  printf 'done: PR https://github.com/o/r/pull/9 checks green\n' \
     > "$d/state/unpushed.status"
   FM_FAKE_AXI_STATUS=""
   FM_FAKE_RUNS_LIST=""
@@ -2627,7 +2627,7 @@ test_moved_remote_branch_without_named_head_is_blocked() {
   fm_write_meta "$d/state/moved.meta" \
     "window=fm:fm-moved" "worktree=$d/wt" "project=$d/wt" \
     "kind=ship" "mode=direct-PR" "harness=claude"
-  printf 'done: PR https://example.test/o/r/pull/8\n' > "$d/state/moved.status"
+  printf 'done: PR https://github.com/o/r/pull/8\n' > "$d/state/moved.status"
   FM_FAKE_AXI_STATUS=""
   FM_FAKE_RUNS_LIST=""
   FM_FAKE_BUSY=0

@@ -1030,6 +1030,12 @@ fm_dod_accept_ship_done() {  # <kind> <mode> <worktree> <project> <line> [<state
   fi
   note=$(status_line_note "$line")
   url=$(fm_dod_pr_url_from_done_note "$note") || url=
+  gerrit=0
+  [ -n "$url" ] && fm_pr_url_parse "$url" && [ "$FM_PR_PROVIDER" = gerrit ] && gerrit=1
+  if [ "$gerrit" = 0 ] && fm_dod_note_reports_published_change "$note"; then
+    printf '%s\n' "the published-for-review report does not name a Gerrit change in the canonical https://<host>/c/<project>/+/<number> form"
+    return 1
+  fi
   if [ "$mode" != local-only ]; then
     if ! fm_pr_url_parse "$url"; then
       printf '%s\n' 'PR destination could not be resolved; report a canonical PR URL so its expected base can be verified'
@@ -1073,12 +1079,6 @@ fm_dod_accept_ship_done() {  # <kind> <mode> <worktree> <project> <line> [<state
     printf '%s\n' "named head could not be resolved"
     return 1
   }
-  gerrit=0
-  [ -n "$url" ] && fm_pr_url_parse "$url" && [ "$FM_PR_PROVIDER" = gerrit ] && gerrit=1
-  if [ "$gerrit" = 0 ] && fm_dod_note_reports_published_change "$(status_line_note "$line")"; then
-    printf '%s\n' "the published-for-review report does not name a Gerrit change in the canonical https://<host>/c/<project>/+/<number> form"
-    return 1
-  fi
   if [ "$gerrit" = 1 ]; then
     case "$mode" in
       no-mistakes|'')
