@@ -404,15 +404,75 @@ SH
 # given, so a test can prove the instance came from the URL. `mr view` answers
 # from the case's JSON payload; marker files in the case dir drive the failure
 # modes, so no test has to leak environment into a shared runner.
+# `api` answers the project read from project.json (a project without merge
+# trains when absent), a commit read from commit-<sha>.json, a merge-train POST
+# by recording glab-train-added, and a merge-train car read from train-car.json
+# (a 404 when absent). Once the request is in the train, the Nth `mr view`
+# answers from mr-train-N.json when that file exists and mr-train.json otherwise.
 add_glab_mock() {
   local case_dir=$1
   cat > "$case_dir/fakebin/glab" <<'SH'
 #!/usr/bin/env bash
 printf 'GITLAB_HOST=%s %s\n' "${GITLAB_HOST-<unset>}" "$*" >> "$FM_TEST_GLAB_LOG"
 case_dir=$(dirname "$FM_TEST_GLAB_JSON")
+if [ "${1:-}" = api ]; then
+  shift
+  method=GET endpoint= sha=
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --hostname) shift 2 ;;
+      --method) method=$2; shift 2 ;;
+      -f) case "$2" in sha=*) sha=${2#sha=} ;; esac; shift 2 ;;
+      *) endpoint=$1; shift ;;
+    esac
+  done
+  case "$endpoint" in
+    */merge_trains/merge_requests/*)
+      if [ "$method" = POST ]; then
+        if [ -f "$case_dir/glab-server-head" ] && [ "$sha" != "$(cat "$case_dir/glab-server-head")" ]; then
+          echo '{"message":"409 SHA does not match HEAD of source branch"}'
+          exit 1
+        fi
+        [ ! -e "$case_dir/glab-train-add-fails" ] || { echo '{"message":"400 Failed to merge"}'; exit 1; }
+        : > "$case_dir/glab-train-added"
+        echo '[{"status":"idle"}]'
+        exit 0
+      fi
+      [ -f "$case_dir/train-car.json" ] || { echo 'glab: 404 Merge Train Merge Request Not Found (HTTP 404)' >&2; exit 1; }
+      cat "$case_dir/train-car.json"
+      exit 0
+      ;;
+    */repository/commits/*)
+      [ -f "$case_dir/commit-${endpoint##*/}.json" ] || exit 1
+      cat "$case_dir/commit-${endpoint##*/}.json"
+      exit 0
+      ;;
+    projects/*/*) exit 1 ;;
+    projects/*)
+      [ ! -e "$case_dir/glab-project-fails" ] || exit 1
+      if [ -f "$case_dir/project.json" ]; then
+        cat "$case_dir/project.json"
+      else
+        echo '{"merge_trains_enabled":false,"merge_method":"merge"}'
+      fi
+      exit 0
+      ;;
+  esac
+  exit 1
+fi
 case "${1:-} ${2:-}" in
   "mr view")
     [ ! -e "$case_dir/glab-view-fails" ] || exit 1
+    if [ -e "$case_dir/glab-train-added" ]; then
+      views=$(( $(cat "$case_dir/glab-train-views" 2>/dev/null || echo 0) + 1 ))
+      echo "$views" > "$case_dir/glab-train-views"
+      if [ -f "$case_dir/mr-train-$views.json" ]; then
+        cat "$case_dir/mr-train-$views.json"
+      else
+        cat "$case_dir/mr-train.json"
+      fi
+      exit 0
+    fi
     if [ -e "$case_dir/glab-merge-called" ] && [ ! -e "$case_dir/glab-stays-open" ]; then
       cat "$case_dir/mr-post.json"
     else
@@ -459,6 +519,7 @@ write_mr_json() {
   local state=opened detail=mergeable conflicts=false discussions=true
   local head=$MR_HEAD pipeline_sha=$MR_HEAD pipeline_status=success pipeline=present
   local merge_when_pipeline_succeeds=false merge_after=null
+  local pipeline_ref='' pipeline_url='' merge_commit_sha=null squash_commit_sha=null
   shift
   for kv in "$@"; do
     key=${kv%%=*}
@@ -474,18 +535,29 @@ write_mr_json() {
       pipeline) pipeline=$value ;;
       merge_when_pipeline_succeeds) merge_when_pipeline_succeeds=$value ;;
       merge_after) merge_after=$value ;;
+      pipeline_ref) pipeline_ref=$value ;;
+      pipeline_url) pipeline_url=$value ;;
+      merge_commit_sha) merge_commit_sha=\"$value\" ;;
+      squash_commit_sha) squash_commit_sha=\"$value\" ;;
       *) fail "write_mr_json: unknown field '$key'" ;;
     esac
   done
   if [ "$pipeline" = present ]; then
-    pipeline=$(printf '{"sha":"%s","status":"%s"}' "$pipeline_sha" "$pipeline_status")
+    pipeline=$(printf '{"sha":"%s","status":"%s"' "$pipeline_sha" "$pipeline_status")
+    [ -z "$pipeline_ref" ] || pipeline="$pipeline,\"ref\":\"$pipeline_ref\""
+    [ -z "$pipeline_url" ] || pipeline="$pipeline,\"web_url\":\"$pipeline_url\""
+    pipeline="$pipeline}"
   fi
-  printf '{"iid":7,"state":"%s","detailed_merge_status":"%s","has_conflicts":%s,' \
-    "$state" "$detail" "$conflicts" > "$file"
-  printf '"blocking_discussions_resolved":%s,"sha":"%s","head_pipeline":%s,' \
-    "$discussions" "$head" "$pipeline" >> "$file"
-  printf '"merge_when_pipeline_succeeds":%s,"merge_after":%s}\n' \
-    "$merge_when_pipeline_succeeds" "$merge_after" >> "$file"
+  {
+    printf '{"iid":7,"state":"%s","detailed_merge_status":"%s","has_conflicts":%s,' \
+      "$state" "$detail" "$conflicts"
+    printf '"blocking_discussions_resolved":%s,"sha":"%s","head_pipeline":%s,' \
+      "$discussions" "$head" "$pipeline"
+    printf '"merge_when_pipeline_succeeds":%s,"merge_after":%s,' \
+      "$merge_when_pipeline_succeeds" "$merge_after"
+    printf '"merge_commit_sha":%s,"squash_commit_sha":%s}\n' \
+      "$merge_commit_sha" "$squash_commit_sha"
+  } > "$file"
 }
 
 # tea mock recording every invocation, so a test can prove the login and
@@ -5428,6 +5500,221 @@ test_allow_no_pipeline_merges_only_a_null_head_pipeline() {
   pass "fm-pr-merge --allow-no-pipeline waives only a null GitLab head pipeline and keeps every other condition"
 }
 
+# The merge-train fixture: a project with merge trains enabled, whose merge
+# request pipeline is a merged results pipeline at MR_RESULT, a commit merging
+# MR_HEAD into MR_BASE, and whose train merges the request at MR_LANDED.
+MR_RESULT=eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee
+MR_BASE=ffffffffffffffffffffffffffffffffffffffff
+MR_LANDED=1212121212121212121212121212121212121212
+MR_PROJECT_API="projects/group%2Fsubgroup%2Fproject"
+MR_TRAIN_PIPELINE_URL="$MR_PROJECT_URL/-/pipelines/55"
+
+# make_gitlab_train_case <name> [<field>=<value> ...]: a GitLab case whose
+# project has merge trains on (merge method from TRAIN_METHOD, default merge)
+# and whose train merges the request on the first read after it enters.
+make_gitlab_train_case() {
+  local name=$1 case_dir
+  shift
+  case_dir=$(make_gitlab_case "$name" pipeline_sha="$MR_RESULT" \
+    pipeline_ref=refs/merge-requests/7/merge "$@")
+  printf '{"merge_trains_enabled":true,"merge_method":"%s"}\n' "${TRAIN_METHOD:-merge}" \
+    > "$case_dir/project.json"
+  printf '{"id":"%s","parent_ids":["%s","%s"]}\n' "$MR_RESULT" "$MR_BASE" "$MR_HEAD" \
+    > "$case_dir/commit-$MR_RESULT.json"
+  write_mr_json "$case_dir/mr-train.json" state=merged detail=not_open \
+    merge_when_pipeline_succeeds=true merge_commit_sha="$MR_LANDED"
+  printf '%s\n' "$case_dir"
+}
+
+# The merge-train POST glab was asked to run, or empty.
+glab_train_add_line() {
+  grep -F -- '--method POST' "$1" || true
+}
+
+run_train_merge() {
+  local case_dir=$1 rc
+  shift
+  set +e
+  FM_PR_GITLAB_TRAIN_WAIT=${TRAIN_WAIT:-0} FM_PR_GITLAB_TRAIN_POLL_INTERVAL=0 \
+    run_pr_merge "$case_dir" task-x1 "$MR_URL" "$@" \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  return "$rc"
+}
+
+test_gitlab_merge_train_entry_lands() {
+  local case_dir rc=0 add_line
+  case_dir=$(make_gitlab_train_case gitlab-train-lands)
+  run_train_merge "$case_dir" || rc=$?
+
+  expect_code 0 "$rc" "gitlab-train-lands: a green train entry that merged should succeed"
+  assert_grep "GITLAB_HOST=$MR_HOST api --hostname $MR_HOST $MR_PROJECT_API" "$case_dir/glab.log" \
+    "gitlab-train-lands: the project's merge settings were not read from the URL's instance"
+  add_line=$(glab_train_add_line "$case_dir/glab.log")
+  [ "$add_line" = "GITLAB_HOST=$MR_HOST api --hostname $MR_HOST --method POST $MR_PROJECT_API/merge_trains/merge_requests/7 -f sha=$MR_HEAD" ] \
+    || fail "gitlab-train-lands: unexpected merge-train entry: '$add_line'"
+  [ -z "$(glab_merge_line "$case_dir/glab.log")" ] \
+    || fail "gitlab-train-lands: an immediate merge ran on a merge-train project"
+  assert_grep "merged results pipeline at $MR_RESULT merging head $MR_HEAD" "$case_dir/stderr" \
+    "gitlab-train-lands: the merged results pipeline was not bound to the verified head"
+  assert_grep "verified: $MR_URL was merged by the merge train at commit $MR_LANDED" "$case_dir/stdout" \
+    "gitlab-train-lands: the proven landing was not reported"
+  assert_grep "$MR_URL" "$case_dir/state/.wake-queue" \
+    "gitlab-train-lands: the landed outcome was not recorded"
+  pass "a green GitLab merge request on a merge-train project enters the train and is reported landed once proven"
+}
+
+test_gitlab_merge_train_waits_for_a_fast_forward_landing() {
+  local case_dir rc=0
+  case_dir=$(TRAIN_METHOD=ff make_gitlab_train_case gitlab-train-ff)
+  write_mr_json "$case_dir/mr-train-1.json" merge_when_pipeline_succeeds=true
+  write_mr_json "$case_dir/mr-train-2.json" state=locked merge_when_pipeline_succeeds=true
+  printf '{"status":"fresh","pipeline":{"status":"running","web_url":"%s"}}\n' "$MR_TRAIN_PIPELINE_URL" \
+    > "$case_dir/train-car.json"
+  write_mr_json "$case_dir/mr-train.json" state=merged detail=not_open head="$MR_LANDED" \
+    merge_when_pipeline_succeeds=true
+  TRAIN_WAIT=5 run_train_merge "$case_dir" || rc=$?
+
+  expect_code 0 "$rc" "gitlab-train-ff: a train that merges within the wait should succeed"
+  [ "$(cat "$case_dir/glab-train-views")" -ge 3 ] \
+    || fail "gitlab-train-ff: the run did not keep reading while the request was queued and locked"
+  assert_grep "verified: $MR_URL was merged by the merge train at commit $MR_LANDED" "$case_dir/stdout" \
+    "gitlab-train-ff: a fast-forward landing was not proven by the head the target moved to"
+  pass "a merge-train entry is waited on and a fast-forward landing is proven by its head"
+}
+
+test_gitlab_merge_train_still_queued_stays_armed() {
+  local case_dir rc=0
+  case_dir=$(make_gitlab_train_case gitlab-train-queued)
+  write_mr_json "$case_dir/mr-train.json" merge_when_pipeline_succeeds=true
+  printf '{"status":"fresh","pipeline":{"status":"running","web_url":"%s"}}\n' "$MR_TRAIN_PIPELINE_URL" \
+    > "$case_dir/train-car.json"
+  run_train_merge "$case_dir" || rc=$?
+
+  expect_code 1 "$rc" "gitlab-train-queued: a still-queued entry must not report success"
+  assert_grep "$MR_URL is queued in the merge train (car status fresh), not merged" "$case_dir/stderr" \
+    "gitlab-train-queued: the queued state was not reported"
+  assert_grep "its merge train pipeline is $MR_TRAIN_PIPELINE_URL" "$case_dir/stderr" \
+    "gitlab-train-queued: the train pipeline was not named"
+  assert_absent "$case_dir/state/.wake-queue" \
+    "gitlab-train-queued: a queued entry was reported as landed"
+  [ -f "$case_dir/state/task-x1.check.sh" ] \
+    || fail "gitlab-train-queued: the merge poll was not left armed"
+  assert_grep "pr=$MR_URL" "$case_dir/state/task-x1.meta" \
+    "gitlab-train-queued: pr= was not recorded"
+  pass "a merge-train entry still queued after the wait reports queued and leaves the merge poll armed"
+}
+
+test_gitlab_merge_train_drop_is_reported_with_its_pipeline() {
+  local case_dir rc=0
+  case_dir=$(make_gitlab_train_case gitlab-train-dropped)
+  write_mr_json "$case_dir/mr-train.json" pipeline_sha="$MR_RESULT" pipeline_status=failed \
+    pipeline_ref=refs/merge-requests/7/train pipeline_url="$MR_TRAIN_PIPELINE_URL"
+  run_train_merge "$case_dir" || rc=$?
+
+  expect_code 1 "$rc" "gitlab-train-dropped: a dropped entry must not report success"
+  assert_grep "the merge train dropped $MR_URL without merging it; its merge train pipeline is $MR_TRAIN_PIPELINE_URL (status failed)" \
+    "$case_dir/stderr" "gitlab-train-dropped: the drop was not reported with the train pipeline URL"
+  assert_absent "$case_dir/state/.wake-queue" \
+    "gitlab-train-dropped: a dropped entry was reported as landed"
+  pass "a merge request the train drops is reported plainly with its train pipeline URL"
+}
+
+test_gitlab_merge_train_keeps_the_pre_merge_guards() {
+  local case_dir rc
+  case_dir=$(make_gitlab_train_case gitlab-train-wrong-source)
+  printf '{"id":"%s","parent_ids":["%s","%s"]}\n' "$MR_RESULT" "$MR_BASE" "$MR_STALE_HEAD" \
+    > "$case_dir/commit-$MR_RESULT.json"
+  rc=0; run_train_merge "$case_dir" || rc=$?
+  expect_code 1 "$rc" "gitlab-train-wrong-source: a pipeline for another head must refuse"
+  assert_grep "merged result $MR_RESULT, whose merged-in source is not the current head $MR_HEAD" \
+    "$case_dir/stderr" "gitlab-train-wrong-source: the refusal did not explain the binding"
+  [ -z "$(glab_train_add_line "$case_dir/glab.log")" ] \
+    || fail "gitlab-train-wrong-source: an unbound pipeline entered the train"
+
+  case_dir=$(make_gitlab_train_case gitlab-train-source-unreadable)
+  rm -f "$case_dir/commit-$MR_RESULT.json"
+  rc=0; run_train_merge "$case_dir" || rc=$?
+  expect_code 1 "$rc" "gitlab-train-source-unreadable: an unreadable merged result must refuse"
+  assert_grep "whose merged-in source could not be read" "$case_dir/stderr" \
+    "gitlab-train-source-unreadable: the refusal did not name the unreadable commit"
+  [ -z "$(glab_train_add_line "$case_dir/glab.log")" ] \
+    || fail "gitlab-train-source-unreadable: an unverified pipeline entered the train"
+
+  case_dir=$(make_gitlab_train_case gitlab-train-red pipeline_status=failed)
+  rc=0; run_train_merge "$case_dir" || rc=$?
+  expect_code 1 "$rc" "gitlab-train-red: a red pipeline must refuse"
+  [ -z "$(glab_train_add_line "$case_dir/glab.log")" ] \
+    || fail "gitlab-train-red: a red merge request entered the train"
+
+  case_dir=$(make_gitlab_train_case gitlab-train-not-mergeable detail=draft_status)
+  rc=0; run_train_merge "$case_dir" || rc=$?
+  expect_code 1 "$rc" "gitlab-train-not-mergeable: a draft must refuse"
+  [ -z "$(glab_train_add_line "$case_dir/glab.log")" ] \
+    || fail "gitlab-train-not-mergeable: a draft entered the train"
+
+  case_dir=$(make_gitlab_train_case gitlab-train-extra-args)
+  rc=0; run_train_merge "$case_dir" --attended-override -- --remove-source-branch || rc=$?
+  expect_code 1 "$rc" "gitlab-train-extra-args: a forge flag must refuse on the train path"
+  assert_grep 'do not apply to a GitLab merge-train entry' "$case_dir/stderr" \
+    "gitlab-train-extra-args: the refusal did not explain the train path"
+  [ -z "$(glab_train_add_line "$case_dir/glab.log")" ] \
+    || fail "gitlab-train-extra-args: a request with dropped flags entered the train"
+
+  case_dir=$(make_gitlab_train_case gitlab-train-moved-head)
+  printf '%s\n' "$MR_STALE_HEAD" > "$case_dir/glab-server-head"
+  rc=0; run_train_merge "$case_dir" || rc=$?
+  expect_code 1 "$rc" "gitlab-train-moved-head: a head that moved after the read must refuse"
+  assert_grep "GitLab did not add $MR_URL to the merge train" "$case_dir/stderr" \
+    "gitlab-train-moved-head: the refused entry was not reported"
+  assert_absent "$case_dir/state/.wake-queue" \
+    "gitlab-train-moved-head: a refused entry was reported as landed"
+
+  case_dir=$(make_gitlab_case gitlab-project-unreadable)
+  : > "$case_dir/glab-project-fails"
+  rc=0; run_train_merge "$case_dir" || rc=$?
+  expect_code 1 "$rc" "gitlab-project-unreadable: an unreadable project must refuse"
+  assert_grep "could not read the GitLab project's merge settings before merging" "$case_dir/stderr" \
+    "gitlab-project-unreadable: the refusal did not name the project read"
+  [ -z "$(glab_merge_line "$case_dir/glab.log")$(glab_train_add_line "$case_dir/glab.log")" ] \
+    || fail "gitlab-project-unreadable: a merge ran without knowing the project's merge path"
+
+  case_dir=$(make_gitlab_case gitlab-no-train-merged-result pipeline_sha="$MR_RESULT" \
+    pipeline_ref=refs/merge-requests/7/merge)
+  printf '{"id":"%s","parent_ids":["%s","%s"]}\n' "$MR_RESULT" "$MR_BASE" "$MR_HEAD" \
+    > "$case_dir/commit-$MR_RESULT.json"
+  rc=0; run_train_merge "$case_dir" || rc=$?
+  expect_code 1 "$rc" "gitlab-no-train-merged-result: a project without trains keeps the exact head match"
+  assert_grep "the head pipeline ran at \"$MR_RESULT\", not at the current head $MR_HEAD" "$case_dir/stderr" \
+    "gitlab-no-train-merged-result: the existing refusal changed"
+  [ -z "$(glab_merge_line "$case_dir/glab.log")$(glab_train_add_line "$case_dir/glab.log")" ] \
+    || fail "gitlab-no-train-merged-result: a merge ran without a pipeline at the head"
+  pass "a merge-train entry keeps every pre-merge guard and a project without trains is unchanged"
+}
+
+test_gitlab_merge_train_entry_runs_under_away_authority() {
+  local case_dir rc=0
+  case_dir=$(make_gitlab_train_case gitlab-train-away)
+  write_away_record "$case_dir" --words 'merge task-x1 when green'
+  run_train_merge "$case_dir" || rc=$?
+  expect_code 0 "$rc" "gitlab-train-away: a green train entry should run under away authority"
+  [ -n "$(glab_train_add_line "$case_dir/glab.log")" ] \
+    || fail "gitlab-train-away: the merge request did not enter the train"
+  [ -z "$(glab_merge_line "$case_dir/glab.log")" ] \
+    || fail "gitlab-train-away: an immediate merge ran on a merge-train project"
+
+  case_dir=$(make_gitlab_train_case gitlab-train-away-configured merge_when_pipeline_succeeds=true)
+  write_away_record "$case_dir" --words 'merge task-x1 when green'
+  rc=0; run_train_merge "$case_dir" || rc=$?
+  expect_code 2 "$rc" "gitlab-train-away-configured: an already-configured auto-merge stays attended-only"
+  assert_grep 'GitLab auto-merge is attended-only' "$case_dir/stderr" \
+    "gitlab-train-away-configured: the refusal did not name auto-merge"
+  [ -z "$(glab_train_add_line "$case_dir/glab.log")" ] \
+    || fail "gitlab-train-away-configured: a configured auto-merge entered the train while away"
+  pass "a merge-train entry needs no attended override, while any other GitLab auto-merge stays attended-only"
+}
+
 test_allow_no_pipeline_is_attended_only_and_gitlab_only() {
   local case_dir rc head
   case_dir=$(make_gitlab_case gitlab-no-pipeline-away pipeline=null)
@@ -5542,6 +5829,12 @@ test_allow_red_refused_on_forgejo
 test_allow_missing_refused_on_forgejo
 test_allow_no_pipeline_merges_only_a_null_head_pipeline
 test_allow_no_pipeline_is_attended_only_and_gitlab_only
+test_gitlab_merge_train_entry_lands
+test_gitlab_merge_train_waits_for_a_fast_forward_landing
+test_gitlab_merge_train_still_queued_stays_armed
+test_gitlab_merge_train_drop_is_reported_with_its_pipeline
+test_gitlab_merge_train_keeps_the_pre_merge_guards
+test_gitlab_merge_train_entry_runs_under_away_authority
 test_expected_head_matching_reaches_each_forge
 test_expected_head_mismatch_refuses_before_merge
 test_expected_head_push_after_verify_is_refused_by_the_forge
