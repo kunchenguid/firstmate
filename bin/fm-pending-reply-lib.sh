@@ -199,7 +199,7 @@ fm_pending_reply_extract_corr() {  # <text>
 # word: xcorr=<id> or corr=<id>ff is a different token, not this one.
 fm_pending_reply_text_has_corr() {  # <text> <corr_id>
   local text=$1 corr=$2 re
-  re="(^|[^[:alnum:]_])$(fm_pending_reply_corr_token "$corr")([^[:alnum:]_]|\$)"
+  re="(^|[^[:alnum:]_])corr=${corr}([^[:alnum:]_]|\$)"
   [[ $text =~ $re ]]
 }
 
