@@ -96,6 +96,7 @@ init_changed_fixture_repo() {
   chmod +x "$repo/bin/fm-test-run.sh"
   for script in \
     fm-brief.test.sh \
+    fm-worker-preparation.test.sh \
     fm-ask-user-authority.test.sh \
     fm-documentation-audiences.test.sh \
     fm-test-isolation-proof.test.sh \
@@ -330,6 +331,24 @@ test_changed_remote_inheritance_selects_generation_contract() {
   done
   rm -rf "$tmp"
   pass "changed inheritance sender, receiver and counter select the focused generation contract"
+}
+
+test_changed_brief_selects_worker_preparation() {
+  local tmp repo listed
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-brief.XXXXXX")
+  repo="$tmp/repo"
+  init_changed_fixture_repo "$repo"
+  : >"$repo/bin/fm-brief.sh"
+  git -C "$repo" add .
+  git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -qm brief-fixture
+  printf '\n' >>"$repo/bin/fm-brief.sh"
+  listed=$(cd "$repo" && bin/fm-test-run.sh --list --changed --base HEAD)
+  assert_contains "$listed" "tests/fm-worker-preparation.test.sh" \
+    "a scaffolding change must select the preparation regression"
+  assert_contains "$listed" "tests/fm-ask-user-authority.test.sh" \
+    "a scaffolding change must keep its pure-contract-unit coverage"
+  rm -rf "$tmp"
+  pass "changed brief scaffolding selects worker preparation coverage"
 }
 
 test_changed_dependency_selection_and_unmapped_failure() {
@@ -1930,6 +1949,7 @@ test_task_marker_refuses_the_primary_checkout
 test_changed_runner_surfaces_select_their_family
 test_shell_line_ending_policy_selects_runner_contract
 test_changed_remote_inheritance_selects_generation_contract
+test_changed_brief_selects_worker_preparation
 test_changed_dependency_selection_and_unmapped_failure
 test_changed_bin_reference_selects_per_script_not_per_family
 test_changed_uses_bounded_automatic_concurrency

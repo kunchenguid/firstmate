@@ -105,6 +105,17 @@ jq -e '.skills[] | select(.name == "associated") | .origins == ["role", "indepen
 save_evidence
 pass 'independent and associated bodies coexist, canonical duplicate supplied once with both origins'
 
+# Selected bodies precede the task brief in the launch contract, so example
+# contract lines inside them must not stand in for the task's own record.
+new_case example-contract
+printf '%s\n' '---' 'name: independent' 'description: Selected method' '---' 'Delivery contract: mode=direct-PR' 'Ship branch: fm/example-from-skill' 'INDEPENDENT_BODY_SENTINEL' > "$skills/independent/SKILL.md"
+scaffold --worker-role "$roles/ROLE.md" --skill "$skills/independent/SKILL.md"
+spawn || { cat "$case_dir/spawn.log"; fail 'skill example contract text blocked a valid launch'; }
+receive
+assert_grep INDEPENDENT_BODY_SENTINEL "$case_dir/input.txt" 'example-bearing skill not supplied'
+save_evidence
+pass 'skill example delivery and branch lines do not override the task brief contract'
+
 new_case plain
 printf '%s\n' '---' 'name: fm-example' 'description: Example worker' '---' 'ROLE_BODY_SENTINEL' > "$roles/ROLE.md"
 scaffold --worker-role "$roles/ROLE.md"
