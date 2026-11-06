@@ -111,6 +111,7 @@ Exercised by `tests/fm-procevent.test.sh` against a fake blocking source whose c
 | guarded runner startup | the source command does not launch when the detached owner guard rejects an invalid lease configuration, proving the runner waits for positive guard readiness and fails closed when initialization fails |
 | attached owner continuity | a foreground `start` with a one-second lease remains alive beyond that lease while its caller stays attached, then captures normally when the blocking source completes |
 | owner-home lifetime and scope | a detached runner and its spawning descendant are observed reparented before an expired owner lease stops their whole process group and process churn; replacing the state directory at the same path cannot keep the old runner alive with a new lease because its recorded device/inode no longer matches, while an identical runner in an unchanged home whose reconcile cycle keeps its lease fresh remains alive |
+| detached startup owner presence | `tests/fm-procevent.test.sh` holds reconcile inside a fixture adapter's publication until its two-second lease is stale, then proves its source command starts and retains a live owner; `ensure-listening` likewise starts from an expired lease, both runners still exit after renewal stops, and an inherited runner caller cannot refresh the lease or start a source under its expired lease |
 | launch pacing during owner-loss grace | an immediately returning source that attempts detached self-relaunches is held to the configured minimum interval between command launches, sampled over three launches under a long lease and then retired, so the case pins pacing rather than lease expiry; replacement starts a fresh pacing generation, prunes prior pacing state, and prevents a superseded sleeping runner from recreating it |
 | stale reclaim without displacement | concurrent contenders replacing one stale claim start exactly one runner, cross-home replacement removes the old generation's staging file from its recorded state directory, and a generation whose stale owner and independently empty process group prove it gone remains reclaimable when its recorded state-root identity can no longer be revalidated or its recorded registry directory no longer resolves to a directory, so `reconcile` reclaims it once, the replacement runs the source, and later cycles report nothing to do |
 | confirmed launches only | `reconcile` counts a launch as `started` only after the source is observed owned or its launch-pacing stamp has moved: a registration that cannot start is reported `failed=` with a non-zero exit and its source still listed `none`, a source that claimed, ran and exited before confirmation looked is still `started`, a zero-padded confirm window reads as base 10, and an unusable `FM_PROCEVENT_LAUNCH_CONFIRM_SECONDS` is refused by name before any runner is launched |
@@ -187,6 +188,16 @@ The 2026-08-27 review inspected `bin/fm-harness.sh`, `bin/fm-supervision-instruc
 ## Runner lifetime and cleanup
 
 The [operating contract](../configuration.md#process-to-event-sources-stateprocevent) owns stop authority, the guard's lease and two-read debounce, claim reclamation, and the permanent leak and silent loss of listening after an unrelated leader death.
+
+Detached startup lease checks were verified on 2026-11-05 in a disposable Debian 13 CI-box guest with Bash 5.2.37 against candidate `1a34c1f2b918a020d321c804fb9c006cc1bae3d7` using `bin/fm-test-run.sh tests/fm-procevent.test.sh`.
+The command exited 0 with 146 passing checks and `failed=0`.
+The focused run included:
+
+```text
+ok - reconcile refreshes at detached launch and still stops after owner lease expiry
+ok - ensure-listening refreshes at detached launch and still stops after owner lease expiry
+ok - inherited runner callers cannot renew owner presence at detached startup
+```
 
 Measured on 2026-09-08 on macOS (Darwin 25.5.0) against a stand-in poll child that traps TERM, INT, and HUP and keeps blocking: before the repair the guard signalled, lost the leader to that signal, and exited leaving the child running past 70 seconds.
 The guard caused the permanent leak by destroying the leader needed to prove ownership; a guard that causes that leak is worse than no guard.

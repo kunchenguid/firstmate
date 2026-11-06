@@ -59,6 +59,28 @@ export FM_TEST_SEAM=1
 # under the marker. A case that verifies the refusal sets FM_TASK_ID itself.
 unset FM_TASK_ID
 
+# Clear the launcher identity, terminal marker, runtime-backend selector, and
+# home/state overrides a suite inherits from the terminal that started it. A
+# session running inside herdr exports HERDR_ENV/HERDR_PANE_ID/HERDR_SOCKET_PATH/...
+# into every child process, an operator or lab shell may export FM_BACKEND (as
+# bin/fm-live-lab.sh's lab environment does), which outranks config/backend and
+# runtime auto-detection, and a supervisor's own shell may export a home or
+# state override. Spawn and backend fixtures then bind to the host's REAL herdr
+# session instead of the isolated one their case creates: on a herdr-hosted
+# machine several spawn/backend suites failed with `herdr launcher pane '...'
+# belongs to the server at ... not session 'default'`, or recorded a real
+# workspace's pane path as a fixture worktree,
+# while the same suites passed in CI. bin/fm-test-run.sh already clears the
+# overrides and FM_BACKEND per worker; this covers a direct run and the herdr
+# identity, so every suite that sources this library starts from the environment
+# CI gives it. A case that deliberately exercises a launcher identity, a backend,
+# or a home/state override exports its own value after this point (or inside its
+# own subshell).
+unset HERDR_ENV HERDR_PANE_ID HERDR_TAB_ID HERDR_WORKSPACE_ID HERDR_SOCKET_PATH \
+  HERDR_SESSION HERDR_BIN_PATH TERM_PROGRAM \
+  FM_BACKEND FM_HOME FM_ROOT FM_ROOT_OVERRIDE FM_STATE_OVERRIDE FM_DATA_OVERRIDE \
+  FM_CONFIG_OVERRIDE FM_PROJECTS_OVERRIDE
+
 # Clear the tasks-axi env overrides. An operator shell exports TASKS_AXI_FILE
 # (and may export TASKS_AXI_BACKEND) at its real home's backlog, and tasks-axi
 # resolves that env AHEAD of the .tasks.toml a fixture copies, so a suite that
@@ -143,6 +165,24 @@ fm_test_launch_git_prefix() {  # <launch>
   tail=${launch#*' env-file '}
   tail=${tail%%"$end"*}
   printf '%s env-file %s%s' "$helper" "$tail" "$end"
+}
+
+# The launch with its OSC 7501 reporter frame removed: the arm statement ending
+# the first line and the disarm line after the agent command. Suites asserting
+# the exact launch compare the rest in its one-line shape; an empty launch
+# stays empty so "nothing was sent" assertions still hold.
+fm_test_launch_unframe() {  # <launch>
+  local launch=$1 nl=$'\n' head body last
+  [ -n "$launch" ] || return 0
+  case "$launch" in
+    *fm-osc7501.sh*' arm --task '*" || true$nl"*"$nl"*fm-osc7501.sh*' disarm --state '*' || true'*) ;;
+    *) fail "launch has no OSC 7501 arm/disarm frame: $launch" ;;
+  esac
+  head=${launch%%"$nl"*}
+  body=${launch#*"$nl"}
+  last=${body##*"$nl"}
+  body=${body%"$nl"*}
+  printf '%s; %s%s' "${head%; *fm-osc7501.sh*}" "$body" "${last##*' || true'}"
 }
 
 # The command a pane runs after the launch's Git configuration prefix and its
@@ -538,6 +578,48 @@ fm_live_gate() {
   return 0
 }
 
+# fm_tmux_isolation_gate [<tmux-tmp-base>...] is the gate a test opens with
+# before it starts, kills, or cleans up a tmux server of its own. tmux resolves
+# its socket under TMUX_TMPDIR only while that directory exists and otherwise
+# silently falls back to /tmp, so one wrong tmux call reaches the user's own
+# server. The test runs only when no live tmux server answers on any socket in
+# <base>/tmux-<uid> for each base (default: /tmp, plus TMUX_TMPDIR when set),
+# which holds under a private /tmp such as
+#   unshare -Urm sh -c 'mount -t tmpfs tmpfs /tmp && exec bin/fm-test-run.sh <test>'
+# and on a disposable CI runner. Each probe is bounded by
+# FM_TMUX_ISOLATION_PROBE_SECONDS (default 5): a server that does not answer
+# in time, stopped or stuck, counts as live. Otherwise it ends the script with
+#   skip: tmux isolation: <why>; <how to run it>
+fm_tmux_isolation_gate() {
+  local base socket probe rc why='' seconds=${FM_TMUX_ISOLATION_PROBE_SECONDS:-5}
+  local -a bases=("$@")
+  case $seconds in '' | *[!0-9]* | 0) seconds=5 ;; esac
+  # shellcheck source=bin/fm-timeout-lib.sh
+  declare -F fm_run_timed >/dev/null || . "$(dirname "${BASH_SOURCE[0]}")/../bin/fm-timeout-lib.sh"
+  if [ "${#bases[@]}" -eq 0 ]; then
+    bases=(/tmp)
+    [ -z "${TMUX_TMPDIR:-}" ] || bases+=("$TMUX_TMPDIR")
+  fi
+  for base in "${bases[@]}"; do
+    for socket in "${base%/}/tmux-$(id -u)"/*; do
+      [ -S "$socket" ] || continue
+      probe=$(fm_run_timed "$seconds" env -u TMUX tmux -S "$socket" list-sessions 2>&1 >/dev/null)
+      rc=$?
+      if fm_timed_out "$rc"; then
+        why="the tmux server on $socket did not answer within ${seconds}s"
+      elif [ "$rc" -eq 0 ] || [ "${probe#*no server running}" = "$probe" ]; then
+        why="a live tmux server answers on $socket"
+      else
+        continue
+      fi
+      break 2
+    done
+  done
+  [ -n "$why" ] || return 0
+  printf 'skip: tmux isolation: %s; run under a private /tmp (unshare -Urm sh -c '"'"'mount -t tmpfs tmpfs /tmp && exec bin/fm-test-run.sh <test>'"'"')\n' "$why"
+  exit 0
+}
+
 # --- fakebin / PATH shims ---------------------------------------------------
 #
 # fm_fakebin <dir> creates <dir>/fakebin and echoes it; prepend it to PATH to
@@ -918,6 +1000,16 @@ assert_grep() {
 # assert_no_grep <pattern> <file> <msg>: fixed-string grep must NOT match.
 assert_no_grep() {
   ! grep -F -- "$1" "$2" >/dev/null || fail "$3"
+}
+
+# assert_no_regex <pattern> <file> <msg>: extended-regex must NOT match.
+# assert_*_grep are fixed-string, so an anchored pattern given to them searches
+# for a literal caret and can never match - an absence assertion written that
+# way passes no matter what the file holds. Use this for any anchored absence.
+assert_no_regex() {
+  local status=0
+  grep -E -- "$1" "$2" >/dev/null || status=$?
+  [ "$status" -eq 1 ] || fail "$3 (grep status: $status)"
 }
 
 # assert_absent <path> <msg>: path must not exist.

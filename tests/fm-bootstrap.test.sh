@@ -783,7 +783,7 @@ test_unknown_backend_reports_invalid_configuration() {
   fakebin=$(make_fake_toolchain "$case_dir")
   out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
     FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
-  assert_contains "$out" "BACKEND_INVALID: bogus (known: tmux herdr zellij orca cmux paseo rex t3code tern)" \
+  assert_contains "$out" "BACKEND_INVALID: bogus (known: tmux herdr zellij orca cmux paseo rex t3code tern hc)" \
     "bootstrap should report an unknown resolved backend"
   assert_not_contains "$out" "MISSING: tmux" "an unknown backend should not silently fall back to tmux dependencies"
   pass "bootstrap: unknown resolved backends fail closed with an actionable diagnostic"
@@ -1404,6 +1404,8 @@ gemini profile with explicit provider is accepted^{"rules":[{"when":"gemini work
 agy low medium high efforts are accepted^{"rules":[{"when":"agy low","use":{"harness":"agy","effort":"low"}},{"when":"agy medium","use":{"harness":"agy","effort":"medium"}},{"when":"agy high","use":{"harness":"agy","effort":"high"}}]}^empty^
 unsupported agy xhigh effort is flagged^{"rules":[{"when":"agy xhigh","use":{"harness":"agy","effort":"xhigh"}}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - invalid effort: agy:xhigh
 unsupported agy max effort is flagged^{"rules":[{"when":"agy max","use":{"harness":"agy","effort":"max"}}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - invalid effort: agy:max
+kiro shared efforts are accepted^{"rules":[{"when":"kiro low","use":{"harness":"kiro","effort":"low"}},{"when":"kiro medium","use":{"harness":"kiro","effort":"medium"}},{"when":"kiro high","use":{"harness":"kiro","effort":"high"}},{"when":"kiro xhigh","use":{"harness":"kiro","effort":"xhigh"}},{"when":"kiro max","use":{"harness":"kiro","effort":"max"}}]}^empty^
+unsupported kiro ultra effort is flagged^{"rules":[{"when":"kiro ultra","use":{"harness":"kiro","effort":"ultra"}}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - invalid effort: kiro:ultra
 unsupported opencode effort is flagged^{"rules":[{"when":"opencode work","use":{"harness":"opencode","model":"anthropic/claude-sonnet-4-5","effort":"high","provider":"claude"}}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - invalid effort: opencode:high
 kimi model profile is accepted^{"rules":[{"when":"kimi work","use":{"harness":"kimi","model":"kimi-code/k3"}}]}^empty^
 unsupported kimi effort is flagged^{"rules":[{"when":"kimi work","use":{"harness":"kimi","model":"kimi-code/k3","effort":"high"}}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - invalid effort: kimi:high
@@ -1433,6 +1435,8 @@ whitespace profile provider is flagged^{"rules":[{"when":"images","use":[{"harne
 newline profile provider is flagged^{"rules":[{"when":"images","use":[{"harness":"pi","model":"openai-codex/gpt-5.6-sol","provider":"claude\n"}]}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - use profile model and effort must be non-empty strings, and provider must match ^[a-z0-9]+(-[a-z0-9]+)*\z when present
 profile floor without scope is flagged^{"rules":[{"when":"images","use":[{"harness":"codex","floor":{"min_percent":50}}]}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - use profile floor needs scope and min_percent 0..100
 profile floor provider override is flagged^{"rules":[{"when":"images","use":{"harness":"codex","floor":{"scope":"all_models","min_percent":50,"provider":"claude"}}}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - use profile floor needs scope and min_percent 0..100
+profile quota_scope empty is flagged^{"rules":[{"when":"images","use":{"harness":"agy","quota_scope":""}}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - use profile quota_scope must be a non-empty string when present
+default profile quota_scope non-string is flagged^{"default":{"harness":"agy","quota_scope":3}}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - default profile quota_scope must be a non-empty string when present
 unknown select is flagged^{"rules":[{"when":"big feature","use":[{"harness":"claude"},{"harness":"codex"}],"select":"mystery"}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - unknown select: mystery
 array profile codex max without Luna model is flagged^{"rules":[{"when":"big feature","use":[{"harness":"codex","effort":"max"}]}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - invalid effort: codex:max
 empty default array is flagged^{"default":[]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - default needs at least one profile

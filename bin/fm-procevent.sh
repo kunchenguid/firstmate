@@ -866,7 +866,8 @@ EOF
           ring_backend=$(fm_backend_of_meta "$ring_meta" 2>/dev/null || true)
           ring_target=$(fm_backend_target_of_meta "$ring_meta" 2>/dev/null || true)
           if [ -n "$ring_backend" ] && [ -n "$ring_target" ]; then
-            fm_task_inbox_ring "$ring_backend" "$ring_target" "$record" "fm-$owner_task" >/dev/null 2>&1 || true
+            FM_COMPOSER_HARNESS=$(fm_meta_get "$ring_meta" harness 2>/dev/null || true) \
+              fm_task_inbox_ring "$ring_backend" "$ring_target" "$record" "fm-$owner_task" >/dev/null 2>&1 || true
           fi
         fi
       fi
@@ -1597,6 +1598,9 @@ cmd_owner_watchdog() {  # <source-id> <runner-pid> <runner-identity> <ready-file
 # Start a runner outside the watcher cycle that noticed it was missing. The
 # public start boundary establishes its own process group before claiming.
 detach_runner() {  # <source-id>
+  # Earlier publication or cleanup can outlast the lease. Refresh at the owning
+  # caller's launch boundary, still excluding runners and their descendants.
+  owner_lease_refresh
   isolate_runner detach "$1"
 }
 
