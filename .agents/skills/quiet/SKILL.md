@@ -54,7 +54,7 @@ point of this mode (AGENTS.md section 8's away-mode stub, quiet branch).
 
 - Only an explicit `/quiet off` (or the captain plainly asking to leave quiet
   mode / resume normal supervision) exits it: run `bin/fm-afk-return.sh`
-  unchanged, exactly the procedure `/afk`'s "How to exit afk" section
+  unchanged, exactly the procedure the `afk` skill's `references/return.md`
   documents for its own return path (correct-ordered daemon shutdown,
   durable wake presentation and acknowledgement, escalation/wedge evidence,
   and the return-catch-up gate).

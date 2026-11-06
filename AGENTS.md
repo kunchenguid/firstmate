@@ -99,9 +99,8 @@ Routing precedence is an explicit per-task captain override, then the best-fit c
 Firstmate alone resolves a matched profile array: begin with `quota-axi`'s default TOON at that intake, using the skill's narrow TOON-then-`--json` fallback only for genuine ambiguity, evaluate every configured candidate against that current output, and choose under the skill's `preferred_provider` procedure with inspectable `spendPriority` as the one quota-perspective ranker after its eligibility, reasoning-class, and runway-feasibility gates.
 Account for every candidate with the catalog evidence, provider relationship, applicable quota and authentication facts, remaining uncertainty, fit and reasoning class, and the spendPriority and runway evidence used in selection; never omit a candidate, guess, fall back silently, or call the result quota-informed without them.
 Establish model support and provider family from that harness's own authoritative catalog, then apply the [account and scope matching rules in `quota-array-dispatch`](.agents/skills/quota-array-dispatch/SKILL.md#1-eligibility).
-When the home's `config/crew-dispatch.json` declares `"shared_quota": true`, make no quota-axi call and apply no quota gate or ranking: choose by the matched rule's declared profile order and reasoning class (`preferred_provider` still narrows the pool; declared order then picks within it), accounting for every candidate with quota ranking off by home declaration (schema: `docs/configuration.md` "Crew dispatch profiles").
-Missing model-level quota, a missing authentication source, unmeasurable headroom, or unmodeled authentication is disclosed uncertainty that keeps a candidate eligible, never a credential or login escalation.
-Only concrete contradictory evidence blocks a candidate, such as an authoritative catalog proving the model unsupported or proof that the credential selected for that surface is unusable; never infer a credential store, provider family, or quota mapping from a harness, model, or source name, and never launch another harness's CLI to judge a candidate.
+Quota uncertainty (a missing model window or authentication source, unmeasurable headroom) keeps a candidate eligible, and only concrete contradictory evidence blocks one; never infer a credential store, provider family, or quota mapping from a harness, model, or source name.
+`quota-array-dispatch` owns those evidence rules and the `"shared_quota": true` opt-out (no `quota-axi` call, no quota gate or ranking, declared profile order picks), so load it before any such choice.
 Preserve malformed profile configuration as an actionable error rather than selecting around it.
 When every candidate is tight, preserve the captain's strongest-reasoning class rather than silently downgrading it solely to conserve quota; stop and report the tight choice if that class cannot proceed.
 Break genuine evidence ties without array-order or harness bias.
@@ -287,7 +286,7 @@ Handle actionable wakes as follows:
    When the note needs a durable answer the submitter can read, publish it with `bin/fm-inbox.sh reply <id>` (the script header owns the reply contract) rather than leaving the answer only in this transcript.
 4. For `heartbeat:`, review the whole fleet from the structured fleet view, reconcile suspicious tasks and PR state, update the backlog, and never report an unchanged fleet as progress.
 
-Load `bearings` on a contributions check wake or when filing work linked to an upstream issue; its contribution-follow-up section owns triage and exact signal acknowledgement.
+Load `bearings` on a contributions check wake or when filing work linked to an upstream issue; its `references/contributions.md` owns triage and exact signal acknowledgement.
 
 When any wake reports a merged PR for a project cloned in this home, refresh that clone through the guarded fleet-sync path.
 When Relay-linked work reaches a milestone or terminal state, load `fmx-respond`; before terminal teardown, use its promised-final reconciliation when a typed public commitment exists, otherwise post the final completion follow-up so the link clears even if earlier follow-ups were spent.
