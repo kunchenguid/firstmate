@@ -90,9 +90,13 @@ test_detection_anchored_name_and_marker_precedence() {
     "$bin/claude" -c '"$1"; :' _ "$HARNESS")
   [ "$out" = claude ] || fail "a leaked FM_OMP_HARNESS without an omp ancestor must not relabel a claude worker, got '$out'"
   # Hide ancestry so a named parent cannot mask an incorrectly trusted marker.
+  # With no ancestry to outrank them, the gemini and rovo markers that
+  # harness_marker checks before CLAUDECODE must be cleared too, so an
+  # inherited one cannot decide this case.
   blind_bin=$(fm_fakebin "$TMP_ROOT/blind-ancestry")
   fm_fake_blind_ancestry "$blind_bin"
   out=$(env -u PI_CODING_AGENT -u CURSOR_AGENT -u CURSOR_INVOKED_AS \
+    -u GEMINI_CLI -u ATLASSIAN_AGENT_TYPE -u ROVODEV_CLI \
     PATH="$blind_bin:$PATH" CLAUDECODE=1 FM_OMP_HARNESS=omp "$HARNESS")
   [ "$out" = claude ] || fail "a leaked FM_OMP_HARNESS with ancestry hidden must not override CLAUDECODE, got '$out'"
   pass "fm-harness: omp detects by its anchored name; the marker is a precedence override that needs real omp ancestry"
