@@ -276,7 +276,7 @@ test_forge_selection_renders_correct_cli() {
     || fail "a scout brief should still scaffold"
   brief="$home/data/brief-forge-scout/brief.md"
   assert_task_cleanup_rule "$brief" "$prefix-brief-forge-scout" "a scout brief"
-  assert_grep "2. Stay inside this worktree; outside it, write only the report, the status file below, and the task temporary directory Rule 3 lets you create and remove." "$brief" \
+  assert_grep "2. Stay inside this worktree; outside it, write only the report, the status file below, and the task temporary directory Rule 3 lets you create and remove, except for the task's empty-inventory attestation" "$brief" \
     "a scout brief's write scope must allow the task temporary directory Rule 3 removes"
 
   FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-forge-forgejo some-proj --mode direct-PR --forge forgejo >/dev/null 2>&1 \
