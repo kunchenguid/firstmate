@@ -446,16 +446,24 @@ last_closed_arm_pid() {
     END { if (pid != "") print pid }' "$STATE/.watch-cycle-exits.log" 2>/dev/null
 }
 
+# The newest record in the lifecycle ledger, as a change marker: a different
+# value means another watcher cycle closed since the last look, however briefly
+# it ran.
+stopfailure_cycle_mark() {
+  tail -n 1 "$STATE/.watch-cycle-exits.log" 2>/dev/null || true
+}
+
 # A hold needs a verified watcher cycling through it: the arm, the host's
 # hand-back, or a failed arm can each leave none, so start the handling
-# successor of the closed cycle unless one is already beating.
+# successor of the closed cycle unless one is already beating. Fails only when
+# that successor did not confirm a live watcher.
 stopfailure_cover_hold() {
   local predecessor
   stopfailure_hold_pending || return 0
   fm_watcher_healthy "$STATE" "$SCRIPT_DIR/fm-watch.sh" "$GRACE" "$FM_HOME" && return 0
   predecessor=${CLOSED_ARM_PID:-}
   [ -n "$predecessor" ] || predecessor=$(last_closed_arm_pid)
-  start_handling_successor "${predecessor:-$$}" || true
+  start_handling_successor "${predecessor:-$$}"
 }
 
 # Hold an impending exit 2 until the episode's retry time, whichever event
@@ -469,14 +477,19 @@ stopfailure_cover_hold() {
 # watcher is verified after the cover attempt: the first failure notice of an
 # episode is the only way to tell the model its supervision is down, so it is
 # never held behind a backoff nothing is covering. Coverage is rechecked on
-# every wait tick: once a watcher has been seen healthy during the hold and then
-# ends (an actionable close of its own cycle), one replacement cycle starts so
-# later events keep reaching the durable queue. A replacement needs a healthy
-# watcher observed first, so a watcher that cannot start is not retried in a
-# loop.
+# every wait tick: with no healthy watcher, a replacement cycle starts when one
+# was seen healthy before or the lifecycle ledger recorded another close since
+# the last tick, so a cycle that ends before the next check is replaced too and
+# later events keep reaching the durable queue. At most one replacement starts
+# per tick, each after a real close, and replacements stop after
+# STOPFAILURE_REPLACE_LIMIT in a row that were never seen healthy, whether they
+# failed to confirm or closed at once, until a healthy watcher is seen again, so
+# a watcher that cannot start is not retried in a loop.
+STOPFAILURE_REPLACE_LIMIT=3
 stopfailure_backoff() {  # [watched]
-  local waited=0 hold=1 covered=0
-  stopfailure_cover_hold
+  local waited=0 hold=1 covered=0 misses=0 mark now
+  mark=$(stopfailure_cycle_mark)
+  stopfailure_cover_hold || misses=1
   if [ "${1:-}" = watched ] \
     && ! fm_watcher_healthy "$STATE" "$SCRIPT_DIR/fm-watch.sh" "$GRACE" "$FM_HOME"; then
     hold=0
@@ -486,10 +499,18 @@ stopfailure_backoff() {  # [watched]
     fm_autoarm_still_owner "$STATE" "$MY_GEN" || break
     if fm_watcher_healthy "$STATE" "$SCRIPT_DIR/fm-watch.sh" "$GRACE" "$FM_HOME"; then
       covered=1
-    elif [ "$covered" -eq 1 ]; then
-      covered=0
-      CLOSED_ARM_PID=
-      stopfailure_cover_hold
+      misses=0
+      mark=$(stopfailure_cycle_mark)
+    else
+      now=$(stopfailure_cycle_mark)
+      if [ "$misses" -lt "$STOPFAILURE_REPLACE_LIMIT" ] \
+        && { [ "$covered" -eq 1 ] || [ "$now" != "$mark" ]; }; then
+        covered=0
+        mark=$now
+        misses=$((misses + 1))
+        CLOSED_ARM_PID=
+        stopfailure_cover_hold || true
+      fi
     fi
     waited=1
     sleep 1
