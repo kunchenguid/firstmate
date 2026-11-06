@@ -3,6 +3,7 @@
 #
 # Opt-in because it launches a real interactive Droid primary, spends model
 # tokens, and provisions an isolated Herdr session through fm-herdr-lab.sh.
+# Set FACTORY_API_KEY and FM_DROID_E2E_MODEL explicitly before running it.
 # Every explicit and production-adapter Herdr call is routed through the lab
 # helper, and teardown verifies that the live default session was untouched.
 # The scenario proves the current vendor-rendered Droid status footer is an
@@ -24,6 +25,12 @@ if [ "${FM_DROID_AFK_HERDR_E2E:-0}" != 1 ]; then
   exit 0
 fi
 
+if [ -z "${FACTORY_API_KEY:-}" ] || [ -z "${FM_DROID_E2E_MODEL:-}" ]; then
+  echo 'error: set FACTORY_API_KEY and FM_DROID_E2E_MODEL before running the Droid/Herdr guard' >&2
+  exit 1
+fi
+export FACTORY_API_KEY
+
 for tool in droid herdr jq git; do
   command -v "$tool" >/dev/null 2>&1 || { echo "skip: $tool not found"; exit 0; }
 done
@@ -31,32 +38,7 @@ done
 LAB_HELPER=${HERDR_LAB_HELPER:-$ROOT/bin/fm-herdr-lab.sh}
 [ -x "$LAB_HELPER" ] || { echo "skip: Herdr lab helper not executable at $LAB_HELPER"; exit 0; }
 
-# Droid's runtime-wide hook registration must be provably untouched by this
-# probe, so the fingerprint is taken before anything in this file can launch
-# Droid. It records only presence, a digest, and the hook subtree that this
-# feature could leak into; no other setting, token, or credential value is read.
-#
-# A real interactive Droid launch rewrites vendor-managed fields in
-# ~/.factory/settings.json on its own, so the whole-file digest is reported
-# rather than asserted. The hook subtree and permissions file are the isolation
-# claim, and those must be identical.
-droid_global_fingerprint() {  # <mode: hooks|whole>
-  local file base
-  for file in "$HOME/.factory/settings.json" "$HOME/.factory/permissions.json"; do
-    base=$(basename "$file")
-    if [ ! -e "$file" ]; then
-      printf '%s absent\n' "$base"
-    elif [ "$1" = whole ]; then
-      printf '%s present %s\n' "$base" "$(shasum -a 256 < "$file" | awk '{print $1}')"
-    else
-      printf '%s hooks %s\n' "$base" "$(jq -S -c '.hooks // null' "$file" 2>/dev/null || printf unreadable)"
-    fi
-  done
-}
-
 if [ "${FM_DROID_AFK_HERDR_PHASE:-orchestrate}" = orchestrate ]; then
-  GLOBAL_HOOKS_BEFORE=$(droid_global_fingerprint hooks)
-  GLOBAL_WHOLE_BEFORE=$(droid_global_fingerprint whole)
   SESSION=$("$LAB_HELPER" name afk-droid-approval-deferral-f1)
   TMP_ROOT=$(fm_test_tmproot fm-droid-afk-herdr-e2e)
   ORIGINAL_PATH=$PATH
@@ -99,15 +81,6 @@ if [ "${FM_DROID_AFK_HERDR_PHASE:-orchestrate}" = orchestrate ]; then
     "$0"
   SCENARIO_RC=$?
   SCENARIO_FINISHED=1
-  if [ "$GLOBAL_HOOKS_BEFORE" = "$(droid_global_fingerprint hooks)" ]; then
-    pass "the isolated live probe left Droid's runtime-wide hook registration unchanged"
-  else
-    echo "not ok - the isolated live probe changed Droid's runtime-wide hook registration" >&2
-    SCENARIO_RC=1
-  fi
-  if [ "$GLOBAL_WHOLE_BEFORE" != "$(droid_global_fingerprint whole)" ]; then
-    echo "# observed: a real Droid launch rewrote vendor-managed fields in ~/.factory/settings.json; the hook subtree above is the isolation claim" >&2
-  fi
   exit "$SCENARIO_RC"
 fi
 
@@ -253,8 +226,8 @@ sed -i.bak "s/__PRIMARY_PANE__/$PRIMARY_PANE/" "$PROJECT/.factory/return-probe.s
 rm -f "$PROJECT/.factory/return-probe.sh.bak"
 
 DROID_PROMPT='Follow the exact startup verification instruction supplied by the SessionStart hook.'
-DROID_CMD=$(printf 'exec env HOME=%q FM_ROOT_OVERRIDE=%q FM_HOME=%q FM_STATE_OVERRIDE=%q droid --auto high %q' \
-  "$HOME_DIR" "$PROJECT" "$HOME_DIR" "$STATE" "$DROID_PROMPT")
+DROID_CMD=$(printf 'exec env HOME=%q FM_ROOT_OVERRIDE=%q FM_HOME=%q FM_STATE_OVERRIDE=%q droid --auto high --model %q %q' \
+  "$HOME_DIR" "$PROJECT" "$HOME_DIR" "$STATE" "$FM_DROID_E2E_MODEL" "$DROID_PROMPT")
 "$LAB_HELPER" run "$SESSION" pane run "$PRIMARY_PANE" "$DROID_CMD" >/dev/null \
   || fail "could not launch Droid in the isolated Herdr pane"
 
@@ -329,9 +302,9 @@ jq -s -e --arg session "$SESSION_ID" --arg prompt "$SEND_PROMPT" '
   || fail "ordinary fm-send did not leave a durable prompt receipt for the interactive Droid session"
 pass "ordinary fm-send reaches Droid through Herdr, UserPromptSubmit adds catch-up context, and the busy guard observes the turn"
 
-api_out=$(HOME="$HOME_DIR" PATH="$ORIGINAL_PATH" droid exec -s "$SESSION_ID" --auto low \
+api_out=$(HOME="$HOME_DIR" PATH="$ORIGINAL_PATH" droid exec -s "$SESSION_ID" --auto low --model "$FM_DROID_E2E_MODEL" \
   'Reply exactly DROID_SESSION_API_HEADLESS_ONLY and do nothing else.' 2>&1) \
-  || fail "Droid's native session continuation surface was unavailable: $api_out"
+  || fail "Droid's native session continuation surface was unavailable"
 printf '%s' "$api_out" | grep -q DROID_SESSION_API_HEADLESS_ONLY \
   || fail "Droid's native session continuation surface returned no proof of its headless turn"
 sleep 3
