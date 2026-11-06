@@ -477,6 +477,32 @@ __FM_BEARINGS_BOARD_DATA__
 
   /* Captain's Call deck: every item renders as the same full card */
   var deck = document.getElementById("bb-call");
+  var DRAFT_KEY = "fm-bearings-board.drafts.v1";
+  function draftsLoad() {
+    try {
+      var d = JSON.parse(window.localStorage.getItem(DRAFT_KEY) || "{}");
+      return d && typeof d === "object" && !Array.isArray(d) ? d : {};
+    } catch (e) { return {}; }
+  }
+  function draftsStore(d) {
+    try { window.localStorage.setItem(DRAFT_KEY, JSON.stringify(d)); } catch (e) { /* storage unavailable */ }
+  }
+  function draftGet(key) { var d = draftsLoad(); return Object.prototype.hasOwnProperty.call(d, key) ? d[key] : null; }
+  function draftSet(key, v) {
+    var d = draftsLoad();
+    if (!v.selection && !v.note) delete d[key]; else d[key] = v;
+    draftsStore(d);
+  }
+  /* drop saved input only for cards no longer on the board */
+  (function () {
+    var live = {};
+    data.captains_call.forEach(function (c) { live[c.key] = true; });
+    var d = draftsLoad(), changed = false;
+    Object.keys(d).forEach(function (k) {
+      if (!live[k]) { delete d[k]; changed = true; }
+    });
+    if (changed) draftsStore(d);
+  })();
   function ctxRow(k, v, rec) {
     var row = el("div", "bb-ctx__row" + (rec ? " bb-ctx__row--rec" : ""));
     row.appendChild(el("span", "bb-ctx__k", k));
@@ -540,6 +566,25 @@ __FM_BEARINGS_BOARD_DATA__
       ff.placeholder = item.freeform_hint || "or answer in your own words…";
       form.appendChild(ff);
     }
+
+    /* In-progress input survives a rebuild: saved per card key under one
+       stable storage key, restored here, and pruned for departed cards. */
+    var saved = draftGet(item.key);
+    if (saved) {
+      if (saved.selection) {
+        Array.prototype.forEach.call(form.querySelectorAll("input[type=radio]"), function (r) {
+          if (r.value === saved.selection) r.checked = true;
+        });
+      }
+      var noteBox = form.querySelector("input[name=note]");
+      if (noteBox && saved.note) noteBox.value = saved.note;
+    }
+    function saveDraft() {
+      var sd = new FormData(form);
+      draftSet(item.key, { selection: sd.get("answer") || "", note: sd.get("note") || "" });
+    }
+    form.addEventListener("input", saveDraft);
+    form.addEventListener("change", saveDraft);
 
     var foot = el("div", "bb-decision__foot");
     var btn = el("button", "fm-btn fm-btn--sm " + (item.type === "merge" ? "fm-btn--gold" : "fm-btn--primary"), "Queue answer");

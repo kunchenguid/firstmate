@@ -296,6 +296,43 @@ EOF
 }
 
 test_full_snapshot_question_reaches_the_rendered_decision
+
+# Build a board with the given Captain's Call keys and run it under the drafts
+# harness against a storage file shared across builds.
+build_call_board() {  # <home> <keys-json>
+  local home=$1 data="$1/payload.json"
+  jq -n --argjson keys "$2" '{
+    schema:"fm-bearings-board.v1", home:"render-home", generated:"2026-08-26T00:00Z",
+    prs_live:false, underway:[], landed:[], charted:[], charted_more:0, charted_warning_more:0,
+    captains_call:[$keys[] | {key:., type:"decision", title:("Card " + .), repo:"r",
+      about:"a", decide:"d", allow_freeform:true,
+      options:[{value:"a",label:"A"},{value:"b",label:"B"}]}]}' > "$data"
+  PATH="$home/fakebin:$PATH" FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    FM_PROCEVENT_CLAIM_ROOT="$home/procevent-claims" \
+    LAVISH_AXI_STATE_DIR="$home/lavish-state" \
+    "$BOARD" build "$data" >/dev/null || fail "the board did not build"
+  require_listener_reached_poll "$home"
+}
+
+test_a_rebuild_keeps_in_progress_answers_and_drops_only_departed_cards() {
+  local home out
+  home=$(make_home drafts)
+  build_call_board "$home" '["k1","k2"]'
+  node "$ROOT/tests/assets/board-drafts-harness.mjs" "$home/.lavish/bearings-board.html" "$home/storage.json" type >/dev/null \
+    || fail "the first board could not be filled in"
+  build_call_board "$home" '["k1","k3"]'
+  out=$(node "$ROOT/tests/assets/board-drafts-harness.mjs" "$home/.lavish/bearings-board.html" "$home/storage.json") \
+    || fail "the rebuilt board could not be rendered"
+  printf '%s' "$out" | jq -e '
+    (.cards | map(.key)) == ["k1","k3"]
+      and .cards[0].selection == "a" and .cards[0].note == "typed k1"
+      and .cards[1].selection == "" and .cards[1].note == ""
+      and ((.storage | to_entries[0].value | fromjson | keys) == ["k1"])
+  ' >/dev/null || fail "a rebuild lost or kept the wrong in-progress input: $out"
+  pass "a rebuild keeps in-progress answers for surviving cards and drops departed ones"
+}
+
 test_an_underway_row_leads_with_the_task_name_and_keeps_its_run_status
 test_an_underway_identifier_label_is_not_replaced_by_run_status
 test_charted_next_reads_newest_filed_first
@@ -305,3 +342,4 @@ test_warnings_are_excluded_from_the_charted_next_count
 test_a_board_of_only_warnings_still_reports_nothing_queued
 test_omitted_warnings_never_count_as_more_queued
 test_an_omitted_kind_keeps_the_existing_queued_rendering
+test_a_rebuild_keeps_in_progress_answers_and_drops_only_departed_cards
