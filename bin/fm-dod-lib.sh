@@ -737,7 +737,7 @@ fm_dod_note_reports_ci_ready() {  # <note>
 # not the bare letters PR inside words such as PROD or PROPERTIES.
 fm_dod_note_has_pr_reference() {  # <note>
   printf '%s' "$1" \
-    | grep -Eq '(^|[^[:alnum:]])PR[[:space:]]*#[0-9]+([^[:alnum:]]|$)|/pull/[0-9]+([^[:alnum:]]|$)|/pulls/[0-9]+([^[:alnum:]]|$)|/merge_requests/[0-9]+([^[:alnum:]]|$)'
+    | grep -Eq '(^|[^[:alnum:]])PR[[:space:]]*#[0-9]+([^[:alnum:]]|$)|/pull/[0-9]+([^[:alnum:]]|$)|/pulls/[0-9]+([^[:alnum:]]|$)|/pullrequest/[0-9]+([^[:alnum:]]|$)|/merge_requests/[0-9]+([^[:alnum:]]|$)'
 }
 
 # 0 when a done: note reports a change published to a Gerrit review server

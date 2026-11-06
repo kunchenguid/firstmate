@@ -1045,6 +1045,30 @@ SH
   pass "teardown closes a landed GitLab task with its merge request URL as a note and GitHub and Forgejo tasks with --pr"
 }
 
+test_teardown_closes_an_azure_task_with_its_pr_url_as_a_note() {
+  local case_dir out merged url=https://dev.azure.com/example/Project/_git/repo/pullrequest/7
+  case_dir=$(make_case tasks-axi-close-azure)
+  write_meta "$case_dir" no-mistakes ship
+  add_lsof_no_holder "$case_dir"
+  wt_commit_file "$case_dir" feature 'landed Azure work'
+  land_on_origin_main "$case_dir" feature 'landed Azure work'
+  merged=$(git -C "$case_dir/origin.git" rev-parse main)
+  add_azure_pr_result "$case_dir" completed "$merged"
+  seed_backlog_in_flight "$case_dir"
+  [ "$(backlog_row_state "$case_dir")" = in_flight ] || fail "Azure fixture has no active backlog item"
+
+  out=$(run_teardown "$case_dir" 2>&1) || fail "teardown of a completed Azure task failed: $out"
+  [ "$(backlog_row_state "$case_dir")" = "done" ] \
+    || fail "teardown left a completed Azure task's backlog item open: $out"
+  tasks-axi show task-x1 --file "$case_dir/data/backlog.md" --full \
+    | grep -F "body: \"Azure DevOps pull request $url\"" >/dev/null \
+    || fail "closed Azure backlog item did not record its PR URL as a note"
+  assert_present "$case_dir/azure.log" "Azure cleanup skipped completion verification"
+  assert_absent "$case_dir/state/task-x1.meta" "completed Azure cleanup retained its task record"
+  assert_absent "$case_dir/state/task-x1.backlog-close" "completed Azure cleanup left a pending-close record"
+  pass "teardown closes a completed Azure task with its PR URL as a note"
+}
+
 test_teardown_manual_backend_leaves_the_backlog_to_the_operator() {
   local case_dir out backlog_path
   case_dir=$(make_case tasks-axi-manual-optout)
@@ -6900,6 +6924,7 @@ test_local_only_fork_remote_allows
 test_teardown_closes_the_backlog_item_itself
 test_teardown_closes_a_gerrit_task_with_its_change_url_as_a_note
 test_teardown_closes_a_gitlab_task_with_its_merge_request_url_as_a_note
+test_teardown_closes_an_azure_task_with_its_pr_url_as_a_note
 test_teardown_manual_backend_leaves_the_backlog_to_the_operator
 test_local_only_truly_unpushed_refuses
 test_local_only_merged_to_local_main_allows
