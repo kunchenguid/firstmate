@@ -177,7 +177,7 @@ SH
     | select(.type == "command")
     | .command
   ' "$SETTINGS") || fail "Droid settings expose no executable AskUser hook"
-  payload='{"hook_event_name":"PreToolUse","tool_name":"AskUser","tool_input":{"questionnaire":"1. [question] Approve the pending change?\n[firstmate-decision origin=review key=approval state=existing]\n[option] Approve\n[option] Keep parked"}}'
+  payload='{"hook_event_name":"PreToolUse","tool_name":"AskUser","tool_input":{"questionnaire":"1. [question] Approve the pending change?\n[option] Approve\n[option] Keep parked"}}'
   out="$root/out"
   err="$root/err"
   date +%s >"$root/state/.afk"
@@ -191,8 +191,8 @@ SH
   expect_code 2 "$status" "Droid AskUser registration must deny while away mode is active"
   jq -e '.hookSpecificOutput.permissionDecision == "deny"' "$err" >/dev/null ||
     fail "Droid AskUser registration did not return its deny contract"
-  assert_contains "$(cat "$root/state/review.status")" 'droid-afk-question' \
-    "Droid AskUser registration did not preserve the away-mode question"
+  assert_contains "$(jq -r .systemMessage "$err")" 'bin/fm-captain-hold.sh hold' \
+    "Droid AskUser registration did not direct decision recording"
 
   before=$(cksum <"$root/state/review.status")
   rm "$root/state/.afk"
@@ -209,7 +209,7 @@ SH
     fail "inactive Droid AskUser registration wrote output"
   [ "$before" = "$(cksum <"$root/state/review.status")" ] ||
     fail "inactive Droid AskUser registration mutated the decision owner"
-  pass "Droid AskUser registration denies and preserves only during away mode"
+  pass "Droid AskUser registration denies only during away mode"
 }
 
 test_commands_anchor_and_preserve_transport() {
