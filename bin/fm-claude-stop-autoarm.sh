@@ -468,9 +468,14 @@ stopfailure_cover_hold() {
 # end of the arm cycle. With "watched", the wait happens only when a healthy
 # watcher is verified after the cover attempt: the first failure notice of an
 # episode is the only way to tell the model its supervision is down, so it is
-# never held behind a backoff nothing is covering.
+# never held behind a backoff nothing is covering. Coverage is rechecked on
+# every wait tick: once a watcher has been seen healthy during the hold and then
+# ends (an actionable close of its own cycle), one replacement cycle starts so
+# later events keep reaching the durable queue. A replacement needs a healthy
+# watcher observed first, so a watcher that cannot start is not retried in a
+# loop.
 stopfailure_backoff() {  # [watched]
-  local waited=0 hold=1
+  local waited=0 hold=1 covered=0
   stopfailure_cover_hold
   if [ "${1:-}" = watched ] \
     && ! fm_watcher_healthy "$STATE" "$SCRIPT_DIR/fm-watch.sh" "$GRACE" "$FM_HOME"; then
@@ -479,6 +484,13 @@ stopfailure_backoff() {  # [watched]
   while [ "$hold" -eq 1 ] && stopfailure_hold_pending; do
     [ "$SECONDS" -lt "$HOLD_LIMIT" ] || break
     fm_autoarm_still_owner "$STATE" "$MY_GEN" || break
+    if fm_watcher_healthy "$STATE" "$SCRIPT_DIR/fm-watch.sh" "$GRACE" "$FM_HOME"; then
+      covered=1
+    elif [ "$covered" -eq 1 ]; then
+      covered=0
+      CLOSED_ARM_PID=
+      stopfailure_cover_hold
+    fi
     waited=1
     sleep 1
   done

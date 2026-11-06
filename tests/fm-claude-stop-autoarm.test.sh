@@ -2475,6 +2475,51 @@ test_stopfailure_failed_arm_hold_starts_a_watcher() {
   pass "auto-arm: a StopFailure hold after a failed arm starts a watcher cycle before the suppressed retry"
 }
 
+# A watcher that covers the hold can end mid-hold (its own cycle closing on an
+# actionable event). The hold rechecks coverage every tick and starts a
+# replacement cycle, so later events keep reaching the durable queue.
+test_stopfailure_hold_replaces_a_watcher_that_ends() {
+  local dir rc watcher identity
+  dir=$(make_primary_dir "$TMP_ROOT/stopfailure-watcher-ends")
+  : > "$dir/state/task.meta"
+  write_arm_fixture "$dir" failed
+  : > "$dir/state/.claude-autoarm-failure-notified"
+  : > "$dir/state/successor-park"
+  FM_HOME="$dir" FM_CLAUDE_STOPFAILURE_BACKOFF_BASE=10 SF_PAYLOAD="$STOPFAILURE_PAYLOAD" \
+    LOCK_FN=$(declare -f record_watcher_lock watcher_identity) "$FAKE_CLAUDE" -c '
+    eval "$LOCK_FN"
+    printf "%s\n" "$$" > "$FM_HOME/state/.lock"
+    printf "%s\n" "$SF_PAYLOAD" | "$FM_HOME/bin/fm-claude-stop-autoarm.sh" >"$FM_HOME/state/hook.out" 2>&1 &
+    hook=$!
+    i=0
+    while [ ! -s "$FM_HOME/state/successor-ran" ]; do
+      [ "$i" -lt 100 ] || exit 90
+      sleep 0.05
+      i=$((i + 1))
+    done
+    sleep 60 &
+    watcher=$!
+    record_watcher_lock "$FM_HOME" "$watcher" "$(watcher_identity "$FM_HOME" "$watcher")"
+    touch "$FM_HOME/state/.last-watcher-beat"
+    sleep 2
+    kill "$watcher"; wait "$watcher" 2>/dev/null
+    i=0
+    while [ "$(wc -l < "$FM_HOME/state/successor-ran" | tr -d " ")" -lt 2 ]; do
+      [ "$i" -lt 100 ] || exit 91
+      sleep 0.05
+      i=$((i + 1))
+    done
+    kill -0 "$hook" 2>/dev/null && : > "$FM_HOME/state/hook-held"
+    wait "$hook"
+    echo "$?" > "$FM_HOME/state/hook-rc"
+  '; rc=$?
+  rm -f "$dir/state/successor-park"
+  expect_code 0 "$rc" "watcher-ends hold scenario did not complete (90: no first cover, 91: no replacement cycle)"
+  assert_present "$dir/state/hook-held" "the hold ended before the replacement cycle started"
+  [ "$(cat "$dir/state/hook-rc")" = 2 ] || fail "the held retry must still rewake after the hold, got rc $(cat "$dir/state/hook-rc")"
+  pass "auto-arm: a StopFailure hold starts a replacement cycle when its covering watcher ends mid-hold"
+}
+
 # The first failure notice of an episode is not held behind the backoff when no
 # watcher can be verified: it is the only signal that supervision is down.
 test_stopfailure_first_failure_notice_is_not_held_without_a_watcher() {
@@ -2669,6 +2714,7 @@ test_stopfailure_host_handback_holds_with_a_live_watcher
 test_stopfailure_non_retryable_notifies_parent_once
 test_stopfailure_non_retryable_silences_a_parked_generation
 test_stopfailure_failed_arm_hold_starts_a_watcher
+test_stopfailure_hold_replaces_a_watcher_that_ends
 test_stopfailure_first_failure_notice_is_not_held_without_a_watcher
 test_stopfailure_notice_is_retried
 test_stopfailure_backoff_knobs_are_decimal
