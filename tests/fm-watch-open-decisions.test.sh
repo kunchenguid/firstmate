@@ -162,6 +162,26 @@ test_timed_fold_is_incremental() {
   pass "quiet polls reuse the timed fold and only new status bytes are folded"
 }
 
+test_transient_read_failure_keeps_the_trusted_set() {
+  local reader="$TMP_ROOT/fail-reader"
+  reset_case
+  touch "$CONFIG/open-decision-reminders"
+  printf '#!/usr/bin/env bash\nexit 1\n' > "$reader"
+  chmod +x "$reader"
+  printf 'needs-decision [at=1000] [key=api]: choose\n' > "$STATE/worker.status"
+  open_decision_reminder_tick 1200
+  [ "$(count_wakes)" = 1 ] || fail "overdue key did not queue its first reminder"
+  printf 'working: routine\n' >> "$STATE/worker.status"
+  FM_STATUS_SPAN_READER="$reader" open_decision_reminder_tick 1250 \
+    || fail "a transient status read failure failed the reminder tick"
+  [ "$(count_wakes)" = 1 ] || fail "the failed read queued a reminder before the key's backoff expired"
+  open_decision_reminder_tick 1260
+  [ "$(count_wakes)" = 1 ] || fail "the failed read lost the key's backoff and repeated early"
+  open_decision_reminder_tick 1300
+  [ "$(count_wakes)" = 2 ] || fail "the key did not repeat once its backoff expired"
+  pass "a transient status read failure keeps the trusted open set and its reminder backoff"
+}
+
 test_invalid_settings() {
   reset_case
   touch "$CONFIG/open-decision-reminders"
@@ -215,4 +235,5 @@ test_watcher_loop() {
 fm_test_run test_disabled test_oldest_and_backoff test_numeric_keys_are_distinct \
   test_numeric_tasks_are_distinct test_resolution_and_reopen \
   test_wait_exemptions test_unknown_times_and_keyless test_timed_fold_is_incremental \
+  test_transient_read_failure_keeps_the_trusted_set \
   test_invalid_settings test_timed_cursor_retirement test_watcher_loop

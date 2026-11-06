@@ -1,7 +1,7 @@
 ---
 name: captain-hold-lifecycle
 description: >-
-  Load before treating an investigation, scout report, structured review, or Lavish review as complete, before ending a visual review that exposed a captain decision, when recording or routing the captain's answer, and on any RECORD DIVERGENCE line the wake drain prints.
+  Load before treating an investigation, scout report, structured review, or Lavish review as complete, before ending a visual review that exposed a captain decision, when recording or routing the captain's answer, after compaction or decision recovery, when the wake drain truncates decisions, and on any RECORD DIVERGENCE line the wake drain prints.
 user-invocable: false
 metadata:
   internal: true
@@ -22,6 +22,7 @@ The originating investigation or review is never its own inventory entry, so hol
 Put the question and its options in the hold reason, and keep one held task per genuine gate: a multi-question review is one held task pointing at its report, not a row per question. Represent that task with exactly one board card that consolidates its questions and options; never fan one task id into duplicate same-key cards.
 Register or re-hold through `bin/fm-captain-hold.sh hold`, which is idempotent per task id.
 After inventorying the whole report and review surface, firstmate runs `bin/fm-captain-hold.sh complete` with every captain-held task id, or with `--none` when nothing waits on the captain.
+Finish this transfer before presenting the inventory: `complete` removes the duplicate status decisions with `captain-held`, not `resolved`, because ownership transfer is not an answer.
 A scout may attest its own empty inventory only through the narrow command exception in its generated brief's Definition of done.
 For a non-empty inventory or a refused command, the scout reports to firstmate rather than writing metadata or backlog records.
 A completed investigation and an ended visual review use this same owner and completion command; a visual tool, including Lavish, never owns a parallel completion policy.
@@ -56,6 +57,16 @@ A captain call can be written down twice - as the keyed status decision the fold
 Read such a line as "these two records disagree", never as "the captain ruled and someone forgot to file it": a call can dissolve because its premise was false, or turn out to have been a question of fact rather than the captain's to answer.
 Reconcile it with what actually happened - `answer` when the captain's own words exist to record, and a fresh `needs-decision` line re-opening the status decision when that resolution was not the captain's word.
 The absence of a routed work item is not a divergence and the guard never requires one: when the decision IS the deliverable there is nothing to route.
+
+## Full-set reconciliation
+
+After compaction or recovery, or whenever a drain truncates decision rows or content, read `bin/fm-wake-drain.sh --open-decisions` without output filters.
+Reconcile every returned key and the authoritative backlog's captain-held tasks before acknowledging the drain or presenting the decision inventory.
+The drain's acknowledgement count covers the full status fold, not merely the preview and not the separate captain-held backlog inventory.
+An unknown count means the status presentation failed, not that no decisions remain.
+Read tool-truncated output through its end, and never treat a filtered preview or remembered list as the complete set.
+Use the existing completion transfer and recorded answers to distinguish duplicate representations from genuinely open calls.
+Do not close a decision just to reduce the count.
 
 ## Operating sequence
 
