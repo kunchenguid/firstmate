@@ -3835,6 +3835,8 @@ case "${1:-} ${2:-}" in
   "workspace list")
     if [ -e "${FM_FAKE_HERDR_RESTORED:?}" ]; then
       printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"w2","active_tab_id":"w2:t2","label":"2ndmate-bravo","focused":true},{"workspace_id":"w3","active_tab_id":"w3:t1","label":"2ndmate-alpha","focused":false}]}}'
+    elif [ -e "${FM_FAKE_HERDR_CLOSED:?}" ] && [ "${FM_FAKE_HERDR_TOKEN_WS_KEPT:-0}" = 1 ]; then
+      printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"w4","active_tab_id":"w4:t9","label":"firstmate/task-x1 · p:AbCdEfGhIjKlMnOpQrStUv","focused":false},{"workspace_id":"w2","active_tab_id":"w2:t2","label":"2ndmate-bravo","focused":false},{"workspace_id":"w3","active_tab_id":"w3:t1","label":"2ndmate-alpha","focused":true}]}}'
     elif [ -e "${FM_FAKE_HERDR_CLOSED:?}" ]; then
       printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"w2","active_tab_id":"w2:t2","label":"2ndmate-bravo","focused":false},{"workspace_id":"w3","active_tab_id":"w3:t1","label":"2ndmate-alpha","focused":true}]}}'
     else
@@ -4069,6 +4071,15 @@ test_teardown_retires_task_watcher_markers_and_orphan_journal() {
   pass "teardown retires the task's own watcher markers and orphaned presentation journal, leaving other tasks' markers alone"
 }
 
+write_drifted_v2_journal() {  # <case-dir>
+  local case_dir=$1
+  printf '%s\n' 'version=2' 'task_id=task-x1' 'projection_id=AbCdEfGhIjKlMnOpQrStUv' \
+    "home=$case_dir" 'session=fmtest' 'workspace_id=w1' 'tab_id=w1:t2' 'pane_id=w1:p9' \
+    'parent_workspace_id=w0' 'parent_label=firstmate' \
+    'workspace_label=└ task-x1 · p:AbCdEfGhIjKlMnOpQrStUv' 'task_label=fm-task-x1' \
+    > "$case_dir/state/task-x1.herdr-presentation"
+}
+
 test_teardown_retains_journal_bound_to_another_pane() {
   local case_dir log closed restored
   case_dir=$(make_case retain-drifted-journal)
@@ -4078,13 +4089,10 @@ test_teardown_retains_journal_bound_to_another_pane() {
   : > "$closed"
   # A version 2 binding that advanced to a replacement pane the metadata never
   # recorded may still name a live quarantined space; only the sweep may judge it.
-  printf '%s\n' 'version=2' 'task_id=task-x1' 'projection_id=AbCdEfGhIjKlMnOpQrStUv' \
-    "home=$case_dir" 'session=fmtest' 'workspace_id=w1' 'tab_id=w1:t2' 'pane_id=w1:p9' \
-    'parent_workspace_id=w0' 'parent_label=firstmate' \
-    'workspace_label=└ task-x1 · p:AbCdEfGhIjKlMnOpQrStUv' 'task_label=fm-task-x1' \
-    > "$case_dir/state/task-x1.herdr-presentation"
+  write_drifted_v2_journal "$case_dir"
 
   FM_FAKE_HERDR_LOG="$log" FM_FAKE_HERDR_CLOSED="$closed" FM_FAKE_HERDR_RESTORED="$restored" \
+    FM_FAKE_HERDR_TOKEN_WS_KEPT=1 \
     run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" \
     || fail "retain-drifted-journal: teardown failed: $(cat "$case_dir/stderr")"
   assert_present "$case_dir/state/task-x1.herdr-presentation" \
@@ -4093,6 +4101,27 @@ test_teardown_retains_journal_bound_to_another_pane() {
   assert_grep "retaining herdr presentation journal" "$case_dir/stderr" \
     "teardown kept the drifted journal without saying why"
   pass "teardown retains a presentation journal bound to a pane other than the closed endpoint"
+}
+
+test_teardown_retires_drifted_journal_when_token_workspace_gone() {
+  local case_dir log closed restored
+  case_dir=$(make_case retire-drifted-journal-workspace-gone)
+  write_meta "$case_dir" local-only ship
+  configure_herdr_projection_teardown_case "$case_dir"
+  log="$case_dir/herdr.log"; closed="$case_dir/closed"; restored="$case_dir/restored"; : > "$log"
+  : > "$closed"
+  # The same drifted binding names nothing once its token workspace is
+  # confirmed gone, so it must not outlive the task.
+  write_drifted_v2_journal "$case_dir"
+
+  FM_FAKE_HERDR_LOG="$log" FM_FAKE_HERDR_CLOSED="$closed" FM_FAKE_HERDR_RESTORED="$restored" \
+    run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" \
+    || fail "retire-drifted-journal-workspace-gone: teardown failed: $(cat "$case_dir/stderr")"
+  assert_absent "$case_dir/state/task-x1.herdr-presentation" \
+    "a drifted journal whose token workspace is confirmed gone was not retired"
+  assert_absent "$case_dir/state/task-x1.meta" \
+    "retire-drifted-journal-workspace-gone: teardown did not complete"
+  pass "teardown retires a drifted presentation journal once its token workspace is confirmed gone"
 }
 
 # A version 1 attempt journal binds no pane, so proving the recorded task pane
@@ -4214,6 +4243,190 @@ test_teardown_retains_v1_journal_when_workspace_query_ambiguous() {
   assert_not_contains "$(cat "$log")" "workspace close" \
     "retain-v1-journal-workspace-ambiguous: teardown must not escalate to workspace cleanup"
   pass "teardown retains a v1 presentation journal when the workspace query is ambiguous"
+}
+
+# A Herdr session restore can leave the task's projected workspace holding a
+# restored idle shell in a pane the metadata never recorded, so closing the
+# recorded pane leaves the workspace behind. Teardown then retires that
+# leftover through the shared proof, under the presentation lock it already
+# holds, and only when the leftover is an unclaimed lone idle shell. The
+# restored shell is a real detached process the death-close path can signal.
+configure_herdr_leftover_teardown_case() {  # <case-dir>
+  local case_dir=$1
+  sed -i.bak 's/^window=.*/window=fmtest:w1:p2/' "$case_dir/state/task-x1.meta"
+  rm -f "$case_dir/state/task-x1.meta.bak"
+  printf '%s\n' \
+    'backend=herdr' \
+    'herdr_session=fmtest' \
+    'herdr_workspace_id=w1' \
+    'herdr_tab_id=w1:t2' \
+    'herdr_pane_id=w1:p2' >> "$case_dir/state/task-x1.meta"
+  printf '%s\n' 'version=2' 'task_id=task-x1' 'projection_id=AbCdEfGhIjKlMnOpQrStUv' \
+    "home=$case_dir" 'session=fmtest' 'workspace_id=w1' 'tab_id=w1:t2' 'pane_id=w1:p2' \
+    'parent_workspace_id=w0' 'parent_label=firstmate' \
+    'workspace_label=└ task-x1 · p:AbCdEfGhIjKlMnOpQrStUv' 'task_label=fm-task-x1' \
+    > "$case_dir/state/task-x1.herdr-presentation"
+  cat > "$case_dir/fakebin/herdr" <<'SH'
+#!/usr/bin/env bash
+set -u
+printf '%s\n' "$*" >> "${FM_FAKE_HERDR_LOG:?}"
+pid=${FM_FAKE_LEFTOVER_PID:?}
+gone=0
+if [ -e "${FM_FAKE_LEFTOVER_CLOSED:?}" ] || ! kill -0 "$pid" 2>/dev/null; then
+  gone=1
+fi
+anchor='{"workspace_id":"w0","active_tab_id":"w0:t1","label":"firstmate","focused":true,"tab_count":1,"pane_count":1}'
+leftover='{"workspace_id":"w1","active_tab_id":"w1:t3","label":"└ task-x1 · p:AbCdEfGhIjKlMnOpQrStUv","focused":false,"tab_count":1,"pane_count":1}'
+if [ "$gone" = 1 ]; then
+  spaces="[$anchor]"; tabs='[{"tab_id":"w0:t1","workspace_id":"w0","focused":true}]'
+  panes='[{"pane_id":"w0:p1","tab_id":"w0:t1","workspace_id":"w0"}]'
+else
+  spaces="[$anchor,$leftover]"
+  tabs='[{"tab_id":"w0:t1","workspace_id":"w0","focused":true},{"tab_id":"w1:t3","workspace_id":"w1","focused":false}]'
+  panes='[{"pane_id":"w0:p1","tab_id":"w0:t1","workspace_id":"w0"},{"pane_id":"w1:p3","tab_id":"w1:t3","workspace_id":"w1"}]'
+fi
+case "${1:-} ${2:-}" in
+  "workspace list") printf '{"result":{"workspaces":%s}}\n' "$spaces" ;;
+  "workspace get")
+    [ "$gone" = 0 ] || { printf '%s\n' '{"error":{"code":"workspace_not_found"}}' >&2; exit 1; }
+    printf '{"result":{"workspace":%s}}\n' "$leftover"
+    ;;
+  "tab list")
+    case "$*" in
+      *"--workspace w0"*) printf '%s\n' '{"result":{"tabs":[{"tab_id":"w0:t1","workspace_id":"w0","focused":true}]}}' ;;
+      *"--workspace w1"*)
+        if [ "$gone" = 0 ]; then
+          printf '%s\n' '{"result":{"tabs":[{"tab_id":"w1:t3","workspace_id":"w1","focused":false}]}}'
+        else
+          printf '%s\n' '{"result":{"tabs":[]}}'
+        fi
+        ;;
+      *) printf '%s\n' '{"result":{"tabs":[]}}' ;;
+    esac
+    ;;
+  "pane list")
+    if [ "$gone" = 0 ] && [ "${4:-}" = w1 ]; then
+      printf '%s\n' '{"result":{"panes":[{"pane_id":"w1:p3","tab_id":"w1:t3","workspace_id":"w1"}]}}'
+    else
+      printf '%s\n' '{"result":{"panes":[]}}'
+    fi
+    ;;
+  "pane get")
+    if [ "${3:-}" = w1:p3 ] && [ "$gone" = 0 ]; then
+      printf '%s\n' '{"result":{"pane":{"pane_id":"w1:p3","tab_id":"w1:t3","workspace_id":"w1"}}}'
+      exit 0
+    fi
+    printf '%s\n' '{"error":{"code":"pane_not_found"}}' >&2
+    exit 1
+    ;;
+  "pane process-info")
+    procs="[{\"pid\":$pid,\"name\":\"sh\",\"argv0\":\"sh\"}]"
+    [ "${FM_FAKE_LEFTOVER_BUSY:-0}" != 1 ] \
+      || procs="[{\"pid\":$pid,\"name\":\"sh\",\"argv0\":\"sh\"},{\"pid\":$((pid + 1)),\"name\":\"vim\",\"argv0\":\"vim\"}]"
+    printf '{"result":{"type":"pane_process_info","process_info":{"pane_id":"w1:p3","shell_pid":%s,"foreground_process_group_id":%s,"foreground_processes":%s}}}\n' \
+      "$pid" "$pid" "$procs"
+    ;;
+  "agent get")
+    printf '%s\n' '{"error":{"code":"agent_not_found"}}' >&2
+    exit 1
+    ;;
+  "api snapshot")
+    printf '{"result":{"snapshot":{"focused_workspace_id":"w0","focused_tab_id":"w0:t1","focused_pane_id":"w0:p1","workspaces":%s,"tabs":%s,"panes":%s}}}\n' \
+      "$spaces" "$tabs" "$panes"
+    ;;
+  "terminal title") printf '%s\n' '{"result":{"reason":"no_foreground_client"}}' ;;
+  "status --json") printf '%s\n' '{"server":{"running":true}}' ;;
+  "session list") printf '%s\n' '{"sessions":[{"name":"fmtest","running":true,"socket_path":"/tmp/fmtest.sock"}]}' ;;
+  "pane close") [ "${3:-}" != w1:p3 ] || : > "$FM_FAKE_LEFTOVER_CLOSED" ;;
+  "tab get") printf '%s\n' '{"result":{"tab":{"tab_id":"w0:t1","workspace_id":"w0"}}}' ;;
+  "tab focus") printf '%s\n' '{"result":{"tab":{"tab_id":"w0:t1","workspace_id":"w0","focused":true}}}' ;;
+esac
+SH
+  chmod +x "$case_dir/fakebin/herdr"
+  cat > "$case_dir/fakebin/fake-ps" <<'SH'
+#!/usr/bin/env bash
+pid=${FM_FAKE_LEFTOVER_PID:?}
+case "$*" in
+  "-axo pid=,ppid=") printf '1 0\n%s 1\n' "$pid" ;;
+  "-p $pid -o stat=") printf 'Ss\n' ;;
+  "-p $pid -o comm=") printf 'sh\n' ;;
+  *) exit 1 ;;
+esac
+SH
+  chmod +x "$case_dir/fakebin/fake-ps"
+}
+
+# Start the detached stand-in for the restored shell; it is reparented away
+# from this test so its death is observable without a zombie.
+start_leftover_shell() {
+  sh -c 'sleep 300 >/dev/null 2>&1 & echo $!'
+}
+
+run_herdr_leftover_teardown() {  # <case-dir> <shell-pid>
+  local case_dir=$1 pid=$2
+  FM_HOME="$case_dir" FM_HERDR_PS_BIN="$case_dir/fakebin/fake-ps" \
+    FM_BACKEND_HERDR_IDLE_SHELL_PROOF_POLLS=1 \
+    FM_FAKE_HERDR_LOG="$case_dir/herdr.log" FM_FAKE_LEFTOVER_PID="$pid" \
+    FM_FAKE_LEFTOVER_CLOSED="$case_dir/leftover-closed" \
+    run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr"
+}
+
+test_teardown_retires_restored_leftover_workspace() {
+  local case_dir pid
+  case_dir=$(make_case herdr-leftover-retired)
+  write_meta "$case_dir" local-only ship
+  configure_herdr_leftover_teardown_case "$case_dir"
+  pid=$(start_leftover_shell)
+  run_herdr_leftover_teardown "$case_dir" "$pid" \
+    || { kill "$pid" 2>/dev/null; fail "herdr-leftover-retired: teardown failed: $(cat "$case_dir/stderr")"; }
+  if kill -0 "$pid" 2>/dev/null; then
+    kill "$pid" 2>/dev/null
+    fail "herdr-leftover-retired: the leftover's idle shell was not ended"
+  fi
+  assert_absent "$case_dir/state/task-x1.meta" "herdr-leftover-retired: teardown did not complete"
+  assert_absent "$case_dir/state/task-x1.herdr-presentation" \
+    "herdr-leftover-retired: the journal outlived its retired workspace"
+  assert_not_contains "$(cat "$case_dir/stderr")" "leftover workspace" \
+    "herdr-leftover-retired: a retired leftover still warned"
+  assert_not_contains "$(cat "$case_dir/herdr.log")" "workspace close" \
+    "herdr-leftover-retired: teardown must never call workspace close"
+  pass "teardown retires its own restored idle-shell leftover workspace once the recorded pane is gone"
+}
+
+test_teardown_leaves_busy_leftover_workspace() {
+  local case_dir pid
+  case_dir=$(make_case herdr-leftover-busy)
+  write_meta "$case_dir" local-only ship
+  configure_herdr_leftover_teardown_case "$case_dir"
+  pid=$(start_leftover_shell)
+  FM_FAKE_LEFTOVER_BUSY=1 run_herdr_leftover_teardown "$case_dir" "$pid" \
+    || { kill "$pid" 2>/dev/null; fail "herdr-leftover-busy: teardown failed: $(cat "$case_dir/stderr")"; }
+  kill -0 "$pid" 2>/dev/null || fail "herdr-leftover-busy: a busy leftover's shell was signaled"
+  kill "$pid" 2>/dev/null
+  assert_absent "$case_dir/leftover-closed" "herdr-leftover-busy: a busy leftover pane was closed"
+  assert_absent "$case_dir/state/task-x1.meta" "herdr-leftover-busy: a busy leftover blocked teardown"
+  assert_grep "leftover workspace for task-x1 was left in place because its pane is not a provably idle" \
+    "$case_dir/stderr" "herdr-leftover-busy: the preserved leftover was not explained"
+  pass "teardown leaves a leftover workspace whose pane is busy and still completes"
+}
+
+test_teardown_leaves_claimed_leftover_workspace() {
+  local case_dir pid
+  case_dir=$(make_case herdr-leftover-claimed)
+  write_meta "$case_dir" local-only ship
+  configure_herdr_leftover_teardown_case "$case_dir"
+  printf '%s\n' 'backend=herdr' 'window=fmtest:w1:p3' > "$case_dir/state/task-y2.meta"
+  pid=$(start_leftover_shell)
+  run_herdr_leftover_teardown "$case_dir" "$pid" \
+    || { kill "$pid" 2>/dev/null; fail "herdr-leftover-claimed: teardown failed: $(cat "$case_dir/stderr")"; }
+  kill -0 "$pid" 2>/dev/null || fail "herdr-leftover-claimed: a pane another task record names was ended"
+  kill "$pid" 2>/dev/null
+  assert_absent "$case_dir/leftover-closed" "herdr-leftover-claimed: a claimed leftover pane was closed"
+  assert_absent "$case_dir/state/task-x1.meta" "herdr-leftover-claimed: a claimed leftover blocked teardown"
+  assert_present "$case_dir/state/task-y2.meta" "herdr-leftover-claimed: teardown touched another task record"
+  assert_grep "another task record or journal still claims it" "$case_dir/stderr" \
+    "herdr-leftover-claimed: the claimed leftover was not explained"
+  pass "teardown leaves a leftover workspace another task record still names"
 }
 
 # --- Fix 1: conclude/abort the task's own parked no-mistakes run before the
@@ -6227,9 +6440,13 @@ test_herdr_projection_teardown_closes_pane_before_returning_its_copy
 test_herdr_projection_teardown_refused_close_preserves_task_and_copy
 test_teardown_retires_task_watcher_markers_and_orphan_journal
 test_teardown_retains_journal_bound_to_another_pane
+test_teardown_retires_drifted_journal_when_token_workspace_gone
 test_teardown_retires_v1_journal_when_projected_workspace_gone
 test_teardown_retains_v1_journal_when_projected_workspace_present
 test_teardown_retains_v1_journal_when_workspace_query_ambiguous
+test_teardown_retires_restored_leftover_workspace
+test_teardown_leaves_busy_leftover_workspace
+test_teardown_leaves_claimed_leftover_workspace
 test_squash_merged_branch_deleted_allows
 test_squash_merged_pr_allows_when_head_ancestor_of_pr_head
 test_no_pr_recorded_discovers_merged_pr_by_branch_allows

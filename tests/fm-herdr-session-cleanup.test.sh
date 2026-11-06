@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Focused safety tests for bin/fm-herdr-session-cleanup.sh.
-# Covers one exact cleanup, every title/journal/topology/agent/process refusal,
-# locked revalidation races, focus refusal, read errors, and repeat idempotence.
+# Covers one exact cleanup on the journal and unjournaled paths, every
+# title/journal/claim/ownership/topology/agent/process refusal, locked revalidation races,
+# focus refusal, read errors, and repeat idempotence.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -159,7 +160,9 @@ fm_backend_herdr_cli() {
       printf '{"result":{"panes":'; fixture_panes; printf '}}\n'
       ;;
     "pane get")
-      printf '{"result":{"pane":{"pane_id":"%s","tab_id":"%s","workspace_id":"%s"}}}\n' "$PANE" "$TAB" "$WS"
+      jq -cn --arg pane "$PANE" --arg tab "$TAB" --arg ws "$WS" --rawfile cwd "$FIXTURE_DIR/cwd" \
+        '{result: {pane: {pane_id: $pane, tab_id: $tab, workspace_id: $ws,
+          cwd: ($cwd | rtrimstr("\n")), foreground_cwd: ($cwd | rtrimstr("\n"))}}}'
       ;;
     "agent get")
       case "$(cat "$FIXTURE_DIR/agent")" in
@@ -219,9 +222,20 @@ write_cross_home_v2() {
   write_v2 "$TMP_ROOT/other-home" "$WS" "$TAB" "$PANE"
 }
 
+# An owned pool worktree: a linked worktree of a project clone under this
+# home's projects/, outside the home directory itself.
+OWNED_PROJECT="$FM_HOME/projects/proj"
+OWNED_WORKTREE="$TMP_ROOT/pool/slot1/proj"
+FOREIGN_WORKTREE="$TMP_ROOT/other-home-pool/slot1/proj"
+git init -q "$OWNED_PROJECT"
+git -C "$OWNED_PROJECT" -c user.name=t -c user.email=t@example.invalid commit -q --allow-empty -m init
+mkdir -p "$(dirname "$OWNED_WORKTREE")" "$FOREIGN_WORKTREE"
+git -C "$OWNED_PROJECT" worktree add -q --detach "$OWNED_WORKTREE"
+
 reset_fixture() {
-  rm -rf "$FIXTURE_DIR" "$TMP_ROOT"/*.lock "${FM_STATE_OVERRIDE:?}/"*
+  rm -rf "$FIXTURE_DIR" "$TMP_ROOT"/*.lock "${FM_STATE_OVERRIDE:?}/"* "$FM_HOME/data" "$TMP_ROOT/sm-home"
   mkdir -p "$FIXTURE_DIR"
+  printf '%s\n' "$OWNED_WORKTREE" > "$FIXTURE_DIR/cwd"
   : > "$LOCK_LOG"; : > "$CLOSE_LOG"
   printf '%s\n' "$TITLE" > "$FIXTURE_DIR/title"
   printf '1\n' > "$FIXTURE_DIR/tabs"
@@ -258,7 +272,6 @@ reset_fixture; printf '%s\n' '└ missing-token' > "$FIXTURE_DIR/title"; assert_
 reset_fixture; printf 'version=1\ntask_id=%s\nprojection_id=short\n' "$ID" > "$FM_STATE_OVERRIDE/$ID.herdr-presentation"; assert_preserved "malformed journal"
 reset_fixture; : > "$FIXTURE_DIR/duplicate-token"; assert_preserved "duplicate token"
 reset_fixture; printf '%s\n' "└ task · p:$TOKEN p:$TOKEN" > "$FIXTURE_DIR/title"; assert_preserved "duplicate title token"
-reset_fixture; rm -f "$FM_STATE_OVERRIDE/$ID.herdr-presentation"; assert_preserved "zero journal match"
 reset_fixture; write_v1 fm-task; assert_preserved "multiple journal matches"
 reset_fixture; rm -f "$FM_STATE_OVERRIDE/$ID.herdr-presentation"; write_cross_home_v2; assert_preserved "cross-home journal"
 reset_fixture; write_v2 "$FM_HOME" w9 "$TAB" "$PANE"; assert_preserved "v2 workspace binding mismatch"
@@ -281,6 +294,137 @@ reset_fixture; : > "$FIXTURE_DIR/error-workspace-get"; assert_preserved "unreada
 reset_fixture; : > "$FIXTURE_DIR/race"; assert_preserved "revalidation race"
 reset_fixture; printf '%s\n' "$TAB" > "$FIXTURE_DIR/active-tab"; assert_preserved "active target"
 reset_fixture; : > "$FIXTURE_DIR/focus-refuse"; assert_preserved "focus refusal"
+
+# Unjournaled leftovers: a restored task workspace whose journal and task
+# record were already cleaned up. Only the shared presentation lock serializes
+# it, and every claim in any local Firstmate home preserves it.
+reset_unjournaled() {
+  reset_fixture
+  rm -f "$FM_STATE_OVERRIDE/$ID.herdr-presentation"
+}
+
+register_secondmate_home() {
+  mkdir -p "$FM_HOME/data" "$TMP_ROOT/sm-home/state"
+  printf -- '- sm1 - test secondmate (home: %s; scope: tests; projects: none; added 2026-11-04)\n' \
+    "$TMP_ROOT/sm-home" > "$FM_HOME/data/secondmates.md"
+}
+
+reset_unjournaled
+fm_herdr_session_cleanup >/dev/null 2>&1
+[ "$(wc -l < "$CLOSE_LOG" | tr -d ' ')" = 1 ] || fail "unjournaled leftover did not close exactly once"
+[ "$(cat "$LOCK_LOG")" = "$TMP_ROOT/presentation.lock" ] \
+  || fail "unjournaled leftover did not serialize on exactly the shared presentation lock"
+pass "unjournaled restored leftover closes one exact pane under the shared presentation lock"
+fm_herdr_session_cleanup >/dev/null 2>&1
+[ "$(wc -l < "$CLOSE_LOG" | tr -d ' ')" = 1 ] || fail "repeat unjournaled cleanup closed again"
+pass "unjournaled cleanup is idempotent on repeat"
+
+reset_unjournaled; register_secondmate_home
+fm_herdr_session_cleanup >/dev/null 2>&1
+[ "$(wc -l < "$CLOSE_LOG" | tr -d ' ')" = 1 ] || fail "an unclaimed leftover beside a registered secondmate home was not closed"
+pass "unjournaled cleanup reads registered secondmate homes and closes an unclaimed leftover"
+
+reset_unjournaled; register_secondmate_home
+mkdir -p "$TMP_ROOT/sm-home/work"
+printf '%s\n' "$TMP_ROOT/sm-home/work" > "$FIXTURE_DIR/cwd"
+fm_herdr_session_cleanup >/dev/null 2>&1
+[ "$(wc -l < "$CLOSE_LOG" | tr -d ' ')" = 1 ] || fail "an unclaimed leftover inside a registered secondmate home was not closed"
+pass "unjournaled cleanup accepts a pane cwd inside a registered secondmate home"
+
+reset_unjournaled; printf '%s\n' "$FOREIGN_WORKTREE" > "$FIXTURE_DIR/cwd"
+warning=$(fm_herdr_session_cleanup 2>&1 >/dev/null)
+[ ! -s "$CLOSE_LOG" ] || fail "an idle leftover whose cwd is outside every local home was closed"
+case "$warning" in
+  *"not proven to be inside a local Firstmate home"*) ;;
+  *) fail "an unowned leftover was preserved without an ownership warning: $warning" ;;
+esac
+pass "an idle task-label leftover from an unknown home is preserved with a warning"
+
+# A foreign home that is another worktree of this home's project repository:
+# git lists it, but its home markers show it belongs to another home.
+FOREIGN_HOME="$TMP_ROOT/foreign-home"
+git -C "$OWNED_PROJECT" worktree add -q --detach "$FOREIGN_HOME"
+mkdir -p "$FOREIGN_HOME/state" "$FOREIGN_HOME/work"
+reset_unjournaled; printf '%s\n' "$FOREIGN_HOME/work" > "$FIXTURE_DIR/cwd"
+warning=$(fm_herdr_session_cleanup 2>&1 >/dev/null)
+[ ! -s "$CLOSE_LOG" ] || fail "an idle leftover inside a foreign home worktree of the same repo was closed"
+case "$warning" in
+  *"not proven to be inside a local Firstmate home"*) ;;
+  *) fail "a foreign-home leftover was preserved without an ownership warning: $warning" ;;
+esac
+pass "an idle task-label leftover inside a foreign home worktree of the same repo is preserved with a warning"
+reset_unjournaled; printf '%s\n' "$TMP_ROOT/missing-dir" > "$FIXTURE_DIR/cwd"
+assert_preserved "unjournaled leftover whose cwd no longer exists"
+reset_unjournaled; : > "$FIXTURE_DIR/cwd"
+assert_preserved "unjournaled leftover with no reported cwd"
+reset_unjournaled; : > "$FIXTURE_DIR/error-pane-get"
+assert_preserved "unjournaled leftover with an unreadable pane cwd"
+
+reset_unjournaled
+(
+  fm_backend_name() { printf tmux; }
+  fm_herdr_session_cleanup >/dev/null 2>&1
+)
+[ ! -s "$CLOSE_LOG" ] || fail "a non-Herdr home closed an unjournaled leftover"
+pass "a home whose backend is not herdr never retires unjournaled leftovers"
+
+reset_unjournaled; printf 'herdr_workspace_id=%s\n' "$WS" > "$FM_STATE_OVERRIDE/other.meta"
+assert_preserved "unjournaled leftover named by a task record workspace"
+reset_unjournaled; printf 'window=test:%s\n' "$PANE" > "$FM_STATE_OVERRIDE/other.meta"
+assert_preserved "unjournaled leftover named by a task record window"
+reset_unjournaled; printf 'herdr_tab_id=%s\n' "$TAB" > "$FM_STATE_OVERRIDE/other.meta"
+assert_preserved "unjournaled leftover named by a task record tab"
+reset_unjournaled; : > "$FM_STATE_OVERRIDE/$ID.meta"
+assert_preserved "unjournaled leftover whose task still has a record"
+reset_unjournaled; : > "$FM_STATE_OVERRIDE/fm-$ID.meta"
+assert_preserved "unjournaled leftover whose concise label matches a live task"
+reset_unjournaled; printf 'version=1\ntask_id=other\nprojection_id=%s\n' "$TOKEN" > "$FM_STATE_OVERRIDE/other.herdr-presentation"
+assert_preserved "unjournaled leftover whose token another journal names"
+reset_unjournaled; register_secondmate_home
+printf 'herdr_pane_id=%s\n' "$PANE" > "$TMP_ROOT/sm-home/state/child.meta"
+assert_preserved "unjournaled leftover named by a secondmate task record"
+reset_unjournaled; register_secondmate_home
+printf 'version=1\ntask_id=child\nprojection_id=%s\n' "$TOKEN" > "$TMP_ROOT/sm-home/state/child.herdr-presentation"
+assert_preserved "unjournaled leftover whose token a secondmate journal names"
+reset_unjournaled; mkdir -p "$FM_HOME/data"; printf -- '- broken registry line\n' > "$FM_HOME/data/secondmates.md"
+assert_preserved "unjournaled leftover with an unreadable local home registry"
+reset_unjournaled; register_secondmate_home; chmod 000 "$TMP_ROOT/sm-home/state"
+if [ -r "$TMP_ROOT/sm-home/state" ]; then
+  chmod 755 "$TMP_ROOT/sm-home/state"
+  pass "unreadable secondmate state cannot be simulated as this user; skipped"
+else
+  assert_preserved "unjournaled leftover with an unreadable secondmate state"
+  chmod 755 "$TMP_ROOT/sm-home/state"
+fi
+
+reset_unjournaled
+(
+  fm_lock_try_acquire() {
+    printf '%s\n' "$1" >> "$LOCK_LOG"
+    printf 'herdr_workspace_id=%s\n' "$WS" > "$FM_STATE_OVERRIDE/late.meta"
+    mkdir "$1" 2>/dev/null
+  }
+  fm_herdr_session_cleanup >/dev/null 2>&1
+)
+[ ! -s "$CLOSE_LOG" ] || fail "a claim published while waiting for the presentation lock did not stop the close"
+pass "the unjournaled claim check repeats under the presentation lock"
+
+reset_unjournaled; mkdir "$TMP_ROOT/presentation.lock"
+assert_preserved "unjournaled leftover behind a busy presentation lock"
+reset_unjournaled; printf 'live\n' > "$FIXTURE_DIR/agent"; assert_preserved "unjournaled registered agent"
+reset_unjournaled; printf 'unknown\n' > "$FIXTURE_DIR/agent"; assert_preserved "unjournaled unknown agent"
+reset_unjournaled; printf '2\n' > "$FIXTURE_DIR/tabs"; printf '2\n' > "$FIXTURE_DIR/panes"; assert_preserved "unjournaled multiple tabs"
+reset_unjournaled; printf '2\n' > "$FIXTURE_DIR/panes"; assert_preserved "unjournaled multiple panes"
+reset_unjournaled; : > "$FIXTURE_DIR/process-unsafe"; assert_preserved "unjournaled non-idle shell or child process"
+reset_unjournaled; : > "$FIXTURE_DIR/duplicate-token"; assert_preserved "unjournaled duplicate token"
+reset_unjournaled; printf '%s\n' '└ task · p:short' > "$FIXTURE_DIR/title"; assert_preserved "unjournaled malformed token"
+reset_unjournaled; printf '%s\n' 'captain-notes' > "$FIXTURE_DIR/title"; assert_preserved "captain workspace outside the task grammar"
+reset_unjournaled; printf '%s\n' '2ndmate-sm1' > "$FIXTURE_DIR/title"; assert_preserved "secondmate home workspace outside the task grammar"
+reset_unjournaled; : > "$FIXTURE_DIR/error-api-snapshot"; assert_preserved "unjournaled unreadable snapshot"
+reset_unjournaled; : > "$FIXTURE_DIR/error-workspace-get"; assert_preserved "unjournaled unreadable topology check"
+reset_unjournaled; : > "$FIXTURE_DIR/race"; assert_preserved "unjournaled revalidation race"
+reset_unjournaled; printf '%s\n' "$TAB" > "$FIXTURE_DIR/active-tab"; assert_preserved "unjournaled active target"
+reset_unjournaled; : > "$FIXTURE_DIR/focus-refuse"; assert_preserved "unjournaled focus refusal"
 
 INTEGRATION_ROOT="$TMP_ROOT/bootstrap-integration"
 mkdir -p "$INTEGRATION_ROOT/home/state" "$INTEGRATION_ROOT/home/data" "$INTEGRATION_ROOT/home/config"
