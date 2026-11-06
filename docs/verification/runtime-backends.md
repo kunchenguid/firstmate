@@ -23,7 +23,6 @@ The full portable OMP suite also passes under a real outer OMP process: its test
 Refresh that portable proof with `bash bin/fm-test-run.sh tests/fm-omp-harness.test.sh tests/fm-worker-preparation.test.sh`.
 [`fm-brief.sh`](../../bin/fm-brief.sh) and [`fm-spawn.sh`](../../bin/fm-spawn.sh) own the selection and delivery contract; this is Firstmate input preparation, not native OMP subagent autoload.
 
-
 ## Polytoken worker lifecycle
 
 Verified on 2026-10-14 with Polytoken 0.9.0 on macOS arm64 using the tmux worker path.
