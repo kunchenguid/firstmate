@@ -4433,10 +4433,10 @@ if [ "$KIND" = ship ]; then
   fi
   [ -n "$STANDING_FORGE" ] || STANDING_FORGE=none
   STANDING_MODE=$("$FM_ROOT/bin/fm-project-mode.sh" --raw "$PROJ_NAME" 2>/dev/null | cut -d' ' -f1) || STANDING_MODE=
-  BRIEF_MODE=$(sed -n 's/^Delivery contract: mode=\([^ ]*\).*$/\1/p' "$BRIEF" | head -n 1)
-  BRIEF_FORGE=$(sed -n 's/^Delivery contract: mode=[^ ]*.*[[:space:]]forge=\([^ ]*\).*$/\1/p' "$BRIEF" | head -n 1)
+  BRIEF_MODE=$(sed -n 's/^Delivery contract: mode=\([^ ]*\).*$/\1/p' "$SOURCE_BRIEF" | head -n 1)
+  BRIEF_FORGE=$(sed -n 's/^Delivery contract: mode=[^ ]*.*[[:space:]]forge=\([^ ]*\).*$/\1/p' "$SOURCE_BRIEF" | head -n 1)
   [ -n "$BRIEF_FORGE" ] || BRIEF_FORGE=none
-  BRIEF_BRANCH=$(sed -n 's/^Ship branch: //p' "$BRIEF" | head -n 1)
+  BRIEF_BRANCH=$(sed -n 's/^Ship branch: //p' "$SOURCE_BRIEF" | head -n 1)
   if [ -n "$BRIEF_BRANCH" ]; then
     [ "$BRIEF_BRANCH" = "$BRANCH" ] || {
       echo "error: branch mismatch for $ID: the brief says branch=$BRIEF_BRANCH but this spawn selected branch=$BRANCH" >&2
@@ -4447,16 +4447,16 @@ if [ "$KIND" = ship ]; then
     # there), so a promoted scout whose brief never carried a Ship branch line
     # must relaunch on that recorded branch rather than be refused.
     if [ "$RELAUNCH" -eq 1 ]; then
-      echo "warning: $BRIEF records no ship branch; relaunching on the task's recorded branch $BRANCH" >&2
+      echo "warning: $SOURCE_BRIEF records no ship branch; relaunching on the task's recorded branch $BRANCH" >&2
     else
-      echo "error: $BRIEF records no ship branch; regenerate it with --branch-prefix before spawning $BRANCH" >&2
+      echo "error: $SOURCE_BRIEF records no ship branch; regenerate it with --branch-prefix before spawning $BRANCH" >&2
       exit 1
     fi
   else
-    echo "warning: $BRIEF records no ship branch; defaulting to legacy branch $BRANCH" >&2
+    echo "warning: $SOURCE_BRIEF records no ship branch; defaulting to legacy branch $BRANCH" >&2
   fi
   if [ -z "$BRIEF_MODE" ]; then
-    echo "warning: $BRIEF records no delivery contract line (scaffolded before ship briefs recorded one); launching on the explicit --mode $MODE - confirm its definition of done matches" >&2
+    echo "warning: $SOURCE_BRIEF records no delivery contract line (scaffolded before ship briefs recorded one); launching on the explicit --mode $MODE - confirm its definition of done matches" >&2
   elif [ "$BRIEF_MODE" != "$MODE" ]; then
     echo "error: delivery mismatch for $ID: the brief says mode=$BRIEF_MODE but this spawn passed --mode $MODE; correct the flag or re-scaffold the brief so the worker's instructions and the task record agree" >&2
     exit 1
@@ -4465,9 +4465,9 @@ if [ "$KIND" = ship ]; then
   # as an upstream-consent= token on that same line; like mode and forge, the
   # brief and the spawn flag must agree so the worker's contract and the task
   # record carry the same authority.
-  BRIEF_CONSENT=$(sed -n 's/^Delivery contract: mode=[^ ]*.*[[:space:]]upstream-consent=\([^ ]*\).*$/\1/p' "$BRIEF" | head -n 1)
+  BRIEF_CONSENT=$(sed -n 's/^Delivery contract: mode=[^ ]*.*[[:space:]]upstream-consent=\([^ ]*\).*$/\1/p' "$SOURCE_BRIEF" | head -n 1)
   if [ "$BRIEF_CONSENT" != "$UPSTREAM_CONSENT" ]; then
-    echo "error: upstream-consent mismatch for $ID: $BRIEF records upstream-consent=${BRIEF_CONSENT:-none} but this spawn passed ${UPSTREAM_CONSENT:-none}; correct the flag or re-scaffold the brief so the worker's contract and the task record agree" >&2
+    echo "error: upstream-consent mismatch for $ID: $SOURCE_BRIEF records upstream-consent=${BRIEF_CONSENT:-none} but this spawn passed ${UPSTREAM_CONSENT:-none}; correct the flag or re-scaffold the brief so the worker's contract and the task record agree" >&2
     exit 1
   fi
   # The registered forge is the captain's confirmed binding (bin/fm-project-mode.sh)
@@ -4494,7 +4494,7 @@ if [ "$KIND" = ship ]; then
   fi
   [ -n "$STANDING_PR" ] || STANDING_PR=auto
   [ "$MODE" = no-mistakes ] || STANDING_PR=auto
-  BRIEF_PR=$(sed -n 's/^Delivery contract: mode=[^ ]*.*[[:space:]]pr=\([^ ]*\).*$/\1/p' "$BRIEF" | head -n 1)
+  BRIEF_PR=$(sed -n 's/^Delivery contract: mode=[^ ]*.*[[:space:]]pr=\([^ ]*\).*$/\1/p' "$SOURCE_BRIEF" | head -n 1)
   [ -n "$BRIEF_PR" ] || BRIEF_PR=auto
   if [ "$BRIEF_PR" != "$STANDING_PR" ]; then
     pr_scaffold="fm-brief.sh $ID $PROJ_NAME --mode $MODE"
