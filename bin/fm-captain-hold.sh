@@ -312,6 +312,11 @@ validate_one_line() {  # <label> <value>
 }
 
 acquire_task_control_lock() {  # <task-id>
+  if [ "$CAPTAIN_CONTROL_LOCK_HELD" = 1 ]; then
+    [ "$CAPTAIN_CONTROL_LOCK" = "$STATE/.control-$1.lock" ] \
+      || fail "cannot acquire two task control locks at once"
+    return 0
+  fi
   CAPTAIN_CONTROL_LOCK="$STATE/.control-$1.lock"
   fm_lock_acquire_wait "$CAPTAIN_CONTROL_LOCK"
   CAPTAIN_CONTROL_LOCK_HELD=1
@@ -916,7 +921,6 @@ refuse_self_inventory() {
 # absent once retention ran. Only the completion gate consults the archive: an
 # archived row is closed, so it can satisfy the gate solely through a recorded
 # resolution, and every mutating path keeps seeing it as absent.
-
 # The [markdown] archive key tasks-axi would honour, resolved with tasks-axi's
 # own source precedence: the backlog root's .tasks.toml first, then the
 # user-level $HOME/.tasks-axi/config.toml. Empty when neither sets it; a relative
@@ -1157,7 +1161,7 @@ hold_is_active() {  # <hold-id>
   local show=''
   task_show "$1" || return 1
   show=$TASK_SHOW_OUTPUT
-  [ "$(show_field "$show" state)" = queued ] || return 1
+  [ "$(show_field "$show" state)" != "done" ] || return 1
   [ "$(show_field "$show" held)" = yes ] || return 1
   [ "$(show_field "$show" hold_kind)" = captain ] || return 1
   return 0
@@ -1255,28 +1259,30 @@ activate_question_evidence() {  # <origin> <digest> <question-text>
   printf '%s' "$reference"
 }
 
-preserve_in_hold() {  # <hold-id> <digest> <reference>
-  local id=$1 digest=$2 reference=$3 show body evidence existing_digest existing_reference
+preserve_in_hold() {  # <hold-id> <digest> <reference> <origin> <key>
+  local id=$1 digest=$2 reference=$3 origin=$4 key=$5 show body evidence
+  local existing_digest existing_reference existing_pair
+  acquire_task_control_lock "$id"
+  hold_is_active "$id" || fail "captain hold $id closed before the question could be preserved"
   task_show "$id" || fail "captain hold $id disappeared while preserving a question"
   show=$TASK_SHOW_OUTPUT
   body=$(decode_body "$(show_field "$show" body)")
   evidence=$(hold_question_evidence "$body") \
     || fail "captain hold $id has malformed deferred-question evidence"
-  while IFS=$'\t' read -r existing_digest existing_reference; do
-    [ "$existing_digest" = "$digest" ] || continue
+  while IFS=$'\t' read -r existing_digest existing_reference existing_pair; do
+    [ "$existing_digest" = "$digest" ] && [ "$existing_pair" = "$origin/$key" ] || continue
     [ "$existing_reference" = "$reference" ] \
       || fail "captain hold $id has conflicting deferred-question evidence"
+    release_task_control_lock
     return 0
-  done <<EOF
+  done <<RECORDS
 $evidence
-EOF
+RECORDS
   [ -z "$body" ] || body="${body}"$'\n'
-  if [[ $body != *"Droid question owner: $origin/$key"* ]]; then
-    body="${body}Droid question owner: $origin/$key"$'\n'
-  fi
-  body="${body}${QUESTION_MARKER} ${digest} ${reference}"
+  body="${body}${QUESTION_MARKER} ${digest} ${reference} ${origin}/${key}"
   tasks_axi update "$id" --body "$body" >/dev/null \
     || fail "could not preserve the attempted question on $id"
+  release_task_control_lock
 }
 
 preserve_in_status() {  # <status-file> <key> <verb> <summary> <digest> <reference>
@@ -1305,9 +1311,32 @@ finish_status_transfer() {  # <origin> <key> <hold-id> <status-file>
   [ "$rc" -ne 2 ] || fail "cannot finish the captain-held transfer for $origin/$key"
 }
 
+find_transferred_question_hold() {  # <origin> <key>; prints the receipt's current hold, if any
+  local origin=$1 key=$2 rows ids id body evidence digest reference pair owner=''
+  rows=$(tasks_axi list --state held) || fail "cannot enumerate captain holds for $origin/$key"
+  ids=$(printf '%s\n' "$rows" | LC_ALL=C awk -F ',' '/^  [A-Za-z0-9._-]+,/ { sub(/^  /, "", $1); print $1 }')
+  for id in $ids; do
+    task_show "$id" || fail "cannot read captain hold $id while locating $origin/$key"
+    [ "$(show_field_value "$TASK_SHOW_OUTPUT" hold_kind)" = captain ] || continue
+    body=$(decode_body "$(show_field "$TASK_SHOW_OUTPUT" body)")
+    evidence=$(hold_question_evidence "$body") || fail "captain hold $id has malformed deferred-question evidence"
+    while IFS=$'\t' read -r digest reference pair; do
+      [ "$pair" = "$origin/$key" ] || continue
+      question_evidence_path "$origin" "$digest" "$reference" >/dev/null \
+        || fail "captain hold $id has unreadable deferred-question evidence for $origin/$key"
+      [ -z "$owner" ] || [ "$owner" = "$id" ] \
+        || fail "deferred question $origin/$key has multiple captain-held owners"
+      owner=$id
+    done <<RECORDS
+$evidence
+RECORDS
+  done
+  printf '%s' "$owner"
+}
+
 command_preserve_question() {
   local origin=${1:-} key=${2:-} state='' question_file='' \
-    id status_file question digest reference summary verb
+    id status_file question digest reference summary verb transferred
   [ "$#" -ge 2 ] || { usage >&2; exit 2; }
   shift 2
   while [ "$#" -gt 0 ]; do
@@ -1345,9 +1374,13 @@ command_preserve_question() {
   fi
   status_file="$STATE/$origin.status"
 
+  if ! hold_is_active "$id"; then
+    transferred=$(find_transferred_question_hold "$origin" "$key") || exit $?
+    [ -z "$transferred" ] || id=$transferred
+  fi
   if hold_is_active "$id"; then
     reference=$(activate_question_evidence "$origin" "$digest" "$question")
-    preserve_in_hold "$id" "$digest" "$reference"
+    preserve_in_hold "$id" "$digest" "$reference" "$origin" "$key"
     finish_status_transfer "$origin" "$key" "$id" "$status_file"
     printf 'preserved: hold %s\n' "$id"
     return 0
@@ -1368,7 +1401,7 @@ command_preserve_question() {
     --title "Deferred away-mode approval question $key" \
     --reason "deferred away-mode approval question awaiting captain decision" >/dev/null
   reference=$(activate_question_evidence "$origin" "$digest" "$question")
-  preserve_in_hold "$id" "$digest" "$reference"
+  preserve_in_hold "$id" "$digest" "$reference" "$origin" "$key"
   printf 'preserved: hold %s\n' "$id"
 }
 
@@ -1414,22 +1447,32 @@ status_question_evidence() {  # <status-file> <decision-key>
   [ "$complete" -eq 1 ]
 }
 
-hold_question_evidence() {  # <decoded-hold-body>
-  local line marker digest reference extra complete=1
+hold_question_evidence() {  # <decoded-hold-body>; digest, reference, origin/key
+  local line marker digest reference pair extra owner='' complete=1
   while IFS= read -r line || [ -n "$line" ]; do
-    case "$line" in "$QUESTION_MARKER "*) ;; *) continue ;; esac
-    IFS=' ' read -r marker digest reference extra <<EOF
+    case "$line" in
+      'Droid question owner: '*) owner=${line#'Droid question owner: '}; continue ;;
+      "$QUESTION_MARKER "*) ;;
+      *) continue ;;
+    esac
+    IFS=' ' read -r marker digest reference pair extra <<RECORD
 $line
-EOF
+RECORD
+    pair=${pair:-$owner}
     if [ "$marker" != "$QUESTION_MARKER" ] || [ -z "$digest" ] \
         || [ -z "$reference" ] || [ -n "${extra:-}" ]; then
       complete=0
       continue
     fi
-    printf '%s\t%s\n' "$digest" "$reference"
-  done <<EOF
+    case "$pair" in
+      ''|*[!A-Za-z0-9._/-]*|/*|*/|*/*/*) complete=0; continue ;;
+      */*) ;;
+      *) complete=0; continue ;;
+    esac
+    printf '%s\t%s\t%s\n' "$digest" "$reference" "$pair"
+  done <<RECORDS
 $1
-EOF
+RECORDS
   [ "$complete" -eq 1 ]
 }
 
@@ -1453,10 +1496,10 @@ EOF
 
 emit_question_records() {
   local held_ids='' held_rows='' id show body origin key status_file open summary \
-    item=0 variant digest reference encoded evidence seen=$'\n' pair complete=1
+    item=0 variant digest reference encoded evidence seen=$'\n' pair pairs evidence_pair complete=1
 
   if fm_tasks_axi_compatible 2>/dev/null; then
-    if held_rows=$(tasks_axi list --state held --kind captain 2>/dev/null); then
+    if held_rows=$(tasks_axi list --state held 2>/dev/null); then
       held_ids=$(printf '%s\n' "$held_rows" \
         | LC_ALL=C awk -F ',' '/^  [A-Za-z0-9._-]+,/ { sub(/^  /, "", $1); print $1 }')
     else
@@ -1475,39 +1518,44 @@ emit_question_records() {
       continue
     fi
     show=$TASK_SHOW_OUTPUT
+    [ "$(show_field_value "$show" hold_kind)" = captain ] || continue
     body=$(decode_body "$(show_field "$show" body)")
-    pair=$(printf '%s\n' "$body" | sed -n 's/^Droid question owner: //p' | head -1)
-    if [ -n "$pair" ]; then
-      origin=${pair%%/*}
-      key=${pair#*/}
-    else
-      origin=$(body_hold_origin "$body")
-      [ -n "$origin" ] || origin=$(printf '%s\n' "$body" | sed -n 's/^Origin: //p' | head -1)
-      key=$(printf '%s\n' "$body" | sed -n 's/^Decision key: //p' | head -1)
-      [ -n "$key" ] || key=$id
-    fi
-    [ -n "$origin" ] || continue
-    item=$((item + 1))
-    seen="${seen}${origin}/${key}"$'\n'
-    printf 'decision\t%s\t%s\t%s\thold\t%s\n' "$item" "$origin" "$key" "$(show_field "$show" title)"
-    variant=0
     evidence=''
     if ! evidence=$(hold_question_evidence "$body"); then
       printf 'limitation\tcaptain-decision hold %s has malformed deferred-question evidence\n' "$id"
       complete=0
     fi
-    while IFS=$'\t' read -r digest reference; do
-      [ -n "$digest" ] && [ -n "$reference" ] || continue
-      if ! encoded=$(encode_question_reference "$origin" "$digest" "$reference"); then
-        printf 'limitation\tcaptain-decision hold %s has unreadable deferred-question evidence %s\n' "$id" "$reference"
-        complete=0
-        continue
-      fi
-      variant=$((variant + 1))
-      emit_question_chunks "$item" "$variant" "$encoded"
-    done <<EOF
+    pairs=$(printf '%s\n' "$evidence" | LC_ALL=C awk -F '\t' 'NF == 3 && !seen[$3]++ { print $3 }')
+    if [ -z "$pairs" ]; then
+      origin=$(body_hold_origin "$body")
+      [ -n "$origin" ] || origin=$(printf '%s\n' "$body" | sed -n 's/^Origin: //p' | head -1)
+      key=$(printf '%s\n' "$body" | sed -n 's/^Decision key: //p' | head -1)
+      [ -n "$key" ] || key=$id
+      [ -n "$origin" ] || continue
+      pairs="$origin/$key"
+    fi
+    while IFS= read -r pair; do
+      origin=${pair%%/*}
+      key=${pair#*/}
+      item=$((item + 1))
+      seen="${seen}${pair}"$'\n'
+      printf 'decision\t%s\t%s\t%s\thold\t%s\n' "$item" "$origin" "$key" "$(show_field "$show" title)"
+      variant=0
+      while IFS=$'\t' read -r digest reference evidence_pair; do
+        [ "$evidence_pair" = "$pair" ] || continue
+        if ! encoded=$(encode_question_reference "$origin" "$digest" "$reference"); then
+          printf 'limitation\tcaptain-decision hold %s has unreadable deferred-question evidence %s\n' "$id" "$reference"
+          complete=0
+          continue
+        fi
+        variant=$((variant + 1))
+        emit_question_chunks "$item" "$variant" "$encoded"
+      done <<RECORDS
 $evidence
-EOF
+RECORDS
+    done <<PAIRS
+$pairs
+PAIRS
   done
 
   for status_file in "$STATE"/*.status; do
@@ -2045,7 +2093,7 @@ sanitize_reconcile_provenance() {
 command_answers() {
   local origin='' source='' row rest key answer label mode id show state hold_kind body digest legacy_digest legacy_key
   local recorded_digest recorded_mode occurrence tmp err closed=0 skipped=0 reason release_flag tab=$'\t'
-  local resolve_rc
+  local resolve_rc valid
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --source) shift; source=${1:-} ;;
@@ -2067,20 +2115,27 @@ command_answers() {
   tmp=$(umask 077; mktemp "${TMPDIR:-/tmp}/fm-keyed-decision.XXXXXX") || fail "cannot stage the captain decision"
   err=$(umask 077; mktemp "${TMPDIR:-/tmp}/fm-keyed-decision-err.XXXXXX") \
     || { rm -f -- "$tmp"; fail "cannot stage the captain decision diagnostics"; }
-  while IFS= read -r row; do
+  while IFS= read -r row || [ -n "$row" ]; do
+    [ -n "$row" ] || continue
+    valid=1
     key=${row%%"$tab"*}
     rest=''
-    case "$row" in *"$tab"*) rest=${row#*"$tab"} ;; esac
+    case "$row" in *"$tab"*) rest=${row#*"$tab"} ;; *) valid=0 ;; esac
     answer=${rest%%"$tab"*}
-    case "$rest" in *"$tab"*) rest=${rest#*"$tab"} ;; *) rest='' ;; esac
+    case "$rest" in *"$tab"*) rest=${rest#*"$tab"} ;; *) rest=''; valid=0 ;; esac
     label=${rest%%"$tab"*}
     case "$rest" in *"$tab"*) mode=${rest#*"$tab"} ;; *) mode='' ;; esac
-    [ -n "${key:-}" ] || continue
-    case "$key" in *[!A-Za-z0-9._-]*) continue ;; esac
-    [ "${#key}" -le 128 ] || continue
+    case "$mode" in *"$tab"*) valid=0 ;; esac
+    case "$key" in ''|*[!A-Za-z0-9._-]*) valid=0 ;; esac
+    [ "${#key}" -le 128 ] || valid=0
     answer=$(sanitize_field "${answer:-}")
-    [ -n "$answer" ] || continue
+    [ -n "$answer" ] || valid=0
     label=$(sanitize_field "${label:-}")
+    if [ "$valid" -ne 1 ]; then
+      printf 'skipped: invalid keyed-answer record (expected task-id, answer, label, and optional close mode TSV fields)\n'
+      skipped=$((skipped + 1))
+      continue
+    fi
     if [ "$answer" = "$RECONCILE_VALUE" ]; then
       printf 'refused: %s (reconcile requests require a bound captured source)\n' "$key"
       skipped=$((skipped + 1))
@@ -2466,6 +2521,7 @@ reconcile_note() {
 command_complete() {
   local origin=${1:-} meta previous='' supplied='' keys='' entry key status_file open has_meta=0 transfer_rc transfers=() resolved
   local resolved_how attested_by_prefix='' origin_state unrecorded_origin='' tmp
+  local question_evidence question_digest question_reference question_owner candidate sole_owner
   [ "$#" -ge 2 ] || { usage >&2; exit 2; }
   validate_slug origin-id "$origin"
   shift
@@ -2532,9 +2588,6 @@ EOF
         fail "cannot record completion for $origin"
       fi
     fi
-    fm_lock_release "$CAPTAIN_META_LOCK"
-    CAPTAIN_META_LOCK_HELD=0
-
     # Transfer every still-open status decision to the durable captain-held
     # inventory so the live status fold does not duplicate the same Captain's
     # Call item. The transfer lines are this home's own bookkeeping closes,
@@ -2544,6 +2597,34 @@ EOF
     if [ -n "$keys" ]; then
       while IFS=$'\t' read -r key _verb _summary; do
         [ -n "$key" ] || continue
+        question_evidence=$(status_question_evidence "$status_file" "$key") \
+          || fail "cannot read deferred-question evidence for $origin/$key"
+        if [ -n "$question_evidence" ]; then
+          question_owner=''
+          sole_owner=''
+          while IFS= read -r entry; do
+            [ -n "$entry" ] || continue
+            candidate=$(resolve_entry "$origin" "$entry") || exit $?
+            candidate=${candidate%% *}
+            if [ "$candidate" = "$key" ] || [ "$candidate" = "$(legacy_hold_id "$origin" "$key")" ]; then
+              question_owner=$candidate
+              break
+            fi
+            if [ -z "$sole_owner" ]; then sole_owner=$candidate; else sole_owner=ambiguous; fi
+          done <<QUESTION_OWNERS
+$(printf '%s\n' "$keys" | tr ',' '\n')
+QUESTION_OWNERS
+          if [ -z "$question_owner" ] && [ "$sole_owner" != ambiguous ]; then question_owner=$sole_owner; fi
+          [ -n "$question_owner" ] || fail "deferred question $origin/$key needs an unambiguous durable owner; use its exact key or transfer it separately"
+          while IFS=$'\t' read -r question_digest question_reference; do
+            [ -n "$question_digest" ] && [ -n "$question_reference" ] || continue
+            question_evidence_path "$origin" "$question_digest" "$question_reference" >/dev/null \
+              || fail "cannot transfer unreadable deferred-question evidence for $origin/$key"
+            preserve_in_hold "$question_owner" "$question_digest" "$question_reference" "$origin" "$key"
+          done <<QUESTION_EVIDENCE
+$question_evidence
+QUESTION_EVIDENCE
+        fi
         transfers+=("captain-held [key=$key]: tracked by $keys")
       done <<EOF
 $open
@@ -2554,6 +2635,8 @@ EOF
         [ "$transfer_rc" -ne 2 ] || fail "cannot append the captain-held transfer for $origin"
       fi
     fi
+    fm_lock_release "$CAPTAIN_META_LOCK"
+    CAPTAIN_META_LOCK_HELD=0
   fi
   printf 'complete: %s captain-call inventory reviewed%s%s%s\n' "$origin" "${keys:+ ($keys)}" \
     "${attested_by_prefix:+ [attested through the configured prefix: $attested_by_prefix]}" \
@@ -2627,7 +2710,6 @@ EOF
 #
 # Output: one `<task-id>\t<origin>\t<key>\t<title>` line per divergence, in
 # status-log then key order; nothing when the two records agree.
-
 # Every still-open task id in this home's backlog, one per line. Only the first
 # two comma-separated listing fields are read - both are slugs that precede any
 # quoted title - so a title containing commas or quotes cannot shift them.
