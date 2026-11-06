@@ -149,8 +149,8 @@
 #      cannot be bound here is reported as unknown - history, but no proof of
 #      the present. A FAILED reading is additionally answered from a newer
 #      record where one states a terminal outcome for this worktree: a later
-#      COMPLETED run the ledger proves is current, or the ledger's own FAILED
-#      verdict; a later CANCELLED row carries no verdict, so it leaves the
+#      COMPLETED run the ledger proves is current (itself failed when its PR
+#      is confirmed closed unmerged), or the ledger's own FAILED verdict; a later CANCELLED row carries no verdict, so it leaves the
 #      failure unprovable (unknown) like any other unbindable row. A DONE
 #      reading claims no such verdict, because unknown is already the whole
 #      answer a contradicted success may publish.
