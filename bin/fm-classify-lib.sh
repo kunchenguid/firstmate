@@ -298,9 +298,16 @@ status_is_terminal_verb() {
 # keeps matching a stamped event however the worker spelled the stamp; other
 # metadata and note text remain intact, as do the stored and surfaced event bytes.
 status_is_captain_relevant() {
-  local line=$1 verb unstamped
+  local line=$1 verb unstamped route_key
   [ -n "$line" ] || return 1
   status_line_verb "$line" verb
+  _fm_status_route_key "$line" route_key
+  if [ -n "$route_key" ]; then
+    case "$verb" in
+      "${FM_CLASSIFY_RESOLVE_VERB:-$FM_CLASSIFY_RESOLVE_VERB_DEFAULT}"|"${FM_CLASSIFY_CAPTAIN_HELD_VERB:-$FM_CLASSIFY_CAPTAIN_HELD_VERB_DEFAULT}") ;;
+      *) return 0 ;;
+    esac
+  fi
   case "$verb" in
     working|resolved|captain-held|"${FM_CLASSIFY_PAUSED_VERB:-$FM_CLASSIFY_PAUSED_VERB_DEFAULT}")
       return 1
@@ -575,9 +582,12 @@ status_event_recorded() {  # <status-file> <new-status-line>
 # masks a still-open needs-decision. status_open_decisions is the ONE authoritative
 # statement of the status-fold contract that fixes this - a needs-decision/blocked
 # line OPENS a keyed decision, and an explicit resolution or a verified
-# captain-held backlog transfer referencing that key CLOSES it.
-# Ship/scout terminal declarations supersede stale log decisions; a secondmate's
-# terminal event may describe other work and cannot close an unrelated decision.
+# captain-held backlog transfer referencing that key CLOSES it. A valid route-*
+# header key also opens on any other verb, and only those two lines close it.
+# Ship/scout terminal declarations supersede stale log decisions but leave
+# route-* records standing, and a route-keyed terminal line opens its own key
+# on top of that pruned set; a secondmate's terminal event may describe other
+# work and cannot close an unrelated decision.
 # Who WRITES the closing line is owned elsewhere: the answering firstmate closes
 # at answer time through fm-send's --resolve-key (bin/fm-send.sh header), and a
 # worker self-closes only a blocker that cleared without an answer (bin/fm-brief.sh
@@ -754,6 +764,33 @@ _fm_decision_key() {  # <status-line> [<keyless>] -> key slug, or <keyless> (def
   _fm_decision_slug_ok "$k" || return 1
   printf '%s' "$k"
 }
+_fm_status_header_route_key() {  # <status-line> -> valid route-* key stated before the colon
+  local unstamped key
+  _fm_status_unstamped "$1" unstamped
+  _fm_key_before_colon "$unstamped" || return 1
+  key=$(_fm_decision_key "$unstamped") || return 1
+  case "$key" in route-*) printf '%s' "$key" ;; *) return 1 ;; esac
+}
+# Same answer into <var>, forking only for a line that can carry such a key.
+_fm_status_route_key() {  # <status-line> <var>
+  case "$1" in
+    *\[key=route-*) printf -v "$2" '%s' "$(_fm_status_header_route_key "$1")" ;;
+    *) printf -v "$2" '%s' '' ;;
+  esac
+}
+# Keep only the route-* records of a newline-separated "<key>\t..." set. This
+# reads the folded key, so a route-* key a plain needs-decision/blocked line
+# stated after the colon survives a terminal line too, although only a key
+# before the colon opens on other verbs.
+_fm_decision_keep_route_keys() {  # <set>
+  local line out=''
+  while IFS= read -r line; do
+    case "$line" in route-*$'\t'*) out="${out}${line}"$'\n' ;; esac
+  done <<EOF
+$1
+EOF
+  printf '%s' "$out"
+}
 # Drop the record for <key> from a newline-terminated "<key>\t<verb>\t<note>" set.
 # Portable (no associative arrays) so the fold runs on bash 3.2 as well as 4+.
 _fm_decision_drop() {  # <open-set> <key>
@@ -770,8 +807,8 @@ EOF
   printf '%s' "$out"
 }
 # Fold ONE status line into an existing "<key>\t<verb>\t<note>\n"-per-line open
-# set, applying the same needs-decision/blocked-opens, resolved/captain-held-closes
-# rule status_open_decisions documents above. Pure text transform, no file I/O.
+# set, applying the needs-decision/blocked and route-key opening rules plus the
+# resolved/captain-held closing rules. Pure text transform, no file I/O.
 # This is the ONE place the per-line open/resolved rule is written; both the
 # whole-file fold (status_open_decisions) and the incremental cursor-backed fold
 # (status_open_decisions_incremental) below call this instead of re-deriving the
@@ -833,7 +870,7 @@ _fm_status_kind() {
 }
 
 _fm_decision_fold_line() {  # <open-set> <status-line> <resolve-verb> <held-verb> <kind> [timed]
-  local open=$1 line=$2 resolve=$3 held=$4 kind=$5 verb key note unstamped
+  local open=$1 line=$2 resolve=$3 held=$4 kind=$5 verb key route_key note unstamped
   local timed=${6:-} epoch
   # Both colon tests below ask where the head ends, the same question the note
   # and key readers ask, so they read the same unstamped copy those readers do.
@@ -855,18 +892,33 @@ _fm_decision_fold_line() {  # <open-set> <status-line> <resolve-verb> <held-verb
     *) printf '%s' "$open"; return 0 ;;
   esac
   status_line_verb "$line" verb
+  _fm_status_route_key "$line" route_key
   case "$unstamped" in
-    *:*) case "$verb:$kind" in done:ship|done:scout|failed:ship|failed:scout) return 0 ;; esac ;;
+    *:*)
+      case "$verb:$kind" in
+        done:ship|done:scout|failed:ship|failed:scout)
+          open=$(_fm_decision_keep_route_keys "$open")
+          [ -n "$route_key" ] || { printf '%s' "$open"; return 0; }
+          ;;
+      esac
+      ;;
   esac
-  case "$verb" in
-    needs-decision|blocked|"$resolve"|"$held") ;;
-    *) printf '%s' "$open"; return 0 ;;
-  esac
-  key=$(_fm_decision_key "$line") || { printf '%s' "$open"; return 0; }
+  key=$route_key
+  if [ -z "$key" ]; then
+    case "$verb" in
+      needs-decision|blocked|"$resolve"|"$held") ;;
+      *) printf '%s' "$open"; return 0 ;;
+    esac
+    key=$(_fm_decision_key "$line") || { printf '%s' "$open"; return 0; }
+  fi
   _fm_decision_key_transition_allowed "$key" "$(status_line_note "$line")" \
     || { printf '%s' "$open"; return 0; }
   case "$verb" in
-    needs-decision|blocked)
+    "$resolve"|"$held")
+      open=$(_fm_decision_drop "$open" "$key")
+      [ -n "$open" ] && open="${open}"$'\n'
+      ;;
+    *)
       note=$(status_line_note "$line")
       if [ "$timed" = timed ]; then
         # The timed view adds an emission-time column, without changing any
@@ -880,10 +932,6 @@ _fm_decision_fold_line() {  # <open-set> <status-line> <resolve-verb> <held-verb
       open=$(_fm_decision_drop "$open" "$key")
       [ -n "$open" ] && open="${open}"$'\n'
       open="${open}${key}"$'\t'"${verb}"$'\t'"${note}"$'\n'
-      ;;
-    "$resolve"|"$held")
-      open=$(_fm_decision_drop "$open" "$key")
-      [ -n "$open" ] && open="${open}"$'\n'
       ;;
   esac
   printf '%s' "$open"
@@ -912,10 +960,10 @@ status_open_decisions() {  # <status-file> [<kind>]
   while IFS= read -r line || [ -n "$line" ]; do
     status_line_verb "$line" verb
     case "$verb" in
-      needs-decision|blocked|done|failed|"$resolve"|"$held")
-        open=$(_fm_decision_fold_line "$open" "$line" "$resolve" "$held" "$kind")
-        ;;
+      needs-decision|blocked|done|failed|"$resolve"|"$held") ;;
+      *) case "$line" in *\[key=route-*) ;; *) continue ;; esac ;;
     esac
+    open=$(_fm_decision_fold_line "$open" "$line" "$resolve" "$held" "$kind")
   done < "$f"
   printf '%s' "$open"
 }
@@ -1036,7 +1084,8 @@ EOF
 
 # The verb that last moved <key> in a status stream, which is what tells a
 # consumer HOW the status side currently reads that key. Prints the opening verb
-# (needs-decision or blocked) while the key is still open, the closing verb
+# (needs-decision or blocked, or whatever verb a route-* key last stated) while
+# the key is still open, the closing verb
 # (resolved, or the captain-held durable-transfer verb) once it is closed, and
 # nothing at all when no line in the stream ever stated a transition for it.
 #
@@ -1067,7 +1116,7 @@ status_key_closing_verb() {  # <status-file> <key>
   resolve=${FM_CLASSIFY_RESOLVE_VERB:-$FM_CLASSIFY_RESOLVE_VERB_DEFAULT}
   held=${FM_CLASSIFY_CAPTAIN_HELD_VERB:-$FM_CLASSIFY_CAPTAIN_HELD_VERB_DEFAULT}
   candidates=$(grep -E \
-    "^[[:space:]]*(needs-decision|blocked|done|failed|$resolve|$held)[[:space:]:[]" \
+    "^[[:space:]]*(needs-decision|blocked|done|failed|$resolve|$held)[[:space:]:[]|\[key=route-" \
     "$f") || [ "$?" -eq 1 ] || candidates=$(cat "$f")
   while IFS= read -r line || [ -n "$line" ]; do
     status_line_verb "$line" event
@@ -1076,7 +1125,7 @@ status_key_closing_verb() {  # <status-file> <key>
       *)
         case "$event" in
           needs-decision|blocked|"$resolve"|"$held") ;;
-          *) continue ;;
+          *) case "$line" in *\[key=route-*) ;; *) continue ;; esac ;;
         esac
         if [ "$want" != default ]; then
           case "$line" in *"[key=$want]"*) ;; *) continue ;; esac
@@ -1230,10 +1279,12 @@ _fm_open_decisions_cursor_path() {  # <status-file>
 # malformed worker stamp whose colons used to pose as the head/note separator
 # no longer opens or closes anything; cursors folded under that reading are
 # discarded.
+# 10: a valid route-* header key opens on any verb and survives the ship/scout
+# terminal rule, so cursors folded without that rule are discarded.
 # Version 4 was already spent on the bracketed-tag parser change above, and a
 # cursor persisted under that reading predates this one, so it must still be
 # discarded and rebuilt from byte 0 under the new reading.
-FM_OPEN_DECISIONS_FOLD_VERSION=9
+FM_OPEN_DECISIONS_FOLD_VERSION=10
 
 # Portable device:inode identity for the rotation/recreation check below.
 _fm_open_decisions_file_ident() {  # <file> -> strongest available identity
@@ -2418,8 +2469,18 @@ $1
 EOF
 }
 
+_fm_decision_origin_prune() {  # <origins> <open-set>
+  local origin
+  while IFS= read -r origin; do
+    [ -n "$origin" ] || continue
+    if _fm_open_set_has "$2" "${origin%%$'\t'*}"; then printf '%s\n' "$origin"; fi
+  done <<EOF
+$1
+EOF
+}
+
 _fm_status_open_decision_origins() {  # <status-file> [<kind>]
-  local f=$1 line open='' after key verb note number=0 origins=''
+  local f=$1 line open='' after key verb note route_key number=0 origins=''
   local resolve held kind
   kind=$(_fm_status_kind "$f" "${2:-}")
   resolve=${FM_CLASSIFY_RESOLVE_VERB:-$FM_CLASSIFY_RESOLVE_VERB_DEFAULT}
@@ -2427,10 +2488,22 @@ _fm_status_open_decision_origins() {  # <status-file> [<kind>]
   while IFS= read -r line || [ -n "$line" ]; do
     number=$((number + 1))
     after=$(_fm_decision_fold_line "$open" "$line" "$resolve" "$held" "$kind")
-    [ -n "$after" ] || origins=''
+    [ "$after" = "$open" ] || origins=$(_fm_decision_origin_prune "$origins" "$after")
     key=$(_fm_decision_key "$line") || { open=$after; continue; }
     verb=$(status_line_verb "$line")
     note=$(status_line_note "$line")
+    _fm_status_route_key "$line" route_key
+    if [ -n "$route_key" ]; then
+      case "$after" in
+        "$route_key"$'\t'"$verb"$'\t'"$note"|*$'\n'"$route_key"$'\t'"$verb"$'\t'"$note")
+          origins=$(_fm_decision_origin_drop "$origins" "$route_key")
+          [ -n "$origins" ] && origins="${origins}"$'\n'
+          origins="${origins}${route_key}"$'\t'"${number}"
+          ;;
+      esac
+      open=$after
+      continue
+    fi
     case "$verb" in
       needs-decision|blocked)
         if _fm_open_set_has "$after" "$key" \
@@ -2444,9 +2517,6 @@ _fm_status_open_decision_origins() {  # <status-file> [<kind>]
           esac
         fi
         ;;
-      "$resolve"|"$held")
-        _fm_open_set_has "$after" "$key" || origins=$(_fm_decision_origin_drop "$origins" "$key")
-        ;;
     esac
     open=$after
   done < "$f"
@@ -2455,7 +2525,7 @@ _fm_status_open_decision_origins() {  # <status-file> [<kind>]
 
 status_span_first_actionable_record() {  # <status-file> <start-offset> [record-var] [needs-decision-var]
   local f=$1 start=${2:-0} output_var=${3-} needs_var=${4-} size ident cur_ident scratch chunk_file result
-  local line verb key origins='' folded=0 rc=1 failed=0 line_number=0 live_line='' events='' _line _key _fm_span_needs_decision=0
+  local line verb key route_key origins='' folded=0 rc=1 failed=0 line_number=0 live_line='' events='' _line _key _fm_span_needs_decision=0
   [ -e "$f" ] || { [ -L "$f" ] && return 2; return 1; }
   [ -f "$f" ] && [ -r "$f" ] && [ ! -L "$f" ] || return 2
   ident=$(_fm_open_decisions_file_ident "$f") || return 2
@@ -2495,15 +2565,19 @@ status_span_first_actionable_record() {  # <status-file> <start-offset> [record-
     fi
     status_is_captain_relevant "$line" || continue
     verb=$(status_line_verb "$line")
-    case "$verb" in
-      needs-decision|blocked)
-        key=$(_fm_decision_key "$line") || {
-          [ -n "$events" ] && events="${events} ; "
-          events="${events}${line}"
-          [ "$verb" = needs-decision ] && _fm_span_needs_decision=1
-          rc=0
-          continue
-        }
+    _fm_status_route_key "$line" route_key
+    case "${route_key:+route}:$verb" in
+      route:*|:needs-decision|:blocked)
+        key=$route_key
+        if [ -z "$key" ]; then
+          key=$(_fm_decision_key "$line") || {
+            [ -n "$events" ] && events="${events} ; "
+            events="${events}${line}"
+            [ "$verb" = needs-decision ] && _fm_span_needs_decision=1
+            rc=0
+            continue
+          }
+        fi
         _fm_decision_key_transition_allowed "$key" "$(status_line_note "$line")" || {
           [ -n "$events" ] && events="${events} ; "
           events="${events}reconciliation-required: ${line}"

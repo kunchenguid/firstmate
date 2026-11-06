@@ -564,6 +564,146 @@ test_keyless_wait_survives_stated_default_retraction
 test_declared_wait_survives_answers_past_the_event_window
 test_bare_prose_cannot_open_or_close_a_decision
 
+test_route_keys_open_until_their_own_resolution() {
+  local dir f verb full incr
+  dir=$(case_dir route-key)
+  for verb in working paused note unfamiliar 'done' failed; do
+    f="$dir/$verb.status"
+    printf '%s [key=route-check]: run the real-app check\n' "$verb" > "$f"
+    full=$(status_open_decisions "$f")
+    incr=$(status_open_decisions_incremental "$f")
+    [ "$full" = "$(printf 'route-check\t%s\trun the real-app check\n' "$verb")" ] \
+      || fail "$verb route key did not open: '$full'"
+    [ "$incr" = "$full" ] || fail "$verb route key incremental fold diverged: '$incr'"
+    status_span_has_actionable "$f" 0 \
+      || fail "$verb route key was not actionable"
+  done
+
+  f="$dir/persistence.status"
+  printf 'working [key=route-check]: run the real-app check\n' > "$f"
+  {
+    printf 'resolved [key=other]: unrelated answer\ndone: finished another task\n'
+    printf 'failed: another task failed\n'
+  } >> "$f"
+  assert_fold "$f" "$(printf 'route-check\tworking\trun the real-app check\n')" \
+    "unrelated and terminal lines do not close a route key"
+  printf 'captain-held [key=route-check]: tracked by t1\n' >> "$f"
+  assert_fold "$f" '' "a verified transfer closes a route key"
+  [ "$(status_key_closing_verb "$f" route-check)" = captain-held ] \
+    || fail "transferred route key reported '$(status_key_closing_verb "$f" route-check)'"
+  [ "$(status_span_first_actionable "$f" 0)" = 'done: finished another task ; failed: another task failed' ] \
+    || fail "a transferred route request stayed actionable: '$(status_span_first_actionable "$f" 0)'"
+  printf 'working [key=route-check]: reopened request\n' >> "$f"
+  assert_fold "$f" "$(printf 'route-check\tworking\treopened request\n')" \
+    "a route key can reopen after its transfer"
+  printf 'resolved [key=route-check]: request completed\n' >> "$f"
+  assert_fold "$f" '' "matching resolution closes a route key"
+
+  f="$dir/reopen.status"
+  printf 'note [key=route-check]: first request\nresolved [key=route-check]: cleared\nworking [key=route-check]: reopened request\n' > "$f"
+  assert_fold "$f" "$(printf 'route-check\tworking\treopened request\n')" \
+    "same route key can reopen after resolution"
+
+  f="$dir/prose.status"
+  printf 'working: the note mentions [key=route-prose]\n' > "$f"
+  assert_fold "$f" '' "route text in note does not open a route key"
+  status_span_has_actionable "$f" 0 && fail "route text in note became actionable"
+
+  f="$dir/note-head.status"
+  printf 'working: [key=route-not-header] note-head key\n' > "$f"
+  assert_fold "$f" '' "note-head key is not a status-header route key"
+
+  f="$dir/resolved-only.status"
+  printf 'resolved [key=route-check]: already handled\n' > "$f"
+  status_span_has_actionable "$f" 0 && fail "a route resolution was treated as a new action"
+  printf 'working [key=route-check]: request\nresolved [key=route-check]: completed\n' > "$f"
+  status_span_has_actionable "$f" 0 && fail "a closed route request stayed actionable"
+
+  f="$dir/reserved.status"
+  printf 'blocked [key=pending-reply-route-check]: not the owner vocabulary\n' > "$f"
+  assert_fold "$f" '' "reserved pending-reply key retains its vocabulary guard"
+  printf 'working [key=route-guarded]: generic note\n' > "$dir/reserved-route.status"
+  full=$(FM_CLASSIFY_RESERVED_KEY_PREFIXES=route- status_open_decisions "$dir/reserved-route.status")
+  [ -z "$full" ] || fail "reserved route namespace bypassed its transition vocabulary"
+  pass "route-key requests remain actionable across verbs until their matching resolution"
+}
+
+test_route_keys_open_until_their_own_resolution
+
+# Issue #8151: "Later unrelated or terminal lines must not silently clear it."
+# A ship's done/failed line still supersedes a stale plain decision, but a
+# route-* request survives it, and status_key_closing_verb reads both the same
+# way the fold does.
+test_route_keys_survive_ship_terminal_declarations() {
+  local dir f terminal
+  dir=$(case_dir route-key-ship)
+  for terminal in 'done: finished the task' 'failed: the task failed'; do
+    f="$dir/${terminal%%:*}.status"
+    printf 'kind=ship\n' > "${f%.status}.meta"
+    printf 'needs-decision [key=env]: which env\nworking [key=route-check]: run the real-app check\n%s\n' \
+      "$terminal" > "$f"
+    assert_fold "$f" "$(printf 'route-check\tworking\trun the real-app check\n')" \
+      "a ship ${terminal%%:*} line closes a plain decision but not a route key"
+    [ "$(status_key_closing_verb "$f" route-check)" = working ] \
+      || fail "route key after ship ${terminal%%:*}: '$(status_key_closing_verb "$f" route-check)'"
+    [ "$(status_key_closing_verb "$f" env)" = "${terminal%%:*}" ] \
+      || fail "plain key after ship ${terminal%%:*}: '$(status_key_closing_verb "$f" env)'"
+    [ "$(status_span_first_actionable "$f" 0)" = "working [key=route-check]: run the real-app check ; $terminal" ] \
+      || fail "span after ship ${terminal%%:*}: '$(status_span_first_actionable "$f" 0)'"
+    printf 'resolved [key=route-check]: request completed\n' >> "$f"
+    assert_fold "$f" '' "resolution closes a route key after a ship ${terminal%%:*}"
+    [ "$(status_key_closing_verb "$f" route-check)" = resolved ] \
+      || fail "resolved route key reported '$(status_key_closing_verb "$f" route-check)'"
+  done
+  f="$dir/route-done.status"
+  printf 'kind=ship\n' > "${f%.status}.meta"
+  printf 'needs-decision [key=env]: which env\nworking [key=route-other]: earlier request\ndone [key=route-check]: finished, please route\n' > "$f"
+  assert_fold "$f" "$(printf 'route-other\tworking\tearlier request\nroute-check\tdone\tfinished, please route\n')" \
+    "a route-keyed ship done line clears plain decisions and opens its own key"
+  [ "$(status_key_closing_verb "$f" env)" = 'done' ] \
+    || fail "plain key after a route-keyed done: '$(status_key_closing_verb "$f" env)'"
+  [ "$(status_span_first_actionable "$f" 0)" = 'working [key=route-other]: earlier request ; done [key=route-check]: finished, please route' ] \
+    || fail "span after a route-keyed done: '$(status_span_first_actionable "$f" 0)'"
+  pass "route-key requests survive ship terminal declarations until their own resolution"
+}
+
+test_route_keys_survive_ship_terminal_declarations
+
+# A route request that is not the first open record in a span must surface
+# alongside the record before it; a route-keyed needs-decision line keeps the
+# decision-owned side-band marker, and a route-keyed captain-held transfer is
+# the same non-actionable side-band signal it is for a plain key.
+test_route_keys_surface_behind_other_open_records() {
+  local dir f record needs
+  dir=$(case_dir route-key-span)
+  f="$dir/behind-plain.status"
+  printf 'blocked [key=vendor]: waiting on vendor\nworking [key=route-check]: run the real-app check\n' > "$f"
+  [ "$(status_span_first_actionable "$f" 0)" = 'blocked [key=vendor]: waiting on vendor ; working [key=route-check]: run the real-app check' ] \
+    || fail "route request behind an open decision: '$(status_span_first_actionable "$f" 0)'"
+  f="$dir/behind-route.status"
+  printf 'working [key=route-a]: first\nworking [key=route-b]: second\n' > "$f"
+  [ "$(status_span_first_actionable "$f" 0)" = 'working [key=route-a]: first ; working [key=route-b]: second' ] \
+    || fail "route request behind another route request: '$(status_span_first_actionable "$f" 0)'"
+  f="$dir/superseded.status"
+  printf 'working [key=route-a]: first\nblocked [key=route-a]: second\n' > "$f"
+  [ "$(status_span_first_actionable "$f" 0)" = 'blocked [key=route-a]: second' ] \
+    || fail "only the live route line surfaces: '$(status_span_first_actionable "$f" 0)'"
+
+  f="$dir/marker.status"
+  printf 'needs-decision [key=route-check]: which env\n' > "$f"
+  status_span_first_actionable_record "$f" 0 record needs || fail "route needs-decision was not actionable"
+  [ "$needs" = 1 ] || fail "route needs-decision lost the decision marker: '$needs'"
+  printf 'captain-held [key=route-check]: transferred\n' > "$f"
+  status_span_first_actionable_record "$f" 0 record needs && fail "route captain-held became actionable"
+  [ "$needs" = 1 ] || fail "route captain-held lost the side-band marker: '$needs'"
+  printf 'working [key=route-check]: run the real-app check\n' > "$f"
+  status_span_first_actionable_record "$f" 0 record needs || fail "route working was not actionable"
+  [ "$needs" = 0 ] || fail "route working set the decision marker: '$needs'"
+  pass "route-key requests surface behind other open records and keep their decision marker"
+}
+
+test_route_keys_surface_behind_other_open_records
+
 # status_event_recorded is an idempotent retry check: a stamped retry matches,
 # and no later resolved line - for another key, outside the reserved-key
 # vocabulary, or the real close of that key - makes a recorded line new again.
