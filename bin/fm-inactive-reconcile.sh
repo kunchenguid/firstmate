@@ -522,7 +522,7 @@ claim_inactive_report_for_ledger() { # <task> <incarnation> <state> <ledger-fing
 # delivered, or nothing is owed, and 1 when it is owed but the parent channel
 # could not be written (the notice is queued once per record).
 report_child_ledger_locked() { # <id> <meta>
-  local id=$1 meta=$2 status last previous state note pr mode yolo data incarnation fingerprint predecessor_head outcome_key line url
+  local id=$1 meta=$2 status last previous state note pr mode yolo data incarnation fingerprint predecessor_head outcome_key line
   status="$STATE/$id.status"
   last=$(child_terminal_ledger_line "$status") || return 0
   state=$(status_line_verb "$last")
@@ -536,8 +536,7 @@ report_child_ledger_locked() { # <id> <meta>
       "$STATE" "$id" "$meta" meta-locked >/dev/null; then
     if [ "$(meta_field "$meta" mode)" != local-only ] \
       && [ "$(meta_field "$meta" forge)" != external ] \
-      && url=$(fm_dod_pr_url_from_done_note "$(status_line_note "$last")") \
-      && fm_pr_url_parse "$url" && ! fm_pr_expected_base "$meta" >/dev/null 2>&1; then
+      && ! fm_pr_expected_base "$meta" >/dev/null 2>&1; then
       note=$("$SCRIPT_DIR/fm-pr-poll.sh" --base-unavailable "$meta") || return 1
       if [ -n "$note" ]; then
         outcome_key="child-pr-base-$id-$(cat "${meta%.meta}.pr-base-parent-notified")"

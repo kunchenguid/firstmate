@@ -1763,25 +1763,30 @@ SH
 }
 
 test_legacy_ledger_reports_missing_base_once() {
-  local route target
+  local route target note index
   for route in local remote; do
-    make_world "legacy-ledger-base-$route"; bind_secondmate "$route"
-    write_child "$MATE" child 'done: PR https://github.com/o/r/pull/1'
-    FM_TEST_META_EXPECTED_BASE='' fm_write_meta "$MATE/state/child.meta" \
-      "worktree=$MATE/projects/child" "project=$MATE/projects/child" \
-      'kind=ship' 'mode=direct-PR' 'pr=https://github.com/o/r/pull/1'
-    run_report "$MATE" child || fail 'legacy ledger refusal could not be delivered'
-    run_report "$MATE" child || fail 'second legacy ledger visit failed'
-    target="$MAIN/state/mate.status"
-    [ "$route" != remote ] || target="$MATE/state/parent-replies.status"
-    assert_grep 'task child merge/readiness refused' "$target" 'parent did not receive the refusal'
-    grep -Eq '^blocked( \[[^]]*\])*: ' "$target" || fail 'parent refusal was not a blocked event'
-    assert_grep 'bin/fm-pr-check.sh recovery steps' "$target" 'parent refusal lost its recovery pointer'
-    [ "$(grep -c 'task child merge/readiness refused' "$target")" = 1 ] \
-      || fail 'legacy ledger repeated the recovery notice'
-    assert_no_regex '^done' "$target" 'legacy ledger claimed readiness without destination proof'
-    [ "$(outcome_count "$MATE" reported)" = 0 ] || fail 'legacy refusal became a terminal outcome'
-    [ ! -s "$WORLD/forge.log" ] || fail 'missing task destination triggered a forge lookup'
+    index=0
+    for note in 'PR https://github.com/o/r/pull/1' 'PR #1' \
+      'opened https://github.com/o/r/pull/1' 'implementation complete'; do
+      index=$((index + 1))
+      make_world "legacy-ledger-base-$route-$index"; bind_secondmate "$route"
+      write_child "$MATE" child "done: $note"
+      FM_TEST_META_EXPECTED_BASE='' fm_write_meta "$MATE/state/child.meta" \
+        "worktree=$MATE/projects/child" "project=$MATE/projects/child" \
+        'kind=ship' 'mode=direct-PR' 'pr=https://github.com/o/r/pull/1'
+      run_report "$MATE" child || fail 'legacy ledger refusal could not be delivered'
+      run_report "$MATE" child || fail 'second legacy ledger visit failed'
+      target="$MAIN/state/mate.status"
+      [ "$route" != remote ] || target="$MATE/state/parent-replies.status"
+      assert_grep 'task child merge/readiness refused' "$target" 'parent did not receive the refusal'
+      grep -Eq '^blocked( \[[^]]*\])*: ' "$target" || fail 'parent refusal was not a blocked event'
+      assert_grep 'bin/fm-pr-check.sh recovery steps' "$target" 'parent refusal lost its recovery pointer'
+      [ "$(grep -c 'task child merge/readiness refused' "$target")" = 1 ] \
+        || fail 'legacy ledger repeated the recovery notice'
+      assert_no_regex '^done' "$target" 'legacy ledger claimed readiness without destination proof'
+      [ "$(outcome_count "$MATE" reported)" = 0 ] || fail 'legacy refusal became a terminal outcome'
+      [ ! -s "$WORLD/forge.log" ] || fail 'missing task destination triggered a forge lookup'
+    done
   done
   pass 'legacy terminal ledgers report missing-base refusal once on either parent route'
 }

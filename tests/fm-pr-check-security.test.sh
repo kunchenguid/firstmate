@@ -4280,7 +4280,7 @@ test_legacy_poll_notices_once_until_rearmed() {
 }
 
 test_legacy_notice_audiences_are_independent() {
-  local dir state replies route order cycle
+  local dir state replies route order cycle note
   for route in local remote; do
     for order in ledger-first watcher-first; do
       dir=$(make_case "legacy-audiences-$route-$order")
@@ -4297,8 +4297,10 @@ test_legacy_notice_audiences_are_independent() {
       seed_canonical_poll "$dir" task-a https://github.com/o/r/pull/1
       add_stop_custom_check "$dir"
       if [ "$order" = ledger-first ]; then
-        printf 'done: PR https://github.com/o/r/pull/1\n' > "$state/task-a.status"
+        note='PR #1'
+        printf 'done: %s\n' "$note" > "$state/task-a.status"
       else
+        note='opened https://github.com/o/r/pull/1'
         printf 'working: implementing\n' > "$state/task-a.status"
       fi
       FM_TEST_GH_STATE=MERGED run_watcher_bounded "$dir/home" "$dir/fakebin" \
@@ -4309,7 +4311,7 @@ test_legacy_notice_audiences_are_independent() {
         || fail 'local audience did not receive exactly one recovery wake'
       if [ "$order" = watcher-first ]; then
         assert_absent "$replies" 'working child unexpectedly produced a parent outcome'
-        printf 'done: PR https://github.com/o/r/pull/1\n' > "$state/task-a.status"
+        printf 'done: %s\n' "$note" > "$state/task-a.status"
         mv "$dir/home/.fm-secondmate-parent" "$dir/home/.fm-secondmate-parent.saved"
         if FM_HOME="$dir/home" FM_STATE_OVERRIDE="$state" PATH="$dir/fakebin:$BASE_PATH" \
           "$ROOT/bin/fm-inactive-reconcile.sh" report task-a > "$dir/refused.out" 2> "$dir/refused.err"; then

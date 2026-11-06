@@ -271,7 +271,7 @@ test_standalone_local_only_needs_project_ref() {
 }
 
 test_free_text_sha_is_not_the_named_head() {
-  local repo wt old new reason rc
+  local repo wt old new reason rc meta
   repo="$TMP_ROOT/hex-repo"
   wt="$TMP_ROOT/hex-wt"
   fm_git_worktree "$repo" "$wt" fm/hex
@@ -279,7 +279,10 @@ test_free_text_sha_is_not_the_named_head() {
   git -C "$wt" update-ref refs/remotes/origin/main "$old"
   git -C "$wt" commit -q --allow-empty -m 'actual fix'
   new=$(git -C "$wt" rev-parse HEAD)
-  reason=$(accept_done ship direct-PR "$wt" "$repo" "done: reverted $old and fixed the retry")
+  meta="$TMP_ROOT/hex.meta"
+  printf 'expected_base=main\n' > "$meta"
+  reason=$(accept_done ship direct-PR "$wt" "$repo" \
+    "done: PR https://github.com/o/r/pull/12 reverted $old and fixed the retry" "$TMP_ROOT" hex "$meta")
   rc=$?
   [ "$rc" -eq 1 ] || fail "free-text SHA on origin/main made an unpushed HEAD accept"
   case "$reason" in
@@ -406,8 +409,9 @@ test_ci_ready_requires_pr_reference() {
   pass "CI-ready notes require checks green and an actual PR reference"
 }
 
-test_ci_ready_destination_gate_covers_every_accepted_form() {
+test_readiness_destination_gate_covers_every_accepted_form() {
   local repo wt state meta missing sha note mode reason rc proof
+  local -a notes
   repo="$TMP_ROOT/ci-destination-repo"
   wt="$TMP_ROOT/ci-destination-wt"
   state="$TMP_ROOT/ci-destination-state"
@@ -424,18 +428,34 @@ test_ci_ready_destination_gate_covers_every_accepted_form() {
     DOD_FORGE_BASE=main accept_done ship "$mode" "$wt" "$repo" \
       'done: PR https://github.com/o/r/pull/12 checks green' "$state" task "$meta" \
       || fail "matching destination and published head were refused for mode '$mode'"
-    for note in \
-      'PR https://github.com/o/r/pull/12 checks green' \
-      'checks green: https://github.com/o/r/pull/12' \
-      'PR #12 checks green' \
-      'checks green: PR#12' \
-      'https://github.com/o/r/pull/12 checks green' \
-      'https://gitlab.com/o/r/-/merge_requests/12 checks green' \
-      'https://git.example.org/team/repo/pulls/12 checks green' \
-      '/pull/12 checks green' \
-      'checks green after review (https://github.com/o/r/pull/12)' \
-      'PR http://github.com/o/r/pull/12 checks green'; do
-      fm_dod_note_reports_ci_ready "$note" || fail "fixture is not CI-ready: $note"
+    notes=(
+      'PR https://github.com/o/r/pull/12 checks green'
+      'checks green: https://github.com/o/r/pull/12'
+      'PR #12 checks green'
+      'checks green: PR#12'
+      'https://github.com/o/r/pull/12 checks green'
+      'https://gitlab.com/o/r/-/merge_requests/12 checks green'
+      'https://git.example.org/team/repo/pulls/12 checks green'
+      '/pull/12 checks green'
+      'checks green after review (https://github.com/o/r/pull/12)'
+      'PR http://github.com/o/r/pull/12 checks green'
+    )
+    if [ "$mode" = direct-PR ]; then
+      DOD_FORGE_BASE=main accept_done ship "$mode" "$wt" "$repo" \
+        'done: PR https://github.com/o/r/pull/12' "$state" task "$meta" \
+        || fail 'matching direct-PR destination without checks-green text was refused'
+      notes+=(
+        'PR https://github.com/o/r/pull/12'
+        'PR #12'
+        'opened https://github.com/o/r/pull/12'
+        'https://github.com/o/r/pull/12'
+        '/pull/12'
+        'implementation complete'
+        'PR http://github.com/o/r/pull/12'
+      )
+    fi
+    for note in "${notes[@]}"; do
+      fm_dod_should_gate_ship_done ship "$mode" "done: $note" || fail "fixture is not gated: $note"
       for proof in wrong unreadable missing; do
         rc=0
         case "$proof" in
@@ -449,15 +469,15 @@ test_ci_ready_destination_gate_covers_every_accepted_form() {
             reason=$(accept_done ship "$mode" "$wt" "$repo" \
               "done: $note" "$state" task "$missing") || rc=$? ;;
         esac
-        [ "$rc" -eq 1 ] || fail "$proof destination accepted CI-ready mode '$mode': $note"
+        [ "$rc" -eq 1 ] || fail "$proof destination accepted readiness mode '$mode': $note"
         case "$reason" in
-          *'expected PR base'*|*'CI-ready PR destination could not be resolved'*) ;;
+          *'expected PR base'*|*'PR destination could not be resolved'*) ;;
           *) fail "destination refusal was masked by another guard: $reason" ;;
         esac
       done
     done
   done
-  pass 'every accepted CI-ready note form requires destination proof despite a published head'
+  pass 'every gated publishing note requires destination proof despite a published head'
 }
 
 test_ci_ready_variants_are_gated() {
@@ -685,7 +705,7 @@ test_canonical_pr_requires_destination_metadata() {
 }
 
 test_canonical_pr_requires_destination_metadata
-test_ci_ready_destination_gate_covers_every_accepted_form
+test_readiness_destination_gate_covers_every_accepted_form
 test_scout_done_is_not_gated
 test_unpushed_ship_done_is_refused
 test_no_mistakes_prevalidation_done_is_not_gated

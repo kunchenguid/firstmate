@@ -1009,7 +1009,7 @@ fm_dod_named_head_reachable_outside_worktree() {  # <worktree> <project> <mode> 
 # output. <state> <id> <meta> supply pr=,
 # pr_head=, and the merge-notified marker; <meta> may be a captured copy
 # (bin/fm-fleet-snapshot.sh), so the marker is read from <state>.
-# Every CI-ready claim requires a supported PR URL, task metadata and a matching
+# Every gated publishing claim requires a supported PR URL, task metadata and a matching
 # live destination; published-head proof alone cannot supply that destination.
 # The inherited FM_READ_DEADLINE caps readiness reads at the scan budget remaining.
 fm_dod_accept_ship_done() {  # <kind> <mode> <worktree> <project> <line> [<state> <id> <meta> [meta-locked]]
@@ -1030,14 +1030,11 @@ fm_dod_accept_ship_done() {  # <kind> <mode> <worktree> <project> <line> [<state
   fi
   note=$(status_line_note "$line")
   url=$(fm_dod_pr_url_from_done_note "$note") || url=
-  # Readiness, not a note prefix, owns this gate. An unresolved CI-ready PR
-  # cannot fall back to published-head evidence without proving its destination.
-  if [ "$mode" != local-only ] && fm_dod_note_reports_ci_ready "$note" \
-    && ! fm_pr_url_parse "$url"; then
-    printf '%s\n' 'CI-ready PR destination could not be resolved; report a canonical PR URL so its expected base can be verified'
-    return 1
-  fi
-  if [ "$mode" != local-only ] && fm_pr_url_parse "$url"; then
+  if [ "$mode" != local-only ]; then
+    if ! fm_pr_url_parse "$url"; then
+      printf '%s\n' 'PR destination could not be resolved; report a canonical PR URL so its expected base can be verified'
+      return 1
+    fi
     # Readiness runs under a child's metadata lock during ledger scans. Bound
     # the forge read so unavailable proof refuses only this child's claim.
     # Use one timer at the read, not a nested timer around the caller: killing
