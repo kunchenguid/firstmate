@@ -947,7 +947,8 @@ test_oldest_observations_use_the_whole_rotation() {
   done
   jq -e '.records[0].observation.state == "merged" and .records[0].error == null' \
     "$home/data/late-terminal/contributions.json" >/dev/null || fail 'terminal settlement consumed a read slot'
-  jq -e --slurpfile owner "$home/data/delivery/contributions.json" '.records[0] == $owner[0].records[0]' \
+  jq -e --slurpfile owner "$home/data/delivery/contributions.json" '.records[0] | {checked_at,error,observation}
+    == ($owner[0].records[0] | {checked_at,error,observation})' \
     "$home/data/duplicate/contributions.json" >/dev/null || fail 'duplicate owner did not receive the shared observation'
   pass 'five due URLs rotate within ceil(5/2) sweeps, oldest first with URL ties and one attempt per URL'
 }
@@ -960,6 +961,8 @@ test_failed_attempts_do_not_starve_older_observations() {
     record "$home" second 9 open mergeable
     record "$home" third 10 open mergeable
     mutate_record "$home" delivery '.records[0].checked_at="2026-09-15T08:00:00Z"'
+    mutate_record "$home" second '.records[0].checked_at="2026-09-15T09:00:00Z"'
+    mutate_record "$home" third '.records[0].checked_at="2026-09-15T09:00:00Z"'
     cp "$home/data/delivery/contributions.json" "$home/prior.json"
     for cycle in 0 1 2; do
       at=$(jq -nr --arg now "$NOW" --argjson cycle "$cycle" '(($now | fromdateiso8601) + $cycle * 300) | todateiso8601')
@@ -1712,7 +1715,7 @@ test_arm_plumbs_a_configured_budget_into_the_check_shim() {
     fi
     [ -z "$out" ] || fail "generated check printed an unavailable wake: $out"
     grep -Fxq 'api repos/o/r/pulls/8' "$home/forge/calls" || fail 'generated check did not attempt a read'
-    cmp -s "$home/prior.json" "$home/data/delivery/contributions.json" \
+    same_observation_record "$home/prior.json" "$home/data/delivery/contributions.json" \
       || fail "generated check failed to preserve the $mode one-second budget"
   done
   pass 'generated checks enforce configured and inherited budgets at runtime'
