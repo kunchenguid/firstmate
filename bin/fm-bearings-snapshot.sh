@@ -36,7 +36,9 @@
 # captain hold still contributes each working child as its own Underway row;
 # the home row on secondmates[] keeps the decision and gate classification.
 # Captain-hold placement follows the canonical snapshot's hold_bucket and
-# nothing else; this wrapper never inspects hold reason or body prose. The
+# nothing else. The only reason inspection this wrapper performs is the
+# presentation flag: a call whose decoded hold reason is nothing but a canonical
+# report pointer (data/<task>/report.md) still needs presenting. The
 # buckets are total and mutually exclusive, so every captain hold appears in
 # exactly one decision bucket and none can fall through both. An actively worked
 # held task may also appear in Underway. A "live" hold is a default Captain's Call
@@ -150,13 +152,16 @@ remote homes under one shared snapshot budget and may refresh the parent-side ca
 Default fields: schema, home, generated, prs, in_flight{id,kind,state,repo,name,doing},
   secondmates{id,state,doing,provenance,freshness,age_seconds,contradiction,reason},
   secondmate_reconcile{id,spawn_gen,host,kind,ids},
-  decisions_open{id,key,verb,summary,question,owner}, landed{id,what,artifact,owner},
+  decisions_open{id,key,verb,summary,question,presentation,stops_worker,owner},
+  landed{id,what,artifact,owner},
   gates{id,title,blocked_by,reason,owner,filed}, reports{id,path}, recorded_prs{id,url},
   unhealthy_endpoints{...} (only when non-empty), omitted{surface,reveal}.
 Default gates are selected newest filed first before their bound; undated gates
   retain input order after dated gates.
 Decision presentation uses question, the full title and hold reason; summary
   remains a bounded overview and must not substitute for the question/options.
+decisions_open lists calls that stop a live worker first and otherwise keeps
+  backlog order.
 landed merges this home's Done with registered secondmate homes' Done, bounded by
   a per-home cap (FM_BEARINGS_LANDED_PER_HOME) and an overall cap (FM_BEARINGS_LANDED),
   with omitted[] disclosure. Default selection is balanced across deterministic home
@@ -393,6 +398,12 @@ MODEL=$(printf '%s' "$SNAP" | jq \
       elif length > $n then (if $n == 1 then "…" else (.[:($n - 1)] + "…") end)
       else . end;
   def live_captain_call: .hold_bucket == "live";
+  def report_pointer_reason($reason):
+    ($reason // "") | test("^data/[^[:space:])]+/report\\.md$");
+  def decision_presentation(pointer):
+    if pointer then "needs presenting" else "presented" end;
+  def decision_stops_worker:
+    .state == "in_flight" and ((.unresolved_blocker_ids // []) | length) == 0;
   def projected_deferred_hold:
     .hold_bucket != null and .hold_bucket != "live";
   def bounded_blocker_note($n):
@@ -532,7 +543,9 @@ MODEL=$(printf '%s' "$SNAP" | jq \
          | select(($all_decisions == 1) or live_captain_call)
          | {id,key:.id,verb:"captain-hold",
             summary:hold_summary(.title; .hold_reason),
-            question:(.title + ": " + .hold_reason),owner:"(main)"} ]
+            question:(.title + ": " + .hold_reason),
+            presentation:decision_presentation(report_pointer_reason(.hold_reason)),
+            stops_worker:decision_stops_worker,owner:"(main)"} ]
      + [ (.secondmate_current.records // [])[] as $m
          | ([ $m.decisions_open[]?
               | select(.source == "backlog" and .verb == "captain-hold")
@@ -540,7 +553,9 @@ MODEL=$(printf '%s' "$SNAP" | jq \
               | {id:($m.id + "/" + .id),key,verb,
                  summary:hold_summary((.summary // .id);
                                       (.reason // "captain decision pending")),
-                 question:(.question // ((.summary // .id) + ": " + (.reason // "captain decision pending"))),owner:$m.id} ]
+                 question:(.question // ((.summary // .id) + ": " + (.reason // "captain decision pending"))),
+                 presentation:decision_presentation(report_pointer_reason(.reason)),
+                 stops_worker:false,owner:$m.id} ]
             + [ $m.queued[]?
                 | select($all_decisions == 1 and .hold_kind == "captain")
                 | select(.id as $id
@@ -551,7 +566,10 @@ MODEL=$(printf '%s' "$SNAP" | jq \
                 | {id:($m.id + "/" + .id),key:.id,verb:"captain-hold",
                    summary:hold_summary((.title // .id);
                                         (.hold_reason // "captain decision pending")),
-                   question:(.question // ((.title // .id) + ": " + (.hold_reason // "captain decision pending"))),owner:$m.id} ])[] ]) as $decisions_all
+                   question:(.question // ((.title // .id) + ": " + (.hold_reason // "captain decision pending"))),
+                   presentation:decision_presentation(report_pointer_reason(.hold_reason)),
+                   stops_worker:false,owner:$m.id} ])[] ]
+       | (map(select(.stops_worker)) + map(select(.stops_worker | not)))) as $decisions_all
   | ([ .backlog.records[]
          | . as $record
          | select(.structured and projected_deferred_hold) ]

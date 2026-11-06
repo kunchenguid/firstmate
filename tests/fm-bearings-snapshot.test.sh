@@ -1125,6 +1125,47 @@ test_open_decision_surfaces_end_to_end() {
   pass "an authoritative captain hold surfaces end-to-end"
 }
 
+test_decision_presentation_preserves_questions() {
+  local home fakebin encoded json
+  home=$(make_home decision-presentation)
+  mkdir -p "$home/data" "$home/projects/waiting-call"
+  encoded=$(. "$ROOT/bin/fm-hold-reason-lib.sh" && fm_hold_reason_encode data/proposal/report.md)
+  cat > "$home/data/backlog.md" <<EOF
+## Queued
+- [ ] blocked-call - Choice with unmet prerequisites blocked-by: missing-prerequisite (repo: firstmate) (kind: captain) (hold: Pick a route) (hold-kind: captain)
+- [ ] long-call - Choose how to configure this detailed feature (repo: firstmate) (kind: captain) (hold: Should the feature start enabled? A: Keep it disabled until checks pass. B: Enable it now and accept the initial risk.) (hold-kind: captain)
+- [ ] path-call - Review proposal (repo: firstmate) (kind: captain) (hold: $encoded) (hold-kind: captain)
+- [ ] pending-prerequisite - Groundwork still queued (repo: firstmate) (kind: ship)
+
+## In flight
+- [ ] waiting-call - Worker needs a captain choice (repo: firstmate) (kind: ship) (hold: Should the worker continue? A: Continue now. B: Stop safely.) (hold-kind: captain)
+- [ ] cleared-call - Worker waits behind landed groundwork blocked-by: finished-prerequisite (repo: firstmate) (kind: ship) (hold: Ship now? A: Yes. B: No.) (hold-kind: captain)
+- [ ] gated-call - Worker waits behind queued groundwork blocked-by: pending-prerequisite (repo: firstmate) (kind: ship) (hold: Ship later? A: Yes. B: No.) (hold-kind: captain)
+
+## Done
+- [x] finished-prerequisite - Groundwork that landed (repo: firstmate) (kind: ship) (done 2026-07-10)
+EOF
+  fm_write_meta "$home/state/waiting-call.meta" \
+    "window=firstmate:fm-waiting-call" "worktree=$home/projects/waiting-call" \
+    "project=firstmate" "harness=claude" "kind=ship" "mode=no-mistakes"
+  printf 'paused: waiting for the captain choice\n' > "$home/state/waiting-call.status"
+  fakebin=$(make_fakebin "$home")
+  json=$(run "$home" "$fakebin" --json --all-decisions)
+  printf '%s' "$json" | jq -e '
+    [.decisions_open[].id] == ["waiting-call", "cleared-call", "blocked-call", "long-call", "path-call", "gated-call"]
+      and ([.decisions_open[] | select(.id == "waiting-call")][0].stops_worker == true)
+      and ([.decisions_open[] | select(.id == "cleared-call")][0].stops_worker == true)
+      and ([.decisions_open[] | select(.id == "gated-call")][0].stops_worker == false)
+      and ([.decisions_open[] | select(.id == "blocked-call")][0]
+        | .stops_worker == false and .presentation == "presented")
+      and ([.decisions_open[] | select(.id == "long-call")][0].question
+      | contains("Should the feature start enabled? A: Keep it disabled until checks pass. B: Enable it now and accept the initial risk."))
+      and ([.decisions_open[] | select(.id == "path-call")][0]
+        | .question == "Review proposal: data/proposal/report.md" and .presentation == "needs presenting")
+  ' >/dev/null || fail "decision presentation lost question, path warning, or worker priority: $json"
+  pass "decision presentation preserves full questions, marks encoded path-only reasons, and lists worker waits first"
+}
+
 test_report_pointers_surface() {
   local home fakebin json
   home=$(make_home reports); write_fixture "$home"
@@ -3398,6 +3439,9 @@ EOF
   ' >/dev/null || fail "full local/secondmate question was lost: $json"
   printf '%s' "$json" | jq -e '
     [.decisions_open[].id] == ["full-call", "report-call", "questions/full-call", "questions/report-call"]
+    and all(.decisions_open[]; .stops_worker == false)
+    and ([.decisions_open[] | select(.id | endswith("report-call")) | .presentation]
+      == ["needs presenting", "needs presenting"])
     and ([.decisions_open[] | select(.id | endswith("report-call")) | .question]
       == ["Review the proposal: data/proposal/report.md", "Review the proposal: data/proposal/report.md"])
   ' >/dev/null || fail "question transport changed placement or report-only text: $json"
@@ -3444,6 +3488,7 @@ test_supplied_secondmate_questions_and_legacy_optional_fields() {
     "$BEARINGS" --json --all-decisions)
   printf '%s' "$json" | jq -e --arg reason "$reason" '
     [.decisions_open[].id] == ["ledger-1/supplied", "ledger-1/minimal", "ledger-1/report", "ledger-1/queued-only"]
+    and (.decisions_open | any(.id == "ledger-1/report" and .presentation == "needs presenting"))
     and (.decisions_open | any(.id == "ledger-1/supplied" and .question == ("Supplied question: " + $reason)))
     and (.decisions_open | any(.id == "ledger-1/minimal" and .question == "minimal: captain decision pending"))
     and (.decisions_open | any(.id == "ledger-1/report" and .question == "Review report: data/supplied/report.md"))
@@ -3501,6 +3546,7 @@ fm_test_run \
   test_main_captain_readiness_matches_secondmate_projection \
   test_completed_scout_report_not_pending \
   test_open_decision_surfaces_end_to_end \
+  test_decision_presentation_preserves_questions \
   test_report_pointers_surface \
   test_queued_item_prose_never_hides_it \
   test_include_prs_is_the_only_fetch_path \
