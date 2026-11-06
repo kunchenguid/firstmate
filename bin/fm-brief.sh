@@ -21,6 +21,8 @@
 #   data/<task-id>/report.md (no branch, no push, no PR) and the worktree is scratch.
 #   It offers the Lavish review loop only when `fm-bootstrap.sh lavish-compatible`
 #   confirms the legacy board-compatibility floor; otherwise it asks for a text report.
+#   Its Definition of done opens with the "Terminal condition:" line;
+#   bin/fm-dod-lib.sh owns the ship modes' completion contracts.
 #   --secondmate writes a persistent secondmate charter. The project list
 #   is cloned into the secondmate home, while the natural-language scope
 #   tells the main firstmate when to route work there; routine churn stays in its own home;
@@ -741,6 +743,7 @@ $SHARED_NO_CD_RULE
 $WAIT_BLOCK$INBOX_SECTION
 
 # Definition of done
+Terminal condition: \`done [at=<epoch>]: {one-line conclusion}\`. That is this task's ONLY legal \`done:\` line, and it is legal only once the report below exists and the completion gate passes; then append it to the status file and stop.
 Write your findings to \`$DATA/$ID/report.md\`.
 The report must stand alone: what you did, what you found, the evidence (commands run, output, file:line references), and what you recommend.
 $LAVISH_LINE
@@ -812,7 +815,9 @@ $RULE1
    https:// URL exactly as the forge printed it, never a bare number such as "PR 108"; firstmate
    copies that URL from your line rather than assembling one.
    A mid-task \`working:\` line (including setup complete) is nonterminal: do not end the
-   turn after it; continue the same stage until a defined \`done:\` gate under Definition of done.
+   turn after it; continue the same stage until a stop gate the Definition of done names.
+   The one exception: where the Definition of done names a \`working:\` line as its stop gate,
+   end the turn on that line.
 $CREWMATE_PAUSE_INSTRUCTIONS
 5. If you hit the same obstacle twice, append \`blocked [at=<epoch>]: {why}\` and stop; firstmate will help.
 6. If a decision belongs above the implementation worker (product choices, destructive actions),
