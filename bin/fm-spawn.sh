@@ -3733,19 +3733,44 @@ relaunch_claude_resume_args() {  # <harness> <backend> <meta-file>
 # effort: a worker that has not written its file within the wait leaves the
 # record as it was, and a later relaunch then starts fresh.
 record_claude_session_id() {  # <target> <worktree> <meta-file>
-  local target=$1 wt=$2 meta=$3 root attempt pids id tmp
+  local target=$1 wt=$2 meta=$3 root attempt pids id=
   root=$(claude_config_root)
   for attempt in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
     pids=$(fm_backend_rex_live_pids "$target" | jq -r '.[]' 2>/dev/null) || pids=
     # shellcheck disable=SC2086
-    if id=$(fm_control_claude_session_id "$root" "$wt" $pids); then
-      tmp="$meta.claude-session.${BASHPID:-$$}"
-      { grep -v '^claude_session_id=' "$meta" 2>/dev/null; printf 'claude_session_id=%s\n' "$id"; } >"$tmp" && mv "$tmp" "$meta"
-      return 0
-    fi
+    id=$(fm_control_claude_session_id "$root" "$wt" $pids) && break
+    id=
     sleep 1
   done
-  return 1
+  [ -n "$id" ] || return 1
+  store_claude_session_id "$meta" "$id"
+}
+
+store_claude_session_id() {  # <meta-file> <session-id>
+  local meta=$1 id=$2 lock tmp line status
+  lock=$(fm_meta_lock_path "$meta") || return 1
+  fm_lock_acquire_wait "$lock"
+  if [ ! -f "$meta" ] || [ -L "$meta" ]; then
+    fm_lock_release "$lock" || true
+    return 1
+  fi
+  tmp=$(mktemp "$STATE/.$ID.meta.claude-session.XXXXXX") || {
+    fm_lock_release "$lock" || true
+    return 1
+  }
+  status=0
+  {
+    while IFS= read -r line || [ -n "$line" ]; do
+      case "$line" in
+        claude_session_id=*) ;;
+        *) printf '%s\n' "$line" ;;
+      esac
+    done <"$meta"
+    printf 'claude_session_id=%s\n' "$id"
+  } >"$tmp" && fm_backlog_atomic_transition publish "$tmp" "$meta" "task record" "$STATE" || status=1
+  rm -f "$tmp"
+  fm_lock_release "$lock" || true
+  return "$status"
 }
 
 model_flag_for_harness() {
