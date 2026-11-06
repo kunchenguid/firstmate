@@ -10,15 +10,16 @@
 # current state from a tail of the log: it reads the authoritative source (a
 # no-mistakes run-step attributed under bin/fm-nm-run-lib.sh's contract, else
 # the pane busy-signature) and reconciles the possibly-stale log against it.
-# A ship `done:` is current-state done only when bin/fm-dod-lib.sh accepts the
-# named head as reachable outside the worker's disposable copy; otherwise blocked.
+# A status-log ship `done:` is current-state done only when bin/fm-dod-lib.sh's
+# fm_dod_accept_ship_done accepts its readiness proof; otherwise blocked.
 #
 # The determinism lives entirely here - run-step / pane / log reads, fixed
 # mapping logic, and terminal passed-run PR detail from bounded evidence only,
 # with no heuristics and no LLM.
 # For a terminal passed no-mistakes run, a matching merge-poll retirement
 # receipt is local merged evidence; otherwise a 5s-bounded forge read is tried.
-# FM_CREW_STATE_NO_FORGE=1 keeps the receipt read but skips the forge fallback.
+# FM_CREW_STATE_NO_FORGE=1 keeps the receipt read but skips that forge fallback;
+# it does not bypass the status-log ship readiness gate's live reads.
 # An absent or unreadable PR identity yields an honest unknown, never an
 # optimistic merged claim.
 # Output is one stable, parseable, token-tight line firstmate can read every

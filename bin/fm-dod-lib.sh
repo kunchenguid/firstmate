@@ -997,20 +997,22 @@ fm_dod_named_head_reachable_outside_worktree() {  # <worktree> <project> <mode> 
   [ "$mode" = local-only ] && fm_dod_ref_contains "$project" refs/heads "$sha"
 }
 
-# 0 when <line> is not a ship done: to gate, when the task's meta records
-# forge=external and fm_dod_accept_external_review_done accepts it, when it
-# names the task's recorded PR whose head the forge holds, when it names a
-# Gerrit change whose current patch set carries the worker copy's HEAD tree, or otherwise when its named
-# head - the worker copy's HEAD - is reachable outside that disposable copy. A
-# published-for-review report that names no Gerrit change is refused.
+# 0 when <line> is not a ship done: to gate, or when its readiness proof passes.
+# forge=external delegates to fm_dod_accept_external_review_done. Every other
+# gated publishing claim must start its note with PR <canonical-supported-url>
+# and supply task metadata whose expected destination matches the live forge.
+# This applies to every direct-PR done: and to the no-mistakes ready reports
+# selected by fm_dod_should_gate_ship_done, before any recorded-head shortcut.
+# Head proof then accepts the task's recorded PR whose head the forge holds,
+# a Gerrit change whose current patch set carries the worker copy's HEAD tree,
+# or otherwise the worker copy's HEAD reachable outside that disposable copy.
+# A published-for-review report that names no Gerrit change is refused.
 # There is no free-text SHA scan: a SHA that happens to appear in the note is
 # not the named head. 1 when
 # the claim is refused; stdout then holds a one-line reason and no other
 # output. <state> <id> <meta> supply pr=,
 # pr_head=, and the merge-notified marker; <meta> may be a captured copy
 # (bin/fm-fleet-snapshot.sh), so the marker is read from <state>.
-# Every gated publishing claim requires a supported PR URL, task metadata and a matching
-# live destination; published-head proof alone cannot supply that destination.
 # The inherited FM_READ_DEADLINE caps readiness reads at the scan budget remaining.
 fm_dod_accept_ship_done() {  # <kind> <mode> <worktree> <project> <line> [<state> <id> <meta> [meta-locked]]
   local kind=$1 mode=$2 wt=$3 project=$4 line=$5 state=${6:-} id=${7:-} meta=${8:-} url note sha gerrit captured=''
