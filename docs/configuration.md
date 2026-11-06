@@ -2400,7 +2400,8 @@ Arm the check once per home with `bin/fm-tool-update-check.sh arm`.
 
 **Repeat reporting and inheritance**
 
-- The check prints nothing when everything is current, and `state/.tool-updates` records the findings the last report was made from so the same pending update is reported once instead of on every poll.
+- The check prints nothing when everything is current, and `state/.tool-updates` records the conditions the last report was made from so the same pending update is reported once instead of on every poll.
+- A `git` entry's condition is being behind its remote branch, so new upstream commits on a clone that is already behind do not repeat the report.
 - A changed or returning condition is reported again.
 - Adding, removing, or changing a watched tool is an edit to this file and needs no code change or re-arming.
 - This file is not inherited by secondmate homes, so each home watches the tools it actually depends on.
