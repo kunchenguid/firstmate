@@ -67,6 +67,16 @@
 # PR for a status-log state, and never a separately recorded task PR; a scout
 # delivers no PR on either path, so it carries none. Together they
 # prevent one captain-facing record from combining claims from different runs.
+# A live agent withholds that verdict only while it is busy, or while its
+# incarnation postdates the terminal evidence (the spawn epoch in spawn_gen is
+# later than the last status line's [at=] epoch). An idle agent on the same
+# incarnation is a finished worker and keeps its record. The endpoint must read
+# `alive` through fm_backend_agent_state (bin/fm-backend.sh) and then `busy`
+# through fm_busy_classify_meta (bin/fm-busy-lib.sh); an unreadable or unknown
+# answer is never read as proof the agent is gone or idle and leaves the
+# verdict unchanged. Both reads share the scan budget left after the state
+# read (at least one second, like the first visit above), and hitting that
+# bound ends the visit like a state-read timeout.
 # Working, paused, parked, blocked, unknown, persistent secondmates, and
 # captain-held work retain their existing supervision semantics.
 #
@@ -95,7 +105,13 @@
 # main-home acknowledgement. The atomic epoch/cursor marker's mtime gates scans,
 # and its cursor records the last child visited within the aggregate budget.
 #
-# The scan reads only durable local state and fm-crew-state.sh; it never invokes
+# A terminal verdict is withheld while the endpoint carries a live agent that is
+# busy, or whose spawn_gen epoch is later than the last status line's [at=]
+# epoch (a newer incarnation; an unknown epoch counts as not newer).
+#
+# The scan reads only durable local state, fm-crew-state.sh, and one endpoint
+# liveness and busy read per terminal candidate, bounded by the scan budget left
+# after the crew-state read; it never invokes
 # gh, gh-axi, curl, fm-pr-check.sh, fm-pr-poll.sh, or a state *.check.sh.
 set -u
 export LC_ALL=C
@@ -118,6 +134,8 @@ CREW_STATE_BIN="${FM_INACTIVE_CREW_STATE_BIN:-$SCRIPT_DIR/fm-crew-state.sh}"
 . "$SCRIPT_DIR/fm-timeout-lib.sh"
 # shellcheck source=bin/fm-dod-lib.sh
 . "$SCRIPT_DIR/fm-dod-lib.sh"
+# shellcheck source=bin/fm-backend.sh
+. "$SCRIPT_DIR/fm-backend.sh"
 
 FM_INACTIVE_RECONCILE_SECS=${FM_INACTIVE_RECONCILE_SECS:-900}
 case "$FM_INACTIVE_RECONCILE_SECS" in
@@ -581,8 +599,35 @@ report_child() { # <id>
   report_child_ledger_locked "$id" "$meta"
 }
 
+task_holds_live_work() { # <id> <meta> <timeout> <last-status-line>; 0 when the verdict must be withheld, 3 on timeout
+  local id=$1 meta=$2 timeout=$3 last=$4 backend target verdict rc=0 spawn_epoch status_epoch
+  backend=$(fm_backend_of_meta "$meta")
+  target=$(fm_backend_target_of_meta "$meta")
+  [ -n "$target" ] || return 1
+  # shellcheck disable=SC2016
+  verdict=$(fm_run_timed "$timeout" bash -c '
+    . "$1"; . "$2"
+    [ "$(fm_backend_agent_state "$3" "$4" 2>/dev/null)" = alive ] || exit 0
+    printf "alive "
+    fm_busy_classify_meta "$5" "$6" "$7" 2>/dev/null' \
+    _ "$SCRIPT_DIR/fm-backend.sh" "$SCRIPT_DIR/fm-busy-lib.sh" "$backend" "$target" "$meta" "$id" "$STATE") || rc=$?
+  [ "$rc" -ne 124 ] || return 3
+  case "$verdict" in
+    'alive busy'*) return 0 ;;
+    alive*)
+      spawn_epoch=$(meta_field "$meta" spawn_gen)
+      spawn_epoch=${spawn_epoch#s}
+      spawn_epoch=${spawn_epoch%%.*}
+      status_epoch=$(status_line_at_epoch "$last") || return 1
+      case "$spawn_epoch$status_epoch" in ''|*[!0-9]*) return 1 ;; esac
+      [ "$spawn_epoch" -gt "$status_epoch" ]
+      ;;
+    *) return 1 ;;
+  esac
+}
+
 reconcile_direct_child_locked() { # <id> <meta> <secondmate-id-or-empty> <timeout>
-  local id=$1 meta=$2 self=${3:-} timeout=$4 status turn last age state_line state pr incarnation fingerprint outcome_key payload kind state_rc=0
+  local id=$1 meta=$2 self=${3:-} timeout=$4 status turn last age state_line state pr incarnation fingerprint outcome_key payload kind state_rc=0 started left
   [ -f "$meta" ] && [ ! -L "$meta" ] || return 0
   kind=$(meta_field "$meta" kind)
   [ "$kind" = secondmate ] && return 0
@@ -597,6 +642,7 @@ reconcile_direct_child_locked() { # <id> <meta> <secondmate-id-or-empty> <timeou
   fi
   age=$(last_activity_age "$meta" "$status" "$turn")
   [ "$age" -ge "$FM_INACTIVE_RECONCILE_SECS" ] || return 0
+  started=$(date +%s)
   state_line=$(fm_run_timed "$timeout" env FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_CREW_STATE_NO_FORGE=1 \
     "$CREW_STATE_BIN" "$id" 2>/dev/null) || state_rc=$?
   [ "$state_rc" -ne 124 ] || return 3
@@ -610,6 +656,10 @@ reconcile_direct_child_locked() { # <id> <meta> <secondmate-id-or-empty> <timeou
     'state: failed '*) state='failed' ;;
     *) return 0 ;;
   esac
+  left=$((timeout - ($(date +%s) - started)))
+  [ "$left" -ge 1 ] || left=1
+  task_holds_live_work "$id" "$meta" "$left" "$last" && return 0
+  [ "$?" -ne 3 ] || return 3
   terminal_outcome_corroborated "$state" "$last" "$state_line" || return 0
   pr=$(terminal_outcome_pr "$state_line" "$kind")
   incarnation=$(meta_incarnation "$meta")

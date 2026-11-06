@@ -66,7 +66,7 @@
 # auto-arm (bin/fm-claude-stop-autoarm.sh), which fires on the same Stop event:
 #   1. a live identity-matched watcher with a fresh beacon - or, in away mode, a
 #      live identity-matched daemon with a fresh beacon - allows immediately;
-#   2. an unhealthy session with a verified live session-lock owner it does not
+#   2. an unhealthy session with a live session-lock owner it does not
 #      own under the shared ancestry-or-trusted-id verdict exits with a read-only
 #      diagnostic instead of blocking a session that cannot repair supervision
 #      without stealing ownership;
@@ -315,9 +315,10 @@ block_stop() {
   exit 2
 }
 
-# Another verified live session owns the home lock under the shared
-# ancestry-or-trusted-id verdict. This session is read-only and cannot arm or
-# repair supervision without
+# Another live session owns the home lock under the shared
+# `fm_session_lock_pid_blocks_reclaim` verdict and is neither this session's
+# harness ancestry nor its trusted id.
+# This session is read-only and cannot arm or repair supervision without
 # stealing ownership, so blocking its Stop would create an impossible loop.
 # Report the ownership conflict as a diagnostic and let this turn end safely;
 # the owning session remains responsible for restoring the watcher.

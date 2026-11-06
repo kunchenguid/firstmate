@@ -1231,6 +1231,67 @@ test_lock_bounded_wait_earns_one_grace_window_for_unpublished_pid() {
   pass "bounded wait earns one grace window for an unpublished-pid lock, still bounds a live holder"
 }
 
+assert_bounded_deadline_result() {
+  local mode=$1 expected=$2 dir out
+  dir=$(make_case "bounded-deadline-$mode")
+  out=$(FM_LOCK_STALE_AFTER=3600 FM_STATE_OVERRIDE="$dir/state" bash -c '
+    . "$1"
+    lock=$2
+    mode=$3
+    mkdir "$lock" "$lock.steal" || exit 20
+    printf "%s\n" "$4" > "$lock.steal/pid"
+    sleep 300 &
+    holder=$!
+    trap "kill $holder 2>/dev/null || true; wait $holder 2>/dev/null || true" EXIT
+    printf "%s\n" "$holder" > "$lock/pid"
+    _fm_wake_require_timeout || exit 21
+    fm_run_timed() {
+      case "$mode" in
+        unpublished) rm "$lock/pid" ;;
+        exited) kill "$holder"; wait "$holder" 2>/dev/null || true ;;
+        absent) rm "$lock/pid"; rmdir "$lock" ;;
+        malformed) printf "invalid\n" > "$lock/pid" ;;
+        file) rm "$lock/pid"; rmdir "$lock"; printf "invalid\n" > "$lock" ;;
+      esac
+      return 124
+    }
+    rc=0
+    fm_lock_acquire_wait_bounded "$lock" 1 || rc=$?
+    case "$mode" in
+      live) [ "${FM_LOCK_HELD_PID:-}" = "$holder" ] || exit 22 ;;
+      *) [ -z "${FM_LOCK_HELD_PID:-}" ] || exit 23 ;;
+    esac
+    printf "%s\n" "$rc"
+  ' _ "$LIB" "$dir/state/.contend.lock" "$mode" "$$") || fail "$mode deadline fixture failed"
+  [ "$out" = "$expected" ] || fail "$mode deadline returned $out, expected $expected"
+}
+
+test_bounded_deadline_unpublished_holder() {
+  assert_bounded_deadline_result unpublished 124
+  pass "bounded deadline with an unpublished holder is retriable"
+}
+
+test_bounded_deadline_exited_holder() {
+  assert_bounded_deadline_result exited 124
+  pass "bounded deadline with an exited holder is retriable"
+}
+
+test_bounded_deadline_released_lock() {
+  assert_bounded_deadline_result absent 124
+  pass "bounded deadline with a released lock is retriable"
+}
+
+test_bounded_deadline_live_holder() {
+  assert_bounded_deadline_result live 124
+  pass "bounded deadline preserves the live holder advisory"
+}
+
+test_bounded_deadline_malformed_lock() {
+  assert_bounded_deadline_result malformed 1
+  assert_bounded_deadline_result file 1
+  pass "bounded deadline rejects malformed pid data and non-directory locks"
+}
+
 test_lock_paused_mid_acquire_claim_fails_during_steal() {
   local dir state lockdir out pid
   dir=$(make_case lock-paused-claim-steal)
@@ -1386,8 +1447,12 @@ test_watcher_exits_on_state_teardown_during_startup() {
     [ -e "$state/.watch.lock/watcher-path" ] && kill -STOP "$pid" 2>/dev/null && { stopped=1; break; }
   done
   [ "$stopped" -eq 1 ] || fail "watcher never finished claiming its lock: $(cat "$out")"
-  rm -rf "$state"
-  mkdir -p "$state"
+  # Stopping the watcher shell does not stop its already-forked helpers.
+  # Atomically detach the old directory instead of racing their writes with
+  # recursive deletion. Retain it until fixture cleanup so its inode cannot
+  # be reused for the replacement and mistaken for a successor's release.
+  mv "$state" "$dir/retired-state" || fail "could not detach startup state"
+  mkdir -p "$state" || fail "could not recreate startup state"
   kill -CONT "$pid" 2>/dev/null || true
   # wait_for_exit returns the watcher's own status, or TERMs a watcher that
   # kept running in the torn-down directory.
@@ -2405,6 +2470,11 @@ test_lock_keeps_live_daemon_holder_with_stale_identity
 test_lock_empty_pid_uses_minimum_grace
 test_lock_late_claim_loses_after_recreate
 test_lock_bounded_wait_earns_one_grace_window_for_unpublished_pid
+test_bounded_deadline_unpublished_holder
+test_bounded_deadline_exited_holder
+test_bounded_deadline_released_lock
+test_bounded_deadline_live_holder
+test_bounded_deadline_malformed_lock
 test_lock_paused_mid_acquire_claim_fails_during_steal
 test_watch_restart_rejects_reused_pid
 test_watch_restart_attaches_to_healthy_peer
