@@ -108,12 +108,21 @@ make_case() {
   # run; the ALLOW cases need them so the script can complete cleanly.
   cat > "$fakebin/treehouse" <<'SH'
 #!/usr/bin/env bash
-# `treehouse return --force <wt>`: succeed silently.
+# `treehouse return --force <wt>`: record the call, succeed silently.
+[ -z "${FM_FAKE_TREEHOUSE_LOG:-}" ] || printf '%s\n' "$*" >> "$FM_FAKE_TREEHOUSE_LOG"
 exit 0
 SH
   cat > "$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
-# tmux kill-window etc.: succeed silently.
+if [ "${1:-}" = display-message ] && [ "${*: -1}" = '#{pane_pid}' ]; then
+  printf '%s\n' "${FM_FAKE_PANE_PID:-}"
+fi
+if [ "${1:-}" = kill-window ] && [ -n "${FM_FAKE_KILL_PID:-}" ]; then
+  ( sleep 1; kill -KILL "$FM_FAKE_KILL_PID" 2>/dev/null ) >/dev/null 2>&1 &
+fi
+if [ "${1:-}" = kill-window ] && [ -n "${FM_LATE_ACTOR_GATE:-}" ]; then
+  : > "$FM_LATE_ACTOR_GATE"
+fi
 exit 0
 SH
   # Default gh-axi mock: no PR is associated with the branch, and viewing any PR
@@ -658,6 +667,7 @@ run_teardown() {
   # FM_DATA_OVERRIDE is pinned to the case dir because teardown closes this
   # home's backlog item itself; without it $DATA would resolve to the real
   # repo's own home and a test could mutate live records.
+  FM_FAKE_PANE_PID="${FM_FAKE_PANE_PID:-$$}" \
   FM_ROOT_OVERRIDE="$ROOT" \
   FM_STATE_OVERRIDE="$case_dir/state" \
   FM_DATA_OVERRIDE="$case_dir/data" \
@@ -691,7 +701,7 @@ make_path_without_lsof() {  # <case-dir>
   local case_dir=$1 path_dir="$1/path-without-lsof" cmd resolved
   mkdir -p "$path_dir"
   for cmd in awk bash basename cat chmod cp cut date dirname env find git grep head hostname id ln \
-    mkdir mktemp mv perl ps readlink realpath rm sed sh sleep sort stat tail timeout tr uname wc xargs; do
+    mkdir mktemp mv node perl ps readlink realpath rm sed sh sleep sort stat tail timeout tr uname wc xargs; do
     resolved=$(command -v "$cmd" 2>/dev/null) || continue
     case "$resolved" in /*) ln -sf "$resolved" "$path_dir/$cmd" ;; esac
   done
@@ -5331,6 +5341,557 @@ test_leaked_tasktmp_process_is_reaped() {
   pass "a leaked descendant process rooted under the task's per-task tasktmp is reaped by teardown too"
 }
 
+test_foreign_session_survives_and_is_reported() {
+  local case_dir rc endpoint owned foreign launcher survived=0 i foreign_tty endpoint_tty foreign_command owned_command
+  case_dir=$(make_case foreign-session)
+  write_meta "$case_dir" no-mistakes ship
+  land_shippable_commit "$case_dir"
+  perl -e '
+    my ($dir, $file) = @ARGV;
+    my $child = fork();
+    die "fork" unless defined $child;
+    if (!$child) { chdir $dir or die; exec "sleep", "300"; }
+    open my $fh, ">", $file or die;
+    print {$fh} "$child\n";
+    close $fh;
+    sleep 300;
+  ' "$case_dir/wt" "$case_dir/owned.pid" &
+  endpoint=$!
+  python3 - "$case_dir/wt" "$case_dir/foreign.pid" <<'PYTHON' &
+import os
+import pty
+import sys
+import time
+
+pid, master = pty.fork()
+if pid == 0:
+    os.chdir(sys.argv[1])
+    os.execlp("bash", "bash", "--noprofile", "--norc", "--login", "-c", "read -r unused")
+with open(sys.argv[2], "w") as stream:
+    stream.write(str(pid))
+time.sleep(300)
+PYTHON
+  launcher=$!
+  for ((i=0; i<100; i++)); do
+    [ ! -s "$case_dir/foreign.pid" ] || [ ! -s "$case_dir/owned.pid" ] || break
+    sleep 0.1
+  done
+  [ "$i" -lt 100 ] || fail "foreign-session: fixture processes did not start"
+  foreign=$(cat "$case_dir/foreign.pid")
+  owned=$(cat "$case_dir/owned.pid")
+  for ((i=0; i<100; i++)); do
+    foreign_tty=$(ps -p "$foreign" -o tty= 2>/dev/null | tr -d '[:space:]')
+    case "$foreign_tty" in ''|'?'|'??') sleep 0.1; continue ;; esac
+    foreign_command=$(ps -p "$foreign" -o comm= 2>/dev/null | tr -d '[:space:]')
+    owned_command=$(ps -p "$owned" -o comm= 2>/dev/null | tr -d '[:space:]')
+    if [ "${foreign_command##*/}" = bash ] && [ "${owned_command##*/}" = sleep ]; then break; fi
+    sleep 0.1
+  done
+  [ "$i" -lt 100 ] || fail "foreign-session: shell has no TTY"
+  endpoint_tty=$(ps -p "$endpoint" -o tty= | tr -d '[:space:]')
+  [ "$foreign_tty" != "$endpoint_tty" ] || fail "foreign-session: shell shares the endpoint TTY"
+  [ "$(ps -p "$foreign" -o pgid= | tr -d '[:space:]')" = "$foreign" ] \
+    || fail "foreign-session: shell does not have its own process group"
+
+  rc=0
+  FM_FAKE_TREEHOUSE_LOG="$case_dir/treehouse.log" FM_FAKE_PANE_PID="$endpoint" run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  kill -0 "$foreign" 2>/dev/null && survived=1
+  kill -KILL "$foreign" "$launcher" "$endpoint" 2>/dev/null || true
+  wait "$launcher" "$endpoint" 2>/dev/null || true
+  if kill -0 "$owned" 2>/dev/null; then
+    kill -KILL "$owned" 2>/dev/null || true
+    fail "foreign-session: task-owned child survived"
+  fi
+  [ "$survived" -eq 1 ] || fail "foreign-session: teardown killed an unowned shell"
+  expect_code 0 "$rc" "foreign-session: unproven ownership must not block teardown"
+  [ ! -s "$case_dir/treehouse.log" ] || fail "foreign-session: treehouse return ran with a spared process"
+  assert_grep "kept worktree" "$case_dir/stderr" "foreign-session: kept worktree not reported"
+  assert_grep "spared unowned process $foreign: bash" "$case_dir/stderr" \
+    "foreign-session: teardown did not report the foreign pid and command"
+  grep -Eq "^[^	]+	task-x1	$foreign	spared	[^	]+	.*bash" "$case_dir/state/teardown-processes.log" \
+    || fail "foreign-session: the spared shell was not logged durably: $(cat "$case_dir/state/teardown-processes.log" 2>/dev/null)"
+  grep -Eq "^[^	]+	task-x1	$owned	killed	[^	]+	.*sleep" "$case_dir/state/teardown-processes.log" \
+    || fail "foreign-session: the reaped child was not logged durably: $(cat "$case_dir/state/teardown-processes.log" 2>/dev/null)"
+  grep -Eq "^[^	]+	task-x1	-	kept	[^	]*${foreign}[^	]*	.*$case_dir" "$case_dir/state/teardown-processes.log" \
+    || fail "foreign-session: the kept worktree was not logged durably: $(cat "$case_dir/state/teardown-processes.log" 2>/dev/null)"
+  pass "foreign TTY shell survives and is reported while the task-owned child is reaped, and both are logged durably"
+}
+
+# A spared (unowned) process in the worktree: with no ownership oracle every
+# process under the root is spared, so these tests need no endpoint shell.
+spawn_late_actor() {  # <case-dir> <root> <delay> <action> [gate]
+  local case_dir=$1 root=$2 delay=$3 action=$4
+  ( cd "$root" && exec bash -c '
+    waits=0
+    while [ -n "$4" ] && [ ! -e "$4" ] && [ "$waits" -lt 600 ]; do
+      sleep 0.1
+      waits=$((waits + 1))
+    done
+    [ -z "$4" ] || [ -e "$4" ] || exit 1
+    sleep "$1"
+    case "$2" in
+      child) ( exec sleep 300 ) & printf "%s\n" "$!" > "$3/late-child.pid" ;;
+      write) printf "late\n" > "$PWD/late.txt" ;;
+      commit)
+        printf "late\n" > "$PWD/late.txt"
+        git add late.txt
+        git -c user.name=late -c user.email=late@example.com commit -q -m late \
+          && git rev-parse HEAD > "$3/late-commit.sha"
+        ;;
+    esac
+  ' _ "$delay" "$action" "$case_dir" "${5:-}" ) >/dev/null 2>&1 &
+  LATE_ACTOR_PID=$!
+  disown
+}
+
+test_child_started_during_the_wait_keeps_the_worktree() {
+  local case_dir rc child
+  case_dir=$(make_case late-child)
+  write_meta "$case_dir" no-mistakes ship
+  land_shippable_commit "$case_dir"
+  spawn_late_actor "$case_dir" "$case_dir/wt" 3 child
+  sleep 0.3
+  rc=0
+  FM_FAKE_TREEHOUSE_LOG="$case_dir/treehouse.log" FM_FAKE_PANE_PID=1 \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  child=$(cat "$case_dir/late-child.pid" 2>/dev/null || true)
+  [ -z "$child" ] || kill -KILL "$child" 2>/dev/null || true
+  kill -KILL "$LATE_ACTOR_PID" 2>/dev/null || true
+  [ -n "$child" ] || fail "late-child: the late child never started: $(cat "$case_dir/stderr")"
+  expect_code 0 "$rc" "late-child: teardown should complete"
+  [ ! -s "$case_dir/treehouse.log" ] || fail "late-child: the worktree was returned under a child started after the reaper"
+  assert_grep "kept worktree" "$case_dir/stderr" "late-child: kept worktree not reported"
+  assert_grep "$child" "$case_dir/state/teardown-processes.log" "late-child: the late child was not logged"
+  pass "a child started by a spared process after the reaper keeps the worktree"
+}
+
+test_unlistable_worktree_after_the_reaper_keeps_the_worktree() {
+  local case_dir rc agent real_lsof
+  case_dir=$(make_case late-unlistable)
+  write_meta "$case_dir" no-mistakes ship
+  land_shippable_commit "$case_dir"
+  real_lsof=$(command -v lsof)
+  cat > "$case_dir/fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = display-message ]; then printf '%s\n' "${FM_FAKE_PANE_PID:-}"; fi
+if [ "${1:-}" = kill-window ]; then
+  : > "$FM_PANE_CLOSED"
+  ( sleep 1; kill -KILL "$FM_FAKE_KILL_PID" 2>/dev/null ) >/dev/null 2>&1 &
+fi
+exit 0
+SH
+  cat > "$case_dir/fakebin/lsof" <<SH
+#!/usr/bin/env bash
+[ ! -e "\$FM_PANE_CLOSED" ] || exit 1
+exec "$real_lsof" "\$@"
+SH
+  chmod +x "$case_dir/fakebin/tmux" "$case_dir/fakebin/lsof"
+  ( cd "$case_dir/wt" && exec sleep 300 ) &
+  agent=$!
+  disown
+  sleep 0.3
+  rc=0
+  FM_PANE_CLOSED="$case_dir/pane-closed" FM_FAKE_KILL_PID="$agent"   FM_FAKE_TREEHOUSE_LOG="$case_dir/treehouse.log" FM_FAKE_PANE_PID=1     run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  kill -KILL "$agent" 2>/dev/null || true
+  assert_present "$case_dir/pane-closed" "late-unlistable: the pane close never ran: $(cat "$case_dir/stderr")"
+  [ ! -s "$case_dir/treehouse.log" ] || fail "late-unlistable: the worktree was returned although it could not be listed"
+  assert_grep "kept worktree" "$case_dir/stderr" "late-unlistable: kept worktree not reported"
+  pass "a worktree that cannot be listed after the pane close is kept"
+}
+
+test_work_saved_during_the_wait_refuses_the_return() {
+  local case_dir rc
+  case_dir=$(make_case late-write)
+  write_meta "$case_dir" no-mistakes ship
+  land_shippable_commit "$case_dir"
+  spawn_late_actor "$case_dir" "$case_dir/wt" 3 write
+  sleep 0.3
+  rc=0
+  FM_FAKE_TREEHOUSE_LOG="$case_dir/treehouse.log" FM_FAKE_PANE_PID=1 \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  kill -KILL "$LATE_ACTOR_PID" 2>/dev/null || true
+  expect_code 1 "$rc" "late-write: work saved during the wait must refuse teardown"
+  assert_grep "REFUSED" "$case_dir/stderr" "late-write: refusal missing"
+  [ ! -s "$case_dir/treehouse.log" ] || fail "late-write: the worktree was returned over late work"
+  assert_present "$case_dir/wt/late.txt" "late-write: late file lost"
+  assert_present "$case_dir/state/task-x1.meta" "late-write: metadata dropped despite the refusal"
+  pass "work saved by a spared process during the wait refuses the return and keeps the records"
+}
+
+replay_close_marker() {  # <case-dir>
+  local case_dir=$1
+  FM_HOME="$case_dir" FM_ROOT_OVERRIDE="$ROOT" bash -c '
+    . "$1/bin/fm-tasks-axi-lib.sh"
+    . "$1/bin/fm-backlog-transition-lib.sh"
+    fm_backlog_close_marker_replay "$2/state" "$2/state/task-x1.backlog-close" "$2/data" || {
+      printf "replay failed: %s\n" "$FM_BACKLOG_TRANSITION_ERROR" >&2
+      exit 1
+    }
+  ' _ "$ROOT" "$case_dir"
+}
+
+test_late_work_refusal_leaves_no_close_marker_for_startup_replay() {
+  local case_dir rc action
+  for action in write commit; do
+    case_dir=$(make_case "late-marker-$action")
+    write_meta "$case_dir" no-mistakes ship
+    land_shippable_commit "$case_dir"
+    seed_backlog_in_flight "$case_dir"
+    spawn_late_actor "$case_dir" "$case_dir/wt" 0.5 "$action" "$case_dir/endpoint-closed"
+    sleep 0.3
+    rc=0
+    FM_LATE_ACTOR_GATE="$case_dir/endpoint-closed" \
+      FM_FAKE_TREEHOUSE_LOG="$case_dir/treehouse.log" FM_FAKE_PANE_PID=1 \
+      run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+    kill -KILL "$LATE_ACTOR_PID" 2>/dev/null || true
+    expect_code 1 "$rc" "late-marker-$action: late work must refuse teardown"
+    assert_present "$case_dir/endpoint-closed" "late-marker-$action: the endpoint was not closed"
+    if [ "$action" = commit ]; then
+      assert_present "$case_dir/late-commit.sha" "late-marker-commit: the late commit failed"
+    fi
+    assert_grep "REFUSED" "$case_dir/stderr" "late-marker-$action: refusal missing"
+    replay_close_marker "$case_dir" || fail "late-marker-$action: startup replay failed"
+    assert_present "$case_dir/state/task-x1.meta" "late-marker-$action: startup replay dropped the retained task"
+    [ "$(backlog_row_state "$case_dir")" = in_flight ] \
+      || fail "late-marker-$action: startup replay closed the backlog item over retained work"
+  done
+  pass "a refusal after the wait leaves no pending close for startup replay to consume"
+}
+
+test_orca_work_saved_during_the_wait_is_not_removed() {
+  local case_dir rc action
+  for action in write commit; do
+    case_dir=$(make_case "orca-late-$action")
+    write_meta "$case_dir" no-mistakes ship
+    land_shippable_commit "$case_dir"
+    seed_backlog_in_flight "$case_dir"
+    configure_orca_teardown_case "$case_dir"
+    spawn_late_actor "$case_dir" "$case_dir/wt" 0.5 "$action" "$case_dir/endpoint-closed"
+    sleep 0.3
+    rc=0
+    FM_ORCA_CASE="$case_dir" FM_LATE_ACTOR_GATE="$case_dir/endpoint-closed" \
+      run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+    kill -KILL "$LATE_ACTOR_PID" 2>/dev/null || true
+    expect_code 1 "$rc" "orca-late-$action: late work must refuse teardown: $(cat "$case_dir/stderr")"
+    assert_present "$case_dir/endpoint-closed" "orca-late-$action: the endpoint was not closed"
+    if [ "$action" = commit ]; then
+      assert_present "$case_dir/late-commit.sha" "orca-late-commit: the late commit failed"
+    fi
+    assert_grep "REFUSED" "$case_dir/stderr" "orca-late-$action: refusal missing"
+    assert_absent "$case_dir/removal.log" "orca-late-$action: the Orca worktree was removed over late work"
+    [ "$(git -C "$case_dir/wt" symbolic-ref --short HEAD)" = fm/task-x1 ] \
+      || fail "orca-late-$action: the task branch was detached before the safety refusal"
+    assert_present "$case_dir/state/task-x1.meta" "orca-late-$action: records dropped"
+    replay_close_marker "$case_dir" || fail "orca-late-$action: startup replay failed"
+    assert_present "$case_dir/state/task-x1.meta" "orca-late-$action: startup replay dropped the retained task"
+    [ "$(backlog_row_state "$case_dir")" = in_flight ] \
+      || fail "orca-late-$action: startup replay closed the backlog item over retained work"
+  done
+  pass "an Orca worktree that gains work during the wait is kept and its close is not replayed"
+}
+
+test_late_write_is_still_returned_with_force() {
+  local case_dir rc
+  case_dir=$(make_case late-write-force)
+  write_meta "$case_dir" no-mistakes ship
+  land_shippable_commit "$case_dir"
+  spawn_late_actor "$case_dir" "$case_dir/wt" 3 write
+  sleep 0.3
+  rc=0
+  FM_FAKE_TREEHOUSE_LOG="$case_dir/treehouse.log" FM_FAKE_PANE_PID=1 \
+    run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  kill -KILL "$LATE_ACTOR_PID" 2>/dev/null || true
+  expect_code 0 "$rc" "late-write-force: explicit force must still complete: $(cat "$case_dir/stderr")"
+  [ -s "$case_dir/treehouse.log" ] || fail "late-write-force: explicit force did not return the worktree"
+  pass "an explicit force still returns the worktree after late work"
+}
+
+configure_orca_teardown_case() {  # <case-dir>
+  local case_dir=$1
+  sed 's/^window=.*/window=fm-task-x1/' "$case_dir/state/task-x1.meta" > "$case_dir/meta-new"
+  mv "$case_dir/meta-new" "$case_dir/state/task-x1.meta"
+  printf 'backend=orca\nterminal=term-test\norca_worktree_id=wt-test::/orca/wt-test\n' >> "$case_dir/state/task-x1.meta"
+  cat > "$case_dir/fakebin/orca" <<'SH'
+#!/usr/bin/env bash
+case "${1:-} ${2:-}" in
+  'terminal close')
+    [ -z "${FM_LATE_ACTOR_GATE:-}" ] || : > "$FM_LATE_ACTOR_GATE"
+    printf '{"ok":true,"result":{}}\n' ;;
+  'worktree show')
+    printf '{"ok":true,"result":{"worktree":{"id":"wt-test::/orca/wt-test","path":"%s"}}}\n' "$FM_ORCA_CASE/wt" ;;
+  'worktree rm')
+    printf 'remove\n' >> "$FM_ORCA_CASE/removal.log"
+    printf '{"ok":true,"result":{}}\n' ;;
+  *) printf '{"ok":true,"result":{}}\n' ;;
+esac
+SH
+  chmod +x "$case_dir/fakebin/orca"
+}
+
+test_orca_worktree_with_a_spared_process_is_not_removed() {
+  local case_dir rc pid
+  case_dir=$(make_case orca-occupied)
+  write_meta "$case_dir" no-mistakes ship
+  land_shippable_commit "$case_dir"
+  configure_orca_teardown_case "$case_dir"
+  seed_backlog_in_flight "$case_dir"
+  ( cd "$case_dir/wt" && exec sleep 300 ) &
+  pid=$!
+  disown
+  sleep 0.3
+  rc=0
+  FM_ORCA_CASE="$case_dir" run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  kill -0 "$pid" 2>/dev/null || fail "orca-occupied: the spared process was killed"
+  kill -KILL "$pid" 2>/dev/null || true
+  expect_code 1 "$rc" "orca-occupied: an occupied Orca worktree must refuse teardown"
+  assert_absent "$case_dir/removal.log" "orca-occupied: the occupied Orca worktree was removed"
+  assert_present "$case_dir/state/task-x1.meta" "orca-occupied: records dropped, so no retry is possible"
+  grep -Eq "^[^	]+	task-x1	-	kept	[^	]*${pid}[^	]*	" "$case_dir/state/teardown-processes.log" \
+    || fail "orca-occupied: the kept worktree was not logged"
+  replay_close_marker "$case_dir" || fail "orca-occupied: startup replay failed"
+  assert_present "$case_dir/state/task-x1.meta" "orca-occupied: startup replay dropped the retained task"
+  [ "$(backlog_row_state "$case_dir")" = in_flight ] \
+    || fail "orca-occupied: startup replay closed the backlog item over a kept worktree"
+  pass "an Orca worktree that a spared process occupies is kept and the records survive for a retry"
+}
+
+test_missing_lsof_does_not_block_orca_or_tasktmp_removal() {
+  local case_dir rc path_without_lsof mode flag
+  for mode in plain force; do
+    flag=
+    [ "$mode" != force ] || flag=--force
+    case_dir=$(make_case "no-lsof-orca-tasktmp-$mode")
+    write_meta "$case_dir" no-mistakes ship
+    printf '%s\n' "tasktmp=$case_dir/tasktmp" >> "$case_dir/state/task-x1.meta"
+    mkdir -p "$case_dir/tasktmp"
+    land_shippable_commit "$case_dir"
+    configure_orca_teardown_case "$case_dir"
+    path_without_lsof=$(make_path_without_lsof "$case_dir")
+    rc=0
+    FM_ORCA_CASE="$case_dir" FM_TEARDOWN_TEST_PATH="$path_without_lsof" \
+      run_teardown "$case_dir" $flag > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+    expect_code 0 "$rc" "no-lsof-orca-$mode: a missing lsof must not block teardown: $(cat "$case_dir/stderr")"
+    assert_present "$case_dir/removal.log" "no-lsof-orca-$mode: the Orca worktree was not removed"
+    assert_absent "$case_dir/tasktmp" "no-lsof-orca-$mode: tasktmp was kept because lsof is missing"
+    assert_absent "$case_dir/state/task-x1.meta" "no-lsof-orca-$mode: the task record was not retired"
+  done
+  pass "a missing lsof falls back to base behavior for Orca and tasktmp removal, with and without force"
+}
+
+test_missing_lsof_does_not_block_local_secondmate_tasktmp_removal() {
+  local case_dir rc path_without_lsof home mode flag
+  for mode in plain force; do
+    flag=
+    [ "$mode" != force ] || flag=--force
+    case_dir=$(make_case "no-lsof-secondmate-tasktmp-$mode")
+    write_meta "$case_dir" local-only secondmate
+    home="$case_dir/secondmate-home"
+    mkdir -p "$home/state" "$home/data" "$home/config" "$home/projects" "$case_dir/tasktmp"
+    printf '%s\n' task-x1 > "$home/.fm-secondmate-home"
+    printf '%s\n' "home=$home" "tasktmp=$case_dir/tasktmp" >> "$case_dir/state/task-x1.meta"
+    path_without_lsof=$(make_path_without_lsof "$case_dir")
+    rc=0
+    FM_TEARDOWN_TEST_PATH="$path_without_lsof" \
+      run_teardown "$case_dir" $flag > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+    expect_code 0 "$rc" "no-lsof-secondmate-$mode: a missing lsof must not block teardown: $(cat "$case_dir/stderr")"
+    assert_absent "$case_dir/tasktmp" "no-lsof-secondmate-$mode: tasktmp was kept because lsof is missing"
+    assert_absent "$case_dir/state/task-x1.meta" "no-lsof-secondmate-$mode: the secondmate record was not retired"
+  done
+  pass "a missing lsof does not keep a local secondmate's tasktmp, with and without force"
+}
+
+test_tasktmp_with_a_spared_process_is_not_deleted() {
+  local case_dir rc pid
+  case_dir=$(make_case tasktmp-occupied)
+  write_meta "$case_dir" no-mistakes ship
+  printf '%s\n' "tasktmp=$case_dir/tasktmp" >> "$case_dir/state/task-x1.meta"
+  mkdir -p "$case_dir/tasktmp"
+  land_shippable_commit "$case_dir"
+  ( cd "$case_dir/tasktmp" && exec sleep 300 ) &
+  pid=$!
+  disown
+  sleep 0.3
+  rc=0
+  FM_FAKE_TREEHOUSE_LOG="$case_dir/treehouse.log" FM_FAKE_PANE_PID=1 \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  kill -0 "$pid" 2>/dev/null || fail "tasktmp-occupied: the spared process was killed"
+  kill -KILL "$pid" 2>/dev/null || true
+  expect_code 0 "$rc" "tasktmp-occupied: teardown should complete"
+  assert_present "$case_dir/tasktmp" "tasktmp-occupied: the occupied tasktmp was deleted"
+  grep -Eq "^[^	]+	task-x1	-	kept	[^	]*${pid}[^	]*	.*tasktmp" "$case_dir/state/teardown-processes.log" \
+    || fail "tasktmp-occupied: the kept tasktmp was not logged"
+  pass "a tasktmp that a spared process occupies is kept"
+}
+
+test_herdr_pane_close_does_not_orphan_task_owned_children() {
+  local case_dir rc endpoint child closed i
+  case_dir=$(make_case herdr-owned-child)
+  write_meta "$case_dir" local-only ship
+  land_shippable_commit "$case_dir"
+  configure_flat_herdr_teardown_case "$case_dir"
+  mv "$case_dir/fakebin/herdr" "$case_dir/fakebin/herdr.base"
+  cat > "$case_dir/fakebin/herdr" <<SH
+#!/usr/bin/env bash
+case "\${1:-} \${2:-}" in
+  "pane process-info")
+    if [ -e "\$FM_FAKE_HERDR_CLOSED" ]; then
+      printf '%s\n' '{"error":{"code":"pane_not_found"}}' >&2
+      exit 1
+    fi
+    printf '{"result":{"type":"pane_process_info","process_info":{"pane_id":"wG:pQ","shell_pid":%s}}}\n' "\$FM_FAKE_HERDR_SHELL_PID"
+    ;;
+  "pane close")
+    kill -KILL "\$FM_FAKE_HERDR_SHELL_PID" 2>/dev/null
+    exec "$case_dir/fakebin/herdr.base" "\$@"
+    ;;
+  *) exec "$case_dir/fakebin/herdr.base" "\$@" ;;
+esac
+SH
+  chmod +x "$case_dir/fakebin/herdr"
+  perl -e '
+    my ($dir, $file) = @ARGV;
+    my $child = fork();
+    die "fork" unless defined $child;
+    if (!$child) { chdir $dir or die; exec "sleep", "300"; }
+    open my $fh, ">", $file or die;
+    print {$fh} "$child\n";
+    close $fh;
+    sleep 300;
+  ' "$case_dir/wt" "$case_dir/owned.pid" &
+  endpoint=$!
+  for ((i=0; i<100; i++)); do
+    [ ! -s "$case_dir/owned.pid" ] || break
+    sleep 0.1
+  done
+  [ "$i" -lt 100 ] || fail "herdr-owned-child: fixture did not start"
+  child=$(cat "$case_dir/owned.pid")
+  closed="$case_dir/closed"
+  : > "$case_dir/herdr.log"
+  rc=0
+  FM_FAKE_HERDR_LOG="$case_dir/herdr.log" FM_FAKE_HERDR_CLOSED="$closed" \
+  FM_FAKE_HERDR_SHELL_PID="$endpoint" FM_BACKEND_HERDR_IDLE_SHELL_PROOF_POLLS=1 \
+  FM_FAKE_TREEHOUSE_LOG="$case_dir/treehouse.log" \
+    run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  wait "$endpoint" 2>/dev/null || true
+  [ -e "$closed" ] || fail "herdr-owned-child: the pane was never closed: $(cat "$case_dir/stderr")"
+  if kill -0 "$child" 2>/dev/null; then
+    kill -KILL "$child" 2>/dev/null || true
+    fail "herdr-owned-child: the shell's background child survived the pane close: $(cat "$case_dir/stderr")"
+  fi
+  expect_code 0 "$rc" "herdr-owned-child: teardown should complete: $(cat "$case_dir/stderr")"
+  [ -s "$case_dir/treehouse.log" ] || fail "herdr-owned-child: the worktree was not returned"
+  pass "a background child of the Herdr pane shell is reaped although the pane closed first"
+}
+
+test_reparented_child_in_endpoint_session_is_reaped() {
+  local case_dir rc endpoint orphan i
+  case_dir=$(make_case endpoint-session-orphan)
+  write_meta "$case_dir" no-mistakes ship
+  land_shippable_commit "$case_dir"
+  perl -MPOSIX -e '
+    my ($dir, $file) = @ARGV;
+    POSIX::setsid() or die "setsid";
+    my $parent = fork();
+    die "fork" unless defined $parent;
+    if (!$parent) {
+      my $child = fork();
+      die "fork" unless defined $child;
+      if (!$child) { setpgrp(0, 0); chdir $dir or die; exec "sleep", "300"; }
+      open my $fh, ">", $file or die;
+      print {$fh} "$child\n";
+      close $fh;
+      POSIX::_exit(0);
+    }
+    waitpid($parent, 0);
+    sleep 300;
+  ' "$case_dir/wt" "$case_dir/orphan.pid" &
+  endpoint=$!
+  for ((i=0; i<100; i++)); do
+    [ ! -s "$case_dir/orphan.pid" ] || break
+    sleep 0.1
+  done
+  [ "$i" -lt 100 ] || fail "endpoint-session-orphan: fixture processes did not start"
+  orphan=$(cat "$case_dir/orphan.pid")
+  for ((i=0; i<100; i++)); do
+    [ "$(ps -p "$orphan" -o ppid= 2>/dev/null | tr -d '[:space:]')" != "$endpoint" ] \
+      && [ "$(ps -p "$orphan" -o comm= 2>/dev/null | tr -d '[:space:]')" = sleep ] && break
+    sleep 0.1
+  done
+  [ "$i" -lt 100 ] || fail "endpoint-session-orphan: child was not reparented away from the endpoint"
+  [ "$(ps -p "$orphan" -o pgid= | tr -d '[:space:]')" = "$orphan" ] \
+    || fail "endpoint-session-orphan: child does not have its own process group"
+
+  rc=0
+  FM_FAKE_PANE_PID="$endpoint" run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  kill -KILL "$endpoint" 2>/dev/null || true
+  wait "$endpoint" 2>/dev/null || true
+  if kill -0 "$orphan" 2>/dev/null; then
+    kill -KILL "$orphan" 2>/dev/null || true
+    fail "endpoint-session-orphan: reparented child in the endpoint session survived: $(cat "$case_dir/stderr")"
+  fi
+  expect_code 0 "$rc" "endpoint-session-orphan: teardown should complete"
+  grep -Eq "^[^	]+	task-x1	$orphan	killed	" "$case_dir/state/teardown-processes.log" \
+    || fail "endpoint-session-orphan: the reaped child was not logged durably"
+  pass "an init-reparented child in the endpoint shell's session is reaped and logged"
+}
+
+test_agent_without_ownership_oracle_ending_at_pane_close_returns_worktree() {
+  local case_dir rc agent
+  case_dir=$(make_case no-oracle-agent)
+  write_meta "$case_dir" no-mistakes ship
+  land_shippable_commit "$case_dir"
+  perl -e 'chdir shift or die; exec "sleep", "300"' "$case_dir/wt" &
+  agent=$!
+  sleep 0.3
+  rc=0
+  FM_FAKE_KILL_PID="$agent" FM_FAKE_TREEHOUSE_LOG="$case_dir/treehouse.log" FM_FAKE_PANE_PID=1 \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  kill -KILL "$agent" 2>/dev/null || true
+  wait "$agent" 2>/dev/null || true
+  expect_code 0 "$rc" "no-oracle-agent: teardown should complete"
+  assert_grep "spared unowned process $agent:" "$case_dir/stderr" \
+    "no-oracle-agent: the unproven agent was not reported"
+  [ -s "$case_dir/treehouse.log" ] || fail "no-oracle-agent: worktree was not returned after the pane close ended the agent"
+  pass "an unproven agent that ends at pane close does not keep the worktree"
+}
+
+test_term_resistant_owned_children_are_reaped_with_the_leader() {
+  local case_dir rc endpoint child i
+  case_dir=$(make_case term-resistant-owned)
+  write_meta "$case_dir" no-mistakes ship
+  land_shippable_commit "$case_dir"
+  perl -e '
+    my ($dir, $file) = @ARGV;
+    chdir $dir or die;
+    my $child = fork();
+    die "fork" unless defined $child;
+    if (!$child) { exec "sh", "-c", "trap \"\" TERM; while :; do sleep 1; done"; }
+    open my $fh, ">", $file or die;
+    print {$fh} "$child\n";
+    close $fh;
+    sleep 300;
+  ' "$case_dir/wt" "$case_dir/owned.pid" &
+  endpoint=$!
+  for ((i=0; i<100; i++)); do
+    [ ! -s "$case_dir/owned.pid" ] || break
+    sleep 0.1
+  done
+  [ "$i" -lt 100 ] || fail "term-resistant-owned: fixture did not start"
+  child=$(cat "$case_dir/owned.pid")
+
+  rc=0
+  FM_FAKE_TREEHOUSE_LOG="$case_dir/treehouse.log" FM_FAKE_PANE_PID="$endpoint" run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  kill -KILL "$child" "$endpoint" 2>/dev/null || true
+  wait "$endpoint" 2>/dev/null || true
+  expect_code 0 "$rc" "term-resistant-owned: teardown should succeed"
+  grep -Eq "^[^	]+	task-x1	$child	force-killed	" "$case_dir/state/teardown-processes.log" \
+    || fail "term-resistant-owned: owned child was not force-killed: $(cat "$case_dir/state/teardown-processes.log" 2>/dev/null)"
+  if grep -Eq "^[^	]+	task-x1	$child	spared	" "$case_dir/state/teardown-processes.log"; then
+    fail "term-resistant-owned: owned child was reported as spared after the leader was signaled"
+  fi
+  pass "TERM-resistant task-owned processes are force-killed without being spared when the endpoint shell dies"
+}
+
 test_lsof_absent_reaps_tmux_process_group() {
   local case_dir rc pid path_without_lsof
   case_dir=$(make_case lsof-absent-process-group-reap)
@@ -5355,10 +5916,16 @@ EOF
   chmod +x "$case_dir/fakebin/tmux"
 
   rc=0
-  FM_TEARDOWN_TEST_PATH="$path_without_lsof" \
+  FM_FAKE_TREEHOUSE_LOG="$case_dir/treehouse.log" FM_TEARDOWN_TEST_PATH="$path_without_lsof" \
     run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
 
   expect_code 0 "$rc" "lsof-absent-process-group-reap: teardown should succeed"
+  [ ! -s "$case_dir/treehouse.log" ] \
+    || fail "lsof-absent-process-group-reap: treehouse return ran although processes in the worktree could not be listed"
+  assert_grep "worktree kept: cannot list processes in it (lsof missing)" "$case_dir/stderr" \
+    "lsof-absent-process-group-reap: kept worktree not reported"
+  grep -q "worktree kept: cannot list processes in it (lsof missing)" "$case_dir/state/teardown-processes.log" \
+    || fail "lsof-absent-process-group-reap: kept worktree not logged durably"
   if kill -0 "$pid" 2>/dev/null; then
     kill -KILL "$pid" 2>/dev/null || true
     fail "lsof-absent-process-group-reap: tmux process group survived teardown"
@@ -5505,31 +6072,45 @@ SH
 }
 
 test_process_spawned_during_grace_is_reaped_on_later_pass() {
-  local case_dir rc pid child_file child_pid="" parent_survived=0 child_survived=0
+  local case_dir rc leader pid child_file child_pid="" parent_survived=0 child_survived=0
   case_dir=$(make_case grace-spawn-convergence)
   write_meta "$case_dir" no-mistakes ship
   land_shippable_commit "$case_dir"
   child_file="$case_dir/child.pid"
 
-  ( cd "$case_dir/wt" && exec perl -e '
-      my $file = shift;
-      $SIG{TERM} = sub {
-        my $child = fork();
-        die "fork" unless defined $child;
-        if (!$child) { exec "sleep", "300"; }
-        open my $fh, ">", $file or die "open";
-        print {$fh} "$child\n";
-        close $fh;
+  perl -e '
+      my ($dir, $file, $worker_file) = @ARGV;
+      require POSIX;
+      POSIX::setsid();
+      my $worker = fork();
+      die "fork" unless defined $worker;
+      if (!$worker) {
+        chdir $dir or die;
+        open my $wf, ">", $worker_file or die;
+        print {$wf} "$$\n";
+        close $wf;
+        $SIG{TERM} = sub {
+          my $child = fork();
+          die "fork" unless defined $child;
+          if (!$child) { exec "sleep", "300"; }
+          open my $fh, ">", $file or die "open";
+          print {$fh} "$child\n";
+          close $fh;
+          exit 0;
+        };
+        sleep 300;
         exit 0;
-      };
+      }
+      $SIG{CHLD} = "IGNORE";
       sleep 300;
-    ' "$child_file" ) &
-  pid=$!
+    ' "$case_dir/wt" "$child_file" "$case_dir/worker.pid" &
+  leader=$!
   disown
-  sleep 0.2
+  for _ in $(seq 1 50); do [ -s "$case_dir/worker.pid" ] && break; sleep 0.1; done
+  pid=$(cat "$case_dir/worker.pid")
 
   rc=0
-  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  FM_FAKE_PANE_PID="$leader" run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
 
   if [ -f "$child_file" ]; then child_pid=$(cat "$child_file"); fi
   if [ -n "$child_pid" ] && kill -0 "$child_pid" 2>/dev/null; then
@@ -5540,6 +6121,7 @@ test_process_spawned_during_grace_is_reaped_on_later_pass() {
     parent_survived=1
     kill -KILL "$pid" 2>/dev/null || true
   fi
+  kill -KILL "$leader" 2>/dev/null || true
   expect_code 0 "$rc" "grace-spawn-convergence: teardown should converge"
   assert_present "$child_file" "grace-spawn-convergence: TERM handler did not spawn a child"
   [ "$child_survived" -eq 0 ] || fail "grace-spawn-convergence: spawned child survived"
@@ -5559,6 +6141,11 @@ printf 'p%s\nfcwd\nn%s\n' '$fake_pid' '$wt_path'
 EOF
   cat > "$case_dir/fakebin/ps" <<'SH'
 #!/usr/bin/env bash
+if [ "${1:-}" = -axo ]; then
+  "$REAL_PS_FOR_TEST" "$@"
+  printf '%s %s %s\n' "$FM_FAKE_PERSISTENT_PID" "$FM_FAKE_PANE_PID" "$FM_FAKE_PERSISTENT_PID"
+  exit 0
+fi
 if [ "${1:-}" = -p ] && [ "${2:-}" = "${FM_FAKE_PERSISTENT_PID:-}" ] \
    && [ "${3:-}" = -o ] && [ "${4:-}" = lstart= ]; then
   printf 'Tue Aug  4 10:00:00 2026\n'
@@ -6425,6 +7012,198 @@ SH
   pass "post-reap proof retains late work and retry records on ordinary and Orca paths, preserving clean/force/scout behavior"
 }
 
+test_post_reap_refusals_keep_backlog_open_after_replay() {
+  local failure failed=0 TEARDOWN=$TEARDOWN
+  for failure in reaper-scan post-reap-work treehouse-pre-return treehouse-write treehouse-commit \
+    orca-write orca-commit orca-kept treehouse-return orca-remove \
+    endpoint-close export inactive-report grok-auth kimi-auth busy-state pr-poll status-archive \
+    t3-close t3-env t3-home t3-home-scan; do
+    (
+      local case_dir rc=0 expected actor='' provider='' home active_home thread=mcp:3d9e1f5a-8c2b-4a4d-8f3e-fedcba543210
+      case_dir=$(make_case "refusal-replay-$failure")
+      active_home="$case_dir"
+      write_meta "$case_dir" no-mistakes ship
+      land_shippable_commit "$case_dir"
+      seed_backlog_in_flight "$case_dir"
+      trap '[ -z "$actor" ] || kill -KILL "$actor" 2>/dev/null || true; [ -z "$provider" ] || kill -KILL "$provider" 2>/dev/null || true; if declare -F t3_fake_stop >/dev/null; then t3_fake_stop; fi' EXIT
+      case "$failure" in
+        orca-*) configure_orca_teardown_case "$case_dir" ;;
+        t3-*)
+          # shellcheck source=tests/t3-fake-lib.sh
+          . "$ROOT/tests/t3-fake-lib.sh"
+          t3_fake_start "$case_dir/server"
+          t3_fake_case "$case_dir/server-case"
+          t3_fake_credential "$case_dir/config/t3code-token"
+          if [ "$failure" = t3-home ] || [ "$failure" = t3-home-scan ]; then
+            active_home="$case_dir/operator-home"
+            mkdir -p "$active_home"
+            home="$case_dir/secondmate-home"
+            mkdir -p "$home/state" "$home/data" "$home/config" "$home/projects"
+            printf 'task-x1\n' > "$home/.fm-secondmate-home"
+            printf '# Firstmate\n' > "$home/AGENTS.md"
+            write_meta "$case_dir" secondmate secondmate "$home"
+            printf 'home=%s\n' "$home" >> "$case_dir/state/task-x1.meta"
+            ( cd "$home" && exec sleep 300 ) &
+            provider=$!
+            disown
+          fi
+          sed 's/^window=.*/window=fm-task-x1/' "$case_dir/state/task-x1.meta" > "$case_dir/meta-new"
+          mv "$case_dir/meta-new" "$case_dir/state/task-x1.meta"
+          printf 'backend=t3code\nt3_thread_id=%s\nt3_project_id=proj-test\n' "$thread" >> "$case_dir/state/task-x1.meta"
+          ;;
+      esac
+      case "$failure" in
+        reaper-scan|t3-home-scan)
+          add_lsof_error "$case_dir"
+          expected='cannot determine leaked processes'
+          ;;
+        post-reap-work)
+          cat > "$case_dir/fakebin/lsof" <<'SH'
+#!/usr/bin/env bash
+printf 'late\n' > "$FM_REFUSAL_CASE/wt/late.txt"
+exit 0
+SH
+          chmod +x "$case_dir/fakebin/lsof"
+          expected='uncommitted changes'
+          ;;
+        treehouse-pre-return)
+          cat > "$case_dir/fakebin/git" <<'SH'
+#!/usr/bin/env bash
+"$REAL_GIT_FOR_TEST" "$@"
+rc=$?
+if [ "$rc" -eq 0 ]; then
+  case " $* " in
+    *" checkout --detach "*) printf 'late\n' > "$FM_REFUSAL_CASE/wt/late.txt" ;;
+  esac
+fi
+exit "$rc"
+SH
+          chmod +x "$case_dir/fakebin/git"
+          expected='REFUSED'
+          ;;
+        treehouse-write|treehouse-commit|orca-write|orca-commit)
+          spawn_late_actor "$case_dir" "$case_dir/wt" 0.5 "${failure##*-}" "$case_dir/endpoint-closed"
+          actor=$LATE_ACTOR_PID
+          expected='REFUSED'
+          ;;
+        orca-kept)
+          ( cd "$case_dir/wt" && exec sleep 300 ) &
+          provider=$!
+          disown
+          expected='kept Orca worktree'
+          ;;
+        treehouse-return)
+          printf '#!/usr/bin/env bash\necho "fixture return refused" >&2\nexit 1\n' > "$case_dir/fakebin/treehouse"
+          chmod +x "$case_dir/fakebin/treehouse"
+          expected='treehouse return failed'
+          ;;
+        orca-remove)
+          mv "$case_dir/fakebin/orca" "$case_dir/fakebin/orca-ok"
+          cat > "$case_dir/fakebin/orca" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-} ${2:-}" = 'worktree rm' ]; then
+  printf '{"ok":false,"error":{"message":"fixture removal refused"}}\n'
+  exit 0
+fi
+exec "$FM_REFUSAL_CASE/fakebin/orca-ok" "$@"
+SH
+          chmod +x "$case_dir/fakebin/orca"
+          expected='fixture removal refused'
+          ;;
+        endpoint-close)
+          cat > "$case_dir/fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+case "${1:-}" in
+  display-message) printf '1\n' ;;
+  kill-window|list-windows) exit 1 ;;
+esac
+exit 0
+SH
+          chmod +x "$case_dir/fakebin/tmux"
+          expected='could not be closed'
+          ;;
+        export)
+          printf '%s\n' "$case_dir/export" > "$case_dir/config/record-export-root"
+          printf 'not a directory\n' > "$case_dir/export"
+          expected='record export'
+          ;;
+        grok-auth|kimi-auth)
+          : > "$case_dir/state/task-x1.${failure%-auth}-turnend-token"
+          expected=''
+          ;;
+        pr-poll|status-archive)
+          if [ "$failure" = status-archive ]; then
+            touch "$case_dir/config/status-archive"
+            printf 'done: fixture\n' > "$case_dir/state/task-x1.status"
+            expected='unsafe status archive'
+          else
+            expected='unsafe task PR-check artifact'
+          fi
+          cat > "$case_dir/fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+case "${1:-}" in
+  display-message) printf '1\n' ;;
+  kill-window)
+    if [ "$FM_REFUSAL_KIND" = pr-poll ]; then
+      mkdir "$FM_REFUSAL_CASE/state/task-x1.pr-poll"
+    else
+      printf 'not a directory\n' > "$FM_REFUSAL_CASE/data/task-x1"
+    fi
+    ;;
+esac
+exit 0
+SH
+          chmod +x "$case_dir/fakebin/tmux"
+          ;;
+        inactive-report|t3-env|busy-state)
+          prepare_teardown_source_copy "$case_dir"
+          rm "$case_dir/config/backlog-backend"
+          TEARDOWN="$case_dir/test-root/bin/fm-teardown.sh"
+          if [ "$failure" = inactive-report ]; then
+            rm "$case_dir/test-root/bin/fm-inactive-reconcile.sh"
+            printf '#!/usr/bin/env bash\necho "fixture report refused" >&2\nexit 1\n' > "$case_dir/test-root/bin/fm-inactive-reconcile.sh"
+            chmod +x "$case_dir/test-root/bin/fm-inactive-reconcile.sh"
+            expected='fixture report refused'
+          elif [ "$failure" = t3-env ]; then
+            rm "$case_dir/test-root/bin/fm-t3code-codex-env.sh"
+            printf '#!/usr/bin/env bash\necho "fixture cleanup refused" >&2\nexit 1\n' > "$case_dir/test-root/bin/fm-t3code-codex-env.sh"
+            chmod +x "$case_dir/test-root/bin/fm-t3code-codex-env.sh"
+            expected='fixture cleanup refused'
+          else
+            printf 'fixture-generation\n' > "$case_dir/state/task-x1.busy-gen"
+            rm "$case_dir/test-root/bin/fm-busy-event.sh"
+            printf '#!/usr/bin/env bash\necho "fixture busy retirement refused" >&2\nexit 1\n' > "$case_dir/test-root/bin/fm-busy-event.sh"
+            chmod +x "$case_dir/test-root/bin/fm-busy-event.sh"
+            expected='fixture busy retirement refused'
+          fi
+          ;;
+        t3-close)
+          t3_fake_set 'w.failTools = {t3_thread_read: {code: "fixture_failure", message: "fixture close refused"}}'
+          expected='could not stop and archive'
+          ;;
+        t3-home) expected='kept secondmate home' ;;
+      esac
+      FM_HOME="$active_home" FM_REFUSAL_CASE="$case_dir" FM_REFUSAL_KIND="$failure" FM_ORCA_CASE="$case_dir" \
+        FM_LATE_ACTOR_GATE="$case_dir/endpoint-closed" FM_FAKE_PANE_PID=1 \
+        run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+      if [ "$failure" = treehouse-pre-return ]; then
+        assert_present "$case_dir/wt/late.txt" "$failure: the late write never happened"
+      fi
+      expect_code 1 "$rc" "$failure: expected refusal: $(cat "$case_dir/stderr")"
+      if [ -n "$expected" ]; then
+        assert_grep "$expected" "$case_dir/stderr" "$failure: wrong refusal path: $(cat "$case_dir/stderr")"
+      fi
+      replay_close_marker "$case_dir" || fail "$failure: startup replay failed"
+      assert_present "$case_dir/state/task-x1.meta" "$failure: startup replay lost the task record"
+      [ "$(backlog_row_state "$case_dir")" = in_flight ] \
+        || fail "$failure: startup replay closed the backlog item"
+      pass "$failure preserves the task record and in_flight row after startup replay"
+    ) || failed=$((failed + 1))
+  done
+  [ "$failed" -eq 0 ] || fail "$failed refusal replay cases failed"
+}
+
+test_post_reap_refusals_keep_backlog_open_after_replay
 test_hidden_untracked_work_refuses_before_return
 test_content_fallback_git_capability_boundary
 test_work_written_at_reap_boundary_is_preserved
@@ -6576,6 +7355,21 @@ test_another_branchs_parked_run_is_never_touched
 test_own_autonomous_run_is_left_alone
 test_leaked_worktree_process_is_reaped
 test_leaked_tasktmp_process_is_reaped
+test_foreign_session_survives_and_is_reported
+test_child_started_during_the_wait_keeps_the_worktree
+test_unlistable_worktree_after_the_reaper_keeps_the_worktree
+test_work_saved_during_the_wait_refuses_the_return
+test_late_work_refusal_leaves_no_close_marker_for_startup_replay
+test_orca_work_saved_during_the_wait_is_not_removed
+test_late_write_is_still_returned_with_force
+test_orca_worktree_with_a_spared_process_is_not_removed
+test_missing_lsof_does_not_block_orca_or_tasktmp_removal
+test_missing_lsof_does_not_block_local_secondmate_tasktmp_removal
+test_tasktmp_with_a_spared_process_is_not_deleted
+test_herdr_pane_close_does_not_orphan_task_owned_children
+test_reparented_child_in_endpoint_session_is_reaped
+test_agent_without_ownership_oracle_ending_at_pane_close_returns_worktree
+test_term_resistant_owned_children_are_reaped_with_the_leader
 test_lsof_absent_reaps_tmux_process_group
 test_lsof_error_refuses_before_removal
 test_reused_pid_identity_is_not_force_killed
