@@ -558,7 +558,7 @@ The lab home was deleted and the test entry was removed from the store and verif
 That automated spawn case runs against a fake claude, so it asserts the store entry and the launch command and nothing more; the live arms above are what establish that the entry actually suppresses the dialog.
 Same-origin clone scope was regression-tested on 2026-11-06 with Git 2.54.0 (Apple Git-157) and Node v26.13.0.
 `bash bin/fm-test-run.sh tests/fm-claude-trust.test.sh` exited 0 (`FM_TEST_SUMMARY total=1 failed=0 skipped_gate=0`).
-The added cases accept matching absolute and resolved relative local origins and exact HTTPS/SCP URLs, preserve import consent on the worktree's owning checkout, and refuse different, missing, unresolved, or incorrectly based origins.
+The added cases accept matching resolved absolute local origins and exact HTTPS/SCP URLs, preserve import consent on the worktree's owning checkout, and refuse different, missing, relative, or unresolvable origins.
 This is persisted-store evidence; the live Claude dialog observations above remain the harness evidence.
 
 The composer-classification record below observes the same gate from the other side, where an untrusted worktree left Claude, Grok, and Muse unverified because the guard reads a first-launch trust dialog as an unreadable composer.

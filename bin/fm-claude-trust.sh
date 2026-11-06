@@ -92,8 +92,9 @@
 # unrelated repo, a subdirectory of a worktree, a plain directory, and a home
 # directory are each refused. Refusal is a non-zero exit, never a warning and
 # never a silent skip. Separate clones can share a treehouse pool, so origin
-# identity also proves scope: remote URLs must match exactly, and local paths
-# must resolve to the same directory. Missing or unresolved origins prove nothing.
+# identity also proves scope: remote URLs must match exactly, and absolute local
+# paths must resolve to the same directory. Missing, relative, or unresolvable
+# origins prove nothing.
 # When <project> is itself a linked worktree (a
 # secondmate home spawned from, rather than as, the primary checkout),
 # refusing outright would wedge a relaunch that is otherwise perfectly valid:
@@ -248,20 +249,15 @@ common_dir_of() {
   (cd -P -- "$dir" && real_dir "$common")
 }
 
-# Compare remote URLs exactly; local origins must resolve from the declaring
-# repository's primary checkout. Unresolved paths prove no shared identity.
+# Compare remote URLs exactly and absolute local origins by resolved path.
+# Missing, relative, or unresolvable origins prove no shared identity.
 origin_identity() {  # <path-inside-repo>
-  local dir=$1 url common base
+  local dir=$1 url
   url=$(git -C "$dir" remote get-url origin 2>/dev/null) || return 1
   [ -n "$url" ] || return 1
   case $url in
     /*) [ -d "$url" ] && (CDPATH='' cd -P -- "$url" && pwd -P) || return 1 ;;
-    *)
-      case ${url%%/*} in *:*) printf '%s\n' "$url"; return ;; esac
-      common=$(common_dir_of "$dir") || return 1
-      base=$(real_dir "$(dirname -- "$common")") || return 1
-      [ -n "$base" ] && [ -d "$base/$url" ] && (CDPATH='' cd -P -- "$base/$url" && pwd -P) || return 1
-      ;;
+    *) case ${url%%/*} in *:*) printf '%s\n' "$url" ;; *) return 1 ;; esac ;;
   esac
 }
 

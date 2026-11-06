@@ -864,21 +864,16 @@ test_secondmate_spawn_fails_closed_when_home_trust_cannot_be_recorded() {
 # Exercise each supported origin form without contacting a remote service.
 test_same_origin_spellings() {
   local kind rec out origin
-  for kind in absolute relative https scp; do
+  for kind in absolute https scp; do
     rec=$(make_same_origin_clones "origin-form-$kind")
     read_clone_case "$rec"
     case $kind in
       absolute) origin="$CASE_DIR/origin.git" ;;
-      relative) origin=../../origin.git ;;
       https) origin=https://example.invalid/team/project.git ;;
       scp) origin=git@example.invalid:team/project.git ;;
     esac
     git -C "$CLONE_MAIN" remote set-url origin "$origin"
-    if [ "$kind" = relative ]; then
-      git -C "$CLONE_MATE" remote set-url origin ../../../origin.git
-    else
-      git -C "$CLONE_MATE" remote set-url origin "$origin"
-    fi
+    git -C "$CLONE_MATE" remote set-url origin "$origin"
     out=$(run_trust "$CLONE_CONFIG" "$CLONE_WT" "$CLONE_MATE")
     expect_code 0 $? "matching $kind origins should prove scope: $out"
     assert_trusted "$CLONE_CONFIG/.claude.json" "$CLONE_WT" "$kind origin was not trusted"
@@ -998,32 +993,7 @@ test_colon_in_relative_origin_is_not_a_url() {
   assert_contains "$out" "is not a worktree of project" "the refusal did not name the project mismatch"
   assert_not_trusted "$config/.claude.json" "$main_wt" \
     "an unrelated repository's worktree was trusted on a colon-containing relative origin"
-  pass "fm-claude-trust.sh: resolves a colon-containing relative origin as a local path"
-}
-
-test_relative_origin_resolves_from_the_declaring_checkout() {
-  local case_dir config main_proj main_wt mate_proj out
-  case_dir="$TMP_ROOT/relative-origin-base"
-  config="$case_dir/claude-config"
-  main_proj="$case_dir/main/project"
-  main_wt="$case_dir/pool/project"
-  mate_proj="$case_dir/pool/clone"
-  mkdir -p "$config" "$(dirname -- "$main_wt")"
-  fm_git_init_commit "$main_proj"
-  git -C "$main_proj" remote add origin ../project.git
-  git -C "$main_proj" worktree add --quiet -b wt-relative-base "$main_wt"
-  fm_git_init_commit "$mate_proj"
-  git -C "$mate_proj" remote add origin ../project.git
-  git clone --quiet --bare "$main_proj" "$case_dir/main/project.git"
-  git clone --quiet --bare "$mate_proj" "$case_dir/pool/project.git"
-  [ -d "$case_dir/pool/project.git" ] \
-    || fail "the relative-origin base case was vacuous: the colliding bare repository is missing"
-  out=$(run_trust "$config" "$main_wt" "$mate_proj")
-  expect_code 1 $? "a relative origin resolved from the worktree must not prove a shared identity: $out"
-  assert_contains "$out" "is not a worktree of project" "the refusal did not name the project mismatch"
-  assert_not_trusted "$config/.claude.json" "$main_wt" \
-    "an unrelated repository's worktree was trusted on a relative origin resolved from the wrong base"
-  pass "fm-claude-trust.sh: resolves a relative origin from the checkout that declares it"
+  pass "fm-claude-trust.sh: refuses a colon-containing relative origin"
 }
 
 test_fresh_worktree_is_trusted
@@ -1064,5 +1034,4 @@ test_different_origin_clone_worktree_is_refused
 test_originless_clone_worktree_is_refused
 test_unresolvable_relative_origin_collision_is_refused
 test_colon_in_relative_origin_is_not_a_url
-test_relative_origin_resolves_from_the_declaring_checkout
 test_same_origin_spellings
