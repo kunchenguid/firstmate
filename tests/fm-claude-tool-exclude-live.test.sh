@@ -10,8 +10,8 @@
 # exactly the excluded tool's schema.
 #
 # Enabled by default wherever claude and python3 are installed; FM_CLAUDE_TOOL_EXCLUDE_LIVE=1
-# makes an absent tool a failure and =0 skips. It needs a Claude Code login only to
-# get as far as building a request.
+# makes an absent tool or an unusable claude (no login, so no request) a failure and
+# =0 skips. A host without a login skips otherwise.
 set -eu
 
 # shellcheck source=tests/lib.sh
@@ -28,7 +28,17 @@ stop_capture() {
 }
 trap 'stop_capture' EXIT
 
-# capture_tools <label> [claude args...]: print the main request's tool names, one per line.
+# unusable <reason>: skip when the host cannot run the comparison, fail when it was requested.
+unusable() {
+  if [ "${FM_CLAUDE_TOOL_EXCLUDE_LIVE:-}" = 1 ] || [ "${FM_LIVE:-}" = 1 ]; then
+    fail "$1"
+  fi
+  printf 'skip: live: %s\n' "$1"
+  exit 0
+}
+
+# capture_tools <label> [claude args...]: write the main request's tool names, one per line,
+# to $TMP_ROOT/<label>.tools. Runs in the main shell so unusable can end the script.
 capture_tools() {
   local label=$1 port_file capture port
   shift
@@ -48,8 +58,8 @@ capture_tools() {
       fm_run_timed 40 claude -p "say hi" --max-turns 1 "$@" >/dev/null 2>&1 || true
   )
   stop_capture
-  [ -s "$capture" ] || fail "claude $CLAUDE_VERSION sent no model request for $label; is it logged in?"
-  python3 -I - "$capture" <<'PY'
+  [ -s "$capture" ] || unusable "claude $CLAUDE_VERSION sent no model request for $label; is it logged in?"
+  python3 -I - "$capture" >"$TMP_ROOT/$label.tools" <<'PY'
 import json, sys
 best = []
 for line in open(sys.argv[1]):
@@ -66,11 +76,13 @@ PY
 # shellcheck source=bin/fm-timeout-lib.sh
 . "$ROOT/bin/fm-timeout-lib.sh"
 
-baseline=$(capture_tools baseline)
-trimmed=$(capture_tools trimmed --disallowedTools Workflow)
+capture_tools baseline
+capture_tools trimmed --disallowedTools Workflow
+baseline=$(cat "$TMP_ROOT/baseline.tools")
+trimmed=$(cat "$TMP_ROOT/trimmed.tools")
 
 printf '%s\n' "$baseline" | grep -qx Workflow \
-  || fail "claude $CLAUDE_VERSION baseline request does not carry Workflow, so the comparison proves nothing"
+  || unusable "claude $CLAUDE_VERSION baseline request does not carry Workflow, so the comparison proves nothing"
 printf '%s\n' "$trimmed" | grep -qx Workflow \
   && fail "claude $CLAUDE_VERSION still sends the Workflow schema under --disallowedTools"
 [ "$(printf '%s\n' "$baseline" | grep -vx Workflow | sort | tr '\n' ' ')" = "$(printf '%s\n' "$trimmed" | sort | tr '\n' ' ')" ] \
