@@ -4718,7 +4718,7 @@ test_pi_stream_silence_uses_inspection_timer() {
   for mode in enabled disabled negative invalid_option leading maximum overflow closed foreign fresh malformed stale resumed racing; do
     dir=$(make_case "pi-stream-$mode"); state="$dir/state"; fakebin="$dir/fakebin"
     out="$dir/watch.out"; capture_file="$dir/pane.txt"; window="test:fm-stream-$mode"
-    key=$(printf '%s' "$window" | tr ':/.' '___')
+    key=$(watch_window_key "$window")
     printf 'Working...' > "$capture_file"
     printf 'window=%s\nkind=ship\nharness=pi\n' "$window" > "$state/stream.meta"
     record_pi_busy "$state" stream
@@ -4809,7 +4809,7 @@ test_pi_model_progress_and_legacy_fallback() {
   for mode in enabled disabled stale malformed closed replaced; do
     dir=$(make_case "pi-anchor-$mode"); state="$dir/state"; fakebin="$dir/fakebin"
     out="$dir/watch.out"; capture_file="$dir/pane.txt"; window="test:fm-anchor-$mode"
-    key=$(printf '%s' "$window" | tr ':/.' '___')
+    key=$(watch_window_key "$window")
     printf 'Working...' > "$capture_file"
     printf 'window=%s\nkind=ship\nharness=pi\n' "$window" > "$state/stream.meta"
     record_pi_busy "$state" stream
@@ -4881,7 +4881,7 @@ test_pi_stream_publication_lock_revalidation() {
     for action in close progress replace; do
       dir=$(make_case "pi-publication-$uninterrupted-terminal-$terminal-$lock_kind-$action"); state="$dir/state"; fakebin="$dir/fakebin"
       out="$dir/watch.out"; capture_file="$dir/pane.txt"; window="test:fm-publication-$lock_kind-$action"
-      key=$(printf '%s' "$window" | tr ':/.' '___')
+      key=$(watch_window_key "$window")
       printf 'Working...' > "$capture_file"
       printf 'window=%s\nkind=ship\nharness=pi\n' "$window" > "$state/stream.meta"
       record_pi_busy "$state" stream
@@ -4963,7 +4963,7 @@ test_pi_stream_resume_restarts_capped_episode() {
   local dir state fakebin out capture_file window key gen pid round snapshot
   dir=$(make_case pi-stream-restall); state="$dir/state"; fakebin="$dir/fakebin"
   out="$dir/watch.out"; capture_file="$dir/pane.txt"; window=test:fm-stream-restall
-  key=$(printf '%s' "$window" | tr ':/.' '___')
+  key=$(watch_window_key "$window")
   printf 'Working...' > "$capture_file"
   printf 'window=%s\nkind=ship\nharness=pi\n' "$window" > "$state/stream.meta"
   record_pi_busy "$state" stream
@@ -5006,7 +5006,7 @@ test_pi_stream_counter_write_failures() {
   for mode in uncapped post_append terminal truncation; do
     dir=$(make_case "pi-counter-$mode"); state="$dir/state"; fakebin="$dir/fakebin"
     out="$dir/watch.out"; capture_file="$dir/pane.txt"; window="test:fm-counter-$mode"
-    key=$(printf '%s' "$window" | tr ':/.' '___')
+    key=$(watch_window_key "$window")
     printf 'Working...' > "$capture_file"
     printf 'window=%s\nkind=ship\nharness=pi\n' "$window" > "$state/stream.meta"
     record_pi_busy "$state" stream
