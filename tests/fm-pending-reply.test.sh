@@ -726,7 +726,7 @@ test_legacy_escalation_closes_default_decision() {
   printf 'done [corr=%s]: delayed legacy reply\n' "$corr" >> "$state/hibit.status"
 
   fm_pending_reply_try_resolve "$state" "$corr" || fail "legacy reply should resolve its record"
-  [ "$(sed -E 's/ \[at=[0-9]+\]//' "$state/hibit.status" | grep -Fc "resolved [key=default]: pending-reply-resolved: task=hibit pending-reply-id=$corr")" -eq 1 ] \
+  [ "$(sed -E 's/ \[at=[0-9]+\]//' "$state/hibit.status" | grep -Fc "resolved [key=default]: pending-reply-resolved: task=hibit pending-reply-id=$corr via=status child=- child-state=unknown overall=unknown")" -eq 1 ] \
     || fail "legacy escalation did not append one guarded default-key resolution"
   open=$(status_open_decisions "$state/hibit.status")
   [ -z "$open" ] || fail "resolved legacy escalation remained open: $open"
@@ -811,7 +811,7 @@ test_concurrent_resolution_closes_escalation_once() {
 
   [ "$(phase_of "$state" "$corr")" = resolved ] \
     || fail "concurrent resolvers left the expectation unresolved"
-  [ "$(grep -Fc "pending-reply-resolved: task=hibit pending-reply-id=$corr" "$state/hibit.status")" -eq 1 ] \
+  [ "$(grep -Fc "pending-reply-resolved: task=hibit pending-reply-id=$corr via=status child=- child-state=unknown overall=unknown" "$state/hibit.status")" -eq 1 ] \
     || fail "concurrent resolvers did not append exactly one decision close"
   [ -n "$(fm_pending_reply_get "$rec" escalation_closed_epoch)" ] \
     || fail "concurrent resolution did not record the closed escalation"
@@ -2123,6 +2123,192 @@ test_summary_keeps_accents_and_caps_by_character() {
   pass "the summary keeps accented letters, drops control characters, and caps by character"
 }
 
+# --- child result on a correlated reply ---------------------------------------
+# A routed request can be answered while the child task behind it is unfinished,
+# so the parent reads the child's fm-crew-state verdict, never the reply's verb.
+
+make_child_stubs() {  # <dir> -> fakebin with a tmux that lists the mate's windows
+  local fb="$1/fakebin"
+  mkdir -p "$fb"
+  cat > "$fb/tmux" <<'SH'
+#!/usr/bin/env bash
+case "${1:-}" in
+  list-windows) sed -n 's/^window=[^:]*://p' "${FM_STATE_OVERRIDE:-${FM_HOME:?}/state}"/*.meta 2>/dev/null ;;
+  display-message) printf '%%1\n' ;;
+  capture-pane) printf 'all quiet\n> \n' ;;
+esac
+exit 0
+SH
+  chmod +x "$fb/tmux"
+  printf '%s\n' "$fb"
+}
+
+# A child task in <mate-home> whose log ends with <log-line>, working or idle.
+make_child() {  # <mate-home> <id> <kind> <busy|idle> <log-line>
+  local mate=$1 id=$2 kind=$3 busy=$4 log=$5 wt gen
+  wt="$mate/wt-$id"
+  mkdir -p "$wt"
+  if [ "$kind" = ship ]; then
+    git -C "$wt" init -q
+    git -C "$wt" commit -q --allow-empty -m init
+    git -C "$wt" update-ref refs/remotes/origin/main "$(git -C "$wt" rev-parse HEAD)"
+  fi
+  printf 'window=fm:fm-%s\nworktree=%s\nkind=%s\nmode=direct-PR\nharness=claude\n' \
+    "$id" "$wt" "$kind" > "$mate/state/$id.meta"
+  printf '%s\n' "$log" > "$mate/state/$id.status"
+  gen=$("$ROOT/bin/fm-busy-event.sh" arm "$mate/state" "$id")
+  if [ "$busy" = busy ]; then
+    "$ROOT/bin/fm-busy-event.sh" apply "$mate/state" "$id" busy --gen "$gen" \
+      --source claude-hook --event user-prompt-submit
+  else
+    "$ROOT/bin/fm-busy-event.sh" apply "$mate/state" "$id" idle --gen "$gen" \
+      --source claude-hook --event stop
+  fi
+}
+
+# The child result fields of a resolved record, as "<id> <state> <overall>".
+recorded_child_result() {  # <state> <corr>
+  local rec
+  rec=$(fm_pending_reply_path "$1" "$2")
+  [ "$(fm_pending_reply_get "$rec" phase)" = resolved ] || fail "request $2 did not resolve"
+  printf '%s %s %s' "$(fm_pending_reply_get "$rec" reply_child_id)" \
+    "$(fm_pending_reply_get "$rec" reply_child_state)" \
+    "$(fm_pending_reply_get "$rec" reply_overall)"
+}
+
+# Answer a marked request through the helper and print the recorded child
+# result. <task> is a child id or empty; <doc> is a document pointer or empty.
+received_result() {  # <fakebin> <mate-home> <parent-home> <mate-id> <task> <doc>
+  local fb=$1 mate=$2 home=$3 mate_id=$4 task=$5 doc=$6 corr
+  local -a flags=() tail=()
+  [ -z "$task" ] || flags+=(--task "$task")
+  [ -z "$doc" ] || { flags+=(--doc); tail+=("$doc"); }
+  corr=$(FM_PENDING_REPLY_NOW=9300 fm_pending_reply_create "$home" "$home/state" "$mate_id" "how far is the repacking")
+  FM_PENDING_REPLY_NOW=9300 fm_pending_reply_mark_delivered "$home/state" "$corr"
+  PATH="$fb:$PATH" FM_HOME="$mate" "$REPORT" "${flags[@]}" "done" "$corr" \
+    "${tail[@]}" "narrow fix done" > /dev/null || fail "helper report failed"
+  FM_PENDING_REPLY_NOW=9300 fm_pending_reply_try_resolve "$home/state" "$corr" || fail "helper report should resolve the request"
+  recorded_child_result "$home/state" "$corr"
+}
+
+test_unfinished_child_is_not_reported_finished() {
+  local home mate fb out
+  fm_git_identity fmtest fmtest@example.invalid
+  home=$(setup_parent child-open)
+  mate=$(bind_local_mate "$home" kid)
+  fb=$(make_child_stubs "$mate")
+  make_child "$mate" repack scout busy 'done: spinner fix done; broader repacking work remains unfinished'
+  out=$(received_result "$fb" "$mate" "$home" kid repack "")
+  [ "$out" = "repack working unfinished" ] \
+    || fail "a done reply for a working child must record it unfinished: $out"
+  make_child "$mate" nopr ship idle 'done: spinner fix done'
+  git -C "$mate/wt-nopr" commit -q --allow-empty -m 'unpublished work'
+  out=$(received_result "$fb" "$mate" "$home" kid nopr "")
+  [ "$out" = "nopr blocked unfinished" ] \
+    || fail "a ship whose commit is not delivered must record blocked and unfinished: $out"
+  pass "a done reply for a still-running child or an undelivered ship records unfinished"
+}
+
+test_finished_child_reads_finished() {
+  local home mate fb out
+  fm_git_identity fmtest fmtest@example.invalid
+  home=$(setup_parent child-done)
+  mate=$(bind_local_mate "$home" kid)
+  fb=$(make_child_stubs "$mate")
+  make_child "$mate" scoutdone scout idle 'done: report written'
+  out=$(received_result "$fb" "$mate" "$home" kid scoutdone "")
+  [ "$out" = "scoutdone done finished" ] \
+    || fail "a completed scout must record done and finished: $out"
+  make_child "$mate" shipready ship idle 'done: ready for merge'
+  out=$(received_result "$fb" "$mate" "$home" kid shipready data/x/report.md)
+  [ "$out" = "shipready done finished" ] \
+    || fail "a ready ship must record done and finished through the document form: $out"
+  pass "a completed scout and a ready ship record finished through the document form too"
+}
+
+test_missing_child_result_reads_unknown() {
+  local home mate fb out
+  home=$(setup_parent child-missing)
+  mate=$(bind_local_mate "$home" kid)
+  fb=$(make_child_stubs "$mate")
+  make_child "$mate" scoutdone scout idle 'done: report written'
+  out=$(received_result "$fb" "$mate" "$home" kid "" "")
+  [ "$out" = "- unknown unknown" ] \
+    || fail "a reply without a child must resolve and record unknown, not finished: $out"
+  out=$(received_result "$fb" "$mate" "$home" kid no-such-child "")
+  [ "$out" = "no-such-child unknown unknown" ] \
+    || fail "a child with no record must record unknown and never finished: $out"
+  out=$(received_result "$fb" "$mate" "$home" kid ./scoutdone "")
+  [ "$out" = "- unknown unknown" ] \
+    || fail "a path-shaped id must not read the real child and record finished: $out"
+  pass "a reply with no child result, an unreadable one, or a path-shaped id records unknown"
+}
+
+test_routine_resolution_appends_no_parent_line() {
+  local home mate fb status
+  fm_git_identity fmtest fmtest@example.invalid
+  home=$(setup_parent routine-no-note)
+  mate=$(bind_local_mate "$home" kid)
+  fb=$(make_child_stubs "$mate")
+  make_child "$mate" repack scout busy 'working: repacking panels'
+  received_result "$fb" "$mate" "$home" kid repack "" >/dev/null
+  status="$home/state/kid.status"
+  [ "$(wc -l < "$status")" -eq 1 ] \
+    || fail "a routine resolution must leave only the mate's reply on the parent channel: $(cat "$status")"
+  assert_grep 'done [corr=' "$status" \
+    "the mate's own reply must stay the parent channel's current line"
+  assert_no_grep 'pending-reply-resolved:' "$status" \
+    "a routine resolution must not append a bookkeeping note that reads as the mate's state"
+  pass "a routine resolution records the child result without appending to the parent channel"
+}
+
+test_escalation_close_note_carries_child_result() {
+  local home state mate fb corr status
+  home=$(setup_parent escalation-child-result)
+  state="$home/state"
+  mate=$(bind_local_mate "$home" kid)
+  fb=$(make_child_stubs "$mate")
+  make_child "$mate" repack scout busy 'working: repacking panels'
+  export FM_PENDING_REPLY_SEND_HOOK='true'
+  corr=$(FM_PENDING_REPLY_NOW=9500 fm_pending_reply_create "$home" "$state" "kid" "how far is the repacking")
+  FM_PENDING_REPLY_NOW=9500 fm_pending_reply_mark_delivered "$state" "$corr"
+  FM_PENDING_REPLY_NOW=9500 fm_pending_reply_mark_turn_completed "$state" "$corr" request
+  FM_PENDING_REPLY_NOW=9500 fm_pending_reply_send_recovery "$state" "$corr" || fail "recovery send failed"
+  FM_PENDING_REPLY_NOW=9500 fm_pending_reply_mark_turn_completed "$state" "$corr" recovery
+  FM_PENDING_REPLY_NOW=9500 fm_pending_reply_maybe_escalate "$state" "$corr" || fail "missed-report escalation should fire"
+  status="$state/kid.status"
+  grep -Fq 'pending-reply-missed' "$status" || fail "escalation did not open a missed-report decision"
+  PATH="$fb:$PATH" FM_HOME="$mate" "$REPORT" --task repack "done" "$corr" "narrow fix done" > /dev/null \
+    || fail "helper report failed"
+  FM_PENDING_REPLY_NOW=9500 fm_pending_reply_try_resolve "$state" "$corr" || fail "late helper reply should resolve the request"
+  [ "$(grep -Fc "resolved [key=pending-reply-$corr]" "$status")" -eq 1 ] \
+    || fail "resolution did not close the escalation decision once: $(cat "$status")"
+  [ "$(grep -Fc "pending-reply-resolved: task=kid pending-reply-id=$corr via=helper child=repack child-state=working overall=unfinished" "$status")" -eq 1 ] \
+    || fail "the escalation close note must carry the working child's unfinished result: $(cat "$status")"
+  pass "an escalation closed by a helper reply records the child and its unfinished verdict in the close note"
+}
+
+test_hand_written_reply_and_forged_note_read_unknown() {
+  local home state corr out
+  home=$(setup_parent child-forged)
+  state="$home/state"
+  corr=$(FM_PENDING_REPLY_NOW=9400 fm_pending_reply_create "$home" "$state" "kid" "how far")
+  FM_PENDING_REPLY_NOW=9400 fm_pending_reply_mark_delivered "$state" "$corr"
+  printf 'done [corr=%s]: all finished (child=x child-state=done)\n' "$corr" >> "$state/kid.status"
+  FM_PENDING_REPLY_NOW=9400 fm_pending_reply_try_resolve "$state" "$corr" || fail "hand-written report should resolve"
+  out=$(recorded_child_result "$state" "$corr")
+  [ "$out" = "- unknown unknown" ] \
+    || fail "only the helper's trailing marker may supply a child result: $out"
+  corr=$(FM_PENDING_REPLY_NOW=9400 fm_pending_reply_create "$home" "$state" "kid" "how far now")
+  FM_PENDING_REPLY_NOW=9400 fm_pending_reply_mark_delivered "$state" "$corr"
+  printf 'done [corr=%s]: all finished (via-helper child=- child-state=done)\n' "$corr" >> "$state/kid.status"
+  FM_PENDING_REPLY_NOW=9400 fm_pending_reply_try_resolve "$state" "$corr" || fail "no-child marker line should resolve"
+  out=$(recorded_child_result "$state" "$corr")
+  [ "$out" = "- unknown unknown" ] \
+    || fail "a marker with no child must not carry a verdict: $out"
+  pass "a hand-written line quoting a child result, or a no-child marker with a verdict, records unknown"
+}
+
 # --- run --------------------------------------------------------------------
 
 test_normal_correlated_reply_resolves_once
@@ -2174,5 +2360,11 @@ test_local_parent_replies_is_wrong_home_evidence
 test_escalated_undelivered_correlation_stays_retryable
 test_same_kind_escalation_reopens_after_operator_close
 test_summary_keeps_accents_and_caps_by_character
+test_unfinished_child_is_not_reported_finished
+test_finished_child_reads_finished
+test_missing_child_result_reads_unknown
+test_routine_resolution_appends_no_parent_line
+test_escalation_close_note_carries_child_result
+test_hand_written_reply_and_forged_note_read_unknown
 
 printf 'ok - all pending-reply tests passed\n'

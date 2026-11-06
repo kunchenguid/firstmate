@@ -839,6 +839,11 @@ test_secondmate_marked_request_reporting_contract() {
     "secondmate charter lost the mechanical helper invocation"
   assert_grep 'do not pass a status path' "$brief" \
     "secondmate charter still tells the mate to pass a hand path to the helper"
+  # shellcheck disable=SC2016 # Backticks are literal generated brief text.
+  assert_grep 'run `bin/fm-secondmate-report.sh --task <child> <verb> <corr_id> <note>` with `--task <child>` before the verb' "$brief" \
+    "secondmate charter never shows the mate where --task goes in the helper invocation"
+  assert_grep 'reads the overall result from that verdict, never from your verb' "$brief" \
+    "secondmate charter lost the rule that the child verdict, not the verb, is the result"
   assert_grep 'For a terse result, a status line is the whole answer.' "$brief" \
     "secondmate charter lost terse result reporting"
   assert_grep 'append a status line that points to that doc' "$brief" \
