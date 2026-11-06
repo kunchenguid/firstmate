@@ -462,7 +462,6 @@ test_allow_is_silent_both_modes() {
 }
 
 # --- harness wiring: each adapter invokes the shared checker -----------------
-
 # --- shellcheck (belt-and-suspenders; CI/CONTRIBUTING.md also runs this) -----
 #
 # Delegated to bin/fm-lint.sh rather than calling shellcheck directly, because

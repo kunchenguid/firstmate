@@ -43,7 +43,6 @@
 # capture, the #{cursor_y} cursor read, the pi foreground-process identity
 # probe, and the capability descriptor - plus the busy detection and submit
 # cores that consume the shared verdict.
-
 # The sibling directory is derived without forking dirname, because a backend
 # probe can re-source this adapter inside a subshell on every watcher cycle.
 _FM_TMUX_LIB_DIR=${BASH_SOURCE[0]%/*}
@@ -53,7 +52,6 @@ _FM_TMUX_LIB_DIR=${BASH_SOURCE[0]%/*}
 # shellcheck source=bin/fm-cursor-lib.sh
 . "${_FM_TMUX_LIB_DIR:-/}/fm-cursor-lib.sh"
 unset _FM_TMUX_LIB_DIR
-
 
 # fm_tmux_strip_ghost: thin adapter over the shared, fleet-wide ghost extractor
 # fm_composer_strip_ghost (bin/fm-composer-lib.sh). It drops de-emphasised
@@ -72,7 +70,6 @@ fm_tmux_strip_ghost() { fm_composer_strip_ghost; }
 # family, and verdict decision lives in the shared owner
 # (bin/fm-composer-lib.sh, fm_composer_classify_screen), so a new harness
 # shape is taught there once and never here.
-
 # fm_tmux_composer_capture: the visible pane WITH ANSI styling. The styled
 # capture is consumed internally by the classifier and is NEVER surfaced
 # (fm-peek and every human/LLM-facing path stay plain).

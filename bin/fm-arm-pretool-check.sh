@@ -56,7 +56,6 @@ usage() {
   cat <<'EOF'
 Usage: fm-arm-pretool-check.sh [--command <cmd>] [--background true|false] [--claude|--cursor|--agy] [--primary-only]
 
-
 With no --command, reads a PreToolUse-style JSON payload on stdin (Grok
 toolInput.command, Antigravity toolCall.args.CommandLine/command, or
 Claude/Codex/Cursor tool_input.command).

@@ -43,7 +43,6 @@
 # archive-chain identity are likewise deferred with no owner. Replacement
 # records carry the original entry boundary and superseded mandates are
 # included so the brief shows every instruction the window ran under.
-
 #
 # The durable state/.afk-return-catchup file is written BEFORE daemon shutdown,
 # so a crash between stopping, wake presentation, and blocker handling fails
@@ -76,7 +75,6 @@ CONTRACT="$SCRIPT_DIR/fm-afk-contract.sh"
 # shellcheck source=bin/fm-hold-reason-lib.sh
 . "$SCRIPT_DIR/fm-hold-reason-lib.sh"
 DROID_DEFERRAL_MARKER="$STATE/.droid-afk-question-deferral"
-
 
 usage() {
   sed -n '2,11p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
