@@ -1001,7 +1001,7 @@ test_local_default_landing_records_backlog_evidence() {
     run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
 
     expect_code 0 "$rc" "local-default-backlog-$mode: teardown should succeed"
-    [ "$(backlog_row_state "$case_dir")" = done ] \
+    [ "$(backlog_row_state "$case_dir")" = "done" ] \
       || fail "local-default-backlog-$mode: teardown did not close the backlog item"
     out=$(tasks-axi show task-x1 --file "$case_dir/data/backlog.md" --full)
     printf '%s\n' "$out" | grep -F 'body: local main' >/dev/null \
