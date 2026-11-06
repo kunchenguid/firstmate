@@ -180,13 +180,47 @@ fm_path_age() {
 # bounding staleness once the poll cadence reaches or exceeds it; growing the
 # default with the cadence while keeping the historical 300s floor for the
 # common short-poll case fixes that without a caller-specific constant.
-# Defaults to $FM_POLL (fm-watch.sh's own poll env var) when no argument is
-# given, so a caller with no independent notion of the poll cadence still
-# derives the same default fm-watch.sh itself would use.
+# Defaults to fm_effective_poll_seconds (the slowest wait one watcher cycle can
+# take: the fast poll, or the home-tuned idle cadence when slower) when no
+# argument is given, so a caller with no independent notion of the poll cadence
+# still derives the same default fm-watch.sh itself would use.
 # docs/turnend-guard.md "Guard grace and the poll cadence" is the single owner
 # of the rationale; every FM_GUARD_GRACE default should derive from this.
+
+# Load the tuning owner only for callers that derive the effective poll. Most
+# wake-library consumers need no tuning machinery.
+_fm_wake_require_tuning() {
+  command -v fm_supervision_tuning_int >/dev/null 2>&1 && return 0
+  if [ ! -f "$FM_WAKE_LIB_DIR/fm-supervision-tuning-lib.sh" ]; then
+    # A minimal install (remote recovery fixture) ships this library alone: the
+    # same sanitizing validator and a no-op loader keep the shipped defaults.
+    fm_supervision_tuning_int() {
+      case ${1:-} in ''|*[!0-9]*) printf '%s\n' "${2:-0}" ;; *) printf '%s\n' "$((10#$1))" ;; esac
+    }
+    fm_supervision_tuning_load() { return 0; }
+    return 0
+  fi
+  # shellcheck source=bin/fm-supervision-tuning-lib.sh
+  . "$FM_WAKE_LIB_DIR/fm-supervision-tuning-lib.sh"
+}
+
+# fm_effective_poll_seconds -> the slowest wait one watcher cycle can take: the
+# fast poll (FM_POLL, default 15) unless home-local tuning (FM_IDLE_POLL from
+# config/supervision-tuning) slows the idle cadence further. Every beacon-age
+# reader must bound staleness with this, not the fast poll alone, or a healthy
+# watcher waiting on the idle cadence reads stale.
+fm_effective_poll_seconds() {
+  _fm_wake_require_tuning
+  fm_supervision_tuning_load
+  local fast slow
+  fast=$(fm_supervision_tuning_int "${FM_POLL:-15}" 15)
+  slow=$(fm_supervision_tuning_int "${FM_IDLE_POLL:-0}" 0)
+  [ "$slow" -gt "$fast" ] && fast=$slow
+  printf '%s\n' "$fast"
+}
+
 fm_poll_derived_grace() {
-  local poll=${1:-${FM_POLL:-15}} margin=60 derived
+  local poll=${1:-$(fm_effective_poll_seconds)} margin=60 derived
   case "$poll" in ''|*[!0-9]*) poll=15 ;; esac
   derived=$((poll + margin))
   [ "$derived" -ge 300 ] || derived=300
@@ -200,7 +234,7 @@ fm_poll_derived_grace() {
 # stale beacon is a slow cycle; at or past it bin/fm-watch.sh evicts that holder
 # and bin/fm-watch-arm.sh stops following it, so both read this one definition.
 fm_watcher_stall_bound() {
-  local poll=${1:-${FM_POLL:-15}} grace
+  local poll=${1:-$(fm_effective_poll_seconds)} grace
   grace=${FM_WATCHER_STALE_GRACE:-${FM_GUARD_GRACE:-$(fm_poll_derived_grace "$poll")}}
   printf '%s\n' "${FM_WATCHER_STALL_BOUND:-$((grace * 3))}"
 }
