@@ -115,7 +115,9 @@ fm_gnu_timeout_path() {
 
 fm_timeout_mechanism() {
   local timeout_path
-  if [ "${FM_TIMEOUT_REQUIRE_GNU:-0}" = 1 ]; then
+  if [ "${FM_TIMEOUT_MECHANISM_OVERRIDE:-}" = bash ]; then
+    printf 'bash\n'
+  elif [ "${FM_TIMEOUT_REQUIRE_GNU:-0}" = 1 ]; then
     if timeout_path=$(fm_gnu_timeout_path); then
       printf '%s\n' "${timeout_path##*/}"
     elif command -v perl >/dev/null 2>&1; then
@@ -123,8 +125,6 @@ fm_timeout_mechanism() {
     else
       printf 'bash\n'
     fi
-  elif [ "${FM_TIMEOUT_MECHANISM_OVERRIDE:-}" = bash ]; then
-    printf 'bash\n'
   elif timeout_path=$(fm_external_timeout_path); then
     printf '%s\n' "${timeout_path##*/}"
   elif command -v perl >/dev/null 2>&1; then

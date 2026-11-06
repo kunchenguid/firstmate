@@ -5773,7 +5773,6 @@ EOF
 
   rc=0
   started=$SECONDS
-  FM_TIMEOUT_MECHANISM_OVERRIDE=bash \
   FM_NON_GNU_TIMEOUT_LOG="$case_dir/non-gnu-timeout-ran" \
   FM_TEARDOWN_LSOF_CENSUS_TIMEOUT=1 \
     run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
@@ -5797,7 +5796,6 @@ SH
   chmod +x "$case_dir/fakebin/timeout" "$case_dir/fakebin/gtimeout" "$case_dir/fakebin/lsof"
 
   rc=0
-  FM_TIMEOUT_MECHANISM_OVERRIDE=bash \
   FM_NON_GNU_TIMEOUT_LOG="$case_dir/non-gnu-timeout-ran" \
     run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
 
@@ -5805,6 +5803,49 @@ SH
   assert_absent "$case_dir/non-gnu-timeout-ran" "non-gnu-timeout-signal-status: incompatible timeout ran"
   assert_present "$case_dir/state/task-x1.meta" "non-gnu-timeout-signal-status: signal death read as success"
   pass "non-GNU timeout falls through with timeout and signal failures preserved"
+}
+
+test_explicit_bash_timeout_override_wins_gnu_requirement() {
+  local case_dir rc started elapsed
+  case_dir=$(make_case explicit-bash-timeout-override)
+  cat > "$case_dir/fakebin/timeout" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = --version ]; then
+  printf 'timeout (GNU coreutils) 9.0\n'
+  exit 0
+fi
+printf 'timeout\n' >> "${FM_TIMEOUT_RUNNER_LOG:?}"
+exit 2
+SH
+  cp "$case_dir/fakebin/timeout" "$case_dir/fakebin/gtimeout"
+  cat > "$case_dir/fakebin/perl" <<'SH'
+#!/usr/bin/env bash
+printf 'perl\n' >> "${FM_TIMEOUT_RUNNER_LOG:?}"
+exit 2
+SH
+  cat > "$case_dir/term-resistant" <<EOF
+#!/usr/bin/env bash
+trap 'printf "term\\n" > "$case_dir/term.log"' TERM
+while :; do sleep 1; done
+EOF
+  chmod +x "$case_dir/fakebin/timeout" "$case_dir/fakebin/gtimeout" \
+    "$case_dir/fakebin/perl" "$case_dir/term-resistant"
+
+  rc=0
+  started=$SECONDS
+  FM_TIMEOUT_MECHANISM_OVERRIDE=bash \
+  FM_TIMEOUT_RUNNER_LOG="$case_dir/runner.log" \
+  PATH="$case_dir/fakebin:$PATH" \
+    bash -c '. "$1"; fm_nm_bounded "$2" 1 "$3"' _ \
+      "$ROOT/bin/fm-nm-run-lib.sh" "$case_dir" "$case_dir/term-resistant" \
+      > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  elapsed=$((SECONDS - started))
+
+  expect_code 124 "$rc" "explicit-bash-timeout-override: bound should report timeout"
+  assert_absent "$case_dir/runner.log" "explicit-bash-timeout-override: automatic runner overrode Bash"
+  assert_present "$case_dir/term.log" "explicit-bash-timeout-override: Bash runner never sent TERM"
+  [ "$elapsed" -le 5 ] || fail "explicit-bash-timeout-override: Bash runner took ${elapsed}s"
+  pass "explicit Bash timeout override wins GNU-only automatic selection"
 }
 
 test_persistent_scan_refuses_after_bounded_retries() {
@@ -6846,6 +6887,7 @@ test_process_spawned_during_grace_is_reaped_on_later_pass
 test_hung_lsof_census_refuses_before_removal
 test_hung_lsof_descendant_is_reaped_after_parent_exits
 test_non_gnu_timeout_falls_back_to_bounded_perl
+test_explicit_bash_timeout_override_wins_gnu_requirement
 test_persistent_scan_refuses_after_bounded_retries
 test_process_exit_during_identity_lookup_does_not_refuse
 test_run_abort_precedes_process_reap_precedes_worktree_removal
