@@ -127,6 +127,12 @@
 #                          opt-in config/open-decision-reminders record-age
 #                          backstop, independent of pane and branch state;
 #                          open_decision_reminder_tick owns its bounded repeats
+#   check: dispatch halted for <seconds>s with <n> ready: <constraint> [fix: ...]; ...
+#                          lane capacity is under its cap but a host or
+#                          captain-queue constraint admits nothing while
+#                          tasks-axi ready lists work, for FM_CAPACITY_HALT_ALERT_SECS
+#                          (1800; 0 off); re-raised at most once per 24 h;
+#                          capacity_halt_alert_tick owns it
 #   check: process-event result captured: <keys>
 #                          a durably captured process-to-event result is queued
 #                          and has not been surfaced yet; reported once per
@@ -2813,6 +2819,76 @@ EOF
   fi
 }
 
+# Dispatch-halt alert (docs/configuration.md "Lane capacity"). Reads the lane
+# facts the watcher already publishes: lanes under the cap, yet a verdict that
+# does not admit (a constraint, not a full cap), while `tasks-axi ready` lists
+# work. Once that has held for FM_CAPACITY_HALT_ALERT_SECS (default 1800; 0
+# turns the alert off) it queues one captain-facing check wake naming each
+# constraint and its fix, and again at most once per 24 h while it persists.
+# STATE/.capacity-halt-alert holds `<since> <last-alert>` and is removed the
+# moment the halt or the ready work clears, so a later halt debounces afresh.
+capacity_halt_alert_tick() {  # [now-epoch], for deterministic clock callers
+  local now=${1:-} after=${FM_CAPACITY_HALT_ALERT_SECS:-1800} ledger="$STATE/.capacity-halt-alert"
+  local since last ready reasons detail='' r fix msg tmp
+  CAPACITY_HALT_ALERT=
+  case "$after" in ''|*[!0-9]*) after=1800 ;; esac
+  if [ "$after" -gt 0 ] && [ -e "$CONFIG/lane-capacity" ] && [ -f "$STATE/lane-capacity.json" ]; then
+    # Facts are republished every 30s; older ones may describe a halt that has
+    # already cleared, so skip the observation and keep the ledger as it is.
+    local gen wall
+    gen=$(jq -r '.generated_epoch // 0' "$STATE/lane-capacity.json" 2>/dev/null) || return 0
+    fm_epoch_seconds_to wall
+    case "$gen" in ''|*[!0-9]*) return 0 ;; esac
+    [ "$((wall - gen))" -le 300 ] || return 0
+    reasons=$(jq -r 'select(.cap.status == "ok" and .lanes.count < .cap.target and .verdict.admit == false)
+      | .verdict.reasons | join("\n")' "$STATE/lane-capacity.json" 2>/dev/null) || return 0
+  else
+    reasons=
+  fi
+  if [ -n "$reasons" ]; then
+    ready=$(FM_HOME=$FM_HOME fm_run_timed 10 "$SCRIPT_DIR/fm-tasks-axi.sh" ready 2>/dev/null) || return 0
+    ready=$(printf '%s\n' "$ready" | sed -n 's/^count: //p')
+    case "$ready" in 0) reasons= ;; ''|*[!0-9]*) return 0 ;; esac
+  fi
+  if [ -z "$reasons" ]; then
+    rm -f -- "$ledger"
+    return 0
+  fi
+  [ -n "$now" ] || fm_epoch_seconds_to now
+  since=$now last=0
+  [ ! -f "$ledger" ] || read -r since last < "$ledger" 2>/dev/null || true
+  case "$since$last" in ''|*[!0-9]*) since=$now last=0 ;; esac
+  if [ "$((now - since))" -ge "$after" ] && { [ "$last" -eq 0 ] || [ "$((now - last))" -ge 86400 ]; }; then
+    while IFS= read -r r; do
+      case "$r" in
+        cpu:*) fix='wait for load to fall below the core count' ;;
+        load:*) fix='wait for load to fall, or raise max-load1' ;;
+        'memory: no room '*) fix='free memory, or lower min-avail-gb' ;;
+        memory:*) fix='free memory' ;;
+        disk:*' GB free, under '*) fix='free disk space, or lower min-disk-gb' ;;
+        disk:*) fix='free disk space' ;;
+        pressure*) fix='wait for the pressure beat to fall below warn' ;;
+        'on battery') fix='connect AC power' ;;
+        captain-queue:*) fix='answer open captain holds, or raise max-captain-holds' ;;
+        captain\ reserve:*) fix='remove the reserve-flag file' ;;
+        *) fix='clear that condition' ;;
+      esac
+      detail="${detail:+$detail; }$r [fix: $fix]"
+    done <<EOF
+$reasons
+EOF
+    msg="check: dispatch halted for $((now - since))s with $ready ready: $detail"
+    fm_wake_append check capacity-halt "$msg" || return 1
+    CAPACITY_HALT_ALERT=$msg
+    last=$now
+  fi
+  tmp=$(mktemp "$STATE/.capacity-halt-alert.XXXXXX") || return 1
+  if ! printf '%s %s\n' "$since" "$last" > "$tmp" || ! mv -f "$tmp" "$ledger"; then
+    rm -f -- "$tmp"
+    return 1
+  fi
+}
+
 # The identity a re-surface throttle is bound to: the task's whole status-log
 # signature. Any new status event - a replacement wait, a fresh delivery, a
 # blocker - changes it and so starts its own window instead of inheriting the
@@ -3943,6 +4019,9 @@ while :; do
     exit 1
   }
   [ -z "$OPEN_DECISION_REMINDER" ] || wake "$OPEN_DECISION_REMINDER"
+
+  capacity_halt_alert_tick || echo 'watcher: dispatch-halt alert check failed' >&2
+  [ -z "$CAPACITY_HALT_ALERT" ] || wake "$CAPACITY_HALT_ALERT"
 
   # Endpoint liveness runs before queue observation: a positively dead or
   # missing secondmate endpoint is relaunched here on a bounded cadence, which
