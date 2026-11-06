@@ -178,6 +178,8 @@ esac
 PAYLOAD=$(cat)
 SESSION=$(printf '%s' "$PAYLOAD" | jq -r '.session_id // empty' 2>/dev/null)
 case "$SESSION" in ''|*[!A-Za-z0-9-]*) SESSION= ;; esac
+# Every ownership check below runs under the payload's native session identity.
+fm_session_lock_codex_hook_identity "$PAYLOAD"
 
 if [ "$MODE" = --session-start ]; then
   transcript=$(printf '%s' "$PAYLOAD" | jq -r '.transcript_path // empty' 2>/dev/null)

@@ -3621,6 +3621,38 @@ The native TUI fired project SessionStart and asynchronous Stop hooks, and `code
 [Supervision verification](supervision.md#codex-native-model-free-park-2026-10-19) records the commands, ten-minute provider-call comparison, real check delivery, input interrupt, park-death recovery and native-exit cleanup.
 This verifies the primary-session park, not a worker busy-state classifier or a Codex dialog-mirror writer.
 
+## Native Codex session-lock identity
+
+Verified on 2026-11-06 with `codex-cli 0.167.0` on macOS 27.2.0, arm64.
+One real `codex app-server` process opened two threads whose native SessionStart hooks ran `bin/fm-sessionstart-run.sh` in an isolated home.
+The two hook payloads carried distinct `session_id` values while every hook shell walked to the same server pid.
+The first thread acquired the lock with a `codex-native:<session_id>` sidecar, and the second thread received the read-only startup digest.
+The guard uses a temporary Codex home and a closed loopback provider, so it sends no credentials and spends no model tokens.
+It does not connect to Desktop threads or install hooks into an operator home.
+
+Refresh the installed-harness evidence with:
+
+```sh
+bash tests/fm-codex-session-identity-live-e2e.test.sh
+```
+
+Observed output:
+
+```text
+ok - fm-isolated-regression/0.167.0 (Mac OS 27.2.0; arm64) herdr/0.9.5 (fm-isolated-regression; 1): distinct native hook identities sharing one server preserve one lock owner
+```
+
+A shell tool in a root `codex exec` thread on the same build received `CODEX_SESSION_ID` and `CODEX_THREAD_ID`, both set to that thread's session id.
+That probe submits a prompt, so rerun it by hand after a Codex upgrade:
+
+```sh
+codex exec --skip-git-repo-check -s read-only 'Run exactly this shell command once and print its raw output, nothing else: env | grep -E "^CODEX_(SESSION|THREAD)_ID"'
+```
+
+`tests/fm-codex-session-lock.test.sh` covers startup, acquisition, ownership, Stop, and checkpoint behavior portably, including descendant threads whose `CODEX_THREAD_ID` differs from `CODEX_SESSION_ID`.
+That descendant case uses a fixture process table, while the installed-harness guard above exercises separate root sessions and their native hooks.
+[`bin/fm-session-lock-lib.sh`](../../bin/fm-session-lock-lib.sh) owns the native identity trust contract and the legacy pid-only lock boundary.
+
 ## hc
 
 Measured on 2026-10-29 with `hc 0.1.13` on macOS (Darwin 27.0.0, `/bin/bash` 3.2.57), against private cores only: a unique `HC_SESSION`, `XDG_STATE_HOME` and `XDG_RUNTIME_DIR` under a short `/tmp/fmhc.*` directory, and `HC_TERMINAL_ID`, `HC_TERMINAL_SOCKET`, and `HC_SCOPE` unset.

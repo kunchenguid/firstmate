@@ -97,25 +97,17 @@ The guard cooperates with that arm rather than trusting a beacon left by the cyc
 
 ### Foreign session-lock owner
 
-When an active home instead has a session lock that the current session does not own and the shared `fm_session_lock_pid_blocks_reclaim` verdict refuses to reclaim, the Claude guard emits a read-only ownership diagnostic and allows the turn to end safely.
+When supervision needs repair, the guard checks `fm_session_lock_foreign_owner_live`.
+A live foreign owner produces a read-only diagnostic, and the guard lets the turn end safely.
+This exit applies in Claude mode and under a native Codex app-server or code-mode host, where every thread shares the server pid.
 
-Ownership is the shared `fm_session_lock_owned_by_self` verdict in `bin/fm-session-lock-lib.sh`.
-The current session owns the lock when either of these holds:
+Ownership is the shared `fm_session_lock_owned_by_self` verdict in [`bin/fm-session-lock-lib.sh`](../bin/fm-session-lock-lib.sh), whose header owns each harness's signals and trust gates.
+[`bin/fm-lock.sh`](../bin/fm-lock.sh) owns the sidecar and the line-1 anchor it records.
 
-- The recorded pid is a member of the current session's contiguous harness ancestry.
-- The trusted Claude session id recorded beside the lock in `state/.lock-session` matches this hook's own environment while the recorded pid is still a live harness.
-
-That second signal keeps a background Claude session owning its own lock after the transient helper chain between its hooks and its recorded owner is recycled.
-The library's header owns the trust gate (`CLAUDE_PID` must be a Claude-shaped member of the current run).
-`bin/fm-lock.sh` owns the sidecar and the line-1 anchor it records for such a session.
-
-A Claude session that does not own the lock cannot arm or repair the home without stealing the live owner's lock, so blocking it would create an unbounded loop.
+A session that does not own the lock cannot arm or repair the home without stealing the live owner's lock, so blocking it would create an unbounded loop.
 The lock-owning session remains responsible for restoring supervision.
 
-The exception has these limits:
-
-- Malformed, absent, dead, or ancestry-uncertain lock records do not satisfy this Claude-specific exception and retain the ordinary guard behavior.
-- A missing or mismatched sidecar or an untrusted id adds nothing to the verdict, so a live owner outside the ancestry still takes this exit exactly as before.
+Malformed, absent, dead, or ancestry-uncertain lock records do not establish a live foreign owner and retain the ordinary guard behavior.
 
 ### Pull-warning verdict by supervision model
 

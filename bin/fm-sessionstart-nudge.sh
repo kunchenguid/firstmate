@@ -48,7 +48,13 @@ lock_is_in_ancestry() {
   return 1
 }
 
-lock_is_in_ancestry && exit 0
+# A native Codex server pid is shared by every thread, so ancestry alone cannot
+# prove this session holds the lock; the shared library's verdict decides.
+if fm_session_lock_codex_native_ancestry; then
+  fm_session_lock_owned_by_self "$STATE" && exit 0
+else
+  lock_is_in_ancestry && exit 0
+fi
 nudge=
 fm_operational_input_encode session-start \
   "Run \`bin/fm-session-start.sh\` now, exactly once, before executing any other instructions." \
