@@ -379,7 +379,11 @@ test_release_frees_a_place() {
   expect_code "$DEFER_EXIT" "$rc" "one freed place admitted two workers: $out"
   assert_contains "$out" "2 already hold a place (live-b, task-c)" "the new worker did not take the freed place"
 
-  # Cleanup: the real teardown removes the record, which frees its place.
+  # Cleanup: the real teardown removes the record, which frees its place. The
+  # worker's worktree is absent, so its recorded branch on a remote proves the
+  # work pushed.
+  fm_test_pushed_branch_project "$case_dir/project" fm/live-b
+  printf 'branch=%s\n' fm/live-b >> "$home/state/live-b.meta"
   rc=0
   out=$(FM_ROOT_OVERRIDE='' FM_HOME="$home" FM_STATE_OVERRIDE='' FM_DATA_OVERRIDE='' FM_CONFIG_OVERRIDE='' \
     FM_FAKE_CALL_LOG="$case_dir/calls.log" PATH="$case_dir/fakebin:$PATH" \
