@@ -826,6 +826,105 @@ EOF
   pass ".omp watch extension: a home without config/supervision-host or with an off file keeps the plain arm"
 }
 
+test_watch_extension_does_not_replay_acknowledged_signals() {
+  local repo home out status dir
+  dir="$TMP_ROOT/watch-acknowledged"
+  repo="$dir/repo"; home="$dir/home"
+  install_omp_extension_fixture "$repo"
+  cp -R "$ROOT/bin/." "$repo/bin/"
+  mkdir -p "$home/state" "$dir/fakebin"
+  printf '#!/usr/bin/env bash\nexit 1\n' > "$dir/fakebin/tmux"
+  chmod +x "$dir/fakebin/tmux"
+  printf 'done: replay fixture completed\n' > "$home/state/task.status"
+  touch "$home/state/.last-check" "$home/state/.last-heartbeat"
+  out=$(PATH="$dir/fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_ROOT_OVERRIDE="$repo" \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    EXT="$repo/.omp/extensions/fm-primary-omp-watch.ts" node --input-type=module 2>&1 <<'EOF'
+import { pathToFileURL } from "node:url";
+import { writeFileSync, readFileSync, renameSync, statSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+const home = process.env.FM_HOME, root = process.env.FM_ROOT_OVERRIDE;
+const state = `${home}/state`, statusFile = `${state}/task.status`;
+writeFileSync(`${state}/.lock`, `${process.pid}\n`);
+const handlers = new Map(), sent = [];
+let tool;
+const mod = await import(pathToFileURL(process.env.EXT).href);
+mod.default({
+  on(name, fn) { handlers.set(name, fn); },
+  registerCommand() {},
+  registerTool(t) { tool = t; },
+  sendUserMessage(message) { sent.push(message); },
+});
+const waitFor = async (predicate, description) => {
+  for (let i = 0; i < 300; i++) {
+    if (predicate()) return;
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  throw new Error(description);
+};
+const drain = () => {
+  const result = spawnSync("bash", [`${root}/bin/fm-wake-drain.sh`], { encoding: "utf8" });
+  if (result.status !== 0) throw new Error(`drain failed: ${result.stderr}`);
+  return result;
+};
+const acknowledge = () => {
+  const result = drain();
+  if (!result.stdout.includes("\tsignal\t")) throw new Error(`signal row absent: ${result.stdout}`);
+  const ack = result.stderr.match(/WAKE_ACK_REQUIRED:.* --ack-through (\d+) --recovery-generation ([A-Za-z0-9._-]+)/);
+  if (!ack) throw new Error(`missing acknowledgement command: ${result.stderr}`);
+  const handled = spawnSync("bash", [`${root}/bin/fm-wake-drain.sh`, "--ack-through", ack[1], "--recovery-generation", ack[2]], { encoding: "utf8" });
+  if (handled.status !== 0) throw new Error(`acknowledgement failed: ${handled.stderr}`);
+};
+try {
+  await tool.execute();
+  await waitFor(() => sent.length === 1, "initial watcher signal was not delivered");
+  if (!sent[0].includes(`signal: ${statusFile}`)) throw new Error(`wrong wake: ${sent[0]}`);
+  const before = statSync(statusFile);
+  const bytes = readFileSync(statusFile, "utf8");
+  await handlers.get("session_shutdown")({}, {});
+  await handlers.get("session_start")({}, {});
+  await waitFor(() => sent.length === 2, "unacknowledged signal was lost across replacement");
+  acknowledge();
+  if (drain().stdout !== "" || readFileSync(`${state}/.wake-queue`, "utf8") !== "") {
+    throw new Error("acknowledged queue was not empty");
+  }
+  // Another in-flight turn can drain the rows without the exact-prompt
+  // consumption callback. Durable acknowledgement must retire that close.
+  for (let i = 0; i < 4; i++) {
+    await handlers.get("session_shutdown")({}, {});
+    await handlers.get("session_start")({}, {});
+    await new Promise((resolve) => setTimeout(resolve, 1500));
+    if (sent.length !== 2) {
+      throw new Error(`acknowledged unchanged status replayed after replacement ${i + 1}; queue=${drain().stdout}; wakes=${sent.length}`);
+    }
+  }
+  const after = statSync(statusFile);
+  if (after.mtimeMs !== before.mtimeMs || after.size !== before.size || readFileSync(statusFile, "utf8") !== bytes) {
+    throw new Error("the replay scenario changed the status file");
+  }
+  writeFileSync(statusFile, "done: a new result must still wake\n", { flag: "a" });
+  await waitFor(() => sent.length === 3, "new signal was suppressed after the acknowledged close");
+  const queue = `${state}/.wake-queue`, saved = `${queue}.saved`;
+  for (const unavailable of ["missing", "malformed"]) {
+    renameSync(queue, saved);
+    if (unavailable === "malformed") writeFileSync(queue, "incomplete queue row");
+    const count = sent.length;
+    await handlers.get("session_shutdown")({}, {});
+    await handlers.get("session_start")({}, {});
+    await waitFor(() => sent.length === count + 1, `${unavailable} queue silently discarded a pending signal`);
+    renameSync(saved, queue);
+  }
+  acknowledge();
+} finally {
+  await handlers.get("session_shutdown")({}, {});
+}
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "acknowledged omp signal replay: $out"
+  pass ".omp watch extension: acknowledged signals do not replay across replacements; unhandled and new signals still deliver"
+}
+
 # A host cycle boundary can close with only a "supervision-host:" line; left
 # unconsumed across a session replacement it rides the persisted handoff and
 # the successor session loads and replays it.
@@ -963,6 +1062,11 @@ EOF
   pass ".omp watch extension: a host close split across stream chunks reaches main as one whole follow-up"
 }
 
+if [ -n "${FM_TEST_ONLY:-}" ]; then
+  "$FM_TEST_ONLY"
+  exit 0
+fi
+
 test_detection_anchored_name_and_marker_precedence
 test_lock_identity_and_liveness_classification
 test_spawn_launch_line_and_worker_wiring
@@ -981,4 +1085,5 @@ test_watch_extension_runs_the_supervision_host
 test_watch_extension_runs_the_supervision_host quiet
 test_watch_extension_keeps_the_arm_without_the_file_or_with_off
 test_watch_extension_replays_a_host_only_boundary_across_replacement
+test_watch_extension_does_not_replay_acknowledged_signals
 test_watch_extension_delivers_a_split_host_close_whole
