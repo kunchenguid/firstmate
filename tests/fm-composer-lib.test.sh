@@ -230,6 +230,57 @@ test_matrix_claude_named_session_titled_rule() {
   pass "matrix: a named claude session's titled top rule proves its composer; pi stays unchanged"
 }
 
+test_matrix_claude_rotating_idle_hint() {
+  local claude_idle
+  claude_idle=$(printf 'claude\tidle')
+  local live live_rule live_head typed_live
+  live_rule=$(printf '─%.0s' {1..120})
+  live=$'orca-ide-1.4.232-pi-wake-parakeet-fhsenv:art@zeppola:~/projects/firstmate$ cd /home/art/projects/firstmate && exec claude\ne\n ▐▛███▛█   Claude Code v2.1.317\n▝▜██████▀  Opus 5.5 · API Usage Billing\n ▝▝   ▝▝   ~/projects/firstmate\n'
+  live+="$live_rule"$'\n'
+  live+="❯$NBSP"$'Try "edit fm-branch-dispatch.ts to..."\n'
+  live+="$live_rule"$'\n  ⏵⏵ auto mode on (shift+tab to cycle)'
+  live_head=${live%%"$live_rule"*}
+  typed_live="$live_head$live_rule"$'\n❯ fix the login bug\n'"$live_rule"$'\n  ⏵⏵ auto mode on (shift+tab to cycle)'
+
+  hint_verdict() {  # <screen> <caps> <idle-re|-> [cursor] [identity]
+    local screen=$1 caps=$2 idle=$3
+    shift 3
+    if [ "$idle" = - ]; then
+      fm_composer_classify_screen "$caps" "$screen" "$@"
+    else
+      FM_COMPOSER_IDLE_RE=$idle fm_composer_classify_screen "$caps" "$screen" "$@"
+    fi
+  }
+  assert_claude_hint() {  # <label> <want> <screen> <caps> <idle-re|-> [cursor] [identity]
+    local label=$1 want=$2 out
+    shift 2
+    out=$(hint_verdict "$@")
+    [ "$out" = "$want" ] \
+      || fail "$label: expected $want, got '$out' (claude 2.1.317 on Orca 1.4.232)"
+    out=$(LC_ALL=C hint_verdict "$@")
+    [ "$out" = "$want" ] \
+      || fail "$label under LC_ALL=C: expected $want, got '$out' (claude 2.1.317 on Orca 1.4.232)"
+  }
+  # The limitation itself: the live rule-separated row stays `unknown` on
+  # Orca's own profile, so an accepted Enter whose read lands here is reported
+  # as unconfirmed and duplicate-resend risk remains until a dedicated
+  # classifier change supports this container.
+  assert_claude_hint "live rule-separated Try hint on orca" unknown "$live" "$CAPS_PLAIN" -
+  assert_claude_hint "live rule-separated Try hint on orca without the idle set" \
+    unknown "$live" "$CAPS_PLAIN" '^$'
+  assert_claude_hint "live Try hint read under a styled profile" \
+    pending "$live" "$CAPS_STYLED" - '' "$claude_idle"
+  assert_claude_hint "live Try hint under a styled profile without the idle set" \
+    pending "$live" "$CAPS_STYLED" '^$' '' "$claude_idle"
+  # The protection that must survive every shape: real typed text in the same
+  # live composer is never `empty` - readable under a styled profile, and the
+  # documented `styled=0` degradation to `unknown` on Orca's own profile.
+  assert_claude_hint "live typed text under a styled profile" \
+    pending "$typed_live" "$CAPS_STYLED" - '' "$claude_idle"
+  assert_claude_hint "live typed text on orca" unknown "$typed_live" "$CAPS_PLAIN" -
+  pass "matrix: claude 2.1.317 rule-separated hint stays unknown and typed text stays pending"
+}
+
 test_matrix_claude_arrow_statusline_footer() {
   # Real claude 2.x on herdr (captured live 2026-09-20, herdr 0.8.0): the
   # composer is a bare `❯`+U+00A0 row between two solid rules, and the harness
@@ -1704,6 +1755,7 @@ test_matrix_opencode_leftbar_cwd_furniture
 test_matrix_opencode_leftbar_abs_cwd_furniture
 test_matrix_grok_titled_bottom_border
 test_matrix_claude_titled_top_rule
+test_matrix_claude_rotating_idle_hint
 test_matrix_grok_144_approval_titled_bottom_border
 test_matrix_kimi_bordered_shell_glyph_box
 test_matrix_claude_inside_zellij_ansi_dump
@@ -1769,6 +1821,65 @@ fm_test_picker_send() {
 
 fm_test_picker_state() {
   fm_composer_classify_screen 'styled=1' "$FM_TEST_PICKER_SCREEN" 1
+}
+
+# A failed Enter after the text was accepted is the uncertain-delivery class:
+# the text may already have been submitted, and Orca may also have replaced the
+# pane between the accepted text and the failed Enter. A composer read cannot
+# tell those apart - a fresh empty pane looks exactly like a delivered message -
+# so the failed path never reads the composer: it stays unconfirmed (typed) or
+# deferred (inbox) and never retries in the same send.
+fm_test_enter_send() {
+  printf 'Enter\n' >> "$FM_TEST_ENTER_ENTERS"
+  return "$FM_TEST_ENTER_SEND_RC"
+}
+
+fm_test_enter_state() {
+  printf 'read\n' >> "$FM_TEST_ENTER_READS"
+  printf '%s' "$FM_TEST_ENTER_STATE"
+}
+
+test_failed_enter_after_accepted_text_never_claims_non_delivery() {
+  local out enters reads
+  FM_TEST_ENTER_ENTERS=$(mktemp)
+  : > "$FM_TEST_ENTER_ENTERS"
+  FM_TEST_ENTER_READS=$(mktemp)
+  : > "$FM_TEST_ENTER_READS"
+  # The adapter always defines its resolved-endpoint variable; an empty value
+  # means the Enter stayed on the endpoint that received the text.
+  FM_TEST_RESOLVED_TARGET=
+
+  # Typed plane: every composer read stays unconfirmed. `empty` is the
+  # replacement-pane shape, so trusting it would silently drop the message.
+  FM_TEST_ENTER_SEND_RC=1
+  FM_TEST_ENTER_STATE=empty
+  out=$(unset FM_TASK_INBOX_RING_LINE; fm_composer_submit_retry_core \
+    fm_test_enter_send fm_test_enter_state win 3 0 "" FM_TEST_RESOLVED_TARGET)
+  [ "$out" = pending ] || fail "a failed Enter with an empty read must stay unconfirmed, got '$out'"
+
+  FM_TEST_ENTER_STATE=pending
+  out=$(unset FM_TASK_INBOX_RING_LINE; fm_composer_submit_retry_core \
+    fm_test_enter_send fm_test_enter_state win 3 0 "" FM_TEST_RESOLVED_TARGET)
+  [ "$out" = pending ] || fail "a failed Enter with the text still pending must stay unconfirmed, got '$out'"
+
+  # Inbox plane: the same proofs defer the ring so the watcher retries later;
+  # a failed Enter is never delivery proof there either.
+  FM_TEST_ENTER_STATE=empty
+  out=$(FM_TASK_INBOX_RING_LINE=doorbell fm_composer_submit_retry_core \
+    fm_test_enter_send fm_test_enter_state win 3 0 "" FM_TEST_RESOLVED_TARGET)
+  [ "$out" = inbox-deferred ] || fail "an inbox ring with an empty read after a failed Enter must defer, got '$out'"
+  FM_TEST_ENTER_STATE=pending
+  out=$(FM_TASK_INBOX_RING_LINE=doorbell fm_composer_submit_retry_core \
+    fm_test_enter_send fm_test_enter_state win 3 0 "" FM_TEST_RESOLVED_TARGET)
+  [ "$out" = inbox-deferred ] || fail "an inbox ring with the doorbell still pending must defer, got '$out'"
+
+  enters=$(grep -c . "$FM_TEST_ENTER_ENTERS" || true)
+  [ "$enters" -eq 4 ] || fail "a failed Enter must never be retried in the same send, saw $enters attempts"
+  reads=$(grep -c . "$FM_TEST_ENTER_READS" || true)
+  [ "$reads" -eq 0 ] || fail "a failed Enter must not consult the composer read, saw $reads reads"
+  rm -f "$FM_TEST_ENTER_ENTERS" "$FM_TEST_ENTER_READS"
+  unset FM_TEST_ENTER_SEND_RC FM_TEST_ENTER_STATE FM_TEST_RESOLVED_TARGET
+  pass "a failed Enter after accepted text stays unconfirmed whatever the composer reads, never send-failed"
 }
 
 test_background_exit_picker_stays_pending_and_blocks_retry() {
@@ -1904,6 +2015,7 @@ test_background_exit_picker_stays_pending_and_blocks_retry
 test_dialog_heading_and_footer_must_be_the_recorded_lines
 test_dialog_note_skips_the_match_when_no_sink_is_set
 test_quoted_exit_picker_text_is_not_a_dialog
+test_failed_enter_after_accepted_text_never_claims_non_delivery
 test_kiro_near_gray_ghost_is_stripped_and_real_text_survives
 test_kiro_palette_gray_ghost_is_stripped_and_chromatic_indexes_survive
 test_composer_widening_is_kiro_only

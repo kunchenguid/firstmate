@@ -5,6 +5,12 @@
 # remains unsupported until Orca exposes a terminal-send primitive for it.
 #
 # Target string shape: the Orca terminal id accepted by `orca terminal ...`.
+# Send and send-key keep that id when it is live, so a healthy record is unchanged.
+# A stale id is resolved at send time from the recorded window= alias, read-only:
+# Orca does not accept a window title as --terminal, and `terminal list
+# --worktree name:<window>` is the native selector because spawn stores that
+# same alias as the worktree display name. Nothing here rewrites meta.
+# A miss keeps today's failed send.
 
 # Shared composer-content classifier (empty|pending|unknown, and the fleet-wide
 # dead-shell-vs-agent-composer rule). Owned by bin/fm-composer-lib.sh, reused by
@@ -213,6 +219,214 @@ fm_backend_orca_terminal_create() {  # <worktree-id> <title>
   printf '%s' "$terminal"
 }
 
+# fm_backend_orca_state_dir: the home whose meta names window= for a stale
+# terminal. FM_STATE_OVERRIDE wins, matching fm-send; otherwise FM_HOME/state.
+# Absent config means no resolution, which is today's failed send.
+fm_backend_orca_state_dir() {
+  if [ -n "${FM_STATE_OVERRIDE:-}" ]; then
+    printf '%s' "$FM_STATE_OVERRIDE"
+    return 0
+  fi
+  if [ -n "${FM_HOME:-}" ] && [ -d "$FM_HOME/state" ]; then
+    printf '%s/state' "$FM_HOME"
+    return 0
+  fi
+  return 1
+}
+
+# Local reader so this adapter can resolve a window when sourced alone.
+# fm_meta_get in bin/fm-backend.sh is the shared owner when the dispatcher
+# has already loaded it; the two must keep the last-value rule.
+fm_backend_orca_meta_value() {  # <file> <key>
+  local file=$1 key=$2 line value=''
+  if type fm_meta_get >/dev/null 2>&1; then
+    value=$(fm_meta_get "$file" "$key")
+    [ -n "$value" ] || return 1
+    printf '%s' "$value"
+    return 0
+  fi
+  [ -f "$file" ] || return 1
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in
+      "$key="*) value=${line#*=} ;;
+    esac
+  done < "$file"
+  [ -n "$value" ] || return 1
+  printf '%s' "$value"
+}
+
+# The window= alias recorded beside this terminal id, or failure when none
+# or more than one distinct alias claims it. Never writes the meta file.
+fm_backend_orca_window_for_terminal() {  # <terminal-id>
+  local state meta term window found=''
+  state=$(fm_backend_orca_state_dir) || return 1
+  [ -d "$state" ] || return 1
+  for meta in "$state"/*.meta; do
+    [ -f "$meta" ] || continue
+    term=$(fm_backend_orca_meta_value "$meta" terminal) || continue
+    [ "$term" = "$1" ] || continue
+    window=$(fm_backend_orca_meta_value "$meta" window) || continue
+    if [ -n "$found" ] && [ "$found" != "$window" ]; then
+      return 1
+    fi
+    found=$window
+  done
+  [ -n "$found" ] || return 1
+  printf '%s' "$found"
+}
+
+fm_backend_orca_attempt() {  # orca argv... ; 0 on accepted JSON, else stored diagnostics
+  local out rc=0 errfile jok_err
+  errfile=$(mktemp "${TMPDIR:-/tmp}/fm-orca-attempt.XXXXXX") || return 1
+  out=$("$@" 2>"$errfile") || rc=$?
+  FM_ORCA_LAST_STDOUT=$out
+  if [ "$rc" -eq 0 ]; then
+    jok_err=$(mktemp "${TMPDIR:-/tmp}/fm-orca-json.XXXXXX") || {
+      rm -f "$errfile"
+      return 1
+    }
+    if printf '%s' "$out" | fm_backend_orca_json_ok 2>"$jok_err"; then
+      rm -f "$errfile" "$jok_err"
+      FM_ORCA_LAST_STDERR=
+      FM_ORCA_LAST_RC=0
+      return 0
+    else
+      # An if whose condition fails is itself status 0, so the failure has to
+      # be read inside else or a stale handle looks accepted.
+      rc=$?
+    fi
+    FM_ORCA_LAST_STDERR=$(cat "$jok_err")
+    rm -f "$jok_err"
+  else
+    FM_ORCA_LAST_STDERR=$(cat "$errfile")
+  fi
+  rm -f "$errfile"
+  FM_ORCA_LAST_RC=$rc
+  return "$rc"
+}
+
+fm_backend_orca_json_is_stale() {
+  node -e '
+const fs = require("fs");
+const raw = fs.readFileSync(0, "utf8").trim();
+if (!raw) process.exit(1);
+let data;
+try { data = JSON.parse(raw); } catch (err) { process.exit(1); }
+if (data.ok !== false) process.exit(1);
+const err = data.error || {};
+const code = String(err.code || "");
+const msg = String(err.message || "");
+if (code === "terminal_handle_stale" || code === "terminal_not_writable" || msg.indexOf("terminal_handle_stale") !== -1 || msg.indexOf("terminal handle stale") !== -1 || msg.indexOf("terminal_not_writable") !== -1) {
+  process.exit(0);
+}
+process.exit(1);
+'
+}
+
+fm_backend_orca_last_stale() {
+  if printf '%s' "${FM_ORCA_LAST_STDOUT:-}" | fm_backend_orca_json_is_stale; then
+    return 0
+  fi
+  case "${FM_ORCA_LAST_STDERR:-}" in
+    *terminal_handle_stale*|*"terminal handle stale"*|*terminal_not_writable*) return 0 ;;
+  esac
+  return 1
+}
+
+fm_backend_orca_replay_last() {
+  if [ -n "${FM_ORCA_LAST_STDERR:-}" ]; then
+    printf '%s' "$FM_ORCA_LAST_STDERR" >&2
+  fi
+  return "${FM_ORCA_LAST_RC:-1}"
+}
+
+fm_backend_orca_pick_terminal() {
+  node -e '
+const fs = require("fs");
+const stale = process.argv[1];
+const raw = fs.readFileSync(0, "utf8").trim();
+if (!raw) process.exit(1);
+let data;
+try { data = JSON.parse(raw); } catch (err) { process.exit(1); }
+if (!data || data.ok === false) process.exit(1);
+const result = data.result || {};
+if (result.truncated === true) process.exit(1);
+const terms = Array.isArray(result.terminals) ? result.terminals : [];
+function usable(term) {
+  if (!term || typeof term.handle !== "string" || !term.handle) return false;
+  if (/[\s]/.test(term.handle) || term.handle === stale) return false;
+  if (term.orphaned === true || term.connected === false || term.writable === false) return false;
+  return true;
+}
+const live = terms.filter(usable);
+if (live.length === 1) {
+  process.stdout.write(live[0].handle);
+  process.exit(0);
+}
+process.exit(1);
+' "$1"
+}
+
+fm_backend_orca_resolve_live_terminal() {  # <stale-terminal-id>
+  local stale=$1 window named_json
+  window=$(fm_backend_orca_window_for_terminal "$stale") || return 1
+  case "$window" in
+    ''|-*|*[!A-Za-z0-9._-]*) return 1 ;;
+  esac
+  named_json=$(orca terminal list --worktree "name:$window" --limit 200 --json 2>/dev/null) || return 1
+  printf '%s' "$named_json" | fm_backend_orca_pick_terminal "$stale"
+}
+
+# Gate input to a replacement endpoint resolved at send time. Returns 0 to
+# proceed with the caller's text or key, 1 for a blocking dialog (text and Enter
+# stop, while an explicit Ctrl-C is unaffected), 2 when the pane provably holds
+# this ring's own pending doorbell so no copy is appended, and 4 when an inbox
+# ring must defer the whole send. FM_TASK_INBOX_RING_LINE alone selects the
+# inbox draft, busy, and unreadable checks; a typed send keeps its existing
+# semantics behind the dialog guard.
+fm_backend_orca_check_replacement() {
+  local cap json dialog cstate action=${2:-literal}
+  if ! json=$(fm_backend_orca_composer_capture "$1" "" json 2>/dev/null) \
+     || ! cap=$(fm_backend_orca_json_text "$json"); then
+    if [ -n "${FM_TASK_INBOX_RING_LINE:-}" ]; then
+      FM_ORCA_RESOLVED_TERMINAL=$1
+      return 4
+    fi
+    return 0
+  fi
+  if dialog=$(fm_composer_blocking_dialog "$cap"); then
+    echo "error: blocked on a prompt: $dialog" >&2
+    return 1
+  fi
+  # Let this capture's own answer decide the ownership check below, instead of
+  # a re-read that can omit the field and lose known foreign text. A later
+  # capture always supersedes it, so it cannot carry into another check.
+  fm_backend_orca_remember_draft "$1" "$json"
+  if [ -n "${FM_TASK_INBOX_RING_LINE:-}" ]; then
+    cstate=$(fm_backend_orca_classify_composer "$json" "$cap")
+    # The old endpoint's advisory read cannot authorize replacement input.
+    # Unknown content must wait for a later ring, never receive text or Enter.
+    case "$cstate" in
+      empty)
+        if [ "$action" = enter ]; then
+          FM_ORCA_RESOLVED_TERMINAL=$1
+          return 4
+        fi
+        ;;
+      pending) ;;
+      *) FM_ORCA_RESOLVED_TERMINAL=$1; return 4 ;;
+    esac
+    if printf '%s' "$cap" | fm_busy_lines_match \
+       || [ "$(fm_backend_busy_state orca "$1" 2>/dev/null)" = busy ] \
+       || ! fm_task_inbox_check_pending orca "$1" "$FM_TASK_INBOX_RING_LINE" "$cstate"; then
+      FM_ORCA_RESOLVED_TERMINAL=$1
+      return 4
+    fi
+    [ "$cstate" != pending ] || return 2
+  fi
+  return 0
+}
+
 fm_backend_orca_send_text_line() {  # <terminal-id> <text>
   local terminal=$1 text=$2
   fm_backend_orca_tool_check || return 1
@@ -220,9 +434,36 @@ fm_backend_orca_send_text_line() {  # <terminal-id> <text>
 }
 
 fm_backend_orca_send_literal() {  # <terminal-id> <text>
-  local terminal=$1 text=$2
+  local terminal=$1 text=$2 live rc=0 check_rc
   fm_backend_orca_tool_check || return 1
-  fm_backend_orca_run_json orca terminal send --terminal "$terminal" --text "$text" --json
+  FM_ORCA_RESOLVED_TERMINAL=
+  if fm_backend_orca_attempt orca terminal send --terminal "$terminal" --text "$text" --json; then
+    FM_ORCA_RESOLVED_TERMINAL=$terminal
+    return 0
+  else
+    rc=$?
+  fi
+  if fm_backend_orca_last_stale; then
+    live=$(fm_backend_orca_resolve_live_terminal "$terminal") || live=
+    if [ -n "$live" ]; then
+      check_rc=0
+      fm_backend_orca_check_replacement "$live" || check_rc=$?
+      case "$check_rc" in
+        0) ;;
+        2) FM_ORCA_RESOLVED_TERMINAL=$live; return 0 ;;
+        *) return "$check_rc" ;;
+      esac
+      if fm_backend_orca_attempt orca terminal send --terminal "$live" --text "$text" --json; then
+        FM_ORCA_RESOLVED_TERMINAL=$live
+        return 0
+      else
+        fm_backend_orca_replay_last
+        return $?
+      fi
+    fi
+  fi
+  fm_backend_orca_replay_last
+  return "$rc"
 }
 
 fm_backend_orca_remove_worktree() {  # <worktree-id>
@@ -268,23 +509,119 @@ if (r.terminal && Array.isArray(r.terminal.tail)) {
 } else {
   process.stdout.write(r.text || r.output || r.content || r.preview || "");
 }
+
 '
 }
 
 # fm_backend_orca_composer_capture: the orca composer screen - one bounded
-# tail read of the live terminal. Deliberately NOT the old 200-line
-# backward-paged read: the composer is bottom-anchored, and paging back into
-# scrollback is what let a stale startup banner (codex's bordered
+# RENDERED-SCREEN read of the live terminal (`--screen`). Deliberately NOT the
+# accumulated stream tail: that read stacks repaint fragments (one `clear`
+# keystroke comes back as `cclclecleaclear`, cursor-moved spaces are absent),
+# so a real claude composer's empty row arrived as stale text and every
+# successful typed send read `unknown` and exited 1. The screen read is what
+# Orca documents for "how output looks". Deliberately also NOT the old
+# 200-line backward-paged read: the composer is bottom-anchored, and paging
+# back into scrollback is what let a stale startup banner (codex's bordered
 # "permissions" box) compete with - and once outrank - the live composer.
-fm_backend_orca_composer_capture() {  # <terminal-id> [expected-label]
-  fm_backend_orca_capture "$1" "$FM_COMPOSER_CAPTURE_LINES"
+# Passing `json` as the third argument prints that same payload raw, so one
+# capture supplies both the rendered text and `result.terminal.draft`.
+fm_backend_orca_composer_capture() {  # <terminal-id> [lines] [json]
+  local terminal=$1 lines=${2:-$FM_COMPOSER_CAPTURE_LINES} out
+  fm_backend_orca_tool_check || return 1
+  out=$(orca terminal read --terminal "$terminal" --screen --limit "$lines" --json) || return 1
+  if [ "${3:-}" = json ]; then
+    printf '%s' "$out"
+  else
+    fm_backend_orca_json_text "$out"
+  fi
+}
+
+# fm_backend_orca_draft_of_json: three-way read of `result.terminal.draft`.
+# Exit 0 prints the draft verbatim, empty included. Exit 1 means the field is
+# absent or not a string, i.e. THIS terminal shape publishes no structured
+# draft - live orca 1.4.232 omits it for the shell and agent terminals this
+# backend creates - so the caller may fall back to plain capture. Exit 3 means
+# a structured draft could not be read (parse error, null root, ok:false, or a
+# failed read), and the caller must defer instead of trusting accumulated
+# stream text, which can still hold an earlier ring's own doorbell next to the
+# current foreign draft.
+fm_backend_orca_draft_of_json() {  # <json>
+  printf '%s' "$1" | node -e '
+try {
+  const data = JSON.parse(require("fs").readFileSync(0, "utf8"));
+  if (data === null || typeof data !== "object") process.exit(3);
+  if (data.ok === false) process.exit(3);
+  const terminal = data.result?.terminal;
+  if (!terminal || typeof terminal !== "object") process.exit(1);
+  const draft = terminal.draft;
+  if (typeof draft !== "string") process.exit(1);
+  process.stdout.write(draft);
+} catch {
+  process.exit(3);
+}
+'
+}
+
+# fm_backend_orca_remember_draft: record the draft ONE capture answered with, so
+# the ownership decision for that capture is made from it instead of a re-read.
+# Every capture that classifies calls this, so each one supersedes whatever an
+# earlier check remembered: the answer is the capture's own three-way result
+# (present, absent, or unreadable), and a later absent field leaves "no
+# structured draft" for that capture rather than an earlier check's doorbell.
+# This is the single boundary those consumers share - a remembered answer can
+# never outlive the capture it came from.
+fm_backend_orca_remember_draft() {  # <terminal-id> <json>
+  local rc=0 draft
+  draft=$(fm_backend_orca_draft_of_json "$2") || rc=$?
+  FM_ORCA_LAST_DRAFT_TERMINAL=$1
+  FM_ORCA_LAST_DRAFT=$draft
+  FM_ORCA_LAST_DRAFT_STATE=$rc
+}
+
+# fm_backend_orca_composer_draft: the structured draft for <terminal-id>, from
+# the capture it was just classified from when that capture answered, otherwise
+# a fresh read. Exit codes are fm_backend_orca_draft_of_json's.
+fm_backend_orca_composer_draft() {  # <terminal-id>
+  local json rc draft
+  if [ -n "${FM_ORCA_LAST_DRAFT_TERMINAL:-}" ] \
+     && [ "${FM_ORCA_LAST_DRAFT_TERMINAL}" = "$1" ]; then
+    rc=${FM_ORCA_LAST_DRAFT_STATE:-3} draft=${FM_ORCA_LAST_DRAFT:-}
+    printf '%s' "$draft"
+    return "$rc"
+  fi
+  json=$(fm_backend_orca_composer_capture "$1" "" json) || return 3
+  fm_backend_orca_draft_of_json "$json"
+}
+
+fm_backend_orca_classify_composer() {
+  local verdict draft
+  verdict=$(fm_composer_classify_screen "$(fm_backend_orca_composer_caps)" "$2")
+  if fm_composer_blocking_dialog "$2" >/dev/null; then
+    printf unknown
+    return 0
+  fi
+  if draft=$(printf '%s' "$1" | node -e '
+try {
+  const data = JSON.parse(require("fs").readFileSync(0, "utf8"));
+  if (data === null || typeof data !== "object") process.exit(3);
+  const draft = data.result?.terminal?.draft;
+  if (data.ok === false || typeof draft !== "string") process.exit(3);
+  process.stdout.write(String(draft.length));
+} catch {
+  process.exit(3);
+}
+') && [ "$draft" -gt 0 ]; then
+    printf pending
+  else
+    printf '%s' "$verdict"
+  fi
 }
 
 # fm_backend_orca_composer_caps: static capability facts, not logic (see the
-# capability model in bin/fm-composer-lib.sh). Orca's `terminal read` returns
-# plain text; whether it can emit ANSI is unverified (orca is not installed
-# on the verification machine), so styled stays 0 - the conservative
-# degradation - until a live capture proves otherwise.
+# capability model in bin/fm-composer-lib.sh). Orca's `terminal read --screen`
+# returns the rendered screen with escape sequences stripped (verified live on
+# orca 1.4.232: no ANSI bytes in the JSON), so styled stays 0 - the
+# conservative degradation - until a capture that preserves ANSI exists.
 fm_backend_orca_composer_caps() {
   printf 'styled=0\ncursor=0\nidentity=0\nrows=%s\n' "$FM_COMPOSER_CAPTURE_LINES"
 }
@@ -294,22 +631,23 @@ fm_backend_orca_composer_caps() {
 # row this adapter never learned, which left every claude/codex/pi/muse steer
 # unconfirmed) lives in bin/fm-composer-lib.sh.
 fm_backend_orca_composer_state() {  # <terminal-id> [expected-label] -> empty|pending|pending-unproven|unknown
-  local cap verdict
-  cap=$(fm_backend_orca_composer_capture "$1") || { printf 'unknown'; return 0; }
-  verdict=$(fm_composer_classify_screen "$(fm_backend_orca_composer_caps)" "$cap")
+  local cap json verdict
+  json=$(fm_backend_orca_composer_capture "$1" "" json) || { printf 'unknown'; return 0; }
+  cap=$(fm_backend_orca_json_text "$json") || { printf 'unknown'; return 0; }
+  fm_backend_orca_remember_draft "$1" "$json"
+  verdict=$(fm_backend_orca_classify_composer "$json" "$cap")
   [ "$verdict" != need-identity ] || verdict=unknown
   printf '%s' "$verdict"
 }
 
-fm_backend_orca_send_key() {  # <terminal-id> <key>
+fm_backend_orca_send_key_once() {  # <terminal-id> <key>
   local terminal=$1 key=$2
-  fm_backend_orca_tool_check || return 1
   case "$key" in
     C-c|ctrl+c|Ctrl-c|Ctrl-C)
-      fm_backend_orca_run_json orca terminal send --terminal "$terminal" --interrupt --json
+      fm_backend_orca_attempt orca terminal send --terminal "$terminal" --interrupt --json
       ;;
     Enter|enter)
-      fm_backend_orca_run_json orca terminal send --terminal "$terminal" --text "" --enter --json
+      fm_backend_orca_attempt orca terminal send --terminal "$terminal" --text "" --enter --json
       ;;
     *)
       echo "error: unsupported Orca key '$key'" >&2
@@ -318,18 +656,84 @@ fm_backend_orca_send_key() {  # <terminal-id> <key>
   esac
 }
 
+fm_backend_orca_send_key() {  # <terminal-id> <key>
+  local terminal=$1 key=$2 live rc=0 check_rc
+  FM_ORCA_RESOLVED_TERMINAL=
+  fm_backend_orca_tool_check || return 1
+  case "$key" in
+    C-c|ctrl+c|Ctrl-c|Ctrl-C|Enter|enter) ;;
+    *)
+      echo "error: unsupported Orca key '$key'" >&2
+      return 1
+      ;;
+  esac
+  if fm_backend_orca_send_key_once "$terminal" "$key"; then
+    return 0
+  else
+    rc=$?
+  fi
+  if fm_backend_orca_last_stale; then
+    live=$(fm_backend_orca_resolve_live_terminal "$terminal") || live=
+    if [ -n "$live" ]; then
+      FM_ORCA_RESOLVED_TERMINAL=$live
+      case "$key" in
+        Enter|enter)
+          check_rc=0
+          fm_backend_orca_check_replacement "$live" enter || check_rc=$?
+          case "$check_rc" in 0|2) ;; *) return "$check_rc" ;; esac
+          ;;
+      esac
+      if fm_backend_orca_send_key_once "$live" "$key"; then
+        case "$key" in
+          Enter|enter) [ -z "${FM_TASK_INBOX_RING_LINE:-}" ] || return 4 ;;
+        esac
+        return 0
+      else
+        fm_backend_orca_replay_last
+        return $?
+      fi
+    fi
+  fi
+  fm_backend_orca_replay_last
+  return "$rc"
+}
+
 # fm_backend_orca_send_text_submit: type <text> once, then drive the shared
 # verify-and-retry-Enter loop (bin/fm-composer-lib.sh:
 # fm_composer_submit_retry_core) against the shared composer verdict, so a
 # slash-command popup placeholder fill gets the required second Enter without
 # duplicating text.
 fm_backend_orca_send_text_submit() {  # <terminal-id> <text> <retries> <enter-sleep> <settle>
-  local terminal=$1 text=$2 retries=$3 sleep_s=$4 settle=$5
+  local terminal=$1 text=$2 retries=$3 sleep_s=$4 settle=$5 target rc=0 verdict
   fm_backend_orca_tool_check || { printf 'send-failed'; return 0; }
-  fm_backend_orca_send_literal "$terminal" "$text" || { printf 'send-failed'; return 0; }
+  # A stale recorded id is retried once through window= inside send_literal.
+  # Enter and the composer read then use that live id, still typing the text once.
+  fm_backend_orca_send_literal "$terminal" "$text" || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    if [ "$rc" -eq 4 ] && [ -n "${FM_TASK_INBOX_RING_LINE:-}" ] && [ -n "${FM_ORCA_RESOLVED_TERMINAL:-}" ]; then
+      printf 'inbox-deferred'
+    else
+      printf 'send-failed'
+    fi
+    return 0
+  fi
+  target=${FM_ORCA_RESOLVED_TERMINAL:-$terminal}
   sleep "$settle"
-  fm_composer_submit_retry_core fm_backend_orca_send_key fm_backend_orca_composer_state \
-    "$terminal" "$retries" "$sleep_s"
+  if [ "$target" != "$terminal" ] && [ -n "${FM_TASK_INBOX_RING_LINE:-}" ]; then
+    rc=0
+    fm_backend_orca_check_replacement "$target" enter || rc=$?
+    case "$rc" in
+      0|2) fm_backend_orca_send_key_once "$target" Enter >/dev/null 2>&1 || true ;;
+    esac
+    printf 'inbox-deferred'
+    return 0
+  fi
+  verdict=$(fm_composer_submit_retry_core fm_backend_orca_send_key fm_backend_orca_composer_state \
+    "$target" "$retries" "$sleep_s" "" FM_ORCA_RESOLVED_TERMINAL)
+  if [ "$verdict" = pending ] && [ "$target" != "$terminal" ]; then
+    verdict=pending-replacement
+  fi
+  printf '%s' "$verdict"
 }
 
 # fm_backend_orca_kill: close one recorded task terminal. A missing CLI is a

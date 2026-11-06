@@ -64,18 +64,22 @@
 # local metadata happens to match it (the same boundary that keeps it unmarked
 # and outside --resolve-key). Pane backends type the literal text ONCE, then
 # retry Enter without retyping; T3 Code starts one native turn. Typed-plane exit
-# contract: 0 = submit confirmed; 3 = the text reached the live endpoint and
-# submission was attempted, but the read-back stayed unconfirmed, or an API
-# backend's outcome is unproven: a lost reply or an error that can follow a
-# commit (verify the endpoint
-# before any resend, and never submit blindly; docs/t3code-backend.md owns
-# T3 Code's request-id retention and retry policy; a marked request's
-# pending-reply expectation stays armed because this outcome is not a proven
-# failure); any other nonzero = the send failed and nothing may be assumed
-# delivered. Submission dispatches through the target's recorded backend; the
-# tmux adapter shares its composer/submit core with the away-mode daemon via
-# bin/fm-tmux-lib.sh. Tune with FM_SEND_RETRIES (default 3; agy typed targets
-# default to 20 for agy's late busy render) / FM_SEND_SLEEP (0.4). Slash
+# contract: 0 = submit confirmed by a composer read after a successful Enter;
+# 3 = the text reached the live endpoint and submission was attempted but stays
+# unconfirmed: the read-back stayed unconfirmed, Enter resolved a different
+# endpoint than the one that received the text (a replacement pane cannot
+# confirm text typed elsewhere), or Enter failed after the text was accepted
+# (even when the composer now reads empty, because a pane replaced between the
+# accepted text and the failed Enter is indistinguishable from delivery), or an
+# API backend's outcome is unproven: a lost reply or an error that can follow a
+# commit (verify the endpoint before any resend, and never submit blindly;
+# docs/t3code-backend.md owns T3 Code's request-id retention and retry policy; a
+# marked request's pending-reply expectation stays armed because this outcome is
+# not a proven failure); any other nonzero = the send failed and nothing may be
+# assumed delivered. Submission dispatches through the target's recorded
+# backend; the tmux adapter shares its composer/submit core with the away-mode
+# daemon via bin/fm-tmux-lib.sh. Tune with FM_SEND_RETRIES (default 3; agy typed
+# targets default to 20 for agy's late busy render) / FM_SEND_SLEEP (0.4). Slash
 # commands, and codex `$...` skill invocations resolved through harness meta,
 # get a longer pre-Enter settle so completion popups do not swallow Enter.
 # A remote secondmate target has no typed text plane at all:
@@ -1284,11 +1288,19 @@ else
   case "$verdict" in
   empty)
     ;;
+  endpoint-changed)
+    echo "fm-send: submission to $T is unconfirmed because Enter changed terminal endpoints; do not retype or blindly resend - inspect the replacement pane for the recorded worktree in Orca's UI before deciding whether to resend" >&2
+    exit 3
+    ;;
   send-failed)
     fm_send_known_undelivered_cleanup ||
       echo "error: known-undelivered pending-reply state could not be reset for $TARGET_TASK_ID" >&2
     echo "error: text not sent to $T ($TARGET_BACKEND send failed; tried $RESOLUTION_TRIED)" >&2
     exit 1
+    ;;
+  pending-replacement)
+    echo "fm-send: submission to $T is unconfirmed (verdict=pending-replacement; tried $RESOLUTION_TRIED); do not retype or blindly resend - inspect the replacement pane for the recorded worktree in Orca's UI before deciding whether to resend" >&2
+    exit 3
     ;;
   pending)
     # The text was typed into the live target and Enter was sent; only the

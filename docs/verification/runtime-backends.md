@@ -1013,6 +1013,16 @@ ok - claude-named (2.1.284 (Claude Code)): real idle composer classifies empty
 ok - claude-named (2.1.284 (Claude Code)): the same idle pane read cursorless is not pending (verdict: empty)
 ```
 
+### 2026-11-02 claude 2.1.317 rotating `Try` idle hint
+
+Verified on 2026-11-02 against real Claude Code 2.1.317 panes on Orca 1.4.232 in a disposable lab runtime: an idle claude composer renders the rotating suggestion hint `Try "edit fm-branch-dispatch.ts to..."` after the `❯` glyph, and a `styled=0` capture carries no ghost-strip proof for it.
+The fleet-wide idle set is unchanged; it does not accept the rotating `Try` hint.
+The live shape on this Orca/Claude pair is rule-separated - `❯ Try "..."` between two solid rules with the permission-mode footer below - and reads `unknown` with both the shipped idle set and `FM_COMPOSER_IDLE_RE='^$'`.
+Orca's `--screen` composer read carries the success-path fix by reading the rendered composer instead of accumulated repaint fragments.
+That rule-separated shape is a known limitation of the success-path proof on this Orca/Claude pair: an empty composer there cannot be proven empty, so an accepted Enter whose read lands on it returns `unknown`, `fm-send.sh` reports the text as not submitted and exits 1, and duplicate-resend risk remains until a dedicated classifier change supports that container.
+`test_matrix_claude_rotating_idle_hint` in `tests/fm-composer-lib.test.sh` embeds this capture verbatim and pins the typed-text counterweight and the limitation itself: the live rule-separated row reads `unknown` with both the shipped idle set and `FM_COMPOSER_IDLE_RE='^$'`, and changed verdicts fail naming claude 2.1.317.
+No `live-harness-optin` guard drives this vendor string on a real Claude pane, so this record is refreshed by re-running the live capture rather than by the portable regression.
+
 ### 2026-09-15 codex-cli 0.154.0 idle starfield and status footer through Herdr
 
 Verified on 2026-09-15 on macOS arm64 (Darwin 25.5.0) against codex-cli 0.154.0 (model gpt-6-astra, fast mode) running as a Codex second mate inside a Herdr pane, read through Herdr's ANSI capture with its exact capability descriptor (`styled=1`, `cursor=0`, `identity=1`, `rows=20`).
@@ -1561,7 +1571,7 @@ The composer row lands outside a bounded 20-row tail of the pane, so the adapter
 The pre-Enter payload proof then judged the typed command unsent, pressed Ctrl+U, and reported `send-failed` without ever pressing Enter, so `bin/fm-control.sh exit` never exited the worker (and `bin/fm-secondmate-restart.sh` inherited the failure through its exit step).
 
 The fix captures the FULL VISIBLE VIEWPORT for every herdr adapter composer read (`pane read --source visible [--format ansi]`, `fm_backend_herdr_composer_state` and `fm_backend_herdr_composer_content`): the composer is by definition inside the viewport, and the viewport is the one bound that always contains it.
-The shared inbox pending-line confirmation read (`bin/fm-task-inbox-lib.sh`) stays a bounded tail on every backend, herdr included; its payloads are task lines, not slash commands, so the popup shape does not arise there.
+The shared inbox pending-line confirmation read (`bin/fm-task-inbox-lib.sh`) stays a bounded tail on every backend that offers no structured draft, herdr included, while Orca answers it from `result.terminal.draft` when the terminal publishes one and otherwise from a bounded rendered-screen read (`terminal read --screen`, as on live orca 1.4.232 shell and agent terminals), never the accumulated stream ([`orca-backend.md`](../orca-backend.md#current-lifecycle-and-safety) owns that path); its payloads are task lines, not slash commands, so the popup shape does not arise there.
 The popup rows sit below the composer's closing rule, which is a structural edge row, so the shared classifier still selects only the composer and the unmarked menu rows never read as typed text (Claude Code 2.1.283 through 2.1.289; 2.1.291 marks the selected row, see below).
 Verified live in the lab: with the popup up the state read answers `pending` (previously `empty`) and the payload proof returns `/exit` (previously empty), the submit presses Enter, and the Claude process exits, leaving the shell prompt.
 Growing the window only adds rows above the composer, so the bottom-most-shape selection, the footer zone, and every previously passing verdict are unchanged.
@@ -2292,6 +2302,15 @@ result.runtime.state=ready
 `orca worktree create` returned `result.worktree.id` and `result.worktree.path`.
 Speculative bare ids and nested terminal fields were deliberately rejected.
 
+Restart-error and worktree-selector behavior were observed on 2026-09-22 against the Orca 1.4.206 runtime with a window that had been restarted by hand: the recorded `term_*` handle read back `result.terminal.status=exited`, and every `orca terminal send` on it failed with `error.code=terminal_not_writable`, while the same worktree's live terminal was a different `term_*` handle.
+
+```sh
+orca terminal list --worktree name:<window> --json
+```
+
+Returned `result.terminals[0]` with the fresh handle, `writable=true`, `connected=true` for the recorded `window=`; the bare name without the `name:` prefix was refused with `selector_not_found`, and `path:<absolute worktree path>` resolved the same pane.
+The accepted selector forms Orca reports are `id:<repo-id>::<absolute-path>` and `path:<absolute path>`; `name:<worktree name>` is accepted live.
+
 ```sh
 tests/fm-backend-orca.test.sh
 tests/fm-backend.test.sh
@@ -2299,6 +2318,25 @@ tests/fm-bootstrap.test.sh
 ```
 
 The fake-Orca suite covers readiness, registration, create response parsing, metadata routing, popup-safe submit, and path-matched release refusal.
+
+On 2026-10-08, Orca CLI 1.4.222 did not accept a window title as a terminal handle.
+`orca terminal show --terminal title:fm-android-compare-slice3 --json`, the same call with `name:` and `window:` prefixes, and the bare title all exited 1 with `error.code=terminal_handle_stale`.
+`orca terminal list --worktree name:fm-sparkdash-deploy-macnode --json` returned the one live terminal whose handle matched that task's recorded `terminal=`, and `name:fm-does-not-exist-probe` exited 1 with `selector_not_found`.
+The current send-time contract is owned by [`orca-backend.md`](../orca-backend.md#task-shape-and-metadata).
+The retarget itself was exercised on 2026-11-02 against Orca 1.4.232 with real Claude Code panes in a disposable lab runtime: a closed recorded handle with exactly one live pane in the recorded window delivered the text while `state/<id>.meta` stayed byte-identical, and two live panes in that window and a missing window both preserved the original `orca send failed` exit 1 and typed into no pane.
+`tests/fm-backend-orca.test.sh` pins fake-CLI delivery for both restart errors, unchanged healthy-handle commands, missing and ambiguous selector refusal, replacement-dialog guards, inbox draft and busy deferral, exact-own-doorbell retries, and explicit typed and key semantics.
+`tests/fm-orca-submit-restart.test.sh` covers inbox restarts before typing and before Enter, replacement content changing during settle, retained watcher retry marks, and the original endpoint's two-Enter budget.
+`tests/fm-orca-typed-restart.test.sh` covers a typed slash command lost during restart, unconfirmed exit 3 without retyping or further Enter attempts, a failed Enter after typed acceptance reported as unconfirmed whether the composer reads pending, empty after a submit, or empty after an endpoint replacement, and unchanged original-endpoint submission. `tests/fm-composer-lib.test.sh` pins the shared failed-Enter verdict on both the typed and inbox planes, including that the failed path never reads the composer.
+
+The composer read was re-verified on 2026-11-02 against Orca 1.4.232 with real Claude Code 2.1.317 and 2.1.304 panes in a disposable lab runtime: Orca's default `orca terminal read` returns the accumulated stream, so after an accepted Enter the same pane returned repaint fragments (`❯ ⚠ claude.ai connectors are disabled ...`) with no rendered composer and classified `unknown`, which reported a command that had already run as "text not submitted" and exited 1.
+`orca terminal read --terminal <handle> --screen --limit <n> --json` returned the rendered screen, the same pane classified `empty`, and the typed send confirmed delivery.
+The `--screen` payload carried no ANSI bytes, so the Orca capability descriptor stays `styled=0`.
+The same runtime reported typed-but-unsubmitted composer text in `result.terminal.draft`, which Orca omits from the tail and screen rows: a replacement pane whose `draft` held `DRAFT-MARKER keep me` rendered an empty `❯` row.
+The adapter retains that structured provenance: a nonempty draft is `pending`, including text matching an idle placeholder, while dialog detection and recording inspect the original rendered screen first and take precedence over the draft verdict.
+The same 2026-11-02 lab observed `orca terminal read --screen --json` publishing no `draft` key at all for a shell pane and for an `orca agent launch --agent claude` terminal, so the field is UI-only and absent for the terminal shapes this backend creates without a paired client.
+An absent or non-string field is therefore "no structured draft" and ownership falls back to plain capture of that capture's rendered screen, not of the accumulated stream, while a draft that exists but cannot be read (parse error, null root, `ok: false`, failed read) defers.
+The draft a capture answered with decides the ownership check for exactly that capture, and every later capture supersedes it, so an own doorbell remembered by an earlier check cannot authorize Enter on a later capture whose absent field means "no structured draft" and falls to plain capture of that later screen.
+`tests/fm-backend-orca.test.sh` pins the rendered-screen read, structured-draft deferral, dialog protection with a nonempty draft, exactly one Enter without retyping when the own doorbell exists only in the structured draft or only in the rendered composer of an absent-draft terminal, deferral without input when that ownership read is unreadable while the accumulated stream still shows an earlier own doorbell, including after a foreign draft was classified and the field then disappeared, and deferral without input when an earlier check's own doorbell is superseded by a later capture whose rendered screen holds foreign composer text and publishes no draft field while the accumulated stream still shows that earlier own doorbell.
 
 ### Orca environment source
 
