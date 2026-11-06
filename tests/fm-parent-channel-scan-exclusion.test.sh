@@ -289,6 +289,51 @@ test_watcher_scan_keeps_name_shared_files_outside_remote_mates() {
   pass "scan_signals keeps parent-replies.status outside remote mate homes"
 }
 
+# record_hygiene_run <home> <detect-only>: run the record hygiene report over a
+# home's own records, report-only when <detect-only> is 1 and with the orphan
+# archive move otherwise.
+record_hygiene_run() {  # <home> <detect-only>
+  FM_TEST_LIB_SOURCED=1 FM_HOME="$1" FM_STATE_OVERRIDE="$1/state" \
+    FM_BOOTSTRAP_DETECT_ONLY="$2" bash -c '
+      SCRIPT_DIR="$1/bin"; STATE="$2/state"; DATA="$2/data"
+      # shellcheck source=bin/fm-classify-lib.sh
+      . "$SCRIPT_DIR/fm-classify-lib.sh"
+      # shellcheck source=bin/fm-tasks-axi-lib.sh
+      . "$SCRIPT_DIR/fm-tasks-axi-lib.sh"
+      # shellcheck source=bin/fm-backlog-transition-lib.sh
+      . "$SCRIPT_DIR/fm-backlog-transition-lib.sh"
+      # shellcheck source=bin/fm-backend.sh
+      . "$SCRIPT_DIR/fm-backend.sh"
+      # shellcheck source=bin/fm-timeout-lib.sh
+      . "$SCRIPT_DIR/fm-timeout-lib.sh"
+      # shellcheck source=bin/fm-record-hygiene-lib.sh
+      . "$SCRIPT_DIR/fm-record-hygiene-lib.sh"
+      record_hygiene_report
+    ' _ "$ROOT" "$1"
+}
+
+test_record_hygiene_skips_remote_parent_channel() {
+  local dir out
+  dir="$TMP_ROOT/record-hygiene"
+  seed_remote_mate "$dir/home"
+  touch -t 202001010000 "$dir/home/state/parent-replies.status" "$dir/home/state/real-task.status"
+  mkdir -p "$dir/home/data"
+  out=$(record_hygiene_run "$dir/home" 1) || fail "report-only record hygiene scan failed"
+  case "$out" in *parent-replies*) fail "remote parent channel was reported: $out" ;; esac
+  printf '%s\n' "$out" | grep -F 'older than 24 hours: real-task' >/dev/null \
+    || fail "the genuine orphan status log must be reported: $out"
+  [ -f "$dir/home/state/real-task.status" ] || fail "the report-only scan must not archive"
+
+  # The mutating pass archives the genuine orphan but never the channel.
+  out=$(record_hygiene_run "$dir/home" 0) || fail "mutating record hygiene scan failed"
+  case "$out" in *parent-replies*) fail "remote parent channel was reported: $out" ;; esac
+  [ -f "$dir/home/state/parent-replies.status" ] || fail "remote parent channel was archived"
+  [ ! -e "$dir/home/data/parent-replies" ] || fail "remote parent channel left an archive dir"
+  [ -f "$dir/home/data/real-task/status.log" ] && [ ! -e "$dir/home/state/real-task.status" ] \
+    || fail "the genuine orphan status log must be archived by the mutating pass"
+  pass "record hygiene reports and archives orphans but leaves a remote mate's parent channel in place"
+}
+
 # --- unit: the away-mode daemon's heartbeat catch-all backstop --------------
 
 # The daemon runs the watcher's twin catch-all scan while a home is away, so it
@@ -406,6 +451,7 @@ test_channel_lines_never_reach_the_remote_unread_surface
 test_name_shared_file_folds_in_a_main_home
 test_name_shared_file_folds_in_a_local_mate
 test_watcher_scan_skips_channel_and_keeps_task_in_remote_mate
+test_record_hygiene_skips_remote_parent_channel
 test_heartbeat_backstop_skips_channel_in_remote_mate
 test_watcher_scan_keeps_name_shared_files_outside_remote_mates
 test_daemon_heartbeat_backstop_skips_channel_in_remote_mate
