@@ -8,7 +8,10 @@
 # which is dead moments after it is written. For a Claude session that proves a
 # trusted session id the anchor is CLAUDE_PID, the model-loop process, so a
 # shared transient daemon or a front-end that outlives the session never keeps
-# a dead session's lock alive. On Windows that pid is recorded tagged, and a
+# a dead session's lock alive. A native Codex server pid is shared by every
+# thread it serves, so equality with line 1 never proves ownership here; the
+# shared library's owned-by-self verdict decides, and it requires the native
+# session identity as well. On Windows that pid is recorded tagged, and a
 # /clear re-key under the same tagged pid refreshes the sidecar as it does on
 # POSIX. Line 1 keeps its whole-line pid format because every other reader
 # takes the first line as the pid.
@@ -27,7 +30,7 @@
 # anchor in that same section (fm_lease_rekey_holder in bin/fm-lease-lib.sh),
 # as does a Claude auto-arm rewake bound to the old pid, under
 # state/.claude-autoarm.lock (fm_autoarm_rekey_session in bin/fm-wake-lib.sh).
-# A later /clear re-key in the same process is then still proven by ancestry
+# A later Claude /clear re-key in the same process is still proven by ancestry
 # after the id changes, a held lease stays live, and the mid-turn guard still
 # accepts that rewake. A lease or rewake that cannot be moved, including when
 # the auto-arm lock stays busy past LEASE_LOCK_WAIT seconds, is reported as a
@@ -77,6 +80,8 @@ me=$(fm_session_lock_anchor_pid) || {
     # ancestry" would describe the wrong problem and send the reader hunting a
     # process tree that can never contain the answer.
     echo "error: cannot identify this harness session on Windows: it publishes no session pid this build recognizes (see FM_WIN_HARNESS_PID_VARS in bin/fm-session-lock-lib.sh; CLAUDE_PID is taken only together with CLAUDE_CODE_SESSION_ID); operate read-only until resolved" >&2
+  elif fm_session_lock_codex_native_ancestry; then
+    echo "error: native Codex server is shared by many threads and this thread proves no trusted session identity (CODEX_SESSION_ID, CODEX_THREAD_ID, or hook session_id; see bin/fm-session-lock-lib.sh); operate read-only until resolved" >&2
   else
     echo "error: cannot locate harness process in ancestry" >&2
   fi
@@ -218,7 +223,7 @@ confirm_own_lock() {  # <recorded-pid>
     waited=1
   fi
   recorded=$(cat "$LOCK" 2>/dev/null || true)
-  if [ "$recorded" = "$me" ] || fm_session_lock_owned_by_self "$STATE"; then
+  if fm_session_lock_owned_by_self "$STATE"; then
     if [ "$recorded" != "$me" ] && pids=$(fm_harness_ancestry_pids) \
       && ! fm_harness_pid_listed "$recorded" "$pids" \
       && fm_lock_acquire_wait_max "$LEASE_LOCK" "$LEASE_LOCK_WAIT"; then
@@ -250,7 +255,7 @@ refuse_live_owner() {  # <recorded-pid>
 
 if [ -f "$LOCK" ] && [ ! -L "$LOCK" ]; then
   old=$(cat "$LOCK" 2>/dev/null || true)
-  if [ "$old" = "$me" ] || fm_session_lock_owned_by_self "$STATE"; then
+  if fm_session_lock_owned_by_self "$STATE"; then
     confirm_own_lock "$old"
     old=$(cat "$LOCK" 2>/dev/null || true)
   fi
@@ -282,10 +287,10 @@ if [ -e "$LOCK" ] || [ -L "$LOCK" ]; then
   }
   # A re-anchor decided above has held the claim lock since, so line 1 is the
   # pid it recorded and needs no second verdict.
-  if [ -z "$REANCHOR" ] && [ "$old" != "$me" ] && fm_session_lock_pid_blocks_reclaim "$old"; then
+  if [ -z "$REANCHOR" ] && fm_session_lock_pid_blocks_reclaim "$old"; then
     fm_session_lock_owned_by_self "$STATE" && confirm_own_lock "$old"
     old=$(cat "$LOCK" 2>/dev/null || true)
-    if [ -z "$REANCHOR" ] && [ "$old" != "$me" ] && fm_session_lock_pid_blocks_reclaim "$old"; then
+    if [ -z "$REANCHOR" ] && fm_session_lock_pid_blocks_reclaim "$old"; then
       refuse_live_owner "$old"
     fi
   fi
@@ -293,8 +298,9 @@ fi
 # The sidecar goes first: a fresh pid beside a previous session's id would let
 # that session's resume own this lock. If the sidecar changes before line 1 is
 # written, a failure restores the previous sidecar. If line 1 is written but
-# not yet verified, a failure removes the sidecar and leaves the lock
-# ancestry-only. After line 1 verifies as this session's anchor, a later
+# not yet verified, a failure removes the sidecar and leaves the lock without
+# trusted identity evidence; the shared library decides whether ancestry alone
+# then suffices for that harness. After line 1 verifies as this session's anchor, a later
 # signal leaves the published pair in place, except on the re-anchor path:
 # there a HUP, INT, or TERM during the lease move or the bounded
 # .claude-autoarm.lock wait, before commit_lock_session, still runs

@@ -38,10 +38,11 @@ SH
 # provider. The table reads FM_TEST_TRIPLE_N records (fake table rows
 # "<pid>|<ppid>|<comm>|<args>"); a pid absent from the table is unreadable,
 # which is how a dead pid behaves. FM_TEST_KILL_RC decides kill as before.
-# CLAUDE identity envs are scrubbed the same way the ancestry suite scrubs
-# them, so a suite running inside a real Claude session cannot leak in.
+# Harness identity envs are scrubbed so a suite running inside a real
+# Claude or native Codex session cannot leak its identity into the table.
 lib_eval_denied() {  # <fakebin> <provider-table-file> <expression>
   env -u CLAUDE_CODE_SESSION_ID -u CLAUDE_PID \
+    -u CODEX_SESSION_ID -u CODEX_THREAD_ID -u FM_CODEX_HOOK_SESSION_ID \
     FM_PROVIDER_FILE="$2" PATH="$1:$PATH" bash -c "
     . \"\$0\"
     kill() { return \${FM_TEST_KILL_RC:-0}; }
@@ -66,6 +67,10 @@ lib_eval_denied() {  # <fakebin> <provider-table-file> <expression>
         esac
       done < \"\$FM_PROVIDER_FILE\"
       return 1
+    }
+    fm_os_proc_argv() {
+      [ \"\$1\" = 800 ] || return 1
+      cat \"\$FM_PROVIDER_FILE.argv\" 2>/dev/null
     }
     $3
   " "$LIB"
@@ -950,8 +955,117 @@ test_unreadable_verdict_returns_success() {
   pass "live owner with unreadable identity returns a successful verdict"
 }
 
+test_procinfo_argv_preserves_boundaries() {
+  command -v python3 >/dev/null 2>&1 \
+    || { pass "kernel argv: python3 absent, skipped"; return; }
+  python3 - "$ROOT/bin/fm-procinfo.py" <<'PYTEST' || fail "kernel argv contract"
+import os
+import shutil
+import subprocess
+import sys
+
+# Public contract: --argv emits the exact NUL-separated OS argument vector.
+# The independently supplied launch vector rejects splitting at spaces,
+# dropping empty values, escaping bytes, or leaking environment strings.
+argv = [shutil.which('sh'), '-c', 'printf "ready\\n"; read line',
+        '-C', '/Users/me/My Home', '-c', 'note="split value"', '', 'app-server']
+child = subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE)
+try:
+    assert child.stdout.readline() == b'ready\n'
+    got = subprocess.run([sys.executable, sys.argv[1], '--argv', str(child.pid)],
+                         capture_output=True, timeout=5)
+    assert got.returncode == 0, got.stderr
+    assert got.stdout == b''.join(os.fsencode(arg) + b'\0' for arg in argv), got.stdout
+finally:
+    child.terminate()
+    child.wait(timeout=5)
+    child.stdout.close()
+    child.stdin.close()
+dead = subprocess.run([sys.executable, sys.argv[1], '--argv', str(child.pid)],
+                      capture_output=True, timeout=5)
+assert dead.returncode == 1 and dead.stdout == b'', dead
+PYTEST
+  pass "kernel argv preserves boundaries and emits nothing for a dead process"
+}
+
+test_denied_ps_reads_native_codex_identity() {
+  # The native Codex server check reads identity through the same denied-ps
+  # route as every other read here, so a host that blocks ps still tells a
+  # shared app-server thread from an ordinary CLI session.
+  local dir fakebin table uuid=00000000-0000-4000-8000-000000000001 got
+  dir="$TMP_ROOT/native-codex"
+  fakebin=$(fm_fakebin "$dir"); make_denied_ps "$fakebin"
+  table="$dir/t"
+  write_native_table() {  # <comm> <args> [<argv>...]
+    printf '800|1|%s|%s\ndefault|800|bash|bash run.sh\n' "$1" "$2" > "$table"
+    shift 2
+    printf '%s\0' "$@" > "$table.argv"
+  }
+  write_native_table /opt/codex '/opt/codex app-server --listen stdio://' /opt/codex app-server --listen stdio://
+  got=$(lib_eval_denied "$fakebin" "$table" \
+    "export CODEX_SESSION_ID=$uuid CODEX_THREAD_ID=$uuid; fm_session_lock_trusted_session_id") \
+    || fail "denied-ps route did not read a native app-server identity"
+  [ "$got" = "codex-native:$uuid" ] || fail "denied-ps native identity was '$got'"
+  if lib_eval_denied "$fakebin" "$table" \
+    "export CODEX_SESSION_ID=$uuid CODEX_THREAD_ID=00000000-0000-4000-8000-000000000002; fm_session_lock_trusted_session_id" >/dev/null 2>&1; then
+    fail "denied-ps route trusted a descendant thread as its root session"
+  fi
+  if lib_eval_denied "$fakebin" "$table" 'fm_session_lock_anchor_pid' >/dev/null 2>&1; then
+    fail "denied-ps route anchored a native thread that proves no identity"
+  fi
+  write_native_table /opt/codex '/opt/codex -C /Users/me/My Home app-server' \
+    /opt/codex -C '/Users/me/My Home' app-server
+  lib_eval_denied "$fakebin" "$table" 'fm_session_lock_codex_native_ancestry' \
+    || fail "denied-ps route missed a server after a spaced directory"
+  got=$(lib_eval_denied "$fakebin" "$table" \
+    "export CODEX_SESSION_ID=$uuid CODEX_THREAD_ID=$uuid; fm_session_lock_trusted_session_id") \
+    || fail "denied-ps route lost native identity after a spaced directory"
+  [ "$got" = "codex-native:$uuid" ] || fail "spaced-directory identity was '$got'"
+  if lib_eval_denied "$fakebin" "$table" 'fm_session_lock_anchor_pid' >/dev/null 2>&1; then
+    fail "denied-ps route anchored a spaced-directory server without identity"
+  fi
+  write_native_table /opt/codex '/opt/codex -C /Users/me/Home app-server' \
+    /opt/codex -C /Users/me/Home app-server
+  rm "$table.argv"
+  if lib_eval_denied "$fakebin" "$table" \
+    "export CODEX_SESSION_ID=$uuid CODEX_THREAD_ID=$uuid; fm_session_lock_anchor_pid" >/dev/null 2>&1; then
+    fail "denied-ps route anchored a server with unreadable argv"
+  fi
+  write_native_table /opt/codex '/opt/codex -c sandbox_permissions=[ "disk-full-read-access" ] app-server' \
+    /opt/codex -c 'sandbox_permissions=[ "disk-full-read-access" ]' app-server
+  got=$(lib_eval_denied "$fakebin" "$table" \
+    "export CODEX_SESSION_ID=$uuid CODEX_THREAD_ID=$uuid; fm_session_lock_trusted_session_id") \
+    || fail "denied-ps route lost native identity after a spaced config value"
+  [ "$got" = "codex-native:$uuid" ] || fail "spaced-config identity was '$got'"
+  write_native_table /opt/codex '/opt/codex --remote unix:///tmp/codex.sock --remote-auth-token-env TOKEN --local-provider ollama app-server' \
+    /opt/codex --remote unix:///tmp/codex.sock --remote-auth-token-env TOKEN --local-provider ollama app-server
+  got=$(lib_eval_denied "$fakebin" "$table" \
+    "export CODEX_SESSION_ID=$uuid CODEX_THREAD_ID=$uuid; fm_session_lock_trusted_session_id") \
+    || fail "denied-ps route missed the server after remote and provider options"
+  [ "$got" = "codex-native:$uuid" ] || fail "remote-option identity was '$got'"
+  write_native_table codex-code-mode /opt/codex-code-mode-host
+  lib_eval_denied "$fakebin" "$table" 'fm_session_lock_codex_native_pid 800' \
+    || fail "denied-ps route missed a truncated code-mode host comm"
+  write_native_table /opt/codex '/opt/codex -C /Users/me/My Home Inspect codex app-server' \
+    /opt/codex -C '/Users/me/My Home' 'Inspect codex app-server'
+  if lib_eval_denied "$fakebin" "$table" 'fm_session_lock_codex_native_ancestry' >/dev/null 2>&1; then
+    fail "denied-ps route read a CLI prompt as a native app-server"
+  fi
+  [ "$(lib_eval_denied "$fakebin" "$table" 'fm_session_lock_anchor_pid')" = 800 ] \
+    || fail "denied-ps route lost the ordinary Codex CLI anchor"
+  rm "$table.argv"
+  if lib_eval_denied "$fakebin" "$table" 'fm_session_lock_codex_native_ancestry' >/dev/null 2>&1; then
+    fail "denied-ps route read prompt text as native with unreadable argv"
+  fi
+  [ "$(lib_eval_denied "$fakebin" "$table" 'fm_session_lock_anchor_pid')" = 800 ] \
+    || fail "denied-ps route lost the CLI anchor with unreadable argv"
+  pass "denied-ps route reads native Codex server identity and keeps the CLI contract"
+}
+
 test_unreadable_verdict_returns_success
 test_partial_identity_reads_refuse
+test_denied_ps_reads_native_codex_identity
+test_procinfo_argv_preserves_boundaries
 test_nonpid_records_allow_acquisition
 
 test_unreadable_owner_refuses_acquisition
