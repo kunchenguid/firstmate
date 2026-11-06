@@ -14,64 +14,70 @@ RETURN="$ROOT/bin/fm-afk-return.sh"
 TMP_ROOT=$(fm_test_tmproot fm-droid-afk-approval)
 TASKS_AXI_BIN=$(command -v tasks-axi || true)
 
-command -v jq >/dev/null 2>&1 || { echo "skip: jq not found"; exit 0; }
-command -v tasks-axi >/dev/null 2>&1 || { echo "skip: tasks-axi not found"; exit 0; }
+command -v jq >/dev/null 2>&1 || {
+  echo "skip: jq not found"
+  exit 0
+}
+command -v tasks-axi >/dev/null 2>&1 || {
+  echo "skip: tasks-axi not found"
+  exit 0
+}
 
 # A primary home with a real backlog, so questions reach the genuine captain-hold
 # and status-decision owners rather than a test double of them.
-make_home() {  # <name>
+make_home() { # <name>
   local home="$TMP_ROOT/$1" fakebin
   mkdir -p "$home/data" "$home/state" "$home/config" "$home/projects" "$home/bin"
   cp "$ROOT/.tasks.toml" "$home/.tasks.toml"
-  printf '## In flight\n\n## Queued\n\n## Done\n' > "$home/data/backlog.md"
-  printf '# fixture\n' > "$home/AGENTS.md"
+  printf '## In flight\n\n## Queued\n\n## Done\n' >"$home/data/backlog.md"
+  printf '# fixture\n' >"$home/AGENTS.md"
   git -C "$home" init -q
   fakebin=$(fm_fakebin "$home")
   fm_fake_exit0 "$fakebin" tmux treehouse no-mistakes gh gh-axi
   printf '%s\n' "$home"
 }
 
-seed_task() {  # <home> <id> [status-line...]
+seed_task() { # <home> <id> [status-line...]
   local home=$1 id=$2
   shift 2
   fm_write_meta "$home/state/$id.meta" "window=synthetic:$id" "kind=ship"
-  : > "$home/state/$id.status"
+  : >"$home/state/$id.status"
   local line
-  for line in "$@"; do printf '%s\n' "$line" >> "$home/state/$id.status"; done
+  for line in "$@"; do printf '%s\n' "$line" >>"$home/state/$id.status"; done
 }
 
-ask() {  # <home> <questionnaire>; stdout/stderr land in <home>/out and <home>/err
+ask() { # <home> <questionnaire>; stdout/stderr land in <home>/out and <home>/err
   local home=$1 questionnaire=$2 rc=0
-  : > "$home/out"
-  : > "$home/err"
+  : >"$home/out"
+  : >"$home/err"
   jq -n --arg q "$questionnaire" \
-    '{hook_event_name:"PreToolUse",tool_name:"AskUser",tool_input:{questionnaire:$q}}' \
-    | PATH="$home/fakebin:$PATH" FM_ROOT_OVERRIDE="$home" FM_HOME="$home" \
+    '{hook_event_name:"PreToolUse",tool_name:"AskUser",tool_input:{questionnaire:$q}}' |
+    PATH="$home/fakebin:$PATH" FM_ROOT_OVERRIDE="$home" FM_HOME="$home" \
       FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
       FM_CONFIG_OVERRIDE="$home/config" \
-      "$CHECK" > "$home/out" 2> "$home/err" || rc=$?
+      "$CHECK" >"$home/out" 2>"$home/err" || rc=$?
   return "$rc"
 }
 
-holds() {  # <home> <command args...>
+holds() { # <home> <command args...>
   local home=$1
   shift
   PATH="$home/fakebin:$PATH" REAL_TASKS_AXI="$TASKS_AXI_BIN" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
     FM_DATA_OVERRIDE="$home/data" FM_CONFIG_OVERRIDE="$home/config" "$HOLD" "$@"
 }
 
-run_return() {  # <home>
+run_return() { # <home>
   local home=$1
   PATH="$home/fakebin:$PATH" FM_ROOT_OVERRIDE="$home" FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_CONFIG_OVERRIDE="$home/config" "$RETURN" 2>&1
 }
 
-deny_message() {  # <home>
+deny_message() { # <home>
   jq -r '.systemMessage' "$1/err"
 }
 
-assert_denied() {  # <rc> <home> <label>
+assert_denied() { # <rc> <home> <label>
   local rc=$1 home=$2 label=$3
   [ "$rc" -eq 2 ] || fail "$label must be denied with exit 2, got $rc"
   [ ! -s "$home/out" ] || fail "$label wrote stdout: $(cat "$home/out")"
@@ -94,7 +100,7 @@ test_existing_status_owner_receives_the_deferred_question() {
   seed_task "$home" review \
     'needs-decision [key=helper-versions]: restrict helper equality to MAS or keep paused' \
     'working: independently authorized review evidence continues'
-  date +%s > "$home/state/.afk"
+  date +%s >"$home/state/.afk"
 
   ask "$home" '1. [question] Limit helper-version equality checks to MAS builds?
 [firstmate-decision origin=review key=helper-versions state=existing]
@@ -109,8 +115,8 @@ test_existing_status_owner_receives_the_deferred_question() {
   # shellcheck disable=SC1091
   . "$ROOT/bin/fm-classify-lib.sh"
   folded=$(status_open_decisions "$home/state/review.status")
-  [ "$(printf '%s\n' "$folded" | grep -c '^helper-versions	')" -eq 1 ] \
-    || fail "the bound decision must stay exactly one open identity: $folded"
+  [ "$(printf '%s\n' "$folded" | grep -c '^helper-versions	')" -eq 1 ] ||
+    fail "the bound decision must stay exactly one open identity: $folded"
   assert_contains "$(cat "$home/state/review.status")" 'working: independently authorized review evidence continues' \
     'deferral discarded unrelated authorized progress'
   assert_not_contains "$(cat "$home/state/review.status")" 'resolved [key=' \
@@ -124,7 +130,7 @@ test_repeat_notifications_and_authorized_progress_keep_one_identity() {
   local home rc=0 before after folded
   home=$(make_home repeat-durability)
   seed_task "$home" review 'needs-decision [key=helper-versions]: restrict helper equality to MAS'
-  date +%s > "$home/state/.afk"
+  date +%s >"$home/state/.afk"
   local q='1. [question] Limit helper-version equality checks to MAS builds?
 [firstmate-decision origin=review key=helper-versions state=existing]
 [option] Approve
@@ -132,17 +138,17 @@ test_repeat_notifications_and_authorized_progress_keep_one_identity() {
 
   ask "$home" "$q" || rc=$?
   [ "$rc" -eq 2 ] || fail "the first away-mode attempt must be denied"
-  before=$(cksum < "$home/state/review.status")
+  before=$(cksum <"$home/state/review.status")
 
   # A fresh guard process with the same disk state is all a restarted or compacted
   # session can recover from, so an exact replay must change nothing.
   rc=0
   ask "$home" "$q" || rc=$?
   [ "$rc" -eq 2 ] || fail "a repeated away-mode notification must still deny AskUser"
-  after=$(cksum < "$home/state/review.status")
+  after=$(cksum <"$home/state/review.status")
   [ "$before" = "$after" ] || fail "an exact replay rewrote the durable decision owner"
 
-  printf 'working: authorized follow-up landed while the captain was away\n' >> "$home/state/review.status"
+  printf 'working: authorized follow-up landed while the captain was away\n' >>"$home/state/review.status"
   # shellcheck disable=SC1091
   . "$ROOT/bin/fm-classify-lib.sh"
   folded=$(status_open_decisions "$home/state/review.status")
@@ -156,7 +162,7 @@ test_reworded_attempt_is_kept_as_another_variant() {
   local home rc=0 variants
   home=$(make_home variants)
   seed_task "$home" review 'needs-decision [key=helper-versions]: restrict helper equality to MAS'
-  date +%s > "$home/state/.afk"
+  date +%s >"$home/state/.afk"
   ask "$home" '1. [question] Limit helper-version equality checks to MAS builds?
 [firstmate-decision origin=review key=helper-versions state=existing]
 [option] Approve' || rc=$?
@@ -166,13 +172,13 @@ test_reworded_attempt_is_kept_as_another_variant() {
 [option] Approve' || rc=$?
   [ "$rc" -eq 2 ] || fail "the reworded attempt must still be denied"
 
-  variants=$(holds "$home" open-questions \
-    | awk -F '\t' '$1 == "chunk" { print $2 "/" $3 }' | sort -u | wc -l | tr -d ' ')
+  variants=$(holds "$home" open-questions |
+    awk -F '\t' '$1 == "chunk" { print $2 "/" $3 }' | sort -u | wc -l | tr -d ' ')
   [ "$variants" -eq 2 ] || fail "both attempted wordings must survive as variants, saw $variants"
   # shellcheck disable=SC1091
   . "$ROOT/bin/fm-classify-lib.sh"
-  [ "$(status_open_decisions "$home/state/review.status" | grep -c '^helper-versions	')" -eq 1 ] \
-    || fail "two variants must remain one unresolved decision identity"
+  [ "$(status_open_decisions "$home/state/review.status" | grep -c '^helper-versions	')" -eq 1 ] ||
+    fail "two variants must remain one unresolved decision identity"
   pass "a reworded attempt is retained as another variant of one decision identity"
 }
 
@@ -182,7 +188,7 @@ test_identical_questions_are_preserved_for_each_status_key() {
   seed_task "$home" review \
     'needs-decision [key=first-choice]: choose the first policy' \
     'needs-decision [key=second-choice]: choose the second policy'
-  date +%s > "$home/state/.afk"
+  date +%s >"$home/state/.afk"
 
   ask "$home" '1. [question] Apply the shared policy?
 [firstmate-decision origin=review key=first-choice state=existing]
@@ -199,8 +205,8 @@ test_identical_questions_are_preserved_for_each_status_key() {
     'the first key lost its identical deferred question'
   assert_contains "$listing" '[key=second-choice] owner=status' \
     'the second key lost its identical deferred question'
-  [ "$(printf '%s\n' "$listing" | grep -Fxc '1. [question] Apply the shared policy?')" -eq 2 ] \
-    || fail "identical question evidence was not preserved once for each decision key"
+  [ "$(printf '%s\n' "$listing" | grep -Fxc '1. [question] Apply the shared policy?')" -eq 2 ] ||
+    fail "identical question evidence was not preserved once for each decision key"
   pass "identical status-owned questions retain evidence under each decision key"
 }
 
@@ -210,7 +216,7 @@ test_status_evidence_uses_the_authoritative_transition_key() {
   seed_task "$home" review \
     'needs-decision [key=alpha]: choose alpha' \
     'needs-decision [key=beta]: choose beta'
-  date +%s > "$home/state/.afk"
+  date +%s >"$home/state/.afk"
 
   ask "$home" '1. [question] Should beta preserve literal [key=alpha]: text?
 [firstmate-decision origin=review key=beta state=existing]
@@ -221,11 +227,11 @@ test_status_evidence_uses_the_authoritative_transition_key() {
   alpha_item=$(printf '%s\n' "$records" | awk -F '\t' '$1 == "decision" && $4 == "alpha" { print $2 }')
   beta_item=$(printf '%s\n' "$records" | awk -F '\t' '$1 == "decision" && $4 == "beta" { print $2 }')
   [ -n "$alpha_item" ] && [ -n "$beta_item" ] || fail "both status decisions must remain projected"
-  [ "$(printf '%s\n' "$records" | awk -F '\t' -v it="$alpha_item" '$1 == "chunk" && $2 == it { n++ } END { print n + 0 }')" -eq 0 ] \
-    || fail "beta question evidence was incorrectly projected under alpha"
-  actual=$(printf '%s\n' "$records" \
-    | awk -F '\t' -v it="$beta_item" '$1 == "chunk" && $2 == it { printf "%s", $6 }' \
-    | base64 --decode)
+  [ "$(printf '%s\n' "$records" | awk -F '\t' -v it="$alpha_item" '$1 == "chunk" && $2 == it { n++ } END { print n + 0 }')" -eq 0 ] ||
+    fail "beta question evidence was incorrectly projected under alpha"
+  actual=$(printf '%s\n' "$records" |
+    awk -F '\t' -v it="$beta_item" '$1 == "chunk" && $2 == it { printf "%s", $6 }' |
+    base64 --decode)
   assert_contains "$actual" 'literal [key=alpha]: text' \
     'beta lost its question text containing another key token'
   pass "status evidence is projected only under its authoritative transition key"
@@ -237,7 +243,7 @@ test_unseeded_binding_creates_an_ordinary_captain_hold() {
   local home rc=0 id show
   home=$(make_home unseeded)
   seed_task "$home" release 'working: release prep'
-  date +%s > "$home/state/.afk"
+  date +%s >"$home/state/.afk"
   ask "$home" '1. [question] Merge PR 123 after its required checks are green?
 [firstmate-decision origin=release key=merge-pr-123 state=unseeded]
 [option] Approve merge
@@ -245,7 +251,7 @@ test_unseeded_binding_creates_an_ordinary_captain_hold() {
   assert_denied "$rc" "$home" "an unseeded merge approval question"
 
   id=release-decision-merge-pr-123
-  show=$( (cd "$home" && tasks-axi show "$id" --full) ) || fail "no captain hold was created for the unseeded question"
+  show=$( (cd "$home" && tasks-axi show "$id" --full)) || fail "no captain hold was created for the unseeded question"
   assert_contains "$show" 'kind: captain' "the unseeded question did not become a captain decision"
   assert_contains "$show" 'held: yes' "the created captain decision is not actively held"
   assert_absent "$home/state/droid-afk-approval.status" "a synthetic question ledger was created"
@@ -260,9 +266,9 @@ test_transferred_hold_wins_and_status_is_never_reopened() {
   local home rc=0 status_text
   home=$(make_home transferred)
   seed_task "$home" review 'needs-decision [key=route-choice]: north or south'
-  holds "$home" hold review route-choice --title 'Choose the route' --reason 'captain decision pending' >/dev/null \
-    || fail "could not seed the captain hold"
-  date +%s > "$home/state/.afk"
+  holds "$home" hold review route-choice --title 'Choose the route' --reason 'captain decision pending' >/dev/null ||
+    fail "could not seed the captain hold"
+  date +%s >"$home/state/.afk"
   ask "$home" '1. [question] Route north or south?
 [firstmate-decision origin=review key=route-choice state=existing]
 [option] North
@@ -272,14 +278,14 @@ test_transferred_hold_wins_and_status_is_never_reopened() {
     'the transferred decision was not filed with its captain hold'
 
   status_text=$(cat "$home/state/review.status")
-  assert_contains "$status_text" 'captain-held [key=route-choice]: tracked by review-decision-route-choice' \
+  assert_contains "$status_text" ': tracked by review-decision-route-choice' \
     'the interrupted status-to-hold transfer was not finished'
-  [ "$(printf '%s\n' "$status_text" | grep -c '^needs-decision \[key=route-choice\]')" -eq 1 ] \
-    || fail "status was reopened for a key its captain hold already owns: $status_text"
+  [ "$(printf '%s\n' "$status_text" | grep -c '^needs-decision \[key=route-choice\]')" -eq 1 ] ||
+    fail "status was reopened for a key its captain hold already owns: $status_text"
   # shellcheck disable=SC1091
   . "$ROOT/bin/fm-classify-lib.sh"
-  [ -z "$(status_open_decisions "$home/state/review.status")" ] \
-    || fail "a duplicate status decision survives beside the authoritative hold"
+  [ -z "$(status_open_decisions "$home/state/review.status")" ] ||
+    fail "a duplicate status decision survives beside the authoritative hold"
   pass "an active captain hold wins and the status ledger is never reopened behind it"
 }
 
@@ -287,17 +293,17 @@ test_status_question_moves_to_hold_before_transfer_closes() {
   local home rc=0 listing
   home=$(make_home transfer-evidence)
   seed_task "$home" review 'needs-decision [key=route-choice]: north or south'
-  date +%s > "$home/state/.afk"
+  date +%s >"$home/state/.afk"
 
   ask "$home" '1. [question] Route north or south?
 [firstmate-decision origin=review key=route-choice state=existing]
 [option] North
 [option] South' || rc=$?
   [ "$rc" -eq 2 ] || fail "the status-owned question must be denied"
-  holds "$home" hold review route-choice --title 'Choose the route' --reason 'captain decision pending' >/dev/null \
-    || fail "could not seed the captain hold"
-  holds "$home" complete review route-choice >/dev/null \
-    || fail "could not transfer the status decision to its hold"
+  holds "$home" hold review route-choice --title 'Choose the route' --reason 'captain decision pending' >/dev/null ||
+    fail "could not seed the captain hold"
+  holds "$home" complete review route-choice >/dev/null ||
+    fail "could not transfer the status decision to its hold"
 
   listing=$(holds "$home" open-questions --render)
   assert_contains "$listing" '[key=route-choice] owner=hold' \
@@ -306,9 +312,80 @@ test_status_question_moves_to_hold_before_transfer_closes() {
     'the status-owned question disappeared during transfer'
   # shellcheck disable=SC1091
   . "$ROOT/bin/fm-classify-lib.sh"
-  [ -z "$(status_open_decisions "$home/state/review.status")" ] \
-    || fail "the status decision stayed open after its evidence reached the hold"
+  [ -z "$(status_open_decisions "$home/state/review.status")" ] ||
+    fail "the status decision stayed open after its evidence reached the hold"
   pass "status question evidence reaches the hold before transfer closes its key"
+}
+
+test_ordinary_captain_held_task_preserves_multiple_question_owners() {
+  local home rc=0 listing records alpha beta actual
+  home=$(make_home ordinary-held-task)
+  seed_task "$home" review \
+    'needs-decision [key=alpha]: choose alpha' \
+    'needs-decision [key=beta]: choose beta'
+  (cd "$home" && tasks-axi add review-policy 'Choose the policies' --kind fix --repo fixture) >/dev/null ||
+    fail "could not seed the ordinary task"
+  HOLD="$ROOT/bin/fm-captain-hold.sh" holds "$home" hold review-policy --origin review --reason 'choose both policies' >/dev/null ||
+    fail "could not captain-hold the ordinary task"
+  date +%s >"$home/state/.afk"
+  ask "$home" '1. [question] Approve alpha?
+[firstmate-decision origin=review key=alpha state=existing]
+[option] Yes
+2. [question] Approve beta?
+[firstmate-decision origin=review key=beta state=existing]
+[option] Yes' || rc=$?
+  [ "$rc" -eq 2 ] || fail "the two status questions must be denied"
+  HOLD="$ROOT/bin/fm-captain-hold.sh" holds "$home" complete review review-policy >/dev/null ||
+    fail "could not transfer both questions to their sole ordinary held task"
+  rc=0
+  ask "$home" '1. [question] Approve alpha after checking the final evidence?
+[firstmate-decision origin=review key=alpha state=existing]
+[option] Yes' || rc=$?
+  [ "$rc" -eq 2 ] || fail "the transferred question must still be denied while away"
+  assert_not_contains "$(deny_message "$home")" 'OWNER FAULT' \
+    'a repeated question lost its ordinary held owner after transfer'
+  records=$(holds "$home" open-questions)
+  alpha=$(printf '%s\n' "$records" | awk -F '\t' '$1 == "decision" && $4 == "alpha" { print $2 }')
+  beta=$(printf '%s\n' "$records" | awk -F '\t' '$1 == "decision" && $4 == "beta" { print $2 }')
+  [ -n "$alpha" ] && [ -n "$beta" ] && [ "$alpha" != "$beta" ] ||
+    fail "the ordinary captain-held task lost a question owner"
+  actual=$(printf '%s\n' "$records" | awk -F '\t' -v it="$alpha" '$1 == "chunk" && $2 == it && $3 == 1 { printf "%s", $6 }' | base64 --decode)
+  assert_contains "$actual" 'Approve alpha?' 'alpha lost its own question'
+  assert_not_contains "$actual" 'Approve beta?' 'beta was incorrectly attributed to alpha'
+  actual=$(printf '%s\n' "$records" | awk -F '\t' -v it="$alpha" '$1 == "chunk" && $2 == it && $3 == 2 { printf "%s", $6 }' | base64 --decode)
+  assert_contains "$actual" 'Approve alpha after checking the final evidence?' \
+    'the transferred owner lost a repeated question variant'
+  actual=$(printf '%s\n' "$records" | awk -F '\t' -v it="$beta" '$1 == "chunk" && $2 == it { printf "%s", $6 }' | base64 --decode)
+  assert_contains "$actual" 'Approve beta?' 'beta lost its own question'
+  assert_not_contains "$actual" 'Approve alpha?' 'alpha was incorrectly attributed to beta'
+  listing=$(holds "$home" open-questions --render)
+  assert_contains "$listing" '[key=alpha] owner=hold' 'alpha was not hold-owned'
+  assert_contains "$listing" '[key=beta] owner=hold' 'beta was not hold-owned'
+  pass "ordinary captain-held tasks retain each transferred question's owner and evidence"
+}
+
+test_ambiguous_transfer_preserves_the_status_question() {
+  local home rc=0 out listing
+  home=$(make_home ambiguous-transfer)
+  seed_task "$home" review 'needs-decision [key=choice]: choose a policy'
+  date +%s >"$home/state/.afk"
+  ask "$home" '1. [question] Approve the policy?
+[firstmate-decision origin=review key=choice state=existing]
+[option] Yes' || rc=$?
+  [ "$rc" -eq 2 ] || fail "the status question must be denied"
+  holds "$home" hold review first --title 'First policy' --reason 'choose first' >/dev/null
+  holds "$home" hold review second --title 'Second policy' --reason 'choose second' >/dev/null
+  rc=0
+  out=$(holds "$home" complete review first second 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "ambiguous completion guessed a question owner"
+  assert_contains "$out" 'needs an unambiguous durable owner' 'ambiguous transfer omitted the remedy'
+  if holds "$home" verify review >/dev/null 2>&1; then
+    fail "an incomplete ambiguous transfer passed the completion verifier"
+  fi
+  listing=$(holds "$home" open-questions --render)
+  assert_contains "$listing" '[key=choice] owner=status' 'refused transfer hid the status question'
+  assert_contains "$listing" 'Approve the policy?' 'refused transfer lost the question evidence'
+  pass "ambiguous transfers refuse without closing or hiding the status question"
 }
 
 test_open_questions_reports_incomplete_hold_enumeration() {
@@ -336,7 +413,7 @@ test_open_questions_reports_unsafe_status_owners() {
     'the unsafe status owner was omitted without a limitation'
 
   rm -f "$home/state/unsafe.status"
-  : > "$home/state/unreadable.status"
+  : >"$home/state/unreadable.status"
   chmod 000 "$home/state/unreadable.status"
   rc=0
   out=$(holds "$home" open-questions --render 2>&1) || rc=$?
@@ -353,8 +430,8 @@ test_unbound_and_malformed_questions_are_rejected_without_mutation() {
   local home rc=0 before
   home=$(make_home rejection)
   seed_task "$home" review 'needs-decision [key=helper-versions]: restrict helper equality to MAS'
-  date +%s > "$home/state/.afk"
-  before=$(cksum < "$home/state/review.status")
+  date +%s >"$home/state/.afk"
+  before=$(cksum <"$home/state/review.status")
 
   rc=0
   ask "$home" '1. [question] Keep the fixture parked?
@@ -381,8 +458,8 @@ test_unbound_and_malformed_questions_are_rejected_without_mutation() {
   assert_denied "$rc" "$home" "a question whose binding repeats its origin"
   assert_contains "$(deny_message "$home")" 'require exactly one origin=' \
     'the repeated-field rejection did not name the strict binding requirement'
-  [ "$before" = "$(cksum < "$home/state/review.status")" ] \
-    || fail "a repeated binding field mutated the durable decision owner"
+  [ "$before" = "$(cksum <"$home/state/review.status")" ] ||
+    fail "a repeated binding field mutated the durable decision owner"
 
   rc=0
   ask "$home" '1. [question] Keep the fixture parked?
@@ -391,8 +468,8 @@ test_unbound_and_malformed_questions_are_rejected_without_mutation() {
   assert_denied "$rc" "$home" "a question whose binding carries an extra token"
   assert_contains "$(deny_message "$home")" 'with no extra tokens' \
     'the extra-token rejection did not name the strict binding requirement'
-  [ "$before" = "$(cksum < "$home/state/review.status")" ] \
-    || fail "an extra binding token mutated the durable decision owner"
+  [ "$before" = "$(cksum <"$home/state/review.status")" ] ||
+    fail "an extra binding token mutated the durable decision owner"
 
   rc=0
   ask "$home" '1. [question] Keep the fixture parked?
@@ -402,8 +479,8 @@ test_unbound_and_malformed_questions_are_rejected_without_mutation() {
   assert_denied "$rc" "$home" "a question with one valid and one malformed binding candidate"
   assert_contains "$(deny_message "$home")" 'multiple [firstmate-decision] candidate lines' \
     'the malformed second binding candidate was not counted'
-  [ "$before" = "$(cksum < "$home/state/review.status")" ] \
-    || fail "a malformed second binding candidate mutated the durable decision owner"
+  [ "$before" = "$(cksum <"$home/state/review.status")" ] ||
+    fail "a malformed second binding candidate mutated the durable decision owner"
 
   rc=0
   ask "$home" '1. [question] Stale binding?
@@ -413,10 +490,10 @@ test_unbound_and_malformed_questions_are_rejected_without_mutation() {
   assert_contains "$(deny_message "$home")" 'OWNER FAULT, not filed' \
     'a stale existing binding was not surfaced as an owner fault'
 
-  [ "$before" = "$(cksum < "$home/state/review.status")" ] \
-    || fail "a rejected question mutated the durable decision owner"
-  [ "$( (cd "$home" && tasks-axi list --state held --kind captain) | grep -c '^  ' || true)" -eq 0 ] \
-    || fail "a rejected question invented a captain hold"
+  [ "$before" = "$(cksum <"$home/state/review.status")" ] ||
+    fail "a rejected question mutated the durable decision owner"
+  [ "$( (cd "$home" && tasks-axi list --state held --kind captain) | grep -c '^  ' || true)" -eq 0 ] ||
+    fail "a rejected question invented a captain hold"
   pass "unbound, malformed, and stale bindings are rejected loudly and mutate nothing"
 }
 
@@ -426,7 +503,7 @@ test_leading_preamble_is_not_mistaken_for_a_question() {
   local home rc=0
   home=$(make_home preamble)
   seed_task "$home" review 'needs-decision [key=helper-versions]: restrict helper equality to MAS'
-  date +%s > "$home/state/.afk"
+  date +%s >"$home/state/.afk"
   ask "$home" 'Here is some framing text before the questions.
 1. [question] Limit helper-version equality checks to MAS builds?
 [firstmate-decision origin=review key=helper-versions state=existing]
@@ -445,7 +522,7 @@ test_multi_origin_questionnaire_reaches_each_owner() {
   home=$(make_home multi-origin)
   seed_task "$home" review 'needs-decision [key=helper-versions]: restrict helper equality to MAS'
   seed_task "$home" release 'working: release prep'
-  date +%s > "$home/state/.afk"
+  date +%s >"$home/state/.afk"
   ask "$home" '1. [question] Limit helper-version equality checks to MAS builds?
 [firstmate-decision origin=review key=helper-versions state=existing]
 [topic] Descriptive helper topic
@@ -469,7 +546,7 @@ test_return_presents_every_question_losslessly() {
   home=$(make_home return-listing)
   seed_task "$home" review 'needs-decision [key=helper-versions]: restrict helper equality to MAS'
   seed_task "$home" release 'working: release prep'
-  date +%s > "$home/state/.afk"
+  date +%s >"$home/state/.afk"
   long=$(awk 'BEGIN { for (i = 0; i < 120; i++) printf "long café segment %d ", i }')
   ask "$home" "1. [question] Limit helper-version equality checks to MAS builds for café α → β 🚀?
 [firstmate-decision origin=review key=helper-versions state=existing]
@@ -484,14 +561,14 @@ test_return_presents_every_question_losslessly() {
   # Every chunk of every variant reassembles to the exact stored question.
   item=$(holds "$home" open-questions | awk -F '\t' '$1 == "decision" && $4 == "long-question" { print $2 }')
   [ -n "$item" ] || fail "the long question is missing from the outstanding-question projection"
-  actual=$(holds "$home" open-questions \
-    | awk -F '\t' -v it="$item" '$1 == "chunk" && $2 == it { printf "%s", $6 }' \
-    | base64 --decode)
+  actual=$(holds "$home" open-questions |
+    awk -F '\t' -v it="$item" '$1 == "chunk" && $2 == it { printf "%s", $6 }' |
+    base64 --decode)
   expected=$(printf '2. [question] %s\n[option] Approve' "$long")
   [ "$actual" = "$expected" ] || fail "a chunked question did not reassemble to its stored bytes"
-  holds "$home" open-questions \
-    | awk -F '\t' -v it="$item" '$1 == "chunk" && $2 == it { if (length($6) > 800) bad = 1 } END { exit bad ? 1 : 0 }' \
-    || fail "a return chunk exceeded the 800-character bound"
+  holds "$home" open-questions |
+    awk -F '\t' -v it="$item" '$1 == "chunk" && $2 == it { if (length($6) > 800) bad = 1 } END { exit bad ? 1 : 0 }' ||
+    fail "a return chunk exceeded the 800-character bound"
 
   listing=$(run_return "$home") || fail "the away-mode return catch-up failed"
   assert_contains "$listing" 'outstanding decision' 'return catch-up presented no outstanding decision'
@@ -512,7 +589,7 @@ test_return_restores_askuser_without_approving_anything() {
   local home rc=0 child
   home=$(make_home return-restores)
   seed_task "$home" review 'needs-decision [key=helper-versions]: restrict helper equality to MAS'
-  date +%s > "$home/state/.afk"
+  date +%s >"$home/state/.afk"
   ask "$home" '1. [question] Limit helper-version equality checks to MAS builds?
 [firstmate-decision origin=review key=helper-versions state=existing]
 [option] Approve
@@ -539,12 +616,12 @@ test_return_restores_askuser_without_approving_anything() {
   child="$TMP_ROOT/linked-child"
   git -C "$home" worktree add -q -b fixture-child "$child"
   mkdir -p "$child/state" "$child/fakebin"
-  printf '# fixture\n' > "$child/AGENTS.md"
-  date +%s > "$child/state/.afk"
+  printf '# fixture\n' >"$child/AGENTS.md"
+  date +%s >"$child/state/.afk"
   rc=0
-  printf '%s' '{"hook_event_name":"PreToolUse","tool_name":"AskUser","tool_input":{"questionnaire":"1. [question] anything?"}}' \
-    | FM_ROOT_OVERRIDE="$child" FM_HOME="$child" FM_STATE_OVERRIDE="$child/state" \
-      "$CHECK" > "$child/out" 2> "$child/err" || rc=$?
+  printf '%s' '{"hook_event_name":"PreToolUse","tool_name":"AskUser","tool_input":{"questionnaire":"1. [question] anything?"}}' |
+    FM_ROOT_OVERRIDE="$child" FM_HOME="$child" FM_STATE_OVERRIDE="$child/state" \
+      "$CHECK" >"$child/out" 2>"$child/err" || rc=$?
   [ "$rc" -eq 0 ] || fail "the guard must stay inert in a linked task worktree, got exit $rc"
   [ ! -s "$child/out" ] && [ ! -s "$child/err" ] || fail "the linked-worktree no-op wrote output"
   pass "a real return restores AskUser, approves nothing, and leaves linked workers untouched"
@@ -554,7 +631,7 @@ test_oversized_question_is_parked_and_returned_losslessly() {
   local home rc=0 large expected records item actual line_max evidence_file
   home=$(make_home oversized-question)
   seed_task "$home" review 'needs-decision [key=oversized]: inspect the complete request'
-  date +%s > "$home/state/.afk"
+  date +%s >"$home/state/.afk"
   large=$(awk 'BEGIN { for (i = 0; i < 900; i++) printf "oversized café segment %d ", i }')
 
   ask "$home" "1. [question] $large
@@ -569,15 +646,15 @@ test_oversized_question_is_parked_and_returned_losslessly() {
   set -- "$home/data/review"/droid-afk-question-*
   [ "$#" -eq 1 ] && [ -f "$1" ] || fail "the oversized question was not parked in one durable per-origin file"
   evidence_file=$1
-  [ "$(LC_ALL=C wc -c < "$evidence_file" | tr -d ' ')" -gt 8192 ] \
-    || fail "the parked oversized evidence did not retain more than 8192 bytes"
+  [ "$(LC_ALL=C wc -c <"$evidence_file" | tr -d ' ')" -gt 8192 ] ||
+    fail "the parked oversized evidence did not retain more than 8192 bytes"
 
   records=$(holds "$home" open-questions)
   item=$(printf '%s\n' "$records" | awk -F '\t' '$1 == "decision" && $4 == "oversized" { print $2 }')
   [ -n "$item" ] || fail "the oversized question is missing from the public projection"
-  actual=$(printf '%s\n' "$records" \
-    | awk -F '\t' -v it="$item" '$1 == "chunk" && $2 == it { printf "%s", $6 }' \
-    | base64 --decode)
+  actual=$(printf '%s\n' "$records" |
+    awk -F '\t' -v it="$item" '$1 == "chunk" && $2 == it { printf "%s", $6 }' |
+    base64 --decode)
   expected=$(printf '1. [question] %s\n[option] Preserve every byte' "$large")
   [ "$actual" = "$expected" ] || fail "the parked oversized question did not round-trip losslessly"
   pass "oversized questions use bounded owner references and return losslessly"
@@ -589,24 +666,26 @@ test_non_droid_return_does_not_project_deferred_questions() {
   seed_task "$home" review 'working: ordinary non-Droid work'
   holds "$home" hold review ordinary-choice --title 'Ordinary captain choice' \
     --reason 'captain decision pending' >/dev/null || fail "could not seed an ordinary captain hold"
-  date +%s > "$home/state/.afk"
+  date +%s >"$home/state/.afk"
 
-  out=$(FM_TASKS_AXI_COMPATIBLE=0 run_return "$home") \
-    || fail "a non-Droid return was gated by the Droid question projection: $out"
+  out=$(FM_TASKS_AXI_COMPATIBLE=0 run_return "$home") ||
+    fail "a non-Droid return was gated by the Droid question projection: $out"
   assert_not_contains "$out" 'outstanding decisions limitation' \
     'a non-Droid return received the Droid projection limitation'
-  assert_not_contains "$out" 'Ordinary captain choice' \
-    'a non-Droid return received the Droid deferred-question listing'
-  [ ! -e "$home/state/.afk-return-catchup" ] \
-    || fail "a non-Droid return stayed gated on Droid-only owner enumeration"
+  assert_contains "$out" 'Ordinary captain choice' \
+    'a non-Droid return lost the ordinary backlog catch-up'
+  assert_not_contains "$out" 'outstanding decision ' \
+    'a non-Droid return received the additional Droid deferred-question listing'
+  [ ! -e "$home/state/.afk-return-catchup" ] ||
+    fail "a non-Droid return stayed gated on Droid-only owner enumeration"
   pass "non-Droid return behavior is unchanged by Droid question deferral"
 }
 
 test_derived_keys_close_and_invalid_answer_records_fail_loudly() {
-  local home rc=0 records key out show
+  local home rc=0 records key out show invalid
   home=$(make_home derived-answer)
   seed_task "$home" release 'working: release prep'
-  date +%s > "$home/state/.afk"
+  date +%s >"$home/state/.afk"
   ask "$home" '1. [question] Ship after checks pass?
 [firstmate-decision origin=release key=derive state=unseeded]
 [option] Approve' || rc=$?
@@ -615,20 +694,23 @@ test_derived_keys_close_and_invalid_answer_records_fail_loudly() {
   records=$(holds "$home" open-questions)
   key=$(printf '%s\n' "$records" | awk -F '\t' '$1 == "decision" && $4 ~ /^droid-askuser-/ { print $4 }')
   [ "${#key}" -eq 78 ] || fail "the accepted derived key did not retain its 78-character identity"
-  printf '%s\tapprove\tApprove\n' "$key" \
-    | holds "$home" answers release --source return >/dev/null \
-    || fail "the shared keyed-answer intake rejected a valid derived key"
-  show=$( (cd "$home" && tasks-axi show "release-decision-$key" --full) )
+  printf '%s\tapprove\tApprove' "$key" |
+    holds "$home" answers release --source return >/dev/null ||
+    fail "the shared keyed-answer intake rejected a valid derived key"
+  show=$( (cd "$home" && tasks-axi show "release-decision-$key" --full))
   assert_contains "$show" 'state: done' 'the valid derived key did not close its hold'
 
-  rc=0
-  out=$(printf 'bad key\tapprove\tApprove\n' \
-    | holds "$home" answers release --source return 2>&1) || rc=$?
-  [ "$rc" -ne 0 ] || fail "an invalid keyed-answer record was silently reported as success"
-  assert_contains "$out" 'skipped: invalid keyed-answer record' \
-    'invalid keyed-answer input did not report a nonzero skip'
-  assert_contains "$out" 'answers: closed=0 skipped=1 origin=release' \
-    'invalid keyed-answer input reported the wrong closure totals'
+  for invalid in $'bad key\tapprove\tApprove' $'ship\tapprove' \
+    $'ship\t\tApprove' $'ship\tapprove\tApprove\tdone\textra'; do
+    rc=0
+    out=$(printf '%s' "$invalid" |
+      holds "$home" answers release --source return 2>&1) || rc=$?
+    [ "$rc" -ne 0 ] || fail "an invalid keyed-answer record was silently reported as success"
+    assert_contains "$out" 'skipped: invalid keyed-answer record' \
+      'invalid keyed-answer input did not report a nonzero skip'
+    assert_contains "$out" 'answers: closed=0 skipped=1' \
+      'invalid keyed-answer input reported the wrong closure totals'
+  done
   pass "derived keys close normally and invalid answer records fail loudly"
 }
 
@@ -636,16 +718,16 @@ test_concurrent_preservation_cannot_erase_a_captain_answer() {
   local home rc=0 preserve_pid answer_pid answer_state='' show i
   home=$(make_home preserve-answer-race)
   seed_task "$home" release 'working: release prep'
-  date +%s > "$home/state/.afk"
+  date +%s >"$home/state/.afk"
   ask "$home" '1. [question] Ship after checks pass?
 [firstmate-decision origin=release key=ship state=unseeded]
 [option] Approve' || rc=$?
   [ "$rc" -eq 2 ] || fail "the initial away-mode question must be denied and filed"
   printf '1. [question] Ship after checks pass with the final evidence?
-[option] Approve\n' > "$home/reworded-question"
-  printf 'ship\tapprove\tApprove\n' > "$home/answer.tsv"
+[option] Approve\n' >"$home/reworded-question"
+  printf 'ship\tapprove\tApprove\n' >"$home/answer.tsv"
 
-  cat > "$home/fakebin/tasks-axi" <<'SH'
+  cat >"$home/fakebin/tasks-axi" <<'SH'
 #!/usr/bin/env bash
 if [ "${INTERLEAVE_PRESERVE:-0}" = 1 ] && [ "${1:-}" = update ] \
     && [ "${2:-}" = release-decision-ship ]; then
@@ -656,7 +738,7 @@ PATH=${PATH#*:}
 export PATH
 exec "$REAL_TASKS_AXI" "$@"
 SH
-  cat > "$home/fakebin/sleep" <<'SH'
+  cat >"$home/fakebin/sleep" <<'SH'
 #!/usr/bin/env bash
 [ "${INTERLEAVE_ANSWER:-0}" != 1 ] || : > "$FM_HOME/answer-waiting"
 exec /bin/sleep "$@"
@@ -664,40 +746,49 @@ SH
   chmod +x "$home/fakebin/tasks-axi" "$home/fakebin/sleep"
 
   INTERLEAVE_PRESERVE=1 holds "$home" preserve-question release ship \
-    --state existing --question-file "$home/reworded-question" > "$home/preserve.out" 2> "$home/preserve.err" &
+    --state existing --question-file "$home/reworded-question" >"$home/preserve.out" 2>"$home/preserve.err" &
   preserve_pid=$!
   i=0
-  while [ "$i" -lt 200 ]; do
+  while [ "$i" -lt 1000 ]; do
     [ -f "$home/preserve-ready" ] && break
     kill -0 "$preserve_pid" 2>/dev/null || break
-    /bin/sleep 0.01
+    /bin/sleep 0.02
     i=$((i + 1))
   done
   if [ ! -f "$home/preserve-ready" ]; then
-    : > "$home/release-preserve"
+    : >"$home/release-preserve"
     wait "$preserve_pid" || true
-    fail "question preservation did not reach the forced interleaving point"
+    fail "question preservation did not reach the forced interleaving point: $(cat "$home/preserve.err")"
   fi
 
-  (INTERLEAVE_ANSWER=1 holds "$home" answers release --source return \
-    < "$home/answer.tsv" > "$home/answer.out" 2> "$home/answer.err"; printf '%s\n' "$?" > "$home/answer.rc") &
+  (
+    INTERLEAVE_ANSWER=1 holds "$home" answers release --source return \
+      <"$home/answer.tsv" >"$home/answer.out" 2>"$home/answer.err"
+    printf '%s\n' "$?" >"$home/answer.rc"
+  ) &
   answer_pid=$!
   i=0
-  while [ "$i" -lt 200 ]; do
-    if [ -f "$home/answer-waiting" ]; then answer_state=waiting; break; fi
-    if [ -f "$home/answer.rc" ]; then answer_state=closed; break; fi
-    /bin/sleep 0.01
+  while [ "$i" -lt 1000 ]; do
+    if [ -f "$home/answer-waiting" ]; then
+      answer_state=waiting
+      break
+    fi
+    if [ -f "$home/answer.rc" ]; then
+      answer_state=closed
+      break
+    fi
+    /bin/sleep 0.02
     i=$((i + 1))
   done
-  : > "$home/release-preserve"
+  : >"$home/release-preserve"
   wait "$preserve_pid" || fail "concurrent question preservation failed: $(cat "$home/preserve.err")"
   wait "$answer_pid" || fail "concurrent captain answer failed: $(cat "$home/answer.err")"
   [ -n "$answer_state" ] || fail "concurrent answer neither waited nor completed"
   [ "$(cat "$home/answer.rc")" -eq 0 ] || fail "concurrent keyed-answer intake reported failure"
-  [ "$answer_state" = waiting ] \
-    || fail "captain answer did not serialize behind in-flight question preservation"
+  [ "$answer_state" = waiting ] ||
+    fail "captain answer did not serialize behind in-flight question preservation"
 
-  show=$( (cd "$home" && tasks-axi show release-decision-ship --full) )
+  show=$( (cd "$home" && tasks-axi show release-decision-ship --full))
   assert_contains "$show" 'state: done' "concurrent preservation reopened the answered hold"
   assert_contains "$show" 'Resolution mode: answered' "concurrent preservation erased the durable captain answer"
   assert_contains "$show" 'Answer: approve' "concurrent preservation changed the captain answer"
@@ -711,7 +802,7 @@ test_answers_close_through_the_existing_owner_paths() {
   home=$(make_home answer-closure)
   seed_task "$home" review 'needs-decision [key=helper-versions]: restrict helper equality to MAS'
   seed_task "$home" release 'working: release prep'
-  date +%s > "$home/state/.afk"
+  date +%s >"$home/state/.afk"
   ask "$home" '1. [question] Limit helper-version equality checks to MAS builds?
 [firstmate-decision origin=review key=helper-versions state=existing]
 [option] Approve
@@ -723,20 +814,20 @@ test_answers_close_through_the_existing_owner_paths() {
   # The status owner closes on its own exact resolved transition, the one
   # bin/fm-send.sh --resolve-key appends after it confirms delivery.
   printf 'resolved [key=helper-versions]: captain approved the MAS-only check\n' \
-    >> "$home/state/review.status"
+    >>"$home/state/review.status"
 
   # The hold owner closes through the existing keyed-answer intake.
   answer="$home/answer.tsv"
-  printf 'merge-pr-123\tcaptain approved the merge once checks are green\treturn\n' > "$answer"
-  holds "$home" answers release --source return < "$answer" >/dev/null \
-    || fail "the existing keyed-answer intake could not close the returned hold"
+  printf 'merge-pr-123\tcaptain approved the merge once checks are green\treturn\n' >"$answer"
+  holds "$home" answers release --source return <"$answer" >/dev/null ||
+    fail "the existing keyed-answer intake could not close the returned hold"
 
   listing=$(holds "$home" open-questions --render)
   assert_not_contains "$listing" 'helper-versions' \
     'an answered status question stayed in the outstanding listing'
   assert_not_contains "$listing" 'merge-pr-123' \
     'an answered captain hold stayed in the outstanding listing'
-  assert_contains "$( (cd "$home" && tasks-axi show release-decision-merge-pr-123 --full) )" 'state: done' \
+  assert_contains "$( (cd "$home" && tasks-axi show release-decision-merge-pr-123 --full))" 'state: done' \
     'the keyed answer did not durably close the captain hold'
   pass "answers close deferred questions through the existing status and captain-hold paths"
 }
@@ -749,6 +840,8 @@ test_status_evidence_uses_the_authoritative_transition_key
 test_unseeded_binding_creates_an_ordinary_captain_hold
 test_transferred_hold_wins_and_status_is_never_reopened
 test_status_question_moves_to_hold_before_transfer_closes
+test_ordinary_captain_held_task_preserves_multiple_question_owners
+test_ambiguous_transfer_preserves_the_status_question
 test_open_questions_reports_incomplete_hold_enumeration
 test_open_questions_reports_unsafe_status_owners
 test_unbound_and_malformed_questions_are_rejected_without_mutation

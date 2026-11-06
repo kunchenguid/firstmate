@@ -23,7 +23,7 @@
 # the ordered option texts, so an exact replay keeps one identity while a
 # substantively different question receives another.
 #
-# Filing itself belongs to bin/fm-decision-hold.sh, which owns the ordered
+# Filing itself belongs to bin/fm-captain-hold.sh, which owns the ordered
 # resolution across the captain-hold and status-decision owners and their
 # existing close paths.  This guard parses, validates, and denies; it creates no
 # question queue, no parallel ledger, and no closing mechanism.  It is inert in
@@ -46,7 +46,7 @@ LOCK="$STATE/.afk-return-catchup.lock"
 
 DEFERRAL='This AskUser call is denied, not answered. Do not retry it or ask the captain in plain text while away mode is active; continue every independently authorized action, and present the outstanding question only after a real unmarked captain message has completed bin/fm-afk-return.sh. An operationally prefixed input is not the captain returning, and away mode grants no additional approval, merge, destructive, irreversible, or security authority.'
 
-deny() {  # <reason>
+deny() { # <reason>
   local escaped
   escaped=$(printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' | tr '\n' ' ')
   printf '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny"},"systemMessage":"%s"}\n' "$escaped" >&2
@@ -71,25 +71,25 @@ sha256_stdin() {
 # The identity for `key=derive`: origin, question text, and ordered option texts,
 # each NUL-terminated. The descriptive topic and the binding line are excluded, so
 # retitling a topic cannot fork one decision into two.
-derive_key() {  # <origin> <block-file>
+derive_key() { # <origin> <block-file>
   local origin=$1 block=$2 digest
   digest=$({
     printf '%s\0' "$origin"
-    sed -n 's/^\([0-9]*\.[[:space:]]*\)\{0,1\}\[question\][[:space:]]*\(.*\)$/\2/p' "$block" \
-      | head -1 | tr -d '\n'
+    sed -n 's/^\([0-9]*\.[[:space:]]*\)\{0,1\}\[question\][[:space:]]*\(.*\)$/\2/p' "$block" |
+      head -1 | tr -d '\n'
     printf '\0'
-    sed -n 's/^\[option\][[:space:]]*\(.*\)$/\1/p' "$block" \
-      | while IFS= read -r option; do printf '%s\0' "$option"; done
+    sed -n 's/^\[option\][[:space:]]*\(.*\)$/\1/p' "$block" |
+      while IFS= read -r option; do printf '%s\0' "$option"; done
   } | sha256_stdin)
   printf 'droid-askuser-%s' "$digest"
 }
 
 QUESTIONNAIRE=$(printf '%s' "$PAYLOAD" | jq -r '.tool_input.questionnaire // empty' 2>/dev/null) || QUESTIONNAIRE=
-[ -n "$QUESTIONNAIRE" ] \
-  || deny "[afk-approval-deferral] away mode is active and this AskUser call carries no questionnaire to file with a decision owner. $DEFERRAL"
+[ -n "$QUESTIONNAIRE" ] ||
+  deny "[afk-approval-deferral] away mode is active and this AskUser call carries no questionnaire to file with a decision owner. $DEFERRAL"
 
-WORK=$(mktemp -d "${TMPDIR:-/tmp}/fm-droid-afk.XXXXXX") \
-  || deny "[afk-approval-deferral] away mode is active but the attempted question could not be staged for its decision owner. $DEFERRAL"
+WORK=$(mktemp -d "${TMPDIR:-/tmp}/fm-droid-afk.XXXXXX") ||
+  deny "[afk-approval-deferral] away mode is active but the attempted question could not be staged for its decision owner. $DEFERRAL"
 trap 'rm -rf "$WORK"' EXIT
 
 # Numbered blocks are the unit of ownership, because one questionnaire may combine
@@ -103,8 +103,8 @@ printf '%s\n' "$QUESTIONNAIRE" | LC_ALL=C awk -v dir="$WORK" '
 # shellcheck disable=SC1091
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 
-fm_lock_acquire_wait "$LOCK" \
-  || deny "[afk-approval-deferral] away mode is active but the attempted question could not reach its decision owner while a return was in progress. $DEFERRAL"
+fm_lock_acquire_wait "$LOCK" ||
+  deny "[afk-approval-deferral] away mode is active but the attempted question could not reach its decision owner while a return was in progress. $DEFERRAL"
 if [ ! -e "$STATE/.afk" ]; then
   fm_lock_release "$LOCK"
   exit 0
@@ -145,12 +145,21 @@ for BLOCK in "$WORK"/block.*; do
   KEY_COUNT=0
   STATE_COUNT=0
   EXTRA_COUNT=0
-  read -r -a BINDING_FIELDS <<< "$BINDING"
+  read -r -a BINDING_FIELDS <<<"$BINDING"
   for FIELD in "${BINDING_FIELDS[@]}"; do
     case "$FIELD" in
-      origin=*) ORIGIN_COUNT=$((ORIGIN_COUNT + 1)); ORIGIN=${FIELD#origin=} ;;
-      key=*) KEY_COUNT=$((KEY_COUNT + 1)); KEY=${FIELD#key=} ;;
-      state=*) STATE_COUNT=$((STATE_COUNT + 1)); BSTATE=${FIELD#state=} ;;
+      origin=*)
+        ORIGIN_COUNT=$((ORIGIN_COUNT + 1))
+        ORIGIN=${FIELD#origin=}
+        ;;
+      key=*)
+        KEY_COUNT=$((KEY_COUNT + 1))
+        KEY=${FIELD#key=}
+        ;;
+      state=*)
+        STATE_COUNT=$((STATE_COUNT + 1))
+        BSTATE=${FIELD#state=}
+        ;;
       *) EXTRA_COUNT=$((EXTRA_COUNT + 1)) ;;
     esac
   done
@@ -166,41 +175,44 @@ for BLOCK in "$WORK"/block.*; do
     REJECTED="${REJECTED}question $INDEX has no state=existing or state=unseeded in its [firstmate-decision] line; "
     continue
   fi
-  if [ "${#BINDING_FIELDS[@]}" -ne 3 ] || [ "$ORIGIN_COUNT" -ne 1 ] \
-      || [ "$KEY_COUNT" -ne 1 ] || [ "$STATE_COUNT" -ne 1 ] || [ "$EXTRA_COUNT" -ne 0 ]; then
+  if [ "${#BINDING_FIELDS[@]}" -ne 3 ] || [ "$ORIGIN_COUNT" -ne 1 ] ||
+    [ "$KEY_COUNT" -ne 1 ] || [ "$STATE_COUNT" -ne 1 ] || [ "$EXTRA_COUNT" -ne 0 ]; then
     REJECTED="${REJECTED}question $INDEX has a malformed [firstmate-decision] line; require exactly one origin=, one key=, and one state= field with no extra tokens; "
     continue
   fi
   case "$ORIGIN" in
-    ''|*[!A-Za-z0-9._-]*)
+    '' | *[!A-Za-z0-9._-]*)
       REJECTED="${REJECTED}question $INDEX has no valid origin= slug in its [firstmate-decision] line; "
-      continue ;;
+      continue
+      ;;
   esac
   case "$KEY" in
-    ''|*[!A-Za-z0-9._-]*)
+    '' | *[!A-Za-z0-9._-]*)
       REJECTED="${REJECTED}question $INDEX has no valid key= slug or key=derive in its [firstmate-decision] line; "
-      continue ;;
+      continue
+      ;;
   esac
   case "$BSTATE" in
-    existing|unseeded) ;;
+    existing | unseeded) ;;
     *)
       REJECTED="${REJECTED}question $INDEX has no state=existing or state=unseeded in its [firstmate-decision] line; "
-      continue ;;
+      continue
+      ;;
   esac
 
   QUESTION="$WORK/question.$INDEX"
-  grep -v '^\[firstmate-decision[[:space:]]' "$BLOCK" > "$QUESTION" || true
+  grep -v '^\[firstmate-decision[[:space:]]' "$BLOCK" >"$QUESTION" || true
   [ -s "$QUESTION" ] || {
     REJECTED="${REJECTED}question $INDEX carries a binding line and no question text; "
     continue
   }
   [ "$KEY" != derive ] || KEY=$(derive_key "$ORIGIN" "$QUESTION")
 
-  if OWNER=$("$SCRIPT_DIR/fm-decision-hold.sh" preserve-question "$ORIGIN" "$KEY" \
-      --state "$BSTATE" --question-file "$QUESTION" 2>"$WORK/err.$INDEX"); then
+  if OWNER=$("$SCRIPT_DIR/fm-captain-hold.sh" preserve-question "$ORIGIN" "$KEY" \
+    --state "$BSTATE" --question-file "$QUESTION" 2>"$WORK/err.$INDEX"); then
     FILED="${FILED}question $INDEX ${OWNER#preserved: }; "
   else
-    FAULT="${FAULT}question $INDEX could not be filed: $(tr '\n' ' ' < "$WORK/err.$INDEX"); "
+    FAULT="${FAULT}question $INDEX could not be filed: $(tr '\n' ' ' <"$WORK/err.$INDEX"); "
   fi
 done
 
