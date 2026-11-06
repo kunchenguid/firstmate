@@ -222,7 +222,7 @@
 #   could later be released out from under its successor. A spawn that aborts
 #   while it still holds the allocation lock drops its own claim; an abort after
 #   metadata publication has released that lock leaves the claim in place, and
-#   the next spawn's claim replaces it. A fresh polytoken spawn that fails and
+#   the next spawn's claim replaces it. A fresh spawn that fails and
 #   leaves no task record restores the pool as it found it: it retakes that lock
 #   once to drop its claim after metadata publication too, and before its launch
 #   is delivered it closes the endpoint whose `treehouse get` shell leases the
@@ -1903,14 +1903,14 @@ spawn_abort_cleanup() {
     SPAWN_META_LOCK_HELD=0
     fm_lock_release "$SPAWN_META_LOCK" || true
   fi
-  # A fresh polytoken spawn that fails and leaves no record must leave the pool
+  # A fresh spawn that fails and leaves no record must leave the pool
   # as it found it. Before its launch is delivered, the endpoint it opened holds nothing but
   # the shell whose `treehouse get` leases the slot, so closing it returns the
   # slot to the pool and leaves no window or tab for a retry to trip over; the
   # Firstmate wiring, task temp root, and staged launch file it wrote go with it.
   # Once a launch was delivered into an endpoint still open, a worker may be
   # running there, so those stay for the operator, as the refusal says.
-  if [ "$status" -ne 0 ] && [ "${HARNESS:-}" = polytoken ] &&
+  if [ "$status" -ne 0 ] &&
     { [ "$SPAWN_FRESH_ENDPOINT_OPENED" = 1 ] || [ "$SPAWN_FRESH_WIRING_PENDING" = 1 ] ||
       [ "$SPAWN_TASK_TMP_CREATED" = 1 ] || [ -n "$SPAWN_STAGED_LAUNCH_FILE" ]; } &&
     [ "$RELAUNCH" -eq 0 ] &&
@@ -4571,9 +4571,9 @@ spawn_worktree_isolated() { # <path>
   return 0
 }
 
-# spawn_endpoint_hint: the operator pointer for a pre-launch refusal. Only a
-# fresh polytoken spawn closes its endpoint on abort, so only it points away
-# from the window; every other harness keeps the plain inspect pointer.
+# spawn_endpoint_hint: the operator pointer for a pre-launch refusal. A fresh
+# spawn closes its endpoint on abort before its launch is delivered, so the
+# pointer says so instead of sending the operator to the window.
 spawn_endpoint_closes_on_abort() {
   [ "$SPAWN_FRESH_ENDPOINT_OPENED" = 1 ] && [ "$SPAWN_LAUNCH_SENT" = 0 ]
 }
@@ -5370,9 +5370,9 @@ EOF
     ;;
   esac
   # Orca and the Herdr projection own their own abort cleanup above; every other
-  # endpoint a fresh polytoken spawn opened is closed by spawn_abort_cleanup when
+  # endpoint a fresh spawn opened is closed by spawn_abort_cleanup when
   # the spawn ends with no record before its launch is delivered.
-  if [ "$HARNESS" = polytoken ] && [ "$BACKEND" != orca ] && [ "${HERDR_PROJECTED:-0}" -ne 1 ]; then
+  if [ "$BACKEND" != orca ] && [ "${HERDR_PROJECTED:-0}" -ne 1 ]; then
     SPAWN_FRESH_ENDPOINT_OPENED=1
   fi
 fi

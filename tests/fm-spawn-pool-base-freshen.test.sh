@@ -728,10 +728,10 @@ test_pool_slot_claim_follows_the_spawn_outcome() {
   [ "$status" -ne 0 ] || fail "spawn launched a worker on a slot it could not claim"
   assert_contains "$out" "could not claim Treehouse pool slot" \
     "spawn did not name the unclaimable slot as the reason"
-  assert_contains "$out" "inspect window" \
-    "a non-polytoken unclaimable-slot refusal must keep its window pointer"
-  assert_not_contains "$out" "is closed on exit" \
-    "a non-polytoken refusal must not claim its window was closed"
+  assert_contains "$out" "is closed on exit" \
+    "an unclaimable-slot refusal must say its window is closed"
+  assert_not_contains "$out" "inspect window" \
+    "an unclaimable-slot refusal must not send the operator to a closed window"
   [ -d "$SLOT_CLAIM" ] || fail "spawn replaced the directory blocking its slot claim"
   [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "spawn published a record for an unclaimable slot"
   [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$before" ] \
@@ -951,10 +951,11 @@ SH
   pass "a refused polytoken launch leaves its per-id paths alone while another spawn holds the per-id lock"
 }
 
-# A launch on any harness other than polytoken keeps main's abort behavior: its
-# pre-publication claim is dropped under the allocation lock, but the window
-# it opened, and with it the slot's lease, stays for the operator to inspect.
-test_non_polytoken_refused_launch_keeps_its_window() {
+# Any harness's launch refused after its endpoint opened and before a launch was
+# delivered closes that endpoint, so its `treehouse get` slot returns to the
+# pool and a retry of the same task launches instead of tripping over the
+# window it left behind.
+test_refused_launch_closes_its_tmux_window_and_a_retry_launches() {
   local rec id out status slot_root world
   id='pool-refused-codex-r1'
   rec=$(make_originless_case refused-codex "$id")
@@ -973,9 +974,125 @@ test_non_polytoken_refused_launch_keeps_its_window() {
   [ "$status" -ne 0 ] || fail "a codex launch on a slot with an unusable origin should refuse"
   assert_contains "$out" "could not fetch origin" "the codex refusal message changed"$'\n'"$out"
   [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "the refused codex launch published a task record"
-  [ -e "$world/fm-$id.id" ] || fail "a non-polytoken refusal closed its window, unlike main"
+  [ ! -e "$world/fm-$id.id" ] \
+    || fail "the refused codex launch left its window open, still leasing $(cat "$world/fm-$id.path")"
   [ ! -e "$slot_root/1/.fm-slot-owner" ] || fail "the refused codex launch left its slot claim"
-  pass "a non-polytoken launch refused after its slot claim keeps main's abort behavior"
+
+  git -C "$slot_root/1/project" config --unset remote.origin.fetch
+  out=$(run_spawn "$id" --harness codex --mode no-mistakes --yolo off)
+  status=$?
+  expect_code 0 "$status" "the retry of the refused codex task should launch"$'\n'"$out"
+  assert_grep "worktree=$slot_root/1/project" "$HOME_DIR/state/$id.meta" \
+    "the retry did not land on the slot the refused launch returned"
+  pass "a codex launch refused on tmux closes its window and a retry launches"
+}
+
+# A stateful herdr-core stand-in for the same sequence. Each terminal is a file
+# of its labels and cwd; `treehouse get` typed into one moves it into the lowest
+# slot no live terminal sits in, so a slot stays leased exactly while its
+# terminal lives, and `run` refuses nothing itself: the adapter's own duplicate
+# check over `ls` is what a surviving terminal would trip.
+install_pool_world_hc() {  # <fakebin> <world-dir> <slot-root>
+  local fakebin=$1 world=$2 slots=$3
+  mkdir -p "$world"
+  cat > "$fakebin/hc" <<SH
+#!/usr/bin/env bash
+set -u
+world='$world'
+slots='$slots'
+SH
+  cat >> "$fakebin/hc" <<'SH'
+cmd=${1:-}
+[ "$#" -eq 0 ] || shift
+labels='{}' cwd= text= addr= sep=0
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --label) k=${2%%=*}; v=${2#*=}; labels=$(printf '%s' "$labels" | jq -c --arg k "$k" --arg v "$v" '. + {($k): $v}'); shift 2 ;;
+    --cwd) cwd=$2; shift 2 ;;
+    --) sep=1; shift; text=$*; break ;;
+    --*) shift ;;
+    *) addr=$1; shift ;;
+  esac
+done
+file="$world/$addr.json"
+case "$cmd" in
+  --version) printf 'hc 0.1.14\n' ;;
+  server) printf '{"live":0}\n' ;;
+  connect) IFS= read -r _req || true; printf '{"jsonrpc":"2.0","id":1,"result":{"generation":1}}\n' ;;
+  ls)
+    for f in "$world"/t*.json; do [ -e "$f" ] || continue; cat "$f"; done \
+      | jq -sc --argjson want "$labels" '{terminals: [.[] | select(.labels as $l | $want | to_entries | all(. as $e | $l[$e.key] == $e.value))]}'
+    ;;
+  run)
+    n=$(( $(cat "$world/.next" 2>/dev/null || echo 0) + 1 ))
+    printf '%s\n' "$n" > "$world/.next"
+    jq -nc --arg a "t$n" --arg cwd "$cwd" --argjson labels "$labels" \
+      '{address: $a, state: "live", labels: $labels, cwd: $cwd}' > "$world/t$n.json"
+    printf '{"address":"t%s"}\n' "$n"
+    ;;
+  get)
+    [ -f "$file" ] || { printf '{"error":{"kind":"not_found"}}\n' >&2; exit 3; }
+    cat "$file"
+    ;;
+  kill|rm) rm -f "$file"; printf '{}\n' ;;
+  send)
+    [ -f "$file" ] || exit 3
+    case "$text" in
+      "treehouse get")
+        for slot in "$slots"/*/project; do
+          grep -qF -- "\"cwd\":\"$slot\"" "$world"/t*.json 2>/dev/null && continue
+          jq -c --arg cwd "$slot" '.cwd = $cwd' "$file" > "$file.tmp" && mv "$file.tmp" "$file"
+          break
+        done
+        ;;
+      "cd -- "*)
+        dest=${text#cd -- }
+        dest=${dest#\'}; dest=${dest%\'}
+        jq -c --arg cwd "$dest" '.cwd = $cwd' "$file" > "$file.tmp" && mv "$file.tmp" "$file"
+        ;;
+    esac
+    printf '{"started":true,"wait":{"status":"working"}}\n'
+    ;;
+  read) printf '\n' ;;
+  *) printf '{}\n' ;;
+esac
+exit 0
+SH
+  chmod +x "$fakebin/hc"
+}
+
+test_refused_launch_closes_its_hc_terminal_and_a_retry_launches() {
+  local rec id out status slot_root world
+  id='pool-refused-hc-r1'
+  rec=$(make_originless_case refused-hc "$id")
+  read_case_record "$rec"
+  slot_root="$CASE_DIR/slots"
+  mkdir -p "$slot_root/1"
+  git -C "$PROJECT_DIR" worktree move "$POOL_DIR" "$slot_root/1/project"
+  printf '{"worktrees":[{"name":"1","path":"%s"}]}\n' "$slot_root/1/project" \
+    > "$slot_root/treehouse-state.json"
+  git -C "$slot_root/1/project" config remote.origin.fetch '+refs/heads/*:refs/remotes/origin/*'
+  world="$CASE_DIR/hc-world"
+  install_pool_world_hc "$FAKEBIN_DIR" "$world" "$slot_root"
+  export FM_HC_BIN="$FAKEBIN_DIR/hc"
+
+  out=$(run_spawn "$id" --backend hc --harness codex --mode no-mistakes --yolo off)
+  status=$?
+  [ "$status" -ne 0 ] || fail "a codex launch on hc with an unusable origin should refuse"
+  assert_contains "$out" "could not fetch origin" "the hc refusal message changed"$'\n'"$out"
+  [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "the refused hc launch published a task record"
+  ls "$world"/t*.json >/dev/null 2>&1 \
+    && fail "the refused hc launch left its terminal open, still leasing $(jq -r .cwd "$world"/t*.json)"
+  [ ! -e "$slot_root/1/.fm-slot-owner" ] || fail "the refused hc launch left its slot claim"
+
+  git -C "$slot_root/1/project" config --unset remote.origin.fetch
+  out=$(run_spawn "$id" --backend hc --harness codex --mode no-mistakes --yolo off)
+  status=$?
+  unset FM_HC_BIN
+  expect_code 0 "$status" "the retry of the refused hc task should launch"$'\n'"$out"
+  assert_grep "worktree=$slot_root/1/project" "$HOME_DIR/state/$id.meta" \
+    "the hc retry did not land on the slot the refused launch returned"
+  pass "a codex launch refused on hc closes its terminal and a retry launches"
 }
 
 # install_isolation_flip_git <fakebin> <worktree>: a git that answers every
@@ -1002,10 +1119,9 @@ SH
   chmod +x "$fakebin/git"
 }
 
-# The post-poll treehouse-get isolation refusal points the operator at the
-# window only when that window survives the abort: every harness but polytoken
-# keeps main's `Inspect target <window>`, and a fresh polytoken spawn, whose
-# window is closed on exit, names the worktree and says so instead.
+# The post-poll treehouse-get isolation refusal names the worktree and says the
+# window is closed on exit, for every harness, instead of pointing the operator
+# at a window the abort removes.
 test_treehouse_isolation_refusal_points_at_what_survives() {
   local rec id out status
   id='pool-isolation-codex-r1'
@@ -1018,10 +1134,10 @@ test_treehouse_isolation_refusal_points_at_what_survives() {
   [ "$status" -ne 0 ] || fail "a codex spawn whose slot stopped being isolated should refuse"
   assert_contains "$out" "treehouse get did not yield an isolated worktree" \
     "the codex spawn did not refuse on the post-poll isolation check"$'\n'"$out"
-  assert_contains "$out" "refusing to launch to avoid tangling the primary checkout. Inspect target firstmate:fm-$id" \
-    "a non-polytoken isolation refusal must keep main's window pointer"$'\n'"$out"
-  assert_not_contains "$out" "is closed on exit" \
-    "a non-polytoken isolation refusal must not claim its window was closed"
+  assert_contains "$out" "pool (window firstmate:fm-$id is closed on exit" \
+    "a codex isolation refusal must name the worktree and the closed window"$'\n'"$out"
+  assert_not_contains "$out" "Inspect target firstmate:fm-$id" \
+    "a codex isolation refusal must not point at its closed window"
 
   id='pool-isolation-polytoken-r1'
   rec=$(make_case isolation-polytoken "$id")
@@ -1382,7 +1498,8 @@ test_remote_seeded_home_spawns_from_treehouse_pool
 test_pool_slot_claim_follows_the_spawn_outcome
 test_refused_launch_leaves_the_pool_for_a_retry_and_a_second_task
 test_refused_launch_spares_per_id_paths_under_a_contended_spawn_lock
-test_non_polytoken_refused_launch_keeps_its_window
+test_refused_launch_closes_its_tmux_window_and_a_retry_launches
+test_refused_launch_closes_its_hc_terminal_and_a_retry_launches
 test_treehouse_isolation_refusal_points_at_what_survives
 test_linked_spawning_home_rejects_primary_before_refresh
 test_stale_pool_base_refreshes_before_branching
