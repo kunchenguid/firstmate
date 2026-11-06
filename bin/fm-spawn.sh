@@ -2440,6 +2440,7 @@ RAW_LAUNCH=0
 # validation teardown uses, so a malformed, ambiguous, or foreign record
 # refuses here exactly as it refuses there.
 RELAUNCH_PRIOR_HARNESS=
+RELAUNCH_PRIOR_CLAUDE_SESSION=
 # 1 when the recorded endpoint is authoritatively gone and this relaunch must
 # create a fresh one for the task rather than adopt its recorded address.
 RELAUNCH_REBIND=0
@@ -2540,6 +2541,7 @@ if [ "$RELAUNCH" -eq 1 ]; then
       ;;
   esac
   RELAUNCH_PRIOR_HARNESS=$(fm_meta_get "$RELAUNCH_META" harness)
+  RELAUNCH_PRIOR_CLAUDE_SESSION=$(fm_meta_get "$RELAUNCH_META" claude_session_id)
   KIND=$(fm_meta_get "$RELAUNCH_META" kind)
   [ -n "$KIND" ] || KIND=ship
   # A secondmate whose endpoint is gone already has ONE owner for that
@@ -3720,10 +3722,10 @@ claude_config_root() {
 # relaunched on Rex, so the replacement keeps its conversation across a Rex
 # Server stop (bin/fm-control-lib.sh's fm_control_claude_resumable_session owns
 # the rule). Anything else prints nothing and keeps the fresh-session relaunch.
-relaunch_claude_resume_args() {  # <harness> <backend> <meta-file> <prior-harness>
-  local harness=${1-} backend=${2-} meta=${3-} prior=${4-} id
+relaunch_claude_resume_args() {  # <harness> <backend> <prior-harness> <prior-session-id>
+  local harness=${1-} backend=${2-} prior=${3-} id
   [ "$harness" = claude ] && [ "$backend" = rex ] || return 0
-  id=$(fm_control_claude_resumable_session "$(claude_config_root)" "$prior" "$(fm_meta_get "$meta" claude_session_id)") || return 0
+  id=$(fm_control_claude_resumable_session "$(claude_config_root)" "$prior" "${4-}") || return 0
   printf -- '--resume %s ' "$(shell_quote "$id")"
 }
 
@@ -7307,7 +7309,7 @@ SPAWN_META_PATH=$SPAWN_META_TMP
 preserve_relaunch_meta() {
   awk -F= '
     BEGIN {
-      split("window endpoint_task_id worktree project harness hermes_profile hermes_home kind mode yolo branch tasktmp base_branch upstream_consent forge backup_remote backup_prefix model effort opencode_version account account_provider omp_profile busy_gen spawn_gen approval_mode traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id paseo_terminal_id paseo_workspace_id rex_server rex_session_id rex_window_id rex_block_id t3_thread_id t3_project_id tern_session_id tern_tab_id tern_block_id hc_session hc_terminal home projects control_relaunch_tx polytoken_session polytoken_port polytoken_credential", keys, " ")
+      split("window endpoint_task_id worktree project harness hermes_profile hermes_home kind mode yolo branch tasktmp base_branch upstream_consent forge backup_remote backup_prefix model effort opencode_version account account_provider omp_profile busy_gen spawn_gen approval_mode traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id paseo_terminal_id paseo_workspace_id rex_server rex_session_id rex_window_id rex_block_id t3_thread_id t3_project_id tern_session_id tern_tab_id tern_block_id hc_session hc_terminal home projects control_relaunch_tx polytoken_session polytoken_port polytoken_credential claude_session_id", keys, " ")
       for (i in keys) owned[keys[i]] = 1
     }
     !($1 in owned)
@@ -7533,7 +7535,7 @@ fi
 LAUNCH=${LAUNCH//__PIRESUME__/$RESUME_ARGS}
 CLAUDE_RESUME_ARGS=
 if [ "$RELAUNCH" -eq 1 ]; then
-  CLAUDE_RESUME_ARGS=$(relaunch_claude_resume_args "$HARNESS" "$BACKEND" "$RELAUNCH_META" "$RELAUNCH_PRIOR_HARNESS") || CLAUDE_RESUME_ARGS=
+  CLAUDE_RESUME_ARGS=$(relaunch_claude_resume_args "$HARNESS" "$BACKEND" "$RELAUNCH_PRIOR_HARNESS" "$RELAUNCH_PRIOR_CLAUDE_SESSION") || CLAUDE_RESUME_ARGS=
 fi
 LAUNCH=${LAUNCH//__CLAUDERESUME__/$CLAUDE_RESUME_ARGS}
 LAUNCH=${LAUNCH//__CLAUDEPERMFLAG__/$CLAUDE_PERM_FLAG}
