@@ -23,7 +23,7 @@ make_spawn_case() {  # <name> <harness> <id>
   home="$case_dir/home"
   proj="$case_dir/project"
   wt="$case_dir/wt"
-  fakebin=$(make_spawn_fakebin "$case_dir/fake" pi opencode claude codex gemini kiro-cli)
+  fakebin=$(make_spawn_fakebin "$case_dir/fake" pi opencode claude codex gemini kiro-cli droid)
   fm_test_spawn_home "$home" "$harness"
   fm_git_worktree "$proj" "$wt" "wt-$name"
   fm_test_spawn_brief "$home" "$id"
@@ -601,6 +601,29 @@ test_raw_gemini_launch_has_no_semantic_wiring() {
   pass "raw gemini launch remains unwired and classifies unknown"
 }
 
+test_droid_stop_hook_and_rendered_state() {
+  local rec id=busy-droid-1 out state settings cmd
+  rec=$(make_spawn_case droid-wiring droid "$id")
+  read_case_record "$rec"
+  out=$(FM_FAKE_PANE_CAPTURE='Executing...  (Press ESC to stop)' \
+    run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR")
+  expect_code 0 $? "Droid spawn should succeed: $out"
+  state="$HOME_DIR/state"
+  settings="$state/$id.droid-settings.json"
+  assert_present "$settings" "Droid spawn did not write its process settings"
+  jq -e . "$settings" >/dev/null || fail "Droid process settings are not valid JSON"
+  assert_absent "$state/$id.busy-gen" \
+    "Droid must not arm a semantic contract without a verified semantic source"
+  rm -f "$state/$id.turn-ended"
+  cmd=$(jq -r '.hooks.Stop[0].hooks[0].command' "$settings")
+  sh -c "$cmd" || fail "Droid Stop hook command failed"
+  [ -f "$state/$id.turn-ended" ] || fail "Droid Stop hook did not touch the turn-end notification"
+  out=$(fm_busy_classify tmux fake:w droid "$id" "$state" 'Executing...  (Press ESC to stop)')
+  [ "$out" = "busy droid-regex" ] \
+    || fail "Droid must classify through its isolated rendered fallback, got '$out'"
+  pass "Droid spawn installs its Stop notification and keeps worker state on the isolated rendered fallback"
+}
+
 test_gemini_is_refused_as_a_secondmate() {
   local rec id=busy-gm-3 out
   rec=$(make_spawn_case gemini-secondmate gemini "$id")
@@ -1147,6 +1170,7 @@ test_claude_hooks_stale_incarnation_harmless
 test_gemini_hooks_semantic_lifecycle
 test_gemini_hooks_stale_incarnation_harmless
 test_raw_gemini_launch_has_no_semantic_wiring
+test_droid_stop_hook_and_rendered_state
 test_gemini_is_refused_as_a_secondmate
 test_kiro_hooks_semantic_lifecycle
 test_kiro_hooks_stale_incarnation_harmless

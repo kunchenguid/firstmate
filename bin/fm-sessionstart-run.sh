@@ -111,7 +111,7 @@ session_start_completed() {
 }
 
 if [ -z "$SOURCE" ] && [ ! -t 0 ]; then
-  # Claude and Codex both deliver a JSON SessionStart payload on stdin whose
+  # Claude, Codex, and Droid deliver a JSON SessionStart payload on stdin whose
   # `source` field carries startup|resume|clear|compact. Parsed without jq so a
   # host missing it still gets correct routing rather than silent full runs.
   # A terminal stdin is skipped outright: a hook always pipes its payload, and

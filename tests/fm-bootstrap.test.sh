@@ -49,7 +49,6 @@ unset TMUX TMUX_PANE HERDR_ENV HERDR_PANE_ID HERDR_SESSION HERDR_SOCKET_PATH PAS
 # case curates its base path with tests/lib.sh's fm_test_base_path_sans, which
 # resolves every other tool as before while hiding the named one. Every other
 # case keeps bare BASE_PATH.
-
 # A fake toolchain where every required tool is present and gh is authenticated.
 # treehouse's `get --help` advertises --lease only when FM_FAKE_TREEHOUSE_LEASE_HELP=1.
 make_fake_toolchain() {
@@ -830,6 +829,55 @@ ROWS
   pass "bootstrap: JSON-emitting backends require jq (their genuine dep), never tmux"
 }
 
+test_static_droid_harnesses_require_jq() {
+  local case_dir home fakebin bash_env out
+  case_dir="$TMP_ROOT/static-droid-crew"
+  home="$case_dir/home"
+  mkdir -p "$home/config"
+  printf '%s\n' manual > "$home/config/backlog-backend"
+  printf '%s\n' droid > "$home/config/crew-harness"
+  fakebin=$(make_fake_toolchain "$case_dir")
+  bash_env="$case_dir/no-jq.bash"
+  cat > "$bash_env" <<'SH'
+command() {
+  if [ "${1:-}" = -v ] && [ "${2:-}" = jq ]; then
+    return 1
+  fi
+  builtin command "$@"
+}
+jq() {
+  return 127
+}
+SH
+
+  out=$(PATH="$fakebin:$BASE_PATH" BASH_ENV="$bash_env" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  assert_contains "$out" "MISSING: jq (install: brew install jq  # or the platform's package manager)" \
+    "static Droid crew configuration did not require jq"
+  pass "bootstrap requires jq for the static Droid crew harness"
+}
+
+test_non_droid_bootstrap_does_not_probe_harness() {
+  local case_dir home fakebin bash_env out
+  case_dir="$TMP_ROOT/non-droid-no-probe"
+  home="$case_dir/home"
+  mkdir -p "$home/config"
+  printf '%s\n' manual > "$home/config/backlog-backend"
+  printf '%s\n' claude > "$home/config/crew-harness"
+  fakebin=$(make_fake_toolchain "$case_dir")
+  bash_env="$case_dir/probe-watch.bash"
+  cat > "$bash_env" <<'SH'
+if [ "${0##*/}" = fm-harness.sh ]; then
+  printf '%s\n' probed >> "$FM_TEST_HARNESS_PROBE_LOG"
+fi
+SH
+  out=$(PATH="$fakebin:$BASE_PATH" BASH_ENV="$bash_env" FM_TEST_HARNESS_PROBE_LOG="$case_dir/probes" \
+    FM_HOME="$home" FM_ROOT_OVERRIDE="$home" FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  [ ! -e "$case_dir/probes" ] || fail 'non-Droid bootstrap unnecessarily invoked harness detection'
+  assert_not_contains "$out" 'MISSING: jq' 'non-Droid tmux home acquired a jq dependency'
+  pass 'non-Droid bootstrap has no adapter probe or new jq dependency'
+}
+
 test_treehouse_lease_check_follows_resolved_backend() {
   local case_dir fakebin out
   # A treehouse that lacks durable --lease support is only a problem for a backend
@@ -1407,6 +1455,8 @@ unsupported agy max effort is flagged^{"rules":[{"when":"agy max","use":{"harnes
 kiro shared efforts are accepted^{"rules":[{"when":"kiro low","use":{"harness":"kiro","effort":"low"}},{"when":"kiro medium","use":{"harness":"kiro","effort":"medium"}},{"when":"kiro high","use":{"harness":"kiro","effort":"high"}},{"when":"kiro xhigh","use":{"harness":"kiro","effort":"xhigh"}},{"when":"kiro max","use":{"harness":"kiro","effort":"max"}}]}^empty^
 unsupported kiro ultra effort is flagged^{"rules":[{"when":"kiro ultra","use":{"harness":"kiro","effort":"ultra"}}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - invalid effort: kiro:ultra
 unsupported opencode effort is flagged^{"rules":[{"when":"opencode work","use":{"harness":"opencode","model":"anthropic/claude-sonnet-4-5","effort":"high","provider":"claude"}}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - invalid effort: opencode:high
+Droid dynamic effort is accepted^{"rules":[{"when":"Droid work","use":{"harness":"droid","model":"gpt-5.6-sol","effort":"dynamic"}}]}^empty^
+unsupported Droid effort is flagged^{"rules":[{"when":"Droid work","use":{"harness":"droid","model":"gpt-5.6-sol","effort":"ultra"}}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - invalid effort: droid:ultra
 kimi model profile is accepted^{"rules":[{"when":"kimi work","use":{"harness":"kimi","model":"kimi-code/k3"}}]}^empty^
 unsupported kimi effort is flagged^{"rules":[{"when":"kimi work","use":{"harness":"kimi","model":"kimi-code/k3","effort":"high"}}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - invalid effort: kimi:high
 cursor model profile is accepted^{"rules":[{"when":"cursor work","use":{"harness":"cursor","model":"cursor-grok-4.5-high"}}]}^empty^
@@ -1554,6 +1604,8 @@ test_herdr_install_requires_manual_action
 test_cmux_bundled_cli_satisfies_dependency
 test_unknown_backend_reports_invalid_configuration
 test_json_backends_require_jq_not_tmux
+test_static_droid_harnesses_require_jq
+test_non_droid_bootstrap_does_not_probe_harness
 test_treehouse_lease_check_follows_resolved_backend
 test_fleet_sync_timeout_scales_with_origin_backed_project_count
 test_fleet_sync_timeout_floor_preserves_small_fleets

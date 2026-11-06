@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Run one bounded foreground watcher checkpoint for harnesses that should not
-# rely on background-task completion to wake the model.
+# Run one bounded foreground watcher checkpoint, used directly by foreground
+# protocols and as a bounded pass inside Droid's tracked background cycle.
 #
 # SUPERVISION HOST. A home opted in with config/supervision-host
 # (docs/configuration.md "Supervision host" owns the gate;
@@ -195,7 +195,8 @@ fi
 
 set +e
 # Interrupt the checkpoint's active check group so the watcher's native EXIT cleanup can release its lock; ordinary watcher shutdown still uses TERM.
-run_bounded "$SECONDS_ARG" INT 5 "$SCRIPT_DIR/fm-watch.sh" >"$OUT" 2>"$ERR"
+FM_WATCH_QUIET_ROTATION=${FM_DROID_BACKGROUND_CYCLE:-0} \
+  run_bounded "$SECONDS_ARG" INT 5 "$SCRIPT_DIR/fm-watch.sh" >"$OUT" 2>"$ERR"
 RC=$?
 set -e
 

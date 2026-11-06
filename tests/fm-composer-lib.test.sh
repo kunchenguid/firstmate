@@ -1335,6 +1335,36 @@ test_matrix_kimi_bordered_shell_glyph_box() {
   pass "matrix: kimi's bordered shell-glyph box reads empty through the shared owner (spawn's fourth copy retired)"
 }
 
+test_matrix_droid_box_allows_verified_status_footer() {
+  local idle idle_context idle_legacy typed malformed malformed_less_than unrelated out
+  idle=$'transcript\n╭──────────────────────────────────────────────────────────────────────────────╮\n│ >                                                                            │\n╰──────────────────────────────────────────────────────────────────────────────╯\n[⏱ 9s, context: <1%] 1 config issue — /diagnostics\n~/firstmate   main'
+  idle_context=$'transcript\n╭──────────────────────────────────────────────────────────────────────────────╮\n│ >                                                                            │\n╰──────────────────────────────────────────────────────────────────────────────╯\n[⏱ 1m 9s, context: 12%] 1 config issue — /diagnostics\n~/firstmate   main'
+  idle_legacy=$'transcript\n╭──────────────────────────────────────────────────────────────────────────────╮\n│ >                                                                            │\n╰──────────────────────────────────────────────────────────────────────────────╯\n[⏱ 9s] 1 config issue — /diagnostics\n~/firstmate   main'
+  typed=$'transcript\n╭──────────────────────────────────────────────────────────────────────────────╮\n│ > captain draft                                                              │\n╰──────────────────────────────────────────────────────────────────────────────╯\n[⏱ 9s, context: <1%] 1 config issue — /diagnostics\n~/firstmate   main'
+  assert_screen "droid idle with current detached footer" empty "$CAPS_STYLED_NOID" "$idle"
+  assert_screen "droid idle with measured context" empty "$CAPS_STYLED_NOID" "$idle_context"
+  assert_screen "droid idle with legacy detached footer" empty "$CAPS_STYLED_NOID" "$idle_legacy"
+  assert_screen "droid typed with current detached footer" pending "$CAPS_STYLED_NOID" "$typed"
+  assert_screen "droid idle through plain cursorless capture" empty "$CAPS_PLAIN" "$idle"
+  assert_screen "droid typed through plain cursorless capture" pending "$CAPS_PLAIN" "$typed"
+
+  malformed=$'transcript\n╭──────────────────────────────────────────────────────────────────────────────╮\n│ >                                                                            │\n╰──────────────────────────────────────────────────────────────────────────────╯\n[⏱ 9s, tokens: 1%] unrelated process output\n~/firstmate   main'
+  out=$(fm_composer_classify_screen "$CAPS_STYLED_NOID" "$malformed")
+  [ "$out" = unknown ] \
+    || fail "a malformed Droid status lookalike must not widen the exception, got '$out'"
+
+  malformed_less_than=$'transcript\n╭──────────────────────────────────────────────────────────────────────────────╮\n│ >                                                                            │\n╰──────────────────────────────────────────────────────────────────────────────╯\n[⏱ 9s, context: <12%] unrelated process output\n~/firstmate   main'
+  out=$(fm_composer_classify_screen "$CAPS_STYLED_NOID" "$malformed_less_than")
+  [ "$out" = unknown ] \
+    || fail "a malformed Droid less-than context percentage must not widen the exception, got '$out'"
+
+  unrelated=$'transcript\n╭──────────────────────────────────────────────────────────────────────────────╮\n│ >                                                                            │\n╰──────────────────────────────────────────────────────────────────────────────╯\nunrelated process output\n~/firstmate   main'
+  out=$(fm_composer_classify_screen "$CAPS_STYLED_NOID" "$unrelated")
+  [ "$out" = unknown ] \
+    || fail "an unrelated row after a box must not borrow Droid's footer exception, got '$out'"
+  pass "matrix: Droid's exact elapsed and context footer permits cursorless box classification without widening lower activity"
+}
+
 test_matrix_claude_inside_zellij_ansi_dump() {
   # Real claude captured through `zellij action dump-screen --ansi`
   # (capability established by the audit): `ESC[m` `❯` U+00A0.
@@ -1706,6 +1736,7 @@ test_matrix_grok_titled_bottom_border
 test_matrix_claude_titled_top_rule
 test_matrix_grok_144_approval_titled_bottom_border
 test_matrix_kimi_bordered_shell_glyph_box
+test_matrix_droid_box_allows_verified_status_footer
 test_matrix_claude_inside_zellij_ansi_dump
 test_strict_blank_row_divergence
 test_bare_wrap_region_classifies

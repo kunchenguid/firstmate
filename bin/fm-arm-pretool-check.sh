@@ -13,9 +13,10 @@
 # Usage:
 #   <PreToolUse JSON on stdin> | bin/fm-arm-pretool-check.sh
 #   bin/fm-arm-pretool-check.sh --command '<cmd>' [--background true|false]
+#   bin/fm-arm-pretool-check.sh --primary-only
 #
 # Stdin mode extracts .toolInput.command for Grok or .tool_input.command for
-# Claude and Codex. Cursor delivers the same .tool_input.command shape with
+# Claude, Codex, and Droid. Cursor delivers the same .tool_input.command shape with
 # tool_name "Shell" (verified live, cursor-agent 2026.08.11-e8db854), so it needs
 # no new extraction - only --cursor, which selects Cursor's own deny rendering
 # and marks this invocation as the Cursor registration rather than the
@@ -49,10 +50,11 @@ BACKGROUND=""
 CLAUDE_MODE=0
 CURSOR_MODE=0
 AGY_MODE=0
+PRIMARY_ONLY=0
 
 usage() {
   cat <<'EOF'
-Usage: fm-arm-pretool-check.sh [--command <cmd>] [--background true|false] [--claude|--cursor|--agy]
+Usage: fm-arm-pretool-check.sh [--command <cmd>] [--background true|false] [--claude|--cursor|--agy] [--primary-only]
 
 With no --command, reads a PreToolUse-style JSON payload on stdin (Grok
 toolInput.command, Antigravity toolCall.args.CommandLine/command, or
@@ -64,6 +66,7 @@ With --cursor, a deny is Cursor's own decision object on stdout and exit 0,
 because Cursor reads the returned object rather than the exit status.
 With --agy, a deny is Antigravity's decision object on stdout and exit 0.
 Malformed transport and an unavailable classifier runtime fail open.
+With --primary-only, the policy is inert outside a genuine primary home.
 EOF
 }
 
@@ -101,6 +104,11 @@ while [ "$#" -gt 0 ]; do
       AGY_MODE=1
       shift
       ;;
+    --primary-only)
+      PRIMARY_ONLY=1
+
+      shift
+      ;;
     -h|--help)
       usage
       exit 0
@@ -133,6 +141,16 @@ if [ "$CMD_SET" -eq 0 ]; then
 fi
 
 [ -n "$CMD" ] || exit 0
+
+if [ "$PRIMARY_ONLY" -eq 1 ]; then
+  SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" 2>/dev/null && pwd -P) || exit 0
+  ROOT=${FM_ROOT_OVERRIDE:-$(CDPATH='' cd -- "$SCRIPT_DIR/.." 2>/dev/null && pwd -P)} || exit 0
+  ACTIVE_HOME=${FM_HOME:-${FM_ROOT_OVERRIDE:-$ROOT}}
+  STATE=${FM_STATE_OVERRIDE:-$ACTIVE_HOME/state}
+  # shellcheck source=bin/fm-primary-scope-lib.sh
+  . "$ROOT/bin/fm-primary-scope-lib.sh"
+  fm_primary_scope_matches "$ROOT" "$STATE" || exit 0
+fi
 
 # Strict-superset prefilter (transport only; owns zero classification semantics).
 # Every protected watcher execution and every broad watcher kill resolves to the
@@ -173,8 +191,8 @@ case "$CMD" in
     ;;
 esac
 
-SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" 2>/dev/null && pwd -P) || exit 0
-ROOT=$(CDPATH='' cd -- "$SCRIPT_DIR/.." 2>/dev/null && pwd -P) || exit 0
+SCRIPT_DIR=${SCRIPT_DIR:-$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" 2>/dev/null && pwd -P)} || exit 0
+ROOT=${ROOT:-$(CDPATH='' cd -- "$SCRIPT_DIR/.." 2>/dev/null && pwd -P)} || exit 0
 ACTIVE_HOME=${FM_HOME:-$ROOT}
 POLICY="$ROOT/bin/fm-arm-command-policy.mjs"
 

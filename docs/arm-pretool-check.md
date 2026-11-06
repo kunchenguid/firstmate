@@ -8,7 +8,7 @@ The tracked harness adapters forward command text without classifying it.
 
 ## Purpose and boundary
 
-A firstmate primary must arm `bin/fm-watch-arm.sh` or run `bin/fm-watch-checkpoint.sh` through an observable harness call.
+A firstmate primary must run its protocol's blessed watcher entry point through an observable harness call.
 A shell background operator, pipeline, redirection, wrapper, or unrelated command list can hide failure or let the watcher child die with the tool call.
 The seatbelt rejects those command shapes before execution.
 
@@ -22,12 +22,13 @@ It tokenizes the bytes and classifies lexical execution positions only.
 
 `bin/fm-arm-pretool-check.sh` supports these entry forms:
 
-- Stdin JSON at `.tool_input.command` for Claude and Codex.
+- Stdin JSON at `.tool_input.command` for Claude, Codex, and Droid.
 - Stdin JSON at `.toolInput.command` for Grok.
 - `--command <exact string>` for OpenCode, Pi, pi-signed, and omp.
 - `--background` as a compatibility-only field that never changes the decision.
 - `--claude` to preserve Claude's stderr-only deny requirement.
 - `--agy` for Antigravity CLI, reading stdin JSON from `.toolCall.args.CommandLine`, `.toolCall.args.command`, `.toolInput.command`, or `.tool_input.command`, denying redundant manual arming when a watcher is healthy, and emitting `{"decision":"deny","reason":...}` on stdout with exit 0.
+- `--primary-only` to make a tracked project registration inert in linked crewmate worktrees and non-Firstmate repositories.
 
 The wrapper discovers the code root from its own location.
 The active firstmate home is `${FM_HOME:-<code-root>}`.
@@ -62,9 +63,10 @@ Quoted text, comments, heredoc bodies, and later argument words are data positio
 A command word in executed position is a protected execution when its normalized path suffix matches one of the protected watcher scripts:
 
 ```text
-bin/fm-watch-arm.sh          (arm; blessed entry point)
-bin/fm-watch-checkpoint.sh   (checkpoint; blessed entry point)
-bin/fm-watch.sh              (watch; protected but never blessed)
+bin/fm-watch-arm.sh                (arm; blessed entry point)
+bin/fm-watch-checkpoint.sh         (checkpoint; blessed entry point)
+bin/fm-watch-droid-background.sh   (Droid cycle; blessed entry point)
+bin/fm-watch.sh                    (watch; protected but never blessed)
 ```
 
 The relative form, the `<code-root>`-anchored absolute form, and any word ending in `/bin/<script>` all resolve to that identity.
@@ -94,7 +96,7 @@ An actual protected command with a heredoc still has a redirection and is denied
 ## Blessed syntax tree
 
 An allowed watcher program is one linear outer command list with zero or more approved setup nodes followed by exactly one direct protected node.
-`bin/fm-watch-arm.sh` and `bin/fm-watch-checkpoint.sh` are the only blessed final nodes, including their expanded-path forms; a `bin/fm-watch.sh` final node is never blessed and denies with `watcher-direct`.
+The blessed entry points listed above are the allowed final nodes, including their expanded-path forms; a `bin/fm-watch.sh` final node is never blessed and denies with `watcher-direct`.
 
 Approved setup nodes are:
 
@@ -154,6 +156,7 @@ Prose may improve without changing adapter behavior.
 - Default deny mode also writes `{"decision":"deny","reason":"[code] reason"}` to stdout for Grok.
 - `--claude` suppresses stdout completely because Claude ignores a PreToolUse deny when stdout is nonempty.
 - Codex blocks on exit 2 and displays stderr.
+- Droid blocks on exit 2 and displays stderr; the default Grok-shaped stdout object does not prevent the denial.
 - OpenCode throws only when the checker exits 2.
 - Pi, pi-signed, and omp return `{block: true}` only when the checker exits 2.
 
@@ -168,11 +171,14 @@ Prose may improve without changing adapter behavior.
 | Pi / pi-signed | `event.input.command` | `.pi/extensions/fm-primary-turnend-guard.ts` passes one `--command` argument and returns `{block: true}` only for exit 2. |
 | omp | `event.input.command` | `.omp/extensions/fm-primary-turnend-guard.ts` passes one `--command` argument and returns `{block: true, reason}` only for exit 2; omp surfaces the reason verbatim to the model (verified 18.1.2). |
 | Cursor | `.tool_input.command` | `.cursor/hooks.json` matches `tool_name` `Shell` and forwards stdin with `--cursor`. Cursor reads the RETURNED object rather than the exit status, so `--cursor` prints `{"permission":"deny","user_message":"[code] reason"}` on stdout and exits 0; only that rendering is verified to block the command and surface the reason. |
+| Droid | `.tool_input.command` | `.factory/settings.json` matches the `Execute` tool and forwards stdin with `--primary-only`, so accumulated project settings stay inert in linked crewmate worktrees; Droid blocks on exit 2 plus stderr, including the checker's unchanged default output. |
 
 Cursor also loads `<project>/.claude/settings.json`, so the tracked Claude entry receives the same event. Without `--cursor` a Cursor-delivered payload is that duplicate and allows without re-classifying, decided from the payload's own `cursor_version` by `bin/fm-hook-host-lib.sh`; [`turnend-guard.md`](turnend-guard.md#harness-integrations) owns why that predicate reads the payload rather than the environment.
 
 Grok project hooks require folder trust.
 Cursor project hooks require the workspace to be launched with `--trust`.
+Droid project hooks load from `.factory/settings.json` on a normal interactive invocation.
+[`verification/droid-primary.md`](verification/droid-primary.md) records the live denial and absent sentinel.
 Every shell variable reference in a Grok hook command must carry an inline default such as `${GROK_WORKSPACE_ROOT:-}` because Grok expands the raw hook command before `bash -lc` runs it.
 The tracked Grok adapter therefore references `${GROK_WORKSPACE_ROOT:-}` directly instead of assigning and later reading a shell-local `$root` variable.
 
