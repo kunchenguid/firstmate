@@ -284,7 +284,7 @@ try {
       if (receiptFile) atomic(receiptFile, owned);
     } else {
       for (const p of paths) {
-        if (action !== "rollback" || (Object.hasOwn(owned.acquired, p) && same(folders[p], owned.acquired[p]))) delete folders[p];
+        if (action === "remove" || (Object.hasOwn(owned.acquired, p) && same(folders[p], owned.acquired[p]))) delete folders[p];
       }
     }
     if (read(store) !== original) continue;
@@ -293,7 +293,7 @@ try {
     if (changed) atomic(store, root);
     const after = parse(read(store) || "{}", store).trustedFolders || {};
     const retained = action === "register" ? [logical, physical].every(p => same(after[p], folders[p]))
-      : paths.every(p => action === "rollback" ? !same(after[p], owned.acquired[p]) || !Object.hasOwn(after,p) : !Object.hasOwn(after,p));
+      : paths.every(p => Object.hasOwn(after, p) === Object.hasOwn(folders, p) && same(after[p], folders[p]));
     if (!retained) continue;
     if (action !== "register" && receiptFile) fs.unlinkSync(receiptFile);
     process.exit(0);
