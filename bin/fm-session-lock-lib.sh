@@ -15,7 +15,6 @@
 # answers whether a recorded owner may be reclaimed, so recovery callers
 # delegate that question instead of re-deriving liveness from the fields.
 # This file is sourced by scripts and has no side effects on source.
-
 # Cursor process identity is NOT expressible as a command-name pattern and is
 # deliberately not added to the tables below: Cursor's installed names are
 # cursor-agent and the far-too-generic legacy alias `agent`, and it runs as a
@@ -34,7 +33,7 @@ unset _FM_SESSION_LOCK_LIB_DIR
 # (verified, omp 18.1.11) and `agy`, and a substring match would claim ompd or
 # comp. omp's own daemon workers share that name and are excluded by
 # fm_omp_daemon_worker below.
-FM_HARNESS_RE='claude|codex|opencode|grok|kimi|^pi$|^pi-signed$|^omp$|^agy$'
+FM_HARNESS_RE='claude|codex|opencode|grok|kimi|^pi$|^pi-signed$|^omp$|^agy$|^droid$'
 
 # True when full argument string $1 is one of omp's daemon worker processes
 # (`omp __omp_worker_daemon_broker`, `omp __omp_worker_mnemopi_embed`, ...):
@@ -61,8 +60,9 @@ fm_omp_daemon_worker() {  # <args>
   return 1
 }
 
-# The same harnesses as exact executable names. Keep in sync with
-# FM_HARNESS_RE. Used only for the stricter path evidence below, where the
+# Harnesses whose whole executable-path components also prove identity.
+# Droid requires its exact basename instead, handled separately below.
+# Used only for the stricter path evidence below, where the
 # loose regex would also match ordinary firstmate paths such as
 # bin/fm-claude-stop-autoarm.sh.
 FM_HARNESS_NAMES=(claude codex opencode grok kimi pi-signed pi omp agy)
@@ -79,6 +79,8 @@ FM_HARNESS_NAMES=(claude codex opencode grok kimi pi-signed pi omp agy)
 fm_harness_path_name() {  # <path>
   local path=$1 name
   [ -n "$path" ] || return 1
+  # Droid is an executable basename, never an incidental parent directory.
+  case "${path##*/}" in droid) printf '%s' droid; return 0 ;; esac
   for name in "${FM_HARNESS_NAMES[@]}"; do
     case "/$path/" in
       */"$name"/*) printf '%s' "$name"; return 0 ;;
@@ -324,7 +326,6 @@ fm_win_harness_ancestry_pids() {
 # and bin/fm-branch-outcome.sh own their own ancestry reads and still
 # require an executable ps; a denied-ps host stays degraded there
 # until they route through a shared provider (follow-up).
-
 # One stderr line per shell that runs identity reads when the denied-ps
 # route cannot answer. AGENTS.md session-start contract: a lock refusal
 # owes its exact diagnostic - but a 16-hop walk over a dead provider
@@ -835,7 +836,6 @@ fm_session_lock_pid_blocks_reclaim() {
 # until the pre-fork process exits; that is the safe direction and a documented
 # non-goal. Two genuinely different live sessions sharing one id is not a
 # supported state (Claude refuses to resume a running session under its id).
-
 # Print the Claude session id this process may own with, or return 1. $1 is the
 # ancestry list an earlier walk already produced, so a caller that walked once
 # need not walk again.

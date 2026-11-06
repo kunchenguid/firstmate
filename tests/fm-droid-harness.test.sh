@@ -18,40 +18,40 @@ mkdir -p "$TMP_ROOT/state"
 fm_control_harness_supported droid || fail 'Droid is not a verified control adapter'
 fm_control_harness_supports_kind droid ship || fail 'Droid ship capability missing'
 fm_control_harness_supports_kind droid scout || fail 'Droid scout capability missing'
-if fm_control_harness_supports_kind droid secondmate; then fail 'Droid must refuse secondmates'; fi
+fm_control_harness_supports_kind droid secondmate || fail 'Droid secondmate capability missing'
 [ "$(fm_control_interrupt_key droid)" = Escape ] || fail 'Droid interrupt key drifted'
 [ "$(fm_control_interrupt_repeat droid)" = 1 ] || fail 'Droid interrupt repeat drifted'
 [ "$(fm_control_exit_command droid)" = /quit ] || fail 'Droid exit command drifted'
-[ "$(fm_control_harness_wiring_paths droid /unused "$TMP_ROOT/state" task)" = "$TMP_ROOT/state/task.droid-settings.json" ] \
-  || fail 'Droid settings not owned by control cleanup'
-pass 'Droid control supports crews/scouts, refuses secondmates, and retires task settings'
+[ "$(fm_control_harness_wiring_paths droid /unused "$TMP_ROOT/state" task)" = "$(printf '%s\n' "$TMP_ROOT/state/task.droid-settings.json" "$TMP_ROOT/state/task.meta.droid-model.*")" ] ||
+  fail 'Droid settings not owned by control cleanup'
+pass 'Droid control supports crews, scouts, and secondmates and retires task settings and accounting'
 [ "$(fm_agent_process_classify_name /usr/local/bin/droid)" = agent ] || fail 'Droid process identity missing'
 [ "$(fm_agent_process_classify_name /usr/local/bin/android)" = other ] || fail 'Droid substring match claims an unrelated process'
 pass 'Droid process identity is anchored to the executable name'
 [ -z "$(fm_busy_sources_for_harness droid)" ] || fail 'Droid must not arm a record without a semantic writer'
-[ "$(fm_busy_classify cmux target droid task "$TMP_ROOT/state" 'Executing... (Press ESC to stop)')" = 'busy droid-regex' ] \
-  || fail 'Droid busy footer lost through cmux classification'
-[ "$(fm_busy_classify cmux target droid task "$TMP_ROOT/state" 'idle composer')" = 'idle droid-regex' ] \
-  || fail 'Droid idle footer did not settle'
-[ "$(fm_busy_classify tmux target claude task "$TMP_ROOT/state" 'Press ESC to stop')" = 'unknown missing' ] \
-  || fail 'Droid rendered fallback leaked into Claude'
+[ "$(fm_busy_classify cmux target droid task "$TMP_ROOT/state" 'Executing... (Press ESC to stop)')" = 'busy droid-regex' ] ||
+  fail 'Droid busy footer lost through cmux classification'
+[ "$(fm_busy_classify cmux target droid task "$TMP_ROOT/state" 'idle composer')" = 'idle droid-regex' ] ||
+  fail 'Droid idle footer did not settle'
+[ "$(fm_busy_classify tmux target claude task "$TMP_ROOT/state" 'Press ESC to stop')" = 'unknown missing' ] ||
+  fail 'Droid rendered fallback leaked into Claude'
 if printf '%s' 'Press ESC to stop' | fm_busy_lines_match claude; then fail 'Droid delivery signature leaked into Claude'; fi
 if printf '%s' 'Press ESC to stop' | fm_busy_lines_match; then fail 'Droid delivery signature leaked into the shared fallback'; fi
 printf '%s' 'Press ESC to stop' | fm_busy_lines_match droid || fail 'Droid scoped delivery signature disappeared'
 spinner=' ⠸ Thinking...'
-[ "$(fm_busy_classify cmux target droid task "$TMP_ROOT/state" "$spinner")" = 'busy droid-regex' ] \
-  || fail 'Droid working spinner alone did not classify busy'
+[ "$(fm_busy_classify cmux target droid task "$TMP_ROOT/state" "$spinner")" = 'busy droid-regex' ] ||
+  fail 'Droid working spinner alone did not classify busy'
 printf '%s' "$spinner" | fm_busy_lines_match droid || fail 'Droid delivery lost the spinner-only signal'
 printf '%s' "$spinner" | LC_ALL=C fm_busy_lines_match droid || fail 'Droid spinner depends on a UTF-8 locale'
 if printf '%s' "$spinner" | fm_busy_lines_match claude; then fail 'Droid spinner leaked into Claude'; fi
-[ "$(fm_busy_classify tmux target claude task "$TMP_ROOT/state" "$spinner")" = 'unknown missing' ] \
-  || fail 'Droid spinner fallback leaked into Claude state'
+[ "$(fm_busy_classify tmux target claude task "$TMP_ROOT/state" "$spinner")" = 'unknown missing' ] ||
+  fail 'Droid spinner fallback leaked into Claude state'
 pass 'Droid independent busy signals and idle are adapter-scoped, including cmux'
 fm_backend_capture() { return 1; }
-[ "$(fm_busy_classify tmux target droid task "$TMP_ROOT/state")" = 'unknown capture-failed' ] \
-  || fail 'Droid capture failure was promoted to idle'
-[ "$(fm_busy_classify tmux target droidish task "$TMP_ROOT/state" 'Press ESC to stop')" = 'unknown missing' ] \
-  || fail 'Droid busy fallback claimed an unverified prefix'
+[ "$(fm_busy_classify tmux target droid task "$TMP_ROOT/state")" = 'unknown capture-failed' ] ||
+  fail 'Droid capture failure was promoted to idle'
+[ "$(fm_busy_classify tmux target droidish task "$TMP_ROOT/state" 'Press ESC to stop')" = 'unknown missing' ] ||
+  fail 'Droid busy fallback claimed an unverified prefix'
 pass 'Droid capture failure remains unknown and unverified prefixes are refused'
 
 # The live Droid footer sits directly below the box; a shell or arbitrary
@@ -68,14 +68,17 @@ pass 'Droid elapsed-time footer preserves box delivery without hiding shell or a
 # Droid 0.237.0 leaves the terminal cursor below its composer after Stop.
 # Render that placement with a real named process in a private tmux server.
 test_droid_parked_cursor() {
-  command -v tmux >/dev/null 2>&1 || { echo 'skip: tmux not found for Droid composer regression'; exit 0; }
+  command -v tmux >/dev/null 2>&1 || {
+    echo 'skip: tmux not found for Droid composer regression'
+    exit 0
+  }
   real_tmux=$(command -v tmux)
   socket="fm-droid-composer-$$"
   lab="$TMP_ROOT/composer"
   mkdir -p "$lab/bin" "$lab/shim"
   trap '"$real_tmux" -L "$socket" kill-server >/dev/null 2>&1 || true' EXIT
   for name in droid android claude; do cp "$(command -v bash)" "$lab/bin/$name"; done
-  cat > "$lab/shim/tmux" <<SH
+  cat >"$lab/shim/tmux" <<SH
 #!/usr/bin/env bash
 if [ "\${FM_DROID_MASK_COMMAND:-0}" = 1 ]; then
   case "\$*" in *'#{pane_current_command}') printf 'fish\\n'; exit 0 ;; esac
@@ -86,11 +89,11 @@ SH
   . "$ROOT/bin/fm-tmux-lib.sh"
   idle=$'╭──────────╮\n│ >        │\n╰──────────╯\n[⏱ 17s, context: <1%] TMUX ⧉\nworkspace main'
   for name in droid android claude; do
-    printf '%s\n' "$idle" > "$lab/screen"
+    printf '%s\n' "$idle" >"$lab/screen"
     # shellcheck disable=SC2016 # Positional parameters expand in the child shell.
     "$real_tmux" -L "$socket" new-session -d -s "$name" -x 40 -y 10 \
-      "$lab/bin/$name" -c 'cat "$1"; printf "\033[8;1H"; while IFS= read -r line; do :; done' _ "$lab/screen" \
-      || fail 'cannot start private composer pane'
+      "$lab/bin/$name" -c 'cat "$1"; printf "\033[8;1H"; while IFS= read -r line; do :; done' _ "$lab/screen" ||
+      fail 'cannot start private composer pane'
     for _ in $(seq 1 100); do
       current=$("$real_tmux" -L "$socket" display-message -p -t "$name" '#{pane_current_command}')
       cy=$("$real_tmux" -L "$socket" display-message -p -t "$name" '#{cursor_y}')
@@ -118,15 +121,24 @@ SH
   # Preserve user text and refuse a newer shell composer despite Droid identity.
   for variant in typed shell activity; do
     case "$variant" in
-      typed) screen=${idle/│ >        │/│ > draft  │}; want=pending ;;
-      shell) screen="$idle"$'\n$ typed command'; want=unknown ;;
-      activity) screen=$'╭──────────╮\n│ >        │\n╰──────────╯\nunclaimed activity'; want=unknown ;;
+      typed)
+        screen=${idle/│ >        │/│ > draft  │}
+        want=pending
+        ;;
+      shell)
+        screen="$idle"$'\n$ typed command'
+        want=unknown
+        ;;
+      activity)
+        screen=$'╭──────────╮\n│ >        │\n╰──────────╯\nunclaimed activity'
+        want=unknown
+        ;;
     esac
-    printf '%s\n' "$screen" > "$lab/screen"
+    printf '%s\n' "$screen" >"$lab/screen"
     # shellcheck disable=SC2016 # Positional parameters expand in the child shell.
     "$real_tmux" -L "$socket" new-session -d -s droid -x 40 -y 10 \
-      "$lab/bin/droid" -c 'cat "$1"; printf "\033[8;1H"; while IFS= read -r line; do :; done' _ "$lab/screen" \
-      || fail 'cannot start private refusal pane'
+      "$lab/bin/droid" -c 'cat "$1"; printf "\033[8;1H"; while IFS= read -r line; do :; done' _ "$lab/screen" ||
+      fail 'cannot start private refusal pane'
     for _ in $(seq 1 100); do
       current=$("$real_tmux" -L "$socket" display-message -p -t droid '#{pane_current_command}')
       [ "$current" != droid ] || break
@@ -139,11 +151,11 @@ SH
   done
   # A background Droid must not authorize input to the foreground shell,
   # even when the old rendered composer remains on screen.
-  printf '%s\n' "$idle" > "$lab/screen"
+  printf '%s\n' "$idle" >"$lab/screen"
   # shellcheck disable=SC2016 # Positional parameters expand in the child shell.
   "$real_tmux" -L "$socket" new-session -d -s background -x 40 -y 10 \
-    bash --noprofile --norc -m -c '"$1" -c "while :; do sleep 1; done" & cat "$2"; printf "\033[8;1H"; while IFS= read -r line; do :; done' _ "$lab/bin/droid" "$lab/screen" \
-    || fail 'cannot start background Droid fixture'
+    bash --noprofile --norc -m -c '"$1" -c "while :; do sleep 1; done" & cat "$2"; printf "\033[8;1H"; while IFS= read -r line; do :; done' _ "$lab/bin/droid" "$lab/screen" ||
+    fail 'cannot start background Droid fixture'
   for _ in $(seq 1 100); do
     cy=$("$real_tmux" -L "$socket" display-message -p -t background '#{cursor_y}')
     [ "$cy" != 7 ] || break
@@ -151,8 +163,8 @@ SH
   done
   [ "$cy" = 7 ] || fail 'background fixture did not park its cursor below the box'
   pane=$(PATH="$lab/shim:$PATH" fm_tmux_composer_capture background)
-  [ "$(fm_composer_classify_screen "$(fm_tmux_composer_caps)" "$pane" '')" = empty ] \
-    || fail 'background fixture lacks a structurally empty stale composer'
+  [ "$(fm_composer_classify_screen "$(fm_tmux_composer_caps)" "$pane" '')" = empty ] ||
+    fail 'background fixture lacks a structurally empty stale composer'
   tty=$("$real_tmux" -L "$socket" display-message -p -t background '#{pane_tty}')
   background=$(LC_ALL=C ps -t "${tty#/dev/}" -o pgid=,tpgid=,comm= | while read -r pgid tpgid comm; do
     [ "${comm##*/}" != droid ] || [ "$pgid" = "$tpgid" ] || printf 'background\n'
@@ -167,11 +179,11 @@ SH
 fm_git_worktree "$TMP_ROOT/project" "$TMP_ROOT/task" droid-trust
 mkdir -p "$TMP_ROOT/user/.factory"
 store="$TMP_ROOT/user/.factory/settings.json"
-printf '%s\n' '{"otherSetting":"preserve","trustedFolders":{"/already-trusted":{"trustedAt":"existing"}}}' > "$store"
+printf '%s\n' '{"otherSetting":"preserve","trustedFolders":{"/already-trusted":{"trustedAt":"existing"}}}' >"$store"
 HOME="$TMP_ROOT/user" "$ROOT/bin/fm-droid-trust.sh" "$TMP_ROOT/task" "$TMP_ROOT/project" >/dev/null || fail 'linked Droid worktree trust registration failed'
 physical=$(cd "$TMP_ROOT/task" && pwd -P)
-jq -e --arg path "$physical" '.otherSetting == "preserve" and .trustedFolders["/already-trusted"].trustedAt == "existing" and (.trustedFolders[$path].trustedAt | type == "string") and (.trustedFolders | length == 2)' "$store" >/dev/null \
-  || fail 'Droid registration lost settings or trusted more than the exact worktree'
+jq -e --arg path "$physical" '.otherSetting == "preserve" and .trustedFolders["/already-trusted"].trustedAt == "existing" and (.trustedFolders[$path].trustedAt | type == "string") and (.trustedFolders | length == 2)' "$store" >/dev/null ||
+  fail 'Droid registration lost settings or trusted more than the exact worktree'
 before=$(cat "$store")
 HOME="$TMP_ROOT/user" "$ROOT/bin/fm-droid-trust.sh" "$TMP_ROOT/task" "$TMP_ROOT/project" >/dev/null || fail 'repeated Droid registration failed'
 [ "$(cat "$store")" = "$before" ] || fail 'repeated Droid trust registration changed the store'
@@ -179,14 +191,14 @@ if HOME="$TMP_ROOT/user" "$ROOT/bin/fm-droid-trust.sh" "$TMP_ROOT/project" "$TMP
 if HOME="$TMP_ROOT/user" "$ROOT/bin/fm-droid-trust.sh" "$TMP_ROOT" "$TMP_ROOT/project" >/dev/null 2>&1; then fail 'Droid trusted a parent directory'; fi
 if HOME="$TMP_ROOT/user" "$ROOT/bin/fm-droid-trust.sh" "$TMP_ROOT/user" "$TMP_ROOT/project" >/dev/null 2>&1; then fail 'Droid trusted the home directory'; fi
 [ "$(cat "$store")" = "$before" ] || fail 'scope refusal changed Droid settings'
-jq -n --arg path "$physical" '{trustedFolders:{($path):false}}' > "$store"
+jq -n --arg path "$physical" '{trustedFolders:{($path):false}}' >"$store"
 before=$(cat "$store")
 if HOME="$TMP_ROOT/user" "$ROOT/bin/fm-droid-trust.sh" "$TMP_ROOT/task" "$TMP_ROOT/project" >/dev/null 2>&1; then fail 'Droid accepted an invalid existing task trust entry'; fi
 [ "$(cat "$store")" = "$before" ] || fail 'Droid replaced an invalid existing trust entry'
-printf '%s\n' '{"trustedFolders":[]}' > "$store"
+printf '%s\n' '{"trustedFolders":[]}' >"$store"
 if HOME="$TMP_ROOT/user" "$ROOT/bin/fm-droid-trust.sh" "$TMP_ROOT/task" "$TMP_ROOT/project" >/dev/null 2>&1; then fail 'Droid accepted a malformed trust registry'; fi
 [ "$(cat "$store")" = '{"trustedFolders":[]}' ] || fail 'Droid replaced malformed user settings'
-printf '%s\n' 'secret-registry-value-not-json' > "$store"
+printf '%s\n' 'secret-registry-value-not-json' >"$store"
 before=$(cat "$store")
 if out=$(HOME="$TMP_ROOT/user" "$ROOT/bin/fm-droid-trust.sh" "$TMP_ROOT/task" "$TMP_ROOT/project" 2>&1); then
   fail 'Droid accepted invalid settings JSON'
@@ -196,7 +208,7 @@ assert_not_contains "$out" 'secret-reg' 'invalid settings error exposed settings
 pass 'Droid trust is exact-worktree scoped, idempotent, and preserves user settings'
 
 # Cleanup is idempotent and preserves settings outside the task's exact paths.
-printf '%s\n' '{"otherSetting":"preserve","trustedFolders":{"/already-trusted":{"trustedAt":"existing"}}}' > "$store"
+printf '%s\n' '{"otherSetting":"preserve","trustedFolders":{"/already-trusted":{"trustedAt":"existing"}}}' >"$store"
 HOME="$TMP_ROOT/user" "$ROOT/bin/fm-droid-trust.sh" "$TMP_ROOT/task" "$TMP_ROOT/project" >/dev/null || fail 'cleanup setup failed'
 HOME="$TMP_ROOT/user" "$ROOT/bin/fm-droid-trust.sh" --remove "$TMP_ROOT/task" "$TMP_ROOT/project" >/dev/null || fail 'Droid trust cleanup failed'
 jq -e --arg path "$physical" '.otherSetting == "preserve" and .trustedFolders["/already-trusted"].trustedAt == "existing" and (.trustedFolders | has($path) | not) and (.trustedFolders | length == 1)' "$store" >/dev/null || fail 'cleanup changed unrelated settings or retained task trust'
@@ -207,10 +219,40 @@ if HOME="$TMP_ROOT/user" "$ROOT/bin/fm-droid-trust.sh" --remove "$TMP_ROOT/proje
 [ "$(cat "$store")" = "$before" ] || fail 'scope refusal changed trust during cleanup'
 pass 'Droid trust cleanup removes only task paths and is idempotent'
 
-# The crew classifier remains separate from primary-session lock ownership.
-if fm_harness_process_matches droid droid; then fail 'Droid acquired primary-session identity'; fi
-if fm_harness_path_name /opt/droid/droid; then fail 'Droid path acquired primary-session identity'; fi
-pass 'Droid crew detection does not enable primary-session lock ownership'
+# Seeded secondmate homes are independent repositories, not crew worktrees.
+secondmate="$TMP_ROOT/secondmate"
+git init -q "$secondmate"
+mkdir -p "$secondmate/bin" "$secondmate/data" "$secondmate/config" "$secondmate/projects"
+printf '# fixture\n' >"$secondmate/AGENTS.md"
+before=$(cat "$store")
+if HOME="$TMP_ROOT/user" "$ROOT/bin/fm-droid-trust.sh" --secondmate-home "$secondmate" mate >/dev/null 2>&1; then fail 'Droid trusted an unmarked secondmate home'; fi
+printf 'other-mate\n' >"$secondmate/.fm-secondmate-home"
+if HOME="$TMP_ROOT/user" "$ROOT/bin/fm-droid-trust.sh" --secondmate-home "$secondmate" mate >/dev/null 2>&1; then fail 'Droid trusted a mismatched secondmate marker'; fi
+printf 'mate\n' >"$secondmate/.fm-secondmate-home"
+ln -s "$TMP_ROOT/user" "$secondmate/state"
+if HOME="$TMP_ROOT/user" "$ROOT/bin/fm-droid-trust.sh" --secondmate-home "$secondmate" mate >/dev/null 2>&1; then fail 'Droid trusted an escaping secondmate directory'; fi
+rm "$secondmate/state"
+ln -s missing "$secondmate/state"
+if HOME="$TMP_ROOT/user" "$ROOT/bin/fm-droid-trust.sh" --secondmate-home "$secondmate" mate >/dev/null 2>&1; then fail 'Droid trusted a broken secondmate directory'; fi
+rm "$secondmate/state"
+mkdir "$secondmate/state"
+mv "$secondmate/.fm-secondmate-home" "$secondmate/marker"
+ln -s marker "$secondmate/.fm-secondmate-home"
+if HOME="$TMP_ROOT/user" "$ROOT/bin/fm-droid-trust.sh" --secondmate-home "$secondmate" mate >/dev/null 2>&1; then fail 'Droid trusted a symlinked secondmate marker'; fi
+rm "$secondmate/.fm-secondmate-home"
+mv "$secondmate/marker" "$secondmate/.fm-secondmate-home"
+[ "$(cat "$store")" = "$before" ] || fail 'rejected secondmate scope changed settings'
+HOME="$TMP_ROOT/user" "$ROOT/bin/fm-droid-trust.sh" --receipt "$TMP_ROOT/state/mate.droid-trust" --secondmate-home "$secondmate" mate >/dev/null || fail 'Droid refused a valid seeded secondmate home'
+HOME="$TMP_ROOT/user" "$ROOT/bin/fm-droid-trust.sh" --retire "$TMP_ROOT/state/mate.droid-trust" "$TMP_ROOT/state" mate >/dev/null || fail 'Droid secondmate trust retirement failed'
+[ "$(cat "$store")" = "$before" ] || fail 'secondmate retirement changed unrelated settings or retained trust'
+pass 'Droid trusts only the exact safely seeded secondmate home and retires its receipt'
+
+# Primary identity requires the exact executable, never an incidental path.
+fm_harness_process_matches droid droid || fail 'Droid primary-session identity missing'
+[ "$(fm_harness_path_name /opt/droid/droid)" = droid ] || fail 'Droid executable path is unrecognized'
+if fm_harness_process_matches android android; then fail 'unrelated process acquired Droid primary identity'; fi
+if fm_harness_path_name /opt/droid/unrelated; then fail 'incidental directory acquired Droid primary identity'; fi
+pass 'Droid primary identity is exact and excludes unrelated executables and directories'
 
 receipt="$TMP_ROOT/state/task.droid-trust"
 HOME="$TMP_ROOT/user" "$ROOT/bin/fm-droid-trust.sh" --receipt "$receipt" "$TMP_ROOT/task" "$TMP_ROOT/project" >/dev/null || fail 'receipt registration failed'
@@ -227,7 +269,7 @@ HOME="$TMP_ROOT/user" "$ROOT/bin/fm-droid-trust.sh" --rollback "$receipt" >/dev/
 # Preserve a grant another writer changed after acquisition.
 HOME="$TMP_ROOT/user" "$ROOT/bin/fm-droid-trust.sh" --remove "$TMP_ROOT/task" "$TMP_ROOT/project" >/dev/null || fail 'changed grant setup failed'
 HOME="$TMP_ROOT/user" "$ROOT/bin/fm-droid-trust.sh" --receipt "$receipt" "$TMP_ROOT/task" "$TMP_ROOT/project" >/dev/null || fail 'changed grant receipt failed'
-jq --arg path "$physical" '.trustedFolders[$path].trustedAt = "changed-by-user"' "$store" > "$store.new"
+jq --arg path "$physical" '.trustedFolders[$path].trustedAt = "changed-by-user"' "$store" >"$store.new"
 mv "$store.new" "$store"
 before=$(cat "$store")
 HOME="$TMP_ROOT/user" "$ROOT/bin/fm-droid-trust.sh" --rollback "$receipt" >/dev/null || fail 'changed grant rollback failed'
@@ -238,7 +280,7 @@ pass 'Droid receipts roll back only unchanged newly acquired grants'
 # survive retirement of the original metadata and disappearance of the copy.
 ln -s "$TMP_ROOT/task" "$TMP_ROOT/task-alias"
 HOME="$TMP_ROOT/user" "$ROOT/bin/fm-droid-trust.sh" --receipt "$receipt" "$TMP_ROOT/task-alias" "$TMP_ROOT/project" >/dev/null || fail 'logical alias registration failed'
-printf 'worktree=%s\nharness=claude\n' "$physical" > "$TMP_ROOT/state/successor.meta"
+printf 'worktree=%s\nharness=claude\n' "$physical" >"$TMP_ROOT/state/successor.meta"
 HOME="$TMP_ROOT/user" "$ROOT/bin/fm-droid-trust.sh" --retire "$receipt" "$TMP_ROOT/state" task >/dev/null || fail 'trust transfer failed'
 [ ! -e "$receipt" ] && [ -f "$TMP_ROOT/state/successor.droid-trust" ] || fail 'cleanup ownership was lost during transfer'
 jq -e --arg physical "$physical" --arg logical "$TMP_ROOT/task-alias" '.trustedFolders | has($physical) and has($logical)' "$store" >/dev/null || fail 'live successor lost trust'
