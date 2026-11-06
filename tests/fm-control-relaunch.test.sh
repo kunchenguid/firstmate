@@ -364,34 +364,6 @@ SH
   chmod +x "$dir/fakebin/tasks-axi"
 }
 
-# --- Rex Claude resume --------------------------------------------------------
-
-load_relaunch_claude_resume_args() {
-  eval "$(sed -n '/^shell_quote() {/,/^}/p;/^claude_config_root() {/,/^}/p;/^relaunch_claude_resume_args() {/,/^}/p' "$SPAWN")"
-  WORKER_ACCOUNT=
-}
-
-test_relaunch_resumes_only_a_claude_worker_that_keeps_its_conversation() {
-  local d=$TMP_ROOT/claude-resume id=0a1b2c3d-1111-4222-8333-444455556666 got
-  mkdir -p "$d/projects/p"
-  : >"$d/projects/p/$id.jsonl"
-  load_relaunch_claude_resume_args
-  export CLAUDE_CONFIG_DIR=$d
-  got=$(relaunch_claude_resume_args claude rex claude "$id")
-  assert_equals "--resume '$id' " "$got" "a claude-to-claude Rex relaunch must resume the recorded session"
-  got=$(relaunch_claude_resume_args claude rex pi "$id")
-  assert_equals "" "$got" "a pi-to-claude relaunch must start a fresh session"
-  got=$(relaunch_claude_resume_args claude tmux claude "$id")
-  assert_equals "" "$got" "only the Rex backend resumes"
-  got=$(relaunch_claude_resume_args claude rex claude "")
-  assert_equals "" "$got" "a record without a session id starts fresh"
-  rm -f "$d/projects/p/$id.jsonl"
-  got=$(relaunch_claude_resume_args claude rex claude "$id")
-  assert_equals "" "$got" "a session whose transcript is gone starts fresh"
-  unset CLAUDE_CONFIG_DIR
-  pass "relaunch: only a claude-to-claude Rex relaunch with a live transcript resumes"
-}
-
 # --- 1. same-harness relaunch -----------------------------------------------
 
 test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint() {
@@ -400,6 +372,7 @@ test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint() {
   add_ship_task "$dir" rl1 claude
   gen_before=$("$ROOT/bin/fm-busy-event.sh" arm "$dir/home/state" rl1)
   printf 'busy_gen=%s\n' "$gen_before" >> "$dir/home/state/rl1.meta"
+  printf 'claude_session_id=0a1b2c3d-1111-4222-8333-444455556666\n' >> "$dir/home/state/rl1.meta"
   out=$(run_control "$dir" rl1 relaunch --note "stopped mid-refactor"); rc=$?
   expect_code 0 "$rc" "a same-harness relaunch should succeed"$'\n'"$out"
   assert_contains "$out" "relaunched rl1 harness=claude from=claude" "the outcome should name the transition"
@@ -412,6 +385,8 @@ test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint() {
   gen_after=$(meta_field "$dir" rl1 busy_gen)
   [ -n "$gen_after" ] && [ "$gen_after" != "$gen_before" ] \
     || fail "a relaunch must arm a fresh busy generation, got '$gen_after'"
+  [ -z "$(meta_field "$dir" rl1 claude_session_id)" ] \
+    || fail "a relaunch must not carry a recorded claude session id forward"
   [ "$(journal_field "$dir" rl1 phase)" = complete ] \
     || fail "the transaction journal should end complete"
   assert_grep "/exit" "$dir/fake/literal" "the previous agent should have been exited"
@@ -3225,7 +3200,6 @@ test_missing_worktree_refuses_before_stopping_anything
 test_relaunch_refuses_a_recorded_worktree_that_is_the_primary_home
 test_relaunch_refuses_a_recorded_worktree_that_is_the_project_primary_checkout
 test_relaunch_refuses_the_primary_checkout_under_inherited_git_overrides
-test_relaunch_resumes_only_a_claude_worker_that_keeps_its_conversation
 test_missing_instructions_refuse_before_stopping_anything
 test_checkpoint_refusal_leaves_the_record_byte_identical
 test_checkpoint_refuses_uninspectable_head_and_status
