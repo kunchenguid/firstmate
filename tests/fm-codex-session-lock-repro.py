@@ -173,6 +173,23 @@ exec '{PS}' "$@"
     descendant_stop = run(stop, payload=owner_stop_payload, thread_identity=OTHER)
     assert descendant_stop.returncode == 0, 'read-only descendant Stop requested impossible supervision repair'
     assert 'OWNED BY ANOTHER LIVE SESSION' in descendant_stop.stdout, 'descendant Stop did not report the foreign owner'
+    park_guard = '"$FM_HOME/bin/fm-codex-stop-park.sh" --guard'
+    fallback = home / 'state/.codex-park-fallback'
+    for opted_in in (False, True):
+        if opted_in:
+            (home / 'config/codex-stop-park').touch()
+        fallback.write_text(OTHER + '\n')
+        for active in (False, True):
+            retained_payload = json.dumps({'session_id': OTHER, 'stop_hook_active': active})
+            retained_stop = run(park_guard, OTHER, retained_payload)
+            assert retained_stop.returncode == 0, 'foreign retained fallback blocked Stop'
+        assert fallback.read_text() == OTHER + '\n', 'foreign Stop rewrote the retained fallback'
+        fallback.write_text(OWNER + '\n')
+        assert run(park_guard, payload=owner_stop_payload, thread_identity=OTHER).returncode == 0, 'descendant retained fallback blocked Stop'
+        owner_stop = run(park_guard, payload=owner_stop_payload)
+        assert owner_stop.returncode == 2 and 'foreground fallback' in owner_stop.stderr, 'owner retained fallback stopped requiring supervision'
+    fallback.unlink()
+    (home / 'config/codex-stop-park').unlink()
     checkpoint = '"$FM_HOME/bin/fm-watch-checkpoint.sh" --seconds 1'
     assert run(checkpoint, OTHER).returncode == 1, 'competitor started a second checkpoint'
     assert run(checkpoint, thread_identity=OTHER).returncode == 1, 'descendant started its root owner checkpoint'
@@ -207,7 +224,7 @@ exec '{PS}' "$@"
     env.pop('FM_FIXTURE_ARGV0')
     env['FM_FIXTURE_SUBCOMMAND'] = '-c features.hooks=true app-server'
     assert run(lock, OTHER).returncode == 1, 'global config flags hid the native server'
-    assert run(own).returncode == 0, 'global config flags hid the owner'
+    assert run(own).returncode == 1, 'flattened config arguments proved native ownership'
     env.pop('FM_FIXTURE_SUBCOMMAND')
     # Old PID-only native locks cannot be upgraded by guessing their thread.
     (home / 'state/.lock-session').unlink()
@@ -233,4 +250,29 @@ exec '{PS}' "$@"
     assert run(lock, None).returncode == 0, 'ordinary Codex CLI lock acquisition regressed'
     assert run(lock, None).returncode == 0, 'ordinary Codex CLI reentry regressed'
     assert run(own, None).returncode == 0, 'ordinary Codex CLI ownership regressed'
+    (home / 'state/.lock').unlink()
+    (home / 'state/checkpoint-ran').unlink()
+    for arguments in (
+        '-c sandbox_permissions=[ "disk-full-read-access" ] app-server',
+        '--config sandbox_permissions=[ "disk-full-read-access" ] app-server',
+        '--config=sandbox_permissions=[ "disk-full-read-access" ] app-server',
+        '-c note="app-server exec" exec',
+    ):
+        env['FM_FIXTURE_SUBCOMMAND'] = arguments
+        for identity in (OWNER, OTHER, None):
+            assert run(lock, identity).returncode == 1, 'ambiguous arguments acquired a fresh PID-only lock: ' + arguments
+        assert not (home / 'state/.lock').exists(), 'ambiguous arguments published a lock'
+        assert not (home / 'state/.lock-session').exists(), 'ambiguous arguments published an identity'
+        (home / 'state/.lock').write_bytes(before)
+        assert run(own).returncode == 1, 'ambiguous arguments trusted a legacy shared PID'
+        assert run(lock, OTHER).returncode == 1, 'ambiguous arguments claimed a legacy shared PID'
+        assert 'READ-ONLY SESSION' in run(hook, None, good_payload).stdout, 'hook arguments bypassed ambiguous identity refusal'
+        assert 'Run `bin/fm-session-start.sh`' in run('"$FM_HOME/bin/fm-sessionstart-nudge.sh"').stdout, 'ambiguous arguments suppressed the startup nudge'
+        fallback.write_text(OTHER + '\n')
+        assert run(park_guard, OTHER, payload).returncode == 0, 'ambiguous arguments blocked a foreign Stop'
+        assert run(checkpoint).returncode == 1, 'ambiguous arguments started a checkpoint'
+        assert not (home / 'state/checkpoint-ran').exists(), 'ambiguous checkpoint ran the watcher'
+        assert (home / 'state/.lock').read_bytes() == before, 'ambiguous arguments replaced the legacy owner'
+        assert not (home / 'state/.lock-session').exists(), 'ambiguous arguments fabricated a legacy owner identity'
+        (home / 'state/.lock').unlink()
     print('ok - distinct native sessions sharing a server cannot acquire or trust its owner lock')

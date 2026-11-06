@@ -200,6 +200,10 @@ if [ "$MODE" = --session-start ]; then
 fi
 
 if [ "$MODE" = --guard ]; then
+  if fm_session_lock_foreign_owner_live "$STATE"; then
+    printf '%s' "$PAYLOAD" | "$SCRIPT_DIR/fm-turnend-guard.sh"
+    exit $?
+  fi
   if [ -n "$SESSION" ] && capable && [ ! -e "$STATE/.afk" ] \
     && fm_supervision_needed "$STATE"; then
     # Startup grace for the async hook to publish its claim: 50 x 0.2s, about 10s.
