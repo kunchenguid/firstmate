@@ -2373,11 +2373,14 @@ conclude_task_no_mistakes_run() {  # <worktree>
 # `lsof -a -d cwd` scan (never the recursive +D file-tree walk, which lsof
 # itself documents as slow). Never $$ (this script's own pid). Empty output
 # when nothing matches; a timeout or failure cannot establish a safe result.
+# The scan runs from / rather than from the scanned root: the subshell, the
+# timeout, and lsof itself would otherwise sit in that root, and the reap
+# would read the scan's own helpers as leaked work and refuse every teardown.
 pids_with_cwd_under() {  # <dir>
   local dir=$1 out pid path line
   [ -n "$dir" ] && [ -d "$dir" ] || return 0
   dir=$(cd "$dir" && pwd -P) || return 1
-  out=$(fm_nm_bounded "$dir" "$LSOF_CENSUS_TIMEOUT" lsof -a -d cwd -Fpn 2>/dev/null) || return 1
+  out=$(fm_nm_bounded / "$LSOF_CENSUS_TIMEOUT" lsof -a -d cwd -Fpn 2>/dev/null) || return 1
   [ -n "$out" ] || return 0
   pid=
   while IFS= read -r line; do
