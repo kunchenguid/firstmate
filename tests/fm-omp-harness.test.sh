@@ -109,6 +109,9 @@ test_lock_identity_and_liveness_classification() {
 
 # A fake omp that answers `models --json` with a two-provider catalog and exits
 # 0 for everything else (the launch itself is only recorded by the fake tmux).
+# Like the real omp it discovers the home's extensions unless `models` is given
+# --no-extensions; discovery leaves <fakebin>/ext-discovered, standing in for the
+# primary load markers a discovered extension would overwrite.
 make_fake_omp() {  # <fakebin>
   # A leading --profile <name> selects that profile's catalog, which also lists
   # one model of its own, so a catalog check read under the wrong profile shows.
@@ -118,6 +121,7 @@ profile=
 if [ "${1:-}" = --profile ]; then profile=$2; shift 2; fi
 case "$1" in
   models)
+    case " $* " in *" --no-extensions "*) ;; *) : > "$(dirname "$0")/ext-discovered" ;; esac
     if [ -n "$profile" ]; then
       printf '%s\n' '{"models":[{"provider":"openai-codex","id":"gpt-6-astra","selector":"openai-codex/gpt-6-astra"},{"provider":"openai-codex","id":"gpt-6-'"$profile"'","selector":"openai-codex/gpt-6-'"$profile"'"}]}'
     else
@@ -215,6 +219,20 @@ test_spawn_model_validation_scoped_to_listed_providers() {
   status=$?
   expect_code 0 "$status" "a bare fuzzy pattern is omp's own matcher's job: $out"
   pass "fm-spawn: omp model validation is scoped to providers the listing can prove"
+}
+
+# The pre-launch listing runs from the home as a descendant of the lock-owning
+# primary. If it discovers the home's tracked extensions, the nested omp
+# overwrites the primary's extension load markers with its own pid.
+test_spawn_model_listing_does_not_load_extensions() {
+  local rec id=omp-model-noext-q5 out status
+  rec=$(make_spawn_case model-noext omp "$id")
+  read_case_record "$rec"
+  out=$(run_scout_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --harness omp --model openai-codex/gpt-nope)
+  status=$?
+  expect_code 1 "$status" "the catalog listing must have run and refused the unlisted model: $out"
+  assert_absent "$FAKEBIN_DIR/ext-discovered" "the model listing discovered the home's extensions, which overwrites the primary's load markers"
+  pass "fm-spawn: the omp model listing runs with --no-extensions so it cannot overwrite the primary's load markers"
 }
 
 test_secondmate_launch_relies_on_discovery() {
@@ -967,6 +985,7 @@ test_detection_anchored_name_and_marker_precedence
 test_lock_identity_and_liveness_classification
 test_spawn_launch_line_and_worker_wiring
 test_spawn_model_validation_scoped_to_listed_providers
+test_spawn_model_listing_does_not_load_extensions
 test_secondmate_launch_relies_on_discovery
 test_secondmate_config_pinned_model_is_validated
 test_secondmate_omp_profile_pin
