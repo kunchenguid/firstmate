@@ -365,17 +365,18 @@ if [ "${FM_PR_CHECK_MERGE:-}" != 1 ]; then
     exit 1
   fi
   BASELINE_TRAIN=0
-  case $BASELINE in
-    *ontrain) BASELINE_TRAIN=1 ;;
-  esac
-  case $BASELINE in
-    'degraded head='*|'degraded pipeline='*)
-      BASELINE=${BASELINE#degraded }
-      BASELINE=${BASELINE%% *}
-      ;;
-    *ontrain) BASELINE=train=on ;;
-    *) BASELINE= ;;
-  esac
+  BASELINE_DEGRADED=
+  while IFS= read -r baseline_line; do
+    case $baseline_line in
+      ontrain) BASELINE_TRAIN=1 ;;
+      'degraded head='*|'degraded pipeline='*)
+        BASELINE_DEGRADED=${baseline_line#degraded }
+        BASELINE_DEGRADED=${BASELINE_DEGRADED%% *}
+        ;;
+    esac
+  done <<EOF
+$BASELINE
+EOF
 fi
 
 META_LOCK=$(fm_meta_lock_path "$META") || exit 1
@@ -418,6 +419,26 @@ fm_pr_metadata_identity_parse "$META" || exit 1
 fm_lock_release "$META_LOCK"
 META_LOCK_HELD=0
 
+# Persist both baseline identities before making the replacement poll runnable.
+if [ "${FM_PR_CHECK_MERGE:-}" != 1 ]; then
+  if [ -n "$BASELINE_DEGRADED" ] && ! fm_pr_poll_degraded_mark_notified "$STATE" "$ID" \
+      "$PROVIDER" "$HOST" "$PROJECT_PATH" "$NUMBER" "$BASELINE_DEGRADED"; then
+    echo "error: could not persist PR poll degraded baseline" >&2
+    exit 1
+  elif [ -z "$BASELINE_DEGRADED" ]; then
+    rm -f -- "$STATE/$ID.pr-poll-degraded"
+  fi
+  if [ "${BASELINE_TRAIN:-0}" = 1 ]; then
+    fm_pr_poll_degraded_mark_notified "$STATE" "$ID" \
+      "$PROVIDER" "$HOST" "$PROJECT_PATH" "$NUMBER" train=on || {
+        echo "error: could not persist PR poll train baseline" >&2
+        exit 1
+      }
+  else
+    rm -f -- "$STATE/$ID.pr-poll-train"
+  fi
+fi
+
 PR_POLL_PUBLISH_LOCK="$STATE/.pr-poll-publish-$ID.lock"
 fm_lock_acquire_wait "$PR_POLL_PUBLISH_LOCK"
 PR_POLL_PUBLISH_LOCK_HELD=1
@@ -429,26 +450,6 @@ else
   PR_POLL_PUBLISH_LOCK_HELD=0
   echo "error: could not publish PR poll" >&2
   exit 1
-fi
-# Commit the baseline only after the replacement poll is safely published;
-# the control lock prevents a watcher from observing an intermediate pair.
-if [ "${FM_PR_CHECK_MERGE:-}" != 1 ]; then
-  if [ -n "$BASELINE" ] && ! fm_pr_poll_degraded_mark_notified "$STATE" "$ID" \
-      "$PROVIDER" "$HOST" "$PROJECT_PATH" "$NUMBER" "$BASELINE"; then
-    echo "error: could not persist PR poll degraded baseline" >&2
-    exit 1
-  elif [ -z "$BASELINE" ]; then
-    rm -f -- "$STATE/$ID.pr-poll-degraded"
-  fi
-  if [ "${BASELINE_TRAIN:-0}" = 1 ] || [ "$BASELINE" = train=on ]; then
-    fm_pr_poll_degraded_mark_notified "$STATE" "$ID" \
-      "$PROVIDER" "$HOST" "$PROJECT_PATH" "$NUMBER" train=on || {
-        echo "error: could not persist PR poll train baseline" >&2
-        exit 1
-      }
-  else
-    rm -f -- "$STATE/$ID.pr-poll-train"
-  fi
 fi
 if [ "$CONTROL_LOCK_HELD" = 1 ]; then
   fm_lock_release "$CONTROL_LOCK" || exit 1
