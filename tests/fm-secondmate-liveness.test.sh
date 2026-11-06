@@ -643,6 +643,78 @@ test_sweep_respawns_authoritatively_missing_pi_signed_secondmate() {
   pass "sweep: an authoritatively missing pi-signed secondmate window is relaunched"
 }
 
+test_sweep_respawns_authoritatively_missing_agy_secondmate() {
+  local w fb tmuxfb log out
+  w=$(new_world sweep-missing-agy)
+  add_sm_home "$w" sm1 firstmate:fm-sm1 agy
+  fb=$(make_toolchain "$w"); tmuxfb=$(make_liveness_tmux "$w")
+  log="$w/calls.log"; : > "$log"
+
+  out=$(run_bootstrap "$tmuxfb:$fb" "$w/home" missing "$log")
+
+  assert_not_contains "$out" "unverified for recovery" \
+    "a recorded agy secondmate should be verified for recovery"
+  assert_contains "$(cat "$log")" "new-window" \
+    "an authoritatively missing agy secondmate should be relaunched"
+  assert_not_contains "$(cat "$log")" "kill-window" \
+    "an absent agy window should not need a destructive pre-kill"
+  pass "sweep: an authoritatively missing agy secondmate window is relaunched"
+}
+
+test_sweep_respawns_confirmed_dead_agy_secondmate() {
+  local w fb tmuxfb log out
+  w=$(new_world sweep-dead-agy)
+  add_sm_home "$w" sm1 firstmate:fm-sm1 agy
+  fb=$(make_toolchain "$w"); tmuxfb=$(make_liveness_tmux "$w")
+  log="$w/calls.log"; : > "$log"
+
+  out=$(run_bootstrap "$tmuxfb:$fb" "$w/home" zsh "$log")
+
+  assert_not_contains "$out" "unverified for recovery" \
+    "a recorded agy secondmate should be verified for recovery"
+  assert_contains "$(cat "$log")" "kill-window -t =firstmate:=fm-sm1" \
+    "the stale endpoint must be killed before respawn"
+  assert_contains "$(cat "$log")" "new-window" \
+    "a confirmed-dead agy secondmate should actually be relaunched"
+  pass "sweep: a confirmed-dead agy secondmate endpoint is killed and respawned"
+}
+
+test_sweep_respawns_authoritatively_missing_cursor_secondmate() {
+  local w fb tmuxfb log out
+  w=$(new_world sweep-missing-cursor)
+  add_sm_home "$w" sm1 firstmate:fm-sm1 cursor
+  fb=$(make_toolchain "$w"); tmuxfb=$(make_liveness_tmux "$w")
+  log="$w/calls.log"; : > "$log"
+
+  out=$(run_bootstrap "$tmuxfb:$fb" "$w/home" missing "$log")
+
+  assert_not_contains "$out" "unverified for recovery" \
+    "a recorded cursor secondmate should be verified for recovery"
+  assert_contains "$(cat "$log")" "new-window" \
+    "an authoritatively missing cursor secondmate should be relaunched"
+  assert_not_contains "$(cat "$log")" "kill-window" \
+    "an absent cursor window should not need a destructive pre-kill"
+  pass "sweep: an authoritatively missing cursor secondmate window is relaunched"
+}
+
+test_sweep_respawns_confirmed_dead_cursor_secondmate() {
+  local w fb tmuxfb log out
+  w=$(new_world sweep-dead-cursor)
+  add_sm_home "$w" sm1 firstmate:fm-sm1 cursor
+  fb=$(make_toolchain "$w"); tmuxfb=$(make_liveness_tmux "$w")
+  log="$w/calls.log"; : > "$log"
+
+  out=$(run_bootstrap "$tmuxfb:$fb" "$w/home" zsh "$log")
+
+  assert_not_contains "$out" "unverified for recovery" \
+    "a recorded cursor secondmate should be verified for recovery"
+  assert_contains "$(cat "$log")" "kill-window -t =firstmate:=fm-sm1" \
+    "the stale endpoint must be killed before respawn"
+  assert_contains "$(cat "$log")" "new-window" \
+    "a confirmed-dead cursor secondmate should actually be relaunched"
+  pass "sweep: a confirmed-dead cursor secondmate endpoint is killed and respawned"
+}
+
 test_sweep_never_acts_on_ambiguous_existing_process() {
   local w fb tmuxfb log out
   w=$(new_world sweep-ambiguous)
@@ -1002,6 +1074,10 @@ test_sweep_keeps_tmux_best_effort_kill_when_close_fails
 test_sweep_leaves_alive_secondmate_untouched
 test_sweep_respawns_authoritatively_missing_pi_secondmate
 test_sweep_respawns_authoritatively_missing_pi_signed_secondmate
+test_sweep_respawns_authoritatively_missing_agy_secondmate
+test_sweep_respawns_confirmed_dead_agy_secondmate
+test_sweep_respawns_authoritatively_missing_cursor_secondmate
+test_sweep_respawns_confirmed_dead_cursor_secondmate
 test_sweep_never_acts_on_ambiguous_existing_process
 test_sweep_never_acts_on_transient_unreadability
 test_sweep_reports_missing_endpoint_relaunch_failure
