@@ -141,9 +141,16 @@ fm_lint_worker_stop() {
   FM_LINT_WORKER_RUN_PID=
 }
 
+# EPOCHREALTIME's decimal separator follows the locale - ".", ",", or the
+# Arabic "٫" - so the two digit runs are split on whatever separates them. An
+# arithmetic error here would abort a private worker mode and fall through into
+# a full owner run that spawns workers again.
 fm_lint_now_ms() {
-  if [ -n "${EPOCHREALTIME:-}" ]; then
-    local seconds=${EPOCHREALTIME%.*} micros=${EPOCHREALTIME#*.}
+  local raw=${EPOCHREALTIME:-} seconds micros
+  seconds=${raw%%[!0-9]*}
+  micros=${raw##*[!0-9]}
+  if [ -n "$seconds" ] && [ -n "$micros" ] && [ "$seconds" != "$raw" ]; then
+    micros="${micros}000"
     printf '%s\n' "$((seconds * 1000 + 10#${micros:0:3}))"
   else
     printf '%s\n' "$(($(date +%s) * 1000))"
@@ -1143,7 +1150,7 @@ fm_lint_load_average() {
 }
 
 fm_lint_aggregate_cpu() {
-  ps -A -o %cpu= 2>/dev/null | awk '{sum += $1} END {printf "%.2f", sum + 0}'
+  LC_ALL=C ps -A -o %cpu= 2>/dev/null | LC_ALL=C awk '{sum += $1} END {printf "%.2f", sum + 0}'
 }
 
 TELEMETRY_START_EPOCH=0
@@ -1323,12 +1330,17 @@ if [ -n "$TELEMETRY" ]; then
   content_cksum=$(cksum "$TMP_ROOT/content-cksums" | awk '{print $1 "-" $2}')
   git_head=$(git rev-parse HEAD 2>/dev/null || printf 'unavailable')
 
+  # /usr/bin/time writes its decimal separator in the caller's locale, and on
+  # macOS truncates a multibyte one such as the Arabic "٫" to its first byte,
+  # so the summaries read bytes in the C locale and treat any non-digit run
+  # between the digits as the decimal point.
   if [ -x /usr/bin/time ]; then
     if [ "$(uname)" = Darwin ]; then
-      timing_summary=$(awk '
-        /^real / {wall += $2; if ($2 > max_wall) max_wall=$2}
-        /^user / {user += $2}
-        /^sys / {sys_cpu += $2}
+      timing_summary=$(LC_ALL=C awk '
+        function num(s) { gsub(/[^0-9]+/, ".", s); return s + 0 }
+        /^real / {v = num($2); wall += v; if (v > max_wall) max_wall=v}
+        /^user / {user += num($2)}
+        /^sys / {sys_cpu += num($2)}
         /maximum resident set size/ {
           rss=$1 / 1024
           rss_sum += rss
@@ -1337,10 +1349,11 @@ if [ -n "$TELEMETRY" ]; then
         END {printf "%.2f %.2f %.2f %.0f %.0f %.2f", user, sys_cpu, wall, max_rss, rss_sum, max_wall}
       ' "$TMP_ROOT"/timing.*)
     else
-      timing_summary=$(awk -F= '
-        $1 == "wall_seconds" {wall += $2; if ($2 > max_wall) max_wall=$2}
-        $1 == "user_seconds" {user += $2}
-        $1 == "system_seconds" {sys_cpu += $2}
+      timing_summary=$(LC_ALL=C awk -F= '
+        function num(s) { gsub(/[^0-9]+/, ".", s); return s + 0 }
+        $1 == "wall_seconds" {v = num($2); wall += v; if (v > max_wall) max_wall=v}
+        $1 == "user_seconds" {user += num($2)}
+        $1 == "system_seconds" {sys_cpu += num($2)}
         $1 == "max_rss_kib" {rss_sum += $2; if ($2 > max_rss) max_rss=$2}
         END {printf "%.2f %.2f %.2f %.0f %.0f %.2f", user, sys_cpu, wall, max_rss, rss_sum, max_wall}
       ' "$TMP_ROOT"/timing.*)
