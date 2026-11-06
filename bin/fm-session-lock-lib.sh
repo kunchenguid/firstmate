@@ -786,8 +786,8 @@ fm_os_proc_argv() {  # <pid>
 # True when pid $1 is a native Codex server shared by threads. Process identity
 # still comes from fm_proc_info. The exact subcommand after global options and
 # their values comes from the kernel argv vector, never from CLI prompt text.
-# If argv is unreadable, a standalone app-server in ps selects restrictions
-# but cannot prove native ancestry for trusted identity (the verified mode).
+# If argv is unreadable, parse ps tokens with the same option rules, stopping
+# at the first positional argument. This cannot prove trusted native identity.
 # A tagged Windows pid is never native: that bridge exposes no argv.
 fm_session_lock_codex_native_pid() {  # <pid> [verified]
   local base argv0 token arg
@@ -806,8 +806,8 @@ fm_session_lock_codex_native_pid() {  # <pid> [verified]
       done < <(fm_os_proc_argv "$1")
       if [ "${#argv[@]}" -eq 0 ]; then
         [ "${2:-}" != verified ] || return 1
-        printf '%s\n' "$FM_PROC_ARGS" | LC_ALL=C grep -Eq '(^|[[:space:]])app-server([[:space:]]|$)'
-        return
+        IFS=$' \t\n' read -r -a argv <<< "$FM_PROC_ARGS"
+        [ "${#argv[@]}" -gt 0 ] || return 1
       fi
       [ "${argv[0]##*/}" = codex ] || return 1
       set -- "${argv[@]:1}"
