@@ -71,12 +71,11 @@ sha256_stdin() {
 # The identity for `key=derive`: origin, question text, and ordered option texts,
 # each NUL-terminated. The descriptive topic and the binding line are excluded, so
 # retitling a topic cannot fork one decision into two.
-derive_key() { # <origin> <block-file>
-  local origin=$1 block=$2 digest
+derive_key() { # <origin> <block-file> <question-text>
+  local origin=$1 block=$2 question_text=$3 digest
   digest=$({
     printf '%s\0' "$origin"
-    sed -n 's/^\([0-9]*\.[[:space:]]*\)\{0,1\}\[question\][[:space:]]*\(.*\)$/\2/p' "$block" |
-      head -1 | tr -d '\n'
+    printf '%s' "$question_text"
     printf '\0'
     sed -n 's/^\[option\][[:space:]]*\(.*\)$/\1/p' "$block" |
       while IFS= read -r option; do printf '%s\0' "$option"; done
@@ -209,11 +208,12 @@ for BLOCK in "$WORK"/block.*; do
 
   QUESTION="$WORK/question.$INDEX"
   grep -v '^\[firstmate-decision[[:space:]]' "$BLOCK" >"$QUESTION" || true
-  [ -s "$QUESTION" ] || {
-    REJECTED="${REJECTED}question $INDEX carries a binding line and no question text; "
+  QUESTION_TEXT=$(sed -n 's/^\([0-9]*\.[[:space:]]*\)\{0,1\}\[question\][[:space:]]*\(.*\)$/\2/p' "$QUESTION" | head -1)
+  if ! printf '%s' "$QUESTION_TEXT" | LC_ALL=C grep -q '[^[:space:]]'; then
+    REJECTED="${REJECTED}question $INDEX requires a [question] line with nonempty question text; "
     continue
-  }
-  [ "$KEY" != derive ] || KEY=$(derive_key "$ORIGIN" "$QUESTION")
+  fi
+  [ "$KEY" != derive ] || KEY=$(derive_key "$ORIGIN" "$QUESTION" "$QUESTION_TEXT")
 
   if OWNER=$("$SCRIPT_DIR/fm-captain-hold.sh" preserve-question "$ORIGIN" "$KEY" \
     --state "$BSTATE" --question-file "$QUESTION" 2>"$WORK/err.$INDEX"); then
