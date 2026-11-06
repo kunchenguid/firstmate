@@ -310,9 +310,12 @@
 #     hours with no live task meta to attribute them to once teardown had
 #     already removed it). reap_task_worktree_processes finds every process
 #     whose CURRENT WORKING DIRECTORY is this task's own worktree or tasktmp
-#     root via `lsof -a -d cwd` (cheap: bounded by process count, not by
-#     walking the worktree's file tree) and sends TERM, then KILL after a short
-#     grace period to any survivor whose process identity still matches. Both
+#     root through one hard-bounded system-wide `lsof -a -d cwd` census
+#     (cheap: bounded by process count, not by walking the worktree's file tree)
+#     and sends TERM, then KILL after a short grace period to any survivor whose
+#     process identity still matches. A census timeout or failure refuses before
+#     destructive cleanup; only an absent lsof uses the identity-safe recorded-
+#     backend process-group fallback. Both
 #     roots are unique per task and never
 #     shared, so this can never reach another task's or the primary's
 #     processes. Idempotent: nothing left to find is a silent no-op.
@@ -1826,8 +1829,9 @@ work_is_landed() {
 
 # The completion links this teardown already holds locally. A retained scout
 # keeps its report as the held deliverable, while a force-closed scout is
-# recorded as discarded with no report. A local-only ship lands on local main,
-# and every other ship carries the PR recorded on its own record.
+# recorded as discarded with no report. A local-only ship, or a PR-less ship
+# whose owned worktree proves local-default reachability, records local main;
+# otherwise a recorded PR is attached when present.
 BACKLOG_DONE_ARGS=()
 backlog_done_args() {
   local data_relative

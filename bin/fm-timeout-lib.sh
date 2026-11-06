@@ -8,7 +8,10 @@
 #   fm_timeout_mechanism
 #       Prints the mechanism fm_run_timed will use on this host: "timeout",
 #       "gtimeout", "perl", or "bash". Set FM_TIMEOUT_MECHANISM_OVERRIDE=bash
-#       to force the dependency-free fallback. An omp shell defines timeout as
+#       to force the dependency-free fallback. Set FM_TIMEOUT_REQUIRE_GNU=1 to
+#       accept an external timeout/gtimeout only when it identifies as GNU
+#       coreutils, otherwise falling back to Perl and then Bash; the explicit
+#       Bash override takes precedence. An omp shell defines timeout as
 #       a builtin; command -v reports that builtin, and invoking the name runs
 #       it. timeout and gtimeout are selected only when type -P yields an
 #       executable path, and that path is what fm_run_timed and fm_exec_timed

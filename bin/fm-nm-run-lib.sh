@@ -20,6 +20,8 @@
 # `no-mistakes "$@"` specialization. The bounded
 # form preserves stdout, stderr, and exit status; the checked form discards
 # stderr, while fm_nm_run keeps the fail-open query contract for read-only callers.
+# fm_nm_bounded delegates to fm-timeout-lib's GNU-filtered hard runner; that
+# owner's explicit Bash mechanism override still takes precedence.
 # The no-mistakes forms route host reads through the opt-in home resolver below.
 fm_nm_bounded() (  # <dir> <timeout_secs> <command> <args...>
   local dir=$1 timeout_secs=$2 lib_dir
