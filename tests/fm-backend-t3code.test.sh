@@ -123,8 +123,14 @@ make_treehouse_fakebin() {  # <dir> -> echoes fakebin dir
   cat > "$fb/treehouse" <<'SH'
 #!/usr/bin/env bash
 set -u
+# Capability discovery does not acquire, lease, or return a pool slot.
+[ "${1:-}" != lease ] || [ "${2:-}" != --help ] || exit 0
 printf '{"tool":"treehouse","args":"%s","cwd":"%s"}\n' "$*" "$PWD" >> "${FM_T3_TREEHOUSE_LOG:?}"
 case "${1:-}" in
+  lease)
+    echo "already leased" >&2
+    exit 1
+    ;;
   get)
     # FM_T3_TREEHOUSE_GET_WORLD changes the fake T3 world while the slot is
     # leased, the moment a real T3 could restart.
@@ -1507,7 +1513,9 @@ test_spawn_leases_slot_creates_thread_and_starts_launch_turn() {
   t3_task_id "$id"
   t3_case spawn
   proj="$CASE_DIR/spawn-project"
-  wt="$CASE_DIR/spawn-wt"
+  wt="$CASE_DIR/pool/1/repo"
+  mkdir -p "$CASE_DIR/pool/1"
+  printf '{}\n' > "$CASE_DIR/pool/treehouse-state.json"
   data="$CASE_DIR/data"
   state="$CASE_DIR/state"
   fm_git_worktree "$proj" "$wt" "fm/$id"
@@ -1526,6 +1534,7 @@ test_spawn_leases_slot_creates_thread_and_starts_launch_turn() {
   assert_grep "backend=t3code" "$state/$id.meta" "meta missing backend=t3code"
   assert_grep "window=fm-$id" "$state/$id.meta" "meta missing the stable window alias"
   assert_grep "t3_project_id=proj-1" "$state/$id.meta" "meta missing the matched T3 project id"
+  assert_grep "task=$id" "$(dirname "$wt")/.fm-slot-owner" "the already leased T3 slot must still be claimed"
   assert_grep "worktree=$wt" "$state/$id.meta" "meta missing the leased worktree"
   thread=$(bash -c '. "$1"; fm_meta_get "$2" t3_thread_id' _ "$ROOT/bin/fm-backend.sh" "$state/$id.meta")
   case "$thread" in mcp:*) ;; *) fail "meta t3_thread_id should be the id T3 assigned, got '$thread'" ;; esac
@@ -1891,10 +1900,15 @@ test_spawn_abort_returns_lease_only_after_archive() {  # <ok|fail>
   # A regular file where the Claude hooks go aborts the spawn after the
   # thread exists and before its record is published.
   t3_worker_setup "$id"
+  mkdir -p "$CASE_DIR/pool/1"
+  git -C "$WORKER_PROJ" worktree move "$WORKER_WT" "$CASE_DIR/pool/1/repo"
+  WORKER_WT="$CASE_DIR/pool/1/repo"
+  printf '{}\n' > "$CASE_DIR/pool/treehouse-state.json"
   printf 'blocker\n' > "$WORKER_WT/.claude"
   printf '.claude\n' >> "$(git -C "$WORKER_WT" rev-parse --git-path info/exclude)"
   out=$(t3_worker_spawn "$id" claude --model claude-sonnet-5); rc=$?
   [ "$rc" -ne 0 ] || fail "the blocked spawn should abort"$'\n'"$out"
+  assert_not_contains "$out" "was left in place; a refusal never releases" "T3 cleanup owns whether its lease is retained"
   return_line=$(t3_log_line_of 'r.tool === "treehouse" && r.args.indexOf("return --force") === 0')
   if [ "$archive" = ok ]; then
     [ "$(t3_dispatch_types)" = "t3_thread_launch t3_thread_organize" ] || fail "an abort must archive the idle thread, got '$(t3_dispatch_types)'"

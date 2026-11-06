@@ -396,15 +396,54 @@ Exercise the spawn behavior under test.
 EOF
 }
 
+# State-only Treehouse lease stand-in; the pool-world terminal honors the same
+# sibling marker when selecting a slot. No Git command runs inside this fake.
+fm_test_fake_treehouse() {  # <fakebin>
+  cat > "$1/treehouse" <<'SH'
+#!/usr/bin/env bash
+set -u
+if [ "${1:-}" = status ]; then
+  wt=${FM_FAKE_PANE_PATH:?}
+  root=$(dirname "$(dirname "$wt")")
+  rows='[]'
+  for copy in "$root"/*/"$(basename "$wt")"; do
+    [ -d "$copy" ] || continue
+    name=$(basename "$(dirname "$copy")")
+    status=available
+    [ ! -e "$(dirname "$copy")/.test-treehouse-lease" ] || status=leased
+    rows=$(printf '%s\n' "$rows" | jq --arg path "$copy" --arg name "$name" --arg status "$status" '. + [{path: $path, name: $name, status: $status}]')
+  done
+  printf '%s\n' "$rows"
+  exit 0
+fi
+if [ "${1:-}" = lease ]; then
+  [ "${2:-}" != --help ] || exit "${FM_FAKE_TREEHOUSE_OLD:-0}"
+  [ "${FM_FAKE_TREEHOUSE_LEASE_FAIL:-0}" = 0 ] || { echo 'lease failed' >&2; exit 1; }
+  wt=${FM_FAKE_PANE_PATH:?}
+  root=$(dirname "$(dirname "$wt")")
+  if [ -f "$root/treehouse-state.json" ]; then
+    wt="$root/$2/$(basename "$wt")"
+  fi
+  marker="$(dirname "$wt")/.test-treehouse-lease"
+  [ ! -e "$marker" ] || { echo "already leased (holder: $(cat "$marker"))" >&2; exit 1; }
+  printf '%s\n' "${4:-}" > "$marker"
+  printf '%s\n' "${FM_FAKE_TREEHOUSE_LEASE_PATH:-$wt}"
+fi
+exit 0
+SH
+  chmod +x "$1/treehouse"
+}
+
 # fm_test_make_spawn_fakebin <dir> [extra-exit0-tool...]
-# Creates <dir>/fakebin with the spawn tmux stub, a no-op treehouse, and any
+# Creates <dir>/fakebin with the spawn tmux stub, a state-only Treehouse, and any
 # extra exit-0 tools. Echoes the fakebin path.
 fm_test_make_spawn_fakebin() {
   local dir=$1 fakebin
   shift
   fakebin=$(fm_fakebin "$dir")
   fm_test_fake_tmux_spawn "$fakebin"
-  fm_fake_exit0 "$fakebin" treehouse "$@"
+  fm_fake_exit0 "$fakebin" "$@"
+  fm_test_fake_treehouse "$fakebin"
   printf '%s\n' "$fakebin"
 }
 
