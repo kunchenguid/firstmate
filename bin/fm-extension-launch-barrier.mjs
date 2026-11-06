@@ -15,12 +15,27 @@ const READY_SCHEMA = "firstmate.extension-invocation-ready.v1";
 const OWNER_SCHEMA = "firstmate.extension-invocation-owner.v1";
 const RELEASE_SCHEMA = "firstmate.extension-invocation-release.v1";
 const STARTUP_WAIT_MS = 5000;
+// The host releases this barrier with a wall-clock deadline that counts time
+// the machine spent suspended. A wait that expired far past its deadline
+// cannot be a host that never answered: the machine slept across it. One
+// bounded re-arm follows; it is never granted twice. A suspension that ends
+// inside the slack still kills at the bound, because without a second clock
+// the barrier cannot tell it from a host that never answered.
+const SUSPEND_SLACK_MS = 2000;
+const SUSPEND_GRACE_MS = 5000;
 const MAX_CONTROL_BYTES = 16384;
 const POLL_MS = 20;
 
 function die(message) {
   process.stderr.write(`extension launch barrier: ${message}\n`);
   process.exit(125);
+}
+
+// Deadline failures name their bound and lateness so a suspension-driven
+// exit can never be read as a host that failed to release in time.
+function deadlineMessage(subject, bound, overrunMs, graceUsed) {
+  const grace = graceUsed ? ` after a system suspension (a ${SUSPEND_GRACE_MS} ms bounded grace expired)` : "";
+  return `${subject}; bound ${bound} fired ${overrunMs} ms past its deadline${grace}`;
 }
 
 function exactKeys(value, expected) {
@@ -86,19 +101,35 @@ async function main() {
     group_identity: identity,
   });
 
-  const deadline = Date.now() + STARTUP_WAIT_MS;
+  let deadline = Date.now() + STARTUP_WAIT_MS;
   let release;
-  while (Date.now() < deadline) {
-    if (!pidAlive(hostPid)) process.exit(125);
-    try {
-      release = await readControl(releaseFile);
-      break;
-    } catch (error) {
-      if (error && error.code !== "ENOENT") throw error;
+  let graceUsed = false;
+  let suspensionOverrun = 0;
+  while (true) {
+    while (Date.now() < deadline) {
+      if (!pidAlive(hostPid)) process.exit(125);
+      try {
+        release = await readControl(releaseFile);
+        break;
+      } catch (error) {
+        if (error && error.code !== "ENOENT") throw error;
+      }
+      await sleep(POLL_MS);
     }
-    await sleep(POLL_MS);
+    if (release) break;
+    const overrun = Date.now() - deadline;
+    if (!graceUsed && overrun > SUSPEND_SLACK_MS) {
+      // The wait expired far past its deadline: the machine was suspended
+      // across it. Re-arm once for a bounded grace so a release that is
+      // already on its way still lands; a host that never releases still
+      // fails at the bound.
+      graceUsed = true;
+      suspensionOverrun = overrun;
+      deadline = Date.now() + SUSPEND_GRACE_MS;
+      continue;
+    }
+    die(deadlineMessage("host did not release the launch barrier", "startup", graceUsed ? suspensionOverrun : overrun, graceUsed));
   }
-  if (!release) die("host did not release the launch barrier");
   if (!exactKeys(release, ["schema", "token"]) || release.schema !== RELEASE_SCHEMA || release.token !== token) {
     die("launch release identity is invalid");
   }
