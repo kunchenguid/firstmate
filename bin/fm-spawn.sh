@@ -128,9 +128,9 @@
 #   effective_model= stays unknown-at-spawn until this generation is observed.
 #   Their folder-trust gate requires viewport capture (tmux/herdr/zellij), sends
 #   Enter only on the complete affirmative-selected dialog, and waits for work
-#   or a response before success. Relaunch also requires SessionStart to write
-#   its spawn_gen into state/<id>.meta.droid-model.<spawn_gen>.started; old
-#   output alone is insufficient. Retirement, abort, and teardown remove it.
+#   or a response before success. Relaunch requires generation-scoped receipts
+#   from SessionStart and a subsequent PreToolUse or Stop hook.
+#   Retirement, abort, and teardown remove them.
 #   FM_DROID_READY_POLLS (120) and
 #   FM_DROID_POLL_INTERVAL (0.5 seconds) bound that wait; raw launches bypass it.
 #   --backend <name> is the explicit runtime session-provider backend for this
@@ -1934,7 +1934,8 @@ spawn_abort_cleanup() {
     if [ "${RELAUNCH:-0}" -eq 1 ] ||
       { [ ! -e "$STATE/$ID.meta" ] && [ ! -L "$STATE/$ID.meta" ]; }; then
       rm -f "$DROID_SETTINGS_CLEANUP" "$STATE/$ID.meta.droid-model.${SPAWN_GEN:-unset}" \
-        "$STATE/$ID.meta.droid-model.${SPAWN_GEN:-unset}.started" || true
+        "$STATE/$ID.meta.droid-model.${SPAWN_GEN:-unset}.started" \
+        "$STATE/$ID.meta.droid-model.${SPAWN_GEN:-unset}.progress" || true
     fi
     DROID_SETTINGS_CLEANUP=
   fi
@@ -3930,28 +3931,30 @@ droid_effort_value() {
 }
 
 droid_settings_json() { # <resolved-model>; render this launch's process-local settings
-  local model=$1 effort hook_command='' observe_command start_command
+  local model=$1 effort hook_command='' observe_command start_command progress_command
   effort=$(droid_effort_value "$EFFORT")
   [ "$KIND" = secondmate ] || hook_command="touch $(shell_quote "$TURNEND")"
   observe_command="bash $(shell_quote "$SCRIPT_DIR/fm-droid-model.sh") observe $(shell_quote "$STATE_REAL/$ID.meta") $(shell_quote "$SPAWN_GEN")"
   start_command=$observe_command
+  progress_command=$observe_command
   if [ "$RELAUNCH" -eq 1 ]; then
     start_command="(umask 077; printf '%s\\n' $(shell_quote "$SPAWN_GEN") > $(shell_quote "$DROID_START_RECEIPT")) && $observe_command"
+    progress_command="if [ -f $(shell_quote "$DROID_START_RECEIPT") ] && [ ! -L $(shell_quote "$DROID_START_RECEIPT") ] && [ \"\$(cat $(shell_quote "$DROID_START_RECEIPT"))\" = $(shell_quote "$SPAWN_GEN") ]; then (umask 077; printf '%s\\n' $(shell_quote "$SPAWN_GEN") > $(shell_quote "$DROID_PROGRESS_RECEIPT")); fi; $observe_command"
   fi
   jq -n \
     --arg model "$model" \
     --arg effort "$effort" \
     --arg start_command "$start_command" \
-    --arg observe_command "$observe_command" \
+    --arg progress_command "$progress_command" \
     --arg hook_command "$hook_command" '
       {sessionDefaultSettings:
          ({autonomyLevel: "high", autonomyMode: "auto-high", interactionMode: "auto"} +
           (if $model == "" then {} else {model: $model} end) +
           (if $effort == "" then {} else {reasoningEffort: $effort} end))} +
       {hooks: {SessionStart: [{hooks: [{type: "command", command: $start_command}]}],
-                PreToolUse: [{hooks: [{type: "command", command: $observe_command}]}],
+                PreToolUse: [{hooks: [{type: "command", command: $progress_command}]}],
                 Stop: [{hooks: ((if $hook_command == "" then [] else [{type: "command", command: $hook_command}] end) +
-                  [{type: "command", command: $observe_command}])}]}}
+                  [{type: "command", command: $progress_command}])}]}}
     '
 }
 
@@ -4619,6 +4622,7 @@ if [ "$DROID_TEMPLATE" -eq 1 ]; then
   DROID_MODEL=$(bash "$SCRIPT_DIR/fm-droid-model.sh" resolve "$MODEL") || exit 1
   if [ "$RELAUNCH" -eq 1 ]; then
     DROID_START_RECEIPT="$STATE_REAL/$ID.meta.droid-model.$SPAWN_GEN.started"
+    DROID_PROGRESS_RECEIPT="$STATE_REAL/$ID.meta.droid-model.$SPAWN_GEN.progress"
   fi
   DROID_SETTINGS_TMP=$(mktemp "$STATE/.${ID}.droid-settings.XXXXXXXXXXXX")
   if droid_settings_json "$DROID_MODEL" >"$DROID_SETTINGS_TMP" &&
@@ -5836,10 +5840,6 @@ droid_launch_has_progress() { # <visible-pane-capture>
     printf '%s\n' "$1" | grep -qE '^[[:space:]]*⛬[[:space:]]'
 }
 
-droid_progress_lines() { # <visible-pane-capture>
-  printf '%s\n' "$1" | grep -E 'Press ESC to stop|^[[:space:]]*⛬[[:space:]]' || true
-}
-
 droid_current_launch_started() {
   [ "$RELAUNCH" -eq 0 ] && return 0
   # A reused pane can retain progress from the retired launch. Its replacement
@@ -5849,7 +5849,7 @@ droid_current_launch_started() {
 }
 
 droid_wait_for_working() {
-  local pane line progress i=0 max=${FM_DROID_READY_POLLS:-120} interval=${FM_DROID_POLL_INTERVAL:-0.5}
+  local pane i=0 max=${FM_DROID_READY_POLLS:-120} interval=${FM_DROID_POLL_INTERVAL:-0.5}
   DROID_READY_FAILURE_DETAIL='Droid did not start processing its launch brief'
   while [ "$i" -lt "$max" ]; do
     if ! pane=$(fm_backend_visible_capture "$BACKEND" "$T" "$W"); then
@@ -5865,22 +5865,16 @@ droid_wait_for_working() {
       fi
       DROID_READY_FAILURE_DETAIL='Droid folder-trust dialog did not clear or its verified affirmative choice was unavailable'
     elif [[ "$pane" != *'Exit without trusting'* ]]; then
-      if droid_launch_has_progress "$pane"; then
+      if [ "$RELAUNCH" -eq 1 ]; then
         if droid_current_launch_started; then
-          if [ "$RELAUNCH" -eq 0 ]; then return 0; fi
-          progress=$(droid_progress_lines "$pane")
-          while IFS= read -r line; do
-            [ -n "$line" ] || continue
-            if ! printf '%s\n' "$DROID_PRIOR_PROGRESS" | grep -Fqx -- "$line"; then
-              return 0
-            fi
-          done <<EOF
-$progress
-EOF
+          if [ -f "$DROID_PROGRESS_RECEIPT" ] && [ ! -L "$DROID_PROGRESS_RECEIPT" ] &&
+            [ "$(cat "$DROID_PROGRESS_RECEIPT" 2>/dev/null)" = "$SPAWN_GEN" ]; then return 0; fi
           DROID_READY_FAILURE_DETAIL='Droid replacement has not shown new launch progress'
         else
           DROID_READY_FAILURE_DETAIL='Droid replacement did not confirm its current launch generation'
         fi
+      elif droid_launch_has_progress "$pane"; then
+        return 0
       else
         DROID_READY_FAILURE_DETAIL='Droid did not start processing its launch brief after folder-trust handling'
       fi
@@ -8209,13 +8203,6 @@ else
     # under errexit on sourcing a file spawn already reclaimed even inside ||, so
     # keep an errexit pane shell open in both cases.
     LAUNCH_SOURCE_TEXT="if [ -e $(shell_quote "$LAUNCH_FILE") ]; then $LAUNCH_SOURCE_TEXT || true; else echo 'error: private launch file was already removed; refusing worker launch' >&2; fi"
-  fi
-  if [ "$DROID_TEMPLATE" -eq 1 ] && [ "$RELAUNCH" -eq 1 ]; then
-    DROID_PRIOR_PANE=$(fm_backend_visible_capture "$BACKEND" "$T" "$W") || {
-      echo "error: could not capture Droid's prior viewport before relaunch; inspect window $T" >&2
-      exit 1
-    }
-    DROID_PRIOR_PROGRESS=$(droid_progress_lines "$DROID_PRIOR_PANE")
   fi
   if ! spawn_send_literal "$T" "$LAUNCH_SOURCE_TEXT"; then
     [ "$ORCA_LAUNCH_ENV_ENABLED" != 1 ] || spawn_orca_launch_send_fail

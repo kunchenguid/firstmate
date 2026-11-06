@@ -89,6 +89,10 @@ case "${1:-}" in
           if [ "$(cat "$D/becomes")" = droid ]; then
             for settings in "$FM_HOME/state/"*.droid-settings.json; do
               [ -f "$settings" ] || continue
+              if [ "${FM_FAKE_DROID_PROGRESS:-PreToolUse}" = before-start ]; then
+                hook=$(jq -er '.hooks.PreToolUse[0].hooks[0].command' "$settings") || exit 1
+                printf '{"hook_event_name":"PreToolUse"}\n' | bash -c "$hook" || exit 1
+              fi
               case "${FM_FAKE_DROID_START:-current}" in
                 missing) ;;
                 *)
@@ -101,10 +105,19 @@ case "${1:-}" in
                   fi
                   ;;
               esac
+              case "${FM_FAKE_DROID_PROGRESS:-PreToolUse}" in
+                PreToolUse|Stop)
+                  event=${FM_FAKE_DROID_PROGRESS:-PreToolUse}
+                  hook=$(jq -er --arg event "$event" '.hooks[$event][0].hooks[-1].command' "$settings") || exit 1
+                  printf '{"hook_event_name":"%s"}\n' "$event" | bash -c "$hook" || exit 1
+                  ;;
+                stale)
+                  meta="${settings%.droid-settings.json}.meta"
+                  gen=$(sed -n 's/^spawn_gen=//p' "$meta")
+                  printf 'retired\n' > "$meta.droid-model.$gen.progress"
+                  ;;
+              esac
             done
-            if [ "${FM_FAKE_DROID_PROGRESS:-}" = fresh ]; then
-              printf '⛬  Replacement response\n' > "$D/droid-screen"
-            fi
           fi
           [ -z "${FM_FAKE_LAUNCH_TRANSPORT_FAIL_AFTER_START:-}" ] || exit 1
           ;;
@@ -989,11 +1002,11 @@ test_same_droid_relaunch_preserves_dynamic_effort() {
 }
 
 test_droid_relaunch_requires_a_current_start_receipt() {
-  local dir out rc mode meta gen receipt signal screen progress
+  local dir out rc mode meta gen receipt signal screen progress start
   for signal in response busy; do
     screen='⛬  Previous answer'
     [ "$signal" != busy ] || screen='Press ESC to stop'
-    for mode in missing wrong-generation current current-progress; do
+    for mode in missing wrong-generation current before-start stale PreToolUse Stop; do
       dir=$(new_case "droid-start-$signal-$mode" rl-droid-start)
       add_ship_task "$dir" rl-droid-start droid
       printf droid > "$dir/fake/command"
@@ -1003,11 +1016,15 @@ test_droid_relaunch_requires_a_current_start_receipt() {
       printf 'spawn_gen=retired\n' >> "$meta"
       printf 'retired\n' > "$meta.droid-model.retired.started"
 
-      progress=''
-      [ "$mode" != current-progress ] || progress=fresh
-      out=$(FM_FAKE_DROID_START="$mode" FM_FAKE_DROID_PROGRESS="$progress" FM_DROID_READY_POLLS=2 FM_DROID_POLL_INTERVAL=0 \
+      start=current
+      progress=none
+      case "$mode" in
+        missing|wrong-generation) start=$mode ;;
+        before-start|stale|PreToolUse|Stop) progress=$mode ;;
+      esac
+      out=$(FM_FAKE_DROID_START="$start" FM_FAKE_DROID_PROGRESS="$progress" FM_DROID_READY_POLLS=2 FM_DROID_POLL_INTERVAL=0 \
         run_control "$dir" rl-droid-start relaunch --note 'replace the prior turn'); rc=$?
-      if [ "$mode" = current-progress ]; then
+      if [ "$mode" = PreToolUse ] || [ "$mode" = Stop ]; then
         expect_code 0 "$rc" "current-generation receipt and new progress must confirm the replacement"$'\n'"$out"
         gen=$(meta_field "$dir" rl-droid-start spawn_gen)
         receipt="$meta.droid-model.$gen.started"
@@ -1015,7 +1032,7 @@ test_droid_relaunch_requires_a_current_start_receipt() {
         [ ! -e "$meta.droid-model.retired.started" ] || fail 'relaunch retained the retired startup receipt'
       else
         expect_code 1 "$rc" "unchanged old $signal and a $mode receipt must not confirm relaunch"$'\n'"$out"
-        if [ "$mode" = current ]; then
+        if [ "$mode" = current ] || [ "$mode" = before-start ] || [ "$mode" = stale ]; then
           assert_contains "$out" 'Droid replacement has not shown new launch progress' 'stale output counted as replacement progress'
         else
           assert_contains "$out" 'Droid replacement did not confirm its current launch generation' 'relaunch refused before testing the receipt'
@@ -1023,9 +1040,7 @@ test_droid_relaunch_requires_a_current_start_receipt() {
         assert_not_contains "$out" 'relaunched rl-droid-start' 'stale output reported a successful replacement'
       fi
       assert_equals droid "$(cat "$dir/fake/command")" 'the regression did not reach the replacement launch'
-      if [ "$mode" != current-progress ]; then
-        assert_equals "$screen" "$(cat "$dir/fake/droid-screen")" 'the stale-output control changed'
-      fi
+      assert_equals "$screen" "$(cat "$dir/fake/droid-screen")" 'the identical viewport changed'
       chmod u+w "$dir/home/state/rl-droid-start.git-hooks"
     done
   done
