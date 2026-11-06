@@ -413,6 +413,8 @@ STUB
         "$mode: $contract retained the scout-only write restriction"
       assert_grep "Keep project edits inside this worktree; keep proof and scratch output outside it, under \`$home/data/$id/\` or a temporary directory." "$contract" \
         "$mode: $contract omitted the ship scratch-location rule"
+      assert_grep "Put any copy of the project that you build, deploy, or run project tooling against in a fresh temporary directory outside every git repository, never under \`$home/data/$id/\`" "$contract" \
+        "$mode: $contract omitted the rule keeping project copies outside every git repository"
       assert_grep "Outside the worktree, write only that task material and the status and steering-inbox records authorized below." "$contract" \
         "$mode: $contract omitted the ship outside-worktree write boundary"
       assert_grep "Leave the worktree clean before reporting done." "$contract" \
@@ -425,6 +427,8 @@ STUB
     rm "$home/data/$id/brief.md"
     FM_HOME="$home" "$BRIEF" "$id" fixture-project --mode "$mode" >/dev/null 2>&1 \
       || fail "$mode: ordinary ship brief generation should succeed"
+    assert_grep "Put any copy of the project that you build, deploy, or run project tooling against in a fresh temporary directory outside every git repository, never under \`$home/data/$id/\`" "$home/data/$id/brief.md" \
+      "$mode: ordinary ship brief omitted the rule keeping project copies outside every git repository"
     brief_dod="$TMP_ROOT/promote-dod/brief-dod-$id"
     delivered_dod="$TMP_ROOT/promote-dod/delivered-dod-$id"
     awk '/^# Definition of done$/ { emit=1 } emit' "$home/data/$id/brief.md" > "$brief_dod"
