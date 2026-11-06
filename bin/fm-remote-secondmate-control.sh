@@ -83,6 +83,8 @@ if [ "${1:-}" = retire ] && [ ! -e "$TARGET_HOME" ] && [ ! -L "$TARGET_HOME" ]; 
   esac
 fi
 
+# shellcheck source=bin/fm-profile-lib.sh
+. "$SCRIPT_DIR/fm-profile-lib.sh"
 # shellcheck source=bin/fm-backend.sh
 . "$SCRIPT_DIR/fm-backend.sh"
 # shellcheck source=bin/fm-ff-lib.sh
@@ -239,10 +241,10 @@ cmd_launch() {
   validate_id "$id"
   validate_home "$id"
   case "$harness" in
-    claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|omp) ;;
+    claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|omp|droid) ;;
     *) die "unverified remote secondmate harness: $harness" ;;
   esac
-  case "$effort" in -|low|medium|high|xhigh|max|ultra) ;; *) die "invalid remote secondmate effort: $effort" ;; esac
+  [ "$effort" = - ] || fm_profile_effort_valid "$effort" || die "invalid remote secondmate effort: $effort"
   if [ "$effort" = ultra ]; then
     "$SCRIPT_DIR/fm-harness.sh" validate-native-effort "$harness" "$model" "$effort" || return 1
   fi
@@ -326,10 +328,10 @@ cmd_relaunch() {
   validate_id "$id"
   validate_home "$id"
   case "$harness" in
-    claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|omp) ;;
+    claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|omp|droid) ;;
     *) die "unverified remote secondmate harness: $harness" ;;
   esac
-  case "$effort" in -|default|low|medium|high|xhigh|max|ultra) ;; *) die "invalid remote secondmate effort: $effort" ;; esac
+  case "$effort" in -|default) ;; *) fm_profile_effort_valid "$effort" || die "invalid remote secondmate effort: $effort" ;; esac
   case "$model" in *[[:space:]]*) die "invalid remote secondmate model: $model" ;; esac
   if [ "$effort" = ultra ]; then
     "$SCRIPT_DIR/fm-harness.sh" validate-native-effort "$harness" "$model" "$effort" || return 1

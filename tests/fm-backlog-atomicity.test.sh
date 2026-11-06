@@ -47,7 +47,6 @@ command -v tasks-axi >/dev/null 2>&1 || {
 }
 
 # --- fixture ----------------------------------------------------------------
-
 # fm_tasks_axi_backend reads <addressing-root>/.tasks.toml and otherwise falls
 # through to the developer's ambient ~/.tasks-axi/config.toml. make_home pins
 # the home itself; a case that relocates its data directory is addressed from
@@ -100,6 +99,7 @@ window_file="$(dirname "$0")/.spawn-window"
 case "$*" in *"#{pane_current_path}"*) printf '%s\n' "${FM_FAKE_PANE_PATH:-}"; exit 0 ;; esac
 case "${1:-}" in
   display-message) printf 'firstmate\n'; exit 0 ;;
+  capture-pane) printf '%s\n' "${FM_FAKE_PANE_CAPTURE:-}"; exit 0 ;;
   list-windows) [ ! -s "$window_file" ] || cat "$window_file"; exit 0 ;;
   new-window)
     name=
@@ -127,6 +127,13 @@ exit 0
 SH
   chmod +x "$fakebin/tmux"
   fm_fake_exit0 "$fakebin" treehouse gh gh-axi no-mistakes
+  cat > "$fakebin/droid" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = exec ] && [ "${2:-}" = --help ]; then
+  printf '%s\n' 'Available Models:' '  gpt-5.6-sol  GPT-5.6 Sol'
+fi
+SH
+  chmod +x "$fakebin/droid"
 
   fm_git_init_commit "$case_dir/project"
   fm_git_add_origin "$case_dir/project" "$case_dir/project.origin.git"
@@ -344,7 +351,6 @@ SH
 }
 
 # --- fm_tasks_axi's own bound -------------------------------------------------
-
 # A PATH with no timeout variant on it - the stock-macOS shape, where GNU
 # timeout is absent and coreutils does not ship gtimeout. fm_tasks_axi must
 # still bound the call, through its perl watchdog, instead of running it
@@ -1400,13 +1406,12 @@ test_droid_settings_survive_incomplete_record_rollback() {
   id=atomic-droid-remove-failure-b5
   case_dir=$(make_home droid-remove-failure "$id")
   add_item "$case_dir" "$id"
-  fm_fake_exit0 "$case_dir/fakebin" droid
   meta="$(home_of "$case_dir")/state/$id.meta"
   settings="$(home_of "$case_dir")/state/$id.droid-settings.json"
   break_verb "$case_dir" start
   break_meta_removal "$case_dir" "$meta"
 
-  out=$(run_spawn "$case_dir" "$id" "$case_dir/project" --harness droid \
+  out=$(FM_FAKE_PANE_CAPTURE='Executing... (Press ESC to stop)' run_spawn "$case_dir" "$id" "$case_dir/project" --harness droid \
     --model gpt-5.6-sol --effort dynamic --mode no-mistakes --yolo off) || rc=$?
   [ "$rc" -ne 0 ] || fail 'Droid spawn reported success though transition and rollback failed'
   assert_contains "$out" 'failed-dispatch cleanup is incomplete' 'Droid spawn did not report incomplete rollback'
@@ -1468,8 +1473,7 @@ test_dispatch_defers_interruption_across_backlog_commit() {
 
       rc=0
       if [ "$harness" = droid ]; then
-        fm_fake_exit0 "$case_dir/fakebin" droid
-        out=$(run_spawn "$case_dir" "$id" "$case_dir/project" --harness droid \
+        out=$(FM_FAKE_PANE_CAPTURE='Executing... (Press ESC to stop)' run_spawn "$case_dir" "$id" "$case_dir/project" --harness droid \
           --model gpt-5.6-sol --effort dynamic --mode no-mistakes --yolo off) || rc=$?
       else
         out=$(run_ship_spawn "$case_dir" "$id") || rc=$?
@@ -2976,7 +2980,6 @@ EOF
   pass "spawn refuses an unsafe tasks-axi config before any exemption is derived from it"
 }
 
-
 test_spawn_refuses_a_data_directory_symlinked_outside_the_home() {
   local case_dir home id out rc=0
   id=atomic-external-data-b15
@@ -2996,7 +2999,6 @@ test_spawn_refuses_a_data_directory_symlinked_outside_the_home() {
     "spawn published a task record through a data directory outside the home"
   pass "spawn refuses a data directory symlinked outside the home"
 }
-
 
 test_configured_adapter_refuses_a_data_directory_outside_the_home() {
   local case_dir home id out rc=0
@@ -3018,7 +3020,6 @@ test_configured_adapter_refuses_a_data_directory_outside_the_home() {
     "a configured adapter published a task record outside the home"
   pass "a configured adapter refuses a data directory outside the home"
 }
-
 
 test_dispatch_and_completion_are_structural() {
   local case_dir home id meta out pr

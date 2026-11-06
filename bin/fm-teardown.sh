@@ -3519,10 +3519,9 @@ cleanup_firstmate_home_children() {
           || { endpoint_close_refusal "child $child_id" "$child_backend" "$child_t" 0; return 1; }
       fi
     fi
+    remove_droid_task_trust "$sub_state" "$child_id" || return 1
     teardown_export_records "$sub_state" "$child_id" || return 1
-    if [ "$child_kind" != secondmate ]; then
-      remove_droid_task_trust "$sub_state" "$child_id" || return 1
-    fi
+
     if [ "$child_kind" = secondmate ]; then
       child_home=$(meta_value "$child_meta" home)
       [ -n "$child_home" ] || child_home=$child_wt
@@ -3594,7 +3593,6 @@ cleanup_firstmate_home_children() {
       "$(fm_wake_signal_seen_path "$sub_state" "$sub_state/$child_id.turn-ended")" \
       "$sub_state/$child_id.pi-ext.ts" "$sub_state/$child_id.omp-ext.ts" \
       "$sub_state/$child_id.droid-settings.json" "$sub_state/$child_id.meta".droid-model.* \
-
       "$sub_state/$child_id.grok-turnend-token" "$sub_state/$child_id.kimi-turnend-token" \
       "$sub_state/$child_id.muse-session" "$sub_state/$child_id.muse-session-current" \
       "$sub_state/$child_id.cursor-session" "$sub_state/$child_id.reconcile-nudged" \
@@ -3992,9 +3990,7 @@ fi
 
 # Retire stored trust ownership even for a missing or reassigned pooled slot.
 # The helper transfers cleanup when another recorded task still uses that path.
-if [ "$KIND" != secondmate ]; then
-  remove_droid_task_trust "$STATE" "$ID" || exit 1
-fi
+remove_droid_task_trust "$STATE" "$ID" || exit 1
 
 # Best-effort: drop the local task branch so the shared repo does not accumulate refs.
 if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
@@ -4145,7 +4141,6 @@ rm -f "$STATE/$ID.turn-ended" "$STATE/$ID.progress" \
   "$(fm_wake_signal_seen_path "$STATE" "$STATE/$ID.turn-ended")" \
   "$STATE/$ID.pi-ext.ts" "$STATE/$ID.omp-ext.ts" "$STATE/$ID.grok-turnend-token" \
   "$STATE/$ID.droid-settings.json" "$STATE/$ID.meta".droid-model.* \
-
   "$STATE/$ID.kimi-turnend-token" "$STATE/$ID.muse-session" \
   "$STATE/$ID.muse-session-current" "$STATE/$ID.cursor-session" \
   "$STATE/$ID.control-relaunch" "$STATE/$ID.control-relaunch.meta-prior" \

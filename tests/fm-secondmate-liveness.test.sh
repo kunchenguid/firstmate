@@ -41,7 +41,6 @@ fm_git_identity fmtest fmtest@example.com
 TMP_ROOT=$(fm_test_tmproot fm-secondmate-liveness)
 
 # --- unit level: fm_backend_tmux_agent_state --------------------------------
-
 # make_probe_tmux <dir> <pane_current_command>: a fake tmux whose
 # #{pane_current_command} display-message query answers with the fixed value;
 # every other subcommand is a silent no-op success.
@@ -201,7 +200,6 @@ test_agent_state_dispatcher_and_compatibility() {
 }
 
 # --- sweep level: bin/fm-bootstrap.sh's secondmate_liveness_sweep -----------
-
 # make_toolchain <dir>: the fixed set of stubs bin/fm-bootstrap.sh's read-only
 # diagnostics need to stay quiet (mirrors tests/fm-secondmate-sync.test.sh's
 # make_fake_toolchain), MINUS tmux - callers add their own controllable tmux.
@@ -647,22 +645,29 @@ test_sweep_respawns_authoritatively_missing_pi_signed_secondmate() {
 test_sweep_respawns_authoritatively_missing_droid_secondmate() {
   local w fb tmuxfb log out settings cmd
   w=$(new_world sweep-missing-droid)
+  mkdir -p "$w/user-home"
   printf '%s\n' droid > "$w/home/config/secondmate-harness"
   add_sm_home "$w" sm1 firstmate:fm-sm1 droid
   printf '%s\n' '{"retired":true}' > "$w/home/state/sm1.droid-settings.json"
+  printf '%s\n' retired > "$w/home/state/sm1.meta.droid-model.previous"
+  printf '%s\n' staged > "$w/home/state/sm1.meta.droid-model.previous.tmp"
+  printf '%s\n' unrelated > "$w/home/state/sm10.meta.droid-model.previous"
   fb=$(make_toolchain "$w"); tmuxfb=$(make_liveness_tmux "$w")
   log="$w/calls.log"; : > "$log"
 
   out=$(run_bootstrap "$tmuxfb:$fb" "$w/home" missing "$log" \
-    FM_FAKE_PANE_CAPTURE='Executing...  (Press ESC to stop)')
+    HOME="$w/user-home" FM_FAKE_PANE_CAPTURE='Executing...  (Press ESC to stop)')
 
   assert_not_contains "$out" "unverified for recovery" \
     "a recorded Droid secondmate should be verified for recovery"
   assert_contains "$(cat "$log")" "new-window" \
-    "an authoritatively missing Droid secondmate should be relaunched"
+    "an authoritatively missing Droid secondmate should be relaunched: $out"
   settings="$w/home/state/sm1.droid-settings.json"
   jq -e '.retired == null and (.hooks.Stop[0].hooks | length == 1)' "$settings" >/dev/null \
     || fail "Droid secondmate recovery did not replace prior runtime settings"
+  assert_absent "$w/home/state/sm1.meta.droid-model.previous" "Droid recovery retained retired accounting"
+  assert_absent "$w/home/state/sm1.meta.droid-model.previous.tmp" "Droid recovery retained staged accounting"
+  assert_equals "$(cat "$w/home/state/sm10.meta.droid-model.previous")" unrelated "Droid recovery removed another task's accounting"
   cmd=$(jq -er '.hooks.Stop[0].hooks[0].command' "$settings") || fail "Droid accounting hook is missing"
   printf '{}\n' | bash -c "$cmd" || fail "Droid secondmate accounting hook failed"
   assert_absent "$w/home/state/sm1.turn-ended" "Droid secondmate must not install a worker turn-end hook"
@@ -670,7 +675,6 @@ test_sweep_respawns_authoritatively_missing_droid_secondmate() {
     "an absent Droid window should not need a destructive pre-kill"
   pass "sweep: an authoritatively missing Droid secondmate window is relaunched"
 }
-
 
 test_sweep_never_acts_on_ambiguous_existing_process() {
   local w fb tmuxfb log out
@@ -795,7 +799,6 @@ test_sweep_noop_with_no_secondmate_meta() {
 # never evidence of death. Full-mode remote readiness repair and route
 # revalidation remain the startup sweep's own behavior, covered by the sweep
 # tests above and tests/fm-remote-secondmate-lifecycle-e2e.test.sh.
-
 # make_remote_probe_world <name>: a parent home carrying one remote-route
 # secondmate meta plus a fake ssh that logs every call and answers with
 # FM_FAKE_REMOTE_REPLY on FM_FAKE_REMOTE_RC.
@@ -1031,6 +1034,7 @@ test_sweep_keeps_tmux_best_effort_kill_when_close_fails
 test_sweep_leaves_alive_secondmate_untouched
 test_sweep_respawns_authoritatively_missing_pi_secondmate
 test_sweep_respawns_authoritatively_missing_pi_signed_secondmate
+test_sweep_respawns_authoritatively_missing_droid_secondmate
 test_sweep_never_acts_on_ambiguous_existing_process
 test_sweep_never_acts_on_transient_unreadability
 test_sweep_reports_missing_endpoint_relaunch_failure

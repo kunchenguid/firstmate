@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Register or retire Droid folder trust for exactly an isolated task worktree.
 # Usage: fm-droid-trust.sh [--receipt <file>] [--remove] <worktree> <project>
+#        fm-droid-trust.sh [--receipt <file>] --secondmate-home <home> <id>
 #        fm-droid-trust.sh --rollback <receipt>
 #        fm-droid-trust.sh --retire <receipt> <state> <task-id>
 # Receipts retain exact paths across relaunch and worktree removal. Rollback
@@ -12,6 +13,8 @@
 # checkout, a parent, or the user's home. Only the exact logical and physical
 # worktree paths enter ~/.factory/settings.json trustedFolders. Other settings
 # and existing trust entries are preserved; malformed or racing stores refuse.
+# A secondmate launch instead requires its exact owned seed marker, AGENTS.md,
+# bin/, and private operational directories contained within the seeded home.
 # Verified on Droid 0.237.0; runtime --settings trust entries are not sufficient.
 # This helper owns trust mutation; spawn and teardown refuse if it fails.
 set -u
@@ -25,18 +28,57 @@ ACTION=register
 RECEIPT=
 TASK_STATE=
 TASK_ID=
-if [ "${1:-}" = --receipt ]; then RECEIPT=${2:-}; shift 2; fi
+MODE=worktree
+if [ "${1:-}" = --receipt ]; then
+  RECEIPT=${2:-}
+  shift 2
+fi
 case "${1:-}" in
-  --remove) ACTION=remove; shift ;;
-  --rollback) ACTION=rollback; RECEIPT=${2:-}; shift 2 ;;
-  --retire) ACTION=retire; RECEIPT=${2:-}; TASK_STATE=${3:-}; TASK_ID=${4:-}; shift 4 ;;
+  --remove)
+    ACTION=remove
+    shift
+    ;;
+  --rollback)
+    ACTION=rollback
+    RECEIPT=${2:-}
+    shift 2
+    ;;
+  --retire)
+    ACTION=retire
+    RECEIPT=${2:-}
+    TASK_STATE=${3:-}
+    TASK_ID=${4:-}
+    shift 4
+    ;;
 esac
 case "$ACTION" in
-  rollback|retire) [ "$#" -eq 0 ] && [ -n "$RECEIPT" ] || exit 2; WT_ARG=; PROJ_ARG= ;;
-  *) [ "$#" -eq 2 ] || { echo "usage: fm-droid-trust.sh [--receipt <file>] [--remove] <worktree> <project>" >&2; exit 2; }; WT_ARG=$1; PROJ_ARG=$2 ;;
+  rollback | retire)
+    [ "$#" -eq 0 ] && [ -n "$RECEIPT" ] || exit 2
+    WT_ARG=
+    PROJ_ARG=
+    ;;
+  *)
+    if [ "${1:-}" = --secondmate-home ]; then
+      [ "$#" -eq 3 ] || exit 2
+      MODE=secondmate
+      WT_ARG=$2
+      SUB_ID=$3
+      PROJ_ARG=$2
+    else
+      [ "$#" -eq 2 ] || {
+        echo "usage: fm-droid-trust.sh [--receipt <file>] [--remove] <worktree> <project>" >&2
+        exit 2
+      }
+      WT_ARG=$1
+      PROJ_ARG=$2
+    fi
+    ;;
 esac
 
-refuse() { echo "error: refusing to change Droid trust: $1" >&2; exit 1; }
+refuse() {
+  echo "error: refusing to change Droid trust: $1" >&2
+  exit 1
+}
 
 real_dir() { (cd -P -- "$1" 2>/dev/null && pwd -P); }
 logical_dir() { (cd -- "$1" 2>/dev/null && pwd -L); }
@@ -54,31 +96,48 @@ HOME_REAL=$(real_dir "$HOME") || true
 WT_REAL=
 WT_LOGICAL=
 if [ "$ACTION" = register ] || [ "$ACTION" = remove ]; then
-WT_REAL=$(real_dir "$WT_ARG") || true
-[ -n "$WT_REAL" ] || refuse "worktree '$WT_ARG' is not an accessible directory"
-WT_LOGICAL=$(logical_dir "$WT_ARG") || true
-[ -n "$WT_LOGICAL" ] || WT_LOGICAL=$WT_REAL
-PROJ_REAL=$(real_dir "$PROJ_ARG") || true
-[ -n "$PROJ_REAL" ] || refuse "project '$PROJ_ARG' is not an accessible directory"
+  WT_REAL=$(real_dir "$WT_ARG") || true
+  [ -n "$WT_REAL" ] || refuse "worktree '$WT_ARG' is not an accessible directory"
+  WT_LOGICAL=$(logical_dir "$WT_ARG") || true
+  [ -n "$WT_LOGICAL" ] || WT_LOGICAL=$WT_REAL
+  PROJ_REAL=$(real_dir "$PROJ_ARG") || true
+  [ -n "$PROJ_REAL" ] || refuse "project '$PROJ_ARG' is not an accessible directory"
 
-[ "$WT_REAL" != "$HOME_REAL" ] || refuse "'$WT_REAL' is the home directory, not a task worktree"
+  [ "$WT_REAL" != "$HOME_REAL" ] || refuse "'$WT_REAL' is the home directory, not a task worktree"
 
-WT_TOP=$(git -C "$WT_REAL" rev-parse --show-toplevel 2>/dev/null) || true
-[ -n "$WT_TOP" ] || refuse "'$WT_REAL' is not inside a git repository"
-WT_TOP_REAL=$(real_dir "$WT_TOP") || true
-[ "$WT_TOP_REAL" = "$WT_REAL" ] || refuse "'$WT_REAL' is not a worktree root (its root is '${WT_TOP_REAL:-unresolvable}')"
+  WT_TOP=$(git -C "$WT_REAL" rev-parse --show-toplevel 2>/dev/null) || true
+  [ -n "$WT_TOP" ] || refuse "'$WT_REAL' is not inside a git repository"
+  WT_TOP_REAL=$(real_dir "$WT_TOP") || true
+  [ "$WT_TOP_REAL" = "$WT_REAL" ] || refuse "'$WT_REAL' is not a worktree root (its root is '${WT_TOP_REAL:-unresolvable}')"
 
-WT_GIT_DIR=$(git -C "$WT_REAL" rev-parse --absolute-git-dir 2>/dev/null) || true
-[ -n "$WT_GIT_DIR" ] || refuse "'$WT_REAL' has no resolvable git directory"
-WT_GIT_DIR=$(real_dir "$WT_GIT_DIR") || true
-[ -n "$WT_GIT_DIR" ] || refuse "'$WT_REAL' has an unresolvable git directory"
-WT_COMMON=$(common_dir_of "$WT_REAL") || true
-[ -n "$WT_COMMON" ] || refuse "'$WT_REAL' has no resolvable git common directory"
-[ "$WT_GIT_DIR" != "$WT_COMMON" ] || refuse "'$WT_REAL' is a primary checkout, not an isolated worktree"
+  WT_GIT_DIR=$(git -C "$WT_REAL" rev-parse --absolute-git-dir 2>/dev/null) || true
+  [ -n "$WT_GIT_DIR" ] || refuse "'$WT_REAL' has no resolvable git directory"
+  WT_GIT_DIR=$(real_dir "$WT_GIT_DIR") || true
+  [ -n "$WT_GIT_DIR" ] || refuse "'$WT_REAL' has an unresolvable git directory"
+  WT_COMMON=$(common_dir_of "$WT_REAL") || true
+  [ -n "$WT_COMMON" ] || refuse "'$WT_REAL' has no resolvable git common directory"
+  if [ "$MODE" = worktree ]; then
+    [ "$WT_GIT_DIR" != "$WT_COMMON" ] || refuse "'$WT_REAL' is a primary checkout, not an isolated worktree"
+  else
+    SUB_MARKER="$WT_REAL/.fm-secondmate-home"
+    [ -f "$SUB_MARKER" ] && [ ! -L "$SUB_MARKER" ] && [ -O "$SUB_MARKER" ] ||
+      refuse "'$WT_REAL' has no owned regular secondmate seed marker"
+    [ -n "$SUB_ID" ] && [ "$(cat "$SUB_MARKER")" = "$SUB_ID" ] ||
+      refuse "'$WT_REAL' is not marked for secondmate '$SUB_ID'"
+    [ -f "$WT_REAL/AGENTS.md" ] && [ -d "$WT_REAL/bin" ] ||
+      refuse "'$WT_REAL' is not a seeded Firstmate home"
+    for sub_dir_name in data state config projects; do
+      sub_dir="$WT_REAL/$sub_dir_name"
+      [ -e "$sub_dir" ] || [ -L "$sub_dir" ] || continue
+      [ -d "$sub_dir" ] || refuse "'$sub_dir' is not a directory"
+      sub_real=$(real_dir "$sub_dir") || refuse "'$sub_dir' cannot be resolved"
+      case "$sub_real" in "$WT_REAL"/*) ;; *) refuse "'$sub_dir' resolves outside the secondmate home" ;; esac
+    done
+  fi
 
-PROJ_COMMON=$(common_dir_of "$PROJ_REAL") || true
-[ -n "$PROJ_COMMON" ] || refuse "project '$PROJ_REAL' is not inside a git repository"
-[ "$WT_COMMON" = "$PROJ_COMMON" ] || refuse "'$WT_REAL' is not a worktree of project '$PROJ_REAL'"
+  PROJ_COMMON=$(common_dir_of "$PROJ_REAL") || true
+  [ -n "$PROJ_COMMON" ] || refuse "project '$PROJ_REAL' is not inside a git repository"
+  [ "$WT_COMMON" = "$PROJ_COMMON" ] || refuse "'$WT_REAL' is not a worktree of project '$PROJ_REAL'"
 
 fi
 
@@ -110,7 +169,7 @@ FM_STATE_OVERRIDE=$STORE_DIR_REAL
 TRUST_LOCKS=()
 release_trust_locks() {
   local status=$? i
-  for ((i=${#TRUST_LOCKS[@]} - 1; i >= 0; i--)); do
+  for ((i = ${#TRUST_LOCKS[@]} - 1; i >= 0; i--)); do
     fm_lock_release "${TRUST_LOCKS[$i]}" || true
   done
   return "$status"

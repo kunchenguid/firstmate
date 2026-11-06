@@ -158,7 +158,6 @@ task_inbox_export() {  # <home> <id>
   printf "export FM_TASK_INBOX='%s'; " "$state/$2.inbox"
 }
 
-
 run_spawn() {
   local home=$1 wt=$2 fakebin=$3 launchlog=$4
   shift 4
@@ -1550,32 +1549,6 @@ test_pi_signed_persistent_secondmate_uses_pi_extensions_and_identity() {
   pass "pi-signed is a distinct persistent secondmate runtime with shared Pi supervision semantics"
 }
 
-test_droid_preserves_native_model_and_dynamic_effort_through_settings() {
-  local rec id out status launch settings turnend
-  id=profile-droid-z20
-  rec=$(make_spawn_case profile-droid droid "$id")
-  read_case_record "$rec"
-  mkdir -p "$HOME_DIR/user-home/.factory"
-  printf '%s\n' '{"customModels":[{"id":"custom:GPT-5.6-Sol-0","model":"gpt-5.6-sol","provider":"custom"}]}' \
-    > "$HOME_DIR/user-home/.factory/settings.json"
-
-  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
-    "$id" "$PROJ_DIR" --harness droid --model gpt-5.6-sol --effort dynamic)
-  status=$?
-  expect_code 0 "$status" "droid spawn with model and dynamic effort should succeed"
-  assert_meta_profile "$HOME_DIR/state/$id.meta" droid gpt-5.6-sol dynamic
-  launch=$(cat "$LAUNCH_LOG")
-  settings="$HOME_DIR/state/$id.droid-settings.json"
-  turnend="$(cd "$HOME_DIR/state" && pwd -P)/$id.turn-ended"
-  assert_contains "$launch" "droid --settings '$settings' --auto high" \
-    "droid launch did not use its process-only settings merge"
-  jq -e '.sessionDefaultSettings == {"model":"gpt-5.6-sol","reasoningEffort":"dynamic"}' "$settings" >/dev/null \
-    || fail "droid settings changed an exact native model id or lost dynamic effort"
-  jq -e --arg turnend "$turnend" \
-    '.hooks.Stop[0].hooks[0] == {"type":"command","command":("touch '\''" + $turnend + "'\''")}' "$settings" >/dev/null \
-    || fail "droid settings lost the Stop turn-end hook"
-  pass "droid preserves native model identity and dynamic effort alongside its Stop hook"
-}
 
 test_droid_exact_model_ids_and_selection_refusals() {
   local rec id selection scenario out status settings
@@ -1607,7 +1580,7 @@ test_droid_exact_model_ids_and_selection_refusals() {
       native|custom-first|custom-second)
         expect_code 0 "$status" "exact Droid ID failed: $scenario"$'\n'"$out"
         settings="$HOME_DIR/state/$id.droid-settings.json"
-        jq -e --arg model "$selection" '.sessionDefaultSettings == {model:$model,reasoningEffort:"high"} and (keys == ["hooks","sessionDefaultSettings"])' "$settings" >/dev/null || fail 'Droid changed exact ID, effort, or unrelated settings'
+        jq -e --arg model "$selection" '.sessionDefaultSettings == {model:$model,reasoningEffort:"high",autonomyLevel:"high",autonomyMode:"auto-high",interactionMode:"auto"} and (keys == ["hooks","sessionDefaultSettings"])' "$settings" >/dev/null || fail 'Droid changed exact ID, effort, or unrelated settings'
         assert_meta_profile "$HOME_DIR/state/$id.meta" droid "$selection" high
         assert_equals unknown-at-spawn "$(sed -n 's/^effective_model=//p' "$HOME_DIR/state/$id.meta")" 'Droid pin claimed execution without observation'
         assert_not_contains "$(cat "$settings" "$HOME_DIR/state/$id.meta")" must-not-copy 'Droid copied unrelated settings'
@@ -1621,7 +1594,14 @@ test_droid_exact_model_ids_and_selection_refusals() {
         [ ! -e "$HOME_DIR/state/$id.droid-settings.json" ] || fail 'invalid Droid ID published settings'
         ;;
     esac
-    cmp -s "$CASE_DIR/user-before.json" "$HOME_DIR/user-home/.factory/settings.json" || fail 'Droid selection changed user defaults'
+    if [ "$status" -eq 0 ]; then
+      cmp -s <(jq -S 'del(.trustedFolders)' "$CASE_DIR/user-before.json") \
+        <(jq -S 'del(.trustedFolders)' "$HOME_DIR/user-home/.factory/settings.json") \
+        || fail 'Droid selection changed user defaults outside its owned trust entry'
+    else
+      cmp -s "$CASE_DIR/user-before.json" "$HOME_DIR/user-home/.factory/settings.json" \
+        || fail 'refused Droid selection changed user settings'
+    fi
     cmp -s "$CASE_DIR/project-before.json" "$WT_DIR/.factory/settings.local.json" || fail 'Droid selection changed project defaults'
   done
   pass 'Droid preserves exact native/custom IDs, refuses shorthand and ambiguous/unavailable catalog selections, and retains exact effort'
@@ -1666,7 +1646,7 @@ test_droid_observes_default_model_without_pinning_it() {
     expect_code 0 "$status" "Droid default observation failed: $scenario"$'\n'"$out"
     assert_meta_profile "$HOME_DIR/state/$id.meta" droid default default
     assert_equals unknown-at-spawn "$(sed -n 's/^effective_model=//p' "$HOME_DIR/state/$id.meta")" 'Droid accounting model mismatch'
-    jq -e 'has("sessionDefaultSettings") | not' \
+    jq -e '.sessionDefaultSettings | (has("model") | not) and (has("reasoningEffort") | not) and .autonomyMode == "auto-high"' \
       "$HOME_DIR/state/$id.droid-settings.json" >/dev/null \
       || fail "observing the Droid default must not pin it"
     assert_not_contains "$(cat "$HOME_DIR/state/$id.meta" "$HOME_DIR/state/$id.droid-settings.json")" \
@@ -1805,149 +1785,6 @@ SH
   pass "Droid refuses unsupported trust-gate backends before allocation"
 }
 
-test_droid_stop_hook_quotes_apostrophe_paths() {
-  local rec id out status settings cmd turnend
-  id=profile-droid-quote-z20a
-  rec=$(make_spawn_case "profile-droid-quote's" droid "$id")
-  read_case_record "$rec"
-
-  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
-    "$id" "$PROJ_DIR" --harness droid)
-  status=$?
-  expect_code 0 "$status" "droid spawn under an apostrophe path should succeed"
-  settings="$HOME_DIR/state/$id.droid-settings.json"
-  turnend="$(cd "$HOME_DIR/state" && pwd -P)/$id.turn-ended"
-  cmd=$(jq -r '.hooks.Stop[0].hooks[0].command' "$settings")
-  bash -c "$cmd" || fail "Droid Stop hook was not executable under an apostrophe path"
-  [ -e "$turnend" ] || fail "Droid Stop hook did not touch the exact apostrophe-bearing path"
-  pass "droid shell-quotes apostrophe-bearing Stop hook paths"
-}
-
-test_droid_requires_jq_before_allocating_backend() {
-  local rec id out status
-  id=profile-droid-no-jq-z21
-  rec=$(make_spawn_case profile-droid-no-jq droid "$id")
-  read_case_record "$rec"
-
-  out=$(run_spawn_without_jq "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
-    "$id" "$PROJ_DIR" --harness droid --model gpt-5.6-sol --effort dynamic \
-    --backend tmux --mode no-mistakes --yolo off)
-  status=$?
-  [ "$status" -ne 0 ] || fail "droid spawn without jq should fail"
-  assert_contains "$out" "error: jq is required to build droid runtime settings" \
-    "droid spawn did not report its missing settings dependency"
-  [ ! -s "$LAUNCH_LOG" ] || fail "droid spawn allocated or launched a backend before checking jq"
-  [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "droid spawn wrote task metadata despite missing jq"
-  [ ! -e "$HOME_DIR/state/$id.droid-settings.json" ] || fail "droid spawn wrote settings despite missing jq"
-  pass "droid refuses missing jq before backend allocation"
-}
-
-test_droid_settings_failure_precedes_backend_allocation() {
-  local rec id out status leftovers
-  id=profile-droid-bad-settings-z22
-  rec=$(make_spawn_case profile-droid-bad-settings droid "$id")
-  read_case_record "$rec"
-  cat > "$FAKEBIN_DIR/jq" <<'SH'
-#!/usr/bin/env bash
-exit 1
-SH
-  chmod +x "$FAKEBIN_DIR/jq"
-
-  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
-    "$id" "$PROJ_DIR" --harness droid --effort dynamic --backend tmux)
-  status=$?
-  [ "$status" -ne 0 ] || fail "droid spawn should fail when settings generation fails"
-  assert_contains "$out" "error: failed to build droid runtime settings" \
-    "droid spawn did not report settings generation failure"
-  [ ! -s "$LAUNCH_LOG" ] || fail "droid spawn allocated or launched a backend before generating settings"
-  [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "droid spawn wrote metadata after settings generation failed"
-  [ ! -e "$HOME_DIR/state/$id.droid-settings.json" ] || fail "failed droid settings generation left a final settings file"
-  leftovers=$(find "$HOME_DIR/state" -name ".$id.droid-settings.*" -print)
-  [ -z "$leftovers" ] || fail "failed droid settings generation left a temporary file: $leftovers"
-  pass "droid settings generation fails atomically before backend allocation"
-}
-
-test_droid_settings_refuse_duplicate_id_without_overwrite() {
-  local rec id out status settings original
-  id=profile-droid-duplicate-z23
-  rec=$(make_spawn_case profile-droid-duplicate droid "$id")
-  read_case_record "$rec"
-  settings="$HOME_DIR/state/$id.droid-settings.json"
-  original='{"existing":"live-task-settings"}'
-  printf '%s\n' "$original" > "$settings"
-
-  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
-    "$id" "$PROJ_DIR" --harness droid --effort dynamic --backend tmux)
-  status=$?
-  [ "$status" -ne 0 ] || fail "duplicate droid task id should fail"
-  assert_contains "$out" "error: droid runtime settings already exist for task '$id'" \
-    "duplicate droid spawn did not report the protected settings collision"
-  [ "$(cat "$settings")" = "$original" ] || fail "duplicate droid spawn overwrote existing settings"
-  [ ! -s "$LAUNCH_LOG" ] || fail "duplicate droid spawn allocated or launched a backend"
-  [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "duplicate droid spawn wrote task metadata"
-  pass "droid settings publication refuses duplicate task ids without overwriting live settings"
-}
-
-test_droid_settings_refuse_directory_symlink_collision() {
-  local rec id out status settings collision_dir leftovers
-  id=profile-droid-symlink-z23a
-  rec=$(make_spawn_case profile-droid-symlink droid "$id")
-  read_case_record "$rec"
-  settings="$HOME_DIR/state/$id.droid-settings.json"
-  collision_dir="$HOME_DIR/state/$id.settings-collision"
-  mkdir -p "$collision_dir"
-  ln -s "$collision_dir" "$settings"
-
-  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
-    "$id" "$PROJ_DIR" --harness droid --backend tmux)
-  status=$?
-  [ "$status" -ne 0 ] || fail "directory-symlink droid settings collision should fail"
-  assert_contains "$out" "error: droid runtime settings already exist for task '$id'" \
-    "directory-symlink collision did not report the protected settings path"
-  [ -L "$settings" ] || fail "directory-symlink collision replaced the existing path"
-  leftovers=$(find "$collision_dir" -mindepth 1 -print)
-  [ -z "$leftovers" ] || fail "directory-symlink collision created an orphaned link: $leftovers"
-  [ ! -s "$LAUNCH_LOG" ] || fail "directory-symlink collision allocated or launched a backend"
-  pass "droid settings publication refuses directory symlink collisions"
-}
-
-test_droid_settings_cleanup_after_backend_failure() {
-  local rec id out status leftovers
-  id=profile-droid-backend-failure-z24
-  rec=$(make_spawn_case profile-droid-backend-failure droid "$id")
-  read_case_record "$rec"
-  touch "$FAKEBIN_DIR/fail-new-window"
-
-  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
-    "$id" "$PROJ_DIR" --harness droid --effort dynamic --backend tmux)
-  status=$?
-  [ "$status" -ne 0 ] || fail "droid spawn should fail when backend allocation fails"
-  [ ! -e "$HOME_DIR/state/$id.droid-settings.json" ] \
-    || fail "failed backend allocation left finalized droid settings"
-  [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "failed backend allocation wrote task metadata"
-  leftovers=$(find "$HOME_DIR/state" -name ".$id.droid-settings.*" -print)
-  [ -z "$leftovers" ] || fail "failed backend allocation left a droid settings temporary file: $leftovers"
-  pass "droid settings are removed when spawn fails after atomic publication"
-}
-
-test_droid_settings_cleanup_after_launch_failure_before_commit() {
-  local rec id out status
-  id=profile-droid-launch-failure-z25
-  rec=$(make_spawn_case profile-droid-launch-failure droid "$id")
-  read_case_record "$rec"
-  touch "$FAKEBIN_DIR/fail-gotmp-send"
-
-  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
-    "$id" "$PROJ_DIR" --harness droid --effort dynamic --backend tmux)
-  status=$?
-  [ "$status" -ne 0 ] || fail "droid spawn should fail when launch delivery fails"
-  [ ! -e "$HOME_DIR/state/$id.meta" ] \
-    || fail "launch failure retained provisional task metadata"
-  [ ! -e "$HOME_DIR/state/$id.droid-settings.json" ] \
-    || fail "launch failure retained settings after provisional metadata rolled back"
-  pass "droid settings roll back with provisional metadata after launch failure"
-}
-
 test_droid_secondmate_uses_settings_for_profile_without_turn_end_hook() {
   local rec id sm out status launch settings
   id=profile-droid-secondmate-z26
@@ -1965,11 +1802,10 @@ test_droid_secondmate_uses_settings_for_profile_without_turn_end_hook() {
   settings="$HOME_DIR/state/$id.droid-settings.json"
   assert_contains "$launch" "droid --settings '$settings' --auto high" \
     "droid secondmate launch did not use the process-only settings merge"
-  jq -e '.sessionDefaultSettings == {"model":"custom:GPT-5.6-Sol-0","reasoningEffort":"dynamic"} and (.hooks.Stop[0].hooks | length == 1)' "$settings" >/dev/null \
+  jq -e '.sessionDefaultSettings == {"model":"custom:GPT-5.6-Sol-0","reasoningEffort":"dynamic","autonomyLevel":"high","autonomyMode":"auto-high","interactionMode":"auto"} and (.hooks.Stop[0].hooks | length == 1)' "$settings" >/dev/null \
     || fail "droid secondmate settings did not pin both axes or unexpectedly installed a turn-end hook"
   pass "droid secondmates receive configured model and effort through settings without a turn-end hook"
 }
-
 
 test_pi_seeded_secondmate_preapproves_project_trust() {
   local harness rec id sm out status launch
@@ -3488,7 +3324,6 @@ test_droid_settings_cleanup_after_launch_failure_before_commit() {
   pass "droid settings and newly acquired trust roll back with provisional metadata after launch failure"
 }
 
-
 test_droid_scout_trust_and_profile() {
   local rec id out status settings physical
   id=profile-droid-scout
@@ -3507,35 +3342,11 @@ test_droid_scout_trust_and_profile() {
   pass 'Droid scouts retain profiles and trust only their isolated worktree'
 }
 
-test_droid_secondmate_refuses_before_launch() {
-  local rec id sm out status
-  id=profile-droid-refuse-secondmate
-  rec=$(make_spawn_case profile-droid-refuse-secondmate droid "$id")
-  read_case_record "$rec"
-  sm="$CASE_DIR/secondmate"
-  make_seeded_secondmate_home "$sm" "$id"
-  out=$(run_spawn "$HOME_DIR" "$sm" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$sm" --secondmate --harness droid)
-  status=$?
-  [ "$status" -ne 0 ] || fail 'Droid secondmate launch should refuse'
-  assert_contains "$out" 'verified crewmate/scout adapter only' 'Droid secondmate refusal was not actionable'
-  [ ! -s "$LAUNCH_LOG" ] || fail 'Droid secondmate refusal launched an endpoint'
-  assert_absent "$HOME_DIR/state/$id.droid-settings.json" 'Droid secondmate refusal wrote runtime settings'
-  pass 'Droid secondmate launch refuses before settings or endpoint allocation'
-}
-
 test_droid_scout_trust_and_profile
-test_droid_secondmate_refuses_before_launch
 
 test_raw_droid_launch_does_not_use_template_settings
 test_droid_threads_native_model_and_dynamic_effort_through_settings
 test_droid_retains_explicit_custom_registry_id
-test_droid_stop_hook_quotes_apostrophe_paths
-test_droid_requires_jq_before_allocating_backend
-test_droid_settings_failure_precedes_backend_allocation
-test_droid_settings_refuse_duplicate_id_without_overwrite
-test_droid_settings_refuse_directory_symlink_collision
-test_droid_settings_cleanup_after_backend_failure
-test_droid_settings_cleanup_after_launch_failure_before_commit
 
 test_no_profile_keeps_claude_profile_defaults
 test_claude_launch_brief_publishes_record_doorbell
@@ -3591,7 +3402,6 @@ test_pi_tui_mode_probe_is_safe_for_old_and_new_pi
 test_pi_signed_threads_shared_pi_profile_and_preserves_identity
 test_pi_signed_missing_binary_refuses_before_endpoint_or_metadata
 test_pi_signed_persistent_secondmate_uses_pi_extensions_and_identity
-test_droid_preserves_native_model_and_dynamic_effort_through_settings
 test_droid_exact_model_ids_and_selection_refusals
 test_droid_observes_default_model_without_pinning_it
 test_droid_runtime_model_reconciliation

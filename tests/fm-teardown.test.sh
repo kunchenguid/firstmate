@@ -4308,7 +4308,6 @@ test_teardown_retains_v1_journal_when_workspace_query_ambiguous() {
 # worker is removed, and Fix 2: reap leaked descendant processes rooted under
 # the task's own worktree/tasktmp - both exercised through the real teardown
 # path (bin/fm-teardown.sh), never by matching its source text. ------------
-
 # A parked-at-a-gate `axi status` TOON payload for <branch>/<head>, matching
 # the shape no-mistakes actually emits (see tests/fm-crew-state.test.sh's
 # run_parked fixture, the same shape bin/fm-crew-state.sh's own tests pin).

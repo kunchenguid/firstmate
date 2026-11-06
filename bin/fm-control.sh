@@ -192,6 +192,8 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 . "$SCRIPT_DIR/fm-backend.sh"
 # shellcheck source=bin/fm-busy-lib.sh
 . "$SCRIPT_DIR/fm-busy-lib.sh"
+# shellcheck source=bin/fm-profile-lib.sh
+. "$SCRIPT_DIR/fm-profile-lib.sh"
 # shellcheck source=bin/fm-control-lib.sh
 . "$SCRIPT_DIR/fm-control-lib.sh"
 # shellcheck source=bin/fm-polytoken-lib.sh
@@ -1012,13 +1014,10 @@ resolve_relaunch_profile() {
     if ! CONFIG_EFFORT=$("$SCRIPT_DIR/fm-harness.sh" secondmate-effort "$ID"); then
       die "the configured secondmate effort pin for $ID cannot be read; fix config/secondmate-harness rather than relaunching onto an unresolved effort"
     fi
-    case "$CONFIG_EFFORT" in
-      ''|low|medium|high|xhigh|max|ultra) ;;
-      *)
-        echo "warning: config/secondmate-harness effort token '$CONFIG_EFFORT' is not one of low, medium, high, xhigh, max, ultra; ignoring" >&2
-        CONFIG_EFFORT=
-        ;;
-    esac
+    if [ -n "$CONFIG_EFFORT" ] && ! fm_profile_effort_valid "$CONFIG_EFFORT"; then
+      echo "warning: config/secondmate-harness effort token '$CONFIG_EFFORT' is not one of $FM_PROFILE_EFFORT_VALUES; ignoring" >&2
+      CONFIG_EFFORT=
+    fi
   fi
   if [ "$HARNESS_SET" = 1 ]; then
     fm_control_harness_supported "$NEW_HARNESS" \

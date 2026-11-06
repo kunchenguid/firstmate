@@ -14,7 +14,6 @@
 # FM_TEST_NO_MISTAKES_VERSION is the single default version for the shared fake
 # no-mistakes banner. Override a single case with FM_FAKE_NO_MISTAKES_VERSION
 # rather than editing a stub body.
-
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
@@ -31,7 +30,6 @@ export FM_TEST_NO_MISTAKES_FAKE_VERSION_TS="${FM_TEST_NO_MISTAKES_FAKE_VERSION} 
 export FM_TEST_GH_AXI_VERSION=0.1.29
 
 # --- fake no-mistakes -------------------------------------------------------
-
 # fm_test_fake_no_mistakes <fakebin>
 # Drops a no-mistakes stub that answers --version with
 # FM_TEST_NO_MISTAKES_FAKE_VERSION (or FM_FAKE_NO_MISTAKES_VERSION when set)
@@ -67,7 +65,6 @@ SH
 }
 
 # --- fake gh / gh-axi -------------------------------------------------------
-
 # fm_test_fake_gh <fakebin>
 # Authenticates (`gh auth status` exits 0) and otherwise exits 0.
 fm_test_fake_gh() {
@@ -90,7 +87,6 @@ fm_test_fake_gh_axi() {
 }
 
 # --- fake tmux / ssh / sleep ------------------------------------------------
-
 # fm_test_fake_tmux_spawn <fakebin>
 # Spawn-world tmux: pane_current_path from FM_FAKE_PANE_PATH, session named
 # firstmate, window ops succeed, send-keys succeed. When FM_FAKE_LAUNCH_LOG is
@@ -101,7 +97,6 @@ fm_test_fake_gh_axi() {
 # launch simulates its busy-state plugin per FM_FAKE_OPENCODE_TURN (see below),
 # and FM_FAKE_ENTER_LOG records each bare Enter key.
 # FM_FAKE_PANE_CAPTURE supplies visible pane output (empty by default).
-
 #
 # The pane path defaults to empty when FM_FAKE_PANE_PATH is unset. Window
 # cleanup and option operations are no-ops. Launch logging is env-gated, so
@@ -376,7 +371,6 @@ SH
 }
 
 # --- spawn-world ------------------------------------------------------------
-
 # fm_test_spawn_home <home> [harness]
 # Minimal firstmate home layout plus watcher-liveness beat. Optional harness
 # pin is written to config/crew-harness.
@@ -450,7 +444,6 @@ fm_test_run_spawn() {
 }
 
 # --- send-world stubs -------------------------------------------------------
-
 # make_stubs <dir>
 # Send-world fakebin: send tmux + no-op sleep. Echoes the fakebin path.
 # Suites that need recording sleep, herdr, or ssh add those on top of this

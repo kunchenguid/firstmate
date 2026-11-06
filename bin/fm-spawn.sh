@@ -130,7 +130,6 @@
 #   Enter only on the complete affirmative-selected dialog, and waits for work
 #   or a response before success. FM_DROID_READY_POLLS (120) and
 #   FM_DROID_POLL_INTERVAL (0.5 seconds) bound that wait; raw launches bypass it.
-
 #   --backend <name> is the explicit runtime session-provider backend for this
 #   exact task only (docs/configuration.md "Runtime backend" owns when that flag
 #   is authorized). Without it, the script resolves FM_BACKEND, then
@@ -956,6 +955,8 @@ fm_backlog_directory_present "$STATE" "state directory" || {
 . "$SCRIPT_DIR/fm-backend.sh"
 # shellcheck source=bin/fm-kimi-trust-lib.sh
 . "$SCRIPT_DIR/fm-kimi-trust-lib.sh"
+# shellcheck source=bin/fm-profile-lib.sh
+. "$SCRIPT_DIR/fm-profile-lib.sh"
 # shellcheck source=bin/fm-control-lib.sh
 . "$SCRIPT_DIR/fm-control-lib.sh"
 # shellcheck source=bin/fm-gate-refuse-lib.sh
@@ -1225,13 +1226,10 @@ if [ "$TRACEPARENT_SET" -eq 1 ]; then
     exit 1
   }
 fi
-case "$EFFORT" in
-'' | low | medium | high | xhigh | max | ultra | dynamic) ;;
-*)
-  echo "error: --effort must be one of low, medium, high, xhigh, max, ultra, dynamic" >&2
+if [ -n "$EFFORT" ] && ! fm_profile_effort_valid "$EFFORT"; then
+  echo "error: --effort must be one of $FM_PROFILE_EFFORT_VALUES" >&2
   exit 1
-  ;;
-esac
+fi
 
 # --relaunch reuses an existing task's endpoint, worktree, project, and kind,
 # so every axis this block resolves for a fresh spawn instead comes from that
@@ -1415,15 +1413,12 @@ spawn_remote_secondmate() {
       [ -n "$effort" ] || effort=-
     fi
   fi
-  case "$effort" in
-  - | low | medium | high | xhigh | max | ultra) ;;
-  *)
+  if [ "$effort" != - ] && ! fm_profile_effort_valid "$effort"; then
     fm_lock_release "$registry_lock" || true
     fm_lock_release "$SPAWN_TASK_LOCK" || true
     echo "error: invalid configured remote secondmate effort: $effort" >&2
     return 1
-    ;;
-  esac
+  fi
   if [ "$effort" = ultra ] && ! "$SCRIPT_DIR/fm-harness.sh" validate-native-effort "$harness" "$model" "$effort"; then
     fm_lock_release "$registry_lock" || true
     fm_lock_release "$SPAWN_TASK_LOCK" || true
@@ -1778,10 +1773,6 @@ spawn_orca_reclaim_launch_file() {
 
 spawn_abort_cleanup() {
   local status=$?
-  if [ -n "$DROID_SETTINGS_CLEANUP" ]; then
-    rm -f "$DROID_SETTINGS_CLEANUP" "$STATE/$ID.meta.droid-model.${SPAWN_GEN:-unset}" || true
-    DROID_SETTINGS_CLEANUP=
-  fi
 
   if [ -n "$DROID_SETTINGS_TMP" ]; then
     rm -f "$DROID_SETTINGS_TMP" || true
@@ -1939,7 +1930,7 @@ spawn_abort_cleanup() {
     # worker's settings; deleting them would strip its profile and Stop hook.
     if [ "${RELAUNCH:-0}" -eq 1 ] ||
       { [ ! -e "$STATE/$ID.meta" ] && [ ! -L "$STATE/$ID.meta" ]; }; then
-      rm -f "$DROID_SETTINGS_CLEANUP" || true
+      rm -f "$DROID_SETTINGS_CLEANUP" "$STATE/$ID.meta.droid-model.${SPAWN_GEN:-unset}" || true
     fi
     DROID_SETTINGS_CLEANUP=
   fi
@@ -3287,7 +3278,7 @@ case "$ARG3" in
   ;;
 esac
 
-# muse, gemini, devin, droid, commandcode, polytoken, cortex, and kiro are verified as CREWMATE/SCOUT adapters only. A secondmate is
+# muse, gemini, devin, commandcode, polytoken, cortex, and kiro are verified as CREWMATE/SCOUT adapters only. A secondmate is
 # a firstmate instance, so it needs a primary supervision protocol.
 # gemini has none: docs/supervision-protocols/ carries no gemini wake protocol
 # and this task verified only crewmate-side launch, busy state, interrupt, and
@@ -3308,7 +3299,8 @@ esac
 # kiro has none either: this task verified only crewmate-side launch, busy state,
 # interrupt, exit, and resume on the V2 engine, and docs/supervision-protocols/
 # carries no kiro wake protocol (kiro-cli 2.21.4).
-if [ "$KIND" = secondmate ] && { [ "$HARNESS" = muse ] || [ "$HARNESS" = gemini ] || [ "$HARNESS" = droid ] || [ "$HARNESS" = devin ] || [ "$HARNESS" = commandcode ] || [ "$HARNESS" = polytoken ] || [ "$HARNESS" = cortex ] || [ "$HARNESS" = kiro ] || [ "$HARNESS" = hermes ]; }; then
+if [ "$KIND" = secondmate ] && { [ "$HARNESS" = muse ] || [ "$HARNESS" = gemini ] || [ "$HARNESS" = devin ] || [ "$HARNESS" = commandcode ] || [ "$HARNESS" = polytoken ] || [ "$HARNESS" = cortex ] || [ "$HARNESS" = kiro ] || [ "$HARNESS" = hermes ]; }; then
+
   echo "error: $HARNESS is a verified crewmate/scout adapter only and cannot run a secondmate; it has no primary supervision protocol. Select a harness verified for secondmates." >&2
   exit 1
 fi
@@ -3483,10 +3475,11 @@ if [ "$KIND" = secondmate ] && [ -z "$ARG3" ]; then
   if [ "$EFFORT_SET" -eq 0 ]; then
     SM_EFFORT=$("$SCRIPT_DIR/fm-harness.sh" secondmate-effort "$ID")
     if [ -n "$SM_EFFORT" ]; then
-      case "$SM_EFFORT" in
-      low | medium | high | xhigh | max | ultra) EFFORT=$SM_EFFORT ;;
-      *) echo "warning: config/secondmate-harness effort token '$SM_EFFORT' is not one of low, medium, high, xhigh, max, ultra; ignoring" >&2 ;;
-      esac
+      if fm_profile_effort_valid "$SM_EFFORT"; then
+        EFFORT=$SM_EFFORT
+      else
+        echo "warning: config/secondmate-harness effort token '$SM_EFFORT' is not one of $FM_PROFILE_EFFORT_VALUES; ignoring" >&2
+      fi
     fi
   fi
 fi
@@ -3921,7 +3914,6 @@ effort_flag_for_harness() {
     # separate effort flag.
   esac
 }
-
 
 droid_effort_value() {
   local effort=$1
@@ -4580,11 +4572,7 @@ TURNEND="$STATE_REAL/$ID.turn-ended"
 
 SPAWN_GEN="s$(date +%s).${BASHPID:-$$}.$RANDOM"
 
-
 if [ "$DROID_TEMPLATE" -eq 1 ]; then
-  mkdir -p "$STATE"
-  STATE_REAL=$(cd "$STATE" && pwd -P)
-  TURNEND="$STATE_REAL/$ID.turn-ended"
   DROID_MODEL=$(bash "$SCRIPT_DIR/fm-droid-model.sh" resolve "$MODEL") || exit 1
 
   DROID_EFFORT=$(droid_effort_value "$EFFORT")
@@ -4610,7 +4598,9 @@ if [ "$DROID_TEMPLATE" -eq 1 ]; then
     ' > "$DROID_SETTINGS_TMP" \
     && jq -e 'type == "object"' "$DROID_SETTINGS_TMP" >/dev/null; then
     DROID_SETTINGS_PATH="$STATE/$ID.droid-settings.json"
-    if [ "$RELAUNCH" -eq 1 ]; then
+    if [ "$RELAUNCH" -eq 1 ] || { [ "$KIND" = secondmate ] \
+      && [ "$(fm_meta_get "$STATE/$ID.meta" kind)" = secondmate ] \
+      && [ "$(fm_meta_get "$STATE/$ID.meta" harness)" = droid ]; }; then
       DROID_SETTINGS_STAGED=1
     elif publish_file_no_clobber "$DROID_SETTINGS_TMP" "$DROID_SETTINGS_PATH"; then
       DROID_SETTINGS_TMP=
@@ -4646,7 +4636,6 @@ real_path_or_raw() { # <path>
 # herdr-sm-spaces-k4). Both branches converge on the same $T ("target") string
 # that every downstream operation (send/capture/kill) already treats as opaque
 # per-backend routing (fm_backend_resolve_selector).
-
 # True when <path> is an isolated worktree of the spawning project: a real
 # directory that is its own worktree root, is not the spawning project itself,
 # and does not share the project repository's common git dir. SPAWN_WT_TOP is
@@ -5696,7 +5685,6 @@ kimi_composer_is_empty() {
 # is still up and waiting, with Kimi's startup banner sitting above it in that
 # same capture. Treating such a pane as ready would type the brief pointer
 # into the dialog and lose it.
-
 # A successful key send is not evidence that Kimi accepted trust. Only the
 # ordinary readiness signals in a later capture prove advancement.
 kimi_ready_signal_is_present() { # <plain-pane-capture>
@@ -6290,7 +6278,6 @@ if [ "$DROID_TEMPLATE" -eq 1 ]; then
   RECORDED_MODEL=unknown-at-spawn
 fi
 
-
 # Pre-register Claude's workspace trust for the directory this launch starts in,
 # at the first point that directory is known and before any per-task state is
 # created below. The dialog gates the pane before the brief is ever read, and it
@@ -6309,7 +6296,9 @@ fi
 # behind.
 if [ "$DROID_TEMPLATE" -eq 1 ]; then
   DROID_TRUST_PENDING=1
-  "$FM_ROOT/bin/fm-droid-trust.sh" --receipt "$STATE/$ID.droid-trust" "$WT" "$PROJ_ABS" >/dev/null || {
+  DROID_TRUST_ARGS=("$WT" "$PROJ_ABS")
+  [ "$KIND" != secondmate ] || DROID_TRUST_ARGS=(--secondmate-home "$WT" "$ID")
+  "$FM_ROOT/bin/fm-droid-trust.sh" --receipt "$STATE/$ID.droid-trust" "${DROID_TRUST_ARGS[@]}" >/dev/null || {
     echo "error: could not register Droid trust for the isolated worktree $WT; refusing launch" >&2
     exit 1
   }
@@ -6491,6 +6480,12 @@ if [ "$RELAUNCH" -eq 1 ]; then
   # (bin/fm-control-lib.sh owns where those artifacts live).
   clear_relaunch_harness_wiring "$RELAUNCH_PRIOR_HARNESS" "$WT" "$STATE_REAL" "$ID" "$KIND" || {
     echo "error: could not retire $RELAUNCH_PRIOR_HARNESS wiring for task $ID; refusing to arm the replacement" >&2
+    exit 1
+  }
+elif [ "$DROID_SETTINGS_STAGED" -eq 1 ]; then
+  # A dead secondmate recovers through fresh spawn with its recorded settings.
+  clear_relaunch_harness_wiring droid "$WT" "$STATE_REAL" "$ID" "$KIND" || {
+    echo "error: could not retire Droid settings for secondmate $ID" >&2
     exit 1
   }
 fi

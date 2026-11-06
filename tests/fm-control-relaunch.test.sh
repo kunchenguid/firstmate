@@ -565,7 +565,6 @@ test_relaunch_serializes_concurrent_durable_metadata_publication() {
     FM_FAKE_TRACE_RELEASE="$launch_release" \
     run_control "$dir" rl28 relaunch --note "continue after publication" > "$dir/control.out" &
   control_pid=$!
-  fm_test_track_child "$control_pid"
   # This marker follows the complete relaunch preflight, not just a fork.
   # Give that startup path headroom on loaded hosts while retaining the cadence.
   while [ ! -e "$prepare" ] && [ "$i" -lt 3000 ]; do
@@ -985,7 +984,7 @@ test_droid_relaunch_follows_requested_selection() {
     if [ "$selection" = default ]; then
       jq -e '(.sessionDefaultSettings // {}) | has("model") | not' "$settings" >/dev/null || fail 'default relaunch pinned a model'
     else
-      jq -e --arg model "$selection" '.sessionDefaultSettings == {model:$model}' "$settings" >/dev/null || fail 'relaunch lost explicit pin or added an effort override'
+      jq -e --arg model "$selection" '.sessionDefaultSettings | .model == $model and (has("reasoningEffort") | not) and .autonomyLevel == "high" and .autonomyMode == "auto-high" and .interactionMode == "auto"' "$settings" >/dev/null || fail 'relaunch lost explicit pin, high autonomy, or added an effort override'
     fi
   done
   printf codex > "$dir/fake/becomes"
@@ -1027,9 +1026,9 @@ test_droid_relaunch_changes_and_clears_pins() {
     [ -n "$gen" ] && [ "$gen" != "$previous_gen" ] || fail 'Droid relaunch reused a runtime generation'
     previous_gen=$gen
     if [ "$selection" = default ]; then
-      jq -e 'has("sessionDefaultSettings") | not' "$settings" >/dev/null || fail 'Droid relaunch failed to clear model pin'
+      jq -e '.sessionDefaultSettings | (has("model") | not) and (has("reasoningEffort") | not) and .autonomyMode == "auto-high"' "$settings" >/dev/null || fail 'Droid relaunch failed to clear model and effort pins while retaining high autonomy'
     else
-      jq -e --arg model "$selection" '.sessionDefaultSettings == {model:$model,reasoningEffort:"high"}' "$settings" >/dev/null || fail 'Droid relaunch changed exact model identity'
+      jq -e --arg model "$selection" '.sessionDefaultSettings | .model == $model and .reasoningEffort == "high" and .autonomyMode == "auto-high"' "$settings" >/dev/null || fail 'Droid relaunch changed exact model identity or high autonomy'
     fi
   done
   pass 'fm-control relaunch: Droid changes exact native/custom pins and clears model/effort with fresh generations'
@@ -1061,7 +1060,7 @@ test_relaunch_refuses_invalid_explicit_effort_before_stop() {
 
   out=$(run_control "$dir" rl36 relaunch --effort impossible --note "must refuse"); rc=$?
   expect_code 1 "$rc" "invalid explicit effort should refuse"
-  assert_contains "$out" "--effort must be one of default, low, medium, high, xhigh, max, dynamic, ultra" \
+  assert_contains "$out" "--effort must be one of default, low, medium, high, xhigh, max, ultra, dynamic" \
     "invalid explicit effort should report the centralized vocabulary"
   [ "$(cat "$dir/fake/command")" = droid ] || fail "invalid explicit effort stopped the running agent"
   pass "fm-control relaunch: invalid explicit effort refuses before stop"
@@ -1473,6 +1472,47 @@ test_secondmate_relaunch_picks_up_the_configured_harness_pin() {
     || fail "the configured effort token should come with the pin"
   assert_not_contains "$out" "not a verified harness" "codex is a verified harness"
   pass "fm-control relaunch: a secondmate relaunch re-resolves its durable configured harness pin"
+}
+
+test_droid_secondmate_relaunch_preserves_dynamic_pin() {
+  local dir home out rc
+  dir=$(new_case droid-smpin sm3)
+  home="$dir/home"
+  mkdir -p "$home/config"
+  printf 'droid pinned-model dynamic\n' > "$home/config/secondmate-harness"
+  mkdir -p "$home/data/sm3"
+  printf '# secondmate brief\n' > "$home/data/sm3/brief.md"
+  fm_git_worktree "$dir/proj" "$dir/smhome" sm-branch
+  mkdir -p "$dir/smhome/state" "$dir/smhome/data" "$dir/smhome/bin"
+  printf 'sm3\n' > "$dir/smhome/.fm-secondmate-home"
+  printf '# agents\n' > "$dir/smhome/AGENTS.md"
+  {
+    echo "window=fmses:fm-sm3"
+    echo "endpoint_task_id=sm3"
+    echo "worktree=$dir/smhome"
+    echo "project=$dir/smhome"
+    echo "harness=claude"
+    echo "kind=secondmate"
+    echo "mode=secondmate"
+    echo "yolo=off"
+    echo "model=default"
+    echo "effort=default"
+    echo "home=$dir/smhome"
+  } > "$home/state/sm3.meta"
+  printf '%s\n' "fm-sm3" > "$dir/fake/windows"
+  printf '%s' "$dir/smhome" > "$dir/fake/cwd"
+  printf 'droid' > "$dir/fake/becomes"
+  out=$(run_control "$dir" sm3 relaunch); rc=$?
+  expect_code 0 "$rc" "a configured secondmate harness should relaunch"$'\n'"$out"
+  [ "$(journal_field "$dir" sm3 to_harness)" = droid ] \
+    || fail "a secondmate relaunch should pick up the configured harness pin, got '$(journal_field "$dir" sm3 to_harness)'"
+  [ "$(journal_field "$dir" sm3 to_model)" = pinned-model ] \
+    || fail "the configured model token should come with the pin"
+  [ "$(journal_field "$dir" sm3 to_effort)" = dynamic ] \
+    || fail "the configured effort token should come with the pin"
+  assert_not_contains "$out" "not a verified harness" "droid is a verified harness"
+  jq -e '.sessionDefaultSettings.reasoningEffort == "dynamic" and .sessionDefaultSettings.autonomyMode == "auto-high" and (.hooks.Stop[0].hooks | length == 1)' "$home/state/sm3.droid-settings.json" >/dev/null || fail "Droid secondmate lost its dynamic profile or installed a worker Stop hook"
+  pass "fm-control relaunch: a Droid secondmate relaunch preserves its durable dynamic effort pin"
 }
 
 # The relaunch half of the opt-in scope: a pin file that declares no
@@ -2663,7 +2703,6 @@ test_spawn_relaunch_refuses_a_pane_outside_the_worktree() {
 # prerequisite, so a task whose pane or workspace was destroyed could not be
 # reclaimed by anything, and any no-mistakes approval it was parked on had no
 # seat left to answer it.
-
 # strand_endpoint <case-dir> <id>: make a tmux endpoint read `missing` the way
 # a destroyed window does - a successful session inventory that omits the exact
 # window.
@@ -3333,6 +3372,7 @@ test_prior_harness_turnend_registry_entry_is_cleared
 test_wiring_removal_failure_refuses_before_replacement_arm
 test_turnend_auth_paths_are_owned_by_the_control_adapter
 test_secondmate_relaunch_picks_up_the_configured_harness_pin
+test_droid_secondmate_relaunch_preserves_dynamic_pin
 test_secondmate_claude_relaunch_keeps_local_settings
 test_secondmate_relaunch_lands_on_the_per_mate_pin
 test_secondmate_relaunch_uses_the_default_for_an_unpinned_mate

@@ -373,14 +373,12 @@ pass "tmux liveness: an absent window classifies missing rather than inheriting 
 # screen must read differently depending only on whether the pane's foreground
 # process is genuinely Cursor, and the cursor-anchored source must be asserted
 # blind so the case cannot go quietly vacuous.
-
 # shellcheck source=bin/fm-tmux-lib.sh
 . "$ROOT/bin/fm-tmux-lib.sh"
 
 ln -s "$STANDIN_BIN" "$LAB/bin/cursor-agent"
 ln -s "$STANDIN_BIN" "$LAB/bin/notcursor"
 ln -s "$STANDIN_BIN" "$LAB/bin/droid"
-
 
 # Cursor's real screen shape: a BARE composer row carrying its U+2192 glyph, two
 # footer rows below it, and the terminal cursor left on a blank row past the
@@ -617,7 +615,6 @@ fi
 [ "$(fm_tmux_composer_state "$SESSION:hm-decoy")" = "$(cursor_anchored_verdict "$SESSION:hm-decoy")" ] \
   || fail "a non-Hermes prompt pane must keep the generic cursor-anchored verdict"
 pass "hermes composer: a non-Hermes prompt keeps the generic cursor-anchored verdict"
-
 
 cleanup_all
 trap - EXIT
