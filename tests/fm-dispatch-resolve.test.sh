@@ -1640,7 +1640,8 @@ pass "native Codex binds to codex-home before default, independently of Pi accou
 
 FOLDED_QUOTA="$TMP_ROOT/schema6-folded.json"
 jq '.providers |= map(select(.provider != "codex" or .accountKey == "codex-home") |
-  if .provider == "codex" then .accountKey = "credential-primary" | .accountKeys = ["credential-primary", "credential-alias"] else . end)' "$SCHEMA6_NATIVE" > "$FOLDED_QUOTA"
+  if .provider == "codex" then .accountKey = "credential-primary" | .accountKeys = ["credential-primary", "credential-alias"] else . end) |
+  .providers += [(.providers[] | select(.provider == "codex" and .accountKey == "credential-primary") | .accountKey = "default" | del(.accountKeys))]' "$SCHEMA6_NATIVE" > "$FOLDED_QUOTA"
 jq '.rules[0].use = [{harness: "pi", model: "credential-alias/gpt-6-astra", provider: "codex"}]' "$LANE_RULES" > "$RULES"
 reset_log
 TYPESAFE_API_KEY=$KEY QUOTA_AXI_FIXTURE="$FOLDED_QUOTA" run code out err "$BRIEF"
