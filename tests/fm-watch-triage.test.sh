@@ -3166,6 +3166,37 @@ test_busy_pane_below_turn_age_bound_is_absorbed() {
   pass "a busy worker below the turn-age bound remains working with no escalation"
 }
 
+# A relaunch re-arms the busy contract for a fresh agent but keeps the task's
+# status log, whose newest line is still the old declared pause. The previous
+# incarnation's completed-turn marker must not age the fresh agent past the
+# bound, or its first busy poll re-surfaces the old pause as a stale wake.
+test_relaunched_busy_pane_is_not_aged_by_previous_turn_end() {
+  local dir state fakebin out capture_file window old pid
+  dir=$(make_case relaunch-old-turn-end); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; window="test:fm-relaunched"
+  old=$(( $(date +%s) - 19000 ))
+  printf 'Working... (3.1s)' > "$capture_file"
+  printf 'paused [at=%s]: waiting on an outside review\n' "$old" > "$state/relaunched.status"
+  touch -d "@$old" "$state/relaunched.status"
+  printf '%s' "$(seen_sig "$state/relaunched.status")" > "$state/.seen-relaunched_status"
+  touch -d "@$(( old + 10 ))" "$state/relaunched.turn-ended"
+  prime_turnend_seen "$state/relaunched.turn-ended"
+  # The relaunch: a fresh spawn record and a re-armed busy contract.
+  printf 'window=%s\nkind=scout\nharness=pi\n' "$window" > "$state/relaunched.meta"
+  record_pi_busy "$state" relaunched
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_BUSY_TURN_MAX_SECS=3600 FM_STALE_ESCALATE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_poll_cycle "$state" "$pid"; then
+    reap "$pid"; fail "a relaunched busy worker re-surfaced its old declared pause: $(cat "$out")"
+  fi
+  [ ! -s "$out" ] || fail "a relaunched busy worker printed a wake reason: $(cat "$out")"
+  reap "$pid"
+  pass "a relaunched busy worker is aged from its own arm, not the previous agent's last turn"
+}
+
 test_busy_pane_stable_hash_escalates_past_turn_age_bound() {
   local dir state fakebin out capture_file window key pane_hash sig pid
   dir=$(make_case busy-stable-hash-turn-age); state="$dir/state"; fakebin="$dir/fakebin"
@@ -5528,6 +5559,7 @@ fm_test_run \
   test_term_stops_a_watcher_whose_cleanup_marker_lock_is_held \
   test_cleanup_marker_lock_bound_is_decimal_with_zero_default \
   test_busy_pane_below_turn_age_bound_is_absorbed \
+  test_relaunched_busy_pane_is_not_aged_by_previous_turn_end \
   test_busy_pane_stable_hash_escalates_past_turn_age_bound \
   test_busy_pane_changing_hash_escalates_past_turn_age_bound \
   test_busy_pane_turn_end_touch_resets_age \

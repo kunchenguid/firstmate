@@ -11,7 +11,9 @@
 #       launch-brief - the launch prompt IS a submitted turn). Prints the
 #       minted gen on stdout so the caller can embed it into adapter wiring.
 #       Arming again replaces the previous incarnation: late events carrying
-#       the old gen are rejected as stale from then on.
+#       the old gen are rejected as stale from then on. Arm also removes the
+#       previous incarnation's state/<id>.turn-ended, so the watcher's
+#       completed-turn bound ages a relaunched agent from its own spawn record.
 #
 #   apply <state-dir> <id> <busy|idle|unknown> (--gen G | --current-gen)
 #         --source S --event E [--turn-ended]
@@ -216,7 +218,7 @@ if [ "$CMD" = arm ]; then
   lock_acquire || exit 1
   {
     printf '%s\n' "$GEN" > "$GEN_FILE.tmp.$$" && mv -f "$GEN_FILE.tmp.$$" "$GEN_FILE" \
-      && write_record "$GEN" 1 && rm -f "$STATE/$ID.progress" && clear_stream_incarnation
+      && write_record "$GEN" 1 && rm -f "$STATE/$ID.progress" "$STATE/$ID.turn-ended" && clear_stream_incarnation
   } || { lock_release; umask "$old_umask"; echo "error: arm failed for $ID" >&2; exit 1; }
   lock_release
   umask "$old_umask"
