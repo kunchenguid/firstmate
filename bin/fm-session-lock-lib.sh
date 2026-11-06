@@ -781,7 +781,7 @@ fm_session_lock_pid_blocks_reclaim() {
 # from fm_proc_info, the file's single ps-primary, ps-free-fallback reader. A
 # tagged Windows pid is never native: that bridge exposes no argv to prove the
 # app-server subcommand, and it publishes no Codex session pid at all.
-fm_session_lock_codex_native_pid() {  # <pid>
+fm_session_lock_codex_native_pid() {  # <pid> [verified]
   local base argv0
   case "$1" in ''|*[!0-9]*) return 1 ;; esac
   fm_proc_info "$1" || return 1
@@ -793,16 +793,18 @@ fm_session_lock_codex_native_pid() {  # <pid>
   case "$base" in
     codex-code-mode-host) return 0 ;;
     codex)
-      # Global Codex config flags may precede the app-server subcommand.
-      # Stop at the first positional token, so an exec prompt mentioning
-      # app-server can never turn an ordinary CLI session into a native one.
-      printf '%s\n' "$FM_PROC_ARGS" | awk '
-        { for (i = 2; i <= NF; i++) {
-          if ($i == "-c" || $i == "--config" || $i == "--enable" || $i == "--disable") { i++; continue }
-          if ($i ~ /^--(config|enable|disable)=/) continue
-          exit ($i == "app-server" ? 0 : 1)
-        }; exit 1 }
-      ' && return 0
+      case "$FM_PROC_ARGS" in
+        *$'\n'*|*$'\r'*) [ "${2:-}" != verified ]; return ;;
+      esac
+      if [ "${argv0##*/}" != codex ]; then
+        [ "${2:-}" != verified ]; return
+      fi
+      printf '%s\n' "$FM_PROC_ARGS" | awk -v proof="${2:-}" '
+        { if (NF < 2) exit 1
+          if ($2 ~ /^-/) exit (proof == "verified" ? 1 : 0)
+          exit ($2 == "app-server" ? 0 : 1) }
+      '
+      return
       ;;
   esac
   return 1
@@ -810,11 +812,11 @@ fm_session_lock_codex_native_pid() {  # <pid>
 
 # True when this process runs under a native Codex server. $1 is an ancestry
 # list an earlier walk already produced.
-fm_session_lock_codex_native_ancestry() {  # [<ancestry-pids>]
+fm_session_lock_codex_native_ancestry() {  # [<ancestry-pids>] [verified]
   local pids=${1:-} pid
   [ -n "$pids" ] || pids=$(fm_harness_ancestry_pids) || return 1
   while IFS= read -r pid; do
-    fm_session_lock_codex_native_pid "$pid" && return 0
+    fm_session_lock_codex_native_pid "$pid" "${2:-}" && return 0
   done <<EOF
 $pids
 EOF
@@ -858,7 +860,7 @@ fm_session_lock_codex_hook_identity() {  # <payload>
 # Print the trusted native identity, codex-native:<uuid>, or return 1.
 fm_session_lock_codex_trusted_id() {  # [<ancestry-pids>]
   local id
-  fm_session_lock_codex_native_ancestry "${1:-}" || return 1
+  fm_session_lock_codex_native_ancestry "${1:-}" verified || return 1
   id=${FM_CODEX_HOOK_SESSION_ID-${CODEX_SESSION_ID:-}}
   fm_session_lock_codex_id_valid "$id" || return 1
   [ -z "${CODEX_SESSION_ID:-}" ] || [ "$CODEX_SESSION_ID" = "$id" ] || return 1

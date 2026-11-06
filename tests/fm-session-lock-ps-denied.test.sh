@@ -962,7 +962,7 @@ test_denied_ps_reads_native_codex_identity() {
   write_native_table() {  # <comm> <args>
     printf '800|1|%s|%s\ndefault|800|bash|bash run.sh\n' "$1" "$2" > "$table"
   }
-  write_native_table /opt/codex '/opt/codex -c features.hooks=true app-server --listen stdio://'
+  write_native_table /opt/codex '/opt/codex app-server --listen stdio://'
   got=$(lib_eval_denied "$fakebin" "$table" \
     "export CODEX_SESSION_ID=$uuid CODEX_THREAD_ID=$uuid; fm_session_lock_trusted_session_id") \
     || fail "denied-ps route did not read a native app-server identity"
@@ -973,6 +973,13 @@ test_denied_ps_reads_native_codex_identity() {
   fi
   if lib_eval_denied "$fakebin" "$table" 'fm_session_lock_anchor_pid' >/dev/null 2>&1; then
     fail "denied-ps route anchored a native thread that proves no identity"
+  fi
+  write_native_table /opt/codex '/opt/codex -c sandbox_permissions=[ "disk-full-read-access" ] app-server'
+  lib_eval_denied "$fakebin" "$table" 'fm_session_lock_codex_native_ancestry' \
+    || fail "denied-ps route allowed ambiguous arguments to bypass native restrictions"
+  if lib_eval_denied "$fakebin" "$table" \
+    "export CODEX_SESSION_ID=$uuid CODEX_THREAD_ID=$uuid; fm_session_lock_anchor_pid" >/dev/null 2>&1; then
+    fail "denied-ps route anchored a session from ambiguous arguments"
   fi
   write_native_table codex-code-mode /opt/codex-code-mode-host
   lib_eval_denied "$fakebin" "$table" 'fm_session_lock_codex_native_pid 800' \
