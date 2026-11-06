@@ -541,6 +541,7 @@ $PROJECT_CLONES_BODY
 # Operating model
 You are in an isolated firstmate home. The local \`AGENTS.md\` is your job description, and your local \`data/\`, \`state/\`, \`config/\`, and \`projects/\` dirs are yours to operate.
 $PROJECT_CLONES_NOTE
+Never hold your own turn in a long foreground wait (a CI run watch, a sleep loop, a release watch); hand the wait to the PR poll or a process-event source, declare it, and return to supervision, because instructions and worker events reach you only between turns.
 Delegate project work to your own crewmates with the normal firstmate lifecycle: brief, spawn, status, watcher, steer, teardown, and recovery.
 Do not invent a second delegation system.
 You do not generate your own work.
