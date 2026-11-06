@@ -209,6 +209,19 @@ make_toolchain() {
   local dir=$1 fakebin
   fakebin=$(fm_fakebin "$dir")
   fm_fake_exit0 "$fakebin" node chrome-devtools-axi pi-signed
+  # The real launch templates resolve their executable from PATH, so a recovery
+  # fixture that pins a named runtime needs that runtime to exist. The agy stub
+  # only has to resolve; cursor-agent's --help must also carry Cursor's own CLI
+  # identity, the same probe fm_cursor_verify_executable requires of a launch.
+  fm_fake_exit0 "$fakebin" agy
+  cat > "$fakebin/cursor-agent" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = --help ]; then
+  printf '%s\n' 'Start the Cursor Agent'
+fi
+exit 0
+SH
+  chmod +x "$fakebin/cursor-agent"
   fm_fake_version_tool "$fakebin" lavish-axi FM_FAKE_LAVISH_AXI_VERSION 0.1.80
   cat > "$fakebin/gh-axi" <<'SH'
 #!/usr/bin/env bash
@@ -265,7 +278,9 @@ SH
 
 # make_liveness_tmux <dir>: a controllable tmux stub. FM_TEST_PANE_CMD may be
 # a foreground command, `missing` (readable inventory omits the window), or
-# `unreadable` (both pane and inventory reads fail).
+# `unreadable` (both pane and inventory reads fail). FM_TEST_PANE_TEXT is what
+# a pane capture returns (default empty), so a harness whose post-launch
+# readiness gate reads the rendered pane can be driven to its verified state.
 make_liveness_tmux() {
   local dir=$1 fakebin
   fakebin=$(fm_fakebin "$dir")
@@ -275,6 +290,9 @@ set -u
 mode=${FM_TEST_PANE_CMD:-zsh}
 windows="${FM_TMUX_CALL_LOG:?}.windows"
 case "${1:-}" in
+  capture-pane)
+    [ -z "${FM_TEST_PANE_TEXT:-}" ] || printf '%s\n' "$FM_TEST_PANE_TEXT"
+    exit 0 ;;
   send-keys)
     if [ -n "${FM_FAKE_LAUNCH_LOG:-}" ]; then
       for arg in "$@"; do
@@ -646,11 +664,13 @@ test_sweep_respawns_authoritatively_missing_pi_signed_secondmate() {
 test_sweep_respawns_authoritatively_missing_agy_secondmate() {
   local w fb tmuxfb log out
   w=$(new_world sweep-missing-agy)
+  printf 'agy\n' > "$w/home/config/secondmate-harness"
   add_sm_home "$w" sm1 firstmate:fm-sm1 agy
   fb=$(make_toolchain "$w"); tmuxfb=$(make_liveness_tmux "$w")
   log="$w/calls.log"; : > "$log"
 
-  out=$(run_bootstrap "$tmuxfb:$fb" "$w/home" missing "$log")
+  out=$(run_bootstrap "$tmuxfb:$fb" "$w/home" missing "$log" \
+    HOME="$w/home" FM_TEST_PANE_TEXT='esc to cancel' FM_FAKE_LAUNCH_LOG="$w/launch.log")
 
   assert_not_contains "$out" "unverified for recovery" \
     "a recorded agy secondmate should be verified for recovery"
@@ -658,17 +678,25 @@ test_sweep_respawns_authoritatively_missing_agy_secondmate() {
     "an authoritatively missing agy secondmate should be relaunched"
   assert_not_contains "$(cat "$log")" "kill-window" \
     "an absent agy window should not need a destructive pre-kill"
+  assert_contains "$(cat "$w/launch.log")" "$fb/agy" \
+    "the relaunch must launch the agy runtime, not the crew harness"
+  assert_contains "$(cat "$w/launch.log")" "--prompt-interactive" \
+    "the agy relaunch must carry agy's verified launch template"
+  assert_grep 'relaunched' "$w/home/state/.secondmate-relaunch-sm1" \
+    "the agy relaunch must complete"
   pass "sweep: an authoritatively missing agy secondmate window is relaunched"
 }
 
 test_sweep_respawns_confirmed_dead_agy_secondmate() {
   local w fb tmuxfb log out
   w=$(new_world sweep-dead-agy)
+  printf 'agy\n' > "$w/home/config/secondmate-harness"
   add_sm_home "$w" sm1 firstmate:fm-sm1 agy
   fb=$(make_toolchain "$w"); tmuxfb=$(make_liveness_tmux "$w")
   log="$w/calls.log"; : > "$log"
 
-  out=$(run_bootstrap "$tmuxfb:$fb" "$w/home" zsh "$log")
+  out=$(run_bootstrap "$tmuxfb:$fb" "$w/home" zsh "$log" \
+    HOME="$w/home" FM_TEST_PANE_TEXT='esc to cancel' FM_FAKE_LAUNCH_LOG="$w/launch.log")
 
   assert_not_contains "$out" "unverified for recovery" \
     "a recorded agy secondmate should be verified for recovery"
@@ -676,17 +704,25 @@ test_sweep_respawns_confirmed_dead_agy_secondmate() {
     "the stale endpoint must be killed before respawn"
   assert_contains "$(cat "$log")" "new-window" \
     "a confirmed-dead agy secondmate should actually be relaunched"
+  assert_contains "$(cat "$w/launch.log")" "$fb/agy" \
+    "the relaunch must launch the agy runtime, not the crew harness"
+  assert_contains "$(cat "$w/launch.log")" "--prompt-interactive" \
+    "the agy relaunch must carry agy's verified launch template"
+  assert_grep 'relaunched' "$w/home/state/.secondmate-relaunch-sm1" \
+    "the agy relaunch must complete"
   pass "sweep: a confirmed-dead agy secondmate endpoint is killed and respawned"
 }
 
 test_sweep_respawns_authoritatively_missing_cursor_secondmate() {
   local w fb tmuxfb log out
   w=$(new_world sweep-missing-cursor)
+  printf 'cursor\n' > "$w/home/config/secondmate-harness"
   add_sm_home "$w" sm1 firstmate:fm-sm1 cursor
   fb=$(make_toolchain "$w"); tmuxfb=$(make_liveness_tmux "$w")
   log="$w/calls.log"; : > "$log"
 
-  out=$(run_bootstrap "$tmuxfb:$fb" "$w/home" missing "$log")
+  out=$(run_bootstrap "$tmuxfb:$fb" "$w/home" missing "$log" \
+    HOME="$w/home" FM_FAKE_LAUNCH_LOG="$w/launch.log")
 
   assert_not_contains "$out" "unverified for recovery" \
     "a recorded cursor secondmate should be verified for recovery"
@@ -694,17 +730,25 @@ test_sweep_respawns_authoritatively_missing_cursor_secondmate() {
     "an authoritatively missing cursor secondmate should be relaunched"
   assert_not_contains "$(cat "$log")" "kill-window" \
     "an absent cursor window should not need a destructive pre-kill"
+  assert_contains "$(cat "$w/launch.log")" "$fb/cursor-agent" \
+    "the relaunch must launch the cursor runtime, not the crew harness"
+  assert_contains "$(cat "$w/launch.log")" "--trust --yolo" \
+    "the cursor relaunch must carry cursor's verified launch template"
+  assert_grep 'relaunched' "$w/home/state/.secondmate-relaunch-sm1" \
+    "the cursor relaunch must complete"
   pass "sweep: an authoritatively missing cursor secondmate window is relaunched"
 }
 
 test_sweep_respawns_confirmed_dead_cursor_secondmate() {
   local w fb tmuxfb log out
   w=$(new_world sweep-dead-cursor)
+  printf 'cursor\n' > "$w/home/config/secondmate-harness"
   add_sm_home "$w" sm1 firstmate:fm-sm1 cursor
   fb=$(make_toolchain "$w"); tmuxfb=$(make_liveness_tmux "$w")
   log="$w/calls.log"; : > "$log"
 
-  out=$(run_bootstrap "$tmuxfb:$fb" "$w/home" zsh "$log")
+  out=$(run_bootstrap "$tmuxfb:$fb" "$w/home" zsh "$log" \
+    HOME="$w/home" FM_FAKE_LAUNCH_LOG="$w/launch.log")
 
   assert_not_contains "$out" "unverified for recovery" \
     "a recorded cursor secondmate should be verified for recovery"
@@ -712,6 +756,12 @@ test_sweep_respawns_confirmed_dead_cursor_secondmate() {
     "the stale endpoint must be killed before respawn"
   assert_contains "$(cat "$log")" "new-window" \
     "a confirmed-dead cursor secondmate should actually be relaunched"
+  assert_contains "$(cat "$w/launch.log")" "$fb/cursor-agent" \
+    "the relaunch must launch the cursor runtime, not the crew harness"
+  assert_contains "$(cat "$w/launch.log")" "--trust --yolo" \
+    "the cursor relaunch must carry cursor's verified launch template"
+  assert_grep 'relaunched' "$w/home/state/.secondmate-relaunch-sm1" \
+    "the cursor relaunch must complete"
   pass "sweep: a confirmed-dead cursor secondmate endpoint is killed and respawned"
 }
 
