@@ -59,7 +59,7 @@
 # reviewed. It must be one full lowercase hex commit of 40 or 64 characters,
 # given once as its own argument. The initial live head must equal it or the
 # request is refused before any forge write. The forge head match receives that same
-# supplied value on GitHub, GitLab, and Forgejo. A later preflight in this run
+# supplied value on GitHub, GitLab, Forgejo, and Azure DevOps. A later preflight in this run
 # does not replace it with a newly read head. Omitting the flag keeps the
 # previous behavior: the live head read at verification is the matched value.
 # Reading that state needs gh and jq, and either one absent stops the merge before any
