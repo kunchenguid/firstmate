@@ -905,6 +905,8 @@ The portable halves are pinned by `tests/fm-backend-herdr.test.sh` (the read, ag
 ## Push events and polling fallback
 
 Protocol 16 can subscribe to `pane.agent_status_changed` over one bounded Unix-socket reader.
+The [event reader](../bin/backends/herdr-eventwait.py) supports long control-socket paths under deep home directories.
+See its header for argument requirements and exit statuses.
 `bin/fm-transition-lib.sh` owns the backend-neutral transition vocabulary and policy.
 The Herdr adapter subscribes before reconciling current levels, buffers edges during reconciliation, and returns fresh blocked transitions for this home's panes.
 
