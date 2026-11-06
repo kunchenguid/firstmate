@@ -597,7 +597,12 @@ hold_key() {
   printf '%s' test:fm-held-merge | tr ':/.' '___'
 }
 
-make_hold_home() {  # <name> <status-line> <hold|nohold>
+# <hold> is where the captain call lives: `hold` on the task itself, `origin` on
+# a separate held-merge-call task recorded with `--origin held-merge` (the shape
+# captain-hold-lifecycle requires of an investigation), `elsewhere` on that task
+# held for a different origin, `unrelated` on that task with no origin at all,
+# and `nohold` nowhere.
+make_hold_home() {  # <name> <status-line> <hold|origin|elsewhere|unrelated|nohold>
   local name=$1 line=$2 hold=$3 dir state
   dir=$(make_case "$name"); state="$dir/state"
   mkdir -p "$dir/data" "$dir/config"
@@ -605,9 +610,23 @@ make_hold_home() {  # <name> <status-line> <hold|nohold>
   printf '## In flight\n\n## Queued\n\n## Done\n' > "$dir/data/backlog.md"
   (cd "$dir" && tasks-axi add held-merge 'delivered work' --file data/backlog.md) >/dev/null 2>&1 \
     || return 1
-  if [ "$hold" = hold ]; then
-    run_hold "$dir" hold held-merge --reason 'awaiting the captain on the merge' || return 1
-  fi
+  case "$hold" in
+    hold)
+      run_hold "$dir" hold held-merge --reason 'awaiting the captain on the merge' || return 1
+      ;;
+    origin)
+      run_hold "$dir" hold held-merge-call --title 'the call held-merge raised' \
+        --reason 'awaiting the captain on the board' --origin held-merge || return 1
+      ;;
+    elsewhere)
+      run_hold "$dir" hold held-merge-call --title 'a call another task raised' \
+        --reason 'awaiting the captain elsewhere' --origin other-task || return 1
+      ;;
+    unrelated)
+      run_hold "$dir" hold held-merge-call --title 'an unrelated call' \
+        --reason 'awaiting the captain on something else' || return 1
+      ;;
+  esac
   printf 'window=test:fm-held-merge\nkind=ship\nharness=grok\nbackend=tmux\n' \
     > "$state/held-merge.meta"
   printf '%s\n' "$line" > "$state/held-merge.status"
@@ -675,16 +694,21 @@ hold_stale_wakes() {  # <state>
 # the captain-relevant stale branch, and a worker line that routes through the
 # inconclusive one. The hold is invisible to the status line in both, so both
 # branches had the same blindness and both are covered.
+# The `origin` row is a parked scout: its newest line asks for the captain's
+# decision, and the call itself is held on a separate task that records the
+# scout as its origin. Bounding only the task's own row let every pane tick of
+# such a scout (a ticking status line) re-alarm for the whole decision.
 test_open_captain_call_bounds_stale_churn() {
-  local spec name line dir state out capture throttle wakes
+  local spec name mode line dir state out capture throttle wakes round
   command -v tasks-axi >/dev/null 2>&1 \
     || fail "tasks-axi is required (captain-hold stale bound)"
   for spec in \
-    'held-delivery|done: PR https://example.invalid/pull/1 checks green' \
-    'held-worker-line|working: still tidying the branch'
+    'held-delivery|hold|done: PR https://example.invalid/pull/1 checks green' \
+    'held-worker-line|hold|working: still tidying the branch' \
+    'origin-decision|origin|needs-decision [key=board-review]: the board is ready for the captain'
   do
-    name=${spec%%|*}; line=${spec#*|}
-    dir=$(make_hold_home "$name" "$line" hold) \
+    name=${spec%%|*}; mode=${spec#*|}; line=${mode#*|}; mode=${mode%%|*}
+    dir=$(make_hold_home "$name" "$line" "$mode") \
       || fail "[$name] could not build a captain-held backlog fixture"
     state="$dir/state"; out="$dir/watch.out"; capture="$dir/pane.txt"
     throttle="$state/.paused-resurfaced-$(hold_key)"
@@ -712,8 +736,47 @@ test_open_captain_call_bounds_stale_churn() {
     wakes=$(hold_stale_wakes "$state")
     [ "$wakes" -eq 1 ] \
       || fail "[$name] elapsed re-surface window produced $wakes wakes instead of one"
+    [ "$mode" = origin ] || continue
+
+    # Answering and releasing the origin-linked call, then holding it again, is a
+    # new call with no status append on either task: its first sight alarms.
+    ack_stopped_cycle "$state" || fail "[$name] could not acknowledge the re-surface"
+    printf 'revise the board\n' > "$dir/decision.txt"
+    run_hold "$dir" answer held-merge-call --decision-file "$dir/decision.txt" --release \
+      || fail "[$name] could not record the captain's answer on the origin-linked call"
+    run_hold "$dir" hold held-merge-call --reason 'awaiting the captain on the revised board' \
+      || fail "[$name] could not re-hold the origin-linked call"
+    hold_watch_surface "$dir" "$out" "$capture" 'idle, elapsed 12s' \
+      || fail "[$name] the re-held origin-linked call inherited the previous call's silence"
+    wakes=$(hold_stale_wakes "$state")
+    [ "$wakes" -eq 1 ] \
+      || fail "[$name] the re-held origin-linked call produced $wakes first wakes instead of one"
   done
-  pass "work under an open captain call surfaces once, absorbs pane churn, then re-surfaces when the window elapses"
+
+  # A captain call held for some OTHER origin, or for none, says nothing about
+  # this task's wait, and neither does one held for it while it keeps working
+  # rather than parking on the decision, so every new hash keeps alarming.
+  for spec in \
+    'origin-worker-line|origin|working: still tidying the branch' \
+    'elsewhere-decision|elsewhere|needs-decision [key=board-review]: the board is ready for the captain' \
+    'unrelated-decision|unrelated|needs-decision [key=board-review]: the board is ready for the captain'
+  do
+    name=${spec%%|*}; mode=${spec#*|}; line=${mode#*|}; mode=${mode%%|*}
+    dir=$(make_hold_home "$name" "$line" "$mode") \
+      || fail "[$name] could not build a backlog fixture"
+    state="$dir/state"; out="$dir/watch.out"; capture="$dir/pane.txt"
+    round=1
+    while [ "$round" -le 2 ]; do
+      hold_watch_surface "$dir" "$out" "$capture" "idle, elapsed ${round}s" \
+        || fail "[$name] a call that is not this task's wait bounded this window on round $round"
+      wakes=$(hold_stale_wakes "$state")
+      [ "$wakes" -eq 1 ] \
+        || fail "[$name] round $round produced $wakes wakes instead of one"
+      ack_stopped_cycle "$state" || fail "[$name] could not acknowledge round $round"
+      round=$((round + 1))
+    done
+  done
+  pass "work under an open captain call, on its own row or held for it as origin, surfaces once, absorbs pane churn, then re-surfaces when the window elapses"
 }
 
 

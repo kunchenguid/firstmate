@@ -31,6 +31,7 @@
 #   fm-captain-hold.sh complete <origin-id> (--none | <task-id>...)
 #   fm-captain-hold.sh verify <origin-id>
 #   fm-captain-hold.sh open <task-id> [--identity] [--distinguish-absent]
+#   fm-captain-hold.sh open-origin <origin-id> [--identity]
 #   fm-captain-hold.sh diverged
 #   fm-captain-hold.sh reconcile list
 #   fm-captain-hold.sh reconcile close <task-id> --evidence-file <path>
@@ -200,6 +201,17 @@
 # crew task reaches a due stale alarm - its open backlog hold need not appear in
 # the task's last status line - and on a 0 bounds repeated alarms from new pane
 # hashes for the decision.
+#
+# `open-origin` is the same read-only predicate for the calls an origin handed
+# to the captain on OTHER tasks, the shape this lifecycle requires of an
+# investigation: is any row that is still an open captain call held for this
+# origin? Exit 0 yes, 1 no, 2 cannot tell. A row is held for the origin when
+# its `Captain hold origin:` line names it. With `--identity` an exit 0 prints
+# each matching call's id beside its lifecycle identity, so a new, released, or
+# re-held call is a new identity. bin/fm-watch.sh asks it beside `open` only for a task whose newest
+# line is an open `needs-decision` or `blocked`, so a scout parked on a call the
+# captain is holding on another task is bounded like a held task itself, while a
+# scout still working beside such a call keeps its alarms.
 #
 # `diverged` is the read-only guard over the seam between the two records of
 # one captain call. See "record divergence" beside command_diverged below.
@@ -2186,6 +2198,44 @@ EOF
   done
 }
 
+# Resolve the backlog an `open` read consults into OPEN_DATA. Returns 0 when
+# the backlog can be read and 3 when this home has no markdown backlog file at
+# all, which records no captain calls; every unreadable record exits 2 with the
+# reason on stderr, because "cannot tell" must never read as "no call".
+OPEN_DATA=
+open_backlog_resolve() {
+  local root backend file
+  OPEN_DATA=$(fm_backlog_data_absolute "$DATA") \
+    || { printf 'fm-captain-hold: data directory cannot be resolved: %s\n' "$DATA" >&2; exit 2; }
+  root=$(fm_backlog_root "$OPEN_DATA") \
+    || { printf 'fm-captain-hold: %s\n' "$FM_BACKLOG_TRANSITION_ERROR" >&2; exit 2; }
+  if ! backend=$(fm_tasks_axi_backend_resolve "$root"); then
+    exit 2
+  fi
+  if [ "$backend" = markdown ]; then
+    file=$(fm_backlog_file "$OPEN_DATA") \
+      || { printf 'fm-captain-hold: %s\n' "$FM_BACKLOG_TRANSITION_ERROR" >&2; exit 2; }
+    if [ ! -e "$file" ] && [ ! -L "$file" ]; then
+      # No backlog file at all: this home records no captain calls, so the task
+      # is absent from it rather than held. A record that EXISTS but cannot be
+      # read is a different state and still leaves by the exit 2 paths below,
+      # because that one may hide a live hold.
+      return 3
+    fi
+  fi
+  fm_tasks_axi_compatible || { printf 'fm-captain-hold: compatible tasks-axi is required\n' >&2; exit 2; }
+}
+
+# The lifecycle identity of an open call, `<hold-set stamp>#<answer count>`,
+# read from a shown row (see the header's `open --identity`).
+open_call_identity() {  # <show-output>
+  local shown_body
+  shown_body=$(show_field "$1" body)
+  printf '%s#%s' \
+    "$(body_hold_set_timestamp "$(decode_shown_value "$shown_body")")" \
+    "$(resolution_record_count "$shown_body")"
+}
+
 # Still an open captain call? Exit 0 yes, 1 no, 2 cannot tell (see the header).
 # A row this home does not carry is 3 when the caller requests the distinction,
 # and so is a home with no backlog file at all, because a backlog that does not
@@ -2193,7 +2243,7 @@ EOF
 # printed to stderr, because a mechanical closer must never read "cannot tell"
 # as permission to close.
 command_open() {  # <task-id> [--identity] [--distinguish-absent]
-  local id='' identity=0 distinguish_absent=0 data state root file backend show shown_body
+  local id='' identity=0 distinguish_absent=0 state resolve_status=0
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --identity) identity=1 ;;
@@ -2212,27 +2262,12 @@ command_open() {  # <task-id> [--identity] [--distinguish-absent]
       exit 2
       ;;
   esac
-  data=$(fm_backlog_data_absolute "$DATA") \
-    || { printf 'fm-captain-hold: data directory cannot be resolved: %s\n' "$DATA" >&2; exit 2; }
-  root=$(fm_backlog_root "$data") \
-    || { printf 'fm-captain-hold: %s\n' "$FM_BACKLOG_TRANSITION_ERROR" >&2; exit 2; }
-  if ! backend=$(fm_tasks_axi_backend_resolve "$root"); then
-    exit 2
+  open_backlog_resolve || resolve_status=$?
+  if [ "$resolve_status" -eq 3 ]; then
+    [ "$distinguish_absent" = 0 ] || return 3
+    return 1
   fi
-  if [ "$backend" = markdown ]; then
-    file=$(fm_backlog_file "$data") \
-      || { printf 'fm-captain-hold: %s\n' "$FM_BACKLOG_TRANSITION_ERROR" >&2; exit 2; }
-    if [ ! -e "$file" ] && [ ! -L "$file" ]; then
-      # No backlog file at all: this home records no captain calls, so the task
-      # is absent from it rather than held. A record that EXISTS but cannot be
-      # read is a different state and still leaves by the exit 2 paths below,
-      # because that one may hide a live hold.
-      [ "$distinguish_absent" = 0 ] || return 3
-      return 1
-    fi
-  fi
-  fm_tasks_axi_compatible || { printf 'fm-captain-hold: compatible tasks-axi is required\n' >&2; exit 2; }
-  if fm_backlog_row_probe "$data" "$id"; then
+  if fm_backlog_row_probe "$OPEN_DATA" "$id"; then
     state=${FM_BACKLOG_ROW_STATE%% *}
     if [ "$state" != "done" ] && [ "$FM_BACKLOG_ROW_HOLD_KIND" = captain ]; then
       if [ "$identity" -eq 1 ]; then
@@ -2240,11 +2275,7 @@ command_open() {  # <task-id> [--identity] [--distinguish-absent]
           printf 'fm-captain-hold: captain call %s is open but its record could not be read\n' "$id" >&2
           exit 2
         }
-        show=$TASK_SHOW_OUTPUT
-        shown_body=$(show_field "$show" body)
-        printf '%s#%s\n' \
-          "$(body_hold_set_timestamp "$(decode_shown_value "$shown_body")")" \
-          "$(resolution_record_count "$shown_body")"
+        printf '%s\n' "$(open_call_identity "$TASK_SHOW_OUTPUT")"
       fi
       return 0
     fi
@@ -2258,6 +2289,84 @@ command_open() {  # <task-id> [--identity] [--distinguish-absent]
   exit 2
 }
 
+# Is there an open captain call held FOR <origin> on some other task? Exit 0
+# yes, 1 no, 2 cannot tell, with `open`'s meaning of "open" (not Done, hold kind
+# captain) applied to every row. A row belongs to the origin when its body
+# records `Captain hold origin: <origin>` (written by `hold --origin`).
+# The origin is matched both as given and as its backend identity, the form
+# `hold --origin` stores. The origin's own row is never counted: `open` owns it.
+# With --identity, an exit 0 prints every matching call as
+# `<task-id>@<hold-set stamp>#<answer count>`, sorted and space-separated, so a
+# new, released, or re-held call changes the printed identity.
+command_open_origin() {  # <origin-id> [--identity]
+  local origin='' identity=0 resolve_status=0 listing list_status=0 ids id show body
+  local origin_id stored found=''
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --identity) identity=1 ;;
+      -*) usage >&2; exit 2 ;;
+      *)
+        [ -z "$origin" ] || { usage >&2; exit 2; }
+        origin=$1
+        ;;
+    esac
+    shift
+  done
+  case "$origin" in
+    ''|*[!A-Za-z0-9._-]*)
+      printf 'fm-captain-hold: origin id must be a non-empty privacy-safe slug: %s\n' "$origin" >&2
+      exit 2
+      ;;
+  esac
+  open_backlog_resolve || resolve_status=$?
+  [ "$resolve_status" -ne 3 ] || return 1
+  origin_id=$origin
+  if task_show "$origin"; then
+    origin_id=$(show_field_value "$TASK_SHOW_OUTPUT" id)
+  elif ! printf '%s\n' "$TASK_SHOW_OUTPUT" | grep -q '^code: NOT_FOUND$'; then
+    printf 'fm-captain-hold: could not resolve the backend identity of %s\n' "$origin" >&2
+    exit 2
+  fi
+  listing=$(fm_backlog_row_list "$OPEN_DATA" --fields body,hold_kind) || list_status=$?
+  if [ "$list_status" -ne 0 ]; then
+    printf 'fm-captain-hold: the backlog listing could not be read: %s\n' "${listing%%$'\n'*}" >&2
+    exit 2
+  fi
+  # Only the first two comma-separated fields and the last are read: the id and
+  # state are slugs ahead of any quoted title or body, and the requested
+  # hold_kind field is a bare slug at the end, so commas inside them cannot shift
+  # those. The escaped body keeps the origin line on the row's one listing line,
+  # so a row whose listing never carries it is skipped without showing its record.
+  ids=$(printf '%s\n' "$listing" | awk -F, -v origin="Captain hold origin: $origin" \
+    -v origin_id="Captain hold origin: $origin_id" '
+    /^  [A-Za-z0-9._-]+,/ {
+      id = $1
+      sub(/^ +/, "", id)
+      if ($2 != "done" && $NF == "captain" && (index($0, origin) || index($0, origin_id))) print id
+    }
+  ')
+  while IFS= read -r id; do
+    [ -n "$id" ] || continue
+    [ "$id" != "$origin" ] && [ "$id" != "$origin_id" ] || continue
+    task_show "$id" || {
+      printf 'fm-captain-hold: captain call %s is open but its record could not be read\n' "$id" >&2
+      exit 2
+    }
+    show=$TASK_SHOW_OUTPUT
+    body=$(decode_shown_value "$(show_field "$show" body)")
+    stored=$(body_hold_origin "$body")
+    if [ -z "$stored" ] || { [ "$stored" != "$origin" ] && [ "$stored" != "$origin_id" ]; }; then
+      continue
+    fi
+    found="${found}${found:+$NL_SEP}$id@$(open_call_identity "$show")"
+  done <<EOF
+$ids
+EOF
+  [ -n "$found" ] || return 1
+  [ "$identity" -eq 0 ] || printf '%s\n' "$found" | LC_ALL=C sort | paste -sd' ' -
+  return 0
+}
+
 case "${1:-}" in
   hold) shift; command_hold "$@" ;;
   answer) shift; command_answer "$@" ;;
@@ -2269,6 +2378,7 @@ case "${1:-}" in
   complete) shift; command_complete "$@" ;;
   verify) shift; command_verify "$@" ;;
   open) shift; command_open "$@" ;;
+  open-origin) shift; command_open_origin "$@" ;;
   diverged) shift; command_diverged "$@" ;;
   reconcile) shift; command_reconcile "$@" ;;
   -h|--help) usage ;;
