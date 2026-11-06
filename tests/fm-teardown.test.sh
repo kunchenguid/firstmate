@@ -25,7 +25,9 @@
 #   (b) local-only + truly unpushed work (no remote, not main) -> REFUSE (safety)
 #   (c) local-only + merged into local main, no remote         -> ALLOW  (no regression)
 #   (c2) direct-PR + merged into local main, no remote         -> ALLOW  (local-default fix)
-#   (c3) direct-PR + not in local main, no remote              -> REFUSE (safety preserved)
+#   (c3) direct-PR + base=main + commit on local main           -> ALLOW  (explicit default)
+#   (c4) direct-PR + not in local main, no remote               -> REFUSE (safety preserved)
+#   (c5) direct-PR + named base + commit only on local main     -> REFUSE (target preserved)
 #   (d) no-mistakes + HEAD on origin remote-tracking branch    -> ALLOW  (no regression)
 #   (e) no-mistakes + unpushed, no PR, content not in default  -> REFUSE (safety)
 #   (f) local-only + truly unpushed + --force                  -> ALLOW  (escape hatch)
@@ -916,7 +918,7 @@ test_local_only_merged_to_local_main_allows() {
 # A commit the local default branch holds is landed even when no remote holds it
 # and the task record never named a local merge: a local-only delivery
 # fast-forwards that branch, so its copy can be reclaimed. The same work stays
-# protected while the local default branch does not hold it.
+# protected when that branch does not hold it or the task targets another branch.
 test_local_default_branch_reachability_is_landed() {
   local case_dir rc wt_head
   case_dir=$(make_case local-default-reachability)
@@ -934,7 +936,22 @@ test_local_default_branch_reachability_is_landed() {
   expect_code 0 "$rc" "local-default-reachability: teardown should succeed when the local default branch holds the work"
   ! grep -q REFUSED "$case_dir/stderr" || fail "local-default-reachability: teardown printed a REFUSED line"
   assert_absent "$case_dir/state/task-x1.meta" "local-default-reachability: teardown left task metadata after cleanup"
-  pass "work reachable from the local default branch is landed even when no remote holds it"
+
+  case_dir=$(make_case local-default-explicit-target)
+  write_meta "$case_dir" direct-PR ship
+  printf 'base_branch=main\n' >> "$case_dir/state/task-x1.meta"
+  wt_commit_file "$case_dir" feature.txt hello "add feature"
+  wt_head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  git -C "$case_dir/project" update-ref refs/heads/main "$wt_head"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "local-default-explicit-target: teardown should accept an explicit main target"
+  ! grep -q REFUSED "$case_dir/stderr" || fail "local-default-explicit-target: teardown printed a REFUSED line"
+  assert_absent "$case_dir/state/task-x1.meta" "local-default-explicit-target: teardown left task metadata after cleanup"
 
   case_dir=$(make_case local-default-unlanded)
   write_meta "$case_dir" direct-PR ship
@@ -949,7 +966,24 @@ test_local_default_branch_reachability_is_landed() {
   expect_code 1 "$rc" "local-default-unlanded: teardown should refuse when the local default branch does not hold the work"
   grep -q REFUSED "$case_dir/stderr" || fail "local-default-unlanded: no REFUSED line in stderr"
   assert_refusal_retained_task_state "$case_dir" "local-default-unlanded" "$wt_head"
-  pass "work the local default branch does not hold is still refused"
+
+  case_dir=$(make_case local-default-wrong-target)
+  write_meta "$case_dir" direct-PR ship
+  printf 'base_branch=release\n' >> "$case_dir/state/task-x1.meta"
+  git -C "$case_dir/project" push -q origin HEAD:refs/heads/release
+  wt_commit_file "$case_dir" feature.txt hello "add feature"
+  wt_head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  git -C "$case_dir/project" update-ref refs/heads/main "$wt_head"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "local-default-wrong-target: local main must not satisfy a named release target"
+  grep -q REFUSED "$case_dir/stderr" || fail "local-default-wrong-target: no REFUSED line in stderr"
+  assert_refusal_retained_task_state "$case_dir" "local-default-wrong-target" "$wt_head"
+  pass "local default reachability applies only to tasks targeting the default branch"
 }
 
 # Send the task branch's commits to <target> on origin from a separate clone, so

@@ -81,8 +81,8 @@
 # local-only projects additionally accept work merged into the local default
 # branch (firstmate performs that merge after configured approval) as a fallback
 # for the common case where there is no remote at all. That local default branch
-# is a landed-work proof in every mode, because a local-only delivery lands
-# there whether or not the task record still names that mode.
+# is also a landed-work proof when the task targets the resolved default branch,
+# because a local-only delivery lands there whether or not the record names that mode.
 # Safety is proved again after task processes are reaped, before backlog-close
 # publication, branch deletion, or worktree return.
 # Scout tasks (kind=scout in meta) carve out of that check: their worktree is
@@ -1799,11 +1799,13 @@ content_in_default() {
 # commit no remote holds is still landed and its copy can be reclaimed. Proves
 # reachability only: HEAD must be an ancestor of the local default branch, so a
 # commit that branch does not contain stays unlanded and its copy stays
-# protected. Returns non-zero when the local default branch cannot be resolved,
-# so the caller refuses rather than guesses.
+# protected. A task targeting another recorded base must land there instead.
+# Returns non-zero when the local default branch cannot be resolved, so the
+# caller refuses rather than guesses.
 landed_in_local_default() {
   local name ref
   name=$(default_branch) || return 1
+  [ -z "$BASE_BRANCH" ] || [ "$BASE_BRANCH" = "$name" ] || return 1
   ref="refs/heads/$name"
   git -C "$WT" rev-parse --quiet --verify "$ref^{commit}" >/dev/null 2>&1 || return 1
   git -C "$WT" merge-base --is-ancestor HEAD "$ref" 2>/dev/null
@@ -1812,9 +1814,9 @@ landed_in_local_default() {
 # Has the worktree's committed work actually LANDED, though its commits are not
 # reachable from any remote-tracking branch? True when a merged PR proves the
 # current local work is contained in the PR head, OR the content is already in the
-# default branch (fallback, which also covers the no-PR and gh-error paths), OR
-# the work is reachable from the local default branch (a local-only delivery
-# lands there). False when no proof establishes that the work landed.
+# target branch (fallback, which also covers the no-PR and gh-error paths), OR
+# the work targets and is reachable from the local default branch (a local-only
+# delivery lands there). False when no proof establishes that the work landed.
 work_is_landed() {
   local branch=$1
   pr_is_merged "$branch" && return 0
