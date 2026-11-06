@@ -351,6 +351,24 @@ test_build_injects_binds_then_arms() {
   pass "build injects the payload, binds any-origin, then arms the source"
 }
 
+# The opt-in config/lavish-off flag makes build a plain no-op that says so:
+# no board file, no Lavish session, no binding, no registered source.
+test_build_skips_the_board_when_lavish_is_off() {
+  local home data out
+  home=$(make_home lavish-off)
+  data="$home/payload.json"
+  write_valid_payload "$data"
+  mkdir -p "$home/config"
+  : > "$home/config/lavish-off"
+  out=$(run_board "$home" build "$data") || fail "build failed with config/lavish-off set"
+  assert_contains "$out" "lavish-off: no board built or armed" "build did not say the board is off: $out"
+  assert_not_contains "$out" "armed:" "build armed a source with config/lavish-off set: $out"
+  assert_absent "$home/.lavish/bearings-board.html" "build wrote a board with config/lavish-off set"
+  [ -z "$(run_procevent "$home" list | awk 'NR > 1')" ] \
+    || fail "build registered a source with config/lavish-off set"
+  pass "build skips the board, session, binding, and source when config/lavish-off exists"
+}
+
 test_registration_cannot_consume_before_any_origin_binding() {
   local home data origin key hold board sid show
   home=$(make_home order-proof)
@@ -773,6 +791,7 @@ test_path_is_stable_and_home_scoped
 test_build_refuses_malformed_payloads_before_touching_the_board
 test_charted_kind_is_optional_and_accepts_both_values
 test_build_injects_binds_then_arms
+test_build_skips_the_board_when_lavish_is_off
 test_registration_cannot_consume_before_any_origin_binding
 test_build_does_not_bind_or_arm_when_session_start_fails
 test_rebuild_is_idempotent_and_does_not_double_arm
