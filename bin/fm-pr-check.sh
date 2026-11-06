@@ -435,16 +435,17 @@ fi
 if [ "${FM_PR_CHECK_MERGE:-}" != 1 ]; then
   if [ -n "$BASELINE" ] && ! fm_pr_poll_degraded_mark_notified "$STATE" "$ID" \
       "$PROVIDER" "$HOST" "$PROJECT_PATH" "$NUMBER" "$BASELINE"; then
-    rm -f -- "$STATE/$ID.pr-poll-degraded"
+    echo "error: could not persist PR poll degraded baseline" >&2
+    exit 1
   elif [ -z "$BASELINE" ]; then
     rm -f -- "$STATE/$ID.pr-poll-degraded"
   fi
-  if [ "${BASELINE_TRAIN:-0}" = 1 ]; then
+  if [ "${BASELINE_TRAIN:-0}" = 1 ] || [ "$BASELINE" = train=on ]; then
     fm_pr_poll_degraded_mark_notified "$STATE" "$ID" \
-      "$PROVIDER" "$HOST" "$PROJECT_PATH" "$NUMBER" train=on || rm -f -- "$STATE/$ID.pr-poll-train"
-  elif [ "$BASELINE" = train=on ]; then
-    fm_pr_poll_degraded_mark_notified "$STATE" "$ID" \
-      "$PROVIDER" "$HOST" "$PROJECT_PATH" "$NUMBER" train=on || exit 1
+      "$PROVIDER" "$HOST" "$PROJECT_PATH" "$NUMBER" train=on || {
+        echo "error: could not persist PR poll train baseline" >&2
+        exit 1
+      }
   else
     rm -f -- "$STATE/$ID.pr-poll-train"
   fi
