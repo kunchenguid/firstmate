@@ -114,6 +114,12 @@ tests/fm-devin-signals-live-e2e.test.sh	189
 tests/fm-dispatch-resolve.test.sh	32061
 tests/fm-documentation-audiences.test.sh	2683
 tests/fm-dod-lib.test.sh	12525
+tests/fm-droid-afk-approval.test.sh	1000
+tests/fm-droid-afk-herdr-live-e2e.test.sh	250
+tests/fm-droid-harness.test.sh	35000
+tests/fm-droid-primary-live-e2e.test.sh	250
+tests/fm-droid-primary.test.sh	5000
+tests/fm-droid-signals-live-e2e.test.sh	250
 tests/fm-ensure-agents-md.test.sh	814
 tests/fm-extension-binding.test.sh	30445
 tests/fm-fleet-ledger.test.sh	25999
