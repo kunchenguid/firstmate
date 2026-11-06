@@ -1586,15 +1586,12 @@ test_live_artifact_single_link_and_privacy_validation() {
   state="$dir/home/state"
   printf '#!/usr/bin/env bash\nprintf "custom-ready\\n"\n' > "$state/custom.check.sh"
   chmod 0755 "$state/custom.check.sh"
-  set +e
-  FM_HOME="$dir/home" "$REGISTER" custom > "$dir/register.out" 2> "$dir/register.err"
-  rc=$?
-  set -e
-  [ "$rc" -ne 0 ] || fail "custom check registration accepted a non-private source"
-  [ ! -e "$state/custom.check-trust" ] || fail "non-private custom check received a trust record"
-  chmod 0700 "$state/custom.check.sh"
   FM_HOME="$dir/home" "$REGISTER" custom >/dev/null \
-    || fail "could not register private custom check fixture"
+    || fail "custom check registration refused a 0755 source instead of normalizing it"
+  [ "$(stat -c %a "$state/custom.check.sh" 2>/dev/null || stat -f %Lp "$state/custom.check.sh")" = 700 ] \
+    || fail "custom check registration did not normalize the source to 0700"
+  fm_custom_check_registered "$state" custom \
+    || fail "normalized custom check was not authenticated after registration"
   chmod 0755 "$state/custom.check.sh"
   ! fm_custom_check_registered "$state" custom \
     || fail "registered custom check remained authenticated after becoming non-private"
