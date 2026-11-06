@@ -442,6 +442,7 @@ add_lock_aware_treehouse() {
   local case_dir=$1
   cat > "$case_dir/fakebin/treehouse" <<'SH'
 #!/usr/bin/env bash
+[ "${1:-}" != status ] || exit 0
 if [ "${1:-}" = return ]; then
   shift
   wt=""
@@ -476,6 +477,7 @@ add_transient_lock_treehouse() {
   local case_dir=$1
   cat > "$case_dir/fakebin/treehouse" <<'SH'
 #!/usr/bin/env bash
+[ "${1:-}" != status ] || exit 0
 if [ "${1:-}" = return ]; then
   shift
   wt=""
@@ -521,6 +523,7 @@ add_persistent_lock_treehouse() {
   local case_dir=$1
   cat > "$case_dir/fakebin/treehouse" <<'SH'
 #!/usr/bin/env bash
+[ "${1:-}" != status ] || exit 0
 if [ "${1:-}" = return ]; then
   shift
   wt=""
@@ -1437,6 +1440,7 @@ test_content_in_default_fallback_allows() {
   land_on_origin_main "$case_dir" feature.txt hello
   cat > "$case_dir/fakebin/treehouse" <<'SH'
 #!/usr/bin/env bash
+[ "${1:-}" != status ] || exit 0
 printf '%s\n' "$*" > "${FM_TEST_TREEHOUSE_LOG:?}"
 exit 0
 SH
@@ -1484,6 +1488,7 @@ test_content_fallback_uses_recorded_base_branch() {
     fi
     cat > "$case_dir/fakebin/treehouse" <<'SH'
 #!/usr/bin/env bash
+[ "${1:-}" != status ] || exit 0
 exit 0
 SH
     chmod +x "$case_dir/fakebin/treehouse"
@@ -1666,6 +1671,7 @@ add_treehouse_clean_fd() {
   local case_dir=$1
   cat > "$case_dir/fakebin/treehouse" <<'SH'
 #!/usr/bin/env bash
+[ "${1:-}" != status ] || exit 0
 if [ "${1:-}" = return ]; then
   shift
   wt=
@@ -1690,6 +1696,7 @@ add_treehouse_that_leaves_residue() {
   local case_dir=$1
   cat > "$case_dir/fakebin/treehouse" <<'SH'
 #!/usr/bin/env bash
+[ "${1:-}" != status ] || exit 0
 if [ "${1:-}" = return ]; then
   shift
   wt=
@@ -1772,6 +1779,7 @@ test_ship_nested_clone_is_refused_and_bytes_stay() {
   : > "$case_dir/treehouse.log"
   cat > "$case_dir/fakebin/treehouse" <<EOF
 #!/usr/bin/env bash
+[ "\${1:-}" != status ] || exit 0
 printf '%s\n' "\$*" >> "$case_dir/treehouse.log"
 exit 0
 EOF
@@ -1891,6 +1899,7 @@ add_treehouse_that_removes_copy() {
   local case_dir=$1
   cat > "$case_dir/fakebin/treehouse" <<'SH'
 #!/usr/bin/env bash
+[ "${1:-}" != status ] || exit 0
 if [ "${1:-}" = return ]; then
   for a in "$@"; do wt=$a; done
   rm -f "$wt/.git"
@@ -3251,6 +3260,7 @@ test_herdr_flat_teardown_refuses_orphaning_records_then_retry_completes() {
   thlog="$case_dir/treehouse.log"; : > "$thlog"
   cat > "$case_dir/fakebin/treehouse" <<SH
 #!/usr/bin/env bash
+[ "\${1:-}" != status ] || exit 0
 printf '%s\n' "\$*" >> "$thlog"
 exit 0
 SH
@@ -3347,6 +3357,7 @@ assert_herdr_teardown_preflight_refuses_before_changes() {
   thlog="$case_dir/treehouse.log"; : > "$thlog"
   cat > "$case_dir/fakebin/treehouse" <<SH
 #!/usr/bin/env bash
+[ "\${1:-}" != status ] || exit 0
 printf '%s\n' "\$*" >> "$thlog"
 exit 0
 SH
@@ -3601,6 +3612,7 @@ test_forced_secondmate_herdr_child_preflight_refuses_before_changes() {
   : > "$log"; : > "$thlog"
   cat > "$case_dir/fakebin/treehouse" <<SH
 #!/usr/bin/env bash
+[ "\${1:-}" != status ] || exit 0
 printf '%s\n' "\$*" >> "$thlog"
 exit 0
 SH
@@ -3655,6 +3667,7 @@ exit 0
 SH
   cat > "$case_dir/fakebin/treehouse" <<SH
 #!/usr/bin/env bash
+[ "\${1:-}" != status ] || exit 0
 printf '%s\n' "\$*" >> "$case_dir/treehouse.log"
 exit 0
 SH
@@ -4952,6 +4965,7 @@ test_parked_own_run_refuses_when_abort_is_unconfirmed() {
 
   cat > "$case_dir/fakebin/treehouse" <<EOF
 #!/usr/bin/env bash
+[ "\${1:-}" != status ] || exit 0
 printf 'return\n' >> "$case_dir/treehouse.log"
 EOF
   chmod +x "$case_dir/fakebin/treehouse"
@@ -5122,6 +5136,7 @@ exit 1
 SH
   cat > "$case_dir/fakebin/treehouse" <<EOF
 #!/usr/bin/env bash
+[ "\${1:-}" != status ] || exit 0
 printf 'return\n' >> "$case_dir/treehouse.log"
 EOF
   chmod +x "$case_dir/fakebin/lsof" "$case_dir/fakebin/treehouse"
@@ -5348,6 +5363,7 @@ exec "$REAL_PS_FOR_TEST" "$@"
 SH
   cat > "$case_dir/fakebin/treehouse" <<EOF
 #!/usr/bin/env bash
+[ "\${1:-}" != status ] || exit 0
 printf 'returned\n' > "$case_dir/treehouse.log"
 EOF
   chmod +x "$case_dir/fakebin/lsof" "$case_dir/fakebin/ps" "$case_dir/fakebin/treehouse"
@@ -5384,6 +5400,7 @@ test_run_abort_precedes_process_reap_precedes_worktree_removal() {
   # real observed state, not a source-text or line-number correlation.
   cat > "$case_dir/fakebin/treehouse" <<EOF
 #!/usr/bin/env bash
+[ "\${1:-}" != status ] || exit 0
 if [ -s "$abort_log" ]; then echo "abort-already-happened" >> "$case_dir/order.log"; fi
 if ! kill -0 $pid 2>/dev/null; then echo "reap-already-happened" >> "$case_dir/order.log"; fi
 exit 0
@@ -5426,6 +5443,7 @@ prepare_teardown_source_copy() {  # <case-dir>
   printf 'manual\n' > "$case_dir/config/backlog-backend"
   cat > "$case_dir/fakebin/treehouse" <<SH
 #!/usr/bin/env bash
+[ "\${1:-}" != status ] || exit 0
 printf '%s\n' "\$*" >> "$case_dir/treehouse.log"
 exit 0
 SH

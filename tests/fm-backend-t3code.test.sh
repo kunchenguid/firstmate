@@ -2248,7 +2248,7 @@ test_teardown_refuses_when_t3_is_unreachable() {
   rc=$?
   [ "$rc" -ne 0 ] || fail "teardown must refuse when the T3 server cannot be reached"
   assert_contains "$out" "is unreachable" "the early runtime gate must explain the refusal"
-  [ "$(t3_log_line_of 'r.tool === "treehouse"')" -eq 0 ] || fail "a refused teardown must not return the slot"
+  [ "$(t3_log_line_of 'r.tool === "treehouse" && r.args.indexOf("return") === 0')" -eq 0 ] || fail "a refused teardown must not return the slot"
   assert_present "$state/$id.meta" "a refused teardown must preserve metadata"
   t3_world_set 'w.tools = ["t3_thread_send","t3_thread_read","t3_thread_wait","t3_thread_interrupt","t3_thread_organize","t3_project_list","t3_project_create","t3_environment_read"]'
   out=$( PATH="$fb:$PATH" FM_T3_TREEHOUSE_LOG="$LOG" FM_T3_TREEHOUSE_WT="$wt" \
@@ -2257,7 +2257,7 @@ test_teardown_refuses_when_t3_is_unreachable() {
   expect_code 1 "$rc" "a server the capability gate refuses must stop teardown before cleanup"
   assert_contains "$out" "lacks t3_thread_launch" "the gate refusal must name the missing tool"
   [ -z "$(t3_dispatch_types)" ] || fail "a gate-refused teardown must not mutate"
-  [ "$(t3_log_line_of 'r.tool === "treehouse"')" -eq 0 ] || fail "a gate-refused teardown must not return the slot"
+  [ "$(t3_log_line_of 'r.tool === "treehouse" && r.args.indexOf("return") === 0')" -eq 0 ] || fail "a gate-refused teardown must not return the slot"
   assert_present "$state/$id.meta" "a gate-refused teardown must preserve metadata"
   pass "fm-teardown.sh backend=t3code: an unreachable or gate-refused server keeps the slot a live thread still points at"
 }
