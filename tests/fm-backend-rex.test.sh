@@ -22,172 +22,11 @@ TMP_ROOT=$(fm_test_tmproot fm-backend-rex-tests)
 # pid probe never reads a real process.
 DEAD_PID=99999999
 
-# make_rex_fake: a stateful fake `rex` at <dir>/bin/rex. Every invocation is
-# logged as one space-joined line to <dir>/fake/log. Marker files under
-# <dir>/fake steer failure modes: `unreachable` (every call exits 4), `down`
-# (a stopped server: --autostart=false reads exit 4, any other call starts a
-# fresh server with no sessions), `ls-fail`, `close-noop` (a close that leaves
-# the block alive). Per-block canned reads live in fake/process/<uuid>.json,
-# fake/status/<uuid>.json, fake/capture/<uuid>.txt and fake/capture/<uuid>.vt.
-# `do` stands in for the bounded event reader: it prints "@subscribed", then
-# replays fake/events (a `sleep N` line pauses), and exits 0; `do-fail` makes
-# it exit 3 before subscribing.
-make_rex_fake() {  # <dir>
-  local dir=$1
-  mkdir -p "$dir/bin" "$dir/fake/process" "$dir/fake/status" "$dir/fake/capture" "$dir/fake/cursor" "$dir/home/state"
-  cat >"$dir/bin/rex" <<'SH'
-#!/usr/bin/env bash
-D="${FM_REX_FAKE_DIR:?}"
-S="$D/state.json"
-[ -f "$S" ] || printf '{"sessions":[]}' >"$S"
-{ printf 'rex'; for a in "$@"; do printf ' %s' "$a"; done; printf '\n'; } >>"$D/log"
-autostart=1
-while [ $# -gt 0 ]; do
-  case "$1" in
-    --autostart=false) autostart=0; shift ;;
-    --*) shift ;;
-    *) break ;;
-  esac
-done
-if [ -f "$D/unreachable" ]; then echo "error: could not connect to the rex server" >&2; exit 4; fi
-if [ -f "$D/down" ]; then
-  if [ "$autostart" = 0 ]; then echo "error: could not connect to the rex server" >&2; exit 4; fi
-  rm -f "$D/down"
-  printf '{"sessions":[]}' >"$S"
-fi
-newid() {
-  local n
-  n=$(( $(cat "$D/.n" 2>/dev/null || echo 0) + 1 ))
-  echo "$n" >"$D/.n"
-  printf '%s:%08x-0000-7000-8000-%012x' "$1" "$n" "$n"
-}
-save() { jq "$@" "$S" >"$S.tmp" && mv "$S.tmp" "$S"; }
-notfound() { echo "error: $1 not found" >&2; exit 3; }
-has_session() { jq -e --arg s "$1" 'any(.sessions[]; .session_id == $s)' "$S" >/dev/null; }
-has_block() {
-  jq -e --arg s "$1" --arg b "$2" \
-    'any(.sessions[] | select(.session_id == $s) | .windows[].blocks[]; .block_id == $b)' "$S" >/dev/null
-}
-cmd=${1:-}; shift
-sub=
-case "$cmd" in window|block|api) sub=${1:-}; shift ;; esac
-sid=; bid=; fmt=text; wlabel=; pos=()
-while [ $# -gt 0 ]; do
-  case "$1" in
-    -s) sid=$2; shift 2 ;;
-    -b) bid=$2; shift 2 ;;
-    --format=*) fmt=${1#--format=}; shift ;;
-    --window) wlabel=$2; shift 2 ;;
-    --cwd) shift 2 ;;
-    --) shift; pos+=("$@"); break ;;
-    --*) shift ;;
-    *) pos+=("$1"); shift ;;
-  esac
-done
-p0=${pos[0]:-}; p1=${pos[1]:-}
-case "$cmd:$sub" in
-  version:)
-    printf 'rex 0.0.1-fake\napi: revision %s\n' "${FM_REX_FAKE_API:-5}" ;;
-  whoami:)
-    printf '{"endpoint":"%s"}\n' "${FM_REX_FAKE_ENDPOINT:-unix:///fake/rex.sock}" ;;
-  ls:)
-    [ ! -f "$D/ls-fail" ] || exit 1
-    jq -c '{sessions: [.sessions[] | {session_id, label}]}' "$S" ;;
-  api:call)
-    case "$p0" in
-      server.status) printf '{"api_revision":%s}\n' "${FM_REX_FAKE_SERVER_API:-5}" ;;
-      session.view)
-        has_session "$sid" || notfound "session"
-        jq -c --arg s "$sid" '.sessions[] | select(.session_id == $s)
-          | if ((.windows // []) | length) == 0 then {session_id, label}
-            else {session_id, label, windows: [.windows[] | {window_id, label,
-              layers: [{blocks: [.blocks[] | {block_id, label}]}]}]} end' "$S" ;;
-      *) exit 2 ;;
-    esac ;;
-  new:)
-    s=$(newid session); w=$(newid window); b=$(newid block)
-    save --arg s "$s" --arg w "$w" --arg b "$b" --arg l "$p0" --arg wl "$wlabel" \
-      '.sessions += [{session_id: $s, label: $l, windows: [{window_id: $w, label: $wl,
-        blocks: [{block_id: $b, label: "shell", columns: 80, rows: 24}]}]}]'
-    printf '{"session_id":"%s","initial_windows":[{"window_id":"%s","block_ids":["%s"]}]}\n' "$s" "$w" "$b" ;;
-  window:new)
-    has_session "$sid" || notfound "session"
-    w=$(newid window); b=$(newid block)
-    save --arg s "$sid" --arg w "$w" --arg b "$b" --arg l "$p0" \
-      '(.sessions[] | select(.session_id == $s) | .windows) += [{window_id: $w, label: $l,
-        blocks: [{block_id: $b, label: "shell", columns: 80, rows: 24}]}]'
-    printf '{"window_id":"%s","block_ids":["%s"]}\n' "$w" "$b" ;;
-  block:rename)
-    has_block "$sid" "$p0" || notfound "block"
-    save --arg s "$sid" --arg b "$p0" --arg l "$p1" \
-      '(.sessions[] | select(.session_id == $s) | .windows[].blocks[] | select(.block_id == $b) | .label) = $l' ;;
-  block:close)
-    has_block "$sid" "$p0" || notfound "block"
-    [ ! -f "$D/close-noop" ] || exit 0
-    save --arg s "$sid" --arg b "$p0" \
-      '(.sessions[] | select(.session_id == $s) | .windows) |= ([.[] | .blocks |= map(select(.block_id != $b))]
-        | map(select(.blocks | length > 0)))' ;;
-  block:call)
-    has_block "$sid" "$bid" || notfound "block"
-    u=${bid#block:}
-    case "$p0" in
-      size)
-        jq -c --arg s "$sid" --arg b "$bid" '.sessions[] | select(.session_id == $s) | .windows[].blocks[]
-          | select(.block_id == $b) | {columns, rows, owner: null}' "$S" ;;
-      resize)
-        save --arg s "$sid" --arg b "$bid" --argjson r "$p1" \
-          '(.sessions[] | select(.session_id == $s) | .windows[].blocks[] | select(.block_id == $b))
-            |= (.columns = $r.columns | .rows = $r.rows)' ;;
-      process)
-        if [ -f "$D/process/$u.json" ]; then cat "$D/process/$u.json"; else
-          printf '{"foreground":{"pid":%s,"name":"zsh","path":"/bin/zsh","argv0":"-zsh","cwd":"/tmp"},"ancestors":[],"last_exit":null}\n' "${FM_REX_FAKE_DEAD_PID:-99999999}"
-        fi ;;
-      program_status)
-        if [ -f "$D/status/$u.json" ]; then cat "$D/status/$u.json"; else printf '{"records":[]}\n'; fi ;;
-      format)
-        # The styled grid without the newline `capture` adds when the grid
-        # does not already end in one, then the cursor from fake/cursor/<uuid>
-        # ("<row>;<col>") when extra_cursor is asked for.
-        content=$(cat "$D/capture/$u.vt" 2>/dev/null && printf x); content=${content%x}
-        case "$content" in *$'\r\n') ;; *$'\n') content=${content%$'\n'} ;; esac
-        case "$p1" in
-          *extra_cursor*) [ ! -f "$D/cursor/$u" ] || content="$content"$'\033['"$(cat "$D/cursor/$u")H" ;;
-        esac
-        printf '%s' "$content" | jq -Rs '{content: .}' ;;
-      *) exit 2 ;;
-    esac ;;
-  capture:)
-    has_block "$sid" "$bid" || notfound "block"
-    u=${bid#block:}
-    if [ "$fmt" = vt ]; then cat "$D/capture/$u.vt" 2>/dev/null; else cat "$D/capture/$u.txt" 2>/dev/null; fi ;;
-  send:)
-    has_block "$sid" "$bid" || notfound "block"
-    [ -n "$p0" ] || exit 2
-    printf '%s\n' "$p0" >>"$D/sent" ;;
-  send-key:)
-    has_block "$sid" "$bid" || notfound "block"
-    case "$p0" in enter|escape|tab|ctrl+c|ctrl+u) ;; *) exit 2 ;; esac
-    printf '%s\n' "$p0" >>"$D/keys" ;;
-  do:)
-    has_session "$sid" || notfound "session"
-    [ ! -f "$D/do-fail" ] || exit 3
-    echo "@subscribed"
-    if [ -f "$D/events" ]; then
-      while IFS= read -r line; do
-        case "$line" in
-          "sleep "*) sleep "${line#sleep }" ;;
-          *) printf '%s\n' "$line" ;;
-        esac
-      done <"$D/events"
-    fi ;;
-  kill:)
-    has_session "$p0" || notfound "session"
-    save --arg s "$p0" '.sessions |= map(select(.session_id != $s))' ;;
-  *) exit 2 ;;
-esac
-SH
-  chmod +x "$dir/bin/rex"
-}
+# The fake rex CLI and its driver helpers moved to the shared fixture so the
+# remote second-mate suites can install the same server model on a fake remote
+# host.
+# shellcheck source=tests/rex-fake-fixture.sh
+. "$(dirname "${BASH_SOURCE[0]}")/rex-fake-fixture.sh"
 
 # rex_env: run a bash snippet with the adapter loaded through the dispatcher,
 # the fake CLI on REX_BIN_DIR, and an isolated home. Extra VAR=value words
@@ -206,13 +45,6 @@ rex_env() {  # <dir> [VAR=value...] <snippet>
     done
     bash -c '. "$0/bin/fm-backend.sh" && fm_backend_source rex && eval "$1"' "$ROOT" "$1"
   )
-}
-
-# fake_rex: drive the fake directly (test setup and server-state reads).
-fake_rex() {  # <dir> <rex-args...>
-  local dir=$1
-  shift
-  FM_REX_FAKE_DIR="$dir/fake" "$dir/bin/rex" "$@"
 }
 
 new_case() {  # <name> -> echoes a fresh case dir with the fake installed
@@ -251,6 +83,19 @@ test_bin_prefers_rex_bin_dir() {
   out=$(rex_env "$dir" "FM_BACKEND_REX_BUNDLE_BIN=$dir/bin/rex" 'unset REX_BIN_DIR; PATH=/usr/bin:/bin; fm_backend_rex_bin')
   assert_equals "$dir/bin/rex" "$out" "the server bundle path is the last fallback"
   pass "fm_backend_rex_bin: REX_BIN_DIR, then PATH, then the server bundle path"
+}
+
+test_rex_spawn_refuses_unproven_remote_endpoint() {
+  local dir out
+  dir=$(new_case remote-endpoint)
+  out=$(rex_env "$dir" FM_REX_FAKE_ENDPOINT=tcp://rex-linux.example:8723 \
+    'fm_backend_rex_local_server_ensure' 2>&1) && fail "a non-locality-proving Rex endpoint must be refused"
+  assert_contains "$out" "tcp://rex-linux.example:8723" "the refusal must name the endpoint"
+  assert_contains "$out" "Rex workers need a Rex server on this machine" "the refusal must explain the same-machine requirement"
+  assert_contains "$out" "remote second mates" "the refusal must point to remote second mates"
+  assert_no_grep 'rex (new|window new)' "$dir/fake/log" "the locality refusal must happen before any tab or session is created"
+  rex_env "$dir" 'fm_backend_rex_local_server_ensure' || fail "a local Unix-socket server must pass the locality check"
+  pass "Rex spawn refuses an endpoint whose server locality is unproven before creating sessions or tabs"
 }
 
 test_version_check_gates_api_revision() {
@@ -502,13 +347,17 @@ test_agent_state_from_process_view() {
 
 # start_shell_tree: a real process tree shaped like a pane whose login shell
 # launched <leaf> through a wrapper script in its own process group: a root
-# shell (TREE_ROOT), a wrapper shell below it, and <leaf> (a `sleep` under that
+# shell (TREE_ROOT), a wrapper shell below it, and <leaf> (a stand-in under that
 # name, TREE_LEAF) below the wrapper. Its args name <dir>/tree, so the suite's
 # fixture reaping also covers it.
 start_shell_tree() {  # <dir> <leaf-name>
-  local dir=$1 leaf=$2 i=0
+  local dir=$1 leaf=$2 i=0 standin
+  standin=$(fm_agent_standin "$dir/standin") || {
+    echo "skip: no long-running stand-in survives a rename, so the shell descendant case cannot run"
+    return 1
+  }
   mkdir -p "$dir/tree"
-  ln -sf "$(command -v sleep)" "$dir/tree/$leaf"
+  ln -sf "$standin" "$dir/tree/$leaf"
   cat >"$dir/tree/wrapper" <<'SH'
 #!/usr/bin/env bash
 "$1" "$2"
@@ -539,13 +388,31 @@ shell_foreground_payload() {  # <foreground-pid>
 }
 
 test_agent_state_sees_a_harness_below_a_shell_foreground() {
-  local dir out sid bid t
+  local dir out sid bid t fakebin real_sleep PATH=$PATH
   dir=$(new_case agent-state-below-shell)
+  # Model a multicall sleep on every host, including macOS and GNU coreutils.
+  # The real process tree must still start when sleep refuses a foreign name.
+  real_sleep=$(command -v sleep) || fail "sleep not found"
+  fakebin=$(fm_fakebin "$dir/multicall")
+  cat >"$fakebin/sleep" <<SH
+#!/usr/bin/env bash
+case "\${0##*/}" in
+  sleep) exec "$real_sleep" "\$@" ;;
+  *) echo "Requested utility \${0##*/} does not match executable name" >&2; exit 1 ;;
+esac
+SH
+  chmod +x "$fakebin/sleep"
+  ln -s "$fakebin/sleep" "$dir/multicall/claude"
+  "$fakebin/sleep" 0 || fail "the fake multicall sleep must run under its own name"
+  if "$dir/multicall/claude" 0 2>/dev/null; then
+    fail "the fake multicall sleep must refuse a harness name, or this case proves nothing"
+  fi
+  export PATH="$fakebin:$PATH"
   out=$(rex_env "$dir" 'fm_backend_rex_create_task fm-alpha /tmp')
   read -r sid _ bid <<<"$out"
   t="${sid#session:}:${bid#block:}"
 
-  start_shell_tree "$dir" claude
+  start_shell_tree "$dir" claude || return 0
   write_process "$dir" "$bid" "$(shell_foreground_payload "$DEAD_PID")"
   assert_equals dead "$(rex_env "$dir" "fm_backend_agent_state rex '$t'")" \
     "the reported chain alone holds no harness, so a foreground shell with no live process below it is dead"
@@ -558,7 +425,7 @@ test_agent_state_sees_a_harness_below_a_shell_foreground() {
   stop_shell_tree "$dir"
   rm -f "$dir/fake/status/${bid#block:}.json"
 
-  start_shell_tree "$dir" worker
+  start_shell_tree "$dir" worker || return 0
   write_process "$dir" "$bid" "$(shell_foreground_payload "$TREE_ROOT")"
   assert_equals dead "$(rex_env "$dir" "fm_backend_agent_state rex '$t'")" \
     "a shell foreground with only non-harness processes below it is dead"
@@ -1053,10 +920,16 @@ test_firstmate_records_never_count_as_worker_state() {
   assert_equals unknown "$(rex_env "$PUSH_DIR" "fm_backend_busy_state rex '$PUSH_T'")" "a Firstmate record must not decide busy state"
   res=$(push_wait 1)
   assert_equals "1|" "$res" "the level reconcile must ignore a Firstmate record"
+  printf '{"records":[{"state":"working","app":"firstmate-grok","title":"fm-t1","owner":{"pid":4242}}]}\n' \
+    >"$PUSH_DIR/fake/status/${PUSH_BID#block:}.json"
+  assert_equals unknown "$(rex_env "$PUSH_DIR" "fm_backend_busy_state rex '$PUSH_T'")" "the status bridge's own root record must not decide busy state"
   rm -f "$PUSH_DIR/fake/status/${PUSH_BID#block:}.json"
   rex_event "$PUSH_BID" blocked question firstmate 4242 "Needs your decision" >"$PUSH_DIR/fake/events"
   res=$(push_wait 1)
   assert_equals "1|" "$res" "a streamed Firstmate record must never escalate"
+  rex_event "$PUSH_BID" blocked question firstmate-grok 4242 "Needs your decision" >"$PUSH_DIR/fake/events"
+  res=$(push_wait 1)
+  assert_equals "1|" "$res" "a streamed status-bridge record must never escalate"
   rex_event "$PUSH_BID" blocked question claude-code 4242 "Continue?" >"$PUSH_DIR/fake/events"
   res=$(push_wait 1)
   [ "${res%%|*}" = 0 ] || fail "the harness's own blocked edge must still escalate, got $res"
@@ -1155,6 +1028,7 @@ test_nm_run_progress_reads_captured_status() {
 }
 
 test_bin_prefers_rex_bin_dir
+test_rex_spawn_refuses_unproven_remote_endpoint
 test_version_check_gates_api_revision
 test_parse_target_restores_prefixes
 test_create_task_per_home_session_create_then_adopt

@@ -992,17 +992,17 @@ unit_supervision_host_other_harnesses_run_no_away_daemon() {
     FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" FM_CONFIG_OVERRIDE="$st/config" FM_TEST_HARNESS="$1" FM_AFK_MODE="${2:-}" \
       bash -c '. "$1"; fm_afk_launch_primary_harness() { printf "%s" "$FM_TEST_HARNESS"; }; fm_afk_launch_daemon_allowed' _ "$LAUNCH" 2>&1
   }
-  for harness in cursor opencode omp grok codex; do
+  for harness in cursor opencode omp grok codex agy; do
     daemon_allowed "$harness" >/dev/null || fail "$harness: a home without config/supervision-host must keep the away daemon"
   done
   daemon_allowed claude >/dev/null && fail "claude: a home without config/supervision-host runs the host, so it must refuse the away daemon"
   : > "$st/config/supervision-host-off"
-  for harness in claude cursor opencode omp grok codex; do
+  for harness in claude cursor opencode omp grok codex agy; do
     daemon_allowed "$harness" >/dev/null || fail "$harness: a home opted out by config/supervision-host-off must keep the away daemon"
   done
   rm -f "$st/config/supervision-host-off"
   : > "$st/config/supervision-host"
-  for harness in cursor opencode omp grok codex; do
+  for harness in cursor opencode omp grok codex agy; do
     out=$(daemon_allowed "$harness"); rc=$?
     [ "$rc" -ne 0 ] || fail "$harness: an opted-in home must refuse the away daemon"
     printf '%s' "$out" | grep -F "not launched on this $harness home, which runs the supervision host" >/dev/null \
@@ -1010,7 +1010,7 @@ unit_supervision_host_other_harnesses_run_no_away_daemon() {
     daemon_allowed "$harness" quiet >/dev/null || fail "$harness: quiet mode must still launch the daemon on an opted-in home"
   done
   daemon_allowed kimi >/dev/null || fail "kimi has no arm owner to run the host, so it must keep the away daemon"
-  pass "supervision host: away mode on an opted-in cursor, opencode, omp, grok, or codex home launches no daemon"
+  pass "supervision host: away mode on an opted-in cursor, opencode, omp, grok, codex, or agy home launches no daemon"
 
   enter_with() {  # <harness> <config line, off for the opt-out, or ->
     rm -f "$st/state/.afk-contract" "$st/config/supervision-host" "$st/config/supervision-host-off"
