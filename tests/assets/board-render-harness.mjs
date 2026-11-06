@@ -6,10 +6,23 @@
 // Prints one JSON document:
 //   { stats:[{n,label,tag,type,scrolls_to,target_declared,prompts}],
 //     captains_call:[text], underway:[{title,sub,badges}],
-//     charted:[{title,sub,badges,pickable}], empty, more, error }
+//     charted:[{title,sub,badges,pickable}], empty, more, error,
+//     call:{wide:[page], narrow:[page], empty} }
+// where each Captain's Call page is {title, height, natural}: the card the back
+// and next buttons show, the height it lays out at, and the height its own
+// content needs. Layout is a toy model - text wraps at a fixed character width
+// within the viewport width, and a hidden element takes no space - so height
+// assertions test how the page sizes its cards, not real font metrics. "wide"
+// pages after the initial render and web fonts load; "narrow" pages again after
+// the window narrows and fires resize.
 import { readFileSync } from "node:fs";
 
 const html = readFileSync(process.argv[2], "utf8");
+
+const CHAR_PX = 8;
+const LINE_PX = 20;
+const BOX_PX = 4;
+const layout = { width: 640 };
 
 class Node {
   constructor(tag) {
@@ -27,17 +40,34 @@ class Node {
     this.checked = false;
     this.listeners = {};
     this.id = "";
+    this.style = {};
+    const has = (c) => this.className.split(/\s+/).includes(c);
+    const remove = (c) => { this.className = this.className.split(/\s+/).filter((x) => x && x !== c).join(" "); };
     this.classList = {
-      add: (c) => { this.className = (this.className + " " + c).trim(); },
-      contains: (c) => this.className.split(/\s+/).includes(c),
+      add: (c) => { if (!has(c)) this.className = (this.className + " " + c).trim(); },
+      remove,
       toggle: (c, force) => {
-        const classes = new Set(this.className.split(/\s+/).filter(Boolean));
-        const enabled = force ?? !classes.has(c);
-        if (enabled) classes.add(c); else classes.delete(c);
-        this.className = [...classes].join(" ");
+        const enabled = force ?? !has(c);
+        if (enabled) this.classList.add(c); else remove(c);
         return enabled;
       },
+      contains: has,
     };
+  }
+  // Toy layout: own text wraps at CHAR_PX per character inside the viewport,
+  // children stack, and a hidden element takes no space. An explicit
+  // min-height raises the laid-out box; the natural height ignores it.
+  naturalHeight() {
+    if (this.hidden) return 0;
+    const own = this.children.length || !this._text
+      ? 0
+      : Math.ceil((this._text.length * CHAR_PX) / layout.width) * LINE_PX;
+    return BOX_PX + own + this.children.reduce((h, c) => h + c.naturalHeight(), 0);
+  }
+  getBoundingClientRect() {
+    if (this.hidden) return { height: 0, width: 0 };
+    const min = parseFloat(this.style.minHeight) || 0;
+    return { height: Math.max(min, this.naturalHeight()), width: layout.width };
   }
   get textContent() {
     return this.children.length
@@ -99,7 +129,17 @@ globalThis.document = {
     return byId.get(id);
   },
 };
-globalThis.window = { lavish: { queuePrompt: (...args) => prompts.push(args) } };
+const frames = [];
+const flushFrames = () => { while (frames.length) frames.shift()(); };
+const windowListeners = {};
+let fontsReady;
+const fontsLoaded = new Promise((resolve) => { fontsReady = resolve; });
+globalThis.document.fonts = { ready: fontsLoaded };
+globalThis.window = {
+  lavish: { queuePrompt: (...args) => prompts.push(args) },
+  addEventListener: (type, fn) => { (windowListeners[type] ||= []).push(fn); },
+  requestAnimationFrame: (fn) => { frames.push(fn); },
+};
 globalThis.TextEncoder = TextEncoder;
 
 const script = html.slice(html.indexOf("<script>") + "<script>".length, html.lastIndexOf("</script>"));
@@ -109,6 +149,40 @@ const badgesOf = (row) =>
   row.children
     .filter((c) => c.className.includes("fm-badge"))
     .map((c) => ({ tone: c.className.replace(/.*fm-badge--/, "").trim(), text: c.textContent }));
+
+// Web fonts finish loading after the first render.
+fontsReady();
+await fontsLoaded;
+await Promise.resolve();
+flushFrames();
+
+// Page through Captain's Call from the first card with the back and next
+// buttons, recording the card each step shows.
+const deck = byId.get("bb-call");
+const decisionCards = () => deck.children.filter((c) => c.className.split(/\s+/).includes("bb-decision"));
+const pageCall = () => {
+  const prev = byId.get("bb-stack-prev");
+  const next = byId.get("bb-stack-next");
+  const pages = [];
+  if (!decisionCards().length) return pages;
+  for (let i = 0; i < 100 && !prev.disabled; i++) prev.dispatch("click");
+  for (let i = 0; i < 100; i++) {
+    const shown = decisionCards().filter((c) => !c.hidden);
+    pages.push(...shown.map((c) => {
+      const title = c.querySelectorAll(".bb-decision__title")[0]?.textContent ?? "";
+      return { title, height: c.getBoundingClientRect().height, natural: c.naturalHeight() };
+    }));
+    if (next.disabled) break;
+    next.dispatch("click");
+  }
+  return pages;
+};
+const callWide = pageCall();
+layout.width = 320;
+for (const fn of windowListeners.resize || []) fn({ type: "resize" });
+flushFrames();
+const callNarrow = pageCall();
+const callEmpty = deck.children.filter((c) => c.className.includes("bb-empty")).map((c) => c.textContent);
 
 const strip = byId.get("bb-stats") || new Node("div");
 // Click each tile and record where the page scrolled and whether the click
@@ -159,4 +233,5 @@ const empty = ch.children.filter((c) => c.className.includes("bb-empty")).map((c
 const more = ch.children.filter((c) => c.className.includes("bb-morechip")).map((c) => c.textContent);
 
 process.stdout.write(
-  JSON.stringify({ stats, captains_call, underway, charted, empty, more, error: errorText }) + "\n");
+  JSON.stringify({ stats, captains_call, underway, charted, empty, more, error: errorText,
+    call: { wide: callWide, narrow: callNarrow, empty: callEmpty } }) + "\n");

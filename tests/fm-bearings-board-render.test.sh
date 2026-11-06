@@ -286,6 +286,49 @@ test_each_summary_tile_scrolls_to_the_section_it_counts() {
   pass "each summary tile is a button that scrolls to its own declared section and queues nothing"
 }
 
+test_every_captains_call_card_takes_the_tallest_cards_height() {
+  local home out
+  home=$(make_home call-height)
+  out=$(render_board "$home" '[]' '[]' 0 0 '[
+    {"key":"merge.short","type":"merge","repo":"sample","title":"Merge: short","risk":"low",
+     "options":[{"value":"merge","label":"Merge now"}]},
+    {"key":"long-decision","type":"decision","repo":"sample","title":"A decision with a great deal of context to read before answering",
+     "about":"This decision card carries a long about line that wraps across several lines of the card at any reasonable width, so its content is much taller than the short merge card that comes before it.",
+     "decide":"Which of the several options below should the fleet adopt, given everything described above and the tradeoffs each option names in its hint?",
+     "options":[
+       {"value":"first","label":"First option","hint":"A hint long enough to wrap onto a second line inside the option row"},
+       {"value":"second","label":"Second option","hint":"Another hint long enough to wrap onto a second line inside the option row"},
+       {"value":"third","label":"Third option"}],
+     "allow_freeform":true},
+    {"key":"merge.medium","type":"merge","repo":"sample","title":"Merge: medium","risk":"high",
+     "detail":"A detail line of moderate length that wraps once or twice.",
+     "options":[{"value":"merge","label":"Merge now"},{"value":"hold","label":"Not yet"}]}
+  ]')
+  printf '%s' "$out" | jq -e '.error == ""' >/dev/null \
+    || fail "the board rendered its fail-closed error instead of the fleet: $out"
+  printf '%s' "$out" | jq -e '
+    def even($pages): ($pages | length) == 3
+      and ([$pages[] | .natural] | unique | length) == 3
+      and ([$pages[] | .height] | unique) == [([$pages[] | .natural] | max)];
+    even(.call.wide) and even(.call.narrow)
+      and (.call.wide[0].height != .call.narrow[0].height)
+      and ([.call.wide[] | .title] == ["Merge: short",
+        "A decision with a great deal of context to read before answering", "Merge: medium"])
+  ' >/dev/null || fail "Captain's Call cards of different lengths did not all take the tallest card's height: $out"
+  pass "every Captain's Call card takes the tallest card's height, and again after a resize"
+}
+
+test_an_empty_captains_call_still_shows_its_empty_state() {
+  local home out
+  home=$(make_home call-empty)
+  out=$(render_board "$home" '[]' '[]')
+  printf '%s' "$out" | jq -e '
+    .call.wide == [] and .call.narrow == []
+      and .call.empty == ["Nothing needs your action right now."]
+  ' >/dev/null || fail "an empty Captain's Call lost its empty-state line: $out"
+  pass "an empty Captain's Call still shows its empty-state line"
+}
+
 test_full_snapshot_question_reaches_the_rendered_decision() {
   local home a b reason snapshot calls out
   home=$(make_home full-decision-question)
@@ -316,6 +359,8 @@ EOF
 }
 
 test_full_snapshot_question_reaches_the_rendered_decision
+test_every_captains_call_card_takes_the_tallest_cards_height
+test_an_empty_captains_call_still_shows_its_empty_state
 test_an_underway_row_leads_with_the_task_name_and_keeps_its_run_status
 test_an_underway_identifier_label_is_not_replaced_by_run_status
 test_charted_next_reads_newest_filed_first

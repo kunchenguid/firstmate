@@ -213,9 +213,10 @@ button.bb-stat--call:hover { background: var(--rust-100); border-color: var(--ru
 .bb-decision__link { font-family: var(--font-mono); font-size: var(--fs-xs); color: var(--ocean-600); font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; display: block; }
 .bb-decision__link:hover { text-decoration: underline; }
 /* One rhythm owner: the answer form is a flex column with the same 12px gap as
-   the card pad, and the foot rides margin-top:auto so every Queue answer button
-   sits on the same baseline with identical breathing room. */
-.bb-decision form { display: flex; flex-direction: column; gap: 12px; flex: 1 1 auto; }
+   the card pad. It does not grow, so a card stretched to the stack height keeps
+   its answer field and Queue answer button in place, with the extra space at
+   the bottom. */
+.bb-decision form { display: flex; flex-direction: column; gap: 12px; flex: none; }
 .bb-opts { display: flex; flex-direction: column; gap: 7px; }
 .bb-opt {
   display: flex; align-items: flex-start; gap: 10px; padding: 9px 12px; cursor: pointer;
@@ -231,7 +232,7 @@ button.bb-stat--call:hover { background: var(--rust-100); border-color: var(--ru
   letter-spacing: 0.07em; color: var(--navy-700); background: var(--gold-300);
   border: 1px solid var(--gold-600); border-radius: var(--radius-xs); padding: 3px 7px 2px; }
 .bb-opt:has(input:checked) { border-color: var(--rust-500); background: var(--rust-050); box-shadow: inset 0 0 0 1px var(--rust-500); }
-.bb-decision__foot { display: flex; align-items: center; gap: 10px; margin-top: auto; }
+.bb-decision__foot { display: flex; align-items: center; gap: 10px; }
 .bb-queued {
   display: none; align-items: center; gap: 6px;
   font-size: var(--fs-2xs); font-weight: 800; text-transform: uppercase; letter-spacing: 0.07em;
@@ -635,10 +636,45 @@ __FM_BEARINGS_BOARD_DATA__
     deck.classList.toggle("bb-call--penult", active === cards.length - 2);
     deck.classList.toggle("bb-call--last", active === cards.length - 1);
   }
+  /* One stack height: every card takes the height of the tallest, so paging
+     never moves the nav or anything below the stack. Each card's natural
+     height is read with every card laid out at once - the inactive ones
+     invisible and the active one never hidden, so a focused answer field
+     keeps its focus - and is re-read whenever wrapping can change: on
+     resize and once web fonts load. */
+  function fitStackHeight() {
+    var tallest = 0;
+    cards.forEach(function (c) {
+      c.style.minHeight = "";
+      c.style.alignSelf = "start";
+      if (c.hidden) { c.hidden = false; c.style.visibility = "hidden"; }
+    });
+    cards.forEach(function (c) {
+      tallest = Math.max(tallest, Math.ceil(c.getBoundingClientRect().height));
+    });
+    cards.forEach(function (c, j) {
+      c.style.alignSelf = "";
+      c.style.visibility = "";
+      c.hidden = j !== active;
+      c.style.minHeight = tallest + "px";
+    });
+  }
+  var fitPending = false;
+  function queueFit() {
+    if (fitPending) return;
+    fitPending = true;
+    window.requestAnimationFrame(function () { fitPending = false; fitStackHeight(); });
+  }
   if (cards.length) {
     stackPrev.addEventListener("click", function () { showCard(active - 1); });
     stackNext.addEventListener("click", function () { showCard(active + 1); });
     showCard(0);
+    fitStackHeight();
+    window.addEventListener("resize", queueFit);
+    if (document.fonts) {
+      if (document.fonts.ready) document.fonts.ready.then(queueFit);
+      if (document.fonts.addEventListener) document.fonts.addEventListener("loadingdone", queueFit);
+    }
   } else {
     deck.classList.add("bb-call--empty");
     deck.appendChild(el("div", "bb-empty", "Nothing needs your action right now."));
