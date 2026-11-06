@@ -5,8 +5,8 @@
 # .agents/skills/captain-hold-lifecycle/SKILL.md. This script never reads
 # report, visual-review, chat, or terminal prose to guess whether the captain
 # owes an answer. The invoking agent decides what is genuinely waiting on the
-# captain; this script supplies guarded creation, a durable record of what the
-# captain actually said, the investigation completion gate, and the one
+# captain; this script supplies guarded creation, a durable decision record
+# with its declared source, the investigation completion gate, and the one
 # keyed-answer intake every channel feeds.
 #
 # There is no separate decision type. A captain call is an ordinary backlog
@@ -207,8 +207,9 @@
 # one captain call. See "record divergence" beside command_diverged below.
 #
 # Resolution records: the block written into the body names this script, the
-# decision digest, and a `Resolution mode:` of answered, released, repaired, or
-# reconciled. Records written by the retired fm-decision-hold.sh (routed,
+# decision digest, the source fields owned by bin/fm-resolution-source-lib.sh,
+# and a `Resolution mode:` of answered, released, repaired, or reconciled.
+# Records written by the retired fm-decision-hold.sh (routed,
 # declined, answered, repaired) are recognized everywhere a record is read, so
 # nothing already closed needs rewriting.
 #

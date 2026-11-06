@@ -50,7 +50,7 @@ The `hold` subcommand is the mandatory captain-hold creation path.
 It works in this order:
 
 1. It uses an existing task, or creates one when nothing exists to hold.
-2. It records the task's UTC hold-set timestamp as the leading line of the task body.
+2. It records the task's UTC hold-set timestamp as the leading line of the task body, followed by the hold occurrence defined in the [command header](../bin/fm-captain-hold.sh).
 3. It invokes the underlying tasks-axi hold operation.
 4. It verifies the captain-hold annotations and timestamp.
 5. In a secondmate home, it publishes the verified hold to the parent channel.
