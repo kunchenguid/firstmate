@@ -382,10 +382,11 @@ fm_task_inbox_doorbell_line() {  # <record-path>
 # CONSTANT line the worker recovers semantically, while skipping on ambiguous
 # verdicts would starve a harness whose idle screen the classifier cannot
 # positively identify (that classifier is advisory here by design).
-# A pending composer holding exactly our own doorbell line is a previous ring
-# whose Enter never landed, so on an agent not reported busy it is submitted
-# rather than skipped; skipping it would block every later ring. On both paths
-# a lost first Enter gets one confirmed retry.
+# A pending composer holding our own doorbell line, whole or as a leading
+# fragment (fm_task_inbox_composer_holds_own), is a previous ring whose Enter
+# never landed, so on an agent not reported busy it is submitted rather than
+# skipped; skipping it would block every later ring. On both paths a lost
+# first Enter gets one confirmed retry.
 fm_task_inbox_ring() {  # <backend> <target> <record-path> [expected-label]
   local backend=$1 target=$2 rec=$3 label=${4:-} line cstate verdict
   case "$(fm_backend_agent_state "$backend" "$target" 2>/dev/null || true)" in
@@ -397,12 +398,12 @@ fm_task_inbox_ring() {  # <backend> <target> <record-path> [expected-label]
   cstate=$(fm_backend_composer_state "$backend" "$target" "$label" 2>/dev/null) || cstate=unknown
   case "$cstate" in
     pending)
-      fm_task_inbox_composer_holds "$backend" "$target" "$line" "$label" \
+      fm_task_inbox_composer_holds_own "$backend" "$target" "$line" "$label" \
         && [ "$(fm_backend_busy_state "$backend" "$target" 2>/dev/null)" != busy ] \
         || return 1
       fm_backend_send_key "$backend" "$target" Enter "$label" >/dev/null 2>&1 || return 2
       sleep 0.3
-      fm_task_inbox_composer_holds "$backend" "$target" "$line" "$label" || return 0
+      fm_task_inbox_composer_holds_own "$backend" "$target" "$line" "$label" || return 0
       fm_backend_send_key "$backend" "$target" Enter "$label" >/dev/null 2>&1 || return 2
       return 0
       ;;
@@ -420,13 +421,29 @@ fm_task_inbox_ring() {  # <backend> <target> <record-path> [expected-label]
   return 0
 }
 
-# Whether the composer's content, ignoring line wrapping, is exactly <line>.
-fm_task_inbox_composer_holds() {  # <backend> <target> <line> [expected-label]
-  local cap held
+# Whether the composer's content, ignoring whitespace and line wrapping, is
+# our doorbell <line> whole, or a leading fragment of it that reaches at least
+# through its inbox glob (`*.msg`). A target that consumed typed input late can
+# keep such a fragment: Claude's Ctrl+U deletes one wrapped row per press, so a
+# clear that raced the render leaves the first rows behind. The fragment is
+# still our own self-describing line, so it is submitted like a whole stranded
+# doorbell; the glob floor keeps a shorter or non-leading piece, such as
+# someone's own draft, skipped.
+fm_task_inbox_composer_holds_own() {  # <backend> <target> <line> [expected-label]
+  local cap held want floor
   fm_backend_source "$1" || return 1
   cap=$(fm_backend_capture "$1" "$2" "$FM_COMPOSER_CAPTURE_LINES" "${4:-}" 2>/dev/null) || return 1
   held=$(fm_composer_extract_selected_content styled=0 "$cap") || return 1
-  [ -n "$held" ] && [ "$(printf '%s' "$held" | tr -d '[:space:]')" = "$(printf '%s' "$3" | tr -d '[:space:]')" ]
+  held=$(printf '%s' "$held" | tr -d '[:space:]')
+  want=$(printf '%s' "$3" | tr -d '[:space:]')
+  [ -n "$held" ] || return 1
+  [ "$held" = "$want" ] && return 0
+  floor=${want%%\*.msg*}
+  [ "$floor" != "$want" ] && [ "${#held}" -ge "$((${#floor} + 5))" ] || return 1
+  case "$want" in
+    "$held"*) return 0 ;;
+  esac
+  return 1
 }
 
 fm_task_inbox_is_fire_and_forget() {  # <record-path>
