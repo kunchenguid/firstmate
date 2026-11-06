@@ -19,9 +19,8 @@
 # For a terminal passed no-mistakes run, a matching merge-poll retirement
 # receipt is local merged evidence; otherwise a 5s-bounded forge read is tried.
 # FM_CREW_STATE_NO_FORGE=1 keeps the receipt read but skips that forge fallback;
-# it does not bypass the status-log ship readiness gate's live reads.
-# An absent or unreadable PR identity yields an honest unknown, never an
-# optimistic merged claim.
+# it does not bypass ship readiness gates' live reads.
+# An absent or unreadable PR identity never proves a merge.
 # Output is one stable, parseable, token-tight line firstmate can read every
 # heartbeat:
 #

@@ -67,11 +67,10 @@
 # or the configured paused verb) does not contradict it; a state sourced from
 # the pipeline's own RUN STEP outranks that word outright, so the routine ship
 # shape (`done:` written, the run then fails, the crew goes silent) still
-# reaches the captain. Its PR identity comes from the same record as its state -
-# the run's own published PR for a run-step state, that line's own ready-signal
-# PR for a status-log state, and never a separately recorded task PR; a scout
-# delivers no PR on either path, so it carries none. Together they
-# prevent one captain-facing record from combining claims from different runs.
+# reaches the captain. terminal_outcome_pr below owns PR identity extraction
+# from the reader's output; fm-crew-state.sh's run_pr_identity helper owns
+# selection of the emitted run-step identity. A scout delivers no PR on either
+# path, so it carries none.
 # A live agent withholds that verdict only while it is busy, or while its
 # incarnation postdates the terminal evidence (the spawn epoch in spawn_gen is
 # later than the last status line's [at=] epoch). An idle agent on the same
@@ -386,7 +385,7 @@ state_line_note() { # <state-line>
   printf '%s' "$rest"
 }
 
-# Enforce the header's same-record pull-request contract. A scout never delivers
+# Extract the reader's emitted pull-request identity. A scout never delivers
 # a PR, so it never carries one, exactly as pr_for_task rules for the
 # ledger-first path. Otherwise a status-log state carries a PR only in a mode's
 # ready-signal shape (`PR <url>`, `PR <url> checks green`, or Gerrit's
