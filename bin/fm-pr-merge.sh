@@ -1998,12 +1998,13 @@ gitlab_read_train_car() {
 # Wait, within a bounded time, for proof that the train merged the request:
 # state merged plus the commit that landed, which is the merge commit, a squash
 # commit, or for a fast-forward project the head the target branch moved to.
+# bin/fm-pr-poll.sh owns that proof, so this wait and the armed poll agree.
 # Returns 0 once proven; otherwise reports the outcome and returns 1, with the
 # merge poll still armed so a later landing is recorded by it. Any state other
 # than merged, opened, or closed, such as GitLab's transient locked while the
 # merge runs, is waited on rather than judged.
 gitlab_await_train() {
-  local wait interval deadline json fields state mwps landed hp_ref hp_url hp_status
+  local wait interval deadline json fields state mwps hp_ref hp_url hp_status
   local merged_unrecorded=false
   wait=${FM_PR_GITLAB_TRAIN_WAIT:-90}
   interval=${FM_PR_GITLAB_TRAIN_POLL_INTERVAL:-10}
@@ -2014,13 +2015,10 @@ gitlab_await_train() {
     fields=
     if json=$(GITLAB_HOST="$FM_PR_HOST" glab mr view "$PR_NUMBER" -R "$PROJECT_URL" -F json 2>/dev/null) \
       && [ -n "$json" ]; then
-      fields=$(printf '%s' "$json" | jq -r --arg method "$FM_PR_GITLAB_MERGE_METHOD" '
-          def commit: if type == "string" and test("^([0-9a-f]{40}|[0-9a-f]{64})$") then . else null end;
+      fields=$(printf '%s' "$json" | jq -r '
           if type == "object" and (.state | type) == "string" then
             [ .state,
               (if .merge_when_pipeline_succeeds == true then "true" else "false" end),
-              ((.merge_commit_sha | commit) // (.squash_commit_sha | commit)
-                // (if $method == "ff" then (.sha | commit) else null end) // "-"),
               ((.head_pipeline.ref // "-") | tostring),
               ((.head_pipeline.web_url // "-") | tostring),
               ((.head_pipeline.status // "-") | tostring)
@@ -2028,13 +2026,13 @@ gitlab_await_train() {
           else error("unreadable") end' 2>/dev/null) || fields=
     fi
     if [ -n "$fields" ]; then
-      read -r state mwps landed hp_ref hp_url hp_status <<FIELDS
+      read -r state mwps hp_ref hp_url hp_status <<FIELDS
 $fields
 FIELDS
       case "$state" in
         merged)
-          if [ "$landed" != - ]; then
-            printf 'verified: %s was merged by the merge train at commit %s\n' "$URL" "$landed"
+          if [ -n "$("$SCRIPT_DIR/fm-pr-poll.sh" --validated gitlab "$URL" "$FM_PR_HOST" "$PR_PATH" "$PR_NUMBER" 2>/dev/null)" ]; then
+            printf 'verified: %s was merged by the merge train\n' "$URL"
             return 0
           fi
           merged_unrecorded=true

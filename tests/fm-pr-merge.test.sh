@@ -463,6 +463,11 @@ fi
 case "${1:-} ${2:-}" in
   "mr view")
     [ ! -e "$case_dir/glab-view-fails" ] || exit 1
+    # Plain glab prints "field: value" lines; the JSON form is the fixture.
+    case " $* " in
+      *" -F "*) ;;
+      *) "$0" "$@" -F json | jq -r '"state: " + .state'; exit 0 ;;
+    esac
     if [ -e "$case_dir/glab-train-added" ]; then
       views=$(( $(cat "$case_dir/glab-train-views" 2>/dev/null || echo 0) + 1 ))
       echo "$views" > "$case_dir/glab-train-views"
@@ -5558,7 +5563,7 @@ test_gitlab_merge_train_entry_lands() {
     || fail "gitlab-train-lands: an immediate merge ran on a merge-train project"
   assert_grep "merged results pipeline at $MR_RESULT merging head $MR_HEAD" "$case_dir/stderr" \
     "gitlab-train-lands: the merged results pipeline was not bound to the verified head"
-  assert_grep "verified: $MR_URL was merged by the merge train at commit $MR_LANDED" "$case_dir/stdout" \
+  assert_grep "verified: $MR_URL was merged by the merge train" "$case_dir/stdout" \
     "gitlab-train-lands: the proven landing was not reported"
   assert_grep "$MR_URL" "$case_dir/state/.wake-queue" \
     "gitlab-train-lands: the landed outcome was not recorded"
@@ -5579,9 +5584,26 @@ test_gitlab_merge_train_waits_for_a_fast_forward_landing() {
   expect_code 0 "$rc" "gitlab-train-ff: a train that merges within the wait should succeed"
   [ "$(cat "$case_dir/glab-train-views")" -ge 3 ] \
     || fail "gitlab-train-ff: the run did not keep reading while the request was queued and locked"
-  assert_grep "verified: $MR_URL was merged by the merge train at commit $MR_LANDED" "$case_dir/stdout" \
+  assert_grep "verified: $MR_URL was merged by the merge train" "$case_dir/stdout" \
     "gitlab-train-ff: a fast-forward landing was not proven by the head the target moved to"
   pass "a merge-train entry is waited on and a fast-forward landing is proven by its head"
+}
+
+test_gitlab_merge_train_merged_without_a_landed_commit_stays_armed() {
+  local case_dir rc=0
+  case_dir=$(make_gitlab_train_case gitlab-train-unrecorded)
+  write_mr_json "$case_dir/mr-train.json" state=merged detail=not_open \
+    merge_when_pipeline_succeeds=true
+  run_train_merge "$case_dir" || rc=$?
+
+  expect_code 1 "$rc" "gitlab-train-unrecorded: merged without a landed commit must not report success"
+  assert_grep "$MR_URL reads as merged but GitLab has not recorded the commit that landed" "$case_dir/stderr" \
+    "gitlab-train-unrecorded: the unrecorded landing was not reported"
+  assert_absent "$case_dir/state/.wake-queue" \
+    "gitlab-train-unrecorded: an unproved landing was recorded"
+  [ -f "$case_dir/state/task-x1.check.sh" ] \
+    || fail "gitlab-train-unrecorded: the merge poll was not left armed"
+  pass "a merge-train request merged with no landed commit recorded stays unproved in the wait and in the armed poll"
 }
 
 test_gitlab_merge_train_still_queued_stays_armed() {
@@ -5831,6 +5853,7 @@ test_allow_no_pipeline_merges_only_a_null_head_pipeline
 test_allow_no_pipeline_is_attended_only_and_gitlab_only
 test_gitlab_merge_train_entry_lands
 test_gitlab_merge_train_waits_for_a_fast_forward_landing
+test_gitlab_merge_train_merged_without_a_landed_commit_stays_armed
 test_gitlab_merge_train_still_queued_stays_armed
 test_gitlab_merge_train_drop_is_reported_with_its_pipeline
 test_gitlab_merge_train_keeps_the_pre_merge_guards
