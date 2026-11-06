@@ -2855,7 +2855,7 @@ test_merged_poll_retries_a_failed_upward_report() {
 # lane's merge-time cleanup, detached so even a slow teardown never holds the
 # watcher iteration, and the next park tick reports its outcome.
 test_self_merged_lane_is_still_cleaned_up_by_the_poll() {
-  local dir state url rc start took
+  local dir state url rc
   url=https://github.com/o/r/pull/1
   dir=$(make_case self-merge-cleanup)
   state="$dir/home/state"
@@ -2867,7 +2867,7 @@ test_self_merged_lane_is_still_cleaned_up_by_the_poll() {
     || fail "self-merge-cleanup: merge entrypoint failed: $(cat "$dir/merge.err")"
   [ -f "$state/task-a.pr-poll-merge-notified" ] \
     || fail "self-merge-cleanup: the merge entrypoint did not record the outcome first"
-  printf '#!/usr/bin/env bash\nsleep 8\nprintf "%%s\\n" "$*" >> "%s/teardown.log"\n' "$dir" > "$dir/teardown-stub"
+  printf '#!/usr/bin/env bash\nprintf started > "%s/teardown.started"\nwhile [ ! -e "%s/teardown.release" ]; do sleep 0.05; done\nprintf "%%s\\n" "$*" >> "%s/teardown.log"\n' "$dir" "$dir" "$dir" > "$dir/teardown-stub"
   chmod +x "$dir/teardown-stub"
   retire_contributions_observer "$dir"
   add_stop_custom_check "$dir"
@@ -2879,15 +2879,17 @@ test_self_merged_lane_is_still_cleaned_up_by_the_poll() {
   ack_watcher_cycle "$state" || fail "self-merge-cleanup: recovery acknowledgement failed"
   rm -f "$state/.last-check"
   set +e
-  start=$(date +%s)
   FM_PARK_TEARDOWN_BIN="$dir/teardown-stub" FM_TEST_GH_STATE=MERGED \
     run_watcher_bounded "$dir/home" "$dir/fakebin" >"$dir/watch.out" 2>"$dir/watch.err"
   rc=$?
-  took=$(( $(date +%s) - start ))
   set -e
   [ "$rc" -eq 0 ] || fail "self-merge-cleanup: watcher failed: $(cat "$dir/watch.err")"
-  [ ! -e "$dir/teardown.log" ] && [ "$took" -lt 8 ] \
-    || fail "self-merge-cleanup: the watcher iteration waited ${took}s for the teardown"
+  for _ in $(seq 1 200); do [ -e "$dir/teardown.started" ] && break; sleep 0.05; done
+  [ -e "$dir/teardown.started" ] \
+    || fail "self-merge-cleanup: detached teardown did not start"
+  [ ! -e "$dir/teardown.log" ] \
+    || fail "self-merge-cleanup: teardown completed before release"
+  : > "$dir/teardown.release"
   assert_grep 'stop-cycle' "$dir/watch.out" \
     "self-merge-cleanup: the absorbed duplicate did not fall through to the next check"
   assert_poll_absent "$state" task-a
