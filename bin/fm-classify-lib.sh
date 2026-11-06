@@ -355,6 +355,41 @@ status_is_paused_or_captain_held() {  # <status-line>
   status_is_paused "$line" || status_is_captain_held "$line"
 }
 
+# Clause appended to a paused-wait stale recheck when the task's recorded
+# pull request conflicts with its base. Empty when there is no recorded
+# pull request, the read fails, or the pull request is not conflicting.
+# GitHub mergeability is bin/fm-pr-state.sh (MERGEABILITY: conflicting,
+# GitHub's CONFLICTING / REST dirty). That command is the pull-request read
+# this recheck reuses. A GitLab merge request is not named here: that read
+# does not report GitLab conflicts. The clause text is also what marks the
+# wake for the primary while the home is attended
+# (.pi/extensions/lib/fm-branch-dispatch.ts).
+# Prints nothing and returns 0 on every non-conflict, so a forge miss cannot
+# swallow the recheck that called it.
+pause_recheck_conflict_clause() {  # <meta-file>
+  local meta=$1 line url out
+  [ -f "$meta" ] && [ ! -L "$meta" ] || return 0
+  url=
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in
+      pr=*) url=${line#pr=} ;;
+    esac
+  done < "$meta"
+  [ -n "$url" ] || return 0
+  if ! declare -F fm_pr_url_parse >/dev/null 2>&1; then
+    # shellcheck source=bin/fm-pr-lib.sh
+    # shellcheck disable=SC1091
+    . "$_FM_CLASSIFY_LIB_DIR/fm-pr-lib.sh"
+  fi
+  fm_pr_url_parse "$url" || return 0
+  [ "$FM_PR_PROVIDER" = github ] || return 0
+  out=$(fm_run_timed 15 "$_FM_CLASSIFY_LIB_DIR/fm-pr-state.sh" "$FM_PR_URL" 2>/dev/null) || true
+  case "$out" in
+    *"MERGEABILITY: conflicting"*) printf '%s' ', merge conflict with its base' ;;
+  esac
+  return 0
+}
+
 # The status line that holds a crew in a declared wait, or nothing when it is in
 # none. Supervisors decide the wait from this line, never from the raw latest
 # event: a resolved line is also how firstmate answers a decision (fm-send
