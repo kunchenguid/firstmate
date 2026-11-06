@@ -992,6 +992,7 @@ test_local_default_landing_records_backlog_evidence() {
     case_dir=$(make_case "local-default-backlog-$mode")
     write_meta "$case_dir" "$mode" ship
     seed_backlog_in_flight "$case_dir"
+    git -C "$case_dir/project" remote remove origin
     wt_commit_file "$case_dir" feature.txt hello "add feature"
     wt_head=$(git -C "$case_dir/wt" rev-parse HEAD)
     git -C "$case_dir/project" update-ref refs/heads/main "$wt_head"
@@ -1022,6 +1023,28 @@ test_local_default_landing_records_backlog_evidence() {
   out=$(tasks-axi show task-x1 --file "$case_dir/data/backlog.md" --full)
   printf '%s\n' "$out" | grep -F "links: \"pr:$url\"" >/dev/null \
     || fail "local-default-backlog-pr: teardown replaced the available PR evidence"
+
+  case_dir=$(make_case local-default-backlog-late-remote)
+  write_meta "$case_dir" direct-PR ship
+  seed_backlog_in_flight "$case_dir"
+  wt_commit_file "$case_dir" feature.txt hello "add feature"
+  wt_head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  git -C "$case_dir/project" update-ref refs/heads/main "$wt_head"
+  cat > "$case_dir/fakebin/lsof" <<EOF
+#!/usr/bin/env bash
+git -C "$case_dir/wt" update-ref refs/remotes/origin/late HEAD
+printf 'late remote\n' > "$case_dir/late-remote.log"
+EOF
+  chmod +x "$case_dir/fakebin/lsof"
+
+  rc=0
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  expect_code 0 "$rc" "local-default-backlog-late-remote: teardown should succeed"
+  assert_present "$case_dir/late-remote.log" "local-default-backlog-late-remote: second safety path was not reached"
+  out=$(tasks-axi show task-x1 --file "$case_dir/data/backlog.md" --full)
+  printf '%s\n' "$out" | grep -F 'body: local main' >/dev/null \
+    || fail "local-default-backlog-late-remote: final safety pass dropped local-main evidence"
   pass "local-default teardown records landing evidence for every ship mode"
 }
 
@@ -5696,6 +5719,46 @@ EOF
   pass "a hung global lsof census refuses teardown before removal"
 }
 
+test_non_gnu_timeout_falls_back_to_bounded_perl() {
+  local case_dir rc wt_path started elapsed fake_pid=99999996
+  case_dir=$(make_case non-gnu-timeout-fallback)
+  write_meta "$case_dir" no-mistakes ship
+  land_shippable_commit "$case_dir"
+  wt_path=$(cd "$case_dir/wt" && pwd -P)
+  cat > "$case_dir/fakebin/timeout" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = --version ]; then
+  printf 'timeout 0.1.0\n'
+  exit 0
+fi
+[ -z "${FM_NON_GNU_TIMEOUT_LOG:-}" ] || printf 'ran\n' >> "$FM_NON_GNU_TIMEOUT_LOG"
+exit 2
+SH
+  cp "$case_dir/fakebin/timeout" "$case_dir/fakebin/gtimeout"
+  cat > "$case_dir/fakebin/lsof" <<EOF
+#!/usr/bin/env bash
+printf 'p%s\nfcwd\nn%s\n' '$fake_pid' '$wt_path'
+trap 'printf "term\\n" >> "$case_dir/lsof-signals.log"' TERM
+while :; do sleep 1; done
+EOF
+  chmod +x "$case_dir/fakebin/timeout" "$case_dir/fakebin/gtimeout" "$case_dir/fakebin/lsof"
+
+  rc=0
+  started=$SECONDS
+  FM_TIMEOUT_MECHANISM_OVERRIDE=bash \
+  FM_NON_GNU_TIMEOUT_LOG="$case_dir/non-gnu-timeout-ran" \
+  FM_TEARDOWN_LSOF_CENSUS_TIMEOUT=1 \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  elapsed=$((SECONDS - started))
+
+  expect_code 1 "$rc" "non-gnu-timeout-fallback: teardown should refuse the incomplete census"
+  assert_absent "$case_dir/non-gnu-timeout-ran" "non-gnu-timeout-fallback: incompatible timeout executed the bounded command"
+  assert_present "$case_dir/lsof-signals.log" "non-gnu-timeout-fallback: Perl fallback never sent TERM"
+  [ "$elapsed" -le 10 ] || fail "non-gnu-timeout-fallback: TERM-resistant census ran for ${elapsed}s"
+  assert_present "$case_dir/state/task-x1.meta" "non-gnu-timeout-fallback: teardown removed task metadata"
+  pass "non-GNU timeout falls through to the bounded Perl runner"
+}
+
 test_persistent_scan_refuses_after_bounded_retries() {
   local case_dir rc wt_path fake_pid=99999999
   case_dir=$(make_case persistent-reap-refusal)
@@ -6733,6 +6796,7 @@ test_reused_pid_identity_is_not_force_killed
 test_exec_changed_process_is_still_reaped
 test_process_spawned_during_grace_is_reaped_on_later_pass
 test_hung_lsof_census_refuses_before_removal
+test_non_gnu_timeout_falls_back_to_bounded_perl
 test_persistent_scan_refuses_after_bounded_retries
 test_process_exit_during_identity_lookup_does_not_refuse
 test_run_abort_precedes_process_reap_precedes_worktree_removal

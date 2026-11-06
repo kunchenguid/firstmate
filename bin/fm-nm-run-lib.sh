@@ -22,11 +22,17 @@
 # stderr, while fm_nm_run keeps the fail-open query contract for read-only callers.
 # The no-mistakes forms route host reads through the opt-in home resolver below.
 fm_nm_bounded() {  # <dir> <timeout_secs> <command> <args...>
-  local dir=$1 timeout_secs=$2 have_timeout=none
+  local dir=$1 timeout_secs=$2 have_timeout=none candidate
   shift 2
-  if command -v timeout >/dev/null 2>&1; then have_timeout=timeout
-  elif command -v gtimeout >/dev/null 2>&1; then have_timeout=gtimeout
-  elif command -v perl >/dev/null 2>&1; then have_timeout=perl
+  for candidate in timeout gtimeout; do
+    if command -v "$candidate" >/dev/null 2>&1 \
+      && "$candidate" --version 2>/dev/null | grep -q 'GNU coreutils'; then
+      have_timeout=$candidate
+      break
+    fi
+  done
+  if [ "$have_timeout" = none ] && command -v perl >/dev/null 2>&1; then
+    have_timeout=perl
   fi
   case "$have_timeout" in
     timeout|gtimeout) ( cd "$dir" && "$have_timeout" --kill-after=1s "$timeout_secs" "$@" ) ;;
