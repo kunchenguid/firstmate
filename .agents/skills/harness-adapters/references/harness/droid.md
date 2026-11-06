@@ -32,7 +32,7 @@ Control uses Escape for interrupt and `/quit` for exit.
 The settings file carries accounting hooks, the crewmate turn-end hook, and optional model and reasoning-effort pins.
 It is task-local runtime state and `../../../../../bin/fm-teardown.sh` removes it.
 [Task model selection and accounting](../../../../../docs/configuration.md) defines the separate requested and effective fields, catalog resolution, runtime reconciliation, and their consumers.
-`../../../../../bin/fm-spawn.sh` owns the folder-trust gate, its bounded wait, and the refusal on backends without verified viewport capture.
+`../../../../../bin/fm-spawn.sh` owns the folder-trust gate, generation-bound relaunch confirmation, its bounded wait, and the refusal on backends without verified viewport capture.
 Exact-path pre-registration remains the normal trust path; the bounded viewport gate handles a remaining interactive trust prompt and verifies that launch has continued.
 
 ## Working style
