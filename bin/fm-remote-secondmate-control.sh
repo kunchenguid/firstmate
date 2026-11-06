@@ -10,7 +10,7 @@
 #   fm-remote-secondmate-control.sh send-stdin <id> [fire-and-forget]  # message on stdin
 #   fm-remote-secondmate-control.sh key <id> <key>
 #   fm-remote-secondmate-control.sh capture <id> [lines]
-#   fm-remote-secondmate-control.sh observe <id>
+#   fm-remote-secondmate-control.sh observe <id> [--start-proof]
 #   fm-remote-secondmate-control.sh sync <id> [<parent-commit>]
 #   fm-remote-secondmate-control.sh update <id>
 #   fm-remote-secondmate-control.sh retire <id> [--force]
@@ -67,6 +67,10 @@ REMOTE_HERDR_SESSION=fm-remote
 # cannot repair while it answers, so nothing this control plane runs may start
 # one: bin/fm-remote-doctor.sh --fix alone starts the persistent server.
 export FM_BACKEND_REX_NO_AUTOSTART=1
+# The parent's watcher owns this mate's spawn start check; nothing on this host
+# scans parent-route state, so every spawn or relaunch driven from here skips
+# arming one and instead records the reply-log offset that check counts from.
+export FM_SPAWN_NO_START_CHECK=1
 
 die() { printf 'error: %s\n' "$1" >&2; exit 1; }
 usage() { sed -n '2,27p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
@@ -191,7 +195,7 @@ state_value() { # <id>; prints recovery-grade state
 }
 
 print_route() { # <id>
-  local id=$1 harness model effort traceparent rex_session_id rex_server
+  local id=$1 harness model effort traceparent rex_session_id rex_server busy_gen replies_offset
   remote_endpoint_require "$id"
   harness=$(fm_meta_get "$REMOTE_ENDPOINT_META" harness)
   model=$(fm_meta_get "$REMOTE_ENDPOINT_META" model)
@@ -215,6 +219,12 @@ print_route() { # <id>
   printf 'model=%s\n' "$model"
   printf 'effort=%s\n' "$effort"
   [ -z "$traceparent" ] || printf 'traceparent=%s\n' "$traceparent"
+  busy_gen=$(fm_meta_get "$REMOTE_ENDPOINT_META" busy_gen)
+  [ -z "$busy_gen" ] || printf 'busy_gen=%s\n' "$busy_gen"
+  # The parent's spawn start check counts only reply bytes past this offset,
+  # which the host-local spawn sampled before this agent launched.
+  replies_offset=$(fm_meta_get "$REMOTE_ENDPOINT_META" replies_offset)
+  [ -z "$replies_offset" ] || printf 'replies_offset=%s\n' "$replies_offset"
 }
 
 cmd_route() {
@@ -432,14 +442,29 @@ cmd_capture() {
   fm_backend_capture "$REMOTE_ENDPOINT_BACKEND" "$REMOTE_ENDPOINT_TARGET" "$lines" "fm-$id" | head -c 65536
 }
 
+# Without --start-proof the output is the single observation line the pending-
+# reply tracker compares whole. --start-proof appends this mate's busy-contract
+# verdict, its busy record's event (empty without a valid record), and its launch
+# generation, read from its parent-route record on this host:
+# the only durable start proof for a mate that starts and settles without writing
+# a status line, which the parent's spawn start check (bin/fm-watch.sh
+# start_check_started) reads.
 cmd_observe() {
-  local id=$1 harness
+  local id=$1 mode=${2:-} harness record
   validate_id "$id"
+  case "$mode" in '' | --start-proof) ;; *) usage ;; esac
   validate_home "$id"
   remote_endpoint_require "$id"
   harness=$(fm_meta_get "$REMOTE_ENDPOINT_META" harness)
   fm_pending_reply_backend_observation "$REMOTE_ENDPOINT_BACKEND" "$REMOTE_ENDPOINT_TARGET" "fm-$id" "$harness"
   printf '\n'
+  [ "$mode" = --start-proof ] || return 0
+  # shellcheck source=bin/fm-busy-lib.sh
+  . "$SCRIPT_DIR/fm-busy-lib.sh"
+  printf 'verdict=%s\n' "$(fm_busy_classify_meta "$REMOTE_ENDPOINT_META" "$id" "$CONTROL_STATE")"
+  record=$(fm_busy_record_read "$CONTROL_STATE" "$id") || record=
+  printf 'event=%s\n' "$(printf '%s\n' "$record" | awk '{print $3}')"
+  printf 'busy_gen=%s\n' "$(fm_meta_get "$REMOTE_ENDPOINT_META" busy_gen)"
 }
 
 # Make <commit> readable in this home's own object store without moving any other
@@ -548,7 +573,7 @@ case "${1:-}" in
   send-stdin) shift; [ "$#" -ge 1 ] && [ "$#" -le 2 ] || usage; cmd_send_stdin "$@" ;;
   key) shift; [ "$#" -eq 2 ] || usage; cmd_key "$@" ;;
   capture) shift; [ "$#" -ge 1 ] && [ "$#" -le 2 ] || usage; cmd_capture "$@" ;;
-  observe) shift; [ "$#" -eq 1 ] || usage; cmd_observe "$@" ;;
+  observe) shift; [ "$#" -ge 1 ] && [ "$#" -le 2 ] || usage; cmd_observe "$@" ;;
   sync) shift; [ "$#" -ge 1 ] && [ "$#" -le 2 ] || usage; cmd_sync "$@" ;;
   update) shift; [ "$#" -eq 1 ] || usage; cmd_update "$@" ;;
   retire) shift; [ "$#" -ge 1 ] && [ "$#" -le 2 ] || usage; cmd_retire "$@" ;;

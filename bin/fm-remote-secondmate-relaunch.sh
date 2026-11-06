@@ -46,6 +46,12 @@ REMOTE_HOST=$(fm_meta_get "$META" remote_host)
 [ -n "$REMOTE_HOST" ] \
   || die "task $ID is not a remotely placed secondmate; use bin/fm-control.sh $ID relaunch instead"
 
+SPAWN_TASK_LOCK="$STATE/.spawn-$ID.lock"
+fm_lock_try_acquire "$SPAWN_TASK_LOCK" || die "a spawn is still creating task $ID; retry the relaunch"
+trap 'fm_lock_release "$SPAWN_TASK_LOCK" || true' EXIT
+# The start-check boundary is taken before the host relaunch delivers anything.
+LAUNCH_EPOCH=$(fm_start_check_launch_epoch "$STATE" "$ID")
+START_CHECK_FAILED=0
 RELAUNCH_OUT=$("$SCRIPT_DIR/fm-on.sh" "$ID" fm-remote-secondmate-control.sh \
   relaunch "$ID" "$HARNESS" "$MODEL" "$EFFORT" </dev/null 2>&1) || {
   rc=$?
@@ -65,6 +71,10 @@ printf '%s\n' "$RELAUNCH_OUT"
 NEW_HARNESS=$(printf '%s\n' "$RELAUNCH_OUT" | sed -n 's/^harness=//p' | tail -1)
 NEW_MODEL=$(printf '%s\n' "$RELAUNCH_OUT" | sed -n 's/^model=//p' | tail -1)
 NEW_EFFORT=$(printf '%s\n' "$RELAUNCH_OUT" | sed -n 's/^effort=//p' | tail -1)
+REMOTE_BUSY_GEN=$(printf '%s\n' "$RELAUNCH_OUT" | sed -n 's/^busy_gen=//p' | tail -1)
+case "$REMOTE_BUSY_GEN" in *[!A-Za-z0-9._-]*) REMOTE_BUSY_GEN= ;; esac
+REMOTE_REPLIES_OFFSET=$(printf '%s\n' "$RELAUNCH_OUT" | sed -n 's/^replies_offset=//p' | tail -1)
+case "$REMOTE_REPLIES_OFFSET" in *[!0-9]*) REMOTE_REPLIES_OFFSET= ;; esac
 [ -n "$NEW_HARNESS" ] || die "the host's route confirmation carried no harness to record"
 
 META_LOCK=$(fm_meta_lock_path "$META") || die "metadata lock path is invalid for $ID"
@@ -77,6 +87,8 @@ META_TMP=$(mktemp "$STATE/.fm-remote-relaunch-meta.XXXXXX") || {
   printf 'harness=%s\n' "$NEW_HARNESS"
   printf 'model=%s\n' "$NEW_MODEL"
   printf 'effort=%s\n' "$NEW_EFFORT"
+  [ -z "$REMOTE_BUSY_GEN" ] || printf 'remote_busy_gen=%s\n' "$REMOTE_BUSY_GEN"
+  [ -z "$REMOTE_REPLIES_OFFSET" ] || printf 'remote_replies_offset=%s\n' "$REMOTE_REPLIES_OFFSET"
 } >> "$META_TMP"
 # Every other line is preserved in its original relative order after the
 # refreshed harness/model/effort. A pr= line's own identity region (pr_head=
@@ -87,10 +99,30 @@ META_TMP=$(mktemp "$STATE/.fm-remote-relaunch-meta.XXXXXX") || {
 # that already had one armed.
 while IFS= read -r line || [ -n "$line" ]; do
   case "$line" in
-    harness=*|model=*|effort=*) ;;
+    harness=*|model=*|effort=*|remote_busy_gen=*|remote_replies_offset=*) ;;
     *) printf '%s\n' "$line" >> "$META_TMP" ;;
   esac
 done < "$META"
 chmod 0600 "$META_TMP"
 mv -f -- "$META_TMP" "$META"
+# A start wake the replaced launch already queued is dropped with its record.
+fm_wake_queue_prune_task "$STATE" "$ID" "" start 2>/dev/null || true
+case "$NEW_HARNESS" in kimi*) rm -f -- "$STATE/$ID.start-pending" ;;
+  *)
+    if [ "${FM_SPAWN_NO_START_CHECK:-0}" = 1 ]; then
+      rm -f -- "$STATE/$ID.start-pending"
+    else
+      record_tmp="$STATE/$ID.start-pending.tmp.$$"
+      if { printf '%s %s %s\n' "$LAUNCH_EPOCH" "${REMOTE_BUSY_GEN:--}" "$NEW_HARNESS" > "$record_tmp" \
+        && mv -f -- "$record_tmp" "$STATE/$ID.start-pending"; }; then :
+      else
+        rm -f -- "$record_tmp"
+        START_CHECK_FAILED=1
+      fi
+    fi
+    ;;
+esac
 fm_lock_release "$META_LOCK"
+# The replacement is running and its record is republished, but without its
+# start check; never report that as a clean relaunch.
+[ "$START_CHECK_FAILED" = 0 ] || die "relaunched $ID, but its start check could not be armed ($STATE/$ID.start-pending could not be written); inspect the worker yourself in about two minutes"
