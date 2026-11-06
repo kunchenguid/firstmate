@@ -6,11 +6,8 @@
 # below is the single owner of that condition set), and whether its watcher has
 # a fresh liveness beacon (state/.last-watcher-beat, touched every poll cycle,
 # within the grace window).
-# bin/fm-turnend-guard.sh uses the PID-strict fm_watcher_healthy from
-# bin/fm-wake-lib.sh for its block decision. bin/fm-guard.sh uses the model-aware
-# fm_watcher_supervision_verdict (also in bin/fm-wake-lib.sh), which owns what a
-# live watcher process means per supervision model. The status fields here retain
-# the beacon-age details used in their messages.
+# docs/turnend-guard.md owns the distinct turn-end and mid-turn health verdicts.
+# The status fields here retain the beacon-age details used in their messages.
 
 # Portable mtime; Linux stat lacks -f, macOS stat lacks -c.
 fm_sup_stat_mtime() {

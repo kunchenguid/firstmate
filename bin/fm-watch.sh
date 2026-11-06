@@ -3704,6 +3704,13 @@ if [ -z "$FM_WATCH_DELIVERY_IDENTITY" ] \
   exit 1
 fi
 
+# Only Codex on Linux needs the read-only cross-namespace Stop proof.
+if [ "$(uname -s)" = Linux ] && [ "$("$SCRIPT_DIR/fm-harness.sh" 2>/dev/null)" = codex ] \
+  && [ -r /proc/sys/kernel/random/boot_id ]; then
+  readlink /proc/self/ns/pid > "$WATCH_LOCK/pid-namespace" 2>/dev/null || true
+  cat /proc/sys/kernel/random/boot_id > "$WATCH_LOCK/boot-id" 2>/dev/null || true
+fi
+
 # A bounded startup recovery-lock failure reports the typed line the arm relays; a
 # transient or dead holder keeps the legacy stderr diagnostic.
 startup_lock_failed() {

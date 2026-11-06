@@ -54,3 +54,4 @@ The script owns version and native-session selection; [`codex.md`](../../../../.
 Homes without the opt-in, unverified versions, and sessions without the native registration keep [`codex-checkpoint.md`](../../../../../docs/supervision-protocols/codex-checkpoint.md), the unchanged bounded foreground protocol.
 The [supervision host](../../../../../docs/supervision-host.md) retains its existing posture decisions on both paths.
 Codex's PreToolUse watcher-arm seatbelt blocks directly through its project hook.
+The [turn-end guard contract](../../../../../docs/turnend-guard.md#linuxcodex-cross-namespace-observation) owns the Linux/Codex fallback; its [verification record](../../../../../docs/verification/supervision.md#linuxcodex-pid-namespace-fallback-2026-10-23) owns coverage and live-evidence limits.
