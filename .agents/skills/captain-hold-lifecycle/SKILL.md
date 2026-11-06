@@ -1,7 +1,7 @@
 ---
 name: captain-hold-lifecycle
 description: >-
-  Load before treating an investigation, scout report, structured review, or Lavish review as complete, before ending a visual review that exposed a captain decision, when recording or routing the captain's answer, and on any RECORD DIVERGENCE line the wake drain prints.
+  Load before treating an investigation, scout report, structured review, or Lavish review as complete, before ending a visual review that exposed a captain decision, before raising, re-raising, reminding about, or recommending an option on a captain decision, when recording or routing the captain's answer, and on any RECORD DIVERGENCE line the wake drain prints.
 user-invocable: false
 metadata:
   internal: true
@@ -57,13 +57,22 @@ Read such a line as "these two records disagree", never as "the captain ruled an
 Reconcile it with what actually happened - `answer` when the captain's own words exist to record, and a fresh `needs-decision` line re-opening the status decision when that resolution was not the captain's word.
 The absence of a routed work item is not a divergence and the guard never requires one: when the decision IS the deliverable there is nothing to route.
 
+## Earlier answers across homes
+
+Before raising, re-raising, reminding about, or recommending an option on a decision the captain may already have answered, search every home's records for an earlier answer: the main home and each home registered in `data/secondmates.md`.
+An answer recorded in one home is invisible to the others, so a report's open-questions list, a status line, or one home's backlog alone never proves the call is still open.
+When records disagree, the newest dated captain answer wins over an older answer and over any report's open-questions list; raise the call again only when no answer exists or the captain's newest words leave it genuinely open.
+`FM_HOME=<home> bin/fm-tasks-axi.sh list` and `show <id> --full` read a local home's backlog, including recorded `answer` resolution blocks, and `bin/fm-on.sh <secondmate-id> fm-tasks-axi.sh ...` reads a remote home's.
+An answered call closes, and once it ages past the home's `done_keep` it moves to that home's Done archive (`.tasks.toml` `archive`, default `data/done-archive.md`), which `list` and `show` do not read, so search that archive file as well; no tracked command reads a remote home's archive, so ask that secondmate through the routed path to search its own.
+When the captain answers a decision about work another home owns, send the answer to that owning home in the same turn through the routed secondmate path, then read that home's record back and confirm it changed; until it has, report the answer as not yet delivered rather than recorded.
+
 ## Operating sequence
 
 1. Read the complete investigation result and complete the visual review before declaring either complete.
 2. Inventory only genuine unresolved choices that require the captain, and find the task each one gates.
 3. Firstmate holds that task - or creates one captain-held task for the review's open questions - with a concise reason carrying the question and options.
 4. Attest the full inventory for that review pass under the caller authority in Policy above.
-5. Relay the choices to the captain as decisions from Bearings' Captain's Call section under `AGENTS.md` section 9; do not use the word hold in captain chat.
+5. Check every home for an earlier answer under Earlier answers across homes, then relay the choices that remain open to the captain as decisions from Bearings' Captain's Call section under `AGENTS.md` section 9; do not use the word hold in captain chat.
 6. Close each call only through `answer` (or a channel that feeds `answers`), close a board-requested moot call through evidence-backed `reconcile close`, record a still-active reconciliation through `reconcile note`, use `--until` when the captain defers it, or confirm a channel already closed it.
 7. Confirm Bearings reflects the outcome: answered or reconciled-moot calls leave Captain's Call, released work resumes, active reconciliations remain held, and deferred calls sit in Charted Next with their date.
 
