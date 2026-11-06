@@ -130,6 +130,9 @@
 # parallel_unhinted (the number of members missing a parallel hint).
 # These sums exclude unhinted members and are estimates, not measured job wall
 # times. Missing parallel hints are reported without failing this guard.
+# The guard's set comparisons run under LC_ALL=C, the same collation its sorts
+# use, so a caller's UTF-8 locale cannot make a correctly ordered list look
+# unsorted and fail the guard.
 #
 # portable-serial stays strictly serial. Its CI shards (portable-serial-<k>of<n>)
 # split it across separate runners, so two of its stateful scripts still never
