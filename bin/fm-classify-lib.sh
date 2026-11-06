@@ -2262,10 +2262,12 @@ window_to_task() {
 # --resolve-key closes must not each force a captain-facing wake solely because
 # each one appended a status line, while a worker-authored line that is not in
 # this ledger still signals.
-# fm_wake_signal_seen_current (bin/fm-wake-lib.sh) is the ONLY consumer. The
-# ledger decides whether growth wakes this home and nothing else: it never
-# removes a line from presentation, so the drain's signal annotation and its
-# UNREAD STATUS section both still print these bytes.
+# It has two consumers: fm_wake_signal_seen_current (bin/fm-wake-lib.sh), which
+# decides whether growth wakes this home, and the Pi branch dispatch
+# (.pi/extensions/lib/fm-branch-dispatch.ts), which keeps owned lines from
+# deciding a second mate's signal-span ownership. Neither removes a line from
+# presentation, so the drain's signal annotation and its UNREAD STATUS section
+# both still print these bytes.
 # The ledger does not use lag verbs to hide a worker `resolved` line; only
 # bytes this home itself recorded as owned are ever treated as owned.
 #
