@@ -621,11 +621,12 @@ read_schedule() {
   device=$(fm_pr_file_device "$STATE")
   fm_pr_regular_destination_on_device_or_absent "$file" "$device" || fail 'unsafe contribution scheduler state'
   if [ -f "$file" ]; then
-    jq_lib -e 'select(try (.schema == "fm-contributions-poll.v1"
+    jq_lib -ne --slurpfile schedule "$file" 'select(($schedule | length) == 1) | $schedule[0]
+      | select(try (.schema == "fm-contributions-poll.v1"
       and (.attempts | type == "object")
       and all(.attempts | to_entries[]; (.key | supported_url)
         and (.value | type == "string") and (.value | fromdateiso8601 | type == "number"))) catch false)' \
-      "$file" > "$TMP/schedule.json" || fail 'invalid contribution scheduler state'
+      > "$TMP/schedule.json" || fail 'invalid contribution scheduler state'
   else
     printf '{"schema":"fm-contributions-poll.v1","attempts":{}}\n' > "$TMP/schedule.json"
   fi
