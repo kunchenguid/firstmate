@@ -76,7 +76,7 @@ install_scripts() {
            fm-session-lock-lib.sh fm-cursor-lib.sh fm-operational-input.sh \
            fm-supervision-instructions.sh fm-harness.sh fm-lock.sh \
            fm-gate-refuse-lib.sh fm-afk-contract.sh fm-classify-lib.sh fm-timeout-lib.sh \
-           fm-supervision-engine-lib.sh; do
+           fm-supervision-engine-lib.sh fm-lease-lib.sh; do
     cp "$ROOT/bin/$f" "$dir/bin/$f"
   done
   cp "$ROOT/bin/fm-arm-command-policy.mjs" "$dir/bin/fm-arm-command-policy.mjs"
@@ -695,6 +695,104 @@ test_park_stands_down_after_session_takeover() {
   pass "cursor park: session takeover stops polling without output or state mutation"
 }
 
+# A fakebin standing in for Git Bash: uname reports <uname>, ps refuses -o as
+# Cygwin's does and reports every local process as a shell whose parent link is
+# severed, and `ps -W` lists FM_TEST_WIN_TABLE. The session therefore resolves
+# only through the Windows bridge, as the tagged win:7204 its CLAUDE_PID names.
+windows_session_fakebin() {  # <dir> <uname>
+  local fakebin
+  fakebin=$(fm_fakebin "$1")
+  printf '#!/usr/bin/env bash\nprintf "%%s\\n" %s\n' "$2" > "$fakebin/uname"
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+pid=
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -o) echo "ps: unknown option -- o" >&2; exit 1 ;;
+    -W)
+      printf '%s\n' '      PID    PPID    PGID     WINPID   TTY         UID    STIME COMMAND'
+      [ -z "${FM_TEST_WIN_TABLE:-}" ] || printf '%s\n' "$FM_TEST_WIN_TABLE"
+      exit 0
+      ;;
+    -p) pid=$2; shift 2 ;;
+    *) shift ;;
+  esac
+done
+printf '%s\n' '      PID    PPID    PGID     WINPID   TTY         UID    STIME COMMAND'
+printf '%s 1 %s 9999 ? 0 00:00:00 /usr/bin/bash\n' "$pid" "$pid"
+SH
+  chmod +x "$fakebin/uname" "$fakebin/ps"
+  printf '%s\n' "$fakebin"
+}
+
+WIN_SESSION_ROW='  4201508       0       0       7204  ?              0 22:24:48 C:\Users\u\.local\bin\claude.exe'
+WIN_OTHER_ROW='  4201600       0       0       7300  ?              0 22:30:00 C:\Users\u\.local\bin\claude.exe'
+
+run_windows_park() {  # <dir> <fakebin> <windows-table>
+  printf '%s' "$CURSOR_PAYLOAD" | env -u PI_CODING_AGENT -u CLAUDE_PID -u CLAUDE_CODE_SESSION_ID \
+    PATH="$2:$PATH" FM_TEST_WIN_TABLE="$3" FM_HOME="$1" FM_CURSOR_PARK_POLL=1 \
+    CLAUDE_PID=7204 CLAUDE_CODE_SESSION_ID=sess-win \
+    bash "$1/bin/fm-turnend-guard-cursor.sh" 2>/dev/null
+}
+
+# On Windows/Git Bash the session lock legitimately holds a tagged win:<pid>
+# (bin/fm-session-lock-lib.sh). The park must recognize its own tagged lock and
+# reclaim a dead tagged holder's, instead of reading either as malformed.
+test_park_honors_a_windows_tagged_session_lock() {
+  local dir fakebin out
+  dir=$(make_primary_dir "$TMP_ROOT/park-win-owned")
+  fakebin=$(windows_session_fakebin "$dir" MINGW64_NT-10.0-26200)
+  : > "$dir/state/task1.meta"
+  write_arm_fixture "$dir" actionable
+  printf 'win:7204\n' > "$dir/state/.lock"
+  out=$(run_windows_park "$dir" "$fakebin" "$WIN_SESSION_ROW")
+  [ -e "$dir/state/arm-ran" ] || fail "the park did not arm for the session holding its own tagged lock"
+  [ "$(kind_of_followup "$out")" = watcher ] \
+    || fail "the owner of a tagged lock must receive the actionable wake, got: $out"
+
+  dir=$(make_primary_dir "$TMP_ROOT/park-win-reclaim")
+  : > "$dir/state/task1.meta"
+  write_arm_fixture "$dir" actionable
+  printf 'win:7300\n' > "$dir/state/.lock"
+  out=$(run_windows_park "$dir" "$fakebin" "$WIN_SESSION_ROW")
+  [ "$(cat "$dir/state/.lock")" = 'win:7204' ] \
+    || fail "a dead tagged holder's lock was not reclaimed: $(cat "$dir/state/.lock")"
+  [ -e "$dir/state/arm-ran" ] || fail "the park did not arm after reclaiming a dead tagged holder's lock"
+  [ "$(kind_of_followup "$out")" = watcher ] \
+    || fail "the reclaiming session must receive the actionable wake, got: $out"
+  pass "cursor park: a Windows-tagged session lock is owned by its session and reclaimed from a dead holder"
+}
+
+# A live tagged holder is another session, a malformed tagged value is no
+# identity, and the tag means nothing off Windows: each leaves the lock alone.
+test_park_leaves_other_tagged_session_locks_alone() {
+  local spec case_name uname lock table dir fakebin out
+  for spec in \
+    "live-other|MINGW64_NT-10.0-26200|win:7300|both" \
+    "malformed|MINGW64_NT-10.0-26200|win:72x4|session" \
+    "not-windows|Linux|win:7300|session"; do
+    IFS='|' read -r case_name uname lock table <<EOF
+$spec
+EOF
+    case "$table" in
+      both) table="$WIN_SESSION_ROW
+$WIN_OTHER_ROW" ;;
+      *) table=$WIN_SESSION_ROW ;;
+    esac
+    dir=$(make_primary_dir "$TMP_ROOT/park-win-$case_name")
+    fakebin=$(windows_session_fakebin "$dir" "$uname")
+    : > "$dir/state/task1.meta"
+    write_arm_fixture "$dir" actionable
+    printf '%s\n' "$lock" > "$dir/state/.lock"
+    out=$(run_windows_park "$dir" "$fakebin" "$table")
+    [ -z "$out" ] || fail "$case_name: a session that does not own the tagged lock emitted a follow-up: $out"
+    [ ! -e "$dir/state/arm-ran" ] || fail "$case_name: the park armed without owning the tagged lock"
+    [ "$(cat "$dir/state/.lock")" = "$lock" ] \
+      || fail "$case_name: the tagged lock was rewritten to $(cat "$dir/state/.lock")"
+  done
+  pass "cursor park: a live, malformed, or off-Windows tagged lock is left alone"
+}
+
 test_park_inert_in_child_worktree() {
   local base child out
   base=$(make_primary_dir "$TMP_ROOT/park-base")
@@ -819,6 +917,8 @@ test_park_still_parks_with_pi_leak_and_cursor_identity
 test_park_stands_down_when_away_mode_activates_before_commit
 test_park_inert_without_session_lock
 test_park_stands_down_after_session_takeover
+test_park_honors_a_windows_tagged_session_lock
+test_park_leaves_other_tagged_session_locks_alone
 test_park_inert_in_child_worktree
 test_park_ignores_malformed_payload
 test_sessionstart_emits_additional_context
