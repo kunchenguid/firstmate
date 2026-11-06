@@ -819,6 +819,7 @@ SH
     FM_FLOOR_BRANCH="$branch" FM_FLOOR_HEAD="$head" run_reconcile "$MATE" --startup
   grep -Fxq ledger-read "$WORLD/forge.log" || fail 'the floor regression never exhausted ledger proof'
   [ -s "$WORLD/measure" ] || fail 'the forced first cadence visit never completed its measured real crew-state read'
+  [ ! -e "$MATE/state/.meta-0-cadence.lock" ] || fail 'the forced first cadence visit retained its metadata lock after cleanup'
   read -r started elapsed deadline rc < "$WORLD/measure"
   elapsed=$((elapsed - started))
   [ "$((deadline - started))" -ge 900 ] \

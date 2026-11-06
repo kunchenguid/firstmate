@@ -49,6 +49,8 @@
 # kill one second after the budget remains as a backstop for a scan wedged in
 # an unbounded wait (for example a live-held wake-queue lock), so the clean
 # deadline path is not racing its own backstop.
+# The state-reader watchdog uses half of that existing cleanup reserve after
+# its read deadline, leaving the other half for scan and metadata-lock cleanup.
 #
 # It considers only a direct ordinary crewmate whose newest meta, status, or
 # turn-ended mtime is older than that interval and whose last status is not
@@ -127,6 +129,7 @@ OUTCOME_DIR="$STATE/terminal-outcomes"
 SCAN_MARKER="$STATE/.inactive-outcome-reconcile"
 SCAN_LOCK="$STATE/.inactive-outcome-reconcile.lock"
 CREW_STATE_BIN="${FM_INACTIVE_CREW_STATE_BIN:-$SCRIPT_DIR/fm-crew-state.sh}"
+SCAN_CLEANUP_RESERVE_MS=1000
 
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
@@ -669,7 +672,7 @@ task_holds_live_work() { # <id> <meta> <timeout> <last-status-line>; 0 when the 
 }
 
 reconcile_direct_child_locked() { # <id> <meta> <secondmate-id-or-empty> <deadline> <first>
-  local id=$1 meta=$2 self=${3:-} deadline=$4 first=$5 status turn last age state_line state pr incarnation fingerprint outcome_key payload kind state_rc=0 started left
+  local id=$1 meta=$2 self=${3:-} deadline=$4 first=$5 status turn last age state_line state pr incarnation fingerprint outcome_key payload kind state_rc=0 started left watchdog_deadline
   [ -f "$meta" ] && [ ! -L "$meta" ] || return 0
   kind=$(meta_field "$meta" kind)
   [ "$kind" = secondmate ] && return 0
@@ -690,8 +693,13 @@ reconcile_direct_child_locked() { # <id> <meta> <secondmate-id-or-empty> <deadli
   fi
   local FM_READ_DEADLINE=$deadline
   # The visit budget includes the scan's guaranteed first-visit floor.
-  # Endpoint readers need an outer watchdog as well as the shared deadline.
-  left=$(fm_nm_read_timeout 30) || return 3
+  fm_nm_read_timeout 30 >/dev/null || return 3
+  # A deadline-aware reader must finish reaping before the outer guard fires.
+  # Borrow only half of the scan's existing cleanup reserve; its read deadline
+  # and the whole-scan backstop remain unchanged.
+  watchdog_deadline=$((deadline + SCAN_CLEANUP_RESERVE_MS / 2))
+  left=$(FM_READ_DEADLINE=$watchdog_deadline fm_nm_read_timeout \
+    "$((FM_INACTIVE_RECONCILE_BUDGET_SECS + SCAN_CLEANUP_RESERVE_MS / 1000))") || return 3
   state_line=$(fm_run_timed "$left" env FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_CREW_STATE_NO_FORGE=1 \
     FM_READ_DEADLINE="$deadline" \
     "$CREW_STATE_BIN" "$id" 2>/dev/null) || state_rc=$?
@@ -854,7 +862,7 @@ case "$mode" in
     # process-group kill is only the backstop for a scan wedged outside every
     # bounded section (an unbounded lock wait), so it fires one second after
     # the deadline instead of racing the clean bounded exit it exists to guard.
-    if fm_run_timed $((FM_INACTIVE_RECONCILE_BUDGET_SECS + 1)) "$0" _scan-locked "$startup"; then
+    if fm_run_timed $((FM_INACTIVE_RECONCILE_BUDGET_SECS + SCAN_CLEANUP_RESERVE_MS / 1000)) "$0" _scan-locked "$startup"; then
       :
     elif [ "$?" -ne 124 ]; then
       exit 1
