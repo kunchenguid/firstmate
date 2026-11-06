@@ -122,8 +122,10 @@ A key-less line otherwise falls back to its verb; an unrelated open decision alo
 The status-presentation cursor bounds that span, and a missing or unmatched cursor falls back to the whole log.
 Single-task crewmate signals keep their existing Pi payload and attended-host whole-log rules, except that the TypeScript decision fold now ignores bare transition words without a colon or complete key token, matching `bin/fm-classify-lib.sh` on both crewmate and second-mate logs.
 
-For a stale row, `scopeForUnreadWake` folds the mapped task's status log.
-It excludes the row when any `needs-decision` remains open or the current meaningful declaration is `captain-held`.
+For a stale row, and for a signal row on the attended host, `scopeForUnreadWake` folds the mapped task's status log.
+It excludes the row when any `needs-decision` remains open, the current meaningful declaration is `captain-held`, or the task is a no-mistakes ship whose latest line is its pre-validation `done:`.
+That `done:` is the handoff that starts validation, which only main can send, so the branch never absorbs it as a routine outcome; `fm_dod_should_gate_ship_done` in `bin/fm-dod-lib.sh` owns what counts as pre-validation, and the CI-ready and published-for-review reports stay the branch's.
+The Pi extension's own signal rows are not folded, so there the branch prompt's verdict rule (`bin/fm-branch-prompt.sh`) is the only guard.
 An unreadable or symlinked status log fails the scope closed rather than influencing routing.
 
 Before cross-referencing them, the dispatcher resolves trigger keys and every currently unread excluded decision row to task identity.

@@ -628,8 +628,16 @@ while [ "$attempt" -lt "$AUTOARM_ATTEMPTS" ]; do
 done
 
 # The need may have vanished mid-cycle (fleet torn down, X opted out): nothing
-# left to supervise, so close quietly instead of waking the model.
-if ! need_supervision; then
+# left to supervise, so close quietly instead of waking the model. One close is
+# owed to main whatever the fleet now holds: the host's captain-outcome
+# hand-back, because the engine's own handling can be what emptied the fleet (it
+# tears down a finished scout), and the drain is main's only way to learn it.
+CAPTAIN_OUTCOME=0
+if [ "$HOST_MODE" -eq 1 ] && [ -n "$OUT" ] \
+  && grep -q '^supervision-host: branch-outcome:' "$OUT" 2>/dev/null; then
+  CAPTAIN_OUTCOME=1
+fi
+if [ "$CAPTAIN_OUTCOME" -eq 0 ] && ! need_supervision; then
   autoarm_record clean
   [ -z "$OUT" ] || rm -f "$OUT" 2>/dev/null || true
   exit 0

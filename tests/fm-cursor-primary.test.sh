@@ -489,6 +489,15 @@ write_host_fixture() {  # <dir> <kind>
       boundary)
         printf 'printf "supervision-host: cycle boundary - fixture\\n"\n'
         ;;
+      outcome-after-teardown)
+        # The engine's own handling tore down the last task, so the fleet is empty.
+        printf 'rm -f "$FM_HOME/state/task1.meta"\n'
+        printf 'printf "supervision-host: branch-outcome: the supervision session handled this wake and recorded captain outcomes for you (store rows 1)\\n"\n'
+        ;;
+      boundary-after-teardown)
+        printf 'rm -f "$FM_HOME/state/task1.meta"\n'
+        printf 'printf "supervision-host: cycle boundary - fixture\\n"\n'
+        ;;
       stood-down)
         printf 'printf "supervision-host stood down: this session no longer owns supervision\\n"\n'
         ;;
@@ -556,6 +565,30 @@ test_park_runs_the_supervision_host_only_when_opted_in() {
   case "$body" in *'supervision-host:'*) ;; *) fail "the quiet-record handback did not reach main: $out" ;; esac
   case "$body" in *'not a return'*) fail "a handback beside a quiet record called itself away-posture supervision: $body" ;; esac
   pass "cursor park: an opted-in home parks on the supervision host and relays every host line"
+}
+
+# A captain outcome is owed to main even when the engine's own handling emptied
+# the fleet; any other host close stays quiet once the fleet went idle.
+test_park_host_branch_outcome_survives_an_emptied_fleet() {
+  local dir out
+  dir=$(make_primary_dir "$TMP_ROOT/park-host-outcome-teardown")
+  : > "$dir/state/task1.meta"
+  mkdir -p "$dir/config"
+  : > "$dir/config/supervision-host"
+  write_host_fixture "$dir" outcome-after-teardown
+  out=$(run_park "$dir")
+  [ ! -e "$dir/state/task1.meta" ] || fail "fixture: the host did not empty the fleet"
+  [ "$(kind_of_followup "$out")" = watcher ] || fail "a captain outcome after the fleet emptied must arrive as a watcher follow-up, got: $out"
+  case "$(followup_of "$out")" in *'supervision-host: branch-outcome:'*) ;; *) fail "the follow-up must carry the captain-outcome line: $out" ;; esac
+
+  dir=$(make_primary_dir "$TMP_ROOT/park-host-boundary-teardown")
+  : > "$dir/state/task1.meta"
+  mkdir -p "$dir/config"
+  : > "$dir/config/supervision-host"
+  write_host_fixture "$dir" boundary-after-teardown
+  out=$(run_park "$dir")
+  [ -z "$out" ] || fail "a host close that is not a captain outcome must stay quiet once the fleet went idle: $out"
+  pass "cursor park: a host captain-outcome hand-back survives an emptied fleet; other host closes stay quiet"
 }
 
 test_park_host_boundary_stand_down_and_death() {
@@ -911,6 +944,7 @@ test_park_serializes_supersession_with_followup_commit
 test_superseded_park_does_not_consume_nag_budget
 test_park_inert_when_afk
 test_park_runs_the_supervision_host_only_when_opted_in
+test_park_host_branch_outcome_survives_an_emptied_fleet
 test_park_host_boundary_stand_down_and_death
 test_park_inert_under_pi_coding_agent
 test_park_still_parks_with_pi_leak_and_cursor_identity
