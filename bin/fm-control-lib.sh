@@ -333,6 +333,42 @@ fm_control_relaunch_resume_flag() {  # <harness> <registered-agent>
   return 0
 }
 
+# Claude session continuity for a Rex relaunch. A Rex Server stop kills the
+# worker but restores its block, so the replacement can `claude --resume` the
+# conversation if the task record holds the session id Claude itself wrote to
+# <claude-root>/sessions/<pid>.json while the worker was alive.
+fm_control_claude_session_id_valid() {  # <id>
+  [[ ${1-} =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]]
+}
+
+# The sessionId of the first <pid> whose Claude session file names <worktree>
+# as its cwd; fails when none does.
+fm_control_claude_session_id() {  # <claude-root> <worktree> <pid>...
+  local root=${1-} wt=${2-} pid file id
+  shift 2 || return 1
+  for pid in "$@"; do
+    file="$root/sessions/$pid.json"
+    [ -f "$file" ] || continue
+    id=$(jq -r --arg wt "$wt" 'select(.cwd == $wt) | .sessionId // empty' "$file" 2>/dev/null) || continue
+    fm_control_claude_session_id_valid "$id" || continue
+    printf '%s' "$id"
+    return 0
+  done
+  return 1
+}
+
+# The recorded session id of a claude task (<harness> and <id> as the task
+# record holds them), printed only when Claude still holds that session's
+# transcript under <claude-root>; fails otherwise so the caller keeps the
+# fresh-session relaunch.
+fm_control_claude_resumable_session() {  # <claude-root> <recorded-harness> <recorded-id>
+  local root=${1-} id=${3-}
+  [ "${2-}" = claude ] || return 1
+  fm_control_claude_session_id_valid "$id" || return 1
+  compgen -G "$root/projects/*/$id.jsonl" >/dev/null || return 1
+  printf '%s' "$id"
+}
+
 # Which named keys a backend adapter can deliver. Every session provider
 # normalizes Enter, Ctrl+C, and the Ctrl+U composer clear; Orca's terminal API
 # exposes only an interrupt and an Enter, so it can deliver neither Escape nor

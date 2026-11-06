@@ -169,7 +169,11 @@ Naming `rex` in `config/wedge-alarm` adds an opt-in wedge alarm on Firstmate's o
 - Rex is experimental and in beta, and the adapter refuses a CLI or server below API revision 5.
 - A Rex server stop kills every task's agent process.
   A restarted server restores the sessions themselves on the same endpoint and state directory, with each block returning as a fresh login shell preserving its working directory.
-  Liveness relaunches the dead agent into the restored session; when a session genuinely does not come back, recovery proves the task gone and reclaims it into a fresh tab.
+  Liveness relaunches the dead agent into the restored session.
+  A Claude worker relaunches with `claude --resume <session-id>` plus its normal launch line, so it keeps its conversation.
+  Spawn and relaunch record that id as `claude_session_id` in the task record, read from Claude's own `sessions/<pid>.json`.
+  When no id is recorded or Claude no longer holds the session transcript, the relaunch starts a fresh session as before.
+  When a session genuinely does not come back, recovery proves the task gone and reclaims it into a fresh tab.
 - The viewport is derived, not read directly, as described above.
 - Only harnesses that report OSC 7501 contribute native busy evidence; the others are classified from their own lifecycle and rendered footer.
 - Command Code is refused on Rex until it is live-verified there, and Cursor Agent is not yet live-verified on Rex.
