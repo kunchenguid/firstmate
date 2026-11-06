@@ -102,6 +102,8 @@
 #      and ambiguity reporting. The selected run's id-addressed status must
 #      agree on id, branch, and live/terminal class before attribution;
 #      disagreement reports unknown with available candidate ids.
+#      These run-step mappings are provisional until emit_run applies
+#      bin/fm-dod-lib.sh's fm_dod_claim_destination to every done reading.
 #      The run-step is AUTHORITATIVE: running/fixing -> working, ci -> working
 #      (the id-addressed detail read carries step words the overview does not),
 #      awaiting_approval/fix_review -> parked (with gate findings), terminal
