@@ -654,17 +654,19 @@ STUB
   fm_write_meta "$home/state/old-paused.meta" "window=fm-old3" "kind=ship"
   fm_write_meta "$home/state/old-paused-paused.meta" "window=fm-old4" "kind=ship"
   fm_write_meta "$home/state/mate-working.meta" "window=remote:mate-1" "kind=secondmate"
-  # A gone target is proof of a stopped worker only on a backend that classifies
-  # its own agent state; on a capture-failure backend it is a failed read.
+  # A gone target is proof of a stopped worker only on a backend whose endpoint
+  # id the record carries (herdr); a tmux window is named without its server and
+  # a capture-failure backend prints the same text for a failed read, so those
+  # stay counted.
   fm_write_meta "$home/state/gone-tmux.meta" "window=fm-g1" "kind=ship" "backend=tmux"
   fm_write_meta "$home/state/gone-herdr.meta" "window=fm-g2" "kind=ship" "backend=herdr"
-  [ "$(contract "$home" live-workers)" = 6 ] \
-    || fail "live-workers counted the secondmate, a finished or paused record, or miscounted: $(contract "$home" live-workers)"
+  [ "$(contract "$home" live-workers)" = 7 ] \
+    || fail "live-workers counted the secondmate, a finished or paused record, a herdr-gone record, or dropped the tmux one: $(contract "$home" live-workers)"
   out=$(contract "$home" enter --words 'keep the lane busy' 2>&1) || fail "entry failed: $out"
-  [ "$(contract "$home" field spend_max_concurrent_workers)" = 6 ] \
+  [ "$(contract "$home" field spend_max_concurrent_workers)" = 7 ] \
     || fail "entry did not take the live count as the cap: $(contract "$home" field spend_max_concurrent_workers)"
-  assert_contains "$out" 'Spend cap: 6 concurrent workers.' 'the announcement carries the live count'
-  assert_contains "$out" '  spend cap: 6 concurrent workers' 'the read-back carries the live count'
+  assert_contains "$out" 'Spend cap: 7 concurrent workers.' 'the announcement carries the live count'
+  assert_contains "$out" '  spend cap: 7 concurrent workers' 'the read-back carries the live count'
 
   home=$(make_home spend-live-capture-backends)
   for i in cmux orca zellij paseo tern hc; do

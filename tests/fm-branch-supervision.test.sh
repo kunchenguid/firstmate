@@ -1533,7 +1533,7 @@ test_away_spend_cap_counts_only_working_workers() {
   # whole budget many times over without counting; their records stay put.
   fm_write_meta "$home/state/t1-done.meta" "window=fm-t1" "kind=ship"
   fm_write_meta "$home/state/t2-paused.meta" "window=fm-t2" "kind=ship"
-  fm_write_meta "$home/state/t3-gone.meta" "window=fm-t3" "kind=ship"
+  fm_write_meta "$home/state/t3-gone.meta" "window=fm-t3" "kind=ship" "backend=herdr"
   fm_write_meta "$home/state/mate-working.meta" "window=remote:mate" "kind=secondmate"
   fm_write_meta "$home/state/t4-working.meta" "window=fm-t4" "kind=ship"
   out=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$root" "$root/bin/fm-spawn.sh" task-new --mode no-mistakes --yolo off 2>&1)
@@ -1552,9 +1552,9 @@ test_away_spend_cap_counts_only_working_workers() {
 
   # The real classifier, with records that keep their worktrees so the read
   # reaches the endpoint probe: a private tmux server that answers but omits
-  # the recorded window is positive evidence the endpoint is gone, so those
-  # records do not count, while a record with no reachable tmux at all reads an
-  # uncertain unknown and does count (the cap fails safe).
+  # the recorded window is not proof the worker is gone (the record does not
+  # name its server, so this shell may simply address another one), so those
+  # records still count, as does a record with no reachable tmux at all.
   local tmuxdir wt
   tmuxdir=$(mktemp -d /tmp/fmcap.XXXXXX)
   rm -f "$home"/state/*.meta
@@ -1568,7 +1568,7 @@ test_away_spend_cap_counts_only_working_workers() {
     out=$(env -u TMUX -u TMUX_PANE TMUX_TMPDIR="$tmuxdir" FM_HOME="$home" "$ROOT/bin/fm-afk-contract.sh" live-workers 2>&1)
     env -u TMUX -u TMUX_PANE TMUX_TMPDIR="$tmuxdir" tmux kill-server >/dev/null 2>&1 || true
     rm -rf "$tmuxdir"
-    [ "$out" = 0 ] || fail "endpoint-gone records with live worktrees counted against the cap: $out"
+    [ "$out" = 2 ] || fail "tmux workers missing from the addressed server stopped counting against the cap: $out"
   fi
   # An uncertain reading counts: a record with a worktree but no recorded
   # endpoint at all cannot be proved idle.

@@ -197,7 +197,11 @@ fm_afk_contract_present() {  # [state-dir]
 # not provably idle. A finished, paused, parked, blocked, or failed reading
 # spends nothing, and so does an unknown one that positively names a gone
 # endpoint (worktree gone, or backend target gone on a backend that classifies
-# its own agent state: tmux, herdr, rex, t3code). Every other unknown - an
+# its own agent state by an id the record carries: herdr, rex, t3code). A tmux
+# window is addressed only by name, and a record does not say which tmux server
+# holds it, so a tmux reading of "gone" may just mean this shell addresses a
+# different server (another TMUX_TMPDIR) than the worker runs on: that worker
+# stays counted. Every other unknown - an
 # unreachable endpoint, a read error, or a read cut off by the time bound
 # below - counts, so the cap errs toward refusing a spawn rather than
 # admitting one on an uncertain count. The reads share one total deadline
@@ -225,12 +229,15 @@ fm_afk_contract_live_ordinary_workers() {  # [state-dir]
       case "$reading" in
       *'worktree gone'*) continue ;;
       *'backend target gone'*)
-        # Only the backends fm-crew-state.sh classifies by their own agent state
-        # report a gone target as positive evidence; the capture-failure
-        # backends (cmux, orca, zellij, paseo, tern, hc) print the same text
-        # when a screen read merely failed, so their worker stays counted.
+        # Only the backends that address the endpoint by an id the record
+        # carries (herdr, rex, t3code) report a gone target as positive
+        # evidence. tmux names a window without its server, so a window missing
+        # from the server this shell reaches proves nothing about the worker's
+        # own server; the capture-failure backends (cmux, orca, zellij, paseo,
+        # tern, hc) print the same text when a screen read merely failed. Those
+        # workers stay counted.
         case "$(grep '^backend=' "$meta" 2>/dev/null | tail -1 | cut -d= -f2-)" in
-        '' | tmux | herdr | rex | t3code) continue ;;
+        herdr | rex | t3code) continue ;;
         esac
         ;;
       esac
