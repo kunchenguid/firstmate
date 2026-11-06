@@ -56,7 +56,7 @@
 # never be read again, such as a PR in a deleted repository. It records retired
 # with actor captain, a non-empty reason and the UTC time. It refuses any
 # other actor, a blank reason, and a task/url pair with no saved record or
-# with unacknowledged pending signals. A retired pair leaves known, rotation and coverage even while a
+# with unacknowledged pending signals. A retired pair leaves known, scheduling and coverage even while a
 # backlog link remains. Retiring a retired pair again is a no-op that keeps the
 # first provenance. Nothing un-retires a record, poll never retires one on its
 # own, and a later owner settled from a retired record is not retired. A
@@ -79,8 +79,9 @@
 # is set), then the closing head read;
 # an issue has two waves. Before starting a URL, poll reserves the smaller of
 # the effective budget and 15 seconds for those waves. URLs needing forge
-# reads are ordered oldest-observed first with the URL as a stable tie-break.
-# Scheduling uses the latest checked_at or attempted_at across the URL's owners;
+# reads are ordered by the oldest scheduling timestamp, with the URL as a stable
+# tie-break. That timestamp is the latest checked_at or attempted_at across the
+# URL's owners, or zero when neither exists, so never-attempted URLs come first.
 # checked_at on an error records an attempt, not a good observation. A budget
 # refusal stamps only attempted_at so a repeatedly timed-out oldest URL yields
 # to the tail without refreshing its observation. Terminal URLs settle separately
