@@ -975,7 +975,7 @@ tests/fm-watch-wedge-cap-live.test.sh 74
 tests/fm-watcher-lock.test.sh 72022
 tests/fm-worker-account-live-e2e.test.sh 3179
 tests/fm-worker-account.test.sh 37445
-tests/fm-worker-preparation.test.sh 47000
+tests/fm-worker-preparation.test.sh 49941
 EOF
 }
 
