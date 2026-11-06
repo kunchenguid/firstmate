@@ -114,7 +114,28 @@ case "$provider" in
     # unreadable merge request stays silent instead of reporting a merge.
     raw=$(glab mr view "$number" -R "https://$host/$path" 2>/dev/null) || exit 0
     state=$(printf '%s\n' "$raw" | sed -n 's/^state:[[:space:]]*//p' | head -1) || exit 0
-    [ "$state" = merged ] && printf '%s\n' merged
+    [ "$state" = merged ] || exit 0
+    # On a project with merge trains, merged alone is not proof of the landing:
+    # the merge, squash, or (fast-forward project) head commit must also be
+    # recorded, or the poll stays armed. bin/fm-pr-merge.sh waits on this same
+    # check, so the two cannot disagree. Any unreadable read stays silent.
+    command -v jq >/dev/null 2>&1 || { printf '%s\n' merged; exit 0; }
+    project=$(glab api --hostname "$host" "projects/${path//\//%2F}" 2>/dev/null) || exit 0
+    settings=$(printf '%s' "$project" | jq -r '
+        if type == "object" then "\(.merge_trains_enabled // false) \(.merge_method // "")"
+        else error("unreadable") end' 2>/dev/null) || exit 0
+    if [ "${settings%% *}" = false ]; then
+      printf '%s\n' merged
+      exit 0
+    fi
+    json=$(glab mr view "$number" -R "https://$host/$path" -F json 2>/dev/null) || exit 0
+    landed=$(printf '%s' "$json" | jq -r --arg method "${settings#* }" '
+        def commit: if type == "string" and test("^([0-9a-f]{40}|[0-9a-f]{64})$") then . else null end;
+        if type == "object" and .state == "merged" then
+          ((.merge_commit_sha | commit) // (.squash_commit_sha | commit)
+            // (if $method == "ff" then (.sha | commit) else null end) // "-")
+        else "-" end' 2>/dev/null) || exit 0
+    [ -n "$landed" ] && [ "$landed" != - ] && printf '%s\n' merged
     ;;
   gerrit)
     [ "${#host}" -ge 1 ] && [ "${#host}" -le 253 ] || exit 0
