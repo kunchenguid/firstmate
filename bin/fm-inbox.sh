@@ -20,8 +20,8 @@
 #           fleet work and must not become fleet work.
 #
 # Usage:
-#   fm-inbox.sh note [--request-id <id>] [--json] [--] <text>...
-#   fm-inbox.sh note [--request-id <id>] [--json] -   (body from stdin)
+#   fm-inbox.sh note [--request-id <id>] [--attach <absolute-path>]... [--json] [--] <text>...
+#   fm-inbox.sh note [--request-id <id>] [--attach <absolute-path>]... [--json] -   (body from stdin)
 #   fm-inbox.sh announce [--json] <id>
 #   fm-inbox.sh reply [--json] <id> <text>... | reply [--json] <id> -
 #   fm-inbox.sh receipts [--after <cursor>] [--all-pending] [--all-handled] [--all-replies]
@@ -38,6 +38,10 @@
 # retry are distinguishable. The binding is recorded before announcement, so a
 # crash between save and wake still replays the original note. Without
 # --request-id the historical one-note-per-call behaviour is unchanged.
+# `note --attach <absolute-path>` may be repeated to record caller-supplied
+# paths alongside a note.
+# Firstmate never opens, fetches, or uploads those paths.
+# They are echoed in the note receipt, `list`/`drain`, and receipts records.
 # `announce` repairs the wake for an already-saved note without creating another.
 # A note already acknowledged (in handled/) gets no wake from `announce` or a
 # request-id replay; both report it as acknowledged and exit 0.
@@ -237,6 +241,17 @@ valid_note_id() {
   return 0
 }
 
+valid_attachment_path() {  # <absolute-path>
+  case "$1" in
+    /*) ;;
+    *) return 1 ;;
+  esac
+  case "$1" in
+    *$'\n'*|*$'\r'*) return 1 ;;
+  esac
+  return 0
+}
+
 note_path() {  # <id>
   if [ -f "$INBOX/$1.note" ]; then
     printf '%s\n' "$INBOX/$1.note"
@@ -280,6 +295,10 @@ read_note_body() {  # <file>
   awk 'found { print; next } /^--$/ { found=1 }' "$1"
 }
 
+read_note_attachments() {  # <file>
+  awk '/^--$/ { exit } /^attach=/ { sub(/^attach=/, ""); print }' "$1"
+}
+
 note_summary_from_body() {
   printf '%s' "$1" | tr '\n\t' '  ' | cut -c1-100
 }
@@ -302,12 +321,12 @@ write_note_file() {  # <path> <id> <source> <body> [extra] [request-id]
   } >"$path"
 }
 
-emit_note_json() {  # <outcome> <id> <request-id> <saved> <announced> <path> [acknowledged]
+emit_note_json() {  # <outcome> <id> <request-id> <saved> <announced> <path> [acknowledged] [attachments]
   need_python
-  python3 - "$1" "$2" "$3" "$4" "$5" "$6" "${7:-0}" <<'PY'
+  python3 - "$1" "$2" "$3" "$4" "$5" "$6" "${7:-0}" "${8:-}" <<'PY'
 import json, sys
-outcome, note_id, request_id, saved, announced, path, acknowledged = sys.argv[1:8]
-json.dump({
+outcome, note_id, request_id, saved, announced, path, acknowledged, raw_attachments = sys.argv[1:9]
+result = {
     "schema": "fm-inbox-note.v1",
     "outcome": outcome,
     "id": note_id,
@@ -316,7 +335,11 @@ json.dump({
     "announced": True if announced == "1" else False if announced == "0" else None,
     "acknowledged": acknowledged == "1",
     "path": path,
-}, sys.stdout, separators=(",", ":"))
+}
+attachments = raw_attachments.split("\n") if raw_attachments else []
+if attachments:
+    result["attachments"] = attachments
+json.dump(result, sys.stdout, separators=(",", ":"))
 sys.stdout.write("\n")
 PY
 }
@@ -364,15 +387,16 @@ announce_note() {  # <id> <summary>
 
 finish_note_result() {  # <outcome> <id> <request-id> <json> <strict-exit> <summary>
   local outcome=$1 id=$2 request_id=$3 json=$4 strict=$5 summary=$6
-  local announced=0 acknowledged=0 path="$INBOX/$id.note" rc=0
+  local announced=0 acknowledged=0 path="$INBOX/$id.note" rc=0 attachments attachment
   announce_note "$id" "$summary" || rc=$?
   case "$rc" in
     0) announced=1 ;;
     2) acknowledged=1 ;;
   esac
   [ -f "$INBOX/handled/$id.note" ] && path="$INBOX/handled/$id.note"
+  attachments=$(read_note_attachments "$path")
   if [ "$json" -eq 1 ]; then
-    emit_note_json "$outcome" "$id" "$request_id" 1 "$announced" "$path" "$acknowledged"
+    emit_note_json "$outcome" "$id" "$request_id" 1 "$announced" "$path" "$acknowledged" "$attachments"
   else
     if [ "$outcome" = replay ]; then
       printf 'replay %s\n' "$id"
@@ -385,6 +409,10 @@ finish_note_result() {  # <outcome> <id> <request-id> <json> <strict-exit> <summ
     elif [ "$acknowledged" -eq 1 ]; then
       printf '  firstmate has already acknowledged this note.\n'
     fi
+    while IFS= read -r attachment; do
+      [ -n "$attachment" ] || continue
+      printf '  attachment %s\n' "$attachment"
+    done <<<"$attachments"
   fi
   if [ "$announced" -eq 1 ] || [ "$acknowledged" -eq 1 ]; then
     return 0
@@ -470,7 +498,7 @@ queue_note() {
 }
 
 cmd_note() {
-  local body json=0 request_id=""
+  local body json=0 request_id="" attachment extra=""
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --json) json=1; shift ;;
@@ -481,25 +509,34 @@ cmd_note() {
           || die "invalid request id (use 1-128 characters: A-Za-z0-9._:-)"
         shift 2
         ;;
+      --attach)
+        [ "$#" -ge 2 ] || die "usage: fm-inbox.sh note [--request-id <id>] [--attach <absolute-path>]... [--json] [--] <text>... (or: note -)"
+        attachment=$2
+        valid_attachment_path "$attachment" \
+          || die "attachment path must be absolute and contain no newline"
+        [ -z "$extra" ] || extra+=$'\n'
+        extra+="attach=$attachment"
+        shift 2
+        ;;
       --) shift; break ;;
-      -h|--help) die "usage: fm-inbox.sh note [--request-id <id>] [--json] [--] <text>... (or: note -)" ;;
+      -h|--help) die "usage: fm-inbox.sh note [--request-id <id>] [--attach <absolute-path>]... [--json] [--] <text>... (or: note -)" ;;
       *) break ;;
     esac
   done
   if [ "$#" -eq 0 ]; then
-    die "usage: fm-inbox.sh note [--request-id <id>] [--json] [--] <text>... (or: note -)"
+    die "usage: fm-inbox.sh note [--request-id <id>] [--attach <absolute-path>]... [--json] [--] <text>... (or: note -)"
   elif [ "$1" = "-" ]; then
-    [ "$#" -eq 1 ] || die "usage: fm-inbox.sh note [--request-id <id>] [--json] -"
+    [ "$#" -eq 1 ] || die "usage: fm-inbox.sh note [--request-id <id>] [--attach <absolute-path>]... [--json] -"
     body=$(cat; printf .)
     body=${body%.}
   else
     body="$*"
   fi
-  queue_note text "$body" "" "$request_id" "$json"
+  queue_note text "$body" "$extra" "$request_id" "$json"
 }
 
 cmd_announce() {
-  local json=0 id summary path state rc=0
+  local json=0 id summary path state rc=0 attachments
   if [ "${1:-}" = "--json" ]; then
     json=1
     shift
@@ -509,6 +546,7 @@ cmd_announce() {
   valid_note_id "$id" || die "invalid note id"
   path=$(note_path "$id") || die "no such note: $id"
   summary=$(note_summary_from_body "$(read_note_body "$path")")
+  attachments=$(read_note_attachments "$path")
   state=$(note_announce_state "$id" "$path")
   if [ "$state" != true ] && [ "$path" = "$INBOX/handled/$id.note" ]; then
     state=acknowledged
@@ -516,7 +554,7 @@ cmd_announce() {
   case "$state" in
     true)
       if [ "$json" -eq 1 ]; then
-        emit_note_json replay "$id" "" 1 1 "$path"
+        emit_note_json replay "$id" "" 1 1 "$path" 0 "$attachments"
       else
         printf 'already-announced %s\n' "$id"
       fi
@@ -524,7 +562,7 @@ cmd_announce() {
       ;;
     unknown)
       if [ "$json" -eq 1 ]; then
-        emit_note_json refused "$id" "" 1 unknown "$path"
+        emit_note_json refused "$id" "" 1 unknown "$path" 0 "$attachments"
       fi
       printf 'fm-inbox: note %s predates the announcement marker, so whether it was already announced is UNKNOWN; refusing to announce it again\n' \
         "$id" >&2
@@ -534,7 +572,7 @@ cmd_announce() {
   announce_note "$id" "$summary" || rc=$?
   if [ "$rc" -eq 0 ]; then
     if [ "$json" -eq 1 ]; then
-      emit_note_json created "$id" "" 1 1 "$path"
+      emit_note_json created "$id" "" 1 1 "$path" 0 "$attachments"
     else
       printf 'announced %s\n' "$id"
     fi
@@ -543,14 +581,14 @@ cmd_announce() {
   if [ "$rc" -eq 2 ] || [ "$state" = acknowledged ]; then
     path=$(note_path "$id") || path="$INBOX/handled/$id.note"
     if [ "$json" -eq 1 ]; then
-      emit_note_json replay "$id" "" 1 0 "$path" 1
+      emit_note_json replay "$id" "" 1 0 "$path" 1 "$attachments"
     else
       printf 'already-acknowledged %s\n' "$id"
     fi
     return 0
   fi
   if [ "$json" -eq 1 ]; then
-    emit_note_json created "$id" "" 1 0 "$path"
+    emit_note_json created "$id" "" 1 0 "$path" 0 "$attachments"
     printf 'fm-inbox: note %s is saved at %s but firstmate was NOT woken\n' \
       "$id" "$path" >&2
     return 3
@@ -702,13 +740,17 @@ def parse_record(path):
         else:
             body = ""
     meta = {}
-    for line in headers.splitlines():
+    attachments = []
+    for line in headers.split("\n"):
         if "=" in line:
             key, val = line.split("=", 1)
-            meta[key] = val
+            if key == "attach":
+                attachments.append(val)
+            else:
+                meta[key] = val
     if body.endswith("\n"):
         body = body[:-1]
-    return meta, body
+    return meta, body, attachments
 
 def list_notes(folder):
     folder = Path(folder)
@@ -721,9 +763,9 @@ def list_notes(folder):
         record = parse_record(path)
         if record is None:
             continue
-        meta, body = record
+        meta, body, attachments = record
         note_id = meta.get("id") or path.name[:-5]
-        notes.append({
+        note = {
             "id": note_id,
             "at": meta.get("at"),
             "source": meta.get("source"),
@@ -731,7 +773,10 @@ def list_notes(folder):
             "announce_marker": meta.get("announce_marker") == "1",
             "body": body,
             "path": str(path),
-        })
+        }
+        if attachments:
+            note["attachments"] = attachments
+        notes.append(note)
     return notes
 
 # The cursor is the reply sequence, a strict total order in creation order.
@@ -746,7 +791,7 @@ def reply_record(note_id):
     record = parse_record(path)
     if record is None:
         return None
-    meta, body = record
+    meta, body, _ = record
     raw_seq = meta.get("seq") or ""
     if not (raw_seq.isascii() and raw_seq.isdigit()):
         malformed_replies.append(note_id)
@@ -1108,6 +1153,7 @@ cmd_list() {
     [ -e "$f" ] || break
     any=1
     printf '%s\n' "$(basename "$f" .note)"
+    read_note_attachments "$f" | sed 's/^/  attachment /'
     sed -n '/^--$/,$p' "$f" | tail -n +2 | sed 's/^/    /'
   done
   [ "$any" -eq 1 ] || printf '(inbox empty)\n'
