@@ -35,6 +35,144 @@ EOF
   printf '%s\n' "$home"
 }
 
+test_interrupted_resolution_and_utf8_attribution() {
+  local scenario parent home channel before after before_channel retry_source bad_rc errors=''
+  local reference boundary show count
+  local -a initial_flags=() retry_flags=()
+  for scenario in release-source release-mode release-both answer-source answer-mode answer-both; do
+    parent=$(make_home "retry-parent-$scenario")
+    home=$(make_home "retry-source-$scenario")
+    printf 'retry-mate\n' > "$home/.fm-secondmate-home"
+    printf 'schema=fm-secondmate-parent.v1\nroute=local\nparent_home=%s\n' "$parent" \
+      > "$home/.fm-secondmate-parent"
+    channel="$parent/state/retry-mate.status"
+    run_captain "$home" hold retry-call --title 'Interrupted answer' --reason choose >/dev/null \
+      || fail "could not create $scenario fixture"
+    printf 'Proceed with the work.\n' > "$home/decision.txt"
+    cat > "$home/fakebin/tasks-axi" <<'SH'
+#!/usr/bin/env bash
+case "${1:-}" in
+  done|unhold)
+    if [ "${2:-}" = retry-call ] && [ ! -e "$FM_HOME/close-failed-once" ]; then
+      : > "$FM_HOME/close-failed-once"
+      exit 92
+    fi ;;
+esac
+exec "$REAL_TASKS_AXI" "$@"
+SH
+    chmod +x "$home/fakebin/tasks-axi"
+    initial_flags=(); retry_flags=()
+    case "$scenario" in release-*) initial_flags=(--release) ;; esac
+    case "$scenario" in
+      release-source|answer-mode|answer-both) retry_flags=(--release) ;;
+    esac
+    if run_captain "$home" answer retry-call --decision-file "$home/decision.txt" \
+      --source message:original "${initial_flags[@]+"${initial_flags[@]}"}" \
+      > "$home/first.out" 2>&1; then
+      fail "the forced $scenario close failure reported success"
+    fi
+    before=$(tasks_in "$home" show retry-call --full)
+    before_channel=$(cat "$channel")
+    assert_contains "$before" 'held: yes' "the forced failure did not leave a held call"
+    assert_contains "$before" 'Source reference: message:original' "the failed attempt was not recorded"
+    retry_source=message:original
+    case "$scenario" in *-source|*-both) retry_source=message:changed ;; esac
+    bad_rc=0
+    run_captain "$home" answer retry-call --decision-file "$home/decision.txt" \
+      --source "$retry_source" "${retry_flags[@]+"${retry_flags[@]}"}" \
+      > "$home/changed.out" 2>&1 || bad_rc=$?
+    after=$(tasks_in "$home" show retry-call --full)
+    if [ "$bad_rc" -eq 0 ]; then
+      printf 'UNSAFE_RETRY_ACCEPTED %s\n%s\n' "$scenario" "$after"
+      errors="$errors $scenario-accepted"
+    fi
+    if [ "$before" != "$after" ]; then
+      printf 'UNSAFE_RETRY_REWROTE_RECORD %s\n' "$scenario"
+      errors="$errors $scenario-mutated"
+    fi
+    if [ "$before_channel" != "$(cat "$channel")" ]; then
+      printf 'UNSAFE_RETRY_PUBLISHED %s\n%s\n' "$scenario" "$(cat "$channel")"
+      errors="$errors $scenario-parent"
+    fi
+    [ "$bad_rc" -ne 0 ] || continue
+    run_captain "$home" answer retry-call --decision-file "$home/decision.txt" \
+      --source message:original "${initial_flags[@]+"${initial_flags[@]}"}" >/dev/null \
+      || fail "an exact $scenario retry could not finish its recorded close"
+    run_captain "$home" answer retry-call --decision-file "$home/decision.txt" \
+      --source message:original "${initial_flags[@]+"${initial_flags[@]}"}" >/dev/null \
+      || fail "a completed $scenario retry was not idempotent"
+    after=$(tasks_in "$home" show retry-call --full)
+    count=$(printf '%s\n' "$after" | grep -o 'Resolution recorded by fm-captain-hold\.' | wc -l | tr -d ' ')
+    [ "$count" = 1 ] || fail "an exact retry duplicated the resolution record"
+    assert_contains "$after" 'Source reference: message:original' "an exact retry lost the saved source"
+    case "$scenario" in
+      release-*)
+        assert_contains "$after" 'held: no' "an exact release retry stayed held"
+        assert_not_contains "$after" 'state: done' "a release retry completed unfinished work" ;;
+      answer-*) assert_contains "$after" 'state: done' "an exact close retry did not close the call" ;;
+    esac
+    [ "$(grep -c 'resolved \[key=captain-hold-retry-call-1\]' "$channel")" = 1 ] \
+      || fail "an exact retry did not close its original parent occurrence exactly once"
+    assert_no_grep 'captain-hold-retry-call-2' "$channel" "an exact retry published the next occurrence"
+  done
+
+  parent=$(make_home reheld-same-parent)
+  home=$(make_home reheld-same-source)
+  printf 'reheld-mate\n' > "$home/.fm-secondmate-home"
+  printf 'schema=fm-secondmate-parent.v1\nroute=local\nparent_home=%s\n' "$parent" \
+    > "$home/.fm-secondmate-parent"
+  channel="$parent/state/reheld-mate.status"
+  printf 'Proceed with the work.\n' > "$home/decision.txt"
+  FM_CAPTAIN_HOLD_NOW=2026-11-05T12:00:00Z run_captain "$home" hold reheld-call \
+    --title 'Repeated decision' --reason choose >/dev/null || fail "could not hold repeated decision"
+  run_captain "$home" answer reheld-call --release --source message:original \
+    --decision-file "$home/decision.txt" >/dev/null || fail "could not release repeated decision"
+  FM_CAPTAIN_HOLD_NOW=2026-11-05T12:00:00Z run_captain "$home" hold reheld-call \
+    --reason choose-again >/dev/null || fail "could not re-hold repeated decision"
+  run_captain "$home" answer reheld-call --release --source message:original \
+    --decision-file "$home/decision.txt" >/dev/null || fail "could not answer the new hold"
+  show=$(tasks_in "$home" show reheld-call --full)
+  count=$(printf '%s\n' "$show" | grep -o 'Resolution recorded by fm-captain-hold\.' | wc -l | tr -d ' ')
+  if [ "$count" != 2 ] || ! grep -q 'resolved \[key=captain-hold-reheld-call-2\]' "$channel"; then
+    printf 'REHELD_OCCURRENCE_REUSED\n%s\n%s\n' "$show" "$(cat "$channel")"
+    errors="$errors reheld-occurrence"
+  fi
+
+  parent=$(make_home utf8-source-parent)
+  home=$(make_home utf8-source-mate)
+  printf 'utf8-mate\n' > "$home/.fm-secondmate-home"
+  printf 'schema=fm-secondmate-parent.v1\nroute=local\nparent_home=%s\n' "$parent" \
+    > "$home/.fm-secondmate-parent"
+  channel="$parent/state/utf8-mate.status"
+  printf 'Proceed with the work.\n' > "$home/decision.txt"
+  reference=$(perl -e 'binmode STDOUT, ":utf8"; print "\x{754c}" x 400')
+  run_captain "$home" hold utf8-oversized --title 'Oversized source' --reason choose >/dev/null \
+    || fail "could not create oversized source fixture"
+  before=$(tasks_in "$home" show utf8-oversized --full)
+  before_channel=$(cat "$channel")
+  if LC_ALL=C.UTF-8 run_captain "$home" answer utf8-oversized --source "$reference" \
+    --decision-file "$home/decision.txt" > "$home/oversized.out" 2>&1; then
+    printf 'OVERSIZED_UTF8_ACCEPTED\n%s\n' "$(cat "$channel")"
+    errors="$errors utf8-byte-limit"
+  else
+    [ "$before" = "$(tasks_in "$home" show utf8-oversized --full)" ] \
+      || fail "an oversized source refusal changed the hold"
+    [ "$before_channel" = "$(cat "$channel")" ] \
+      || fail "an oversized source refusal changed the parent channel"
+  fi
+  boundary=$(perl -e 'binmode STDOUT, ":utf8"; print "\x{754c}" x 170, "xx"')
+  [ "$(printf '%s' "$boundary" | wc -c | tr -d ' ')" = 512 ] \
+    || fail "the UTF-8 boundary fixture is not 512 bytes"
+  run_captain "$home" hold utf8-boundary --title 'Boundary source' --reason choose >/dev/null \
+    || fail "could not create boundary source fixture"
+  LC_ALL=C.UTF-8 run_captain "$home" answer utf8-boundary --source "$boundary" \
+    --decision-file "$home/decision.txt" >/dev/null || fail "a valid 512-byte source was refused"
+  assert_grep "[source-kind=user] [source=$boundary] [source-time=2026-11-05T12:00:00Z]" \
+    "$channel" "a valid non-ASCII source lost its complete parent attribution"
+  [ -z "$errors" ] || fail "interrupted-close or UTF-8 provenance regressions:$errors"
+  pass "interrupted retries preserve their call and non-ASCII parent sources stay complete"
+}
+
 test_resolution_attribution() {
   local home kind show at rc
   home=$(make_home attribution)
@@ -5328,6 +5466,7 @@ EOF
   pass "an answered captain call archived to a user-configured location still satisfies the completion gate"
 }
 
+test_interrupted_resolution_and_utf8_attribution
 test_resolution_attribution
 test_hold_reason_round_trips_awkward_characters
 test_hold_origins_follow_backend_holds

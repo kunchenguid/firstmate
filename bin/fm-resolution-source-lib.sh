@@ -6,19 +6,21 @@
 # References name the answering message, supervisor judgement, or owning
 # operation and evidence respectively. These are caller declarations, not
 # authentication or proof that a human authored an answer.
-# Fields are single-line printable text, bounded so status closes can retain
+# References are at most 512 bytes. Fields are single-line printable text, so
+# parent notes and status closes can retain
 # the entire provenance or refuse before delivery. Older stored records remain
 # readable without migration; new writes must supply provenance.
 
 fm_resolution_source_validate() {
-  local kind=$1 reference=$2 at=$3
+  local kind=$1 reference=$2 at=$3 reference_bytes
   case "$kind" in
     user|supervisor|mechanical) ;;
     *) echo 'error: --source-kind must be user, supervisor, or mechanical' >&2; return 1 ;;
   esac
-  if [ -z "${reference//[[:space:]]/}" ] || [ "${#reference}" -gt 512 ] \
+  reference_bytes=$(printf '%s' "$reference" | LC_ALL=C wc -c | tr -d '[:space:]')
+  if [ -z "${reference//[[:space:]]/}" ] || [ "$reference_bytes" -gt 512 ] \
     || [ "$(printf '%s' "$reference" | LC_ALL=C tr -d '\000-\037\177[]')" != "$reference" ]; then
-    echo 'error: --source requires a nonempty printable reference of at most 512 characters without brackets' >&2
+    echo 'error: --source requires a nonempty printable reference of at most 512 bytes without brackets' >&2
     return 1
   fi
   if [ "$kind" = user ] && [ -z "$at" ]; then

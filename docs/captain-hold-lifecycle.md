@@ -96,7 +96,7 @@ It then works in this order:
    User answers carry the `Captain decision:` label.
    Supervisor and mechanical answers carry `Resolution decision:`.
    Evidence-backed reconciliation retains its separate [reconcile record](#verifying-and-retiring-a-request).
-2. It retains the leading hold-set stamp until the selected `tasks-axi done` or `tasks-axi unhold` transition succeeds.
+2. It retains the leading hold-set stamp and its recorded hold occurrence until the selected `tasks-axi done` or `tasks-axi unhold` transition succeeds.
 3. It then restores the successful record's resolution-first body ordering.
    The previous body remains preserved below the block and archived through tasks-axi `--archive-body`.
 
@@ -105,9 +105,9 @@ A matching retry also completes any resolution-first normalization left unfinish
 
 ### Answer retries and tasks closed elsewhere
 
-- An exact retry is idempotent only when the requested close mode matches the newest record.
-- A drifted answer or a mode mismatch is rejected.
-- A re-held task accepts a new answer as a new record on top.
+- An unfinished close keeps its hold occurrence and requires the saved answer, source, and close mode on retry.
+- A drifted answer, source, or mode is rejected before the close or parent publication.
+- A completed release followed by a new hold gets a new occurrence, even when its answer, source, and hold timestamp match the earlier call.
 
 On a task closed outside the script, `answer` records the missing block only when the captain-hold annotations tasks-axi preserves through a close prove the captain owned it.
 It also verifies the task stays closed.
