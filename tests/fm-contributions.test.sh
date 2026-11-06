@@ -1016,10 +1016,6 @@ test_scheduler_accepts_owner_created_mid_poll() {
   forge_home "$home"
   wrap_forge "$home"
   rm -f "$home/data/delivery/contributions.json"
-  printf -- '- [ ] delivery - Contributions https://github.com/o/r/pull/8 https://github.com/o/r/pull/10 (repo: sample) (kind: ship)\n' \
-    > "$home/data/backlog.md"
-  input=$(with_home "$home" "$ROOT/bin/fm-fleet-snapshot.sh" --contribution-input) || fail 'could not diagnose the old fixture'
-  printf 'old-mid-poll-fixture structured-owners=%s\n' "$(printf '%s' "$input" | jq '[.backlog.records[] | select(.structured == true)] | length')"
   printf '# Backlog\n\n## Queued\n- [ ] delivery - Contributions https://github.com/o/r/pull/8 https://github.com/o/r/pull/10 (repo: sample) (kind: ship)\n' \
     > "$home/data/backlog.md"
   input=$(with_home "$home" "$ROOT/bin/fm-fleet-snapshot.sh" --contribution-input) || fail 'could not inspect valid fixture ownership'
