@@ -3539,9 +3539,6 @@ This reset is harmless to running tasks and durable recovery state: task status,
 Declared pauses and waits are classified again from their existing evidence.
 Their old notification throttles are not carried forward.
 Legacy keys can conflate different endpoints, so importing their history could suppress a current endpoint using another endpoint's evidence.
-No legacy or intermediate `v2.` marker is migrated.
-Obsolete files remain ignored on disk until the operator archives or removes the reviewed cache files using the header's cleanup procedure.
-There is no automatic garbage collection.
 
 `fm-teardown.sh` retries only Git's `Unable to create '...index.lock': File exists` return failure up to `FM_TREEHOUSE_RETURN_LOCK_RETRIES` times.
 `FM_TREEHOUSE_RETURN_LOCK_RETRIES` accepts a nonnegative integer, and an unset, blank, or invalid value uses the default of 3.
