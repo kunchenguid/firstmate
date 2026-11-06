@@ -22,7 +22,10 @@
 # Each harness is launched bare, with no prompt, so this consumes no model
 # tokens. The launch uses whatever credentials the harness already has; an
 # unauthenticated harness still starts its process, which is all the liveness
-# probe reads.
+# probe reads. The one exception is codex, launched with CODEX_HOME isolated
+# inside this run's lab: a launch with the operator's real home spawns a shared
+# daemon that outlives the lab and later breaks every real codex start, and the
+# probe needs no codex credentials.
 #
 # Portable serial CI installs the public Pi package but no credentials, so this
 # guard checks that available token-free surface there and runs against every installed
@@ -47,13 +50,44 @@ SOCKET="fm-liveness-drift-$$"
 LAB=$(mktemp -d "${TMPDIR:-/tmp}/fm-liveness-drift.XXXXXX")
 SESSION=drift
 
+# The lab codex's app-server daemon detaches from its pane and survives
+# kill-server, so stop it before its home is deleted. The updater goes first to
+# avoid respawning the daemon. Check portable ps command arguments for codex
+# before signalling a recorded pid; a name check cannot prove pid ownership.
+# A shutdown timeout fails cleanup and retains the lab for the surviving process.
+stop_lab_codex_daemon() {
+  local pid_file pid attempt process_state
+  for pid_file in "$LAB/codex-home/app-server-daemon/daemon-updater.pid" \
+    "$LAB/codex-home/app-server-daemon/daemon.pid"; do
+    [ -r "$pid_file" ] || continue
+    pid=$(sed -n 's/^{"pid":\([0-9][0-9]*\).*/\1/p' "$pid_file")
+    [ -n "$pid" ] || continue
+    ps -p "$pid" -o args= 2>/dev/null | grep -q codex || continue
+    kill "$pid" 2>/dev/null || true
+    # SIGTERM is asynchronous; let final state writes finish before rm -rf.
+    for attempt in $(seq 1 100); do
+      process_state=$(ps -p "$pid" -o stat= 2>/dev/null) || break
+      case "$process_state" in *Z*) break ;; esac
+      ps -p "$pid" -o args= 2>/dev/null | grep -q codex || break
+      sleep 0.05
+    done
+    [ "$attempt" -lt 100 ] || {
+      printf 'not ok - lab codex process %s did not stop after SIGTERM\n' "$pid" >&2
+      return 1
+    }
+  done
+}
+
 cleanup_all() {
   "$REAL_TMUX" -L "$SOCKET" kill-server >/dev/null 2>&1 || true
+  if [ -n "${LAB:-}" ]; then
+    stop_lab_codex_daemon || return 1
+  fi
   [ -n "${LAB:-}" ] && rm -rf "$LAB"
 }
 trap cleanup_all EXIT
 
-mkdir -p "$LAB/shim" "$LAB/wt"
+mkdir -p "$LAB/shim" "$LAB/wt" "$LAB/codex-home"
 cat > "$LAB/shim/tmux" <<SH
 #!/usr/bin/env bash
 exec "$REAL_TMUX" -L "$SOCKET" "\$@"
@@ -127,8 +161,17 @@ for harness in claude codex opencode pi pi-signed grok kimi cursor muse; do
   # same flag fm-spawn passes for the same reason.
   launch_args=""
   [ "$harness" = cursor ] && launch_args="--trust"
+  # codex keys its SHARED managed app-server daemon to CODEX_HOME, and that
+  # daemon detaches from its pane and outlives the tmux server. Launched with the
+  # operator's real home from this run's ephemeral lab cwd, it survives cleanup
+  # holding the deleted lab as its working directory and poisons every later real
+  # codex start (account/read fails with "failed to load workspace
+  # requirements"). tmux -e sets the variable while keeping codex itself as the
+  # pane process; an env wrapper would become the pane's process name instead.
+  launch_env=()
+  [ "$harness" = codex ] && launch_env=(-e "CODEX_HOME=$LAB/codex-home")
   # shellcheck disable=SC2086  # deliberate: an empty value must add no argument
-  "$REAL_TMUX" -L "$SOCKET" new-window -d -t "$SESSION:" -n "$harness" -c "$LAB/wt" -- "$bin_path" $launch_args \
+  "$REAL_TMUX" -L "$SOCKET" new-window -d -t "$SESSION:" -n "$harness" -c "$LAB/wt" ${launch_env[@]+"${launch_env[@]}"} -- "$bin_path" $launch_args \
     || fail "$harness ($version): could not launch a window for the liveness probe"
 
   state=
@@ -234,5 +277,5 @@ if [ -n "$SKIPPED" ]; then
 fi
 note "checked $CHECKED installed harness(es)"
 
-cleanup_all
+cleanup_all || exit 1
 trap - EXIT
