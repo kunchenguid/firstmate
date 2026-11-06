@@ -1416,8 +1416,9 @@ test_static_poll_contract() {
   out=$(FM_TEST_GH_STATE=MERGED run_poll "$dir")
   assert_contains "$out" 'task task-a merge/readiness refused' 'missing metadata did not produce a refusal'
   assert_contains "$out" 'bin/fm-pr-check.sh recovery steps' 'missing metadata lost its recovery pointer'
+  assert_absent "$dir/home/state/task-a.pr-base-notified" 'static poll marked an unqueued notice delivered'
   out=$(FM_TEST_GH_STATE=MERGED run_poll "$dir")
-  [ -z "$out" ] || fail "static poll repeated its missing-metadata notice"
+  assert_contains "$out" 'task task-a merge/readiness refused' 'static poll suppressed its unqueued missing-metadata notice'
   mv "$dir/home/state/task-a.meta.missing" "$dir/home/state/task-a.meta"
   out=$(FM_TEST_GH_FAIL=1 run_poll "$dir")
   [ -z "$out" ] || fail "static poll emitted after gh failure"
@@ -4233,6 +4234,74 @@ test_expected_destination_fail_closed_and_retarget() {
   pass 'destination proof fails closed through readiness, polling, restart, and legacy task records'
 }
 
+# The recovery contract requires a receipt only after queue delivery. A failed
+# sequence write or a stop after capturing the poll output must leave it pending.
+# The oracle is the durable wake row and receipt, not the check's printed text.
+test_legacy_notice_retries_failed_delivery() {
+  local failure=$1 dir state rc attempt real_rm
+  dir=$(make_case "legacy-notice-$failure")
+  state="$dir/home/state"
+  FM_TEST_META_EXPECTED_BASE='' fm_write_meta "$state/task-a.meta" \
+    "worktree=$dir/wt" 'kind=ship' 'mode=direct-PR' 'pr=https://github.com/o/r/pull/1'
+  seed_canonical_poll "$dir" task-a https://github.com/o/r/pull/1
+  case "$failure" in
+    queue-failure) mkdir "$state/.wake-queue.seq" ;;
+    interrupted)
+      real_rm=$(command -v rm)
+      cat > "$dir/fakebin/rm" <<'SH'
+#!/usr/bin/env bash
+for file in "$@"; do
+  case "$file" in
+    */.fm-check-output.*)
+      # This is the poll's generated output interface, captured by the watcher.
+      if grep -qF 'task task-a merge/readiness refused' "$file" 2>/dev/null; then
+        : > "$FM_TEST_NOTICE_STOP_FILE"
+        kill -TERM "$PPID"
+      fi
+      ;;
+  esac
+done
+exec "$FM_TEST_REAL_RM" "$@"
+SH
+      chmod +x "$dir/fakebin/rm"
+      ;;
+  esac
+  rc=0
+  FM_TEST_REAL_RM="${real_rm:-}" FM_TEST_NOTICE_STOP_FILE="$dir/stopped-before-queue" \
+    run_watcher_bounded "$dir/home" "$dir/fakebin" \
+      > "$dir/failed.out" 2> "$dir/failed.err" || rc=$?
+  if [ "$failure" = queue-failure ]; then
+    [ "$rc" -ne 0 ] || fail 'failed queue write did not fail the watcher'
+    rmdir "$state/.wake-queue.seq"
+  else
+    assert_present "$dir/stopped-before-queue" 'watcher never reached captured recovery output'
+    rm -f -- "$dir/fakebin/rm"
+  fi
+  assert_no_grep 'task task-a merge/readiness refused' "$state/.wake-queue" 'failed delivery queued a recovery notice'
+  assert_absent "$state/task-a.pr-base-notified" "$failure suppressed the undelivered notice"
+  assert_absent "$state/task-a.pr-base-parent-notified" 'local failure changed parent suppression'
+  assert_present "$state/task-a.pr-poll" 'failed delivery retired the poll'
+  for attempt in 1 2; do
+    run_watcher_bounded "$dir/home" "$dir/fakebin" \
+      > "$dir/retry-$attempt.out" 2> "$dir/retry-$attempt.err" || fail 'delivery retry failed'
+    if grep -qF 'task task-a merge/readiness refused' "$state/.wake-queue" 2>/dev/null; then
+      break
+    fi
+    assert_grep 'check: rearm-resurface' "$dir/retry-$attempt.out" 'retry did not deliver or resurface downtime'
+    ack_watcher_cycle "$state" || fail 'could not acknowledge downtime recovery'
+  done
+  [ "$(grep -cF 'task task-a merge/readiness refused' "$state/.wake-queue")" = 1 ] \
+    || fail 'retry did not queue exactly one recovery notice'
+  assert_present "$state/task-a.pr-base-notified" 'successful retry did not mark delivery'
+  ack_watcher_cycle "$state" || fail 'could not acknowledge delivered notice'
+  add_stop_custom_check "$dir"
+  run_watcher_bounded "$dir/home" "$dir/fakebin" \
+    > "$dir/after-success.out" 2> "$dir/after-success.err" || fail 'post-delivery cycle failed'
+  assert_grep 'z-stop.check.sh' "$dir/after-success.out" 'post-delivery cycle never reached control check'
+  assert_no_grep 'merge/readiness refused' "$state/.wake-queue" 'successful delivery repeated'
+  pass "$failure leaves recovery pending until one successful queue write"
+}
+
 test_legacy_poll_notices_once_until_rearmed() {
   local dir state surface out
   for surface in standalone watcher; do
@@ -4247,8 +4316,9 @@ test_legacy_poll_notices_once_until_rearmed() {
       assert_contains "$out" 'bin/fm-pr-check.sh recovery steps' 'legacy poll lost the recovery pointer'
       [ "$(printf '%s\n' "$out" | wc -l | tr -d ' ')" = 1 ] || fail 'legacy poll emitted multiple notice lines'
       [ "$out" != merged ] || fail 'legacy poll claimed a merge'
+      assert_absent "$state/task-a.pr-base-notified" 'standalone poll marked an unqueued notice delivered'
       out=$(FM_TEST_GH_STATE=MERGED run_poll "$dir")
-      [ -z "$out" ] || fail 'legacy poll repeated its recovery notice'
+      assert_contains "$out" 'task task-a merge/readiness refused' 'standalone poll suppressed its pending notice'
       write_task_meta "$dir"
       run_check_entry "$dir" task-a https://github.com/o/r/pull/1 >/dev/null \
         || fail 'recovery did not re-arm the legacy task'
@@ -4349,6 +4419,8 @@ test_legacy_notice_audiences_are_independent() {
   pass 'legacy watcher and parent notices are independent in either order and reset on re-arm'
 }
 
+test_legacy_notice_retries_failed_delivery queue-failure
+test_legacy_notice_retries_failed_delivery interrupted
 test_legacy_notice_audiences_are_independent
 test_legacy_poll_notices_once_until_rearmed
 test_expected_destination_refuses_registration

@@ -2,8 +2,8 @@
 # Static watcher program for a validated pull request, merge request, or Gerrit
 # change poll sidecar.
 # It emits exactly one merged line for a merged change and stays silent
-# otherwise, except for a one-time missing-base recovery notice when task
-# metadata is supplied. A failed lookup can never be read as a merge.
+# otherwise, except for a missing-base recovery notice when task metadata is
+# supplied, until its caller records delivery. A failed lookup is never a merge.
 # The provider-tagged identity is data in the sidecar and is never
 # interpolated into this source: these bytes are identical for every task.
 # Each provider is read through its own standard CLI, gh for GitHub, glab for
@@ -30,7 +30,7 @@ base_unavailable_notice() {
   [ "$state" != "$meta" ] || state=.
   [ -d "$state" ] && [ ! -L "$state" ] || return 1
   marker=${meta%.meta}.$suffix
-  (umask 077; set -C; printf '%s-%s\n' "$$" "$RANDOM" > "$marker") 2>/dev/null || return 0
+  [ ! -e "$marker" ] && [ ! -L "$marker" ] || return 0
   printf 'task %s merge/readiness refused: expected PR base unavailable. Follow bin/fm-pr-check.sh recovery steps.\n' "$id"
 }
 

@@ -522,7 +522,7 @@ claim_inactive_report_for_ledger() { # <task> <incarnation> <state> <ledger-fing
 # delivered, or nothing is owed, and 1 when it is owed but the parent channel
 # could not be written (the notice is queued once per record).
 report_child_ledger_locked() { # <id> <meta>
-  local id=$1 meta=$2 status last previous state note pr mode yolo data incarnation fingerprint predecessor_head outcome_key line
+  local id=$1 meta=$2 status last previous state note pr mode yolo data incarnation fingerprint predecessor_head outcome_key line notice_token
   status="$STATE/$id.status"
   last=$(child_terminal_ledger_line "$status") || return 0
   state=$(status_line_verb "$last")
@@ -539,11 +539,11 @@ report_child_ledger_locked() { # <id> <meta>
       && ! fm_pr_expected_base "$meta" >/dev/null 2>&1; then
       note=$("$SCRIPT_DIR/fm-pr-poll.sh" --base-unavailable "$meta") || return 1
       if [ -n "$note" ]; then
-        outcome_key="child-pr-base-$id-$(cat "${meta%.meta}.pr-base-parent-notified")"
-        if ! fm_parent_channel_report "$FM_HOME" "$STATE" "blocked [key=$outcome_key]: $note"; then
-          rm -f -- "${meta%.meta}.pr-base-parent-notified"
-          return 1
-        fi
+        notice_token="$$-$RANDOM"
+        outcome_key="child-pr-base-$id-$notice_token"
+        fm_parent_channel_report "$FM_HOME" "$STATE" "blocked [key=$outcome_key]: $note" || return 1
+        (umask 077; set -C; printf '%s\n' "$notice_token" \
+          > "${meta%.meta}.pr-base-parent-notified") || return 1
       fi
     fi
     return 0

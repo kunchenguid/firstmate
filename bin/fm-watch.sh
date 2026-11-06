@@ -4119,8 +4119,18 @@ EOF
           fi
           wake "$reason"
         fi
-        pr_poll_control_release || exit 1
         fm_wake_append check "$c" "$reason" || exit 1
+        if [ "$is_pr_poll" -eq 1 ]; then
+          case "$out" in
+            "task $id merge/readiness refused: "*)
+              # Keep the control lock through delivery and its receipt so a
+              # concurrent re-arm cannot reset the notice between those writes.
+              (umask 077; set -C; printf '%s-%s\n' "$$" "$RANDOM" \
+                > "$STATE/$id.pr-base-notified") || exit 1
+              ;;
+          esac
+        fi
+        pr_poll_control_release || exit 1
         touch "$STATE/.last-check"
         wake "$reason"
       fi
