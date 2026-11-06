@@ -102,6 +102,17 @@ FM_BACKEND_CONFIG_DIR="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 # (docs/hc-backend.md).
 FM_BACKEND_KNOWN="tmux herdr zellij orca cmux paseo rex t3code tern hc"
 FM_BACKEND_SPAWN="tmux herdr zellij orca cmux paseo rex t3code tern hc"
+# The spawn-capable backends that also host a persistent --secondmate launch
+# (bin/fm-spawn.sh refuses the rest with one message, and
+# bin/fm-secondmate-move.sh checks a move target here before stopping
+# anything). A second mate runs its own firstmate home as the task directory,
+# so a backend here places that endpoint where the mate's own crew can later
+# find and join it: herdr and rex stand up the mate home's own workspace or
+# session, and hc labels the mate's terminal into that home's own Herdr.app
+# space (docs/hc-backend.md "Second mates"). orca owns the task worktree
+# itself, which a home is not; cmux, paseo, and tern have no secondmate launch
+# semantics designed yet.
+FM_BACKEND_SECONDMATE="tmux herdr zellij rex t3code hc"
 
 # fm_backend_list_contains: whitespace-delimited membership without relying on
 # shell word splitting. fm-backend.sh is normally sourced by bash scripts, but
@@ -519,6 +530,13 @@ fm_backend_validate_spawn() {  # <name>
   fm_backend_list_contains "$FM_BACKEND_SPAWN" "$name" && return 0
   echo "error: backend '$name' does not support task spawning yet (spawn-supported: $FM_BACKEND_SPAWN)" >&2
   return 1
+}
+
+# fm_backend_secondmate_supported: whether <name> hosts a --secondmate launch
+# (FM_BACKEND_SECONDMATE above owns the list and why). Silent either way; the
+# callers word their own refusal.
+fm_backend_secondmate_supported() {  # <name>
+  fm_backend_list_contains "$FM_BACKEND_SECONDMATE" "$1"
 }
 
 # fm_backend_required_tools: the backend-SPECIFIC CLI tools a firstmate home on

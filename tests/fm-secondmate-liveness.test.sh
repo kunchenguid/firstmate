@@ -770,6 +770,571 @@ test_sweep_noop_with_no_secondmate_meta() {
 # make_remote_probe_world <name>: a parent home carrying one remote-route
 # secondmate meta plus a fake ssh that logs every call and answers with
 # FM_FAKE_REMOTE_REPLY on FM_FAKE_REMOTE_RC.
+# --- sweep level: hc-backed mates (bin/backends/hc.sh) ----------------------
+
+# make_liveness_hc <dir>: a stateful fake herdr-core. Terminals live as
+# <FM_HC_FAKE_DIR>/<address>.json; `run` allocates the next address from the
+# counter file and stores the labels and cwd it was given, `ls` lists live
+# terminals filtered by --label exactly like the real core (finished ones only
+# with --all), `get` answers not_found with exit 3, `kill` marks a terminal
+# finished, and `rm` removes it. Every call is logged with its HC_SESSION.
+make_liveness_hc() {
+  local dir=$1 fakebin
+  fakebin=$(fm_fakebin "$dir")
+  cat > "$fakebin/hc" <<'SH'
+#!/usr/bin/env bash
+set -u
+D=${FM_HC_FAKE_DIR:?}
+mkdir -p "$D"
+{ printf 'HC_SESSION=%s' "${HC_SESSION:-}"; for a in "$@"; do printf '\x1f%s' "$a"; done; printf '\n'; } >> "$D/log"
+cmd=${1:-}
+last=''
+for a in "$@"; do last=$a; done
+case "$cmd" in
+  --version) printf 'hc 0.1.14\n' ;;
+  server) printf '{"pid":1}\n' ;;
+  connect) IFS= read -r _ || true; printf '{"jsonrpc":"2.0","id":1,"result":{"generation":1}}\n' ;;
+  ls)
+    all=0; want=()
+    shift
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        --all) all=1 ;;
+        --label) want+=("$2"); shift ;;
+      esac
+      shift
+    done
+    out='[]'
+    for f in "$D"/t*.json; do
+      [ -e "$f" ] || continue
+      [ "$all" = 1 ] || [ "$(jq -r .state "$f")" = live ] || continue
+      ok=1
+      for kv in ${want[@]+"${want[@]}"}; do
+        [ "$(jq -r --arg k "${kv%%=*}" '.labels[$k] // ""' "$f")" = "${kv#*=}" ] || ok=0
+      done
+      [ "$ok" = 1 ] || continue
+      out=$(jq -c --slurpfile t "$f" '. + [$t[0] | {address, state}]' <<<"$out")
+    done
+    printf '{"terminals":%s}\n' "$out" ;;
+  run)
+    n=$(cat "$D/next" 2>/dev/null || printf 1)
+    printf '%s\n' $((n + 1)) > "$D/next"
+    addr="t$n"; cwd=/; labels='{}'
+    shift
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        --cwd) cwd=$2; shift ;;
+        --label) labels=$(jq -c --arg k "${2%%=*}" --arg v "${2#*=}" '.[$k]=$v' <<<"$labels"); shift ;;
+      esac
+      shift
+    done
+    jq -n --arg a "$addr" --arg c "$cwd" --argjson l "$labels" \
+      '{address:$a, state:"live", name:null, labels:$l, cwd:$c, foreground:{name:"zsh", argv:["/bin/zsh"], cwd:$c, pid:1}}' > "$D/$addr.json"
+    printf '{"address":"%s"}\n' "$addr" ;;
+  get)
+    [ -f "$D/$last.json" ] || { printf '{"error":{"kind":"not_found"}}\n' >&2; exit 3; }
+    cat "$D/$last.json" ;;
+  kill)
+    [ -f "$D/$last.json" ] || { printf '{"error":{"kind":"not_found"}}\n' >&2; exit 3; }
+    jq '.state="finished" | .foreground=null' "$D/$last.json" > "$D/$last.tmp" && mv "$D/$last.tmp" "$D/$last.json"
+    printf '{}\n' ;;
+  rm) rm -f "$D/$last.json"; printf '{}\n' ;;
+  read) printf '❯\n' ;;
+  send)
+    [ ! -e "$D/send-refuses" ] || { printf '{"error":{"kind":"refused"}}\n' >&2; exit 1; }
+    printf '{"started":true,"wait":{"status":"working"}}\n' ;;
+  *) printf '{}\n' ;;
+esac
+SH
+  chmod +x "$fakebin/hc"
+  printf '%s\n' "$fakebin"
+}
+
+# hc_seed_terminal <fake-dir> <address> <live|finished> <fg-name|-> <task-label> <hometag>:
+# the mate's recorded terminal as the core would report it, carrying the
+# PRIMARY's identity labels (its record owns the terminal) and the mate's tab.
+hc_seed_terminal() {
+  local d=$1 addr=$2 state=$3 fg=$4 task=$5 home=$6
+  mkdir -p "$d"
+  jq -n --arg a "$addr" --arg s "$state" --arg f "$fg" --arg t "$task" --arg h "$home" \
+    '{address:$a, state:$s, name:null, labels:{"firstmate.task":$t, "firstmate.home":$h, "herdr.space":("fm-"+$h), "herdr.tab":($h+"-"+$t)}, cwd:"/", foreground:(if $f == "-" then null else {name:$f, argv:[$f], cwd:"/", pid:1} end)}' \
+    > "$d/$addr.json"
+  printf '%s\n' $(( ${addr#t} + 1 )) > "$d/next"
+}
+
+# add_hc_sm_home <w> <id> <address>: add_sm_home plus the hc endpoint fields.
+add_hc_sm_home() {
+  local w=$1 id=$2 addr=$3
+  add_sm_home "$w" "$id" "fmtest:$addr"
+  printf 'backend=hc\nhc_session=fmtest\nhc_terminal=%s\n' "$addr" >> "$w/home/state/$id.meta"
+}
+
+# The hometag the sweep's own process derives (FM_HOME is the world's home and
+# FM_ROOT the checkout under test), and the tag the MATE home derives for itself
+# (both resolve to that home inside its own session).
+# shellcheck disable=SC2016 # the $0 root expands in the child shell.
+primary_tag_of() {  # <w>
+  env -u FM_ROOT_OVERRIDE FM_HOME="$1/home" bash -c '. "$0/bin/fm-backend.sh"; fm_backend_source hc >/dev/null 2>&1; fm_backend_hometag' "$ROOT"
+}
+# shellcheck disable=SC2016 # the $0 root expands in the child shell.
+mate_tag_of() {  # <mate-home>
+  FM_HOME="$1" FM_ROOT_OVERRIDE="$1" bash -c '. "$0/bin/fm-backend.sh"; fm_backend_source hc >/dev/null 2>&1; fm_backend_hometag' "$ROOT"
+}
+
+run_hc_bootstrap() {  # <w> <path> <hc-bin> <tmux-call-log> -> stdout
+  local w=$1 path=$2 hcbin=$3 log=$4
+  env -u HC_TERMINAL_ID -u HC_TERMINAL_SOCKET -u HC_SCOPE -u HC_SOCKET -u FM_HC_SOCKET -u FM_ROOT_OVERRIDE \
+    PATH="$path:$BASE_PATH" TMUX='' FM_BACKEND=hc FM_HOME="$w/home" \
+    FM_HC_BIN="$hcbin" FM_HC_FAKE_DIR="$w/hc" HC_SESSION=fmtest \
+    FM_TEST_PANE_CMD=zsh FM_TMUX_CALL_LOG="$log" \
+    "$ROOT/bin/fm-bootstrap.sh" 2>&1
+}
+
+hc_world() {  # <name> -> sets W_DIR, W_PATH, W_HCBIN, W_LOG, W_TAG, W_MATE_TAG for sm1
+  W_DIR=$(new_world "$1")
+  add_hc_sm_home "$W_DIR" sm1 t1
+  local fb tmuxfb hcfb
+  fb=$(make_toolchain "$W_DIR"); tmuxfb=$(make_liveness_tmux "$W_DIR"); hcfb=$(make_liveness_hc "$W_DIR/hc-tools")
+  W_PATH="$hcfb:$tmuxfb:$fb"
+  W_HCBIN="$hcfb/hc"
+  W_LOG="$W_DIR/calls.log"; : > "$W_LOG"
+  W_TAG=$(primary_tag_of "$W_DIR")
+  W_MATE_TAG=$(mate_tag_of "$W_DIR/sm1")
+  [ -n "$W_TAG" ] && [ -n "$W_MATE_TAG" ] || fail "could not resolve the home tags"
+}
+
+test_sweep_closes_and_respawns_a_dead_hc_secondmate() {
+  local out hclog run_line
+  hc_world sweep-hc-dead
+  hc_seed_terminal "$W_DIR/hc" t1 live zsh fm-sm1 "$W_TAG"
+
+  out=$(run_hc_bootstrap "$W_DIR" "$W_PATH" "$W_HCBIN" "$W_LOG")
+
+  assert_not_contains "$out" "SECONDMATE_LIVENESS: secondmate sm1:" \
+    "a dead hc mate must be recovered silently: $out"
+  hclog=$(cat "$W_DIR/hc/log")
+  assert_contains "$hclog" $'\x1fkill\x1f--json\x1ft1' "the dead terminal must be closed before the respawn"
+  assert_contains "$hclog" $'\x1frm\x1f--json\x1ft1' "the closed terminal must be removed from the core"
+  [ ! -e "$W_DIR/hc/t1.json" ] || fail "the dead terminal must be gone from the core"
+  run_line=$(grep $'\x1frun\x1f' "$W_DIR/hc/log")
+  assert_contains "$run_line" "herdr.space=fm-$W_MATE_TAG" "the respawned mate must land in its own space"
+  assert_contains "$run_line" "firstmate.home=$W_TAG" "the respawned terminal must carry this home's identity"
+  assert_contains "$run_line" "firstmate.task=fm-sm1" "the respawned terminal must carry the mate's task label"
+  assert_grep 'hc_terminal=t2' "$W_DIR/home/state/sm1.meta" "the record must follow the replacement terminal"
+  assert_grep 'window=fmtest:t2' "$W_DIR/home/state/sm1.meta" "the window must follow the replacement terminal"
+  assert_grep 'backend=hc' "$W_DIR/home/state/sm1.meta" "the record must stay on hc"
+  assert_not_contains "$hclog" HC_SESSION=default "recovery must never reach the default session"
+  assert_grep 'relaunched' "$W_DIR/home/state/.secondmate-relaunch-sm1" \
+    "the durable per-mate relaunch record must be written"
+  pass "sweep: a dead hc secondmate terminal is closed, removed, and respawned in the mate's own space"
+}
+
+test_sweep_removes_a_finished_hc_husk_before_respawn() {
+  local out hclog
+  hc_world sweep-hc-finished
+  # The agent's program ended: the core keeps a finished record carrying the
+  # mate's labels and its Herdr.app tab until it is removed.
+  hc_seed_terminal "$W_DIR/hc" t1 finished - fm-sm1 "$W_TAG"
+
+  out=$(run_hc_bootstrap "$W_DIR" "$W_PATH" "$W_HCBIN" "$W_LOG")
+
+  assert_not_contains "$out" "SECONDMATE_LIVENESS: secondmate sm1:" \
+    "a finished hc mate must be recovered silently: $out"
+  hclog=$(cat "$W_DIR/hc/log")
+  assert_not_contains "$hclog" $'\x1fkill\x1f' "a finished terminal has nothing left to kill"
+  assert_contains "$hclog" $'\x1frm\x1f--json\x1ft1' "the finished husk must be removed before the respawn"
+  [ ! -e "$W_DIR/hc/t1.json" ] || fail "the husk must be gone from the core"
+  assert_contains "$hclog" $'\x1frun\x1f' "the mate must be respawned"
+  assert_grep 'hc_terminal=t2' "$W_DIR/home/state/sm1.meta" "the record must follow the replacement terminal"
+  pass "sweep: a finished hc terminal is removed as a husk before the mate is respawned"
+}
+
+test_sweep_respawns_a_not_found_hc_secondmate() {
+  local out hclog
+  hc_world sweep-hc-gone
+  # The recorded terminal is already gone from the core; the next address the
+  # core hands out is unrelated to the record.
+  mkdir -p "$W_DIR/hc"
+  printf '5\n' > "$W_DIR/hc/next"
+
+  out=$(run_hc_bootstrap "$W_DIR" "$W_PATH" "$W_HCBIN" "$W_LOG")
+
+  assert_not_contains "$out" "SECONDMATE_LIVENESS: secondmate sm1:" \
+    "a mate whose terminal is gone must be respawned silently: $out"
+  hclog=$(cat "$W_DIR/hc/log")
+  assert_not_contains "$hclog" $'\x1fkill\x1f' "nothing is killed for a terminal that is already gone"
+  assert_contains "$hclog" $'\x1frun\x1f' "the mate must be respawned"
+  assert_grep 'hc_terminal=t5' "$W_DIR/home/state/sm1.meta" "the record must bind the fresh terminal"
+  pass "sweep: an hc secondmate whose terminal is gone is respawned without touching the core"
+}
+
+test_sweep_leaves_an_alive_hc_secondmate_untouched() {
+  local out before
+  hc_world sweep-hc-alive
+  hc_seed_terminal "$W_DIR/hc" t1 live claude fm-sm1 "$W_TAG"
+  before=$(cat "$W_DIR/home/state/sm1.meta")
+
+  out=$(run_hc_bootstrap "$W_DIR" "$W_PATH" "$W_HCBIN" "$W_LOG")
+
+  assert_not_contains "$out" "SECONDMATE_LIVENESS: secondmate sm1:" "an alive hc mate needs no report: $out"
+  for verb in kill rm run; do
+    assert_not_contains "$(cat "$W_DIR/hc/log")" $'\x1f'"$verb"$'\x1f' "an alive hc mate must not be touched ($verb)"
+  done
+  [ "$(cat "$W_DIR/home/state/sm1.meta")" = "$before" ] || fail "an alive hc mate's record must not change"
+  [ ! -e "$W_DIR/home/state/.secondmate-relaunch-sm1" ] || fail "no relaunch attempt may be recorded for an alive mate"
+  pass "sweep: an alive hc secondmate is left exactly as it is"
+}
+
+# --- bin/fm-secondmate-move.sh: moving a local mate onto another backend ------
+
+# make_move_tmux <dir>: a file-driven fake tmux (FM_MOVE_FAKE_DIR) with the
+# reads fm-control's exit needs and the window ops the move's close and the
+# liveness probe need. The pane's command lives in <dir>/command and flips to
+# zsh when the typed /exit lands; typed text is kept in <dir>/literal; an
+# `unreadable` marker fails every read; a <dir>/pane file replaces the default
+# empty composer screen.
+make_move_tmux() {
+  local dir=$1 fakebin
+  fakebin=$(fm_fakebin "$dir")
+  cat > "$fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+set -u
+D=${FM_MOVE_FAKE_DIR:?}
+case "${1:-}" in
+  send-keys)
+    shift
+    literal=0
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        -t) shift 2 ;;
+        -l) literal=1; shift ;;
+        *) break ;;
+      esac
+    done
+    if [ "$literal" = 1 ]; then
+      printf '%s\n' "${1:-}" >> "$D/literal"
+      case "${1:-}" in /exit|/quit) printf 'zsh' > "$D/command" ;; esac
+    else
+      printf '%s\n' "${1:-}" >> "$D/keys"
+    fi
+    exit 0 ;;
+  display-message)
+    [ ! -e "$D/unreadable" ] || exit 1
+    for a in "$@"; do
+      case "$a" in
+        *cursor_y*) printf '1\n'; exit 0 ;;
+        *pane_current_command*) cat "$D/command"; printf '\n'; exit 0 ;;
+        *pane_current_path*) cat "$D/cwd"; printf '\n'; exit 0 ;;
+      esac
+    done
+    printf 'fakepane\n'; exit 0 ;;
+  capture-pane)
+    [ ! -e "$D/unreadable" ] || exit 1
+    if [ -f "$D/pane" ]; then cat "$D/pane"; else printf '╭────╮\n│    │\n╰────╯\n'; fi
+    exit 0 ;;
+  list-windows)
+    [ ! -e "$D/unreadable" ] || exit 1
+    [ ! -f "$D/windows" ] || cat "$D/windows"
+    exit 0 ;;
+  new-window|kill-window)
+    printf '%s\n' "$*" >> "${FM_TMUX_CALL_LOG:?}"
+    if [ "$1" = kill-window ]; then : > "$D/windows"; fi
+    exit 0 ;;
+  has-session) exit 0 ;;
+esac
+exit 0
+SH
+  chmod +x "$fakebin/tmux"
+  printf '%s\n' "$fakebin"
+}
+
+# add_move_sm_home <w> <id>: a tmux-recorded mate with the full record shape a
+# real launch publishes, so fm-control can validate its endpoint identity.
+add_move_sm_home() {
+  local w=$1 id=$2
+  add_sm_home "$w" "$id" "firstmate:fm-$id"
+  printf 'endpoint_task_id=%s\nworktree=%s\nproject=%s\nmode=secondmate\nyolo=off\nprojects=\n' \
+    "$id" "$w/$id" "$w/$id" >> "$w/home/state/$id.meta"
+}
+
+move_world() {  # <name> <pane-command> -> sets W_DIR, W_PATH, W_HCBIN, W_LOG, W_TAG, W_MATE_TAG, W_MV
+  W_DIR=$(new_world "$1")
+  add_move_sm_home "$W_DIR" sm1
+  local fb mvfb hcfb
+  fb=$(make_toolchain "$W_DIR"); mvfb=$(make_move_tmux "$W_DIR/mv-tools"); hcfb=$(make_liveness_hc "$W_DIR/hc-tools")
+  W_PATH="$mvfb:$hcfb:$fb"
+  W_HCBIN="$hcfb/hc"
+  W_LOG="$W_DIR/calls.log"; : > "$W_LOG"
+  W_MV="$W_DIR/mv"
+  mkdir -p "$W_MV" "$W_DIR/hc"
+  printf '%s' "$2" > "$W_MV/command"
+  printf '%s' "$W_DIR/sm1" > "$W_MV/cwd"
+  printf 'fm-sm1\n' > "$W_MV/windows"
+  : > "$W_MV/literal"
+  W_TAG=$(primary_tag_of "$W_DIR")
+  W_MATE_TAG=$(mate_tag_of "$W_DIR/sm1")
+  [ -n "$W_TAG" ] && [ -n "$W_MATE_TAG" ] || fail "could not resolve the home tags"
+}
+
+run_move_with_root() {  # <fm-root> <args...> -> run_move with FM_ROOT_OVERRIDE set to <fm-root>
+  local root=$1
+  shift
+  env -u HC_TERMINAL_ID -u HC_TERMINAL_SOCKET -u HC_SCOPE -u HC_SOCKET -u FM_HC_SOCKET -u FM_BACKEND \
+    FM_ROOT_OVERRIDE="$root" \
+    PATH="$W_PATH:$BASE_PATH" TMUX='' FM_HOME="$W_DIR/home" \
+    FM_HC_BIN="$W_HCBIN" FM_HC_FAKE_DIR="$W_DIR/hc" HC_SESSION=fmtest \
+    FM_MOVE_FAKE_DIR="$W_MV" FM_TMUX_CALL_LOG="$W_LOG" \
+    FM_CONTROL_POLL=0.01 FM_CONTROL_SETTLE_WAIT=0.05 FM_CONTROL_EXIT_WAIT=0.5 \
+    "$ROOT/bin/fm-secondmate-move.sh" "$@" 2>&1
+}
+
+run_move() {  # <args...> -> combined output; the move's exit status
+  env -u HC_TERMINAL_ID -u HC_TERMINAL_SOCKET -u HC_SCOPE -u HC_SOCKET -u FM_HC_SOCKET -u FM_ROOT_OVERRIDE -u FM_BACKEND \
+    PATH="$W_PATH:$BASE_PATH" TMUX='' FM_HOME="$W_DIR/home" \
+    FM_HC_BIN="$W_HCBIN" FM_HC_FAKE_DIR="$W_DIR/hc" HC_SESSION=fmtest \
+    FM_MOVE_FAKE_DIR="$W_MV" FM_TMUX_CALL_LOG="$W_LOG" \
+    FM_CONTROL_POLL=0.01 FM_CONTROL_SETTLE_WAIT=0.05 FM_CONTROL_EXIT_WAIT=0.5 \
+    "$ROOT/bin/fm-secondmate-move.sh" "$@" 2>&1
+}
+
+assert_move_landed_on_hc() {  # <output>
+  local run_line meta
+  assert_contains "$1" "moved sm1 from=tmux to=hc" "the move must report the backends"
+  assert_contains "$1" "spawned sm1 harness=codex kind=secondmate" "the move must relay the launch line"
+  assert_contains "$(cat "$W_LOG")" "kill-window" "the old tmux endpoint must be closed"
+  run_line=$(grep $'\x1frun\x1f' "$W_DIR/hc/log")
+  assert_contains "$run_line" "herdr.space=fm-$W_MATE_TAG" "the moved mate must land in its own space"
+  assert_contains "$run_line" "firstmate.home=$W_TAG" "the moved terminal must carry this home's identity"
+  meta=$(cat "$W_DIR/home/state/sm1.meta")
+  for line in backend=hc hc_session=fmtest hc_terminal=t1 window=fmtest:t1 kind=secondmate "home=$W_DIR/sm1"; do
+    assert_contains "$meta" "$line" "the republished record must carry $line"
+  done
+  assert_grep 'attempt' "$W_DIR/home/state/.secondmate-relaunch-sm1" "the move must record its attempt"
+  assert_grep 'relaunched' "$W_DIR/home/state/.secondmate-relaunch-sm1" "the move must record its outcome"
+}
+
+test_move_stops_a_live_tmux_secondmate_and_relaunches_it_on_hc() {
+  local out rc=0
+  move_world move-live claude
+  out=$(run_move sm1 --backend hc) || rc=$?
+  expect_code 0 "$rc" "moving a live tmux mate onto hc must succeed"$'\n'"$out"
+  [ "$(cat "$W_MV/literal")" = /exit ] || fail "the live agent must be stopped through its exit command first, got: $(cat "$W_MV/literal")"
+  [ "$(cat "$W_MV/command")" = zsh ] || fail "the stop must have been proven before the move went on"
+  assert_move_landed_on_hc "$out"
+  pass "move: a live tmux secondmate is stopped, its endpoint closed, and the mate relaunched on hc in its own space"
+}
+
+test_move_relaunches_an_already_stopped_tmux_secondmate_on_hc() {
+  local out rc=0
+  move_world move-stopped zsh
+  out=$(run_move sm1 --backend hc) || rc=$?
+  expect_code 0 "$rc" "moving a stopped tmux mate onto hc must succeed"$'\n'"$out"
+  [ ! -s "$W_MV/literal" ] || fail "an already-stopped agent must not be sent an exit command: $(cat "$W_MV/literal")"
+  assert_move_landed_on_hc "$out"
+  pass "move: an already-stopped tmux secondmate is relaunched on hc without lifecycle input"
+}
+
+# add_move_remote_dead <w>: places sm1 on a remote host whose stubbed state
+# probe reports the agent dead, so the move reaches the relaunch step.
+add_move_remote_dead() {
+  local w=$1 sshbin
+  printf 'remote_host=lab-host\nremote_backend=herdr\nremote_herdr_session=fm-remote\nremote_target=fm-remote:w1:p1\n' >> "$w/home/state/sm1.meta"
+  mkdir -p "$w/home/data"
+  printf -- '- sm1 - Remote mate (host: lab-host; root: /remote/root; home: /remote/sm1-home; scope: remote work; projects: alpha; added 2026-01-01)\n' \
+    > "$w/home/data/secondmates.md"
+  sshbin=$(fm_fakebin "$w/ssh-tools")
+  cat > "$sshbin/ssh" <<SH
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> '$w/ssh.log'
+printf 'dead\n'
+SH
+  chmod +x "$sshbin/ssh"
+  W_PATH="$sshbin:$W_PATH"
+}
+
+test_move_refuses_before_stopping_anything() {
+  local scenario out rc before args
+  for scenario in cmux unknown same-backend harness-mismatch missing-hc remote unreadable pending-composer; do
+    move_world "move-refuse-$scenario" claude
+    args=(sm1 --backend hc)
+    case "$scenario" in
+      cmux) args=(sm1 --backend cmux) ;;
+      unknown) args=(sm1 --backend bogus) ;;
+      same-backend) args=(sm1 --backend tmux) ;;
+      harness-mismatch) args=(sm1 --backend t3code); printf 'pi\n' > "$W_DIR/home/config/secondmate-harness" ;;
+      missing-hc) W_HCBIN="$W_DIR/no-such-dir/hc" ;;
+      remote) add_move_remote_dead "$W_DIR" ;;
+      unreadable) : > "$W_MV/unreadable" ;;
+      pending-composer) printf '❯ draft text\n' > "$W_MV/pane" ;;
+    esac
+    before=$(cat "$W_DIR/home/state/sm1.meta")
+    rc=0
+    out=$(run_move "${args[@]}") || rc=$?
+    [ "$rc" -ne 0 ] || fail "$scenario must refuse the move: $out"
+    [ ! -s "$W_MV/literal" ] || fail "$scenario must not stop the agent: $(cat "$W_MV/literal")"
+    [ "$(cat "$W_MV/command")" = claude ] || fail "$scenario must leave the agent running"
+    [ ! -s "$W_LOG" ] || fail "$scenario must not close the endpoint: $(cat "$W_LOG")"
+    assert_not_contains "$(cat "$W_DIR/hc/log" 2>/dev/null || true)" $'\x1frun\x1f' "$scenario must not launch anything"
+    [ "$(cat "$W_DIR/home/state/sm1.meta")" = "$before" ] || fail "$scenario must leave the record unchanged"
+    [ ! -e "$W_DIR/home/state/.secondmate-relaunch-sm1" ] || fail "$scenario must not record a relaunch attempt"
+    case "$scenario" in
+      cmux) assert_contains "$out" "backend=cmux does not support --secondmate" "the cmux refusal names the limit" ;;
+      unknown) assert_contains "$out" "unknown backend" "the unknown-backend refusal names it" ;;
+      same-backend) assert_contains "$out" "already recorded on backend=tmux" "a same-backend move points at relaunch" ;;
+      harness-mismatch) assert_contains "$out" "runs only the claude and codex harnesses" "a target that cannot launch the mate's configured harness refuses before any stop" ;;
+      missing-hc) assert_contains "$out" "backend=hc needs 'hc', which is not available here; nothing was stopped or moved" "a missing target binary refuses before any stop" ;;
+      remote)
+        assert_contains "$out" "a local move is refused" "a dead remote mate reaches the library's own refusal"
+        assert_contains "$(cat "$W_DIR/ssh.log")" "-- lab-host " "the remote mate must have been probed on its host"
+        ;;
+      unreadable) assert_contains "$out" "cannot be classified" "an unreadable endpoint refuses before any stop" ;;
+      pending-composer) assert_contains "$out" "could not be proven stopped" "a refused stop ends the move" ;;
+    esac
+  done
+  pass "move: an unmovable or unavailable target, a remote mate, an unclassifiable endpoint, and a refused stop all leave the mate untouched"
+}
+
+test_move_restores_the_previous_record_when_the_launch_fails() {
+  local out rc=0 before
+  move_world move-launch-fails zsh
+  : > "$W_DIR/hc/send-refuses"
+  cp -p "$W_DIR/home/state/sm1.meta" "$W_DIR/before.meta"
+  out=$(run_move sm1 --backend hc) || rc=$?
+  expect_code 1 "$rc" "a move whose replacement launch fails must fail"$'\n'"$out"
+  [ -f "$W_DIR/home/state/sm1.meta" ] || fail "a failed launch must not leave the mate without a record"$'\n'"$out"
+  cmp -s "$W_DIR/before.meta" "$W_DIR/home/state/sm1.meta" \
+    || fail "a failed launch must leave the previous record byte-identical"$'\n'"$(diff "$W_DIR/before.meta" "$W_DIR/home/state/sm1.meta")"
+  assert_contains "$out" "could not be launched on hc" "the failure names the target"
+  assert_contains "$out" "its previous record (backend=tmux) is in place" "the failure states the record survived"
+  assert_not_contains "$out" "moved sm1" "a failed launch must not report a move"
+  assert_grep 'failed' "$W_DIR/home/state/.secondmate-relaunch-sm1" "the move must record its failed outcome"
+  pass "move: a failed replacement launch leaves the previous record in place for recovery and says so"
+}
+
+test_move_leaves_a_newer_record_in_place_when_the_launch_fails() {
+  local out rc=0 entry fake_root
+  move_world move-launch-fails-newer zsh
+  : > "$W_DIR/hc/send-refuses"
+  # A root whose fm-spawn.sh runs the real spawn (which fails at the send) and
+  # then publishes a newer record, as a concurrent relaunch would, before the
+  # move gets to its restore.
+  fake_root="$W_DIR/root"
+  mkdir -p "$fake_root/bin"
+  for entry in "$ROOT"/*; do
+    [ "${entry##*/}" = bin ] || ln -s "$entry" "$fake_root/${entry##*/}"
+  done
+  for entry in "$ROOT"/bin/*; do
+    [ "${entry##*/}" = fm-spawn.sh ] || ln -s "$entry" "$fake_root/bin/${entry##*/}"
+  done
+  cat > "$fake_root/bin/fm-spawn.sh" <<SH
+#!/usr/bin/env bash
+rc=0
+env -u FM_ROOT_OVERRIDE '$ROOT/bin/fm-spawn.sh' "\$@" || rc=\$?
+printf 'window=fm-sm1-newer\nkind=secondmate\nbackend=tmux\nhome=$W_DIR/sm1\n' > '$W_DIR/newer.meta'
+cp -p '$W_DIR/newer.meta' '$W_DIR/home/state/sm1.meta'
+exit "\$rc"
+SH
+  chmod +x "$fake_root/bin/fm-spawn.sh"
+  cp -p "$W_DIR/home/state/sm1.meta" "$W_DIR/before.meta"
+  out=$(run_move_with_root "$fake_root" sm1 --backend hc) || rc=$?
+  expect_code 1 "$rc" "a move whose replacement launch fails must fail"$'\n'"$out"
+  cmp -s "$W_DIR/newer.meta" "$W_DIR/home/state/sm1.meta" \
+    || fail "a record published after the failed launch must be left byte-identical"$'\n'"$(diff "$W_DIR/newer.meta" "$W_DIR/home/state/sm1.meta" 2>&1)"
+  ! cmp -s "$W_DIR/before.meta" "$W_DIR/home/state/sm1.meta" || fail "the snapshot must not overwrite a newer record"
+  assert_contains "$out" "could not be launched on hc" "the failure names the target"
+  assert_contains "$out" "a different record for it is now in place" "the failure names the record it found"
+  assert_contains "$out" "the previous one was not put back" "the failure must not claim the previous record was restored"
+  assert_not_contains "$out" "is in place, so the next liveness recovery" "the failure must not claim the previous record survived"
+  assert_not_contains "$out" "moved sm1" "a failed launch must not report a move"
+  pass "move: a failed launch leaves a record published since in place and says the previous one was not restored"
+}
+
+test_move_names_the_stopped_state_when_the_relaunch_is_skipped() {
+  local out rc=0 ledger
+  if [ "$(id -u)" = 0 ]; then
+    pass "move: skipped-relaunch message skipped (root ignores file modes)"
+    return
+  fi
+  move_world move-skipped-after-stop claude
+  ledger="$W_DIR/home/state/.secondmate-relaunch-sm1"
+  : > "$ledger"
+  chmod 444 "$ledger"
+  cp -p "$W_DIR/home/state/sm1.meta" "$W_DIR/before.meta"
+  out=$(run_move sm1 --backend hc) || rc=$?
+  chmod 644 "$ledger"
+  expect_code 1 "$rc" "a move whose relaunch is skipped must fail"$'\n'"$out"
+  [ "$(cat "$W_MV/literal")" = /exit ] || fail "the live agent must have been stopped first, got: $(cat "$W_MV/literal")"
+  assert_not_contains "$(cat "$W_DIR/hc/log" 2>/dev/null || true)" $'\x1frun\x1f' "a skipped relaunch must not launch anything"
+  cmp -s "$W_DIR/before.meta" "$W_DIR/home/state/sm1.meta" || fail "a skipped relaunch must leave the record unchanged"
+  assert_contains "$out" "its tmux agent was stopped, nothing was launched, and its previous record (backend=tmux) is unchanged" "the failure states what the move did"
+  assert_contains "$out" "the next liveness recovery respawns it on its recorded backend" "the failure states how the mate comes back"
+  assert_contains "$out" "relaunch ledger $ledger is unwritable" "the failure carries the library's skip reason"
+  assert_not_contains "$out" "moved sm1" "a skipped relaunch must not report a move"
+  pass "move: a relaunch skipped after the stop says the agent was stopped, nothing launched, and the record is unchanged"
+}
+
+test_move_usage_prints_the_exit_status_contract() {
+  local out rc=0 contract='Exit status: 0 moved; 1 refused or failed,'
+  out=$("$ROOT/bin/fm-secondmate-move.sh" --help 2>/dev/null) || rc=$?
+  expect_code 0 "$rc" "--help must succeed"$'\n'"$out"
+  assert_contains "$out" "$contract" "--help must print the exit-status contract"
+  assert_contains "$out" "with the message naming the state the mate was left in; 2 invalid use." "--help must print the whole contract"
+  rc=0
+  out=$("$ROOT/bin/fm-secondmate-move.sh" 2>&1 >/dev/null) || rc=$?
+  expect_code 2 "$rc" "a move with no arguments is invalid use"$'\n'"$out"
+  assert_contains "$out" "$contract" "invalid use must print the exit-status contract on stderr"
+  assert_contains "$out" "with the message naming the state the mate was left in; 2 invalid use." "invalid use must print the whole contract on stderr"
+  pass "move: --help and invalid use both print the header through its exit-status contract"
+}
+
+# fm-control's relaunch serializes on the task's control lock, not the liveness
+# lock, so the move holds it too: a move that cannot take it refuses outright.
+test_move_refuses_while_the_control_lock_is_held() {
+  local out rc=0 holder i=0 lock
+  move_world move-control-lock-held claude
+  lock="$W_DIR/home/state/.control-sm1.lock"
+  ( STATE="$W_DIR/home/state" bash -c \
+      '. "$1" && fm_lock_acquire_wait "$2" && sleep 30' \
+      _ "$ROOT/bin/fm-wake-lib.sh" "$lock" ) &
+  holder=$!
+  while [ ! -d "$lock" ] && [ "$i" -lt 100 ]; do
+    sleep 0.05
+    i=$((i + 1))
+  done
+  [ -d "$lock" ] || fail "the fixture never acquired the control lock"
+  out=$(run_move sm1 --backend hc) || rc=$?
+  kill "$holder" 2>/dev/null || true
+  wait "$holder" 2>/dev/null || true
+  [ "$rc" -ne 0 ] || fail "a move must not run beside a lifecycle action: $out"
+  assert_contains "$out" "another lifecycle action is already running" "the refusal names the control lock"
+  [ ! -s "$W_MV/literal" ] || fail "a mate under a lifecycle action must not be stopped: $(cat "$W_MV/literal")"
+  [ ! -s "$W_LOG" ] || fail "a mate under a lifecycle action must not be touched: $(cat "$W_LOG")"
+  assert_not_contains "$(cat "$W_DIR/hc/log" 2>/dev/null || true)" $'\x1frun\x1f' "a mate under a lifecycle action must not be launched"
+  pass "move: a mate under another lifecycle action's control lock is refused entirely"
+}
+
+test_move_refuses_while_the_liveness_lock_is_held() {
+  local out rc=0 holder i=0
+  move_world move-lock-held zsh
+  ( STATE="$W_DIR/home/state" bash -c \
+      '. "$1" && fm_lock_acquire_wait "$2" && sleep 30' \
+      _ "$ROOT/bin/fm-wake-lib.sh" "$W_DIR/home/state/.secondmate-liveness-sm1.lock" ) &
+  holder=$!
+  while [ ! -d "$W_DIR/home/state/.secondmate-liveness-sm1.lock" ] && [ "$i" -lt 100 ]; do
+    sleep 0.05
+    i=$((i + 1))
+  done
+  [ -d "$W_DIR/home/state/.secondmate-liveness-sm1.lock" ] || fail "the fixture never acquired the liveness lock"
+  out=$(run_move sm1 --backend hc) || rc=$?
+  kill "$holder" 2>/dev/null || true
+  wait "$holder" 2>/dev/null || true
+  [ "$rc" -ne 0 ] || fail "a move must not run beside a liveness episode: $out"
+  assert_contains "$out" "another liveness check or recovery is in progress" "the refusal names the lock"
+  [ ! -s "$W_LOG" ] || fail "a locked mate must not be touched: $(cat "$W_LOG")"
+  assert_not_contains "$(cat "$W_DIR/hc/log" 2>/dev/null || true)" $'\x1frun\x1f' "a locked mate must not be launched"
+  pass "move: a mate mid-episode under the shared liveness lock is refused entirely"
+}
+
 make_remote_probe_world() {
   local name=$1 w fakebin
   w="$TMP_ROOT/$name"
@@ -1012,6 +1577,19 @@ test_sweep_noop_with_no_secondmate_meta
 test_sweep_skips_mate_whose_liveness_lock_is_held
 test_relaunch_waits_for_other_mates_relaunch_lock
 test_sweep_refuses_relaunch_on_ledger_errors
+test_sweep_closes_and_respawns_a_dead_hc_secondmate
+test_sweep_removes_a_finished_hc_husk_before_respawn
+test_sweep_respawns_a_not_found_hc_secondmate
+test_sweep_leaves_an_alive_hc_secondmate_untouched
+test_move_stops_a_live_tmux_secondmate_and_relaunches_it_on_hc
+test_move_relaunches_an_already_stopped_tmux_secondmate_on_hc
+test_move_refuses_before_stopping_anything
+test_move_restores_the_previous_record_when_the_launch_fails
+test_move_leaves_a_newer_record_in_place_when_the_launch_fails
+test_move_names_the_stopped_state_when_the_relaunch_is_skipped
+test_move_usage_prints_the_exit_status_contract
+test_move_refuses_while_the_liveness_lock_is_held
+test_move_refuses_while_the_control_lock_is_held
 test_remote_poll_probe_maps_states
 test_remote_poll_probe_unreachable_preserves_route
 test_remote_full_probe_rex_route
