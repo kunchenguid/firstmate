@@ -912,6 +912,33 @@ fm_dod_read_timeout() {
   }
 }
 
+fm_dod_claim_destination() {
+  local kind=${1:-ship} mode=$2 meta=$3 url=$4 read_timeout reason expected
+  [ "$kind" = ship ] || return 0
+  [ "$mode" != local-only ] || return 0
+  [ "$(fm_dod_meta_value "$meta" forge)" != external ] || return 0
+  if ! fm_pr_url_parse "$url"; then
+    expected=$(fm_pr_expected_base "$meta") || expected=unavailable
+    printf 'expected PR base %s, actual base unavailable: no canonical PR identity\n' "$expected"
+    return 1
+  fi
+  if ! read_timeout=$(fm_dod_read_timeout 5 2>&1); then
+    printf '%s\n' "$read_timeout"
+    return 1
+  fi
+  if ! reason=$(fm_run_timed "$read_timeout" bash -c '
+    . "$1"
+    shift
+    fm_pr_require_base "$@"
+  ' _ "$_FM_PR_LIB_ROOT/bin/fm-pr-lib.sh" "$meta" "$FM_PR_PROVIDER" "$url" \
+    "$FM_PR_HOST" "$FM_PR_PATH" "$FM_PR_NUMBER" 2>&1); then
+    expected=$(fm_pr_expected_base "$meta") || expected=unavailable
+    printf '%s\n' "${reason:-expected PR base $expected, actual base unavailable}"
+    return 1
+  fi
+  fm_dod_read_timeout 5 >/dev/null
+}
+
 # 0 when <url> names a Gerrit change whose current patch set carries the tree of
 # the worktree's HEAD. The revision is read live and bounded, because the server
 # is the only place a refs/for/ push leaves it, and it must already be an object
@@ -1016,7 +1043,6 @@ fm_dod_named_head_reachable_outside_worktree() {  # <worktree> <project> <mode> 
 # The inherited FM_READ_DEADLINE caps readiness reads at the scan budget remaining.
 fm_dod_accept_ship_done() {  # <kind> <mode> <worktree> <project> <line> [<state> <id> <meta> [meta-locked]]
   local kind=$1 mode=$2 wt=$3 project=$4 line=$5 state=${6:-} id=${7:-} meta=${8:-} url note sha gerrit captured=''
-  local read_timeout
   fm_dod_should_gate_ship_done "$kind" "$mode" "$line" || return 0
   if [ "$mode" = local-only ] && [ -n "$meta" ]; then
     captured=$(cat "$meta") || return 1
@@ -1039,32 +1065,7 @@ fm_dod_accept_ship_done() {  # <kind> <mode> <worktree> <project> <line> [<state
     return 1
   fi
   if [ "$mode" != local-only ]; then
-    if ! fm_pr_url_parse "$url"; then
-      printf '%s\n' 'PR destination could not be resolved; report a canonical PR URL so its expected base can be verified'
-      return 1
-    fi
-    # Readiness runs under a child's metadata lock during ledger scans. Bound
-    # the forge read so unavailable proof refuses only this child's claim.
-    # Use one timer at the read, not a nested timer around the caller: killing
-    # an inner watchdog first can orphan its separately grouped forge command.
-    if ! read_timeout=$(fm_dod_read_timeout 5 2>&1); then
-      printf '%s\n' "$read_timeout"
-      return 1
-    fi
-    # shellcheck disable=SC2016  # The child shell receives the arguments literally.
-    if ! captured=$(fm_run_timed "$read_timeout" bash -c '
-      . "$1"
-      shift
-      fm_pr_require_base "$@"
-    ' _ "$_FM_PR_LIB_ROOT/bin/fm-pr-lib.sh" "$meta" "$FM_PR_PROVIDER" "$url" \
-      "$FM_PR_HOST" "$FM_PR_PATH" "$FM_PR_NUMBER" 2>&1); then
-      printf '%s\n' "${captured:-PR destination readiness could not be verified}"
-      return 1
-    fi
-    if ! captured=$(fm_dod_read_timeout 5 2>&1); then
-      printf '%s\n' "$captured"
-      return 1
-    fi
+    fm_dod_claim_destination "$kind" "$mode" "$meta" "$url" || return 1
   fi
   if [ -n "$url" ] && fm_dod_recorded_pr_on_forge "$state" "$id" "$meta" "$mode" "$url"; then
     return 0

@@ -290,7 +290,11 @@ emit() {  # <state> <source> [detail]
 }
 
 emit_run() {  # <state> <detail> [pr]
-  local detail=$2
+  local detail=$2 reason
+  if [ "$1" = done ] \
+    && ! reason=$(fm_dod_claim_destination "$KIND" "$(meta_value mode)" "$META" "${3:-}"); then
+    emit blocked run-step "$reason"
+  fi
   case "$1" in
     done|failed) [ -z "${3:-}" ] || detail="$detail${SEP}pr=$3" ;;
   esac

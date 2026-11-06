@@ -415,9 +415,15 @@ terminal_outcome_pr() { # <state-line> <kind>
 # (`done:` written, the run then fails, the crew goes silent) would reach nobody.
 # The two sources are genuinely comparable only when the state itself came from
 # the status log, and there the crew's latest word still decides.
-terminal_outcome_corroborated() { # <state> <last-status-line> <state-line>
-  local state=$1 last=$2 line=${3:-} declared
-  [ "$(state_line_source "$line")" != run-step ] || return 0
+terminal_outcome_corroborated() { # <state> <last-status-line> <state-line> <meta>
+  local state=$1 last=$2 line=${3:-} meta=$4 declared kind
+  if [ "$(state_line_source "$line")" = run-step ]; then
+    [ "$state" = done ] || return 0
+    kind=$(meta_field "$meta" kind)
+    fm_dod_claim_destination "$kind" "$(meta_field "$meta" mode)" "$meta" \
+      "$(terminal_outcome_pr "$line" "$kind")"
+    return
+  fi
   if status_is_paused "$last"; then
     declared=paused
   else
@@ -708,7 +714,7 @@ reconcile_direct_child_locked() { # <id> <meta> <secondmate-id-or-empty> <deadli
   task_holds_live_work "$id" "$meta" "$left" "$last" && return 0
   [ "$?" -ne 3 ] || return 3
   fm_nm_read_timeout 1 >/dev/null || return 3
-  terminal_outcome_corroborated "$state" "$last" "$state_line" || return 0
+  terminal_outcome_corroborated "$state" "$last" "$state_line" "$meta" || return 0
   pr=$(terminal_outcome_pr "$state_line" "$kind")
   incarnation=$(meta_incarnation "$meta")
   # The receipt identity binds structured fields only: a persistent child that
