@@ -1188,6 +1188,41 @@ test_matrix_grok_titled_bottom_border() {
   pass "matrix: grok's real oversized titled bottom is empty while typed and unproved panes stay safe"
 }
 
+# Grok Build 1.0.52 and 1.0.62 folder-trust dialogs captured live in the Herdr
+# lab on 2026-10-19 (tests/fixtures/grok-<version>); both render the same
+# dialog, which has no composer and answers typed y and n.
+GROK_FIXTURE_VERSIONS='1.0.52 1.0.62'
+grok_1052_fixture() {  # <version> <name> <ext>
+  cat "$ROOT/tests/fixtures/grok-$1/$2.$3"
+}
+
+test_matrix_grok_1052_trust_dialog_is_not_a_composer() {
+  local v plain ansi idle out rc
+  for v in $GROK_FIXTURE_VERSIONS; do
+    plain=$(grok_1052_fixture "$v" trust-dialog plain)
+    ansi=$(grok_1052_fixture "$v" trust-dialog ansi)
+    idle=$(printf '%s\n' '  ╭──────────────────────────────────────╮' '  │ ❯                                    │' '  ╰──────────── Grok 4.7 (high) · always-approve ─╯' '' '  Shift+Tab:mode  │  Ctrl+.:shortcuts')
+    assert_screen "grok $v trust dialog on tmux" unknown "$CAPS_TMUX" "$ansi" 1
+    assert_screen "grok $v trust dialog on herdr" unknown "$CAPS_STYLED" "$ansi"
+    assert_screen "grok $v trust dialog on zellij" unknown "$CAPS_STYLED_NOID" "$ansi"
+    assert_screen "grok $v trust dialog on cmux/orca" unknown "$CAPS_PLAIN" "$plain"
+    out=$(fm_composer_blocking_dialog "$ansi"); rc=$?
+    [ "$rc" -eq 0 ] || fail "the $v trust dialog should be a blocking dialog"
+    [ "$out" = 'Grok folder-trust dialog' ] || fail "dialog name was '$out'"
+    out=$(fm_composer_blocking_dialog "$plain"); rc=$?
+    [ "$rc" -eq 0 ] || fail "the plain $v trust dialog should be a blocking dialog"
+    out=$(fm_composer_blocking_dialog "$idle"); rc=$?
+    [ "$rc" -eq 1 ] || fail "the idle $v composer is not a blocking dialog"
+    [ -z "$out" ] || fail "a miss must print nothing, got '$out'"
+    # The dialog's strings quoted above a live composer are not a live dialog.
+    out=$(fm_composer_blocking_dialog "$plain"$'\n'"$idle"); rc=$?
+    [ "$rc" -eq 1 ] || fail "$v dialog text above a live composer must not match"
+  done
+  out=$(fm_composer_blocking_dialog "$(printf '%s\n' 'Do you trust the contents of this directory?' 'Yes, proceed   y' 'No, quit   n')"); rc=$?
+  [ "$rc" -eq 1 ] || fail "the dialog's rows without its warning and version footer must not match"
+  pass "matrix: grok 1.0.52 and 1.0.62 folder-trust dialogs are never a composer and are named as a blocking dialog"
+}
+
 test_matrix_claude_titled_top_rule() {
   # A named Claude Code session draws its title into the composer's TOP rule
   # (issues #5601 and #5558; observed on herdr as
@@ -1703,6 +1738,7 @@ test_matrix_opencode_leftbar_signals
 test_matrix_opencode_leftbar_cwd_furniture
 test_matrix_opencode_leftbar_abs_cwd_furniture
 test_matrix_grok_titled_bottom_border
+test_matrix_grok_1052_trust_dialog_is_not_a_composer
 test_matrix_claude_titled_top_rule
 test_matrix_grok_144_approval_titled_bottom_border
 test_matrix_kimi_bordered_shell_glyph_box

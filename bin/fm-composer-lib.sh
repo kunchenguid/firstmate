@@ -732,6 +732,14 @@ fm_composer_strip_braille() {
 # also uses this value as the minimum Ctrl+U clear budget after a refused proof.
 FM_COMPOSER_CAPTURE_LINES=${FM_COMPOSER_CAPTURE_LINES:-20}
 
+# The row window for the blocking-dialog guard alone. A dialog's heading sits
+# far above its footer on a tall screen (Grok's folder-trust dialog is 39 rows
+# with the heading 24 above the footer), so the 20-row tail above cannot see it
+# on the tail-capture backends, while the guard's own structure check
+# (fm_composer_blocking_dialog) already refuses scrollback that is not the live
+# screen. Widening only this read leaves every composer verdict untouched.
+FM_COMPOSER_DIALOG_CAPTURE_LINES=${FM_COMPOSER_DIALOG_CAPTURE_LINES:-60}
+
 # Pi allows a multi-line composer between its horizontal separators. Bound the
 # structural candidate so two unrelated transcript rules with an arbitrarily
 # large region between them can never be promoted into a composer.
@@ -2223,6 +2231,10 @@ EOF
 # and prints nothing.
 # Recorded 2026-10-05 on Claude Code 2.1.289: /exit while a background shell
 # is still running opens this picker, and its selected row is Exit and stop tasks.
+# Recorded 2026-10-19 on Grok Build 1.0.52: a folder it has not trusted opens a
+# trust dialog whose Enter accepts Yes, proceed and whose typed y or n answers
+# it, so text typed into it (a steer's doorbell) would answer it by accident.
+# That dialog has no composer, and its last non-blank row is the version footer.
 fm_composer_blocking_dialog() {  # <screen> -> dialog name
   local screen=${1-}
   [ -n "$screen" ] || return 1
@@ -2233,6 +2245,17 @@ fm_composer_blocking_dialog() {  # <screen> -> dialog name
     END { exit !(selected && last ~ /^[ \t]*Enter to confirm · Esc to cancel[ \t\r]*$/) }
   '; then
     printf '%s' 'Claude background-task exit picker'
+    return 0
+  fi
+  if printf '%s\n' "$screen" | fm_composer_strip_ansi | LC_ALL=C awk '
+    /^[ \t]*Do you trust the contents of this directory\?[ \t\r]*$/ { heading = 1 }
+    heading && /^[ \t]*Grok Build may run or modify contents in this directory,[ \t\r]*$/ { warned = 1 }
+    warned && /^[ \t]*Yes, proceed[ \t]+y[ \t\r]*$/ { yes = 1 }
+    yes && /^[ \t]*No, quit[ \t]+n[ \t\r]*$/ { no = 1 }
+    /[^ \t\r]/ { last = $0 }
+    END { exit !(no && last ~ /^[ \t]*Grok Build[ \t]+[0-9][0-9.]*[ \t]+\[[a-z]+\][ \t\r]*$/) }
+  '; then
+    printf '%s' 'Grok folder-trust dialog'
     return 0
   fi
   return 1
