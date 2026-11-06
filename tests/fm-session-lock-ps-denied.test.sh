@@ -1024,6 +1024,8 @@ test_denied_ps_reads_native_codex_identity() {
   if lib_eval_denied "$fakebin" "$table" 'fm_session_lock_anchor_pid' >/dev/null 2>&1; then
     fail "denied-ps route anchored a spaced-directory server without identity"
   fi
+  write_native_table /opt/codex '/opt/codex -C /Users/me/Home app-server' \
+    /opt/codex -C /Users/me/Home app-server
   rm "$table.argv"
   if lib_eval_denied "$fakebin" "$table" \
     "export CODEX_SESSION_ID=$uuid CODEX_THREAD_ID=$uuid; fm_session_lock_anchor_pid" >/dev/null 2>&1; then
@@ -1051,6 +1053,12 @@ test_denied_ps_reads_native_codex_identity() {
   fi
   [ "$(lib_eval_denied "$fakebin" "$table" 'fm_session_lock_anchor_pid')" = 800 ] \
     || fail "denied-ps route lost the ordinary Codex CLI anchor"
+  rm "$table.argv"
+  if lib_eval_denied "$fakebin" "$table" 'fm_session_lock_codex_native_ancestry' >/dev/null 2>&1; then
+    fail "denied-ps route read prompt text as native with unreadable argv"
+  fi
+  [ "$(lib_eval_denied "$fakebin" "$table" 'fm_session_lock_anchor_pid')" = 800 ] \
+    || fail "denied-ps route lost the CLI anchor with unreadable argv"
   pass "denied-ps route reads native Codex server identity and keeps the CLI contract"
 }
 

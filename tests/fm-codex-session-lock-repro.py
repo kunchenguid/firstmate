@@ -164,6 +164,31 @@ exec {shlex.quote(sys.executable)} "$@"
     start = '"$FM_HOME/bin/fm-session-start.sh"'
     lock = '"$FM_HOME/bin/fm-lock.sh"'
     own = '. "$FM_HOME/bin/fm-session-lock-lib.sh"; fm_session_lock_owned_by_self "$FM_HOME/state"'
+    # Contract: an unavailable argv reader must not turn positional prompt
+    # text into a native subcommand. Hide python3 while retaining lock tools.
+    no_python = home / 'no-python'
+    no_python.mkdir()
+    for name in ('bash', 'basename', 'dirname', 'cat', 'grep', 'tr', 'uname',
+                 'mkdir', 'mktemp', 'rm', 'date', 'mv', 'rmdir', 'sleep',
+                 'head', 'tail', 'cut', 'sed', 'awk', 'jq', 'touch', 'git',
+                 'ln', 'readlink', 'stat', 'chmod', 'cp', 'cmp'):
+        path = shutil.which(name)
+        assert path, 'missing fixture tool: ' + name
+        (no_python / name).symlink_to(path)
+    (no_python / 'ps').symlink_to(home / 'fakebin/ps')
+    saved_path = env['PATH']
+    env['PATH'] = str(no_python)
+    assert run('command -v python3', None).returncode == 1, 'python3 remained available'
+    env['FM_FIXTURE_SUBCOMMAND'] = '-m gpt-5.5 --approve-for-me Inspect codex app-server ownership'
+    acquired = run(lock, None)
+    assert acquired.returncode == 0, 'missing-python CLI could not acquire an empty home: ' + acquired.stdout + acquired.stderr
+    assert (home / 'state/.lock').read_text().strip() == str(os.getpid()), 'missing-python CLI lost its PID anchor'
+    assert not (home / 'state/.lock-session').exists(), 'missing-python CLI published a native identity'
+    assert run(lock, None).returncode == 0, 'missing-python CLI could not re-enter its lock'
+    assert run(own, None).returncode == 0, 'missing-python CLI lost ownership'
+    (home / 'state/.lock').unlink()
+    env['PATH'] = saved_path
+    print('ok - missing-python prompt text retains ordinary CLI lock ownership')
     # Contract: a shared server without identity cannot publish a PID-only
     # lock, even when a global directory value contains spaces.
     env['FM_FIXTURE_SUBCOMMAND'] = "-C '/Users/me/My Home' app-server"
@@ -335,17 +360,18 @@ exec {shlex.quote(sys.executable)} "$@"
         assert run(lock, OTHER).returncode == 1, 'identified native server accepted a competing session'
         (home / 'state/.lock').unlink()
         (home / 'state/.lock-session').unlink()
-    # The OS denies argv reads. No retained environment or hook ID can turn
-    # the flattened, ambiguous process row into verified native ancestry.
+    # The OS denies argv reads. A server in the subcommand position still
+    # cannot prove native identity from retained environment or hook IDs.
+    # Spaced option values are covered above with the argv reader available.
     env['FM_FIXTURE_ARGV_UNREADABLE'] = '1'
     for arguments in (
-        "-C '/Users/me/My Home' app-server",
         'app-server --listen stdio://',
-        '-c sandbox_permissions=[ "disk-full-read-access" ] app-server',
-        '--config sandbox_permissions=[ "disk-full-read-access" ] app-server',
-        '--config=sandbox_permissions=[ "disk-full-read-access" ] app-server',
-        '-cfeatures={ hooks=true } app-server',
-        '-c note="split value" app-server',
+        '-c features.hooks=true app-server',
+        '--config features.hooks=true app-server',
+        '--config=features.hooks=true app-server',
+        '-cfeatures.hooks=true app-server',
+        '-C /Users/me/Home app-server',
+        '-m gpt-5.5 --approve-for-me app-server',
     ):
         env['FM_FIXTURE_SUBCOMMAND'] = arguments
         for identity in (OWNER, OTHER, None):
