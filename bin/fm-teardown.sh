@@ -50,7 +50,8 @@
 # do not show the work, OR - for a
 # normal ship task whose commits are not so reachable - when its PR is merged and
 # GitHub reports a PR head that contains the current local work, or its content is
-# already present in the up-to-date default branch. This recognizes the common
+# already present in the up-to-date default branch, or its commits are reachable
+# from the LOCAL default branch. This recognizes the common
 # squash-merge-then-delete-branch flow, where the branch's own commits live nowhere
 # on a remote yet the change is fully in main. A task whose meta records
 # base_branch= (bin/fm-spawn.sh) runs that content check against origin's copy of
@@ -79,7 +80,9 @@
 # untracked work and the clean return control.
 # local-only projects additionally accept work merged into the local default
 # branch (firstmate performs that merge after configured approval) as a fallback
-# for the common case where there is no remote at all.
+# for the common case where there is no remote at all. That local default branch
+# is a landed-work proof in every mode, because a local-only delivery lands
+# there whether or not the task record still names that mode.
 # Safety is proved again after task processes are reaped, before backlog-close
 # publication, branch deletion, or worktree return.
 # Scout tasks (kind=scout in meta) carve out of that check: their worktree is
@@ -1791,15 +1794,32 @@ content_in_default() {
   [ "$merged_tree" = "$default_tree" ]
 }
 
+# Has the worktree's committed work landed on the LOCAL default branch? A
+# local-only delivery (bin/fm-merge-local.sh) fast-forwards that branch, so a
+# commit no remote holds is still landed and its copy can be reclaimed. Proves
+# reachability only: HEAD must be an ancestor of the local default branch, so a
+# commit that branch does not contain stays unlanded and its copy stays
+# protected. Returns non-zero when the local default branch cannot be resolved,
+# so the caller refuses rather than guesses.
+landed_in_local_default() {
+  local name ref
+  name=$(default_branch) || return 1
+  ref="refs/heads/$name"
+  git -C "$WT" rev-parse --quiet --verify "$ref^{commit}" >/dev/null 2>&1 || return 1
+  git -C "$WT" merge-base --is-ancestor HEAD "$ref" 2>/dev/null
+}
+
 # Has the worktree's committed work actually LANDED, though its commits are not
 # reachable from any remote-tracking branch? True when a merged PR proves the
 # current local work is contained in the PR head, OR the content is already in the
-# default branch (fallback, which also covers the no-PR and gh-error paths). False
-# when neither proof establishes that the work landed.
+# default branch (fallback, which also covers the no-PR and gh-error paths), OR
+# the work is reachable from the local default branch (a local-only delivery
+# lands there). False when no proof establishes that the work landed.
 work_is_landed() {
   local branch=$1
   pr_is_merged "$branch" && return 0
-  content_in_default
+  content_in_default && return 0
+  landed_in_local_default
 }
 
 # The completion links this teardown already holds locally. A retained scout

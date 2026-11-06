@@ -24,6 +24,8 @@
 #   (a) local-only + HEAD on a fork remote-tracking branch     -> ALLOW  (fork fix)
 #   (b) local-only + truly unpushed work (no remote, not main) -> REFUSE (safety)
 #   (c) local-only + merged into local main, no remote         -> ALLOW  (no regression)
+#   (c2) direct-PR + merged into local main, no remote         -> ALLOW  (local-default fix)
+#   (c3) direct-PR + not in local main, no remote              -> REFUSE (safety preserved)
 #   (d) no-mistakes + HEAD on origin remote-tracking branch    -> ALLOW  (no regression)
 #   (e) no-mistakes + unpushed, no PR, content not in default  -> REFUSE (safety)
 #   (f) local-only + truly unpushed + --force                  -> ALLOW  (escape hatch)
@@ -909,6 +911,45 @@ test_local_only_merged_to_local_main_allows() {
   expect_code 0 "$rc" "merged-main: teardown should succeed when work is merged into local main"
   ! grep -q REFUSED "$case_dir/stderr" || fail "merged-main: teardown printed a REFUSED line"
   pass "local-only worktree with work merged into local main is torn down (no regression)"
+}
+
+# A commit the local default branch holds is landed even when no remote holds it
+# and the task record never named a local merge: a local-only delivery
+# fast-forwards that branch, so its copy can be reclaimed. The same work stays
+# protected while the local default branch does not hold it.
+test_local_default_branch_reachability_is_landed() {
+  local case_dir rc wt_head
+  case_dir=$(make_case local-default-reachability)
+  write_meta "$case_dir" direct-PR ship
+  wt_commit_file "$case_dir" feature.txt hello "add feature"
+  wt_head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  # Only the local default branch holds the commit: no remote ever received it.
+  git -C "$case_dir/project" update-ref refs/heads/main "$wt_head"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "local-default-reachability: teardown should succeed when the local default branch holds the work"
+  ! grep -q REFUSED "$case_dir/stderr" || fail "local-default-reachability: teardown printed a REFUSED line"
+  assert_absent "$case_dir/state/task-x1.meta" "local-default-reachability: teardown left task metadata after cleanup"
+  pass "work reachable from the local default branch is landed even when no remote holds it"
+
+  case_dir=$(make_case local-default-unlanded)
+  write_meta "$case_dir" direct-PR ship
+  wt_commit_file "$case_dir" feature.txt hello "add feature"
+  wt_head=$(git -C "$case_dir/wt" rev-parse HEAD)
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "local-default-unlanded: teardown should refuse when the local default branch does not hold the work"
+  grep -q REFUSED "$case_dir/stderr" || fail "local-default-unlanded: no REFUSED line in stderr"
+  assert_refusal_retained_task_state "$case_dir" "local-default-unlanded" "$wt_head"
+  pass "work the local default branch does not hold is still refused"
 }
 
 # Send the task branch's commits to <target> on origin from a separate clone, so
@@ -6488,6 +6529,7 @@ test_teardown_closes_a_gitlab_task_with_its_merge_request_url_as_a_note
 test_teardown_manual_backend_leaves_the_backlog_to_the_operator
 test_local_only_truly_unpushed_refuses
 test_local_only_merged_to_local_main_allows
+test_local_default_branch_reachability_is_landed
 test_landed_on_other_origin_branch_with_stale_refs_allows
 test_refresh_failure_does_not_read_as_landed
 test_refreshed_refs_still_refuse_unreachable_commits
