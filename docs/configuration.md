@@ -1575,7 +1575,7 @@ A relaunch validates the list and the replacement runtime's support before stopp
 Claude Code sends every enabled tool's schema with each model call, and a long-lived worker resends them on every turn.
 List a tool the workers do not use to remove its schema from that fixed cost, for example `Workflow`, `ScheduleWakeup`, or the artifact tools.
 Claude Code can supply a built-in `Artifact` tool when the artifacts MCP server is disallowed, so hide both `mcp__<artifacts-server>` and `Artifact` to remove every artifact schema.
-Only a name that matches a tool present in the worker's session has any effect, and Firstmate does not verify names on Claude, so confirm the saving from a worker's first request or `/context`.
+Only a name that matches a tool present in the worker's session has any effect; [Validation](#validation) explains why Claude names go unchecked, so confirm the saving from a worker's first request or `/context`.
 The measured effect on a Claude Code 2.1.319 worker launch is recorded in [`docs/verification/runtime-backends.md`](verification/runtime-backends.md).
 
 ### Validation
