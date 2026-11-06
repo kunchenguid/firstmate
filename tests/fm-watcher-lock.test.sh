@@ -287,22 +287,49 @@ test_live_stalled_watch_lock_is_replaced_past_hard_bound() {
 }
 
 # Stop <pid> at a moment it holds no state lock but the watch lock, so a
-# successor never waits on a lock the stopped holder cannot release.
+# successor never waits on a lock the stopped holder cannot release. A lock link
+# is published by a background child (`ln -s ... &` in fm_lock_try_create), so
+# stopping <pid> alone lets that child create a lock after the scan; the whole
+# process tree is stopped before scanning instead. STOPPED_TREE lists every
+# stopped pid for resume_stopped_tree.
+STOPPED_TREE=
 stop_outside_state_locks() {  # <pid> <state>
-  local pid=$1 state=$2 i=0 lock held
+  local pid=$1 state=$2 i=0 lock held holder p child added
   while [ "$i" -lt 100 ]; do
     kill -STOP "$pid" 2>/dev/null || return 1
+    STOPPED_TREE=" $pid "
+    added=1
+    while [ "$added" -eq 1 ]; do
+      added=0
+      for p in $STOPPED_TREE; do
+        for child in $(pgrep -P "$p" 2>/dev/null); do
+          case "$STOPPED_TREE" in *" $child "*) continue ;; esac
+          kill -STOP "$child" 2>/dev/null || true
+          STOPPED_TREE="$STOPPED_TREE$child "
+          added=1
+        done
+      done
+    done
     held=0
     for lock in "$state"/.*.lock "$state"/.*.lock.steal "$state"/*.lock; do
       [ "$lock" != "$state/.watch.lock" ] || continue
-      [ "$(cat "$lock/pid" 2>/dev/null || true)" != "$pid" ] || { held=1; break; }
+      holder=$(cat "$lock/pid" 2>/dev/null || true)
+      case "$STOPPED_TREE" in *" ${holder:-none} "*) held=1; break ;; esac
     done
     [ "$held" -eq 1 ] || return 0
-    kill -CONT "$pid" 2>/dev/null || true
+    resume_stopped_tree
     sleep 0.05
     i=$((i + 1))
   done
   return 1
+}
+
+resume_stopped_tree() {
+  local p
+  for p in $STOPPED_TREE; do
+    kill -CONT "$p" 2>/dev/null || true
+  done
+  STOPPED_TREE=
 }
 
 # Issue #7801: on a /proc-less host outside UTC, a watcher started before
@@ -366,7 +393,7 @@ run_legacy_identity_takeover() {  # <case> <successor-first>
     done
     released=$([ -e "$state/.watch.lock/pid" ] && echo no || echo yes)
     # Resume before any assertion can fail, so a failure never strands it stopped.
-    kill -CONT "$old" 2>/dev/null || true
+    resume_stopped_tree
     is_live_non_zombie "$new" && fail "the successor never delivered its recovery wake and exited: $(cat "$new_out")"
     wait "$new" || fail "the successor did not exit cleanly after its recovery wake: $(cat "$new_out")"
     # A successor that held the lock delivers a wake; one that stood down prints
