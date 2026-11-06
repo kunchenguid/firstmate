@@ -1502,6 +1502,10 @@ families_for_changed_path() {
       ;;
   esac
   case "$path" in
+    tests/fm-codex-session-lock-repro.py)
+      printf '%s\n' "__script__:fm-codex-session-lock.test.sh" \
+        "__script__:fm-codex-session-identity-live-e2e.test.sh"
+      ;;
     tests/fm-backend-herdr-eventwait.test.py)
       printf '%s\n' real-herdr-gated
       printf '%s\n' backend-dispatch

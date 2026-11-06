@@ -1488,6 +1488,28 @@ test_changed_shared_fixture_selects_its_readers() {
   pass "a changed shared test fixture selects its readers while an unread tests/ path still refuses"
 }
 
+test_changed_codex_session_fixture_selects_both_consumers() {
+  local tmp repo listed expected script
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-codex-fixture.XXXXXX")
+  repo="$tmp/repo"
+  init_changed_fixture_repo "$repo"
+  for script in fm-codex-session-lock.test.sh fm-codex-session-identity-live-e2e.test.sh; do
+    printf '#!/usr/bin/env bash\n' >"$repo/tests/$script"
+    chmod +x "$repo/tests/$script"
+  done
+  : >"$repo/tests/fm-codex-session-lock-repro.py"
+  git -C "$repo" add tests
+  git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -qm codex-fixture
+
+  printf '\n' >>"$repo/tests/fm-codex-session-lock-repro.py"
+  listed=$(cd "$repo" && bin/fm-test-run.sh --list --changed --base HEAD | LC_ALL=C sort)
+  expected=$(printf '%s\n' tests/fm-codex-session-lock.test.sh tests/fm-codex-session-identity-live-e2e.test.sh | LC_ALL=C sort)
+  [ "$listed" = "$expected" ] || fail "Codex session fixture must select exactly both consumers: $listed"
+
+  rm -rf "$tmp"
+  pass "a changed Codex session fixture selects exactly its two consumers"
+}
+
 # Suites outside backend-dispatch source the T3 fake and the T3 adapter, so a
 # change to either selects the suites that read them as well.
 test_changed_t3_sources_select_their_readers() {
@@ -1958,6 +1980,7 @@ test_jobs_requires_proven_isolated
 test_jobs_admits_a_concurrent_safe_family
 test_unmapped_new_test_never_inherits_family_concurrency
 test_changed_shared_fixture_selects_its_readers
+test_changed_codex_session_fixture_selects_both_consumers
 test_changed_t3_sources_select_their_readers
 test_concurrent_runs_are_ordered_longest_first
 test_per_script_timeout_bounds_a_hang
