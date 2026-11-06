@@ -590,6 +590,10 @@
       "audience": "maintainer-verification"
     },
     {
+      "path": "docs/verification/droid-primary.md",
+      "audience": "maintainer-verification"
+    },
+    {
       "path": "docs/verification/hermes.md",
       "audience": "maintainer-verification"
     },
@@ -599,7 +603,6 @@
     },
     {
       "path": "docs/verification/lint-option-a.md",
-
       "audience": "maintainer-verification"
     },
     {

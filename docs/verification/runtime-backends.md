@@ -2277,7 +2277,7 @@ The fixture captures submitted input through Pi's `input` extension hook, so the
 The daemon injection transport into a live composer keeps its coverage in `tests/fm-afk-inject-herdr-e2e.test.sh` for the harnesses that still run the daemon, and the dedicated Herdr daemon workspace topology is covered by `tests/fm-afk-launch.test.sh` and preserves the captain tab's pane count.
 
 The Droid/Herdr away-mode path was refreshed on 2026-09-04 with Droid 0.212.0 and Herdr 0.8.0.
-[`droid-primary.md`](droid-primary.md#away-mode-delivery-under-herdr) owns the exact command, causal and disconfirming evidence, pending-text and max-defer results, same-session delivery signal, cleanup proof, shared-hook comparison, and backend applicability review.
+[`droid-primary.md`](droid-primary.md#away-mode-delivery-under-herdr) records the imported live observations, their limitations, and the guarded refresh boundary.
 
 ## Zellij
 
@@ -3537,6 +3537,110 @@ This live proof covers the watcher and queue boundary; it does not establish liv
 `bin/fm-test-run.sh tests/fm-daemon.test.sh` exercises that consumer routing separately with portable regressions for busy escalation and busy-bookkeeping failures in away and quiet mode.
 Repeat the hooked-worker check above before publication if watcher or task-inbox busy code changes; `bin/fm-test-run.sh tests/fm-task-inbox.test.sh` refreshes the portable ladder regressions.
 
+## Droid
+
+### 2026-11-05 primary and launch refresh
+
+Droid 1.4.1 passed the credentialed tmux primary guard on macOS using an isolated HOME and a private tmux server:
+
+```sh
+FM_DROID_PRIMARY_LIVE_E2E=1 bash tests/fm-droid-primary-live-e2e.test.sh
+```
+
+The real launch cleared fresh-folder trust, left default model selection unpinned, observed the actual session model, and applied an exact native model despite a conflicting project default.
+The guard reported:
+
+```text
+Droid 1.4.1 live spawn: trust cleared; effective_model=custom:GPT-6.1-Sol-0; runtime model override absent
+ok - Droid live spawn: fresh-worktree folder trust is answered and the default model is observed
+Droid 1.4.1 live spawn: observed=gpt-6.1-sol; effort indicator unverified (no model-row High indicator)
+ok - Droid live spawn: exact native runtime model overrides conflicting project defaults
+Droid 1.4.1 live relaunch: effort indicator unverified (no model-row Medium indicator)
+ok - Droid live primary hooks: project settings, SessionStart, PreToolUse, Stop blocking, and loop guard
+ok - Droid live composer: detached cursor remains safe for idle and typed input
+ok - Droid live foreground tool: no reasoning continuation until tool completion
+ok - Droid 1.4.1 primary live verification complete
+```
+
+This proves the hook transport and runtime model observations, not a rendered reasoning-effort indicator.
+[Primary verification](droid-primary.md) records historical away-mode evidence, portable coverage, and remaining live limitations.
+No Herdr lifecycle was driven for this refresh.
+
+The independent lifecycle guard also passed on Droid 1.4.1 in a private HOME and tmux server:
+
+```sh
+FM_DROID_SIGNALS_LIVE=1 bash tests/fm-droid-signals-live-e2e.test.sh
+```
+
+Its observed assertions were:
+
+```text
+ok - Droid 1.4.1 independent working signals match the scoped busy guard
+ok - Droid 1.4.1 trusted worktree brief runs, exact ancestry detects Droid, and Stop fires
+ok - Droid 1.4.1 idle composer permits delivery
+ok - Droid 1.4.1 process-local dynamic effort and requested model apply in native settings
+ok - Droid 1.4.1 single Escape interrupts a running turn
+ok - Droid 1.4.1 /quit exits the agent
+DROID_LIVE_RESULT version=1.4.1 detection=pass launch=pass busy=pass stop=pass composer=pass profile=pass interrupt=pass exit=pass
+ok - Droid 1.4.1 exact-worktree trust is retired after exit
+ok - Droid 1.4.1 public scout relaunch completes a replacement turn with dynamic effort
+DROID_FISH_IDLE command=fish cursor=42
+ok - Droid 1.4.1 public Fish-backed ship exit preserves drafts and stops the idle agent
+```
+
+The native `/settings` assertion proves runtime dynamic effort separately from the unverified model-row High/Medium indicators above.
+Native Execute `fireAndForget: true` also delivered automatic completion notifications for these validation commands on Droid 1.4.1, including after the initiating turn ended, without polling a job id.
+That observation establishes the background notification transport; the portable checkpoint regression establishes quiet rotation and bounded failure behavior.
+
+### Historical crewmate and scout evidence
+
+Verified on 2026-10-09 with Droid 0.237.0, tmux 3.7c, and Fish 4.9.3 on macOS in an isolated tmux server, linked task worktree, and private HOME.
+The [Droid adapter reference](../../.agents/skills/harness-adapters/references/harness/droid.md) owns current operations and restrictions.
+This historical run covers crewmate and scout support; [Droid primary verification](droid-primary.md) records the separate primary and secondmate integration evidence and its refresh boundaries.
+
+Refresh the credentialed guard with:
+
+```sh
+FM_DROID_SIGNALS_LIVE=1 FM_DROID_LIVE_MODEL=custom:GPT-5.6-Sol-0 bash bin/fm-test-run.sh --per-script-timeout-secs 600 tests/fm-droid-signals-live-e2e.test.sh
+```
+
+Observed guard assertions:
+
+```text
+ok - Droid 0.237.0 independent working signals match the scoped busy guard
+ok - Droid 0.237.0 trusted worktree brief runs, exact ancestry detects Droid, and Stop fires
+ok - Droid 0.237.0 idle composer permits delivery
+ok - Droid 0.237.0 process-local dynamic effort and requested model apply in native settings
+ok - Droid 0.237.0 single Escape interrupts a running turn
+ok - Droid 0.237.0 /quit exits the agent
+DROID_LIVE_RESULT version=0.237.0 detection=pass launch=pass busy=pass stop=pass composer=pass profile=pass interrupt=pass exit=pass
+ok - Droid 0.237.0 exact-worktree trust is retired after exit
+ok - Droid 0.237.0 public scout relaunch completes a replacement turn with dynamic effort
+DROID_FISH_IDLE command=fish cursor=42
+ok - Droid 0.237.0 public Fish-backed ship exit preserves drafts and stops the idle agent
+```
+
+Droid stores folder trust in the persistent `trustedFolders` object in `~/.factory/settings.json`; adding that field to a process-only `--settings` file did not suppress the fresh-folder dialog on 0.233.0.
+The live guard proves that exact-worktree registration through `bin/fm-droid-trust.sh` suppresses the gate on 0.237.0 and that the launched worker actually executes its brief.
+After `/quit`, the same guard removes the exact logical and physical worktree trust keys and confirms they are absent from native settings.
+The working spinner row and interrupt hint each classify busy when the other is deliberately removed from the native capture.
+It also proves `Auto (High)` survives inherited medium-autonomy user session defaults when the process settings pin the template's autonomy.
+The native `/settings` surface confirms the requested model and `Dynamic` reasoning level are overridden by the runtime settings file.
+The guard retains the configured session model unless `FM_DROID_LIVE_MODEL` selects another authenticated model.
+The tmux composer check uses the real cursor and exact foreground process identity, including Droid's cursor below the input box after Stop.
+The public scout scenario launches through `fm-spawn`, relaunches through `fm-control`, and requires a fresh computed report and Stop event from the replacement with recorded `dynamic` effort before exit and teardown.
+The Fish-backed ship scenario also launches through `fm-spawn`, refuses exit with an unsent draft, and stops the idle agent through `fm-control` despite tmux reporting `fish` and cursor row 42.
+The portable composer case blinds tmux's command name while retaining exact kernel foreground identity, and refuses unrelated foreground processes and background Droid processes over an empty stale composer.
+These scenarios require Treehouse, Fish, and compatible `tasks-axi` (0.2.6 in this verification).
+The portable guards refresh with:
+
+```sh
+bash bin/fm-test-run.sh tests/fm-droid-harness.test.sh tests/fm-harness-precedence.test.sh tests/fm-spawn-dispatch-profile.test.sh tests/fm-control-relaunch.test.sh tests/fm-backlog-atomicity.test.sh tests/fm-teardown.test.sh tests/fm-teardown-endpoint-safety.test.sh
+```
+
+The portable cases cover exact-name process detection, foreign-marker precedence, adapter-scoped busy classification including cmux, timer-footer composer safety, scoped trust registration, exact-path cleanup, and malformed-store refusal, model/effort settings, hook quoting, collisions, failed-spawn cleanup, preserved-task settings, dynamic-effort relaunch, receipt-only teardown retries, and cleanup transfer to a non-Droid successor, including concurrent retirement with a vanished pooled worktree.
+Herdr, Zellij, cmux, and Orca have no new credentialed Droid placement evidence in this record; they retain their existing backend delivery and control limitations.
+
 ## OpenCode 2 launch and brief delivery
 
 Verified on 2026-10-15 on Linux x86_64 against OpenCode 2.0.11 and 2.0.22, each installed into a scratch npm prefix with scratch `HOME`, XDG directories, and `OPENCODE_DB`, while the host's global OpenCode 1.18 stayed in place.
@@ -3782,51 +3886,3 @@ Real Herdr.app exercise on 2026-11-02: the official herdr-app 0.1.11 bundle (sha
 - `send --wait`'s `started`/`working` proof against a real status-reporting harness; the lab run covered a non-reporting shell, whose verdict falls to the composer screen.
 - Native `status.state` reported by a real harness launched through `bin/fm-spawn.sh`.
 
-## Droid
-
-Verified on 2026-10-09 with Droid 0.237.0, tmux 3.7c, and Fish 4.9.3 on macOS in an isolated tmux server, linked task worktree, and private HOME.
-The [Droid adapter reference](../../.agents/skills/harness-adapters/references/harness/droid.md) owns current operations and restrictions.
-This evidence covers crewmate and scout support; primary and secondmate integration are unsupported.
-
-Refresh the credentialed guard with:
-
-```sh
-FM_DROID_SIGNALS_LIVE=1 FM_DROID_LIVE_MODEL=custom:GPT-5.6-Sol-0 bash bin/fm-test-run.sh --per-script-timeout-secs 600 tests/fm-droid-signals-live-e2e.test.sh
-```
-
-Observed guard assertions:
-
-```text
-ok - Droid 0.237.0 independent working signals match the scoped busy guard
-ok - Droid 0.237.0 trusted worktree brief runs, exact ancestry detects Droid, and Stop fires
-ok - Droid 0.237.0 idle composer permits delivery
-ok - Droid 0.237.0 process-local dynamic effort and requested model apply in native settings
-ok - Droid 0.237.0 single Escape interrupts a running turn
-ok - Droid 0.237.0 /quit exits the agent
-DROID_LIVE_RESULT version=0.237.0 detection=pass launch=pass busy=pass stop=pass composer=pass profile=pass interrupt=pass exit=pass
-ok - Droid 0.237.0 exact-worktree trust is retired after exit
-ok - Droid 0.237.0 public scout relaunch completes a replacement turn with dynamic effort
-DROID_FISH_IDLE command=fish cursor=42
-ok - Droid 0.237.0 public Fish-backed ship exit preserves drafts and stops the idle agent
-```
-
-Droid stores folder trust in the persistent `trustedFolders` object in `~/.factory/settings.json`; adding that field to a process-only `--settings` file did not suppress the fresh-folder dialog on 0.233.0.
-The live guard proves that exact-worktree registration through `bin/fm-droid-trust.sh` suppresses the gate on 0.237.0 and that the launched worker actually executes its brief.
-After `/quit`, the same guard removes the exact logical and physical worktree trust keys and confirms they are absent from native settings.
-The working spinner row and interrupt hint each classify busy when the other is deliberately removed from the native capture.
-It also proves `Auto (High)` survives inherited medium-autonomy user session defaults when the process settings pin the template's autonomy.
-The native `/settings` surface confirms the requested model and `Dynamic` reasoning level are overridden by the runtime settings file.
-The guard retains the configured session model unless `FM_DROID_LIVE_MODEL` selects another authenticated model.
-The tmux composer check uses the real cursor and exact foreground process identity, including Droid's cursor below the input box after Stop.
-The public scout scenario launches through `fm-spawn`, relaunches through `fm-control`, and requires a fresh computed report and Stop event from the replacement with recorded `dynamic` effort before exit and teardown.
-The Fish-backed ship scenario also launches through `fm-spawn`, refuses exit with an unsent draft, and stops the idle agent through `fm-control` despite tmux reporting `fish` and cursor row 42.
-The portable composer case blinds tmux's command name while retaining exact kernel foreground identity, and refuses unrelated foreground processes and background Droid processes over an empty stale composer.
-These scenarios require Treehouse, Fish, and compatible `tasks-axi` (0.2.6 in this verification).
-The portable guards refresh with:
-
-```sh
-bash bin/fm-test-run.sh tests/fm-droid-harness.test.sh tests/fm-harness-precedence.test.sh tests/fm-spawn-dispatch-profile.test.sh tests/fm-control-relaunch.test.sh tests/fm-backlog-atomicity.test.sh tests/fm-teardown.test.sh tests/fm-teardown-endpoint-safety.test.sh
-```
-
-The portable cases cover exact-name process detection, foreign-marker precedence, adapter-scoped busy classification including cmux, timer-footer composer safety, scoped trust registration, exact-path cleanup, and malformed-store refusal, model/effort settings, hook quoting, collisions, failed-spawn cleanup, preserved-task settings, dynamic-effort relaunch, receipt-only teardown retries, and cleanup transfer to a non-Droid successor, including concurrent retirement with a vanished pooled worktree.
-Herdr, Zellij, cmux, and Orca have no new credentialed Droid placement evidence in this record; they retain their existing backend delivery and control limitations.

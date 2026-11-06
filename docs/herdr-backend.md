@@ -789,7 +789,6 @@ Droid's cursorless bordered composer also admits its elapsed footer with an opti
 
 ### Away-mode injection
 
-
 A bare shell prompt is never an empty agent composer.
 Away-mode injection proceeds only on an affirmative `empty` result, never on unknown.
 This prevents a dead agent pane from receiving and possibly executing an escalation as shell input.

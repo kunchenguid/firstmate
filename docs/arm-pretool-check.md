@@ -30,7 +30,6 @@ It tokenizes the bytes and classifies lexical execution positions only.
 - `--agy` for Antigravity CLI, reading stdin JSON from `.toolCall.args.CommandLine`, `.toolCall.args.command`, `.toolInput.command`, or `.tool_input.command`, denying redundant manual arming when a watcher is healthy, and emitting `{"decision":"deny","reason":...}` on stdout with exit 0.
 - `--primary-only` to make a tracked project registration inert in linked crewmate worktrees and non-Firstmate repositories.
 
-
 The wrapper discovers the code root from its own location.
 The active firstmate home is `${FM_HOME:-<code-root>}`.
 It passes both roots and the exact command string to the Node policy owner.

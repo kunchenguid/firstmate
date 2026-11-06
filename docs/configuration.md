@@ -1246,12 +1246,13 @@ A local standalone-clone home cannot receive a primary-local commit through that
 
 ## Harness support
 
-claude, codex, opencode, pi, pi-signed, grok, kimi, cursor, and omp are empirically verified for crewmate and secondmate launches; gemini is verified for crewmate and scout launches only, and [README requirements](../README.md#requirements) own the set supported for the primary session.
+claude, codex, opencode, pi, pi-signed, grok, kimi, cursor, omp, and droid are empirically verified for crewmate and secondmate launches; gemini is verified for crewmate and scout launches only, and [README requirements](../README.md#requirements) own the set supported for the primary session.
 
 ### Harness restrictions and credentials
 
 `fm-spawn.sh` refuses kimi on cmux and Orca at preflight, because answering Kimi's folder-trust dialog needs a verified viewport-only capture those backends lack; [its adapter reference](../.agents/skills/harness-adapters/references/harness/kimi.md#readiness-gated-start) owns the trust-dialog handling.
 It also never answers a Kimi folder prompt that announces project MCP servers, pages what trusting would activate, or is collapsed for a short terminal, so no project MCP server starts without a consent decision that covers it; the launch fails with that reason, and the same adapter reference owns the exact rules.
+
 Droid's canonical launch likewise requires viewport capture to answer folder trust and confirm brief processing; [its adapter reference](../.agents/skills/harness-adapters/references/harness/droid.md#launch-settings) owns its launch settings.
 Task metadata `model` records the requested selection: an explicit `--model`, a dispatch-profile or secondmate pin, or `default` for an unset selection that follows the user's current default.
 `fm-control.sh` relaunch and recovery consume only this selection; observing a default never creates a model pin.
@@ -1266,7 +1267,6 @@ An observation arriving while spawn holds that lock is reconciled after launch; 
 Remote launch and relaunch replies mirror both fields from the launching host; switching away from Droid removes `effective_model` from both host and parent records.
 The fleet ledger receives the observed identifier available at dispatch, including an honest `unknown-at-spawn` if reconciliation has not happened yet.
 Neither runtime settings generation nor relaunch or recovery uses `effective_model` for selection.
-
 
 A cursor secondmate or primary runs the tracked project-scope `.cursor/hooks.json` in its own home and must be launched with `--trust`, or no project hook loads; [`docs/supervision-protocols/cursor.md`](supervision-protocols/cursor.md) owns its supervision protocol.
 
@@ -1308,7 +1308,7 @@ The first-start license dialog requires an operator decision and is never accept
 
 ### Verification and primary supervision
 
-Droid is verified for crewmate and scout launches only; primary and secondmate supervision are unsupported.
+Droid supports primary and secondmate supervision as well as crewmate and scout launches.
 Its [adapter reference](../.agents/skills/harness-adapters/references/harness/droid.md) owns current trust, model, effort, and lifecycle facts, and [runtime verification](verification/runtime-backends.md#droid) records the live guard.
 Template-backed Droid launches require `jq` to construct private per-task settings; bootstrap diagnoses that dependency for static Droid crew selection or an active dispatch profile file, and every template-backed Droid spawn checks it before allocation.
 
@@ -1329,7 +1329,6 @@ Primary-session watcher wake protocols are rendered at session start by [`bin/fm
 Claude's Stop `asyncRewake` hook owns tokenless re-arm cycles, Cursor's stop hook parks on the watcher, Grok and Droid use background-notify cycles, Codex uses bounded foreground checkpoints unless the home opts in to its [native Stop park](#codex-native-stop-park-configcodex-stop-park), Pi and pi-signed use the same two tracked primary extensions, omp uses its own two tracked `.omp/extensions/` files with a blocking `session_stop` turn-end hook, and OpenCode uses its TUI plugin.
 
 ### Choose the worker harness
-
 
 `config/crew-harness` is a local, gitignored file containing one adapter name for crewmate and scout launches.
 When pi-signed is selected, Firstmate preserves `FM_PI_HARNESS=pi-signed` and refuses the launch if the selected executable is unavailable rather than falling back to pi; [`fm-spawn.sh --help`](../bin/fm-spawn.sh) owns executable resolution and launch mechanics.
@@ -3408,7 +3407,6 @@ FM_WHEN_OUTPUT_TAIL_BYTES=8192          # bound on the command-output tail insid
 FM_CODEX_WATCH_CHECKPOINT=180   # seconds per foreground watcher checkpoint in Codex primary supervision
 FM_CODEX_WATCH_CHECKPOINT_AWAY=3600  # requested away checkpoint bound on a home that runs the supervision host; longer of this and attended bound, capped at 27000
 FM_CREW_STATE_NM_TIMEOUT=10   # seconds allowed per no-mistakes query inside fm-crew-state.sh, and per state-database run-inventory read behind a capped AXI overview
-
 FM_TEARDOWN_NM_TIMEOUT=10    # seconds allowed per no-mistakes query or abort inside fm-teardown.sh
 FM_CREW_STATE_RUNS_LIMIT=200  # plain runs-ledger rows scanned for fallback attribution; does not change the CLI's AXI overview window (selection owner: bin/fm-nm-run-lib.sh)
 FM_TEARDOWN_NM_RUNS_LIMIT=200  # recent no-mistakes run rows scanned to prove an unresolved-head parked run belongs to teardown's task

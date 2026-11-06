@@ -27,7 +27,6 @@ The tier is a property of the harness surface, not of the home.
 | Tier | What the adapter does | Used by |
 | --- | --- | --- |
 | Run | Executes `bin/fm-session-start.sh` through the native session-open adapter and gates its ordered digest into model context before the first turn. | Claude, `codex exec`, verified native Codex TUI, Pi / pi-signed, omp, Cursor, Droid, Antigravity (agy) |
-
 | Nudge | Asks the agent to run the digest through the native adapter or the tracked session-start instruction. | Grok, OpenCode, and run-tier sources routed to the nudge |
 
 Codex's interactive TUI has verified session-open delivery only on the native version selected by `bin/fm-codex-stop-park.sh`; its compaction and re-emit surfaces remain unverified.
@@ -235,7 +234,6 @@ None of these becomes a refusal to open the session.
 ## Harness transports
 
 Each subsection below gives one harness surface's tier, its tracked transport, and its current compatibility.
-
 
 ### Claude
 
@@ -471,7 +469,6 @@ Its separate `FM_PI_SESSIONSTART_RACE_LIVE_E2E=1` mode uses real Pi with an offl
 That mode proves both an immediate prompt and a completed-before-prompt control make their first provider call with exactly one native startup context and no manual execution.
 
 Cursor uses the separate primary live guard named in [Cursor tests](#cursor-tests) because its source-free `sessionStart` and stop-hook park are validated together.
-
 
 `tests/fm-sessionstart-instruction-refresh-live-e2e.test.sh` is the separate opt-in real-Pi guard for a post-start AGENTS.md update followed by compaction.
 

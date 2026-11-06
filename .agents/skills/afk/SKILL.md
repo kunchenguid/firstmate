@@ -3,7 +3,6 @@ name: afk
 description: >-
   Enter the away posture when the captain invokes /afk, says they are going afk, `state/.afk-contract` or `state/.afk` exists, an incoming message starts with `FM_INJECT_MARK`, or any `state/.subsuper-*` marker is involved.
   Load it at once in the /afk turn, before any other work, and on the first unmarked message while away to render the return brief.
-
 user-invocable: true
 metadata:
   internal: true
@@ -65,7 +64,6 @@ Hold-for-return is the default and the only reach profile this release records: 
   Anything else holds for the return, a red merge never proceeds while away, local-only landing always waits for the captain, and only a wake the branch declines (including a broken branch or unsafe scan) or a watcher failure wakes main (`docs/pi-supervision-branch.md` "Postures").
 - On a non-Pi home that runs the supervision host, the host's engine is that branch under the same rules, and a wake it hands back reaches main through that harness's own wake path (`Stop hook feedback` on Claude, a `watcher` follow-up on Cursor, OpenCode, and omp, the arm's background-task-completed notification on Grok, the checkpoint's output on Codex) with a `supervision-host:` line: that is automatic supervision, never the captain's return, so handle it under the away posture ([supervision protocol](../../../docs/supervision-protocols/supervision-host.md)).
 - The session-start digest reports the posture under its AFK subsection, so a restart re-enters the posture from the record, not from memory.
-
 
 ## How to exit: the return
 
@@ -150,7 +148,7 @@ an ERROR in the daemon log naming the last delivery failure, a durable
 `docs/wedge-alarm.md` owns the alert channel setup, and `docs/verification/supervision.md` "Wedge-alarm channels" owns active evidence.
 So a guard false-positive becomes a visible stall, never an unbounded silent no-op.
 
-## Droid background-delivery hierarchy
+### Droid background-delivery hierarchy
 
 Droid away delivery uses the shared verified composer and submit owners because the native Sessions continuation command was not observed to steer an already-running interactive TUI session.
 Tracked `SessionStart` owns registration and recovery context, including the compact-sourced re-emit, while durable disk state preserves undelivered events across compaction.
@@ -176,8 +174,6 @@ After a real unmarked captain message runs the ordered `bin/fm-afk-return.sh` ca
 Answer a returned question only through its owner's existing close path, and never treat presentation as approval.
 
 ### Submit model
-
-
 
 On tmux and Herdr, the digest is typed **once** with a literal, non-submitting send (`send-keys -l` on tmux, `pane send-text` on Herdr).
 Enter submits it, and the selected backend's submit primitive verifies delivery.

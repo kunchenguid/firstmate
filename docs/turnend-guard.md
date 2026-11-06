@@ -283,7 +283,6 @@ The registrations in detail:
   The continuation's stop carries `stop_hook_active: true`, which bounds it to one per turn, and omp's own cap of eight consecutive continuations is the second backstop.
   `session_stop` never fires for an interrupted turn or a task session, so those boundaries are deliberately unguarded.
 - Droid registers a `Stop` hook in `.factory/settings.json`, anchors through `DROID_PROJECT_DIR`, and passes the native payload to the shared guard.
-
 - Cursor registers a `stop` hook in `.cursor/hooks.json` and delegates the whole turn boundary to `bin/fm-turnend-guard-cursor.sh`, the park described below.
   Cursor also loads `<project>/.claude/settings.json`, so every tracked Claude-shaped entrypoint whose event Cursor covers stands down on a Cursor-delivered payload through `bin/fm-hook-host-lib.sh`.
   That predicate reads the delivered payload's own `cursor_version`, never the environment.
@@ -321,7 +320,6 @@ The tracked Codex Stop hook runs this guard through `bin/fm-codex-stop-park.sh -
 [The Codex protocol](supervision-protocols/codex.md) owns that mode and its failure behavior.
 
 ### Claude cooperative mode
-
 
 Claude runs the guard with `--claude`, which ignores `stop_hook_active` and cooperates with the Stop-owned auto-arm.
 Claude Code sets `stop_hook_active=true` on every stop after any stop-hook continuation, including `asyncRewake` rewakes.
@@ -628,7 +626,6 @@ It proves that a live foreign owner still prevents arming while repeated non-own
 - The persistent model's fresh-leftover-beacon negative control.
 - The auto-arm model's healthy fresh-beacon-without-a-watcher case, session-and-recovery-bound long-turn rewake tolerance, independently broken tolerance signals, open-claim negative control, stale-beacon alarm, and isolation from other models.
 - The extension model's live-watcher path, ownership-qualified fresh hand-off, held-lock failures, independently broken ownership signals, stale-beacon alarm, queued-wake warning, and Pi and pi-signed harness routing.
-
 
 It also covers true-reason banner wording and reason-keyed episode dedup surviving a beacon mtime change.
 

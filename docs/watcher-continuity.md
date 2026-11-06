@@ -166,8 +166,6 @@ This is deliberate Option B ordering.
 Whenever restoration succeeds, the fleet is protected before the model handles the wake.
 When restoration does not succeed, the model is never left blind.
 
-
-
 ### Claude handling successor
 
 Claude's Stop hook also starts one handling successor before notification.
@@ -208,7 +206,6 @@ Any row left for main then becomes a recoverable downtime episode, including one
 The successor closes once with the recovery wake only while that row is still queued; this is how a captain inbox note reaches main during handling-successor startup or while the host is parked on the handled wake's successor.
 When the host instead hands the accepted close back to main and leaves that successor running, it republishes the episode as announced downtime, because the close it hands back is that episode's delivery; the successor therefore does not announce it again, while a later durable append still opens a pending episode it recovers.
 
-
 ### Manual recovery and other harnesses
 
 - The model no longer re-arms after ordinary wakes.
@@ -244,6 +241,7 @@ Its ordinary arm check still announces a never-announced generation, including o
 
 An ordinary watcher close attempts to publish downtime, and every durable queue append publishes it.
 A watcher closing to resurface the recovery it found at its start preserves the existing marker instead, while a handling successor resurfacing a later row publishes downtime like any close.
+
 A planned quiet timeout inside a Droid background cycle only releases the watcher lock when cleanup succeeds, no wake was delivered, and away or quiet mode is inactive.
 That rotation leaves the recovery marker and durable queue untouched, so consecutive quiet passes create no downtime while concurrently appended events still resurface; `tests/fm-watch-checkpoint.test.sh` covers both with real watcher rotations.
 
@@ -572,8 +570,6 @@ It also covers generation-claim single-flight, stuck-claim supersession, superse
 The goal is continuity without a Pi, omp, or OpenCode model-memory re-arm step.
 No zero-latency guarantee is claimed, because lock verification, watcher startup, and bounded retry delays remain deliberate safety work.
 OpenCode support targets persistent TUI sessions rather than headless `opencode run`.
-
-
 
 The other harnesses rely on these mechanisms:
 
