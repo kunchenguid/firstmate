@@ -983,8 +983,12 @@ fm_busy_grok_tail_busy() {
 # Droid has no verified semantic busy writer; its activity and interrupt
 # signals are scoped so another adapter can never inherit this fallback.
 fm_busy_droid_tail_busy() {
+  if [ -z "${FM_DELIVERY_DROID_BUSY_REGEX_DEFAULT:-}" ]; then
+    # shellcheck source=bin/fm-composer-lib.sh
+    . "${BASH_SOURCE[0]%/*}/fm-composer-lib.sh"
+  fi
   grep -v '^[[:space:]]*$' | tail -12 \
-    | grep -qiE "${FM_BUSY_REGEX:-${FM_DELIVERY_DROID_BUSY_REGEX_DEFAULT:-Press ESC to stop}}"
+    | grep -qiE "${FM_BUSY_REGEX:-$FM_DELIVERY_DROID_BUSY_REGEX_DEFAULT}"
 }
 
 # fm_busy_rovo_tail_busy: the Rovo-only temporary rendered-tail fallback.

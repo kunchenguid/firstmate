@@ -14,6 +14,12 @@ unset FM_BUSY_REGEX
 . "$ROOT/bin/fm-agent-process-lib.sh"
 TMP_ROOT=$(fm_test_tmproot fm-droid-harness)
 mkdir -p "$TMP_ROOT/state"
+out=$(FM_TEST_ROOT="$ROOT" FM_TEST_STATE="$TMP_ROOT/state" bash -c '
+  . "$FM_TEST_ROOT/bin/fm-busy-lib.sh"
+  fm_backend_capture() { printf " ⠸ Thinking...\n"; }
+  fm_busy_classify tmux target droid task "$FM_TEST_STATE"
+') || fail 'standalone Droid classifier failed'
+[ "$out" = 'busy droid-regex' ] || fail "standalone captured Droid spinner classified as $out"
 [ "$(fm_control_harnesses | sort | uniq -d)" = '' ] || fail 'control adapter registry contains duplicates'
 fm_control_harness_supported droid || fail 'Droid is not a verified control adapter'
 fm_control_harness_supports_kind droid ship || fail 'Droid ship capability missing'
@@ -245,6 +251,14 @@ mv "$secondmate/marker" "$secondmate/.fm-secondmate-home"
 HOME="$TMP_ROOT/user" "$ROOT/bin/fm-droid-trust.sh" --receipt "$TMP_ROOT/state/mate.droid-trust" --secondmate-home "$secondmate" mate >/dev/null || fail 'Droid refused a valid seeded secondmate home'
 HOME="$TMP_ROOT/user" "$ROOT/bin/fm-droid-trust.sh" --retire "$TMP_ROOT/state/mate.droid-trust" "$TMP_ROOT/state" mate >/dev/null || fail 'Droid secondmate trust retirement failed'
 [ "$(cat "$store")" = "$before" ] || fail 'secondmate retirement changed unrelated settings or retained trust'
+secondmate_real=$(cd "$secondmate" && pwd -P)
+jq --arg path "$secondmate_real" '.trustedFolders[$path] = {trustedAt:"user-grant"}' "$store" >"$store.new"
+mv "$store.new" "$store"
+HOME="$TMP_ROOT/user" "$ROOT/bin/fm-droid-trust.sh" --receipt "$TMP_ROOT/state/mate.droid-trust" --secondmate-home "$secondmate" mate >/dev/null || fail 'existing secondmate grant registration failed'
+HOME="$TMP_ROOT/user" "$ROOT/bin/fm-droid-trust.sh" --retire "$TMP_ROOT/state/mate.droid-trust" "$TMP_ROOT/state" mate >/dev/null || fail 'existing secondmate grant retirement failed'
+jq -e --arg path "$secondmate_real" '.trustedFolders[$path].trustedAt == "user-grant"' "$store" >/dev/null || fail 'retirement removed a pre-existing grant'
+jq --arg path "$secondmate_real" 'del(.trustedFolders[$path])' "$store" >"$store.new"
+mv "$store.new" "$store"
 pass 'Droid trusts only the exact safely seeded secondmate home and retires its receipt'
 
 # Primary identity requires the exact executable, never an incidental path.
@@ -276,6 +290,13 @@ HOME="$TMP_ROOT/user" "$ROOT/bin/fm-droid-trust.sh" --rollback "$receipt" >/dev/
 [ "$(cat "$store")" = "$before" ] || fail 'rollback removed a grant changed by another writer'
 pass 'Droid receipts roll back only unchanged newly acquired grants'
 
+HOME="$TMP_ROOT/user" "$ROOT/bin/fm-droid-trust.sh" --remove "$TMP_ROOT/task" "$TMP_ROOT/project" >/dev/null || fail 'retirement setup failed'
+HOME="$TMP_ROOT/user" "$ROOT/bin/fm-droid-trust.sh" --receipt "$receipt" "$TMP_ROOT/task" "$TMP_ROOT/project" >/dev/null || fail 'retirement receipt failed'
+jq --arg path "$physical" '.trustedFolders[$path].trustedAt = "changed-by-user"' "$store" >"$store.new"
+mv "$store.new" "$store"
+HOME="$TMP_ROOT/user" "$ROOT/bin/fm-droid-trust.sh" --retire "$receipt" "$TMP_ROOT/state" task >/dev/null || fail 'changed grant retirement failed'
+jq -e --arg path "$physical" '.trustedFolders[$path].trustedAt == "changed-by-user"' "$store" >/dev/null || fail 'retirement removed a changed grant'
+
 # The successor can use a physical spelling and any harness. Its receipt must
 # survive retirement of the original metadata and disappearance of the copy.
 ln -s "$TMP_ROOT/task" "$TMP_ROOT/task-alias"
@@ -286,8 +307,10 @@ HOME="$TMP_ROOT/user" "$ROOT/bin/fm-droid-trust.sh" --retire "$receipt" "$TMP_RO
 jq -e --arg physical "$physical" --arg logical "$TMP_ROOT/task-alias" '.trustedFolders | has($physical) and has($logical)' "$store" >/dev/null || fail 'live successor lost trust'
 git -C "$TMP_ROOT/project" worktree remove --force "$TMP_ROOT/task"
 HOME="$TMP_ROOT/user" "$ROOT/bin/fm-droid-trust.sh" --retire "$TMP_ROOT/state/successor.droid-trust" "$TMP_ROOT/state" successor >/dev/null || fail 'vanished worktree trust retirement failed'
-jq -e '.otherSetting == "preserve" and .trustedFolders == {"/already-trusted":{"trustedAt":"existing"}}' "$store" >/dev/null || fail 'final retirement retained aliases or lost other settings'
+jq -e --arg path "$physical" '.otherSetting == "preserve" and .trustedFolders == {"/already-trusted":{"trustedAt":"existing"}, ($path):{"trustedAt":"changed-by-user"}}' "$store" >/dev/null || fail 'final retirement changed the user grant or retained the acquired alias'
 [ ! -e "$TMP_ROOT/state/successor.droid-trust" ] || fail 'final retirement retained receipt'
+jq --arg path "$physical" 'del(.trustedFolders[$path])' "$store" >"$store.new"
+mv "$store.new" "$store"
 pass 'Droid cleanup transfers to a non-Droid successor and retires aliases after worktree removal'
 
 # Concurrent helpers reached through different symlinks share the resolved

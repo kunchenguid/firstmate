@@ -137,7 +137,7 @@ case "${1:-}" in
     printf 'fakepane\n'; exit 0 ;;
   capture-pane)
     [ -z "${FM_FAKE_COMPOSER_READ_FAIL:-}" ] || exit 1
-    if [ "${*: -1}" = -0 ] && [ -f "$D/droid-screen" ]; then
+    if { [ "${*: -1}" = -0 ] || [ "${*: -1}" = -40 ]; } && [ -f "$D/droid-screen" ]; then
       cat "$D/droid-screen"
       exit 0
     fi
@@ -3341,6 +3341,18 @@ test_away_branch_relaunch_accepts_existing_dispatchable_items() {
   pass "away supervision relaunches existing In-flight and queued items under the saturated fresh-spawn spend cap"
 }
 
+test_droid_spinner_interrupts_before_exit() {
+  local dir out rc=0
+  dir=$(new_case droid-spinner-exit rl-droid-spinner)
+  add_ship_task "$dir" rl-droid-spinner droid
+  printf droid > "$dir/fake/command"
+  printf ' ⠸ Thinking...\n' > "$dir/fake/droid-screen"
+  out=$(run_control "$dir" rl-droid-spinner exit) || rc=$?
+  [ "$rc" -ne 0 ] || [ "$(cat "$dir/fake/command")" != droid ] || fail "exit claimed success while Droid was running: $out"
+  assert_contains "$(cat "$dir/fake/keys")" 'Escape' 'spinner-only Droid exit skipped the interrupt'
+  pass 'spinner-only Droid is interrupted before exit'
+}
+
 test_exit_and_relaunch_remove_the_dialog_file() {
   local dir out rc
   dir=$(new_case dialog-file-exit rl70)
@@ -3392,6 +3404,7 @@ SH
 
 test_droid_relaunch_requires_a_current_start_receipt
 test_relaunch_off_opencode_removes_tracked_wiring
+test_droid_spinner_interrupts_before_exit
 test_exit_and_relaunch_remove_the_dialog_file
 test_exit_removes_the_dialog_file_before_releasing_the_lock
 test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint
