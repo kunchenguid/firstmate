@@ -249,7 +249,9 @@ establish_board_session() {  # <board>
   local board=$1 real out status version
   BOARD_SESSION_REOPENED=0
   real=$(board_realpath "$board") || fail "cannot resolve the board path: $board"
-  out=$(lavish-axi "$board") || fail "cannot establish the board Lavish session"
+  # --no-open: a rebuild must never open another browser tab. A window that is
+  # already connected picks the rewritten file up through Lavish's own reload.
+  out=$(lavish-axi "$board" --no-open) || fail "cannot establish the board Lavish session"
   printf '%s\n' "$out"
   if lavish_board_live "$out" "$real"; then
     printf 'session: live\n'
