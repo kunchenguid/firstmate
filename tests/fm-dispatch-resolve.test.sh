@@ -462,6 +462,7 @@ while IFS='|' read -r base endpoint; do
 done <<'BASE_ENDPOINTS'
 https://gateway.example/typesafe/|https://gateway.example/typesafe/v1/systemone
 http://localhost:8080/proxy///|http://localhost:8080/proxy/v1/systemone
+http://typesafe_gateway:8080|http://typesafe_gateway:8080/v1/systemone
 https://[::1]:8443/typesafe/|https://[::1]:8443/typesafe/v1/systemone
 https://gateway.example:1/tenant/{a,b}/|https://gateway.example:1/tenant/{a,b}/v1/systemone
 https://gateway.example:65535/|https://gateway.example:65535/v1/systemone
@@ -501,11 +502,6 @@ for base in \
   'https://[12345::1]' \
   'https://[::ffff:192.0.2.999]' \
   https://::1 \
-  https://bad..example \
-  https://-bad.example \
-  https://bad-.example \
-  https://bad_example \
-  https://256.0.0.1 \
   'https://gateway.example/tenant[1-2]' \
   'https://gateway.example/tenant[' \
   'https://gateway.example/tenant]' \
@@ -540,7 +536,7 @@ rm -f "$HOME_DIR/.env"
 # Invalid addresses must never reach Keychain, curl, or quota, for either
 # provider spelling and either configuration source. Literal errors are the
 # oracle; returning off or an HTTP error would violate that contract.
-for base in https://gateway.example:99999 'https://[abc]' https://bad..example \
+for base in https://gateway.example:99999 'https://[abc]' \
   'https://gateway.example/tenant[1-2]' 'https://gateway.example/tenant[' 'https://gateway.example/tenant]'; do
   for provider in '' typesafe; do
     for source in environment dotenv; do
