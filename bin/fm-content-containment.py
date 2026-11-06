@@ -8,8 +8,10 @@ No Git refs, index, working files, configuration, or remote are changed.
 History is not reduced to its net patch. Every changed path and every text region
 changed by a local parent-to-child comparison remains an obligation, even after
 restoration. Merges with upstream parents compare against those parents; other
-commits compare against all parents. Only anchors shared throughout that history
-and unambiguously matched in the landed result may separate independent regions.
+commits compare against all parents. For each path, only comparisons that change
+its raw entry constrain the proof; unrelated snapshots cannot erase its anchors.
+Only anchors shared across those versions and unambiguously matched in the landed
+result may separate independent regions.
 Each obligated region's final bytes must match between those same anchors.
 This accepts independent upstream hunks, but never infers containment from patch
 applicability, a matching occurrence elsewhere, or a partial history enumeration.

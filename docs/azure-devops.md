@@ -54,13 +54,12 @@ An accepted request with unconfirmed landing returns a diagnostic and leaves mon
 
 Only a `completed` PR with successful merge evidence is considered merged.
 An `abandoned` PR is not a merge, even if its branch was pushed or equivalent content happens to be on the default branch.
-Azure cleanup additionally proves that clean local work is contained in the completed PR's actual merge result or landed base-branch content (the default branch when no base was selected); later unlanded edits and commits are preserved.
-[`bin/fm-teardown.sh`](../bin/fm-teardown.sh) owns the complete cleanup test, using the shared proof whose evidence and ambiguity limits are owned by [`bin/fm-content-containment.py`](../bin/fm-content-containment.py).
+Cleanup preserves unmatched later local work; [`bin/fm-teardown.sh`](../bin/fm-teardown.sh) owns the completion and copy-ownership prerequisites, and [`bin/fm-content-containment.py`](../bin/fm-content-containment.py) owns the containment proof's evidence and ambiguity limits.
 
 ## Conservative limits and verification
 
 An incomplete API response carrying a continuation token is refused rather than treating the first page as complete evidence.
-Each status selected by an enabled, blocking policy evaluation's `latestStatusId` must be uniquely present, bound to the current iteration, and report `succeeded` or `notApplicable`.
+Each status selected by an approved, enabled, blocking policy evaluation's `latestStatusId` must be uniquely present, bound to the current iteration, and report `succeeded` or `notApplicable`.
 Optional or informational statuses do not block completion, even when pending, failed, or retained from an older iteration.
 Unresolved user discussions stop completion only when a mandatory Azure comment-resolution policy makes them blocking.
 An unsupported policy response or unknown merge strategy needs operator attention, never a guessed approval.

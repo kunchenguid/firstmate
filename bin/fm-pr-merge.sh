@@ -54,13 +54,14 @@
 # --match-head-commit, so a push that lands between that read and the merge
 # fails the merge instead of landing commits nothing verified.
 # An optional --expected-head <full-sha> pins the commit the caller already
-# reviewed. It must be one full lowercase hex commit of 40 or 64 characters,
-# given once as its own argument. The live head must equal it or the merge is
+# reviewed. It must be one full lowercase hex commit of 40 or 64 characters
+# (Azure accepts only 40), given once as its own argument. The live head must
+# equal it or the merge is
 # refused before any forge write. The forge head match receives that same
 # supplied value on GitHub, GitLab, Forgejo, and Azure DevOps. A later preflight
 # in this run does not replace it with a newly read head. Omitting the flag keeps the
 # previous behavior: the live head read at verification is the matched value.
-# Reading that state needs gh and jq, and either one absent stops the merge before any
+# Reading GitHub state needs gh and jq, and either one absent stops the merge before any
 # state is recorded. An attended --allow-red <check-name> may be passed once,
 # with the name as a separate argument; it waives only checks with that exact
 # name, still requires every other check green, and still binds the head. Its

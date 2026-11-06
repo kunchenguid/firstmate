@@ -72,8 +72,9 @@
 # branch-content fallback above. An active, abandoned or unreadable Azure PR
 # cannot use that fallback to bypass completion. With no pr=, a non-local-only
 # task whose origin identifies Azure (HTTPS or SSH) refuses; an unreadable origin
-# classification also refuses. This prerequisite still applies when the task's
-# worktree is absent but an Azure PR URL is recorded.
+# classification also refuses. With a recorded Azure PR URL, completion is
+# required even when the worktree is absent or reassigned; local content and dirt
+# are inspected only in an owned, present copy.
 # Uncommitted changes are never landed, including in initialized nested
 # submodules even when ignore settings hide them. Before return, the dirty check
 # explicitly requests all untracked files, even when status.showUntrackedFiles
