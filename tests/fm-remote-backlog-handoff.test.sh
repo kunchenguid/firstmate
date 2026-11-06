@@ -102,6 +102,8 @@ command_name=$(perl -MMIME::Base64=decode_base64 -e '$d=decode_base64($ARGV[0]);
 case "${FM_FAKE_SSH_MODE:-normal}:$command_name" in
   *:fm-remote-secondmate-control.sh)
     printf '%s\n' "$command_name" >> "$FM_FAKE_REMOTE_WAKE_LOG"
+    perl -MMIME::Base64=decode_base64 -e '$d=decode_base64($ARGV[0]); $d=~tr/\0\n/  /; print "$d\n"' "$argv_b64" \
+      >> "$FM_FAKE_REMOTE_WAKE_LOG.argv"
     [ "${FM_FAKE_REMOTE_WAKE_RC:-0}" -eq 0 ] || printf 'remote receiver wake failed\n' >&2
     exit "${FM_FAKE_REMOTE_WAKE_RC:-0}"
     ;;
@@ -446,7 +448,70 @@ assert_absent "$PARENT/data/handoff/ios.outbox.md" "permanently lost wake retain
   || fail "later handoff did not retain the same pending wake correlation"
 [ "$(grep -cF fm-remote-secondmate-control.sh "$WAKE_LOG")" -gt "$wakes_after_resume" ] \
   || fail "later handoff did not retry the separately pending wake"
+reused_wake=$(tail -n 1 "$WAKE_LOG.argv")
+assert_contains "$reused_wake" 'wake-permanent-a' \
+  "reused pending wake dropped the earlier batch's item"
+assert_contains "$reused_wake" 'wake-permanent-b' \
+  "reused pending wake did not name the later batch's item"
 pass "a permanently unconfirmable wake never jams later durable handoffs"
+
+MESSAGE_MV_FAKEBIN="$TMP_ROOT/message-mv-fakebin"
+mkdir -p "$MESSAGE_MV_FAKEBIN"
+REAL_MV=$(command -v mv)
+cat > "$MESSAGE_MV_FAKEBIN/mv" <<'SH'
+#!/usr/bin/env bash
+last=${!#}
+if [ "$last" = "$FM_FAIL_MV_PATH" ]; then
+  exit 1
+fi
+exec "$FM_REAL_MV" "$@"
+SH
+chmod +x "$MESSAGE_MV_FAKEBIN/mv"
+write_backlog '- [ ] wake-message-write-fail - durable work survives wake-message enrichment failure (repo: alpha)'
+wakes_before=$(grep -cF fm-remote-secondmate-control.sh "$WAKE_LOG")
+PATH="$MESSAGE_MV_FAKEBIN:$PATH" FM_REAL_MV="$REAL_MV" \
+  FM_FAIL_MV_PATH="$PARENT/state/.backlog-handoff-ios.wake-message" \
+  FM_FAKE_REMOTE_WAKE_RC=255 handoff_env "$ROOT/bin/fm-backlog-handoff.sh" ios wake-message-write-fail \
+  > "$TMP_ROOT/wake-message-write-fail.out" 2>&1 \
+  || fail "wake-message enrichment failure blocked a durable handoff"
+[ "$(cat "$PARENT/state/.backlog-handoff-ios.wake-pending")" = "pending:$permanent_corr" ] \
+  || fail "wake-message enrichment failure discarded the reusable pending wake"
+assert_present "$PARENT/state/pending-replies/$permanent_corr" \
+  "wake-message enrichment failure discarded the reusable pending-reply record"
+[ "$(grep -cF fm-remote-secondmate-control.sh "$WAKE_LOG")" -gt "$wakes_before" ] \
+  || fail "wake-message enrichment failure prevented retrying the reusable wake"
+reused_wake=$(tail -n 1 "$WAKE_LOG.argv")
+assert_contains "$reused_wake" 'wake-permanent-a' \
+  "wake-message enrichment failure did not retain the prior wake message"
+pass "wake-message enrichment failure preserves and retries reusable pending wake intent"
+
+write_backlog '- [ ] wake-tabbed - canonical spacing still names the routed key (repo: alpha)'
+rm -rf "$TMP_ROOT/serialize.once"
+rm -f "$TMP_ROOT/serialize.entered" "$TMP_ROOT/serialize.release"
+FM_FAKE_SSH_MODE=serialize FM_FAKE_REMOTE_WAKE_RC=255 \
+  handoff_env "$ROOT/bin/fm-backlog-handoff.sh" ios wake-tabbed \
+  > "$TMP_ROOT/wake-tabbed.out" 2>&1 &
+grammar_handoff=$!
+wait_for_serialization=0
+while [ ! -f "$TMP_ROOT/serialize.entered" ]; do
+  kill -0 "$grammar_handoff" 2>/dev/null \
+    || fail "grammar fixture handoff exited before remote receipt"
+  wait_for_serialization=$((wait_for_serialization + 1))
+  [ "$wait_for_serialization" -le 250 ] \
+    || fail "grammar fixture handoff never reached remote receipt"
+  sleep 0.02
+done
+perl -pi -e 's/^- \[ \] wake-tabbed /- [ ]  wake-tabbed\t/' \
+  "$PARENT/data/handoff/ios.outbox.md"
+touch "$TMP_ROOT/serialize.release"
+wait "$grammar_handoff" \
+  || fail "canonical multi-space and tab item syntax blocked durable outbox recovery"
+reused_wake=$(tail -n 1 "$WAKE_LOG.argv")
+assert_contains "$reused_wake" 'wake-tabbed' \
+  "canonical multi-space and tab item syntax produced the wrong routed key"
+assert_not_contains "$reused_wake" '- [ ]' \
+  "canonical multi-space item syntax leaked the whole item line into the wake"
+pass "remote wake key extraction accepts the canonical backlog item grammar"
 
 RM_FAKEBIN="$TMP_ROOT/rm-fakebin"
 mkdir -p "$RM_FAKEBIN"
