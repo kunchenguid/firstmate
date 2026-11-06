@@ -590,30 +590,8 @@ NL_SEP=$'\n'
 
 # Section-aware extraction from a .tasks.toml: only the named keys inside the
 # named section, comments stripped. Prints "<key> <value>" lines.
-captain_toml_section_entries() {  # <toml-file> <section> <key-alternation>
-  [ -f "$1" ] || return 0
-  LC_ALL=C awk -v section="[$2]" -v keys="^($3)[[:space:]]*=" '
-    function trim(v) { sub(/^[[:space:]]+/, "", v); sub(/[[:space:]]+$/, "", v); return v }
-    BEGIN { insection = 0 }
-    {
-      line = $0
-      sub(/[[:space:]]*#.*/, "", line)
-      line = trim(line)
-      if (line ~ /^\[[^]]+\]$/) { insection = (line == section); next }
-      if (!insection) next
-      if (line ~ keys) {
-        key = line
-        sub(/[[:space:]]*=.*/, "", key)
-        sub(/^[^=]*=[[:space:]]*/, "", line)
-        gsub(/^"|"$/, "", line); gsub(/^'\''|'\''$/, "", line)
-        printf "%s %s\n", key, line
-      }
-    }
-  ' "$1"
-}
-
 captain_beads_toml_entries() {  # <toml-file>
-  captain_toml_section_entries "$1" beads 'prefix|path|binary'
+  fm_backlog_toml_section_entries "$1" beads 'prefix|path|binary'
 }
 
 captain_beads_setting() {  # <entries-output> <setting>
@@ -907,95 +885,8 @@ refuse_self_inventory() {
   fail "origin $origin cannot be its own captain-call inventory entry; hold a separate captain task for the call and list that task"
 }
 
-# --- Done-archive reads on the markdown backend -----------------------------
-#
-# Done retention moves closed markdown rows into the configured archive, which
-# tasks-axi show never reads, so an answered call a scout attested would read as
-# absent once retention ran. Only the completion gate consults the archive: an
-# archived row is closed, so it can satisfy the gate solely through a recorded
-# resolution, and every mutating path keeps seeing it as absent.
-
-# The [markdown] archive key tasks-axi would honour, resolved with tasks-axi's
-# own source precedence: the backlog root's .tasks.toml first, then the
-# user-level $HOME/.tasks-axi/config.toml. Empty when neither sets it; a relative
-# value resolves against the backlog root wherever it was configured, the way
-# tasks-axi resolves it.
-captain_markdown_archive_setting() {  # <backlog-root>
-  local root=$1 archive
-  archive=$(captain_toml_section_entries "$root/.tasks.toml" markdown archive | sed -n 's/^archive //p' | head -1)
-  if [ -z "$archive" ] && [ -n "${HOME:-}" ]; then
-    archive=$(captain_toml_section_entries "$HOME/.tasks-axi/config.toml" markdown archive | sed -n 's/^archive //p' | head -1)
-  fi
-  printf '%s\n' "$archive"
-}
-
-# The archive tasks-axi writes: the [markdown] archive key resolved against the
-# backlog root, else done-archive.md beside the addressed backlog file. Returns
-# 1 when the configured backend keeps no markdown archive.
-captain_markdown_archive_path() {
-  local data root backend archive file
-  data=$(fm_backlog_data_absolute "$DATA") || return 1
-  root=$(fm_backlog_root "$data") || return 1
-  backend=$(fm_tasks_axi_backend "$root" 2>/dev/null) || return 1
-  [ "$backend" = markdown ] || return 1
-  archive=$(captain_markdown_archive_setting "$root")
-  case "$archive" in
-    '')
-      file=$(fm_backlog_file "$data") || return 1
-      archive="${file%/*}/done-archive.md"
-      ;;
-    /*) ;;
-    *) archive="$root/$archive" ;;
-  esac
-  printf '%s\n' "$archive"
-}
-
-# Read an archived row into TASK_SHOW_OUTPUT exactly as tasks-axi shows a live
-# one, by replaying its newest archived block under a scratch Done section. A
-# reused id can be archived more than once, and retention appends, so the last
-# block is the newest. Returns 1 when the row is not archived.
 task_show_archived() {  # <id>; sets TASK_SHOW_OUTPUT
-  local id=$1 archive dir status=0 secs=${FM_BACKLOG_ROW_TIMEOUT_SECS:-10}
-  TASK_SHOW_OUTPUT=
-  case "$secs" in ''|*[!0-9]*) secs=10 ;; esac
-  [ "$secs" -gt 0 ] 2>/dev/null || secs=10
-  archive=$(captain_markdown_archive_path) || return 1
-  [ -f "$archive" ] || return 1
-  dir=$(umask 077; mktemp -d "${TMPDIR:-/tmp}/fm-captain-hold-archive.XXXXXX") \
-    || fail "cannot stage the Done archive read for $id"
-  printf 'backend = "markdown"\n' > "$dir/.tasks.toml"
-  {
-    printf '## Done\n'
-    LC_ALL=C awk -v id="$id" '
-      /^- \[.\] / {
-        rest = substr($0, 7)
-        inrow = (rest == id || index(rest, id " ") == 1)
-        if (inrow) block = $0 "\n"
-        next
-      }
-      inrow && ($0 == "" || $0 ~ /^[[:space:]]/) { block = block $0 "\n"; next }
-      { inrow = 0 }
-      END { printf "%s", block }
-    ' "$archive"
-  } > "$dir/backlog.md" || status=1
-  if [ "$status" -eq 0 ]; then
-    # The replayed archive read gets the same bound as a live backlog read, so a
-    # wedged tasks-axi cannot hang verify, or complete while it holds the origin
-    # metadata lock. A bound hit is not absence, so it stops loudly with 124.
-    # shellcheck disable=SC2016  # Expansion is deliberately deferred to the child shell.
-    TASK_SHOW_OUTPUT=$(fm_run_timed "$secs" bash -c \
-      'cd "$1" 2>/dev/null || exit 1; shift; exec tasks-axi show "$@"' \
-      _ "$dir" "$id" --full --file "$dir/backlog.md" 2>/dev/null)
-    status=$?
-    if [ "$status" -eq 124 ]; then
-      printf 'fm-captain-hold: tasks-axi show %s exceeded its %ss Done-archive read bound\n' "$id" "$secs" >&2
-    elif [ "$status" -ne 0 ]; then
-      status=1
-    fi
-  fi
-  rm -f -- "$dir/backlog.md" "$dir/.tasks.toml"
-  rmdir -- "$dir" 2>/dev/null || true
-  return "$status"
+  TASK_SHOW_OUTPUT=$(fm_backlog_row_show_archived "$DATA" "$1")
 }
 
 # The archived row an entry names, under its exact id or its legacy identity.

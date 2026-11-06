@@ -133,11 +133,13 @@ test_single_stale_first_read_is_not_accepted() {
   id=settle-single-stale-z1
   rec=$(make_settle_case settle-single "$id" 1)
   read_settle_record "$rec"
+  printf 'fm-prune-safe-v1\n' > "$HOME_DIR/state/$id.prune-safe"
 
   out=$(run_settle_spawn "$id")
   status=$?
   expect_code 0 "$status" "spawn should succeed once the pane settles"
   assert_contains "$out" "spawned $id" "spawn did not report success"
+  assert_absent "$HOME_DIR/state/$id.prune-safe" 'spawn retained an earlier teardown receipt'
   assert_grep "worktree=$WT_DIR" "$HOME_DIR/state/$id.meta" \
     "meta did not record the settled worktree"
   assert_no_grep "worktree=$STALE_DIR" "$HOME_DIR/state/$id.meta" \
