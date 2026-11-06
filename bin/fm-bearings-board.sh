@@ -331,7 +331,7 @@ effective_payload() {  # <data.json> <dest.json>
         then .options += [{
           value: "reconcile",
           label: "Reconcile",
-          hint: "Re-check the latest state, then close this with evidence or keep it open with a note"
+          hint: "Not an answer: firstmate re-checks the latest state, closes this only if it is moot, and otherwise asks again"
         }]
         else . end
     ]' "$data" > "$dest" || return 1
