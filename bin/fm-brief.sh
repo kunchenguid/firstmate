@@ -685,6 +685,8 @@ SHARED_INFRA_RULE=${SHARED_INFRA_RULE%$'\n'}
 IFS= read -r -d '' SHARED_NO_CD_RULE <<'EOF' || true
 8. Never start a shell command with `cd`, and never run a search whose path depends on the current directory.
    Use absolute paths, `git -C <abs>`, or a `( cd <abs> && ... )` subshell.
+   Run a command the operator allow-listed - such as a read-only production wrapper, or `no-mistakes axi run` and `no-mistakes axi respond` - as one bare command, never inside that subshell or with a `;`, `&&`, pipe, redirect, `timeout`, or `VAR=` prefix around it.
+   Claude Code's auto mode applies an allow rule only to the bare form and sends a wrapped one to its classifier, which refuses production reads and gate responses; your shell already starts in this worktree, and `no-mistakes axi respond --run <id>` answers a run from anywhere.
    Pass this rule to every sub-agent you launch.
 EOF
 SHARED_NO_CD_RULE=${SHARED_NO_CD_RULE%$'\n'}
