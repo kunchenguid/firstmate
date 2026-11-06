@@ -180,9 +180,23 @@ case "$provider" in
     [ "$status" = MERGED ] && printf '%s\n' merged
     ;;
   forgejo)
-    [ "${#host}" -ge 1 ] && [ "${#host}" -le 253 ] || exit 0
-    [ "$host" != github.com ] || exit 0
+    # The recorded host is the authority, which may carry a port on a
+    # plain-LAN instance, and the stored URL may use either http or https for
+    # the same reason; both are revalidated here before either is trusted.
+    [ "${#host}" -ge 1 ] && [ "${#host}" -le 259 ] || exit 0
+    login_host=$host
     case "$host" in
+      *:*)
+        login_host=${host%%:*}
+        port=${host#*:}
+        case "$port" in
+          ''|*[!0-9]*|0*|??????*) exit 0 ;;
+        esac
+        [ "$port" -le 65535 ] || exit 0
+        ;;
+    esac
+    [ "$login_host" != github.com ] || exit 0
+    case "$login_host" in
       .*|*.|*..*|*[!a-z0-9.-]*) exit 0 ;;
     esac
     case "$path" in
@@ -197,28 +211,31 @@ case "$provider" in
         .|..|*.git|*[!A-Za-z0-9._-]*) exit 0 ;;
       esac
     done
-    [ "$url" = "https://$host/$owner/$repo/pulls/$number" ] || exit 0
+    [ "$url" = "https://$host/$owner/$repo/pulls/$number" ] \
+      || [ "$url" = "http://$host/$owner/$repo/pulls/$number" ] || exit 0
     command -v tea >/dev/null 2>&1 || exit 0
     command -v jq >/dev/null 2>&1 || exit 0
-    # tea addresses a repo by slug only; the host comes from a named login
+    # tea addresses a repo by slug only; the server comes from a named login
     # rather than a URL the way gh and glab take one, so the login registered
-    # for this exact host is resolved fresh on every poll rather than trusted
-    # from anywhere durable. Refuse to guess when zero or more than one
+    # for this exact scheme and authority is resolved fresh on every poll rather
+    # than trusted from anywhere durable. Refuse to guess when zero or more than one
     # registered login matches, rather than picking one arbitrarily.
     # The list is parsed as JSON, never split on quotes per line, so a login
     # printed as one compact object still matches; this is the same filter
-    # bin/fm-pr-lib.sh's fm_pr_forgejo_login applies.
+    # bin/fm-pr-lib.sh's fm_pr_forgejo_login applies, matching the recorded
+    # scheme and complete authority including any port.
+    scheme=${url%%://*}
     login=$(
-      tea login list --output json 2>/dev/null | jq -er --arg h "$host" '
+      tea login list --output json 2>/dev/null | jq -er --arg h "$host" --arg scheme "$scheme" '
         if type == "array" then
           [ .[]
             | select(type == "object" and (.name | type) == "string" and (.name | length) > 0
                      and (.url | type) == "string")
-            | select((.url
-                      | sub("^[A-Za-z][A-Za-z0-9+.-]*://"; "")
-                      | sub("[/?#].*$"; "")
-                      | sub("^.*@"; "")
-                      | sub(":[0-9]+$"; "")) == $h)
+            | select((.url | startswith($scheme + "://"))
+                     and ((.url
+                           | sub("^[A-Za-z][A-Za-z0-9+.-]*://"; "")
+                           | sub("[/?#].*$"; "")
+                           | sub("^.*@"; "")) == $h))
             | .name ]
           | if length == 1 then .[0] else error("not exactly one matching login") end
         else

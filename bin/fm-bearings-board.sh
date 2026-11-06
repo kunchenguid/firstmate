@@ -128,11 +128,16 @@ validate_payload() {  # <data.json>
     def optional_filed:
       (has("filed") | not) or (.filed == null) or (.filed | valid_filed);
     def optional_string($name): (has($name) | not) or (.[$name] | type == "string");
-    def optional_https_url($name):
+    def optional_http_url($name):
       (has($name) | not)
       or (.[$name]
         | type == "string"
-          and test("^https://[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?(?::[0-9]{1,5})?(?:[/?#][^[:space:]]*)?$"));
+          and test("^https?://[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?(?::[0-9]{1,5})?(?:[/?#][^[:space:]]*)?$")
+          and (capture("^https?://(?<authority>[^/?#]+)").authority
+            | if test(":[0-9]+$") then
+                (capture(":(?<port>[0-9]+)$").port | tonumber) as $port
+                | $port >= 1 and $port <= 65535
+              else true end));
     def version: type == "string" and test("^(0|[1-9][0-9]{0,8})\\.(0|[1-9][0-9]{0,8})\\.(0|[1-9][0-9]{0,8})$");
     def optional_subject:
       (has("subject") | not)
@@ -157,7 +162,7 @@ validate_payload() {  # <data.json>
       and (optional_string("about"))
       and (optional_string("decide"))
       and (optional_string("detail"))
-      and (optional_https_url("pr_url"))
+      and (optional_http_url("pr_url"))
       and optional_subject
       and (if has("subject") then .type == "decision" else true end)
       and (optional_string("freeform_hint"))
@@ -175,7 +180,7 @@ validate_payload() {  # <data.json>
     def landed_item:
       type == "object" and repo_marker and (.id | nonempty_string)
       and (.what | nonempty_string) and (.owner | nonempty_string)
-      and optional_https_url("pr_url")
+      and optional_http_url("pr_url")
       and optional_subject;
     def charted_item:
       type == "object" and repo_marker and (.id | slug(128))

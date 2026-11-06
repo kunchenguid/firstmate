@@ -2360,11 +2360,11 @@ test_forgejo_url_resolves_and_merges() {
 
 test_forgejo_login_resolves_from_the_host() {
   local case_dir rc host url
-  host=git.self-hosted.example
-  url="https://$host/$FJ_OWNER/$FJ_REPO/pulls/12"
+  host=git.self-hosted.example:3000
+  url="http://$host/$FJ_OWNER/$FJ_REPO/pulls/12"
   case_dir=$(make_forgejo_case forgejo-login-from-host)
   write_tea_logins_json "$case_dir/tea-logins.json" \
-    other "https://unrelated.example" "$FJ_LOGIN" "https://$host:3000"
+    other "http://git.self-hosted.example:3001" "$FJ_LOGIN" "http://$host"
 
   set +e
   run_pr_merge "$case_dir" task-x1 "$url" \
@@ -2372,12 +2372,41 @@ test_forgejo_login_resolves_from_the_host() {
   rc=$?
   set -e
 
-  expect_code 0 "$rc" "forgejo-login-from-host: the matching login (port stripped) should be resolved and merge"
+  expect_code 0 "$rc" "forgejo-login-from-host: the exact-authority login should be resolved and merge"
   assert_grep "--login $FJ_LOGIN --repo $FJ_OWNER/$FJ_REPO /repos/{owner}/{repo}/pulls/12" "$case_dir/tea.log" \
-    "forgejo-login-from-host: the login was not resolved from the URL's host"
+    "forgejo-login-from-host: the login was not resolved from the URL's authority"
   assert_no_grep 'other' "$case_dir/tea.log" \
-    "forgejo-login-from-host: an unrelated login name leaked into a tea invocation"
-  pass "fm-pr-merge resolves the tea login by matching the PR's host against every registered login"
+    "forgejo-login-from-host: the login for another port leaked into a tea invocation"
+
+  case_dir=$(make_forgejo_case forgejo-login-wrong-port)
+  write_tea_logins_json "$case_dir/tea-logins.json" other "http://git.self-hosted.example:3001"
+  set +e
+  run_pr_merge "$case_dir" task-x1 "$url" \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "forgejo-login-wrong-port: fm-pr-merge should refuse another port's only login"
+  assert_grep "requires exactly one 'tea login' registered for that host" "$case_dir/stderr" \
+    "forgejo-login-wrong-port: refusal did not name the login requirement"
+  [ -z "$(tea_merge_line "$case_dir/tea.log")" ] \
+    || fail "forgejo-login-wrong-port: a merge was attempted through another port's login"
+
+  case_dir=$(make_forgejo_case forgejo-login-scheme-downgrade)
+  url="https://$host/$FJ_OWNER/$FJ_REPO/pulls/12"
+  write_tea_logins_json "$case_dir/tea-logins.json" "$FJ_LOGIN" "http://$host"
+  set +e
+  run_pr_merge "$case_dir" task-x1 "$url" \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "forgejo-login-scheme-downgrade: fm-pr-merge should refuse a plain-http login for an HTTPS PR"
+  assert_grep "requires exactly one 'tea login' registered for that host" "$case_dir/stderr" \
+    "forgejo-login-scheme-downgrade: refusal did not name the login requirement: $(cat "$case_dir/stderr")"
+  assert_no_regex '^api ' "$case_dir/tea.log" \
+    "forgejo-login-scheme-downgrade: tea api used a login with a weaker scheme"
+  pass "fm-pr-merge resolves only logins with the exact scheme, host, and port"
 }
 
 test_forgejo_refuses_when_login_is_ambiguous() {

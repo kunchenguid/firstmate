@@ -523,7 +523,7 @@ fm_nm_runs_row_valid() {  # <status> <branch> <sha> <day> <clock> <pr> <extra>
   case "$sha" in *[!A-Fa-f0-9]*) return 1 ;; esac
   case "$day" in [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]) ;; *) return 1 ;; esac
   case "$clock" in [01][0-9]:[0-5][0-9]|2[0-3]:[0-5][0-9]) ;; *) return 1 ;; esac
-  case "$pr" in ''|https://*) ;; *) return 1 ;; esac
+  case "$pr" in ''|https://*|http://*) ;; *) return 1 ;; esac
   [ "${#sha}" -ge 7 ] && [ "${#sha}" -le 40 ] || return 1
   year_num=$((10#${day%%-*}))
   month_num=${day#*-}; month_num=${month_num%%-*}; month_num=$((10#$month_num))

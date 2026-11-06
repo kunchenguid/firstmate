@@ -127,9 +127,10 @@ fm_task_id_creation_valid() {
 }
 
 # GitLab, Gerrit, and Forgejo all serve self-hosted instances, so the host is part of the
-# identity rather than a constant. It is accepted only as a lowercase DNS name
-# with no userinfo, port, or trailing dot, which keeps one canonical spelling per
-# change. github.com is refused here even though its shape is otherwise valid:
+# identity rather than a constant. This shared DNS validator accepts no userinfo, port, or
+# trailing dot; fm_pr_forgejo_authority_valid below adds Forgejo's optional canonical port
+# before delegating here. These rules keep one canonical spelling per change.
+# github.com is refused here even though its shape is otherwise valid:
 # it is GitHub's own host and never another forge's instance, so a URL like
 # https://github.com/o/r/-/merge_requests/1 (a typo'd or spoofed GitHub URL)
 # would otherwise be armed as a watch that can never succeed.
@@ -199,6 +200,30 @@ fm_pr_gerrit_path_valid() {
   done
 }
 
+# A Forgejo/Gitea authority is the same lowercase DNS name as the other
+# self-hosted forges plus an optional port, because a private LAN instance
+# commonly serves on a non-default port. The port is canonical only without a
+# leading zero, so one authority has exactly one spelling. The port check is a
+# case match rather than [[ =~ ]], like every validator this file's parser
+# calls, because a regex match here would clobber BASH_REMATCH before the
+# parser has read the remaining capture groups.
+fm_pr_forgejo_authority_valid() {
+  local authority=${1-} host port
+  local LC_ALL=C
+  host=$authority
+  case "$authority" in
+    *:*)
+      host=${authority%%:*}
+      port=${authority#*:}
+      case "$port" in
+        ''|*[!0-9]*|0*|??????*) return 1 ;;
+      esac
+      [ "$port" -le 65535 ] || return 1
+      ;;
+  esac
+  fm_pr_forge_host_valid "$host"
+}
+
 # Unlike GitLab, a Forgejo/Gitea project has no subgroup nesting: it is always
 # exactly owner/repository, so each segment is validated the same way GitHub's
 # owner and repo are, minus GitHub's specific hyphen-run and length rules.
@@ -252,6 +277,9 @@ fm_pr_github_host_export() {  # <host>
 # provider-tagged identity. Validation is strict and per provider: the GitHub
 # username and repository rules are unchanged, and GitLab, Gerrit, and Forgejo
 # each get their own namespace rules rather than a loosened GitHub rule.
+# GitHub, GitLab, and Gerrit URLs are https-only; a Forgejo/Gitea URL also
+# accepts plain http and an optional port, because a private LAN instance
+# often has no TLS, and its FM_PR_HOST then carries the whole authority.
 #
 # FM_PR_OWNER and FM_PR_REPO are additionally set for github and forgejo
 # because bin/fm-pr-merge.sh addresses both by owner/repository. A gitlab or
@@ -323,23 +351,24 @@ fm_pr_url_parse() {
   fi
   # Forgejo/Gitea serve pulls at owner/repo/pulls/<n>: plural "pulls", no "/-/"
   # route separator and no "/+/" change separator, so this shape never collides
-  # with the GitLab or Gerrit patterns above.
-  pattern='^https://([a-z0-9.-]{1,253})/([A-Za-z0-9._-]{1,100})/([A-Za-z0-9._-]{1,100})/pulls/([1-9][0-9]*)$'
+  # with the GitLab or Gerrit patterns above. The authority may carry a port,
+  # and http is accepted alongside https for a plain-LAN instance without TLS.
+  pattern='^https?://([a-z0-9.-]{1,253}(:[0-9]{1,5})?)/([A-Za-z0-9._-]{1,100})/([A-Za-z0-9._-]{1,100})/pulls/([1-9][0-9]*)$'
   [[ "$raw" =~ $pattern ]] || return 1
   host=${BASH_REMATCH[1]}
-  fm_pr_forge_host_valid "$host" || return 1
-  fm_pr_forgejo_segment_valid "${BASH_REMATCH[2]}" || return 1
+  fm_pr_forgejo_authority_valid "$host" || return 1
   fm_pr_forgejo_segment_valid "${BASH_REMATCH[3]}" || return 1
+  fm_pr_forgejo_segment_valid "${BASH_REMATCH[4]}" || return 1
   FM_PR_PROVIDER=forgejo
   FM_PR_URL=$raw
   FM_PR_HOST=$host
-  FM_PR_PATH="${BASH_REMATCH[2]}/${BASH_REMATCH[3]}"
+  FM_PR_PATH="${BASH_REMATCH[3]}/${BASH_REMATCH[4]}"
   # Consumed by bin/fm-pr-merge.sh, which addresses Forgejo by owner/repository.
   # shellcheck disable=SC2034
-  FM_PR_OWNER=${BASH_REMATCH[2]}
+  FM_PR_OWNER=${BASH_REMATCH[3]}
   # shellcheck disable=SC2034
-  FM_PR_REPO=${BASH_REMATCH[3]}
-  FM_PR_NUMBER=${BASH_REMATCH[4]}
+  FM_PR_REPO=${BASH_REMATCH[4]}
+  FM_PR_NUMBER=${BASH_REMATCH[5]}
 }
 
 fm_pr_head_valid() {
@@ -1156,29 +1185,34 @@ FIELDS
 # than split on quotes per line, because tea's JSON is not guaranteed to put
 # each field on its own line: a login printed as one compact object would hand
 # a line-oriented split the name where it expects the url, and arming would
-# then refuse every host. A login matches when its url's host - scheme,
-# userinfo, port, and path stripped - is exactly <host>. bin/fm-pr-poll.sh keeps
-# its own copy of this filter because the watcher body sources nothing.
-# shellcheck disable=SC2016 # $h is a jq variable bound by --arg, not a shell one.
+# then refuse every host. A login matches when its url has the pull request's
+# scheme and its authority - userinfo and path stripped, with any port preserved -
+# is exactly <host>.
+# bin/fm-pr-poll.sh keeps its own copy of this filter because the watcher body
+# sources nothing.
+# shellcheck disable=SC2016 # $h and $scheme are jq variables bound by --arg, not shell ones.
 FM_PR_FORGEJO_LOGIN_JQ='
   if type == "array" then
     [ .[]
       | select(type == "object" and (.name | type) == "string" and (.name | length) > 0
                and (.url | type) == "string")
-      | select((.url
-                | sub("^[A-Za-z][A-Za-z0-9+.-]*://"; "")
-                | sub("[/?#].*$"; "")
-                | sub("^.*@"; "")
-                | sub(":[0-9]+$"; "")) == $h)
+      | select((.url | startswith($scheme + "://"))
+               and ((.url
+                     | sub("^[A-Za-z][A-Za-z0-9+.-]*://"; "")
+                     | sub("[/?#].*$"; "")
+                     | sub("^.*@"; "")) == $h))
       | .name ]
     | if length == 1 then .[0] else error("not exactly one matching login") end
   else
     error("login list is not an array")
   end'
-fm_pr_forgejo_login() {  # <host>
+fm_pr_forgejo_login() {  # <host> <scheme>
+  local host=${1-} scheme=${2-}
+  case "$scheme" in http|https) ;; *) return 1 ;; esac
   command -v tea >/dev/null 2>&1 || return 1
   command -v jq >/dev/null 2>&1 || return 1
-  tea login list --output json 2>/dev/null | jq -er --arg h "$1" "$FM_PR_FORGEJO_LOGIN_JQ" 2>/dev/null
+  tea login list --output json 2>/dev/null \
+    | jq -er --arg h "$host" --arg scheme "$scheme" "$FM_PR_FORGEJO_LOGIN_JQ" 2>/dev/null
 }
 
 # The state, merged flag, and head commit of one Forgejo pull request, read
@@ -1186,8 +1220,8 @@ fm_pr_forgejo_login() {  # <host>
 # "tea api" exits 0 on an HTTP error and prints the error body instead, so
 # only a record whose state, merged, and head.sha fields all have the expected
 # types is accepted; anything else returns 1 for an honest unknown.
-fm_pr_forgejo_read_record() {  # <host> <path> <number>
-  local host=$1 path=$2 number=$3 login json fields line
+fm_pr_forgejo_read_record() {  # <host> <path> <number> <scheme>
+  local host=$1 path=$2 number=$3 scheme=${4-} login json fields line
   local total=0 named=0 state='' merged='' head=''
   FM_PR_RECORD_STATE=
   FM_PR_RECORD_MERGED=
@@ -1196,7 +1230,7 @@ fm_pr_forgejo_read_record() {  # <host> <path> <number>
   case "$number" in
     ''|*[!0-9]*) return 1 ;;
   esac
-  login=$(fm_pr_forgejo_login "$host") || return 1
+  login=$(fm_pr_forgejo_login "$host" "$scheme") || return 1
   [ -n "$login" ] || return 1
   if ! json=$(tea api --login "$login" --repo "$path" \
       "/repos/{owner}/{repo}/pulls/$number" 2>/dev/null) || [ -z "$json" ]; then

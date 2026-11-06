@@ -381,7 +381,7 @@ status_event_json() {  # <observed-status-log> [<contract-path>]
 
 first_pr_url_in_file() {  # <file>
   [ -f "$1" ] || return 1
-  grep -Eo 'https?://[^[:space:])"]+/pull/[0-9]+' "$1" 2>/dev/null | head -1
+  grep -Eo 'https?://[^[:space:])"]+/pulls?/[0-9]+' "$1" 2>/dev/null | head -1
 }
 
 # Isolate this read-only projection from the fleet collector's shell state.
@@ -438,6 +438,17 @@ backlog_json() (  # [<backlog-path>] - defaults to this home's $BACKLOG
     def url_pattern: "https?://[^[:space:])\"<>]+";
     def wrapped_url_pattern: "<?" + url_pattern + ">?";
     def links($rest): [$rest | scan(url_pattern)];
+    def generated_pr_url($lines):
+      [ $lines[] as $line
+        | if ($line | startswith("PR ")) then
+            [$line | sub("^PR "; "")]
+          elif ($line | startswith("Deliverable of the finished work: ")) then
+            [$line | sub("^Deliverable of the finished work: "; "")
+              | split("; ")[] | select(startswith("PR ")) | sub("^PR "; "")]
+          else [] end
+        | .[]
+        | select(test("^" + url_pattern + "$") and test("/pulls?/[0-9]+$"))
+      ] | .[0] // null;
     def strip_trailing_metadata:
       reduce range(0; 20) as $_ (.;
         sub("[[:space:]]*\\([[:space:]]*(?:(?:repo|kind|priority|hold|hold-kind|hold-until):[[:space:]]*[^)]*|(?:since|merged|reported|done)[[:space:]]+[^)]*)[[:space:]]*\\)[[:space:]]*$"; ""));
@@ -511,7 +522,7 @@ backlog_json() (  # [<backlog-path>] - defaults to this home's $BACKLOG
              done:metadata_word($rest; "done"),
              completion:completion($rest),
              links:links($rest),
-             pr_url:((links($rest) | map(select(test("/pull/[0-9]+"))) | .[0]) // null),
+             pr_url:((links($rest) | map(select(test("/pulls?/[0-9]+"))) | .[0]) // null),
              report_path:cap($rest; ".*(?<v>data/[^[:space:])]+/report\\.md).*"),
              local_note:local_note($rest),
              raw:$line,
@@ -545,6 +556,11 @@ backlog_json() (  # [<backlog-path>] - defaults to this home's $BACKLOG
                   else cap(.body_lines[-1]; "^(?<v>local main)$")
                   end))
           | .body_excerpt = ((.body_lines | join(" "))[:240])
+          | generated_pr_url(.body_lines) as $generated_pr
+          | .pr_url = (.pr_url // $generated_pr)
+          | if $generated_pr != null and .completion.verb == "done" then
+              .completion.verb = "merged"
+            else . end
         else . end)
     | .records as $records
     | (reduce ($records[] | select(.structured)) as $record ({};

@@ -383,6 +383,36 @@ test_local_secondmate_delivers_terminal_ledger_line() {
   pass "secondmate delivers a child's terminal ledger line once, on the next poll, from the ledger alone"
 }
 
+test_local_secondmate_extracts_forgejo_ledger_pr() {
+  local key url=http://pi4:3001/o/r/pulls/7
+  make_world forgejo-ledger; bind_secondmate local
+  write_child "$MATE" child "done: PR $url checks green"
+  awk '!/^pr=/' "$MATE/state/child.meta" > "$MATE/state/child.meta.tmp" \
+    && mv "$MATE/state/child.meta.tmp" "$MATE/state/child.meta"
+  age "$MATE/state/child.meta"
+  FM_FAKE_CREW_STATE='unknown' run_reconcile "$MATE"
+  key=$(reported_outcome_key "$MATE" child 'done') || fail "Forgejo ledger receipt was not recorded"
+  sed -E 's/ \[at=[0-9]+\]//' "$MAIN/state/mate.status" \
+    | grep -Fxq "done [key=$key]: child child done: PR $url checks green pr=$url mode=no-mistakes yolo=off" \
+    || fail "secondmate dropped the unrecorded Forgejo ledger PR: $(cat "$MAIN/state/mate.status" 2>/dev/null)"
+  pass "secondmate preserves an unrecorded plain-http Forgejo PR from its ledger line"
+}
+
+test_local_secondmate_omits_noncanonical_ledger_pr() {
+  local key url=https://github.com/o/r/pulls/7
+  make_world noncanonical-ledger; bind_secondmate local
+  write_child "$MATE" child "done: PR $url checks green"
+  awk '!/^pr=/' "$MATE/state/child.meta" > "$MATE/state/child.meta.tmp" \
+    && mv "$MATE/state/child.meta.tmp" "$MATE/state/child.meta"
+  age "$MATE/state/child.meta"
+  FM_FAKE_CREW_STATE='unknown' run_reconcile "$MATE"
+  key=$(reported_outcome_key "$MATE" child 'done') || fail "noncanonical ledger receipt was not recorded"
+  sed -E 's/ \[at=[0-9]+\]//' "$MAIN/state/mate.status" \
+    | grep -Fxq "done [key=$key]: child child done: PR $url checks green mode=no-mistakes yolo=off" \
+    || fail "secondmate published a parser-invalid ledger PR: $(cat "$MAIN/state/mate.status" 2>/dev/null)"
+  pass "secondmate omits a noncanonical PR from its structured ledger report"
+}
+
 # A terminal record written as a multi-line block belongs to the ledger path
 # whether the block lands before or during the state read: it is delivered once,
 # under the ledger's own outcome key, and the inactive fallback stays out of it.
@@ -506,7 +536,7 @@ test_secondmate_ledger_delivery_carries_report_and_failure() {
   mkdir -p "$MATE/data/scout"
   printf '# findings\n' > "$MATE/data/scout/report.md"
   write_child "$MATE" boom 'failed: build broke'
-  write_child "$MATE" replaced-pr $'working: old PR https://example.test/owner/repo/pull/11\ndone: PR https://example.test/owner/repo/pull/22'
+  write_child "$MATE" replaced-pr $'working: old PR https://github.com/owner/repo/pull/11\ndone: PR https://github.com/owner/repo/pull/22'
   awk '$0 !~ /^pr=/' "$MATE/state/replaced-pr.meta" > "$MATE/state/replaced-pr.meta.tmp"
   mv "$MATE/state/replaced-pr.meta.tmp" "$MATE/state/replaced-pr.meta"
   FM_FAKE_CREW_STATE='unknown' run_reconcile "$MATE"
@@ -517,7 +547,7 @@ test_secondmate_ledger_delivery_carries_report_and_failure() {
     || fail "scout delivery lost its report pointer: $(cat "$MAIN/state/mate.status")"
   sed -E 's/ \[at=[0-9]+\]//' "$MAIN/state/mate.status" | grep -Fxq "failed [key=$boom_key]: child boom failed: build broke pr=https://example.test/owner/repo/pull/1 mode=no-mistakes yolo=off" \
     || fail "failed line was not delivered under the failed verb: $(cat "$MAIN/state/mate.status")"
-  sed -E 's/ \[at=[0-9]+\]//' "$MAIN/state/mate.status" | grep -Fxq "done [key=$replaced_key]: child replaced-pr done: PR https://example.test/owner/repo/pull/22 pr=https://example.test/owner/repo/pull/22 mode=no-mistakes yolo=off" \
+  sed -E 's/ \[at=[0-9]+\]//' "$MAIN/state/mate.status" | grep -Fxq "done [key=$replaced_key]: child replaced-pr done: PR https://github.com/owner/repo/pull/22 pr=https://github.com/owner/repo/pull/22 mode=no-mistakes yolo=off" \
     || fail "ledger fallback did not prefer the terminal ready line PR: $(cat "$MAIN/state/mate.status")"
   printf 'working: retrying\ndone: fixed on retry\n' >> "$MATE/state/boom.status"
   FM_FAKE_CREW_STATE='unknown' run_reconcile "$MATE"
@@ -536,9 +566,9 @@ test_pr_field_requires_recorded_pr_or_ready_signal_line() {
   local id prose_key ready_key stamped_key placeholder_key scout_key
   make_world pr-provenance; bind_secondmate local
   write_child "$MATE" prose $'working: context in https://example.test/other/repo/pull/33\ndone: cleanup finished'
-  write_child "$MATE" ready 'done: PR https://example.test/owner/repo/pull/44 checks green'
-  write_child "$MATE" stamped 'done [at=1788576000]: PR https://example.test/owner/repo/pull/66 checks green'
-  write_child "$MATE" placeholder 'done [at=<epoch>]: PR https://example.test/owner/repo/pull/77 checks green'
+  write_child "$MATE" ready 'done: PR https://github.com/owner/repo/pull/44 checks green'
+  write_child "$MATE" stamped 'done [at=1788576000]: PR https://github.com/owner/repo/pull/66 checks green'
+  write_child "$MATE" placeholder 'done [at=<epoch>]: PR https://github.com/owner/repo/pull/77 checks green'
   write_child "$MATE" lookout 'done: PR https://example.test/owner/repo/pull/55'
   for id in prose ready stamped placeholder; do
     awk '$0 !~ /^pr=/' "$MATE/state/$id.meta" > "$MATE/state/$id.meta.tmp"
@@ -556,11 +586,11 @@ test_pr_field_requires_recorded_pr_or_ready_signal_line() {
   scout_key=$(reported_outcome_key "$MATE" lookout 'done') || fail "scout receipt key missing"
   sed -E 's/ \[at=[0-9]+\]//' "$MAIN/state/mate.status" | grep -Fxq "done [key=$prose_key]: child prose done: cleanup finished mode=no-mistakes yolo=off" \
     || fail "a PR mentioned only in prose was claimed as the delivery: $(cat "$MAIN/state/mate.status")"
-  sed -E 's/ \[at=[0-9]+\]//' "$MAIN/state/mate.status" | grep -Fxq "done [key=$ready_key]: child ready done: PR https://example.test/owner/repo/pull/44 checks green pr=https://example.test/owner/repo/pull/44 mode=no-mistakes yolo=off" \
+  sed -E 's/ \[at=[0-9]+\]//' "$MAIN/state/mate.status" | grep -Fxq "done [key=$ready_key]: child ready done: PR https://github.com/owner/repo/pull/44 checks green pr=https://github.com/owner/repo/pull/44 mode=no-mistakes yolo=off" \
     || fail "a ready-signal terminal line did not carry its PR: $(cat "$MAIN/state/mate.status")"
-  sed -E 's/ \[at=[0-9]+\]//' "$MAIN/state/mate.status" | grep -Fxq "done [key=$stamped_key]: child stamped done: PR https://example.test/owner/repo/pull/66 checks green pr=https://example.test/owner/repo/pull/66 mode=no-mistakes yolo=off" \
+  sed -E 's/ \[at=[0-9]+\]//' "$MAIN/state/mate.status" | grep -Fxq "done [key=$stamped_key]: child stamped done: PR https://github.com/owner/repo/pull/66 checks green pr=https://github.com/owner/repo/pull/66 mode=no-mistakes yolo=off" \
     || fail "a stamped ready-signal terminal line did not carry its PR: $(cat "$MAIN/state/mate.status")"
-  sed -E 's/ \[at=[0-9]+\]//' "$MAIN/state/mate.status" | grep -Fxq "done [key=$placeholder_key]: child placeholder done: PR https://example.test/owner/repo/pull/77 checks green pr=https://example.test/owner/repo/pull/77 mode=no-mistakes yolo=off" \
+  sed -E 's/ \[at=[0-9]+\]//' "$MAIN/state/mate.status" | grep -Fxq "done [key=$placeholder_key]: child placeholder done: PR https://github.com/owner/repo/pull/77 checks green pr=https://github.com/owner/repo/pull/77 mode=no-mistakes yolo=off" \
     || fail "a ready-signal line whose stamp was left unsubstituted lost its PR: $(cat "$MAIN/state/mate.status")"
   sed -E 's/ \[at=[0-9]+\]//' "$MAIN/state/mate.status" | grep -Fxq "done [key=$scout_key]: child lookout done: PR https://example.test/owner/repo/pull/55 mode=no-mistakes yolo=off" \
     || fail "a scout's ready-looking line carried a PR claim: $(cat "$MAIN/state/mate.status")"
@@ -1429,6 +1459,8 @@ test_unpushed_ci_ready_done_is_not_published
 test_local_done_head_is_pinned_before_parent_delivery
 test_delivered_ledger_done_skips_git_gate
 test_local_secondmate_delivers_terminal_ledger_line
+test_local_secondmate_extracts_forgejo_ledger_pr
+test_local_secondmate_omits_noncanonical_ledger_pr
 test_secondmate_multiline_terminal_outcome_is_delivered_once
 test_secondmate_unterminated_prose_reports_run_outcome
 test_inactive_receipt_ignores_later_status_prose
