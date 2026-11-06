@@ -646,12 +646,13 @@ Ship branch: $branch
 This task ships **direct-PR**: you raise the PR yourself, without the no-mistakes pipeline.
 The task is complete only when committed on your branch.
 When it is implemented and committed, push your branch and open a PR with \`$forge_cli\` that is ready for review, not a draft$pr_base.
-Before you report done, read the PR back from the forge and confirm it is not a draft $draft_check
-A draft cannot be merged, so a done report on one leaves the merge unasked.
-Then append \`done [at=<epoch>]: PR {url}\` to the status file and stop.
+Before you report the PR, read it back from the forge and confirm it is not a draft $draft_check
+A draft cannot be merged, so a report on one leaves the merge unasked.
+The configured merge authority decides whether to merge the PR; firstmate relays the outcome. You never merge a PR.
+Append \`done [at=<epoch>]: PR {url}\` after confirming the PR is ready for review, then stop.
 That \`done:\` is accepted only when this copy's HEAD - your latest commit - is pushed to your PR branch; the check tests that commit, not merely that a branch moved.
 If you deliberately keep the PR a draft, append \`paused [at=<epoch>]: {why the draft is held}\` instead of done.
-Do NOT run /no-mistakes. The configured merge authority decides whether to merge the PR; firstmate relays the outcome.
+Do NOT run /no-mistakes.
 EOF
       ;;
     local-only:*)
@@ -688,8 +689,9 @@ EOF
       cat <<EOF
 
 After /no-mistakes reports CI green (the CI-ready return point - do not wait for it to keep monitoring in the background until merge), read the PR back from the forge and confirm it is not a draft $draft_check
-A draft cannot be merged, so a done report on one leaves the merge unasked.
-Then append \`done [at=<epoch>]: PR {url} checks green\` and stop. You are finished.
+A draft cannot be merged, so a report on one leaves the merge unasked.
+The configured merge authority decides whether to merge the PR; firstmate relays the outcome. You never merge a PR.
+Append \`done [at=<epoch>]: PR {url} checks green\` after confirming the PR is ready for review, then stop.
 That CI-ready \`done:\` is accepted only when this copy's HEAD - your latest commit - is one the /no-mistakes run pushed, so commit nothing after the run; the check tests that commit, not merely that a branch moved.
 If you deliberately keep the PR a draft, append \`paused [at=<epoch>]: {why the draft is held}\` instead of done.
 EOF
