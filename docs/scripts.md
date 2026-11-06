@@ -109,6 +109,7 @@ The shared no-mistakes gate lifecycle boundary is summarized in [architecture.md
 | `fm-codex-stop-park.sh`  | On an opted-in home, register verified native Codex sessions and park supervision in the asynchronous Stop hook, delivering wakes through the native thread queue |
 | `fm-watch-checkpoint.sh` | Run one bounded foreground watcher checkpoint for Codex-style supervision            |
 | `fm-watch.sh`            | Singleton-safe watcher: absorb benign wakes, detect stalled local-secondmate wake queues, and exit on actionable ones |
+| `fm-watch-key-lib.sh`    | Shared per-window watcher marker identity for the watcher and away daemon             |
 | `fm-inactive-reconcile.sh` | Reconcile direct crewmate terminal outcomes through the [shared readiness gate](architecture.md#delivery-modes-are-explicit-per-task) |
 | `fm-afk-contract.sh`     | Own the away-or-quiet record's posture, schema, entry, read-back, archive, and cross-subsystem authority lock |
 | `fm-afk-start.sh`        | Run the common sourceable away-mode daemon entry in the foreground                      |
