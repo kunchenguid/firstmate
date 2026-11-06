@@ -79,7 +79,7 @@ The composer classifier reads that styled viewport with styling, row count, proc
 Where that cursor-anchored read is `unknown`, as for a harness that parks its cursor outside its composer, the cursorless read that takes the bottom-most shape decides instead.
 
 The `process` block method reports the foreground process with its cwd, its ancestors, and the last exit.
-Spawn's worktree discovery reads the foreground cwd, which follows the nested subshell `treehouse get` opens.
+Spawn reads the foreground cwd to confirm the block entered the task copy.
 Agent state is recovery-grade: a verified harness anywhere in the foreground process or its ancestors, or among a shell foreground's live descendants, reads `alive`, a shell foreground with no harness above or below it reads `dead`, an exited terminal child reads `dead`, anything else reads `ambiguous`, a structured not-found reads `missing`, and an unreachable server reads `unreadable`.
 The descendant check exists because a login shell that starts the harness through a wrapper in its own process group, such as a fish function or a shell shim, stays the reported foreground process while the harness runs below it.
 Passive reads never start a server.
@@ -103,6 +103,13 @@ That never wakes the supervisor by itself, because a routine cleanup closes bloc
 The push path only shortens latency, and polling stays the fallback.
 Supervision polls when the CLI or server is below API revision 5 or unreachable (the reader never starts a server), when the reader cannot start or ends before its deadline, and after the watcher's consecutive-reader-failure threshold is reached (three by default).
 Task tabs in a second Rex session stay on polling, because one reader covers one session.
+
+## Task copy lease
+
+A fresh task leases its task copy durably with `treehouse get --lease` and then moves the block's top-level shell into it, exactly as on Herdr.
+The interactive `treehouse get` holds a slot only through its live subshell, so a Rex Server stop would free the slot of a worker that is about to be relaunched, and another task could take it first.
+The lease outlives the block and the server: cleanup returns it with the copy, and a relaunch reuses the recorded copy.
+An aborted spawn returns the lease only when Rex confirms the task block gone and the copy holds no uncommitted work; otherwise it names the `treehouse return --force` command.
 
 ## Cleanup and the absence proof
 

@@ -544,8 +544,7 @@ fm_backend_rex_target_ready() {  # <target> [expected-label]
 }
 
 # fm_backend_rex_current_path: the block's foreground process cwd, which
-# follows a nested subshell such as `treehouse get` (verified live). Empty on
-# any error.
+# follows a nested subshell (verified live). Empty on any error.
 fm_backend_rex_current_path() {  # <target> [expected-label]
   local out
   out=$(fm_backend_rex_block_call "$1" process) || return 0
