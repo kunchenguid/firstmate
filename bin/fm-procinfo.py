@@ -28,7 +28,6 @@ Usage: fm-procinfo.py <pid>
 """
 import ctypes
 import ctypes.util
-import locale
 import os
 import struct
 import sys
@@ -37,9 +36,6 @@ CTL_KERN = 1
 KERN_PROC = 14        # CTL_KERN, KERN_PROC, KERN_PROC_PID: one kinfo_proc
 KERN_PROC_PID = 1
 KERN_PROCARGS2 = 49   # CTL_KERN, KERN_PROCARGS2, pid: exec path + argv + env
-VIS_TAB = 0x0008
-VIS_NL = 0x0010
-VIS_NOSLASH = 0x0040
 
 # kinfo_proc LP64 offsets: p_pid lives in kp_proc, the real parent pid in
 # kp_eproc.e_ppid. These are assumptions, so _self_kinfo() proves them
@@ -149,26 +145,22 @@ def _procargs(pid):
 
 
 def _ps_visible(raw):
-    # Use the same locale-aware vis encoder and flags as macOS ps.
-    result = ctypes.create_string_buffer(4 * len(raw) + 1)
-    encode = libc().strnvis
-    encode.argtypes = (ctypes.c_void_p, ctypes.c_size_t,
-                       ctypes.c_char_p, ctypes.c_int)
-    encode.restype = ctypes.c_int
-    if encode(result, len(result), raw, VIS_TAB | VIS_NL | VIS_NOSLASH) < 0:
-        return None
-    return result.value
+    result = []
+    for byte in raw:
+        if byte >= 128:
+            result.append("M-")
+            byte -= 128
+        if byte < 32 or byte == 127:
+            result.append("^" + chr(byte ^ 64))
+        else:
+            result.append(chr(byte))
+    return "".join(result)
 
 
 def main():
     if len(sys.argv) != 2 or not sys.argv[1].isdigit():
         print("usage: fm-procinfo.py <pid>", file=sys.stderr)
         return 2
-    # Match ps rather than Python's automatic C-locale coercion.
-    try:
-        locale.setlocale(locale.LC_CTYPE, "")
-    except locale.Error:
-        locale.setlocale(locale.LC_CTYPE, "C")
     pid = int(sys.argv[1])
     verified = _self_kinfo()
     ppid = ppid_of(pid, verified)
@@ -182,10 +174,10 @@ def main():
         # hand the two routes different facts about one process.
         return 1
     comm = _ps_visible(argv[0])
+    while argv and not argv[-1]:
+        argv.pop()
     args = _ps_visible(b" ".join(argv))
-    if comm is None or args is None:
-        return 1
-    sys.stdout.buffer.write(str(ppid).encode("ascii") + b"\t" + comm + b"\t" + args + b"\n")
+    sys.stdout.write("%d\t%s\t%s\n" % (ppid, comm, args))
     return 0
 
 

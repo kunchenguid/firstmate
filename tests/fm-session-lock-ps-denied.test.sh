@@ -685,8 +685,8 @@ test_procinfo_helper_fails_closed() {
 # control byte, in place, with every printable and UTF-8 byte intact, so
 # a byte-for-byte comparison here would pin one procps build instead of
 # the rule and fail on the other. A route that spells control bytes with
-# characters ps itself prints (such as caret notation or octal escapes)
-# keeps them through the fold, which is why this touches only
+# characters ps itself prints (BSD and the macOS provider render them as
+# ^I / ^J) keeps them through the fold, which is why this touches only
 # the space and non-printable bytes.
 normalize_control_bytes() {  # <text>
   printf '%s' "$1" \
@@ -713,12 +713,6 @@ os.execv(sys.executable, [os.fsencode(sys.executable), b"-c", b"import sys,time;
     || { kill "$child"; fail "provider refused control-byte child"; }
   kill "$child" 2>/dev/null
   wait "$child" 2>/dev/null || :
-  # macOS has one shared vis contract for both fields, including Unicode
-  # and control-byte escapes. Linux permits different placeholder bytes.
-  if [ "$(uname -s)" = Darwin ]; then
-    [ "$got" = "$expected" ] \
-      || fail "macOS control-byte routes disagree: provider '$got', ps '$expected'"
-  fi
   # ppid and comm carry no control bytes, so those fields stay a raw
   # comparison; only the argv field is compared by shape.
   [ "${got%$'\t'*}" = "${expected%$'\t'*}" ] \
@@ -728,8 +722,8 @@ os.execv(sys.executable, [os.fsencode(sys.executable), b"-c", b"import sys,time;
   # Non-vacuity: every fixture word that sits around a control byte must
   # still arrive from both routes, so a route that swallowed that text
   # cannot pass by matching a loss on the other route. The words are
-  # asserted without their placeholder, because BSD and macOS can use
-  # visible escape sequences while Linux uses one placeholder byte.
+  # asserted without their placeholder, because a BSD ps and the macOS
+  # provider spell it ^I / ^J while a Linux one spells it as one byte.
   local word
   for word in tab newline high; do
     case $got in
@@ -832,19 +826,12 @@ os.execv(sys.executable, [sys.executable, "-c", "import sys,time; open(sys.argv[
       middle) suffix='aa  bb' ;;
       space) suffix='tail ' ;;
     esac
-    # macOS ps joins all argc entries. Linux drops trailing empty ones.
-    if [ "$(uname -s)" = Darwin ]; then
-      case "$shape" in
-        one) suffix='--resume ' ;;
-        two) suffix='--resume  ' ;;
-      esac
-    fi
     case "$args" in
       *"$marker $suffix") ;;
       *) fail "$shape argv lost element spacing: '$args'" ;;
     esac
   done
-  pass "empty argv elements and argument spaces match the platform ps"
+  pass "trailing empty argv elements are dropped; interior empties and argument spaces survive"
 }
 
 test_unreadable_owner_refuses_acquisition() {
