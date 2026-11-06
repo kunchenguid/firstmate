@@ -84,6 +84,9 @@
 #   fm-afk-launch.sh start-native
 #                              Prepare lifecycle state for a harness-native
 #                              background job and record that no terminal exists.
+#                              Like `start`, it resolves the operator session
+#                              first and refuses before writing state/.afk when
+#                              discovery names none.
 #   fm-afk-launch.sh stop      Correct-ordered exit: SIGTERM the daemon so its
 #                              cleanup flushes WHILE state/.afk is still present,
 #                              wait for it, close a recorded non-native terminal
@@ -108,6 +111,13 @@
 # runs in a dedicated Rex session of its own, so the captain's session gains no
 # tab and keeps its focus.
 #
+# Both entry paths resolve the operator session BEFORE they write state/.afk, and
+# both refuse there when discovery cannot name one: an armed window that can
+# deliver nothing is the silent loss issue #7168 closes. The discovery precedence
+# and the supported-backend list are owned by bin/fm-supervisor-target-lib.sh;
+# Orca is recognized there so an Orca-hosted captain gets the named refusal
+# instead of the tmux fallback.
+#
 # Test seam: FM_AFK_LAUNCH_ENTRY overrides the command run in the created
 # terminal (default bin/fm-afk-start.sh), so a topology test can run a harmless
 # placeholder instead of a real daemon. FM_SUPERVISOR_TARGET/FM_SUPERVISOR_BACKEND
@@ -116,6 +126,7 @@
 # with it unset, a daemon start/refresh uses the record's mode.
 # FM_TEST_HARNESS pins the primary harness this launch path judges, through
 # fm_supervision_host_primary (bin/fm-supervision-engine-lib.sh owns the seam).
+# FM_AFK_LAUNCH_TARGET_PROBE overrides the endpoint probe only with FM_TEST_SEAM=1.
 set -u
 
 FM_AFK_LAUNCH_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -765,18 +776,55 @@ fm_afk_launch_create_tmux() {  # <captain-target> <captain-backend>
   fm_afk_launch_log "daemon launched in detached tmux session '$session', supervising $captain_target"
 }
 
+# fm_afk_launch_capture_captain: resolve the operator session this launcher runs
+# in, and refuse when discovery cannot name one the away daemon can inject into.
+# `start` and `start-native` call this BEFORE either path writes state/.afk, so
+# no entry can report armed without a verifiable operator session (issue #7168
+# gap 1: the native path used to record `none - native` and arm the flag with no
+# discovery at all). Discovery, the supported-backend list, and its predicate are
+# owned by bin/fm-supervisor-target-lib.sh; this function only owns the ordering.
+# Both refusals leave every lifecycle file untouched: the caller has not written
+# anything yet. Sets FM_AFK_LAUNCH_CAPTAIN_TARGET and
+# FM_AFK_LAUNCH_CAPTAIN_BACKEND on success.
+FM_AFK_LAUNCH_CAPTAIN_TARGET=""
+FM_AFK_LAUNCH_CAPTAIN_BACKEND=""
+fm_afk_launch_target_exists() {
+  if [ "${FM_TEST_SEAM:-}" = 1 ] && [ -n "${FM_AFK_LAUNCH_TARGET_PROBE:-}" ]; then
+    "$FM_AFK_LAUNCH_TARGET_PROBE" "$1" "$2"
+  else
+    fm_backend_target_exists "$1" "$2"
+  fi
+}
+
+fm_afk_launch_capture_captain() {
+  local target backend
+  target=$(discover_supervisor_target) || {
+    fm_afk_launch_log "could not resolve a verifiable operator session for away supervision (no FM_SUPERVISOR_TARGET, TMUX_PANE, herdr, Rex, T3 thread, or Orca terminal in this session); refusing to arm away mode"
+    return 1; }
+  backend=$(discover_supervisor_backend) || {
+    fm_afk_launch_log "could not resolve the captain supervisor backend (set FM_SUPERVISOR_BACKEND); refusing to arm away mode"
+    return 1; }
+  if ! fm_supervisor_backend_supported "$backend"; then
+    fm_afk_launch_log "away supervision does not support supervisor backend '$backend' yet (supported: $FM_SUPERVISOR_SUPPORTED_BACKENDS); refusing to arm away mode. Run firstmate inside a supported session, or set FM_SUPERVISOR_BACKEND/FM_SUPERVISOR_TARGET explicitly"
+    return 1
+  fi
+  if ! fm_afk_launch_target_exists "$backend" "$target"; then
+    fm_afk_launch_log "supervisor target '$target' does not resolve to a $backend endpoint; refusing to arm away mode. Set FM_SUPERVISOR_TARGET to firstmate's own pane"
+    return 1
+  fi
+  FM_AFK_LAUNCH_CAPTAIN_TARGET=$target
+  FM_AFK_LAUNCH_CAPTAIN_BACKEND=$backend
+}
+
 fm_afk_launch_start() {
   local captain_target captain_backend backup artifact had_afk=0 result
   fm_afk_launch_catchup_pending && return 1
   fm_afk_launch_daemon_allowed || return 1
   fm_afk_launch_record_require || return 1
   # Capture the captain endpoint FIRST, before creating anything.
-  captain_target=$(discover_supervisor_target) || {
-    fm_afk_launch_log "could not resolve the captain supervisor pane (set FM_SUPERVISOR_TARGET)"
-    return 1; }
-  captain_backend=$(discover_supervisor_backend) || {
-    fm_afk_launch_log "could not resolve the captain supervisor backend (set FM_SUPERVISOR_BACKEND)"
-    return 1; }
+  fm_afk_launch_capture_captain || return 1
+  captain_target=$FM_AFK_LAUNCH_CAPTAIN_TARGET
+  captain_backend=$FM_AFK_LAUNCH_CAPTAIN_BACKEND
   if [ "$captain_backend" = t3code ]; then
     fm_afk_launch_log "backend t3code hosts no terminal to launch the daemon in; use 'fm-afk-launch.sh start-native' and run bin/fm-afk-start.sh through the harness's tracked background tool"
     return 1
@@ -847,6 +895,10 @@ fm_afk_launch_start_native() {
   fm_afk_launch_catchup_pending && return 1
   fm_afk_launch_daemon_allowed || return 1
   fm_afk_launch_record_require || return 1
+  # The same pre-flag refusal `start` runs (issue #7168 gap 1): a harness-native
+  # background job still needs a captain endpoint the daemon can inject into, so
+  # `none - native` is only recorded for a session discovery can name.
+  fm_afk_launch_capture_captain || return 1
   if daemon_lock_held_by_live_daemon; then
     fm_afk_launch_record_validate_if_present || return 1
     fm_afk_launch_flag_write || return 1
