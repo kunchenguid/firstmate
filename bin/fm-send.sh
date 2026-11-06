@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Steer a task by durable record: write the message into the task's steering
 # inbox and ring a constant doorbell through its backend endpoint, best-effort.
-# Usage: fm-send.sh <target> [--resolve-key <key>]... [--fire-and-forget <delivery-id>] <text...>
+# Usage: fm-send.sh <target> [--fire-and-forget <delivery-id>] <text...>
+#   fm-send.sh <target> --resolve-key <key> [--resolve-key <key>]... --source-kind <kind> --source <reference> [--source-time <UTC>] <text...>
 #   <target> may be an exact task id, a legacy fm-<id> task label resolved
 #   through this home's state/<id>.meta, or an explicit well-formed backend
 #   target. fm-send refuses unresolved guesses rather than falling back to a
@@ -159,16 +160,19 @@
 # blocked: record in the target task's state/<id>.status. fm-send itself
 # appends the closing resolved line to that status file, so the captain-facing
 # OPEN DECISIONS record closes at answer time and never depends on the busy
-# worker writing a matching resolved line. For ordinary keys the payload is
-# "resolved [key=<key>]: answered: <capped excerpt>" before the emission-time
+# worker writing a matching resolved line. Every resolution requires source
+# fields validated by bin/fm-resolution-source-lib.sh (the provenance owner).
+# Source flags without --resolve-key remain literal ordinary message text.
+# For ordinary keys the payload is
+# "resolved [key=<key>]: answered: <capped excerpt> <source fields>" before the emission-time
 # handling owned by bin/fm-classify-lib.sh. A reserved key
 # (pending-reply-* today; bin/fm-classify-lib.sh's reserved-key guard) is
 # closed with the owning library's vocabulary note
 # (fm_pending_reply_close_note_for_key / fm_pending_reply_resolved_note), so
 # the fold actually drops it; a bare answered: note is not a reserved-key
 # transition and is never written for those keys. If this send cannot produce
-# a note the guard will accept, or the structural key would be lost to the
-# status-line cap, it refuses before sending and names the cause rather than
+# a note the guard will accept, or the source fields and structural key cannot
+# fit within the status-line cap, it refuses before sending and names the cause rather than
 # exiting 0 on a silent no-op. A key nothing owns refuses the same way, for the
 # same reason: delivering an answer this send cannot close would leave the
 # decision open behind an answer the operator believes settled it. That refusal
@@ -248,6 +252,8 @@ FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 
 # shellcheck source=bin/fm-gate-refuse-lib.sh
 . "$SCRIPT_DIR/fm-gate-refuse-lib.sh"
+# shellcheck source=bin/fm-resolution-source-lib.sh
+. "$SCRIPT_DIR/fm-resolution-source-lib.sh"
 # Fail closed before any fleet mutation: a no-mistakes gate agent must never steer
 # a crewmate (see bin/fm-gate-refuse-lib.sh).
 fm_refuse_if_gate_agent
@@ -516,6 +522,9 @@ fi
 # must precede --key or the message text; everything after the last flag is the
 # message exactly as before, so ordinary sends are byte-identical.
 RESOLVE_KEYS=
+RESOLVE_SOURCE_KIND=
+RESOLVE_SOURCE=
+RESOLVE_SOURCE_TIME=
 FIRE_AND_FORGET_ID=
 fm_send_add_resolve_key() { # <key>
   local k=$1
@@ -533,8 +542,36 @@ fm_send_add_resolve_key() { # <key>
   esac
   RESOLVE_KEYS="${RESOLVE_KEYS}${RESOLVE_KEYS:+ }$k"
 }
+fm_send_has_resolve_key() {
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --resolve-key|--resolve-key=*) return 0 ;;
+      --source-kind|--source|--source-time|--fire-and-forget)
+        [ "$#" -ge 2 ] || return 1
+        shift 2 ;;
+      --fire-and-forget=*) shift ;;
+      --key)
+        case "$*" in
+          *--resolve-key*) return 0 ;;
+          *) return 1 ;;
+        esac ;;
+      *) return 1 ;;
+    esac
+  done
+  return 1
+}
 while :; do
   case "${1:-}" in
+  --source-kind|--source|--source-time)
+    [ -n "$RESOLVE_KEYS" ] || fm_send_has_resolve_key "$@" || break
+    [ $# -ge 2 ] || { echo "error: $1 requires a value" >&2; exit 1; }
+    case "$1" in
+      --source-kind) RESOLVE_SOURCE_KIND=$2 ;;
+      --source) RESOLVE_SOURCE=$2 ;;
+      --source-time) RESOLVE_SOURCE_TIME=$2 ;;
+    esac
+    shift 2
+    ;;
   --resolve-key)
     [ $# -ge 2 ] || {
       echo "error: --resolve-key requires a key" >&2
@@ -679,16 +716,31 @@ fm_send_resend_exe() {
   printf '%q' "$SCRIPT_DIR/fm-send.sh"
 }
 
-# Close-note body for --resolve-key. Ordinary keys keep answered: <excerpt>.
+# Close-note body for --resolve-key. Retain provenance in full, capping only
+# the answer excerpt to fit the stamped status record.
 # A pending-reply-* key uses the owning library's vocabulary so the reserved-key
 # fold actually closes it (fm_pending_reply_close_note_for_key).
 fm_send_resolve_close_note() { # <key> <excerpt>
-  local k=$1 excerpt=$2 owned
+  local k=$1 excerpt=$2 owned source empty budget prefix
+  source=$(fm_resolution_source_note "$RESOLVE_SOURCE_KIND" "$RESOLVE_SOURCE" "$RESOLVE_SOURCE_TIME")
+  empty='answered: '
+  if owned=$(fm_pending_reply_close_note_for_key "$k" "$RESOLVE_TASK_ID" operator-resolve-key ''); then
+    empty="$owned "
+  fi
+  prefix="resolved [key=$k]: "
+  budget=$((RESOLVE_CLOSE_MAX - ${#prefix} - ${#empty} - ${#source} - 1))
+  [ "$budget" -ge 0 ] || return 1
+  if [ "$budget" -lt "${#FM_LINE_CAP_SUFFIX}" ]; then
+    excerpt=${excerpt:0:budget}
+  else
+    fm_cap_line_var "$excerpt" "$budget"
+    excerpt=$FM_LINE_CAP_LINE
+  fi
   if owned=$(fm_pending_reply_close_note_for_key "$k" "$RESOLVE_TASK_ID" operator-resolve-key "$excerpt"); then
-    printf '%s' "$owned"
+    printf '%s %s' "$owned" "$source"
     return 0
   fi
-  printf 'answered: %s' "$excerpt"
+  printf 'answered: %s %s' "$excerpt" "$source"
 }
 
 if [ -n "$FIRE_AND_FORGET_ID" ]; then
@@ -710,6 +762,7 @@ if [ -n "$FIRE_AND_FORGET_ID" ]; then
 fi
 
 if [ -n "$RESOLVE_KEYS" ]; then
+  fm_resolution_source_validate "$RESOLVE_SOURCE_KIND" "$RESOLVE_SOURCE" "$RESOLVE_SOURCE_TIME" || exit 1
   if [ -z "$TARGET_SELECTOR" ] || [ -z "$TARGET_META" ]; then
     echo "error: --resolve-key needs a task selector resolved through this home's metadata; an explicit backend target has no decision ledger here" >&2
     exit 1
@@ -769,9 +822,11 @@ if [ -n "$RESOLVE_KEYS" ]; then
       # a resend that resolves to another home, or to no script at all, delivers
       # the preserved message nowhere.
       resolve_resend_prefix="$(fm_send_resend_env)$(fm_send_resend_exe)"
+      printf -v resolve_source_args ' --source-kind %q --source %q' "$RESOLVE_SOURCE_KIND" "$RESOLVE_SOURCE"
+      [ -z "$RESOLVE_SOURCE_TIME" ] || printf -v resolve_source_args '%s --source-time %q' "$resolve_source_args" "$RESOLVE_SOURCE_TIME"
       printf '  resend, your message preserved:\n'
       printf '    %s %s%s %s\n' \
-        "$resolve_resend_prefix" "$RESOLVE_TASK_ID" "$resolve_resend_args" "$resolve_quoted_message"
+        "$resolve_resend_prefix" "$RESOLVE_TASK_ID" "$resolve_resend_args$resolve_source_args" "$resolve_quoted_message"
       printf '    %s %s %s   # deliver without closing anything\n' \
         "$resolve_resend_prefix" "$RESOLVE_TASK_ID" "$resolve_quoted_message"
     } >&2
@@ -802,7 +857,10 @@ if [ -n "$RESOLVE_KEYS" ]; then
   [ "$RESOLVE_CLOSE_MAX" -ge 0 ] || RESOLVE_CLOSE_MAX=0
   resolve_excerpt=$(printf '%s' "$*" | tr '\n\r\t' '   ' | LC_ALL=C tr -d '\000-\037\177')
   for k in $RESOLVE_STATUS_KEYS; do
-    probe=$(fm_send_resolve_close_note "$k" "$resolve_excerpt")
+    probe=$(fm_send_resolve_close_note "$k" "$resolve_excerpt") || {
+      echo "error: --resolve-key cannot close a decision key of length ${#k}: its source and structural key exceed the $FM_LINE_CAP_DEFAULT-character status-line cap; nothing was sent." >&2
+      exit 1
+    }
     if ! _fm_decision_key_transition_allowed "$k" "$probe"; then
       echo "error: --resolve-key '$k' cannot take effect: this key is reserved for its owning library, and this send cannot produce a close note that library's fold will accept. Refusing rather than writing a silent no-op; nothing was sent." >&2
       exit 1
@@ -864,15 +922,17 @@ fm_send_close_resolved_keys() { # <answer-text>
 # it does not build a decision record or choose a close path; the keys were
 # already resolved to task ids above, so the intake needs no legacy origin.
 fm_send_feed_resolved_holds() { # <answer-text>
-  local note=$1 k lines=''
+  local note=$1 k lines='' source_args
   [ -n "$RESOLVE_HOLD_KEYS" ] || return 0
   note=$(printf '%s' "$note" | tr '\n\r\t' '   ' | LC_ALL=C tr -d '\000-\037\177')
   for k in $RESOLVE_HOLD_KEYS; do
     lines="${lines}${k}"$'\t'"${note}"$'\t'$'\n'
   done
   if ! printf '%s' "$lines" | "$SCRIPT_DIR/fm-captain-hold.sh" answers \
-    --source "a firstmate answer sent to $RESOLVE_TASK_ID" >/dev/null 2>&1; then
-    echo "error: the answer was delivered to $T, but this captain-held task could not be closed: ${RESOLVE_HOLD_KEYS}. Close it with fm-captain-hold.sh answer - do not resend the answer." >&2
+    --source-kind "$RESOLVE_SOURCE_KIND" --source "$RESOLVE_SOURCE" \
+    --source-time "$RESOLVE_SOURCE_TIME" --delivery-task "$RESOLVE_TASK_ID" >/dev/null 2>&1; then
+    printf -v source_args ' --source-kind %q --source %q --source-time %q' "$RESOLVE_SOURCE_KIND" "$RESOLVE_SOURCE" "$RESOLVE_SOURCE_TIME"
+    echo "error: the answer was delivered to $T, but this captain-held task could not be closed: ${RESOLVE_HOLD_KEYS}. Close it with fm-captain-hold.sh answer$source_args - do not resend the answer." >&2
     return 1
   fi
 }

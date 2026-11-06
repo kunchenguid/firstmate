@@ -1681,7 +1681,7 @@ test_landed_accepts_only_kind_owned_delivery_artifacts() {
     || fail "could not hold the answered captain question"
   printf 'Choose route north.\n' > "$home/question-answer.txt"
   run_captain "$home" "$fakebin" answer answered-question \
-    --decision-file "$home/question-answer.txt" >/dev/null \
+    --source-kind user --source "fixture answering message" --source-time 2026-11-05T12:00:00Z --decision-file "$home/question-answer.txt" >/dev/null \
     || fail "could not close the answered captain question"
 
   run_captain "$home" "$fakebin" hold created-local-question \
@@ -1690,7 +1690,7 @@ test_landed_accepts_only_kind_owned_delivery_artifacts() {
   created_kind=$("$TASKS_AXI_BIN" show created-local-question --full --file "$main_backlog" \
     | sed -n 's/^  kind: *//p' | head -1)
   run_captain "$home" "$fakebin" answer created-local-question \
-    --decision-file "$home/question-answer.txt" >/dev/null \
+    --source-kind user --source "fixture answering message" --source-time 2026-11-05T12:00:00Z --decision-file "$home/question-answer.txt" >/dev/null \
     || fail "could not close the local-only captain question"
 
   "$TASKS_AXI_BIN" add legacy-local-question "Choose local main" \
@@ -1700,7 +1700,7 @@ test_landed_accepts_only_kind_owned_delivery_artifacts() {
     --reason "captain legacy local route pending" >/dev/null \
     || fail "could not hold the legacy kindless captain question"
   run_captain "$home" "$fakebin" answer legacy-local-question \
-    --decision-file "$home/question-answer.txt" >/dev/null \
+    --source-kind user --source "fixture answering message" --source-time 2026-11-05T12:00:00Z --decision-file "$home/question-answer.txt" >/dev/null \
     || fail "could not close the legacy kindless captain question"
 
   keyword_report="data/keyword-scout/report.md"

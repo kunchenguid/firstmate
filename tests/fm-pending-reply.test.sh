@@ -2066,7 +2066,7 @@ test_same_kind_escalation_reopens_after_operator_close() {
     open=$(status_open_decisions "$status" | cut -f1)
     [ "$open" = "pending-reply-$corr" ] \
       || fail "the first decision must stay open, got '$open'"
-    run_send "$fb" "$home" "$log" mate --resolve-key "pending-reply-$corr" \
+    run_send "$fb" "$home" "$log" mate --source-kind supervisor --source "fixture supervisor judgement" --resolve-key "pending-reply-$corr" \
       "dismiss the unknown-delivery hold" \
       || fail "operator close failed"
     open=$(status_open_decisions "$status")

@@ -35,6 +35,208 @@ EOF
   printf '%s\n' "$home"
 }
 
+test_interrupted_resolution_and_utf8_attribution() {
+  local scenario parent home channel before after before_channel retry_source bad_rc errors=''
+  local reference boundary show count
+  local -a initial_flags=() retry_flags=()
+  for scenario in release-source release-mode release-both answer-source answer-mode answer-both; do
+    parent=$(make_home "retry-parent-$scenario")
+    home=$(make_home "retry-source-$scenario")
+    printf 'retry-mate\n' > "$home/.fm-secondmate-home"
+    printf 'schema=fm-secondmate-parent.v1\nroute=local\nparent_home=%s\n' "$parent" \
+      > "$home/.fm-secondmate-parent"
+    channel="$parent/state/retry-mate.status"
+    run_captain "$home" hold retry-call --title 'Interrupted answer' --reason choose >/dev/null \
+      || fail "could not create $scenario fixture"
+    printf 'Proceed with the work.\n' > "$home/decision.txt"
+    cat > "$home/fakebin/tasks-axi" <<'SH'
+#!/usr/bin/env bash
+case "${1:-}" in
+  done|unhold)
+    if [ "${2:-}" = retry-call ] && [ ! -e "$FM_HOME/close-failed-once" ]; then
+      : > "$FM_HOME/close-failed-once"
+      exit 92
+    fi ;;
+esac
+exec "$REAL_TASKS_AXI" "$@"
+SH
+    chmod +x "$home/fakebin/tasks-axi"
+    initial_flags=(); retry_flags=()
+    case "$scenario" in release-*) initial_flags=(--release) ;; esac
+    case "$scenario" in
+      release-source|answer-mode|answer-both) retry_flags=(--release) ;;
+    esac
+    if run_captain "$home" answer retry-call --decision-file "$home/decision.txt" \
+      --source message:original "${initial_flags[@]+"${initial_flags[@]}"}" \
+      > "$home/first.out" 2>&1; then
+      fail "the forced $scenario close failure reported success"
+    fi
+    before=$(tasks_in "$home" show retry-call --full)
+    before_channel=$(cat "$channel")
+    assert_contains "$before" 'held: yes' "the forced failure did not leave a held call"
+    assert_contains "$before" 'Source reference: message:original' "the failed attempt was not recorded"
+    retry_source=message:original
+    case "$scenario" in *-source|*-both) retry_source=message:changed ;; esac
+    bad_rc=0
+    run_captain "$home" answer retry-call --decision-file "$home/decision.txt" \
+      --source "$retry_source" "${retry_flags[@]+"${retry_flags[@]}"}" \
+      > "$home/changed.out" 2>&1 || bad_rc=$?
+    after=$(tasks_in "$home" show retry-call --full)
+    if [ "$bad_rc" -eq 0 ]; then
+      printf 'UNSAFE_RETRY_ACCEPTED %s\n%s\n' "$scenario" "$after"
+      errors="$errors $scenario-accepted"
+    fi
+    if [ "$before" != "$after" ]; then
+      printf 'UNSAFE_RETRY_REWROTE_RECORD %s\n' "$scenario"
+      errors="$errors $scenario-mutated"
+    fi
+    if [ "$before_channel" != "$(cat "$channel")" ]; then
+      printf 'UNSAFE_RETRY_PUBLISHED %s\n%s\n' "$scenario" "$(cat "$channel")"
+      errors="$errors $scenario-parent"
+    fi
+    [ "$bad_rc" -ne 0 ] || continue
+    run_captain "$home" answer retry-call --decision-file "$home/decision.txt" \
+      --source message:original "${initial_flags[@]+"${initial_flags[@]}"}" >/dev/null \
+      || fail "an exact $scenario retry could not finish its recorded close"
+    run_captain "$home" answer retry-call --decision-file "$home/decision.txt" \
+      --source message:original "${initial_flags[@]+"${initial_flags[@]}"}" >/dev/null \
+      || fail "a completed $scenario retry was not idempotent"
+    after=$(tasks_in "$home" show retry-call --full)
+    count=$(printf '%s\n' "$after" | grep -o 'Resolution recorded by fm-captain-hold\.' | wc -l | tr -d ' ')
+    [ "$count" = 1 ] || fail "an exact retry duplicated the resolution record"
+    assert_contains "$after" 'Source reference: message:original' "an exact retry lost the saved source"
+    case "$scenario" in
+      release-*)
+        assert_contains "$after" 'held: no' "an exact release retry stayed held"
+        assert_not_contains "$after" 'state: done' "a release retry completed unfinished work" ;;
+      answer-*) assert_contains "$after" 'state: done' "an exact close retry did not close the call" ;;
+    esac
+    [ "$(grep -c 'resolved \[key=captain-hold-retry-call-1\]' "$channel")" = 1 ] \
+      || fail "an exact retry did not close its original parent occurrence exactly once"
+    assert_no_grep 'captain-hold-retry-call-2' "$channel" "an exact retry published the next occurrence"
+  done
+
+  parent=$(make_home reheld-same-parent)
+  home=$(make_home reheld-same-source)
+  printf 'reheld-mate\n' > "$home/.fm-secondmate-home"
+  printf 'schema=fm-secondmate-parent.v1\nroute=local\nparent_home=%s\n' "$parent" \
+    > "$home/.fm-secondmate-parent"
+  channel="$parent/state/reheld-mate.status"
+  printf 'Proceed with the work.\n' > "$home/decision.txt"
+  FM_CAPTAIN_HOLD_NOW=2026-11-05T12:00:00Z run_captain "$home" hold reheld-call \
+    --title 'Repeated decision' --reason choose >/dev/null || fail "could not hold repeated decision"
+  run_captain "$home" answer reheld-call --release --source message:original \
+    --decision-file "$home/decision.txt" >/dev/null || fail "could not release repeated decision"
+  FM_CAPTAIN_HOLD_NOW=2026-11-05T12:00:00Z run_captain "$home" hold reheld-call \
+    --reason choose-again >/dev/null || fail "could not re-hold repeated decision"
+  run_captain "$home" answer reheld-call --release --source message:original \
+    --decision-file "$home/decision.txt" >/dev/null || fail "could not answer the new hold"
+  show=$(tasks_in "$home" show reheld-call --full)
+  count=$(printf '%s\n' "$show" | grep -o 'Resolution recorded by fm-captain-hold\.' | wc -l | tr -d ' ')
+  if [ "$count" != 2 ] || ! grep -q 'resolved \[key=captain-hold-reheld-call-2\]' "$channel"; then
+    printf 'REHELD_OCCURRENCE_REUSED\n%s\n%s\n' "$show" "$(cat "$channel")"
+    errors="$errors reheld-occurrence"
+  fi
+
+  parent=$(make_home utf8-source-parent)
+  home=$(make_home utf8-source-mate)
+  printf 'utf8-mate\n' > "$home/.fm-secondmate-home"
+  printf 'schema=fm-secondmate-parent.v1\nroute=local\nparent_home=%s\n' "$parent" \
+    > "$home/.fm-secondmate-parent"
+  channel="$parent/state/utf8-mate.status"
+  printf 'Proceed with the work.\n' > "$home/decision.txt"
+  reference=$(perl -e 'binmode STDOUT, ":utf8"; print "\x{754c}" x 400')
+  run_captain "$home" hold utf8-oversized --title 'Oversized source' --reason choose >/dev/null \
+    || fail "could not create oversized source fixture"
+  before=$(tasks_in "$home" show utf8-oversized --full)
+  before_channel=$(cat "$channel")
+  if LC_ALL=C.UTF-8 run_captain "$home" answer utf8-oversized --source "$reference" \
+    --decision-file "$home/decision.txt" > "$home/oversized.out" 2>&1; then
+    printf 'OVERSIZED_UTF8_ACCEPTED\n%s\n' "$(cat "$channel")"
+    errors="$errors utf8-byte-limit"
+  else
+    [ "$before" = "$(tasks_in "$home" show utf8-oversized --full)" ] \
+      || fail "an oversized source refusal changed the hold"
+    [ "$before_channel" = "$(cat "$channel")" ] \
+      || fail "an oversized source refusal changed the parent channel"
+  fi
+  boundary=$(perl -e 'binmode STDOUT, ":utf8"; print "\x{754c}" x 170, "xx"')
+  [ "$(printf '%s' "$boundary" | wc -c | tr -d ' ')" = 512 ] \
+    || fail "the UTF-8 boundary fixture is not 512 bytes"
+  run_captain "$home" hold utf8-boundary --title 'Boundary source' --reason choose >/dev/null \
+    || fail "could not create boundary source fixture"
+  LC_ALL=C.UTF-8 run_captain "$home" answer utf8-boundary --source "$boundary" \
+    --decision-file "$home/decision.txt" >/dev/null || fail "a valid 512-byte source was refused"
+  assert_grep "[source-kind=user] [source=$boundary] [source-time=2026-11-05T12:00:00Z]" \
+    "$channel" "a valid non-ASCII source lost its complete parent attribution"
+  [ -z "$errors" ] || fail "interrupted-close or UTF-8 provenance regressions:$errors"
+  pass "interrupted retries preserve their call and non-ASCII parent sources stay complete"
+}
+
+test_resolution_attribution() {
+  local home kind show at rc
+  home=$(make_home attribution)
+  printf 'Use the north route.\n' > "$home/answer.txt"
+  for kind in user supervisor mechanical; do
+    run_captain "$home" hold "source-$kind" --title "Source $kind" --reason choose >/dev/null \
+      || fail "could not create attribution fixture"
+    at=''
+    [ "$kind" != user ] || at=2026-11-04T15:23:07Z
+    run_captain "$home" answer "source-$kind" --decision-file "$home/answer.txt" \
+      --source-kind "$kind" --source "$kind:message-or-operation-3" --source-time "$at" >/dev/null \
+      || fail "$kind direct answer failed"
+    show=$(tasks_in "$home" show "source-$kind" --full)
+    assert_contains "$show" "Source kind: $kind" "direct answer lost its source kind"
+    assert_contains "$show" "Source reference: $kind:message-or-operation-3" "direct answer lost its reference"
+    if [ "$kind" = user ]; then
+      assert_contains "$show" "Source message UTC: $at" "user answer lost its message UTC time"
+      assert_contains "$show" 'Captain decision:' "user answer lost its decision label"
+    else
+      assert_contains "$show" 'Resolution decision:' "non-user answer lost its distinct label"
+      assert_not_contains "$show" 'Captain decision:' "non-user judgement was labelled as captain words"
+    fi
+    if run_captain "$home" answer "source-$kind" --decision-file "$home/answer.txt" \
+      --source-kind "$kind" --source "different-source" --source-time "$at" >/dev/null 2>&1; then
+      fail "an answer replay changed its recorded source"
+    fi
+  done
+  run_captain "$home" hold source-reheld --title "Re-held source" --reason choose >/dev/null
+  run_captain "$home" answer source-reheld --release --decision-file "$home/answer.txt" \
+    --source message:first >/dev/null || fail "could not release the first sourced answer"
+  run_captain "$home" hold source-reheld --reason choose-again >/dev/null
+  run_captain "$home" answer source-reheld --release --decision-file "$home/answer.txt" \
+    --source message:second --source-time 2026-11-05T12:01:00Z >/dev/null \
+    || fail "a re-held call could not record the same words from a new message"
+  show=$(tasks_in "$home" show source-reheld --full)
+  case "$show" in
+    *'Source reference: message:second'*'Source reference: message:first'*) ;;
+    *) fail "a new source on a re-held call replaced or reused the earlier source: $show" ;;
+  esac
+  run_captain "$home" hold source-missing --title "Missing source" --reason choose >/dev/null
+  PATH="$home/fakebin:$PATH" FM_HOME="$home" \
+    "$ROOT/bin/fm-captain-hold.sh" answer source-missing --decision-file "$home/answer.txt" >/dev/null 2>&1; rc=$?
+  [ "$rc" -ne 0 ] || fail "direct answer accepted missing source"
+  show=$(tasks_in "$home" show source-missing --full)
+  assert_not_contains "$show" 'Resolution recorded' "missing source changed the hold"
+  run_captain "$home" hold source-batch --title "Batch source" --reason choose >/dev/null
+  printf 'source-batch\tnorth\t\n' | run_captain "$home" answers \
+    --source-kind supervisor --source "supervisor:judgement-4" --source-time '' >/dev/null \
+    || fail "shared answer failed"
+  show=$(tasks_in "$home" show source-batch --full)
+  assert_contains "$show" 'Source kind: supervisor' "shared intake changed source kind"
+  assert_contains "$show" 'Source reference: supervisor:judgement-4' "shared intake changed source reference"
+  assert_not_contains "$show" 'Captain answered' "shared supervisor answer claims human authorship"
+  run_captain "$home" hold source-reconcile --title "Reconcile source" --reason choose >/dev/null
+  request_reconciles "$home" source-fixture source-reconcile || fail "reconcile request failed"
+  run_captain "$home" reconcile close source-reconcile --evidence-file "$home/answer.txt" >/dev/null \
+    || fail "mechanical reconciliation failed"
+  show=$(tasks_in "$home" show source-reconcile --full)
+  assert_contains "$show" 'Source kind: mechanical' "reconciliation lost its source kind"
+  assert_contains "$show" "Source reference: fm-captain-hold reconcile close: $home/answer.txt" "reconciliation lost its operation and evidence"
+  assert_contains "$show" 'Reconciliation evidence:' "reconciliation lost its evidence label"
+  pass "direct, shared, and reconciliation records preserve their distinct source"
+}
+
 # The Lavish review adapter, run against this suite's isolated home. The
 # machine-wide process-event claim root is redirected into the fixture so arming
 # a review here can never contend with a real one on this machine.
@@ -83,9 +285,19 @@ tasks_in() {  # <home> <tasks-axi args...>
 run_captain() {  # <home> <command args...>
   local home=$1
   shift
+  local command=$1 id
+  shift
+  case "$command" in
+    answer)
+      id=$1; shift
+      set -- "$id" --source-kind user --source "lifecycle fixture message" \
+        --source-time 2026-11-05T12:00:00Z "$@"
+      ;;
+    answers) set -- --source-kind user --source-time 2026-11-05T12:00:00Z "$@" ;;
+  esac
   PATH="$home/fakebin:$PATH" REAL_TASKS_AXI="$TASKS_AXI_BIN" \
     FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
-    FM_CONFIG_OVERRIDE="$home/config" "$ROOT/bin/fm-captain-hold.sh" "$@"
+    FM_CONFIG_OVERRIDE="$home/config" "$ROOT/bin/fm-captain-hold.sh" "$command" "$@"
 }
 
 # Completes <id>'s captain-call inventory through a separate held task, because
@@ -199,9 +411,18 @@ SH
 run_shim() {  # <home> <command args...>
   local home=$1
   shift
+  local command=$1 origin key
+  shift
+  case "$command" in
+    resolve|answer|decline|repair)
+      origin=$1; key=$2; shift 2
+      set -- "$origin" "$key" --source-kind user --source "lifecycle fixture message" \
+        --source-time 2026-11-05T12:00:00Z "$@"
+      ;;
+  esac
   PATH="$home/fakebin:$PATH" REAL_TASKS_AXI="$TASKS_AXI_BIN" \
     FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
-    FM_CONFIG_OVERRIDE="$home/config" "$ROOT/bin/fm-decision-hold.sh" "$@"
+    FM_CONFIG_OVERRIDE="$home/config" "$ROOT/bin/fm-decision-hold.sh" "$command" "$@"
 }
 
 write_origin_meta() {  # <home> <id> [kind]
@@ -631,7 +852,7 @@ SH
   PATH="$fb:$PATH" REAL_TASKS_AXI="$TASKS_AXI_BIN" \
     FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
     FM_DATA_OVERRIDE="$home/data" FM_CONFIG_OVERRIDE="$home/config" \
-    "$ROOT/bin/fm-captain-hold.sh" answer "$id" --decision-file "$decision" >/dev/null \
+    "$ROOT/bin/fm-captain-hold.sh" answer "$id" --source-kind user --source "lifecycle fixture message" --source-time 2026-11-05T12:00:00Z --decision-file "$decision" >/dev/null \
     || fail "answering on a beads-configured home failed without a markdown backlog"
   assert_grep "update $id --body-file" "$log" \
     "the captain answer never reached the configured backend"
@@ -1538,6 +1759,93 @@ EOF
 # the script itself, keyed per hold occurrence, so a re-held task opens and
 # closes a distinct parent decision and a retry never duplicates a line. A main
 # home publishes nothing anywhere.
+test_parent_publication_uses_verified_resolution_body() {
+  local route mode home parent channel id out show kind reference
+  for route in primary secondmate; do
+    for mode in answer repair release answers reconcile; do
+      home=$(make_home "publish-body-$route-$mode")
+      channel=''
+      if [ "$route" = secondmate ]; then
+        parent=$(make_home "publish-parent-$mode")
+        printf 'proof-mate\n' > "$home/.fm-secondmate-home"
+        printf 'schema=fm-secondmate-parent.v1\nroute=local\nparent_home=%s\n' "$parent" \
+          > "$home/.fm-secondmate-parent"
+        channel="$parent/state/proof-mate.status"
+      fi
+      id="proof-$mode"
+      run_captain "$home" hold "$id" --title 'Publication proof' --reason choose >/dev/null \
+        || fail "could not create publication fixture"
+      if [ "$mode" = repair ]; then
+        tasks_in "$home" 'done' "$id" >/dev/null || fail "could not close repair fixture"
+      fi
+      if [ "$mode" = answers ]; then
+        run_captain "$home" hold proof-next --title 'Next answer' --reason choose >/dev/null \
+          || fail "could not create next batch call"
+      fi
+      if [ "$mode" = reconcile ]; then
+        request_reconciles "$home" proof-board "$id" || fail "could not request reconciliation"
+      fi
+      printf 'Proceed with the release.\n' > "$home/decision.txt"
+      cat > "$home/fakebin/tasks-axi" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = show ]; then
+  case "${2:-}" in
+    proof-*)
+      if [ -e "$FM_HOME/read-unavailable-$2" ]; then
+        : > "$FM_HOME/unexpected-read-$2"
+        exit 92
+      fi
+      "$REAL_TASKS_AXI" "$@" > "$FM_HOME/shown-$2" || exit $?
+      cat "$FM_HOME/shown-$2"
+      if grep -q 'Source kind: ' "$FM_HOME/shown-$2" \
+        && ! grep -q '^  body: "Captain hold set:' "$FM_HOME/shown-$2"; then
+        : > "$FM_HOME/read-unavailable-$2"
+      fi
+      exit 0 ;;
+  esac
+fi
+exec "$REAL_TASKS_AXI" "$@"
+SH
+      chmod +x "$home/fakebin/tasks-axi"
+      kind=user; reference='lifecycle fixture message'
+      case "$mode" in
+        answer|repair)
+          out=$(run_captain "$home" answer "$id" --decision-file "$home/decision.txt" 2>&1) \
+            || fail "$route $mode failed after verifying its committed resolution: $out" ;;
+        release)
+          out=$(run_captain "$home" answer "$id" --decision-file "$home/decision.txt" --release 2>&1) \
+            || fail "$route release failed after verifying its committed resolution: $out" ;;
+        answers)
+          reference='batch proof'
+          out=$(printf 'proof-answers\tproceed\t\nproof-next\tproceed\t\n' \
+            | run_captain "$home" answers --source "$reference" 2>&1) \
+            || fail "$route batch failed after verifying its committed resolutions: $out"
+          assert_contains "$out" 'answers: closed=2 skipped=0' "publication interrupted the answer batch"
+          assert_present "$home/read-unavailable-proof-next" "the batch never verified its next resolution"
+          assert_absent "$home/unexpected-read-proof-next" "the next answer reread its verified body" ;;
+        reconcile)
+          kind=mechanical; reference="fm-captain-hold reconcile close: $home/decision.txt"
+          out=$(run_captain "$home" reconcile close "$id" --evidence-file "$home/decision.txt" 2>&1) \
+            || fail "$route reconciliation failed after verifying its committed resolution: $out" ;;
+      esac
+      assert_present "$home/read-unavailable-$id" "the fixture never verified the committed resolution"
+      assert_absent "$home/unexpected-read-$id" "publication reread an already verified body"
+      show=$(tasks_in "$home" show "$id" --full)
+      assert_contains "$show" "Source reference: $reference" "the committed record lost its source"
+      if [ "$mode" = release ]; then
+        assert_contains "$show" 'held: no' "publication reversed the committed release"
+      else
+        assert_contains "$show" 'state: done' "publication reversed the committed close"
+      fi
+      if [ -n "$channel" ]; then
+        assert_grep "[source-kind=$kind] [source=$reference]" "$channel" \
+          "publication lost the verified record's attribution"
+      fi
+    done
+  done
+  pass "primary and secondmate resolutions publish from their verified bodies without rereading"
+}
+
 test_secondmate_home_publishes_holds_and_answers() {
   local parent mate fakebin channel decision out
   parent=$(make_home parent-channel)
@@ -1625,6 +1933,45 @@ EOF
   pass "a secondmate home publishes each hold occurrence and its answer on the parent channel"
 }
 
+test_legacy_parent_replays_preserve_absent_attribution() {
+  local parent mate channel mode show before
+  parent=$(make_home legacy-source-parent)
+  mate=$(make_home legacy-source-mate)
+  printf 'legacy-source-mate\n' > "$mate/.fm-secondmate-home"
+  printf 'schema=fm-secondmate-parent.v1\nroute=local\nparent_home=%s\n' "$parent" \
+    > "$mate/.fm-secondmate-parent"
+  channel="$parent/state/legacy-source-mate.status"
+  printf 'ship it\n' > "$mate/decision.txt"
+  for mode in direct shared; do
+    run_captain "$mate" hold "legacy-$mode" --title 'Legacy call' --reason choose >/dev/null \
+      || fail "could not create legacy parent fixture"
+    if [ "$mode" = direct ]; then
+      run_captain "$mate" answer "legacy-$mode" --decision-file "$mate/decision.txt" >/dev/null \
+        || fail "could not close direct legacy fixture"
+    else
+      printf 'legacy-shared\tship it\t\n' | run_captain "$mate" answers --source 'legacy source' >/dev/null \
+        || fail "could not close shared legacy fixture"
+    fi
+    show=$(tasks_in "$mate" show "legacy-$mode" --full)
+    printf '%s\n' "$show" | sed -n 's/^  body: //p' | jq -r . \
+      | sed '/^Source kind: /d; /^Source reference: /d; /^Source message UTC: /d' > "$mate/legacy-body.txt"
+    tasks_in "$mate" update "legacy-$mode" --body-file "$mate/legacy-body.txt" >/dev/null \
+      || fail "could not stage legacy persisted record"
+    sed 's/ \[source-kind=.*//' "$channel" > "$mate/legacy-channel.txt"
+    mv "$mate/legacy-channel.txt" "$channel"
+    before=$(cat "$channel")
+    if [ "$mode" = direct ]; then
+      run_captain "$mate" answer "legacy-$mode" --decision-file "$mate/decision.txt" >/dev/null \
+        || fail "direct legacy replay failed"
+    else
+      printf 'legacy-shared\tship it\t\n' | run_captain "$mate" answers --source 'legacy source' >/dev/null \
+        || fail "shared legacy replay failed"
+    fi
+    [ "$(cat "$channel")" = "$before" ] || fail "legacy replay manufactured parent attribution"
+  done
+  pass "direct and shared legacy replays retain their source-free parent events"
+}
+
 test_secondmate_reconcile_publishes_before_request_retirement() {
   local parent mate channel evidence out show rc request
   parent=$(make_home reconcile-parent-channel)
@@ -1663,6 +2010,14 @@ test_secondmate_reconcile_publishes_before_request_retirement() {
     <(sed -E 's/ \[at=[0-9]+\]//' "$channel"))" -eq 1 ] \
     || fail "the parent resolution was not published before retirement failed: $(cat "$channel")"
 
+  cp "$evidence" "$mate/other-evidence.txt"
+  if run_captain "$mate" reconcile close reconcile-channel-call \
+    --evidence-file "$mate/other-evidence.txt" >/dev/null 2>&1; then
+    fail "closed reconciliation accepted a different evidence reference"
+  fi
+  [ -f "$request" ] || fail "source mismatch retired the retry request"
+  [ "$(grep -c 'resolved \[key=captain-hold-reconcile-channel-call-1\]' "$channel")" -eq 1 ] \
+    || fail "source mismatch duplicated the parent resolution"
   run_captain "$mate" reconcile close reconcile-channel-call --evidence-file "$evidence" >/dev/null \
     || fail "the closed reconciliation could not finish publication and retirement"
   [ ! -e "$request" ] || fail "the retry did not retire the published reconcile request"
@@ -1704,7 +2059,7 @@ test_secondmate_reconcile_publishes_before_request_retirement() {
 # answer time, a card-declared release mode frees held work, freeform prose can
 # forge nothing, and a replayed capture is idempotent.
 test_bound_channel_answers_close_at_answer_time() {
-  local home id sid artifact result out show rc
+  local home id sid artifact result out show rc captured_time
   home=$(make_home channel-answer-closure)
   id=sample-eval-proposal
   mkdir -p "$home/data/$id"
@@ -1823,12 +2178,17 @@ SH
     "feeding a captain answer retired the notification firstmate still needs"
   assert_present "$home/state/procevent-inbox/fixture-src.1.result" \
     "the fixture channel captured no result to feed"
+  captured_time=$(perl -MPOSIX=strftime -e '
+    print strftime("%Y-%m-%dT%H:%M:%SZ", gmtime((stat($ARGV[0]))[9]));
+  ' "$home/state/procevent-inbox/fixture-src.1.result")
 
   show=$(tasks_in "$home" show sample-membership-call --full)
   assert_contains "$show" "state: done" "capturing the captain's answer left the membership call open"
   assert_contains "$show" "Resolution mode: answered" "the membership call did not record its close path"
   assert_contains "$show" "Answer: gold-only" "the closed call did not record the captain's actual answer"
   assert_contains "$show" "captain detail" "the annotated normal answer lost the captain's note"
+  assert_contains "$show" "Source message UTC: $captured_time" \
+    "the captured answer did not retain the original message receipt time"
   show=$(tasks_in "$home" show sample-gated-work --full)
   assert_contains "$show" "state: queued" "the released work item did not stay queued"
   assert_contains "$show" "held: no" "the card-declared release did not lift the hold"
@@ -1871,7 +2231,8 @@ SH
   # run that could not close every answered key still reports nonzero.
   set +e
   out=$(run_lavish "$home" answers "$result" \
-    | run_captain "$home" answers --source "the captured result fixture-src sequence 1" 2>&1)
+    | run_captain "$home" answers --source "the captured result fixture-src sequence 1" \
+        --source-time "$captured_time" 2>&1)
   rc=$?
   set -e
   [ "$rc" -ne 0 ] || fail "a run that skipped a key reported success"
@@ -2149,6 +2510,11 @@ SH
   rc=$?
   set -e
   [ "$rc" -ne 0 ] || fail "the forced reconcile close failure reported success"
+  cp "$home/retry-evidence.txt" "$home/other-retry-evidence.txt"
+  if run_captain "$home" reconcile close sample-reconcile-close-retry \
+    --evidence-file "$home/other-retry-evidence.txt" >/dev/null 2>&1; then
+    fail "interrupted reconciliation accepted a different evidence reference"
+  fi
   run_captain "$home" reconcile close sample-reconcile-close-retry \
     --evidence-file "$home/retry-evidence.txt" >/dev/null \
     || fail "reconcile close did not recover from its partial failure"
@@ -2446,6 +2812,8 @@ SH
   assert_contains "$show" "north" "the board answer lost the captain's selection"
   assert_contains "$show" "the captured result $sid sequence 1" \
     "the recorded answer did not name the board result that carried it"
+  assert_contains "$show" "Source kind: user" "the captured user answer lost its source kind"
+  assert_contains "$show" "Source message UTC:" "the captured answer lost its receipt time"
   pass "a board answer reaches the keyed-answer intake and wakes firstmate"
 }
 
@@ -2509,7 +2877,7 @@ SH
   env PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$home" FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_SEND_LOG="$home/send.log" FM_SEND_SETTLE=0 \
-    "$ROOT/bin/fm-send.sh" "$id" --resolve-key chat-choice "go with option A" >/dev/null 2>&1 \
+    "$ROOT/bin/fm-send.sh" "$id" --source-kind user --source "lifecycle fixture message" --source-time 2026-11-05T12:00:00Z --resolve-key chat-choice "go with option A" >/dev/null 2>&1 \
     || fail "an answer to a transferred legacy decision was refused by the chat channel"
   # The answer rides fm-send's durable inbox plane: the record carries the
   # text while the typed channel carries only the doorbell.
@@ -2518,25 +2886,29 @@ SH
   show=$(tasks_in "$home" show "$id-decision-chat-choice" --full)
   assert_contains "$show" "state: done" "a chat answer left the legacy row open"
   assert_contains "$show" "Answer: go with option A" "the chat-answered row lost the captain answer"
+  assert_contains "$show" "answer sent to $id" "the legacy chat answer lost its delivery target"
 
   : > "$home/send.log"
   env PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$home" FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_SEND_LOG="$home/send.log" FM_SEND_SETTLE=0 \
-    "$ROOT/bin/fm-send.sh" "$id" --resolve-key sample-chat-followup "take the second option" >/dev/null 2>&1 \
+    "$ROOT/bin/fm-send.sh" "$id" --source-kind user --source "lifecycle fixture message" --source-time 2026-11-05T12:00:00Z --resolve-key sample-chat-followup "take the second option" >/dev/null 2>&1 \
     || fail "an answer keyed by a task id was refused by the chat channel"
   show=$(tasks_in "$home" show sample-chat-followup --full)
   assert_contains "$show" "state: done" "a chat answer left the task-id call open"
   assert_contains "$show" "Resolution mode: answered" "the chat-answered call did not record its close path"
   assert_contains "$show" "Answer: take the second option" "the chat-answered call lost the captain answer"
-  assert_contains "$show" "answer sent to $id" "the chat-answered call lost its channel provenance"
+  assert_contains "$show" "Source kind: user" "the chat channel lost the declared source kind"
+  assert_contains "$show" "Source reference: lifecycle fixture message" \
+    "the chat channel lost the answering message reference"
+  assert_contains "$show" "answer sent to $id" "the chat channel lost its delivery target"
 
   : > "$home/send.log"
   set +e
   env PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$home" FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_SEND_LOG="$home/send.log" FM_SEND_SETTLE=0 \
-    "$ROOT/bin/fm-send.sh" "$id" --resolve-key sample-chat-reconcile reconcile >/dev/null 2>&1
+    "$ROOT/bin/fm-send.sh" "$id" --source-kind user --source "lifecycle fixture message" --source-time 2026-11-05T12:00:00Z --resolve-key sample-chat-reconcile reconcile >/dev/null 2>&1
   set -e
   show=$(tasks_in "$home" show sample-chat-reconcile --full)
   assert_contains "$show" "state: queued" "a chat reconcile answer closed the call"
@@ -2553,7 +2925,7 @@ SH
   if env PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$home" FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_SEND_LOG="$home/send.log" FM_SEND_SETTLE=0 \
-    "$ROOT/bin/fm-send.sh" "$id" --resolve-key sample-chat-followup "again" \
+    "$ROOT/bin/fm-send.sh" "$id" --source-kind user --source "lifecycle fixture message" --source-time 2026-11-05T12:00:00Z --resolve-key sample-chat-followup "again" \
     > "$home/closed-key.out" 2> "$home/closed-key.err"; then
     fail "a key already closed in both ledgers was accepted"
   fi
@@ -3342,7 +3714,7 @@ SH
   printf 'Proceed despite the reporting limitation.\n' > "$home/answer.txt"
   PATH="$home/fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
     FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$home/config" \
-    "$ROOT/bin/fm-captain-hold.sh" answer "$id" --decision-file "$home/answer.txt" \
+    "$ROOT/bin/fm-captain-hold.sh" answer "$id" --source-kind user --source "lifecycle fixture message" --source-time 2026-11-05T12:00:00Z --decision-file "$home/answer.txt" \
     >/dev/null || fail "the unsupported relocated report wedged the captain's answer"
   show=$(cd "$home" && tasks-axi show "$id" --full --file "$data/backlog.md") \
     || fail "the answered relocated row disappeared"
@@ -5094,6 +5466,8 @@ EOF
   pass "an answered captain call archived to a user-configured location still satisfies the completion gate"
 }
 
+test_interrupted_resolution_and_utf8_attribution
+test_resolution_attribution
 test_hold_reason_round_trips_awkward_characters
 test_hold_origins_follow_backend_holds
 test_interrupted_origin_move_does_not_inherit_the_previous_answer
@@ -5119,7 +5493,9 @@ test_completion_keeps_an_armed_pr_identity_last
 test_completion_replaces_a_pair_recorded_after_pr
 test_terminal_single_owner_status_decision_does_not_block_empty_inventory
 test_secondmate_hold_stays_in_authoritative_home
+test_parent_publication_uses_verified_resolution_body
 test_secondmate_home_publishes_holds_and_answers
+test_legacy_parent_replays_preserve_absent_attribution
 test_secondmate_reconcile_publishes_before_request_retirement
 test_bound_channel_answers_close_at_answer_time
 test_reconcile_never_closes_through_the_keyed_answer_intake
