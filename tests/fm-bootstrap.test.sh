@@ -110,7 +110,7 @@ add_quota_axi() {
   cat > "$fakebin/quota-axi" <<'SH'
 #!/usr/bin/env bash
 if [ "${1:-}" = --version ]; then
-  printf '%s\n' "${FM_FAKE_QUOTA_AXI_VERSION:-0.1.51}"
+  printf '%s\n' "${FM_FAKE_QUOTA_AXI_VERSION:-0.1.54}"
   exit 0
 fi
 exit 0
@@ -312,7 +312,7 @@ test_bootstrap_reporting() {
       esac
       add_tasks_axi "$fakebin" "$tasks" "$archive_body" "$multi_id"
     fi
-    quota_version=0.1.51
+    quota_version=0.1.54
     if [ "$quota" = "0" ]; then
       rm -f "$fakebin/quota-axi"
       base=$(fm_test_base_path_sans "$base" quota-axi)
@@ -346,7 +346,7 @@ incompatible tasks-axi reports an upgrade by default^1^0.1.0^1^-^exact^OUTDATED:
 tasks-axi without archive-body reports an upgrade by default^1^0.2.6:noarchive^1^-^exact^OUTDATED: tasks-axi (installed: 0.2.6; requires 0.2.6 with update --archive-body; upgrade: npm install -g tasks-axi)^
 tasks-axi without multi-id mv reports an upgrade by default^1^0.2.6:nomulti^1^-^exact^OUTDATED: tasks-axi (installed: 0.2.6; requires 0.2.6 with mv multi-ID; upgrade: npm install -g tasks-axi)^
 missing quota-axi is required by default^1^0.2.6^0^manual^exact^MISSING: quota-axi (install: npm install -g quota-axi)^
-outdated quota-axi reports an upgrade by default^1^0.2.6^0.1.50^manual^exact^OUTDATED: quota-axi (installed: 0.1.50; requires 0.1.51; upgrade: quota-axi update)^
+outdated quota-axi reports an upgrade by default^1^0.2.6^0.1.53^manual^exact^OUTDATED: quota-axi (installed: 0.1.53; requires 0.1.54; upgrade: quota-axi update)^
 manual backlog backend still requires missing tasks-axi^1^-^1^manual^exact^MISSING: tasks-axi (install: npm install -g tasks-axi)^
 manual backlog backend suppresses tasks-axi availability^1^0.2.6^1^manual^empty^^
 ROWS
@@ -603,16 +603,16 @@ test_quota_axi_min_version() {
       missing)
         [ "$out" = "$missing" ] || fail "$label: expected '$missing', got: $out" ;;
       outdated)
-        expect="OUTDATED: quota-axi (installed: $installed; requires 0.1.51; upgrade: quota-axi update)"
+        expect="OUTDATED: quota-axi (installed: $installed; requires 0.1.54; upgrade: quota-axi update)"
         [ "$out" = "$expect" ] || fail "$label: expected '$expect', got: $out" ;;
     esac
   done <<'ROWS'
-minimum quota-axi version is accepted^0.1.51^empty^
-newer quota-axi patch is accepted^0.1.52^empty^
+minimum quota-axi version is accepted^0.1.54^empty^
+newer quota-axi patch is accepted^0.1.55^empty^
 newer quota-axi minor is accepted^0.2.0^empty^
 newer quota-axi major is accepted^1.0.0^empty^
 absent quota-axi reports a missing tool^absent^missing^
-the patch just below the floor reports an upgrade^0.1.50^outdated^0.1.50
+the patch just below the floor reports an upgrade^0.1.53^outdated^0.1.53
 much older quota-axi minor reports an upgrade^0.0.9^outdated^0.0.9
 unparseable quota-axi version reports an upgrade^quota-axi development build^outdated^unparseable
 ROWS

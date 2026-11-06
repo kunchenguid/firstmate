@@ -5,6 +5,9 @@ set -u
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 BIN="$FM_ROOT/bin"
+# shellcheck source=bin/fm-quota-axi-lib.sh
+. "$BIN/fm-quota-axi-lib.sh"
+export FM_QUOTA_AXI_MIN
 LAB=$(mktemp -d "${TMPDIR:-/tmp}/fm-procevent-quota.XXXXXX")
 FAKEBIN="$LAB/fakebin"
 NO_QUOTA_BIN="$LAB/no-quota-bin"
@@ -37,7 +40,7 @@ if [ "${1:-}" = "--version" ]; then
   if [ "${QUOTA_AXI_VERSION_FAIL:-0}" = 1 ]; then
     exit 42
   fi
-  printf 'quota-axi %s\n' "${QUOTA_AXI_VERSION:-0.1.51}"
+  printf 'quota-axi %s\n' "${QUOTA_AXI_VERSION:-$FM_QUOTA_AXI_MIN}"
   exit 0
 fi
 case "${QUOTA_AXI_MALFORMED:-}" in

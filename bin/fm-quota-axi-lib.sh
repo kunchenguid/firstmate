@@ -4,7 +4,9 @@
 # Usage: . bin/fm-quota-axi-lib.sh
 #
 # FM_QUOTA_AXI_MIN follows the axi-family floor policy owned beside the floor
-# constants in bin/fm-bootstrap.sh.
+# constants in bin/fm-bootstrap.sh. The 0.1.54 floor is also where quota-axi
+# first shipped --max-age, which fm-dispatch-resolve.sh's bounded quota reuse
+# requires.
 #
 # This file is the single owner of that version number. bin/fm-bootstrap.sh
 # turns an absent binary into the operator-facing MISSING diagnostic and an
@@ -18,7 +20,7 @@
 # quota-axi keeps working unchanged. FM_QUOTA_ROW_JQ is the one join used to
 # bind a candidate to its row under either schema.
 
-FM_QUOTA_AXI_MIN=0.1.51
+FM_QUOTA_AXI_MIN=0.1.54
 FM_QUOTA_PROVIDER_ID_RE='^[a-z0-9]+(-[a-z0-9]+)*\z'
 
 # The eligibility section of .agents/skills/quota-array-dispatch/SKILL.md

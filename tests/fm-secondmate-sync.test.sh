@@ -30,6 +30,8 @@ set -u
 
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+# shellcheck source=bin/fm-quota-axi-lib.sh
+. "$ROOT/bin/fm-quota-axi-lib.sh"
 # shellcheck source=tests/remote-herdr-fixture.sh
 . "$(dirname "${BASH_SOURCE[0]}")/remote-herdr-fixture.sh"
 
@@ -386,14 +388,7 @@ esac
 exit 0
 SH
   chmod +x "$fakebin/tasks-axi"
-  cat > "$fakebin/quota-axi" <<'SH'
-#!/usr/bin/env bash
-if [ "${1:-}" = --version ]; then
-  printf '%s\n' 'quota-axi 0.1.51 (fake)'
-fi
-exit 0
-SH
-  chmod +x "$fakebin/quota-axi"
+  fm_fake_version_tool "$fakebin" quota-axi FM_FAKE_QUOTA_AXI_VERSION "$FM_QUOTA_AXI_MIN"
   printf '%s\n' "$fakebin"
 }
 

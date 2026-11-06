@@ -6,7 +6,7 @@ Load this with the selected tool reference for dispatch, start, or adapter verif
 
 Use the router's detection and safety sections for static crew and secondmate harness resolution and all explicit overrides.
 `config/crew-dispatch.json` can override that static default for one crewmate or scout with concrete harness, model, and effort axes.
-For a profile array, load `quota-array-dispatch` after establishing harness and provider facts here.
+The [dispatch intake contract](../../../../../AGENTS.md#4-harness-and-runtime-dispatch) owns profile selection and override limits.
 When the opt-in `bin/fm-dispatch-resolve.sh` is on, its `clear` answer already names the concrete axes; `docs/configuration.md` "Typed dispatch resolution" owns that contract.
 
 `../secondmate-provisioning/SKILL.md` owns inherited local material.
@@ -18,7 +18,6 @@ The inherited dispatch file applies the same best-fit profiles there.
 ## Owners
 
 `../../../bin/fm-spawn.sh` owns launch, autonomy, concrete flags, task-kind compatibility, and worker turn-end wiring.
-Natural-language rules stay with firstmate, while scripts receive concrete axes.
 
 `../../../bin/fm-busy-lib.sh` owns semantic busy trust.
 Composer shapes, glyphs, placeholders, popups, rendered delivery signals, and the `empty` / `pending` / `pending-unproven` / `unknown` decision belong only to `../../../bin/fm-composer-lib.sh`.
