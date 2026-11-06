@@ -9,6 +9,7 @@
 # No case touches the network, and the absent-key case proves the tool makes
 # no call at all.
 set -u
+unset TYPESAFE_BASE
 
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
