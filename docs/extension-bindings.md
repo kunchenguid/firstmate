@@ -112,6 +112,9 @@ The parser rejects malformed UTF-8, a byte-order mark, duplicate object keys, un
 A tracked static core launch barrier publishes one exact host-created process group before the host releases package code, without `eval`, generated source, a shell, or a package-controlled bootstrap.
 A timeout, output-bound violation, failed response, host interruption, or successful parent that leaves that group live sends `TERM`, escalates to `KILL`, and rejects the invocation until that exact group is proved gone.
 If the host dies first, its private identity-bound cleanup record keeps source reconciliation, home cleanup, and binding retirement from releasing ownership until a later core invocation proves that exact group extinct; an uncertain or reused live identity is retained and never signalled.
+An ownerless readiness record carries no source or binding authority and never authorizes signalling.
+Cleanup reclaims it only after validating its private file and exact filename-bound barrier token, proving both its PID and process group gone, and rechecking that the record is unchanged and its owner is still absent.
+This check applies even during source- or binding-filtered cleanup because the readiness record cannot establish either association; unsafe or unprovable residue remains a refusal.
 Extension children must remain foreground members of their invocation group and be owned and reaped by the live entrypoint. Starting another session or process group, changing process groups, double-forking, reparenting, or surviving the entrypoint response violates this protocol contract.
 Trusted same-user code is not an operating-system sandbox: deliberate process-group escape is outside this protocol guarantee. The host never infers ownership from process-table scans or signals contemporaneous same-user processes outside the exact invocation group.
 Extension stderr and failure diagnostics are never copied into a wake or authority-bearing record.
@@ -192,7 +195,7 @@ Before an external result can be captured, core applies the same boundary checks
 These external-only checks refuse before a staging or capture write when a post-registration link, ownership, mode, or canonical-path substitution is detected, while the legacy four-argument built-in capture path retains its existing behavior.
 For `result.terminal` and `result.silent`, the live core runner passes the host an internal one-shot handoff that pins the exact active claim, inbox, and result identities before the host reads a regular mode-`0600` result and sends only bounded UTF-8 content.
 Public lifecycle entry, environment, paths, and caller-supplied descriptors cannot create that handoff or authorize capture; runner claim release and dead-owner reconciliation remove its pending or consumed reservation state from the claim's recorded, revalidated state root.
-A source failure becomes a small host-produced `firstmate.process-event-extension-error.v1` result, so missing packages, invalid responses, crashes, nonzero exits, and timeouts become actionable evidence rather than silent fallback.
+Source failures follow the [host-error capture and retry contract](#compatibility-and-failure-semantics).
 Unknown or malformed terminal and silent responses take the safe false path.
 
 External registration stores the extension id and version, capability version, package digest, binding digest, source configuration reference, and a fresh random registration token beside the adapter and source id.
@@ -211,7 +214,12 @@ An unknown enabled version refuses rather than downgrading.
 
 A missing or changed package never executes.
 A malformed binding, integrity mismatch, failed handshake, crash, nonzero exit, timeout, oversized stream, wrong request id, or invalid response never selects another adapter.
-A source invocation failure is captured as bounded host evidence and remains unhandled.
+A source invocation failure becomes a bounded host-produced `firstmate.process-event-extension-error.v1` result and remains unhandled.
+For the same source, a repeated complete host-error envelope reuses an existing unhandled capture only when its host-error sidecar, exact result bytes, adapter, and immutable extension identity all match.
+A matching retry allocates no new result sequence and records no handled acknowledgement.
+Ordinary reconciliation continues to publish the retained evidence and retry polling, so old failure evidence does not block recovery.
+A changed error or extension identity remains distinct, and a failure after its matching evidence was handled receives a fresh capture.
+Successful adapter results always retain separate sequences, even when their bytes are identical to host-error evidence.
 A classification, terminal, or silence failure returns no positive verdict.
 Replay uses the exact request id as the package's idempotence key, including a stable pre-capture retry from the generic runner, but Firstmate makes no generic exactly-once or source-side losslessness claim.
 The process-event durability boundary remains owned by [`configuration.md`](configuration.md#process-to-event-sources-stateprocevent).
