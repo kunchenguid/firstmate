@@ -157,6 +157,30 @@ def _ps_visible(raw):
     return "".join(result)
 
 
+def argv_main(pid):
+    """Emit only complete, NUL-separated argv for native lock classification.
+
+    This is separate from the existing ps-compatible process-facts output.
+    """
+    if sys.platform == "darwin":
+        argv = _procargs(pid)
+    elif sys.platform.startswith("linux"):
+        try:
+            with open("/proc/%d/cmdline" % pid, "rb") as stream:
+                raw = stream.read()
+        except OSError:
+            return 1
+        if not raw.endswith(b"\0"):
+            return 1
+        argv = raw[:-1].split(b"\0")
+    else:
+        return 1
+    if not argv or not argv[0]:
+        return 1
+    sys.stdout.buffer.write(b"\0".join(argv) + b"\0")
+    return 0
+
+
 def main():
     if len(sys.argv) != 2 or not sys.argv[1].isdigit():
         print("usage: fm-procinfo.py <pid>", file=sys.stderr)
@@ -182,4 +206,6 @@ def main():
 
 
 if __name__ == "__main__":
+    if len(sys.argv) == 3 and sys.argv[1] == "--argv" and sys.argv[2].isdigit():
+        sys.exit(argv_main(int(sys.argv[2])))
     sys.exit(main())

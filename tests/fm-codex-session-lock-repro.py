@@ -12,6 +12,7 @@ import sys
 import time
 import pathlib
 import shutil
+import shlex
 import subprocess
 import tempfile
 
@@ -39,12 +40,26 @@ with tempfile.TemporaryDirectory(prefix='fm-codex-session-') as temp:
                  'fm-guard.sh', 'fm-lease.sh', 'fm-branch-outcome.sh',
                  'fm-public-followup.sh'):
         (home / 'bin' / name).write_text('#!/usr/bin/env bash\nexit 0\n')
+    # Both process interfaces expose the same vendor argv, with spaces inside
+    # each element preserved. Command strings below use shell launch syntax.
     (home / 'fakebin' / 'ps').write_text(f'''#!/usr/bin/env bash
 if [ "$*" = '-o comm= -p {os.getpid()}' ]; then printf '%s\\n' "${{FM_FIXTURE_COMM:-/opt/codex}}"; exit 0; fi
-if [ "$*" = '-o args= -p {os.getpid()}' ]; then printf '%s\\n' "${{FM_FIXTURE_ARGV0:-/opt/codex}} ${{FM_FIXTURE_SUBCOMMAND-app-server --listen stdio://}}"; exit 0; fi
-exec '{PS}' "$@"
+if [ "$*" = '-o args= -p {os.getpid()}' ]; then printf '%s\\n' "$FM_FIXTURE_PS_ARGS"; exit 0; fi
+exec {shlex.quote(PS)} "$@"
 ''')
     (home / 'fakebin' / 'ps').chmod(0o755)
+    (home / 'fakebin' / 'python3').write_text(f'''#!/usr/bin/env bash
+case "$1" in
+  */fm-procinfo.py)
+    if [ "$#" -eq 3 ] && [ "$2" = --argv ] && [ "$3" = {os.getpid()} ]; then
+      [ -z "${{FM_FIXTURE_ARGV_UNREADABLE:-}}" ] || exit 1
+      cat "$FM_HOME/vendor-argv"
+      exit
+    fi ;;
+esac
+exec {shlex.quote(sys.executable)} "$@"
+''')
+    (home / 'fakebin' / 'python3').chmod(0o755)
     (home / 'bin/fm-watch.sh').write_text('#!/usr/bin/env bash\ntouch "$FM_HOME/state/checkpoint-ran"\nprintf "signal: fixture\\n"\n')
     (home / '.codex').mkdir()
     shutil.copy(REPO / '.codex/hooks.json', home / '.codex/hooks.json')
@@ -54,6 +69,11 @@ exec '{PS}' "$@"
 
     def run(command, identity=OWNER, payload=None, thread_identity=None):
         call_env = env.copy()
+        argv = [
+            env.get('FM_FIXTURE_ARGV0', '/opt/codex'),
+            *shlex.split(env.get('FM_FIXTURE_SUBCOMMAND', 'app-server --listen stdio://'))]
+        call_env['FM_FIXTURE_PS_ARGS'] = ' '.join(argv)
+        (home / 'vendor-argv').write_bytes(b''.join(os.fsencode(arg) + b'\0' for arg in argv))
         if identity is not None:
             call_env |= {'CODEX_SESSION_ID': identity,
                          'CODEX_THREAD_ID': identity if thread_identity is None else thread_identity}
@@ -144,12 +164,18 @@ exec '{PS}' "$@"
     start = '"$FM_HOME/bin/fm-session-start.sh"'
     lock = '"$FM_HOME/bin/fm-lock.sh"'
     own = '. "$FM_HOME/bin/fm-session-lock-lib.sh"; fm_session_lock_owned_by_self "$FM_HOME/state"'
+    # Contract: a shared server without identity cannot publish a PID-only
+    # lock, even when a global directory value contains spaces.
+    env['FM_FIXTURE_SUBCOMMAND'] = "-C '/Users/me/My Home' app-server"
+    assert run(lock, None).returncode == 1, 'spaced directory hid an unidentified native server'
+    assert not (home / 'state/.lock').exists(), 'spaced-directory server published a lock'
     for label, arguments in (
+        ('CLI with spaced directory', "-C '/Users/me/My Home' --approve-for-me 'Inspect codex app-server ownership'"),
         ('plain CLI', ''),
-        ('fm-spawn crewmate', '-m gpt-5.5 -c model_reasoning_effort="xhigh" --dangerously-bypass-approvals-and-sandbox --disable hooks -c notify=["bash","-c","touch /tmp/t"] FIRSTMATE_OP: v1 launch-brief'),
+        ('fm-spawn crewmate', "-m gpt-5.5 -c 'model_reasoning_effort=\"xhigh\"' --dangerously-bypass-approvals-and-sandbox --disable hooks -c 'notify=[\"bash\",\"-c\",\"touch /tmp/t\"]' 'FIRSTMATE_OP: v1 launch-brief'"),
         ('option-first secondmate', '-m gpt-6.1-sol -c model_reasoning_effort="low" --dangerously-bypass-approvals-and-sandbox Launch brief'),
         ('approval-review secondmate', '-m gpt-6.1-sol --approve-for-me Launch brief'),
-        ('secondmate with server prompt text', '-m gpt-5.5 --approve-for-me FIRSTMATE_OP: v1 launch-brief Inspect codex app-server ownership'),
+        ('secondmate with server prompt text', '-m gpt-5.5 --approve-for-me \"FIRSTMATE_OP: v1 launch-brief Inspect codex app-server ownership\"'),
         ('config value names server', '-c note="app-server" --approve-for-me FIRSTMATE_OP: Inspect ownership'),
         ('split config without server token', '-c note="app-server exec" exec'),
         ('long option values name server', '--model app-server --ask-for-approval app-server --sandbox app-server --cd app-server --profile app-server --disable app-server --enable app-server --image app-server --add-dir app-server Inspect ownership'),
@@ -283,6 +309,15 @@ exec '{PS}' "$@"
     (home / 'state/.lock').unlink()
     (home / 'state/checkpoint-ran').unlink()
     for arguments in (
+        "-C '/Users/me/My Home' app-server",
+        "--cd '/Users/me/My Home' app-server",
+        "--cd='/Users/me/My Home' app-server",
+        "-C'/Users/me/My Home' app-server",
+        "-c 'sandbox_permissions=[ \"disk-full-read-access\" ]' app-server",
+        "--config 'sandbox_permissions=[ \"disk-full-read-access\" ]' app-server",
+        "--config='sandbox_permissions=[ \"disk-full-read-access\" ]' app-server",
+        "-c'features={ hooks=true }' app-server",
+        "-c 'note=\"split value\"' app-server",
         'app-server --listen stdio://',
         '-c features.hooks=true app-server',
         '--config features.hooks=true app-server',
@@ -300,7 +335,12 @@ exec '{PS}' "$@"
         assert run(lock, OTHER).returncode == 1, 'identified native server accepted a competing session'
         (home / 'state/.lock').unlink()
         (home / 'state/.lock-session').unlink()
+    # The OS denies argv reads. No retained environment or hook ID can turn
+    # the flattened, ambiguous process row into verified native ancestry.
+    env['FM_FIXTURE_ARGV_UNREADABLE'] = '1'
     for arguments in (
+        "-C '/Users/me/My Home' app-server",
+        'app-server --listen stdio://',
         '-c sandbox_permissions=[ "disk-full-read-access" ] app-server',
         '--config sandbox_permissions=[ "disk-full-read-access" ] app-server',
         '--config=sandbox_permissions=[ "disk-full-read-access" ] app-server',

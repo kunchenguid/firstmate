@@ -777,73 +777,53 @@ fm_session_lock_pid_blocks_reclaim() {
 # tests/fm-codex-session-lock.test.sh pins these boundaries portably, and
 # tests/fm-codex-session-identity-live-e2e.test.sh against the installed Codex.
 
-# True when pid $1 is a native Codex server shared by threads. Identity comes
-# from fm_proc_info, the file's single ps-primary, ps-free-fallback reader. A
-# tagged Windows pid is never native: that bridge exposes no argv to prove the
-# app-server subcommand, and it publishes no Codex session pid at all.
-# For codex, scan flattened arguments past known global options and their values.
-# The first non-option token decides whether this is app-server, so ordinary
-# CLI prompt text cannot select native ownership after an unambiguous parse.
-# An unclosed bracket, brace, or quote in a config token makes its boundary
-# ambiguous. A later standalone app-server then selects native restrictions,
-# but cannot prove native ancestry for identity trust, even with a runtime id.
-# The optional verified argument excludes these ambiguous cases from proof.
+# Read the vendor argv vector without flattening argument boundaries. An
+# unreadable vector emits nothing, so it cannot prove native identity.
+fm_os_proc_argv() {  # <pid>
+  python3 "$(dirname -- "${BASH_SOURCE[0]}")/fm-procinfo.py" --argv "$1" 2>/dev/null
+}
+
+# True when pid $1 is a native Codex server shared by threads. Process identity
+# still comes from fm_proc_info. The exact subcommand after global options and
+# their values comes from the kernel argv vector, never from CLI prompt text.
+# If argv is unreadable, a standalone app-server in ps selects restrictions
+# but cannot prove native ancestry for trusted identity (the verified mode).
+# A tagged Windows pid is never native: that bridge exposes no argv.
 fm_session_lock_codex_native_pid() {  # <pid> [verified]
-  local base argv0
+  local base argv0 token arg
+  local -a argv=()
   case "$1" in ''|*[!0-9]*) return 1 ;; esac
   fm_proc_info "$1" || return 1
   base=${FM_PROC_COMM##*/}
   argv0=${FM_PROC_ARGS%% *}
-  # Linux truncates comm to 15 bytes for the code-mode host. Its exact
-  # executable basename in argv[0] supplies the same installed identity.
+  # Linux truncates comm to 15 bytes for the code-mode host.
   case "${argv0##*/}" in codex-code-mode-host) return 0 ;; esac
   case "$base" in
     codex-code-mode-host) return 0 ;;
     codex)
-      case "$FM_PROC_ARGS" in
-        *$'\n'*|*$'\r'*) [ "${2:-}" != verified ]; return ;;
-      esac
-      if [ "${argv0##*/}" != codex ]; then
-        [ "${2:-}" != verified ]; return
+      while IFS= read -r -d '' arg; do
+        argv+=("$arg")
+      done < <(fm_os_proc_argv "$1")
+      if [ "${#argv[@]}" -eq 0 ]; then
+        [ "${2:-}" != verified ] || return 1
+        printf '%s\n' "$FM_PROC_ARGS" | LC_ALL=C grep -Eq '(^|[[:space:]])app-server([[:space:]]|$)'
+        return
       fi
-      printf '%s\n' "$FM_PROC_ARGS" | awk -v proof="${2:-}" '
-        function unbalanced(value, j, c, quote, square, brace, escaped) {
-          for (j = 1; j <= length(value); j++) {
-            c = substr(value, j, 1)
-            if (escaped) { escaped = 0; continue }
-            if (c == "\\" && quote != "\047") { escaped = 1; continue }
-            if (quote != "") {
-              if (c == quote) quote = ""
-            } else if (c == "\042" || c == "\047") quote = c
-            else if (c == "[") square++
-            else if (c == "]") square--
-            else if (c == "{") brace++
-            else if (c == "}") brace--
-          }
-          return quote != "" || square > 0 || brace > 0
-        }
-        {
-          for (i = 2; i <= NF; i++) {
-            token = $i
-            if (token == "-c" || token == "--config") value = $(++i)
-            else if (token ~ /^--config=/) value = substr(token, 10)
-            else if (token ~ /^-c./) value = substr(token, 3)
-            else if (token ~ /^(-m|--model|-a|--ask-for-approval|-s|--sandbox|-C|--cd|-p|--profile|--disable|--enable|-i|--image|--add-dir)$/) {
-              i++
-              continue
-            } else if (token == "--") exit 1
-            else if (token ~ /^-/) continue
-            else exit (token == "app-server" ? 0 : 1)
-            if (unbalanced(value)) {
-              for (j = i + 1; j <= NF; j++)
-                if ($j == "app-server") exit (proof == "verified" ? 1 : 0)
-              exit 1
-            }
-          }
-          exit 1
-        }
-      '
-      return
+      [ "${argv[0]##*/}" = codex ] || return 1
+      set -- "${argv[@]:1}"
+      while [ "$#" -gt 0 ]; do
+        token=$1
+        shift
+        case "$token" in
+          -c|--config|-m|--model|-a|--ask-for-approval|-s|--sandbox|-C|--cd|-p|--profile|--disable|--enable|-i|--image|--add-dir|--remote|--remote-auth-token-env|--local-provider)
+            [ "$#" -gt 0 ] || return 1
+            shift
+            ;;
+          --) return 1 ;;
+          -*) ;;
+          *) [ "$token" = app-server ]; return ;;
+        esac
+      done
       ;;
   esac
   return 1
