@@ -1439,10 +1439,21 @@ command_preserve_question() {
 #   limitation <text>
 status_question_evidence() {  # <status-file> <decision-key>
   local status_file=$1 wanted=$2 line key evidence digest reference complete=1
+  local kind resolve held open='' transition records=''
   [ -f "$status_file" ] && [ ! -L "$status_file" ] && [ -r "$status_file" ] || return 1
+  kind=$(_fm_status_kind "$status_file")
+  resolve=${FM_CLASSIFY_RESOLVE_VERB:-$FM_CLASSIFY_RESOLVE_VERB_DEFAULT}
+  held=${FM_CLASSIFY_CAPTAIN_HELD_VERB:-$FM_CLASSIFY_CAPTAIN_HELD_VERB_DEFAULT}
   while IFS= read -r line || [ -n "$line" ]; do
+    open=$(_fm_decision_fold_line "$open" "$line" "$resolve" "$held" "$kind")
+    case "$open" in
+      "$wanted"$'\t'*|*$'\n'"$wanted"$'\t'*) ;;
+      *) records=''; complete=1; continue ;;
+    esac
     key=$(_fm_decision_key "$line") || continue
     [ "$key" = "$wanted" ] || continue
+    transition=$(_fm_decision_fold_line '' "$line" "$resolve" "$held" "$kind")
+    case "$transition" in "$wanted"$'\t'*) ;; *) continue ;; esac
     case "$line" in
       *" | $QUESTION_MARKER "*) evidence=${line##*" | $QUESTION_MARKER "} ;;
       *) continue ;;
@@ -1454,8 +1465,9 @@ status_question_evidence() {  # <status-file> <decision-key>
       complete=0
       continue
     fi
-    printf '%s\t%s\n' "$digest" "$reference"
+    records="${records}${digest}"$'\t'"${reference}"$'\n'
   done < "$status_file"
+  printf '%s' "$records"
   [ "$complete" -eq 1 ]
 }
 
