@@ -569,6 +569,135 @@ test_status_table() {
   pass "t3code status table: every V2 thread status, a pending request, archived, archived-but-draining, missing, unreachable, and unreadable rows"
 }
 
+# External launch keeps the T3 target across the primary ending its turn and
+# across an operator terminal carrying unrelated pane/backend variables.
+t3_afk() {
+  env -u TMUX_PANE -u HERDR_ENV -u HERDR_PANE_ID -u REX_SESSION -u REX_BLOCK \
+    FM_HOME="$REPO" FM_CONFIG_OVERRIDE="$CONFIG" FM_STATE_OVERRIDE="$CASE_DIR/state" \
+    FM_BACKEND=t3code FM_TEST_SEAM=1 FM_TEST_HARNESS="${FM_TEST_HARNESS:-codex}" \
+    "$ROOT/bin/fm-afk-launch.sh" "$@"
+}
+
+test_external_away_launch_uses_recorded_thread_after_primary_settles() {
+  local entry record got
+  t3_case external-away running
+  t3_afk enter --words 'Hold anything that needs me.' >/dev/null || fail "external away: enter failed"
+  if t3_afk start >/dev/null 2>&1; then
+    fail "external away: T3 unexpectedly created a daemon terminal"
+  fi
+  t3_afk prepare-external >/dev/null || fail "external away: preparation failed"
+  record="$CASE_DIR/state/.afk-daemon-terminal"
+  [ "$(cat "$record")" = $'none\tthread-live\tt3code:codex' ] \
+    || fail "external away: primary thread and harness were not recorded"
+
+  # Discovery cannot find this now-idle primary. The external entry must use
+  # the prepared id and the daemon's real delivery path instead.
+  t3_world "$(t3_thread_json thread-live completed false)"
+  entry="$CASE_DIR/external-entry"
+  cat > "$entry" <<'SH'
+#!/usr/bin/env bash
+set -eu
+[ ! -d "$FM_STATE_OVERRIDE/.afk-launch.lock" ] || exit 91
+[ "$FM_AFK_STATE_PREPARED" = 1 ] || exit 92
+[ "$FM_DAEMON_PRIMARY_HARNESS" = codex ] || exit 93
+. "$FM_T3_TEST_ROOT/bin/fm-supervise-daemon.sh"
+inject_msg external-launch-regression "$FM_STATE_OVERRIDE"
+SH
+  chmod +x "$entry"
+  FM_T3_TEST_ROOT="$ROOT" FM_AFK_LAUNCH_ENTRY="$entry" \
+    FM_SUPERVISOR_TARGET=unrelated-pane FM_SUPERVISOR_BACKEND=tmux \
+    t3_afk run-external >/dev/null || fail "external away: foreground launch failed"
+  [ "$(t3_dispatch_types)" = t3_thread_send ] || fail "external away: digest was not delivered exactly once"
+  got=$(t3_request "$(t3_log_line_of 'r.tool === "t3_thread_send"')" 'r.arguments.threadId')
+  [ "$got" = thread-live ] || fail "external away: delivered to $got instead of the recorded primary"
+  t3_afk stop >/dev/null || fail "external away: ordinary stop failed"
+  [ ! -e "$record" ] && [ ! -e "$CASE_DIR/state/.afk" ] \
+    || fail "external away: stop retained lifecycle state"
+  [ "$(t3_dispatch_types)" = t3_thread_send ] || fail "external away: stop tried to archive or interrupt the primary thread"
+  pass "external away: an idle Codex primary receives the digest through its recorded thread, without a model-owned job or operator-pane discovery"
+}
+
+test_external_away_launch_refuses_unprepared_and_unsupported_cases() {
+  local got candidate
+  t3_case external-away-refusals completed
+  if t3_afk run-external >/dev/null 2>&1; then
+    fail "external away: accepted an unprepared launch"
+  fi
+  t3_afk enter >/dev/null || fail "external away refusals: enter failed"
+  if t3_afk prepare-external >/dev/null 2>&1; then
+    fail "external away: discovered an idle primary without an explicit target"
+  fi
+  [ ! -e "$CASE_DIR/state/.afk" ] || fail "external away: failed discovery wrote the away flag"
+  t3_world "$(t3_thread_json thread-live running false)" "$(t3_thread_json thread-other running false)"
+  if t3_afk prepare-external >/dev/null 2>&1; then
+    fail "external away: accepted ambiguous primary discovery"
+  fi
+  if got=$(FM_SUPERVISOR_TARGET=thread-live FM_SUPERVISOR_BACKEND=tmux t3_afk prepare-external 2>&1); then
+    fail "external away: accepted a non-T3 supervisor backend"
+  fi
+  assert_contains "$got" 'requires a t3code supervisor' "external away: unsupported backend refusal is unclear"
+  fm_fake_exit0 "$CASE_DIR" external-entry
+  for candidate in $'none\t-\tnative' $'none\tthread-live\tt3code:claude' $'none\tthread-live\tt3code:pi' $'none\tbad target\tt3code:codex'; do
+    printf '%s\n' "$candidate" > "$CASE_DIR/state/.afk-daemon-terminal"
+    if FM_AFK_LAUNCH_ENTRY="$CASE_DIR/external-entry" t3_afk run-external >/dev/null 2>&1; then
+      fail "external away: accepted an unrelated or malformed lifecycle record"
+    fi
+  done
+  rm -f "$CASE_DIR/state/.afk-daemon-terminal"
+  : > "$CONFIG/supervision-host"
+  if FM_SUPERVISOR_TARGET=thread-live FM_SUPERVISOR_BACKEND=t3code t3_afk prepare-external >/dev/null 2>&1; then
+    fail "external away: bypassed the supervision-host refusal"
+  fi
+  [ ! -e "$CASE_DIR/state/.afk" ] || fail "external away: refused cases wrote the away flag"
+  [ -z "$(t3_dispatch_types)" ] || fail "external away: refusals mutated a T3 thread"
+  : > "$CONFIG/supervision-host-off"
+  if got=$(FM_TEST_HARNESS=claude FM_SUPERVISOR_TARGET=thread-live FM_SUPERVISOR_BACKEND=t3code t3_afk prepare-external 2>&1); then
+    fail "external away: accepted a Claude primary"
+  fi
+  assert_contains "$got" 'supports only a codex T3 primary' "external away: unsupported harness refusal is unclear"
+  [ ! -e "$CASE_DIR/state/.afk-daemon-terminal" ] && [ ! -e "$CASE_DIR/state/.afk" ] \
+    || fail "external away: rejected preparation wrote lifecycle state"
+  FM_TEST_HARNESS=claude t3_afk start-native >/dev/null || fail "external away: Claude native preparation failed"
+  [ "$(cat "$CASE_DIR/state/.afk-daemon-terminal")" = $'none\t-\tnative' ] \
+    || fail "external away: Claude native preparation changed its lifecycle record"
+  FM_TEST_HARNESS=claude t3_afk stop >/dev/null || fail "external away: Claude native stop failed"
+  [ ! -e "$CASE_DIR/state/.afk-daemon-terminal" ] && [ ! -e "$CASE_DIR/state/.afk" ] \
+    || fail "external away: Claude native stop retained lifecycle state"
+  [ -z "$(t3_dispatch_types)" ] || fail "external away: Claude native lifecycle mutated a T3 thread"
+  pass "external away: missing preparation, idle or ambiguous discovery, unrelated records, unsupported backends and the supervision host still fail closed"
+}
+
+test_external_away_refresh_keeps_the_live_daemon_target() {
+  local record before
+  t3_case external-away-refresh running
+  t3_afk enter >/dev/null || fail "external away refresh: enter failed"
+  t3_afk prepare-external >/dev/null || fail "external away refresh: preparation failed"
+  record="$CASE_DIR/state/.afk-daemon-terminal"
+  before=$(cat "$record")
+  FM_HOME="$REPO" FM_TEST_SEAM=1 FM_TEST_HARNESS=codex FM_BACKEND=t3code t3_run '
+    . "$0/bin/fm-afk-launch.sh"
+    lock="$FM_STATE_OVERRIDE/.supervise-daemon.lock"
+    mkdir "$lock" || exit 1
+    trap '\''rm -rf "$lock"'\'' EXIT
+    printf "%s\n" "$$" > "$lock/pid"
+    fm_pid_identity "$$" > "$lock/pid-identity" || exit 1
+    # A real, identity-bound process owns the daemon lock. Neither refresh may
+    # replace its target or execute another daemon entry.
+    FM_SUPERVISOR_TARGET=thread-other FM_SUPERVISOR_BACKEND=t3code \
+      "$0/bin/fm-afk-launch.sh" prepare-external >/dev/null || exit 1
+    FM_AFK_LAUNCH_ENTRY=/missing-external-entry \
+      "$0/bin/fm-afk-launch.sh" run-external >/dev/null || exit 1
+  ' || fail "external away refresh: attempted a second daemon entry"
+  [ "$(cat "$record")" = "$before" ] || fail "external away refresh: retargeted a live daemon"
+  : > "$CASE_DIR/state/.afk-return-catchup"
+  if t3_afk run-external >/dev/null 2>&1; then
+    fail "external away refresh: bypassed the pending-return refusal"
+  fi
+  [ "$(cat "$record")" = "$before" ] || fail "external away refresh: failed start changed the recorded target"
+  [ -z "$(t3_dispatch_types)" ] || fail "external away refresh: mutated a T3 thread"
+  pass "external away: refresh preserves the live daemon target, starts no duplicate, and pending return still blocks restart"
+}
+
 test_unreadable_thread_defers_like_busy() {
   local got state harness
   t3_case read-failure completed
@@ -2746,6 +2875,9 @@ test_thread_create_and_turn_start_payloads
 test_thread_create_uncertain_and_refused_outcomes
 test_thread_for_home_zero_one_and_ambiguous
 test_explicit_t3_selection_and_precedence
+test_external_away_launch_uses_recorded_thread_after_primary_settles
+test_external_away_launch_refuses_unprepared_and_unsupported_cases
+test_external_away_refresh_keeps_the_live_daemon_target
 test_capture_renders_activity_and_status
 test_send_key_mapping
 test_send_text_submit_verdicts

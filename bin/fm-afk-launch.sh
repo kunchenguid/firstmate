@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # fm-afk-launch.sh - the single owner of away-mode ENTRY and EXIT: the
 # same-turn entry that writes the away-posture record through
-# bin/fm-afk-contract.sh, and the away-mode daemon TERMINAL lifecycle where a
-# daemon still runs: launch it in a NON-VISIBLE tracked terminal per backend,
-# record its exact id, tear it down by that exact id, and reconcile a leaked one
-# after a crash.
+# bin/fm-afk-contract.sh, and the daemon lifecycle where a daemon still runs.
+# Terminal-backed launches create a NON-VISIBLE tracked terminal, record its
+# exact id, tear it down by that id, and reconcile a leaked one after a crash.
+# Native and external launches record that no managed terminal exists.
 #
 # ENTRY (the posture record). `/afk [words]` is itself the captain's go, because
 # the captain who typed it may not look at the screen again: `enter` records the
@@ -23,8 +23,8 @@
 # Claude, by config/supervision-host elsewhere), where the host runs the away
 # session; `enter` there adds one line when the host has no
 # engine, because every away wake then reaches main. Every other harness still
-# runs the daemon for now, so `start` and `start-native` require the record
-# `enter` wrote before they launch the daemon.
+# runs the daemon for now; every daemon launch path requires the record
+# `enter` wrote.
 # QUIET MODE on a home that runs the supervision host needs nothing
 # where the attended host runs (docs/supervision-host.md "Quiet mode"): its
 # primary is attended-ready (fm_supervision_host_attended_ready: engine, tools,
@@ -41,21 +41,23 @@
 # (bin/fm-afk-return.sh and its catch-up gate) comes first. Where the attended
 # host lacks one of those parts, `quiet-check` names it and quiet mode enters
 # through the daemon as it does without the host. A quiet `enter` records its
-# mode, so `start` and `start-native` launch the quiet daemon without
+# mode, so all daemon launch paths use quiet mode without
 # FM_AFK_MODE; a running quiet daemon is refreshed by a later `/quiet` and runs
-# until `/quiet off`. A quiet `start` or `start-native` that fails while no
-# daemon runs ends quiet mode as `stop` does, so no quiet record outlives its
-# daemon to park a present captain's main.
-# On backend=t3code there is no terminal for `start` to create, so only a
-# harness with a tracked native background job can run `start-native` there.
+# until `/quiet off`. Any failed quiet daemon preparation or launch while no
+# daemon runs ends quiet mode as `stop` does, so no quiet record remains after
+# that failure to park a present captain's main.
+# On backend=t3code there is no terminal for `start` to create. A harness with
+# a tracked native background job can use `start-native`; a Codex primary
+# runs `prepare-external` during its turn and the operator runs `run-external`
+# in a separate terminal, whose foreground process owns the daemon.
 # `stop` (the return, driven by bin/fm-afk-return.sh) shuts the daemon down,
 # clears state/.afk last, and archives the record under state/afk-contracts/.
 #
 # Why the terminal lifecycle exists (docs/herdr-backend.md "Away-mode daemon terminal launch"):
 # bin/fm-afk-start.sh execs the supervise daemon in the FOREGROUND of whatever
 # terminal it is already in. Harnesses with a native in-pane tracked-background
-# tool (claude, grok) run it there directly and it is fine. A harness with NO
-# native background mechanism (pi) has to manufacture a terminal, and doing that
+# tool (claude, grok) run it there directly and it is fine. On pane backends a
+# harness with NO native background mechanism (codex) needs a terminal, and doing that
 # by SPLITTING the captain's active pane visibly shrinks it - the regression this
 # script fixes. Instead this creates a non-visible tracked terminal (a herdr tab/
 # workspace with --no-focus, or a detached tmux session) that never touches the
@@ -84,6 +86,19 @@
 #   fm-afk-launch.sh start-native
 #                              Prepare lifecycle state for a harness-native
 #                              background job and record that no terminal exists.
+#   fm-afk-launch.sh prepare-external
+#                              For a Codex T3 primary, capture its thread and harness
+#                              while its turn is active, prepare the no-terminal
+#                              lifecycle, and print the operator's run command.
+#                              Requires the record written by enter.
+#                              Set FM_SUPERVISOR_BACKEND=t3code and
+#                              FM_SUPERVISOR_TARGET=<thread-id> to override discovery.
+#   fm-afk-launch.sh run-external
+#                              Run the prepared T3 daemon in the foreground of
+#                              an operator terminal. Uses the recorded thread,
+#                              even when it is idle, ignoring this terminal's
+#                              supervisor overrides. Keep the terminal open;
+#                              ordinary stop/return still shuts the daemon down.
 #   fm-afk-launch.sh stop      Correct-ordered exit: SIGTERM the daemon so its
 #                              cleanup flushes WHILE state/.afk is still present,
 #                              wait for it, close a recorded non-native terminal
@@ -100,10 +115,10 @@
 #                              only on a home that runs the host; exit 2 with one
 #                              line naming a live away record on that home.
 #
-# Supported backends: herdr, tmux, and rex for `start`; t3code only through
-# `start-native` (T3 hosts no terminal to create, so the daemon runs as the
-# captain's own tracked background job, which means a Codex captain on t3code
-# has no away mode). Others (zellij, orca, cmux, paseo, tern) have no verified
+# Supported backends: herdr, tmux, and rex for `start`; t3code through
+# `start-native` or, for Codex, the operator-owned
+# `prepare-external`/`run-external` path.
+# Others (zellij, orca, cmux, paseo, tern) have no verified
 # non-visible-launch primitive here yet and refuse loudly. On rex the daemon
 # runs in a dedicated Rex session of its own, so the captain's session gains no
 # tab and keeps its focus.
@@ -320,7 +335,7 @@ fm_afk_launch_quiet_check() {
 # quiet daemon is allowed.
 fm_afk_launch_daemon_allowed() {
   local harness mode
-  harness=$(fm_afk_launch_primary_harness)
+  harness=${1:-$(fm_afk_launch_primary_harness)}
   case "$harness" in
     pi|pi-signed)
       fm_afk_launch_log "the away daemon is no longer launched on $harness; the away-posture record is the posture there (run bin/fm-afk-launch.sh enter and stop)"
@@ -420,9 +435,9 @@ fm_afk_launch_flag_write() {
 }
 
 # Read the recorded terminal into FM_AFK_REC_BACKEND/FM_AFK_REC_TARGET. The third
-# field (a herdr workspace id, kept for the record's own documentation) is not
-# needed to close by id, so it is discarded; a rex record's third field is the
-# dedicated session id, kept in FM_AFK_REC_EXTRA because closing kills it.
+# field is a herdr workspace id, a rex dedicated session id, or, for a
+# no-terminal external entry, t3code:<primary-harness>. That entry's target is
+# the supervisor thread, never a terminal to close. Native jobs retain -/native.
 # Returns 1 when no record exists.
 fm_afk_launch_record_read() {
   local extra record
@@ -441,7 +456,12 @@ fm_afk_launch_record_read() {
     herdr) [ -n "$extra" ] ;;
     rex) [ "${extra%%:*}" = session ] && [ "${FM_AFK_REC_TARGET%%:*}" = "${extra#session:}" ] ;;
     tmux) : ;;
-    none) [ "$FM_AFK_REC_TARGET" = - ] && [ "$extra" = native ] ;;
+    none)
+      case "$extra" in
+        native) [ "$FM_AFK_REC_TARGET" = - ] ;;
+        t3code:codex) fm_afk_launch_external_target_valid "$FM_AFK_REC_TARGET" ;;
+        *) return 2 ;;
+      esac ;;
     *) return 2 ;;
   esac || { fm_afk_launch_log "daemon terminal record is malformed; refusing to act on it"; return 2; }
 }
@@ -778,7 +798,7 @@ fm_afk_launch_start() {
     fm_afk_launch_log "could not resolve the captain supervisor backend (set FM_SUPERVISOR_BACKEND)"
     return 1; }
   if [ "$captain_backend" = t3code ]; then
-    fm_afk_launch_log "backend t3code hosts no terminal to launch the daemon in; use 'fm-afk-launch.sh start-native' and run bin/fm-afk-start.sh through the harness's tracked background tool"
+    fm_afk_launch_log "backend t3code hosts no terminal to launch the daemon in; use start-native with a tracked background tool, or for Codex use prepare-external then run-external in an operator terminal"
     return 1
   fi
 
@@ -842,10 +862,10 @@ fm_afk_launch_start() {
 }
 
 fm_afk_launch_start_native() {
-  local backup artifact had_afk=0 result=0
+  local record_target=${1:--} record_extra=${2:-native} harness=${3:-} backup artifact had_afk=0 result=0
   mkdir -p "$FM_AFK_LAUNCH_STATE" || return 1
   fm_afk_launch_catchup_pending && return 1
-  fm_afk_launch_daemon_allowed || return 1
+  fm_afk_launch_daemon_allowed "$harness" || return 1
   fm_afk_launch_record_require || return 1
   if daemon_lock_held_by_live_daemon; then
     fm_afk_launch_record_validate_if_present || return 1
@@ -874,7 +894,7 @@ fm_afk_launch_start_native() {
     fi
   fi
   if [ "$result" -eq 0 ]; then
-    fm_afk_launch_record_write none - native || result=1
+    fm_afk_launch_record_write none "$record_target" "$record_extra" || result=1
   fi
   if [ "$result" -ne 0 ]; then
     fm_afk_launch_restore_backup "$backup" "$had_afk" || result=1
@@ -882,6 +902,57 @@ fm_afk_launch_start_native() {
     rm -rf "$backup" || result=1
   fi
   return "$result"
+}
+
+fm_afk_launch_external_target_valid() {
+  case "$1" in ''|-|*[[:space:]]*) return 1 ;; esac
+}
+
+fm_afk_launch_prepare_external() {
+  local target backend harness
+  harness=$(fm_afk_launch_primary_harness)
+  case "$harness" in
+    codex) ;;
+    *) fm_afk_launch_log "external launch supports only a codex T3 primary"; return 1 ;;
+  esac
+  backend=$(discover_supervisor_backend) || backend=
+  if [ "$backend" != t3code ]; then
+    fm_afk_launch_log "external launch requires a t3code supervisor"
+    return 1
+  fi
+  if ! target=$(discover_supervisor_target) || ! fm_afk_launch_external_target_valid "$target"; then
+    fm_afk_launch_log "could not resolve the T3 primary thread; prepare during its active turn or set FM_SUPERVISOR_BACKEND=t3code and FM_SUPERVISOR_TARGET"
+    return 1
+  fi
+  fm_afk_launch_start_native "$target" "t3code:$harness" "$harness" || return 1
+  printf 'Run in a separate operator terminal and keep it open:\n  env FM_HOME=%q %q run-external\n' \
+    "$FM_HOME" "$FM_AFK_LAUNCH_DIR/fm-afk-launch.sh"
+}
+
+fm_afk_launch_run_external() {
+  local target extra harness entry
+  fm_afk_launch_record_read || {
+    fm_afk_launch_log "run-external requires the T3 record written by prepare-external"
+    return 1
+  }
+  if [ "$FM_AFK_REC_BACKEND" != none ] || [ "${FM_AFK_REC_EXTRA%%:*}" != t3code ]; then
+    fm_afk_launch_log "run-external requires the T3 record written by prepare-external"
+    return 1
+  fi
+  target=$FM_AFK_REC_TARGET
+  extra=$FM_AFK_REC_EXTRA
+  harness=${extra#t3code:}
+  # Reuse native startup's refresh, reconciliation, rollback and policy gates,
+  # judging the recorded primary rather than this operator shell's ancestry.
+  fm_afk_launch_start_native "$target" "$extra" "$harness" || return 1
+  daemon_lock_held_by_live_daemon && return 0
+  entry=$(fm_afk_launch_entry_cmd)
+  # The daemon owns its own singleton lock. Release the short launcher lock
+  # before exec so stop/return can acquire it while this foreground job runs.
+  fm_afk_launch_lock_release || return 1
+  trap - EXIT INT TERM
+  exec env FM_HOME="$FM_HOME" FM_SUPERVISOR_TARGET="$target" FM_SUPERVISOR_BACKEND=t3code \
+    FM_DAEMON_PRIMARY_HARNESS="$harness" FM_AFK_STATE_PREPARED=1 "$entry"
 }
 
 fm_afk_launch_stop() {
@@ -987,6 +1058,8 @@ fm_afk_launch_main() {
       (exit 2) ;;
     start) fm_afk_launch_start || fm_afk_launch_quiet_rollback $? ;;
     start-native) fm_afk_launch_start_native || fm_afk_launch_quiet_rollback $? ;;
+    prepare-external) fm_afk_launch_prepare_external || fm_afk_launch_quiet_rollback $? ;;
+    run-external) fm_afk_launch_run_external || fm_afk_launch_quiet_rollback $? ;;
     stop) fm_afk_launch_stop ;;
     reconcile) fm_afk_launch_reconcile ;;
     quiet-check) fm_afk_launch_quiet_check ;;
