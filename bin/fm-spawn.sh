@@ -5836,6 +5836,10 @@ droid_launch_has_progress() { # <visible-pane-capture>
     printf '%s\n' "$1" | grep -qE '^[[:space:]]*⛬[[:space:]]'
 }
 
+droid_progress_lines() { # <visible-pane-capture>
+  printf '%s\n' "$1" | grep -E 'Press ESC to stop|^[[:space:]]*⛬[[:space:]]' || true
+}
+
 droid_current_launch_started() {
   [ "$RELAUNCH" -eq 0 ] && return 0
   # A reused pane can retain progress from the retired launch. Its replacement
@@ -5845,7 +5849,7 @@ droid_current_launch_started() {
 }
 
 droid_wait_for_working() {
-  local pane i=0 max=${FM_DROID_READY_POLLS:-120} interval=${FM_DROID_POLL_INTERVAL:-0.5}
+  local pane line progress i=0 max=${FM_DROID_READY_POLLS:-120} interval=${FM_DROID_POLL_INTERVAL:-0.5}
   DROID_READY_FAILURE_DETAIL='Droid did not start processing its launch brief'
   while [ "$i" -lt "$max" ]; do
     if ! pane=$(fm_backend_visible_capture "$BACKEND" "$T" "$W"); then
@@ -5863,9 +5867,20 @@ droid_wait_for_working() {
     elif [[ "$pane" != *'Exit without trusting'* ]]; then
       if droid_launch_has_progress "$pane"; then
         if droid_current_launch_started; then
-          return 0
+          if [ "$RELAUNCH" -eq 0 ]; then return 0; fi
+          progress=$(droid_progress_lines "$pane")
+          while IFS= read -r line; do
+            [ -n "$line" ] || continue
+            if ! printf '%s\n' "$DROID_PRIOR_PROGRESS" | grep -Fqx -- "$line"; then
+              return 0
+            fi
+          done <<EOF
+$progress
+EOF
+          DROID_READY_FAILURE_DETAIL='Droid replacement has not shown new launch progress'
+        else
+          DROID_READY_FAILURE_DETAIL='Droid replacement did not confirm its current launch generation'
         fi
-        DROID_READY_FAILURE_DETAIL='Droid replacement did not confirm its current launch generation'
       else
         DROID_READY_FAILURE_DETAIL='Droid did not start processing its launch brief after folder-trust handling'
       fi
@@ -8194,6 +8209,13 @@ else
     # under errexit on sourcing a file spawn already reclaimed even inside ||, so
     # keep an errexit pane shell open in both cases.
     LAUNCH_SOURCE_TEXT="if [ -e $(shell_quote "$LAUNCH_FILE") ]; then $LAUNCH_SOURCE_TEXT || true; else echo 'error: private launch file was already removed; refusing worker launch' >&2; fi"
+  fi
+  if [ "$DROID_TEMPLATE" -eq 1 ] && [ "$RELAUNCH" -eq 1 ]; then
+    DROID_PRIOR_PANE=$(fm_backend_visible_capture "$BACKEND" "$T" "$W") || {
+      echo "error: could not capture Droid's prior viewport before relaunch; inspect window $T" >&2
+      exit 1
+    }
+    DROID_PRIOR_PROGRESS=$(droid_progress_lines "$DROID_PRIOR_PANE")
   fi
   if ! spawn_send_literal "$T" "$LAUNCH_SOURCE_TEXT"; then
     [ "$ORCA_LAUNCH_ENV_ENABLED" != 1 ] || spawn_orca_launch_send_fail
