@@ -31,6 +31,8 @@ set -u
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 # shellcheck source=tests/t3-fake-lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/t3-fake-lib.sh"
+# shellcheck source=bin/fm-pending-reply-lib.sh
+. "$ROOT/bin/fm-pending-reply-lib.sh"
 
 RESTART="$ROOT/bin/fm-secondmate-restart.sh"
 
@@ -96,7 +98,9 @@ case "${1:-}" in
             corr=$(cat "$inbox"/*.msg 2>/dev/null \
               | grep -oE 'corr=[0-9a-f]{16}' | head -1)
             if [ -n "$corr" ]; then
-              printf 'done [%s]: open records written down\n' "$corr" \
+              verb=done
+              [ ! -f "$D/answer-verb" ] || verb=$(cat "$D/answer-verb")
+              printf '%s [%s]: open records written down; deliberately left unrelated work alone\n' "$verb" "$corr" \
                 >> "$(cat "$D/answer-status")"
             fi
           fi
@@ -131,7 +135,15 @@ SH
 #!/usr/bin/env bash
 case "${1:-}" in
   ''|*[!0-9]*) ;;
-  *) /bin/sleep 0.01 ;;
+  *)
+    if [ -f "$FM_FAKE_DIR/finish-progress" ] && [ ! -e "$FM_FAKE_DIR/progress-waited" ]; then
+      : > "$FM_FAKE_DIR/progress-waited"
+      status=$(cat "$FM_FAKE_DIR/answer-status")
+      corr=$(grep -oE 'corr=[0-9a-f]{16}' "$status" | tail -1)
+      printf 'done [%s]: open records written down\n' "$corr" >> "$status"
+    fi
+    /bin/sleep 0.01
+    ;;
 esac
 exit 0
 SH
@@ -330,27 +342,30 @@ test_arrived_answer_precedes_deadline_check() {
 
 # --- T2c: an answer arriving between resolution and timeout wins -------------
 test_answer_between_resolution_and_timeout_wins() {
-  local dir out rc
+  local dir out rc verb
+  for verb in 'done' blocked failed needs-decision working; do
   dir=$(new_case answer-at-timeout-decision)
   add_local_mate "$dir" sm1
+  printf '%s' "$verb" > "$dir/fake/answer-verb"
 
-  # Delay the modelled answer until the first resolution attempt has completed
-  # its unsuccessful status scan. The real pending-reply machinery publishes
-  # that scan signature with mv; this wrapper appends the correlated answer only
-  # after that publication, reproducing the boundary race deterministically.
+  # Deliver after the shared resolver persists its unsuccessful scan signature.
+  # Observe the pending-reply record's atomic publication so the answer lands
+  # between the preliminary resolution and the deadline recheck.
+  : > "$dir/home/state/sm1.status"
   cat > "$dir/fakebin/mv" <<'SH'
 #!/usr/bin/env bash
 set -u
 /bin/mv "$@" || exit $?
-target=${!#}
+for target in "$@"; do :; done
 case "$target" in
   "${FM_FAKE_DIR%/fake}"/home/state/pending-replies/*)
     if [ ! -e "$FM_FAKE_DIR/answer-after-scan" ] \
       && grep -q '^parent_status_scan_signature=.' "$target"; then
       : > "$FM_FAKE_DIR/answer-after-scan"
-      corr=${target##*/}
-      status=$(sed -n 's/^parent_status=//p' "$target")
-      printf 'done [corr=%s]: open records written down\n' "$corr" >> "$status"
+      corr=$(grep '^corr_id=' "$target" | cut -d= -f2)
+      status=$(grep '^parent_status=' "$target" | cut -d= -f2-)
+      verb=$(cat "$FM_FAKE_DIR/answer-verb")
+      printf '%s [corr=%s]: open records written down; deliberately left unrelated work alone\n' "$verb" "$corr" >> "$status"
     fi
     ;;
 esac
@@ -359,10 +374,204 @@ SH
 
   out=$(FM_TEST_PERSIST_WAIT=0 run_restart "$dir" sm1); rc=$?
 
-  expect_code 0 "$rc" "an answer already on disk at the timeout decision must release the gate"$'\n'"$out"
-  assert_contains "$out" "restarted: sm1" "the reply that raced the timeout was ignored"
-  assert_not_contains "$out" "nudged: sm1" "a confirmed mate must not take the timeout fallback"
+  assert_present "$dir/fake/answer-after-scan" "the deadline-recheck fixture did not deliver its reply"
+  assert_persist_result "$dir" "$verb" "$out" "$rc"
+  done
   pass "T2c a reply between the preliminary scan and timeout decision wins"
+}
+
+# Classify the observable result and durable expectation for one correlated reply.
+assert_persist_result() {  # <case-dir> <verb> <output> <exit-code>
+  local dir=$1 verb=$2 out=$3 rc=$4 phase=resolved
+  if [ "$verb" = 'done' ]; then
+    expect_code 0 "$rc" "done must authorize restart"$'\n'"$out"
+    assert_contains "$out" "summary: 1 of 1 restarted, 0 nudged, 0 unreached" "done must count as restarted"
+    assert_grep '/exit' "$dir/fake/literal" "done must restart the mate"
+  else
+    expect_code 3 "$rc" "$verb must fall back"$'\n'"$out"
+    assert_contains "$out" "summary: 0 of 1 restarted, 1 nudged, 0 unreached" "$verb must count as nudged"
+    assert_no_grep '/exit' "$dir/fake/literal" "$verb must not stop the mate"
+    assert_absent "$dir/home/state/sm1.control-relaunch" "$verb must not open a lifecycle transaction"
+    assert_grep 're-read your AGENTS.md' "$dir/home/state/sm1.inbox/002.msg" "$verb must receive the ordinary nudge"
+    [ "$verb" != working ] || phase=awaiting_report
+  fi
+  grep -h '^phase=' "$dir/home/state/pending-replies"/* | grep -q "^phase=$phase$" \
+    || fail "$verb left the wrong expectation phase, wanted $phase"
+}
+
+test_persist_reply_verbs() {
+  local dir out rc verb
+  for verb in blocked failed needs-decision working 'done'; do
+    dir=$(new_case "reply-$verb")
+    add_local_mate "$dir" sm1
+    arm_answer "$dir" sm1
+    printf '%s' "$verb" > "$dir/fake/answer-verb"
+    out=$(FM_TEST_PERSIST_WAIT=0 run_restart "$dir" sm1); rc=$?
+    assert_persist_result "$dir" "$verb" "$out" "$rc"
+  done
+  pass "T2d only a terminal done reply permits restart"
+}
+
+test_progress_waits_for_done() {
+  local dir out rc
+  dir=$(new_case progress-then-done)
+  add_local_mate "$dir" sm1
+  arm_answer "$dir" sm1
+  printf 'working' > "$dir/fake/answer-verb"
+  : > "$dir/fake/finish-progress"
+  printf 'done [corr=0000000000000000]: stale answer\n' > "$dir/home/state/sm1.status"
+  out=$(run_restart "$dir" sm1); rc=$?
+  assert_present "$dir/fake/progress-waited" "progress or a stale done released the gate before waiting"
+  assert_persist_result "$dir" 'done' "$out" "$rc"
+  pass "T2e progress waits for a done with the request's own correlation"
+}
+
+test_unchanged_history_is_not_reread() {
+  local dir out rc
+  dir=$(new_case unchanged-history)
+  add_local_mate "$dir" sm1
+  arm_answer "$dir" sm1
+  printf 'working' > "$dir/fake/answer-verb"
+  : > "$dir/fake/history-reads"
+  # Observe actual whole-file reads through the command boundary, keeping the
+  # history unchanged across three polls before appending a terminal reply.
+  cat > "$dir/fakebin/cat" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = "${FM_FAKE_DIR%/fake}/home/state/sm1.status" ]; then
+  printf 'read\n' >> "$FM_FAKE_DIR/history-reads"
+fi
+exec /bin/cat "$@"
+SH
+  cat > "$dir/fakebin/sleep" <<'SH'
+#!/usr/bin/env bash
+case "${1:-}" in
+  ''|*[!0-9]*) exit 0 ;;
+esac
+D=$FM_FAKE_DIR
+poll=0
+[ ! -f "$D/polls" ] || poll=$(/bin/cat "$D/polls")
+poll=$((poll + 1))
+printf '%s' "$poll" > "$D/polls"
+case "$poll" in
+  1) cp "$D/history-reads" "$D/reads-first-poll" ;;
+  3)
+    cp "$D/history-reads" "$D/reads-third-poll"
+    status=$(/bin/cat "$D/answer-status")
+    corr=$(grep -oE 'corr=[0-9a-f]{16}' "$status" | tail -1)
+    printf 'done [%s]: open records written down\n' "$corr" >> "$status"
+    ;;
+esac
+/bin/sleep 0.01
+SH
+  chmod +x "$dir/fakebin/cat" "$dir/fakebin/sleep"
+
+  out=$(run_restart "$dir" sm1); rc=$?
+
+  assert_present "$dir/fake/reads-third-poll" "the fixture must wait through three polls before done"
+  assert_equals "$(cat "$dir/fake/reads-first-poll")" "$(cat "$dir/fake/reads-third-poll")" \
+    "unchanged history must not be reread on subsequent polls"
+  assert_persist_result "$dir" 'done' "$out" "$rc"
+  pass "T2g unchanged histories are skipped and a later terminal reply still settles"
+}
+
+# Consume replies through the real remote ingest or local watcher before restart
+# polling resumes. The local mate writes its own same-basename status file, so
+# the watcher also exercises the ordinary restatement repair path.
+arm_shared_consumer() {  # <case-dir> <local|remote> <terminal-verb|working>
+  local dir=$1 consumer=$2 verb=$3
+  printf '%s' "$ROOT" > "$dir/fake/repo"
+  printf '%s' "$consumer" > "$dir/fake/consumer"
+  printf '%s' "$verb" > "$dir/fake/shared-verb"
+  cat > "$dir/fake/on-doorbell" <<'SH'
+#!/usr/bin/env bash
+set -eu
+D=$FM_FAKE_DIR
+[ ! -e "$D/shared-consumed" ] || exit 0
+: > "$D/shared-consumed"
+dir=${D%/fake}
+root=$(cat "$D/repo")
+home="$dir/home"
+state="$home/state"
+. "$root/bin/fm-pending-reply-lib.sh"
+if [ -f "$D/request-corr" ]; then
+  corr=$(cat "$D/request-corr")
+else
+  corr=$(grep -hoE 'corr=[0-9a-f]{16}' "$state/sm1.inbox"/*.msg | head -1 | cut -d= -f2)
+fi
+rec=$(fm_pending_reply_path "$state" "$corr")
+printf '%s' "$corr" > "$D/request-corr"
+# The mate has received the doorbell; reconcile confirmed delivery before the
+# shared consumers run, rather than testing their undelivered early return.
+fm_pending_reply_mark_delivered "$state" "$corr"
+consumer=$(cat "$D/consumer")
+consume_reply() {
+  local verb=$1 source offset prefix
+  if [ "$consumer" = local ]; then
+    printf '%s [corr=%s]: persistence reply\n' "$verb" "$corr" >> "$dir/sm1-home/state/sm1.status"
+    fm_pending_reply_tick_one "$state" "$corr" unknown "$dir/sm1-home"
+  else
+    mkdir -p "$dir/remote/state"
+    source="$dir/remote/state/parent-replies.status"
+    [ -f "$source" ] || : > "$source"
+    offset=$(LC_ALL=C wc -c < "$source" | tr -d '[:space:]')
+    if command -v shasum >/dev/null 2>&1; then
+      prefix=$(shasum -a 256 "$source" | awk '{print $1}')
+    else
+      prefix=$(sha256sum "$source" | awk '{print $1}')
+    fi
+    printf '%s [corr=%s]: persistence reply\n' "$verb" "$corr" >> "$source"
+    FM_HOME="$dir/remote" bash "$root/bin/fm-remote-delta-read.sh" \
+      state/parent-replies.status "$offset" "$prefix" 0 > "$dir/shared.result"
+    FM_HOME="$home" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$home/data" \
+      bash "$root/bin/fm-procevent-remote-reply.sh" ingest sm1 "$dir/shared.result"
+  fi
+}
+consume_reply working
+fm_pending_reply_get "$rec" phase > "$D/phase-after-progress"
+verb=$(cat "$D/shared-verb")
+if [ "$verb" != working ]; then
+  consume_reply "$verb"
+  fm_pending_reply_get "$rec" phase > "$D/phase-after-terminal"
+fi
+SH
+  chmod +x "$dir/fake/on-doorbell"
+}
+
+test_shared_consumers_preserve_persist_expectation() {
+  local dir consumer verb out rc rec corr
+  for consumer in remote local; do
+    for verb in working 'done' blocked failed needs-decision; do
+      dir=$(new_case "shared-$consumer-$verb")
+      add_local_mate "$dir" sm1
+      arm_shared_consumer "$dir" "$consumer" "$verb"
+      out=$(FM_TEST_PERSIST_WAIT=0 run_restart "$dir" sm1); rc=$?
+      assert_equals awaiting_report "$(cat "$dir/fake/phase-after-progress")" \
+        "$consumer progress must not settle the persist request before restart polls"
+      corr=$(cat "$dir/fake/request-corr")
+      rec=$(fm_pending_reply_path "$dir/home/state" "$corr")
+      assert_equals secondmate-restart-persist "$(fm_pending_reply_get "$rec" request_kind)" \
+        "the real restart must tag its request before any shared consumer sees it"
+      if [ "$verb" != working ]; then
+        assert_equals resolved "$(cat "$dir/fake/phase-after-terminal")" \
+          "$consumer must settle $verb after progress"
+      fi
+      assert_persist_result "$dir" "$verb" "$out" "$rc"
+    done
+
+    # Ordinary requests retain their existing acknowledgement policy.
+    dir=$(new_case "ordinary-$consumer")
+    add_local_mate "$dir" sm1
+    arm_shared_consumer "$dir" "$consumer" working
+    corr=$(fm_pending_reply_create "$dir/home" "$dir/home/state" sm1 "ordinary request")
+    fm_pending_reply_mark_delivered "$dir/home/state" "$corr"
+    printf '%s' "$corr" > "$dir/fake/request-corr"
+    FM_HOME="$dir/home" FM_FAKE_DIR="$dir/fake" PATH="$dir/fakebin:$PATH" \
+      bash "$dir/fake/on-doorbell" > "$dir/ordinary.out" 2>&1 \
+      || fail "$consumer ordinary shared consumer failed: $(cat "$dir/ordinary.out")"
+    assert_equals resolved "$(cat "$dir/fake/phase-after-progress")" \
+      "$consumer must keep resolving progress for ordinary request kinds"
+  done
+  pass "T2f remote ingest and local watcher preserve progress-only persist expectations"
 }
 
 # --- T3: a runtime that cannot prove a restart never gets one ----------------
@@ -990,6 +1199,10 @@ w = { tokens: [],
 test_persist_gates_and_asks_only_for_open_records
 test_persist_precedes_restart
 test_arrived_answer_precedes_deadline_check
+test_persist_reply_verbs
+test_progress_waits_for_done
+test_unchanged_history_is_not_reread
+test_shared_consumers_preserve_persist_expectation
 test_answer_between_resolution_and_timeout_wins
 test_unprovable_runtime_falls_back
 test_unknown_mate_is_accounted_for
