@@ -551,6 +551,35 @@ test_leading_preamble_is_not_mistaken_for_a_question() {
   pass "leading preamble is not mistaken for an unbound question"
 }
 
+test_bound_questions_require_canonical_text() {
+  local home rc=0 message index
+  home=$(make_home missing-question-text)
+  seed_task "$home" review 'needs-decision [key=approval]: approve review'
+  date +%s >"$home/state/.afk"
+  ask "$home" '1. Approve the first change?
+[firstmate-decision origin=review key=derive state=unseeded]
+[option] Yes
+2. Approve the second change?
+[firstmate-decision origin=review key=derive state=unseeded]
+[option] Yes
+3. [question]   
+[firstmate-decision origin=review key=approval state=existing]
+[option] Yes' || rc=$?
+  assert_denied "$rc" "$home" 'bound questions without canonical text'
+  message=$(deny_message "$home")
+  for index in 1 2 3; do
+    assert_contains "$message" "question $index requires a [question] line with nonempty question text" \
+      'a missing or empty question was not rejected'
+  done
+  [ "$( (cd "$home" && tasks-axi list --state held --kind captain) | grep -c '^  ' || true)" -eq 0 ] ||
+    fail 'untagged questions created a derived decision'
+  # shellcheck disable=SC1091
+  . "$ROOT/bin/fm-classify-lib.sh"
+  assert_contains "$(status_open_decisions "$home/state/review.status")" "$(printf 'approval\tneeds-decision')" \
+    'an empty question changed the existing decision'
+  pass 'bound questions without canonical text cannot create or alter decisions'
+}
+
 # One questionnaire, two origins: the first block must not capture the second.
 test_multi_origin_questionnaire_reaches_each_owner() {
   local home rc=0 message
@@ -882,6 +911,7 @@ test_open_questions_reports_incomplete_hold_enumeration
 test_open_questions_reports_unsafe_status_owners
 test_unbound_and_malformed_questions_are_rejected_without_mutation
 test_leading_preamble_is_not_mistaken_for_a_question
+test_bound_questions_require_canonical_text
 test_multi_origin_questionnaire_reaches_each_owner
 test_return_presents_every_question_losslessly
 test_return_restores_askuser_without_approving_anything
