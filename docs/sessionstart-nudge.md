@@ -236,7 +236,6 @@ None of these becomes a refusal to open the session.
 
 Each subsection below gives one harness surface's tier, its tracked transport, and its current compatibility.
 
-
 ### Claude
 
 Claude is a run-tier harness.
@@ -472,7 +471,6 @@ Its separate `FM_PI_SESSIONSTART_RACE_LIVE_E2E=1` mode uses real Pi with an offl
 That mode proves both an immediate prompt and a completed-before-prompt control make their first provider call with exactly one native startup context and no manual execution.
 
 Cursor uses the separate primary live guard named in [Cursor tests](#cursor-tests) because its source-free `sessionStart` and stop-hook park are validated together.
-
 
 `tests/fm-sessionstart-instruction-refresh-live-e2e.test.sh` is the separate opt-in real-Pi guard for a post-start AGENTS.md update followed by compaction.
 
