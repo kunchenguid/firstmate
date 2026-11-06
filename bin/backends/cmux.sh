@@ -93,7 +93,9 @@
 #   external clients, no shared secret), `password` (works, needs
 #   config/cmux-socket-password or CMUX_SOCKET_PASSWORD supplied on every
 #   invocation), or `allowAll` (works, but opens the socket to every local
-#   user - not recommended). `off` and `cmuxOnly` can never work externally.
+#   user - not recommended). `off` starts no listener, and `cmuxOnly` admits
+#   only descendants of the app, so it can transiently work for a firstmate
+#   running inside cmux and fail on reparent. Neither is externally viable.
 #   A configured password is harmless under non-password modes: cmux's own
 #   CLI sends `auth` preemptively and tolerates the server's "Unknown
 #   command 'auth'" reply (cli/cmux.swift, authenticateSocketClientIfNeeded).
