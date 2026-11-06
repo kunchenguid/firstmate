@@ -960,7 +960,7 @@ tests/fm-warm-compact-herdr-live-e2e.test.sh 170
 tests/fm-warm-compact.test.sh 1500
 tests/fm-watch-arm.test.sh 113076
 tests/fm-watch-checkpoint.test.sh 11234
-tests/fm-watch-idle-cadence.test.sh 1077
+tests/fm-watch-idle-cadence.test.sh 1800
 tests/fm-watch-inbox-meta.test.sh 283
 tests/fm-watch-recovery-loop.test.sh 59092
 tests/fm-watch-triage-pause.test.sh 466750

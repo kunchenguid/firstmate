@@ -62,4 +62,28 @@ busy=$(printf '%s\n' "$out" | sed -n '3p')
 [ "$busy" = 15 ] || fail "a live crew did not get the fast cadence: $busy"
 ok "an idle fleet waits on the slow cadence, a live crew on the fast one"
 
+# 3. Every beacon-age reader derives the same default grace from the EFFECTIVE
+# poll, not the fast poll: with idle_poll_secs=1800 the no-argument derivation
+# (what the hook readers use) must equal the watcher's own max(300, 1860), and
+# the stall bound must grow with it - or the arm and hooks evict a healthy
+# slow watcher. An unset FM_HOME must be ignored, not read.
+out=$(env FM_POLL=15 FM_CONFIG_OVERRIDE="$TMP/config" bash -c '
+  . "$1"
+  mkdir -p "$2"
+  printf "idle_poll_secs=1800\n" > "$2/supervision-tuning"
+  grace=$(fm_poll_derived_grace)
+  bound=$(fm_watcher_stall_bound)
+  unset FM_HOME
+  grace_unsets=$(fm_poll_derived_grace)
+  printf "%s %s %s\n" "$grace" "$bound" "$grace_unsets"
+' _ "$ROOT/bin/fm-wake-lib.sh" "$TMP/config")
+# shellcheck disable=SC2016
+grace=$(printf '%s\n' "$out" | cut -d' ' -f1)
+bound=$(printf '%s\n' "$out" | cut -d' ' -f2)
+grace_unsets=$(printf '%s\n' "$out" | cut -d' ' -f3)
+[ "$grace" = 1860 ] || fail "the hook-side grace used the fast poll, not the effective cadence: $grace"
+[ "$bound" = 5580 ] || fail "the stall bound did not grow with the effective cadence: $bound"
+[ "$grace_unsets" = 1860 ] || fail "an unset FM_HOME changed the derived grace: $grace_unsets"
+ok "hook-side grace and stall bound derive from the same effective cadence the watcher waits on"
+
 echo "PASS: fm-watch-idle-cadence"

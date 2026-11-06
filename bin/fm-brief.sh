@@ -680,10 +680,14 @@ IFS= read -r -d '' GATE_POLICY_SECTION <<EOF || true
   new spend. Everything else is yours to decide and record.
 EOF
 GATE_POLICY_SECTION=${GATE_POLICY_SECTION%$'\n'}
-# Collapsed to empty when the home has not opted in, so the shared template
-# stays byte-identical to the pre-tuning brief.
+# When the home has not opted in the section renders nothing at all, so the
+# shared template stays byte-identical to the pre-tuning brief; when it is on,
+# the leading and trailing newlines below reproduce the surrounding blank
+# lines the interpolation point used to provide.
 if [ "$GATE_POLICY_ENABLED" -le 0 ]; then
-  GATE_POLICY_SECTION=
+  GATE_POLICY_BLOCK=
+else
+  GATE_POLICY_BLOCK="$GATE_POLICY_SECTION"$'\n\n'
 fi
 
 # One shared string keeps the ship and scout infrastructure rule identical.
@@ -864,9 +868,7 @@ $WAIT_BLOCK$INBOX_SECTION
 A project's \`AGENTS.md\` or \`CLAUDE.md\` is loaded into every agent session in that project, so edit it only to correct information that is factually wrong - including information your own change made wrong - and never to add knowledge because it is missing.
 A correction edits only the wrong text: do not run \`$FM_ROOT/bin/fm-ensure-agents-md.sh\`, create either file, or add sections, headings, or pointers alongside it.
 
-$GATE_POLICY_SECTION
-
-$DOD
+$GATE_POLICY_BLOCK$DOD
 EOF
 append_brief_include
 if [ "$PR_TEXT" = manual ]; then

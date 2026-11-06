@@ -492,6 +492,18 @@ test_brief_gate_policy_is_opt_in() {
     "the gate-policy section must not pre-approve deviation classes"
   assert_no_grep "campaign number" "$brief" \
     "the gate-policy section must not carry domain-specific examples"
+
+  # The off-state brief must be byte-identical to the pre-tuning template:
+  # the empty interpolation leaves no stray blank line at its point.
+  local offbrief onbrief
+  offbrief="$home/data/brief-gate-off/brief.md"
+  onbrief="$home/data/brief-gate-on/brief.md"
+  if awk 'BEGIN{b=0; bad=0} /^$/{b++; next} {if (b>=2 && $0 ~ /^# Definition of done/) bad=1; b=0} END{if (bad==0) exit 1}' "$offbrief"; then
+    fail "the off-state brief must not carry a stray doubled blank line at the gate-policy interpolation point"
+  fi
+  if awk '/^# Validation gate policy$/{if (prev_blank >= 2) bad=1; seen=1} /^$/{prev_blank++; next} {prev_blank=0} END{if (!seen || bad) exit 0; exit 1}' "$onbrief"; then
+    fail "the enabled brief must keep exactly one blank line above the gate-policy section"
+  fi
   pass "fm-brief.sh: the validation gate-policy section is opt-in via brief_gate_policy"
 }
 
