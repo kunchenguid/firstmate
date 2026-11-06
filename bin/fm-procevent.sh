@@ -94,6 +94,8 @@
 #            human makes for a group that lost its leader, which `start`
 #            reports as owned and which the next cycle reclaims on its own
 #            once that group is empty.
+#            Extension invocation cleanup refusals count as `uncertain`;
+#            docs/configuration.md owns their failure-wake and recovery policy.
 # handled    Durably and idempotently record that a captured result has been
 #            fully handled: <source-id> <sequence>. Prints "handled: id seq"
 #            the first time for that exact source-and-sequence generation and
@@ -865,7 +867,8 @@ EOF
           ring_target=$(fm_backend_target_of_meta "$ring_meta" 2>/dev/null || true)
           if [ -n "$ring_backend" ] && [ -n "$ring_target" ]; then
             fm_backend_bind_task_record "$ring_meta" "$ring_target"
-            fm_task_inbox_ring "$ring_backend" "$ring_target" "$record" "fm-$owner_task" >/dev/null 2>&1 || true
+            FM_COMPOSER_HARNESS=$(fm_meta_get "$ring_meta" harness 2>/dev/null || true) \
+              fm_task_inbox_ring "$ring_backend" "$ring_target" "$record" "fm-$owner_task" >/dev/null 2>&1 || true
           fi
         fi
       fi
@@ -1067,6 +1070,9 @@ cmd_start() {
   }
   fm_procevent_claim_acquire_locked "$id" "$FM_HOME" "$$" "$(source_file "$id")" "$STATE"
   claimed=$?
+  if [ "$claimed" -eq 0 ]; then
+    rm -f -- "$REG/.$id.cleanup-failed"
+  fi
   fm_procevent_source_lock_release "$id"
   case "$claimed" in
     0) ;;
@@ -1593,6 +1599,9 @@ cmd_owner_watchdog() {  # <source-id> <runner-pid> <runner-identity> <ready-file
 # Start a runner outside the watcher cycle that noticed it was missing. The
 # public start boundary establishes its own process group before claiming.
 detach_runner() {  # <source-id>
+  # Earlier publication or cleanup can outlast the lease. Refresh at the owning
+  # caller's launch boundary, still excluding runners and their descendants.
+  owner_lease_refresh
   isolate_runner detach "$1"
 }
 
@@ -1650,6 +1659,20 @@ report_launch_failure() {  # <source-id> <registration-identity>
   announce_source_once "$(launch_failed_file "$id")" "$episode" \
     "procevent:$id:launch-failed:$episode-$nonce" \
     "check: process-event source $id is registered but its launch did not prove it took the source's claim within FM_PROCEVENT_LAUNCH_CONFIRM_SECONDS, so nothing is confirmed to be collecting from it; reconcile reports that as failed= and keeps launching it every supervision cycle. If it stays that way, check the source command and the adapter binary the registration names, and run an attached bin/fm-procevent.sh start $id to reproduce a refusal on its stderr - the detached launch discards it, and a hand-run reconcile only counts it as failed=. A later cycle that finds the source owned ends this episode on its own, so a runner that was merely slow to claim needs nothing from you." \
+    "$episode $nonce"
+}
+
+# Cleanup has no claim token when an ownerless invocation blocks a source.
+# Key its announcement to the registration and a nonce so a later episode of
+# the same registration is still visible through the durable wake deduplicator.
+report_extension_cleanup_failure() {  # <source-id>
+  local id=$1 identity episode nonce
+  identity=$(fm_pr_file_identity "$(source_file "$id")" 2>/dev/null) || identity=
+  case "$identity" in ''|*[!0-9:]*) episode=unreadable ;; *) episode=${identity//:/-} ;; esac
+  nonce="$RANDOM$RANDOM"
+  announce_source_once "$REG/.$id.cleanup-failed" "$episode" \
+    "procevent:$id:launch-failed:$episode-$nonce" \
+    "check: process-event source $id cannot restart because extension invocation cleanup could not prove recovery safe. Run bin/fm-extension.sh cleanup-invocations in this source's home and effective state root to read the refusal, then verify the named invocation records and process ownership before changing them. Reconcile preserves the source and retries cleanup; successful cleanup ends this failure episode." \
     "$episode $nonce"
 }
 
@@ -1773,9 +1796,11 @@ cmd_reconcile() {
         elif [ "$claim_state" -eq 1 ]; then
           if ! cleanup_extension_registration_invocations_locked "$id"; then
             uncertain=$((uncertain + 1))
+            report_extension_cleanup_failure "$id" || true
             fm_procevent_source_lock_release "$id"
             continue
           fi
+          rm -f -- "$REG/.$id.cleanup-failed"
           # Snapshot the launch-pacing stamp for the registration generation
           # this launch will run under, while the source lock still keeps that
           # registration from being replaced underneath it. The runner writes
@@ -1820,6 +1845,7 @@ cmd_reconcile() {
           # A live owner is the same evidence confirmation reads, however the
           # runner was started, so it ends any launch-failure episode here.
           rm -f -- "$(launch_failed_file "$id")"
+          rm -f -- "$REG/.$id.cleanup-failed"
         fi
       fi
       fm_procevent_source_lock_release "$id"
@@ -2239,6 +2265,7 @@ cmd_retire() {
   rm -f -- "$(runner_file "$id")"
   rm -f -- "$(stranded_file "$id")"
   rm -f -- "$(launch_failed_file "$id")"
+  rm -f -- "$REG/.$id.cleanup-failed"
   rm -f -- "$REG/.$id.reply."*
   fm_procevent_source_lock_release "$id"
   # A retired source produces no further answer, so drop any decision binding it
