@@ -1258,7 +1258,13 @@ test_next_url_does_not_inherit_a_forge_diagnostic() {
   # fails on its reviews read before it checks comments.
   printf '{}\n' > "$home/forge/comments.json"
   printf 'fail\n' > "$home/forge/fault"
-  # This rotation bucket reads the failing PR before the issue.
+  # Seed a newer issue observation so the failing PR is read first.
+  mutate_record "$home" delivery '.records[0].checked_at="2026-09-15T08:00:00Z"'
+  mkdir -p "$home/data/filed"
+  jq -n --arg now "$NOW" '{schema:"fm-contributions.v1",task:"filed",records:[{
+    url:"https://github.com/o/r/issues/9",kind:"issue",checked_at:$now,error:null,pending:[],seen:[],
+    observation:{state:"open",head:null,ready:false,checks:[],reviews:[],events:[]}}]}' \
+    > "$home/data/filed/contributions.json"
   out=$(with_home "$home" env FM_CONTRIBUTIONS_NOW=2026-09-16T08:05:00Z "$ROOT/bin/fm-contributions.sh" poll) \
     || fail 'poll failed while a GitHub issue followed a failed PR read'
   pull_line=$(grep -nF 'api repos/o/r/pulls/8/reviews?' "$home/forge/calls" | head -n 1 | cut -d: -f1)
