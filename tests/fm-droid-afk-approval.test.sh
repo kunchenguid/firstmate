@@ -340,6 +340,47 @@ test_status_question_moves_to_hold_before_transfer_closes() {
   pass "status question evidence reaches the hold before transfer closes its key"
 }
 
+test_reopened_decision_keeps_only_current_evidence() {
+  local home rc=0 listing before
+  local old='1. [question] Approve the old policy?
+[firstmate-decision origin=review key=choice state=existing]
+[option] Yes'
+  local current='1. [question] Approve the new policy?
+[firstmate-decision origin=review key=choice state=existing]
+[option] Yes'
+  home=$(make_home reopened-evidence)
+  seed_task "$home" review 'needs-decision [key=choice]: old policy'
+  date +%s >"$home/state/.afk"
+  ask "$home" "$old" || rc=$?
+  [ "$rc" -eq 2 ] || fail 'old question was not denied'
+  printf 'resolved [key=choice]: answered old policy\nneeds-decision [key=choice]: new policy\n' >>"$home/state/review.status"
+  rc=0
+  ask "$home" "$current" || rc=$?
+  [ "$rc" -eq 2 ] || fail 'new question was not denied'
+  before=$(cksum <"$home/state/review.status")
+  rc=0
+  ask "$home" "$current" || rc=$?
+  [ "$rc" -eq 2 ] && [ "$before" = "$(cksum <"$home/state/review.status")" ] ||
+    fail 'replay of current question was not deduplicated'
+  rc=0
+  ask "$home" '1. [question] Approve the revised new policy?
+[firstmate-decision origin=review key=choice state=existing]
+[option] Yes' || rc=$?
+  [ "$rc" -eq 2 ] || fail 'current question variant was not denied'
+  listing=$(holds "$home" open-questions --render)
+  assert_contains "$listing" 'Approve the new policy?' 'reopened question was omitted'
+  assert_contains "$listing" 'Approve the revised new policy?' 'current variant was omitted'
+  assert_not_contains "$listing" 'Approve the old policy?' 'answered question was projected again'
+  holds "$home" hold review choice --title 'Choose the policy' --reason 'captain decision pending' >/dev/null ||
+    fail 'could not create a hold for the reopened decision'
+  holds "$home" complete review choice >/dev/null || fail 'could not transfer reopened decision'
+  listing=$(holds "$home" open-questions --render)
+  assert_contains "$listing" 'Approve the new policy?' 'transfer lost the reopened question'
+  assert_contains "$listing" 'Approve the revised new policy?' 'transfer lost the current variant'
+  assert_not_contains "$listing" 'Approve the old policy?' 'transfer revived answered evidence'
+  pass 'reopened decisions retain only current question evidence'
+}
+
 test_ordinary_captain_held_task_preserves_multiple_question_owners() {
   local home rc=0 listing records alpha beta actual
   home=$(make_home ordinary-held-task)
@@ -905,6 +946,7 @@ test_unseeded_binding_creates_an_ordinary_captain_hold
 test_transferred_hold_wins_and_status_is_never_reopened
 test_unrelated_hold_does_not_capture_status_decision
 test_status_question_moves_to_hold_before_transfer_closes
+test_reopened_decision_keeps_only_current_evidence
 test_ordinary_captain_held_task_preserves_multiple_question_owners
 test_ambiguous_transfer_preserves_the_status_question
 test_open_questions_reports_incomplete_hold_enumeration
