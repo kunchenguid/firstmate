@@ -170,8 +170,9 @@ Naming `rex` in `config/wedge-alarm` adds an opt-in wedge alarm on Firstmate's o
 - A Rex server stop kills every task's agent process.
   A restarted server restores the sessions themselves on the same endpoint and state directory, with each block returning as a fresh login shell preserving its working directory.
   Liveness relaunches the dead agent into the restored session.
-  A Claude worker relaunches with `claude --resume <session-id>` plus its normal launch line, so it keeps its conversation.
-  Spawn and relaunch record that id as `claude_session_id` in the task record, read from Claude's own `sessions/<pid>.json`.
+  A Claude worker relaunched as Claude resumes with `claude --resume <session-id>` plus its normal launch line, so it keeps its conversation.
+  A relaunch from another harness never resumes, and every relaunch drops the old id from the record.
+  Spawn and relaunch record the live worker's id as `claude_session_id` in the task record, read from Claude's own `sessions/<pid>.json`.
   When no id is recorded or Claude no longer holds the session transcript, the relaunch starts a fresh session as before.
   When a session genuinely does not come back, recovery proves the task gone and reclaims it into a fresh tab.
 - The viewport is derived, not read directly, as described above.
