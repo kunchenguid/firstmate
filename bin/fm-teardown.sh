@@ -269,6 +269,16 @@
 # checks before any destructive return. Teardown output notes every wait, retry, and
 # removal so the operator can see what happened.
 #
+# Post-return slot recycle (teardown_detach_returned_slot): Treehouse refuses to
+# recycle a pool slot whose HEAD sits on no remote-tracking branch, so a task whose
+# commits landed only in a local branch (this repo's own local-only delivery) would
+# strand its slot after return until the pool runs dry. After every successful
+# return of a pool slot, teardown moves a clean slot whose HEAD is reachable from a
+# local branch but from no remote-tracking branch back to the remote default commit
+# (origin/HEAD, else origin/main or origin/master). A HEAD no branch holds is left
+# untouched with one warning, dirty slots are never moved, branches are never
+# deleted, and nothing is forced.
+#
 # Pre-teardown cleanup sequence (starts after the initial landed/discard-work
 # safety checks pass, and BEFORE any worktree return or branch
 # deletion below - a still-active run or a leaked process may
@@ -2129,6 +2139,41 @@ teardown_note_dirty_return() {
   printf '%s\n' "$residue" | sed 's/^/  /' >&2
 }
 
+# Move a returned Treehouse pool slot back to the published commit so the pool can
+# recycle it; see the script header's "Post-return slot recycle" paragraph for the
+# strand this prevents. Only a clean slot whose HEAD is reachable from a local
+# branch yet contained in no remote-tracking branch is moved, and never with force;
+# a HEAD no branch holds is left untouched with one warning naming it.
+teardown_detach_returned_slot() {
+  local wt=$1 label=$2 head ref target
+  git -C "$wt" rev-parse --is-inside-work-tree >/dev/null 2>&1 || return 0
+  [ -z "$(git -C "$wt" status --porcelain)" ] || return 0
+  [ -z "$(git -C "$wt" for-each-ref refs/remotes/ --contains=HEAD)" ] || return 0
+  head=$(git -C "$wt" rev-parse HEAD 2>/dev/null) || return 0
+  # for-each-ref, not `git branch --contains`: the branch listing adds a
+  # "(HEAD detached ...)" pseudo-entry when detached HEAD holds the commit
+  # itself, which would read an unreferenced commit as branch-held and detach
+  # the pool slot off the only copy that still names it.
+  if [ -z "$(git -C "$wt" for-each-ref refs/heads/ --contains="$head")" ]; then
+    echo "warning: returned $label $wt stays on commit $head, which no local branch holds and no remote branch contains; the pool may not recycle this slot" >&2
+    return 0
+  fi
+  ref=$(git -C "$wt" symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null || true)
+  if [ -z "$ref" ]; then
+    for target in main master; do
+      if git -C "$wt" show-ref --verify --quiet "refs/remotes/origin/$target"; then
+        ref="origin/$target"
+        break
+      fi
+    done
+  fi
+  [ -n "$ref" ] || return 0
+  target=$(git -C "$wt" rev-parse --verify -q "$ref^{commit}") || return 0
+  git -C "$wt" checkout --detach -q "$target" \
+    || echo "warning: could not move returned $label $wt onto $ref; the pool may not recycle this slot" >&2
+  return 0
+}
+
 # A worker may have pushed from another checkout, so tracking refs that do not
 # show the work prove nothing until they are refreshed. Runs at most once per
 # teardown. Each fetch is bounded to 30 seconds and non-interactive, and
@@ -2987,6 +3032,7 @@ remove_firstmate_home() {  # <home> <label> <task-id> <backend>
       restore_firstmate_home_process_events "$abs_home_path" "$label" "$process_event_backup" || return $?
       return 1
     }
+    teardown_detach_returned_slot "$abs_home_path" "$label"
     [ -z "$process_event_backup" ] || rm -rf -- "$process_event_backup"
     return 0
   fi
@@ -3619,6 +3665,7 @@ cleanup_firstmate_home_children() {
           fm_treehouse_pool_slot "$child_proj" "$child_wt" && child_pool_slot=1
           if teardown_treehouse_return "$child_wt" "$child_proj" "child worktree"; then
             [ "$child_pool_slot" = 0 ] || teardown_note_dirty_return "$child_wt"
+            [ "$child_pool_slot" = 0 ] || teardown_detach_returned_slot "$child_wt" "child worktree"
             fm_treehouse_slot_owner_release "$child_wt" "$child_id"
           else
             child_return_rc=$?
@@ -4100,6 +4147,7 @@ elif [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
     exit 1
   }
   [ "$wt_pool_slot" = 0 ] || teardown_note_dirty_return "$WT"
+  [ "$wt_pool_slot" = 0 ] || teardown_detach_returned_slot "$WT" "worktree"
   # The slot is back in the pool, so this task's claim on it is spent. Dropping
   # it here - and only after a return that succeeded - keeps a returned slot
   # unclaimed until its next holder claims it, and leaves the claim in place

@@ -24,6 +24,9 @@
 #   (a) local-only + HEAD on a fork remote-tracking branch     -> ALLOW  (fork fix)
 #   (b) local-only + truly unpushed work (no remote, not main) -> REFUSE (safety)
 #   (c) local-only + merged into local main, no remote         -> ALLOW  (no regression)
+#   (c1) same, on a pool slot: returned copy is moved back onto
+#        the published commit (detached), local main keeps the work -> slot recycles
+#   (c2) returned pool slot on a commit no branch holds        -> untouched + one warning
 #   (d) no-mistakes + HEAD on origin remote-tracking branch    -> ALLOW  (no regression)
 #   (e) no-mistakes + unpushed, no PR, content not in default  -> REFUSE (safety)
 #   (f) local-only + truly unpushed + --force                  -> ALLOW  (escape hatch)
@@ -1154,6 +1157,57 @@ test_gate_remote_is_not_refreshed_into_landed() {
   expect_code 1 "$rc" "gate-not-refreshed: commits only on the gate must refuse"
   grep -q REFUSED "$case_dir/stderr" || fail "gate-not-refreshed: no REFUSED line"
   pass "commits held only by the no-mistakes gate are not refreshed into landed"
+}
+
+test_returned_pool_slot_on_local_only_commit_detaches_to_published() {
+  local case_dir wt rc head published
+  case_dir=$(make_case pool-slot-detach)
+  wt_commit "$case_dir" "local-only landed work"
+  head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  # Land the work only in the project's local main; no remote ever sees it.
+  git -C "$case_dir/project" update-ref refs/heads/main "$head"
+  published=$(git -C "$case_dir/wt" rev-parse origin/HEAD)
+  wt=$(move_case_to_pool_slot "$case_dir" 7)
+  write_meta "$case_dir" local-only ship "$wt"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "pool-slot-detach: teardown should succeed"
+  [ "$(git -C "$wt" rev-parse HEAD)" = "$published" ] \
+    || fail "pool-slot-detach: slot HEAD is $(git -C "$wt" rev-parse HEAD), expected published $published"
+  [ "$(git -C "$wt" rev-parse --abbrev-ref HEAD)" = "HEAD" ] \
+    || fail "pool-slot-detach: slot sits on branch $(git -C "$wt" rev-parse --abbrev-ref HEAD), expected detached"
+  [ "$(git -C "$case_dir/project" rev-parse refs/heads/main)" = "$head" ] \
+    || fail "pool-slot-detach: local main no longer holds the landed commit"
+  pass "a clean returned pool slot on a local-only commit is detached back to the published commit"
+}
+
+test_returned_pool_slot_on_unreferenced_commit_stays_with_warning() {
+  local case_dir wt rc head
+  case_dir=$(make_case pool-slot-orphan)
+  wt_commit "$case_dir" "never landed anywhere"
+  head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  wt=$(move_case_to_pool_slot "$case_dir" 5)
+  write_meta "$case_dir" no-mistakes scout "$wt"
+  prepare_scout_teardown "$case_dir"
+  add_treehouse_clean_fd "$case_dir"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  # Teardown deletes the scout's task branch itself, so the returned slot's
+  # HEAD is held by no branch: the commit must survive in place with a warning.
+  expect_code 0 "$rc" "pool-slot-orphan: scout teardown should succeed"
+  [ "$(git -C "$wt" rev-parse HEAD)" = "$head" ] \
+    || fail "pool-slot-orphan: slot HEAD moved to $(git -C "$wt" rev-parse HEAD), expected the unreferenced commit $head to stay"
+  assert_grep "warning: returned worktree $wt stays on commit $head" "$case_dir/stderr" \
+    "pool-slot-orphan: no warning named the unreferenced slot commit"
+  pass "a returned pool slot on a commit no branch holds stays untouched with one warning"
 }
 
 test_no_mistakes_origin_remote_allows() {
@@ -6463,6 +6517,8 @@ test_teardown_closes_a_gitlab_task_with_its_merge_request_url_as_a_note
 test_teardown_manual_backend_leaves_the_backlog_to_the_operator
 test_local_only_truly_unpushed_refuses
 test_local_only_merged_to_local_main_allows
+test_returned_pool_slot_on_local_only_commit_detaches_to_published
+test_returned_pool_slot_on_unreferenced_commit_stays_with_warning
 test_landed_on_other_origin_branch_with_stale_refs_allows
 test_refresh_failure_does_not_read_as_landed
 test_refreshed_refs_still_refuse_unreachable_commits
