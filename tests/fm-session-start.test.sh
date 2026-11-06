@@ -2401,6 +2401,61 @@ SH
   pass "the runtime bound leaves enough ancestry headroom for a deeply nested session to take the lock"
 }
 
+# Codex publishes no harness marker, so its native process in the ancestry is the
+# only evidence the digest has for choosing Codex's supervision protocol. This
+# runs the tracked Codex SessionStart hook command itself, unmodified, under a
+# real process named codex, so the digest's harness probe sits as deep below that
+# process as it does in a live Codex session (the hook shell, the stop-park
+# wrapper, the session-start runner, and the digest's own bounded child). A walk
+# that falls short of that depth renders the generic unknown block, whose watcher
+# wait the Codex command policy denies, while the lock walker still names the
+# session. tests/fm-harness-precedence.test.sh measures and pins the walk's reach
+# directly; this case pins the composed startup path that depends on it.
+test_codex_sessionstart_hook_chain_selects_the_codex_protocol() {
+  local rec root home fakebin w codex hook profile_home out
+  command -v jq >/dev/null 2>&1 || { echo "skip: jq not found (the Codex SessionStart hook stands down without it)"; return 0; }
+  rec=$(new_world codex-hook-chain)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  w=${root%/root}
+  make_fake_toolchain "$fakebin"
+  # The session-start runner takes the helm only for a primary-shaped root.
+  printf '# Firstmate\n' > "$root/AGENTS.md"
+  ln -s "$ROOT/bin" "$root/bin"
+  mkdir -p "$w/vendor"
+  cp "$(command -v bash)" "$w/vendor/codex"
+  codex="$w/vendor/codex"
+  hook=$(jq -er '.hooks.SessionStart[0].hooks[0].command' "$ROOT/.codex/hooks.json") \
+    || fail "the tracked Codex SessionStart hook command could not be read"
+  # The hook runs a login shell, which may reset PATH from the system profile;
+  # a test-owned HOME restores the fixture PATH and keeps the operator's own
+  # profile out of the run.
+  profile_home="$w/profile-home"
+  mkdir -p "$profile_home"
+  printf 'PATH=%q\nexport PATH\n' "$fakebin:$BASE_PATH" > "$profile_home/.bash_profile"
+
+  # The hook resolves the code under test from its working directory, exactly
+  # as a Codex session started in the home does. The subshell keeps the cd out
+  # of the suite's own shell.
+  # shellcheck disable=SC2016 # $FM_TEST_HOOK must expand in the codex-named shell, not here.
+  out=$(cd "$ROOT" && env -u CLAUDECODE -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT \
+    -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u FM_SUPERVISION_ACTOR -u FM_SUPERVISION_PRIMARY_HARNESS \
+    HOME="$profile_home" FM_HOME="$home" FM_ROOT_OVERRIDE="$root" PATH="$fakebin:$BASE_PATH" \
+    FM_TEST_HOOK="$hook" "$codex" -c \
+    'printf "%s" "{\"hook_event_name\":\"SessionStart\",\"source\":\"startup\"}" | bash -c "$FM_TEST_HOOK"')
+
+  assert_contains "$out" "lock acquired: harness pid" \
+    "the Codex hook chain did not take the session lock, so the case never reached the digest"
+  assert_contains "$out" "primary harness: codex" \
+    "the digest under the real Codex SessionStart hook chain did not detect the Codex primary"
+  assert_contains "$out" "Mode: Codex foreground checkpoint." \
+    "the digest under the real Codex SessionStart hook chain did not render Codex's supervision protocol"
+  assert_not_contains "$out" "primary harness: unknown" \
+    "the digest under the real Codex SessionStart hook chain fell back to the unknown protocol"
+  pass "the real Codex SessionStart hook chain renders the Codex supervision protocol"
+}
+
 # --- context re-emit (--reemit) ----------------------------------------------
 
 test_reemit_cue_survives_the_hook_output_preview() {
@@ -3151,6 +3206,7 @@ test_runtime_bound_truncates_loudly_and_exits_zero
 test_portable_timeout_escalates_term_resistant_process
 test_runtime_bound_leaves_a_healthy_digest_untouched
 test_runtime_bound_leaves_harness_ancestry_headroom
+test_codex_sessionstart_hook_chain_selects_the_codex_protocol
 test_reemit_skips_startup_sweeps_but_keeps_the_wake_drain
 test_reemit_cue_survives_the_hook_output_preview
 test_agents_baseline_stays_at_true_start_and_reemits_on_every_drifted_pi_compact

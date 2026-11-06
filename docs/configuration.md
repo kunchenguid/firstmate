@@ -426,7 +426,9 @@ Removing it stops further retries and leaves the current watcher for the ordinar
 
 Create the empty, home-local `config/codex-stop-park` file to let a Codex primary wait for watcher wakes outside the model between turns.
 The feature is off when the file is absent, and every Codex session then keeps the bounded foreground checkpoint protocol.
-With the file present, only an interactive native Codex session on the verified CLI version that holds this home's session lock parks; every other session keeps the foreground checkpoint.
+With the file present, only an interactive native Codex session on a supported CLI release that holds this home's session lock parks; every other session keeps the foreground checkpoint.
+The script requires canonical `codex-cli major.minor.patch` output at or above `0.163.0`, with no leading zeroes, prerelease suffixes, or build metadata; malformed output and failed version probes keep the foreground checkpoint.
+This minimum is the compatibility policy, not a claim that every admitted release has been tested; [runtime verification](verification/runtime-backends.md#native-codex-supervision-park) records empirical coverage.
 The supervision protocol is chosen when the session starts, so create or remove the file before starting the Codex session.
 The file is local to each home and is not inherited by secondmate homes.
 [The Codex protocol](supervision-protocols/codex.md) owns the parked operating protocol, and `bin/fm-codex-stop-park.sh` owns version selection, registration, and failure fallback.

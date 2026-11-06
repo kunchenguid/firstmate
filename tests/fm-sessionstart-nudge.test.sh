@@ -235,6 +235,24 @@ run_hook_pi() {  # <root> [args...]
     FM_GATE_REFUSE_BYPASS=0 FM_ROOT_OVERRIDE="$root" FM_HOME="$root" PATH="$RUN_PATH" "$RUN" "$@"
 }
 
+# A Pi session's hooks run beneath its own pi process, the nearest harness
+# ancestor; the suite's codex fixture sits further up, and a real codex
+# ancestor outranks a Pi marker that has no pi process beneath it. pi_session
+# runs one case's Pi hook calls beneath a single pi-named process, so they share
+# one harness ancestor the way a real Pi session's hooks do. The trailing no-op
+# keeps bash from exec-replacing that process with the case's last command.
+PI_SESSION_BIN="$TMP_ROOT/pi-session/pi"
+mkdir -p "${PI_SESSION_BIN%/*}"
+ln -s /bin/bash "$PI_SESSION_BIN"
+export RUN RUN_PATH
+export -f run_hook_pi
+pi_session() {  # <script> [args...]
+  local script=$1
+  shift
+  # shellcheck disable=SC2016 # The status expands in the pi session shell.
+  "$PI_SESSION_BIN" -c "$script"'; rc=$?; :; exit "$rc"' _ "$@"
+}
+
 # Every run-tier assertion keys off the digest banner, which fm-session-start.sh
 # prints before the lock result, so routing is proven whether or not the lock
 # was won in the test environment.
@@ -278,15 +296,21 @@ test_run_rebuild_forwards_source_to_drifted_instruction_refresh() {
   local root="$TMP_ROOT/run-instruction-refresh" baseline compact_out clear_out resume_out
   make_run_primary "$root"
   printf '%s\n' 'RUN_TIER_AGENTS=original' > "$root/AGENTS.md"
-  run_hook_pi "$root" --source startup </dev/null >/dev/null
-  assert_present "$root/state/.session-start-agents-baseline" \
+  mkdir -p "$root.out"
+  # shellcheck disable=SC2016 # Expand in the pi session shell, not here.
+  pi_session '
+    run_hook_pi "$1" --source startup </dev/null >/dev/null
+    cp "$1/state/.session-start-agents-baseline" "$2/baseline" 2>/dev/null
+    printf "%s\n" RUN_TIER_AGENTS=updated > "$1/AGENTS.md"
+    run_hook_pi "$1" --source compact </dev/null > "$2/compact"
+    run_hook_pi "$1" --source clear </dev/null > "$2/clear"
+    run_hook_pi "$1" --source resume </dev/null > "$2/resume"' "$root" "$root.out"
+  assert_present "$root.out/baseline" \
     "run-tier startup did not record an instruction baseline"
-  baseline=$(cat "$root/state/.session-start-agents-baseline")
-
-  printf '%s\n' 'RUN_TIER_AGENTS=updated' > "$root/AGENTS.md"
-  compact_out=$(run_hook_pi "$root" --source compact </dev/null)
-  clear_out=$(run_hook_pi "$root" --source clear </dev/null)
-  resume_out=$(run_hook_pi "$root" --source resume </dev/null)
+  baseline=$(cat "$root.out/baseline")
+  compact_out=$(cat "$root.out/compact")
+  clear_out=$(cat "$root.out/clear")
+  resume_out=$(cat "$root.out/resume")
 
   assert_contains "$compact_out" "RUN_TIER_AGENTS=updated" \
     "the compact run wrapper did not forward its source to instruction refresh"
@@ -305,7 +329,8 @@ test_run_compact_without_completion_refreshes_before_finishing_startup() {
   make_run_primary "$root"
   printf '%s\n' 'INCOMPLETE_START_AGENTS=current' > "$root/AGENTS.md"
 
-  out=$(run_hook_pi "$root" --source compact </dev/null) || status=$?
+  # shellcheck disable=SC2016 # Expand in the pi session shell, not here.
+  out=$(pi_session 'run_hook_pi "$1" --source compact </dev/null' "$root") || status=$?
   expect_code 0 "$status" "run wrapper compact without completion proof"
   assert_contains "$out" "$FULL_BANNER$root" \
     "compact skipped full startup when no completed startup could be proven"

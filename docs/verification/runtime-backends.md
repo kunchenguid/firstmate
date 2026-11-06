@@ -80,6 +80,28 @@ The portable regression asserts both directions of that case: a host-shaped pid 
 
 Run on the host under Claude Code 2.1.252 with the same two markers set, the same probe reports `claude`, `comm claude`, and Claude's Stop-owned protocol, so the correction does not trade one misidentification for its inverse.
 
+### Ancestry reach across the Codex SessionStart hook
+
+Codex publishes no marker, so its session start digest identifies Codex only if the ancestry walk reaches the native `codex` process from where the hook runs.
+The walk in `bin/fm-harness.sh` examines the probing process plus fifteen parents, the same reach as the session lock walker in `bin/fm-session-lock-lib.sh`.
+Verified on 2026-11-04 with codex-cli 0.166.0 on Linux 6.12.113 (arm64), through the installed `codex app-server` against a loopback model fixture with an isolated `CODEX_HOME`, `HOME`, and lab checkout:
+
+```sh
+bin/fm-test-run.sh tests/fm-codex-hook-layer-live-e2e.test.sh
+```
+
+The tracked SessionStart wrapper ran as `codex app-server` -> `bash -lc` -> `fm-codex-stop-park.sh` -> `fm-sessionstart-run.sh` -> `fm-session-start.sh` -> `timeout` -> `bash -c` -> `fm-session-start.sh` -> `fm-session-start.sh`, which puts the digest's harness probe nine parents below the native process, the wake drain's probe eleven, and the guard's probe thirteen.
+With an eight-process walk the digest model context read `SUPERVISION OPERATING INSTRUCTIONS - primary harness: unknown`; with the current walk the same run reads:
+
+```text
+ok - codex codex-cli 0.166.0: the SessionStart hook digest detects the installed Codex and renders its protocol
+```
+
+`tests/fm-harness-precedence.test.sh` pins the measured reach portably at depths 1, 7, 9, and 15, with and without a retained `CLAUDECODE`, plus the bound one process beyond it, and `tests/fm-session-start.test.sh` runs the tracked hook command under a renamed `codex` process.
+That run proves the extended reach live for Codex only.
+Claude 2.1.316 and Pi 1.4.0 were installed on the same host, but no live guard exercised their session-open paths under the extended reach, so their live behavior under it is unverified; each publishes a marker, so ancestry is not their only evidence.
+tmux was not installed, so `tests/fm-harness-liveness-drift-live-e2e.test.sh` gate-skipped and refreshed no per-harness process-name evidence here.
+
 ### Real harness process names behind the walk
 
 The detection half of the opt-in drift guard asks the ancestry walk what it makes of each INSTALLED harness's real running process:
@@ -3620,6 +3642,29 @@ Verified on 2026-10-19 with `codex-cli 0.163.0` on macOS arm64 in an isolated na
 The native TUI fired project SessionStart and asynchronous Stop hooks, and `codex queue --thread` delivered input to the embedded `--no-daemon` session.
 [Supervision verification](supervision.md#codex-native-model-free-park-2026-10-19) records the commands, ten-minute provider-call comparison, real check delivery, input interrupt, park-death recovery and native-exit cleanup.
 This verifies the primary-session park, not a worker busy-state classifier or a Codex dialog-mirror writer.
+
+The [minimum-version policy](../configuration.md#codex-native-stop-park-configcodex-stop-park) admits releases beyond those exercised live.
+On 2026-11-05, the following focused checks passed on Linux with installed `codex-cli 0.166.0`:
+
+```sh
+bash bin/fm-test-run.sh tests/fm-codex-stop-park.test.sh tests/fm-codex-hook-layer-live-e2e.test.sh
+```
+
+Selected exact output:
+
+```text
+ok - the park admits numeric releases >=0.163.0 and fails closed on other version output
+codex-cli 0.166.0: Stop parser checked 12 isolated cases with clean wrapper JSON and bounded continuation
+FM_TEST_SUMMARY total=2 failed=0 skipped_gate=0 duration_ms=46017
+```
+
+The portable park suite exercises registration and capability through a compiled harness ancestor, including below-minimum, intermediate, patch, future-major, malformed, prerelease, and failed-probe cases.
+The real installed CLI guard checks hook flags and native Stop response parsing in isolated app-server fixtures; it does not prove a resumed TUI's watcher cycle.
+The CLI emitted a nonfatal stale arg0 cleanup warning (`Cross-device link`) during the guard.
+A separate functional trial on 2026-11-05 with real `codex-cli 0.166.0` completed resumed startup, native queued worker-report delivery, primary handling and acknowledgement, and automatic next-Stop rearm.
+That trial included the ancestry fix described above, plus additional local cleanup-lock and resume-registration patches absent from this upstream change.
+It validates that local composition on 0.166.0, not the minimum-version comparison alone, every newly admitted release, or long-duration stability.
+The ancestry fix makes the native SessionStart hook reach the Codex process; resume-registration behavior remains unchanged and does not inherit that trial's live resume guarantee.
 
 ## hc
 

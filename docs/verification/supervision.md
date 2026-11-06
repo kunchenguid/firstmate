@@ -1005,8 +1005,8 @@ The retained successful native macOS arm64 Codex CLI 0.163.0 lab sessions record
 This is derived from those no-latch observations, not from measured per-Stop minimum, median or maximum values or a cold-shell latency distribution.
 The retained native rollouts carry no paired hook-start and claim-publication timestamps, so no such measurement is claimed and the wait is not a strict wall-clock guarantee.
 
-The native mode is selected only in a home that opts in with `config/codex-stop-park`, for the verified CLI version and a registered TUI session owning this home's lock.
-Unverified sessions retain the foreground protocol, whose existing live guard remains `FM_CODEX_LIVE_E2E=1 tests/fm-codex-continuity-live-e2e.test.sh`.
+The [Codex native Stop park configuration](../configuration.md#codex-native-stop-park-configcodex-stop-park) owns current opt-in, minimum-version, and native-session selection requirements.
+The foreground protocol's existing live guard remains `FM_CODEX_LIVE_E2E=1 tests/fm-codex-continuity-live-e2e.test.sh`.
 The native proof above was a real adapter smoke; it did not add a test case or modify the foreground live guard.
 `tests/fm-codex-stop-park.test.sh` separately covers the opt-in and version gates, single-flight claim, fallback latch, final-result delivery when supervision ends, owner-gone watcher exit and retained quiet boundary against a fake `codex`.
 [The Codex protocol](../supervision-protocols/codex.md) owns operating instructions; script headers own registration, failure fallback and process ownership.
