@@ -17,6 +17,12 @@
 # from the stored URL and refuses any record whose parts do not reconstruct that
 # exact URL.
 #
+# Registered poll generations bind to their original hashes and file objects,
+# so a repository template update does not invalidate an armed poll. The watcher
+# executes the current repository poll with validated data, never the registered
+# state-file copy. Control relaunch metadata may follow the preserved PR identity
+# fields.
+#
 # A validated exact merged result is retired through a private receipt only
 # after its durable wake is appended.
 # The receipt binds the terminal observation to the canonical registration and
@@ -480,7 +486,8 @@ fm_pr_metadata_identity_parse() {
           fm_pr_head_valid "$value" || post_pr_invalid=1
         fi
         ;;
-      x_request=*|x_request_ts=*|x_followups=*|x_platform=*|x_reply_max_chars=*)
+      control_relaunch_tx=*|x_request=*|x_request_ts=*|x_followups=*|x_platform=*|x_reply_max_chars=*)
+        # Lifecycle and relay fields may be appended after the PR identity.
         ;;
       *)
         [ "$seen_pr" -eq 0 ] || post_pr_invalid=1
@@ -775,7 +782,11 @@ fm_pr_poll_artifacts_content_valid() {
   fm_pr_private_file_valid "$registration" 600 "$state_device" || return 1
   [ -f "$meta" ] && [ ! -L "$meta" ] || return 1
   [ "$(fm_pr_file_link_count "$meta")" = 1 ] || return 1
-  cmp -s "$template" "$check" || return 1
+  # Authenticate the published generation against its registration below, not
+  # against a template that may have changed during a repository update.
+  # The watcher executes this repository's current poll with validated data;
+  # it never executes the registered state-file bytes.
+  [ -f "$template" ] && [ ! -L "$template" ] || return 1
   fm_pr_poll_data_parse "$data" || return 1
   data_hash=$(fm_pr_sha256 "$data") || return 1
   template_hash=$(fm_pr_sha256 "$check") || return 1
@@ -799,7 +810,7 @@ fm_pr_poll_artifacts_content_valid() {
 # A registration armed before a volume remount can name a device number the
 # kernel has since reassigned (fm_pr_file_identity). This proves that is the
 # only difference: every artifact passes fm_pr_poll_artifacts_content_valid, so
-# the check is byte-identical to the template, both hashes match, and the three
+# both hashes match the registered generation, and the three
 # poll artifacts are private, single-link, and on the state directory's live
 # device; both recorded identities name one device; each recorded inode equals
 # its live inode; and that recorded device differs from the live one. A

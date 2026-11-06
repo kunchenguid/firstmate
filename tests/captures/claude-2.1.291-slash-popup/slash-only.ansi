@@ -1,0 +1,9 @@
+[0m[38;2;136;136;136m──────────────────────────────────────────────────────────────────────────────────────────────[0m
+❯ /
+[0m[38;2;136;136;136m──────────────────────────────────────────────────────────────────────────────────────────────[0m
+  [0m[38;2;177;185;249m❯ /no-mistakes                         Validate your code changes through the no-mistakes[0m
+                                         [0m[38;2;177;185;249mpipeline - automated code review, tests, lint, doc…[0m
+  [0m[38;2;153;153;153m  /handoff                             Compact the current conversation into a handoff[0m
+                                         [0m[38;2;153;153;153mdocument for another agent to pick up. (user)[0m
+  [0m[38;2;153;153;153m  /dataviz                             Use this skill whenever you are about to create ANY[0m
+                                         [0m[38;2;153;153;153mchart, graph, plot, dashboard, or data visualizati…[0m
