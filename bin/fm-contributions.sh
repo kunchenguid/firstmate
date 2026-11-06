@@ -131,6 +131,8 @@
 # config/contribution-reraise-interval, or FM_CONTRIBUTIONS_REPLY_AGE is
 # set; 0 or off disables), even if an earlier signal was acknowledged; ack
 # restarts the snooze until the next interval from the acknowledgement.
+# Review thread reminders keep their own snooze, so they never delay this
+# pull request comment reminder.
 # A verdict recording actor nobody (e.g. thanks-only) for that comment clears
 # it. The condition clears automatically once we reply or push after it (push
 # evidence tied to this pull request's head sha changing). The wake text names
