@@ -1871,10 +1871,8 @@ SH
     FM_TEST_CHECK_TIMEOUT=1 FM_CHECK_FORCE_FALLBACK="$force_fallback" \
       run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/watch.out" 2> "$dir/watch.err" || rc=$?
     [ "$rc" -eq 0 ] || fail "$backend watcher did not stop on the timed-out check (rc=$rc): $(cat "$dir/watch.err")"
-    grep -qxF "check: $state/custom.check.sh: finding before the cut" "$dir/watch.out" \
-      || fail "$backend watcher dropped output printed before the timeout: $(cat "$dir/watch.out")"
-    grep -qxF 'timed out after 1s' "$dir/watch.out" \
-      || fail "$backend watcher kept a timed-out check silent: $(cat "$dir/watch.out")"
+    grep -qxF "check: $state/custom.check.sh: finding before the cut timed out after 1s" "$dir/watch.out" \
+      || fail "$backend watcher dropped earlier output or the timeout from its one wake line: $(cat "$dir/watch.out")"
     ! grep -qF 'finding after the cut' "$dir/watch.out" || fail "$backend watcher let the check run past its timeout"
   done
   pass "a timed-out custom check surfaces its timeout and earlier output on installed and fallback timeout paths"
