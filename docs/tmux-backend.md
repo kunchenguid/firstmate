@@ -68,6 +68,7 @@ Cortex is anchored to the exact `cortex` identity for the same reason.
 Hermes uses anchored native TUI script or Python module argv through `bin/fm-hermes-process-lib.sh`; [Hermes verification](verification/hermes.md) owns the current process and composer evidence.
 An unrelated tool that ships a binary named exactly `cortex` is still classified as an agent when it is a pane's foreground process, because the exact name is the only identity Cortex Code carries.
 Kiro is anchored to the exact `kiro-cli` foreground identity for the same reason (its toolbox/aim-sandbox wrapper is the foreground process, with the compiled binary a descendant), so unrelated names containing that fragment remain ambiguous.
+Bob is identified from its installed entry script through `bin/fm-bob-process-lib.sh`, because its foreground process is a bare node bundle; a bare `node` running anything else remains ambiguous.
 Cursor is identified from its exact `cursor-agent` identity or versioned install tree in the foreground process path or structured argv[0]; a bare `node` or unrelated `agent` remains ambiguous.
 
 The CI-enforced portable regression and opt-in real-harness drift guard follow the split owned by `.agents/skills/firstmate-coding-guidelines/SKILL.md`.
@@ -81,7 +82,8 @@ Since OpenCode 1.18.0 its left bar also draws the working directory and branch r
 OpenCode 1.19.0 draws its mode/model footer row de-emphasised, so the classifier proves that footer from both the ghost-stripped and the ANSI-stripped form of the row; the dated capture and the plain-form safety argument are in [runtime backend verification](verification/runtime-backends.md#2026-10-14-opencode-1190-de-emphasised-modefooter-row-in-the-left-bar-composer).
 Real text in an identified shape is pending, while only positively proven emptiness reads empty.
 A blank or otherwise unidentified cursor row is `unknown` and every consumer defers, except that a foreground process proven to be Cursor or Cortex is re-read cursorlessly because each parks its terminal cursor below its footer.
-That identity-gated exception preserves the strict container-proof rule for every other pane, so a modal dialog, a dead shell between stale rules, or a mid-redraw pane is never an injection target.
+A caller that names the harness bob reads cursorlessly only while the cursor is hidden; the [Bob adapter reference](../.agents/skills/harness-adapters/references/harness/bob.md) owns why.
+Those identity-gated exceptions preserve the strict container-proof rule for every other pane, so a modal dialog, a dead shell between stale rules, or a mid-redraw pane is never an injection target.
 The shared classifier accepts a shell glyph as an empty agent composer only inside a bordered container.
 A bare shell prompt is `unknown`, so away-mode escalation is never injected into a dead shell.
 

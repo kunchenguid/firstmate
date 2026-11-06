@@ -80,6 +80,63 @@ The portable regression asserts both directions of that case: a host-shaped pid 
 
 Run on the host under Claude Code 2.1.252 with the same two markers set, the same probe reports `claude`, `comm claude`, and Claude's Stop-owned protocol, so the correction does not trade one misidentification for its inverse.
 
+### Bob session identity and session lock
+
+Bob (IBM Bob CLI) publishes `BOB_SESSION=1` and runs as a node bundle that sets no process title, so harness detection and the session lock need different evidence.
+Verified on 2026-11-03 with Bob 2.0.9 on Node v24.21.0, Linux 6.18 (WSL2), against a live interactive Bob session.
+The installed entry script `@ibm/bob/dist/bob.js` sets `process.env.BOB_SESSION="1"` inside the session process at runtime, so tool subprocesses inherit it while the session's own `/proc/<pid>/environ` shows only `BOB_SUPERVISED=1`.
+Its supervisor parent strips `BOB_SESSION` and starts the session with `BOB_SUPERVISED=1`.
+Both long-lived processes report `comm=MainThread`, with `node <prefix>/bin/bob ...` as the supervisor's command line and `<prefix>/bin/node <prefix>/bin/bob ...` as the session's, where `<prefix>/bin/bob` is npm's symlink to the entry script.
+
+`bin/fm-bob-process-lib.sh` identifies the process by that entry script for `bin/fm-harness.sh`, the session lock, and pane liveness, so a Bob session started beneath another harness keeps its own identity.
+Bob has no primary supervision protocol: a session started on it resolves the generic fallback, and `bob` is no supervision-branch pin.
+Asked about the two live Bob processes, the lock's process matcher reported:
+
+```text
+parent commit:  supervisor -> no-match ; session -> no-match
+this change:    supervisor -> match    ; session -> match
+```
+
+Verified on 2026-11-04 with Bob 2.0.6 on Node v24.22.1, Linux 7.2, where the package is `bobshell/dist/bob.js` behind a `~/.local/bin/bob` symlink.
+A real `UserPromptSubmit` hook subprocess reported:
+
+```text
+BOB_SESSION=1 BOB_SUPERVISED=1
+bob
+comm bob
+```
+
+A full ship spawn on that version, under `de_DE`, read the brief through the delivered pointer, committed its file, reported done, and closed its turn through the hook record:
+
+```text
+v1 gen=g1793830393.375908.32687 seq=3 state=idle source=bob-hook event=stop ts=1793830416
+done [at=1793830412]: ready in branch fm/bob-full-1
+```
+
+A `fm-harness.sh` run as a real worker tool call printed `bob`, and `bin/fm-control.sh <id> interrupt` ended a running `sleep 90` tool call while the busy record stayed `busy`, the documented consequence of `Stop` not firing on Escape.
+
+The portable regressions pin the matcher with real processes and no installed Bob, and the live guard refreshes the rendered and process facts for the installed version:
+
+```sh
+bin/fm-test-run.sh tests/fm-harness-precedence.test.sh
+bash tests/fm-session-lock-ancestry.test.sh
+FM_BOB_SIGNALS_LIVE=1 tests/fm-bob-signals-live-e2e.test.sh
+```
+
+```text
+ok - Bob's marker names bob only when no nearer marker or structural ancestor does
+ok - a Bob session beneath codex keeps its own identity
+ok - session-lock: a bob session is identified from its installed entry script, never from MainThread alone
+ok - session-lock e2e: a bob session acquires the lock and an unrelated MainThread script does not
+ok - bob 2.0.6 under LANG=de_DE.UTF-8: composer, cursor and prompt hook
+ok - bob 2.0.6: a real subprocess resolves bob by marker and by ancestry
+ok - bob 2.0.6: the pane reads alive
+ok - bob 2.0.6: /exit returns to the shell
+ok - bob 2.0.6 under LANG=en_US.UTF-8: composer, cursor and prompt hook
+```
+
+The end-to-end case runs a real process the kernel names `MainThread` executing a fixture install tree through npm's relative launcher symlink, and the real `bin/fm-lock.sh` acquires the lock for it; the same tree with an unrelated script named `bob` is refused with `cannot locate harness process in ancestry`.
+
 ### Real harness process names behind the walk
 
 The detection half of the opt-in drift guard asks the ancestry walk what it makes of each INSTALLED harness's real running process:
@@ -1989,8 +2046,8 @@ Real captures verified these active distinctions:
 - Pi uses content between complete separator rows and requires exact native Pi identity.
 - Dim or faint suggestion text is ghost content, while normally styled text is pending input.
 - Grok dark truecolor placeholders are ghost content, while bright truecolor typed input remains pending.
-- On a kiro pane only, a near-achromatic truecolor run up to `FM_COMPOSER_GHOST_GRAY_LUMA_MAX` is ghost content, while a chromatic glyph at similar luminance stays real; every other harness keeps the shared ceiling, so Claude's grey slash-command input stays typed input.
-- On a kiro pane only, a 256-colour index is luminance-tested as ghost content inside the 232-255 greyscale ramp, whose RGB is fixed by definition; every other index, and every index on another harness, is not tested at all.
+- On a kiro or bob pane only, a near-achromatic truecolor run up to `FM_COMPOSER_GHOST_GRAY_LUMA_MAX` is ghost content, while a chromatic glyph at similar luminance stays real; every other harness keeps the shared ceiling, so Claude's grey slash-command input stays typed input.
+- On a kiro or bob pane only, a 256-colour index is luminance-tested as ghost content inside the 232-255 greyscale ramp, whose RGB is fixed by definition; every other index, and every index on another harness, is not tested at all.
 - On a real Herdr 0.9.5 pane running kiro-cli 2.35.1, the idle composer reads `empty` when the caller names `kiro` and `pending` otherwise, so the harness must be named for every kiro composer read; [Kiro CLI adapter verification](kiro.md#2026-10-29-re-verification-on-kiro-cli-2351) owns the run.
 - A bare shell prompt has no safe agent-composer container and is unknown.
 - Codex 0.154's idle braille starfield rows are composer furniture, with the dated Herdr evidence and refresh command in [Composer classification matrix](#composer-classification-matrix).

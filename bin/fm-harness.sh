@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Detect the agent harness this process tree runs on.
-# Usage: fm-harness.sh                  print own harness: claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|gemini|muse|rovo|omp|agy|devin|commandcode|polytoken|cortex|kiro|hermes|unknown
+# Usage: fm-harness.sh                  print own harness: claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|gemini|muse|rovo|omp|agy|devin|commandcode|polytoken|cortex|kiro|hermes|bob|unknown
 #        fm-harness.sh crew             print the effective CREWMATE harness
 #                                        (config/crew-harness; "default" resolves to own)
 #        fm-harness.sh secondmate [id]  print the harness the PRIMARY uses to launch
@@ -81,6 +81,8 @@ CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 . "$SCRIPT_DIR/fm-gemini-lib.sh"
 # shellcheck source=bin/fm-hermes-process-lib.sh
 . "${SCRIPT_DIR:-/}/fm-hermes-process-lib.sh"
+# shellcheck source=bin/fm-bob-process-lib.sh
+. "${SCRIPT_DIR:-/}/fm-bob-process-lib.sh"
 
 # Print the harness named by a verified environment marker, or nothing when no
 # marker is present. Markers only report what the environment CLAIMS; detect_own
@@ -141,6 +143,14 @@ harness_marker() {
     if [ "${FM_PI_HARNESS:-}" = pi-signed ]; then echo pi-signed; else echo pi; fi
     return
   fi
+  # Bob (IBM Bob CLI) sets BOB_SESSION=1 in its own session process at runtime,
+  # so every tool subprocess inherits it while /proc/<pid>/environ of the session
+  # does not show it; its supervisor parent strips it and sets BOB_SUPERVISED=1
+  # instead (verified, bob 2.0.9). It sits after claude and pi deliberately: a
+  # claude or pi worker launched from a bob session inherits BOB_SESSION, and pi
+  # is not always visible to the ancestry walk. harness_process_verdict
+  # identifies the bob process itself from its entry script.
+  [ "${BOB_SESSION:-}" = "1" ] && { echo bob; return; }
   # grok set GROK_AGENT=1 for its child/tool processes (verified, grok 0.2.73).
   # It does NOT set CLAUDECODE despite being Claude-Code-compatible, so the marker
   # is unambiguous WHEN PRESENT - but it is not guaranteed present. A grok 1.0.0
@@ -200,6 +210,13 @@ harness_process_verdict() {  # <pid>
   args=$(ps -o args= -p "$pid" 2>/dev/null) || args=
   if fm_hermes_process_matches "$args" "$pid"; then
     echo "comm hermes"
+    return
+  fi
+  # Bob is a node bundle Linux reports as MainThread, which the case below cannot
+  # name. Its entry script is a structural fact, so a Bob session started under
+  # another harness stops the walk here instead of naming its launcher.
+  if fm_bob_process_matches "$comm" "$args"; then
+    echo "comm bob"
     return
   fi
   case "$(basename -- "$comm")" in

@@ -401,8 +401,9 @@ HARNESS=$(fm_control_harness_family "$RECORDED_HARNESS") \
   || die "task $ID records harness '${RECORDED_HARNESS:-none}', which has no verified control mechanics; fm-control refuses to guess an interrupt key or exit command"
 fm_control_harness_supported "$HARNESS" \
   || die "task $ID records harness '${RECORDED_HARNESS:-none}', which has no verified control mechanics; fm-control refuses to guess an interrupt key or exit command"
-# The recorded harness scopes the kiro-only composer rules for every composer
-# read this control action makes (fm_composer_kiro_scope in bin/fm-composer-lib.sh).
+# The recorded harness scopes the harness-only composer rules for every composer
+# read this control action makes (fm_composer_kiro_scope and fm_composer_gray_scope
+# in bin/fm-composer-lib.sh).
 # shellcheck disable=SC2034
 FM_COMPOSER_HARNESS=$HARNESS
 
@@ -1106,6 +1107,14 @@ resolve_relaunch_profile() {
     fm_control_harness_wiring_paths "$PRIOR_HARNESS" "$WT" "$STATE" "$ID" "$KIND" \
         | grep -qxF "$(fm_polytoken_hooks_file "$WT")" \
       || fm_polytoken_require_hooks_free "$WT" || return 1
+  fi
+  # Likewise Bob's launch, wiring, and trust refusals. The launch owner repeats
+  # them, and registering the task's own worktree here is the same idempotent entry.
+  if [ "$TARGET_HARNESS" = bob ]; then
+    fm_control_bob_launch_command >/dev/null || return 1
+    fm_control_bob_require_wiring_free "$WT" "$STATE" "$ID" || return 1
+    "$SCRIPT_DIR/fm-bob-trust.sh" "$WT" "$(fm_meta_get "$META" project)" >/dev/null \
+      || die "could not pre-register Bob workspace trust for $WT; refusing before the current worker stops"
   fi
   # Likewise config/crew-exclude-tools: a malformed file, or a replacement
   # runtime that cannot hide the listed tools, refuses here, before the old

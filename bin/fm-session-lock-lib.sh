@@ -25,6 +25,8 @@ _FM_SESSION_LOCK_LIB_DIR=${BASH_SOURCE[0]%/*}
 [ "$_FM_SESSION_LOCK_LIB_DIR" != "${BASH_SOURCE[0]}" ] || _FM_SESSION_LOCK_LIB_DIR=.
 # shellcheck source=bin/fm-cursor-lib.sh
 . "${_FM_SESSION_LOCK_LIB_DIR:-/}/fm-cursor-lib.sh"
+# shellcheck source=bin/fm-bob-process-lib.sh
+. "${_FM_SESSION_LOCK_LIB_DIR:-/}/fm-bob-process-lib.sh"
 unset _FM_SESSION_LOCK_LIB_DIR
 
 # Known harness command names; extend when a new adapter is verified. omp and
@@ -104,8 +106,9 @@ fm_ps_ppid() {  # <pid> -> parent pid
 #      argv[0] in `ps -o comm=`, while procps on Linux reports the kernel exec
 #      name and ignores argv[0] entirely, so a version-named Claude Code binary
 #      is identified by its install path on macOS and by argv[0] on Linux.
-#   3. a bare interpreter (node, python) running a harness script path.
-#   4. Cursor's own structural identity, owned by bin/fm-cursor-lib.sh.
+#   3. Bob's installed entry script (bin/fm-bob-process-lib.sh).
+#   4. a bare interpreter (node, python) running a harness script path.
+#   5. Cursor's own structural identity, owned by bin/fm-cursor-lib.sh.
 FM_HARNESS_IS_CLAUDE=0
 fm_harness_process_matches() {  # <comm> <args>
   local comm=$1 args=$2 base argv0 name
@@ -120,6 +123,9 @@ fm_harness_process_matches() {  # <comm> <args>
     case "$name" in claude) FM_HARNESS_IS_CLAUDE=1 ;; esac
     return 0
   fi
+  # Bob: tested before the interpreter arm so a foreign harness word elsewhere
+  # in a bob command line can never claim it.
+  fm_bob_process_matches "$comm" "$args" && return 0
   # Bare interpreter (e.g. node): match the harness name in its script path.
   case "$comm" in
     *node*|*python*)

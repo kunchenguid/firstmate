@@ -585,6 +585,7 @@
 #                  generated firstmate-worker facet (the project facet layer)
 #     __KIROBIN__   resolved, kiro-verified executable for a kiro launch
 #     __KIROHOME__  firstmate-owned per-task KIRO_HOME dir (hook agent config + trust setting)
+#     __BOBLAUNCH__ absolute command that starts Bob (fm_control_bob_launch_command)
 # Verified per-harness turn-end hooks are installed automatically where enabled; some live outside the worktree.
 # A --secondmate launch arms the same semantic busy contract (bin/fm-busy-lib.sh) in THIS
 # parent home for claude, opencode, pi, pi-signed, and omp, so the parent's active-turn
@@ -619,7 +620,7 @@
 # plus a gitignored .fm-grok-turnend worktree pointer and a state token.
 # muse installs no hook at all - its plugin engine is off in the default build - so
 # it writes state/<id>.muse-session to bind the pane to muse's own session event
-# log; muse, gemini, devin, commandcode, cortex, and kiro are crewmate/scout only and are refused for --secondmate.
+# log; muse, gemini, devin, commandcode, cortex, kiro, and bob are crewmate/scout only and are refused for --secondmate.
 # rovo installs no hook either - its eventHooks fire at tool granularity only,
 # never turn-end - so it carries no busy-source wiring at all and no turn-end
 # hook. A positional brief is dead-on-arrival (rovo loads, never works, and drops
@@ -650,6 +651,19 @@
 # chat.disableTrustAllConfirmation into that per-task home's settings. kiro is
 # crewmate/scout only and refused for --secondmate. The kiro-hook record is its
 # only busy-state source (bin/fm-busy-lib.sh).
+# bob (IBM Bob CLI) is also claude-shaped for hooks: its workspace hooks live in
+# the worktree's .bob/settings.json (UserPromptSubmit opens a turn; Stop closes
+# it and keeps the turn-ended notification touch). Workspace hooks are only loaded
+# in trusted folders, so the spawn pre-registers the worktree in Bob's own trust
+# store through bin/fm-bob-trust.sh before launch and refuses a failed registration
+# rather than launching a worker whose --auto-approve and hooks would be silently
+# suppressed. Bob has no --model or --effort flag (both axes record-only). Its
+# brief cannot ride the launch command (bob chat has no positional prompt arg), so
+# it launches bare and receives a per-launch pointer to an in-worktree brief copy
+# after the TUI attaches, through the same gate shape as kimi and rovo. BOB_SESSION=1 is
+# stripped: the Bob source throws on a nested session (verified, bob 2.0.9). The
+# bob-hook record is its only busy-state source (bin/fm-busy-lib.sh). bob is
+# crewmate/scout only and is refused for --secondmate.
 # cursor installs no per-task hook either: it writes state/<id>.cursor-session to
 # bind the pane to cursor's own conversation transcript (projects root, the exact
 # workspace path cursor records in .workspace-trusted, and the conversations that
@@ -2099,11 +2113,13 @@ clear_relaunch_harness_wiring() {
   fi
   while IFS= read -r path; do
     [ -n "$path" ] || continue
-    if [ "$harness" = polytoken ]; then
-      case "$path" in
-        "$wt"/*) git -C "$wt" ls-files --error-unmatch -- "$path" >/dev/null 2>&1 && continue ;;
-      esac
-    fi
+    case "$harness" in
+      polytoken | bob)
+        case "$path" in
+          "$wt"/*) git -C "$wt" ls-files --error-unmatch -- "$path" >/dev/null 2>&1 && continue ;;
+        esac
+        ;;
+    esac
     rm -f -- "$path" || return 1
   done <<EOF
 $(fm_control_harness_wiring_paths "$harness" "$wt" "$state" "$id" "$kind")
@@ -2630,7 +2646,7 @@ if [ "$RELAUNCH" -eq 1 ]; then
   }
 elif [ "$KIND" = secondmate ]; then
   case "${POS[1]:-}" in
-  '' | claude | codex | opencode | pi | pi-signed | grok | kimi | cursor | gemini | muse | rovo | omp | agy | devin | commandcode | polytoken | cortex | kiro | hermes)
+  '' | claude | codex | opencode | pi | pi-signed | grok | kimi | cursor | gemini | muse | rovo | omp | agy | devin | commandcode | polytoken | cortex | kiro | hermes | bob)
     ARG3=${POS[1]:-}
     ;;
   *' '*)
@@ -3001,6 +3017,21 @@ launch_template() {
   # launcher. The V2 stop hook is a real turn-end pair, so busy state is armed
   # below (unlike agy's screen-scrape-only fallback).
   kiro) printf '%s' 'env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS KIRO_HOME=__KIROHOME__ __KIROBIN__ chat --agent-engine v2 --agent firstmate __MODELFLAG____EFFORTFLAG__--trust-all-tools "$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
+  # bob (IBM Bob CLI): bob chat --auto-approve --trust --workspace starts a supervised
+  # interactive session. The brief cannot ride the launch command (bob chat has no
+  # positional prompt arg), so it is delivered after the TUI attaches through the
+  # readiness and delivery gates, same as kimi and rovo.
+  # --auto-approve auto-approves tool executions when safety rules allow. --trust
+  # persists the worktree path as trusted in ~/.bob/trustedFolders.json, which is
+  # required for --auto-approve to take effect (silently suppressed in untrusted
+  # folders). BOB_SESSION=1 is stripped: the Bob source throws on a nested session
+  # (verified, bob 2.0.9). Bob has no --model or --effort flag (both axes record-only).
+  # Turn-end and busy-state hooks ride a firstmate-owned per-task settings file written
+  # to __WORKTREE__/.bob/settings.json before launch (workspace-scoped hooks require a
+  # trusted folder, which --trust and fm-bob-trust.sh ensure before launch). The
+  # foreign primary markers are cleared because Bob does not clear an inherited
+  # CLAUDECODE, and bin/fm-harness.sh must not read a bob worker as its launcher.
+  bob) printf '%s' 'env -u BOB_SESSION -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS __BOBLAUNCH__ chat --auto-approve --trust --workspace __WORKTREE__' ;;
   # grok (Grok Build TUI): a positional prompt starts the supervised interactive
   # session. --always-approve auto-approves every tool execution (verified: the
   # crewmate runs fully autonomously, no permission gate), which an unattended
@@ -3217,7 +3248,7 @@ case "$ARG3" in
   ;;
 esac
 
-# muse, gemini, devin, commandcode, polytoken, cortex, and kiro are verified as CREWMATE/SCOUT adapters only. A secondmate is
+# muse, gemini, devin, commandcode, polytoken, cortex, kiro, and bob are verified as CREWMATE/SCOUT adapters only. A secondmate is
 # a firstmate instance, so it needs a primary supervision protocol.
 # gemini has none: docs/supervision-protocols/ carries no gemini wake protocol
 # and this task verified only crewmate-side launch, busy state, interrupt, and
@@ -3238,7 +3269,11 @@ esac
 # kiro has none either: this task verified only crewmate-side launch, busy state,
 # interrupt, exit, and resume on the V2 engine, and docs/supervision-protocols/
 # carries no kiro wake protocol (kiro-cli 2.21.4).
-if [ "$KIND" = secondmate ] && { [ "$HARNESS" = muse ] || [ "$HARNESS" = gemini ] || [ "$HARNESS" = devin ] || [ "$HARNESS" = commandcode ] || [ "$HARNESS" = polytoken ] || [ "$HARNESS" = cortex ] || [ "$HARNESS" = kiro ] || [ "$HARNESS" = hermes ]; }; then
+# bob has none either: only its crewmate-side launch and workspace-hook busy
+# state are verified, and docs/supervision-protocols/ carries no bob wake protocol
+# (bob 2.0.9). Refusing keeps the gap loud rather than standing up a secondmate
+# whose supervision cycle could never be armed.
+if [ "$KIND" = secondmate ] && { [ "$HARNESS" = muse ] || [ "$HARNESS" = gemini ] || [ "$HARNESS" = devin ] || [ "$HARNESS" = commandcode ] || [ "$HARNESS" = polytoken ] || [ "$HARNESS" = cortex ] || [ "$HARNESS" = kiro ] || [ "$HARNESS" = hermes ] || [ "$HARNESS" = bob ]; }; then
   echo "error: $HARNESS is a verified crewmate/scout adapter only and cannot run a secondmate; it has no primary supervision protocol. Select a harness verified for secondmates." >&2
   exit 1
 fi
@@ -3322,6 +3357,9 @@ cortex)
     echo "error: cortex executable not found on PATH" >&2
     exit 1
   }
+  ;;
+bob)
+  BOB_LAUNCH=$(fm_control_bob_launch_command) || exit 1
   ;;
 pi | pi-signed)
   PI_BIN=$(resolve_pi_executable "$HARNESS") || {
@@ -3839,6 +3877,8 @@ effort_flag_for_harness() {
     # stays in task metadata but never reaches the launch command. Cursor encodes
     # effort in model ids such as cursor-grok-4.5-high, so it also receives no
     # separate effort flag.
+    # bob chat has no --effort or --model flag (verified, bob 2.0.9 --help);
+    # both axes are record-and-omit for bob workers.
   esac
 }
 
@@ -5753,6 +5793,52 @@ rovo_endpoint_cleanup() {
   fm_backend_kill "$BACKEND" "$T" "$tab_id" "fm-$ID" 2>/dev/null && SPAWN_ENDPOINT_CLOSED=1 || true
 }
 
+# bob mirrors rovo's launch-then-send shape: bob chat has no positional prompt,
+# so bob launches bare and takes its brief pointer after the composer is ready.
+# Delivery is confirmed by bob's own UserPromptSubmit hook record (the prompt
+# reached Bob) or by this launch's pointer sitting in the transcript above an
+# empty composer. The pointer opens with the busy generation so a relaunch into
+# the same pane never reads the previous incarnation's pointer as this one's.
+bob_capture() {
+  fm_backend_capture "$BACKEND" "$T" 120 "$W" 2>/dev/null || true
+}
+
+bob_composer_is_empty() {
+  [ "$(FM_COMPOSER_HARNESS=bob fm_backend_composer_state "$BACKEND" "$T" "$W" 2>/dev/null)" = empty ]
+}
+
+bob_wait_for_ready() {
+  local i=0 max=${FM_BOB_READY_POLLS:-60} interval=${FM_BOB_POLL_INTERVAL:-0.5}
+  while [ "$i" -lt "$max" ]; do
+    bob_composer_is_empty && return 0
+    i=$((i + 1))
+    [ "$i" -ge "$max" ] || sleep "$interval"
+  done
+  return 1
+}
+
+bob_delivery_is_confirmed() {
+  case "$(fm_busy_classify "$BACKEND" "$T" bob "$ID" "$STATE_REAL" 2>/dev/null)" in
+    'busy bob-hook' | 'idle bob-hook') return 0 ;;
+  esac
+  bob_composer_is_empty || return 1
+  bob_capture | grep -Fq "Brief $BUSY_GEN:"
+}
+
+bob_wait_for_delivery() {
+  local i=0 max=${FM_BOB_DELIVERY_POLLS:-40} interval=${FM_BOB_POLL_INTERVAL:-0.5}
+  while [ "$i" -lt "$max" ]; do
+    bob_delivery_is_confirmed && return 0
+    i=$((i + 1))
+    [ "$i" -ge "$max" ] || sleep "$interval"
+  done
+  return 1
+}
+
+bob_spawn_fail() { # <detail>
+  rovo_spawn_fail "$1"
+}
+
 # OpenCode 2 takes its brief on the launch command (--prompt), but some 2.x
 # releases (2.0.11) only prefill the composer and never submit it, while later
 # ones (2.0.22) submit it on their own. This post-launch gate makes both work:
@@ -6151,6 +6237,23 @@ agy)
     echo "warning: could not pre-register agy workspace trust for $WT; the launch will answer the folder-trust dialog in window $T instead" >&2
   fi
   ;;
+bob)
+  # Bob's workspace hooks (.bob/settings.json) are silently skipped in untrusted
+  # folders, and --auto-approve is silently suppressed without trust: both are
+  # required for an unattended crewmate, so a failed trust registration is fatal
+  # here, unlike agy where the post-launch gate can answer the dialog as a
+  # backstop. bin/fm-bob-trust.sh owns the structural scope test and refuses
+  # anything outside the isolated worktree; the refusal blocks the spawn rather
+  # than launching a worker with silent suppression of approval and hooks.
+  fm_control_bob_require_wiring_free "$WT" "$STATE" "$ID" || {
+    echo "error: refusing to launch a bob worker; $(spawn_endpoint_hint)" >&2
+    exit 1
+  }
+  if ! "$FM_ROOT/bin/fm-bob-trust.sh" "$WT" "$PROJ_ABS" >/dev/null; then
+    echo "error: could not pre-register Bob workspace trust for $WT; refusing to launch a bob worker whose --auto-approve and workspace hooks would be silently suppressed; $(spawn_endpoint_hint)" >&2
+    exit 1
+  fi
+  ;;
 esac
 
 # Per-task temp root: /tmp/fm-<id>/ with Go's build temp nested at gotmp/. Go won't
@@ -6407,7 +6510,7 @@ BUSY_GEN=
     }
     [ "$RELAUNCH" -ne 1 ] || RELAUNCH_REPLACEMENT_BUSY_GEN=$BUSY_GEN
     ;;
-  gemini | devin | commandcode | polytoken | cortex | kiro | hermes)
+  gemini | devin | commandcode | polytoken | cortex | kiro | hermes | bob)
     if [ "$RAW_LAUNCH" -eq 0 ]; then
       BUSY_GEN=$("$FM_ROOT/bin/fm-busy-event.sh" arm "$STATE_REAL" "$ID") || {
         echo "error: failed to arm the busy-state contract for $ID" >&2
@@ -6605,6 +6708,50 @@ EOF
       cat >"$KIRO_HOME_DIR/agents/firstmate.json" <<EOF
 {"name":"firstmate","description":"Firstmate per-task crewmate agent (busy-state and turn-end hooks)","tools":["*"],"allowedTools":["*"],"hooks":{"userPromptSubmit":[{"command":"$(json_escape "$k_submit")"}],"stop":[{"command":"$(json_escape "$k_stop")"}]}}
 EOF
+    fi
+    ;;
+  bob)
+    if [ "$RAW_LAUNCH" -eq 0 ]; then
+      # Semantic busy-state hooks (bin/fm-busy-lib.sh): UserPromptSubmit opens a
+      # turn; Stop closes it, with Stop also keeping the turn-ended NOTIFICATION
+      # touch for the watcher. Bob's hook schema is Claude-shaped:
+      # { "hooks": { "Event": [{ "hooks": [{ "type": "command", "command": "..." }] }] } }
+      # Hooks are written into the worktree's .bob/settings.json (the workspace-
+      # scoped layer). Bob merges hook arrays across its two settings layers
+      # (global ~/.bob/settings/settings.json + workspace .bob/settings.json), so
+      # the user's global hooks still run alongside firstmate's. A project that
+      # tracks its own .bob/settings.json or .bob/launch-brief.md, or links .bob elsewhere, is refused before launch (see the bob
+      # trust step), so this write never replaces committed settings. The
+      # workspace layer is only loaded in trusted folders; fm-bob-trust.sh and --trust on the launch command both
+      # ensure the folder is trusted before hooks are needed.
+      # Bob has no StopFailure or SessionEnd equivalent in its documented hook
+      # surface (verified, bob 2.0.9), so Stop is the only turn-close hook.
+      # Stop does NOT fire on a manual Escape interrupt (same as kiro's stop),
+      # so fm-control preserves the adapter-owned record there.
+      # Each hook command tolerates a refused event (|| true) so a stale-gen
+      # writer can never break Bob's own lifecycle.
+      busy_cmd_prefix="$(shell_quote "$FM_ROOT/bin/fm-busy-event.sh") apply $(shell_quote "$STATE_REAL") $(shell_quote "$ID")"
+      busy_suffix="--gen $(shell_quote "$BUSY_GEN") --source bob-hook"
+      stop_turnend=
+      if [ "$busy_notify_turnend" = true ]; then
+        stop_turnend="touch $(shell_quote "$TURNEND"); "
+      fi
+      j_submit=$(json_escape "$busy_cmd_prefix busy $busy_suffix --event user-prompt-submit 2>/dev/null || true")
+      j_stop=$(json_escape "${stop_turnend}$busy_cmd_prefix idle $busy_suffix --event stop 2>/dev/null || true")
+      mkdir -p "$WT/.bob"
+      printf '{"hooks":{"UserPromptSubmit":[{"hooks":[{"type":"command","command":"%s"}]}],"Stop":[{"hooks":[{"type":"command","command":"%s"}]}]}}\n' \
+        "$j_submit" "$j_stop" >"$WT/.bob/settings.json"
+      exclude_path '.bob/settings.json'
+      # Bob blocks file reads outside its workspace by default
+      # (approval.outsideWorkspaceAllowed=false, and the workspace settings layer
+      # does not override it, verified live against bob 2.0.9), so the brief
+      # pointer cannot name the launch-brief under FM_HOME/data. Hand Bob an
+      # in-workspace copy, kept out of git like the hook file.
+      cp -- "$BRIEF_REAL" "$WT/.bob/launch-brief.md" || {
+        echo "error: could not place the bob brief copy at $WT/.bob/launch-brief.md; $(spawn_endpoint_hint)" >&2
+        exit 1
+      }
+      exclude_path '.bob/launch-brief.md'
     fi
     ;;
   opencode*)
@@ -7500,6 +7647,7 @@ cortex)
   LAUNCH=${LAUNCH//__CORTEXPLUGIN__/"$(shell_quote "$STATE_REAL/$ID.cortex-plugin")"}
   ;;
 agy) LAUNCH=${LAUNCH//__AGYBIN__/"$(shell_quote "$AGY_BIN")"} ;;
+bob) LAUNCH=${LAUNCH//__BOBLAUNCH__/"$BOB_LAUNCH"} ;;
 opencode)
   # The resolved absolute path probed for the version gate above, so the pane
   # runs exactly the binary whose major was recorded. An unresolved executable
@@ -7553,7 +7701,7 @@ case "$LAUNCH" in
   ;;
 esac
 case "$HARNESS" in
-claude | codex | opencode | pi | pi-signed | grok | kimi | gemini | muse | rovo | agy | devin | commandcode | cortex | kiro | hermes)
+claude | codex | opencode | pi | pi-signed | grok | kimi | gemini | muse | rovo | agy | devin | commandcode | cortex | kiro | hermes | bob)
   LAUNCH="env -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GEMINI_CLI $LAUNCH"
   ;;
 esac
@@ -8049,6 +8197,27 @@ if [ "$HARNESS" = rovo ]; then
   fi
   if ! rovo_wait_for_delivery; then
     rovo_spawn_fail "rovo brief pointer delivery was not confirmed in window $T"
+    exit 1
+  fi
+fi
+if [ "$HARNESS" = bob ] && [ "$RAW_LAUNCH" -eq 0 ]; then
+  if ! bob_wait_for_ready; then
+    bob_spawn_fail "bob did not show a verified ready signal before brief delivery in window $T"
+    exit 1
+  fi
+  BOB_POINTER="Brief $BUSY_GEN: read $WT/.bob/launch-brief.md and follow it exactly."
+  BOB_SUBMIT_RETRIES=${FM_BOB_SUBMIT_RETRIES:-3}
+  BOB_SUBMIT_SLEEP=${FM_BOB_SUBMIT_SLEEP:-${FM_BOB_POLL_INTERVAL:-0.5}}
+  BOB_SUBMIT_SETTLE=${FM_BOB_SUBMIT_SETTLE:-0}
+  if ! BOB_SUBMIT_VERDICT=$(FM_COMPOSER_HARNESS=bob fm_backend_send_text_submit \
+    "$BACKEND" "$T" "$BOB_POINTER" "$BOB_SUBMIT_RETRIES" \
+    "$BOB_SUBMIT_SLEEP" "$BOB_SUBMIT_SETTLE" "$W") ||
+    [ "$BOB_SUBMIT_VERDICT" = send-failed ]; then
+    bob_spawn_fail "bob brief pointer could not be submitted into window $T"
+    exit 1
+  fi
+  if ! bob_wait_for_delivery; then
+    bob_spawn_fail "bob brief pointer delivery was not confirmed in window $T"
     exit 1
   fi
 fi

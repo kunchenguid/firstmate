@@ -789,6 +789,80 @@ SH
   pass "fm-control relaunch: a refused polytoken profile leaves the running agent untouched"
 }
 
+# A bob refusal the launch owner would reach only after the stop must fire here,
+# while the running agent and its record are untouched.
+expect_bob_relaunch_refused() {  # <case-dir> <id> <expected-refusal>
+  local dir=$1 id=$2 out rc=0
+  out=$(run_control "$dir" "$id" relaunch --harness bob --note "switching runtime") || rc=$?
+  [ "$rc" -ne 0 ] || fail "a relaunch onto bob must refuse: $3"$'\n'"$out"
+  assert_contains "$out" "$3" "the refusal must name its cause"$'\n'"$out"
+  [ -z "$(cat "$dir/fake/literal")" ] || fail "a refused relaunch onto bob must send nothing"
+  [ "$(cat "$dir/fake/command")" = claude ] || fail "a refused relaunch onto bob must not stop the agent"
+  [ "$(meta_field "$dir" "$id" harness)" = claude ] || fail "a refused relaunch onto bob must keep the prior record"
+}
+
+test_refused_relaunch_onto_bob_leaves_the_running_agent() {
+  local dir file
+  for file in settings.json launch-brief.md; do
+    dir=$(new_case bobtracked rl90)
+    add_ship_task "$dir" rl90 claude
+    mkdir -p "$dir/wt/.bob"
+    printf 'project content\n' > "$dir/wt/.bob/$file"
+    git -C "$dir/wt" add ".bob/$file"
+    git -C "$dir/wt" -c user.email=t@t -c user.name=t commit -q -m "project bob file"
+    fm_fake_exit0 "$dir/fakebin" bob
+    expect_bob_relaunch_refused "$dir" rl90 "tracks its own .bob/$file"
+  done
+  dir=$(new_case bobsymlink rl91)
+  add_ship_task "$dir" rl91 claude
+  mkdir -p "$dir/outside"
+  ln -s "$dir/outside" "$dir/wt/.bob"
+  fm_fake_exit0 "$dir/fakebin" bob
+  expect_bob_relaunch_refused "$dir" rl91 "has .bob as a symlink"
+  [ -z "$(ls -A "$dir/outside")" ] || fail "a refused relaunch must not write through the .bob symlink"
+  dir=$(new_case bobtrust rl92)
+  add_ship_task "$dir" rl92 claude
+  mkdir -p "$dir/user-home"
+  printf 'not a directory\n' > "$dir/user-home/.bob"
+  fm_fake_exit0 "$dir/fakebin" bob
+  expect_bob_relaunch_refused "$dir" rl92 "could not pre-register Bob workspace trust"
+  dir=$(new_case bobmissing rl95)
+  add_ship_task "$dir" rl95 claude
+  PATH="${FM_TEST_BASE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}" \
+    expect_bob_relaunch_refused "$dir" rl95 "bob executable not found on PATH"
+  [ ! -e "$dir/user-home/.bob/trustedFolders.json" ] || fail "a refused relaunch must not write a trust entry"
+  pass "fm-control relaunch: bob's executable, wiring, and trust refusals leave the running agent untouched"
+}
+
+test_relaunch_off_bob_retires_its_wiring_and_keeps_a_tracked_copy() {
+  local dir out
+  dir=$(new_case bobretire rl93)
+  add_ship_task "$dir" rl93 bob
+  mkdir -p "$dir/wt/.bob"
+  printf '{}\n' > "$dir/wt/.bob/settings.json"
+  printf 'brief\n' > "$dir/wt/.bob/launch-brief.md"
+  printf 'zsh' > "$dir/fake/command"
+  out=$(run_spawn "$dir" rl93 --relaunch --harness claude)
+  assert_contains "$out" "spawned rl93 harness=claude" "the relaunch off bob should complete"
+  [ ! -e "$dir/wt/.bob/settings.json" ] || fail "retiring bob must remove its hook file"
+  [ ! -e "$dir/wt/.bob/launch-brief.md" ] || fail "retiring bob must remove its brief copy"
+
+  dir=$(new_case bobretiretracked rl94)
+  add_ship_task "$dir" rl94 bob
+  mkdir -p "$dir/wt/.bob"
+  printf 'project settings\n' > "$dir/wt/.bob/settings.json"
+  git -C "$dir/wt" add .bob/settings.json
+  git -C "$dir/wt" -c user.email=t@t -c user.name=t commit -q -m "project bob settings"
+  printf 'brief\n' > "$dir/wt/.bob/launch-brief.md"
+  printf 'zsh' > "$dir/fake/command"
+  out=$(run_spawn "$dir" rl94 --relaunch --harness claude)
+  assert_contains "$out" "spawned rl94 harness=claude" "the relaunch off bob should complete"
+  assert_contains "$(cat "$dir/wt/.bob/settings.json" 2>/dev/null)" "project settings" \
+    "retiring bob must keep the project's tracked copy"
+  [ ! -e "$dir/wt/.bob/launch-brief.md" ] || fail "retiring bob must still remove the untracked brief copy"
+  pass "fm-spawn --relaunch: bob's generated wiring is retired and a tracked copy stays"
+}
+
 test_relaunch_off_opencode_removes_tracked_wiring() {
   local dir out
   dir=$(new_case opencodetracked rl78)
@@ -3141,6 +3215,8 @@ SH
   pass "fm-control exit removes the dialog file before it releases the control lock"
 }
 
+test_refused_relaunch_onto_bob_leaves_the_running_agent
+test_relaunch_off_bob_retires_its_wiring_and_keeps_a_tracked_copy
 test_relaunch_off_opencode_removes_tracked_wiring
 test_exit_and_relaunch_remove_the_dialog_file
 test_exit_removes_the_dialog_file_before_releasing_the_lock

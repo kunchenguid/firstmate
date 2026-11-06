@@ -471,7 +471,8 @@ EOF
   # ps output cannot represent unambiguously.
   while IFS= read -r pid; do
     [ -n "$pid" ] || continue
-    if fm_gemini_pid_is_gemini "$pid" || fm_hermes_process_matches '' "$pid"; then
+    if fm_gemini_pid_is_gemini "$pid" || fm_hermes_process_matches '' "$pid" \
+      || fm_bob_pid_matches "$(LC_ALL=C ps -o comm= -p "$pid" 2>/dev/null)" "$pid"; then
       printf 'alive'
       return 0
     fi

@@ -3325,6 +3325,46 @@ seed_polytoken_wiring() {
   ) || fail "seeding the generated polytoken wiring failed"
 }
 
+# Bob's hook file and brief copy sit behind the worktree exclude, which the
+# return's git clean leaves alone, and the next holder of the slot must not
+# inherit the previous task's hooks or brief. A tracked copy stays the project's.
+test_teardown_retires_bob_wiring_on_pool_return() {
+  local case_dir rc
+  case_dir=$(make_case bob-wiring)
+  write_meta "$case_dir" local-only ship
+  printf 'harness=bob\n' >> "$case_dir/state/task-x1.meta"
+  mkdir -p "$case_dir/wt/.bob"
+  printf '{}\n' > "$case_dir/wt/.bob/settings.json"
+  printf 'brief\n' > "$case_dir/wt/.bob/launch-brief.md"
+  printf '.bob/settings.json\n.bob/launch-brief.md\n' >> "$(git -C "$case_dir/wt" rev-parse --git-path info/exclude)"
+  rc=0
+  run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  expect_code 0 "$rc" "bob-wiring: teardown should succeed ($(cat "$case_dir/stderr"))"
+  assert_absent "$case_dir/wt/.bob/settings.json" "bob-wiring: the hook file survived pool return"
+  assert_absent "$case_dir/wt/.bob/launch-brief.md" "bob-wiring: the brief copy survived pool return"
+  pass "fm-teardown: bob's hook file and brief copy are removed on pool return"
+}
+
+test_teardown_preserves_tracked_bob_wiring() {
+  local case_dir rc
+  case_dir=$(make_case bob-tracked)
+  write_meta "$case_dir" local-only ship
+  printf 'harness=bob\n' >> "$case_dir/state/task-x1.meta"
+  mkdir -p "$case_dir/wt/.bob"
+  printf 'project settings\n' > "$case_dir/wt/.bob/settings.json"
+  git -C "$case_dir/wt" add .bob/settings.json
+  git -C "$case_dir/wt" -c user.email=t@t -c user.name=t commit -q -m "project bob settings"
+  printf 'brief\n' > "$case_dir/wt/.bob/launch-brief.md"
+  printf '.bob/launch-brief.md\n' >> "$(git -C "$case_dir/wt" rev-parse --git-path info/exclude)"
+  rc=0
+  run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  expect_code 0 "$rc" "bob-tracked: teardown should succeed ($(cat "$case_dir/stderr"))"
+  [ -f "$case_dir/wt/.bob/settings.json" ] \
+    || fail "bob-tracked: teardown deleted the project's tracked settings"
+  assert_absent "$case_dir/wt/.bob/launch-brief.md" "bob-tracked: the untracked brief copy survived pool return"
+  pass "fm-teardown: a tracked .bob file stays while the generated brief copy goes"
+}
+
 test_teardown_retires_polytoken_wiring_on_pool_return() {
   local case_dir rc
   case_dir=$(make_case polytoken-wiring)
@@ -6474,6 +6514,8 @@ test_secondmate_pr_ready_line_waits_for_green_when_opted_in
 test_secondmate_pr_ready_line_follows_green_report_with_trailing_text
 test_secondmate_home_teardown_delivers_final_line_or_refuses
 test_teardown_missing_busy_sidecar_completes
+test_teardown_retires_bob_wiring_on_pool_return
+test_teardown_preserves_tracked_bob_wiring
 test_teardown_retires_polytoken_wiring_on_pool_return
 test_teardown_preserves_tracked_polytoken_layer
 test_teardown_preserves_ignored_project_polytoken_layer

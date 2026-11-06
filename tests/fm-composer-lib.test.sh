@@ -1900,6 +1900,32 @@ test_quoted_exit_picker_text_is_not_a_dialog() {
   pass "picker text quoted above a normal composer is not read as a live picker"
 }
 
+# Bob 2.0.9 (captured live with tmux capture-pane -e): a `❯` composer between two
+# `─` rules, an SGR 7 cursor cell, and the placeholder as a 256-colour grey run
+# (38;5;243) when idle. Typed text is the default foreground. Its terminal
+# cursor is hidden on the pane's last row, so the read is cursorless. The grey
+# placeholder is stripped only when the caller names the harness bob; without
+# the name the placeholder collides with typed text and stays pending.
+test_bob_composer_idle_reads_empty_and_typed_text_reads_pending() {
+  local rule idle idle_de typed saved=${FM_COMPOSER_HARNESS-__unset__}
+  unset FM_COMPOSER_HARNESS
+  rule="${ESC}[38;5;57m────────────────────────────────────────${ESC}[39m"
+  idle="Logged in as test@example.com"$'\n\n'"$rule"$'\n'"  ${ESC}[1m${ESC}[38;5;57m❯ ${ESC}[0;7m ${ESC}[0m${ESC}[38;5;243m Build Anything, @ for context, / for commands, \$ for skills${ESC}[39m"$'\n'"$rule"$'\n'"  ${ESC}[38;5;57mAgent${ESC}[38;5;243m Mode${ESC}[38;5;160m (auto-approve)${ESC}[39m"
+  typed="Logged in as test@example.com"$'\n\n'"$rule"$'\n'"  ${ESC}[1m${ESC}[38;5;57m❯ ${ESC}[0mBuild Anything${ESC}[7m ${ESC}[0m"$'\n'"$rule"$'\n'"  ${ESC}[38;5;57mAgent${ESC}[38;5;243m Mode${ESC}[38;5;160m (auto-approve)${ESC}[39m"
+  FM_COMPOSER_HARNESS=bob assert_screen "bob idle composer" empty "$CAPS_STYLED_NOID" "$idle"
+  FM_COMPOSER_HARNESS=bob assert_screen "bob typed placeholder words" pending "$CAPS_STYLED_NOID" "$typed"
+  FM_COMPOSER_HARNESS=bob assert_screen "bob typed draft" pending "$CAPS_STYLED_NOID" "${typed/Build Anything/fix the login bug}"
+  assert_screen "bob idle composer without the harness name" pending "$CAPS_STYLED_NOID" "$idle"
+  # Bob 2.0.6 under de_DE, captured live: the placeholder follows the locale and
+  # is a truecolor grey, so no idle regex names it and the stripped row decides.
+  idle_de="${rule}"$'\n'"  ${ESC}[1m${ESC}[38;2;82;47;224m❯ ${ESC}[0;7m ${ESC}[0m${ESC}[38;2;118;118;118m Baue Alles, @ für Kontext, / für Befehle, \$ für Skills${ESC}[39m"$'\n'"$rule"$'\n'"  ${ESC}[38;2;82;47;224mAgent${ESC}[38;2;118;118;118m Mode${ESC}[31m (auto-approve)${ESC}[39m"$'\n'
+  FM_COMPOSER_HARNESS=bob assert_screen "bob idle composer, translated placeholder" empty "$CAPS_STYLED_NOID" "$idle_de"
+  FM_COMPOSER_HARNESS=bob assert_screen "bob typed draft over a translated frame" pending "$CAPS_STYLED_NOID" "${idle_de/Baue Alles/${ESC}[0mBaue Alles}"
+  assert_screen "a translated placeholder stays unproven without the harness name" unknown "$CAPS_STYLED_NOID" "$idle_de"
+  [ "$saved" = __unset__ ] || FM_COMPOSER_HARNESS=$saved
+  pass "bob's idle composer reads empty and typed text reads pending (live frame)"
+}
+
 test_background_exit_picker_stays_pending_and_blocks_retry
 test_dialog_heading_and_footer_must_be_the_recorded_lines
 test_dialog_note_skips_the_match_when_no_sink_is_set
@@ -1907,3 +1933,4 @@ test_quoted_exit_picker_text_is_not_a_dialog
 test_kiro_near_gray_ghost_is_stripped_and_real_text_survives
 test_kiro_palette_gray_ghost_is_stripped_and_chromatic_indexes_survive
 test_composer_widening_is_kiro_only
+test_bob_composer_idle_reads_empty_and_typed_text_reads_pending

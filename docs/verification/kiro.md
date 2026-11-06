@@ -182,9 +182,9 @@ A real idle kiro composer used to classify as `pending`, and `fm_task_inbox_ring
 kiro draws its idle placeholder in truecolor `38;2;158;158;158`, luminance 158.0, above the 128 `FM_COMPOSER_GHOST_LUMA_MAX` default, so `fm_composer_strip_ghost` left it in place and it read as real typed content.
 
 The fix applies a higher ceiling only to NEAR-ACHROMATIC truecolor runs, `FM_COMPOSER_GHOST_GRAY_LUMA_MAX` (default 180) within `FM_COMPOSER_GHOST_GRAY_SPREAD_MAX` (default 12) of channel spread, and keeps 128 for anything more saturated.
-It applies only on a kiro pane: a caller that knows the target's recorded harness names it through `FM_COMPOSER_HARNESS`, and `fm_composer_kiro_scope` in `bin/fm-composer-lib.sh` turns on this ceiling, the palette-grey test below, and the hinted idle row only for `kiro`.
+It applies only on a named pane: a caller that knows the target's recorded harness names it through `FM_COMPOSER_HARNESS`, `fm_composer_gray_scope` in `bin/fm-composer-lib.sh` turns on this ceiling and the palette-grey test below only for `kiro` and `bob`, and `fm_composer_kiro_scope` turns on the hinted idle row only for `kiro`.
 Every other harness, and a read with no harness named, keeps the shared rules unchanged, because the wider ceiling also strips Claude's typed slash command, which Claude draws in grey `38;2;112;112;112`, so a herdr exit proof judged a typed `/exit` unsent.
-Inside the kiro scope, kiro's ghost at spread 0 strips, near-gray real text at luminance 207.0 is kept, and muse's chromatic prompt glyph at spread 165 is unreachable by any luminance ceiling.
+Inside that scope, kiro's ghost at spread 0 strips, near-gray real text at luminance 207.0 is kept, and muse's chromatic prompt glyph at spread 165 is unreachable by any luminance ceiling.
 `bin/fm-composer-lib.sh`'s ghost-strip comment owns the measured values.
 
 On a kiro pane the same ceiling covers the 256-colour encoding of the same grey, because the encoding follows the pane's terminal rather than the harness.

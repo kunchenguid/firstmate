@@ -319,6 +319,37 @@ fi
 # it dead - the one verdict that can start a duplicate agent on a live worktree.
 
 new_window launcher "$LAB/bin/agent-launcher"
+# --- Bob's node bundle, identified from its installed entry script ------------
+# Bob sets no process title, so the foreground group is a bare node or
+# MainThread; only the script argument names it. A later argument naming Bob's
+# real script must not lend an unrelated node process that identity.
+if command -v node >/dev/null 2>&1; then
+  mkdir -p "$LAB/bob-lib/@ibm/bob/dist"
+  printf 'setInterval(() => {}, 1000);\n' > "$LAB/bob-lib/@ibm/bob/dist/bob.js"
+  printf 'setInterval(() => {}, 1000);\n' > "$LAB/bob-decoy.js"
+  tmux new-window -d -t "$SESSION" -n bob "exec node '$LAB/bob-lib/@ibm/bob/dist/bob.js' chat"
+  wait_for_state "$SESSION:bob" alive \
+    || fail "a node process running Bob's entry script must classify alive"
+  tmux new-window -d -t "$SESSION" -n bob-decoy \
+    "exec node '$LAB/bob-decoy.js' '$LAB/bob-lib/@ibm/bob/dist/bob.js'"
+  wait_for_state "$SESSION:bob-decoy" ambiguous \
+    || fail "a later argument naming Bob's script must not read as a live Bob"
+  # The launch names node by its absolute path, which spaces can split in ps.
+  mkdir -p "$LAB/bob spaced/bin"
+  ln -s "$(command -v node)" "$LAB/bob spaced/bin/node"
+  tmux new-window -d -t "$SESSION" -n bob-spaced \
+    "exec '$LAB/bob spaced/bin/node' '$LAB/bob-lib/@ibm/bob/dist/bob.js' chat"
+  wait_for_state "$SESSION:bob-spaced" alive \
+    || fail "Bob under a node path with spaces must classify alive"
+  tmux new-window -d -t "$SESSION" -n bob-spaced-decoy \
+    "exec '$LAB/bob spaced/bin/node' '$LAB/bob-decoy.js' '$LAB/bob-lib/@ibm/bob/dist/bob.js'"
+  wait_for_state "$SESSION:bob-spaced-decoy" ambiguous \
+    || fail "a later argument naming Bob's script must not read as a live Bob under a spaced node"
+  pass "tmux liveness: Bob is alive from its entry script and a later argument does not impersonate it"
+else
+  echo "skip: Bob node-bundle regression needs node"
+fi
+
 wait_for_state "$SESSION:launcher" alive \
   || fail "a launcher running a harness child must classify alive, never dead"
 comms_classify_agent "$SESSION:launcher" \
