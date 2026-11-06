@@ -77,6 +77,7 @@ Repeat and edge cases:
   Re-running `hold` completes the move, and re-running the same `answer --release` also normalizes a release interrupted before its stamp was removed.
 - The reason may contain parentheses, semicolons, quotes, and line breaks.
   [`bin/fm-hold-reason-lib.sh`](../bin/fm-hold-reason-lib.sh) owns the storage encoding and compatibility rules; [`bin/fm-tasks-axi.sh --help`](../bin/fm-tasks-axi.sh) owns the public read commands and output contract.
+  `reason <task-id>` prints the held reason as plain text and `append <task-id> --text-file <path>` adds text to it, keeping the hold kind and `--until`, so no caller decodes or re-encodes it by hand.
 
 ### Answering a call (`answer`)
 
