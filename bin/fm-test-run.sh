@@ -858,6 +858,7 @@ tests/fm-pi-primary-live-e2e.test.sh 72
 tests/fm-pi-seeded-home-trust-live-e2e.test.sh 45
 tests/fm-pi-watch-extension.test.sh 56515
 tests/fm-pi-windows-shell-invocation.test.sh 5121
+tests/fm-park.test.sh 65161
 tests/fm-polytoken-harness.test.sh 21090
 tests/fm-polytoken-signals-live-e2e.test.sh 103
 tests/fm-pr-check-security.test.sh 300675

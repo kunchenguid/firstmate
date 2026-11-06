@@ -907,7 +907,15 @@ test_closed_pr_is_reported_once() {
   : > "$w/config/auto-land"
   out=$(run_park "$w" tick 2>&1)
   [ "$out" = "closed lane: PR $GL_URL was closed without merging; the lane needs a decision" ] || fail "closed-unparked: $out"
-  pass "closed-without-merge reporting for unparked lanes requires a feature flag"
+
+  w=$(make_world closed-busy "$GL_URL"); gl_fixture "$w" state=closed
+  : > "$w/config/auto-land"
+  printf 'v1 gen=gen1 seq=4 state=working source=claude-hook event=Start ts=%s\n' "$(date +%s)" > "$w/state/lane.busy-state"
+  out=$(run_park "$w" tick 2>&1)
+  [ "$out" = "closed lane: PR $GL_URL was closed without merging; the lane needs a decision" ] || fail "closed-busy: $out"
+  [ ! -e "$w/state/lane.review-park" ] && [ ! -e "$w/control.log" ] && [ ! -e "$w/teardown.log" ] \
+    || fail "closed-busy: lifecycle action occurred"
+  pass "closed-without-merge reporting for unparked lanes requires a feature flag and does not require an idle worker"
 }
 
 test_tick_parks_clean_idle_lanes_only_when_opted_in() {

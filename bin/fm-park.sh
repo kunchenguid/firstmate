@@ -793,14 +793,14 @@ watch_unparked() {  # <id>
   pr=$(fm_meta_get "$meta" pr)
   [ -n "$pr" ] && [ -f "$STATE/$id.check.sh" ] || return 0
   [ ! -e "$(record_path "$id")" ] || return 0
-  ! lane_busy "$id" || return 0
-  local idle_secs
-  idle_secs=$(step_secs "$READ_SECS") || return 0
-  fm_run_timed "$idle_secs" "$SCRIPT_DIR/fm-park.sh" idle-check "$id" >/dev/null 2>&1 || return 0
   snap=$(snapshot "$pr") || return 0
   state=$(printf '%s' "$snap" | jq -r .state)
   [ "$state" != closed ] || { closed_once "$id" "$pr"; return 0; }
   [ "$state" = open ] && [ -e "$CONFIG/park-on-review" ] || return 0
+  ! lane_busy "$id" || return 0
+  local idle_secs
+  idle_secs=$(step_secs "$READ_SECS") || return 0
+  fm_run_timed "$idle_secs" "$SCRIPT_DIR/fm-park.sh" idle-check "$id" >/dev/null 2>&1 || return 0
   result=$(printf '%s' "$snap" | jq -c --argjson now "$(date +%s)" --argjson quiet "$QUIET_SECS" \
     --arg expect "" --argjson bots "$(review_bots_json)" "$GATE_PROGRAM") || return 0
   [ "$(printf '%s' "$result" | jq -r .clean)" = true ] || return 0
