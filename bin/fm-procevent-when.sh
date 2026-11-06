@@ -9,7 +9,7 @@
 #   fm-procevent-when.sh classify <result-file>
 #   fm-procevent-when.sh terminal <result-file>
 #   fm-procevent-when.sh source-id <name>
-#   fm-procevent-when.sh retire <name>
+#   fm-procevent-when.sh retire <name|source-id>
 #   fm-procevent-when.sh rebind-all
 #   fm-procevent-when.sh run <source-id>
 #
@@ -47,9 +47,14 @@
 #            generic runner then retires the registration itself.
 # source-id  Print the canonical source id for <name>.
 # retire     Stop the watch: retire the registration and remove the spec, trust
-#            record, and fired marker. Idempotent. Captured results and their
-#            handled acknowledgements are never touched. Warns when the action
-#            had already fired without a captured outcome.
+#            record, and fired marker. Accepts the bare <name> or the exact
+#            when-<name> source id that `fm-procevent.sh list` prints. An
+#            argument starting with when- is always that exact id, so a watch
+#            armed as when-<x> retires as when-when-<x>, and an id that matches
+#            no registered watch is refused instead of gaining a second prefix.
+#            Repeating a bare-name retire is idempotent. Captured results and
+#            their handled acknowledgements are never touched. Warns when the
+#            action had already fired without a captured outcome.
 # rebind-all Refresh the trust binding of every registered watch whose action
 #            executable lives under this repo (FM_ROOT), re-hashing it against
 #            its CURRENT on-disk bytes. A self-update fast-forwards bin/ in
@@ -107,7 +112,7 @@ WHEN_DIR="$STATE/when"
 OUTPUT_TAIL_BYTES=${FM_WHEN_OUTPUT_TAIL_BYTES:-8192}
 
 die() { printf 'error: %s\n' "$1" >&2; exit 1; }
-usage() { sed -n '2,72p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 2; }
+usage() { sed -n '2,80p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 2; }
 
 spec_file()  { printf '%s/%s.spec\n' "$WHEN_DIR" "$1"; }
 trust_file() { printf '%s/%s.trust\n' "$WHEN_DIR" "$1"; }
@@ -610,8 +615,17 @@ cmd_rebind_all() {
 
 cmd_retire() {
   local name=${1-} sid captured=0 result
-  when_name_valid "$name" || die "name must be path-safe and at most 59 characters: ${name-}"
-  sid="when-$name"
+  case "$name" in
+    when-*)
+      when_name_valid "${name#when-}" || die "invalid source id: $name"
+      sid=$name
+      [ -e "$(spec_file "$sid")" ] || die "no watch registered as $sid (run list for the registered source ids)"
+      ;;
+    *)
+      when_name_valid "$name" || die "name must be path-safe and at most 59 characters: ${name-}"
+      sid="when-$name"
+      ;;
+  esac
   if [ -e "$(fired_file "$sid")" ]; then
     for result in "$(fm_procevent_inbox_dir "$STATE")/$sid".*.result; do
       [ -e "$result" ] && captured=1
