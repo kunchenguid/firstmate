@@ -9,6 +9,10 @@
 # tracked files (plus the one home include described below): fixed rules text
 # plus the verbatim tracked policy skills. NO timestamps, NO fleet snapshot,
 # NO per-wake content, NO home-specific paths, NO other environment reads.
+# The one other exception is the home's opt-in config/away-standing-dispatch
+# presence flag (docs/configuration.md): it selects between two fixed texts
+# and changes only when the home edits its config, so the bytes stay constant
+# for a home across wakes.
 # Fleet state and events reach the branch as the wake message at the TAIL of
 # the conversation, never inside this prompt. The
 # same rule extends to the branch session's tool set: each host offers the
@@ -40,6 +44,12 @@ set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_TRACKED_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_TRACKED_ROOT}}"
+CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
+
+fm_standing_dispatch_enabled() {
+  [ -f "$CONFIG/away-standing-dispatch" ]
+}
 
 # Read before anything is emitted, so an unusable file never yields a partial prompt.
 INCLUDE_FILE="${FM_CONFIG_OVERRIDE:-${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_TRACKED_ROOT}}/config}/branch-prompt-include.md"
@@ -154,14 +164,30 @@ No script parses them; you read them at the tail of every wake, decide by your o
 - `bin/fm-pr-merge.sh`: a merge the words call for proceeds when the pull request is green at its live head, synchronously, under the record lock; which pull request the words meant is your reading, and any green merge is mechanically permitted while the record exists.
   A red pull request, or one with a required check that has not reported, is never merged while away, whatever the words say, and `--allow-red`, `--allow-missing`, and `--allow-no-pipeline` are refused under the record: a merge the words want past a red or unreported check, or a GitLab merge request with no head pipeline, holds for the return.
 - `bin/fm-spawn.sh`: work the words explicitly call for is dispatched within the record's spend cap, from a queued backlog item - one already queued, or one you file yourself for exactly that step under the `backlog` lease, writing its brief intent from the captain's words and a backlog note citing them; filing the item the captain asked for is not inventing work, and anything the words do not call for is.
+PROMPT
+if fm_standing_dispatch_enabled; then
+  cat <<'PROMPT'
   Unless the away words explicitly forbid starting it (or all new work) for this absence, dispatch also proceeds for one class: a recurring backlog item that dispatches a read-only scout (no pull request, no project change), whose captain hold reason records the captain's own standing order to start it while away, and whose hold date has arrived; words that merely name other work do not stop it, and a current explicit captain instruction outranks the standing order. A ship or any other recurring item still waits for the return.
   File and dispatch only the run that hold names, within the record's spend cap, through `bin/fm-spawn.sh`, then re-hold the item until the next day the way that hold already says.
   Leave the hold itself in place until that re-hold, merge nothing because of that order, and dispatch no other new work.
   Report that dispatch in the outcome, and do not open the summary with "per your away instructions:" because the words did not name it.
+PROMPT
+fi
+cat <<'PROMPT'
 - `bin/fm-send.sh` and `bin/fm-control.sh`: a run the words say to abort or a worker the words say to steer is steered, as in any posture.
 - `bin/fm-send.sh --resolve-key`: a decision the words pre-answer is answered with the captain's own answer, and every other decision only as the ask-user-authority policy at the end of this prompt lets firstmate decide; a finding it says to escalate is reported with verdict captain and left for the return.
 - `bin/fm-merge-local.sh` still refuses you: local-only landing waits for the captain in both postures.
+PROMPT
+if fm_standing_dispatch_enabled; then
+  cat <<'PROMPT'
 Never by analogy: act only where the words plainly name the event and the action, or where the standing-order hold dispatch above names it; the words cover nothing they do not say, and that dispatch is the only thing a silent or empty set of words leaves open.
+PROMPT
+else
+  cat <<'PROMPT'
+Never by analogy: act only where the words plainly name the event and the action; the words cover nothing they do not say.
+PROMPT
+fi
+cat <<'PROMPT'
 Hold on doubt: a sentence you cannot act on with confidence, and any fork the words and the standing rules leave open, is reported with verdict captain naming the sentence and left for the return brief, never improvised.
 The never-set is absolute for every actor in every posture: credential entry, legal or financial acceptance, an attended prompt, any discard the captain did not name, and any destructive, irreversible, or security-sensitive action are refused whatever the words say.
 Log every action taken under the words in that event's outcome summary, opening with "per your away instructions:" and naming the sentence you acted on, so the return brief can account for each one.

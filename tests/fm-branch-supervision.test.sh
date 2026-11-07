@@ -153,30 +153,48 @@ test_branch_prompt_routes_completed_scouts_through_guarded_cleanup() {
   pass "emitted branch prompt routes completed scouts through existing policies and leased cleanup, preserving unfinished work"
 }
 
-# Away words that are empty or silent authorize no new spawn. The one exception
-# is a recurring read-only scout backlog item whose captain hold reason already
-# records the captain's standing order to start it while away, unless the words explicitly forbid it. The emitted prompt is
-# that contract.
-test_branch_prompt_dispatches_dated_standing_hold_unless_the_away_words_forbid_it() {
-  local prompt
-  prompt=$(bash "$ROOT/bin/fm-branch-prompt.sh") || fail "branch prompt generator failed"
+# Away words that are empty or silent authorize no new spawn. A home that opts in
+# with config/away-standing-dispatch adds one exception: a recurring read-only
+# scout backlog item whose captain hold reason already records the captain's
+# standing order to start it while away, unless the words explicitly forbid it.
+# The emitted prompt is that contract.
+test_branch_prompt_dispatches_dated_standing_hold_only_under_the_opt_in_key() {
+  local home_off home_on off on
+  home_off="$TMP_ROOT/standing-dispatch-off"
+  home_on="$TMP_ROOT/standing-dispatch-on"
+  mkdir -p "$home_off/config" "$home_on/config"
+  : > "$home_on/config/away-standing-dispatch"
 
-  assert_contains "$prompt" \
+  off=$(FM_HOME="$home_off" bash "$ROOT/bin/fm-branch-prompt.sh") || fail "branch prompt generator failed without the key"
+  on=$(FM_HOME="$home_on" bash "$ROOT/bin/fm-branch-prompt.sh") || fail "branch prompt generator failed with the key"
+
+  assert_contains "$on" \
     "Unless the away words explicitly forbid starting it (or all new work) for this absence, dispatch also proceeds for one class: a recurring backlog item that dispatches a read-only scout (no pull request, no project change), whose captain hold reason records the captain's own standing order to start it while away, and whose hold date has arrived; words that merely name other work do not stop it, and a current explicit captain instruction outranks the standing order. A ship or any other recurring item still waits for the return." \
-    "branch prompt does not state the explicit-forbid exception for a dated standing hold"
-  assert_contains "$prompt" \
+    "branch prompt does not state the explicit-forbid exception for a dated standing hold under the key"
+  assert_contains "$on" \
     "File and dispatch only the run that hold names, within the record's spend cap, through \`bin/fm-spawn.sh\`, then re-hold the item until the next day the way that hold already says." \
     "branch prompt does not keep the standing-hold dispatch on the guarded spawn path"
-  assert_contains "$prompt" \
+  assert_contains "$on" \
     "Leave the hold itself in place until that re-hold, merge nothing because of that order, and dispatch no other new work." \
     "branch prompt lets the standing-order dispatch merge or start other new work"
-  assert_contains "$prompt" \
+  assert_contains "$on" \
     'Report that dispatch in the outcome, and do not open the summary with "per your away instructions:" because the words did not name it.' \
     "branch prompt attributes the standing-hold dispatch to the away words"
-  assert_not_contains "$prompt" \
+  assert_contains "$on" \
+    "or where the standing-order hold dispatch above names it" \
+    "branch prompt keeps the never-by-analogy rule closed to the standing-order dispatch under the key"
+  assert_not_contains "$on" \
     "empty words cancel no standing grant" \
     "branch prompt reopened every standing grant under silent away words"
-  pass "emitted branch prompt dispatches a dated standing hold unless the away words explicitly forbid it"
+
+  assert_not_contains "$off" "standing order to start it while away" \
+    "branch prompt states the standing-hold dispatch without the opt-in key"
+  assert_not_contains "$off" "standing-order hold dispatch" \
+    "branch prompt widens never-by-analogy without the opt-in key"
+  assert_contains "$off" \
+    "Never by analogy: act only where the words plainly name the event and the action; the words cover nothing they do not say." \
+    "branch prompt lost the upstream never-by-analogy rule without the opt-in key"
+  pass "emitted branch prompt dispatches a dated standing hold only under config/away-standing-dispatch"
 }
 
 # --- append-only outcome store ------------------------------------------------
@@ -1684,7 +1702,7 @@ WRAPPER
 test_branch_prompt_is_byte_stable_and_above_cache_floor
 test_branch_prompt_home_include_is_appended_last
 test_branch_prompt_routes_completed_scouts_through_guarded_cleanup
-test_branch_prompt_dispatches_dated_standing_hold_unless_the_away_words_forbid_it
+test_branch_prompt_dispatches_dated_standing_hold_only_under_the_opt_in_key
 test_outcome_store_is_append_only_with_cursor_reads
 test_outcome_append_keeps_a_bounded_display_tail
 test_outcome_tail_keeps_whole_newest_rows_within_its_byte_budget

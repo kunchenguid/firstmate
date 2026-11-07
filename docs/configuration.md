@@ -11,7 +11,7 @@ Start with the directory layout, then use the setting reference for the behavior
 | Task windows and worker tools | [Runtime backend](#runtime-backend-configbackend--fm_backend) and [harness support](#harness-support) |
 | Worker permissions, accounts, or environment | [Codex approval review](#codex-automatic-approval-review), [Claude permission mode](#claude-permission-mode-configclaude-permission-mode), [Codex permission mode](#codex-permission-mode-configcodex-permission-mode), [persistent managed-policy failover](#persistent-managed-policy-failover), [worker account pin](#worker-account-pin-configclaude-account-configpi-account), [several Claude accounts](#several-claude-accounts-configclaude-accounts), [worker tool exclusions](#worker-tool-exclusions-configcrew-exclude-tools), [worker launch environment](#worker-launch-environment-configlaunch-env-allowlist), and its [Orca environment source](#orca-environment-source-configlaunch-env-tmux-session) |
 | Backlog, preferences, and memory | [Backlog backend](#backlog-backend-taskstoml--configbacklog-backend), [captain preferences](#captain-preferences-datacaptainmd--datacaptain-sharedmd), [external memory tiers](#external-memory-tiers-memory-layering-section), [record export](#record-export-configrecord-export-root), [startup memory budget](#startup-memory-budget-configstartup-memory-budget), and [stow guard](#stow-guard-configstow-guard) |
-| Supervision and presentation | [Pi supervision branch](#pi-supervision-branch), [supervision host](#supervision-host-configsupervision-host), [Codex native Stop park](#codex-native-stop-park-configcodex-stop-park), [warm-cache compaction](#warm-cache-compaction-configwarm-compact), and [Calm preference](#calm-preference-configcalm) |
+| Supervision and presentation | [Pi supervision branch](#pi-supervision-branch), [supervision host](#supervision-host-configsupervision-host), [Codex native Stop park](#codex-native-stop-park-configcodex-stop-park), [away standing-order dispatch](#away-standing-order-dispatch-configaway-standing-dispatch), [warm-cache compaction](#warm-cache-compaction-configwarm-compact), and [Calm preference](#calm-preference-configcalm) |
 | Persistent secondmates | [Secondmate routes](#secondmate-routes-datasecondmatesmd) |
 | Review bots on owned GitHub pull requests | [Contribution review bots](#contribution-review-bots-configcontribution-review-bots) |
 | Stopping idle workers while a PR awaits review, and cleanup on merge | [Park on review](#park-on-review) |
@@ -434,6 +434,15 @@ With the file present, only an interactive native Codex session on the verified 
 The supervision protocol is chosen when the session starts, so create or remove the file before starting the Codex session.
 The file is local to each home and is not inherited by secondmate homes.
 [The Codex protocol](supervision-protocols/codex.md) owns the parked operating protocol, and `bin/fm-codex-stop-park.sh` owns version selection, registration, and failure fallback.
+
+## Away standing-order dispatch (config/away-standing-dispatch)
+
+The optional local, gitignored `config/away-standing-dispatch` presence flag opts this home in to one extra dispatch by the away supervision actor.
+With it present, the actor may dispatch a recurring read-only scout item whose captain hold records the captain's standing order to start it while away, once the hold date arrives, unless the away words explicitly forbid it.
+`bin/fm-branch-prompt.sh` "Postures" owns the exact rule and its limits.
+With the file absent, the emitted branch prompt is the one without that exception, and empty or silent away words spawn nothing.
+The flag is read each time the prompt is generated, so a new branch conversation or engine session picks up a change.
+The flag is a home-local preference and is not inherited by secondmate homes.
 
 ## Warm-cache compaction (config/warm-compact)
 
