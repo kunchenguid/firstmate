@@ -162,13 +162,24 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 die() { printf 'error: %s\n' "$1" >&2; exit 1; }
 usage() { sed -n '2,/^set -u$/p' "${BASH_SOURCE[0]}" | sed '$d; s/^# \{0,1\}//'; exit 2; }
 
+# Lavish keys a session on the path the platform's native realpath returns, which
+# on a case-insensitive filesystem restores the on-disk spelling. Perl's realpath
+# keeps the caller's spelling there, so it cannot name a Lavish session, and every
+# board identity here comes from this one helper. Perl remains for a path node
+# cannot answer, and for a host with no node, where no Lavish session can exist.
+artifact_realpath() {  # <artifact>
+  node -e 'process.stdout.write(require("node:fs").realpathSync.native(process.argv[1]) + "\n")' \
+    -- "$1" 2>/dev/null \
+    || perl -MCwd=realpath -e '$p = realpath($ARGV[0]); defined($p) or exit 1; print "$p\n"' "$1" 2>/dev/null
+}
+
 apply_session_host() {  # <artifact>
-  local endpoint
-  endpoint=$(perl -MJSON::PP -MCwd=realpath -MEncode=decode,FB_CROAK -e '
+  local endpoint real
+  real=$(artifact_realpath "$1") || die "cannot resolve the board server from its Lavish session: $1"
+  endpoint=$(perl -MJSON::PP -MEncode=decode,FB_CROAK -e '
     use strict;
     use warnings;
-    my ($path, $artifact) = @ARGV;
-    my $real = realpath($artifact) // die "cannot resolve board artifact\n";
+    my ($path, $real) = @ARGV;
     $real = decode("UTF-8", $real, FB_CROAK);
     open my $file, "<", $path or die "cannot read Lavish session store\n";
     -f $file or die "Lavish session store is not a regular file\n";
@@ -189,7 +200,7 @@ apply_session_host() {  # <artifact>
     $host ne "0.0.0.0" && $host ne "::" && $port >= 1 && $port <= 65535
       or die "invalid saved Lavish server address\n";
     print "$host\n$port\n";
-  ' "${LAVISH_AXI_STATE_DIR:-$HOME/.lavish-axi}/state.json" "$1") \
+  ' "${LAVISH_AXI_STATE_DIR:-$HOME/.lavish-axi}/state.json" "$real") \
     || die "cannot resolve the board server from its Lavish session: $1"
   LAVISH_AXI_HOST=${endpoint%$'\n'*}
   LAVISH_AXI_PORT=${endpoint##*$'\n'}
@@ -214,13 +225,13 @@ post_lavish_reply() {  # <artifact> <reply-file>
 }
 
 # Canonical identity is physical, not the path string: Lavish itself keys a
-# session on the realpath of the artifact, so two names for one file are one
-# source and must never become two owners.
+# session on the native realpath of the artifact, so two names for one file are
+# one source and must never become two owners.
 cmd_source_id() {
   local artifact=${1-} real
   [ -n "$artifact" ] || usage
   case "$artifact" in *$'\n'*) die "artifact paths cannot contain newlines" ;; esac
-  real=$(perl -MCwd=realpath -e '$p = realpath($ARGV[0]); defined($p) or exit 1; print "$p\n"' "$artifact" 2>/dev/null) \
+  real=$(artifact_realpath "$artifact") \
     || die "cannot resolve the artifact path: $artifact"
   [ -f "$real" ] || die "artifact does not exist: $artifact"
   if command -v shasum >/dev/null 2>&1; then
@@ -258,7 +269,7 @@ cmd_arm() {
   command -v lavish-axi >/dev/null 2>&1 || die "lavish-axi is not installed"
   poll_retry_delay >/dev/null
   id=$(cmd_source_id "$artifact") || exit 1
-  real=$(perl -MCwd=realpath -e '$p = realpath($ARGV[0]); defined($p) or exit 1; print "$p\n"' "$artifact" 2>/dev/null) \
+  real=$(artifact_realpath "$artifact") \
     || die "cannot resolve the artifact path: $artifact"
   listener=("$SCRIPT_DIR/fm-procevent-lavish.sh" poll "$real")
   [ -z "$reply_file" ] || listener+=(--agent-reply-file "$reply_file")

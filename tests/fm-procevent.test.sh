@@ -1103,6 +1103,61 @@ wait_for "$HORPHAN/state/worker-4.inbox/001.msg" \
   || fail "the recovered capture did not reach its owning worker's steering inbox"
 pass "a capture interrupted before its result commit does not wedge its source"
 
+# --- end-user-aligned regression: one board, however its path is spelled ------
+# Lavish keys a session on the native realpath, which restores the on-disk
+# spelling on a case-insensitive filesystem. A board armed through another
+# spelling is still that session's one source: otherwise its listener cannot
+# find its session and exits at once while arm reports it armed, the captain's
+# answer waits with nothing collecting it, and the id derived from the on-disk
+# path names nothing registered.
+HCASE="$TMP_ROOT/hcase"; new_home "$HCASE"
+CASE_BIN=$(fm_fakebin "$TMP_ROOT/lavish-case-stub")
+CASE_TRIGGER="$TMP_ROOT/lavish-case-hold"
+CASE_DIR="$TMP_ROOT/Case-Board"
+mkdir -p "$CASE_DIR"
+CASE_DIR=$(cd -P -- "$CASE_DIR" && pwd -P)
+CASE_ART="$CASE_DIR/board.html"
+CASE_SPELLED="${CASE_DIR%/*}/case-board/board.html"
+export CASE_TRIGGER CASE_ART
+cat > "$CASE_BIN/lavish-axi" <<'SH'
+#!/usr/bin/env bash
+while [ ! -e "$CASE_TRIGGER" ]; do sleep 0.02; done
+printf 'session:\n  status: feedback\nprompts[1]{uid,prompt,selector,tag,text}:\n  "","spelled answer","","message",""\n'
+SH
+chmod +x "$CASE_BIN/lavish-axi"
+printf '<h1>spelled</h1>\n' > "$CASE_ART"
+lavish_session "$CASE_ART"
+if [ ! -e "$CASE_SPELLED" ]; then
+  # A case-sensitive filesystem has no second spelling, so this stand-in gives
+  # the answer the native realpath gives on one that does. The real filesystem
+  # and the real Lavish are covered by tests/fm-bearings-board-lavish-live-e2e.test.sh.
+  cat > "$CASE_BIN/node" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$CASE_ART"
+SH
+  chmod +x "$CASE_BIN/node"
+fi
+case_id=$(PATH="$CASE_BIN:$PATH" "$ROOT/bin/fm-procevent-lavish.sh" source-id "$CASE_ART")
+[ "$(PATH="$CASE_BIN:$PATH" "$ROOT/bin/fm-procevent-lavish.sh" source-id "$CASE_SPELLED")" = "$case_id" ] \
+  || fail "two spellings of one board produced two source ids"
+fm_test_track_procevent_home "$HCASE"
+new_task_endpoint "$HCASE" worker-case
+out=$(PATH="$CASE_BIN:$PATH" FM_HOME="$HCASE" \
+  "$ROOT/bin/fm-procevent-lavish.sh" arm "$CASE_SPELLED" --for worker-case) \
+  || fail "a board armed through another spelling was refused: $out"
+assert_contains "$out" "armed: $case_id" "another spelling arms the board's one source"
+assert_contains "$out" "artifact: $CASE_ART" "the listener holds the path Lavish keys its session on"
+PATH="$CASE_BIN:$PATH" pe "$HCASE" ensure-listening "$case_id" \
+  || fail "the id derived from the on-disk path does not name the armed board"
+assert_contains "$(PATH="$CASE_BIN:$PATH" pe "$HCASE" list)" "task:worker-case/listening" \
+  "the listener stays up after another spelling arms the board"
+touch "$CASE_TRIGGER"
+wait_for "$HCASE/state/worker-case.inbox/001.msg" \
+  || fail "the answer to a board armed through another spelling never reached its worker"
+[ -f "$HCASE/state/procevent-inbox/$case_id.1.result" ] \
+  || fail "the answer to a board armed through another spelling was not captured under its one source"
+pass "a board armed through another spelling keeps one source and a live listener, and its answer arrives"
+
 # --- end-user-aligned regression: an orphaned capture keeps its owner ---------
 # An unacknowledged capture belongs to whoever it was routed to. Retiring the
 # board it came from orphans that capture without handing it to anyone, so a

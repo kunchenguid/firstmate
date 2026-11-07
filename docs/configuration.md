@@ -2904,6 +2904,7 @@ A long-polling external process is registered as a *source* through its adapter,
 **Open the Lavish artifact first**
 
 Before arming any Lavish source, open its artifact with `lavish-axi` so the saved session identifies the board's server; reply and poll attempts derive their host and port from that session and refuse missing or invalid session evidence before posting or consuming a staged worker reply.
+A board's identity is the native realpath Lavish keys that session on, so every spelling of its path on a case-insensitive filesystem names one source.
 
 **Retry interrupted Lavish polls**
 

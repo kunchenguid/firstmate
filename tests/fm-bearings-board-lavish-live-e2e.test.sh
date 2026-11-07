@@ -17,6 +17,11 @@
 # a human. The artifact is a scratch page in a temporary directory, and the
 # session it opens is ended again before the guard returns.
 #
+# The same run proves the board identity the listener depends on: Lavish keys a
+# session on the native realpath, which is why a board armed through another
+# spelling of its path on a case-insensitive filesystem must reach that session.
+# A stub cannot show which spelling the real server stores.
+#
 # Standard CI has no lavish-axi, so this reports a capability skip there. The
 # portable counterpart in tests/fm-bearings-board.test.sh pins the build's logic
 # in CI against a stub that reproduces these shapes. Run this guard after a
@@ -39,6 +44,8 @@ cleanup() {
   [ -z "$LAB" ] || {
     [ ! -f "$LAB/.lavish/bearings-board.html" ] \
       || lavish-axi end "$LAB/.lavish/bearings-board.html" >/dev/null 2>&1 || true
+    [ ! -f "$LAB/.lavish/spelled-board.html" ] \
+      || lavish-axi end "$LAB/.lavish/spelled-board.html" >/dev/null 2>&1 || true
     rm -rf "$LAB"
   }
 }
@@ -120,3 +127,44 @@ esac
 lavish-axi 2>/dev/null | grep -F "$BOARD," | grep -q ',open,' \
   || fail "the board build reported success while the session was still not live"
 pass "the board build reopens a captain-ended session against real lavish-axi instead of arming a dead one"
+
+# THE IDENTITY UNDER GUARD: a board armed through another spelling of its path
+# is the session real Lavish stored, and an answer posted the way the browser
+# posts it is captured.
+LAB_SPELLED="${LAB%/*}/$(printf '%s' "${LAB##*/}" | tr '[:lower:][:upper:]' '[:upper:][:lower:]')"
+if [ ! -e "$LAB_SPELLED" ]; then
+  note "case-sensitive filesystem: another spelling of a board path cannot exist here"
+else
+  run_adapter() {
+    FM_HOME="$LAB" FM_STATE_OVERRIDE="$LAB/state" FM_DATA_OVERRIDE="$LAB/data" \
+      FM_PROCEVENT_CLAIM_ROOT="$LAB/procevent-claims" \
+      "$ROOT/bin/fm-procevent-lavish.sh" "$@"
+  }
+  SPELLED="$LAB_SPELLED/.lavish/spelled-board.html"
+  printf '<!doctype html><title>Spelled board</title><p>Guard placeholder</p>\n' \
+    > "$LAB/.lavish/spelled-board.html"
+  url=$(lavish-axi "$SPELLED" | sed -n 's/^[[:space:]]*url:[[:space:]]*//p' | head -1 | tr -d '"')
+  case "$url" in
+    http://*/session/*) ;;
+    *) fail "could not read the spelled board session url: $url" ;;
+  esac
+  key=${url##*/}
+  key=${key%%\?*}
+  base=${url%/session/*}
+  sid=$(run_adapter source-id "$SPELLED") || fail "cannot derive the spelled board source id"
+  [ "$sid" = "lavish-$key" ] \
+    || fail "lavish-axi ${VERSION:-version-unknown} session $key is not the one source $sid; board identity must be revisited"
+  out=$(run_adapter arm "$SPELLED" 2>&1) || fail "the spelled board did not arm: $out"
+  curl -fsS -X POST -H 'content-type: application/json' -H "origin: $base" \
+    -d '{"prompts":[{"tag":"message","prompt":"guard answer"}]}' \
+    "$base/api/$key/prompts" >/dev/null 2>&1 || fail "could not post an answer to the spelled board"
+  result="$LAB/state/procevent-inbox/$sid.1.result"
+  for _ in $(seq 1 100); do
+    [ ! -f "$result" ] || break
+    sleep 0.1
+  done
+  [ -f "$result" ] || fail "an answer to a board armed through another spelling was never captured"
+  [ "$(run_adapter classify "$result")" = feedback ] \
+    || fail "the spelled board capture is not the posted answer"
+  pass "a board armed through another spelling reaches the session real lavish-axi stored"
+fi
