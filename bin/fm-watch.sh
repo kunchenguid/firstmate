@@ -522,19 +522,10 @@ window_busy_verdict() {  # <window> <task> [tail40]
   local w=$1 task=$2 tail40=${3-} meta
   meta="$STATE/$task.meta"
   if [ -n "$task" ] && [ -f "$meta" ]; then
-    if [ -n "$tail40" ]; then
-      fm_busy_classify_meta "$meta" "$task" "$STATE" "$tail40"
-    else
-      fm_busy_classify_meta "$meta" "$task" "$STATE"
-    fi
+    fm_busy_classify_meta "$meta" "$task" "$STATE" "$tail40"
   else
-    if [ -n "$tail40" ]; then
-      fm_busy_classify "$(window_backend "$w")" "$w" "$(window_harness "$w")" \
-        "${task:-unknown}" "$STATE" "$tail40"
-    else
-      fm_busy_classify "$(window_backend "$w")" "$w" "$(window_harness "$w")" \
-        "${task:-unknown}" "$STATE"
-    fi
+    fm_busy_classify "$(window_backend "$w")" "$w" "$(window_harness "$w")" \
+      "${task:-unknown}" "$STATE" "$tail40"
   fi
 }
 
@@ -2452,9 +2443,17 @@ busy_stream_snapshot_current() {  # <task> <observed snapshot>
 # captain themself for a verified hold. Only the captain-held verb takes the second
 # wording; a caller that reached the bounded cadence off pause tracking alone, with
 # no declaring verb left on the log, keeps the external-wait wording it always had.
-handle_paused_stale() {  # <window> <task> <hash>
-  local win=$1 task=$2 h=$3 key statusf mtime age detail reason declaration last until now min_age
+handle_paused_stale() {  # <window> <task> <hash> [dialog-name]
+  local win=$1 task=$2 h=$3 dialog=${4-} key statusf mtime age detail reason declaration last until now min_age
   key=$(window_key "$win")
+  # A confirmed Claude background-task exit picker positively proves a human
+  # action is blocking progress, so a declaration that still owes its first
+  # alarm surfaces once through the declaration throttle; an `until` line or an
+  # already-alarmed declaration keeps the cadence below.
+  if [ -n "$dialog" ] && stale_wait_first_alarm_owed "$key" "$task"; then
+    surface_nonterminal_stale "$win" "$h" "$dialog"
+    return 0
+  fi
   printf '%s' "$h" > "$STATE/.stale-$key"
   : > "$STATE/.paused-$key"
   wedge_episode_end "$key"
@@ -2561,15 +2560,7 @@ busy_turn_bound_check() {  # <window> <task> <hash> <since-file> <escalation-fil
       fi
       return 0
     fi
-    # This is not an unreadable-runtime exception.  The recorded Claude picker
-    # positively proves that a human action is blocking progress, so surface it
-    # once through the declaration throttle instead of hiding it behind the
-    # normal pause cadence.
-    if [ -n "$dialog" ]; then
-      surface_nonterminal_stale "$win" "$h" "$dialog"
-      return 0
-    fi
-    handle_paused_stale "$win" "$task" "$h"
+    handle_paused_stale "$win" "$task" "$h" "$dialog"
     return 0
   fi
   stream_episode="$STATE/.model-stream-episode-$(window_key "$win")"
@@ -2922,7 +2913,8 @@ captain_call_stale_bound() {  # <window-key> <task>
 # decision is never silenced - which routes every parked-but-live worker here, on
 # first sight of each distinct stale hash. The one exception is a live pane whose
 # crew state and busy verdict are both unknown: it takes the pause cadence with
-# no first-sight wake, unless a confirmed blocking dialog is showing.
+# no first-sight wake, unless a confirmed blocking dialog shows while that
+# first alarm is still owed.
 #
 # So a legitimate wait bounds this path to the same once-per-PAUSE_RESURFACE_SECS
 # cadence resurface_absorbed owns for the absorbed paths, throttled by this
@@ -4473,14 +4465,7 @@ EOF
                 triage_log "absorbed non-terminal stale (provably working): $w"
                 ;;
               paused)
-                # A confirmed Claude background-task exit picker is itself an
-                # actionable block.  Let its first sight wake once; the shared
-                # declaration throttle then restores the ordinary long cadence.
-                if [ -n "$dialog" ]; then
-                  surface_nonterminal_stale "$w" "$h" "$dialog"
-                else
-                  handle_paused_stale "$w" "$task" "$h"
-                fi
+                handle_paused_stale "$w" "$task" "$h" "$dialog"
                 ;;
               *)
                 surface_nonterminal_stale "$w" "$h" "$dialog"
@@ -4490,7 +4475,7 @@ EOF
             task=$(window_to_task "$w" "$STATE")
             if [ -e "$pf" ] || status_is_paused_or_captain_held "$(status_declared_wait_line "$STATE/$task.status")"; then
               case "$(pause_state_class "$w" "$task")" in
-                paused)  handle_paused_stale "$w" "$task" "$h" ;;
+                paused)  handle_paused_stale "$w" "$task" "$h" "$dialog" ;;
                 working) clear_pause_state "$key"
                          printf '%s' "$h" > "$sf"
                          wedge_timer_check "$w" "$ssf" "non-terminal stale (provably working after a declared pause)" "$ewf" "$task" "$h" "$dialog"
@@ -4543,7 +4528,7 @@ EOF
       task=$(window_to_task "$w" "$STATE")
       if ! afk_present && status_is_paused_or_captain_held "$(status_declared_wait_line "$STATE/$task.status")" && [ "$busy_now" -ne 0 ]; then
         case "$(pause_state_class "$w" "$task")" in
-          paused) handle_paused_stale "$w" "$task" "$h" ;;
+          paused) handle_paused_stale "$w" "$task" "$h" "$dialog" ;;
           # Inconclusive, but the declared wait itself still stands, so only the
           # per-hash bookkeeping resets. The re-surface throttle bounds the
           # DECLARATION, not the pane hash: an idle parked pane whose display
