@@ -617,7 +617,7 @@ Each relocated script keeps its own gate, enforcing exactly what a script can ch
 | `bin/fm-send.sh --resolve-key` | Answers a decision the words pre-answer, or one `ask-user-authority`'s judgment (carried verbatim in the branch prompt) lets firstmate decide. |
 | `bin/fm-merge-local.sh` | Never relocated. |
 
-A repository the home lists in [`config/merge-script-only`](configuration.md#merge-script-only-repositories-configmerge-script-only) is the one unguarded exception: `bin/fm-pr-merge.sh` refuses it, and the branch runs that repository's named command itself under limits no script enforces, which the Postures section owns; such a merge records no merge authority, so its summary alone is the audit trail.
+A repository the home lists in [`config/merge-script-only`](configuration.md#merge-script-only-repositories-configmerge-script-only) is the one partly unguarded exception: the branch first calls `bin/fm-pr-merge.sh`, which checks the role, the away record, the recorded `pr=` binding, and the captain hold before it refuses with the exact invocation, and the branch then runs exactly that invocation itself under the remaining limits no script enforces, which the Postures section owns; such a merge records no merge authority, so its summary alone is the audit trail.
 The merge-authority record and the outcome row's summary are the audit trail.
 The return brief renders the words verbatim beside that account.
 
