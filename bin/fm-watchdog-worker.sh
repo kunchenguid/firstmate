@@ -1111,9 +1111,19 @@ dry_plan() {  # <id> <busy> <changed> <conn_err> <stage> <strikes> <inbox-min>
   if [ "$conn_err" = 1 ] && [ "$changed" -ge "$CONNECTION_SECS" ]; then
     if [ "$(csv_recent "$strikes" "$(now_epoch)" "$HOUR")" -lt "$CONNECTION_STRIKES" ]; then
       printf 'would continue'
-    else
-      printf 'would relaunch on fallback model'
+      return 0
     fi
+    # The plan must agree with the pass. A preview that promises a relaunch the
+    # pass will refuse, on a model the harness cannot reach, sends the reader
+    # looking for a change that never happens.
+    if [ "$(csv_recent "$relaunches" "$(now_epoch)" "$HOUR")" -ge "$RELAUNCH_PER_HOUR" ]; then
+      printf 'conn: would escalate (relaunch budget spent)'
+      return 0
+    fi
+    case "$(fm_meta_get "$STATE/$1.meta" harness)" in
+      ''|claude|claude-*) printf 'would relaunch on fallback model' ;;
+      *) printf 'would relaunch on its own model' ;;
+    esac
     return 0
   fi
   if [ "$busy" = busy ]; then
