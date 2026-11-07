@@ -3616,6 +3616,8 @@ A real `bin/fm-spawn.sh --scout --harness opencode --model opencode-go/deepseek-
 
 ## Native Codex supervision park
 
+The separate [foreground tool-yield verification](supervision.md#codex-foreground-tool-yields-2026-11-05) records Codex CLI 0.166.0 checkpoint continuation through returned shell session IDs on Herdr.
+
 Verified on 2026-10-19 with `codex-cli 0.163.0` on macOS arm64 in an isolated named Herdr lab.
 The native TUI fired project SessionStart and asynchronous Stop hooks, and `codex queue --thread` delivered input to the embedded `--no-daemon` session.
 [Supervision verification](supervision.md#codex-native-model-free-park-2026-10-19) records the commands, ten-minute provider-call comparison, real check delivery, input interrupt, park-death recovery and native-exit cleanup.

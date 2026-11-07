@@ -966,6 +966,17 @@ Observed output:
 
 The safe command-channel contract is covered without a notification by `tests/fm-daemon.test.sh`: the summary reaches both `$1` and stdin, every channel is process-group bounded, and a failed channel falls through.
 
+## Codex foreground tool yields (2026-11-05)
+
+Verified manually on Linux 7.2.15 with Codex CLI 0.166.0, `gpt-6-astra` at medium effort, in a guarded named Herdr lab with the tracked project hooks.
+The native TUI used `--no-daemon --no-alt-screen --dangerously-bypass-hook-trust --dangerously-bypass-approvals-and-sandbox --enable hooks`.
+Calling `exec_command` with `cmd="bin/fm-watch-checkpoint.sh --seconds 12"` and `yield_time_ms=1000` returned a `session_id` while the checkpoint was still running.
+Waiting through `write_stdin` on that ID returned `checkpoint: no actionable wake within 12s` with exit 124; draining then delivered the first independently appended durable event.
+After acknowledgement, the next checkpoint returned `check: rearm-resurface` with exit 0 for a second event appended while its watcher held the lock; main drained and acknowledged that event in the same turn.
+The negative trial deliberately finalized after receiving an ID: the later `check: rearm-resurface` completion appeared in the transcript without starting another handling turn or watcher cycle.
+This supports the [foreground protocol's tool-wait boundary](../supervision-protocols/codex-checkpoint.md), not automatic continuation across final responses.
+The existing `FM_CODEX_LIVE_E2E=1 tests/fm-codex-continuity-live-e2e.test.sh` covers only a one-second checkpoint; it does not automate this multi-cycle TUI trial.
+
 ## Codex native model-free park (2026-10-19)
 
 Verified on macOS arm64 with `codex-cli 0.163.0` in an isolated named Herdr lab, using the tracked project hooks and an embedded native TUI:
