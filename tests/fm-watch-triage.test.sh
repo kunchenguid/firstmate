@@ -5385,7 +5385,7 @@ test_long_endpoint_keeps_stale_history() (
     reap "$pid"
     fail "long endpoint never produced a stale wake: $(sed -n '1,3p' "$dir/watch.err")"
   fi
-  grep -Fx "stale: $window" "$out" >/dev/null || fail "long endpoint stale was not surfaced"
+  grep -Fx "stale: $window (task=$task)" "$out" >/dev/null || fail "long endpoint stale was not surfaced"
   [ "$(wedge_stale_wakes "$state" "$window")" -eq 1 ] || fail "long endpoint stale was not queued"
   for marker in ".hash-$key" ".count-$key" ".stale-$key"; do
     [ "${#marker}" -le 255 ] || fail "watcher marker exceeds 255 bytes"
