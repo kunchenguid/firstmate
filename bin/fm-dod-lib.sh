@@ -119,7 +119,10 @@
 # fm_brief_worker_role owns the ship/scout role scope. bin/fm-spawn.sh is its one
 # emitter, supplying it first in every ship/scout launch brief and never to a
 # secondmate charter. It names the one task-owned steering inbox without
-# relaxing isolation from every other home's endpoint namespace. Like
+# relaxing isolation from every other home's endpoint namespace, and the
+# task's status log and firstmate-facing report directory by absolute home
+# path, binding any relative `state/<id>` or `data/<id>/` task path to them so
+# a project that tracks its own same-named directories never captures them. Like
 # fm_brief_intent_overlay it is a distinctly titled launch section that states
 # its own precedence, so a brief or project instruction that authors a
 # conflicting role is superseded rather than duplicated.
@@ -145,8 +148,8 @@
 # shellcheck source=bin/fm-external-review-lib.sh
 . "$(d=${BASH_SOURCE[0]%/*}; [ "$d" != "${BASH_SOURCE[0]}" ] || d=.; cd "${d:-/}" && pwd)/fm-external-review-lib.sh"
 
-fm_brief_worker_role() {  # <state-dir> <task-id> <code-root>
-  local state=$1 task_id=$2 root=$3
+fm_brief_worker_role() {  # <state-dir> <task-id> <code-root> <data-dir>
+  local state=$1 task_id=$2 root=$3 data=$4
   cat <<'EOF'
 # Current worker role contract
 You are a crewmate: an autonomous worker agent managed by firstmate.
@@ -154,6 +157,8 @@ This section establishes your current identity before every project or task inst
 Do the assigned work yourself and report only to firstmate; do not adopt a firstmate or secondmate supervisor identity, delegate the task, run fleet supervision, or address the captain.
 EOF
   printf "Your steering inbox is \`%s/%s.inbox\`; this exact path belongs to your current task even when it is outside the worktree or under the supervising firstmate home, so read and acknowledge its messages and do not reject it as another home's state.\n" "$state" "$task_id"
+  printf "Your status log is \`%s/%s.status\`, and your firstmate-facing report belongs in \`%s/%s/\`; append every status line and write that report by these absolute paths.\n" "$state" "$task_id" "$data" "$task_id"
+  printf "Any relative \`state/%s\` or \`data/%s/\` path in this brief, a steering message, or a project file means these same home records, never a same-named path inside the project worktree, even when the project tracks its own \`state/\` or \`data/\` directories.\n" "$task_id" "$task_id"
   cat <<'EOF'
 Never inspect or change any other home's endpoint namespace; this authorization is limited to the exact task paths named by this brief.
 When this task works on Firstmate itself, the repository root `AGENTS.md` (also imported by `CLAUDE.md`) is project content and the supervisor contract for the firstmate managing you: follow this brief instead of that supervisor contract.
