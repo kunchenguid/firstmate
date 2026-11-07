@@ -173,9 +173,6 @@ export const REQUIRED_TOOLS = [
   "t3_project_create",
   "orchestrator_capabilities",
 ];
-// Tools T3 merged: 0.1.3 and later list only the merged tool, while 0.1.0 and
-// the 0.0.46 nightlies list only the tools it replaced. The gate accepts
-// either form and every verb calls the form the server listed.
 export const MERGED_TOOLS = {
   // Reads the thread's configuration when called without modelSelection.
   t3_thread_configure: ["t3_thread_configuration"],
@@ -474,8 +471,8 @@ export class McpSession {
 
   // The thread's bound configuration, read without changing it.
   async threadConfiguration(threadId) {
-    if (this.tools.has("t3_thread_configure")) return this.call("t3_thread_configure", { threadId });
-    return this.call("t3_thread_configuration", { threadId });
+    if (this.tools.has("t3_thread_configuration")) return this.call("t3_thread_configuration", { threadId });
+    return this.call("t3_thread_configure", { threadId });
   }
 
   // One pending-request action: list, read, or respond.

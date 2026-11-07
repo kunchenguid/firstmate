@@ -73,7 +73,7 @@ const BASE_TOOLS = [
   "orchestrator_capabilities", "t3_environment_read",
 ];
 const ALL_TOOLS = [...BASE_TOOLS, "t3_thread_configure", "t3_pending_request"];
-const LEGACY_TOOLS = [...BASE_TOOLS, "t3_thread_configuration", "t3_pending_request_list", "t3_pending_request_read", "t3_pending_request_respond"];
+const LEGACY_TOOLS = [...BASE_TOOLS, "t3_thread_configuration", "t3_thread_configure", "t3_pending_request_list", "t3_pending_request_read", "t3_pending_request_respond"];
 const listedTools = (w) => w.tools ?? (w.legacy ? LEGACY_TOOLS : ALL_TOOLS);
 
 // T3 0.1.3's compact catalog: option values only, and a short model list
@@ -215,6 +215,7 @@ async function callTool(w, name, a) {
   if (!listedTools(w).includes(name)) return [err("unknown_tool", `no tool ${name}`), false];
   // The merged tools answer as the single-purpose tool their call stands for.
   if (name === "t3_thread_configure") {
+    if (w.legacy && a.modelSelection === undefined) return [err("invalid_request", "modelSelection is required"), false];
     if (a.modelSelection !== undefined) return [err("invalid_request", "the fake reads configuration only"), false];
     name = "t3_thread_configuration";
   } else if (name === "t3_pending_request") {

@@ -131,15 +131,12 @@ test_gate_refuses_missing_tools() {
   pass "fm-t3-mcp gate: refuses a server missing a required tool or its identity tool"
 }
 
-# T3 0.1.3 merged t3_thread_configuration into t3_thread_configure and the
-# three t3_pending_request_* tools into t3_pending_request; T3 0.1.0 lists
-# only the tools they replaced. The gate accepts either form and every verb
-# calls the form the server lists, while a server with neither is refused.
 test_gate_accepts_merged_or_replaced_tools() {
   local project form base='"t3_thread_launch","t3_thread_send","t3_thread_read","t3_thread_wait","t3_thread_interrupt","t3_thread_organize","t3_thread_list","t3_project_list","t3_project_create","orchestrator_capabilities","t3_environment_read"'
-  for form in merged replaced; do
+  for form in merged legacy replaced; do
     fresh_case "gate-$form"
-    [ "$form" = replaced ] && t3_fake_set 'w.legacy = true'
+    [ "$form" = merged ] || t3_fake_set 'w.legacy = true'
+    [ "$form" = replaced ] && t3_fake_set "w.tools = [$base,\"t3_thread_configuration\",\"t3_pending_request_list\",\"t3_pending_request_read\",\"t3_pending_request_respond\"]"
     t3_fake_set 'w.threads = { "thread-q": { threadId: "thread-q", projectId: "p", status: "running", activeRunId: "run-q", archived: false, worktreePath: null, items: [],
       runs: [{ runId: "run-q", ordinal: 1, status: "running" }],
       runtimeRequests: [{ id: "req-question", kind: "user_input", status: "pending", questions: [{ id: "q1", header: "Pick", question: "Which?" }] }] } }'
@@ -161,7 +158,27 @@ test_gate_accepts_merged_or_replaced_tools() {
       assert_equals 'list read respond' "$(t3_fake_calls t3_pending_request | node -e 'process.stdout.write(require("fs").readFileSync(0, "utf8").trim().split("\n").map((l) => JSON.parse(l).action).join(" "))')" "every pending-request action goes to the merged tool"
     else
       assert_contains "$(t3_fake_calls t3_thread_configuration)" '"threadId"' "the replaced configuration tool reads the launch back"
+      assert_equals '' "$(t3_fake_calls t3_thread_configure)" "configuration read-back never invokes the legacy model writer"
       assert_equals '{"q1":"a"}' "$(field "$(t3_fake_calls t3_pending_request_respond)" answers)" "the answers reach t3_pending_request_respond"
+    fi
+    if [ "$form" = legacy ]; then
+      node --input-type=module - "$HELPER" "$CRED" <<'JS' || fail "T3 0.1.0's model writer must require modelSelection"
+import assert from "node:assert/strict";
+const { McpSession, readCredential, gate } = await import(process.argv[2]);
+const cred = readCredential(process.argv[3]);
+const session = new McpSession(cred.origin, cred.access_token);
+try {
+  const { tools } = await gate(session, cred);
+  assert.ok(tools.includes("t3_thread_configuration"));
+  assert.ok(tools.includes("t3_thread_configure"));
+  await assert.rejects(session.call("t3_thread_configure", { threadId: "thread-q" }), {
+    code: "invalid_request",
+    message: /modelSelection is required/,
+  });
+} finally {
+  await session.close();
+}
+JS
     fi
   done
   fresh_case gate-neither
