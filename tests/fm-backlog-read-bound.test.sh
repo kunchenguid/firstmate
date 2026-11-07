@@ -394,7 +394,7 @@ fm_fake_exit0 "$E2E_FAKEBIN" tmux node chrome-devtools-axi gh treehouse
 fm_fake_version_tool "$E2E_FAKEBIN" lavish-axi FM_FAKE_LAVISH_AXI_VERSION 0.1.80
 fm_fake_version_tool "$E2E_FAKEBIN" gh-axi FM_FAKE_GH_AXI_VERSION 0.1.29
 fm_fake_version_tool "$E2E_FAKEBIN" no-mistakes FM_FAKE_NO_MISTAKES_VERSION \
-  'no-mistakes version v1.46.0 (fake) 2026-06-27T00:02:18Z'
+  'no-mistakes version v1.80.0 (fake) 2026-06-27T00:02:18Z'
 
 printf '# Backlog\n' > "$E2E_HOME/data/backlog.md"
 # One owned record, so the reconcile sweep actually reads the wedged backend.
