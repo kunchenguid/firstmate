@@ -5647,6 +5647,60 @@ test_merge_script_only_waits_for_role_binding_and_hold_refusals() {
   pass "fm-pr-merge hands over the merge script invocation only after role, binding, and hold refusals"
 }
 
+# While away, the supervision branch calls fm-pr-merge first for a listed
+# repository, and the invocation its refusal prints is what it runs: that
+# command, run from the firstmate home, receives the recorded PR URL as its final
+# argument, while fm-pr-merge itself never merges, records, or keeps the away lock.
+test_merge_script_only_hands_away_branch_a_runnable_invocation() {
+  local case_dir rc url invocation run_dir
+  url=https://github.com/example-org/example-app/pull/77
+  case_dir=$(make_case merge-script-only-away-branch)
+  mkdir -p "$case_dir/wt" "$case_dir/home/scripts"
+  add_gh_mocks "$case_dir" 7777777777777777777777777777777777777777
+  : > "$case_dir/gh-axi.log"
+  cat > "$case_dir/home/scripts/land-pr.sh" <<'SCRIPT'
+#!/usr/bin/env bash
+pwd -P > "$LAND_PR_LOG.cwd"
+printf '%s\n' "$@" > "$LAND_PR_LOG.args"
+SCRIPT
+  chmod +x "$case_dir/home/scripts/land-pr.sh"
+  printf '%s\n' 'example-org/example-app scripts/land-pr.sh --squash' > "$case_dir/home/config/merge-script-only"
+  printf '%s\n' "pr=$url" >> "$case_dir/state/task-x1.meta"
+  cp "$case_dir/state/task-x1.meta" "$case_dir/meta.before"
+  write_away_record "$case_dir" --words 'merge task-x1 when green'
+
+  set +e
+  FM_SUPERVISION_ACTOR=branch run_pr_merge "$case_dir" task-x1 "$url" \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 2 "$rc" "merge-script-only-away-branch: the away branch should be refused with the invocation"
+  assert_grep "run 'scripts/land-pr.sh --squash $url' from $case_dir/home;" "$case_dir/stderr" \
+    "merge-script-only-away-branch: the away branch was not handed the invocation"
+  cmp -s "$case_dir/meta.before" "$case_dir/state/task-x1.meta" \
+    || fail "merge-script-only-away-branch: a refused merge changed the task metadata"
+  [ ! -e "$case_dir/gh.log" ] || assert_no_grep 'pr merge' "$case_dir/gh.log" \
+    "merge-script-only-away-branch: the gh merge was invoked for a listed repository"
+  assert_no_grep 'merge' "$case_dir/gh-axi.log" \
+    "merge-script-only-away-branch: the gh-axi merge was invoked for a listed repository"
+  assert_absent "$case_dir/state/.afk-contract.lock" \
+    "merge-script-only-away-branch: the away-authority lock remained held"
+
+  invocation=$(sed -n "s/.*run '\(.*\)' from \(.*\); firstmate will not merge it.*/\1/p" "$case_dir/stderr")
+  run_dir=$(sed -n "s/.*run '\(.*\)' from \(.*\); firstmate will not merge it.*/\2/p" "$case_dir/stderr")
+  [ -n "$invocation" ] && [ -n "$run_dir" ] \
+    || fail "merge-script-only-away-branch: could not read the invocation from the refusal"
+  (cd "$run_dir" && LAND_PR_LOG="$case_dir/land-pr" bash -c "$invocation") \
+    || fail "merge-script-only-away-branch: the printed invocation did not run from the named directory"
+  [ "$(cat "$case_dir/land-pr.cwd")" = "$(cd "$case_dir/home" && pwd -P)" ] \
+    || fail "merge-script-only-away-branch: the command did not run from the firstmate home"
+  [ "$(tail -1 "$case_dir/land-pr.args")" = "$url" ] \
+    || fail "merge-script-only-away-branch: the PR URL was not the command's final argument"
+  [ "$(head -1 "$case_dir/land-pr.args")" = "--squash" ] \
+    || fail "merge-script-only-away-branch: the configured arguments were not kept"
+  pass "while away, the branch is handed a merge script invocation that runs from the home with the PR URL last"
+}
+
 test_merge_script_only_leaves_unlisted_repositories_alone() {
   local case_dir rc
   case_dir=$(make_case merge-script-only-unlisted)
@@ -5778,5 +5832,6 @@ test_expected_head_bad_inputs_refuse_before_effects
 test_expected_head_keeps_existing_refusals
 test_merge_script_only_repo_refuses_before_recording
 test_merge_script_only_waits_for_role_binding_and_hold_refusals
+test_merge_script_only_hands_away_branch_a_runnable_invocation
 test_merge_script_only_leaves_unlisted_repositories_alone
 test_unreadable_merge_script_only_refuses
