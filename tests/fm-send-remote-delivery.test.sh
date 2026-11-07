@@ -575,6 +575,10 @@ test_remote_slash_rides_inbox() {
   [ -n "$recs" ] || fail "a remote '/' steer must land in the remote steering inbox, not a typed plane"
   grep -rqF '/audit the ledger' "$rhome/state/parent-route/rsm.inbox" \
     || fail "the remote record must carry the harness-native text verbatim"
+  case "$(fm_task_inbox_body "$recs")" in
+    "$FM_FROMFIRST_MARK"corr=[a-f0-9]*" /audit the ledger") : ;;
+    *) fail "a remote claude secondmate slash command must keep the marker in front of its record body" ;;
+  esac
   pass "fm-send remote: every remote text, harness-native included, rides the inbox"
 }
 

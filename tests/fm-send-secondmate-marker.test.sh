@@ -268,8 +268,102 @@ test_marked_send_preserves_trailing_newlines() {
   pass "fm-send: marked secondmate payload preserves trailing newline bytes in its record"
 }
 
+test_claude_secondmate_slash_command_leads_typed_bytes() {
+  local dir fb log home rc got corr long
+  dir="$TMP_ROOT/sm-slash"; mkdir -p "$dir"
+  fb=$(make_stubs "$dir"); log="$dir/send.log"
+  home=$(setup_home sm-slash)
+  fm_write_secondmate_meta "$home/state/domain.meta" "$home" "sess:fm-domain" alpha claude
+  # shellcheck source=/dev/null
+  . "$ROOT/bin/fm-pending-reply-lib.sh"
+
+  run_send "$fb" "$home" "$log" "domain" "/pstack:sharpen tighten the plan"; rc=$?
+  expect_code 0 "$rc" "a slash command to a local claude secondmate should succeed"
+  [ ! -d "$home/state/domain.inbox" ] || fail "a slash command must stay on the typed plane"
+  got=$(cat "$log")
+  corr=$(fm_pending_reply_extract_corr "$got")
+  [ -f "$(fm_pending_reply_path "$home/state" "$corr")" ] \
+    || fail "the typed slash command must carry the corr of its parent pending-reply record"$'\n'"$got"
+  [ "$got" = "/pstack:sharpen ${FM_FROMFIRST_MARK}corr=$corr tighten the plan" ] \
+    || fail "a claude secondmate slash command must be typed command-first with marker and corr opening its arguments"$'\n'"--- bytes ---"$'\n'"$(printf '%s' "$got" | od -An -c)"
+
+  FM_PENDING_REPLY_EXISTING_CORR=$corr run_send "$fb" "$home" "$log" "domain" "/pstack:sharpen tighten the plan"; rc=$?
+  expect_code 0 "$rc" "a recovery resend of the slash command should succeed"
+  got=$(cat "$log")
+  [ "$got" = "/pstack:sharpen ${FM_FROMFIRST_MARK}corr=$corr tighten the plan" ] \
+    || fail "a resend must keep the same corr in the command-first bytes"$'\n'"$got"
+
+  run_send "$fb" "$home" "$log" "domain" "/compact"; rc=$?
+  expect_code 0 "$rc" "a bare slash command to a local claude secondmate should succeed"
+  got=$(cat "$log")
+  corr=$(fm_pending_reply_extract_corr "$got")
+  [ "${got% }" = "/compact ${FM_FROMFIRST_MARK}corr=$corr" ] \
+    || fail "a bare slash command must be typed as the command followed by marker and corr"$'\n'"$got"
+
+  long=$(printf 'word %.0s' $(seq 1 160))
+  run_send "$fb" "$home" "$log" "domain" "/pstack:sharpen $long"; rc=$?
+  expect_code 0 "$rc" "a long slash command to a local claude secondmate should succeed"
+  got=$(cat "$log")
+  case "$got" in
+    "${FM_FROMFIRST_MARK}corr="[a-f0-9]*" /pstack:sharpen $long") : ;;
+    *) fail "typed bytes over Claude's 800-character paste threshold must keep the marker in front"$'\n'"$got" ;;
+  esac
+  pass "fm-send: a local claude secondmate slash command is typed command-first, carrying marker and corr as its arguments, up to Claude's paste threshold"
+}
+
+test_other_marked_messages_keep_marker_first() {
+  local dir fb log home rc got
+  dir="$TMP_ROOT/sm-slash-others"; mkdir -p "$dir"
+  fb=$(make_stubs "$dir"); log="$dir/send.log"
+  home=$(setup_home sm-slash-others)
+  fm_write_secondmate_meta "$home/state/echo.meta" "$home" "sess:fm-echo" alpha echo
+  fm_write_secondmate_meta "$home/state/cdx.meta" "$home" "sess:fm-cdx" alpha codex
+  fm_write_secondmate_meta "$home/state/cl.meta" "$home" "sess:fm-cl" alpha claude
+  fm_write_meta "$home/state/crew.meta" \
+    "window=sess:fm-crew" "worktree=$home/wt" "project=$home/p" \
+    "harness=claude" "kind=ship" "mode=no-mistakes" "yolo=off"
+
+  run_send "$fb" "$home" "$log" "echo" "/audit the ledger"; rc=$?
+  expect_code 0 "$rc" "a slash command to a non-claude secondmate should succeed"
+  got=$(cat "$log")
+  case "$got" in
+    "${FM_FROMFIRST_MARK}corr="[a-f0-9]*" /audit the ledger") : ;;
+    *) fail "a non-claude secondmate slash command must keep the marker in front"$'\n'"$got" ;;
+  esac
+
+  run_send "$fb" "$home" "$log" "cdx" "\$audit the ledger"; rc=$?
+  expect_code 0 "$rc" "a skill invocation to a codex secondmate should succeed"
+  got=$(cat "$log")
+  case "$got" in
+    "${FM_FROMFIRST_MARK}corr="[a-f0-9]*" \$audit the ledger") : ;;
+    *) fail "a codex secondmate skill invocation must keep the marker in front"$'\n'"$got" ;;
+  esac
+
+  run_send "$fb" "$home" "$log" "crew" "/audit the ledger"; rc=$?
+  expect_code 0 "$rc" "a slash command to a claude crewmate should succeed"
+  [ "$(cat "$log")" = "/audit the ledger" ] \
+    || fail "a claude crewmate slash command must stay unmarked"$'\n'"$(cat "$log")"
+
+  run_send "$fb" "$home" "$log" "cl" --fire-and-forget 0123456789abcdef "/audit the ledger"; rc=$?
+  expect_code 0 "$rc" "a fire-and-forget slash command to a claude secondmate should succeed"
+  got=$(record_body "$home/state/cl.inbox/001.msg")
+  [ "$got" = "${FM_FROMFIRST_MARK}delivery=0123456789abcdef /audit the ledger" ] \
+    || fail "a fire-and-forget slash command must ride the inbox with the marker in front"$'\n'"$got"
+
+  run_send "$fb" "$home" "$log" "cl" "audit the ledger"; rc=$?
+  expect_code 0 "$rc" "plain text to a claude secondmate should succeed"
+  got=$(record_body "$home/state/cl.inbox/002.msg")
+  case "$got" in
+    "${FM_FROMFIRST_MARK}corr="[a-f0-9]*" audit the ledger") : ;;
+    *) fail "plain text to a claude secondmate must ride the inbox with the marker in front"$'\n'"$got" ;;
+  esac
+  pass "fm-send: every other marked message, and every unmarked one, keeps today's bytes"
+}
+
 test_secondmate_target_is_marked
 test_exact_secondmate_task_id_is_marked
+test_claude_secondmate_slash_command_leads_typed_bytes
+test_other_marked_messages_keep_marker_first
 test_crewmate_target_is_not_marked
 test_explicit_window_is_not_marked
 test_key_path_is_not_marked
