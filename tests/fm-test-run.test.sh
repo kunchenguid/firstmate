@@ -306,6 +306,33 @@ test_shell_line_ending_policy_selects_runner_contract() {
   pass "shell line-ending policy selects runner coverage"
 }
 
+test_changed_remote_inheritance_selects_generation_contract() {
+  local tmp repo listed source
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-inheritance.XXXXXX")
+  repo="$tmp/repo"
+  init_changed_fixture_repo "$repo"
+  printf '#!/usr/bin/env bash\n' >"$repo/tests/fm-remote-inherit-generation.test.sh"
+  chmod +x "$repo/tests/fm-remote-inherit-generation.test.sh"
+  for source in fm-remote-inherit-push.sh fm-remote-inherit.sh fm-secondmate-nudge-lib.sh; do
+    : >"$repo/bin/$source"
+  done
+  git -C "$repo" add .
+  git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -qm inheritance-fixture
+  for source in fm-remote-inherit-push.sh fm-remote-inherit.sh fm-secondmate-nudge-lib.sh; do
+    printf '\n' >>"$repo/bin/$source"
+    listed=$(cd "$repo" && bin/fm-test-run.sh --list --changed --base HEAD)
+    assert_contains "$listed" "tests/fm-remote-inherit-generation.test.sh" \
+      "$source change must select the generation regression"
+    assert_contains "$listed" "tests/fm-secondmate-safety.test.sh" \
+      "$source change must retain secondmate coverage"
+    assert_not_contains "$listed" "tests/fm-ask-user-authority.test.sh" \
+      "$source change must not select the whole pure-contract-unit family"
+    git -C "$repo" checkout -q -- "bin/$source"
+  done
+  rm -rf "$tmp"
+  pass "changed inheritance sender, receiver and counter select the focused generation contract"
+}
+
 test_changed_dependency_selection_and_unmapped_failure() {
   local tmp repo listed rc
   tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-changed.XXXXXX")
@@ -1590,9 +1617,10 @@ SH
 # green but whose wall clock outgrew its caller's invocation budget. The caller
 # gets killed mid-run and retries invisibly, so an over-budget run has to be a
 # failure, not a note in the log.
-# tests/fm-watch-triage.test.sh finishes in about 434s alone and about 698s
-# under CI load, so the automatic --changed bound must leave a slow but healthy
-# watcher-wake-lock script room while still bounding a genuinely hung one
+# tests/fm-watch-triage.test.sh is the slowest watcher-wake-lock member at about
+# 593s under CI load (pause and wedge-defer siblings are 467s and 527s), so the
+# automatic --changed bound must leave a slow but healthy watcher-wake-lock
+# script room while still bounding a genuinely hung one
 # (upstream issue #3869). The stub records the bound the runner hands it.
 test_changed_bound_gives_slow_watcher_suites_headroom() {
   local tmp repo script bound rc
@@ -1908,6 +1936,7 @@ test_changed_file_selection_is_conservative
 test_task_marker_refuses_the_primary_checkout
 test_changed_runner_surfaces_select_their_family
 test_shell_line_ending_policy_selects_runner_contract
+test_changed_remote_inheritance_selects_generation_contract
 test_changed_dependency_selection_and_unmapped_failure
 test_changed_bin_reference_selects_per_script_not_per_family
 test_changed_uses_bounded_automatic_concurrency

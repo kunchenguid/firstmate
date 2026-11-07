@@ -7,7 +7,10 @@ It provides task tabs and their terminal blocks while Treehouse continues to pro
 ## Setup
 
 Pick Rex when you already run Firstmate inside Rex and want each task as its own tab next to your session.
-Rex is in beta, and its sessions live in a personal server that does not keep them across a server stop.
+The Rex server must run on the same machine as Firstmate because spawn and liveness checks compare Rex-reported process and filesystem data with local machine state.
+For a new spawn, only a `unix://` endpoint reported by `rex whoami --json` is accepted as proof of locality; other transports, including local TCP endpoints, or an unreadable endpoint are refused before a tab is created or a worktree is leased.
+Use [remote second mates](remote-secondmates.md) to run workers on another host; that page owns remote backend selection and server-readiness requirements.
+See [Active limits](#active-limits) for server-stop behavior.
 
 Prerequisites:
 
@@ -116,7 +119,7 @@ An ordinary spawn refuses any block carrying the task's scoped label.
 ## Attention marks
 
 Opt-in: with `config/rex-status-marks` set to `on`, the captain sees which worker needs them from Rex itself.
-`bin/fm-rex-marks.sh` turns each Rex task's latest status into one program-status record (OSC 7501, `app=firstmate`, `id=fm`) on that worker's pane, so Rex badges its tab, session, and Activity entry while the worker's own agent keeps the pane's root status.
+`bin/fm-rex-marks.sh` turns each Rex task's latest status into one program-status record (OSC 7501, `app=firstmate`, `id=fm`) on that worker's pane, so Rex badges its tab, session, and Activity entry without replacing the pane's root status.
 
 | Worker status | Record | Message |
 | --- | --- | --- |
@@ -130,8 +133,8 @@ Opt-in: with `config/rex-status-marks` set to `on`, the captain sees which worke
 
 Each record's title is the task's tab label, `fm-<id>`, so Rex labels it with the name Firstmate gave the tab rather than a branch or the agent's terminal title.
 Each new record that needs the captain also carries an OSC 777 desktop notification titled with the tab label, because Rex sounds and notifications follow each pane's root program status, not a child record.
-Firstmate never writes the root record: the harness owns it, and a second root report for the same turn makes Rex notify twice.
-Firstmate's own records never count as the worker's state, for busy detection or for push escalation.
+The attention-mark writer never writes the root record: the harness or the [worker-side status bridge](configuration.md#osc-7501-worker-status-reporting) owns it, and a second root report for the same turn makes Rex notify twice.
+Firstmate's own records - attention marks and the bridge's `app=firstmate-<harness>` root record - never count as the worker's state, for busy detection or for push escalation.
 The notification fires once per change, never on a repeated sync.
 Rex has no API to set a record, so the mark is one small write to the pane's terminal device; a `working` or `blocked` record is dropped when the agent's shell prints its next prompt or exits, and the next sync writes it again.
 The watcher runs `fm-rex-marks.sh sync` once per poll only while `config/rex-status-marks` or `config/rex-tint` exists or a cached record remains, and cleanup clears a cached mark before closing the pane.
@@ -164,7 +167,9 @@ Naming `rex` in `config/wedge-alarm` adds an opt-in wedge alarm on Firstmate's o
 ## Active limits
 
 - Rex is experimental and in beta, and the adapter refuses a CLI or server below API revision 5.
-- Sessions do not survive a Rex server stop; recovery proves such tasks gone and reclaims them into fresh tabs.
+- A Rex server stop kills every task's agent process.
+  A restarted server restores the sessions themselves on the same endpoint and state directory, with each block returning as a fresh login shell preserving its working directory.
+  Liveness relaunches the dead agent into the restored session; when a session genuinely does not come back, recovery proves the task gone and reclaims it into a fresh tab.
 - The viewport is derived, not read directly, as described above.
 - Only harnesses that report OSC 7501 contribute native busy evidence; the others are classified from their own lifecycle and rendered footer.
 - Command Code is refused on Rex until it is live-verified there, and Cursor Agent is not yet live-verified on Rex.

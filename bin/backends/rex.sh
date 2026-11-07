@@ -42,8 +42,9 @@
 # line, 3 target not found (or an ambiguous label, which full ids never are),
 # 4 server unreachable. Passive reads pass --autostart=false so a probe never
 # starts a server; spawn, cleanup, and the control plane's absence recheck let
-# the CLI start a missing personal server, because a stopped server ends every
-# session on it and a started one then answers "not found" with authority.
+# the CLI start a missing personal server so it can prove whether the recorded
+# block restored as a shell or is authoritatively missing.
+# FM_BACKEND_REX_NO_AUTOSTART=1 withholds that start (fm_backend_rex_cli).
 #
 # Viewport: Rex has no viewport-only read, so the visible viewport is DERIVED
 # as the last `size.rows` lines of the styled `format` read, which always ends
@@ -113,17 +114,26 @@ fm_backend_rex_tool_check() {
   return 0
 }
 
-# fm_backend_rex_cli: one CLI call that may start a missing personal server.
+# fm_backend_rex_cli: one CLI call that may start a missing personal server,
+# unless FM_BACKEND_REX_NO_AUTOSTART=1 prevents calls from starting one. A remote second mate's host-local control plane sets it
+# (bin/fm-remote-secondmate-control.sh): there an automatic start creates an
+# exit-empty server, and only remote readiness may start the persistent one.
 fm_backend_rex_cli() {  # <rex-args...>
   local bin
   bin=$(fm_backend_rex_bin) || return 1
-  "$bin" "$@"
+  if [ "${FM_BACKEND_REX_NO_AUTOSTART:-}" = 1 ]; then
+    "$bin" --autostart=false "$@"
+  else
+    "$bin" "$@"
+  fi
 }
 
 # fm_backend_rex_read: one CLI call that never starts a server; an unreachable
 # server exits 4 instead.
 fm_backend_rex_read() {  # <rex-args...>
-  fm_backend_rex_cli --autostart=false "$@"
+  local bin
+  bin=$(fm_backend_rex_bin) || return 1
+  "$bin" --autostart=false "$@"
 }
 
 # fm_backend_rex_failure_class: classify a failed call from its exit status
@@ -180,6 +190,23 @@ fm_backend_rex_version_check() {  # [start|read]
     return 1
   fi
   return 0
+}
+
+# fm_backend_rex_local_server_ensure: Rex's process and cwd views are only
+# authoritative on the machine running Firstmate. A Unix socket endpoint is
+# local to this machine; other endpoint transports do not prove locality and
+# are refused conservatively before spawn leases a worktree or opens a tab.
+fm_backend_rex_local_server_ensure() {
+  local endpoint
+  endpoint=$(fm_backend_rex_server_endpoint) || {
+    echo "error: could not determine the Rex server endpoint; Rex workers need a Rex server on this machine. For work on another host, use remote second mates (docs/remote-secondmates.md)" >&2
+    return 1
+  }
+  case "$endpoint" in
+    unix://*) return 0 ;;
+  esac
+  echo "error: Rex server endpoint '$endpoint' is not proven to be on this machine; Rex workers need a Rex server on this machine. For work on another host, use remote second mates (docs/remote-secondmates.md)" >&2
+  return 1
 }
 
 # fm_backend_rex_container_ensure: the spawn-time gate (tool, CLI, server).
@@ -818,7 +845,7 @@ fm_backend_rex_trusted_record() {  # <target>
   live=$(fm_backend_rex_live_pids "$1") || return 0
   jq -rn --argjson s "$status" --argjson live "$live" --arg mark "$FM_BACKEND_REX_MARK_APP" '
     def clean: tostring | gsub("[\t\r\n]"; " ");
-    [$s.records[]? | select((.app // "") != $mark
+    [$s.records[]? | select((.app // "") as $a | $a != $mark and ($a | startswith($mark + "-") | not)
       and (.owner.pid as $p | $p != null and ($live | index($p)) != null))] as $trusted
     | first(("working", "blocked", "error", "done", "idle") as $want
         | $trusted[] | select(.state == $want)
@@ -1232,9 +1259,10 @@ fm_backend_rex_wait_transition() {  # <session> <timeout_secs> <state_dir> <wind
     owner=$(printf '%s' "$line" | cut -f5)
     msg=$(printf '%s' "$line" | cut -f6)
     fm_backend_rex_id_valid block "$block" || continue
-    # Firstmate's own records (bin/fm-rex-marks.sh, the wedge alarm) are never
-    # the worker's state; rex-eventwait.lua drops them too.
-    [ "$app" != "$FM_BACKEND_REX_MARK_APP" ] || continue
+    # Firstmate's own records (bin/fm-rex-marks.sh, the wedge alarm, and the
+    # bin/fm-osc7501.sh bridge's app=firstmate-<harness> root record) are
+    # never the worker's state; rex-eventwait.lua drops them too.
+    case "$app" in "$FM_BACKEND_REX_MARK_APP" | "$FM_BACKEND_REX_MARK_APP"-*) continue ;; esac
     case "$(fm_transition_policy "$to")" in
       actionable|absorb)
         fm_backend_rex_owner_trusted "$session:${block#block:}" "$owner" || continue
@@ -1273,6 +1301,8 @@ fm_backend_rex_wait_transition() {  # <session> <timeout_secs> <state_dir> <wind
 # Firstmate's own records (app=firstmate, id=fm and its validation-progress
 # child id=fm/validate on a worker pane, id=fm-wedge on the supervisor pane)
 # never overwrite a harness's report and a harness never overwrites them.
+# Those records, and the worker-side bridge's app=firstmate-<harness> root
+# record (bin/fm-osc7501.sh), never count as the worker's own state.
 # Clearing id=fm also removes id=fm/validate. A worker record's title is the
 # task's tab label, which Rex shows as the record's label. Rex drops a `working` or `blocked` record when its
 # owning process exits or at the next OSC 133 prompt mark, while `done` and

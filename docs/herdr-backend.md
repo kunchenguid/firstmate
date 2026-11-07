@@ -4,6 +4,8 @@ This page covers running Firstmate workers on the Herdr runtime backend: setup, 
 Operators who choose Herdr, or who verify Firstmate against it, need it.
 
 Herdr is an agent-native terminal backend with native per-pane agent state and push events.
+This backend uses the existing `herdr` product line, not the separate preview products herdr-core (`hc`) and herdr-app.
+Those previews are not upgrades to `herdr` 0.9.x and are not currently supported by this adapter.
 Firstmate requires Herdr protocol 14 or newer.
 Broad backend verification covers versions 0.7.1, 0.7.3, 0.7.4, 0.7.5, and 0.8.0.
 Protocol-16 features remain gated by availability.
@@ -24,6 +26,7 @@ Herdr provides the terminal session while Treehouse continues to provide task wo
 | What task metadata records for a Herdr endpoint | [Endpoint metadata](#endpoint-metadata) |
 | How text and keys reach a worker and how delivery is confirmed | [Current transport behavior](#current-transport-behavior) and [Composer and injection safety](#composer-and-injection-safety) |
 | What happens after a Herdr server restart and how liveness is judged | [Restart and liveness behavior](#restart-and-liveness-behavior) |
+| Keeping Firstmate from starting a server a service manager owns | [Externally managed servers](#externally-managed-servers) |
 | How blocked transitions arrive and what happens without protocol 16 | [Push events and polling fallback](#push-events-and-polling-fallback) |
 | Where the away daemon runs and how it stops | [Away-mode supervisor support](#away-mode-supervisor-support) |
 | Stopping or deleting Herdr sessions during verification | [Destructive lab safety](#destructive-lab-safety) |
@@ -40,7 +43,8 @@ Prerequisites:
 - The universal harness and toolchain requirements in [`configuration.md`](configuration.md#toolchain).
 - `python3` only for optional protocol-16 presentation-space ordering, native event subscription, and opt-in [project groups](#project-groups) agent-view transport.
 
-Herdr is dual-licensed AGPL-3.0-or-later or commercial.
+Herdr is Apache-2.0 licensed.
+Releases before 0.8.0 were dual-licensed AGPL-3.0-or-later or commercial.
 Firstmate invokes its CLI as a separate process.
 
 ### Selecting Herdr
@@ -51,7 +55,7 @@ Select Herdr in any of these ways:
 - `FM_BACKEND=herdr` for one launch.
 - An explicit request to Firstmate.
 
-A remote second-mate agent is the one case with no choice: it always runs on Herdr, and [`remote-secondmates.md`](remote-secondmates.md) owns that requirement and the readiness its host must meet.
+[`remote-secondmates.md`](remote-secondmates.md#launch-or-recover) owns remote second-mate backend selection, placement, and readiness.
 
 Herdr is also auto-detected when the primary runs natively under `HERDR_ENV=1` and is not inside tmux.
 A tmux pane nested inside Herdr resolves to tmux because the innermost multiplexer wins.
@@ -137,7 +141,8 @@ A claimed parent identity that cannot be resolved exactly stops the spawn before
 That covers:
 
 - A missing or unusable socket identity.
-- A closed or unreadable launcher pane.
+- A launcher pane that cannot be read, including a destroyed pane, which Herdr answers with `pane_not_found`. The refusal says it could not be read.
+- A launcher pane id that Herdr resolves to a different pane (such as a legacy id form), or a pane record with no tab or workspace. The refusal calls the pane id stale and names `HERDR_PANE_ID`, `HERDR_TAB_ID`, and `HERDR_WORKSPACE_ID` as the variables to refresh in the shell.
 - A pane and tab that disagree about their workspace.
 - A workspace missing from the session.
 - A pane belonging to another named session or Herdr server.
@@ -296,6 +301,8 @@ The worker remains on the ordinary flat or Herdr-current-order path.
 
 Normal task metadata remains the sole endpoint authority after creation.
 Cleanup closes only the exact recorded task pane and never calls `workspace close`.
+For a leased task copy, cleanup confirms that exact pane is gone before it reaps worktree processes or returns the copy.
+If the pane remains or its absence is ambiguous, cleanup retains the task records and copy for a retry.
 
 Herdr 0.7.5's explicit close moves focus to a neighbor whenever it empties a non-focused workspace.
 Its pane-death removal preserves the focused workspace whenever the dying workspace sits behind it or the focused workspace is last.
@@ -360,6 +367,11 @@ If lock, snapshot, pane identity, or restoration is ambiguous, cleanup warns and
 Once the exact pane is confirmed gone, teardown retires the task's own journal when it binds that same pane, or when it is a version 1 attempt whose token-bearing projected workspace is itself confirmed gone, because nothing then remains for the session-start sweep to correlate; a journal bound to any other pane, or a version 1 attempt whose workspace is still present or unreadable, stays for that sweep.
 
 ### Restart recovery
+
+A fresh task leases its task copy durably with `treehouse get --lease` and then moves the pane's top-level shell into it.
+Herdr restores a pane from the cwd of that top-level shell, and the pane's `cwd` field does not follow the nested shell an interactive `treehouse get` opens, so a restart would otherwise reopen the worker in the primary clone.
+The lease outlives the pane: teardown closes the exact pane before it returns the lease, because returning the copy ends the pane's top-level shell and Herdr would then remove the pane outside the focus-preserving close.
+An aborted spawn returns the lease only when Herdr confirms the task pane gone and the copy holds no uncommitted work; otherwise it names the `treehouse return --force` command.
 
 Recovery is deliberately conservative and presentation-only.
 An existing journal suppresses another projected create.
@@ -790,6 +802,25 @@ No Herdr-specific copy of that protocol exists.
 
 ## Restart and liveness behavior
 
+### Externally managed servers
+
+By default Firstmate starts a session's Herdr server itself, headless, whenever an operation finds it not running.
+That is wrong when a service manager, such as a systemd user unit, owns the server.
+During a unit restart or a `server live-handoff`, `status` can briefly report not running, and a server Firstmate started would race the owner and split panes across two servers.
+
+The owner opts out by writing marker files into the session directory, the directory holding the socket that `herdr --session <name> status --json` reports as `.server.socket`:
+
+| Marker | Written by the owner | Firstmate behavior |
+| --- | --- | --- |
+| `firstmate-server-owner` | Once, for as long as it owns the server; the first line names the owner | Uses a running server; never starts a stopped one, and waits a bounded time for it to report running, then fails naming the owner |
+| `firstmate-server-replacing` | Only for the duration of a restart or handoff | Never starts or uses a server, even one that reports running; waits a bounded time for the marker to clear and the server to report running, then fails naming the marker |
+
+The wait is up to 60 checks half a second apart, 30 seconds in all.
+A replacement marker that clears with no owner marker hands the session back to the default, so Firstmate starts the server if it is still down.
+A replacement marker left behind fails every operation naming its path, so the owner must remove it when the replacement ends.
+Every operation checks the session directory for a replacement marker once, even when the server reports running, so a replacement marker holds callers off the old server as well as the new one.
+That check reuses the `status` read Firstmate already makes, which reports the socket even while the server is stopped ([verification](verification/runtime-backends.md#session-directory)); a Herdr whose `status` omits the socket cannot carry the markers and keeps the default behavior.
+
 ### Husks after a server restart
 
 Stopping and restarting a named Herdr server preserves workspace, tab, pane, and label ids.
@@ -804,7 +835,7 @@ This prevents closing the workspace's last tab before a replacement exists.
 A registration alone never proves an agent.
 Herdr keeps a Pi registration after the Pi process has exited to a plain shell, whenever a nested interactive shell sits under the pane's top shell.
 In that case `agent get` still reports `agent=pi` with its last status.
-That nested shell is the crew shape `treehouse get` leaves behind (measured on Herdr 0.9.0 - [verification](verification/runtime-backends.md) "Stale agent registration"; upstream issue #4115).
+That nested shell is the shape the interactive `treehouse get` leaves behind; fresh Herdr spawns lease durably instead (see [Restart recovery](#restart-recovery)), but older or hand-driven panes can still have it (measured on Herdr 0.9.0 - [verification](verification/runtime-backends.md) "Stale agent registration"; upstream issue #4115).
 
 So before a registered agent counts as live, the pane classifier reads `pane process-info` and the real process table.
 It uses the shared harness-process classifier in `bin/fm-agent-process-lib.sh`, the same rule the tmux adapter proves liveness with:
