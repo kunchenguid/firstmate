@@ -6,12 +6,12 @@
 // branch conversation, so the branch reasons from today's generated prompt and
 // the current main dialog instead of an older thread's accumulated memory. The
 // durable outcome store, not that conversation, is what carries unacknowledged
-// captain-facing outcomes across the boundary. The watcher extension offers each
+// main and captain outcomes across the boundary. The watcher extension offers each
 // actionable wake here (lib/fm-branch-dispatch.ts); the branch handles it with
 // real tools and reports through the fm_branch_report custom tool, which
 // writes the durable outcome store FIRST (bin/fm-branch-outcome.sh), then
 // persists a sequence-keyed visible record in main's transcript, and for a
-// captain-facing outcome opens one sequence-keyed processing turn on main
+// main or captain outcome opens one sequence-keyed processing turn on main
 // that stays open until main acknowledges that sequence (see
 // presentUnprocessedOutcomes).
 // Main's captain/assistant dialog is mirrored into the branch as read-only
@@ -995,7 +995,7 @@ export default function (pi: ExtensionAPI) {
     };
   }
 
-  // A captain outcome is delivered by a durable, rendered session entry, not
+  // A main or captain outcome is delivered by a durable, rendered session entry, not
   // by asking main's model to acknowledge a hidden custom message. The store
   // sequence is the idempotency key: a reload after appendEntry but before
   // mark-read finds the same record and advances the cursor without appending
@@ -1086,7 +1086,7 @@ export default function (pi: ExtensionAPI) {
     }
   }
 
-  // Present the oldest bounded batch of unprocessed captain outcomes to main
+  // Present the oldest bounded batch of unprocessed main and captain outcomes to main
   // as one sequence-keyed processing request. After its acknowledgement the
   // next run boundary presents the next batch. The first PROCESSING_TRIGGERED_ATTEMPTS presentations
   // of a given sequence set open a turn of their own (queued as a follow-up
@@ -2355,7 +2355,7 @@ ${context.command}
     },
   });
 
-  // Main's only way to close a captain outcome. The acknowledgement is keyed
+  // Main's only way to close a main or captain outcome. The acknowledgement is keyed
   // to the sequence main names, validated by the store (never past the read
   // cursor, never backwards), and refused outside lock ownership, so neither a
   // paraphrase, an empty reply, nor a stale generation can mark an outcome
@@ -2444,7 +2444,7 @@ ${context.command}
     },
   });
 
-  // Captain outcomes are transcript entries rather than model messages. Their
+  // Main and captain outcomes are transcript entries rather than model messages. Their
   // payload is the durable store row plus a schema version, and the renderer
   // displays the exact stored summary without asking a model to paraphrase or
   // acknowledge it.
