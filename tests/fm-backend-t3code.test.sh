@@ -1819,7 +1819,7 @@ test_spawn_refuses_t3code_when_token_rejected() {
 t3_worker_setup() {
   local id=$1
   t3_task_id "$id"
-  WORKER_PROJ="$CASE_DIR/spawn-project"; WORKER_WT="$CASE_DIR/spawn-wt"
+  WORKER_PROJ="$CASE_DIR/spawn-project"; WORKER_WT="$CASE_DIR/${2:-spawn-wt}"
   fm_git_worktree "$WORKER_PROJ" "$WORKER_WT" "fm/$id"
   mkdir -p "$CASE_DIR/data/$id" "$CASE_DIR/state" "$CASE_DIR/home/state"
   write_spawn_brief "$CASE_DIR/data" "$id"
@@ -2046,6 +2046,31 @@ test_dirty_leased_slot_is_kept_without_a_thread() {
     || fail "a slot holding uncommitted work must never be force-returned"$'\n'"$out"
   assert_absent "$CASE_DIR/state/$id.meta" "a refused spawn records nothing"
   pass "fm-spawn.sh --backend t3code: a leased slot holding uncommitted work gets no thread and keeps its lease"
+}
+
+# A stale claim must be checked before T3 refreshes the leased slot's HEAD.
+test_stale_claim_refuses_before_t3_refresh() {
+  local id out rc before meta
+  id=$(t3_uid t3stalez)
+  t3_case spawn-stale-claim
+  t3_worker_setup "$id" pool/0/repo
+  printf '{}\n' > "$CASE_DIR/pool/treehouse-state.json"
+  printf 'unlanded\n' > "$WORKER_WT/keep.txt"
+  git -C "$WORKER_WT" add keep.txt
+  git -C "$WORKER_WT" commit -qm unlanded
+  before=$(git -C "$WORKER_WT" rev-parse HEAD)
+  meta="$CASE_DIR/state/older.meta"
+  fm_write_meta "$meta" "worktree=$WORKER_WT" "project=$WORKER_PROJ" "backend=t3code"
+  cp "$meta" "$CASE_DIR/older-before.meta"
+  out=$(t3_worker_spawn "$id" claude --model claude-sonnet-5); rc=$?
+  expect_code 1 "$rc" "an unprovable older endpoint must refuse the spawn"$'\n'"$out"
+  assert_contains "$out" "cannot retire older claims" "the refusal names the stale claim"
+  [ "$(git -C "$WORKER_WT" rev-parse HEAD)" = "$before" ] || fail "T3 refreshed HEAD before checking the older claim"
+  cmp -s "$meta" "$CASE_DIR/older-before.meta" || fail "refusal changed the older record"
+  [ -z "$(t3_dispatch_types)" ] || fail "a refused claim launched a thread"
+  [ "$(t3_log_line_of 'r.tool === "treehouse" && r.args.indexOf("return --force") === 0')" -eq 0 ] \
+    || fail "an unproved older claim was force-returned"
+  pass "fm-spawn.sh --backend t3code: stale claims are checked before refresh and unsafe slots stay leased"
 }
 
 # A clean slot whose refresh fails holds nothing to lose, so it gets no thread
@@ -2804,6 +2829,7 @@ test_launch_gate_failure_returns_lease
 test_refused_launch_turn_archives_thread_and_returns_lease
 test_misbound_thread_launch_returns_lease
 test_dirty_leased_slot_is_kept_without_a_thread
+test_stale_claim_refuses_before_t3_refresh
 test_clean_slot_refresh_failure_returns_lease
 test_aborted_t3_secondmate_spawn_removes_home_env
 test_nested_t3_secondmate_home_reaped_before_removal
