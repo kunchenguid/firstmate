@@ -79,18 +79,25 @@
 # commands, and codex `$...` skill invocations resolved through harness meta,
 # get a longer pre-Enter settle so completion popups do not swallow Enter.
 # A remote secondmate target has no typed text plane at all:
-# every remote text steer rides the inbox (a marked secondmate request already
-# reaches the harness as marker-prefixed chat rather than a parser command, so
-# routing a remote "/..." or "$..." through the record changes nothing the
-# parser would have seen); only --key still crosses to the remote endpoint.
+# every remote text steer rides the inbox, so a remote "/..." or "$..." reaches
+# the harness inside its marked record as chat, not as a parser command; only
+# --key still crosses to the remote endpoint.
 #
-# Stage-1 compatibility boundary: classification uses the original pre-marker
-# text, but secondmate marking still precedes every typed submission. Therefore
-# a marked parser-native secondmate invocation intentionally reaches the harness
-# as marker-prefixed chat rather than executing as a parser command. This is a
-# pre-existing interaction retained for byte compatibility in this local-inbox
-# stage; do not move the marker behind the invocation or omit it here. Follow-up
-# fm-send-secondmate-harness-invocation-r1 owns that behavior.
+# Secondmate slash commands: a marked request to a LOCAL claude secondmate whose
+# text opens with "/" is typed as "/<command> <marker>corr=<id> <rest>", so
+# Claude's parser runs the command (the token up to the first whitespace) and
+# passes the marker and corr in its arguments (a skill without argument
+# placeholders gets them on an appended "ARGUMENTS:" line); the secondmate still
+# answers through its parent status channel. Only the typed bytes move: the
+# pending-reply record, corr reuse, and the slash settle read the original text.
+# Typed bytes over 800 keep the marker in front, because Claude turns a typed
+# burst longer than 800 characters into a pasted block it never parses as a
+# command. Limits: a skill whose body uses positional or named placeholders may
+# not receive the marker, and a built-in that starts no model turn (/clear,
+# /compact, /exit) cannot reply, so the pending-reply guard sends its one
+# recovery request and then escalates. Every other marked typed message,
+# including "/" or "$" to a non-claude secondmate, keeps the marker in front
+# and reaches that harness as chat, not as a parser command.
 #
 # From-firstmate marker: when the resolved target is a task selector whose meta
 # records kind=secondmate, the message uses the live-charter-compatible
@@ -1000,16 +1007,11 @@ else
   # resolved through this home's metadata rides the inbox plane, unless it is
   # a LOCAL harness-native invocation that must reach the harness's own parser
   # - a leading "/" (slash command), or a leading "$" to a codex target (skill
-  # invocation). A remote secondmate selector always rides the inbox: its
-  # requests are marked, and a marked request reaches the harness as
-  # marker-prefixed chat rather than a parser command anyway, so no remote
-  # text has a typed plane to lose. An explicit backend target stays typed
-  # even when it happens to match local metadata: it names an endpoint, not a
-  # task, the same boundary that keeps it unmarked and outside --resolve-key.
+  # invocation). An explicit backend target stays typed even when it happens
+  # to match local metadata: it names an endpoint, not a task, the same
+  # boundary that keeps it unmarked and outside --resolve-key.
   # Classification reads the pre-marker text so a marked secondmate request
-  # and a plain crewmate steer classify identically. It deliberately does NOT
-  # promise that a marked parser-native secondmate request executes as a parser
-  # command: the pre-existing marker-first wire bytes are retained in stage 1.
+  # and a plain crewmate steer classify identically.
   INBOX_PLANE=0
   if [ -n "$TARGET_SELECTOR" ]; then
     if [ -n "$FIRE_AND_FORGET_ID" ] || [ "$TARGET_BACKEND" = remote ]; then
@@ -1233,6 +1235,18 @@ else
     3) echo "fm-send: doorbell not typed because the agent in $T has exited; the steer is durably recorded at $INBOX_RECORD for recovery (stuck-crewmate-recovery), and the watcher will not re-ring a dead pane" >&2 ;;
     esac
     exit 0
+  fi
+  # See "Secondmate slash commands" in the header.
+  if [ "$MARK_FROM_FIRSTMATE" = 1 ] && [ "$TARGET_HARNESS" = claude ]; then
+    case "$RESOLVE_ANSWER_TEXT" in
+    /*)
+      slash_command=${RESOLVE_ANSWER_TEXT%%[[:space:]]*}
+      slash_args=${RESOLVE_ANSWER_TEXT#"$slash_command"}
+      fm_pending_reply_embed_corr "${slash_args#[[:space:]]}" "$PENDING_REPLY_CORR" slash_args
+      slash_message="$slash_command $slash_args"
+      [ "$(printf '%s' "$slash_message" | wc -c)" -gt 800 ] || MESSAGE=$slash_message
+      ;;
+    esac
   fi
   # Slash commands open a completion popup in some TUIs (verified on codex);
   # submitting too fast selects nothing, so give the popup time to settle before
