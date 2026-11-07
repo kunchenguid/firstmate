@@ -167,6 +167,40 @@ test_remote_only_commits_refuse_before_rebasing() {
   pass "auto-rebase: origin commits missing locally refuse before any rebase or push"
 }
 
+test_other_local_branches_stay_put_with_update_refs() {
+  local saved
+  fixture updaterefs
+  git -C "$FX_WT" branch fm/saved
+  saved=$(head_of "$FX_WT" refs/heads/fm/saved)
+  git -C "$FX_WT" config rebase.updateRefs true
+  advance_origin other 'from main'
+  run_rebase --mode direct-PR
+  expect_code 0 "$RC" "rebase with rebase.updateRefs enabled"
+  assert_equals "$saved" "$(head_of "$FX_WT" refs/heads/fm/saved)" "a second local branch moved with the rebase"
+  pass "auto-rebase: another local branch stays put even with rebase.updateRefs enabled"
+}
+
+test_merge_commit_refuses_before_rebasing() {
+  local before remote_before
+  fixture merged
+  git -C "$FX_WT" checkout -q -b side
+  printf 'side\n' > "$FX_WT/side"
+  git -C "$FX_WT" add side
+  git -C "$FX_WT" commit -qm 'side work'
+  git -C "$FX_WT" checkout -q fm/t1
+  git -C "$FX_WT" merge -q --no-ff -m 'merge side' side
+  git -C "$FX_WT" push -q origin fm/t1
+  advance_origin other 'from main'
+  before=$(head_of "$FX_WT" HEAD)
+  remote_before=$(head_of "$FX_ORIGIN" refs/heads/fm/t1)
+  run_rebase --mode direct-PR
+  expect_code 2 "$RC" "rebase of a branch with a merge commit"
+  assert_contains "$OUT" "merge commit" "the refusal did not say why"
+  assert_equals "$before" "$(head_of "$FX_WT" HEAD)" "the refusal moved the task branch"
+  assert_equals "$remote_before" "$(head_of "$FX_ORIGIN" refs/heads/fm/t1)" "the refusal pushed over origin's task branch"
+  pass "auto-rebase: a branch holding a merge commit is refused before any rebase or push"
+}
+
 test_refusals() {
   fixture refuse
   run_rebase
@@ -185,4 +219,5 @@ test_refusals() {
 
 fm_test_run test_clean_rebase_pushes_with_lease test_current_branch_is_a_noop \
   test_conflict_aborts_and_leaves_the_branch test_local_only_rebases_onto_local_main_without_remote \
-  test_no_mistakes_never_pushes test_remote_only_commits_refuse_before_rebasing test_refusals
+  test_no_mistakes_never_pushes test_remote_only_commits_refuse_before_rebasing test_refusals \
+  test_other_local_branches_stay_put_with_update_refs test_merge_commit_refuses_before_rebasing

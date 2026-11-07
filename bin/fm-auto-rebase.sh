@@ -23,8 +23,10 @@
 #   - On a conflict the rebase is aborted and the branch is left exactly where
 #     it was; the conflicted paths are printed and the exit is 1.
 # It refuses a detached HEAD, the base branch itself, tracked uncommitted
-# changes, and a rebase, merge, or cherry-pick already in progress. No other
-# local branch is written; fetch updates only remote-tracking refs.
+# changes, a rebase, merge, or cherry-pick already in progress, and a branch
+# that holds merge commits (a rebase would drop changes made only in a merge).
+# No other local branch is written, even with rebase.updateRefs enabled; fetch
+# updates only remote-tracking refs.
 #
 # Exit: 0 rebased (and pushed when applicable) or already current,
 #       1 conflict (aborted, branch untouched), 2 any other refusal or failure.
@@ -106,6 +108,10 @@ if g merge-base --is-ancestor "$onto_sha" "$old"; then
   exit 0
 fi
 
+if [ -n "$(g rev-list --merges --max-count=1 "$onto_sha..$old")" ]; then
+  fail "$branch holds a merge commit; a rebase can drop changes made only in a merge, so rebase it by hand"
+fi
+
 push=0
 if [ "$mode" = direct-PR ] && [ -n "$lease" ]; then
   g merge-base --is-ancestor "$lease" "$old" \
@@ -113,7 +119,9 @@ if [ "$mode" = direct-PR ] && [ -n "$lease" ]; then
   push=1
 fi
 
-if ! out=$(g rebase "$onto_sha" 2>&1); then
+# rebase.updateRefs would also move other local branches that point at the
+# rewritten commits; this script writes only the checked-out branch.
+if ! out=$(g -c rebase.updateRefs=false rebase "$onto_sha" 2>&1); then
   conflicts=$(g diff --name-only --diff-filter=U 2>/dev/null | tr '\n' ' ')
   if [ -e "$git_dir/rebase-merge" ] || [ -e "$git_dir/rebase-apply" ]; then
     g rebase --abort >/dev/null 2>&1 || fail "rebase failed and could not be aborted; run 'git rebase --abort' by hand"
