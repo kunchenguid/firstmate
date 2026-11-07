@@ -36,7 +36,7 @@
 // consumption changes.
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, renameSync, unlinkSync, unwatchFile, watchFile, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { ExtensionAPI, Theme } from "@earendil-works/pi-coding-agent";
@@ -103,6 +103,7 @@ type SessionGeneration = {
   replacement: boolean;
   child: ChildProcess | null;
   retryTimer: ReturnType<typeof setTimeout> | null;
+  reclaimListener: (() => void) | null;
   cleanupTimer: ReturnType<typeof setTimeout> | null;
   retryFailures: number;
   restoring: boolean;
@@ -554,6 +555,7 @@ function createGeneration(): SessionGeneration {
     replacement: false,
     child: null,
     retryTimer: null,
+    reclaimListener: null,
     cleanupTimer: null,
     retryFailures: 0,
     restoring: false,
@@ -575,6 +577,8 @@ function generationIsLive(generation: SessionGeneration): boolean {
 
 function relinquishGeneration(generation: SessionGeneration): void {
   generation.stopping = true;
+  if (generation.reclaimListener) unwatchFile(`${state}/.lock`, generation.reclaimListener);
+  generation.reclaimListener = null;
   if (generation.retryTimer) clearTimeout(generation.retryTimer);
   if (generation.cleanupTimer) clearTimeout(generation.cleanupTimer);
   generation.retryTimer = null;
@@ -1077,6 +1081,20 @@ export default function (pi: ExtensionAPI) {
     owner.retryTimer = timer;
   }
 
+  function scheduleOwnershipReclaim(owner: SessionGeneration): void {
+    if (!generationIsLive(owner) || liveArmChild(owner) || owner.reclaimListener) return;
+    const observe = (): void => {
+      const ownership = lockOwnership();
+      if (generationIsLive(owner) && !liveArmChild(owner) && ownership === "missing") return;
+      unwatchFile(`${state}/.lock`, observe);
+      owner.reclaimListener = null;
+      if (generationIsLive(owner) && ownership === "owned") activateOwnedWatch(owner);
+    };
+    owner.reclaimListener = observe;
+    watchFile(`${state}/.lock`, { persistent: false, interval: retryBaseMs }, observe);
+    observe();
+  }
+
   function startArm(owner: SessionGeneration, predecessorArmPid = ""): ArmResult {
     if (!generationIsLive(owner)) return { ok: false, message: shuttingDownMessage };
     const ownership = lockOwnership();
@@ -1087,6 +1105,8 @@ export default function (pi: ExtensionAPI) {
         message: "watcher: not armed - no live session holds the lock; run bin/fm-session-start.sh to reclaim it, then call fm_watch_arm_pi to re-arm",
       };
     }
+    if (owner.reclaimListener) unwatchFile(`${state}/.lock`, owner.reclaimListener);
+    owner.reclaimListener = null;
     publishGenerationOwner(owner, "active");
     if (liveArmChild(owner)) {
       return {
@@ -1249,7 +1269,10 @@ export default function (pi: ExtensionAPI) {
   pi.on?.("session_start", async () => {
     if (generation.stopping) generation = createGeneration();
     activateGeneration(generation);
-    if (lockOwnership() !== "owned") return;
+    if (lockOwnership() !== "owned") {
+      scheduleOwnershipReclaim(generation);
+      return;
+    }
     activateOwnedWatch(generation);
   });
   pi.on?.("session_shutdown", async (event) => {
