@@ -2605,6 +2605,104 @@ test_claude_permission_mode_auto_reaches_scout_launch() {
   pass "config/claude-permission-mode=auto reaches scout launches too"
 }
 
+# Each verified Claude scout gets a native id at launch, so its teardown can
+# retain a reference that a later follow-up scout may resume.
+test_claude_scout_records_a_native_session_id() {
+  local rec id out status launch session
+  id=scout-native-session-z22
+  rec=$(make_spawn_case scout-native-session claude "$id")
+  read_case_record "$rec"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --scout)
+  status=$?
+  expect_code 0 "$status" "Claude scout spawn should succeed: $out"
+  launch=$(cat "$LAUNCH_LOG")
+  session=$(sed -n 's/.*--session-id \([0-9a-f-]*\).*/\1/p' <<<"$launch")
+  [[ "$session" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]] \
+    || fail "Claude scout launch did not carry a UUID session id: $launch"
+  assert_grep "claude_session=$session" "$HOME_DIR/state/$id.meta" \
+    "Claude scout metadata did not retain its native session id"
+  pass "Claude scouts receive and record a native session id"
+}
+
+make_finished_scout_record() {  # <home> <id> <harness> <session>
+  local home=$1 id=$2 harness=$3 session=$4
+  mkdir -p "$home/data/$id"
+  printf '%s\n' 'Earlier scout report.' > "$home/data/$id/report.md"
+  printf '%s\n' \
+    "harness=$harness" \
+    'model=default' \
+    'effort=default' \
+    'project=/old/project' \
+    "session=$session" \
+    "report=$home/data/$id/report.md" \
+    'torn_down=2026-10-31T10:00:00Z' > "$home/data/$id/session.ref"
+}
+
+test_scout_follow_up_resumes_a_recorded_claude_session() {
+  local rec old id out status launch brief old_session new_session store
+  old=scout-follow-up-old-z23
+  id=scout-follow-up-new-z23
+  rec=$(make_spawn_case scout-follow-up-resume claude "$id")
+  read_case_record "$rec"
+  old_session=0f8fad5b-d9cb-469f-a165-70867728950e
+  make_finished_scout_record "$HOME_DIR" "$old" claude "$old_session"
+  store="$CASE_DIR/claude-store"
+  mkdir -p "$store/projects/old-project"
+  : > "$store/projects/old-project/$old_session.jsonl"
+
+  out=$(FM_TEST_CLAUDE_CONFIG_DIR="$store" \
+    run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --scout --harness claude --follow-up "$old")
+  status=$?
+  expect_code 0 "$status" "Claude follow-up scout should spawn: $out"
+  assert_contains "$out" "follow-up: resuming scout $old's claude session $old_session" \
+    "follow-up did not report its native-resume path"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "--resume $old_session --fork-session --session-id " \
+    "follow-up launch did not resume and fork the old Claude session"
+  new_session=$(sed -n 's/.*--session-id \([0-9a-f-]*\).*/\1/p' <<<"$launch")
+  [ "$new_session" != "$old_session" ] || fail "follow-up reused the old session instead of forking it"
+  assert_grep "follow_up=$old" "$HOME_DIR/state/$id.meta" "follow-up metadata lost the prior scout id"
+  brief="$HOME_DIR/data/$id/launch-brief.md"
+  assert_grep 're-verify every claim against it' "$brief" "follow-up brief omitted the re-verification instruction"
+  assert_grep "$HOME_DIR/data/$old/report.md" "$brief" "follow-up brief omitted the prior report path"
+  pass "a Claude follow-up resumes in a fresh scout copy and requires re-verification"
+}
+
+test_scout_follow_up_falls_back_without_a_resumable_session() {
+  local rec old id out status launch
+  old=scout-follow-up-fresh-old-z24
+  id=scout-follow-up-fresh-new-z24
+  rec=$(make_spawn_case scout-follow-up-fresh claude "$id")
+  read_case_record "$rec"
+  make_finished_scout_record "$HOME_DIR" "$old" codex ''
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --scout --harness claude --follow-up "$old")
+  status=$?
+  expect_code 0 "$status" "fresh fallback follow-up scout should spawn: $out"
+  assert_contains "$out" "follow-up: fresh scout pointed at $HOME_DIR/data/$old/report.md" \
+    "follow-up did not report the fresh-scout fallback"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_not_contains "$launch" '--resume ' "fallback follow-up incorrectly tried to resume a session"
+  assert_contains "$launch" '--session-id ' "fresh Claude follow-up did not receive its own resumable session id"
+  pass "a non-resumable scout follow-up falls back to a fresh scout"
+}
+
+test_scout_follow_up_refuses_without_a_prior_report() {
+  local rec id out status
+  id=scout-follow-up-missing-new-z25
+  rec=$(make_spawn_case scout-follow-up-missing claude "$id")
+  read_case_record "$rec"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --scout --harness claude --follow-up scout-follow-up-missing-old-z25 2>&1)
+  status=$?
+  expect_code 1 "$status" "follow-up without a report must refuse"
+  assert_contains "$out" 'has no report' "follow-up refusal did not name the required earlier report"
+  assert_absent "$HOME_DIR/state/$id.meta" "follow-up without a report wrote task metadata"
+  [ ! -s "$LAUNCH_LOG" ] || fail "follow-up without a report launched a worker"
+  pass "a scout follow-up requires the finished scout report"
+}
+
 # A Claude worker's Firstmate channel files all live outside its worktree cwd
 # (launch record in state/operational-inbox, steers in state/<id>.inbox, brief
 # in data/<id>), and since Claude Code 2.1.257 the first file-tool read of
@@ -2873,6 +2971,10 @@ test_claude_permission_mode_absent_defaults_to_bypass
 test_claude_permission_mode_auto_opts_into_model_reviewed_launch
 test_claude_permission_mode_bypass_swaps_only_the_permission_flag
 test_claude_permission_mode_auto_reaches_scout_launch
+test_claude_scout_records_a_native_session_id
+test_scout_follow_up_resumes_a_recorded_claude_session
+test_scout_follow_up_falls_back_without_a_resumable_session
+test_scout_follow_up_refuses_without_a_prior_report
 test_claude_worker_launch_covers_task_channel_dirs
 test_claude_permission_mode_invalid_refuses_before_endpoint_or_metadata
 test_non_claude_harness_ignores_claude_permission_mode

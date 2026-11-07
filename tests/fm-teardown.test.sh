@@ -2018,6 +2018,67 @@ test_scout_nested_clone_returns_with_no_untracked_entries() {
   pass "scout copy with a nested clone and a scratch file returns with no untracked entries"
 }
 
+# Run a scout teardown on <harness> with optional extra meta lines; echoes the case dir.
+run_scout_session_case() {
+  local name=$1 harness=$2 case_dir; shift 2
+  case_dir=$(make_case "$name")
+  write_meta "$case_dir" no-mistakes scout
+  printf '%s\n' "harness=$harness" "model=m-1" "effort=high" "$@" >> "$case_dir/state/task-x1.meta"
+  prepare_scout_teardown "$case_dir"
+  printf '%s\n' "$case_dir"
+}
+
+test_scout_teardown_records_the_claude_session() {
+  local case_dir rc ref sid=0f8fad5b-d9cb-469f-a165-70867728950e
+  case_dir=$(run_scout_session_case scout-session-claude claude "claude_session=$sid")
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 0 "$rc" "scout-session-claude: teardown should succeed"
+  ref="$case_dir/data/task-x1/session.ref"
+  assert_present "$ref" "scout-session-claude: no session record beside the report"
+  assert_grep "session=$sid" "$ref" "scout-session-claude: session id not recorded"
+  assert_grep "harness=claude" "$ref" "scout-session-claude: harness not recorded"
+  assert_grep "model=m-1" "$ref" "scout-session-claude: model not recorded"
+  assert_grep "project=$case_dir/project" "$ref" "scout-session-claude: project not recorded"
+  assert_grep "report=$case_dir/data/task-x1/report.md" "$ref" "scout-session-claude: report path not recorded"
+  grep -Eq '^torn_down=[0-9]{4}-[0-9]{2}-[0-9]{2}T' "$ref" || fail "scout-session-claude: cleanup time not recorded"
+  assert_absent "$case_dir/state/task-x1.meta" "scout-session-claude: task record survived teardown"
+  pass "scout teardown records the Claude session id beside the report"
+}
+
+test_scout_teardown_without_a_session_still_succeeds() {
+  local case_dir rc ref
+  case_dir=$(run_scout_session_case scout-session-none codex)
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 0 "$rc" "scout-session-none: teardown should succeed"
+  ref="$case_dir/data/task-x1/session.ref"
+  assert_grep "harness=codex" "$ref" "scout-session-none: harness not recorded"
+  grep -qx 'session=' "$ref" || fail "scout-session-none: a session id was invented: $(cat "$ref")"
+  assert_absent "$case_dir/state/task-x1.meta" "scout-session-none: task record survived teardown"
+  pass "scout teardown without a session reference records an empty session and succeeds"
+}
+
+test_scout_teardown_survives_an_unwritable_session_record() {
+  local case_dir rc
+  case_dir=$(run_scout_session_case scout-session-unwritable claude "claude_session=0f8fad5b-d9cb-469f-a165-70867728950e")
+  chmod 555 "$case_dir/data/task-x1"
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  chmod 755 "$case_dir/data/task-x1"
+  expect_code 0 "$rc" "scout-session-unwritable: a failed capture must not fail teardown"
+  assert_absent "$case_dir/data/task-x1/session.ref" "scout-session-unwritable: record should not exist"
+  assert_grep "could not record task-x1's session reference" "$case_dir/stderr" "scout-session-unwritable: no warning"
+  assert_absent "$case_dir/state/task-x1.meta" "scout-session-unwritable: task record survived teardown"
+  pass "scout teardown warns and completes when the session record cannot be written"
+}
+
 test_ship_nested_clone_is_refused_and_bytes_stay() {
   local case_dir wt rc head before after
   case_dir=$(make_case ship-nested-refuse)
@@ -6525,6 +6586,9 @@ test_forced_secondmate_child_scout_nested_clone_returns_clean
 test_forced_secondmate_dirty_child_return_warns_and_completes
 test_return_that_removes_copy_warns_cannot_verify
 test_scout_ignored_files_survive_scratch_clean
+test_scout_teardown_records_the_claude_session
+test_scout_teardown_without_a_session_still_succeeds
+test_scout_teardown_survives_an_unwritable_session_record
 test_gh_error_and_content_absent_refuses
 test_legacy_record_without_the_flag_refuses
 test_windowless_legacy_record_with_gone_worktree_tears_down

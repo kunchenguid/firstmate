@@ -86,6 +86,9 @@
 # declared scratch and the report at data/<task-id>/report.md is the work
 # product. Teardown proceeds only once the report exists and the shared
 # unresolved-decision completion gate verifies its captain-held inventory.
+# Cleanup of a scout with a report also writes data/<task-id>/session.ref, the
+# native-session record a follow-up scout resumes from; it never blocks cleanup
+# (bin/fm-scout-session-lib.sh owns the format).
 # A scratch copy (kind=scout) and a --force run discard untracked content.
 # Treehouse's return resets with `git clean -fd`, which never deletes a nested
 # git repository, so the pool slot stays dirty and later checkouts skip it.
@@ -429,6 +432,8 @@ unset _teardown_source
 . "$SCRIPT_DIR/fm-public-followup-lib.sh"
 # shellcheck source=bin/fm-secondmate-registry-lib.sh
 . "$SCRIPT_DIR/fm-secondmate-registry-lib.sh"
+# shellcheck source=bin/fm-scout-session-lib.sh
+. "$SCRIPT_DIR/fm-scout-session-lib.sh"
 # shellcheck source=bin/fm-secondmate-parent-lib.sh
 . "$SCRIPT_DIR/fm-secondmate-parent-lib.sh"
 # shellcheck source=bin/fm-nm-run-lib.sh
@@ -4223,6 +4228,11 @@ if [ -e "$HERDR_PRESENTATION_JOURNAL" ] || [ -L "$HERDR_PRESENTATION_JOURNAL" ];
   else
     echo "warning: retaining herdr presentation journal for $ID; it still names a projected workspace the session-start sweep owns, not the closed endpoint" >&2
   fi
+fi
+# A finished scout leaves its native session record beside its report for a
+# later follow-up (bin/fm-scout-session-lib.sh). Capture only: a failure warns.
+if [ "$KIND" = scout ] && [ -f "$DATA/$ID/report.md" ] && ! fm_scout_session_record "$STATE/$ID.meta" "$DATA" "$ID"; then
+  echo "warning: could not record $ID's session reference; a follow-up scout will start fresh" >&2
 fi
 # The record is gone, so the backlog must not still show this task in flight
 # when teardown reports success. Still under this task's meta lock, so a steer
