@@ -26,6 +26,8 @@ LOCK_STALE_SECS=30
 . "$SCRIPT_DIR/fm-tasks-axi-lib.sh"
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
+# shellcheck source=bin/fm-home-summary-refresh-lib.sh disable=SC1091
+. "$SCRIPT_DIR/fm-home-summary-refresh-lib.sh"
 
 die() { printf 'error: %s\n' "$1" >&2; exit 1; }
 usage() { sed -n '2,16p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
@@ -185,4 +187,7 @@ done
 rm -f -- "$DELIVERED" || die "receipt succeeded but delivered scratch cleanup failed"
 fm_lock_release "$TRANSFER_LOCK" || die "receipt succeeded but transfer lock cleanup failed"
 trap - EXIT
+if [ "${#TO_MOVE[@]}" -gt 0 ]; then
+  fm_home_summary_refresh_on_backlog_write_detached
+fi
 printf 'received: %s moved=%s already=%s\n' "$(basename "$REL" .outbox.md)" "${#TO_MOVE[@]}" "${#ALREADY[@]}"

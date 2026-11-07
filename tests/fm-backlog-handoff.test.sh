@@ -1368,8 +1368,92 @@ EOF
   pass "a cwd .tasks.toml for another backend does not redirect a markdown handoff"
 }
 
+wait_for_ledger() { # <home> <max-seconds> <jq-filter>
+  local i=0
+  while [ "$i" -lt "$2" ]; do
+    jq -e "$3" "$1/state/home-summary.json" >/dev/null 2>&1 && return 0
+    sleep 1
+    i=$((i + 1))
+  done
+  return 1
+}
+
+# The destination published missing_backlog before any backlog existed; a local
+# handoff creates and fills that backlog from the parent, so both homes' ledgers
+# must be republished without either home acting on its own.
+test_local_handoff_republishes_both_home_ledgers() {
+  local home="$TMP_ROOT/ledger-main" sub="$TMP_ROOT/ledger-sub" out
+  command -v jq >/dev/null 2>&1 || { echo "skip: jq not found (ledger republication)"; return 0; }
+  setup_homes "$home" "$sub"
+  mark_firstmate_home "$home"
+  rm -rf "${sub:?}/bin"
+  ln -s "$ROOT/bin" "$sub/bin"
+  mkdir -p "$sub/state"
+  cat > "$home/data/backlog.md" <<'EOF'
+## In flight
+
+## Queued
+- [ ] ledger-item - routed into a home with a stale ledger (repo: alpha)
+
+## Done
+EOF
+  FM_HOME="$home" "$ROOT/bin/fm-home-summary-refresh.sh" >/dev/null \
+    || fail "initial main ledger publication failed"
+  FM_HOME="$sub" "$sub/bin/fm-home-summary-refresh.sh" >/dev/null \
+    || fail "initial secondmate ledger publication failed"
+  jq -e 'any(.queued[]; .id == "ledger-item")' "$home/state/home-summary.json" >/dev/null \
+    || fail "main ledger did not list the queued item before handoff"
+  jq -e '.invalidity.kind == "missing_backlog"' "$sub/state/home-summary.json" >/dev/null \
+    || fail "secondmate ledger did not record missing_backlog before handoff"
+
+  out=$(FM_HOME="$home" FM_DATA_OVERRIDE="$home/data" FM_STATE_OVERRIDE="$home/state" \
+    "$ROOT/bin/fm-backlog-handoff.sh" design ledger-item 2>&1) \
+    || fail "local handoff failed: $out"
+  wait_for_ledger "$sub" 30 '.valid == true and any(.queued[]; .id == "ledger-item")' \
+    || fail "secondmate ledger was not republished after the handoff: $(jq -c . "$sub/state/home-summary.json" 2>/dev/null || true)"
+  wait_for_ledger "$home" 30 'all(.queued[]; .id != "ledger-item")' \
+    || fail "main ledger still lists the handed-off item: $(jq -c . "$home/state/home-summary.json" 2>/dev/null || true)"
+  pass "a local handoff republishes the sender and destination home ledgers"
+}
+
+# The destination is its own firstmate checkout, so its ledger must come from
+# its own entrypoint with none of the sender's root or home overrides.
+test_local_handoff_republishes_destination_through_its_own_entrypoint() {
+  local home="$TMP_ROOT/own-root-main" sub="$TMP_ROOT/own-root-sub" record="$TMP_ROOT/own-root.env" out i=0
+  setup_homes "$home" "$sub"
+  cat > "$home/data/backlog.md" <<'EOF'
+## Queued
+- [ ] own-root-item - republished by the destination's own code (repo: alpha)
+
+## Done
+EOF
+  cat > "$sub/bin/fm-home-summary-refresh.sh" <<SH
+#!/usr/bin/env bash
+printf 'home=%s root=%s data=%s state=%s config=%s projects=%s\n' "\${FM_HOME-}" \
+  "\${FM_ROOT_OVERRIDE-}" "\${FM_DATA_OVERRIDE-}" "\${FM_STATE_OVERRIDE-}" \
+  "\${FM_CONFIG_OVERRIDE-}" "\${FM_PROJECTS_OVERRIDE-}" > "$record"
+SH
+  chmod +x "$sub/bin/fm-home-summary-refresh.sh"
+
+  out=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" FM_DATA_OVERRIDE="$home/data" \
+    FM_STATE_OVERRIDE="$home/state" FM_CONFIG_OVERRIDE="$home/config" \
+    FM_PROJECTS_OVERRIDE="$home/projects" \
+    "$ROOT/bin/fm-backlog-handoff.sh" design own-root-item 2>&1) \
+    || fail "local handoff failed: $out"
+  while [ ! -s "$record" ] && [ "$i" -lt 100 ]; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  assert_present "$record" "destination's own refresh entrypoint never ran after the handoff"
+  assert_equals "home=$(cd "$sub" && pwd -P) root= data= state= config= projects=" "$(cat "$record")" \
+    "destination refresh ran with the sender's root or home overrides"
+  pass "a local handoff republishes the destination through its own entrypoint and code root"
+}
+
 test_handoff_wakes_live_local_receiver
 test_cwd_tasks_toml_does_not_redirect_handoff
+test_local_handoff_republishes_both_home_ledgers
+test_local_handoff_republishes_destination_through_its_own_entrypoint
 test_failed_wake_retries_when_the_item_is_already_present
 test_known_receiver_failure_remains_retryable_after_grace
 test_known_failure_restores_retry_after_reconciliation_race
