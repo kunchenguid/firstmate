@@ -90,7 +90,9 @@ MAX_DOC_BYTES=${FM_REMOTE_REPLY_MAX_DOC_BYTES:-262144}
 # final (see cmd_ingest).
 SSH_UNAVAILABLE=255
 DOCUMENT_LOCAL_FAILURE=2
-SNAPSHOT_UNVERIFIED=3
+SNAPSHOT_UNVERIFIED=4
+# fm-document-snapshot.sh exits 3 when its content checks refuse the bytes.
+SNAPSHOT_CONTENT_REFUSED=3
 
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
@@ -501,7 +503,7 @@ fetch_document() { # <id> <remote-relative> <result-var>
       FETCH_DOC_REASON=$(summarize_fetch_reason "$err" "$rel")
       rm -f -- "$tmp" "$err"
       FETCH_TMP='' FETCH_ERR=''
-      [ "$rc" -ne 3 ] || return 1
+      [ "$rc" -ne "$SNAPSHOT_CONTENT_REFUSED" ] || return 1
       return "$SNAPSHOT_UNVERIFIED"
     fi
     rm -f -- "$tmp" "$err"
