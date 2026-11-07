@@ -643,7 +643,7 @@ test_a_main_row_collapsing_a_captain_row_keeps_the_captain_question() {
     --summary 'local branch ready to land' >/dev/null || fail "fixture: could not record a main outcome"
   drained=$(FM_HOME="$home" "$FAKE_CLAUDE" -c '"$0" 2>&1' "$ROOT/bin/fm-wake-drain.sh")
   assert_contains "$drained" "[seq 1, captain call, recorded 0m ago] login: needs the captain's login
-[seq 3, newest of 2 for this task, recorded 0m ago] login: PR ready" \
+[seq 3, recorded 0m ago] login: PR ready" \
     "a main row that collapsed a captain row hid the captain's question or put it after the newer result"
   assert_not_contains "$drained" "truncated" "rows that fit their caps were reported as truncated"
   assert_not_contains "$drained" "main to act, not a captain call] login:" \
@@ -671,7 +671,7 @@ test_a_long_captain_question_does_not_evict_the_newer_result() {
   drained=$(FM_HOME="$home" "$FAKE_CLAUDE" -c '"$0" 2>&1' "$ROOT/bin/fm-wake-drain.sh")
   assert_re "^\[seq 1, captain call, recorded 0m ago\] login: needs the captain's login x+ \[truncated\]\$" <(printf '%s\n' "$drained") \
     "the long captain question was not shown as its own cut row"
-  assert_contains "$drained" "[seq 2, newest of 2 for this task, recorded 0m ago] login: PR ready to land" \
+  assert_contains "$drained" "[seq 2, recorded 0m ago] login: PR ready to land" \
     "the newer ready-to-land result was pushed off the screen by the long question"
   printf '%s\n' "$drained" | LC_ALL=C awk '/^\[seq [0-9]+[^]]*\] login:/ && length($0) > 599 { bad = 1 } END { exit bad }' \
     || fail "a row exceeded its own 599-byte cap: $drained"
@@ -683,6 +683,39 @@ test_a_long_captain_question_does_not_evict_the_newer_result() {
   pass "a long captain question and a newer result both survive as rows, and the truncated one is named"
 }
 
+# The other order: a captain call that arrives after a main result must not
+# swallow it. For one task, seq 1 asks for the captain's login, seq 2 says
+# PR #5 is ready to merge, and seq 3 asks to approve the hosting spend. The
+# acknowledgement covers all three, so the newest captain question and the
+# ready-to-merge result must each be on screen as their own row, question
+# first; only the older captain question collapses under the newer one, and
+# it is counted. A plain main-then-captain task keeps its main result too.
+test_a_newer_captain_row_keeps_the_older_main_result() {
+  local home drained
+  home="$TMP_ROOT/drain-captain-over-main"
+  mkdir -p "$home/state" "$home/config"
+  FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" append --task deploy --verdict captain \
+    --summary "needs the captain's login" >/dev/null || fail "fixture: could not record a captain outcome"
+  FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" append --task deploy --verdict main \
+    --summary 'PR #5 ready to merge' >/dev/null || fail "fixture: could not record a main outcome"
+  FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" append --task deploy --verdict captain \
+    --summary 'approve the hosting spend' >/dev/null || fail "fixture: could not record a captain outcome"
+  FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" append --task landing --verdict main \
+    --summary 'local branch ready to land' >/dev/null || fail "fixture: could not record a main outcome"
+  FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" append --task landing --verdict captain \
+    --summary 'pick the rollout window' >/dev/null || fail "fixture: could not record a captain outcome"
+  drained=$(FM_HOME="$home" "$FAKE_CLAUDE" -c '"$0" 2>&1' "$ROOT/bin/fm-wake-drain.sh")
+  assert_contains "$drained" "[seq 3, newest of 2 for this task, captain call, recorded 0m ago] deploy: approve the hosting spend
+[seq 2, recorded 0m ago] deploy: PR #5 ready to merge" \
+    "a newer captain row hid the task's main result or put it first"
+  assert_contains "$drained" "[seq 5, captain call, recorded 0m ago] landing: pick the rollout window
+[seq 4, recorded 0m ago] landing: local branch ready to land" \
+    "a captain row after a main row hid the main result"
+  assert_not_contains "$drained" "truncated" "rows that fit their caps were reported as truncated"
+  assert_contains "$drained" "mark-processed --through 5;" "the acknowledgement did not cover every row"
+  pass "a captain row newer than a main row keeps the main result as its own row, question first"
+}
+
 fm_test_run \
   test_report_surface_enforces_actor_turn_and_scope \
   test_report_after_the_return_is_queued_for_main \
@@ -690,6 +723,7 @@ fm_test_run \
   test_branch_outcomes_only_on_a_host_home_off_pi \
   test_a_main_row_collapsing_a_captain_row_keeps_the_captain_question \
   test_a_long_captain_question_does_not_evict_the_newer_result \
+  test_a_newer_captain_row_keeps_the_older_main_result \
   test_a_main_outcome_reaches_main_without_counting_as_a_captain_call \
   test_branch_outcomes_put_captain_first_and_collapse_routine_overflow \
   test_branch_outcomes_collapse_repeated_captain_outcomes_per_task \
