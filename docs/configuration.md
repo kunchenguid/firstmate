@@ -8,7 +8,7 @@ Start with the directory layout, then use the setting reference for the behavior
 | What you want to configure | Start here |
 | --- | --- |
 | Firstmate's code, private files, or project location | [FM_HOME](#fm_home) and [operational home layout](#operational-home-layout-and-state) |
-| Task windows and worker tools | [Runtime backend](#runtime-backend-configbackend--fm_backend) and [harness support](#harness-support) |
+| Task windows and worker tools | [Runtime backend](#runtime-backend-configbackend--fm_backend), [harness support](#harness-support), and the [Rex durable lease](#rex-durable-lease-configrex-durable-lease) |
 | Worker permissions, accounts, or environment | [Codex approval review](#codex-automatic-approval-review), [Claude permission mode](#claude-permission-mode-configclaude-permission-mode), [Codex permission mode](#codex-permission-mode-configcodex-permission-mode), [persistent managed-policy failover](#persistent-managed-policy-failover), [worker account pin](#worker-account-pin-configclaude-account-configpi-account), [several Claude accounts](#several-claude-accounts-configclaude-accounts), [worker tool exclusions](#worker-tool-exclusions-configcrew-exclude-tools), [worker launch environment](#worker-launch-environment-configlaunch-env-allowlist), and its [Orca environment source](#orca-environment-source-configlaunch-env-tmux-session) |
 | Backlog, preferences, and memory | [Backlog backend](#backlog-backend-taskstoml--configbacklog-backend), [captain preferences](#captain-preferences-datacaptainmd--datacaptain-sharedmd), [external memory tiers](#external-memory-tiers-memory-layering-section), [record export](#record-export-configrecord-export-root), and [startup memory budget](#startup-memory-budget-configstartup-memory-budget) |
 | Supervision and presentation | [Pi supervision branch](#pi-supervision-branch), [supervision host](#supervision-host-configsupervision-host), [Codex native Stop park](#codex-native-stop-park-configcodex-stop-park), [warm-cache compaction](#warm-cache-compaction-configwarm-compact), and [Calm preference](#calm-preference-configcalm) |
@@ -788,6 +788,17 @@ The optional local, gitignored `config/wait-no-turns` presence flag opts this ho
 With it present, ship and scout briefs gain the `# Waiting` section and the foreground no-mistakes drive text, every brief's inbox section keeps the natural-checkpoint check and adds that a waiting worker does not poll or list its inbox because a waiting instruction rings, a pending-reply recovery waits while that mate has its own open decision or blocker, and a fire-and-forget steer whose doorbell did not land gets one later ring.
 With the file absent, generated briefs omit the waiting section and the no-poll inbox line, the drive text backgrounds the call, recovery sends during an open decision, and a fire-and-forget steer is not owed a retry ring.
 The flag is a home-local preference and is not inherited by secondmate homes.
+
+## Rex durable lease (config/rex-durable-lease)
+
+The optional local, gitignored `config/rex-durable-lease` presence flag opts this home into a durable treehouse lease for Rex task copies.
+Create it with `touch "$FM_HOME/config/rex-durable-lease"`; remove it to restore the default.
+It is off by default: without the flag, a Rex spawn types the interactive `treehouse get` into the block, which holds the slot only while its subshell lives.
+With the flag present, a fresh Rex spawn runs `treehouse get --lease` outside the block and moves the block's top-level shell into the copy, as a Herdr spawn does.
+A Rex Server stop then cannot free the slot of a worker that is waiting for its relaunch.
+Cleanup returns the lease as it does for Herdr, and an aborted spawn keeps a lease it cannot prove unused and names the command that releases it.
+Herdr always leases its slot, and the other backends are unaffected.
+The flag is a home-local preference and is not inherited by secondmate homes; [`docs/rex-backend.md`](rex-backend.md#task-copy-lease) owns the behavior and [`bin/fm-spawn.sh`](../bin/fm-spawn.sh) owns the mechanics.
 
 ## PR health monitor (config/pr-health-monitor)
 

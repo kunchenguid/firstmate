@@ -141,9 +141,10 @@
 #   auto-detected (the paseo and tern markers, like bare hc markers, leak into
 #   every descendant process). An app-detected hc also records its signal in
 #   meta's backend_detect= line.
-#   Herdr and Rex lease their slot durably (treehouse get --lease) and move the
-#   endpoint's top-level shell into it: Herdr restores that shell's cwd after a
-#   restart, and a Rex Server stop would otherwise free a slot held only by the
+#   Herdr leases its slot durably (treehouse get --lease) and moves the pane's
+#   top-level shell into it, because a restart restores that shell's cwd.
+#   A home with config/rex-durable-lease (docs/configuration.md) does the same
+#   for Rex, whose Server stop would otherwise free a slot held only by the
 #   live `treehouse get` subshell.
 #   codex-app is not a known backend yet; docs/codex-app-backend.md owns that
 #   blocked backend contract. Default tmux spawns do not write backend= to meta;
@@ -5454,6 +5455,14 @@ spawn_send_key() { # <target> <key>
   esac
 }
 
+spawn_leases_slot_durably() {
+  case "$BACKEND" in
+    herdr) return 0 ;;
+    rex) [ -e "$CONFIG/rex-durable-lease" ] ;;
+    *) return 1 ;;
+  esac
+}
+
 spawn_leased_endpoint_confirmed_gone() {
   case "$BACKEND" in
     herdr) fm_backend_herdr_endpoint_confirmed_gone "${T:-}" ;;
@@ -5506,17 +5515,17 @@ spawn_assert_agent_worktree() {
   [ "$KIND" = secondmate ] && return 0
   case "$BACKEND" in orca|t3code) return 0 ;; esac
   expected=$(real_path_or_raw "$WT")
-  # The out-of-pane Herdr and Rex lease no longer waits for the new shell to
+  # The out-of-pane durable lease no longer waits for the new shell to
   # process treehouse get. Allow its former minute of startup tolerance here, and
   # repeat the idempotent cd once in case input arrived before shell readiness.
-  case "$BACKEND" in herdr | rex) last_poll=120 ;; esac
+  ! spawn_leases_slot_durably || last_poll=120
   for i in $(seq 0 "$last_poll"); do
     [ "$i" -eq 0 ] || sleep 0.5
     seen=$(spawn_current_path "$WT_TARGET" || true)
     if [ -n "$seen" ] && [ "$(real_path_or_raw "$seen")" = "$expected" ]; then
       return 0
     fi
-    if { [ "$BACKEND" = herdr ] || [ "$BACKEND" = rex ]; } && [ "$i" -eq 20 ]; then
+    if spawn_leases_slot_durably && [ "$i" -eq 20 ]; then
       spawn_enter_recorded_worktree
     fi
   done
@@ -6015,7 +6024,7 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   # A t3code slot was leased and validated in its target branch above.
   if [ "$BACKEND" = t3code ]; then
     :
-  elif [ "$BACKEND" = herdr ] || [ "$BACKEND" = rex ]; then
+  elif spawn_leases_slot_durably; then
     spawn_lease_slot
   else
     spawn_send_text_line "$WT_TARGET" 'treehouse get'
@@ -6084,7 +6093,7 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
     fi
   fi
 
-  # Claim the pool slot for this task. Except on Herdr and Rex, whose slot
+  # Claim the pool slot for this task. Except on a durable lease, whose slot
   # spawn_lease_slot leased durably, the interactive `treehouse get` sent
   # to the pane above records only a process lease, so Treehouse cannot say
   # which task a slot belongs to once that task's worker exits - and that is

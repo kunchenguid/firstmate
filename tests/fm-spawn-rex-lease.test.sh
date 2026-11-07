@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
-# fm-spawn.sh on the Rex backend: a fresh task copy is leased durably and the
-# block's top-level shell is moved into it.
+# fm-spawn.sh on the Rex backend: with config/rex-durable-lease a fresh task
+# copy is leased durably and the block's top-level shell is moved into it;
+# without it the interactive `treehouse get` stays.
 #
 # The interactive `treehouse get` holds a pool slot only through its live
 # subshell, so a Rex Server stop frees the slot of a worker whose block is about
-# to be relaunched. These cases pin the replacement: `treehouse get --lease`,
-# then a cd into the copy, never the interactive form.
+# to be relaunched. The opt-in replaces it with `treehouse get --lease`, then a
+# cd into the copy.
 #
 # The stateful rex fixture models the server; a thin wrapper adds the shell cwd
 # a `cd` moves and the agent a delivered launch starts. Fakes only - never a
@@ -24,8 +25,8 @@ TMP_ROOT=$(fm_test_tmproot fm-spawn-rex-lease)
 mkdir -p "$TMP_ROOT"
 TMP_ROOT=$(cd "$TMP_ROOT" && pwd)
 
-make_lease_case() {  # <name> [harness]
-  local name=$1 harness=${2:-codex} dir home proj wt d fb
+make_lease_case() {  # <name> [harness] [on|off]
+  local name=$1 harness=${2:-codex} flag=${3:-on} dir home proj wt d fb
   dir="$TMP_ROOT/$name"
   home="$dir/home"
   proj="$dir/project"
@@ -34,6 +35,7 @@ make_lease_case() {  # <name> [harness]
   fb="$dir/fakebin"
   mkdir -p "$d" "$fb" "$dir/rexbin" "$dir/user-home"
   fm_test_spawn_home "$home" "$harness"
+  [ "$flag" = on ] && : > "$home/config/rex-durable-lease"
   fm_git_init_commit "$proj"
   git clone -q "$proj" "$wt"
   fm_test_spawn_brief "$home" "$name" "Exercise the Rex task-copy lease for $name."
@@ -49,6 +51,7 @@ case "\$all" in
   *'send -s '*)
     payload=\${all#* -- }
     case "\$payload" in
+      'treehouse get') printf '%s' '$wt' > "\$D/fg" ;;
       'cd -- '*) path=\${payload#cd -- }; path=\${path#\\'}; path=\${path%\\'}
         printf '%s' "\$path" > "\$D/fg" ;;
       *'encode launch-brief'*|*'Firstmate operational input waiting: read'*)
@@ -107,6 +110,18 @@ test_fresh_spawn_leases_and_moves_the_top_level_shell() {
   pass "a fresh rex spawn leases the copy durably and moves the block's shell into it"
 }
 
+test_default_spawn_keeps_the_interactive_treehouse_get() {
+  local id=rex-lease-off dir out status
+  dir=$(make_lease_case "$id" codex off)
+  out=$(run_lease_spawn "$dir" "$id")
+  status=$?
+  expect_code 0 "$status" "spawn should succeed"$'\n'"$out"
+  ! grep -q -- '--lease' "$dir/fake/treehouse-log" \
+    || fail "a home without config/rex-durable-lease leased the copy durably"
+  assert_grep "worktree=$dir/slot" "$dir/home/state/$id.meta" "meta did not record the interactive copy"
+  pass "without config/rex-durable-lease a rex spawn takes no durable lease"
+}
+
 test_failed_lease_refuses_without_a_record() {
   local id=rex-lease-refused dir out status
   dir=$(make_lease_case "$id")
@@ -154,6 +169,7 @@ SH
   pass "an abort whose rex block is confirmed gone returns a clean lease"
 }
 
+test_default_spawn_keeps_the_interactive_treehouse_get
 test_fresh_spawn_leases_and_moves_the_top_level_shell
 test_failed_lease_refuses_without_a_record
 test_aborted_spawn_names_the_lease_it_keeps
