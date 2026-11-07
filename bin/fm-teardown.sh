@@ -3767,27 +3767,23 @@ if [ "$KIND" = ship ] && [ -n "$PR_URL" ] \
 fi
 
 if [ "$KIND" = ship ] && [ -n "$PR_URL" ] && [ "$FORCE" != "--force" ] && fm_pr_url_parse "$PR_URL"; then
+  PR_RECORD_CHECKED=1
   case "$FM_PR_PROVIDER" in
-    github)
-      fm_pr_github_read_record "$FM_PR_HOST" "$FM_PR_OWNER" "$FM_PR_REPO" "$FM_PR_NUMBER" || true
-      ;;
-    gitlab)
-      fm_pr_gitlab_read_record "$FM_PR_HOST" "$FM_PR_PATH" "$FM_PR_NUMBER" || true
-      ;;
-    forgejo)
-      fm_pr_forgejo_read_record "$FM_PR_HOST" "$FM_PR_PATH" "$FM_PR_NUMBER" || true
-      ;;
-    *) FM_PR_RECORD_MERGED=unsupported ;;
+    github) fm_pr_github_read_record "$FM_PR_HOST" "$FM_PR_OWNER" "$FM_PR_REPO" "$FM_PR_NUMBER" || true ;;
+    gitlab) fm_pr_gitlab_read_record "$FM_PR_HOST" "$FM_PR_PATH" "$FM_PR_NUMBER" || true ;;
+    forgejo) fm_pr_forgejo_read_record "$FM_PR_HOST" "$FM_PR_PATH" "$FM_PR_NUMBER" || true ;;
+    *) PR_RECORD_CHECKED=0 ;;
   esac
-  case "$FM_PR_PROVIDER" in
-    github|gitlab|forgejo)
-      if [ "$FM_PR_RECORD_MERGED" != true ]; then
-        echo "REFUSED: ship task $ID still has an unmerged or unreadable PR at $PR_URL. Stop the worker with bin/fm-control.sh $ID exit and keep its task record until the PR merges." >&2
-        echo "Use --force only after explicit discard approval." >&2
-        exit 1
-      fi
-      ;;
-  esac
+  if [ "$PR_RECORD_CHECKED" = 1 ] && [ "$FM_PR_RECORD_MERGED" != true ]; then
+    case "$FM_PR_RECORD_STATE" in
+      CLOSED|closed) [ -d "$WT" ] && content_in_default && PR_RECORD_CHECKED=0 ;;
+    esac
+  fi
+  if [ "$PR_RECORD_CHECKED" = 1 ] && [ "$FM_PR_RECORD_MERGED" != true ]; then
+    echo "REFUSED: ship task $ID still has an unmerged or unreadable PR at $PR_URL. Stop the worker with bin/fm-control.sh $ID exit and keep its task record until the PR merges." >&2
+    echo "A closed PR passes only when its change is already in the default branch. Use --force only after explicit discard approval." >&2
+    exit 1
+  fi
 fi
 
 # Non-blocking: the legacy Relay link is not guarded as a refusal.

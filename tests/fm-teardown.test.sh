@@ -799,7 +799,7 @@ test_forced_cleanup_discards_a_closed_unmerged_pr() {
   local case_dir out rc url=https://github.com/example/repo/pull/7 head
   case_dir=$(make_case closed-pr-forced)
   write_meta "$case_dir" no-mistakes ship
-  wt_commit "$case_dir" "abandoned PR"
+  wt_commit_file "$case_dir" abandoned.txt draft "abandoned PR"
   add_fork_with_pushed_branch "$case_dir"
   printf 'pr=%s\n' "$url" >> "$case_dir/state/task-x1.meta"
   seed_backlog_in_flight "$case_dir"
@@ -818,6 +818,40 @@ test_forced_cleanup_discards_a_closed_unmerged_pr() {
   out=$(run_teardown "$case_dir" --force 2>&1) || fail "forced cleanup of a closed pull request failed: $out"
   assert_absent "$case_dir/state/task-x1.meta" "forced cleanup retained task metadata"
   pass "forced teardown discards a ship whose pull request closed without merging"
+}
+
+test_closed_pr_whose_change_landed_elsewhere_cleans_up_without_force() {
+  local case_dir out rc url=https://github.com/example/repo/pull/7 head
+  case_dir=$(make_case closed-pr-landed-elsewhere)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit_file "$case_dir" feature.txt hello "add feature"
+  printf 'pr=%s\n' "$url" >> "$case_dir/state/task-x1.meta"
+  seed_backlog_in_flight "$case_dir"
+  head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  add_gh_pr_open_for_head "$case_dir" "$head" CLOSED
+
+  set +e
+  out=$(run_teardown "$case_dir" 2>&1)
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "cleanup of a closed pull request whose change is not in the default branch"
+  assert_contains "$out" "unmerged or unreadable PR at $url" "the refusal must name the closed pull request"
+  [ -f "$case_dir/state/task-x1.meta" ] || fail "cleanup removed the task metadata of an unlanded closed PR"
+
+  land_on_origin_main "$case_dir" feature.txt hello
+  printf '%s\n' draft > "$case_dir/wt/notes.txt"
+  set +e
+  out=$(run_teardown "$case_dir" 2>&1)
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "cleanup of a landed closed pull request with uncommitted changes"
+  assert_contains "$out" "has uncommitted changes" "the dirty-tree refusal must still apply"
+  [ -f "$case_dir/state/task-x1.meta" ] || fail "cleanup removed the task metadata despite uncommitted changes"
+
+  rm "$case_dir/wt/notes.txt"
+  out=$(run_teardown "$case_dir" 2>&1) || fail "cleanup of a closed pull request whose change landed failed: $out"
+  assert_absent "$case_dir/state/task-x1.meta" "landed closed PR cleanup retained task metadata"
+  pass "a closed pull request whose change landed elsewhere cleans up without --force and keeps the dirty-tree refusal"
 }
 
 test_teardown_closes_the_backlog_item_itself() {
@@ -6542,6 +6576,7 @@ test_retained_sources_still_reach_the_ordinary_refusal
 test_local_only_fork_remote_allows
 test_unmerged_pr_refuses_cleanup_until_merge_is_confirmed
 test_forced_cleanup_discards_a_closed_unmerged_pr
+test_closed_pr_whose_change_landed_elsewhere_cleans_up_without_force
 test_teardown_closes_the_backlog_item_itself
 test_teardown_closes_a_gerrit_task_with_its_change_url_as_a_note
 test_teardown_closes_a_gitlab_task_with_its_merge_request_url_as_a_note
