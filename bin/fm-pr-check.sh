@@ -413,13 +413,15 @@ fm_pr_regular_destination_on_device_or_absent "$META" "$STATE_DEVICE" || exit 1
 # Keep the current registration recoverable until all replacement files commit.
 if [ "${FM_PR_CHECK_MERGE:-}" != 1 ]; then
   BASELINE_BACKUP=$(mktemp -d "$STATE/.fm-pr-baseline.XXXXXX") || exit 1
-  for artifact in "$META" "$STATE/$ID.pr-poll-degraded" "$STATE/$ID.pr-poll-train"; do
-    [ -e "$artifact" ] || [ -L "$artifact" ] || continue
+  for artifact in "$META" "$STATE/$ID.pr-poll-degraded" "$STATE/$ID.pr-poll-train" \
+    "$STATE/$ID.check.sh" "$STATE/$ID.pr-poll" "$STATE/$ID.pr-poll-registration"; do
+    [ -e "$artifact" || [ -L "$artifact" ] || continue
     cp -p -- "$artifact" "$BASELINE_BACKUP/$(basename "$artifact")" || exit 1
   done
   restore_baselines() {
     local artifact backup
-    for artifact in "$META" "$STATE/$ID.pr-poll-degraded" "$STATE/$ID.pr-poll-train"; do
+    for artifact in "$META" "$STATE/$ID.pr-poll-degraded" "$STATE/$ID.pr-poll-train" \
+      "$STATE/$ID.check.sh" "$STATE/$ID.pr-poll" "$STATE/$ID.pr-poll-registration"; do
       backup="$BASELINE_BACKUP/$(basename "$artifact")"
       if [ -e "$backup" ]; then
         cp -p -- "$backup" "$artifact.restore" && mv -f -- "$artifact.restore" "$artifact" || return 1
@@ -454,16 +456,12 @@ if [ "${FM_PR_CHECK_MERGE:-}" != 1 ]; then
 fi
 
 mv -f -- "$META_TMP" "$META" || { [ -z "${BASELINE_BACKUP:-}" ] || baseline_failure; exit 1; }
-[ -z "${BASELINE_BACKUP:-}" ] || rm -rf -- "$BASELINE_BACKUP"
 META_TMP=
 fm_pr_private_file_valid "$META" 600 "$STATE_DEVICE" || exit 1
 fm_pr_metadata_identity_parse "$META" || exit 1
 [ "$FM_PR_META_PROVIDER" = "$PROVIDER" ] && [ "$FM_PR_META_URL" = "$URL" ] \
   && [ "$FM_PR_META_HOST" = "$HOST" ] && [ "$FM_PR_META_PATH" = "$PROJECT_PATH" ] \
   && [ "$FM_PR_META_NUMBER" = "$NUMBER" ] || exit 1
-fm_lock_release "$META_LOCK"
-META_LOCK_HELD=0
-
 PR_POLL_PUBLISH_LOCK="$STATE/.pr-poll-publish-$ID.lock"
 fm_lock_acquire_wait "$PR_POLL_PUBLISH_LOCK"
 PR_POLL_PUBLISH_LOCK_HELD=1
@@ -474,8 +472,12 @@ else
   fm_lock_release "$PR_POLL_PUBLISH_LOCK" || exit 1
   PR_POLL_PUBLISH_LOCK_HELD=0
   echo "error: could not publish PR poll" >&2
+  [ -z "${BASELINE_BACKUP:-}" ] || baseline_failure
   exit 1
 fi
+[ -z "${BASELINE_BACKUP:-}" ] || rm -rf -- "$BASELINE_BACKUP"
+fm_lock_release "$META_LOCK"
+META_LOCK_HELD=0
 if [ "$CONTROL_LOCK_HELD" = 1 ]; then
   fm_lock_release "$CONTROL_LOCK" || exit 1
   CONTROL_LOCK_HELD=0
