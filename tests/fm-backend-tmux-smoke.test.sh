@@ -316,7 +316,11 @@ tmux list-panes -t "$SESSION:$DOTTED_WINDOW" >/dev/null 2>&1 \
 if tmux list-panes -t "$SESSION:fm-$DOTTED_ID" >/dev/null 2>&1; then
   fail "raw dotted window name unexpectedly targetable; the sanitization premise changed"
 fi
-fm_backend_tmux_kill "$SESSION:$DOTTED_WINDOW"
+fm_backend_tmux_kill "$SESSION:$DOTTED_WINDOW" \
+  || fail "fm_backend_tmux_kill failed on a dotted task id's sanitized window"
+if tmux list-windows -t "$SESSION" -F '#{window_name}' 2>/dev/null | grep -qx "$DOTTED_WINDOW"; then
+  fail "fm_backend_tmux_kill did not remove a dotted task id's sanitized window"
+fi
 pass "real tmux: a dotted task id's sanitized window is targetable and killable"
 
 cleanup_all
