@@ -433,11 +433,17 @@ if [ "${1:-}" = api ]; then
           echo '{"message":"409 SHA does not match HEAD of source branch"}'
           exit 1
         fi
+        if [ -e "$case_dir/glab-train-add-lost" ]; then
+          : > "$case_dir/glab-train-added"
+          echo 'glab: connection reset' >&2
+          exit 1
+        fi
         [ ! -e "$case_dir/glab-train-add-fails" ] || { echo '{"message":"400 Failed to merge"}'; exit 1; }
         : > "$case_dir/glab-train-added"
         echo '[{"status":"idle"}]'
         exit 0
       fi
+      [ ! -e "$case_dir/train-car-fails" ] || { echo 'glab: 502 Bad Gateway (HTTP 502)' >&2; exit 1; }
       [ -f "$case_dir/train-car.json" ] || { echo 'glab: 404 Merge Train Merge Request Not Found (HTTP 404)' >&2; exit 1; }
       cat "$case_dir/train-car.json"
       exit 0
@@ -5643,6 +5649,41 @@ test_gitlab_merge_train_drop_is_reported_with_its_pipeline() {
   pass "a merge request the train drops is reported plainly with its train pipeline URL"
 }
 
+test_gitlab_merge_train_lost_entry_response_is_reconciled() {
+  local case_dir rc=0
+  case_dir=$(make_gitlab_train_case gitlab-train-lost-response)
+  : > "$case_dir/glab-train-add-lost"
+  printf '{"status":"fresh","pipeline":{"web_url":"%s"}}\n' "$MR_TRAIN_PIPELINE_URL" \
+    > "$case_dir/train-car.json"
+  run_train_merge "$case_dir" || rc=$?
+
+  expect_code 0 "$rc" "gitlab-train-lost-response: an entry GitLab holds must continue as accepted"
+  assert_grep "continuing as an accepted entry" "$case_dir/stderr" \
+    "gitlab-train-lost-response: the reconciliation was not reported"
+  assert_grep "verified: $MR_URL was merged by the merge train" "$case_dir/stdout" \
+    "gitlab-train-lost-response: the accepted entry was not carried to its landing"
+  assert_grep 'merge' "$case_dir/state/.wake-queue" \
+    "gitlab-train-lost-response: the landing was not recorded"
+  pass "a train POST whose response is lost but whose car exists continues as an accepted entry"
+}
+
+test_gitlab_merge_train_unreadable_car_is_not_a_drop() {
+  local case_dir rc=0
+  case_dir=$(make_gitlab_train_case gitlab-train-car-unreadable)
+  : > "$case_dir/train-car-fails"
+  write_mr_json "$case_dir/mr-train.json" pipeline_sha="$MR_RESULT" pipeline_status=failed \
+    pipeline_ref=refs/merge-requests/7/train pipeline_url="$MR_TRAIN_PIPELINE_URL"
+  run_train_merge "$case_dir" || rc=$?
+
+  expect_code 1 "$rc" "gitlab-train-car-unreadable: an unreadable car must not report success"
+  assert_grep "is queued in the merge train (car status unreadable)" "$case_dir/stderr" \
+    "gitlab-train-car-unreadable: the run did not keep the entry indeterminate"
+  if grep -q 'merge train dropped' "$case_dir/stderr"; then
+    fail "gitlab-train-car-unreadable: a read failure was reported as a dropped entry"
+  fi
+  pass "an unreadable merge-train car stays indeterminate instead of reporting a drop"
+}
+
 test_gitlab_merge_train_keeps_the_pre_merge_guards() {
   local case_dir rc
   case_dir=$(make_gitlab_train_case gitlab-train-wrong-source)
@@ -5856,6 +5897,8 @@ test_gitlab_merge_train_waits_for_a_fast_forward_landing
 test_gitlab_merge_train_merged_without_a_landed_commit_stays_armed
 test_gitlab_merge_train_still_queued_stays_armed
 test_gitlab_merge_train_drop_is_reported_with_its_pipeline
+test_gitlab_merge_train_lost_entry_response_is_reconciled
+test_gitlab_merge_train_unreadable_car_is_not_a_drop
 test_gitlab_merge_train_keeps_the_pre_merge_guards
 test_gitlab_merge_train_entry_runs_under_away_authority
 test_expected_head_matching_reaches_each_forge

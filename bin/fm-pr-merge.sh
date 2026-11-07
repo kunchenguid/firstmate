@@ -1978,19 +1978,27 @@ gitlab_add_to_train() {
 FM_PR_TRAIN_CAR_STATUS=
 FM_PR_TRAIN_PIPELINE_URL=
 # Read this merge request's merge-train car. Returns 0 with the car's status
-# and its pipeline URL (when it has one yet) recorded, or non-zero when there
-# is no readable car: GitLab deletes a car when the train drops its merge
-# request, so a missing car is told apart from a read failure only together
-# with the merge request's own auto-merge state.
+# and its pipeline URL (when it has one yet) recorded, 1 when GitLab answers
+# HTTP 404 because there is no car (it deletes the car when the train drops the
+# merge request), and 2 when the car cannot be read for any other reason, which
+# callers treat as indeterminate rather than as a dropped entry.
 gitlab_read_train_car() {
-  local json fields
-  json=$(gitlab_project_api "$GITLAB_PROJECT_API/merge_trains/merge_requests/$PR_NUMBER" 2>/dev/null) \
-    && [ -n "$json" ] \
+  local json fields errfile rc=0
+  errfile=$(mktemp) || return 2
+  json=$(gitlab_project_api "$GITLAB_PROJECT_API/merge_trains/merge_requests/$PR_NUMBER" 2>"$errfile") || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    rc=2
+    ! grep -q 'HTTP 404' "$errfile" || rc=1
+    rm -f "$errfile"
+    return "$rc"
+  fi
+  rm -f "$errfile"
+  [ -n "$json" ] \
     && fields=$(printf '%s' "$json" | jq -r '
         if type == "object" and (.status | type) == "string" then
           .status + " " + ((.pipeline.web_url // "") | tostring)
         else error("no car") end' 2>/dev/null) \
-    || return 1
+    || return 2
   FM_PR_TRAIN_CAR_STATUS=${fields%% *}
   [ -z "${fields#* }" ] || FM_PR_TRAIN_PIPELINE_URL=${fields#* }
 }
@@ -2004,7 +2012,7 @@ gitlab_read_train_car() {
 # than merged, opened, or closed, such as GitLab's transient locked while the
 # merge runs, is waited on rather than judged.
 gitlab_await_train() {
-  local wait interval deadline json fields state mwps hp_ref hp_url hp_status
+  local wait interval deadline json fields state mwps hp_ref hp_url hp_status car_rc
   local merged_unrecorded=false
   wait=${FM_PR_GITLAB_TRAIN_WAIT:-90}
   interval=${FM_PR_GITLAB_TRAIN_POLL_INTERVAL:-10}
@@ -2038,7 +2046,9 @@ FIELDS
           merged_unrecorded=true
           ;;
         opened)
-          if ! gitlab_read_train_car && [ "$mwps" = false ]; then
+          car_rc=0
+          gitlab_read_train_car || car_rc=$?
+          if [ "$car_rc" -eq 1 ] && [ "$mwps" = false ]; then
             if [ "$hp_ref" = "refs/merge-requests/$PR_NUMBER/train" ] && [ "$hp_url" != - ]; then
               FM_PR_TRAIN_PIPELINE_URL="$hp_url (status $hp_status)"
             fi
@@ -2210,6 +2220,19 @@ case "$PROVIDER" in
       [ "$away_status" -eq 0 ] || exit "$away_status"
       train_status=0
       train_output=$(gitlab_add_to_train 2>&1) || train_status=$?
+      # A lost response can hide an accepted entry, so a failed POST is
+      # reconciled against the live car or a merged request before refusing.
+      if [ "$train_status" -ne 0 ]; then
+        car_rc=0
+        gitlab_read_train_car || car_rc=$?
+        if [ "$car_rc" -ne 0 ] && gitlab_confirm_merged 2>/dev/null; then
+          car_rc=0
+        fi
+        if [ "$car_rc" -eq 0 ]; then
+          printf 'notice: the merge-train request for %s reported a failure but GitLab holds the entry; continuing as an accepted entry\n' "$URL" >&2
+          train_status=0
+        fi
+      fi
       if [ "$train_status" -ne 0 ]; then
         fm_afk_contract_lock_release || true
         fm_lock_release "$MERGE_CONTROL_LOCK" || true
