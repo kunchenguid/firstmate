@@ -494,8 +494,23 @@ cmd_retire() {
       printf 'warning: the action had fired but no outcome was captured; verify its effect manually\n' >&2
     fi
   fi
+  # A captured result with no durable handled acknowledgement stays eligible for
+  # re-announcement on every pass, so a retire that leaves one behind reports
+  # success while the watch it just retired keeps waking firstmate. Mark every
+  # unhandled result of this source handled as part of the retire, and say how
+  # many, so the retire actually ends the announcements it claims to end.
+  local resolved=0 seq
+  for result in "$(fm_procevent_inbox_dir "$STATE")/$sid".*.result; do
+    [ -e "$result" ] || continue
+    [ -e "${result%.result}.handled" ] && continue
+    seq=$(basename "$result" .result)
+    seq=${seq##*.}
+    case "$seq" in ''|*[!0-9]*) continue ;; esac
+    "$SCRIPT_DIR/fm-procevent.sh" handled "$sid" "$seq" >/dev/null 2>&1 && resolved=$((resolved + 1))
+  done
   "$SCRIPT_DIR/fm-procevent.sh" retire "$sid" || die "cannot retire the watch source: $sid"
   rm -f -- "$(spec_file "$sid")" "$(trust_file "$sid")" "$(fired_file "$sid")"
+  [ "$resolved" -eq 0 ] || printf 'acknowledged %s captured result(s) so the retire ends the announcements too\n' "$resolved"
   printf 'retired: %s\n' "$sid"
 }
 
