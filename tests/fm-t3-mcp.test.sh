@@ -194,6 +194,49 @@ JS
   pass "fm-t3-mcp gate: accepts T3's merged or replaced configuration and pending-request tools, refuses neither"
 }
 
+test_fake_merged_tool_failures() {
+  fresh_case merged-tool-failures
+  node --input-type=module - "$HELPER" "$CRED" "$T3_FAKE_WORLD" <<'JS' || fail "merged tools must honor incoming and legacy failure settings"
+import assert from "node:assert/strict";
+import { readFileSync, writeFileSync } from "node:fs";
+const { McpSession, readCredential } = await import(process.argv[2]);
+const cred = readCredential(process.argv[3]);
+const worldFile = process.argv[4];
+const session = new McpSession(cred.origin, cred.access_token);
+// The fake's failTools contract injects the selected error before any effect.
+// These calls must return that error, rather than the normal thread_not_found.
+const cases = [
+  ["t3_thread_configure", "t3_thread_configuration", { threadId: "missing" }],
+  ["t3_pending_request", "t3_pending_request_list", { action: "list", threadId: "missing" }],
+  ["t3_pending_request", "t3_pending_request_read", { action: "read", threadId: "missing", requestId: "q" }],
+  ["t3_pending_request", "t3_pending_request_respond", { action: "respond", threadId: "missing", requestId: "q", answers: {} }],
+];
+const incoming = { code: "incoming_failure", message: "incoming failure" };
+const legacy = { code: "legacy_failure", message: "legacy failure" };
+try {
+  await session.open();
+  for (const [name, oldName, args] of cases) {
+    for (const [failTools, expected] of [
+      [{ [name]: incoming }, incoming],
+      [{ [oldName]: legacy }, legacy],
+      [{ [name]: incoming, [oldName]: legacy }, incoming],
+    ]) {
+      const world = JSON.parse(readFileSync(worldFile, "utf8"));
+      world.failTools = failTools;
+      writeFileSync(worldFile, JSON.stringify(world));
+      await assert.rejects(session.call(name, args), {
+        code: expected.code,
+        message: `T3 ${name} failed: ${expected.message}`,
+      }, `${name} ${args.action ?? "read"}: ${JSON.stringify(failTools)}`);
+    }
+  }
+} finally {
+  await session.close();
+}
+JS
+  pass "fake merged tools: incoming failure settings fire and take precedence over legacy settings"
+}
+
 test_environment_mismatch_refused() {
   fresh_case env-mismatch '{"environmentId":"env-other"}'
   mcp status
@@ -900,6 +943,7 @@ test_login_refuses_other_ceilings
 test_status_gate_and_protocol
 test_gate_refuses_missing_tools
 test_gate_accepts_merged_or_replaced_tools
+test_fake_merged_tool_failures
 test_environment_mismatch_refused
 test_expiry_and_permissions
 test_revoked_credential_refused

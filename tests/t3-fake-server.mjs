@@ -214,6 +214,8 @@ function listItem(x) {
 // Returns [result, changed].
 async function callTool(w, name, a) {
   if (!listedTools(w).includes(name)) return [err("unknown_tool", `no tool ${name}`), false];
+  const incomingFail = (w.failTools ?? {})[name];
+  if (incomingFail) return [err(incomingFail.code, incomingFail.message), false];
   // The merged tools answer as the single-purpose tool their call stands for.
   if (name === "t3_thread_configure") {
     if (w.legacy && a.modelSelection === undefined) return [err("invalid_request", "modelSelection is required"), false];
