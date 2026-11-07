@@ -409,6 +409,13 @@ test_polytoken_write_facet_carries_the_role_contract_without_a_model_pin() {
   facet="$case_dir/wt/.polytoken/facets/firstmate-worker.md"
   [ -f "$facet" ] || fail "the facet must exist at the project facet layer path"
   body=$(cat "$facet")
+  # The facet is generated public output; this does not prove model compliance.
+  assert_contains "$body" "read each message in numeric order" \
+    "the facet must preserve ordered reading"
+  assert_contains "$body" "acknowledge each read and accepted message" \
+    "the facet must acknowledge accepted receipt rather than completed action"
+  assert_contains "$body" "Follow the launch brief's command-boundary, deferred-action and keyed decision-resolution guidance" \
+    "the facet must defer boundary and decision guidance to its owner"
   assert_contains "$body" "name: firstmate-worker" "the facet must be the firstmate-worker facet"
   assert_contains "$body" "tools_deny: [switch_facet, handoff_plan, subagent, message_subagent]" \
     "the facet must deny facet switching and delegation at the tool-registry level"

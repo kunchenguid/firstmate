@@ -46,10 +46,9 @@
 # and with both the commit and the marker lost the send prints a distinct
 # "reply-tracking-degraded (steer delivered, do not resend)" warning instead,
 # because a resend-inviting status there would duplicate a delivered
-# instruction. There is no delivered-unconfirmed
-# outcome on this plane: "did the doorbell land" is no longer the question -
-# "was the message acted on" is, and that is answered asynchronously for an
-# ordinary record by the worker's acknowledgement move into handled/.
+# instruction. There is no delivered-unconfirmed outcome on this plane:
+# the ordinary record's acknowledgement move is asynchronous, governed by
+# bin/fm-brief.sh's worker receipt and command-boundary guidance.
 # bin/fm-task-inbox-lib.sh owns the record format, doorbell line, and retry and
 # escalation policy for ordinary and fire-and-forget records.
 # On pane backends, the composer pre-check before the ring is ADVISORY only: when

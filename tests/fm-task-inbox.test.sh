@@ -188,6 +188,8 @@ test_write_is_durable_and_exact() {
   assert_contains "$doorbell" "list \"\$FM_TASK_INBOX\"/*.msg" "doorbell should list all unhandled records through FM_TASK_INBOX"
   assert_contains "$doorbell" "'t1.inbox' steering inbox" "doorbell should quote and name the inbox"
   assert_contains "$doorbell" "numeric order" "doorbell should require ordered processing"
+  # This checks the emitted reminder contract, not autonomous compliance.
+  assert_contains "$doorbell" "mv each read and accepted message" "doorbell must acknowledge receipt of accepted messages"
   assert_contains "$doorbell" "handled/" "doorbell should name the handled dir"
   assert_contains "$doorbell" "Firstmate instruction waiting" "doorbell should be self-describing"
   case "$doorbell" in
