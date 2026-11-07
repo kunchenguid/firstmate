@@ -16,11 +16,11 @@
 # arm        Bind a (condition, action) pair as process-event source
 #            "when-<name>". The spec is written privately under state/when/ and
 #            hash-bound by a trust record the same way fm-check-register.sh
-#            binds a custom check. The action executable is resolved and its
-#            bytes are hash-bound at registration, then checked again immediately
-#            before the fire is claimed. The runner refuses a mutated spec or
-#            action without executing anything. Both argv vectors are executed
-#            directly with no shell, so nothing is re-split or interpreted.
+#            binds a custom check. Both executables are resolved at registration,
+#            and an unavailable one is refused. The action's bytes are also
+#            hash-bound, then checked again just before the fire is claimed. The
+#            runner refuses a mutated spec or action without executing anything.
+#            Both argv vectors run with no shell, never re-split or interpreted.
 #            Options, before --condition:
 #              --interval <secs>           poll cadence, decimals allowed (default 60)
 #              --stable <n>                consecutive true polls required to fire (default 2)
