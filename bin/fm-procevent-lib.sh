@@ -1019,8 +1019,52 @@ fm_procevent_directory_owned_by_current_user() {
 fm_procevent_state_root_resolve() {  # <state-root>
   local state=$1 canonical
   canonical=$(CDPATH='' cd -P -- "$state" 2>/dev/null && pwd -P) || return 1
-  fm_procevent_private_directory_valid "$canonical" 0 || return 1
+  fm_procevent_private_directory_valid "$canonical" 0 \
+    || fm_procevent_state_root_establish_private "$canonical" || return 1
   printf '%s\n' "$canonical"
+}
+
+# The state root is shared with the rest of firstmate, and every other script
+# that may create it first does so with a plain mkdir under whatever umask the
+# host gives it, so on a umask-002 host it arrives group-writable and this
+# module's privacy contract was never established for the directory it actually
+# operates on. Establish it here, once, instead of depending on which script
+# happened to create the home; the module already creates its own root with
+# umask 077 when it gets there first. Clearing the group and other write bits is
+# only ever a tightening, and it converges on repeat. A root we do not own, or
+# one we cannot tighten, still fails closed through the same validation.
+# To prevent a state-root TOCTOU swap from redirecting the permission change to
+# an unrelated inode, the directory is opened once, the pinned object behind the
+# file descriptor is validated as the same owned directory the path names, and
+# chmod is executed against the descriptor before re-validating the path.
+fm_procevent_state_root_establish_private() {  # <canonical-state-root>
+  local directory=$1 fd_path pinned named rc=1
+  exec 9< "$directory" 2>/dev/null || return 1
+  if [ -e /proc/self/fd/9 ]; then
+    fd_path=/proc/self/fd/9
+  elif [ -e /dev/fd/9 ]; then
+    fd_path=/dev/fd/9
+  else
+    exec 9<&-
+    return 1
+  fi
+  if [ -d "$fd_path" ] \
+    && pinned=$(fm_procevent_inode_identity -L "$fd_path") \
+    && named=$(fm_procevent_inode_identity "$directory") \
+    && [ "$pinned" = "$named" ] && [ "${pinned##*:}" = "$(id -u)" ]; then
+    chmod go-w "$fd_path" 2>/dev/null && rc=0
+  fi
+  exec 9<&-
+  [ "$rc" -eq 0 ] || return 1
+  fm_procevent_private_directory_valid "$directory" 0
+}
+
+fm_procevent_inode_identity() {  # [-L] <path>
+  if [ "$(uname)" = Darwin ]; then
+    /usr/bin/stat -f '%d:%i:%u' "$@" 2>/dev/null
+  else
+    stat -c '%d:%i:%u' "$@" 2>/dev/null
+  fi
 }
 
 fm_procevent_private_directory_valid() {
