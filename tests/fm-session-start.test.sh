@@ -2513,6 +2513,32 @@ EOF
   pass "a compact re-emit stays under the hook output cap with counts, task lines, paths, and the full wake queue"
 }
 
+# The compact re-emit counts the backlog from tasks-axi's own `count: N` headers
+# when the backend is compatible; each group gets a distinct size so a parser
+# that reads the wrong listing or no header at all cannot pass.
+test_compact_reemit_counts_the_backlog_through_tasks_axi() {
+  local rec root home fakebin compact
+  rec=$(new_world compact-reemit-tasks-axi)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_tasks_axi_compact "$fakebin"
+  make_fake_ps_claude "$fakebin"
+  write_long_body_backlog "$home/data/backlog.md"
+
+  FM_FAKE_HARNESS_PID=$$ run_session_start "$home" "$root" "$fakebin:$BASE_PATH" >/dev/null
+  compact=$(FM_FAKE_HARNESS_PID=$$ FM_FAKE_TASKS_AXI_READY=5 \
+    run_named_harness_session_start claude "$home" "$root" "$fakebin:$BASE_PATH" --reemit --source compact)
+
+  assert_contains "$compact" "1 in flight, 1 held, 1 blocked queued, 5 ready queued (tasks-axi counts; done rows omitted)" \
+    "the compact re-emit did not count the backlog from tasks-axi's count headers"
+  assert_not_contains "$compact" "title-line counts" "the compact re-emit fell back to manual counts with tasks-axi compatible"
+  assert_not_contains "$compact" "OVERSIZED-BODY-LINE" "the compact re-emit leaked a task body"
+
+  pass "a compact re-emit counts the backlog through tasks-axi"
+}
+
 test_reemit_skips_startup_sweeps_but_keeps_the_wake_drain() {
   local rec root home fakebin network_report reemit sequence generation
   rec=$(new_world reemit)
@@ -3237,6 +3263,7 @@ test_portable_timeout_escalates_term_resistant_process
 test_runtime_bound_leaves_a_healthy_digest_untouched
 test_runtime_bound_leaves_harness_ancestry_headroom
 test_compact_reemit_digest_fits_the_hook_output_cap
+test_compact_reemit_counts_the_backlog_through_tasks_axi
 test_reemit_skips_startup_sweeps_but_keeps_the_wake_drain
 test_reemit_cue_survives_the_hook_output_preview
 test_agents_baseline_stays_at_true_start_and_reemits_on_every_drifted_pi_compact
