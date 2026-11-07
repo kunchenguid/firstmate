@@ -548,7 +548,7 @@ EOF
     || fail "the classifier did not read through the helper's doc line '$helper_line' (verb=[$verb])"
 
   ln -s "$mate" "$dir/mate-link"
-  FM_HOME="$dir/mate-link" "$REPORT" --doc done "$corr" "$dir/mate-link/data/x/report.md" "via a symlinked home" \
+  FM_HOME="$dir/mate-link" "$REPORT" --doc "done" "$corr" "$dir/mate-link/data/x/report.md" "via a symlinked home" \
     || fail "an absolute document path under a symlinked home was refused"
 
   pass "both real correlation-token writers produce lines this classifier reads through"
