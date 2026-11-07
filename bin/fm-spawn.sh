@@ -3708,6 +3708,13 @@ relaunch_resume_args() {  # <harness> <backend> <target>
   printf -- ' %s %s' "$flag" "$(shell_quote "$ref")"
 }
 
+# rex_claude_resume_enabled: whether this home opted in to Claude session resume
+# on Rex (config/rex-claude-resume holding `on`); absent or any other word is
+# off, so spawn and relaunch behave exactly as without the feature.
+rex_claude_resume_enabled() {
+  [ "$(tr -d '[:space:]' <"$CONFIG/rex-claude-resume" 2>/dev/null)" = on ]
+}
+
 # claude_config_root: the Claude store the launch line points the worker at,
 # which is where its sessions/<pid>.json and projects/*/<session>.jsonl live.
 claude_config_root() {
@@ -3725,6 +3732,7 @@ claude_config_root() {
 relaunch_claude_resume_args() {  # <harness> <backend> <prior-harness> <prior-session-id>
   local harness=${1-} backend=${2-} prior=${3-} id
   [ "$harness" = claude ] && [ "$backend" = rex ] || return 0
+  rex_claude_resume_enabled || return 0
   id=$(fm_control_claude_resumable_session "$(claude_config_root)" "$prior" "${4-}") || return 0
   printf -- '--resume %s ' "$(shell_quote "$id")"
 }
@@ -8289,7 +8297,7 @@ SPAWN_ACCOUNT=
 # Opt-in Herdr project groups (docs/herdr-backend.md "Project groups") tag the
 # new endpoint now rather than at the next watcher poll; off costs one file test.
 [ ! -e "$CONFIG/herdr-project-groups" ] || [ "$BACKEND" != herdr ] || FM_HOME=$FM_HOME FM_STATE_OVERRIDE=$STATE FM_CONFIG_OVERRIDE=$CONFIG "$SCRIPT_DIR/fm-herdr-groups.sh" sync "$ID" || true
-if [ "$BACKEND" = rex ] && [ "$HARNESS" = claude ]; then
+if [ "$BACKEND" = rex ] && [ "$HARNESS" = claude ] && rex_claude_resume_enabled; then
   record_claude_session_id "$T" "$WT" "$STATE/$ID.meta" || true
 fi
 echo "spawned $ID harness=$HARNESS kind=$KIND$SPAWN_DELIVERY window=$META_WINDOW worktree=$WT$SPAWN_ACCOUNT"

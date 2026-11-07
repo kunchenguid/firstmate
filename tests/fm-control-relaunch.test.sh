@@ -2946,6 +2946,8 @@ rex_claude_case() {  # <name> <id> <recorded-harness> <recorded-claude-session-i
     [ "$recorded" = - ] || echo "claude_session_id=$recorded"
   } > "$dir/home/state/$id.meta"
   TASK_TMPS+=("/tmp/fm-$id")
+  mkdir -p "$dir/home/config"
+  [ "${REX_CLAUDE_RESUME_KEY-on}" = absent ] || printf '%s\n' "${REX_CLAUDE_RESUME_KEY-on}" > "$dir/home/config/rex-claude-resume"
   if [ "$5" = yes ]; then
     mkdir -p "$dir/user-home/.claude/projects/p"
     : > "$dir/user-home/.claude/projects/p/$recorded.jsonl"
@@ -3025,6 +3027,23 @@ test_rex_claude_relaunch_without_a_live_session_file_drops_the_old_id() {
   [ -z "$(meta_field "$dir" rx3 claude_session_id)" ] \
     || fail "a relaunch whose record step finds no session must not keep the old id, got '$(meta_field "$dir" rx3 claude_session_id)'"
   pass "fm-spawn --relaunch: a Rex claude relaunch that records no session leaves no stale id"
+}
+
+test_rex_claude_resume_is_off_unless_the_home_opts_in() {
+  local dir out rc launched key
+  command -v jq >/dev/null 2>&1 || { echo "skip - rex relaunch needs jq"; return 0; }
+  for key in absent off; do
+    rc=0
+    dir=$(REX_CLAUDE_RESUME_KEY=$key rex_claude_case "rex-optout-$key" "rx4$key" claude "$REX_CLAUDE_SESSION" yes "$REX_CLAUDE_LIVE_SESSION")
+    out=$(run_rex_spawn "$dir" "rx4$key" --relaunch --harness claude) || rc=$?
+    expect_code 0 "$rc" "a Rex claude relaunch should succeed with the key $key"$'\n'"$out"
+    launched=$(cat "$dir/rex/fake/launched")
+    assert_contains "$launched" "claude --dangerously-skip-permissions" "the replacement claude must launch"
+    assert_not_contains "$launched" "--resume" "with the key $key a recorded conversation must not be reopened"
+    [ -z "$(meta_field "$dir" "rx4$key" claude_session_id)" ] \
+      || fail "with the key $key no session id may be recorded, got '$(meta_field "$dir" "rx4$key" claude_session_id)'"
+  done
+  pass "fm-spawn --relaunch: Rex claude resume stays off unless config/rex-claude-resume is on"
 }
 
 test_herdr_reclaim_refuses_an_agent_that_came_back() {
@@ -3356,6 +3375,7 @@ test_herdr_reclaim_refuses_an_agent_that_came_back
 test_rex_claude_relaunch_resumes_the_recorded_conversation
 test_rex_pi_to_claude_relaunch_does_not_resume_an_old_claude_session
 test_rex_claude_relaunch_without_a_live_session_file_drops_the_old_id
+test_rex_claude_resume_is_off_unless_the_home_opts_in
 test_herdr_reclaim_keeps_the_task_whole
 test_herdr_reclaim_of_a_secondmate_names_its_own_owner
 test_herdr_rebind_failure_from_a_plain_shell_names_the_real_cause

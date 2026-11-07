@@ -669,6 +669,7 @@ Use the explicit guarded cleanup path described in [`docs/herdr-backend.md`](her
 
 The local `config/rex-status-marks` file opts a home in to Rex attention marks: `on` sets a program-status badge and a notification on the pane of a Rex worker that needs the captain, plus validation progress in its hover card, and `off` (the default when absent) shows none of them.
 [Attention marks](rex-backend.md#attention-marks) owns the status mapping and its limits.
+The local `config/rex-claude-resume` file opts a home in to Claude session resume on a Rex relaunch: `on` records each Rex Claude worker's session id and relaunches it with `claude --resume`, and `off` (the default when absent) keeps the fresh-session relaunch; [Active limits](rex-backend.md#active-limits) owns the behavior.
 The local `config/rex-tint` file opts in to a subtle background tint on waiting and failed workers: `off` (the default when absent), `subtle`, or `subtle-light`; [State tint](rex-backend.md#state-tint) owns its behavior and caveats.
 
 ### OSC 7501 worker status reporting
