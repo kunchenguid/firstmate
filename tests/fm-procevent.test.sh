@@ -1168,7 +1168,15 @@ cp "$CASE_BIN/node" "$UP_BIN/node" 2>/dev/null || true
 printf '#!/usr/bin/env bash\nsleep 30\n' > "$UP_BIN/lavish-axi"
 chmod +x "$UP_BIN/lavish-axi"
 fm_test_track_procevent_home "$HUP"
-old_id=$(PATH="$UP_BIN:$PATH" "$ROOT/bin/fm-procevent-lavish.sh" source-id "$CASE_SPELLED")
+# The old id hashes the Perl-resolved spelling, which keeps the caller's case.
+# Without a second spelling (a case-sensitive filesystem) it is the native id.
+old_path=$(perl -MCwd=realpath -e '$p = realpath($ARGV[0]); defined($p) or exit 1; print "$p\n"' "$CASE_SPELLED" 2>/dev/null) \
+  || old_path=$CASE_ART
+old_id="lavish-$(printf '%s' "$old_path" | { shasum -a 256 2>/dev/null || sha256sum; } | awk '{print substr($1,1,16)}')"
+native_id=$(PATH="$UP_BIN:$PATH" "$ROOT/bin/fm-procevent-lavish.sh" source-id "$CASE_ART")
+if [ -e "$CASE_SPELLED" ]; then
+  [ "$old_id" != "$native_id" ] || fail "the old spelling id equals the native-path id, so reuse is not exercised"
+fi
 pe "$HUP" register lavish "$old_id" -- "$ROOT/bin/fm-procevent-lavish.sh" poll "$CASE_SPELLED" >/dev/null
 [ "$(PATH="$UP_BIN:$PATH" FM_HOME="$HUP" "$ROOT/bin/fm-procevent-lavish.sh" source-id "$CASE_SPELLED")" = "$old_id" ] \
   || fail "an existing registration under the old spelling was not reused"
