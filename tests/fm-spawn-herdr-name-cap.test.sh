@@ -11,8 +11,8 @@
 # inner `agent start` silently errors and never boots.
 #
 # Ids are semantic, so the scripts never auto-truncate - the hint is to
-# recreate the task under a shorter id. The cap predicate is defined locally
-# in each of the two scripts (it is a one-line length comparison), so this
+# recreate the task under a shorter id. The cap predicate lives once in
+# bin/fm-control-lib.sh, which both entry scripts source, so this
 # suite pins the cap through the entry points a caller actually invokes,
 # on the exact 32/33 boundary:
 #   - Integration (spawn): a fresh fm-spawn.sh ship spawn with --backend herdr
