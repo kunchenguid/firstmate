@@ -1098,6 +1098,19 @@ export default function (pi: ExtensionAPI) {
     return result;
   }
 
+  // A tool call or a slash command is proof the session is running, so it is the
+  // right place to heal a generation a shutdown hook left retired. Without this,
+  // one earlier shutdown leaves `generation.stopping` true for the rest of the
+  // session and every arm answers "omp session is shutting down" even though the
+  // session is alive and answering.
+  function liveGeneration(): SessionGeneration {
+    if (generation.stopping) {
+      generation = createGeneration();
+      activateGeneration(generation);
+    }
+    return generation;
+  }
+
   pi.on?.("before_agent_start", (event) => {
     consumeWake(generation, String((event as { prompt?: unknown })?.prompt ?? ""));
   });
@@ -1125,7 +1138,7 @@ export default function (pi: ExtensionAPI) {
   pi.registerCommand?.("fm-watch-arm-omp", {
     description: "Arm firstmate watcher supervision through the omp extension instead of foreground bash.",
     handler: async (_args, ctx) => {
-      const result = activateOwnedWatch(generation);
+      const result = activateOwnedWatch(liveGeneration());
       ctx?.ui?.notify?.(result.message, result.ok ? "info" : "warning");
     },
   });
@@ -1140,7 +1153,7 @@ export default function (pi: ExtensionAPI) {
     ],
     parameters: Type.Object({}),
     execute: async () => {
-      const result = activateOwnedWatch(generation);
+      const result = activateOwnedWatch(liveGeneration());
       return {
         content: [{ type: "text", text: result.message }],
         details: result,
