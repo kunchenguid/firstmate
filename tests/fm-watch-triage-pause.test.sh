@@ -1437,6 +1437,16 @@ test_silent_recheck_flag_on_wakes_for_a_changed_declaration() {
   pass "with paused-recheck-silent on, a changed declaration still wakes"
 }
 
+test_silent_recheck_flag_on_wakes_when_the_agent_exited() {
+  local dir state
+  dir=$(silent_recheck_case silent-dead on 'paused: rate limit resets, until 2999-01-01T00:00Z, then resuming'); state="$dir/state"
+  printf 'window=test:fm-until\nkind=ship\nharness=grok\nbackend=tmux\n' > "$state/until.meta"
+  FM_FAKE_TMUX_CURRENT_COMMAND=zsh until_watch "$dir" 240
+  wait_for_exit "$UNTIL_PID" 100 || { reap "$UNTIL_PID"; fail "a paused recheck for an exited agent did not wake with the flag on"; }
+  grep -F 'stale: test:fm-until' "$dir/watch.out" >/dev/null || fail "the exited-agent recheck wake was not printed: $(cat "$dir/watch.out")"
+  pass "with paused-recheck-silent on, a paused recheck for an exited agent still wakes"
+}
+
 test_silent_recheck_flag_on_wakes_when_declared_time_is_due() {
   local dir state
   dir=$(silent_recheck_fixture silent-due "$(( $(date +%s) - 30 ))" 500); state="$dir/state"
@@ -1588,6 +1598,7 @@ fm_test_run \
   test_silent_recheck_flag_off_still_wakes \
   test_silent_recheck_flag_on_wakes_for_an_open_decision \
   test_silent_recheck_flag_on_wakes_for_a_changed_declaration \
+  test_silent_recheck_flag_on_wakes_when_the_agent_exited \
   test_silent_recheck_flag_on_wakes_when_declared_time_is_due \
   test_paused_bg_job_without_until_stays_silent_after_the_job_ends \
   test_paused_bg_job_until_timeout_rechecks_after_the_job_ends

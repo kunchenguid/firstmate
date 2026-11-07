@@ -2479,6 +2479,7 @@ handle_paused_stale() {  # <window> <task> <hash>
     reason="paused ${age}s, awaiting external - declared pause, rechecked on a long cadence not a wedge; confirm the wait still holds"
   fi
   if [ "$silent" = 1 ] && [ -e "$CONFIG/paused-recheck-silent" ] \
+    && { [ "$(window_kind "$win")" = secondmate ] || [ "$(fm_backend_agent_alive "$(window_backend "$win")" "$win" 2>/dev/null || true)" = alive ]; } \
     && [ -z "$(status_own_open_decisions "$statusf")" ] \
     && [ "$age" -ge "$min_age" ] \
     && [ "$(cat "$STATE/.paused-resurfaced-$key" 2>/dev/null || true)" = "$declaration" ] \
