@@ -1726,6 +1726,20 @@ test_silent_recheck_flag_on_absorbs_unchanged_pause_for_a_live_ship_agent() {
   pass "with paused-recheck-silent on, an unchanged paused recheck for a live ship agent is silent"
 }
 
+test_silent_recheck_flag_on_absorbs_a_ticking_pane_for_a_live_ship_agent() {
+  local dir state
+  dir=$(silent_recheck_case silent-ticking on 'paused: waiting on the vendor reply'); state="$dir/state"
+  printf 'window=test:fm-until\nkind=ship\nharness=grok\nbackend=tmux\n' > "$state/until.meta"
+  printf 'idle, waiting for the reset 12:01\n' > "$dir/pane.txt"
+  printf '%s' "$(hash_text 'idle, waiting for the reset 12:01')" > "$state/.hash-$(watch_window_key test:fm-until)"
+  FM_FAKE_TMUX_CURRENT_COMMAND=grok until_watch "$dir" 240
+  if ! wait_poll_cycle "$state" "$UNTIL_PID" || ! wait_poll_cycle "$state" "$UNTIL_PID"; then
+    reap "$UNTIL_PID"; fail "a changed pane on an unchanged paused declaration woke the supervisor with the flag on: $(cat "$dir/watch.out")"
+  fi
+  reap "$UNTIL_PID"
+  pass "with paused-recheck-silent on, a ticking pane on an unchanged paused declaration is silent"
+}
+
 test_silent_recheck_flag_on_wakes_when_the_agent_exited() {
   local dir state
   dir=$(silent_recheck_case silent-dead on 'paused: rate limit resets, until 2999-01-01T00:00Z, then resuming'); state="$dir/state"
@@ -1898,6 +1912,7 @@ fm_test_run \
   test_silent_recheck_flag_on_wakes_for_an_open_decision \
   test_silent_recheck_flag_on_wakes_for_a_changed_declaration \
   test_silent_recheck_flag_on_absorbs_unchanged_pause_for_a_live_ship_agent \
+  test_silent_recheck_flag_on_absorbs_a_ticking_pane_for_a_live_ship_agent \
   test_silent_recheck_flag_on_wakes_when_the_agent_exited \
   test_silent_recheck_flag_on_wakes_when_declared_time_is_due \
   test_paused_bg_job_without_until_stays_silent_after_the_job_ends \
