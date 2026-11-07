@@ -212,7 +212,7 @@
 # never left leased forever. If the treehouse return fails, teardown leaves the
 # leased home and state in place instead of hiding a still-held lease.
 # Usage: fm-teardown.sh <task-id> [--force] [--legacy-record]
-#   --force skips ordinary-task dirty, landed-work, and unmerged-PR checks, skips scout report
+#   --force skips ordinary-task dirty, landed-work, and open-PR checks, skips scout report
 #   checks and closes the scout as discarded with no report recorded, and
 #   discards secondmate child work for kind=secondmate. Only use it when the
 #   captain has explicitly said to discard the work.
