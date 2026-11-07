@@ -995,6 +995,111 @@ test_pi_harness_routes_itself_to_the_extension_model() {
   pass "fm-guard stale banner: Pi and pi-signed primaries route themselves to the extension model"
 }
 
+# Foreground Codex checkpoints leave no watcher between an actionable exit and
+# the next checkpoint. The verdict stays an alarm, but the wording must tell an
+# active same-turn handler what to finish, while still telling an abandoned turn
+# that supervision lapsed. Codex publishes no env marker, so pin the harness
+# through a structural ancestor and clear foreign markers from the runner.
+CODEX_HANDLING_LINE='If this turn is still handling a wake a checkpoint returned, finish handling and acknowledging it, then start the next checkpoint in this same turn.'
+
+fake_harness_ancestry() {  # <fakebin> <harness-comm>
+  local fakebin=$1 comm=$2 real_ps
+  real_ps=$(command -v ps) || return 1
+  cat > "$fakebin/ps" <<SH
+#!/usr/bin/env bash
+case "\$*" in
+  '-o comm= -p '*) printf '%s\n' $comm ;;
+  '-o args= -p '*) printf '%s\n' $comm ;;
+  '-o ppid= -p '*) printf '%s\n' 1 ;;
+  *) exec "$real_ps" "\$@" ;;
+esac
+SH
+  chmod +x "$fakebin/ps"
+}
+
+run_guard_case_as_harness() {  # <dir> <fakebin> [extra env...]
+  local dir=$1 fakebin=$2
+  shift 2
+  env -u CLAUDECODE -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GROK_AGENT -u GEMINI_CLI \
+    -u PI_CODING_AGENT -u FM_PI_HARNESS -u FM_OMP_HARNESS -u FM_HERMES_HARNESS \
+    -u ATLASSIAN_AGENT_TYPE -u ROVODEV_CLI -u FM_SUPERVISION_ACTOR \
+    PATH="$fakebin:$PATH" \
+    FM_ROOT_OVERRIDE="$(case_root "$dir")" \
+    FM_HOME="$(case_home "$dir")" \
+    FM_GUARD_GRACE=999 \
+    FM_SUPERVISION_MODEL=persistent \
+    "$@" \
+    "$ROOT/bin/fm-guard.sh" 2>&1
+}
+
+test_codex_foreground_no_watcher_banner_names_active_handler() {
+  local fakebin dir out1 out2
+  fakebin=$(fm_fakebin "$TMP_ROOT/codex-ancestry")
+  fake_harness_ancestry "$fakebin" codex
+  dir=$(make_guard_case codex-foreground-no-watcher)
+  touch "$(case_home "$dir")/state/.last-watcher-beat"
+  out1=$(run_guard_case_as_harness "$dir" "$fakebin")
+  [ "$(count_text "$out1" "WATCHER DOWN - SUPERVISION IS OFF")" -eq 1 ] \
+    || fail "a foreground Codex no-watcher state must still print the full alarm: $out1"
+  assert_contains "$out1" "no live watcher process holds this home lock" \
+    "the foreground Codex banner must keep the strict no-watcher reason"
+  assert_contains "$out1" "$CODEX_HANDLING_LINE" \
+    "the foreground Codex banner must tell an active handler to finish and rearm"
+  assert_contains "$out1" "If the turn already ended with a final response, supervision has lapsed and must be repaired." \
+    "the foreground Codex banner must still warn an abandoned-after-final turn"
+  assert_contains "$out1" "Trust the emitted supervision protocol" \
+    "the foreground Codex banner must keep the repair instruction"
+  out2=$(run_guard_case_as_harness "$dir" "$fakebin")
+  [ "$(count_text "$out2" "WATCHER DOWN - SUPERVISION IS OFF")" -eq 0 ] \
+    || fail "the second foreground Codex call repeated the full banner: $out2"
+  assert_contains "$out2" "full banner already printed this episode" \
+    "the second foreground Codex call must print the concise reminder"
+  [ "$(count_text "$out2" "$CODEX_HANDLING_LINE")" -eq 1 ] \
+    || fail "the foreground Codex reminder must carry the handling line once: $out2"
+  pass "fm-guard stale banner: foreground Codex no-watcher alarm names the active-handler path"
+}
+
+test_codex_handling_line_only_for_writable_fresh_beacon_codex() {
+  local fakebin dir out harness
+  fakebin=$(fm_fakebin "$TMP_ROOT/codex-ancestry-scope")
+  fake_harness_ancestry "$fakebin" codex
+  dir=$(make_guard_case codex-foreground-stale-beacon)
+  out=$(run_guard_case_as_harness "$dir" "$fakebin")
+  [ "$(count_text "$out" "WATCHER DOWN - SUPERVISION IS OFF")" -eq 1 ] \
+    || fail "a Codex stale beacon must print the full alarm: $out"
+  assert_not_contains "$out" "$CODEX_HANDLING_LINE" \
+    "a Codex beacon past grace must not suggest a still-active handler"
+  out=$(run_guard_case_as_harness "$dir" "$fakebin")
+  assert_not_contains "$out" "$CODEX_HANDLING_LINE" \
+    "a Codex stale-beacon reminder must not suggest a still-active handler"
+
+  dir=$(make_guard_case codex-foreground-read-only)
+  touch "$(case_home "$dir")/state/.last-watcher-beat"
+  out=$(run_guard_case_as_harness "$dir" "$fakebin" FM_GUARD_READ_ONLY=1)
+  assert_contains "$out" "WATCHER DOWN - SUPERVISION IS OFF" \
+    "a read-only Codex observer must still see the alarm"
+  assert_not_contains "$out" "$CODEX_HANDLING_LINE" \
+    "a read-only Codex observer must not be told to rearm"
+
+  for harness in opencode grok; do
+    fakebin=$(fm_fakebin "$TMP_ROOT/$harness-ancestry")
+    fake_harness_ancestry "$fakebin" "$harness"
+    dir=$(make_guard_case "$harness-no-watcher")
+    touch "$(case_home "$dir")/state/.last-watcher-beat"
+    out=$(run_guard_case_as_harness "$dir" "$fakebin")
+    [ "$(count_text "$out" "WATCHER DOWN - SUPERVISION IS OFF")" -eq 1 ] \
+      || fail "a $harness no-watcher state must print the full alarm: $out"
+    assert_not_contains "$out" "$CODEX_HANDLING_LINE" \
+      "the foreground Codex handling line leaked into a $harness primary"
+    assert_not_contains "$out" "foreground checkpoint watcher is not running" \
+      "the foreground Codex banner wording leaked into a $harness primary"
+    out=$(run_guard_case_as_harness "$dir" "$fakebin")
+    assert_not_contains "$out" "$CODEX_HANDLING_LINE" \
+      "the foreground Codex reminder line leaked into a $harness primary"
+  done
+  pass "fm-guard stale banner: the Codex handling line needs a writable Codex no-watcher state"
+}
+
 test_first_stale_call_prints_full_banner
 test_full_banner_names_quiet_mode_when_active
 test_repeated_same_episode_prints_reminder_only
@@ -1026,6 +1131,8 @@ test_healthy_recovery_rearms_next_stale_episode
 test_concurrent_same_episode_prints_one_full_banner
 test_home_isolation
 test_queued_wake_warning_stays_independent
+test_codex_foreground_no_watcher_banner_names_active_handler
+test_codex_handling_line_only_for_writable_fresh_beacon_codex
 test_read_only_before_writable_does_not_consume_full_banner
 test_read_only_during_episode_observes_without_mutating_marker
 test_healthy_read_only_does_not_clear_marker
