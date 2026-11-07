@@ -90,6 +90,7 @@ MAX_DOC_BYTES=${FM_REMOTE_REPLY_MAX_DOC_BYTES:-262144}
 # final (see cmd_ingest).
 SSH_UNAVAILABLE=255
 DOCUMENT_LOCAL_FAILURE=2
+SNAPSHOT_UNVERIFIED=3
 
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
@@ -449,8 +450,9 @@ summarize_fetch_reason() { # <stderr-file> <remote-relative>
 
 # Fetch one referenced remote document. Returns 0 on success, 1 when the remote
 # reader refused the path or size, DOCUMENT_LOCAL_FAILURE when local storage
-# failed, and SSH_UNAVAILABLE when transport completion is unknown. A refusal
-# leaves the reader's own explanation in FETCH_DOC_REASON.
+# failed, SNAPSHOT_UNVERIFIED when a required snapshot is missing or does not
+# verify yet, and SSH_UNAVAILABLE when transport completion is unknown. A
+# refusal leaves the reader's own explanation in FETCH_DOC_REASON.
 FETCH_DOC_REASON=''
 fetch_document() { # <id> <remote-relative> <result-var>
   local id=$1 rel=$2 result_var=$3 base destination parent parent_real tmp err local_rel rc=0
@@ -489,15 +491,18 @@ fetch_document() { # <id> <remote-relative> <result-var>
     rm -f -- "$tmp" "$err"
     FETCH_TMP='' FETCH_ERR=''
     [ "$rc" -ne "$SSH_UNAVAILABLE" ] || return "$SSH_UNAVAILABLE"
+    [ -z "$digest" ] || return "$SNAPSHOT_UNVERIFIED"
     return 1
   fi
   if [ -n "$digest" ]; then
     bytes=$(wc -c < "$tmp" | tr -d ' ')
-    if ! FM_HOME="$base" "$SCRIPT_DIR/fm-document-snapshot.sh" receive "$digest" "$bytes" < "$tmp" > /dev/null 2> "$err"; then
+    FM_HOME="$base" "$SCRIPT_DIR/fm-document-snapshot.sh" receive "$digest" "$bytes" < "$tmp" > /dev/null 2> "$err" || rc=$?
+    if [ "$rc" -ne 0 ]; then
       FETCH_DOC_REASON=$(summarize_fetch_reason "$err" "$rel")
       rm -f -- "$tmp" "$err"
       FETCH_TMP='' FETCH_ERR=''
-      return 1
+      [ "$rc" -ne 3 ] || return 1
+      return "$SNAPSHOT_UNVERIFIED"
     fi
     rm -f -- "$tmp" "$err"
     FETCH_TMP='' FETCH_ERR=''
@@ -677,13 +682,9 @@ cmd_ingest() {
     fetch_rc=0
     local_doc=''
     fetch_document "$id" "$doc" local_doc || fetch_rc=$?
+    [ "$fetch_rc" -ne "$SNAPSHOT_UNVERIFIED" ] \
+      || { fm_lock_release "$lock"; die "required document snapshot did not transfer: $doc - $FETCH_DOC_REASON"; }
     if [ "$fetch_rc" -eq 1 ]; then
-      case "$doc" in
-        data/report-snapshots/*)
-          fm_lock_release "$lock"
-          die "required document snapshot did not transfer: $doc - $FETCH_DOC_REASON"
-          ;;
-      esac
       # Fail open. A refusal is never a decision: the mate's line keeps its own
       # pointer, the cursor still advances, and one unkeyed note says why. A
       # keyed escalation raised here once stood open forever describing a report

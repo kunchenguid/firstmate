@@ -14,9 +14,10 @@
 # receive is the narrow artifact-copy endpoint for fm-on.sh --stdin; its hash
 # and byte count commit to the exact reviewed bytes, including final newlines.
 # Source-home and source-document provenance travel with the referring message.
+# Exit status 3 means the content checks refused the bytes, which no retry fixes.
 set -eu
 case "${1:-}" in
-  --help|-h) sed -n '2,16p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+  --help|-h) sed -n '2,17p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
 esac
 # Descriptor-relative IO keeps components confined across directory replacement.
 python3 - "$@" 3<&0 <<'PY'
@@ -30,6 +31,10 @@ import uuid
 MAX_BYTES = 1048576
 DIRECTORY = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
 FILE = os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW
+
+
+class ContentRefused(ValueError):
+    pass
 
 
 def refuse(message):
@@ -58,9 +63,12 @@ def read_file(parent, name):
 def check_content(content):
     if len(content) > MAX_BYTES:
         refuse('document exceeds the 1048576-byte safety bound')
-    text = content.decode('utf-8')
+    try:
+        text = content.decode('utf-8')
+    except UnicodeDecodeError as error:
+        raise ContentRefused(str(error))
     if re.search(r'[\x00-\x08\x0b-\x1f\x7f]', text):
-        refuse('document contains control bytes')
+        raise ContentRefused('document contains control bytes')
     patterns = (
         r'-----BEGIN [A-Z ]*PRIVATE KEY-----',
         r'\b(?:AKIA|ASIA)[A-Z0-9]{16}\b',
@@ -72,7 +80,7 @@ def check_content(content):
         r'://[^\s/:]+:[^\s/@]+@',
     )
     if any(re.search(pattern, text, re.IGNORECASE) for pattern in patterns):
-        refuse('document contains possible credentials; provide a reviewed non-secret extract')
+        raise ContentRefused('document contains possible credentials; provide a reviewed non-secret extract')
 
 
 def publish(home, content, digest):
@@ -130,7 +138,10 @@ def main():
             if re.search(r'[\x00-\x1f\x7f]', path):
                 refuse('document path contains control bytes')
             if os.path.isabs(path):
-                path = os.path.relpath(path, home_path)
+                path = os.path.abspath(path)
+                lexical_home = os.path.abspath(os.environ['FM_HOME'])
+                root = lexical_home if os.path.commonpath([path, lexical_home]) == lexical_home else home_path
+                path = os.path.relpath(path, root)
             parts = path.split('/')
             if parts[0] != 'data' or any(not part or part.startswith('.') for part in parts):
                 refuse("document must be a non-hidden path under this home's data directory")
@@ -168,6 +179,9 @@ def main():
 
 try:
     main()
+except ContentRefused as error:
+    print('error: cannot deliver document snapshot: ' + str(error), file=sys.stderr)
+    sys.exit(3)
 except (OSError, ValueError, KeyError) as error:
     sys.exit('error: cannot deliver document snapshot: ' + str(error))
 PY

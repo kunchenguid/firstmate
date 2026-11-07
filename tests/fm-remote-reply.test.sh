@@ -1488,4 +1488,29 @@ for snapshot_size in 48 300000; do
   [ "$(grep -c "corr=$DOC_CORR" "$PARENT/state/ios.status")" -eq 1 ] || fail "snapshot replay duplicated the answer"
 done
 
+# A refusal that no retry changes must not hold back the mate's later lines.
+DOC_CORR=$(fm_pending_reply_create "$PARENT" "$PARENT/state" ios 'send another plan')
+fm_pending_reply_mark_delivered "$PARENT/state" "$DOC_CORR"
+CURSOR_HASH=$(shasum -a 256 < "$REMOTE/state/parent-replies.status" | awk '{print $1}')
+CURSOR_OFFSET=$(wc -c < "$REMOTE/state/parent-replies.status" | tr -d ' ')
+printf 'progress: see report=data/report-snapshots/notes.md for context\n' >> "$REMOTE/state/parent-replies.status"
+printf 'password: hunter2\n' > "$REMOTE/data/plans/refused.md"
+REFUSED_HASH=$(shasum -a 256 < "$REMOTE/data/plans/refused.md" | awk '{print $1}')
+mkdir -p "$REMOTE/data/report-snapshots"
+cp "$REMOTE/data/plans/refused.md" "$REMOTE/data/report-snapshots/$REFUSED_HASH.md"
+printf 'done [corr=%s]: refused (report=data/report-snapshots/%s.md via-helper)\n' "$DOC_CORR" "$REFUSED_HASH" \
+  >> "$REMOTE/state/parent-replies.status"
+FM_HOME="$REMOTE" "$ROOT/bin/fm-remote-delta-read.sh" state/parent-replies.status "$CURSOR_OFFSET" "$CURSOR_HASH" 1 \
+  > "$TMP_ROOT/refused-delta" || fail "refused-snapshot delta capture failed"
+remote_env "$ADAPTER" ingest ios "$TMP_ROOT/refused-delta" >/dev/null \
+  || fail "an invalid digest or a content refusal blocked the mate's reply stream"
+assert_grep 'progress: see report=data/report-snapshots/notes.md' "$PARENT/state/ios.status" \
+  "a line with an invalid snapshot digest was withheld"
+assert_grep 'invalid required snapshot digest' "$PARENT/state/ios.status" "the invalid digest left no note"
+assert_grep "corr=$DOC_CORR" "$PARENT/state/ios.status" "a content refusal withheld the answer forever"
+assert_grep 'possible credentials' "$PARENT/state/ios.status" "the content refusal left no note"
+assert_absent "$PARENT/data/remote-secondmates/ios/data/report-snapshots/$REFUSED_HASH.md" \
+  "refused content was published at the parent"
+pass "deterministic snapshot refusals fail open instead of blocking the stream"
+
 echo "ALL TESTS PASSED"
