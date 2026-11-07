@@ -5,6 +5,9 @@
 # compatibility for pre-collapse decision identities.
 set -u
 
+# Merge fixtures represent newly launched tasks with a pinned destination.
+FM_TEST_META_EXPECTED_BASE=main
+
 # shellcheck source=tests/lib.sh
 # shellcheck disable=SC1091
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
@@ -118,6 +121,7 @@ case "${1:-} ${2:-}" in
         printf '%s\n' '{"state":"OPEN","isDraft":false,"mergeable":"MERGEABLE","mergeStateStatus":"CLEAN","headRefOid":"1111111111111111111111111111111111111111","baseRefName":"main","statusCheckRollup":[{"__typename":"CheckRun","name":"ci","status":"COMPLETED","conclusion":"SUCCESS"}]}'
         ;;
       *headRefOid*) printf '%s\n' 1111111111111111111111111111111111111111 ;;
+      *baseRefName*) printf '%s\n' main ;;
     esac
     ;;
   "pr merge") printf 'merged:\n  number: %s\n  status: ok\n' "${3:-}" ;;

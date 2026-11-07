@@ -591,7 +591,7 @@ SH
 
 test_readiness_deadline_owns_forge_processes_on_both_paths() {
   local timer route tools_bin tool tool_path mechanism home id number attempt pid state deadline url running started elapsed
-  command -v perl >/dev/null 2>&1 || { fail 'readiness deadline regression requires perl'; return; }
+  command -v perl >/dev/null 2>&1 || fail 'readiness deadline regression requires perl'
   for timer in normal perl; do
     for route in ledger cadence; do
       make_world "deadline-$timer-$route"
