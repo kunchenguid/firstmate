@@ -5,8 +5,13 @@
 // It serves T3's headless OAuth sign-in (/oauth/mcp/register, /decision,
 // /token) and the Orchestrator V2 `/mcp` streamable-HTTP endpoint with the
 // tool subset bin/fm-t3-mcp.mjs drives. Shapes follow T3 main 50647de0 and
-// 0.0.46 nightly as recorded in docs/verification/runtime-backends.md,
-// including the protocol facts a simpler fake would hide:
+// 0.0.46 nightly as recorded in docs/verification/runtime-backends.md. By
+// default it serves T3 0.1.3 and later: the merged t3_thread_configure and
+// t3_pending_request tools, and a compact orchestrator_capabilities catalog
+// whose options list their `values` and whose short model list counts the
+// rest in omittedModels, found with `search`. The legacy world key serves
+// T3 0.1.0 instead: the single-purpose tools and the full typed catalog. It
+// keeps the protocol facts a simpler fake would hide:
 //   - t3_thread_list pages by cursor (default 50, at most 100) and reports
 //     each thread's relationshipToParent (fork or subagent);
 //   - t3_thread_read caps limit at 100;
@@ -18,7 +23,8 @@
 //   - archive is distinct from run end: the active run ends asynchronously;
 //   - a send is committed before its reply, which dropReplyTools can lose;
 //   - pendingRequestCount counts every pending runtime request, while the
-//     t3_pending_request_* tools see only user-input questions.
+//     pending-request tools see only user-input questions;
+//   - a tool the server does not list answers unknown_tool.
 //
 // Usage: t3-fake-server.mjs --case-file <file> --port-file <file> [--parent-pid <pid>]
 // <case-file> holds the path of the current case directory. Every request
@@ -26,7 +32,9 @@
 // one JSON line to <case-dir>/requests.jsonl, so a test can switch cases and
 // edit the world between calls. World keys (all optional):
 //   tokens (accepted bearers; sign-in appends), environmentId, serverVersion,
-//   tools (array of names; default all), revoked (every /mcp call is 401),
+//   tools (array of names; default all), legacy (serve T3 0.1.0's tools and
+//   catalog), omitModels (model ids the compact catalog leaves out of its
+//   short list), revoked (every /mcp call is 401),
 //   sse (SSE replies), expiresIn (seconds), bindWorktree, bindInstance,
 //   bindRuntimeMode, bindModel, bindOptions (override what a launch binds),
 //   archiveKeepsRun (archive never ends the run), interruptStuck or
@@ -59,12 +67,30 @@ import path from "node:path";
 const args = {};
 for (let i = 2; i < process.argv.length; i += 2) args[process.argv[i].slice(2)] = process.argv[i + 1];
 
-const ALL_TOOLS = [
+const BASE_TOOLS = [
   "t3_thread_launch", "t3_thread_send", "t3_thread_read", "t3_thread_wait", "t3_thread_interrupt",
-  "t3_thread_organize", "t3_thread_list", "t3_thread_configuration", "t3_project_list", "t3_project_create",
-  "t3_pending_request_list", "t3_pending_request_read", "t3_pending_request_respond",
+  "t3_thread_organize", "t3_thread_list", "t3_project_list", "t3_project_create",
   "orchestrator_capabilities", "t3_environment_read",
 ];
+const ALL_TOOLS = [...BASE_TOOLS, "t3_thread_configure", "t3_pending_request"];
+const LEGACY_TOOLS = [...BASE_TOOLS, "t3_thread_configuration", "t3_pending_request_list", "t3_pending_request_read", "t3_pending_request_respond"];
+const listedTools = (w) => w.tools ?? (w.legacy ? LEGACY_TOOLS : ALL_TOOLS);
+
+// T3 0.1.3's compact catalog: option values only, and a short model list
+// unless a search names the models.
+function compactCatalog(providers, omit, search) {
+  const terms = (search ?? "").toLowerCase().split(/\s+/).filter(Boolean);
+  const compactOption = (d) => ({ id: d.id, values: d.type === "boolean" ? [false, true] : (d.options ?? []).map((c) => c.id) });
+  return providers.map((p) => {
+    const models = p.models ?? [];
+    const listed = terms.length ? models.filter((m) => terms.every((t) => m.id.toLowerCase().includes(t))) : models.filter((m) => !omit.includes(m.id));
+    return {
+      ...p,
+      models: listed.map((m) => ({ id: m.id, ...(m.options ? { options: m.options.map(compactOption) } : {}) })),
+      ...(terms.length || listed.length === models.length ? {} : { omittedModels: models.length - listed.length }),
+    };
+  });
+}
 const ACTIVE = new Set(["preparing", "queued", "starting", "running", "waiting"]);
 const TERMINAL = new Set(["completed", "failed", "cancelled", "interrupted", "rolled_back"]);
 const select = (id, values) => ({ id, label: id, type: "select", options: values.map((v) => ({ id: v, label: v })) });
@@ -186,6 +212,15 @@ function listItem(x) {
 
 // Returns [result, changed].
 async function callTool(w, name, a) {
+  if (!listedTools(w).includes(name)) return [err("unknown_tool", `no tool ${name}`), false];
+  // The merged tools answer as the single-purpose tool their call stands for.
+  if (name === "t3_thread_configure") {
+    if (a.modelSelection !== undefined) return [err("invalid_request", "the fake reads configuration only"), false];
+    name = "t3_thread_configuration";
+  } else if (name === "t3_pending_request") {
+    if (!["list", "read", "respond"].includes(a.action)) return [err("invalid_request", `unknown action ${a.action}`), false];
+    name = `t3_pending_request_${a.action}`;
+  }
   const fail = (w.failTools ?? {})[name];
   if (fail) return [err(fail.code, fail.message), false];
   const threads = (w.threads = w.threads ?? {});
@@ -195,7 +230,7 @@ async function callTool(w, name, a) {
     case "t3_environment_read":
       return [ok({ environmentId: w.environmentId ?? "env-fake-1", serverVersion: w.serverVersion ?? "0.0.46-nightly.fake" }), false];
     case "orchestrator_capabilities":
-      return [ok({ parentThreadId: null, runtimeMode: "full-access", interactionMode: "default", providers: w.providers ?? FAKE_PROVIDERS }), false];
+      return [ok({ parentThreadId: null, runtimeMode: "full-access", interactionMode: "default", providers: w.legacy ? (w.providers ?? FAKE_PROVIDERS) : compactCatalog(w.providers ?? FAKE_PROVIDERS, w.omitModels ?? [], a.search) }), false];
     case "t3_project_list":
       return [ok({ projects, nextCursor: null }), false];
     case "t3_project_create": {
@@ -363,7 +398,7 @@ async function mcp(req, res) {
     res.writeHead(202);
     return res.end();
   } else if (msg.method === "tools/list") {
-    result = { tools: (w.tools ?? ALL_TOOLS).map((name) => ({ name, inputSchema: { type: "object" } })) };
+    result = { tools: listedTools(w).map((name) => ({ name, inputSchema: { type: "object" } })) };
   } else if (msg.method === "tools/call") {
     let changed = settle(w);
     let mutated;

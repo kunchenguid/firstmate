@@ -131,6 +131,52 @@ test_gate_refuses_missing_tools() {
   pass "fm-t3-mcp gate: refuses a server missing a required tool or its identity tool"
 }
 
+# T3 0.1.3 merged t3_thread_configuration into t3_thread_configure and the
+# three t3_pending_request_* tools into t3_pending_request; T3 0.1.0 lists
+# only the tools they replaced. The gate accepts either form and every verb
+# calls the form the server lists, while a server with neither is refused.
+test_gate_accepts_merged_or_replaced_tools() {
+  local project form base='"t3_thread_launch","t3_thread_send","t3_thread_read","t3_thread_wait","t3_thread_interrupt","t3_thread_organize","t3_thread_list","t3_project_list","t3_project_create","orchestrator_capabilities","t3_environment_read"'
+  for form in merged replaced; do
+    fresh_case "gate-$form"
+    [ "$form" = replaced ] && t3_fake_set 'w.legacy = true'
+    t3_fake_set 'w.threads = { "thread-q": { threadId: "thread-q", projectId: "p", status: "running", activeRunId: "run-q", archived: false, worktreePath: null, items: [],
+      runs: [{ runId: "run-q", ordinal: 1, status: "running" }],
+      runtimeRequests: [{ id: "req-question", kind: "user_input", status: "pending", questions: [{ id: "q1", header: "Pick", question: "Which?" }] }] } }'
+    mcp status
+    expect_code 0 "$RC" "the gate passes T3's $form tools: $ERR"
+    mcp project-ensure --root "$TMP_ROOT/proj"
+    project=$(field "$OUT" projectId)
+    mcp launch --project "$project" --title "$form" --model-selection "$SEL" --worktree "$WT"
+    expect_code 0 "$RC" "a launch reads its configuration back through the $form tool: $ERR"
+    mcp requests --thread thread-q
+    expect_code 0 "$RC" "requests through the $form tools: $ERR"
+    assert_equals Which? "$(field "$OUT" questions.0.questions.0.question)" "the question is read through the $form tools"
+    printf '{"q1":"a"}' > "$TMP_ROOT/answers"
+    mcp respond --thread thread-q --request req-question --answers-file "$TMP_ROOT/answers"
+    expect_code 0 "$RC" "respond through the $form tool: $ERR"
+    if [ "$form" = merged ]; then
+      assert_contains "$(t3_fake_calls t3_thread_configure)" '"threadId"' "the merged configure tool reads the launch back"
+      assert_not_contains "$(t3_fake_calls t3_thread_configure)" modelSelection "the read-back never changes the thread's model"
+      assert_equals 'list read respond' "$(t3_fake_calls t3_pending_request | node -e 'process.stdout.write(require("fs").readFileSync(0, "utf8").trim().split("\n").map((l) => JSON.parse(l).action).join(" "))')" "every pending-request action goes to the merged tool"
+    else
+      assert_contains "$(t3_fake_calls t3_thread_configuration)" '"threadId"' "the replaced configuration tool reads the launch back"
+      assert_equals '{"q1":"a"}' "$(field "$(t3_fake_calls t3_pending_request_respond)" answers)" "the answers reach t3_pending_request_respond"
+    fi
+  done
+  fresh_case gate-neither
+  t3_fake_set "w.tools = [$base,\"t3_thread_configure\",\"t3_pending_request_list\",\"t3_pending_request_respond\"]"
+  mcp status
+  expect_code 4 "$RC" "a server with neither the merged pending-request tool nor every tool it replaced is refused"
+  assert_equals capability_gate "$(field "$OUT" error.code)" "the refusal is the capability gate"
+  assert_equals '["t3_pending_request"]' "$(field "$OUT" error.missing)" "the refusal names only the missing capability"
+  t3_fake_set "w.tools = [$base,\"t3_pending_request\"]"
+  mcp status
+  expect_code 4 "$RC" "a server without any thread-configuration tool is refused"
+  assert_equals '["t3_thread_configure"]' "$(field "$OUT" error.missing)" "the refusal names the missing configuration tool"
+  pass "fm-t3-mcp gate: accepts T3's merged or replaced configuration and pending-request tools, refuses neither"
+}
+
 test_environment_mismatch_refused() {
   fresh_case env-mismatch '{"environmentId":"env-other"}'
   mcp status
@@ -547,6 +593,37 @@ test_resolve_selection_uses_t3_catalog() {
   pass "fm-t3-mcp resolve-selection: driver, model, and options come from T3's catalog; an effort override keeps other options"
 }
 
+# T3 0.1.3 lists each option's allowed values and only a short model list,
+# counting the rest in omittedModels; T3 0.1.0 gives typed descriptors and
+# every model. Both resolve the same selection, an omitted model is found by
+# search, and a value or model neither form lists is still refused.
+test_resolve_selection_reads_compact_or_typed_catalog() {
+  local project form want='{"instanceId":"claudeAgent","model":"claude-sonnet-5","options":[{"id":"fastMode","value":true},{"id":"effort","value":"high"}]}'
+  for form in compact typed; do
+    fresh_case "catalog-$form"
+    if [ "$form" = typed ]; then t3_fake_set 'w.legacy = true'; else t3_fake_set 'w.omitModels = ["claude-sonnet-5"]'; fi
+    mcp project-ensure --root "$TMP_ROOT/proj"
+    project=$(field "$OUT" projectId)
+    FM_T3_ID="$project" t3_fake_set 'w.projects.find((p) => p.id === process.env.FM_T3_ID).defaultModelSelection = { instanceId: "claudeAgent", model: "claude-sonnet-5", options: [{ id: "fastMode", value: true }] }'
+    : > "$T3_FAKE_LOG"
+    mcp resolve-selection --harness claude --instance claudeAgent --model default --effort high --project "$project"
+    expect_code 0 "$RC" "the $form catalog resolves the project's default with a boolean option kept: $ERR"
+    assert_equals "$want" "$(field "$OUT" selection)" "the $form catalog keeps the boolean option and sets the effort"
+    if [ "$form" = compact ]; then
+      assert_contains "$(t3_fake_calls orchestrator_capabilities)" '"search":"claude-sonnet-5"' "a model left off the short list is searched for by id"
+    else
+      assert_not_contains "$(t3_fake_calls orchestrator_capabilities)" search "a full catalog needs no search"
+    fi
+    mcp resolve-selection --harness claude --instance claudeAgent --model claude-haiku-5-5 --effort ultra --project "$project"
+    expect_code 4 "$RC" "an effort the $form catalog does not list is refused"
+    assert_contains "$ERR" "low, medium, high, xhigh, max" "the $form refusal lists the catalog's values"
+    mcp resolve-selection --harness claude --instance claudeAgent --model claude-none --effort default --project "$project"
+    expect_code 4 "$RC" "a model the $form catalog lacks is refused"
+    assert_equals model_unknown "$(field "$OUT" error.code)" "the $form refusal names the unknown model"
+  done
+  pass "fm-t3-mcp resolve-selection: T3's compact and typed catalogs resolve the same selection; an omitted model is searched for"
+}
+
 test_launch_reads_back_full_configuration() {
   local project sel='{"instanceId":"codex","model":"gpt-5.6-sol","options":[{"id":"reasoningEffort","value":"high"},{"id":"serviceTier","value":"priority"}]}'
   fresh_case launch-config
@@ -563,7 +640,7 @@ test_launch_reads_back_full_configuration() {
   t3_fake_set 'delete w.bindOptions; w.bindModel = "gpt-6-luna"'
   mcp launch --project "$project" --title model --model-selection "$sel" --worktree "$WT"
   expect_code 4 "$RC" "a launch on another model is refused"
-  pass "fm-t3-mcp launch: t3_thread_configuration must read back the instance, model, and every requested option"
+  pass "fm-t3-mcp launch: the thread configuration must read back the instance, model, and every requested option"
 }
 
 test_requests_and_respond() {
@@ -583,7 +660,7 @@ test_requests_and_respond() {
   printf '{"q1":"a"}' > "$TMP_ROOT/answers"
   mcp respond --thread thread-q --request req-question --answers-file "$TMP_ROOT/answers"
   expect_code 0 "$RC" "respond: $ERR"
-  assert_equals '{"q1":"a"}' "$(field "$(t3_fake_calls t3_pending_request_respond)" answers)" "the answers reach t3_pending_request_respond"
+  assert_equals '{"q1":"a"}' "$(field "$(t3_fake_calls t3_pending_request | grep '"action":"respond"' | tail -1)" answers)" "the answers reach T3's pending-request respond"
   mcp respond --thread thread-q --request req-approval --answers-file "$TMP_ROOT/answers"
   expect_code 3 "$RC" "a permission approval cannot be answered through the question tools"
   mcp requests --thread thread-q
@@ -805,6 +882,7 @@ test_login_origin_defaults
 test_login_refuses_other_ceilings
 test_status_gate_and_protocol
 test_gate_refuses_missing_tools
+test_gate_accepts_merged_or_replaced_tools
 test_environment_mismatch_refused
 test_expiry_and_permissions
 test_revoked_credential_refused
@@ -820,6 +898,7 @@ test_interrupt_confirms_only_the_interrupted_run
 test_send_lost_reply_is_unconfirmed_and_retry_is_one_delivery
 test_thread_for_root_pages_and_forks
 test_resolve_selection_uses_t3_catalog
+test_resolve_selection_reads_compact_or_typed_catalog
 test_launch_reads_back_full_configuration
 test_requests_and_respond
 test_watch_is_event_driven_and_bounded

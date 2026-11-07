@@ -2747,6 +2747,45 @@ The first line is the sign-in with only the read and operate scopes; the second 
 | `fm-control.sh exit` | refused before anything was sent |
 | Teardown, including the archive read-back and slot return | 23.5 s; the thread read `archived:true` with no active run, the record was removed, and the slot read `available` |
 
+### Nightly 0.1.8
+
+The backend was verified live on 2026-11-07 against `t3 v0.1.8-nightly.20261107.4301` (native binary from the `t3` launcher), run as a loopback lab server with `T3CODE_TELEMETRY_ENABLED=false` and its own `--base-dir`, with Claude Code 2.1.319, node v26.13.0, and treehouse v3.1.8 on macOS 27.2 arm64.
+It used a scratch Firstmate home with `config/backend` `t3code`, a scratch project with a bare origin, and a private Treehouse pool root.
+T3 0.1.3 (commit `ed44f251d`, PR #25423) merged `t3_thread_configuration` into `t3_thread_configure` and the three `t3_pending_request_*` tools into `t3_pending_request`, which takes `action` `list`, `read`, or `respond`.
+T3 0.1.3 also lists only option `values` and a short model list in `orchestrator_capabilities` (commit `680152e27`, PR #22889); for `claudeAgent` and `codex` the short list holds every current model, and `omittedModels` counts legacy and hidden ones.
+Before the merged-tool support, sign-in with the four scopes T3 0.1.0 needs was refused by the gate after a successful token exchange:
+
+```text
+{"ok":false,"error":{"code":"capability_gate","message":"T3 0.1.8-nightly.20261107.4301 at http://127.0.0.1:<port> lacks t3_thread_configuration, t3_pending_request_list, t3_pending_request_read, t3_pending_request_respond; ...","serverVersion":"0.1.8-nightly.20261107.4301","missing":["t3_thread_configuration","t3_pending_request_list","t3_pending_request_read","t3_pending_request_respond"]}}
+```
+
+The same `tools/list` without a credential answers HTTP 401 `invalid_mcp_credential`, and with the signed-in credential it lists 68 tools, including `t3_thread_configure` and `t3_pending_request` and none of the four replaced names.
+
+```sh
+bin/fm-t3-mcp.mjs login --url http://127.0.0.1:<port> --access full-access --base-dir <t3-base-dir>
+bin/fm-spawn.sh lab2 projects/t3lab --scout --backend t3code --harness claude --model claude-haiku-5-5 --effort low
+bin/fm-send.sh lab2 "<steer>"
+bin/fm-control.sh lab2 interrupt
+bin/fm-t3-mcp.mjs requests --thread <thread-id>
+bin/fm-t3-answer.sh lab2 <request-id> '<answers-json>'
+bin/fm-teardown.sh lab2
+```
+
+```text
+{"ok":true,...,"access":"full-access","scope":"orchestration:read orchestration:operate settings:write source-control:write",...,"serverVersion":"0.1.8-nightly.20261107.4301"}
+interrupt-delivered lab2 harness=claude backend=t3code verified=agent-alive cancel=confirmed
+{"ok":true,...,"exists":true,"archived":true,"status":"completed","activeRunId":null,...}
+```
+
+| Step | Result |
+| --- | --- |
+| Spawn of a Claude scout, including the catalog-resolved selection, the Treehouse lease, and the `t3_thread_configure` read-back | 6 s |
+| Claude scout from spawn to its `done` line and report | about 2.5 min, including the `sleep 120` its brief asked for |
+| Inbox steer send | started the thread's next turn, and the worker read the message from its inbox |
+| `fm-control.sh interrupt` during a running `sleep 120` tool call | 2 s, `cancel=confirmed`; the child was gone and the thread read `interrupted` |
+| A question from Claude's question tool | listed and read through `t3_pending_request` and answered with `fm-t3-answer.sh`; the run then completed with the chosen answer |
+| Teardown, including the archive read-back and slot return | 9 s; the thread read `archived:true` with no active run, and the slot read `available` |
+
 ### Permission approvals in the activity view
 
 The approval part of the pending-request signature was checked against the stable `t3 v0.1.0` source (tag `v0.1.0`, commit `81493efb`); no permission approval was triggered on the live lab server.
@@ -2784,10 +2823,10 @@ FM_CONFIG_OVERRIDE=<home>/config bin/fm-test-run.sh tests/fm-backend-t3code-live
 ```
 
 ```text
-ok - t3code live transport: T3 0.1.0 environment <id> passes the gate (telemetry=off)
+ok - t3code live transport: T3 0.1.8-nightly.20261107.4301 environment <id> passes the gate (telemetry=off)
 ```
 
-That result is from the 2026-10-17 stable 0.1.0 lab run; refresh it with the command above after signing in.
+That result is from the 2026-11-07 nightly 0.1.8 lab run; refresh it with the command above after signing in.
 
 ### Portable regression coverage
 
