@@ -6157,7 +6157,7 @@ test_status_archive_cursor_failure_retries_without_duplicate() {
   prepare_status_archive_presentation "$case_dir"
   cp "$case_dir/state/task-x1.status" "$case_dir/expected"
   cp "$case_dir/state/.status-presentation-cursor" "$case_dir/cursor.before"
-  printf 'broken\tidentity\tnot-an-offset\t0\n' >> "$case_dir/state/.status-presentation-cursor"
+  printf 'task-x1\tidentity\tnot-an-offset\t0\n' >> "$case_dir/state/.status-presentation-cursor"
   cp "$case_dir/state/.status-presentation-cursor" "$case_dir/cursor.malformed"
   rc=0
   run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
