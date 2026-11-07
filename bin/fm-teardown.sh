@@ -1603,7 +1603,7 @@ validate_pr_poll_cleanup() {
   for artifact in "$state_dir/$id.check.sh" "$state_dir/$id.pr-poll" \
     "$state_dir/$id.pr-poll-registration" "$state_dir/$id.pr-poll-retirement" \
     "$state_dir/$id.pr-poll-merge-notified" "$state_dir/$id.pr-poll-degraded" \
-    "$state_dir/$id.merge-authority" "$state_dir/$id.check-trust"; do
+    "$state_dir/$id.pr-poll-train" "$state_dir/$id.merge-authority" "$state_dir/$id.check-trust"; do
     [ -e "$artifact" ] || [ -L "$artifact" ] || continue
     has_artifact=1
   done
@@ -1612,7 +1612,8 @@ validate_pr_poll_cleanup() {
   state_device=$(fm_pr_file_device "$state_dir") || return 1
   for artifact in "$state_dir/$id.check.sh" "$state_dir/$id.pr-poll" \
     "$state_dir/$id.pr-poll-registration" "$state_dir/$id.pr-poll-retirement" \
-    "$state_dir/$id.merge-authority" "$state_dir/$id.check-trust"; do
+    "$state_dir/$id.pr-poll-merge-notified" "$state_dir/$id.pr-poll-degraded" \
+    "$state_dir/$id.pr-poll-train" "$state_dir/$id.merge-authority" "$state_dir/$id.check-trust"; do
     [ -e "$artifact" ] || [ -L "$artifact" ] || continue
     if [ ! -f "$artifact" ] || [ -L "$artifact" ] \
       || [ "$(fm_pr_file_device "$artifact")" != "$state_device" ] \

@@ -2386,7 +2386,7 @@ SH
   assert_poll_absent "$dir/home/state" task-a
   [ ! -e "$dir/home/state/task-a.meta" ] || fail "receipt-aware teardown left task metadata"
 
-  for artifact in check.sh pr-poll; do
+  for artifact in check.sh pr-poll pr-poll-degraded pr-poll-train; do
     dir=$(make_case "teardown-final-directory-${artifact//./-}")
     fakebin="$dir/fakebin"
     fm_write_meta "$dir/home/state/task-a.meta" \
@@ -2427,7 +2427,31 @@ SH
       && fail "teardown killed the endpoint before $artifact refusal"
   done
 
-  pass "teardown removes safe poll artifacts and refuses directory-shaped check files without traversal"
+  for artifact in pr-poll-degraded pr-poll-train; do
+    dir=$(make_case "teardown-symlink-marker-$artifact")
+    fm_write_meta "$dir/home/state/task-a.meta" \
+      'window=firstmate:fm-task-a' 'endpoint_task_id=task-a' \
+      "worktree=$dir/missing-worktree" "project=$dir/project" 'kind=ship' 'mode=local-only'
+    printf 'marker target\n' > "$dir/target"
+    ln -s "$dir/target" "$dir/home/state/task-a.$artifact"
+    cat > "$dir/fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "${FM_FAKE_TMUX_LOG:?}"
+SH
+    chmod +x "$dir/fakebin/tmux"
+    set +e
+    FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" FM_FAKE_TMUX_LOG="$dir/tmux.log" \
+      PATH="$dir/fakebin:$BASE_PATH" "$TEARDOWN" task-a --force \
+      > "$dir/teardown.out" 2> "$dir/teardown.err"
+    rc=$?
+    set -e
+    [ "$rc" -ne 0 ] || fail "teardown accepted a symlink-shaped $artifact"
+    [ -e "$dir/home/state/task-a.meta" ] || fail "teardown removed metadata before $artifact refusal"
+    ! grep -F 'kill-window' "$dir/tmux.log" >/dev/null 2>&1 \
+      || fail "teardown killed the endpoint before $artifact refusal"
+  done
+
+  pass "teardown refuses unsafe degraded and train markers before lifecycle cleanup"
 }
 
 # The Gerrit watch must follow a change exactly as the GitHub watch follows a
