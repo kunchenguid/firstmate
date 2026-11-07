@@ -1060,7 +1060,7 @@ export default function (pi: ExtensionAPI) {
       }
       if (!row) {
         deliverBranchHealthNote(
-          `Supervision branch could not present unprocessed captain outcomes: the outcome store listed a row that breaks its contract (${line.slice(0, 200)}). Nothing was marked processed; they are presented again once the store is healthy.`,
+          `Supervision branch could not present unprocessed main or captain outcomes: the outcome store listed a row that breaks its contract (${line.slice(0, 200)}). Nothing was marked processed; they are presented again once the store is healthy.`,
         );
         return null;
       }
@@ -2364,8 +2364,8 @@ ${context.command}
     name: "fm_branch_processed",
     label: "Acknowledge processed supervision outcomes",
     description:
-      "Acknowledge that every captain-facing supervision outcome up to a sequence number has been processed by this conversation. Call it exactly once after handling a supervision processing request, with through set to the highest sequence that request listed; an outcome that is not acknowledged is presented again.",
-    promptSnippet: "Acknowledge processed captain-facing supervision outcomes by sequence.",
+      "Acknowledge that every main or captain supervision outcome up to a sequence number has been processed by this conversation. Call it exactly once after handling a supervision processing request, with through set to the highest sequence that request listed; an outcome that is not acknowledged is presented again.",
+    promptSnippet: "Acknowledge processed main or captain supervision outcomes by sequence.",
     parameters: Type.Object({
       through: Type.Number({ description: "The highest outcome sequence number this conversation has processed" }),
     }),
