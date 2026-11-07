@@ -1956,6 +1956,18 @@ gitlab_confirm_merged() {
   [ "$state" = merged ]
 }
 
+# True only when the merge request's live source head is the head this run
+# verified, so a lost-response recovery never adopts another caller's entry.
+gitlab_source_head_is_verified() {
+  local json head
+  json=$(GITLAB_HOST="$FM_PR_HOST" glab mr view "$PR_NUMBER" \
+    -R "$PROJECT_URL" -F json 2>/dev/null) && [ -n "$json" ] || return 1
+  head=$(printf '%s' "$json" | jq -r \
+    'if type == "object" and (.sha | type) == "string" then .sha else error("no sha") end' \
+    2>/dev/null) || return 1
+  [ "$head" = "$FM_PR_MERGE_HEAD" ]
+}
+
 # A merge-train entry takes the project's own merge method and carries no
 # forge flags of the glab mr merge shape, so a caller's extra argument is
 # refused rather than silently dropped.
@@ -2222,7 +2234,7 @@ case "$PROVIDER" in
       train_output=$(gitlab_add_to_train 2>&1) || train_status=$?
       # A lost response can hide an accepted entry, so a failed POST is
       # reconciled against the live car or a merged request before refusing.
-      if [ "$train_status" -ne 0 ]; then
+      if [ "$train_status" -ne 0 ] && gitlab_source_head_is_verified; then
         car_rc=0
         gitlab_read_train_car || car_rc=$?
         if [ "$car_rc" -ne 0 ] && gitlab_confirm_merged 2>/dev/null; then

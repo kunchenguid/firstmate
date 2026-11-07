@@ -5667,6 +5667,23 @@ test_gitlab_merge_train_lost_entry_response_is_reconciled() {
   pass "a train POST whose response is lost but whose car exists continues as an accepted entry"
 }
 
+test_gitlab_merge_train_lost_entry_for_another_head_is_refused() {
+  local case_dir rc=0
+  case_dir=$(make_gitlab_train_case gitlab-train-lost-other-head)
+  : > "$case_dir/glab-train-add-lost"
+  printf '{"status":"fresh","pipeline":{"web_url":"%s"}}\n' "$MR_TRAIN_PIPELINE_URL" \
+    > "$case_dir/train-car.json"
+  write_mr_json "$case_dir/mr-train.json" head="$MR_STALE_HEAD"
+  run_train_merge "$case_dir" || rc=$?
+
+  expect_code 1 "$rc" "gitlab-train-lost-other-head: another caller's newer head must not be adopted"
+  assert_grep "GitLab did not add $MR_URL to the merge train" "$case_dir/stderr" \
+    "gitlab-train-lost-other-head: the refusal was not reported"
+  assert_absent "$case_dir/state/.wake-queue" \
+    "gitlab-train-lost-other-head: another head's landing was recorded as ours"
+  pass "a lost train response is not recovered when the source head is no longer the verified head"
+}
+
 test_gitlab_merge_train_unreadable_car_is_not_a_drop() {
   local case_dir rc=0
   case_dir=$(make_gitlab_train_case gitlab-train-car-unreadable)
@@ -5898,6 +5915,7 @@ test_gitlab_merge_train_merged_without_a_landed_commit_stays_armed
 test_gitlab_merge_train_still_queued_stays_armed
 test_gitlab_merge_train_drop_is_reported_with_its_pipeline
 test_gitlab_merge_train_lost_entry_response_is_reconciled
+test_gitlab_merge_train_lost_entry_for_another_head_is_refused
 test_gitlab_merge_train_unreadable_car_is_not_a_drop
 test_gitlab_merge_train_keeps_the_pre_merge_guards
 test_gitlab_merge_train_entry_runs_under_away_authority
