@@ -18,13 +18,13 @@ The design goal is therefore: the parent channel must not depend on the model re
 ## The design
 
 The delivery rule has one sentence: the scripts report facts, the mate reports judgement.
-Every captain-facing outcome that leaves durable evidence in the mate home is published on the channel by the script that records that evidence, at record time or on the next supervision poll, and the charter reserves the mate's own appends for judgement.
+Every captain-facing outcome that leaves durable evidence in the mate home is published on the channel by the script that records that evidence, at record time or through the per-poll ledger pass, and the charter reserves the mate's own appends for judgement.
 
 | Outcome | Durable evidence in the mate home | Published by |
 |---|---|---|
-| Ship child PR ready | the child's `done:` PR ready line, whose accepted spellings the publisher below owns; `pr=` in the child's record once registered | `bin/fm-inactive-reconcile.sh` on the next poll with the child's line; `bin/fm-pr-check.sh` at registration with the canonical URL, or after the green report when [`config/ready-after-green`](configuration.md#pr-ready-line-after-green-configready-after-green) is set |
-| Scout child findings | the child's `done:` line plus `data/<child>/report.md` | `bin/fm-inactive-reconcile.sh` on the next poll, with the report pointer |
-| Child failed | the child's `failed:` line | `bin/fm-inactive-reconcile.sh` on the next poll |
+| Ship child PR ready | the child's `done:` PR ready line, subject to [`fm_dod_accept_ship_done`](../bin/fm-dod-lib.sh)'s report-format and proof contract; `pr=` in the child's record once registered | `bin/fm-inactive-reconcile.sh` during the per-poll ledger pass with the child's line; `bin/fm-pr-check.sh` at registration with the canonical URL, or after the green report when [`config/ready-after-green`](configuration.md#pr-ready-line-after-green-configready-after-green) is set |
+| Scout child findings | the child's `done:` line plus `data/<child>/report.md` | `bin/fm-inactive-reconcile.sh` during the per-poll ledger pass, with the report pointer |
+| Child failed | the child's `failed:` line | `bin/fm-inactive-reconcile.sh` during the per-poll ledger pass |
 | Child decision escalated to the captain | the task held for the captain in the mate backlog | `bin/fm-captain-hold.sh hold`, and its answer by `answer` |
 | PR merged | the merge poll or the mate's own merge | `bin/fm-merge-outcome-lib.sh` |
 | Child leaving the home | its final ledger line | `bin/fm-teardown.sh`, which refuses to remove the child while that line is undelivered |
@@ -32,7 +32,9 @@ Every captain-facing outcome that leaves durable evidence in the mate home is pu
 | Answer to a marked request | a correlated line guarded by the pending-reply record | `bin/fm-secondmate-report.sh`, which resolves the parent channel from the mate home; the pending-reply guard repairs a line stranded in the local mate's same-basename status file before recovery or escalation |
 | An outcome that exists only in the mate's reasoning | none | the charter and the `AGENTS.md` carve-outs only |
 
-The ledger delivery reads files, plus a local git reachability check on a ship `done:` with no delivery record yet (`bin/fm-dod-lib.sh`): it calls no harness, no forge, and no current-state reader, so it is identical for every harness and runtime backend.
+Ledger delivery reads task files and invokes the [shared ship readiness gate](architecture.md#delivery-modes-are-explicit-per-task) before publishing a ship `done:` claim.
+[`bin/fm-inactive-reconcile.sh`](../bin/fm-inactive-reconcile.sh)'s header owns the shared scan budget and cursor rules that can defer delivery to later polls.
+It calls no harness or current-state reader, so delivery is independent of the harness and runtime backend.
 Each delivery is keyed with the first eight hexadecimal characters of its receipt fingerprint and uses the shared append contract above, and the ledger path reuses the inactive scan's per-fingerprint receipts, so a replayed poll or restart cannot deliver an event twice while a genuinely new terminal event is delivered again.
 A duplicate line is harmless and a missed one is not, so the mate may still append its own judgement about a delivered outcome, and the parent reads the script's line as the fact and the mate's line as commentary.
 For marked replies, the report helper accepts no caller-selected destination and uses the channel resolver for both local and remote homes; its script header owns the exact invocation contract.
@@ -52,6 +54,7 @@ A missed-reply escalation includes the complete first sighting path and line num
 ## Regression coverage
 
 `tests/fm-inactive-reconcile.test.sh` covers the ledger delivery against real ledgers with no harness: immediate done and failed delivery with note, PR, mode, posture, and report pointer, once-only delivery across polls, a ship `done:` withheld while its named head exists only in the worker copy, a pending one still delivered after teardown removes that copy, a line still being appended, later routine status prose not minting a fresh parent event because the inactive receipt identity binds structured fields only, the remote route, the yield of the inactive path to a terminal ledger, and the real watcher poll driving it.
+It also covers stalled destination reads refusing readiness while later ledger reports and due inactive outcomes make progress.
 `tests/fm-captain-hold-lifecycle.test.sh` covers a mate home publishing a hold, its answer, and a distinct occurrence on re-hold, and a main home publishing nothing.
 `tests/fm-pr-merge.test.sh` covers the PR-ready line at registration and the merge outcome's upward report.
 `tests/fm-teardown.test.sh` covers teardown delivering a child's final line and refusing when the channel cannot be written.

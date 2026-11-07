@@ -4,6 +4,10 @@ Empirical record for the merge watch on Gerrit, alongside the existing GitHub an
 It covers what the watch reads, why it reads that field and not a neighbouring one, and why the merge path refuses.
 Every output below is reproduced verbatim except for the server host, project name, and change numbers, which are replaced throughout by the placeholders the test fixtures use.
 
+The transcripts predate the [task-owned destination checks and legacy recovery](architecture.md#delivery-modes-are-explicit-per-task).
+Their historical poll invocations do not include the expected-base argument now required by `bin/fm-pr-poll.sh`, whose header owns the current invocation contract.
+`tests/fm-pr-check-security.test.sh` verifies destination checks without a live server.
+
 ## Versions
 
 ```
@@ -57,7 +61,7 @@ A new patch set drops both blocking votes, and a rebase is a new patch set, so a
 
 `gerrit-axi` reports a change's `url` straight from `gerrit query` (`src/core/changes.js`, `url: row?.url ?? null`), and Gerrit composes that field from `gerrit.canonicalWebUrl`, omitting it when the setting is unset.
 So the field is null on a server that has never been told its own web address, and it names the canonical host rather than the alias a reader may have pasted the change URL from.
-Comparing it against the stored URL would therefore arm a watch that can never wake: the poll is silent on every failure, so a change on such a server would be polled forever and its merge never reported, with nothing distinguishing that from a change nobody has submitted.
+Comparing it against the stored URL would therefore arm a watch that can never wake: the poll is silent on failed forge reads, so a change on such a server would be polled forever and its merge never reported, with nothing distinguishing that from a change nobody has submitted.
 
 A change number is server-global on Gerrit and `--host` already pins the server, so the number alone names the change.
 The watch matches on the number and reads nothing else for identity; the recorded project path addresses the change for a human reader and is not part of the read.
@@ -78,7 +82,7 @@ $ cd /tmp && gerrit-axi show 4200 --json
 ```
 
 `gerrit-axi` resolves its server from the current directory's `origin` remote first, so outside a clone it has nothing to reach.
-The poll is silent on every failure, so without `--host` the watch would wait forever on a change it never looked at.
+The poll is silent on failed forge reads, so without `--host` the watch would wait forever on a change it never looked at.
 `bin/fm-pr-poll.sh` therefore passes `--host` from the validated record, and `bin/fm-crew-state.sh` reads an open change's status through the same explicit host.
 `--host` pins only the server, and the SSH user and port resolve down that same current-directory `origin` path before falling back to the local login name and 29418, so watching a change requires `GERRIT_USER` - and `GERRIT_PORT` on a server that does not use 29418 - set in the watcher's environment or in `~/.config/gerrit-axi/config.json`, because the poll cannot report that it never authenticated.
 
@@ -124,7 +128,8 @@ The server permitting self-approval is what makes this a policy boundary rather 
 - Arming records no `pr_head`: a Gerrit revision names one patch set, and `bin/fm-review-diff.sh` has no Gerrit path to resolve a current head with, so a recorded revision would quietly become the reviewed content after the next amend.
 - The merge path refuses a Gerrit change.
 - Arming accepts a done naming a Gerrit change only when a live read shows the change's current patch set carrying the worker's HEAD tree, even when a remote-tracking ref such as the no-mistakes gate branch holds that HEAD, and refuses a mismatched, unknown, or unreadable patch set before recording anything.
-- Once arming has recorded the change as `pr=`, a later done naming it is accepted from that record with no forge read, so a server-side rebase or new patch set does not revoke it.
+- Once arming has recorded the change as `pr=`, a later done naming it retains the recorded head/tree proof, so a server-side rebase or new patch set does not revoke it.
+  The [shared destination gate](architecture.md#delivery-modes-are-explicit-per-task) still applies.
 - A no-mistakes done naming a Gerrit change is also refused unless the copy holds a passed pipeline's result: refused when the run's outcome is missing or not a pass, while the run reports `recover_custody` or `continue_active_run`, when HEAD's tree differs from the pipeline head's, or when the run cannot be read, and accepted once recovered even after the Change-Id stamp rewrote the branch's messages.
 - A `published for review` done whose URL is not a canonical Gerrit change URL is refused, even when a remote-tracking ref holds HEAD.
 

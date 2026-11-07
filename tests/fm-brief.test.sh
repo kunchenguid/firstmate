@@ -1409,6 +1409,8 @@ test_base_branch_is_rendered_and_bounded() {
   brief="$home/data/brief-base-dp-b1/brief.md"
   base=$(fm_brief_base_branches "$brief")
   [ "$base" = feature/hub ] || fail "the direct-PR brief recorded base '$base', not feature/hub"
+  assert_grep 'verify the live PR base against the task-owned expected destination' "$brief" 'ship scaffold omitted destination verification'
+  assert_grep 'inspect the diff against that base for task-only changes' "$brief" 'ship scaffold omitted task-only diff verification'
   # shellcheck disable=SC2016  # literal backticks in rendered prose must stay unexpanded
   assert_grep 'open a PR with `gh-axi` that is ready for review, not a draft, against the base branch `feature/hub` (`--base feature/hub`)' "$brief" \
     "the direct-PR definition of done does not target the base branch"

@@ -4,6 +4,8 @@ set -u
 
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+# shellcheck source=bin/fm-nm-run-lib.sh
+. "$ROOT/bin/fm-nm-run-lib.sh"
 
 RECON="$ROOT/bin/fm-inactive-reconcile.sh"
 DRAIN="$ROOT/bin/fm-wake-drain.sh"
@@ -57,7 +59,14 @@ SH
   for tool in gh gh-axi curl; do
     cat > "$fake/$tool" <<'SH'
 #!/usr/bin/env bash
-printf '%s\n' "$(basename "$0")" >> "${FM_FORGE_LOG:?}"
+printf '%s %s\n' "$(basename "$0")" "$*" >> "${FM_FORGE_LOG:?}"
+if [ "$(basename "$0")" = gh ] && [ "${GH_HOST:-}" = example.test ]; then
+  case " $* " in
+    *' --json baseRefName '*)
+      [ "${FM_FAKE_BASE_FAIL:-0}" = 0 ] || exit 1
+      printf '%s\n' "${FM_FAKE_PR_BASE-main}"; exit 0 ;;
+  esac
+fi
 exit 97
 SH
   done
@@ -69,6 +78,8 @@ make_world() { # <name>
   MAIN="$WORLD/main"
   MATE="$WORLD/mate"
   mkdir -p "$WORLD/root" "$MAIN"/{state,data,config,projects} "$MATE"/{state,data,config,projects,bin}
+  printf 'example.test\n' > "$MAIN/config/github-hosts"
+  printf 'example.test\n' > "$MATE/config/github-hosts"
   : > "$MATE/AGENTS.md"
   make_tools "$WORLD"
   : > "$WORLD/forge.log"
@@ -100,7 +111,7 @@ write_child() { # <home> <id> <status> [spawn-gen]
   git -C "$home/projects/$id" update-ref refs/remotes/origin/main "$sha"
   fm_write_meta "$home/state/$id.meta" \
     "window=firstmate:fm-$id" "worktree=$home/projects/$id" "project=$home/projects/$id" \
-    'harness=codex' 'kind=ship' 'mode=no-mistakes' 'yolo=off' \
+    'harness=codex' 'kind=ship' 'mode=no-mistakes' 'yolo=off' 'expected_base=main' \
     "spawn_gen=$spawn_gen" 'pr=https://example.test/owner/repo/pull/1' \
     "pr_head=$sha"
   printf '%s\n' "$status" > "$home/state/$id.status"
@@ -118,7 +129,7 @@ run_reconcile() { # <home> [--startup]
   local home=$1 option=${2:-}
   PATH="$WORLD/fakebin:$PATH" FM_ROOT_OVERRIDE="$WORLD/root" FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" FM_CONFIG_OVERRIDE="$home/config" \
-    FM_INACTIVE_RECONCILE_SECS=60 FM_INACTIVE_CREW_STATE_BIN="$WORLD/fakebin/fm-crew-state.sh" \
+    FM_INACTIVE_RECONCILE_SECS=60 FM_INACTIVE_CREW_STATE_BIN="${FM_TEST_CREW_STATE_BIN:-$WORLD/fakebin/fm-crew-state.sh}" \
     FM_FORGE_LOG="$WORLD/forge.log" "$RECON" scan ${option:+"$option"}
 }
 
@@ -494,6 +505,339 @@ test_busy_child_does_not_starve_later_ledger_outcomes() {
   grep -Fq 'child-outcome-a-busy-done' "$MAIN/state/mate.status" \
     || fail "the skipped busy child was not retried on the next poll"
   pass "busy child locks do not starve later ledger outcomes"
+}
+
+# Unreadable destination proof must refuse only that child's
+# readiness. A later child with matching live proof must still reach the parent
+# in the same scan, even when the earlier forge CLI never returns.
+test_stalled_base_read_does_not_starve_later_ledger_outcomes() {
+  local id url
+  make_world stalled-base-ledger; bind_secondmate local
+  for id in a-hung b-ready; do
+    url="https://github.com/owner/repo/pull/1"
+    [ "$id" != b-ready ] || url="https://github.com/owner/repo/pull/2"
+    write_child "$MATE" "$id" "done: PR $url checks green"
+  done
+  cat > "$WORLD/fakebin/gh" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "${FM_FORGE_LOG:?}"
+case "${3:-}" in
+  https://github.com/owner/repo/pull/1) exec sleep 60 ;;
+  https://github.com/owner/repo/pull/2) printf 'main\n' ;;
+  *) exit 97 ;;
+esac
+SH
+  chmod +x "$WORLD/fakebin/gh"
+
+  FM_FAKE_CREW_STATE=unknown run_reconcile "$MATE"
+  grep -Fq 'child-outcome-b-ready-done' "$MAIN/state/mate.status" 2>/dev/null \
+    || fail 'a hung base lookup starved a later ready child in the same scan'
+  ! grep -Fq 'child-outcome-a-hung-done' "$MAIN/state/mate.status" \
+    || fail 'a child with unavailable destination proof was reported done'
+  [ "$(outcome_count "$MATE" reported)" = 1 ] \
+    || fail 'a hung child acquired a readiness receipt'
+  grep -Fq 'pr view https://github.com/owner/repo/pull/1 --json baseRefName' "$WORLD/forge.log" \
+    || fail 'the regression never reached the hanging forge lookup'
+  pass 'a hung destination lookup refuses that child without starving the next ledger report'
+}
+
+# Several individually bounded destination reads can exhaust the whole scan.
+# Repeated polls must resume beyond them instead of starting at the first hang.
+test_several_stalled_base_reads_resume_before_later_ledger_outcomes() {
+  local id number=0 attempt
+  make_world several-stalled-bases; bind_secondmate local
+  write_child "$MATE" 0-dead 'working: stopped before writing an outcome'
+  for id in a-hung b-hung c-hung z-ready; do
+    number=$((number + 1))
+    write_child "$MATE" "$id" "done: PR https://github.com/owner/repo/pull/$number checks green"
+  done
+  cat > "$WORLD/fakebin/gh" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "${FM_FORGE_LOG:?}"
+case "${3:-}" in
+  https://github.com/owner/repo/pull/1|https://github.com/owner/repo/pull/2|https://github.com/owner/repo/pull/3) exec sleep 30 ;;
+  https://github.com/owner/repo/pull/4) printf 'main\n' ;;
+  *) exit 97 ;;
+esac
+SH
+  chmod +x "$WORLD/fakebin/gh"
+
+  for attempt in 1 2 3 4 5; do
+    FM_INACTIVE_RECONCILE_BUDGET_SECS=2 FM_FAKE_CREW_STATE=failed run_reconcile "$MATE"
+    grep -Fq 'inactive-outcome-mate-0-dead-failed' "$MAIN/state/mate.status" 2>/dev/null \
+      || fail "hung ledger reads starved the due inactive outcome on poll $attempt"
+    [ -f "$MATE/state/.inactive-outcome-reconcile" ] \
+      || fail 'hung ledger reads prevented the inactive cadence marker'
+    grep -Fq 'child-outcome-z-ready-done' "$MAIN/state/mate.status" 2>/dev/null && break
+  done
+  grep -Fq 'child-outcome-z-ready-done' "$MAIN/state/mate.status" 2>/dev/null \
+    || fail 'several hung destination reads starved the healthy child across bounded retries'
+  for id in a-hung b-hung c-hung; do
+    ! grep -Fq "child-outcome-$id-done" "$MAIN/state/mate.status" \
+      || fail "a timed-out child was reported ready: $id"
+  done
+  [ "$(grep -Fc 'inactive-outcome-mate-0-dead-failed' "$MAIN/state/mate.status")" = 1 ] \
+    || fail 'ledger retries duplicated the inactive outcome'
+  [ "$(outcome_count "$MATE" reported)" = 2 ] \
+    || fail 'timed-out destination reads acquired readiness receipts'
+  [ "$(outcome_count "$MATE" pending)" = 0 ] \
+    || fail 'timed-out destination reads acquired pending receipts'
+  for number in 1 2 3; do
+    grep -Fq "pr view https://github.com/owner/repo/pull/$number --json baseRefName" "$WORLD/forge.log" \
+      || fail "the regression never reached hung destination $number"
+  done
+  pass 'hung destinations refuse readiness while inactive and ledger outcomes both progress'
+}
+
+test_readiness_deadline_owns_forge_processes_on_both_paths() {
+  local timer route tools_bin tool tool_path mechanism home id number attempt pid state deadline url running started elapsed
+  command -v perl >/dev/null 2>&1 || fail 'readiness deadline regression requires perl'
+  for timer in normal perl; do
+    for route in ledger cadence; do
+      make_world "deadline-$timer-$route"
+      home=$MAIN
+      if [ "$route" = ledger ]; then
+        bind_secondmate local
+        home=$MATE
+      fi
+      tools_bin="$WORLD/tools-bin"
+      mkdir -p "$tools_bin"
+      for tool in perl bash sh env sleep git dirname basename mkdir mktemp chmod mv rm rmdir cat grep tail cut tr sed stat date wc head sort find awk readlink id ps shasum sha256sum cksum touch ln uname cmp realpath jq; do
+        tool_path=$(type -P "$tool" 2>/dev/null) || continue
+        ln -s "$tool_path" "$tools_bin/$tool"
+      done
+      if [ "$timer" = normal ]; then
+        for tool in timeout gtimeout; do
+          tool_path=$(type -P "$tool" 2>/dev/null) || continue
+          ln -s "$tool_path" "$tools_bin/$tool"
+        done
+      fi
+      mechanism=$(PATH="$tools_bin" bash -c '. "$1"; fm_timeout_mechanism' _ "$ROOT/bin/fm-timeout-lib.sh")
+      case "$timer:$mechanism" in
+        perl:perl|normal:timeout|normal:gtimeout) ;;
+        *) fail "readiness deadline regression could not select $timer timeout: $mechanism" ;;
+      esac
+      number=0
+      for id in a-hung b-hung z-ready; do
+        number=$((number + 1))
+        write_child "$home" "$id" "done: PR https://github.com/owner/repo/pull/$number checks green"
+        sed 's/^mode=no-mistakes$/mode=direct-PR/' "$home/state/$id.meta" > "$home/state/$id.meta.tmp"
+        mv "$home/state/$id.meta.tmp" "$home/state/$id.meta"
+        age "$home/state/$id.meta"
+      done
+      cat > "$WORLD/fakebin/gh" <<'SH'
+#!/usr/bin/env bash
+printf '%s %s %s\n' "$$" "${FM_READ_DEADLINE:-0}" "${3:-}" >> "${FM_FORGE_PIDS:?}"
+case "${3:-}" in
+  https://github.com/owner/repo/pull/1|https://github.com/owner/repo/pull/2) exec sleep 30 ;;
+  https://github.com/owner/repo/pull/3) printf 'main\n' ;;
+  *) exit 97 ;;
+esac
+SH
+      if [ "$route" = cadence ]; then
+        cat > "$WORLD/fakebin/fm-crew-state.sh" <<'SH'
+#!/usr/bin/env bash
+exec 2>>"${FM_FORGE_PIDS}.crew"
+. "${FM_TEST_DOD_LIB%/*}/fm-timeout-lib.sh"
+. "$FM_TEST_DOD_LIB"
+meta="$FM_STATE_OVERRIDE/$1.meta"
+value() { sed -n "s/^$1=//p" "$meta"; }
+line=$(cat "$FM_STATE_OVERRIDE/$1.status")
+if reason=$(fm_dod_accept_ship_done "$(value kind)" "$(value mode)" "$(value worktree)" \
+    "$(value project)" "$line" "$FM_STATE_OVERRIDE" "$1" "$meta"); then
+  printf 'state: done · source: status-log · %s\n' "$(status_line_note "$line")"
+else
+  printf '%s: %s\n' "$1" "$reason" >&2
+  printf 'state: blocked · source: status-log · %s\n' "$reason"
+fi
+SH
+      fi
+      chmod +x "$WORLD/fakebin/"*
+      for attempt in 1 2 3 4; do
+        : > "$WORLD/forge.pids"
+        started=$(fm_nm_now_ms)
+        PATH="$tools_bin" FM_FORGE_PIDS="$WORLD/forge.pids" FM_TEST_DOD_LIB="$ROOT/bin/fm-dod-lib.sh" \
+          FM_INACTIVE_RECONCILE_BUDGET_SECS=3 FM_FAKE_CREW_STATE=unknown \
+          run_reconcile "$home" --startup
+        elapsed=$(( $(fm_nm_now_ms) - started ))
+        [ "$elapsed" -le 4000 ] || fail "$timer/$route scan exceeded budget plus backstop: ${elapsed}ms"
+        running=0
+        [ -s "$WORLD/forge.pids" ] \
+          || fail "$timer/$route poll $attempt never started a forge read: $(cat "$WORLD/forge.pids.crew" 2>/dev/null)"
+        while read -r pid deadline url; do
+          printf '%s\n' "$url" >> "$WORLD/visited"
+          [ "$deadline" -gt 0 ] && [ "$(fm_nm_now_ms)" -le "$((deadline + 2000))" ] \
+            || fail "$timer/$route scan exceeded its read deadline"
+          state=$(ps -p "$pid" -o stat= 2>/dev/null || true)
+          case "$state" in
+            ''|*Z*) ;;
+            *) running=1; reap "$pid" ;;
+          esac
+        done < "$WORLD/forge.pids"
+        [ "$running" = 0 ] || fail "$timer/$route left a forge process alive past the scan"
+        if [ "$route" = ledger ]; then
+          grep -Fq 'child-outcome-z-ready-done' "$MAIN/state/mate.status" 2>/dev/null && break
+        else
+          grep -Fq 'child=z-ready state=done' "$MAIN/state/.wake-queue" 2>/dev/null && break
+        fi
+      done
+      for number in 1 2; do
+        grep -Fxq "https://github.com/owner/repo/pull/$number" "$WORLD/visited" \
+          || fail "$timer/$route never reached hung child $number"
+      done
+      if [ "$route" = ledger ]; then
+        grep -Fq 'child-outcome-z-ready-done' "$MAIN/state/mate.status" 2>/dev/null \
+          || fail "$timer ledger reads starved the healthy later child"
+        [ "$(outcome_count "$home" reported)" = 1 ] \
+          || fail "$timer ledger reads reported a hung child"
+      else
+        grep -Fq 'child=z-ready state=done' "$MAIN/state/.wake-queue" 2>/dev/null \
+          || fail "$timer cadence reads starved the healthy later child"
+        [ "$(outcome_count "$home" pending)" = 1 ] \
+          || fail "$timer cadence reads reported a hung child"
+      fi
+    done
+  done
+  pass 'ledger and cadence readiness share deadlines without surviving forge processes'
+}
+
+test_deadline_truncated_run_read_has_no_verdict() {
+  local generation out rc=0
+  make_world truncated-run-read
+  write_child "$MAIN" child 'done: implemented the change'
+  sed 's/^harness=codex$/harness=claude/' "$MAIN/state/child.meta" > "$MAIN/state/child.meta.tmp"
+  mv "$MAIN/state/child.meta.tmp" "$MAIN/state/child.meta"
+  age "$MAIN/state/child.meta"
+  generation=$("$ROOT/bin/fm-busy-event.sh" arm "$MAIN/state" child)
+  "$ROOT/bin/fm-busy-event.sh" apply "$MAIN/state" child idle --gen "$generation" \
+    --source claude-hook --event stop
+  cat > "$WORLD/fakebin/no-mistakes" <<'SH'
+#!/usr/bin/env bash
+if [ "${FM_STALL_RUN_READ:-0}" = 1 ]; then
+  printf '%s\n' "$*" >> "$FM_RUN_READ_LOG"
+  sleep 5
+fi
+exit 1
+SH
+  cat > "$WORLD/fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+case "${1:-}" in
+  list-windows) printf 'fm-child\n' ;;
+  display-message) printf '%%1\n' ;;
+  capture-pane) printf 'idle\n> \n' ;;
+esac
+SH
+  chmod +x "$WORLD/fakebin/"*
+  out=$(PATH="$WORLD/fakebin:$PATH" FM_HOME="$MAIN" FM_STATE_OVERRIDE="$MAIN/state" \
+    FM_CONFIG_OVERRIDE="$MAIN/config" FM_READ_DEADLINE='' \
+    "$ROOT/bin/fm-crew-state.sh" child)
+  case "$out" in 'state: done '*) ;; *) fail "ordinary idle handoff no longer reads done: $out" ;; esac
+  out=$(PATH="$WORLD/fakebin:$PATH" FM_HOME="$MAIN" FM_STATE_OVERRIDE="$MAIN/state" \
+    FM_CONFIG_OVERRIDE="$MAIN/config" FM_READ_DEADLINE="$(( $(fm_nm_now_ms) + 2000 ))" \
+    FM_STALL_RUN_READ=1 FM_RUN_READ_LOG="$WORLD/run.calls" \
+    "$ROOT/bin/fm-crew-state.sh" child) || rc=$?
+  [ "$rc" = 124 ] || fail "deadline-truncated crew-state lost its timeout status: $rc $out"
+  case "$out" in 'state: unknown '*) ;; *) fail "deadline-truncated crew-state emitted a verdict: $out" ;; esac
+  FM_TEST_CREW_STATE_BIN="$ROOT/bin/fm-crew-state.sh" FM_INACTIVE_RECONCILE_BUDGET_SECS=2 \
+    FM_STALL_RUN_READ=1 FM_RUN_READ_LOG="$WORLD/run.calls" run_reconcile "$MAIN" --startup
+  [ -s "$WORLD/run.calls" ] || fail 'the truncated-run regression never read the pipeline'
+  [ "$(outcome_count "$MAIN" pending)" = 0 ] && [ "$(outcome_count "$MAIN" reported)" = 0 ] \
+    || fail 'a deadline-truncated run read acquired a terminal record'
+  ! grep -Fq 'inactive-outcome:' "$MAIN/state/.wake-queue" 2>/dev/null \
+    || fail 'a deadline-truncated run read queued a terminal wake'
+  pass 'deadline-truncated run reads return unknown and create no terminal outcome'
+}
+
+# Exhaust ledger proof with a real stalled process, then measure the real
+# crew-state command. A clock frozen at a whole-second boundary cannot prove
+# that the forced visit gets a full second rather than the next clock tick.
+test_forced_cadence_visit_keeps_floor_after_ledger_deadline() {
+  local branch head out mode started elapsed deadline rc
+  for mode in failed stalled; do
+  make_world "forced-cadence-floor-$mode"; bind_secondmate local
+  write_child "$MATE" 0-cadence 'working: awaiting the pipeline result'
+  write_child "$MATE" a-ledger 'done: PR https://github.com/owner/repo/pull/1 checks green'
+  branch=$(git -C "$MATE/projects/0-cadence" symbolic-ref --short HEAD)
+  head=$(git -C "$MATE/projects/0-cadence" rev-parse HEAD)
+  cat > "$WORLD/fakebin/gh" <<'SH'
+#!/usr/bin/env bash
+printf 'ledger-read\n' >> "$FM_FORGE_LOG"
+exec sleep 30
+SH
+  cat > "$WORLD/fakebin/no-mistakes" <<'SH'
+#!/usr/bin/env bash
+if [ "$#" = 1 ] && [ "$1" = axi ]; then
+  if [ "${FM_FLOOR_STALL:-0}" = 1 ]; then
+    printf 'run-read\n' >> "$FM_FLOOR_CALLS"
+    exec sleep 5
+  fi
+  [ "${FM_FLOOR_DELAY:-0}" = 0 ] || sleep "$FM_FLOOR_DELAY"
+  printf 'current_branch: %s\ncount: 1 of 1 total\nruns[1]{id,branch,status,head,pr}:\n' "$FM_FLOOR_BRANCH"
+  printf '  01RUN,%s,failed,%s,""\n' "$FM_FLOOR_BRANCH" "$FM_FLOOR_HEAD"
+else
+  cat <<EOF
+run:
+  id: "01RUN"
+  branch: $FM_FLOOR_BRANCH
+  status: failed
+  head: "$FM_FLOOR_HEAD"
+  pr: ""
+  findings: none
+outcome: failed
+EOF
+fi
+SH
+  cat > "$WORLD/fakebin/measured-crew-state" <<'SH'
+#!/usr/bin/env bash
+. "$FM_FLOOR_LIB"
+started=$(fm_nm_now_ms)
+rc=0
+"${FM_FLOOR_LIB%/*}/fm-crew-state.sh" "$@" || rc=$?
+printf '%s %s %s %s\n' "$started" "$(fm_nm_now_ms)" "$FM_READ_DEADLINE" "$rc" > "$FM_FLOOR_MEASURE"
+exit "$rc"
+SH
+  chmod +x "$WORLD/fakebin/"*
+  out=$(PATH="$WORLD/fakebin:$PATH" FM_HOME="$MATE" FM_STATE_OVERRIDE="$MATE/state" \
+    FM_CONFIG_OVERRIDE="$MATE/config" FM_READ_DEADLINE='' \
+    FM_FLOOR_BRANCH="$branch" FM_FLOOR_HEAD="$head" \
+    "$ROOT/bin/fm-crew-state.sh" 0-cadence)
+  case "$out" in
+    'state: failed · source: run-step'*) ;;
+    *) fail "the floor fixture did not supply a known failed run: $out" ;;
+  esac
+  # Start away from the next whole-second tick to expose the old fractional
+  # floor. Every clock in the scan and crew-state continues advancing normally.
+  while :; do
+    started=$(fm_nm_now_ms)
+    [ "$((started % 1000))" -ge 600 ] && [ "$((started % 1000))" -le 650 ] && break
+    sleep 0.01
+  done
+  FM_TEST_CREW_STATE_BIN="$WORLD/fakebin/measured-crew-state" FM_INACTIVE_RECONCILE_BUDGET_SECS=3 \
+    FM_FLOOR_LIB="$ROOT/bin/fm-nm-run-lib.sh" FM_FLOOR_MEASURE="$WORLD/measure" \
+    FM_FLOOR_CALLS="$WORLD/run.calls" FM_FLOOR_STALL="$([ "$mode" = stalled ] && printf 1 || printf 0)" \
+    FM_FLOOR_DELAY=0.6 \
+    FM_FLOOR_BRANCH="$branch" FM_FLOOR_HEAD="$head" run_reconcile "$MATE" --startup
+  grep -Fxq ledger-read "$WORLD/forge.log" || fail 'the floor regression never exhausted ledger proof'
+  [ -s "$WORLD/measure" ] || fail 'the forced first cadence visit never completed its measured real crew-state read'
+  [ ! -e "$MATE/state/.meta-0-cadence.lock" ] || fail 'the forced first cadence visit retained its metadata lock after cleanup'
+  read -r started elapsed deadline rc < "$WORLD/measure"
+  elapsed=$((elapsed - started))
+  [ "$((deadline - started))" -ge 900 ] \
+    || fail 'the forced first cadence visit inherited less than a full second of real budget'
+  if [ "$mode" = stalled ]; then
+    grep -Fxq run-read "$WORLD/run.calls" || fail 'the floor regression never stalled a run read'
+    [ "$rc" = 124 ] && [ "$elapsed" -ge 900 ] \
+      || fail "the forced first cadence visit lost its one-second real-time floor: ${elapsed}ms rc=$rc"
+    [ "$(outcome_count "$MATE" reported)" = 0 ] \
+      || fail 'the floor regression reported a deadline-truncated read'
+  else
+    grep -Fq 'inactive-outcome-mate-0-cadence-failed' "$MAIN/state/mate.status" 2>/dev/null \
+      || fail 'the forced first cadence visit lost its one-second floor after the ledger deadline'
+    [ "$(outcome_count "$MATE" reported)" = 1 ] \
+      || fail 'the floor regression reported an unproved ledger child'
+  fi
+  done
+  pass 'the forced first cadence visit preserves a measured full-second floor after real stalled ledger proof'
 }
 
 # A scout's done line carries its report pointer, a failed line is delivered
@@ -1006,7 +1350,10 @@ test_watcher_poll_delivers_child_ledger_line_to_parent() {
   key=$(reported_outcome_key "$MATE" child 'done') || fail "watcher ledger receipt key missing"
   sed -E 's/ \[at=[0-9]+\]//' "$MAIN/state/mate.status" | grep -Fxq "done [key=$key]: child child done: PR https://example.test/owner/repo/pull/1 checks green pr=https://example.test/owner/repo/pull/1 mode=no-mistakes yolo=off" \
     || fail "the watcher poll did not deliver the child's ledger line to the parent: $(cat "$MAIN/state/mate.status" 2>/dev/null; cat "$WORLD/mate-watch.out")"
-  [ ! -s "$WORLD/forge.log" ] || fail "ledger delivery invoked a forge command"
+  grep -Fq 'gh pr view https://example.test/owner/repo/pull/1 --json baseRefName' "$WORLD/forge.log" \
+    || fail 'ledger delivery did not verify its destination'
+  [ "$(wc -l < "$WORLD/forge.log" | tr -d ' ')" = 1 ] \
+    || fail 'ledger delivery invoked a forge command beyond its destination check'
   pass "the real watcher poll delivers a child's terminal ledger line to the parent channel"
 }
 
@@ -1030,6 +1377,7 @@ SH
   FM_INACTIVE_RECONCILE_BUDGET_SECS=1 run_reconcile "$MAIN" --startup
   elapsed=$(( $(date +%s) - started ))
   [ "$elapsed" -le 3 ] || fail "stalled state read exceeded aggregate scan budget (${elapsed}s)"
+  [ ! -e "$MAIN/state/.meta-a.lock" ] || fail "stalled state reader left its child's metadata lock behind"
 
   write_child "$MAIN" b 'done: green'
   FM_INACTIVE_RECONCILE_BUDGET_SECS=1 run_reconcile "$MAIN" --startup
@@ -1181,6 +1529,19 @@ test_terminal_outcome_never_names_a_pr_the_run_did_not_open() {
 }
 
 # When the run DID open one, that identity wins over the older recorded PR.
+test_run_step_destination_has_one_publication_boundary() {
+  make_world run-destination-emitter
+  write_child "$MAIN" child 'working: still validating'
+  # The real emitter's destination matrix lives in fm-crew-state.test.sh.
+  # A consumer must deliver its proved result without another network read.
+  FM_FAKE_BASE_FAIL=1 FM_FAKE_CREW_STATE='done' FM_FAKE_CREW_SOURCE='run-step' \
+    FM_FAKE_CREW_DETAIL='checks green: PR ready for review · pr=https://example.test/owner/repo/pull/42' \
+    run_reconcile "$MAIN" --startup
+  [ -n "$(queued_payload "$MAIN" 'inactive-outcome:')" ] || fail 'proved run-step result was not delivered'
+  [ ! -s "$WORLD/forge.log" ] || fail 'run-step consumer repeated the emitter destination read'
+  pass 'inactive run-step delivery trusts the single proved publication boundary'
+}
+
 test_terminal_outcome_takes_the_pr_its_run_opened() {
   local payload
   make_world outcome-pr-current; write_child "$MAIN" child 'working: still validating'
@@ -1418,6 +1779,36 @@ SH
   pass "reconciliation state reads set no-forge mode"
 }
 
+test_legacy_ledger_reports_missing_base_once() {
+  local route target note index
+  for route in local remote; do
+    index=0
+    for note in 'PR https://github.com/o/r/pull/1' 'PR #1' \
+      'opened https://github.com/o/r/pull/1' 'implementation complete'; do
+      index=$((index + 1))
+      make_world "legacy-ledger-base-$route-$index"; bind_secondmate "$route"
+      write_child "$MATE" child "done: $note"
+      FM_TEST_META_EXPECTED_BASE='' fm_write_meta "$MATE/state/child.meta" \
+        "worktree=$MATE/projects/child" "project=$MATE/projects/child" \
+        'kind=ship' 'mode=direct-PR' 'pr=https://github.com/o/r/pull/1'
+      run_report "$MATE" child || fail 'legacy ledger refusal could not be delivered'
+      run_report "$MATE" child || fail 'second legacy ledger visit failed'
+      target="$MAIN/state/mate.status"
+      [ "$route" != remote ] || target="$MATE/state/parent-replies.status"
+      assert_grep 'task child merge/readiness refused' "$target" 'parent did not receive the refusal'
+      grep -Eq '^blocked( \[[^]]*\])*: ' "$target" || fail 'parent refusal was not a blocked event'
+      assert_grep 'bin/fm-pr-check.sh recovery steps' "$target" 'parent refusal lost its recovery pointer'
+      [ "$(grep -c 'task child merge/readiness refused' "$target")" = 1 ] \
+        || fail 'legacy ledger repeated the recovery notice'
+      assert_no_regex '^done' "$target" 'legacy ledger claimed readiness without destination proof'
+      [ "$(outcome_count "$MATE" reported)" = 0 ] || fail 'legacy refusal became a terminal outcome'
+      [ ! -s "$WORLD/forge.log" ] || fail 'missing task destination triggered a forge lookup'
+    done
+  done
+  pass 'legacy terminal ledgers report missing-base refusal once on either parent route'
+}
+
+test_legacy_ledger_reports_missing_base_once
 test_main_direct_terminal_presentation_receipt
 test_busy_agent_withholds_terminal_outcome
 test_relaunched_idle_agent_withholds_terminal_outcome
@@ -1433,6 +1824,11 @@ test_secondmate_multiline_terminal_outcome_is_delivered_once
 test_secondmate_unterminated_prose_reports_run_outcome
 test_inactive_receipt_ignores_later_status_prose
 test_busy_child_does_not_starve_later_ledger_outcomes
+test_stalled_base_read_does_not_starve_later_ledger_outcomes
+test_several_stalled_base_reads_resume_before_later_ledger_outcomes
+test_readiness_deadline_owns_forge_processes_on_both_paths
+test_deadline_truncated_run_read_has_no_verdict
+test_forced_cadence_visit_keeps_floor_after_ledger_deadline
 test_secondmate_ledger_delivery_carries_report_and_failure
 test_pr_field_requires_recorded_pr_or_ready_signal_line
 test_terminal_line_during_state_read_yields_to_ledger_delivery
@@ -1463,6 +1859,7 @@ test_missing_parent_binding_names_itself
 test_reconciliation_never_calls_forge
 test_reconciliation_sets_no_forge_mode_for_state_read
 test_terminal_outcome_never_names_a_pr_the_run_did_not_open
+test_run_step_destination_has_one_publication_boundary
 test_terminal_outcome_takes_the_pr_its_run_opened
 test_status_log_sourced_outcome_keeps_its_own_pr
 test_status_log_outcome_keeps_gitlab_and_gerrit_reviews

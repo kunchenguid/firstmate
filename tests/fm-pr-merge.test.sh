@@ -57,7 +57,8 @@ make_case() {
     "worktree=$case_dir/wt" \
     "project=$case_dir/project" \
     "kind=ship" \
-    "mode=no-mistakes"
+    "mode=no-mistakes" \
+    "expected_base=main"
   printf '%s\n' \
     'state=MERGED' \
     'merged=true' \
@@ -184,6 +185,14 @@ printf '%s\n' "$*" >> "$FM_TEST_GH_LOG"
 case "${1:-} ${2:-}" in
   "pr view")
     case " $* " in
+      *" --json baseRefName "*)
+        if [ -f "$(dirname "$FM_TEST_GH_VIEW_JSON")/retargeted" ]; then
+          printf 'other\n'
+          exit 0
+        fi
+        jq -r '.baseRefName // empty' "$FM_TEST_GH_VIEW_JSON"
+        exit 0
+        ;;
       *statusCheckRollup*)
         view_json=$FM_TEST_GH_VIEW_JSON
         if [ -f "${FM_TEST_GH_UPDATE_VIEW:-}" ] && [ -f "${FM_TEST_GH_UPDATE_DONE:-}" ]; then
@@ -222,6 +231,9 @@ case "${1:-} ${2:-}" in
         if [ -f "$view_dir/github-head-after-view" ]; then
           cp "$view_dir/github-head-after-view" "$view_dir/github-server-head"
           rm -f "$view_dir/github-head-after-view"
+        fi
+        if [ -f "$(dirname "$FM_TEST_GH_VIEW_JSON")/retarget-on-verify" ]; then
+          : > "$(dirname "$FM_TEST_GH_VIEW_JSON")/retargeted"
         fi
         exit 0
         ;;
@@ -458,7 +470,7 @@ write_mr_json() {
   local file=$1 kv key value
   local state=opened detail=mergeable conflicts=false discussions=true
   local head=$MR_HEAD pipeline_sha=$MR_HEAD pipeline_status=success pipeline=present
-  local merge_when_pipeline_succeeds=false merge_after=null
+  local merge_when_pipeline_succeeds=false merge_after=null base=main
   shift
   for kv in "$@"; do
     key=${kv%%=*}
@@ -474,14 +486,15 @@ write_mr_json() {
       pipeline) pipeline=$value ;;
       merge_when_pipeline_succeeds) merge_when_pipeline_succeeds=$value ;;
       merge_after) merge_after=$value ;;
+      base) base=$value ;;
       *) fail "write_mr_json: unknown field '$key'" ;;
     esac
   done
   if [ "$pipeline" = present ]; then
     pipeline=$(printf '{"sha":"%s","status":"%s"}' "$pipeline_sha" "$pipeline_status")
   fi
-  printf '{"iid":7,"state":"%s","detailed_merge_status":"%s","has_conflicts":%s,' \
-    "$state" "$detail" "$conflicts" > "$file"
+  printf '{"iid":7,"target_branch":"%s","state":"%s","detailed_merge_status":"%s","has_conflicts":%s,' \
+    "$base" "$state" "$detail" "$conflicts" > "$file"
   printf '"blocking_discussions_resolved":%s,"sha":"%s","head_pipeline":%s,' \
     "$discussions" "$head" "$pipeline" >> "$file"
   printf '"merge_when_pipeline_succeeds":%s,"merge_after":%s}\n' \
@@ -602,7 +615,7 @@ SH
 # with named fields overridden so one case drives exactly one condition.
 write_forgejo_pr_json() {
   local file=$1 kv key value
-  local state=open mergeable=true merged=false draft=false head=$FJ_HEAD
+  local state=open mergeable=true merged=false draft=false head=$FJ_HEAD base=main
   shift
   for kv in "$@"; do
     key=${kv%%=*}
@@ -613,11 +626,12 @@ write_forgejo_pr_json() {
       merged) merged=$value ;;
       draft) draft=$value ;;
       head) head=$value ;;
+      base) base=$value ;;
       *) fail "write_forgejo_pr_json: unknown field '$key'" ;;
     esac
   done
-  printf '{"state":"%s","mergeable":%s,"merged":%s,"draft":%s,"head":{"sha":"%s"}}\n' \
-    "$state" "$mergeable" "$merged" "$draft" "$head" > "$file"
+  printf '{"state":"%s","mergeable":%s,"merged":%s,"draft":%s,"base":{"ref":"%s"},"head":{"sha":"%s"}}\n' \
+    "$state" "$mergeable" "$merged" "$draft" "$base" "$head" > "$file"
 }
 
 # write_forgejo_status_json <file> [state=<value>] [total_count=<n>]
@@ -2249,7 +2263,7 @@ test_gitlab_stale_recorded_head_is_reported() {
 }
 
 test_gitlab_unreadable_state_refuses() {
-  local case_dir rc name
+  local case_dir rc name diagnostic
   for name in view-fails not-an-object split-value; do
     case_dir=$(make_gitlab_case "gitlab-unreadable-$name")
     case "$name" in
@@ -2267,8 +2281,12 @@ test_gitlab_unreadable_state_refuses() {
     set -e
 
     expect_code 1 "$rc" "gitlab-unreadable-$name: fm-pr-merge should refuse"
-    assert_grep 'could not read the GitLab merge request state before merging' \
-      "$case_dir/stderr" "gitlab-unreadable-$name: refusal did not name the unreadable state"
+    case "$name" in
+      split-value) diagnostic='could not read the GitLab merge request state before merging' ;;
+      *) diagnostic='expected PR base main, actual base unavailable' ;;
+    esac
+    assert_grep "$diagnostic" "$case_dir/stderr" \
+      "gitlab-unreadable-$name: refusal did not name the unavailable proof"
     [ -z "$(glab_merge_line "$case_dir/glab.log")" ] \
       || fail "gitlab-unreadable-$name: a merge was attempted on an unreadable state"
   done
@@ -2342,7 +2360,7 @@ test_forgejo_url_resolves_and_merges() {
   rc=$?
   set -e
 
-  expect_code 0 "$rc" "forgejo-merges: a well-formed pull request URL should merge, not error"
+  expect_code 0 "$rc" "forgejo-merges: a well-formed pull request URL should merge, not error"$'\n'"$(cat "$case_dir/stderr")"
   assert_grep "pr=$FJ_URL" "$case_dir/state/task-x1.meta" \
     "forgejo-merges: pr= was not recorded before merging"
   assert_grep "--login $FJ_LOGIN --repo $FJ_OWNER/$FJ_REPO /repos/{owner}/{repo}/pulls/9" "$case_dir/tea.log" \
@@ -3442,6 +3460,45 @@ test_secondmate_without_parent_binding_is_loud() {
   pass "a secondmate home that cannot report upward says so instead of merging in silence"
 }
 
+test_destination_refuses_forge_merge_calls() {
+  local case_dir forge base url rc
+  for forge in github gitlab forgejo; do
+    for base in other ''; do
+      case "$forge" in
+        github)
+          case_dir=$(make_case "base-$forge-${base:-absent}")
+          add_gh_mocks "$case_dir" 2121212121212121212121212121212121212121
+          jq --arg base "$base" '.baseRefName = $base' "$case_dir/github-view.json" > "$case_dir/new-view.json"
+          mv "$case_dir/new-view.json" "$case_dir/github-view.json"
+          url=https://github.com/example/repo/pull/56
+          ;;
+        gitlab) case_dir=$(make_gitlab_case "base-$forge-${base:-absent}" "base=$base"); url=$MR_URL ;;
+        forgejo) case_dir=$(make_forgejo_case "base-$forge-${base:-absent}" "base=$base"); url=$FJ_URL ;;
+      esac
+      rc=0
+      run_pr_merge "$case_dir" task-x1 "$url" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+      [ "$rc" -ne 0 ] || fail "$forge accepted a wrong or absent destination"
+      assert_no_regex '^pr merge ' "$case_dir/gh.log" "$forge reached GitHub merge"
+      assert_absent "$case_dir/glab-merge-called" "$forge reached GitLab merge"
+      assert_absent "$case_dir/tea-merge-called" "$forge reached Forgejo merge"
+      assert_grep 'expected PR base main' "$case_dir/stderr" "$forge refusal lost expected destination"
+    done
+  done
+  case_dir=$(make_case destination-retarget-after-readiness)
+  add_gh_mocks "$case_dir" 2121212121212121212121212121212121212121
+  : > "$case_dir/retarget-on-verify"
+  rc=0
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/56 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  [ "$rc" -ne 0 ] || fail 'retarget after registration reached merge'
+  [ -f "$case_dir/retargeted" ] \
+    || fail "retarget case did not reach live merge verification: $(cat "$case_dir/stderr")"
+  assert_grep 'pr=https://github.com/example/repo/pull/56' "$case_dir/state/task-x1.meta" 'retarget was not after registration'
+  assert_no_regex '^pr merge ' "$case_dir/gh.log" 'retargeted PR reached the forge merge command'
+  assert_grep 'expected PR base main, actual base other' "$case_dir/stderr" 'retarget refusal lost the two bases'
+  pass 'wrong, missing, and retargeted destinations cannot reach a forge merge call'
+}
+
 test_github_behind_update_refuses_concurrent_head_change() {
   local case_dir rc scenario old_head raced_head updated_head actual_head
   old_head=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
@@ -3544,6 +3601,7 @@ test_github_updated_head_other_refusals_stop_waiting() {
 
 test_github_updated_head_other_refusals_stop_waiting
 test_github_behind_update_refuses_concurrent_head_change
+test_destination_refuses_forge_merge_calls
 test_github_zero_exit_queue_required_refuses_with_exact_retry
 test_github_closed_unqueued_outcome_omits_retry_flags
 test_github_agreeing_queue_rules_keep_retry_guidance

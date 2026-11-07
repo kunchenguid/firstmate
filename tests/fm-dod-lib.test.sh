@@ -12,14 +12,134 @@ set -u
 TMP_ROOT=$(fm_test_tmproot fm-dod-lib)
 fm_git_identity fmtest fmtest@example.invalid
 
+DOD_FAKEBIN="$TMP_ROOT/destination-bin"
+mkdir -p "$DOD_FAKEBIN"
+cat > "$DOD_FAKEBIN/gh" <<'SH'
+#!/usr/bin/env bash
+case " $* " in
+  *' --json baseRefName '*)
+    [ "${DOD_FORGE_UNREADABLE:-0}" != 1 ] || exit 1
+    printf '%s\n' "${DOD_FORGE_BASE:-main}" ;;
+  *) exit 1 ;;
+esac
+SH
+chmod +x "$DOD_FAKEBIN/gh"
+
 accept_done() {  # <kind> <mode> <worktree> <project> <line> [<state> <id> <meta>]
-  fm_dod_accept_ship_done "$@"
+  PATH="$DOD_FAKEBIN:$PATH" fm_dod_accept_ship_done "$@"
 }
 
 write_merge_marker() {  # <state> <id> <provider> <host> <path> <number>
   printf '%s\n' fm-pr-poll-merge-notified-v1 "$3" "$4" "$5" "$6" > "$1/$2.pr-poll-merge-notified"
   chmod 600 "$1/$2.pr-poll-merge-notified"
 }
+
+test_gerrit_readiness_obeys_scan_deadline() {
+  local dir repo wt meta url mode stalled deadline rc out elapsed start
+  local published_head budget
+  dir="$TMP_ROOT/gerrit-deadline"
+  repo="$dir/repo"
+  wt="$dir/wt"
+  meta="$dir/task.meta"
+  url=https://gerrit.example/c/o/r/+/42
+  mkdir -p "$dir/bin" "$dir/config"
+  fm_git_worktree "$repo" "$wt" fm/gerrit-deadline
+  git -C "$wt" commit -q --allow-empty -m 'published work'
+  published_head=$(git -C "$wt" rev-parse HEAD)
+  cat > "$dir/bin/gerrit-axi" <<'SH'
+#!/usr/bin/env bash
+count=$(cat "$FM_GERRIT_CALLS" 2>/dev/null || printf 0)
+count=$((count + 1))
+printf '%s\n' "$count" > "$FM_GERRIT_CALLS"
+if [ "$count" -gt 1 ]; then
+  case "$FM_STALLED_READ" in
+    revision|sequence)
+      sleep 5 ;;
+  esac
+fi
+printf '{"ok":true,"changes":[{"change":42,"branch":"main","revision":"%s"}]}\n' "$FM_PUBLISHED_HEAD"
+SH
+  cat > "$dir/bin/no-mistakes" <<'SH'
+#!/usr/bin/env bash
+printf 'status\n' >> "$FM_NM_CALLS"
+if [ "$FM_STALLED_READ" = custody ]; then
+  sleep 5
+fi
+if [ "$FM_STALLED_READ" = sequence ]; then
+  sleep 1
+fi
+printf 'run:\n  outcome: passed\n  head_sha: %s\n' "$FM_PUBLISHED_HEAD"
+SH
+  cat > "$dir/bin/resolver" <<'SH'
+#!/usr/bin/env bash
+printf 'resolver\n' >> "$FM_NM_CALLS"
+if [ "$FM_STALLED_READ" = resolver ]; then
+  sleep 5
+fi
+if [ "$FM_STALLED_READ" = sequence ]; then
+  sleep 1
+fi
+printf '%s\n' "$FM_RESOLVED_HOME"
+SH
+  chmod +x "$dir/bin/"*
+  printf '%s\n' "$dir/bin/resolver" > "$dir/config/nm-home-resolver"
+  printf 'kind=ship\nmode=no-mistakes\nforge=gerrit\nexpected_base=main\n' > "$meta"
+  for mode in direct-PR no-mistakes ''; do
+    for deadline in '' "$(( $(fm_nm_now_ms) + 10000 ))"; do
+      : > "$dir/gerrit.calls"
+      PATH="$dir/bin:$PATH" FM_READ_DEADLINE="$deadline" FM_CONFIG_OVERRIDE="$dir/config" NM_HOME='' \
+        FM_GERRIT_CALLS="$dir/gerrit.calls" FM_NM_CALLS="$dir/nm.calls" \
+        FM_STALLED_READ=none FM_RESOLVED_HOME="$dir" \
+        FM_PUBLISHED_HEAD="$published_head" \
+        fm_dod_accept_ship_done ship "$mode" "$wt" "$repo" "done: PR $url published for review" \
+        "$dir" task "$meta" meta-locked \
+        || fail "matching Gerrit readiness was refused for mode '$mode'"
+    done
+  done
+  for stalled in custody revision resolver sequence; do
+    : > "$dir/gerrit.calls"
+    : > "$dir/nm.calls"
+    budget=1
+    [ "$stalled" != sequence ] || budget=3
+    start=$(fm_nm_now_ms)
+    deadline=$((start + budget * 1000))
+    rc=0
+    out=$(PATH="$dir/bin:$PATH" FM_READ_DEADLINE="$deadline" \
+      FM_CONFIG_OVERRIDE="$dir/config" NM_HOME='' \
+      FM_GERRIT_CALLS="$dir/gerrit.calls" FM_NM_CALLS="$dir/nm.calls" \
+      FM_STALLED_READ="$stalled" FM_RESOLVED_HOME="$dir" \
+      FM_PUBLISHED_HEAD="$published_head" \
+      fm_dod_accept_ship_done ship no-mistakes "$wt" "$repo" "done: PR $url published for review" \
+      "$dir" task "$meta" meta-locked) || rc=$?
+    elapsed=$(( $(fm_nm_now_ms) - start ))
+    [ "$rc" -ne 0 ] || fail "Gerrit $stalled accepted proof after the scan deadline: $out"
+    [ "$elapsed" -lt "$(( (budget + 3) * 1000 ))" ] \
+      || fail "Gerrit $stalled outlived the scan deadline ($elapsed ms)"
+    if [ "$stalled" = custody ] || [ "$stalled" = resolver ]; then
+      [ "$(cat "$dir/gerrit.calls")" = 1 ] || fail 'expired custody reached the revision read'
+    fi
+    if [ "$stalled" = resolver ]; then
+      [ "$(cat "$dir/nm.calls")" = resolver ] || fail 'expired resolver reached axi status'
+    else
+      [ "$(cat "$dir/nm.calls")" = $'resolver\nstatus' ] || fail "Gerrit $stalled never reached axi status"
+    fi
+    if [ "$stalled" = revision ] || [ "$stalled" = sequence ]; then
+      [ "$(cat "$dir/gerrit.calls")" = 2 ] || fail "Gerrit $stalled never reached the revision read"
+    fi
+  done
+  for deadline in invalid 00 9999999999999999999 "$(fm_nm_now_ms)"; do
+    : > "$dir/gerrit.calls"
+    if PATH="$dir/bin:$PATH" FM_READ_DEADLINE="$deadline" FM_GERRIT_CALLS="$dir/gerrit.calls" \
+      fm_dod_accept_ship_done ship direct-PR "$wt" "$repo" "done: PR $url published for review" \
+      "$dir" task "$meta" meta-locked >/dev/null; then
+      fail "Gerrit readiness accepted deadline '$deadline'"
+    fi
+    [ ! -s "$dir/gerrit.calls" ] || fail 'an invalid or expired deadline started a forge read'
+  done
+  pass 'Gerrit readiness caps custody, revision and resolver reads at the scan deadline'
+}
+
+test_gerrit_readiness_obeys_scan_deadline
 
 test_scout_done_is_not_gated() {
   local repo wt
@@ -33,13 +153,16 @@ test_scout_done_is_not_gated() {
 }
 
 test_unpushed_ship_done_is_refused() {
-  local repo wt sha reason rc
+  local repo wt sha reason rc meta
   repo="$TMP_ROOT/unpushed-repo"
   wt="$TMP_ROOT/unpushed-wt"
   fm_git_worktree "$repo" "$wt" fm/unpushed
   git -C "$wt" commit -q --allow-empty -m 'fix only in the worktree'
   sha=$(git -C "$wt" rev-parse HEAD)
-  reason=$(accept_done ship no-mistakes "$wt" "$repo" "done: PR https://example.test/o/r/pull/1 checks green")
+  meta="$TMP_ROOT/unpushed.meta"
+  printf 'expected_base=main\n' > "$meta"
+  reason=$(accept_done ship no-mistakes "$wt" "$repo" "done: PR https://github.com/o/r/pull/1 checks green" \
+    "$TMP_ROOT" unpushed "$meta")
   rc=$?
   [ "$rc" -eq 1 ] || fail "unpushed ship done: was accepted (exit $rc)"
   case "$reason" in
@@ -50,20 +173,23 @@ test_unpushed_ship_done_is_refused() {
 }
 
 test_remote_containing_named_head_is_accepted() {
-  local repo wt sha
+  local repo wt sha meta
   repo="$TMP_ROOT/pushed-repo"
   wt="$TMP_ROOT/pushed-wt"
   fm_git_worktree "$repo" "$wt" fm/pushed
   git -C "$wt" commit -q --allow-empty -m 'fix on the branch'
   sha=$(git -C "$wt" rev-parse HEAD)
   git -C "$wt" update-ref refs/remotes/origin/fm/pushed "$sha"
-  accept_done ship no-mistakes "$wt" "$repo" "done: PR https://example.test/o/r/pull/2 checks green" \
+  meta="$TMP_ROOT/pushed.meta"
+  printf 'expected_base=main\n' > "$meta"
+  accept_done ship no-mistakes "$wt" "$repo" "done: PR https://github.com/o/r/pull/2 checks green" \
+    "$TMP_ROOT" pushed "$meta" \
     || fail "named head on a remote-tracking ref was refused"
   pass "named head on a remote-tracking ref is accepted"
 }
 
 test_moved_branch_without_named_head_is_refused() {
-  local repo wt main_sha fix_sha reason rc
+  local repo wt main_sha fix_sha reason rc meta
   repo="$TMP_ROOT/moved-repo"
   wt="$TMP_ROOT/moved-wt"
   fm_git_worktree "$repo" "$wt" fm/moved
@@ -73,7 +199,10 @@ test_moved_branch_without_named_head_is_refused() {
   # The fork branch exists and moved, but only to a merge of the default
   # branch: reachability of that branch is not reachability of the named head.
   git -C "$wt" update-ref refs/remotes/origin/fm/moved "$main_sha"
-  reason=$(accept_done ship no-mistakes "$wt" "$repo" "done: PR https://example.test/o/r/pull/3 checks green")
+  meta="$TMP_ROOT/moved.meta"
+  printf 'expected_base=main\n' > "$meta"
+  reason=$(accept_done ship no-mistakes "$wt" "$repo" "done: PR https://github.com/o/r/pull/3 checks green" \
+    "$TMP_ROOT" moved "$meta")
   rc=$?
   [ "$rc" -eq 1 ] || fail "moved remote branch without the named head was accepted"
   case "$reason" in
@@ -142,7 +271,7 @@ test_standalone_local_only_needs_project_ref() {
 }
 
 test_free_text_sha_is_not_the_named_head() {
-  local repo wt old new reason rc
+  local repo wt old new reason rc meta
   repo="$TMP_ROOT/hex-repo"
   wt="$TMP_ROOT/hex-wt"
   fm_git_worktree "$repo" "$wt" fm/hex
@@ -150,7 +279,10 @@ test_free_text_sha_is_not_the_named_head() {
   git -C "$wt" update-ref refs/remotes/origin/main "$old"
   git -C "$wt" commit -q --allow-empty -m 'actual fix'
   new=$(git -C "$wt" rev-parse HEAD)
-  reason=$(accept_done ship direct-PR "$wt" "$repo" "done: reverted $old and fixed the retry")
+  meta="$TMP_ROOT/hex.meta"
+  printf 'expected_base=main\n' > "$meta"
+  reason=$(accept_done ship direct-PR "$wt" "$repo" \
+    "done: PR https://github.com/o/r/pull/12 reverted $old and fixed the retry" "$TMP_ROOT" hex "$meta")
   rc=$?
   [ "$rc" -eq 1 ] || fail "free-text SHA on origin/main made an unpushed HEAD accept"
   case "$reason" in
@@ -169,7 +301,7 @@ test_recorded_merged_pr_is_landed_after_prune() {
   fm_git_worktree "$repo" "$wt" fm/merged
   git -C "$wt" commit -q --allow-empty -m 'fix, squash-merged and branch pruned'
   meta="$state/merged.meta"
-  printf 'kind=ship\nmode=direct-PR\nworktree=%s\nproject=%s\npr=https://github.com/o/r/pull/7\n' \
+  printf 'kind=ship\nmode=direct-PR\nexpected_base=main\nworktree=%s\nproject=%s\npr=https://github.com/o/r/pull/7\n' \
     "$wt" "$repo" > "$meta"
   write_merge_marker "$state" merged github github.com o/r 7
   accept_done ship direct-PR "$wt" "$repo" "done: PR https://github.com/o/r/pull/7" "$state" merged "$meta" \
@@ -187,7 +319,7 @@ test_merge_marker_binds_to_the_named_pr() {
   git -C "$wt" commit -q --allow-empty -m 'second PR head, never pushed'
   sha=$(git -C "$wt" rev-parse HEAD)
   meta="$state/bind.meta"
-  printf 'kind=ship\nmode=direct-PR\nworktree=%s\nproject=%s\npr=https://github.com/o/r/pull/7\n' \
+  printf 'kind=ship\nmode=direct-PR\nexpected_base=main\nworktree=%s\nproject=%s\npr=https://github.com/o/r/pull/7\n' \
     "$wt" "$repo" > "$meta"
   write_merge_marker "$state" bind github github.com o/r 7
   reason=$(accept_done ship direct-PR "$wt" "$repo" "done: PR https://github.com/o/r/pull/9" "$state" bind "$meta")
@@ -215,7 +347,7 @@ test_forge_recorded_head_is_accepted_without_local_object() {
   # fetched into the worker clone.
   forge_head=0123456789abcdef0123456789abcdef01234567
   meta="$state/forge.meta"
-  printf 'kind=ship\nmode=no-mistakes\nworktree=%s\nproject=%s\npr=https://github.com/o/r/pull/5\npr_head=%s\n' \
+  printf 'kind=ship\nmode=no-mistakes\nexpected_base=main\nworktree=%s\nproject=%s\npr=https://github.com/o/r/pull/5\npr_head=%s\n' \
     "$wt" "$repo" "$forge_head" > "$meta"
   accept_done ship no-mistakes "$wt" "$repo" "done: PR https://github.com/o/r/pull/5 checks green" \
     "$state" forge "$meta" \
@@ -241,7 +373,7 @@ test_direct_pr_recorded_head_does_not_cover_unpushed_commit() {
   git -C "$wt" commit -q --allow-empty -m 'the fix, only in the worktree'
   later=$(git -C "$wt" rev-parse HEAD)
   meta="$state/postopen.meta"
-  printf 'kind=ship\nmode=direct-PR\nworktree=%s\nproject=%s\npr=https://github.com/o/r/pull/5\npr_head=%s\n' \
+  printf 'kind=ship\nmode=direct-PR\nexpected_base=main\nworktree=%s\nproject=%s\npr=https://github.com/o/r/pull/5\npr_head=%s\n' \
     "$wt" "$repo" "$pushed" > "$meta"
   reason=$(accept_done ship direct-PR "$wt" "$repo" "done: PR https://github.com/o/r/pull/5" "$state" postopen "$meta")
   rc=$?
@@ -275,6 +407,77 @@ test_ci_ready_requires_pr_reference() {
       || fail "CI-ready PR reference rejected: $note"
   done
   pass "CI-ready notes require checks green and an actual PR reference"
+}
+
+test_readiness_destination_gate_covers_every_accepted_form() {
+  local repo wt state meta missing sha note mode reason rc proof
+  local -a notes
+  repo="$TMP_ROOT/ci-destination-repo"
+  wt="$TMP_ROOT/ci-destination-wt"
+  state="$TMP_ROOT/ci-destination-state"
+  mkdir -p "$state"
+  fm_git_worktree "$repo" "$wt" fm/ci-destination
+  git -C "$wt" commit -q --allow-empty -m 'published readiness candidate'
+  sha=$(git -C "$wt" rev-parse HEAD)
+  git -C "$wt" update-ref refs/remotes/origin/fm/ci-destination "$sha"
+  meta="$state/task.meta"
+  missing="$state/missing.meta"
+  printf 'kind=ship\nexpected_base=main\npr=https://github.com/o/r/pull/12\npr_head=%s\n' "$sha" > "$meta"
+  printf 'kind=ship\npr=https://github.com/o/r/pull/12\npr_head=%s\n' "$sha" > "$missing"
+  for mode in no-mistakes direct-PR ''; do
+    DOD_FORGE_BASE=main accept_done ship "$mode" "$wt" "$repo" \
+      'done: PR https://github.com/o/r/pull/12 checks green' "$state" task "$meta" \
+      || fail "matching destination and published head were refused for mode '$mode'"
+    notes=(
+      'PR https://github.com/o/r/pull/12 checks green'
+      'checks green: https://github.com/o/r/pull/12'
+      'PR #12 checks green'
+      'checks green: PR#12'
+      'https://github.com/o/r/pull/12 checks green'
+      'https://gitlab.com/o/r/-/merge_requests/12 checks green'
+      'https://git.example.org/team/repo/pulls/12 checks green'
+      '/pull/12 checks green'
+      'checks green after review (https://github.com/o/r/pull/12)'
+      'PR http://github.com/o/r/pull/12 checks green'
+    )
+    if [ "$mode" = direct-PR ]; then
+      DOD_FORGE_BASE=main accept_done ship "$mode" "$wt" "$repo" \
+        'done: PR https://github.com/o/r/pull/12' "$state" task "$meta" \
+        || fail 'matching direct-PR destination without checks-green text was refused'
+      notes+=(
+        'PR https://github.com/o/r/pull/12'
+        'PR #12'
+        'opened https://github.com/o/r/pull/12'
+        'https://github.com/o/r/pull/12'
+        '/pull/12'
+        'implementation complete'
+        'PR http://github.com/o/r/pull/12'
+      )
+    fi
+    for note in "${notes[@]}"; do
+      fm_dod_should_gate_ship_done ship "$mode" "done: $note" || fail "fixture is not gated: $note"
+      for proof in wrong unreadable missing; do
+        rc=0
+        case "$proof" in
+          wrong)
+            reason=$(DOD_FORGE_BASE=wrong accept_done ship "$mode" "$wt" "$repo" \
+              "done: $note" "$state" task "$meta") || rc=$? ;;
+          unreadable)
+            reason=$(DOD_FORGE_UNREADABLE=1 accept_done ship "$mode" "$wt" "$repo" \
+              "done: $note" "$state" task "$meta") || rc=$? ;;
+          missing)
+            reason=$(accept_done ship "$mode" "$wt" "$repo" \
+              "done: $note" "$state" task "$missing") || rc=$? ;;
+        esac
+        [ "$rc" -eq 1 ] || fail "$proof destination accepted readiness mode '$mode': $note"
+        case "$reason" in
+          *'expected PR base'*|*'PR destination could not be resolved'*) ;;
+          *) fail "destination refusal was masked by another guard: $reason" ;;
+        esac
+      done
+    done
+  done
+  pass 'every gated publishing note requires destination proof despite a published head'
 }
 
 test_ci_ready_variants_are_gated() {
@@ -439,6 +642,10 @@ EOF
       assert_grep 'against the base branch `feature/hub`' "$home/data/$id/ship-instructions.md" \
         "promotion did not target the PR at the recorded base"
       assert_grep 'base_branch=feature/hub' "$meta" "promotion dropped the recorded base"
+      assert_grep 'Expected PR base: feature/hub' "$home/data/$id/ship-instructions.md" \
+        "promotion instructions omitted the expected destination value"
+      assert_grep 'Expected PR base: feature/hub' "$home/data/$id/brief.md" \
+        "the relaunch brief omitted the promoted expected destination value"
     else
       [ "$status" -ne 0 ] || fail "promoting a based scout to local-only should be refused"
       assert_contains "$out" "mode=local-only" "the local-only promotion refusal did not explain itself"
@@ -448,6 +655,57 @@ EOF
   pass "promotion keeps a scout's recorded base branch and refuses local-only for it"
 }
 
+test_promotion_default_base_matches_delivery_mode() {
+  local home id meta out status mode surface
+  home="$TMP_ROOT/promote-default-base-home"
+  for mode in local-only direct-PR no-mistakes; do
+    id="promote-default-$mode"
+    meta="$home/state/$id.meta"
+    mkdir -p "$home/state" "$home/data/$id"
+    printf 'window=fm-%s\nkind=scout\nworktree=/tmp/wt\nexpected_base=main\n' "$id" > "$meta"
+    cat > "$home/data/$id/brief.md" <<'EOF'
+# Task
+## Captain's intent
+Fix the hub bug.
+
+## Firstmate spec
+Reproduce it first.
+EOF
+    out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$ROOT/bin/fm-promote.sh" "$id" --mode "$mode" --yolo off 2>&1)
+    status=$?
+    expect_code 0 "$status" "$mode promotion with a pinned default base should succeed"$'\n'"$out"
+    assert_grep 'expected_base=main' "$meta" "$mode promotion changed the task-owned pin"
+    assert_grep "mode=$mode" "$meta" "$mode promotion did not record its delivery mode"
+    assert_grep 'kind=ship' "$meta" "$mode promotion did not complete the scout transition"
+    for surface in ship-instructions.md brief.md; do
+      if [ "$mode" = local-only ]; then
+        assert_no_grep 'Expected PR base:' "$home/data/$id/$surface" \
+          "local-only $surface advertised a PR destination"
+      else
+        assert_grep 'Expected PR base: main' "$home/data/$id/$surface" \
+          "$mode $surface omitted the task-owned destination"
+      fi
+    done
+  done
+  pass "default-base promotion emits a PR destination only for publishing modes"
+}
+
+test_canonical_pr_requires_destination_metadata() {
+  local repo wt reason rc
+  repo="$TMP_ROOT/unknown-destination-repo"
+  wt="$TMP_ROOT/unknown-destination-wt"
+  fm_git_worktree "$repo" "$wt" fm/unknown-destination
+  git -C "$wt" commit -q --allow-empty -m 'published head without task metadata'
+  git -C "$wt" update-ref refs/remotes/origin/fm/unknown-destination "$(git -C "$wt" rev-parse HEAD)"
+  reason=$(accept_done ship direct-PR "$wt" "$repo" 'done: PR https://github.com/o/r/pull/7')
+  rc=$?
+  [ "$rc" -eq 1 ] || fail 'a published head bypassed missing task destination metadata'
+  assert_contains "$reason" 'expected PR base is unavailable' 'readiness refusal lost the missing destination'
+  pass 'a canonical PR requires destination metadata even when its head is published'
+}
+
+test_canonical_pr_requires_destination_metadata
+test_readiness_destination_gate_covers_every_accepted_form
 test_scout_done_is_not_gated
 test_unpushed_ship_done_is_refused
 test_no_mistakes_prevalidation_done_is_not_gated
@@ -468,6 +726,7 @@ test_non_done_lines_are_not_gated
 test_fenced_and_indented_captain_lines_are_not_intent
 test_pr_based_dod_draft_check_uses_gh_axi
 test_promotion_keeps_the_recorded_base_branch
+test_promotion_default_base_matches_delivery_mode
 
 # The launch role is the generated text a worker receives. It must keep the
 # skill name, so a session that registers the skill loads it by name, and must

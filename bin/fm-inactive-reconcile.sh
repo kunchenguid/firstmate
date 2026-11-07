@@ -7,16 +7,16 @@
 #   fm-inactive-reconcile.sh acknowledge <fingerprint>
 #
 # This is an adjunct to the existing watcher poll loop and session-start path,
-# not a watcher, daemon, PR poll, or forge client of its own.
+# not a watcher, daemon, or PR poll of its own.
 # In a secondmate home every `scan` invocation, which is every watcher poll,
 # first runs the LEDGER-FIRST parent delivery: a direct child whose status
 # ledger ends in a whole `done:` or `failed:` line has stated its own outcome,
-# so that line is published on the parent channel at once through
+# so that line is eligible for publication on the parent channel through
 # bin/fm-parent-channel-lib.sh from this unstamped payload:
 #   <state> [key=child-outcome-<child>-<state>-<fp8>]: child <child> <state>: <note> [pr=<url>] [mode=<mode>] [yolo=<posture>] [report=data/<child>/report.md]
 # carrying the child's recorded PR, delivery mode, merge posture, and scout
 # report pointer, without consulting fm-crew-state.sh. A ship `done:` is
-# published only when bin/fm-dod-lib.sh accepts the named head, so an
+# published only when bin/fm-dod-lib.sh accepts its readiness proof, so an
 # unpushed copy is not reported upstream as ready. The cadence path uses
 # fm-crew-state.sh, which applies the same gate: a no-mistakes
 # pre-validation `done: {summary}` still reads done (the pipeline handoff),
@@ -32,20 +32,25 @@
 # does before it removes the child's record; it exits 0 when the line is
 # delivered or nothing is owed, and non-zero when the parent channel could not
 # be written, so teardown refuses instead of discarding an undelivered outcome.
+# Ledger delivery keeps its own durable cursor, independent of the cadence
+# marker, so a scan interrupted by several stalled readiness reads resumes
+# after its last visited child on the next poll.
 # The cadence-gated scan below then evaluates at most once per
 # FM_INACTIVE_RECONCILE_SECS (default 900, valid 60..1800) per home, except
 # that --startup performs the same scan immediately in the locked session
-# start's deferred worker. Each scan uses an aggregate
-# FM_INACTIVE_RECONCILE_BUDGET_SECS deadline (default 10, valid 1..30) and
-# resumes after its last visited child on the next scan.
-# The scan enforces that budget itself through a whole-second deadline, and the
-# first due child of every scan is always visited with at least a one-second
-# state-read bound: whole-second arithmetic can otherwise round a small budget
-# to zero mid-scan, and an invocation that exits having visited nothing would
-# advance the durable cursor past a child it never examined. A process-group
+# start's deferred worker. Ledger delivery and the cadence scan share one
+# FM_INACTIVE_RECONCILE_BUDGET_SECS deadline (default 10, valid 1..30).
+# When the cadence scan is due, ledger delivery stops one second
+# before that deadline to leave room for the cadence scan's first visit.
+# Each pass resumes after its own last visited child on its next invocation.
+# The scan enforces that budget itself through a millisecond deadline, and the
+# first due child of every scan gets at least one full second for its reads.
+# Later visits retain the shared scan deadline. A process-group
 # kill one second after the budget remains as a backstop for a scan wedged in
 # an unbounded wait (for example a live-held wake-queue lock), so the clean
 # deadline path is not racing its own backstop.
+# The state-reader watchdog uses half of that existing cleanup reserve after
+# its read deadline, leaving the other half for scan and metadata-lock cleanup.
 #
 # It considers only a direct ordinary crewmate whose newest meta, status, or
 # turn-ended mtime is older than that interval and whose last status is not
@@ -62,11 +67,10 @@
 # or the configured paused verb) does not contradict it; a state sourced from
 # the pipeline's own RUN STEP outranks that word outright, so the routine ship
 # shape (`done:` written, the run then fails, the crew goes silent) still
-# reaches the captain. Its PR identity comes from the same record as its state -
-# the run's own published PR for a run-step state, that line's own ready-signal
-# PR for a status-log state, and never a separately recorded task PR; a scout
-# delivers no PR on either path, so it carries none. Together they
-# prevent one captain-facing record from combining claims from different runs.
+# reaches the captain. terminal_outcome_pr below owns PR identity extraction
+# from the reader's output; fm-crew-state.sh's run_pr_identity helper owns
+# selection of the emitted run-step identity. A scout delivers no PR on either
+# path, so it carries none.
 # A live agent withholds that verdict only while it is busy, or while its
 # incarnation postdates the terminal evidence (the spawn epoch in spawn_gen is
 # later than the last status line's [at=] epoch). An idle agent on the same
@@ -75,7 +79,7 @@
 # through fm_busy_classify_meta (bin/fm-busy-lib.sh); an unreadable or unknown
 # answer is never read as proof the agent is gone or idle and leaves the
 # verdict unchanged. Both reads share the scan budget left after the state
-# read (at least one second, like the first visit above), and hitting that
+# read, and hitting that
 # bound ends the visit like a state-read timeout.
 # Working, paused, parked, blocked, unknown, persistent secondmates, and
 # captain-held work retain their existing supervision semantics.
@@ -109,10 +113,11 @@
 # busy, or whose spawn_gen epoch is later than the last status line's [at=]
 # epoch (a newer incarnation; an unknown epoch counts as not newer).
 #
-# The scan reads only durable local state, fm-crew-state.sh, and one endpoint
+# The cadence path reads durable local state, fm-crew-state.sh, and one endpoint
 # liveness and busy read per terminal candidate, bounded by the scan budget left
-# after the crew-state read; it never invokes
-# gh, gh-axi, curl, fm-pr-check.sh, fm-pr-poll.sh, or a state *.check.sh.
+# after the crew-state read. Both paths can make live forge reads through
+# bin/fm-dod-lib.sh's shared ship readiness gate.
+# Neither path runs fm-pr-check.sh, a forge poll, or a state *.check.sh.
 set -u
 export LC_ALL=C
 
@@ -123,6 +128,7 @@ OUTCOME_DIR="$STATE/terminal-outcomes"
 SCAN_MARKER="$STATE/.inactive-outcome-reconcile"
 SCAN_LOCK="$STATE/.inactive-outcome-reconcile.lock"
 CREW_STATE_BIN="${FM_INACTIVE_CREW_STATE_BIN:-$SCRIPT_DIR/fm-crew-state.sh}"
+SCAN_CLEANUP_RESERVE_MS=1000
 
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
@@ -317,20 +323,21 @@ scan_marker_age() {
   if [ "$now" -lt "$m" ]; then printf '0\n'; else printf '%s\n' $((now - m)); fi
 }
 
-scan_marker_cursor() {
-  [ -f "$SCAN_MARKER" ] && [ ! -L "$SCAN_MARKER" ] || return 0
-  grep '^cursor=' "$SCAN_MARKER" 2>/dev/null | tail -1 | cut -d= -f2- || true
+scan_marker_cursor() { # [<marker>]
+  local marker=${1:-$SCAN_MARKER}
+  [ -f "$marker" ] && [ ! -L "$marker" ] || return 0
+  grep '^cursor=' "$marker" 2>/dev/null | tail -1 | cut -d= -f2- || true
 }
 
-write_scan_marker() { # <cursor>
-  local cursor=$1 marker_tmp
+write_scan_marker() { # <cursor> [<marker>]
+  local cursor=$1 marker=${2:-$SCAN_MARKER} marker_tmp
   marker_tmp=$(mktemp "$STATE/.inactive-outcome-reconcile.XXXXXX") || return 1
   {
     printf 'epoch=%s\n' "$(reconcile_now)"
     printf 'cursor=%s\n' "$cursor"
   } > "$marker_tmp" || { rm -f "$marker_tmp"; return 1; }
   chmod 600 "$marker_tmp" 2>/dev/null || true
-  mv -f "$marker_tmp" "$SCAN_MARKER" || { rm -f "$marker_tmp"; return 1; }
+  mv -f "$marker_tmp" "$marker" || { rm -f "$marker_tmp"; return 1; }
 }
 
 meta_field() {
@@ -378,7 +385,7 @@ state_line_note() { # <state-line>
   printf '%s' "$rest"
 }
 
-# Enforce the header's same-record pull-request contract. A scout never delivers
+# Extract the reader's emitted pull-request identity. A scout never delivers
 # a PR, so it never carries one, exactly as pr_for_task rules for the
 # ledger-first path. Otherwise a status-log state carries a PR only in a mode's
 # ready-signal shape (`PR <url>`, `PR <url> checks green`, or Gerrit's
@@ -408,11 +415,14 @@ terminal_outcome_pr() { # <state-line> <kind>
 # honest unknown, so a crew's own earlier prose is the weaker witness and never
 # vetoes it - otherwise the routine ship shape
 # (`done:` written, the run then fails, the crew goes silent) would reach nobody.
+# The run-step emitter proves destination before publishing success.
 # The two sources are genuinely comparable only when the state itself came from
 # the status log, and there the crew's latest word still decides.
 terminal_outcome_corroborated() { # <state> <last-status-line> <state-line>
   local state=$1 last=$2 line=${3:-} declared
-  [ "$(state_line_source "$line")" != run-step ] || return 0
+  if [ "$(state_line_source "$line")" = run-step ]; then
+    return 0
+  fi
   if status_is_paused "$last"; then
     declared=paused
   else
@@ -517,7 +527,7 @@ claim_inactive_report_for_ledger() { # <task> <incarnation> <state> <ledger-fing
 # delivered, or nothing is owed, and 1 when it is owed but the parent channel
 # could not be written (the notice is queued once per record).
 report_child_ledger_locked() { # <id> <meta>
-  local id=$1 meta=$2 status last previous state note pr mode yolo data incarnation fingerprint predecessor_head outcome_key line
+  local id=$1 meta=$2 status last previous state note pr mode yolo data incarnation fingerprint predecessor_head outcome_key line notice_token
   status="$STATE/$id.status"
   last=$(child_terminal_ledger_line "$status") || return 0
   state=$(status_line_verb "$last")
@@ -529,6 +539,20 @@ report_child_ledger_locked() { # <id> <meta>
     && ! fm_dod_accept_ship_done "$(meta_field "$meta" kind)" "$(meta_field "$meta" mode)" \
       "$(meta_field "$meta" worktree)" "$(meta_field "$meta" project)" "$last" \
       "$STATE" "$id" "$meta" meta-locked >/dev/null; then
+    if [ "$(meta_field "$meta" mode)" != local-only ] \
+      && [ "$(meta_field "$meta" forge)" != external ] \
+      && ! fm_pr_expected_base "$meta" >/dev/null 2>&1; then
+      note=$("$SCRIPT_DIR/fm-pr-poll.sh" --base-unavailable "$meta") || return 1
+      if [ -n "$note" ]; then
+        # Parent delivery can succeed before the local receipt is written.
+        # Bind retries to this ledger event so the parent deduplicates them.
+        notice_token=$fingerprint
+        outcome_key="child-pr-base-$id-$notice_token"
+        fm_parent_channel_report "$FM_HOME" "$STATE" "blocked [key=$outcome_key]: $note" || return 1
+        (umask 077; set -C; printf '%s\n' "$notice_token" \
+          > "${meta%.meta}.pr-base-parent-notified") || return 1
+      fi
+    fi
     return 0
   fi
   outcome_key="child-outcome-$id-$state-${fingerprint:0:8}"
@@ -564,26 +588,46 @@ report_child_ledger_locked() { # <id> <meta>
   return 1
 }
 
-# Every direct child's ledger, under its meta lock. File reads, plus a local
-# git reachability check for a ship done: with no delivery record yet, so it
-# runs on every poll in a secondmate home; a delivery failure is already queued as a
-# notice and never fails the scan.
+# Every direct child's ledger, under its meta lock. A ship done: with no delivery
+# record also needs local head reachability and bounded live destination proof.
+# Persist the visit before that read: even the scan's aggregate backstop must
+# not make every poll start again at the same stalled children.
 ledger_pass() {
-  local meta id lock
-  for meta in "$STATE"/*.meta; do
-    [ -f "$meta" ] || continue
-    id=$(basename "$meta" .meta)
-    valid_id "$id" || continue
-    [ "$(meta_field "$meta" kind)" != secondmate ] || continue
-    lock=$(fm_meta_lock_path "$meta") || continue
-    fm_lock_try_acquire "$lock" || continue
-    if [ ! -f "$meta" ] || [ -L "$meta" ] \
-      || [ "$(meta_field "$meta" kind)" = secondmate ]; then
+  local deadline=$1 meta id lock cursor range remaining marker="$STATE/.terminal-outcome-ledger-scan"
+  local FM_READ_DEADLINE=$deadline
+  cursor=$(scan_marker_cursor "$marker")
+  valid_id "$cursor" || cursor=''
+  for range in after through; do
+    [ "$range" != through ] || [ -n "$cursor" ] || break
+    for meta in "$STATE"/*.meta; do
+      [ -f "$meta" ] || continue
+      id=$(basename "$meta" .meta)
+      valid_id "$id" || continue
+      case "$range" in
+        after) [ -z "$cursor" ] || [[ "$id" > "$cursor" ]] || continue ;;
+        through) [[ "$id" > "$cursor" ]] && continue ;;
+      esac
+      [ "$(fm_nm_now_ms)" -lt "$deadline" ] || return 0
+      [ "$(meta_field "$meta" kind)" != secondmate ] || continue
+      lock=$(fm_meta_lock_path "$meta") || continue
+      fm_lock_try_acquire "$lock" || continue
+      if [ ! -f "$meta" ] || [ -L "$meta" ] \
+        || [ "$(meta_field "$meta" kind)" = secondmate ]; then
+        fm_lock_release "$lock"
+        continue
+      fi
+      remaining=$((deadline - $(fm_nm_now_ms)))
+      if [ "$remaining" -le 0 ]; then
+        fm_lock_release "$lock"
+        return 0
+      fi
+      if ! write_scan_marker "$id" "$marker"; then
+        fm_lock_release "$lock"
+        return 1
+      fi
+      report_child_ledger_locked "$id" "$meta" || true
       fm_lock_release "$lock"
-      continue
-    fi
-    report_child_ledger_locked "$id" "$meta" || true
-    fm_lock_release "$lock"
+    done
   done
 }
 
@@ -626,8 +670,8 @@ task_holds_live_work() { # <id> <meta> <timeout> <last-status-line>; 0 when the 
   esac
 }
 
-reconcile_direct_child_locked() { # <id> <meta> <secondmate-id-or-empty> <timeout>
-  local id=$1 meta=$2 self=${3:-} timeout=$4 status turn last age state_line state pr incarnation fingerprint outcome_key payload kind state_rc=0 started left
+reconcile_direct_child_locked() { # <id> <meta> <secondmate-id-or-empty> <deadline> <first>
+  local id=$1 meta=$2 self=${3:-} deadline=$4 first=$5 status turn last age state_line state pr incarnation fingerprint outcome_key payload kind state_rc=0 started left watchdog_deadline
   [ -f "$meta" ] && [ ! -L "$meta" ] || return 0
   kind=$(meta_field "$meta" kind)
   [ "$kind" = secondmate ] && return 0
@@ -642,10 +686,24 @@ reconcile_direct_child_locked() { # <id> <meta> <secondmate-id-or-empty> <timeou
   fi
   age=$(last_activity_age "$meta" "$status" "$turn")
   [ "$age" -ge "$FM_INACTIVE_RECONCILE_SECS" ] || return 0
-  started=$(date +%s)
-  state_line=$(fm_run_timed "$timeout" env FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_CREW_STATE_NO_FORGE=1 \
+  started=$(fm_nm_now_ms) || return 3
+  if [ "$first" -eq 1 ] && [ "$deadline" -lt "$((started + 1000))" ]; then
+    deadline=$((started + 1000))
+  fi
+  local FM_READ_DEADLINE=$deadline
+  # The visit budget includes the scan's guaranteed first-visit floor.
+  fm_nm_read_timeout 30 >/dev/null || return 3
+  # A deadline-aware reader must finish reaping before the outer guard fires.
+  # Borrow only half of the scan's existing cleanup reserve; its read deadline
+  # and the whole-scan backstop remain unchanged.
+  watchdog_deadline=$((deadline + SCAN_CLEANUP_RESERVE_MS / 2))
+  left=$(FM_READ_DEADLINE=$watchdog_deadline fm_nm_read_timeout \
+    "$((FM_INACTIVE_RECONCILE_BUDGET_SECS + SCAN_CLEANUP_RESERVE_MS / 1000))") || return 3
+  state_line=$(fm_run_timed "$left" env FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_CREW_STATE_NO_FORGE=1 \
+    FM_READ_DEADLINE="$deadline" \
     "$CREW_STATE_BIN" "$id" 2>/dev/null) || state_rc=$?
   [ "$state_rc" -ne 124 ] || return 3
+  fm_nm_read_timeout 1 >/dev/null || return 3
   last=$(last_status_line "$status")
   if [ -n "$self" ]; then
     child_terminal_ledger_line "$status" >/dev/null
@@ -656,10 +714,10 @@ reconcile_direct_child_locked() { # <id> <meta> <secondmate-id-or-empty> <timeou
     'state: failed '*) state='failed' ;;
     *) return 0 ;;
   esac
-  left=$((timeout - ($(date +%s) - started)))
-  [ "$left" -ge 1 ] || left=1
+  left=$(fm_nm_read_timeout 30) || return 3
   task_holds_live_work "$id" "$meta" "$left" "$last" && return 0
   [ "$?" -ne 3 ] || return 3
+  fm_nm_read_timeout 1 >/dev/null || return 3
   terminal_outcome_corroborated "$state" "$last" "$state_line" || return 0
   pr=$(terminal_outcome_pr "$state_line" "$kind")
   incarnation=$(meta_incarnation "$meta")
@@ -690,22 +748,17 @@ reconcile_direct_child_locked() { # <id> <meta> <secondmate-id-or-empty> <timeou
   queue_presentation "$RECORD_PENDING" "$fingerprint" "$payload" || true
 }
 
-reconcile_direct_child() { # <id> <meta> <secondmate-id-or-empty> <timeout>
-  local id=$1 meta=$2 self=${3:-} timeout=$4 lock rc=0
+reconcile_direct_child() { # <id> <meta> <secondmate-id-or-empty> <deadline> <first>
+  local id=$1 meta=$2 self=${3:-} deadline=$4 first=$5 lock rc=0
   lock=$(fm_meta_lock_path "$meta") || return 1
   fm_lock_acquire_wait "$lock" || return 1
-  reconcile_direct_child_locked "$id" "$meta" "$self" "$timeout" || rc=$?
+  reconcile_direct_child_locked "$id" "$meta" "$self" "$deadline" "$first" || rc=$?
   fm_lock_release "$lock"
   return "$rc"
 }
 
-# SCAN_FIRST_VISIT_PENDING is armed by scan() before its passes. The deadline
-# below is whole-second arithmetic, so a small budget can quantize to zero
-# between the deadline computation and these checks; without the guaranteed
-# first visit, such a scan would return 3 having examined no child at all while
-# write_scan_marker had already advanced the cursor past the skipped child.
 scan_pass() { # <cursor> <after|through> <deadline> <secondmate-id-or-empty>
-  local cursor=$1 range=$2 deadline=$3 self=${4:-} meta id remaining rc first
+  local cursor=$1 range=$2 deadline=$3 self=${4:-} meta id rc first
   for meta in "$STATE"/*.meta; do
     [ -f "$meta" ] || continue
     id=$(basename "$meta" .meta)
@@ -720,15 +773,10 @@ scan_pass() { # <cursor> <after|through> <deadline> <secondmate-id-or-empty>
       SCAN_FIRST_VISIT_PENDING=0
     fi
     if [ "$first" -eq 0 ]; then
-      [ "$(date +%s)" -lt "$deadline" ] || return 3
+      [ "$(fm_nm_now_ms)" -lt "$deadline" ] || return 3
     fi
     write_scan_marker "$id" || return 1
-    remaining=$((deadline - $(date +%s)))
-    if [ "$first" -eq 1 ] && [ "$remaining" -lt 1 ]; then
-      remaining=1
-    fi
-    [ "$remaining" -gt 0 ] || return 3
-    reconcile_direct_child "$id" "$meta" "$self" "$remaining" || {
+    reconcile_direct_child "$id" "$meta" "$self" "$deadline" "$first" || {
       rc=$?
       [ "$rc" -eq 3 ] && return 3
       return "$rc"
@@ -737,17 +785,26 @@ scan_pass() { # <cursor> <after|through> <deadline> <secondmate-id-or-empty>
 }
 
 scan() {
-  local startup=${1:-0} self='' cursor deadline rc=0 marker_rc=0
+  local startup=${1:-0} self='' cursor deadline ledger_deadline due=1 rc=0 marker_rc=0
+  local FM_READ_DEADLINE
   mkdir -p "$STATE" "$OUTCOME_DIR" || return 1
   [ ! -L "$OUTCOME_DIR" ] || return 1
+  deadline=$(( $(fm_nm_now_ms) + FM_INACTIVE_RECONCILE_BUDGET_SECS * 1000 ))
+  export FM_READ_DEADLINE=$deadline
+  ledger_deadline=$deadline
+  if [ "$startup" != 1 ] && [ "$(scan_marker_age)" -lt "$FM_INACTIVE_RECONCILE_SECS" ]; then
+    due=0
+  else
+    ledger_deadline=$((deadline - 1000))
+  fi
   if self=$(home_secondmate_id); then
     # The ledger-first delivery is per poll, not per cadence.
-    ledger_pass
+    ledger_pass "$ledger_deadline"
   else
     marker_rc=$?
     self=''
   fi
-  if [ "$startup" != 1 ] && [ "$(scan_marker_age)" -lt "$FM_INACTIVE_RECONCILE_SECS" ]; then
+  if [ "$due" -eq 0 ]; then
     return 0
   fi
   cursor=$(scan_marker_cursor)
@@ -758,7 +815,6 @@ scan() {
       "inactive terminal outcomes remain unreconciled: invalid .fm-secondmate-home marker" || true
     return 0
   fi
-  deadline=$(( $(date +%s) + FM_INACTIVE_RECONCILE_BUDGET_SECS ))
   SCAN_FIRST_VISIT_PENDING=1
   scan_pass "$cursor" after "$deadline" "$self" || rc=$?
   if [ "$rc" -eq 0 ] && [ -n "$cursor" ]; then
@@ -801,11 +857,11 @@ case "$mode" in
       --startup) startup=1 ;;
       *) printf 'usage: fm-inactive-reconcile.sh scan [--startup]\n' >&2; exit 2 ;;
     esac
-    # The scan's own whole-second deadline enforces the budget; this outer
+    # The scan's own millisecond deadline enforces the budget; this outer
     # process-group kill is only the backstop for a scan wedged outside every
     # bounded section (an unbounded lock wait), so it fires one second after
     # the deadline instead of racing the clean bounded exit it exists to guard.
-    if fm_run_timed $((FM_INACTIVE_RECONCILE_BUDGET_SECS + 1)) "$0" _scan-locked "$startup"; then
+    if fm_run_timed $((FM_INACTIVE_RECONCILE_BUDGET_SECS + SCAN_CLEANUP_RESERVE_MS / 1000)) "$0" _scan-locked "$startup"; then
       :
     elif [ "$?" -ne 124 ]; then
       exit 1

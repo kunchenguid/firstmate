@@ -2,24 +2,84 @@
 # Static watcher program for a validated pull request, merge request, or Gerrit
 # change poll sidecar.
 # It emits exactly one merged line for a merged change and stays silent
-# otherwise, including on every error, so a failed lookup can never be read as
-# a merge. The provider-tagged identity is data in the sidecar and is never
+# otherwise, except for a destination recovery notice when task metadata is
+# supplied, until its caller records delivery. A failed lookup is never a merge.
+# The provider-tagged identity is data in the sidecar and is never
 # interpolated into this source: these bytes are identical for every task.
 # Each provider is read through its own standard CLI, gh for GitHub, glab for
 # GitLab, gerrit-axi for Gerrit, and tea for Forgejo, so an upstream checkout
-# needs no extra tooling to follow GitHub or GitLab. The Gerrit and Forgejo
-# branches additionally need jq, which bin/fm-pr-check.sh refuses to arm those
-# watches without.
-set -u
+# needs no extra tooling to follow GitHub. The other forge branches need jq
+# to read state and destination from the same structured response.
+# Usage: fm-pr-poll.sh --validated <provider> <url> <host> <path> <number> <expected-base> [<task-meta>]
+#        fm-pr-poll.sh --base-unavailable <task-meta>
+# Internal watcher cleanup: --retire-secondmate <provider> <url> <host> <path> <number> <task-meta>.
+# This requires kind=secondmate and reads merge state only. Its result may retire
+# a leftover poll, never publish a task outcome or readiness claim.
+# A registered <task>.check.sh takes no arguments and reads its sibling .pr-poll
+# identity and task-owned expected_base from .meta (legacy base_branch is accepted).
+# This standalone copy sources nothing, so its metadata parser mirrors
+# fm_pr_expected_base in bin/fm-pr-lib.sh and refuses unavailable destination proof.
+set -uo pipefail
 LC_ALL=C
 export LC_ALL
 
-if [ "$#" -eq 6 ] && [ "$1" = --validated ]; then
+base_refusal_notice() {
+  local meta=${1:-} suffix=$2 reason=$3 id marker state
+  case "$meta" in *.meta) ;; *) return 1 ;; esac
+  id=${meta##*/}
+  id=${id%.meta}
+  case "$id" in ''|.*|*[!A-Za-z0-9._-]*) return 1 ;; esac
+  state=${meta%/*}
+  [ "$state" != "$meta" ] || state=.
+  [ -d "$state" ] && [ ! -L "$state" ] || return 1
+  marker=${meta%.meta}.$suffix
+  [ ! -e "$marker" ] && [ ! -L "$marker" ] || return 0
+  printf 'task %s merge/readiness refused: %s. Follow bin/fm-pr-check.sh recovery steps.\n' "$id" "$reason"
+}
+
+base_unavailable_notice() {
+  base_refusal_notice "${1:-}" "${2:-pr-base-notified}" 'expected PR base unavailable'
+}
+
+matching_destination() { # <base-and-state TSV record>
+  local record=$1 actual
+  [ "$retirement_only" -eq 0 ] || return 0
+  case "$record" in *$'\t'*) ;; *) return 1 ;; esac
+  actual=${record%%$'\t'*}
+  case "$actual" in ''|-*|*$'\n'*) return 1 ;; esac
+  git check-ref-format "refs/heads/$actual" >/dev/null 2>&1 || return 1
+  [ "$actual" = "$expected_base" ] && return 0
+  [ -z "$meta" ] || base_refusal_notice "$meta" pr-base-notified \
+    "expected base $expected_base, actual base $actual"
+  return 1
+}
+
+meta=
+retirement_only=0
+if [ "$#" -eq 2 ] && [ "$1" = --base-unavailable ]; then
+  base_unavailable_notice "$2" pr-base-parent-notified
+  exit "$?"
+elif { [ "$#" -eq 7 ] || [ "$#" -eq 8 ]; } && [ "$1" = --validated ]; then
   provider=$2
   url=$3
   host=$4
   path=$5
   number=$6
+  expected_base=$7
+  meta=${8:-}
+elif [ "$#" -eq 7 ] && [ "$1" = --retire-secondmate ]; then
+  provider=$2
+  url=$3
+  host=$4
+  path=$5
+  number=$6
+  meta=$7
+  expected_base=
+  [ -f "$meta" ] && [ ! -L "$meta" ] && [ -r "$meta" ] || exit 0
+  kind=$(awk -F= '/^kind=/ { n++; value=substr($0,6) }
+    END { if (n == 1) print value; else exit 1 }' "$meta") || exit 0
+  [ "$kind" = secondmate ] || exit 0
+  retirement_only=1
 elif [ "$#" -eq 0 ]; then
   case "$0" in
     *.check.sh) data=${0%.check.sh}.pr-poll ;;
@@ -37,7 +97,27 @@ elif [ "$#" -eq 0 ]; then
     exit 0
   fi
   exec 3<&-
+  meta=${0%.check.sh}.meta
+  expected_base=
+  if [ -f "$meta" ] && [ ! -L "$meta" ] && [ -r "$meta" ]; then
+    expected_base=$(awk -F= '
+    /^expected_base=/ { e++; expected=substr($0,15) }
+    /^base_branch=/ { b++; named=substr($0,13) }
+    END {
+      if (e > 1 || b > 1 || (e && expected == "") || (b && named == "")) exit 1
+      if (e && b && expected != named) exit 1
+      if (e) print expected
+      else if (b) print named
+      else exit 1
+    }' "$meta") || expected_base=
+  fi
 else
+  exit 0
+fi
+
+case "$expected_base" in ''|-*|*$'\n'*) expected_base= ;; esac
+if [ "$retirement_only" -eq 0 ] && { [ -z "$expected_base" ] || ! git check-ref-format "refs/heads/$expected_base" >/dev/null 2>&1; }; then
+  [ -z "$meta" ] || base_unavailable_notice "$meta"
   exit 0
 fi
 
@@ -73,8 +153,11 @@ case "$provider" in
       .|..|*[!A-Za-z0-9._-]*) exit 0 ;;
     esac
     [ "$url" = "https://$host/$owner/$repo/pull/$number" ] || exit 0
-    state=$(GH_HOST=$host gh pr view "$url" --json state -q .state 2>/dev/null) || exit 0
-    [ "$state" = MERGED ] && printf '%s\n' merged
+    record=$(GH_HOST=$host gh pr view "$url" --json state,baseRefName \
+      -q '[.baseRefName, .state] | @tsv' 2>/dev/null) || exit 0
+    matching_destination "$record" || exit 0
+    [ "${record#*$'\t'}" = MERGED ] || exit 0
+    printf '%s\n' merged
     ;;
   gitlab)
     [ "${#host}" -ge 1 ] && [ "${#host}" -le 253 ] || exit 0
@@ -108,13 +191,16 @@ case "$provider" in
     # comes from the validated record rather than glab's configured default.
     # It cannot take a merge request URL the way gh does: that form shells out
     # to git for the current repository, and the watcher runs in no repository.
-    # The state is read from glab's own field output rather than its JSON,
-    # because plain glab has no field selector and firstmate does not require a
-    # JSON processor; only an exact "merged" wakes, so a changed format or an
-    # unreadable merge request stays silent instead of reporting a merge.
-    raw=$(glab mr view "$number" -R "https://$host/$path" 2>/dev/null) || exit 0
-    state=$(printf '%s\n' "$raw" | sed -n 's/^state:[[:space:]]*//p' | head -1) || exit 0
-    [ "$state" = merged ] && printf '%s\n' merged
+    # Read state and destination from one JSON record; a retarget cannot join
+    # a previously matching destination to a later merged state.
+    record=$(glab mr view "$number" -R "https://$host/$path" -F json 2>/dev/null \
+      | jq -er --argjson retirement "$retirement_only" '
+        select((.state | type) == "string")
+        | if $retirement == 1 then ["", .state]
+          else select((.target_branch | type) == "string") | [.target_branch, .state]
+          end | @tsv' 2>/dev/null) || exit 0
+    matching_destination "$record" || exit 0
+    [ "${record#*$'\t'}" = merged ] && printf '%s\n' merged
     ;;
   gerrit)
     [ "${#host}" -ge 1 ] && [ "${#host}" -le 253 ] || exit 0
@@ -166,18 +252,20 @@ case "$provider" in
     # a server, and this poll has no channel to report that it never matched.
     json=$(gerrit-axi show "$number" --host "$host" --json 2>/dev/null) || exit 0
     [ -n "$json" ] || exit 0
-    status=$(printf '%s' "$json" | jq -r --argjson change "$number" '
+    record=$(printf '%s' "$json" | jq -r --argjson change "$number" --argjson retirement "$retirement_only" '
       if type == "object" and .ok == true and (.changes | type) == "array" then
         [.changes[] | select((.change | type) == "number" and .change == $change)] as $match
         | if ($match | length) == 1
-             and ($match[0].status | type) == "string"
-          then $match[0].status
+              and ($match[0].status | type) == "string"
+              and ($retirement == 1 or ($match[0].branch | type) == "string")
+          then [(if $retirement == 1 then "" else $match[0].branch end), $match[0].status] | @tsv
           else error("no exact change record")
           end
       else
         error("invalid gerrit record")
       end' 2>/dev/null) || exit 0
-    [ "$status" = MERGED ] && printf '%s\n' merged
+    matching_destination "$record" || exit 0
+    [ "${record#*$'\t'}" = MERGED ] && printf '%s\n' merged
     ;;
   forgejo)
     [ "${#host}" -ge 1 ] && [ "${#host}" -le 253 ] || exit 0
@@ -231,13 +319,15 @@ case "$provider" in
     # the credential inside tea. "tea api" exits 0 on an HTTP error with the
     # error body as output, so only a boolean merged field of true wakes this
     # poll and every other reading stays silent.
-    merged=$(tea api --login "$login" --repo "$owner/$repo" \
-      "/repos/{owner}/{repo}/pulls/$number" 2>/dev/null | jq -r '
+    record=$(tea api --login "$login" --repo "$owner/$repo" \
+      "/repos/{owner}/{repo}/pulls/$number" 2>/dev/null | jq -r --argjson retirement "$retirement_only" '
         if type == "object" and (.merged | type) == "boolean"
-        then .merged | tostring
+            and ($retirement == 1 or (.base.ref | type) == "string")
+        then [(if $retirement == 1 then "" else .base.ref end), (.merged | tostring)] | @tsv
         else error("invalid pull request record")
         end' 2>/dev/null) || exit 0
-    [ "$merged" = true ] && printf '%s\n' merged
+    matching_destination "$record" || exit 0
+    [ "${record#*$'\t'}" = true ] && printf '%s\n' merged
     ;;
   *) exit 0 ;;
 esac

@@ -824,6 +824,7 @@ With the flag present, the watcher's check sweep runs `bin/fm-pr-check.sh scan` 
 The scan reads each ship task's newest `done:` line that names a `PR <url>`, and records that PR through the ordinary registration path when the task has no `pr=`, or has that same `pr=` but no published merge poll.
 It skips persistent secondmate and scout records, a `pr=` that names another PR, and a PR whose merge was already reported or whose poll was retired.
 A refused registration, such as a draft, prints one `check: pr-register:` wake for each task and PR, and later sweeps retry without a new wake, so a PR marked ready later is recorded.
+The [task-owned destination contract and legacy recovery](architecture.md#delivery-modes-are-explicit-per-task) apply to both scanned and manual registration.
 With the file absent, the check sweep does not run the scan, and `pr=` and the merge poll come only from a manual `bin/fm-pr-check.sh <id> <PR url>` run.
 The flag takes effect at the next check sweep, and is a home-local preference that is not inherited by secondmate homes.
 
@@ -838,7 +839,7 @@ An existing ledger is left untouched while recording is disabled.
 The optional local, gitignored `config/nm-home-resolver` file opts this home into finding each task's no-mistakes home through a site-provided resolver, for sites that run one no-mistakes daemon per isolated workspace, each against its own `NM_HOME`.
 The home cannot be derived from a task copy's `no-mistakes` remote, because every workspace of a project shares one gate URL.
 The file's first line is the absolute path of an executable the site provides; Firstmate calls it with the task copy's path as its only argument and never interprets the layout itself.
-When the resolver exits successfully within 5 seconds and prints exactly one line naming an existing directory by absolute path, that directory is exported as `NM_HOME` for that one call.
+When the resolver exits successfully within its caller's time bound and prints exactly one line naming an existing directory by absolute path, that directory is exported as `NM_HOME` for that one call.
 
 Only host-side reads use it: current-state reads, pipeline-spend recording, the custody check, and teardown's parked-run lookup and `axi abort --run`, which read `axi status`, the `axi` overview, `axi logs`, `runs`, `daemon status`, and the state database.
 It never starts a daemon and never changes how runs are launched or driven, account routing, or no-mistakes' own `config.yaml`.
@@ -2276,7 +2277,7 @@ Firstmate passes the binding to `bin/fm-brief.sh --forge` at intake the same way
 The URL-driven provider dispatch in [`bin/fm-pr-lib.sh`](../bin/fm-pr-lib.sh) recognizes a GitHub, GitLab, Gerrit, or Forgejo PR/MR/change URL once one exists, regardless of this token.
 
 A Forgejo (or Gitea) project needs `tea` on `PATH` plus a `tea login` registered for that project's host (`tea login add`); the login is matched to a PR's host automatically, never configured per project.
-A GitLab project needs no forge token, only `glab` on `PATH`, authenticated via `glab auth login`.
+A GitLab project needs no forge token, but its merge-request watch and merge paths require `glab` and `jq` on `PATH`, with `glab` authenticated via `glab auth login`.
 [`docs/gitlab-merge-watch.md`](gitlab-merge-watch.md) and [`docs/forgejo-tea-integration.md`](forgejo-tea-integration.md) hold the empirically verified CLI behavior each provider's watch and merge path depends on.
 
 A project whose reviews are created by a review tool that uploads its own snapshot of the worker's commits is registered `[direct-PR forge=external]`; it is never detected, ships `direct-PR` only, carries no yolo, and needs the [external review tool](#external-review-tool-configexternal-reviewmd-configexternal-review-url-configexternal-review-backup) configuration below.

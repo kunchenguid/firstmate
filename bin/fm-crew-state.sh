@@ -10,17 +10,17 @@
 # current state from a tail of the log: it reads the authoritative source (a
 # no-mistakes run-step attributed under bin/fm-nm-run-lib.sh's contract, else
 # the pane busy-signature) and reconciles the possibly-stale log against it.
-# A ship `done:` is current-state done only when bin/fm-dod-lib.sh accepts the
-# named head as reachable outside the worker's disposable copy; otherwise blocked.
+# A status-log ship `done:` is current-state done only when bin/fm-dod-lib.sh's
+# fm_dod_accept_ship_done accepts its readiness proof; otherwise blocked.
 #
 # The determinism lives entirely here - run-step / pane / log reads, fixed
 # mapping logic, and terminal passed-run PR detail from bounded evidence only,
 # with no heuristics and no LLM.
 # For a terminal passed no-mistakes run, a matching merge-poll retirement
 # receipt is local merged evidence; otherwise a 5s-bounded forge read is tried.
-# FM_CREW_STATE_NO_FORGE=1 keeps the receipt read but skips the forge fallback.
-# An absent or unreadable PR identity yields an honest unknown, never an
-# optimistic merged claim.
+# FM_CREW_STATE_NO_FORGE=1 keeps the receipt read but skips that forge fallback;
+# it does not bypass ship readiness gates' live reads.
+# An absent or unreadable PR identity never proves a merge.
 # Output is one stable, parseable, token-tight line firstmate can read every
 # heartbeat:
 #
@@ -102,6 +102,8 @@
 #      and ambiguity reporting. The selected run's id-addressed status must
 #      agree on id, branch, and live/terminal class before attribution;
 #      disagreement reports unknown with available candidate ids.
+#      These run-step mappings are provisional until emit_run applies
+#      bin/fm-dod-lib.sh's fm_dod_claim_destination to every done reading.
 #      The run-step is AUTHORITATIVE: running/fixing -> working, ci -> working
 #      (the id-addressed detail read carries step words the overview does not),
 #      awaiting_approval/fix_review -> parked (with gate findings), terminal
@@ -276,8 +278,12 @@ FM_CREW_STATE_RUNS_LIMIT=${FM_CREW_STATE_RUNS_LIMIT:-200}
 case "$FM_CREW_STATE_RUNS_LIMIT" in ''|*[!0-9]*) FM_CREW_STATE_RUNS_LIMIT=200 ;; esac
 SEP=' · '
 
-# Emit the one canonical line and exit 0. Detail is optional.
+# Emit the one canonical line. Detail is optional.
 emit() {  # <state> <source> [detail]
+  if ! fm_nm_read_timeout 1 >/dev/null; then
+    printf 'state: unknown%ssource: none%sscan read deadline expired\n' "$SEP" "$SEP"
+    exit 124
+  fi
   local line="state: $1${SEP}source: $2"
   [ -n "${3:-}" ] && line="$line${SEP}$3"
   printf '%s\n' "$line"
@@ -285,9 +291,18 @@ emit() {  # <state> <source> [detail]
 }
 
 emit_run() {  # <state> <detail> [pr]
-  local detail=$2
+  local detail=$2 reason pr=${3:-}
+  # All run classifications are provisional until this shared publication
+  # boundary: passed outcomes, green monitors, recovered monitors and merged
+  # detail must prove the destination of this reading's own PR.
+  if [ "$1" = 'done' ]; then
+    pr=$(run_pr_identity "$pr") || pr=
+    if ! reason=$(fm_dod_claim_destination "$KIND" "$(meta_value mode)" "$META" "$pr"); then
+      emit blocked run-step "$reason"
+    fi
+  fi
   case "$1" in
-    done|failed) [ -z "${3:-}" ] || detail="$detail${SEP}pr=$3" ;;
+    done|failed) [ -z "$pr" ] || detail="$detail${SEP}pr=$pr" ;;
   esac
   emit "$1" run-step "$detail"
 }
@@ -514,25 +529,27 @@ change_read_record_bounded() {  # <host> <number>
   FM_PR_RECORD_MERGED=$merged
 }
 
-passed_pr_detail() {
-  local provider url host path number owner repo raw_pr state_lc
-  raw_pr=$(strip_quotes "$(nm_field pr)")
-  if fm_pr_url_parse "$raw_pr"; then
-    provider=$FM_PR_PROVIDER
-    url=$FM_PR_URL
-    host=$FM_PR_HOST
-    path=$FM_PR_PATH
-    number=$FM_PR_NUMBER
+run_pr_identity() { # <run-pr>; fall back only to this task's recorded identity
+  if fm_pr_url_parse "${1:-}"; then
+    printf '%s\n' "$FM_PR_URL"
   elif fm_pr_metadata_identity_parse "$META"; then
-    provider=$FM_PR_META_PROVIDER
-    url=$FM_PR_META_URL
-    host=$FM_PR_META_HOST
-    path=$FM_PR_META_PATH
-    number=$FM_PR_META_NUMBER
+    printf '%s\n' "$FM_PR_META_URL"
   else
+    return 1
+  fi
+}
+
+passed_pr_detail() {
+  local provider url host path number owner repo state_lc
+  if ! url=$(run_pr_identity "$(strip_quotes "$(nm_field pr)")"); then
     printf 'run passed: PR state unknown (no PR identity)'
     return
   fi
+  fm_pr_url_parse "$url" || return
+  provider=$FM_PR_PROVIDER
+  host=$FM_PR_HOST
+  path=$FM_PR_PATH
+  number=$FM_PR_NUMBER
   if fm_pr_poll_retirement_receipt_valid "$STATE" "$ID" \
     && [ "$FM_PR_RETIRE_PROVIDER" = "$provider" ] \
     && [ "$FM_PR_RETIRE_URL" = "$url" ] \

@@ -18,6 +18,7 @@ TEARDOWN="$ROOT/bin/fm-teardown.sh"
 REGISTER="$ROOT/bin/fm-check-register.sh"
 TMP_ROOT=$(fm_test_tmproot fm-pr-check-security)
 fm_git_identity fmtest fmtest@example.invalid
+FM_TEST_META_EXPECTED_BASE=main
 BASE_PATH=${FM_TEST_BASE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}
 REAL_CP=$(command -v cp)
 REAL_MV=$(command -v mv)
@@ -128,6 +129,7 @@ make_case() {
   fakebin="$dir/fakebin"
   fake_root="$dir/root"
   mkdir -p "$dir/home/state" "$dir/home/data" "$dir/home/config" "$dir/wt" "$fakebin" "$fake_root/bin"
+  ln -s "$REAL_JQ" "$fakebin/jq"
   git -C "$dir/wt" init -q
   git -C "$dir/wt" commit -q --allow-empty -m init
   git -C "$dir/wt" update-ref refs/remotes/origin/main "$(git -C "$dir/wt" rev-parse HEAD)"
@@ -151,6 +153,18 @@ case "${1:-} ${2:-}" in
     ;;
   "pr view")
     case " $* " in
+      *" --json state,baseRefName "*)
+        [ "${FM_TEST_BASE_FAIL:-0}" = 0 ] && [ "${FM_TEST_GH_FAIL:-0}" = 0 ] || exit 1
+        [ -z "${FM_TEST_GH_STATE_STARTED:-}" ] || : > "$FM_TEST_GH_STATE_STARTED"
+        [ "${FM_TEST_GH_SLEEP:-0}" = 0 ] || sleep "$FM_TEST_GH_SLEEP"
+        printf '%s\t%s\n' "${FM_TEST_BASE-main}" "${FM_TEST_GH_STATE:-OPEN}"
+        exit 0
+        ;;
+      *" --json baseRefName "*)
+        [ "${FM_TEST_BASE_FAIL:-0}" = 0 ] || exit 1
+        printf '%s\n' "${FM_TEST_BASE-main}"
+        exit 0
+        ;;
       *statusCheckRollup*)
         printf '%s\n' "{\"state\":\"OPEN\",\"isDraft\":false,\"mergeable\":\"MERGEABLE\",\"mergeStateStatus\":\"CLEAN\",\"headRefOid\":\"${FM_TEST_GH_HEAD:-0123456789abcdef0123456789abcdef01234567}\",\"baseRefName\":\"main\",\"statusCheckRollup\":[{\"__typename\":\"CheckRun\",\"name\":\"ci\",\"status\":\"COMPLETED\",\"conclusion\":\"SUCCESS\"}]}"
         exit 0
@@ -222,10 +236,20 @@ SH
 printf '%s\n' "$*" >> "$FM_TEST_GLAB_LOG"
 [ "${FM_TEST_GLAB_FAIL:-0}" = 0 ] || exit 1
 [ "${FM_TEST_GLAB_SLEEP:-0}" = 0 ] || sleep "$FM_TEST_GLAB_SLEEP"
+case " $* " in
+  *" -F json "*) printf '{"target_branch":"%s","state":"%s"}\n' "${FM_TEST_BASE-main}" "${FM_TEST_GLAB_STATE:-opened}"; exit 0 ;;
+esac
 printf 'title:\tfixture merge request\nstate:\t%s\nauthor:\tsomeone\n' "${FM_TEST_GLAB_STATE:-opened}"
 SH
   # gerrit-axi, reproducing the real CLI's contract: one JSON record on stdout
   # and exit 0 on success, and a non-zero exit with no stdout on any failure.
+  # Immutable show -> changeRow -> JSON contract, including branch:
+  # https://github.com/slnkjthien/gerrit-axi/blob/64544117b66ec4445f3c0b3cef36f752228952a8/src/axi/commands.js#L512
+  # https://github.com/slnkjthien/gerrit-axi/blob/64544117b66ec4445f3c0b3cef36f752228952a8/src/axi/records.js#L87
+  # https://github.com/slnkjthien/gerrit-axi/blob/64544117b66ec4445f3c0b3cef36f752228952a8/src/axi/main.js#L162
+  # https://github.com/slnkjthien/gerrit-axi/blob/64544117b66ec4445f3c0b3cef36f752228952a8/src/axi/output.js#L49
+  # Missing branch normalizes to an empty string:
+  # https://github.com/slnkjthien/gerrit-axi/blob/64544117b66ec4445f3c0b3cef36f752228952a8/src/core/changes.js#L337
   # Its defaults are the real server's readings for an OPEN change, and the
   # submit fields are settable independently of the status so a case can build
   # the reading a merged change and a merely submittable change share.
@@ -238,9 +262,10 @@ if [ -n "${FM_TEST_GERRIT_RAW:-}" ]; then
   exit 0
 fi
 change=${FM_TEST_GERRIT_CHANGE:-${2:-0}}
-printf '{"ok":true,"op":"show","count":1,"missing":[],"changes":[{"change":%s,"subject":%s,"project":"p","status":"%s","wip":false,"submit":"%s","submittable":%s,"blocked_on":"%s","patch_set":1,"revision":"%s","url":"%s"}]}\n' \
+printf '{"ok":true,"op":"show","count":1,"missing":[],"changes":[{"change":%s,"subject":%s,"project":"p","branch":"%s","status":"%s","wip":false,"submit":"%s","submittable":%s,"blocked_on":"%s","patch_set":1,"revision":"%s","url":"%s"}]}\n' \
   "$change" \
   "${FM_TEST_GERRIT_SUBJECT:-\"fixture change\"}" \
+  "${FM_TEST_BASE-main}" \
   "${FM_TEST_GERRIT_STATUS:-NEW}" \
   "${FM_TEST_GERRIT_SUBMIT:-NOT_READY}" \
   "${FM_TEST_GERRIT_SUBMITTABLE:-false}" \
@@ -279,14 +304,15 @@ SH
 }
 
 write_task_meta() {
-  local dir=$1 id=${2:-task-a}
+  local dir=$1 id=${2:-task-a} base=${3:-main}
   fm_write_meta "$dir/home/state/$id.meta" \
     "window=firstmate:fm-$id" \
     "endpoint_task_id=$id" \
     "worktree=$dir/wt" \
     "project=$dir/project" \
     "kind=ship" \
-    "mode=no-mistakes"
+    "mode=no-mistakes" \
+    "expected_base=$base"
 }
 
 # Extra "field=value" arguments are written before pr=, because
@@ -298,6 +324,7 @@ write_poll_meta() {
   fm_write_meta "$state/$id.meta" \
     "window=fm-$id" \
     "worktree=$case_dir/wt" \
+    "expected_base=main" \
     "$@" \
     "pr=$url"
 }
@@ -323,6 +350,18 @@ run_merge_entry() {
     FM_TEST_GERRIT_AXI_LOG="$dir/gerrit-axi.log" \
     PATH="$dir/fakebin:$BASE_PATH" \
     "$PR_MERGE" "$@"
+}
+
+test_expected_destination_refuses_registration() {
+  local dir out rc
+  dir=$(make_case expected-destination)
+  write_task_meta "$dir" task-a release/integration
+  out=$(run_check_entry "$dir" task-a https://github.com/o/r/pull/1 2>&1); rc=$?
+  [ "$rc" -ne 0 ] || fail "a PR on main armed for a task expecting release/integration"
+  assert_contains "$out" 'release/integration' 'refusal must name the expected base'
+  assert_contains "$out" 'main' 'refusal must name the actual base'
+  assert_absent "$dir/home/state/task-a.pr-poll" 'wrong-base PR published a poll'
+  pass "registration refuses a PR on the wrong destination"
 }
 
 # shellcheck disable=SC2016 # Literal rejected URL bytes are parser test data.
@@ -749,7 +788,7 @@ test_direct_pr_unpushed_commit_refuses_registration() {
   dir=$(make_case direct-pr-unpushed)
   fm_write_meta "$dir/home/state/task-a.meta" \
     "window=firstmate:fm-task-a" "endpoint_task_id=task-a" "worktree=$dir/wt" \
-    "project=$dir/project" "kind=ship" "mode=direct-PR"
+    "project=$dir/project" "kind=ship" "mode=direct-PR" "expected_base=main"
   pushed=$(git -C "$dir/wt" rev-parse HEAD)
   git -C "$dir/wt" commit -q --allow-empty -m 'fix only in the copy'
   later=$(git -C "$dir/wt" rev-parse HEAD)
@@ -1356,9 +1395,22 @@ run_poll() {
     bash "$dir/home/state/task-a.check.sh"
 }
 
+assert_destination_poll_refusal() { # <output> <actual-base> <provider>
+  local out=$1 actual=$2 provider=$3
+  if [ -n "$actual" ]; then
+    assert_contains "$out" 'task task-a merge/readiness refused' "$provider retarget lost recovery notice"
+    assert_contains "$out" "expected base main, actual base $actual" "$provider retarget lost destination names"
+    assert_contains "$out" 'bin/fm-pr-check.sh recovery steps' "$provider retarget lost recovery pointer"
+    [ "$(printf '%s\n' "$out" | wc -l | tr -d ' ')" = 1 ] || fail "$provider retarget emitted multiple lines"
+  else
+    [ -z "$out" ] || fail "$provider missing destination emitted a claim"
+  fi
+}
+
 test_static_poll_contract() {
   local dir state out rc
   dir=$(make_case poll-contract)
+  write_task_meta "$dir"
   make_poll_fixture "$dir"
 
   for state in OPEN CLOSED EMPTY MALFORMED; do
@@ -1372,6 +1424,14 @@ test_static_poll_contract() {
   done
   out=$(FM_TEST_GH_STATE=MERGED run_poll "$dir")
   [ "$out" = merged ] || fail "static poll did not emit exactly one merged line"
+  mv "$dir/home/state/task-a.meta" "$dir/home/state/task-a.meta.missing"
+  out=$(FM_TEST_GH_STATE=MERGED run_poll "$dir")
+  assert_contains "$out" 'task task-a merge/readiness refused' 'missing metadata did not produce a refusal'
+  assert_contains "$out" 'bin/fm-pr-check.sh recovery steps' 'missing metadata lost its recovery pointer'
+  assert_absent "$dir/home/state/task-a.pr-base-notified" 'static poll marked an unqueued notice delivered'
+  out=$(FM_TEST_GH_STATE=MERGED run_poll "$dir")
+  assert_contains "$out" 'task task-a merge/readiness refused' 'static poll suppressed its unqueued missing-metadata notice'
+  mv "$dir/home/state/task-a.meta.missing" "$dir/home/state/task-a.meta"
   out=$(FM_TEST_GH_FAIL=1 run_poll "$dir")
   [ -z "$out" ] || fail "static poll emitted after gh failure"
 
@@ -1407,7 +1467,7 @@ test_static_poll_contract() {
   set -e
   [ "$rc" -eq 0 ] || fail "watcher did not surface merged poll"
   [ "$(grep -c '^check: .*: merged$' "$dir/watch.out")" -eq 1 ] || fail "watcher did not convert merged output into exactly one wake"
-  pass "static poll is silent except for one merged line and remains watcher-bounded"
+  pass "static poll emits only exact merges or one missing-base notice and remains watcher-bounded"
 }
 
 test_atomic_interruption_leaves_no_partial_artifact() {
@@ -2027,6 +2087,13 @@ group/apps/console
   out=$(FM_TEST_GERRIT_STATUS=MERGED FM_TEST_GERRIT_SUBMIT=OK \
     FM_TEST_GERRIT_SUBMITTABLE=true FM_TEST_GERRIT_BLOCKED_ON='' run_poll "$dir")
   [ "$out" = merged ] || fail "Gerrit poll did not emit exactly one merged line"
+  for value in other ''; do
+    out=$(FM_TEST_BASE="$value" FM_TEST_GERRIT_STATUS=MERGED run_poll "$dir")
+    assert_destination_poll_refusal "$out" "$value" Gerrit
+    write_task_meta "$dir" task-destination
+    FM_TEST_BASE="$value" run_check_entry "$dir" task-destination "$url" >/dev/null 2>&1 \
+      && fail 'Gerrit wrong or missing destination armed'
+  done
 
   out=$(FM_TEST_GERRIT_FAIL=1 FM_TEST_GERRIT_STATUS=MERGED run_poll "$dir")
   [ -z "$out" ] || fail "Gerrit poll emitted after a gerrit-axi failure"
@@ -2050,10 +2117,10 @@ group/apps/console
   # it when that setting is unset, so a merge must still be reported when the
   # server returns the field null or does not return it at all. Comparing it
   # against the stored URL is what would leave such a watch silent forever.
-  out=$(FM_TEST_GERRIT_RAW='{"ok":true,"op":"show","changes":[{"change":4201,"status":"MERGED","url":null}]}' \
+  out=$(FM_TEST_GERRIT_RAW='{"ok":true,"op":"show","changes":[{"change":4201,"branch":"main","status":"MERGED","url":null}]}' \
     run_poll "$dir")
   [ "$out" = merged ] || fail "Gerrit poll stayed silent for a merged change with a null url"
-  out=$(FM_TEST_GERRIT_RAW='{"ok":true,"op":"show","changes":[{"change":4201,"status":"MERGED"}]}' \
+  out=$(FM_TEST_GERRIT_RAW='{"ok":true,"op":"show","changes":[{"change":4201,"branch":"main","status":"MERGED"}]}' \
     run_poll "$dir")
   [ "$out" = merged ] || fail "Gerrit poll stayed silent for a merged change with no url field"
   out=$(FM_TEST_GERRIT_STATUS=MERGED \
@@ -2178,8 +2245,8 @@ test_gerrit_arming_records_no_patch_set_revision() {
 # HEAD's tree - the squash is a new commit on the server's base, so the tree and
 # not the commit names what was published - and refuses otherwise, before
 # anything is recorded or armed. Once arming has recorded the change as pr=, a
-# later done naming it is accepted from that record without a read, so a
-# reviewer's rebase or new patch set on the server does not revoke it.
+# later done naming it retains that head/tree proof while rechecking the live
+# destination, so a reviewer's rebase or new patch set does not revoke it.
 test_gerrit_ready_gate_reads_the_published_tree() {
   local dir state base published other out rc
   dir=$(make_case gerrit-ready-gate)
@@ -2252,7 +2319,10 @@ test_gerrit_ready_gate_reads_the_published_tree() {
   rc=$?
   set -e
   [ "$rc" -eq 0 ] || fail "a server-side rebase after arming revoked the recorded change's done: $out"
-  [ ! -s "$dir/gerrit-axi.log" ] || fail "a done naming the recorded change read the server again"
+  assert_grep 'show 4201 --host gerrit.example --json' "$dir/gerrit-axi.log" \
+    'a done naming the recorded change did not recheck its destination'
+  [ "$(wc -l < "$dir/gerrit-axi.log")" -eq 1 ] \
+    || fail "a done naming the recorded change reread more than its destination"
   pass "Gerrit arming accepts a published HEAD only by the change's current patch set tree"
 }
 
@@ -2380,8 +2450,8 @@ test_gerrit_nm_ready_gate_requires_recovered_custody() {
   out=$(FM_TEST_GERRIT_REVISION=$squash FM_TEST_NM_PIPELINE_HEAD=$fixed \
     FM_TEST_GERRIT_AXI_LOG="$dir/gerrit-axi.log" PATH="$dir/fakebin:$BASE_PATH" \
     bash -c '. "$1/bin/fm-timeout-lib.sh"; . "$1/bin/fm-dod-lib.sh"
-      fm_dod_accept_ship_done ship no-mistakes "$2" "$3" "$4"' \
-    _ "$ROOT" "$dir/wt" "$dir/project" "$line" 2>&1)
+      fm_dod_accept_ship_done ship no-mistakes "$2" "$3" "$4" "$5" task-unrecovered "$6"' \
+    _ "$ROOT" "$dir/wt" "$dir/project" "$line" "$state" "$state/task-unrecovered.meta" 2>&1)
   rc=$?
   set -e
   [ "$rc" -eq 0 ] || fail "the done gate refused a recovered, published copy: $out"
@@ -2433,9 +2503,9 @@ fi
 [ "${1:-}" = api ] || exit 0
 [ -z "${FM_TEST_TEA_FAIL:-}" ] || exit 1
 case "${FM_TEST_TEA_PULL:-open}" in
-  merged) printf '{"state":"closed","merged":true,"head":{"sha":"abc"}}\n' ;;
+  merged) printf '{"state":"closed","merged":true,"base":{"ref":"%s"},"head":{"sha":"abc"}}\n' "${FM_TEST_BASE-main}" ;;
   error) printf '{"message":"The target couldn'"'"'t be found.","url":"x"}\n' ;;
-  *) printf '{"state":"open","merged":false,"head":{"sha":"abc"}}\n' ;;
+  *) printf '{"state":"open","merged":false,"base":{"ref":"%s"},"head":{"sha":"abc"}}\n' "${FM_TEST_BASE-main}" ;;
 esac
 SH
   chmod +x "$dir/fakebin/tea"
@@ -2457,6 +2527,13 @@ SH
   [ -z "$out" ] || fail "Forgejo poll emitted with an ambiguous tea login"
   out=$(FM_TEST_TEA_LOG="$dir/tea.log" FM_TEST_TEA_PULL=merged run_poll "$dir")
   [ "$out" = merged ] || fail "Forgejo poll did not emit exactly one merged line"
+  for value in other ''; do
+    out=$(FM_TEST_BASE="$value" FM_TEST_TEA_LOG="$dir/tea.log" FM_TEST_TEA_PULL=merged run_poll "$dir")
+    assert_destination_poll_refusal "$out" "$value" Forgejo
+    write_task_meta "$dir" task-destination
+    FM_TEST_BASE="$value" FM_TEST_TEA_LOG="$dir/tea.log" run_check_entry "$dir" task-destination "$url" >/dev/null 2>&1 \
+      && fail 'Forgejo wrong or missing destination armed'
+  done
 
   grep -qF -- "api --login main --repo o/r /repos/{owner}/{repo}/pulls/7" "$dir/tea.log" \
     || fail "the poll did not read the one pull request by number on the host's login"
@@ -2512,7 +2589,7 @@ if [ "${1:-} ${2:-}" = "login list" ]; then
 fi
 [ "${1:-}" = api ] || exit 0
 printf '%s\n' "$*" >> "$FM_TEST_TEA_LOG"
-printf '{"state":"closed","merged":true,"head":{"sha":"abc"}}\n'
+printf '{"state":"closed","merged":true,"base":{"ref":"main"},"head":{"sha":"abc"}}\n'
 SH
   chmod +x "$dir/fakebin/tea"
   ln -sf "$(command -v jq)" "$dir/fakebin/jq"
@@ -2572,6 +2649,13 @@ group/subgroup/project
   done
   out=$(FM_TEST_GLAB_STATE=merged run_poll "$dir")
   [ "$out" = merged ] || fail "GitLab poll did not emit exactly one merged line"
+  for value in other ''; do
+    out=$(FM_TEST_BASE="$value" FM_TEST_GLAB_STATE=merged run_poll "$dir")
+    assert_destination_poll_refusal "$out" "$value" GitLab
+    write_task_meta "$dir" task-destination
+    FM_TEST_BASE="$value" run_check_entry "$dir" task-destination "$url" >/dev/null 2>&1 \
+      && fail 'GitLab wrong or missing destination armed'
+  done
   out=$(FM_TEST_GLAB_FAIL=1 run_poll "$dir")
   [ -z "$out" ] || fail "GitLab poll emitted after a glab failure"
 
@@ -2634,9 +2718,8 @@ EOF
   [ ! -e "$state/task-b.check.sh" ] || fail "refused GitLab arming left a poll armed"
 
   # The merge path addresses the forge the URL names, and never the other one.
-  # This fixture's glab answers with the field output the poll reads, so the
-  # merge's JSON read cannot be parsed, which must refuse rather than merge on a
-  # state it could not read.
+  # This fixture supplies the poll's destination/state record but no head.
+  # Merge must still refuse before a forge call when that head is unreadable.
   write_task_meta "$dir" task-c
   : > "$dir/glab.log"
   # The merge path needs jq before it reads anything, so this case supplies it
@@ -2647,8 +2730,8 @@ EOF
   rc=$?
   set -e
   [ "$rc" -ne 0 ] || fail "merge wrapper merged a GitLab merge request it could not read"
-  grep -qF 'could not read the GitLab merge request state before merging' "$dir/merge-c.err" \
-    || fail "merge wrapper refused for some reason other than the state it could not read"
+  grep -qF 'could not read the GitLab merge request head commit before merging' "$dir/merge-c.err" \
+    || fail "merge wrapper refused for some reason other than the head it could not read"
   [ ! -s "$dir/gh-axi.log" ] || fail "merge wrapper reached the GitHub CLI for a GitLab URL"
   grep -qF "mr view 7 -R https://gitlab.example/group/subgroup/project" "$dir/glab.log" \
     || fail "merge wrapper did not read the merge request through glab at its own instance"
@@ -3021,10 +3104,35 @@ test_different_merged_pr_for_same_task_is_not_absorbed() {
 # poll silently - no merge outcome, no notified marker, no wake that could put
 # the mate itself up for teardown - and leaves every lifecycle artifact whole.
 test_persistent_secondmate_retirement_is_poll_only() {
-  local dir state meta_before status_before registry_before endpoint_before rc
-  dir=$(make_case merged-retirement-secondmate)
+  local dir state meta_before status_before registry_before endpoint_before rc provider url phase out
+  for provider in github gitlab gerrit forgejo; do
+  dir=$(make_case "merged-retirement-secondmate-$provider")
   state="$dir/home/state"
-  fm_write_meta "$state/domain.meta" \
+  case "$provider" in
+    github) url=https://github.com/o/r/pull/2 ;;
+    gitlab) url=https://gitlab.example/group/project/-/merge_requests/2 ;;
+    gerrit) url=https://gerrit.example/c/group/project/+/2 ;;
+    forgejo) url=https://forgejo.example/o/r/pulls/2 ;;
+  esac
+  if [ "$provider" = forgejo ]; then
+    cat > "$dir/fakebin/tea" <<'SH'
+#!/usr/bin/env bash
+[ "${FM_TEST_TEA_FAIL:-0}" = 0 ] || exit 1
+if [ "${1:-} ${2:-}" = 'login list' ]; then
+  printf '[{"name":"fixture","url":"https://forgejo.example"}]\n'
+elif [ "${1:-}" = api ]; then
+  if [ "${FM_TEST_TEA_PULL:-open}" = merged ]; then
+    printf '{"merged":true}\n'
+  else
+    printf '{"merged":false}\n'
+  fi
+fi
+SH
+    chmod +x "$dir/fakebin/tea"
+  fi
+  # Real legacy secondmate records predate expected-base state. Do not let the
+  # general fixture helper silently give them a ship's destination contract.
+  FM_TEST_META_EXPECTED_BASE='' fm_write_meta "$state/domain.meta" \
     'window=session:fm-domain' \
     "worktree=$dir/secondmate-home" \
     "project=$dir/project" \
@@ -3032,8 +3140,10 @@ test_persistent_secondmate_retirement_is_poll_only() {
     'mode=secondmate' \
     'backend=tmux' \
     "home=$dir/secondmate-home" \
-    'pr=https://github.com/o/r/pull/2' \
+    "pr=$url" \
     'pr_head=0123456789abcdef0123456789abcdef01234567'
+  ! grep -Eq '^(expected_base|base_branch)=' "$state/domain.meta" \
+    || fail 'legacy secondmate fixture unexpectedly has a delivery destination'
   mkdir -p "$dir/secondmate-home"
   printf 'working: persistent endpoint remains healthy\n' > "$state/domain.status"
   printf -- '- domain | scope: test | home: %s\n' "$dir/secondmate-home" > "$dir/home/data/secondmates.md"
@@ -3042,11 +3152,28 @@ test_persistent_secondmate_retirement_is_poll_only() {
   status_before=$(shasum -a 256 "$state/domain.status")
   registry_before=$(shasum -a 256 "$dir/home/data/secondmates.md")
   endpoint_before=$(shasum -a 256 "$dir/endpoint-sentinel")
-  seed_canonical_poll "$dir" domain https://github.com/o/r/pull/2
+  seed_canonical_poll "$dir" domain "$url"
   add_stop_custom_check "$dir"
 
+  for phase in open unreadable; do
+    rc=0
+    FM_TEST_GH_STATE=OPEN FM_TEST_GLAB_STATE=opened FM_TEST_GERRIT_STATUS=NEW \
+      FM_TEST_GH_FAIL="$([ "$phase" = unreadable ] && printf 1 || printf 0)" \
+      FM_TEST_GLAB_FAIL="$([ "$phase" = unreadable ] && printf 1 || printf 0)" \
+      FM_TEST_GERRIT_FAIL="$([ "$phase" = unreadable ] && printf 1 || printf 0)" \
+      FM_TEST_TEA_FAIL="$([ "$phase" = unreadable ] && printf 1 || printf 0)" \
+      run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/$phase.out" 2> "$dir/$phase.err" || rc=$?
+    [ "$rc" = 0 ] || fail "$provider secondmate $phase watcher failed"
+    assert_grep 'z-stop.check.sh' "$dir/$phase.out" "$provider secondmate $phase poll produced a recovery wake"
+    assert_present "$state/domain.pr-poll" "$provider secondmate $phase poll was prematurely retired"
+    assert_absent "$state/domain.pr-base-notified" "$provider secondmate $phase poll recorded an unrecoverable base notice"
+    assert_no_grep 'domain.check.sh' "$state/.wake-queue" "$provider secondmate $phase poll queued a claim"
+    ack_watcher_cycle "$state" || fail 'could not acknowledge secondmate control cycle'
+  done
   set +e
-  FM_TEST_GH_STATE=MERGED run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/watch.out" 2> "$dir/watch.err"
+  FM_TEST_BASE='' FM_TEST_GH_STATE=MERGED FM_TEST_GLAB_STATE=merged \
+    FM_TEST_GERRIT_STATUS=MERGED FM_TEST_TEA_PULL=merged \
+    run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/watch.out" 2> "$dir/watch.err"
   rc=$?
   set -e
   [ "$rc" -eq 0 ] || fail "persistent secondmate merged watcher failed: $(cat "$dir/watch.err")"
@@ -3066,6 +3193,14 @@ test_persistent_secondmate_retirement_is_poll_only() {
   [ "$(shasum -a 256 "$dir/home/data/secondmates.md")" = "$registry_before" ] || fail "retirement changed secondmate registry"
   [ "$(shasum -a 256 "$dir/endpoint-sentinel")" = "$endpoint_before" ] || fail "retirement changed secondmate endpoint evidence"
   [ -d "$dir/secondmate-home" ] || fail "retirement removed the persistent secondmate home"
+  assert_absent "$state/domain.pr-base-notified" "$provider retirement recorded a base notice"
+  done
+  dir=$(make_case retirement-only-refuses-ship)
+  write_task_meta "$dir"
+  out=$(FM_TEST_GH_LOG="$dir/gh.log" FM_TEST_GH_STATE=MERGED PATH="$dir/fakebin:$BASE_PATH" \
+    bash "$POLL" --retire-secondmate github https://github.com/o/r/pull/1 github.com o/r 1 "$dir/home/state/task-a.meta")
+  [ -z "$out" ] || fail 'ship used the secondmate-only retirement entrypoint'
+  [ ! -s "$dir/gh.log" ] || fail 'secondmate-only retirement looked up a ship PR'
   pass "a merged poll on a persistent secondmate retires silently: no outcome, marker, or wake, and every lifecycle artifact preserved"
 }
 
@@ -4102,6 +4237,316 @@ SH
   pass "device re-record publication waits without rewriting its registration"
 }
 
+test_expected_destination_fail_closed_and_retarget() {
+  local dir state out value rc
+  dir=$(make_case destination-retarget)
+  state="$dir/home/state"
+  write_task_meta "$dir"
+  run_check_entry "$dir" task-a https://github.com/o/r/pull/1 >/dev/null \
+    || fail 'matching destination did not arm'
+  for value in other ''; do
+    out=$(FM_TEST_BASE="$value" run_check_entry "$dir" task-a https://github.com/o/r/pull/1 2>&1); rc=$?
+    [ "$rc" -ne 0 ] || fail 'changed or missing live base was accepted'
+    out=$(FM_TEST_BASE="$value" FM_TEST_GH_STATE=MERGED run_poll "$dir")
+    assert_destination_poll_refusal "$out" "$value" GitHub
+  done
+  FM_TEST_BASE_FAIL=1 run_check_entry "$dir" task-a https://github.com/o/r/pull/1 >/dev/null 2>&1 \
+    && fail 'unreadable live destination armed'
+  out=$(FM_TEST_BASE_FAIL=1 FM_TEST_GH_STATE=MERGED run_poll "$dir")
+  [ -z "$out" ] || fail 'unreadable destination reported merged'
+  out=$(FM_TEST_BASE=other FM_TEST_GH_LOG="$dir/gh.log" PATH="$dir/fakebin:$BASE_PATH" bash -c '
+    . "$1/bin/fm-wake-lib.sh"
+    . "$1/bin/fm-dod-lib.sh"
+    fm_dod_accept_ship_done ship no-mistakes "$2/wt" "$2/project" \
+      "done: PR https://github.com/o/r/pull/1 checks green" "$2/home/state" task-a "$2/home/state/task-a.meta"
+  ' _ "$ROOT" "$dir" 2>&1); rc=$?
+  [ "$rc" -ne 0 ] || fail 'recorded ready head bypassed the live destination check'
+  assert_contains "$out" 'actual base other' 'readiness refusal lost the live base'
+
+  # A fresh watcher process must re-read the destination even for a poll armed
+  # before restart. Its delivered recovery notice proves that the cycle ran.
+  retire_contributions_observer "$dir"
+  add_stop_custom_check "$dir"
+  FM_TEST_BASE=other FM_TEST_GH_STATE=MERGED run_watcher_bounded "$dir/home" "$dir/fakebin" \
+    > "$dir/restart.out" 2> "$dir/restart.err" || fail 'retarget restart cycle failed'
+  assert_no_grep 'task-a.check.sh: merged' "$dir/restart.out" 'restart reported a wrong-base merge'
+  assert_grep 'expected base main, actual base other' "$state/.wake-queue" 'retarget did not queue its recovery notice'
+  assert_present "$state/task-a.pr-base-notified" 'retarget delivery did not record its receipt'
+  assert_present "$state/task-a.pr-poll" 'retarget retired the armed poll'
+  ack_watcher_cycle "$state" || fail 'could not acknowledge retarget recovery notice'
+  FM_TEST_BASE=other FM_TEST_GH_STATE=MERGED run_watcher_bounded "$dir/home" "$dir/fakebin" \
+    > "$dir/retry.out" 2> "$dir/retry.err" || fail 'retarget retry cycle failed'
+  assert_grep 'z-stop.check.sh' "$dir/retry.out" 'retarget retry never reached its control check'
+  assert_no_grep 'merge/readiness refused' "$state/.wake-queue" 'delivered retarget notice repeated'
+  out=$(FM_TEST_BASE=main FM_TEST_GH_STATE=MERGED run_poll "$dir")
+  [ "$out" = merged ] || fail 'restored destination did not resume merge observation'
+
+  for value in missing duplicate invalid drift; do
+    dir=$(make_case "destination-$value")
+    state="$dir/home/state"
+    FM_TEST_META_EXPECTED_BASE='' fm_write_meta "$state/task-a.meta" "worktree=$dir/wt" 'kind=ship' 'mode=no-mistakes'
+    case "$value" in
+      duplicate) printf 'expected_base=main\nexpected_base=main\n' >> "$state/task-a.meta" ;;
+      invalid) printf 'expected_base=../main\n' >> "$state/task-a.meta" ;;
+      drift) printf 'expected_base=main\nbase_branch=release/integration\n' >> "$state/task-a.meta" ;;
+    esac
+    rc=0
+    out=$(run_check_entry "$dir" task-a https://github.com/o/r/pull/1 2>&1) || rc=$?
+    [ "$rc" -ne 0 ] || fail "$value expected destination armed"
+    assert_contains "$out" 'The supervising firstmate must recover the originally authorized destination from task-owned launch/brief evidence' 'refusal lost the task-owned recovery source'
+    assert_contains "$out" 'never from the current PR or current default branch' 'refusal permits inferring the destination'
+    assert_contains "$out" 'Source bin/fm-wake-lib.sh and use fm_meta_lock_path with fm_lock_acquire_wait' 'refusal lost the metadata locking convention'
+    assert_contains "$out" 'exactly one valid expected_base=<branch> in state/<id>.meta, keeping any existing base_branch consistent' 'refusal lost the destination metadata repair'
+    assert_contains "$out" 'Release the lock with fm_lock_release, then rerun bin/fm-pr-check.sh <id> <PR-URL>' 'refusal lost the existing registration command'
+    assert_absent "$state/task-a.pr-poll" "$value destination published a poll"
+  done
+  dir=$(make_case destination-legacy-named)
+  fm_write_meta "$dir/home/state/task-a.meta" "worktree=$dir/wt" 'kind=ship' 'mode=no-mistakes' 'base_branch=main'
+  run_check_entry "$dir" task-a https://github.com/o/r/pull/1 >/dev/null \
+    || fail 'legacy explicit base was not preserved'
+  pass 'destination proof fails closed through readiness, polling, restart, and legacy task records'
+}
+
+# The recovery contract requires a receipt only after queue delivery. A failed
+# sequence write or a stop after capturing the poll output must leave it pending.
+# The oracle is the durable wake row and receipt, not the check's printed text.
+test_legacy_notice_retries_failed_delivery() {
+  local failure=$1 dir state rc attempt real_rm
+  dir=$(make_case "legacy-notice-$failure")
+  state="$dir/home/state"
+  FM_TEST_META_EXPECTED_BASE='' fm_write_meta "$state/task-a.meta" \
+    "worktree=$dir/wt" 'kind=ship' 'mode=direct-PR' 'pr=https://github.com/o/r/pull/1'
+  seed_canonical_poll "$dir" task-a https://github.com/o/r/pull/1
+  case "$failure" in
+    queue-failure) mkdir "$state/.wake-queue.seq" ;;
+    interrupted)
+      real_rm=$(command -v rm)
+      cat > "$dir/fakebin/rm" <<'SH'
+#!/usr/bin/env bash
+for file in "$@"; do
+  case "$file" in
+    */.fm-check-output.*)
+      # This is the poll's generated output interface, captured by the watcher.
+      if grep -qF 'task task-a merge/readiness refused' "$file" 2>/dev/null; then
+        : > "$FM_TEST_NOTICE_STOP_FILE"
+        kill -TERM "$PPID"
+      fi
+      ;;
+  esac
+done
+exec "$FM_TEST_REAL_RM" "$@"
+SH
+      chmod +x "$dir/fakebin/rm"
+      ;;
+  esac
+  rc=0
+  FM_TEST_REAL_RM="${real_rm:-}" FM_TEST_NOTICE_STOP_FILE="$dir/stopped-before-queue" \
+    run_watcher_bounded "$dir/home" "$dir/fakebin" \
+      > "$dir/failed.out" 2> "$dir/failed.err" || rc=$?
+  if [ "$failure" = queue-failure ]; then
+    [ "$rc" -ne 0 ] || fail 'failed queue write did not fail the watcher'
+    rmdir "$state/.wake-queue.seq"
+  else
+    assert_present "$dir/stopped-before-queue" 'watcher never reached captured recovery output'
+    rm -f -- "$dir/fakebin/rm"
+  fi
+  assert_no_grep 'task task-a merge/readiness refused' "$state/.wake-queue" 'failed delivery queued a recovery notice'
+  assert_absent "$state/task-a.pr-base-notified" "$failure suppressed the undelivered notice"
+  assert_absent "$state/task-a.pr-base-parent-notified" 'local failure changed parent suppression'
+  assert_present "$state/task-a.pr-poll" 'failed delivery retired the poll'
+  for attempt in 1 2; do
+    run_watcher_bounded "$dir/home" "$dir/fakebin" \
+      > "$dir/retry-$attempt.out" 2> "$dir/retry-$attempt.err" || fail 'delivery retry failed'
+    if grep -qF 'task task-a merge/readiness refused' "$state/.wake-queue" 2>/dev/null; then
+      break
+    fi
+    assert_grep 'check: rearm-resurface' "$dir/retry-$attempt.out" 'retry did not deliver or resurface downtime'
+    ack_watcher_cycle "$state" || fail 'could not acknowledge downtime recovery'
+  done
+  [ "$(grep -cF 'task task-a merge/readiness refused' "$state/.wake-queue")" = 1 ] \
+    || fail 'retry did not queue exactly one recovery notice'
+  assert_present "$state/task-a.pr-base-notified" 'successful retry did not mark delivery'
+  ack_watcher_cycle "$state" || fail 'could not acknowledge delivered notice'
+  add_stop_custom_check "$dir"
+  run_watcher_bounded "$dir/home" "$dir/fakebin" \
+    > "$dir/after-success.out" 2> "$dir/after-success.err" || fail 'post-delivery cycle failed'
+  assert_grep 'z-stop.check.sh' "$dir/after-success.out" 'post-delivery cycle never reached control check'
+  assert_no_grep 'merge/readiness refused' "$state/.wake-queue" 'successful delivery repeated'
+  pass "$failure leaves recovery pending until one successful queue write"
+}
+
+test_legacy_poll_notices_once_until_rearmed() {
+  local dir state surface out
+  for surface in standalone watcher; do
+    dir=$(make_case "legacy-base-notice-$surface")
+    state="$dir/home/state"
+    FM_TEST_META_EXPECTED_BASE='' fm_write_meta "$state/task-a.meta" \
+      "worktree=$dir/wt" 'kind=ship' 'mode=direct-PR' 'pr=https://github.com/o/r/pull/1'
+    seed_canonical_poll "$dir" task-a https://github.com/o/r/pull/1
+    if [ "$surface" = standalone ]; then
+      out=$(FM_TEST_GH_STATE=MERGED run_poll "$dir")
+      assert_contains "$out" 'task task-a merge/readiness refused' 'legacy poll lost the task refusal'
+      assert_contains "$out" 'bin/fm-pr-check.sh recovery steps' 'legacy poll lost the recovery pointer'
+      [ "$(printf '%s\n' "$out" | wc -l | tr -d ' ')" = 1 ] || fail 'legacy poll emitted multiple notice lines'
+      [ "$out" != merged ] || fail 'legacy poll claimed a merge'
+      assert_absent "$state/task-a.pr-base-notified" 'standalone poll marked an unqueued notice delivered'
+      out=$(FM_TEST_GH_STATE=MERGED run_poll "$dir")
+      assert_contains "$out" 'task task-a merge/readiness refused' 'standalone poll suppressed its pending notice'
+      write_task_meta "$dir"
+      run_check_entry "$dir" task-a https://github.com/o/r/pull/1 >/dev/null \
+        || fail 'recovery did not re-arm the legacy task'
+      out=$(FM_TEST_GH_STATE=MERGED run_poll "$dir")
+      [ "$out" = merged ] || fail 're-armed task lost normal merge polling'
+      FM_TEST_META_EXPECTED_BASE='' fm_write_meta "$state/task-a.meta" \
+        "worktree=$dir/wt" 'kind=ship' 'mode=direct-PR' 'pr=https://github.com/o/r/pull/1'
+      out=$(FM_TEST_GH_STATE=MERGED run_poll "$dir")
+      assert_contains "$out" 'task task-a merge/readiness refused' 're-arming did not reset the notice'
+    else
+      FM_TEST_GH_STATE=MERGED run_watcher_bounded "$dir/home" "$dir/fakebin" \
+        > "$dir/first.out" 2> "$dir/first.err" || fail 'legacy poll did not wake the watcher'
+      assert_grep 'task task-a merge/readiness refused' "$dir/first.out" 'watcher lost the recovery notice'
+      assert_grep 'bin/fm-pr-check.sh recovery steps' "$dir/first.out" 'watcher lost the recovery pointer'
+      assert_no_grep 'task-a.check.sh: merged' "$dir/first.out" 'legacy watcher claimed a merge'
+      [ "$(grep -c 'task task-a merge/readiness refused' "$state/.wake-queue")" = 1 ] \
+        || fail 'watcher did not queue exactly one recovery notice'
+      ack_watcher_cycle "$state" || fail 'could not acknowledge the recovery wake'
+      add_stop_custom_check "$dir"
+      FM_TEST_GH_STATE=MERGED run_watcher_bounded "$dir/home" "$dir/fakebin" \
+        > "$dir/second.out" 2> "$dir/second.err" || fail 'second legacy poll failed'
+      assert_grep 'z-stop.check.sh' "$dir/second.out" 'second poll did not reach its control check'
+      assert_no_grep 'merge/readiness refused' "$dir/second.out" 'watcher repeated the recovery notice'
+      assert_no_grep 'task-a.check.sh: merged' "$dir/second.out" 'second legacy poll claimed a merge'
+    fi
+    assert_present "$state/task-a.pr-poll" 'missing-base refusal retired the armed poll'
+  done
+  pass 'legacy polls wake once without merge proof and reset their notice on re-arm'
+}
+
+test_legacy_parent_notice_retries_after_delivery() {
+  local dir state replies route rc
+  for route in local remote; do
+    dir=$(make_case "legacy-parent-crash-$route")
+    state="$dir/home/state"
+    seed_secondmate_home "$dir" "$route"
+    replies="$state/parent-replies.status"
+    if [ "$route" = local ]; then
+      mkdir -p "$dir/parent/state"
+      printf 'parent_home=%s\n' "$dir/parent" >> "$dir/home/.fm-secondmate-parent"
+      replies="$dir/parent/state/mate-x.status"
+    fi
+    FM_TEST_META_EXPECTED_BASE='' fm_write_meta "$state/task-a.meta" \
+      "worktree=$dir/wt" 'kind=ship' 'mode=direct-PR' 'pr=https://github.com/o/r/pull/1'
+    printf 'done: PR https://github.com/o/r/pull/1\n' > "$state/task-a.status"
+    # Interrupt immediately after the observable parent append, before its
+    # delivery receipt. The retry must converge to one parent blocker.
+    cat > "$dir/stop-after-append.sh" <<'SH'
+printf() {
+  builtin printf "$@" || return
+  if [ -s "$FM_TEST_PARENT_REPLIES" ]; then
+    : > "$FM_TEST_PARENT_STOPPED"
+    kill -TERM "$$"
+    exit 143
+  fi
+}
+SH
+    rc=0
+    FM_HOME="$dir/home" FM_STATE_OVERRIDE="$state" PATH="$dir/fakebin:$BASE_PATH" \
+      BASH_ENV="$dir/stop-after-append.sh" FM_TEST_PARENT_REPLIES="$replies" \
+      FM_TEST_PARENT_STOPPED="$dir/stopped" \
+      bash "$ROOT/bin/fm-inactive-reconcile.sh" report task-a \
+      > "$dir/interrupted.out" 2> "$dir/interrupted.err" || rc=$?
+    [ "$rc" -ne 0 ] || fail 'parent delivery interruption did not stop reporting'
+    assert_present "$dir/stopped" 'report never reached the parent append'
+    [ "$(grep -c 'task task-a merge/readiness refused' "$replies")" = 1 ] \
+      || fail 'interrupted report did not publish exactly one blocker'
+    assert_absent "$state/task-a.pr-base-parent-notified" 'interrupted report wrote a delivery receipt'
+    FM_HOME="$dir/home" FM_STATE_OVERRIDE="$state" PATH="$dir/fakebin:$BASE_PATH" \
+      bash "$ROOT/bin/fm-inactive-reconcile.sh" report task-a \
+      > "$dir/retry.out" 2> "$dir/retry.err" || fail 'parent delivery retry failed'
+    [ "$(grep -c 'task task-a merge/readiness refused' "$replies")" = 1 ] \
+      || fail 'parent delivery retry duplicated its blocker'
+    assert_present "$state/task-a.pr-base-parent-notified" 'retry did not record successful delivery'
+  done
+  pass 'parent delivery retries reuse one blocker after an append-before-receipt crash'
+}
+
+test_legacy_notice_audiences_are_independent() {
+  local dir state replies route order cycle note
+  for route in local remote; do
+    for order in ledger-first watcher-first; do
+      dir=$(make_case "legacy-audiences-$route-$order")
+      state="$dir/home/state"
+      seed_secondmate_home "$dir" "$route"
+      replies="$state/parent-replies.status"
+      if [ "$route" = local ]; then
+        mkdir -p "$dir/parent/state"
+        printf 'parent_home=%s\n' "$dir/parent" >> "$dir/home/.fm-secondmate-parent"
+        replies="$dir/parent/state/mate-x.status"
+      fi
+      FM_TEST_META_EXPECTED_BASE='' fm_write_meta "$state/task-a.meta" \
+        "worktree=$dir/wt" 'kind=ship' 'mode=direct-PR' 'pr=https://github.com/o/r/pull/1'
+      seed_canonical_poll "$dir" task-a https://github.com/o/r/pull/1
+      add_stop_custom_check "$dir"
+      if [ "$order" = ledger-first ]; then
+        note='PR #1'
+        printf 'done: %s\n' "$note" > "$state/task-a.status"
+      else
+        note='opened https://github.com/o/r/pull/1'
+        printf 'working: implementing\n' > "$state/task-a.status"
+      fi
+      FM_TEST_GH_STATE=MERGED run_watcher_bounded "$dir/home" "$dir/fakebin" \
+        > "$dir/first.out" 2> "$dir/first.err" || fail "$route $order first watcher failed"
+      assert_grep 'task task-a merge/readiness refused' "$dir/first.out" 'parent report suppressed the local wake'
+      assert_no_grep 'task-a.check.sh: merged' "$dir/first.out" 'legacy task claimed a merge'
+      [ "$(grep -c 'task task-a merge/readiness refused' "$state/.wake-queue")" = 1 ] \
+        || fail 'local audience did not receive exactly one recovery wake'
+      if [ "$order" = watcher-first ]; then
+        assert_absent "$replies" 'working child unexpectedly produced a parent outcome'
+        printf 'done: %s\n' "$note" > "$state/task-a.status"
+        mv "$dir/home/.fm-secondmate-parent" "$dir/home/.fm-secondmate-parent.saved"
+        if FM_HOME="$dir/home" FM_STATE_OVERRIDE="$state" PATH="$dir/fakebin:$BASE_PATH" \
+          "$ROOT/bin/fm-inactive-reconcile.sh" report task-a > "$dir/refused.out" 2> "$dir/refused.err"; then
+          fail 'unavailable parent route accepted the refusal report'
+        fi
+        assert_present "$state/task-a.pr-base-notified" 'parent failure cleared local suppression'
+        assert_absent "$state/task-a.pr-base-parent-notified" 'parent failure suppressed its retry'
+        mv "$dir/home/.fm-secondmate-parent.saved" "$dir/home/.fm-secondmate-parent"
+      fi
+      ack_watcher_cycle "$state" || fail 'could not acknowledge the local recovery wake'
+      for cycle in second third; do
+        FM_TEST_GH_STATE=MERGED run_watcher_bounded "$dir/home" "$dir/fakebin" \
+          > "$dir/$cycle.out" 2> "$dir/$cycle.err" || fail "$route $order $cycle watcher failed"
+        assert_grep 'z-stop.check.sh' "$dir/$cycle.out" 'repeat watcher never reached its control check'
+        assert_no_grep 'merge/readiness refused' "$dir/$cycle.out" 'local notice repeated'
+        assert_no_grep 'task-a.check.sh: merged' "$dir/$cycle.out" 'repeat watcher claimed a merge'
+        [ "$(grep -c 'task task-a merge/readiness refused' "$state/.wake-queue")" = 0 ] \
+          || fail 'local recovery wake repeated after acknowledgement'
+        [ "$(grep -c 'task task-a merge/readiness refused' "$replies")" = 1 ] \
+          || fail 'local wake suppressed or duplicated the parent notice'
+        grep -Eq '^blocked( \[[^]]*\])*: .*task task-a merge/readiness refused' "$replies" \
+          || fail 'parent refusal was not a blocked event'
+        assert_no_regex '^done' "$replies" 'legacy task claimed readiness'
+        ack_watcher_cycle "$state" || fail 'could not acknowledge the control wake'
+      done
+      [ ! -s "$dir/gh.log" ] || fail 'missing destination caused a forge read'
+      assert_present "$state/task-a.pr-poll" 'refusal retired the poll'
+      write_task_meta "$dir"
+      run_check_entry "$dir" task-a https://github.com/o/r/pull/1 >/dev/null \
+        || fail 'recovery could not re-arm the task'
+      assert_absent "$state/task-a.pr-base-notified" 're-arm retained local suppression'
+      assert_absent "$state/task-a.pr-base-parent-notified" 're-arm retained parent suppression'
+    done
+  done
+  pass 'legacy watcher and parent notices are independent in either order and reset on re-arm'
+}
+
+test_legacy_notice_retries_failed_delivery queue-failure
+test_legacy_notice_retries_failed_delivery interrupted
+test_legacy_parent_notice_retries_after_delivery
+test_legacy_notice_audiences_are_independent
+test_legacy_poll_notices_once_until_rearmed
+test_expected_destination_refuses_registration
+test_expected_destination_fail_closed_and_retarget
 test_parser_matrix
 test_github_enterprise_config_resolution
 test_github_enterprise_hosts

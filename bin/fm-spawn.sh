@@ -999,6 +999,7 @@ MODE_SET=0
 YOLO_SET=0
 BRANCH_PREFIX_SET=0
 BASE_BRANCH=
+SPAWN_EXPECTED_BASE=
 BASE_BRANCH_SET=0
 UPSTREAM_CONSENT=
 UPSTREAM_CONSENT_SET=0
@@ -4258,6 +4259,11 @@ if [ "$KIND" = ship ] || [ "$KIND" = scout ]; then
     fi
   fi
   if [ "$RELAUNCH" -eq 1 ]; then
+    if grep -q '^expected_base=' "$RELAUNCH_META" \
+      && ! fm_pr_expected_base "$RELAUNCH_META" >/dev/null; then
+      echo 'error: recorded expected PR base is unavailable or inconsistent; refusing relaunch' >&2
+      exit 1
+    fi
     BASE_BRANCH=$(fm_meta_get "$RELAUNCH_META" base_branch)
   elif [ "$BASE_BRANCH_SET" -eq 1 ]; then
     [ -n "$BASE_BRANCH" ] || {
@@ -4735,6 +4741,7 @@ freshen_spawn_worktree_base() { # <worktree> <base-branch> <project> <mode>; 2 w
     echo "error: pooled worktree '$worktree' is at '${actual:-unknown}', not current '$target' ('$expected'); refusing to launch" >&2
     return 1
   fi
+  SPAWN_EXPECTED_BASE=$default
 }
 
 herdr_projection_meta_field_exact() { # <meta> <key>
@@ -7189,6 +7196,28 @@ fi
 META_WINDOW=$T
 [ "$BACKEND" = orca ] && META_WINDOW=$W
 [ "$BACKEND" = t3code ] && META_WINDOW=$W
+# Pin the destination from the same refreshed origin HEAD used to plant this
+# task, never from its later PR. Relaunch preserves it across default changes.
+EXPECTED_BASE=
+if { [ "$KIND" = ship ] || [ "$KIND" = scout ]; } && [ "$MODE" != local-only ] && [ "$EXTERNAL_REVIEW" = 0 ]; then
+  if [ "$RELAUNCH" -eq 1 ]; then
+    EXPECTED_BASE=$(fm_pr_expected_base "$RELAUNCH_META" 2>/dev/null || true)
+  elif [ -n "$BASE_BRANCH" ]; then
+    EXPECTED_BASE=$BASE_BRANCH
+  else
+    EXPECTED_BASE=$SPAWN_EXPECTED_BASE
+  fi
+  if [ -n "$EXPECTED_BASE" ] && [ "$KIND" = ship ]; then
+    git check-ref-format "refs/heads/$EXPECTED_BASE" >/dev/null 2>&1 || exit 1
+    BRIEF_TMP="$DATA/$ID/.launch-brief.md.${BASHPID:-$$}"
+    {
+      fm_brief_worker_role "$STATE" "$ID" "$FM_ROOT" && printf '\n' && cat "$SOURCE_BRIEF" &&
+        printf '\n# Expected pull request destination\nExpected PR base: %s\nVerify the live PR base equals this branch and inspect its task-only diff before reporting ready.\n' "$EXPECTED_BASE" &&
+        { [ "$MODE" != no-mistakes ] || fm_brief_intent_overlay "$CAPTAIN_INTENT"; }
+    } > "$BRIEF_TMP" || exit 1
+    mv "$BRIEF_TMP" "$BRIEF" || exit 1
+  fi
+fi
 SPAWN_GEN="s$(date +%s).${BASHPID:-$$}.$RANDOM"
 SPAWN_META_PATH="$STATE/$ID.meta"
 if [ "$SPAWN_META_LOCK_HELD" != 1 ]; then
@@ -7209,7 +7238,7 @@ preserve_relaunch_meta() {
       split("window endpoint_task_id worktree project harness hermes_profile hermes_home kind mode yolo branch tasktmp base_branch upstream_consent forge backup_remote backup_prefix model effort opencode_version account account_provider omp_profile busy_gen spawn_gen approval_mode traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id paseo_terminal_id paseo_workspace_id rex_server rex_session_id rex_window_id rex_block_id t3_thread_id t3_project_id tern_session_id tern_tab_id tern_block_id hc_session hc_terminal home projects control_relaunch_tx polytoken_session polytoken_port polytoken_credential", keys, " ")
       for (i in keys) owned[keys[i]] = 1
     }
-    !($1 in owned)
+    !($1 in owned) && $1 != "expected_base"
   ' "$RELAUNCH_META"
 }
 {
@@ -7230,6 +7259,7 @@ preserve_relaunch_meta() {
   [ -z "${BRANCH:-}" ] || echo "branch=$BRANCH"
   echo "tasktmp=$TASK_TMP"
   [ -z "$BASE_BRANCH" ] || echo "base_branch=$BASE_BRANCH"
+  [ -z "$EXPECTED_BASE" ] || echo "expected_base=$EXPECTED_BASE"
   [ -z "$UPSTREAM_CONSENT" ] || echo "upstream_consent=$UPSTREAM_CONSENT"
   # Read by bin/fm-dod-lib.sh's ready-report gate; absent on every other forge.
   [ "$EXTERNAL_REVIEW" = 0 ] || echo "forge=external"
