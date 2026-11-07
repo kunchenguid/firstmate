@@ -979,6 +979,26 @@ fm_refuse_if_gate_agent
 # Skip the watcher guard when re-exec'd for one pair of a batch (FM_SPAWN_NO_GUARD is
 # set by the batch loop below), so the guard runs once for the batch, not once per pair.
 [ -n "${FM_SPAWN_NO_GUARD:-}" ] || "$FM_ROOT/bin/fm-guard.sh" || true
+# Herdr's `agent start <NAME>` caps agent names at FM_HERDR_AGENT_NAME_MAX
+# characters (verified against real herdr; over-cap names fail with
+# `invalid_agent_name`: "agent name must start with a lowercase letter and
+# contain only lowercase letters, digits, '-' or '_' (1-32 characters)"). The
+# fresh spawn and --relaunch paths apply this BEFORE creating any pane, tab,
+# workspace, or agent, so a task id over the cap refuses instead of reporting
+# success and silently stranding a replacement whose inner agent-start can
+# never boot (fm-control.sh carries the same cap check on its relaunch path).
+# The cap is a length rule only; herdr's stricter character set is
+# intentionally NOT enforced here because fm_task_id_creation_valid accepts
+# uppercase letters and dots, and tightening that is a separate, broader
+# scope. Ids are semantic, so the scripts never auto-truncate - the hint is
+# to recreate the task under a shorter id.
+FM_HERDR_AGENT_NAME_MAX=32
+
+fm_herdr_agent_name_within_cap() {  # <task-id>
+  local id=$1
+  [ "${#id}" -le "$FM_HERDR_AGENT_NAME_MAX" ]
+}
+
 KIND=ship
 KIND_SET=0
 HARNESS_ARG=
@@ -2385,6 +2405,13 @@ if [ "$RELAUNCH" -eq 0 ]; then
     echo "error: backend=hc does not support --secondmate spawns yet" >&2
     exit 1
   fi
+  # Herdr's `agent start <NAME>` caps names at FM_HERDR_AGENT_NAME_MAX chars and
+  # returns invalid_agent_name past it. Refuse here, before any pane, tab, or
+  # workspace is created, so a too-long id never strands a half-built endpoint.
+  if [ "$BACKEND" = herdr ] && ! fm_herdr_agent_name_within_cap "$ID"; then
+    echo "error: herdr caps agent names at $FM_HERDR_AGENT_NAME_MAX characters (lowercase/digits/-/_), but task id '$ID' is ${#ID} chars; pick a shorter id before spawning" >&2
+    exit 1
+  fi
   fm_backend_runtime_check "$BACKEND" || exit 1
   if [ "$BACKEND" = rex ]; then
     fm_backend_rex_local_server_ensure || exit 1
@@ -2460,6 +2487,13 @@ if [ "$RELAUNCH" -eq 1 ]; then
   RELAUNCH_TARGET=$FM_BACKEND_VALIDATED_TARGET
   fm_backend_validate_spawn "$BACKEND" || exit 1
   fm_backend_source "$BACKEND" || exit 1
+  # Same herdr name-length guard as the fresh spawn path: refuse the relaunch
+  # before the endpoint is inspected or touched, so a too-long id never stops
+  # the old agent for a relaunch whose replacement could never boot.
+  if [ "$BACKEND" = herdr ] && ! fm_herdr_agent_name_within_cap "$ID"; then
+    echo "error: herdr caps agent names at $FM_HERDR_AGENT_NAME_MAX characters (lowercase/digits/-/_), but task id '$ID' is ${#ID} chars; recreate the task under a shorter id before relaunching" >&2
+    exit 1
+  fi
   # A relaunch must PROVE the previous agent is gone before it launches another
   # one into the same endpoint, and only a backend with a recovery-grade
   # classifier can (bin/fm-control-lib.sh owns that capability table).
