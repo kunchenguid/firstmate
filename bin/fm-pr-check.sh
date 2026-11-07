@@ -365,10 +365,12 @@ if [ "${FM_PR_CHECK_MERGE:-}" != 1 ]; then
     exit 1
   fi
   BASELINE_TRAIN=0
+  BASELINE_TRAIN_UNKNOWN=0
   BASELINE_DEGRADED=
   while IFS= read -r baseline_line; do
     case $baseline_line in
       ontrain) BASELINE_TRAIN=1 ;;
+      train=unknown) BASELINE_TRAIN_UNKNOWN=1 ;;
       'degraded head='*|'degraded pipeline='*)
         BASELINE_DEGRADED=${baseline_line#degraded }
         BASELINE_DEGRADED=${BASELINE_DEGRADED%% *}
@@ -417,31 +419,6 @@ if [ "${FM_PR_CHECK_MERGE:-}" != 1 ]; then
   restore_baselines() {
     local artifact backup
     [ "$BASELINE_BACKUP_COMPLETE" = 1 ] || return 1
-    for artifact in "$META" "$STATE/$ID.pr-poll-degraded" "$STATE/$ID.pr-poll-train" \\
-      "$STATE/$ID.check.sh" "$STATE/$ID.pr-poll" "$STATE/$ID.pr-poll-registration"; do
-      backup="$BASELINE_BACKUP/$(basename "$artifact")"
-      if [ -e "$backup" ]; then
-        cp -p -- "$backup" "$artifact.restore" && mv -f -- "$artifact.restore" "$artifact" || return 1
-      else
-        rm -f -- "$artifact" || return 1
-      fi
-    done
-  }
-  baseline_failure() {
-    restore_baselines || echo "error: could not restore previous PR poll registration" >&2
-    rm -rf -- "$BASELINE_BACKUP"
-    exit 1
-  }
-  for artifact in "$META" "$STATE/$ID.pr-poll-degraded" "$STATE/$ID.pr-poll-train" \
-    "$STATE/$ID.check.sh" "$STATE/$ID.pr-poll" "$STATE/$ID.pr-poll-registration"; do
-    [ -e "$artifact" ] || [ -L "$artifact" ] || continue
-    [ -f "$artifact" ] && [ ! -L "$artifact" ] \
-      && [ "$(fm_pr_file_device "$artifact")" = "$STATE_DEVICE" ] \
-      && [ "$(fm_pr_file_link_count "$artifact")" = 1 ] || baseline_failure
-    cp -p -- "$artifact" "$BASELINE_BACKUP/$(basename "$artifact")" || baseline_failure
-  done
-  restore_baselines() {
-    local artifact backup
     for artifact in "$META" "$STATE/$ID.pr-poll-degraded" "$STATE/$ID.pr-poll-train" \
       "$STATE/$ID.check.sh" "$STATE/$ID.pr-poll" "$STATE/$ID.pr-poll-registration"; do
       backup="$BASELINE_BACKUP/$(basename "$artifact")"
@@ -454,56 +431,57 @@ if [ "${FM_PR_CHECK_MERGE:-}" != 1 ]; then
   }
   baseline_failure() {
     restore_baselines || echo "error: could not restore previous PR poll registration" >&2
-    rm -rf -- "$BASELINE_BACKUP"
     exit 1
   }
+  for artifact in "$META" "$STATE/$ID.pr-poll-degraded" "$STATE/$ID.pr-poll-train" \
+    "$STATE/$ID.check.sh" "$STATE/$ID.pr-poll" "$STATE/$ID.pr-poll-registration"; do
+    [ -e "$artifact" ] || [ -L "$artifact" ] || continue
+    [ -f "$artifact" ] && [ ! -L "$artifact" ] \
+      && [ "$(fm_pr_file_device "$artifact")" = "$STATE_DEVICE" ] \
+      && [ "$(fm_pr_file_link_count "$artifact")" = 1 ] || { rm -rf -- "$BASELINE_BACKUP"; exit 1; }
+    cp -p -- "$artifact" "$BASELINE_BACKUP/$(basename "$artifact")" || { rm -rf -- "$BASELINE_BACKUP"; exit 1; }
+  done
+  BASELINE_BACKUP_COMPLETE=1
   if [ -n "$BASELINE_DEGRADED" ]; then
     fm_pr_poll_degraded_mark_notified "$STATE" "$ID" \
-      "$PROVIDER" "$HOST" "$PROJECT_PATH" "$NUMBER" "$BASELINE_DEGRADED" || {
-        echo "error: could not persist PR poll degraded baseline" >&2
-        baseline_failure
-      }
+      "$PROVIDER" "$HOST" "$PROJECT_PATH" "$NUMBER" "$BASELINE_DEGRADED" || baseline_failure
   else
     rm -f -- "$STATE/$ID.pr-poll-degraded" || baseline_failure
   fi
   if [ "${BASELINE_TRAIN:-0}" = 1 ]; then
     fm_pr_poll_degraded_mark_notified "$STATE" "$ID" \
-      "$PROVIDER" "$HOST" "$PROJECT_PATH" "$NUMBER" train=on || {
-        echo "error: could not persist PR poll train baseline" >&2
-        baseline_failure
-      }
-  else
+      "$PROVIDER" "$HOST" "$PROJECT_PATH" "$NUMBER" train=on || baseline_failure
+  elif [ "${BASELINE_TRAIN_UNKNOWN:-0}" != 1 ]; then
     rm -f -- "$STATE/$ID.pr-poll-train" || baseline_failure
   fi
 fi
-
 mv -f -- "$META_TMP" "$META" || { [ -z "${BASELINE_BACKUP:-}" ] || baseline_failure; exit 1; }
 META_TMP=
-fm_pr_private_file_valid "$META" 600 "$STATE_DEVICE" || exit 1
-fm_pr_metadata_identity_parse "$META" || exit 1
+fm_pr_private_file_valid "$META" 600 "$STATE_DEVICE" || { [ -z "${BASELINE_BACKUP:-}" ] || baseline_failure; exit 1; }
+fm_pr_metadata_identity_parse "$META" || { [ -z "${BASELINE_BACKUP:-}" ] || baseline_failure; exit 1; }
 [ "$FM_PR_META_PROVIDER" = "$PROVIDER" ] && [ "$FM_PR_META_URL" = "$URL" ] \
   && [ "$FM_PR_META_HOST" = "$HOST" ] && [ "$FM_PR_META_PATH" = "$PROJECT_PATH" ] \
-  && [ "$FM_PR_META_NUMBER" = "$NUMBER" ] || exit 1
+  && [ "$FM_PR_META_NUMBER" = "$NUMBER" ] || { [ -z "${BASELINE_BACKUP:-}" ] || baseline_failure; exit 1; }
 PR_POLL_PUBLISH_LOCK="$STATE/.pr-poll-publish-$ID.lock"
-fm_lock_acquire_wait "$PR_POLL_PUBLISH_LOCK"
+fm_lock_acquire_wait "$PR_POLL_PUBLISH_LOCK" || { [ -z "${BASELINE_BACKUP:-}" ] || baseline_failure; exit 1; }
 PR_POLL_PUBLISH_LOCK_HELD=1
 if fm_pr_poll_publish_prepared; then
-  fm_lock_release "$PR_POLL_PUBLISH_LOCK" || exit 1
+  fm_lock_release "$PR_POLL_PUBLISH_LOCK" || { [ -z "${BASELINE_BACKUP:-}" ] || baseline_failure; exit 1; }
   PR_POLL_PUBLISH_LOCK_HELD=0
 else
-  fm_lock_release "$PR_POLL_PUBLISH_LOCK" || exit 1
+  fm_lock_release "$PR_POLL_PUBLISH_LOCK" || { [ -z "${BASELINE_BACKUP:-}" ] || baseline_failure; exit 1; }
   PR_POLL_PUBLISH_LOCK_HELD=0
   echo "error: could not publish PR poll" >&2
   [ -z "${BASELINE_BACKUP:-}" ] || baseline_failure
   exit 1
 fi
-[ -z "${BASELINE_BACKUP:-}" ] || rm -rf -- "$BASELINE_BACKUP"
-fm_lock_release "$META_LOCK"
+fm_lock_release "$META_LOCK" || { [ -z "${BASELINE_BACKUP:-}" ] || baseline_failure; exit 1; }
 META_LOCK_HELD=0
 if [ "$CONTROL_LOCK_HELD" = 1 ]; then
-  fm_lock_release "$CONTROL_LOCK" || exit 1
+  fm_lock_release "$CONTROL_LOCK" || { [ -z "${BASELINE_BACKUP:-}" ] || baseline_failure; exit 1; }
   CONTROL_LOCK_HELD=0
 fi
+[ -z "${BASELINE_BACKUP:-}" ] || rm -rf -- "$BASELINE_BACKUP"
 # Opt-in fleet activity ledger (docs/fleet-ledger.md); off costs one file test.
 # The merge-time re-record is not a new review-ready PR, so it writes nothing.
 [ ! -e "${FM_CONFIG_OVERRIDE:-$FM_HOME/config}/fleet-ledger" ] || [ "${FM_PR_CHECK_MERGE:-}" = 1 ] \
