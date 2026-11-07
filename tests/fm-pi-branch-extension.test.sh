@@ -5566,6 +5566,39 @@ delete stockDefinition.renderShell;
 delete stockDefinition.renderCall;
 delete stockDefinition.renderResult;
 
+// Both custom shells must retain stock argument display, including pending
+// calls, narrow terminals, expanded calls, and error backgrounds.
+for (const [name, samples] of [
+  ["fm_branch_outcomes", [{}, { recent: 2 }, { recent: 1234567890 }]],
+  ["fm_branch_processed", [{}, { through: 2 }, { through: 1234567890 }]],
+]) {
+  const actual = tools.find((tool) => tool.name === name);
+  if (!actual) throw new Error(name + " was not registered");
+  const stock = { ...actual };
+  delete stock.renderShell;
+  delete stock.renderCall;
+  delete stock.renderResult;
+  const ui = { requestRender() {} };
+  for (const args of samples) {
+    const rows = [stock, actual].map((definition) => new ToolExecutionComponent(
+      name, "argument-contract", args, { showImages: false }, definition, ui, process.cwd(),
+    ));
+    for (const phase of ["pending", "success", "error"]) {
+      if (phase !== "pending") {
+        for (const row of rows) row.updateResult({ content: [{ type: "text", text: "OK" }], isError: phase === "error" });
+      }
+      for (const expanded of [false, true]) {
+        for (const row of rows) row.setExpanded(expanded);
+        for (const width of [40, 100]) {
+          if (JSON.stringify(rows[0].render(width)) !== JSON.stringify(rows[1].render(width))) {
+            throw new Error(name + " lost stock argument rendering: " + JSON.stringify({ args, expanded, phase, width }));
+          }
+        }
+      }
+    }
+  }
+}
+
 const args = { recent: 2 };
 const result = {
   content: [{
@@ -5649,8 +5682,8 @@ if (JSON.stringify(actualRow.render(100)) !== JSON.stringify(stockRow.render(100
 }
 
 pi.events.emit("firstmate:calm-presentation", { active: true, stockExportRendering: true });
-const stockHtml = createToolHtmlRenderer({ getToolDefinition: () => stockDefinition, theme, cwd: process.cwd() });
-const actualHtml = createToolHtmlRenderer({ getToolDefinition: () => actualDefinition, theme, cwd: process.cwd() });
+const stockHtml = createToolHtmlRenderer({ getToolDefinition: () => stockDefinition, getToolRenderers: () => stockDefinition, theme, cwd: process.cwd() });
+const actualHtml = createToolHtmlRenderer({ getToolDefinition: () => actualDefinition, getToolRenderers: () => actualDefinition, theme, cwd: process.cwd() });
 const stockCall = stockHtml.renderCall("stock-html", "fm_branch_outcomes", args);
 const actualCall = actualHtml.renderCall("actual-html", "fm_branch_outcomes", args);
 const stockResult = stockHtml.renderResult("stock-html", "fm_branch_outcomes", result.content, result.details, false);
