@@ -573,7 +573,8 @@ Recording that source line prevents another duplicate on later recaptures.
 The channel carries the mate's status and decision model.
 An uncorrelated progress line and a newly raised `needs-decision` travel the same path as a correlated answer, and reach the parent's open-decision fold identically.
 Correlation is a per-line property that settles a pending request.
-It is never a gate on the stream, so no single line can stop or wedge the relay or hold the cursor back.
+It is never a gate on the stream, so an ordinary status line never stops the relay or holds the cursor back.
+The one exception is a required document snapshot, described in [When an offered document cannot be fetched](#when-an-offered-document-cannot-be-fetched).
 
 ### Transport normalization
 
@@ -596,6 +597,11 @@ A decision raised on that ambiguity could stand open describing a transfer that 
 A refused document is not re-attempted automatically.
 It stays on the remote, and a later structured offer of the same path fetches it.
 An SSH exit status of 255 while fetching a referenced document leaves the delta uncommitted for the process-event runner's normal retry, because remote completion is unknown.
+
+A required `report=data/report-snapshots/<sha256>.md` snapshot, which [`bin/fm-secondmate-report.sh --doc`](../bin/fm-secondmate-report.sh) offers, does not fail open when it is missing or its digest does not verify.
+The adapter stops that ingest and leaves the delta uncommitted, so the correlated answer is withheld until the exact bytes arrive.
+A malformed snapshot digest or a snapshot whose content checks refuse it can never verify, so it fails open like any other refusal.
+[`bin/fm-document-snapshot.sh`](../bin/fm-document-snapshot.sh) owns the capture and verification contract.
 
 ### Reply settlement
 
