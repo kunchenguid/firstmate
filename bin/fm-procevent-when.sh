@@ -478,7 +478,14 @@ cmd_terminal() {
 cmd_retire() {
   local name=${1-} sid captured=0 result
   when_name_valid "$name" || die "name must be path-safe and at most 59 characters: ${name-}"
-  sid="when-$name"
+  # Accept the bare name AND the prefixed form this command itself prints. A
+  # retire that silently builds 'when-when-<name>' removes nothing and reports
+  # success, so a reader who re-feeds the printed name believes the watch is
+  # gone while it keeps firing.
+  case "$name" in
+    when-*) sid=$name ;;
+    *)      sid="when-$name" ;;
+  esac
   if [ -e "$(fired_file "$sid")" ]; then
     for result in "$(fm_procevent_inbox_dir "$STATE")/$sid".*.result; do
       [ -e "$result" ] && captured=1
