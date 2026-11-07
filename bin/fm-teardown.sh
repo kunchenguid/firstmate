@@ -70,6 +70,10 @@
 # by itself causes a false refusal of landed work.
 # A gh lookup error falls back to the content check; if that is also inconclusive,
 # teardown refuses rather than risk discarding unlanded work.
+# A ship task with a recorded pr= on a supported forge also REFUSES until the forge
+# reports that PR merged, even when the proofs above hold, because the guarded merge
+# command needs this record. A closed PR passes only when its change is already in
+# the default branch. An unreadable record refuses, and --force skips this gate.
 # A merge-tree option or execution error reports the content-landed proof as
 # unavailable. The merge-tree --write-tree proof requires Git 2.38 or newer.
 # Uncommitted changes are never landed. Before return, the dirty check explicitly
@@ -208,7 +212,7 @@
 # never left leased forever. If the treehouse return fails, teardown leaves the
 # leased home and state in place instead of hiding a still-held lease.
 # Usage: fm-teardown.sh <task-id> [--force] [--legacy-record]
-#   --force skips ordinary-task dirty and landed-work checks, skips scout report
+#   --force skips ordinary-task dirty, landed-work, and unmerged-PR checks, skips scout report
 #   checks and closes the scout as discarded with no report recorded, and
 #   discards secondmate child work for kind=secondmate. Only use it when the
 #   captain has explicitly said to discard the work.
