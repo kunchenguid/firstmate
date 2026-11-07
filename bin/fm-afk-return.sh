@@ -682,7 +682,7 @@ EOF
   visible_outcomes=$((routine_visible + mainrows + captain))
   printf '  %s outcome(s) handled by the away session (%s routine, %s for firstmate to act on, %s escalated above)\n' "$((routine + mainrows + captain))" "$routine" "$mainrows" "$captain"
   if [ "$drained" -eq 1 ] && [ "$visible_outcomes" -gt 0 ] && [ "$drain_ok" -eq 1 ]; then
-    printf '  the drain'"'"'s BRANCH OUTCOMES section presents the visible outcomes: each task'"'"'s captain outcomes on one line until you acknowledge them, visible routine notes once, past its limit as a count\n'
+    printf '  the drain'"'"'s BRANCH OUTCOMES section presents the visible outcomes: each task'"'"'s main or captain outcomes until you acknowledge them, visible routine notes once, past its limit as a count\n'
   elif [ "$drained" -eq 1 ] && [ "$visible_outcomes" -gt 0 ]; then
     printf '  visible outcomes %s\n' "$pointer"
   else
