@@ -84,18 +84,22 @@
 # --key still crosses to the remote endpoint.
 #
 # Secondmate slash commands: a marked request to a LOCAL claude secondmate whose
-# text opens with "/" is typed as "/<command> <marker>corr=<id> <rest>", so
-# Claude's parser runs the command (the token up to the first whitespace) and
+# text opens with "/" and whose command (the token up to the first whitespace)
+# resolves to an installed skill or custom command is typed as
+# "/<command> <marker>corr=<id> <rest>", so Claude's parser runs the command and
 # passes the marker and corr in its arguments (a skill without argument
-# placeholders gets them on an appended "ARGUMENTS:" line); the secondmate still
-# answers through its parent status channel. Only the typed bytes move: the
-# pending-reply record, corr reuse, and the slash settle read the original text.
-# Typed bytes over 800 keep the marker in front, because Claude turns a typed
-# burst longer than 800 characters into a pasted block it never parses as a
-# command. Limits: a skill whose body uses positional or named placeholders may
-# not receive the marker, and a built-in that starts no model turn (/clear,
-# /compact, /exit) cannot reply, so the pending-reply guard sends its one
-# recovery request and then escalates. Every other marked typed message,
+# placeholders gets them on an appended "ARGUMENTS:" line); the leading
+# key=value-shaped marker token takes no positional slot, and the secondmate
+# still answers through its parent status channel. A name N resolves through
+# skills/N/SKILL.md or commands/N.md under the secondmate home's .claude or the
+# account's user root; a plugin name P:N resolves through an enabled P@<market>
+# entry of the user root's plugins/installed_plugins.json. Built-ins and unknown
+# commands keep the marker in front and arrive as chat. Only the typed bytes
+# move: the pending-reply record, corr reuse, and the slash settle read the
+# original text. Typed bytes over 800 keep the marker in front, because Claude
+# turns a typed burst longer than 800 characters into a pasted block it never
+# parses as a command; the limit counts bytes on purpose, so multibyte text
+# falls back early rather than late. Every other marked typed message,
 # including "/" or "$" to a non-claude secondmate, keeps the marker in front
 # and reaches that harness as chat, not as a parser command.
 #
@@ -324,6 +328,40 @@ fm_send_normalize_key() { # <key>
   Escape | escape | Esc | esc) printf '%s' Escape ;;
   *) printf '%s' "$1" ;;
   esac
+}
+
+# Succeeds when <name> resolves to an installed skill or custom command of the
+# target secondmate's Claude. See "Secondmate slash commands" in the header.
+fm_send_claude_command_installed() { # <name>
+  local name=$1 account home user_root root plugin cmd key path settings
+  [[ $name =~ ^[A-Za-z0-9_-]+(:[A-Za-z0-9_-]+)?$ ]] || return 1
+  account=$(fm_meta_get "$TARGET_META" account)
+  case "$account" in
+  /*) user_root=$account ;;
+  ordinary) user_root=$HOME/.claude ;;
+  '') user_root=${CLAUDE_CONFIG_DIR:-$HOME/.claude} ;;
+  *) return 1 ;;
+  esac
+  home=$(fm_meta_get "$TARGET_META" home)
+  case "$name" in
+  *:*) ;;
+  *)
+    for root in ${home:+"$home/.claude"} "$user_root"; do
+      { [ -f "$root/skills/$name/SKILL.md" ] || [ -f "$root/commands/$name.md" ]; } && return 0
+    done
+    return 1
+    ;;
+  esac
+  plugin=${name%%:*}
+  cmd=${name#*:}
+  command -v jq >/dev/null 2>&1 || return 1
+  while IFS=$'\t' read -r key path; do
+    { [ -f "$path/skills/$cmd/SKILL.md" ] || [ -f "$path/commands/$cmd.md" ]; } || continue
+    for settings in "$user_root/settings.json" ${home:+"$home/.claude/settings.json"}; do
+      jq -e --arg k "$key" '.enabledPlugins[$k] == true' "$settings" >/dev/null 2>&1 && return 0
+    done
+  done < <(jq -r --arg p "$plugin@" '.plugins | to_entries[] | select(.key | startswith($p)) | .key as $k | .value[]? | .installPath | strings | [$k, .] | @tsv' "$user_root/plugins/installed_plugins.json" 2>/dev/null)
+  return 1
 }
 
 fm_send_record_interrupt() { # <key>
@@ -1241,10 +1279,12 @@ else
     case "$RESOLVE_ANSWER_TEXT" in
     /*)
       slash_command=${RESOLVE_ANSWER_TEXT%%[[:space:]]*}
-      slash_args=${RESOLVE_ANSWER_TEXT#"$slash_command"}
-      fm_pending_reply_embed_corr "${slash_args#[[:space:]]}" "$PENDING_REPLY_CORR" slash_args
-      slash_message="$slash_command $slash_args"
-      [ "$(printf '%s' "$slash_message" | wc -c)" -gt 800 ] || MESSAGE=$slash_message
+      if fm_send_claude_command_installed "${slash_command#/}"; then
+        slash_args=${RESOLVE_ANSWER_TEXT#"$slash_command"}
+        fm_pending_reply_embed_corr "${slash_args#[[:space:]]}" "$PENDING_REPLY_CORR" slash_args
+        slash_message="$slash_command $slash_args"
+        [ "$(printf '%s' "$slash_message" | wc -c)" -gt 800 ] || MESSAGE=$slash_message
+      fi
       ;;
     esac
   fi
