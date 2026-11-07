@@ -455,9 +455,10 @@ case "$SECONDMATE_LIVENESS_WINDOW_SECS" in ''|*[!0-9]*|0) SECONDMATE_LIVENESS_WI
 # pane is absorbed rather than wedge-escalated.
 # A captain-held or paused crew whose agent has confidently exited uses the same
 # bounded cadence, while a live or ambiguously read agent surfaces on first sight
-# and is then held to that same cadence; a secondmate earns the cadence on its
-# declaration alone, because its endpoint liveness is deliberately never read
-# (pause_state_class owns that split).
+# and is then held to that same cadence, unless its crew state and busy verdict
+# are both unknown, which takes the cadence from first sight; a secondmate earns
+# the cadence on its declaration alone, because its endpoint liveness is
+# deliberately never read (pause_state_class owns that split).
 # These cases re-surface once for a recheck every PAUSE_RESURFACE_SECS - far
 # longer than the wedge threshold, but finite so a forgotten wait cannot rot
 # invisibly - except an item held for the captain while the away-posture record
