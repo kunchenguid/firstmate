@@ -415,8 +415,11 @@ if [ "${FM_PR_CHECK_MERGE:-}" != 1 ]; then
   BASELINE_BACKUP=$(mktemp -d "$STATE/.fm-pr-baseline.XXXXXX") || exit 1
   for artifact in "$META" "$STATE/$ID.pr-poll-degraded" "$STATE/$ID.pr-poll-train" \
     "$STATE/$ID.check.sh" "$STATE/$ID.pr-poll" "$STATE/$ID.pr-poll-registration"; do
-    [ -e "$artifact" || [ -L "$artifact" ] || continue
-    cp -p -- "$artifact" "$BASELINE_BACKUP/$(basename "$artifact")" || exit 1
+    [ -e "$artifact" ] || [ -L "$artifact" ] || continue
+    [ -f "$artifact" ] && [ ! -L "$artifact" ] \
+      && [ "$(fm_pr_file_device "$artifact")" = "$STATE_DEVICE" ] \
+      && [ "$(fm_pr_file_link_count "$artifact")" = 1 ] || baseline_failure
+    cp -p -- "$artifact" "$BASELINE_BACKUP/$(basename "$artifact")" || baseline_failure
   done
   restore_baselines() {
     local artifact backup
