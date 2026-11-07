@@ -275,7 +275,7 @@ case " $* " in
           gone) printf '%s\n' '{"message":"404 Not found"}'; printf '%s\n' 'glab: 404 Not Found (HTTP 404)' >&2; exit 1 ;;
           fail) printf '%s\n' 'glab: 500 (HTTP 500)' >&2; exit 1 ;;
           neterr) printf '%s\n' 'glab: Get "https://gitlab.example/api/v4/projects/group%2Fproj404/merge_trains/merge_requests/1404": i/o timeout' >&2; exit 1 ;;
-          *) printf '%s\n' '[]' ;;
+          *) printf '%s\n' 'glab: 404 Not Found (HTTP 404)' >&2; exit 1 ;;
         esac
         ;;
       *merge_trains)
