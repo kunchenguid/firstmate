@@ -3388,7 +3388,7 @@ teardown_herdr_require_prerequisites() {  # <task-id>
 }
 
 teardown_herdr_preflight_target() {  # <target> <task-id>
-  local target=$1 task_id=$2 session pane presence lock_path verified_lock_path lock_session held_path attempt
+  local target=$1 task_id=$2 session pane presence reason lock_path verified_lock_path lock_session held_path attempt
   teardown_herdr_require_prerequisites "$task_id" || return 1
   if ! fm_backend_herdr_parse_target "$target"; then
     echo "error: herdr endpoint $target for $task_id could not be parsed exactly; nothing was changed - repair the endpoint metadata and rerun teardown" >&2
@@ -3400,7 +3400,12 @@ teardown_herdr_preflight_target() {  # <target> <task-id>
   case "$presence" in
     dead|present) ;;
     *)
-      echo "error: herdr endpoint $target for $task_id has ambiguous structured presence; nothing was changed - restore reliable endpoint inspection and rerun teardown" >&2
+      reason=
+      if declare -F fm_backend_herdr_pane_presence_reason >/dev/null 2>&1; then
+        reason=$(fm_backend_herdr_pane_presence_reason "$session" "$pane")
+      fi
+      [ -n "$reason" ] || reason="the cause could not be re-read"
+      echo "error: herdr endpoint $target for $task_id has ambiguous structured presence ($reason); nothing was changed - restore reliable endpoint inspection and rerun teardown" >&2
       return 1
       ;;
   esac

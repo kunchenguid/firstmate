@@ -2139,18 +2139,58 @@ fm_backend_herdr_container_ensure() {  # <cwd-for-a-fresh-workspace> [<launcher-
   printf '%s:%s\t%s' "$session" "$FM_BACKEND_HERDR_WS_ID" "$FM_BACKEND_HERDR_WS_SEEDED_TAB_ID"
 }
 
-# fm_backend_herdr_pane_presence_state: classify one exact pane get response
+# fm_backend_herdr_pane_presence_classify: classify one exact pane get response
 # as dead|present|unknown from its JSON body, never from process exit status.
-fm_backend_herdr_pane_presence_state() {  # <session> <pane_id>
-  local session=$1 pane_id=$2 out code pid
+# Prints "<state>\t<reason>"; the reason is empty for dead and present, and for
+# unknown names which of the three causes applied: a herdr error code other
+# than pane_not_found, a response that is empty or not JSON, or a response
+# whose pane id does not match the one asked for.
+fm_backend_herdr_pane_presence_classify() {  # <session> <pane_id>
+  local session=$1 pane_id=$2 out code pid snippet
   out=$(fm_backend_herdr_cli "$session" pane get "$pane_id" 2>&1)
   code=$(printf '%s' "$out" | jq -r '.error.code // empty' 2>/dev/null)
   if [ -n "$code" ]; then
-    [ "$code" = "pane_not_found" ] && printf 'dead' || printf 'unknown'
+    if [ "$code" = "pane_not_found" ]; then
+      printf 'dead\t'
+    else
+      printf 'unknown\therdr returned error code %s' "$(printf '%s' "$code" | tr -d '\t\r\n' | cut -c1-80)"
+    fi
+    return 0
+  fi
+  if ! printf '%s' "$out" | jq -e . >/dev/null 2>&1; then
+    snippet=$(printf '%s' "$out" | tr '\t\r\n' '   ' | cut -c1-80)
+    if [ -n "$snippet" ]; then
+      printf 'unknown\therdr returned a non-JSON response: %s' "$snippet"
+    else
+      printf 'unknown\therdr returned an empty response'
+    fi
     return 0
   fi
   pid=$(printf '%s' "$out" | jq -r '.result.pane.pane_id // empty' 2>/dev/null)
-  [ "$pid" = "$pane_id" ] && printf 'present' || printf 'unknown'
+  if [ "$pid" = "$pane_id" ]; then
+    printf 'present\t'
+  elif [ -n "$pid" ]; then
+    printf 'unknown\therdr returned pane id %s, not the requested %s' \
+      "$(printf '%s' "$pid" | tr -d '\t\r\n' | cut -c1-80)" "$pane_id"
+  else
+    printf 'unknown\therdr response carried no pane id'
+  fi
+}
+
+# fm_backend_herdr_pane_presence_state: dead|present|unknown on stdout, unchanged
+# for every caller; the unknown cause is fm_backend_herdr_pane_presence_reason.
+fm_backend_herdr_pane_presence_state() {  # <session> <pane_id>
+  local result
+  result=$(fm_backend_herdr_pane_presence_classify "$1" "$2")
+  printf '%s' "${result%%$'\t'*}"
+}
+
+# fm_backend_herdr_pane_presence_reason: one bounded line saying why a fresh
+# pane get is unknown, empty when it classifies dead or present.
+fm_backend_herdr_pane_presence_reason() {  # <session> <pane_id>
+  local result
+  result=$(fm_backend_herdr_pane_presence_classify "$1" "$2")
+  printf '%s' "${result#*$'\t'}"
 }
 
 fm_backend_herdr_workspace_presence_state() {  # <session> <workspace_id>
