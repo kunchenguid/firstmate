@@ -3,9 +3,31 @@
 #
 # Mechanical half of the /updatefirstmate skill. Fast-forwards the running
 # firstmate repo's default branch from origin, then fast-forwards every
-# registered secondmate home. Local homes are treehouse worktrees or standalone
-# clones; remote routes update their configured code root on that host and then
-# fast-forward the persistent home to that root. FAST-FORWARD ONLY, exactly like
+# registered secondmate home.
+#
+# Self-update source. The optional local, gitignored, not-inherited
+# $FM_HOME/config/self-update-source replaces origin as the source for this
+# command ONLY. It holds one line, "<remote> <branch>", naming a remote that
+# already exists in this repository and a branch on it (for example a fork
+# branch carrying unmerged fixes on top of upstream). When it is present:
+#   - the primary fetches exactly that branch into refs/remotes/<remote>/<branch>
+#     and fast-forwards to it under the same guards as the origin path;
+#   - local secondmates advance to the primary's resulting default-branch commit
+#     (the same commit the startup secondmate sync follows), importing it from
+#     the primary first when a standalone clone lacks it;
+#   - a remote secondmate is unchanged: its host runs its own copy of this
+#     command, which reads the config of that host's code root, so a remote
+#     home follows the source only when that code root has the same file.
+# Absent, behaviour is exactly the origin path. A present but unreadable or
+# malformed file, an unknown remote, or an invalid branch name stops the whole
+# update before anything moves; it never falls back to origin. Nothing else
+# reads the file: worker spawns, review diffs, the cleanup landed-work test,
+# lint, and default-branch detection keep using origin. The fast-forward-only
+# guards still apply, so the named branch must only ever move forward.
+#
+# Local homes are treehouse worktrees or standalone clones; remote routes update
+# their configured code root on that host and then fast-forward the persistent
+# home to that root. FAST-FORWARD ONLY, exactly like
 # fm-fleet-sync.sh: never force, never create a merge commit, never stash.
 # A secondmate divergence whose complete local tree result is already present at
 # the target is reconciled with reset --keep; every other unsafe target is
@@ -28,8 +50,8 @@
 #   - one status line per target (updated/already current/skipped)
 #   - reread-firstmate: yes|no    (did the running firstmate's instructions change)
 #   - restart-secondmates: fm-<id>...|none (every live secondmate this pass left
-#     on origin's tip - advanced OR already there - whose recorded runtime can
-#     prove a restart)
+#     on the update target's tip - advanced OR already there - whose recorded
+#     runtime can prove a restart)
 #   - nudge-secondmates: fm-<id>...|none   (the residual: live secondmates on
 #     that same tip whose runtime CANNOT prove a restart, so the older re-read
 #     steer is all that is honest for them)
@@ -85,10 +107,71 @@ if [ "${1:-}" = "--help" ] || [ "${1:-}" = "-h" ]; then
 fi
 [ $# -eq 0 ] || { usage; exit 1; }
 
+# --- self-update source ----------------------------------------------------
+
+SELF_UPDATE_SOURCE_FILE="$FM_HOME/config/self-update-source"
+SELF_UPDATE_REMOTE=""
+SELF_UPDATE_BRANCH=""
+
+self_update_source_refuse() {  # <reason>
+  echo "error: $SELF_UPDATE_SOURCE_FILE: $1; fix it or remove it to update from origin" >&2
+  exit 1
+}
+
+# Parse config/self-update-source into SELF_UPDATE_REMOTE and SELF_UPDATE_BRANCH.
+# Absent leaves both empty (the origin path); anything present but unusable exits.
+read_self_update_source() {
+  local content remote branch extra lines
+  [ -e "$SELF_UPDATE_SOURCE_FILE" ] || [ -L "$SELF_UPDATE_SOURCE_FILE" ] || return 0
+  if [ -L "$SELF_UPDATE_SOURCE_FILE" ] || [ ! -f "$SELF_UPDATE_SOURCE_FILE" ] \
+    || [ ! -r "$SELF_UPDATE_SOURCE_FILE" ]; then
+    self_update_source_refuse "not a readable regular file"
+  fi
+  content=$(cat "$SELF_UPDATE_SOURCE_FILE") || self_update_source_refuse "cannot be read"
+  lines=$(printf '%s\n' "$content" | grep -c '')
+  [ "$lines" -eq 1 ] || self_update_source_refuse "expected exactly one line \"<remote> <branch>\""
+  case "$content" in
+    *[[:cntrl:]]*) self_update_source_refuse "contains a control character" ;;
+  esac
+  read -r remote branch extra <<EOF
+$content
+EOF
+  if [ -z "$remote" ] || [ -z "$branch" ] || [ -n "$extra" ]; then
+    self_update_source_refuse "expected exactly one line \"<remote> <branch>\""
+  fi
+  case "$remote" in
+    -*|*/*) self_update_source_refuse "invalid remote name '$remote'" ;;
+  esac
+  git -C "$FM_ROOT" remote get-url "$remote" >/dev/null 2>&1 \
+    || self_update_source_refuse "remote '$remote' does not exist in $FM_ROOT"
+  case "$branch" in
+    -*) self_update_source_refuse "invalid branch name '$branch'" ;;
+  esac
+  git check-ref-format "refs/heads/$branch" >/dev/null 2>&1 \
+    || self_update_source_refuse "invalid branch name '$branch'"
+  SELF_UPDATE_REMOTE=$remote
+  SELF_UPDATE_BRANCH=$branch
+}
+
+read_self_update_source
+
 # --- main firstmate repo ---------------------------------------------------
 
 reread_firstmate="no"
-ff_target "$FM_ROOT" "firstmate" origin no no
+if [ -n "$SELF_UPDATE_REMOTE" ]; then
+  echo "self-update source: $SELF_UPDATE_REMOTE $SELF_UPDATE_BRANCH (config/self-update-source)"
+  primary_base="refs/remotes/$SELF_UPDATE_REMOTE/$SELF_UPDATE_BRANCH"
+  if git -C "$FM_ROOT" fetch --quiet --no-tags "$SELF_UPDATE_REMOTE" \
+    "+refs/heads/$SELF_UPDATE_BRANCH:$primary_base" 2>/dev/null; then
+    ff_target "$FM_ROOT" "firstmate" "$primary_base" no no
+  else
+    FF_STATUS="skipped"
+    FF_INSTR=""
+    echo "firstmate: skipped: fetch of $SELF_UPDATE_REMOTE $SELF_UPDATE_BRANCH failed"
+  fi
+else
+  ff_target "$FM_ROOT" "firstmate" origin no no
+fi
 if [ "$FF_STATUS" = "updated" ]; then
   if [ -n "$FF_INSTR" ]; then
     reread_firstmate="yes"
@@ -105,10 +188,10 @@ if [ "$FF_STATUS" = "updated" ]; then
 fi
 
 # --- secondmates -----------------------------------------------------------
-# Every live secondmate this pass leaves on origin's tip is restarted, whether it
-# advanced or was already there. The header above owns why the git diff does not
-# gate that, and which two conditions - a skipped home, an unprovable runtime -
-# are the only ways a live mate stays out of the restart set.
+# Every live secondmate this pass leaves on the update target is restarted,
+# whether it advanced or was already there. The header above owns why the git
+# diff does not gate that, and which two conditions - a skipped home, an
+# unprovable runtime - are the only ways a live mate stays out of the restart set.
 
 # FF_NUDGE_WINDOWS and FF_SEEN_HOMES are the sweep's own accumulators and are
 # reset here per its contract; the instruction-gated nudge set is the session-start
@@ -171,9 +254,24 @@ fm_ff_after_secondmate_settled() {  # <id> <home> <window> <status> <instr>
   claim_settled_secondmate "$1"
 }
 
+# The local secondmate target: origin by default, or the primary's resulting
+# default-branch commit under a configured self-update source (see header).
+secondmate_base=origin
+if [ -n "$SELF_UPDATE_REMOTE" ]; then
+  if secondmate_base=$(primary_head_commit "$FM_ROOT"); then
+    FF_IMPORT_FROM="$FM_ROOT"
+  else
+    secondmate_base=""
+  fi
+fi
+
 # Live direct reports first: state/<id>.meta with kind=secondmate carries the
 # authoritative home= path.
-sweep_live_secondmate_metas "$STATE" origin yes
+if [ -n "$secondmate_base" ]; then
+  sweep_live_secondmate_metas "$STATE" "$secondmate_base" yes
+else
+  echo "local secondmates: skipped: primary default-branch commit cannot be resolved"
+fi
 
 # Registry backstop: a secondmate registered in data/secondmates.md but without
 # a live meta (e.g. between restarts) is still its persistent on-disk home.
@@ -229,8 +327,8 @@ if [ -f "$SECONDMATES_MD" ]; then
       else
         echo "remote secondmate $id: skipped on $SECONDMATE_REGISTRY_HOST: ${remote_out%%$'\n'*}" >&2
       fi
-    else
-      process_secondmate "$id" "$home" "" origin yes
+    elif [ -n "$secondmate_base" ]; then
+      process_secondmate "$id" "$home" "" "$secondmate_base" yes
     fi
   done < "$SECONDMATES_MD"
 fi

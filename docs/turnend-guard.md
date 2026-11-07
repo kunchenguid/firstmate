@@ -24,6 +24,7 @@ Do not infer this guard's scope, loop safety, or compatibility tradeoffs for tho
 | How each harness blocks or follows up | [Harness integrations](#harness-integrations) |
 | Claude's Stop auto-arm cooperation, block budget, and fail-open | [Claude cooperative mode](#claude-cooperative-mode) |
 | Cursor's parked hook | [Cursor park](#cursor-park) |
+| Antigravity's parked hook | [Antigravity park](#antigravity-park) |
 | Known gaps | [Compatibility limits](#compatibility-limits) |
 | Tests and live evidence | [Regression coverage](#regression-coverage) |
 
@@ -96,7 +97,7 @@ The guard cooperates with that arm rather than trusting a beacon left by the cyc
 
 ### Foreign session-lock owner
 
-When an active home instead has a live session lock held by a verified harness that the current session does not own, the Claude guard emits a read-only ownership diagnostic and allows the turn to end safely.
+When an active home instead has a session lock that the current session does not own and the shared `fm_session_lock_pid_blocks_reclaim` verdict refuses to reclaim, the Claude guard emits a read-only ownership diagnostic and allows the turn to end safely.
 
 Ownership is the shared `fm_session_lock_owned_by_self` verdict in `bin/fm-session-lock-lib.sh`.
 The current session owns the lock when either of these holds:
@@ -262,6 +263,7 @@ Each enabled primary harness adapts its own turn-end mechanism to the shared gua
 | omp | `session_stop` in `.omp/extensions/fm-primary-turnend-guard.ts` | Blocking hook that compels one continuation |
 | Cursor | `stop` hook in `.cursor/hooks.json` | Cannot block, so it parks and returns at most one follow-up |
 | Grok | `Stop` hook in `.grok/hooks/fm-primary-turnend-guard.json` | Native blocking, or one legacy `grok --resume` fallback |
+| Antigravity | `Stop` hook in `.agents/hooks.json` | Synchronous Stop-hook park running `bin/fm-watch-arm.sh` (or the supervision host) with bounded repair nag via `bin/fm-turnend-guard.sh --agy` |
 
 The registrations in detail:
 
@@ -270,7 +272,10 @@ The registrations in detail:
   It records idle when it allows the Stop and busy when its exit 2 blocks it into a continuation, because Claude runs Stop hooks in parallel and that continuation fires no `UserPromptSubmit`.
   A home whose guard predates `.fm-busy-stop` cannot close the turn, so that launch keeps the ordinary `Stop` idle hook instead.
   [Runtime backend verification](verification/runtime-backends.md#secondmate-busy-contract) owns the live evidence.
-- Codex registers a `Stop` hook in `.codex/hooks.json`, anchors the executable to the hook process working directory, verifies a Firstmate-shaped hook-bearing root, and passes the original payload to the shared guard.
+- Codex registers a synchronous `Stop` hook in `.codex/hooks.json`, anchors the executable to the hook process working directory, verifies a Firstmate-shaped hook-bearing root, and passes the original payload to the shared guard through `bin/fm-codex-stop-park.sh --guard` when that script is present.
+  Its inner wrapper uses non-login Bash with the inherited PATH to avoid login/logout output contaminating the hook response.
+  Allowed stops return one literal `{}` object; nonzero exits and stderr retain the shared guard's error or bounded-continuation behavior.
+  [Runtime backend verification](verification/runtime-backends.md#stop-response-parsing) owns the parser evidence and its portable and token-free live regression entry points.
 - OpenCode subscribes to the terminal `session.execution.succeeded`, `session.execution.failed`, and `session.execution.interrupted` events through `ctx.event.subscribe` in `.opencode/plugins/fm-primary-turnend-guard.js`, latched to the root worker session so child-session turns do not trip it, lets the watcher coordinator act first, and calls `ctx.session.prompt` once when the guard returns 2. The legacy OpenCode 1 `session.idle` + `client.session.promptAsync` path is retained in the plugin's `server` export.
 - Pi listens for `agent_settled` in `.pi/extensions/fm-primary-turnend-guard.ts`, runs once per logical agent run, and calls `pi.sendUserMessage(..., { deliverAs: "followUp" })` once when the guard returns 2.
 - omp answers its blocking `session_stop` hook in `.omp/extensions/fm-primary-turnend-guard.ts`, passing the payload's own `stop_hook_active` to the shared guard.
@@ -301,12 +306,17 @@ The registrations in detail:
   The discriminator is the payload's own `transcript_path`, not the environment and not the shared foreign-host predicate above.
   pi-code stamps it with Pi's session file under `/.pi/`, a path component a Claude transcript never carries.
   The stand-down fails toward running, matching the guards above, so no payload, no `jq`, or no `transcript_path` still arms, and every other Claude-shaped hook pi-code delivers keeps running.
+- Antigravity registers a `Stop` hook in `.agents/hooks.json` with a 28800s timeout, anchoring commands safely to the project root and delegating the turn boundary to `bin/fm-turnend-guard-agy.sh`.
+  In linked crewmate worktrees or foreign checkouts, the wrapper stands down immediately with `{}`.
+  In primary or persistent secondmate homes, the hook parks synchronously on `bin/fm-watch-arm.sh` (or `bin/fm-supervision-host.sh park` on a home that runs the host), keeping supervision continuity alive until an incoming wake event arrives or a bounded repair nag is returned via `bin/fm-turnend-guard.sh --agy`.
 
 ### Claude and Codex blocking
 
 Claude and Codex can block a Stop directly with exit status 2 and stderr.
 Both payloads carry `stop_hook_active`.
-In the default Codex mode, a true value lets the second stop finish after one forced continuation.
+In the default foreground-checkpoint Codex mode, a true value lets the second stop finish after one forced continuation.
+The tracked Codex Stop hook runs this guard through `bin/fm-codex-stop-park.sh --guard`, which adds behavior only for a native park session on a home that [opts in](configuration.md#codex-native-stop-park-configcodex-stop-park): while supervision is needed it accepts a live session-bound park or an immediate queued-wake handoff, blocks the Stop and latches the session to foreground fallback when no park owner appears within the startup grace, blocks a latched session's Stop while supervision is still needed, and otherwise runs this guard.
+[The Codex protocol](supervision-protocols/codex.md) owns that mode and its failure behavior.
 
 ### Claude cooperative mode
 
@@ -343,8 +353,9 @@ A claim is open while all of these hold:
 - Its owner is still reachable by its session: it descends from the numeric pid in `state/.lock`, or, for a tagged Windows holder outside the local process table, its recorded `owner_session_id` matches the trusted session id in `state/.lock-session` while the session-lock identity recorded on entry line 3 still recomputes from that lock's holder.
 - It is not stuck.
 
-Stuck means the entry and the watcher beacon are both older than the guard grace, which proves the owner hung mid-arm.
-A healthy hours-long foregrounded cycle keeps the beacon beating, and every arming phase with no watcher is bounded in seconds.
+The guard classifies an owner as stuck when the entry and the watcher beacon are both older than the guard grace.
+A healthy hours-long foregrounded cycle keeps the beacon beating.
+An unconfirmed startup follows the [arm backstop and safe-interruption contract](watcher-continuity.md#startup-interruption-window), not an unconditional arming deadline.
 A missing or unusable lock means no session can receive a rewake, so such a claim is never open.
 The reachability test is what makes an open claim deliverable: a hook whose session exited mid-cycle stays alive with no parent to receive its exit 2, so deferring to it would leave the replacement session deaf until a captain turn.
 The session-id signal is the second one the claiming hook's own admission accepts, so a background session whose bridge is recycled mid-cycle - breaking the ancestry to its still-live lock owner - keeps its live claim instead of being double-armed.
@@ -388,7 +399,7 @@ Two bounded residuals are accepted intent, each costing at most one extra contin
 A legacy build's lock-holding claim (recognizable by its `autoarm` role file) still defers or reclaims under the legacy abandonment proof.
 A live identity-verified stuck legacy owner is retired via TERM before its lock is removed, and an unverified pid is never signalled.
 An upgrade mid-session can therefore neither double-arm nor deadlock, and a failed reclaim re-blocks rather than allowing a blind stop.
-The one exception is the UTC pid-identity upgrade-window residual that `fm_pid_identity` in [`bin/fm-wake-lib.sh`](../bin/fm-wake-lib.sh) owns: on a /proc-less host outside UTC, a pre-upgrade claim's recorded identity can read as reused until the post-update restart.
+The one exception is the UTC pid-identity upgrade-window residual that `fm_pid_identity` in [`bin/fm-wake-lib.sh`](../bin/fm-wake-lib.sh) owns: on a /proc-less host outside UTC, a pre-upgrade claim's recorded identity can read as reused until the next lock claim replaces that holder.
 
 #### Failure progression and block budget
 
@@ -396,7 +407,13 @@ Fresh `failed` and `failed-suppressed` outcomes enter or advance the failure pro
 The auto-arm itself rechecks the healthy watcher predicate and retries a bounded number of times before reporting a genuine failure.
 
 The foreground arm legitimately follows a healthy watcher until its next wake.
-The hook therefore catches HUP, TERM, and INT from host timeout or teardown and commits the ordinary durable failed outcome and failure-notice marker before exiting 2 for a recovery turn.
+The hook catches HUP, TERM, and INT from host timeout or teardown.
+If the producing session no longer matches the lock's process identity and recorded session id, the hook records `session-ended` and exits 0 silently without creating a failure notice.
+The existing trusted-session ownership proof preserves that match across a verified same-session lock re-anchor.
+While that session remains current, interruptions use the ordinary failure progression, including its notice deduplication, attended-alarm limits, and the [attended exhaustion decision](#attended-fail-open).
+An interruption notice carries the producing session's lock-holder identity and recorded session id, which are rechecked under the auto-arm owner lock before committing the failure.
+Before taking its first generation, a replacement that no longer matches that session clears the interrupted episode's notice, attended alarm, and block budget, so its first genuine failure can notify even if a process number and executable path are reused.
+Empty legacy markers and ordinary failure notices retain their existing behavior.
 Claude drops that exit 2 when it terminated the hook at the configured timeout itself, so a park that outlives the timeout ends without a rewake (`bin/fm-claude-stop-autoarm.sh` header).
 
 The first fresh exhausted-failure epoch preserves its handoff without consuming a blocked-stop count.
@@ -412,8 +429,8 @@ The block budget is charged by two rules:
 That second rule still bounds an inert auto-arm when a hook never fires or fails before its generation claim and therefore leaves the ledger frozen at its last outcome.
 Charging only epoch changes let the count freeze with that ledger, so the remaining inert-hook cases could re-block without limit and make the attended fail-open unreachable.
 `budget_account_current_epoch` in `bin/fm-turnend-guard.sh` owns the rule.
-A verified live foreign session-lock owner takes the earlier diagnostic safe exit instead and never reaches this budget path.
-Whenever both coordination locks are needed, positive auto-arm recovery and the terminal check acquire the auto-arm owner lock before the budget lock.
+A live foreign session-lock owner takes the earlier diagnostic safe exit instead and never reaches this budget path.
+Whenever both coordination locks are needed, positive auto-arm recovery, the terminal check, and the auto-arm's attended-alarm commit acquire the auto-arm owner lock before the budget lock.
 
 #### Attended fail-open
 
@@ -424,9 +441,16 @@ The one loud attended fail-open is available only when all of these hold:
 - The block budget is exhausted.
 - A final check finds neither a healthy watcher nor an automatic continuation.
 
-After that alarm, the Stop auto-arm suppresses further exit-2 continuations until positive watcher recovery, so the final fail-open remains reachable.
+Two writers can commit `state/.claude-autoarm-failure-alarmed`, both under the same owner-then-budget lock order:
+
+- The guard's `terminal_fail_open`, when a Stop reaches it with the budget already exhausted and no live open generation claim.
+- The Stop auto-arm's own terminal failure: the exhausted continuation is the one participant that knows no automatic continuation remains, so when this session's consumed block count is already over budget it commits the alarm in the same owned critical section as its `failed-suppressed` ledger write and delivers the one loud final rewake.
+  Every failed-suppressed continuation - an ordinary exhausted failure, a lost supervision-host hand-back, an interrupted hook, or a refused healthy-watcher reset - takes this one exhaustion decision before it commits another retry, because the guard's claim-open step-aside would otherwise leave the alarm unwritten on every Stop.
+
+After that alarm, the Stop auto-arm suppresses further exit-2 continuations until the episode resets, so the final fail-open remains reachable.
+[Failure progression and block budget](#failure-progression-and-block-budget) owns the reset boundaries, including positive watcher recovery and replacement-session isolation of an interrupted episode.
 The alarm cannot repeat during that failure episode, and a later unhealthy stop blocks again.
-A positively verified healthy watcher clears the failure notice, alarm, and block budget for a future independent episode.
+Every suppressed continuation in the episode emits one reason line instead of an empty rewake body, stating why no operator notice repeats and whether a Stop-owned retry stays scheduled.
 A Claude failure notice describes the automatic mechanism as broken and does not direct a routine manual background arm.
 
 ### Passive adapters
@@ -524,6 +548,22 @@ Cursor's `beforeSubmitPrompt` step fires once on a real captain message and does
 The step is now registered only for the [dialog mirror](supervision-host.md#the-dialog-mirror); it does not invalidate the park baton.
 Baton invalidation and the `preCompact` surface remain deferred.
 
+### Antigravity park
+
+Antigravity CLI evaluates project-local `.agents/hooks.json` (Stop event) at the end of every agent turn.
+Like Cursor, Antigravity does not expose an asynchronous background rewake channel on Stop.
+`bin/fm-turnend-guard-agy.sh` parks the Stop hook on a tracked child, following the [Cursor park](#cursor-park): `bin/fm-watch-arm.sh`, or `bin/fm-supervision-host.sh park` with `FM_SUPERVISION_HOST_PRIMARY=agy` on a home that runs the supervision host.
+It polls the child every `FM_AGY_PARK_POLL` seconds (default 2) and waits on it under the 28800s hook timeout, so an idle watcher cycle forces no model turn and consumes no `executionNum`; the optional `FM_AGY_PARK_TIMEOUT` bounds the total wait across every attempt:
+
+- An actionable close (a watcher reason line, or a `supervision-host:` line in host mode) resets `state/.turnend-blocks` and returns `{"decision":"continue","reason":"<wake>"}` on stdout, immediately starting a follow-up supervision turn.
+- When an `FM_AGY_PARK_TIMEOUT` bound is set and passes with the child still running, the hook stops the child and returns `{"decision":"continue","reason":"[supervision-park] ..."}` so the next turn boundary parks again.
+- A non-actionable close beside a verified healthy watcher, a host that stood down, or a fleet that no longer needs supervision resets `state/.turnend-blocks`, emits `{}`, and lets the turn end cleanly.
+- A park that cannot establish a cycle after two bounded attempts delegates to `bin/fm-turnend-guard.sh --agy` for a bounded 3-block repair nag before failing open.
+
+Before parking, the hook stands down with `{}` in crewmate or scout linked worktrees, passes through non-normal termination reasons, and verifies session-lock ownership so a foreign session never steals supervision.
+When `executionNum` reaches the loop ceiling (`FM_AGY_TURNEND_LOOP_CEILING`, default 180) while supervision is still needed, it returns one ceiling notice instead of parking; past the ceiling it emits `{}`.
+Each invocation publishes a unique claim in `state/.agy-park-owner` and yields cleanly with `{}` if a newer Stop hook supersedes this park while waiting.
+
 ### Adapter failures in the pull guard
 
 If a passive adapter cannot invoke its SDK, or the Grok legacy fallback cannot find `grok` or a session id, the next pull-based `fm-guard.sh` call reports the problem.
@@ -561,6 +601,7 @@ That warning uses `bin/fm-supervision-instructions.sh --repair-line`, so it alwa
 - The cooperative `--claude` open-generation claim wait.
 - Monotonic failed-epoch progression.
 - Bounded attended fail-open.
+- Auto-arm-owned exhaustion alarms while the guard steps aside for open claims, including ordinary failures, pending and announced lost host hand-backs, and interruptions.
 - The same bound against a ledger frozen by an inert auto-arm with and without a verified failure episode.
 - Post-alarm continuation suppression.
 - Positive recovery reset.

@@ -32,6 +32,14 @@ cat > "$DATA/projects.md" <<'EOF'
 - reviewed-yolo [direct-PR +yolo forge=external] - +yolo cannot apply to an external review (added 2026-01-01)
 - reviewed-local [local-only forge=external] - an external review on a mode that publishes nothing (added 2026-01-01)
 - near-miss [direct-PR forg=external] - a near miss of the forge key (added 2026-01-01)
+- hand [no-mistakes pr=manual] - the worker writes the PR text (added 2026-01-01)
+- hand-first [pr=manual no-mistakes +yolo branch=] - pr token first, order must not matter (added 2026-01-01)
+- hand-prod [no-mistakes-prod-only pr=manual] - conditional policy keeps the binding (added 2026-01-01)
+- hand-direct [direct-PR pr=manual] - direct-PR already leaves the text to the worker (added 2026-01-01)
+- hand-local [local-only pr=manual] - local-only opens no PR (added 2026-01-01)
+- hand-forgejo [no-mistakes forge=forgejo pr=manual] - a bound forge (added 2026-01-01)
+- hand-empty [no-mistakes pr=] - an empty value (added 2026-01-01)
+- hand-auto [no-mistakes pr=auto] - auto is the absence of the token, not a value (added 2026-01-01)
 EOF
 
 run_mode() {
@@ -106,5 +114,51 @@ pass "fm-project-mode: forge=external binds direct-PR, reports yolo=off with a r
 [ "$(FM_DATA_OVERRIDE="$TMP_ROOT/no-such-dir" "$PROJECT_MODE" --forge legacy 2>/dev/null)" = "none" ] \
   || fail "an absent registry file must default --forge to none"
 pass "fm-project-mode: a missing project or absent registry defaults --forge to none"
+
+run_pr() {
+  FM_DATA_OVERRIDE="$DATA" "$PROJECT_MODE" --pr "$1" 2>/dev/null
+}
+
+[ "$(run_pr legacy)" = "auto" ] || fail "an entry with no pr token must report pr auto: $(run_pr legacy)"
+[ "$(run_pr flagged)" = "auto" ] || fail "mode and +yolo with no pr token must report pr auto: $(run_pr flagged)"
+[ "$(run_pr missing-project)" = "auto" ] || fail "a missing project must default --pr to auto: $(run_pr missing-project)"
+[ "$(FM_DATA_OVERRIDE="$TMP_ROOT/no-such-dir" "$PROJECT_MODE" --pr legacy 2>/dev/null)" = "auto" ] \
+  || fail "an absent registry file must default --pr to auto"
+pass "fm-project-mode: an entry with no pr token, a missing project, or an absent registry reports pr auto"
+
+[ "$(run_pr hand)" = "manual" ] || fail "pr=manual did not resolve: $(run_pr hand)"
+[ "$(run_mode hand)" = "no-mistakes off" ] || fail "pr=manual changed the two-word output: $(run_mode hand)"
+[ "$(run_forge hand)" = "none" ] || fail "pr=manual changed the forge: $(run_forge hand)"
+err=$(FM_DATA_OVERRIDE="$DATA" "$PROJECT_MODE" hand 2>&1 >/dev/null)
+[ -z "$err" ] || fail "a registered pr=manual warned: $err"
+[ "$(run_pr hand-first)" = "manual" ] || fail "pr=manual placed first did not resolve: $(run_pr hand-first)"
+[ "$(run_mode hand-first)" = "no-mistakes on" ] || fail "pr=manual placed first displaced the mode or +yolo: $(run_mode hand-first)"
+[ "$(FM_DATA_OVERRIDE="$DATA" "$PROJECT_MODE" --branch-prefix hand-first 2>/dev/null)" = "" ] \
+  || fail "pr=manual placed first displaced the empty branch= override"
+pass "fm-project-mode: pr=manual binds in any token order and leaves mode, yolo, forge, and branch alone"
+
+[ "$(run_pr hand-prod)" = "manual" ] || fail "pr=manual on the conditional policy did not resolve: $(run_pr hand-prod)"
+[ "$(FM_DATA_OVERRIDE="$DATA" "$PROJECT_MODE" --raw hand-prod 2>/dev/null)" = "no-mistakes-prod-only off" ] \
+  || fail "pr=manual changed the raw conditional-policy output"
+pass "fm-project-mode: pr=manual is kept on a no-mistakes-prod-only project"
+
+for name in hand-direct hand-local hand-forgejo hand-empty hand-auto; do
+  for flag in "" --pr; do
+    # shellcheck disable=SC2086 # An empty flag must expand to nothing.
+    out=$(FM_DATA_OVERRIDE="$DATA" "$PROJECT_MODE" $flag "$name" 2>/dev/null)
+    status=$?
+    [ "$status" -eq 3 ] || fail "$name did not refuse${flag:+ under $flag} (status $status, got '$out')"
+    [ -z "$out" ] || fail "a refused $name still handed the caller a posture: '$out'"
+  done
+  [ "$(FM_DATA_OVERRIDE="$DATA" "$PROJECT_MODE" --forge "$name" 2>/dev/null)" != "" ] \
+    || fail "--forge refused over the pr token of $name"
+done
+err=$(FM_DATA_OVERRIDE="$DATA" "$PROJECT_MODE" --pr hand-empty 2>&1 >/dev/null)
+assert_contains "$err" "empty PR-text binding" "the empty pr= refusal did not name the empty value"
+err=$(FM_DATA_OVERRIDE="$DATA" "$PROJECT_MODE" --pr hand-auto 2>&1 >/dev/null)
+assert_contains "$err" "pr=manual" "the unknown pr value refusal did not name the accepted value"
+err=$(FM_DATA_OVERRIDE="$DATA" "$PROJECT_MODE" --pr hand-direct 2>&1 >/dev/null)
+assert_contains "$err" "only a no-mistakes ship takes it" "the direct-PR refusal did not say why"
+pass "fm-project-mode: pr=manual refuses another mode, a bound forge, an empty value, and an unknown value, but leaves --forge answerable"
 
 echo "# fm-project-mode.test.sh: all assertions passed"
