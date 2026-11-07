@@ -491,6 +491,86 @@ test_unreadable_holders_refuse_admission() {
   pass "an unreadable state directory or task record refuses admission rather than undercounting"
 }
 
+# Unreadable registries must not hide a descendant's capacity holder, whether
+# the failing home is in the middle or at the end of the local walk.
+test_unreadable_registry_and_config_refuse_admission() {
+  local case_dir root a b g target label out rc before worktrees direct_out direct_rc wt
+  if [ "$(id -u)" = 0 ]; then
+    printf 'ok - skipped the unreadable-registry/config case (root reads files regardless of mode)\n'
+    return 0
+  fi
+  case_dir=$(make_case unreadable-registry task-c)
+  root="$case_dir/home"
+  a="$case_dir/a"
+  b="$case_dir/b"
+  g="$case_dir/g"
+  make_home "$a"
+  make_home "$b"
+  make_home "$g"
+  printf -- '- g - a local mate (home: %s; scope: project work; projects: project; added 2026-09-01)\n' "$g" \
+    > "$a/data/secondmates.md"
+  declare_capacity "$root" "project 1"
+  write_live "$g" live-g "$case_dir/project"
+  wt=$(new_worktree "$case_dir" task-c)
+  before=$(call_count "$case_dir")
+  worktrees=$(worktree_list "$case_dir")
+  for label in registry-middle registry-last root-data mate-data root-config; do
+    if [ "$label" = registry-last ]; then
+      printf -- '- b - a local mate (home: %s; scope: project work; projects: project; added 2026-09-01)\n' "$b" > "$root/data/secondmates.md"
+      printf -- '- a - a local mate (home: %s; scope: project work; projects: project; added 2026-09-01)\n' "$a" >> "$root/data/secondmates.md"
+    else
+      printf -- '- a - a local mate (home: %s; scope: project work; projects: project; added 2026-09-01)\n' "$a" > "$root/data/secondmates.md"
+      printf -- '- b - a local mate (home: %s; scope: project work; projects: project; added 2026-09-01)\n' "$b" >> "$root/data/secondmates.md"
+    fi
+    case "$label" in
+      registry-*) target="$a/data/secondmates.md" ;;
+      root-data) target="$root/data" ;;
+      mate-data) target="$a/data" ;;
+      root-config) target="$root/config" ;;
+    esac
+    chmod 000 "$target"
+    direct_rc=0
+    # shellcheck disable=SC2016 # expanded by the reader's own shell
+    direct_out=$(FM_HOME="$root" bash -c '
+      . "$1/bin/fm-secondmate-registry-lib.sh"
+      . "$1/bin/fm-wake-lib.sh"
+      . "$1/bin/fm-project-capacity-lib.sh"
+      if [ "$3" = root-config ]; then
+        fm_project_capacity_lookup "$2/config" project
+        rc=$?
+        printf "%s\n" "$FM_PROJECT_CAPACITY_ERROR"
+      else
+        fm_local_firstmate_state_dirs "$2/state"
+        rc=$?
+        printf "%s\n" "$FM_LOCAL_FIRSTMATE_ERROR"
+      fi
+      exit "$rc"
+    ' _ "$ROOT" "$root" "$label" 2>&1) || direct_rc=$?
+    rc=0
+    out=$(spawn_ship "$case_dir" task-c "$wt") || rc=$?
+    if [ -d "$target" ]; then chmod 755 "$target"; else chmod 600 "$target"; fi
+    expect_code 1 "$direct_rc" "$label: the public reader skipped an inaccessible input: $direct_out"
+    expect_code 1 "$rc" "$label: an inaccessible input did not refuse admission: $out"
+    case "$label" in
+      registry-* | mate-data) assert_contains "$direct_out" "local Firstmate registry is unreadable at $a/data/secondmates.md" "$label: the refusal did not name the registry" ;;
+      root-data) assert_contains "$direct_out" "local Firstmate registry is unreadable at $root/data/secondmates.md" "$label: the refusal did not name the registry" ;;
+      root-config) assert_contains "$direct_out" "$root/config/project-capacity" "$label: the refusal did not name the declaration" ;;
+    esac
+    assert_contains "$out" "$target" "$label: the spawn refusal did not name the inaccessible path"
+    assert_nothing_created "$case_dir" "$root" task-c "$before" "$worktrees"
+    rc=0
+    out=$(spawn_ship "$case_dir" task-c "$case_dir/unused") || rc=$?
+    expect_code "$DEFER_EXIT" "$rc" "$label: restored permissions did not count the descendant: $out"
+    assert_contains "$out" "live-g in $g" "$label: the restored walk missed the descendant's holder"
+    assert_nothing_created "$case_dir" "$root" task-c "$before" "$worktrees"
+  done
+  printf 'pr=%s\n' "https://github.com/o/r/pull/9" >> "$g/state/live-g.meta"
+  rc=0
+  out=$(spawn_ship "$case_dir" task-c "$wt") || rc=$?
+  expect_code 0 "$rc" "the restored inputs did not admit a worker after PR handoff: $out"
+  pass "unreadable registries and configuration refuse admission without hiding descendants or changing queued work"
+}
+
 # Two spawns racing for the last place: the one holding the project lock
 # publishes, the other cannot publish while it waits and is deferred afterwards.
 test_concurrent_spawns_cannot_both_take_the_last_place() {
@@ -660,6 +740,7 @@ test_restart_does_not_count_its_own_record
 test_occupancy_counts_only_this_projects_workers
 test_capacity_is_shared_by_every_local_home
 test_unreadable_holders_refuse_admission
+test_unreadable_registry_and_config_refuse_admission
 test_concurrent_spawns_cannot_both_take_the_last_place
 test_failed_spawn_after_admission_holds_no_place
 test_unreadable_declaration_refuses_every_spawn
