@@ -1063,7 +1063,7 @@ The flag is a home-local supervision-noise preference and is not inherited by se
 ## Silent paused rechecks (config/paused-recheck-silent)
 
 The optional local, gitignored `config/paused-recheck-silent` presence flag opts this home into a default-off quiet form of the declared-wait recheck.
-With it present, the watcher's `FM_PAUSE_RESURFACE_SECS` recheck of a worker's `paused:` declaration queues no wake when the declaration is unchanged since its first-sight wake, its declared `until` time is not yet due, and the task has no open decision.
+With it present, the watcher's `FM_PAUSE_RESURFACE_SECS` recheck of a worker's `paused:` declaration queues no wake when the declaration is unchanged since its first recheck wake, the agent is confirmed alive (a secondmate's liveness is never read), its declared `until` time is not yet due, and the task has no open decision.
 The watcher records the recheck in the declaration's existing throttle marker, so the recheck cadence is unchanged.
 A first sight, a changed status line, a due declared time, and an open decision still wake.
 Captain-held transfers are not affected.
