@@ -3766,7 +3766,7 @@ if [ "$KIND" = ship ] && [ -n "$PR_URL" ] \
   echo "warning: an open public loop with nothing owed is still recorded in the consent-holding home while cleaning up ship task $ID. Hand it on with bin/fm-public-followup.sh rechain or close it with retire --reason." >&2
 fi
 
-if [ "$KIND" = ship ] && [ -n "$PR_URL" ] && fm_pr_url_parse "$PR_URL"; then
+if [ "$KIND" = ship ] && [ -n "$PR_URL" ] && [ "$FORCE" != "--force" ] && fm_pr_url_parse "$PR_URL"; then
   case "$FM_PR_PROVIDER" in
     github)
       fm_pr_github_read_record "$FM_PR_HOST" "$FM_PR_OWNER" "$FM_PR_REPO" "$FM_PR_NUMBER" || true
@@ -3783,6 +3783,7 @@ if [ "$KIND" = ship ] && [ -n "$PR_URL" ] && fm_pr_url_parse "$PR_URL"; then
     github|gitlab|forgejo)
       if [ "$FM_PR_RECORD_MERGED" != true ]; then
         echo "REFUSED: ship task $ID still has an unmerged or unreadable PR at $PR_URL. Stop the worker with bin/fm-control.sh $ID exit and keep its task record until the PR merges." >&2
+        echo "Use --force only after explicit discard approval." >&2
         exit 1
       fi
       ;;

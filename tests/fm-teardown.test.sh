@@ -280,19 +280,20 @@ land_on_origin_main() {
   rm -rf "$tmp"
 }
 
-# Override GitHub lookups to report PR 7 as open with the supplied head.
+# Override GitHub lookups to report PR 7 as unmerged (OPEN by default, or the
+# supplied state) with the supplied head.
 add_gh_pr_open_for_head() {
-  local case_dir=$1 head=$2
-  cat > "$case_dir/fakebin/gh-axi" <<'SH'
+  local case_dir=$1 head=$2 state=${3:-OPEN}
+  cat > "$case_dir/fakebin/gh-axi" <<SH
 #!/usr/bin/env bash
-case "${1:-} ${2:-}" in
-  "pr view") printf '%s\n' 'state: open' ;;
+case "\${1:-} \${2:-}" in
+  "pr view") printf '%s\n' 'state: ${state,,}' ;;
 esac
 SH
   cat > "$case_dir/fakebin/gh" <<SH
 #!/usr/bin/env bash
 case "\${1:-} \${2:-}" in
-  "pr view") printf '%s\t%s\t%s\n' 'OPEN' '$head' 'https://github.com/example/repo/pull/7' ;;
+  "pr view") printf '%s\t%s\t%s\n' '$state' '$head' 'https://github.com/example/repo/pull/7' ;;
 esac
 SH
   chmod +x "$case_dir/fakebin/gh-axi" "$case_dir/fakebin/gh"
@@ -792,6 +793,31 @@ test_unmerged_pr_refuses_cleanup_until_merge_is_confirmed() {
   assert_absent "$case_dir/state/task-x1.meta" "confirmed merge cleanup retained task metadata"
   [ "$(backlog_row_state "$case_dir")" = "done" ] || fail "confirmed merge cleanup left the backlog item open"
   pass "teardown preserves the task record and copy until its pull request is confirmed merged"
+}
+
+test_forced_cleanup_discards_a_closed_unmerged_pr() {
+  local case_dir out rc url=https://github.com/example/repo/pull/7 head
+  case_dir=$(make_case closed-pr-forced)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit "$case_dir" "abandoned PR"
+  add_fork_with_pushed_branch "$case_dir"
+  printf 'pr=%s\n' "$url" >> "$case_dir/state/task-x1.meta"
+  seed_backlog_in_flight "$case_dir"
+  head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  add_gh_pr_open_for_head "$case_dir" "$head" CLOSED
+
+  set +e
+  out=$(run_teardown "$case_dir" 2>&1)
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "unforced cleanup of a ship with a closed unmerged pull request"
+  assert_contains "$out" "unmerged or unreadable PR at $url" "the refusal must name the closed pull request"
+  assert_contains "$out" "--force only after explicit discard approval" "the refusal must name the discard escape"
+  [ -f "$case_dir/state/task-x1.meta" ] || fail "unforced cleanup removed the task metadata"
+
+  out=$(run_teardown "$case_dir" --force 2>&1) || fail "forced cleanup of a closed pull request failed: $out"
+  assert_absent "$case_dir/state/task-x1.meta" "forced cleanup retained task metadata"
+  pass "forced teardown discards a ship whose pull request closed without merging"
 }
 
 test_teardown_closes_the_backlog_item_itself() {
@@ -6515,6 +6541,7 @@ test_forced_secondmate_own_missing_adapter_sibling_refuses_before_child_cleanup
 test_retained_sources_still_reach_the_ordinary_refusal
 test_local_only_fork_remote_allows
 test_unmerged_pr_refuses_cleanup_until_merge_is_confirmed
+test_forced_cleanup_discards_a_closed_unmerged_pr
 test_teardown_closes_the_backlog_item_itself
 test_teardown_closes_a_gerrit_task_with_its_change_url_as_a_note
 test_teardown_closes_a_gitlab_task_with_its_merge_request_url_as_a_note
