@@ -152,22 +152,22 @@ ENTRIES='if . == "" or endswith("\n") then .[:-1] else error("unterminated mirro
 # the entry, its digest, or any feed exists: the mirror would otherwise copy it
 # into every engine conversation and model request that carries it. Known token
 # shapes, assignments and flags whose name has a credential word as a whole
-# segment (api_key, X-API-Key, apiKey; not author or keyboard), and long
-# mixed-case high-entropy runs are masked; ordinary names, paths, URLs, and
-# commit ids are not. Read with jq -Rjs.
+# segment (api_key, X-API-Key, apiKey, password; not author, sort_key or a bare
+# key or auth), and long mixed-case high-entropy runs that are not camelCase
+# words are masked; ordinary names, paths, URLs, and commit ids are not. Read with jq -Rjs.
 # shellcheck disable=SC2016 # a jq program, not shell
 MASK='def entropy: explode | length as $n | group_by(.) | map(length / $n | . * log2) | -add;
-  def credname: "(?<![A-Za-z0-9_.-])(?:[A-Za-z0-9_.-]*(?:[_.-]|[a-z](?=[A-Z])))?(?i:key|token|secret|passw(?:or)?d|auth|credentials?)(?![A-Za-z0-9])[A-Za-z0-9_.-]*";
+  def credname: "(?<![A-Za-z0-9_.-])(?:[A-Za-z0-9_.-]*(?:[_.-]|[a-z](?=[A-Z])))?(?i:token|secret|passw(?:or)?d|credentials?|(?:api|access|private|client)[_.-]?key)(?![A-Za-z0-9])[A-Za-z0-9_.-]*";
   gsub("-----BEGIN [A-Z ]*PRIVATE KEY-----[\\s\\S]*?(-----END [A-Z ]*PRIVATE KEY-----|$)"; "<private-key>")
   | gsub("(?i)\\b(?<h>(proxy-)?authorization)\\s*:\\s*((bearer|basic|token|digest)\\s+\\S+|\\S{16,})"; "\(.h): <redacted>")
   | gsub("(?i)\\b(?<s>[a-z][a-z0-9+.-]*://)[^/\\s:@]+:[^/?#\\s]+@"; "\(.s)<redacted>@")
   | gsub("\\beyJ[A-Za-z0-9_-]{8,}\\.[A-Za-z0-9_-]{8,}\\.[A-Za-z0-9_-]{8,}"; "<jwt>")
   | gsub("\\b(sk-[A-Za-z0-9_-]{16,}|gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|xox[abprs]-[A-Za-z0-9-]{10,}|AKIA[0-9A-Z]{16}|AIza[0-9A-Za-z_-]{30,}|glpat-[A-Za-z0-9_-]{16,}|hf_[A-Za-z0-9]{20,})"; "<redacted>")
-  | gsub("(?i)(?<f>--([a-z0-9]+-)*(token|password|passwd|secret|key|api-key))(?<s>\\s+|=)\\S+"; "\(.f)\(.s)<redacted>")
+  | gsub("(?i)(?<f>--([a-z0-9]+-)*(token|password|passwd|secret|(api|access|private|client)-key))(?<s>\\s+|=)\\S+"; "\(.f)\(.s)<redacted>")
   | gsub("(?<n>" + credname + ")=(\"[^\"]*\"|\\x27[^\\x27]*\\x27|[^\\s&\"\\x27]+)"; "\(.n)=<redacted>")
-  | gsub("(?<n>[\"\\x27]?" + credname + "[\"\\x27]?)(?<o>[ \\t]*[:=][ \\t]*)(?<q>[\"\\x27]?)(?=[A-Za-z0-9+/_.=-]*[0-9])[A-Za-z0-9+/_.=-]{8,}"; "\(.n)\(.o)\(.q)<redacted>")
+  | gsub("(?<n>[\"\\x27]?" + credname + "[\"\\x27]?)(?<o>[ \\t]*[:=][ \\t]*)(?<q>[\"\\x27]?)[A-Za-z0-9+/_.=-]{8,}"; "\(.n)\(.o)\(.q)<redacted>")
   | gsub("\\b[0-9a-fA-F]{48,}\\b"; "<redacted>")
-  | gsub("(?<t>[A-Za-z0-9+_=-]{32,})"; .t | if test("[a-z]") and test("[A-Z]") and test("[0-9]") and entropy >= 4 then "<redacted>" else . end)'
+  | gsub("(?<t>[A-Za-z0-9+_=-]{32,})"; .t | if test("[a-z]") and test("[A-Z]") and test("[0-9]") and (test("^(?>[A-Z]?[a-z]{2,}|[0-9]+|[_=+-])+$") | not) and entropy >= 4 then "<redacted>" else . end)'
 
 # A writer records only the lock-owning primary session's dialog.
 writer_in_scope() {

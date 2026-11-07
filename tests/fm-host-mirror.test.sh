@@ -536,6 +536,8 @@ test_pasted_secrets_are_masked_before_recording() {
     say captain "clone https://user:madeup@pw@host.example.com/path" p8
     say captain "see https://github.com/o/r/pulls?author=c6aw&sort=created with keyboard=us and monkey=banana" p9
     say captain "Authorization: the captain approved it" p10
+    say captain "keep sort_key=created_at, primary key: user_id2024, auth: 2026-11-07 and fmSupervisionHostAttendedReadyCheck2 as said" p11
+    say captain "password: madeupCorrectHorseBattery" p12
     "$MIRROR" feed engine-1 new > "$FM_HOME/feed.out"
   ' || fail "a writer or the feed failed"
   if grep -q -e "$fake" -e "$gh" -e plainvalue -e madeup "$home/state/.host-mirror.jsonl"; then
@@ -551,11 +553,12 @@ test_pasted_secrets_are_masked_before_recording() {
     *) fail "ordinary dialog must be recorded as said: $feed" ;; esac
   for masked in '"apiKey": "<redacted>"' 'token: <redacted>' 'X-API-Key: <redacted>' 'api_key = <redacted>' \
     '--access-token <redacted> --client-secret <redacted> --auth-token=<redacted> --api-token <redacted>' \
-    'https://<redacted>@host.example.com/path'; do
+    'https://<redacted>@host.example.com/path' 'password: <redacted>'; do
     case "$feed" in *"$masked"*) ;; *) fail "a masked credential line is missing from the feed: $masked" ;; esac
   done
   for plain in 'https://github.com/o/r/pulls?author=c6aw&sort=created with keyboard=us and monkey=banana' \
-    'Authorization: the captain approved it'; do
+    'Authorization: the captain approved it' \
+    'keep sort_key=created_at, primary key: user_id2024, auth: 2026-11-07 and fmSupervisionHostAttendedReadyCheck2 as said'; do
     case "$feed" in *"$plain"*) ;; *) fail "ordinary dialog must be recorded as said: $plain" ;; esac
   done
   pass "mirror: a pasted secret is masked before it reaches the mirror, its digest, or the feed"
