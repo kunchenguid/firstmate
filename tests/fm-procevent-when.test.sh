@@ -119,9 +119,8 @@ assert_absent "$H/state/when/when-joined-condition.spec" "a rejected condition l
 assert_absent "$H/state/procevent/when-joined-condition.source" "a rejected condition leaves no active source"
 pe "$H" reconcile >/dev/null
 assert_absent "$H/state/procevent/when-joined-condition.source" "reconcile cannot start a rejected watch"
-if pgrep -f '[f]m-procevent-when.sh run when-joined-condition' >/dev/null; then
-  fail "a rejected condition must not leave a polling process"
-fi
+assert_absent "$H/state/procevent/when-joined-condition.runner" \
+  "a rejected condition leaves no polling process"
 
 when "$H" arm separate-condition --condition /bin/true https://example.com --action "$ACT" "$TMP_ROOT/separate-condition-action" >/dev/null
 assert_present "$H/state/procevent/when-separate-condition.source" \
