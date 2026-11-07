@@ -202,6 +202,24 @@ fi
 # so this exempts them while guarding every real secondmate home.
 fm_primary_scope_matches "$FM_ROOT" "$STATE" || allow_exit
 
+# --- installed turn-end lifecycle hooks ----------------------------------------
+# docs/configuration.md "Lifecycle hooks". Absent hooks/turn-end.d this is one
+# directory test. A refusing hook blocks this stop once, with the hook's reason,
+# through the same exit-2 path every harness adapter already renders; a stop
+# that already follows a stop-hook continuation (stopHookActive or
+# stop_hook_active true, on every harness including --claude) never runs them,
+# so hooks can never hold a turn open twice. The supervision predicate below
+# runs on the next stop exactly as before. Cursor and Antigravity run these
+# hooks in their own stop adapters on every stop, so --cursor and --agy skip
+# them here rather than running them twice.
+# shellcheck source=bin/fm-hooks-lib.sh
+. "$SCRIPT_DIR/fm-hooks-lib.sh"
+if [ "$CURSOR_MODE" -eq 0 ] && [ "$AGY_MODE" -eq 0 ] && [ "$STOP_HOOK_ACTIVE" != "true" ] \
+  && ! TURN_END_REASON=$(fm_hooks_turn_end "$PAYLOAD"); then
+  printf 'TURN END HELD BY A LIFECYCLE HOOK - handle this before ending the turn:\n%s\n' "$TURN_END_REASON" >&2
+  exit 2
+fi
+
 # --- the actual predicate ----------------------------------------------------
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"

@@ -67,11 +67,14 @@
 #   9. closing reminder - prints the context-specific watcher next step; this
 #                       script points back to the emitted harness supervision
 #                       block and deliberately never arms the watcher itself.
+#  10. hooks          - only when hooks/session-start.d exists in the home: the
+#                       stdout of each installed session-start lifecycle hook
+#                       (bin/fm-hooks.sh), in both locked and read-only modes.
 #
-# Those ten names are also the runtime-bound stage list below, so a truncated
-# startup can name exactly which of them never ran - and the parent banners
-# EVERY nonzero child exit, not only the bound: a child that dies or is killed
-# mid-stage must never truncate the digest silently.
+# Those ten names (eleven with hooks) are also the runtime-bound stage list
+# below, so a truncated startup can name exactly which of them never ran - and
+# the parent banners EVERY nonzero child exit, not only the bound: a child that
+# dies or is killed mid-stage must never truncate the digest silently.
 #
 # NO NETWORK ON THE BLOCKING PATH. This digest runs on a session-open hook that
 # blocks session initialization, so anything it waits for is time the captain
@@ -280,6 +283,11 @@ done
 # names the stage it is entering, and the parent reports every stage at or after
 # that one as never emitted. Keep it in the exact order the digest prints.
 SESSION_START_STAGES='lock role bootstrap wake-queue supervision-instructions read-once fleet-state network-checks context next-step'
+# shellcheck source=bin/fm-hooks-lib.sh
+. "$SCRIPT_DIR/fm-hooks-lib.sh"
+# Installed session-start lifecycle hooks print last (stage 10); with no
+# hooks/session-start.d folder the stage list and digest are unchanged.
+! fm_hooks_present session-start || SESSION_START_STAGES="$SESSION_START_STAGES hooks"
 
 stage() {  # <stage-name>: breadcrumb for the parent's truncation banner
   [ -n "${FM_SESSION_START_STAGE_FILE:-}" ] || return 0
@@ -1096,6 +1104,23 @@ Follow the supervision operating instructions block above for harness '$PRIMARY_
 This script never starts supervision itself.
 
 EOF
+fi
+# --- 10. lifecycle hooks -----------------------------------------------------
+# docs/configuration.md "Lifecycle hooks": each session-start hook's stdout is
+# appended here, each hook bounded by FM_HOOK_TIMEOUT; failures never stop the
+# digest. Absent hooks/session-start.d, nothing below prints.
+if fm_hooks_present session-start; then
+  stage hooks
+  SESSION_HOOKS_READ_ONLY=false
+  [ "$READ_ONLY" -eq 0 ] || SESSION_HOOKS_READ_ONLY=true
+  SESSION_HOOKS_REEMIT=false
+  [ "$REEMIT" -eq 0 ] || SESSION_HOOKS_REEMIT=true
+  SESSION_HOOKS_OUT=$(fm_hooks_emit session-start home="$FM_HOME" harness="$PRIMARY_HARNESS" \
+    source="$SESSION_SOURCE" read_only:="$SESSION_HOOKS_READ_ONLY" reemit:="$SESSION_HOOKS_REEMIT") || true
+  if [ -n "$SESSION_HOOKS_OUT" ]; then
+    section "ADD-ON HOOKS (session-start)"
+    printf '%s\n\n' "$SESSION_HOOKS_OUT"
+  fi
 fi
 cat <<'EOF'
 The digest above is complete for this session start. The READ-ONCE CONTRACT
