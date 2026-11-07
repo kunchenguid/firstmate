@@ -18,8 +18,9 @@
 #
 # Bounded call to an arbitrary command in dir $1, timeout $2 seconds, and its
 # `no-mistakes "$@"` specialization. The bounded
-# form preserves stdout, stderr, and exit status; the checked form discards
-# stderr, while fm_nm_run keeps the fail-open query contract for read-only callers.
+# form preserves stdout and stderr; the checked form discards stderr.
+# Both preserve command exit status unless the shared deadline expires, returning 124.
+# fm_nm_run suppresses command failures for read-only callers but retains that deadline status.
 # The no-mistakes forms route host reads through the opt-in home resolver below.
 # The inherited FM_READ_DEADLINE caps both resolver and command reads at the
 # remaining fractional seconds and refuses the command after the deadline expires.
