@@ -1725,7 +1725,7 @@ test_arming_baselines_an_already_degraded_change() {
   state="$dir/home/state"
   ln -sf "$REAL_JQ" "$dir/fakebin/jq"
   write_task_meta "$dir" task-a
-  FM_TEST_GLAB_ARMING_PROBE="$state" FM_TEST_GLAB_STATE=opened FM_TEST_GLAB_PIPELINE=failed \
+  FM_TEST_GLAB_ARMING_PROBE="$state" FM_TEST_GLAB_STATE=opened FM_TEST_GLAB_PIPELINE=failed FM_TEST_GLAB_TRAIN=car \
     run_check_entry "$dir" task-a "$url" >/dev/null 2>&1 \
     || fail "arming a GitLab watch for the baseline order failed"
   [ "$(cat "$dir/glab.log.probe")" = 'published=no locked=yes' ] \
@@ -1736,7 +1736,7 @@ test_arming_baselines_an_already_degraded_change() {
     || fail "arming did not record the failing pipeline as its baseline"
 
   # Re-arming on a green change replaces the previous watch's marker.
-  FM_TEST_GLAB_STATE=opened FM_TEST_GLAB_PIPELINE=success \
+  FM_TEST_GLAB_STATE=opened FM_TEST_GLAB_PIPELINE=success FM_TEST_GLAB_TRAIN=car \
     run_check_entry "$dir" task-a "$url" >/dev/null 2>&1 \
     || fail "re-arming a GitLab watch on a green change failed"
   [ ! -e "$state/task-a.pr-poll-degraded" ] || fail "re-arming on a green change kept the previous watch's marker"
@@ -1853,7 +1853,8 @@ test_arming_baselines_an_already_degraded_change() {
   state="$dir/home/state"
   ln -sf "$REAL_JQ" "$dir/fakebin/jq"
   write_task_meta "$dir" task-a
-  FM_TEST_GLAB_STATE=opened FM_TEST_GLAB_PIPELINE=failed run_check_entry "$dir" task-a "$url" >/dev/null 2>&1 \
+  FM_TEST_GLAB_STATE=opened FM_TEST_GLAB_PIPELINE=failed FM_TEST_GLAB_TRAIN=car \
+    run_check_entry "$dir" task-a "$url" >/dev/null 2>&1 \
     || fail "arming a GitLab watch with a failed head pipeline failed before the merge-time re-record"
   "$REAL_CP" "$state/task-a.pr-poll-degraded" "$dir/marker.before"
   : > "$dir/glab.log"
