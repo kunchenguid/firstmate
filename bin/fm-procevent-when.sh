@@ -201,7 +201,9 @@ cmd_arm() {
 
   (umask 077; mkdir -p "$WHEN_DIR") || die "cannot create the watch directory"
   [ -d "$WHEN_DIR" ] && [ ! -L "$WHEN_DIR" ] || die "watch directory is unavailable"
-  local tmp trust_tmp hash device action_path action_hash
+  local tmp trust_tmp hash device condition_path action_path action_hash
+  condition_path=$(action_executable "${cond[0]}") || die "condition executable is unavailable: ${cond[0]}"
+  cond[0]=$condition_path
   action_path=$(action_executable "${act[0]}") || die "action executable is unavailable: ${act[0]}"
   action_hash=$(fm_pr_sha256 "$action_path") || die "cannot hash the action executable"
   act[0]=$action_path

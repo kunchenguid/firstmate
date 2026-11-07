@@ -108,6 +108,37 @@ out=$(when "$H" retire arm-test)
 assert_contains "$out" "retired: when-arm-test" "retire is idempotent"
 pass "arm binds, refuses duplicates, and retire cleans up"
 
+# --- arm validates the condition executable without splitting argv -----------
+H="$TMP_ROOT/h-condition-executable"; new_home "$H"
+if when "$H" arm joined-condition --condition "$ROOT/bin/fm-procevent-when.sh https://example.com" --action "$ACT" "$TMP_ROOT/joined-condition-action" 2>"$TMP_ROOT/joined-condition.err"; then
+  fail "arm must reject a condition executable joined to its argument"
+fi
+assert_grep "condition executable is unavailable" "$TMP_ROOT/joined-condition.err" \
+  "arm identifies the unavailable condition executable"
+assert_absent "$H/state/when/when-joined-condition.spec" "a rejected condition leaves no spec"
+assert_absent "$H/state/procevent/when-joined-condition.source" "a rejected condition leaves no active source"
+pe "$H" reconcile >/dev/null
+assert_absent "$H/state/procevent/when-joined-condition.source" "reconcile cannot start a rejected watch"
+if pgrep -f '[f]m-procevent-when.sh run when-joined-condition' >/dev/null; then
+  fail "a rejected condition must not leave a polling process"
+fi
+
+when "$H" arm separate-condition --condition /bin/true https://example.com --action "$ACT" "$TMP_ROOT/separate-condition-action" >/dev/null
+assert_present "$H/state/procevent/when-separate-condition.source" \
+  "arm accepts separate condition arguments"
+assert_grep 'https://example.com' "$H/state/when/when-separate-condition.spec" \
+  "arm preserves separate condition arguments"
+
+SPACED_COND="$TMP_ROOT/condition with spaces"
+cp "$COND" "$SPACED_COND"
+chmod +x "$SPACED_COND"
+when "$H" arm spaced-condition --condition "$SPACED_COND" "$TMP_ROOT/space-trigger" "$TMP_ROOT/space-count" --action "$ACT" "$TMP_ROOT/spaced-condition-action" >/dev/null
+assert_present "$H/state/procevent/when-spaced-condition.source" \
+  "arm accepts a real executable path containing spaces"
+when "$H" retire separate-condition >/dev/null
+when "$H" retire spaced-condition >/dev/null
+pass "arm validates condition executables and preserves argument boundaries"
+
 # --- concurrent arms publish exactly one complete registration ---------------
 H="$TMP_ROOT/h-concurrent-arm"; new_home "$H"
 (
