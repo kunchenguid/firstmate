@@ -2520,18 +2520,10 @@ handle_paused_stale() {  # <window> <task> <hash>
 # its own classification, which is why the declaration is read before the afk
 # branch rather than after it.
 busy_turn_bound_check() {  # <window> <task> <hash> <since-file> <escalation-file> [dialog-name]
-  local win=$1 task=$2 h=$3 since_file=$4 escalation_file=$5 dialog=${6-} key statusf declared
+  local win=$1 task=$2 h=$3 since_file=$4 escalation_file=$5 dialog=${6-} key statusf declared reason
   local stream_episode stream_snapshot=$BUSY_STREAM_SNAPSHOT label="busy (no completed turn)"
   statusf="$STATE/$task.status"
   if status_is_paused_or_captain_held "$(status_declared_wait_line "$statusf")"; then
-    # This is not an unreadable-runtime exception.  The recorded Claude picker
-    # positively proves that a human action is blocking progress, so surface it
-    # once through the declaration throttle instead of hiding it behind the
-    # normal pause cadence.
-    if [ -n "$dialog" ]; then
-      surface_nonterminal_stale "$win" "$h" "$dialog"
-      return 0
-    fi
     if afk_present; then
       # Away mode is daemon-owned, so this bound hands off the PLAIN wake identity
       # and lets the daemon classify the declaration itself - the undecorated
@@ -2562,10 +2554,19 @@ busy_turn_bound_check() {  # <window> <task> <hash> <since-file> <escalation-fil
         return 0
       fi
       if [ "$(cat "$STATE/.stale-$key" 2>/dev/null || true)" != "$declared" ]; then
-        fm_wake_append stale "$win" "stale: $win" || exit 1
+        reason=$(stale_reason_naming_dialog "stale: $win" "$dialog")
+        fm_wake_append stale "$win" "$reason" || exit 1
         printf '%s' "$declared" > "$STATE/.stale-$key"
-        wake "stale: $win"
+        wake "$reason"
       fi
+      return 0
+    fi
+    # This is not an unreadable-runtime exception.  The recorded Claude picker
+    # positively proves that a human action is blocking progress, so surface it
+    # once through the declaration throttle instead of hiding it behind the
+    # normal pause cadence.
+    if [ -n "$dialog" ]; then
+      surface_nonterminal_stale "$win" "$h" "$dialog"
       return 0
     fi
     handle_paused_stale "$win" "$task" "$h"
@@ -2646,23 +2647,26 @@ clear_pause_tracking() {  # <window-key>
 }
 
 # A declared wait remains authoritative when the pane is live but its runtime
-# state is unreadable.  The exact idle/stopped verdicts keep their existing live
-# endpoint handling; only an unknown semantic verdict cannot contradict the
-# worker's own declaration.
-pause_runtime_unreadable() {  # <window> <task>
+# state is unreadable.  Both readers must say so: authoritative crew state must
+# itself be `unknown` (a readable parked, failed, done, or blocked run is a state
+# the declaration cannot outrank), and the semantic busy verdict must be
+# `unknown`, since the exact idle/stopped verdicts keep their existing live
+# endpoint handling.
+pause_runtime_unreadable() {  # <window> <task> <crew-state-line>
   local win=$1 task=$2 verdict
+  case "$3" in "state: unknown "*) ;; *) return 1 ;; esac
   verdict=$(window_busy_verdict "$win" "$task")
   case "$verdict" in unknown\ *) return 0 ;; esac
   return 1
 }
 
 # Reconcile a declared pause or captain-held status with authoritative crew state.
-# After fm-crew-state has fallen back to stopped, paused classification is
-# recovered for a confidently dead ordinary crew, a live crew whose semantic
-# pane state is unreadable, or a secondmate, whose endpoint liveness this
-# function deliberately never reads.
+# After fm-crew-state has fallen back to stopped or unknown, paused classification
+# is recovered for a confidently dead ordinary crew, a live crew whose crew state
+# and semantic pane state are both unknown, or a secondmate, whose endpoint
+# liveness this function deliberately never reads.
 pause_state_class() {  # <window> <task>
-  local win=$1 task=$2 key last recheck_file class agent_alive kind
+  local win=$1 task=$2 key last recheck_file class agent_alive=unknown kind crew_line=''
   key=$(window_key "$win")
   last=$(status_declared_wait_line "$STATE/$task.status")
   recheck_file="$STATE/.paused-rechecked-$key"
@@ -2671,41 +2675,38 @@ pause_state_class() {  # <window> <task>
     crew_absorb_class "$task"
     return
   fi
-  # Read once past the declared-wait gate and reused by both liveness gates below,
-  # so a mate's stale poll costs one metadata scan rather than one per gate, and the
-  # far more common no-declaration path above still costs none.
+  # Read once past the declared-wait gate and reused by both gates below, so a
+  # mate's stale poll costs one metadata scan rather than one per gate, and the far
+  # more common no-declaration path above still costs none. A live ordinary crew
+  # never takes the recheck shortcut: its admission depends on the crew state
+  # read below, which a run that parks or starts after the first sight changes.
   kind=$(window_kind "$win")
-  if [ -e "$STATE/.paused-$key" ] && [ "$(age_of "$recheck_file")" -lt "$STALE_ESCALATE_SECS" ]; then
-    if [ "$kind" != secondmate ]; then
-      agent_alive=$(fm_backend_agent_alive "$(window_backend "$win")" "$win" 2>/dev/null) || agent_alive=unknown
-      if [ "$agent_alive" != dead ] && ! pause_runtime_unreadable "$win" "$task"; then
-        rm -f "$recheck_file"
-        printf 'none'
-        return
-      fi
-    fi
+  if [ "$kind" != secondmate ]; then
+    agent_alive=$(fm_backend_agent_alive "$(window_backend "$win")" "$win" 2>/dev/null) || agent_alive=unknown
+  fi
+  if [ -e "$STATE/.paused-$key" ] && [ "$(age_of "$recheck_file")" -lt "$STALE_ESCALATE_SECS" ] \
+    && { [ "$kind" = secondmate ] || [ "$agent_alive" = dead ]; }; then
     printf 'paused'
     return
   fi
-  class=$(crew_absorb_class "$task")
+  [ -z "$task" ] || crew_line=$("$FM_CREW_STATE_BIN" "$task" 2>/dev/null) || true
+  class=$(crew_absorb_line_class "$crew_line")
   if [ "$class" = working ]; then
     rm -f "$recheck_file"
     printf 'working'
     return
   fi
-  if [ "$kind" != secondmate ]; then
-    agent_alive=$(fm_backend_agent_alive "$(window_backend "$win")" "$win" 2>/dev/null) || agent_alive=unknown
-    if [ "$agent_alive" != dead ] && ! pause_runtime_unreadable "$win" "$task"; then
-      rm -f "$recheck_file"
-      printf 'none'
-      return
-    fi
+  if [ "$kind" != secondmate ] && [ "$agent_alive" != dead ] \
+    && ! pause_runtime_unreadable "$win" "$task" "$crew_line"; then
+    rm -f "$recheck_file"
+    printf 'none'
+    return
   fi
   # Recover paused classification for a declared wait that authoritative crew state
   # could not name. Reaching here already proves the only admissible cases: an
-  # ordinary crew whose agent the gate above confirmed dead or whose live pane runtime
-  # state is unreadable, or a secondmate, whose endpoint liveness is deliberately never
-  # read and so cannot supply that confirmation. Without the mate case a mate's
+  # ordinary crew whose agent the gate above confirmed dead or whose crew state and
+  # live pane runtime state are both unknown, or a secondmate, whose endpoint
+  # liveness is deliberately never read and so cannot supply that confirmation. Without the mate case a mate's
   # status-declared `captain-held` transfer - which has no current-state mapping
   # and so arrives as `none` - would be silenced by every caller rather than taking
   # the bounded re-surface cadence, and a forgotten declaration would rot invisibly.
@@ -2715,6 +2716,20 @@ pause_state_class() {  # <window> <task>
     *) rm -f "$recheck_file" ;;
   esac
   printf '%s' "$class"
+}
+
+# 0 when a declared wait that pause_state_class no longer admits never fired its
+# first alarm: a wait first absorbed as unreadable whose crew state later became
+# readable still owes that one wake. A declared `until` time, or a declaration
+# whose alarm is already recorded, keeps handle_paused_stale's own cadence.
+stale_wait_first_alarm_owed() {  # <window-key> <task>
+  local key=$1 task=$2 last declared throttle
+  last=$(status_declared_wait_line "$STATE/$task.status")
+  status_is_paused_or_captain_held "$last" || return 1
+  status_paused_until "$last" >/dev/null && return 1
+  declared=$(stale_wait_declaration "$task")
+  throttle=$(cat "$STATE/.paused-resurfaced-$key" 2>/dev/null || true)
+  [ "$throttle" != "$declared" ] && [ "$throttle" != "$declared:due" ]
 }
 
 # The two records of one ordinary crew wait, and why its stale alarm reads both.
@@ -2905,7 +2920,9 @@ captain_call_stale_bound() {  # <window-key> <task>
 # a decision, or be wedged. pause_state_class deliberately answers `none` for a
 # still-LIVE agent even under a declared wait, so a worker genuinely waiting on a
 # decision is never silenced - which routes every parked-but-live worker here, on
-# first sight of each distinct stale hash.
+# first sight of each distinct stale hash. The one exception is a live pane whose
+# crew state and busy verdict are both unknown: it takes the pause cadence with
+# no first-sight wake, unless a confirmed blocking dialog is showing.
 #
 # So a legitimate wait bounds this path to the same once-per-PAUSE_RESURFACE_SECS
 # cadence resurface_absorbed owns for the absorbed paths, throttled by this
@@ -4478,7 +4495,11 @@ EOF
                          printf '%s' "$h" > "$sf"
                          wedge_timer_check "$w" "$ssf" "non-terminal stale (provably working after a declared pause)" "$ewf" "$task" "$h" "$dialog"
                          triage_log "absorbed non-terminal stale (provably working): $w" ;;
-                *)       handle_paused_stale "$w" "$task" "$h" ;;
+                *)       if stale_wait_first_alarm_owed "$key" "$task"; then
+                           surface_nonterminal_stale "$w" "$h" "$dialog"
+                         else
+                           handle_paused_stale "$w" "$task" "$h"
+                         fi ;;
               esac
             else
               wedge_timer_check "$w" "$ssf" "non-terminal stale" "$ewf" "$task" "$h" "$dialog"

@@ -2581,9 +2581,15 @@ status_span_has_actionable() {  # <status-file> <start-offset>
 # run it only on no-verb signal and first-sighting stale paths, never every wake.
 # FM_CREW_STATE_BIN lets tests stub the verdict.
 crew_absorb_class() {  # <id>
-  local id=$1 line state src
+  local id=$1 line
   [ -n "$id" ] || { printf 'none'; return; }
   line=$("$FM_CREW_STATE_BIN" "$id" 2>/dev/null) || true
+  crew_absorb_line_class "$line"
+}
+
+# crew_absorb_class's decision for an fm-crew-state line a caller already read.
+crew_absorb_line_class() {  # <fm-crew-state-line>
+  local line=$1 state src
   case "$line" in state:*) ;; *) printf 'none'; return ;; esac
   state=${line#state: }; state=${state%% *}
   if [ "$state" = paused ]; then printf 'paused'; return; fi

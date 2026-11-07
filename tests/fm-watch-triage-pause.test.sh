@@ -575,6 +575,72 @@ test_unverified_codex_declared_wait_keeps_pause_cadence() {
   pass "an unverified Codex declared wait records and keeps the long pause cadence"
 }
 
+# The unreadable-pane recovery is admitted only while authoritative crew state is
+# itself unknown. A Codex wait first absorbed on that recovery must still get its
+# one first-sight wake once its run parks at a readable gate, even though the pane
+# never changes (the stable-hash route), and a readable parked gate seen on first
+# sight must surface rather than be absorbed. Plausible wrong behavior rejected:
+# an `unknown codex-unverified` busy verdict alone silencing a parked gate until
+# the status file is PAUSE_RESURFACE_SECS old.
+test_unverified_codex_wait_surfaces_once_its_run_parks() {
+  local dir state fakebin out capture_file statusf window key sig pid wakes start
+  local unknown_line='state: unknown · source: pane · harness state unavailable (unknown codex-unverified)'
+  local parked_line='state: parked · source: run-step · ask-user gate awaiting a decision'
+  for start in unknown parked; do
+    dir=$(make_case "unverified-codex-parks-$start"); state="$dir/state"; fakebin="$dir/fakebin"
+    out="$dir/watch.out"; capture_file="$dir/pane.txt"; statusf="$state/lane.status"
+    window="test:fm-codex-$start"; key=$(watch_window_key "$window")
+    printf 'window=%s\nkind=ship\nharness=codex\nbackend=tmux\n' "$window" > "$state/lane.meta"
+    printf 'paused: waiting for the pipeline\n' > "$statusf"
+    sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-lane_status"
+    printf 'Codex idle at its prompt\n' > "$capture_file"
+    printf '%s' "$(hash_text "$(cat "$capture_file")")" > "$state/.hash-$key"
+    printf '1\n' > "$state/.count-$key"
+
+    if [ "$start" = unknown ]; then
+      PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+        FM_FAKE_TMUX_CURRENT_COMMAND=codex FM_FAKE_CREW_STATE="$unknown_line" \
+        FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+        FM_PAUSE_RESURFACE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+        FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+      pid=$!
+      wait_poll_cycle "$state" "$pid" \
+        || { reap "$pid"; fail "an unknown-state Codex wait surfaced on first sight: $(cat "$out")"; }
+      reap "$pid"
+      [ -e "$state/.paused-$key" ] || fail "an unknown-state Codex wait was not absorbed on the pause cadence"
+      [ "$(cat "$state/.stale-$key")" = "$(cat "$state/.hash-$key")" ] \
+        || fail "the absorbed Codex wait did not leave the pane on the stable-hash route"
+    fi
+
+    PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+      FM_FAKE_TMUX_CURRENT_COMMAND=codex FM_FAKE_CREW_STATE="$parked_line" \
+      FM_WATCH_HANDLING_SUCCESSOR=1 \
+      FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+      FM_PAUSE_RESURFACE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+      FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" >> "$out" &
+    pid=$!
+    wait_for_exit "$pid" 100 \
+      || { reap "$pid"; fail "[$start] a Codex wait whose run parked at a readable gate stayed silent"; }
+    wakes=$(awk -F '\t' -v w="$window" '$3 == "stale" && $4 == w { n++ } END { print n + 0 }' "$state/.wake-queue" 2>/dev/null || echo 0)
+    [ "$wakes" -eq 1 ] || fail "[$start] a parked Codex gate queued $wakes stale wake(s) instead of one"
+    ack_stopped_cycle "$state" || fail "[$start] could not acknowledge the parked-gate wake"
+
+    PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+      FM_FAKE_TMUX_CURRENT_COMMAND=codex FM_FAKE_CREW_STATE="$parked_line" \
+      FM_WATCH_HANDLING_SUCCESSOR=1 \
+      FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+      FM_PAUSE_RESURFACE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+      FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" >> "$out" &
+    pid=$!
+    wait_poll_cycle "$state" "$pid" \
+      || { reap "$pid"; fail "[$start] the parked Codex gate re-alarmed inside its cadence"; }
+    reap "$pid"
+    wakes=$(awk -F '\t' -v w="$window" '$3 == "stale" && $4 == w { n++ } END { print n + 0 }' "$state/.wake-queue" 2>/dev/null || echo 0)
+    [ "$wakes" -eq 0 ] || fail "[$start] the parked Codex gate queued $wakes repeat wake(s)"
+  done
+  pass "an unverified Codex wait surfaces once when its run parks, on first sight or a still pane"
+}
+
 # A structurally confirmed Claude background-task exit picker is different from
 # an unreadable runtime verdict: it proves a human action is blocking the lane.
 # Both the idle-stale and busy-turn gates must surface that fact once, then let
@@ -1584,6 +1650,7 @@ fm_test_run \
   test_absorbed_replacement_wait_does_not_inherit_the_old_throttle \
   test_live_declared_wait_churn_honors_the_resurface_throttle \
   test_unverified_codex_declared_wait_keeps_pause_cadence \
+  test_unverified_codex_wait_surfaces_once_its_run_parks \
   test_blocking_dialog_gets_one_first_sight_at_both_pause_gates \
   test_live_paused_until_controls_recheck_time \
   test_open_captain_call_bounds_stale_churn \
