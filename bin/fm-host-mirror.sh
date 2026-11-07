@@ -151,15 +151,17 @@ ENTRIES='if . == "" or endswith("\n") then .[:-1] else error("unterminated mirro
 # the entry, its digest, or any feed exists: the mirror would otherwise copy it
 # into every engine conversation and model request that carries it. Known token
 # shapes, assignments and flags whose name has a credential word as a whole
-# segment (api_key, X-API-Key, apiKey, password; not author, sort_key or a bare
-# key or auth), and long mixed-case high-entropy runs that are not camelCase
+# segment (api_key, X-API-Key, apiKey, signing_key, auth, password; not author,
+# keyboard or monkey), and long mixed-case high-entropy runs that are not camelCase
 # words are masked; ordinary names, paths, URLs, and commit ids are not. A quoted
 # value is masked whole; an unquoted secret, password or credential value is
-# masked whatever it is, a token or key value only at 8 or more characters with
-# a digit, so prose stays. An unquoted value ends at whitespace, &, ;, a comma, a
-# closing brace or bracket, or a quote, and a placeholder is never re-masked. An Authorization header with a scheme word is masked
-# to the end of its line. Read with jq -Rjs.
-# shortcut: an unquoted token or key value with no digit is kept, widen if one shows up in real dialog.
+# masked whatever it is, a key, token or auth value after a colon or a spaced =
+# only at 8 or more characters with a digit and no slash, so prose and paths stay;
+# NAME=value masks any value for token and the api, access, private and client
+# keys. An unquoted value ends at whitespace, &, ;, a comma, a closing brace or
+# bracket, or a quote, and a placeholder is never re-masked. An Authorization
+# header with a scheme word is masked to the end of its line. Read with jq -Rjs.
+# shortcut: an unquoted key, token or auth value with no digit or with a slash is kept, widen if one shows up in real dialog.
 # shellcheck disable=SC2016 # a jq program, not shell
 MASK='def entropy: explode | length as $n | group_by(.) | map(length / $n | . * log2) | -add;
   def credname($w): "(?<![A-Za-z0-9_.-])(?:[A-Za-z0-9_.-]*(?:[_.-]|[a-z](?=[A-Z])))?(?i:" + $w + ")(?![A-Za-z0-9])[A-Za-z0-9_.-]*";
@@ -173,10 +175,10 @@ MASK='def entropy: explode | length as $n | group_by(.) | map(length / $n | . * 
   | gsub("(?i)\\b(?<s>[a-z][a-z0-9+.-]*://)[^/\\s:@]+:[^/?#\\s]+@"; "\(.s)<redacted>@")
   | gsub("\\beyJ[A-Za-z0-9_-]{8,}\\.[A-Za-z0-9_-]{8,}\\.[A-Za-z0-9_-]{8,}"; "<jwt>")
   | gsub("\\b(sk-[A-Za-z0-9_-]{16,}|gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|xox[abprs]-[A-Za-z0-9-]{10,}|AKIA[0-9A-Z]{16}|AIza[0-9A-Za-z_-]{30,}|glpat-[A-Za-z0-9_-]{16,}|hf_[A-Za-z0-9]{20,})"; "<redacted>")
-  | gsub("(?i)(?<f>--([a-z0-9]+-)*(token|password|passwd|secret|(api|access|private|client)-key))(?<s>\\s+|=)(" + quoted + "|\\S+)"; "\(.f)\(.s)<redacted>")
+  | gsub("(?i)(?<f>--([a-z0-9]+-)*(token|password|passwd|secret|key))(?<s>\\s+|=)(" + quoted + "|\\S+)"; "\(.f)\(.s)<redacted>")
   | gsub("(?<n>" + credname(strong + "|" + weak) + ")=(\"[^\"]*\"|\\x27[^\\x27]*\\x27|[^\\s&\"\\x27]+)"; "\(.n)=<redacted>")
   | gsub("(?<n>[\"\\x27]?" + credname(strong) + "[\"\\x27]?)(?<o>[ \\t]*[:=][ \\t]*)(" + quoted + "|" + bare + ")"; "\(.n)\(.o)\(.q // "")<redacted>\(.q // "")")
-  | gsub("(?<n>[\"\\x27]?" + credname(weak) + "[\"\\x27]?)(?<o>[ \\t]*[:=][ \\t]*)(" + quoted + "|(?=" + vchar + "*[0-9])(?=" + vchar + "{8})" + bare + ")"; "\(.n)\(.o)\(.q // "")<redacted>\(.q // "")")
+  | gsub("(?<n>[\"\\x27]?" + credname(weak + "|key|auth") + "[\"\\x27]?)(?<o>[ \\t]*[:=][ \\t]*)(" + quoted + "|(?=" + vchar + "*[0-9])(?=" + vchar + "{8})(?!" + vchar + "*/)" + bare + ")"; "\(.n)\(.o)\(.q // "")<redacted>\(.q // "")")
   | gsub("\\b[0-9a-fA-F]{48,}\\b"; "<redacted>")
   | gsub("(?<t>[A-Za-z0-9+_=-]{32,})"; .t | if test("[a-z]") and test("[A-Z]") and test("[0-9]") and (test("^(?>[A-Z]?[a-z]{2,}|[0-9]+|[_=+-])+$") | not) and entropy >= 4 then "<redacted>" else . end)'
 

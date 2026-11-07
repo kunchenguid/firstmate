@@ -536,12 +536,14 @@ test_pasted_secrets_are_masked_before_recording() {
     say captain "clone https://user:madeup@pw@host.example.com/path" p8
     say captain "see https://github.com/o/r/pulls?author=c6aw&sort=created with keyboard=us and monkey=banana" p9
     say captain "Authorization: the captain approved it" p10
-    say captain "keep sort_key=created_at, primary key: user_id2024, auth: 2026-11-07 and fmSupervisionHostAttendedReadyCheck2 as said" p11
+    say captain "keep sort_key=created_at, key: config/v2.yaml and fmSupervisionHostAttendedReadyCheck2 as said" p11
     say captain "password: madeupCorrectHorseBattery" p12
     say captain "json {\"password\":\"madeup7\"} and yaml password: Madeup!Horse" p13
     say captain "flag --client-secret \"madeup horse battery staple\" done" p14
     say captain "Authorization: Digest username=\"madeupuser\", realm=\"madeuprealm\", nonce=\"madeupnonce\", response=\"madeup0123456789abcdef\"" p15
     say captain "see https://example.com/?password=madeup7&sort=created and https://example.com/?access_token=madeup2token&page=2 then {\"password\":madeupbare,\"user\":\"kept\"}" p16
+    say captain "keys signing_key=madeupsign1 session_key: madeupsess2 license_key = madeuplic3 stripe_key=madeupstripe4" p17
+    say captain "flag --key madeupflag5 then key: madeup0123456789abcdef0123456789 and auth: madeupAuthValue0for0Tests0123" p18
     "$MIRROR" feed engine-1 new > "$FM_HOME/feed.out"
   ' || fail "a writer or the feed failed"
   if grep -q -e "$fake" -e "$gh" -e plainvalue -e madeup "$home/state/.host-mirror.jsonl"; then
@@ -561,12 +563,14 @@ test_pasted_secrets_are_masked_before_recording() {
     'json {"password":"<redacted>"} and yaml password: <redacted>' 'flag --client-secret <redacted> done' \
     'Authorization: <redacted>' \
     'https://example.com/?password=<redacted>&sort=created and https://example.com/?access_token=<redacted>&page=2' \
-    '{"password":<redacted>,"user":"kept"}'; do
+    '{"password":<redacted>,"user":"kept"}' \
+    'signing_key=<redacted> session_key: <redacted> license_key = <redacted> stripe_key=<redacted>' \
+    'flag --key <redacted> then key: <redacted> and auth: <redacted>'; do
     case "$feed" in *"$masked"*) ;; *) fail "a masked credential line is missing from the feed: $masked" ;; esac
   done
   for plain in 'https://github.com/o/r/pulls?author=c6aw&sort=created with keyboard=us and monkey=banana' \
     'Authorization: the captain approved it' \
-    'keep sort_key=created_at, primary key: user_id2024, auth: 2026-11-07 and fmSupervisionHostAttendedReadyCheck2 as said'; do
+    'keep sort_key=created_at, key: config/v2.yaml and fmSupervisionHostAttendedReadyCheck2 as said'; do
     case "$feed" in *"$plain"*) ;; *) fail "ordinary dialog must be recorded as said: $plain" ;; esac
   done
   pass "mirror: a pasted secret is masked before it reaches the mirror, its digest, or the feed"
