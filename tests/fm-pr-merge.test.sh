@@ -3054,7 +3054,7 @@ test_expected_head_keeps_existing_refusals() {
     > "$case_dir/hold-add.out" 2> "$case_dir/hold-add.err" \
     || fail "expected-head-hold: could not add the task: $(cat "$case_dir/hold-add.err")"
   FM_HOME="$case_dir/home" FM_STATE_OVERRIDE="$case_dir/state" \
-    "$ROOT/bin/fm-captain-hold.sh" hold task-x1 --reason "captain merge approval pending" \
+    "$ROOT/bin/fm-captain-hold.sh" hold task-x1 --class merge-or-landing-outside-authority --reason "captain merge approval pending" \
     > "$case_dir/hold.out" 2> "$case_dir/hold.err" \
     || fail "expected-head-hold: could not hold the task: $(cat "$case_dir/hold.err")"
   set +e
