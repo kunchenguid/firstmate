@@ -1081,6 +1081,24 @@ test_codex_handling_line_only_for_writable_fresh_beacon_codex() {
   assert_not_contains "$out" "$CODEX_HANDLING_LINE" \
     "a read-only Codex observer must not be told to rearm"
 
+  for mode in away quiet; do
+    dir=$(make_guard_case "codex-foreground-$mode")
+    touch "$(case_home "$dir")/state/.last-watcher-beat"
+    printf '%s\n%s\n' "$mode" "$(date '+%s')" > "$(case_home "$dir")/state/.afk"
+    out=$(run_guard_case_as_harness "$dir" "$fakebin")
+    [ "$(count_text "$out" "WATCHER DOWN - SUPERVISION IS OFF")" -eq 1 ] \
+      || fail "a Codex $mode-mode no-watcher state must print the full alarm: $out"
+    assert_contains "$out" "daemon" \
+      "the Codex $mode-mode banner must keep the daemon-owned repair line"
+    assert_not_contains "$out" "$CODEX_HANDLING_LINE" \
+      "a Codex $mode-mode banner must not tell the primary to start a checkpoint"
+    assert_not_contains "$out" "foreground checkpoint watcher is not running" \
+      "the foreground Codex wording leaked into $mode mode"
+    out=$(run_guard_case_as_harness "$dir" "$fakebin")
+    assert_not_contains "$out" "$CODEX_HANDLING_LINE" \
+      "a Codex $mode-mode reminder must not tell the primary to start a checkpoint"
+  done
+
   for harness in opencode grok; do
     fakebin=$(fm_fakebin "$TMP_ROOT/$harness-ancestry")
     fake_harness_ancestry "$fakebin" "$harness"

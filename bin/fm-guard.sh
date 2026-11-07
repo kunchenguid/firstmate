@@ -219,9 +219,11 @@ elif [ "$watcher_healthy" = false ]; then
   # Foreground Codex checkpoints leave no watcher between an actionable exit and
   # the next checkpoint, so a missing watcher there is either an active handler
   # mid-protocol or an abandoned turn. The verdict stays strict; only the wording
-  # tells the two apart for the reader.
+  # tells the two apart for the reader. Away and quiet mode hand supervision to
+  # the daemon, so they keep only the daemon repair wording.
   codex_foreground=0
   if [ "$watcher_down_reason" = no-watcher ] && [ "$READ_ONLY" -eq 0 ] \
+    && [ ! -e "$STATE/.afk" ] \
     && [ "$(fm_supervision_model)" = persistent ] \
     && [ "$("$SCRIPT_DIR/fm-harness.sh" 2>/dev/null || printf unknown)" = codex ]; then
     codex_foreground=1
