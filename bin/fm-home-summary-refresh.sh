@@ -25,6 +25,14 @@
 # teardown use that mode so this side-band publication can never change their
 # result. Without it, failures are printed and returned to the direct caller
 # for tests and diagnostics.
+#
+# Best-effort failures back off exponentially: each consecutive failure records
+# its count and next allowed attempt in state/.home-summary-backoff, waiting
+# 60 seconds after the first and doubling up to one hour. Best-effort triggers
+# inside that window exit zero without running, each logged failure names its
+# streak and wait, and the first successful publication clears the record.
+# Direct callers always attempt. Session start keeps reporting the unpublished
+# ledger and its failure count until a publication succeeds.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -37,6 +45,11 @@ PROJECTS="${FM_PROJECTS_OVERRIDE:-$FM_HOME/projects}"
 LEDGER="$STATE/home-summary.json"
 ERROR_LOG="$STATE/.home-summary-refresh.log"
 REFRESH_LOCK="$STATE/.home-summary-refresh.lock"
+BACKOFF_FILE="$STATE/.home-summary-backoff"
+BACKOFF_BASE_SECONDS=60
+BACKOFF_MAX_SECONDS=3600
+WORKER_LOGGED_FAILURE_RC=3
+WORKER_SKIPPED_RC=4
 ERROR_LOG_MAX_BYTES=${FM_HOME_SUMMARY_ERROR_LOG_MAX_BYTES:-65536}
 HOME_SUMMARY_TIMEOUT=${FM_HOME_SUMMARY_TIMEOUT:-60}
 HOME_SUMMARY_IF_IDLE=${FM_HOME_SUMMARY_IF_IDLE:-0}
@@ -110,7 +123,7 @@ home_summary_refresh_once() {
   trap 'exit 130' INT
   trap 'exit 143' TERM
   if [ "$HOME_SUMMARY_IF_IDLE" -eq 1 ]; then
-    fm_lock_try_acquire "$REFRESH_LOCK" || return 0
+    fm_lock_try_acquire "$REFRESH_LOCK" || exit "$WORKER_SKIPPED_RC"
   else
     fm_lock_acquire_wait "$REFRESH_LOCK"
   fi
@@ -216,20 +229,47 @@ if [ "$HOME_SUMMARY_MODE" = log-failure ]; then
 fi
 
 if [ "$HOME_SUMMARY_MODE" = parent ]; then
+  backoff_failures=0
+  backoff_until=0
+  if [ -f "$BACKOFF_FILE" ]; then
+    read -r backoff_failures backoff_until < "$BACKOFF_FILE" 2>/dev/null || true
+    case "$backoff_failures" in ''|*[!0-9]*) backoff_failures=0 ;; esac
+    case "$backoff_until" in ''|*[!0-9]*) backoff_until=0 ;; esac
+  fi
+  if [ "$BEST_EFFORT" -eq 1 ] && [ "$(date +%s)" -lt "$backoff_until" ]; then
+    exit 0
+  fi
+  backoff_failures=$((backoff_failures + 1))
+  backoff_delay=$BACKOFF_BASE_SECONDS
+  backoff_step=1
+  while [ "$backoff_step" -lt "$backoff_failures" ] && [ "$backoff_delay" -lt "$BACKOFF_MAX_SECONDS" ]; do
+    backoff_delay=$((backoff_delay * 2))
+    backoff_step=$((backoff_step + 1))
+  done
+  [ "$backoff_delay" -le "$BACKOFF_MAX_SECONDS" ] || backoff_delay=$BACKOFF_MAX_SECONDS
+  backoff_note="(failure $backoff_failures in a row, backing off ${backoff_delay}s)"
   attempt_stamp=$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null) || attempt_stamp=
   if fm_run_timed "$HOME_SUMMARY_TIMEOUT" env \
     FM_HOME_SUMMARY_WORKER_BEST_EFFORT="$BEST_EFFORT" \
+    FM_HOME_SUMMARY_BACKOFF_NOTE="$backoff_note" \
     FM_HOME_SUMMARY_IF_IDLE="$HOME_SUMMARY_IF_IDLE" \
     "$SCRIPT_DIR/fm-home-summary-refresh.sh" --_worker; then
+    rm -f -- "$BACKOFF_FILE" 2>/dev/null || true
     exit 0
   else
     refresh_rc=$?
   fi
+  [ "$refresh_rc" -ne "$WORKER_SKIPPED_RC" ] || exit 0
   if [ "$BEST_EFFORT" -eq 1 ]; then
+    backoff_tmp="$BACKOFF_FILE.tmp.${BASHPID:-$$}"
+    printf '%s %s\n' "$backoff_failures" "$(( $(date +%s) + backoff_delay ))" > "$backoff_tmp" 2>/dev/null \
+      && mv -f -- "$backoff_tmp" "$BACKOFF_FILE" 2>/dev/null
+    rm -f -- "$backoff_tmp" 2>/dev/null || true
+    [ "$refresh_rc" -ne "$WORKER_LOGGED_FAILURE_RC" ] || exit 0
     if [ "$refresh_rc" -eq 124 ]; then
-      parent_error="refresh exceeded its ${HOME_SUMMARY_TIMEOUT}-second deadline"
+      parent_error="refresh exceeded its ${HOME_SUMMARY_TIMEOUT}-second deadline $backoff_note"
     else
-      parent_error="refresh worker failed with exit $refresh_rc"
+      parent_error="refresh worker failed with exit $refresh_rc $backoff_note"
     fi
     fm_run_timed 2 env \
       FM_HOME_SUMMARY_PARENT_ERROR="$parent_error" \
@@ -250,8 +290,9 @@ else
   refresh_rc=$?
 fi
 if [ "$BEST_EFFORT" -eq 1 ]; then
+  HOME_SUMMARY_ERROR="$HOME_SUMMARY_ERROR ${FM_HOME_SUMMARY_BACKOFF_NOTE:-}"
   home_summary_log_failure
-  exit 0
+  exit "$WORKER_LOGGED_FAILURE_RC"
 fi
 printf 'fm-home-summary-refresh: %s\n' "$HOME_SUMMARY_ERROR" >&2
 exit "$refresh_rc"
