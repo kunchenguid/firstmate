@@ -517,9 +517,9 @@ test_only_proven_writers_are_verified() {
 
 # A credential pasted into the conversation must not be copied onward: the
 # mirror file, its digest, and the feed the engine receives carry a placeholder,
-# while ordinary dialog, long lowercase names, and commit ids stay as said.
+# while ordinary dialog, URLs, long lowercase names, and commit ids stay as said.
 test_pasted_secrets_are_masked_before_recording() {
-  local home fake gh text feed masked
+  local home fake gh text feed masked plain
   home=$(make_home secrets)
   fake='madeupQueryKey0for0Tests0Only0123456'
   gh='ghp_aB3dE5fG7hJ9kL1mN3pQ5rS7tU9vW1xY3zA5'
@@ -532,6 +532,10 @@ test_pasted_secrets_are_masked_before_recording() {
     say captain "yaml token: madeupyaml456" p4
     say captain "header X-API-Key: madeupheader789" p5
     say captain "ini api_key = madeupspaced246" p6
+    say captain "flags --access-token madeupaccess --client-secret madeupclient --auth-token=madeupauth --api-token madeupapi" p7
+    say captain "clone https://user:madeup@pw@host.example.com/path" p8
+    say captain "see https://github.com/o/r/pulls?author=c6aw&sort=created with keyboard=us and monkey=banana" p9
+    say captain "Authorization: the captain approved it" p10
     "$MIRROR" feed engine-1 new > "$FM_HOME/feed.out"
   ' || fail "a writer or the feed failed"
   if grep -q -e "$fake" -e "$gh" -e plainvalue -e madeup "$home/state/.host-mirror.jsonl"; then
@@ -545,8 +549,14 @@ test_pasted_secrets_are_masked_before_recording() {
   case "$feed" in *'apiKey=<redacted> for the check'*) ;; *) fail "the masked captain line is missing from the feed: $feed" ;; esac
   case "$feed" in *'fm_supervision_host_attended_ready_and_friends and bf05a4fc0123456789abcdef0123456789abcdef as said'*) ;;
     *) fail "ordinary dialog must be recorded as said: $feed" ;; esac
-  for masked in '"apiKey": "<redacted>"' 'token: <redacted>' 'X-API-Key: <redacted>' 'api_key = <redacted>'; do
+  for masked in '"apiKey": "<redacted>"' 'token: <redacted>' 'X-API-Key: <redacted>' 'api_key = <redacted>' \
+    '--access-token <redacted> --client-secret <redacted> --auth-token=<redacted> --api-token <redacted>' \
+    'https://<redacted>@host.example.com/path'; do
     case "$feed" in *"$masked"*) ;; *) fail "a masked credential line is missing from the feed: $masked" ;; esac
+  done
+  for plain in 'https://github.com/o/r/pulls?author=c6aw&sort=created with keyboard=us and monkey=banana' \
+    'Authorization: the captain approved it'; do
+    case "$feed" in *"$plain"*) ;; *) fail "ordinary dialog must be recorded as said: $plain" ;; esac
   done
   pass "mirror: a pasted secret is masked before it reaches the mirror, its digest, or the feed"
 }
