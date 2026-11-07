@@ -3239,10 +3239,10 @@ if [ "$KIND" != secondmate ] && [ "$RELAUNCH" -eq 0 ] && [ -f "$CONFIG/crew-disp
     exit 1
   fi
   if [ "$dispatch_status" = clear ] && [ -z "$DISPATCH_OVERRIDE" ] \
-    && { [ "$HARNESS" != "$selected_harness" ] \
+    && { [ "$RAW_LAUNCH" -eq 1 ] || [ "$HARNESS" != "$selected_harness" ] \
       || { [ -n "$selected_model" ] && [ "${MODEL:-}" != "$selected_model" ]; } \
       || { [ -n "$selected_effort" ] && [ "${EFFORT:-}" != "$selected_effort" ]; }; }; then
-    echo "error: launch flags do not match the clear dispatch selection --harness $selected_harness${selected_model:+ --model $selected_model}${selected_effort:+ --effort $selected_effort} recorded in $DISPATCH_RECORD; pass those flags, or record this task's override with --dispatch-override <reason>" >&2
+    echo "error: launch flags do not match the clear dispatch selection --harness $selected_harness${selected_model:+ --model $selected_model}${selected_effort:+ --effort $selected_effort} recorded in $DISPATCH_RECORD; pass those flags with no raw launch command, or record this task's override with --dispatch-override <reason>" >&2
     exit 1
   fi
 fi

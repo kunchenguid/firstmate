@@ -563,6 +563,32 @@ test_recorded_dispatch_selection_leaves_unset_effort_unbound() {
   pass "an effort the clear selection leaves unset is not bound"
 }
 
+# A raw command keeps its own options, so matching --harness/--model/--effort
+# beside it proves nothing about what the worker runs.
+test_recorded_dispatch_selection_refuses_raw_launch_without_override() {
+  local rec id out status
+  id=profile-selected-raw-z13
+  rec=$(make_spawn_case profile-selected-raw claude "$id")
+  read_case_record "$rec"
+  enable_dispatch_profile "$HOME_DIR"
+  record_dispatch "$HOME_DIR" "$id" clear claude haiku low
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" "claude --model opus --effort high" --model haiku --effort low)
+  status=$?
+  expect_code 1 "$status" "a raw command under a clear selection should be refused without an override"
+  assert_contains "$out" 'launch flags do not match the clear dispatch selection --harness claude --model haiku --effort low' "spawn did not name the recorded selection"
+  assert_absent "$HOME_DIR/state/$id.meta" "a refused raw launch should not publish the task"
+  assert_equals '' "$(cat "$LAUNCH_LOG")" "a refused raw launch must not create a worker"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" "claude --model opus --effort high" --dispatch-override 'captain asked for opus')
+  status=$?
+  expect_code 0 "$status" "a raw command with a recorded task override should launch: $out"
+  assert_grep 'dispatch_override=captain asked for opus' "$HOME_DIR/state/$id.meta" "task record omitted the override reason"
+  pass "a clear dispatch selection refuses a raw launch command unless a task override is recorded"
+}
+
 test_active_dispatch_without_task_record_is_refused() {
   local rec id out status
   id=profile-unrecorded-z13
@@ -2942,6 +2968,7 @@ test_recorded_dispatch_selection_refuses_conflicting_flags
 test_recorded_dispatch_selection_allows_matching_flags
 test_recorded_dispatch_selection_allows_recorded_override
 test_recorded_dispatch_selection_leaves_unset_effort_unbound
+test_recorded_dispatch_selection_refuses_raw_launch_without_override
 test_active_dispatch_without_task_record_is_refused
 test_batch_checks_each_task_against_its_own_record
 test_active_dispatch_profile_allows_positional_harness

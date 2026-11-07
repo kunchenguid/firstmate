@@ -1356,7 +1356,8 @@ An explicit harness also bypasses reading the pin file during spawn or control-p
 Remote secondmate routes accept verified harness adapters only and reject raw launch commands.
 When `config/crew-dispatch.json` exists, crewmate and scout spawns require an explicit resolved harness instead of automatically falling back to `config/crew-harness`.
 Such a spawn also refuses until `bin/fm-dispatch-resolve.sh data/<id>/brief.md` has written that task's record, `data/<id>/dispatch-resolution.json`.
-When the record is `clear`, the spawn must match its harness, and its model and effort where the record sets them, unless `--dispatch-override <reason>` records a task override in `state/<id>.meta` as `dispatch_override=<reason>`.
+Both paths are under `FM_DATA_OVERRIDE` instead of `data/` when it is set.
+When the record is `clear`, the spawn must match its harness, and its model and effort where the record sets them, with no raw launch command, unless `--dispatch-override <reason>` records a task override in `state/<id>.meta` as `dispatch_override=<reason>`.
 A model or effort the record leaves empty is not bound, so the documented effort fallback still applies.
 When the record is `ambiguous`, `escalate`, `error`, or `off`, the explicit flags from the manual intake are enough.
 An `fm-spawn.sh --relaunch` skips this check.
@@ -2092,7 +2093,7 @@ Firstmate passes its profile line unless it states a reason to override, such as
 
 **Task record (data/<id>/dispatch-resolution.json)**
 
-For a brief at `data/<id>/brief.md`, each run first removes that task's `dispatch-resolution.json`, so a decision never outlives a later run.
+For a brief at `data/<id>/brief.md`, or `<FM_DATA_OVERRIDE>/<id>/brief.md` when that override is set, each run first removes that task's `dispatch-resolution.json`, so a decision never outlives a later run.
 Every outcome that exits 0, including off, then writes one JSON object there: `task` (the `<id>`), `status` (`clear`, `ambiguous`, `escalate`, `error`, or `off`), and `profile`.
 On `clear`, `profile` holds `harness`, `model`, and `effort`, each `null` when the chosen profile leaves it unset; otherwise `profile` is `null`.
 A usage or configuration error (exit 2) writes no record.

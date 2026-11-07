@@ -1367,8 +1367,8 @@ assert_not_contains "$out" '  profile:' "ambiguous emits no profile line"
 pass "ambiguous: confidence below the fixed floor hands the decision back"
 
 # --- task record: data/<id>/dispatch-resolution.json for fm-spawn ---------------
-TASK_BRIEF="$TMP_ROOT/data/pager-fix/brief.md"
-TASK_RECORD="$TMP_ROOT/data/pager-fix/dispatch-resolution.json"
+TASK_BRIEF="$HOME_DIR/data/pager-fix/brief.md"
+TASK_RECORD="$HOME_DIR/data/pager-fix/dispatch-resolution.json"
 mkdir -p "$(dirname "$TASK_BRIEF")"
 cp "$BRIEF" "$TASK_BRIEF"
 reset_log
@@ -1394,6 +1394,24 @@ expect_code 2 "$code" "malformed rules exit 2"
 assert_absent "$TASK_RECORD" "a configuration error leaves no task record to act on"
 mv "$RULES.keep" "$RULES"
 pass "task record: every exit-0 outcome records its decision for data/<id>/brief.md, and exit 2 records none"
+
+# A home with FM_DATA_OVERRIDE keeps briefs outside $FM_HOME/data; fm-spawn.sh
+# reads the record there, so the resolver must write it there too.
+OVERRIDE_DATA="$TMP_ROOT/custom-records"
+mkdir -p "$OVERRIDE_DATA/pager-fix" "$TMP_ROOT/data/pager-fix"
+cp "$BRIEF" "$OVERRIDE_DATA/pager-fix/brief.md"
+cp "$BRIEF" "$TMP_ROOT/data/pager-fix/brief.md"
+reset_log
+write_response "$RESPONSE" rule_4 0.9
+FM_DATA_OVERRIDE=$OVERRIDE_DATA TYPESAFE_API_KEY=$KEY run code out err "$OVERRIDE_DATA/pager-fix/brief.md" --project pager
+assert_equals 'pager-fix clear cursor' \
+  "$(jq -r '"\(.task) \(.status) \(.profile.harness)"' "$OVERRIDE_DATA/pager-fix/dispatch-resolution.json")" \
+  "a brief under FM_DATA_OVERRIDE records its decision beside it"
+reset_log
+write_response "$RESPONSE" rule_4 0.9
+TYPESAFE_API_KEY=$KEY run code out err "$TMP_ROOT/data/pager-fix/brief.md" --project pager
+assert_absent "$TMP_ROOT/data/pager-fix/dispatch-resolution.json" "a data/<id>/ directory outside the configured data root writes no task record"
+pass "task record: the configured data root, including FM_DATA_OVERRIDE, decides where the record goes"
 
 # --- per-rule confidence floor ------------------------------------------------
 write_floor_response() {  # <path> <choice> <confidence> <rule_1> <rule_2> <rule_3> <rule_4> <default>
