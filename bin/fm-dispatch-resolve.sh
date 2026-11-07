@@ -99,6 +99,10 @@
 #     candidate: <harness>:<model> provider=.. scope=.. remaining=..% spendPriority=.. runway=.. -> eligible | eligible, unranked: <reason> | not eligible: <reason>
 #        (with the shared-quota opt-out: <harness>:<model> provider=.. -> eligible (quota ranking off: home declares a single shared quota))
 #     profile: --harness <h> [--model <m>] [--effort <e>]     (status clear only)
+#   Recorded selection: every run first removes dispatch-selection beside the
+#   brief, and only a clear result writes it back as harness|model|effort. For
+#   data/<id>/brief.md, fm-spawn.sh refuses that task's launch with other flags
+#   unless it gets --dispatch-override <reason>, which the task record keeps.
 #   clear     -> pass the profile line to fm-spawn.sh unless you state a reason to override
 #   ambiguous -> confidence below the floor; decide as today from the probabilities
 #   escalate  -> the rule requires captain approval, no candidate is rankable, or a genuine tie
@@ -197,6 +201,11 @@ while [ $# -gt 0 ]; do
     *) [ -z "$BRIEF" ] || die "one brief file only"; BRIEF=$1; shift ;;
   esac
 done
+SELECTION=''
+[ -z "$BRIEF" ] || SELECTION="$(dirname -- "$BRIEF")/dispatch-selection"
+if [ -n "$SELECTION" ] && { [ -e "$SELECTION" ] || [ -L "$SELECTION" ]; }; then
+  rm -f -- "$SELECTION" || die "could not clear the previous dispatch selection: $SELECTION"
+fi
 
 # ---- opt-in gate ---------------------------------------------------------------
 # declared_key <provider> <private variable>: set the variable from the source
@@ -789,7 +798,13 @@ TEXT=$(jq -r '
       + "  -> " + (if .unranked then "eligible, unranked: \(.reason | flat): disclosed uncertainty" elif .sq then "eligible (quota ranking off: home declares a single shared quota)" elif .eligible then "eligible" else "not eligible: \(.reason | flat)" end)),
   (if .chosen then "  profile: --harness \(.chosen.profile.harness | shell_arg)"
       + (if .chosen.profile.model then " --model \(.chosen.profile.model | shell_arg)" else "" end)
-      + (if .chosen.profile.effort then " --effort \(.chosen.profile.effort | shell_arg)" else "" end) else empty end),
-  (if .chosen then "  dispatch_profile: \(.chosen.profile.harness | flat)|\((.chosen.profile.model // "") | flat)|\((.chosen.profile.effort // "") | flat)" else empty end)' <<<"$RESULT") || emit_error "output rendering failed"
+      + (if .chosen.profile.effort then " --effort \(.chosen.profile.effort | shell_arg)" else "" end) else empty end)' <<<"$RESULT") || emit_error "output rendering failed"
+CHOSEN=$(jq -r 'if .chosen then .chosen.profile | "\(.harness)|\(.model // "")|\(.effort // "")" else empty end' <<<"$RESULT") || emit_error "selection rendering failed"
+if [ -n "$CHOSEN" ]; then
+  if ! { printf '%s\n' "$CHOSEN" > "$SELECTION.tmp.$$" && mv -f -- "$SELECTION.tmp.$$" "$SELECTION"; }; then
+    rm -f -- "$SELECTION.tmp.$$"
+    emit_error "could not record the dispatch selection"
+  fi
+fi
 printf '%s\n' "$TEXT"
 exit 0

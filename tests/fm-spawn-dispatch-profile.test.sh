@@ -437,7 +437,7 @@ test_active_dispatch_profile_requires_explicit_harness_for_ship() {
   out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
   status=$?
   expect_code 1 "$status" "ship spawn without explicit harness should fail when dispatch profiles are active"
-  assert_contains "$out" "config/crew-dispatch.json is active - pass the task's selected dispatch profile with --dispatch-profile" \
+  assert_contains "$out" "config/crew-dispatch.json is active - pass an explicit harness resolved from the dispatch rules" \
     "spawn did not explain the dispatch-profile backstop"
   assert_absent "$HOME_DIR/state/$id.meta" "ship refusal should happen before meta is written"
   pass "active crew-dispatch profile requires an explicit harness for ship spawns"
@@ -453,14 +453,14 @@ test_active_dispatch_profile_requires_explicit_harness_for_scout() {
   out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --scout)
   status=$?
   expect_code 1 "$status" "scout spawn without explicit harness should fail when dispatch profiles are active"
-  assert_contains "$out" "config/crew-dispatch.json is active - pass the task's selected dispatch profile with --dispatch-profile" \
+  assert_contains "$out" "config/crew-dispatch.json is active - pass an explicit harness resolved from the dispatch rules" \
     "scout refusal did not explain the dispatch-profile backstop"
   assert_absent "$HOME_DIR/state/$id.meta" "scout refusal should happen before meta is written"
   pass "active crew-dispatch profile requires an explicit harness for scout spawns"
 }
 
-test_active_dispatch_profile_refuses_conflicting_explicit_harness() {
-  local rec id out status
+test_active_dispatch_profile_allows_explicit_harness() {
+  local rec id out status launch
   id=profile-explicit-z13
   rec=$(make_spawn_case profile-explicit claude "$id")
   read_case_record "$rec"
@@ -469,30 +469,71 @@ test_active_dispatch_profile_refuses_conflicting_explicit_harness() {
   mv "$HOME_DIR/config/preferred.json" "$HOME_DIR/config/crew-dispatch.json"
 
   out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
-    "$id" "$PROJ_DIR" --harness codex --model gpt-5 --effort high --dispatch-profile 'claude|opus|high')
+    "$id" "$PROJ_DIR" --harness codex --model gpt-5 --effort high)
   status=$?
-  expect_code 1 "$status" "conflicting explicit profile should be refused"
-  assert_contains "$out" 'launch flags do not match this task' "spawn did not explain the selected-profile mismatch"
-  assert_absent "$HOME_DIR/state/$id.meta" "profile mismatch should refuse before task publication"
-  assert_equals '' "$(cat "$LAUNCH_LOG")" "profile mismatch must not create a worker"
-  pass "active crew-dispatch profile refuses conflicting explicit launch flags"
+  expect_code 0 "$status" "explicit harness should satisfy active dispatch-profile requirement"
+  assert_contains "$out" "spawned $id harness=codex" "spawn did not report explicit codex harness"
+  assert_meta_profile "$HOME_DIR/state/$id.meta" codex gpt-5 high
+  launch=$(fm_test_launch_unframe "$(cat "$LAUNCH_LOG")")
+  assert_contains "$launch" "codex --model 'gpt-5' -c 'model_reasoning_effort=\"high\"' --dangerously-bypass-approvals-and-sandbox" \
+    "explicit harness launch did not thread model, effort, and Codex bypass flag"
+  pass "active crew-dispatch profile allows an explicit resolved harness"
 }
 
-test_active_dispatch_profile_allows_recorded_override() {
+test_recorded_dispatch_selection_refuses_conflicting_flags() {
   local rec id out status
-  id=profile-override-z13
-  rec=$(make_spawn_case profile-override claude "$id")
+  id=profile-selected-conflict-z13
+  rec=$(make_spawn_case profile-selected-conflict claude "$id")
   read_case_record "$rec"
   enable_dispatch_profile "$HOME_DIR"
+  mkdir -p "$HOME_DIR/data/$id"
+  printf '%s\n' 'claude|opus|high' > "$HOME_DIR/data/$id/dispatch-selection"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" --harness codex --model gpt-5 --effort high)
+  status=$?
+  expect_code 1 "$status" "flags that differ from the recorded selection should be refused"
+  assert_contains "$out" 'launch flags do not match the dispatch selection claude|opus|high' "spawn did not name the recorded selection"
+  assert_absent "$HOME_DIR/state/$id.meta" "selection mismatch should refuse before task publication"
+  assert_equals '' "$(cat "$LAUNCH_LOG")" "selection mismatch must not create a worker"
+  pass "a recorded dispatch selection refuses conflicting explicit launch flags"
+}
+
+test_recorded_dispatch_selection_allows_matching_flags() {
+  local rec id out status
+  id=profile-selected-match-z13
+  rec=$(make_spawn_case profile-selected-match claude "$id")
+  read_case_record "$rec"
+  enable_dispatch_profile "$HOME_DIR"
+  mkdir -p "$HOME_DIR/data/$id"
+  printf '%s\n' 'codex|gpt-5|high' > "$HOME_DIR/data/$id/dispatch-selection"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" --harness codex --model gpt-5 --effort high)
+  status=$?
+  expect_code 0 "$status" "flags equal to the recorded selection should launch: $out"
+  assert_meta_profile "$HOME_DIR/state/$id.meta" codex gpt-5 high
+  assert_no_grep 'dispatch_override=' "$HOME_DIR/state/$id.meta" "a matching launch should record no override"
+  pass "a recorded dispatch selection allows the matching launch flags"
+}
+
+test_recorded_dispatch_selection_allows_recorded_override() {
+  local rec id out status
+  id=profile-selected-override-z13
+  rec=$(make_spawn_case profile-selected-override claude "$id")
+  read_case_record "$rec"
+  enable_dispatch_profile "$HOME_DIR"
+  mkdir -p "$HOME_DIR/data/$id"
+  printf '%s\n' 'claude|opus|high' > "$HOME_DIR/data/$id/dispatch-selection"
 
   out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
     "$id" "$PROJ_DIR" --harness codex --model gpt-5 --effort high \
-    --dispatch-profile 'claude|opus|high' --dispatch-override 'authorized account test')
+    --dispatch-override 'authorized account test')
   status=$?
-  expect_code 0 "$status" "a recorded account-test override should permit launch"
-  assert_contains "$out" "spawned $id harness=codex" "spawn did not report the authorized Codex launch"
+  expect_code 0 "$status" "a recorded task override should permit a different launch: $out"
+  assert_contains "$out" "spawned $id harness=codex" "spawn did not report the overridden Codex launch"
   assert_grep 'dispatch_override=authorized account test' "$HOME_DIR/state/$id.meta" "task record omitted the override reason"
-  pass "an authorized task-specific override is recorded and permits launch"
+  pass "a task override with its reason permits a different launch and is recorded"
 }
 
 test_active_dispatch_profile_allows_positional_harness() {
@@ -503,7 +544,7 @@ test_active_dispatch_profile_allows_positional_harness() {
   enable_dispatch_profile "$HOME_DIR"
 
   out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
-    "$id" "$PROJ_DIR" codex --model gpt-5 --effort high --dispatch-profile 'codex|gpt-5|high')
+    "$id" "$PROJ_DIR" codex --model gpt-5 --effort high)
   status=$?
   expect_code 0 "$status" "positional harness should satisfy active dispatch-profile requirement"
   assert_contains "$out" "spawned $id harness=codex" "spawn did not report positional codex harness"
@@ -605,7 +646,7 @@ test_active_dispatch_profile_allows_raw_launch_command() {
   enable_dispatch_profile "$HOME_DIR"
 
   out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
-    "$id" "$PROJ_DIR" "custom-agent --flag" --dispatch-profile 'custom-agent||' --dispatch-override 'authorized custom tool')
+    "$id" "$PROJ_DIR" "custom-agent --flag")
   status=$?
   expect_code 0 "$status" "raw launch command should satisfy active dispatch-profile requirement"
   assert_contains "$out" "spawned $id harness=custom-agent" "spawn did not report raw command harness"
@@ -1332,7 +1373,7 @@ test_native_pi_ultra_is_explicit_and_model_scoped() {
       rec=$(make_spawn_case "$id" "$harness" "$id")
       read_case_record "$rec"
       out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
-        --harness "$harness" --model codex-native/gpt-6-astra --effort ultra --mode "$mode" --yolo off --dispatch-profile "$harness|codex-native/gpt-6-astra|ultra")
+        --harness "$harness" --model codex-native/gpt-6-astra --effort ultra --mode "$mode" --yolo off)
       expect_code 0 "$?" "native Ultra spawn failed: $out"
       assert_meta_profile "$HOME_DIR/state/$id.meta" "$harness" codex-native/gpt-6-astra ultra
       launch=$(fm_test_launch_unframe "$(cat "$LAUNCH_LOG")")
@@ -1370,7 +1411,7 @@ test_batch_preserves_native_ultra() {
   read_case_record "$rec"
   enable_dispatch_profile "$HOME_DIR"
   out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
-    "$id1=$PROJ_DIR" "$id2=$PROJ_DIR" --harness pi --model codex-native/gpt-6-astra --effort ultra --dispatch-profile 'pi|codex-native/gpt-6-astra|ultra')
+    "$id1=$PROJ_DIR" "$id2=$PROJ_DIR" --harness pi --model codex-native/gpt-6-astra --effort ultra)
   expect_code 0 "$?" "native Ultra batch failed: $out"
   assert_meta_profile "$HOME_DIR/state/$id1.meta" pi codex-native/gpt-6-astra ultra
   assert_meta_profile "$HOME_DIR/state/$id2.meta" pi codex-native/gpt-6-astra ultra
@@ -1913,7 +1954,7 @@ test_batch_forwards_shared_profile_flags() {
   enable_dispatch_profile "$HOME_DIR"
 
   out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
-    "$id1=$PROJ_DIR" "$id2=$PROJ_DIR" --harness codex --model gpt-5 --effort high --dispatch-profile 'codex|gpt-5|high')
+    "$id1=$PROJ_DIR" "$id2=$PROJ_DIR" --harness codex --model gpt-5 --effort high)
   status=$?
   expect_code 0 "$status" "batch spawn with shared profile flags should succeed"
   assert_contains "$out" "spawned $id1 harness=codex" "first batch task did not use shared harness"
@@ -2826,8 +2867,10 @@ test_absolute_override_spelling_is_preserved_in_launch_paths
 test_unresolvable_relative_overrides_fail_loudly
 test_active_dispatch_profile_requires_explicit_harness_for_ship
 test_active_dispatch_profile_requires_explicit_harness_for_scout
-test_active_dispatch_profile_refuses_conflicting_explicit_harness
-test_active_dispatch_profile_allows_recorded_override
+test_active_dispatch_profile_allows_explicit_harness
+test_recorded_dispatch_selection_refuses_conflicting_flags
+test_recorded_dispatch_selection_allows_matching_flags
+test_recorded_dispatch_selection_allows_recorded_override
 test_active_dispatch_profile_allows_positional_harness
 test_active_dispatch_profile_allows_raw_launch_command
 test_raw_launch_trailing_separator_or_comment_keeps_disarm
