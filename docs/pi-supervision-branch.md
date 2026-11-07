@@ -228,8 +228,8 @@ The outcome store is `bin/fm-branch-outcome.sh`.
 Its header owns the append-only format, read cursor, and bounded per-task status-coverage indexes.
 
 Outcomes are written to the store before delivery to Pi.
-A captain row advances the cursor only after its matching visible session entry exists.
-Locked session-start replay stops before the first captain row, so it cannot acknowledge that outcome through prose alone.
+A main or captain row advances the cursor only after its matching visible session entry exists.
+Locked session-start replay stops before the first main or captain row, so it cannot acknowledge that outcome through prose alone.
 
 A routine note has no such sequence-keyed record.
 If its cursor write fails after the note was delivered, the next reconciliation sends that note once more.
@@ -292,7 +292,7 @@ The legacy `state/.afk` daemon flag means nothing on Pi, where the daemon is nev
 The supervision branch lives inside the captain's own Pi process.
 Pi runs extensions, their tools, and their event handlers on the single JavaScript thread that also draws the TUI and reads the keyboard.
 A synchronous subprocess in the delivery path therefore stops repaint and key echo for the child's whole lifetime.
-The captain saw that as a subsecond freeze every time a routine or captain-facing outcome arrived.
+The captain saw that as a subsecond freeze every time a routine, main, or captain outcome arrived.
 
 Subprocess work reached through Pi's asynchronous APIs is now awaited instead.
 `.pi/extensions/lib/fm-async-exec.ts` owns that awaited-spawn replacement.
@@ -409,15 +409,15 @@ Reconciliation runs at two points:
 - At session start, when that generation already owns the fleet lock.
 - At the first post-lock `turn_end`.
 
-Together, these let a cold start that acquires the lock through the startup digest still deliver stored captain outcomes without waiting for another wake.
+Together, these let a cold start that acquires the lock through the startup digest still deliver stored main and captain outcomes without waiting for another wake.
 
-### Processing a captain outcome on main
+### Processing a main or captain outcome on main
 
-Display is only half of a captain outcome.
+Display is only half of a main or captain outcome.
 The other half is processing, because a blocker, a decision, or a ready PR needs main to act, not only the captain to see it.
 
-1. After the visible entry exists and the read cursor has passed it, the extension hands the oldest batch of at most 32 still-unprocessed captain rows to main as one hidden, typed `fm-branch-process` request (kind `branch-outcome`), and presents the next batch after main acknowledges that one.
-   The request lists each `[seq N, recorded <age> ago] task: summary`, with the age from the store's `recordedAgo` (`bin/fm-branch-outcome.sh` owns its wording), and asks main to check the task's current state first.
+1. After the visible entry exists and the read cursor has passed it, the extension hands the oldest batch of at most 32 still-unprocessed main and captain rows to main as one hidden, typed `fm-branch-process` request (kind `branch-outcome`), and presents the next batch after main acknowledges that one.
+   The request lists each `[seq N, recorded <age> ago] task: summary`, a `main` row as `[seq N, recorded <age> ago, main to act, not a captain call] task: summary`, with the age from the store's `recordedAgo` (`bin/fm-branch-outcome.sh` owns its wording), and asks main to check the task's current state first.
    Summaries over 1024 characters are abbreviated within that bound and point to `bin/fm-branch-outcome.sh lookup --seqs <N>` for the full outcome.
    Main must read the full outcome for any abbreviated line before acting on, relaying, or acknowledging it.
    It says each outcome was recorded earlier and may already have been seen or handled, rather than claiming a visible entry in this transcript, because an outcome carried over from before a restart or a switch of primary has none here.
@@ -451,7 +451,7 @@ After that, the request rides the captain's next prompt, so an ignored request c
 Changed sequence membership and a session replacement each start that budget over.
 
 Routine outcomes never enter this path and stay turn-free.
-A home with no processed marker, including an upgrade or switch from the supervision host, re-presents delivered captain rows dated and check-first until acknowledged; see the marker contract in `bin/fm-branch-outcome.sh`.
+A home with no processed marker, including an upgrade or switch from the supervision host, re-presents delivered main and captain rows dated and check-first until acknowledged; see the marker contract in `bin/fm-branch-outcome.sh`.
 
 ### Ownership and verdict rules
 
