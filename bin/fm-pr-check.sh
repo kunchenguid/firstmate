@@ -427,12 +427,16 @@ if [ "${FM_PR_CHECK_MERGE:-}" != 1 ]; then
       "$STATE/$ID.check.sh" "$STATE/$ID.pr-poll" "$STATE/$ID.pr-poll-registration"; do
       backup="$BASELINE_BACKUP/$(basename "$artifact")"
       if [ -e "$backup" ]; then
-        restore_tmp=$(mktemp "$STATE/.fm-pr-restore.XXXXXX") || return 1
-        if ln -- "$backup" "$restore_tmp" && mv -f -- "$restore_tmp" "$artifact"; then
-          :
+        if [ -e "$artifact" ] && [ ! -L "$artifact" ]; then
+          cat -- "$backup" > "$artifact" || return 1
         else
-          rm -f -- "$restore_tmp"
-          return 1
+          restore_tmp=$(mktemp "$STATE/.fm-pr-restore.XXXXXX") || return 1
+          if cp -p -- "$backup" "$restore_tmp" && mv -f -- "$restore_tmp" "$artifact"; then
+            :
+          else
+            rm -f -- "$restore_tmp"
+            return 1
+          fi
         fi
       else
         rm -f -- "$artifact" || return 1
@@ -449,7 +453,7 @@ if [ "${FM_PR_CHECK_MERGE:-}" != 1 ]; then
     [ -f "$artifact" ] && [ ! -L "$artifact" ] \
       && [ "$(fm_pr_file_device "$artifact")" = "$STATE_DEVICE" ] \
       && [ "$(fm_pr_file_link_count "$artifact")" = 1 ] || { rm -rf -- "$BASELINE_BACKUP"; exit 1; }
-    ln -- "$artifact" "$BASELINE_BACKUP/$(basename "$artifact")" || { rm -rf -- "$BASELINE_BACKUP"; exit 1; }
+    cp -p -- "$artifact" "$BASELINE_BACKUP/$(basename "$artifact")" || { rm -rf -- "$BASELINE_BACKUP"; exit 1; }
   done
   BASELINE_BACKUP_COMPLETE=1
   if [ -n "$BASELINE_DEGRADED" ]; then
