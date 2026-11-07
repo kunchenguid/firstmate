@@ -1359,6 +1359,7 @@ Such a spawn also refuses until `bin/fm-dispatch-resolve.sh data/<id>/brief.md` 
 When the record is `clear`, the spawn must match its harness, and its model and effort where the record sets them, unless `--dispatch-override <reason>` records a task override in `state/<id>.meta` as `dispatch_override=<reason>`.
 A model or effort the record leaves empty is not bound, so the documented effort fallback still applies.
 When the record is `ambiguous`, `escalate`, `error`, or `off`, the explicit flags from the manual intake are enough.
+An `fm-spawn.sh --relaunch` skips this check.
 
 The inherited-local-material contract is owned by [`secondmate-provisioning`](../.agents/skills/secondmate-provisioning/SKILL.md); its harness-relevant consequence is that a secondmate's own crewmates use the primary's dispatch profiles and static harness value.
 Those inherited values are defaults and rules only; `fm-spawn` still permits a consciously chosen explicit runtime outside the config.
@@ -2088,6 +2089,7 @@ Firstmate still applies those gates before dispatch, including when `preferred_p
 Explicit captain overrides retain precedence over the resolver's suggestion.
 
 Firstmate passes its profile line unless it states a reason to override, such as the brief's reasoning class or an eligible-unranked-candidate note; every non-clear result returns to the full existing intake.
+
 **Task record (data/<id>/dispatch-resolution.json)**
 
 For a brief at `data/<id>/brief.md`, each run first removes that task's `dispatch-resolution.json`, so a decision never outlives a later run.
