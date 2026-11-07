@@ -515,16 +515,33 @@ hash_pane() {
 # into the contract's harness-scoped rendered-text checks: the Grok/Rovo/AGY
 # busy fallbacks and the launch-prompt backstop that keeps a launch pinned at
 # its fm-spawn seed from reading as provably working.
-window_is_busy() {  # <window> <tail40>
-  local w=$1 tail40=$2 task meta verdict
-  task=$(window_to_task "$w" "$STATE")
+# The semantic busy verdict has several consumers in this watcher.  Keep its
+# metadata lookup and fallback in one place so a pause exception cannot resolve
+# the same pane differently from the ordinary stale path.
+window_busy_verdict() {  # <window> <task> [tail40]
+  local w=$1 task=$2 tail40=${3-} meta
   meta="$STATE/$task.meta"
   if [ -n "$task" ] && [ -f "$meta" ]; then
-    verdict=$(fm_busy_classify_meta "$meta" "$task" "$STATE" "$tail40")
+    if [ -n "$tail40" ]; then
+      fm_busy_classify_meta "$meta" "$task" "$STATE" "$tail40"
+    else
+      fm_busy_classify_meta "$meta" "$task" "$STATE"
+    fi
   else
-    verdict=$(fm_busy_classify "$(window_backend "$w")" "$w" "$(window_harness "$w")" \
-      "${task:-unknown}" "$STATE" "$tail40")
+    if [ -n "$tail40" ]; then
+      fm_busy_classify "$(window_backend "$w")" "$w" "$(window_harness "$w")" \
+        "${task:-unknown}" "$STATE" "$tail40"
+    else
+      fm_busy_classify "$(window_backend "$w")" "$w" "$(window_harness "$w")" \
+        "${task:-unknown}" "$STATE"
+    fi
   fi
+}
+
+window_is_busy() {  # <window> <tail40>
+  local w=$1 tail40=$2 task verdict
+  task=$(window_to_task "$w" "$STATE")
+  verdict=$(window_busy_verdict "$w" "$task" "$tail40")
   case "$verdict" in
     busy\ *) return 0 ;;
     *) return 1 ;;
@@ -2507,6 +2524,14 @@ busy_turn_bound_check() {  # <window> <task> <hash> <since-file> <escalation-fil
   local stream_episode stream_snapshot=$BUSY_STREAM_SNAPSHOT label="busy (no completed turn)"
   statusf="$STATE/$task.status"
   if status_is_paused_or_captain_held "$(status_declared_wait_line "$statusf")"; then
+    # This is not an unreadable-runtime exception.  The recorded Claude picker
+    # positively proves that a human action is blocking progress, so surface it
+    # once through the declaration throttle instead of hiding it behind the
+    # normal pause cadence.
+    if [ -n "$dialog" ]; then
+      surface_nonterminal_stale "$win" "$h" "$dialog"
+      return 0
+    fi
     if afk_present; then
       # Away mode is daemon-owned, so this bound hands off the PLAIN wake identity
       # and lets the daemon classify the declaration itself - the undecorated
@@ -2625,14 +2650,8 @@ clear_pause_tracking() {  # <window-key>
 # endpoint handling; only an unknown semantic verdict cannot contradict the
 # worker's own declaration.
 pause_runtime_unreadable() {  # <window> <task>
-  local win=$1 task=$2 meta verdict
-  meta="$STATE/$task.meta"
-  if [ -f "$meta" ]; then
-    verdict=$(fm_busy_classify_meta "$meta" "$task" "$STATE")
-  else
-    verdict=$(fm_busy_classify "$(window_backend "$win")" "$win" "$(window_harness "$win")" \
-      "$task" "$STATE")
-  fi
+  local win=$1 task=$2 verdict
+  verdict=$(window_busy_verdict "$win" "$task")
   case "$verdict" in unknown\ *) return 0 ;; esac
   return 1
 }
@@ -2983,15 +3002,9 @@ surface_nonterminal_stale() {  # <window> <hash> [dialog-name]
 # existing paths, and an already-classified quiet pane still reaches
 # wedge_timer_check.
 unknown_alive_stale_bound() {  # <window> <task>
-  local win=$1 task=$2 meta verdict agent_alive
+  local win=$1 task=$2 verdict agent_alive
   [ -n "$task" ] || return 1
-  meta="$STATE/$task.meta"
-  if [ -f "$meta" ]; then
-    verdict=$(fm_busy_classify_meta "$meta" "$task" "$STATE")
-  else
-    verdict=$(fm_busy_classify "$(window_backend "$win")" "$win" "$(window_harness "$win")" \
-      "$task" "$STATE")
-  fi
+  verdict=$(window_busy_verdict "$win" "$task")
   [ "${verdict%% *}" = unknown ] || return 1
   agent_alive=$(fm_backend_agent_alive "$(window_backend "$win")" "$win" 2>/dev/null) || agent_alive=unknown
   [ "$agent_alive" = alive ] || return 1
@@ -4443,7 +4456,14 @@ EOF
                 triage_log "absorbed non-terminal stale (provably working): $w"
                 ;;
               paused)
-                handle_paused_stale "$w" "$task" "$h"
+                # A confirmed Claude background-task exit picker is itself an
+                # actionable block.  Let its first sight wake once; the shared
+                # declaration throttle then restores the ordinary long cadence.
+                if [ -n "$dialog" ]; then
+                  surface_nonterminal_stale "$w" "$h" "$dialog"
+                else
+                  handle_paused_stale "$w" "$task" "$h"
+                fi
                 ;;
               *)
                 surface_nonterminal_stale "$w" "$h" "$dialog"
