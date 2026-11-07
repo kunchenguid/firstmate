@@ -1105,6 +1105,30 @@ fm_dod_named_head_reachable_outside_worktree() {  # <worktree> <project> <mode> 
   fm_dod_named_head_on_surviving_ref "$@"
 }
 
+# 0 when <sha> is the project's base branch tip or an ancestor of it, so it
+# carries no task work. The base is the task's recorded base_branch=, else the
+# project's origin/HEAD, main or master (the order bin/fm-merge-local.sh uses).
+# 1 when the base cannot be resolved, so an unknown base never blocks a done.
+fm_dod_head_within_base() {  # <project> <meta> <sha>
+  local project=$1 meta=$2 sha=$3 base='' ref branch
+  [ -z "$meta" ] || [ ! -f "$meta" ] || base=$(fm_dod_meta_value "$meta" base_branch)
+  if [ -z "$base" ]; then
+    ref=$(git -C "$project" symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null || true)
+    base=${ref#origin/}
+  fi
+  if [ -z "$base" ]; then
+    for branch in main master; do
+      if git -C "$project" show-ref --verify --quiet "refs/heads/$branch"; then
+        base=$branch
+        break
+      fi
+    done
+  fi
+  [ -n "$base" ] || return 1
+  git -C "$project" rev-parse --verify --quiet "refs/heads/$base^{commit}" >/dev/null 2>&1 || return 1
+  git -C "$project" merge-base --is-ancestor "$sha" "refs/heads/$base"
+}
+
 # 0 when <line> is not a ship done: to gate, when the task's meta records
 # forge=external and fm_dod_accept_external_review_done accepts it, when it
 # names the task's recorded PR whose head the forge holds, when it names a
@@ -1166,6 +1190,11 @@ fm_dod_accept_ship_done() {  # <kind> <mode> <worktree> <project> <line> [<state
     return 1
   fi
   if fm_dod_named_head_reachable_outside_worktree "$wt" "$project" "$mode" "$sha"; then
+    if [ "$mode" = local-only ] && ! grep -q '^local_done_head=' "${meta:-/dev/null}" 2>/dev/null \
+      && fm_dod_head_within_base "$project" "$meta" "$sha"; then
+      printf '%s\n' "the worker copy's HEAD $sha has no commits beyond the base branch, so the done line is premature"
+      return 1
+    fi
     if [ "$mode" = local-only ] && [ -n "$meta" ]; then
       if [ -z "$state" ] || [ -z "$id" ] \
         || ! fm_dod_pin_local_done_head "$state" "$id" "$meta" "$sha" "$captured" "${9:-}"; then
