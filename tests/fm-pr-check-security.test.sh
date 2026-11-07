@@ -2582,6 +2582,8 @@ group/subgroup/project
   out=$(FM_TEST_GLAB_STATE=merged run_poll "$dir")
   [ "$out" = merged ] || fail "GitLab poll did not emit exactly one merged line"
 
+  # The train reads below parse glab's JSON, so the poll's restricted PATH needs jq.
+  ln -sf "$REAL_JQ" "$dir/fakebin/jq"
   # On a merge-train project, merged alone is not proof of the landing: the poll
   # stays silent until the merge, squash, or fast-forward commit is recorded.
   local sha=0123456789abcdef0123456789abcdef01234567
