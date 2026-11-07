@@ -9,7 +9,7 @@
 #
 # Mapping (old -> new):
 #   id <origin> <key>                      -> prints the legacy <origin>-decision-<key> identity
-#   hold <origin> <key> --title --reason [--repo]
+#   hold <origin> <key> --title --class --reason [--repo]
 #                                          -> hold <origin>-decision-<key> --origin <origin> ...
 #   complete <origin> (--none | <key>...)  -> complete <origin> (--none | <origin>-decision-<key>...)
 #   verify <origin>                        -> verify <origin>

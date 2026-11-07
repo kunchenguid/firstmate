@@ -414,6 +414,41 @@ JS
   pass "the supervision notes read the store owner's tail copy and markers as Pi does: sailboat and anchor lines, silent rows skipped, bounded replay of unread and unprocessed rows not already shown in the session, and latch notes"
 }
 
+# A main outcome is firstmate's own work: the store owner accepts verdict main,
+# and Pi draws it as an anchor tagged "[firstmate to act, not a captain call]"
+# (tests/fm-pi-branch-extension.test.sh pins Pi's line). The mod must draw the
+# same line, never fold it into a "not shown" count, and replay it until main
+# acknowledges it as processed, exactly as it replays a captain row.
+test_branch_notes_show_main_outcomes() {
+  local home state out
+  home="$TMP_ROOT/notes-main-home"
+  state="$home/state"
+  mkdir -p "$state"
+  outcome() { FM_HOME="$home" bash "$ROOT/bin/fm-branch-outcome.sh" "$@" >/dev/null || fail "fm-branch-outcome.sh $1 failed"; }
+  outcome append --task fm-r --verdict routine --summary 'worker healthy'
+  outcome append --task fm-m --verdict main --summary 'local branch ready to land'
+  outcome append --task fm-s --verdict routine --summary 'reconciled the backlog'
+  outcome mark-read --through 3
+  [ -s "$state/.branch-outcomes-tail.jsonl" ] || fail "the store owner wrote no display tail copy"
+  cat >"$TMP_ROOT/notes-main.mjs" <<'JS'
+import { readFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+const notes = await import(pathToFileURL(`${process.env.NOTES_MOD}/lib/fm-branch-notes.ts`).href);
+const same = (actual, expected, message) => { if (JSON.stringify(actual) !== JSON.stringify(expected)) throw new Error(`${message}: ${JSON.stringify(actual)}`); };
+const rows = notes.parseOutcomeTail(readFileSync(`${process.env.NOTES_STATE}/.branch-outcomes-tail.jsonl`, "utf8"));
+same(rows.map((row) => `${row.seq}:${row.verdict}`), ["1:routine", "2:main", "3:routine"], "the main row the store owner wrote");
+const mainLine = "⚓ [seq 2] [firstmate to act, not a captain call] fm-m: local branch ready to land";
+same(notes.newOutcomeNotes(rows, 0), { lines: ["⛵ fm-r: worker healthy", mainLine, "⛵ fm-s: reconciled the backlog"], lastSeen: 3 },
+  "a main row is drawn as Pi draws it, never counted as not shown");
+same(notes.replayOutcomeNotes(rows, 3, 0), [mainLine], "an unprocessed main row replays past the read cursor");
+same(notes.replayOutcomeNotes(rows, 3, 2), [], "an acknowledged main row does not replay");
+console.log("notes-main-ok");
+JS
+  out=$(NOTES_MOD=$MOD NOTES_STATE=$state run_node "$TMP_ROOT/notes-main.mjs" 2>&1) || fail "main supervision notes: $out"
+  assert_contains "$out" "notes-main-ok" "the main supervision notes check did not complete"
+  pass "the supervision notes draw a main outcome as Pi does and replay it until main acknowledges it"
+}
+
 # The classifier parity corpus: envelopes the shell owner encodes itself, its legacy
 # shapes, and near misses. Each case is one file so multi-line bodies stay exact.
 canonical_generic_kinds() {
@@ -602,5 +637,6 @@ test_shared_sprite_and_pi_rendering
 test_raster_packing
 test_presentation_policy
 test_branch_notes_over_the_store_owner
+test_branch_notes_show_main_outcomes
 test_classifier_parity_with_shell_owner
 test_doorbell_parity_with_shell_owner

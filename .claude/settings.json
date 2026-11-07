@@ -63,6 +63,11 @@
             "type": "command",
             "command": "[ -z \"${GROK_AGENT:-}${GROK_HOOK_EVENT:-}\" ] || exit 0; exec \"$CLAUDE_PROJECT_DIR\"/bin/fm-host-mirror.sh hook claude",
             "timeout": 10
+          },
+          {
+            "type": "command",
+            "command": "[ -z \"${GROK_AGENT:-}${GROK_HOOK_EVENT:-}\" ] || exit 0; exec \"$CLAUDE_PROJECT_DIR\"/bin/fm-waiting-on-you.sh --claude",
+            "timeout": 20
           }
         ]
       }
