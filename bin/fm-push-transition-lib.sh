@@ -153,6 +153,15 @@ handle_push_transition() {  # <backend> <session> <record>
   [ -n "$pane_id" ] || { sleep 1; return; }
   window=$(fm_backend_transition_target "$backend" "$session" "$pane_id")
   task=$(window_to_task "$window" "$STATE")
+  # An endpoint no surviving task record owns belongs to retired work: its
+  # task was torn down while the bounded wait was open, or the backend
+  # streamed an edge for a pane outside the subscribed set. There is no
+  # worker to recover, so the edge is only logged and never raises a stall.
+  if [ "$(fm_backend_target_of_meta "$STATE/$task.meta" 2>/dev/null)" != "$window" ]; then
+    triage_log "absorbed push $to (leftover endpoint, no task record): $window"
+    fm_backend_commit_transition "$backend" "$STATE" "$session" "$record" || exit 1
+    return
+  fi
   # A declared wait already names the human this transition would report: an
   # external dependency, or the captain a verified hold transferred the work to.
   # Either way the wait is durably recorded, so absorb the immediate escalation
