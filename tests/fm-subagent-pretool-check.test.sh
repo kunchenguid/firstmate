@@ -71,6 +71,83 @@ expect_deny() {
     || fail "$label ($tool) deny message lost its code or tool name: $(jq -r '.systemMessage' "$ERR")"
 }
 
+# The payload helpers feed a real PreToolUse JSON document on stdin, which is
+# the only transport that carries tool_input for the SendMessage exception.
+
+run_payload() {
+  local payload=$1 rc=0
+  : > "$OUT"
+  : > "$ERR"
+  printf '%s' "$payload" | \
+    env FM_ROOT_OVERRIDE="$PRIMARY" FM_HOME="$PRIMARY" FM_STATE_OVERRIDE="$STATE" \
+      "$CHECK" --claude > "$OUT" 2> "$ERR" || rc=$?
+  return "$rc"
+}
+
+expect_payload_allow() {
+  local label=$1 payload=$2 rc=0
+  run_payload "$payload" || rc=$?
+  [ "$rc" -eq 0 ] || fail "$label must allow, got exit $rc: $(cat "$ERR")"
+  [ ! -s "$OUT" ] || fail "$label allow wrote stdout: $(cat "$OUT")"
+  [ ! -s "$ERR" ] || fail "$label allow wrote stderr: $(cat "$ERR")"
+}
+
+expect_payload_deny() {
+  local label=$1 payload=$2 tool=$3 rc=0
+  run_payload "$payload" || rc=$?
+  [ "$rc" -eq 2 ] || fail "$label must deny with exit 2, got $rc"
+  [ ! -s "$OUT" ] || fail "$label deny wrote stdout: $(cat "$OUT")"
+  jq -e '.hookSpecificOutput.hookEventName == "PreToolUse" and .hookSpecificOutput.permissionDecision == "deny"' "$ERR" >/dev/null 2>&1 \
+    || fail "$label deny omitted Claude's permission decision: $(cat "$ERR")"
+  jq -e --arg tool "$tool" '.systemMessage | startswith("[subagent-dispatch]") and contains("blocked tool: " + $tool)' "$ERR" >/dev/null 2>&1 \
+    || fail "$label deny message lost its code or tool name: $(jq -r '.systemMessage' "$ERR")"
+}
+
+test_sendmessage_to_existing_claude_session_is_allowed() {
+  # A reply to another of the owner's own Claude sessions is not delegation:
+  # the session already exists, so the call creates no unaccounted work.
+  # Claude Code addresses those sessions as a uds:<socket> address or a
+  # local_<session id> peer name, delivered in the payload's .tool_input.to.
+  expect_payload_allow "reply to a local_ session" \
+    '{"tool_name":"SendMessage","tool_input":{"to":"local_01ABC","summary":"reply","message":"the PR is up"}}'
+  expect_payload_allow "reply to a uds: session" \
+    '{"tool_name":"SendMessage","tool_input":{"to":"uds:/tmp/claude-peer.sock","summary":"reply","message":"the PR is up"}}'
+
+  # Every other recipient stays refused: an in-process helper agent addressed
+  # by name, a broadcast, a bridge address, a near-miss case, a non-string
+  # recipient, and a payload with no recipient at all.
+  expect_payload_deny "message to an in-process agent name" \
+    '{"tool_name":"SendMessage","tool_input":{"to":"researcher","summary":"go","message":"start task 1"}}' \
+    SendMessage
+  expect_payload_deny "broadcast message" \
+    '{"tool_name":"SendMessage","tool_input":{"to":"*","summary":"all","message":"status?"}}' \
+    SendMessage
+  expect_payload_deny "bridge-addressed message" \
+    '{"tool_name":"SendMessage","tool_input":{"to":"bridge:abc123","summary":"go","message":"start"}}' \
+    SendMessage
+  expect_payload_deny "wrong-case local_ recipient" \
+    '{"tool_name":"SendMessage","tool_input":{"to":"Local_01ABC","summary":"go","message":"start"}}' \
+    SendMessage
+  expect_payload_deny "non-string recipient" \
+    '{"tool_name":"SendMessage","tool_input":{"to":5,"summary":"go","message":"start"}}' \
+    SendMessage
+  expect_payload_deny "missing recipient" \
+    '{"tool_name":"SendMessage","tool_input":{"summary":"go","message":"start"}}' \
+    SendMessage
+
+  # The exception is exact-name only and scoped to the stdin transport:
+  # a near-miss name and the --tool CLI form stay refused, and a helper-agent
+  # call fed the same way is still the core denial.
+  expect_payload_deny "sendmessage near-miss name" \
+    '{"tool_name":"SendMessageAndSpawn","tool_input":{"to":"local_01ABC","message":"hi"}}' \
+    SendMessageAndSpawn
+  expect_deny "--tool mode has no recipient" SendMessage
+  expect_payload_deny "helper-agent call" \
+    '{"tool_name":"Agent","tool_input":{"prompt":"investigate the build"}}' \
+    Agent
+  pass "SendMessage is allowed only for uds:/local_ recipients and every other form stays refused"
+}
+
 # ---------------------------------------------------------------------------
 # Delegation-shape PreToolUse guard.
 # ---------------------------------------------------------------------------
@@ -289,3 +366,4 @@ test_secondmate_home_is_in_scope
 test_stdin_transports_and_output_shapes
 test_malformed_transport_fails_open
 test_missing_jq_stdin_transport_fails_open
+test_sendmessage_to_existing_claude_session_is_allowed

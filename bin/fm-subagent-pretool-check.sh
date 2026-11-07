@@ -89,7 +89,9 @@ Usage: fm-subagent-pretool-check.sh [--tool <tool-name>] [--claude|--agy]
 
 With no --tool, reads a PreToolUse-style JSON payload on stdin (Claude/Codex
 tool_name, Grok toolName, or Antigravity toolCall.name).
-Denies a delegation-SHAPED tool name in a genuine primary home.
+Denies a delegation-SHAPED tool name in a genuine primary home, except a
+SendMessage whose recipient addresses an existing same-machine Claude
+session (a uds:<socket> address or a local_<session id> peer name).
 Claude primaries may also add an untracked per-home permissions.deny list that
 removes known delegation tools from the model schema before this hook is needed.
 Do not ship that Claude-only list in tracked project settings, because linked
@@ -169,6 +171,24 @@ for stem in $DELEGATION_STEMS; do
   esac
 done
 [ -n "$MATCHED" ] || exit 0
+
+# One recipient-limited exception: SendMessage addressed to an existing
+# same-machine Claude session is replying to the owner's other sessions, not
+# creating unaccounted work. The local deny list recommended in
+# docs/subagent-guard.md still removes SendMessage from the schema upstream of
+# this hook, so this exception matters only where SendMessage reaches the
+# hook. Only the exact normalized name qualifies (SendMessageAndSpawn stays
+# denied) and only the two recipient forms that name an existing session: a
+# uds:<socket> address or a local_<session id> peer name. A peer name with
+# any other shape - an in-process agent addressed by name, a broadcast '*',
+# or a bridge:<session id> - is refused, as is a payload with a missing or
+# non-string recipient and the --tool CLI form, which carries no recipient.
+if [ "$NORMALIZED" = "sendmessage" ] && [ -n "${PAYLOAD:-}" ]; then
+  RECIPIENT=$(printf '%s' "$PAYLOAD" | jq -r 'if (.tool_input.to | type) == "string" then .tool_input.to else empty end' 2>/dev/null) || RECIPIENT=""
+  case "$RECIPIENT" in
+    uds:*|local_*) exit 0 ;;
+  esac
+fi
 
 # The single deliberate escape hatch. It is an environment variable rather than
 # a flag or a state file so it must be set when the session is launched, which
