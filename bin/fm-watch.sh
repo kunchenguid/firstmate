@@ -2160,7 +2160,14 @@ while :; do
   if inactive_out=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
     "$SCRIPT_DIR/fm-inactive-reconcile.sh" scan 2>/dev/null); then
     if [ -n "$inactive_out" ]; then
-      wake "check: inactive-outcome"
+      # The scan already publishes one keyed wake per fingerprint, and those
+      # carry the detail. This generic line exists so a scan that published
+      # nothing still surfaces, but a bare "check: inactive-outcome" names a
+      # condition without naming the action that clears it: 94 terminal
+      # outcomes accumulated over two months because nothing could be
+      # acknowledged from a wake that never said which record it meant.
+      # Carry the scan's own first line so the wake is actionable.
+      wake "check: inactive-outcome: $(printf '%s' "$inactive_out" | head -1 | cut -c1-300)"
     fi
   else
     triage_log "inactive-outcome reconciliation unavailable"
