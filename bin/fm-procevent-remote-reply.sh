@@ -53,7 +53,9 @@
 # on the stream. Gating on it here made a remote mate's own progress lines and
 # newly raised decisions - which carry no corr= by contract - unrepresentable,
 # and rejecting one line failed the whole delta, so the cursor could never
-# advance past it. No single line can stop or wedge the stream.
+# advance past it. Ordinary status lines never gate the stream. A required
+# data/report-snapshots/<sha256>.md offer is different: its correlated answer is
+# withheld until the frozen bytes arrive and their digest verifies.
 #
 # What remains here is only what crossing a machine boundary genuinely adds:
 #   - cursor continuity and identity (offset plus prefix digest)
@@ -452,11 +454,23 @@ summarize_fetch_reason() { # <stderr-file> <remote-relative>
 FETCH_DOC_REASON=''
 fetch_document() { # <id> <remote-relative> <result-var>
   local id=$1 rel=$2 result_var=$3 base destination parent parent_real tmp err local_rel rc=0
+  local limit=$MAX_DOC_BYTES digest='' bytes
   FETCH_DOC_REASON=''
   if ! safe_doc_path "$rel"; then
     FETCH_DOC_REASON='pointer is not a confined data/*.md path'
     return 1
   fi
+  case "$rel" in
+    data/report-snapshots/*)
+      digest=${rel#data/report-snapshots/}
+      digest=${digest%.md}
+      if [ "${#digest}" -ne 64 ] || [[ "$digest" = *[!a-f0-9]* ]]; then
+        FETCH_DOC_REASON='invalid required snapshot digest'
+        return 1
+      fi
+      limit=1048576
+      ;;
+  esac
   base="$DATA/remote-secondmates/$id"
   destination="$base/$rel"
   parent=$(dirname "$destination")
@@ -469,7 +483,7 @@ fetch_document() { # <id> <remote-relative> <result-var>
   FETCH_ERR=$err
   tmp=$(umask 077; mktemp "$parent/.remote-doc.XXXXXX") || { rm -f -- "$err"; FETCH_ERR=''; return "$DOCUMENT_LOCAL_FAILURE"; }
   FETCH_TMP=$tmp
-  "$SCRIPT_DIR/fm-on.sh" "$id" fm-remote-file.sh get "$rel" "$MAX_DOC_BYTES" < /dev/null > "$tmp" 2> "$err" || rc=$?
+  "$SCRIPT_DIR/fm-on.sh" "$id" fm-remote-file.sh get "$rel" "$limit" < /dev/null > "$tmp" 2> "$err" || rc=$?
   if [ "$rc" -ne 0 ]; then
     FETCH_DOC_REASON=$(summarize_fetch_reason "$err" "$rel")
     rm -f -- "$tmp" "$err"
@@ -477,11 +491,23 @@ fetch_document() { # <id> <remote-relative> <result-var>
     [ "$rc" -ne "$SSH_UNAVAILABLE" ] || return "$SSH_UNAVAILABLE"
     return 1
   fi
-  rm -f -- "$err"
-  FETCH_ERR=''
-  chmod 600 "$tmp" || { rm -f -- "$tmp"; FETCH_TMP=''; return "$DOCUMENT_LOCAL_FAILURE"; }
-  mv -f -- "$tmp" "$destination" || { rm -f -- "$tmp"; FETCH_TMP=''; return "$DOCUMENT_LOCAL_FAILURE"; }
-  FETCH_TMP=''
+  if [ -n "$digest" ]; then
+    bytes=$(wc -c < "$tmp" | tr -d ' ')
+    if ! FM_HOME="$base" "$SCRIPT_DIR/fm-document-snapshot.sh" receive "$digest" "$bytes" < "$tmp" > /dev/null 2> "$err"; then
+      FETCH_DOC_REASON=$(summarize_fetch_reason "$err" "$rel")
+      rm -f -- "$tmp" "$err"
+      FETCH_TMP='' FETCH_ERR=''
+      return 1
+    fi
+    rm -f -- "$tmp" "$err"
+    FETCH_TMP='' FETCH_ERR=''
+  else
+    rm -f -- "$err"
+    FETCH_ERR=''
+    chmod 600 "$tmp" || { rm -f -- "$tmp"; FETCH_TMP=''; return "$DOCUMENT_LOCAL_FAILURE"; }
+    mv -f -- "$tmp" "$destination" || { rm -f -- "$tmp"; FETCH_TMP=''; return "$DOCUMENT_LOCAL_FAILURE"; }
+    FETCH_TMP=''
+  fi
   local_rel="data/remote-secondmates/$id/$rel"
   printf -v "$result_var" '%s' "$local_rel"
 }
@@ -652,6 +678,12 @@ cmd_ingest() {
     local_doc=''
     fetch_document "$id" "$doc" local_doc || fetch_rc=$?
     if [ "$fetch_rc" -eq 1 ]; then
+      case "$doc" in
+        data/report-snapshots/*)
+          fm_lock_release "$lock"
+          die "required document snapshot did not transfer: $doc - $FETCH_DOC_REASON"
+          ;;
+      esac
       # Fail open. A refusal is never a decision: the mate's line keeps its own
       # pointer, the cursor still advances, and one unkeyed note says why. A
       # keyed escalation raised here once stood open forever describing a report

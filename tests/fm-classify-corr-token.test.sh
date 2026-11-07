@@ -517,7 +517,8 @@ test_the_real_writers_produce_tokens_this_library_reads() {
   local parent mate
   parent="$dir"
   mate="$dir/mate"
-  mkdir -p "$mate/state"
+  mkdir -p "$mate/state" "$mate/data/x"
+  printf '# Reviewed report\n' > "$mate/data/x/report.md"
   printf 'pinned\n' > "$mate/.fm-secondmate-home"
   cat > "$mate/.fm-secondmate-parent" <<EOF
 schema=fm-secondmate-parent.v1
@@ -538,6 +539,10 @@ EOF
     || fail "$REPORT failed writing a correlated doc-pointer report"
   helper_line=$(tail -1 "$state/pinned.status")
   status_line_at_epoch "$helper_line" >/dev/null || fail "doc report helper emitted no time"
+  case "$helper_line" in *'report=data/report-snapshots/'*) ;; *) fail "the report does not point to a captured snapshot" ;; esac
+  snapshot=$(find "$parent/data/report-snapshots" -type f -name '*.md' -print -quit)
+  [ -n "$snapshot" ] || fail "the local parent did not receive a snapshot"
+  cmp -s "$mate/data/x/report.md" "$snapshot" || fail "the received snapshot differs from the reviewed document"
   verb=$(status_line_verb "$helper_line")
   [ "$verb" = needs-decision ] \
     || fail "the classifier did not read through the helper's doc line '$helper_line' (verb=[$verb])"

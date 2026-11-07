@@ -177,6 +177,17 @@ For an existing or inherited domain, the creating agent must:
 A live backlog keeps only the configured recent Done entries by design, so an inherited queue structurally over-represents plans and under-represents deliveries.
 Treat an inherited queue that carries plans with no matching delivery record as unreconciled rather than as open work, and record whatever could not be reconciled as an explicit residual-uncertainty list in the new home rather than leaving that gap silent.
 
+## Required documents when routing work
+
+Use [`bin/fm-secondmate-report.sh --doc`](../../../bin/fm-secondmate-report.sh) for a document-bearing parent reply, not a source-machine path in prose.
+Its header owns the snapshot and delivery contract.
+When forwarding that document with a request, preserve its source-host, source-home, and source-document provenance.
+Use [`bin/fm-document-snapshot.sh`](../../../bin/fm-document-snapshot.sh)'s capture/receive contract to copy the reviewed artifact into the receiving home.
+For a remote route, use `fm-on.sh --stdin`.
+Send the request with its receiving-home path only after a successful verified receive.
+The receiving secondmate must read that copy before dispatching the task.
+A source reply queued remotely or an acknowledgement of the request alone does not establish that the required document arrived.
+
 ## Backlog handoff
 
 Apply `AGENTS.md` section 10's work-items-only backlog contract before creation or handoff.

@@ -14,6 +14,11 @@
 # state/parent-replies.status. Call it from the secondmate home with FM_HOME
 # set to that home.
 #
+# --doc captures reviewed non-secret Markdown/text under data/ into a
+# content-addressed snapshot. A local reply receives and verifies the bytes
+# before it appends the report. A remote reply offers the snapshot for verified
+# transfer before its correlated line is mirrored.
+#
 # Usage:
 #   fm-secondmate-report.sh <verb> <corr_id> <note...>
 #   fm-secondmate-report.sh --doc <verb> <corr_id> <doc-path> <note...>
@@ -35,6 +40,10 @@ usage() {
 Usage:
   fm-secondmate-report.sh <verb> <corr_id> <note...>
   fm-secondmate-report.sh --doc <verb> <corr_id> <doc-path> <note...>
+
+--doc captures a reviewed non-secret .md/.txt document under this home's data/.
+The receiving home verifies the snapshot before it delivers the report.
+Remote success queues the offer, not a receipt. The maximum is 1048576 bytes.
 EOF
   exit 2
 }
@@ -92,12 +101,17 @@ token=$(fm_pending_reply_corr_token "$CORR")
 if [ "$DOC_MODE" = 1 ]; then
   DOC_PATH=$1
   shift
-  NOTE=$*
-  if [ -n "$NOTE" ]; then
-    printf -v line '%s [%s]: %s (%s via-helper)' "$VERB" "$token" "$NOTE" "$DOC_PATH"
-  else
-    printf -v line '%s [%s]: %s (via-helper)' "$VERB" "$token" "$DOC_PATH"
+  SNAPSHOT=$(FM_HOME="$HOME_DIR" "$SCRIPT_DIR/fm-document-snapshot.sh" capture "$DOC_PATH")
+  DIGEST=${SNAPSHOT##*/}
+  DIGEST=${DIGEST%.md}
+  BYTES=$(wc -c < "$HOME_DIR/$SNAPSHOT" | tr -d ' ')
+  fm_parent_channel_destination "$HOME_DIR" "$STATE_DIR" >/dev/null
+  if [ "$FM_PARENT_CHANNEL_ROUTE" = local ]; then
+    FM_HOME="$FM_SECONDMATE_PARENT_HOME" "$SCRIPT_DIR/fm-document-snapshot.sh" receive "$DIGEST" "$BYTES" \
+      < "$HOME_DIR/$SNAPSHOT" >/dev/null
   fi
+  printf -v line '%s [%s]: %s (report=%s source-host=%q source-home=%q source-document=%q document-bytes=%s via-helper)' \
+    "$VERB" "$token" "$*" "$SNAPSHOT" "$(hostname)" "$HOME_DIR" "$DOC_PATH" "$BYTES"
 else
   NOTE=$*
   printf -v line '%s [%s]: %s (via-helper)' "$VERB" "$token" "$NOTE"
