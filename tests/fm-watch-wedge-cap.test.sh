@@ -63,7 +63,10 @@ file_mtime() {
 
 wait_poll_cycle() {  # <state> <pid> [limit-ticks]
   local state=$1 pid=$2 limit=${3:-300} beat first now i=0
-  beat="$state/.last-watcher-beat"
+  # The cycle marker is touched once per poll at the loop top, so a mtime
+  # change is a whole cycle - unlike the liveness beacon, which also advances
+  # per window during a slow pane scan.
+  beat="$state/.last-watcher-cycle"
   rm -f "$beat"
   first=""
   while [ "$i" -lt "$limit" ]; do

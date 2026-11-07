@@ -38,7 +38,7 @@ The guard acts at that boundary when both of these hold:
 - Work, a process-event source, a registered custom check, or Relay polling needs supervision.
 - No identity-matched watcher has a fresh beacon.
 
-The beacon is `state/.last-watcher-beat`, which `bin/fm-watch.sh` touches every cycle, as [Guard grace and the poll cadence](#guard-grace-and-the-poll-cadence) describes.
+The beacon is `state/.last-watcher-beat`; [Guard grace and the poll cadence](#guard-grace-and-the-poll-cadence) owns its touch cadence.
 When the guard acts, the harness integration must do one of two things:
 
 - Block the turn end.
@@ -207,8 +207,8 @@ With `state/.afk` absent the daemon lock proves nothing and the strict watcher p
 
 ### Guard grace and the poll cadence
 
-`bin/fm-watch.sh` touches `state/.last-watcher-beat` once per cycle, immediately before its terminal wait (`event_wait_or_sleep`) as well as at the top of the next cycle.
-A healthy watcher's beacon can therefore legitimately age up to `FM_POLL` seconds between touches.
+`bin/fm-watch.sh` touches `state/.last-watcher-beat` once per cycle at the loop top, and again once per completed window as the pane scan advances.
+A healthy watcher's beacon can therefore legitimately age up to `FM_POLL` seconds between loop-top touches, while a slow-but-advancing pane scan stays fresh and a single window whose current-state read hangs past the grace still reads stale.
 
 A fixed 300-second grace default stops correctly bounding staleness once a home's `FM_POLL` reaches or exceeds it.
 A perfectly healthy watcher mid-wait would then read stale at the edge of every full poll cycle by definition.
