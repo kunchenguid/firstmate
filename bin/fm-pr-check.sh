@@ -417,13 +417,17 @@ if [ "${FM_PR_CHECK_MERGE:-}" != 1 ]; then
   BASELINE_BACKUP=$(mktemp -d "$STATE/.fm-pr-baseline.XXXXXX") || exit 1
   BASELINE_BACKUP_COMPLETE=0
   restore_baselines() {
-    local artifact backup
+    local artifact backup restore_tmp
     [ "$BASELINE_BACKUP_COMPLETE" = 1 ] || return 1
     for artifact in "$META" "$STATE/$ID.pr-poll-degraded" "$STATE/$ID.pr-poll-train" \
       "$STATE/$ID.check.sh" "$STATE/$ID.pr-poll" "$STATE/$ID.pr-poll-registration"; do
       backup="$BASELINE_BACKUP/$(basename "$artifact")"
       if [ -e "$backup" ]; then
-        cp -p -- "$backup" "$artifact.restore" && mv -f -- "$artifact.restore" "$artifact" || return 1
+        restore_tmp=$(mktemp "$STATE/.fm-pr-restore.XXXXXX") || return 1
+        cp -p -- "$backup" "$restore_tmp" && mv -f -- "$restore_tmp" "$artifact" || {
+          rm -f -- "$restore_tmp"
+          return 1
+        }
       else
         rm -f -- "$artifact" || return 1
       fi
