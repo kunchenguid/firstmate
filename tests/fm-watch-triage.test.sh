@@ -3177,9 +3177,9 @@ test_relaunched_busy_pane_is_not_aged_by_previous_turn_end() {
   old=$(( $(date +%s) - 19000 ))
   printf 'Working... (3.1s)' > "$capture_file"
   printf 'paused [at=%s]: waiting on an outside review\n' "$old" > "$state/relaunched.status"
-  touch -d "@$old" "$state/relaunched.status"
+  set_mtime "$old" "$state/relaunched.status"
   printf '%s' "$(seen_sig "$state/relaunched.status")" > "$state/.seen-relaunched_status"
-  touch -d "@$(( old + 10 ))" "$state/relaunched.turn-ended"
+  set_mtime "$(( old + 10 ))" "$state/relaunched.turn-ended"
   prime_turnend_seen "$state/relaunched.turn-ended"
   # The relaunch: a fresh spawn record and a re-armed busy contract.
   printf 'window=%s\nkind=scout\nharness=pi\n' "$window" > "$state/relaunched.meta"
