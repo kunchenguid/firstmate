@@ -280,6 +280,34 @@ land_on_origin_main() {
   rm -rf "$tmp"
 }
 
+# Override GitHub lookups to report PR 7 as open with the supplied head.
+add_gh_pr_open_for_head() {
+  local case_dir=$1 head=$2
+  cat > "$case_dir/fakebin/gh-axi" <<'SH'
+#!/usr/bin/env bash
+case "${1:-} ${2:-}" in
+  "pr view") printf '%s\n' 'state: open' ;;
+esac
+SH
+  cat > "$case_dir/fakebin/gh" <<SH
+#!/usr/bin/env bash
+case "\${1:-} \${2:-}" in
+  "pr view") printf '%s\t%s\t%s\n' 'OPEN' '$head' 'https://github.com/example/repo/pull/7' ;;
+esac
+SH
+  chmod +x "$case_dir/fakebin/gh-axi" "$case_dir/fakebin/gh"
+}
+
+# Override GitLab lookups to report a merged MR.
+add_glab_mr_merged() {
+  local case_dir=$1
+  cat > "$case_dir/fakebin/glab" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' '{"state":"merged"}'
+SH
+  chmod +x "$case_dir/fakebin/glab"
+}
+
 # Override GitHub lookups to report PR 7 as merged with the supplied head.
 add_gh_pr_merged_for_head() {
   local case_dir=$1 head=$2
@@ -738,12 +766,41 @@ test_local_only_fork_remote_allows() {
   pass "local-only worktree with HEAD on a fork remote is torn down and the home summary is refreshed"
 }
 
+test_unmerged_pr_refuses_cleanup_until_merge_is_confirmed() {
+  local case_dir out rc url=https://github.com/example/repo/pull/7 head
+  case_dir=$(make_case unmerged-pr-retained)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit "$case_dir" "ready PR"
+  add_fork_with_pushed_branch "$case_dir"
+  printf 'pr=%s\n' "$url" >> "$case_dir/state/task-x1.meta"
+  seed_backlog_in_flight "$case_dir"
+  head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  add_gh_pr_open_for_head "$case_dir" "$head"
+
+  set +e
+  out=$(run_teardown "$case_dir" 2>&1)
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "cleanup of a ship with an open pull request"
+  assert_contains "$out" "unmerged or unreadable PR at $url" "the refusal must name the open pull request"
+  [ -f "$case_dir/state/task-x1.meta" ] || fail "cleanup removed the task metadata"
+  [ -d "$case_dir/wt" ] || fail "cleanup removed the isolated copy"
+  [ "$(backlog_row_state "$case_dir")" = in_flight ] || fail "cleanup changed the backlog item before merge"
+
+  add_gh_pr_merged_for_head "$case_dir" "$head"
+  out=$(run_teardown "$case_dir" 2>&1) || fail "cleanup after forge-confirmed merge failed: $out"
+  assert_absent "$case_dir/state/task-x1.meta" "confirmed merge cleanup retained task metadata"
+  [ "$(backlog_row_state "$case_dir")" = "done" ] || fail "confirmed merge cleanup left the backlog item open"
+  pass "teardown preserves the task record and copy until its pull request is confirmed merged"
+}
+
 test_teardown_closes_the_backlog_item_itself() {
   local case_dir out
   case_dir=$(make_case tasks-axi-close)
   write_meta "$case_dir" no-mistakes ship
   printf '%s\n' 'pr=https://github.com/example/repo/pull/7' >> "$case_dir/state/task-x1.meta"
   seed_backlog_in_flight "$case_dir"
+  add_gh_pr_merged_for_head "$case_dir" "$(git -C "$case_dir/wt" rev-parse HEAD)"
 
   out=$(run_teardown "$case_dir") || fail "teardown failed with a real backlog"
   [ "$(backlog_row_state "$case_dir")" = "done" ] \
@@ -799,6 +856,7 @@ SH
   printf '%s\n' 'pr=https://github.com/example/repo/pull/7' >> "$case_dir/state/task-x1.meta"
   seed_backlog_in_flight "$case_dir"
   cp "$TMP_ROOT/tasks-axi-close-gerrit/fakebin/tasks-axi" "$case_dir/fakebin/tasks-axi"
+  add_gh_pr_merged_for_head "$case_dir" "$(git -C "$case_dir/wt" rev-parse HEAD)"
   out=$(run_teardown "$case_dir" 2>&1) || fail "teardown of a landed GitHub task failed: $out"
   tasks-axi show task-x1 --file "$case_dir/data/backlog.md" \
     | grep -F 'links: "pr:https://github.com/example/repo/pull/7"' >/dev/null \
@@ -813,6 +871,7 @@ test_teardown_closes_a_gitlab_task_with_its_merge_request_url_as_a_note() {
   write_meta "$case_dir" no-mistakes ship
   printf 'pr=%s\n' "$gitlab_url" >> "$case_dir/state/task-x1.meta"
   seed_backlog_in_flight "$case_dir"
+  add_glab_mr_merged "$case_dir"
   # Pin the refusal tasks-axi applies to a --pr link that is neither a GitHub
   # nor a Forgejo pull request, so this case keeps reproducing whatever the
   # installed release accepts.
@@ -847,6 +906,11 @@ SH
     printf 'pr=%s\n' "$url" >> "$case_dir/state/task-x1.meta"
     seed_backlog_in_flight "$case_dir"
     cp "$TMP_ROOT/tasks-axi-close-gitlab/fakebin/tasks-axi" "$case_dir/fakebin/tasks-axi"
+    if [[ "$url" == https://github.com/* ]]; then
+      add_gh_pr_merged_for_head "$case_dir" "$(git -C "$case_dir/wt" rev-parse HEAD)"
+    else
+      add_tea_pull_for_head "$case_dir" true "$(git -C "$case_dir/wt" rev-parse HEAD)" forgejo.example.com
+    fi
     out=$(run_teardown "$case_dir" 2>&1) || fail "teardown of a landed task with $url failed: $out"
     tasks-axi show task-x1 --file "$case_dir/data/backlog.md" \
       | grep -F "links: \"pr:$url\"" >/dev/null \
@@ -862,6 +926,7 @@ test_teardown_manual_backend_leaves_the_backlog_to_the_operator() {
   printf '%s\n' 'pr=https://github.com/example/repo/pull/7' >> "$case_dir/state/task-x1.meta"
   printf '%s\n' manual > "$case_dir/config/backlog-backend"
   seed_backlog_in_flight "$case_dir"
+  add_gh_pr_merged_for_head "$case_dir" "$(git -C "$case_dir/wt" rev-parse HEAD)"
 
   out=$(run_teardown "$case_dir") || fail "teardown failed with manual backlog backend"
   [ "$(backlog_row_state "$case_dir")" = in_flight ] \
@@ -1419,12 +1484,12 @@ test_squash_merged_rebased_branch_allows() {
 # Override tea to answer one login for git.example.org and a pull request
 # read through "tea api" with the supplied merged flag and head.
 add_tea_pull_for_head() {
-  local case_dir=$1 merged=$2 head=$3
+  local case_dir=$1 merged=$2 head=$3 host=${4:-git.example.org}
   cat > "$case_dir/fakebin/tea" <<SH
 #!/usr/bin/env bash
 printf '%s\n' "\$*" >> "$case_dir/tea.log"
 if [ "\${1:-} \${2:-}" = "login list" ]; then
-  printf '[\n  {\n    "name": "fj",\n    "url": "https://git.example.org"\n  }\n]\n'
+  printf '[\n  {\n    "name": "fj",\n    "url": "https://$host"\n  }\n]\n'
   exit 0
 fi
 [ "\${1:-}" = api ] || exit 1
@@ -6449,6 +6514,7 @@ test_forced_child_missing_adapter_sibling_refuses_before_cleanup
 test_forced_secondmate_own_missing_adapter_sibling_refuses_before_child_cleanup
 test_retained_sources_still_reach_the_ordinary_refusal
 test_local_only_fork_remote_allows
+test_unmerged_pr_refuses_cleanup_until_merge_is_confirmed
 test_teardown_closes_the_backlog_item_itself
 test_teardown_closes_a_gerrit_task_with_its_change_url_as_a_note
 test_teardown_closes_a_gitlab_task_with_its_merge_request_url_as_a_note

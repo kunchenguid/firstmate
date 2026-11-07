@@ -3766,6 +3766,29 @@ if [ "$KIND" = ship ] && [ -n "$PR_URL" ] \
   echo "warning: an open public loop with nothing owed is still recorded in the consent-holding home while cleaning up ship task $ID. Hand it on with bin/fm-public-followup.sh rechain or close it with retire --reason." >&2
 fi
 
+if [ "$KIND" = ship ] && [ -n "$PR_URL" ] && fm_pr_url_parse "$PR_URL"; then
+  case "$FM_PR_PROVIDER" in
+    github)
+      fm_pr_github_read_record "$FM_PR_HOST" "$FM_PR_OWNER" "$FM_PR_REPO" "$FM_PR_NUMBER" || true
+      ;;
+    gitlab)
+      fm_pr_gitlab_read_record "$FM_PR_HOST" "$FM_PR_PATH" "$FM_PR_NUMBER" || true
+      ;;
+    forgejo)
+      fm_pr_forgejo_read_record "$FM_PR_HOST" "$FM_PR_PATH" "$FM_PR_NUMBER" || true
+      ;;
+    *) FM_PR_RECORD_MERGED=unsupported ;;
+  esac
+  case "$FM_PR_PROVIDER" in
+    github|gitlab|forgejo)
+      if [ "$FM_PR_RECORD_MERGED" != true ]; then
+        echo "REFUSED: ship task $ID still has an unmerged or unreadable PR at $PR_URL. Stop the worker with bin/fm-control.sh $ID exit and keep its task record until the PR merges." >&2
+        exit 1
+      fi
+      ;;
+  esac
+fi
+
 # Non-blocking: the legacy Relay link is not guarded as a refusal.
 X_REQUEST=$(grep '^x_request=' "$META" 2>/dev/null | tail -1 | cut -d= -f2- || true)
 if [ -n "$X_REQUEST" ]; then
