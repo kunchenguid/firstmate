@@ -115,6 +115,8 @@ The lock-owning session remains responsible for restoring supervision.
 The exception has these limits:
 
 - Malformed, absent, dead, or ancestry-uncertain lock records do not satisfy this Claude and Pi exception and retain the ordinary guard behavior.
+- The Pi extension discards the guard's stdout, so the Pi diagnostic is not shown; only the Claude hook surfaces it.
+- The session-id signal trusts only `CLAUDE_PID` plus `CLAUDE_CODE_SESSION_ID`, so native Windows Pi cannot take this exit and is out of scope.
 - A missing or mismatched sidecar or an untrusted id adds nothing to the verdict, so a live owner outside the ancestry still takes this exit exactly as before.
 
 ### Pull-warning verdict by supervision model
