@@ -561,8 +561,9 @@ __FM_BEARINGS_BOARD_DATA__
       var note = (fd.get("note") || "").trim();
       var displayAnswer = value ? (note ? value + " - " + note : value) : note;
       if (!displayAnswer) return;
-      if (utf8ByteLength(displayAnswer) > 512) {
-        answerLimit.textContent = "Answer is too long to queue (512 bytes maximum).";
+      /* Same cap as fm-captain-hold.sh answer-limit. */
+      if (utf8ByteLength(displayAnswer) > 6000) {
+        answerLimit.textContent = "Answer is too long to queue (6000 bytes maximum).";
         answerLimit.classList.add("is-visible");
         return;
       }

@@ -95,7 +95,9 @@
 # not held for the captain, or a task already closed is reported as `skipped:`
 # and feeds nothing. A replayed delivery whose answer digest and requested
 # close mode both match the newest record is reported `closed:` and is a no-op;
-# a mode mismatch is skipped. The command exits nonzero when any key was
+# a mode mismatch is skipped. An answer over `answer-limit` bytes (6000) is
+# refused visibly, never truncated; the label keeps its 512-character cut.
+# The command exits nonzero when any key was
 # skipped. `--source` is provenance text recorded in the
 # durable decision, never a behavior switch: this command has no per-channel
 # branch and no knowledge of chat, review decks, or any transport.
@@ -1510,9 +1512,26 @@ legacy_keyed_decision_text() {  # <source> <key> <answer> <label>
   [ -z "$4" ] || printf 'Answer as shown to the captain: %s\n' "$4"
 }
 
-sanitize_field() {  # <text>
-  printf '%s' "$1" | tr '\n\r\t' '   ' | LC_ALL=C tr -d '\000-\037\177' | cut -c1-512
+# The one cap on a captain's free-text keyed answer, in bytes. It sits inside
+# the 8192-byte decision file with room for source, task id and label. The
+# Lavish board refuses above it up front; this intake refuses visibly above it
+# (never truncates), and `answer-limit` publishes it for other callers.
+ANSWER_MAX_BYTES=6000
+
+# A keyed answer is sanitized exactly like any field, minus the 512 cut.
+sanitize_answer() {  # <text>
+  printf '%s' "$1" | tr '\n\r\t' '   ' | LC_ALL=C tr -d '\000-\037\177'
 }
+
+sanitize_field() {  # <text>
+  sanitize_answer "$1" | cut -c1-512
+}
+
+answer_too_long() {  # <sanitized-answer>
+  [ "$(printf '%s' "$1" | LC_ALL=C wc -c | tr -d ' ')" -gt "$ANSWER_MAX_BYTES" ]
+}
+
+command_answer_limit() { printf '%s\n' "$ANSWER_MAX_BYTES"; }
 
 sanitize_reconcile_provenance() {
   printf '%s' "$1" | tr '\n\r\t' '   ' | LC_ALL=C tr -d '\000-\037\177' | cut -c1-1024
@@ -1520,7 +1539,7 @@ sanitize_reconcile_provenance() {
 
 command_answers() {
   local origin='' source='' row rest key answer label mode id show state hold_kind body digest legacy_digest legacy_key
-  local recorded_digest recorded_mode occurrence tmp err closed=0 skipped=0 reason release_flag tab=$'\t'
+  local cut_digest cut_answer recorded_digest recorded_mode occurrence tmp err closed=0 skipped=0 reason release_flag tab=$'\t'
   local resolve_rc
   while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -1554,8 +1573,15 @@ command_answers() {
     [ -n "${key:-}" ] || continue
     case "$key" in *[!A-Za-z0-9._-]*) continue ;; esac
     [ "${#key}" -le 128 ] || continue
-    answer=$(sanitize_field "${answer:-}")
+    answer=$(sanitize_answer "${answer:-}")
+    answer=${answer#"${answer%%[![:space:]]*}"}
+    answer=${answer%"${answer##*[![:space:]]}"}
     [ -n "$answer" ] || continue
+    if answer_too_long "$answer"; then
+      printf 'refused: %s (answer exceeds %s bytes)\n' "$key" "$ANSWER_MAX_BYTES"
+      skipped=$((skipped + 1))
+      continue
+    fi
     label=$(sanitize_field "${label:-}")
     if [ "$answer" = "$RECONCILE_VALUE" ]; then
       printf 'refused: %s (reconcile requests require a bound captured source)\n' "$key"
@@ -1600,6 +1626,12 @@ command_answers() {
     keyed_decision_text "$source" "$id" "$answer" "$label" > "$tmp" \
       || fail "cannot stage the captain decision for $id"
     digest=$(sha256_text "$(cat "$tmp")")
+    # A hold closed before the cap moved recorded the answer cut to 512
+    # characters; a replay of the full answer still matches that record.
+    cut_digest=''
+    cut_answer=$(sanitize_field "$answer")
+    [ "$cut_answer" = "$answer" ] \
+      || cut_digest=$(sha256_text "$(keyed_decision_text "$source" "$id" "$cut_answer" "$label")")
     legacy_digest=''
     if [ "$id" != "$key" ]; then
       legacy_key=$key
@@ -1621,6 +1653,7 @@ command_answers() {
     recorded_mode=$(recorded_resolution_mode "$body" || true)
     if body_has_resolution_record "$body" \
       && { [ "$recorded_digest" = "$digest" ] \
+        || { [ -n "$cut_digest" ] && [ "$recorded_digest" = "$cut_digest" ]; } \
         || { case "$body" in *"Resolution recorded by fm-decision-hold."*) true ;; *) false ;; esac \
           && [ -n "$legacy_digest" ] && [ "$recorded_digest" = "$legacy_digest" ]; }; }; then
       if { [ -z "$release_flag" ] && [ "$state" = "done" ] \
@@ -2265,6 +2298,7 @@ case "${1:-}" in
   reconcile-requests) shift; command_reconcile_requests "$@" ;;
   bind) shift; command_bind "$@" ;;
   unbind) shift; command_unbind "$@" ;;
+  answer-limit) shift; command_answer_limit ;;
   binding) shift; command_binding "$@" ;;
   complete) shift; command_complete "$@" ;;
   verify) shift; command_verify "$@" ;;

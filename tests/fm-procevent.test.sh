@@ -3631,6 +3631,71 @@ if "$ROOT/bin/fm-procevent-lavish.sh" reconciles "$ANS" >/dev/null 2>&1; then
 fi
 pass "answers reads list-form choices and refuses a block it cannot account for"
 
+# A selection with a long note keeps the whole note in the answer; empty answers
+# produce no row; a long reconcile note is still dropped.
+LONG=$(printf 'n%.0s' $(seq 1 1500))
+cat > "$ANS" <<EOF
+session:
+  file: /review.html
+  status: feedback
+prompts[5]:
+  - uid: "1"
+    prompt: "Pick\n\nContext data:\n{\n  \"schema\": \"fm-bearings-answer.v1\",\n  \"question\": \"sel-note\",\n  \"selection\": \"optA\",\n  \"note\": \"$LONG\"\n}"
+    selector: "div#qgrid > form:nth-of-type(1)"
+    tag: choice
+    text: "Pick -> optA"
+  - uid: "2"
+    prompt: "Old\n\nContext data:\n{\n  \"question\": \"legacy-empty\",\n  \"answer\": \"\"\n}"
+    selector: "div#qgrid > form:nth-of-type(2)"
+    tag: choice
+    text: "Old"
+  - uid: "3"
+    prompt: "Pick\n\nContext data:\n{\n  \"schema\": \"fm-bearings-answer.v1\",\n  \"question\": \"v1-empty\",\n  \"selection\": \"\",\n  \"note\": \"\"\n}"
+    selector: "div#qgrid > form:nth-of-type(3)"
+    tag: choice
+    text: "Pick"
+  - uid: "4"
+    prompt: "Pick\n\nContext data:\n{\n  \"schema\": \"fm-bearings-answer.v1\",\n  \"question\": \"rec-long\",\n  \"selection\": \"reconcile\",\n  \"note\": \"$LONG\"\n}"
+    selector: "div#qgrid > form:nth-of-type(4)"
+    tag: choice
+    text: "Pick"
+  - uid: "5"
+    prompt: "Pick\n\nContext data:\n{\n  \"schema\": \"fm-bearings-answer.v1\",\n  \"question\": \"rec-short\",\n  \"selection\": \"reconcile\",\n  \"note\": \"recheck\"\n}"
+    selector: "div#qgrid > form:nth-of-type(5)"
+    tag: choice
+    text: "Pick"
+EOF
+out=$("$ROOT/bin/fm-procevent-lavish.sh" answers "$ANS") || fail "answers failed on selection plus long note"
+[ "$out" = "$(printf 'sel-note\toptA - %s\tPick -> optA' "$LONG")" ] \
+  || fail "a selection plus long note lost the note or emitted an empty answer"
+out=$("$ROOT/bin/fm-procevent-lavish.sh" reconciles "$ANS") || fail "reconciles failed"
+[ "$out" = "$(printf 'rec-short\trecheck')" ] \
+  || fail "reconciles did not drop the over-512 note and keep the short one"
+pass "answers keeps a selection's long note and skips empty answers; reconciles bounds its note"
+
+# A long note is delivered intact in both the versioned and legacy shapes.
+LONG=$(printf 'x%.0s' $(seq 1 2000))
+cat > "$ANS" <<EOF
+session:
+  file: /review.html
+  status: feedback
+prompts[2]:
+  - uid: "1"
+    prompt: "Pick\n\nContext data:\n{\n  \"schema\": \"fm-bearings-answer.v1\",\n  \"question\": \"long-v1\",\n  \"selection\": \"\",\n  \"note\": \"$LONG\"\n}"
+    selector: "div#qgrid > form:nth-of-type(1)"
+    tag: choice
+    text: "Pick"
+  - uid: "2"
+    prompt: "Old\n\nContext data:\n{\n  \"question\": \"long-legacy\",\n  \"answer\": \"$LONG\"\n}"
+    selector: "div#qgrid > form:nth-of-type(2)"
+    tag: choice
+    text: "Old"
+EOF
+out=$("$ROOT/bin/fm-procevent-lavish.sh" answers "$ANS") || fail "answers failed on long notes"
+[ "$out" = "$(printf 'long-v1\t%s\tPick\nlong-legacy\t%s\tOld' "$LONG" "$LONG")" ] \
+  || fail "answers dropped or altered a note longer than 512 characters"
+pass "answers delivers notes longer than 512 characters intact"
+
 # The runner's silence seam is generic and closed by default: an adapter with no
 # `silent` command must keep announcing, so adding the seam changed nothing for
 # every adapter that has no notion of a no-op.

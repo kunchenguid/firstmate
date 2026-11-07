@@ -784,6 +784,13 @@ if [ -n "$RESOLVE_KEYS" ]; then
   # away-posture record the guard passes the branch instead (relocation:
   # bin/fm-lease-lib.sh); which findings firstmate may decide at all stays
   # ask-user-authority's judgment, for either actor.
+  if [ -n "$RESOLVE_HOLD_KEYS" ]; then
+    resolve_answer_max=$("$SCRIPT_DIR/fm-captain-hold.sh" answer-limit 2>/dev/null) || resolve_answer_max=6000
+    if [ "$(printf '%s' "$*" | LC_ALL=C wc -c | tr -d ' ')" -gt "$resolve_answer_max" ]; then
+      echo "error: the answer is over the $resolve_answer_max-byte limit for closing a captain-held task, so nothing was sent. Shorten it, or send it without --resolve-key." >&2
+      exit 1
+    fi
+  fi
   RESOLVE_IS_DECISION=0
   [ -z "$RESOLVE_HOLD_KEYS" ] || RESOLVE_IS_DECISION=1
   for k in $RESOLVE_STATUS_KEYS; do
