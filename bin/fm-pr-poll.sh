@@ -324,22 +324,21 @@ case "$provider" in
         car_err=$(cat "$errfile" 2>/dev/null)
         rm -f "$errfile"
         if [ "$car_rc" -eq 0 ]; then
-          printf '%s' "$car" | jq -e . >/dev/null 2>&1 || exit 0
           printf '%s' "$car" | jq -e 'type == "object" and (.id | type) == "number"' >/dev/null 2>&1 \
-            && printf '%s\n' ontrain
+            && printf '%s\n' ontrain || { [ "$unknown" -eq 3 ] && printf '%s\n' train=unknown; }
         elif [ "$car_rc" -ne 0 ]; then
           case $car_err in
             *'(HTTP 404)'*) ;;
-            *) exit 0 ;;
+            *) [ "$unknown" -eq 3 ] && printf '%s\n' train=unknown; exit 0 ;;
           esac
-          trains=$(gitlab_detail_read "projects/$enc/merge_trains" 2>/dev/null) || exit 0
+          trains=$(gitlab_detail_read "projects/$enc/merge_trains" 2>/dev/null) || { [ "$unknown" -eq 3 ] && printf '%s\n' train=unknown; exit 0; }
           present=$(printf '%s' "$trains" | jq -er --argjson iid "$number" '
             if type == "array" then
               [ .[].cars[]? | select(.merge_request.iid == $iid) ] | length == 0
             else
               error("invalid merge train list")
-            end' 2>/dev/null) || exit 0
-          [ "$present" = true ] || exit 0
+            end' 2>/dev/null) || { [ "$unknown" -eq 3 ] && printf '%s\n' train=unknown; exit 0; }
+          [ "$present" = true ] || { [ "$unknown" -eq 3 ] && printf '%s\n' train=unknown; exit 0; }
           # A merge can remove the car between the initial MR read and the
           # train-list read. Recheck once, with the same hard read bound, so
           # stale open state cannot turn a merge into a drop wake.

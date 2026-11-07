@@ -1820,6 +1820,16 @@ test_arming_baselines_an_already_degraded_change() {
     [ ! -e "$state/task-a.pr-poll-degraded" ] || fail "an unreadable merge-train car read recorded a baseline ($fail_env)"
   done
   rm -f "$state/task-a.check.sh"
+  FM_TEST_GLAB_STATE=opened FM_TEST_GLAB_PIPELINE=success FM_TEST_GLAB_TRAIN=car \
+    run_check_entry "$dir" task-a "$url" >/dev/null 2>&1 \
+    || fail "arming an on-train merge request failed"
+  [ -f "$state/task-a.pr-poll-train" ] || fail "arming did not persist the train baseline"
+  FM_TEST_GLAB_STATE=opened FM_TEST_GLAB_PIPELINE=success FM_TEST_GLAB_TRAIN=fail \
+    run_check_entry "$dir" task-a "$url" >/dev/null 2>&1 \
+    || fail "re-arming failed on an unreadable merge-train baseline"
+  grep -q '^train=on$' "$state/task-a.pr-poll-train" \
+    || fail "an unreadable train re-arm cleared the previous train baseline"
+  rm -f "$state/task-a.check.sh"
   FM_TEST_GLAB_STATE=opened FM_TEST_GLAB_PIPELINE=success run_check_entry "$dir" task-a "$url1" >/dev/null 2>&1 \
     || fail "arming the first GitLab watch for the unreadable case failed"
   FM_TEST_GLAB_FAIL=1 run_check_entry "$dir" task-a "$url" >/dev/null 2>&1 \
