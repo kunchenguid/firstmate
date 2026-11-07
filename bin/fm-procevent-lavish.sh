@@ -241,6 +241,25 @@ cmd_source_id() {
   fi
 }
 
+# A board armed before ids followed the native realpath is registered under an
+# id derived from its old spelling, with that spelling in its listener argv. It
+# still polls, so it must not outlive the id that now names the board: retire it
+# so exactly one source owns the board and `retire <artifact>` reaches it.
+retire_superseded_sources() {  # <real-path> <current-id>
+  local real=$1 id=$2 rec old argv_path
+  for rec in "${FM_STATE_OVERRIDE:-$FM_HOME/state}"/procevent/*.source; do
+    [ -f "$rec" ] && [ ! -L "$rec" ] || continue
+    old=${rec##*/}; old=${old%.source}
+    [ "$old" != "$id" ] || continue
+    [ "$(sed -n 's/^adapter=//p' "$rec" | head -1)" = lavish ] || continue
+    argv_path=$(sed -n '/^argv:$/,$p' "$rec" | sed -n '4p')
+    [ -n "$argv_path" ] && [ "$argv_path" != "$real" ] || continue
+    [ "$(artifact_realpath "$argv_path")" = "$real" ] || continue
+    FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-procevent.sh" retire "$old" >/dev/null \
+      || die "cannot retire the superseded registration $old for this board"
+  done
+}
+
 cmd_arm() {
   local artifact='' task='' reply_file='' id real owner listening
   local -a listener=()
@@ -271,6 +290,7 @@ cmd_arm() {
   id=$(cmd_source_id "$artifact") || exit 1
   real=$(artifact_realpath "$artifact") \
     || die "cannot resolve the artifact path: $artifact"
+  retire_superseded_sources "$real" "$id"
   listener=("$SCRIPT_DIR/fm-procevent-lavish.sh" poll "$real")
   [ -z "$reply_file" ] || listener+=(--agent-reply-file "$reply_file")
   if [ -n "$task" ]; then
@@ -317,9 +337,11 @@ cmd_deliver_reply() {
 }
 
 cmd_retire() {
-  local artifact=${1-} id
+  local artifact=${1-} id real
   [ -n "$artifact" ] || usage
   id=$(cmd_source_id "$artifact") || exit 1
+  real=$(artifact_realpath "$artifact") || exit 1
+  retire_superseded_sources "$real" "$id"
   "$SCRIPT_DIR/fm-procevent.sh" retire "$id"
 }
 
