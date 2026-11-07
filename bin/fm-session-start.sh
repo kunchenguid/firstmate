@@ -49,7 +49,11 @@
 #   5. read-once contract - the do-not-re-read contract covering every source
 #                       represented by the two digests below.
 #   6. fleet digest   - a compact data/backlog.md identity/metadata listing,
-#                       every state/*.meta, a bounded state/*.status tail,
+#                       one line per state/*.meta lane (id, kind, mode,
+#                       endpoint and its liveness, last status line, and
+#                       any of those fields its record is missing; the
+#                       raw record stays in state/<id>.meta), a bounded
+#                       tail of each orphan state/*.status,
 #                       the away posture (state/.afk-contract and the legacy
 #                       state/.afk daemon flag), and a cheap per-task
 #                       endpoint-liveness read, each bounded and crash-
@@ -143,11 +147,16 @@
 #   - `done` rows are never listed. Retained completion history belongs to the
 #     reporting surfaces (bin/fm-bearings-snapshot.sh, /ahoy), and at startup it
 #     is pure weight - 10 done rows cost 3.3KB in an observed main-home digest.
-#   - Every in-flight, held, and blocked row is listed IN FULL, with its
-#     hold_kind/hold_reason and blocked_by. Those are the rows AGENTS.md
-#     sections 7 and 10 make actionable at startup, so they are never bounded
+#   - Every in-flight, held, and blocked ROW is listed, with its hold_kind,
+#     hold_until, hold_reason, and blocked_by. Those are the rows AGENTS.md
+#     sections 7 and 10 make actionable at startup, so no row is ever bounded
 #     away.
-#   - Only the plain queued (dispatchable-now) listing is bounded, by
+#   - The hold_reason TEXT of a listed row is bounded, by
+#     FM_SESSION_START_HOLD_REASON_LIMIT characters, default 200. A longer
+#     reason is cut there and closed with the marker tasks-axi gives a long
+#     title, which names the command that prints the rest, so one long reason
+#     costs a line rather than kilobytes on every session start.
+#   - Only the plain queued (dispatchable-now) listing has its ROWS bounded, by
 #     FM_SESSION_START_QUEUED_LIMIT, default 20. Anything it omits is disclosed
 #     with an exact remainder count and the command that shows the rest, so a
 #     deep queue costs a counter rather than kilobytes.
@@ -156,7 +165,7 @@
 # When compatible tasks-axi is selected and available, the shared tasks-axi
 # backend probe remains the compatibility owner and this script asks
 # `tasks-axi list` for the compact identity fields plus blocked_by, hold_kind,
-# and hold_reason, never body. The groups are the tool's own filters
+# hold_reason, and hold_until, never body. The groups are the tool's own filters
 # (`--state in_flight`, `--state held`, `--state queued --blocked`, and
 # `tasks-axi ready`), so this script never reimplements task state; the groups
 # can overlap, because an in-flight item that is also held appears under both.
@@ -170,10 +179,12 @@
 # compatible tasks-axi is available, or `data/backlog.md` when the file body is
 # truly needed.
 #
-# STATUS TAILS: FM_SESSION_START_STATUS_TAIL bounds how many lines each task's
-# tail prints, and bin/fm-line-cap-lib.sh bounds how long each of those lines
-# may be. Both bounds are safe because the section prints every task's full
-# status log path, and AGENTS.md section 8 treats a status line as a wake EVENT
+# STATUS LINES: a lane under way prints only its last status event (the line
+# bin/fm-classify-lib.sh reads past blanks and continuation prose), and an
+# orphan status log prints a tail bounded by FM_SESSION_START_STATUS_TAIL;
+# bin/fm-line-cap-lib.sh bounds how long each of those lines may be. These
+# bounds are safe because the digest names every task's full status log path
+# (once in the lane heading, per log for orphans), and AGENTS.md section 8 treats a status line as a wake EVENT
 # rather than current state - bin/fm-crew-state.sh owns current state.
 #
 # RUNTIME BOUND: the digest is now executed through a native session-open
@@ -373,6 +384,8 @@ PRIMARY_HARNESS=$("$SCRIPT_DIR/fm-harness.sh" 2>/dev/null || printf unknown)
 . "$SCRIPT_DIR/fm-trace-context-lib.sh"
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
+# shellcheck source=bin/fm-classify-lib.sh
+. "$SCRIPT_DIR/fm-classify-lib.sh"
 # shellcheck source=bin/fm-line-cap-lib.sh
 . "$SCRIPT_DIR/fm-line-cap-lib.sh"
 # shellcheck source=bin/fm-hold-reason-lib.sh
@@ -394,13 +407,15 @@ STATUS_TAIL=${FM_SESSION_START_STATUS_TAIL:-5}
 case "$STATUS_TAIL" in ''|*[!0-9]*) STATUS_TAIL=5 ;; esac
 QUEUED_LIMIT=${FM_SESSION_START_QUEUED_LIMIT:-20}
 case "$QUEUED_LIMIT" in ''|*[!0-9]*|0) QUEUED_LIMIT=20 ;; esac
+HOLD_REASON_LIMIT=${FM_SESSION_START_HOLD_REASON_LIMIT:-200}
+case "$HOLD_REASON_LIMIT" in ''|*[!0-9]*|0) HOLD_REASON_LIMIT=200 ;; esac
 # One per-task endpoint read may never outlive this bound: a hung backend CLI
 # becomes that task's endpoint: error line instead of the digest's whole
 # runtime budget.
 ENDPOINT_TIMEOUT=${FM_SESSION_START_ENDPOINT_TIMEOUT:-10}
 case "$ENDPOINT_TIMEOUT" in ''|*[!0-9]*) ENDPOINT_TIMEOUT=10 ;; esac
 [ "$ENDPOINT_TIMEOUT" -gt 0 ] 2>/dev/null || ENDPOINT_TIMEOUT=10
-BACKLOG_FIELDS=blocked_by,hold_kind,hold_reason
+BACKLOG_FIELDS=blocked_by,hold_kind,hold_reason,hold_until
 
 RULE='================================================================================'
 SUBRULE='--------------------------------------------------------------------------------'
@@ -439,10 +454,55 @@ print_backlog_pointer() {
 # because awk's -v applies escape processing before the regex is ever compiled.
 MANUAL_KEEP_RE='[(]hold|blocked-by:'
 
+# bound_hold_reasons [toon|markdown]: cut each already-decoded hold reason
+# longer than HOLD_REASON_LIMIT characters, keeping its row and every other
+# field. The cut reason is one quoted string ending in the marker tasks-axi
+# itself writes for a long title, so both truncations read the same way.
+bound_hold_reasons() {
+  perl -MJSON::PP -e '
+    use strict;
+    use warnings;
+    binmode STDIN, ":encoding(UTF-8)";
+    binmode STDOUT, ":encoding(UTF-8)";
+    my ($format, $max) = @ARGV;
+    my $json = JSON::PP->new->allow_nonref;
+    sub bound_field {
+      my ($raw, $id) = @_;
+      my $value = $raw =~ /^"/ ? eval { $json->decode($raw) } : $raw;
+      $value = $raw unless defined $value;
+      return $raw unless length($value) > $max;
+      return $json->encode(sprintf("%s\n... (truncated, %d chars total - use show %s --full to see complete text)",
+        substr($value, 0, $max), length($value), $id));
+    }
+    my $column;
+    while (my $line = <STDIN>) {
+      if ($format eq "markdown") {
+        if ($line =~ /^[-*]\s+(?:\[.\]\s+)?(\S+)\s/) {
+          my $id = $1;
+          $line =~ s{(\(hold:\s*)("(?:[^"\\]|\\.)*"|[^()]*)(\))}
+            {$1 . bound_field($2, $id) . $3}e;
+        }
+      } elsif ($line =~ /^tasks\[\d+\]\{([^}]*)\}:\n?$/) {
+        my @names = split /,/, $1;
+        ($column) = grep { $names[$_] eq "hold_reason" } 0 .. $#names;
+      } elsif (defined($column) && $line =~ /^  (.*)\n?$/) {
+        my @fields = $1 =~ /("(?:[^"\\]|\\.)*"|[^,]+)/g;
+        if (defined $fields[$column]) {
+          $fields[$column] = bound_field($fields[$column], $fields[0]);
+          $line = "  " . join(",", @fields) . "\n";
+        }
+      } elsif ($line !~ /^  /) {
+        $column = undef;
+      }
+      print $line;
+    }
+  ' "${1:-toon}" "$HOLD_REASON_LIMIT"
+}
+
 print_backlog_manual_compact() {
   local path=$1 reason=$2
-  printf 'compact backlog listing (%s; done rows omitted; every in-flight, held, and blocked title line kept; other queued bounded to %s; indented task bodies omitted)\n' \
-    "$reason" "$QUEUED_LIMIT"
+  printf 'compact backlog listing (%s; done rows omitted; every in-flight, held, and blocked title line kept; hold reasons bounded to %s chars; other queued bounded to %s; indented task bodies omitted)\n' \
+    "$reason" "$HOLD_REASON_LIMIT" "$QUEUED_LIMIT"
   awk -v max="$QUEUED_LIMIT" -v keep_re="$MANUAL_KEEP_RE" '
     function state_for_heading(line, heading) {
       heading = line
@@ -479,7 +539,7 @@ print_backlog_manual_compact() {
         }
       }
     }
-  ' "$path" | fm_hold_reason_decode_stream markdown
+  ' "$path" | fm_hold_reason_decode_stream markdown | bound_hold_reasons markdown
 }
 
 # tasks-axi closes every listing with its own help block. This section composes
@@ -528,14 +588,14 @@ print_backlog_tasks_axi_compact() {
   elif ! ready=$(tasks-axi ready --file "$path" 2>&1); then
     err=$ready
   else
-    printf 'compact backlog listing (tasks-axi; done rows omitted; every in-flight, held, and blocked row shown in full; ready queued bounded to %s; task bodies omitted)\n' \
-      "$QUEUED_LIMIT"
+    printf 'compact backlog listing (tasks-axi; done rows omitted; every in-flight, held, and blocked row shown; hold reasons bounded to %s chars; ready queued bounded to %s; task bodies omitted)\n' \
+      "$HOLD_REASON_LIMIT" "$QUEUED_LIMIT"
     printf '\nin flight:\n'
-    printf '%s\n' "$in_flight" | fm_hold_reason_decode_stream | strip_axi_help
+    printf '%s\n' "$in_flight" | fm_hold_reason_decode_stream | bound_hold_reasons | strip_axi_help
     printf '\nheld (captain- or time-gated; an in-flight item that is also held appears in both groups):\n'
-    printf '%s\n' "$held" | fm_hold_reason_decode_stream | strip_axi_help
+    printf '%s\n' "$held" | fm_hold_reason_decode_stream | bound_hold_reasons | strip_axi_help
     printf '\nblocked queued:\n'
-    printf '%s\n' "$blocked" | fm_hold_reason_decode_stream | strip_axi_help
+    printf '%s\n' "$blocked" | fm_hold_reason_decode_stream | bound_hold_reasons | strip_axi_help
     printf '\nready queued (dispatchable now):\n'
     print_ready_queued_bounded "$ready"
     return 0
@@ -894,10 +954,11 @@ fi
 stage read-once
 section "READ-ONCE CONTRACT"
 cat <<'EOF'
-Everything below is printed in full for this session start: every state/*.meta,
-a compact data/backlog.md listing, a bounded tail of every state/*.status,
-data/projects.md, data/secondmates.md, data/captain.md, data/captain-shared.md,
-and data/learnings.md.
+Everything below is printed for this session start: one line per state/*.meta
+lane with its last state/*.status line, a compact data/backlog.md listing,
+a bounded tail of every orphan state/*.status, data/projects.md,
+data/secondmates.md, data/captain.md, data/captain-shared.md, and
+data/learnings.md.
 Do NOT re-read any of them after reading this digest, and do NOT bulk-read
 data/backlog.md or state/*.status: re-reading everything defeats the entire
 point of this command.
@@ -906,8 +967,9 @@ Go to a source directly only when:
   - this digest flagged it ABSENT (then rebuild or create it per AGENTS.md),
   - its contents looked unparseable or corrupt,
   - an individual full status log is needed for older wake-event history, or a
-    status line was capped and its tail matters (each task's full log path is
-    printed with its tail),
+    status line was capped and its tail matters (state/<id>.status),
+  - a lane's line does not carry the record field this turn needs
+    (state/<id>.meta),
   - a full task body is needed (bin/fm-tasks-axi.sh show <id> --full, or data/backlog.md),
   - the backlog listing disclosed omitted queued items and this turn needs them,
   - the NETWORK CHECKS section reported its checks still IN PROGRESS and this
@@ -925,14 +987,22 @@ stage fleet-state
 section "FLEET STATE"
 print_backlog_compact "$DATA/backlog.md" "data/backlog.md"
 
-subsection "Work under way (state/*.meta)"
+subsection "Work under way (one line per lane; raw record: state/<id>.meta, full status log: state/<id>.status)"
 META_FOUND=0
 for meta in "$STATE"/*.meta; do
   [ -f "$meta" ] || continue
   META_FOUND=1
   id=$(basename "$meta" .meta)
-  printf '\n--- %s ---\n' "$id"
-  cat "$meta"
+  missing=''
+
+  kind=$(fm_meta_get "$meta" kind)
+  [ -n "$kind" ] || missing="${missing:+$missing, }kind"
+  mode=$(fm_meta_get "$meta" mode)
+  # A scout record carries no delivery mode by design, so only the other kinds
+  # can be missing one.
+  if [ -z "$mode" ] && [ "$kind" != scout ]; then
+    missing="${missing:+$missing, }mode"
+  fi
 
   window=$(fm_meta_get "$meta" window)
   target=$(fm_backend_target_of_meta "$meta")
@@ -944,23 +1014,29 @@ for meta in "$STATE"/*.meta; do
     # the bound firing and >=128 is a signal death. Every other nonzero status
     # is the probe's own verdict that the endpoint is gone.
     if [ "$endpoint_rc" -eq 0 ]; then
-      printf 'endpoint: alive (backend=%s window=%s)\n' "$backend" "$window"
+      endpoint="alive (backend=$backend window=$window)"
     elif [ "$endpoint_rc" -eq 124 ] || [ "$endpoint_rc" -ge 128 ]; then
-      printf 'endpoint: error (backend=%s window=%s - the endpoint read died or hit its %ss bound; the digest continued past it)\n' \
-        "$backend" "$window" "$ENDPOINT_TIMEOUT"
+      endpoint="error (backend=$backend window=$window - the endpoint read died or hit its ${ENDPOINT_TIMEOUT}s bound; the digest continued past it)"
     else
-      printf 'endpoint: dead (backend=%s window=%s)\n' "$backend" "$window"
+      endpoint="dead (backend=$backend window=$window)"
     fi
   else
-    printf 'endpoint: unknown (no window recorded)\n'
+    endpoint='unknown (no window recorded)'
+    missing="${missing:+$missing, }window"
   fi
 
   status="$STATE/$id.status"
   if [ -f "$status" ]; then
-    print_status_tail "$status"
+    # A crewmate writes its own status lines, so their length is unbounded.
+    fm_cap_line_var "$(last_status_line "$status")"
+    last=${FM_LINE_CAP_LINE:-(empty status log)}
   else
-    printf 'status tail: (no status file yet: %s)\n' "$status"
+    last='(no status file yet)'
   fi
+
+  printf '%s | kind=%s mode=%s | endpoint: %s | last status: %s%s\n' \
+    "$id" "${kind:-?}" "${mode:--}" "$endpoint" "$last" \
+    "${missing:+ | record missing: $missing}"
 done
 [ "$META_FOUND" -eq 1 ] || printf '(none)\n'
 
