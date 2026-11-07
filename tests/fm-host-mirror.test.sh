@@ -544,6 +544,7 @@ test_pasted_secrets_are_masked_before_recording() {
     say captain "see https://example.com/?password=madeup7&sort=created and https://example.com/?access_token=madeup2token&page=2 then {\"password\":madeupbare,\"user\":\"kept\"}" p16
     say captain "keys signing_key=madeupsign1 session_key: madeupsess2 license_key = madeuplic3 stripe_key=madeupstripe4" p17
     say captain "flag --key madeupflag5 then key: madeup0123456789abcdef0123456789 and auth: madeupAuthValue0for0Tests0123" p18
+    say captain "slash api_key: madeupZm9v0/YmF6madeup and X-Auth-Token: madeup12/madeup34abcd end" p19
     "$MIRROR" feed engine-1 new > "$FM_HOME/feed.out"
   ' || fail "a writer or the feed failed"
   if grep -q -e "$fake" -e "$gh" -e plainvalue -e madeup "$home/state/.host-mirror.jsonl"; then
@@ -565,7 +566,8 @@ test_pasted_secrets_are_masked_before_recording() {
     'https://example.com/?password=<redacted>&sort=created and https://example.com/?access_token=<redacted>&page=2' \
     '{"password":<redacted>,"user":"kept"}' \
     'signing_key=<redacted> session_key: <redacted> license_key = <redacted> stripe_key=<redacted>' \
-    'flag --key <redacted> then key: <redacted> and auth: <redacted>'; do
+    'flag --key <redacted> then key: <redacted> and auth: <redacted>' \
+    'slash api_key: <redacted> and X-Auth-Token: <redacted> end'; do
     case "$feed" in *"$masked"*) ;; *) fail "a masked credential line is missing from the feed: $masked" ;; esac
   done
   for plain in 'https://github.com/o/r/pulls?author=c6aw&sort=created with keyboard=us and monkey=banana' \

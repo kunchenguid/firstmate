@@ -156,12 +156,13 @@ ENTRIES='if . == "" or endswith("\n") then .[:-1] else error("unterminated mirro
 # words are masked; ordinary names, paths, URLs, and commit ids are not. A quoted
 # value is masked whole; an unquoted secret, password or credential value is
 # masked whatever it is, a key, token or auth value after a colon or a spaced =
-# only at 8 or more characters with a digit and no slash, so prose and paths stay;
+# only at 8 or more characters with a digit, and a bare key or auth value also
+# only with no slash, so prose and paths stay;
 # NAME=value masks any value for token and the api, access, private and client
 # keys. An unquoted value ends at whitespace, &, ;, a comma, a closing brace or
 # bracket, or a quote, and a placeholder is never re-masked. An Authorization
 # header with a scheme word is masked to the end of its line. Read with jq -Rjs.
-# shortcut: an unquoted key, token or auth value with no digit or with a slash is kept, widen if one shows up in real dialog.
+# shortcut: an unquoted key, token or auth value with no digit, or a bare key or auth value with a slash, is kept, widen if one shows up in real dialog.
 # shellcheck disable=SC2016 # a jq program, not shell
 MASK='def entropy: explode | length as $n | group_by(.) | map(length / $n | . * log2) | -add;
   def credname($w): "(?<![A-Za-z0-9_.-])(?:[A-Za-z0-9_.-]*(?:[_.-]|[a-z](?=[A-Z])))?(?i:" + $w + ")(?![A-Za-z0-9])[A-Za-z0-9_.-]*";
@@ -170,6 +171,7 @@ MASK='def entropy: explode | length as $n | group_by(.) | map(length / $n | . * 
   def quoted: "(?<q>[\"\\x27])(?:(?!\\k<q>)[^\\n])*\\k<q>";
   def vchar: "[^\\s&;,}\\]\"\\x27]";
   def bare: "(?!<redacted>)" + vchar + "+";
+  def weakvalue($w; $guard): gsub("(?<n>[\"\\x27]?" + credname($w) + "[\"\\x27]?)(?<o>[ \\t]*[:=][ \\t]*)(" + quoted + "|(?=" + vchar + "*[0-9])(?=" + vchar + "{8})" + $guard + bare + ")"; "\(.n)\(.o)\(.q // "")<redacted>\(.q // "")");
   gsub("-----BEGIN [A-Z ]*PRIVATE KEY-----[\\s\\S]*?(-----END [A-Z ]*PRIVATE KEY-----|$)"; "<private-key>")
   | gsub("(?i)\\b(?<h>(proxy-)?authorization)\\s*:\\s*((bearer|basic|token|digest)[ \\t]+[^\\r\\n]*|\\S{16,})"; "\(.h): <redacted>")
   | gsub("(?i)\\b(?<s>[a-z][a-z0-9+.-]*://)[^/\\s:@]+:[^/?#\\s]+@"; "\(.s)<redacted>@")
@@ -178,7 +180,8 @@ MASK='def entropy: explode | length as $n | group_by(.) | map(length / $n | . * 
   | gsub("(?i)(?<f>--([a-z0-9]+-)*(token|password|passwd|secret|key))(?<s>\\s+|=)(" + quoted + "|\\S+)"; "\(.f)\(.s)<redacted>")
   | gsub("(?<n>" + credname(strong + "|" + weak) + ")=(\"[^\"]*\"|\\x27[^\\x27]*\\x27|[^\\s&\"\\x27]+)"; "\(.n)=<redacted>")
   | gsub("(?<n>[\"\\x27]?" + credname(strong) + "[\"\\x27]?)(?<o>[ \\t]*[:=][ \\t]*)(" + quoted + "|" + bare + ")"; "\(.n)\(.o)\(.q // "")<redacted>\(.q // "")")
-  | gsub("(?<n>[\"\\x27]?" + credname(weak + "|key|auth") + "[\"\\x27]?)(?<o>[ \\t]*[:=][ \\t]*)(" + quoted + "|(?=" + vchar + "*[0-9])(?=" + vchar + "{8})(?!" + vchar + "*/)" + bare + ")"; "\(.n)\(.o)\(.q // "")<redacted>\(.q // "")")
+  | weakvalue(weak; "")
+  | weakvalue("key|auth"; "(?!" + vchar + "*/)")
   | gsub("\\b[0-9a-fA-F]{48,}\\b"; "<redacted>")
   | gsub("(?<t>[A-Za-z0-9+_=-]{32,})"; .t | if test("[a-z]") and test("[A-Z]") and test("[0-9]") and (test("^(?>[A-Z]?[a-z]{2,}|[0-9]+|[_=+-])+$") | not) and entropy >= 4 then "<redacted>" else . end)'
 
