@@ -48,6 +48,12 @@
 // Stale callbacks from a prior generation are no-ops against the active replacement.
 //
 // Delivery versus consumption (stated once here):
+// Wakes are sent with deliverAs "aside". omp documents that an explicit
+// "followUp" (or "steer") queues the prompt even when the session is idle
+// instead of starting a turn, so an idle primary sat on a growing "After yield"
+// queue until someone typed at its terminal (observed on omp 18.6-18.8: 9-20 h
+// gaps). "aside" joins a live run at its next step boundary without
+// interrupting the tool batch, and starts a turn when the session is idle.
 // A main follow-up is delivered once omp accepts it (sendUserMessage returns).
 // The successor pipeline never waits for the model to read it: a follow-up
 // queued while main is streaming joins the running run without ever raising
@@ -572,7 +578,7 @@ export default function (pi: ExtensionAPI) {
     );
     if (pending) owner.unconsumedWakes.set(pending.token, { content, pending });
     try {
-      await pi.sendUserMessage(content, { deliverAs: "followUp" });
+      await pi.sendUserMessage(content, { deliverAs: "aside" });
     } catch (error) {
       if (pending) owner.unconsumedWakes.delete(pending.token);
       throw error;
