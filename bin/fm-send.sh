@@ -333,7 +333,7 @@ fm_send_normalize_key() { # <key>
 # Succeeds when <name> resolves to an installed skill or custom command of the
 # target secondmate's Claude. See "Secondmate slash commands" in the header.
 fm_send_claude_command_installed() { # <name>
-  local name=$1 account home user_root root plugin cmd key path settings
+  local name=$1 account home user_root root plugin cmd key path settings enabled
   [[ $name =~ ^[A-Za-z0-9_-]+(:[A-Za-z0-9_-]+)?$ ]] || return 1
   account=$(fm_meta_get "$TARGET_META" account)
   case "$account" in
@@ -357,8 +357,11 @@ fm_send_claude_command_installed() { # <name>
   command -v jq >/dev/null 2>&1 || return 1
   while IFS=$'\t' read -r key path; do
     { [ -f "$path/skills/$cmd/SKILL.md" ] || [ -f "$path/commands/$cmd.md" ]; } || continue
-    for settings in "$user_root/settings.json" ${home:+"$home/.claude/settings.json"}; do
-      jq -e --arg k "$key" '.enabledPlugins[$k] == true' "$settings" >/dev/null 2>&1 && return 0
+    for settings in ${home:+"$home/.claude/settings.local.json" "$home/.claude/settings.json"} "$user_root/settings.json"; do
+      enabled=$(jq -r --arg k "$key" '.enabledPlugins | select(type == "object" and has($k)) | .[$k] == true' "$settings" 2>/dev/null) || continue
+      [ -n "$enabled" ] || continue
+      [ "$enabled" = true ] && return 0
+      break
     done
   done < <(jq -r --arg p "$plugin@" '.plugins | to_entries[] | select(.key | startswith($p)) | .key as $k | .value[]? | .installPath | strings | [$k, .] | @tsv' "$user_root/plugins/installed_plugins.json" 2>/dev/null)
   return 1

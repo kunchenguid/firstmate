@@ -356,6 +356,13 @@ test_claude_secondmate_slash_command_leads_typed_bytes() {
     expect_code 0 "$rc" "an enabled plugin skill send should succeed"
     expect_command_first "$log" /pstack:sharpen "tighten the plan" \
       "an enabled plugin skill must be typed command-first"
+    mkdir -p "$home/.claude"
+    printf '{"enabledPlugins":{"pstack@market":false}}\n' > "$home/.claude/settings.json"
+    run_send "$fb" "$home" "$log" "domain" "/pstack:sharpen tighten the plan"; rc=$?
+    expect_code 0 "$rc" "a project-disabled plugin skill send should succeed"
+    expect_marker_first "$log" "/pstack:sharpen tighten the plan" \
+      "a plugin the secondmate home's settings disable must keep the marker in front even when the user enables it"
+    rm -f "$home/.claude/settings.json"
   else
     echo "skip: jq missing, plugin skill cases not run" >&2
   fi
