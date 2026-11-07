@@ -541,6 +541,7 @@ test_pasted_secrets_are_masked_before_recording() {
     say captain "json {\"password\":\"madeup7\"} and yaml password: Madeup!Horse" p13
     say captain "flag --client-secret \"madeup horse battery staple\" done" p14
     say captain "Authorization: Digest username=\"madeupuser\", realm=\"madeuprealm\", nonce=\"madeupnonce\", response=\"madeup0123456789abcdef\"" p15
+    say captain "see https://example.com/?password=madeup7&sort=created and https://example.com/?access_token=madeup2token&page=2 then {\"password\":madeupbare,\"user\":\"kept\"}" p16
     "$MIRROR" feed engine-1 new > "$FM_HOME/feed.out"
   ' || fail "a writer or the feed failed"
   if grep -q -e "$fake" -e "$gh" -e plainvalue -e madeup "$home/state/.host-mirror.jsonl"; then
@@ -558,7 +559,9 @@ test_pasted_secrets_are_masked_before_recording() {
     '--access-token <redacted> --client-secret <redacted> --auth-token=<redacted> --api-token <redacted>' \
     'https://<redacted>@host.example.com/path' 'password: <redacted>' \
     'json {"password":"<redacted>"} and yaml password: <redacted>' 'flag --client-secret <redacted> done' \
-    'Authorization: <redacted>'; do
+    'Authorization: <redacted>' \
+    'https://example.com/?password=<redacted>&sort=created and https://example.com/?access_token=<redacted>&page=2' \
+    '{"password":<redacted>,"user":"kept"}'; do
     case "$feed" in *"$masked"*) ;; *) fail "a masked credential line is missing from the feed: $masked" ;; esac
   done
   for plain in 'https://github.com/o/r/pulls?author=c6aw&sort=created with keyboard=us and monkey=banana' \
