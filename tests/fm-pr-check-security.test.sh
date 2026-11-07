@@ -222,6 +222,15 @@ SH
 printf '%s\n' "$*" >> "$FM_TEST_GLAB_LOG"
 [ "${FM_TEST_GLAB_FAIL:-0}" = 0 ] || exit 1
 [ "${FM_TEST_GLAB_SLEEP:-0}" = 0 ] || sleep "$FM_TEST_GLAB_SLEEP"
+if [ "${1:-}" = api ]; then
+  printf '%s\n' "${FM_TEST_GLAB_PROJECT:-{\"merge_trains_enabled\":false,\"merge_method\":\"merge\"\}}"
+  exit 0
+fi
+if [ -n "${FM_TEST_GLAB_MR_JSON:-}" ]; then
+  case " $* " in
+    *" -F json "*) printf '%s\n' "$FM_TEST_GLAB_MR_JSON"; exit 0 ;;
+  esac
+fi
 printf 'title:\tfixture merge request\nstate:\t%s\nauthor:\tsomeone\n' "${FM_TEST_GLAB_STATE:-opened}"
 SH
   # gerrit-axi, reproducing the real CLI's contract: one JSON record on stdout
@@ -2572,6 +2581,23 @@ group/subgroup/project
   done
   out=$(FM_TEST_GLAB_STATE=merged run_poll "$dir")
   [ "$out" = merged ] || fail "GitLab poll did not emit exactly one merged line"
+
+  # The train reads below parse glab's JSON, so the poll's restricted PATH needs jq.
+  ln -sf "$REAL_JQ" "$dir/fakebin/jq"
+  # On a merge-train project, merged alone is not proof of the landing: the poll
+  # stays silent until the merge, squash, or fast-forward commit is recorded.
+  local sha=0123456789abcdef0123456789abcdef01234567
+  out=$(FM_TEST_GLAB_STATE=merged FM_TEST_GLAB_PROJECT='{"merge_trains_enabled":true,"merge_method":"merge"}' \
+    FM_TEST_GLAB_MR_JSON='{"state":"merged","merge_commit_sha":null,"squash_commit_sha":null,"sha":"'$sha'"}' \
+    run_poll "$dir")
+  [ -z "$out" ] || fail "GitLab train poll emitted merged with no landed commit recorded"
+  out=$(FM_TEST_GLAB_STATE=merged FM_TEST_GLAB_PROJECT='{"merge_trains_enabled":true,"merge_method":"ff"}' \
+    FM_TEST_GLAB_MR_JSON='{"state":"merged","merge_commit_sha":null,"squash_commit_sha":null,"sha":"'$sha'"}' \
+    run_poll "$dir")
+  [ "$out" = merged ] || fail "GitLab train poll did not emit merged once the fast-forward commit was recorded"
+  out=$(FM_TEST_GLAB_STATE=merged FM_TEST_GLAB_PROJECT='{"merge_trains_enabled":true,"merge_method":"merge"}' \
+    FM_TEST_GLAB_MR_JSON='{"state":"merged","merge_commit_sha":"'$sha'"}' run_poll "$dir")
+  [ "$out" = merged ] || fail "GitLab train poll did not emit merged once the merge commit was recorded"
   out=$(FM_TEST_GLAB_FAIL=1 run_poll "$dir")
   [ -z "$out" ] || fail "GitLab poll emitted after a glab failure"
 

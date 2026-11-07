@@ -151,6 +151,34 @@
 # recorded value stale. Reading that state needs glab and jq, and either one
 # absent stops the merge before any state is recorded.
 #
+# The project's merge_trains_enabled and merge_method are read live from the
+# project API (glab api) at the same time, and an unreadable project refuses.
+# A project without merge trains merges exactly as above. On a project with
+# merge trains every condition above still holds, with one difference in how
+# the head pipeline binds to the head: such a project runs merged results
+# pipelines on refs/merge-requests/<iid>/merge at a commit GitLab makes by
+# merging the source into the target, so that pipeline is accepted only when
+# the live read of its commit shows exactly two parents, the second being the
+# verified head. Landing then adds the merge request to the merge train through
+# the merge-train API, bound to the verified head by its sha field, instead of
+# merging it immediately; any extra forge argument is refused there because
+# the train uses the project's own merge settings. The train merges only after
+# its own pipeline passes on top of the cars ahead, so this entry runs under
+# the same merge authority and away lock as an immediate merge, needs no
+# --attended-override, and is allowed while the away-posture record exists;
+# every other GitLab auto-merge request keeps the attended-only rule. Once the
+# entry is accepted the run waits, by default 90 seconds polled every 10
+# (FM_PR_GITLAB_TRAIN_WAIT up to 600 and FM_PR_GITLAB_TRAIN_POLL_INTERVAL up to
+# 60 override them), for proof of the landing: state merged plus the landed
+# commit, which is the merge commit, a squash commit, or on a fast-forward
+# project the head the target moved to. A merge request still in the train
+# when the wait ends is reported as queued, not merged, and one that reads
+# merged with no landed commit recorded yet is reported as unproved; both exit
+# 1 and record no landed outcome while the merge poll stays armed to record the
+# landing later. When the train drops the merge request, read as an open merge
+# request with no train car and auto-merge cancelled, the run reports that
+# plainly with the merge train pipeline's URL and exits 1.
+#
 # A Forgejo merge is refused unless every pre-merge condition holds, each read
 # live at merge time: the pull request is open, not a draft, mergeable is
 # true, and the combined commit status at the exact current head, read across
@@ -193,7 +221,8 @@
 # The authority read and synchronous forge command share the away record's
 # cross-subsystem lock, which bin/fm-afk-contract.sh owns, closing the common
 # live-owner TOCTOU; failure to take it refuses before the forge call. Async and
-# queued paths are refused while away. Two confused-agent-grade limitations are
+# queued paths are refused while away, except the GitLab merge-train entry
+# described above. Two confused-agent-grade limitations are
 # accepted rather than hidden: queue or base changes after GitHub's preflight can
 # still enqueue, and killing this shell can orphan a forge child after stale-lock
 # recovery. docs/architecture.md owns those away-merge limits, while
@@ -221,8 +250,8 @@
 # Usage: fm-pr-merge.sh <task-id> <pr-url> [--attended-override] [--update-branch] [--expected-head <full-sha>] [--allow-red <check-name>] [--allow-missing <check-name>] [--allow-no-pipeline] [-- <extra forge merge args>]
 #
 # On GitLab, this script confirms the MR is actually merged before reporting it;
-# an auto-merge-queued or unconfirmed request leaves the poll armed and records
-# no landed outcome. bin/fm-merge-outcome-lib.sh owns a confirmed merge's
+# an auto-merge-queued or unconfirmed immediate request, or a merge-train entry
+# still queued, leaves the poll armed and records no landed outcome. bin/fm-merge-outcome-lib.sh owns a confirmed merge's
 # destination, normal-case deduplication, and at-least-once recovery.
 # A landed merge whose outcome cannot be written is reported loudly rather than
 # misreported as a failed merge.
@@ -660,11 +689,66 @@ note_expected_head() {
   fi
 }
 
+# The project's merge-train setting, read live from the project API rather than
+# taken from any recorded value, because a project owner can switch trains on or
+# off at any time and the two settings land a merge request differently. An
+# absent or null merge_trains_enabled is a project without the feature (GitLab
+# omits it below the tier that offers trains); any other non-boolean value, or
+# an unreadable project, refuses rather than guessing which path applies.
+FM_PR_GITLAB_TRAIN=false
+FM_PR_GITLAB_MERGE_METHOD=
+GITLAB_PROJECT_API=
+gitlab_project_api() {
+  GITLAB_HOST="$FM_PR_HOST" glab api --hostname "$FM_PR_HOST" "$@"
+}
+
+gitlab_read_project_settings() {
+  local json fields
+  GITLAB_PROJECT_API="projects/$(jq -rn --arg p "$PR_PATH" '$p | @uri')"
+  if ! json=$(gitlab_project_api "$GITLAB_PROJECT_API" 2>/dev/null) || [ -z "$json" ] \
+    || ! fields=$(printf '%s' "$json" | jq -r '
+        if type != "object" then error("project payload is not an object") else . end
+        | (.merge_trains_enabled // false) as $train
+        | (.merge_method // "") as $method
+        | if ($train | type) != "boolean" or ($method | type) != "string"
+            or ($method | test("^[a-z_]*$") | not)
+          then error("unreadable merge settings")
+          else "\($train) \($method)"
+          end' 2>/dev/null); then
+    echo "error: could not read the GitLab project's merge settings before merging" >&2
+    return 1
+  fi
+  FM_PR_GITLAB_TRAIN=${fields%% *}
+  FM_PR_GITLAB_MERGE_METHOD=${fields#* }
+}
+
+# A project that runs merged results pipelines (which merge trains require)
+# runs a merge request's pipeline on refs/merge-requests/<iid>/merge, at a
+# commit GitLab creates by merging the source head into the target, so that
+# pipeline's sha is never the source head. Such a pipeline binds to the
+# verified head only when that merged-result commit, read live, has exactly two
+# parents and the second, the merged-in source, is the live head.
+# Prints proven, other, or unreadable.
+gitlab_merged_result_source() {
+  local commit=$1 head=$2 json verdict
+  if ! json=$(gitlab_project_api "$GITLAB_PROJECT_API/repository/commits/$commit" 2>/dev/null) \
+    || [ -z "$json" ] \
+    || ! verdict=$(printf '%s' "$json" | jq -r --arg head "$head" '
+        if type == "object" and (.parent_ids | type) == "array" then
+          if (.parent_ids | length) == 2 and .parent_ids[1] == $head then "proven" else "other" end
+        else error("unreadable commit") end' 2>/dev/null); then
+    printf 'unreadable'
+    return 0
+  fi
+  printf '%s' "$verdict"
+}
+
 gitlab_verify_mergeable() {
-  local json fields line pipeline_waived
+  local json fields line pipeline_waived pipeline_merged_result=false source_verdict
   local total=0 named=0 refusals=''
   local state='' detail='' conflicts='' discussions=''
   local live_head='' pipeline_sha='' pipeline_status='' pipeline_absent='' async_configured=''
+  local pipeline_ref=''
 
   # GITLAB_HOST is set to the same host the project URL already carries, so the
   # instance is taken from the parsed URL by both signals and never from the
@@ -687,6 +771,7 @@ gitlab_verify_mergeable() {
         "head=" + ((.sha // "") | tostring),
         "pipeline_sha=" + ((.head_pipeline.sha // "") | tostring),
         "pipeline_status=" + ((.head_pipeline.status // "") | tostring),
+        "pipeline_ref=" + ((.head_pipeline.ref // "") | tostring),
         "pipeline_absent=" + (if has("head_pipeline") and .head_pipeline == null then "true" else "false" end),
         "async_configured=" + (if .merge_when_pipeline_succeeds == true or (.merge_after != null) then "true" else "false" end)
       else
@@ -705,6 +790,7 @@ gitlab_verify_mergeable() {
       head=*) live_head=${line#head=} ;;
       pipeline_sha=*) pipeline_sha=${line#pipeline_sha=} ;;
       pipeline_status=*) pipeline_status=${line#pipeline_status=} ;;
+      pipeline_ref=*) pipeline_ref=${line#pipeline_ref=} ;;
       pipeline_absent=*) pipeline_absent=${line#pipeline_absent=} ;;
       async_configured=*) async_configured=${line#async_configured=} ;;
       *) continue ;;
@@ -716,10 +802,11 @@ FIELDS
   # Every field named exactly once and no unnamed line: a value carrying a
   # newline would split into a line no name matches, so it is refused here
   # rather than silently truncated into a value a check could accept.
-  if [ "$named" -ne 9 ] || [ "$total" -ne 9 ]; then
+  if [ "$named" -ne 10 ] || [ "$total" -ne 10 ]; then
     echo "error: could not read the GitLab merge request state before merging" >&2
     return 1
   fi
+  gitlab_read_project_settings || return 1
 
   if ! fm_pr_head_valid "$live_head"; then
     echo "error: could not read the GitLab merge request head commit before merging" >&2
@@ -753,9 +840,27 @@ FIELDS
     [ "$pipeline_status" = success ] \
       || refusals="$refusals  - the head pipeline status is \"${pipeline_status:-none}\", not success
 "
-    [ "$pipeline_sha" = "$live_head" ] \
-      || refusals="$refusals  - the head pipeline ran at \"${pipeline_sha:-none}\", not at the current head $live_head
+    # Only a merge-train project's merged results pipeline is bound through its
+    # merged-result commit; every other project keeps the exact sha match.
+    if [ "$pipeline_sha" != "$live_head" ] && [ "$FM_PR_GITLAB_TRAIN" = true ] \
+      && [ "$pipeline_ref" = "refs/merge-requests/$PR_NUMBER/merge" ] \
+      && fm_pr_head_valid "$pipeline_sha"; then
+      source_verdict=$(gitlab_merged_result_source "$pipeline_sha" "$live_head")
+      case "$source_verdict" in
+        proven) pipeline_merged_result=true ;;
+        other)
+          refusals="$refusals  - the head pipeline ran at merged result $pipeline_sha, whose merged-in source is not the current head $live_head
 "
+          ;;
+        *)
+          refusals="$refusals  - the head pipeline ran at merged result $pipeline_sha, whose merged-in source could not be read
+"
+          ;;
+      esac
+    elif [ "$pipeline_sha" != "$live_head" ]; then
+      refusals="$refusals  - the head pipeline ran at \"${pipeline_sha:-none}\", not at the current head $live_head
+"
+    fi
   fi
 
   note_expected_head "$live_head"
@@ -773,6 +878,9 @@ FIELDS
   if [ "$pipeline_waived" = true ]; then
     printf 'verified: %s is open and mergeable at head %s, with no head pipeline, waived by --allow-no-pipeline\n' \
       "$URL" "$live_head" >&2
+  elif [ "$pipeline_merged_result" = true ]; then
+    printf 'verified: %s is open and mergeable, with a successful merged results pipeline at %s merging head %s\n' \
+      "$URL" "$pipeline_sha" "$live_head" >&2
   else
     printf 'verified: %s is open and mergeable, with a successful pipeline at head %s\n' \
       "$URL" "$live_head" >&2
@@ -1848,6 +1956,140 @@ gitlab_confirm_merged() {
   [ "$state" = merged ]
 }
 
+# True only when the merge request's live source head is the head this run
+# verified, so a lost-response recovery never adopts another caller's entry.
+gitlab_source_head_is_verified() {
+  local json head
+  json=$(GITLAB_HOST="$FM_PR_HOST" glab mr view "$PR_NUMBER" \
+    -R "$PROJECT_URL" -F json 2>/dev/null) && [ -n "$json" ] || return 1
+  head=$(printf '%s' "$json" | jq -r \
+    'if type == "object" and (.sha | type) == "string" then .sha else error("no sha") end' \
+    2>/dev/null) || return 1
+  [ "$head" = "$FM_PR_MERGE_HEAD" ]
+}
+
+# A merge-train entry takes the project's own merge method and carries no
+# forge flags of the glab mr merge shape, so a caller's extra argument is
+# refused rather than silently dropped.
+gitlab_reject_train_args() {
+  [ "$#" -eq 0 ] && return 0
+  echo "error: extra merge arguments do not apply to a GitLab merge-train entry, which uses the project's own merge settings; nothing was handed to the forge" >&2
+  return 1
+}
+
+# Add the verified merge request to the merge train. sha binds the entry to
+# the head this run verified, so GitLab refuses it if the source branch moved.
+# With no auto_merge field the request joins the train directly, which is
+# right because its pipeline has already succeeded.
+gitlab_add_to_train() {
+  gitlab_project_api --method POST \
+    "$GITLAB_PROJECT_API/merge_trains/merge_requests/$PR_NUMBER" \
+    -f "sha=$FM_PR_MERGE_HEAD"
+}
+
+FM_PR_TRAIN_CAR_STATUS=
+FM_PR_TRAIN_PIPELINE_URL=
+# Read this merge request's merge-train car. Returns 0 with the car's status
+# and its pipeline URL (when it has one yet) recorded, 1 when GitLab answers
+# HTTP 404 because there is no car (it deletes the car when the train drops the
+# merge request), and 2 when the car cannot be read for any other reason, which
+# callers treat as indeterminate rather than as a dropped entry.
+gitlab_read_train_car() {
+  local json fields errfile rc=0
+  errfile=$(mktemp) || return 2
+  json=$(gitlab_project_api "$GITLAB_PROJECT_API/merge_trains/merge_requests/$PR_NUMBER" 2>"$errfile") || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    rc=2
+    ! grep -q 'HTTP 404' "$errfile" || rc=1
+    rm -f "$errfile"
+    return "$rc"
+  fi
+  rm -f "$errfile"
+  [ -n "$json" ] \
+    && fields=$(printf '%s' "$json" | jq -r '
+        if type == "object" and (.status | type) == "string" then
+          .status + " " + ((.pipeline.web_url // "") | tostring)
+        else error("no car") end' 2>/dev/null) \
+    || return 2
+  FM_PR_TRAIN_CAR_STATUS=${fields%% *}
+  [ -z "${fields#* }" ] || FM_PR_TRAIN_PIPELINE_URL=${fields#* }
+}
+
+# Wait, within a bounded time, for proof that the train merged the request:
+# state merged plus the commit that landed, which is the merge commit, a squash
+# commit, or for a fast-forward project the head the target branch moved to.
+# bin/fm-pr-poll.sh owns that proof, so this wait and the armed poll agree.
+# Returns 0 once proven; otherwise reports the outcome and returns 1, with the
+# merge poll still armed so a later landing is recorded by it. Any state other
+# than merged, opened, or closed, such as GitLab's transient locked while the
+# merge runs, is waited on rather than judged.
+gitlab_await_train() {
+  local wait interval deadline json fields state mwps hp_ref hp_url hp_status car_rc
+  local merged_unrecorded=false
+  wait=${FM_PR_GITLAB_TRAIN_WAIT:-90}
+  interval=${FM_PR_GITLAB_TRAIN_POLL_INTERVAL:-10}
+  [[ "$wait" =~ ^[0-9]{1,3}$ ]] && [ "$wait" -le 600 ] || wait=90
+  [[ "$interval" =~ ^[0-9]{1,2}$ ]] && [ "$interval" -le 60 ] || interval=10
+  deadline=$((SECONDS + wait))
+  while :; do
+    fields=
+    if json=$(GITLAB_HOST="$FM_PR_HOST" glab mr view "$PR_NUMBER" -R "$PROJECT_URL" -F json 2>/dev/null) \
+      && [ -n "$json" ]; then
+      fields=$(printf '%s' "$json" | jq -r '
+          if type == "object" and (.state | type) == "string" then
+            [ .state,
+              (if .merge_when_pipeline_succeeds == true then "true" else "false" end),
+              ((.head_pipeline.ref // "-") | tostring),
+              ((.head_pipeline.web_url // "-") | tostring),
+              ((.head_pipeline.status // "-") | tostring)
+            ] | map(gsub("[[:space:]]"; "") | if . == "" then "-" else . end) | join(" ")
+          else error("unreadable") end' 2>/dev/null) || fields=
+    fi
+    if [ -n "$fields" ]; then
+      read -r state mwps hp_ref hp_url hp_status <<FIELDS
+$fields
+FIELDS
+      case "$state" in
+        merged)
+          if [ -n "$("$SCRIPT_DIR/fm-pr-poll.sh" --validated gitlab "$URL" "$FM_PR_HOST" "$PR_PATH" "$PR_NUMBER" 2>/dev/null)" ]; then
+            printf 'verified: %s was merged by the merge train\n' "$URL"
+            return 0
+          fi
+          merged_unrecorded=true
+          ;;
+        opened)
+          car_rc=0
+          gitlab_read_train_car || car_rc=$?
+          if [ "$car_rc" -eq 1 ] && [ "$mwps" = false ]; then
+            if [ "$hp_ref" = "refs/merge-requests/$PR_NUMBER/train" ] && [ "$hp_url" != - ]; then
+              FM_PR_TRAIN_PIPELINE_URL="$hp_url (status $hp_status)"
+            fi
+            printf 'error: the merge train dropped %s without merging it; its merge train pipeline is %s\n' \
+              "$URL" "${FM_PR_TRAIN_PIPELINE_URL:-unreadable}" >&2
+            return 1
+          fi
+          ;;
+        closed)
+          printf 'error: %s was closed without merging after it entered the merge train\n' "$URL" >&2
+          return 1
+          ;;
+      esac
+    fi
+    [ "$SECONDS" -lt "$deadline" ] || break
+    sleep "$interval"
+  done
+  if [ "$merged_unrecorded" = true ]; then
+    printf 'error: %s reads as merged but GitLab has not recorded the commit that landed after waiting %s seconds; this run refuses instead of reporting an unproved merge, and the merge poll remains armed to record the landing\n' \
+      "$URL" "$wait" >&2
+    return 1
+  fi
+  printf 'error: %s is queued in the merge train (car status %s), not merged, after waiting %s seconds; this run refuses instead of reporting an unproved merge, and the merge poll remains armed to record the landing\n' \
+    "$URL" "${FM_PR_TRAIN_CAR_STATUS:-unreadable}" "$wait" >&2
+  [ -z "$FM_PR_TRAIN_PIPELINE_URL" ] \
+    || printf 'error: its merge train pipeline is %s\n' "$FM_PR_TRAIN_PIPELINE_URL" >&2
+  return 1
+}
+
 # Unlike gh and glab, "tea api" reports an HTTP-level failure (a rejected or
 # malformed merge request included) with exit status 0 and the error only in
 # the response body, verified empirically against a real Forgejo instance. So
@@ -1977,36 +2219,77 @@ case "$PROVIDER" in
     ;;
   gitlab)
     gitlab_verify_mergeable || exit 1
-    # --sha binds the merge to the head this run verified, so a push that lands
-    # in between is refused by GitLab instead of merged unverified. --yes only
-    # skips the interactive confirmation, which no supervised run can answer;
-    # the conditions above are what authorize the merge.
-    # The away record is locked first, so this last presence and authority read
-    # and the forge command below share one live-owner critical section.
-    hold_away_record_for_merge || exit 1
-    away_status=0
-    require_current_away_authority || away_status=$?
-    [ "$away_status" -eq 0 ] || exit "$away_status"
-    merge_status=0
-    gitlab_merge_args=()
-    if [ "$FM_PR_AWAY_POSTURE" = true ]; then
-      gitlab_merge_args=(--auto-merge=false)
-    fi
-    GITLAB_HOST="$FM_PR_HOST" glab mr merge "$PR_NUMBER" -R "$PROJECT_URL" \
-      --sha "$FM_PR_MERGE_HEAD" --yes "$@" "${gitlab_merge_args[@]+"${gitlab_merge_args[@]}"}" || merge_status=$?
-    if [ "$merge_status" -ne 0 ]; then
+    if [ "$FM_PR_GITLAB_TRAIN" = true ]; then
+      gitlab_reject_train_args "$@" || exit 1
+      printf 'notice: %s has merge trains enabled, so landing adds %s to the merge train\n' \
+        "$PROJECT_URL" "$URL" >&2
+      # The train merges only after its own pipeline passes on top of the cars
+      # ahead, so entering it is the merge, under the same authority and away
+      # lock as an immediate merge rather than an attended-only auto-merge.
+      hold_away_record_for_merge || exit 1
+      away_status=0
+      require_current_away_authority || away_status=$?
+      [ "$away_status" -eq 0 ] || exit "$away_status"
+      train_status=0
+      train_output=$(gitlab_add_to_train 2>&1) || train_status=$?
+      # A lost response can hide an accepted entry, so a failed POST is
+      # reconciled against the live car or a merged request before refusing.
+      if [ "$train_status" -ne 0 ] && gitlab_source_head_is_verified; then
+        car_rc=0
+        gitlab_read_train_car || car_rc=$?
+        if [ "$car_rc" -ne 0 ] && gitlab_confirm_merged 2>/dev/null; then
+          car_rc=0
+        fi
+        if [ "$car_rc" -eq 0 ]; then
+          printf 'notice: the merge-train request for %s reported a failure but GitLab holds the entry; continuing as an accepted entry\n' "$URL" >&2
+          train_status=0
+        fi
+      fi
+      if [ "$train_status" -ne 0 ]; then
+        fm_afk_contract_lock_release || true
+        fm_lock_release "$MERGE_CONTROL_LOCK" || true
+        MERGE_CONTROL_LOCK=
+        [ -z "$train_output" ] || printf '%s\n' "$train_output" >&2
+        printf 'error: GitLab did not add %s to the merge train; nothing was merged or queued by this run\n' "$URL" >&2
+        exit "$train_status"
+      fi
+      persist_accepted_merge_authority || exit 1
       fm_afk_contract_lock_release || true
       fm_lock_release "$MERGE_CONTROL_LOCK" || true
       MERGE_CONTROL_LOCK=
-      exit "$merge_status"
+      gitlab_await_train || exit 1
+    else
+      # --sha binds the merge to the head this run verified, so a push that lands
+      # in between is refused by GitLab instead of merged unverified. --yes only
+      # skips the interactive confirmation, which no supervised run can answer;
+      # the conditions above are what authorize the merge.
+      # The away record is locked first, so this last presence and authority read
+      # and the forge command below share one live-owner critical section.
+      hold_away_record_for_merge || exit 1
+      away_status=0
+      require_current_away_authority || away_status=$?
+      [ "$away_status" -eq 0 ] || exit "$away_status"
+      merge_status=0
+      gitlab_merge_args=()
+      if [ "$FM_PR_AWAY_POSTURE" = true ]; then
+        gitlab_merge_args=(--auto-merge=false)
+      fi
+      GITLAB_HOST="$FM_PR_HOST" glab mr merge "$PR_NUMBER" -R "$PROJECT_URL" \
+        --sha "$FM_PR_MERGE_HEAD" --yes "$@" "${gitlab_merge_args[@]+"${gitlab_merge_args[@]}"}" || merge_status=$?
+      if [ "$merge_status" -ne 0 ]; then
+        fm_afk_contract_lock_release || true
+        fm_lock_release "$MERGE_CONTROL_LOCK" || true
+        MERGE_CONTROL_LOCK=
+        exit "$merge_status"
+      fi
+      persist_accepted_merge_authority || exit 1
+      fm_afk_contract_lock_release || true
+      fm_lock_release "$MERGE_CONTROL_LOCK" || true
+      MERGE_CONTROL_LOCK=
+      gitlab_confirm_rc=0
+      gitlab_confirm_merged || gitlab_confirm_rc=$?
+      [ "$gitlab_confirm_rc" -eq 0 ] || exit 0
     fi
-    persist_accepted_merge_authority || exit 1
-    fm_afk_contract_lock_release || true
-    fm_lock_release "$MERGE_CONTROL_LOCK" || true
-    MERGE_CONTROL_LOCK=
-    gitlab_confirm_rc=0
-    gitlab_confirm_merged || gitlab_confirm_rc=$?
-    [ "$gitlab_confirm_rc" -eq 0 ] || exit 0
     ;;
   forgejo)
     forgejo_reject_unsupported_args "$@" || exit 1
