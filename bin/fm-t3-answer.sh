@@ -6,9 +6,9 @@
 #   questions (each request id with its questions, options, and ids) and
 #   approvals, the count of permission approvals T3's pending-request tools
 #   cannot see or answer; those are answered only in T3 Code itself.
-#   With a request id, answers that question through
-#   t3_pending_request_respond; <answers-json> is a JSON object keyed by
-#   question id, e.g. '{"q1":"yes"}'.
+#   With a request id, answers that question through T3's pending-request
+#   respond action; <answers-json> is a JSON object keyed by question id,
+#   e.g. '{"q1":"yes"}'.
 # The task must be recorded in this home with backend=t3code. An answer is
 # authorized the same way any steer is: it is the supervisor's decision, never
 # the worker's own. bin/backends/t3code.sh owns the transport.
