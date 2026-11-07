@@ -5686,6 +5686,25 @@ test_unreadable_merge_script_only_refuses() {
     "merge-script-only-unreadable: the refusal did not name the unreadable list"
   assert_no_grep 'pr merge' "$case_dir/gh.log" \
     "merge-script-only-unreadable: the gh merge was invoked past an unreadable list"
+
+  # A symlink whose target is gone is unreadable too, not absent.
+  case_dir=$(make_case merge-script-only-dangling)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" 7575757575757575757575757575757575757575
+  : > "$case_dir/gh-axi.log"
+  ln -s "$case_dir/missing-merge-script-only" "$case_dir/home/config/merge-script-only"
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/75 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 2 "$rc" "merge-script-only-dangling: a dangling list symlink should refuse"
+  assert_grep 'error: config/merge-script-only must be a readable regular file' "$case_dir/stderr" \
+    "merge-script-only-dangling: the refusal did not name the dangling list"
+  assert_no_grep 'pr merge' "$case_dir/gh.log" \
+    "merge-script-only-dangling: the gh merge was invoked past a dangling list"
   pass "fm-pr-merge refuses when config/merge-script-only cannot be read"
 }
 

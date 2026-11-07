@@ -1736,7 +1736,8 @@ require_recorded_pr_identity() {
 refuse_merge_script_only_repo() {
   local list msr_path msr_line msr_repo msr_cmd
   list="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}/merge-script-only"
-  [ -e "$list" ] || return 0
+  # A dangling symlink is a list that cannot be read, not an absent one.
+  [ -e "$list" ] || [ -L "$list" ] || return 0
   if [ ! -f "$list" ] || [ ! -r "$list" ]; then
     echo "error: config/merge-script-only must be a readable regular file; firstmate will not merge $PR_PATH" >&2
     return 2
