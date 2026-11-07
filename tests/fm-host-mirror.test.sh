@@ -371,7 +371,7 @@ test_dialog_text_never_enters_process_arguments() {
   assert_equals "captain|captain-secret-7f3a
 main|main-secret-9c1e" "$(entries "$home")" "both entries must be recorded"
   [ -s "$home/jq-argv.log" ] || fail "the writers must have run through the recording jq"
-  ! grep -q 'secret' "$home/jq-argv.log" || fail "dialog text must never appear in a jq argument list"
+  ! grep -q -e 'captain-secret-7f3a' -e 'main-secret-9c1e' "$home/jq-argv.log" || fail "dialog text must never appear in a jq argument list"
   pass "mirror: captain prompts and main replies reach the mirror without ever entering a process argument list"
 }
 
@@ -515,6 +515,43 @@ test_only_proven_writers_are_verified() {
   pass "only Claude and Cursor, the primaries with proven writers, have a verified dialog mirror"
 }
 
+# A credential pasted into the conversation must not be copied onward: the
+# mirror file, its digest, and the feed the engine receives carry a placeholder,
+# while ordinary dialog, long lowercase names, and commit ids stay as said.
+test_pasted_secrets_are_masked_before_recording() {
+  local home fake gh text feed masked
+  home=$(make_home secrets)
+  fake='madeupQueryKey0for0Tests0Only0123456'
+  gh='ghp_aB3dE5fG7hJ9kL1mN3pQ5rS7tU9vW1xY3zA5'
+  text="use wss://feed.example.com/stream?apiKey=$fake for the check"
+  as_session "$home" "$SAY"'
+    say captain "'"$text"'" p1
+    say main "token '"$gh"' and API_TOKEN=plainvalue noted" p1
+    say captain "keep fm_supervision_host_attended_ready_and_friends and bf05a4fc0123456789abcdef0123456789abcdef as said" p2
+    say captain "json {\"apiKey\": \"madeupjson123\"}" p3
+    say captain "yaml token: madeupyaml456" p4
+    say captain "header X-API-Key: madeupheader789" p5
+    say captain "ini api_key = madeupspaced246" p6
+    "$MIRROR" feed engine-1 new > "$FM_HOME/feed.out"
+  ' || fail "a writer or the feed failed"
+  if grep -q -e "$fake" -e "$gh" -e plainvalue -e madeup "$home/state/.host-mirror.jsonl"; then
+    fail "a pasted secret reached the mirror file"
+  fi
+  assert_equals "$(printf '%s' "${text/$fake/<redacted>}" | sha256sum | awk '{print $1}')" \
+    "$(jq -r 'select(.id == "p1" and .tag == "captain") | .text_sha256' "$home/state/.host-mirror.jsonl")" \
+    "the recorded digest must be of the masked text"
+  feed=$(cat "$home/feed.out")
+  case "$feed" in *"$fake"*|*"$gh"*|*plainvalue*|*madeup*) fail "a pasted secret reached the engine feed" ;; esac
+  case "$feed" in *'apiKey=<redacted> for the check'*) ;; *) fail "the masked captain line is missing from the feed: $feed" ;; esac
+  case "$feed" in *'fm_supervision_host_attended_ready_and_friends and bf05a4fc0123456789abcdef0123456789abcdef as said'*) ;;
+    *) fail "ordinary dialog must be recorded as said: $feed" ;; esac
+  for masked in '"apiKey": "<redacted>"' 'token: <redacted>' 'X-API-Key: <redacted>' 'api_key = <redacted>'; do
+    case "$feed" in *"$masked"*) ;; *) fail "a masked credential line is missing from the feed: $masked" ;; esac
+  done
+  pass "mirror: a pasted secret is masked before it reaches the mirror, its digest, or the feed"
+}
+
+test_pasted_secrets_are_masked_before_recording
 test_every_harness_registration_writes_the_mirror
 test_writers_are_inert_on_a_home_that_opted_out
 test_only_proven_writers_are_verified

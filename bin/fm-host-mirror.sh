@@ -14,7 +14,8 @@
 # omp have no writer (docs/supervision-host.md "The dialog mirror"). A writer
 # appends captain text (the submitted prompt) and MAIN text (the turn's final
 # assistant message), never tool traffic, as said, with only the whitespace at
-# the very end of the message trimmed. A prompt the shared operational-input
+# the very end of the message trimmed and credentials masked (MASK below). A
+# prompt the shared operational-input
 # protocol classifies
 # (bin/fm-operational-input.sh: watcher wakes, guard follow-ups, launch briefs)
 # is fleet machinery, not dialog, and is dropped, and so is a prompt that opens
@@ -147,6 +148,24 @@ ENTRIES='if . == "" or endswith("\n") then .[:-1] else error("unterminated mirro
       and (map(.seq) | [.[:-1], .[1:]] | transpose | all(.[0] < .[1]))
     then . else error("invalid mirror entry") end'
 
+# A credential pasted into the conversation is replaced by a placeholder before
+# the entry, its digest, or any feed exists: the mirror would otherwise copy it
+# into every engine conversation and model request that carries it. Known token
+# shapes, credential-named assignments, and long mixed-case high-entropy runs
+# are masked; ordinary names, paths, and commit ids are not. Read with jq -Rjs.
+# shellcheck disable=SC2016 # a jq program, not shell
+MASK='def entropy: explode | length as $n | group_by(.) | map(length / $n | . * log2) | -add;
+  gsub("-----BEGIN [A-Z ]*PRIVATE KEY-----[\\s\\S]*?(-----END [A-Z ]*PRIVATE KEY-----|$)"; "<private-key>")
+  | gsub("(?i)\\b(?<h>(proxy-)?authorization)\\s*:\\s*((bearer|basic|token)\\s+)?\\S+"; "\(.h): <redacted>")
+  | gsub("(?i)\\b(?<s>[a-z][a-z0-9+.-]*://)[^/\\s:@]+:[^/\\s@]+@"; "\(.s)<redacted>@")
+  | gsub("\\beyJ[A-Za-z0-9_-]{8,}\\.[A-Za-z0-9_-]{8,}\\.[A-Za-z0-9_-]{8,}"; "<jwt>")
+  | gsub("\\b(sk-[A-Za-z0-9_-]{16,}|gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|xox[abprs]-[A-Za-z0-9-]{10,}|AKIA[0-9A-Z]{16}|AIza[0-9A-Za-z_-]{30,}|glpat-[A-Za-z0-9_-]{16,}|hf_[A-Za-z0-9]{20,})"; "<redacted>")
+  | gsub("(?i)(?<f>--(token|password|secret|key|api-key))(?<s>\\s+|=)\\S+"; "\(.f)\(.s)<redacted>")
+  | gsub("(?i)\\b(?<n>[a-z0-9_]*(key|token|secret|passw(or)?d|auth|credential)[a-z0-9_]*)=(\"[^\"]*\"|\\x27[^\\x27]*\\x27|[^\\s&\"\\x27]+)"; "\(.n)=<redacted>")
+  | gsub("(?i)(?<n>[\"\\x27]?\\b[a-z0-9_-]*(key|token|secret|passw(or)?d|auth|credential)[a-z0-9_-]*[\"\\x27]?)(?<o>[ \\t]*[:=][ \\t]*)(?<q>[\"\\x27]?)(?=[A-Za-z0-9+/_.=-]*[0-9])[A-Za-z0-9+/_.=-]{8,}"; "\(.n)\(.o)\(.q)<redacted>")
+  | gsub("\\b[0-9a-fA-F]{48,}\\b"; "<redacted>")
+  | gsub("(?<t>[A-Za-z0-9+_=-]{32,})"; .t | if test("[a-z]") and test("[A-Z]") and test("[0-9]") and entropy >= 4 then "<redacted>" else . end)'
+
 # A writer records only the lock-owning primary session's dialog.
 writer_in_scope() {
   # shellcheck source=bin/fm-primary-scope-lib.sh
@@ -171,6 +190,8 @@ append_entry() {  # <captain|main> <text> [<id>]
     esac
     ! operational "$text" || return 0
   fi
+  # An entry that cannot be masked is not recorded.
+  text=$(printf '%s' "$text" | jq -Rjs "$MASK" 2>/dev/null) || return 1
   key=$(fm_supervision_host_main_key "$STATE") || return 1
   # Keep dialog off process argument lists and refuse an unavailable digest
   # rather than using a lossy presentation as reply identity.
