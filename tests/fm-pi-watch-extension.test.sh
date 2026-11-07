@@ -2391,10 +2391,11 @@ EOF
 }
 
 # A verified successor that closes while its wake is still being delivered
-# defers its retry to the end of that delivery. If a manual repair meanwhile
-# left a dead-but-unclosed arm in the slot, the deferred retry must still
-# start a fresh arm.
-test_pi_deferred_close_starts_fresh_arm_over_dead_child() {
+# takes its bounded retry at once: restoration never waits on delivery
+# settlement (docs/watcher-continuity.md). If that retry leaves a
+# dead-but-unclosed arm in the slot, a manual repair must still start a fresh
+# arm instead of answering unchanged.
+test_pi_held_delivery_close_retries_over_dead_child() {
   local repo home plugin log stop release out status
   repo="$TMP_ROOT/pi-deferred-dead-root"
   home="$TMP_ROOT/pi-deferred-dead-home"
@@ -2480,25 +2481,22 @@ for (let i = 0; i < 250 && !deliveryStarted; i += 1) await sleep(20);
 if (!deliveryStarted) throw new Error("the restored wake was never delivered");
 writeFileSync(process.env.FM_RELEASE_FILE, "release\n");
 await waitForExit(successorPid);
-await sleep(100);
+// The held delivery must not defer the successor's retry.
+await waitForExit(await waitForArms(3));
 const repair = await tool.execute("tool-call-deferred-dead-repair", {}, undefined, undefined, {});
 if (!repair.content[0].text.includes("started Pi extension arm child")) {
-  throw new Error(`repair did not start an arm after the successor closed: ${repair.content[0].text}`);
+  throw new Error(`repair over the dead retry arm did not start an arm: ${repair.content[0].text}`);
 }
-await waitForExit(await waitForArms(3));
+await waitForArms(4);
 finishDelivery();
-for (let i = 0; i < 250 && armRows().length < 4; i += 1) await sleep(20);
-if (armRows().length !== 4) {
-  throw new Error(`the deferred close started no retry over the dead repair arm: ${armRows().join(" | ")}`);
-}
 writeFileSync(process.env.FM_STOP_FILE, "stop\n");
 process.exit(0);
 EOF
 )
   status=$?
-  expect_code 0 "$status" "Pi deferred close must start a fresh arm over a dead child handle: $out"
-  [ -z "$out" ] || fail "Pi deferred-close dead-child test printed output: $out"
-  pass "Pi deferred close starts a fresh arm instead of stalling on a dead child"
+  expect_code 0 "$status" "Pi successor close during held delivery must retry, and repair must start a fresh arm over a dead child: $out"
+  [ -z "$out" ] || fail "Pi held-delivery dead-child test printed output: $out"
+  pass "Pi successor close during held delivery retries, and repair replaces a dead child"
 }
 
 test_pi_hung_successor_falls_back_to_typed_wake() {
@@ -5858,7 +5856,7 @@ test_pi_superseded_delivery_is_offered_to_branch
 test_pi_extension_log_stays_off_unless_opted_in
 test_pi_repair_starts_fresh_arm_over_dead_child
 test_pi_scheduled_retry_starts_fresh_arm_over_dead_child
-test_pi_deferred_close_starts_fresh_arm_over_dead_child
+test_pi_held_delivery_close_retries_over_dead_child
 test_pi_failed_case_poller_is_reaped_as_a_group
 test_pi_hung_successor_falls_back_to_typed_wake
 test_pi_unretired_successor_falls_back_without_retry
