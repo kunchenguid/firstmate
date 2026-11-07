@@ -665,7 +665,7 @@ Malformed or unreadable generation state stops the push before inherited payload
 Counter recovery requires a receiver that supports the generation query, so synchronize an older receiver's code before relying on recovery.
 The [`fm-remote-inherit-push.sh`](../bin/fm-remote-inherit-push.sh) header owns generation negotiation, transaction locking, and the compatibility fallback that keeps ordinary pushes to older receivers working.
 The synthetic transport regression is [`fm-remote-inherit-generation.test.sh`](../tests/fm-remote-inherit-generation.test.sh).
-The [`secondmate-provisioning` skill](../.agents/skills/secondmate-provisioning/SKILL.md#charter-and-seed) owns the placement-specific re-read contract, including changed transfers, unchanged retries, and partial or unknown completion.
+The [`secondmate-provisioning` skill](../.agents/skills/secondmate-provisioning/references/sync-and-inheritance.md) owns the placement-specific re-read contract, including changed transfers, unchanged retries, and partial or unknown completion.
 
 ### Relaunch a live remote second mate
 
