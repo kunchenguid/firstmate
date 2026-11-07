@@ -1158,29 +1158,29 @@ wait_for "$HCASE/state/worker-case.inbox/001.msg" \
   || fail "the answer to a board armed through another spelling was not captured under its one source"
 pass "a board armed through another spelling keeps one source and a live listener, and its answer arrives"
 
-# --- upgrade regression: a board armed under its old spelling keeps one owner --
+# --- upgrade regression: a board registered under its old spelling is reused --
 # A registration saved before ids followed the native realpath carries the id of
-# the spelling it was armed through. Arming the board again must retire it, so
-# one source owns the board and retire <artifact> reaches it.
+# the spelling it was armed through. That registration stays the board's one
+# source, so arming again adds no second listener and retire <artifact> reaches it.
 HUP="$TMP_ROOT/hupgrade"; new_home "$HUP"
 UP_BIN=$(fm_fakebin "$TMP_ROOT/lavish-upgrade-stub")
 cp "$CASE_BIN/node" "$UP_BIN/node" 2>/dev/null || true
 printf '#!/usr/bin/env bash\nsleep 30\n' > "$UP_BIN/lavish-axi"
 chmod +x "$UP_BIN/lavish-axi"
 fm_test_track_procevent_home "$HUP"
-up_id=$(PATH="$CASE_BIN:$PATH" "$ROOT/bin/fm-procevent-lavish.sh" source-id "$CASE_ART")
-old_id=lavish-0123456789abcdef
+old_id=$(PATH="$UP_BIN:$PATH" "$ROOT/bin/fm-procevent-lavish.sh" source-id "$CASE_SPELLED")
 pe "$HUP" register lavish "$old_id" -- "$ROOT/bin/fm-procevent-lavish.sh" poll "$CASE_SPELLED" >/dev/null
+[ "$(PATH="$UP_BIN:$PATH" FM_HOME="$HUP" "$ROOT/bin/fm-procevent-lavish.sh" source-id "$CASE_SPELLED")" = "$old_id" ] \
+  || fail "an existing registration under the old spelling was not reused"
 out=$(PATH="$UP_BIN:$PATH" FM_HOME="$HUP" "$ROOT/bin/fm-procevent-lavish.sh" arm "$CASE_SPELLED") \
   || fail "re-arming a board with an old-spelling registration failed: $out"
-assert_contains "$out" "armed: $up_id" "the re-armed board takes the id of its on-disk path"
+assert_contains "$out" "armed: $old_id" "the re-armed board keeps its registered id"
 list=$(PATH="$UP_BIN:$PATH" pe "$HUP" list)
-assert_not_contains "$list" "$old_id" "the old-spelling registration was left behind"
-assert_contains "$list" "$up_id" "the board's one source is registered"
+[ "$(printf '%s\n' "$list" | grep -c 'lavish-')" = 1 ] || fail "the board has more than one source: $list"
 PATH="$UP_BIN:$PATH" FM_HOME="$HUP" "$ROOT/bin/fm-procevent-lavish.sh" retire "$CASE_SPELLED" >/dev/null
 assert_contains "$(PATH="$UP_BIN:$PATH" pe "$HUP" list)" "no sources registered" \
   "retire <artifact> left a registration owning the board"
-pass "re-arming a board registered under an old spelling leaves one owner that retire reaches"
+pass "an existing old-spelling registration stays the board's one source and retire reaches it"
 
 # --- end-user-aligned regression: an orphaned capture keeps its owner ---------
 # An unacknowledged capture belongs to whoever it was routed to. Retiring the
