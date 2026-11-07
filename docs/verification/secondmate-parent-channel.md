@@ -4,6 +4,8 @@ Maintainer-verification record for the guarantee in [`secondmate-parent-channel.
 Refresh it by rerunning the fixture below after changing any publisher named in `bin/fm-parent-channel-lib.sh`.
 This run predates emission-time stamping, so each published line below is the payload without its stamp: a rerun now writes the same bytes with an `[at=<epoch>]` tag closing the head, as in `done [key=child-outcome-child-done-05b032a1] [at=<epoch>]: child ...`.
 [`bin/fm-classify-lib.sh`](../../bin/fm-classify-lib.sh) owns that tag's syntax; nothing this record proves about delivery depends on it.
+This run also predates typed captain calls, so its Step 3 hold carries no class: a rerun now needs `--class <class>` on that `hold` command, as in `bin/fm-captain-hold.sh hold child-call --title 'Pick the rollout window' --class <class> --reason 'rollout window choice pending' --repo alpha`.
+[`bin/fm-captain-hold.sh`](../../bin/fm-captain-hold.sh) owns the class list; nothing this record proves about delivery depends on it.
 
 ## What was run
 
@@ -57,19 +59,19 @@ signal: $P/state/mate.status
 
 $ # Step 3: the mate holds a task for the captain; the hold reaches the parent from fm-captain-hold itself
 
-$ FM_HOME=$M bin/fm-captain-hold.sh hold child-call --title 'Approve the hosting spend' --class money --reason 'hosting spend approval pending' --repo alpha
+$ FM_HOME=$M bin/fm-captain-hold.sh hold child-call --title 'Pick the rollout window' --reason 'rollout window choice pending' --repo alpha
 child-call
 
 $ # Step 4: the captain's answer is recorded in the mate home; the close reaches the parent from fm-captain-hold itself
 
-$ FM_HOME=$M bin/fm-captain-hold.sh answer child-call --decision-file decision.txt   (decision: approved)
+$ FM_HOME=$M bin/fm-captain-hold.sh answer child-call --decision-file decision.txt   (decision: roll out on Monday)
 answered: child-call
 
 $ cat $P/state/mate.status   (final parent channel)
 working: delegated scope
 done [key=child-outcome-child-done-05b032a1]: child child done: PR https://github.com/kunchenguid/firstmate/pull/9999 checks green pr=https://github.com/kunchenguid/firstmate/pull/9999 mode=no-mistakes yolo=off
 done [key=child-pr-child]: child child PR ready: https://github.com/kunchenguid/firstmate/pull/9999 mode=no-mistakes yolo=off
-needs-decision [key=captain-hold-child-call-1]: captain hold child-call: hosting spend approval pending
+needs-decision [key=captain-hold-child-call-1]: captain hold child-call: rollout window choice pending
 resolved [key=captain-hold-child-call-1]: captain hold child-call: answered
 
 $ parent watcher wakes, one per delivered line (4 signals)
