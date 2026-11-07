@@ -616,6 +616,25 @@ task_conn_relaunch() {  # <id> <kind> <minutes> <strikes>
     esac
   fi
   if [ -n "$model" ] && [ "$DRY_RUN" != 1 ] && [ ! -f "$STATE/$id.gateway.env" ]; then
+    # Only a Claude Code lane can be repointed by typing /model into its pane.
+    # Every other harness refuses structurally, so attempting the switch on them
+    # is not a failed action - it is an impossible one, and waking firstmate for
+    # it trains the reader to skip the watchdog-model line. Check the harness
+    # BEFORE the attempt; a non-Claude lane simply relaunches on its own model.
+    # Skip only when the harness is POSITIVELY known to be non-Claude. An
+    # unrecorded harness keeps the old attempt-and-fall-back behaviour, because
+    # absence of a recorded harness is not evidence that the lane is not Claude.
+    lane_harness=$(fm_meta_get "$STATE/$id.meta" harness)
+    case "$lane_harness" in
+      ''|claude|claude-*) ;;
+      *)
+        printf 'watchdog: %s runs harness %s, which no /model switch can reach; relaunching it on its own model\n' \
+          "$id" "$lane_harness"
+        model=''
+        ;;
+    esac
+  fi
+  if [ -n "$model" ] && [ "$DRY_RUN" != 1 ] && [ ! -f "$STATE/$id.gateway.env" ]; then
     out=$(fm_run_timed "$READ_TIMEOUT_SECS" "$LANE_SWITCH_BIN" "$id" gateway 2>&1)
     rc=$?
     if [ "$rc" -ne 0 ]; then
@@ -942,9 +961,23 @@ task_pass() {
         task_conn_continue "$id" "$((changed / 60))" || true
         strikes=$(csv_append "$strikes" "$now")
       else
-        task_conn_relaunch "$id" "$kind" "$((changed / 60))" "$strike_count" || true
-        strikes=$(csv_append "$strikes" "$now")
-        relaunches=$(csv_append "$relaunches" "$now")
+        # The relaunch rung is budgeted exactly like the stall ladder's. Without
+        # this check the ladder relaunches on EVERY pass once the strike count is
+        # reached, because the strikes list keeps growing and never falls back
+        # below the threshold: seven lanes were relaunched twelve times each in
+        # fifty-five minutes, and every relaunch woke firstmate. A rung that
+        # cannot succeed is a request for a hand, not a retry loop.
+        relaunch_count=$(csv_recent "$relaunches" "$now" "$HOUR")
+        if [ "$relaunch_count" -lt "$RELAUNCH_PER_HOUR" ]; then
+          task_conn_relaunch "$id" "$kind" "$((changed / 60))" "$strike_count" || true
+          strikes=$(csv_append "$strikes" "$now")
+          relaunches=$(csv_append "$relaunches" "$now")
+        elif [ "$woke" != true ]; then
+          printf 'watchdog: %s stuck on a connection error and out of relaunches; asking firstmate\n' "$id"
+          wake_firstmate "watchdog-conn-$id" \
+            "check: watchdog $id is stuck on a connection error and its hourly relaunch budget ($RELAUNCH_PER_HOUR) is spent; it needs a hand"
+          woke=true
+        fi
       fi
       task_store "$id"
       continue
