@@ -213,8 +213,8 @@ Every later drain, including the session-start digest, presents unprocessed main
 The drain's header owns the section's bounds; these rules keep it bounded and in order:
 
 - Main and captain outcomes come first and never wait behind routine ones.
-- Repeated main and captain outcomes for one task collapse to that task's newest, naming how many it carries, and one acknowledgement covers them; a line whose rows are all `main` says so.
-- When a task's newest row is `main` but it still has an open captain row, the drain prints that captain question as its own row first and the newer result as a second row, each under its own line cap, so neither can push the other out.
+- Repeated outcomes of one verdict for one task collapse to that verdict's newest, naming how many it carries, and one acknowledgement covers them; a line whose rows are all `main` says so.
+- A task with both an open captain row and a `main` row prints its newest captain question as its own row first and its newest `main` result as a second row, whichever of the two is newer, each under its own line cap, so neither can push the other out.
 - A row cut by its cap ends in a truncation marker, and the acknowledgement names every truncated row's seq with the `bin/fm-branch-outcome.sh lookup --seqs` command that reads it in full, so no row is acknowledged unread.
 - The byte cap shows only the oldest contiguous run of main and captain outcomes, so the printed acknowledgement covers exactly the rows shown, and it counts the newer ones it holds back, which follow once the run is acknowledged.
 - Routine outcomes never open a main turn: the next drain lists the newest visible one once, for awareness and with nothing to acknowledge, and collapses older visible routine notes into a count; silent routine outcomes never appear.

@@ -594,10 +594,11 @@ EOF
 #   - Acted-on outcomes (verdict main or captain, bin/fm-branch-outcome.sh)
 #     come first and never wait behind routine ones; a line whose collapsed
 #     rows are all verdict main says so, so a main outcome never reads as a
-#     captain call, and a line whose newest row is main but which collapses a
-#     captain row prints that captain row's own question as its own row
-#     first and the newer result as a second row, each under its own line
-#     cap, so neither can push the other out. A row cut by its cap ends in
+#     captain call, and a task carrying both verdicts prints its newest
+#     captain row's own question as its own row first and its newest main
+#     result as a second row, whichever of the two is newer, each under its
+#     own line cap, so neither can push the other out; the newest-of-N
+#     collapse counts within one verdict. A row cut by its cap ends in
 #     the truncation marker, and the acknowledgement names every truncated
 #     row's seq with the lookup that reads it in full, so no row is
 #     acknowledged unread.
@@ -656,11 +657,13 @@ print_branch_outcomes_section() {
   if ! through=$(printf '%s\n' "$rows" | jq -s 'map(select(.unread) | .seq) | max // 0' 2>/dev/null) \
     || ! captain=$(printf '%s\n' "$rows" | jq -rs '
       map(select(.verdict != "routine")) | sort_by(.seq)
-      | reduce .[] as $r ({count: {}, captain: {}, lines: []};
-          .count[$r.task] += 1
-          | if $r.verdict != "main" then .captain[$r.task] = $r else . end
-          | .captain[$r.task] as $c
-          | .lines += ["\($r.seq)\t\($r.task)\t[seq \($r.seq)\(if .count[$r.task] > 1 then ", newest of \(.count[$r.task]) for this task" else "" end), recorded \($r.recordedAgo) ago\(if $c == null then ", main to act, not a captain call" else "" end)] \($r.task): \($r.summary | gsub("[\t\n\r]"; " "))\(if $r.verdict == "main" and $c != null then "\t\($c.seq)\t[seq \($c.seq), captain call, recorded \($c.recordedAgo) ago] \($r.task): \($c.summary | gsub("[\t\n\r]"; " "))" else "" end)"])
+      | def row($label; $tail): "[seq \(.seq)\(if .n > 1 then ", newest of \(.n) for this task" else "" end)\($label), recorded \(.recordedAgo) ago\($tail)] \(.task): \(.summary | gsub("[\t\n\r]"; " "))";
+      reduce .[] as $r ({count: {}, latest: {}, lines: []};
+          .count[$r.verdict][$r.task] += 1
+          | .latest[$r.verdict][$r.task] = ($r + {n: .count[$r.verdict][$r.task]})
+          | .latest.captain[$r.task] as $c
+          | .latest.main[$r.task] as $m
+          | .lines += ["\($r.seq)\t\($r.task)\t\(if $m != null and $c != null then "\($m.seq)\t\($m | row(""; ""))\t\($c.seq)\t\($c | row(", captain call"; ""))" elif $c != null then "\($c.seq)\t\($c | row(""; ""))" else "\($m.seq)\t\($m | row(""; ", main to act, not a captain call"))" end)"])
       | .lines[]' 2>/dev/null) \
     || ! routine=$(printf '%s\n' "$rows" | jq -rs 'map(select(.unread and .verdict == "routine" and .silent != true)) | sort_by(.seq) | reverse | .[]
       | "[seq \(.seq)] \(.task): \(.summary | gsub("[\t\n\r]"; " "))"' 2>/dev/null) \
@@ -670,7 +673,7 @@ print_branch_outcomes_section() {
   fi
 
   target=0
-  while IFS=$(printf '\t') read -r seq task task_line question_seq question_line; do
+  while IFS=$(printf '\t') read -r seq task line_seq task_line question_seq question_line; do
     case "$seq" in ''|*[!0-9]*) continue ;; esac
     if [ "$held" -gt 0 ]; then
       held=$((held + 1))
@@ -689,7 +692,7 @@ print_branch_outcomes_section() {
     cap_outcome_line "$task_line" $((item_bytes - 1))
     entry=$entry$OUTCOME_LINE
     entry_bytes=$((entry_bytes + OUTCOME_LINE_BYTES + 1))
-    [ "$OUTCOME_LINE" = "$task_line" ] || entry_truncated="${entry_truncated:+$entry_truncated,}$seq"
+    [ "$OUTCOME_LINE" = "$task_line" ] || entry_truncated="${entry_truncated:+$entry_truncated,}$line_seq"
     i=0
     while [ "$i" -lt "$shown" ] && [ "${captain_tasks[$i]}" != "$task" ]; do i=$((i + 1)); done
     bytes=$(( used + entry_bytes ))
@@ -709,7 +712,7 @@ print_branch_outcomes_section() {
 $captain
 ROWS
   if [ "$shown" -gt 0 ]; then
-    text="BRANCH OUTCOMES (outcomes the supervision session recorded for you to act on, one line per task, oldest first, with a task's still-open captain call as its own row above a newer result; verdict main is firstmate's own to act on and never a question for the captain, while verdict captain names one of the captain's own categories; each says what was true when it was recorded, so check the task's current state first, including its still-open decisions listed above under OPEN DECISIONS, and sort them into still open and already settled, such as a decision since answered, a PR since merged, or a task since finished - process the still-open ones as firstmate: tell the captain, land or merge what is ready, answer or escalate a decision, or act on a blocker; your reply to the captain covers only those, as if the settled ones had never been listed, and a settled one needs only the acknowledgement):
+    text="BRANCH OUTCOMES (outcomes the supervision session recorded for you to act on, one line per task, oldest first, with a task's still-open captain call as its own row above its newest main result; verdict main is firstmate's own to act on and never a question for the captain, while verdict captain names one of the captain's own categories; each says what was true when it was recorded, so check the task's current state first, including its still-open decisions listed above under OPEN DECISIONS, and sort them into still open and already settled, such as a decision since answered, a PR since merged, or a task since finished - process the still-open ones as firstmate: tell the captain, land or merge what is ready, answer or escalate a decision, or act on a blocker; your reply to the captain covers only those, as if the settled ones had never been listed, and a settled one needs only the acknowledgement):
 "
     for line in "${captain_lines[@]}"; do
       text="$text$line
