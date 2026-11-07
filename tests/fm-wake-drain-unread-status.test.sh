@@ -385,6 +385,27 @@ test_malformed_cursor_row_fails_only_its_own_task() {
   pass "a malformed presentation-cursor row fails only its own task"
 }
 
+test_malformed_sibling_row_does_not_block_retirement() {
+  local dir state status cursor ghost
+  dir=$(make_case malformed-row-retire); state="$dir/state"
+  status="$state/healthy.status"
+  prime_cursor "$state" "$status"
+  cursor="$state/.status-presentation-cursor"
+  ghost=$'ghost\tident\tNaN\t0'
+  printf '%s\n' "$ghost" >> "$cursor"
+  grep -q $'^healthy\t' "$cursor" || fail "setup error: healthy has no cursor row"
+  FM_STATE_OVERRIDE="$state" bash -c '. "$1/bin/fm-wake-lib.sh"; . "$1/bin/fm-classify-lib.sh"; status_retire_presentation_task "$2" healthy' \
+    _ "$ROOT" "$state" || fail "another task's malformed row blocked retiring a healthy task"
+  [ ! -e "$status" ] || fail "retiring the healthy task left its status log behind"
+  grep -q $'^healthy\t' "$cursor" && fail "retiring the healthy task left its cursor row behind"
+  grep -qxF "$ghost" "$cursor" || fail "retirement did not copy the unrelated row through unchanged"
+  printf 'note: x\n' > "$state/ghost.status"
+  FM_STATE_OVERRIDE="$state" bash -c '. "$1/bin/fm-wake-lib.sh"; . "$1/bin/fm-classify-lib.sh"; status_retire_presentation_task "$2" ghost' \
+    _ "$ROOT" "$state" 2>/dev/null && fail "a malformed row did not fail its own task's retirement"
+  [ -e "$state/ghost.status" ] || fail "a failed retirement removed the malformed task's status log"
+  pass "a malformed sibling cursor row does not block retiring a healthy task"
+}
+
 test_snapshot_failure_is_visible() {
   local dir state out reader
   dir=$(make_case snapshot-failure); state="$dir/state"; out="$dir/drain.out"; reader="$dir/identity-reader"
@@ -488,6 +509,7 @@ test_snapshot_does_not_ack_a_later_append
 test_retired_task_id_starts_new_status_unread
 test_weak_identity_still_presents_and_advances
 test_malformed_cursor_row_fails_only_its_own_task
+test_malformed_sibling_row_does_not_block_retirement
 test_snapshot_failure_is_visible
 test_open_decisions_fold_is_unchanged
 test_empty_queue_does_not_swallow_later_signal_annotation

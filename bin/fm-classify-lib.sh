@@ -1626,7 +1626,6 @@ status_outcome_backstop_cursor_offset() {  # <status-file>
   backstop=${row##*$'\t'}
   _fm_status_read_ident_size "$f" || return 1
   current=$_FM_STAT_IDENTITY size=${_FM_STAT_SIZE//[[:space:]]/}
-  size=${size//[[:space:]]/}
   case "$size" in ''|*[!0-9]*) return 1 ;; esac
   [ "$ident" = "$current" ] || { printf '0'; return 0; }
   [ "$backstop" -le "$size" ] || backstop=0
@@ -1769,7 +1768,7 @@ status_presentation_marker_commit() {
 # path selection and retention; publication also checks for unsafe collisions.
 # No status consumer reads that archive.
 status_retire_presentation_task() {  # <state> <task-id> [<archive-file>]
-  local state=$1 task=$2 lock manifest tmp data row_task ident offset backstop extra rc=0 found=0 archive_published=0
+  local state=$1 task=$2 lock manifest tmp data row line rc=0 archive_published=0
   local signal_marker heartbeat_marker daemon_marker home_appends home_appends_lock archive=${3:-} archive_tmp=
   lock="$state/.status-presentation-lock"
   manifest="$state/.status-presentation-cursor"
@@ -1783,7 +1782,7 @@ status_retire_presentation_task() {  # <state> <task-id> [<archive-file>]
   # A remote-home teardown can legitimately retire an endpoint ID that has no
   # status log in that home. Do not contend with that home's unrelated status
   # presenter in this no-op case. A concurrent presenter cannot add this task
-  # without its status file, so a valid manifest with no matching row is a
+  # without its status file, so a manifest with no row for this task is a
   # durable proof that there is nothing to retire.
   if [ ! -e "$state/$task.status" ] && [ ! -L "$state/$task.status" ] \
     && [ ! -e "$state/.$task.open-decisions-cursor" ] \
@@ -1799,18 +1798,10 @@ status_retire_presentation_task() {  # <state> <task-id> [<archive-file>]
       return 0
     fi
     if [ -f "$manifest" ] && [ -r "$manifest" ] && [ ! -L "$manifest" ] \
-      && data=$(LC_ALL=C command cat "$manifest" 2>/dev/null); then
-      while IFS=$(printf '\t') read -r row_task ident offset backstop extra; do
-        [ -n "$row_task" ] || continue
-        if [ -n "$extra" ] || [ -z "$ident" ]; then rc=1; break; fi
-        case "$offset:$backstop" in *[!0-9:]*) rc=1; break ;; esac
-        [ -n "$offset" ] || { rc=1; break; }
-        [ "$row_task" != "$task" ] || found=1
-      done <<EOF
-$data
-EOF
-      [ "$rc" -ne 0 ] || [ "$found" -ne 0 ] || return 0
-      rc=0
+      && data=$(LC_ALL=C command cat "$manifest" 2>/dev/null) \
+      && row=$(_fm_status_presentation_cursor_row "$data" "$task") \
+      && [ -z "$row" ]; then
+      return 0
     fi
   fi
 
@@ -1838,18 +1829,16 @@ EOF
       rc=1
     elif ! data=$(LC_ALL=C command cat "$manifest" 2>/dev/null); then
       rc=1
+    elif ! _fm_status_presentation_cursor_row "$data" "$task" >/dev/null; then
+      rc=1
     elif ! : > "$tmp"; then
       rc=1
     else
-      while IFS=$(printf '\t') read -r row_task ident offset backstop extra; do
-        [ -n "$row_task" ] || continue
-        if [ -n "$extra" ] || [ -z "$ident" ]; then rc=1; break; fi
-        case "$offset:$backstop" in *[!0-9:]*) rc=1; break ;; esac
-        [ -n "$offset" ] || { rc=1; break; }
-        if [ "$row_task" != "$task" ]; then
-          printf '%s\t%s\t%s\t%s\n' "$row_task" "$ident" "$offset" "${backstop:-0}" >> "$tmp" \
-            || { rc=1; break; }
-        fi
+      while IFS= read -r line; do
+        row=${line#"${line%%[!$'\t']*}"}
+        row=${row%%$'\t'*}
+        [ -n "$row" ] && [ "$row" != "$task" ] || continue
+        printf '%s\n' "$line" >> "$tmp" || { rc=1; break; }
       done <<EOF
 $data
 EOF
