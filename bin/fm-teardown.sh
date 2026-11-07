@@ -70,10 +70,10 @@
 # by itself causes a false refusal of landed work.
 # A gh lookup error falls back to the content check; if that is also inconclusive,
 # teardown refuses rather than risk discarding unlanded work.
-# A ship task with a recorded pr= on a supported forge also REFUSES until the forge
-# reports that PR merged, even when the proofs above hold, because the guarded merge
-# command needs this record. A closed PR passes only when its change is already in
-# the default branch. An unreadable record refuses, and --force skips this gate.
+# A ship task with a recorded pr= on a supported forge also REFUSES while the forge
+# reports that PR open, even when the proofs above hold, because the guarded merge
+# command needs this record. A merged or closed PR takes the checks above unchanged.
+# An unreadable record refuses, and --force skips this gate.
 # A merge-tree option or execution error reports the content-landed proof as
 # unavailable. The merge-tree --write-tree proof requires Git 2.38 or newer.
 # Uncommitted changes are never landed. Before return, the dirty check explicitly
@@ -3780,13 +3780,13 @@ if [ "$KIND" = ship ] && [ -n "$PR_URL" ] && [ "$FORCE" != "--force" ] && fm_pr_
   esac
   if [ "$PR_RECORD_CHECKED" = 1 ] && [ "$FM_PR_RECORD_MERGED" != true ]; then
     case "$FM_PR_RECORD_STATE" in
-      CLOSED|closed) [ -d "$WT" ] && content_in_default && PR_RECORD_CHECKED=0 ;;
+      CLOSED|closed) ;;
+      *)
+        echo "REFUSED: ship task $ID still has an open or unreadable PR at $PR_URL. Stop the worker with bin/fm-control.sh $ID exit and keep its task record until the PR merges." >&2
+        echo "Use --force only after explicit discard approval." >&2
+        exit 1
+        ;;
     esac
-  fi
-  if [ "$PR_RECORD_CHECKED" = 1 ] && [ "$FM_PR_RECORD_MERGED" != true ]; then
-    echo "REFUSED: ship task $ID still has an unmerged or unreadable PR at $PR_URL. Stop the worker with bin/fm-control.sh $ID exit and keep its task record until the PR merges." >&2
-    echo "A closed PR passes only when its change is already in the default branch. Use --force only after explicit discard approval." >&2
-    exit 1
   fi
 fi
 
