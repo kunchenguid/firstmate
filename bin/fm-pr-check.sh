@@ -413,6 +413,25 @@ fm_pr_regular_destination_on_device_or_absent "$META" "$STATE_DEVICE" || exit 1
 # Keep the current registration recoverable until all replacement files commit.
 if [ "${FM_PR_CHECK_MERGE:-}" != 1 ]; then
   BASELINE_BACKUP=$(mktemp -d "$STATE/.fm-pr-baseline.XXXXXX") || exit 1
+  BASELINE_BACKUP_COMPLETE=0
+  restore_baselines() {
+    local artifact backup
+    [ "$BASELINE_BACKUP_COMPLETE" = 1 ] || return 1
+    for artifact in "$META" "$STATE/$ID.pr-poll-degraded" "$STATE/$ID.pr-poll-train" \\
+      "$STATE/$ID.check.sh" "$STATE/$ID.pr-poll" "$STATE/$ID.pr-poll-registration"; do
+      backup="$BASELINE_BACKUP/$(basename "$artifact")"
+      if [ -e "$backup" ]; then
+        cp -p -- "$backup" "$artifact.restore" && mv -f -- "$artifact.restore" "$artifact" || return 1
+      else
+        rm -f -- "$artifact" || return 1
+      fi
+    done
+  }
+  baseline_failure() {
+    restore_baselines || echo "error: could not restore previous PR poll registration" >&2
+    rm -rf -- "$BASELINE_BACKUP"
+    exit 1
+  }
   for artifact in "$META" "$STATE/$ID.pr-poll-degraded" "$STATE/$ID.pr-poll-train" \
     "$STATE/$ID.check.sh" "$STATE/$ID.pr-poll" "$STATE/$ID.pr-poll-registration"; do
     [ -e "$artifact" ] || [ -L "$artifact" ] || continue
