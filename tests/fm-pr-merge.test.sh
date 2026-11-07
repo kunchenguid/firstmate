@@ -2584,6 +2584,26 @@ test_forgejo_unreadable_tree_refuses() {
   pass "fm-pr-merge refuses a zero-status Forgejo pull request when a tree cannot be read whole"
 }
 
+# An error body that the API client prints with exit 0 is not a combined status,
+# so it refuses rather than reading as zero statuses and so as no CI.
+test_forgejo_error_body_status_refuses() {
+  local case_dir rc
+  case_dir=$(make_forgejo_case forgejo-status-error-body)
+  printf '{"message":"internal server error","url":"https://forge.example/api/swagger"}\n' \
+    > "$case_dir/tea-status.json"
+  set +e
+  run_pr_merge "$case_dir" task-x1 "$FJ_URL" \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "forgejo-status-error-body: an error body should refuse"
+  assert_grep 'the combined commit status is "unreadable", not success' "$case_dir/stderr" \
+    "forgejo-status-error-body: the refusal did not name the unreadable status"
+  [ -z "$(tea_merge_line "$case_dir/tea.log")" ] \
+    || fail "forgejo-status-error-body: a merge was attempted on an unreadable status"
+  pass "fm-pr-merge refuses a Forgejo status response that is an error body"
+}
+
 # A status that is present is a verdict, so neither the no-CI reading nor the
 # attended waiver reaches one that is not success.
 test_forgejo_present_status_still_refuses() {
@@ -3780,6 +3800,7 @@ test_forgejo_each_condition_refuses_independently
 test_forgejo_no_ci_repository_merges
 test_forgejo_unreported_ci_refuses
 test_forgejo_unreadable_tree_refuses
+test_forgejo_error_body_status_refuses
 test_forgejo_present_status_still_refuses
 test_forgejo_no_ci_merges_while_away
 test_forgejo_combined_status_reads_every_page
