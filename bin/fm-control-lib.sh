@@ -8,7 +8,9 @@
 # through the status path. That marking is exactly right for a message and
 # exactly wrong for a lifecycle command: a marked "/quit" arrives as ordinary
 # chat ("[fm-from-firstmate] /quit") that the agent reasons ABOUT instead of
-# executing. bin/fm-control.sh is the CONTROL plane: allowlisted lifecycle
+# executing, and where it does run as a command (a local claude secondmate,
+# see bin/fm-send.sh) it still opens a reply expectation that an exited agent
+# never answers. bin/fm-control.sh is the CONTROL plane: allowlisted lifecycle
 # verbs addressed to an exact task id, with the per-harness mechanics owned
 # here rather than improvised per harness in agent prose.
 #
