@@ -3223,16 +3223,26 @@ case "$ARG3" in
 esac
 
 case "$DISPATCH_OVERRIDE" in *[![:print:]]*) echo 'error: --dispatch-override must be a printable reason' >&2; exit 1 ;; esac
-DISPATCH_SELECTION="$DATA/$ID/dispatch-selection"
-if [ "$KIND" != secondmate ] && [ "$RELAUNCH" -eq 0 ] && [ -f "$CONFIG/crew-dispatch.json" ] && [ -e "$DISPATCH_SELECTION" ]; then
-  selection=$(cat "$DISPATCH_SELECTION") || { echo "error: could not read the recorded dispatch selection $DISPATCH_SELECTION" >&2; exit 1; }
-  IFS='|' read -r selected_harness selected_model selected_effort extra <<<"$selection"
-  if [ -z "$selected_harness" ] || [ -n "$extra" ]; then
-    echo "error: malformed dispatch selection $DISPATCH_SELECTION (expected harness|model|effort); rerun bin/fm-dispatch-resolve.sh on the brief" >&2
+DISPATCH_RECORD="$DATA/$ID/dispatch-resolution.json"
+if [ "$KIND" != secondmate ] && [ "$RELAUNCH" -eq 0 ] && [ -f "$CONFIG/crew-dispatch.json" ]; then
+  if [ ! -e "$DISPATCH_RECORD" ]; then
+    echo "error: config/crew-dispatch.json is active and task $ID has no recorded dispatch resolution; run bin/fm-dispatch-resolve.sh $DATA/$ID/brief.md --project <name> first" >&2
     exit 1
   fi
-  if [ -z "$DISPATCH_OVERRIDE" ] && { [ "$HARNESS" != "$selected_harness" ] || [ "${MODEL:-}" != "$selected_model" ] || [ "${EFFORT:-}" != "$selected_effort" ]; }; then
-    echo "error: launch flags do not match the dispatch selection $selected_harness|$selected_model|$selected_effort recorded in $DISPATCH_SELECTION; pass those flags, or record this task's override with --dispatch-override <reason>" >&2
+  dispatch_fields=$(jq -r --arg id "$ID" '
+    select(.task == $id and (.status | IN("clear", "ambiguous", "escalate", "error", "off"))
+      and (if .status == "clear" then (.profile.harness | type) == "string" and .profile.harness != "" else true end))
+    | .status, (.profile.harness // ""), (.profile.model // ""), (.profile.effort // "")' "$DISPATCH_RECORD" 2>/dev/null) || dispatch_fields=
+  { read -r dispatch_status; read -r selected_harness; read -r selected_model; read -r selected_effort; } <<<"$dispatch_fields" || true
+  if [ -z "$dispatch_status" ]; then
+    echo "error: malformed dispatch resolution $DISPATCH_RECORD for task $ID; rerun bin/fm-dispatch-resolve.sh $DATA/$ID/brief.md --project <name>" >&2
+    exit 1
+  fi
+  if [ "$dispatch_status" = clear ] && [ -z "$DISPATCH_OVERRIDE" ] \
+    && { [ "$HARNESS" != "$selected_harness" ] \
+      || { [ -n "$selected_model" ] && [ "${MODEL:-}" != "$selected_model" ]; } \
+      || { [ -n "$selected_effort" ] && [ "${EFFORT:-}" != "$selected_effort" ]; }; }; then
+    echo "error: launch flags do not match the clear dispatch selection --harness $selected_harness${selected_model:+ --model $selected_model}${selected_effort:+ --effort $selected_effort} recorded in $DISPATCH_RECORD; pass those flags, or record this task's override with --dispatch-override <reason>" >&2
     exit 1
   fi
 fi
