@@ -219,25 +219,9 @@ die() {  # <message>
   exit 1
 }
 
-# Herdr's `agent start <NAME>` caps agent names at FM_HERDR_AGENT_NAME_MAX
-# characters (verified against real herdr; over-cap names fail with
-# `invalid_agent_name`: "agent name must start with a lowercase letter and
-# contain only lowercase letters, digits, '-' or '_' (1-32 characters)"). The
-# relaunch path applies this BEFORE stopping the old agent or mutating any
-# durable record, so a task id over the cap refuses instead of reporting
-# success and silently stranding a replacement whose inner agent-start can
-# never boot (fm-spawn.sh carries the same cap check on its fresh and
-# --relaunch paths). The cap is a length rule only; herdr's stricter character
-# set is intentionally NOT enforced here because fm_task_id_creation_valid
-# accepts uppercase letters and dots, and tightening that is a separate,
-# broader scope. Ids are semantic, so the scripts never auto-truncate - the
-# hint is to recreate the task under a shorter id.
-FM_HERDR_AGENT_NAME_MAX=32
-
-fm_herdr_agent_name_within_cap() {  # <task-id>
-  local id=$1
-  [ "${#id}" -le "$FM_HERDR_AGENT_NAME_MAX" ]
-}
+# The herdr agent-name-cap guard (bin/fm-control-lib.sh) fires on the relaunch
+# path before the old agent is stopped or any durable record is mutated; see
+# bin/fm-control-lib.sh for the cap's rationale.
 
 CONTROL_LOCK=
 CONTROL_LOCK_HELD=0

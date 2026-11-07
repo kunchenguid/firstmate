@@ -979,26 +979,9 @@ fm_refuse_if_gate_agent
 # Skip the watcher guard when re-exec'd for one pair of a batch (FM_SPAWN_NO_GUARD is
 # set by the batch loop below), so the guard runs once for the batch, not once per pair.
 [ -n "${FM_SPAWN_NO_GUARD:-}" ] || "$FM_ROOT/bin/fm-guard.sh" || true
-# Herdr's `agent start <NAME>` caps agent names at FM_HERDR_AGENT_NAME_MAX
-# characters (verified against real herdr; over-cap names fail with
-# `invalid_agent_name`: "agent name must start with a lowercase letter and
-# contain only lowercase letters, digits, '-' or '_' (1-32 characters)"). The
-# fresh spawn and --relaunch paths apply this BEFORE creating any pane, tab,
-# workspace, or agent, so a task id over the cap refuses instead of reporting
-# success and silently stranding a replacement whose inner agent-start can
-# never boot (fm-control.sh carries the same cap check on its relaunch path).
-# The cap is a length rule only; herdr's stricter character set is
-# intentionally NOT enforced here because fm_task_id_creation_valid accepts
-# uppercase letters and dots, and tightening that is a separate, broader
-# scope. Ids are semantic, so the scripts never auto-truncate - the hint is
-# to recreate the task under a shorter id.
-FM_HERDR_AGENT_NAME_MAX=32
-
-fm_herdr_agent_name_within_cap() {  # <task-id>
-  local id=$1
-  [ "${#id}" -le "$FM_HERDR_AGENT_NAME_MAX" ]
-}
-
+# The herdr agent-name-cap guard (bin/fm-control-lib.sh) fires on both the
+# fresh-spawn and --relaunch paths before any pane, tab, workspace, or agent
+# is created; see bin/fm-control-lib.sh for the cap's rationale.
 KIND=ship
 KIND_SET=0
 HARNESS_ARG=
