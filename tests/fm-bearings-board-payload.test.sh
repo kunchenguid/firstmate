@@ -193,10 +193,94 @@ test_copy_overlay_cannot_change_the_payload_shape() {
   pass "a copy overlay cannot add fields, sections, or the reconcile option"
 }
 
+# A captain-waiting item firstmate never held: a contribution awaiting merge
+# approval has no hold, so the snapshot carries it only in contributions.captain.
+test_an_unheld_captain_contribution_becomes_a_link_card() {
+  local snap p out
+  snap="$TMP_ROOT/snap-unheld.json"
+  write_snapshot "$TMP_ROOT/snap.json"
+  jq '.contributions.captain = [
+        {task: "alpha-fix", url: "https://github.com/acme/alpha/pull/3", kind: "pr",
+         reason: "checks green; merge approval needed", hold: "alpha-fix"},
+        {task: "gamma-ship", url: "https://github.com/acme/gamma/pull/12", kind: "pr",
+         reason: "checks green; merge approval needed"},
+        {task: "same-pr", url: "https://github.com/acme/alpha/pull/3", kind: "pr",
+         reason: "checks green; merge approval needed"}]' "$TMP_ROOT/snap.json" > "$snap"
+  p=$("$GEN" --snapshot "$snap") || fail "the generator failed"
+  assert_equals "alpha-fix,old-row,contribution.gamma-ship" \
+    "$(jq -r '[.captains_call[].key] | join(",")' <<<"$p")" \
+    "an unheld captain contribution is carded once, and a held or duplicate one adds nothing"
+  out=$(jq -c '.captains_call[2] | {type, repo, title, pr_url, about}' <<<"$p")
+  assert_equals '{"type":"decision","repo":"gamma","title":"gamma #12","pr_url":"https://github.com/acme/gamma/pull/12","about":"checks green; merge approval needed"}' \
+    "$out" "the link card did not carry the contribution's page"
+  printf '%s\n' "$p" > "$TMP_ROOT/unheld.json"
+  validates "$TMP_ROOT/unheld.json" || fail "a payload with an unheld contribution card did not satisfy the board validator"
+  pass "a captain contribution with no hold becomes a link card the validator accepts"
+}
+
+test_cards_carry_links_and_a_non_held_credential_card_survives() {
+  local snap copy p
+  snap="$TMP_ROOT/snap.json"
+  copy="$TMP_ROOT/links-copy.json"
+  write_snapshot "$snap"
+  cat > "$copy" <<'EOF'
+{
+  "captains_call": {
+    "alpha-fix": {"links": [{"url": "https://review.example.test/session/abc", "label": "Review page"}]}
+  },
+  "captains_call_extra": [
+    {"key": "registry-login", "type": "credential", "repo": null, "title": "Log in to the package registry",
+     "options": [{"value": "done", "label": "Done"}], "close": "done",
+     "links": [{"url": "https://registry.example.test/login"}]},
+    {"key": "mr-review", "type": "decision", "repo": "alpha", "title": "Review the alpha MR",
+     "options": [], "allow_freeform": true,
+     "links": [{"url": "https://gitlab.example.test/acme/alpha/-/merge_requests/4", "label": "MR 4"}]}
+  ]
+}
+EOF
+  p=$("$GEN" --snapshot "$snap" --copy "$copy") || fail "the generator refused cards with links"
+  assert_equals "alpha-fix,old-row,registry-login,mr-review" "$(jq -r '[.captains_call[].key] | join(",")' <<<"$p")" \
+    "a card whose key is not a held task id was dropped"
+  assert_equals "Review page" "$(jq -r '.captains_call[0].links[0].label' <<<"$p")" "an overlay attaches links to a generated card"
+  assert_equals "https://registry.example.test/login" "$(jq -r '.captains_call[2].links[0].url' <<<"$p")" "a credential card keeps its link"
+  printf '%s\n' "$p" > "$TMP_ROOT/links.json"
+  validates "$TMP_ROOT/links.json" || fail "cards with links did not satisfy the board validator"
+  pass "every card type carries links and a non-held credential card survives the generator and validator"
+}
+
+test_the_validator_accepts_https_links_and_refuses_every_other_scheme() {
+  local snap p url
+  snap="$TMP_ROOT/snap.json"
+  write_snapshot "$snap"
+  p=$("$GEN" --snapshot "$snap") || fail "the generator failed"
+  for url in https://example.test/page \
+             'https://example.test:8443/session/abc?x=1#frag'; do
+    jq --arg u "$url" '.captains_call[0].links = [{url: $u}]' <<<"$p" > "$TMP_ROOT/link-ok.json"
+    validates "$TMP_ROOT/link-ok.json" || fail "the validator refused an allowed link: $url"
+  done
+  for url in http://example.test/page \
+             ftp://example.test/page \
+             'javascript:alert(1)' \
+             'https://example.test/has space'; do
+    jq --arg u "$url" '.captains_call[0].links = [{url: $u}]' <<<"$p" > "$TMP_ROOT/link-bad.json"
+    validates "$TMP_ROOT/link-bad.json" && fail "the validator accepted a link it must refuse: $url"
+  done
+  jq '.captains_call[0].links = []' <<<"$p" > "$TMP_ROOT/link-empty.json"
+  validates "$TMP_ROOT/link-empty.json" || fail "the validator refused an empty links list"
+  jq '.captains_call[0].links = [{url: "https://example.test/x", extra: 1}]' <<<"$p" > "$TMP_ROOT/link-field.json"
+  validates "$TMP_ROOT/link-field.json" && fail "the validator accepted a link with an unknown field"
+  jq '.captains_call[0].links = "https://example.test/x"' <<<"$p" > "$TMP_ROOT/link-str.json"
+  validates "$TMP_ROOT/link-str.json" && fail "the validator accepted links that is not an array"
+  pass "the validator accepts https links only and refuses every other scheme"
+}
+
 fm_test_run \
   test_zero_copy_payload_satisfies_the_board_validator \
   test_the_same_snapshot_yields_the_same_payload \
   test_rows_map_deterministically_from_the_snapshot \
   test_charted_rows_derive_dispatchable_and_warning_from_structure \
   test_copy_overlay_refines_cards_and_keeps_the_payload_valid \
-  test_copy_overlay_cannot_change_the_payload_shape
+  test_copy_overlay_cannot_change_the_payload_shape \
+  test_an_unheld_captain_contribution_becomes_a_link_card \
+  test_cards_carry_links_and_a_non_held_credential_card_survives \
+  test_the_validator_accepts_https_links_and_refuses_every_other_scheme

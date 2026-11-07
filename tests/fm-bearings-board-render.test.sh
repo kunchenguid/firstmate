@@ -296,6 +296,43 @@ EOF
 }
 
 test_full_snapshot_question_reaches_the_rendered_decision
+test_every_card_type_renders_its_links() {
+  local home data out
+  home=$(make_home card-links)
+  data="$home/payload.json"
+  jq -n '{
+    schema:"fm-bearings-board.v1", home:"render-home", generated:"2026-08-26T00:00Z",
+    prs_live:false, underway:[], landed:[], charted:[], charted_more:0, charted_warning_more:0,
+    captains_call:[
+      {key:"held-decision", type:"decision", title:"A held decision", repo:"r", about:"a",
+       options:[], allow_freeform:true, pr_url:"https://example.test/o/r/pull/7",
+       links:[{url:"https://review.example.test/session/abc", label:"Review page"}]},
+      {key:"merge.some-task", type:"merge", title:"A merge", repo:"r", risk:"low",
+       options:[{value:"merge",label:"Merge now"}], pr_url:"https://example.test/o/r/pull/9"},
+      {key:"unheld-credential", type:"credential", title:"A credential", repo:"r",
+       options:[{value:"done",label:"Done"}],
+       links:[{url:"https://example.test/console"},
+              {url:"https://example.test/mr/3", label:"Merge request"}]}]}' > "$data"
+  PATH="$home/fakebin:$PATH" FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    FM_PROCEVENT_CLAIM_ROOT="$home/procevent-claims" \
+    LAVISH_AXI_STATE_DIR="$home/lavish-state" \
+    "$BOARD" build "$data" >/dev/null 2>&1 || fail "the board did not build"
+  require_listener_reached_poll "$home"
+  out=$(node "$HARNESS" "$home/.lavish/bearings-board.html") \
+    || fail "the built board could not be rendered"
+  printf '%s' "$out" | jq -e '
+    (.call | map({key, hrefs: [.links[].href]}) | sort_by(.key)) == [
+      {key:"held-decision", hrefs:["https://example.test/o/r/pull/7",
+        "https://review.example.test/session/abc"]},
+      {key:"merge.some-task", hrefs:["https://example.test/o/r/pull/9"]},
+      {key:"unheld-credential", hrefs:["https://example.test/console","https://example.test/mr/3"]}]
+    and (.call[] | select(.key == "held-decision") | .links[1].text) == "Review page - https://review.example.test/session/abc"
+    and (.call[] | select(.key == "unheld-credential") | .links[1].text) == "Merge request - https://example.test/mr/3"
+  ' >/dev/null || fail "a card type did not render its links: $out"
+  pass "decision, merge, and credential cards each render their PR and extra links"
+}
+
 test_an_underway_row_leads_with_the_task_name_and_keeps_its_run_status
 test_an_underway_identifier_label_is_not_replaced_by_run_status
 test_charted_next_reads_newest_filed_first
@@ -305,3 +342,4 @@ test_warnings_are_excluded_from_the_charted_next_count
 test_a_board_of_only_warnings_still_reports_nothing_queued
 test_omitted_warnings_never_count_as_more_queued
 test_an_omitted_kind_keeps_the_existing_queued_rendering
+test_every_card_type_renders_its_links

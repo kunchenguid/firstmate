@@ -5,7 +5,8 @@
 // Usage: node board-render-harness.mjs <built-board.html>
 // Prints one JSON document:
 //   { stats:[{n,label}], captains_call:[text], underway:[{title,sub,badges}],
-//     charted:[{title,sub,badges,pickable}], empty, more, error }
+//     charted:[{title,sub,badges,pickable}], call:[{key,links:[{href,text}]}],
+//     empty, more, error }
 import { readFileSync } from "node:fs";
 
 const html = readFileSync(process.argv[2], "utf8");
@@ -45,6 +46,12 @@ class Node {
   appendChild(n) { n.parentNode = this; this.children.push(n); return n; }
   setAttribute(k, v) { this.attributes[k] = v; }
   addEventListener() {}
+  findAll(pred) {
+    const out = [];
+    const walk = (n) => { for (const c of n.children) { if (pred(c)) out.push(c); walk(c); } };
+    walk(this);
+    return out;
+  }
   querySelectorAll(sel) {
     const want = sel.replace(/^\./, "").replace(/:checked$/, "");
     const checkedOnly = sel.endsWith(":checked");
@@ -129,8 +136,16 @@ const errorText = [...byId.entries()]
   .filter(([k]) => k.startsWith("sel:"))
   .flatMap(([, n]) => n.children.map((c) => c.textContent))
   .join(" ");
+// Each Captain's Call card is the container holding its answer form; its links are
+// the anchors the card renders, with the href the page would navigate to.
+const call = (byId.get("bb-call") || new Node("div")).children.map((card) => ({
+  key: card.findAll((n) => n.attributes["data-lavish-question"] != null)
+    .map((n) => n.attributes["data-lavish-question"])[0] ?? "",
+  links: card.findAll((n) => n.tagName === "a")
+    .map((a) => ({ href: a.href ?? "", text: a.textContent })),
+}));
 const empty = ch.children.filter((c) => c.className.includes("bb-empty")).map((c) => c.textContent);
 const more = ch.children.filter((c) => c.className.includes("bb-morechip")).map((c) => c.textContent);
 
 process.stdout.write(
-  JSON.stringify({ stats, captains_call, underway, charted, empty, more, error: errorText }) + "\n");
+  JSON.stringify({ stats, captains_call, underway, charted, call, empty, more, error: errorText }) + "\n");

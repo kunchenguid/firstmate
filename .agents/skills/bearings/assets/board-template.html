@@ -484,6 +484,21 @@ __FM_BEARINGS_BOARD_DATA__
     return row;
   }
 
+  /* Every card type shows its PR and each extra link the same way; the
+     validator already limits schemes, and this keeps a bad href unrenderable. */
+  function cardLinks(item) {
+    var out = [], seen = {};
+    function add(url, label) {
+      if (typeof url !== "string" || seen[url]) return;
+      if (!/^https:\/\//.test(url)) return;
+      seen[url] = true;
+      out.push({ url: url, label: label });
+    }
+    add(item.pr_url);
+    (item.links || []).forEach(function (l) { add(l && l.url, l && l.label); });
+    return out;
+  }
+
   data.captains_call.forEach(function (item) {
     var card = el("div", "fm-card fm-card--poster bb-decision");
     var pad = el("div", "bb-decision__pad");
@@ -502,11 +517,6 @@ __FM_BEARINGS_BOARD_DATA__
 
     if (item.type === "merge") {
       if (item.detail) pad.appendChild(el("p", "bb-decision__detail", item.detail));
-      if (item.pr_url) {
-        var pr = el("a", "bb-decision__link", item.pr_url);
-        pr.href = item.pr_url; pr.target = "_blank"; pr.rel = "noopener";
-        pad.appendChild(pr);
-      }
     } else {
       /* the rec marker on the option itself carries the recommendation */
       var ctx = el("div", "bb-ctx");
@@ -514,6 +524,11 @@ __FM_BEARINGS_BOARD_DATA__
       if (item.decide) ctx.appendChild(ctxRow("decide", item.decide));
       pad.appendChild(ctx);
     }
+    cardLinks(item).forEach(function (l) {
+      var a = el("a", "bb-decision__link", l.label ? l.label + " - " + l.url : l.url);
+      a.href = l.url; a.target = "_blank"; a.rel = "noopener";
+      pad.appendChild(a);
+    });
 
     var form = document.createElement("form");
     form.setAttribute("data-lavish-question", item.key);

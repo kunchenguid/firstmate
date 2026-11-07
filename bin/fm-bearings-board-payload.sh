@@ -20,6 +20,13 @@
 #                      `pr_url` and `repo` from the PR the task recorded, and a
 #                      freeform answer box (a card with no authored options). The
 #                      snapshot already buckets holds, so every row is a live call.
+#   contributions.captain
+#                   -> captains_call: one link-only `decision` card (key
+#                      `contribution.<task>`, `pr_url` the contribution's page) for
+#                      each row waiting on the captain with no hold of its own, so
+#                      Captain's Call also shows what firstmate never held. A row
+#                      whose hold already has a card, or whose PR a card already
+#                      carries, adds none.
 #   in_flight       -> underway: every row except state `done`, in snapshot order,
 #                      with the projected `name`.
 #   landed          -> landed: every row; `pr_url` and `repo` come from the
@@ -37,14 +44,19 @@
 # Copy overlay (--copy): a JSON object whose optional maps are keyed by the row
 # key or id they refine, so a missing entry leaves the deterministic default.
 #   captains_call  {"<key>": {title, about, decide, detail, options, recommend_value,
-#                   type, close, risk, pr_url, subject, freeform_hint, allow_freeform,
-#                   repo} | null}   (null drops the card)
-#   captains_call_extra  [<call item>, ...]   merge and credential cards, appended
+#                   type, close, risk, pr_url, links, subject, freeform_hint,
+#                   allow_freeform, repo} | null}   (null drops the card)
+#   captains_call_extra  [<call item>, ...]   merge, credential, and any other card
+#                   waiting on the captain that firstmate did not hold, appended
 #   underway       {"<id>": {repo}}
 #   landed         {"<id>": {repo, pr_url, subject}}
 #   charted        {"<id>": {title, reason, repo, dispatchable, filed}}
 # An unknown map or field is refused, so the payload shape cannot drift through
 # the overlay. An entry whose key matches no row is reported on stderr and ignored.
+# A card's `links` is an array of up to 8 `{url, label}` pointers (https only);
+# `bin/fm-bearings-board.sh` owns that rule and refuses a card whose link breaks
+# it, so a link-only item such as a Lavish page needs nothing but a card under
+# captains_call_extra.
 # `dispatchable` is ignored on a warning row, and `reconcile` is never accepted as
 # an option value (`build` injects it).
 set -eu
@@ -106,7 +118,7 @@ printf '%s\n' "$COPY_JSON" | jq -e 'type == "object"' >/dev/null 2>&1 \
 
 overlay_errors=$(printf '%s\n' "$COPY_JSON" | jq -r '
   { captains_call: ["title","about","decide","detail","options","recommend_value","type","close",
-                    "risk","pr_url","subject","freeform_hint","allow_freeform","repo"],
+                    "risk","pr_url","links","subject","freeform_hint","allow_freeform","repo"],
     underway: ["repo"],
     landed: ["repo","pr_url","subject"],
     charted: ["title","reason","repo","dispatchable","filed"] } as $allowed
@@ -125,7 +137,7 @@ overlay_errors=$(printf '%s\n' "$COPY_JSON" | jq -r '
 
 jq -n --argjson snap "$SNAP_JSON" --argjson copy "$COPY_JSON" '
   def card_fields: ["title","about","decide","detail","options","recommend_value","type","close",
-                    "risk","pr_url","subject","freeform_hint","allow_freeform","repo"];
+                    "risk","pr_url","links","subject","freeform_hint","allow_freeform","repo"];
   def underway_fields: ["repo"];
   def landed_fields: ["repo","pr_url","subject"];
   def charted_fields: ["title","reason","repo","dispatchable","filed"];
@@ -176,7 +188,25 @@ jq -n --argjson snap "$SNAP_JSON" --argjson copy "$COPY_JSON" '
                    or ($copy.captains_call[$d.key] != null))
           | $card )
     ) as $cards
-  | ($cards + ($copy.captains_call_extra // [])) as $captains_call
+  | ( [ $contrib[]
+        | select((.hold // null) == null and (.url | https_url) and (.task | type == "string"))
+        | . as $c
+        | select(($cards | any(.key == $c.task or .pr_url? == $c.url)) | not)
+        | { key: ("contribution." + (.task | gsub("[^A-Za-z0-9._-]"; "-"))),
+            type: "decision",
+            repo: (.url | repo_of_url),
+            title: ((.url | repo_of_url | nz("")) as $r
+                    | (if $r == "" then $c.task else $r + " #" + ($c.url | split("/") | last) end)),
+            about: ($c.reason | nz("waiting on the captain")),
+            pr_url: .url,
+            options: [], allow_freeform: true,
+            freeform_hint: "answer in your own words (say later to defer)" }
+        | . as $card
+        | select((($copy.captains_call // {}) | has($card.key) | not)
+                 or ($copy.captains_call[$card.key] != null)) ]
+      | reduce .[] as $d ([]; if (map(.key) | index($d.key)) then . else . + [$d] end)
+      | map(. + overlay("captains_call"; .key; card_fields)) ) as $contrib_cards
+  | ($cards + $contrib_cards + ($copy.captains_call_extra // [])) as $captains_call
 
   | ( [ $in_flight[] | select(.state != "done") | . as $r
         | { id, name: (.name | nz($r.id)), repo: (.repo // null),

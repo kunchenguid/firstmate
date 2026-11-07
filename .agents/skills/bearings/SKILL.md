@@ -102,6 +102,8 @@ Decision cards arrive as freeform answer boxes; the optional `--copy <overlay.js
 
 - A card's authored options, `recommend_value`, `decide` and `about` copy, and a `close: "release"` when the card's task is a captain-gated WORK item (the answer should free it to proceed rather than complete it); question-shaped items omit it.
 - A merge or credential card under `captains_call_extra`: a merge card's key is `merge.<task-id>`, carries `risk`, and puts the one PR it waits on in `pr_url`.
+- Captain's Call shows everything waiting on the captain, including items firstmate never held. Add each such item under `captains_call_extra` with a slug `key` of its own (it need not be a task id); `build` keeps a card whose key is not an open captain-held task.
+- Any card may carry `links`, one or more `{url, label}` pointers to the page the captain acts on, such as a Lavish page, a merge request, or a credential console. A link is https; the validator refuses every other scheme.
 - A hold whose subject has already landed is dropped by `build` when its task or PR appears among the payload's landed rows; for a published version put the artifact and numeric three-part version in the card's structured `subject`, and verify any subject without one of these identities against current reality before carding it.
 - Never author a `reconcile` option: `build` gives every decision card that standard choice and the generator refuses it.
 - The dispatch picker's key `dispatch.charted` comes from the template; a payload never authors it.

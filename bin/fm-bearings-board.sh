@@ -81,6 +81,13 @@
 # first; a row with no comparable date keeps its payload order after every dated
 # row. Anything else in that field refuses rather than sorting on garbage.
 #
+# CAPTAIN'S CALL SHOWS EVERYTHING WAITING ON THE CAPTAIN, including items
+# firstmate never held. Any card (decision, merge, credential) MAY carry `links`,
+# up to 8 `{url, label}` pointers to the page the captain acts on. A link url
+# must be https, like `pr_url`; every other scheme refuses. A card whose key is
+# not a captain-held task id is kept, because hygiene only drops a decision card
+# it can positively show is landed or no longer an open captain call.
+#
 # The board path is stable - $FM_HOME/.lavish/bearings-board.html - so a
 # re-invocation rebuilds the same file in place, which keeps the same Lavish
 # session URL and the same canonical process-event source id. Injection escapes
@@ -135,6 +142,19 @@ validate_payload() {  # <data.json>
       or (.[$name]
         | type == "string"
           and test("^https://[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?(?::[0-9]{1,5})?(?:[/?#][^[:space:]]*)?$"));
+    def link_url:
+      type == "string"
+      and test("^https://[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?(?::[0-9]{1,5})?(?:[/?#][^[:space:]]*)?$");
+    def optional_links:
+      (has("links") | not)
+      or (.links
+        | type == "array"
+          and length <= 8
+          and ([.[]
+            | type == "object"
+              and ((keys - ["url", "label"]) | length == 0)
+              and (.url | link_url)
+              and optional_string("label")] | all));
     def version: type == "string" and test("^(0|[1-9][0-9]{0,8})\\.(0|[1-9][0-9]{0,8})\\.(0|[1-9][0-9]{0,8})$");
     def optional_subject:
       (has("subject") | not)
@@ -160,6 +180,7 @@ validate_payload() {  # <data.json>
       and (optional_string("decide"))
       and (optional_string("detail"))
       and (optional_https_url("pr_url"))
+      and optional_links
       and optional_subject
       and (if has("subject") then .type == "decision" else true end)
       and (optional_string("freeform_hint"))
