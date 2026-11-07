@@ -2448,7 +2448,7 @@ busy_stream_snapshot_current() {  # <task> <observed snapshot>
 # wording; a caller that reached the bounded cadence off pause tracking alone, with
 # no declaring verb left on the log, keeps the external-wait wording it always had.
 handle_paused_stale() {  # <window> <task> <hash>
-  local win=$1 task=$2 h=$3 key statusf mtime age detail reason declaration last until now min_age rc snapshot pause_age
+  local win=$1 task=$2 h=$3 key statusf mtime age detail reason declaration last until now min_age rc snapshot pause_age silent=0
   key=$(window_key "$win")
   pause_overdue_reconcile "$task" "$STATE/$task.status"; rc=$?
   if [ "$rc" -eq 0 ]; then
@@ -2487,6 +2487,7 @@ handle_paused_stale() {  # <window> <task> <hash>
       return 0
     elif [ "$now" -lt "$until" ]; then
       detail="paused, declared time beyond recheck cadence"
+      silent=1
       reason="paused ${age}s, awaiting external - the declared time is beyond the recheck cadence; confirm the wait still holds"
     else
       # The declared time has passed: recheck now, once per declaration, then
@@ -2498,7 +2499,17 @@ handle_paused_stale() {  # <window> <task> <hash>
     fi
   else
     detail="paused, awaiting external"
+    silent=1
     reason="paused ${age}s, awaiting external - declared pause, rechecked on a long cadence not a wedge; confirm the wait still holds"
+  fi
+  if [ "$silent" = 1 ] && [ -e "$CONFIG/paused-recheck-silent" ] \
+    && [ -z "$(status_own_open_decisions "$statusf")" ] \
+    && [ "$age" -ge "$min_age" ] \
+    && [ "$(cat "$STATE/.paused-resurfaced-$key" 2>/dev/null || true)" = "$declaration" ] \
+    && [ "$(age_of "$STATE/.paused-resurfaced-$key")" -ge "$PAUSE_RESURFACE_SECS" ]; then
+    printf '%s' "$declaration" > "$STATE/.paused-resurfaced-$key"
+    triage_log "absorbed stale (${detail}, unchanged declaration rechecked without a wake, age ${age}s): $win"
+    return 0
   fi
   if [ "$detail" = "paused, wait overdue" ]; then
     resurface_absorbed "$win" "$STATE/.paused-resurfaced-$key" "$age" "stale: $win ($reason)" "$declaration" "$min_age" "$statusf" "blocked [key=paused-overdue-$task]: paused ${pause_age}s, wait overdue - decide or release" "$STATE/.paused-overdue-$task" "$snapshot"
