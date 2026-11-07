@@ -168,6 +168,7 @@ A cycle the extension never restores is loud once the beacon passes grace.
 Under every persistent-watcher harness a live identity-matched watcher with a fresh beacon is still required, so the pull guard keeps the same strict semantics there.
 Its banner names the true failing condition, either a missing live watcher process or a genuinely stale beacon with its real age.
 It keys the once-per-episode dedup on that condition rather than the beacon mtime.
+For a mutable Codex primary with no live watcher process, the verdict stays strict but the banner and repeated reminder add that an active same-turn handler should finish and acknowledge the wake, then start the next [foreground checkpoint](supervision-protocols/codex-checkpoint.md); a stale beacon, read-only session, or other harness gets no such line.
 
 ### Away and quiet mode daemon ownership
 
@@ -625,7 +626,7 @@ It proves that a live foreign owner still prevents arming while repeated non-own
 - The auto-arm model's healthy fresh-beacon-without-a-watcher case, session-and-recovery-bound long-turn rewake tolerance, independently broken tolerance signals, open-claim negative control, stale-beacon alarm, and isolation from other models.
 - The extension model's live-watcher path, ownership-qualified fresh hand-off, held-lock failures, independently broken ownership signals, stale-beacon alarm, queued-wake warning, and Pi and pi-signed harness routing.
 
-It also covers true-reason banner wording and reason-keyed episode dedup surviving a beacon mtime change.
+It also covers true-reason banner wording, the foreground-Codex handling line and its absence for stale beacons, read-only sessions, and other harnesses, and reason-keyed episode dedup surviving a beacon mtime change.
 
 `tests/fm-cursor-primary.test.sh` covers the Cursor park end to end over real processes with no harness installed:
 
