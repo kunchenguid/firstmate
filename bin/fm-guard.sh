@@ -27,9 +27,11 @@
 # later guarded commands in the same episode print a one-line reminder instead.
 # Episode state lives only under state/.guard-watcher-stale-banner (volatile,
 # bounded). Independent alarms (queued wakes, worktree tangle) are never
-# suppressed by that dedup. Normal wake handling (watcher briefly down between a
-# wake and the next supervision resume) stays inside the grace window and stays
-# silent. The queued-wakes warning counts only the rows the calling actor can
+# suppressed by that dedup. Under the auto-arm and extension models, normal wake
+# handling (watcher briefly down between a wake and the next supervision resume)
+# stays silent; a foreground Codex checkpoint home still alarms with no live
+# watcher, but the banner says an active same-turn handler should finish,
+# acknowledge, and start the next checkpoint. The queued-wakes warning counts only the rows the calling actor can
 # itself present or retire (fm_wake_actor_pending_count), so it is never an
 # instruction to run a drain with nothing to present. A row reserved by a live
 # supervision-branch grant is never a drain instruction for main; instead of
@@ -214,6 +216,17 @@ if [ "$GUARD_ACTOR" = branch ]; then
 elif [ "$watcher_healthy" = false ]; then
   episode_key=$(fm_guard_stale_episode_key "$watcher_down_reason")
   episode_key=${episode_key%$'\n'}
+  # Foreground Codex checkpoints leave no watcher between an actionable exit and
+  # the next checkpoint, so a missing watcher there is either an active handler
+  # mid-protocol or an abandoned turn. The verdict stays strict; only the wording
+  # tells the two apart for the reader.
+  codex_foreground=0
+  if [ "$watcher_down_reason" = no-watcher ] && [ "$READ_ONLY" -eq 0 ] \
+    && [ "$(fm_supervision_model)" = persistent ] \
+    && [ "$("$SCRIPT_DIR/fm-harness.sh" 2>/dev/null || printf unknown)" = codex ]; then
+    codex_foreground=1
+  fi
+  codex_handling_line='If this turn is still handling a wake a checkpoint returned, finish handling and acknowledging it, then start the next checkpoint in this same turn.'
   print_full_banner=0
   if [ "$READ_ONLY" -eq 1 ]; then
     fm_guard_stale_banner_seen "$STATE" "$episode_key" || print_full_banner=1
@@ -252,6 +265,11 @@ elif [ "$watcher_healthy" = false ]; then
       else
         printf '●  X-mode relay polling needs supervision, but %s.\n' "$watcher_cause"
       fi
+      if [ "$codex_foreground" -eq 1 ]; then
+        printf '●  The foreground checkpoint watcher is not running; that alone does not show this turn has ended.\n'
+        printf '●  %s\n' "$codex_handling_line"
+        printf '●  If the turn already ended with a final response, supervision has lapsed and must be repaired.\n'
+      fi
       if [ "$READ_ONLY" -eq 1 ]; then
         printf '●  This read-only session should report the lapse, not repair it.\n'
       else
@@ -264,6 +282,7 @@ elif [ "$watcher_healthy" = false ]; then
   else
     printf 'WARNING: watcher still down (same stale episode; last beat: %s, grace %ss) - full banner already printed this episode.\n' \
       "$beacon_desc" "$GRACE" >&2
+    [ "$codex_foreground" -eq 0 ] || printf '%s\n' "$codex_handling_line" >&2
   fi
 else
   # Healthy again while work is still in flight: end the episode so a later
