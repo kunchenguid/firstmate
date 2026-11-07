@@ -10,8 +10,9 @@
 // t3_pending_request tools, and a compact orchestrator_capabilities catalog
 // whose options list their `values` and whose short model list counts the
 // rest in omittedModels, found with `search`. The legacy world key serves
-// T3 0.1.0 instead: the single-purpose tools and the full typed catalog. It
-// keeps the protocol facts a simpler fake would hide:
+// T3 0.1.0 instead: both configuration tools, separate pending-request tools,
+// and the full typed catalog. Its configure writer requires modelSelection.
+// It keeps the protocol facts a simpler fake would hide:
 //   - t3_thread_list pages by cursor (default 50, at most 100) and reports
 //     each thread's relationshipToParent (fork or subagent);
 //   - t3_thread_read caps limit at 100;

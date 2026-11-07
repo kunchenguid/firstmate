@@ -174,7 +174,7 @@ export const REQUIRED_TOOLS = [
   "orchestrator_capabilities",
 ];
 export const MERGED_TOOLS = {
-  // Reads the thread's configuration when called without modelSelection.
+  // The merged configure tool supports reads without modelSelection.
   t3_thread_configure: ["t3_thread_configuration"],
   // Takes action list, read, or respond.
   t3_pending_request: ["t3_pending_request_list", "t3_pending_request_read", "t3_pending_request_respond"],
@@ -469,7 +469,7 @@ export class McpSession {
     return data;
   }
 
-  // The thread's bound configuration, read without changing it.
+  // Prefer the dedicated reader: the legacy configure writer requires modelSelection.
   async threadConfiguration(threadId) {
     if (this.tools.has("t3_thread_configuration")) return this.call("t3_thread_configuration", { threadId });
     return this.call("t3_thread_configure", { threadId });

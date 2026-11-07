@@ -2753,13 +2753,8 @@ The backend was verified live on 2026-11-07 against `t3 v0.1.8-nightly.20261107.
 It used a scratch Firstmate home with `config/backend` `t3code`, a scratch project with a bare origin, and a private Treehouse pool root.
 T3 0.1.3 (commit `ed44f251d`, PR #25423) merged `t3_thread_configuration` into `t3_thread_configure` and the three `t3_pending_request_*` tools into `t3_pending_request`, which takes `action` `list`, `read`, or `respond`.
 T3 0.1.3 also lists only option `values` and a short model list in `orchestrator_capabilities` (commit `680152e27`, PR #22889); for `claudeAgent` and `codex` the short list holds every current model, and `omittedModels` counts legacy and hidden ones.
-Before the merged-tool support, sign-in with the four scopes T3 0.1.0 needs was refused by the gate after a successful token exchange:
-
-```text
-{"ok":false,"error":{"code":"capability_gate","message":"T3 0.1.8-nightly.20261107.4301 at http://127.0.0.1:<port> lacks t3_thread_configuration, t3_pending_request_list, t3_pending_request_read, t3_pending_request_respond; ...","serverVersion":"0.1.8-nightly.20261107.4301","missing":["t3_thread_configuration","t3_pending_request_list","t3_pending_request_read","t3_pending_request_respond"]}}
-```
-
-The same `tools/list` without a credential answers HTTP 401 `invalid_mcp_credential`, and with the signed-in credential it lists 68 tools, including `t3_thread_configure` and `t3_pending_request` and none of the four replaced names.
+Without a credential, `tools/list` returns HTTP 401 `invalid_mcp_credential`.
+With the signed-in credential, it lists 68 tools, including `t3_thread_configure` and `t3_pending_request`, with none of the four replaced names.
 
 ```sh
 bin/fm-t3-mcp.mjs login --url http://127.0.0.1:<port> --access full-access --base-dir <t3-base-dir>
@@ -2839,6 +2834,9 @@ tests/fm-daemon.test.sh
 
 The fake models the T3 protocol facts that hide defects when simplified: cursor paging, the read cap of 100, a wait on the exact run or else the latest by ordinal, an interrupt and an archive whose run ends asynchronously, a send committed before a reply that can be lost, and a pending-request count that includes approvals the question tools cannot see.
 `tests/fm-t3-mcp.test.sh` drives the helper against `tests/t3-fake-server.mjs`: the PKCE sign-in, origin defaults, every gate and credential refusal, real-path project matching, catalog-resolved selection, launch binding and configuration read-back with their uncertain and refused outcomes, send idempotency and the unconfirmed verdict for a lost reply, a JSON-RPC server error, T3's catch-all `orchestration_error`, or a tool error without a code (each of which also leaves a launch uncertain), capture and its 500-line bound, exact-run interrupt claims, pending questions and the per-approval signature, the bounded event wait and its re-armed slices, session close, the proven archive, and paged supervisor lookup.
+The helper suite covers merged tools, legacy tools, incomplete tool sets, and compact and typed catalogs.
+Legacy launch coverage includes both configuration tools, with `modelSelection` required by the legacy writer.
+Omitted-model coverage requires a search by id and preserves the project's other default options.
 `tests/fm-backend-t3code.test.sh` drives the adapter, spawn, control, watcher, away daemon, and teardown against the same fake: model selection, the status table, kill ordering, per-directory environment and the Codex trust warning, the Claude pull-request-tool version boundary, worker and secondmate spawn, the secondmate credential link, launch-setting refusals, abort, including a secondmate home's environment removal, slot freshening before launch, isolation-rejected, dirty-slot, and uncertain-launch lease retention, tracked Codex configuration and tracked `CLAUDE.local.md` preservation, the exit and relaunch refusals, lost-reply resends through `fm-send.sh`, the push escalation of pending questions, including under a fractional poll interval, and `bin/fm-t3-answer.sh`, failed-run secondmate resume, the secondmate home shutdown barrier for pooled, standalone, and nested homes and its `lsof` refusal before any archive, the wedge and dead-agent paths, and stale-alert retention and re-arming under unknown busy state.
 `tests/fm-backend-t3code.test.sh` also covers the refusal to replace a T3 secondmate whose thread cannot be proven closed, and `tests/fm-secondmate-liveness.test.sh` pins the unchanged best-effort close on tmux.
 `tests/fm-daemon.test.sh` covers discovery precedence and native busy state.
