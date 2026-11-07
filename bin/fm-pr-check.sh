@@ -410,28 +410,51 @@ fm_pr_metadata_identity_parse "$META_TMP" || exit 1
   && [ "$FM_PR_META_NUMBER" = "$NUMBER" ] || exit 1
 fm_pr_regular_destination_on_device_or_absent "$META" "$STATE_DEVICE" || exit 1
 
-# Persist both baseline identities before replacing the task metadata or making
-# the replacement poll runnable.
+# Keep the current registration recoverable until all replacement files commit.
 if [ "${FM_PR_CHECK_MERGE:-}" != 1 ]; then
-  if [ -n "$BASELINE_DEGRADED" ] && ! fm_pr_poll_degraded_mark_notified "$STATE" "$ID" \
-      "$PROVIDER" "$HOST" "$PROJECT_PATH" "$NUMBER" "$BASELINE_DEGRADED"; then
-    echo "error: could not persist PR poll degraded baseline" >&2
+  BASELINE_BACKUP=$(mktemp -d "$STATE/.fm-pr-baseline.XXXXXX") || exit 1
+  for artifact in "$META" "$STATE/$ID.pr-poll-degraded" "$STATE/$ID.pr-poll-train"; do
+    [ -e "$artifact" ] || [ -L "$artifact" ] || continue
+    cp -p -- "$artifact" "$BASELINE_BACKUP/$(basename "$artifact")" || exit 1
+  done
+  restore_baselines() {
+    local artifact backup
+    for artifact in "$META" "$STATE/$ID.pr-poll-degraded" "$STATE/$ID.pr-poll-train"; do
+      backup="$BASELINE_BACKUP/$(basename "$artifact")"
+      if [ -e "$backup" ]; then
+        cp -p -- "$backup" "$artifact.restore" && mv -f -- "$artifact.restore" "$artifact" || return 1
+      else
+        rm -f -- "$artifact" || return 1
+      fi
+    done
+  }
+  baseline_failure() {
+    restore_baselines || echo "error: could not restore previous PR poll registration" >&2
+    rm -rf -- "$BASELINE_BACKUP"
     exit 1
-  elif [ -z "$BASELINE_DEGRADED" ]; then
-    rm -f -- "$STATE/$ID.pr-poll-degraded"
+  }
+  if [ -n "$BASELINE_DEGRADED" ]; then
+    fm_pr_poll_degraded_mark_notified "$STATE" "$ID" \
+      "$PROVIDER" "$HOST" "$PROJECT_PATH" "$NUMBER" "$BASELINE_DEGRADED" || {
+        echo "error: could not persist PR poll degraded baseline" >&2
+        baseline_failure
+      }
+  else
+    rm -f -- "$STATE/$ID.pr-poll-degraded" || baseline_failure
   fi
   if [ "${BASELINE_TRAIN:-0}" = 1 ]; then
     fm_pr_poll_degraded_mark_notified "$STATE" "$ID" \
       "$PROVIDER" "$HOST" "$PROJECT_PATH" "$NUMBER" train=on || {
         echo "error: could not persist PR poll train baseline" >&2
-        exit 1
+        baseline_failure
       }
   else
-    rm -f -- "$STATE/$ID.pr-poll-train"
+    rm -f -- "$STATE/$ID.pr-poll-train" || baseline_failure
   fi
 fi
 
-mv -f -- "$META_TMP" "$META" || exit 1
+mv -f -- "$META_TMP" "$META" || { [ -z "${BASELINE_BACKUP:-}" ] || baseline_failure; exit 1; }
+[ -z "${BASELINE_BACKUP:-}" ] || rm -rf -- "$BASELINE_BACKUP"
 META_TMP=
 fm_pr_private_file_valid "$META" 600 "$STATE_DEVICE" || exit 1
 fm_pr_metadata_identity_parse "$META" || exit 1
