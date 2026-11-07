@@ -379,6 +379,10 @@ if [ "${FM_PR_CHECK_MERGE:-}" != 1 ]; then
   done <<EOF
 $BASELINE
 EOF
+  if [ "$BASELINE_TRAIN_UNKNOWN" = 1 ]; then
+    echo "error: merge-train baseline read was inconclusive" >&2
+    exit 1
+  fi
 fi
 
 META_LOCK=$(fm_meta_lock_path "$META") || exit 1
@@ -455,7 +459,7 @@ if [ "${FM_PR_CHECK_MERGE:-}" != 1 ]; then
   if [ "${BASELINE_TRAIN:-0}" = 1 ]; then
     fm_pr_poll_degraded_mark_notified "$STATE" "$ID" \
       "$PROVIDER" "$HOST" "$PROJECT_PATH" "$NUMBER" train=on || baseline_failure
-  elif [ "${BASELINE_TRAIN_UNKNOWN:-0}" != 1 ]; then
+  else
     rm -f -- "$STATE/$ID.pr-poll-train" || baseline_failure
   fi
 fi

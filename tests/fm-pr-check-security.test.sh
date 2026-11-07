@@ -1702,7 +1702,8 @@ test_arming_baselines_an_already_degraded_change() {
   ln -sf "$REAL_JQ" "$dir/fakebin/jq"
   url=https://gitlab.example/group/subgroup/project/-/merge_requests/7
   write_task_meta "$dir" task-a
-  FM_TEST_GLAB_STATE=opened FM_TEST_GLAB_PIPELINE=failed run_check_entry "$dir" task-a "$url" >/dev/null 2>&1 \
+  FM_TEST_GLAB_STATE=opened FM_TEST_GLAB_PIPELINE=failed FM_TEST_GLAB_TRAIN=car \
+    run_check_entry "$dir" task-a "$url" >/dev/null 2>&1 \
     || fail "arming a GitLab watch with a failed head pipeline failed"
   [ -f "$state/task-a.pr-poll-degraded" ] || fail "arming did not baseline the already failing pipeline"
   rm -f "$state/.last-check"
@@ -1807,26 +1808,25 @@ test_arming_baselines_an_already_degraded_change() {
     || fail "arming failed although the unreadable baseline should be unknown"
   [ ! -e "$state/.control-task-a.lock" ] || fail "an unreadable baseline read left the control lock held"
   [ -e "$state/task-a.check.sh" ] || fail "an unreadable baseline read did not publish a poll"
-  # A readable merge request whose merge-train car read fails for any reason
-  # other than a 404 arms as not on a train, so the merged wake is kept.
   for fail_env in FM_TEST_GLAB_API_FAIL FM_TEST_GLAB_TRAIN; do
     rm -f "$state/task-a.check.sh" "$state/task-a.pr-poll-degraded"
     if [ "$fail_env" = FM_TEST_GLAB_TRAIN ]; then value=fail; else value=1; fi
-    (export "$fail_env=$value" FM_TEST_GLAB_STATE=opened FM_TEST_GLAB_PIPELINE=success
+    if (export "$fail_env=$value" FM_TEST_GLAB_STATE=opened FM_TEST_GLAB_PIPELINE=success
       [ "$fail_env" = FM_TEST_GLAB_TRAIN ] || export FM_TEST_GLAB_TRAIN=car
-      run_check_entry "$dir" task-a "$url" >/dev/null 2>"$dir/unreadable.err") \
-      || fail "arming failed on an unreadable merge-train car read ($fail_env): $(cat "$dir/unreadable.err")"
-    [ -f "$state/task-a.check.sh" ] || fail "an unreadable merge-train car read published no poll ($fail_env)"
-    [ ! -e "$state/task-a.pr-poll-degraded" ] || fail "an unreadable merge-train car read recorded a baseline ($fail_env)"
+      run_check_entry "$dir" task-a "$url" >/dev/null 2>"$dir/unreadable.err"); then
+      fail "arming accepted an unknown merge-train baseline ($fail_env)"
+    fi
+    [ ! -f "$state/task-a.check.sh" ] || fail "an unknown train baseline published a poll ($fail_env)"
   done
   rm -f "$state/task-a.check.sh"
   FM_TEST_GLAB_STATE=opened FM_TEST_GLAB_PIPELINE=success FM_TEST_GLAB_TRAIN=car \
     run_check_entry "$dir" task-a "$url" >/dev/null 2>&1 \
     || fail "arming an on-train merge request failed"
   [ -f "$state/task-a.pr-poll-train" ] || fail "arming did not persist the train baseline"
-  FM_TEST_GLAB_STATE=opened FM_TEST_GLAB_PIPELINE=success FM_TEST_GLAB_TRAIN=fail \
-    run_check_entry "$dir" task-a "$url" >/dev/null 2>&1 \
-    || fail "re-arming failed on an unreadable merge-train baseline"
+  if FM_TEST_GLAB_STATE=opened FM_TEST_GLAB_PIPELINE=success FM_TEST_GLAB_TRAIN=fail \
+    run_check_entry "$dir" task-a "$url" >/dev/null 2>&1; then
+    fail "re-arming accepted an unreadable merge-train baseline"
+  fi
   grep -q '^train=on$' "$state/task-a.pr-poll-train" \
     || fail "an unreadable train re-arm cleared the previous train baseline"
   rm -f "$state/task-a.check.sh"
