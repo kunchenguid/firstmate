@@ -324,8 +324,11 @@ case "$provider" in
         car_err=$(cat "$errfile" 2>/dev/null)
         rm -f "$errfile"
         if [ "$car_rc" -eq 0 ]; then
-          printf '%s' "$car" | jq -e 'type == "object" and (.id | type) == "number"' >/dev/null 2>&1 \
-            && printf '%s\n' ontrain || { [ "$unknown" -eq 3 ] && printf '%s\n' train=unknown; }
+          if printf '%s' "$car" | jq -e 'type == "object" and (.id | type) == "number"' >/dev/null 2>&1; then
+            printf '%s\n' ontrain
+          elif [ "$unknown" -eq 3 ]; then
+            printf '%s\n' train=unknown
+          fi
         elif [ "$car_rc" -ne 0 ]; then
           case $car_err in
             *'(HTTP 404)'*) ;;

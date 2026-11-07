@@ -428,10 +428,12 @@ if [ "${FM_PR_CHECK_MERGE:-}" != 1 ]; then
       backup="$BASELINE_BACKUP/$(basename "$artifact")"
       if [ -e "$backup" ]; then
         restore_tmp=$(mktemp "$STATE/.fm-pr-restore.XXXXXX") || return 1
-        cp -p -- "$backup" "$restore_tmp" && mv -f -- "$restore_tmp" "$artifact" || {
+        if cp -p -- "$backup" "$restore_tmp" && mv -f -- "$restore_tmp" "$artifact"; then
+          :
+        else
           rm -f -- "$restore_tmp"
           return 1
-        }
+        fi
       else
         rm -f -- "$artifact" || return 1
       fi
