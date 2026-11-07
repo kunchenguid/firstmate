@@ -6,10 +6,11 @@
 # a merge. The provider-tagged identity is data in the sidecar and is never
 # interpolated into this source: these bytes are identical for every task.
 # Each provider is read through its own standard CLI, gh for GitHub, glab for
-# GitLab, gerrit-axi for Gerrit, and tea for Forgejo, so an upstream checkout
-# needs no extra tooling to follow GitHub or GitLab. The Gerrit and Forgejo
-# branches additionally need jq, which bin/fm-pr-check.sh refuses to arm those
-# watches without.
+# GitLab, gerrit-axi for Gerrit, tea for Forgejo, and az with its azure-devops
+# extension for Azure DevOps, so an upstream checkout needs no extra tooling to
+# follow GitHub or GitLab. The Gerrit, Forgejo, and Azure DevOps branches
+# additionally need jq, which bin/fm-pr-check.sh refuses to arm those watches
+# without.
 set -u
 LC_ALL=C
 export LC_ALL
@@ -236,6 +237,93 @@ case "$provider" in
         if type == "object" and (.merged | type) == "boolean"
         then .merged | tostring
         else error("invalid pull request record")
+        end' 2>/dev/null) || exit 0
+    [ "$merged" = true ] && printf '%s\n' merged
+    ;;
+  azure-devops)
+    # The same rules bin/fm-pr-lib.sh's fm_pr_azure_devops_parts applies when a
+    # URL is armed, restated because this program sources nothing: the
+    # organization is the first path segment on dev.azure.com and the host
+    # label on <org>.visualstudio.com, where DefaultCollection may lead the
+    # path, and the project and repository are canonical percent-encoded
+    # segments around a literal _git.
+    case "$host" in
+      dev.azure.com)
+        org=${path%%/*}
+        rest=${path#*/}
+        [ "$org" != "$path" ] || exit 0
+        org_url="https://dev.azure.com/$org"
+        ;;
+      *.visualstudio.com)
+        org=${host%.visualstudio.com}
+        case "$org" in
+          *[!a-z0-9-]*) exit 0 ;;
+        esac
+        rest=${path#DefaultCollection/}
+        org_url="https://$host"
+        ;;
+      *) exit 0 ;;
+    esac
+    [ "${#org}" -ge 1 ] && [ "${#org}" -le 50 ] || exit 0
+    case "$org" in
+      -*|*-|*[!A-Za-z0-9-]*) exit 0 ;;
+    esac
+    project=${rest%%/*}
+    repo=${rest#*/_git/}
+    [ "$rest" = "$project/_git/$repo" ] || exit 0
+    names=
+    for segment in "$project" "$repo"; do
+      [ "${#segment}" -ge 1 ] && [ "${#segment}" -le 1024 ] || exit 0
+      case "$segment" in
+        *[!A-Za-z0-9._~\&@%-]*) exit 0 ;;
+      esac
+      scan=$segment
+      while :; do
+        case "$scan" in
+          *%*) scan=${scan#*%} ;;
+          *) break ;;
+        esac
+        case "${scan:0:2}" in
+          [01]?|7F|2F|5C|2D|2E|3[0-9]|4[1-9A-F]|5[0-9A]|5F|6[1-9A-F]|7[0-9A]|7E) exit 0 ;;
+          [0-9A-F][0-9A-F]) ;;
+          *) exit 0 ;;
+        esac
+      done
+      printf -v decoded '%b' "${segment//%/\\x}"
+      case "$decoded" in
+        ''|.|..) exit 0 ;;
+      esac
+      names="$names$decoded
+"
+    done
+    expected_project=${names%%
+*}
+    expected_repo=${names#*
+}
+    expected_repo=${expected_repo%
+}
+    [ "$url" = "https://$host/$path/pullrequest/$number" ] || exit 0
+    command -v az >/dev/null 2>&1 || exit 0
+    command -v jq >/dev/null 2>&1 || exit 0
+    # A pull request id is unique per organization rather than per repository,
+    # so only a record naming this URL's project and repository counts, and
+    # only a completed pull request that names the commit its completion made
+    # wakes this poll; an active or abandoned one, a changed format, and an
+    # unreadable answer all stay silent. --detect false keeps az from reading
+    # a git remote, so only the validated organization is reached.
+    merged=$(az repos pr show --id "$number" --organization "$org_url" \
+      --detect false --only-show-errors --output json 2>/dev/null | jq -r \
+      --argjson id "$number" --arg project "$expected_project" --arg repo "$expected_repo" '
+        if type == "object" and .pullRequestId == $id
+          and (.repository.name | type) == "string"
+          and (.repository.project.name | type) == "string"
+          and (.repository.name | ascii_downcase) == ($repo | ascii_downcase)
+          and (.repository.project.name | ascii_downcase) == ($project | ascii_downcase)
+        then
+          (.status == "completed"
+            and ((.lastMergeCommit.commitId // "") | type == "string" and test("^([0-9a-f]{40}|[0-9a-f]{64})$")))
+          | tostring
+        else error("not this pull request")
         end' 2>/dev/null) || exit 0
     [ "$merged" = true ] && printf '%s\n' merged
     ;;

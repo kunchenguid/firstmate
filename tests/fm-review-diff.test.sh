@@ -44,6 +44,8 @@
 #   (s) a branch merging both diverged default branches -> the unrelated merge
 #       bases are reported rather than picked silently
 #   (t) meta records base_branch= -> base stays origin/<base_branch>
+#   (u) pr= Azure DevOps /pullrequest/<n> URL -> local branch + warning, even
+#       when the remote serves a refs/pull/<n>/merge preview
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -571,6 +573,33 @@ test_opted_in_base_branch_stays_on_origin() {
   pass "fm-review-diff keeps an opted-in named base branch on origin's copy"
 }
 
+# Azure DevOps serves no refs/pull/<n>/head, and the second parent of its
+# refs/pull/<n>/merge preview lags a push until the merge is recomputed, so a
+# fix round pushed after the preview must not lose to it: an Azure DevOps pr=
+# URL reviews the local branch under the warning a GitLab or Gerrit task takes.
+test_azure_devops_pr_url_reviews_local_branch_with_warning() {
+  local case_dir out main_sha lagging_sha merge_sha
+  case_dir=$(make_case azure-devops-local-branch)
+  main_sha=$(git -C "$case_dir/wt" rev-parse main)
+  printf 'lagging-merge-source\n' > "$case_dir/wt/feature.txt"
+  git -C "$case_dir/wt" commit -qam "source commit the merge preview was computed from"
+  lagging_sha=$(git -C "$case_dir/wt" rev-parse HEAD)
+  merge_sha=$(git -C "$case_dir/wt" commit-tree "$lagging_sha^{tree}" -p "$main_sha" -p "$lagging_sha" -m "Merge pull request 9")
+  git -C "$case_dir/wt" push -q origin "$merge_sha:refs/pull/9/merge"
+  printf 'fix-round-push\n' > "$case_dir/wt/feature.txt"
+  git -C "$case_dir/wt" commit -qam "fix round pushed after the preview was computed"
+  write_task_meta "$case_dir" \
+    "pr=https://dev.azure.com/example/Team%20Project/_git/repo/pullrequest/9"
+
+  out=$(run_review_diff "$case_dir" task-x1 2> "$case_dir/stderr")
+
+  assert_contains "$(cat "$case_dir/stderr")" 'warning: PR head unavailable; diff may lag the open PR (using local branch fm/task-x1)' \
+    "azure-devops-local-branch: must warn that the local branch stands in for the pull request"
+  assert_contains "$out" '+fix-round-push' "azure-devops-local-branch: diff should show the local branch's current content"
+  assert_not_contains "$out" 'lagging-merge-source' "azure-devops-local-branch: diff must not use the lagging merge preview"
+  pass "fm-review-diff reviews an Azure DevOps pull request's local branch with a warning, never its merge preview"
+}
+
 test_pr_meta_uses_pr_head_not_stale_local
 test_pr_meta_fetches_pull_head_without_recorded_sha
 test_stale_recorded_pr_head_loses_to_fetched_pull_head
@@ -591,3 +620,4 @@ test_opted_in_diverged_defaults_anchor_where_the_task_was_planted
 test_opted_in_landed_branch_reports_an_empty_review
 test_opted_in_unrelated_merge_bases_are_reported
 test_opted_in_base_branch_stays_on_origin
+test_azure_devops_pr_url_reviews_local_branch_with_warning
