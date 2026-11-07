@@ -52,7 +52,7 @@ fm_standing_dispatch_enabled() {
 }
 
 # Read before anything is emitted, so an unusable file never yields a partial prompt.
-INCLUDE_FILE="${FM_CONFIG_OVERRIDE:-${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_TRACKED_ROOT}}/config}/branch-prompt-include.md"
+INCLUDE_FILE="$CONFIG/branch-prompt-include.md"
 INCLUDE_BODY=
 if [ -e "$INCLUDE_FILE" ] || [ -L "$INCLUDE_FILE" ]; then
   { [ -f "$INCLUDE_FILE" ] && INCLUDE_BODY=$(cat "$INCLUDE_FILE" 2>/dev/null); } || {
