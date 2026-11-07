@@ -159,6 +159,57 @@ spawn_secondmate_claude() {
     fm_test_run_spawn "$primary" "$home" "$fakebin" "$id" "$home" claude --secondmate
 }
 
+# Case aliases must be real filesystem aliases, not lowercased strings: on a
+# case-sensitive volume the two spellings can name genuinely different repos.
+test_case_alias_worktree_identity() {
+  local rec alias out store primary_key
+  rec=$(make_case case-identity)
+  read_case "$rec"
+  alias="$CASE_DIR/PROJECT"
+  if [ ! "$alias" -ef "$PROJ" ]; then
+    fm_git_init_commit "$alias"
+    out=$(run_trust "$CONFIG" "$WT" "$alias")
+    expect_code 1 $? "distinct case-sensitive project directories must be refused: $out"
+    assert_contains "$out" "not a worktree of project" "distinct case-sensitive project lost its refusal"
+    pass "fm-claude-trust.sh: distinct case-sensitive folders refused (case-alias acceptance needs a case-insensitive volume)"
+    return
+  fi
+  # Git's linked-worktree pointer uses project, while the caller uses PROJECT.
+  # pwd -P preserves the alias on macOS, reproducing the original disagreement.
+  store="$CONFIG/.claude.json"
+  primary_key=$(cd -P "$PROJ" && pwd -P)
+  printf '{"projects":{"%s":{"hasClaudeMdExternalIncludesApproved":true,"hasClaudeMdExternalIncludesWarningShown":true}}}\n' "$primary_key" > "$store"
+  out=$(run_trust "$CONFIG" "$WT" "$alias")
+  expect_code 0 $? "case aliases of the same project must be accepted: $out"
+  assert_all_flags "$store" "$primary_key" "trust and import consent missed the git-pointer project key"
+  assert_all_flags "$store" "$WT" "worktree trust and import consent were not registered"
+  # A linked project argument must reach the same primary key as well.
+  out=$(run_trust "$CONFIG" "$CASE_DIR/WT" "$CASE_DIR/WT")
+  expect_code 0 $? "case aliases of linked project/worktree roots must be accepted: $out"
+  assert_all_flags "$store" "$primary_key" "linked project alias missed the primary key"
+  assert_all_flags "$store" "$WT" "case-alias pane missed the filesystem-spelled worktree key"
+  assert_not_trusted "$store" "$alias" "caller-spelled project alias was written instead of the git-pointer key"
+  mkdir -p "$WT/child"
+  out=$(run_trust "$CONFIG" "$CASE_DIR/WT/child" "$alias")
+  expect_code 1 $? "a case-aliased worktree subdirectory must still be refused: $out"
+  assert_contains "$out" "not a worktree root" "subdirectory alias lost its refusal"
+  out=$(run_trust "$CONFIG" "$WT" "$alias" "$CASE_DIR/WT")
+  expect_code 1 $? "a home-directory alias must still be refused: $out"
+  assert_contains "$out" "home directory" "home alias lost its refusal"
+  out=$(run_trust "$CASE_DIR/WT" "$WT" "$alias")
+  expect_code 1 $? "a config-directory alias must still be refused: $out"
+  assert_contains "$out" "config directory" "config alias lost its refusal"
+  out=$(run_trust "$CONFIG" "$alias" "$PROJ")
+  expect_code 1 $? "a primary checkout alias must still be refused: $out"
+  assert_contains "$out" "primary checkout" "primary alias refusal lost its reason"
+  printf '{"projects":{"%s":{"hasClaudeMdExternalIncludesApproved":false,"hasClaudeMdExternalIncludesWarningShown":true}}}\n' "$primary_key" > "$store"
+  out=$(run_trust "$CONFIG" "$WT" "$alias")
+  expect_code 1 $? "an explicit decline at the git-pointer key must still refuse: $out"
+  assert_contains "$out" "already declined" "case alias bypassed the explicit import decline"
+  assert_not_trusted "$store" "$WT" "declined alias registration wrote worktree trust"
+  pass "fm-claude-trust.sh: case aliases preserve identity, project keys, and explicit declines"
+}
+
 test_fresh_worktree_is_trusted() {
   local rec out
   rec=$(make_case fresh)
@@ -481,6 +532,31 @@ test_project_argument_that_is_itself_a_worktree_resolves_to_the_primary_checkout
   assert_not_trusted "$CONFIG/.claude.json" "$proj_wt" \
     "the linked worktree argument itself was recorded as the project root"
   pass "fm-claude-trust.sh: a project argument that is itself a linked worktree resolves to the primary checkout"
+}
+
+# A primary checkout whose git dir lives elsewhere (git clone/init
+# --separate-git-dir) has no checkout at its common dir's parent, so the
+# project key falls back to the verified primary <project> itself.
+test_separate_git_dir_primary_project_is_trusted() {
+  local case_dir proj wt config out
+  case_dir="$TMP_ROOT/separate-git-dir"
+  proj="$case_dir/project"
+  wt="$case_dir/wt"
+  config="$case_dir/claude-config"
+  mkdir -p "$proj" "$config" "$case_dir/store"
+  git -C "$proj" init -q -b main --separate-git-dir "$case_dir/store/project.git"
+  printf '# project\n' > "$proj/README.md"
+  git -C "$proj" add README.md
+  git -C "$proj" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm initial
+  git -C "$proj" worktree add --quiet -b wt-separate "$wt"
+  out=$(run_trust "$config" "$wt" "$proj")
+  expect_code 0 $? "a worktree of a separate-git-dir primary checkout must be trusted: $out"
+  assert_contains "$out" "trusted (project root): $proj" "the outcome did not name the primary checkout"
+  assert_trust_only_no_import_consent "$config/.claude.json" "$proj" \
+    "the separate-git-dir primary checkout either lost trust or gained unearned import consent"
+  assert_trusted "$config/.claude.json" "$wt" "the worktree entry was not registered"
+  assert_not_trusted "$config/.claude.json" "$case_dir/store" "the git dir's parent was recorded as the project root"
+  pass "fm-claude-trust.sh: a separate-git-dir primary checkout is its own project root"
 }
 
 test_unrelated_store_content_is_preserved() {
@@ -838,6 +914,7 @@ test_secondmate_spawn_fails_closed_when_home_trust_cannot_be_recorded() {
   pass "fm-spawn.sh: a claude secondmate spawn refuses when home trust cannot be recorded"
 }
 
+test_case_alias_worktree_identity
 test_fresh_worktree_is_trusted
 test_fresh_worktree_also_trusts_the_project_root_without_import_consent
 test_registration_carries_forward_existing_import_consent
@@ -856,6 +933,7 @@ test_missing_directory_is_refused
 test_foreign_project_worktree_is_refused
 test_worktree_subdirectory_is_refused
 test_project_argument_that_is_itself_a_worktree_resolves_to_the_primary_checkout
+test_separate_git_dir_primary_project_is_trusted
 test_unrelated_store_content_is_preserved
 test_symlinked_store_to_a_foreign_owned_target_is_refused
 test_symlinked_store_to_an_owned_target_is_accepted
