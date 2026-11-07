@@ -70,6 +70,9 @@ ln -s "$STANDIN_BIN" "$LAB/bin/comp"
 # merely contains it.
 ln -s "$STANDIN_BIN" "$LAB/bin/command-code"
 ln -s "$STANDIN_BIN" "$LAB/bin/command-code-helper"
+# Hermes's own launcher is argv[0] `hermes`; the decoy merely contains it.
+ln -s "$STANDIN_BIN" "$LAB/bin/hermes"
+ln -s "$STANDIN_BIN" "$LAB/bin/hermes-helper"
 # muse's installed binary is muse-bin-<version>: the launcher execs it, so the
 # version is the LIVE process name and it changes on every auto-update. Unlike
 # Claude Code's version-named binary there is no `muse` path component to fall
@@ -253,6 +256,64 @@ wait_for_state "$SESSION:unknown" ambiguous \
   || fail "a foreground process no name source attributes must stay ambiguous"
 pass "tmux liveness: a process neither name source attributes stays ambiguous rather than inventing an agent"
 
+# --- Hermes's Python bootstrap and same-group Node TUI child -----------------
+# Neither process name identifies the harness on the reported git install.
+# The first script argument, not a prompt or the Python -c payload, owns it.
+PYTHON_BIN=$(command -v python3 2>/dev/null || true)
+NODE_BIN=$(command -v node 2>/dev/null || true)
+if [ -n "$PYTHON_BIN" ] && [ -n "$NODE_BIN" ]; then
+  mkdir -p "$LAB/.hermes/hermes-agent/ui-tui/dist" "$LAB/unrelated"
+  printf 'setInterval(() => {}, 1000);\n' > "$LAB/.hermes/hermes-agent/ui-tui/dist/entry.js"
+  cp "$LAB/.hermes/hermes-agent/ui-tui/dist/entry.js" "$LAB/unrelated/entry.js"
+  bootstrap='import os, subprocess, sys; child = subprocess.Popen([sys.argv[1], "--expose-gc", sys.argv[2]]); open(sys.argv[3], "w").write(str(child.pid)); child.wait()'
+  for shape in native unrelated; do
+    script="$LAB/.hermes/hermes-agent/ui-tui/dist/entry.js"
+    [ "$shape" = native ] || script="$LAB/unrelated/entry.js"
+    target="$SESSION:hermes-$shape"
+    new_window "hermes-$shape" env -u NODE_OPTIONS -u NODE_PATH "$PYTHON_BIN" -I -c "$bootstrap" "$NODE_BIN" "$script" "$LAB/$shape.pid"
+    child_pid=
+    for _ in $(seq 1 100); do
+      [ -s "$LAB/$shape.pid" ] && child_pid=$(cat "$LAB/$shape.pid") && break
+      sleep 0.1
+    done
+    [ -n "$child_pid" ] || fail "Hermes $shape bootstrap did not start its Node child"
+    pane_pid=$("$REAL_TMUX" -L "$SOCKET" display-message -p -t "$target" '#{pane_pid}')
+    parent_pgid=$(ps -p "$pane_pid" -o pgid= | tr -d ' ')
+    child_pgid=$(ps -p "$child_pid" -o pgid= | tr -d ' ')
+    [ -n "$parent_pgid" ] && [ "$parent_pgid" = "$child_pgid" ] \
+      || fail "Hermes $shape parent and child must share their process group"
+    foreground_pids=$(fm_backend_tmux_foreground_pids "$target")
+    printf '%s\n' "$foreground_pids" | grep -Fxq "$pane_pid" \
+      || fail "Hermes $shape Python bootstrap must be foreground"
+    printf '%s\n' "$foreground_pids" | grep -Fxq "$child_pid" \
+      || fail "Hermes $shape Node child must be foreground"
+    if title_classifies_agent "$target" || comms_classify_agent "$target"; then
+      fail "Hermes $shape case must not rely on a harness-named process"
+    fi
+    if [ "$shape" = native ]; then
+      wait_for_state "$target" alive || fail "Hermes bootstrap and Node TUI must classify alive"
+      (
+        fm_backend_tmux_foreground_pids() { :; }
+        [ -z "$(fm_backend_tmux_foreground_pids "$target")" ] || exit 1
+        [ "$(fm_backend_agent_state tmux "$target")" = alive ]
+      ) || fail "Hermes TUI must remain alive with only the ps argument path"
+      if [ -r "/proc/$child_pid/cmdline" ]; then
+        (
+          fm_backend_tmux_foreground_args() { :; }
+          [ -z "$(fm_backend_tmux_foreground_args "$target")" ] || exit 1
+          [ "$(fm_backend_agent_state tmux "$target")" = alive ]
+        ) || fail "Hermes TUI must remain alive with only the kernel argv path"
+      fi
+      pass "tmux liveness: Python -I -c bootstrap with same-group Node --expose-gc Hermes TUI classifies alive without harness names"
+    else
+      wait_for_state "$target" ambiguous || fail "unrelated Node script must stay ambiguous"
+      pass "tmux liveness: the same bootstrap with an unrelated Node script stays ambiguous"
+    fi
+  done
+else
+  echo "skip: Hermes bootstrap/Node regression needs python3 and node"
+fi
+
 # --- a launcher whose own identity reads as a bare shell --------------------
 # The single-source classifier would read this pane as an idle shell and call
 # it dead - the one verdict that can start a duplicate agent on a live worktree.
@@ -365,6 +426,50 @@ fm_tmux_pane_is_cursor "$SESSION:cursor-idle" \
   || fail "an idle Cursor composer must read empty; without it every away-mode escalation defers forever"
 pass "cursor composer: an idle Cursor pane reads empty even though the cursor row is blind"
 
+# cursor-agent 2026.10.19 draws the glyph and the placeholder as one dim run,
+# with half-block rules around the row and no reverse-video cell. The older
+# screen above keeps the glyph outside the dim run, so it cannot see this.
+cursor_screen_dimrun() {  # <composer-text> <idle|typed>
+  local text=$1 mode=$2 e
+  e=$(printf '\033')
+  printf '\n %s[38;2;42;44;57m▄▄▄▄▄▄▄▄%s[39m\n' "$e" "$e"
+  if [ "$mode" = idle ]; then
+    printf ' %s[48;2;42;44;57m %s[2m→ %s%s[0m%s[48;2;42;44;57m        %s[49m\n' \
+      "$e" "$e" "$text" "$e" "$e" "$e"
+  else
+    printf ' %s[48;2;42;44;57m %s[2m→ %s[0m%s[38;2;224;222;244m%s%s[0m\n' \
+      "$e" "$e" "$e" "$e" "$text" "$e"
+  fi
+  printf ' %s[38;2;42;44;57m▀▀▀▀▀▀▀▀%s[39m\n  Cursor Grok 4.5                    Run Everything\n\n' \
+    "$e" "$e"
+}
+open_dimrun_pane() {  # <window> <binary> <composer-text> <idle|typed>
+  local window=$1 binary=$2 text=$3 mode=$4
+  new_window "$window" bash -c "$(declare -f cursor_screen_dimrun); cursor_screen_dimrun '$text' '$mode'; exec '$binary' 900"
+  local i=0
+  while [ "$i" -lt 100 ]; do
+    case "$("$REAL_TMUX" -L "$SOCKET" capture-pane -p -t "$SESSION:$window" 2>/dev/null)" in
+      *"$text"*) return 0 ;;
+    esac
+    sleep 0.1
+    i=$((i + 1))
+  done
+  fail "pane $window never rendered its composer"
+}
+open_dimrun_pane cursor-dim-idle "$LAB/bin/cursor-agent" 'Add a follow-up' idle
+fm_tmux_pane_is_cursor "$SESSION:cursor-dim-idle" \
+  || fail "the fully dim pane's foreground process must still be Cursor"
+[ "$(cursor_anchored_verdict "$SESSION:cursor-dim-idle")" = unknown ] \
+  || fail "the fully dim pane's cursor-anchored source must stay blind"
+[ "$(fm_tmux_composer_state "$SESSION:cursor-dim-idle")" = empty ] \
+  || fail "a fully dim idle Cursor placeholder must read empty"
+pass "cursor composer: a fully dim placeholder reads empty"
+
+open_dimrun_pane cursor-dim-typed "$LAB/bin/cursor-agent" 'Add a follow-up' typed
+[ "$(fm_tmux_composer_state "$SESSION:cursor-dim-typed")" = pending ] \
+  || fail "typed text that matches the placeholder must stay pending"
+pass "cursor composer: bright text matching the placeholder stays pending"
+
 open_composer_pane cursor-typed "$LAB/bin/cursor-agent" 'half typed captain text' 0
 [ "$(cursor_anchored_verdict "$SESSION:cursor-typed")" = unknown ] \
   || fail "the cursor-anchored source must be blind here too"
@@ -450,6 +555,64 @@ fi
 [ "$(fm_tmux_composer_state "$SESSION:cc-decoy")" = unknown ] \
   || fail "the reclassification and its ceiling must be gated on Command Code's own process identity"
 pass "commandcode composer: an identical screen stays unknown when the pane is not Command Code"
+
+# Hermes's default profile draws an unprefixed `❯` prompt under its native
+# status rule (Hermes Agent 0.21.7). That row also matches the generic
+# cursor-anchored shape, so a Hermes pane must be read by its identity-scoped
+# classifier first: the native orange busy hint is not a draft, and a bare
+# prompt without the status rule is not proven empty.
+hermes_screen() {  # <rule|norule> <hint|draft|placeholder|bare>
+  local e
+  e=$(printf '\033')
+  printf '\n  done\n\n'
+  case "$1" in
+    rule) printf ' \342\224\200 ready \342\224\202 model \342\224\202 1s\n' ;;
+  esac
+  case "$2" in
+    hint) printf '\342\235\257 %s[38;5;231m%s[48;5;178mC%s[38;5;178m%s[49mtrl+C to interrupt\342\200\246%s[39m' "$e" "$e" "$e" "$e" "$e" ;;
+    draft) printf '\342\235\257 real draft' ;;
+    placeholder) printf '\342\235\257 %s[2mAsk me anything\342\200\246%s[0m' "$e" "$e" ;;
+    bare) printf '\342\235\257 ' ;;
+  esac
+}
+open_hermes_pane() {  # <window> <binary> <rule|norule> <row>
+  local window=$1 binary=$2 rule=$3 row=$4 i=0
+  new_window "$window" bash -c "$(declare -f hermes_screen); hermes_screen '$rule' '$row'; exec '$binary' 900"
+  while [ "$i" -lt 100 ]; do
+    case "$("$REAL_TMUX" -L "$SOCKET" capture-pane -p -t "$SESSION:$window" 2>/dev/null)" in
+      *'❯'*) sleep 0.2; return 0 ;;
+    esac
+    sleep 0.1
+    i=$((i + 1))
+  done
+  fail "pane $window never rendered its composer"
+}
+
+open_hermes_pane hm-busy "$LAB/bin/hermes" rule hint
+case "$(fm_tmux_composer_identity "$SESSION:hm-busy")" in
+  hermes$'\t'*) ;;
+  *) fail "a pane whose foreground process is hermes must identify as Hermes" ;;
+esac
+[ "$(fm_tmux_composer_state "$SESSION:hm-busy")" = empty ] \
+  || fail "Hermes's native busy hint on an unprefixed prompt must not read as a draft, or busy interrupts are refused"
+open_hermes_pane hm-idle "$LAB/bin/hermes" rule placeholder
+[ "$(fm_tmux_composer_state "$SESSION:hm-idle")" = empty ] \
+  || fail "an idle unprefixed Hermes prompt beneath its status rule must read empty"
+open_hermes_pane hm-draft "$LAB/bin/hermes" rule draft
+[ "$(fm_tmux_composer_state "$SESSION:hm-draft")" = pending ] \
+  || fail "a bright typed draft on an unprefixed Hermes prompt must read pending"
+open_hermes_pane hm-norule "$LAB/bin/hermes" norule bare
+[ "$(fm_tmux_composer_state "$SESSION:hm-norule")" = unknown ] \
+  || fail "an unprefixed Hermes prompt without its native status rule must not be proven empty"
+pass "hermes composer: an unprefixed default-profile prompt is read by Hermes identity before the generic cursor shape"
+
+open_hermes_pane hm-decoy "$LAB/bin/hermes-helper" norule bare
+if fm_tmux_composer_identity "$SESSION:hm-decoy" >/dev/null; then
+  fail "a pane running hermes-helper must not identify as Hermes"
+fi
+[ "$(fm_tmux_composer_state "$SESSION:hm-decoy")" = "$(cursor_anchored_verdict "$SESSION:hm-decoy")" ] \
+  || fail "a non-Hermes prompt pane must keep the generic cursor-anchored verdict"
+pass "hermes composer: a non-Hermes prompt keeps the generic cursor-anchored verdict"
 
 cleanup_all
 trap - EXIT

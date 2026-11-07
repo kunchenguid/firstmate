@@ -155,6 +155,108 @@ wait_for() {  # <file> [tries]
   return 1
 }
 
+# --- detached startup refreshes owner presence after slow caller work -------
+LEASE_ADAPTERS="$TMP_ROOT/lease-adapters"
+mkdir -p "$LEASE_ADAPTERS/bin"
+cat > "$LEASE_ADAPTERS/bin/fm-procevent-leaseplain.sh" <<'SH'
+#!/usr/bin/env bash
+exit 2
+SH
+cat > "$LEASE_ADAPTERS/bin/fm-procevent-leasepublish.sh" <<'SH'
+#!/usr/bin/env bash
+case "${1-}" in
+  silent)
+    printf 'publishing\n' > "$LEASE_PUBLISH_READY"
+    while [ ! -e "$LEASE_PUBLISH_RELEASE" ]; do
+      [ "$SECONDS" -lt 30 ] || exit 2
+      sleep 0.05
+    done
+    exit 1
+    ;;
+esac
+exit 2
+SH
+chmod +x "$LEASE_ADAPTERS/bin/"*.sh
+
+lease_pe() {
+  FM_ROOT_OVERRIDE="$LEASE_ADAPTERS" FM_PROCEVENT_OWNER_LEASE_SECONDS=2 \
+    FM_PROCEVENT_OWNER_CHECK_SECONDS=1 pe "$@"
+}
+wait_stale_lease() {  # <home>
+  local lease="$1/state/procevent/.owner-lease" n
+  for n in $(seq 1 100); do
+    if perl -MTime::HiRes=clock_gettime,CLOCK_MONOTONIC -e '
+      open my $in, "<", $ARGV[0] or exit 1;
+      my $stamp = <$in>;
+      exit(clock_gettime(CLOCK_MONOTONIC) - $stamp >= 3 ? 0 : 1);
+    ' "$lease"; then
+      return 0
+    fi
+    sleep 0.1
+  done
+  return 1
+}
+
+for lease_entry in reconcile ensure-listening; do
+  LEASE_HOME="$TMP_ROOT/lease-$lease_entry"; new_home "$LEASE_HOME"
+  fm_test_track_procevent_home "$LEASE_HOME"
+  lease_id="lease-$lease_entry-src"
+  lease_started="$TMP_ROOT/$lease_id.started"
+  lease_pe "$LEASE_HOME" register leaseplain "$lease_id" -- \
+    "$STARTED_BLOCKER" "$lease_started" "$BLOCKER" "$TMP_ROOT/$lease_id.trigger" payload >/dev/null
+  if [ "$lease_entry" = reconcile ]; then
+    mkdir -p "$LEASE_HOME/state/procevent-inbox"
+    printf 'old payload\n' > "$LEASE_HOME/state/procevent-inbox/lease-old.1.result"
+    printf 'leasepublish\n' > "$LEASE_HOME/state/procevent-inbox/lease-old.1.adapter"
+    chmod 600 "$LEASE_HOME/state/procevent-inbox/lease-old.1."*
+    export LEASE_PUBLISH_READY="$TMP_ROOT/lease-publish.ready"
+    export LEASE_PUBLISH_RELEASE="$TMP_ROOT/lease-publish.release"
+    lease_pe "$LEASE_HOME" reconcile > "$TMP_ROOT/lease-reconcile.out" 2>&1 &
+    lease_caller=$!
+    wait_for "$LEASE_PUBLISH_READY" || fail "reconcile never reached pre-launch publication"
+    wait_stale_lease "$LEASE_HOME" || fail "publication did not outlast the fixture lease"
+    touch "$LEASE_PUBLISH_RELEASE"
+    wait "$lease_caller" || fail "reconcile failed after slow publication"
+  else
+    wait_stale_lease "$LEASE_HOME" || fail "the readiness fixture lease never expired"
+    lease_pe "$LEASE_HOME" ensure-listening "$lease_id" \
+      > "$TMP_ROOT/lease-ensure-listening.out" 2>&1 \
+      || fail "ensure-listening failed with an old caller lease"
+  fi
+  wait_for "$lease_started" \
+    || fail "$lease_entry confirmed a detached start without running the source command"
+  assert_contains "$(lease_pe "$LEASE_HOME" list)" "live" \
+    "$lease_entry leaves a live source owner after refreshing at launch"
+  # No further owner-presence operation runs. The launch refresh must not keep
+  # renewing itself after the caller has returned.
+  lease_runner=$(cat "$LEASE_HOME/state/procevent/$lease_id.runner")
+  lease_deadline=$((SECONDS + 10))
+  while kill -0 "$lease_runner" 2>/dev/null; do
+    [ "$SECONDS" -lt "$lease_deadline" ] \
+      || fail "$lease_entry kept its runner alive after the owning home's lease expired"
+    sleep 0.1
+  done
+  lease_pe "$LEASE_HOME" retire "$lease_id" >/dev/null
+  pass "$lease_entry refreshes at detached launch and still stops after owner lease expiry"
+done
+
+# An ordinary runner descendant may request a detached launch, but may never
+# turn that launch into new owner-presence activity for its missing home.
+LEASE_INHERITED="$TMP_ROOT/lease-inherited"; new_home "$LEASE_INHERITED"
+fm_test_track_procevent_home "$LEASE_INHERITED"
+lease_pe "$LEASE_INHERITED" register leaseplain lease-inherited-src -- \
+  "$STARTED_BLOCKER" "$TMP_ROOT/lease-inherited.started" /bin/sleep 30 >/dev/null
+wait_stale_lease "$LEASE_INHERITED" || fail "the inherited caller fixture lease never expired"
+lease_before=$(cat "$LEASE_INHERITED/state/procevent/.owner-lease")
+FM_PROCEVENT_IN_RUNNER=1 lease_pe "$LEASE_INHERITED" ensure-listening lease-inherited-src \
+  > "$TMP_ROOT/lease-inherited.out" 2>&1 || true
+[ "$(cat "$LEASE_INHERITED/state/procevent/.owner-lease")" = "$lease_before" ] \
+  || fail "a runner descendant refreshed the owning lease at detached launch"
+assert_absent "$TMP_ROOT/lease-inherited.started" \
+  "a runner descendant cannot start a source under its expired owning lease"
+lease_pe "$LEASE_INHERITED" retire lease-inherited-src >/dev/null
+pass "inherited runner callers cannot renew owner presence at detached startup"
+
 # Arm now starts the listener, so a later start would poll again. Wait for the
 # capture that listener is already producing, and for its runner to release the
 # claim: the result lands before the runner publishes and exits, and a retire or
@@ -3590,24 +3692,17 @@ HFLOOR="$TMP_ROOT/launch-floor"; new_home "$HFLOOR"
 fm_test_track_procevent_home "$HFLOOR"
 pe_register "$HFLOOR" lavish floor-src -- \
   "$STORM_SOURCE" "$TMP_ROOT/launch-times" "$HFLOOR" "$ROOT"
-# Three real launches can outlive a four-second lease on a loaded host. Give
-# this fixture a bounded observation window, then retire it as soon as sampled
-# rather than leaving its orphan loop running alongside the remaining tests.
-FM_PROCEVENT_OWNER_LEASE_SECONDS=30 FM_PROCEVENT_OWNER_CHECK_SECONDS=1 \
+# Pacing, not lease expiry, is under test here. Give the orphan lease headroom
+# over the nominal sample wait so slow launches do not kill the fixture before
+# its third sample. Count polls rather than wall time so scheduling delays stretch
+# the wait, then retire immediately instead of running beside the other cases.
+FM_PROCEVENT_OWNER_LEASE_SECONDS=600 FM_PROCEVENT_OWNER_CHECK_SECONDS=1 \
   FM_PROCEVENT_LAUNCH_FLOOR_SECONDS=1 pe "$HFLOOR" reconcile >/dev/null
-floor_deadline=$((SECONDS + 30))
-while :; do
-  floor_count=0
-  [ ! -f "$TMP_ROOT/launch-times" ] \
-    || floor_count=$(wc -l < "$TMP_ROOT/launch-times" | tr -d ' ')
-  [ "$floor_count" -ge 3 ] && break
-  [ "$SECONDS" -lt "$floor_deadline" ] \
-    || fail "the orphan-storm fixture launched only $floor_count times within its observation window"
-  sleep 0.1
-done
+wait_for_lines "$TMP_ROOT/launch-times" 3 600 \
+  || fail "the orphan-storm fixture did not produce three launch samples"
+pe "$HFLOOR" retire floor-src >/dev/null
 launch_count=$(wc -l < "$TMP_ROOT/launch-times" | tr -d ' ')
 launch_span=$(perl -e '@t=<>; printf "%.3f", $t[-1] - $t[0]' "$TMP_ROOT/launch-times")
-pe "$HFLOOR" retire floor-src >/dev/null
 perl -e 'exit($ARGV[0] >= ($ARGV[1] - 1) * 0.8 ? 0 : 1)' "$launch_span" "$launch_count" \
   || fail "an orphaned source launched $launch_count times in only ${launch_span}s"
 [ "$launch_count" -le 6 ] \
