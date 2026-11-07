@@ -62,7 +62,8 @@ expect_allow() {
 
 expect_deny() {
   local label=$1 tool=$2 rc=0
-  run_tool "$tool" || rc=$?
+  shift 2
+  run_tool "$tool" "$@" || rc=$?
   [ "$rc" -eq 2 ] || fail "$label ($tool) must deny with exit 2, got $rc"
   [ ! -s "$OUT" ] || fail "$label ($tool) deny wrote stdout: $(cat "$OUT")"
   jq -e '.hookSpecificOutput.hookEventName == "PreToolUse" and .hookSpecificOutput.permissionDecision == "deny"' "$ERR" >/dev/null 2>&1 \
@@ -142,6 +143,8 @@ test_sendmessage_to_existing_claude_session_is_allowed() {
     '{"tool_name":"SendMessageAndSpawn","tool_input":{"to":"local_01ABC","message":"hi"}}' \
     SendMessageAndSpawn
   expect_deny "--tool mode has no recipient" SendMessage
+  expect_deny "--tool mode ignores an inherited PAYLOAD" SendMessage \
+    PAYLOAD='{"tool_name":"SendMessage","tool_input":{"to":"local_01ABC","message":"hi"}}'
   expect_payload_deny "helper-agent call" \
     '{"tool_name":"Agent","tool_input":{"prompt":"investigate the build"}}' \
     Agent

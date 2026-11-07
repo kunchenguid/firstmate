@@ -183,7 +183,7 @@ done
 # any other shape - an in-process agent addressed by name, a broadcast '*',
 # or a bridge:<session id> - is refused, as is a payload with a missing or
 # non-string recipient and the --tool CLI form, which carries no recipient.
-if [ "$NORMALIZED" = "sendmessage" ] && [ -n "${PAYLOAD:-}" ]; then
+if [ "$TOOL_SET" -eq 0 ] && [ "$NORMALIZED" = "sendmessage" ] && [ -n "${PAYLOAD:-}" ]; then
   RECIPIENT=$(printf '%s' "$PAYLOAD" | jq -r 'if (.tool_input.to | type) == "string" then .tool_input.to else empty end' 2>/dev/null) || RECIPIENT=""
   case "$RECIPIENT" in
     uds:*|local_*) exit 0 ;;
