@@ -15,8 +15,7 @@
 # appends captain text (the submitted prompt) and MAIN text (the turn's final
 # assistant message), never tool traffic, as said, with only the whitespace at
 # the very end of the message trimmed and credentials masked (MASK below). A
-# prompt the shared operational-input
-# protocol classifies
+# prompt the shared operational-input protocol classifies
 # (bin/fm-operational-input.sh: watcher wakes, guard follow-ups, launch briefs)
 # is fleet machinery, not dialog, and is dropped, and so is a prompt that opens
 # with the wrapper a harness puts around a turn it started itself: Claude
