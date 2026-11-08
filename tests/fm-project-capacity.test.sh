@@ -2,7 +2,9 @@
 # Behavior tests for project capacity admission: a project that declares how
 # many workers it admits at once on this machine never gets a fresh worker
 # launched beyond that number (bin/fm-project-capacity-lib.sh owns the
-# contract; bin/fm-spawn.sh runs the check).
+# contract; bin/fm-spawn.sh runs the check). The opt-in lane capacity spawn
+# gate (config/lane-capacity admit-spawns; bin/fm-capacity.sh owns the verdict)
+# is covered here too, because it defers through the same spawn path.
 #
 # Every case drives the real bin/fm-spawn.sh against a real project clone with
 # an origin, fake tmux and treehouse binaries that log every call, and a real
@@ -575,7 +577,7 @@ test_batch_reports_a_deferred_pair() {
   write_live "$home" live-a "$case_dir/project"
   out=$(run_spawn "$case_dir" "$home" "$case_dir/unused" "task-c=$case_dir/project" --mode no-mistakes --yolo off) || rc=$?
   expect_code "$DEFER_EXIT" "$rc" "a batch whose only pair was deferred did not exit with the deferral status: $out"
-  assert_contains "$out" "batch: DEFERRED task-c ($case_dir/project) - its project is at capacity, so it stays queued" \
+  assert_contains "$out" "batch: DEFERRED task-c ($case_dir/project) - its project or this machine's lanes are at capacity, so it stays queued" \
     "the batch did not report the deferral"
   assert_not_contains "$out" "batch: FAILED" "the batch reported a deferral as a failure"
   pass "a batch reports a capacity deferral as deferred, not failed"
@@ -649,6 +651,70 @@ SH
   pass "an Orca spawn takes the shared project lock whenever a same-origin clone is capped and defers before creating anything"
 }
 
+# A full lane cap gates nothing until config/lane-capacity asks for the gate.
+test_lane_capacity_gate_is_opt_in() {
+  local case_dir home out rc=0
+  case_dir=$(make_case lane-opt-in task-c)
+  home="$case_dir/home"
+  printf '0\n' > "$home/config/lane-capacity"
+  out=$(spawn_ship "$case_dir" task-c) || rc=$?
+  expect_code 0 "$rc" "a lane cap without admit-spawns refused a spawn: $out"
+  assert_contains "$out" "spawned task-c" "a lane cap without admit-spawns did not launch the worker"
+  assert_absent "$home/state/.lane-admission.lock" "a spawn without admit-spawns touched the lane admission lock"
+  pass "a full lane cap without admit-spawns never gates a spawn"
+}
+
+test_lane_capacity_gate_defers_without_leaving_anything_behind() {
+  local case_dir home out rc=0 before worktrees
+  case_dir=$(make_case lane-defer task-c)
+  home="$case_dir/home"
+  printf '1\nadmit-spawns\n' > "$home/config/lane-capacity"
+  write_live "$home" live-a "$case_dir/project"
+  before=$(call_count "$case_dir")
+  worktrees=$(worktree_list "$case_dir")
+  out=$(spawn_ship "$case_dir" task-c "$case_dir/unused") || rc=$?
+  expect_code "$DEFER_EXIT" "$rc" "a spawn beyond the lane cap was not deferred: $out"
+  # The reasons depend on this host's own probes, so only the verdict's owner is asserted.
+  assert_contains "$out" "deferred: lane capacity of this home ($home/config/lane-capacity) does not admit another lane: " \
+    "the deferral did not name the lane capacity verdict"
+  assert_contains "$out" "task task-c was not launched and its backlog item stays queued" "the deferral did not say the task stays queued"
+  assert_nothing_created "$case_dir" "$home" task-c "$before" "$worktrees"
+  assert_absent "$home/state/.lane-admission.lock" "a deferred spawn left the lane admission lock held"
+  rc=0
+  out=$(FM_SPAWN_IGNORE_LANE_CAPACITY=1 spawn_ship "$case_dir" task-c "$case_dir/unused") || rc=$?
+  expect_code "$DEFER_EXIT" "$rc" "an environment variable bypassed the lane capacity verdict: $out"
+  assert_nothing_created "$case_dir" "$home" task-c "$before" "$worktrees"
+  pass "admit-spawns defers a spawn the lane verdict refuses, leaves nothing behind, and nothing in the environment bypasses it"
+}
+
+test_lane_capacity_gate_refuses_an_unreadable_opt_in() {
+  local case_dir home out rc=0 before worktrees
+  case_dir=$(make_case lane-invalid task-c)
+  home="$case_dir/home"
+  printf 'twelve\nadmit-spawns\n' > "$home/config/lane-capacity"
+  before=$(call_count "$case_dir")
+  worktrees=$(worktree_list "$case_dir")
+  out=$(spawn_ship "$case_dir" task-c "$case_dir/unused") || rc=$?
+  expect_code 1 "$rc" "an unreadable opted-in lane capacity did not refuse: $out"
+  assert_contains "$out" "this home's lane capacity cannot be read" "the refusal did not name the lane capacity"
+  assert_nothing_created "$case_dir" "$home" task-c "$before" "$worktrees"
+  printf 'auto\n' > "$home/config/lane-capacity"
+  chmod 000 "$home/config/lane-capacity"
+  if [ ! -r "$home/config/lane-capacity" ]; then
+    rc=0
+    out=$(spawn_ship "$case_dir" task-c "$case_dir/unused") || rc=$?
+    expect_code 1 "$rc" "a lane capacity file that cannot be read did not refuse: $out"
+    assert_contains "$out" "this home's lane capacity cannot be read" "the refusal did not name the unreadable lane capacity"
+    assert_nothing_created "$case_dir" "$home" task-c "$before" "$worktrees"
+  fi
+  chmod 600 "$home/config/lane-capacity"
+  printf 'twelve\n' > "$home/config/lane-capacity"
+  rc=0
+  out=$(spawn_ship "$case_dir" task-c) || rc=$?
+  expect_code 0 "$rc" "a malformed lane capacity without admit-spawns refused a spawn: $out"
+  pass "a malformed lane capacity refuses spawns only when it asks for the gate, and one that cannot be read always refuses"
+}
+
 test_undeclared_capacity_keeps_dispatch_uncapped
 test_available_capacity_admits_the_worker
 test_exhausted_capacity_defers_without_leaving_anything_behind
@@ -665,3 +731,6 @@ test_failed_spawn_after_admission_holds_no_place
 test_unreadable_declaration_refuses_every_spawn
 test_batch_reports_a_deferred_pair
 test_orca_spawn_is_admitted_under_the_shared_project_lock
+test_lane_capacity_gate_is_opt_in
+test_lane_capacity_gate_defers_without_leaving_anything_behind
+test_lane_capacity_gate_refuses_an_unreadable_opt_in
