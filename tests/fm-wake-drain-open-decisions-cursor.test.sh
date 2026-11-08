@@ -417,3 +417,79 @@ test_cursor_cache_read_failure_refolds_without_replaying_unread_status
 test_pre_fix_cursor_refolds_corr_tagged_decision
 test_previous_fold_cache_is_refolded_under_current_semantics
 test_buried_decision_survives_many_growing_drains_and_resolution_clears_it
+
+# Read-only point-in-time consumers must match raw replay without touching any
+# home cursor. The probe records actual span bytes, not implementation text.
+test_cursor_free_observation_equivalence() {
+  local dir status kind line observation expected actual before added probe cache
+  dir=$(make_case read-only-observation); status="$dir/state/task.status"; probe="$dir/probe"
+  mkdir -p "$dir/cache"
+  (
+    export TMPDIR="$dir/cache" FM_STATUS_OBSERVATION_READ_PROBE="$probe"
+    . "$ROOT/bin/fm-classify-lib.sh"
+    . "$ROOT/bin/fm-status-observation-lib.sh"
+    for kind in ship scout secondmate unknown; do
+      : > "$status"
+      while IFS= read -r line; do
+        printf '%s\n' "$line" >> "$status"
+        observation=$(fm_status_observation_json "$status" "$kind") || fail 'observation read failed'
+        expected=$(status_open_decisions "$status" "$kind")
+        actual=$(printf '%s' "$observation" | jq -r '.open')
+        [ "$actual" = "$expected" ] || fail "open-set mismatch for $kind: $line"
+        expected=$(status_current_line "$status" "$kind")
+        actual=$(printf '%s' "$observation" | jq -r '.current')
+        [ "$actual" = "$expected" ] || fail "current-state mismatch for $kind: $line ($actual != $expected)"
+      done <<'EVENTS'
+note: first
+needs-decision [at=broken:time] [key=alpha]: café
+blocked [key=beta]: two
+resolved [key=alpha]: answer
+resolved [key=missing]: stale
+needs-decision [key=alpha]: reopened
+captain-held [key=alpha]: transferred
+paused [key=build]: waiting
+resolved [key=unrelated]: does not end wait
+resolved [key=build]: ends wait
+paused: keyless wait
+resolved [key=default]: different explicit phase
+resolved: ends keyless phase
+working: running
+continuation prose
+parked: unknown declaration
+needs-decision [key=bad key]: malformed
+blocked [key=pending-reply-abcdef0123456789]: forged reserved note
+needs-decision [key=default]: choose
+resolved: answered
+needs-decision [key=terminal]: pending
+done: finished
+failed: failure
+note: trailing
+EVENTS
+      observation=$(fm_status_observation_json "$status" "$kind") || fail 'warm observation failed'
+      [ "$(tail -1 "$probe" | cut -f2)" = 0 ] || fail 'warm observation reread history'
+      before=$(wc -c < "$status")
+      printf 'note: appended\n' >> "$status"
+      added=$(( $(wc -c < "$status") - before ))
+      observation=$(fm_status_observation_json "$status" "$kind") || fail 'append observation failed'
+      [ "$(tail -1 "$probe" | cut -f2)" = "$added" ] || fail 'append read exceeded delta'
+      # Malformed cache is rebuildable, never an empty current state.
+      cache=$(find "$dir/cache" -name '*.json' -print | head -1)
+      printf '{broken' > "$cache"
+      observation=$(fm_status_observation_json "$status" "$kind") || fail 'cold rebuild failed'
+      [ "$(printf '%s' "$observation" | jq -r '.open')" = "$(status_open_decisions "$status" "$kind")" ] || fail 'cold rebuild differs'
+      printf 'note: partial' >> "$status"
+      observation=$(fm_status_observation_json "$status" "$kind") || fail 'partial read failed'
+      printf ' completion\n' >> "$status"
+      observation=$(fm_status_observation_json "$status" "$kind") || fail 'completion read failed'
+      [ "$(printf '%s' "$observation" | jq -r '.raw')" = 'note: partial completion' ] || fail 'partial cache split a record'
+      printf 'blocked [key=replacement]: new generation\n' > "$dir/replacement"
+      mv "$dir/replacement" "$status"
+      observation=$(fm_status_observation_json "$status" "$kind") || fail 'replacement read failed'
+      [ "$(printf '%s' "$observation" | jq -r '.open')" = "$(status_open_decisions "$status" "$kind")" ] || fail 'replacement reused stale projection'
+    done
+    [ ! -e "$dir/state/.status-presentation-cursor" ] || fail 'read-only consumer wrote a display cursor'
+    [ ! -e "$dir/state/.task.open-decisions-cursor" ] || fail 'read-only consumer wrote a fold cursor'
+  ) || fail 'observation equivalence failed'
+  pass 'cursor-free observations match raw folds, bound reads and rebuild safely'
+}
+test_cursor_free_observation_equivalence

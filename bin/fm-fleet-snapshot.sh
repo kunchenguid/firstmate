@@ -222,6 +222,8 @@ esac
 # shellcheck source=bin/fm-classify-lib.sh
 # shellcheck disable=SC1091
 . "$SCRIPT_DIR/fm-classify-lib.sh"
+# shellcheck source=bin/fm-status-observation-lib.sh
+. "$SCRIPT_DIR/fm-status-observation-lib.sh"
 # shellcheck source=bin/fm-ff-lib.sh
 # shellcheck disable=SC1091
 . "$SCRIPT_DIR/fm-ff-lib.sh"  # validate_secondmate_home: shared seeded-home boundary checks
@@ -332,6 +334,7 @@ crew_state_json() {  # <id> [<captured-meta>] [<captured-status>]
       FM_STATE_OVERRIDE="$STATE" \
       FM_CREW_STATE_META_OVERRIDE="$captured_meta" \
       FM_CREW_STATE_STATUS_OVERRIDE="$captured_status" \
+      FM_CREW_STATE_OBSERVATION_OVERRIDE="$captured_status.observation" \
       FM_DATA_OVERRIDE="$DATA" \
       FM_PROJECTS_OVERRIDE="$PROJECTS" \
       FM_CONFIG_OVERRIDE="$CONFIG" \
@@ -361,7 +364,11 @@ status_event_json() {  # <observed-status-log> [<contract-path>]
   local log=$1 path=${2:-$1} present=0 raw='' verb='' note='' epoch=null age=null
   if [ -f "$log" ]; then
     present=1
-    raw=$(last_nonempty_line "$log" || true)
+    if [ -f "$log.observation" ]; then
+      raw=$(jq -r '.raw' "$log.observation")
+    else
+      raw=$(last_nonempty_line "$log" || true)
+    fi
     verb=$(status_line_verb "$raw")
     note=$(status_line_note "$raw")
     epoch=$(status_line_at_epoch "$raw") || epoch=null
@@ -634,7 +641,7 @@ snapshot_task_generation_is_current() {  # <captured-meta> <id>
 
 prefetch_task_observations() {  # <meta> <id>
   local meta=$1 id=$2 remote_host current_file endpoint_file current_pid='' current_rc=0
-  local status_log status_capture report_path report_capture
+  local status_log status_capture report_path report_capture endpoint start length ident
   local kind backend target endpoint_exists=null agent_alive=not_checked generation_current=1
   remote_host=$(meta_value "$meta" remote_host)
   current_file="$SNAPSHOT_TASK_DIR/$id.json"
@@ -646,7 +653,23 @@ prefetch_task_observations() {  # <meta> <id>
 
   snapshot_task_generation_is_current "$meta" "$id" || generation_current=0
   if [ "$generation_current" = 1 ]; then
-    snapshot_capture_optional "$status_log" "$status_capture" || current_rc=1
+    kind=$(meta_value "$meta" kind)
+    [ -n "$kind" ] || kind=ship
+    if fm_status_observation_json "$status_log" "$kind" > "$status_capture.observation"; then
+      # Preserve the separately bounded activity window and source freshness;
+      # lifecycle/open decisions use the captured projection, never this tail.
+      endpoint=$(jq -r '.endpoint' "$status_capture.observation")
+      ident=$(jq -r '.identity' "$status_capture.observation")
+      length=$FM_SNAPSHOT_PARENT_ACTIVITY_BYTES
+      [ "$length" -le "$endpoint" ] || length=$endpoint
+      start=$((endpoint - length))
+      if ! _fm_status_read_span "$status_log" "$start" "$length" > "$status_capture" \
+        || [ "$(_fm_open_decisions_file_ident "$status_log")" != "$ident" ] \
+        || ! touch -r "$status_log" "$status_capture"; then current_rc=1; fi
+    else
+      rm -f "$status_capture.observation"
+      snapshot_capture_optional "$status_log" "$status_capture" || current_rc=1
+    fi
     snapshot_mark_optional_present "$report_path" "$report_capture" || current_rc=1
   fi
 
@@ -680,7 +703,7 @@ prefetch_task_observations() {  # <meta> <id>
   # All mutable observations must belong to the metadata generation captured in
   # the manifest. If teardown/relaunch raced any read, discard the whole sample.
   if ! snapshot_task_generation_is_current "$meta" "$id"; then
-    rm -f -- "$status_capture" "$report_capture"
+    rm -f -- "$status_capture" "$status_capture.observation" "$report_capture"
     jq -n '{state:"unknown",source:"none",detail:"task generation changed during snapshot",raw:""}' \
       > "$current_file" || current_rc=1
     endpoint_exists=null
@@ -782,7 +805,11 @@ task_json_lines() {
     pr=$(meta_value "$meta" pr)
     pr_source=meta
     if [ -z "$pr" ]; then
-      pr_from_status=$(first_pr_url_in_file "$status_log" || true)
+      if [ -f "$status_log.observation" ]; then
+        pr_from_status=$(jq -r '.pr' "$status_log.observation")
+      else
+        pr_from_status=$(first_pr_url_in_file "$status_log" || true)
+      fi
       pr=$pr_from_status
       pr_source=status_event
     fi
@@ -801,7 +828,7 @@ task_json_lines() {
       printf '%s' "$current_json" | jq -r '[.state // "", .source // ""] | @tsv'
     )
 
-    # Durable keyed open-decision set: fold the WHOLE status stream
+    # Durable keyed open-decision set: observe the WHOLE status stream
     # (fm-classify-lib.sh's status_open_decisions) so a later unrelated event can
     # never mask a still-open captain decision. The set is derived purely from the
     # keyed fold - never from report bodies or decision-like prose - and then
@@ -818,7 +845,11 @@ task_json_lines() {
     # never clear another concern's keyed decision. A parked/blocked state, or a
     # non-authoritative status-log/none read on a still-live task, keeps the fold's
     # open decision surfacing.
-    open_decisions_tsv=$(status_open_decisions "$status_log" "$kind")
+    if [ -f "$status_log.observation" ]; then
+      open_decisions_tsv=$(jq -r '.open' "$status_log.observation")
+    else
+      open_decisions_tsv=$(status_open_decisions "$status_log" "$kind")
+    fi
     if [ "$kind" != secondmate ] && \
        { { { [ "$current_source" = run-step ] || [ "$current_source" = pane ]; } \
            && [ "$current_state" != parked ] && [ "$current_state" != blocked ]; } \
@@ -1507,8 +1538,9 @@ snapshot_cleanup() {
 }
 trap snapshot_cleanup EXIT
 
-bounded_parent_activities_json() {  # <status-file>
-  local f=$1 out rc reason script
+bounded_parent_activities_json() {  # <captured-tail-or-status-file>
+  local f=$1 out rc reason script original_size=
+  if [ -f "$f.observation" ]; then original_size=$(jq -r '.endpoint' "$f.observation"); fi
   if [ ! -f "$f" ]; then
     jq -n '{records:[],available:true,input_truncated:false,retained_truncated:false,reasons:[],lines_in_window:0,records_in_window:0}'
     return 0
@@ -1526,6 +1558,7 @@ bounded_parent_activities_json() {  # <status-file>
     else
       size=$(stat -c "%s" "$f" 2>/dev/null) || exit 3
     fi
+    [ -z "${7:-}" ] || size=$7
     content=$(LC_ALL=C tail -c "$max_bytes" "$f") || exit 3
     byte_truncated=false
     if [ "$size" -gt "$max_bytes" ]; then
@@ -1580,7 +1613,7 @@ BASH
   out=$(fm_run_timed "$FM_SNAPSHOT_PARENT_ACTIVITY_TIMEOUT" bash -c "$script" \
     fm-parent-activities "$SCRIPT_DIR/fm-classify-lib.sh" "$f" \
     "$FM_SNAPSHOT_PARENT_ACTIVITY_LINES" "$FM_SNAPSHOT_PARENT_ACTIVITY_BYTES" \
-    "$FM_SNAPSHOT_PARENT_ACTIVITIES" "$SNAPSHOT_STAT_STYLE" 2>/dev/null)
+    "$FM_SNAPSHOT_PARENT_ACTIVITIES" "$SNAPSHOT_STAT_STYLE" "$original_size" 2>/dev/null)
   rc=$?
   if [ "$rc" -eq 0 ] && printf '%s' "$out" | jq -e '
     (.records | type) == "array" and (.available | type) == "boolean"

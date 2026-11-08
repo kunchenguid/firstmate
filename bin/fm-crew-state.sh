@@ -235,6 +235,8 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 . "$SCRIPT_DIR/fm-backend.sh"
 # shellcheck source=bin/fm-classify-lib.sh
 . "$SCRIPT_DIR/fm-classify-lib.sh"
+# shellcheck source=bin/fm-status-observation-lib.sh
+. "$SCRIPT_DIR/fm-status-observation-lib.sh"
 # shellcheck source=bin/fm-busy-lib.sh
 . "$SCRIPT_DIR/fm-busy-lib.sh"
 # shellcheck source=bin/fm-nm-run-lib.sh
@@ -346,7 +348,16 @@ map_log_state() {  # <line>
   esac
 }
 
-LOG_LINE=$(status_current_line "$LOG" "$KIND")
+# A fleet collector can pass its already-captured observation, keeping the
+# lifecycle and decision views at the same endpoint. Ordinary reads keep all
+# caches outside the home and never touch presentation cursors.
+if [ -n "${FM_CREW_STATE_OBSERVATION_OVERRIDE:-}" ] && [ -f "$FM_CREW_STATE_OBSERVATION_OVERRIDE" ]; then
+  LOG_LINE=$(jq -er '.current | strings' "$FM_CREW_STATE_OBSERVATION_OVERRIDE") || LOG_LINE=$(status_current_line "$LOG" "$KIND")
+elif observation=$(fm_status_observation_json "$LOG" "$KIND"); then
+  LOG_LINE=$(printf '%s' "$observation" | jq -r '.current')
+else
+  LOG_LINE=$(status_current_line "$LOG" "$KIND")
+fi
 LOG_VERB=$(status_line_verb "$LOG_LINE")
 
 # --- remote secondmate: the true source is the remote endpoint ---------------
