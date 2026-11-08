@@ -6,15 +6,18 @@
 # real worker processes, and the fixed-cap path compared byte for byte against
 # a baseline revision.
 #
-# Deterministic cases read this host's real memory and set the room they need
-# through min-avail-gb relative to it, drive power through a fake pmset and a
-# fixture /sys power_supply, and fake only getconf (64 cores, so this host's
-# own load never binds) and df (a fixed free disk); every other probe, the
-# spawn path, the watcher, the lock, the backlog, and the process table are
-# real. Because that memory keeps moving, the cases assert the rules against
-# the raw budget each publish actually reported (free = min(raw, previous + 2),
-# the burst admits exactly the published damped value) and an exact zero only
-# where the floor sits 5 GB above the live reading.
+# Deterministic cases inject their memory reading through the probe seams the
+# unit suites use, so they pass on any host whatever its free memory: on macOS
+# a fake sysctl answers hw.memsize and kern.memorystatus_level (every other key
+# goes to the real sysctl), and on Linux FM_PROC_ROOT_OVERRIDE points at a tree
+# whose meminfo is a fixture and whose other entries link to the real /proc
+# (process ids are left out, so identity checks fall back to ps). They also
+# drive power through a fake pmset and a fixture /sys power_supply, and fake
+# getconf (64 cores, so this host's own load never binds) and df (a fixed free
+# disk); the spawn path, the watcher, the lock, and the backlog are real. The
+# idle-reclaim case keeps the real process table and real memory, since it
+# judges real workers and never depends on room. Only the opt-in live case
+# reads this host's real memory for admission.
 #
 # Opt-in live cases (FM_TEST_LANE_LIVE_LOAD=1, or FM_LIVE=1) use only real
 # probes: they load this host's CPU with niced busy loops (and optionally a
@@ -130,6 +133,24 @@ SH
     write_brief "$home" "$id"
     add_item "$home" "$id"
   done
+  # Injected memory: a 100 GB host, so the macOS memory level is the GB available.
+  cat > "$fakebin/sysctl" <<SH
+#!/usr/bin/env bash
+case "\${2:-}" in
+  hw.memsize) echo 107374182400 ;;
+  kern.memorystatus_level) cat "$case_dir/v/avail_gb" ;;
+  *) exec /usr/sbin/sysctl "\$@" ;;
+esac
+SH
+  chmod +x "$fakebin/sysctl"
+  mkdir -p "$case_dir/proc"
+  if [ -d /proc ] && [ -r /proc/loadavg ]; then
+    for e in /proc/*; do
+      n=${e##*/}
+      case "$n" in meminfo|*[!0-9]*) [ "$n" = meminfo ] || ln -s "$e" "$case_dir/proc/$n" 2>/dev/null ;; esac
+    done
+  fi
+  set_mem "$case_dir" 13
   set_power "$case_dir" ac
   printf '%s\n' "$case_dir"
 }
@@ -149,35 +170,34 @@ set_power() {
   fi
 }
 
-# set_room <case-dir> <lanes>: write config/lane-capacity so memory, the
-# binding resource here, has room for about <lanes> default 2 GB lanes (a 1 GB
-# margin, so at least 1 while this host's memory moves between calls), or for
-# none with the floor 5 GB above the reading. Fails the case when this host has
-# too little memory for the room asked.
-set_room() {
-  local case_dir=$1 lanes=$2 avail kept
-  avail=$(cat "$case_dir/avail")
-  if [ "$lanes" -eq 0 ]; then kept=$((avail + 5)); else kept=$((avail - lanes * 2 - 1)); fi
-  [ "$kept" -ge 0 ] || fail "this host has $avail GB available, too little for $lanes lanes of 2 GB"
-  printf 'auto\nadmit-spawns\nmin-avail-gb %s\nmin-disk-gb 1\n' "$kept" > "$case_dir/home/config/lane-capacity"
+# set_mem <case-dir> <gb>: the injected available memory, in whole GB of 100.
+set_mem() {
+  printf '%s\n' "$2" > "$1/v/avail_gb"
+  printf 'MemTotal:       104857600 kB\nMemAvailable:   %s kB\n' "$(( $2 * 1048576 ))" > "$1/proc/meminfo"
 }
 
-# auto_config <case-dir> <lanes>: measure this host once, then set the room.
+# set_room <case-dir> <lanes>: injected memory with room for exactly <lanes>
+# default 2 GB lanes above a fixed 4 GB floor (0 lanes puts it under the floor).
+set_room() {
+  local gb=2
+  [ "$2" -eq 0 ] || gb=$((4 + $2 * 2 + 1))
+  set_mem "$1" "$gb"
+}
+
+# auto_config <case-dir> <lanes>: the case's config/lane-capacity and its room.
 auto_config() {
-  local avail
-  mkdir -p "$1/probe-config-dir"
-  printf 'auto\n' > "$1/probe-config-dir/lane-capacity"
-  avail=$(probe_env "$1" env FM_HOME="$1/home" FM_CONFIG_OVERRIDE="$1/probe-config-dir" "$CAPACITY" --json 2>/dev/null |
-    jq -r '.pressure.avail_gb // empty | floor')
-  [ -n "$avail" ] || fail "this host's available memory cannot be read"
-  printf '%s\n' "$avail" > "$1/avail"
+  printf 'auto\nadmit-spawns\nmin-avail-gb 4\nmin-disk-gb 1\n' > "$1/home/config/lane-capacity"
   set_room "$1" "$2"
 }
 
-probe_env() {  # <case-dir> <command...>: run with this case's probes
+probe_env() {  # <case-dir> <command...>: run with this case's probes and injected memory
   local case_dir=$1
   shift
-  PATH="$case_dir/fakebin:$PATH" FM_SYS_ROOT_OVERRIDE="$case_dir/sys" "$@"
+  if [ -e "$case_dir/real-processes" ] || [ ! -r /proc/loadavg ]; then
+    PATH="$case_dir/fakebin:$PATH" FM_SYS_ROOT_OVERRIDE="$case_dir/sys" "$@"
+  else
+    PATH="$case_dir/fakebin:$PATH" FM_SYS_ROOT_OVERRIDE="$case_dir/sys" FM_PROC_ROOT_OVERRIDE="$case_dir/proc" "$@"
+  fi
 }
 
 publish() {  # <case-dir>
@@ -250,6 +270,8 @@ test_spawn_gate_end_to_end() {
   publish "$c"
   assert_equals '[true,true,"memory"]' "$(doc "$c" '[.verdict.admit, (.budget.raw >= 1), .budget.binding]')" \
     "room above the memory floor must publish an admitting budget bound by memory: $(doc "$c" '[.verdict, .budget.by]')"
+  assert_equals '[11,3]' "$(doc "$c" '[.pressure.avail_gb, .budget.raw]')" \
+    "the budget must read the injected 11 GB, not this host's memory, and give exactly 3 lanes above the 4 GB floor"
   rc=0; out=$(spawn_ship "$c" task-a) || rc=$?
   assert_admitted "$c" task-a "$rc" "$out" "a spawn with room in the budget"
   set_power "$c" battery
@@ -358,7 +380,10 @@ test_idle_reclaim_from_real_workers() {
   local c h now idle_pid busy_pid out report
   c=$(make_case reclaim)
   h="$c/home"
-  auto_config "$c" 2
+  # The real process table and real memory: this case judges real workers, never room.
+  : > "$c/real-processes"
+  rm -f "$c/fakebin/sysctl"
+  printf 'auto\n' > "$h/config/lane-capacity"
   mkdir -p "$c/wt-idle" "$c/wt-busy"
   now=$(date +%s)
   for id in idle busy; do
