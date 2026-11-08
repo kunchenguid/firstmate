@@ -877,7 +877,7 @@ test_post_alarm_uncommitted_actionable_close_stays_suppressed() {
 # events must each deliver one rewake, run one arm, keep one watcher live at a
 # time with an advancing beacon, and end the stale episode on the first event.
 test_stale_alarm_cannot_freeze_the_stop_owned_chain() {
-  local dir out status i arms beats age successor attempt
+  local dir out status i arms beats age successor
   dir=$(make_primary_dir "$TMP_ROOT/chain-freeze")
   : > "$dir/state/task.meta"
   : > "$dir/state/.claude-autoarm-failure-notified"
@@ -902,7 +902,7 @@ test_stale_alarm_cannot_freeze_the_stop_owned_chain() {
     # End this handling turn explicitly, then await the successor's EXIT trap
     # before the next Stop; no timing assumption substitutes for completion.
     rm -f "$dir/state/successor-park"
-    for attempt in $(seq 1 200); do
+    for _ in $(seq 1 200); do
       [ -e "$dir/state/watcher-exited-$successor" ] && break
       sleep 0.05
     done
