@@ -153,6 +153,11 @@
 #                          line reported a PR that the check sweep's
 #                          fm-pr-check.sh scan could not record; the line
 #                          names the task, the PR, and the refusal
+#   check: record hygiene: <lines>
+#                          with config/record-hygiene present, the heartbeat's
+#                          background record-hygiene scan found a new set of
+#                          RECORD_HYGIENE findings (fm-record-hygiene-lib.sh);
+#                          an unchanged set does not wake again
 #   check: rejected unauthenticated state checks: <paths>
 #                          unsafe state checks were refused without execution
 #   check: rejected unauthenticated PR poll retirement receipts: <paths>
@@ -4707,10 +4712,14 @@ EOF
   done < <(recorded_windows)
 
   # Collect a completed hygiene scan before launching another one. The report
-  # child keeps endpoint/backlog reads out of the polling path.
+  # child keeps endpoint/backlog reads out of the polling path. Only a home
+  # with config/record-hygiene present scans; read the flag once per cycle so
+  # collection and launch agree.
+  hygiene_enabled=0
+  [ -e "$CONFIG/record-hygiene" ] && hygiene_enabled=1
   hygiene_result="$STATE/.record-hygiene-result"
   hygiene_running="$STATE/.record-hygiene-running"
-  if [ -f "$hygiene_result" ]; then
+  if [ "$hygiene_enabled" = 1 ] && [ -f "$hygiene_result" ]; then
     hygiene_report=$(cat "$hygiene_result")
     if [ -n "$hygiene_report" ]; then
       if ! cmp -s <(printf '%s\n' "$hygiene_report") "$STATE/.record-hygiene-last"; then
@@ -4734,7 +4743,7 @@ EOF
   hb=$(( HEARTBEAT * (1 << streak) ))
   [ "$hb" -gt "$HEARTBEAT_MAX" ] && hb=$HEARTBEAT_MAX
   if [ "$(age_of "$STATE/.last-heartbeat")" -ge "$hb" ]; then
-    if [ -e "$hygiene_running" ]; then
+    if [ "$hygiene_enabled" = 1 ] && [ -e "$hygiene_running" ]; then
       hygiene_owner=$(cat "$hygiene_running" 2>/dev/null || true)
       IFS=$'\t' read -r hygiene_pid hygiene_started <<< "$hygiene_owner"
       hygiene_live_start=''
@@ -4748,7 +4757,7 @@ EOF
         rm -f "$hygiene_running"
       fi
     fi
-    if [ ! -e "$hygiene_running" ] && [ ! -e "$hygiene_result" ]; then
+    if [ "$hygiene_enabled" = 1 ] && [ ! -e "$hygiene_running" ] && [ ! -e "$hygiene_result" ]; then
       (
         report_timeout=${FM_RECORD_HYGIENE_TIMEOUT:-60}
         case "$report_timeout" in ''|*[!0-9]*|0) report_timeout=60 ;; esac

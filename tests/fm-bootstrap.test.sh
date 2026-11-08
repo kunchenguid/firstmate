@@ -261,14 +261,11 @@ assert_timeout_report() {
   [ "$elapsed" -ge "$timeout" ] || fail "expected elapsed >= timeout, got elapsed=${elapsed}s timeout=${timeout}s"
 }
 
-# Each row (fields are '^'-separated; the install URL contains a literal '|'):
-#   <label>^<lease 1/0>^<tasks-axi version or ->^<quota 1/0>^<backend or ->^<mode>^<expect>^<notcontains>
-#   mode=empty -> output must be empty (expect/notcontains ignored)
-#   mode=exact -> output must equal <expect>
-#   mode=grep  -> output must contain <expect> (fixed string); <notcontains> must not appear
-test_record_hygiene_archives_old_orphan_status() {
-  local case_dir fakebin out
-  case_dir="$TMP_ROOT/record-hygiene"
+# seed_record_hygiene_home <case_dir>: build <case_dir>/home with every record
+# inconsistency the hygiene report detects, plus a fake tasks-axi whose list
+# calls are appended to <case_dir>/tasks-axi-list.log. Prints the fake bin dir.
+seed_record_hygiene_home() {
+  local case_dir=$1 fakebin
   mkdir -p "$case_dir/home/config" "$case_dir/home/state" "$case_dir/home/data"
   printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
   fakebin=$(make_fake_toolchain "$case_dir")
@@ -279,6 +276,7 @@ case "${1:-}" in
   update) echo 'usage: tasks-axi update <id> --body-file <path> --archive-body' ;;
   mv) echo 'usage: tasks-axi mv <id> [<id>...] --to <path-or-dir>' ;;
   list)
+    printf '%s\n' "$*" >> "${0%/*}/../tasks-axi-list.log"
     case " $* " in *' --fields id '*) echo 'unsupported extra field: id' >&2; exit 2 ;; esac
     printf 'count: 3\ntasks[1]{id}:\n  missing-record\ntasks[2]{id}:\n  "missing,record",extra\ntasks[3]{id}:\n  nested/task\n'
     ;;
@@ -295,6 +293,14 @@ SH
   printf 'kind=ship\nbackend=tmux\n' > "$case_dir/home/state/no-window.meta"
   printf 'backend=tmux\nwindow=outside:window\npr=https://example.test/pull/42\n' > "$case_dir/outside.meta"
   ln -s "$case_dir/outside.meta" "$case_dir/home/state/linked.meta"
+  printf '%s\n' "$fakebin"
+}
+
+test_record_hygiene_archives_old_orphan_status() {
+  local case_dir fakebin out
+  case_dir="$TMP_ROOT/record-hygiene"
+  fakebin=$(seed_record_hygiene_home "$case_dir")
+  : > "$case_dir/home/config/record-hygiene"
   out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
     FM_BOOTSTRAP_NETWORK=skip FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
   assert_contains "$out" 'RECORD_HYGIENE: status log without metadata older than 24 hours: orphan' \
@@ -317,10 +323,57 @@ SH
   pass "bootstrap archives an old orphan status log and reports interleaved duplicates"
 }
 
+test_record_hygiene_absent_flag_is_inert() {
+  local case_dir fakebin out_off out_on before after
+  case_dir="$TMP_ROOT/record-hygiene-off"
+  fakebin=$(seed_record_hygiene_home "$case_dir")
+  before=$(cd "$case_dir/home" && ls -laR state data)
+  out_off=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_BOOTSTRAP_NETWORK=skip FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  after=$(cd "$case_dir/home" && ls -laR state data)
+  assert_not_contains "$out_off" 'RECORD_HYGIENE' "bootstrap reported record hygiene without config/record-hygiene"
+  [ "$before" = "$after" ] || fail "bootstrap changed state or data records without config/record-hygiene"
+  [ -f "$case_dir/home/state/orphan.status" ] || fail "bootstrap archived an orphan status log without config/record-hygiene"
+  ! grep -q in_flight "$case_dir/tasks-axi-list.log" 2>/dev/null \
+    || fail "bootstrap read the In-flight backlog for record hygiene without config/record-hygiene"
+
+  # Opting in on the same home changes only the RECORD_HYGIENE lines.
+  : > "$case_dir/home/config/record-hygiene"
+  out_on=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_BOOTSTRAP_NETWORK=skip FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  assert_contains "$out_on" 'RECORD_HYGIENE: status log without metadata older than 24 hours: orphan' \
+    "bootstrap did not report record hygiene once config/record-hygiene was created"
+  [ "$out_off" = "$(printf '%s\n' "$out_on" | grep -v '^RECORD_HYGIENE: ' || true)" ] \
+    || fail "bootstrap output without config/record-hygiene differs beyond the RECORD_HYGIENE lines"
+  pass "bootstrap without config/record-hygiene reports nothing, moves nothing, and reads no backlog for it"
+}
+
+test_record_hygiene_watcher_absent_flag_is_inert() {
+  local case_dir status
+  case_dir="$TMP_ROOT/record-hygiene-watcher-off"
+  mkdir -p "$case_dir/home"/{state,data,config}
+  printf 'kind=ship\nbackend=tmux\n' > "$case_dir/home/state/hygiene.meta"
+  status=0
+  FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$ROOT" FM_LIVE=0 \
+    FM_POLL=1 FM_HEARTBEAT=1 FM_HEARTBEAT_MAX=1 FM_CHECK_INTERVAL=999999 \
+    FM_RECORD_HYGIENE_TIMEOUT=1 timeout 5 "$ROOT/bin/fm-watch.sh" >"$case_dir/out" 2>"$case_dir/err" || status=$?
+  { [ "$status" -eq 0 ] || [ "$status" -eq 124 ]; } \
+    || fail "watcher failed without config/record-hygiene (exit=$status)"
+  sleep 2
+  [ -e "$case_dir/home/state/.last-heartbeat" ] || fail "watcher never reached a heartbeat"
+  for marker in .record-hygiene-running .record-hygiene-result .record-hygiene-result.tmp .record-hygiene-last; do
+    [ ! -e "$case_dir/home/state/$marker" ] || fail "watcher heartbeat ran record hygiene without config/record-hygiene ($marker)"
+  done
+  ! grep -q $'\tcheck\trecord-hygiene\t' "$case_dir/home/state/.wake-queue" 2>/dev/null \
+    || fail "watcher queued a record hygiene wake without config/record-hygiene"
+  pass "watcher heartbeat without config/record-hygiene runs no hygiene scan"
+}
+
 test_record_hygiene_reclaims_stale_running_marker() {
   local case_dir status tries
   case_dir="$TMP_ROOT/record-hygiene-stale-marker"
   mkdir -p "$case_dir/home"/{state,data,config}
+  : > "$case_dir/home/config/record-hygiene"
   printf '99999999 nonexistent-process-start-time\n' > "$case_dir/home/state/.record-hygiene-running"
   printf 'kind=ship\nbackend=tmux\n' > "$case_dir/home/state/hygiene.meta"
   status=0
@@ -346,6 +399,7 @@ test_record_hygiene_watcher_data_is_defined() {
   local case_dir status
   case_dir="$TMP_ROOT/record-hygiene-watcher-data"
   mkdir -p "$case_dir/home"/{state,data,config}
+  : > "$case_dir/home/config/record-hygiene"
   status=0
   FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$ROOT" FM_LIVE=0 \
     FM_POLL=1 FM_HEARTBEAT=1 FM_HEARTBEAT_MAX=1 FM_CHECK_INTERVAL=999999 \
@@ -361,6 +415,7 @@ test_record_hygiene_bounds_backlog_read() {
   local case_dir fakebin out
   case_dir="$TMP_ROOT/record-hygiene-timeout"
   mkdir -p "$case_dir/home/config" "$case_dir/home/state" "$case_dir/home/data"
+  : > "$case_dir/home/config/record-hygiene"
   printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
   fakebin=$(make_fake_toolchain "$case_dir")
   cat > "$fakebin/tasks-axi" <<'SH'
@@ -381,6 +436,11 @@ SH
   pass "bootstrap bounds and reports backlog read timeout"
 }
 
+# Each row (fields are '^'-separated; the install URL contains a literal '|'):
+#   <label>^<lease 1/0>^<tasks-axi version or ->^<quota 1/0>^<backend or ->^<mode>^<expect>^<notcontains>
+#   mode=empty -> output must be empty (expect/notcontains ignored)
+#   mode=exact -> output must equal <expect>
+#   mode=grep  -> output must contain <expect> (fixed string); <notcontains> must not appear
 test_bootstrap_reporting() {
   local label lease tasks quota backend mode expect notcontains case_dir fakebin base out n archive_body multi_id quota_version
   n=0
@@ -1658,6 +1718,8 @@ test_record_hygiene_archives_old_orphan_status
 test_record_hygiene_watcher_data_is_defined
 test_record_hygiene_reclaims_stale_running_marker
 test_record_hygiene_bounds_backlog_read
+test_record_hygiene_absent_flag_is_inert
+test_record_hygiene_watcher_absent_flag_is_inert
 test_bootstrap_reporting
 test_absent_tool_cases_hide_a_real_install_in_the_base_path
 test_no_mistakes_min_version

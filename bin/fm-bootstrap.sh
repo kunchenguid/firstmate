@@ -16,7 +16,8 @@
 #                 "HOME_SUMMARY: <ledger never published|not republished since
 #                 <stamp>>; <n> failed attempt(s) ... last: <recorded failure>",
 #                 "BACKLOG_RECONCILE: <id>: <what this home could not reconcile>",
-#                 "RECORD_HYGIENE: <record inconsistency found in this home>",
+#                 "RECORD_HYGIENE: <record inconsistency found in this home>"
+#                 (only with config/record-hygiene present),
 #                 "BACKLOG_RECONCILE: code-root <file> is not this home's <file>; ...",
 #                 "TANGLE: <remediation>",
 #                 "SECONDMATE_SYNC: secondmate <id>: skipped: <reason>",
@@ -1685,7 +1686,7 @@ if network_phase; then
   fm_timing_record phase gh-auth "$__fm_timing_stamp"
 fi
 local_phase && detect_local_config
-local_phase && record_hygiene_report
+local_phase && [ -e "$CONFIG/record-hygiene" ] && record_hygiene_report
 
 if [ "${FM_BOOTSTRAP_DETECT_ONLY:-0}" != 1 ]; then
   # secondmate_sync consumes SECONDMATE_RESPAWNED_IDS from the liveness sweep, so
