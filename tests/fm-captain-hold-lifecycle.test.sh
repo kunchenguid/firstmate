@@ -1626,7 +1626,7 @@ EOF
 }
 
 test_hold_and_answer_republish_the_home_summary() {
-  local home decision before
+  local home decision
   home=$(make_home summary-refresh)
   decision="$home/decision.txt"
   printf 'go\n' > "$decision"
@@ -1642,18 +1642,86 @@ test_hold_and_answer_republish_the_home_summary() {
     || fail "answer failed"
   [ -s "$home/state/home-summary.json" ] \
     || fail "a successful answer did not republish the home summary"
+  pass "hold and answer republish the home summary"
+}
 
-  # A refresh that cannot publish must never fail the hold or the answer.
-  rm -f "$home/state/home-summary.json"
-  mkdir "$home/state/home-summary.json"
-  run_captain "$home" hold summary-call-two --title "Choose again" \
+test_hold_and_answer_never_fail_on_a_refresh_failure() {
+  local home decision lock_marker holder_pid i shown
+  home=$(make_home summary-refresh-failure)
+  decision="$home/decision.txt"
+  printf 'go\n' > "$decision"
+  lock_marker="$home/refresh-lock-held"
+  # Hold the refresh lock from another live process so every refresh times out.
+  FM_HOME="$home" bash -c '
+    . "$1/bin/fm-wake-lib.sh"
+    fm_lock_acquire_wait "$2/state/.home-summary-refresh.lock"
+    : > "$3"
+    sleep 30
+  ' _ "$ROOT" "$home" "$lock_marker" &
+  holder_pid=$!
+  i=0
+  while [ ! -e "$lock_marker" ] && [ "$i" -lt 100 ]; do
+    kill -0 "$holder_pid" 2>/dev/null || break
+    sleep 0.05
+    i=$((i + 1))
+  done
+  [ -e "$lock_marker" ] || { kill "$holder_pid" 2>/dev/null || true; fail "could not hold the refresh lock"; }
+  FM_HOME_SUMMARY_TIMEOUT=1 run_captain "$home" hold summary-call-two --title "Choose again" \
     --reason "second choice pending" --repo sample >/dev/null \
-    || fail "a refresh failure failed the hold"
-  before=$(tasks_in "$home" show summary-call-two --full)
-  assert_contains "$before" "held: yes" "the hold was not recorded when the refresh failed"
-  run_captain "$home" answer summary-call-two --decision-file "$decision" >/dev/null \
-    || fail "a refresh failure failed the answer"
-  pass "hold and answer republish the home summary and never fail on a refresh error"
+    || { kill "$holder_pid" 2>/dev/null || true; fail "a refresh failure failed the hold"; }
+  shown=$(tasks_in "$home" show summary-call-two --full)
+  assert_contains "$shown" "held: yes" "the hold was not recorded when the refresh failed"
+  FM_HOME_SUMMARY_TIMEOUT=1 run_captain "$home" answer summary-call-two --decision-file "$decision" >/dev/null \
+    || { kill "$holder_pid" 2>/dev/null || true; fail "a refresh failure failed the answer"; }
+  kill "$holder_pid" 2>/dev/null || true
+  wait "$holder_pid" 2>/dev/null || true
+  [ ! -e "$home/state/home-summary.json" ] || fail "the failed refresh published a summary"
+  grep -F 'refresh exceeded its 1-second deadline' "$home/state/.home-summary-refresh.log" >/dev/null \
+    || fail "the refresh failure was not recorded"
+  [ "$(grep -c 'refresh exceeded its 1-second deadline' "$home/state/.home-summary-refresh.log")" -ge 2 ] \
+    || fail "the hold and the answer did not each attempt a refresh"
+  pass "hold and answer succeed and record a refresh failure"
+}
+
+test_hold_and_answer_release_their_locks() {
+  local home decision
+  home=$(make_home lock-release)
+  decision="$home/decision.txt"
+  printf 'go\n' > "$decision"
+  run_captain "$home" hold lock-call --title "Choose the lock option" \
+    --reason "lock choice pending" --repo sample >/dev/null || fail "hold failed"
+  [ -z "$(find "$home/state" -maxdepth 1 -name '.*.lock*' -print)" ] \
+    || fail "a hold left lock records behind: $(find "$home/state" -maxdepth 1 -name '.*.lock*' -print)"
+  run_captain "$home" answer lock-call --decision-file "$decision" >/dev/null || fail "answer failed"
+  [ -z "$(find "$home/state" -maxdepth 1 -name '.*.lock*' -print)" ] \
+    || fail "an answer left lock records behind: $(find "$home/state" -maxdepth 1 -name '.*.lock*' -print)"
+  pass "hold and answer release every lock they take"
+}
+
+test_hold_stops_when_its_task_lock_cannot_be_taken() {
+  local home rc=0 shown real_date
+  home=$(make_home lock-unobtainable)
+  real_date=$(command -v date)
+  # The state directory disappears just before the hold takes its task lock, so
+  # the lock is unobtainable while the backlog stays readable and writable.
+  cat > "$home/fakebin/date" <<EOF
+#!/usr/bin/env bash
+if [ -d "$home/state" ] && [ ! -e "$home/date-fired" ]; then
+  : > "$home/date-fired"
+  rm -rf "$home/state"
+fi
+exec "$real_date" "\$@"
+EOF
+  chmod +x "$home/fakebin/date"
+  run_captain "$home" hold orphan-call --title "No lock call" \
+    --reason "the lock cannot be taken" --repo sample >/dev/null 2>&1 || rc=$?
+  [ -e "$home/date-fired" ] || fail "the fixture never removed the state directory"
+  [ "$rc" -ne 0 ] || fail "a hold that could not take its task lock reported success"
+  shown=$(tasks_in "$home" show orphan-call --full 2>&1 || true)
+  case "$shown" in
+    *"held: yes"*) fail "a hold that could not take its task lock still changed the task" ;;
+  esac
+  pass "a hold that cannot take its task lock stops before changing anything"
 }
 
 test_secondmate_reconcile_publishes_before_request_retirement() {
@@ -5152,6 +5220,9 @@ test_terminal_single_owner_status_decision_does_not_block_empty_inventory
 test_secondmate_hold_stays_in_authoritative_home
 test_secondmate_home_publishes_holds_and_answers
 test_hold_and_answer_republish_the_home_summary
+test_hold_and_answer_never_fail_on_a_refresh_failure
+test_hold_and_answer_release_their_locks
+test_hold_stops_when_its_task_lock_cannot_be_taken
 test_secondmate_reconcile_publishes_before_request_retirement
 test_bound_channel_answers_close_at_answer_time
 test_reconcile_never_closes_through_the_keyed_answer_intake

@@ -268,7 +268,11 @@ CAPTAIN_META_LOCK=
 CAPTAIN_META_LOCK_HELD=0
 CAPTAIN_CONTROL_LOCK=
 CAPTAIN_CONTROL_LOCK_HELD=0
+# Set by a hold or answer that should republish this home's summary once it
+# has succeeded and released its locks.
+CAPTAIN_REFRESH_HOME_SUMMARY=0
 captain_hold_cleanup() {
+  local rc=$?
   if [ "$CAPTAIN_META_LOCK_HELD" = 1 ]; then
     fm_lock_release "$CAPTAIN_META_LOCK" || true
     CAPTAIN_META_LOCK_HELD=0
@@ -278,6 +282,14 @@ captain_hold_cleanup() {
     CAPTAIN_CONTROL_LOCK_HELD=0
   fi
   fm_afk_contract_lock_release || true
+  # A hold or answer changes what this home's published summary says about
+  # open captain calls, so a successful one republishes it. The refresh is
+  # side-band and best-effort: it can never change the command's result, and
+  # it runs after the locks are released so it never extends them.
+  if [ "$CAPTAIN_REFRESH_HOME_SUMMARY" = 1 ] && [ "$rc" -eq 0 ]; then
+    CAPTAIN_REFRESH_HOME_SUMMARY=0
+    "$SCRIPT_DIR/fm-home-summary-refresh.sh" --best-effort >/dev/null 2>&1 || true
+  fi
 }
 trap captain_hold_cleanup EXIT
 
@@ -2258,21 +2270,9 @@ command_open() {  # <task-id> [--identity] [--distinguish-absent]
   exit 2
 }
 
-# A hold or answer changes what this home's published summary says about open
-# captain calls, so a successful one republishes it. The refresh is side-band
-# and best-effort: it can never change the hold's or answer's result.
-run_then_refresh_home_summary() {  # <command-function> <args...>
-  local rc=0
-  ( "$@" ) || rc=$?
-  if [ "$rc" -eq 0 ]; then
-    "$SCRIPT_DIR/fm-home-summary-refresh.sh" --best-effort >/dev/null 2>&1 || true
-  fi
-  exit "$rc"
-}
-
 case "${1:-}" in
-  hold) shift; run_then_refresh_home_summary command_hold "$@" ;;
-  answer) shift; run_then_refresh_home_summary command_answer "$@" ;;
+  hold) shift; CAPTAIN_REFRESH_HOME_SUMMARY=1; command_hold "$@" ;;
+  answer) shift; CAPTAIN_REFRESH_HOME_SUMMARY=1; command_answer "$@" ;;
   answers) shift; command_answers "$@" ;;
   reconcile-requests) shift; command_reconcile_requests "$@" ;;
   bind) shift; command_bind "$@" ;;
