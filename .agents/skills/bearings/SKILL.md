@@ -96,7 +96,7 @@ For a contribution wake or linked-issue filing, go directly to Contribution foll
 
 `bin/fm-bearings-board-payload.sh` owns the payload's shape, so the board is identical every session.
 It maps the fleet snapshot to the fm-bearings-board.v1 payload deterministically: one decision card per captain-held task id (keyed by the task id, titled and described from the held task's own record), every non-done in-flight row as Underway with its projected `name`, landed rows, and the gates and warnings as Charted Next with `kind`, `dispatchable`, `filed`, `repo` and the omitted-row counts derived from structured fields.
-Run `bin/fm-bearings-board-payload.sh > <payload.json>` (add `--include-prs` when the digest used live PRs), then `bin/fm-bearings-board.sh build <payload.json>`.
+Run `printf '%s\n' "$snapshot" | bin/fm-bearings-board-payload.sh --snapshot - > <payload.json>` on the snapshot already captured for the digest, so the board matches the digest and keeps any `--all-decisions` or live-PR selection, then `bin/fm-bearings-board.sh build <payload.json>`.
 Add nothing for a plain board.
 Decision cards arrive as freeform answer boxes; the optional `--copy <overlay.json>` carries only the judgment the snapshot cannot supply, and the generator's header owns its schema:
 

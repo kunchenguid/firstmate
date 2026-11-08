@@ -31,7 +31,16 @@ write_snapshot() {  # <path>
      "title": "Pick the alpha retry policy", "reason": "two options measured",
      "summary": "Pick the alpha retry policy: two options measured", "owner": "(main)"},
     {"id": "beta/old-row", "key": "old-row", "verb": "captain-hold",
-     "summary": "Legacy fused summary", "owner": "beta"}
+     "summary": "Legacy fused summary", "owner": "beta"},
+    {"id": "full-call", "key": "full-call", "verb": "captain-hold",
+     "title": "Choose the rollout scope for the next release while preserving the", "reason": "Which route should proceed? A: retain the existing workflow until the staged",
+     "summary": "Choose the rollout scope: Which route",
+     "question": "Choose the rollout scope for the next release while preserving the complete operator question: Which route should proceed? A: retain the workflow. B: start the migration. C: defer.",
+     "owner": "(main)"},
+    {"id": "questions/full-call", "key": "full-call", "verb": "captain-hold",
+     "title": "Other home call", "reason": "same task id as main",
+     "summary": "Other home call: same task id as main",
+     "question": "Other home call: same task id as main", "owner": "questions"}
   ],
   "in_flight": [
     {"id": "t1", "name": "Build the thing", "repo": "alpha", "state": "working", "doing": "writing tests", "kind": "ship"},
@@ -104,7 +113,11 @@ test_rows_map_deterministically_from_the_snapshot() {
   write_snapshot "$snap"
   p=$("$GEN" --snapshot "$snap") || fail "the generator failed"
 
-  assert_equals "alpha-fix,old-row" "$(jq -r '[.captains_call[].key] | join(",")' <<<"$p")" "captains_call is one card per open decision"
+  assert_equals "alpha-fix,old-row,full-call,questions.full-call" "$(jq -r '[.captains_call[].key] | join(",")' <<<"$p")" "captains_call is one card per open decision, and a colliding home keeps its own card"
+  assert_contains "$(jq -r '.captains_call[2].decide' <<<"$p")" "B: start the migration. C: defer." "the card shows every option of a question the short fields cut"
+  assert_equals "null" "$(jq -c '.captains_call[0].decide' <<<"$p")" "a question the short fields already carry adds no duplicate row"
+  assert_equals "null" "$(jq -c '.captains_call[3].decide' <<<"$p")" "a short other-home question adds no duplicate row"
+  assert_equals "Other home call" "$(jq -r '.captains_call[3].title' <<<"$p")" "the other home's hold keeps its own title"
   assert_equals "Pick the alpha retry policy" "$(jq -r '.captains_call[0].title' <<<"$p")" "the card title comes from the clean title field"
   assert_equals "two options measured" "$(jq -r '.captains_call[0].about' <<<"$p")" "the card about comes from the reason field"
   assert_equals "Legacy fused summary" "$(jq -r '.captains_call[1].title' <<<"$p")" "a row with no title falls back to its summary"
@@ -157,7 +170,7 @@ test_copy_overlay_refines_cards_and_keeps_the_payload_valid() {
 }
 EOF
   p=$("$GEN" --snapshot "$snap" --copy "$copy") || fail "the generator refused a valid overlay"
-  assert_equals "alpha-fix,merge-widgets" "$(jq -r '[.captains_call[].key] | join(",")' <<<"$p")" "a null overlay drops its card and extra cards append"
+  assert_equals "alpha-fix,full-call,questions.full-call,merge-widgets" "$(jq -r '[.captains_call[].key] | join(",")' <<<"$p")" "a null overlay drops its card and extra cards append"
   assert_equals "Alpha retry: pick one" "$(jq -r '.captains_call[0].title' <<<"$p")" "the overlay title wins"
   assert_equals "two options measured" "$(jq -r '.captains_call[0].about' <<<"$p")" "unlisted fields keep the generated value"
   assert_equals "Queued, reworded" "$(jq -r '.charted[] | select(.id == "plain-queued") | .title' <<<"$p")" "the overlay can reword a charted row"
