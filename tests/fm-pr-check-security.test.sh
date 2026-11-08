@@ -1134,22 +1134,62 @@ test_scan_does_not_replace_a_merged_pr() {
   pass "the scan does not replace a PR whose merge was already reported"
 }
 
-test_scan_does_not_replace_a_pr_merged_after_candidate_collection() {
-  local dir state
+# A merge record holds the task's merge-notification lock while it writes the
+# merge notice, and the scan holds that same lock from its recheck through the
+# pr= write, so a replacement can never interleave with the record of the PR it
+# replaces. Holding the wake-queue lock stalls the real merge record mid-write
+# with that lock held; the scan must wait for it and then leave the merged PR.
+test_scan_does_not_replace_a_pr_whose_merge_is_being_recorded() {
+  local dir state holder_pid merge_pid scan_pid
   dir=$(make_case scan-merge-race)
   state="$dir/home/state"
   write_task_meta "$dir"
   printf '%s\n' 'done [at=2]: PR https://github.com/o/r/pull/7 checks green' > "$state/task-a.status"
   run_check_entry "$dir" scan >/dev/null 2>"$dir/stderr" || fail "the first scan failed: $(cat "$dir/stderr")"
+  grep -qxF 'pr=https://github.com/o/r/pull/7' "$state/task-a.meta" || fail "the first scan did not record pull/7"
   printf '%s\n' 'done [at=3]: PR https://github.com/o/r/pull/8 checks green' >> "$state/task-a.status"
-  FM_CHECK_TIMEOUT=60 FM_TEST_GH_SLOW_URL=pull/8 FM_TEST_GH_SLOW_SECONDS=3 run_check_entry "$dir" scan >/dev/null 2>"$dir/stderr" &
-  sleep 1
-  fm_pr_poll_merge_mark_notified "$state" task-a github github.com o/r 7 || fail "could not record merge notice"
-  wait $! || fail "the scan failed: $(cat "$dir/stderr")"
-  grep -qxF 'pr=https://github.com/o/r/pull/7' "$state/task-a.meta" || fail "the merged PR was replaced"
-  pass "a merge notice recorded during registration prevents replacement"
+  (
+    STATE=$state
+    # shellcheck source=/dev/null
+    . "$ROOT/bin/fm-wake-lib.sh"
+    fm_lock_acquire_wait "$state/.wake-queue.lock" || exit 1
+    : > "$dir/queue-held"
+    # Bounded, so a failed assertion cannot strand this holder.
+    for _ in $(seq 600); do [ ! -e "$dir/queue-release" ] || break; sleep 0.1; done
+    fm_lock_release "$state/.wake-queue.lock"
+  ) &
+  holder_pid=$!
+  until [ -e "$dir/queue-held" ]; do
+    kill -0 "$holder_pid" 2>/dev/null || fail "could not hold the wake-queue lock"
+    sleep 0.1
+  done
+  (
+    # shellcheck source=/dev/null
+    . "$ROOT/bin/fm-merge-outcome-lib.sh"
+    FM_HOME="$dir/home" FM_CONFIG_OVERRIDE="$dir/home/config" \
+      fm_merge_outcome_report "$dir/home" "$state" task-a https://github.com/o/r/pull/7 self
+  ) >/dev/null 2>"$dir/merge.stderr" &
+  merge_pid=$!
+  until [ -d "$state/task-a.pr-poll-merge-notified.lock" ]; do
+    kill -0 "$merge_pid" 2>/dev/null || fail "the merge record exited before taking its locks: $(cat "$dir/merge.stderr")"
+    sleep 0.1
+  done
+  FM_CHECK_TIMEOUT=60 run_check_entry "$dir" scan >/dev/null 2>"$dir/stderr" &
+  scan_pid=$!
+  sleep 2
+  kill -0 "$scan_pid" 2>/dev/null || fail "the scan did not wait for the merge record holding its lock: $(cat "$dir/stderr")"
+  grep -qxF 'pr=https://github.com/o/r/pull/7' "$state/task-a.meta" || fail "the scan replaced pr= while the merge record held its lock"
+  : > "$dir/queue-release"
+  wait "$holder_pid" || fail "could not release the wake-queue lock"
+  wait "$merge_pid" || fail "the merge record failed: $(cat "$dir/merge.stderr")"
+  wait "$scan_pid" || fail "the scan failed: $(cat "$dir/stderr")"
+  fm_pr_poll_merge_already_notified "$state" task-a github github.com o/r 7 || fail "the merge notice was not recorded"
+  grep -qxF 'pr=https://github.com/o/r/pull/7' "$state/task-a.meta" || fail "the merged PR was replaced after its merge record"
+  pass "a merge record holding its lock blocks the scan from replacing that PR"
 }
 
+# A refused replacement keeps the current watch and reports the refusal, and a
+# PR the supervisor records during the replacement outranks it.
 test_scan_replacement_keeps_the_watch_it_cannot_take_over() {
   local dir state out
   dir=$(make_case scan-replacement-refused)
@@ -5412,7 +5452,7 @@ test_scan_reads_the_ready_line_past_supervisor_annotations
 test_scan_replaces_a_recorded_pr_named_by_an_older_line
 test_scan_keeps_a_recorded_pr_the_log_never_named
 test_scan_does_not_replace_a_merged_pr
-test_scan_does_not_replace_a_pr_merged_after_candidate_collection
+test_scan_does_not_replace_a_pr_whose_merge_is_being_recorded
 test_scan_replacement_keeps_the_watch_it_cannot_take_over
 test_scan_reports_a_timed_out_registration_once_and_retries
 test_scan_keeps_a_notice_owed_until_its_wake_is_queued

@@ -327,6 +327,8 @@ BASELINE_BACKUP=
 BASELINE_BACKUP_COMPLETE=0
 META_LOCK=
 META_LOCK_HELD=0
+MERGE_NOTICE_LOCK=
+MERGE_NOTICE_LOCK_HELD=0
 PR_POLL_PUBLISH_LOCK=
 PR_POLL_PUBLISH_LOCK_HELD=0
 CONTROL_LOCK=
@@ -350,6 +352,10 @@ pr_check_cleanup() {
   if [ "$CONTROL_LOCK_HELD" = 1 ]; then
     fm_lock_release "$CONTROL_LOCK" || true
     CONTROL_LOCK_HELD=0
+  fi
+  if [ "$MERGE_NOTICE_LOCK_HELD" = 1 ]; then
+    fm_lock_release "$MERGE_NOTICE_LOCK" || true
+    MERGE_NOTICE_LOCK_HELD=0
   fi
   if [ "$META_LOCK_HELD" = 1 ]; then
     fm_lock_release "$META_LOCK" || true
@@ -415,10 +421,16 @@ META_LOCK_HELD=1
   || { echo "error: task metadata is unavailable" >&2; exit 1; }
 # A scan gathers its candidates before it registers them, so the supervisor may
 # have recorded another PR meanwhile; that choice is never overwritten. Only the
-# exact pr= the scan chose to replace gives way.
+# exact pr= the scan chose to replace gives way, and only while its merge is
+# unrecorded: the merge-notification lock bin/fm-merge-outcome-lib.sh records a
+# merge under is held from that recheck through the pr= write, so a replacement
+# never interleaves with the record of the PR it replaces.
 if [ "${FM_PR_CHECK_SCAN:-}" = 1 ]; then
   RECORDED_PR=$(grep '^pr=' "$META" | tail -1 | cut -d= -f2- || true)
   if [ -n "${FM_PR_CHECK_SCAN_REPLACES:-}" ] && [ "$RECORDED_PR" = "$FM_PR_CHECK_SCAN_REPLACES" ]; then
+    MERGE_NOTICE_LOCK="$STATE/$ID.pr-poll-merge-notified.lock"
+    fm_lock_acquire_wait "$MERGE_NOTICE_LOCK"
+    MERGE_NOTICE_LOCK_HELD=1
     pr_check_pr_retired "$ID" "$RECORDED_PR" && exit 0
   fi
   [ -z "$RECORDED_PR" ] || [ "$RECORDED_PR" = "$URL" ] \
@@ -482,6 +494,11 @@ fm_pr_metadata_identity_parse "$META" || { [ -z "${BASELINE_BACKUP:-}" ] || base
 [ "$FM_PR_META_PROVIDER" = "$PROVIDER" ] && [ "$FM_PR_META_URL" = "$URL" ] \
   && [ "$FM_PR_META_HOST" = "$HOST" ] && [ "$FM_PR_META_PATH" = "$PROJECT_PATH" ] \
   && [ "$FM_PR_META_NUMBER" = "$NUMBER" ] || { [ -z "${BASELINE_BACKUP:-}" ] || baseline_failure; exit 1; }
+if [ "$MERGE_NOTICE_LOCK_HELD" = 1 ]; then
+  fm_lock_release "$MERGE_NOTICE_LOCK"
+  MERGE_NOTICE_LOCK_HELD=0
+fi
+
 PR_POLL_PUBLISH_LOCK="$STATE/.pr-poll-publish-$ID.lock"
 fm_lock_acquire_wait "$PR_POLL_PUBLISH_LOCK" || { [ -z "${BASELINE_BACKUP:-}" ] || baseline_failure; exit 1; }
 PR_POLL_PUBLISH_LOCK_HELD=1
