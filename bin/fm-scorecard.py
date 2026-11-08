@@ -103,7 +103,9 @@ def read_ledger(label: str, path: str) -> tuple[dict, list[Task]]:
             t.harness = rec.get("harness")
             t.model = rec.get("model")
             continue
-        if t is None:
+        if t is None or (t.cleaned_up and event != "task.cleaned_up"):
+            # After cleanup the id is free: an event that races ahead of the
+            # next dispatch record starts a pending task that dispatch adopts.
             t = Task(label, name)
             tasks.append(t)
             current[name] = t

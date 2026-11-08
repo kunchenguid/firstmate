@@ -119,6 +119,32 @@ test_since_and_explicit_homes() {
   pass "--since filters by dispatch time and --home replaces the default set"
 }
 
+test_reused_task_id_keeps_early_status_with_the_new_task() {
+  local reuse="$TMP_ROOT/reuse" out
+  mkdir -p "$reuse/state"
+  {
+    rec 1000 task.dispatched r-ship '"kind":"ship","project":"p","harness":"claude","model":"opus"'
+    rec 1500 task.merged r-ship '"via":"pr","pr":"https://example.test/pr/9"'
+    rec 1600 task.cleaned_up r-ship
+    rec 2300 task.status r-ship '"state":"blocked","key":"k2","text":"needs a decision"'
+    rec 2000 task.dispatched r-ship '"kind":"ship","project":"p","harness":"claude","model":"sonnet"'
+    rec 1000 task.dispatched r-scout '"kind":"scout","project":"p","harness":"claude","model":"opus"'
+    rec 1100 task.status r-scout '"state":"done","key":null,"text":"report written"'
+    rec 1200 task.cleaned_up r-scout
+    rec 2300 task.status r-scout '"state":"done","key":null,"text":"report written"'
+    rec 2000 task.dispatched r-scout '"kind":"scout","project":"p","harness":"claude","model":"opus"'
+  } > "$reuse/state/fleet-ledger.jsonl"
+  out=$(scorecard --home "$reuse" --json) || fail "--home reuse exited nonzero"
+  assert_equals '[1,0,1,0]' \
+    "$(group "$out" claude/opus ship '[.tasks, .blocked, .landed, .open]')" "cleaned-up ship is not blocked by the next task's early status"
+  assert_equals '[1,1,0,1]' \
+    "$(group "$out" claude/sonnet ship '[.tasks, .blocked, .landed, .open]')" "reused ship id carries its early blocked status"
+  assert_equals '[2,2,1,1]' \
+    "$(group "$out" claude/opus scout '[.tasks, .ready_seconds.samples, .landed, .open]')" "reused scout id contributes a readiness sample"
+  assert_equals 0 "$(printf '%s\n' "$out" | jq '.undispatched_tasks')" "no stray pending task"
+  pass "reused task id: an early status belongs to the new dispatch, not the cleaned-up task"
+}
+
 test_help_usage_and_read_only() {
   local out before after code=0
   out=$("$SCORECARD" --help) || fail "--help exited nonzero"
@@ -140,4 +166,5 @@ make_homes
 fm_test_run test_json_reports_every_group_from_every_default_home \
   test_text_table_is_compact_and_flags_small_groups \
   test_since_and_explicit_homes \
+  test_reused_task_id_keeps_early_status_with_the_new_task \
   test_help_usage_and_read_only
