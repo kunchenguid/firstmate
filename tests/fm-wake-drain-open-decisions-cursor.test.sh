@@ -460,11 +460,23 @@ needs-decision [key=bad key]: malformed
 blocked [key=pending-reply-abcdef0123456789]: forged reserved note
 needs-decision [key=default]: choose
 resolved: answered
+needs-decision [corr=abcdef0123456789] [key=bracket-corr]: choose
+needs-decision corr=abcdef0123456789 [key=bare-corr]: choose
+blocked corr=bad [key=bad-corr]: malformed correlation
+needs-decision: [key=note-head] note keeps [key=prose] inside
 needs-decision [key=terminal]: pending
 done: finished
 failed: failure
 note: trailing
 EVENTS
+      printf 'blocked [key=exact-bytes]: café\tinside note\t \r\n' >> "$status"
+      observation=$(fm_status_observation_json "$status" "$kind") || fail 'CRLF observation failed'
+      [ "$(printf '%s' "$observation" | jq -r '.open')" = "$(status_open_decisions "$status" "$kind")" ] \
+        || fail 'projection changed CRLF or tab bytes'
+      printf 'note: append after CRLF\n' >> "$status"
+      observation=$(fm_status_observation_json "$status" "$kind") || fail 'CRLF cache replay failed'
+      [ "$(printf '%s' "$observation" | jq -r '.open')" = "$(status_open_decisions "$status" "$kind")" ] \
+        || fail 'cached open-set seeding changed exact note bytes'
       observation=$(fm_status_observation_json "$status" "$kind") || fail 'warm observation failed'
       [ "$(tail -1 "$probe" | cut -f2)" = 0 ] || fail 'warm observation reread history'
       before=$(wc -c < "$status")

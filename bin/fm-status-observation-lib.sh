@@ -31,7 +31,7 @@ _fm_status_observation_witness() {  # <file> <endpoint>
 }
 
 fm_status_observation_json() (
-  local f=$1 kind=$2 dir key cache token parser_digest data='' offset=0 size ident chunk line complete
+  local f=$1 kind=$2 dir key cache token parser_digest data='' offset=0 size ident chunk fold_chunk='' line complete
   local latest='' previous='' wait='' raw='' pr='' open='' current='' event='' verb resolve held legacy key_line digest canonical
   local cached_ident cached_token cached_offset scratch actual_ident actual_size witness cached_witness
   [ -f "$f" ] && [ -r "$f" ] && [ ! -L "$f" ] || return 1
@@ -79,13 +79,35 @@ fm_status_observation_json() (
   fi
   chunk=$(umask 077; mktemp "$dir/read.XXXXXX") || return 1
   scratch=$(umask 077; mktemp "$dir/cache.XXXXXX") || { rm -f "$chunk"; return 1; }
-  trap 'rm -f "$chunk" "$scratch"' EXIT
+  trap 'rm -f "$chunk" "$scratch"; [ -z "$fold_chunk" ] || rm -f "$fold_chunk"' EXIT
   _fm_status_read_span "$f" "$offset" "$((size - offset))" > "$chunk" || return 1
   [ -z "${FM_STATUS_OBSERVATION_READ_PROBE:-}" ] || printf '%s\t%s\n' "$f" "$((size - offset))" >> "$FM_STATUS_OBSERVATION_READ_PROBE"
+  if [ "$size" -gt "$offset" ]; then
+    # Seed only the current open set, then replay the exact new bytes through
+    # the canonical bulk fold. This preserves its accelerated implementations
+    # without copying the retained set through every per-event subshell.
+    printf '%s' "$open" > "$scratch" || return 1
+    fold_chunk=$(umask 077; mktemp "$dir/fold.XXXXXX") || return 1
+    perl -e '
+      open my $state, "<", $ARGV[0] or exit 1;
+      while (my $row=<$state>) {
+        $row =~ s/\n\z//;
+        next unless length $row;
+        my ($key,$verb,$note)=split(/\t/,$row,3);
+        defined $note or exit 1;
+        print "$verb [key=$key]:$note\n" or exit 1;
+      }
+      open my $tail, "<", $ARGV[1] or exit 1;
+      while (1) {
+        my $n=read($tail, my $bytes, 65536);
+        defined $n or exit 1; last unless $n; print $bytes or exit 1;
+      }
+    ' "$scratch" "$chunk" > "$fold_chunk" || return 1
+    open=$(status_open_decisions "$fold_chunk" "$kind") || return 1
+  fi
   complete=1
   while IFS= read -r line || { [ -n "$line" ] && { complete=0; true; }; }; do
     case "$line" in *[![:space:]]*) raw=$line ;; *) continue ;; esac
-    open=$(_fm_decision_fold_line "$open" "$line" "$resolve" "$held" "$kind")
     if _fm_status_line_is_event "$line" "$legacy"; then
       previous=$event event=$line latest=$line
       status_line_verb "$line" verb
