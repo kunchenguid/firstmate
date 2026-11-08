@@ -670,28 +670,48 @@ test_stopfailure_failure_continuations_are_paced() {
 # a vanished need leaves nothing to supervise, so either one appearing during
 # the wait ends the firing silently instead of waking the primary late.
 test_stopfailure_paced_rewake_honors_afk_and_need_after_wait() {
-  local dir case_name status fail_payload rcfile hook_pid
+  local dir case_name status fail_payload rcfile hook_pid sleep_bin real_sleep
   fail_payload='{"session_id":"sess-autoarm","hook_event_name":"StopFailure","error":"connection_failed","transcript_path":"/tmp/sess.jsonl"}'
+  real_sleep=$(command -v sleep)
   for case_name in afk need; do
     dir=$(make_primary_dir "$TMP_ROOT/stopfailure-wait-$case_name")
     : > "$dir/state/task.meta"
     write_arm_fixture "$dir" actionable
     : > "$dir/state/.claude-autoarm-stopfailure-rewake"
     rcfile="$dir/hook-rc"
-    ( FM_CLAUDE_STOPFAILURE_REWAKE_COOLDOWN=5 run_autoarm "$dir" "$fail_payload" >/dev/null 2>&1; echo "$?" > "$rcfile" ) &
+    # Control the cooldown's sleep through its executable interface. Successor
+    # startup precedes pacing and can use up a short cooldown on a busy runner.
+    sleep_bin=$(fm_fakebin "$dir/sleep-bin")
+    cat > "$sleep_bin/sleep" <<'SH'
+#!/usr/bin/env bash
+if [ "$#" -eq 1 ] && [ "$1" -gt 100 ] 2>/dev/null; then
+  : > "$FM_HOME/state/cooldown-waiting"
+  while [ ! -e "$FM_HOME/state/cooldown-release" ] \
+    && kill -0 "$FM_AUTOARM_TEST_PID" 2>/dev/null; do
+    "$FM_TEST_REAL_SLEEP" 0.05
+  done
+  exit 0
+fi
+exec "$FM_TEST_REAL_SLEEP" "$@"
+SH
+    chmod +x "$sleep_bin/sleep"
+    ( PATH="$sleep_bin:$PATH" FM_TEST_REAL_SLEEP="$real_sleep" \
+        FM_CLAUDE_STOPFAILURE_REWAKE_COOLDOWN=600 \
+        run_autoarm "$dir" "$fail_payload" >"$dir/hook.out" 2>&1; echo "$?" > "$rcfile" ) &
     hook_pid=$!
-    for _ in $(seq 1 100); do
-      [ -e "$dir/state/successor-ran" ] && break
+    for _ in $(seq 1 600); do
+      [ -e "$dir/state/cooldown-waiting" ] && break
+      [ -e "$rcfile" ] && break
       sleep 0.05
     done
-    [ -e "$dir/state/successor-ran" ] || fail "$case_name: the paced StopFailure never reached its handling successor"
-    sleep 0.5
+    [ -e "$dir/state/cooldown-waiting" ] || fail "$case_name: StopFailure never reached its cooldown sleep: $(cat "$dir/hook.out")"
     [ ! -e "$rcfile" ] || fail "$case_name: the StopFailure inside the cooldown finished before waiting it out"
     if [ "$case_name" = afk ]; then
       : > "$dir/state/.afk"
     else
       rm -f "$dir/state/task.meta"
     fi
+    : > "$dir/state/cooldown-release"
     wait "$hook_pid"
     status=$(cat "$rcfile")
     expect_code 0 "$status" "$case_name appearing during the StopFailure cooldown wait must end the firing silently"
@@ -1282,12 +1302,15 @@ test_signal_session_identity_proof() {
       out="$dir/state/interrupted.out"
       run_autoarm_bg "$dir" "$out" sess-signal
       hook_pid=
-      for i in $(seq 1 100); do
+      # Claiming and starting the arm performs process-identity probes; allow
+      # loaded runners time to finish, but stop early if the harness exited.
+      for i in $(seq 1 600); do
         hook_pid=$(epoch_field "$dir" owner_pid)
         [ -n "$hook_pid" ] && [ -e "$dir/state/arm-ran" ] && break
-        sleep 0.02
+        kill -0 "$RUN_AUTOARM_BG_PID" 2>/dev/null || break
+        sleep 0.05
       done
-      [ -n "$hook_pid" ] && [ -e "$dir/state/arm-ran" ] || fail "$mode $signal hook did not park"
+      [ -n "$hook_pid" ] && [ -e "$dir/state/arm-ran" ] || fail "$mode $signal hook did not park; output: $(cat "$out"); epoch: $(cat "$dir/state/.claude-autoarm-epoch" 2>/dev/null); processes: $(ps -p "$RUN_AUTOARM_BG_PID${hook_pid:+,$hook_pid}" -o pid=,ppid=,stat=,args= 2>/dev/null)"
       if [ "$mode" = reanchor ]; then
         FM_HOME="$dir" "$FAKE_CLAUDE" -c '
           export CLAUDE_CODE_SESSION_ID=sess-signal CLAUDE_PID=$$
