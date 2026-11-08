@@ -11,7 +11,8 @@
 # a fake sysctl answers hw.memsize and kern.memorystatus_level (every other key
 # goes to the real sysctl), and on Linux FM_PROC_ROOT_OVERRIDE points at a tree
 # whose meminfo is a fixture and whose other entries link to the real /proc
-# (process ids are left out, so identity checks fall back to ps). They also
+# (process ids are left out, so identity checks fall back to ps), and a failing
+# powershell.exe keeps a WSL2 run off the live Windows host view. They also
 # drive power through a fake pmset and a fixture /sys power_supply, and fake
 # getconf (64 cores, so this host's own load never binds) and df (a fixed free
 # disk); the spawn path, the watcher, the lock, and the backlog are real. The
@@ -119,6 +120,8 @@ SH
 [ "\${2:-}" = batt ] && printf "Now drawing from '%s'\n" "\$(cat "$case_dir/v/power")"
 exit 0
 SH
+  # No Windows host view, so a WSL2 run never reads the live Windows host's memory.
+  printf '#!/usr/bin/env bash\nexit 1\n' > "$fakebin/powershell.exe"
   chmod +x "$fakebin"/*
   fm_fake_exit0 "$fakebin" gh gh-axi no-mistakes
   fm_git_init_commit "$case_dir/project"
