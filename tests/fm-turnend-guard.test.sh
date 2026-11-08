@@ -721,13 +721,14 @@ test_hook_silent_without_stdin() {
 }
 
 test_hook_runs_fast() {
-  local dir start elapsed_s
+  local dir elapsed_s elapsed_ms
   dir=$(make_primary_dir "$TMP_ROOT/hook-timing")
   : > "$dir/state/task1.meta"
-  start=$SECONDS
-  run_hook "$dir" false >/dev/null
-  elapsed_s=$((SECONDS - start))
-  [ "$elapsed_s" -lt 3 ] || fail "hook took ${elapsed_s}s, expected well under a second (generous 3s CI margin)"
+  # SECONDS rounds at wall-clock boundaries: a sub-3s run can report 3s.
+  # Bash time measures the same hook with millisecond precision.
+  elapsed_s=$(export LC_NUMERIC=C; TIMEFORMAT=%R; { time run_hook "$dir" false >/dev/null; } 2>&1)
+  elapsed_ms=${elapsed_s/./}
+  [ "$elapsed_ms" -lt 3000 ] || fail "hook took ${elapsed_s}s, expected well under a second (generous 3s CI margin)"
   pass "fm-turnend-guard: runs well under the generous timing margin (${elapsed_s}s)"
 }
 

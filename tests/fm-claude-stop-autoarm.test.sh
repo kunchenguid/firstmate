@@ -1154,14 +1154,15 @@ test_replacement_retires_interrupted_session_episode() {
     out="$dir/state/interrupted.out"
     run_autoarm_bg "$dir" "$out" sess-producing
     hook_pid=
-    i=0
-    while [ "$i" -lt 100 ]; do
+    # Allow process-identity probes to finish on loaded runners, stopping
+    # early if the harness exits before the foreground arm starts.
+    for i in $(seq 1 600); do
       hook_pid=$(epoch_field "$dir" owner_pid)
       [ -n "$hook_pid" ] && [ -e "$dir/state/arm-ran" ] && break
-      sleep 0.02
-      i=$((i + 1))
+      kill -0 "$RUN_AUTOARM_BG_PID" 2>/dev/null || break
+      sleep 0.05
     done
-    [ -n "$hook_pid" ] && [ -e "$dir/state/arm-ran" ] || fail "$signal hook did not park"
+    [ -n "$hook_pid" ] && [ -e "$dir/state/arm-ran" ] || fail "$signal hook did not park; output: $(cat "$out"); epoch: $(cat "$dir/state/.claude-autoarm-epoch" 2>/dev/null); processes: $(ps -p "$RUN_AUTOARM_BG_PID${hook_pid:+,$hook_pid}" -o pid=,ppid=,stat=,args= 2>/dev/null)"
     kill -"$signal" "$hook_pid" || fail "could not signal $signal hook"
     status=0
     wait "$RUN_AUTOARM_BG_PID" || status=$?
