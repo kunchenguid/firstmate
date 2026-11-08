@@ -2434,6 +2434,143 @@ test_msys_pid_identity_uses_proc() {
   pass "MSYS process identity uses compatible /proc fields"
 }
 
+# Write stand-ins for the Windows tools the lock link uses into <fakebin>, so a
+# non-Windows host drives the Windows branch: uname names MSYS, cygpath maps
+# /x to C:\x, and `cmd /c mklink /J` makes the link with the host's own symlink.
+# Every call is logged to FM_FAKE_WIN_LOG; FM_FAKE_MKLINK_FAIL=1 makes mklink
+# fail, and the ln stand-in records the MSYS setting it was run with.
+write_fake_windows_link_tools() {  # <fakebin>
+  local fakebin=$1 real_ln
+  real_ln=$(command -v ln)
+  mkdir -p "$fakebin"
+  cat > "$fakebin/uname" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' MINGW64_NT-10.0-26200
+SH
+  cat > "$fakebin/cygpath" <<'SH'
+#!/usr/bin/env bash
+[ "$1" = -w ] && [ "$2" = -- ] || exit 2
+p=$3
+printf 'C:%s\n' "${p//\//\\}"
+SH
+  cat > "$fakebin/cmd" <<'SH'
+#!/usr/bin/env bash
+printf 'cmd %s\n' "$*" >> "$FM_FAKE_WIN_LOG"
+[ "$1 $2 $3" = "/c mklink /J" ] || exit 2
+[ -z "${FM_FAKE_MKLINK_FAIL:-}" ] || exit 1
+link=${4#C:}; link=${link//\\//}
+target=${5#C:}; target=${target//\\//}
+if [ -e "$link" ] || [ -L "$link" ]; then exit 1; fi
+exec ln -s "$target" "$link"
+SH
+  cat > "$fakebin/ln" <<SH
+#!/usr/bin/env bash
+printf 'ln MSYS=%s\n' "\${MSYS:-}" >> "\$FM_FAKE_WIN_LOG"
+exec "$real_ln" "\$@"
+SH
+  chmod +x "$fakebin/uname" "$fakebin/cygpath" "$fakebin/cmd" "$fakebin/ln"
+}
+
+# Acquire <lockdir>, report what a held lock looks like, let a second process
+# contend for it, and release it. Extra VAR=value arguments go to env.
+lock_link_cycle() {  # <lockdir> [VAR=value...]
+  local lockdir=$1
+  shift
+  # shellcheck disable=SC2016 # Positional parameters expand in the child shell.
+  env "$@" bash -c '
+    . "$1"
+    fm_lock_try_create "$2" || exit 7
+    if [ -L "$2" ] && [ "$(readlink "$2")" = "$FM_LOCK_OWNER_DIR" ]; then
+      echo held=link
+    else
+      echo held=not-link
+    fi
+    if [ "$(cat "$2/pid" 2>/dev/null)" = "${BASHPID:-$$}" ]; then
+      echo pid=holder
+    else
+      echo pid=other
+    fi
+    if bash -c ". \"\$1\"; fm_lock_try_acquire \"\$2\"" _ "$1" "$2"; then
+      echo second=won
+    else
+      echo second=refused
+    fi
+    fm_lock_release "$2"
+  ' _ "$LIB" "$lockdir"
+}
+
+# Fail unless lock_link_cycle output <out> shows a held link to its owner,
+# naming its holder, that a second process could not take.
+assert_lock_link_cycle() {  # <label> <out>
+  case "$2" in *held=link*) ;; *) fail "$1 lock was not a link to its owner: $2" ;; esac
+  case "$2" in *pid=holder*) ;; *) fail "$1 lock does not name its holder: $2" ;; esac
+  case "$2" in *second=refused*) ;; *) fail "a held $1 lock was taken by another process: $2" ;; esac
+}
+
+# Pins the Windows lock-link branch on every host. Without the symlink privilege
+# (no administrator, Developer Mode off) a plain `ln -s` there deep-copies the
+# owner directory, and every acquire then spins on its own copy forever.
+test_lock_windows_link_is_junction_not_copy() {
+  local dir state lockdir fakebin log out
+  case "$(uname)" in
+    MSYS*|MINGW*|CYGWIN*)
+      pass "emulated Windows lock link skipped on a real Windows host (the native junction case covers it)"
+      return
+      ;;
+  esac
+  dir=$(make_case lock-windows-junction)
+  state="$dir/state"
+  lockdir="$state/.contend.lock"
+  fakebin="$dir/winbin"
+  write_fake_windows_link_tools "$fakebin"
+
+  log="$dir/junction.log"
+  out=$(lock_link_cycle "$lockdir" FM_STATE_OVERRIDE="$state" PATH="$fakebin:$PATH" \
+    FM_FAKE_WIN_LOG="$log") \
+    || fail "emulated Windows acquire failed: $out $(cat "$log" 2>/dev/null)"
+  assert_lock_link_cycle "emulated Windows" "$out"
+  case "$(cat "$log")" in
+    *'cmd /c mklink /J C:'*'\.contend.lock C:'*'\.contend.lock.owner.'*) ;;
+    *) fail "Windows lock link was not created as a junction: $(cat "$log")" ;;
+  esac
+  case "$(cat "$log")" in *'ln MSYS='*) fail "junction success still ran ln: $(cat "$log")" ;; esac
+  [ ! -e "$lockdir" ] && [ ! -L "$lockdir" ] || fail "emulated Windows release left the lock behind"
+
+  log="$dir/fallback.log"
+  out=$(lock_link_cycle "$lockdir" FM_STATE_OVERRIDE="$state" PATH="$fakebin:$PATH" \
+    FM_FAKE_WIN_LOG="$log" MSYS=disable_pcon FM_FAKE_MKLINK_FAIL=1) \
+    || fail "emulated Windows symlink fallback failed: $out $(cat "$log" 2>/dev/null)"
+  assert_lock_link_cycle "symlink fallback" "$out"
+  case "$(cat "$log")" in
+    *'ln MSYS=disable_pcon winsymlinks:nativestrict'*) ;;
+    *) fail "symlink fallback could deep-copy instead of failing: $(cat "$log")" ;;
+  esac
+  [ -z "$(find "$state" -maxdepth 1 -name '.contend.lock*' -print)" ] \
+    || fail "emulated Windows lock cycles left owner directories behind"
+  pass "Windows lock link is a junction, and its symlink fallback never copies"
+}
+
+# The same guarantee against the real Windows filesystem and runtime.
+test_lock_windows_native_junction() {
+  local dir state lockdir out
+  case "$(uname)" in
+    MSYS*|MINGW*|CYGWIN*) ;;
+    *)
+      pass "native Windows lock junction skipped on non-Windows host"
+      return
+      ;;
+  esac
+  dir=$(make_case lock-windows-native)
+  state="$dir/state"
+  lockdir="$state/.contend.lock"
+  out=$(lock_link_cycle "$lockdir" FM_STATE_OVERRIDE="$state") \
+    || fail "native Windows acquire failed: $out"
+  assert_lock_link_cycle "native Windows" "$out"
+  [ -z "$(find "$state" -maxdepth 1 -name '.contend.lock*' -print)" ] \
+    || fail "native Windows release left the lock or its owner behind"
+  pass "native Windows lock is a junction to its owner and releases cleanly"
+}
+
 # Optional function names allow focused regression verification without running
 # unrelated watcher scenarios.
 if [ "$#" -gt 0 ]; then
@@ -2450,6 +2587,8 @@ test_pid_identity_is_locale_invariant
 test_pid_identity_is_terminal_width_invariant
 test_proc_pid_identity_ignores_wall_clock_and_detects_pid_reuse
 test_msys_pid_identity_uses_proc
+test_lock_windows_link_is_junction_not_copy
+test_lock_windows_native_junction
 test_stale_watch_lock_reclaimed
 test_stale_watch_reclaim_rejects_unwritable_downtime_marker
 test_stale_watch_reclaim_publishes_before_clear

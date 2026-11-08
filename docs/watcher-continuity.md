@@ -527,6 +527,7 @@ It checks that a newly appended keyed decision is classified without rereading e
 - Bounded and successor-linked lifecycle rows.
 - Startup-stop resilience: slow post-claim confirmation, typed startup-lock and identity-publication failures, safe-point deadline and signal forwarding, and cleanup of published locks and in-flight staging while preserving foreign owners.
 - A SIGSTOP counterfactual that distinguishes a live PID from a stale beacon before classifying termination.
+- Windows lock links made as junctions, never deep copies of the owner, with a strict native-symlink fallback, emulated on every host and checked natively on Windows.
 
 ### Claude auto-arm and turn-end guard
 

@@ -753,8 +753,61 @@ fm_lock_wait_pending_mutation() {
   fi
 }
 
+# Set variable $1 to the Windows form of absolute path $2. An owner directory
+# and its lock always share one parent, so the cygpath conversion is cached per
+# parent directory: every exec is expensive on Windows, and a lock acquire would
+# otherwise pay for two conversions on top of the link itself.
+_FM_LOCK_WIN_DIR_POSIX=
+_FM_LOCK_WIN_DIR=
+fm_lock_win_path_to() {  # <var> <absolute-path>
+  local dir=${2%/*} base=${2##*/} win
+  if [ -z "$_FM_LOCK_WIN_DIR" ] || [ "$dir" != "$_FM_LOCK_WIN_DIR_POSIX" ]; then
+    win=$(cygpath -w -- "${dir:-/}" 2>/dev/null) || return 1
+    [ -n "$win" ] || return 1
+    _FM_LOCK_WIN_DIR=${win%\\}
+    _FM_LOCK_WIN_DIR_POSIX=$dir
+  fi
+  printf -v "$1" '%s\\%s' "$_FM_LOCK_WIN_DIR" "$base"
+}
+
+# Windows (Git Bash, MSYS2, Cygwin) form of the lock link: create <lockdir> as
+# an NTFS directory junction to <ownerdir>, failing when anything already exists
+# there. $3 and $4 are the Windows forms of the owner and the lock.
+#
+# `ln -s` cannot be used as is: it needs the symlink privilege (administrator or
+# Developer Mode), and without it the runtime silently deep-copies the owner
+# directory. That copy is a plain directory holding this process's pid that no
+# link check recognizes, so every later acquire reads it as self-held, removes
+# it, and copies it again, forever. Any account can create a junction on a local
+# NTFS volume, and the runtime reports one exactly like a symlink to `[ -L ]`,
+# readlink, and `rm -f`, so every other lock helper works on it unchanged.
+#
+# mklink creates the directory and then attaches the reparse point, so for a
+# moment the lock is a plain directory with no pid. Contenders already treat a
+# lock without a pid as a fresh mid-acquire claim (fm_lock_mid_acquire_is_fresh).
+#
+# Where a junction cannot be made - a volume without reparse points, or a path
+# cmd.exe would reinterpret - a native symlink is the fallback, in strict mode so
+# a missing privilege fails instead of copying.
+fm_lock_link_windows() {  # <ownerdir> <lockdir> <owner-win> <lock-win>
+  local ownerdir=$1 lockdir=$2 owner_win=$3 lock_win=$4
+  case "$owner_win$lock_win" in
+    ''|*[\"%\&\|\<\>^]*) ;;
+    *)
+      MSYS2_ARG_CONV_EXCL='*' cmd /c mklink /J "$lock_win" "$owner_win" >/dev/null 2>&1 \
+        && return 0
+      ;;
+  esac
+  if [ -e "$lockdir" ] || [ -L "$lockdir" ]; then
+    return 1
+  fi
+  MSYS="${MSYS:+$MSYS }winsymlinks:nativestrict" \
+    CYGWIN="${CYGWIN:+$CYGWIN }winsymlinks:nativestrict" \
+    ln -s "$ownerdir" "$lockdir"
+}
+
 fm_lock_try_create() {
-  local lockdir=$1 allowed_steal_owner=${2:-} ownerdir
+  local lockdir=$1 allowed_steal_owner=${2:-} ownerdir owner_win lock_win
   local FM_LOCK_PENDING_PREVIOUS_PID FM_LOCK_PENDING_PID=
   FM_LOCK_OWNER_DIR=
   if [ "${BASH_VERSINFO[0]}" -lt 4 ]; then
@@ -781,7 +834,21 @@ fm_lock_try_create() {
     fm_lock_discard_owner "$ownerdir"
     return 1
   fi
-  ln -s "$ownerdir" "$lockdir" 2>/dev/null &
+  case "$_FM_UNAME" in
+    CYGWIN*|MINGW*|MSYS*)
+      # The owner's parent is the lock's resolved parent, so this is the
+      # lock's absolute path even when $lockdir is relative.
+      if ! fm_lock_win_path_to owner_win "$ownerdir" \
+        || ! fm_lock_win_path_to lock_win "${ownerdir%/*}/${lockdir##*/}"; then
+        owner_win=
+        lock_win=
+      fi
+      fm_lock_link_windows "$ownerdir" "$lockdir" "$owner_win" "$lock_win" 2>/dev/null &
+      ;;
+    *)
+      ln -s "$ownerdir" "$lockdir" 2>/dev/null &
+      ;;
+  esac
   FM_LOCK_PENDING_PID=$!
   if wait "$FM_LOCK_PENDING_PID" && fm_lock_points_to_owner "$lockdir" "$ownerdir"; then
     if fm_lock_claim "$lockdir" "$ownerdir" "$allowed_steal_owner"; then
