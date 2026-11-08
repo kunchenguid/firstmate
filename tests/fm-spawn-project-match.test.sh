@@ -12,6 +12,11 @@ set -u
 SPAWN="$ROOT/bin/fm-spawn.sh"
 TMP_ROOT=$(fm_test_tmproot fm-spawn-project-match)
 
+command -v tasks-axi >/dev/null 2>&1 || {
+  printf 'ok - skipped (tasks-axi is not installed; the project-match gate is inert without it)\n'
+  exit 0
+}
+
 # make_match_case <name> <id> [repo] builds a home with a real backlog carrying
 # <id> (recording <repo> when given), a project named alpha, and its worktree.
 make_match_case() {
