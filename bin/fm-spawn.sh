@@ -4180,11 +4180,12 @@ fi
 # at the next occurrence. Advisory only: the project is not mine to rewrite, and
 # bin/fm-git-strip-ai-trailers.sh already copes with a resolvable relative value.
 # The lookup drops the pane's GIT_CONFIG_* so only the repository's own files
-# answer, as the wrapper's own lookup does.
+# answer, as the wrapper's own lookup does, and follows config includes, which
+# --local alone skips, so a value set by a file .git/config includes is found.
 spawn_warn_unusable_shared_hookspath() {
   local proj=$1 value
   value=$(env -u GIT_CONFIG_COUNT -u GIT_CONFIG_PARAMETERS \
-    git -C "$proj" config --local --type=path --get core.hooksPath 2>/dev/null) || return 0
+    git -C "$proj" config --local --includes --type=path --get core.hooksPath 2>/dev/null) || return 0
   [ -n "$value" ] || return 0
   case "$value" in
   /*) [ ! -d "$value" ] || return 0 ;;
@@ -4197,7 +4198,7 @@ spawn_warn_unusable_shared_hookspath() {
     echo "  git config --show-origin --get-all core.hooksPath:"
     env -u GIT_CONFIG_COUNT -u GIT_CONFIG_PARAMETERS \
       git -C "$proj" config --show-origin --get-all core.hooksPath 2>&1 | sed 's/^/    /'
-    echo "  to clear it: git -C $proj config --local --unset-all core.hooksPath"
+    echo "  to clear it: git -C $(shell_quote "$proj") config --local --unset-all core.hooksPath"
   } >&2
   return 0
 }
