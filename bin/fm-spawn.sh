@@ -2025,7 +2025,7 @@ spawn_abort_cleanup() {
       local reclaim_status=0
       spawn_orca_reclaim_launch_file || reclaim_status=$?
       case "$reclaim_status" in
-        0) kimi_spawn_fail "spawn ended before Orca terminal $T ran the launch command; removed the launch file and refused the worker launch" || true ;;
+        0) kimi_launch_fail "spawn ended before Orca terminal $T ran the launch command; removed the launch file and refused the worker launch" || true ;;
         2) echo "warning: could not remove Orca launch file $SPAWN_STAGED_LAUNCH_FILE; remove it by hand" >&2 ;;
       esac
     fi
@@ -5755,6 +5755,11 @@ kimi_spawn_fail() { # <detail>
   spawn_delivery_gate_failed "$1"
 }
 
+kimi_launch_fail() { # <detail>
+  printf '%s\n' "$(status_stamp_line "failed: $1")" >>"$STATE/$ID.status"
+  echo "error: $1; inspect window $T" >&2
+}
+
 # rovo mirrors kimi's launch-then-send shape exactly: a positional brief is
 # dead-on-arrival, so rovo launches bare and takes its brief pointer only after a
 # readiness gate, then a delivery-confirmation gate. Both route their
@@ -8008,7 +8013,7 @@ else
   sleep 0.3
   spawn_orca_launch_send_fail() {
     rm -f -- "$LAUNCH_FILE" 2>/dev/null || true
-    kimi_spawn_fail "launch command could not be delivered to Orca terminal $T"
+    kimi_launch_fail "launch command could not be delivered to Orca terminal $T"
     rovo_endpoint_cleanup
     exit 1
   }
@@ -8024,7 +8029,7 @@ else
       if [ "$i" -gt "$max" ]; then
         spawn_orca_reclaim_launch_file || reclaim_status=$?
         [ "$reclaim_status" != 1 ] || return 0
-        kimi_spawn_fail "Orca terminal $T did not run the launch command or could not remove the launch file; refused the worker launch"
+        kimi_launch_fail "Orca terminal $T did not run the launch command or could not remove the launch file; refused the worker launch"
         exit 1
       fi
       sleep 0.2
