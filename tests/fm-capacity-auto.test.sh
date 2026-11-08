@@ -9,9 +9,10 @@
 # static ceiling, the learned footprint and the unmeasured lanes it ignores,
 # the published ledger and its history, the ranked reclaim list, the Windows
 # host view inside WSL (cached for every mode but --publish) and on native
-# Windows, a closed gate held while its reading cannot be taken, admission that
-# skips the process and GPU probes its verdict does not read, the opt-in
-# spawn gate, config validation, and a real-host smoke.
+# Windows, a closed gate held while its reading cannot be taken, even past the
+# budget's 300 s freshness window, admission that skips the process and GPU
+# probes its verdict does not read, the opt-in spawn gate, config validation,
+# and a real-host smoke.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -515,6 +516,33 @@ test_unknown_reading_holds_a_closed_gate() {
   pass "an unknown reading never counts as clean: a closed or clearing gate holds until a real reading clears it, including a gate that is otherwise omitted, and an open gate stays unjudged"
 }
 
+# A closed gate outlives the budget's 300 s freshness window: the watcher stops
+# after a starved Windows host closed admission, the published doc ages past
+# 300 s, powershell.exe stays unreadable, and the spawn gate still defers.
+test_closed_gate_survives_a_stale_publish() {
+  local home fakebin proc rc out
+  home=$(make_home wsl-stale)
+  fakebin=$(make_wsl_probes "$TMP_ROOT/p-wsl-stale")
+  proc="$TMP_ROOT/p-wsl-stale/proc"
+  printf 'auto\nadmit-spawns\n' > "$home/config/lane-capacity"
+  set_host "$fakebin" "2135 32614400 88 51 16 -"
+  PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FM_PROC_ROOT_OVERRIDE="$proc" FM_LANE_CAPACITY_PUBLISH_INTERVAL=0 "$CAPACITY" --publish >/dev/null 2>&1
+  assert_equals '"closed"' "$(jq -c '.gates[] | select(.name == "host-memory") | .state' "$home/state/lane-capacity.json")" \
+    "a starved Windows host must close the host-memory gate"
+  jq '.generated_epoch -= 900' "$home/state/lane-capacity.json" > "$home/state/aged.json"
+  mv "$home/state/aged.json" "$home/state/lane-capacity.json"
+  rm -f "$home/state/.lane-vitals-host"
+  set_host "$fakebin" fail
+  rc=0
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FM_PROC_ROOT_OVERRIDE="$proc" "$CAPACITY" --spawn-gate 2>&1) || rc=$?
+  expect_code 75 "$rc" "a closed gate in a publish older than 300 s must still defer the spawn: $out"
+  assert_contains "$out" 'host-memory: Windows host unreadable' "the deferral must name the held host-memory gate"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FM_PROC_ROOT_OVERRIDE="$proc" "$CAPACITY" --json 2>/dev/null |
+    jq -c '[(.gates[] | select(.name == "host-memory") | .state), .verdict.admit]')
+  assert_equals '["closed",false]' "$out" "the stale publish must not reopen the host-memory gate"
+  pass "closed gates outlive the budget's freshness window, so only a clean reading reopens admission"
+}
+
 test_native_windows_reads_the_host_view() {
   local home fakebin proc out
   home=$(make_home mingw)
@@ -720,6 +748,7 @@ test_publish_writes_ledger_and_history
 test_reclaim_ranks_idle_lanes
 test_wsl_host_view_closes_admission
 test_unknown_reading_holds_a_closed_gate
+test_closed_gate_survives_a_stale_publish
 test_native_windows_reads_the_host_view
 test_admission_honours_the_damped_budget
 test_admission_skips_unused_probes

@@ -730,8 +730,9 @@ def dur: if . == null then "?" elif . >= 86400 then "\(. / 86400 | floor)d" elif
     age_s: ($hv[6] | num | n2)} else null end) as $h
 | (if ($prev_ledger | type) == "object" and $prev_ledger.schema == "fm-lane-footprint.v1" then $prev_ledger
    else {lanes: {}, history: []} end) as $pl
-| (if ($prev_doc | type) == "object" and (($prev_doc.cap.mode // "") == "auto")
-     and (($now - ($prev_doc.generated_epoch // 0)) | . >= 0 and . <= 300) then $prev_doc else null end) as $pd
+| (if ($prev_doc | type) == "object" and (($prev_doc.cap.mode // "") == "auto") then $prev_doc else null end) as $pa
+| ($pa.gates // []) as $pg
+| (if $pa != null and (($now - ($pa.generated_epoch // 0)) | . >= 0 and . <= 300) then $pa else null end) as $pd
 | [ $lanes[] | select(.home == 0) ] as $own
 | ($own | map(. as $l
     | [ $attr[] | select(.key == $l.key) ] as $procs
@@ -801,7 +802,7 @@ def dur: if . == null then "?" elif . >= 86400 then "\(. / 86400 | floor)d" elif
    then (($vit.swapin - $pd.vitals.swapin_total) / ($now - $pd.generated_epoch) | r2) else null end) as $swap_rate
 | (if $vit.on_ac != null then $vit.on_ac elif $beat_battery == true then false elif $beat_battery == false then true else null end) as $on_ac
 | def gate($name; $close; $clear; $what):
-    ((($pd.gates // []) | map(select(.name == $name)) | .[0]) // {}) as $g
+    (($pg | map(select(.name == $name)) | .[0]) // {}) as $g
     | if $close == null then
         (if $g.state == "closed" then {name: $name, state: "closed", since_epoch: $g.since_epoch, clear_count: ($g.clear_count // 0), what: $what}
          else {name: $name, state: "unknown", since_epoch: null, clear_count: 0, what: $what} end)
