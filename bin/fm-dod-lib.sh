@@ -12,9 +12,10 @@
 # contract.
 # For local-only tasks, the first accepted done head is latched as exactly one
 # local_done_head= full commit id in the live task metadata. Observing done again
-# never changes that identity. Revised work needs a new task/approval record;
-# the one rebind is fm_dod_rebind_local_done_head, used only after
-# fm_dod_rebased_identity_proof proves a rebased head's content identical.
+# never changes that identity. Revised work needs a new task/approval record.
+# A done naming the lane's own rebased head stays ready, without changing the
+# record, only when fm_dod_rebased_identity_proof proves its content identical;
+# the one rebind is fm_dod_rebind_local_done_head, run at landing after that proof.
 # The optional third argument is the task's full ship-branch name (a project's
 # registered prefix may replace the legacy `fm/` one); it defaults to `fm/<task-id>`
 # and is the immutable task branch rendered in every delivery contract.

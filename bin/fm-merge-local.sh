@@ -31,7 +31,8 @@
 # docs/captain-hold-lifecycle.md owns the accepted merge-to-cleanup residual.
 # A per-checkout lock in the project's Git directory serializes different
 # tasks across the checks, checkout update, ref transaction, and rollback.
-# tests/fm-merge-local.test.sh covers pinned-head landing and race refusals.
+# tests/fm-merge-local.test.sh covers pinned-head and identical-rebase landing
+# and race refusals.
 # Usage: fm-merge-local.sh <task-id>
 set -eu
 
