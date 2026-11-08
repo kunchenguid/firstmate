@@ -255,9 +255,9 @@ fm_backend_orca_capture() {  # <terminal-id> <lines>
 # stream. `orca terminal read` without --screen strips escapes from the output
 # history, so a TUI's cursor-addressed rows (agy's pinned `esc to cancel` /
 # `? for shortcuts` status row) never appear in it at all. It never degrades to
-# that stream: a reply whose source is present but not "screen" (the CLI's
-# "screen-unavailable" fallback returns accumulated output instead) fails, and
-# only an absent source - a host that predates the field - is accepted as is.
+# that stream: a reply whose source is not "screen" fails, whether it is the
+# CLI's "screen-unavailable" fallback (accumulated output instead) or absent (a
+# host that predates the field, so nothing proves the rows are a rendered screen).
 fm_backend_orca_screen_capture() {  # <terminal-id> <lines>
   local terminal=$1 lines=${2:-40} out
   fm_backend_orca_tool_check || return 1
@@ -276,8 +276,8 @@ if (data.ok === false) {
 }
 const r = data.result || {};
 const source = r.terminal && r.terminal.source;
-if (process.argv[1] === "screen" && source != null && source !== "screen") {
-  console.error("orca terminal read --screen returned source " + source + ", not a rendered screen");
+if (process.argv[1] === "screen" && source !== "screen") {
+  console.error("orca terminal read --screen returned source " + (source == null ? "(none)" : source) + ", not a rendered screen");
   process.exit(3);
 }
 if (r.terminal && Array.isArray(r.terminal.tail)) {

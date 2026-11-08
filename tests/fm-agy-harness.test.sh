@@ -771,9 +771,10 @@ test_agy_fresh_worktree_is_pre_trusted_and_launches_without_a_dialog() {
 # output stream, which never carries agy's cursor-addressed status row, while
 # `terminal read --screen` is the rendered screen with that row pinned at the
 # bottom. FM_FAKE_ORCA_SCREEN picks the --screen reply: genuine (source
-# "screen"), legacy (no source field, a host that predates it), unsupported
-# (the CLI rejects --screen), empty (source "screen", no rows), or unavailable
-# (source "screen-unavailable" carrying the stream instead).
+# "screen"), sourceless (the busy screen rows with no source field, as a host
+# that predates it answers), unsupported (the CLI rejects --screen), empty
+# (source "screen", no rows), or unavailable (source "screen-unavailable"
+# carrying the stream instead).
 # FM_FAKE_ORCA_STREAM_PHRASE=1 echoes the busy phrase into the stream, as brief
 # text that mentions it would. Everything else answers the minimal JSON the
 # Orca adapter consumes.
@@ -829,7 +830,7 @@ case "${1:-} ${2:-}" in
       *' --screen '*)
         case "${FM_FAKE_ORCA_SCREEN:-genuine}" in
           genuine) screen_text | lines_json screen ;;
-          legacy) screen_text | lines_json ;;
+          sourceless) screen_text | lines_json ;;
           unsupported) echo "error: unknown option --screen" >&2; exit 2 ;;
           empty) printf '' | lines_json screen ;;
           unavailable) stream_text | lines_json screen-unavailable ;;
@@ -869,7 +870,7 @@ agy_orca_stream_verdict() {  # <id> <stream-phrase 0|1> -> the classifier verdic
 # reads the stream sees a working agy as unknown on every poll and kills it.
 test_agy_orca_gate_reads_the_rendered_screen() {
   local mode id
-  for mode in genuine legacy; do
+  for mode in genuine; do
     id="agy-orca-$mode-z20-$$"
     run_agy_orca_case "orca-$mode" "$id" "$mode" 0
     expect_code 0 "$RC" "an agy spawn on Orca whose $mode screen shows a busy turn should succeed"$'\n'"$OUT"
@@ -885,15 +886,16 @@ test_agy_orca_gate_reads_the_rendered_screen() {
       busy*) fail "the fake Orca stream read already classifies busy, so this case cannot prove the screen read" ;;
     esac
   done
-  pass "fm-spawn: the agy gate on Orca reads the rendered screen, with or without a source field"
+  pass "fm-spawn: the agy gate on Orca reads the rendered screen"
 }
 
 # The gate is screen-only on its error paths too: a --screen read the CLI
-# rejects, an empty screen, or a screen-unavailable reply that carries the
-# stream is not ready, even when that stream echoes the busy phrase.
+# rejects, an empty screen, a screen-unavailable reply that carries the stream,
+# or a reply with no source field is not ready, even when its rows (or the
+# stream) carry the busy phrase.
 test_agy_orca_gate_never_falls_back_to_the_stream() {
   local mode id
-  for mode in unsupported empty unavailable; do
+  for mode in unsupported empty unavailable sourceless; do
     id="agy-orca-$mode-z21-$$"
     run_agy_orca_case "orca-$mode" "$id" "$mode" 1
     [ "$RC" -ne 0 ] || fail "an agy spawn on Orca with a $mode screen read must not report a ready worker"$'\n'"$OUT"
@@ -908,7 +910,7 @@ test_agy_orca_gate_never_falls_back_to_the_stream() {
       *) fail "the fake Orca stream with the echoed phrase does not classify busy, so the $mode case is vacuous" ;;
     esac
   done
-  pass "fm-spawn: the agy gate on Orca treats a failed, empty, or screen-unavailable read as not ready"
+  pass "fm-spawn: the agy gate on Orca treats a failed, empty, screen-unavailable, or sourceless read as not ready"
 }
 
 test_agy_dialog_despite_registration_is_answered_once() {
