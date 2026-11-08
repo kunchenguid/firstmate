@@ -40,6 +40,9 @@ reset_state() {
   _event_cap_key=""
   _event_cap_ok=0
   _event_cap_fails=0
+  _event_cap_off_at=0
+  _event_cap_panes=""
+  _event_cap_diag_logged=""
 }
 
 mkrec() {  # <pane_id> <status>
@@ -184,5 +187,105 @@ event_wait_or_sleep   # disabled: sleeps without calling wait_transition
 WTN=$(wc -l < "$TMP/wtcalls" | tr -d '[:space:]')
 [ "$WTN" = 2 ] || fail "after EVENT_CAP_FAIL_MAX connect failures the event path must be disabled for the process (expected 2 wait_transition calls, got $WTN)"
 pass "event_wait_or_sleep: consecutive event-path failures disable the fast-path and revert to pure polling (fail-closed)"
+
+# --- event_wait_or_sleep: the switch-off is named, and it recovers -----------
+
+triage_text() { cat "$STATE_DIR/.watch-triage.log" 2>/dev/null || true; }
+
+reset_state
+fm_write_meta "$STATE_DIR/tk6.meta" "window=default:wG:pQ" "backend=herdr" "kind=ship"
+export EVENT_CAP_FAIL_MAX=2
+EVENT_CAP_RETRY_SECS=300
+# shellcheck disable=SC2329 # Runtime overrides called by the isolated watcher.
+fm_backend_events_capable() { return 0; }
+# shellcheck disable=SC2329 # Runtime overrides called by the isolated watcher.
+fm_backend_wait_transition() {
+  printf 'WT\n' >> "$TMP/wtcalls"
+  printf 'herdr subscription rejected (pane_not_found: pane wG:pGone not found)\n' >> "${FM_BACKEND_EVENTS_DIAG_FILE:-/dev/null}"
+  return 2
+}
+: > "$TMP/wtcalls"
+event_wait_or_sleep   # fails=1
+event_wait_or_sleep   # fails=2 -> off
+event_wait_or_sleep   # off: polls only
+[ "$(wc -l < "$TMP/wtcalls" | tr -d '[:space:]')" = 2 ] || fail "setup: the path must be off after EVENT_CAP_FAIL_MAX failures"
+assert_contains "$(triage_text)" "event path off after 2 consecutive failures (herdr:default)" "the shutoff must be named in the triage log"
+assert_contains "$(triage_text)" "pane wG:pGone not found" "the shutoff line must carry the backend's cause"
+[ "$(triage_text | grep -c 'event wait degraded')" = 1 ] || fail "a persistent cause must be logged once, not every cycle, got: $(triage_text)"
+pass "event_wait_or_sleep: the failure switch-off is named in the triage log with its cause (once per cause)"
+
+# A changed pane set lifts the switch-off.
+fm_write_meta "$STATE_DIR/tk7.meta" "window=default:wG:pR" "backend=herdr" "kind=ship"
+event_wait_or_sleep
+[ "$(wc -l < "$TMP/wtcalls" | tr -d '[:space:]')" = 3 ] || fail "a changed watched-pane set must re-arm the event path"
+assert_contains "$(triage_text)" "event path re-armed: watched pane set changed" "the re-arm must be logged"
+pass "event_wait_or_sleep: a changed pane set re-arms a switched-off event path"
+
+# The retry timer lifts it too, with one probationary cycle.
+reset_state
+fm_write_meta "$STATE_DIR/tk6.meta" "window=default:wG:pQ" "backend=herdr" "kind=ship"
+: > "$TMP/wtcalls"
+event_wait_or_sleep
+event_wait_or_sleep   # off
+_event_cap_off_at=$(( $(date +%s) - EVENT_CAP_RETRY_SECS - 1 ))
+event_wait_or_sleep   # timer re-arm -> probation: one failure switches it off again
+[ "$(wc -l < "$TMP/wtcalls" | tr -d '[:space:]')" = 3 ] || fail "the retry timer must re-arm the event path, got $(wc -l < "$TMP/wtcalls") calls"
+assert_contains "$(triage_text)" "event path re-armed: retrying after 300s" "the timer re-arm must be logged"
+[ "$_event_cap_ok" = 0 ] || fail "a failed probationary cycle must switch the path off again"
+[ "$(triage_text | grep -c 'event path off after')" = 2 ] || fail "the second switch-off must be named too: $(triage_text)"
+event_wait_or_sleep   # still off, timer not due
+[ "$(wc -l < "$TMP/wtcalls" | tr -d '[:space:]')" = 3 ] || fail "the path must stay off until the next retry is due"
+pass "event_wait_or_sleep: the retry timer re-arms the path for one probationary cycle and a repeat failure is named again"
+
+# A recovered probation stays on.
+reset_state
+fm_write_meta "$STATE_DIR/tk6.meta" "window=default:wG:pQ" "backend=herdr" "kind=ship"
+# shellcheck disable=SC2329 # Runtime override called by the isolated watcher.
+fm_backend_wait_transition() { printf 'WT\n' >> "$TMP/wtcalls"; return 1; }
+: > "$TMP/wtcalls"
+_event_cap_key="herdr:default"; _event_cap_ok=0; _event_cap_off_at=$(( $(date +%s) - EVENT_CAP_RETRY_SECS - 1 ))
+_event_cap_panes="default:wG:pQ "
+event_wait_or_sleep
+event_wait_or_sleep
+[ "$(wc -l < "$TMP/wtcalls" | tr -d '[:space:]')" = 2 ] || fail "a probationary cycle that succeeds must leave the event path on"
+pass "event_wait_or_sleep: a probationary cycle that succeeds leaves the event path on"
+
+# --- event_wait_or_sleep + real herdr adapter: one gone pane, one blocked pane -
+
+reset_state
+export EVENT_CAP_FAIL_MAX=3
+. "$ROOT/bin/fm-backend.sh"   # restore the real dispatchers over the overrides above
+FAKEBIN="$TMP/fakebin"; mkdir -p "$FAKEBIN"
+cat > "$FAKEBIN/herdr" <<'SH'
+#!/usr/bin/env bash
+case "${1:-} ${2:-}" in
+  "status --json") printf '{"client":{"version":"0.9.5","protocol":22},"server":{"running":true}}\n' ;;
+  "session list") printf '{"sessions":[{"name":"default","running":true,"default":true,"socket_path":"/tmp/fm-fake.sock"}]}\n' ;;
+  "pane get")
+    if [ "${3:-}" = "wG:pGone" ]; then printf '{"error":{"code":"pane_not_found","message":"pane wG:pGone not found"}}\n'; exit 1; fi
+    printf '{"result":{"pane":{"pane_id":"%s"}}}\n' "${3:-}" ;;
+  "agent get") printf '{"result":{"agent":{"agent":"claude","agent_status":"blocked"}}}\n' ;;
+esac
+exit 0
+SH
+cat > "$FAKEBIN/reader" <<'SH'
+#!/usr/bin/env bash
+shift 2
+for pane in "$@"; do
+  if [ "$pane" = "wG:pGone" ]; then printf '@error\tpane_not_found\tpane wG:pGone not found\n'; exit 3; fi
+done
+printf '@subscribed\n'
+exit 0
+SH
+chmod +x "$FAKEBIN/herdr" "$FAKEBIN/reader"
+fm_write_meta "$STATE_DIR/tkgone.meta" "window=default:wG:pGone" "backend=herdr" "kind=ship"
+fm_write_meta "$STATE_DIR/tklive.meta" "window=default:wG:pLive" "backend=herdr" "kind=ship"
+PATH="$FAKEBIN:$PATH" FM_BACKEND_HERDR_EVENTS_FORCE=1 FM_BACKEND_HERDR_EVENT_READER="$FAKEBIN/reader" event_wait_or_sleep
+grep -q 'default:wG:pLive' "$STATE_DIR/.wake-queue" 2>/dev/null || fail "the blocked pane's push wake must still fire past one gone pane, queue: $(cat "$STATE_DIR/.wake-queue" 2>/dev/null)"
+grep -q 'herdr: agent blocked' "$STATE_DIR/.wake-queue" || fail "the wake must name the herdr-blocked cause"
+assert_contains "$(triage_text)" "default:wG:pGone" "a triage line must name the gone pane"
+assert_contains "$(triage_text)" "resubscribed without gone pane" "the triage line must say the wait recovered"
+[ "$_event_cap_fails" = 0 ] || fail "a recovered cycle must not count toward the shutoff, got $_event_cap_fails"
+pass "event_wait_or_sleep: one gone pane plus one blocked pane still wakes on the blocked pane and a triage line names the gone pane"
 
 echo "# fm-supervision-events.test.sh: all assertions passed"

@@ -6145,6 +6145,15 @@ case "$cmd $sub" in
   "session list")
     printf '{"sessions":[{"name":"%s","running":true,"default":false,"socket_path":"%s"}]}\n' \
       "${FM_FAKE_SESSION_NAME:-default}" "${FM_FAKE_SOCKET:-/tmp/fm-fake.sock}" ;;
+  "pane get")
+    # FM_FAKE_GONE_PANES: space-separated pane ids herdr no longer knows.
+    for gone in ${FM_FAKE_GONE_PANES:-}; do
+      if [ "$gone" = "${3:-}" ]; then
+        printf '{"error":{"code":"pane_not_found","message":"pane %s not found"}}\n' "$gone"
+        exit 1
+      fi
+    done
+    printf '{"result":{"pane":{"pane_id":"%s"}}}\n' "${3:-}" ;;
   "agent get")
     if [ -n "${FM_FAKE_READER_READY_FILE:-}" ] && [ ! -e "$FM_FAKE_READER_READY_FILE" ]; then
       exit 9
@@ -6153,7 +6162,9 @@ case "$cmd $sub" in
     key=$(printf '%s' "$pane" | tr ':/.' '___')
     f="${FM_FAKE_AGENT_DIR:-/tmp}/$key.status"
     if [ -f "$f" ]; then
-      printf '{"result":{"agent":{"agent_status":"%s"}}}\n' "$(cat "$f")"
+      name=
+      [ ! -f "${FM_FAKE_AGENT_DIR:-/tmp}/$key.agent" ] || name=$(cat "${FM_FAKE_AGENT_DIR:-/tmp}/$key.agent")
+      printf '{"result":{"agent":{"agent":"%s","agent_status":"%s"}}}\n' "$name" "$(cat "$f")"
     else
       printf '{"error":{"code":"agent_not_found"}}\n' >&2
       exit 1
@@ -6176,7 +6187,18 @@ make_fake_reader() {  # <dir> -> echoes reader path
   cat > "$path" <<'SH'
 #!/usr/bin/env bash
 set -u
-# argv: <sock> <timeout> <pane...> - ignored; behavior is env-driven.
+# argv: <sock> <timeout> <pane...> - behavior is env-driven, except that a pane
+# listed in FM_FAKE_GONE_PANES makes the reader answer like herdr does: reject the
+# whole subscription with a pane_not_found @error line and exit 3.
+shift 2
+for pane in "$@"; do
+  for gone in ${FM_FAKE_GONE_PANES:-}; do
+    if [ "$gone" = "$pane" ]; then
+      printf '@error\tpane_not_found\tpane %s not found\n' "$gone"
+      exit 3
+    fi
+  done
+done
 if [ -n "${FM_FAKE_READER_READY_FILE:-}" ]; then
   : > "$FM_FAKE_READER_READY_FILE"
 fi
@@ -6421,6 +6443,87 @@ test_wait_transition_clean_timeout_returns_1() {
   [ "$fd_open" = no ] || fail "a clean timeout must close fixed fd 9"
   [ -z "$(find "$temp" -mindepth 1 -print -quit)" ] || fail "a clean timeout must remove its private FIFO directory"
   pass "fm_backend_herdr_wait_transition: stock macOS Bash clean timeout closes fd 9 and returns 1"
+}
+
+test_normalize_event_distrusts_cursor_blocked() {
+  local rec status
+  rec=$(bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_normalize_event wG:pQ wG blocked cursor' "$ROOT")
+  status=$(bash -c '. "$0/bin/fm-transition-lib.sh"; fm_transition_to_status "$1"' "$ROOT" "$rec")
+  [ "$status" = unknown ] || fail "a Cursor pane's native blocked must normalize to unknown (it reads blocked in every state), got '$status'"
+  [ "$(bash -c '. "$0/bin/fm-transition-lib.sh"; fm_transition_agent "$1"' "$ROOT" "$rec")" = cursor ] \
+    || fail "the Cursor record must keep its agent identity: $rec"
+  rec=$(bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_normalize_event wG:pQ wG working cursor' "$ROOT")
+  status=$(bash -c '. "$0/bin/fm-transition-lib.sh"; fm_transition_to_status "$1"' "$ROOT" "$rec")
+  [ "$status" = working ] || fail "only blocked is distrusted for Cursor; working must pass through, got '$status'"
+  rec=$(bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_normalize_event wG:pQ wG blocked claude' "$ROOT")
+  status=$(bash -c '. "$0/bin/fm-transition-lib.sh"; fm_transition_to_status "$1"' "$ROOT" "$rec")
+  [ "$status" = blocked ] || fail "another harness's blocked must stay blocked, got '$status'"
+  pass "fm_backend_herdr_normalize_event: Cursor's always-blocked native state is untrusted, other harnesses keep blocked"
+}
+
+test_wait_transition_cursor_blocked_is_not_escalated() {
+  local dir state agent fb reader lines out rc
+  dir="$TMP_ROOT/wt-cursor"; state="$dir/state"; agent="$dir/agents"; mkdir -p "$state" "$agent"
+  fb=$(make_herdr_eventfake "$dir")
+  set_fake_agent "$agent" "wG:pQ" blocked
+  printf 'cursor' > "$agent/wG_pQ.agent"
+  reader=$(make_fake_reader "$dir"); lines="$dir/lines"
+  printf 'wG:pQ\twG\tblocked\tcursor\n' > "$lines"
+  out=$(PATH="$fb:$PATH" FM_BACKEND_HERDR_EVENTS_FORCE=1 FM_FAKE_SESSION_NAME=sess FM_FAKE_SOCKET="$dir/x.sock" FM_FAKE_AGENT_DIR="$agent" \
+    FM_BACKEND_HERDR_EVENT_READER="$reader" FM_FAKE_READER_LINES="$lines" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_wait_transition sess 1 "$1" sess:wG:pQ' "$ROOT" "$state"); rc=$?
+  [ "$rc" = 1 ] || fail "a Cursor pane reading blocked (reconcile and stream edge) must not escalate, got rc=$rc out='$out'"
+  [ -z "$out" ] || fail "a Cursor pane reading blocked must print no record, got '$out'"
+  pass "fm_backend_herdr_wait_transition: Cursor's false native blocked raises no wake from the reconcile or the stream"
+}
+
+test_wait_transition_gone_pane_does_not_fail_the_subscription() {
+  local dir state agent temp fb reader lines diag out rc
+  dir="$TMP_ROOT/wt-gone-pane"; state="$dir/state"; agent="$dir/agents"; temp="$dir/temp"; mkdir -p "$state" "$agent" "$temp"
+  fb=$(make_herdr_eventfake "$dir")
+  set_fake_agent "$agent" "wG:pLive" blocked
+  printf 'claude' > "$agent/wG_pLive.agent"
+  reader=$(make_fake_reader "$dir"); lines="$dir/lines"; : > "$lines"; diag="$dir/diag"; : > "$diag"
+  out=$(PATH="$fb:$PATH" TMPDIR="$temp" FM_BACKEND_HERDR_EVENTS_FORCE=1 FM_FAKE_SESSION_NAME=sess FM_FAKE_SOCKET="$dir/x.sock" FM_FAKE_AGENT_DIR="$agent" \
+    FM_BACKEND_HERDR_EVENT_READER="$reader" FM_FAKE_READER_LINES="$lines" FM_FAKE_GONE_PANES="wG:pGone" FM_BACKEND_EVENTS_DIAG_FILE="$diag" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_wait_transition sess 1 "$1" sess:wG:pGone sess:wG:pLive' "$ROOT" "$state"); rc=$?
+  [ "$rc" = 0 ] || fail "one gone pane must not fail the whole subscription; the live blocked pane must still return rc 0, got $rc out='$out'"
+  [ "$(bash -c '. "$0/bin/fm-transition-lib.sh"; fm_transition_pane_id "$1"' "$ROOT" "$out")" = wG:pLive ] \
+    || fail "the record must be the live pane's, got '$out'"
+  assert_contains "$(cat "$diag")" "sess:wG:pGone" "the cause line must name the gone pane"
+  assert_contains "$(cat "$diag")" "pane_not_found" "the cause line must carry herdr's error code"
+  [ -z "$(find "$temp" -mindepth 1 -print -quit)" ] || fail "the retry path must remove its private FIFO directory"
+  pass "fm_backend_herdr_wait_transition: a gone pane is dropped and named, the live pane still subscribes and reconciles"
+}
+
+test_wait_transition_unexplained_rejection_names_its_cause() {
+  local dir state agent temp fb reader lines diag rc
+  dir="$TMP_ROOT/wt-reject-live"; state="$dir/state"; agent="$dir/agents"; temp="$dir/temp"; mkdir -p "$state" "$agent" "$temp"
+  fb=$(make_herdr_eventfake "$dir")
+  set_fake_agent "$agent" "wG:pQ" idle
+  reader=$(make_fake_reader "$dir"); lines="$dir/lines"; : > "$lines"; diag="$dir/diag"; : > "$diag"
+  # herdr rejects the subscription naming a pane that `pane get` still finds: no
+  # gone pane to drop, so the cycle stays rc 2 and says why.
+  rc=$(PATH="$fb:$PATH" TMPDIR="$temp" FM_BACKEND_HERDR_EVENTS_FORCE=1 FM_FAKE_SESSION_NAME=sess FM_FAKE_SOCKET="$dir/x.sock" FM_FAKE_AGENT_DIR="$agent" \
+    FM_BACKEND_HERDR_EVENT_READER="$reader" FM_FAKE_READER_LINES="$lines" FM_FAKE_GONE_PANES="wG:pQ" FM_BACKEND_EVENTS_DIAG_FILE="$diag" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_pane_presence_state() { printf present; }; fm_backend_herdr_wait_transition sess 1 "$1" sess:wG:pQ; echo $?' "$ROOT" "$state" | tail -1)
+  [ "$rc" = 2 ] || fail "a rejection with no gone pane to drop must return 2, got $rc"
+  assert_contains "$(cat "$diag")" "pane_not_found" "an unexplained rejection must still name herdr's error"
+  [ -z "$(find "$temp" -mindepth 1 -print -quit)" ] || fail "a rejected subscription must remove its private FIFO directory"
+  pass "fm_backend_herdr_wait_transition: a rejection with no gone pane falls back to polling and names herdr's error"
+}
+
+test_wait_transition_all_panes_gone_returns_2_and_names_them() {
+  local dir state fb reader lines diag rc
+  dir="$TMP_ROOT/wt-all-gone"; state="$dir/state"; mkdir -p "$state"
+  fb=$(make_herdr_eventfake "$dir")
+  reader=$(make_fake_reader "$dir"); lines="$dir/lines"; : > "$lines"; diag="$dir/diag"; : > "$diag"
+  rc=$(PATH="$fb:$PATH" FM_BACKEND_HERDR_EVENTS_FORCE=1 FM_FAKE_SESSION_NAME=sess FM_FAKE_SOCKET="$dir/x.sock" \
+    FM_BACKEND_HERDR_EVENT_READER="$reader" FM_FAKE_READER_LINES="$lines" FM_FAKE_GONE_PANES="wG:pA wG:pB" FM_BACKEND_EVENTS_DIAG_FILE="$diag" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_wait_transition sess 1 "$1" sess:wG:pA sess:wG:pB; echo $?' "$ROOT" "$state" | tail -1)
+  [ "$rc" = 2 ] || fail "with every recorded pane gone there is nothing to subscribe to; expected rc 2, got $rc"
+  assert_contains "$(cat "$diag")" "sess:wG:pA, sess:wG:pB" "the cause line must name every gone pane"
+  pass "fm_backend_herdr_wait_transition: every pane gone falls back to polling and names them"
 }
 
 # shellcheck source=bin/fm-backend.sh
@@ -6735,6 +6838,11 @@ test_wait_transition_stream_absorb_clears_then_timeout
 test_wait_transition_reader_failure_returns_2
 test_wait_transition_bad_ack_returns_2_and_cleans_up
 test_wait_transition_clean_timeout_returns_1
+test_normalize_event_distrusts_cursor_blocked
+test_wait_transition_cursor_blocked_is_not_escalated
+test_wait_transition_gone_pane_does_not_fail_the_subscription
+test_wait_transition_unexplained_rejection_names_its_cause
+test_wait_transition_all_panes_gone_returns_2_and_names_them
 test_canonical_socket_path_folds_a_windows_drive_letter_spelling
 test_canonical_socket_path_refuses_a_failed_cygpath
 test_canonical_socket_path_refuses_empty_cygpath_output

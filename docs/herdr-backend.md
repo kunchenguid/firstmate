@@ -930,6 +930,19 @@ Polling runs every cycle and remains the permanent fallback when any of these is
 
 There is still one watcher process; the event reader is a bounded child of that watcher.
 
+Herdr rejects the whole subscription when any one subscribed pane is gone (`pane_not_found`).
+The adapter then checks which recorded panes still exist, resubscribes once on those, and still runs the level reconcile, so one stale task record never takes the live panes off the push path.
+When no gone pane explains a rejection, the cycle falls back to polling.
+Either way the cause reaches the watcher's triage log as an `event wait degraded` line that names the gone pane or Herdr's error, once per distinct cause.
+
+After `FM_EVENT_CAP_FAIL_MAX` (3) consecutive failed cycles the watcher stops trying the push path and logs `event path off` with the cause.
+It is never off for the watcher's whole life.
+A change in the set of watched panes re-arms it at once, and so does `FM_EVENT_CAP_RETRY_SECS` (300) elapsing, with one probationary cycle: a further failure switches it off again and is logged again.
+Each re-arm is logged as `event path re-armed`.
+
+Herdr reads a Cursor pane `blocked` in every state, so the adapter reports Cursor's native `blocked` as `unknown`, and a Cursor worker raises no push wake.
+The poll loop remains its backstop.
+
 `tests/fm-backend-herdr-eventwait-smoke.test.sh`, `tests/fm-transition-lib.test.sh`, and `tests/fm-supervision-events.test.sh` cover capability, subscribe-then-reconcile ordering, dedupe, exemptions, and polling fallback.
 
 ## Away-mode supervisor support

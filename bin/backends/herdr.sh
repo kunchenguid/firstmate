@@ -4015,7 +4015,35 @@ fm_backend_herdr_events_capable() {  # <session>
 # carries no previous status and its stream is edge-triggered, so from_status is
 # left empty; to_status drives the policy.
 fm_backend_herdr_normalize_event() {  # <pane_id> <workspace_id> <agent_status> <agent>
-  fm_transition_record "${1:-}" "${2:-}" "" "${3:-}" "${4:-}"
+  local status=${3:-}
+  fm_backend_herdr_native_blocked_trusted "${4:-}" || [ "$status" != blocked ] || status=unknown
+  fm_transition_record "${1:-}" "${2:-}" "" "$status" "${4:-}"
+}
+
+# fm_backend_herdr_native_blocked_trusted: whether herdr's native `blocked` for
+# <agent> means a harness waiting on the human. It does for every harness except
+# Cursor, which herdr reads `blocked` in every state - idle, mid-turn, and after
+# (measured live; see "Harnesses with no idle baseline" in
+# docs/herdr-backend.md) - so each Cursor task would raise a false wake. The
+# normalizer reports that untrusted `blocked` as `unknown`, which the shared
+# policy table (bin/fm-transition-lib.sh) takes no fast action on; the poll loop
+# stays the backstop for a Cursor worker. This is the push path's per-harness
+# trust gate, and the normalizer is its only caller so the stream edge and the
+# level reconcile cannot disagree.
+fm_backend_herdr_native_blocked_trusted() {  # <agent>
+  case "$1" in
+    cursor|cursor-agent) return 1 ;;
+  esac
+  return 0
+}
+
+# fm_backend_herdr_event_diag: append one cause line to the file the watcher
+# named in FM_BACKEND_EVENTS_DIAG_FILE, so a degraded event wait can be named in
+# the watcher's triage log instead of failing silently. A no-op when no file is
+# named (the wait then behaves exactly as before), and never fatal.
+fm_backend_herdr_event_diag() {  # <message>
+  [ -n "${FM_BACKEND_EVENTS_DIAG_FILE:-}" ] || return 0
+  printf '%s\n' "$1" >> "$FM_BACKEND_EVENTS_DIAG_FILE" 2>/dev/null || true
 }
 
 # fm_backend_herdr_event_reader_cmd: emit the reader argv (one word per line) for
@@ -4066,11 +4094,11 @@ fm_backend_herdr_wait_transition() {  # <session> <timeout_secs> <state_dir> <pa
   local windows=("$@")
   [ "${#windows[@]}" -gt 0 ] || return 2
   if [ "${FM_BACKEND_EVENTS_CAPABILITY_CONFIRMED:-0}" != 1 ]; then
-    fm_backend_herdr_events_capable "$session" || return 2
+    fm_backend_herdr_events_capable "$session" || { fm_backend_herdr_event_diag "herdr event capability check failed"; return 2; }
   fi
   local sock
   sock=$(fm_backend_herdr_socket_path "$session")
-  [ -n "$sock" ] || return 2
+  [ -n "$sock" ] || { fm_backend_herdr_event_diag "herdr control socket for session '$session' could not be resolved"; return 2; }
 
   # Map each window to its herdr pane id (strip the leading "<session>:").
   local w pane_id
@@ -4094,23 +4122,70 @@ fm_backend_herdr_wait_transition() {  # <session> <timeout_secs> <state_dir> <pa
   [ "${#reader[@]}" -gt 0 ] || return 2
 
   local fifo_dir fifo reader_pid line ws status agent raw record hit rc=1 reader_rc=0
+  local ack_error code message attempt=1 live_ids gone_ids
   fifo_dir=$(mktemp -d "${TMPDIR:-/tmp}/fm-herdr-eventwait.XXXXXX") || return 2
   fifo="$fifo_dir/events"
   if ! mkfifo "$fifo" 2>/dev/null; then
     rm -rf "$fifo_dir" 2>/dev/null || true
+    fm_backend_herdr_event_diag "event reader stream could not be created"
     return 2
   fi
-  "${reader[@]}" "$sock" "$timeout" "${pane_ids[@]}" > "$fifo" 2>/dev/null &
-  reader_pid=$!
-  if ! exec 9< "$fifo"; then
+  while :; do
+    "${reader[@]}" "$sock" "$timeout" "${pane_ids[@]}" > "$fifo" 2>/dev/null &
+    reader_pid=$!
+    if ! exec 9< "$fifo"; then
+      kill "$reader_pid" 2>/dev/null || true
+      wait "$reader_pid" 2>/dev/null || true
+      rm -rf "$fifo_dir" 2>/dev/null || true
+      fm_backend_herdr_event_diag "event reader could not open its stream"
+      return 2
+    fi
+    if IFS= read -r -u 9 line && [ "$line" = "@subscribed" ]; then
+      break
+    fi
+    # The subscription failed. herdr rejects the WHOLE request when any one pane
+    # in it is gone (pane_not_found), so one stale task record would otherwise
+    # keep every live pane off the push path and skip the level reconcile.
+    # Retry once on the panes that still exist; any other cause stays rc 2 and
+    # is named for the watcher's triage log.
     kill "$reader_pid" 2>/dev/null || true
     wait "$reader_pid" 2>/dev/null || true
-    rm -rf "$fifo_dir" 2>/dev/null || true
-    return 2
-  fi
-  if ! IFS= read -r -u 9 line || [ "$line" != "@subscribed" ]; then
-    rc=2
-  fi
+    exec 9<&-
+    ack_error=
+    case "${line:-}" in "@error"*) ack_error=$line ;; esac
+    code=$(printf '%s' "$ack_error" | cut -f2)
+    message=$(printf '%s' "$ack_error" | cut -f3)
+    if [ "$attempt" -ge 2 ] || [ -z "$ack_error" ]; then
+      rm -rf "$fifo_dir" 2>/dev/null || true
+      if [ -n "$ack_error" ]; then
+        fm_backend_herdr_event_diag "herdr subscription rejected (${code:-unknown error}: ${message:-no detail})"
+      else
+        fm_backend_herdr_event_diag "herdr subscription failed (no acknowledgement from the event reader)"
+      fi
+      return 2
+    fi
+    live_ids=()
+    gone_ids=
+    for pane_id in "${pane_ids[@]}"; do
+      if [ "$(fm_backend_herdr_pane_presence_state "$session" "$pane_id")" = dead ]; then
+        gone_ids="${gone_ids:+$gone_ids, }$session:$pane_id"
+      else
+        live_ids+=("$pane_id")
+      fi
+    done
+    if [ -z "$gone_ids" ] || [ "${#live_ids[@]}" -eq 0 ]; then
+      rm -rf "$fifo_dir" 2>/dev/null || true
+      fm_backend_herdr_event_diag "herdr subscription rejected (${code:-unknown error}: ${message:-no detail})${gone_ids:+; recorded pane(s) gone: $gone_ids}"
+      return 2
+    fi
+    fm_backend_herdr_event_diag "herdr subscription rejected (${code:-unknown error}: ${message:-no detail}); resubscribed without gone pane(s): $gone_ids"
+    pane_ids=("${live_ids[@]}")
+    windows=()
+    for pane_id in "${pane_ids[@]}"; do
+      windows+=("$session:$pane_id")
+    done
+    attempt=2
+  done
 
   # Level reconcile on (re)connect (report section 3d): a pane already `blocked`
   # during the gap since the last subscription is returned now, once, while
@@ -4122,9 +4197,11 @@ fm_backend_herdr_wait_transition() {  # <session> <timeout_secs> <state_dir> <pa
       if [ -z "$pane_id" ] || [ "$pane_id" = "$w" ]; then
         continue
       fi
-      raw=$(fm_backend_herdr_agent_status_raw "$session" "$pane_id")
-      [ -n "$raw" ] || continue
-      record=$(fm_backend_herdr_normalize_event "$pane_id" "" "$raw" "")
+      raw=$(fm_backend_herdr_agent_identity_raw "$session" "$pane_id") || raw=
+      status=${raw#*$'\t'}
+      agent=${raw%%$'\t'*}
+      [ -n "$raw" ] && [ -n "$status" ] || continue
+      record=$(fm_backend_herdr_normalize_event "$pane_id" "" "$status" "$agent")
       if hit=$(fm_backend_herdr_apply_transition "$state" "$session" "$record"); then
         printf '%s' "$hit"
         rc=0
@@ -4170,5 +4247,6 @@ fm_backend_herdr_wait_transition() {  # <session> <timeout_secs> <state_dir> <pa
   [ "$rc" -eq 0 ] && return 0
   [ "$rc" -eq 2 ] && return 2
   [ "$reader_rc" -eq 0 ] && return 1
+  fm_backend_herdr_event_diag "herdr event stream ended early (reader exit $reader_rc)"
   return 2
 }
