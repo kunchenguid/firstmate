@@ -3345,7 +3345,7 @@ preflight_descendant_treehouse_slots() {
 }
 
 validate_firstmate_home_children_removal() {
-  local home=$1 sub_state child_meta child_id child_wt child_proj child_kind child_home child_backend child_orca_worktree_id child_owner_rc child_owner_err
+  local home=$1 archive_parent=${2:-$ID} sub_state child_meta child_id child_wt child_proj child_kind child_home child_backend child_orca_worktree_id child_owner_rc child_owner_err
   sub_state="$home/state"
   [ -d "$sub_state" ] || return 0
   for child_meta in "$sub_state"/*.meta; do
@@ -3363,7 +3363,7 @@ validate_firstmate_home_children_removal() {
       [ -n "$child_home" ] || child_home=$child_wt
       [ "$child_backend" != t3code ] || t3code_secondmate_lsof_check "$child_id" "$child_home" || return 1
       validate_firstmate_home_for_removal "$child_home" "child firstmate home" "$child_id" >/dev/null || return 1
-      validate_firstmate_home_children_removal "$child_home" || return 1
+      validate_firstmate_home_children_removal "$child_home" "$archive_parent/children/$child_id" || return 1
     elif [ "$child_backend" = orca ]; then
       child_orca_worktree_id=$(require_orca_worktree_id "$child_meta") || return 1
       if [ -n "$child_wt" ] && [ -e "$child_wt" ]; then
@@ -3384,7 +3384,7 @@ validate_firstmate_home_children_removal() {
         child_owner_err=$(require_owned_worktree_slot_record "$child_id" "$child_wt" 2>&1) || child_owner_rc=$?
       fi
       case "$child_owner_rc" in
-        0) teardown_require_scout_data_preserved "$child_id" "$child_wt" "$DATA/$ID/children/$child_id" || return 1 ;;
+        0) teardown_require_scout_data_preserved "$child_id" "$child_wt" "$DATA/$archive_parent/children/$child_id" || return 1 ;;
         "$TEARDOWN_SLOT_REASSIGNED_RC") ;; # Never inspect a new owner's data.
         *) printf '%s\n' "$child_owner_err" >&2; return 1 ;;
       esac
@@ -3635,7 +3635,7 @@ cleanup_firstmate_home_children() {
     elif [ "$child_backend" = orca ]; then
       # The child endpoint is stopped: re-prove before its copy goes.
       [ "$child_kind" != scout ] \
-        || teardown_require_scout_data_preserved "$child_id" "$child_wt" "$DATA/$ID/children/$child_id" || return 1
+        || teardown_require_scout_data_preserved "$child_id" "$child_wt" "$DATA/$archive_parent/children/$child_id" || return 1
       if [ -n "$child_wt" ] && [ -d "$child_wt" ]; then
         validate_child_worktree_for_removal "$child_wt" "$child_proj" >/dev/null || return 1
         rm -f "$child_wt/.claude/settings.local.json" "$child_wt/.opencode/plugins/fm-turn-end.js" \
@@ -3658,7 +3658,7 @@ cleanup_firstmate_home_children() {
       else
         validate_child_worktree_for_removal "$child_wt" "$child_proj" >/dev/null || return 1
         [ "$child_kind" != scout ] \
-          || teardown_require_scout_data_preserved "$child_id" "$child_wt" "$DATA/$ID/children/$child_id" || return 1
+          || teardown_require_scout_data_preserved "$child_id" "$child_wt" "$DATA/$archive_parent/children/$child_id" || return 1
         rm -f "$child_wt/.claude/settings.local.json" "$child_wt/.opencode/plugins/fm-turn-end.js" \
           "$child_wt/.opencode/plugins/fm-busy-state.js" \
           "$child_wt/.fm-grok-turnend" "$child_wt/.fm-kimi-turnend"

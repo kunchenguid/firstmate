@@ -2309,6 +2309,56 @@ SH
   pass "forced secondmate cleanup refuses child scout task data written while the child stops"
 }
 
+# A grandchild scout's refusal names the destination under its own secondmate,
+# matching the nested layout teardown archives that secondmate's records into,
+# both before any endpoint stops and when data appears as the grandchild stops.
+test_forced_secondmate_grandchild_scout_names_nested_destination() {
+  local case_dir home nested_home grandchild_wt when rc
+  for when in early late; do
+    case_dir=$(make_case "secondmate-grandchild-scout-destination-$when")
+    write_meta "$case_dir" local-only secondmate
+    home="$case_dir/secondmate-home"
+    nested_home="$home/nested-home"
+    mkdir -p "$home/state" "$home/data" "$home/config" "$home/projects" \
+      "$nested_home/state" "$nested_home/data" "$nested_home/config" "$nested_home/projects"
+    printf '%s\n' task-x1 > "$home/.fm-secondmate-home"
+    printf '%s\n' nested-sm > "$nested_home/.fm-secondmate-home"
+    printf '%s\n' "home=$home" >> "$case_dir/state/task-x1.meta"
+    fm_write_meta "$home/state/nested-sm.meta" 'window=firstmate:fm-nested-sm' \
+      'kind=secondmate' 'mode=local-only' "home=$nested_home" "project=$case_dir/project" "worktree=$case_dir/wt"
+    grandchild_wt="$case_dir/grandchild-scout-wt"
+    git -C "$case_dir/project" worktree add -q -b fm/grandchild-scout "$grandchild_wt" main
+    fm_write_meta "$nested_home/state/grandchild-scout.meta" \
+      'window=firstmate:fm-grandchild-scout' 'endpoint_task_id=grandchild-scout' \
+      "worktree=$grandchild_wt" "project=$case_dir/project" 'kind=scout' 'mode=local-only'
+    add_treehouse_clean_fd "$case_dir"
+    if [ "$when" = early ]; then
+      mkdir -p "$grandchild_wt/data/grandchild-scout"
+      printf 'canonical answers\n' > "$grandchild_wt/data/grandchild-scout/marks.json"
+    else
+      cat > "$case_dir/fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+case "${1:-}:$*" in
+  kill-window:*fm-grandchild-scout*)
+    mkdir -p "$FM_LATE_SOURCE" && printf 'canonical answers\n' > "$FM_LATE_SOURCE/marks.json" ;;
+esac
+exit 0
+SH
+      chmod +x "$case_dir/fakebin/tmux"
+    fi
+    rc=0
+    FM_LATE_SOURCE="$grandchild_wt/data/grandchild-scout" run_teardown "$case_dir" --force \
+      > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+    expect_code 1 "$rc" "grandchild scout task data ($when): forced cleanup must refuse"
+    assert_grep "$case_dir/data/task-x1/children/nested-sm/children/grandchild-scout/" "$case_dir/stderr" \
+      "grandchild scout task data ($when): refusal did not name the nested home destination"
+    assert_grep 'canonical answers' "$grandchild_wt/data/grandchild-scout/marks.json" \
+      "grandchild scout task data ($when): data lost"
+    assert_present "$nested_home/state/grandchild-scout.meta" "grandchild scout task data ($when): record removed"
+  done
+  pass "a grandchild scout's refusal names the destination under its own secondmate"
+}
+
 # A child scout whose recorded copy is already gone has no task data left to
 # lose and no slot to prove ownership of, so forced retirement proceeds.
 test_forced_secondmate_retires_child_scout_with_missing_copy() {
@@ -6649,6 +6699,7 @@ test_scout_task_data_requires_preservation
 test_scout_task_data_discard_flag
 test_forced_secondmate_preserves_child_scout_task_data
 test_forced_secondmate_retires_child_scout_with_missing_copy
+test_forced_secondmate_grandchild_scout_names_nested_destination
 test_scout_task_data_written_while_stopping_is_preserved
 test_forced_secondmate_child_scout_late_task_data_is_preserved
 test_hidden_untracked_work_refuses_before_return
