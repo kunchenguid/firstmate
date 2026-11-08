@@ -24,7 +24,8 @@
 #                 "SECONDMATE_LIVENESS: secondmate <id>: skipped: <reason>|respawn failed after <cause>: <reason>",
 #                 "SECONDMATE_HANDOFF: secondmate <id>: pending delivery: <n> item(s)",
 #                 "FMX: X mode on ..." or "FMX: X mode off ...",
-#                 "TREEHOUSE_POOL_REPORT: <pool finding or scan summary>".
+#                 "TREEHOUSE_POOL_REPORT: <pool finding or scan summary>" (only when
+#                 the config/treehouse-pool-report presence flag exists).
 #          When a RUNNING secondmate home is fast-forwarded, its target is
 #          firstmate's own current default-branch commit. A local worktree uses
 #          a purely local fast-forward with no origin fetch; a remote route hands
@@ -1643,7 +1644,8 @@ treehouse_pool_report() {
 }
 
 detect_local_config() {
-  treehouse_pool_report
+  # Opt-in only: without the flag bootstrap reads no Treehouse state.
+  [ ! -e "$CONFIG/treehouse-pool-report" ] || treehouse_pool_report
   # Worktree-tangle check: the firstmate primary checkout (FM_ROOT) must sit on its
   # default branch, not a feature branch (see fm-tangle-lib.sh). Scoped to the
   # primary only; detached-HEAD worktrees and secondmate homes never trip it.
