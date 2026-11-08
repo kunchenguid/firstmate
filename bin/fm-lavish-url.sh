@@ -60,8 +60,8 @@
 #
 # Environment: FM_HOME selects the home (FM_STATE_OVERRIDE, FM_DATA_OVERRIDE,
 # FM_CONFIG_OVERRIDE, FM_PROJECTS_OVERRIDE as elsewhere). The capture uses
-# browser session FM_LAVISH_URL_BROWSER_SESSION (default fm-lavish-url, with a
-# -mobile suffix for --mobile) and inherits every other CHROME_DEVTOOLS_AXI_*
+# browser session FM_LAVISH_URL_BROWSER_SESSION (default a unique per-capture
+# session derived from FM_HOME) and inherits every other CHROME_DEVTOOLS_AXI_*
 # setting, such as an executable path or Chrome flags a host needs.
 # FM_LAVISH_URL_TIMEOUT bounds each browser call in seconds (default 90) where
 # `timeout` exists. FM_LAVISH_URL_SETTLE_MS is the post-load settle (default 800).
@@ -165,7 +165,7 @@ session_listed_open() {  # <canonical-path>
 
 cmd_snapshot() {
   local url='' mobile=0 viewport=desktop size slug ts snap meta tmp real sid out session_url arm_out routed
-  local settle
+  local settle claim cleanup suffix=0
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --mobile) mobile=1; shift ;;
@@ -185,26 +185,36 @@ cmd_snapshot() {
   settle=${FM_LAVISH_URL_SETTLE_MS:-800}
   case "$settle" in ''|*[!0-9]*) die "FM_LAVISH_URL_SETTLE_MS must be a whole number of milliseconds" ;; esac
 
-  BROWSER_SESSION=${FM_LAVISH_URL_BROWSER_SESSION:-fm-lavish-url}
+  BROWSER_SESSION=${FM_LAVISH_URL_BROWSER_SESSION:-$(python3 - "$FM_HOME" <<'PYSESSION'
+import hashlib, sys, uuid
+print("fm-lavish-url-" + hashlib.sha256(sys.argv[1].encode()).hexdigest()[:12] + "-" + uuid.uuid4().hex)
+PYSESSION
+)}
   size=1440x900
   if [ "$mobile" = 1 ]; then
     viewport=mobile
     size=390x844
-    BROWSER_SESSION="$BROWSER_SESSION-mobile"
   fi
 
   mkdir -p "$SNAPSHOTS" || die "cannot create $SNAPSHOTS"
   slug=$(url_slug "$url")
   ts=$(date -u +%Y%m%dT%H%M%SZ)
-  while [ -e "$SNAPSHOTS/$slug-$ts.html" ]; do
-    sleep 1
-    ts=$(date -u +%Y%m%dT%H%M%SZ)
+  claim="$SNAPSHOTS/$slug-$ts"
+  while :; do
+    if mkdir "$claim.claim" 2>/dev/null; then
+      [ ! -e "$claim.html" ] && break
+      rmdir "$claim.claim"
+    fi
+    suffix=$((suffix + 1))
+    claim="$SNAPSHOTS/$slug-$ts~$(printf '%06d' "$suffix")"
   done
-  snap="$SNAPSHOTS/$slug-$ts.html"
-  meta="$SNAPSHOTS/$slug-$ts.meta.json"
-  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-lavish-url.XXXXXX") || die "cannot create a temporary directory"
+  snap="$claim.html"
+  meta="$claim.meta.json"
+  tmp=$(mktemp -d "$SNAPSHOTS/.capture.XXXXXX") || die "cannot create a temporary directory"
+  printf -v cleanup 'browser stop >/dev/null 2>&1 || true; rm -rf -- %q; rmdir -- %q' "$tmp" "$claim.claim"
+  # The paths are deliberately shell-quoted now, before function locals expire.
   # shellcheck disable=SC2064
-  trap "rm -rf -- '$tmp'" EXIT
+  trap "$cleanup" EXIT
 
   # Emulation is set on a blank page first so the target URL loads under it.
   browser_ok "open a blank page" open about:blank >/dev/null
@@ -216,7 +226,19 @@ cmd_snapshot() {
   fi
   browser_ok "load $url" open "$url" >/dev/null
   browser_ok "let the page settle" eval "async () => { if (document.readyState !== 'complete') { await new Promise((resolve) => { addEventListener('load', resolve, { once: true }); setTimeout(resolve, 15000); }); } await new Promise((resolve) => setTimeout(resolve, $settle)); return document.readyState; }" >/dev/null
-  browser eval --full "() => ({ url: location.href, baseURI: document.baseURI, title: document.title, html: document.documentElement.outerHTML })" \
+  browser eval --full "() => {
+    const styles = [], inaccessible = [];
+    for (const sheet of [...document.styleSheets, ...document.adoptedStyleSheets]) {
+      if (sheet.disabled) continue;
+      try {
+        let css = Array.from(sheet.cssRules, rule => rule.cssText).join('\n');
+        const media = sheet.media && sheet.media.mediaText;
+        if (media) css = '@media ' + media + ' {' + css + '}';
+        styles.push({ css, baseURI: sheet.href || document.baseURI });
+      } catch (_) { if (sheet.href) inaccessible.push(sheet.href); }
+    }
+    return { url: location.href, baseURI: document.baseURI, title: document.title, html: document.documentElement.outerHTML, styles, inaccessible_stylesheets: inaccessible };
+  }" \
     > "$tmp/eval.txt" 2>&1 || die "capture browser failed to read the page: $(head -5 "$tmp/eval.txt")"
   python3 "$HELPER" decode-eval "$tmp/eval.txt" > "$tmp/capture.json" \
     || die "the capture browser did not return a complete page for $url"

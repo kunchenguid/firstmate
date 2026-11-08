@@ -167,6 +167,8 @@ class Sanitizer(HTMLParser):
             value = "" if value is None else value
             if not ATTR_NAME.match(name):
                 continue
+            if (name == "id" and (value.startswith("fm-lavish-url") or value == "fmLavishUrl")) or (name == "name" and value == "fmLavishUrl"):
+                continue
             if name.startswith("on") or name in DROP_ATTRS:
                 continue
             if name.startswith("data-lavish") or name.startswith("data-fm-"):
@@ -438,6 +440,9 @@ def build(args):
         css = escape_css_markup(handle.read())
     with open(os.path.join(skill_dir, "assets", "core.js"), encoding="utf-8") as handle:
         core = inline_script(handle.read(), "core.js")
+    captured_css = []
+    for sheet in capture.get("styles", []):
+        captured_css.append("<style>\n%s</style>" % rewrite_css(sheet["css"], sheet.get("baseURI") or base))
     head_inject = '<style id="fm-lavish-url-style">\n%s</style>' % css
     context_json = json.dumps(context).replace("<", "\\u003c").replace(">", "\\u003e").replace("&", "\\u0026")
     tail = [
@@ -447,7 +452,7 @@ def build(args):
     for name, path in selected:
         with open(path, encoding="utf-8") as handle:
             tail.append('<script data-fm-enhancer="%s">\n%s</script>' % (html.escape(name), inline_script(handle.read(), path)))
-    tail_html = "\n".join(tail) + "\n"
+    tail_html = "".join(captured_css) + "\n".join(tail) + "\n"
     if sanitizer.body_end is not None:
         body = body[: sanitizer.body_end] + [tail_html] + body[sanitizer.body_end:]
     else:
@@ -460,6 +465,7 @@ def build(args):
     with open(out_path, "w", encoding="utf-8") as handle:
         handle.write(document)
     meta = dict(context)
+    meta["inaccessible_stylesheets"] = capture.get("inaccessible_stylesheets", [])
     meta["title"] = title
     meta["reported_url"] = reported[:2000]
     meta["snapshot"] = os.path.abspath(out_path)

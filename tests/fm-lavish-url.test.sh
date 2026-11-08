@@ -57,14 +57,32 @@ if [ -e "$home/browser-fail" ]; then
 fi
 case "${1-}" in
   open)
-    printf '%s\n' "$2" > "$home/browser-url"
+    printf '%s\n' "$2" > "$home/browser-url-${CHROME_DEVTOOLS_AXI_SESSION}"
+    sleep 0.1
     printf 'page:\n  title: fake\n  url: "%s"\n' "$2"
     ;;
   emulate) printf 'status: ok\n' ;;
   eval)
     if [ "${2-}" != --full ]; then printf 'result: "complete"\n'; exit 0; fi
-    url=$(cat "$home/browser-url")
+    url=$(cat "$home/browser-url-${CHROME_DEVTOOLS_AXI_SESSION}")
     host=$(python3 -c 'import sys; from urllib.parse import urlsplit; print(urlsplit(sys.argv[1]).hostname)' "$url")
+    if [ -f "$home/pages/$host.html.json" ]; then
+      node - "$url" "$home/pages/$host.html" "$3" <<'JSCAPTURE'
+const fs = require("fs"), vm = require("vm");
+const [url, page, expression] = process.argv.slice(2);
+const fixture = JSON.parse(fs.readFileSync(page + ".json", "utf8"));
+const sheets = fixture.styles.map(s => ({href: s.baseURI, cssRules: [{cssText: s.css}], media: {mediaText: s.media || ""}, disabled: !!s.disabled}));
+const adopted = sheets.pop();
+for (const href of fixture.inaccessible_stylesheets) {
+  sheets.push({href, get cssRules() { throw new Error("SecurityError"); }});
+}
+const document = {baseURI: url, title: "Fixture page", documentElement: {outerHTML: fs.readFileSync(page, "utf8")},
+  styleSheets: sheets, adoptedStyleSheets: [adopted]};
+const result = vm.runInNewContext("(" + expression + ")()", {document, location: {href: url}});
+console.log("result: " + JSON.stringify(JSON.stringify(result)));
+JSCAPTURE
+      exit
+    fi
     python3 - "$url" "$home/pages/$host.html" <<'PY'
 import json, sys
 url, page = sys.argv[1], sys.argv[2]
@@ -237,7 +255,7 @@ test_generic_url_capture_sanitizes_layers_and_arms() {
   assert_equals 3 "$script_count" "the snapshot carries scripts other than context, core, and default"
   assert_grep 'data-fm-enhancer="default"' "$snap" "the universal enhancer layer was not injected"
 
-  assert_grep "$(printf 'fm-lavish-url\topen about:blank')" "$home/browser.log" "the capture did not use its own browser session"
+  assert_grep 'open about:blank' "$home/browser.log" "the capture did not use its own browser session"
   assert_grep "emulate --viewport 1440x900x1" "$home/browser.log" "a desktop capture did not set a desktop viewport"
   assert_equals "$snap" "$(lu "$home" path "https://shop.example.test/landing?x=1")" "path did not return the snapshot"
   expect_code 1 "$(lu "$home" path "https://shop.example.test/landing?x=2" >/dev/null 2>&1; echo $?)" \
@@ -260,7 +278,7 @@ test_project_url_selects_matching_enhancers() {
   done
   assert_equals "mobile 390x844" "$(field "$out" viewport)" "a --mobile capture did not record its viewport"
   assert_equals mobile "$(jq -r .viewport "${snap%.html}.meta.json")" "the metadata did not record the mobile viewport"
-  assert_grep "$(printf 'fm-lavish-url-mobile\temulate --viewport 390x844x3,mobile,touch')" "$home/browser.log" \
+  assert_grep 'emulate --viewport 390x844x3,mobile,touch' "$home/browser.log" \
     "a --mobile capture did not emulate a mobile device in its own session"
 
   odoo_page "$home/pages/erp.example.test.html"
@@ -444,7 +462,113 @@ test_snapshot_refuses_bad_urls_and_failed_captures() {
   pass "snapshot refuses unsupported URLs, malformed domain maps, failed or truncated captures, and sessions that are not open"
 }
 
+test_overlapping_captures_keep_pages_and_names_distinct() {
+  local home other a b c d
+  home=$(make_home overlaps)
+  other=$(make_home overlaps-other)
+  printf '<html><body>First page</body></html>' > "$home/pages/first.test.html"
+  printf '<html><body>Second page</body></html>' > "$home/pages/second.test.html"
+  cp "$home/pages/second.test.html" "$other/pages/second.test.html"
+  lu "$home" snapshot https://first.test/ > "$home/a" 2>&1 & a=$!
+  lu "$home" snapshot https://second.test/ > "$home/b" 2>&1 & b=$!
+  lu "$other" snapshot https://second.test/ > "$other/c" 2>&1 & c=$!
+  if ! { wait "$a" && wait "$b" && wait "$c"; }; then fail "overlapping captures failed"; fi
+  assert_grep 'First page' "$(field "$(cat "$home/a")" snapshot)" "first capture read another page"
+  assert_grep 'Second page' "$(field "$(cat "$home/b")" snapshot)" "second capture read another page"
+  assert_equals 3 "$(cat "$home/browser.log" "$other/browser.log" | grep 'open about:blank' | cut -f1 | sort -u | wc -l | tr -d ' ')" "captures shared sessions"
+  # Freeze the clock so both same-slug captures must contend for one name.
+  printf '#!/usr/bin/env bash\nprintf "20261108T000000Z\\n"\n' > "$home/fakebin/date"
+  chmod +x "$home/fakebin/date"
+  lu "$home" snapshot https://first.test/same > "$home/c" 2>&1 & c=$!
+  lu "$home" snapshot https://first.test/same > "$home/d" 2>&1 & d=$!
+  if ! { wait "$c" && wait "$d"; }; then fail "same-slug captures failed"; fi
+  a=$(field "$(cat "$home/c")" snapshot)
+  b=$(field "$(cat "$home/d")" snapshot)
+  [ "$a" != "$b" ] || fail "captures overwrote the snapshot"
+  [ "$(jq -r .source_id "${a%.html}.meta.json")" != "$(jq -r .source_id "${b%.html}.meta.json")" ] || fail "source identities collided"
+  assert_equals "$(printf '%s\n%s\n' "$a" "$b" | sort | tail -1)" "$(lu "$home" path https://first.test/same)" "path did not select newest reservation"
+  pass "overlapping captures isolate browser state and reserve unique snapshot identities"
+}
+
+test_cssom_and_reserved_markup() {
+  local home out snap
+  home=$(make_home cssom)
+  printf '<html><head></head><body><div id="fm-lavish-url-panel">Page panel</div><form name="fmLavishUrl"><input id="fmLavishUrl"><p id="fm-lavish-url-outline">Content</p></form></body></html>' > "$home/pages/css.test.html"
+  cat > "$home/pages/css.test.html.json" <<'JSON'
+{"styles":[{"css":".disabled{color:green}","disabled":true},{"css":".dynamic{background:url(img.png)}","baseURI":"https://css.test/assets/sheet.css","media":"(width < 600px)"},{"css":".adopted{color:red} /* </style><img src=x> */","baseURI":"https://css.test/"}],"inaccessible_stylesheets":["https://external.test/sheet.css"]}
+JSON
+  out=$(lu "$home" snapshot https://css.test/ 2>&1) || fail "$out"
+  snap=$(field "$out" snapshot)
+  if ! python3 - "$snap" <<'PYHTML'
+import sys
+from html.parser import HTMLParser
+class Output(HTMLParser):
+    def __init__(self):
+        super().__init__()
+        self.ids = []
+        self.styles = []
+        self.in_style = False
+    def handle_starttag(self, tag, attrs):
+        attrs = dict(attrs)
+        if "id" in attrs: self.ids.append(attrs["id"])
+        assert attrs.get("name") != "fmLavishUrl"
+        assert tag != "img"
+        self.in_style = tag == "style"
+    def handle_endtag(self, tag):
+        if tag == "style": self.in_style = False
+    def handle_data(self, data):
+        if self.in_style: self.styles.append(data)
+p = Output()
+p.feed(open(sys.argv[1]).read())
+assert "fm-lavish-url-panel" not in p.ids
+assert "fmLavishUrl" not in p.ids
+assert "fm-lavish-url-outline" not in p.ids
+assert any("url(https://css.test/assets/img.png)" in css for css in p.styles)
+assert any(".adopted{color:red}" in css for css in p.styles)
+assert any("@media (width < 600px)" in css for css in p.styles)
+assert not any(".disabled" in css for css in p.styles)
+PYHTML
+  then fail "CSSOM or reserved markup output failed"; fi
+  assert_equals 'https://external.test/sheet.css' "$(jq -r '.inaccessible_stylesheets[0]' "${snap%.html}.meta.json")" "inaccessible stylesheet was not disclosed"
+  if ! node - "$snap" <<'JS'
+const fs = require("fs"), vm = require("vm"), assert = require("assert");
+const html = fs.readFileSync(process.argv[2], "utf8");
+const scripts = [...html.matchAll(/<script([^>]*)>([\s\S]*?)<\/script>/g)];
+class Element {
+  constructor(tag) { this.tagName = tag.toUpperCase(); this.children = []; this.style = {}; this.listeners = {}; this.nodeType = 1; }
+  appendChild(el) { this.children.push(el); el.parentElement = this; }
+  setAttribute(key, value) { this[key] = value; }
+  removeAttribute(key) { delete this[key]; }
+  addEventListener(key, fn) { this.listeners[key] = fn; }
+}
+const body = new Element("body"), collision = new Element("div");
+collision.id = "fm-lavish-url-panel";
+body.appendChild(collision);
+const context = {textContent: scripts.find(s => s[1].includes('type="application/json"'))[2]};
+function all(el) { return [el, ...el.children.flatMap(all)]; }
+const document = {
+  body, documentElement: new Element("html"), readyState: "complete",
+  createElement: tag => new Element(tag), addEventListener() {},
+  getElementById: id => id === "fm-lavish-url-context" ? context : all(body).find(el => el.id === id)
+};
+const queued = [];
+const window = {fmLavishUrl: collision, addEventListener() {}, lavish: {queuePrompt: (...args) => queued.push(args)}};
+vm.runInNewContext(scripts.find(s => s[1].includes('id="fm-lavish-url-core"'))[2], {window, document});
+const panel = document.getElementById("fm-lavish-url-panel");
+assert(panel && panel !== collision);
+const buttons = all(panel).filter(el => el["data-chip"]);
+assert.deepStrictEqual(buttons.map(el => el.textContent), ["[Fix Layout]", "[Update Text]", "[Mobile Bug]"]);
+for (const button of buttons) button.listeners.click({preventDefault() {}, stopPropagation() {}});
+assert.strictEqual(queued.length, 3);
+assert(queued.every(args => args[1].data.url === "https://css.test/"));
+JS
+  then fail "runtime controls did not install and queue feedback"; fi
+  pass "CSSOM styles are rewritten safely and reserved page markup is stripped"
+}
+
 fm_test_run \
+  test_overlapping_captures_keep_pages_and_names_distinct \
+  test_cssom_and_reserved_markup \
   test_generic_url_capture_sanitizes_layers_and_arms \
   test_project_url_selects_matching_enhancers \
   test_resolve_routes_domains_to_registered_projects \

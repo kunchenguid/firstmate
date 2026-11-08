@@ -14,7 +14,6 @@
 // textContent or prompt data, never in innerHTML or code.
 (function () {
   "use strict";
-  if (window.fmLavishUrl) return;
 
   var contextNode = document.getElementById("fm-lavish-url-context");
   var context = {};
@@ -335,7 +334,9 @@
   window.fmLavishUrl = api;
 
   function start() {
-    if (document.getElementById(PANEL_ID)) return;
+    if (panel) return;
+    var collision = document.getElementById(PANEL_ID);
+    if (collision) collision.removeAttribute("id");
     buildPanel();
     window.addEventListener("pointerdown", onPointerDown, true);
     document.addEventListener("mouseover", onHover, true);
