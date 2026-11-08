@@ -10,9 +10,11 @@
 # worker itself.
 #
 # A remote second mate runs on one session-provider backend: herdr (the
-# default) in the dedicated fm-remote session, or rex on the host's own
-# persistent rex server in a 2ndmate-<id>-<hash> session. --backend names the
-# one to verify; the default `any` resolves herdr when its CLI is present, then
+# default) uses the shared fm-remote session and launch-agent label for the
+# primary code root; each additional code root uses its own isolated session
+# and launch-agent label. Rex uses the host's own persistent rex server in a
+# 2ndmate-<id>-<hash> session. --backend names the one to verify; the default
+# `any` resolves herdr when its CLI is present, then
 # rex, so a host offering both is still verified for the default backend. On
 # the Herdr backend the account needs the Firstmate-owned Aqua Herdr agent plus
 # the sibling dev.firstmate.remote-job worker that runs normal fm-on commands
