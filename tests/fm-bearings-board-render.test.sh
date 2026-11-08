@@ -312,7 +312,10 @@ test_every_card_type_renders_its_links() {
       {key:"unheld-credential", type:"credential", title:"A credential", repo:"r",
        options:[{value:"done",label:"Done"}],
        links:[{url:"https://example.test/console"},
-              {url:"https://example.test/mr/3", label:"Merge request"}]}]}' > "$data"
+              {url:"https://example.test/mr/3", label:"Merge request"}]},
+      {key:"contribution.main.t.https_example.test_o_r_pull_11", type:"link", title:"A link card",
+       repo:"r", about:"waiting on the captain", options:[],
+       pr_url:"https://example.test/o/r/pull/11"}]}' > "$data"
   PATH="$home/fakebin:$PATH" FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_PROCEVENT_CLAIM_ROOT="$home/procevent-claims" \
@@ -323,6 +326,7 @@ test_every_card_type_renders_its_links() {
     || fail "the built board could not be rendered"
   printf '%s' "$out" | jq -e '
     (.call | map({key, hrefs: [.links[].href]}) | sort_by(.key)) == [
+      {key:"contribution.main.t.https_example.test_o_r_pull_11", hrefs:["https://example.test/o/r/pull/11"]},
       {key:"held-decision", hrefs:["https://example.test/o/r/pull/7",
         "https://review.example.test/session/abc"]},
       {key:"merge.some-task", hrefs:["https://example.test/o/r/pull/9"]},
@@ -330,7 +334,11 @@ test_every_card_type_renders_its_links() {
     and (.call[] | select(.key == "held-decision") | .links[1].text) == "Review page - https://review.example.test/session/abc"
     and (.call[] | select(.key == "unheld-credential") | .links[1].text) == "Merge request - https://example.test/mr/3"
   ' >/dev/null || fail "a card type did not render its links: $out"
-  pass "decision, merge, and credential cards each render their PR and extra links"
+  printf '%s' "$out" | jq -e '
+    (.call[] | select(.key | startswith("contribution.")) | .forms == 0 and .inputs == 0)
+    and ([.call[] | select(.key | startswith("contribution.") | not) | .forms >= 1] | all)
+  ' >/dev/null || fail "a link card rendered answer controls, or an answerable card lost its form: $out"
+  pass "decision, merge, credential, and link cards each render their links, and a link card has no answer controls"
 }
 
 test_an_underway_row_leads_with_the_task_name_and_keeps_its_run_status

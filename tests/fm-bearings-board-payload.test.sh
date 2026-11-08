@@ -195,7 +195,8 @@ test_copy_overlay_cannot_change_the_payload_shape() {
 
 # A captain-waiting item firstmate never held: a contribution awaiting merge
 # approval has no hold, so the snapshot carries it only in contributions.captain.
-test_an_unheld_captain_contribution_becomes_a_link_card() {
+# Its card is link-only: its key names no held task, so an answer could never apply.
+test_an_unheld_captain_contribution_becomes_a_link_only_card() {
   local snap p out
   snap="$TMP_ROOT/snap-unheld.json"
   write_snapshot "$TMP_ROOT/snap.json"
@@ -203,19 +204,64 @@ test_an_unheld_captain_contribution_becomes_a_link_card() {
         {task: "alpha-fix", url: "https://github.com/acme/alpha/pull/3", kind: "pr",
          reason: "checks green; merge approval needed", hold: "alpha-fix"},
         {task: "gamma-ship", url: "https://github.com/acme/gamma/pull/12", kind: "pr",
-         reason: "checks green; merge approval needed"},
+         reason: "checks green; merge approval needed", owner: "(main)"},
         {task: "same-pr", url: "https://github.com/acme/alpha/pull/3", kind: "pr",
          reason: "checks green; merge approval needed"}]' "$TMP_ROOT/snap.json" > "$snap"
   p=$("$GEN" --snapshot "$snap") || fail "the generator failed"
-  assert_equals "alpha-fix,old-row,contribution.gamma-ship" \
+  assert_equals "alpha-fix,old-row,contribution._main_.gamma-ship.github.com_acme_gamma_pull_12" \
     "$(jq -r '[.captains_call[].key] | join(",")' <<<"$p")" \
     "an unheld captain contribution is carded once, and a held or duplicate one adds nothing"
-  out=$(jq -c '.captains_call[2] | {type, repo, title, pr_url, about}' <<<"$p")
-  assert_equals '{"type":"decision","repo":"gamma","title":"gamma #12","pr_url":"https://github.com/acme/gamma/pull/12","about":"checks green; merge approval needed"}' \
-    "$out" "the link card did not carry the contribution's page"
+  out=$(jq -c '.captains_call[2]' <<<"$p")
+  assert_equals '{"key":"contribution._main_.gamma-ship.github.com_acme_gamma_pull_12","type":"link","repo":"gamma","title":"gamma #12","about":"checks green; merge approval needed (home (main))","pr_url":"https://github.com/acme/gamma/pull/12","options":[]}' \
+    "$out" "the link card carried an answer control or lost the contribution's page"
   printf '%s\n' "$p" > "$TMP_ROOT/unheld.json"
   validates "$TMP_ROOT/unheld.json" || fail "a payload with an unheld contribution card did not satisfy the board validator"
-  pass "a captain contribution with no hold becomes a link card the validator accepts"
+  pass "a captain contribution with no hold becomes a link-only card the validator accepts"
+}
+
+# One task can own several contribution URLs, and two homes can reuse a task id.
+# Each distinct home, task, and URL keeps its own card; only an exact repeat is dropped.
+test_every_distinct_contribution_gets_its_own_link_card() {
+  local snap p
+  snap="$TMP_ROOT/snap-many.json"
+  write_snapshot "$TMP_ROOT/snap.json"
+  jq '.contributions.captain = [
+        {task: "multi", url: "https://github.com/acme/alpha/pull/1", kind: "pr", reason: "first", owner: "(main)"},
+        {task: "multi", url: "https://github.com/acme/alpha/pull/2", kind: "pr", reason: "second", owner: "(main)"},
+        {task: "multi", url: "https://github.com/acme/beta/pull/2", kind: "pr", reason: "other home", owner: "beta"},
+        {task: "multi", url: "https://github.com/acme/alpha/pull/2", kind: "pr", reason: "exact repeat", owner: "(main)"},
+        {task: "long", url: ("https://github.com/acme/alpha/pull/" + ("9" * 140) + "1"), kind: "pr", reason: "long one", owner: "(main)"},
+        {task: "long", url: ("https://github.com/acme/alpha/pull/" + ("9" * 140) + "2"), kind: "pr", reason: "long two", owner: "(main)"}]' \
+    "$TMP_ROOT/snap.json" > "$snap"
+  p=$("$GEN" --snapshot "$snap") || fail "the generator failed"
+  assert_equals "5" "$(jq '[.captains_call[] | select(.type == "link")] | length' <<<"$p")" \
+    "two PRs of one task, one task id in two homes, or two long URLs lost a card"
+  assert_equals "5" "$(jq '[.captains_call[] | select(.type == "link") | .key] | unique | length' <<<"$p")" \
+    "link card keys collided"
+  assert_equals "https://github.com/acme/alpha/pull/1,https://github.com/acme/alpha/pull/2,https://github.com/acme/beta/pull/2" \
+    "$(jq -r '[.captains_call[] | select(.type == "link" and (.about | startswith("long") | not)) | .pr_url] | join(",")' <<<"$p")" \
+    "a contribution page did not reach its own card"
+  printf '%s\n' "$p" > "$TMP_ROOT/many.json"
+  validates "$TMP_ROOT/many.json" || fail "a payload with several link cards did not satisfy the board validator"
+  pass "each distinct home, task, and contribution URL keeps its own link card"
+}
+
+# The validator refuses any answer control on a link card, because none could apply.
+test_the_validator_refuses_answer_controls_on_a_link_card() {
+  local p
+  write_snapshot "$TMP_ROOT/snap.json"
+  jq '.contributions.captain = [{task: "t", url: "https://github.com/acme/alpha/pull/9", kind: "pr", reason: "r"}]' \
+    "$TMP_ROOT/snap.json" > "$TMP_ROOT/snap-link.json"
+  p=$("$GEN" --snapshot "$TMP_ROOT/snap-link.json") || fail "the generator failed"
+  for edit in '.options = [{value: "later", label: "Later"}]' \
+              '.allow_freeform = true' \
+              '.freeform_hint = "answer here"' \
+              '.recommend_value = "later"' \
+              '.close = "done"'; do
+    jq --arg e "$edit" '.captains_call |= map(if .type == "link" then (. | '"$edit"') else . end)' <<<"$p" > "$TMP_ROOT/link-ctl.json"
+    validates "$TMP_ROOT/link-ctl.json" && fail "the validator accepted a link card with: $edit"
+  done
+  pass "a link card carrying any answer control is refused"
 }
 
 test_cards_carry_links_and_a_non_held_credential_card_survives() {
@@ -281,6 +327,8 @@ fm_test_run \
   test_charted_rows_derive_dispatchable_and_warning_from_structure \
   test_copy_overlay_refines_cards_and_keeps_the_payload_valid \
   test_copy_overlay_cannot_change_the_payload_shape \
-  test_an_unheld_captain_contribution_becomes_a_link_card \
+  test_an_unheld_captain_contribution_becomes_a_link_only_card \
+  test_every_distinct_contribution_gets_its_own_link_card \
+  test_the_validator_refuses_answer_controls_on_a_link_card \
   test_cards_carry_links_and_a_non_held_credential_card_survives \
   test_the_validator_accepts_https_links_and_refuses_every_other_scheme

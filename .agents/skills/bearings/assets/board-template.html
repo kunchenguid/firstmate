@@ -501,6 +501,7 @@ __FM_BEARINGS_BOARD_DATA__
 
   data.captains_call.forEach(function (item) {
     var card = el("div", "fm-card fm-card--poster bb-decision");
+    card.setAttribute("data-card-key", item.key);
     var pad = el("div", "bb-decision__pad");
 
     var top = el("div", "bb-decision__top");
@@ -508,7 +509,8 @@ __FM_BEARINGS_BOARD_DATA__
       top.appendChild(badge("online", "checks green"));
       top.appendChild(badge(item.risk === "low" ? "neutral" : "warn", "risk " + item.risk));
     } else {
-      top.appendChild(badge("solid", "decision"));
+      top.appendChild(badge(item.type === "link" ? "neutral" : "solid",
+                            item.type === "link" ? "waiting on you" : "decision"));
       top.appendChild(el("span", "bb-decision__repo", item.repo));
     }
     pad.appendChild(top);
@@ -529,6 +531,14 @@ __FM_BEARINGS_BOARD_DATA__
       a.href = l.url; a.target = "_blank"; a.rel = "noopener";
       pad.appendChild(a);
     });
+
+    /* A link card names no held task, so an answer could never apply: it
+       shows its page and offers no answer controls. */
+    if (item.type === "link") {
+      card.appendChild(pad);
+      deck.appendChild(card);
+      return;
+    }
 
     var form = document.createElement("form");
     form.setAttribute("data-lavish-question", item.key);

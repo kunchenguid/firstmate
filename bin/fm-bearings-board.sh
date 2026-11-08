@@ -59,6 +59,8 @@
 # THE RECONCILE CHOICE. Every decision card carries the standard `reconcile`
 # option, injected here so the guarantee does not depend on the composer's
 # memory, and the payload validator reserves that value across every card type.
+# A `link` card is the exception: it is link-only, names no held task, and
+# carries no options, so it gets no reconcile choice and no answer controls.
 # The validator's reservation scope must equal the adapter's reconcile
 # classification scope, which is all card types because the captured payload
 # carries no card type. Its meaning, and the reason it can never reach the
@@ -82,7 +84,11 @@
 # row. Anything else in that field refuses rather than sorting on garbage.
 #
 # CAPTAIN'S CALL SHOWS EVERYTHING WAITING ON THE CAPTAIN, including items
-# firstmate never held. Any card (decision, merge, credential) MAY carry `links`,
+# firstmate never held. Such an item is a `link` card: a title, a reason, and
+# the page to act on, with no options, no freeform answer, and no other answer
+# field, because its key names no held task and an answer could never apply.
+# A link card is dropped when a landed row carries the same PR URL.
+# Any card (decision, merge, credential, link) MAY carry `links`,
 # up to 8 `{url, label}` pointers to the page the captain acts on. A link url
 # must be https, like `pr_url`; every other scheme refuses. A card whose key is
 # not a captain-held task id is kept, because hygiene only drops a decision card
@@ -166,11 +172,19 @@ validate_payload() {  # <data.json>
     def call_item:
       type == "object"
       and (.key | slug(128))
-      and (.type == "decision" or .type == "merge" or .type == "credential")
+      and (.type == "decision" or .type == "merge" or .type == "credential" or .type == "link")
       and repo_marker
       and (.title | nonempty_string)
       and (.options | type == "array")
-      and ((.options | length) > 0 or .allow_freeform == true)
+      and (if .type == "link"
+           then ((.options | length) == 0
+                 and ((has("allow_freeform") | not) or .allow_freeform == false)
+                 and (has("freeform_hint") | not)
+                 and (has("recommend_value") | not)
+                 and (has("close") | not)
+                 and (has("subject") | not)
+                 and (has("risk") | not))
+           else ((.options | length) > 0 or .allow_freeform == true) end)
       and ([.options[]
         | type == "object"
           and (.value | slug(128))
@@ -346,10 +360,13 @@ effective_payload() {  # <data.json> <dest.json>
   done < <(jq -r '.captains_call[]? | select(.type == "decision") | .key' "$data")
   tmp=$(printf '%s' "$drop" | jq -R -s 'split("\n") | map(select(length > 0))') || return 1
   jq --argjson dropped "$tmp" '
-    .captains_call = [
+    . as $payload
+    | .captains_call = [
       .captains_call[]
       | . as $card
       | select($card.type != "decision" or (($dropped | index($card.key)) == null))
+      | select($card.type != "link"
+               or ((($card.pr_url? != null) and ($payload.landed | any(.pr_url? == $card.pr_url))) | not))
       | if .type == "decision"
         then .options += [{
           value: "reconcile",

@@ -21,12 +21,16 @@
 #                      freeform answer box (a card with no authored options). The
 #                      snapshot already buckets holds, so every row is a live call.
 #   contributions.captain
-#                   -> captains_call: one link-only `decision` card (key
-#                      `contribution.<task>`, `pr_url` the contribution's page) for
-#                      each row waiting on the captain with no hold of its own, so
-#                      Captain's Call also shows what firstmate never held. A row
-#                      whose hold already has a card, or whose PR a card already
-#                      carries, adds none.
+#                   -> captains_call: one `link` card (answer-less: no options, no
+#                      answer box) for each distinct home, task, and contribution
+#                      URL waiting on the captain with no hold of its own, so
+#                      Captain's Call also shows what firstmate never held. The
+#                      card key is `contribution.<home>.<task>.<url>`, so two PRs
+#                      of one task, or one task id in two homes, each get a card.
+#                      A link card names no held task, so the captain acts on the
+#                      linked page, never through the board. A row whose hold
+#                      already has a card, or whose PR a card already carries,
+#                      adds none.
 #   in_flight       -> underway: every row except state `done`, in snapshot order,
 #                      with the projected `name`.
 #   landed          -> landed: every row; `pr_url` and `repo` come from the
@@ -138,6 +142,7 @@ overlay_errors=$(printf '%s\n' "$COPY_JSON" | jq -r '
 jq -n --argjson snap "$SNAP_JSON" --argjson copy "$COPY_JSON" '
   def card_fields: ["title","about","decide","detail","options","recommend_value","type","close",
                     "risk","pr_url","links","subject","freeform_hint","allow_freeform","repo"];
+  def link_card_fields: ["title","about","detail","pr_url","links","repo"];
   def underway_fields: ["repo"];
   def landed_fields: ["repo","pr_url","subject"];
   def charted_fields: ["title","reason","repo","dispatchable","filed"];
@@ -192,20 +197,31 @@ jq -n --argjson snap "$SNAP_JSON" --argjson copy "$COPY_JSON" '
         | select((.hold // null) == null and (.url | https_url) and (.task | type == "string"))
         | . as $c
         | select(($cards | any(.key == $c.task or .pr_url? == $c.url)) | not)
-        | { key: ("contribution." + (.task | gsub("[^A-Za-z0-9._-]"; "-"))),
-            type: "decision",
-            repo: (.url | repo_of_url),
-            title: ((.url | repo_of_url | nz("")) as $r
-                    | (if $r == "" then $c.task else $r + " #" + ($c.url | split("/") | last) end)),
-            about: ($c.reason | nz("waiting on the captain")),
-            pr_url: .url,
-            options: [], allow_freeform: true,
-            freeform_hint: "answer in your own words (say later to defer)" }
-        | . as $card
-        | select((($copy.captains_call // {}) | has($card.key) | not)
-                 or ($copy.captains_call[$card.key] != null)) ]
-      | reduce .[] as $d ([]; if (map(.key) | index($d.key)) then . else . + [$d] end)
-      | map(. + overlay("captains_call"; .key; card_fields)) ) as $contrib_cards
+        | { owner: ($c.owner // "-"), task: $c.task, url: $c.url, reason: $c.reason } ]
+      | reduce .[] as $r ([];
+          if any(.[]; .owner == $r.owner and .task == $r.task and .url == $r.url)
+          then . else . + [$r] end)
+      | reduce .[] as $r ([];
+          ( ("contribution." + ($r.owner | gsub("[^A-Za-z0-9._-]"; "_"))
+             + "." + ($r.task | gsub("[^A-Za-z0-9._-]"; "_"))
+             + "." + ($r.url | ltrimstr("https://") | gsub("[^A-Za-z0-9._-]"; "_")))
+            | .[0:120] ) as $base
+          | (map(.key)) as $used
+          | ([range(0; 1000) | if . == 0 then $base else $base + "." + tostring end
+              | select(. as $k | $used | index($k) | not)][0]) as $key
+          | . + [ { key: $key,
+                    type: "link",
+                    repo: ($r.url | repo_of_url),
+                    title: (($r.url | repo_of_url | nz("")) as $repo
+                            | (if $repo == "" then $r.task else $repo + " #" + ($r.url | split("/") | last) end)),
+                    about: (($r.reason | nz("waiting on the captain"))
+                            + (if $r.owner == "-" then "" else " (home " + $r.owner + ")" end)),
+                    pr_url: $r.url,
+                    options: [] } ])
+      | map(. as $card
+            | select((($copy.captains_call // {}) | has($card.key) | not)
+                     or ($copy.captains_call[$card.key] != null)))
+      | map(. + overlay("captains_call"; .key; link_card_fields)) ) as $contrib_cards
   | ($cards + $contrib_cards + ($copy.captains_call_extra // [])) as $captains_call
 
   | ( [ $in_flight[] | select(.state != "done") | . as $r

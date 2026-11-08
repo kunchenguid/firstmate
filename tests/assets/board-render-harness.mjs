@@ -139,8 +139,9 @@ const errorText = [...byId.entries()]
 // Each Captain's Call card is the container holding its answer form; its links are
 // the anchors the card renders, with the href the page would navigate to.
 const call = (byId.get("bb-call") || new Node("div")).children.map((card) => ({
-  key: card.findAll((n) => n.attributes["data-lavish-question"] != null)
-    .map((n) => n.attributes["data-lavish-question"])[0] ?? "",
+  key: card.attributes["data-card-key"] ?? "",
+  forms: card.findAll((n) => n.tagName === "form").length,
+  inputs: card.findAll((n) => n.tagName === "input" || n.tagName === "button").length,
   links: card.findAll((n) => n.tagName === "a")
     .map((a) => ({ href: a.href ?? "", text: a.textContent })),
 }));
