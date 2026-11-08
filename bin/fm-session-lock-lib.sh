@@ -49,14 +49,53 @@ FM_HARNESS_NAMES=(claude codex opencode grok kimi pi-signed pi omp agy)
 # such as bin/fm-claude-stop-autoarm.sh or ~/.claude/hooks/notify.sh has no
 # "claude" component and is correctly not a harness process.
 fm_harness_path_name() {  # <path>
-  local path=$1 name
-  [ -n "$path" ] || return 1
-  for name in "${FM_HARNESS_NAMES[@]}"; do
-    case "/$path/" in
-      */"$name"/*) printf '%s' "$name"; return 0 ;;
+  local name
+  _fm_harness_path_name_to name "$1" || return 1
+  printf '%s' "$name"
+}
+
+# The same answer as fm_harness_path_name, stored in variable $1 instead of
+# printed. The identity walk below calls this on every hop; capturing the
+# printed form costs a subshell, and on Git Bash each subshell costs about a
+# tenth of a second. The locals carry a private prefix so that printf -v always
+# reaches the caller's variable rather than one of these.
+_fm_harness_path_name_to() {  # <var> <path>
+  local _fm_hpn_path=$2 _fm_hpn_name
+  [ -n "$_fm_hpn_path" ] || return 1
+  for _fm_hpn_name in "${FM_HARNESS_NAMES[@]}"; do
+    case "/$_fm_hpn_path/" in
+      */"$_fm_hpn_name"/*) printf -v "$1" '%s' "$_fm_hpn_name"; return 0 ;;
     esac
   done
   return 1
+}
+
+# Set variable $1 to exactly what `basename -- "$2"` prints, without starting a
+# process: trailing slashes are dropped, an all-slash path is "/", and an empty
+# path stays empty.
+_fm_basename_to() {  # <var> <path>
+  local _fm_bn_path=$2
+  case $_fm_bn_path in
+    '') ;;
+    *[!/]*)
+      _fm_bn_path=${_fm_bn_path%"${_fm_bn_path##*[!/]}"}
+      _fm_bn_path=${_fm_bn_path##*/}
+      ;;
+    *) _fm_bn_path=/ ;;
+  esac
+  printf -v "$1" '%s' "$_fm_bn_path"
+}
+
+# True exactly when `printf '%s' "$1" | grep -qE "$2"` would be. grep matches
+# line by line, so text holding a newline still goes to grep; a single line is
+# matched by the shell itself, which reaches the same answer without starting
+# two processes. Empty text is no input line at all, which grep never matches.
+_fm_ere_matches() {  # <text> <extended-regex>
+  case $1 in
+    '') return 1 ;;
+    *$'\n'*) printf '%s' "$1" | grep -qE "$2" ;;
+    *) [[ $1 =~ $2 ]] ;;
+  esac
 }
 
 # Portable single-pid process introspection.
@@ -110,20 +149,20 @@ FM_HARNESS_IS_CLAUDE=0
 fm_harness_process_matches() {  # <comm> <args>
   local comm=$1 args=$2 base argv0 name
   FM_HARNESS_IS_CLAUDE=0
-  base=$(basename -- "$comm")
-  if printf '%s' "$base" | grep -qE "$FM_HARNESS_RE"; then
+  _fm_basename_to base "$comm"
+  if _fm_ere_matches "$base" "$FM_HARNESS_RE"; then
     case "$base" in *claude*) FM_HARNESS_IS_CLAUDE=1 ;; esac
     return 0
   fi
   argv0=${args%% *}
-  if name=$(fm_harness_path_name "$comm") || name=$(fm_harness_path_name "$argv0"); then
+  if _fm_harness_path_name_to name "$comm" || _fm_harness_path_name_to name "$argv0"; then
     case "$name" in claude) FM_HARNESS_IS_CLAUDE=1 ;; esac
     return 0
   fi
   # Bare interpreter (e.g. node): match the harness name in its script path.
   case "$comm" in
     *node*|*python*)
-      if printf '%s' "$args" | grep -qE "$FM_HARNESS_RE"; then
+      if _fm_ere_matches "$args" "$FM_HARNESS_RE"; then
         case "$args" in *claude*) FM_HARNESS_IS_CLAUDE=1 ;; esac
         return 0
       fi
@@ -156,9 +195,15 @@ fm_harness_process_matches() {  # <comm> <args>
 # future `kill` - refuses it instead of acting on the wrong process.
 FM_WIN_PID_PREFIX='win:'
 
+# The kernel name, read once at source time as bin/fm-classify-lib.sh does:
+# identity reads mostly run inside $() subshells, where a lazy cache would never
+# persist, and the walk below asks this question on every lookup. fm-wake-lib.sh's
+# _FM_UNAME is reused when it is already loaded.
+_FM_SESSION_LOCK_UNAME=${_FM_UNAME:-$(uname -s 2>/dev/null)}
+
 # True on a Cygwin-family userspace, where the boundary above applies.
 fm_win_boundary_applies() {
-  case "$(uname -s 2>/dev/null)" in
+  case "$_FM_SESSION_LOCK_UNAME" in
     CYGWIN*|MINGW*|MSYS*) return 0 ;;
   esac
   return 1
@@ -431,11 +476,57 @@ _fm_ps_exec_denied() {
   return 1
 }
 
+# Set variable $1 to text $2 as the Cygwin fixed-column readers above report a
+# column: only its first line, with runs of blanks collapsed to one space and
+# the ends trimmed, which is what awk's field split and rejoin produce.
+_fm_cygwin_column_text_to() {  # <var> <text>
+  local _fm_ct_line=${2%%$'\n'*} _fm_ct_out=''
+  local -a _fm_ct_words=()
+  IFS=$' \t' read -r -a _fm_ct_words <<< "$_fm_ct_line" || true
+  if [ "${#_fm_ct_words[@]}" -gt 0 ]; then
+    local IFS=' '
+    _fm_ct_out="${_fm_ct_words[*]}"
+  fi
+  printf -v "$1" '%s' "$_fm_ct_out"
+}
+
+# Cygwin-family route for one local pid, read with shell builtins only.
+#
+# Git Bash's /proc holds the three facts its ps reports for a local pid:
+# exename is the executable path `ps -p` prints, ppid is its PPID column, and
+# cmdline is the NUL-separated argv `ps -f` prints with spaces. The ps route
+# costs about a dozen process launches per pid, and on a Windows host where
+# endpoint scanning makes each launch cost a tenth of a second or more, that
+# was most of every identity check. Both fields are normalized exactly as the
+# fixed-column readers normalize ps output, so the two routes report one fact
+# per field and a process gets the same verdict from either.
+#
+# Linux's /proc has neither exename nor ppid, so this route never answers there.
+# A pid without all three files returns 1 and the caller falls back to ps, which
+# keeps the verdict for a gone or unreadable pid exactly where it was.
+_fm_cygwin_proc_info() {  # <pid>
+  local pid=$1 proc comm='' ppid='' args='' element
+  case "$pid" in ''|*[!0-9]*) return 1 ;; esac
+  proc=${FM_PROC_ROOT_OVERRIDE:-/proc}/$pid
+  [ -r "$proc/exename" ] && [ -r "$proc/ppid" ] && [ -r "$proc/cmdline" ] || return 1
+  IFS= read -r comm < "$proc/exename" || [ -n "$comm" ] || return 1
+  IFS= read -r ppid < "$proc/ppid" || [ -n "$ppid" ] || return 1
+  case "$ppid" in ''|*[!0-9]*) return 1 ;; esac
+  while IFS= read -r -d '' element || [ -n "$element" ]; do
+    args="${args:+$args }$element"
+  done < "$proc/cmdline" || return 1
+  _fm_cygwin_column_text_to comm "$comm"
+  _fm_cygwin_column_text_to args "$args"
+  [ -n "$comm" ] && [ -n "$args" ] || return 1
+  FM_PROC_COMM=$comm FM_PROC_ARGS=$args FM_PROC_PPID=$ppid
+}
+
 # Read the identity fields of pid $1 into FM_PROC_COMM, FM_PROC_ARGS, and
 # FM_PROC_PPID.
 #
-# ps stays primary everywhere it runs: while it executes, its output is
-# used verbatim, so behavior is byte-identical to every session that ever
+# On Cygwin-family hosts the builtin /proc route above answers first and ps is
+# its fallback. Everywhere else ps stays primary: while it executes, its output
+# is used verbatim, so behavior is byte-identical to every session that ever
 # worked. Only a ps that cannot execute at all - bash exits 126 for a
 # refused exec, 127 for a missing binary - routes one read to the OS provider.
 # Status 1 is platform-specific: Linux/macOS mean ps ran and named nothing;
@@ -451,6 +542,9 @@ _fm_ps_exec_denied() {
 fm_proc_info() {  # <pid>
   local pid=$1 rc=0 out comm args ppid
   FM_PROC_COMM='' FM_PROC_ARGS='' FM_PROC_PPID=''
+  if fm_win_boundary_applies && _fm_cygwin_proc_info "$pid"; then
+    return 0
+  fi
   out=$(ps -o comm= -p "$pid" 2>/dev/null) || rc=$?
   case $rc in
     0) ;;
