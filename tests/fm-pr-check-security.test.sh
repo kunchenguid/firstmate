@@ -2012,7 +2012,7 @@ test_term_during_pr_baseline_move_restores_registration() {
   url2=https://gitlab.example/group/subgroup/project/-/merge_requests/2
   ln -sf "$REAL_JQ" "$dir/fakebin/jq"
   write_task_meta "$dir" task-a
-  FM_TEST_GLAB_STATE=opened FM_TEST_GLAB_PIPELINE=success \
+  FM_TEST_GLAB_STATE=opened FM_TEST_GLAB_PIPELINE=failed FM_TEST_GLAB_TRAIN=car \
     run_check_entry "$dir" task-a "$url1" >/dev/null 2>/dev/null \
     || fail "could not seed the original PR registration"
   for artifact in task-a.meta task-a.pr-poll-degraded task-a.pr-poll-train task-a.check.sh task-a.pr-poll task-a.pr-poll-registration; do
@@ -2032,10 +2032,15 @@ esac
 exec "$FM_TEST_REAL_MV" "$@"
 SH
   chmod +x "$dir/fakebin/mv"
-  FM_TEST_BASELINE_MOVE_STARTED="$dir/move-started" \
+  FM_ROOT_OVERRIDE="$dir/root" FM_HOME="$dir/home" FM_CONFIG_OVERRIDE="$dir/home/config" \
+    FM_TEST_GUARD_LOG="$dir/guard.log" FM_TEST_GH_LOG="$dir/gh.log" \
+    FM_TEST_GH_AXI_LOG="$dir/gh-axi.log" FM_TEST_GLAB_LOG="$dir/glab.log" \
+    FM_TEST_GERRIT_AXI_LOG="$dir/gerrit-axi.log" FM_TEST_JQ="$REAL_JQ" \
+    FM_TEST_BASELINE_MOVE_STARTED="$dir/move-started" \
     FM_TEST_BASELINE_MOVE_RELEASE="$dir/move-release" FM_TEST_REAL_MV="$REAL_MV" \
     FM_TEST_GLAB_STATE=opened FM_TEST_GLAB_PIPELINE=success \
-    run_check_entry "$dir" task-a "$url2" > "$dir/rearm.out" 2> "$dir/rearm.err" &
+    PATH="$dir/fakebin:$BASE_PATH" "$PR_CHECK" task-a "$url2" \
+      > "$dir/rearm.out" 2> "$dir/rearm.err" &
   pid=$!
   i=0
   while [ "$i" -lt 300 ] && [ ! -e "$dir/move-started" ]; do sleep 0.01; i=$((i + 1)); done
