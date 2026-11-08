@@ -3634,6 +3634,9 @@ pr_poll_publish_release() {
 }
 
 watcher_cleanup() {
+  # EXIT may run inside a library frame with unset locals hiding these names.
+  # Bind cleanup and its helpers to this watcher's own runtime paths.
+  local STATE=$FM_WATCH_CLEANUP_STATE FM_WAKE_QUEUE=$FM_WATCH_CLEANUP_QUEUE FM_WAKE_QUEUE_LOCK=$FM_WATCH_CLEANUP_QUEUE_LOCK
   local cleanup_status=0 owns_lock=0 transition=release-lock staged lock
   # Join any interrupted owner creation/publication before the release sweep:
   # a child must not publish a lock or staging directory after we removed ours.
@@ -3676,6 +3679,9 @@ watcher_cleanup() {
   fi
   return "$cleanup_status"
 }
+FM_WATCH_CLEANUP_STATE=$STATE
+FM_WATCH_CLEANUP_QUEUE=$FM_WAKE_QUEUE
+FM_WATCH_CLEANUP_QUEUE_LOCK=$FM_WAKE_QUEUE_LOCK
 trap watcher_cleanup EXIT
 watcher_stop_signals
 # This watcher's own pid, as recorded in the lock by fm_lock_claim (which writes
