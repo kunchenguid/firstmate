@@ -8,6 +8,8 @@ set -u
 . "$(dirname "${BASH_SOURCE[0]}")/remote-herdr-fixture.sh"
 # shellcheck source=tests/herdr-client-pair-fixture.sh
 . "$(dirname "${BASH_SOURCE[0]}")/herdr-client-pair-fixture.sh"
+# shellcheck source=tests/rex-fake-fixture.sh
+. "$(dirname "${BASH_SOURCE[0]}")/rex-fake-fixture.sh"
 
 command -v jq >/dev/null 2>&1 || { echo "skip: jq not found"; exit 0; }
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)
@@ -23,6 +25,7 @@ SSH_COUNT="$TMP_ROOT/ssh.count"
 DOCTOR_LOG="$TMP_ROOT/doctor.log"
 HERDR_STATE="$TMP_ROOT/remote-herdr.state"
 HERDR_LOG="$TMP_ROOT/remote-herdr.log"
+REX_FAKE="$TMP_ROOT/remote-rex"
 TMUX_LOG="$TMP_ROOT/remote-tmux.log"
 TMUX_STATE="$TMP_ROOT/remote-tmux.state"
 # One fixture value names the remote route's steering-inbox surface, so the
@@ -188,6 +191,11 @@ if [ "$command_name" = fm-remote-doctor.sh ]; then
       printf 'error: this host is not ready for a remote second mate; unresolved: gui-session\n' >&2
       exit 1
       ;;
+    doctor-old)
+      # A remote still on the herdr-only doctor exits 2 on the unknown
+      # --backend flag; bare calls answer like the normal readiness probe.
+      case "${_command_action:-}:${command_rel:-}" in *--backend*) exit 2 ;; esac
+      ;;
     doctor-fixable)
       # Red until --fix runs on this host, green on every later read-only run.
       if [ "${_command_action:-}" = --fix ]; then
@@ -229,6 +237,26 @@ case "${FM_FAKE_SSH_MODE:-normal}:$command_name:$command_rel" in
     printf 'backend=herdr\n'
     printf 'target=default:w1:p2\n'
     printf 'herdr_session=default\n'
+    printf 'harness=codex\n'
+    exit 0
+    ;;
+  launch-rex-bad-server-route:fm-remote-secondmate-control.sh:*)
+    [ "$_command_action" = launch ] || exit 93
+    printf 'schema=fm-remote-secondmate-control.v1\n'
+    printf 'backend=rex\n'
+    printf 'target=00000001-0000-7000-8000-000000000002:00000002-0000-7000-8000-000000000003\n'
+    printf 'rex_session_id=session:00000001-0000-7000-8000-000000000002\n'
+    printf 'rex_server=tcp://127.0.0.1:7299\n'
+    printf 'harness=codex\n'
+    exit 0
+    ;;
+  launch-rex-mismatched-route:fm-remote-secondmate-control.sh:*)
+    [ "$_command_action" = launch ] || exit 93
+    printf 'schema=fm-remote-secondmate-control.v1\n'
+    printf 'backend=rex\n'
+    printf 'target=99999999-0000-7000-8000-000000000009:00000002-0000-7000-8000-000000000003\n'
+    printf 'rex_session_id=session:00000001-0000-7000-8000-000000000002\n'
+    printf 'rex_server=unix:///tmp/fake-rex.sock\n'
     printf 'harness=codex\n'
     exit 0
     ;;
@@ -1260,9 +1288,9 @@ rm -f "$TMP_ROOT/doctor.repaired"
   || fail "the stopped-server fixture did not make the pre-repair endpoint probe unreadable"
 launches_before_repair=$(grep -c '^tab create' "$HERDR_LOG" || true)
 BOOT_REPAIRED=$(FM_FAKE_SSH_MODE=doctor-fixable remote_env "$ROOT/bin/fm-bootstrap.sh")
-[ "$(cat "$DOCTOR_LOG")" = 'doctor-fixable -
+[ "$(cat "$DOCTOR_LOG")" = 'doctor-fixable --backend
 doctor-fixable --fix
-doctor-fixable -' ] || fail "liveness did not check, repair, and re-check readiness before probing"$'\n'"$(cat "$DOCTOR_LOG")"
+doctor-fixable --backend' ] || fail "liveness did not check, repair, and re-check readiness before probing"$'\n'"$(cat "$DOCTOR_LOG")"
 assert_not_contains "$BOOT_REPAIRED" 'SECONDMATE_LIVENESS: secondmate ios:' \
   "successful pre-probe readiness repair produced a liveness failure"
 launches_after_repair=$(grep -c '^tab create' "$HERDR_LOG" || true)
@@ -1442,6 +1470,205 @@ launches_after_legacy=$(grep -c '^tab create' "$HERDR_LOG" || true)
 mv -f "$TMP_ROOT/remote-ios-before-liveness-legacy.meta" "$remote_route_meta"
 rm -f "$TMUX_STATE"
 pass "startup reports alive legacy backends without changing their routes"
+
+# A remote may instead run a rex second mate on that host's persistent personal
+# rex server: the parent asks for the backend explicitly, and the remote home's
+# own control script launches, states, and reports the rex route.
+remote_route_meta="$REMOTE_HOME/state/parent-route/ios.meta"
+cp "$remote_route_meta" "$TMP_ROOT/remote-ios-before-rex.meta"
+cp "$PARENT/state/ios.meta" "$TMP_ROOT/parent-ios-before-rex.meta"
+
+# A remote still on the herdr-only doctor exits 2 on --backend: a herdr request
+# retries bare, a rex request does not, because that remote cannot run rex.
+FM_FAKE_SSH_MODE=doctor-old remote_env "$ROOT/bin/fm-spawn.sh" ios --secondmate --backend herdr >/dev/null \
+  || fail "a herdr spawn did not survive the old remote doctor's --backend refusal"
+assert_grep 'remote_backend=herdr' "$PARENT/state/ios.meta" \
+  "the old-doctor herdr spawn did not record its backend"
+cp "$PARENT/state/ios.meta" "$TMP_ROOT/parent-ios-before-old-rex.meta"
+if FM_FAKE_SSH_MODE=doctor-old remote_env "$ROOT/bin/fm-spawn.sh" ios --secondmate --backend rex \
+  >"$TMP_ROOT/spawn-rex-old-doctor.out" 2>&1; then
+  fail "a rex spawn was accepted by a remote too old to select its backend"
+fi
+assert_grep 'not ready' "$TMP_ROOT/spawn-rex-old-doctor.out" \
+  "the old-doctor rex refusal did not come from readiness"
+cmp -s "$TMP_ROOT/parent-ios-before-old-rex.meta" "$PARENT/state/ios.meta" \
+  || fail "the refused rex spawn rewrote the recorded route"
+
+# An explicit backend outside {herdr, rex} is refused before any remote call.
+ssh_before=$(cat "$SSH_COUNT")
+if remote_env "$ROOT/bin/fm-spawn.sh" ios --secondmate --backend tmux >"$TMP_ROOT/spawn-tmux-backend.out" 2>&1; then
+  fail "an unknown remote backend was accepted"
+fi
+assert_grep 'runs only on the herdr or rex backend' "$TMP_ROOT/spawn-tmux-backend.out" \
+  "an unknown remote backend did not fail with the backend refusal"
+[ "$(cat "$SSH_COUNT")" = "$ssh_before" ] || fail "an unknown remote backend still made a remote call"
+
+# A rex route reply that breaks the contract at the parent boundary is refused
+# and leaves the recorded route untouched: a non-local server, or a target
+# whose session half is not the reported session.
+cp "$PARENT/state/ios.meta" "$TMP_ROOT/parent-ios-pre-launch.meta"
+if FM_FAKE_SSH_MODE=launch-rex-bad-server-route remote_env "$ROOT/bin/fm-spawn.sh" ios --secondmate --backend rex \
+  >"$TMP_ROOT/spawn-rex-bad-server.out" 2>&1; then
+  fail "a rex route naming a non-local server was accepted"
+fi
+assert_grep 'malformed Rex route metadata' "$TMP_ROOT/spawn-rex-bad-server.out" \
+  "a non-local rex server route did not fail with the rex metadata refusal"
+cmp -s "$TMP_ROOT/parent-ios-pre-launch.meta" "$PARENT/state/ios.meta" \
+  || fail "a refused rex server route rewrote the recorded route"
+if FM_FAKE_SSH_MODE=launch-rex-mismatched-route remote_env "$ROOT/bin/fm-spawn.sh" ios --secondmate --backend rex \
+  >"$TMP_ROOT/spawn-rex-mismatched.out" 2>&1; then
+  fail "a rex route whose target did not match its session was accepted"
+fi
+assert_grep 'malformed Rex route metadata' "$TMP_ROOT/spawn-rex-mismatched.out" \
+  "a session-mismatched rex route did not fail with the rex metadata refusal"
+cmp -s "$TMP_ROOT/parent-ios-pre-launch.meta" "$PARENT/state/ios.meta" \
+  || fail "a refused rex session route rewrote the recorded route"
+pass "remote secondmate backend selection is strict on both sides of the boundary"
+
+# The remote host itself launches on rex: with no recorded endpoint (a
+# never-launched route) the remote control script runs the host-local spawn on
+# the remote's own rex server and both sides record the rex route.
+install_remote_rex_fixture "$REMOTE_ROOT" "$REX_FAKE" "unix://$REX_FAKE/rex.sock" codex
+rm -f "$remote_route_meta"
+remote_env "$ROOT/bin/fm-spawn.sh" ios --secondmate --backend rex >/dev/null \
+  || fail "a remote rex secondmate launch was refused"
+assert_grep 'remote_backend=rex' "$PARENT/state/ios.meta" "the rex launch did not record its backend"
+assert_grep 'remote_rex_session_id=session:' "$PARENT/state/ios.meta" "the rex launch did not record its session"
+assert_grep 'remote_rex_server=unix://' "$PARENT/state/ios.meta" "the rex launch did not record its server"
+assert_grep 'remote_target=' "$PARENT/state/ios.meta" "the rex launch did not record its target"
+assert_grep 'backend=rex' "$remote_route_meta" "the remote endpoint record did not record the rex backend"
+assert_grep 'rex_server=unix://' "$remote_route_meta" "the remote endpoint record did not record the rex server"
+assert_grep 'rex_session_id=session:' "$remote_route_meta" "the remote endpoint record did not record the rex session"
+[ "$(jq '[.sessions[] | select((.windows[0].blocks | length) > 0)] | length' "$REX_FAKE/state.json")" -ge 1 ] \
+  || fail "the remote rex launch did not create its own session"
+jq -e '.sessions[] | select(.label | startswith("2ndmate-ios-"))' "$REX_FAKE/state.json" >/dev/null \
+  || fail "the remote rex launch did not use the secondmate home's per-home session"
+assert_grep ' send -s ' "$REX_FAKE/log" "the remote rex launch did not deliver its launch text"
+assert_grep 'fm-ios' "$REX_FAKE/sent" "the remote rex launch delivered no launch-source text"
+[ "$(remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh state ios)" = alive ] \
+  || fail "the rex endpoint was not projected alive from its own host"
+route=$(remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh route ios)
+assert_contains "$route" 'backend=rex' "the remote route did not report rex"
+assert_contains "$route" 'rex_session_id=session:' "the remote route did not report its rex session"
+assert_contains "$route" 'rex_server=unix://' "the remote route did not report its rex server"
+pass "the remote control plane launches, states, and reports a rex route"
+
+# A rex route pinned to a server that is not this host's local unix socket is
+# refused by every verb and classified unverified by the state probe.
+cp "$remote_route_meta" "$TMP_ROOT/remote-ios-rex-good.meta"
+awk '/^rex_server=/{print "rex_server=tcp://127.0.0.1:7299"; next} {print}' \
+  "$remote_route_meta" > "$remote_route_meta.new"
+mv -f "$remote_route_meta.new" "$remote_route_meta"
+[ "$(remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh state ios)" = unverified ] \
+  || fail "a non-local rex server record was not classified unverified"
+if remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh route ios >/dev/null 2>&1; then
+  fail "a non-local rex server record stayed operational for route"
+fi
+if remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh launch ios codex - - rex >/dev/null 2>&1; then
+  fail "a non-local rex server record accepted a launch"
+fi
+mv -f "$TMP_ROOT/remote-ios-rex-good.meta" "$remote_route_meta"
+
+# The parent's startup liveness probe keeps a live rex route alive and reports
+# a recorded/remote backend mismatch instead of migrating it.
+BOOT_REX=$(remote_env "$ROOT/bin/fm-bootstrap.sh")
+assert_not_contains "$BOOT_REX" 'SECONDMATE_LIVENESS: secondmate ios:' \
+  "the full sweep did not keep the live rex route alive"
+cp "$PARENT/state/ios.meta" "$TMP_ROOT/parent-ios-rex-good.meta"
+awk '/^remote_backend=/{print "remote_backend=herdr"; next} {print}' \
+  "$PARENT/state/ios.meta" > "$PARENT/state/ios.meta.new"
+mv -f "$PARENT/state/ios.meta.new" "$PARENT/state/ios.meta"
+BOOT_DRIFT=$(remote_env "$ROOT/bin/fm-bootstrap.sh")
+assert_contains "$BOOT_DRIFT" "runs on backend 'rex', but this home recorded 'herdr'" \
+  "the full sweep did not report the recorded/remote backend drift"
+mv -f "$TMP_ROOT/parent-ios-rex-good.meta" "$PARENT/state/ios.meta"
+
+# A named key reaches the rex endpoint through its recorded route: the parent's
+# fm-send crosses to the remote key verb, which must address the rex block from
+# that host's endpoint record rather than as a bare tmux-looking target.
+: > "$REX_FAKE/keys"
+remote_env "$ROOT/bin/fm-send.sh" fm-ios --key Escape >"$TMP_ROOT/send-rex-key.out" 2>&1 \
+  || fail "a key was not sent to the remote rex secondmate: $(cat "$TMP_ROOT/send-rex-key.out")"
+grep -qx escape "$REX_FAKE/keys" || fail "the remote rex endpoint never received the Escape key"
+pass "a key reaches a remote rex secondmate through its recorded endpoint"
+
+# Recovery keeps the recorded backend: once the rex agent exits, the startup
+# sweep relaunches the mate on rex again, never on the herdr default.
+rex_target_before=$(sed -n 's/^remote_target=//p' "$PARENT/state/ios.meta" | tail -1)
+herdr_launches_before=$(grep -c '^tab create' "$HERDR_LOG" || true)
+rm -f "$REX_FAKE/agent-blocks"
+[ "$(remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh state ios)" = dead ] \
+  || fail "the exited rex agent was not projected dead from its own host"
+BOOT_REX_DEAD=$(FM_BOOTSTRAP_VERBOSE_FACTS=1 remote_env "$ROOT/bin/fm-bootstrap.sh")
+assert_not_contains "$BOOT_REX_DEAD" 'SECONDMATE_LIVENESS: secondmate ios:' \
+  "the dead rex secondmate was not relaunched cleanly"
+assert_contains "$BOOT_REX_DEAD" 'secondmate ios relaunched after remote endpoint dead' \
+  "the dead rex secondmate was not reported relaunched"
+assert_grep 'remote_backend=rex' "$PARENT/state/ios.meta" "recovery moved the rex secondmate off its recorded backend"
+assert_grep 'backend=rex' "$remote_route_meta" "recovery rewrote the remote endpoint onto another backend"
+[ "$(sed -n 's/^remote_target=//p' "$PARENT/state/ios.meta" | tail -1)" != "$rex_target_before" ] \
+  || fail "recovery did not record a fresh rex endpoint"
+[ "$(grep -c '^tab create' "$HERDR_LOG" || true)" = "$herdr_launches_before" ] \
+  || fail "recovery launched the rex secondmate into herdr"
+[ "$(remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh state ios)" = alive ] \
+  || fail "the relaunched rex endpoint did not read alive"
+pass "liveness recovery relaunches a remote rex secondmate on rex"
+
+# A stopped remote rex server stays stopped under every control-plane probe:
+# Rex starts a missing server as exit-empty, which remote readiness refuses and
+# cannot repair while it answers. Once a persistent server is started, the
+# startup sweep relaunches the mate on it.
+"$REMOTE_ROOT/bin/rex" server stop >/dev/null || fail "the fake remote rex server did not stop"
+[ "$(remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh state ios)" = unreadable ] \
+  || fail "a stopped remote rex server was not projected unreadable"
+if remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh launch ios codex - - rex >/dev/null 2>&1; then
+  fail "a launch over a stopped remote rex server was accepted"
+fi
+[ -f "$REX_FAKE/down" ] || fail "a remote control-plane probe started the stopped rex server"
+"$REMOTE_ROOT/bin/rex" server start >/dev/null || fail "the fake remote rex server did not start"
+[ "$(remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh state ios)" = missing ] \
+  || fail "the restarted rex server did not prove the old block missing"
+BOOT_REX_RESTARTED=$(FM_BOOTSTRAP_VERBOSE_FACTS=1 remote_env "$ROOT/bin/fm-bootstrap.sh")
+assert_contains "$BOOT_REX_RESTARTED" 'secondmate ios relaunched after remote endpoint missing' \
+  "the rex secondmate was not relaunched onto the restarted persistent server"
+[ "$(remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh state ios)" = alive ] \
+  || fail "the rex secondmate relaunched onto the restarted server did not read alive"
+pass "remote rex control-plane probes never start a stopped server, and recovery follows a persistent start"
+
+# Retirement contract: neither close nor home deletion is authorized without
+# an answering server whose identity matches the launch record. Exercise both
+# ordinary and forced retirement; observing only a refusal would miss a close
+# that happened before the refusal.
+cp "$REX_FAKE/state.json" "$TMP_ROOT/rex-before-refused-retire.json"
+for server_failure in repointed unreadable unreachable; do
+  case "$server_failure" in
+    repointed) printf 'unix:///other/rex.sock\n' > "$REX_FAKE/endpoint" ;;
+    unreadable) touch "$REX_FAKE/whoami-fail" ;;
+    unreachable) touch "$REX_FAKE/unreachable" ;;
+  esac
+  for retire_force in '' --force; do
+    : > "$REX_FAKE/log"
+    if remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh retire ios ${retire_force:+"$retire_force"} \
+      > "$TMP_ROOT/rex-refused-retire.out" 2>&1; then
+      fail "rex retirement accepted $server_failure server ($retire_force)"
+    fi
+    assert_present "$REMOTE_HOME" "refused rex retirement deleted the home"
+    assert_grep 'restore access to the recorded Rex server' "$TMP_ROOT/rex-refused-retire.out" \
+      "refused rex retirement omitted the human action"
+    assert_no_grep 'block close' "$REX_FAKE/log" "refused rex retirement attempted to close the block"
+    cmp -s "$TMP_ROOT/rex-before-refused-retire.json" "$REX_FAKE/state.json" \
+      || fail "refused rex retirement changed running sessions"
+  done
+  printf 'unix://%s/rex.sock\n' "$REX_FAKE" > "$REX_FAKE/endpoint"
+  rm -f "$REX_FAKE/whoami-fail" "$REX_FAKE/unreachable"
+done
+[ "$(remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh state ios)" = alive ] \
+  || fail "the rex agent did not survive refused retirement"
+pass "rex retirement refuses server drift and unreadable or unreachable identity without closing or deleting"
+
+mv -f "$TMP_ROOT/remote-ios-before-rex.meta" "$remote_route_meta"
+mv -f "$TMP_ROOT/parent-ios-before-rex.meta" "$PARENT/state/ios.meta"
+pass "a remote secondmate may run on rex with strict route validation both ways"
 
 # Host loss never creates a local replacement. Remove both the published ledger
 # and its parent-side cache so the structured-home read degrades explicitly;

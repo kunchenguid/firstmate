@@ -559,12 +559,15 @@ leave_dead_link_locks() {  # <state> <lock>...
 }
 
 test_lock_reclaims_dead_steal_owner_without_nested_markers() {
-  local dir state lockdir fakebin lnlog rc
+  local dir state lockdir fakebin lnlog real_ln rc
   dir=$(make_case lock-dead-steal-owner)
   state="$dir/state"
   lockdir="$state/.contend.lock"
   fakebin="$dir/fakebin"
   lnlog="$dir/ln.log"
+  # The host's own ln path, not a hardcoded /bin/ln: on a host that keeps only
+  # sh in /bin (NixOS) the fixture's shim would exec a path that does not exist.
+  real_ln=$(command -v ln)
   mkdir "$lockdir"
   printf '%s\n' "$(dead_pid)" > "$lockdir/pid"
   leave_dead_link_locks "$state" "$lockdir.steal"
@@ -573,13 +576,14 @@ test_lock_reclaims_dead_steal_owner_without_nested_markers() {
 last=
 for arg do last=$arg; done
 printf '%s\n' "$last" >> "$FM_TEST_LN_LOG"
-exec /bin/ln "$@"
+exec "$FM_TEST_REAL_LN" "$@"
 SH
   chmod +x "$fakebin/ln"
   : > "$lnlog"
 
   rc=0
-  PATH="$fakebin:$PATH" FM_TEST_LN_LOG="$lnlog" FM_STATE_OVERRIDE="$state" bash -c '
+  PATH="$fakebin:$PATH" FM_TEST_LN_LOG="$lnlog" FM_TEST_REAL_LN="$real_ln" \
+    FM_STATE_OVERRIDE="$state" bash -c '
     . "$1"
     fm_lock_try_acquire "$2" || exit 8
     fm_lock_release "$2"
@@ -740,12 +744,15 @@ test_lock_steal_reap_cannot_remove_successor() {
   # Two reapers verify the same dead steal owner. The competitor runs to
   # completion exactly when the first one is about to remove the link; at most
   # one of them may end up believing it holds the mutex.
-  local dir state steal fakebin out rc
+  local dir state steal fakebin out real_rm rc
   dir=$(make_case lock-steal-reap-race)
   state="$dir/state"
   steal="$state/.contend.lock.steal"
   fakebin="$dir/fakebin"
   out="$dir/competitor"
+  # The host's own rm path, not a hardcoded /bin/rm: on a host that keeps only
+  # sh in /bin (NixOS) the fixture's shim would exec a path that does not exist.
+  real_rm=$(command -v rm)
   leave_dead_link_locks "$state" "$steal"
   # The killed fixture owner may have its PID reused during a loaded serial
   # shard. Pin a verified-dead PID so the race exercises reaping, not liveness.
@@ -769,14 +776,14 @@ if [ "$last" = "$FM_TEST_RACE_PATH" ] && mkdir "$FM_TEST_RACE_ONCE" 2>/dev/null;
     i=$((i + 1))
   done
 fi
-exec /bin/rm "$@"
+exec "$FM_TEST_REAL_RM" "$@"
 SH
   chmod +x "$fakebin/rm"
 
   rc=0
   PATH="$fakebin:$PATH" FM_TEST_LIB="$LIB" FM_TEST_RACE_PATH="$steal" \
     FM_TEST_RACE_ONCE="$dir/race-once" FM_TEST_RACE_OUT="$out" \
-    FM_STATE_OVERRIDE="$state" bash -c '
+    FM_TEST_REAL_RM="$real_rm" FM_STATE_OVERRIDE="$state" bash -c '
       . "$1"
       fm_lock_try_acquire_steal_mutex "$2" || exit 1
       [ "$(cat "$2/pid" 2>/dev/null)" = "${BASHPID:-$$}" ] || exit 2
@@ -1036,8 +1043,10 @@ test_lock_reclaims_holder_whose_identity_no_longer_recomputes() {
   state="$dir/state"
   lockdir="$state/.watch.lock"
   # Naming the holder under the fixture root lets the suite's cleanup reap it
-  # if an assertion below fails before the kill at the end.
-  (exec -a "$dir/holder" sleep 300) >/dev/null 2>&1 &
+  # if an assertion below fails before the kill at the end. A python holder
+  # carries that name as its own argument instead of through `exec -a`, which a
+  # multicall sleep rejects by dispatching on argv[0] and exiting at once.
+  python3 -c 'import sys, time; time.sleep(300)' "$dir/holder" >/dev/null 2>&1 &
   live=$!
   identity=$(FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$live") \
     || fail "could not identify the fixture holder"
@@ -1088,8 +1097,10 @@ test_lock_keeps_live_daemon_holder_with_stale_identity() {
   state="$dir/state"
   lockdir="$state/.supervise-daemon.lock"
   # Naming the holder under the fixture root lets the suite's cleanup reap it
-  # if an assertion below fails before the kill at the end.
-  (exec -a "$dir/holder" sleep 300) >/dev/null 2>&1 &
+  # if an assertion below fails before the kill at the end. A python holder
+  # carries that name as its own argument instead of through `exec -a`, which a
+  # multicall sleep rejects by dispatching on argv[0] and exiting at once.
+  python3 -c 'import sys, time; time.sleep(300)' "$dir/holder" >/dev/null 2>&1 &
   live=$!
   identity=$(FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$live") \
     || fail "could not identify the fixture daemon"
@@ -1218,6 +1229,67 @@ test_lock_bounded_wait_earns_one_grace_window_for_unpublished_pid() {
   # nearly two seconds of scheduling slack but rejects the extra grace wait.
   [ "$live_elapsed" -lt 3 ] || fail "published live holder earned unpublished-pid grace: $out"
   pass "bounded wait earns one grace window for an unpublished-pid lock, still bounds a live holder"
+}
+
+assert_bounded_deadline_result() {
+  local mode=$1 expected=$2 dir out
+  dir=$(make_case "bounded-deadline-$mode")
+  out=$(FM_LOCK_STALE_AFTER=3600 FM_STATE_OVERRIDE="$dir/state" bash -c '
+    . "$1"
+    lock=$2
+    mode=$3
+    mkdir "$lock" "$lock.steal" || exit 20
+    printf "%s\n" "$4" > "$lock.steal/pid"
+    sleep 300 &
+    holder=$!
+    trap "kill $holder 2>/dev/null || true; wait $holder 2>/dev/null || true" EXIT
+    printf "%s\n" "$holder" > "$lock/pid"
+    _fm_wake_require_timeout || exit 21
+    fm_run_timed() {
+      case "$mode" in
+        unpublished) rm "$lock/pid" ;;
+        exited) kill "$holder"; wait "$holder" 2>/dev/null || true ;;
+        absent) rm "$lock/pid"; rmdir "$lock" ;;
+        malformed) printf "invalid\n" > "$lock/pid" ;;
+        file) rm "$lock/pid"; rmdir "$lock"; printf "invalid\n" > "$lock" ;;
+      esac
+      return 124
+    }
+    rc=0
+    fm_lock_acquire_wait_bounded "$lock" 1 || rc=$?
+    case "$mode" in
+      live) [ "${FM_LOCK_HELD_PID:-}" = "$holder" ] || exit 22 ;;
+      *) [ -z "${FM_LOCK_HELD_PID:-}" ] || exit 23 ;;
+    esac
+    printf "%s\n" "$rc"
+  ' _ "$LIB" "$dir/state/.contend.lock" "$mode" "$$") || fail "$mode deadline fixture failed"
+  [ "$out" = "$expected" ] || fail "$mode deadline returned $out, expected $expected"
+}
+
+test_bounded_deadline_unpublished_holder() {
+  assert_bounded_deadline_result unpublished 124
+  pass "bounded deadline with an unpublished holder is retriable"
+}
+
+test_bounded_deadline_exited_holder() {
+  assert_bounded_deadline_result exited 124
+  pass "bounded deadline with an exited holder is retriable"
+}
+
+test_bounded_deadline_released_lock() {
+  assert_bounded_deadline_result absent 124
+  pass "bounded deadline with a released lock is retriable"
+}
+
+test_bounded_deadline_live_holder() {
+  assert_bounded_deadline_result live 124
+  pass "bounded deadline preserves the live holder advisory"
+}
+
+test_bounded_deadline_malformed_lock() {
+  assert_bounded_deadline_result malformed 1
+  assert_bounded_deadline_result file 1
+  pass "bounded deadline rejects malformed pid data and non-directory locks"
 }
 
 test_lock_paused_mid_acquire_claim_fails_during_steal() {
@@ -1375,8 +1447,12 @@ test_watcher_exits_on_state_teardown_during_startup() {
     [ -e "$state/.watch.lock/watcher-path" ] && kill -STOP "$pid" 2>/dev/null && { stopped=1; break; }
   done
   [ "$stopped" -eq 1 ] || fail "watcher never finished claiming its lock: $(cat "$out")"
-  rm -rf "$state"
-  mkdir -p "$state"
+  # Stopping the watcher shell does not stop its already-forked helpers.
+  # Atomically detach the old directory instead of racing their writes with
+  # recursive deletion. Retain it until fixture cleanup so its inode cannot
+  # be reused for the replacement and mistaken for a successor's release.
+  mv "$state" "$dir/retired-state" || fail "could not detach startup state"
+  mkdir -p "$state" || fail "could not recreate startup state"
   kill -CONT "$pid" 2>/dev/null || true
   # wait_for_exit returns the watcher's own status, or TERMs a watcher that
   # kept running in the torn-down directory.
@@ -1503,12 +1579,13 @@ test_attached_arm_signal_is_recorded_in_cycle_ledger() {
 }
 
 test_arm_term_during_steal_waits_for_watcher_cleanup_trap() {
-  local dir state fakebin armout armpid i dead pidfile status
+  local dir state fakebin armout armpid i dead pidfile real_ln status
   dir=$(make_case arm-term-mid-steal)
   state="$dir/state"
   fakebin="$dir/fakebin"
   armout="$dir/arm.out"
   pidfile="$dir/arm.pid"
+  real_ln=$(command -v ln)
   mkdir "$state/.watch.lock"
   dead=$(dead_pid)
   printf '%s\n' "$dead" > "$state/.watch.lock/pid"
@@ -1524,10 +1601,11 @@ case "$last" in
     [ -n "$arm_pid" ] && kill -TERM "$arm_pid" 2>/dev/null || true
     ;;
 esac
-exec /bin/ln "$@"
+exec "$FM_TEST_REAL_LN" "$@"
 SH
   chmod +x "$fakebin/ln"
   PATH="$fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" \
+    FM_TEST_REAL_LN="$real_ln" \
     FM_TEST_ARM_PID_FILE="$pidfile" FM_POLL=5 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH_ARM" > "$armout" 2>&1 &
   armpid=$!
@@ -1547,13 +1625,14 @@ SH
 }
 
 test_arm_term_waits_out_a_stalled_claim() {
-  local dir state fakebin armout pidfile release armpid status
+  local dir state fakebin armout pidfile release armpid real_ln status
   dir=$(make_case arm-term-stalled-startup)
   state="$dir/state"
   fakebin="$dir/fakebin"
   armout="$dir/arm.out"
   pidfile="$dir/arm.pid"
   release="$dir/release"
+  real_ln=$(command -v ln)
   cat > "$fakebin/ln" <<'SH'
 #!/usr/bin/env bash
 last=
@@ -1569,10 +1648,11 @@ case "$last" in
     while [ ! -e "$FM_TEST_RELEASE" ]; do sleep 0.05; done
     ;;
 esac
-exec /bin/ln "$@"
+exec "$FM_TEST_REAL_LN" "$@"
 SH
   chmod +x "$fakebin/ln"
   PATH="$fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" \
+    FM_TEST_REAL_LN="$real_ln" \
     FM_TEST_ARM_PID_FILE="$pidfile" FM_TEST_RELEASE="$release" \
     FM_ARM_CONFIRM_TIMEOUT=2 FM_POLL=5 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH_ARM" > "$armout" 2>&1 &
@@ -2090,22 +2170,26 @@ test_forced_term_before_the_safe_point_stays_clean() {
 # Delay the probe past the arm deadline so the typed failure must also survive
 # the safe-point join, not just the arm's ordinary child-exit path.
 test_unpublishable_identity_exits_through_cleanup() {
-  local dir state fakebin no_proc armout armpid status
+  local dir state fakebin no_proc armout armpid real_ps status
   dir=$(make_case arm-identity-probe-fails)
   state="$dir/state"
   fakebin="$dir/fakebin"
   no_proc="$dir/no-proc"
   armout="$dir/arm.out"
+  # The host's own ps path, not a hardcoded /bin/ps: on a host that keeps only
+  # sh in /bin (NixOS) the fixture's shim would exec a path that does not exist.
+  real_ps=$(command -v ps)
   mkdir -p "$no_proc"
   cat > "$fakebin/ps" <<'SH'
 #!/usr/bin/env bash
 case " $* " in
   *" lstart= "*" command= "*) exit 1 ;;
 esac
-exec /bin/ps "$@"
+exec "$FM_TEST_REAL_PS" "$@"
 SH
   chmod +x "$fakebin/ps"
   PATH="$fakebin:$PATH" FM_PROC_ROOT_OVERRIDE="$no_proc" FM_STATE_OVERRIDE="$state" \
+    FM_TEST_REAL_PS="$real_ps" \
     FM_ARM_CONFIRM_TIMEOUT=2 FM_TEST_WATCHER_PRE_IDENTITY_DELAY=4 \
     FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
     "$WATCH_ARM" > "$armout" 2>&1 &
@@ -2386,6 +2470,11 @@ test_lock_keeps_live_daemon_holder_with_stale_identity
 test_lock_empty_pid_uses_minimum_grace
 test_lock_late_claim_loses_after_recreate
 test_lock_bounded_wait_earns_one_grace_window_for_unpublished_pid
+test_bounded_deadline_unpublished_holder
+test_bounded_deadline_exited_holder
+test_bounded_deadline_released_lock
+test_bounded_deadline_live_holder
+test_bounded_deadline_malformed_lock
 test_lock_paused_mid_acquire_claim_fails_during_steal
 test_watch_restart_rejects_reused_pid
 test_watch_restart_attaches_to_healthy_peer

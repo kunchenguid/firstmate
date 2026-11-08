@@ -439,19 +439,23 @@ run_extension_section_lane() {
   return "$section_rc"
 }
 
+# The coordinator stops any section lane, including the aggregate run's, that
+# outlives this bound, so no wait inside a section can usefully run longer.
+EXTENSION_SECTION_LANE_MAX_SECONDS=34
+
 run_extension_section_lanes() {
-  local section result_file section_rc timeout_seconds deadline index remaining launched total maximum_sections
+  local section result_file section_rc timeout_seconds deadline deadline_epoch index remaining launched total maximum_sections
   local active maximum_concurrent
   local -a sections=("$@")
   local -a section_pids=()
   local -a section_results=()
   local -a section_complete=()
   local section_result_root
-  timeout_seconds=${FM_EXTENSION_BINDING_COORDINATOR_TIMEOUT_SECONDS:-34}
+  timeout_seconds=${FM_EXTENSION_BINDING_COORDINATOR_TIMEOUT_SECONDS:-$EXTENSION_SECTION_LANE_MAX_SECONDS}
   case "$timeout_seconds" in
     ''|*[!0-9]*) return 64 ;;
   esac
-  [ "$timeout_seconds" -gt 0 ] && [ "$timeout_seconds" -lt 35 ] || return 64
+  [ "$timeout_seconds" -gt 0 ] && [ "$timeout_seconds" -le "$EXTENSION_SECTION_LANE_MAX_SECONDS" ] || return 64
   section_result_root=$(mktemp -d "$TMP_ROOT/section-lanes.XXXXXX") || return 1
   total=${#sections[@]}
   # Sixteen selectors are validated here. The bounded aggregate keeps its
@@ -463,17 +467,18 @@ run_extension_section_lanes() {
   [ "$total" -le "$maximum_sections" ] || return 64
   launched=0
   active=0
+  deadline=$((SECONDS + timeout_seconds))
+  deadline_epoch=$(($(date +%s) + timeout_seconds))
   while [ "$launched" -lt "$total" ] && [ "$active" -lt "$maximum_concurrent" ]; do
     section=${sections[$launched]}
     result_file="$section_result_root/$launched.result"
-    run_extension_section_lane "$result_file" "$section" &
+    FM_EXTENSION_BINDING_LANE_DEADLINE_EPOCH="$deadline_epoch" run_extension_section_lane "$result_file" "$section" &
     section_pids+=("$!")
     section_results+=("$result_file")
     section_complete+=("")
     launched=$((launched + 1))
     active=$((active + 1))
   done
-  deadline=$((SECONDS + timeout_seconds))
   remaining=$total
   while [ "$remaining" -gt 0 ]; do
     for index in "${!section_pids[@]}"; do
@@ -505,7 +510,7 @@ run_extension_section_lanes() {
     while [ "$launched" -lt "$total" ] && [ "$active" -lt "$maximum_concurrent" ]; do
       section=${sections[$launched]}
       result_file="$section_result_root/$launched.result"
-      run_extension_section_lane "$result_file" "$section" &
+      FM_EXTENSION_BINDING_LANE_DEADLINE_EPOCH="$deadline_epoch" run_extension_section_lane "$result_file" "$section" &
       section_pids+=("$!")
       section_results+=("$result_file")
       section_complete+=("")
@@ -2063,6 +2068,7 @@ if section_enabled lifecycle-flow lifecycle-orphan-readiness; then
 P_INVOCATION_CLEANUP="$PACKAGES/orphan-cleanup"
 make_package "$P_INVOCATION_CLEANUP" org.example.invocation-cleanup ext-invocation-cleanup
 H_ORPHAN_READY="$HOMES/orphan-ready"; new_home "$H_ORPHAN_READY"
+fm_test_track_procevent_home "$H_ORPHAN_READY" "$FM_PROCEVENT_CLAIM_ROOT"
 bind_package "$H_ORPHAN_READY" "$P_INVOCATION_CLEANUP" ext-invocation-cleanup >/dev/null
 for orphan_source in orphan-first orphan-second; do
   FM_HOME="$H_ORPHAN_READY" "$PROCEVENT" register-extension ext-invocation-cleanup "$orphan_source" --config-ref silent-result >/dev/null
@@ -2138,18 +2144,43 @@ write_orphan_ready "$orphan_token" "$orphan_dead_pid" "barrier-token:$orphan_tok
 orphan_reconcile=$(FM_HOME="$H_ORPHAN_READY" "$PROCEVENT" reconcile)
 assert_contains "$orphan_reconcile" "started=2" "dead orphan readiness blocked recovery of two extension sources"
 assert_contains "$orphan_reconcile" "uncertain=0" "recovered extension sources remained uncertain"
+# Reconcile confirms each launch, not its completion. Each recovered runner owns
+# its poll, capture, silent verdict, and terminal retirement, and the two take
+# their verdicts in turn under this home's extension lifecycle lock, so a loaded
+# host stretches the pair past any fixed marker poll. Wait for the recorded
+# runner groups to exit instead, and stop any survivor before failing.
+orphan_runners=()
 for orphan_source in orphan-first orphan-second; do
-  for _ in $(seq 1 200); do
-    [ -f "$H_ORPHAN_READY/state/procevent-inbox/$orphan_source.1.handled" ] && break
-    sleep 0.05
+  orphan_runner=$(sed -n '2p' "$FM_PROCEVENT_CLAIM_ROOT/$orphan_source.claim" 2>/dev/null || true)
+  [ -z "$orphan_runner" ] || orphan_runners+=("$orphan_source:$orphan_runner")
+done
+orphan_wait_seconds=$EXTENSION_SECTION_LANE_MAX_SECONDS
+if [ -n "${FM_EXTENSION_BINDING_LANE_DEADLINE_EPOCH:-}" ]; then
+  orphan_remaining=$((FM_EXTENSION_BINDING_LANE_DEADLINE_EPOCH - $(date +%s) - 3))
+  [ "$orphan_remaining" -ge "$orphan_wait_seconds" ] || orphan_wait_seconds=$orphan_remaining
+  [ "$orphan_wait_seconds" -ge 1 ] || orphan_wait_seconds=1
+fi
+orphan_deadline=$((SECONDS + orphan_wait_seconds))
+while :; do
+  orphan_live=()
+  for orphan_runner in "${orphan_runners[@]+"${orphan_runners[@]}"}"; do
+    kill -0 -"${orphan_runner#*:}" 2>/dev/null && orphan_live+=("$orphan_runner")
   done
+  [ "${#orphan_live[@]}" -gt 0 ] && [ "$SECONDS" -lt "$orphan_deadline" ] || break
+  sleep 0.1
+done
+if [ "${#orphan_live[@]}" -gt 0 ]; then
+  # Killing the runner groups strands their detached invocation groups, which
+  # the home sweep's invocation cleanup then reclaims as host-crash residue.
+  for orphan_runner in "${orphan_live[@]}"; do
+    kill -KILL -"${orphan_runner#*:}" 2>/dev/null || true
+  done
+  FM_HOME="$H_ORPHAN_READY" "$PROCEVENT" sweep-home >/dev/null 2>&1 || true
+  fail "recovered source ${orphan_live[*]%%:*} did not finish within ${orphan_wait_seconds}s"
+fi
+for orphan_source in orphan-first orphan-second; do
   assert_present "$H_ORPHAN_READY/state/procevent-inbox/$orphan_source.1.handled" \
     "recovered source $orphan_source never handled its private result"
-  for _ in $(seq 1 200); do
-    [ ! -e "$H_ORPHAN_READY/state/procevent/$orphan_source.source" ] \
-      && [ ! -e "$FM_PROCEVENT_CLAIM_ROOT/$orphan_source.claim" ] && break
-    sleep 0.05
-  done
   assert_absent "$H_ORPHAN_READY/state/procevent/$orphan_source.source" "recovered terminal source did not retire"
   assert_absent "$FM_PROCEVENT_CLAIM_ROOT/$orphan_source.claim" "recovered terminal source retained its claim"
 done
