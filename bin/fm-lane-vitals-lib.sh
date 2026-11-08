@@ -5,7 +5,7 @@
 # bin/fm-capacity.sh owns every threshold, the verdict, and the published
 # documents; this library only measures and prints. Every function is
 # read-only, bounded, and degrades to an empty value rather than failing, so an
-# unmeasurable signal is reported unknown and never judged. No side effects on
+# unmeasurable signal is reported unknown rather than guessed. No side effects on
 # source; sourcing requires bin/fm-timeout-lib.sh to be sourced first.
 #
 # Test seams: FM_PROC_ROOT_OVERRIDE replaces /proc and FM_SYS_ROOT_OVERRIDE

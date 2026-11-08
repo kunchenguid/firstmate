@@ -891,6 +891,7 @@ min-gpu-free-gb 4      # only for work that uses the GPU; agent workers do not
 There are no per-lane pins: the script samples each lane's process tree while the watcher publishes, learns the per-lane memory, CPU, and disk cost from this machine's last 30 measured lanes once five are recorded, and keeps that ledger in `state/lane-footprint.json`.
 A lane whose process tree was never attributed is left out of that learning, so a backend that runs its agent outside the recorded worktree cannot teach a near-zero footprint.
 Pressure stall, swap-in rate, macOS memory pressure, thermal limits, battery, and under WSL2 the Windows host's own memory close admission at once and reopen only after three clean readings, and growth after a reopen is damped, so admission does not flap.
+A reading that cannot be taken never counts as clean: a gate that was closed stays closed with its clean count held until a real reading clears it, and a gate that was open stays unknown and is not judged.
 The damped budget is what a spawn is admitted against: lanes started since the last publish count against it, so a burst of spawns between two publishes cannot exceed it.
 A `pressure-file` beat can only lower the memory the budget sees, never raise it above the live reading.
 Memory is the one reading the budget cannot do without: when it is unmeasurable the budget never admits on cpu alone, it falls back to the static `max-lanes` ceiling (or nothing without one), and the verdict's reasons say so.

@@ -9,7 +9,8 @@
 # static ceiling, the learned footprint and the unmeasured lanes it ignores,
 # the published ledger and its history, the ranked reclaim list, the Windows
 # host view inside WSL (cached for every mode but --publish) and on native
-# Windows, the opt-in spawn gate, config validation, and a real-host smoke.
+# Windows, a closed gate held while its reading cannot be taken, the opt-in
+# spawn gate, config validation, and a real-host smoke.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -382,11 +383,11 @@ test_reclaim_ranks_idle_lanes() {
   pass "idle lanes are ranked for reclaim with their evidence, and nothing is removed"
 }
 
-test_wsl_host_view_closes_admission() {
-  local home fakebin proc out
-  home=$(make_home wsl)
-  fakebin=$(fm_fakebin "$TMP_ROOT/p-wsl")
-  proc="$TMP_ROOT/p-wsl/proc"
+# make_wsl_probes <dir>: a WSL2 Linux view (16 cores, 15 GB available of 24,
+# a roomy disk) whose Windows host answers through <dir>/fakebin/powershell.exe.
+make_wsl_probes() {
+  local fakebin proc="$1/proc"
+  fakebin=$(fm_fakebin "$1")
   mkdir -p "$proc"
   printf '0.50 0.60 0.70 1/100 9\n' > "$proc/loadavg"
   printf 'MemTotal: 25165824 kB\nMemAvailable: 15728640 kB\n' > "$proc/meminfo"
@@ -401,8 +402,25 @@ SH
 echo "Filesystem 1024-blocks Used Available Capacity Mounted on"
 echo "/dev/sdc 999999999 1 104857600 1% /"
 SH
-  printf '#!/usr/bin/env bash\nprintf "2135 32614400 88 51 16 -\\r\\n"\n' > "$fakebin/powershell.exe"
   chmod +x "$fakebin"/*
+  printf '%s\n' "$fakebin"
+}
+
+set_host() {  # <fakebin> <powershell line>|fail: what the Windows host answers
+  if [ "$2" = fail ]; then
+    printf '#!/usr/bin/env bash\nexit 1\n' > "$1/powershell.exe"
+  else
+    printf '#!/usr/bin/env bash\nprintf "%s\\r\\n"\n' "$2" > "$1/powershell.exe"
+  fi
+  chmod +x "$1/powershell.exe"
+}
+
+test_wsl_host_view_closes_admission() {
+  local home fakebin proc out
+  home=$(make_home wsl)
+  fakebin=$(make_wsl_probes "$TMP_ROOT/p-wsl")
+  proc="$TMP_ROOT/p-wsl/proc"
+  set_host "$fakebin" "2135 32614400 88 51 16 -"
   printf 'auto\n' > "$home/config/lane-capacity"
   out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FM_PROC_ROOT_OVERRIDE="$proc" "$CAPACITY" 2>&1)
   assert_contains "$out" 'free_lanes=0 reason=host-memory ' "a starved Windows host must close admission while WSL has room"
@@ -432,6 +450,45 @@ SH
     jq -c '[(.gates[] | select(.name == "host-memory") | .state), .budget.notes, .verdict.admit]')
   assert_equals '["unknown",["Windows host view unavailable"],true]' "$out" "an unreadable host must be unknown, noted, and not judged"
   pass "inside WSL the Windows host view can only close admission, including on battery, --publish reads it live, and the cache serves the other modes"
+}
+
+# A gate that was closed holds while its reading cannot be taken: the Windows
+# host starves, powershell.exe then fails for several publishes, and admission
+# stays closed until a real clean reading starts the reopen count.
+test_unknown_reading_holds_a_closed_gate() {
+  local home fakebin proc i
+  home=$(make_home wsl-hold)
+  fakebin=$(make_wsl_probes "$TMP_ROOT/p-wsl-hold")
+  proc="$TMP_ROOT/p-wsl-hold/proc"
+  printf 'auto\n' > "$home/config/lane-capacity"
+  pub() { PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FM_PROC_ROOT_OVERRIDE="$proc" FM_LANE_CAPACITY_PUBLISH_INTERVAL=0 "$CAPACITY" --publish >/dev/null 2>&1; }
+  gate() { jq -c '[(.gates[] | select(.name == "host-memory") | .state, .clear_count), .verdict.admit, .verdict.free_lanes]' "$home/state/lane-capacity.json"; }
+  set_host "$fakebin" "2135 32614400 88 51 16 -"
+  pub
+  assert_equals '["closed",0,false,0]' "$(gate)" "a starved Windows host must close the host-memory gate"
+  set_host "$fakebin" fail
+  for i in 1 2 3 4; do
+    pub
+    assert_equals '["closed",0,false,0]' "$(gate)" "an unreadable host must hold the closed gate through publish $i"
+    assert_contains "$(jq -r '.verdict.reasons[]' "$home/state/lane-capacity.json")" 'host-memory: Windows host unreadable' \
+      "the held gate must say the host is unreadable"
+    assert_contains "$(jq -r '.budget.notes[]' "$home/state/lane-capacity.json")" 'Windows host view unavailable' "the unreadable host must be noted"
+  done
+  set_host "$fakebin" "20480 32614400 60 10 16 -"
+  pub
+  assert_equals '["closed",1,false,0]' "$(gate)" "the first real clean reading must count 1 of 3, not reopen"
+  assert_contains "$(jq -r '.verdict.reasons[]' "$home/state/lane-capacity.json")" '(clearing 1 of 3)' "the reason must show the reopen count"
+  set_host "$fakebin" fail
+  pub
+  assert_equals '["closed",1,false,0]' "$(gate)" "an unreadable host while clearing must hold the clean count, not reset or advance it"
+  set_host "$fakebin" "20480 32614400 60 10 16 -"
+  pub
+  pub
+  assert_equals '["open",0,true,2]' "$(gate)" "two more clean readings must reopen the gate with damped growth"
+  set_host "$fakebin" fail
+  pub
+  assert_equals '["unknown",0,true,4]' "$(gate)" "an open gate that becomes unreadable must be unknown and not judged"
+  pass "an unknown reading never counts as clean: a closed or clearing gate holds until a real reading clears it, and an open gate stays unjudged"
 }
 
 test_native_windows_reads_the_host_view() {
@@ -601,6 +658,7 @@ test_learned_footprint
 test_publish_writes_ledger_and_history
 test_reclaim_ranks_idle_lanes
 test_wsl_host_view_closes_admission
+test_unknown_reading_holds_a_closed_gate
 test_native_windows_reads_the_host_view
 test_admission_honours_the_damped_budget
 test_spawn_gate_is_opt_in

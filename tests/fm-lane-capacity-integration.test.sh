@@ -7,11 +7,14 @@
 # a baseline revision.
 #
 # Deterministic cases read this host's real memory and set the room they need
-# through min-avail-gb relative to it (a 1 GB margin either side), drive power
-# through a fake pmset and a fixture /sys power_supply, and fake only getconf
-# (64 cores, so this host's own load never binds) and df (a fixed free disk);
-# every other probe, the spawn path, the watcher, the lock, the backlog, and the
-# process table are real.
+# through min-avail-gb relative to it, drive power through a fake pmset and a
+# fixture /sys power_supply, and fake only getconf (64 cores, so this host's
+# own load never binds) and df (a fixed free disk); every other probe, the
+# spawn path, the watcher, the lock, the backlog, and the process table are
+# real. Because that memory keeps moving, the cases assert the rules against
+# the raw budget each publish actually reported (free = min(raw, previous + 2),
+# the burst admits exactly the published damped value) and an exact zero only
+# where the floor sits 5 GB above the live reading.
 #
 # Opt-in live cases (FM_TEST_LANE_LIVE_LOAD=1, or FM_LIVE=1) use only real
 # probes: they load this host's CPU with niced busy loops (and optionally a
@@ -19,8 +22,9 @@
 # and after the load with timestamps in FM_TEST_LANE_LIVE_LOG when set.
 #
 # FM_LANE_CAPACITY_BASELINE_REF names the git revision whose bin/ the fixed-cap
-# comparison runs against (default: the merge base with origin/main); without
-# readable history that one comparison reports a skip line and the rest runs.
+# comparison runs against (default: 5c935cfb, the last fixed-cap-only
+# revision); when the history lacks it that one comparison reports a skip line
+# and the rest runs.
 # shellcheck disable=SC2016 # fake commands are written as single-quoted scripts.
 set -u
 
@@ -146,9 +150,10 @@ set_power() {
 }
 
 # set_room <case-dir> <lanes>: write config/lane-capacity so memory, the
-# binding resource here, has room for exactly <lanes> default 2 GB lanes, with a
-# 1 GB margin against this host's memory moving between calls. Fails the case
-# when this host has too little memory for the room asked.
+# binding resource here, has room for about <lanes> default 2 GB lanes (a 1 GB
+# margin, so at least 1 while this host's memory moves between calls), or for
+# none with the floor 5 GB above the reading. Fails the case when this host has
+# too little memory for the room asked.
 set_room() {
   local case_dir=$1 lanes=$2 avail kept
   avail=$(cat "$case_dir/avail")
@@ -177,6 +182,21 @@ probe_env() {  # <case-dir> <command...>: run with this case's probes
 
 publish() {  # <case-dir>
   probe_env "$1" env FM_HOME="$1/home" FM_LANE_CAPACITY_PUBLISH_INTERVAL=0 "$CAPACITY" --publish >/dev/null 2>&1
+}
+
+# assert_damped_publish <case-dir> <previous-free> <label>: the published
+# verdict must be min(raw, previous + 2) with the raw budget at least 1, and
+# the published free count is printed.
+assert_damped_publish() {
+  local raw free want
+  raw=$(doc "$1" '.budget.raw')
+  free=$(doc "$1" '.verdict.free_lanes')
+  [ "$raw" -ge 1 ] || fail "$3: room was set but the raw budget is $raw: $(doc "$1" '[.budget, .verdict]')"
+  want=$(( $2 + 2 ))
+  [ "$raw" -lt "$want" ] && want=$raw
+  assert_equals "$want" "$free" "$3: free lanes must be min(raw $raw, previous $2 + 2)"
+  assert_equals "$([ "$free" -lt "$raw" ] && echo true || echo false)" "$(doc "$1" '.budget.damped')" "$3: damped must say whether growth was held back"
+  printf '%s\n' "$free"
 }
 
 doc() {  # <case-dir> <jq-filter>: the published document
@@ -228,7 +248,8 @@ test_spawn_gate_end_to_end() {
   c=$(make_case gate task-a task-b)
   auto_config "$c" 3
   publish "$c"
-  assert_equals '[true,3,"memory"]' "$(doc "$c" '[.verdict.admit, .budget.raw, .budget.binding]')" "room for three lanes must publish a raw budget of 3"
+  assert_equals '[true,true,"memory"]' "$(doc "$c" '[.verdict.admit, (.budget.raw >= 1), .budget.binding]')" \
+    "room above the memory floor must publish an admitting budget bound by memory: $(doc "$c" '[.verdict, .budget.by]')"
   rc=0; out=$(spawn_ship "$c" task-a) || rc=$?
   assert_admitted "$c" task-a "$rc" "$out" "a spawn with room in the budget"
   set_power "$c" battery
@@ -260,22 +281,22 @@ test_burst_of_spawns_never_exceeds_the_damped_budget() {
   c=$(make_case burst t1 t2 t3 t4 t5 t6 t7 t8)
   auto_config "$c" 0
   publish "$c"
+  assert_equals '[0,0]' "$(doc "$c" '[.verdict.free_lanes, .budget.raw]')" "a floor 5 GB above the live reading must publish no open lanes"
   set_room "$c" 3
   publish "$c"
-  published=$(doc "$c" '[.verdict.free_lanes, .budget.raw]')
-  assert_equals '[2,3]' "$published" "a recovery from 0 open must be damped to 2 of a raw 3"
+  published=$(assert_damped_publish "$c" 0 "a recovery from 0 open")
   for i in 1 2 3 4 5 6 7 8; do
     rc=0; out=$(spawn_ship "$c" "t$i") || rc=$?
     case "$rc" in
       0) admitted=$((admitted + 1)) ;;
       "$DEFER_EXIT") deferred=$((deferred + 1))
-        assert_contains "$out" "damped: 2 lanes started since the last publish against a published budget of 2" \
+        assert_contains "$out" "damped: $published lanes started since the last publish against a published budget of $published" \
           "a burst deferral must name the damped budget" ;;
       *) fail "spawn t$i exited $rc: $out" ;;
     esac
   done
-  assert_equals '2 6' "$admitted $deferred" "eight spawns in one interval must admit exactly the damped 2"
-  pass "eight spawns inside one publish interval admit exactly the damped budget and defer the rest"
+  assert_equals "$published $((8 - published))" "$admitted $deferred" "eight spawns in one interval must admit exactly the published damped $published"
+  pass "eight spawns inside one publish interval admit exactly the damped budget ($published) and defer the rest"
 }
 
 # --- B: watcher publish cycle -------------------------------------------------
@@ -302,7 +323,7 @@ wait_for_publish() {
 # The real watcher publishes the verdict, growth after a recovery is damped
 # across two of its publishes, and the next spawn reads what it published.
 test_watcher_publish_cycle_feeds_the_next_spawn() {
-  local c h e1 e2 e3 rc out
+  local c h e1 e2 e3 rc out f2 f3
   c=$(make_case watch task-w task-x task-y task-z)
   h="$c/home"
   auto_config "$c" 0
@@ -311,19 +332,18 @@ test_watcher_publish_cycle_feeds_the_next_spawn() {
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 FM_LANE_CAPACITY_PUBLISH_INTERVAL=1 "$ROOT/bin/fm-watch.sh" >/dev/null 2>&1 &
   e1=$(wait_for_publish "$c" 0) || fail "the watcher never published the lane verdict"
   assert_equals '[0,0,"memory"]' "$(doc "$c" '[.verdict.free_lanes, .budget.raw, .budget.binding]')" \
-    "no room above the memory floor must publish no open lanes"
+    "a floor 5 GB above the live reading must publish no open lanes"
   set_room "$c" 4
   e2=$(wait_for_publish "$c" "$e1") || fail "the watcher did not publish again"
   # One more publish may land at the old config before the change is seen.
   if [ "$(doc "$c" '.budget.raw')" = 0 ]; then e2=$(wait_for_publish "$c" "$e2") || fail "no publish after the change"; fi
-  assert_equals '[2,4,true]' "$(doc "$c" '[.verdict.free_lanes, .budget.raw, .budget.damped]')" \
-    "the first watcher publish after recovery must grow by at most 2"
+  f2=$(assert_damped_publish "$c" 0 "the first watcher publish after recovery")
   e3=$(wait_for_publish "$c" "$e2") || fail "the watcher did not publish a third time"
-  assert_equals '[4,4]' "$(doc "$c" '[.verdict.free_lanes, .budget.raw]')" "the next publish must grow by 2 more"
+  f3=$(assert_damped_publish "$c" "$f2" "the next watcher publish")
   FM_HOME="$h" FM_STATE_OVERRIDE="$h/state" "$ROOT/bin/fm-watch-arm.sh" --stop >/dev/null 2>&1 || true
   rc=0; out=$(spawn_ship "$c" task-w) || rc=$?
-  assert_admitted "$c" task-w "$rc" "$out" "a spawn after the watcher published 4 open lanes"
-  pass "the real watcher publishes the verdict, damps growth by 2 per publish, and the next spawn is admitted on it ($e1 -> $e2 -> $e3)"
+  assert_admitted "$c" task-w "$rc" "$out" "a spawn after the watcher published $f3 open lanes"
+  pass "the real watcher publishes the verdict, damps growth by 2 per publish ($f2 then $f3 open), and the next spawn is admitted on it ($e1 -> $e2 -> $e3)"
 }
 
 # --- C: idle reclaim from real workers ----------------------------------------
@@ -372,12 +392,11 @@ test_idle_reclaim_from_real_workers() {
 
 # --- E: the fixed-cap path is byte-identical to the baseline ------------------
 
+BASELINE_REF_DEFAULT=5c935cfbaf8a649ccc3656c1cdabd23fe1fcc0b9
+
 baseline_bin() {  # -> a directory holding the baseline revision's bin/
-  local ref=${FM_LANE_CAPACITY_BASELINE_REF:-} dir="$TMP_ROOT/baseline"
-  if [ -z "$ref" ]; then
-    ref=$(git -C "$ROOT" merge-base HEAD origin/main 2>/dev/null) || ref=
-  fi
-  [ -n "$ref" ] || return 1
+  local ref=${FM_LANE_CAPACITY_BASELINE_REF:-$BASELINE_REF_DEFAULT} dir="$TMP_ROOT/baseline"
+  git -C "$ROOT" cat-file -e "$ref^{commit}" 2>/dev/null || return 1
   mkdir -p "$dir"
   git -C "$ROOT" archive "$ref" bin 2>/dev/null | tar -C "$dir" -xf - 2>/dev/null || return 1
   [ -x "$dir/bin/fm-capacity.sh" ] || return 1
@@ -411,7 +430,7 @@ SH
 test_fixed_cap_output_matches_the_baseline() {
   local base ref home fakebin now mode a b
   if ! base=$(baseline_bin); then
-    printf 'skip: fixed-cap baseline: no readable baseline revision (set FM_LANE_CAPACITY_BASELINE_REF)\n'
+    printf 'skip: fixed-cap baseline: revision %s is not in this history (set FM_LANE_CAPACITY_BASELINE_REF)\n' "${FM_LANE_CAPACITY_BASELINE_REF:-$BASELINE_REF_DEFAULT}"
     return 0
   fi
   ref=${base#*	} base=${base%%	*}

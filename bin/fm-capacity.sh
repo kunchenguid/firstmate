@@ -170,7 +170,10 @@
 #   room, the verdict names "damped" (lanes started since the last publish
 #   against the published budget) rather than a resource.
 #   Gates close admission at once and reopen only after their reopen test holds
-#   on 3 consecutive publishes; an unmeasurable gate is unknown and not judged:
+#   on 3 consecutive publishes. An unmeasurable gate is unknown and not judged
+#   unless it was closed at the previous publish: then an unknown reading never
+#   counts as clean, and the gate stays closed with its clean count held until
+#   a real reading clears it.
 #     cpu             load1/cores >= 1; reopens < 0.8 with load5/cores < 0.85
 #     load            load1 >= max-load1; reopens < 0.9 x max-load1
 #     memory-pressure Linux PSI memory some avg10 >= 10 or full avg10 >= 5,
@@ -214,11 +217,11 @@
 #
 # Environment: FM_HOME, FM_STATE_OVERRIDE, FM_CONFIG_OVERRIDE, and
 # FM_PROJECTS_OVERRIDE resolve the home exactly as the other bin/ scripts do.
-# FM_PROC_ROOT_OVERRIDE replaces /proc for every Linux read (tests), and
-# FM_LANE_VITALS_HOST_MAX_AGE (default 120 s) bounds the cached Windows host
-# view that --admit, --spawn-gate, --json, and the report use; --publish always
-# queries the host live and rewrites the cache, so the host-memory gate's
-# reopen count never reads one sample three times.
+# FM_PROC_ROOT_OVERRIDE replaces /proc for every Linux read (tests). The cached
+# Windows host view that --admit, --spawn-gate, --json, and the report use is
+# served for at most 120 s; --publish always queries the host live and rewrites
+# the cache, so the host-memory gate's reopen count never reads one sample
+# three times.
 #
 # Exit status: 0 on a report, 1 on an invalid config/lane-capacity (report,
 # --json, --admit), 2 on a usage error or --json without jq, 75 on an --admit
@@ -644,8 +647,7 @@ EOF
 # owns every rule; AUTO_JQ below is the one place they are computed.
 LANE_LEDGER="$STATE/lane-footprint.json"
 HOST_CACHE="$STATE/.lane-vitals-host"
-HOST_CACHE_MAX_AGE=${FM_LANE_VITALS_HOST_MAX_AGE:-120}
-is_uint "$HOST_CACHE_MAX_AGE" || HOST_CACHE_MAX_AGE=120
+HOST_CACHE_MAX_AGE=120
 DU_TIMEOUT=3
 YOUNG_S=180
 
@@ -797,7 +799,9 @@ def dur: if . == null then "?" elif . >= 86400 then "\(. / 86400 | floor)d" elif
 | (if $vit.on_ac != null then $vit.on_ac elif $beat_battery == true then false elif $beat_battery == false then true else null end) as $on_ac
 | def gate($name; $close; $clear; $what):
     ((($pd.gates // []) | map(select(.name == $name)) | .[0]) // {}) as $g
-    | if $close == null then {name: $name, state: "unknown", since_epoch: null, clear_count: 0, what: $what}
+    | if $close == null then
+        (if $g.state == "closed" then {name: $name, state: "closed", since_epoch: $g.since_epoch, clear_count: ($g.clear_count // 0), what: $what}
+         else {name: $name, state: "unknown", since_epoch: null, clear_count: 0, what: $what} end)
       elif $close then {name: $name, state: "closed", since_epoch: (if $g.state == "closed" then $g.since_epoch else $now end),
         clear_count: 0, what: $what}
       elif $g.state == "closed" then
