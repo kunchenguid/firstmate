@@ -43,7 +43,10 @@ Each adapter:
 - Applies bounded exponential retry after an unexpected or failed close.
 
 Pi treats an arm child whose process is already gone as an empty slot even while its close event is still pending, so a repair call or a scheduled retry starts a fresh arm instead of answering unchanged.
-A failed follow-up never cancels continuity restoration.
+On Pi, successor restoration is serialized independently of delivery settlement.
+A pending main follow-up or accepted supervision-branch turn retains its delivery claim without blocking the next actionable close from restoring a successor.
+A failed follow-up never cancels continuity restoration, and an exhausted restoration reaches main with a typed failure even while an earlier branch delivery remains pending.
+If Pi rejects that failure, the extension retries it without waiting for the earlier branch; an unaccepted delivery stays pending rather than inheriting that branch's success.
 
 ### Pi session replacement
 
@@ -456,6 +459,8 @@ Defaults and overrides, including Claude Stop's outer successor-status wait, are
 It then simulates actionable and empty child closes against the actual Pi and OpenCode close handlers, and:
 
 - Blocks prompt delivery to prove the successor launches first.
+- Holds main or branch delivery open across a successor's actionable close to prove the next successor starts without waiting for settlement.
+- Holds branch delivery open across a successor failure or exhausted restoration to prove retries proceed and the typed failure reaches main.
 - Verifies single-flight behavior.
 - Changes the session lock before close to prove ownership is rechecked.
 - Hangs each successor arm to prove bounded fallback delivery includes the typed restoration failure.
@@ -473,7 +478,7 @@ The same suite covers ordinary same-process session replacement for `/new`, `/re
 - Terminal quit still refusing late rearm.
 - A mid-restore marker advance that delivers the wake with no rejection appendix, offers it to an accepting supervision branch like a confirmed delivery, and records the attempt and the confirm result in the bounded extension log when opted in.
 - A failed confirmation for a stale successor that spares a newer arm started by a repair.
-- A repair, a scheduled retry, and a deferred close over a dead-but-unclosed arm child that each start a fresh arm instead of stalling.
+- A repair and a scheduled retry over a dead-but-unclosed arm child that each start a fresh arm instead of stalling, including a repair after a successor that closed during held delivery retried at once.
 
 The guard and session-start suites prove that active generation evidence tolerates a fresh-beacon handoff.
 They also prove that a legacy or handoff-phase watcher marker from an absent replacement extension still raises the outage diagnostic.
