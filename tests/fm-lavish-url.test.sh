@@ -573,15 +573,19 @@ JS
 }
 
 
-test_unwritable_snapshot_directory() {
+test_snapshot_reservation_failure() {
   local home rc out
-  home=$(make_home unwritable)
-  mkdir -p "$home/.lavish/snapshots"
-  chmod 0500 "$home/.lavish/snapshots"
-  if [ -w "$home/.lavish/snapshots" ]; then
-    chmod 0700 "$home/.lavish/snapshots"
-    fail "permission regression requires an unprivileged test user"
-  fi
+  home=$(make_home reservation-failure)
+  # Replace the directory after setup, immediately before reservation. Unlike
+  # mode bits, a non-directory parent makes os.mkdir fail even for root.
+  cat > "$home/fakebin/date" <<'SH'
+#!/usr/bin/env bash
+set -eu
+rmdir "$FM_HOME/.lavish/snapshots"
+printf 'blocked\n' > "$FM_HOME/.lavish/snapshots"
+printf '20260101T000000Z\n'
+SH
+  chmod +x "$home/fakebin/date"
   rc=0
   out=$(python3 - "$home" "$LU" <<'PYFAIL'
 import os, subprocess, sys
@@ -596,15 +600,15 @@ assert result.returncode != 0
 assert "cannot reserve snapshot name" in result.stderr
 PYFAIL
 ) || rc=$?
-  chmod 0700 "$home/.lavish/snapshots"
-  expect_code 0 "$rc" "unwritable snapshot regression failed: $out"
+  expect_code 0 "$rc" "snapshot reservation regression failed: $out"
   assert_absent "$home/browser.log" "reservation failure drove the browser"
   assert_absent "$home/lavish-state/open" "reservation failure opened Lavish"
-  pass "unwritable snapshots fail promptly before capture or arming"
+  assert_absent "$home/state/procevent" "reservation failure armed a listener"
+  pass "snapshot reservation errors fail promptly before capture or arming"
 }
 
 fm_test_run \
-  test_unwritable_snapshot_directory \
+  test_snapshot_reservation_failure \
   test_overlapping_captures_keep_pages_and_names_distinct \
   test_cssom_and_reserved_markup \
   test_generic_url_capture_sanitizes_layers_and_arms \
