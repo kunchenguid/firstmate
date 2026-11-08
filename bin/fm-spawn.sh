@@ -5844,7 +5844,13 @@ opencode2_wait_for_delivery() {
 AGY_TRUST_DIALOG='Do you trust the contents of this project?'
 AGY_TRUST_ANSWERED=0
 
+# On Orca the gate reads the rendered screen: the adapter's default capture is
+# the escape-stripped output stream, which never carries the pinned status row.
 agy_capture() {
+  if [ "$BACKEND" = orca ]; then
+    fm_backend_orca_screen_capture "$T" 120 2>/dev/null || true
+    return 0
+  fi
   fm_backend_capture "$BACKEND" "$T" 120 "$W" 2>/dev/null || true
 }
 

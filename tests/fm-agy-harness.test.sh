@@ -766,6 +766,86 @@ test_agy_fresh_worktree_is_pre_trusted_and_launches_without_a_dialog() {
   pass "fm-spawn: agy pre-registers the worktree and launches straight into a busy turn"
 }
 
+# The fake orca models Orca's two terminal reads the way the real CLI returns
+# them for agy: a plain `terminal read` is the accumulated, escape-stripped
+# output stream, which never carries agy's cursor-addressed status row, while
+# `terminal read --screen` is the rendered screen with that row pinned at the
+# bottom. Everything else answers the minimal JSON the Orca adapter consumes.
+make_agy_orca_fakebin() {  # <fakebin> <worktree>
+  local fakebin=$1
+  cat > "$fakebin/orca" <<'SH'
+#!/usr/bin/env bash
+set -u
+{ printf 'orca'; for a in "$@"; do printf '\x1f%s' "$a"; done; printf '\n'; } >> "$FM_FAKE_ORCA_CALL_LOG"
+state=$(cat "$FM_FAKE_AGY_STATE" 2>/dev/null || true)
+ok() { printf '{"ok":true,"result":%s}\n' "${1-}"; }
+lines_json() { node -e 'const t=require("fs").readFileSync(0,"utf8").replace(/\n$/,"");process.stdout.write(JSON.stringify({ok:true,result:{terminal:{tail:t.split("\n")}}}))'; }
+arg_after() { local want=$1 prev=; shift; for a in "$@"; do [ "$prev" = "$want" ] && { printf '%s' "$a"; return 0; }; prev=$a; done; return 1; }
+case "${1:-} ${2:-}" in
+  "status "*) ok '{"runtime":{"reachable":true,"state":"ready"}}' ;;
+  "repo show") exit 1 ;;
+  "repo add") ok '{"repo":{"id":"repo-agy"}}' ;;
+  "worktree create") ok "{\"worktree\":{\"id\":\"wt-agy::/orca/wt-agy\",\"path\":\"$FM_FAKE_PANE_PATH\"},\"terminal\":{\"handle\":\"term-agy\"}}" ;;
+  "terminal send")
+    text=$(arg_after --text "$@" || true)
+    case "$text" in
+      ". '"*"'") staged=${text#". '"}; staged=${staged%"'"}; [ ! -f "$staged" ] || text=$(cat "$staged") ;;
+    esac
+    case "$text" in
+      *--prompt-interactive*)
+        printf '%s\n' "$text" >> "$FM_FAKE_LAUNCH_LOG"
+        printf 'launched\n' > "$FM_FAKE_AGY_STATE" ;;
+    esac
+    case " $* " in
+      *' --enter '*) [ -n "$text" ] || [ "$state" != launched ] || printf 'busy\n' > "$FM_FAKE_AGY_STATE" ;;
+    esac
+    ok "{}" ;;
+  "terminal read")
+    case "$state:$*" in
+      busy:*--screen*)
+        printf '> FIRSTMATE_OP: v1 launch-brief: Exercise Antigravity dispatch.\nGenerating...\n────\n>\n────\nesc to cancel                                Gemini 3.8 Flash · low\n' | lines_json ;;
+      busy:*)
+        printf ' Antigravity CLI 1.5.3\n> FIRSTMATE_OP: v1 launch-brief: Exercise Antigravity dispatch.\nGenerating...\n' | lines_json ;;
+      *) printf '$ \n' | lines_json ;;
+    esac ;;
+  "terminal close"|"worktree rm") ok "{}" ;;
+  *) ok "{}" ;;
+esac
+exit 0
+SH
+  chmod +x "$fakebin/orca"
+}
+
+# Orca's default read is the escape-stripped stream, so the pinned status row
+# the agy gate classifies only exists in the rendered-screen read. A gate that
+# reads the stream sees a working agy as unknown on every poll and kills it.
+test_agy_orca_gate_reads_the_rendered_screen() {
+  local id rec out rc stream
+  id="agy-orca-z20-$$"
+  rec=$(make_agy_spawn_case orca "$id")
+  read_agy_spawn_record "$rec"
+  make_agy_orca_fakebin "$FAKEBIN_DIR"
+  : > "$CASE_DIR/orca-calls.log"
+  out=$(FM_FAKE_ORCA_CALL_LOG="$CASE_DIR/orca-calls.log" run_agy_spawn "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" \
+    "$WT_DIR" "$FAKEBIN_DIR" "$id" --model gemini-3.8-flash-low --backend orca)
+  rc=$?
+  expect_code 0 "$rc" "an agy spawn on Orca whose screen shows a busy turn should succeed"$'\n'"$out"
+  assert_contains "$out" "spawned $id harness=agy" "agy spawn on Orca did not report success"
+  assert_grep "backend=orca" "$HOME_DIR/state/$id.meta" "agy spawn on Orca did not record backend=orca"
+  [ "$(cat "$CASE_DIR/agy.state")" = busy ] \
+    || fail "the Orca spawn reported success before agy reached a busy turn (state: $(cat "$CASE_DIR/agy.state"))"
+  assert_not_contains "$(cat "$CASE_DIR/orca-calls.log")" $'orca\x1f''terminal'$'\x1f''close' \
+    "a successful agy spawn on Orca must never close the terminal it just launched"
+  # Divergence guard: the stream read of the same busy turn must stay unclassifiable,
+  # or this case would pass for a gate that never consulted the screen at all.
+  stream=$(FM_FAKE_ORCA_CALL_LOG="$CASE_DIR/orca-calls.log" FM_FAKE_AGY_STATE="$CASE_DIR/agy.state" \
+    PATH="$FAKEBIN_DIR:$BASE_PATH" bash -c '. "$0/bin/backends/orca.sh"; fm_backend_orca_capture term-agy 120' "$ROOT")
+  case "$(fm_busy_classify orca term-agy agy "$id-stream" "$CASE_DIR" "$stream")" in
+    busy*) fail "the fake Orca stream read already classifies busy, so this case cannot prove the screen read" ;;
+  esac
+  pass "fm-spawn: the agy gate on Orca reads the rendered screen, where the busy status row lives"
+}
+
 test_agy_dialog_despite_registration_is_answered_once() {
   local id rec out rc enters
   id="agy-vendor-z10-$$"
@@ -937,6 +1017,7 @@ test_agy_trust_registers_the_logical_and_resolved_worktree_paths
 test_agy_trust_creates_a_missing_store
 test_agy_trust_refuses_out_of_scope_paths
 test_agy_fresh_worktree_is_pre_trusted_and_launches_without_a_dialog
+test_agy_orca_gate_reads_the_rendered_screen
 test_agy_dialog_despite_registration_is_answered_once
 test_agy_unregistered_path_ignores_busy_until_the_dialog_is_answered
 test_agy_unregistered_path_without_a_dialog_fails_the_spawn

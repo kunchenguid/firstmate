@@ -251,6 +251,17 @@ fm_backend_orca_capture() {  # <terminal-id> <lines>
   fm_backend_orca_json_text "$out"
 }
 
+# fm_backend_orca_screen_capture: the rendered screen, not the accumulated
+# stream. `orca terminal read` without --screen strips escapes from the output
+# history, so a TUI's cursor-addressed rows (agy's pinned `esc to cancel` /
+# `? for shortcuts` status row) never appear in it at all.
+fm_backend_orca_screen_capture() {  # <terminal-id> <lines>
+  local terminal=$1 lines=${2:-40} out
+  fm_backend_orca_tool_check || return 1
+  out=$(orca terminal read --terminal "$terminal" --limit "$lines" --screen --json) || return 1
+  fm_backend_orca_json_text "$out"
+}
+
 fm_backend_orca_json_text() {  # <json>
   printf '%s' "$1" | node -e '
 const fs = require("fs");
