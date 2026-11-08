@@ -5,7 +5,8 @@
 # informational status lines, latest captain-facing statuses not covered by a
 # newer branch outcome, OPEN DECISIONS, captain-call record divergence, and on
 # a supervision-host home the supervision session's new and unprocessed
-# outcomes (BRANCH OUTCOMES), then assert liveness.
+# outcomes (BRANCH OUTCOMES), on a heartbeat drain with config/heartbeat-ready-work
+# present the bounded READY WORK backlog listing, then assert liveness.
 #
 # Keep sequence-bound row consumption independent from generation-bound episode
 # retirement; docs/watcher-continuity.md owns the recovery contract.
@@ -837,6 +838,7 @@ print_ready_work_section() {  # <deduped-raw-rows>
 
 print_ready_work_section_bounded() {  # <deduped-raw-rows>
   local rows=$1 seconds=${FM_TASKS_AXI_TIMEOUT:-10} function_body status
+  [ -e "$CONFIG/heartbeat-ready-work" ] || return 0
   case "$seconds" in ''|*[!0-9]*|0) seconds=10 ;; esac
   printf '%s\n' "$rows" | awk -F '\t' '$3 == "heartbeat" { found=1 } END { exit !found }' || return 0
   function_body=$(declare -f print_ready_work_section) || return 0

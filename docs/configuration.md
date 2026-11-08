@@ -827,6 +827,15 @@ A refused registration, such as a draft, prints one `check: pr-register:` wake f
 With the file absent, the check sweep does not run the scan, and `pr=` and the merge poll come only from a manual `bin/fm-pr-check.sh <id> <PR url>` run.
 The flag takes effect at the next check sweep, and is a home-local preference that is not inherited by secondmate homes.
 
+## Heartbeat ready work (config/heartbeat-ready-work)
+
+The optional local, gitignored `config/heartbeat-ready-work` presence flag opts this home into a READY WORK section on heartbeat wake drains.
+With the flag present, a drain that presents a heartbeat lists the queued backlog tasks that are dispatchable now, bounded like the session-start queued listing by `FM_SESSION_START_QUEUED_LIMIT`.
+The lookup runs only when the backlog backend is tasks-axi; a manual backend, an empty ready list, or a home without a data directory prints nothing, and a failed lookup prints one `READY WORK unavailable:` line without stopping the drain.
+The backlog gate and lookup are bounded by `FM_TASKS_AXI_TIMEOUT` (default 10 seconds).
+With the file absent, heartbeat drains print no READY WORK section and read no backlog.
+The flag takes effect at the next drain, and is a home-local preference that is not inherited by secondmate homes.
+
 ## No-mistakes pipeline spend (config/pipeline-spend)
 
 The optional local, gitignored `config/pipeline-spend` presence flag opts this home into recording per-task no-mistakes pipeline spend in `data/pipeline-spend.jsonl` during teardown.

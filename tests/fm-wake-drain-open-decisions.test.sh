@@ -19,6 +19,7 @@ make_fake_tasks_axi_ready() {
   local fakebin=$1
   cat > "$fakebin/tasks-axi" <<'SH'
 #!/usr/bin/env bash
+[ -z "${FM_FAKE_TASKS_AXI_LOG:-}" ] || printf 'call %s\n' "$*" >> "$FM_FAKE_TASKS_AXI_LOG"
 case "$1 ${2:-}" in
   '--version ') echo 'tasks-axi 0.2.6' ;;
   'update --help')
@@ -46,6 +47,12 @@ SH
 }
 
 run_drain_with_backlog() {
+  local dir=$1 state=$2 out=$3
+  mkdir -p "$dir/home/config" && : > "$dir/home/config/heartbeat-ready-work" || return
+  run_drain_without_ready_flag "$dir" "$state" "$out"
+}
+
+run_drain_without_ready_flag() {
   local dir=$1 state=$2 out=$3
   FM_HOME="$dir/home" FM_STATE_OVERRIDE="$state" \
     FM_CONFIG_OVERRIDE="$dir/home/config" FM_DATA_OVERRIDE="$dir/home/data" \
@@ -122,6 +129,34 @@ test_ready_work_only_on_heartbeat() {
     fail "non-heartbeat drain printed READY WORK"
   fi
   pass "READY WORK is shown with its since date only when a heartbeat is drained"
+}
+
+test_absent_flag_keeps_heartbeat_drain_unchanged() {
+  local dir state out baseline log
+  dir=$(make_case ready-work-flag-absent)
+  state="$dir/state"
+  mkdir -p "$dir/home/config" "$dir/home/data"
+  : > "$dir/home/.tasks.toml"
+  printf '# backlog\n' > "$dir/home/data/backlog.md"
+  make_fake_tasks_axi_ready "$dir/fakebin"
+  log="$dir/tasks-axi.log"
+  append_wake "$state" heartbeat '' 'scheduled review' || fail "queueing heartbeat failed"
+  out="$dir/flag-absent.out"
+  FM_FAKE_TASKS_AXI_LOG="$log" run_drain_without_ready_flag "$dir" "$state" "$out" \
+    || fail "heartbeat drain failed without the flag"
+  grep -F 'heartbeat' "$out" >/dev/null || fail "flag-absent drain did not present the heartbeat"
+  if grep -F 'READY WORK' "$out" >/dev/null; then
+    fail "heartbeat drain printed READY WORK without config/heartbeat-ready-work"
+  fi
+  [ ! -s "$log" ] || fail "flag-absent heartbeat drain read the backlog: $(cat "$log")"
+
+  rm -f "$dir/home/.tasks.toml" "$dir/fakebin/tasks-axi"
+  rm -rf "$dir/home/data"
+  baseline="$dir/no-backlog.out"
+  run_drain_without_ready_flag "$dir" "$state" "$baseline" || fail "baseline heartbeat drain failed"
+  diff "$baseline" "$out" >/dev/null \
+    || fail "flag-absent output differs from a drain with no backlog: $(diff "$baseline" "$out")"
+  pass "without config/heartbeat-ready-work a heartbeat drain is unchanged and reads no backlog"
 }
 
 test_large_drain_rows_reach_ready_lookup() {
@@ -389,6 +424,7 @@ test_over_long_decision_note_is_capped_with_a_marker() {
 
 test_buried_decision_still_surfaces
 test_ready_work_only_on_heartbeat
+test_absent_flag_keeps_heartbeat_drain_unchanged
 test_large_drain_rows_reach_ready_lookup
 test_stalled_backlog_gate_does_not_block_drain
 test_manual_backlog_suppresses_ready_work
