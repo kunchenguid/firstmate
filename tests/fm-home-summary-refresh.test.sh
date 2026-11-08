@@ -352,6 +352,14 @@ jq -e '
   || fail "fleet snapshot did not consume the published local ledger: $(jq -c '.secondmate_current.records[0]' "$TMP_ROOT/parent-snapshot.json")"
 pass "fleet snapshot consumes the published local ledger by default"
 
+# A terminated worker cannot run its EXIT trap; the surviving publisher must
+# reclaim its private workspace, including both producer files.
+assert_no_refresh_temps() {
+  local leftover
+  leftover=$(find "$HOME_DIR/state" -name '.home-summary-error.*' -o -name '.home-summary.json.*' -o -name '.home-summary-work.*')
+  [ -z "$leftover" ] || fail "refresh left temporary files behind: $leftover"
+}
+
 # Restore the established ledger, then stop a real writer while its real producer
 # is blocked in a current-state read. The prior ledger must remain byte-identical
 # and valid because no partial producer output is ever published at its path.
@@ -404,6 +412,7 @@ wait "$SLOW_WRITER_PID" >/dev/null 2>&1 || true
 SLOW_WRITER_PID=
 SLOW_WORKER_PGID=
 SLOW_NM_PID=
+assert_no_refresh_temps
 jq -e . "$HOME_DIR/state/home-summary.json" >/dev/null \
   || fail "killing the writer exposed invalid JSON at the ledger path"
 cmp -s "$TMP_ROOT/prior-ledger.json" "$HOME_DIR/state/home-summary.json" \
@@ -456,6 +465,28 @@ cmp -s "$TMP_ROOT/before-best-effort.json" "$HOME_DIR/state/home-summary.json" \
 grep -F 'summary producer failed' "$HOME_DIR/state/.home-summary-refresh.log" >/dev/null \
   || fail "best-effort refresh did not log its failure"
 pass "best-effort publication logs and continues"
+
+TMPFAILBIN="$TMP_ROOT/temp-failure-bin"
+REAL_MKTEMP=$(command -v mktemp)
+mkdir -p "$TMPFAILBIN"
+cat > "$TMPFAILBIN/mktemp" <<'SH'
+#!/usr/bin/env bash
+for arg in "$@"; do
+  case "$arg" in */fm-home-summary-owner.XXXXXX) exit 1 ;; esac
+done
+exec "$FM_TEST_REAL_MKTEMP" "$@"
+SH
+chmod +x "$TMPFAILBIN/mktemp"
+PATH="$TMPFAILBIN:$FAKEBIN:$PATH" FM_TEST_REAL_MKTEMP="$REAL_MKTEMP" \
+  FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$HOME_DIR" "$WRITER" --best-effort \
+  || fail "cleanup workspace allocation failure changed best-effort success"
+grep -F 'could not create refresh cleanup workspace' "$HOME_DIR/state/.home-summary-refresh.log" >/dev/null \
+  || fail "cleanup workspace allocation failure was not recorded"
+cmp -s "$TMP_ROOT/before-best-effort.json" "$HOME_DIR/state/home-summary.json" \
+  || fail "cleanup workspace allocation failure changed the prior ledger"
+assert_no_refresh_temps
+pass "best-effort refresh logs cleanup workspace allocation failure"
+
 
 LOCK_MARKER="$TMP_ROOT/lock-held"
 rm -f "$HOME_DIR/state/.home-summary-refresh.log"
@@ -512,6 +543,7 @@ elapsed=$(( $(date +%s) - started ))
 grep -F 'refresh exceeded its 1-second deadline' \
   "$HOME_DIR/state/.home-summary-refresh.log" >/dev/null \
   || fail "publication validation timeout was not logged"
+assert_no_refresh_temps
 pass "best-effort refresh bounds validation and publication"
 
 MKBIN="$TMP_ROOT/mkdir-hangbin"
@@ -644,7 +676,7 @@ fm_write_meta "$COST_HOME/state/cost-task.meta" \
   "worktree=$COST_HOME/projects/task" \
   "project=firstmate" \
   "harness=claude" \
-  "kind=ship" \
+  "kind=secondmate" \
   "mode=no-mistakes" \
   "spawn_gen=fm.cost123456"
 cost_busy_gen=$("$ROOT/bin/fm-busy-event.sh" arm "$COST_HOME/state" cost-task)
@@ -653,10 +685,14 @@ cost_busy_gen=$("$ROOT/bin/fm-busy-event.sh" arm "$COST_HOME/state" cost-task)
 python3 - "$COST_HOME/state/cost-task.status" <<'PY'
 import sys
 note = ("the crewmate ran validation and reported checks on the branch "
-        "after review ") * 25
+        "after review ") * 5
 with open(sys.argv[1], "w") as handle:
-    for i in range(300):
-        handle.write(f"working: {note}({i})\n")
+    for i in range(16):
+        handle.write(f"needs-decision [key=retained-{i}]: {note}({i})\n")
+    for i in range(3000):
+        handle.write(f"blocked [key=round-{i % 40}]: {note}({i})\n")
+        handle.write(f"resolved [key=round-{i % 40}]: dependency cleared\n")
+        handle.write(f"done: unrelated concern {i}\n")
     handle.write("needs-decision [key=cost-gate]: which base to rebuild from\n")
 PY
 PATH="$FAKEBIN:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$COST_HOME" \
@@ -669,6 +705,7 @@ jq -e --arg home "$COST_HOME" '
   .schema == "fm-secondmate-home-summary.v1"
   and .home == $home
   and any(.decisions_open[]; .key == "cost-gate")
+  and ([.decisions_open[] | select(.key | startswith("retained-"))] | length) == 16
 ' "$COST_HOME/state/home-summary.json" >/dev/null \
   || fail "the accumulated home published a ledger missing its open decision"
 pass "publication completes on a home carrying accumulated status history"

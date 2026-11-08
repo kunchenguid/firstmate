@@ -18,6 +18,8 @@
 # timeout owner bounds the complete refresh with FM_HOME_SUMMARY_TIMEOUT
 # (default 60 seconds). No reader can observe temporary output through the
 # ledger path.
+# The parent owns a unique state-filesystem workspace and reclaims it even
+# when deadline escalation or SIGKILL prevents the worker from running traps.
 #
 # With --best-effort, a failure is appended to the bounded home-local
 # state/.home-summary-refresh.log when available, with stderr as the bounded
@@ -46,6 +48,8 @@ HOME_SUMMARY_ERROR=
 HOME_SUMMARY_FAILURE_STAMP=
 HOME_SUMMARY_TMP=
 HOME_SUMMARY_ERR_TMP=
+HOME_SUMMARY_WORK_DIR=
+HOME_SUMMARY_OWNER_DIR=
 HOME_SUMMARY_LOCK_HELD=0
 
 # shellcheck source=bin/fm-timeout-lib.sh
@@ -61,6 +65,7 @@ case "${1:-}" in
   --best-effort) BEST_EFFORT=1 ;;
   --_worker)
     HOME_SUMMARY_MODE=worker
+    HOME_SUMMARY_WORK_DIR=${FM_HOME_SUMMARY_WORK_DIR:-}
     BEST_EFFORT=${FM_HOME_SUMMARY_WORKER_BEST_EFFORT:-0}
     ;;
   --_log-failure) HOME_SUMMARY_MODE=log-failure ;;
@@ -86,6 +91,8 @@ fi
 
 # shellcheck disable=SC2329 # Invoked by the signal and EXIT traps below.
 home_summary_cleanup() {
+  [ -z "$HOME_SUMMARY_WORK_DIR" ] || rm -rf -- "$HOME_SUMMARY_WORK_DIR" 2>/dev/null || true
+  [ -z "$HOME_SUMMARY_OWNER_DIR" ] || rm -rf -- "$HOME_SUMMARY_OWNER_DIR" 2>/dev/null || true
   [ -z "$HOME_SUMMARY_TMP" ] || rm -f -- "$HOME_SUMMARY_TMP" 2>/dev/null || true
   [ -z "$HOME_SUMMARY_ERR_TMP" ] || rm -f -- "$HOME_SUMMARY_ERR_TMP" 2>/dev/null || true
   if [ "$HOME_SUMMARY_LOCK_HELD" -eq 1 ]; then
@@ -115,11 +122,15 @@ home_summary_refresh_once() {
     fm_lock_acquire_wait "$REFRESH_LOCK"
   fi
   HOME_SUMMARY_LOCK_HELD=1
-  HOME_SUMMARY_TMP=$(umask 077; mktemp "$STATE/.home-summary.json.XXXXXX") || {
+  if ! mkdir -m 700 -- "$HOME_SUMMARY_WORK_DIR"; then
+    home_summary_fail "could not create the refresh workspace in $STATE"
+    return 1
+  fi
+  HOME_SUMMARY_TMP=$(umask 077; mktemp "$HOME_SUMMARY_WORK_DIR/.home-summary.json.XXXXXX") || {
     home_summary_fail "could not create an atomic publication file in $STATE"
     return 1
   }
-  HOME_SUMMARY_ERR_TMP=$(umask 077; mktemp "$STATE/.home-summary-error.XXXXXX") || {
+  HOME_SUMMARY_ERR_TMP=$(umask 077; mktemp "$HOME_SUMMARY_WORK_DIR/.home-summary-error.XXXXXX") || {
     home_summary_fail "could not create a producer diagnostic file in $STATE"
     return 1
   }
@@ -184,6 +195,7 @@ home_summary_refresh_once() {
   HOME_SUMMARY_TMP=
   fm_lock_release "$REFRESH_LOCK"
   HOME_SUMMARY_LOCK_HELD=0
+  home_summary_cleanup
   trap - EXIT HUP INT TERM
   return 0
 }
@@ -216,8 +228,24 @@ if [ "$HOME_SUMMARY_MODE" = log-failure ]; then
 fi
 
 if [ "$HOME_SUMMARY_MODE" = parent ]; then
+  # The parent survives deadline escalation and a SIGKILLed worker group.
+  # Own the exact paths here as well as in the worker; never sweep other attempts.
+  trap home_summary_cleanup EXIT
+  trap 'exit 129' HUP
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+  if ! HOME_SUMMARY_OWNER_DIR=$(umask 077; mktemp -d "${TMPDIR:-/tmp}/fm-home-summary-owner.XXXXXX"); then
+    if [ "$BEST_EFFORT" -eq 1 ]; then
+      fm_run_timed 2 env FM_HOME_SUMMARY_PARENT_ERROR="could not create refresh cleanup workspace" \
+        "$SCRIPT_DIR/fm-home-summary-refresh.sh" --_log-failure >/dev/null || true
+      exit 0
+    fi
+    exit 1
+  fi
+  HOME_SUMMARY_WORK_DIR="$STATE/.home-summary-work.${HOME_SUMMARY_OWNER_DIR##*/}"
   attempt_stamp=$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null) || attempt_stamp=
   if fm_run_timed "$HOME_SUMMARY_TIMEOUT" env \
+    FM_HOME_SUMMARY_WORK_DIR="$HOME_SUMMARY_WORK_DIR" \
     FM_HOME_SUMMARY_WORKER_BEST_EFFORT="$BEST_EFFORT" \
     FM_HOME_SUMMARY_IF_IDLE="$HOME_SUMMARY_IF_IDLE" \
     "$SCRIPT_DIR/fm-home-summary-refresh.sh" --_worker; then
