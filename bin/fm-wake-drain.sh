@@ -448,13 +448,12 @@ prepare_unread_status_page() {  # <snapshot>
   local snapshot=$1 task endpoint ident f offset pos end line chunk complete
   local used=0 shown=0 remaining=0 bytes blocked=0 previous='' page='' first=''
   local root='' receipt_end start epoch age now item digest page_count=0 page_shown=0 page_used=0 page_start=0
-  PAGE_SNAPSHOT="" PAGE_UNREAD="" PAGE_BASELINE=""
+  PAGE_SNAPSHOT="" PAGE_UNREAD=""
   now=$(date +%s)
   while IFS=$'\t' read -r task endpoint ident; do
     [ -n "$task" ] || continue
     f="$STATE/$task.status"
     offset=$(status_presentation_cursor_offset "$f") || return 1
-    PAGE_BASELINE="$PAGE_BASELINE$task"$'\t'"$offset"$'\t'"$ident"$'\n'
     pos=$offset receipt_end=$endpoint blocked=0 page='' page_shown=0 page_used=0
     chunk=$(mktemp "$STATE/.status-page-read.XXXXXX") || return 1
     if ! _fm_status_read_span "$f" "$offset" "$((endpoint - offset))" > "$chunk"; then
@@ -935,12 +934,6 @@ print_status_presentation() {  # [<deduped-raw-rows>]
     rc=1
   }
   if [ "$rc" -eq 0 ]; then prepare_unread_status_page "$snapshot" || rc=1; fi
-  # Freeze legacy migration before a state fold can update its cache. A failed
-  # first stdout must not let that cache masquerade as a display receipt on retry.
-  if [ "$rc" -eq 0 ] && [ -n "$snapshot" ] \
-    && [ ! -e "$STATE/.status-presentation-cursor" ] && [ ! -L "$STATE/.status-presentation-cursor" ]; then
-    status_commit_presentation_snapshot "$STATE" "$PAGE_BASELINE" || rc=1
-  fi
   if [ "$rc" -eq 0 ] && [ -n "$rows" ]; then
     annotations=$(mktemp "$STATE/.status-annotations.XXXXXX") || rc=1
     if [ "$rc" -eq 0 ]; then fm_wake_print_annotations "$rows" "$PAGE_SNAPSHOT" > "$annotations" || rc=1; fi

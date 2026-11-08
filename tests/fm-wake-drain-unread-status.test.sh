@@ -543,6 +543,8 @@ test_first_stdout_failure_cannot_seed_a_false_read_receipt() {
   local dir state out fakebin real_cat
   dir=$(make_case first-stdout-failure); state="$dir/state"; out="$dir/out"
   printf 'note: evidence before the first manifest\n' > "$state/fresh.status"
+  bash -c '. "$1"; status_open_decisions_incremental "$2" >/dev/null' _ \
+    "$ROOT/bin/fm-classify-lib.sh" "$state/fresh.status" || fail 'could not warm the independent fold cache'
   fakebin="$dir/fakebin"; mkdir -p "$fakebin"
   real_cat=$(command -v cat)
   cat > "$fakebin/cat" <<'SH'
