@@ -401,11 +401,7 @@ test_raw_compound_launch_command_carries_the_switch() {
 
   probe_dir="$CASE_DIR/agent-cwd"
   mkdir -p "$probe_dir"
-  cat > "$probe_dir/probe" <<'SH'
-#!/bin/sh
-printf '%s\n' "${COMPACT_ADVISER_DISABLE-unset}"
-SH
-  chmod +x "$probe_dir/probe"
+  install_env_probe "$probe_dir" probe FM_HOME
 
   out=$(run_case_spawn raw-compound-a1 "$PROJ_DIR" --mode no-mistakes --yolo off \
     "cd $probe_dir && ./probe")
@@ -417,9 +413,9 @@ SH
     TMUX=synthetic-pane COMPACT_ADVISER_DISABLE="$CONTRARY" \
     /bin/sh -c "$launch") \
     || fail "raw compound launch: the emitted launch failed to run"
-  assert_equals 1 "$seen" \
-    "a raw compound launch must start its agent with the compact adviser disabled, even after cd"
-  pass "a compound raw launch-command still starts its agent with the compact-adviser switch on"
+  assert_equals "$HOME_DIR" "$seen" \
+    "a raw compound launch must start its agent with active FM_HOME, even after cd"
+  pass "a compound raw launch-command carries active FM_HOME"
 }
 
 test_launch_preserves_literal_home_and_brief_paths() {

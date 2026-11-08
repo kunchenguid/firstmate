@@ -7641,7 +7641,7 @@ if [ "$KIND" = secondmate ]; then
   LAUNCH="FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= FM_PUBLIC_FOLLOWUP_PRIMARY_HOME=$sq_primary_home FM_HOME=$sq_home FM_TRACE_CONTEXT=$SPAWN_TRACE_EFFECTIVE FM_SUPERVISION_MODEL=$supervision_model $LAUNCH"
 else
   # A ship or scout works for the active home itself.
-  LAUNCH="FM_HOME=$(shell_quote "$FM_HOME") $LAUNCH"
+  LAUNCH="export FM_HOME=$(shell_quote "$FM_HOME"); $LAUNCH"
 fi
 # Implement the launch-delivery contract in this script's header. The full
 # home-identity hash isolates equal task ids across homes, and the spawn token in
