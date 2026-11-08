@@ -1194,6 +1194,11 @@ crew_dispatch_validate() {
       elif $h == "opencode" or $h == "kimi" or $h == "cursor" then false
       else true
       end;
+    def effort_note($h):
+      if ($h == "opencode" or $h == "kimi" or $h == "cursor")
+      then " (" + $h + " accepts no effort field; drop the effort key)"
+      else ""
+      end;
     def profiles($value):
       if ($value | type) == "array" then $value
       elif ($value | type) == "object" then [$value]
@@ -1227,7 +1232,7 @@ crew_dispatch_validate() {
       | map(select(.e != null))
       | map(select((.h | type) == "string" and verified(.h)))
       | map(select(. as $p | effort_ok($p.h; $p.m; $p.e) | not))
-      | map("\(.h):\(.e)")
+      | map("\(.h):\(.e)" + effort_note(.h))
       | unique;
     if type != "object" then "top-level value must be an object"
     elif has("preferred_provider") and (provider_id(.preferred_provider) | not) then "preferred_provider must be a lowercase provider ID (for example codex)"

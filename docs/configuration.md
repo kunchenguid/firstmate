@@ -1856,6 +1856,9 @@ This section is the single owner of the canonical schema and its per-field seman
 }
 ```
 
+Profiles for `opencode`, `kimi`, and `cursor` accept no `effort` field, so omit the key.
+A present value is invalid, and bootstrap names the pair and the remedy, for example `invalid effort: kimi:medium (kimi accepts no effort field; drop the effort key)`.
+
 **Required and optional fields**
 
 | Field | Requirement |
@@ -1935,7 +1938,8 @@ This single-provider table is separate from the frozen legacy mapping used by `f
 - `ultra` is native-only: the model-aware validation contract and launch mapping are owned by `bin/fm-harness.sh validate-native-effort` and `bin/fm-spawn.sh` respectively.
 - Codex `max` is valid when the profile selects `gpt-5.6-luna`, whose installed catalog entry supports that reasoning level.
 - On pane backends, an omitted model or effort means the selected harness uses its own default for that axis; [T3 selection](t3code-backend.md#provider-instances-and-models) owns server-backed defaults.
-- OpenCode receives the effort as its default `build` agent's `variant`, keyed to the resolved model, inside the `OPENCODE_CONFIG_CONTENT` JSON its launch already writes (the per-model reasoning-effort field of the config schema, verified on opencode 1.18.32); with no model resolved, the effort is recorded in task metadata but omitted from the launch.
+- `opencode`, `kimi`, and `cursor` profiles omit `effort`, as stated with the schema above.
+  `bin/fm-spawn.sh` owns any OpenCode launch-time variant mapping outside this file.
 - Every profile array is an implicit quota-aware choice resolved through `quota-array-dispatch`.
 - If no dispatch rule fits, firstmate resolves `default` through the same object-or-array path before falling back to `config/crew-harness`.
 - On pane backends, except for `ultra` under the native-effort contract above, an effort value the chosen harness does not accept is recorded as `effort=` in task meta for traceability but omitted from the launch flags.
