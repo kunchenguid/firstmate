@@ -720,6 +720,7 @@ seed_secondmate_home() { # <home> <id> [home Stop guard]
   local home=$1 id=$2 guard=${3:-$ROOT/bin/fm-turnend-guard.sh}
   mkdir -p "$home/bin" "$home/data" "$home/state" "$home/config" "$home/projects"
   cp "$guard" "$home/bin/fm-turnend-guard.sh"
+  cp "$ROOT/bin/fm-hooks-lib.sh" "$ROOT/bin/fm-hooks.sh" "$home/bin/"
   printf '# Firstmate\n' > "$home/AGENTS.md"
   printf '%s\n' "$id" > "$home/.fm-secondmate-home"
   printf 'charter\n' > "$home/data/charter.md"

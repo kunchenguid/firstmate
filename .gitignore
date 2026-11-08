@@ -11,6 +11,7 @@ __pycache__/
 *.pyc
 .env
 config/
+/hooks/
 .claude/settings.local.json
 
 .tools/

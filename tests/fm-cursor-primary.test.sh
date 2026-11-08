@@ -71,7 +71,7 @@ install_scripts() {
   mkdir -p "$dir/bin" "$dir/docs"
   for f in fm-turnend-guard-cursor.sh fm-turnend-guard.sh fm-sessionstart-cursor.sh \
            fm-sessionstart-run.sh fm-sessionstart-nudge.sh fm-arm-pretool-check.sh \
-           fm-cd-pretool-check.sh fm-claude-stop-autoarm.sh fm-hook-host-lib.sh \
+           fm-cd-pretool-check.sh fm-claude-stop-autoarm.sh fm-hook-host-lib.sh fm-hooks-lib.sh fm-hooks.sh \
            fm-primary-scope-lib.sh fm-supervision-lib.sh fm-wake-lib.sh fm-path-lib.sh \
            fm-session-lock-lib.sh fm-cursor-lib.sh fm-operational-input.sh \
            fm-supervision-instructions.sh fm-harness.sh fm-lock.sh \
@@ -290,6 +290,54 @@ test_park_delivers_actionable_wake_as_followup() {
   case "$body" in *'stale: fixture-win needs a look'*) ;; *) fail "the wake reason was not carried into the follow-up: $body" ;; esac
   case "$body" in *'fm-wake-drain.sh'*) ;; *) fail "the follow-up must tell the session to drain first: $body" ;; esac
   pass "cursor park: an actionable close is delivered as one watcher-kind follow-up"
+}
+
+# Installed turn-end lifecycle hooks run on a normal Cursor stop, not only when
+# the park fails, and a refusal is that stop's one follow-up.
+test_park_runs_turn_end_hooks_on_a_normal_stop() {
+  local dir out body
+  dir=$(make_primary_dir "$TMP_ROOT/park-turn-end-hook")
+  write_arm_fixture "$dir" actionable
+  mkdir -p "$dir/hooks/turn-end.d"
+  printf '#!/bin/sh\ncat > "%s/payload.json"\necho "finish the owed reply first" >&2\nexit 1\n' \
+    "$dir" > "$dir/hooks/turn-end.d/10-owed"
+  chmod +x "$dir/hooks/turn-end.d/10-owed"
+  out=$(run_park "$dir")
+  [ "$(kind_of_followup "$out")" = turn-end-guard ] \
+    || fail "a refusing turn-end hook must arrive as one follow-up on a normal stop, got: $out"
+  body=$(followup_of "$out")
+  case "$body" in *'finish the owed reply first'*) ;; *) fail "the hook's reason is missing: $body" ;; esac
+  jq -e '.session == "sess-cursor"' "$dir/payload.json" >/dev/null \
+    || fail "turn-end payload is wrong: $(cat "$dir/payload.json")"
+  rm -f "$dir/payload.json"
+  out=$(run_park "$dir" 1)
+  [ -z "$out" ] || fail "a follow-up-driven stop must not be held by hooks again: $out"
+  [ ! -e "$dir/payload.json" ] || fail "turn-end hooks ran on a follow-up-driven stop"
+  printf '#!/bin/sh\nexit 0\n' > "$dir/hooks/turn-end.d/10-owed"
+  out=$(run_park "$dir")
+  [ -z "$out" ] || fail "a passing turn-end hook must let the stop end quietly: $out"
+  pass "cursor park: turn-end hooks run on a normal stop and hold it at most once"
+}
+
+# A refusing turn-end hook on a newer stop still claims the baton first, so an
+# older park still parked stands down instead of delivering a later follow-up.
+test_park_turn_end_hook_refusal_supersedes_an_older_park() {
+  local dir out before after
+  dir=$(make_primary_dir "$TMP_ROOT/park-turn-end-supersede")
+  write_arm_fixture "$dir" actionable
+  run_park "$dir" >/dev/null
+  before=$(sed -n 's/^seq=\([0-9][0-9]*\) .*/\1/p' "$dir/state/.cursor-park-owner" 2>/dev/null)
+  [ -n "$before" ] || fail "the first stop did not claim the park"
+  mkdir -p "$dir/hooks/turn-end.d"
+  printf '#!/bin/sh\necho "finish the owed reply first" >&2\nexit 1\n' > "$dir/hooks/turn-end.d/10-owed"
+  chmod +x "$dir/hooks/turn-end.d/10-owed"
+  out=$(run_park "$dir")
+  [ "$(kind_of_followup "$out")" = turn-end-guard ] \
+    || fail "the hook refusal must arrive as this stop's follow-up, got: $out"
+  after=$(sed -n 's/^seq=\([0-9][0-9]*\) .*/\1/p' "$dir/state/.cursor-park-owner" 2>/dev/null)
+  [ "$after" = "$((before + 1))" ] \
+    || fail "a refusing stop must claim the park before its follow-up so an older park stands down (seq $before -> $after)"
+  pass "cursor park: a turn-end hook refusal claims the park first, superseding an older park"
 }
 
 test_park_never_exits_two() {
@@ -901,6 +949,8 @@ test_pretool_guards_deduplicate_and_render_cursor_deny
 test_cd_guard_renders_cursor_deny
 test_park_silent_when_nothing_in_flight
 test_park_delivers_actionable_wake_as_followup
+test_park_runs_turn_end_hooks_on_a_normal_stop
+test_park_turn_end_hook_refusal_supersedes_an_older_park
 test_park_never_exits_two
 test_park_repair_nag_is_bounded
 test_park_repair_nag_requires_a_persisted_budget

@@ -102,6 +102,8 @@ case "$LOCK_ATTEMPTS" in ''|*[!0-9]*|0) LOCK_ATTEMPTS=50 ;; esac
 . "$SCRIPT_DIR/fm-supervision-engine-lib.sh"
 # shellcheck source=bin/fm-operational-input.sh
 . "$SCRIPT_DIR/fm-operational-input.sh"
+# shellcheck source=bin/fm-hooks-lib.sh
+. "$SCRIPT_DIR/fm-hooks-lib.sh"
 
 PAYLOAD=$(cat 2>/dev/null || true)
 [ -n "$PAYLOAD" ] || exit 0
@@ -279,6 +281,17 @@ fm_session_pid_valid "$OWNER_ID" || exit 0
 
 PARK_SEQ=
 claim_park || exit 0
+
+# Installed turn-end lifecycle hooks (docs/configuration.md "Lifecycle hooks")
+# run on every normal stop, after this stop has claimed the baton so an older
+# park stands down, and before any park of its own. A refusal becomes this
+# stop's one follow-up through the checked output path; a follow-up-driven stop
+# (loop_count > 0) never runs them, so hooks can never hold a turn open twice.
+# Absent hooks/turn-end.d this is one directory test.
+if [ "$LOOP_COUNT" -eq 0 ] && ! TURN_END_REASON=$(fm_hooks_turn_end "$PAYLOAD"); then
+  emit_followup turn-end-guard "TURN END HELD BY A LIFECYCLE HOOK - handle this before ending the turn:
+$TURN_END_REASON"
+fi
 
 # Cursor's own loop_limit is the outer ceiling; this inner one bites first so the
 # session is told once, loudly, instead of supervision going quiet unannounced.

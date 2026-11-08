@@ -30,6 +30,8 @@ _FM_MERGE_OUTCOME_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$_FM_MERGE_OUTCOME_LIB_DIR/fm-pr-lib.sh"
 # shellcheck source=bin/fm-parent-channel-lib.sh
 . "$_FM_MERGE_OUTCOME_LIB_DIR/fm-parent-channel-lib.sh"
+# shellcheck source=bin/fm-hooks-lib.sh
+. "$_FM_MERGE_OUTCOME_LIB_DIR/fm-hooks-lib.sh"
 
 # shellcheck disable=SC2034 # Public result consumed by sourcing callers.
 FM_MERGE_OUTCOME_ALREADY_RECORDED=false
@@ -111,5 +113,10 @@ fm_merge_outcome_report() {  # <home> <state> <task-id> <pr-url> <origin> [autho
   fm_lock_release "$lock"
   # Opt-in fleet activity ledger (docs/fleet-ledger.md); off costs one file test.
   [ ! -e "${FM_CONFIG_OVERRIDE:-$home/config}/fleet-ledger" ] || [ "$status" -ne 0 ] || FM_HOME=$home FM_STATE_OVERRIDE=$state "$_FM_MERGE_OUTCOME_LIB_DIR/fm-fleet-ledger.sh" merged "$id" pr "$FM_PR_URL" || true
+  # Lifecycle post-merge hooks (docs/configuration.md "Lifecycle hooks") fire
+  # once per newly recorded merge, whether this home merged it or its poll saw
+  # it land; a hook failure never changes the outcome.
+  [ "$status" -ne 0 ] || FM_HOME=$home fm_hooks_emit post-merge task_id="$id" pr_url="$url" \
+    sha="${FM_PR_MERGE_HEAD:-}" provider="$provider" >/dev/null || true
   return "$status"
 }
