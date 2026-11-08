@@ -262,6 +262,10 @@ fi
 # again: a missing field, an undelivered nonce, a Stop for another turn, or a
 # newer drain, which presents the same unacknowledged rows under a new ticket.
 ACK_TICKET="$STATE/.claude-autoarm-ack-ticket"
+# A hook-run acknowledgement that fails (error or timeout) is never silent: the
+# ticket stays for a retry and the error waits here for the next rewake to
+# report, because the harness discards a hook's output on exit 0.
+ACK_FAILURE="$STATE/.claude-autoarm-ack-failure"
 WAKE_DRAIN_TIMEOUT=120
 
 run_wake_drain() {  # [drain args...]
@@ -297,7 +301,7 @@ delivery_verdict() {  # <transcript> <nonce> <stop prompt id>
 }
 
 settle_ack_ticket() {
-  local claimed nonce ack generation verdict
+  local claimed nonce ack generation verdict ack_out ack_rc keep=0
   [ -f "$ACK_TICKET" ] && [ -n "$PROMPT_ID" ] && [ -r "$TRANSCRIPT" ] || return 0
   claimed="$ACK_TICKET.settling.$$"
   mv -f "$ACK_TICKET" "$claimed" 2>/dev/null || return 0
@@ -308,13 +312,22 @@ settle_ack_ticket() {
     verdict=$(delivery_verdict "$TRANSCRIPT" "$nonce" "$PROMPT_ID")
     case "$verdict" in
       handled)
-        run_wake_drain --ack-through "$ack" --recovery-generation "$generation" >/dev/null 2>&1 || true
+        ack_rc=0
+        ack_out=$(run_wake_drain --ack-through "$ack" --recovery-generation "$generation" 2>&1) || ack_rc=$?
+        if [ "$ack_rc" -ne 0 ]; then
+          keep=1
+          {
+            printf 'exit %s from bin/fm-wake-drain.sh --ack-through %s --recovery-generation %s\n' "$ack_rc" "$ack" "$generation"
+            printf '%s\n' "$ack_out" | head -n 20
+          } > "$ACK_FAILURE" 2>/dev/null || true
+        fi
         ;;
       superseded) ;;
       # Not yet received, or received by a later turn: keep it for a later
       # Stop, unless a newer drain has already replaced it.
-      *) ln "$claimed" "$ACK_TICKET" 2>/dev/null || true ;;
+      *) keep=1 ;;
     esac
+    [ "$keep" -eq 0 ] || ln "$claimed" "$ACK_TICKET" 2>/dev/null || true
   fi
   rm -f "$claimed" 2>/dev/null || true
 }
@@ -645,14 +658,23 @@ start_handling_successor() {  # <closed-arm-pid>
 # contract above when this payload can prove the receiving turn later;
 # otherwise the model runs the printed acknowledgement itself. Output past the
 # delivery bound (a live probe delivered 60 KB intact on Claude Code 2.1.311)
-# is left in a file for the model to read, and a drain that printed no
-# acknowledgement falls back to the model running the drain itself.
+# is left in a file for the model to read. A drain that printed output but no
+# acknowledgement still delivers that output, because it may hold status it
+# marked as shown; only a drain that printed nothing, or failed without
+# presenting any status, falls back to the model running the drain itself.
 CONTINUITY_NOTE='This Stop hook owns watcher continuity: when the handling turn ends, the next needed cycle arms automatically - do NOT run bin/fm-watch-arm.sh after an ordinary wake.'
 MODEL_DRAIN_LINE="Run bin/fm-wake-drain.sh first, handle the wake, then run its exact WAKE_ACK_REQUIRED --ack-through command. Until that post-handling acknowledgement, interruption leaves the wake durable for idempotent re-handling. $CONTINUITY_NOTE"
 DRAIN_DELIVERY_MAX=48000
 DRAIN_OVERFLOW="$STATE/.claude-autoarm-drain-output"
 deliver_inline_drain() {
-  local out='' line ack='' generation='' nonce ticket stale=0
+  local out='' line ack='' generation='' nonce ticket stale=0 drain_rc=0
+  # An acknowledgement this hook ran earlier and could not complete: say so
+  # before the drain, which presents any rows it left unacknowledged again.
+  if [ -s "$ACK_FAILURE" ]; then
+    printf 'The hook-run acknowledgement of an earlier drain failed, so those wakes may be presented again below; the failure was:\n'
+    cat "$ACK_FAILURE" 2>/dev/null || true
+    rm -f "$ACK_FAILURE" 2>/dev/null || true
+  fi
   # A ticket still waiting here has no proof its turn completed, perhaps
   # because the transcript format changed: this delivery leaves its
   # acknowledgement to the model rather than let unproven tickets keep rows
@@ -663,25 +685,39 @@ deliver_inline_drain() {
     rm -f "$ACK_TICKET" 2>/dev/null || true
   fi
   if out=$(mktemp "$STATE/.claude-autoarm-drain.XXXXXX"); then
-    run_wake_drain >"$out" 2>&1
+    run_wake_drain >"$out" 2>&1 || drain_rc=$?
     line=$(sed -n 's/^WAKE_ACK_REQUIRED:.* --ack-through \([0-9][0-9]*\) --recovery-generation \([A-Za-z0-9._-][A-Za-z0-9._-]*\)$/\1 \2/p' "$out" | tail -n 1)
     ack=${line%% *}
     generation=${line#* }
   else
     out=
   fi
-  if [ -z "$ack" ]; then
+  # Nothing worth keeping: the model runs the drain itself. Output of a failed
+  # drain is only an error unless it already presented unread status.
+  if [ -z "$out" ] || [ ! -s "$out" ] \
+    || { [ -z "$ack" ] && [ "$drain_rc" -ne 0 ] && ! grep -q '^UNREAD STATUS' "$out"; }; then
     [ -z "$out" ] || rm -f "$out" 2>/dev/null || true
     printf '%s\n' "$MODEL_DRAIN_LINE"
     return 0
   fi
+  # A drain can print status sections it marks as shown (UNREAD STATUS) yet no
+  # acknowledgement line, so captured output is never discarded for that alone.
   if [ "$(wc -c < "$out")" -gt "$DRAIN_DELIVERY_MAX" ] && mv -f "$out" "$DRAIN_OVERFLOW" 2>/dev/null; then
-    printf 'The wake drain already ran, but its output is too large to carry here: read %s in full, handle it, then run its exact WAKE_ACK_REQUIRED --ack-through command. Until that post-handling acknowledgement, interruption leaves the wake durable for idempotent re-handling. %s\n' "$DRAIN_OVERFLOW" "$CONTINUITY_NOTE"
+    if [ -n "$ack" ]; then
+      printf 'The wake drain already ran, but its output is too large to carry here: read %s in full, handle it, then run its exact WAKE_ACK_REQUIRED --ack-through command. Until that post-handling acknowledgement, interruption leaves the wake durable for idempotent re-handling. %s\n' "$DRAIN_OVERFLOW" "$CONTINUITY_NOTE"
+    else
+      printf 'The wake drain already ran, but its output is too large to carry here and printed no acknowledgement command: read %s in full and handle it, then run bin/fm-wake-drain.sh yourself for anything still queued. %s\n' "$DRAIN_OVERFLOW" "$CONTINUITY_NOTE"
+    fi
+    return 0
+  fi
+  if [ -z "$ack" ]; then
+    printf 'The wake drain already ran and its output follows (status it marks as shown is not printed again), but it printed no acknowledgement command: handle it, then run bin/fm-wake-drain.sh yourself for anything still queued. %s\n' "$CONTINUITY_NOTE"
+    cat "$out"
+    rm -f "$out" 2>/dev/null || true
     return 0
   fi
   nonce=fmwake-$(od -An -N8 -tx1 /dev/urandom 2>/dev/null | tr -d ' \n')
   if [ "$stale" -eq 0 ] && [ "${#nonce}" -eq 23 ] && [ -n "$PROMPT_ID" ] && [ -r "$TRANSCRIPT" ] \
-    && [ "$(wc -c < "$out")" -le "$DRAIN_DELIVERY_MAX" ] \
     && ticket=$(mktemp "$ACK_TICKET.tmp.XXXXXX") \
     && printf 'nonce=%s\nack=%s\ngeneration=%s\n' "$nonce" "$ack" "$generation" > "$ticket" \
     && mv -f "$ticket" "$ACK_TICKET"; then

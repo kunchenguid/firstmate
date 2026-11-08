@@ -251,13 +251,18 @@ epoch_outcome() {
 # records its actor in state/drain-ran, prints state/drain-fixture-output (one
 # wake row by default), and prints the generation-bound acknowledgement line on
 # stderr like the real drain; state/drain-no-ack suppresses that line. An
-# acknowledgement run records its arguments in state/drain-acks.
+# acknowledgement run records its arguments in state/drain-acks and fails with
+# a message when state/drain-ack-fail exists.
 write_drain_fixture() {
   local dir=$1
   cat > "$dir/bin/fm-wake-drain.sh" <<'SH'
 #!/usr/bin/env bash
 if [ "${1:-}" = --ack-through ]; then
   printf '%s\n' "$*" >> "$FM_HOME/state/drain-acks"
+  if [ -e "$FM_HOME/state/drain-ack-fail" ]; then
+    echo "wake drain: acknowledged wakes could not be consumed safely" >&2
+    exit 1
+  fi
   exit 0
 fi
 printf '%s\n' "${FM_SUPERVISION_ACTOR:-unset}" >> "$FM_HOME/state/drain-ran"
@@ -677,10 +682,70 @@ test_unprovable_inline_drain_keeps_the_model_acknowledgement() {
   : > "$dir/state/drain-no-ack"
   write_arm_fixture "$dir" actionable
   write_drain_fixture "$dir"
+  printf 'UNREAD STATUS (new since last drain, not re-printed after this presentation):\nfixture-task: done fixture-unread-line\n' \
+    > "$dir/state/drain-fixture-output"
+  out=$(run_autoarm "$dir" 2>/dev/null)
+  assert_contains "$out" "fixture-unread-line" \
+    "a drain that printed status but no acknowledgement must still deliver that status"
+  assert_not_contains "$out" "Run bin/fm-wake-drain.sh first" \
+    "a drain that printed output must not be discarded for the model-run fallback"
+  assert_absent "$dir/state/.claude-autoarm-ack-ticket" "a drain with no acknowledgement left a ticket"
+
+  dir=$(make_primary_dir "$TMP_ROOT/inline-drain-empty")
+  : > "$dir/state/task.meta"
+  : > "$dir/state/drain-no-ack"
+  : > "$dir/state/drain-fixture-output"
+  write_arm_fixture "$dir" actionable
+  write_drain_fixture "$dir"
   out=$(run_autoarm "$dir" 2>/dev/null)
   assert_contains "$out" "Run bin/fm-wake-drain.sh first, handle the wake, then run its exact WAKE_ACK_REQUIRED --ack-through command." \
-    "a drain that printed no acknowledgement must fall back to the model-run drain"
+    "a drain that printed nothing must fall back to the model-run drain"
   pass "auto-arm: an unprovable inline drain keeps the model-run acknowledgement"
+}
+
+# A hook-run acknowledgement that fails must not vanish: the ticket stays for a
+# retry on the same turn, and the next rewake reports the error.
+test_failed_hook_acknowledgement_is_kept_and_reported() {
+  local dir out transcript
+  dir=$(make_primary_dir "$TMP_ROOT/inline-drain-ack-fails")
+  transcript="$dir/transcript.jsonl"
+  : > "$dir/state/task.meta"
+  write_arm_fixture "$dir" actionable
+  write_drain_fixture "$dir"
+  append_transcript_user "$transcript" turn-1 "Supervise the fleet."
+  out=$(run_autoarm "$dir" "$(stop_payload turn-1 "$transcript")" 2>/dev/null)
+  [ -n "$(ack_ticket_nonce "$out")" ] || fail "rewake carried no ticket: $out"
+  append_transcript_user "$transcript" turn-2 "$out"
+  : > "$dir/state/drain-ack-fail"
+  rm -f "$dir/state/task.meta"
+  run_autoarm "$dir" "$(stop_payload turn-2 "$transcript")" >/dev/null 2>&1
+  [ "$(cat "$dir/state/drain-acks" 2>/dev/null)" = "--ack-through 7 --recovery-generation fixture-generation" ] \
+    || fail "the completed turn did not attempt the acknowledgement"
+  assert_present "$dir/state/.claude-autoarm-ack-ticket" "a failed acknowledgement dropped its ticket"
+
+  # The retry on the same turn succeeds and clears the ticket.
+  rm -f "$dir/state/drain-ack-fail" "$dir/state/drain-acks"
+  run_autoarm "$dir" "$(stop_payload turn-2 "$transcript")" >/dev/null 2>&1
+  [ "$(cat "$dir/state/drain-acks" 2>/dev/null)" = "--ack-through 7 --recovery-generation fixture-generation" ] \
+    || fail "the retry did not acknowledge the wakes"
+  assert_absent "$dir/state/.claude-autoarm-ack-ticket" "an acknowledged retry left its ticket"
+
+  # An unretried failure is reported by the next rewake.
+  : > "$dir/state/task.meta"
+  : > "$dir/state/drain-ack-fail"
+  append_transcript_user "$transcript" turn-5 "Supervise again."
+  out=$(run_autoarm "$dir" "$(stop_payload turn-5 "$transcript")" 2>/dev/null)
+  append_transcript_user "$transcript" turn-6 "$out"
+  rm -f "$dir/state/task.meta"
+  run_autoarm "$dir" "$(stop_payload turn-6 "$transcript")" >/dev/null 2>&1
+  : > "$dir/state/task.meta"
+  rm -f "$dir/state/drain-ack-fail"
+  append_transcript_user "$transcript" turn-7 "Another prompt."
+  out=$(run_autoarm "$dir" "$(stop_payload turn-7 "$transcript")" 2>/dev/null)
+  assert_contains "$out" "acknowledgement of an earlier drain failed" "the next rewake must report the failed acknowledgement"
+  assert_contains "$out" "acknowledged wakes could not be consumed safely" "the report must carry the acknowledgement error"
+  assert_contains "$out" "--ack-through 7 --recovery-generation fixture-generation" "the report must name the exact acknowledgement"
+  pass "auto-arm: a failed hook acknowledgement keeps its ticket and is reported"
 }
 
 test_actionable_close_with_live_successor_rewakes_once() {
@@ -2413,6 +2478,7 @@ test_inline_drain_is_acknowledged_after_the_receiving_turn
 test_mid_turn_delivery_is_acknowledged_by_its_turn
 test_interrupted_turn_leaves_the_drain_unacknowledged
 test_unprovable_inline_drain_keeps_the_model_acknowledgement
+test_failed_hook_acknowledgement_is_kept_and_reported
 test_actionable_close_with_live_successor_rewakes_once
 test_attached_cycle_end_starts_handling_successor
 test_unconfirmed_handling_successor_still_rewakes
