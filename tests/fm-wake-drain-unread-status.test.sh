@@ -537,3 +537,28 @@ test_routine_working_and_covered_done_stay_silent_on_the_empty_queue
 
 test_paged_notes_preserve_contiguous_receipts
 test_oversized_and_partial_notes_are_not_acknowledged
+
+# No pre-existing manifest: folding itself must never become proof of display.
+test_first_stdout_failure_cannot_seed_a_false_read_receipt() {
+  local dir state out fakebin real_cat
+  dir=$(make_case first-stdout-failure); state="$dir/state"; out="$dir/out"
+  printf 'note: evidence before the first manifest\n' > "$state/fresh.status"
+  fakebin="$dir/fakebin"; mkdir -p "$fakebin"
+  real_cat=$(command -v cat)
+  cat > "$fakebin/cat" <<'SH'
+#!/usr/bin/env bash
+case "${1:-}" in *.status-presentation.prepared.*) exit 1 ;; esac
+exec "$FM_TEST_REAL_CAT" "$@"
+SH
+  chmod +x "$fakebin/cat"
+  PATH="$fakebin:$PATH" FM_TEST_REAL_CAT="$real_cat" FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" 2>/dev/null || :
+  if grep -F 'fresh note: evidence before the first manifest' "$out" >/dev/null; then
+    fail 'stdout failure seam did not block presentation'
+  fi
+  [ "$(bash -c '. "$1"; status_presentation_cursor_offset "$2"' _ "$ROOT/bin/fm-classify-lib.sh" "$state/fresh.status")" -eq 0 ] \
+    || fail 'first failed stdout advanced the read receipt'
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" || fail 'retry after first stdout failure failed'
+  assert_grep 'fresh note: evidence before the first manifest' "$out" 'fold cache swallowed the failed first presentation'
+  pass 'failed first stdout cannot migrate a state-fold cache into a read receipt'
+}
+test_first_stdout_failure_cannot_seed_a_false_read_receipt
