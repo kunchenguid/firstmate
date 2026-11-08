@@ -2241,6 +2241,27 @@ test_forced_secondmate_preserves_child_scout_task_data() {
   pass "forced secondmate cleanup refuses before discarding child scout task data"
 }
 
+# A child scout whose recorded copy is already gone has no task data left to
+# lose and no slot to prove ownership of, so forced retirement proceeds.
+test_forced_secondmate_retires_child_scout_with_missing_copy() {
+  local case_dir home rc
+  case_dir=$(make_case secondmate-child-scout-missing-copy)
+  write_meta "$case_dir" local-only secondmate
+  home="$case_dir/secondmate-home"
+  mkdir -p "$home/state" "$home/data" "$home/config" "$home/projects"
+  printf '%s\n' task-x1 > "$home/.fm-secondmate-home"
+  printf '%s\n' "home=$home" >> "$case_dir/state/task-x1.meta"
+  fm_write_meta "$home/state/child-scout.meta" \
+    'window=firstmate:fm-child-scout' 'endpoint_task_id=child-scout' \
+    "worktree=$case_dir/child-scout-wt-gone" "project=$case_dir/project" 'kind=scout' 'mode=local-only'
+  add_treehouse_clean_fd "$case_dir"
+  if run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr"; then rc=0; else rc=$?; fi
+  expect_code 0 "$rc" "forced secondmate with a missing child scout copy should retire"
+  assert_no_grep 'slot-owner claim' "$case_dir/stderr" "missing child copy: ownership refusal on a gone path"
+  assert_absent "$case_dir/state/task-x1.meta" "missing child copy: parent record was not retired"
+  pass "forced secondmate retirement proceeds when a child scout's recorded copy is gone"
+}
+
 test_forced_secondmate_child_scout_nested_clone_returns_clean() {
   local case_dir home child_wt rc
   case_dir=$(make_case secondmate-child-nested-clean)
@@ -6559,6 +6580,7 @@ SH
 test_scout_task_data_requires_preservation
 test_scout_task_data_discard_flag
 test_forced_secondmate_preserves_child_scout_task_data
+test_forced_secondmate_retires_child_scout_with_missing_copy
 test_hidden_untracked_work_refuses_before_return
 test_content_fallback_git_capability_boundary
 test_work_written_at_reap_boundary_is_preserved

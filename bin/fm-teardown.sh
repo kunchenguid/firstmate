@@ -3341,7 +3341,7 @@ preflight_descendant_treehouse_slots() {
 }
 
 validate_firstmate_home_children_removal() {
-  local home=$1 sub_state child_meta child_id child_wt child_proj child_kind child_home child_backend child_orca_worktree_id child_owner_rc
+  local home=$1 sub_state child_meta child_id child_wt child_proj child_kind child_home child_backend child_orca_worktree_id child_owner_rc child_owner_err
   sub_state="$home/state"
   [ -d "$sub_state" ] || return 0
   for child_meta in "$sub_state"/*.meta; do
@@ -3373,11 +3373,16 @@ validate_firstmate_home_children_removal() {
     fi
     if [ "$child_kind" = scout ]; then
       child_owner_rc=0
-      require_owned_worktree_slot_record "$child_id" "$child_wt" || child_owner_rc=$?
+      child_owner_err=
+      child_proj=$(meta_value "$child_meta" project)
+      if [ "$DISCARD_SCOUT_DATA" != 1 ] && [ -n "$child_wt" ] && [ -d "$child_wt" ] \
+          && fm_treehouse_pool_slot "$child_proj" "$child_wt"; then
+        child_owner_err=$(require_owned_worktree_slot_record "$child_id" "$child_wt" 2>&1) || child_owner_rc=$?
+      fi
       case "$child_owner_rc" in
         0) teardown_require_scout_data_preserved "$child_id" "$child_wt" "$DATA/$ID/children/$child_id" || return 1 ;;
         "$TEARDOWN_SLOT_REASSIGNED_RC") ;; # Never inspect a new owner's data.
-        *) return 1 ;;
+        *) printf '%s\n' "$child_owner_err" >&2; return 1 ;;
       esac
     fi
   done
