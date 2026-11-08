@@ -103,6 +103,7 @@ drain=$("$FM_REPO/bin/fm-wake-drain.sh" 2>&1)
 printf '%s\n' "$drain" > "$FM_HOME/engine-drain.$n"
 ack=$(printf '%s\n' "$drain" | sed -n 's/^WAKE_ACK_REQUIRED: after handling completes run bin\/fm-wake-drain.sh //p' | tail -1)
 task=$(sed -n 's/^tasks=//p' "$STATE/.supervision-host-turn" | awk '{ print $1 }')
+[ ! -s "$FM_HOME/stub-task" ] || task=$(cat "$FM_HOME/stub-task")
 [ -n "$task" ] || task=fleet
 verdict=routine
 [ "$mode" != go-away ] || verdict=captain

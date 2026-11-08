@@ -175,6 +175,39 @@ test_attended_finished_scout_reaches_main_as_captain() {
   pass "host: attended, a finished scout's report reaches main as captain even when the branch reports it routine"
 }
 
+# Completion delivery is the contract: even a heartbeat with no task rows must
+# produce a captain outcome and an actionable close after deleting the scout.
+test_heartbeat_finished_scout_reaches_main_after_cleanup() {
+  local home
+  home=$(make_home heartbeat-scout attended)
+  printf 'kind=scout\n' >> "$home/state/demo.meta"
+  append_status "$home" 'report written; next round is yours' 'done'
+  # The task signal was already surfaced. Leave the independent heartbeat
+  # backstop unsurfaced so the real watcher finds the completion on its scan.
+  bash -c '
+    . "$1/bin/fm-wake-lib.sh"
+    . "$1/bin/fm-classify-lib.sh"
+    marker=$(fm_wake_signal_seen_path "$2/state" "$2/state/demo.status")
+    sig=$(fm_wake_signal_sig "$2/state/demo.status")
+    status_presentation_marker_report "$marker" "$sig"
+  ' _ "$ROOT" "$home" || fail "heartbeat: could not seed the surfaced signal"
+  echo cleanup > "$home/stub-mode"
+  echo demo > "$home/stub-task"
+  FM_HEARTBEAT=1 start_host "$home"
+  wait_until_deadline 60 host_exited "$home" \
+    || fail "heartbeat: the completed scout's report never woke main"
+  assert_re '^(arg=)?FIRSTMATE SUPERVISION WAKE: heartbeat' "$home/engine-call.1" \
+    "fixture: the completion must be found by a heartbeat"
+  assert_absent "$home/state/demo.meta" "fixture: the engine must clean up the scout before reporting"
+  assert_absent "$home/state/demo.status" "fixture: cleanup must remove the completion evidence"
+  assert_grep '"task":"demo"' "$home/state/branch-outcomes.jsonl" "the heartbeat must report the scout"
+  assert_grep '"verdict":"captain","summary":"stub handled demo","silent":false' "$home/state/branch-outcomes.jsonl" \
+    "a finished scout discovered by heartbeat must be promoted"
+  assert_re '^supervision-host: branch-outcome: .*\(store rows 1\)' "$home/host.out" \
+    "the heartbeat's promoted outcome must wake main"
+  pass "host: a heartbeat discovers a finished scout and wakes main after cleanup removes its records"
+}
+
 test_captain_leaving_mid_turn_keeps_its_captain_outcome_for_the_return() {
   local home drained
   home=$(make_home attended-go-away attended)
@@ -941,6 +974,7 @@ fm_test_run \
   test_engine_in_another_time_zone_handles_its_granted_rows \
   test_attended_captain_outcome_reaches_main_through_branch_outcomes \
   test_attended_finished_scout_reaches_main_as_captain \
+  test_heartbeat_finished_scout_reaches_main_after_cleanup \
   test_captain_leaving_mid_turn_keeps_its_captain_outcome_for_the_return \
   test_quiet_record_without_its_daemon_is_a_present_captain \
   test_attended_main_only_close_passes_straight_to_main \

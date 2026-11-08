@@ -1023,8 +1023,17 @@ health_record() {  # <engine-error 0|1> <reports>
 
 # The cleanup of a finished scout removes the records that show it finished,
 # so the turn captures them before the branch acts.
-finished_scouts() {  # <task>... -> the scouts among them whose last status is done
-  local task verb out=
+finished_scouts() {  # <unscoped 0|1> <task>... -> completed scouts in the turn's scope
+  local unscoped=$1 task meta verb out=
+  shift
+  if [ "$unscoped" = 1 ]; then
+    set --
+    for meta in "$STATE"/*.meta; do
+      [ -f "$meta" ] || continue
+      task=${meta##*/}
+      set -- "$@" "${task%.meta}"
+    done
+  fi
   for task in "$@"; do
     grep -qx kind=scout "$STATE/$task.meta" 2>/dev/null || continue
     status_line_verb "$(last_status_line "$STATE/$task.status")" verb
@@ -1105,7 +1114,7 @@ handle_wake() {  # <reason-lines>
   : > "$RECEIPTS"
   # shellcheck disable=SC2086 # tasks is a space-separated list of task ids.
   printf 'turn=%s\nrows=%s\ntasks=%s\nunscoped=%s\nwake=%s\nposture=%s\nfinished_scouts=%s\n' \
-    "$turn" "$rows" "$tasks" "${unscoped:-0}" "$first" "$TURN_POSTURE" "$(finished_scouts $tasks)" > "$TURN_FILE"
+    "$turn" "$rows" "$tasks" "${unscoped:-0}" "$first" "$TURN_POSTURE" "$(finished_scouts "${unscoped:-0}" $tasks)" > "$TURN_FILE"
   readback=
   if [ "$TURN_POSTURE" = away ]; then
     readback=$(mktemp "$STATE/.supervision-host-readback.XXXXXX") || readback=
