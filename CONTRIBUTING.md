@@ -13,7 +13,6 @@ A GitHub Actions check (`Require no-mistakes`) runs on PRs targeting `main` and 
 The attestation must bind to the current PR head commit and report the review, test, and document steps as completed, so a stale attestation, a missing `head_sha`, or a skipped required step fails.
 It evaluates every PR opening and body edit independently, reruns after head synchronization or reopening, and prevents a later edit from replacing an earlier pending compliance check.
 GitHub Actions and Dependabot are exempt so their automation keeps working, but other contributor PRs that do not satisfy the attestation contract will not be reviewed or merged.
-After a head change, the owning no-mistakes run must publish an attestation for the final head through its supported delivery flow; rerunning the GitHub check alone cannot refresh an older attestation.
 
 ## Workflow
 
@@ -39,12 +38,6 @@ Until then the `Full suite` check fails with a message naming the label; that is
 Adding the label runs the full suite, and every later push to that pull request runs it again.
 This keeps the repository's public CI within GitHub's limit on jobs running at once, while no-mistakes already reviews, tests, and lints your change locally.
 Pull requests from this repository's own branches or from authors with write access run the full suite without the label.
-
-GitHub may separately require maintainer approval before running workflows from a fork.
-A run marked `action_required` with no jobs has not executed the checks; a maintainer must approve the workflows in GitHub Actions, in addition to adding `full-ci` when required.
-Neither approval nor a current-head attestation can be supplied by changing source files or weakening the workflow checks.
-When both checks are blocked, finish any local fixes first, let the owning no-mistakes run publish the final head and its matching attestation, then have a maintainer approve the workflows for that head and add `full-ci` if absent.
-Confirm that the resulting runs actually execute and pass; `action_required` and skipped behavior lanes are not full-validation evidence.
 
 See the [no-mistakes quick start](https://kunchenguid.github.io/no-mistakes/start-here/quick-start/) for the full first-run walkthrough.
 
