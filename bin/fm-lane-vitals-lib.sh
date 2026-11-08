@@ -12,7 +12,7 @@
 # replaces /sys for every Linux read; every other source is a command found on
 # PATH (uname, sysctl, vm_stat, pmset, ioreg, ps, lsof, df, du, nvidia-smi,
 # powershell.exe), so a fake bin directory drives the macOS, WSL, and native
-# Windows (Git Bash/MSYS, where uname -s is MINGW*/MSYS*/CYGWIN*) paths.
+# Windows (Git Bash/MSYS, where uname -s is MINGW*/MSYS*) paths.
 #
 # fm_lane_vitals_probe <os>
 #   Sets LV_LOAD5, LV_PSI_CPU10, LV_PSI_MEM10, LV_PSI_MEM60, LV_PSI_MEMFULL10,
@@ -91,7 +91,7 @@ fm_lane_vitals_probe() {  # <os>
   LV_LOAD5='' LV_PSI_CPU10='' LV_PSI_MEM10='' LV_PSI_MEM60='' LV_PSI_MEMFULL10=''
   LV_PSI_IO10='' LV_PSI_IO60='' LV_SWAPIN='' LV_VMPRESS='' LV_ON_AC='' LV_BATT_PCT=''
   LV_THERMAL='' LV_WSL=0 LV_WINDOWS=0 LV_GPU=''
-  case "$os" in MINGW*|MSYS*|CYGWIN*) LV_WINDOWS=1 ;; esac
+  case "$os" in MINGW*|MSYS*) LV_WINDOWS=1 ;; esac
   if [ "$os" = Darwin ]; then
     v=$(sysctl -n vm.loadavg 2>/dev/null | tr -d '{}' | awk '{print $2}')
     _fm_lv_num "$v" && LV_LOAD5=$v

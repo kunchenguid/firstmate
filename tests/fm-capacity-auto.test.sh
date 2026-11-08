@@ -480,8 +480,15 @@ test_admission_honours_the_damped_budget() {
   rc=0
   out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" "$CAPACITY" --admit 2>&1) || rc=$?
   expect_code 75 "$rc" "a third spawn after a damped budget of 2 must be deferred: $out"
-  assert_equals '[0,3,2,true]' "$(json "$home" "$fakebin" '[.budget.open, .budget.raw, .budget.young, .budget.damped]')" \
+  assert_contains "$out" 'damped: 2 lanes started since the last publish against a published budget of 2' \
+    "the deferral must blame the damped budget, not a resource that still has room"
+  assert_not_contains "$out" 'cpu: load' "the deferral must not describe a resource with room as the constraint"
+  assert_equals '[0,3,2,true,"damped",false,["damped: 2 lanes started since the last publish against a published budget of 2"]]' \
+    "$(json "$home" "$fakebin" '[.budget.open, .budget.raw, .budget.young, .budget.damped, .budget.binding, .verdict.admit, .verdict.reasons]')" \
     "two lanes started since the publish must use up the damped budget although the raw budget has room"
+  out=$(run_cap "$home" "$fakebin")
+  assert_contains "$out" 'free_lanes=0 reason=damped ' "the report must name the damped budget as the reason"
+  assert_contains "$out" 'Constrained: damped - hold new dispatch until it clears.' "the hold line must name the damped budget"
   run_cap "$home" "$fakebin" --publish >/dev/null
   assert_equals '[2,3]' "$(jq -c '[.verdict.free_lanes, .budget.raw]' "$home/state/lane-capacity.json")" \
     "the next publish must grow by 2 net of the lanes started since the previous one"

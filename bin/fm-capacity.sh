@@ -155,13 +155,16 @@
 #   never below 0. Memory is the one probe the budget cannot do without: with
 #   no memory reading it never admits on cpu alone, the budget is the static
 #   max-lanes ceiling alone (or 0 without one), and the verdict's reasons say
-#   so. On native Windows (Git Bash/MSYS, uname MINGW*/MSYS*/CYGWIN*) the
+#   so. On native Windows (Git Bash/MSYS, uname MINGW*/MSYS*) the
 #   Windows host view below is the memory, cores, load, and power probe, since
 #   the Cygwin /proc carries none of them.
 #   Free lanes grow by at most 2 per publish over the previously published
 #   verdict, less the lanes started on this machine since that publish; between
 #   publishes --admit, --spawn-gate, --json, and the report allow no growth at
 #   all, so a burst of spawns can never exceed the published damped budget.
+#   When that damping alone leaves nothing open while the resources still have
+#   room, the verdict names "damped" (lanes started since the last publish
+#   against the published budget) rather than a resource.
 #   Gates close admission at once and reopen only after their reopen test holds
 #   on 3 consecutive publishes; an unmeasurable gate is unknown and not judged:
 #     cpu             load1/cores >= 1; reopens < 0.8 with load5/cores < 0.85
@@ -198,7 +201,8 @@
 #   open|closed|unknown, since_epoch, clear_count}], and reclaim [{id, class,
 #   idle_s, mem_gb, cpu_pct, evidence[], next cleanup|recover|retire-pane|
 #   review}]. The report line appends mode=auto budget=<lanes>, and reason
-#   names the closed gates, the binding resource when nothing is open, or ok.
+#   names the closed gates, the binding resource (or damped) when nothing is
+#   open, or ok.
 #   GPU never counts unless min-gpu-free-gb is set: agent workers do not use it.
 #
 # Environment: FM_HOME, FM_STATE_OVERRIDE, FM_CONFIG_OVERRIDE, and
@@ -437,7 +441,7 @@ fi
 # --- host probes ------------------------------------------------------------
 os=$(uname -s 2>/dev/null) || os=unknown
 windows=0
-case "$os" in MINGW*|MSYS*|CYGWIN*) windows=1 ;; esac
+case "$os" in MINGW*|MSYS*) windows=1 ;; esac
 
 load1=unknown
 if [ "$os" = Darwin ]; then
@@ -822,14 +826,16 @@ def dur: if . == null then "?" elif . >= 86400 then "\(. / 86400 | floor)d" elif
 | ($closed | map("\(.name): \(.what)" + (if .clear_count > 0 then " (clearing \(.clear_count) of \($reopen))" else "" end))) as $gate_reasons
 | (if $measurable or ($closed | length) > 0 then [] elif $bind == null then ["memory unmeasurable: no memory probe, and no max-lanes ceiling to fall back on"]
    else ["memory unmeasurable: admitting up to the static max-lanes ceiling only"] end) as $unmeasured_reasons
+| (($closed | length) == 0 and $open == 0 and $raw > 0) as $damped_out
 | (if ($closed | length) > 0 or $open > 0 or ($measurable | not) then []
+   elif $damped_out then ["damped: \($since_publish) lanes started since the last publish against a published budget of \($prev_free)"]
    else [ (if $bind.key == "memory" then "memory: \($avail | n2) GB available, \($min_avail | r2) GB kept, \($young) starting, a lane needs \($fp.mem_gb) GB"
       elif $bind.key == "cpu" then "cpu: load \($cpu_load | n2) of \($cores * 0.85 | r2) usable on \($cores) cores, \($young) starting, a lane needs \($fp.cpu_cores) core"
       elif $bind.key == "disk" then "disk: \($dbind.label) \($dbind.free_gb | n2) GB free, \($min_disk) GB kept, \($young) starting, a lane needs \($fp.disk_gb) GB"
       else "ceiling: \($mlanes) of \($cfg.max_lanes) lanes on this machine (max-lanes)" end) ] end) as $budget_reasons
 | ($unmeasured_reasons + (if $measurable or ($closed | length) > 0 or $open > 0 or $bind == null then []
    else ["ceiling: \($mlanes) of \($cfg.max_lanes) lanes on this machine (max-lanes)"] end)) as $unmeasured_reasons
-| (if ($closed | length) > 0 then ($closed | map(.name)) elif $open > 0 then ["ok"]
+| (if ($closed | length) > 0 then ($closed | map(.name)) elif $open > 0 then ["ok"] elif $damped_out then ["damped"]
    elif $bind == null then ["unmeasurable"] else [$bind.key] end) as $names
 | ($own | map(. as $l | $ll[$l.id] as $e
     | (if $e.quiet_since == null then 0 else $now - $e.quiet_since end) as $q
@@ -856,7 +862,7 @@ def dur: if . == null then "?" elif . >= 86400 then "\(. / 86400 | floor)d" elif
    free_lanes: (if ($closed | length) == 0 then $open else 0 end),
    names: $names, reasons: ($gate_reasons + $unmeasured_reasons + $budget_reasons),
    doc: {budget: {lanes: ($mlanes + $open), open: $open, raw: $raw, machine_lanes: $mlanes, by: $by,
-           binding: (if ($closed | length) > 0 then "gate" elif $bind == null then "unmeasurable" else $bind.key end),
+           binding: (if ($closed | length) > 0 then "gate" elif $damped_out then "damped" elif $bind == null then "unmeasurable" else $bind.key end),
            young: $young, damped: ($open < $raw),
            notes: (($notes | split("\n") | map(select(. != "")))
              + (if $attr_ok and ($own | length) > 0 and ([ $own[] | select($ll[.id].procs == 0) ] | length) * 2 > ($own | length)
