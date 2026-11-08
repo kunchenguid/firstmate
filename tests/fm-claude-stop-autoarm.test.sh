@@ -123,6 +123,35 @@ printf 'stale: fixture-win actionable\n'
 exit 0
 SH
       ;;
+    singleton-actionable)
+      # Models one real watcher cycle against a wake queue that is never empty:
+      # it refuses to overlap another live watcher, refreshes the liveness
+      # beacon, and closes at once with an actionable wake, exactly as
+      # bin/fm-watch-arm.sh does when a queued wake is waiting.
+      cat >> "$dir/bin/fm-watch-arm.sh" <<'SH'
+if ! (set -C; : > "$FM_HOME/state/watcher-live") 2>/dev/null; then
+  : > "$FM_HOME/state/watcher-overlap"
+fi
+printf 'pending:downtime:fixture-generation\n' > "$FM_HOME/state/.watcher-down"
+touch "$FM_HOME/state/.last-watcher-beat"
+date +%s >> "$FM_HOME/state/watcher-beats"
+printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+printf 'signal: task.status done: fixture wake\n'
+rm -f "$FM_HOME/state/watcher-live"
+exit 0
+SH
+      ;;
+    actionable-unbound)
+      # An actionable close whose recovery marker is not a downtime record, so
+      # its rewake cannot bind to a recovery generation and is never committed.
+      cat >> "$dir/bin/fm-watch-arm.sh" <<'SH'
+printf 'acked:handling:fixture-generation\n' > "$FM_HOME/state/.watcher-down"
+touch "$FM_HOME/state/.last-watcher-beat"
+printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+printf 'stale: fixture-win actionable\n'
+exit 0
+SH
+      ;;
     failed)
       cat >> "$dir/bin/fm-watch-arm.sh" <<'SH'
 printf 'watcher: FAILED - no live watcher with a fresh beacon\n'
@@ -274,6 +303,12 @@ os.execv(sys.argv[1], sys.argv[1:])
 watcher_identity() {
   local dir=$1 pid=$2
   FM_STATE_OVERRIDE="$dir/state" bash -c '. "$1"; fm_pid_identity "$2"' _ "$dir/bin/fm-wake-lib.sh" "$pid"
+}
+
+beacon_age() {
+  local dir=$1
+  FM_STATE_OVERRIDE="$dir/state" bash -c '. "$1"; fm_path_age "$2"' _ \
+    "$dir/bin/fm-wake-lib.sh" "$dir/state/.last-watcher-beat"
 }
 
 record_watcher_lock() {
@@ -776,21 +811,85 @@ test_unverified_clean_close_exhausts_retries() {
   pass "auto-arm: unverified clean close exhausts retries and fails closed"
 }
 
-test_post_alarm_actionable_close_is_suppressed() {
+# A committed actionable close is positive proof that the automatic mechanism
+# works: the arm reached a watcher, that watcher ran a cycle, and it produced a
+# real supervision wake. It must therefore be delivered and end the failure
+# episode, exactly as a verified live watcher does. Suppressing it instead
+# swallowed every wake for as long as closes stayed actionable, because the
+# episode's only clearing path in this hook runs on the non-actionable branch.
+test_post_alarm_actionable_close_delivers_and_ends_the_episode() {
   local dir out status
   dir=$(make_primary_dir "$TMP_ROOT/post-alarm-actionable")
   : > "$dir/state/task.meta"
   : > "$dir/state/.claude-autoarm-failure-notified"
   : > "$dir/state/.claude-autoarm-failure-alarmed"
+  printf 'session=sess-autoarm\ncount=4\nepoch=9\n' > "$dir/state/.turnend-claude-blocks"
   write_arm_fixture "$dir" actionable
   out=$(run_autoarm "$dir" 2>/dev/null); status=$?
-  expect_code 0 "$status" "an actionable result after attended fail-open must not continue"
-  assert_contains "$out" "suppressed continuation" "a suppressed post-alarm result did not carry its one-line reason: $out"
-  assert_not_contains "$out" "automatic supervision mechanism is broken" "post-alarm result repeated the operator notice: $out"
-  assert_present "$dir/state/.claude-autoarm-failure-notified" "post-alarm actionable result cleared the failure notice"
-  assert_present "$dir/state/.claude-autoarm-failure-alarmed" "post-alarm actionable result cleared the attended alarm"
-  [ "$(epoch_outcome "$dir")" = failed-suppressed ] || fail "post-alarm actionable result must record failed-suppressed"
-  pass "auto-arm: post-alarm actionable outcomes cannot continue or reset failure state"
+  expect_code 2 "$status" "an actionable result after the attended fail-open must still reach the model"
+  assert_contains "$out" "one supervision event needs a handling turn now" "post-alarm actionable close lost its rewake banner: $out"
+  assert_contains "$out" "stale: fixture-win actionable" "post-alarm rewake banner lost its wake line: $out"
+  assert_not_contains "$out" "suppressed continuation" "a delivered post-alarm wake was still described as suppressed: $out"
+  assert_absent "$dir/state/.claude-autoarm-failure-notified" "positive actionable recovery left the failure notice"
+  assert_absent "$dir/state/.claude-autoarm-failure-alarmed" "positive actionable recovery left the attended alarm"
+  assert_absent "$dir/state/.turnend-claude-blocks" "positive actionable recovery left the block budget"
+  [ "$(epoch_outcome "$dir")" = rewake ] || fail "post-alarm actionable result must record rewake, got: $(epoch_outcome "$dir")"
+  pass "auto-arm: an actionable close after the attended fail-open is delivered and ends the episode"
+}
+
+# Only a COMMITTED rewake is positive recovery. An actionable close whose rewake
+# cannot be committed delivers nothing, so an already-alarmed episode must stay
+# suppressed and keep its markers rather than restart automatic continuation.
+test_post_alarm_uncommitted_actionable_close_stays_suppressed() {
+  local dir out status
+  dir=$(make_primary_dir "$TMP_ROOT/post-alarm-unbound")
+  : > "$dir/state/task.meta"
+  : > "$dir/state/.claude-autoarm-failure-notified"
+  : > "$dir/state/.claude-autoarm-failure-alarmed"
+  write_arm_fixture "$dir" actionable-unbound
+  out=$(run_autoarm "$dir" 2>/dev/null); status=$?
+  expect_code 0 "$status" "an uncommitted actionable result after the attended fail-open must not continue"
+  assert_present "$dir/state/.claude-autoarm-failure-notified" "an uncommitted actionable result cleared the failure notice"
+  assert_present "$dir/state/.claude-autoarm-failure-alarmed" "an uncommitted actionable result cleared the attended alarm"
+  [ "$(epoch_outcome "$dir")" = failed-suppressed ] || fail "an uncommitted post-alarm actionable result must record failed-suppressed, got: $(epoch_outcome "$dir")"
+  pass "auto-arm: an uncommitted actionable close cannot end an alarmed episode"
+}
+
+# The chain-freeze regression. A home whose wake queue never empties gets an
+# actionable close from every cycle, never a non-actionable close with a live
+# parked watcher, so no idle interval can clear the episode on the model's
+# behalf. Markers left by an earlier, finished episode used to swallow every one
+# of those wakes, and with no rewake no further Stop fired. Ten consecutive Stop
+# events must each deliver one rewake, run one arm, keep one watcher live at a
+# time with an advancing beacon, and end the stale episode on the first event.
+test_stale_alarm_cannot_freeze_the_stop_owned_chain() {
+  local dir out status i arms beats age
+  dir=$(make_primary_dir "$TMP_ROOT/chain-freeze")
+  : > "$dir/state/task.meta"
+  : > "$dir/state/.claude-autoarm-failure-notified"
+  : > "$dir/state/.claude-autoarm-failure-alarmed"
+  write_arm_fixture "$dir" singleton-actionable
+  for i in 1 2 3 4 5 6 7 8 9 10; do
+    # Backdate the beacon before every event, so only a cycle that genuinely
+    # ran its watcher can leave a fresh one behind.
+    touch -t 202001010000 "$dir/state/.last-watcher-beat"
+    out=$(run_autoarm "$dir" 2>/dev/null); status=$?
+    [ "$status" -eq 2 ] || fail "Stop event $i did not continue the chain (exit $status): $out"
+    assert_contains "$out" "signal: task.status done: fixture wake" "Stop event $i lost its wake line: $out"
+    [ "$(epoch_outcome "$dir")" = rewake ] || fail "Stop event $i recorded $(epoch_outcome "$dir") instead of rewake"
+    age=$(beacon_age "$dir")
+    [ "$age" -lt 300 ] || fail "Stop event $i left a stale beacon (${age}s), so its cycle skipped the watcher"
+    if [ "$i" -eq 1 ]; then
+      assert_absent "$dir/state/.claude-autoarm-failure-alarmed" "the first delivered wake did not end the stale episode"
+      assert_absent "$dir/state/.claude-autoarm-failure-notified" "the first delivered wake left the stale failure notice"
+    fi
+  done
+  arms=$(wc -l < "$dir/state/arm-ran" | tr -d ' ')
+  [ "$arms" -eq 10 ] || fail "expected exactly one foreground arm per Stop event, got $arms"
+  beats=$(wc -l < "$dir/state/watcher-beats" | tr -d ' ')
+  [ "$beats" -eq 10 ] || fail "expected one watcher beat per Stop event, got $beats"
+  assert_absent "$dir/state/watcher-overlap" "two watchers were live at the same time"
+  pass "auto-arm: 10 consecutive actionable Stop events keep one live watcher and an advancing beat despite stale alarm markers"
 }
 
 test_benign_cycle_end_with_live_watcher_is_silent() {
@@ -2354,7 +2453,9 @@ test_failed_close_rewakes_with_failure_banner
 test_failed_cycles_notify_once_and_keep_retrying
 test_failure_notice_marker_write_refuses_delivery_and_retries
 test_unverified_clean_close_exhausts_retries
-test_post_alarm_actionable_close_is_suppressed
+test_post_alarm_actionable_close_delivers_and_ends_the_episode
+test_post_alarm_uncommitted_actionable_close_stays_suppressed
+test_stale_alarm_cannot_freeze_the_stop_owned_chain
 test_benign_cycle_end_with_live_watcher_is_silent
 test_positive_recovery_budget_contention_preserves_episode
 test_owner_mutex_contention_preserves_failure_episode_reset

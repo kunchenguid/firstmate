@@ -91,6 +91,7 @@ If a session exits mid-cycle and leaves an orphaned auto-arm hook, the replaceme
 While supervision is still needed and away mode remains inactive, an actionable close wakes the idle session through exit 2.
 StopFailure-driven continuations are paced rather than dropped during persistent API errors; after waiting, the hook stands down silently if away mode appeared or supervision is no longer needed.
 The script header owns the storm-bound mechanics, [configuration](configuration.md#environment-variables) lists the cooldown override, and [StopFailure verification](verification/supervision.md#stopfailure-auto-arm) records the Herdr-hosted evidence and deterministic regression entry point.
+A stale attended alarm left by an earlier failure episode cannot suppress that wake; [`turnend-guard.md`](turnend-guard.md#failure-progression-and-block-budget) owns why its committed rewake ends the episode.
 
 ### Claude session-lock ownership
 
@@ -540,6 +541,7 @@ It checks that a newly appended keyed decision is classified without rereading e
 - Benign live-watcher cycle ends.
 - One-notice failure episodes.
 - Exit-2 translation.
+- Post-alarm actionable delivery that ends a stale failure episode, its uncommitted-rewake negative control, and ten continuously actionable Stop events that keep one live watcher with an advancing beacon.
 - The handling successor an ended attached cycle starts with the closed arm as its predecessor and that outlives the rewake.
 - An unconfirmed successor reported in the banner without withholding the wake.
 - The [session-bound HUP/TERM/INT failure handoff](turnend-guard.md#failure-progression-and-block-budget) and replacement-session notice isolation.

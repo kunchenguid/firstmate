@@ -91,7 +91,10 @@
 #     ledger write; the failure notice additionally requires its marker write.
 #     A refused generation exits 0 silently even after printing. A close that
 #     reports no actionable reason is benign when a live identity-matched
-#     watcher still has a fresh beacon.
+#     watcher still has a fresh beacon. An actionable close is decided before
+#     the attended-alarm suppression below: its committed rewake is positive
+#     recovery and ends the failure episode, so a stale alarm can suppress
+#     only an uncommitted rewake or a non-actionable close.
 #   - Failure handling: a typed failure is rechecked against the same live,
 #     fresh watcher predicate and retried a bounded number of times in this
 #     hook. Only an exhausted failure with no verified watcher emits one
@@ -130,7 +133,8 @@
 # epoch. The failure marker
 # state/.claude-autoarm-failure-notified deduplicates the last-resort notice,
 # and state/.claude-autoarm-failure-alarmed bounds the attended fail-open and
-# suppresses any later automatic continuation in that unresolved episode.
+# suppresses any later automatic failure continuation in that unresolved
+# episode, until a verified healthy watcher or a committed rewake ends it.
 #
 # In hook mode it never blocks the Stop decision itself or prints to stdout:
 # exit 0 is silent, and exit 2 carries the rewake banner on stderr.
@@ -715,15 +719,23 @@ if [ "$HEALTHY" -eq 1 ]; then
   autoarm_exit_suppressed 'firstmate watcher auto-arm could not clear the resolved failure episode - a verified healthy watcher is running, but the episode reset was refused'
 fi
 
-# After either alarm writer has consumed the episode's attended fail-open,
-# do not create another exit-2 continuation that could defeat it.
-if [ -e "$FAILURE_ALARM" ]; then
+# Exit without a continuation once either alarm writer has consumed the
+# episode's attended fail-open, so no later exit 2 can defeat it.
+autoarm_exit_if_alarmed() {
+  [ -e "$FAILURE_ALARM" ] || return 0
   printf 'firstmate watcher auto-arm suppressed - the attended failure alarm is already committed for this episode, so this suppressed continuation emits no further rewake.\n' >&2
   autoarm_record failed-suppressed
   [ -z "$OUT" ] || rm -f "$OUT" 2>/dev/null || true
   exit 0
-fi
+}
 
+# An actionable close is decided BEFORE that alarm suppression, because a
+# committed rewake is positive recovery: the arm reached a watcher, the watcher
+# ran a cycle, and the wake it produced is being delivered. The actionable
+# break above skips the healthy-watcher recheck, so the HEALTHY reset is
+# unreachable while closes stay actionable, and checking the alarm first let a
+# stale episode swallow every later wake. Only a committed rewake ends the
+# episode; an uncommitted one is still suppressed by an alarmed episode.
 if [ "$ACTIONABLE" -eq 1 ]; then
   # Cheap early-out before composing the banner; the real commit decision is
   # the owned terminal write below.
@@ -750,9 +762,14 @@ if [ "$ACTIONABLE" -eq 1 ]; then
     printf 'Run bin/fm-wake-drain.sh first, handle the wake, then run its exact WAKE_ACK_REQUIRED --ack-through command. Until that post-handling acknowledgement, interruption leaves the wake durable for idempotent re-handling. This Stop hook owns watcher continuity: when the handling turn ends, the next needed cycle arms automatically - do NOT run bin/fm-watch-arm.sh after an ordinary wake.\n'
   } >&2
   if autoarm_commit rewake; then
+    # End the failure episode only after the winning commit, so a superseded
+    # owner never mutates it. A refused or contended reset leaves it for the
+    # next committed rewake or verified healthy watcher; the wake still goes.
+    fm_autoarm_reset_owned "$STATE" "$MY_GEN" >/dev/null 2>&1 || true
     [ -z "$OUT" ] || rm -f "$OUT" 2>/dev/null || true
     exit 2
   fi
+  autoarm_exit_if_alarmed
   if [ "$HOST_MODE" -eq 1 ] && fm_autoarm_still_owner "$STATE" "$MY_GEN" \
     && fm_recovery_marker_snapshot "$STATE/.watcher-down" \
     && [[ "$FM_RECOVERY_MARKER_TOKEN" == pending:handling:* || "$FM_RECOVERY_MARKER_TOKEN" == announced:handling:* ]] \
@@ -768,6 +785,8 @@ if [ "$ACTIONABLE" -eq 1 ]; then
   [ -z "$OUT" ] || rm -f "$OUT" 2>/dev/null || true
   exit 0
 fi
+
+autoarm_exit_if_alarmed
 
 # The notice marker commits in the same owned critical section as the winning
 # failed write, so a losing generation can neither consume nor deliver it.
