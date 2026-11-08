@@ -2023,6 +2023,23 @@ test_cleanup_only_records_never_transition_the_backlog() {
       "$reason cleanup record teardown did not say its item was left alone"
   done
 
+  id=atomic-delivery-pending-b8
+  case_dir=$(make_home delivery-pending)
+  add_item "$case_dir" "$id"
+  start_item "$case_dir" "$id"
+  write_task_meta "$case_dir" "$id" ship local-only
+  printf 'cleanup_recovery=delivery-unconfirmed\n' \
+    > "$(home_of "$case_dir")/state/$id.delivery-unconfirmed"
+  out=$(run_bootstrap "$case_dir")
+  [ "$(row_state "$case_dir" "$id")" = "in_flight" ] \
+    || fail "session start changed a delivery-pending row: $out"
+  out=$(run_teardown "$case_dir" "$id") \
+    || fail "delivery-pending marker teardown failed: $out"
+  [ "$(row_state "$case_dir" "$id")" = "in_flight" ] \
+    || fail "delivery-pending marker let teardown close an unconfirmed task: $out"
+  assert_absent "$(home_of "$case_dir")/state/$id.delivery-unconfirmed" \
+    "teardown retained a consumed delivery-pending marker"
+
   # A manual-backend home is told by hand what to do with the row, so the
   # reminder there must not ask for a close either.
   id=atomic-cleanup-only-manual-b8

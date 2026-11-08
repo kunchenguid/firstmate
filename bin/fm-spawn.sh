@@ -2470,6 +2470,10 @@ if [ "$RELAUNCH" -eq 1 ]; then
     echo "error: --relaunch refused: task $ID's record is cleanup-only (cleanup_recovery=$RELAUNCH_CLEANUP_REASON), left by a spawn that never became a backlog worker; clean it up with bin/fm-teardown.sh $ID, then dispatch the task again" >&2
     exit 1
   fi
+  if [ -e "$STATE/$ID.delivery-unconfirmed" ] || [ -L "$STATE/$ID.delivery-unconfirmed" ]; then
+    echo "error: --relaunch refused: task $ID has a pending delivery-cleanup marker; clean it up with bin/fm-teardown.sh $ID" >&2
+    exit 1
+  fi
   fm_backend_validate_task_endpoint "$RELAUNCH_META" "$ID" || exit 1
   BACKEND=$FM_BACKEND_VALIDATED_BACKEND
   RELAUNCH_TARGET=$FM_BACKEND_VALIDATED_TARGET
@@ -5725,6 +5729,9 @@ spawn_delivery_gate_failed() { # <detail> [close]
     elif spawn_mark_cleanup_only_record_in_place; then
       FM_BACKLOG_TRANSITION_ERROR=
       cleanup_marked=1
+    elif spawn_write_delivery_cleanup_pending; then
+      FM_BACKLOG_TRANSITION_ERROR=
+      cleanup_marked=1
     else
       echo "error: $detail; inspect window $T. Its cleanup-only record could not be published${FM_BACKLOG_TRANSITION_ERROR:+ ($FM_BACKLOG_TRANSITION_ERROR)}; do not run teardown until its delivery state is repaired" >&2
     fi
@@ -5780,8 +5787,28 @@ spawn_mark_cleanup_only_record_in_place() {
   return 0
 }
 
+spawn_write_delivery_cleanup_pending() {
+  local marker="$STATE/$ID.delivery-unconfirmed"
+  local tmp="$STATE/.$ID.delivery-unconfirmed.${BASHPID:-$$}"
+  if [ -e "$marker" ] || [ -L "$marker" ]; then
+    FM_BACKLOG_TRANSITION_ERROR="delivery cleanup marker already exists at $marker"
+    return 1
+  fi
+  if ! printf 'cleanup_recovery=delivery-unconfirmed\n' >"$tmp" ||
+    ! fm_backlog_atomic_transition publish "$tmp" "$marker" "delivery cleanup marker" "$STATE"; then
+    rm -f "$tmp" 2>/dev/null || true
+    [ -n "$FM_BACKLOG_TRANSITION_ERROR" ] || FM_BACKLOG_TRANSITION_ERROR="delivery cleanup marker could not be published at $marker"
+    return 1
+  fi
+  return 0
+}
+
 kimi_spawn_fail() { # <detail>
   spawn_delivery_gate_failed "$1"
+}
+
+kimi_readiness_fail() { # <detail>
+  kimi_launch_fail "$1"
 }
 
 kimi_launch_fail() { # <detail>
@@ -5854,6 +5881,12 @@ rovo_wait_for_delivery() {
 
 rovo_spawn_fail() { # <detail>
   spawn_delivery_gate_failed "$1" close
+}
+
+rovo_readiness_fail() { # <detail>
+  printf '%s\n' "$(status_stamp_line "failed: $1")" >>"$STATE/$ID.status"
+  echo "error: $1; inspect window $T" >&2
+  rovo_endpoint_cleanup
 }
 
 # The launch-then-confirm gates run after the task record is published, when
@@ -8125,7 +8158,7 @@ if [ "$HARNESS" = hermes ] && [ "$RAW_LAUNCH" -eq 0 ]; then
 fi
 if [ "$HARNESS" = kimi ]; then
   if ! kimi_wait_for_ready; then
-    kimi_spawn_fail "$KIMI_READY_FAILURE_DETAIL"
+    kimi_readiness_fail "$KIMI_READY_FAILURE_DETAIL"
     exit 1
   fi
   KIMI_POINTER="Read the brief at $BRIEF_REAL and follow it exactly."
@@ -8149,7 +8182,7 @@ if [ "$HARNESS" = kimi ]; then
 fi
 if [ "$HARNESS" = rovo ]; then
   if ! rovo_wait_for_ready; then
-    rovo_spawn_fail "rovo did not show a verified ready signal before brief delivery in window $T"
+    rovo_readiness_fail "rovo did not show a verified ready signal before brief delivery in window $T"
     exit 1
   fi
   ROVO_POINTER="Read the brief at $BRIEF_REAL and follow it exactly."

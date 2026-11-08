@@ -111,7 +111,13 @@ case "$*" in
   *"#{cursor_y}"*) fake_cursor_y; exit 0 ;;
 esac
 case "${1:-}" in
-  display-message) printf 'firstmate\n'; exit 0 ;;
+  display-message)
+    case "$*" in
+      *"#{pane_current_command}"*) printf 'bash\n' ;;
+      *) printf 'firstmate\n' ;;
+    esac
+    exit 0
+    ;;
   list-windows)
     [ ! -s "$FM_FAKE_KIMI_STATE.window" ] || cat "$FM_FAKE_KIMI_STATE.window"
     exit 0 ;;
@@ -292,7 +298,14 @@ EOF
 
 run_spawn() {
   local case_dir=$1 home=$2 proj=$3 wt=$4 fakebin=$5 id=$6
+  local -a spawn_args
   shift 6
+  if [ "${1:-}" = --relaunch ]; then
+    shift
+    spawn_args=("$id" --relaunch --harness kimi "$@")
+  else
+    spawn_args=("$id" "$proj" --harness kimi --mode no-mistakes --yolo off "$@")
+  fi
   HOME="$home" FM_ROOT_OVERRIDE='' FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
@@ -316,7 +329,7 @@ run_spawn() {
     FM_FAKE_BRIEF_REAL="$(cd "$home/data/$id" && pwd -P)/launch-brief.md" \
     FM_KIMI_READY_POLLS="${FM_KIMI_READY_POLLS:-2}" FM_KIMI_DELIVERY_POLLS=2 FM_KIMI_POLL_INTERVAL=0 \
     PATH="$fakebin:$BASE_PATH" \
-    "$SPAWN" "$id" "$proj" --harness kimi --mode no-mistakes --yolo off "$@" 2>&1
+    "$SPAWN" "${spawn_args[@]}" 2>&1
 }
 
 read_spawn_record() {
@@ -891,6 +904,41 @@ SH
   pass "fm-spawn: a failed kimi delivery whose record cannot be marked rolls it back"
 }
 
+test_kimi_relaunch_keeps_cleanup_state_after_delivery_failure() {
+  local id rec out rc real_mv meta marker
+  id=kimi-relaunch-pending-z12
+  rec=$(make_spawn_case relaunch-pending "$id")
+  read_spawn_record "$rec"
+  out=$(run_spawn "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id") || {
+    fail "the initial kimi spawn failed: $out"
+  }
+  meta="$HOME_DIR/state/$id.meta"
+  marker="$HOME_DIR/state/$id.delivery-unconfirmed"
+  printf 'ready\n' > "$CASE_DIR/kimi.state"
+  real_mv=$(command -v mv)
+  cat > "$FAKEBIN_DIR/mv" <<SH
+#!/usr/bin/env bash
+for arg in "\$@"; do
+  case "\$arg" in *.meta.cleanup.*) exit 1 ;; esac
+done
+exec "$real_mv" "\$@"
+SH
+  chmod +x "$FAKEBIN_DIR/mv"
+  chmod 400 "$meta"
+  rc=0
+  out=$(FM_FAKE_KIMI_DELIVERY=no run_spawn \
+    "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" --relaunch) || rc=$?
+  [ "$rc" -ne 0 ] || fail "an unconfirmed relaunch delivery should fail"
+  if [ -e "$marker" ]; then
+    assert_grep 'cleanup_recovery=delivery-unconfirmed' "$marker" \
+      "failed relaunch did not leave its cleanup marker: $out"
+  else
+    assert_grep 'cleanup_recovery=delivery-unconfirmed' "$meta" \
+      "failed relaunch did not retain cleanup state: $out"
+  fi
+  pass "fm-spawn: failed Kimi relaunch keeps cleanup state"
+}
+
 test_kimi_readiness_gate_precedes_pointer() {
   local id rec out rc
   id=kimi-not-ready-z3
@@ -1394,6 +1442,7 @@ test_kimi_hook_remove_preserves_owned_newline_boundary
 test_kimi_hook_fails_closed_on_missing_malformed_or_partial_config
 test_kimi_hook_install_refuses_without_jq
 test_kimi_launch_then_send_is_verified
+test_kimi_relaunch_keeps_cleanup_state_after_delivery_failure
 test_kimi_spawn_refuses_shared_task_temp_root
 test_kimi_hook_is_silent_and_requires_registered_workspace_token
 test_kimi_spawn_refuses_unsafe_global_config_before_pane_creation

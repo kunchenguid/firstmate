@@ -1401,8 +1401,11 @@ backlog_record_reconcile() {
       fm_lock_release "$meta_lock"
       return 2
     fi
+    id=$(basename "$meta" .meta)
     if [ "$(fm_meta_get "$meta" kind)" != secondmate ] \
-       && ! fm_backlog_record_cleanup_reason "$meta" >/dev/null; then
+       && ! fm_backlog_record_cleanup_reason "$meta" >/dev/null \
+       && [ ! -e "$STATE/$id.delivery-unconfirmed" ] \
+       && [ ! -L "$STATE/$id.delivery-unconfirmed" ]; then
       row=
       if fm_backlog_row_probe "$DATA" "$id"; then
         row=$FM_BACKLOG_ROW_STATE
@@ -1490,8 +1493,11 @@ if [ "${FM_BOOTSTRAP_DETECT_ONLY:-0}" != 1 ] && local_phase; then
           echo "error: bootstrap refused unsafe worker record ($FM_BACKLOG_TRANSITION_ERROR)" >&2
           exit 1
         fi
+        BOOTSTRAP_BACKLOG_ID=$(basename "$BOOTSTRAP_BACKLOG_META" .meta)
         if [ "$(fm_meta_get "$BOOTSTRAP_BACKLOG_META" kind)" != secondmate ] \
-           && ! fm_backlog_record_cleanup_reason "$BOOTSTRAP_BACKLOG_META" >/dev/null; then
+           && ! fm_backlog_record_cleanup_reason "$BOOTSTRAP_BACKLOG_META" >/dev/null \
+           && [ ! -e "$STATE/$BOOTSTRAP_BACKLOG_ID.delivery-unconfirmed" ] \
+           && [ ! -L "$STATE/$BOOTSTRAP_BACKLOG_ID.delivery-unconfirmed" ]; then
           BOOTSTRAP_BACKLOG_GATE_KIND=ship
           break
         fi
