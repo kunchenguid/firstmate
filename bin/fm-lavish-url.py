@@ -96,6 +96,36 @@ def safe_url(value, base):
     return resolved
 
 
+def srcset_candidates(value):
+    whitespace = " \t\n\f\r"
+    position = 0
+    while position < len(value):
+        while position < len(value) and value[position] in whitespace + ",":
+            position += 1
+        start = position
+        while position < len(value) and value[position] not in whitespace:
+            position += 1
+        url = value[start:position]
+        if not url:
+            break
+        if url.endswith(","):
+            yield url.rstrip(","), ""
+            continue
+        start = position
+        in_parentheses = False
+        while position < len(value):
+            char = value[position]
+            if char == "," and not in_parentheses:
+                break
+            if char == "(":
+                in_parentheses = True
+            elif char == ")":
+                in_parentheses = False
+            position += 1
+        yield url, value[start:position].strip(whitespace)
+        position += 1
+
+
 def escape_css_markup(text):
     return re.sub(r"<(?=[a-zA-Z/!])", lambda _: "\\3c ", text)
 
@@ -154,13 +184,10 @@ class Sanitizer(HTMLParser):
                 continue
             if name in SRCSET_ATTRS:
                 parts = []
-                for candidate in value.split(","):
-                    bits = candidate.strip().split(None, 1)
-                    if not bits:
-                        continue
-                    fixed = safe_url(bits[0], self.base)
+                for url, descriptors in srcset_candidates(value):
+                    fixed = safe_url(url, self.base)
                     if fixed:
-                        parts.append(fixed + (" " + bits[1] if len(bits) > 1 else ""))
+                        parts.append(fixed + (" " + descriptors if descriptors else ""))
                 kept.append((name, ", ".join(parts)))
                 continue
             if name == "style":

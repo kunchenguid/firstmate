@@ -159,6 +159,9 @@ hostile_page() {  # <path>
 <a href="javascript:alert('link')">bad link</a>
 <a href="/menu">Menu</a>
 <img src="img/cup.png" onerror="alert('img')" srcset="img/cup.png 1x, img/cup2.png 2x">
+<img srcset="data:image/png;base64,AAAA 2x, img/fallback.png 1x">
+<link rel="stylesheet" imagesrcset="data:image/png;base64,BBBB 2x, img/preload.png 1x">
+<source srcset="img/plain.png, img/wide.png 800w, javascript:bad 3x">
 <iframe srcdoc="&lt;script&gt;alert('frame')&lt;/script&gt;" src="https://video.example.test/embed"></iframe>
 <form action="/subscribe"><button type="submit" data-lavish-action="1">Subscribe</button></form>
 <svg><style><img src=x onerror=alert('svg')></style></svg>
@@ -219,6 +222,10 @@ test_generic_url_capture_sanitizes_layers_and_arms() {
   assert_no_regex '<[^>]*[[:space:]]on[a-z]+=' "$home/captured.html" "the captured page kept an event handler attribute"
   assert_grep 'href="https://shop.example.test/menu"' "$home/captured.html" "a relative link was not resolved against the page"
   assert_grep 'href="https://shop.example.test/site.css"' "$home/captured.html" "the stylesheet link was not kept"
+  assert_grep 'srcset="data:image/png;base64,AAAA 2x, https://shop.example.test/img/fallback.png 1x"' "$home/captured.html" "a data-image srcset candidate was corrupted"
+  assert_grep 'imagesrcset="data:image/png;base64,BBBB 2x, https://shop.example.test/img/preload.png 1x"' "$home/captured.html" "a data-image imagesrcset candidate was corrupted"
+  assert_grep 'srcset="https://shop.example.test/img/plain.png, https://shop.example.test/img/wide.png 800w"' "$home/captured.html" "descriptor-free or width candidates were corrupted"
+  assert_grep 'srcset="https://shop.example.test/img/cup.png 1x, https://shop.example.test/img/cup2.png 2x"' "$home/captured.html" "relative density candidates were corrupted"
   assert_grep 'url(https://shop.example.test/img/hero.png)' "$home/captured.html" "a style url was not resolved"
   assert_grep '@media (width < 600px)' "$home/captured.html" "a range media query lost its comparison operator"
   assert_grep '@media (600px <= width)' "$home/captured.html" "a reversed range media query lost its comparison operator"
