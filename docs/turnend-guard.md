@@ -422,8 +422,9 @@ Later fresh failed epochs advance the same monotonic progression instead of rese
 When none of those proofs appears, the guard re-blocks up to `FM_CLAUDE_TURNEND_BLOCK_BUDGET` times (default 3, below Claude's 8-block override).
 In Claude mode, positive watcher recovery clears the block budget, failure notice, and attended alarm together under the existing budget lock before either hook reports ordinary recovery.
 A committed actionable rewake is positive recovery too, because the arm reached a watcher, that watcher ran a cycle, and the wake it produced is being delivered.
-The Stop auto-arm therefore decides an actionable close before the post-alarm suppression and clears the same three markers after its winning rewake commit.
-An actionable close skips the healthy-watcher recheck, so deciding it after the suppression let one stale alarm swallow every later wake on a home whose closes stay actionable.
+The Stop auto-arm therefore decides an actionable close before the post-alarm suppression and attempts to clear the same three markers after its winning rewake commit.
+If ownership or lock contention refuses that reset, the wake is still delivered and the markers remain for a later committed rewake or verified healthy watcher to clear.
+An actionable close skips the healthy-watcher recheck, so delivery must not depend on that recheck clearing a stale alarm.
 An actionable close whose rewake cannot be committed delivers nothing, so it stays suppressed in an alarmed episode and keeps the markers.
 
 The block budget is charged by two rules:
@@ -452,7 +453,7 @@ Two writers can commit `state/.claude-autoarm-failure-alarmed`, both under the s
 - The Stop auto-arm's own terminal failure: the exhausted continuation is the one participant that knows no automatic continuation remains, so when this session's consumed block count is already over budget it commits the alarm in the same owned critical section as its `failed-suppressed` ledger write and delivers the one loud final rewake.
   Every failed-suppressed continuation - an ordinary exhausted failure, a lost supervision-host hand-back, an interrupted hook, or a refused healthy-watcher reset - takes this one exhaustion decision before it commits another retry, because the guard's claim-open step-aside would otherwise leave the alarm unwritten on every Stop.
 
-After that alarm, the Stop auto-arm suppresses further failure continuations until the episode resets, so the final fail-open remains reachable; a committed actionable rewake is not one of them, because it is the positive recovery that resets the episode.
+After that alarm, the Stop auto-arm suppresses further failure continuations until the episode resets, so the final fail-open remains reachable; committed actionable rewakes follow the positive recovery path in [Failure progression and block budget](#failure-progression-and-block-budget).
 [Failure progression and block budget](#failure-progression-and-block-budget) owns the reset boundaries, including positive watcher recovery and replacement-session isolation of an interrupted episode.
 The alarm cannot repeat during that failure episode, and a later unhealthy stop blocks again.
 Every suppressed continuation in the episode emits one reason line instead of an empty rewake body, stating why no operator notice repeats and whether a Stop-owned retry stays scheduled.

@@ -108,7 +108,7 @@
 #     that knows no automatic continuation remains, so once this session's
 #     consumed block count is over the guard's budget it commits the alarm in
 #     the same owned critical section as its failed-suppressed write and
-#     delivers the one loud final rewake; later generations exit 0.
+#     delivers the one loud final rewake; later failed generations exit 0.
 #   - StopFailure storm bound: an error-ended turn can precede another error
 #     end when the API is still down, and no Stop phase runs to charge the
 #     guard's block budget, so every StopFailure-triggered exit-2
