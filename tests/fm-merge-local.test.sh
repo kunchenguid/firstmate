@@ -326,10 +326,9 @@ make_rebased_case() {
 
 assert_record_unchanged() {
   [ "$(fm_dod_local_done_head "$META")" = "$X" ] || fail "$1: a refusal changed the recorded head"
-  assert_no_regex '^local_done_head_prior=' "$META" "$1: a refusal recorded provenance"
 }
 
-test_identical_rebase_lands_and_keeps_provenance() {
+test_identical_rebase_lands() {
   local out
   make_rebased_case rebased
   out=$(land 2>&1) || fail "identical rebase was refused: $out"
@@ -338,8 +337,7 @@ test_identical_rebase_lands_and_keeps_provenance() {
   [ "$(cat "$PROJ/other.txt")" = 'other lane' ] || fail 'landing lost the other lane'
   [ -z "$(git -C "$PROJ" status --porcelain)" ] || fail 'landing left a dirty checkout'
   [ "$(fm_dod_local_done_head "$META")" = "$N" ] || fail 'the rebased head is not the recorded identity'
-  [ "$(grep -c "^local_done_head_prior=$X\$" "$META")" = 1 ] || fail 'the reported head was not kept as provenance'
-  pass 'a provably identical rebase lands, becomes the recorded head, and keeps the reported head as provenance'
+  pass 'a provably identical rebase lands and becomes the recorded head'
 }
 
 test_rebase_with_different_content_refuses() {
@@ -422,7 +420,7 @@ SH
     out=$(MERGE_SCRIPT="$CASE/toolbin/fm-merge-local.sh" RACE_PROJ="$PROJ" RACE_X="$X" land 2>&1) || rc=$?
     [ "$rc" -ne 0 ] || fail "$variant: rebased landing skipped a check: $out"
     case "$variant" in
-      main-moved-again) reason='commits of its own' ;;
+      main-moved-again) reason='not a fast-forward of main; have the crewmate rebase it onto main again' ;;
       held) reason='still held for the captain' ;;
       branch-moved) reason='changed during approval check' ;;
     esac
@@ -438,6 +436,6 @@ fm_test_run test_two_tasks_cannot_undo_a_same_tree_landing test_branch_advance_d
   test_missing_and_malformed_head_refuse test_change_after_hold_check_refuses \
   test_diverged_default_refuses test_change_during_approval_check_refuses \
   test_snapshot_cannot_pin_a_replacement_task test_done_recording_preserves_caller_locks \
-  test_identical_rebase_lands_and_keeps_provenance test_rebase_with_different_content_refuses \
+  test_identical_rebase_lands test_rebase_with_different_content_refuses \
   test_rebase_on_a_branch_not_the_lanes_own_refuses test_rebase_without_recorded_identity_refuses \
   test_rebase_keeps_the_existing_landing_checks

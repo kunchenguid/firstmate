@@ -14,16 +14,16 @@
 # Rebased lanes: when another landing moved the default branch after this lane
 # reported ready, the lane may rebase its own recorded branch and land that new
 # head N in place of the recorded head R only by an exact content-identity
-# proof against the current default head D (rebased_identity_proof below): N
-# is on refs/heads/<branch>, D is a strict ancestor of N, R and D have
-# diverged (neither contains the other) from exactly one merge base,
-# `git merge-tree --write-tree D R` merges cleanly, and its tree object id
-# equals N^{tree}. That proof is the
-# whole gate; a rebase whose tree differs, or anything else, refuses as before.
-# After the captain-hold read, bin/fm-dod-lib.sh's fm_dod_rebind_local_done_head
-# swaps the record to N and keeps R as local_done_head_prior= provenance; every
-# other check then runs against N exactly as for an unrebased lane. A later
-# refusal leaves that rebound record, which names the same proven content.
+# proof against the current default head D (bin/fm-dod-lib.sh's
+# fm_dod_rebased_identity_proof): N is on refs/heads/<branch>, D is a strict
+# ancestor of N, R and D have diverged (neither contains the other) from
+# exactly one merge base, `git merge-tree --write-tree D R` merges cleanly, and
+# its tree object id equals N^{tree}. That proof is the whole gate; a rebase
+# whose tree differs, or anything else, refuses as before. After the
+# captain-hold read, bin/fm-dod-lib.sh's fm_dod_rebind_local_done_head swaps the
+# record from R to N; every other check then runs against N exactly as for an
+# unrebased lane. A later refusal leaves that rebound record, which names the
+# same proven content.
 # The task's existing per-task control lock serializes the captain-hold check
 # through that fast-forward. A still-held or unreadable row refuses before the
 # merge, so a captain approval must be recorded as an `answer --release` before
@@ -143,44 +143,6 @@ branch_head() {
 local_head_matches() {  # <head>
   [ "$(branch_head)" = "$1" ]
 }
-# The rebased-lane identity proof (contract in the header). 0 only when the
-# lane's own branch head <candidate> carries exactly the tree that combining
-# the recorded head <recorded> with <target>, the current default head, yields.
-REBASE_REFUSAL=
-rebased_identity_proof() {  # <recorded> <candidate> <target>
-  local recorded=$1 candidate=$2 target=$3 bases proof_tree candidate_tree
-  if ! git -C "$PROJ" cat-file -e "$recorded^{commit}" 2>/dev/null; then
-    REBASE_REFUSAL='the recorded done head is no longer in the project repository'
-    return 1
-  fi
-  if [ "$candidate" = "$target" ] || ! git -C "$PROJ" merge-base --is-ancestor "$target" "$candidate"; then
-    REBASE_REFUSAL="the branch is not $DEFAULT plus commits of its own"
-    return 1
-  fi
-  if git -C "$PROJ" merge-base --is-ancestor "$recorded" "$target"; then
-    REBASE_REFUSAL="the recorded done head is already part of $DEFAULT"
-    return 1
-  fi
-  if git -C "$PROJ" merge-base --is-ancestor "$target" "$recorded"; then
-    REBASE_REFUSAL="the recorded done head still fast-forwards $DEFAULT, so there is nothing to rebase"
-    return 1
-  fi
-  bases=$(git -C "$PROJ" merge-base --all "$target" "$recorded") || bases=
-  if [ -z "$bases" ] || [ "$(printf '%s\n' "$bases" | wc -l | tr -d ' ')" != 1 ]; then
-    REBASE_REFUSAL="the recorded done head and $DEFAULT do not share exactly one merge base"
-    return 1
-  fi
-  # Exit 0 from --write-tree means a clean merge whose only output is the tree.
-  if ! proof_tree=$(git -C "$PROJ" merge-tree --write-tree "$target" "$recorded" 2>/dev/null); then
-    REBASE_REFUSAL="the recorded done head does not combine cleanly with $DEFAULT (Git 2.38 or newer required)"
-    return 1
-  fi
-  candidate_tree=$(git -C "$PROJ" rev-parse --verify --quiet "$candidate^{tree}") || candidate_tree=
-  if [ -z "$candidate_tree" ] || [ "$proof_tree" != "$candidate_tree" ]; then
-    REBASE_REFUSAL="the rebased content differs from the recorded done head combined with $DEFAULT"
-    return 1
-  fi
-}
 project_git_dir=$(git -C "$PROJ" rev-parse --absolute-git-dir) || {
   echo "error: cannot determine the project checkout's Git directory" >&2
   exit 1
@@ -208,8 +170,8 @@ fi
 
 # Clean fast-forward only: DEFAULT must be an ancestor of BRANCH.
 before=$(git -C "$PROJ" rev-parse "$DEFAULT")
-if [ "$LAND_HEAD" != "$MERGE_HEAD" ] && ! rebased_identity_proof "$MERGE_HEAD" "$LAND_HEAD" "$before"; then
-  echo "error: branch $BRANCH differs from the recorded local done head and is not a provably identical rebase: $REBASE_REFUSAL; refusing" >&2
+if [ "$LAND_HEAD" != "$MERGE_HEAD" ] && ! rebase_refusal=$(fm_dod_rebased_identity_proof "$PROJ" "$DEFAULT" "$MERGE_HEAD" "$LAND_HEAD" "$before"); then
+  echo "error: branch $BRANCH differs from the recorded local done head and is not a provably identical rebase: $rebase_refusal; refusing" >&2
   exit 1
 fi
 if ! git -C "$PROJ" merge-base --is-ancestor "$before" "$LAND_HEAD"; then
