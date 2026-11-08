@@ -3713,9 +3713,11 @@ restart_has_news() {
   [ "$queued" -eq 0 ] || return 0
   exclude=$(status_scan_parent_channel_exclude "$STATE")
   for f in "$STATE"/*.status; do
-    [ -f "$f" ] && [ -r "$f" ] && [ ! -L "$f" ] || continue
+    [ -f "$f" ] && [ ! -L "$f" ] || continue
     [ "$f" != "$exclude" ] || continue
-    open=$(status_open_decisions_incremental "$f" '' timed) || return 0
+    # A log that exists but cannot be read is unknown, not empty.
+    [ -r "$f" ] || return 0
+    open=$(status_open_decisions_incremental "$f" '' timed strict) || return 0
     [ -z "$open" ] || return 0
   done
   return 1
@@ -3735,7 +3737,9 @@ fm_recovery_marker_arm_check "$WATCHER_DOWNTIME_MARKER" "$STARTUP_LOCK_BOUND" \
 [ "$FM_RECOVERY_MARKER_DOUBTFUL" -eq 0 ] || WATCHER_RECOVERY_DOUBTFUL=1
 if [ "${FM_WATCH_HANDLING_SUCCESSOR:-0}" = 1 ]; then
   WATCHER_RECOVERY_PENDING=0
-elif [ "$FM_RECOVERY_MARKER_ACTION" = recover ]; then
+elif [ "$FM_RECOVERY_MARKER_ACTION" = recover ] || [ "$WATCHER_RECOVERY_DOUBTFUL" -eq 1 ]; then
+  # Doubt recovers on its own: a quiet restart leaves the marker announced, so
+  # the stale lock a later restart clears would otherwise be consumed unreported.
   WATCHER_RECOVERY_PENDING=1
 fi
 # Side-band ledger publication, detached from the poll loop.
@@ -3853,7 +3857,7 @@ resurface_after_downtime() {
       exit 1
     fi
     [ "$FM_RECOVERY_MARKER_DOUBTFUL" -eq 0 ] || WATCHER_RECOVERY_DOUBTFUL=1
-    [ "$FM_RECOVERY_MARKER_ACTION" = recover ] || return 0
+    [ "$FM_RECOVERY_MARKER_ACTION" = recover ] || [ "$WATCHER_RECOVERY_DOUBTFUL" -eq 1 ] || return 0
   fi
   # A doubtful restart always announces: the previous holder may have stopped
   # between seeing an event and queuing it. Otherwise the arm check already

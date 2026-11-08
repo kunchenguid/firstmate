@@ -817,8 +817,8 @@ test_restart_preserves_recovery_across_reused_pid_lock() {
 # A restart after a previous watcher stopped wakes main only with something to
 # show: a queued row, an open decision, or a doubtful stop. Each case varies one
 # of those from a clean close; quiet is the case with none of them.
-test_restart_wakes_only_with_news() {  # <quiet|queued|decision|dead-lock|stale-lock-flag>
-  local variant=$1 dir home state fakebin armout first_arm watcher_pid
+test_restart_wakes_only_with_news() {  # <quiet|queued|decision|dead-lock|stale-lock-flag|unreadable-status|read-failure|announced-dead-lock|announced-reused-pid>
+  local variant=$1 dir home state fakebin armout first_arm watcher_pid reader unrelated=''
   dir=$(make_case "restart-news-$variant")
   home="$dir/home"
   state="$dir/state"
@@ -836,9 +836,36 @@ test_restart_wakes_only_with_news() {  # <quiet|queued|decision|dead-lock|stale-
     kill -TERM "$watcher_pid" 2>/dev/null || fail "$variant: could not stop the fixture watcher"
   fi
   wait "$first_arm" 2>/dev/null || true
+  case "$variant" in announced-dead-lock|announced-reused-pid)
+    # A quiet restart leaves the episode announced; the watcher it started is
+    # then killed abruptly, so only a doubtful restart can report what it missed.
+    start_rearm_arm "$home" "$state" "$fakebin" "$dir/quiet-arm.out"
+    first_arm=$ARM_PID
+    is_live_non_zombie "$first_arm" || fail "$variant: quiet restart did not stay live: $(cat "$dir/quiet-arm.out")"
+    case "$(cat "$state/.watcher-down" 2>/dev/null || true)" in
+      announced:downtime:*) ;;
+      *) fail "$variant: quiet restart did not mark the episode announced" ;;
+    esac
+    watcher_pid=$(cat "$state/.watch.lock/pid" 2>/dev/null || true)
+    kill -KILL "$watcher_pid" 2>/dev/null || fail "$variant: could not abruptly stop the quiet watcher"
+    wait "$first_arm" 2>/dev/null || true
+    [ "$(cat "$state/.watch.lock/pid" 2>/dev/null || true)" = "$watcher_pid" ] \
+      || fail "$variant: the killed watcher did not leave its lock behind"
+    case "$(cat "$state/.watcher-down" 2>/dev/null || true)" in
+      announced:downtime:*) ;;
+      *) fail "$variant: the abrupt stop disturbed the announced marker" ;;
+    esac
+    if [ "$variant" = announced-reused-pid ]; then
+      # The killed watcher's pid now belongs to an unrelated live process.
+      sleep 300 &
+      unrelated=$!
+      printf '%s\n' "$unrelated" > "$state/.watch.lock/pid"
+    fi
+    ;;
+  esac
   case "$variant" in
-    dead-lock)
-      [ "$(cat "$state/.watch.lock/pid" 2>/dev/null || true)" = "$watcher_pid" ] \
+    dead-lock|announced-dead-lock|announced-reused-pid)
+      [ "$(cat "$state/.watch.lock/pid" 2>/dev/null || true)" = "${unrelated:-$watcher_pid}" ] \
         || fail "$variant: the killed watcher did not leave its lock behind"
       ;;
     *)
@@ -856,9 +883,23 @@ test_restart_wakes_only_with_news() {  # <quiet|queued|decision|dead-lock|stale-
       prime_status_seen "$state" "$state/demo.status" || fail "$variant: could not mark the status seen"
       ;;
     stale-lock-flag) mkdir "$state/.watcher-down.stale-lock" ;;
+    unreadable-status)
+      printf 'done: nothing pending\n' > "$state/demo.status"
+      chmod 000 "$state/demo.status"
+      prime_status_seen "$state" "$state/demo.status" || fail "$variant: could not mark the status seen"
+      ;;
+    read-failure)
+      printf 'done: nothing pending\n' > "$state/demo.status"
+      prime_status_seen "$state" "$state/demo.status" || fail "$variant: could not mark the status seen"
+      reader="$dir/failing-reader"
+      printf '#!/bin/sh\nexit 1\n' > "$reader"
+      chmod +x "$reader"
+      export FM_STATUS_SPAN_READER="$reader"
+      ;;
   esac
 
   start_rearm_arm "$home" "$state" "$fakebin" "$armout"
+  unset FM_STATUS_SPAN_READER
   if [ "$variant" = quiet ]; then
     is_live_non_zombie "$ARM_PID" || fail "$variant: restart with nothing to show did not stay live: $(cat "$armout")"
     ! grep -F 'check: rearm-resurface' "$armout" >/dev/null \
@@ -880,6 +921,12 @@ test_restart_wakes_only_with_news() {  # <quiet|queued|decision|dead-lock|stale-
     return
   fi
   wait_for_exit "$ARM_PID" "$REARM_EXIT_POLLS" || fail "$variant: restart did not wake main"
+  [ ! -e "$state/demo.status" ] || chmod 600 "$state/demo.status"
+  if [ -n "$unrelated" ]; then
+    is_live_non_zombie "$unrelated" || fail "$variant: restart signaled the unrelated process whose pid was reused"
+    kill "$unrelated" 2>/dev/null || true
+    wait "$unrelated" 2>/dev/null || true
+  fi
   grep -F 'check: rearm-resurface' "$armout" >/dev/null \
     || fail "$variant: restart did not deliver the recovery wake: $(cat "$armout")"
   [ ! -e "$state/.watcher-down.stale-lock" ] || fail "$variant: the stale-lock flag was not consumed"
@@ -2077,6 +2124,10 @@ test_restart_wakes_only_with_news queued
 test_restart_wakes_only_with_news decision
 test_restart_wakes_only_with_news dead-lock
 test_restart_wakes_only_with_news stale-lock-flag
+test_restart_wakes_only_with_news unreadable-status
+test_restart_wakes_only_with_news read-failure
+test_restart_wakes_only_with_news announced-dead-lock
+test_restart_wakes_only_with_news announced-reused-pid
 test_markerless_legacy_queue_is_recovered_on_arm
 test_idle_lavish_source_stays_quiet_until_result
 test_append_wakes_live_announced_watcher

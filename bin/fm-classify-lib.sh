@@ -1329,11 +1329,17 @@ _fm_status_read_span() {  # <status-file> <start-offset> <byte-length>
   ' "$f" "$start" "$length"
 }
 
-status_open_decisions_incremental() {  # <status-file> [<captured-end-offset>] [timed]
+# With the optional fourth argument "strict", a log that cannot be read - a failed
+# stat, size, or span read - returns 3 instead of reporting the last trusted
+# set as if it were current, so a caller that must not miss news can tell a
+# failed read from a genuinely empty set. Without it the failure is absorbed.
+status_open_decisions_incremental() {  # <status-file> [<captured-end-offset>] [timed] [strict]
   local f=$1 captured_end=${2:-} cf offset ident open='' trusted_open='' cursor_data first rest offset_line ident_line
   local version='' size actual_size cur_ident resolve held chunk_file chunk_size line cursor_dirty=0
-  local target_cursor kind fold_version timed=${3:-}
+  local target_cursor kind fold_version timed=${3:-} strict=${4:-} read_rc=0
   case "$timed" in ''|timed) ;; *) return 2 ;; esac
+  case "$strict" in ''|strict) ;; *) return 2 ;; esac
+  [ "$strict" != strict ] || read_rc=3
   [ -f "$f" ] && [ -r "$f" ] && [ ! -L "$f" ] || return 0
   kind=$(_fm_status_kind "$f")
   fold_version="$FM_OPEN_DECISIONS_FOLD_VERSION:$kind"
@@ -1387,16 +1393,16 @@ status_open_decisions_incremental() {  # <status-file> [<captured-end-offset>] [
   # A stat/size-read failure is a genuine I/O error, not "the file is empty" -
   # report the already-trusted persisted set unchanged rather than risking a
   # silent invalidation that would wipe it.
-  _fm_status_read_ident_size "$f" || { printf '%s' "$trusted_open"; return 0; }
+  _fm_status_read_ident_size "$f" || { printf '%s' "$trusted_open"; return "$read_rc"; }
   cur_ident=$_FM_STAT_IDENTITY actual_size=$_FM_STAT_SIZE
-  [ -n "$cur_ident" ] || { printf '%s' "$trusted_open"; return 0; }
+  [ -n "$cur_ident" ] || { printf '%s' "$trusted_open"; return "$read_rc"; }
   actual_size=${actual_size//[[:space:]]/}
-  case "$actual_size" in ''|*[!0-9]*) printf '%s' "$trusted_open"; return 0 ;; esac
+  case "$actual_size" in ''|*[!0-9]*) printf '%s' "$trusted_open"; return "$read_rc" ;; esac
   if [ -n "$captured_end" ]; then
     case "$captured_end" in
-      ''|*[!0-9]*) printf '%s' "$trusted_open"; return 0 ;;
+      ''|*[!0-9]*) printf '%s' "$trusted_open"; return "$read_rc" ;;
     esac
-    [ "$captured_end" -le "$actual_size" ] || { printf '%s' "$trusted_open"; return 0; }
+    [ "$captured_end" -le "$actual_size" ] || { printf '%s' "$trusted_open"; return "$read_rc"; }
     size=$captured_end
   else
     size=$actual_size
@@ -1412,12 +1418,12 @@ status_open_decisions_incremental() {  # <status-file> [<captured-end-offset>] [
   if [ "$offset" -lt "$size" ]; then
     chunk_file="$cf.read.$$"
     _fm_status_read_span "$f" "$offset" "$((size - offset))" > "$chunk_file" 2>/dev/null \
-      || { rm -f "$chunk_file"; printf '%s' "$trusted_open"; return 0; }
+      || { rm -f "$chunk_file"; printf '%s' "$trusted_open"; return "$read_rc"; }
     chunk_size=$(LC_ALL=C wc -c < "$chunk_file" 2>/dev/null) \
-      || { rm -f "$chunk_file"; printf '%s' "$trusted_open"; return 0; }
+      || { rm -f "$chunk_file"; printf '%s' "$trusted_open"; return "$read_rc"; }
     chunk_size=${chunk_size//[[:space:]]/}
     case "$chunk_size" in
-      ''|*[!0-9]*) rm -f "$chunk_file"; printf '%s' "$trusted_open"; return 0 ;;
+      ''|*[!0-9]*) rm -f "$chunk_file"; printf '%s' "$trusted_open"; return "$read_rc" ;;
     esac
     # Test-only observability seam (off by default, no production behavior
     # change): when set, records exactly how many bytes THIS call folded, so a
