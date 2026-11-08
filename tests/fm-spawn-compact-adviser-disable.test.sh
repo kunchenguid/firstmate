@@ -388,8 +388,8 @@ $launch") \
 
 # A command-prefix assignment only covers the first simple command. A raw
 # compound launch such as `cd <dir> && <probe>` must still start the probe with
-# the switch on, so this drives that escape hatch and executes the pane's
-# launch under a contrary ambient value.
+# both required environment values, so execute the pane's launch under a
+# contrary ambient compact-adviser value.
 test_raw_compound_launch_command_carries_the_switch() {
   local rec out status seen launch probe_dir
   rec=$(make_case raw-compound claude raw-compound-a1)
@@ -401,7 +401,11 @@ test_raw_compound_launch_command_carries_the_switch() {
 
   probe_dir="$CASE_DIR/agent-cwd"
   mkdir -p "$probe_dir"
-  install_env_probe "$probe_dir" probe FM_HOME
+  cat > "$probe_dir/probe" <<'SH'
+#!/bin/sh
+printf '%s\n%s\n' "${COMPACT_ADVISER_DISABLE-unset}" "${FM_HOME-unset}"
+SH
+  chmod +x "$probe_dir/probe"
 
   out=$(run_case_spawn raw-compound-a1 "$PROJ_DIR" --mode no-mistakes --yolo off \
     "cd $probe_dir && ./probe")
@@ -413,9 +417,10 @@ test_raw_compound_launch_command_carries_the_switch() {
     TMUX=synthetic-pane COMPACT_ADVISER_DISABLE="$CONTRARY" \
     /bin/sh -c "$launch") \
     || fail "raw compound launch: the emitted launch failed to run"
-  assert_equals "$HOME_DIR" "$seen" \
-    "a raw compound launch must start its agent with active FM_HOME, even after cd"
-  pass "a compound raw launch-command carries active FM_HOME"
+  assert_equals "1
+$HOME_DIR" "$seen" \
+    "a raw compound launch must start with COMPACT_ADVISER_DISABLE=1 and active FM_HOME, even after cd"
+  pass "a compound raw launch carries COMPACT_ADVISER_DISABLE=1 and active FM_HOME"
 }
 
 test_launch_preserves_literal_home_and_brief_paths() {
