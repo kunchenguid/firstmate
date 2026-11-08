@@ -5723,15 +5723,17 @@ spawn_delivery_gate_failed() { # <detail> [close]
   [ "$close" != close ] || rovo_endpoint_cleanup
   if spawn_mark_cleanup_only_record; then
     cleanup_marked=1
+  elif spawn_mark_cleanup_only_record_in_place; then
+    SPAWN_FRESH_COMMIT_PENDING=0
+    FM_BACKLOG_TRANSITION_ERROR=
+    cleanup_marked=1
+  elif spawn_write_delivery_cleanup_pending; then
+    SPAWN_FRESH_COMMIT_PENDING=0
+    FM_BACKLOG_TRANSITION_ERROR=
+    cleanup_marked=1
   else
     if [ "$SPAWN_FRESH_COMMIT_PENDING" = 1 ]; then
       echo "error: $detail; inspect window $T. Its task record could not be kept for cleanup${FM_BACKLOG_TRANSITION_ERROR:+ ($FM_BACKLOG_TRANSITION_ERROR)} and is rolled back - close out endpoint $T and local copy $WT by hand before retrying" >&2
-    elif spawn_mark_cleanup_only_record_in_place; then
-      FM_BACKLOG_TRANSITION_ERROR=
-      cleanup_marked=1
-    elif spawn_write_delivery_cleanup_pending; then
-      FM_BACKLOG_TRANSITION_ERROR=
-      cleanup_marked=1
     else
       echo "error: $detail; inspect window $T. Its cleanup-only record could not be published${FM_BACKLOG_TRANSITION_ERROR:+ ($FM_BACKLOG_TRANSITION_ERROR)}; do not run teardown until its delivery state is repaired" >&2
     fi
@@ -5784,6 +5786,7 @@ spawn_mark_cleanup_only_record_in_place() {
     FM_BACKLOG_TRANSITION_ERROR="cleanup-only marker was not retained in $meta"
     return 1
   fi
+  SPAWN_FRESH_COMMIT_PENDING=0
   return 0
 }
 
@@ -5800,6 +5803,7 @@ spawn_write_delivery_cleanup_pending() {
     [ -n "$FM_BACKLOG_TRANSITION_ERROR" ] || FM_BACKLOG_TRANSITION_ERROR="delivery cleanup marker could not be published at $marker"
     return 1
   fi
+  SPAWN_FRESH_COMMIT_PENDING=0
   return 0
 }
 

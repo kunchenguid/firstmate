@@ -880,7 +880,7 @@ test_kimi_failed_delivery_keeps_a_cleanup_record_teardown_can_use() {
 # An unmarked record kept for a failed delivery is what lets session start heal
 # its item In flight and teardown close it as Done, so a record the spawn cannot
 # mark is rolled back as before and the leftovers are named for hand cleanup.
-test_kimi_failed_delivery_rolls_back_a_record_it_cannot_mark() {
+test_kimi_failed_delivery_appends_cleanup_state_when_publish_fails() {
   local id rec out rc real_mv
   id=kimi-unmarked-z11
   rec=$(make_spawn_case unmarked "$id")
@@ -898,10 +898,9 @@ SH
   out=$(FM_FAKE_KIMI_DELIVERY=no run_spawn \
     "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id") || rc=$?
   [ "$rc" -ne 0 ] || fail "an unconfirmed kimi delivery should fail"
-  assert_contains "$out" "could not be kept for cleanup" \
-    "an unmarkable failed-delivery record was not reported: $out"
-  assert_absent "$HOME_DIR/state/$id.meta" "an unmarkable failed-delivery record was kept unmarked"
-  pass "fm-spawn: a failed kimi delivery whose record cannot be marked rolls it back"
+  assert_grep 'cleanup_recovery=delivery-unconfirmed' "$HOME_DIR/state/$id.meta" \
+    "a failed publication did not fall back to the cleanup marker: $out"
+  pass "fm-spawn: a failed Kimi publication appends cleanup state"
 }
 
 test_kimi_relaunch_keeps_cleanup_state_after_delivery_failure() {
@@ -1442,6 +1441,7 @@ test_kimi_hook_remove_preserves_owned_newline_boundary
 test_kimi_hook_fails_closed_on_missing_malformed_or_partial_config
 test_kimi_hook_install_refuses_without_jq
 test_kimi_launch_then_send_is_verified
+test_kimi_failed_delivery_appends_cleanup_state_when_publish_fails
 test_kimi_relaunch_keeps_cleanup_state_after_delivery_failure
 test_kimi_spawn_refuses_shared_task_temp_root
 test_kimi_hook_is_silent_and_requires_registered_workspace_token
@@ -1451,7 +1451,6 @@ test_kimi_falls_back_to_expanded_home_binary
 test_kimi_missing_binary_refuses_before_pane_creation
 test_kimi_unconfirmed_delivery_fails_loudly
 test_kimi_failed_delivery_keeps_a_cleanup_record_teardown_can_use
-test_kimi_failed_delivery_rolls_back_a_record_it_cannot_mark
 test_kimi_readiness_gate_precedes_pointer
 test_kimi_fresh_worktree_trust_is_answered_and_verified
 test_kimi_swallowed_trust_enter_is_retried_until_the_dialog_clears
