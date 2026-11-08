@@ -134,6 +134,104 @@ test_wait_exemptions() {
   pass "paused waits, verified transfers, and backlog captain holds are exempt"
 }
 
+# A child home's captain hold relayed on its parent channel is already in the
+# captain's hands: the structured key prefix exempts it, never the note text.
+test_relayed_captain_hold_is_exempt_by_key() {
+  reset_case
+  touch "$CONFIG/open-decision-reminders"
+  printf 'needs-decision [key=captain-hold-api-1] [at=1000]: captain hold api: choose\n' > "$STATE/mate.status"
+  printf 'needs-decision [at=1000] [key=rollout]: captain-hold-api-1 is waiting on the captain\n' > "$STATE/prose.status"
+  printf 'needs-decision [at=1000] [key=x-captain-hold-1]: choose\n' > "$STATE/infix.status"
+  printf 'blocked [at=1000] [key=api]: help\n' > "$STATE/worker.status"
+  open_decision_reminder_tick 1200
+  open_decision_reminder_tick 1200
+  open_decision_reminder_tick 1200
+  open_decision_reminder_tick 1200
+  [ "$(count_wakes)" = 3 ] || fail "expected exactly the three non-hold keys to remind: $(cat "$FM_WAKE_QUEUE")"
+  grep -F 'mate key=captain-hold-api-1' "$FM_WAKE_QUEUE" >/dev/null \
+    && fail "a relayed captain-hold key queued a reminder"
+  grep -F 'prose key=rollout' "$FM_WAKE_QUEUE" >/dev/null \
+    || fail "note prose naming a captain hold exempted an ordinary key"
+  grep -F 'infix key=x-captain-hold-1' "$FM_WAKE_QUEUE" >/dev/null \
+    || fail "a key merely containing captain-hold was exempted"
+  grep -F 'worker key=api' "$FM_WAKE_QUEUE" >/dev/null \
+    || fail "an unrelated open key stopped reminding"
+  pass "captain-hold- keys are exempt by prefix while unrelated and prose-only keys still remind"
+}
+
+# The structured [until=YYYY-MM-DD] field hold --until publishes re-arms the
+# relayed key from 00:00 UTC on that date; prose and malformed fields never
+# silence a key.
+test_relayed_captain_hold_until_rearms() {
+  reset_case
+  touch "$CONFIG/open-decision-reminders"
+  # 1970-01-02T00:00:00Z is epoch 86400.
+  printf 'needs-decision [key=captain-hold-api-1] [until=1970-01-02] [at=1000]: captain hold api: choose\n' > "$STATE/dated.status"
+  printf 'needs-decision [key=captain-hold-api-2] [at=1000]: captain hold api: revisit [until=1970-01-01]\n' > "$STATE/prose.status"
+  open_decision_reminder_tick 86399
+  [ "$(count_wakes)" = 0 ] || fail "a dated relayed hold reminded before its date: $(cat "$FM_WAKE_QUEUE")"
+  open_decision_reminder_tick 86400
+  [ "$(count_wakes)" = 1 ] || fail "a dated relayed hold did not re-arm on its date"
+  [ "$OPEN_DECISION_REMINDER" = 'check: open decision overdue: dated key=captain-hold-api-1 age=85400s' ] \
+    || fail "the re-armed reminder named the wrong key: $OPEN_DECISION_REMINDER"
+  open_decision_reminder_tick 86400
+  [ "$(count_wakes)" = 1 ] || fail "an [until=] date written in note prose re-armed a relayed hold"
+  printf 'needs-decision [key=captain-hold-api-3] [until=soon] [at=1000]: captain hold api: choose\n' > "$STATE/malformed.status"
+  open_decision_reminder_tick 86400
+  [ "$(count_wakes)" = 2 ] || fail "a malformed [until=] field silenced a relayed hold"
+  pass "a structured [until=] date re-arms a relayed hold; prose never does and a malformed one re-arms at once"
+}
+
+# A still-open key republished with only a new [at=] keeps its backoff instead
+# of restarting at the threshold; a changed note is a new episode.
+test_unchanged_republish_keeps_backoff() {
+  reset_case
+  touch "$CONFIG/open-decision-reminders"
+  printf 'needs-decision [at=1000] [key=api]: choose\n' > "$STATE/worker.status"
+  open_decision_reminder_tick 1200
+  open_decision_reminder_tick 1300
+  [ "$(count_wakes)" = 2 ] || fail "the first two reminders did not fire"
+  # The next delay is now 200s. A restarted ramp would fire 100s after 1310.
+  printf 'needs-decision [at=1310] [key=api]: choose\n' >> "$STATE/worker.status"
+  open_decision_reminder_tick 1450
+  [ "$(count_wakes)" = 2 ] || fail "an unchanged republish restarted the backoff at the threshold"
+  open_decision_reminder_tick 1500
+  [ "$(count_wakes)" = 3 ] || fail "the preserved backoff did not expire"
+  [ "$OPEN_DECISION_REMINDER" = 'check: open decision overdue: worker key=api age=500s' ] \
+    || fail "an unchanged republish lost the decision's first opened time: $OPEN_DECISION_REMINDER"
+  # The next delay is now 400s, so only a new episode fires at 1700.
+  printf 'needs-decision [at=1600] [key=api]: choose differently\n' >> "$STATE/worker.status"
+  open_decision_reminder_tick 1700
+  [ "$(count_wakes)" = 4 ] || fail "a changed note inherited the previous episode's backoff"
+  [ "$OPEN_DECISION_REMINDER" = 'check: open decision overdue: worker key=api age=100s' ] \
+    || fail "a changed note did not start a new episode: $OPEN_DECISION_REMINDER"
+  open_decision_reminder_tick 1800
+  [ "$(count_wakes)" = 5 ] || fail "the new episode did not repeat"
+  # The next delay is now 200s, so only a new episode fires at 1910.
+  printf 'blocked [at=1810] [key=api]: choose differently\n' >> "$STATE/worker.status"
+  open_decision_reminder_tick 1910
+  [ "$(count_wakes)" = 6 ] || fail "a changed verb inherited the previous episode's backoff"
+  [ "$OPEN_DECISION_REMINDER" = 'check: open decision overdue: worker key=api age=100s' ] \
+    || fail "a changed verb did not start a new episode: $OPEN_DECISION_REMINDER"
+  pass "an unchanged republish keeps its backoff while a changed verb or note restarts it"
+}
+
+# A ledger written before rows carried the verb and note still keeps its
+# backoff for the same opened time, and is rewritten in the current form.
+test_legacy_ledger_row_keeps_backoff() {
+  reset_case
+  touch "$CONFIG/open-decision-reminders"
+  printf 'needs-decision [at=1000] [key=api]: choose\n' > "$STATE/worker.status"
+  printf 'worker\tapi\t1000\t1200\t200' > "$STATE/.open-decision-reminders"
+  open_decision_reminder_tick 1399
+  [ "$(count_wakes)" = 0 ] || fail "a legacy ledger row lost its backoff"
+  open_decision_reminder_tick 1400
+  [ "$(count_wakes)" = 1 ] || fail "a legacy ledger row's backoff did not expire"
+  [ "$(cut -f6,7 "$STATE/.open-decision-reminders")" = "needs-decision"$'\t'"choose" ] \
+    || fail "the legacy row was not rewritten with its verb and note: $(cat "$STATE/.open-decision-reminders")"
+  pass "legacy five-column ledger rows keep their backoff and migrate in place"
+}
+
 test_unknown_times_and_keyless() {
   reset_case
   touch "$CONFIG/open-decision-reminders"
@@ -214,5 +312,7 @@ test_watcher_loop() {
 
 fm_test_run test_disabled test_oldest_and_backoff test_numeric_keys_are_distinct \
   test_numeric_tasks_are_distinct test_resolution_and_reopen \
-  test_wait_exemptions test_unknown_times_and_keyless test_timed_fold_is_incremental \
+  test_wait_exemptions test_relayed_captain_hold_is_exempt_by_key \
+  test_relayed_captain_hold_until_rearms test_unchanged_republish_keeps_backoff \
+  test_legacy_ledger_row_keeps_backoff test_unknown_times_and_keyless test_timed_fold_is_incremental \
   test_invalid_settings test_timed_cursor_retirement test_watcher_loop
