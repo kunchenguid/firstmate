@@ -362,11 +362,13 @@ fm_control_claude_session_id() {  # <claude-root> <worktree> <pid>...
 # transcript under <claude-root>; fails otherwise so the caller keeps the
 # fresh-session relaunch.
 fm_control_claude_resumable_session() {  # <claude-root> <recorded-harness> <recorded-id>
-  local root=${1-} id=${3-}
+  local root=${1-} id=${3-} dir
   [ "${2-}" = claude ] || return 1
   fm_control_claude_session_id_valid "$id" || return 1
-  compgen -G "$root/projects/*/$id.jsonl" >/dev/null || return 1
-  printf '%s' "$id"
+  for dir in "$root"/projects/*/; do
+    [ -e "$dir$id.jsonl" ] && { printf '%s' "$id"; return 0; }
+  done
+  return 1
 }
 
 # Which named keys a backend adapter can deliver. Every session provider

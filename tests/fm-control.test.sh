@@ -1324,7 +1324,7 @@ EOF
 }
 
 test_claude_session_resume_needs_a_recorded_transcript_backed_session() {
-  local d root harness rid wt id other got
+  local d root glob_root harness rid wt id other got
   d=$(fm_test_tmproot claude-resume)
   mkdir -p "$d"
   root="$d/claude"
@@ -1349,6 +1349,13 @@ test_claude_session_resume_needs_a_recorded_transcript_backed_session() {
   got=$(fm_control_claude_resumable_session "$root" "$harness" "$rid") \
     || fail "a recorded session with a transcript must be resumable"
   [ "$got" = "$id" ] || fail "expected resumable session $id, got '$got'"
+
+  glob_root="$d/claude[work]"
+  mkdir -p "$glob_root/projects/-some-worktree"
+  : > "$glob_root/projects/-some-worktree/$id.jsonl"
+  got=$(fm_control_claude_resumable_session "$glob_root" claude "$id") \
+    || fail "a Claude root whose name holds glob characters must still find its transcript"
+  [ "$got" = "$id" ] || fail "expected resumable session $id under the bracketed root, got '$got'"
 
   harness=pi rid=$id
   fm_control_claude_resumable_session "$root" "$harness" "$rid" >/dev/null \
