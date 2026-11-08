@@ -90,7 +90,7 @@ If a session exits mid-cycle and leaves an orphaned auto-arm hook, the replaceme
 [`turnend-guard.md`](turnend-guard.md#auto-arm-generation-claim) owns the open-claim definition.
 While supervision is still needed and away mode remains inactive, an actionable plain-arm close wakes the idle session through exit 2.
 Host closes follow the [host's output contract](../bin/fm-supervision-host.sh), including delivery after the fleet empties.
-StopFailure-driven continuations are paced rather than dropped during persistent API errors; after waiting, the hook stands down silently if away mode appeared or supervision is no longer needed.
+StopFailure-driven continuations are paced rather than dropped during persistent API errors; the [script header](../bin/fm-claude-stop-autoarm.sh) owns post-wait delivery gates.
 The script header owns the storm-bound mechanics, [configuration](configuration.md#environment-variables) lists the cooldown override, and [StopFailure verification](verification/supervision.md#stopfailure-auto-arm) records the Herdr-hosted evidence and deterministic regression entry point.
 
 ### Claude session-lock ownership
