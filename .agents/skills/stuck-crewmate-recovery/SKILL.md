@@ -1,7 +1,7 @@
 ---
 name: stuck-crewmate-recovery
 description: >-
-  Load when the session-start digest reports an ordinary direct report's endpoint dead or its metadata has no window, after a stale wake, looping pane, repeated confusion, an answered-by-brief question, an unresponsive crewmate, or a failed steer, after observing a defeated Claude or Codex bypass, and when a live crewmate reports its no-mistakes pipeline dead, unreachable, or timed out.
+  Load when the session-start digest reports an ordinary direct report's endpoint dead or its metadata has no window, after a stale wake, looping pane, repeated confusion, an answered-by-brief question, an unresponsive crewmate, or a failed steer, after observing a defeated Claude or Codex bypass, when a live crewmate reports its no-mistakes pipeline dead, unreachable, or timed out, and on every heartbeat review for work that is not visibly progressing, including a declared wait, an open decision, or a delegated track with no first sign of work.
 user-invocable: false
 metadata:
   internal: true
@@ -71,6 +71,26 @@ Nothing reaches the captain in that case.
 Never restart, stop, or update the shared daemon on a crewmate's claim.
 It is one instance serving every lane and home, so a restart kills other lanes' in-flight runs.
 Only positive socket refusal or absence is a daemon-down finding; escalate that finding, or a failed run record that names a daemon error, to the captain.
+
+## Stalled-work follow-through
+
+This is the one owner of how firstmate handles work that is not visibly progressing, so the captain never has to ask for status to find it.
+Apply it at every heartbeat review, every stale wake, and whenever a recovery case above turns out to be a quiet wait rather than a dead worker.
+Every such task must end the review with a named next action and an accountable owner (the worker, firstmate, the captain, or a named external system); "waiting" alone is neither.
+
+1. Classify the stall.
+   A genuine captain decision is one `ask-user-authority` and `AGENTS.md` section 9 reserve for the captain: a product choice, a merge the standing posture does not cover, a destructive, irreversible, or security-sensitive action, or a needed credential.
+   Everything else is work firstmate or the worker can advance: a question the brief or code answers, an unanswered steer, a dead or looping endpoint, a queued item whose dependencies cleared, or an unfiled follow-up.
+2. Advance what firstmate can advance in the same review, through the steer, recovery, dispatch, or backlog path that owns it; never park it as awaiting the captain.
+   Escalate a genuine decision once, with evidence and a recommendation, and hold it through `captain-hold-lifecycle`; do not re-escalate an unchanged decision.
+3. Verify every wait against its own condition and do not mistake monitoring for progress.
+   A live supervision cycle, a quiet pane, or elapsed time proves nothing.
+   A declared `paused:` wait is healthy only while the condition it names is still pending and any `until` time has not passed; a cleared condition, an elapsed `until`, or a wait that names nothing checkable is a stall to advance under step 2.
+   A verified healthy wait stays silent.
+4. Confirm a delegated track actually started.
+   After a spawn, a steer, or work routed to a secondmate, look for the first sign of work in the next review: a status line, pane activity, or the steering message moved to `handled/`.
+   No sign means the track never started, so treat it as unresponsive under the escalation below rather than as a wait.
+5. Never end a review with a stalled task that has no owner or next action; record the one you chose in its backlog note when it will outlive this turn.
 
 ## Live-endpoint escalation
 
