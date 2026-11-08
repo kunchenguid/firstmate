@@ -225,6 +225,44 @@ test_launch_exports_task_inbox() {
   pass "ship and secondmate launches export their absolute steering inbox as FM_TASK_INBOX"
 }
 
+# A pane does not inherit the spawner's FM_HOME, so every launch must set it:
+# ships and scouts get the spawner's active home, which here differs from the
+# code root, and a secondmate gets its own home. Without it a worker's bin/*.sh
+# scripts would resolve their code root as the home.
+test_launch_exports_active_home() {
+  local kind rec id sm out status seen want
+  for kind in ship scout secondmate; do
+    id="home-$kind-a1"
+    rec=$(make_case "home-$kind" codex "$id")
+    read_case "$rec"
+    : > "$HOME_DIR/config/launch-env-allowlist"
+    want=$HOME_DIR
+    case "$kind" in
+    ship) out=$(run_case_spawn "$id" "$PROJ_DIR" --mode no-mistakes --yolo off) ;;
+    scout) out=$(run_case_spawn "$id" "$PROJ_DIR" --scout) ;;
+    secondmate)
+      sm="$CASE_DIR/secondmate-home"
+      mkdir -p "$sm/bin" "$sm/data"
+      printf '# Firstmate\n' > "$sm/AGENTS.md"
+      printf '%s\n' "$id" > "$sm/.fm-secondmate-home"
+      printf 'charter for %s\n' "$id" > "$sm/data/charter.md"
+      printf '%s\n' 'projects/' 'state/' 'data/' 'config/' '.no-mistakes/' > "$sm/.gitignore"
+      git -C "$sm" init -q -b main
+      want=$sm
+      out=$(run_case_spawn "$id" "$sm" --secondmate)
+      ;;
+    esac
+    status=$?
+    expect_code 0 "$status" "$kind spawn should succeed: $out"
+    install_env_probe "$FAKEBIN_DIR" codex FM_HOME
+    seen=$(emitted_launch_env "$FAKEBIN_DIR" "$LAUNCH_LOG" "$PANE_LOG") \
+      || fail "$kind: the emitted launch failed to run"
+    [ "$seen" != "$ROOT" ] || fail "$kind: FM_HOME must not be the code root"
+    assert_equals "$want" "$seen" "a $kind agent must start with FM_HOME set to its home"
+  done
+  pass "ship and scout launches export the active home as FM_HOME; a secondmate gets its own"
+}
+
 # --- relaunch ---------------------------------------------------------------
 #
 # bin/fm-control.sh relaunch stops the agent and rebuilds the launch through
@@ -421,5 +459,6 @@ test_ship_allowlist_enabled
 test_launch_command_carries_the_switch_without_the_pane_export
 test_secondmate_launch
 test_launch_exports_task_inbox
+test_launch_exports_active_home
 test_relaunch_rebuilds_the_switch
 test_raw_compound_launch_command_carries_the_switch

@@ -7614,6 +7614,9 @@ if [ -n "$WORKER_ACCOUNT" ]; then
 elif [ "$HARNESS" = claude ] && [ -n "${CLAUDE_CONFIG_DIR:-}" ]; then
   LAUNCH="CLAUDE_CONFIG_DIR=$(shell_quote "$CLAUDE_CONFIG_DIR") $LAUNCH"
 fi
+# Like CLAUDE_CONFIG_DIR above, FM_HOME cannot be left to pane inheritance:
+# every worker gets its home explicitly, or its bin/*.sh scripts fall back to
+# their own code root as the home.
 if [ "$KIND" = secondmate ]; then
   sq_home=$(shell_quote "$PROJ_ABS")
   sq_primary_home=$(shell_quote "$FM_HOME")
@@ -7636,6 +7639,9 @@ if [ "$KIND" = secondmate ]; then
   # Reuse the single frozen decision from the carrier resolution above so the
   # injected carrier and this on/off snapshot are guaranteed to agree.
   LAUNCH="FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= FM_PUBLIC_FOLLOWUP_PRIMARY_HOME=$sq_primary_home FM_HOME=$sq_home FM_TRACE_CONTEXT=$SPAWN_TRACE_EFFECTIVE FM_SUPERVISION_MODEL=$supervision_model $LAUNCH"
+else
+  # A ship or scout works for the active home itself.
+  LAUNCH="FM_HOME=$(shell_quote "$FM_HOME") $LAUNCH"
 fi
 # Implement the launch-delivery contract in this script's header. The full
 # home-identity hash isolates equal task ids across homes, and the spawn token in
@@ -7791,7 +7797,7 @@ if [ "$BACKEND" = t3code ]; then
     T3CODE_ENV+=("LAVISH_AXI_HOST=$LAVISH_AXI_HOST")
   fi
   if [ "$KIND" = ship ] || [ "$KIND" = scout ]; then
-    T3CODE_ENV+=("FM_TASK_ID=$ID")
+    T3CODE_ENV+=("FM_TASK_ID=$ID" "FM_HOME=$FM_HOME")
   fi
   if [ -n "$SPAWN_TRACEPARENT" ] && spawn_record_traceparent; then
     T3CODE_ENV+=("TRACEPARENT=$SPAWN_TRACEPARENT")
