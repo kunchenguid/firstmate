@@ -21,6 +21,7 @@
 #
 # Usage:
 #   fm-captain-hold.sh hold <task-id> --reason <reason> \
+#     --rec <pick> [--option <text>]... [--key <slug>] \
 #     [--title <title>] [--repo <repo>] [--origin <origin-id>] [--until YYYY-MM-DD]
 #   fm-captain-hold.sh answer <task-id> --decision-file <path> [--release]
 #   fm-captain-hold.sh answers [<legacy-origin> | --any-origin] --source <provenance>   (keyed answers on stdin)
@@ -56,6 +57,15 @@
 # `--until` records the captain's own deferral date through `tasks-axi hold
 # --until`, so a "revisit later" answer is stored as a date instead of a live
 # card.
+#
+# A new ask must carry the agent's recommended pick: `--rec <pick>` is required
+# (refused otherwise, before anything is written) and is appended to the hold
+# reason as a `Rec:` line, after up to four `--option <text>` numbered lines. An
+# already captain-held task and a `--until` deferral record are not new asks.
+# `--key <slug>` (the decision-key charset of bin/fm-classify-lib.sh) names the
+# subject of the ask and is recorded on a `Captain hold key:` body line: a new
+# ask whose key matches another open captain hold creates nothing and says it
+# attached to the existing one, whose id is printed instead.
 #
 # `answer` records the captain's exact words and resolves the call in the same
 # act. It requires a non-empty captain decision file of at most 8192 bytes and
@@ -844,6 +854,16 @@ body_hold_origin() {  # <decoded-task-body>
   printf '%s\n' "$1" | sed -n 's/^Captain hold origin: \(.*\)$/\1/p' | head -1
 }
 
+# The numbered option and Rec lines that end a shown captain-hold reason,
+# each led by a newline, so a retry without --rec can carry them forward.
+shown_hold_pick() {  # <show-output>
+  printf '%s\n' "$(decode_shown_value "$(printf '%s\n' "$1" | fm_hold_reason_decode_stream \
+    | sed -n 's/^  hold_reason: //p' | head -1)")" \
+    | awk '{ l[NR] = $0 } /^Rec: / { r = NR }
+      END { if (!r) exit; s = r; while (s > 1 && l[s - 1] ~ /^[1-4]\. /) s--
+        for (i = s; i <= NR; i++) printf "\n%s", l[i] }'
+}
+
 task_identity() {
   local id=$1
   if task_show "$id"; then
@@ -855,16 +875,17 @@ task_identity() {
   printf '%s' "$id"
 }
 
-write_hold_origin() {  # <task-id> <shown-body> <origin>
-  local id=$1 body=$2 origin=$3 stamp rest new_body tmp
+write_hold_origin() {  # <task-id> <shown-body> <origin> [<label>, default "origin"]
+  local id=$1 body=$2 origin=$3 label=${4:-origin} stamp rest new_body tmp
   body=$(decode_shown_value "$body") \
     || fail "could not decode the existing body for $id"
   stamp=$(printf '%s\n' "$body" | sed -n 1p)
   [ -n "$(body_hold_set_timestamp "$body")" ] \
     || fail "task $id lost its hold-set stamp before its origin was recorded"
-  rest=$(printf '%s\n' "$body" | sed 1d | awk '!/^Captain hold origin: /' \
+  rest=$(printf '%s\n' "$body" | sed 1d | awk -v p="Captain hold $label: " 'index($0, p) != 1' \
     | awk 'NF || started { started = 1; print }')
-  new_body=$(printf '%s\nCaptain hold origin: %s' "$stamp" "$origin")
+  new_body=$stamp
+  [ -z "$origin" ] || new_body=$(printf '%s\nCaptain hold %s: %s' "$stamp" "$label" "$origin")
   if [ -n "$rest" ]; then
     new_body=$(printf '%s\n\n%s' "$new_body" "$rest")
   fi
@@ -1029,7 +1050,7 @@ archived_entry() {  # <origin-or-empty> <entry>; prints the archived id
 # as absence. The result carries the attestation evidence and whether an
 # origin was recorded, so completion can disclose the legacy fallback.
 verify_entry_durable() {  # <origin-or-empty> <entry>; prints "<id> <how> <origin-state>"
-  local origin=$1 entry=$2 resolved resolve_status=0 id how stored origin_state=unrecorded origin_id stored_id resolve_err archived archived_status
+  local origin=$1 entry=$2 resolved resolve_status=0 id how stored origin_state=unrecorded origin_id stored_id resolve_err archived archived_status attached
   # The origin task is never its own captain-call inventory: it is the work the
   # calls were found in, so accepting it would let a refused hold look recorded.
   if [ -n "$origin" ] && [ "$origin" != "$BINDING_ANY" ] && [ "$entry" = "$origin" ]; then
@@ -1070,7 +1091,11 @@ verify_entry_durable() {  # <origin-or-empty> <entry>; prints "<id> <how> <origi
     origin_id=$(task_identity "$origin") || exit $?
     [ "$id" != "$origin_id" ] || refuse_self_inventory "$origin" "$entry"
   fi
-  if [ -n "$stored" ]; then
+  attached=$(printf '%s\n' "$(decode_shown_value "$(show_field "$TASK_SHOW_OUTPUT" body)")" \
+    | sed -n 's/^Captain hold attached origins: \(.*\)$/\1/p' | head -1)
+  if [ -n "$origin" ] && [ "$origin" != "$BINDING_ANY" ] && list_has_line "${attached// /$'\n'}" "$origin_id"; then
+    origin_state=recorded
+  elif [ -n "$stored" ]; then
     if [ -n "$origin" ] && [ "$origin" != "$BINDING_ANY" ]; then
       stored_id=$(task_identity "$stored") || exit $?
       if [ "$stored_id" != "$origin_id" ]; then
@@ -1083,14 +1108,21 @@ verify_entry_durable() {  # <origin-or-empty> <entry>; prints "<id> <how> <origi
 }
 
 command_hold() {
-  local id=${1:-} title='' reason='' repo='' origin='' until='' show state existing_title body='' hold_kind hold_set occurrence
-  local existing_hold_kind='' existing_held='' preserve_hold_set=0 stored_reason original_body='' hold_status=0
+  local id=${1:-} title='' reason='' rec='' key='' options='' nopt=0 dup='' other pre repo='' origin='' until='' show state existing_title body='' hold_kind hold_set occurrence
+  local existing_hold_kind='' existing_held='' preserve_hold_set=0 stored_reason original_body='' hold_status=0 ids attached exists prev_origin
   [ "$#" -ge 1 ] || { usage >&2; exit 2; }
   shift
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --title) shift; title=${1:-} ;;
       --reason) shift; reason=${1:-} ;;
+      --rec) shift; rec=${1:-} ;;
+      --key) shift; key=${1:-} ;;
+      --option)
+        shift; nopt=$((nopt + 1))
+        [ "$nopt" -le 4 ] || fail "at most 4 --option values are allowed"
+        options="${options}${nopt}. ${1:-}"$'\n'
+        ;;
       --repo) shift; repo=${1:-} ;;
       --origin) shift; origin=${1:-} ;;
       --until) shift; until=${1:-} ;;
@@ -1100,6 +1132,12 @@ command_hold() {
   done
   validate_slug task-id "$id"
   [ -n "$reason" ] || fail "reason must not be empty"
+  [ -z "$options" ] || [ -n "$rec" ] || fail "--option needs --rec \"<the option you recommend and why>\""
+  [ -z "$key" ] || _fm_decision_slug_ok "$key" || fail "--key must be a privacy-safe slug: $key"
+  # The pick and options live in the reason text, so every place the hold is shown carries them.
+  if [ -n "$rec" ]; then
+    reason="${reason}"$'\n'"${options}Rec: ${rec}"
+  fi
   # bin/fm-hold-reason-lib.sh owns the storage constraint and reversible encoding.
   stored_reason=$(fm_hold_reason_encode "$reason") || fail "could not encode the hold reason"
   if [ -n "$origin" ]; then
@@ -1118,6 +1156,55 @@ command_hold() {
   esac
   acquire_task_control_lock "$id"
   require_tasks_axi
+  pre=0
+  exists=0
+  if task_show "$id"; then
+    exists=1
+    [ "$(show_field_value "$TASK_SHOW_OUTPUT" hold_kind)" = captain ] && pre=1
+  fi
+  if [ "$pre" = 1 ] && [ -z "$rec" ]; then
+    reason="${reason}$(shown_hold_pick "$TASK_SHOW_OUTPUT")"
+    stored_reason=$(fm_hold_reason_encode "$reason") || fail "could not encode the hold reason"
+  fi
+  if [ "$pre" = 0 ] && [ -z "$until" ]; then
+    [ -n "$rec" ] || fail "a new captain ask must carry your recommended pick: add --rec \"<the option you recommend and why>\" (optionally 1-4 --option \"<text>\")"
+    # ponytail: locks are per task id, so two different ids racing on one key can both pass; add a key lock if that bites.
+    # Only an ask that would create its task collapses: an existing task (often
+    # the work itself) is what merge checks read, so it keeps its own hold.
+    if [ -n "$key" ] && [ "$exists" = 0 ]; then
+      ids=$(open_task_ids) \
+        || fail "could not list the backlog to check decision key $key for an open hold; no hold created for $id"
+      while IFS= read -r other; do
+        [ -n "$other" ] && [ "$other" != "$id" ] || continue
+        task_show "$other" || continue
+        [ "$(show_field_value "$TASK_SHOW_OUTPUT" hold_kind)" = captain ] || continue
+        [ "$(show_field_value "$TASK_SHOW_OUTPUT" held)" = yes ] || continue
+        [ "$(printf '%s\n' "$(decode_shown_value "$(show_field "$TASK_SHOW_OUTPUT" body)")" | sed -n 's/^Captain hold key: \(.*\)$/\1/p' | head -1)" = "$key" ] || continue
+        dup=$other
+        break
+      done <<< "$ids"
+      if [ -n "$dup" ]; then
+        if [ -n "$origin" ]; then
+          validate_slug origin-id "$origin"
+          origin=$(task_identity "$origin") || exit $?
+          release_task_control_lock
+          acquire_task_control_lock "$dup"
+          task_show_or_fail "$dup" "task $dup disappeared before origin $origin was attached"
+          [ "$(show_field_value "$show" held)" = yes ] && [ "$(show_field_value "$show" hold_kind)" = captain ] \
+            || fail "task $dup was released before origin $origin was attached; retry the hold"
+          [ "$(printf '%s\n' "$(decode_shown_value "$(show_field "$show" body)")" | sed -n 's/^Captain hold key: \(.*\)$/\1/p' | head -1)" = "$key" ] \
+            || fail "task $dup no longer carries decision key $key; origin $origin was not attached, retry the hold"
+          attached=$(printf '%s\n' "$(decode_shown_value "$(show_field "$show" body)")" \
+            | sed -n 's/^Captain hold attached origins: \(.*\)$/\1/p' | head -1)
+          list_has_line "${attached// /$'\n'}" "$origin" \
+            || write_hold_origin "$dup" "$(show_field "$show" body)" "${attached:+$attached }$origin" "attached origins" || exit $?
+        fi
+        printf 'fm-captain-hold: decision key %s is already an open captain hold; attached to %s%s, no new hold created for %s\n' "$key" "$dup" "${origin:+ for origin $origin}" "$id" >&2
+        printf '%s\n' "$dup"
+        exit 0
+      fi
+    fi
+  fi
   if task_show "$id"; then
     show=$TASK_SHOW_OUTPUT
     state=$(show_field "$show" state)
@@ -1189,8 +1276,24 @@ command_hold() {
     || fail "task $id lost its hold-set stamp while being held"
   occurrence=$(( $(resolution_record_count "$(show_field "$show" body)") + 1 ))
   publish_parent_hold "$id" "$occurrence" needs-decision "$reason"
+  prev_origin=$(body_hold_origin "$(decode_shown_value "$(show_field "$show" body)")")
   if [ -n "$origin" ]; then
     write_hold_origin "$id" "$(show_field "$show" body)" "$origin" || exit $?
+  fi
+  if [ -n "$key" ] || [ "$pre" = 0 ]; then
+    task_show_or_fail "$id" "task $id disappeared before its decision key was recorded"
+    show=$TASK_SHOW_OUTPUT
+    if [ -n "$key" ] || printf '%s\n' "$(decode_shown_value "$(show_field "$show" body)")" | grep -q '^Captain hold key: '; then
+      write_hold_origin "$id" "$(show_field "$show" body)" "$key" key || exit $?
+    fi
+  fi
+  # Attached origins belong to one call: a new ask or a move to another origin drops them.
+  if [ "$pre" = 0 ] || { [ -n "$origin" ] && [ "$origin" != "$prev_origin" ]; }; then
+    task_show_or_fail "$id" "task $id disappeared before its attached origins were cleared"
+    show=$TASK_SHOW_OUTPUT
+    if printf '%s\n' "$(decode_shown_value "$(show_field "$show" body)")" | grep -q '^Captain hold attached origins: '; then
+      write_hold_origin "$id" "$(show_field "$show" body)" "" "attached origins" || exit $?
+    fi
   fi
   printf '%s\n' "$id"
 }
@@ -2108,9 +2211,10 @@ EOF
 # two comma-separated listing fields are read - both are slugs that precede any
 # quoted title - so a title containing commas or quotes cannot shift them.
 open_task_ids() {
-  local data
+  local data listing
   data=$(fm_backlog_data_absolute "$DATA") || return 1
-  fm_backlog_row_list "$data" 2>/dev/null | awk -F, '
+  listing=$(fm_backlog_row_list "$data" 2>/dev/null) || return 1
+  printf '%s\n' "$listing" | awk -F, '
     /^  [A-Za-z0-9._-]+,/ {
       id = $1
       sub(/^ +/, "", id)

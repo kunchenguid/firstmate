@@ -64,6 +64,20 @@ Repeat and edge cases:
 - Re-holding released work starts a new timestamped lifecycle.
 - A closed task is refused rather than reopened.
 - `--until` stores the captain's own deferral date through tasks-axi's date gate.
+- A new ask must carry the agent's recommended pick: `--rec "<pick>"` is required, and `hold` refuses before writing anything when it is missing.
+  The pick is appended to the hold reason as a `Rec:` line, after up to four `--option "<text>"` values rendered as numbered lines, so every place the hold text is shown carries them.
+  `--option` without `--rec` is refused.
+  A task that still carries its captain hold kind (a retry, including one whose `--until` date has passed but was never released) and a `--until` deferral record are not new asks and need no pick.
+  Such a retry without `--rec` keeps the numbered options and `Rec:` line from the stored reason, and it also keeps the key and attached origins lines.
+- `--key <slug>` names the ask's subject, in the decision-key charset owned by [`bin/fm-classify-lib.sh`](../bin/fm-classify-lib.sh), and is recorded on a `Captain hold key:` body line.
+  A new ask that would create its task, and whose key matches another open captain hold, creates nothing: the output says it attached to the existing hold and prints that task id.
+  A task that already exists, often the work itself, is held on its own even when the key matches, because merge checks read that task's hold.
+  With `--origin`, that origin is added to the existing hold's `Captain hold attached origins:` body line, so `complete` accepts the hold for it too.
+  The key is checked again under that task's lock; if the hold was released or its key changed meanwhile, nothing is attached and the ask is refused with a retry message.
+  A new ask on that task, or a move to another origin, drops the attached origins line.
+  If the backlog listing fails, the keyed ask is refused instead of treated as an empty queue.
+  Different keys stay separate holds.
+  A new ask without `--key` drops any key line left from an earlier released ask on the same task.
 - `--origin` resolves the backend origin identity before writing the hold-set stamp.
   The association lives on its own `Captain hold origin:` body line; [completion inventory checks](#recording-a-reviewed-inventory-complete) own how it is verified.
   The ordering above prevents an interrupted or refused backend hold from publishing the new association, even when an old captain hold is still active or date-expired.
@@ -128,7 +142,7 @@ A Done task still requires a recorded resolution, but is not subject to that sta
 An answered entry that markdown Done retention moved into the configured Done archive still counts, while an archived close with no recorded answer does not.
 The origin is never its own inventory entry, so a hold that failed cannot be vouched for by the origin row.
 For a historical inventory that names its own origin, hold a separate captain task with `--origin`, replace only the invalid entry in the final `decision_keys=` line of the origin metadata with that task id while preserving all other entries, and re-run `complete`.
-An entry whose recorded origin differs from the one being completed is refused, comparing backend identities rather than alias spellings.
+An entry whose recorded origin differs from the one being completed is refused, comparing backend identities rather than alias spellings, unless that origin is on the entry's `Captain hold attached origins:` line from a duplicate `--key` ask.
 An entry with no recorded origin, such as a hold made before origins were recorded or without `--origin`, is accepted on the durability check alone and named in the output.
 
 With a non-empty inventory, `complete` appends a `captain-held [key=<key>]` transfer event for every still-open keyed status decision.
@@ -560,6 +574,8 @@ The suite does not test the accepted merge-to-cleanup re-hold window or asynchro
 - Hold-set stamping precedes visible hold state, preserves an active lifecycle's timestamp, and resets after release.
 - Interrupted answer closure retains the stamp until close and restores resolution-first ordering on retry.
 - Deferral through `--until` leaves `captain_actionable` false until due.
+- A hold without `--rec` is refused and writes nothing, `--option` lines render numbered with the `Rec:` line, a retry without `--rec` keeps the stored options and `Rec:` line, a repeated `--key` attaches to the open hold (recording its `--origin` so `complete` accepts it until a new ask drops it) while existing work and a different key get their own hold, and a failed backlog listing refuses a keyed ask without creating a hold (`test_hold_requires_a_pick_and_renders_options`, `test_hold_collapses_a_duplicate_decision_key`).
+- Extending a date-expired, unanswered call with `--until` keeps its attached origins, `Rec:` line, and key (`test_until_extension_keeps_the_unanswered_call`).
 
 ### Legacy paths
 
