@@ -2309,6 +2309,45 @@ SH
   pass "forced secondmate cleanup refuses child scout task data written while the child stops"
 }
 
+# A detached capture in the child scout copy survives the child window close
+# and flushes its artifacts only when stopped; forced cleanup must stop it and
+# find those artifacts before the copy goes.
+test_forced_secondmate_child_scout_detached_writer_is_stopped_and_preserved() {
+  local case_dir home child_wt pid rc
+  case_dir=$(make_case secondmate-child-detached-writer)
+  write_meta "$case_dir" local-only secondmate
+  home="$case_dir/secondmate-home"
+  mkdir -p "$home/state" "$home/data" "$home/config" "$home/projects"
+  printf '%s\n' task-x1 > "$home/.fm-secondmate-home"
+  printf '%s\n' "home=$home" >> "$case_dir/state/task-x1.meta"
+  child_wt="$case_dir/child-scout-wt"
+  git -C "$case_dir/project" worktree add -q -b fm/child-scout "$child_wt" main
+  fm_write_meta "$home/state/child-scout.meta" \
+    'window=firstmate:fm-child-scout' 'endpoint_task_id=child-scout' \
+    "worktree=$child_wt" "project=$case_dir/project" 'kind=scout' 'mode=local-only'
+  add_treehouse_clean_fd "$case_dir"
+  ( cd "$child_wt" && exec bash -c '
+      trap "mkdir -p data/child-scout && printf \"final capture\n\" > data/child-scout/capture.txt; exit 0" TERM
+      : > "$0"
+      while :; do sleep 0.1; done' "$case_dir/writer-ready" ) &
+  pid=$!
+  disown
+  for _ in $(seq 50); do [ -e "$case_dir/writer-ready" ] && break; sleep 0.1; done
+  [ -e "$case_dir/writer-ready" ] || fail "detached child writer: setup writer did not start"
+  rc=0
+  run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  if kill -0 "$pid" 2>/dev/null; then
+    kill -KILL "$pid" 2>/dev/null || true
+    fail "detached child writer: forced cleanup left the writer running in the child copy (rc=$rc)"
+  fi
+  expect_code 1 "$rc" "detached child writer: forced cleanup must refuse"
+  assert_grep 'scout task data' "$case_dir/stderr" "detached child writer: refusal missing"
+  assert_grep 'final capture' "$child_wt/data/child-scout/capture.txt" "detached child writer: data lost"
+  assert_present "$home/state/child-scout.meta" "detached child writer: child record removed"
+  assert_present "$case_dir/state/task-x1.meta" "detached child writer: parent record removed"
+  pass "forced secondmate cleanup stops a detached child scout writer and refuses its final task data"
+}
+
 # A grandchild scout's refusal names the destination under its own secondmate,
 # matching the nested layout teardown archives that secondmate's records into,
 # both before any endpoint stops and when data appears as the grandchild stops.
@@ -6702,6 +6741,7 @@ test_forced_secondmate_retires_child_scout_with_missing_copy
 test_forced_secondmate_grandchild_scout_names_nested_destination
 test_scout_task_data_written_while_stopping_is_preserved
 test_forced_secondmate_child_scout_late_task_data_is_preserved
+test_forced_secondmate_child_scout_detached_writer_is_stopped_and_preserved
 test_hidden_untracked_work_refuses_before_return
 test_content_fallback_git_capability_boundary
 test_work_written_at_reap_boundary_is_preserved

@@ -2133,6 +2133,13 @@ teardown_require_scout_data_preserved() {  # <id> <worktree> <durable-destinatio
   fi
 }
 
+teardown_require_child_scout_data_preserved() {  # <id> <worktree> <backend> <target> <durable-destination>
+  if [ -n "$2" ] && [ -d "$2" ]; then
+    ID=$1 BACKEND=$3 T=$4 reap_task_worktree_processes "child scout copy" "$2" || return 1
+  fi
+  teardown_require_scout_data_preserved "$1" "$2" "$5"
+}
+
 # Scratch and --force copies are scrubbed before Treehouse return. See the
 # script header for why `git clean -fd` is not enough and why a dirty return
 # is not reported as clean.
@@ -3635,7 +3642,8 @@ cleanup_firstmate_home_children() {
     elif [ "$child_backend" = orca ]; then
       # The child endpoint is stopped: re-prove before its copy goes.
       [ "$child_kind" != scout ] \
-        || teardown_require_scout_data_preserved "$child_id" "$child_wt" "$DATA/$archive_parent/children/$child_id" || return 1
+        || teardown_require_child_scout_data_preserved "$child_id" "$child_wt" "$child_backend" "$child_t" \
+          "$DATA/$archive_parent/children/$child_id" || return 1
       if [ -n "$child_wt" ] && [ -d "$child_wt" ]; then
         validate_child_worktree_for_removal "$child_wt" "$child_proj" >/dev/null || return 1
         rm -f "$child_wt/.claude/settings.local.json" "$child_wt/.opencode/plugins/fm-turn-end.js" \
@@ -3658,7 +3666,8 @@ cleanup_firstmate_home_children() {
       else
         validate_child_worktree_for_removal "$child_wt" "$child_proj" >/dev/null || return 1
         [ "$child_kind" != scout ] \
-          || teardown_require_scout_data_preserved "$child_id" "$child_wt" "$DATA/$archive_parent/children/$child_id" || return 1
+          || teardown_require_child_scout_data_preserved "$child_id" "$child_wt" "$child_backend" "$child_t" \
+          "$DATA/$archive_parent/children/$child_id" || return 1
         rm -f "$child_wt/.claude/settings.local.json" "$child_wt/.opencode/plugins/fm-turn-end.js" \
           "$child_wt/.opencode/plugins/fm-busy-state.js" \
           "$child_wt/.fm-grok-turnend" "$child_wt/.fm-kimi-turnend"
