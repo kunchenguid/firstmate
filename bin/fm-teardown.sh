@@ -4257,6 +4257,14 @@ fi
 # racing the same id stays serialized exactly as it was before. A captain-held
 # row takes the retain transition here instead of the close: same record, same
 # ordering, the row returns to Queued with its deliverable recorded.
+if [ -e "$TEARDOWN_DELIVERY_PENDING" ] || [ -L "$TEARDOWN_DELIVERY_PENDING" ]; then
+  fm_backlog_atomic_transition remove "$TEARDOWN_DELIVERY_PENDING" "delivery cleanup marker" "$STATE" || {
+    fm_lock_release "$META_LOCK"
+    META_LOCK_HELD=0
+    echo "error: $ID cleanup finished but its delivery cleanup marker could not be removed ($FM_BACKLOG_TRANSITION_ERROR)" >&2
+    exit 1
+  }
+fi
 if [ "$BACKLOG_CLOSED" = 1 ]; then
   BACKLOG_CLOSE_MARKER=$(fm_backlog_close_marker_path "$STATE" "$ID") || exit 1
   if ! fm_backlog_atomic_transition "$BACKLOG_TRANSITION" "$STATE/$ID.meta" "$BACKLOG_CLOSE_MARKER" \
@@ -4282,14 +4290,6 @@ else
     echo "error: $ID's endpoint and local copy are cleaned up, but its task record could not be removed ($FM_BACKLOG_TRANSITION_ERROR)" >&2
     exit 1
   fi
-fi
-if [ -e "$TEARDOWN_DELIVERY_PENDING" ]; then
-  fm_backlog_atomic_transition remove "$TEARDOWN_DELIVERY_PENDING" "delivery cleanup marker" "$STATE" || {
-    fm_lock_release "$META_LOCK"
-    META_LOCK_HELD=0
-    echo "error: $ID cleanup finished but its delivery cleanup marker could not be removed ($FM_BACKLOG_TRANSITION_ERROR)" >&2
-    exit 1
-  }
 fi
 fm_lock_release "$META_LOCK"
 META_LOCK_HELD=0

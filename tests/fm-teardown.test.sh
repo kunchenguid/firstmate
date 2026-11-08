@@ -4352,6 +4352,46 @@ test_teardown_retains_journal_bound_to_another_pane() {
   pass "teardown retains a presentation journal bound to a pane other than the closed endpoint"
 }
 
+test_delivery_marker_removal_failure_keeps_retry_record() {
+  local case_dir marker real_rm
+  case_dir=$(make_case delivery-marker-removal-failure)
+  write_meta "$case_dir" local-only ship
+  printf '%s\n' 'cleanup_recovery=delivery-unconfirmed' >> "$case_dir/state/task-x1.meta"
+  marker="$case_dir/state/task-x1.delivery-unconfirmed"
+  printf '%s\n' 'cleanup_recovery=delivery-unconfirmed' > "$marker"
+  real_rm=$(command -v rm)
+  cat > "$case_dir/fakebin/rm" <<'SH'
+#!/usr/bin/env bash
+for arg in "$@"; do
+  if [ "$arg" = "${FM_FAIL_REMOVE_PATH:-}" ]; then
+    exit 1
+  fi
+done
+exec "${REAL_RM_FOR_TEST:?}" "$@"
+SH
+  chmod +x "$case_dir/fakebin/rm"
+  seed_backlog_in_flight "$case_dir"
+
+  if REAL_RM_FOR_TEST="$real_rm" FM_FAIL_REMOVE_PATH="$marker" \
+    run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr"; then
+    fail "delivery-marker-removal-failure: teardown ignored the failed marker removal"
+  fi
+  assert_present "$case_dir/state/task-x1.meta" \
+    "failed marker removal discarded the retryable task record"
+  assert_present "$marker" "failed marker removal discarded the delivery marker"
+  assert_equals "in_flight" "$(backlog_row_state "$case_dir")" \
+    "failed marker removal closed the unconfirmed delivery row"
+
+  rm -f "$case_dir/fakebin/rm"
+  run_teardown "$case_dir" --force > "$case_dir/retry.stdout" 2> "$case_dir/retry.stderr" \
+    || fail "delivery-marker-removal-failure: retry failed: $(cat "$case_dir/retry.stderr")"
+  assert_absent "$case_dir/state/task-x1.meta" "retry kept the task record"
+  assert_absent "$marker" "retry kept the delivery marker"
+  assert_equals "in_flight" "$(backlog_row_state "$case_dir")" \
+    "retry closed the unconfirmed delivery row"
+  pass "teardown keeps retry state when delivery marker removal fails"
+}
+
 # A version 1 attempt journal binds no pane, so proving the recorded task pane
 # gone does not prove its token-bearing projected workspace gone. When the v2
 # bind never landed (RETIRE_CANDIDATE stays 0 because the metadata workspace no
@@ -6494,6 +6534,7 @@ test_herdr_projection_teardown_closes_pane_before_returning_its_copy
 test_herdr_projection_teardown_refused_close_preserves_task_and_copy
 test_teardown_retires_task_watcher_markers_and_orphan_journal
 test_teardown_retains_journal_bound_to_another_pane
+test_delivery_marker_removal_failure_keeps_retry_record
 test_teardown_retires_v1_journal_when_projected_workspace_gone
 test_teardown_retains_v1_journal_when_projected_workspace_present
 test_teardown_retains_v1_journal_when_workspace_query_ambiguous
