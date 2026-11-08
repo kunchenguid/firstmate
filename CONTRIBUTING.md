@@ -43,6 +43,8 @@ Pull requests from this repository's own branches or from authors with write acc
 GitHub may separately require maintainer approval before running workflows from a fork.
 A run marked `action_required` with no jobs has not executed the checks; a maintainer must approve the workflows in GitHub Actions, in addition to adding `full-ci` when required.
 Neither approval nor a current-head attestation can be supplied by changing source files or weakening the workflow checks.
+When both checks are blocked, finish any local fixes first, let the owning no-mistakes run publish the final head and its matching attestation, then have a maintainer approve the workflows for that head and add `full-ci` if absent.
+Confirm that the resulting runs actually execute and pass; `action_required` and skipped behavior lanes are not full-validation evidence.
 
 See the [no-mistakes quick start](https://kunchenguid.github.io/no-mistakes/start-here/quick-start/) for the full first-run walkthrough.
 
