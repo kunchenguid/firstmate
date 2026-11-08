@@ -2481,7 +2481,7 @@ for (let i = 0; i < 250 && !deliveryStarted; i += 1) await sleep(20);
 if (!deliveryStarted) throw new Error("the restored wake was never delivered");
 writeFileSync(process.env.FM_RELEASE_FILE, "release\n");
 await waitForExit(successorPid);
-// The held delivery must not defer the successor's retry.
+// The held delivery must not defer the successor retry.
 await waitForExit(await waitForArms(3));
 const repair = await tool.execute("tool-call-deferred-dead-repair", {}, undefined, undefined, {});
 if (!repair.content[0].text.includes("started Pi extension arm child")) {
@@ -3583,7 +3583,7 @@ await waitFor(() => liveArms().length === 1 && armRows().length >= 4, "replaceme
 if (replacement.prompts.some((message) => message.includes("signal: replacement-race actionable outcome"))) {
   throw new Error(`replacement raced the accepted old-session delivery: ${replacement.prompts.join(" | ")}`);
 }
-// The prior generation's accepted branch claim still holds. A close in the
+// The prior generation accepted branch claim still holds. A close in the
 // replacement must also keep continuity without waiting for that old claim.
 writeFileSync(process.env.FM_TRIGGER_FILE, "replacement while old claim pending\n");
 await waitFor(() => liveArms().length === 1 && armRows().length >= 5, "replacement successor while old delivery claim is held");
