@@ -26,7 +26,7 @@ It renders the page in its own browser session (mobile emulation with `--mobile`
 Never run `lavish-axi poll` on a snapshot yourself; the armed listener owns waiting for feedback (`process-event-sources`).
 If the capture browser cannot start on this host, report the exact error; the script inherits every `CHROME_DEVTOOLS_AXI_*` setting the host needs, such as an executable path or Chrome flags, and never changes a captain's browser profile.
 
-Give the captain the `session-url:` line as the review link and say which layers loaded, in plain words (for example "the Odoo and Teatop helpers are on").
+Give the captain the `session-url:` line as the review link and say which layers loaded, in plain words (for example "the Odoo helper is on").
 The review panel offers the `[Fix Layout]`, `[Update Text]`, and `[Mobile Bug]` chips for the element the captain last clicked or focused, plus Lavish's own free annotations and message box.
 A `--mobile` snapshot is captured under mobile emulation, but width-based styles follow the review window, so tell the captain to narrow the window for mobile breakpoints.
 
