@@ -318,7 +318,7 @@ fm_ship_ancestry_check() {
   printf '%s\n' \
     "   Before rebasing or replaying this task branch onto its intended target, verify the target branch and its current tip, then inspect \`git merge-base HEAD <target>\` and both sides of \`git log --oneline --left-right <target>...HEAD\` to confirm the branch base and every outgoing commit." \
     "   If the base or any outgoing commit is unclear or is not task work, stop and report it." \
-    "   Before replay, isolate the task commits from the verified merge base with \`git rev-list --reverse --no-merges <merge-base>..HEAD\` and replay only those commits; if \`git rev-list --merges <merge-base>..HEAD\` lists any merge commit, stop and report it instead of replaying an unverified range."
+    "   Before replay, isolate the task commits from the verified merge base with \`git rev-list --reverse <merge-base>..HEAD\` and replay only those commits; if \`git rev-list --merges <merge-base>..HEAD\` lists any merge commit, stop and report it instead of replaying an unverified range."
 }
 
 # Return 0 when a Task subsection still consists only of its scaffold

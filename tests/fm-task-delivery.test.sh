@@ -275,8 +275,8 @@ test_promote_requires_and_records_the_delivery_contract() {
     "promoted ship instructions did not carry the branch ancestry check"
   assert_grep '   If the base or any outgoing commit is unclear or is not task work, stop and report it.' "$instructions_path" \
     "promoted ship instructions did not stop on unclear or non-task outgoing commits"
-  assert_grep 'git rev-list --reverse --no-merges <merge-base>..HEAD' "$instructions_path" \
-    "promoted ship instructions did not isolate non-merge task commits before replay"
+  assert_grep 'git rev-list --reverse <merge-base>..HEAD' "$instructions_path" \
+    "promoted ship instructions did not isolate task commits before replay"
   pass "fm-promote: promotion requires the delivery contract and records it exactly once"
 }
 

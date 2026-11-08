@@ -1479,8 +1479,8 @@ test_ship_branch_ancestry_check_is_generated() {
     "ship brief did not require reviewing both sides of the target comparison"
   assert_grep 'If the base or any outgoing commit is unclear or is not task work, stop and report it.' "$brief" \
     "ship brief did not stop on unclear or non-task outgoing commits"
-  assert_grep 'git rev-list --reverse --no-merges <merge-base>..HEAD' "$brief" \
-    "ship brief did not isolate non-merge task commits from the verified merge base before replay"
+  assert_grep 'git rev-list --reverse <merge-base>..HEAD' "$brief" \
+    "ship brief did not isolate task commits from the verified merge base before replay"
   assert_grep 'if `git rev-list --merges <merge-base>..HEAD` lists any merge commit, stop and report it' "$brief" \
     "ship brief did not stop on a merge commit in the outgoing range"
   grep -A1 '^1. Never push to the default branch. Never merge a PR.$' "$brief" \
