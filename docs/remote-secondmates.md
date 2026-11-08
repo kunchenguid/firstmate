@@ -25,7 +25,7 @@ The remote second-mate agent runs on one of two session-provider backends, selec
 [Launch selection and placement](#launch-or-recover) define the backend contract.
 Provisioning checks any available supported backend; launch checks the selected one.
 
-- `fm-remote` is reserved for remote fleet work and must not be used for personal work.
+- The code root's Herdr remote session is reserved for remote fleet work and must not be used for personal work; [launch placement](#launch-or-recover) identifies that session.
 - The user's interactive Herdr session remains `default` and is not a remote-secondmate prerequisite.
 - Herdr's remote-session server belongs to the host's own GUI login session rather than to the SSH connection.
   As a result, the agent's endpoint survives every disconnection the primary's supervision depends on.
