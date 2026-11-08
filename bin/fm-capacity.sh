@@ -101,8 +101,9 @@
 #   limits {min_avail_gb, min_disk_gb, max_load1} (null when unset),
 #   verdict {admit, free_lanes, reasons[]}.
 # verdict.admit is true only with a valid cap, lanes under it, and no
-# constraint, or in auto mode as below; its reasons are the constraints in words. The document carries
-# labels and derived states only, never paths, addresses, commands, or tokens:
+# constraint, or in auto mode as below; its reasons are the constraints in
+# words. The document carries labels and derived states only, never paths,
+# addresses, commands, or tokens:
 # a beat's own why and error text is published as counts (pressure_why=N,
 # beat_errors=N), and an invalid config line by its line number and a fixed
 # reason. --json and --publish print the full detail on stderr.

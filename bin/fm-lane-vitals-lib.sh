@@ -45,8 +45,9 @@
 #
 # fm_lane_vitals_processes <os> <out-file>
 #   Writes one "pid<TAB>ppid<TAB>mem_kb<TAB>cpu_s<TAB>cwd" line per readable
-#   process; the cwd is empty where it cannot be read. Linux reads /proc/<pid>/stat (utime+stime over CLK_TCK, rss
-#   pages) and the cwd link; macOS reads ps -axo pid=,ppid=,rss=,time= and
+#   process; the cwd is empty where it cannot be read. Linux reads
+#   /proc/<pid>/stat (utime+stime over CLK_TCK, rss pages) and the cwd link;
+#   macOS reads ps -axo pid=,ppid=,rss=,time= and
 #   lsof -a -d cwd -u <uid> -Fpn, bounded to 8 s. Memory is refined later by
 #   fm_lane_vitals_pss for attributed Linux processes only. Returns 1, with the
 #   table still written, when no working directory could be read at all (lsof
@@ -57,8 +58,9 @@
 #   <lanes-file> holds "key<TAB>worktree" lines. Prints one
 #   "key<TAB>pid<TAB>mem_kb<TAB>cpu_s" line per attributed process. A process
 #   belongs to the lane whose worktree holds its own cwd (the longest match
-#   wins, and the first listed lane on an exact tie), otherwise to its nearest attributed ancestor's lane; an ancestor of
-#   processes in two or more lanes - a terminal multiplexer server or a login
+#   wins, and the first listed lane on an exact tie), otherwise to its nearest
+#   attributed ancestor's lane; an ancestor of processes in two or more lanes -
+#   a terminal multiplexer server or a login
 #   session - is shared, so it is never attributed and nothing inherits a lane
 #   through it.
 #
