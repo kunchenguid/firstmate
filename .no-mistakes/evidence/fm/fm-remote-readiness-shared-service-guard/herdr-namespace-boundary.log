@@ -1,0 +1,2 @@
+fm-herdr-lab: session name must start with 'fm-lab-' and contain only letters, digits, underscores, or dashes: fm-remote
+non-lab namespace attempt exit=1

@@ -1,0 +1,19 @@
+27.4.0
+FIELD               VALUE
+status              running
+client.version      1.4.1
+client.build        release
+client.commit       unspecified
+host.os             Version 27.2 (Build 26B123)
+host.architecture   arm64
+host.cpus           14
+server.version      1.4.1
+server.build        release
+server.commit       unspecified
+server.appName      container-apiserver
+paths.appRoot       ~/Library/Application Support/com.apple.container/
+paths.installRoot   /opt/homebrew/Cellar/container/1.4.1/
+paths.logRoot       
+containers.total    0
+containers.running  0
+images.total        1

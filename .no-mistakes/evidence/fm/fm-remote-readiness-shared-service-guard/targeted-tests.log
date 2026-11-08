@@ -1,0 +1,48 @@
+FM_TEST_BEGIN 2026-11-02T10:09:33Z tests/fm-remote-doctor.test.sh family=secondmate expected_gate_skip=none
+FM_TEST_BEGIN 2026-11-02T10:09:33Z tests/fm-remote-herdr-guard.test.sh family=secondmate expected_gate_skip=none
+ok - holder processes expose their environment to the owner library
+ok - an empty session is started inside the launch agent
+ok - launchd and worker markers require gui-domain launchctl proof
+ok - background, inherited-XPC, SSH-born, SSH-descended, and unprovable owners are taken over when the operator authorizes it
+ok - a login, KeepAlive, or automatic start never takes over a foreign server, and an authorization is honored once
+ok - a running session with no provable owner is taken over rather than trusted
+ok - a host without lsof cannot prove an Aqua birth, so the session is taken over
+ok - a foreign server that never releases the socket yields exit 1 so launchd retries
+ok - the guard starts as soon as the foreign server releases the socket
+ok - argument errors are refused before any herdr call
+FM_TEST_END 2026-11-02T10:09:40Z tests/fm-remote-herdr-guard.test.sh exit=0 duration_ms=7148 gate_skip=false
+ok - a missing session backend is a human gap that --fix never claims to close
+ok - an absent launch agent is a fixable gap and the read-only run changes nothing
+ok - --fix installs the dedicated fm-remote launch agent without touching default
+ok - --fix is idempotent once the host is ready
+ok - a second code root gets a separate Herdr session and launch agent
+ok - a second code root reaches readiness through the shared entrypoint and the primary root stays ready
+ok - a legacy service is adopted by its matching guard without service control
+ok - automatic readiness reports a running drifted service to an operator and leaves it untouched
+ok - an operator's --fix repairs a running service this root owns once its pane list proves it empty
+ok - a service with live panes is never rewritten or restarted
+ok - a pane listing that fails or lacks a panes array blocks every repair
+ok - a reload never force-restarts the freshly bootstrapped server
+ok - concurrent automatic readiness runs with an intervening mate launch never restart the service
+ok - a failed reload leaves stale effective launch-agent state unready
+ok - a launch agent outside the Aqua session scope is rewritten in place
+ok - launchd failures are reported and delayed server readiness is awaited
+ok - a foreign-born session is left to the operator, whose --fix takes it over through launchd
+ok - human gaps are reported with their operator step and never claimed as fixed
+ok - a bash Directory Services login shell is rendered with -l -c
+ok - custom Directory Services shell paths remain valid plist arguments
+not ok - a stalled Directory Services lookup blocked doctor for 14s
+FM_TEST_END 2026-11-02T10:12:30Z tests/fm-remote-doctor.test.sh exit=1 duration_ms=176652 gate_skip=false
+FM_TEST_BEGIN 2026-11-02T10:12:30Z tests/fm-remote-herdr-identity.test.sh family=unclassified expected_gate_skip=none
+ok - A a second code root launches, routes, and reads its mate in its own Herdr session
+ok - B a second code root refuses an endpoint in the primary session
+ok - C the owning code root keeps the primary fm-remote session
+ok - D the parent accepts only the primary or a code-root-derived session
+ALL TESTS PASSED
+FM_TEST_END 2026-11-02T10:12:46Z tests/fm-remote-herdr-identity.test.sh exit=0 duration_ms=16524 gate_skip=false
+FM_TEST_SUMMARY total=3 failed=1 skipped_gate=0 duration_ms=193732
+FM_TEST_SUMMARY_FAMILY family=secondmate count=2 duration_ms=183800 failed=1
+FM_TEST_SUMMARY_FAMILY family=unclassified count=1 duration_ms=16524 failed=0
+FM_TEST_SLOWEST rank=1 script=tests/fm-remote-doctor.test.sh duration_ms=176652
+FM_TEST_SLOWEST rank=2 script=tests/fm-remote-herdr-identity.test.sh duration_ms=16524
+FM_TEST_SLOWEST rank=3 script=tests/fm-remote-herdr-guard.test.sh duration_ms=7148

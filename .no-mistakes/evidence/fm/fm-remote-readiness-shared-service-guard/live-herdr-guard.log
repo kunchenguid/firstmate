@@ -1,0 +1,6 @@
+REAL HERDR: original lab panes
+{"id":"cli:pane:list","result":{"panes":[{"agent_status":"unknown","cwd":"{run-worktree}","focused":true,"foreground_cwd":"{run-worktree}","pane_id":"w1:p1","revision":0,"scroll":{"max_offset_from_bottom":0,"offset_from_bottom":0,"viewport_rows":40},"tab_id":"w1:t1","terminal_id":"term_65f488bbedce11","workspace_id":"w1"}],"type":"pane_list"}}
+Run actual launch-agent guard without takeover authorization against the running lab
+fm-remote-herdr-guard: session fm-lab-owner-proof-94057-3797 is served by pid 66566 born outside the Aqua login session (unknown); leaving it alone, because only the operator's fm-remote-doctor.sh --fix authorizes a takeover
+REAL HERDR: retained lab panes
+{"id":"cli:pane:list","result":{"panes":[{"agent_status":"unknown","cwd":"{run-worktree}","focused":true,"foreground_cwd":"{run-worktree}","pane_id":"w1:p1","revision":0,"scroll":{"max_offset_from_bottom":0,"offset_from_bottom":0,"viewport_rows":40},"tab_id":"w1:t1","terminal_id":"term_65f488bbedce11","workspace_id":"w1"}],"type":"pane_list"}}
