@@ -3308,6 +3308,8 @@ fm_wake_latest_event() {  # <validated-status-path> <tail-byte-cap>
 fm_wake_print_annotations() {  # <deduped-raw-rows> [<presentation-snapshot>]
   local rows=$1 snapshot=${2:-} manifest status_key mode path prefix line task endpoint
   local snapshot_task snapshot_endpoint _snapshot_ident offset last_event event_line
+  local used=0 task_omitted=0 bytes
+  FM_WAKE_ANNOTATION_INCOMPLETE_TASKS=
   local LC_ALL=C
 
   manifest=$(fm_wake_annotation_manifest "$rows" | awk -F '\t' '
@@ -3363,6 +3365,9 @@ EOF
     fi
     if [ -n "$endpoint" ] && [ "$offset" -ge "$endpoint" ]; then continue; fi
     if ! fm_wake_unread_events "$path" 0 "$offset" "$endpoint"; then
+      task=${status_key%.status}
+      FM_WAKE_ANNOTATION_INCOMPLETE_TASKS="$FM_WAKE_ANNOTATION_INCOMPLETE_TASKS$task"$'\n'
+      printf 'wake annotation: unavailable status read for %s; source: %s (receipt retained)\n' "$task" "$path" || return 1
       # Annotation enrichment is supplemental to the already-printed durable
       # wake rows. A file that disappears, rotates, or becomes unreadable after
       # the snapshot must not suppress annotations for other status files; the
@@ -3370,6 +3375,7 @@ EOF
       continue
     fi
     last_event=$FM_WAKE_EVENT_LINE
+    task_omitted=0
     while IFS= read -r event_line || [ -n "$event_line" ]; do
       [ -n "$event_line" ] || continue
       event_line=$(printf '%s' "$event_line" | LC_ALL=C tr '\t\r' '  ')
@@ -3381,10 +3387,22 @@ EOF
         prefix="$prefix; historical / not necessarily the triggering event"
       fi
       line="$prefix: $status_key: $event_line"
+      bytes=$(( ${#line} + 1 ))
+      if [ $((used + bytes)) -gt 12000 ]; then
+        task_omitted=$((task_omitted + 1))
+        continue
+      fi
+      used=$((used + bytes))
       printf '%s\n' "$line" || return 1
     done <<EOF
 $FM_WAKE_UNREAD_LINES
 EOF
+    if [ "$task_omitted" -gt 0 ]; then
+      task=${status_key%.status}
+      FM_WAKE_ANNOTATION_INCOMPLETE_TASKS="$FM_WAKE_ANNOTATION_INCOMPLETE_TASKS$task"$'\n'
+      printf 'wake annotation: %d records omitted for %s; full source: cat %q (unacknowledged range [%s,%s))\n' \
+        "$task_omitted" "$task" "$path" "$offset" "${endpoint:-unknown}" || return 1
+    fi
   done <<EOF
 $manifest
 EOF

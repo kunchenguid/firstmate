@@ -244,12 +244,17 @@ test_unread_output_over_cap_remains_recoverable() {
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" || fail "drain failed for unread output over the former cap"
   grep -F 'task-cap note: overflow-01' "$out" >/dev/null \
     || fail "the first over-cap note was not surfaced"
-  grep -F 'task-cap note: overflow-30' "$out" >/dev/null \
-    || fail "a later note vanished behind the unread byte cap: $(cat "$out")"
-  if grep -F 'more omitted' "$out" >/dev/null; then
-    fail "the unread section still omitted complete lines: $(cat "$out")"
+  if ! grep -F 'task-cap note: overflow-30' "$out" >/dev/null; then
+    local page
+    grep -F 'UNREAD STATUS continuation:' "$out" >/dev/null || fail 'hidden notes have no continuation'
+    page=$(find "$state" -path '*/1/state' -print); page=${page%/state}
+    while [ -n "$page" ]; do
+      bash "$ROOT/bin/fm-status-page.sh" "$page" >> "$out" || fail 'overflow continuation failed'
+      if [ -f "$page/next" ]; then page=$(cat "$page/next"); else page=''; fi
+    done
+    grep -F 'task-cap note: overflow-30' "$out" >/dev/null || fail 'continuation lost an overflow note'
   fi
-  pass "unread status over the former byte cap preserves every line"
+  pass "unread status over the byte cap preserves every line by exact continuation"
 }
 
 test_snapshot_does_not_ack_a_later_append() {
@@ -449,6 +454,72 @@ test_routine_working_and_covered_done_stay_silent_on_the_empty_queue() {
   pass "routine working and branch-covered done lines print nothing on an empty-queue drain"
 }
 
+test_paged_notes_preserve_contiguous_receipts() {
+  local dir state status out page next i offset expected first_page
+  dir=$(make_case paged-notes); state="$dir/state"; status="$state/paged.status"; out="$dir/out"
+  prime_cursor "$state" "$status"
+  for i in $(seq 1 95); do printf 'note [at=100]: evidence-%s café\n' "$i" >> "$status"; done
+  printf 'needs-decision [key=buried]: actionable after notes\n' >> "$status"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" || fail 'paged drain failed'
+  assert_grep 'shown=30 remaining=65' "$out" 'untruthful first-page counts'
+  assert_grep 'key=buried' "$out" 'paging hid a buried decision'
+  if grep -F 'evidence-31 café' "$out" >/dev/null; then fail 'hidden evidence leaked into first page'; fi
+  offset=$(bash -c '. "$1"; status_presentation_cursor_offset "$2"' _ "$ROOT/bin/fm-classify-lib.sh" "$status")
+  expected=$(head -31 "$status" | wc -c | tr -d ' ')
+  [ "$offset" -eq "$expected" ] || fail "cursor skipped hidden notes: $offset != $expected"
+  page=$(find "$state" -path '*/1/state' -print); page=${page%/state}
+  [ -n "$page" ] || fail 'no durable continuation artifact'
+  first_page=$page
+  cp "$page/receipt" "$dir/receipt.saved"
+  printf 'damage' >> "$page/receipt"
+  if bash "$ROOT/bin/fm-status-page.sh" "$page" >/dev/null 2>&1; then fail 'damaged receipt was accepted'; fi
+  cp "$dir/receipt.saved" "$page/receipt"
+  if [ -e /dev/full ]; then
+    if bash "$ROOT/bin/fm-status-page.sh" "$page" > /dev/full 2>/dev/null; then fail 'failed stdout was accepted'; fi
+    [ "$(bash -c '. "$1"; status_presentation_cursor_offset "$2"' _ "$ROOT/bin/fm-classify-lib.sh" "$status")" -eq "$offset" ] \
+      || fail 'failed stdout advanced the page receipt'
+  fi
+  next=$(cat "$page/next")
+  if bash "$ROOT/bin/fm-status-page.sh" "$next" >/dev/null 2>&1; then fail 'out-of-order continuation skipped evidence'; fi
+  i=31
+  while [ -n "$page" ]; do
+    bash "$ROOT/bin/fm-status-page.sh" "$page" > "$out" || fail 'continuation failed'
+    assert_grep "evidence-$i café" "$out" 'continuation lost exact multibyte evidence'
+    assert_grep 'age_seconds=' "$out" 'continuation omitted age provenance'
+    if [ -f "$page/next" ]; then page=$(cat "$page/next"); else page=''; fi
+    i=$((i + 30))
+  done
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" || fail 'drain after continuations failed'
+  if grep -F 'UNREAD STATUS (' "$out" >/dev/null; then fail 'delivered notes replayed'; fi
+  assert_grep 'key=buried' "$out" 'display receipt closed an open decision'
+  printf 'note: replacement generation\n' > "$dir/new-status"
+  mv "$dir/new-status" "$status"
+  if bash "$ROOT/bin/fm-status-page.sh" "$first_page" >/dev/null 2>&1; then fail 'old page advanced a replaced source'; fi
+  pass 'paged exact evidence preserves contiguous receipts and independent decisions'
+}
+
+test_oversized_and_partial_notes_are_not_acknowledged() {
+  local dir state status out page before after
+  dir=$(make_case oversized-page); state="$dir/state"; status="$state/large.status"; out="$dir/out"
+  prime_cursor "$state" "$status"
+  before=$(wc -c < "$status")
+  { printf 'note: '; printf '%14000s' '' | tr ' ' x; printf '\n'; } >> "$status"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" || fail 'oversized drain failed'
+  assert_grep 'shown=0 remaining=1' "$out" 'oversized record not disclosed'
+  after=$(bash -c '. "$1"; status_presentation_cursor_offset "$2"' _ "$ROOT/bin/fm-classify-lib.sh" "$status")
+  [ "$before" -eq "$after" ] || fail 'oversized unpresented record acknowledged'
+  page=$(find "$state" -path '*/1/state' -print); page=${page%/state}
+  bash "$ROOT/bin/fm-status-page.sh" "$page" > "$out" || fail 'full oversized continuation failed'
+  [ "$(wc -c < "$out")" -gt 14000 ] || fail 'oversized exact continuation was shortened'
+  printf 'note: partial' >> "$status"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" || fail 'partial drain failed'
+  assert_grep 'incomplete final record deferred' "$out" 'partial append not disclosed'
+  printf ' completed\n' >> "$status"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" || fail 'completed partial drain failed'
+  assert_grep 'note: partial completed' "$out" 'partial completion lost its prefix'
+  pass 'oversized and partial records stay unread until exact presentation'
+}
+
 test_incident_note_answer_buried_under_routine_note_surfaces_both
 test_already_presented_notes_are_not_replayed
 test_brand_new_note_after_presentation_is_surfaced
@@ -463,3 +534,6 @@ test_snapshot_failure_is_visible
 test_open_decisions_fold_is_unchanged
 test_empty_queue_does_not_swallow_later_signal_annotation
 test_routine_working_and_covered_done_stay_silent_on_the_empty_queue
+
+test_paged_notes_preserve_contiguous_receipts
+test_oversized_and_partial_notes_are_not_acknowledged

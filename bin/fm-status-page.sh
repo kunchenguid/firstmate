@@ -7,18 +7,27 @@
 # Display receipts never process branch outcomes, answer decisions, or resolve
 # correlations. Artifacts are retained for explicit inspection, not deleted.
 set -eu
+case "${1:-}" in
+  -h|--help) sed -n '2,10s/^# \{0,1\}//p' "$0"; exit 0 ;;
+esac
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 . "$SCRIPT_DIR/fm-classify-lib.sh"
-. "$SCRIPT_DIR/fm-lock-lib.sh"
 page=${1:?usage: fm-status-page.sh <page-directory>}
 [ -d "$page" ] && [ ! -L "$page" ] || exit 1
-for part in body receipt state; do
+for part in body receipt state checksum; do
   [ -f "$page/$part" ] && [ ! -L "$page/$part" ] || exit 1
 done
 state=$(cat "$page/state")
+export FM_STATE_OVERRIDE="$state"
+# shellcheck source=bin/fm-wake-lib.sh
+. "$SCRIPT_DIR/fm-wake-lib.sh"
 IFS=$'\t' read -r task start end ident < "$page/receipt"
 case "$task" in ''|*[!a-zA-Z0-9_.-]*) exit 1 ;; esac
 case "$start:$end" in *[!0-9:]*|:*|*:) exit 1 ;; esac
+[ "$start" -le "$end" ] || exit 1
+digest=$(perl -MDigest::SHA -e 'my $d=Digest::SHA->new(256); for (@ARGV) { open my $f,"<",$_ or exit 1; binmode $f; $d->addfile($f); } print $d->hexdigest' \
+  "$page/body" "$page/receipt" "$page/state")
+[ "$digest" = "$(cat "$page/checksum")" ] || { echo 'status page: damaged evidence; drain again' >&2; exit 1; }
 lock="$state/.status-presentation-lock"
 fm_lock_acquire_wait_bounded "$lock" 10 || exit 1
 trap 'fm_lock_release "$lock"' EXIT

@@ -7,6 +7,14 @@
 # a supervision-host home the supervision session's new and unprocessed
 # outcomes (BRANCH OUTCOMES), then assert liveness.
 #
+# Unread informational pages contain at most 30 complete records and 12,000
+# bytes including provenance. A single oversized record gets an explicit full
+# continuation page; partial final records are deferred. Saved pages and exact
+# actionable views are retained under state/, with retrieval commands printed
+# in the digest. New/changed decisions lead unchanged decisions; action sections
+# precede optional signal annotations. Only successful stdout commits display
+# receipts, separately from branch processing, state folds and answers.
+#
 # Keep sequence-bound row consumption independent from generation-bound episode
 # retirement; docs/watcher-continuity.md owns the recovery contract.
 # Every scratch file this script mints (.main-eligible-rows.tmp.*,
@@ -332,7 +340,7 @@ EOF
 
 print_status_outcome_backstop_section() {  # <task-and-endpoint-snapshot>
   local snapshot=$1 task endpoint ident event event_endpoint line verb key receipt store lock ready
-  local output='' used=0 shown=0 omitted=0 bytes item_bytes=220 global_bytes=4000 rc=0
+  local output='' evidence_lines='' evidence used=0 shown=0 omitted=0 bytes item_bytes=220 global_bytes=4000 rc=0
   [ "$ACTOR" = main ] || return 0
 
   store="$STATE/branch-outcomes.jsonl"
@@ -390,10 +398,11 @@ print_status_outcome_backstop_section() {  # <task-and-endpoint-snapshot>
       continue
     fi
 
+    evidence_lines="$evidence_lines$task"$'\t'"$ident"$'\t'"$event_endpoint"$'\t'"$event"$'\n'
     line="$task $event"
     fm_cap_line_var "$line" $((item_bytes - 1))
     line=$FM_LINE_CAP_LINE
-    bytes=$(( ${#line} + 1 ))
+    bytes=$(LC_ALL=C printf '%s\n' "$line" | wc -c)
     if [ $((used + bytes)) -gt "$global_bytes" ]; then
       omitted=$((omitted + 1))
       continue
@@ -416,11 +425,13 @@ EOF
     return 0
   fi
   [ "$shown" -gt 0 ] || [ "$omitted" -gt 0 ] || return 0
+  evidence=$(save_status_evidence status-outcome-backstop "$evidence_lines") || return 1
   printf 'STATUS OUTCOME BACKSTOP (newest captain-facing task event has no covering branch outcome):\n' || return 1
   printf '%s' "$output" || return 1
   if [ "$omitted" -gt 0 ]; then
     printf 'STATUS OUTCOME BACKSTOP: %d more omitted (byte cap)\n' "$omitted" || return 1
   fi
+  printf 'STATUS OUTCOME BACKSTOP full exact snapshot (%d shown, %d omitted): cat %q\n' "$shown" "$omitted" "$evidence" || return 1
 }
 
 # Print still-unread informational status lines (note: answers and pending-reply
@@ -429,30 +440,113 @@ EOF
 # including the empty-queue fast path - so a buried answer cannot be swallowed
 # when the fold later advances the cursor. Prints nothing when nothing is
 # unread, which is the common case.
-print_unread_status_section() {
-  local snapshot=${1:-} unread task line shown=0
-
-  if [ -n "$snapshot" ]; then
-    unread=$(scan_unread_surface_snapshot "$STATE" "$snapshot") || return 1
-  else
-    unread=$(scan_unread_surface_lines "$STATE") || return 1
-  fi
-  [ -n "$unread" ] || return 0
-
-  while IFS=$(printf '\t') read -r task line; do
+# Prepare exact evidence before writing stdout. The first page is bounded by
+# both records and bytes; an oversized record goes to an explicit full page.
+# PAGE_SNAPSHOT stops each task before its first omitted record. Later actionable
+# sections still use the original endpoint, independently of display receipts.
+prepare_unread_status_page() {  # <snapshot>
+  local snapshot=$1 task endpoint ident f offset pos end line chunk complete
+  local used=0 shown=0 remaining=0 bytes blocked=0 previous='' page='' first=''
+  local root='' receipt_end start epoch age now item digest page_count=0 page_shown=0 page_used=0 page_start=0
+  PAGE_SNAPSHOT="" PAGE_UNREAD=""
+  now=$(date +%s)
+  while IFS=$'\t' read -r task endpoint ident; do
     [ -n "$task" ] || continue
-    [ -n "$line" ] || continue
-    line="$task $line"
-    if [ "$shown" -eq 0 ]; then
-      printf 'UNREAD STATUS (new since last drain, not re-printed after this presentation):\n' || return 1
+    f="$STATE/$task.status"
+    offset=$(status_presentation_cursor_offset "$f") || return 1
+    pos=$offset receipt_end=$endpoint blocked=0 page='' page_shown=0 page_used=0
+    chunk=$(mktemp "$STATE/.status-page-read.XXXXXX") || return 1
+    if ! _fm_status_read_span "$f" "$offset" "$((endpoint - offset))" > "$chunk"; then
+      rm -f "$chunk"; return 1
     fi
-    printf '%s\n' "$line" || return 1
-    shown=$((shown + 1))
-  done <<EOF
-$unread
-EOF
+    # shellcheck disable=SC2094 # Failure cleanup unlinks an open scratch reader.
+    while :; do
+      complete=1
+      IFS= read -r line || complete=0
+      [ -n "$line" ] || [ "$complete" -eq 1 ] || break
+      local LC_ALL=C
+      bytes=${#line}
+      end=$((pos + bytes + complete))
+      if [ "$complete" -eq 0 ]; then
+        [ "$blocked" -eq 1 ] || receipt_end=$pos
+        PAGE_UNREAD="$PAGE_UNREAD$task: incomplete final record deferred at byte $pos (not acknowledged)"$'\n'
+        break
+      fi
+      if status_line_is_unread_surface "$line"; then
+        epoch=$(status_line_at_epoch "$line") || epoch=unknown
+        age=unknown
+        if [ "$epoch" != unknown ] && [ "$epoch" -le "$now" ]; then age=$((now - epoch)); fi
+        printf -v item '%s %s\n  source=%s generation=%s range=[%s,%s) age_seconds=%s\n' \
+          "$task" "$line" "$f" "$ident" "$pos" "$end" "$age"
+        bytes=${#item}
+        if [ "$remaining" -eq 0 ] && [ "$shown" -lt 30 ] && [ $((used + bytes)) -le 12000 ]; then
+          PAGE_UNREAD="$PAGE_UNREAD$item"
+          used=$((used + bytes)) shown=$((shown + 1))
+        else
+          start=$pos
+          if [ "$blocked" -eq 0 ]; then receipt_end=$pos; blocked=1; start=$offset; fi
+          if [ -z "$root" ]; then
+            root=$(umask 077; mktemp -d "$STATE/.status-pages.XXXXXX") || { rm -f "$chunk"; return 1; }
+          fi
+          remaining=$((remaining + 1))
+          if [ -z "$page" ] || [ "$page_shown" -ge 30 ] || [ $((page_used + bytes)) -gt 12000 ]; then
+            page_count=$((page_count + 1))
+            page="$root/$page_count"
+            mkdir -m 700 "$page" || { rm -f "$chunk"; return 1; }
+            [ -n "$first" ] || first=$page
+            if [ -n "$previous" ]; then
+              printf '%s\n' "$page" > "$previous/next" || { rm -f "$chunk"; return 1; }
+            fi
+            previous=$page page_start=$start page_shown=0 page_used=25
+            printf '%s\n' "$STATE" > "$page/state" || { rm -f "$chunk"; return 1; }
+            printf 'UNREAD STATUS saved page\n' > "$page/body" || { rm -f "$chunk"; return 1; }
+          fi
+          start=$page_start
+          printf '%s\t%s\t%s\t%s\n' "$task" "$start" "$end" "$ident" > "$page/receipt" || { rm -f "$chunk"; return 1; }
+          printf '%s' "$item" >> "$page/body" || { rm -f "$chunk"; return 1; }
+          page_shown=$((page_shown + 1)) page_used=$((page_used + bytes))
+        fi
+      elif [ "$blocked" -eq 1 ] && [ -n "$page" ]; then
+        # Routine records between evidence do not need their own page. Include
+        # them in the preceding contiguous receipt, never cross hidden evidence.
+        printf '%s\t%s\t%s\t%s\n' "$task" "$start" "$end" "$ident" > "$page/receipt"
+      fi
+      pos=$end
+    done < "$chunk"
+    rm -f "$chunk"
+    PAGE_SNAPSHOT="$PAGE_SNAPSHOT$task"$'\t'"$receipt_end"$'\t'"$ident"$'\n'
+  done <<< "$snapshot"
+  if [ "$shown" -gt 0 ] || [ "$remaining" -gt 0 ]; then
+    PAGE_UNREAD="UNREAD STATUS (new since last drain, not re-printed after this presentation): shown=$shown remaining=$remaining"$'\n'"$PAGE_UNREAD"
+  fi
+  if [ -n "$first" ]; then
+    page=$first
+    while [ -n "$page" ]; do
+      digest=$(perl -MDigest::SHA -e 'my $d=Digest::SHA->new(256); for (@ARGV) { open my $f,"<",$_ or exit 1; binmode $f; $d->addfile($f); } print $d->hexdigest' \
+        "$page/body" "$page/receipt" "$page/state") || return 1
+      printf '%s\n' "$digest" > "$page/checksum" || return 1
+      if [ -f "$page/next" ]; then page=$(cat "$page/next"); else page=''; fi
+    done
+    printf -v line 'UNREAD STATUS continuation: bash %q %q\n' "$SCRIPT_DIR/fm-status-page.sh" "$first"
+    PAGE_UNREAD="$PAGE_UNREAD$line"
+  fi
+}
 
-  [ "$shown" -gt 0 ] || return 0
+print_unread_status_section() {
+  printf '%s' "$PAGE_UNREAD"
+}
+
+# Content-addressed full views stay stable across unchanged drains. Atomic
+# replacement never follows a pre-existing symlink and preserves exact bytes.
+save_status_evidence() {  # <label> <content>
+  local label=$1 content=$2 digest temporary target
+  digest=$(printf '%s\n' "$content" | perl -MDigest::SHA=sha256_hex -0777 -ne 'print sha256_hex($_)') || return 1
+  target="$STATE/.$label.$digest"
+  temporary=$(umask 077; mktemp "$STATE/.status-evidence.XXXXXX") || return 1
+  if ! printf '%s\n' "$content" > "$temporary" || ! mv -f "$temporary" "$target"; then
+    rm -f "$temporary"; return 1
+  fi
+  printf '%s' "$target"
 }
 
 # Print the consolidated OPEN DECISIONS section: every still-open
@@ -479,7 +573,26 @@ print_open_decisions_section() {
   else
     open=$(scan_open_decisions_incremental "$STATE") || return 1
   fi
+  local evidence priority priority_evidence previous="$STATE/.open-decisions-presented"
+  evidence=$(save_status_evidence open-decisions "$open") || return 1
+  priority=$(printf '%s\n--OPEN--\n%s\n' "$snapshot" "$open" | awk -F '\t' '
+    $0 == "--OPEN--" { rows=1; next }
+    !rows { generation[$1]=$3; next }
+    NF { print generation[$1] "\t" $0 }') || return 1
+  priority_evidence=$(save_status_evidence open-decision-priority "$priority") || return 1
+  OPEN_DECISIONS_EVIDENCE=$priority_evidence
   [ -n "$open" ] || return 0
+  if [ -e "$previous" ] || [ -L "$previous" ]; then
+    [ -f "$previous" ] && [ -r "$previous" ] && [ ! -L "$previous" ] || return 1
+  else
+    previous=/dev/null
+  fi
+  # Changed notes and newly opened items precede unchanged items. This receipt
+  # only orders presentation: it never suppresses or closes any open decision.
+  open=$(awk 'FILENAME == ARGV[1] { old[$0]=1; next }
+    { row=$0; sub(/^[^\t]*\t/, "", row) }
+    !($0 in old) { print row; next } { same[++n]=row }
+    END { for (i=1;i<=n;i++) print same[i] }' "$previous" "$priority_evidence") || return 1
 
   while IFS=$(printf '\t') read -r task key verb note; do
     [ -n "$task" ] || continue
@@ -497,7 +610,7 @@ print_open_decisions_section() {
     # allowance passed down is one short of the cap.
     fm_cap_line_var "$line" $((item_bytes - 1))
     line=$FM_LINE_CAP_LINE
-    bytes=$(( ${#line} + 1 ))
+    bytes=$(LC_ALL=C printf '%s\n' "$line" | wc -c)
     if [ $((used + bytes)) -gt "$global_bytes" ]; then
       omitted=$((omitted + 1))
       continue
@@ -516,6 +629,7 @@ EOF
   if [ "$omitted" -gt 0 ]; then
     printf 'OPEN DECISIONS: %d more omitted (byte cap)\n' "$omitted" || return 1
   fi
+  printf 'OPEN DECISIONS full exact snapshot (%d shown, %d omitted; full notes): cat %q\n' "$shown" "$omitted" "$evidence" || return 1
   # Answerer-closes hint, printed at exactly the moment an answer gets written:
   # the send that answers a listed decision also closes it, so closure never
   # depends on the busy worker writing a matching resolved line (contract:
@@ -550,6 +664,8 @@ print_record_divergence_section() {
   # presentation of the wakes it exists to deliver.
   diverged=$(fm_run_timed "$bound" "$SCRIPT_DIR/fm-captain-hold.sh" diverged 2>/dev/null) || return 0
   [ -n "$diverged" ] || return 0
+  local evidence
+  evidence=$(save_status_evidence record-divergence "$diverged") || return 1
 
   while IFS=$(printf '\t') read -r task origin key title; do
     [ -n "$task" ] || continue
@@ -557,7 +673,7 @@ print_record_divergence_section() {
     [ -z "$title" ] || line="$line: $title"
     fm_cap_line_var "$line" $((item_bytes - 1))
     line=$FM_LINE_CAP_LINE
-    bytes=$(( ${#line} + 1 ))
+    bytes=$(LC_ALL=C printf '%s\n' "$line" | wc -c)
     if [ $((used + bytes)) -gt "$global_bytes" ]; then
       omitted=$((omitted + 1))
       continue
@@ -576,6 +692,7 @@ EOF
   if [ "$omitted" -gt 0 ]; then
     printf 'RECORD DIVERGENCE: %d more omitted (byte cap)\n' "$omitted" || return 1
   fi
+  printf 'RECORD DIVERGENCE full exact snapshot (%d shown, %d omitted): cat %q\n' "$shown" "$omitted" "$evidence" || return 1
   # Both directions, deliberately. The status resolution is not proof the
   # captain ruled: a call can dissolve, or turn out to have been a question of
   # fact. Reconcile with what actually happened - never by closing on the
@@ -760,16 +877,17 @@ cap_outcome_line() {  # <line> <max-bytes>
 }
 
 print_status_sections() {
-  local snapshot=${1:-} fully_presented=${2:-} acknowledged prepared
+  local snapshot=${1:-} fully_presented=${2:-} annotations=${3:-} acknowledged prepared
   if [ -z "$snapshot" ]; then snapshot=$(status_presentation_snapshot "$STATE") || return 1; fi
   [ -n "$snapshot" ] || return 0
-  acknowledged=$(status_acknowledge_presented_snapshot "$STATE" "$snapshot" "$fully_presented") || return 1
+  acknowledged=$(status_acknowledge_presented_snapshot "$STATE" "$PAGE_SNAPSHOT" "$fully_presented") || return 1
   prepared=$(mktemp "$STATE/.status-presentation.prepared.XXXXXX") || return 1
   if ! {
-    print_unread_status_section "$snapshot" \
-      && print_status_outcome_backstop_section "$snapshot" \
+    print_status_outcome_backstop_section "$snapshot" \
       && print_open_decisions_section "$snapshot" \
-      && print_record_divergence_section
+      && print_record_divergence_section \
+      && print_unread_status_section \
+      && { [ -z "$annotations" ] || cat "$annotations"; }
   } > "$prepared"; then
     rm -f -- "$prepared"
     return 1
@@ -781,6 +899,13 @@ print_status_sections() {
     rm -f -- "$prepared"
     return 1
   fi
+  if [ -n "${OPEN_DECISIONS_EVIDENCE:-}" ]; then
+    if ! cp "$OPEN_DECISIONS_EVIDENCE" "$prepared.decisions" \
+      || ! mv -f "$prepared.decisions" "$STATE/.open-decisions-presented"; then
+      rm -f -- "$prepared" "$prepared.decisions"
+      return 1
+    fi
+  fi
   if ! status_commit_presentation_snapshot "$STATE" "$acknowledged"; then
     rm -f -- "$prepared"
     return 1
@@ -789,7 +914,7 @@ print_status_sections() {
 }
 
 print_status_presentation() {  # [<deduped-raw-rows>]
-  local rows=${1:-} lock="$STATE/.status-presentation-lock" snapshot annotation_manifest fully_presented='' rc=0
+  local task rows=${1:-} lock="$STATE/.status-presentation-lock" snapshot annotation_manifest annotations='' fully_presented='' rc=0
   local lock_rc holder_pid
   if fm_lock_acquire_wait_bounded "$lock" "$PRESENTATION_LOCK_TIMEOUT"; then
     :
@@ -808,14 +933,24 @@ print_status_presentation() {  # [<deduped-raw-rows>]
     printf 'STATUS PRESENTATION INCOMPLETE: status snapshot could not be read.\n'
     rc=1
   }
+  if [ "$rc" -eq 0 ]; then prepare_unread_status_page "$snapshot" || rc=1; fi
   if [ "$rc" -eq 0 ] && [ -n "$rows" ]; then
-    fm_wake_print_annotations "$rows" "$snapshot" || rc=1
+    annotations=$(mktemp "$STATE/.status-annotations.XXXXXX") || rc=1
+    if [ "$rc" -eq 0 ]; then fm_wake_print_annotations "$rows" "$PAGE_SNAPSHOT" > "$annotations" || rc=1; fi
     if [ "$rc" -eq 0 ]; then
       annotation_manifest=$(fm_wake_annotation_manifest "$rows") || rc=1
       fully_presented=$(printf '%s\n' "$annotation_manifest" | awk -F '\t' '$2 == "direct" { sub(/\.status$/, "", $1); print $1 }') || rc=1
+      if [ -n "${FM_WAKE_ANNOTATION_INCOMPLETE_TASKS:-}" ]; then
+        fully_presented=$(printf '%s\n' "$fully_presented" | while IFS= read -r task; do
+          case "
+$FM_WAKE_ANNOTATION_INCOMPLETE_TASKS
+" in *$'\n'"$task"$'\n'*) ;; *) printf '%s\n' "$task" ;; esac
+        done)
+      fi
     fi
   fi
-  if [ "$rc" -eq 0 ] && [ -n "$snapshot" ]; then print_status_sections "$snapshot" "$fully_presented" || rc=1; fi
+  if [ "$rc" -eq 0 ] && [ -n "$snapshot" ]; then print_status_sections "$snapshot" "$fully_presented" "$annotations" || rc=1; fi
+  [ -z "$annotations" ] || rm -f -- "$annotations"
   fm_lock_release "$lock"
   return "$rc"
 }

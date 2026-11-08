@@ -224,3 +224,26 @@ test_no_open_decisions_prints_nothing
 test_open_decision_surfaces_even_with_an_unrelated_queued_wake
 test_buried_decision_surfaces_on_the_empty_queue_fast_path
 test_status_symlink_is_not_followed
+
+test_changed_decisions_precede_unchanged_and_all_remain_retrievable() {
+  local dir state out status i first full
+  dir=$(make_case priority-and-retrieval); state="$dir/state"; out="$dir/out"; status="$state/many.status"
+  for i in $(seq 1 25); do
+    printf 'needs-decision [key=k%s]: choose %s %0180d\n' "$i" "$i" 0 >> "$status"
+  done
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" || fail 'initial many-decision drain failed'
+  printf 'blocked [key=new]: urgent new blocker\n' >> "$status"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" || fail 'changed-decision drain failed'
+  first=$(sed -n '/^OPEN DECISIONS (/{n;p;}' "$out")
+  case "$first" in 'many [key=new] blocked: urgent new blocker') ;; *) fail "new blocker was hidden behind unchanged decisions: $first" ;; esac
+  full=$(sed -n 's/^OPEN DECISIONS full exact snapshot .*: cat //p' "$out")
+  [ -f "$full" ] || fail 'missing exact actionable retrieval artifact'
+  [ "$(wc -l < "$full")" -eq 26 ] || fail 'full retrieval silently dropped open items'
+  grep -F 'more omitted (byte cap)' "$out" >/dev/null || fail 'overflow count was not disclosed'
+  printf 'needs-decision [key=k10]: changed title must invalidate priority\n' >> "$status"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" || fail 'changed-title drain failed'
+  first=$(sed -n '/^OPEN DECISIONS (/{n;p;}' "$out")
+  case "$first" in 'many [key=k10] needs-decision: changed title must invalidate priority') ;; *) fail 'changed note was treated as unchanged';; esac
+  pass 'new and changed decisions lead while exact full retrieval keeps all open items'
+}
+test_changed_decisions_precede_unchanged_and_all_remain_retrievable
