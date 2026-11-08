@@ -14,9 +14,6 @@ Subcommands (all output is line-oriented `key: value` text):
       universal layer and those enhancers, and write the snapshot and its
       metadata. Prints `enhancers: <a,b,...>`.
 
-  match --url <url> --html <file> --skill-dir <dir>
-      Print `enhancers: <a,b,...>` for an already-captured page.
-
   route --url <url> --registry <projects.md> --projects <dir> --domains <file>
       Resolve which registered project a URL belongs to. Prints `route:` one of
       project, inferred, ambiguous, unrouted, then `project:` or `candidates:`
@@ -99,6 +96,10 @@ def safe_url(value, base):
     return resolved
 
 
+def escape_css_markup(text):
+    return re.sub(r"<(?=[a-zA-Z/!])", lambda _: "\\3c ", text)
+
+
 def rewrite_css(text, base):
     def repl_url(match):
         quote, target = match.group(1), match.group(2)
@@ -113,7 +114,7 @@ def rewrite_css(text, base):
     text = CSS_URL.sub(repl_url, text)
     text = CSS_IMPORT.sub(repl_import, text)
     # Raw style text can never open markup, even inside foreign content.
-    return text.replace("<", "\\3c ")
+    return escape_css_markup(text)
 
 
 class Sanitizer(HTMLParser):
@@ -407,7 +408,7 @@ def build(args):
         "enhancers": [name for name, _ in selected],
     }
     with open(os.path.join(skill_dir, "assets", "core.css"), encoding="utf-8") as handle:
-        css = handle.read().replace("<", "\\3c ")
+        css = escape_css_markup(handle.read())
     with open(os.path.join(skill_dir, "assets", "core.js"), encoding="utf-8") as handle:
         core = inline_script(handle.read(), "core.js")
     head_inject = '<style id="fm-lavish-url-style">\n%s</style>' % css
@@ -439,16 +440,6 @@ def build(args):
         json.dump(meta, handle, indent=2)
         handle.write("\n")
     print("enhancers: %s" % ",".join(name for name, _ in selected))
-
-
-def match(args):
-    url = opt(args, "--url")
-    page = opt(args, "--html")
-    skill_dir = opt(args, "--skill-dir")
-    with open(page, encoding="utf-8", errors="replace") as handle:
-        page_html = handle.read()
-    host = (urlsplit(url).hostname or "").lower()
-    print("enhancers: %s" % ",".join(name for name, _ in matching_enhancers(skill_dir, host, page_html)))
 
 
 # -- routing ---------------------------------------------------------------
@@ -604,8 +595,6 @@ def main(argv):
         decode_eval(args[0])
     elif command == "build":
         build(args)
-    elif command == "match":
-        match(args)
     elif command == "route":
         route(args)
     else:

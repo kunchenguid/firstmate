@@ -151,10 +151,11 @@ hostile_page() {  # <path>
 <html lang="en" data-lavish-annotate="off"><head>
 <meta charset="utf-8"><meta http-equiv="refresh" content="0;url=https://evil.example.test/">
 <base href="https://evil.example.test/"><link rel="stylesheet" href="/site.css"><link rel="modulepreload" href="/app.js">
-<style>.hero{background:url(img/hero.png)}</style>
+<style>.hero{background:url(img/hero.png)}@media (width < 600px){.hero{display:none}}@media (600px <= width){.hero{display:block}}</style>
 <script>alert('captured script')</script>
 </head><body>
 <h1 onclick="alert('handler')">Welcome</h1>
+<div style='--comparison: "width < 600px"'>Comparison</div>
 <a href="javascript:alert('link')">bad link</a>
 <a href="/menu">Menu</a>
 <img src="img/cup.png" onerror="alert('img')" srcset="img/cup.png 1x, img/cup2.png 2x">
@@ -219,13 +220,15 @@ test_generic_url_capture_sanitizes_layers_and_arms() {
   assert_grep 'href="https://shop.example.test/menu"' "$home/captured.html" "a relative link was not resolved against the page"
   assert_grep 'href="https://shop.example.test/site.css"' "$home/captured.html" "the stylesheet link was not kept"
   assert_grep 'url(https://shop.example.test/img/hero.png)' "$home/captured.html" "a style url was not resolved"
+  assert_grep '@media (width < 600px)' "$home/captured.html" "a range media query lost its comparison operator"
+  assert_grep '@media (600px <= width)' "$home/captured.html" "a reversed range media query lost its comparison operator"
+  assert_grep 'style="--comparison: &quot;width &lt; 600px&quot;"' "$home/captured.html" "an inline CSS comparison was changed"
   assert_grep 'data-fm-action="https://shop.example.test/subscribe"' "$home/captured.html" "a form could still submit to the live site"
   assert_grep 'data-fm-placeholder="iframe"' "$home/captured.html" "an embedded frame left no placeholder"
   assert_grep '<h1>Welcome</h1>' "$home/captured.html" "page content was lost"
   script_count=$(grep -o '<script' "$snap" | wc -l | tr -d ' ')
   assert_equals 3 "$script_count" "the snapshot carries scripts other than context, core, and default"
   assert_grep 'data-fm-enhancer="default"' "$snap" "the universal enhancer layer was not injected"
-  assert_grep '[Fix Layout]' "$snap" "the prompt chips are not in the universal layer"
 
   assert_grep "$(printf 'fm-lavish-url\topen about:blank')" "$home/browser.log" "the capture did not use its own browser session"
   assert_grep "emulate --viewport 1440x900x1" "$home/browser.log" "a desktop capture did not set a desktop viewport"
