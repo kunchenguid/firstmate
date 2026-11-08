@@ -130,7 +130,7 @@
 #   check: validation claim has no run for <branch> (worker reported validation started)
 #                          opt-in config/verify-claimed-run: a worker's
 #                          validation-started status has no no-mistakes run
-#                          on its branch FM_CLAIMED_RUN_DELAY seconds later;
+#                          on its branch 180 seconds later;
 #                          reported once per claim
 #   check: process-event result captured: <keys>
 #                          a durably captured process-to-event result is queued
