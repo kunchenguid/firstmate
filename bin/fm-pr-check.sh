@@ -324,9 +324,12 @@ CONTROL_LOCK_HELD=0
 pr_check_cleanup() {
   if [ -n "$BASELINE_BACKUP" ] && [ -d "$BASELINE_BACKUP" ] \
     && declare -F restore_baselines >/dev/null; then
-    restore_baselines || echo "error: could not restore previous PR poll registration" >&2
-    rm -rf -- "$BASELINE_BACKUP"
-    BASELINE_BACKUP=
+    if restore_baselines; then
+      rm -rf -- "$BASELINE_BACKUP"
+      BASELINE_BACKUP=
+    else
+      echo "error: could not restore previous PR poll registration; backup retained at $BASELINE_BACKUP" >&2
+    fi
   fi
   fm_pr_poll_cleanup
   [ -z "$META_TMP" ] || rm -f -- "$META_TMP"
@@ -503,8 +506,10 @@ if [ "$CONTROL_LOCK_HELD" = 1 ]; then
   CONTROL_LOCK_HELD=0
 fi
 if [ -n "${BASELINE_BACKUP:-}" ]; then
-  rm -rf -- "$BASELINE_BACKUP"
+  OBSOLETE_BASELINE_BACKUP=$BASELINE_BACKUP
   BASELINE_BACKUP=
+  BASELINE_BACKUP_COMPLETE=0
+  rm -rf -- "$OBSOLETE_BASELINE_BACKUP"
 fi
 # Opt-in fleet activity ledger (docs/fleet-ledger.md); off costs one file test.
 # The merge-time re-record is not a new review-ready PR, so it writes nothing.
