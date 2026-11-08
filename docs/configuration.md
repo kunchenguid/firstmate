@@ -3016,7 +3016,7 @@ Discovery is never a timer.
 Each registered source has its own child process blocking on that source.
 On every cycle, the watcher's `reconcile`:
 
-- Republishes every captured result without a durable handled acknowledgement, regardless of earlier publication.
+- Republishes every captured result without a durable handled acknowledgement, unless an identical unacknowledged row is still queued.
 - Restarts a source whose owner is gone.
 - Stops this home's runner if its registration disappeared unexpectedly.
 
