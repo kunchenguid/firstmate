@@ -211,6 +211,12 @@ printf 'signal: task.status done: slow fixture\n'
 exit 0
 SH
       ;;
+    signal-blocking)
+      cat >> "$dir/bin/fm-watch-arm.sh" <<'SH'
+# Stay parked through lock re-anchoring until the hook's signal handler kills us.
+while :; do sleep 1; done
+SH
+      ;;
     blocking-actionable)
       cat >> "$dir/bin/fm-watch-arm.sh" <<'SH'
 sleep 6
@@ -1272,7 +1278,7 @@ test_signal_session_identity_proof() {
     for signal in HUP TERM INT; do
       dir=$(make_primary_dir "$TMP_ROOT/signal-$mode-$signal")
       : > "$dir/state/task.meta"
-      write_arm_fixture "$dir" blocking-actionable
+      write_arm_fixture "$dir" signal-blocking
       out="$dir/state/interrupted.out"
       run_autoarm_bg "$dir" "$out" sess-signal
       hook_pid=
