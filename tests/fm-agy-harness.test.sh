@@ -869,23 +869,21 @@ agy_orca_stream_verdict() {  # <id> <stream-phrase 0|1> -> the classifier verdic
 # the agy gate classifies only exists in the rendered-screen read. A gate that
 # reads the stream sees a working agy as unknown on every poll and kills it.
 test_agy_orca_gate_reads_the_rendered_screen() {
-  local mode id
-  for mode in genuine; do
-    id="agy-orca-$mode-z20-$$"
-    run_agy_orca_case "orca-$mode" "$id" "$mode" 0
-    expect_code 0 "$RC" "an agy spawn on Orca whose $mode screen shows a busy turn should succeed"$'\n'"$OUT"
-    assert_contains "$OUT" "spawned $id harness=agy" "agy spawn on Orca ($mode screen) did not report success"
-    assert_grep "backend=orca" "$HOME_DIR/state/$id.meta" "agy spawn on Orca did not record backend=orca"
-    [ "$(cat "$CASE_DIR/agy.state")" = busy ] \
-      || fail "the Orca spawn reported success before agy reached a busy turn (state: $(cat "$CASE_DIR/agy.state"))"
-    assert_not_contains "$(cat "$CASE_DIR/orca-calls.log")" $'orca\x1f''terminal'$'\x1f''close' \
-      "a successful agy spawn on Orca must never close the terminal it just launched"
-    # Divergence guard: the stream read of the same busy turn must stay unclassifiable,
-    # or this case would pass for a gate that never consulted the screen at all.
-    case "$(agy_orca_stream_verdict "$id" 0)" in
-      busy*) fail "the fake Orca stream read already classifies busy, so this case cannot prove the screen read" ;;
-    esac
-  done
+  local mode=genuine id
+  id="agy-orca-$mode-z20-$$"
+  run_agy_orca_case "orca-$mode" "$id" "$mode" 0
+  expect_code 0 "$RC" "an agy spawn on Orca whose $mode screen shows a busy turn should succeed"$'\n'"$OUT"
+  assert_contains "$OUT" "spawned $id harness=agy" "agy spawn on Orca ($mode screen) did not report success"
+  assert_grep "backend=orca" "$HOME_DIR/state/$id.meta" "agy spawn on Orca did not record backend=orca"
+  [ "$(cat "$CASE_DIR/agy.state")" = busy ] \
+    || fail "the Orca spawn reported success before agy reached a busy turn (state: $(cat "$CASE_DIR/agy.state"))"
+  assert_not_contains "$(cat "$CASE_DIR/orca-calls.log")" $'orca\x1f''terminal'$'\x1f''close' \
+    "a successful agy spawn on Orca must never close the terminal it just launched"
+  # Divergence guard: the stream read of the same busy turn must stay unclassifiable,
+  # or this case would pass for a gate that never consulted the screen at all.
+  case "$(agy_orca_stream_verdict "$id" 0)" in
+    busy*) fail "the fake Orca stream read already classifies busy, so this case cannot prove the screen read" ;;
+  esac
   pass "fm-spawn: the agy gate on Orca reads the rendered screen"
 }
 
