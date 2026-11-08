@@ -5714,14 +5714,23 @@ kimi_wait_for_delivery() {
 # record cannot be marked, a fresh dispatch rolls it back as before.
 spawn_delivery_gate_failed() { # <detail> [close]
   local detail=$1 close=${2:-}
+  local cleanup_marked=0
   printf '%s\n' "$(status_stamp_line "failed: $detail")" >>"$STATE/$ID.status"
   [ "$close" != close ] || rovo_endpoint_cleanup
-  if ! spawn_mark_cleanup_only_record; then
+  if spawn_mark_cleanup_only_record; then
+    cleanup_marked=1
+  else
     if [ "$SPAWN_FRESH_COMMIT_PENDING" = 1 ]; then
       echo "error: $detail; inspect window $T. Its task record could not be kept for cleanup${FM_BACKLOG_TRANSITION_ERROR:+ ($FM_BACKLOG_TRANSITION_ERROR)} and is rolled back - close out endpoint $T and local copy $WT by hand before retrying" >&2
+    elif spawn_mark_cleanup_only_record_in_place; then
+      FM_BACKLOG_TRANSITION_ERROR=
+      cleanup_marked=1
     else
-      echo "error: $detail; inspect window $T. Its cleanup-only record could not be published${FM_BACKLOG_TRANSITION_ERROR:+ ($FM_BACKLOG_TRANSITION_ERROR)}; clean up endpoint $T and local copy $WT by hand before retrying" >&2
+      echo "error: $detail; inspect window $T. Its cleanup-only record could not be published${FM_BACKLOG_TRANSITION_ERROR:+ ($FM_BACKLOG_TRANSITION_ERROR)}; do not run teardown until its delivery state is repaired" >&2
     fi
+  fi
+  if [ "$cleanup_marked" != 1 ]; then
+    return
   elif [ "$close" = close ]; then
     echo "error: $detail; its endpoint $T was closed. Its task record was kept for cleanup and its backlog item was left unchanged: run bin/fm-teardown.sh $ID to clean up its local copy, then dispatch it again" >&2
   else
@@ -5750,6 +5759,25 @@ spawn_mark_cleanup_only_record() {
   rm -f "$SPAWN_META_TMP" 2>/dev/null || true
   SPAWN_META_TMP=
   return 1
+}
+
+spawn_mark_cleanup_only_record_in_place() {
+  local meta="$STATE/$ID.meta" reason
+  [ "$SPAWN_META_LOCK_HELD" = 1 ] || return 1
+  fm_backlog_record_present "$meta" "task record" "$STATE" || return 1
+  if ! printf 'cleanup_recovery=delivery-unconfirmed\n' >>"$meta"; then
+    FM_BACKLOG_TRANSITION_ERROR="cleanup-only marker could not be appended to $meta"
+    return 1
+  fi
+  reason=$(fm_backlog_record_cleanup_reason "$meta") || {
+    FM_BACKLOG_TRANSITION_ERROR="cleanup-only marker could not be read from $meta"
+    return 1
+  }
+  if [ "$reason" != delivery-unconfirmed ]; then
+    FM_BACKLOG_TRANSITION_ERROR="cleanup-only marker was not retained in $meta"
+    return 1
+  fi
+  return 0
 }
 
 kimi_spawn_fail() { # <detail>
