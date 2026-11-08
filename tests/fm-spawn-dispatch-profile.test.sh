@@ -2350,6 +2350,102 @@ test_claude_crew_settings_invalid_refuses_before_endpoint_or_metadata() {
   pass "an invalid config/claude-crew-settings.json refuses before any endpoint or metadata"
 }
 
+# A relaunch re-reads config/claude-crew-settings.json, so a change made after
+# the fresh launch reaches the replacement agent. bin/fm-control.sh relaunch
+# rebuilds the launch through bin/fm-spawn.sh --relaunch; this stub models just
+# enough pane lifecycle for that transaction: /exit leaves a bare shell behind
+# and the staged launch file starts the harness again.
+make_relaunch_tmux_stub() {  # <fakebin>
+  mkdir -p "$1"
+  cat > "$1/tmux" <<'SH'
+#!/usr/bin/env bash
+set -u
+D=$FM_FAKE_DIR
+case "${1:-}" in
+  send-keys)
+    shift
+    literal=0
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        -t) shift 2 ;;
+        -l) literal=1; shift ;;
+        *) break ;;
+      esac
+    done
+    payload=${1:-}
+    if [ "$literal" = 1 ]; then
+      case "$payload" in
+        ". '"*"'")
+          staged=${payload#". '"}
+          staged=${staged%"'"}
+          [ ! -f "$staged" ] || { printf '%s\n' "$(cat "$staged")" > "$D/launch"; printf 'claude' > "$D/command"; }
+          ;;
+        /exit|/quit) printf 'zsh' > "$D/command" ;;
+      esac
+    fi
+    exit 0 ;;
+  display-message)
+    for a in "$@"; do
+      case "$a" in
+        *cursor_y*) printf '1\n'; exit 0 ;;
+        *pane_current_command*) cat "$D/command"; printf '\n'; exit 0 ;;
+        *pane_current_path*) cat "$D/cwd"; printf '\n'; exit 0 ;;
+      esac
+    done
+    printf 'fakepane\n'; exit 0 ;;
+  capture-pane) printf '╭────╮\n│    │\n╰────╯\n'; exit 0 ;;
+  list-windows) [ -f "$D/windows" ] && cat "$D/windows"; exit 0 ;;
+esac
+exit 0
+SH
+  chmod +x "$1/tmux"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$1/sleep"
+  chmod +x "$1/sleep"
+}
+
+test_claude_crew_settings_reach_relaunch() {
+  local rec id out status launch settings window rl_fake rl_dir
+  id=profile-claude-crew-relaunch-z34
+  rec=$(make_spawn_case profile-claude-crew-relaunch claude "$id")
+  read_case_record "$rec"
+  printf '%s\n' "$CLAUDE_SESSION_SETTINGS" > "$HOME_DIR/config/claude-session-settings.json"
+  printf '%s\n' "$CLAUDE_CREW_SETTINGS" > "$HOME_DIR/config/claude-crew-settings.json"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "claude spawn before a relaunch should succeed"$'\n'"$out"
+  assert_crew_settings_overlay "$(cat "$LAUNCH_LOG")" "fresh claude crewmate"
+
+  # The captain edits the crew file while the worker runs.
+  printf '%s\n' '{"skillListingMaxDescChars":111,"skillOverrides":{"afk":"name-only"},"relaunchnote":"after the edit"}' \
+    > "$HOME_DIR/config/claude-crew-settings.json"
+
+  rl_dir="$CASE_DIR/relaunch"
+  rl_fake="$rl_dir/fakebin"
+  mkdir -p "$rl_dir"
+  make_relaunch_tmux_stub "$rl_fake"
+  window=$(sed -n 's/^window=//p' "$HOME_DIR/state/$id.meta")
+  printf '%s\n' "${window#*:}" > "$rl_dir/windows"
+  printf 'claude' > "$rl_dir/command"
+  printf '%s' "$WT_DIR" > "$rl_dir/cwd"
+  out=$(env PATH="$rl_fake:$PATH" FM_HOME="$HOME_DIR" FM_FAKE_DIR="$rl_dir" \
+    HOME="$HOME_DIR/user-home" CLAUDE_CONFIG_DIR='' FM_SPAWN_NO_GUARD=1 \
+    FM_CONTROL_POLL=0.01 FM_CONTROL_EXIT_WAIT=0.05 FM_CONTROL_LAUNCH_WAIT=0.05 \
+    "$ROOT/bin/fm-control.sh" "$id" relaunch --note 'replacement continues the same task' 2>&1)
+  status=$?
+  expect_code 0 "$status" "claude relaunch after a crew settings edit should succeed"$'\n'"$out"
+
+  launch=$(cat "$rl_dir/launch" 2>/dev/null)
+  [ -n "$launch" ] || fail "relaunch sent no replacement launch command"
+  settings=$(claude_settings_json_arg "$launch")
+  printf '%s' "$settings" | jq -e '.skillListingMaxDescChars == 111 and .relaunchnote == "after the edit"
+    and .skillOverrides == {"anthropic-skills:pdf":"user-invocable-only","caveman":"name-only","afk":"name-only"}
+    and .modelSettings == {"claude-opus-5-5":{"autoCompactWindow":100000}}
+    and (has("crewnote") | not) and .note == "it'\''s" and .feedbackDrafts == "off"' >/dev/null \
+    || fail "the relaunch did not carry the edited crew file merged over the session file: $settings"
+  pass "a relaunched claude worker re-reads config/claude-crew-settings.json"
+}
+
 test_active_dispatch_profile_does_not_block_secondmate_launch() {
   local rec id sm out status
   id=profile-secondmate-z16
@@ -3078,6 +3174,7 @@ test_claude_crew_settings_merge_into_crewmate_launch
 test_claude_crew_settings_merge_into_scout_launch
 test_claude_crew_settings_reach_secondmate_home_not_its_launch
 test_claude_crew_settings_invalid_refuses_before_endpoint_or_metadata
+test_claude_crew_settings_reach_relaunch
 test_active_dispatch_profile_does_not_block_secondmate_launch
 
 echo "# all fm-spawn-dispatch-profile tests passed"
