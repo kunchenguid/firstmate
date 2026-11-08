@@ -1727,6 +1727,38 @@ remote_env "$ROOT/bin/fm-bootstrap.sh" >/dev/null \
 assert_present "$PARENT/state/procevent/remote-reply-ios.source" \
   "bootstrap did not repair reply registration after retirement rollback"
 resolve_ios_pending
+# A forced retirement refuses a remote child scout's task data; the captain's
+# discard reaches the remote teardown, which then passes that scout and stops
+# only at the windowless child record that sorts after it.
+git -C "$TMP_ROOT" init -q -b main scout-proj
+git -C "$TMP_ROOT/scout-proj" -c user.email=t@t -c user.name=t commit -q --allow-empty -m init
+git -C "$TMP_ROOT/scout-proj" worktree add -q -b fm/a-scout "$TMP_ROOT/scout-wt" main
+mkdir -p "$TMP_ROOT/scout-wt/data/a-scout"
+printf 'scout answers\n' > "$TMP_ROOT/scout-wt/data/a-scout/answers.json"
+printf '%s\n' 'window=firstmate:fm-a-scout' 'endpoint_task_id=a-scout' \
+  "worktree=$TMP_ROOT/scout-wt" "project=$TMP_ROOT/scout-proj" 'kind=scout' 'mode=local-only' \
+  > "$REMOTE_HOME/state/a-scout.meta"
+if remote_env "$ROOT/bin/fm-teardown.sh" ios --force > "$TMP_ROOT/teardown-scout-data.out" 2>&1; then
+  fail "forced remote retirement discarded child scout task data"
+fi
+assert_grep 'scout task data may remain' "$TMP_ROOT/teardown-scout-data.out" \
+  "forced remote retirement did not refuse child scout task data"
+if remote_env "$ROOT/bin/fm-teardown.sh" ios --force --discard-scout-data \
+  > "$TMP_ROOT/teardown-scout-discard.out" 2>&1; then
+  fail "forced remote retirement accepted a windowless child record"
+fi
+assert_no_grep 'scout task data' "$TMP_ROOT/teardown-scout-discard.out" \
+  "the scout-data discard did not reach the remote teardown"
+assert_grep 'task child has a missing, empty, or ambiguous window endpoint' "$TMP_ROOT/teardown-scout-discard.out" \
+  "the remote teardown did not continue past the discarded scout"
+assert_grep 'scout answers' "$TMP_ROOT/scout-wt/data/a-scout/answers.json" "refused remote retirement removed scout data"
+assert_present "$REMOTE_HOME" "refused remote scout retirement removed the home"
+assert_present "$PARENT/state/ios.meta" "refused remote scout retirement removed parent metadata"
+assert_grep '- ios ' "$PARENT/data/secondmates.md" "refused remote scout retirement removed the route"
+rm -f "$REMOTE_HOME/state/a-scout.meta"
+git -C "$TMP_ROOT/scout-proj" worktree remove --force "$TMP_ROOT/scout-wt"
+resolve_ios_pending
+pass "forced remote retirement refuses child scout task data and forwards the captain's discard"
 rm -f "$REMOTE_HOME/state/child.meta"
 mkdir -p "$PARENT/data/handoff"
 ln -s "$TMP_ROOT/missing-outbox-target" "$PARENT/data/handoff/ios.outbox.md"
@@ -1936,10 +1968,17 @@ retired_rc=0
 remote_control_retire ios --force > "$TMP_ROOT/retired-force.out" 2>&1 || retired_rc=$?
 [ "$retired_rc" -eq 0 ] || fail "forced retirement of an absent home failed ($retired_rc): $(cat "$TMP_ROOT/retired-force.out")"
 assert_grep 'already-retired: ios' "$TMP_ROOT/retired-force.out" "forced retirement of an absent home was not a no-op"
+retired_rc=0
+remote_control_retire ios --force --discard-scout-data > "$TMP_ROOT/retired-discard.out" 2>&1 || retired_rc=$?
+[ "$retired_rc" -eq 0 ] || fail "forwarded scout-data discard on an absent home failed ($retired_rc): $(cat "$TMP_ROOT/retired-discard.out")"
+assert_grep 'already-retired: ios' "$TMP_ROOT/retired-discard.out" "forwarded scout-data discard on an absent home was not a no-op"
+bogus_rc=0
+remote_control_retire ios --discard-scout-data > "$TMP_ROOT/retired-discard-noforce.out" 2>&1 || bogus_rc=$?
+[ "$bogus_rc" -eq 2 ] || fail "a scout-data discard without --force did not fail with usage (exit $bogus_rc)"
 bogus_rc=0
 remote_control_retire ios --bogus > "$TMP_ROOT/retired-bogus.out" 2>&1 || bogus_rc=$?
 [ "$bogus_rc" -eq 2 ] || fail "an invalid retire option on an absent home did not fail with usage (exit $bogus_rc)"
-assert_grep 'fm-remote-secondmate-control.sh retire <id> [--force]' "$TMP_ROOT/retired-bogus.out" "an invalid retire option did not print usage"
+assert_grep 'fm-remote-secondmate-control.sh retire <id> [--force [--discard-scout-data]]' "$TMP_ROOT/retired-bogus.out" "an invalid retire option did not print usage"
 assert_no_grep 'already-retired' "$TMP_ROOT/retired-bogus.out" "an invalid retire option reported a retirement"
 assert_absent "$REMOTE_HOME" "retiring an absent home recreated it"
 pass "an absent remote home retires only with the dispatcher's arguments and is never recreated"

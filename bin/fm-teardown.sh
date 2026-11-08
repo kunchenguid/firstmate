@@ -95,7 +95,9 @@
 # saved, and no automatic merge is attempted: the home may already hold a
 # different report or canonical answers. A forced secondmate retirement applies
 # the same check to each child scout copy before any child is stopped or
-# returned; a reassigned slot is never inspected.
+# returned; a reassigned slot is never inspected. A worker can still write while
+# it stops, so each copy is checked again after its writers are stopped and
+# before it is returned or removed.
 # Once that check passes, a scratch copy (kind=scout) and a --force run discard
 # remaining untracked content.
 # Treehouse's return resets with `git clean -fd`, which never deletes a nested
@@ -225,10 +227,10 @@
 #   captain has explicitly said to discard the work. It never bypasses the scout
 #   task-data check above.
 #   --discard-scout-data skips only that scout task-data check, for a scout copy
-#   (or, with --force, each child scout copy of a retired secondmate) whose
-#   data/<task-id> content the captain has explicitly said to discard. It
-#   authorizes nothing else: the report and completion-gate checks still apply
-#   unless --force is also given.
+#   (or, with --force, each child scout copy of a retired local or remote
+#   secondmate) whose data/<task-id> content the captain has explicitly said to
+#   discard. It authorizes nothing else: the report and completion-gate checks
+#   still apply unless --force is also given.
 #   --legacy-record accepts a task record that predates the spawn_gen field:
 #   teardown then proceeds only when the recorded endpoint is confirmed dead or
 #   agent-less (bin/fm-backend.sh's recovery-grade classifier), and without
@@ -1173,7 +1175,7 @@ remote_outbox_cleanup() {
 }
 
 remote_secondmate_teardown() {
-  local remote_host remote_root remote_home kind route_host route_root route_home out rc tmp
+  local remote_host remote_root remote_home kind route_host route_root route_home out rc tmp discard_flag
   remote_host=$(fm_meta_get "$META" remote_host)
   [ -n "$remote_host" ] || return 3
   kind=$(fm_meta_get "$META" kind)
@@ -1203,7 +1205,9 @@ remote_secondmate_teardown() {
   }
   "$FM_ROOT/bin/fm-guard.sh" || true
   if [ "$FORCE" = --force ]; then
-    if out=$("$SCRIPT_DIR/fm-on.sh" "$ID" fm-remote-secondmate-control.sh retire "$ID" --force < /dev/null 2>&1); then rc=0; else rc=$?; fi
+    discard_flag=
+    [ "$DISCARD_SCOUT_DATA" != 1 ] || discard_flag=--discard-scout-data
+    if out=$("$SCRIPT_DIR/fm-on.sh" "$ID" fm-remote-secondmate-control.sh retire "$ID" --force ${discard_flag:+"$discard_flag"} < /dev/null 2>&1); then rc=0; else rc=$?; fi
   else
     if out=$("$SCRIPT_DIR/fm-on.sh" "$ID" fm-remote-secondmate-control.sh retire "$ID" < /dev/null 2>&1); then rc=0; else rc=$?; fi
   fi
@@ -3629,6 +3633,9 @@ cleanup_firstmate_home_children() {
         remove_firstmate_home "$child_home" "child firstmate home" "$child_id" "$child_backend" || return $?
       fi
     elif [ "$child_backend" = orca ]; then
+      # The child endpoint is stopped: re-prove before its copy goes.
+      [ "$child_kind" != scout ] \
+        || teardown_require_scout_data_preserved "$child_id" "$child_wt" "$DATA/$ID/children/$child_id" || return 1
       if [ -n "$child_wt" ] && [ -d "$child_wt" ]; then
         validate_child_worktree_for_removal "$child_wt" "$child_proj" >/dev/null || return 1
         rm -f "$child_wt/.claude/settings.local.json" "$child_wt/.opencode/plugins/fm-turn-end.js" \
@@ -3650,6 +3657,8 @@ cleanup_firstmate_home_children() {
         require_owned_worktree_slot_record "$child_id" "$child_wt" || return 1
       else
         validate_child_worktree_for_removal "$child_wt" "$child_proj" >/dev/null || return 1
+        [ "$child_kind" != scout ] \
+          || teardown_require_scout_data_preserved "$child_id" "$child_wt" "$DATA/$ID/children/$child_id" || return 1
         rm -f "$child_wt/.claude/settings.local.json" "$child_wt/.opencode/plugins/fm-turn-end.js" \
           "$child_wt/.opencode/plugins/fm-busy-state.js" \
           "$child_wt/.fm-grok-turnend" "$child_wt/.fm-kimi-turnend"
@@ -3992,6 +4001,9 @@ fi
 # returning it on either backend path.
 if teardown_owns_worktree && [ -d "$WT" ] && [ "$FORCE" != "--force" ]; then
   validate_worktree_teardown_safety || exit 1
+fi
+if [ "$KIND" = scout ] && teardown_owns_worktree; then
+  teardown_require_scout_data_preserved "$ID" "$WT" "$DATA/$ID" || exit 1
 fi
 
 if [ "$TEARDOWN_BACKLOG_APPLIES" = 1 ]; then

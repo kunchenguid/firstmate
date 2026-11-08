@@ -2241,6 +2241,74 @@ test_forced_secondmate_preserves_child_scout_task_data() {
   pass "forced secondmate cleanup refuses before discarding child scout task data"
 }
 
+# A worker can still write task data while teardown stops it, after the first
+# check passed. The fake lsof runs only when the reaper stops the copy's
+# processes, so the data appears strictly after the early check.
+test_scout_task_data_written_while_stopping_is_preserved() {
+  local case_dir source force rc
+  for force in '' --force; do
+    case_dir=$(make_case "scout-task-data-late${force}")
+    write_meta "$case_dir" no-mistakes scout
+    prepare_scout_teardown "$case_dir"
+    add_treehouse_clean_fd "$case_dir"
+    source="$case_dir/wt/data/task-x1"
+    cat > "$case_dir/fakebin/lsof" <<'SH'
+#!/usr/bin/env bash
+mkdir -p "$FM_LATE_SOURCE" && printf 'late answers\n' > "$FM_LATE_SOURCE/marks.json"
+exit 0
+SH
+    chmod +x "$case_dir/fakebin/lsof"
+    rc=0
+    FM_LATE_SOURCE="$source" run_teardown "$case_dir" ${force:+"$force"} \
+      > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+    expect_code 1 "$rc" "late scout task data ($force): cleanup must refuse"
+    assert_grep 'scout task data' "$case_dir/stderr" "late scout task data ($force): refusal missing"
+    assert_grep 'late answers' "$source/marks.json" "late scout task data ($force): data lost"
+    assert_present "$case_dir/state/task-x1.meta" "late scout task data ($force): task record removed"
+    [ "$(git -C "$case_dir/wt" symbolic-ref --short HEAD)" = fm/task-x1 ] \
+      || fail "late scout task data ($force): branch changed"
+  done
+  pass "scout task data written while the worker stops refuses cleanup, with or without --force"
+}
+
+# Forced child cleanup stops the child endpoint before removing its copy; data
+# the child writes as it stops is checked again before the copy goes.
+test_forced_secondmate_child_scout_late_task_data_is_preserved() {
+  local case_dir home child_wt rc
+  case_dir=$(make_case secondmate-child-late-task-data)
+  write_meta "$case_dir" local-only secondmate
+  home="$case_dir/secondmate-home"
+  mkdir -p "$home/state" "$home/data" "$home/config" "$home/projects"
+  printf '%s\n' task-x1 > "$home/.fm-secondmate-home"
+  printf '%s\n' "home=$home" >> "$case_dir/state/task-x1.meta"
+  child_wt="$case_dir/child-scout-wt"
+  git -C "$case_dir/project" worktree add -q -b fm/child-scout "$child_wt" main
+  fm_write_meta "$home/state/child-scout.meta" \
+    'window=firstmate:fm-child-scout' 'endpoint_task_id=child-scout' \
+    "worktree=$child_wt" "project=$case_dir/project" 'kind=scout' 'mode=local-only'
+  add_treehouse_clean_fd "$case_dir"
+  cat > "$case_dir/fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+case "${1:-}:$*" in
+  kill-window:*fm-child-scout*)
+    mkdir -p "$FM_LATE_SOURCE" && printf 'late answers\n' > "$FM_LATE_SOURCE/marks.json" ;;
+esac
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/tmux"
+  rc=0
+  FM_LATE_SOURCE="$child_wt/data/child-scout" run_teardown "$case_dir" --force \
+    > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  expect_code 1 "$rc" "late child scout task data: forced cleanup must refuse"
+  assert_grep 'scout task data' "$case_dir/stderr" "late child scout task data: refusal missing"
+  assert_grep 'late answers' "$child_wt/data/child-scout/marks.json" "late child scout task data: data lost"
+  assert_present "$home/state/child-scout.meta" "late child scout task data: child record removed"
+  assert_present "$case_dir/state/task-x1.meta" "late child scout task data: parent record removed"
+  [ "$(git -C "$child_wt" symbolic-ref --short HEAD)" = fm/child-scout ] \
+    || fail "late child scout task data: branch changed"
+  pass "forced secondmate cleanup refuses child scout task data written while the child stops"
+}
+
 # A child scout whose recorded copy is already gone has no task data left to
 # lose and no slot to prove ownership of, so forced retirement proceeds.
 test_forced_secondmate_retires_child_scout_with_missing_copy() {
@@ -6581,6 +6649,8 @@ test_scout_task_data_requires_preservation
 test_scout_task_data_discard_flag
 test_forced_secondmate_preserves_child_scout_task_data
 test_forced_secondmate_retires_child_scout_with_missing_copy
+test_scout_task_data_written_while_stopping_is_preserved
+test_forced_secondmate_child_scout_late_task_data_is_preserved
 test_hidden_untracked_work_refuses_before_return
 test_content_fallback_git_capability_boundary
 test_work_written_at_reap_boundary_is_preserved

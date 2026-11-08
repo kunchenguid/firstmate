@@ -13,7 +13,7 @@
 #   fm-remote-secondmate-control.sh observe <id>
 #   fm-remote-secondmate-control.sh sync <id> [<parent-commit>]
 #   fm-remote-secondmate-control.sh update <id>
-#   fm-remote-secondmate-control.sh retire <id> [--force]
+#   fm-remote-secondmate-control.sh retire <id> [--force [--discard-scout-data]]
 #
 # Remote placement ends here, but the second-mate agent runs only on a
 # session-provider backend whose server survives every SSH disconnection that
@@ -77,8 +77,8 @@ validate_id() { case "$1" in ''|*[!A-Za-z0-9._-]*) die "invalid secondmate id: $
 # fabricating an unseeded home that every later retirement then refuses.
 # The accepted arguments match the retire dispatcher's.
 if [ "${1:-}" = retire ] && [ ! -e "$TARGET_HOME" ] && [ ! -L "$TARGET_HOME" ]; then
-  case "$#:${3:-}" in
-    2:|3:|3:--force) validate_id "$2"; printf 'already-retired: %s\n' "$2"; exit 0 ;;
+  case "$#:${3:-}:${4:-}" in
+    2::|3::|3:--force:|4:--force:--discard-scout-data) validate_id "$2"; printf 'already-retired: %s\n' "$2"; exit 0 ;;
     *) usage ;;
   esac
 fi
@@ -512,10 +512,11 @@ cmd_update() {
 }
 
 cmd_retire() {
-  local id=$1 force=${2:-} recorded_server current_server
+  local id=$1 force=${2:-} discard=${3:-} recorded_server current_server
   validate_id "$id"
   validate_home "$id"
   [ -z "$force" ] || [ "$force" = --force ] || usage
+  [ -z "$discard" ] || { [ "$force" = --force ] && [ "$discard" = --discard-scout-data ]; } || usage
   remote_endpoint_require "$id"
   if [ "$REMOTE_ENDPOINT_BACKEND" = rex ]; then
     recorded_server=$(fm_backend_meta_exact_value "$REMOTE_ENDPOINT_META" rex_server)
@@ -530,7 +531,7 @@ cmd_retire() {
     FM_HOME="$FM_ROOT" FM_ROOT_OVERRIDE="$FM_ROOT" \
       FM_STATE_OVERRIDE="$CONTROL_STATE" FM_DATA_OVERRIDE="$CONTROL_DATA" \
       FM_CONFIG_OVERRIDE="$TARGET_HOME/config" FM_TEARDOWN_GUARD_DONE=1 \
-      "$SCRIPT_DIR/fm-teardown.sh" "$id" --force
+      "$SCRIPT_DIR/fm-teardown.sh" "$id" --force ${discard:+"$discard"}
   else
     FM_HOME="$FM_ROOT" FM_ROOT_OVERRIDE="$FM_ROOT" \
       FM_STATE_OVERRIDE="$CONTROL_STATE" FM_DATA_OVERRIDE="$CONTROL_DATA" \
@@ -551,7 +552,7 @@ case "${1:-}" in
   observe) shift; [ "$#" -eq 1 ] || usage; cmd_observe "$@" ;;
   sync) shift; [ "$#" -ge 1 ] && [ "$#" -le 2 ] || usage; cmd_sync "$@" ;;
   update) shift; [ "$#" -eq 1 ] || usage; cmd_update "$@" ;;
-  retire) shift; [ "$#" -ge 1 ] && [ "$#" -le 2 ] || usage; cmd_retire "$@" ;;
+  retire) shift; [ "$#" -ge 1 ] && [ "$#" -le 3 ] || usage; cmd_retire "$@" ;;
   ''|-h|--help|help) usage ;;
   *) die "unknown command: $1" ;;
 esac
