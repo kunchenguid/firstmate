@@ -2423,11 +2423,16 @@ busy_stream_snapshot_current() {  # <task> <observed snapshot>
 # gate nobody has been told about, or when the run is terminal. Surface those
 # authoritative changes once per declaration and run, then use the same bounded
 # recheck cadence for repeats. The shared predicates bind the gate to this run.
-paused_wait_superseded() {  # <window> <task> <state-line>
-  local win=$1 task=$2 line=$3 statusf key last run state reason
+# OFF unless the home creates config/paused-wait-supersession: absent the flag it
+# returns before any read, so the watcher spends no crew-state read here and
+# keeps the unchanged declared-wait cadence and wording.
+paused_wait_superseded() {  # <window> <task>
+  local win=$1 task=$2 line statusf key last run state reason
+  [ -e "$CONFIG/paused-wait-supersession" ] || return 1
   statusf="$STATE/$task.status"
   last=$(status_declared_wait_line "$statusf")
   status_is_paused "$last" || return 1
+  line=$("$FM_CREW_STATE_BIN" "$task" 2>/dev/null) || line=''
   if run=$(crew_gate_awaits_human_decision "$task" "$line") \
     && ! status_has_open_needs_decision "$statusf" "$run"; then
     reason="stale: $win (paused wait superseded: run $run is parked at a human-owed gate with no open decision)"
@@ -2450,9 +2455,10 @@ paused_wait_superseded() {  # <window> <task> <state-line>
 
 # Absorb a stale pane under a declared external-wait pause (paused:) or a
 # dead-agent captain-held transfer, and re-surface it once every
-# PAUSE_RESURFACE_SECS for a recheck so it cannot rot invisibly. The superseded
-# state check runs before the ordinary bounded cadence on idle and busy paths.
-# The re-surface age is anchored on the
+# PAUSE_RESURFACE_SECS for a recheck so it cannot rot invisibly. Called on any
+# stale poll once pause_state_class permits the bounded cadence, so it must be
+# cheap: it never re-reads crew state except through the opt-in superseded-wait
+# check (paused_wait_superseded) that runs first. The re-surface age is anchored on the
 # status file mtime, not a per-hash marker, so a churny idle pane (a ticking
 # clock, a token counter) cannot keep resetting the cadence the way a hash-tied
 # timer would. The bounded re-surface itself is the shared resurface_absorbed
@@ -2465,9 +2471,8 @@ paused_wait_superseded() {  # <window> <task> <state-line>
 # wording; a caller that reached the bounded cadence off pause tracking alone, with
 # no declaring verb left on the log, keeps the external-wait wording it always had.
 handle_paused_stale() {  # <window> <task> <hash>
-  local win=$1 task=$2 h=$3 key statusf mtime age detail reason declaration last until now min_age line
-  line=$("$FM_CREW_STATE_BIN" "$task" 2>/dev/null) || line=''
-  if paused_wait_superseded "$win" "$task" "$line"; then return 0; fi
+  local win=$1 task=$2 h=$3 key statusf mtime age detail reason declaration last until now min_age
+  if paused_wait_superseded "$win" "$task"; then return 0; fi
   key=$(window_key "$win")
   printf '%s' "$h" > "$STATE/.stale-$key"
   : > "$STATE/.paused-$key"
@@ -2920,12 +2925,11 @@ captain_call_stale_bound() {  # <window-key> <task>
 # above): the status line the worker declared, and the backlog hold firstmate
 # recorded once the captain took the work in hand.
 surface_nonterminal_stale() {  # <window> <hash> [dialog-name]
-  local win=$1 h=$2 dialog=${3-} key task last line declared=1 bounded=1 throttled=1 until now reason=''
+  local win=$1 h=$2 dialog=${3-} key task last declared=1 bounded=1 throttled=1 until now reason=''
   key=$(window_key "$win")
   task=$(window_to_task "$win" "$STATE")
   last=$(status_declared_wait_line "$STATE/$task.status")
-  line=$("$FM_CREW_STATE_BIN" "$task" 2>/dev/null) || line=''
-  if paused_wait_superseded "$win" "$task" "$line"; then return 0; fi
+  if paused_wait_superseded "$win" "$task"; then return 0; fi
   STALE_WAIT_DECLARATION=
   if status_is_paused "$last"; then
     declared=0
@@ -4494,10 +4498,7 @@ EOF
         # A pane that leaves the stale path ends the wedge episode it was in, so
         # the cap that episode fired goes with the rest of its bookkeeping.
         paused_bound=1
-        if [ "$busy_now" -eq 0 ] && status_is_paused "$(status_declared_wait_line "$STATE/$task.status")"; then
-          line=$("$FM_CREW_STATE_BIN" "$task" 2>/dev/null) || line=''
-          paused_wait_superseded "$w" "$task" "$line" || true
-        fi
+        [ "$busy_now" -ne 0 ] || paused_wait_superseded "$w" "$task" || true
         if [ "$busy_now" -eq 0 ] && busy_turn_over_age "$task"; then
           busy_turn_bound_check "$w" "$task" "$h" "$ssf" "$ewf" "$dialog" && paused_bound=0
         else
@@ -4517,10 +4518,7 @@ EOF
       printf '%s' "$h" > "$hf"
       echo 0 > "$cf"
       paused_bound=1
-      if [ "$busy_now" -eq 0 ] && status_is_paused "$(status_declared_wait_line "$STATE/$task.status")"; then
-        line=$("$FM_CREW_STATE_BIN" "$task" 2>/dev/null) || line=''
-        paused_wait_superseded "$w" "$task" "$line" || true
-      fi
+      [ "$busy_now" -ne 0 ] || paused_wait_superseded "$w" "$task" || true
       if [ "$busy_now" -eq 0 ] && busy_turn_over_age "$task"; then
         busy_turn_bound_check "$w" "$task" "$h" "$ssf" "$ewf" "$dialog" && paused_bound=0
       else

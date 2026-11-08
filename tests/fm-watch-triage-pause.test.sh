@@ -1461,9 +1461,13 @@ test_required_captain_hold_tests_fail_without_tasks_axi() {
   pass "all four required captain-hold tests fail when tasks-axi is unavailable"
 }
 
-make_superseded_pause_case() {  # <name> <status-line>
-  local name=$1 status_line=$2 dir state window key sig
+# The superseded-wait check is opt-in through config/paused-wait-supersession;
+# cases arm it unless asked for the flag-absent default.
+make_superseded_pause_case() {  # <name> <status-line> [armed|unarmed]
+  local name=$1 status_line=$2 arm=${3:-armed} dir state window key sig
   dir=$(make_case "$name"); state="$dir/state"; window="test:fm-superseded"
+  mkdir -p "$dir/config"
+  [ "$arm" = unarmed ] || : > "$dir/config/paused-wait-supersession"
   printf 'idle at declared wait\n' > "$dir/pane.txt"
   printf 'window=%s\nkind=ship\nharness=grok\nbackend=tmux\n' "$window" > "$state/paused.meta"
   printf '%s\n' "$status_line" > "$state/paused.status"
@@ -1483,7 +1487,8 @@ superseded_pause_round() {  # <dir> <crew-state-line> <exit|absorb> [busy]
   PATH="$dir/fakebin:$PATH" FM_FAKE_TMUX_WINDOW=test:fm-superseded \
     FM_FAKE_TMUX_CAPTURE="$dir/pane.txt" FM_FAKE_TMUX_CURRENT_COMMAND="$command" \
     FM_FAKE_CREW_STATE="$crew_state" FM_WATCH_HANDLING_SUCCESSOR=1 \
-    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$dir/fakebin/fm-crew-state.sh" \
+    FM_STATE_OVERRIDE="$state" FM_CONFIG_OVERRIDE="$dir/config" \
+    FM_CREW_STATE_BIN="$dir/fakebin/fm-crew-state.sh" FM_FAKE_CREW_STATE_LOG="$dir/crew-state.log" \
     FM_BUSY_TURN_MAX_SECS="$busy_max" FM_PAUSE_RESURFACE_SECS=240 \
     FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
     "$WATCH" >> "$out" 2>&1 &
@@ -1557,6 +1562,32 @@ test_declared_wait_surfaces_superseding_state() {
   pass "declared waits surface unreported gates and terminal runs once, while working runs and answered gates keep the pause cadence on idle and busy paths"
 }
 
+# Absent config/paused-wait-supersession the same superseding states keep main's
+# declared-wait handling: no superseded wake, nothing queued, and no crew-state
+# read beyond the one the idle declared-wait recheck already spends (none on the
+# busy paths), counted through the stub's read log.
+test_superseded_wait_check_is_opt_in() {
+  local c n crew_state busy reads got dir state
+  for c in "idle-gate|state: parked · source: run-step · ask-user: authority decision · run: R|no|1" \
+           "idle-terminal|state: done · source: run-step · run: R|no|1" \
+           "busy-recent|state: parked · source: run-step · ask-user: authority decision · run: R|recent|0" \
+           "busy-old|state: parked · source: run-step · ask-user: authority decision · run: R|yes|0"; do
+    IFS='|' read -r n crew_state busy reads <<< "$c"
+    dir=$(make_superseded_pause_case "unarmed-$n" 'paused: waiting for validation run R' unarmed)
+    state="$dir/state"
+    [ "$busy" != yes ] || set_mtime "$(( $(date +%s) - 500 ))" "$state/paused.meta"
+    superseded_pause_round "$dir" "$crew_state" absorb "$busy" \
+      || fail "$n: flag-absent watcher round failed"
+    ! grep -F 'paused wait superseded' "$dir/watch.out" >/dev/null \
+      || fail "$n: flag-absent watcher surfaced a superseded wait"
+    [ ! -s "$state/.wake-queue" ] || fail "$n: flag-absent watcher queued a wake"
+    got=0
+    [ ! -f "$dir/crew-state.log" ] || got=$(wc -l < "$dir/crew-state.log" | tr -d ' ')
+    [ "$got" = "$reads" ] || fail "$n: flag-absent watcher read crew state $got times, want $reads"
+  done
+  pass "without config/paused-wait-supersession superseding states keep the declared-wait cadence and spend no extra crew-state read"
+}
+
 if [ -n "${FM_TEST_ONLY:-}" ]; then
   "$FM_TEST_ONLY"
   exit 0
@@ -1567,6 +1598,7 @@ fm_test_run \
   test_nonterminal_stale_not_working_surfaced \
   test_nonterminal_stale_paused_absorbed_then_resurfaced \
   test_declared_wait_surfaces_superseding_state \
+  test_superseded_wait_check_is_opt_in \
   test_exited_declared_pause_is_bounded_but_live_gate_surfaces \
   test_own_work_wait_keeps_first_alert_then_long_cadence \
   test_absorbed_replacement_wait_does_not_inherit_the_old_throttle \
