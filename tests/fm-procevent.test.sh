@@ -643,6 +643,20 @@ assert_grep 'publish-src 1' "$HPUBLISH/state/applied" "the handler could not app
 assert_present "$HPUBLISH/state/procevent-inbox/publish-src.1.handled" "the later handler application was not acknowledged"
 pass "automatic application waits for durable publication and failed publication remains recoverable"
 
+# An announcement that is already queued (reconcile published it first) is not
+# appended again, yet it is still published: a non-self-announcing adapter's
+# capture must be autohandled rather than left for the handler.
+HDUP="$TMP_ROOT/hdup"; new_home "$HDUP"
+fm_test_track_procevent_home "$HDUP"
+pe_adapter "$HDUP" register applying dup-src -- /bin/echo "apply after queued" >/dev/null
+printf '%s\t1\tcheck\tprocevent:dup-src:1\tcheck: procevent applying dup-src 1\n' "$(date +%s)" > "$HDUP/state/.wake-queue"
+printf '1\n' > "$HDUP/state/.wake-queue.seq"
+out=$(pe_adapter "$HDUP" start dup-src 2>&1)
+assert_contains "$out" "autohandled: dup-src" "an already-queued announcement left the capture unapplied"
+assert_grep 'dup-src 1' "$HDUP/state/applied" "the capture was not applied when its announcement was already queued"
+[ "$(wake_payloads "$HDUP" | wc -l | tr -d ' ')" = 1 ] || fail "an already-queued announcement was appended again"
+pass "an already-queued announcement still lets a non-self-announcing capture autohandle without a duplicate row"
+
 # A self-announcing adapter inverts that order on its own declaration: the
 # runner applies first and publishes nothing for a capture the adapter fully
 # applied and acknowledged, because the adapter's own durable downstream

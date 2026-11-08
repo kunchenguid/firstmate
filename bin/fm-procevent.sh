@@ -811,6 +811,8 @@ cmd_register_extension() {
 # appends nothing; once that row is consumed and the result is still unhandled,
 # the next call re-announces it, so a result stays eligible for re-announcement
 # across restarts and drains until `fm_procevent_mark_handled` records it.
+# Returns 0 when a row was appended, 3 when an identical one was already queued
+# (published, nothing appended), and 1 otherwise.
 publish_result() {  # <result-file>
   local result=$1 id seq adapter line status=1 owner_task='' message='' record=''
   local ring_backend ring_target ring_meta inbox_dir handled_dir pre_existing existing new_record
@@ -899,10 +901,14 @@ EOF
     # yet every durable append reopens the recovery episode, so a handling
     # successor would close with an empty rearm-resurface wake on each poll
     # for as long as the handling turn runs.
-    if fm_wake_append_guarded procevent_announcement_not_queued \
-      check "procevent:$id:$seq" "check: $line" "procevent:$id:$seq" "check: $line"; then
-      status=0
-    fi
+    # A guard rejection (3) means the announcement is already durably queued:
+    # nothing was appended, but it is not a failed publication either.
+    fm_wake_append_guarded procevent_announcement_not_queued \
+      check "procevent:$id:$seq" "check: $line" "procevent:$id:$seq" "check: $line"
+    case "$?" in
+      0) status=0 ;;
+      3) status=3 ;;
+    esac
   fi
   fm_procevent_source_lock_release "$id"
   return "$status"
@@ -1403,11 +1409,15 @@ EOF
   if [ "$extension_owner" -eq 0 ] && adapter_self_announcing "$adapter"; then
     self_announcing=1
   else
-    if publish_result "$durable"; then
-      published_capture=1
-    elif fm_procevent_is_handled "$STATE" "$id" "$(fm_procevent_result_sequence "$durable")"; then
-      handled_capture=1
-    fi
+    publish_result "$durable"
+    case "$?" in
+      0|3) published_capture=1 ;;
+      *)
+        if fm_procevent_is_handled "$STATE" "$id" "$(fm_procevent_result_sequence "$durable")"; then
+          handled_capture=1
+        fi
+        ;;
+    esac
     publish_pending "$durable" >/dev/null
   fi
   [ "$extension_owner" -eq 1 ] || rm -f -- "$runner"
