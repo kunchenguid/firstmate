@@ -1812,9 +1812,14 @@ test_resumed_same_id_session_supersedes_the_orphan() {
   FM_HOME="$dir" "$FAKE_CLAUDE" -c '
       export CLAUDE_PID=$$
       printf "%s\n" "$$" > "$FM_HOME/state/.lock"
-      printf "%s\n" "{\"session_id\":\"sess-resumed\",\"stop_hook_active\":false}" \
-        | "$FM_HOME/bin/fm-claude-stop-autoarm.sh" > "$FM_HOME/state/orphan-out" 2>&1 &
-      printf "%s\n" "$!" > "$FM_HOME/state/orphan-hook-pid"
+      (
+        printf "%s\n" "{\"session_id\":\"sess-resumed\",\"stop_hook_active\":false}" \
+          | "$FM_HOME/bin/fm-claude-stop-autoarm.sh" > "$FM_HOME/state/orphan-out" 2>&1 &
+        hook_pid=$!
+        printf "%s\n" "$hook_pid" > "$FM_HOME/state/orphan-hook-pid"
+        wait "$hook_pid"
+        printf "%s\n" "$?" > "$FM_HOME/state/orphan-exit"
+      ) &
       for _ in $(seq 1 250); do [ -e "$FM_HOME/state/arm-ran" ] && break; sleep 0.02; done
     '
   orphan_pid=$(cat "$dir/state/orphan-hook-pid")
@@ -1855,7 +1860,11 @@ test_resumed_same_id_session_supersedes_the_orphan() {
   [ "$(epoch_field "$dir" owner_pid)" != "$orphan_pid" ] || fail "the orphaned hook still owns the ledger"
   [ "$(epoch_field "$dir" session_pid)" = "$lock_pid" ] || fail "the rewake must bind the resumed session's lock pid"
   [ "$lock_pid" != "$dead_lock_pid" ] || fail "fm-lock.sh recovery left the dead session's pid on lock line 1: $lock_pid"
-  ! grep -q 'firstmate watcher wake' "$orphan_out" || fail "the superseded orphan still delivered a banner: $(cat "$orphan_out")"
+  # Claude delivers collected stderr only on exit 2. A losing generation may
+  # compose its banner before the terminal commit refuses it, then exit 0.
+  for i in $(seq 1 250); do [ -e "$dir/state/orphan-exit" ] && break; sleep 0.02; done
+  assert_present "$dir/state/orphan-exit" "the orphan exit status was not captured"
+  expect_code 0 "$(cat "$dir/state/orphan-exit")" "the superseded orphan must not deliver a notification: $(cat "$orphan_out")"
   pass "auto-arm: a resumed session with the dead session's id still supersedes its orphaned claim"
 }
 
