@@ -286,52 +286,6 @@ test_live_stalled_watch_lock_is_replaced_past_hard_bound() {
   pass "live watcher lock with a beacon past the hard bound is replaced, under it is still refused"
 }
 
-# Stop <pid> at a moment it holds no state lock but the watch lock, so a
-# successor never waits on a lock the stopped holder cannot release. A lock link
-# is published by a background child (`ln -s ... &` in fm_lock_try_create), so
-# stopping <pid> alone lets that child create a lock after the scan; the whole
-# process tree is stopped before scanning instead. STOPPED_TREE lists every
-# stopped pid for resume_stopped_tree.
-STOPPED_TREE=
-stop_outside_state_locks() {  # <pid> <state>
-  local pid=$1 state=$2 i=0 lock held holder p child added
-  while [ "$i" -lt 100 ]; do
-    kill -STOP "$pid" 2>/dev/null || return 1
-    STOPPED_TREE=" $pid "
-    added=1
-    while [ "$added" -eq 1 ]; do
-      added=0
-      for p in $STOPPED_TREE; do
-        for child in $(pgrep -P "$p" 2>/dev/null); do
-          case "$STOPPED_TREE" in *" $child "*) continue ;; esac
-          kill -STOP "$child" 2>/dev/null || true
-          STOPPED_TREE="$STOPPED_TREE$child "
-          added=1
-        done
-      done
-    done
-    held=0
-    for lock in "$state"/.*.lock "$state"/.*.lock.steal "$state"/*.lock; do
-      [ "$lock" != "$state/.watch.lock" ] || continue
-      holder=$(cat "$lock/pid" 2>/dev/null || true)
-      case "$STOPPED_TREE" in *" ${holder:-none} "*) held=1; break ;; esac
-    done
-    [ "$held" -eq 1 ] || return 0
-    resume_stopped_tree
-    sleep 0.05
-    i=$((i + 1))
-  done
-  return 1
-}
-
-resume_stopped_tree() {
-  local p
-  for p in $STOPPED_TREE; do
-    kill -CONT "$p" 2>/dev/null || true
-  done
-  STOPPED_TREE=
-}
-
 # Issue #7801: on a /proc-less host outside UTC, a watcher started before
 # fm_pid_identity pinned TZ=UTC0 recorded its lstart in local time, so after the
 # update its own identity no longer recomputes. A fresh watcher must replace that
@@ -342,7 +296,7 @@ resume_stopped_tree() {
 # was never torn down.
 run_legacy_identity_takeover() {  # <case> <successor-first>
   local case_name=$1 successor_first=$2
-  local dir state fakebin no_proc old new old_out new_out legacy current i lock_pid old_rc claimed released
+  local dir state fakebin no_proc old new old_out new_out legacy current i lock_pid old_rc claimed released real_sleep old_poll
   dir=$(make_case "$case_name")
   state="$dir/state"
   fakebin="$dir/fakebin"
@@ -350,7 +304,26 @@ run_legacy_identity_takeover() {  # <case> <successor-first>
   old_out="$dir/old-watch.out"
   new_out="$dir/new-watch.out"
   mkdir -p "$no_proc"
-  PATH="$fakebin:$PATH" FM_PROC_ROOT_OVERRIDE="$no_proc" TZ=America/Los_Angeles FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_GUARD_GRACE=1 FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$old_out" 2>&1 &
+  old_poll=1
+  if [ "$successor_first" -eq 1 ]; then
+    # Pause at the terminal poll sleep, after startup and state-lock mutations
+    # have completed. Sending STOP from the test then scanning locks races both
+    # signal delivery and an in-flight lock publication by the watcher's child.
+    # A distinctive poll interval keeps other sleeps and the successor untouched.
+    old_poll=17
+    real_sleep=$(command -v sleep)
+    cat > "$fakebin/sleep" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = 17 ]; then
+  kill -STOP "$PPID" || exit 1
+  : > "$FM_TEST_WATCH_PAUSED"
+  exit 0
+fi
+exec "$FM_TEST_REAL_SLEEP" "$@"
+SH
+    chmod +x "$fakebin/sleep"
+  fi
+  PATH="$fakebin:$PATH" FM_TEST_REAL_SLEEP="${real_sleep:-}" FM_TEST_WATCH_PAUSED="$dir/old.paused" FM_PROC_ROOT_OVERRIDE="$no_proc" TZ=America/Los_Angeles FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_GUARD_GRACE=1 FM_POLL="$old_poll" FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$old_out" 2>&1 &
   old=$!
   i=0
   lock_pid=
@@ -366,16 +339,21 @@ run_legacy_identity_takeover() {  # <case> <successor-first>
   legacy=$(COLUMNS=10000 LC_ALL=C TZ=America/Los_Angeles ps -p "$old" -o lstart= -o command= 2>/dev/null | sed 's/^[[:space:]]*//')
   [ -n "$legacy" ] && [ "$legacy" != "$current" ] \
     || fail "the legacy local-time identity does not differ from the UTC identity, so this case would pass vacuously ('$legacy')"
+  if [ "$successor_first" -eq 1 ]; then
+    i=0
+    while [ "$i" -lt 100 ] && [ ! -e "$dir/old.paused" ] && is_live_non_zombie "$old"; do
+      sleep 0.1
+      i=$((i + 1))
+    done
+    [ -e "$dir/old.paused" ] \
+      || fail "old watcher never reached its lock-free poll sleep: $(cat "$old_out")"
+  fi
   # A pre-pin build recorded no start time either, so drop it to leave only the
   # legacy identity as the holder's record.
   rm -f "$state/.watch.lock/pid-start"
   printf '%s\n' "$legacy" > "$state/.watch.lock/pid-identity"
   is_live_non_zombie "$old" || fail "the old holder exited before its successor started, so the replacement would not be exercised: $(cat "$old_out")"
-  if [ "$successor_first" -eq 1 ]; then
-    stop_outside_state_locks "$old" "$state" \
-      || fail "could not pause the old holder outside its state locks: $(cat "$old_out")"
-  fi
-  PATH="$fakebin:$PATH" FM_PROC_ROOT_OVERRIDE="$no_proc" TZ=America/Los_Angeles FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_GUARD_GRACE=1 FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$new_out" 2>&1 &
+  PATH="$fakebin:$PATH" FM_TEST_REAL_SLEEP="${real_sleep:-}" FM_PROC_ROOT_OVERRIDE="$no_proc" TZ=America/Los_Angeles FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_GUARD_GRACE=1 FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$new_out" 2>&1 &
   new=$!
   i=0
   claimed=0
@@ -393,7 +371,7 @@ run_legacy_identity_takeover() {  # <case> <successor-first>
     done
     released=$([ -e "$state/.watch.lock/pid" ] && echo no || echo yes)
     # Resume before any assertion can fail, so a failure never strands it stopped.
-    resume_stopped_tree
+    kill -CONT "$old" 2>/dev/null || true
     is_live_non_zombie "$new" && fail "the successor never delivered its recovery wake and exited: $(cat "$new_out")"
     wait "$new" || fail "the successor did not exit cleanly after its recovery wake: $(cat "$new_out")"
     # A successor that held the lock delivers a wake; one that stood down prints
