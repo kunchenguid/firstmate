@@ -5844,11 +5844,16 @@ opencode2_wait_for_delivery() {
 AGY_TRUST_DIALOG='Do you trust the contents of this project?'
 AGY_TRUST_ANSWERED=0
 
-# On Orca the gate reads the rendered screen: the adapter's default capture is
-# the escape-stripped output stream, which never carries the pinned status row.
+# On Orca the gate reads only the rendered screen: the adapter's default capture
+# is the escape-stripped output stream, which never carries the pinned status
+# row, and can echo the busy phrase from brief text. A failed or non-screen read
+# yields an empty capture, which agy_pane_is_working treats as not ready on Orca
+# instead of letting fm_busy_classify refill it from that stream.
 agy_capture() {
+  local pane
   if [ "$BACKEND" = orca ]; then
-    fm_backend_orca_screen_capture "$T" 120 2>/dev/null || true
+    pane=$(fm_backend_orca_screen_capture "$T" 120 2>/dev/null) || return 0
+    printf '%s' "$pane"
     return 0
   fi
   fm_backend_capture "$BACKEND" "$T" 120 "$W" 2>/dev/null || true
@@ -5859,6 +5864,7 @@ agy_pane_shows_trust_dialog() {  # <plain-pane-capture>
 }
 
 agy_pane_is_working() {  # <plain-pane-capture>
+  [ "$BACKEND" != orca ] || [ -n "$1" ] || return 1
   case "$(fm_busy_classify "$BACKEND" "$T" agy "$ID" "$STATE" "$1")" in
     busy*) return 0 ;;
   esac
