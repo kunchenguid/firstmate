@@ -1174,6 +1174,13 @@ test_scout_and_secondmate_scaffold() {
   assert_present "$brief" "scout brief was not scaffolded"
   assert_grep "SCOUT task" "$brief" "scout brief must declare itself a scout task"
   assert_grep "report.md" "$brief" "scout brief must point at the report deliverable"
+  assert_grep "absolute home directory \`$BRIEF_HOME/data/brief-scout-q6/\`" "$brief" \
+    "scout brief must put durable artifacts beside the home report"
+  assert_grep 'is deleted at cleanup' "$brief" "scout brief must say plainly that the copy is deleted at cleanup"
+  assert_grep "write only task material under \`$BRIEF_HOME/data/brief-scout-q6/\`" "$brief" \
+    "scout brief rule 2 must authorize writing durable artifacts outside the worktree"
+  assert_no_grep 'The report is the only thing that survives' "$brief" \
+    "scout brief must not claim only the report can survive"
   assert_grep "## Captain's intent" "$brief" "scout brief missing Captain's intent subsection"
   assert_grep "## Firstmate spec" "$brief" "scout brief missing Firstmate spec subsection"
   assert_grep "{FIRSTMATE_SPEC}" "$brief" "scout brief missing the spec placeholder"

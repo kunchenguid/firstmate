@@ -1996,6 +1996,111 @@ move_case_to_pool_slot() {
   printf '%s\n' "$dest"
 }
 
+# A report in the home is not proof that the copy's task artifacts were saved.
+# Exercise the real teardown entry point and its real git clean in a private repo.
+test_scout_task_data_requires_preservation() {
+  local case_dir source report rc before branch variant
+  for variant in untracked ignored forced symlink file orca; do
+    case_dir=$(make_case "scout-task-data-$variant")
+    write_meta "$case_dir" no-mistakes scout
+    prepare_scout_teardown "$case_dir"
+    add_treehouse_clean_fd "$case_dir"
+    source="$case_dir/wt/data/task-x1"
+    report="$case_dir/data/task-x1/report.md"
+    mkdir -p "$source/captain"
+    printf '{"answer":"keep"}\n' > "$source/captain/marks.json"
+    printf 'raw capture\n' > "$source/raw.json"
+    before=$(cksum "$source/captain/marks.json")
+    branch=$(git -C "$case_dir/wt" symbolic-ref HEAD)
+    case "$variant" in
+      orca)
+        fm_write_meta "$case_dir/state/task-x1.meta" \
+          'window=fm-task-x1' 'endpoint_task_id=task-x1' 'terminal=term-1' \
+          "worktree=$case_dir/wt" "project=$case_dir/project" 'backend=orca' \
+          "orca_worktree_id=task-copy::$case_dir/wt" 'kind=scout' \
+          'mode=local-only' 'spawn_gen=teardown-test-task-x1' 'decisions_reviewed=1'
+        ;;
+      ignored) printf 'data/\n' > "$case_dir/wt/.gitignore" ;;
+      symlink)
+        mv "$source" "$case_dir/linked-artifacts"
+        ln -s "$case_dir/linked-artifacts" "$source"
+        ;;
+      file)
+        rm -r "$source"
+        printf 'task artifact\n' > "$source"
+        before=$(cksum "$source")
+        ;;
+    esac
+    if [ "$variant" = forced ]; then
+      if run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr"; then rc=0; else rc=$?; fi
+    else
+      if run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"; then rc=0; else rc=$?; fi
+    fi
+    if [ "$rc" -ne 1 ]; then
+      fail "scout task data ($variant): expected refusal, got $rc; source present=$([ ! -e "$source" ] || printf yes), home report present=$([ ! -f "$report" ] || printf yes)"
+    fi
+    assert_grep 'scout task data' "$case_dir/stderr" "scout task data: refusal must name the protected data"
+    assert_grep "$source" "$case_dir/stderr" "scout task data: refusal must name the source"
+    assert_grep "$case_dir/data/task-x1" "$case_dir/stderr" "scout task data: refusal must name the durable destination"
+    assert_grep 'discard-scout-data' "$case_dir/stderr" "scout task data: refusal must name the explicit discard flag"
+    assert_present "$case_dir/state/task-x1.meta" "scout task data: task record was removed"
+    [ "$(git -C "$case_dir/wt" symbolic-ref HEAD)" = "$branch" ] || fail "scout task data: branch changed"
+    if [ "$variant" = file ]; then
+      [ "$(cksum "$source")" = "$before" ] || fail "scout task data file changed"
+    else
+      [ "$(cksum "$source/captain/marks.json")" = "$before" ] || fail "scout task data bytes changed"
+      assert_present "$source/raw.json" "scout task data: raw capture lost"
+    fi
+    assert_grep 'Scout report.' "$report" "scout task data: home report changed"
+    if [ "$variant" = untracked ]; then
+      # Smallest counterfactual: preserve the source in the home, then remove
+      # that preserved source. Ordinary scratch remains disposable.
+      cp -R "$source/captain" "$case_dir/data/task-x1/"
+      cp "$source/raw.json" "$case_dir/data/task-x1/"
+      rm -r "$source"
+      printf 'disposable\n' > "$case_dir/wt/scratch.txt"
+      run_teardown "$case_dir" > "$case_dir/retry.out" 2> "$case_dir/retry.err" \
+        || fail "scout task data: preserved source should allow ordinary cleanup"
+      assert_present "$case_dir/data/task-x1/captain/marks.json" "scout task data: durable answer lost"
+      assert_absent "$case_dir/wt/scratch.txt" "scout task data: scratch was not cleaned"
+    fi
+  done
+  pass "scout task data requires preservation even with a report, ignored files, links, or --force"
+}
+
+# The captain's explicit word to discard is the dedicated flag, not --force.
+test_scout_task_data_discard_flag() {
+  local case_dir source report
+  case_dir=$(make_case scout-task-data-discard)
+  write_meta "$case_dir" no-mistakes scout
+  prepare_scout_teardown "$case_dir"
+  add_treehouse_clean_fd "$case_dir"
+  source="$case_dir/wt/data/task-x1"
+  report="$case_dir/data/task-x1/report.md"
+  mkdir -p "$source"
+  printf 'discard me\n' > "$source/marks.json"
+  run_teardown "$case_dir" --discard-scout-data > "$case_dir/stdout" 2> "$case_dir/stderr" \
+    || fail "scout task data: --discard-scout-data should allow cleanup after a report"
+  assert_absent "$case_dir/state/task-x1.meta" "scout task data discard: task record was not closed"
+  assert_absent "$source" "scout task data discard: the copy's task data was not discarded"
+  assert_grep 'Scout report.' "$report" "scout task data discard: home report changed"
+
+  # The flag waives only the task-data check: the report requirement stays.
+  case_dir=$(make_case scout-task-data-discard-noreport)
+  write_meta "$case_dir" no-mistakes scout
+  prepare_scout_teardown "$case_dir"
+  add_treehouse_clean_fd "$case_dir"
+  rm -f "$case_dir/data/task-x1/report.md"
+  mkdir -p "$case_dir/wt/data/task-x1"
+  printf 'discard me\n' > "$case_dir/wt/data/task-x1/marks.json"
+  if run_teardown "$case_dir" --discard-scout-data > "$case_dir/stdout" 2> "$case_dir/stderr"; then
+    fail "scout task data: --discard-scout-data must not waive the missing-report refusal"
+  fi
+  assert_grep 'has no report' "$case_dir/stderr" "scout task data discard: report refusal missing"
+  assert_present "$case_dir/wt/data/task-x1/marks.json" "scout task data discard: data lost despite refusal"
+  pass "--discard-scout-data discards scout task data on explicit word and waives nothing else"
+}
+
 test_scout_nested_clone_returns_with_no_untracked_entries() {
   local case_dir wt rc
   case_dir=$(make_case scout-nested-clean)
@@ -2108,6 +2213,32 @@ SH
   assert_grep "left-behind-clone" "$case_dir/stderr" \
     "dirty-return-later-refusal: a later refusal dropped the remaining paths"
   pass "a dirty return is reported even when a later teardown step refuses"
+}
+
+test_forced_secondmate_preserves_child_scout_task_data() {
+  local case_dir home child_wt rc
+  case_dir=$(make_case secondmate-child-task-data)
+  write_meta "$case_dir" local-only secondmate
+  home="$case_dir/secondmate-home"
+  mkdir -p "$home/state" "$home/data" "$home/config" "$home/projects"
+  printf '%s\n' task-x1 > "$home/.fm-secondmate-home"
+  printf '%s\n' "home=$home" >> "$case_dir/state/task-x1.meta"
+  child_wt="$case_dir/child-scout-wt"
+  git -C "$case_dir/project" worktree add -q -b fm/child-scout "$child_wt" main
+  fm_write_meta "$home/state/child-scout.meta" \
+    'window=firstmate:fm-child-scout' 'endpoint_task_id=child-scout' \
+    "worktree=$child_wt" "project=$case_dir/project" 'kind=scout' 'mode=local-only'
+  mkdir -p "$child_wt/data/child-scout"
+  printf 'canonical answers\n' > "$child_wt/data/child-scout/marks.json"
+  add_treehouse_clean_fd "$case_dir"
+  if run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr"; then rc=0; else rc=$?; fi
+  expect_code 1 "$rc" "forced secondmate must not discard child scout task data"
+  assert_grep 'scout task data' "$case_dir/stderr" "forced child: preservation refusal missing"
+  assert_grep 'canonical answers' "$child_wt/data/child-scout/marks.json" "forced child: answers lost"
+  assert_present "$case_dir/state/task-x1.meta" "forced child: parent record lost"
+  assert_present "$home/state/child-scout.meta" "forced child: child record lost"
+  [ "$(git -C "$child_wt" symbolic-ref --short HEAD)" = fm/child-scout ] || fail "forced child: branch changed"
+  pass "forced secondmate cleanup refuses before discarding child scout task data"
 }
 
 test_forced_secondmate_child_scout_nested_clone_returns_clean() {
@@ -6425,6 +6556,9 @@ SH
   pass "post-reap proof retains late work and retry records on ordinary and Orca paths, preserving clean/force/scout behavior"
 }
 
+test_scout_task_data_requires_preservation
+test_scout_task_data_discard_flag
+test_forced_secondmate_preserves_child_scout_task_data
 test_hidden_untracked_work_refuses_before_return
 test_content_fallback_git_capability_boundary
 test_work_written_at_reap_boundary_is_preserved
