@@ -42,10 +42,11 @@ land() {
     bash "${MERGE_SCRIPT:-$ROOT/bin/fm-merge-local.sh}" "$task"
 }
 
-assert_refused() {
+assert_refused() {  # [reason-regex]
   local out rc=0
   out=$(land 2>&1) || rc=$?
   [ "$rc" -ne 0 ] || fail "landing unexpectedly succeeded: $out"
+  [ -z "${1:-}" ] || printf '%s\n' "$out" | grep -Eq -- "$1" || fail "refusal gave the wrong reason: $out"
   [ "$(git -C "$PROJ" rev-parse HEAD)" = "$BASE" ] || fail 'refusal moved main'
   [ -z "$(git -C "$PROJ" status --porcelain)" ] || fail 'refusal left a dirty checkout'
   [ ! -e "$PROJ/approved.txt" ] || fail 'refusal left approved files behind'
@@ -308,7 +309,135 @@ SH
   pass 'two approved tasks with the same tree cannot roll back a successful landing'
 }
 
+# Another lane lands on main after this lane reported X, and the lane rebases
+# its own branch onto that landing. BASE becomes the moved main, so
+# assert_refused still proves a refusal leaves main where it was.
+make_rebased_case() {
+  make_case "$1"
+  record_done || fail "$1: done head was not accepted"
+  printf 'other lane\n' > "$PROJ/other.txt"
+  git -C "$PROJ" add other.txt
+  git -C "$PROJ" commit -q -m 'other lane landed'
+  BASE=$(git -C "$PROJ" rev-parse HEAD)
+  git -C "$WT" rebase -q main || fail "$1: rebase onto the moved main failed"
+  N=$(git -C "$WT" rev-parse HEAD)
+  [ "$N" != "$X" ] || fail "$1: the rebase did not produce a new commit"
+}
+
+assert_record_unchanged() {
+  [ "$(fm_dod_local_done_head "$META")" = "$X" ] || fail "$1: a refusal changed the recorded head"
+  assert_no_regex '^local_done_head_prior=' "$META" "$1: a refusal recorded provenance"
+}
+
+test_identical_rebase_lands_and_keeps_provenance() {
+  local out
+  make_rebased_case rebased
+  out=$(land 2>&1) || fail "identical rebase was refused: $out"
+  [ "$(git -C "$PROJ" rev-parse HEAD)" = "$N" ] || fail 'landing did not use the rebased head'
+  [ "$(cat "$PROJ/approved.txt")" = 'approved X' ] || fail 'landing lost the approved content'
+  [ "$(cat "$PROJ/other.txt")" = 'other lane' ] || fail 'landing lost the other lane'
+  [ -z "$(git -C "$PROJ" status --porcelain)" ] || fail 'landing left a dirty checkout'
+  [ "$(fm_dod_local_done_head "$META")" = "$N" ] || fail 'the rebased head is not the recorded identity'
+  [ "$(grep -c "^local_done_head_prior=$X\$" "$META")" = 1 ] || fail 'the reported head was not kept as provenance'
+  pass 'a provably identical rebase lands, becomes the recorded head, and keeps the reported head as provenance'
+}
+
+test_rebase_with_different_content_refuses() {
+  local variant
+  for variant in amended extra-commit; do
+    make_rebased_case "differs-$variant"
+    case "$variant" in
+      amended)
+        printf 'approved X, then edited\n' > "$WT/approved.txt"
+        git -C "$WT" commit -q -a --amend -m X ;;
+      extra-commit)
+        printf 'unapproved\n' > "$WT/extra.txt"
+        git -C "$WT" add extra.txt
+        git -C "$WT" commit -q -m extra ;;
+    esac
+    assert_refused 'rebased content differs'
+    assert_record_unchanged "$variant"
+  done
+  pass 'a rebased branch whose content differs refuses and keeps the recorded head'
+}
+
+test_rebase_on_a_branch_not_the_lanes_own_refuses() {
+  local proof
+  # An identical rebase that exists only on another branch never lands this lane.
+  make_case foreign-branch
+  record_done || fail 'foreign-branch done head was not accepted'
+  git -C "$PROJ" commit -q --allow-empty -m 'other lane landed'
+  BASE=$(git -C "$PROJ" rev-parse HEAD)
+  proof=$(printf 'X replayed elsewhere\n' | git -C "$PROJ" commit-tree "$X^{tree}" -p "$BASE")
+  git -C "$PROJ" update-ref refs/heads/fm/other-task "$proof"
+  assert_refused 'not a fast-forward'
+  assert_record_unchanged foreign-branch
+  # The other lane landed the same change; pointing this lane at that landing
+  # matches the tree but carries no commit of the lane's own.
+  make_case duplicate-landing
+  record_done || fail 'duplicate-landing done head was not accepted'
+  git -C "$PROJ" commit-tree "$X^{tree}" -p "$BASE" -m 'other lane, same change' > "$CASE/other"
+  git -C "$PROJ" merge -q --ff-only "$(cat "$CASE/other")"
+  BASE=$(git -C "$PROJ" rev-parse HEAD)
+  git -C "$WT" reset -q --hard "$BASE"
+  local out rc=0
+  out=$(land 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "the other lane's landing was accepted as this lane's: $out"
+  printf '%s\n' "$out" | grep -q 'commits of its own' || fail "duplicate-landing gave the wrong reason: $out"
+  [ "$(git -C "$PROJ" rev-parse HEAD)" = "$BASE" ] || fail 'duplicate-landing refusal moved main'
+  assert_record_unchanged duplicate-landing
+  pass "a proven tree on another lane's branch or landing never lands this lane"
+}
+
+test_rebase_without_recorded_identity_refuses() {
+  make_case unrecorded
+  git -C "$PROJ" commit -q --allow-empty -m 'other lane landed'
+  BASE=$(git -C "$PROJ" rev-parse HEAD)
+  git -C "$WT" rebase -q main || fail 'unrecorded rebase failed'
+  assert_refused 'missing or malformed local done head'
+  assert_no_regex '^local_done_head' "$META" 'a refusal invented a recorded identity'
+  pass 'a rebased lane with no recorded head refuses'
+}
+
+test_rebase_keeps_the_existing_landing_checks() {
+  local variant out rc reason
+  for variant in main-moved-again held branch-moved; do
+    make_rebased_case "checks-$variant"
+    cp -R "$ROOT/bin" "$CASE/toolbin"
+    case "$variant" in
+      main-moved-again)
+        git -C "$PROJ" commit -q --allow-empty -m 'third lane landed'
+        BASE=$(git -C "$PROJ" rev-parse HEAD) ;;
+      held)
+        printf '#!/usr/bin/env bash\nexit 0\n' > "$CASE/toolbin/fm-captain-hold.sh" ;;
+      branch-moved)
+        cat > "$CASE/toolbin/fm-captain-hold.sh" <<'SH'
+#!/usr/bin/env bash
+git -C "$RACE_PROJ" update-ref refs/heads/fm/local-task "$RACE_X"
+exit 3
+SH
+        ;;
+    esac
+    rc=0
+    out=$(MERGE_SCRIPT="$CASE/toolbin/fm-merge-local.sh" RACE_PROJ="$PROJ" RACE_X="$X" land 2>&1) || rc=$?
+    [ "$rc" -ne 0 ] || fail "$variant: rebased landing skipped a check: $out"
+    case "$variant" in
+      main-moved-again) reason='commits of its own' ;;
+      held) reason='still held for the captain' ;;
+      branch-moved) reason='changed during approval check' ;;
+    esac
+    printf '%s\n' "$out" | grep -q -- "$reason" || fail "$variant: refusal gave the wrong reason: $out"
+    [ "$(git -C "$PROJ" rev-parse HEAD)" = "$BASE" ] || fail "$variant: refusal moved main"
+    [ -z "$(git -C "$PROJ" status --porcelain)" ] || fail "$variant: refusal left a dirty checkout"
+    assert_record_unchanged "$variant"
+  done
+  pass 'a rebased landing still refuses a non-fast-forward, a captain hold, and a branch move during the hold read'
+}
+
 fm_test_run test_two_tasks_cannot_undo_a_same_tree_landing test_branch_advance_does_not_change_approval \
   test_missing_and_malformed_head_refuse test_change_after_hold_check_refuses \
   test_diverged_default_refuses test_change_during_approval_check_refuses \
-  test_snapshot_cannot_pin_a_replacement_task test_done_recording_preserves_caller_locks
+  test_snapshot_cannot_pin_a_replacement_task test_done_recording_preserves_caller_locks \
+  test_identical_rebase_lands_and_keeps_provenance test_rebase_with_different_content_refuses \
+  test_rebase_on_a_branch_not_the_lanes_own_refuses test_rebase_without_recorded_identity_refuses \
+  test_rebase_keeps_the_existing_landing_checks

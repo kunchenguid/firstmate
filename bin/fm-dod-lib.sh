@@ -12,7 +12,9 @@
 # contract.
 # For local-only tasks, the first accepted done head is latched as exactly one
 # local_done_head= full commit id in the live task metadata. Observing done again
-# never changes that identity. Revised work needs a new task/approval record.
+# never changes that identity. Revised work needs a new task/approval record;
+# the one rebind is fm_dod_rebind_local_done_head, used only after
+# bin/fm-merge-local.sh proves a rebased head's content identical.
 # The optional third argument is the task's full ship-branch name (a project's
 # registered prefix may replace the legacy `fm/` one); it defaults to `fm/<task-id>`
 # and is the immutable task branch rendered in every delivery contract.
@@ -867,6 +869,30 @@ fm_dod_pin_local_done_head() (  # <state> <id> <meta> <sha> <captured-meta> [met
   tmp=$(mktemp "$state/.local-done-$id.XXXXXX") || return 1
   { cat "$live" && printf '\nlocal_done_head=%s\n' "$sha"; } > "$tmp" || return 1
   fm_backlog_record_publish "$tmp" "$live" 'local readiness metadata' "$state"
+)
+
+# Swap the recorded head <old> for the proven rebased head <new> and keep <old>
+# as one local_done_head_prior= provenance line. The caller holds the task's
+# control and meta locks and owns the identity proof (bin/fm-merge-local.sh).
+# Refuses unless the live record still names exactly <old>.
+fm_dod_rebind_local_done_head() (  # <state> <id> <old> <new>
+  local state=$1 id=$2 old=$3 new=$4 script_dir live tmp=''
+  script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+  # shellcheck source=/dev/null
+  . "$script_dir/fm-backlog-transition-lib.sh"
+  live="$state/$id.meta"
+  case "$new" in ''|*[!0-9a-f]*) return 1 ;; esac
+  case ${#new} in 40|64) ;; *) return 1 ;; esac
+  fm_backlog_record_present "$live" 'local readiness metadata' "$state" || return 1
+  [ "$(fm_dod_local_done_head "$live")" = "$old" ] || return 1
+  trap '[ -z "$tmp" ] || rm -f -- "$tmp"' EXIT
+  tmp=$(mktemp "$state/.local-done-$id.XXXXXX") || return 1
+  awk -v old="$old" -v new="$new" '
+    $0 == "local_done_head=" old { print "local_done_head=" new; print "local_done_head_prior=" old; next }
+    { print }
+  ' "$live" > "$tmp" || return 1
+  fm_backlog_record_publish "$tmp" "$live" 'local readiness metadata' "$state" || return 1
+  tmp=
 )
 
 # 0 when the forge's head for a PR is the head the done names. In no-mistakes
