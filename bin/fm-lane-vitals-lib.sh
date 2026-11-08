@@ -27,7 +27,7 @@
 #   /proc/version for WSL; macOS reads sysctl vm.loadavg and
 #   kern.memorystatus_vm_pressure_level, vm_stat Swapins, pmset -g batt and
 #   -g therm (a CPU_Speed_Limit under 100 or a recorded warning is limited), and
-#   ioreg -c IOAccelerator. Native Windows reads the same Cygwin /proc files
+#   ioreg -c IOAccelerator. Native Windows reads the same MSYS /proc files
 #   where they exist (loadavg, vmstat) and nothing else; the host view below
 #   supplies its memory, cores, load, and power. The GPU probe tries nvidia-smi
 #   on PATH, then inside WSL /usr/lib/wsl/lib/nvidia-smi, then nvidia-smi.exe,

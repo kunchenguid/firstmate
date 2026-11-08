@@ -158,7 +158,7 @@
 #   max-lanes ceiling alone (or 0 without one), and the verdict's reasons say
 #   so. On native Windows (Git Bash/MSYS, uname MINGW*/MSYS*) the
 #   Windows host view below is the memory, cores, load, and power probe, since
-#   the Cygwin /proc carries none of them.
+#   the MSYS /proc carries none of them.
 #   Free lanes grow by at most 2 per publish over the previously published
 #   verdict, less the lanes started on this machine since that publish; between
 #   publishes --admit, --spawn-gate, --json, and the report allow no growth at
