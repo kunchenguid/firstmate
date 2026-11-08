@@ -3840,6 +3840,8 @@ resurface_after_downtime() {
 }
 
 while :; do
+  PR_DEGRADED_WATCH_ENABLED=0
+  [ ! -e "$CONFIG/pr-degraded-watch" ] || PR_DEGRADED_WATCH_ENABLED=1
   # Native Codex may tear down the async hook and its watchdog together.
   # fm-codex-stop-park.sh owns this optional identity binding. Self-expiry
   # closes the normal recovery generation and lets the arm/host exit too.
@@ -4107,6 +4109,12 @@ EOF
             continue
           fi
           wake "$reason"
+        elif [ "$is_pr_poll" -eq 1 ] \
+          && { [ "$out" = ontrain ] || [ "${out%% *}" = degraded ]; } \
+          && [ "$PR_DEGRADED_WATCH_ENABLED" != 1 ]; then
+          pr_poll_control_release || exit 1
+          touch "$STATE/.last-check"
+          continue
         elif [ "$is_pr_poll" -eq 1 ] && [ "$out" = ontrain ] && [ "$PR_DEGRADED_WATCH_ENABLED" = 1 ]; then
           # A ready MR still on its merge train: remember it in the train
           # marker so a later drop (the car gone while the MR is still open)

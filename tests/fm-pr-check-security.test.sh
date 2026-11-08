@@ -1571,6 +1571,31 @@ test_degraded_watch_opt_in_absent_preserves_merged_only_behavior() {
   pass "degraded wake reads are opt-in; absent flag keeps GitHub and GitLab polls merged-only, silent, and baseline-free"
 }
 
+test_degraded_watch_flag_refreshes_each_sweep() {
+  local dir state url pid i
+  dir=$(make_case degraded-watch-flag-refresh)
+  state="$dir/home/state"
+  url=https://github.com/o/r/pull/1
+  write_task_meta "$dir" task-a
+  FM_TEST_GH_STATE=OPEN run_check_entry "$dir" task-a "$url" >/dev/null 2>/dev/null \
+    || fail "could not seed the opt-in PR watch"
+  rm -f "$dir/home/config/pr-degraded-watch" "$state/.last-check"
+  FM_TEST_WATCH_BOUND=30 \
+    FM_TEST_GH_ROLLUP='[{"__typename":"CheckRun","name":"ci","status":"COMPLETED","conclusion":"FAILURE"}]' \
+    run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/watch.out" 2> "$dir/watch.err" &
+  pid=$!
+  i=0
+  while [ "$i" -lt 1000 ] && [ ! -e "$state/.last-check" ]; do sleep 0.01; i=$((i + 1)); done
+  [ -e "$state/.last-check" ] || fail "watcher did not finish its first disabled sweep: $(cat "$dir/watch.err") $(cat "$dir/watch.out") $(cat "$dir/gh.log")"
+  : > "$dir/home/config/pr-degraded-watch"
+  wait "$pid" || fail "watcher failed after the opt-in flag was enabled: $(cat "$dir/watch.err") $(cat "$dir/watch.out")"
+  [ "$(grep -c 'degraded after ready' "$dir/watch.out")" -eq 1 ] \
+    || fail "watcher did not refresh opt-in before its next sweep: $(cat "$dir/watch.out")"
+  ! grep -q 'check: task-a.check.sh:' "$dir/watch.out" \
+    || fail "disabled degraded result fell through to a generic wake: $(cat "$dir/watch.out")"
+  pass "watcher refreshes the degraded-watch flag each sweep and drops disabled poll results"
+}
+
 test_github_degraded_poll() {
   local dir out
   dir=$(make_case github-degraded-poll)
@@ -1977,6 +2002,59 @@ SH
       || fail "rollback left a non-single-link artifact: $artifact"
   done
   pass "partial poll publication failure restores the prior watch and registered file identities"
+}
+
+test_term_during_pr_baseline_move_restores_registration() {
+  local dir state url1 url2 artifact before pid i rc
+  dir=$(make_case term-during-pr-baseline-move)
+  state="$dir/home/state"
+  url1=https://gitlab.example/group/subgroup/project/-/merge_requests/1
+  url2=https://gitlab.example/group/subgroup/project/-/merge_requests/2
+  ln -sf "$REAL_JQ" "$dir/fakebin/jq"
+  write_task_meta "$dir" task-a
+  FM_TEST_GLAB_STATE=opened FM_TEST_GLAB_PIPELINE=success \
+    run_check_entry "$dir" task-a "$url1" >/dev/null 2>/dev/null \
+    || fail "could not seed the original PR registration"
+  for artifact in task-a.meta task-a.pr-poll-degraded task-a.pr-poll-train task-a.check.sh task-a.pr-poll task-a.pr-poll-registration; do
+    before=$(fm_pr_file_identity "$state/$artifact")
+    printf '%s %s\n' "$artifact" "$before" >> "$dir/identities.before"
+  done
+  cat > "$dir/fakebin/mv" <<'SH'
+#!/usr/bin/env bash
+case "${!#}" in
+  */.fm-pr-baseline.*/task-a.meta)
+    "$FM_TEST_REAL_MV" "$@" || exit 1
+    : > "$FM_TEST_BASELINE_MOVE_STARTED"
+    while [ ! -e "$FM_TEST_BASELINE_MOVE_RELEASE" ]; do sleep 0.01; done
+    exit 0
+    ;;
+esac
+exec "$FM_TEST_REAL_MV" "$@"
+SH
+  chmod +x "$dir/fakebin/mv"
+  FM_TEST_BASELINE_MOVE_STARTED="$dir/move-started" \
+    FM_TEST_BASELINE_MOVE_RELEASE="$dir/move-release" FM_TEST_REAL_MV="$REAL_MV" \
+    FM_TEST_GLAB_STATE=opened FM_TEST_GLAB_PIPELINE=success \
+    run_check_entry "$dir" task-a "$url2" > "$dir/rearm.out" 2> "$dir/rearm.err" &
+  pid=$!
+  i=0
+  while [ "$i" -lt 300 ] && [ ! -e "$dir/move-started" ]; do sleep 0.01; i=$((i + 1)); done
+  [ -e "$dir/move-started" ] || fail "re-arm did not enter baseline preservation"
+  kill -TERM "$pid" || fail "could not interrupt re-arm during baseline preservation"
+  : > "$dir/move-release"
+  set +e
+  wait "$pid"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "TERM-interrupted re-arm unexpectedly succeeded"
+  fm_pr_poll_artifacts_valid "$state" task-a "$POLL" \
+    || fail "TERM cleanup did not restore a valid prior registration: $(cat "$dir/rearm.err")"
+  for artifact in task-a.meta task-a.pr-poll-degraded task-a.pr-poll-train task-a.check.sh task-a.pr-poll task-a.pr-poll-registration; do
+    before=$(awk -v a="$artifact" '$1 == a { print $2 }' "$dir/identities.before")
+    [ "$(fm_pr_file_identity "$state/$artifact")" = "$before" ] \
+      || fail "TERM cleanup changed the old registered identity for $artifact"
+  done
+  pass "TERM during PR registration restores the old poll and its registered identities"
 }
 
 test_atomic_interruption_leaves_no_partial_artifact() {
@@ -4986,10 +5064,12 @@ test_valid_recording_and_merge_derivation
 test_rejected_metacharacter_bytes_are_inert
 test_static_poll_contract
 test_degraded_watch_opt_in_absent_preserves_merged_only_behavior
+test_degraded_watch_flag_refreshes_each_sweep
 test_github_degraded_poll
 test_degraded_poll_wakes_once_per_transition
 test_degraded_wake_survives_an_unsaved_marker
 test_rearm_failure_after_partial_publish_restores_watch_identities
+test_term_during_pr_baseline_move_restores_registration
 test_atomic_interruption_leaves_no_partial_artifact
 test_concurrent_watcher_sees_only_complete_publication
 test_poll_publication_refuses_unsafe_destinations
