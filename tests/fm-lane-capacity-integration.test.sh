@@ -303,7 +303,7 @@ test_burst_of_spawns_never_exceeds_the_damped_budget() {
   c=$(make_case burst t1 t2 t3 t4 t5 t6 t7 t8)
   auto_config "$c" 0
   publish "$c"
-  assert_equals '[0,0]' "$(doc "$c" '[.verdict.free_lanes, .budget.raw]')" "a floor 5 GB above the live reading must publish no open lanes"
+  assert_equals '[0,0]' "$(doc "$c" '[.verdict.free_lanes, .budget.raw]')" "injected memory under the 4 GB floor must publish no open lanes"
   set_room "$c" 3
   publish "$c"
   published=$(assert_damped_publish "$c" 0 "a recovery from 0 open")
@@ -312,11 +312,8 @@ test_burst_of_spawns_never_exceeds_the_damped_budget() {
     case "$rc" in
       0) admitted=$((admitted + 1)) ;;
       "$DEFER_EXIT") deferred=$((deferred + 1))
-        # Live memory may drift under the floor mid-burst, in which case memory, not damping, is what refuses.
-        case "$out" in
-          *"damped: $published lanes started since the last publish against a published budget of $published"*|*"memory: "*) ;;
-          *) fail "a burst deferral must name the damped budget or memory: $out" ;;
-        esac ;;
+        assert_contains "$out" "damped: $published lanes started since the last publish against a published budget of $published" \
+          "a burst deferral must name the damped budget" ;;
       *) fail "spawn t$i exited $rc: $out" ;;
     esac
   done
@@ -357,7 +354,7 @@ test_watcher_publish_cycle_feeds_the_next_spawn() {
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 FM_LANE_CAPACITY_PUBLISH_INTERVAL=1 "$ROOT/bin/fm-watch.sh" >/dev/null 2>&1 &
   e1=$(wait_for_publish "$c" 0) || fail "the watcher never published the lane verdict"
   assert_equals '[0,0,"memory"]' "$(doc "$c" '[.verdict.free_lanes, .budget.raw, .budget.binding]')" \
-    "a floor 5 GB above the live reading must publish no open lanes"
+    "injected memory under the 4 GB floor must publish no open lanes"
   set_room "$c" 4
   e2=$(wait_for_publish "$c" "$e1") || fail "the watcher did not publish again"
   # One more publish may land at the old config before the change is seen.
@@ -365,7 +362,7 @@ test_watcher_publish_cycle_feeds_the_next_spawn() {
   f2=$(assert_damped_publish "$c" 0 "the first watcher publish after recovery")
   e3=$(wait_for_publish "$c" "$e2") || fail "the watcher did not publish a third time"
   f3=$(assert_damped_publish "$c" "$f2" "the next watcher publish")
-  FM_HOME="$h" FM_STATE_OVERRIDE="$h/state" "$ROOT/bin/fm-watch-arm.sh" --stop >/dev/null 2>&1 || true
+  probe_env "$c" env FM_HOME="$h" FM_STATE_OVERRIDE="$h/state" "$ROOT/bin/fm-watch-arm.sh" --stop >/dev/null 2>&1 || true
   rc=0; out=$(spawn_ship "$c" task-w) || rc=$?
   assert_admitted "$c" task-w "$rc" "$out" "a spawn after the watcher published $f3 open lanes"
   pass "the real watcher publishes the verdict, damps growth by 2 per publish ($f2 then $f3 open), and the next spawn is admitted on it ($e1 -> $e2 -> $e3)"
