@@ -1,0 +1,38 @@
+ok - a missing session backend is a human gap that --fix never claims to close
+ok - an absent launch agent is a fixable gap and the read-only run changes nothing
+ok - --fix installs the dedicated fm-remote launch agent without touching default
+ok - --fix is idempotent once the host is ready
+ok - a second code root gets a separate Herdr session and launch agent
+ok - a second code root reaches readiness through the shared entrypoint and the primary root stays ready
+ok - a legacy service is adopted by its matching guard without service control
+ok - automatic readiness reports a running drifted service to an operator and leaves it untouched
+ok - an operator's --fix repairs a running service this root owns once its pane list proves it empty
+ok - a service with live panes is never rewritten or restarted
+ok - a pane listing that fails or lacks a panes array blocks every repair
+ok - a reload never force-restarts the freshly bootstrapped server
+ok - concurrent automatic readiness runs with an intervening mate launch never restart the service
+ok - a failed reload leaves stale effective launch-agent state unready
+ok - a launch agent outside the Aqua session scope is rewritten in place
+ok - launchd failures are reported and delayed server readiness is awaited
+ok - a foreign-born session is left to the operator, whose --fix takes it over through launchd
+ok - human gaps are reported with their operator step and never claimed as fixed
+ok - a bash Directory Services login shell is rendered with -l -c
+ok - custom Directory Services shell paths remain valid plist arguments
+ok - shell resolution bounds Directory Services and uses executable SHELL and POSIX fallbacks
+ok - repeated repair reuses one resolved login shell and remains a no-op
+ok - a legacy service without a provable owner is reported and never taken over
+ok - a non-darwin host skips launch agents and starts its herdr server directly
+ok - omp alone satisfies the remote harness requirement
+ok - --fix creates only owned version-manager wrappers and never clobbers an operator file
+ok - doctor refreshes stale worker identity before probing tools
+ok - the entrypoint symlink is recreated when absent and never overwritten when operator-owned
+ok - a rex-verified host checks rex, its persistent server, and the backend-independent worker
+ok - backend resolution keeps herdr the default on a host offering both
+ok - backend resolution falls to rex when herdr is absent
+ok - --fix starts a missing rex server as the persistent shape
+ok - --fix never stops an answering exit-empty rex server and reports the operator restart
+ok - unreadable, missing, and malformed rex persistence settings require human action
+ok - a rex CLI or server below the verified API floor is a human gap
+ok - a rex endpoint that is not a local unix socket is a human gap
+ok - an explicit rex request needs the CLI on PATH, and --backend rejects unknown backends
+ok - a Linux host verifies rex without any Aqua-specific requirement

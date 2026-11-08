@@ -1,0 +1,11 @@
+ok - holder processes expose their environment to the owner library
+ok - an empty session is started inside the launch agent
+ok - launchd and worker markers require gui-domain launchctl proof
+ok - background, inherited-XPC, SSH-born, SSH-descended, and unprovable owners are taken over when the operator authorizes it
+ok - a live PID cannot revive a missing or mismatched process-start identity
+ok - a login, KeepAlive, or automatic start never takes over a foreign server, and an authorization is honored once
+ok - a running session with no provable owner is taken over rather than trusted
+ok - a host without lsof cannot prove an Aqua birth, so the session is taken over
+ok - a foreign server that never releases the socket yields exit 1 so launchd retries
+ok - the guard starts as soon as the foreign server releases the socket
+ok - argument errors are refused before any herdr call

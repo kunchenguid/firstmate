@@ -1,0 +1,2 @@
+ok - fm-remote-entrypoint.sh invoked via a PATH symlink resolves SCRIPT_DIR to the real bin/ directory
+ok - fm-remote-entrypoint.sh invoked directly still resolves SCRIPT_DIR correctly

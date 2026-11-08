@@ -1,0 +1,44 @@
+LAB=fm-lab-ownership-54916-11738
+{"client":{"version":"0.9.0","channel":"stable","protocol":22,"endpoint_protocol_generation":1,"endpoint_capabilities":["surface_interest","presentation_effects_fence","health_check"],"binary":"/etc/profiles/per-user/kunchen/bin/herdr","session":"fm-lab-ownership-54916-11738"},"server":{"status":"running","running":true,"version":"0.9.0","protocol":22,"capabilities":{"live_handoff":true,"detached_server_daemon":false,"endpoint_protocol_generation":1,"surface_interest":true,"health_check":true},"compatible":true,"endpoint_compatible":true,"socket":"~/.config/herdr/sessions/fm-lab-ownership-54916-11738/herdr.sock","session":"fm-lab-ownership-54916-11738","restart_needed":false,"server_binary_stale":false},"update":{"restart_needed":false,"server_binary_stale":false}}
+{"id":"cli:pane:list","result":{"panes":[],"type":"pane_list"}}
+Create a workspace
+
+Usage: herdr workspace create [OPTIONS]
+
+Options:
+      --cwd <PATH>
+          
+
+      --label <TEXT>
+          
+
+      --env <KEY=VALUE>
+          Set an environment variable for the launched process
+
+      --focus
+          
+
+      --no-focus
+
+Create a tab
+
+Usage: herdr tab create [OPTIONS]
+
+Options:
+      --workspace <WORKSPACE_ID>
+          
+
+      --cwd <PATH>
+          
+
+      --label <TEXT>
+          
+
+      --env <KEY=VALUE>
+          Set an environment variable for the launched process
+
+      --focus
+          
+
+      --no-focus
+

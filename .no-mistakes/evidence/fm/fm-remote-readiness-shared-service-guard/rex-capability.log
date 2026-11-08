@@ -1,0 +1,16 @@
+rex on PATH: 
+Repository-local Rex candidates:
+docs/rex-backend.md
+bin/fm-rex-marks.sh
+bin/backends/rex.sh
+bin/backends/rex-eventwait.lua
+tests/rex-test-safety.sh
+tests/rex-fake-fixture.sh
+tests/fm-backend-rex-composer-live-e2e.test.sh
+tests/fm-backend-rex-smoke.test.sh
+tests/fm-backend-rex-eventwait-smoke.test.sh
+tests/fm-backend-rex.test.sh
+
+Official Rex download links:
+
+ Installation · Rex Docs Search ⌘K esc Installation Customize Configuration File Keyboard Shortcuts Key Sequences Key Modes Custom Actions Automate The CLI Agents Lua Scripts Lua Events Shell Scripting Server API Build for Rex Program Status Protocol Block Plugins References CLI Commands Server API Methods Mac Actions Mac Settings iOS Actions iOS Settings Lua API Events Privacy &amp; Telemetry Server Installing on Linux Installing on FreeBSD Server Modes Shared Server Login Server Remote Access Upgrading Resources and Limits Beta Community MCP Log in Installation Customize Configuration File Keyboard Shortcuts Key Sequences Key Modes Custom Actions Automate The CLI Agents Lua Scripts Lua Events Shell Scripting Server API Build for Rex Program Status Protocol Block Plugins References CLI Commands Server API Methods Mac Actions Mac Settings iOS Actions iOS Settings Lua API Events Privacy &amp; Telemetry Server Installing on Linux Installing on FreeBSD Server Modes Shared Server Login Server Remote Access Upgrading Resources and Limits Beta Community MCP Log in Installation At the current stage of beta testing, the macOS application and the Linux and FreeBSD server are available to all testers. We already have Rex servers running on Windows, and we have Rex clients for iOS, Linux, and Windows at varying stages of readiness. We hope to expand the scope of public testing quickly, but they aren’t part of testing yet. macOS Rex for macOS Invites are going out to our mailing list a]:block @max-md:[&amp;>a]:py-2 @max-md:[&amp;>a]:text-center"> Get an invite Already testing? Log in with Discord to download. The macOS client is fully self-contained with a local server that lets you get up and running quickly. We plan on adding support for more platforms for the client in the future. Linux Server only See Installing on Linux for the details. Log in with Discord to see the install commands. FreeBSD Server only See Installing on FreeBSD for the details. Log in with Discord to see the install commands. { __sveltekit_ec12f2 = { base: "/rex/docs", assets: "/rex/docs" }; const element = document.currentScript.parentElement; Promise.all([ import("/rex/docs/_app/immutable/entry/start.eBPIqBc9.js"), import("/rex/docs/_app/immutable/entry/app.8l8DZKkq.js") ]).then(([kit, app]) => { kit.start(app, element, { node_ids: [0, 5], data: [{type:"data",data:{session:null},uses:{}},{type:"data",data:{macDownload:null,linuxMethods:null,freebsdMethods:null},uses:{parent:1}}], form: null, error: null }); }); } 
