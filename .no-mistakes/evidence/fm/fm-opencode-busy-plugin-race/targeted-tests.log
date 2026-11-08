@@ -1,0 +1,4 @@
+ok - opencode 1.x plugin classifies from session.status and ignores OpenCode 2 session.execution.* events
+ok - opencode plugin classifies from session.execution.* (OpenCode 2), scoped to the latched worker session
+ok - opencode 1.x plugin applies a terminal busy/idle burst in emission order
+ok - opencode 2.x plugin applies events in emission order across its server hook and setup subscription

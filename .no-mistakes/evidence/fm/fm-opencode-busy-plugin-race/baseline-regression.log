@@ -1,0 +1,1 @@
+not ok - a terminal busy must not out-write its session.status idle, got 'busy opencode-plugin'

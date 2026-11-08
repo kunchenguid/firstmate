@@ -1,0 +1,59 @@
+[
+  {
+    "scenario": "real-turn",
+    "variant": "fixed",
+    "turn": 0,
+    "session": "ses_e42f7d395ffeyYOcyiObp1G4iz",
+    "classification": "idle opencode-plugin",
+    "record": "v1 gen=g1794172782.13049.2064 seq=5 state=idle source=opencode-plugin event=session-status-idle ts=1794172792\n",
+    "assistant": "LOCAL_TURN_ACK"
+  },
+  {
+    "scenario": "real-turn",
+    "variant": "fixed",
+    "turn": 1,
+    "session": "ses_e42f7d395ffeyYOcyiObp1G4iz",
+    "classification": "idle opencode-plugin",
+    "record": "v1 gen=g1794172782.13049.2064 seq=9 state=idle source=opencode-plugin event=session-status-idle ts=1794172796\n",
+    "assistant": "LOCAL_TURN_ACK"
+  },
+  {
+    "scenario": "real-turn",
+    "variant": "fixed",
+    "turn": 2,
+    "session": "ses_e42f7d395ffeyYOcyiObp1G4iz",
+    "classification": "idle opencode-plugin",
+    "record": "v1 gen=g1794172782.13049.2064 seq=13 state=idle source=opencode-plugin event=session-status-idle ts=1794172797\n",
+    "assistant": "LOCAL_TURN_ACK"
+  },
+  {
+    "scenario": "real-turn",
+    "variant": "fixed",
+    "turn": 3,
+    "session": "ses_e42f7d395ffeyYOcyiObp1G4iz",
+    "classification": "idle opencode-plugin",
+    "record": "v1 gen=g1794172782.13049.2064 seq=17 state=idle source=opencode-plugin event=session-status-idle ts=1794172798\n",
+    "assistant": "LOCAL_TURN_ACK"
+  },
+  {
+    "scenario": "real-turn",
+    "variant": "fixed",
+    "turn": 4,
+    "session": "ses_e42f7d395ffeyYOcyiObp1G4iz",
+    "classification": "idle opencode-plugin",
+    "record": "v1 gen=g1794172782.13049.2064 seq=21 state=idle source=opencode-plugin event=session-status-idle ts=1794172799\n",
+    "assistant": "LOCAL_TURN_ACK"
+  },
+  {
+    "scenario": "child-idle-while-parent-busy",
+    "classification": "busy opencode-plugin",
+    "record": "v1 gen=g1794172782.13049.2064 seq=23 state=busy source=opencode-plugin event=session-busy ts=1794172800\n",
+    "main": "ses_e42f7d395ffeyYOcyiObp1G4iz",
+    "child": "ses_e42f7b021ffeJ78Mc2aECG1y91"
+  },
+  {
+    "scenario": "parent-settled-after-child",
+    "classification": "idle opencode-plugin",
+    "record": "v1 gen=g1794172782.13049.2064 seq=25 state=idle source=opencode-plugin event=session-status-idle ts=1794172802\n"
+  }
+]

@@ -1,0 +1,71 @@
+[
+  {
+    "scenario": "runtime",
+    "info": {
+      "healthy": true,
+      "version": "0.0.0-beta-19271",
+      "pid": 67955
+    }
+  },
+  {
+    "scenario": "native-plugin-loaded",
+    "plugin": {
+      "id": "fm.busy-state",
+      "source": {
+        "type": "local",
+        "path": "{run-worktree}/.busy-live/v2/project/.opencode/plugins/fm-busy-state.js"
+      },
+      "features": {
+        "server": true
+      },
+      "state": {
+        "status": "active"
+      }
+    }
+  },
+  {
+    "scenario": "real-v2-turn",
+    "turn": 0,
+    "session": "ses_e42ebdff3ffehEV0cXBDG2bSkh",
+    "classification": "idle opencode-plugin",
+    "record": "v1 gen=g1794173572.64747.31432 seq=4 state=idle source=opencode-plugin event=session-execution-succeeded ts=1794173575\n"
+  },
+  {
+    "scenario": "real-v2-turn",
+    "turn": 1,
+    "session": "ses_e42ebdff3ffehEV0cXBDG2bSkh",
+    "classification": "idle opencode-plugin",
+    "record": "v1 gen=g1794173572.64747.31432 seq=6 state=idle source=opencode-plugin event=session-execution-succeeded ts=1794173576\n"
+  },
+  {
+    "scenario": "real-v2-turn",
+    "turn": 2,
+    "session": "ses_e42ebdff3ffehEV0cXBDG2bSkh",
+    "classification": "idle opencode-plugin",
+    "record": "v1 gen=g1794173572.64747.31432 seq=8 state=idle source=opencode-plugin event=session-execution-succeeded ts=1794173577\n"
+  },
+  {
+    "scenario": "real-v2-turn",
+    "turn": 3,
+    "session": "ses_e42ebdff3ffehEV0cXBDG2bSkh",
+    "classification": "idle opencode-plugin",
+    "record": "v1 gen=g1794173572.64747.31432 seq=10 state=idle source=opencode-plugin event=session-execution-succeeded ts=1794173577\n"
+  },
+  {
+    "scenario": "real-v2-turn",
+    "turn": 4,
+    "session": "ses_e42ebdff3ffehEV0cXBDG2bSkh",
+    "classification": "idle opencode-plugin",
+    "record": "v1 gen=g1794173572.64747.31432 seq=12 state=idle source=opencode-plugin event=session-execution-succeeded ts=1794173578\n"
+  },
+  {
+    "scenario": "new-turn-busy",
+    "classification": "busy opencode-plugin",
+    "record": "v1 gen=g1794173572.64747.31432 seq=13 state=busy source=opencode-plugin event=session-execution-started ts=1794173579\n"
+  },
+  {
+    "scenario": "new-turn-settled",
+    "classification": "idle opencode-plugin",
+    "record": "v1 gen=g1794173572.64747.31432 seq=14 state=idle source=opencode-plugin event=session-execution-succeeded ts=1794173579\n"
+  }
+]
