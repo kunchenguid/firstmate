@@ -423,6 +423,7 @@ assert_contains "$out" 'dispatch-resolve:' "TOON block header"
 assert_contains "$out" '  status: clear' "clear status"
 assert_contains "$out" '  rule: rule_4 (A simple bug fix with a stated root cause.)   confidence: 0.9' "rule and confidence line"
 assert_contains "$out" "  profile: --harness 'cursor' --model 'cursor-grok-4.6-medium'" "argmax picks the highest spendPriority"
+assert_absent "$TMP_ROOT/dispatch-resolution.json" "a brief outside data/<id>/ writes no task record"
 assert_contains "$out" 'candidate: claude:sonnet  provider=claude  scope=all_models  remaining=79%  spendPriority=-0.4627  runway=projected_exhaustion  -> eligible' "every candidate is accounted for"
 assert_contains "$out" 'candidate: kimi:kimi-code/k3  provider=kimi  -> eligible, unranked: provider kimi unmeasured (unknown): disclosed uncertainty' "unmeasured provider stays listed as eligible and unranked"
 assert_contains "$out" '  note: 1 eligible candidate(s) unranked (kimi)' "clear results flag eligible unranked candidates once"
@@ -1364,6 +1365,53 @@ assert_contains "$out" 'candidate: claude:sonnet  provider=claude  scope=all_mod
 assert_contains "$out" 'candidate: kimi:kimi-code/k3  provider=kimi  -> eligible, unranked: provider kimi unmeasured (unknown): disclosed uncertainty' "ambiguous preserves eligible unranked candidate evidence"
 assert_not_contains "$out" '  profile:' "ambiguous emits no profile line"
 pass "ambiguous: confidence below the fixed floor hands the decision back"
+
+# --- task record: data/<id>/dispatch-resolution.json for fm-spawn ---------------
+TASK_BRIEF="$HOME_DIR/data/pager-fix/brief.md"
+TASK_RECORD="$HOME_DIR/data/pager-fix/dispatch-resolution.json"
+mkdir -p "$(dirname "$TASK_BRIEF")"
+cp "$BRIEF" "$TASK_BRIEF"
+reset_log
+write_response "$RESPONSE" rule_4 0.9
+TYPESAFE_API_KEY=$KEY run code out err "$TASK_BRIEF" --project pager
+assert_contains "$out" "  profile: --harness 'cursor' --model 'cursor-grok-4.6-medium'" "the task brief resolves clear"
+assert_equals '{"task":"pager-fix","status":"clear","profile":{"harness":"cursor","model":"cursor-grok-4.6-medium","effort":null}}' \
+  "$(jq -c '{task, status, profile: (.profile | {harness, model, effort})}' "$TASK_RECORD")" \
+  "a clear run records the task, status, and the printed profile with an unset effort as null"
+reset_log
+write_response "$RESPONSE" rule_4 0.41
+TYPESAFE_API_KEY=$KEY run code out err "$TASK_BRIEF" --project pager
+assert_equals 'ambiguous null' "$(jq -r '"\(.status) \(.profile)"' "$TASK_RECORD")" \
+  "a later non-clear run replaces the clear selection, so the manual intake is not bound to it"
+reset_log
+run code out err "$TASK_BRIEF" --project pager
+assert_contains "$err" 'dispatch-resolve: off (' "the keyless run is off"
+assert_equals 'off null' "$(jq -r '"\(.status) \(.profile)"' "$TASK_RECORD")" "an off run records off so fm-spawn accepts the manual intake"
+mv "$RULES" "$RULES.keep"
+printf '{"broken":\n' > "$RULES"
+TYPESAFE_API_KEY=$KEY run code out err "$TASK_BRIEF" --project pager
+expect_code 2 "$code" "malformed rules exit 2"
+assert_absent "$TASK_RECORD" "a configuration error leaves no task record to act on"
+mv "$RULES.keep" "$RULES"
+pass "task record: every exit-0 outcome records its decision for data/<id>/brief.md, and exit 2 records none"
+
+# A home with FM_DATA_OVERRIDE keeps briefs outside $FM_HOME/data; fm-spawn.sh
+# reads the record there, so the resolver must write it there too.
+OVERRIDE_DATA="$TMP_ROOT/custom-records"
+mkdir -p "$OVERRIDE_DATA/pager-fix" "$TMP_ROOT/data/pager-fix"
+cp "$BRIEF" "$OVERRIDE_DATA/pager-fix/brief.md"
+cp "$BRIEF" "$TMP_ROOT/data/pager-fix/brief.md"
+reset_log
+write_response "$RESPONSE" rule_4 0.9
+FM_DATA_OVERRIDE=$OVERRIDE_DATA TYPESAFE_API_KEY=$KEY run code out err "$OVERRIDE_DATA/pager-fix/brief.md" --project pager
+assert_equals 'pager-fix clear cursor' \
+  "$(jq -r '"\(.task) \(.status) \(.profile.harness)"' "$OVERRIDE_DATA/pager-fix/dispatch-resolution.json")" \
+  "a brief under FM_DATA_OVERRIDE records its decision beside it"
+reset_log
+write_response "$RESPONSE" rule_4 0.9
+TYPESAFE_API_KEY=$KEY run code out err "$TMP_ROOT/data/pager-fix/brief.md" --project pager
+assert_absent "$TMP_ROOT/data/pager-fix/dispatch-resolution.json" "a data/<id>/ directory outside the configured data root writes no task record"
+pass "task record: the configured data root, including FM_DATA_OVERRIDE, decides where the record goes"
 
 # --- per-rule confidence floor ------------------------------------------------
 write_floor_response() {  # <path> <choice> <confidence> <rule_1> <rule_2> <rule_3> <rule_4> <default>
