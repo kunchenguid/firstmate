@@ -218,6 +218,15 @@ scaffold
 save_evidence
 pass 'failed scaffold publishes no worker selection'
 
+new_case rescaffold-selection
+scaffold --worker-role "$roles/ROLE.md"
+[ -s "$home/data/$id/worker-selection.json" ] || fail 'selection scaffold did not record a selection'
+rm "$home/data/$id/brief.md"
+scaffold
+[ ! -e "$home/data/$id/worker-selection.json" ] || fail 'no-flag rescaffold kept a stale worker selection'
+save_evidence
+pass 'no-flag rescaffold drops a previous worker selection'
+
 new_case nonregular
 scaffold --worker-role "$roles/ROLE.md"
 rm "$skills/associated/SKILL.md"

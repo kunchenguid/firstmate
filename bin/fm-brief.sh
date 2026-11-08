@@ -474,6 +474,7 @@ fi
 BRIEF="$DATA/$ID/brief.md"
 [ -e "$BRIEF" ] && { echo "error: $BRIEF already exists" >&2; exit 1; }
 mkdir -p "$DATA/$ID"
+rm -f "$DATA/$ID/worker-selection.json"
 
 publish_worker_selection() {
   [ -n "$WORKER_SELECTION" ] || return 0
