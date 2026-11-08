@@ -568,10 +568,15 @@ __FM_BEARINGS_BOARD_DATA__
     }
 
     /* In-progress input survives a rebuild: saved per card key under one
-       stable storage key, restored here, and pruned for departed cards. */
+       stable storage key, restored here, and pruned for departed cards.
+       The draft carries the question and option definitions it was made
+       against, and a saved selection is restored only while they still match,
+       so a recomposed card never inherits a pick the captain did not make. */
+    var sig = JSON.stringify([item.title, item.about || "", item.decide || "",
+      item.options.map(function (o) { return [o.value, o.label, o.hint || ""]; })]);
     var saved = draftGet(item.key);
     if (saved) {
-      if (saved.selection) {
+      if (saved.selection && saved.sig === sig) {
         Array.prototype.forEach.call(form.querySelectorAll("input[type=radio]"), function (r) {
           if (r.value === saved.selection) r.checked = true;
         });
@@ -581,7 +586,7 @@ __FM_BEARINGS_BOARD_DATA__
     }
     function saveDraft() {
       var sd = new FormData(form);
-      draftSet(item.key, { selection: sd.get("answer") || "", note: sd.get("note") || "" });
+      draftSet(item.key, { sig: sig, selection: sd.get("answer") || "", note: sd.get("note") || "" });
     }
     form.addEventListener("input", saveDraft);
     form.addEventListener("change", saveDraft);

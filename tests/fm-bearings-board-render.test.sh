@@ -299,14 +299,15 @@ test_full_snapshot_question_reaches_the_rendered_decision
 
 # Build a board with the given Captain's Call keys and run it under the drafts
 # harness against a storage file shared across builds.
-build_call_board() {  # <home> <keys-json>
-  local home=$1 data="$1/payload.json"
-  jq -n --argjson keys "$2" '{
+build_call_board() {  # <home> <keys-json> [swapped]
+  local home=$1 data="$1/payload.json" swap=${3:-}
+  jq -n --argjson keys "$2" --arg swap "$swap" '{
     schema:"fm-bearings-board.v1", home:"render-home", generated:"2026-08-26T00:00Z",
     prs_live:false, underway:[], landed:[], charted:[], charted_more:0, charted_warning_more:0,
     captains_call:[$keys[] | {key:., type:"decision", title:("Card " + .), repo:"r",
       about:"a", decide:"d", allow_freeform:true,
-      options:[{value:"a",label:"A"},{value:"b",label:"B"}]}]}' > "$data"
+      options:(if $swap == "" then [{value:"a",label:"A"},{value:"b",label:"B"}]
+        else [{value:"a",label:"B"},{value:"b",label:"A"}] end)}]}' > "$data"
   PATH="$home/fakebin:$PATH" FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_PROCEVENT_CLAIM_ROOT="$home/procevent-claims" \
@@ -333,6 +334,21 @@ test_a_rebuild_keeps_in_progress_answers_and_drops_only_departed_cards() {
   pass "a rebuild keeps in-progress answers for surviving cards and drops departed ones"
 }
 
+test_a_recomposed_card_does_not_inherit_a_pick_made_against_other_options() {
+  local home out
+  home=$(make_home recomposed)
+  build_call_board "$home" '["k1"]'
+  node "$ROOT/tests/assets/board-drafts-harness.mjs" "$home/.lavish/bearings-board.html" "$home/storage.json" type >/dev/null \
+    || fail "the first board could not be filled in"
+  build_call_board "$home" '["k1"]' swapped
+  out=$(node "$ROOT/tests/assets/board-drafts-harness.mjs" "$home/.lavish/bearings-board.html" "$home/storage.json") \
+    || fail "the rebuilt board could not be rendered"
+  printf '%s' "$out" | jq -e '
+    .cards[0].selection == "" and .cards[0].note == "typed k1"
+  ' >/dev/null || fail "a recomposed card inherited a pick made against other options: $out"
+  pass "a recomposed card does not inherit a pick made against different options"
+}
+
 test_an_underway_row_leads_with_the_task_name_and_keeps_its_run_status
 test_an_underway_identifier_label_is_not_replaced_by_run_status
 test_charted_next_reads_newest_filed_first
@@ -343,3 +359,4 @@ test_a_board_of_only_warnings_still_reports_nothing_queued
 test_omitted_warnings_never_count_as_more_queued
 test_an_omitted_kind_keeps_the_existing_queued_rendering
 test_a_rebuild_keeps_in_progress_answers_and_drops_only_departed_cards
+test_a_recomposed_card_does_not_inherit_a_pick_made_against_other_options
