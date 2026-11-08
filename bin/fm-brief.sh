@@ -34,8 +34,11 @@
 #   launch, so removed associations cannot leave stale bodies in the input.
 #   Missing or malformed bindings stop preparation. The internal parser/schema
 #   owner is bin/fm-worker-preparation.mjs; no role means no inferred defaults.
-#   No selection flags preserves the existing no-role task contract. These flags
-#   do not apply to persistent secondmate charters or select a native OMP agent.
+#   No selection flags preserves the existing no-role task contract: a scaffold
+#   owns the selection state, publishing the file only after the brief is written
+#   and removing any earlier one, so no stale selection survives a rescaffold.
+#   These flags do not apply to persistent secondmate charters or select a
+#   native OMP agent.
 #   --scout writes the scout contract instead: the deliverable is a report at
 #   data/<task-id>/report.md (no branch, no push, no PR) and the worktree is scratch.
 #   It offers the Lavish review loop only when `fm-bootstrap.sh lavish-compatible`
