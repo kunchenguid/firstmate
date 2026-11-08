@@ -666,10 +666,10 @@ test_herdr_lab_contract_is_explicit_and_complete() {
     "Herdr lab brief missing the per-call session option contract"
   assert_grep "direct \`herdr server stop\`" "$brief" \
     "Herdr lab brief missing the forbidden server-global command list"
-  assert_grep "records the live default session before provisioning" "$brief" \
-    "Herdr lab brief missing the before tripwire"
-  assert_grep "verifies the identical fleet state after teardown" "$brief" \
-    "Herdr lab brief missing the after tripwire"
+  assert_grep 'See the `bin/fm-herdr-lab.sh` header for the fleet-state tripwire and `FM_HERDR_LAB_FLEET_SESSION` rule.' "$brief" \
+    "Herdr lab brief missing the tripwire owner pointer"
+  assert_grep "A missing, stopped, or changed fleet session is a hard tripwire failure" "$brief" \
+    "Herdr lab brief missing the hard tripwire failure guidance"
   assert_no_grep "Herdr lifecycle declaration - NOT ENABLED" "$brief" \
     "Herdr lab brief retained the unguarded declaration"
   pass "fm-brief.sh: --herdr-lab emits the complete hard safety contract"
