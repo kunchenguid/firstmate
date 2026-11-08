@@ -56,14 +56,17 @@ watch_bg() {  # <state> <fakebin> <out> [extra env assignments...]
 # machine a short fixed budget can reap a round before the cycle it asserts on
 # ever ran - and then every "no wake, no marker" assertion passes vacuously
 # while every "marker written" assertion fails spuriously.
-# The liveness beacon is touched at the TOP of every poll, so this drops any
-# beacon left by an earlier round, waits for THIS watcher to write a fresh one
-# (some poll's top), then waits for that one to advance (the next poll's top) -
-# and the whole cycle in between is what the caller's assertions describe.
+# The cycle marker (.last-watcher-cycle) is touched once per poll, at the loop
+# top only, so this drops any marker left by an earlier round, waits for THIS
+# watcher to write a fresh one (some poll's top), then waits for that one to
+# advance (the next poll's top) - and the whole cycle in between is what the
+# caller's assertions describe. The liveness beacon is NOT a cycle signal: it
+# also advances once per completed window during a slow pane scan, so its mtime
+# moves several times inside one cycle.
 # 0 if the watcher is still alive after a completed cycle, 1 if it exited.
 wait_poll_cycle() {  # <state> <pid> [limit-ticks]
   local state=$1 pid=$2 limit=${3:-300} beat first now i=0
-  beat="$state/.last-watcher-beat"
+  beat="$state/.last-watcher-cycle"
   rm -f "$beat"
   first=""
   while [ "$i" -lt "$limit" ]; do
