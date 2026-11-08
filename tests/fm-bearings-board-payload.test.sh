@@ -221,10 +221,10 @@ test_an_unheld_captain_contribution_becomes_a_link_only_card() {
         {task: "same-pr", url: "https://github.com/acme/alpha/pull/3", kind: "pr",
          reason: "checks green; merge approval needed"}]' "$TMP_ROOT/snap.json" > "$snap"
   p=$("$GEN" --snapshot "$snap") || fail "the generator failed"
-  assert_equals "alpha-fix,old-row,contribution._main_.gamma-ship.github.com_acme_gamma_pull_12" \
+  assert_equals "alpha-fix,old-row,full-call,questions.full-call,contribution._main_.gamma-ship.github.com_acme_gamma_pull_12" \
     "$(jq -r '[.captains_call[].key] | join(",")' <<<"$p")" \
     "an unheld captain contribution is carded once, and a held or duplicate one adds nothing"
-  out=$(jq -c '.captains_call[2]' <<<"$p")
+  out=$(jq -c '.captains_call[4]' <<<"$p")
   assert_equals '{"key":"contribution._main_.gamma-ship.github.com_acme_gamma_pull_12","type":"link","repo":"gamma","title":"gamma #12","about":"checks green; merge approval needed (home (main))","pr_url":"https://github.com/acme/gamma/pull/12","options":[]}' \
     "$out" "the link card carried an answer control or lost the contribution's page"
   printf '%s\n' "$p" > "$TMP_ROOT/unheld.json"
@@ -298,10 +298,10 @@ test_cards_carry_links_and_a_non_held_credential_card_survives() {
 }
 EOF
   p=$("$GEN" --snapshot "$snap" --copy "$copy") || fail "the generator refused cards with links"
-  assert_equals "alpha-fix,old-row,registry-login,mr-review" "$(jq -r '[.captains_call[].key] | join(",")' <<<"$p")" \
+  assert_equals "alpha-fix,old-row,full-call,questions.full-call,registry-login,mr-review" "$(jq -r '[.captains_call[].key] | join(",")' <<<"$p")" \
     "a card whose key is not a held task id was dropped"
   assert_equals "Review page" "$(jq -r '.captains_call[0].links[0].label' <<<"$p")" "an overlay attaches links to a generated card"
-  assert_equals "https://registry.example.test/login" "$(jq -r '.captains_call[2].links[0].url' <<<"$p")" "a credential card keeps its link"
+  assert_equals "https://registry.example.test/login" "$(jq -r '.captains_call[4].links[0].url' <<<"$p")" "a credential card keeps its link"
   printf '%s\n' "$p" > "$TMP_ROOT/links.json"
   validates "$TMP_ROOT/links.json" || fail "cards with links did not satisfy the board validator"
   pass "every card type carries links and a non-held credential card survives the generator and validator"
